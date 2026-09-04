@@ -1,12 +1,12 @@
-# remote_ci_monitor — 계획서 (v1, 2026-09-04)
+# remote_ci_monitor — 계획서 (v1.1, 2026-09-04)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다.
 > v0(2026-09-04 오전)의 원칙·함정·마일스톤을 그대로 품고, **어떻게 만들지**(모듈·설정·스키마·API 예산·수집기 프로토콜·테스트·CI)를 결정 수준까지 내렸다.
-> 2026-09-04 Codex(gpt-5.5) 크로스리뷰를 반영했고(`docs/reviews/2026-09-04-codex-plan-v1.md`), 남아 있던 결정 항목은 같은 날 오너가 확정했다(「결정 항목」). 열린 ⛔ 는 없다.
+> 2026-09-04 Codex(gpt-5.5) 크로스리뷰를 반영했고(`docs/reviews/2026-09-04-codex-plan-v1.md`), 남아 있던 결정 항목은 같은 날 오너가 확정했다(「결정 항목」). 같은 날 오후 오너 검토(연결·실시간 자원·큐·전달 여섯 질문)로 **디스패치 `rcm run` · 세션 명령 `rcm eta`/`rcm wait` · GPU** 를 추가했다(v1.1). 열린 ⛔ 는 없다.
 
 ## 한 줄
 
-**self-hosted GitHub Actions 러너에서 지금 뭐가 돌고, 누가 시켰고, 어느 스텝을 몇 분째 도는지, 그 머신의 CPU·메모리는 어떤지** 를 어느 컴퓨터에서든 웹 화면 하나로 본다.
+**self-hosted GitHub Actions 러너에서 지금 뭐가 돌고, 누가 시켰고, 어느 스텝을 몇 분째 도는지, 그 머신의 CPU·메모리·GPU 는 어떤지** 를 어느 컴퓨터에서든 웹 화면 하나로 보고, 다른 컴퓨터의 세션에서 **한 줄로 CI 를 넣고(`rcm run`) 결과를 종료 코드로 받는다(`rcm wait`)**.
 
 ## 왜 만드나
 
@@ -53,17 +53,21 @@
 | 큐 (FIFO) — 순번 · 실행중/대기 · 키(워크플로[:scope]) · 브랜치 · 요청자 · 이벤트 · 대기 · 잔여 · 예상 완료 · 초과 여부 · 표본 수 | `GET .../actions/runs` (+ jobs) | 예상 완료 = 최근 N 일 **잡** 실행시간 중앙값 − 경과, 앞선 run 잔여 누적 |
 | 진행 — 잡 N/M · 스텝 N/M(지금까지 알려진) · 지금 스텝 · 그 스텝 경과 · 잡 전체 경과 · 스텝 타임라인 · 실패 스텝 | `GET .../actions/runs/{id}/jobs` | 「jobs API 실측 함정」 필수 |
 | 최근 완료 — 결과(성공·실패·취소·타임아웃 전부) · 실측 소요 · 요청자 | runs + jobs | |
-| 호스트 자원 — 러너 머신별 load · CPU % · 메모리 · 상위 프로세스 · **마지막 수신 시각/stale** | 러너 머신의 수집기 | 서버가 러너 머신에서 돌면 로컬 수집, 아니면 push |
+| 호스트 자원 — 러너 머신별 load · CPU % · 메모리 · **GPU 사용률·GPU 메모리** · 상위 프로세스 · **마지막 수신 시각/stale** | 러너 머신의 수집기 | 서버가 러너 머신에서 돌면 로컬 수집, 아니면 push. 폴링이지 스트리밍이 아니다(기본 10초, 하한 2초) |
 | 폴링 건강 — 마지막 성공 시각 · 마지막 오류 · rate limit 잔량 · 저하 모드 | 서버 자체 | 「조용히 고장」을 화면에서 잡기 위해 |
+| **세션 명령** — 요청 넣기(중복이면 합류) · 내 run 의 위치·대기·예상 완료 · 끝날 때까지 대기 후 성공/실패를 **종료 코드**로 | `rcm run` · `rcm eta` · `rcm wait` (GitHub 직접 또는 서버 경유) | 「세션 명령」절. 순차 처리 자체는 GitHub 큐가 보장한다 |
 
 ## 구조
 
 ```
 [러너 머신]                          [아무 데나]                       [브라우저 / 터미널]
 collector ──push(JSON, N초)──▶  server ──GET /api/status──▶  web UI (정적 HTML+JS, 자동 갱신)
-(vm_stat/top/ps 또는 /proc)     (GitHub REST 폴링 + 메모리 캐시)        rcm top --server URL
-                                     ▲
-                                     └── GET /api/status 를 rcm top 이 그대로 그린다
+(vm_stat/top/ps/ioreg 또는      (GitHub REST 폴링 + 메모리 캐시)        rcm top --server URL
+ /proc/nvidia-smi)                   ▲                                 rcm wait --server URL
+                                     │                                        │
+[GitHub Actions]  ◀── 폴링 ──────────┘                                        │
+  큐(FIFO) · runs · jobs · runners  ◀── POST dispatches ── [다른 컴퓨터의 세션] rcm run ──┘
+                                                          (서버가 없으면 GitHub 를 직접 폴링)
 ```
 
 실행 형태는 셋이고 전부 같은 코드(같은 `StatusModel` → 같은 JSON 스키마)다.
@@ -73,6 +77,7 @@ collector ──push(JSON, N초)──▶  server ──GET /api/status──▶
 | **A. 원격 서버 + 수집기 push** (기본) | 아무 데나 `rcm serve` · 러너 머신에 `rcm collect --server URL` | 서버를 VPS·노트북에 두고 러너 머신엔 인바운드 포트를 안 연다 |
 | **B. 서버가 러너 머신에서 직접** | 러너 머신에 `rcm serve --host-local` | 러너 머신에 Tailscale·LAN 으로 닿을 수 있으면 수집기·토큰이 필요 없다 |
 | **C. 터미널 단독** | 어디서든 `rcm top` (GitHub 직접 조회) · `rcm top --server URL` (서버 JSON 렌더) | 서버 없이 한 컷. 호스트 자원 칸은 서버가 있을 때만 |
+| **D. 세션에서 넣고 기다리기** | 어디서든 `rcm run <workflow> -f k=v` → (자동으로) `rcm wait` | 요청은 GitHub 에 직접 넣는다(도구는 저장하지 않는다). 상태 조회는 서버가 있으면 서버, 없으면 GitHub |
 
 - `server` 하나가 GitHub API 를 폴링해 JSON 을 만들고 정적 UI 를 서빙한다. 상태는 메모리에만 두고(DB 없음), 완료 run 의 잡 소요시간만 파일 캐시에 남긴다(재시작해도 표본이 유지되게).
 - 순수 계산(큐·잔여·진행률·파서·렌더)과 I/O(GitHub API·프로세스 실행·HTTP)를 패키지로 가른다. 순수 부분은 픽스처로 테스트한다.
@@ -86,7 +91,7 @@ collector ──push(JSON, N초)──▶  server ──GET /api/status──▶
 pyproject.toml                 # hatchling · requires-python >=3.11 · 런타임 의존성 0
 src/remote_ci_monitor/
   __init__.py                  # __version__
-  cli.py                       # argparse: rcm top | serve | collect | check | version
+  cli.py                       # argparse: rcm top | run | eta | wait | serve | collect | check | version
   config.py                    # Config dataclass · 파일(TOML)+env+플래그 로딩 · 우선순위 · 검증 · 오류 메시지
   core/                        # ── 순수: I/O 도 시계도 안 본다. now 는 인자로 받는다 ──
     model.py                   # Run · Job · Step · Runner · HostSample · Pool · StatusModel (dataclass)
@@ -94,12 +99,14 @@ src/remote_ci_monitor/
     membership.py              # 이 run/잡이 「이 풀」인가 (라벨 ⊇ 설정 · 워크플로 allowlist · 미상 상태)
     queue.py                   # fifo 정렬 · expected · remaining(하한) · wait(레인) · finish_at · medians
     progress.py                # jobs payload → Progress (스텝 N/M · 현재 · 경과 · 실패 스텝 · 대기시간)
-    hostparse.py               # macOS: vm_stat/top/ps · Linux: /proc/meminfo, /proc/stat, /proc/loadavg, ps
+    dispatchmatch.py           # 합류 판정(같은 워크플로·ref·sha[·scope]) · dispatch 뒤 내 run 고르기 · wait 종료 코드 매핑
+    hostparse.py               # macOS: vm_stat/top/ps/ioreg(GPU) · Linux: /proc/meminfo, /proc/stat, /proc/loadavg, ps, nvidia-smi(GPU)
     status.py                  # 조각들 → StatusModel → to_json() (스키마 v1) · 실패는 null + *_error
     render_text.py             # StatusModel → 터미널 문자열 (rcm top)
   github/                      # ── I/O ──
     client.py                  # urllib 기반 REST: get(path, etag) → Response(status, json, etag, ratelimit) · 페이지네이션 · 토큰 결정 · ApiError
-    fetch.py                   # fetch_runs · fetch_jobs · fetch_runners — 실패는 예외, 빈 목록과 절대 안 섞는다
+    fetch.py                   # fetch_runs(필터: event·branch·actor·created) · fetch_run · fetch_jobs · fetch_runners · whoami — 실패는 예외
+    dispatch.py                # POST /actions/workflows/{id}/dispatches (204, run id 없음) · 쓰기 토큰
   timing_cache.py              # 완료 run 의 잡 소요·라벨·러너명 파일 캐시 (JSON, XDG cache, 키 repo/run_id/attempt)
   poller.py                    # 백그라운드 스레드 1개: 직렬 호출 · ETag · 적응 주기 · rate limit 가드 · 모델 조립
   hostsample.py                # 수집기의 I/O: 명령 실행/파일 읽기 → hostparse 로 넘김 (macOS/Linux 분기)
@@ -113,6 +120,7 @@ examples/
   rcm.toml                     # 일반 팀(규약 없음)
   rcm.run-name-convention.toml # run 이름 규약이 있는 팀(참고 구현 팀의 규약을 예시 값으로)
   launchd/ · systemd/          # 수집기·서버 서비스 파일
+  session/ci-gate.sh           # 세션(Claude Code 스킬 등)에서 rcm run 한 줄로 게이트 돌리고 종료 코드로 분기하는 예시
 scripts/
   mutcheck.py                  # 테스트가 실제로 빨개지는지 확인하는 뮤테이션 3종 (아래)
 docs/reviews/                  # 크로스리뷰 기록
@@ -128,6 +136,7 @@ docs/reviews/                  # 크로스리뷰 기록
 [github]
 repos = ["owner/repo"]              # 1개 이상. 여러 개면 같은 러너를 나눠 쓰는 레포들의 큐를 합친다(M4)
 token_env = "GITHUB_TOKEN"          # 이 env 가 비어 있으면 `gh auth token` 을 시도하고, 그것도 없으면 명확한 에러
+write_token_env = ""                # rcm run(dispatch) 전용 토큰의 env 이름. 비어 있으면 token_env 의 토큰을 쓴다. Actions: write 가 필요하다
 api_url = "https://api.github.com"  # GHES 면 바꾼다
 
 [runner]                            # = 풀 하나. M4 에서 [[pools]] 목록으로 확장한다
@@ -150,6 +159,12 @@ floor_remaining_seconds = 30        # 초과 실행 run 의 잔여 하한(음수
 run_name_regex = ""                 # 비어 있으면 규약 없음. named group `scope`·`caller` 만 읽는다
 key_template = "{workflow}"         # scope 가 잡히면 예: "{workflow}:{scope}"
 
+[dispatch]                          # rcm run
+join_duplicates = true              # 같은 워크플로·ref·head_sha(·scope) 가 이미 활성이면 새로 넣지 않고 그 run 에 붙는다
+require_pushed_head = true          # git 체크아웃 안에서 실행하면 미커밋 변경·미푸시 커밋이 있을 때 멈춘다
+find_run_timeout_seconds = 90       # dispatch 뒤 내 run 이 목록에 나타나길 기다리는 상한
+wait_poll_seconds = 10              # rcm wait 의 폴링 주기(최소 3)
+
 [server]
 bind = "127.0.0.1"                  # 바깥에 열려면 명시적으로 0.0.0.0 — 그때 read_auth 가 none 이면 시작 로그에 경고
 port = 8787
@@ -170,6 +185,8 @@ server_url = ""                     # rcm collect 가 push 할 곳
 interval_seconds = 10
 token_env = "RCM_HOST_TOKEN"
 top_processes = 5
+gpu = "auto"                        # "auto"(macOS ioreg · Linux nvidia-smi 가 있으면) | "off". 못 읽으면 null + 사유
+# interval_seconds 하한: push 5초, --host-local 2초. 그보다 촘촘하면 top(1초 표본) 자체가 병목이다
 
 [display]
 timezone = ""                       # IANA 이름. 시작 시 zoneinfo 로 검증. 비어 있으면 rcm top 은 프로세스 로컬, 웹 UI 는 브라우저 로컬
@@ -254,6 +271,7 @@ GitHub 은 run 이 어느 러너로 갈지 run 목록에서 안 알려준다. �
 - API 의 「실패」와 「빈 목록」을 코드에서 다른 값으로 돌려준다(예외 vs `[]`).
 - JSON 스키마도 실패를 `null` + `*_error` 로 가른다. 수집기가 안 오면 `stale: true` 와 `age_seconds` 를 같이 찍는다. 아직 한 번도 안 왔으면 `hosts: []` + `hosts_note`.
 - 큐 소속을 모르는 run(잡 목록 없음·jobs 조회 실패)은 빈 큐로 접지 않고 `membership: "unknown"` 으로 남긴다. 러너 조회 실패로 레인 수를 모르면 `lanes_source: "assumed"` 를 띄운다.
+- `rcm run` 이 dispatch 는 했는데 내 run 을 못 찾은 것은 「실패」가 아니라 「미확인」이다(종료 코드 3). `rcm wait` 가 조회에 실패하면 「실패(1)」가 아니라 「미확인(3)」이다 — 게이트를 빨강으로 위장하지 않는다.
 - 서버 자체의 건강(`poll.last_ok_at` · `last_error` · `degraded`)을 JSON 과 화면 머리에 찍는다. 마지막 성공이 3 주기보다 오래되면 UI 헤더가 경고색이 된다.
 - 순수 계산 모듈은 픽스처 테스트를 갖고 CI 가 매번 돌린다. 테스트가 실제로 빨개지는지 `scripts/mutcheck.py` 로 확인한다.
 
@@ -266,6 +284,7 @@ GitHub 은 run 이 어느 러너로 갈지 run 목록에서 안 알려준다. �
  "cores": 10, "load": [3.48, 3.1, 2.9],
  "cpu": {"user": 17.0, "sys": 4.0, "idle": 79.0, "busy": 21.0},
  "memory": {"total_bytes": 25769803776, "used_bytes": 15032385536},
+ "gpu": {"util_pct": 13, "mem_used_bytes": 594411520, "mem_total_bytes": null, "source": "ioreg"},
  "top": [{"comm": "gen_snapshot", "cpu": 103.0, "rss_mb": 169}]}
 ```
 
@@ -274,9 +293,47 @@ GitHub 은 run 이 어느 러너로 갈지 run 목록에서 안 알려준다. �
 - 값이 없는 칸은 `null`(0 아님). 부분 실패(예 `top` 만 실패)는 그 칸만 `null`.
 - **macOS** 소스: `os.getloadavg()` · `sysctl -n hw.memsize` · `vm_stat`(active + wired + compressor = 사용량) · `top -l 2 -n 0 -s 1`(**두 번째** 표본만 — 첫 표본은 부팅 후 누적) · `ps -Aro %cpu=,rss=,comm=`.
 - **Linux** 소스: `/proc/loadavg` · `/proc/meminfo`(`MemTotal − MemAvailable` = 사용량) · `/proc/stat` 1초 간격 두 표본의 차로 user/sys/idle · `ps -eo %cpu=,rss=,comm= --sort=-%cpu` · 코어 수 `os.cpu_count()`.
+- **GPU**: macOS 는 `ioreg -r -d 1 -w 0 -c IOAccelerator` 의 `PerformanceStatistics` 에서 `Device Utilization %` 와 `In use system memory` 를 읽는다(2026-09-04 Apple Silicon 에서 **sudo 없이** 확인. `powermetrics` 는 sudo 가 필요해 안 쓴다. 통합 메모리라 `mem_total_bytes` 는 null). Linux 는 `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits` 가 있을 때만(`source: "nvidia-smi"`). 둘 다 없으면 `gpu: null` + `gpu_note`("no supported GPU reader"). 다른 GPU(AMD·Intel)는 범위 밖으로 명시.
 - 파서는 전부 `core/hostparse.py` 의 순수 함수이고 두 OS 의 실제 출력 캡처를 픽스처로 잠근다. 명령 실행은 `hostsample.py` 에만 있다.
 - **로컬 모드** `rcm serve --host-local`: 서버가 러너 머신에서 돌 때 같은 샘플러를 in-process 로 돌린다. 전송·토큰이 없다(`source: "local"`). (확정 2026-09-04 — v0 의 「gist 주기 갱신」 대안을 이걸로 대체한다. gist 는 지연이 크고 토큰 권한이 하나 더 필요하다. Codex 도 같은 의견)
 - 서비스 파일: `examples/launchd/com.remote-ci-monitor.collector.plist` · `examples/systemd/rcm-collector.service`(+ `rcm-server.service`). 러너 머신이 잠들면 러너도 수집기도 같이 죽으니 README 에 잠자기 금지 안내.
+
+## 세션 명령 — `rcm run` · `rcm eta` · `rcm wait` (M1)
+
+다른 컴퓨터의 세션(사람 터미널·Claude Code 스킬·스크립트)이 **한 줄로 CI 를 넣고, 자기 차례를 기다리고, 성공/실패를 종료 코드로 받는** 경로다. 참고 구현의 `remote_ci.sh` 가 하던 일을 이식성 규칙에 맞게 흡수한다. 요청은 GitHub 에 직접 넣고 **도구는 아무것도 저장하지 않는다** — 순차 처리는 GitHub 큐가 보장하고(러너 1대 = 동시 1잡, 생성 시각 순 FIFO), 서버가 죽어도 요청은 안 사라진다. 서버는 있으면 상태 조회에만 쓴다(rate limit 절약).
+
+### `rcm run WORKFLOW [--ref REF] [-f KEY=VALUE …] [--by LABEL] [--no-join] [--no-wait] [--allow-dirty]`
+
+1. **ref 결정**: `--ref` 가 없으면 현재 git 체크아웃의 브랜치. 체크아웃이 아니면 `--ref` 필수.
+2. **가드**(체크아웃 안에서 실행할 때, `require_pushed_head`): 미커밋 변경이 있으면 멈춘다(`--allow-dirty` 로만 강행, 그때도 무엇이 빠지는지 출력). 로컬 HEAD ≠ `origin/<ref>` 면 멈춘다. **dispatch 는 원격 브랜치 HEAD 만 본다** — 로컬에만 있는 커밋은 조용히 빠지고 그 초록은 가짜가 된다(참고 구현이 실제로 겪은 함정).
+3. **합류**(`join_duplicates`): 활성 run(`queued`·`in_progress`·`pending`·`requested`) 중 같은 워크플로·같은 ref·같은 `head_sha`(+ `naming.run_name_regex` 가 있으면 같은 `scope`) 가 있으면 **새로 넣지 않고 그 run 에 붙는다**. 두 세션이 같은 커밋을 확인하려는 것뿐이라 두 번 돌릴 이유가 없다. ⚠️ `workflow_dispatch` 의 `inputs` 는 runs API 에 안 나와 비교할 수 없다. run 이름 규약이 없는 팀에서 입력이 다른 요청을 겹쳐 넣을 땐 `--no-join`(README 에 명시).
+4. **dispatch**: `POST /repos/{o}/{r}/actions/workflows/{file|id}/dispatches` `{ref, inputs}`. 204 가 오고 **run id 는 안 돌아온다**. 직전 시각 `t0` 와 기대 sha(`origin/<ref>` 의 HEAD, 체크아웃이 없으면 `GET /repos/{o}/{r}/commits/<ref>`) 를 기억한다. `--by LABEL` 은 `inputs.caller` 같은 이름으로 워크플로가 받을 때만 실어 보낸다(설정 `dispatch.caller_input`, 기본 없음) — 요청자 기본값은 어차피 `triggering_actor` 다.
+5. **내 run 찾기**: `GET runs?event=workflow_dispatch&branch=<ref>&actor=<login>&created=>=<t0>` 를 2초 간격으로 `find_run_timeout_seconds` 까지 폴링(`login` 은 `GET /user`). 후보 중 `head_sha == 기대 sha` · `created_at >= t0` · 워크플로 일치인 것의 **가장 이른** run. 못 찾으면 종료 코드 3 + 「dispatch 는 됐으나 run 을 못 찾았다」(실패로 위장 안 함). 판정은 `core/dispatchmatch.py` 의 순수 함수.
+6. **출력**: stdout 에 JSON 한 줄(`run_id`·`url`·`joined`·`position`·`wait_seconds`·`finish_at`), stderr 에 사람용 한 줄. `--no-wait` 가 아니면 그대로 `rcm wait` 로 이어진다.
+7. **토큰**: dispatch 는 쓰기 권한이다(fine-grained PAT `Actions: Read and write`, classic `repo`; public 레포는 `public_repo`). 403 은 「토큰에 Actions: write 가 없다」로 번역해 보여준다. `write_token_env` 로 읽기 토큰과 분리할 수 있다(서버는 읽기 토큰만 갖게).
+
+### `rcm eta (--run ID | --workflow W [--scope S]) [--server URL]`
+
+내 run(또는 「지금 넣으면」)의 앞선 건수·대기·자기 소요·예상 완료·표본 출처(`measured n=7` / `default`)를 JSON 과 한 줄로. 계산은 `core/queue.py` 의 **같은 함수**(터미널·서버·eta 가 세 벌을 두지 않는다).
+
+### `rcm wait --run ID [--timeout S] [--server URL]`
+
+- 폴링(`wait_poll_seconds`, 최소 3). 서버가 있으면 `/api/status` 를 읽어 GitHub 호출이 없고, 없으면 `GET runs/{id}` + jobs 를 직접 본다.
+- 기다리는 동안 stderr 에 위치·현재 스텝·경과·ETA 를 갱신한다(TTY 면 한 줄 덮어쓰기, 아니면 변화가 있을 때만 새 줄).
+- 끝나면 stdout 에 JSON 한 줄(`run_id`·`conclusion`·`job_seconds`·`failed_step`·`url`). **종료 코드**: `success` 0 · `failure` 1 · `cancelled`/`timed_out`/`action_required`/`stale` 2 · 조회 실패·`--timeout` 초과 3. 세션 스크립트는 이 코드로 바로 분기한다.
+- run 이 활성 목록에서 사라지면(concurrency 그룹 취소 등) `GET runs/{id}` 로 확정한 뒤 2 를 돌려준다. 완료 뒤 `Complete job` 이 붙으며 스텝 수가 느는 건 정상(「진행 규칙」 2).
+
+### 세션에서 쓰는 모양 (`examples/session/ci-gate.sh`)
+
+```bash
+if out=$(rcm run ci -f scope=full --by "$(whoami)@$(hostname -s)"); then
+  echo "gate green: $(jq -r .url <<<"$out")"
+else
+  case $? in 1) echo "gate red — $(jq -r .failed_step <<<"$out")";; 2) echo "cancelled/timed out";; *) echo "unknown — check $(jq -r .url <<<"$out")";; esac
+fi
+```
+
+범위 밖(오너 결정 2026-09-04): 서버가 밖으로 미는 webhook, 커밋 status·PR 코멘트 갱신. 결과 전달은 위 폴링 명령뿐이다.
 
 ## 서버 (`server.py`)
 
@@ -344,6 +401,7 @@ GitHub 은 run 이 어느 러너로 갈지 run 목록에서 안 알려준다. �
                "os": "darwin", "cores": 10, "load": [3.48, 3.1, 2.9],
                "cpu": {"user": 17.0, "sys": 4.0, "idle": 79.0, "busy": 21.0},
                "memory": {"total_bytes": 25769803776, "used_bytes": 15032385536},
+               "gpu": {"util_pct": 13, "mem_used_bytes": 594411520, "mem_total_bytes": null, "source": "ioreg"}, "gpu_note": null,
                "top": [{"comm": "gen_snapshot", "cpu": 103.0, "rss_mb": 169}]}],
     "hosts_note": null
   }]
@@ -401,7 +459,7 @@ host  runner-1 (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · m
 ## 테스트·품질
 
 - **픽스처**(`tests/fixtures/`): jobs 응답 3종(진행 중 · 러너 배정 전 · 완료, post 스텝 포함) + hosted/self-hosted 혼합 run + 100 초과 페이지네이션 · runs 목록(활성·완료·waiting·재실행 attempt 2) · runners · macOS `vm_stat`/`top`/`ps` · Linux `/proc/meminfo`/`/proc/stat`/`/proc/loadavg`/`ps`. 실측 캡처에서 브랜치명·요청자·run id·호스트명을 지운다.
-- **테스트 목록**(M0): `test_queue.py`(참고 구현의 21 시나리오를 옮기되 팀 상수 제거 + 레인 assumed) · `test_progress.py`(18 시나리오 + 위 표의 6개 이름) · `test_naming.py`(규약 없음/있음/안 맞음) · `test_membership.py`(hosted 잡 · self-hosted 잡 · 혼합 run · 라벨 부분집합 · 잡 없음 → unknown · names 는 배정된 잡에만) · `test_hostparse.py`(두 OS) · `test_status_schema.py`(`json.dumps` 성공 · 실패는 `null`+`*_error` · datetime 안 샘 · pools 한 개) · `test_render_text.py`(빈 큐 vs 조회 실패가 다르게 그려짐) · `test_config.py`(우선순위 · 오류 메시지 · 시간대 검증) · `test_client.py`(가짜 전송으로 304·401·403·429·`Retry-After`·페이지네이션 경로) · `test_server.py`(in-process 서버: 인증 · 413 · 경로 탈출 차단 · stale 계산).
+- **테스트 목록**(M0): `test_queue.py`(참고 구현의 21 시나리오를 옮기되 팀 상수 제거 + 레인 assumed) · `test_progress.py`(18 시나리오 + 위 표의 6개 이름) · `test_naming.py`(규약 없음/있음/안 맞음) · `test_membership.py`(hosted 잡 · self-hosted 잡 · 혼합 run · 라벨 부분집합 · 잡 없음 → unknown · names 는 배정된 잡에만) · `test_hostparse.py`(두 OS) · `test_status_schema.py`(`json.dumps` 성공 · 실패는 `null`+`*_error` · datetime 안 샘 · pools 한 개) · `test_render_text.py`(빈 큐 vs 조회 실패가 다르게 그려짐) · `test_config.py`(우선순위 · 오류 메시지 · 시간대 검증) · `test_client.py`(가짜 전송으로 304·401·403·429·`Retry-After`·페이지네이션 경로) · `test_server.py`(in-process 서버: 인증 · 413 · 경로 탈출 차단 · stale 계산) · `test_dispatchmatch.py`(합류: 같은 sha+ref → 붙음 · sha 다름 → 새로 · scope 다름 → 새로 · 후보 여러 개 → 가장 이른 것 · 못 찾음 → 미확인 · wait 종료 코드 매핑 전부) · `test_hostparse.py` 에 `ioreg`·`nvidia-smi` 캡처.
 - **뮤테이션 확인** `scripts/mutcheck.py`: `src/`+`tests/` 를 tmpdir 에 복사하고 변이 하나를 넣은 뒤 그 복사본에서 pytest 를 돌려 **빨개지는지** 본다(원본은 안 건드리니 되돌릴 게 없다). 변이 패턴이 소스에 없으면 그 자체로 실패한다(코드가 바뀌어 뮤테이션이 헛돌면 잡아야 한다). 3종 — ① 잔여 하한 제거(`max(…, floor)` → `…`) ② `ApiError` 를 `[]` 로 삼킴 ③ 스텝 위치 대신 `number` 사용. 셋 다 빨개져야 「검증됨」이라고 말한다. CI 에서도 돌린다(초 단위라 싸다).
 - **CI**(`ci.yml`): `unit` 잡(matrix: py 3.11 · 3.13, ubuntu) → `ruff check` · `ruff format --check` · `pytest` · `scripts/mutcheck.py`. `secrets` 잡 → `gitleaks/gitleaks-action@v3`(개인 계정 레포는 라이선스 키 불필요 — 조직 레포로 옮기면 무료 키 필요, 2026-09-04 README 확인). 집계 잡 **`test`**(룰셋 필수 체크)는 `needs: [unit, secrets]` + `if: always()` 로 항상 돌고, `needs.unit.result`·`needs.secrets.result` 가 **둘 다 `success`** 가 아니면 `exit 1`(`cancelled`·`skipped` 도 실패로 전파). macOS 러너 잡은 M2 에서 `hostsample` 스모크용으로 하나 추가(public 이라 무료).
 - 코드 스타일: ruff(기본 + `I` import 정렬), 줄 100자, 타입 힌트 필수(순수 계층은 `mypy --strict` 를 M1 에서 검토).
@@ -417,10 +475,11 @@ host  runner-1 (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · m
 ## 마일스톤과 완료 기준
 
 - **M0 — 뼈대** (한 세션): 위 모듈 구조 · 설정 로딩 · GitHub 클라이언트(ETag·페이지네이션·attempt·양쪽 rate limit 가드·에러 모델) · 순수 계산 전부 + 픽스처 테스트 · `rcm top` · `rcm serve` 의 `/api/status`·`/api/health` + hardening 목록 · `rcm check` · CI 잡 채우기 · `mutcheck.py`. 완료 기준: `rcm top` 이 실제 레포에서 큐·진행을 맞게 그린다 · 테스트 전부 통과 · 뮤테이션 3종 빨개짐 · CI 초록.
-- **M1 — 웹 UI**: 정적 UI 전부 · 갱신 · 실패/stale/미상 배지 · 모바일 · 다크/라이트 · `read_auth = basic` 옵션(기본 none · TLS 프록시 뒤 전용). 완료 기준: 폰에서 큐와 스텝 진행이 읽힌다 · 서버를 끊으면 UI 가 「stale」을 띄운다.
-- **M2 — 수집기**: `rcm collect` (macOS·Linux) · `POST /api/host` · `--host-local` · 서비스 파일 · macOS CI 스모크. 완료 기준: 러너 머신에서 push 한 값이 다른 컴퓨터의 UI 에 보이고, 수집기를 죽이면 60초 안에 stale 이 뜬다.
-- **M3 — 배포**: pipx/uvx · Docker · PyPI/GHCR 릴리스 워크플로 · `examples/` · README. 완료 기준: 새 머신에서 README 만 보고 5분 안에 `rcm top` 이 뜬다.
-- **M4 — 확장**: 레포 여러 개 · `[[pools]]` 로 러너 풀 여러 개(라벨별 레인·호스트) · 쓰기 동작(run 취소, 선택) · 알림(선택).
+- **M1 — 세션 명령**: `rcm eta` · `rcm wait`(종료 코드) · `rcm run`(가드·합류·내 run 찾기·쓰기 토큰) · `examples/session/ci-gate.sh`. 완료 기준: 다른 컴퓨터에서 `rcm run` 한 줄로 넣고 종료 코드로 결과를 받는다 · 같은 커밋을 두 세션이 넣으면 두 번째는 합류한다 · 미푸시 커밋이 있으면 멈춘다.
+- **M2 — 웹 UI**: 정적 UI 전부 · 갱신 · 실패/stale/미상 배지 · 모바일 · 다크/라이트 · `read_auth = basic` 옵션(기본 none · TLS 프록시 뒤 전용). 완료 기준: 폰에서 큐와 스텝 진행이 읽힌다 · 서버를 끊으면 UI 가 「stale」을 띄운다.
+- **M3 — 수집기**: `rcm collect` (macOS·Linux, CPU·메모리·**GPU**) · `POST /api/host` · `--host-local` · 서비스 파일 · macOS CI 스모크. 완료 기준: 러너 머신에서 push 한 값이 다른 컴퓨터의 UI 에 보이고, 수집기를 죽이면 60초 안에 stale 이 뜬다 · Apple Silicon 에서 GPU 사용률이 보인다.
+- **M4 — 배포**: pipx/uvx · Docker · PyPI/GHCR 릴리스 워크플로 · `examples/` · README. 완료 기준: 새 머신에서 README 만 보고 5분 안에 `rcm top` 과 `rcm run` 이 된다.
+- **M5 — 확장**: 레포 여러 개 · `[[pools]]` 로 러너 풀 여러 개(라벨별 레인·호스트) · run 취소(선택) · 알림(선택).
 
 ## 결정 항목
 
@@ -430,13 +489,16 @@ host  runner-1 (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · m
 1. **서버 노출 범위** — Tailscale/LAN 안에서만 쓴다. 읽기 인증 기본 `none`, 서버는 TLS 를 안 한다. `basic` 은 옵션으로만 두고(TLS 프록시 뒤 전용) 인터넷 노출은 README 의 「TLS 프록시 뒤에서」 안내로 끝낸다. 내장 로그인은 범위 밖.
 2. **호스트 자원의 두 번째 경로** — v0 의 「gist 주기 갱신」을 버리고 `rcm serve --host-local`(서버가 러너 머신에서 직접 수집)로 대체한다.
 3. **언어** — 식별자·UI 문자열·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 계획서·커밋 본문·리뷰 기록도 한국어.
+4. **큐 역할** — 이 도구가 **디스패치까지 담당**한다(`rcm run`: workflow_dispatch + 중복 합류 + 대기). 요청을 도구가 저장하는 자체 브로커는 하지 않는다 — 순차 처리는 GitHub 큐가 보장한다.
+5. **세션 전달** — 대기 위치·ETA·완료/실패는 **폴링 명령**(`rcm eta`·`rcm wait`, 종료 코드)으로만. 서버 webhook 과 커밋 status/PR 코멘트 갱신은 범위 밖.
+6. **GPU** — CPU·메모리와 같은 수집기에서 GPU 사용률·GPU 메모리를 읽는다(macOS `ioreg`, Linux `nvidia-smi`). 실시간은 폴링(기본 10초, 하한 2초)이다.
 
 ## 참고 구현 (private — 접근 가능한 사람만)
 
 `fmmc-tech/dolomood-app-renew` 의 `scripts/ci_queue.py`(큐·중앙값·잔여 계산, 21개 자기검증) 와 `scripts/ci_top.py`(진행률·파서·렌더, 18개 자기검증), 문서 `docs/renew-guide/ci-cd/30-remote-dispatch.md`(로컬에선 `dolomood-ci-monitor` 워크트리의 `feat/ci-monitor` 브랜치에 있다). 설계와 함정은 가져오되 코드는 이식성 규칙에 맞게 다시 쓴다. 픽스처를 옮길 땐 브랜치명·요청자 라벨·run id 같은 팀 정보는 지운다.
 
-- **버리는 것**: `gh` 서브프로세스 · `gh auth switch` 자동 실행 · 팀 워크플로 집합 · 종류별 기본 소요 표 · KST 상수 · `~/actions-runner` 판별.
-- **반드시 지키는 것**: `job_started_at` 우선(run 시각은 큐 대기 포함) · 조회 실패와 빈 큐를 다른 타입으로 · 스텝 `number` 미사용(위치로) · `top` 두 번째 표본만 · 큐·ETA 계산은 **공용 함수 하나**(터미널과 서버가 같은 것을 쓴다 — 두 벌 두면 하나가 조용히 어긋난다) · 워크플로별 이력 보강(전역 목록만 보면 다른 워크플로가 표본을 밀어낸다).
+- **버리는 것**: `gh` 서브프로세스 · `gh auth switch` 자동 실행 · 팀 워크플로 집합 · 종류별 기본 소요 표 · KST 상수 · `~/actions-runner` 판별 · run 이름의 `· <scope> ·` 문자열로 하던 합류 판정(→ `head_sha` 기준).
+- **반드시 지키는 것**: `job_started_at` 우선(run 시각은 큐 대기 포함) · 조회 실패와 빈 큐를 다른 타입으로 · 스텝 `number` 미사용(위치로) · `top` 두 번째 표본만 · 큐·ETA 계산은 **공용 함수 하나**(터미널과 서버가 같은 것을 쓴다 — 두 벌 두면 하나가 조용히 어긋난다) · 워크플로별 이력 보강(전역 목록만 보면 다른 워크플로가 표본을 밀어낸다) · `remote_ci.sh` 의 dispatch 3중 가드(미커밋 → 멈춤 · 미푸시 → 멈춤 · 내 run 은 `head_sha` 로 고른다)와 취소 대신 합류.
 
 ---
 
@@ -468,5 +530,5 @@ host  runner-1 (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · m
   - 식별자·UI 문자열·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 커밋 메시지는 Conventional Commits.
 
 끝나면: 무엇을 만들었는지, 테스트가 몇 개이고 어떤 뮤테이션으로 확인했는지, 실제 레포에서 rcm top 이
-무엇을 보여줬는지, M1 에서 먼저 정해야 할 것이 무엇인지 짧게 보고해라.
+무엇을 보여줬는지, M1(세션 명령 rcm run/eta/wait)에서 먼저 정해야 할 것이 무엇인지 짧게 보고해라.
 ```
