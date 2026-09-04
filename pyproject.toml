@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "remote-ci-monitor"
+version = "0.1.0"
+description = "Local job server for a single build machine: queue, run presets, show ETA/steps/host load, return exit codes."
+readme = "README.md"
+requires-python = ">=3.11"
+# 런타임 의존성 0 — 표준 라이브러리만 쓴다(PLAN.md 「의존성 원칙」).
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: Console",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.urls]
+Repository = "https://github.com/monocsp/remote_ci_monitor"
+
+[project.scripts]
+rcm = "remote_ci_monitor.cli:main"
+remote-ci-monitor = "remote_ci_monitor.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/remote_ci_monitor"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/remote_ci_monitor", "README.md", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

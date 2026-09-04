@@ -1,0 +1,79 @@
+# remote_ci_monitor — example server config.
+# Copy to ~/.config/rcm/server.toml (or ./rcm.toml) on the build machine and edit.
+# Every command the server can run is a preset below; sessions send a preset name + inputs only.
+
+[server]
+bind = "127.0.0.1"          # Set your Tailscale IP or 0.0.0.0 to accept remote sessions.
+port = 8787
+data_dir = "~/.local/share/rcm"
+lanes = 1                   # Parallel job lanes. 1 for a single build machine.
+read_auth = "none"          # "none" (LAN/Tailscale) | "basic" (only behind a TLS proxy)
+max_snapshot_bytes = 536870912
+grace_seconds = 10          # SIGTERM → SIGKILL grace on cancel/timeout
+recent_count = 8
+upload_stall_seconds = 60
+upload_abandon_seconds = 300
+
+[estimate]
+sample_days = 45
+min_samples = 2
+min_job_seconds = 30
+sample_policy = "success"   # "success" | "completed"
+default_seconds = 600
+floor_remaining_seconds = 30
+stuck_multiplier = 3
+no_output_seconds = 240
+
+[host]
+interval_seconds = 5
+gpu = "auto"
+top_processes = 5
+history_samples = 60
+
+[display]
+timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local / browser local.
+
+# ── Presets ────────────────────────────────────────────────────────────────
+# argv runs from the uploaded workspace root. No shell interpolation: inputs arrive as
+# RCM_INPUT_<NAME> environment variables. Scripts may print step markers, e.g.
+#   ::rcm::steps::3
+#   ::rcm::step::analyze
+#   ::rcm::step-end::ok
+#   ::rcm::summary::all green
+
+[[presets]]
+name = "gate"
+description = "Full local gate: analyze, test, lint"
+argv = ["bash", "scripts/gate.sh"]
+timeout_seconds = 1200
+source_modes = ["tree"]
+expected_seconds = 480
+duration_key_inputs = ["scope"]
+env_passthrough = ["PATH", "HOME", "LANG"]
+[presets.env]
+CI = "1"
+[[presets.inputs]]
+name = "scope"
+type = "choice"
+choices = ["full", "commit", "fast"]
+default = "full"
+
+[[presets]]
+name = "gate-fast"
+description = "Quick checks only"
+argv = ["bash", "scripts/gate.sh", "--fast"]
+timeout_seconds = 300
+expected_seconds = 60
+
+[[presets]]
+name = "qa-smoke"
+description = "Smoke test on the shared device/simulator (serialized via concurrency_group)"
+argv = ["bash", "scripts/qa-smoke.sh"]
+timeout_seconds = 900
+concurrency_group = "devices"
+expected_seconds = 540
+[[presets.inputs]]
+name = "device"
+type = "string"
+pattern = "[A-Za-z0-9._-]+"
+default = "default"

@@ -1,5 +1,5 @@
-# CI. 이 잡(test)은 main 룰셋의 필수 체크다. 잡 이름을 바꾸면 룰셋도 같이 바꿔야 한다.
-# M0 에서 pytest · ruff · 시크릿 스캔을 이 잡에 채운다. 그 전까지는 자리표시자다.
+# CI. 집계 잡 `test` 는 main 룰셋의 필수 체크다. 잡 이름을 바꾸면 룰셋도 같이 바꿔야 한다.
+# ⚠️ matrix 잡의 체크 이름은 `unit (3.11, ubuntu-latest)` 처럼 바뀌므로 룰셋은 `test` 만 본다.
 name: CI
 
 on:
@@ -12,11 +12,59 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test
+  unit:
+    name: unit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: macos-latest, python: "3.13" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 개발 의존성 (pytest · ruff)
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .
+      - name: pytest
+        run: pytest
+      - name: 뮤테이션 확인 (테스트가 실제로 빨개지는지)
+        if: hashFiles('scripts/mutcheck.py') != ''
+        run: python scripts/mutcheck.py
+
+  secrets:
+    name: secrets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 테스트 (M0 에서 채운다)
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 집계 잡. 룰셋 필수 체크는 이 이름(`test`)으로 잡혀 있다.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: [unit, secrets]
+    if: always()
+    steps:
+      - name: unit · secrets 둘 다 success 여야 통과
+        env:
+          UNIT: ${{ needs.unit.result }}
+          SECRETS: ${{ needs.secrets.result }}
         run: |
-          echo "::warning::아직 테스트가 없다. M0 에서 pytest · ruff · 시크릿 스캔을 이 잡에 넣어라."
+          echo "unit=$UNIT secrets=$SECRETS"
+          if [ "$UNIT" != "success" ] || [ "$SECRETS" != "success" ]; then
+            echo "::error::unit=$UNIT secrets=$SECRETS — 둘 다 success 여야 한다."
+            exit 1
+          fi
