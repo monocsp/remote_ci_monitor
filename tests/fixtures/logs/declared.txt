@@ -1,0 +1,11 @@
+::rcm::steps::4
+::rcm::step::analyze
+Analyzing 12 packages...
+No issues found!
+::rcm::step::format
+::rcm::step-end::ok
+::rcm::step::test
+00:00 +0: loading test/widget_test.dart
+00:03 +12: All tests passed!
+::rcm::step::lint
+::rcm::summary::all 4 steps green
