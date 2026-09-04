@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rcm 큐 화면</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* ── 토큰: 라이트가 기본, 다크는 토큰만 바꾼다 ── */
+:root {
+  --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
+  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1E8A4C; --ok-soft: #E1F3E8; --warn: #B26A00; --warn-soft: #FBEFD9;
+  --bad: #C23B32; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #6B7A8B; --queued-soft: #ECF0F4;
+  --callout: #C0287A; --callout-ink: #FFFFFF; --callout-soft: #FBE4F0;
+  --sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+    --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+    --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+    --callout: #F26DB5; --callout-ink: #1A0B14; --callout-soft: #3B1A2C;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+  --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+  --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+  --callout: #F26DB5; --callout-ink: #1A0B14; --callout-soft: #3B1A2C;
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.55; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+table { font: inherit; }
+
+.page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: 30px; font-weight: 600; margin: 6px 0 10px; letter-spacing: -0.01em; text-wrap: balance; }
+h2 { font-size: 20px; font-weight: 600; margin: 48px 0 12px; }
+h3 { font-size: 16px; font-weight: 600; margin: 0; }
+.lede { max-width: 68ch; color: var(--muted); margin: 0 0 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend .b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); }
+.legend .ln { display: inline-block; width: 34px; border-top: 1.5px dashed var(--callout); vertical-align: middle; }
+
+/* ── 주석 컨테이너: 목업 + 오른쪽 배지 거터 + 선 레이어 ── */
+.annot-wrap { overflow-x: auto; padding-bottom: 6px; }
+.annot { position: relative; display: grid; grid-template-columns: 1fr 76px; min-width: 1096px; }
+.annot svg.lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.annot .gutter { position: relative; }
+.badge { position: absolute; left: 22px; transform: translateY(-50%); width: 26px; height: 26px; border-radius: 50%; background: var(--callout); color: var(--callout-ink);
+  font: 600 12px var(--mono); display: grid; place-items: center; cursor: pointer; border: 0; padding: 0; box-shadow: 0 0 0 3px var(--bg); }
+.badge:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.badge.on { transform: translateY(-50%) scale(1.15); }
+[data-c] { position: relative; }
+[data-c].hl { outline: 2px solid var(--callout); outline-offset: 3px; border-radius: 3px; }
+.lines .lead { fill: none; stroke: var(--callout); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: 0.7; }
+.lines .lead.on { stroke-width: 2; stroke-dasharray: none; opacity: 1; }
+.lines .dot { fill: var(--callout); }
+
+/* ── 목업 화면 ── */
+.screen { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); overflow: hidden; font-size: 13.5px; }
+.s-top { display: flex; align-items: center; gap: 18px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.wordmark { font: 600 15px var(--mono); letter-spacing: 0.02em; }
+.s-top .host { font-family: var(--mono); }
+.workers { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.wk i { width: 8px; height: 8px; border-radius: 50%; background: var(--queued); }
+.wk.busy i { background: var(--accent); }
+.spacer { flex: 1; }
+.fresh { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.fresh .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.tz { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.tokenbox { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; background: var(--surface); font-family: var(--mono); font-size: 12px; }
+.tokenbox .k { color: var(--muted); }
+
+.s-section { padding: 12px 16px 14px; border-bottom: 1px solid var(--line-2); }
+.s-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.s-h .t { font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; font-size: 12px; color: var(--muted); }
+.s-h .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+table.q { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.q th { text-align: left; font-weight: 500; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+.num, .pill, .eta, .blocked, .chip, .sha { white-space: nowrap; }
+table.q tr.exp td { border-bottom: 0; }
+table.q td.num { font-family: var(--mono); }
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font: 500 11.5px var(--mono); }
+.pill.running { background: var(--accent-soft); color: var(--accent); }
+.pill.queued { background: var(--queued-soft); color: var(--queued); }
+.pill.uploading { background: var(--queued-soft); color: var(--queued); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.lost { background: var(--lost-soft); color: var(--lost); }
+.key { font-family: var(--mono); font-weight: 500; }
+.chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font: 11.5px var(--mono); color: var(--muted); margin-left: 4px; }
+.sha { font-family: var(--mono); }
+.dirty { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 11px var(--mono); }
+.sub { color: var(--muted); font-size: 12px; }
+.eta .src { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
+.eta .src.def { font-style: italic; }
+.over { color: var(--warn); font-weight: 500; }
+.blocked { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 11.5px var(--mono); }
+tr.overdue td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+
+.prog { padding: 4px 8px 12px 46px; }
+.prog .head { display: flex; gap: 14px; align-items: baseline; font-family: var(--mono); font-size: 12.5px; margin-bottom: 8px; }
+.prog .head b { font-weight: 500; }
+.prog .note { color: var(--muted); }
+.tl { display: flex; gap: 3px; align-items: flex-end; height: 46px; }
+.tl .st:nth-child(even) span { top: -31px; }
+.tl .st { position: relative; height: 10px; border-radius: 2px; background: var(--ok); min-width: 14px; }
+.tl .st.run { background: var(--accent); height: 14px; }
+.tl .st.pend { background: transparent; border: 1px dashed var(--line); height: 10px; }
+.tl .st span { position: absolute; top: -17px; left: 0; font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.tl .st.run span { color: var(--accent); }
+.tail { margin-top: 10px; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--muted); white-space: pre; overflow: hidden; }
+.actions { display: inline-flex; gap: 6px; margin-top: 8px; }
+.btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 3px 10px; font: 500 12px var(--sans); cursor: pointer; }
+.btn.danger { color: var(--bad); }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.upl { display: inline-block; width: 90px; height: 6px; border-radius: 3px; background: var(--line-2); vertical-align: middle; margin-right: 6px; overflow: hidden; }
+.upl i { display: block; height: 100%; width: 62%; background: var(--queued); }
+
+.recent { display: grid; grid-template-columns: 1fr; gap: 0; }
+.rrow { display: grid; grid-template-columns: 128px 118px 140px 70px 56px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow:last-child { border-bottom: 0; }
+.rrow .k { font-family: var(--mono); font-weight: 500; }
+.rrow .d, .rrow .t { font-family: var(--mono); color: var(--muted); }
+.rrow .s { color: var(--muted); }
+.rrow .s b { color: var(--ink); font-weight: 500; }
+.medians { display: flex; flex-wrap: wrap; gap: 8px 18px; font: 12px var(--mono); color: var(--muted); margin-top: 8px; }
+.medians b { color: var(--ink); font-weight: 500; }
+
+.hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 14px 22px; align-items: center; }
+.hostcard .hn { font-family: var(--mono); }
+.hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }
+.meter { display: grid; gap: 4px; }
+.meter .lab { display: flex; justify-content: space-between; font: 12px var(--mono); }
+.meter .lab span:last-child { color: var(--muted); }
+.meter .bar { height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+.meter .bar i { display: block; height: 100%; background: var(--accent); }
+.meter.warn .bar i { background: var(--warn); }
+.top { grid-column: 1 / -1; font: 12px var(--mono); color: var(--muted); }
+.top b { color: var(--ink); font-weight: 500; }
+
+/* ── 변형 패널 ── */
+.variants { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.variant { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13px; }
+.variant .vt { font: 500 11.5px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+.banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--warn-soft); color: var(--warn); border-radius: 6px; font-weight: 500; }
+.banner .live { width: 9px; height: 9px; border-radius: 50%; background: var(--queued); }
+.empty { padding: 18px 12px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }
+.empty code { color: var(--ink); }
+.stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 11.5px var(--mono); }
+.dim { opacity: 0.55; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-width: 340px; font-variant-numeric: tabular-nums; }
+.card .r1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card .r2 { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; gap: 10px; }
+.card .r3 { margin-top: 8px; font: 12px var(--mono); }
+
+/* ── 기획 항목 ── */
+.specs { display: grid; gap: 14px; }
+.spec { display: grid; grid-template-columns: 34px 1fr; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.spec.on { border-color: var(--callout); box-shadow: 0 0 0 2px var(--callout-soft); }
+.spec .num { width: 26px; height: 26px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); display: grid; place-items: center; }
+.spec .area { font: 11.5px var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.spec dl { display: grid; grid-template-columns: 78px 1fr; gap: 6px 12px; margin: 10px 0 0; max-width: 78ch; }
+.spec dt { color: var(--muted); font-size: 12.5px; padding-top: 2px; }
+.spec dd { margin: 0; }
+.spec dd code { background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
+.group { margin: 26px 0 8px; font: 500 12px var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.qa { max-width: 78ch; }
+.qa li { margin-bottom: 8px; }
+.note { max-width: 78ch; color: var(--muted); font-size: 13.5px; }
+
+@media (max-width: 720px) {
+  .page { padding: 20px 14px 60px; }
+  .variants { grid-template-columns: 1fr; }
+  .spec dl { grid-template-columns: 1fr; }
+  .spec dt { padding-top: 6px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .badge, .spec { transition: transform 120ms ease, box-shadow 120ms ease; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow">remote_ci_monitor · docs/wireframes · 2026-09-04 · PLAN.md v2 「웹 UI (M2)」</div>
+  <h1>웹 큐 화면</h1>
+  <p class="lede">빌드 머신 한 대의 큐·진행·최근 결과·자원을 한 화면에 보여주는 첫 화면이다. 아래 목업은 <code>/api/status</code> 스키마 v1 의 실제 필드 값으로 그렸고, 오른쪽 번호는 그 요소의 기획 항목 번호다. 번호나 항목에 마우스를 올리면 서로 강조되고, 번호를 누르면 항목으로 이동한다.</p>
+  <div class="legend"><span><span class="b">1</span> 기획 항목 번호</span><span><span class="ln"></span> 요소를 가리키는 선</span><span>UI 문자열은 영어(제품 규칙), 설명은 한국어</span><span>레인 2 로 그렸다 — 그룹 대기(11)를 보이기 위해</span></div>
+
+  <h2>1. 기본 화면 — 잡 두 개 실행 중, 세 개 대기</h2>
+  <div class="annot-wrap"><div class="annot" id="main">
+    <div class="screen">
+      <div class="s-top">
+        <span data-c="1" class="workers"><span class="wordmark">rcm</span><span class="host">macmini</span><span class="sub">lanes 2</span><span class="wk busy"><i></i>#412</span><span class="wk busy"><i></i>#409</span></span>
+        <span class="spacer"></span>
+        <span data-c="2" class="fresh"><span class="live"></span>live · updated 4s ago</span>
+        <span data-c="3" class="tz">Asia/Seoul</span>
+        <span data-c="4" class="tokenbox"><span class="k">token</span> alice-laptop ✓</span>
+      </div>
+
+      <div class="s-section">
+        <div class="s-h" data-c="5"><span class="t">Queue</span><span class="n">5 jobs · 2 running · 2 queued · 1 uploading</span></div>
+        <table class="q">
+          <thead><tr><th>#</th><th>Key</th><th>Source</th><th>Requester</th><th>Elapsed / wait</th><th>Remaining</th><th>ETA</th></tr></thead>
+          <tbody>
+            <tr class="exp">
+              <td class="num" data-c="6">1 <span class="pill running">▶ running</span></td>
+              <td data-c="7"><span class="key">gate:full</span><span class="chip">scope=full</span></td>
+              <td data-c="8"><span class="sha">abc123f</span><span class="dirty">+dirty</span><div class="sub">org/app</div></td>
+              <td data-c="9">alice@laptop</td>
+              <td class="num" data-c="10">0:59</td>
+              <td class="num">5:10</td>
+              <td class="num eta">09:57<br><span class="src">measured · n=7</span></td>
+            </tr>
+            <tr><td colspan="7" class="prog">
+              <div data-c="12">
+                <div class="head"><b>step 5/8</b><span>test</span><span>51s</span><span class="note">job 59s</span></div>
+                <div class="tl">
+                  <div class="st" style="width:64px"><span>analyze 12s</span></div>
+                  <div class="st" style="width:26px"><span>format 3s</span></div>
+                  <div class="st" style="width:50px"><span>lint 8s</span></div>
+                  <div class="st" style="width:104px"><span>deps 21s</span></div>
+                  <div class="st run" style="width:230px"><span>▶ test 51s</span></div>
+                  <div class="st pend" style="width:70px"><span>build-web</span></div>
+                  <div class="st pend" style="width:56px"><span>package</span></div>
+                  <div class="st pend" style="width:50px"><span>report</span></div>
+                </div>
+              </div>
+              <div data-c="13">
+                <div class="tail">[test] 3/9 packages · 412 passed · 0 failed
+[test] running integration/notification_setting_test.dart
+[test] golden: home_tutorial_v3 ✓</div>
+                <div class="actions"><button class="btn">Log</button><button class="btn danger">Cancel</button></div>
+              </div>
+            </td></tr>
+
+            <tr>
+              <td class="num">2 <span class="pill running">▶ running</span></td>
+              <td><span class="key">qa:device-smoke</span><span class="chip">group devices</span></td>
+              <td><span class="sha">9e1d2c0</span><div class="sub">org/app · ref dev</div></td>
+              <td>carol@mbp</td>
+              <td class="num">6:20</td>
+              <td class="num">2:40</td>
+              <td class="num eta">09:55<br><span class="src">measured · n=3</span></td>
+            </tr>
+            <tr>
+              <td class="num">3 <span class="pill queued">· queued</span></td>
+              <td><span class="key">qa:smoke</span><span class="chip">group devices</span><div data-c="11" style="margin-top:5px"><span class="blocked">blocked by #409 · devices</span></div></td>
+              <td><span class="sha">def4567</span><div class="sub">org/app</div></td>
+              <td>bob@desk</td>
+              <td class="num">waiting 1:35</td>
+              <td class="num">9:00</td>
+              <td class="num eta">10:05<br><span class="src def">preset</span></td>
+            </tr>
+            <tr>
+              <td class="num">4 <span class="pill queued">· queued</span></td>
+              <td><span class="key">gate:fast</span><span class="chip">scope=fast</span></td>
+              <td><span class="sha">abc123f</span><span class="dirty">+dirty</span><div class="sub">org/app</div></td>
+              <td>alice@laptop</td>
+              <td class="num">waiting 0:35</td>
+              <td class="num">1:05</td>
+              <td class="num eta">09:59<br><span class="src">measured · n=12</span></td>
+            </tr>
+            <tr>
+              <td class="num">5 <span class="pill uploading">↑ uploading</span></td>
+              <td><span class="key">gate:full</span><span class="chip">scope=full</span></td>
+              <td><span class="upl"><i></i></span><span class="sub">30 / 48 MB</span></td>
+              <td>dan@pc</td>
+              <td class="num">—</td>
+              <td class="num">6:09</td>
+              <td class="num eta">10:12<br><span class="src">measured · n=7</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="s-section">
+        <div class="s-h"><span class="t">Recent</span><span class="n">last 8</span></div>
+        <div class="recent" data-c="14">
+          <div class="rrow"><span class="pill bad">✗ failed · exit 1</span><span class="k">gate:fast</span><span class="s">bob@desk</span><span class="d">1m 02s</span><span class="t">09:47</span><span class="s"><b>2 tests failed</b> · step test</span></div>
+          <div class="rrow"><span class="pill ok">✓ succeeded</span><span class="k">gate:full</span><span class="s">alice@laptop</span><span class="d">5m 50s</span><span class="t">09:40</span><span class="s">all 9 packages green</span></div>
+          <div class="rrow"><span class="pill warn">⏹ cancelled</span><span class="k">qa:smoke</span><span class="s">carol@mbp</span><span class="d">0m 12s</span><span class="t">09:31</span><span class="s">by carol@mbp</span></div>
+          <div class="rrow"><span class="pill warn">⏱ timed out</span><span class="k">gate:full</span><span class="s">dan@pc</span><span class="d">20m 00s</span><span class="t">09:20</span><span class="s">limit 20m · step test</span></div>
+          <div class="rrow"><span class="pill lost">? lost</span><span class="k">gate:full</span><span class="s">dan@pc</span><span class="d">—</span><span class="t">09:02</span><span class="s">server restarted while running</span></div>
+        </div>
+        <div class="medians" data-c="15"><span><b>gate:full</b> 6m 9s · n=7</span><span><b>gate:fast</b> 1m 05s · n=12</span><span><b>qa:device-smoke</b> 8m 40s · n=3</span><span><b>qa:smoke</b> n=1 → preset 9m</span></div>
+      </div>
+
+      <div class="s-section" style="border-bottom:0">
+        <div class="s-h"><span class="t">Host</span></div>
+        <div class="hostcard" data-c="16">
+          <div class="hn">macmini<span class="age">sampled 4s ago · darwin · 10 cores</span></div>
+          <div class="meter"><div class="lab"><span>CPU 21%</span><span>user 17 · sys 4</span></div><div class="bar"><i style="width:21%"></i></div></div>
+          <div class="meter"><div class="lab"><span>Memory 14.0 / 24 GB</span><span>58%</span></div><div class="bar"><i style="width:58%"></i></div></div>
+          <div class="meter"><div class="lab"><span>GPU 13%</span><span>0.6 GB in use</span></div><div class="bar"><i style="width:13%"></i></div></div>
+          <div class="top">load 3.48 / 10 · top: <b>dart</b> 180% 500MB · <b>flutter_tester</b> 95% 300MB · <b>gen_snapshot</b> 103% 169MB</div>
+        </div>
+      </div>
+    </div>
+    <div class="gutter"></div>
+    <svg class="lines" aria-hidden="true"></svg>
+  </div></div>
+
+  <h2>2. 변형 상태 — 같은 화면이 다르게 보여야 하는 경우</h2>
+  <div class="annot-wrap"><div class="annot" id="vars">
+    <div class="variants">
+      <div class="variant"><div class="vt">Empty queue</div>
+        <div class="empty" data-c="17">Queue is empty — <code>rcm run &lt;preset&gt;</code> starts immediately.<br><span class="sub">presets: gate · gate-fast · qa-smoke · deploy-dev</span></div>
+      </div>
+      <div class="variant"><div class="vt">Connection lost</div>
+        <div class="banner" data-c="18"><span class="live"></span>Lost connection to macmini · last update 42s ago · showing last known state</div>
+        <div class="sub" style="margin-top:8px">reconnecting in 8s…</div>
+      </div>
+      <div class="variant"><div class="vt">Host sample stale</div>
+        <div class="hostcard dim" style="grid-template-columns: 150px 1fr" data-c="19">
+          <div class="hn">macmini<span class="age"><span class="stale-badge" style="opacity:1">stale 3m 12s</span></span></div>
+          <div class="meter"><div class="lab"><span>CPU 21%</span><span>last known</span></div><div class="bar"><i style="width:21%;background:var(--queued)"></i></div></div>
+        </div>
+      </div>
+      <div class="variant"><div class="vt">Overdue job</div>
+        <table class="q"><tbody>
+          <tr class="overdue" data-c="20"><td class="num">1 <span class="pill running">▶ running</span></td><td><span class="key">gate:full</span></td><td>alice@laptop</td><td class="num">9:40</td><td class="num over">over by 3:31</td><td class="num eta">now + 0:30<br><span class="src">expected 6:09</span></td></tr>
+        </tbody></table>
+      </div>
+      <div class="variant"><div class="vt">Mobile card (&lt; 720px)</div>
+        <div class="card" data-c="21">
+          <div class="r1"><span><span class="mono">#3</span> <span class="pill queued">· queued</span> <span class="key">qa:smoke</span></span><span class="mono">10:05</span></div>
+          <div class="r2"><span class="sha">def4567</span><span>bob@desk</span><span>waiting 1:35</span></div>
+          <div class="r3"><span class="blocked">blocked by #409 · devices</span></div>
+        </div>
+      </div>
+      <div class="variant"><div class="vt">Queue unavailable (≠ empty)</div>
+        <div class="banner" data-c="22" style="background:var(--bad-soft);color:var(--bad)">Queue unavailable — database locked (retrying)</div>
+      </div>
+    </div>
+    <div class="gutter"></div>
+    <svg class="lines" aria-hidden="true"></svg>
+  </div></div>
+
+  <h2>3. 기획 항목</h2>
+  <p class="note">각 항목은 「보여주는 것 · 데이터(스키마 필드) · 상태 · 상호작용 · 규칙」 순이다. 규칙은 PLAN.md 의 fail-open 금지·보안 절과 맞물린다. 스키마 필드는 <code>pools[0]</code> 기준이다.</p>
+
+  <div class="group">머리 — 서버와 연결</div>
+  <div class="specs">
+    <article class="spec" id="c1" data-for="1"><div class="num">1</div><div><div class="area">header</div><h3>서버 신원과 워커</h3>
+      <dl><dt>보여주는 것</dt><dd>제품 이름, 빌드 머신 이름, 레인 수, 레인마다 지금 도는 잡 번호. 한눈에 「지금 몇 개가 동시에 도나」.</dd>
+      <dt>데이터</dt><dd><code>hosts[0].name</code> · <code>lanes</code> · <code>server.workers[].{lane, state, job_id}</code></dd>
+      <dt>상태</dt><dd>busy 는 파란 점 + 잡 번호, idle 은 회색 점 + <code>idle</code>. 워커 스레드가 죽었으면(<code>server.last_error</code>) 점 대신 경고색 <code>worker down</code> 과 사유.</dd>
+      <dt>상호작용</dt><dd>잡 번호를 누르면 그 큐 행으로 스크롤하고 잠깐 강조.</dd>
+      <dt>규칙</dt><dd>레인 수는 설정값이라 「추정」이 없다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다 — 죽음은 머리에서 보여야 한다.</dd></dl></div></article>
+
+    <article class="spec" id="c2" data-for="2"><div class="num">2</div><div><div class="area">header</div><h3>갱신 상태와 나이</h3>
+      <dl><dt>보여주는 것</dt><dd>연결 방식(<code>live</code> = SSE, <code>polling</code>)과 마지막으로 새 데이터를 받은 지 몇 초인지.</dd>
+      <dt>데이터</dt><dd>클라이언트가 <code>/events</code> 로 마지막 이벤트를 받은 시각(브라우저 시계) 과 <code>generated_at</code>.</dd>
+      <dt>상태</dt><dd>live(초록 점) → SSE 가 끊기면 10초 폴링으로 내려가며 <code>polling</code>(회색 점) → 30초 넘게 아무것도 못 받으면 18 번 배너.</dd>
+      <dt>규칙</dt><dd>화면이 멈췄는데 숫자가 그대로면 사람은 모른다. 나이는 1초마다 올라가야 하고, 이 칸이 없는 상태로 배포하지 않는다.</dd></dl></div></article>
+
+    <article class="spec" id="c3" data-for="3"><div class="num">3</div><div><div class="area">header</div><h3>시간대</h3>
+      <dl><dt>보여주는 것</dt><dd>화면의 모든 시각을 어느 시간대로 그리는지. 서버 설정이 있으면 그 IANA 이름, 없으면 브라우저 로컬을 쓰고 <code>(browser)</code> 를 덧붙인다.</dd>
+      <dt>데이터</dt><dd><code>display_timezone</code>(null 이면 브라우저) · 모든 시각 필드는 UTC ISO-8601 로 와서 <code>Intl.DateTimeFormat</code> 으로 변환.</dd>
+      <dt>상호작용</dt><dd>없음. 바꾸려면 서버 설정 <code>display.timezone</code>. 툴팁에 「set display.timezone on the server to pin this」.</dd></dl></div></article>
+
+    <article class="spec" id="c4" data-for="4"><div class="num">4</div><div><div class="area">header · auth</div><h3>토큰 입력</h3>
+      <dl><dt>보여주는 것</dt><dd>읽기 전용으로는 필요 없다. 로그 tail·로그 보기·취소를 하려면 자기 토큰을 붙여넣는다. 붙여넣은 뒤엔 토큰 값이 아니라 <b>토큰 이름</b>(<code>alice-laptop ✓</code>)만 보인다.</dd>
+      <dt>데이터</dt><dd><code>GET /api/whoami</code>(토큰 → 이름·admin 여부). 토큰은 <code>localStorage</code> 의 <code>rcm.token</code> 에만 저장하고 URL·쿼리에 절대 싣지 않는다.</dd>
+      <dt>상태</dt><dd>없음(<code>add token</code> 링크) · 유효(이름 ✓) · 거부(401 → 빨간 테두리 + <code>Token rejected</code>, 저장값 삭제).</dd>
+      <dt>규칙</dt><dd>토큰이 없어도 화면 전체가 읽힌다(읽기 none 전제). 토큰이 있을 때만 13 번 액션과 로그 tail 이 켜진다.</dd></dl></div></article>
+  </div>
+
+  <div class="group">큐 표</div>
+  <div class="specs">
+    <article class="spec" id="c5" data-for="5"><div class="num">5</div><div><div class="area">queue</div><h3>큐 헤더</h3>
+      <dl><dt>보여주는 것</dt><dd>활성 잡 수와 상태별 분포. 「대기가 몇 개인가」를 표를 세지 않고 알게.</dd>
+      <dt>데이터</dt><dd><code>queue[]</code> 의 <code>state</code> 집계.</dd>
+      <dt>규칙</dt><dd>큐 조회 실패(<code>queue_error</code>)면 표 대신 22 번 오류 띠. 빈 큐(17)와 조회 실패는 <b>다른 모양</b>이어야 한다 — fail-open 금지의 핵심.</dd></dl></div></article>
+
+    <article class="spec" id="c6" data-for="6"><div class="num">6</div><div><div class="area">queue · row</div><h3>순번과 상태</h3>
+      <dl><dt>보여주는 것</dt><dd>FIFO 순번과 상태 필. <code>▶ running</code>(파랑) · <code>· queued</code>(회색) · <code>↑ uploading</code>(회색, 세션이 아직 트리를 올리는 중).</dd>
+      <dt>데이터</dt><dd><code>position</code> · <code>state</code>. uploading 은 8 번 소스 칸에 받은 바이트 / <code>source.bytes</code> 진행 막대.</dd>
+      <dt>상태</dt><dd>uploading 잡은 순번은 받았지만 큐에 「확정」되지 않았다. 업로드가 끊기면 5분 뒤 서버가 지우고 행이 사라진다(이벤트로 알림).</dd>
+      <dt>규칙</dt><dd>실행 중인 잡은 항상 대기 잡보다 위다(순번은 생성 순, 정렬은 상태 → 순번).</dd></dl></div></article>
+
+    <article class="spec" id="c7" data-for="7"><div class="num">7</div><div><div class="area">queue · row</div><h3>키·프리셋·입력</h3>
+      <dl><dt>보여주는 것</dt><dd>소요시간 버킷인 <code>key</code>(굵게)와 입력값 칩. 그룹이 있는 프리셋은 <code>group devices</code> 칩.</dd>
+      <dt>데이터</dt><dd><code>key</code> · <code>preset</code> · <code>inputs</code> · 프리셋의 <code>concurrency_group</code>(<code>presets[]</code> 에서 조인).</dd>
+      <dt>상호작용</dt><dd>키를 누르면 15 번 중앙값 줄에서 같은 키를 강조. 입력 칩 툴팁에 전체 입력 JSON.</dd>
+      <dt>규칙</dt><dd>키는 「같은 키끼리 비교한 예상」임을 툴팁에 밝힌다(<code>estimates compare jobs with the same key</code>).</dd></dl></div></article>
+
+    <article class="spec" id="c8" data-for="8"><div class="num">8</div><div><div class="area">queue · row</div><h3>소스</h3>
+      <dl><dt>보여주는 것</dt><dd>어떤 코드가 도는지. tree 모드는 <code>base_sha</code> 7자리 + 미커밋 변경이 있으면 <code>+dirty</code>(황토), 아래에 레포 이름. git_ref 모드는 <code>sha · ref dev</code>.</dd>
+      <dt>데이터</dt><dd><code>source.{mode, base_sha, dirty, tree_hash, repo, ref, sha, bytes}</code>.</dd>
+      <dt>상호작용</dt><dd>sha 툴팁에 전체 sha 와 <code>tree_hash</code>. 같은 <code>tree_hash</code> 인 행은 hover 시 같이 강조(같은 코드를 두 사람이 올렸다는 뜻 — 보통은 합류돼서 한 행이지만 <code>--no-join</code> 이면 둘 다 보인다).</dd>
+      <dt>규칙</dt><dd><code>+dirty</code> 는 「푸시된 커밋과 다르다」는 신호라 눈에 띄어야 한다. 배포 프리셋(git_ref) 행에는 dirty 가 절대 없다.</dd></dl></div></article>
+
+    <article class="spec" id="c9" data-for="9"><div class="num">9</div><div><div class="area">queue · row</div><h3>요청자</h3>
+      <dl><dt>보여주는 것</dt><dd><code>requester.label</code>. 기본은 <code>토큰이름@호스트</code>, 세션이 <code>--by</code> 로 준 값이면 그것.</dd>
+      <dt>데이터</dt><dd><code>requester.{name, label}</code>.</dd>
+      <dt>상호작용</dt><dd>hover 시 같은 요청자의 다른 행을 같이 강조. 내 토큰(4)과 같은 이름이면 <code>you</code> 배지.</dd>
+      <dt>규칙</dt><dd>라벨은 외부 입력이라 40자에서 자르고 제어문자를 지운다(서버가 이미 하지만 UI 도 escape).</dd></dl></div></article>
+
+    <article class="spec" id="c10" data-for="10"><div class="num">10</div><div><div class="area">queue · row</div><h3>경과 · 잔여 · 예상 완료</h3>
+      <dl><dt>보여주는 것</dt><dd>running 은 경과(<code>0:59</code>) · 잔여(<code>5:10</code>) · ETA(<code>09:57</code>). queued 는 <code>waiting 1:35</code>(생성 후 대기) · 잔여(앞선 잡 포함 안 함, 자기 소요만) · ETA(앞선 잡 잔여 누적). ETA 아래 작은 글씨로 근거: <code>measured · n=7</code> / <code>preset</code> / <code>default</code>.</dd>
+      <dt>데이터</dt><dd><code>estimate.{elapsed_seconds, remaining_seconds, wait_seconds, finish_at, source, sample_count, overdue}</code> · <code>created_at</code> · <code>started_at</code>.</dd>
+      <dt>상태</dt><dd><code>source</code> 가 preset/default 면 이탤릭 회색(신뢰도 낮음). <code>overdue</code> 면 20 번 처리. 경과·대기는 1초마다 클라이언트에서 증가시키되 서버 값이 오면 덮어쓴다.</dd>
+      <dt>규칙</dt><dd>잔여 하한 30초는 계산 규칙이라 「곧 끝난다」가 아니라 「예상보다 오래 걸리고 있다」로 읽히게 20 번으로 넘긴다. 모르는 값(<code>null</code>)은 <code>—</code> 로 그리고 0 으로 그리지 않는다.</dd></dl></div></article>
+
+    <article class="spec" id="c11" data-for="11"><div class="num">11</div><div><div class="area">queue · row</div><h3>그룹 대기</h3>
+      <dl><dt>보여주는 것</dt><dd>레인이 비어 있는데 concurrency 그룹이 겹쳐 못 올라간 잡. <code>blocked by #409 · devices</code>.</dd>
+      <dt>데이터</dt><dd><code>blocked_by.{job_id, group}</code>.</dd>
+      <dt>상태</dt><dd>레인 1 인 서버에선 절대 뜨지 않는다(한 번에 하나만 도니까). 이 열은 값이 하나도 없으면 통째로 숨긴다.</dd>
+      <dt>상호작용</dt><dd>누르면 막고 있는 잡 행으로.</dd>
+      <dt>규칙</dt><dd>대기 사유가 「앞에 줄이 길어서」인지 「장비를 같이 써서」인지는 사용자에게 다른 정보다 — 섞지 않는다.</dd></dl></div></article>
+
+    <article class="spec" id="c12" data-for="12"><div class="num">12</div><div><div class="area">queue · expanded</div><h3>진행 — 스텝과 타임라인</h3>
+      <dl><dt>보여주는 것</dt><dd>실행 중 행은 기본으로 펼쳐진다. 머리에 <code>step 5/8 · test · 51s · job 59s</code>. 아래 타임라인은 스텝마다 막대 하나: 끝난 스텝 초록(길이 = 소요 비례, 최소 폭), 진행 중 파랑(조금 높게), 아직 안 온 스텝 점선.</dd>
+      <dt>데이터</dt><dd><code>progress.{steps_total, steps_total_partial, steps_done, current_index, current_name, current_seconds, job_seconds, steps[], timing}</code>.</dd>
+      <dt>상태</dt><dd><code>steps_total_partial</code> 면 <code>5/8 (so far)</code>. 마커가 하나도 없으면 타임라인 대신 <code>no step markers · job 59s</code> 한 줄. 잡이 queued 면 이 블록 자체가 없다(0/0 금지).</dd>
+      <dt>상호작용</dt><dd>막대 hover 에 스텝 이름·소요. 행 머리의 ▾ 로 접고 펼침(접은 상태는 localStorage 에 기억).</dd>
+      <dt>규칙</dt><dd><code>timing: as_received</code> — 스텝 시각은 서버가 마커를 받은 시각이라 출력 버퍼링 때문에 늦을 수 있다. 머리 옆 ⓘ 툴팁에 그 문장을 그대로 쓴다.</dd></dl></div></article>
+
+    <article class="spec" id="c13" data-for="13"><div class="num">13</div><div><div class="area">queue · expanded · auth</div><h3>로그 tail 과 액션</h3>
+      <dl><dt>보여주는 것</dt><dd>로그 마지막 3~5줄과 <code>Log</code>·<code>Cancel</code> 버튼.</dd>
+      <dt>데이터</dt><dd><code>log_tail</code> — <b>토큰이 있는 요청에만</b> 실린다(없으면 <code>null</code>). <code>Log</code> 는 <code>GET /jobs/{id}/log?offset=</code> 증분 스트림을 옆 서랍(drawer)에 연다. <code>Cancel</code> 은 확인 뒤 <code>POST /jobs/{id}/cancel</code>.</dd>
+      <dt>상태</dt><dd>토큰 없음 → tail 자리에 <code>Add a token to see the log</code>, 버튼 비활성. 내 잡이 아니고 admin 도 아니면 Cancel 비활성 + 툴팁 <code>not your job</code>. 취소 요청 뒤엔 버튼이 <code>cancelling…</code> 으로 바뀌고 상태 이벤트로 확정.</dd>
+      <dt>규칙</dt><dd>로그엔 시크릿이 섞일 수 있어 읽기 none 이어도 로그만은 토큰 필수(PLAN 「보안」). 이 항목은 PLAN 의 <code>/api/status</code> 스키마에 「<code>log_tail</code> 은 토큰 요청에만」을 추가해야 한다 — 아래 「PLAN 반영 제안」.</dd></dl></div></article>
+  </div>
+
+  <div class="group">최근 완료와 표본</div>
+  <div class="specs">
+    <article class="spec" id="c14" data-for="14"><div class="num">14</div><div><div class="area">recent</div><h3>최근 완료</h3>
+      <dl><dt>보여주는 것</dt><dd>최근 8건. 결과 필(✓ succeeded · ✗ failed + exit code · ⏹ cancelled · ⏱ timed out · ? lost) · 키 · 요청자 · 소요 · 끝난 시각 · 요약 한 줄(<code>summary</code>) 과 실패 스텝.</dd>
+      <dt>데이터</dt><dd><code>recent[].{state, exit_code, key, requester, job_seconds, finished_at, summary, failed_step}</code>.</dd>
+      <dt>상태</dt><dd>lost 는 사유 <code>server restarted while running</code>. cancelled 는 누가 취소했는지. timed_out 은 한계값과 죽은 스텝.</dd>
+      <dt>상호작용</dt><dd>행을 누르면 잡 상세(로그 서랍, 토큰 필요). 결과 필을 누르면 같은 결과만 필터(선택).</dd>
+      <dt>규칙</dt><dd>표본 정책(성공만)과 무관하게 <b>전부</b> 보인다. 걸려서 죽은 잡은 그 자체가 신호다.</dd></dl></div></article>
+
+    <article class="spec" id="c15" data-for="15"><div class="num">15</div><div><div class="area">recent</div><h3>실측 소요 중앙값</h3>
+      <dl><dt>보여주는 것</dt><dd>키별 중앙값과 표본 수. 표본이 모자란 키는 <code>n=1 → preset 9m</code> 처럼 「지금 무엇을 근거로 예상하는지」를 그대로.</dd>
+      <dt>데이터</dt><dd><code>medians[key].{seconds, sample_count}</code> · 프리셋 <code>expected_seconds</code>.</dd>
+      <dt>규칙</dt><dd>이 줄이 10 번 ETA 의 신뢰도를 설명한다. 표본이 하나도 없으면 줄을 숨기지 말고 <code>no samples yet · using preset/default</code>.</dd></dl></div></article>
+  </div>
+
+  <div class="group">호스트 자원</div>
+  <div class="specs">
+    <article class="spec" id="c16" data-for="16"><div class="num">16</div><div><div class="area">host</div><h3>호스트 카드</h3>
+      <dl><dt>보여주는 것</dt><dd>머신 이름 · 표본 나이 · OS · 코어 수, 그리고 CPU busy % · 메모리 사용/전체 · GPU 사용률(+ GPU 메모리) 세 막대, 아래에 load 와 상위 프로세스.</dd>
+      <dt>데이터</dt><dd><code>hosts[].{name, sampled_at, age_seconds, stale, os, cores, load, cpu, memory, gpu, gpu_note, top}</code>. 막대 채움 = 퍼센트, 85% 이상이면 황토색.</dd>
+      <dt>상태</dt><dd><code>gpu: null</code> 이면 세 번째 막대 자리에 <code>GPU — <i>gpu_note</i></code>(예: no supported GPU reader). 부분 <code>null</code> 은 그 칸만 <code>—</code>. <code>hosts_error</code> 면 카드 대신 오류 띠. <code>stale</code> 은 19 번.</dd>
+      <dt>상호작용</dt><dd>CPU 막대 툴팁 user/sys/idle. 상위 프로세스는 5개, 더 보기 없음(범위 밖).</dd>
+      <dt>규칙</dt><dd>값은 폴링(기본 5초)이라 「실시간」이 아니라 「N초 전」임을 나이로 항상 보인다.</dd></dl></div></article>
+  </div>
+
+  <div class="group">변형 상태</div>
+  <div class="specs">
+    <article class="spec" id="c17" data-for="17"><div class="num">17</div><div><div class="area">variant</div><h3>빈 큐</h3>
+      <dl><dt>보여주는 것</dt><dd>표 대신 점선 상자: <code>Queue is empty — rcm run &lt;preset&gt; starts immediately.</code> 와 프리셋 이름 목록. 15 번 중앙값 줄은 그대로 남는다.</dd>
+      <dt>데이터</dt><dd><code>queue: []</code> · <code>presets[].name</code>.</dd>
+      <dt>규칙</dt><dd>22 번(조회 실패)과 절대 같은 모양이 아니어야 한다. 「비어 있음」은 좋은 소식, 「모름」은 경고다.</dd></dl></div></article>
+
+    <article class="spec" id="c18" data-for="18"><div class="num">18</div><div><div class="area">variant</div><h3>연결 끊김 배너</h3>
+      <dl><dt>보여주는 것</dt><dd>SSE 도 폴링도 30초 넘게 실패하면 화면 맨 위에 황토색 띠: <code>Lost connection to macmini · last update 42s ago · showing last known state</code>, 아래에 <code>reconnecting in 8s…</code>. 2 번 점은 회색.</dd>
+      <dt>상태</dt><dd>지수 백오프(2s → 30s)로 재연결. 돌아오면 띠가 사라지고 전체 상태를 <code>/api/status</code> 로 한 번 다시 받는다.</dd>
+      <dt>규칙</dt><dd>마지막 상태를 지우지 않는다(사람이 「방금 전까지 뭐가 돌았는지」는 알아야 한다). 대신 모든 나이·경과 표시가 계속 올라가며 낡았음을 드러낸다.</dd></dl></div></article>
+
+    <article class="spec" id="c19" data-for="19"><div class="num">19</div><div><div class="area">variant</div><h3>호스트 표본 stale</h3>
+      <dl><dt>보여주는 것</dt><dd><code>stale: true</code>(나이 &gt; 3×주기)면 카드 머리에 <code>stale 3m 12s</code> 배지, 막대는 회색으로, 숫자는 남기되 <code>last known</code>.</dd>
+      <dt>데이터</dt><dd><code>hosts[].stale</code> · <code>age_seconds</code>.</dd>
+      <dt>규칙</dt><dd>샘플러 자체가 실패한 것(<code>hosts_error</code>, 빨간 띠)과 「샘플러가 조용한 것」(stale, 황토)은 다르게 그린다.</dd></dl></div></article>
+
+    <article class="spec" id="c20" data-for="20"><div class="num">20</div><div><div class="area">variant</div><h3>초과 실행</h3>
+      <dl><dt>보여주는 것</dt><dd><code>estimate.overdue</code> 면 행 왼쪽에 황토 스트라이프, 잔여 칸에 <code>over by 3:31</code>, ETA 칸에 <code>now + 0:30</code> 과 작은 글씨 <code>expected 6:09</code>.</dd>
+      <dt>규칙</dt><dd>잔여 하한(30초) 때문에 ETA 가 계속 「30초 뒤」로 보이는 건 계산의 성질이다 — 그래서 잔여 대신 <b>얼마나 넘겼는지</b>를 앞세운다. 뒤에 선 잡들의 ETA 도 같이 밀리는 게 정상이고, 그 잡들엔 툴팁 <code>waiting on an overdue job</code>.</dd></dl></div></article>
+
+    <article class="spec" id="c21" data-for="21"><div class="num">21</div><div><div class="area">variant</div><h3>모바일 카드</h3>
+      <dl><dt>보여주는 것</dt><dd>720px 미만에서 표를 카드로. 1줄: 순번·상태·키·ETA. 2줄: sha·요청자·대기/경과. 3줄: 그룹 대기나 진행 머리(<code>step 5/8 · test</code>). 타임라인은 카드를 탭해야 펼친다.</dd>
+      <dt>규칙</dt><dd>폰에서 「내 잡이 몇 번째고 언제 끝나나」가 첫 줄에 있어야 한다. 호스트 패널은 막대 세 개만.</dd></dl></div></article>
+
+    <article class="spec" id="c22" data-for="22"><div class="num">22</div><div><div class="area">variant</div><h3>큐 조회 실패</h3>
+      <dl><dt>보여주는 것</dt><dd><code>queue: null</code> + <code>queue_error</code> 면 표 자리에 빨간 띠 <code>Queue unavailable — &lt;error&gt;</code>. 최근 완료·호스트는 각자 살아 있으면 그대로 그린다(섹션별 독립 실패).</dd>
+      <dt>규칙</dt><dd>fail-open 금지의 핵심 케이스. 「0 jobs」로 그리는 순간 사람은 큐가 비었다고 믿는다.</dd></dl></div></article>
+  </div>
+
+  <h2>4. 이 화면이 정한 상호작용 규칙</h2>
+  <ul class="qa">
+    <li><b>갱신</b>: 처음에 <code>GET /api/status</code> 한 번, 이후 <code>GET /events</code>(SSE)로 큐·진행·호스트 이벤트를 받아 부분 갱신. 경과·대기·나이는 클라이언트 시계로 1초마다 올리고 서버 값이 오면 덮어쓴다.</li>
+    <li><b>정렬·필터</b>: 큐는 상태(running → uploading/queued) → 순번 고정. 필터 없음. 최근 완료도 시간 역순 고정. 검색·필터는 M2 범위 밖.</li>
+    <li><b>펼침</b>: 실행 중 행은 전부 자동 펼침. 사용자가 접으면 그 잡은 접힌 채 유지(localStorage). 대기 행은 펼칠 것이 없다.</li>
+    <li><b>권한</b>: 보기는 토큰 없이. 로그 tail·로그·취소만 토큰. 토큰은 localStorage, URL 금지, 화면엔 이름만.</li>
+    <li><b>실패 표시</b>: 섹션마다 독립 — 큐(22)·호스트(hosts_error)·연결(18) 이 따로 실패하고 나머지는 계속 보인다. 실패와 빈 값은 항상 다른 모양.</li>
+    <li><b>시간</b>: 모든 시각은 UTC 로 받아 3 번 시간대로 그린다. 상대 시간(<code>4s ago</code>)은 브라우저 시계 기준.</li>
+  </ul>
+
+  <h2>5. PLAN 반영 제안</h2>
+  <ul class="qa">
+    <li><code>/api/status</code> 의 <code>log_tail</code> 은 토큰이 있는 요청에만 싣고 없으면 <code>null</code> 로 한다(13). 「로그는 항상 토큰」 규칙과 스키마 예시가 지금은 어긋난다.</li>
+    <li><code>GET /api/whoami</code> 라우트를 추가한다(4). 토큰 → <code>{name, admin}</code>. 클라이언트 <code>rcm check</code> 도 같은 걸 쓴다.</li>
+    <li><code>server.workers[]</code> 를 스키마에 넣는다(1). 지금 예시엔 있지만 본문 설명이 없다.</li>
+    <li>uploading 잡의 수신 바이트를 <code>source.received_bytes</code> 로 싣고, 업로드가 끊긴 잡의 정리 시간(5분)을 설정에 둔다(6).</li>
+    <li>이 화면은 M2 를 <b>읽기 전용 + 토큰 액션</b>으로 정의한다. 잡 상세(로그 서랍)는 별도 와이어프레임에서 그린다.</li>
+  </ul>
+
+  <h2>6. 오너에게 묻는 것</h2>
+  <ul class="qa">
+    <li>레인 1 인 서버(지금의 Mac mini)에서는 1 번 워커 표시와 11 번 그룹 대기 열이 노이즈다. 레인 1 이면 워커 필을 하나로 접고 그룹 열은 숨기는 것으로 가도 되나?</li>
+    <li>실행 중 행이 여러 개일 때 전부 펼치는 게 맞나, 첫 번째만 펼칠까? (제안: 전부, 접힘은 기억)</li>
+    <li>최근 완료는 「8건」인가 「24시간」인가? (제안: 8건, 서버 설정 <code>recent_count</code>)</li>
+    <li>토큰 입력(4·13)을 M2 에 넣을지, M2 는 읽기 전용으로 끝내고 로그·취소는 CLI 로 두고 M3 에서 넣을지. (제안: M2 에 넣는다 — 폰에서 취소하고 싶을 때가 있다)</li>
+  </ul>
+</div>
+
+<script>
+(function () {
+  var GUTTER_BADGE_X = 22;   // .badge left
+  function q(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+
+  function layout(container) {
+    var svg = container.querySelector('svg.lines');
+    var gutter = container.querySelector('.gutter');
+    var crect = container.getBoundingClientRect();
+    var W = container.clientWidth, H = container.clientHeight;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.setAttribute('width', W); svg.setAttribute('height', H);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    gutter.innerHTML = '';
+    var gx = W - 76 + GUTTER_BADGE_X + 13;  // badge center x
+    var items = q('[data-c]', container).map(function (el) {
+      var r = el.getBoundingClientRect();
+      return { el: el, n: el.getAttribute('data-c'), ax: r.right - crect.left, ay: r.top - crect.top + 3 };
+    });
+    items.sort(function (a, b) { return a.ay - b.ay || a.ax - b.ax; });
+    var last = -1e9;
+    items.forEach(function (it) { it.by = Math.max(it.ay, last + 30); last = it.by; });
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.className = 'badge'; b.type = 'button'; b.textContent = it.n; b.style.top = it.by + 'px';
+      b.setAttribute('aria-label', '기획 항목 ' + it.n);
+      b.dataset.n = it.n;
+      gutter.appendChild(b);
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      var elbowX = gx - 26;
+      p.setAttribute('points', (it.ax + 3) + ',' + it.ay + ' ' + elbowX + ',' + it.ay + ' ' + (gx - 13) + ',' + it.by);
+      p.setAttribute('class', 'lead'); p.dataset.n = it.n;
+      svg.appendChild(p);
+      var d = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      d.setAttribute('cx', it.ax + 3); d.setAttribute('cy', it.ay); d.setAttribute('r', 3); d.setAttribute('class', 'dot');
+      svg.appendChild(d);
+    });
+  }
+
+  function setOn(n, on) {
+    q('[data-c="' + n + '"]').forEach(function (el) { el.classList.toggle('hl', on); });
+    q('.badge').forEach(function (b) { if (b.dataset.n === n) b.classList.toggle('on', on); });
+    q('.lead').forEach(function (l) { if (l.dataset.n === n) l.classList.toggle('on', on); });
+    q('.spec[data-for="' + n + '"]').forEach(function (s) { s.classList.toggle('on', on); });
+  }
+
+  function wire() {
+    document.addEventListener('mouseover', function (e) {
+      var t = e.target.closest('.badge, .spec, [data-c]'); if (!t) return;
+      var n = t.dataset.n || t.dataset.for || t.getAttribute('data-c'); if (n) setOn(n, true);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var t = e.target.closest('.badge, .spec, [data-c]'); if (!t) return;
+      var n = t.dataset.n || t.dataset.for || t.getAttribute('data-c'); if (n) setOn(n, false);
+    });
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('.badge'); if (!b) return;
+      var s = document.getElementById('c' + b.dataset.n); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }
+
+  function all() { q('.annot').forEach(layout); }
+  wire();
+  all();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(all);
+  window.addEventListener('load', all);
+  var t; window.addEventListener('resize', function () { clearTimeout(t); t = setTimeout(all, 80); });
+})();
+</script>
+</body>
+</html>
