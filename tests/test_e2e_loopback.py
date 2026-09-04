@@ -97,7 +97,7 @@ class ServerProc:
             stdout=self.log.open("ab"),
             stderr=subprocess.STDOUT,
         )
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):

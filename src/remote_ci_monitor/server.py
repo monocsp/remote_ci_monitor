@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -805,6 +806,14 @@ class RcmHTTPServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.app = app
         self.slots = threading.BoundedSemaphore(app.config.server.max_concurrent_requests)
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind 는 socket.getfqdn() 으로 역방향 DNS 를 조회한다 — macOS 에서
+        # 수십 초 멈출 수 있다(CI 에서 실측). 이름은 쓰지 않으므로 조회를 건너뛴다.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # 소켓 오류 스택을 stderr 에 쏟지 않는다(debug 에만)
