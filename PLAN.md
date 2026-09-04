@@ -24,6 +24,23 @@
 - README 는 영어로 쓴다(사용자층이 한국어 팀 밖으로 열린다). 이 계획서 같은 내부 문서는 한국어여도 된다.
 - 시크릿(GitHub 토큰, 수집기 공유 토큰)은 환경변수나 설정 파일로만 받고 절대 커밋하지 않는다. `.gitignore` 와 gitleaks 류 검사를 CI 에 건다.
 
+## 브랜치 정책 (2026-09-04 적용 — GitHub 룰셋으로 강제)
+
+브랜치는 `main`(릴리스)과 `dev`(통합) 둘이 상시 존재한다. 규칙은 문서가 아니라 GitHub 룰셋과 워크플로가 막는다. 관리자도 bypass 없다.
+
+| 규칙 | 강제 수단 |
+|---|---|
+| `main`·`dev` 에 직접 커밋·push 불가. 강제 push·삭제도 불가 | 룰셋 `main — PR only, from dev, checks required` · `dev — PR only` 의 `pull_request` · `non_fast_forward` · `deletion` |
+| `main` 은 **이 레포의 `dev`** 에서 보낸 PR 로만 머지 | `.github/workflows/pr-policy.yml` 의 `main-from-dev-only` 잡을 main 룰셋 필수 체크로 지정 |
+| `dev` 는 PR 로만 받는다(feature 브랜치 → dev) | dev 룰셋 `pull_request` |
+| `main` 으로 올라가려면 CI 가 전부 통과 | `.github/workflows/ci.yml` 의 `test` 잡을 main 룰셋 필수 체크로 지정. M0 에서 pytest · ruff · 시크릿 스캔으로 채운다 |
+| `dev` → `main` 은 merge commit 만 허용 | main 룰셋 `allowed_merge_methods: ["merge"]`. squash · rebase 는 main 과 dev 의 히스토리를 갈라놓아 다음 PR 부터 꼬인다 |
+
+- 승인 수는 0 이다(혼자 하는 레포). 리뷰어가 생기면 룰셋에서 올린다.
+- 필수 체크는 **잡 이름**으로 잡힌다. `test` · `main-from-dev-only` 를 바꾸면 룰셋도 같이 바꿔야 한다.
+- 필수 체크를 더하거나 dev 에도 걸려면: `gh api repos/{owner}/{repo}/rulesets` 로 룰셋 id 를 찾아 `required_status_checks` 항목을 고친다.
+- 일상 흐름: `git switch dev && git pull` → `git switch -c feat/<topic>` → 작업 · 커밋 → `gh pr create --base dev` → 머지. 릴리스는 `gh pr create --base main --head dev`.
+
 ## 무엇을 보여주나
 
 | 항목 | 출처 | 비고 |
@@ -99,7 +116,8 @@ collector ──push(JSON, N초)──▶  server ──/api/status──▶  we
   3. 순수 계산 모듈(큐 FIFO · 잡 실행시간 중앙값 · 잔여 · 스텝 진행률 · 호스트 자원 파서) + 픽스처 테스트.
      PLAN.md 의 「jobs API 실측 함정」 여섯 개를 각각 테스트 하나로 잠근다.
   4. `rcm top`(터미널 한 컷)과 `rcm serve`(`/api/status` JSON). 둘 다 같은 스키마에서 그린다.
-  5. CI: 테스트 · ruff · 시크릿 스캔. public 레포라 GitHub-hosted 러너를 써도 된다.
+  5. CI: 테스트 · ruff · 시크릿 스캔. `.github/workflows/ci.yml` 의 `test` 잡(자리표시자)을 채워라 —
+     잡 이름은 main 룰셋의 필수 체크라 바꾸지 마라. public 레포라 GitHub-hosted 러너를 써도 된다.
 
 지킬 것:
   - PLAN.md 「반드시 지킬 것 — 이식성」을 위반하는 코드는 쓰지 마라. 특정 머신·계정·팀 규약을
@@ -108,6 +126,8 @@ collector ──push(JSON, N초)──▶  server ──/api/status──▶  we
   - 순수 계산과 I/O 를 모듈로 갈라라. 순수 모듈은 픽스처 테스트가 있어야 하고, 테스트가 실제로
     빨개지는지 뮤테이션 하나로 확인한 뒤 「검증됨」이라고 말해라.
   - ⛔ 결정 항목은 PLAN.md 의 기본값으로 진행하고, 기본값에서 벗어나야 할 이유가 생기면 그때 물어라.
+  - 브랜치 정책(PLAN.md 「브랜치 정책」): main · dev 에 직접 커밋 · push 하지 마라 — 룰셋이 막는다.
+    dev 에서 feature 브랜치를 파서 작업하고 dev 로 PR 을 보내라. main 은 dev → main PR 로만 올린다.
   - README 는 영어, 커밋 메시지는 Conventional Commits.
 
 끝나면: 무엇을 만들었는지, 테스트가 몇 개이고 어떤 뮤테이션으로 확인했는지, M1 에서 먼저 정해야 할 것이

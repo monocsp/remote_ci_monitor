@@ -1,0 +1,27 @@
+# main 브랜치로 오는 PR 의 출처를 검사한다.
+# 이 잡(main-from-dev-only)은 main 룰셋의 필수 체크다. 잡 이름을 바꾸면 룰셋도 같이 바꿔야 한다.
+name: PR policy
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  main-from-dev-only:
+    name: main-from-dev-only
+    runs-on: ubuntu-latest
+    steps:
+      - name: main 은 이 레포의 dev 에서 보낸 PR 만 받는다
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REPO" != "$BASE_REPO" ] || [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::main 브랜치는 이 레포의 dev 브랜치에서 보낸 PR 로만 머지할 수 있다. (현재 출처: $HEAD_REPO:$HEAD_REF)"
+            exit 1
+          fi
+          echo "OK: $HEAD_REPO:$HEAD_REF -> main"
