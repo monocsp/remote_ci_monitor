@@ -70,13 +70,16 @@
     var p = partsIn(t, tz);
     return p.hour + ":" + p.minute + ":" + p.second;
   }
-  function fmtAgo(seconds) {
+  // 나이·멈춘 시간은 거칠게(목업 4절): 60초 미만은 초, 그 위는 분·시를 내림. fmtAgo 와 Reason 의
+  // 「upload stalled 2m」·「no output for 4m」이 같은 눈금을 쓴다.
+  function fmtCoarse(seconds) {
     if (!isNum(seconds)) return DASH;
     var s = Math.max(0, Math.round(seconds));
-    if (s < 60) return s + "s ago";
-    if (s < 3600) return Math.floor(s / 60) + "m ago";
-    return Math.floor(s / 3600) + "h ago";
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    return Math.floor(s / 3600) + "h";
   }
+  function fmtAgo(seconds) { return isNum(seconds) ? fmtCoarse(seconds) + " ago" : DASH; }
   function fmtCountdown(seconds) {
     if (!isNum(seconds)) return DASH;
     if (seconds <= 0) return "now";
@@ -90,6 +93,15 @@
     return Math.round(n) + " B";
   }
   function fmtMb(n) { return isNum(n) ? Math.round(n) + " MB" : DASH; }
+  // 「30 / 48 MB」 — 단위는 한 번만(목업 11·31). 눈금은 total(없으면 received) 기준, 모르는 쪽은 —
+  function fmtBytesPair(received, total) {
+    var ref = isNum(total) ? total : received;
+    if (!isNum(ref)) return DASH + " / " + DASH;
+    var div = ref >= 5e8 ? 1e9 : ref >= 1e6 ? 1e6 : ref >= 1e3 ? 1e3 : 1;
+    var unit = div === 1e9 ? "GB" : div === 1e6 ? "MB" : div === 1e3 ? "KB" : "B";
+    var one = function (n) { return !isNum(n) ? DASH : div === 1e9 ? (n / div).toFixed(1) : String(Math.round(n / div)); };
+    return one(received) + " / " + one(total) + " " + unit;
+  }
   // 메모리·GPU 메모리는 GiB 로 세고 라벨은 GB (Activity Monitor · rcm top 과 같다). 업로드 크기는 fmtBytes(십진).
   function fmtMemory(n) {
     if (!isNum(n)) return DASH;
@@ -105,8 +117,9 @@
     return n + suf;
   }
   function truncate(label, n) {
+    if (label == null) return DASH;
     n = n || 40;
-    var s = label == null ? "" : String(label);
+    var s = String(label);
     return s.length <= n ? s : s.slice(0, n - 1) + "…";
   }
   function stateWord(state) { return state === "timed_out" ? "timed out" : (state || "unknown"); }
@@ -132,6 +145,17 @@
     return t == null || !isNum(nowMs) ? null : (t - nowMs) / 1000;
   }
 
+  // 서버는 cancel.by · cancelled_by 에 토큰 이름을 쓴다. 요청자·합류자와 같으면 그 라벨을 보인다
+  // (목업 30 「SIGTERM sent by alice@laptop」), 아니면 이름 그대로(macmini-admin · server).
+  function personLabel(row, name) {
+    if (!name) return DASH;
+    var req = row && row.requester;
+    if (req && req.name === name) return req.label || name;
+    var js = row && Array.isArray(row.joiners) ? row.joiners : [];
+    for (var i = 0; i < js.length; i++) if (js[i] && js[i].name === name) return js[i].label || name;
+    return name;
+  }
+
   // ── Reason 열 (항목 11) ──
   function reasonText(row, a, b) {
     var nowMs = isNum(a) ? a : (isNum(b) ? b : null);
@@ -149,26 +173,30 @@
         var t = "waiting for lane";
         var busy = busyCount(status), lanes = laneCount(status);
         if (isNum(busy) && isNum(lanes)) t += " · " + busy + "/" + lanes + " busy";
-        if (isNum(row.ahead_job_id)) { t += " · behind #" + row.ahead_job_id; links.push(row.ahead_job_id); }
+        if (isNum(row.ahead_job_id)) { t += " · behind #" + row.ahead_job_id; links.push({ jobId: row.ahead_job_id }); }
         if (isNum(est.wait_seconds)) t += " · frees in " + fmtDuration(est.wait_seconds);
         out.text = t; break;
       }
       case "blocked_by_group": {
         var bb = row.blocked_by || {};
-        var t2 = "⛓ blocked by " + (isNum(bb.job_id) ? "#" + bb.job_id : DASH) + " · " + (bb.group || row.concurrency_group || DASH);
-        if (isNum(bb.remaining_seconds)) t2 += " · frees in " + fmtDuration(bb.remaining_seconds);
-        if (isNum(bb.job_id)) links.push(bb.job_id);
+        // 조각은 남기고 모르는 숫자만 —(「frees in —」): 막는 잡이 있는 한 「언제 풀리나」는 늘 묻는 질문이다
+        var t2 = "⛓ blocked by " + (isNum(bb.job_id) ? "#" + bb.job_id : DASH) + " · " + (bb.group || row.concurrency_group || DASH) + " · frees in " + fmtDuration(bb.remaining_seconds);
+        if (isNum(bb.job_id)) links.push({ jobId: bb.job_id });
         out.text = t2; out.actionable = true; out.cls = "blocked"; break;
       }
       case "uploading":
-        out.text = "uploading · " + fmtBytes(src.received_bytes) + " / " + fmtBytes(src.bytes); break;
+        out.text = "uploading · " + fmtBytesPair(src.received_bytes, src.bytes); break;
       case "upload_stalled": {
         var since = secondsSince(src.last_received_at, nowMs);
-        out.text = "upload stalled " + (isNum(since) ? fmtDuration(since) : DASH) + " · " + fmtBytes(src.received_bytes) + " / " + fmtBytes(src.bytes);
+        out.text = "upload stalled " + fmtCoarse(since) + " · " + fmtBytesPair(src.received_bytes, src.bytes);
         out.actionable = true; out.cls = "stalled"; break;
       }
       case "materializing":
-        out.text = "preparing workspace" + (isNum(src.bytes) ? " · unpacking " + fmtBytes(src.bytes) : ""); break;
+        // 목업 33: tree 는 「unpacking 48 MB」, git_ref 는 「fetching dev」, 둘 다 모르면 조각 없이
+        out.text = "preparing workspace";
+        if (src.mode === "git_ref") { if (src.ref) out.text += " · fetching " + src.ref; }
+        else if (isNum(src.bytes)) out.text += " · unpacking " + fmtBytes(src.bytes);
+        break;
       case "overdue": {
         var over = isNum(est.elapsed_seconds) && isNum(est.expected_seconds) ? est.elapsed_seconds - est.expected_seconds : null;
         out.text = "over by " + fmtDuration(over) + " · expected " + fmtDuration(est.expected_seconds);
@@ -179,13 +207,13 @@
         if (isNum(est.elapsed_seconds) && isNum(est.expected_seconds) && est.expected_seconds > 0) t3 += " · " + Math.floor(est.elapsed_seconds / est.expected_seconds) + "× expected";
         var lo = row.progress && row.progress.last_output_at;
         var quiet = secondsSince(lo, nowMs);
-        if (isNum(quiet)) t3 += " · no output for " + fmtDuration(quiet);
+        if (isNum(quiet)) t3 += " · no output for " + fmtCoarse(quiet);
         out.text = t3; out.actionable = true; out.cls = "stuck"; break;
       }
       case "cancelling": {
         var c = row.cancel || {};
         var kill = secondsUntil(c.kill_at, nowMs);
-        out.text = "SIGTERM sent by " + (c.by || DASH) + " · kill " + fmtCountdown(kill); break;
+        out.text = "SIGTERM sent by " + personLabel(row, c.by) + " · kill " + fmtCountdown(kill); break;
       }
       case "paused": out.text = "paused"; out.actionable = true; break;
       case "not_scheduled": out.text = "not scheduled"; out.actionable = true; break;
@@ -259,22 +287,26 @@
     return Array.isArray(row.joiners) && row.joiners.some(function (j) { return j && j.name === me; });
   }
 
-  function yourJobs(status, me, tz, nowMs) {
+  // 시각은 status.display_timezone · generated_at 기준(§2 시그니처가 (status, me) 라 다른 데서 올 수 없다).
+  // text 에 잡 id 는 넣지 않는다 — id 는 렌더 층이 버튼으로 따로 그린다(목업 23 「<b>#412</b> running …」).
+  function yourJobs(status, me) {
     if (!me) return { kind: "no_token", lines: [], more: 0 };
     var q = queueOf(status);
     if (!Array.isArray(q)) return { kind: "unknown", lines: [], more: 0 };
+    var tz = status.display_timezone || undefined;
+    var nowMs = parseIso(status.generated_at);
     var mine = sortQueue(q.filter(function (r) { return isMine(r, me); }));
     if (!mine.length) return { kind: "none", lines: [], more: 0 };
     var lines = mine.slice(0, 2).map(function (row) {
+      var busy = row.state === "running" || row.state === "cancelling";
       var eta = etaText(row, tz, nowMs);
-      var t = "#" + row.id + " ";
-      if (row.state === "running" || row.state === "cancelling") t += stateWord(row.state);
-      else if (isNum(row.position)) t += ordinal(row.position) + " in line";
-      else t += stateWord(row.state);
-      t += " · ETA " + eta.clock + (eta.rel ? " · " + eta.rel : "");
-      if (!(row.state === "running" || row.state === "cancelling")) {
-        var r = reasonText(row, status, nowMs);
-        t += " · " + r.text.replace(/^⛓ /, "");
+      var t;
+      if (busy) t = stateWord(row.state) + " · ETA " + eta.clock + (eta.rel ? " · " + eta.rel : "");
+      else {
+        // 대기 줄은 짧게: 순번 · ETA · 이유의 첫 조각(「2nd in line · ETA 09:58 · waiting for lane」). 그룹 대기는 ~시각
+        t = (isNum(row.position) ? ordinal(row.position) + " in line" : stateWord(row.state)) + " · ETA " + (eta.rel && /^after /.test(eta.clock) ? eta.rel : eta.clock);
+        var brief = reasonText(row, nowMs, status).text.replace(/^⛓ /, "").split(" · ")[0];
+        if (brief && brief !== "unknown") t += " · " + brief;
       }
       var joined = Array.isArray(row.joiners) ? row.joiners.length : 0;
       if (joined) t += " · +" + joined + " joined";
@@ -283,22 +315,26 @@
     return { kind: "list", lines: lines, more: Math.max(0, mine.length - 2) };
   }
 
+  // {cpu, mem, gpu, load, verdict} — 퍼센트는 정수(목업 4절), load 는 「3.5 / 10」 문자열(§2).
+  // 85% 이상이면 busy(아는 값이 이미 바쁘다고 말하므로 partial 보다 우선), 하나라도 모르면 partial, 셋 다 모르면 unknown.
+  // load·cores 는 판정에 안 들어간다 — 텍스트만 —.
   function hostPressure(host) {
-    if (!host) return { verdict: "no_sample", cpu: null, mem: null, gpu: null, load: null, cores: null };
-    var cpu = host.cpu && isNum(host.cpu.busy) ? host.cpu.busy : null;
+    if (!host) return { cpu: null, mem: null, gpu: null, load: DASH, verdict: "no_sample" };
+    var pct = function (v) { return isNum(v) ? Math.round(v) : null; };
+    var cpu = pct(host.cpu && host.cpu.busy);
     var mem = host.memory && isNum(host.memory.used_bytes) && isNum(host.memory.total_bytes) && host.memory.total_bytes > 0
-      ? host.memory.used_bytes / host.memory.total_bytes * 100 : null;
-    var gpu = host.gpu && isNum(host.gpu.util_pct) ? host.gpu.util_pct : null;
-    var load = Array.isArray(host.load) && isNum(host.load[0]) ? host.load[0] : null;
+      ? pct(host.memory.used_bytes / host.memory.total_bytes * 100) : null;
+    var gpu = pct(host.gpu && host.gpu.util_pct);
+    var load1 = Array.isArray(host.load) && isNum(host.load[0]) ? host.load[0] : null;
+    var load = isNum(load1) ? load1.toFixed(1) + " / " + (isNum(host.cores) ? host.cores : DASH) : DASH;
     var vals = [cpu, mem, gpu];
     var known = vals.filter(isNum);
     var verdict;
     if (!known.length) verdict = "unknown";
-    else if (known.length < vals.length) verdict = "partial";
     else if (known.some(function (v) { return v >= 85; })) verdict = "busy";
+    else if (known.length < vals.length) verdict = "partial";
     else verdict = "fine";
-    if (verdict === "partial" && known.some(function (v) { return v >= 85; })) verdict = "busy";
-    return { verdict: verdict, cpu: cpu, mem: mem, gpu: gpu, load: load, cores: isNum(host.cores) ? host.cores : null };
+    return { cpu: cpu, mem: mem, gpu: gpu, load: load, verdict: verdict };
   }
 
   function queueHeader(status, nowMs) {
@@ -320,12 +356,15 @@
     return t;
   }
 
+  // running → cancelling → 대기. 실행 중은 레인 순(목업 표·머리 필이 lane 1 → 2), 대기는 position 순, 동률은 id.
   function sortQueue(rows) {
+    if (!Array.isArray(rows)) return [];
     function rank(r) { return r.state === "running" ? 0 : r.state === "cancelling" ? 1 : 2; }
     return rows.slice().sort(function (a, b) {
       var d = rank(a) - rank(b);
       if (d) return d;
-      var pa = isNum(a.position) ? a.position : 1e9, pb = isNum(b.position) ? b.position : 1e9;
+      var ka = rank(a) < 2 ? a.lane : a.position, kb = rank(b) < 2 ? b.lane : b.position;
+      var pa = isNum(ka) ? ka : 1e9, pb = isNum(kb) ? kb : 1e9;
       if (pa !== pb) return pa - pb;
       return (a.id || 0) - (b.id || 0);
     });
@@ -350,17 +389,24 @@
     return pills;
   }
 
-  function headerNote(status, prev, tz) {
-    if (!status || !prev) return null;
+  // {kind: "reload"|"restart", text} | null — DOM 은 kind 로 띠 색을 고르고, 공개 headerNote 는 §2 대로 문자열만 준다.
+  // 버전·스키마 변화가 재시작보다 우선. uptime 이 어느 쪽이든 null 이면 재시작을 주장하지 않는다. prev 없으면(첫 조회) null.
+  function headerNoteKind(status, nowMs, prev) {
+    if (!status || !prev || typeof prev !== "object") return null;
     if (status.schema_version !== prev.schema_version || (status.server && prev.server && status.server.version !== prev.server.version)) {
       return { kind: "reload", text: "UI out of date — reload" };
     }
     if (status.server && prev.server && isNum(status.server.uptime_seconds) && isNum(prev.server.uptime_seconds) && status.server.uptime_seconds < prev.server.uptime_seconds) {
       var startMs = parseIso(status.generated_at);
-      var at = startMs != null ? fmtClock(new Date(startMs - status.server.uptime_seconds * 1000).toISOString(), tz) : DASH;
+      var tz = status.display_timezone || undefined;
+      var at = startMs != null ? fmtClock(new Date(startMs - status.server.uptime_seconds * 1000).toISOString(), tz, nowMs) : DASH;
       return { kind: "restart", text: "Server restarted at " + at + " — running jobs were marked lost" };
     }
     return null;
+  }
+  function headerNote(status, nowMs, prev) {
+    var note = headerNoteKind(status, nowMs, prev);
+    return note ? note.text : null;
   }
 
   // ── 진행 (항목 12) · 최근 (항목 14) ──
@@ -399,8 +445,7 @@
     else pill = stateWord(state);
     var summary = job.summary || "";
     if (state === "cancelled" && !job.started_at) {
-      var who = job.cancelled_by;
-      if (who && job.requester && job.requester.name === who) who = job.requester.label;
+      var who = job.cancelled_by ? personLabel(job, job.cancelled_by) : null;
       summary = "before start" + (who ? " · by " + who : "");
     } else if (state === "lost") {
       summary = job.summary || "lost";
@@ -416,7 +461,8 @@
     };
   }
   function rerunCommand(job) {
-    var cmd = "rcm run " + (job.preset || DASH);
+    if (!job || !job.preset) return DASH;  // 빈 명령을 복사하게 두지 않는다
+    var cmd = "rcm run " + job.preset;
     var inputs = job.inputs || {};
     Object.keys(inputs).forEach(function (k) {
       var v = inputs[k];
@@ -430,7 +476,7 @@
     var parts = [];
     for (var i = 0; i < tr.length; i++) {
       var t = tr[i];
-      var seg = t.state;
+      var seg = stateWord(t.state);
       if (t.state === "queued") {
         var next = tr[i + 1];
         if (next && next.state === "running") {
@@ -485,8 +531,9 @@
 
   var rcm = {
     DASH: DASH, esc: esc, fmtDuration: fmtDuration, fmtClock: fmtClock, fmtClockSeconds: fmtClockSeconds, fmtAgo: fmtAgo,
-    fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtMemory: fmtMemory, fmtMb: fmtMb, fmtPct: fmtPct, ordinal: ordinal, truncate: truncate,
-    stateWord: stateWord, stateGlyph: stateGlyph, reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
+    fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtMb: fmtMb, fmtPct: fmtPct,
+    ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
+    reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, transitionsLine: transitionsLine,
@@ -708,7 +755,7 @@
     if (state.skewUnknown) { skew.hidden = false; skew.textContent = "clock unknown"; }
     else if (Math.abs(state.skewMs) > 30000) { skew.hidden = false; skew.textContent = "clock " + (state.skewMs > 0 ? "+" : "-") + fmtDuration(Math.abs(state.skewMs) / 1000); }
     else skew.hidden = true;
-    var note = headerNote(state.status, state.prev, tz());
+    var note = headerNoteKind(state.status, now(), state.prev);
     var noteEl = $("#banner-note");
     if (note && note.kind === "reload") {
       if (!sessionStorage.getItem("rcm.reloaded")) { sessionStorage.setItem("rcm.reloaded", "1"); location.reload(); return; }
@@ -764,12 +811,12 @@
     var p = pool0(st);
     var lost = state.conn.mode === "lost";
     // 23
-    var yj = yourJobs(st, state.me, tz(), now());
+    var yj = yourJobs(st, state.me);
     var y;
     if (yj.kind === "no_token") y = '<span class="muted">Add a token to highlight your jobs</span>';
     else if (yj.kind === "unknown") y = '<span class="muted">unknown — queue unavailable</span>';
     else if (yj.kind === "none") y = '<span class="muted">No jobs of yours in the queue</span>';
-    else y = yj.lines.map(function (l) { return jl(l.jobId, "#" + l.jobId) + esc(l.text.replace(/^#\d+ /, " ")); }).join("<br>") + (yj.more ? '<br><span class="muted">and ' + yj.more + " more</span>" : "");
+    else y = yj.lines.map(function (l) { return jl(l.jobId, "#" + l.jobId) + " " + esc(l.text); }).join("<br>") + (yj.more ? '<br><span class="muted">and ' + yj.more + " more</span>" : "");
     $("[data-yours]").innerHTML = (lost ? '<span class="muted">last known: </span>' : "") + y;
     // 24
     var nm = notMoving(st, state.me);
@@ -791,7 +838,7 @@
       lab.textContent = "Host pressure · sampled " + fmtAgo(age);
       var mark = function (v) { return isNum(v) ? (v >= 85 ? '<b class="warn">' + fmtPct(v) + "</b>" : "<b>" + fmtPct(v) + "</b>") : "<b>" + DASH + "</b>"; };
       var verdict = hp.verdict === "fine" ? '<span class="ok">· fine</span>' : hp.verdict === "busy" ? '<span class="warn">· busy</span>' : hp.verdict === "partial" ? '<span class="muted">· partial</span>' : '<span class="muted">· unknown</span>';
-      h = "CPU " + mark(hp.cpu) + " · Mem " + mark(hp.mem) + " · GPU " + mark(hp.gpu) + "<br>load " + (isNum(hp.load) ? hp.load.toFixed(1) : DASH) + " / " + (isNum(hp.cores) ? hp.cores : DASH) + " " + verdict + (stale ? ' <span class="stale-badge">stale ' + fmtDuration(age) + "</span>" : "");
+      h = "CPU " + mark(hp.cpu) + " · Mem " + mark(hp.mem) + " · GPU " + mark(hp.gpu) + "<br>load " + esc(hp.load) + " " + verdict + (stale ? ' <span class="stale-badge">stale ' + fmtDuration(age) + "</span>" : "");
     }
     $("[data-pressure]").innerHTML = h;
   }
@@ -871,8 +918,9 @@
       (joiners.length ? '<button type="button" class="joiners" title="also waiting: ' + esc(joiners.map(function (j) { return j.label || j.name; }).join(", ")) + '">+' + joiners.length + "</button>" : "");
     if (mine && req.name !== state.me) requester += '<span class="you">you joined</span>';
     var r = reasonText(row, st, now());
-    var reasonHtml = r.text;
-    r.links.forEach(function (id) { reasonHtml = reasonHtml.replace("#" + id, '<button type="button" class="jlink" data-goto="' + id + '">#' + id + "</button>"); });
+    // 이유 문구에는 서버가 준 문자열(ref · group · label)이 들어간다 — escape 한 뒤 잡 링크만 버튼으로 바꾼다
+    var reasonHtml = esc(r.text);
+    r.links.forEach(function (l) { var id = l.jobId; reasonHtml = reasonHtml.replace("#" + id, '<button type="button" class="jlink" data-goto="' + id + '">#' + id + "</button>"); });
     var reasonCell = r.cls === "blocked" ? '<span class="blocked">' + reasonHtml + "</span>" : r.cls === "stalled" ? '<span class="stalled">' + reasonHtml + "</span>" : r.cls === "stuck" ? '<span class="stuck">' + reasonHtml + "</span>" : '<span class="reason' + (r.actionable || busy ? " act" : "") + '">' + reasonHtml + "</span>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">will be cancelled by the server if it stays stalled</div>';
     if (row._cancelRequested) reasonCell += '<div class="sub">cancel requested…</div>';
