@@ -273,7 +273,9 @@ def _run_git_ref(
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
-        return USAGE_EXIT if e.status in (400, 401, 403, 413, 0) else EXIT_UNKNOWN
+        # 502 「cannot resolve」 는 ref 가 틀렸다는 확정 거절(잡 없음) — 400 과 같은 usage 2.
+        # 504 (해석 타임아웃) · 503 · 연결 오류는 결과를 모르는 것이라 3.
+        return USAGE_EXIT if e.status in (400, 401, 403, 413, 502, 0) else EXIT_UNKNOWN
     job_id = int(resp["job_id"])
     joined = bool(resp.get("joined"))
     sha = resp.get("sha")

@@ -166,6 +166,17 @@ def test_run_rejects_bad_refs_before_any_submit(git_srv, env, cwd, capsys, monke
     assert git_srv.req("GET", "/api/status")[1]["pools"][0]["queue"] == []
 
 
+def test_run_unknown_ref_is_a_usage_error_not_unknown(git_srv, env, cwd, capsys, monkeypatch):
+    """서버의 502 「cannot resolve」 는 확정 거절(잡 없음) — 400 처럼 exit 2. 3 은 「모른다」."""
+    env(git_srv)
+    snapshots = count_snapshots(monkeypatch)
+    code, out, err = run(capsys, ["run", "deploy", "--ref", "nope", "--no-wait"])
+    assert code == 2, err
+    assert "cannot resolve" in err and "'nope'" in err, err
+    assert out.strip() == "" and snapshots == []
+    assert git_srv.req("GET", "/api/status")[1]["pools"][0]["queue"] == []
+
+
 def test_run_ref_waits_and_succeeds_end_to_end(git_live, bare, env, cwd, capsys, monkeypatch):
     env(git_live)
     snapshots = count_snapshots(monkeypatch)
