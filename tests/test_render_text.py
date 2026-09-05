@@ -107,3 +107,28 @@ def test_header_shows_single_lane_as_one_worker_and_paused():
     out = text(queue=[], paused=Paused(by="admin", at=NOW))
     assert "worker busy #412" in out and "PAUSED by admin" in out
     assert "empty but paused" in out
+
+
+def test_host_line_uses_gib_and_two_decimal_load():
+    """실기(24 GB Mac mini)에서 `25.8 GB` 와 `load 6.60693359375` 가 찍혔다 — GiB 눈금·두 자리."""
+    from datetime import timedelta
+
+    from remote_ci_monitor.core.model import HostSample
+
+    host = HostSample(
+        name="macmini",
+        source="local",
+        sampled_at=NOW - timedelta(seconds=4),
+        interval_seconds=5,
+        os="darwin",
+        cores=10,
+        load=(6.60693359375, 5.77, 3.36),
+        cpu={"user": 44.2, "sys": 12.7, "idle": 43.1, "busy": 56.9},
+        memory={"total_bytes": 24 * 2**30, "used_bytes": 15_100_000_000, "compressed_bytes": None},
+        gpu=None,
+        gpu_note="disabled",
+    )
+    out = text(queue=[], hosts=[host])
+    assert "load 6.61 / 10 cores" in out, out
+    assert "mem 14.1 GB / 24.0 GB" in out, out  # 1e9 로 나누면 25.8 GB 가 되어 기계 사양과 어긋난다
+    assert "GPU —" in out

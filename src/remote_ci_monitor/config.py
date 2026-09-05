@@ -116,6 +116,7 @@ class ClientConfig:
     server: str = ""
     token: str = ""
     label: str = ""
+    token_env: str = "RCM_TOKEN"  # 토큰을 찾은/찾을 환경변수 이름 — 안내 문구에 쓴다
     path: Path | None = None
 
 
@@ -529,6 +530,7 @@ def load_client_config(
             _check_private(found)
             cfg.token = raw["token"]
         token_env = raw.get("token_env", "RCM_TOKEN")
+        cfg.token_env = token_env or "RCM_TOKEN"
         if not cfg.token and token_env and env.get(token_env):
             cfg.token = env[token_env]
         cfg.path = found

@@ -19,3 +19,6 @@ rcm.toml
 
 # OS
 .DS_Store
+
+# 실기 검증 스크래치 (커밋하지 않는다)
+.verify/

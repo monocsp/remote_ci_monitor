@@ -166,3 +166,9 @@ def test_client_token_in_file_requires_600(tmp_path):
     assert "chmod 600" in str(e.value)
     os.chmod(p, 0o600)
     assert load_client_config(p, environ={}).token == "abc"
+
+
+def test_client_config_remembers_token_env_name(tmp_path):
+    p = write(tmp_path, 'server = "http://mini:8787"\ntoken_env = "MY_TOK"\n', "client.toml")
+    cfg = load_client_config(p, environ={})
+    assert cfg.token == "" and cfg.token_env == "MY_TOK"  # `rcm check` 안내가 이 이름을 말한다

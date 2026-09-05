@@ -720,7 +720,7 @@ class App:
         p = self.store.get_paused()
         self._mark_dirty()
         self._publish_server()
-        return {"paused": {"by": p.by, "at": p.at.isoformat()} if p else None}
+        return {"paused": {"by": p.by, "at": iso(p.at)} if p else None}  # 다른 시각과 같은 Z 표기
 
     def resume(self) -> dict[str, Any]:
         self.store.clear_paused()

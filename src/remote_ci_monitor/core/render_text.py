@@ -73,7 +73,13 @@ def _pct(v: float | None) -> str:
 
 
 def _gb(b: int | None) -> str:
-    return DASH if b is None else f"{b / 1e9:.1f} GB"
+    # GiB 로 나눈다 — Activity Monitor·`free -h` 와 같은 눈금이라 24 GB 기계가 24 GB 로 보인다
+    return DASH if b is None else f"{b / 2**30:.1f} GB"
+
+
+def _load(v: float | None) -> str:
+    # os.getloadavg() 는 이진 소수(6.60693359375)라 두 자리로 자른다
+    return DASH if v is None else f"{v:.2f}"
 
 
 def _state_word(state: str) -> str:
@@ -309,10 +315,9 @@ def render(
             mem = h.get("memory") or {}
             gpu = h.get("gpu") or {}
             load = h.get("load") or [None]
-            load1 = load[0] if load[0] is not None else DASH
             cores = h.get("cores") if h.get("cores") is not None else DASH
             out.append(
-                f"host  {h.get('name')} ({age} ago{stale})  load {load1}"
+                f"host  {h.get('name')} ({age} ago{stale})  load {_load(load[0])}"
                 f" / {cores} cores · CPU {_pct(cpu)}"
                 f" · mem {_gb(mem.get('used_bytes'))} / {_gb(mem.get('total_bytes'))}"
                 f" · GPU {_pct(gpu.get('util_pct')) if gpu else DASH}"
