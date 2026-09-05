@@ -17,8 +17,10 @@ from typing import Any
 import pytest
 
 from gitrepo import HELLO, RemoteRepo, build_remote, git, install_hanging_git, isolate_git_env
+from remote_ci_monitor import gitops
 from remote_ci_monitor.gitops import (
     GitError,
+    GitTimeout,
     _mirror_lock,
     checkout,
     ensure_mirror,
@@ -214,21 +216,81 @@ def test_fetch_ref_missing_remote_raises_git_fetch_failed_without_paths(
     assert any("fatal" in line for line in lines)  # git 의 stderr 는 로그로만 나간다
 
 
-def test_fetch_ref_timeout_kills_git_and_raises(
+def test_fetch_ref_does_not_retry_other_refspecs_after_a_timeout(
+    remote: RemoteRepo, mirror: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """상한은 상한이다 — 타임아웃을 다른 refspec 으로 다시 시도하면 실제 상한이 N 배가 된다.
+    프로세스 없이 `_fetch` 를 바꿔 결정적으로 센다(실제 프로세스 kill 은 아래 테스트)."""
+    ensure_mirror(mirror, remote.url, timeout=TIMEOUT)
+    attempts: list[tuple[str, ...]] = []
+
+    def hang(mirror_: Path, url: str, refspecs: tuple[str, ...], *, prune, timeout, log):
+        attempts.append(refspecs)
+        raise GitTimeout(f"git fetch timed out after {int(timeout)}s")
+
+    monkeypatch.setattr(gitops, "_fetch", hang)
+    with pytest.raises(GitTimeout) as e:
+        fetch_ref(mirror, remote.url, "main", timeout=7, log=lambda _line: None)
+    assert "timed out after 7s" in str(e.value)
+    assert_clean_message(e.value, remote.url)
+    assert attempts == [("+refs/heads/main:refs/heads/main",)]
+
+
+def _process_gone(pid: int) -> bool:
+    """죽었거나 좀비면 True. 손자는 부모(sh)가 먼저 죽어 init 이 거둘 때까지 좀비일 수 있다."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    out = subprocess.run(
+        ["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10
+    ).stdout.strip()
+    return out == "" or out.startswith("Z")
+
+
+def test_fetch_ref_timeout_kills_git_and_its_grandchild(
     remote: RemoteRepo, mirror: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """실제 멈춘 git: 상한이 지나면 `GitTimeout` 이고 git 과 그 손자(ssh · helper 격)가 다 죽는다.
+
+    가짜 git 이 손자를 띄우고 pid 를 적을 때까지(실제 조건) 기다린 뒤 상한이 지나게 둔다 —
+    부하가 심해 `sh` 가 그 안에 못 뜨면 조용히 통과하지 않고 그 이유로 실패한다.
+    """
     lines: list[str] = []
     ensure_mirror(mirror, remote.url, timeout=TIMEOUT, log=lines.append)
-    calls = install_hanging_git(tmp_path, monkeypatch, hang_on="fetch")
+    install_hanging_git(tmp_path, monkeypatch, hang_on="fetch", grandchild=True)
+    pids_file = tmp_path / "fakebin" / "pids"
+    result: list[BaseException | None] = []
+
+    def run_fetch() -> None:
+        try:
+            fetch_ref(mirror, remote.url, "main", timeout=3.0, log=lines.append)
+        except BaseException as e:  # noqa: BLE001 — 스레드 밖으로 넘겨 단정한다
+            result.append(e)
+        else:
+            result.append(None)
+
     t0 = time.monotonic()
-    with pytest.raises(GitError) as e:
-        fetch_ref(mirror, remote.url, "main", timeout=0.5, log=lines.append)
-    assert time.monotonic() - t0 < 5
-    assert "timed out" in str(e.value)
-    assert_clean_message(e.value, str(tmp_path), remote.url)
-    # 상한은 상한이다 — 타임아웃을 다른 refspec 으로 다시 시도하면 실제 상한이 N 배가 된다
-    fetches = [c for c in calls.read_text().splitlines() if " fetch " in f" {c} "]
-    assert len(fetches) == 1
+    worker = threading.Thread(target=run_fetch)
+    worker.start()
+    while not pids_file.is_file() or len(pids_file.read_text().split()) < 2:
+        if time.monotonic() - t0 > 2.5:
+            pytest.fail("fake git did not start within 2.5 s — cannot exercise the timeout")
+        time.sleep(0.02)
+    git_pid, grandchild_pid = (int(p) for p in pids_file.read_text().split())
+    assert not _process_gone(grandchild_pid)  # 상한 전에는 살아 있다
+    worker.join(timeout=15)
+    assert not worker.is_alive() and time.monotonic() - t0 < 10
+    err = result[0]
+    assert isinstance(err, GitTimeout) and "git fetch timed out after 3s" in str(err)
+    assert_clean_message(err, str(tmp_path), remote.url)
+    deadline = time.monotonic() + 5
+    while not (_process_gone(git_pid) and _process_gone(grandchild_pid)):
+        if time.monotonic() > deadline:
+            pytest.fail(f"git {git_pid} / grandchild {grandchild_pid} survived the timeout")
+        time.sleep(0.05)
 
 
 # ── checkout ─────────────────────────────────────────────────────────────────

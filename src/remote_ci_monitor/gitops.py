@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import threading
 from collections.abc import Callable, Mapping
@@ -68,12 +69,39 @@ def _mirror_lock(mirror: Path) -> threading.Lock:
         return lock
 
 
+def _run_process(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """`subprocess.run` 과 같되, 타임아웃이면 프로세스 **그룹**을 죽인다.
+
+    `subprocess.run` 은 직접 자식(git)만 죽여서 ssh · credential helper · fetch-pack 같은
+    손자가 멈춘 원격을 붙들고 남는다. `start_new_session` 으로 git 이 세션 리더이므로 그
+    pid 의 그룹을 SIGKILL 한다(세션을 안 만든 호출은 우리 그룹일 수 있어 자식만 죽인다).
+    """
+    timeout = kwargs.pop("timeout", None)
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
+    own_group = bool(kwargs.get("start_new_session")) and hasattr(os, "killpg")
+    with subprocess.Popen(argv, **kwargs) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                if own_group:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.wait()
+            raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _run_git(
     argv: list[str],
     *,
     what: str,
     timeout: float,
-    run: RunFn = subprocess.run,
+    run: RunFn = _run_process,
     cwd: Path | None = None,
     log: LogFn | None = None,
 ) -> subprocess.CompletedProcess[str]:

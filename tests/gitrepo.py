@@ -125,22 +125,31 @@ def isolate_git_env(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(home))
 
 
-def install_hanging_git(root: Path, monkeypatch: pytest.MonkeyPatch, *, hang_on: str) -> Path:
+def install_hanging_git(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, hang_on: str, grandchild: bool = False
+) -> Path:
     """PATH 맨 앞에 가짜 `git` 을 둔다 — 부명령 `hang_on` 이면 잠들고, 나머지는 진짜 git 으로.
 
     호출마다 인자 한 줄을 돌려주는 경로(`calls.log`)에 적는다 — 재시도 횟수를 셀 수 있다.
     gitops 가 argv[0] 을 `git` 으로 두고 PATH 로 찾는다는 전제다(스펙 §1.3: `PATH` 전달).
+    `grandchild=True` 면 잠들 때 `sleep` 을 손자로 띄우고 `<자기 pid> <손자 pid>` 를
+    `fakebin/pids` 에 적는다 — 프로세스 그룹 kill 을 확인하는 데 쓴다.
     """
     real = shutil.which("git")
     assert real is not None
     bin_dir = root / "fakebin"
     bin_dir.mkdir(exist_ok=True)
     calls = bin_dir / "calls.log"
+    pids = bin_dir / "pids"
     script = bin_dir / "git"
+    if grandchild:
+        hang = f'sleep 30 & echo "$$ $!" > "{pids}"; wait; exit 0'
+    else:
+        hang = "exec sleep 30"
     script.write_text(
         "#!/bin/sh\n"
         f'echo "$*" >> "{calls}"\n'
-        f'for a in "$@"; do [ "$a" = {hang_on} ] && exec sleep 30; done\n'
+        f'for a in "$@"; do [ "$a" = {hang_on} ] && {{ {hang}; }}; done\n'
         f'exec "{real}" "$@"\n'
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
