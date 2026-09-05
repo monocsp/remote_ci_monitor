@@ -99,7 +99,9 @@ def _run_git(
         for line in stderr.strip().splitlines()[-STDERR_TAIL_LINES:]:
             log(f"[git] {line}")
     if proc.returncode != 0:
-        raise GitError(f"{what} failed (exit {proc.returncode}) — see the job log", stderr)
+        # 「잡 로그를 보라」는 stderr 가 실제로 그리로 갔을 때만 — 제출 시점(ls-remote)엔 잡이 없다
+        where = " — see the job log" if log is not None else ""
+        raise GitError(f"{what} failed (exit {proc.returncode}){where}", stderr)
     return proc
 
 

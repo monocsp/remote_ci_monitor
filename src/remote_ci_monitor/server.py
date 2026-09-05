@@ -77,7 +77,7 @@ from remote_ci_monitor.events import (
     KIND_SERVER,
     EventBus,
 )
-from remote_ci_monitor.gitops import GitError, GitTimeout, resolve_ref
+from remote_ci_monitor.gitops import STDERR_TAIL_LINES, GitError, GitTimeout, resolve_ref
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
 from remote_ci_monitor.store import Store, TokenInfo
@@ -702,6 +702,9 @@ class App:
         except GitTimeout as e:
             raise ApiError(504, f"resolving '{ref}' timed out after {timeout}s") from e
         except GitError as e:
+            # 잡이 없으니 잡 로그도 없다 — git 의 stderr(URL 이 섞일 수 있다)는 서버 로그에만 남긴다
+            for line in (e.stderr or "").strip().splitlines()[-STDERR_TAIL_LINES:]:
+                self.log(f"resolve '{ref}' in repo '{repo.name}': [git] {line}")
             raise ApiError(502, f"cannot resolve '{ref}' in repo '{repo.name}': {e}") from e
         finally:
             self._resolve_sem.release()

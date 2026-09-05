@@ -535,3 +535,24 @@ def test_job_event_stream_stays_anonymous_when_read_auth_is_none(tmp_path):
     finally:
         srv.close()
 
+@needs_git
+def test_resolve_failure_puts_git_stderr_in_the_server_log_not_the_response(tmp_path):
+    """제출 시점의 git 실패에는 잡이 없어 잡 로그도 없다 — stderr(URL 이 섞인다)는 서버 로그로만,
+    502 본문은 「잡 로그를 보라」고 하지 않고 경로도 싣지 않는다."""
+    missing = tmp_path / "missing.git"
+    srv = make_server(
+        tmp_path, GIT_PRESETS, workers=False, repos=(RepoConfig(name="app", url=str(missing)),)
+    )
+    lines: list[str] = []
+    srv.app.log = lines.append
+    try:
+        status, body = submit_ref(srv, "main")
+        assert status == 502, body
+        assert "cannot resolve 'main' in repo 'app'" in body["error"]
+        assert "see the job log" not in body["error"]
+        assert str(tmp_path) not in body["error"] and "missing.git" not in body["error"]
+        git_lines = [line for line in lines if "[git]" in line]
+        assert git_lines and any("missing.git" in line for line in git_lines), lines
+        assert srv.req("GET", "/api/status")[1]["server"]["last_error"] is None
+    finally:
+        srv.close()
