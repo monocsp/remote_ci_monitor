@@ -29,6 +29,7 @@ shell. A release wheel from the GitHub Releases page also installs with `pipx in
 
 ## Build machine (3 commands)
 
+<!-- every `rcm …` line between smoke:begin and smoke:end is executed by scripts/smoke_install.sh — keep them in sync -->
 <!-- smoke:begin -->
 ```sh
 rcm init server            # writes ~/.config/rcm/server.toml — edit presets and the bind address

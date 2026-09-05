@@ -41,7 +41,7 @@ trap cleanup EXIT
 
 # ── 0. README ↔ script: every `rcm …` command in the README's marked blocks must appear here ──
 step "README commands are covered by this script"
-readme_cmds=$(sed -n '/<!-- smoke:begin -->/,/<!-- smoke:end -->/p' "$ROOT/README.md" \
+readme_cmds=$(sed -n '/<!-- smoke:begin/,/<!-- smoke:end -->/p' "$ROOT/README.md" \
   | sed 's/#.*//' | grep -E '^[[:space:]]*rcm ' | awk '{print $1, $2, $3}' | sed 's/ *$//' | sort -u)
 [ -n "$readme_cmds" ] || { echo "smoke: README has no <!-- smoke:begin --> block" >&2; exit 1; }
 while IFS= read -r cmd; do
@@ -91,7 +91,7 @@ TOKEN=$("$RCM" token add laptop)
 
 start_server() {
   PORT=$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-  "$RCM" serve --port "$PORT" >"$WORK/server.log" 2>&1 &
+  "$RCM" serve --port "$PORT" --data-dir "$WORK/data" >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 60); do
     if curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then return 0; fi
