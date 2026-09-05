@@ -1,9 +1,10 @@
-# remote_ci_monitor — 계획서 (v2.1, 2026-09-04)
+# remote_ci_monitor — 계획서 (v2.2, 2026-09-05)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
 > **v2.1 은 웹 큐 화면 기획(v1.3)의 「5. PLAN 반영 제안」을 데이터 모델·큐 규칙·스키마·API·설정에 반영한 것**이다. 바뀐 곳: 잡 상태 `cancelling` · 합류자 `joiners[]` · `position`/`reason` 규칙 · 살아 있는 레인 수로 대기 계산 · 그룹 대기 하한 · 신뢰도 규칙 · `stuck` 판정 · 스키마 v1 필드 추가 · `GET /api/whoami`·`POST /pause`·`/resume` · 설정 키 6개 · 「웹 UI (M2)」 절 교체 · 오너 결정 5개(12~16).
-> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」).
+> **v2.2** 는 M3(운영) 반영: `git_ref` 소스 모드의 실제 동작(제출 시 sha 확정 · 미러 · 로컬 clone) · 프리셋 `repo` · 보존 정리(janitor · `metadata_retention_days`) · `read_auth = basic` 의 확정(결정 23) · 서비스 파일. 명세 `docs/m3-workplan.md`, 리뷰 `docs/reviews/2026-09-05-codex-m3-design.md`.
+> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~25 는 추천값으로 구현, 오너 확인 대기).
 
 ## 한 줄
 
@@ -126,6 +127,7 @@ description = "Full local gate: analyze, test, lint"
 argv = ["bash", "scripts/gate.sh"]          # 워크스페이스 기준. 셸 보간 없음 — 입력은 env 로만 전달
 timeout_seconds = 1200
 source_modes = ["tree"]                     # "tree" | "git_ref". 게이트는 tree 만, 배포는 git_ref 만
+repo = ""                                   # git_ref 프리셋이 가리키는 [[repos]].name (repos 가 하나면 생략 가능) — M3
 concurrency_group = ""                      # 같은 그룹은 동시에 하나
 expected_seconds = 480                      # 표본이 모자랄 때
 duration_key_inputs = ["scope"]             # key = "gate:<scope>"
@@ -155,9 +157,14 @@ default = "full"
 - **전송**: `tar.gz` 를 `PUT /jobs/{id}/tree` 로 올린다(같은 HTTP·같은 Bearer). rsync·SSH 를 안 쓰는 이유: 두 번째 접속·인증 경로가 생기고 rsync 데몬·키 관리가 따라온다. 크기 상한 `max_snapshot_bytes`(기본 512MB) 초과는 413 + 「.rcmignore 로 빌드 산출물을 빼라」. 참고 팀의 앱 트리(에셋 포함 수십 MB)는 Tailscale 에서 수 초다. 내용 주소 캐시(이미 있는 파일은 안 보냄)는 M5.
 - **서버 풀기**: `tarfile.extractall(filter="data")`(3.11.4+) — 절대 경로·`..`·바깥을 가리키는 링크·장치 파일을 거부한다. 워크스페이스 `<data_dir>/workspaces/<job_id>/`.
 
-### `git_ref` — 원격 브랜치 (배포·릴리스용)
+### `git_ref` — 원격 브랜치 (배포·릴리스용, M3 구현)
 
-서버가 설정된 원격(`repo_url`)에서 `ref` 를 fetch 해 `sha` 를 확정하고 워크스페이스에 체크아웃한다(`--reference` 로 로컬 미러를 써 빠르게). 재현성·감사가 좋다. 세션은 `--ref` 만 보내고 트리를 안 올린다. 프리셋이 `source_modes = ["git_ref"]` 면 tree 요청은 400.
+세션은 `rcm run deploy --ref v1.2.3` 처럼 `--ref` 만 보내고 트리를 안 올린다. 프리셋은 `source_modes = ["git_ref"]` + `repo = "<[[repos]].name>"`(repos 가 하나면 생략 가능). tree 요청은 400, tree 프리셋에 `--ref` 는 usage 2.
+
+- **제출 시 sha 확정**: 서버가 `git ls-remote -- <url> <ref>` 로 커밋 sha 를 정한다(`git_resolve_timeout_seconds` 20, 동시 2개까지 — 핸들러가 원격 호출에 묶이지 않게). 실패 502 · 타임아웃 504. 40 hex 는 원격을 안 부른다. 합류 신원은 이 sha(ref 이름이 달라도 같은 커밋이면 합류). 잡은 바로 `queued`, `queued_at = created_at`.
+- **ref 검증**(`core/gitref.py`, 순수): `git check-ref-format` 의 보수적 부분집합 — `-` 로 시작 금지(옵션 주입) · 공백·제어문자 · `..` `@{` `\` `^` `:` `?` `*` `[` `~` · 앞뒤 `/` · `//` · `.lock` · 200자. `[[repos]].url` 은 `https://` · `ssh://` · `git://` · `file://` · scp 형 · 절대 경로만.
+- **자재화**(`gitops.py` · `materialize.prepare_git_ref`): 미러 `<data_dir>/mirrors/<name>/`(bare, `gc.auto=0`)에 **ref 하나만 먼저** fetch 하고 sha 가 안 오면 전체(heads · tags, `--prune`) fetch 로 폴백 → `cat-file -e <sha>^{commit}` 으로 확인(없으면 `failed` + 「ref moved or was force-pushed?」) → 로컬 clone(객체 하드링크 — 미러가 gc 해도 워크스페이스가 안 깨진다) + `checkout --detach <sha>`. `.git` 이 남아 `git describe` 가 된다. submodule 은 스크립트 몫. 같은 미러는 프로세스 안에서 직렬화. git 의 stderr 는 잡 로그(`[git] …`)에만, summary 엔 URL·경로 없음.
+- env: `RCM_REF` · `RCM_BASE_SHA = sha` · `RCM_DIRTY = 0`. 표시는 `app @a1b2c3d · ref main`.
 
 ## 워커 실행 (`worker.py`)
 
@@ -167,7 +174,7 @@ default = "full"
 - 로그: `<data_dir>/jobs/<id>/log.txt` 줄 단위 flush. 최근 `tail` 은 상태 JSON 에 싣고 전체는 `GET /jobs/{id}/log`. 로그엔 시크릿이 섞일 수 있어 **읽기에 그 잡의 토큰 또는 admin** 이 필요하다. 마지막 줄을 받은 시각을 `progress.last_output_at` 으로 싣는다(stuck 판정).
 - 워커 상태: 레인마다 `{lane, state ∈ idle|busy|down, job_id, error, since}` 를 `server.workers[]` 로 싣는다. 스레드가 예외로 죽으면 `down` + `error`(앞 200자, 경로·토큰 없이) 로 남고 `server.last_error` 에도 적는다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다.
 - ⚠️ 자식 프로세스의 stdout 버퍼링 때문에 마커가 늦게 도착한다. README 에 `PYTHONUNBUFFERED=1`·`stdbuf -oL`·`flutter --no-color` 같은 팁을 쓴다. 마커가 늦어도 잡 전체 경과는 정확하다.
-- 정리: 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 실패는 보존 기간까지), 로그·스냅샷은 `retention_days`(성공 14 · 실패 30).
+- 정리(M3 `janitor.py` + 순수 `core/retention.py`): 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 실패는 보존 기간까지). 서버 안 청소 스레드가 시작 직후와 `retention_sweep_interval_seconds`(3600)마다 `retention_days_success`(14) · `retention_days_failure`(30) 지난 종료 잡의 `jobs/<id>/`·`workspaces/<id>/` 를 지우고 `jobs.artifacts_purged_at` 에 표시한다(DB v2). 활성 잡은 삼중으로 보호(순수 규칙 · janitor 재확인 · UPDATE 조건). 심볼릭 링크는 링크만, data_dir 밖을 가리키면 손대지 않는다. 산출물이 지워진 뒤 `metadata_retention_days`(180, `sample_days` 이상) 지난 잡 행·이벤트·합류자는 삭제한다. 미러는 안 지운다. 지운 잡의 로그는 404 `log expired`. 스레드가 죽거나 주기의 2배가 지나도록 sweep 이 없으면 `/api/health` 503.
 - 권한: 서버가 도는 OS 사용자로 실행된다. README 에 「전용 사용자로 돌리고 sudo 를 주지 말라」.
 
 ## 진행 — 스텝 마커 프로토콜 (순수 · `core/progress.py`)
@@ -205,7 +212,7 @@ default = "full"
 ## 보안 (원격에서 명령을 실행시키는 서버다)
 
 - **쓰기(`POST /jobs`·업로드·취소)는 인증 필수.** `none` 은 없다. 토큰은 **클라이언트별**(2026-09-04 오너 결정): `rcm token add <name> [--admin]` 이 무작위 32바이트 토큰을 만들어 한 번만 출력하고 서버 DB 에는 sha256 만 저장한다. 비교는 `hmac.compare_digest`. `rcm token revoke <name>`. 요청자 표시는 토큰 이름에서 온다.
-- **읽기**(`/api/status`·`/events`·UI)는 기본 `none`(Tailscale/LAN 전제, 2026-09-04 오너 결정). `basic` 옵션은 TLS 프록시 뒤에서만. **잡 로그**는 예외로 항상 토큰이 필요하다(시크릿이 섞일 수 있다).
+- **읽기**(`/api/status`·`/events`·UI)는 기본 `none`(Tailscale/LAN 전제, 2026-09-04 오너 결정). `basic`(M3): 읽기 라우트가 Bearer **또는** HTTP Basic(`<토큰 이름>:<토큰>`)을 요구한다 — 별도 자격 저장소 없이 브라우저 프롬프트로 열린다. 401 은 `WWW-Authenticate: Basic realm="rcm"`. **쓰기는 Bearer 만**(브라우저가 Basic 을 자동으로 붙이므로 쓰기에 허용하면 CSRF). 평문이라 TLS 프록시 뒤 전용. **잡 로그**는 예외로 항상 토큰이 필요하다(시크릿이 섞일 수 있다).
 - **프리셋만 실행.** argv 배열, 셸 없음, 입력은 env 로만. 입력 길이·타입·choices 검증. 임의 명령 옵션은 만들지 않는다.
 - 바인드 기본 `127.0.0.1`. Tailscale IP 나 `0.0.0.0` 은 명시. TLS 는 서버가 안 한다(Tailscale 이 암호화한다).
 - 스냅샷: 크기 상한 · `tarfile` data 필터 · 워크스페이스 밖 쓰기 불가. `.git` 은 받지 않는다.
@@ -216,10 +223,10 @@ default = "full"
 
 | 라우트 | 인증 | 동작 |
 |---|---|---|
-| `POST /jobs` | 토큰 | `{preset, inputs, source, requester_label, join}` → 검증 → 합류면 `{job_id, joined: true}`(+ `joiners[]` 에 기록), 아니면 새 잡(`uploading` 또는 `git_ref` 면 바로 `queued`) `{job_id, joined: false, upload: "/jobs/{id}/tree"}` |
+| `POST /jobs` | 토큰 | `{preset, inputs, source, requester_label, join}` → 검증 → 합류면 `{job_id, joined: true}`(+ `joiners[]` 에 기록), 아니면 새 잡(`uploading` 또는 `git_ref` 면 바로 `queued`) `{job_id, joined: false, upload: "/jobs/{id}/tree"}`. `git_ref` 는 `source: {mode, ref}` → 서버가 sha 확정 → `{job_id, joined, state: "queued", sha, url}`(400 ref 검증 · 502 해석 실패 · 504 타임아웃). git_ref 잡에 `PUT tree` 는 409 |
 | `PUT /jobs/{id}/tree` | 토큰(그 잡의) | 본문 tar.gz(`Content-Length` 필수, 상한) → 풀지 않고 저장만 → `queued`. 수신 중 `source.received_bytes`·`last_received_at` 갱신. 이미 취소된 잡이면 409 |
 | `GET /jobs/{id}?tail=N` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(스키마의 queue/recent 행과 같은 모양). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null. `tail` 기본 5줄, 잡당 8KiB 상한, `rcm wait` 는 `tail=0` |
-| `GET /jobs/{id}/log?offset=N` | 토큰(그 잡의·합류자·admin) | 로그 바이트 스트림(증분) |
+| `GET /jobs/{id}/log?offset=N` | 토큰(그 잡의·합류자·admin) | 로그 바이트 스트림(증분). 보존 정리로 지워졌으면 404 `log expired` |
 | `GET /jobs/{id}/events` | 없음 | SSE: 그 잡의 `job_changed`·`job_finished`·`marker` 만(로그 줄은 아님). 이미 끝난 잡이면 `hello` 뒤 `job_finished` 하나를 보내고 닫는다 |
 | `POST /jobs/{id}/cancel` | 토큰(그 잡의 또는 admin) | 취소 → `{job_id, state}`. 합류자 토큰이면 잡은 두고 자기 `joiners[]` 항목만 지운다 → `{left: true, job_id, job_state}` 이고 그 세션의 `rcm wait` 는 같은 JSON 을 찍고 **2** 로 끝난다 |
 | `GET /api/whoami` | 토큰 | `{name, admin}`. 401 이면 UI 가 저장 토큰을 지운다(네트워크 오류는 지우지 않는다) |
@@ -269,6 +276,10 @@ sse_max_connections = 16            # 초과는 503 + fallback: poll
 sse_keepalive_seconds = 15
 upload_stall_seconds = 60           # 이 동안 바이트가 안 오면 reason = upload_stalled
 upload_abandon_seconds = 300        # 이 동안 바이트가 안 오면 cancelled + "upload abandoned after 5m"
+retention_sweep_interval_seconds = 3600  # 보존 정리 주기(하한 60) — M3
+metadata_retention_days = 180       # 잡 행·이벤트 삭제(sample_days · retention_days_* 이상) — M3
+git_resolve_timeout_seconds = 20    # 제출 시 ls-remote 상한 — M3
+git_fetch_timeout_seconds = 600     # 자재화 fetch·clone 상한 — M3
 
 [estimate]
 sample_days = 45
@@ -289,9 +300,9 @@ history_samples = 60                # hosts[].history[] 길이 (5초 × 60 = 5�
 [display]
 timezone = ""                       # IANA. 시작 시 zoneinfo 로 검증. 비면 서버 로컬 / 브라우저 로컬
 
-[[repos]]                           # git_ref 모드용(선택)
+[[repos]]                           # git_ref 모드용(선택). 프리셋이 repo = "app" 으로 가리킨다
 name = "app"
-url = "git@github.com:org/app.git"  # 어떤 git 호스팅이든. 빌드 머신의 git 자격을 쓴다
+url = "git@github.com:org/app.git"  # 어떤 git 호스팅이든. 빌드 머신의 git 자격을 쓴다. https:// ssh:// git:// file:// scp형 · 절대경로만
 
 [[presets]]                         # 위 「프리셋」
 ```
@@ -316,7 +327,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
   "display_timezone": null,
   "server": {"version": "0.1.0", "uptime_seconds": 8123, "lanes": 1, "paused": null, "last_error": null,
              "workers": [{"lane": 1, "state": "busy", "job_id": 412, "error": null, "since": "2026-09-04T00:51:13Z"}]},
-  "presets": [{"name": "gate", "description": "Full local gate", "source_modes": ["tree"], "concurrency_group": null,
+  "presets": [{"name": "gate", "description": "Full local gate", "source_modes": ["tree"], "repo": null, "concurrency_group": null,
                "expected_seconds": 480, "timeout_seconds": 1200,
                "inputs": [{"name": "scope", "type": "choice", "choices": ["full", "commit", "fast"], "default": "full"}]}],
   "pools": [{
@@ -471,7 +482,9 @@ src/remote_ci_monitor/
     render_text.py             # StatusModel → 터미널 문자열
   store.py                     # SQLite: jobs · events · tokens · samples · 마이그레이션 · claim
   worker.py                    # 레인 스레드: 워크스페이스 · Popen · 로그 · 마커 · 신호 · 정리
-  materialize.py               # tree(tar 안전 추출) · git_ref(미러 fetch · 체크아웃)
+  materialize.py               # tree(tar 안전 추출) · git_ref(미러 fetch · 체크아웃 — gitops.py 를 부른다)
+  gitops.py                    # git 호출: ls-remote · 미러 fetch(부분 → 전체) · clone · checkout (M3)
+  janitor.py                   # 보존 정리 스레드 (M3)
   hostsample.py                # 샘플러 스레드(명령 실행·파일 읽기 → hostparse)
   server.py                    # ThreadingHTTPServer · 라우트 · 인증 · SSE · hardening
   client.py                    # 세션 쪽: 스냅샷 tar 만들기 · 제출 · 업로드 · SSE/폴링 wait
@@ -509,7 +522,7 @@ docs/reviews/
 - **M0 — 서버·큐·워커·run/wait** (**완료 2026-09-05**, PR #5~#11, 테스트 150개 · mutcheck 3/3 · 루프백 종료 코드 4종 확인): 모듈 뼈대 · 설정+프리셋 스키마 · SQLite 저장소 · 워커(tree 모드) · 스냅샷 클라이언트 · `POST /jobs`·`PUT tree`·`GET /jobs/{id}`·`/api/health`·`/api/whoami`·`/api/status` · 토큰 · `rcm run`/`wait`(폴링) · 순수 계산 + 테스트 · `mutcheck.py` · CI. `/api/status` 는 스키마 v1 의 **완전한 모양**을 내되 `hosts: []`(샘플러는 M1)·`medians: {}`(표본 쌓이기 전) 같은 빈 값은 허용한다. 완료 기준: 한 머신에서 루프백으로 `rcm run gate` 가 실제 스크립트를 돌리고 종료 코드 0/1/2/3 이 맞다 · 서버를 죽였다 살려도 큐가 남고 실행 중이던 잡은 `lost` 다 · 테스트 전부 통과 · 뮤테이션 3종 빨개짐 · CI 초록.
 - **M1 — 보이는 것** (**완료 2026-09-05**, PR #12 · #13, 테스트 258 · mutcheck 5/5 · 실기 검증 12단계 PASS — Tailscale 원격 실기는 오너): 호스트 자원(CPU·RAM·**GPU**) · 중앙값/ETA/합류 · 스텝 마커 진행 · SSE · `rcm eta`/`top`/`jobs`/`logs`/`cancel`/`presets` · `/api/status` 완성. 완료 기준: 다른 컴퓨터에서 Tailscale 로 `rcm run` 을 넣고 `rcm top` 에 위치·ETA·스텝·GPU 가 보인다 · 같은 트리를 두 세션이 넣으면 두 번째는 합류한다.
 - **M2 — 웹 UI** (**완료 2026-09-05**, PR #14, 명세 `docs/m2-workplan.md` · 테스트 pytest 270 + node 194 · mutcheck 6/6 · headless Chrome DOM/스크린샷 — 폰·Lost connection·stale 실기는 오너, README 9단계): `docs/wireframes/web-queue.html` 대로 — 요약 세 칸 · 큐 표(Reason·신뢰도) · 호스트 카드(sparkline) · 최근 완료 · Estimates · 변형 19개 · SSE 갱신 · 토큰 입력 · 로그 뷰어·취소(토큰) · 모바일 · 다크/라이트. 완료 기준: 폰에서 큐·스텝·자원이 읽히고, **서버를 끊으면 `Lost connection` 띠가, 샘플러만 멈추면 `stale` 배지가** 뜬다.
-- **M3 — 운영**: `git_ref` 소스 · concurrency 그룹 · 보존 정리 · 타임아웃/취소 신호 검증 · launchd/systemd · macOS CI 잡. 완료 기준: 배포 프리셋이 원격 ref 로 돌고, QA 두 개가 그룹으로 직렬화된다.
+- **M3 — 운영** (**완료 2026-09-05**, 명세 `docs/m3-workplan.md` · 리뷰 `docs/reviews/2026-09-05-codex-m3-design.md`): `git_ref` 소스(제출 시 sha 확정 · 미러 · 로컬 clone) · 프리셋 `repo` · concurrency 그룹 e2e(레인 2 에서 실제 프로세스 두 개가 직렬화, 그룹 없는 잡은 병행) · 보존 정리(janitor · DB v2 · `metadata_retention_days`) · 신호 e2e(손자 프로세스 · TERM 무시 → KILL · 타임아웃) · `examples/launchd/` · `examples/systemd/` · `read_auth = basic` 확정 · mutcheck 8종. macOS CI 잡은 M0 부터 있다. 완료 기준: 배포 프리셋이 원격 ref 로 돌고(로컬 bare 레포로 e2e — 실제 원격·자격은 오너 실기), QA 두 개가 그룹으로 직렬화된다.
 - **M4 — 배포·문서**: pipx/uvx · PyPI 릴리스 · `examples/` · README. 완료 기준: 새 머신에서 README 만 보고 5분 안에 `rcm run` 이 된다.
 - **M5 — 확장**: GitHub 백엔드(Actions run 관찰·dispatch — v1.1 설계 참조) · 원격 워커(빌드 머신 여러 대, 수집기 push) · 우선순위 · 내용 주소 스냅샷 캐시 · 알림.
 
@@ -540,7 +553,9 @@ docs/reviews/
 | 20 | GPU 없는 머신의 M1 완료 | `ioreg`/`nvidia-smi` 로 못 읽는 머신은 `gpu: null` + `gpu_note` 로 **통과**로 본다. 숫자는 Apple Silicon · NVIDIA 에서만. (Codex M1 리뷰, **오너 확인 대기**) |
 | 21 | 연결 끊김 표시 | `Lost connection` 띠 + 나이 증가만. **화면 전체를 dim 하지 않는다**(dim 은 호스트 stale 에만). (Codex M2 리뷰, **오너 확인 대기**) |
 | 22 | 웹 토큰 저장 | `localStorage` 에 둔다(M2 허용) + `index.html` 에 CSP 강제 + README 에 「공용 브라우저에서 쓰지 마라, XSS 면 토큰이 샌다」 명시. (Codex M2 리뷰, **오너 확인 대기**) |
-| 23 | `read_auth = basic` 과 웹 | M0 구현은 `read_auth ≠ none` 을 「읽기에도 bearer 토큰」으로 다뤄서 브라우저가 `/` 를 열 수 없다(`<script src>` 는 헤더를 못 붙인다). M2 는 `read_auth = none`(Tailscale/LAN) 만 지원하고, `basic` 은 M3 에서 진짜 HTTP Basic(브라우저 프롬프트, 자격은 설정 파일)으로 만들지 정한다. (**오너 확인 대기**) |
+| 23 | `read_auth = basic` 과 웹 | **M3 확정**: 진짜 HTTP Basic. 사용자명 = 토큰 이름, 비밀번호 = 토큰(별도 자격 저장소 없음). 읽기 라우트만 Basic 을 받고 쓰기는 Bearer 만(CSRF). TLS 프록시 뒤 전용. 브라우저 로그아웃은 불가하므로 README 에 안내. (Codex M3 리뷰, **오너 확인 대기**) |
+| 24 | git_ref 워크스페이스 모양 | 로컬 clone(`.git` 유지, detached) — `git describe` 가 되고 submodule 은 스크립트가 `git submodule update --init`. `git archive`(더 단순·`.git` 없음)는 배포 스크립트가 `.git` 을 안 쓸 때만 나은 선택. (Codex M3 리뷰, **오너 확인 대기**) |
+| 25 | 잡 메타데이터 보존 | `metadata_retention_days = 180` 뒤 잡 행·이벤트·합류자 삭제(산출물이 먼저 지워진 잡만). 감사 요구가 있으면 늘린다. `sample_days`·`retention_days_*` 보다 짧으면 설정 오류. (Codex M3 리뷰, **오너 확인 대기**) |
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
@@ -548,6 +563,7 @@ docs/reviews/
 
 - `fmmc-tech/dolomood-app-renew`(로컬에선 `dolomood-ci-monitor` 워크트리)의 `scripts/remote_ci.sh`(dispatch·가드·합류·대기) · `ci_queue.py`(큐·중앙값·잔여 21 자기검증) · `ci_top.py`(진행률·파서·렌더 18 자기검증) · `docs/renew-guide/ci-cd/30-remote-dispatch.md`. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
 - v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220`. jobs API 함정 6개·rate limit 예산·큐 판정 규칙은 M5 GitHub 백엔드 때 그대로 쓴다.
+- Codex 크로스리뷰 기록(M3): `docs/reviews/2026-09-05-codex-m3-design.md`(운영 명세 `docs/m3-workplan.md` — 제출 시 sha 확정 · `--shared` 폐기 · 부분 fetch · URL 허용 목록 · Basic 은 읽기만 · 메타데이터 보존 · janitor symlink/health).
 - Codex 크로스리뷰 기록(M2): `docs/reviews/2026-09-05-codex-m2-design.md`(웹 UI 명세 `docs/m2-workplan.md` — XSS/CSP · 포커스 보존 · EventSource 503 · fail-open 문구 · Chrome 테스트).
 - Codex 크로스리뷰 기록: `docs/reviews/2026-09-04-codex-plan-v1.md`(v1 설계) · `docs/reviews/2026-09-04-codex-github-dependency.md`(방향 전환) · `docs/reviews/2026-09-04-codex-web-queue.md`(웹 큐 화면 디자인) · `docs/reviews/2026-09-04-codex-m0-design.md`(v2.1 정합성 + M0 구현 결정 — Ctrl-C detach·부분 업로드 재개 제외는 추천값으로 구현, 오너 확인 대기) · `docs/reviews/2026-09-05-codex-m1-design.md`(M1 명세 `docs/m1-workplan.md` — 캐시·SSE 폴백·재조회 합치기·macOS 메모리 정의·GPU 집계). 서브에이전트 리뷰: `docs/reviews/2026-09-04-subagent-spec-gaps.md`(기획 누락 30건 — v2.1 의 데이터 모델 변경 근거) · `docs/reviews/2026-09-04-subagent-reference-comparison.md`(제품 비교 리서치).
 

@@ -215,6 +215,15 @@ class Worker(threading.Thread):
     def _fail(self, job: Job, summary: str) -> None:
         self.store.finish(job.id, FAILED, now=self.now_fn(), exit_code=None, summary=summary[:200])
 
+    @staticmethod
+    def _append_log(log_path: Path, line: str) -> None:
+        """자재화 단계(프로세스가 뜨기 전)의 줄을 잡 로그에 남긴다. 실패해도 잡을 막지 않는다."""
+        try:
+            with log_path.open("ab") as fh:
+                fh.write(line.encode("utf-8", errors="replace") + b"\n")
+        except OSError:
+            pass
+
     def execute(self, job: Job) -> None:
         job_dir, workspace, log_path = self._paths(job)
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +239,20 @@ class Worker(threading.Thread):
                     raise MaterializeError("snapshot file is missing")
                 extract_tree(tar_path, workspace)
             else:
-                prepare_git_ref(job, workspace)
+                repo = self.config.repo(job.source.repo)
+                if repo is None:
+                    raise MaterializeError(
+                        f"repo '{job.source.repo or preset.repo}' is no longer configured"
+                    )
+                prepare_git_ref(
+                    job,
+                    workspace,
+                    repo_name=repo.name,
+                    repo_url=repo.url,
+                    mirror=self.config.data_dir / "mirrors" / repo.name,
+                    timeout=self.config.server.git_fetch_timeout_seconds,
+                    log=lambda line: self._append_log(log_path, line),
+                )
         except MaterializeError as e:
             self._fail(job, str(e))
             return
@@ -312,6 +334,7 @@ class Worker(threading.Thread):
                 "RCM_PRESET": job.preset,
                 "RCM_REQUESTER": job.requester.label,
                 "RCM_SOURCE_MODE": job.source.mode,
+                "RCM_REF": job.source.ref or "",
                 "RCM_BASE_SHA": job.source.base_sha or "",
                 "RCM_DIRTY": "1" if job.source.dirty else "0",
                 "RCM_WORKSPACE": str(workspace),

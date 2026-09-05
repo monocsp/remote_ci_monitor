@@ -44,7 +44,7 @@ from remote_ci_monitor.core.model import (
 )
 from remote_ci_monitor.core.progress import Marker
 
-DB_VERSION = 1
+DB_VERSION = 2
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_output_at REAL,
   join_key TEXT,
   received_bytes INTEGER,
-  last_received_at REAL
+  last_received_at REAL,
+  artifacts_purged_at REAL
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
@@ -110,6 +111,12 @@ CREATE TABLE IF NOT EXISTS server_state (
   value TEXT NOT NULL
 );
 """
+
+
+#: v1 → v2: 보존 정리가 산출물을 지운 시각. 기존 DB 에 컬럼만 더한다.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: ("ALTER TABLE jobs ADD COLUMN artifacts_purged_at REAL",),
+}
 
 
 class StoreError(RuntimeError):
@@ -176,7 +183,8 @@ class Store:
         conn = self._conn()
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
-            # executescript 는 트랜잭션을 먼저 COMMIT 해 버리므로 문장 단위로 실행한다
+            # executescript 는 트랜잭션을 먼저 COMMIT 해 버리므로 문장 단위로 실행한다.
+            # 새 DB 는 최신 스키마를 한 번에 만든다(중간 버전을 거치지 않는다).
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for stmt in _SCHEMA_V1.split(";"):
@@ -187,6 +195,17 @@ class Store:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        elif version < DB_VERSION:
+            for target in range(version + 1, DB_VERSION + 1):
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for stmt in _MIGRATIONS[target]:
+                        conn.execute(stmt)
+                    conn.execute(f"PRAGMA user_version={target}")
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
         elif version > DB_VERSION:
             raise StoreError(
                 f"database schema version {version} is newer than this build ({DB_VERSION})"
@@ -264,6 +283,7 @@ class Store:
             last_output_at=_dt(row["last_output_at"]),
             joiners=joiners,
             transitions=transitions,
+            artifacts_purged_at=_dt(row["artifacts_purged_at"]),
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -297,6 +317,62 @@ class Store:
             "AND finished_at IS NOT NULL ORDER BY id",
             (*sorted(TERMINAL_STATES), _ts(since)),
         )
+
+    def list_unpurged_finished(self, limit: int = 1000) -> list[Job]:
+        """보존 정리 후보: 산출물을 아직 안 지운 종료 잡. 오래 끝난 것부터."""
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE state IN ({marks}) AND artifacts_purged_at IS NULL "
+            "ORDER BY COALESCE(finished_at, created_at), id LIMIT ?",
+            (*sorted(TERMINAL_STATES), limit),
+        )
+
+    def mark_artifacts_purged(self, job_ids: Iterable[int], now: datetime) -> int:
+        """산출물을 지웠다고 표시한다. 종료 잡만, 아직 표시 안 된 것만. 표시한 수를 돌려준다."""
+        ids = [int(i) for i in job_ids]
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        id_marks = ",".join("?" * len(ids))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                f"UPDATE jobs SET artifacts_purged_at=? WHERE id IN ({id_marks}) "
+                f"AND state IN ({marks}) AND artifacts_purged_at IS NULL",
+                (_ts(now), *ids, *sorted(TERMINAL_STATES)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return int(cur.rowcount)
+
+    def delete_old_jobs(self, cutoff: datetime) -> int:
+        """산출물이 이미 지워진 종료 잡 중 cutoff 전에 끝난 것의 행·이벤트·합류자를 지운다."""
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            ids = [
+                int(r[0])
+                for r in conn.execute(
+                    f"SELECT id FROM jobs WHERE state IN ({marks}) "
+                    "AND artifacts_purged_at IS NOT NULL "
+                    "AND COALESCE(finished_at, created_at) < ?",
+                    (*sorted(TERMINAL_STATES), _ts(cutoff)),
+                ).fetchall()
+            ]
+            if ids:
+                id_marks = ",".join("?" * len(ids))
+                conn.execute(f"DELETE FROM events WHERE job_id IN ({id_marks})", ids)
+                conn.execute(f"DELETE FROM joiners WHERE job_id IN ({id_marks})", ids)
+                conn.execute(f"DELETE FROM jobs WHERE id IN ({id_marks})", ids)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return len(ids)
 
     def list_jobs_by_state(self, states: Iterable[str]) -> list[Job]:
         states = tuple(states)

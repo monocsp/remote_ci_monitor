@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import tomllib
 import zoneinfo
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
+from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     INPUT_TYPES,
     SOURCE_MODES,
@@ -57,6 +59,12 @@ class ServerSection:
     sse_max_connections: int = 16
     sse_keepalive_seconds: int = 15
     public_url: str = ""
+    git_resolve_timeout_seconds: int = 20  # 제출 시 ls-remote 상한
+    git_fetch_timeout_seconds: int = 600  # 자재화(fetch · clone) 상한
+    retention_sweep_interval_seconds: int = 3600  # janitor 주기(하한 60)
+    metadata_retention_days: int = (
+        180  # 잡 행·이벤트 삭제. sample_days · retention_days_failure 이상
+    )
 
 
 @dataclass
@@ -108,6 +116,12 @@ class ServerConfig:
         for p in self.presets:
             if p.name == name:
                 return p
+        return None
+
+    def repo(self, name: str | None) -> RepoConfig | None:
+        for r in self.repos:
+            if r.name == name:
+                return r
         return None
 
 
@@ -218,6 +232,7 @@ _PRESET_KEYS = {
     "argv",
     "timeout_seconds",
     "source_modes",
+    "repo",
     "concurrency_group",
     "expected_seconds",
     "duration_key_inputs",
@@ -312,6 +327,11 @@ def parse_preset(raw: Any) -> Preset:
     bad = [m for m in modes if m not in SOURCE_MODES]
     if bad:
         raise ConfigError(f"{where}: source_modes must be from {SOURCE_MODES}, got {bad}")
+    repo = raw.get("repo", "")
+    if not isinstance(repo, str):
+        raise ConfigError(f"{where}: repo must be a string")
+    if repo and "git_ref" not in modes:
+        raise ConfigError(f"{where}: repo is only valid with source_modes git_ref")
     group = raw.get("concurrency_group", "")
     if not isinstance(group, str):
         raise ConfigError(f"{where}: concurrency_group must be a string")
@@ -349,6 +369,7 @@ def parse_preset(raw: Any) -> Preset:
         description=description,
         timeout_seconds=timeout,
         source_modes=modes,
+        repo=repo,
         concurrency_group=group or None,
         expected_seconds=expected,
         duration_key_inputs=dki,
@@ -386,6 +407,20 @@ def _validate_server(cfg: ServerConfig) -> None:
         raise ConfigError("[server] sse_max_connections must be >= 0")
     if s.sse_keepalive_seconds < 1:
         raise ConfigError("[server] sse_keepalive_seconds must be >= 1")
+    for key in ("retention_days_success", "retention_days_failure"):
+        if getattr(s, key) < 0:
+            raise ConfigError(f"[server] {key} must be >= 0")
+    for key in ("git_resolve_timeout_seconds", "git_fetch_timeout_seconds"):
+        if getattr(s, key) < 1:
+            raise ConfigError(f"[server] {key} must be >= 1")
+    if s.retention_sweep_interval_seconds < 60:
+        raise ConfigError("[server] retention_sweep_interval_seconds must be at least 60")
+    floor = max(cfg.estimate.sample_days, s.retention_days_failure, s.retention_days_success)
+    if s.metadata_retention_days < floor:
+        raise ConfigError(
+            f"[server] metadata_retention_days must be >= {floor} "
+            "(max of estimate.sample_days and retention_days_*)"
+        )
     if s.upload_abandon_seconds < s.upload_stall_seconds:
         raise ConfigError("[server] upload_abandon_seconds must be >= upload_stall_seconds")
     e = cfg.estimate
@@ -416,9 +451,36 @@ def _validate_server(cfg: ServerConfig) -> None:
     if len(names) != len(set(names)):
         dupes = sorted({n for n in names if names.count(n) > 1})
         raise ConfigError(f"[[presets]] duplicate preset name(s): {', '.join(dupes)}")
+    repo_names = [r.name for r in cfg.repos]
+    if len(repo_names) != len(set(repo_names)):
+        dupes = sorted({n for n in repo_names if repo_names.count(n) > 1})
+        raise ConfigError(f"[[repos]] duplicate repo name(s): {', '.join(dupes)}")
+    for r in cfg.repos:
+        if not _NAME_RE.match(r.name):
+            raise ConfigError(f"[[repos]] name must be a short identifier, got {r.name!r}")
+        problem = validate_repo_url(r.url)
+        if problem is not None:
+            raise ConfigError(f"[[repos]] '{r.name}': {problem}")
+    if cfg.repos and shutil.which("git") is None:
+        raise ConfigError("[[repos]] configured but git is not on PATH")
+    resolved: list[Preset] = []
     for p in cfg.presets:
-        if "git_ref" in p.source_modes and not cfg.repos:
-            raise ConfigError(f"preset '{p.name}': source_modes includes git_ref but no [[repos]]")
+        if "git_ref" in p.source_modes:
+            if not cfg.repos:
+                raise ConfigError(
+                    f"preset '{p.name}': source_modes includes git_ref but no [[repos]]"
+                )
+            if not p.repo:
+                if len(cfg.repos) != 1:
+                    raise ConfigError(
+                        f"preset '{p.name}': repo is required when more than one [[repos]] "
+                        "is configured"
+                    )
+                p = replace(p, repo=cfg.repos[0].name)
+            elif cfg.repo(p.repo) is None:
+                raise ConfigError(f"preset '{p.name}': repo '{p.repo}' is not in [[repos]]")
+        resolved.append(p)
+    cfg.presets = tuple(resolved)
 
 
 def load_server_config(

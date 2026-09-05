@@ -68,11 +68,46 @@ Your script can report progress by printing markers at the start of a line:
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
 
+### Deploy presets: run a remote ref instead of an upload
+
+Gates run the session's working tree. Deploys and releases should run a **committed, pushed** ref,
+so the server fetches it itself (`source_modes = ["git_ref"]`). Declare the repository once and
+point the preset at it:
+
+```toml
+[[repos]]
+name = "app"
+url = "git@github.com:org/app.git"      # any git hosting; uses the build machine's git credentials
+
+[[presets]]
+name = "deploy"
+argv = ["bash", "scripts/deploy.sh"]
+source_modes = ["git_ref"]
+repo = "app"                            # optional when exactly one [[repos]] is configured
+concurrency_group = "deploy"
+```
+
+```bash
+rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothing is uploaded
+```
+
+- The server resolves the ref to a commit sha **at submit time** (`git ls-remote`, 20 s limit) and
+  that sha is what runs, even if the branch moves later. Two sessions submitting the same commit
+  join the same job. The sha is in the JSON output and in the queue (`app @a1b2c3d · ref main`).
+- Fetches go into a local mirror under `<data_dir>/mirrors/<name>/`; the workspace is a detached
+  checkout with `.git` kept, so `git describe` works. `git submodule` is **not** initialised — run
+  `git submodule update --init` in your script if you need it.
+- Refs are validated (no leading `-`, no `..`, no control characters) before they reach git, and
+  repository URLs must be `https://`, `ssh://`, `git://`, `file://`, `user@host:path` or an absolute
+  path. Extra env for the script: `RCM_REF`; `RCM_BASE_SHA` is the pinned commit, `RCM_DIRTY=0`.
+- A preset with `source_modes = ["git_ref"]` rejects tree uploads (400), and `--ref` on a tree
+  preset is a usage error.
+
 ## Session commands
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--no-wait] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait |
+| `rcm run PRESET [-f k=v] [--ref REF] [--no-wait] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
 | `rcm eta PRESET [-f k=v]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
@@ -126,6 +161,47 @@ Usage errors and validation failures that never reach the server exit with 2 as 
 - The web UI keeps your client token in the browser's `localStorage` (never in the URL). Do not
   paste it into a shared or public browser; a cross-site-scripting bug would expose it, which is why
   the page ships with a strict Content-Security-Policy and loads nothing from third parties.
+
+### `read_auth = "basic"` — password-protect reads
+
+By default anyone who can reach the port can read the queue (`/`, `/api/status`, `/events`).
+Set `read_auth = "basic"` to require credentials for reads too. There is no separate user
+database: the browser prompt takes the **token name as the username and the token as the
+password** (`rcm token add alice` → user `alice`). API clients keep sending `Authorization: Bearer`.
+
+- Basic is sent in clear text — use it **only behind TLS** (Tailscale HTTPS, Caddy, nginx).
+- Writes (`POST /jobs`, uploads, cancel, pause) accept **Bearer only**. Browsers attach Basic
+  credentials automatically, so allowing them on writes would let any page on your intranet submit
+  or cancel jobs (CSRF).
+- Browsers cannot "log out" of Basic auth: closing the tab is not enough. Quit the browser, use a
+  separate profile, or `rcm token revoke` the token.
+- `/api/health` stays open (no secrets in it) for monitoring.
+
+### Retention
+
+The server deletes job logs, snapshots and kept workspaces after `retention_days_success`
+(default 14) / `retention_days_failure` (30) days, and the job records themselves after
+`metadata_retention_days` (180, must be ≥ `estimate.sample_days`). A sweep runs at start and then
+every `retention_sweep_interval_seconds` (3600). Running jobs are never touched; `rcm logs N` on a
+purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
+`/api/health` turns 503 — nothing here fails silently.
+
+## Run as a service
+
+Keep `rcm serve` alive across logins and reboots with the example units in `examples/`:
+
+- **macOS (launchd)** — `examples/launchd/com.remote-ci-monitor.server.plist`. Edit the paths,
+  copy it to `~/Library/LaunchAgents/` of the dedicated `rcm` user and run
+  `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.server.plist`
+  (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` to stop). Logs go to
+  `~/Library/Logs/rcm/server.log`. launchd does not expand `~`, so every path in the file is absolute.
+- **Linux (systemd)** — `examples/systemd/rcm-server.service`. Copy to `/etc/systemd/system/`,
+  then `sudo systemctl daemon-reload && sudo systemctl enable --now rcm-server`;
+  `journalctl -u rcm-server -f` shows the log.
+- Both send **SIGTERM** on stop: the server shuts down cleanly and jobs that were running are
+  marked `lost` (exit 3 for waiting sessions); queued jobs survive and start after the restart.
+- The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
+  toolchains there. Keep the machine awake (`pmset -a sleep 0` on macOS).
 
 ## Why the numbers can be wrong
 

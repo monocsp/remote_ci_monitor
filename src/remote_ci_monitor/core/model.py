@@ -106,6 +106,7 @@ class Preset:
     description: str = ""
     timeout_seconds: int = 1200
     source_modes: tuple[str, ...] = (MODE_TREE,)
+    repo: str = ""  # git_ref 를 받는 프리셋이 가리키는 `[[repos]].name`
     concurrency_group: str | None = None
     expected_seconds: int | None = None
     duration_key_inputs: tuple[str, ...] = ()
@@ -194,6 +195,7 @@ class Job:
     last_output_at: datetime | None = None
     joiners: tuple[Joiner, ...] = ()
     transitions: tuple[Transition, ...] = ()
+    artifacts_purged_at: datetime | None = None  # 보존 정리로 로그·스냅샷·워크스페이스를 지운 시각
 
     @property
     def is_waiting(self) -> bool:

@@ -218,6 +218,7 @@ def test_status_is_json_serializable_with_expected_shape():
         "name",
         "description",
         "source_modes",
+        "repo",
         "concurrency_group",
         "expected_seconds",
         "timeout_seconds",

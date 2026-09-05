@@ -473,6 +473,7 @@ def preset_from_json(p: dict[str, Any]) -> Preset:
         description=p.get("description", ""),
         timeout_seconds=p.get("timeout_seconds") or 1200,
         source_modes=tuple(p.get("source_modes") or ("tree",)),
+        repo=p.get("repo") or "",
         concurrency_group=p.get("concurrency_group"),
         expected_seconds=p.get("expected_seconds"),
         inputs=inputs,

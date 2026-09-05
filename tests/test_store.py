@@ -9,10 +9,12 @@ import pytest
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
+    FAILED,
     LOST,
     QUEUED,
     RUNNING,
     SUCCEEDED,
+    TIMED_OUT,
     UPLOADING,
     Requester,
     Source,
@@ -313,3 +315,115 @@ def test_abandon_stale_uploads_keeps_the_job_as_cancelled(store):
         and s.cancelled_by == "server"
     )
     assert store.get_job(fresh.id).state == UPLOADING
+
+
+# ── M3 — 스키마 v2 · artifacts_purged_at · 보존 정리용 조회 (docs/m3-workplan.md §2) ──────────
+
+
+def finished_job(store, *, state=SUCCEEDED, finished, created=NOW, tree="9f8e", key="gate:full"):
+    """enqueue → claim → finish 를 명시적 시각으로. 다른 queued 잡이 없을 때 부른다(FIFO claim)."""
+    j = enqueue(store, key=key, tree=tree, now=created)
+    claimed = store.claim(1, created + timedelta(seconds=1))
+    assert claimed is not None and claimed.id == j.id
+    store.finish(j.id, state, now=finished, exit_code=0 if state == SUCCEEDED else 1)
+    return store.get_job(j.id)
+
+
+def test_fresh_db_is_schema_v2_with_artifacts_purged_at(store, tmp_path):
+    assert DB_VERSION == 2 and store.user_version() == 2
+    j = enqueue(store)
+    assert store.get_job(j.id).artifacts_purged_at is None
+    with sqlite3.connect(tmp_path / "rcm.sqlite3") as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+    assert "artifacts_purged_at" in cols
+
+
+def test_migration_v1_to_v2_adds_the_column_and_keeps_rows(tmp_path):
+    path = tmp_path / "rcm.sqlite3"
+    s = Store(path)
+    j = enqueue(s)
+    s.close()
+    # v1 데이터베이스를 흉내 낸다: 새 열을 떼고 user_version 을 1 로 되돌린다
+    c = sqlite3.connect(path)
+    try:
+        for (name,) in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND sql LIKE '%artifacts_purged_at%'"
+        ).fetchall():
+            c.execute(f"DROP INDEX {name}")
+        c.execute("ALTER TABLE jobs DROP COLUMN artifacts_purged_at")
+        c.execute("PRAGMA user_version=1")
+        c.commit()
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 1
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+        assert "artifacts_purged_at" not in cols
+    finally:
+        c.close()
+    s2 = Store(path)  # 1 → 2 마이그레이션이 여기서 돈다
+    try:
+        assert s2.user_version() == 2 and s2.healthy()
+        got = s2.get_job(j.id)
+        assert got is not None and got.key == "gate:full" and got.state == QUEUED
+        assert got.created_at == NOW and got.artifacts_purged_at is None
+        assert s2.list_unpurged_finished() == []  # 새 열을 쓰는 조회가 돈다
+    finally:
+        s2.close()
+    s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
+    assert s3.user_version() == 2 and s3.get_job(j.id).key == "gate:full"
+    s3.close()
+
+
+def test_list_unpurged_finished_orders_by_finished_at_and_skips_active_and_purged(store):
+    a = finished_job(store, finished=at(30))
+    b = finished_job(store, state=FAILED, finished=at(10), tree="b")
+    c = finished_job(store, state=TIMED_OUT, finished=at(20), tree="c")
+    enqueue(store, now=at(40), tree="r")
+    running = store.claim(1, at(41))
+    assert running is not None and running.state == RUNNING
+    enqueue(store, now=at(42), tree="q")  # queued
+    enqueue(store, state=UPLOADING, now=at(43), tree="u")
+    got = store.list_unpurged_finished()
+    assert [j.id for j in got] == [b.id, c.id, a.id]  # finished_at 오름차순 · 활성 잡 없음
+    assert all(j.artifacts_purged_at is None for j in got)
+    assert [j.id for j in store.list_unpurged_finished(limit=2)] == [b.id, c.id]
+    store.mark_artifacts_purged([b.id], at(100))
+    assert [j.id for j in store.list_unpurged_finished()] == [c.id, a.id]
+
+
+def test_mark_artifacts_purged_sets_the_timestamp_and_is_idempotent(store):
+    a = finished_job(store, finished=at(30))
+    b = finished_job(store, finished=at(31), tree="b")
+    store.mark_artifacts_purged([], at(50))  # 빈 목록은 아무 일도 없다
+    assert store.get_job(a.id).artifacts_purged_at is None
+    store.mark_artifacts_purged([a.id, b.id], at(100))
+    assert store.get_job(a.id).artifacts_purged_at == at(100)
+    assert store.get_job(b.id).artifacts_purged_at == at(100)
+    store.mark_artifacts_purged([a.id], at(200))  # 두 번째 호출도 오류 없다
+    assert store.get_job(a.id).artifacts_purged_at is not None
+    assert store.list_unpurged_finished() == []
+    # 표시는 행을 지우지 않는다 — 최근 완료·표본에 그대로 남는다
+    assert [j.id for j in store.list_recent(5)] == [b.id, a.id]
+    assert [j.id for j in store.list_samples(at(0))] == [a.id, b.id]
+    assert store.get_job(a.id).state == SUCCEEDED
+
+
+def test_delete_old_jobs_removes_purged_rows_with_events_and_joiners(store, tmp_path):
+    """산출물이 지워진 종료 잡만 `metadata_retention_days` 뒤 행·이벤트·합류자를 잃는다."""
+    old = finished_job(store, finished=at(10))
+    store.add_joiner(old.id, "eve-ci", "eve@ci", at(11))
+    store.add_marker(old.id, "step", "build", at(5))
+    recent = finished_job(store, finished=at(1000), tree="r")
+    unpurged = finished_job(store, finished=at(20), tree="u")  # 산출물이 아직 있다 → 남긴다
+    active = enqueue(store, now=at(30), tree="a")
+    store.mark_artifacts_purged([old.id, recent.id], at(2000))
+    assert store.delete_old_jobs(at(500)) == 1  # old 만: purged 이고 finished_at < cutoff
+    assert store.get_job(old.id) is None
+    assert store.markers(old.id) == []
+    with sqlite3.connect(tmp_path / "rcm.sqlite3") as c:
+        for table, col in (("jobs", "id"), ("events", "job_id"), ("joiners", "job_id")):
+            n = c.execute(f"SELECT count(*) FROM {table} WHERE {col}=?", (old.id,)).fetchone()[0]
+            assert n == 0, table
+    assert store.get_job(recent.id).artifacts_purged_at == at(2000)
+    assert store.get_job(unpurged.id).state == SUCCEEDED
+    assert store.get_job(active.id).state == QUEUED
+    assert store.delete_old_jobs(at(500)) == 0  # 두 번째는 할 일이 없다
+    assert [j.id for j in store.list_recent(8)] == [recent.id, unpurged.id]
