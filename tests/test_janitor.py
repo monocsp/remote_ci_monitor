@@ -449,3 +449,19 @@ def test_dead_janitor_thread_shows_in_last_error_and_health(tmp_path, monkeypatc
         assert srv.req("POST", "/jobs", token="alice", json_body={"preset": "ok"})[0] == 400
     finally:
         srv.close()
+
+
+def test_log_route_tells_never_started_jobs_apart_from_expired_ones(tmp_path):
+    """대기 중 취소된 잡은 로그가 있었던 적이 없다 — 「retention 이 지웠다」고 말하지 않는다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        jid = srv.submit()[1]["job_id"]  # uploading — 프로세스가 뜬 적이 없다
+        status, body = srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})
+        assert status == 200 and body["state"] == "cancelled"
+        assert srv.store.get_job(jid).artifacts_purged_at is None
+        status, body = srv.req("GET", f"/jobs/{jid}/log", token="alice")
+        assert status == 404, body
+        assert "log expired" not in body["error"]
+        assert "before its process started" in body["error"]
+    finally:
+        srv.close()

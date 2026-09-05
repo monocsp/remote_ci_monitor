@@ -872,9 +872,12 @@ class App:
                 data = fh.read(4 * 1024 * 1024)
                 next_offset = fh.tell()
         except FileNotFoundError:
-            if job.is_terminal:
+            if not job.is_terminal:
+                return b"", 0, True  # 아직 시작 전 — 빈 본문, 계속 따라가라
+            if job.artifacts_purged_at is not None:
                 raise ApiError(404, "log expired — retention removed it") from None
-            return b"", 0, True
+            # 대기 중 취소 · 프리셋 소멸 · 스냅샷 거부 — 프로세스가 뜨기 전에 끝나 로그가 없던 잡
+            raise ApiError(404, "no log — the job ended before its process started") from None
         return data, next_offset, not job.is_terminal
 
     def health(self) -> tuple[int, dict[str, Any]]:
