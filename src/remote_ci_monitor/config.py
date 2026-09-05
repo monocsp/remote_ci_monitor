@@ -39,10 +39,18 @@ def user_config_dir() -> Path:
 
 
 def _candidates(kind: str, static: tuple[str, ...]) -> list[Path]:
-    """XDG 경로를 먼저, 그다음 고정 후보. 같은 경로는 한 번만."""
-    out: list[Path] = [user_config_dir() / f"{kind}.toml"]
+    """고정 후보 순서는 그대로, `~/.config/rcm` 바로 앞에 `$XDG_CONFIG_HOME/rcm` 을 끼운다.
+
+    `./rcm.toml` 이 사용자 설정보다 앞서는 기존 순서(PLAN 「설정」)는 바뀌지 않는다. XDG 가 없거나
+    `~/.config` 이면 두 경로가 같아 한 번만 본다.
+    """
+    legacy = Path("~/.config/rcm").expanduser() / f"{kind}.toml"
+    xdg = user_config_dir() / f"{kind}.toml"
+    out: list[Path] = []
     for cand in static:
         p = Path(cand).expanduser()
+        if p == legacy and xdg not in out:
+            out.append(xdg)
         if p not in out:
             out.append(p)
     return out
@@ -224,7 +232,8 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def find_server_config(explicit: str | os.PathLike[str] | None) -> Path | None:
-    """탐색 순서: `--config` → `$RCM_CONFIG` → `./rcm.toml` → `~/.config/rcm/server.toml`."""
+    """탐색 순서: `--config` → `$RCM_CONFIG` → `./rcm.toml` → `$XDG_CONFIG_HOME/rcm/server.toml`
+    → `~/.config/rcm/server.toml`."""
     if explicit:
         p = Path(explicit).expanduser()
         if not p.is_file():

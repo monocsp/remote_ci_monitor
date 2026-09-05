@@ -256,7 +256,7 @@ default = "full"
 
 ## 설정
 
-**서버**(`rcm serve --config`, 탐색: `--config` → `$RCM_CONFIG` → `./rcm.toml` → `~/.config/rcm/server.toml`). 우선순위 **플래그 > 환경변수(`RCM_<섹션>_<키>`) > 파일 > 기본값**.
+**서버**(`rcm serve --config`, 탐색: `--config` → `$RCM_CONFIG` → `./rcm.toml` → `$XDG_CONFIG_HOME/rcm/server.toml` → `~/.config/rcm/server.toml`). 우선순위 **플래그 > 환경변수(`RCM_<섹션>_<키>`) > 파일 > 기본값**.
 
 ```toml
 [server]
