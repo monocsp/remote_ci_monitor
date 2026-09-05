@@ -5,12 +5,14 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 5종:
+변이 6종:
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
   ④ stale-threshold  — 호스트 표본 stale 판정의 3×interval 을 0 으로 (`core/hostparse.py`, M1)
   ⑤ top-first-sample — macOS top 의 마지막 표본 대신 첫 표본 사용 (`core/hostparse.py`, M1)
+  ⑥ web-not-moving-unknown — 웹 UI 「Not moving」이 queue null 을 「Nothing is stuck」으로
+     (`web/app.js`, M2, node --test)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -37,6 +39,7 @@ class Mutant:
     old: str
     new: str
     tests: tuple[str, ...]
+    runner: str = "pytest"  # "pytest" | "node" (tests 는 node --test 에 넘길 경로)
 
 
 MUTANTS = (
@@ -75,6 +78,14 @@ MUTANTS = (
         new="user_s, sys_s, idle_s = matches[0]",
         tests=("tests/test_hostparse.py",),
     ),
+    Mutant(
+        name="web-not-moving-unknown",
+        path="src/remote_ci_monitor/web/app.js",
+        old='if (!Array.isArray(q)) return { kind: "unknown", lines: [] };\n    var lines = [];',
+        new='if (!Array.isArray(q)) return { kind: "ok", lines: [] };\n    var lines = [];',
+        tests=("tests/web/",),
+        runner="node",
+    ),
 )
 
 
@@ -106,7 +117,13 @@ def run_mutant(m: Mutant, keep: bool) -> tuple[bool, str]:
         text = target.read_text(encoding="utf-8")
         if text.count(m.old) != 1:
             return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
-        cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *m.tests]
+        if m.runner == "node":
+            node = shutil.which("node")
+            if node is None:
+                return False, "node is not installed (needed for the web mutant)"
+            cmd = [node, "--test", *m.tests]
+        else:
+            cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *m.tests]
         # 대조군: 변이 없이 복사본에서 초록이어야 한다(환경 문제로 빨간 것을 감지로 착각하지 않게)
         control = _pytest(cmd, tmp)
         if control is None:

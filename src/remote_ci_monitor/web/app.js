@@ -90,6 +90,13 @@
     return Math.round(n) + " B";
   }
   function fmtMb(n) { return isNum(n) ? Math.round(n) + " MB" : DASH; }
+  // 메모리·GPU 메모리는 GiB 로 세고 라벨은 GB (Activity Monitor · rcm top 과 같다). 업로드 크기는 fmtBytes(십진).
+  function fmtMemory(n) {
+    if (!isNum(n)) return DASH;
+    var gib = n / 1073741824;
+    if (gib >= 0.95) return gib.toFixed(1) + " GB";
+    return Math.round(n / 1048576) + " MB";
+  }
   function fmtPct(v) { return isNum(v) ? Math.round(v) + "%" : DASH; }
   function ordinal(n) {
     if (!isNum(n)) return DASH;
@@ -478,7 +485,7 @@
 
   var rcm = {
     DASH: DASH, esc: esc, fmtDuration: fmtDuration, fmtClock: fmtClock, fmtClockSeconds: fmtClockSeconds, fmtAgo: fmtAgo,
-    fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtMb: fmtMb, fmtPct: fmtPct, ordinal: ordinal, truncate: truncate,
+    fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtMemory: fmtMemory, fmtMb: fmtMb, fmtPct: fmtPct, ordinal: ordinal, truncate: truncate,
     stateWord: stateWord, stateGlyph: stateGlyph, reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
@@ -961,8 +968,8 @@
     };
     var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">stale ' + fmtDuration(age) + "</span> · " : "sampled <span data-tick=\"age\" data-from=\"" + esc(h.sampled_at || "") + "\">" + esc(fmtAgo(age)) + "</span> · ") + esc(h.os || DASH) + " · " + (isNum(h.cores) ? h.cores + " cores" : DASH) + " · load " + (Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH) + "</span></div>";
     html += meter("cpu", "CPU " + fmtPct(cpu.busy), isNum(cpu.user) && isNum(cpu.sys) ? "user " + Math.round(cpu.user) + " · sys " + Math.round(cpu.sys) : (stale ? "last known" : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
-    html += meter("mem", "Memory " + (isNum(mem.used_bytes) ? fmtBytes(mem.used_bytes) : DASH) + " / " + (isNum(mem.total_bytes) ? fmtBytes(mem.total_bytes) : DASH), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · comp " + fmtBytes(mem.compressed_bytes) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
-    if (gpu) html += meter("gpu", "GPU " + fmtPct(gpu.util_pct) + " busy", isNum(gpu.mem_used_bytes) ? fmtBytes(gpu.mem_used_bytes) + " in use" : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
+    html += meter("mem", "Memory " + fmtMemory(mem.used_bytes) + " / " + fmtMemory(mem.total_bytes), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · comp " + fmtMemory(mem.compressed_bytes) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
+    if (gpu) html += meter("gpu", "GPU " + fmtPct(gpu.util_pct) + " busy", isNum(gpu.mem_used_bytes) ? fmtMemory(gpu.mem_used_bytes) + " in use" : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
     else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>GPU — ' + esc(h.gpu_note || "unavailable") + "</span><span></span></div></div>";
     if (Array.isArray(h.top) && h.top.length) html += '<div class="top">top: ' + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
     body.innerHTML = html + "</div>";

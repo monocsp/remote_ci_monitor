@@ -223,6 +223,11 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 @media (min-width: 961px) { .prog .src-block { display: none; } }
 @media (max-width: 720px) {
   .page { padding: 8px 8px 60px; }
+  .s-h .n, .reason, .eta, .blocked, .stalled, .stuck, .pill, td.elapsed, .sum .v { white-space: normal; overflow-wrap: anywhere; }
+  .qwrap { overflow: visible; }
+  .hostcard .meter, .hostcard .hn, .hostcard .top { min-width: 0; overflow-wrap: anywhere; }
+  .meter .lab { flex-wrap: wrap; gap: 0 8px; }
+  .tail { max-width: 100%; }
   .summary { grid-template-columns: 1fr; }
   .s-top .sub, .workers .wk .lane-word { display: none; }
   table.q thead { display: none; }
