@@ -21,7 +21,8 @@ jobs:
           fetch-depth: 0
       - name: 태그가 main 위에 있는지 (릴리스는 main 에서만)
         run: |
-          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
+          # --tags 를 붙이면 checkout 이 이미 만든 태그를 「would clobber existing tag」 로 거부한다 — main 만 받는다
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::release tags must point at a commit on main"
             exit 1
