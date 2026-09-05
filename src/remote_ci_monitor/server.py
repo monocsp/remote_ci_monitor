@@ -1230,9 +1230,9 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(405, "method not allowed; use GET")
         app = self.app
         job: Job | None = None
-        if job_id is None:
-            self._read_only_ok()
-        else:
+        # 잡별 스트림도 읽기 라우트 — 인증 먼저(basic 모드의 익명 스트림 차단), 존재 여부는 그 뒤
+        self._read_only_ok()
+        if job_id is not None:
             job = app.store.get_job(job_id)
             if job is None:
                 raise ApiError(404, "no such job")

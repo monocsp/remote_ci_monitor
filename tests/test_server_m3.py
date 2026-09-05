@@ -154,12 +154,14 @@ def basic(user: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Basic {raw}"}
 
 
-def sse_first_event(srv: Server, headers: dict[str, str]) -> tuple[int, str | None]:
-    """`GET /events` 를 열어 (상태, 첫 프레임의 event 이름) 을 돌려주고 닫는다."""
+def sse_first_event(
+    srv: Server, headers: dict[str, str], path: str = "/events"
+) -> tuple[int, str | None]:
+    """`GET /events`(또는 `path`)를 열어 (상태, 첫 프레임의 event 이름) 을 돌려주고 닫는다."""
     conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
     conn.connect()
     sock = conn.sock  # getresponse 뒤에는 conn.sock 이 None 이 된다
-    conn.request("GET", "/events", headers={"Accept": "text/event-stream", **headers})
+    conn.request("GET", path, headers={"Accept": "text/event-stream", **headers})
     resp = conn.getresponse()
     try:
         if resp.status != 200:
@@ -509,3 +511,27 @@ def test_basic_header_is_ignored_when_read_auth_is_none(tmp_path):
         assert s.req("POST", "/jobs", json_body={"preset": "ok"}, headers=right)[0] == 401
     finally:
         s.close()
+
+
+def test_job_event_stream_is_a_read_route_in_basic_mode(basic_srv):
+    """`/jobs/{id}/events` 도 읽기 라우트다(명세 §5) — 익명이면 401, Basic/Bearer 자격이면 hello.
+    존재하지 않는 잡도 인증이 먼저라 익명에게 404 로 존재 여부를 알리지 않는다."""
+    jid = basic_srv.submit()[1]["job_id"]
+    stream = f"/jobs/{jid}/events"
+    assert sse_first_event(basic_srv, {}, path=stream)[0] == 401
+    alice = basic("alice-laptop", basic_srv.tokens["alice"])
+    assert sse_first_event(basic_srv, alice, path=stream) == (200, "hello")
+    bearer = {"Authorization": f"Bearer {basic_srv.tokens['alice']}"}
+    assert sse_first_event(basic_srv, bearer, path=stream) == (200, "hello")
+    assert sse_first_event(basic_srv, {}, path="/jobs/999/events")[0] == 401
+    assert sse_first_event(basic_srv, alice, path="/jobs/999/events")[0] == 404
+
+
+def test_job_event_stream_stays_anonymous_when_read_auth_is_none(tmp_path):
+    srv = Server(tmp_path, workers=False)
+    try:
+        jid = srv.submit()[1]["job_id"]
+        assert sse_first_event(srv, {}, path=f"/jobs/{jid}/events") == (200, "hello")
+    finally:
+        srv.close()
+
