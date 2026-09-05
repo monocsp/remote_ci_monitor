@@ -21,6 +21,11 @@ COPY pyproject.toml README.md LICENSE CHANGELOG.md ./
 COPY src ./src
 RUN pip install --no-cache-dir . && rm -rf /src
 
+# /data must exist and belong to rcm before it is declared a volume: a fresh named volume copies
+# the image directory's ownership, and a root-owned /data would make the non-root server fail to
+# create its SQLite database on first start. /config is read-only (bind-mounted server.toml).
+RUN mkdir -p /data /config && chown rcm:rcm /data
+
 USER rcm
 WORKDIR /home/rcm
 VOLUME ["/data", "/config"]
