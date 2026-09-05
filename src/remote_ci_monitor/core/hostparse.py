@@ -142,7 +142,7 @@ def parse_ps(text: str, limit: int = 5) -> list[dict[str, Any]]:
 def parse_ioreg_gpu(text: str) -> tuple[dict[str, Any] | None, str | None]:
     """`ioreg -r -d 1 -w 0 -c IOAccelerator` 의 PerformanceStatistics → (gpu dict, note).
 
-    Apple Silicon 은 통합 메모리라 `mem_total_bytes` 는 None. 가속기가 여럿이면 첫 번째.
+    Apple Silicon 은 통합 메모리라 `mem_total_bytes` 는 None. 가속기가 여럿이면 util 은 max, 메모리는 합.
     """
     if not text:
         return None, "no IOAccelerator PerformanceStatistics"

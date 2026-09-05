@@ -49,7 +49,8 @@ def parse_ioreg_gpu(text: str) -> tuple[dict[str, Any] | None, str | None]
     # "Device Utilization %" → util_pct(int), "In use system memory" → mem_used_bytes. mem_total_bytes 는 None(통합 메모리).
     # 반환 ({"util_pct": 1, "mem_used_bytes": 27443200, "mem_total_bytes": None, "source": "ioreg"}, None)
     # IOAccelerator 가 없거나 PerformanceStatistics 가 없으면 (None, "no IOAccelerator PerformanceStatistics")
-    # 여러 가속기가 있으면 첫 번째. 키가 일부만 있으면 있는 것만(없는 값은 None).
+    # 가속기가 여럿이면 PerformanceStatistics 가 있는 것만 모아 util 은 max, 메모리는 합(Codex M1 리뷰 8).
+    # 키가 일부만 있으면 있는 것만(없는 값은 None).
 
 def parse_sysctl_int(text: str) -> int | None
 
