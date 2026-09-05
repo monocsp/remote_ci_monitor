@@ -280,11 +280,24 @@ def test_wait_falls_back_to_polling_when_sse_is_refused(tmp_path, env, capsys, m
         calls = count_events(monkeypatch)
         env(server)
         assert server.req("GET", "/events", raw=True)[0] == 503  # 서버가 SSE 를 거부한다
+        # 큐를 멈춰 두어 wait 가 잡이 끝나기 전에 시작되게 한다
+        # (빠른 러너에서 먼저 끝나면 SSE 를 열 기회가 없다)
+        assert server.req("POST", "/pause", token="admin", json_body={})[0] == 200
         jid = run_ok_job(server)
-        code, out, _ = run(capsys, ["wait", "--job", str(jid)])
-        assert code == 0
-        assert last_json(out)["state"] == "succeeded"
+        result: dict = {}
+        waiter = threading.Thread(
+            target=lambda: result.update(code=main(["wait", "--job", str(jid)]))
+        )
+        waiter.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not calls:
+            time.sleep(0.05)
         assert calls  # SSE 를 시도는 했고 503 을 받고 폴링으로 넘어갔다
+        assert server.req("POST", "/resume", token="admin", json_body={})[0] == 200
+        waiter.join(timeout=30)
+        assert result.get("code") == 0
+        out, _ = capsys.readouterr()
+        assert last_json(out)["state"] == "succeeded"
     finally:
         server.close()
 
