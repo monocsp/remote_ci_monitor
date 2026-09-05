@@ -86,6 +86,27 @@ MUTANTS = (
         tests=("tests/web/summary.test.js",),
         runner="node",
     ),
+    Mutant(
+        name="retention-active-guard",
+        path="src/remote_ci_monitor/core/retention.py",
+        old=(
+            "    if state in TERMINAL_STATES:\n"
+            "        return policy.failure_days * DAY_SECONDS\n"
+            "    return None\n"
+        ),
+        new="    return policy.failure_days * DAY_SECONDS\n",
+        tests=("tests/test_retention.py",),
+    ),
+    Mutant(
+        name="gitref-leading-dash",
+        path="src/remote_ci_monitor/core/gitref.py",
+        old=(
+            '    if ref.startswith("-"):\n'
+            "        raise ValueError(\"ref must not start with '-'\")\n"
+        ),
+        new="",
+        tests=("tests/test_gitref.py",),
+    ),
 )
 
 

@@ -150,7 +150,8 @@ def test_read_auth_basic_requires_token_for_ui_and_assets(tmp_path):
         for path in ("/", "/static/app.js", "/static/style.css"):
             status, headers, body = s.req("GET", path, raw=True)
             assert status == 401, path
-            assert headers.get("WWW-Authenticate", "").startswith("Bearer")
+            # M3(결정 23): 읽기 라우트의 401 은 브라우저 프롬프트를 여는 Basic 챌린지다
+            assert headers.get("WWW-Authenticate", "").startswith('Basic realm="rcm"')
             assert isinstance(json.loads(body).get("error"), str)  # JSON 한 줄, 로그인 페이지 아님
             assert s.req("HEAD", path, raw=True)[0] == 401, path
             assert s.req("GET", path, token="alice")[0] == 200, path

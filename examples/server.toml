@@ -13,6 +13,12 @@ grace_seconds = 10          # SIGTERM → SIGKILL grace on cancel/timeout
 recent_count = 8
 upload_stall_seconds = 60
 upload_abandon_seconds = 300
+retention_days_success = 14     # logs/snapshots of succeeded jobs are removed after this
+retention_days_failure = 30     # failed/cancelled/lost jobs keep logs (and workspace) this long
+metadata_retention_days = 180   # job rows/events are deleted after this (>= sample_days)
+retention_sweep_interval_seconds = 3600
+git_resolve_timeout_seconds = 20    # git ls-remote at submit time (git_ref presets)
+git_fetch_timeout_seconds = 600     # fetch + checkout while materializing
 
 [estimate]
 sample_days = 45
@@ -32,6 +38,14 @@ history_samples = 60
 
 [display]
 timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local / browser local.
+
+# ── Repositories for git_ref presets (deploy/release) ──────────────────────
+# The server fetches the ref itself (mirror under <data_dir>/mirrors/<name>) using the build
+# machine's git credentials (ssh key / credential helper). Any git hosting works.
+# Uncomment and point at your repository:
+# [[repos]]
+# name = "app"
+# url = "git@github.com:org/app.git"
 
 # ── Presets ────────────────────────────────────────────────────────────────
 # argv runs from the uploaded workspace root. No shell interpolation: inputs arrive as
@@ -77,3 +91,15 @@ name = "device"
 type = "string"
 pattern = "[A-Za-z0-9._-]+"
 default = "default"
+
+# A deploy preset runs a remote ref instead of an uploaded tree: `rcm run deploy --ref v1.2.3`.
+# The server pins the commit sha at submit time; the workspace is a detached checkout (.git kept,
+# submodules are NOT initialised — do it in the script if needed). Requires a [[repos]] entry.
+# [[presets]]
+# name = "deploy"
+# description = "Deploy a tagged release"
+# argv = ["bash", "scripts/deploy.sh"]
+# source_modes = ["git_ref"]
+# repo = "app"
+# timeout_seconds = 1800
+# concurrency_group = "deploy"
