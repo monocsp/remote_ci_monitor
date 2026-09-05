@@ -1,0 +1,138 @@
+# 릴리스. 태그 `vX.Y.Z` 를 push 하면: main 위의 커밋인지 · 버전이 __version__ 과 같은지 확인 → sdist+wheel
+# 빌드 → 두 OS 에서 설치 스모크 → GitHub Release(wheel · sdist · CHANGELOG 절) → PyPI(trusted publishing,
+# 저장소 변수 PYPI_PUBLISH=true 일 때만 — 오너가 PyPI 에 publisher 를 등록한 뒤 켠다. environment 이름 `pypi`
+# 는 PyPI 쪽 설정과 정확히 같아야 한다).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 태그가 main 위에 있는지 (릴리스는 main 에서만)
+        run: |
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::release tags must point at a commit on main"
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 태그 == __version__
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VER=$(python -c "import sys; sys.path.insert(0, 'src'); import remote_ci_monitor as m; print(m.__version__)")
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error::tag $TAG does not match __version__ $VER"
+            exit 1
+          fi
+      - name: 빌드 (sdist + wheel)
+        run: python -m pip install -q build twine && python -m build
+      - name: 산출물 검사 (twine check · 버전 · 파일명)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python -m twine check dist/*
+          ls dist/remote_ci_monitor-${TAG#v}-py3-none-any.whl dist/remote_ci_monitor-${TAG#v}.tar.gz
+          python - "$TAG" <<'PY'
+          import sys, zipfile, glob
+          tag = sys.argv[1][1:]
+          (whl,) = glob.glob("dist/*.whl")
+          with zipfile.ZipFile(whl) as zf:
+              meta = next(n for n in zf.namelist() if n.endswith("METADATA"))
+              text = zf.read(meta).decode()
+              names = zf.namelist()
+          assert f"\nVersion: {tag}\n" in text, text[:400]
+          for needed in ("web/index.html", "templates/server.toml", "templates/client.toml"):
+              assert any(n.endswith(needed) for n in names), needed
+          print("wheel metadata ok:", whl)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  smoke:
+    name: smoke
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: 설치 스모크 (새 venv · README 절차 · 루프백)
+        run: scripts/smoke_install.sh dist/*.whl
+
+  github-release:
+    name: github-release
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: CHANGELOG 의 해당 절을 릴리스 노트로
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - "$TAG" <<'PY' > notes.md
+          import re, sys
+          tag = sys.argv[1][1:]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(rf"^## \[{re.escape(tag)}\].*?$(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+          body = (m.group(1).strip() if m else "") or f"Release {tag}."
+          print(body)
+          PY
+          cat notes.md
+      - name: GitHub Release (있으면 파일만 갱신)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md
+          fi
+
+  pypi:
+    name: pypi
+    needs: smoke
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

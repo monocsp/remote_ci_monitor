@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T00:52:12Z",
+  "display_timezone": "Asia/Seoul",
+  "server": {
+    "version": "0.1.0",
+    "uptime_seconds": 3012,
+    "lanes": 1,
+    "paused": null,
+    "last_error": null,
+    "sse_connections": 1,
+    "workers": [
+      {
+        "lane": 1,
+        "state": "busy",
+        "job_id": 412,
+        "error": null,
+        "since": "2026-09-04T00:51:13Z"
+      }
+    ]
+  },
+  "presets": [
+    {
+      "name": "gate",
+      "description": "Full local gate",
+      "source_modes": [
+        "tree"
+      ],
+      "concurrency_group": null,
+      "expected_seconds": 480,
+      "timeout_seconds": 1200,
+      "inputs": [
+        {
+          "name": "scope",
+          "type": "choice",
+          "choices": [
+            "full",
+            "commit",
+            "fast"
+          ],
+          "default": "full",
+          "pattern": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "qa",
+      "description": "QA on shared simulators",
+      "source_modes": [
+        "tree"
+      ],
+      "concurrency_group": "devices",
+      "expected_seconds": 540,
+      "timeout_seconds": 1800,
+      "inputs": [
+        {
+          "name": "suite",
+          "type": "choice",
+          "choices": [
+            "smoke",
+            "device-smoke"
+          ],
+          "default": "smoke",
+          "pattern": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "deploy-dev",
+      "description": "Deploy dev branch",
+      "source_modes": [
+        "git_ref"
+      ],
+      "concurrency_group": null,
+      "expected_seconds": 300,
+      "timeout_seconds": 900,
+      "inputs": []
+    }
+  ],
+  "pools": [
+    {
+      "name": "default",
+      "lanes": 1,
+      "queue": [
+        {
+          "id": 412,
+          "position": null,
+          "preset": "gate",
+          "key": "gate:full",
+          "inputs": {
+            "scope": "full"
+          },
+          "concurrency_group": null,
+          "requester": {
+            "name": "alice-laptop",
+            "label": "alice@laptop"
+          },
+          "joiners": [
+            {
+              "name": "eve-ci",
+              "label": "eve@ci",
+              "joined_at": "2026-09-04T00:50:58Z"
+            }
+          ],
+          "state": "running",
+          "reason": "running",
+          "lane": 1,
+          "ahead_job_id": null,
+          "blocked_by": null,
+          "cancel": null,
+          "source": {
+            "mode": "tree",
+            "repo": "org/app",
+            "base_sha": "abc123f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4",
+            "dirty": true,
+            "tree_hash": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+            "bytes": 48213344,
+            "received_bytes": 48213344,
+            "last_received_at": "2026-09-04T00:50:52Z"
+          },
+          "created_at": "2026-09-04T00:50:40Z",
+          "queued_at": "2026-09-04T00:50:52Z",
+          "started_at": "2026-09-04T00:51:13Z",
+          "estimate": {
+            "confidence": "high",
+            "expected_seconds": 369,
+            "source": "measured",
+            "sample_count": 7,
+            "elapsed_seconds": 59,
+            "waited_seconds": 33,
+            "remaining_seconds": 310,
+            "wait_seconds": 0,
+            "overdue": false,
+            "stuck": false,
+            "finish_at": "2026-09-04T00:57:22Z"
+          },
+          "progress": {
+            "timing": "as_received",
+            "phase": "executing",
+            "last_output_at": "2026-09-04T00:52:10Z",
+            "steps_total": 8,
+            "steps_total_partial": false,
+            "steps_done": 4,
+            "current_index": 5,
+            "current_name": "test",
+            "current_seconds": 51,
+            "job_seconds": 59,
+            "failed_step": null,
+            "steps": [
+              {
+                "index": 1,
+                "name": "analyze",
+                "state": "done",
+                "ok": true,
+                "seconds": 12
+              },
+              {
+                "index": 2,
+                "name": "format",
+                "state": "done",
+                "ok": true,
+                "seconds": 3
+              },
+              {
+                "index": 3,
+                "name": "lint",
+                "state": "done",
+                "ok": true,
+                "seconds": 8
+              },
+              {
+                "index": 4,
+                "name": "deps",
+                "state": "done",
+                "ok": true,
+                "seconds": 21
+              },
+              {
+                "index": 5,
+                "name": "test",
+                "state": "running",
+                "ok": null,
+                "seconds": 51
+              }
+            ]
+          },
+          "log_tail": [
+            "[test] 3/9 packages · 412 passed · 0 failed",
+            "[test] running integration/notification_setting_test.dart",
+            "[test] golden: home_tutorial_v3 ✓"
+          ],
+          "url": "http://macmini:8787/#/jobs/412"
+        },
+        {
+          "id": 414,
+          "position": 1,
+          "preset": "gate",
+          "key": "gate:fast",
+          "inputs": {
+            "scope": "fast"
+          },
+          "concurrency_group": null,
+          "requester": {
+            "name": "alice-laptop",
+            "label": "alice@laptop"
+          },
+          "joiners": [],
+          "state": "queued",
+          "reason": "waiting_for_lane",
+          "lane": null,
+          "ahead_job_id": 412,
+          "blocked_by": null,
+          "cancel": null,
+          "source": {
+            "mode": "tree",
+            "repo": "org/app",
+            "base_sha": "abc123f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4",
+            "dirty": true,
+            "tree_hash": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+            "bytes": 48213344,
+            "received_bytes": 48213344,
+            "last_received_at": "2026-09-04T00:51:35Z"
+          },
+          "created_at": "2026-09-04T00:51:32Z",
+          "queued_at": "2026-09-04T00:51:35Z",
+          "started_at": null,
+          "estimate": {
+            "confidence": "high",
+            "expected_seconds": 65,
+            "source": "measured",
+            "sample_count": 12,
+            "elapsed_seconds": null,
+            "waited_seconds": 40,
+            "remaining_seconds": 65,
+            "wait_seconds": 310,
+            "overdue": false,
+            "stuck": false,
+            "finish_at": "2026-09-04T00:58:27Z"
+          },
+          "progress": null,
+          "log_tail": null,
+          "url": "http://macmini:8787/#/jobs/414"
+        }
+      ],
+      "queue_error": null,
+      "recent": [],
+      "recent_count": 8,
+      "recent_error": null,
+      "medians": {
+        "gate:full": {
+          "seconds": 369,
+          "wait_seconds": 80,
+          "sample_count": 7
+        },
+        "gate:fast": {
+          "seconds": 65,
+          "wait_seconds": 40,
+          "sample_count": 12
+        },
+        "qa:device-smoke": {
+          "seconds": 540,
+          "wait_seconds": 12,
+          "sample_count": 3
+        }
+      },
+      "medians_error": null,
+      "hosts": [],
+      "hosts_error": null
+    }
+  ]
+}

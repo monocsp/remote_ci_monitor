@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T00:52:12Z",
+  "display_timezone": "Asia/Seoul",
+  "server": {
+    "version": "0.1.0",
+    "uptime_seconds": 3012,
+    "lanes": 2,
+    "paused": {
+      "by": "macmini-admin",
+      "at": "2026-09-04T00:50:00Z"
+    },
+    "last_error": "Errno 28 no space left on device",
+    "sse_connections": 1,
+    "workers": [
+      {
+        "lane": 1,
+        "state": "down",
+        "job_id": null,
+        "error": "ENOSPC",
+        "since": "2026-09-04T00:49:30Z"
+      },
+      {
+        "lane": 2,
+        "state": "busy",
+        "job_id": 409,
+        "error": null,
+        "since": "2026-09-04T00:45:52Z"
+      }
+    ]
+  },
+  "presets": [
+    {
+      "name": "gate",
+      "description": "Full local gate",
+      "source_modes": [
+        "tree"
+      ],
+      "concurrency_group": null,
+      "expected_seconds": 480,
+      "timeout_seconds": 1200,
+      "inputs": [
+        {
+          "name": "scope",
+          "type": "choice",
+          "choices": [
+            "full",
+            "commit",
+            "fast"
+          ],
+          "default": "full",
+          "pattern": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "qa",
+      "description": "QA on shared simulators",
+      "source_modes": [
+        "tree"
+      ],
+      "concurrency_group": "devices",
+      "expected_seconds": 540,
+      "timeout_seconds": 1800,
+      "inputs": [
+        {
+          "name": "suite",
+          "type": "choice",
+          "choices": [
+            "smoke",
+            "device-smoke"
+          ],
+          "default": "smoke",
+          "pattern": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "deploy-dev",
+      "description": "Deploy dev branch",
+      "source_modes": [
+        "git_ref"
+      ],
+      "concurrency_group": null,
+      "expected_seconds": 300,
+      "timeout_seconds": 900,
+      "inputs": []
+    }
+  ],
+  "pools": [
+    {
+      "name": "default",
+      "lanes": 2,
+      "queue": [
+        {
+          "id": 409,
+          "position": null,
+          "preset": "qa",
+          "key": "qa:device-smoke",
+          "inputs": {
+            "suite": "device-smoke"
+          },
+          "concurrency_group": "devices",
+          "requester": {
+            "name": "carol-mbp",
+            "label": "carol@mbp"
+          },
+          "joiners": [],
+          "state": "running",
+          "reason": "running",
+          "lane": 2,
+          "ahead_job_id": null,
+          "blocked_by": null,
+          "cancel": null,
+          "source": {
+            "mode": "git_ref",
+            "repo": "org/app",
+            "ref": "dev",
+            "sha": "9e1d2c0b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d"
+          },
+          "created_at": "2026-09-04T00:45:44Z",
+          "queued_at": "2026-09-04T00:45:44Z",
+          "started_at": "2026-09-04T00:45:52Z",
+          "estimate": {
+            "confidence": "med",
+            "expected_seconds": 540,
+            "source": "measured",
+            "sample_count": 3,
+            "elapsed_seconds": 380,
+            "waited_seconds": 8,
+            "remaining_seconds": 160,
+            "wait_seconds": 0,
+            "overdue": false,
+            "stuck": false,
+            "finish_at": "2026-09-04T00:54:52Z"
+          },
+          "progress": {
+            "timing": "as_received",
+            "phase": "executing",
+            "last_output_at": "2026-09-04T00:52:05Z",
+            "steps_total": 3,
+            "steps_total_partial": true,
+            "steps_done": 2,
+            "current_index": 3,
+            "current_name": "boot-simulators",
+            "current_seconds": 200,
+            "job_seconds": 380,
+            "failed_step": null,
+            "steps": [
+              {
+                "index": 1,
+                "name": "checkout",
+                "state": "done",
+                "ok": true,
+                "seconds": 30
+              },
+              {
+                "index": 2,
+                "name": "build",
+                "state": "done",
+                "ok": true,
+                "seconds": 150
+              },
+              {
+                "index": 3,
+                "name": "boot-simulators",
+                "state": "running",
+                "ok": null,
+                "seconds": 200
+              }
+            ]
+          },
+          "log_tail": null,
+          "url": "http://macmini:8787/#/jobs/409"
+        },
+        {
+          "id": 413,
+          "position": 1,
+          "preset": "qa",
+          "key": "qa:smoke",
+          "inputs": {
+            "suite": "smoke"
+          },
+          "concurrency_group": "devices",
+          "requester": {
+            "name": "bob-desk",
+            "label": "bob@desk"
+          },
+          "joiners": [],
+          "state": "queued",
+          "reason": "paused",
+          "lane": null,
+          "ahead_job_id": null,
+          "blocked_by": null,
+          "cancel": null,
+          "source": {
+            "mode": "tree",
+            "repo": "org/app",
+            "base_sha": "def4567a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e",
+            "dirty": false,
+            "tree_hash": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+            "bytes": 48213344,
+            "received_bytes": 48213344,
+            "last_received_at": "2026-09-04T00:50:45Z"
+          },
+          "created_at": "2026-09-04T00:50:37Z",
+          "queued_at": "2026-09-04T00:50:45Z",
+          "started_at": null,
+          "estimate": {
+            "confidence": "low",
+            "expected_seconds": 540,
+            "source": "preset",
+            "sample_count": 1,
+            "elapsed_seconds": null,
+            "waited_seconds": 95,
+            "remaining_seconds": 540,
+            "wait_seconds": null,
+            "overdue": false,
+            "stuck": false,
+            "finish_at": null
+          },
+          "progress": null,
+          "log_tail": null,
+          "url": "http://macmini:8787/#/jobs/413"
+        }
+      ],
+      "queue_error": null,
+      "recent": [],
+      "recent_count": 8,
+      "recent_error": null,
+      "medians": {},
+      "medians_error": null,
+      "hosts": [],
+      "hosts_error": null
+    }
+  ]
+}

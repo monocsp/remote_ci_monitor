@@ -1,0 +1,40 @@
+# remote_ci_monitor — systemd unit for a Linux build machine.
+#
+#   sudo useradd --create-home --shell /bin/bash rcm          # dedicated user, no sudo
+#   sudo -iu rcm pipx install remote-ci-monitor               # installs ~/.local/bin/rcm
+#   sudo -iu rcm mkdir -p ~/.config/rcm && edit ~/.config/rcm/server.toml, then `rcm token add`
+#   sudo cp rcm-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rcm-server
+#   journalctl -u rcm-server -f
+#
+# SIGTERM (stop/restart) shuts the server down cleanly; jobs that were running are marked lost.
+# ProtectHome is deliberately NOT set: the data dir and config live under /home/rcm.
+
+[Unit]
+Description=remote_ci_monitor job server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rcm
+Group=rcm
+WorkingDirectory=/home/rcm
+ExecStart=/home/rcm/.local/bin/rcm serve --config /home/rcm/.config/rcm/server.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+LimitNOFILE=4096
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=en_US.UTF-8
+# Presets inherit PATH from here (env_passthrough). Add the toolchains they need.
+Environment=PATH=/home/rcm/.local/bin:/usr/local/bin:/usr/bin:/bin
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/rcm
+
+[Install]
+WantedBy=multi-user.target

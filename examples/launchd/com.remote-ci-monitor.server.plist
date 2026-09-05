@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  remote_ci_monitor — launchd service for the build machine (macOS).
+
+  1. Create a dedicated user (here: rcm) without sudo, install with `pipx install remote-ci-monitor`.
+  2. Put the config at /Users/rcm/.config/rcm/server.toml and create tokens with `rcm token add`.
+  3. Edit the paths below (rcm binary, config, log directory), then as that user:
+       mkdir -p ~/Library/Logs/rcm ~/Library/LaunchAgents
+       cp com.remote-ci-monitor.server.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.server.plist
+     Stop: launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server
+  4. Keep the machine awake: `sudo pmset -a sleep 0 disksleep 0` (or run `caffeinate -s`).
+  SIGTERM (stop/reboot) shuts the server down cleanly; jobs that were running are marked lost.
+  launchd does not expand `~` — every path here is absolute.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.remote-ci-monitor.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/rcm/.local/bin/rcm</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>/Users/rcm/.config/rcm/server.toml</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>WorkingDirectory</key>
+  <string>/Users/rcm</string>
+  <key>StandardOutPath</key>
+  <string>/Users/rcm/Library/Logs/rcm/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/rcm/Library/Logs/rcm/server.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Presets inherit PATH from here (env_passthrough). Include Homebrew and the toolchains they need. -->
+    <key>PATH</key>
+    <string>/Users/rcm/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/rcm</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>

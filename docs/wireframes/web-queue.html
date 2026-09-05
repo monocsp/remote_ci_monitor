@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rcm 큐 화면</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* ── 토큰: 라이트가 기본, 다크는 토큰만 바꾼다 ── */
+:root {
+  --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
+  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1E8A4C; --ok-soft: #E1F3E8; --warn: #B26A00; --warn-soft: #FBEFD9;
+  --bad: #C23B32; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #6B7A8B; --queued-soft: #ECF0F4;
+  --callout: #C0287A; --callout-ink: #FFFFFF; --callout-soft: #FBE4F0;
+  --sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+    --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+    --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+    --callout: #F26DB5; --callout-ink: #1A0B14; --callout-soft: #3B1A2C;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+  --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+  --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+  --callout: #F26DB5; --callout-ink: #1A0B14; --callout-soft: #3B1A2C;
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.55; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+table { font: inherit; }
+button:focus-visible, [tabindex]:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.page { max-width: 1220px; margin: 0 auto; padding: 32px 24px 80px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: 30px; font-weight: 600; margin: 6px 0 10px; letter-spacing: -0.01em; text-wrap: balance; }
+h2 { font-size: 20px; font-weight: 600; margin: 48px 0 12px; }
+h3 { font-size: 16px; font-weight: 600; margin: 0; }
+.lede { max-width: 68ch; color: var(--muted); margin: 0 0 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend .b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); }
+.legend .ln { display: inline-block; width: 34px; border-top: 1.5px dashed var(--callout); vertical-align: middle; }
+.rev { font-size: 13px; color: var(--muted); max-width: 78ch; margin-top: 8px; }
+
+/* ── 주석 컨테이너 ── */
+.annot-wrap { overflow-x: auto; padding-bottom: 6px; }
+.annot { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 76px; min-width: 1140px; }
+.annot svg.lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.annot .gutter { position: relative; }
+.badge { position: absolute; left: 22px; transform: translateY(-50%); width: 26px; height: 26px; border-radius: 50%; background: var(--callout); color: var(--callout-ink);
+  font: 600 12px var(--mono); display: grid; place-items: center; cursor: pointer; border: 0; padding: 0; box-shadow: 0 0 0 3px var(--bg); }
+.badge.on { transform: translateY(-50%) scale(1.15); }
+[data-c] { position: relative; }
+[data-c].hl { outline: 2px solid var(--callout); outline-offset: 3px; border-radius: 3px; }
+.lines .lead { fill: none; stroke: var(--callout); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: 0.7; }
+.lines .lead.on { stroke-width: 2; stroke-dasharray: none; opacity: 1; }
+.lines .dot { fill: var(--callout); }
+
+/* ── 목업 화면 ── */
+.screen { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); overflow: hidden; font-size: 13.5px; }
+.s-top { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.wordmark { font: 600 15px var(--mono); letter-spacing: 0.02em; }
+.s-top .host { font-family: var(--mono); }
+.workers { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.wk i { width: 8px; height: 8px; border-radius: 50%; background: var(--queued); }
+.wk.busy i { background: var(--accent); }
+.wk.down { border-color: var(--bad); color: var(--bad); }
+.wk.down i { background: var(--bad); border-radius: 1px; }
+.wk.paused { border-color: var(--warn); color: var(--warn); }
+.wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
+.spacer { flex: 1; }
+.livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--mono); background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.livebtn .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.livebtn.paused .live { background: var(--queued); box-shadow: none; }
+.tokbtn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--surface); font: 12px var(--mono); color: var(--ink); cursor: pointer; }
+.tokbtn.bad { border-color: var(--bad); color: var(--bad); }
+.errchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 11.5px var(--mono); }
+
+.s-section { padding: 12px 16px 14px; border-bottom: 1px solid var(--line-2); }
+.s-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.s-h .t { font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; font-size: 12px; color: var(--muted); }
+.s-h .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.s-h .n b { color: var(--ink); font-weight: 500; }
+
+.summary { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line-2); background: var(--surface-2); }
+.sum { display: grid; gap: 3px; font-size: 13px; align-content: start; }
+.sum .lab { font: 500 11px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.sum .v { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+.sum .v b { font-weight: 500; }
+.sum .v .ok { color: var(--ok); }
+.sum .v .warn { color: var(--warn); }
+.sum .v .muted { color: var(--muted); }
+
+table.q { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.q th { text-align: left; font-weight: 500; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.q th .tzh { text-transform: none; letter-spacing: 0; color: var(--muted); font-family: var(--mono); }
+table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+.num, .pill, .eta, .blocked, .chip, .sha, .conf, .pos, .stuck { white-space: nowrap; }
+.reason { white-space: normal; }
+table.q tr.exp td { border-bottom: 0; }
+table.q td.num { font-family: var(--mono); }
+table.q td.num .id { font-weight: 500; }
+.pos { display: block; font: 11.5px var(--mono); color: var(--muted); margin-top: 2px; }
+table.q tr.mine td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.q tr.overdue td:first-child { box-shadow: inset 4px 0 0 var(--warn); }
+table.q tr.mine.overdue td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 7px 0 0 var(--warn); }
+.you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 500 10.5px var(--mono); vertical-align: 1px; }
+.joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 500 10.5px var(--mono); vertical-align: 1px; }
+
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font: 500 11.5px var(--mono); }
+.pill.running { background: var(--accent-soft); color: var(--accent); }
+.pill.queued { background: var(--queued-soft); color: var(--queued); }
+.pill.uploading { background: var(--surface); color: var(--queued); border: 1px dashed var(--queued); }
+.pill.uploading .ub { display: inline-block; width: 34px; height: 5px; border-radius: 3px; background: var(--line-2); overflow: hidden; }
+.pill.uploading .ub i { display: block; height: 100%; width: 62%; background: var(--queued); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.timedout { background: var(--bad-soft); color: var(--bad); border: 1px dashed var(--bad); }
+.pill.cancelled { background: var(--queued-soft); color: var(--queued); }
+.pill.lost { background: var(--lost-soft); color: var(--lost); }
+.pill.cancelling { background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn); }
+.key { font-family: var(--mono); font-weight: 500; }
+.chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font: 11.5px var(--mono); color: var(--muted); margin-left: 4px; }
+.sha { font-family: var(--mono); }
+.uncommitted { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--warn); color: var(--warn); font: 500 11px var(--mono); }
+.uncommitted::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--warn); }
+.sub { color: var(--muted); font-size: 12px; }
+.eta { font-family: var(--mono); }
+.eta .in { color: var(--muted); }
+.conf { display: inline-block; margin-top: 2px; padding: 0 6px; border-radius: 4px; font: 500 10.5px var(--mono); }
+.conf.high { background: var(--ok-soft); color: var(--ok); }
+.conf.med { background: var(--queued-soft); color: var(--queued); }
+.conf.low { background: var(--surface); color: var(--muted); border: 1px dashed var(--line); font-style: italic; }
+.conf.over { background: var(--warn-soft); color: var(--warn); }
+.reason { font-family: var(--mono); font-size: 12px; color: var(--muted); line-height: 1.5; }
+.reason.act { color: var(--ink); }
+.reason b { font-weight: 500; }
+.blocked { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; border: 1.5px dashed var(--warn); color: var(--warn); font: 500 11.5px var(--mono); background: transparent; }
+.over { color: var(--warn); font-weight: 500; }
+.stalled { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 500 11.5px var(--mono); }
+.stuck { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 11.5px var(--mono); }
+.rerun { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font: 11px var(--mono); color: var(--ink); cursor: pointer; }
+
+.prog { padding: 4px 8px 12px 46px; }
+.prog .head { display: flex; gap: 14px; align-items: baseline; font-family: var(--mono); font-size: 12.5px; margin-bottom: 6px; flex-wrap: wrap; }
+.prog .head b { font-weight: 500; }
+.prog .note { color: var(--muted); }
+.minibar { display: flex; gap: 2px; height: 4px; max-width: 520px; margin: 0 0 8px; }
+.minibar i { display: block; height: 100%; border-radius: 2px; background: var(--ok); }
+.minibar i.run { background: var(--accent); }
+.minibar i.pend { background: var(--line); }
+.steps { display: grid; grid-template-columns: repeat(2, minmax(0, 280px)); gap: 1px 24px; font: 12px var(--mono); }
+.step { display: grid; grid-template-columns: 16px 1fr auto; gap: 6px; padding: 1px 0; }
+.step .g { color: var(--ok); }
+.step.run { color: var(--accent); }
+.step.run .g { color: var(--accent); }
+.step.pend { color: var(--muted); }
+.step .s { color: var(--muted); }
+.tail { margin-top: 10px; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--muted); white-space: pre; overflow-x: auto; max-width: 640px; }
+.actions { display: inline-flex; gap: 6px; margin-top: 8px; align-items: center; }
+.btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 3px 10px; font: 500 12px var(--sans); cursor: pointer; }
+.btn.danger { color: var(--bad); }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 12px 22px; align-items: start; }
+.hostcard .hn { font-family: var(--mono); }
+.hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }
+.meter { display: grid; gap: 4px; }
+.meter .lab { display: flex; justify-content: space-between; font: 12px var(--mono); }
+.meter .lab span:last-child { color: var(--muted); }
+.meter .bar { height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; display: flex; }
+.meter .bar i { display: block; height: 100%; background: var(--accent); }
+.meter .bar i.b { background: var(--lost); }
+.meter.warn .bar i { background: var(--warn); }
+.meter .spark { display: flex; align-items: center; gap: 8px; font: 11px var(--mono); color: var(--muted); }
+.meter .spark svg { width: 90px; height: 18px; }
+.meter .spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.2; }
+.meter .spark .gap { stroke-dasharray: 2 2; opacity: 0.5; }
+.top { grid-column: 1 / -1; font: 12px var(--mono); color: var(--muted); }
+.top b { color: var(--ink); font-weight: 500; }
+
+.recent { display: grid; gap: 0; }
+.rrow { display: grid; grid-template-columns: 150px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow .k { font-family: var(--mono); font-weight: 500; }
+.rrow .d, .rrow .t { font-family: var(--mono); color: var(--muted); }
+.rrow .s { color: var(--muted); }
+.rrow .s b { color: var(--ink); font-weight: 500; }
+.more { display: inline-block; margin-top: 8px; font: 12px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+details.est { margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
+details.est summary { cursor: pointer; }
+details.est b { color: var(--ink); font-weight: 500; }
+details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+
+/* ── 변형 패널 ── */
+.variants { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; min-width: 0; }
+.variant { min-width: 0; overflow-wrap: anywhere; }
+.variant { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13px; }
+.variant .vt { font: 500 11.5px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+.banner { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px; background: var(--warn-soft); color: var(--warn); border-radius: 6px; font-weight: 500; line-height: 1.4; }
+.banner .live { width: 9px; height: 9px; border-radius: 50%; background: var(--queued); }
+.banner.bad { background: var(--bad-soft); color: var(--bad); }
+.banner.info { background: var(--accent-soft); color: var(--accent); }
+.empty { padding: 18px 12px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }
+.empty code { color: var(--ink); }
+.stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 500 11.5px var(--mono); }
+.dim { opacity: 0.55; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-width: 340px; font-variant-numeric: tabular-nums; }
+.card .r1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card .r2 { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+.mini-s { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.skew { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 11px var(--mono); }
+
+/* ── 기획 항목 ── */
+.specs { display: grid; gap: 14px; }
+.spec { display: grid; grid-template-columns: 34px 1fr; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.spec.on { border-color: var(--callout); box-shadow: 0 0 0 2px var(--callout-soft); }
+.spec .num { width: 26px; height: 26px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); display: grid; place-items: center; }
+.spec .area { font: 11.5px var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.spec dl { display: grid; grid-template-columns: 78px 1fr; gap: 6px 12px; margin: 10px 0 0; max-width: 78ch; }
+.spec dt { color: var(--muted); font-size: 12.5px; padding-top: 2px; }
+.spec dd { margin: 0; }
+.spec dd code { background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
+.group { margin: 26px 0 8px; font: 500 12px var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.qa { max-width: 78ch; }
+.qa li { margin-bottom: 8px; }
+.note { max-width: 78ch; color: var(--muted); font-size: 13.5px; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--callout-soft); color: var(--callout); font: 500 11px var(--mono); vertical-align: 1px; }
+.src { display: inline-block; padding: 0 5px; border-radius: 3px; background: var(--surface-2); color: var(--muted); font: 10.5px var(--mono); vertical-align: 1px; }
+
+@media (max-width: 720px) {
+  .page { padding: 20px 14px 60px; }
+  .variants { grid-template-columns: 1fr; }
+  .spec dl { grid-template-columns: 1fr; }
+  .spec dt { padding-top: 6px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .badge, .spec { transition: transform 120ms ease, box-shadow 120ms ease; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow">remote_ci_monitor · docs/wireframes · 2026-09-04 · PLAN.md v2 「웹 UI (M2)」 · v1.3</div>
+  <h1>웹 큐 화면</h1>
+  <p class="lede">빌드 머신 한 대의 큐·진행·자원·최근 결과를 한 화면에 보여주는 첫 화면이다. 목업은 <code>/api/status</code> 스키마 v1 의 실제 필드 값으로 그렸고, 오른쪽 번호는 그 요소의 기획 항목 번호다. 번호나 항목에 마우스를 올리면 서로 강조되고, 번호를 누르면 항목으로 이동한다.</p>
+  <div class="legend"><span><span class="b">1</span> 기획 항목 번호</span><span><span class="ln"></span> 요소를 가리키는 선</span><span>UI 문자열은 영어(제품 규칙), 설명은 한국어</span><span>레인 2 로 그렸다 — 그룹 대기를 보이기 위해</span></div>
+  <p class="rev"><b>v1.3</b> — 리뷰 세 건을 반영했다: Codex 디자인 리뷰(<code>docs/reviews/2026-09-04-codex-web-queue.md</code>), 기획 누락 리뷰(<code>…subagent-spec-gaps.md</code>), 제품 비교 리서치(<code>…subagent-reference-comparison.md</code>). 바뀐 것: <code>#</code> 는 잡 id 전용이고 순번은 <code>2nd in line</code> 으로 따로(1·6·23) · 합류자 <code>+1</code>(9·23) · Reason 에 근거 숫자(<code>2/2 busy · frees in 2m 40s</code>)와 <code>likely stuck</code> 분리(11·34) · 정지·다운이면 ETA <code>—</code>(28·27) · 소요는 <code>5m 10s</code>, 시각은 <code>09:57</code> 로 통일(4절) · cancelled 는 회색, timed out 은 빨강 점선(14) · 큐 헤더에 <code>oldest waiting</code>(5) · live 토글(2) · 호스트 막대 구간·sparkline(16) · 실패 행 재실행 명령(14) · 변형 4개 추가(32~35). 항목 35개.</p>
+
+  <h2>1. 기본 화면 — 잡 두 개 실행 중, 세 개 대기 (토큰 있음: alice-laptop)</h2>
+  <div class="annot-wrap"><div class="annot" id="main">
+    <div class="screen">
+      <div class="s-top">
+        <span data-c="1" class="workers"><span class="wordmark">rcm</span><span class="host">macmini</span><span class="sub">lanes 2/2 busy</span><span class="wk busy"><i></i>#412</span><span class="wk busy"><i></i>#409</span></span>
+        <span class="spacer"></span>
+        <button data-c="2" class="livebtn" type="button" title="Click to pause updates"><span class="live"></span>live · updated 4s ago</button>
+        <button data-c="4" class="tokbtn" type="button">🔑 alice-laptop</button>
+      </div>
+
+      <div class="summary">
+        <div class="sum" data-c="23"><span class="lab">Your jobs</span><span class="v"><b>#412</b> running · ETA 09:57 · in 5m 10s <span class="muted">· +1 joined</span><br><b>#414</b> 2nd in line · ETA 09:58 · <span class="muted">waiting for lane</span></span></div>
+        <div class="sum" data-c="24"><span class="lab">Not moving</span><span class="v"><b>#413</b> <span class="warn">⛓ blocked by #409 · devices</span> · frees in 2m 40s<br><span class="ok">nothing else is stuck</span></span></div>
+        <div class="sum" data-c="25"><span class="lab">Host pressure · sampled 4s ago</span><span class="v">CPU <b>21%</b> · Mem <b>58%</b> · GPU <b>13%</b><br>load 3.5 / 10 <span class="ok">· fine</span></span></div>
+      </div>
+
+      <div class="s-section">
+        <div class="s-h" data-c="5"><span class="t">Queue</span><span class="n"><b>5</b> jobs · 2 running · 3 waiting · oldest waiting <b>1m 35s</b> · lanes 2/2 busy</span></div>
+        <table class="q">
+          <thead><tr><th>Job</th><th>Key</th><th>Requester</th><th>Reason</th><th>Elapsed</th><th data-c="3">ETA <span class="tzh">· Asia/Seoul</span></th><th>Source</th></tr></thead>
+          <tbody>
+            <tr class="exp mine">
+              <td class="num" data-c="6"><span class="id">#412</span> <span class="pill running"><span aria-hidden="true">▶</span> running</span></td>
+              <td data-c="7"><span class="key">gate:full</span><span class="chip">scope=full</span></td>
+              <td data-c="9">alice@laptop<span class="you">you</span><span class="joiners" title="also waiting: eve@ci">+1</span></td>
+              <td><span class="reason">running · lane 1</span></td>
+              <td class="num" data-c="10">59s<div class="sub">waited 33s</div></td>
+              <td class="eta">09:57 <span class="in">· in 5m 10s</span><br><span class="conf high">high · measured n=7</span></td>
+              <td data-c="8"><span class="sha">abc123f</span><span class="uncommitted">uncommitted</span><div class="sub">org/app</div></td>
+            </tr>
+            <tr><td colspan="7" class="prog">
+              <div data-c="12">
+                <div class="head"><b>step 5/8</b><span>test</span><span>51s</span><span class="note">job 59s · waited 33s</span></div>
+                <div class="minibar"><i style="width:12%"></i><i style="width:3%"></i><i style="width:8%"></i><i style="width:21%"></i><i class="run" style="width:34%"></i><i class="pend" style="width:8%"></i><i class="pend" style="width:7%"></i><i class="pend" style="width:7%"></i></div>
+                <div class="steps">
+                  <div class="step"><span class="g" aria-hidden="true">✔</span><span>analyze</span><span class="s">12s</span></div>
+                  <div class="step run"><span class="g" aria-hidden="true">▶</span><span>test</span><span class="s">51s</span></div>
+                  <div class="step"><span class="g" aria-hidden="true">✔</span><span>format</span><span class="s">3s</span></div>
+                  <div class="step pend"><span class="g" aria-hidden="true">·</span><span>build-web</span><span class="s">—</span></div>
+                  <div class="step"><span class="g" aria-hidden="true">✔</span><span>lint</span><span class="s">8s</span></div>
+                  <div class="step pend"><span class="g" aria-hidden="true">·</span><span>package</span><span class="s">—</span></div>
+                  <div class="step"><span class="g" aria-hidden="true">✔</span><span>deps</span><span class="s">21s</span></div>
+                  <div class="step pend"><span class="g" aria-hidden="true">·</span><span>report</span><span class="s">—</span></div>
+                </div>
+              </div>
+              <div data-c="13">
+                <div class="tail">[test] 3/9 packages · 412 passed · 0 failed
+[test] running integration/notification_setting_test.dart
+[test] golden: home_tutorial_v3 ✓</div>
+                <div class="actions"><button class="btn" type="button">Log</button><button class="btn danger" type="button">Cancel</button><span class="sub">1 other session is waiting on this job</span></div>
+              </div>
+            </td></tr>
+
+            <tr>
+              <td class="num"><span class="id">#409</span> <span class="pill running"><span aria-hidden="true">▶</span> running</span></td>
+              <td><span class="key">qa:device-smoke</span><span class="chip">group devices</span></td>
+              <td>carol@mbp</td>
+              <td><span class="reason">running · lane 2</span></td>
+              <td class="num">6m 20s<div class="sub">waited 8s</div></td>
+              <td class="eta">09:55 <span class="in">· in 2m 40s</span><br><span class="conf med">med · measured n=3</span></td>
+              <td><span class="sha">9e1d2c0</span><div class="sub">org/app · ref dev</div></td>
+            </tr>
+            <tr>
+              <td class="num"><span class="id">#413</span> <span class="pill queued"><span aria-hidden="true">·</span> queued</span><span class="pos">1st in line</span></td>
+              <td><span class="key">qa:smoke</span><span class="chip">group devices</span></td>
+              <td>bob@desk</td>
+              <td data-c="11"><span class="blocked"><span aria-hidden="true">⛓</span> blocked by #409 · devices</span><div class="reason">frees in 2m 40s</div></td>
+              <td class="num">waiting 1m 35s</td>
+              <td class="eta">after #409 <span class="in">· ~10:04</span><br><span class="conf low">low · group wait</span></td>
+              <td><span class="sha">def4567</span><div class="sub">org/app</div></td>
+            </tr>
+            <tr class="mine">
+              <td class="num"><span class="id">#414</span> <span class="pill queued"><span aria-hidden="true">·</span> queued</span><span class="pos">2nd in line</span></td>
+              <td><span class="key">gate:fast</span><span class="chip">scope=fast</span></td>
+              <td>alice@laptop<span class="you">you</span></td>
+              <td><span class="reason">waiting for lane · 2/2 busy<br>behind #412 · frees in 5m 10s</span></td>
+              <td class="num">waiting 35s</td>
+              <td class="eta">09:58 <span class="in">· in 6m 15s</span><br><span class="conf high">high · measured n=12</span></td>
+              <td><span class="sha">abc123f</span><span class="uncommitted">uncommitted</span><div class="sub">org/app</div></td>
+            </tr>
+            <tr>
+              <td class="num"><span class="id">#415</span> <span class="pill uploading"><span aria-hidden="true">↑</span> uploading <span class="ub"><i></i></span></span><span class="pos">3rd in line</span></td>
+              <td><span class="key">gate:full</span><span class="chip">scope=full</span></td>
+              <td>dan@pc</td>
+              <td><span class="reason act">uploading · 30 / 48 MB</span></td>
+              <td class="num">—</td>
+              <td class="eta">10:05 <span class="in">· in 12m 24s</span><br><span class="conf high">high · measured n=7</span></td>
+              <td><span class="sub">not received yet</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="s-section">
+        <div class="s-h"><span class="t">Host</span></div>
+        <div class="hostcard" data-c="16">
+          <div class="hn">macmini<span class="age">sampled 4s ago · darwin · 10 cores · load 3.5</span></div>
+          <div class="meter"><div class="lab"><span>CPU 21%</span><span>user 17 · sys 4</span></div><div class="bar"><i style="width:17%"></i><i class="b" style="width:4%"></i></div><div class="spark"><svg viewBox="0 0 90 18" aria-hidden="true"><polyline points="0,14 8,13 16,15 24,10 32,9 40,11 48,6 56,5 64,8 72,12 80,13 90,13"/></svg><span>5 min</span></div></div>
+          <div class="meter"><div class="lab"><span>Memory 14.0 / 24 GB</span><span>58% · comp 2.1 GB</span></div><div class="bar"><i style="width:49%"></i><i class="b" style="width:9%"></i></div><div class="spark"><svg viewBox="0 0 90 18" aria-hidden="true"><polyline points="0,9 8,9 16,8 24,8 32,7 40,7 48,7"/><polyline class="gap" points="48,7 60,7"/><polyline points="60,7 72,6 80,7 90,7"/></svg><span>5 min · gap = no sample</span></div></div>
+          <div class="meter"><div class="lab"><span>GPU 13% busy</span><span>0.6 GB in use</span></div><div class="bar"><i style="width:13%"></i></div><div class="spark"><svg viewBox="0 0 90 18" aria-hidden="true"><polyline points="0,16 8,16 16,15 24,16 32,12 40,9 48,10 56,14 64,15 72,15 80,14 90,15"/></svg><span>5 min</span></div></div>
+          <div class="top">top: <b>dart</b> 180% 500 MB · <b>flutter_tester</b> 95% 300 MB · <b>gen_snapshot</b> 103% 169 MB</div>
+        </div>
+      </div>
+
+      <div class="s-section" style="border-bottom:0">
+        <div class="s-h"><span class="t">Recent</span><span class="n">last 5 of 8</span></div>
+        <div class="recent" data-c="14">
+          <div class="rrow"><span class="pill bad"><span aria-hidden="true">✗</span> failed · exit 1</span><span class="k">gate:fast</span><span class="s">bob@desk</span><span class="d">1m 02s</span><span class="t">09:47</span><span class="s"><b>2 tests failed</b> · step test · <button class="rerun" type="button" title="copy">⧉ rcm run gate -f scope=fast</button></span></div>
+          <div class="rrow"><span class="pill ok"><span aria-hidden="true">✓</span> succeeded</span><span class="k">gate:full</span><span class="s">alice@laptop</span><span class="d">5m 50s</span><span class="t">09:40</span><span class="s">all 9 packages green</span></div>
+          <div class="rrow"><span class="pill cancelled"><span aria-hidden="true">■</span> cancelled · exit 2</span><span class="k">qa:smoke</span><span class="s">carol@mbp</span><span class="d">—</span><span class="t">09:31</span><span class="s">before start · by carol@mbp</span></div>
+          <div class="rrow"><span class="pill timedout"><span aria-hidden="true">⏱</span> timed out · exit 2</span><span class="k">gate:full</span><span class="s">dan@pc</span><span class="d">20m 00s</span><span class="t">09:20</span><span class="s">limit 20m · step test · <button class="rerun" type="button" title="copy">⧉ rcm run gate -f scope=full</button></span></div>
+          <div class="rrow"><span class="pill lost"><span aria-hidden="true">?</span> lost · exit 3</span><span class="k">gate:full</span><span class="s">dan@pc</span><span class="d">—</span><span class="t">09:02</span><span class="s">server restarted 09:02 · workspace kept 30d</span></div>
+          <button class="more" type="button">show 3 more ▾</button>
+        </div>
+        <details class="est" data-c="15"><summary>Estimates · 4 keys · how ETA is computed</summary>
+          <div class="row"><span><b>gate:full</b> 6m 09s · wait 1m 20s · n=7 · high</span><span><b>gate:fast</b> 1m 05s · wait 40s · n=12 · high</span><span><b>qa:device-smoke</b> 8m 40s · n=3 · med</span><span><b>qa:smoke</b> n=1 → preset 9m · low</span></div>
+        </details>
+      </div>
+    </div>
+    <div class="gutter"></div>
+    <svg class="lines" aria-hidden="true"></svg>
+  </div></div>
+
+  <h2>2. 변형 상태 — 같은 화면이 다르게 보여야 하는 경우</h2>
+  <div class="annot-wrap"><div class="annot" id="vars">
+    <div class="variants">
+      <div class="variant"><div class="vt">Empty queue</div>
+        <div class="empty" data-c="17">Queue is empty — <code>rcm run &lt;preset&gt;</code> starts immediately.<br><span class="sub">presets: gate · gate-fast · qa-smoke · deploy-dev</span></div>
+      </div>
+      <div class="variant"><div class="vt">Connection lost (page ↔ server)</div>
+        <div class="banner" data-c="18"><span class="live"></span>Lost connection to macmini · last update 42s ago · showing last known state</div>
+        <div class="sub" style="margin-top:8px">reconnecting in 8s… &nbsp;·&nbsp; also: <span class="skew">clock +2m</span> when browser and server disagree by &gt; 30s</div>
+      </div>
+      <div class="variant"><div class="vt">Host sample stale</div>
+        <div class="hostcard dim" style="grid-template-columns: 150px 1fr" data-c="19">
+          <div class="hn">macmini<span class="age"><span class="stale-badge" style="opacity:1">stale 3m</span></span></div>
+          <div class="meter"><div class="lab"><span>CPU 21%</span><span>last known</span></div><div class="bar"><i style="width:21%;background:var(--queued)"></i></div></div>
+        </div>
+      </div>
+      <div class="variant"><div class="vt">Overdue job</div>
+        <table class="q"><tbody>
+          <tr class="overdue" data-c="20"><td class="num"><span class="id">#412</span> <span class="pill running"><span aria-hidden="true">▶</span> running</span></td><td><span class="key">gate:full</span></td><td><span class="reason act"><span class="over">over by 3m 31s</span> · expected 6m 09s<br>delays #414</span></td><td class="num">9m 40s</td><td class="eta">—<br><span class="conf over">overdue</span></td></tr>
+        </tbody></table>
+      </div>
+      <div class="variant"><div class="vt">Mobile card (&lt; 720px)</div>
+        <div class="card" data-c="21">
+          <div class="r1"><span><span class="mono">#413</span> <span class="pill queued"><span aria-hidden="true">·</span> queued</span> <span class="key">qa:smoke</span></span><span class="mono">~10:04</span></div>
+          <div class="r2"><span class="mono">1st in line</span><span class="blocked"><span aria-hidden="true">⛓</span> blocked by #409</span><span>frees in 2m 40s</span></div>
+          <div class="r2"><span class="sha">def4567</span><span>bob@desk</span><span>waiting 1m 35s</span></div>
+        </div>
+      </div>
+      <div class="variant"><div class="vt">Queue unavailable (≠ empty)</div>
+        <div class="banner bad" data-c="22">Queue unavailable — database locked (retrying)</div>
+        <div class="sub" style="margin-top:8px">summary shows <span class="mono">unknown — queue unavailable</span>, never "Nothing is stuck"</div>
+      </div>
+      <div class="variant"><div class="vt">Server just started · no samples yet</div>
+        <div data-c="26">
+          <div class="mini-s"><span class="eta">10:12 <span class="in">· in 10m 00s</span><br><span class="conf low">low · default</span></span><span class="eta">10:22 <span class="in">· in 10m 00s</span><br><span class="conf low">low · default</span></span></div>
+          <div class="sub" style="margin-top:8px">Estimates · no samples yet — using preset/default until 2 successful jobs per key</div>
+        </div>
+      </div>
+      <div class="variant"><div class="vt">Worker down</div>
+        <div data-c="27"><span class="wk down"><i></i>lane 1 · down</span> <span class="wk busy"><i></i>#409</span> <span class="errchip">error · ENOSPC</span>
+          <div class="banner bad" style="margin-top:8px">Worker on lane 1 stopped: Errno 28 no space left on device · waiting jobs use lane 2 only</div></div>
+      </div>
+      <div class="variant"><div class="vt">Queue paused</div>
+        <div data-c="28"><span class="wk paused"><i></i>paused</span>
+          <div class="banner" style="margin-top:8px">Queue paused by macmini-admin at 09:50 — running jobs finish, nothing new starts · <span class="mono">rcm resume</span></div>
+          <div class="sub" style="margin-top:6px">waiting rows: Reason <span class="mono">paused</span>, ETA <span class="mono">—</span></div></div>
+      </div>
+      <div class="variant"><div class="vt">Token rejected</div>
+        <div data-c="29"><button class="tokbtn bad" type="button">🔑 Token rejected</button>
+          <div class="sub" style="margin-top:8px">log tail hidden · Log / Cancel disabled · saved token cleared (401/403 only — network errors keep it)</div></div>
+      </div>
+      <div class="variant"><div class="vt">Cancelling</div>
+        <table class="q"><tbody>
+          <tr data-c="30"><td class="num"><span class="id">#412</span> <span class="pill cancelling"><span aria-hidden="true">■</span> cancelling…</span></td><td><span class="key">gate:full</span></td><td><span class="reason act">SIGTERM sent by alice@laptop · kill in 8s</span></td><td><button class="btn danger" type="button" disabled>Cancel</button></td></tr>
+        </tbody></table>
+      </div>
+      <div class="variant"><div class="vt">Upload stalled</div>
+        <table class="q"><tbody>
+          <tr data-c="31"><td class="num"><span class="id">#415</span> <span class="pill uploading"><span aria-hidden="true">↑</span> uploading <span class="ub"><i></i></span></span></td><td><span class="key">gate:full</span></td><td><span class="stalled">upload stalled 2m · 30 / 48 MB</span></td><td class="sub">cancelled in 3m if nothing arrives</td></tr>
+        </tbody></table>
+      </div>
+      <div class="variant"><div class="vt">Recent unavailable · none yet</div>
+        <div data-c="32"><div class="banner bad">Recent unavailable — database locked (retrying)</div>
+          <div class="empty" style="margin-top:8px; padding: 10px">No completed jobs yet</div></div>
+      </div>
+      <div class="variant"><div class="vt">Preparing workspace (running, no steps yet)</div>
+        <table class="q"><tbody>
+          <tr data-c="33"><td class="num"><span class="id">#415</span> <span class="pill running"><span aria-hidden="true">▶</span> running</span></td><td><span class="key">gate:full</span></td><td><span class="reason act">preparing workspace · unpacking 48 MB</span></td><td class="num">4s</td></tr>
+        </tbody></table>
+      </div>
+      <div class="variant"><div class="vt">Likely stuck (≠ overdue)</div>
+        <table class="q"><tbody>
+          <tr class="overdue" data-c="34"><td class="num"><span class="id">#412</span> <span class="pill running"><span aria-hidden="true">▶</span> running</span></td><td><span class="key">gate:full</span></td><td><span class="stuck"><span aria-hidden="true">⚠</span> likely stuck · 3× expected · no output for 4m</span></td><td class="num">19m 10s</td></tr>
+        </tbody></table>
+      </div>
+      <div class="variant"><div class="vt">Idle lane but nothing starts</div>
+        <div data-c="35"><span class="wk"><i></i>lane 2 · idle</span>
+          <div class="banner" style="margin-top:8px">Lane 2 is idle but #413 has not started for 40s — check the server log</div>
+          <div class="sub" style="margin-top:6px">Reason <span class="mono">not scheduled</span> · shows in Not moving</div></div>
+      </div>
+    </div>
+    <div class="gutter"></div>
+    <svg class="lines" aria-hidden="true"></svg>
+  </div></div>
+
+  <h2>3. 기획 항목</h2>
+  <p class="note">각 항목은 「보여주는 것 · 데이터(스키마 필드) · 상태 · 상호작용 · 규칙」 순이다. 스키마 필드는 <code>pools[0]</code> 기준이다. <span class="tag">v1.3</span> 는 이번에 바뀐 항목, <span class="src">gap</span>·<span class="src">ref</span>·<span class="src">codex</span> 는 어느 리뷰에서 왔는지다.</p>
+
+  <div class="group">머리 — 서버와 연결</div>
+  <div class="specs">
+    <article class="spec" id="c1" data-for="1"><div class="num">1</div><div><div class="area">header</div><h3>서버 신원과 워커 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>제품 이름, 빌드 머신 이름, <code>lanes 2/2 busy</code>, 레인마다 지금 도는 잡 id.</dd>
+      <dt>데이터</dt><dd><code>hosts[0].name</code> · <code>lanes</code> · <code>server.workers[].{lane, state ∈ idle|busy|down, job_id, error, since}</code> · <code>server.paused</code> · <code>server.last_error</code>.</dd>
+      <dt>상태</dt><dd>busy 파란 점 + 잡 id · idle 회색 점 · <b>down</b>(빨간 네모 + <code>lane 1 · down</code>, 27) · <b>paused</b>(황토 두 줄, 28). <code>server.last_error</code> 가 있으면 빨간 <code>error · &lt;앞 60자&gt;</code> 칩(클릭 시 전체) <span class="src">gap</span>. 레인 1 이면 필 하나로 접는다(<code>worker busy #412</code>).</dd>
+      <dt>상호작용</dt><dd>잡 id 는 버튼 — 누르거나 Enter 로 그 큐 행으로 스크롤하고 잠깐 강조.</dd>
+      <dt>규칙</dt><dd>워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다 — 죽음·정지·마지막 오류는 머리에서 보여야 한다.</dd></dl></div></article>
+
+    <article class="spec" id="c2" data-for="2"><div class="num">2</div><div><div class="area">header</div><h3>갱신 상태 토글 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>버튼 하나: <code>● live · updated 4s ago</code>. 누르면 <code>paused · resume</code>(회색 점) — 로그를 읽는 중 행이 튀지 않게 <span class="src">ref</span>(Sidekiq Live Poll). 탭이 60초 넘게 숨겨지면 자동 정지, 돌아오면 <code>/api/status</code> 를 다시 받는다.</dd>
+      <dt>데이터</dt><dd>마지막 이벤트 수신 시각(브라우저 시계) · <code>generated_at</code> · <code>server.uptime_seconds</code> · <code>schema_version</code>·<code>server.version</code>.</dd>
+      <dt>상태</dt><dd>live(SSE) → SSE 가 끊기면 <code>polling</code>(10초 고정, 재연결은 2s→30s 백오프) → 30초 무응답이면 18 번 띠. 브라우저와 서버 시계가 30초 넘게 어긋나면 옆에 <code>clock +2m</code> 칩, 모든 상대 시간은 <code>generated_at</code> 기준으로 보정 <span class="src">gap</span>. 재조회에서 <code>uptime</code> 이 줄면 <code>Server restarted at 09:58 — running jobs were marked lost</code> 띠, <code>schema_version</code>·<code>server.version</code> 이 바뀌면 <code>UI out of date — reload</code>(자동 새로고침 1회).</dd>
+      <dt>규칙</dt><dd>나이는 거칠게(<code>4s ago</code> → 60초 넘으면 <code>3m ago</code>). <code>lost</code> 는 잡 결과에만, 연결엔 <code>Lost connection</code>.</dd></dl></div></article>
+
+    <article class="spec" id="c3" data-for="3"><div class="num">3</div><div><div class="area">queue · header</div><h3>시간대</h3>
+      <dl><dt>보여주는 것</dt><dd>ETA 열 머리에 <code>ETA · Asia/Seoul</code>. 서버 설정이 없으면 <code>ETA · local</code> 과 툴팁 <code>browser time zone — set display.timezone on the server to pin this</code>.</dd>
+      <dt>데이터</dt><dd><code>display_timezone</code>(null 이면 브라우저). 모든 시각은 UTC 로 와서 <code>Intl.DateTimeFormat</code> 으로.</dd></dl></div></article>
+
+    <article class="spec" id="c4" data-for="4"><div class="num">4</div><div><div class="area">header · auth</div><h3>토큰 버튼 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd><code>🔑 add token</code> / <code>🔑 alice-laptop</code> / 빨간 <code>🔑 Token rejected</code>(29). 누르면 <code>&lt;dialog&gt;</code>: 붙여넣기, Enter 제출, Escape 닫기, <code>checking…</code>.</dd>
+      <dt>데이터</dt><dd><code>GET /api/whoami</code> → <code>{name, admin}</code>. 저장은 <code>localStorage</code> 의 <code>rcm.token</code> 뿐, URL 금지. 여러 탭은 <code>storage</code> 이벤트로 동기화 <span class="src">gap</span>.</dd>
+      <dt>규칙</dt><dd>401/403 만 저장값을 지운다. 네트워크 오류는 <code>couldn't verify — kept</code>. 토큰이 없어도 화면 전체가 읽힌다. 토큰이 있을 때만 23·13 이 켜진다.</dd></dl></div></article>
+  </div>
+
+  <div class="group">요약 줄 — 5초 안에 답할 세 질문</div>
+  <div class="specs">
+    <article class="spec" id="c23" data-for="23"><div class="num">23</div><div><div class="area">summary</div><h3>내 잡 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>내 토큰 이름이 <code>requester.name</code> 이거나 <code>joiners[].name</code> 인 활성 잡: <code>#412 running · ETA 09:57 · in 5m 10s · +1 joined</code>, <code>#414 2nd in line · ETA 09:58 · waiting for lane</code>. 순번은 대기 잡에만 <span class="src">gap</span>.</dd>
+      <dt>데이터</dt><dd><code>queue[]</code> 필터 · <code>position</code>(대기 잡만, 실행 중은 null) · <code>estimate.finish_at</code> · <code>reason</code> · <code>joiners[]</code>.</dd>
+      <dt>상태</dt><dd>토큰 없음 → <code>Add a token to highlight your jobs</code>. 내 잡 없음 → <code>No jobs of yours in the queue</code>. <code>queue_error</code> → <code>unknown — queue unavailable</code>. 셋 이상이면 두 개 + <code>and 2 more</code>.</dd>
+      <dt>규칙</dt><dd>이 줄이 이 화면의 첫 번째 답이다. 잡 id 는 버튼이고 누르면 행으로.</dd></dl></div></article>
+
+    <article class="spec" id="c24" data-for="24"><div class="num">24</div><div><div class="area">summary</div><h3>안 움직이는 것 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>행동할 수 있는 원인만, 「행동 가능」 순으로: 워커 다운 → likely stuck → 업로드 멈춤 → 스케줄 안 됨 → 그룹 대기 → 초과 실행 → 정지 <span class="src">ref</span>. 각 줄에 근거 숫자(<code>frees in 2m 40s</code>, <code>over by 3m 31s</code>).</dd>
+      <dt>데이터</dt><dd><code>queue[].reason ∈ {blocked_by_group, upload_stalled, overdue, paused, not_scheduled, worker_down}</code> · <code>estimate.stuck</code> · <code>blocked_by.remaining_seconds</code> · <code>server.workers[].state</code>.</dd>
+      <dt>상태</dt><dd>없으면 초록 <code>Nothing is stuck</code>. 하나라도 있으면 그 아래 회색 <code>nothing else is stuck</code>. <code>queue_error</code> → 회색 <code>unknown — queue unavailable</code>. 연결 끊김(18) → 회색 <code>last known:</code> + dim. <code>reason</code> 필드가 없는 옛 서버 → <code>unknown</code> <span class="src">gap</span>.</dd>
+      <dt>규칙</dt><dd>긍정 문구는 조회가 성공했고 값이 전부 있을 때만. 정상 대기(<code>waiting for lane</code>)와 스텝이 실패했지만 계속 도는 잡은 여기 안 올린다.</dd></dl></div></article>
+
+    <article class="spec" id="c25" data-for="25"><div class="num">25</div><div><div class="area">summary</div><h3>호스트 압력 한 줄 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd><code>CPU 21% · Mem 58% · GPU 13% · load 3.5 / 10 · fine</code> 와 <code>sampled 4s ago</code>.</dd>
+      <dt>데이터</dt><dd><code>hosts[0].{cpu.busy, memory, gpu.util_pct, load, cores, age_seconds, stale, interval_seconds}</code>.</dd>
+      <dt>상태</dt><dd>어느 값이든 85% 이상 → 그 숫자 황토 + <code>· busy</code>. 값 하나라도 null → <code>· partial</code>, 전부 null → <code>· unknown</code>(fine 으로 접지 않는다 <span class="src">gap</span>). <code>hosts: []</code> → 회색 <code>host: no sample yet</code>. <code>hosts_error</code> → 빨강 <code>host: unavailable</code>. stale → <code>stale 3m</code> 빗금 배지(19).</dd>
+      <dt>상호작용</dt><dd>누르면 16 번 호스트 카드로.</dd></dl></div></article>
+  </div>
+
+  <div class="group">큐 표</div>
+  <div class="specs">
+    <article class="spec" id="c5" data-for="5"><div class="num">5</div><div><div class="area">queue</div><h3>큐 헤더 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd><code>5 jobs · 2 running · 3 waiting · oldest waiting 1m 35s · lanes 2/2 busy</code>. 「얼마나 밀렸나」 한 숫자가 분포보다 먼저 <span class="src">ref</span>(Sidekiq latency · Buildkite Current Wait).</dd>
+      <dt>데이터</dt><dd><code>queue[]</code> 집계 · 가장 오래된 대기 잡의 <code>created_at</code> · <code>server.workers[]</code>.</dd>
+      <dt>상태</dt><dd>잡이 많으면 실행 중 전부 + 대기 20행 + <code>and 130 more</code>(펼침). 내 잡과 24 에 오른 잡은 접힘과 무관하게 항상 보인다 <span class="src">gap</span>. <code>queue_error</code> 면 표 대신 22 번 띠.</dd>
+      <dt>규칙</dt><dd>빈 큐(17)와 조회 실패(22)는 다른 모양.</dd></dl></div></article>
+
+    <article class="spec" id="c6" data-for="6"><div class="num">6</div><div><div class="area">queue · row</div><h3>잡 id · 상태 · 순번 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>첫 칸: <code>#412</code>(id, 굵게) + 상태 필 + 대기 잡이면 아래에 <code>2nd in line</code>. <code>#</code> 는 언제나 id 다 — 순번과 섞지 않는다 <span class="src">gap</span>. 필: <code>▶ running</code>(파랑 채움) · <code>· queued</code>(회색 채움) · <code>↑ uploading</code>(점선 테두리 + 필 안 진행 막대) · <code>■ cancelling…</code>(황토 점선, 30).</dd>
+      <dt>데이터</dt><dd><code>id</code> · <code>state</code> · <code>position</code>(대기 잡에만 1부터, 실행 중·취소 중은 null) · uploading 은 <code>source.received_bytes / bytes</code>.</dd>
+      <dt>규칙</dt><dd>필은 색 + 글리프(<code>aria-hidden</code>) + 테두리 모양 세 채널. 정렬은 running → cancelling → 대기(순번순)이고 순번은 대기 잡 사이에서만 센다.</dd></dl></div></article>
+
+    <article class="spec" id="c7" data-for="7"><div class="num">7</div><div><div class="area">queue · row</div><h3>키·입력</h3>
+      <dl><dt>보여주는 것</dt><dd><code>key</code>(굵게)와 입력값 칩, 그룹 칩.</dd>
+      <dt>데이터</dt><dd><code>key</code> · <code>preset</code> · <code>inputs</code> · <code>queue[].concurrency_group</code>(프리셋 재설정과 무관하게 잡에 박힌 값 <span class="src">gap</span>).</dd>
+      <dt>상호작용</dt><dd>칩은 <code>button</code> — 클릭·Enter 로 잡 서랍(inputs 전체). 키를 누르면 15 번이 펼쳐지며 같은 키 강조.</dd></dl></div></article>
+
+    <article class="spec" id="c9" data-for="9"><div class="num">9</div><div><div class="area">queue · row</div><h3>요청자와 합류자 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd><code>requester.label</code>. 내 토큰과 같은 <code>requester.name</code> 이면 <code>you</code> 배지 + 행 왼쪽 파란 선. 합류한 세션이 있으면 <code>+1</code> 칩(툴팁·서랍에 이름) <span class="src">gap</span>.</dd>
+      <dt>데이터</dt><dd><code>requester.{name, label}</code> · <code>joiners[].{name, label}</code>.</dd>
+      <dt>규칙</dt><dd>강조·<code>you</code> 는 항상 <code>name</code>(토큰 이름) 기준 — <code>--by</code> 라벨은 남을 흉내 낼 수 있다. 라벨은 화면 어디서나 40자에서 자르고 <code>…</code> + 툴팁.</dd></dl></div></article>
+
+    <article class="spec" id="c11" data-for="11"><div class="num">11</div><div><div class="area">queue · row</div><h3>Reason 열 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>이 잡이 지금 왜 이 상태인지, 근거 숫자와 함께 <span class="src">ref</span>(Airflow Dependency/Reason · Jenkins 큐 문구): <code>running · lane 1</code> · <code>waiting for lane · 2/2 busy · behind #412 · frees in 5m 10s</code> · <code>⛓ blocked by #409 · devices · frees in 2m 40s</code> · <code>uploading · 30 / 48 MB</code> · <code>upload stalled 2m</code>(빗금, 31) · <code>preparing workspace · unpacking 48 MB</code>(33) · <code>over by 3m 31s · expected 6m 09s · delays #414</code>(20) · <code>⚠ likely stuck · 3× expected · no output for 4m</code>(34) · <code>paused</code>(28) · <code>not scheduled</code>(35) · <code>no worker</code>(27, 모든 레인 다운).</dd>
+      <dt>데이터</dt><dd><code>reason ∈ {running, waiting_for_lane, blocked_by_group, uploading, upload_stalled, materializing, overdue, stuck, paused, not_scheduled, worker_down}</code> · <code>lane</code> · <code>ahead_job_id</code> · <code>blocked_by.{job_id, group, remaining_seconds}</code> · <code>server.workers[]</code>(busy 수).</dd>
+      <dt>상태</dt><dd>행동 가능한 이유는 진한 글자와 모양, 정상(running·waiting)은 회색. 레인 1 이면 <code>blocked</code> 는 안 나온다.</dd>
+      <dt>상호작용</dt><dd>잡 id 는 링크 — 막고 있는 잡·앞선 잡 행으로.</dd></dl></div></article>
+
+    <article class="spec" id="c10" data-for="10"><div class="num">10</div><div><div class="area">queue · row</div><h3>경과 · ETA <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>Elapsed 칸: running 은 <code>59s</code> 와 아래 <code>waited 33s</code>(큐 대기, GitLab Queued/Elapsed 분리 <span class="src">ref</span>), queued 는 <code>waiting 1m 35s</code>, uploading 은 <code>—</code>. ETA 칸: <code>09:57 · in 5m 10s</code> + 신뢰도 배지 <code>high · measured n=7</code> / <code>med</code>(n&lt;5) / <code>low · preset</code> / <code>low · default</code>. 그룹 대기 잡은 <code>after #409 · ~10:04</code> + <code>low · group wait</code>(서버가 <code>finish_at ≥ 막는 잡 finish_at + expected</code> 하한 적용 <span class="src">gap</span>).</dd>
+      <dt>데이터</dt><dd><code>estimate.{elapsed_seconds, waited_seconds, remaining_seconds, wait_seconds, finish_at, source, sample_count, overdue, stuck}</code>.</dd>
+      <dt>상태</dt><dd>정지·모든 레인 다운이면 <code>finish_at: null</code> → <code>—</code>. <code>overdue</code> → 20, <code>stuck</code> → 34. 경과·대기는 클라이언트 시계(시계 보정 후)로 1초마다 올리고 서버 값이 오면 덮어쓴다.</dd>
+      <dt>규칙</dt><dd>소요·잔여는 <code>5m 10s</code>, 시각은 <code>09:57</code> — 모양이 달라야 <code>in 5:10</code> 을 「5시 10분」으로 읽지 않는다 <span class="src">ref</span>. 모르는 값은 <code>—</code>.</dd></dl></div></article>
+
+    <article class="spec" id="c8" data-for="8"><div class="num">8</div><div><div class="area">queue · row</div><h3>소스 (맨 뒤 열)</h3>
+      <dl><dt>보여주는 것</dt><dd>tree 모드 <code>abc123f</code> + <code>◌ uncommitted</code>(황토 테두리·빈 원), 아래 레포. git_ref 모드 <code>sha · ref dev</code>. uploading 은 <code>not received yet</code>.</dd>
+      <dt>데이터</dt><dd><code>source.{mode, base_sha, dirty, tree_hash, repo, ref, sha, bytes, received_bytes, last_received_at}</code>.</dd>
+      <dt>상호작용</dt><dd>sha 는 <code>button</code> — 포커스·hover 시 같은 <code>tree_hash</code> 행 강조, Enter 로 서랍(전체 sha·tree_hash·<code>tree differs from base sha</code>).</dd>
+      <dt>규칙</dt><dd>배포 프리셋(git_ref) 행에는 uncommitted 가 절대 없다.</dd></dl></div></article>
+
+    <article class="spec" id="c12" data-for="12"><div class="num">12</div><div><div class="area">queue · expanded</div><h3>진행 — 스텝 목록 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>실행 중 행은 기본 펼침(머리의 ▾ 버튼, <code>aria-expanded</code>). 머리 <code>step 5/8 · test · 51s · job 59s · waited 33s</code>, 얇은 요약 막대, 두 열 세로 목록 <code>✔ analyze 12s</code> · <code>▶ test 51s</code> · <code>· build-web —</code>(미시작 소요는 <code>—</code> <span class="src">ref</span>). 스텝이 실패했는데 잡이 계속 돌면 <code>✘ test 51s</code>(빨강) + 머리에 <code>1 step failed</code> <span class="src">gap</span>.</dd>
+      <dt>데이터</dt><dd><code>progress.{phase ∈ materializing|executing, steps_total, steps_total_partial, steps_done, current_index, current_name, current_seconds, job_seconds, failed_step, steps[].ok, timing}</code>.</dd>
+      <dt>상태</dt><dd><code>phase: materializing</code> 이면 스텝 블록 대신 Reason 한 줄(33). 마커 없음 → <code>no step markers · job 59s</code>. <code>steps_total_partial</code> → <code>5/8 (so far)</code>, 막대는 <code>role="progressbar"</code> + <code>aria-valuetext="step 5 of at least 8"</code>. queued 면 블록 없음(0/0 금지).</dd>
+      <dt>규칙</dt><dd>목록이 기본, 막대는 요약. <code>timing: as_received</code> 는 ⓘ 툴팁.</dd></dl></div></article>
+
+    <article class="spec" id="c13" data-for="13"><div class="num">13</div><div><div class="area">queue · expanded · auth</div><h3>로그 tail 과 액션 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>로그 마지막 3~5줄, <code>Log</code>·<code>Cancel</code>, 합류 세션이 있으면 <code>1 other session is waiting on this job</code>.</dd>
+      <dt>데이터</dt><dd><code>log_tail</code> 은 유효 토큰 요청에만, running 잡에만(없으면 null). <code>Log</code> 는 서랍을 <b>실패 스텝 마커 위치</b>로 열고(GitHub·Blue Ocean 관례 <span class="src">ref</span>) <code>GET /jobs/{id}/log?offset=</code> 증분. <code>Cancel</code> → 대화상자 → <code>POST /jobs/{id}/cancel</code>.</dd>
+      <dt>상태</dt><dd>토큰 없음 → <code>Add a token to see the log</code>, 버튼 비활성. 내 잡·합류가 아니고 admin 도 아니면 <code>not your job</code>. 요청 직후 행 dim + <code>cancel requested…</code>, 5초 안에 이벤트가 없으면 재조회 <span class="src">gap</span>.</dd>
+      <dt>규칙</dt><dd>대화상자 문구: 제목 <code>Cancel #412 gate:full (alice@laptop)?</code>, running 이면 <code>SIGTERM now, SIGKILL after 10s. 1 other session is waiting on it. Cannot be undone.</code>, queued 면 <code>Removed from the queue. Run rcm run again to resubmit.</code>, 버튼 <code>Cancel job</code> / <code>Keep</code>. uploading 취소는 즉시 <code>cancelled</code>.</dd></dl></div></article>
+  </div>
+
+  <div class="group">호스트 · 최근 완료 · 표본</div>
+  <div class="specs">
+    <article class="spec" id="c16" data-for="16"><div class="num">16</div><div><div class="area">host</div><h3>호스트 카드 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>이름 · 나이 · OS · 코어 · load. CPU 막대는 <code>user | sys</code> 두 구간, 메모리는 <code>used | compressed</code>(macOS), GPU 는 사용률 막대만 + <code>0.6 GB in use</code> 텍스트. 각 미터 아래 최근 5분(60표본) sparkline — 「지금 바쁜가」와 「10분째 바쁜가」를 가른다 <span class="src">ref</span>(htop 구간 막대 · Grafana). 표본이 빠진 구간은 점선으로 끊어 그린다.</dd>
+      <dt>데이터</dt><dd><code>hosts[].{name, sampled_at, age_seconds, stale, interval_seconds, os, cores, load, cpu.{user,sys,idle,busy}, memory.{total,used,compressed}, gpu, gpu_note, top, history[]}</code>. 85% 이상 황토. <code>&lt;meter&gt;</code> 로 시맨틱.</dd>
+      <dt>상태</dt><dd><code>gpu: null</code> → <code>GPU — &lt;gpu_note&gt;</code>. 부분 null → <code>—</code>. <code>hosts_error</code> → 빨간 띠. stale → 19.</dd>
+      <dt>규칙</dt><dd>Apple Silicon GPU 메모리는 total 이 없어 비율로 그리지 않는다. 폴링 값이라 나이를 항상 보인다.</dd></dl></div></article>
+
+    <article class="spec" id="c14" data-for="14"><div class="num">14</div><div><div class="area">recent</div><h3>최근 완료 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>최근 5건 + <code>show 3 more</code>. 결과 필에 종료 코드까지: <code>✓ succeeded</code>(초록) · <code>✗ failed · exit 1</code>(빨강) · <code>■ cancelled · exit 2</code>(<b>회색</b> — 황토는 「봐야 할 것」색이라 뺐다 <span class="src">ref</span>) · <code>⏱ timed out · exit 2</code>(빨강 점선 — 업계는 실패의 하위) · <code>? lost · exit 3</code>(보라). 실패·타임아웃 행엔 복사 버튼 <code>⧉ rcm run gate -f scope=fast</code> <span class="src">ref</span>(Vercel errorMessage 발상). lost 는 <code>server restarted 09:02 · workspace kept 30d</code>.</dd>
+      <dt>데이터</dt><dd><code>recent[].{state, exit_code, key, requester, job_seconds, waited_seconds, finished_at, summary, failed_step, cancelled_by, timeout_seconds, inputs, transitions[]}</code> · <code>recent_count</code>(서버 설정, 기본 8).</dd>
+      <dt>상태</dt><dd><code>recent: null</code> → 빨간 띠 <code>Recent unavailable</code>, <code>[]</code> → <code>No completed jobs yet</code>(32) <span class="src">gap</span>. <code>exit_code: null</code>(자재화 실패) → <code>✗ failed</code> + summary. 시작 전 취소 → 소요 <code>—</code> + <code>before start · by carol@mbp</code>. 30일 넘으면 절대 날짜.</dd>
+      <dt>상호작용</dt><dd>실패·타임아웃 행은 클릭 한 번에 아래로 펼쳐 실패 스텝 타임라인(토큰 불필요)과 tail 5줄(토큰 시) <span class="src">ref</span>(GitHub 실패 스텝 자동 펼침). 서랍 맨 위엔 전이 이력 <code>uploading 09:50:40 → queued (waited 21s) → running 09:51:13 → failed 09:52:15 · exit 1</code>(Hangfire State 이력).</dd>
+      <dt>규칙</dt><dd>표본 정책과 무관하게 전부 보인다. 첫 화면에선 실패·타임아웃이 강해야 한다.</dd></dl></div></article>
+
+    <article class="spec" id="c15" data-for="15"><div class="num">15</div><div><div class="area">recent</div><h3>Estimates (접힘) <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>키별 <code>중앙 소요 · 중앙 대기 · n · 신뢰도</code>: <code>gate:full 6m 09s · wait 1m 20s · n=7 · high</code>. 표본 부족은 <code>n=1 → preset 9m · low</code>.</dd>
+      <dt>데이터</dt><dd><code>medians[key].{seconds, wait_seconds, sample_count}</code> · <code>presets[].expected_seconds</code>.</dd>
+      <dt>규칙</dt><dd>신뢰도 규칙을 여기 툴팁에: measured 이고 n ≥ 5 → high, n &lt; 5 → med, preset·default → low. <code>medians: null</code> 이면 14 와 같은 「null + 오류」.</dd></dl></div></article>
+  </div>
+
+  <div class="group">변형 상태</div>
+  <div class="specs">
+    <article class="spec" id="c17" data-for="17"><div class="num">17</div><div><div class="area">variant</div><h3>빈 큐 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>점선 상자와 프리셋 목록. 정지·모든 레인 다운이면 문구가 <code>Queue is empty but paused — nothing will start</code> <span class="src">gap</span>.</dd></dl></div></article>
+    <article class="spec" id="c18" data-for="18"><div class="num">18</div><div><div class="area">variant</div><h3>연결 끊김 배너 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>SSE·폴링 둘 다 30초 넘게 실패 → 맨 위 황토 띠(<code>role="alert"</code>). 모든 나이·경과가 계속 올라가며 낡았음을 드러낸다. 돌아오면 띠가 사라지고 전체 재조회.</dd></dl></div></article>
+    <article class="spec" id="c19" data-for="19"><div class="num">19</div><div><div class="area">variant</div><h3>호스트 표본 stale <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>서버 <code>stale</code> 플래그(나이 &gt; 3×<code>interval_seconds</code>, 클라이언트도 같은 식으로 외삽) → <code>stale 3m</code> 빗금 배지, 막대 회색, <code>last known</code>. 샘플러 실패(빨간 띠)와 다르다.</dd></dl></div></article>
+    <article class="spec" id="c20" data-for="20"><div class="num">20</div><div><div class="area">variant</div><h3>초과 실행 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>왼쪽 굵은 황토 바(내 잡이면 파란 선 옆에 겹쳐 그린다 — CSS 특이도 버그 수정 <span class="src">gap</span>), Reason <code>over by 3m 31s · expected 6m 09s · delays #414</code>, ETA 는 <code>—</code> + <code>overdue</code> 배지(<code>now + 30s</code> 는 잔여 하한이 만든 자신있는 틀린 시각이라 없앴다). 뒤에 선 잡엔 툴팁 <code>waiting on an overdue job</code>.</dd></dl></div></article>
+    <article class="spec" id="c21" data-for="21"><div class="num">21</div><div><div class="area">variant</div><h3>모바일 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>카드 1줄: id·상태·키·ETA. 2줄: 순번·Reason·근거. 3줄: sha·요청자·대기. 머리는 레인 필 → <code>2 busy</code>, live → 점, 토큰 → 아이콘. 요약 세 칸은 세로. 스텝 목록 1열, tail 은 가로 스크롤, 최근 완료는 2줄 카드(<code>✗ failed · gate:fast · 1m 02s · 09:47</code> / <code>2 tests failed · step test · bob@desk</code>). 720~960px 은 Source 열을 펼침 블록으로 <span class="src">gap</span>.</dd></dl></div></article>
+    <article class="spec" id="c22" data-for="22"><div class="num">22</div><div><div class="area">variant</div><h3>큐 조회 실패</h3>
+      <dl><dt>보여주는 것</dt><dd><code>queue: null</code> + <code>queue_error</code> → 표 자리에 빨간 띠(<code>role="alert"</code>). 요약 줄은 <code>unknown</code>. 다른 섹션은 각자 살아 있으면 그대로.</dd></dl></div></article>
+    <article class="spec" id="c26" data-for="26"><div class="num">26</div><div><div class="area">variant</div><h3>표본 없음</h3>
+      <dl><dt>보여주는 것</dt><dd><code>medians</code> 가 비어 모든 ETA 가 <code>low · default</code>. 15 는 펼쳐진 채 <code>no samples yet — using preset/default until 2 successful jobs per key</code>.</dd></dl></div></article>
+    <article class="spec" id="c27" data-for="27"><div class="num">27</div><div><div class="area">variant</div><h3>워커 다운 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>워커 필 <code>lane 1 · down</code> + <code>error · ENOSPC</code> 칩, 빨간 띠에 어느 레인인지와 <code>waiting jobs use lane 2 only</code>. 모든 레인이 다운이면 대기 잡 Reason <code>no worker</code>, ETA <code>—</code>. 대기 계산은 살아 있는 레인 수로 <span class="src">gap</span>.</dd></dl></div></article>
+    <article class="spec" id="c28" data-for="28"><div class="num">28</div><div><div class="area">variant</div><h3>큐 일시정지 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>머리 <code>paused</code> 필, 띠에 누가·언제·<code>rcm resume</code>. 대기 행 Reason <code>paused</code>, ETA <code>—</code>. 정지·재개는 admin 토큰의 CLI(<code>rcm pause|resume</code>)로만.</dd></dl></div></article>
+    <article class="spec" id="c29" data-for="29"><div class="num">29</div><div><div class="area">variant</div><h3>토큰 거부</h3>
+      <dl><dt>보여주는 것</dt><dd>4 번 버튼이 빨강, tail 숨김, Log/Cancel 비활성, 23 은 토큰 안내로. 401/403 만 저장값 삭제.</dd></dl></div></article>
+    <article class="spec" id="c30" data-for="30"><div class="num">30</div><div><div class="area">variant</div><h3>취소 진행 중</h3>
+      <dl><dt>보여주는 것</dt><dd>필 <code>■ cancelling…</code>, Reason <code>SIGTERM sent by alice@laptop · kill in 8s</code>, Cancel 비활성.</dd>
+      <dt>데이터</dt><dd><code>state: "cancelling"</code> · <code>cancel.{requested_at, by, kill_at}</code>.</dd></dl></div></article>
+    <article class="spec" id="c31" data-for="31"><div class="num">31</div><div><div class="area">variant</div><h3>업로드 멈춤 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>Reason 빗금 <code>upload stalled 2m · 30 / 48 MB</code>, 옆에 <code>cancelled in 3m if nothing arrives</code>. 포기되면 지워지지 않고 <code>cancelled · upload abandoned after 5m</code> 로 최근 완료에 남는다 <span class="src">gap</span>. 413(너무 큼)·tar 거부·프리셋 소멸도 같은 규칙으로 <code>cancelled</code>/<code>failed</code> + summary.</dd></dl></div></article>
+    <article class="spec" id="c32" data-for="32"><div class="num">32</div><div><div class="area">variant</div><h3>최근 완료 실패 · 없음 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd><code>recent: null</code> → 빨간 띠 <code>Recent unavailable — &lt;error&gt;</code>. <code>[]</code> → 점선 상자 <code>No completed jobs yet</code>. 둘은 다른 모양 <span class="src">gap</span>.</dd></dl></div></article>
+    <article class="spec" id="c33" data-for="33"><div class="num">33</div><div><div class="area">variant</div><h3>워크스페이스 준비 <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd><code>running</code> 이지만 <code>progress.phase: materializing</code> — Reason <code>preparing workspace · unpacking 48 MB</code> 또는 <code>fetching dev</code>. 스텝 블록 대신 이 한 줄. <code>no step markers</code> 로 오해하지 않게 <span class="src">gap</span>.</dd></dl></div></article>
+    <article class="spec" id="c34" data-for="34"><div class="num">34</div><div><div class="area">variant</div><h3>Likely stuck (≠ overdue) <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>경과가 예상의 <code>stuck_multiplier</code>(기본 3)배를 넘거나 로그가 <code>no_output_seconds</code>(기본 240) 동안 없으면 <code>⚠ likely stuck · 3× expected · no output for 4m</code>(빨강). 24 에서 overdue 보다 위 <span class="src">ref</span>(Jenkins isLikelyStuck).</dd>
+      <dt>데이터</dt><dd><code>estimate.stuck</code> · <code>progress.last_output_at</code> · 설정 <code>[estimate] stuck_multiplier = 3</code>, <code>no_output_seconds = 240</code>.</dd></dl></div></article>
+    <article class="spec" id="c35" data-for="35"><div class="num">35</div><div><div class="area">variant</div><h3>Idle lane but nothing starts <span class="tag">v1.3</span></h3>
+      <dl><dt>보여주는 것</dt><dd>대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 10초 넘게 있으면 황토 띠 <code>Lane 2 is idle but #413 has not started for 40s — check the server log</code>, Reason <code>not scheduled</code> <span class="src">gap</span>(Codex 「all workers idle but queue blocked」).</dd></dl></div></article>
+  </div>
+
+  <h2>4. 이 화면이 정한 규칙</h2>
+  <ul class="qa">
+    <li><b>표기</b> <span class="src">gap·ref</span>: 시각은 <code>HH:MM</code>(오늘이 아니면 <code>Sep 3 · 23:40</code>). 소요·잔여·대기는 한 함수로 <code>12s</code> · <code>5m 10s</code> · <code>1h 02m</code>, 모름은 <code>—</code>, 앞에 맥락 단어(<code>in</code> · <code>waiting</code> · <code>waited</code> · <code>over by</code> · <code>stale</code> · <code>frees in</code>). 나이·카운트다운은 거칠게(<code>4s ago</code>, 60초 넘으면 <code>3m ago</code>, <code>in 8s</code>). 퍼센트 정수, 메모리 GB 소수 한 자리·MB 정수·단위 앞 공백(<code>500 MB</code>), 표본 <code>n=7</code>, id <code>#412</code>, 순번 <code>2nd in line</code>. 라벨은 40자 절단 + 툴팁.</li>
+    <li><b>갱신</b>: 처음 <code>GET /api/status</code>, 이후 SSE 부분 갱신. SSE 재연결 2s→30s 백오프, 그 사이 폴링 10s 고정, 30s 무응답이면 18. 경과·대기·나이는 <code>generated_at</code> 으로 보정한 클라이언트 시계로 1초마다. 탭 숨김 60s → 정지, 복귀 → 재조회. 2 번 토글로 수동 정지.</li>
+    <li><b>정렬·많은 잡</b>: running → cancelling → 대기(순번순). 필터 없음. 대기 20행 넘으면 접고 내 잡·안 움직이는 잡은 항상 표시. 최근 완료는 시간 역순 5건 + 더 보기.</li>
+    <li><b>펼침·딥링크</b> <span class="src">gap</span>: 실행 중 행은 전부 펼침, 접힘은 잡 id 별 localStorage(큐에 없는 id 는 매 갱신 정리). <code>#/jobs/&lt;id&gt;</code> = 그 행 스크롤·강조·펼침(+토큰 있으면 서랍); 큐에 없으면 최근으로, 거기도 없으면 토스트 <code>#409 finished 09:55 · succeeded</code>. 서랍 열림도 해시(뒤로가기 = 닫기).</li>
+    <li><b>권한</b>: 보기는 토큰 없이. 내 잡 강조·로그 tail·로그·취소만 토큰. 여러 탭은 <code>storage</code> 이벤트로 토큰 동기화.</li>
+    <li><b>실패 표시</b>: 섹션마다 독립 — 큐(22)·최근(32)·호스트·연결(18)·워커(27)가 따로 실패한다. 실패와 빈 값은 항상 다른 모양. 긍정 문구(<code>Nothing is stuck</code>·<code>fine</code>)는 조회 성공 + 값 완전일 때만. 큐에서 사라지는 잡은 없다 — 전부 종료 상태로 최근에 남는다.</li>
+    <li><b>상태 부호화</b>: 색 + 글리프 + 테두리. 빗금 = 낡음/멈춤, 점선 테두리 = 미확정(uploading·cancelling·timed out·low 신뢰도·blocked), 왼쪽 굵은 황토 바 = 초과 실행, 왼쪽 가는 파란 선 = 내 잡(둘 다면 겹쳐 그린다), 회색 = 대기·취소, 빨강 = 실패·타임아웃·stuck·다운, 보라 = lost. 단색 인쇄에서 읽히는지가 수용 기준.</li>
+    <li><b>키보드·보조기기</b> <span class="src">gap</span>: 행 펼침 ▾, 잡 id, 칩, sha, Log, Cancel, show more, Estimates, live 토글은 전부 <code>button</code>/<code>summary</code>. Tab 순서는 읽는 순서, Enter/Space 동작, 포커스 링 파랑 2px. 글리프는 <code>aria-hidden</code>. <code>aria-live="polite"</code> 는 상태 전이(내 잡 시작·종료·lost, 연결 끊김/복구)만, 초당 갱신 요소는 <code>off</code>. 띠(18·22·27·32)는 <code>role="alert"</code>. 진행 막대 <code>role="progressbar"</code>, 호스트 막대 <code>&lt;meter&gt;</code>.</li>
+    <li><b>시간</b>: 모든 시각은 UTC 로 받아 3 번 시간대로. 상대 시간은 보정된 브라우저 시계.</li>
+  </ul>
+
+  <h2>5. PLAN 반영 제안</h2>
+  <ul class="qa">
+    <li><b>잡 모델</b>: 상태 <code>cancelling</code> 추가. 업로드 포기·413·tar 거부·claim 시 프리셋 소멸은 잡을 지우지 않고 <code>cancelled</code>/<code>failed</code> + <code>summary</code>(<code>exit_code: null</code> 허용).</li>
+    <li><b>큐 규칙</b>: <code>position</code> 은 대기 잡에만 1부터, 실행 중·취소 중은 null. 대기 계산은 <code>state ≠ down</code> 레인 수로 하고 0 이거나 <code>paused</code> 면 <code>finish_at</code>·<code>wait_seconds</code> 는 null. 그룹에 막힌 잡은 <code>finish_at ≥ 막는 잡 finish_at + expected</code>. 합류자는 <code>joiners[]</code> 에 남기고 화면·<code>rcm jobs --mine</code> 은 요청자와 합류자를 모두 「내 잡」으로. 원 요청자의 취소는 합류자에게 종료 코드 2 로 전파. 신뢰도 규칙(n≥5 high · n&lt;5 med · preset/default low). <code>stuck_multiplier</code>(3)·<code>no_output_seconds</code>(240).</li>
+    <li><b>스키마</b>: <code>server.{paused, workers[].{state, job_id, error, since}, last_error}</code> · <code>queue[].{position, reason, lane, ahead_job_id, concurrency_group, joiners[], cancel, blocked_by.remaining_seconds}</code> · <code>source.{received_bytes, last_received_at}</code> · <code>estimate.{waited_seconds, stuck}</code> · <code>progress.{phase, last_output_at, steps[].ok}</code> · <code>recent[].{waited_seconds, cancelled_by, timeout_seconds, started_at, inputs, transitions[]}</code> · <code>medians[key].wait_seconds</code> · <code>presets[].{expected_seconds, timeout_seconds}</code> · <code>hosts[].{interval_seconds, memory.compressed, history[]}</code>. <code>recent_error</code>·<code>medians</code> 도 「null + 오류」 규칙. <code>log_tail</code> 은 유효 토큰 요청·running 잡에만.</li>
+    <li><b>API·CLI</b>: <code>GET /api/whoami</code>, <code>POST /pause</code>·<code>/resume</code>(admin), <code>rcm pause|resume</code>. <code>GET /jobs/{id}</code> 의 <code>log_tail</code> 도 토큰 조건.</li>
+    <li><b>설정</b>: <code>[server] recent_count = 8 · upload_stall_seconds = 60 · upload_abandon_seconds = 300</code>, <code>[estimate] stuck_multiplier = 3 · no_output_seconds = 240</code>, <code>[host] history_samples = 60</code>.</li>
+    <li><b>웹 UI (M2) 절</b>: ASCII 스케치를 지우고 「배치·상태·문구·표기 규칙은 <code>docs/wireframes/web-queue.html</code> 이 정본. 큐 위에 Your jobs · Not moving · Host pressure 요약을 먼저」. 갱신 규칙(SSE 2→30s 백오프 · 폴링 10s · 30s 무응답 띠 · 시계 보정 · 버전 불일치 새로고침). 완료 기준 「서버를 끊으면 stale」 → 「서버를 끊으면 Lost connection 띠가, 샘플러만 멈추면 stale 배지가 뜬다」.</li>
+    <li><b>fail-open 금지</b>: 「요약 줄의 긍정 문구는 해당 섹션 조회가 성공했고 값이 전부 있을 때만 그린다」 「큐에서 조용히 사라지는 잡은 없다」.</li>
+    <li><b>결정 항목</b>: 6절의 질문 5개를 ⛔ 로 올린다(현재 「열린 ⛔ 없음」과 모순).</li>
+  </ul>
+
+  <h2>6. 오너에게 묻는 것 <span class="tag">추천 병기</span></h2>
+  <ul class="qa">
+    <li>레인 1 인 서버(지금의 Mac mini)에선 워커 필을 하나로 접고 Reason 의 <code>blocked</code> 는 자연히 안 나온다 — 이대로 가나? <b>추천: 예.</b></li>
+    <li>실행 중 행이 여러 개일 때 전부 펼치나? <b>추천: 전부.</b> 접힘만 기억.</li>
+    <li>최근 완료는 8건(설정 <code>recent_count</code>)인가 24시간인가? <b>추천: 8건.</b></li>
+    <li>토큰 입력(4·13·23)을 M2 에 넣나? <b>추천: 넣는다.</b> 폰에서 로그 확인과 취소가 실제 운영 행동이다.</li>
+    <li><span class="tag">new</span> 합류자(joiner)의 취소 권한: 합류자가 취소하면 잡을 죽이나, 자기 대기만 빠지나? <b>추천: 자기 대기만 빠진다</b>(<code>rcm wait</code> 중단, 잡은 원 요청자 것). 원 요청자가 취소하면 합류자의 <code>rcm wait</code> 는 2 로 끝나고 대화상자가 대기 세션 수를 미리 알린다.</li>
+  </ul>
+</div>
+
+<script>
+(function () {
+  var GUTTER_BADGE_X = 22;
+  function q(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function layout(container) {
+    var svg = container.querySelector('svg.lines');
+    var gutter = container.querySelector('.gutter');
+    var crect = container.getBoundingClientRect();
+    var W = container.clientWidth, H = container.clientHeight;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.setAttribute('width', W); svg.setAttribute('height', H);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    gutter.innerHTML = '';
+    var gx = W - 76 + GUTTER_BADGE_X + 13;
+    var items = q('[data-c]', container).map(function (el) {
+      var r = el.getBoundingClientRect();
+      return { el: el, n: el.getAttribute('data-c'), ax: r.right - crect.left, ay: r.top - crect.top + 3 };
+    });
+    items.sort(function (a, b) { return a.ay - b.ay || a.ax - b.ax; });
+    var last = -1e9;
+    items.forEach(function (it) { it.by = Math.max(it.ay, last + 30); last = it.by; });
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.className = 'badge'; b.type = 'button'; b.textContent = it.n; b.style.top = it.by + 'px';
+      b.setAttribute('aria-label', '기획 항목 ' + it.n); b.dataset.n = it.n;
+      gutter.appendChild(b);
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      p.setAttribute('points', (it.ax + 3) + ',' + it.ay + ' ' + (gx - 26) + ',' + it.ay + ' ' + (gx - 13) + ',' + it.by);
+      p.setAttribute('class', 'lead'); p.dataset.n = it.n;
+      svg.appendChild(p);
+      var d = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      d.setAttribute('cx', it.ax + 3); d.setAttribute('cy', it.ay); d.setAttribute('r', 3); d.setAttribute('class', 'dot');
+      svg.appendChild(d);
+    });
+  }
+  function setOn(n, on) {
+    q('[data-c="' + n + '"]').forEach(function (el) { el.classList.toggle('hl', on); });
+    q('.badge').forEach(function (b) { if (b.dataset.n === n) b.classList.toggle('on', on); });
+    q('.lead').forEach(function (l) { if (l.dataset.n === n) l.classList.toggle('on', on); });
+    q('.spec[data-for="' + n + '"]').forEach(function (s) { s.classList.toggle('on', on); });
+  }
+  function wire() {
+    document.addEventListener('mouseover', function (e) {
+      var t = e.target.closest('.badge, .spec, [data-c]'); if (!t) return;
+      var n = t.dataset.n || t.dataset.for || t.getAttribute('data-c'); if (n) setOn(n, true);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var t = e.target.closest('.badge, .spec, [data-c]'); if (!t) return;
+      var n = t.dataset.n || t.dataset.for || t.getAttribute('data-c'); if (n) setOn(n, false);
+    });
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('.badge'); if (!b) return;
+      var s = document.getElementById('c' + b.dataset.n); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    document.addEventListener('toggle', function () { all(); }, true);
+  }
+  function all() { q('.annot').forEach(layout); }
+  wire(); all();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(all);
+  window.addEventListener('load', all);
+  var t; window.addEventListener('resize', function () { clearTimeout(t); t = setTimeout(all, 80); });
+})();
+</script>
+</body>
+</html>

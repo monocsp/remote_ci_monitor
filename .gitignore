@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# 로컬 서버 데이터·설정 (토큰이 들어갈 수 있다 — 절대 커밋하지 않는다)
+rcm.toml
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.rcm-data/
+.rcmignore.local
+
+# OS
+.DS_Store
+
+# 실기 검증 스크래치 (커밋하지 않는다)
+.verify/
