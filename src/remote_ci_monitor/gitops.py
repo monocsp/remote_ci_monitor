@@ -35,6 +35,10 @@ class GitError(Exception):
         self.stderr = stderr
 
 
+class GitTimeout(GitError):
+    """상한을 넘겼다. 서버는 이걸로 504 를, fetch 루프는 재시도 중단을 판단한다."""
+
+
 def _fmt_seconds(seconds: float) -> str:
     s = int(seconds)
     if s >= 3600 and s % 3600 == 0:
@@ -83,7 +87,7 @@ def _run_git(
     try:
         proc = run(["git", *argv], **kwargs)
     except subprocess.TimeoutExpired as e:
-        raise GitError(f"{what} timed out after {_fmt_seconds(timeout)}") from e
+        raise GitTimeout(f"{what} timed out after {_fmt_seconds(timeout)}") from e
     except FileNotFoundError as e:
         raise GitError("git is not installed on the build machine") from e
     except OSError as e:
@@ -173,9 +177,9 @@ def fetch_ref(
                 try:
                     # 후보가 원격에 없을 때의 「couldn't find remote ref」 는 정상 — 로그 생략
                     _fetch(mirror, url, refspecs, prune=False, timeout=timeout, log=None)
-                except GitError as e:
-                    if "timed out" in str(e):
-                        raise  # 멈춘 원격을 후보마다 다시 기다리지 않는다
+                except GitTimeout:
+                    raise  # 멈춘 원격을 후보마다 다시 기다리지 않는다
+                except GitError:
                     continue
                 if log is not None:
                     log(f"[rcm] fetched {refspecs[0].split(':')[0].lstrip('+')}")

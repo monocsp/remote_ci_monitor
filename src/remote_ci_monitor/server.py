@@ -15,7 +15,9 @@ M0 에서 `/api/status` 는 요청 때마다 DB 에서 다시 만든다(이벤�
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import importlib.resources
 import json
 import re
@@ -35,6 +37,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
 from remote_ci_monitor.config import ServerConfig
+from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
@@ -48,6 +51,7 @@ from remote_ci_monitor.core.model import (
     Median,
     Paused,
     Pool,
+    Preset,
     QueueRow,
     Requester,
     ServerInfo,
@@ -73,7 +77,9 @@ from remote_ci_monitor.events import (
     KIND_SERVER,
     EventBus,
 )
+from remote_ci_monitor.gitops import GitError, GitTimeout, resolve_ref
 from remote_ci_monitor.hostsample import HostSampler
+from remote_ci_monitor.janitor import Janitor
 from remote_ci_monitor.store import Store, TokenInfo
 from remote_ci_monitor.worker import Worker, start_workers, tail_lines
 
@@ -84,6 +90,7 @@ UPLOAD_TIMEOUT = 60
 DEFAULT_TAIL = 5
 MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
+RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
 _JOB_RE = re.compile(r"^/jobs/(\d+)(/tree|/log|/cancel)?$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _STATIC_FILES = {
@@ -110,6 +117,8 @@ def _mb(n: int) -> str:
 
 
 class ApiError(Exception):
+    challenge = "bearer"  # 401 의 WWW-Authenticate 종류. 읽기 라우트는 basic 모드에서 "basic"
+
     def __init__(self, status: int, message: str, **extra: Any):
         super().__init__(message)
         self.status = status
@@ -156,6 +165,8 @@ class App:
         self._last_error: str | None = None
         self._lock = threading.Lock()
         self._janitor: threading.Thread | None = None
+        self.retention: Janitor | None = None
+        self._resolve_sem = threading.BoundedSemaphore(RESOLVE_CONCURRENCY)
         self.bus = EventBus()
         self.sampler: HostSampler | None = None
         self._snap: _DbSnapshot | None = None
@@ -183,6 +194,15 @@ class App:
         )
         self._janitor = threading.Thread(target=self._janitor_loop, name="rcm-janitor", daemon=True)
         self._janitor.start()
+        self.retention = Janitor(
+            self.store,
+            self.config,
+            now_fn=self.now_fn,
+            on_error=self.record_error,
+            log=self.log,
+            stop=self.stop,
+        )
+        self.retention.start()
         host = socket.gethostname().split(".")[0] or "host"
         self.sampler = HostSampler(
             self.config.host, name=host, publish=self.publish, stop=self.stop, now_fn=self.now_fn
@@ -197,6 +217,8 @@ class App:
             w.shutdown()
         for w in self.workers:
             w.join(timeout=self.config.server.grace_seconds + 10)
+        if self.retention is not None:
+            self.retention.stop()
 
     def _janitor_loop(self) -> None:
         while not self.stop.wait(JANITOR_SECONDS):
@@ -326,6 +348,28 @@ class App:
         if scheme.lower() != "bearer" or not value.strip():
             return None
         return self.store.verify_token(value.strip())
+
+    def authenticate_read(self, header: str | None) -> TokenInfo | None:
+        """읽기 라우트 인증. Bearer 는 언제나, Basic(`<토큰 이름>:<토큰>`)은 `read_auth = basic`
+        일 때만 받는다. 쓰기 라우트는 `authenticate`(Bearer 만) — 브라우저가 Basic 을 자동으로
+        붙이므로 쓰기에 허용하면 내부망 CSRF 로 잡 실행·취소가 가능해진다."""
+        token = self.authenticate(header)
+        if token is not None or not header or self.config.server.read_auth != "basic":
+            return token
+        scheme, _, value = header.partition(" ")
+        if scheme.lower() != "basic" or not value.strip():
+            return None
+        try:
+            raw = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        name, sep, secret = raw.partition(":")
+        if not sep or not name or not secret:
+            return None
+        info = self.store.verify_token(secret)
+        if info is None or not hmac.compare_digest(info.name.encode(), name.encode()):
+            return None
+        return info
 
     def require_token(self, token: TokenInfo | None) -> TokenInfo:
         if token is None:
@@ -567,8 +611,11 @@ class App:
         if mode not in preset.source_modes:
             allowed = ", ".join(preset.source_modes)
             raise ApiError(400, f"preset '{preset.name}' accepts source modes: {allowed}")
+        label = body.get("requester_label") or f"{token.name}"
+        if not isinstance(label, str) or len(label) > 120:
+            raise ApiError(400, "requester_label must be a string of at most 120 characters")
         if mode == MODE_GIT_REF:
-            raise ApiError(400, "git_ref source mode is not implemented yet (planned for M3)")
+            return self._submit_git_ref(preset, inputs, src, label, token, body)
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
         tree_hash = src.get("tree_hash")
@@ -582,9 +629,6 @@ class App:
             raise ApiError(
                 413, f"snapshot {_mb(size)} exceeds {limit} — exclude build outputs via .rcmignore"
             )
-        label = body.get("requester_label") or f"{token.name}"
-        if not isinstance(label, str) or len(label) > 120:
-            raise ApiError(400, "requester_label must be a string of at most 120 characters")
         source = Source(
             mode=MODE_TREE,
             repo=_opt_str(src.get("repo"), 200),
@@ -630,6 +674,79 @@ class App:
             "url": f"{self.base_url()}/#/jobs/{job.id}",
         }
 
+    def _submit_git_ref(
+        self,
+        preset: Preset,
+        inputs: dict[str, Any],
+        src: dict[str, Any],
+        label: str,
+        token: TokenInfo,
+        body: dict[str, Any],
+    ) -> tuple[int, dict[str, Any]]:
+        """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
+        repo = self.config.repo(preset.repo)
+        if repo is None:
+            raise ApiError(400, f"preset '{preset.name}' has no repo configured")
+        raw_ref = src.get("ref")
+        if not isinstance(raw_ref, str):
+            raise ApiError(400, "source.ref must be a string")
+        try:
+            ref = validate_ref(raw_ref)
+        except ValueError as e:
+            raise ApiError(400, f"source.ref: {e}") from e
+        timeout = self.config.server.git_resolve_timeout_seconds
+        if not self._resolve_sem.acquire(timeout=timeout):
+            raise ApiError(503, "too many ref resolutions in flight — retry shortly")
+        try:
+            sha = resolve_ref(repo.url, ref, timeout=timeout)
+        except GitTimeout as e:
+            raise ApiError(504, f"resolving '{ref}' timed out after {timeout}s") from e
+        except GitError as e:
+            raise ApiError(502, f"cannot resolve '{ref}' in repo '{repo.name}': {e}") from e
+        finally:
+            self._resolve_sem.release()
+        source = Source(
+            mode=MODE_GIT_REF, repo=repo.name, ref=ref, sha=sha, base_sha=sha, dirty=False
+        )
+        now = self.now_fn()
+        key = duration_key(preset, inputs)
+        jk = join_key(preset.name, inputs, source.identity)
+        want_join = self.config.server.join_duplicates and body.get("join", True) is not False
+        if want_join:
+            existing = self.store.find_joinable(jk)
+            if existing is not None:
+                if existing.requester.name != token.name:
+                    self.store.add_joiner(existing.id, token.name, label, now)
+                    self._publish_job(None, existing.id)
+                return 200, {
+                    "job_id": existing.id,
+                    "joined": True,
+                    "state": existing.state,
+                    "sha": existing.source.sha,
+                    "url": f"{self.base_url()}/#/jobs/{existing.id}",
+                }
+        job = self.store.create_job(
+            preset=preset.name,
+            inputs=inputs,
+            key=key,
+            concurrency_group=preset.concurrency_group,
+            source=source,
+            requester=Requester(name=token.name, label=label),
+            timeout_seconds=preset.timeout_seconds,
+            join_key=jk,
+            now=now,
+            state=QUEUED,
+        )
+        self._publish_job(job, job.id)
+        self.wake.set()
+        return 201, {
+            "job_id": job.id,
+            "joined": False,
+            "state": job.state,
+            "sha": sha,
+            "url": f"{self.base_url()}/#/jobs/{job.id}",
+        }
+
     # ── 업로드 ──────────────────────────────────────────────────────────────
 
     def begin_upload(self, job_id: int, token: TokenInfo, length: int) -> Job:
@@ -638,6 +755,8 @@ class App:
             raise ApiError(404, "no such job")
         if job.requester.name != token.name and not token.admin:
             raise ApiError(403, "not your job")
+        if job.source.mode == MODE_GIT_REF:
+            raise ApiError(409, "job takes no tree upload (git_ref source)", state=job.state)
         if job.state != UPLOADING:
             raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
         limit = self.config.server.max_snapshot_bytes
@@ -750,7 +869,9 @@ class App:
                 data = fh.read(4 * 1024 * 1024)
                 next_offset = fh.tell()
         except FileNotFoundError:
-            return b"", 0, not job.is_terminal
+            if job.is_terminal:
+                raise ApiError(404, "log expired — retention removed it") from None
+            return b"", 0, True
         return data, next_offset, not job.is_terminal
 
     def health(self) -> tuple[int, dict[str, Any]]:
@@ -760,18 +881,28 @@ class App:
         down = [i.lane for i in infos if i.state == "down"] + [
             self.workers[i].lane for i, ok in enumerate(alive) if not ok
         ]
-        ok = db_ok and not down
+        janitor_error: str | None = None
+        if self.retention is not None:
+            if not self.retention.is_alive():
+                janitor_error = self.retention.dead or "janitor thread dead"
+            elif self.retention.stale(self.now_fn()):
+                janitor_error = "janitor stale"
+        ok = db_ok and not down and janitor_error is None
         body = {
             "ok": ok,
             "db": db_ok,
             "workers_down": sorted(set(down)),
+            "janitor": janitor_error is None,
             "lanes": self.config.server.lanes,
             "version": self.version,
         }
         if not ok:
-            body["error"] = (
-                "database unavailable" if not db_ok else f"worker down: lanes {sorted(set(down))}"
-            )
+            if not db_ok:
+                body["error"] = "database unavailable"
+            elif down:
+                body["error"] = f"worker down: lanes {sorted(set(down))}"
+            else:
+                body["error"] = janitor_error
         return (200 if ok else 503), body
 
 
@@ -826,7 +957,10 @@ class Handler(BaseHTTPRequestHandler):
         obj = {"error": e.message, **e.extra}
         if e.status == 401:
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Bearer realm="rcm"')
+            if e.challenge == "basic":
+                self.send_header("WWW-Authenticate", 'Basic realm="rcm", charset="UTF-8"')
+            else:
+                self.send_header("WWW-Authenticate", 'Bearer realm="rcm"')
             body = json.dumps(obj).encode()
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -906,10 +1040,28 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise ApiError(400, "body is not valid JSON") from e
 
+    def _read_token(self) -> TokenInfo | None:
+        """읽기 라우트의 신원. Bearer 또는(basic 모드) Basic."""
+        return self.app.authenticate_read(self.headers.get("Authorization"))
+
     def _read_only_ok(self) -> None:
-        """읽기 인증. `none` 이면 누구나, 아니면 유효한 토큰이 있어야 한다."""
-        if self.config.server.read_auth != "none" and self._token() is None:
-            raise ApiError(401, "read access requires a token on this server")
+        """읽기 인증. `none` 이면 누구나, `basic` 이면 Bearer 나 Basic 자격이 있어야 한다."""
+        if self.config.server.read_auth != "none" and self._read_token() is None:
+            raise self._read_401("read access requires a token on this server")
+
+    def _read_401(self, message: str) -> ApiError:
+        """읽기 라우트의 401. basic 모드면 브라우저 프롬프트를 여는 Basic 챌린지를 단다."""
+        err = ApiError(401, message)
+        if self.config.server.read_auth == "basic":
+            err.challenge = "basic"
+        return err
+
+    def _require_read_token(self) -> TokenInfo:
+        """토큰이 꼭 필요한 읽기 라우트(whoami · 로그). 401 챌린지는 읽기 규칙을 따른다."""
+        token = self._read_token()
+        if token is None:
+            raise self._read_401("a valid token is required")
+        return token
 
     @property
     def config(self) -> ServerConfig:
@@ -933,13 +1085,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/whoami":
             self._only(method, "GET")
-            t = self.app.require_token(self._token())
+            t = self._require_read_token()
             self._send_json(200, {"name": t.name, "admin": t.admin})
             return
         if path == "/api/status":
             self._only(method, "GET")
             self._read_only_ok()
-            doc = self.app.status(self._token())
+            doc = self.app.status(self._read_token())
             body = json.dumps(doc, separators=(",", ":")).encode()
             etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
             if self.headers.get("If-None-Match") == etag:
@@ -982,7 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._only(method, "GET")
                 self._read_only_ok()
                 tail = _int_param(query, "tail", DEFAULT_TAIL, 0, MAX_TAIL)
-                self._send_json(200, self.app.job_view(job_id, self._token(), tail))
+                self._send_json(200, self.app.job_view(job_id, self._read_token(), tail))
                 return
             if sub == "/tree":
                 self._only(method, "PUT")
@@ -998,7 +1150,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "/log":
                 self._only(method, "GET")
-                t = self.app.require_token(self._token())
+                t = self._require_read_token()
                 offset = _int_param(query, "offset", 0, 0, None)
                 data, next_offset, more = self.app.log_bytes(job_id, t, offset)
                 self.send_response(200)
