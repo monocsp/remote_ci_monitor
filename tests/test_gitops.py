@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ import pytest
 from gitrepo import HELLO, RemoteRepo, build_remote, git, install_hanging_git, isolate_git_env
 from remote_ci_monitor.gitops import (
     GitError,
+    _mirror_lock,
     checkout,
     ensure_mirror,
     fetch_ref,
@@ -307,3 +309,40 @@ def test_git_error_messages_never_leak_the_environment(tmp_path: Path) -> None:
     with pytest.raises(GitError) as e:
         resolve_ref(url, "main", timeout=TIMEOUT)
     assert_clean_message(e.value, str(tmp_path), url, os.environ.get("HOME", "~"))
+
+
+# ── 미러 락 ──────────────────────────────────────────────────────────────────
+
+
+def test_mirror_lock_is_one_object_before_and_after_the_mirror_exists(tmp_path: Path) -> None:
+    """같은 미러에 락이 하나여야 fetch 가 직렬화된다 — 심볼릭 링크 경로(/var → /private/var)도,
+    미러가 생기기 전후로도 같은 락이어야 한다."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    mirror = link / "mirrors" / "app"
+    before = _mirror_lock(mirror)
+    mirror.mkdir(parents=True)
+    assert _mirror_lock(mirror) is before
+    assert _mirror_lock(Path(str(mirror))) is before
+
+
+def test_ensure_mirror_survives_concurrent_first_use(remote: RemoteRepo, mirror: Path) -> None:
+    """두 레인이 같은 레포의 첫 잡을 동시에 받아도 `git init` 이 겹치지 않는다."""
+    errors: list[BaseException] = []
+
+    def go() -> None:
+        try:
+            ensure_mirror(mirror, remote.url, timeout=TIMEOUT)
+        except BaseException as e:  # noqa: BLE001 — 어떤 예외든 실패로 센다
+            errors.append(e)
+
+    threads = [threading.Thread(target=go) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == []
+    assert (mirror / "HEAD").is_file()
+    assert git("config", "gc.auto", cwd=mirror) == "0"

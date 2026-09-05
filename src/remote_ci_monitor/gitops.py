@@ -58,7 +58,9 @@ def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def _mirror_lock(mirror: Path) -> threading.Lock:
-    key = str(mirror.resolve()) if mirror.exists() else str(mirror)
+    # 키는 미러가 생기기 전후로 같아야 한다 — `resolve()` 는 생긴 뒤에만 심볼릭 링크
+    # (/var → /private/var)를 풀어 다른 키를 주므로 존재 여부와 무관한 절대 경로를 쓴다
+    key = os.path.abspath(mirror)
     with _mirror_locks_guard:
         lock = _mirror_locks.get(key)
         if lock is None:
@@ -119,22 +121,26 @@ def resolve_ref(url: str, ref: str, *, timeout: float, run: RunFn = subprocess.r
 
 
 def ensure_mirror(mirror: Path, url: str, *, timeout: float, log: LogFn | None = None) -> None:
-    """미러(bare)가 없으면 만든다. 있으면 그대로. 자동 gc 는 끈다(공유 객체를 지우지 않게)."""
-    if (mirror / "HEAD").is_file():
-        return
-    mirror.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(
-        ["init", "--bare", "-q", "--", str(mirror)],
-        what="git init",
-        timeout=timeout,
-        log=log,
-    )
-    _run_git(
-        ["--git-dir", str(mirror), "config", "gc.auto", "0"],
-        what="git config",
-        timeout=timeout,
-        log=log,
-    )
+    """미러(bare)가 없으면 만든다. 있으면 그대로. 자동 gc 는 끈다(공유 객체를 지우지 않게).
+
+    두 레인이 같은 레포의 첫 잡을 동시에 받으면 `git init` 이 겹치므로 fetch 와 같은 락 아래서 한다.
+    """
+    with _mirror_lock(mirror):
+        if (mirror / "HEAD").is_file():
+            return
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        _run_git(
+            ["init", "--bare", "-q", "--", str(mirror)],
+            what="git init",
+            timeout=timeout,
+            log=log,
+        )
+        _run_git(
+            ["--git-dir", str(mirror), "config", "gc.auto", "0"],
+            what="git config",
+            timeout=timeout,
+            log=log,
+        )
 
 
 _FULL_REFSPECS = ("+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
