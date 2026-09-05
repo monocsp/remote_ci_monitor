@@ -535,6 +535,7 @@ def test_job_event_stream_stays_anonymous_when_read_auth_is_none(tmp_path):
     finally:
         srv.close()
 
+
 @needs_git
 def test_resolve_failure_puts_git_stderr_in_the_server_log_not_the_response(tmp_path):
     """제출 시점의 git 실패에는 잡이 없어 잡 로그도 없다 — stderr(URL 이 섞인다)는 서버 로그로만,
