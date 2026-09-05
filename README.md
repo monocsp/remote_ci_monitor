@@ -21,11 +21,13 @@ dependencies:
 ```sh
 pipx install remote-ci-monitor                      # from PyPI
 uvx --from remote-ci-monitor rcm version            # or run it through uv without installing
-pipx install git+https://github.com/monocsp/remote_ci_monitor   # latest dev branch / before the first PyPI release
+pipx install git+https://github.com/monocsp/remote_ci_monitor   # from git (main); add @dev for the dev branch — use this before the first PyPI release
 ```
 
 No `pipx` yet? `python3 -m pip install --user pipx && python3 -m pipx ensurepath`, then open a new
-shell. A release wheel from the GitHub Releases page also installs with `pipx install <wheel-url>`.
+shell. If `rcm` is "command not found" right after installing, `~/.local/bin` is not on your `PATH`
+yet — run `pipx ensurepath` and open a new shell. A release wheel from the GitHub Releases page
+also installs with `pipx install <wheel-url>`.
 
 ## Build machine (3 commands)
 
