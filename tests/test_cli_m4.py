@@ -286,6 +286,15 @@ def test_init_client_rejects_urls_without_an_http_scheme(home, capsys, url):
     assert not (home / ".config" / "rcm" / "client.toml").exists()
 
 
+@pytest.mark.parametrize("url", ['http://a:1/"', "http://a:1\\x", "http://a b:1"])
+def test_init_client_rejects_urls_that_would_break_the_toml_string(home, capsys, url):
+    """따옴표 · 역슬래시 · 공백은 `server = "…"` 줄을 깨거나 엉뚱한 주소를 남긴다 — usage 2."""
+    code, out, err = run(capsys, ["init", "client", "--server", url])
+    assert code == 2 and out == "", err
+    assert "--server" in err, err
+    assert not (home / ".config" / "rcm" / "client.toml").exists()
+
+
 def test_init_client_refuses_to_overwrite_unless_forced(home, capsys):
     path = home / ".config" / "rcm" / "client.toml"
     assert run(capsys, ["init", "client", "--server", "http://a:1"])[0] == 0

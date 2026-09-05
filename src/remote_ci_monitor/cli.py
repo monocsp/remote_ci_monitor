@@ -677,6 +677,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         server = (args.server or "").strip().rstrip("/")
         if not server.startswith(("http://", "https://")):
             return _usage("--server must be a URL starting with http:// or https://")
+        # 템플릿의 `server = "…"` 안에 그대로 들어간다 — 따옴표·역슬래시·공백이 있으면 TOML 이
+        # 깨지거나 엉뚱한 주소가 조용히 남으니 여기서 막는다.
+        if any(c in '"\\' or c.isspace() for c in server):
+            return _usage("--server must not contain quotes, backslashes or whitespace")
     path = Path(args.path).expanduser() if args.path else user_config_dir() / f"{kind}.toml"
     if path.exists() and not args.force:
         return _usage(f"refusing to overwrite {path} (use --force)")
