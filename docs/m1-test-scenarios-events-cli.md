@@ -26,9 +26,9 @@
 | 7 | 링 버퍼 안 재생 | 1..5 발행 후 `last_id=3` → 4, 5 재생(reset 아님) → 그 뒤 실시간 6 |
 | 8 | 최신 `last_id` 재생 | `last_id == bus.last_id` 면 아무것도 안 온다(reset 도 없음) |
 | 9 | 링 버퍼 밖 → reset | `history=5` · 12개 발행 · `last_id=1` → `reset {}` 하나, 옛것은 안 흘림, 이후 13 정상. 같은 버스에서 `last_id=9` 는 10..13 재생 |
-| 10 | 기본 history 500 | 502개 발행 후 `last_id=3` → 499개(4..502) 재생, `last_id=1` → reset |
+| 10 | 기본 history 2048 | 2050개 발행 후 `last_id=3` → 2047개 재생, `last_id=1` → reset (`test_default_history_is_2048`) |
 | 11 | 큐 넘침 → lag | `maxsize=3` · 10개 발행 → `lag {}` 정확히 한 개, 남은 실이벤트의 마지막은 id 10(가장 새 것), id 오름차순·중복 없음, 총 ≤ 4개, 넘친 뒤에도 구독 유지 |
-| 12 | 기본 maxsize 256 | 기본 구독에 300개 → lag 발생, ≤ 257개, 마지막은 id 300 |
+| 12 | 기본 maxsize = 링 크기 | 정확히 2048개는 lag 없음, 2048+52개 → lag 하나 + 최신 유지, ≤ 2049개 (`test_default_subscription_queue_matches_ring_size`) |
 | 13 | lag 는 구독자 별 | 작은 큐가 넘쳐도 큰 큐 구독자는 1..8 전부 받는다 |
 | 14 | 구독 해제 | 해제하면 안 오고 `subscriber_count` 감소, 구독자 0 이어도 발행·id 증가 |
 | 15 | 스레드 안전성 | 발행 스레드 2개(각 250) + 소비 스레드 — id 1..500 빠짐·중복·역순 없음, 스레드별 발행 순서 보존, 마감 10s |
@@ -99,7 +99,7 @@
 
 ## 5. 명세가 모호해 테스트가 정한 것 (구현이 맞춰야 하는 값)
 
-- `EventBus()` 기본 `history=500`, `subscribe()` 기본 `maxsize=256` — 명세 3절 시그니처 그대로 고정한다.
+- `EventBus()` 기본 `history=2048`, `subscribe()` 기본 `maxsize` 는 링 크기와 같다 — Codex M1 리뷰(좋음 1·2) 반영 뒤 격리 검증에서 테스트를 정렬했다.
 - 큐 넘침: `lag` 는 **한 번만**(연속 넘침에도 coalesce) 넣고, **가장 새 이벤트가 남는다**(「가장 오래된 것을
   버린다」). 남는 개수는 `maxsize + 1` 이하.
 - `reset`·`lag` 의 `data` 는 정확히 `{}`.

@@ -62,7 +62,7 @@ rss_mb 기대값은 내림·반올림이 같은 값이 되도록 골랐다(macOS
 | 실제 출력 → util 1 · mem_used 27443200 (`(driver)` 키에 안 속음) · mem_total None · source ioreg · util 은 int | macos/ioreg | `test_parse_ioreg_gpu_real_fixture` |
 | IOAccelerator 는 있는데 PerformanceStatistics 없음 · 빈 문자열 · 쓰레기 → `(None, "no IOAccelerator PerformanceStatistics")` | inline | `test_parse_ioreg_gpu_without_performance_statistics` |
 | 키 일부만: util 만 / mem 만(`(driver)` 키 동반) → 없는 값 None, note None | inline | `test_parse_ioreg_gpu_partial_keys_leave_missing_none` |
-| 가속기 2개 → 첫 번째 | inline | `test_parse_ioreg_gpu_multiple_accelerators_first_wins` |
+| 가속기 2개 → util 은 max, 메모리는 합(PerformanceStatistics 없는 항목은 무시, 한쪽만 있으면 있는 값만) | inline | `test_parse_ioreg_gpu_multiple_accelerators_max_util_and_summed_memory` |
 
 ### `parse_proc_loadavg` · `parse_proc_meminfo`
 | 시나리오 | 픽스처 | 테스트 |
@@ -162,4 +162,4 @@ rss_mb 기대값은 내림·반올림이 같은 값이 되도록 골랐다(macOS
 9. `gpu_note` 문구를 고정한 것은 `"disabled"` · `"nvidia-smi not found"` · 파서 note `"no IOAccelerator PerformanceStatistics"` 뿐. ioreg 실행 실패·nvidia-smi 오류 문구는 「비어 있지 않은 문자열」만 본다.
 10. `publish` 의 `sampled_at` 은 iso 문자열(SSE JSON)이 맞지만 datetime 도 받아 준다. publish 는 `run()` 에서 부르는 것으로 보고 `sample_once()` 단독 호출엔 publish 를 요구하지 않는다.
 11. Linux `/proc/stat` 두 번째 읽기 사이의 1초 대기는 주입하지 않는다 — Linux 샘플러 테스트는 각각 1초쯤 걸린다.
-12. **가속기가 여럿이면 첫 번째**(workplan §1 문구 그대로) — `test_parse_ioreg_gpu_multiple_accelerators_first_wins` 는 util 5 / 90 두 블록에서 5 를 기대한다. 구현이 「util 은 max · 메모리는 합」을 택하면 이 테스트가 빨개진다. 그 의미가 더 낫다고 보면 workplan §1 을 먼저 고치고 테스트를 따라 바꾼다(스펙이 정본).
+12. **가속기가 여럿이면 util 은 max · 메모리는 합** — 처음엔 「첫 번째」였으나 Codex M1 리뷰(필수 8)로 workplan §1 이 바뀌었고, 격리 검증에서 테스트를 `…_max_util_and_summed_memory` 로 정렬했다(스펙이 정본).

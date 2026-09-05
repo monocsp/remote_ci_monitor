@@ -34,7 +34,7 @@ def mac_memory(vm: dict[str, int] | None, total_bytes: int | None) -> dict[str, 
 
 def parse_top_cpu(text: str) -> dict[str, float | None] | None
     # `top -l 2 -n 0 -s 1` 출력에서 **마지막** "CPU usage: 46.75% user, 21.8% sys, 32.16% idle" 만 쓴다(첫 표본은 부팅 이후 누적이라 버린다).
-    # {"user": 46.75, "sys": 21.8, "idle": 32.16, "busy": 68.55}  busy = 100 − idle (반올림 2자리)
+    # {"user": 46.75, "sys": 21.8, "idle": 32.16, "busy": 67.84}  busy = 100 − idle (반올림 2자리)
 
 def parse_top_load(text: str) -> tuple[float, float, float] | None
     # "Load Avg: 5.42, 5.06, 3.45" 마지막 것
