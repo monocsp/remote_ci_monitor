@@ -460,14 +460,22 @@
       rerun: (state === "failed" || state === "timed_out") ? rerunCommand(job) : null
     };
   }
+  // 셸에 붙여 넣는 값이라 안전한 문자만 그대로, 나머지는 작은따옴표로 감싼다(다른 사용자의 입력값·ref 다)
+  function shellQuote(v) {
+    var s = String(v);
+    if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }
   function rerunCommand(job) {
     if (!job || !job.preset) return DASH;  // 빈 명령을 복사하게 두지 않는다
     var cmd = "rcm run " + job.preset;
     var inputs = job.inputs || {};
     Object.keys(inputs).forEach(function (k) {
       var v = inputs[k];
-      cmd += " -f " + k + "=" + (typeof v === "boolean" ? (v ? "true" : "false") : String(v));
+      cmd += " -f " + k + "=" + shellQuote(typeof v === "boolean" ? (v ? "true" : "false") : String(v));
     });
+    var src = job.source || {};
+    if (src.mode === "git_ref" && src.ref) cmd += " --ref " + shellQuote(src.ref);  // git_ref 잡은 --ref 없이는 usage 오류
     return cmd;
   }
   function transitionsLine(job, tz) {
@@ -536,7 +544,8 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
-    stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, transitionsLine: transitionsLine,
+    stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    sourceHtml: sourceHtml,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
   };
@@ -1262,7 +1271,7 @@
       if (t.hasAttribute("data-rtoggle")) { var rid = parseInt(t.getAttribute("data-rtoggle"), 10); if (ev.target.closest("[data-copy]")) return; state.expandedRecent[rid] = !state.expandedRecent[rid]; renderRecent(); return; }
       if (t.hasAttribute("data-copy")) { var text = t.getAttribute("data-copy"); if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { toast("copied: " + text); }, function () { toast(text); }); else toast(text); return; }
       if (t.hasAttribute("data-inputs")) { var r = findRow(parseInt(t.getAttribute("data-inputs"), 10)); if (r) toast("#" + r.id + " inputs: " + JSON.stringify(r.inputs || {})); return; }
-      if (t.hasAttribute("data-src")) { var rs = findRow(parseInt(t.getAttribute("data-src"), 10)); if (rs && rs.source) toast("#" + rs.id + " " + (rs.source.base_sha || DASH) + (rs.source.dirty ? " · tree differs from base sha" : "") + (rs.source.tree_hash ? " · tree " + rs.source.tree_hash : "")); return; }
+      if (t.hasAttribute("data-src")) { var rs = findRow(parseInt(t.getAttribute("data-src"), 10)); if (rs && rs.source) toast("#" + rs.id + " " + (rs.source.mode === "git_ref" ? (rs.source.sha || DASH) + " · ref " + (rs.source.ref || DASH) : (rs.source.base_sha || DASH) + (rs.source.dirty ? " · tree differs from base sha" : "") + (rs.source.tree_hash ? " · tree " + rs.source.tree_hash : ""))); return; }
     });
     document.addEventListener("keydown", function (ev) {
       if (ev.key === "Escape") { closeDrawer(false); }

@@ -31,8 +31,9 @@ from remote_ci_monitor.config import (
     load_client_config,
     load_server_config,
 )
+from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
-from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES
+from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.render_text import fmt_clock, fmt_duration
 
 USAGE_EXIT = 2
@@ -155,8 +156,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         inputs_raw = parse_kv(args.f or [])
     except InputError as e:
         return _usage(str(e))
-    if args.source != "tree":
-        return _usage("only --source tree is available in this version (git_ref arrives in M3)")
+    ref: str | None = None
+    if args.ref is not None:
+        # 서버에 보내기 전에 같은 규칙으로 거른다(옵션처럼 보이는 값은 여기서 끝난다)
+        try:
+            ref = validate_ref(args.ref)
+        except ValueError as e:
+            return _usage(f"--ref: {e}")
     # ① 서버 스키마로 검증 — 실패면 보내지 않는다
     try:
         presets = client.presets()
@@ -166,12 +172,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     if preset is None:
         names = ", ".join(sorted(presets)) or "(none)"
         return _usage(f"unknown preset '{args.preset}' — server has: {names}")
-    if "tree" not in preset.source_modes:
-        return _usage(f"preset '{preset.name}' does not accept a tree snapshot")
+    # 소스 모드: --source 명시 > --ref 가 있으면 git_ref > 프리셋이 git_ref 만 받으면 git_ref > tree
+    mode = args.source
+    if mode is None:
+        if ref is not None or tuple(preset.source_modes) == ("git_ref",):
+            mode = "git_ref"
+        else:
+            mode = "tree"
+    if mode not in preset.source_modes:
+        allowed = ", ".join(preset.source_modes)
+        return _usage(f"preset '{preset.name}' accepts source modes: {allowed}")
+    if mode == "git_ref" and ref is None:
+        return _usage(f"preset '{preset.name}' needs --ref <branch|tag|sha>")
+    if mode == "tree" and ref is not None:
+        return _usage(f"--ref only applies to git_ref presets; '{preset.name}' takes a tree")
     try:
         inputs = validate_inputs(preset, inputs_raw)
     except InputError as e:
         return _usage(str(e))
+    label = args.by or default_label(None)
+    if mode == "git_ref":
+        return _run_git_ref(client, args, preset, inputs, ref or "", label)
     # ② 스냅샷
     root = Path(args.dir or os.getcwd())
     try:
@@ -189,7 +210,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "tree_hash": snap.tree_hash,
             "bytes": snap.bytes,
         }
-        label = args.by or default_label(None)
         # ③ 제출 (합류면 업로드 생략)
         try:
             resp = client.submit(
@@ -231,6 +251,49 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 0
     # ⑤ wait
+    return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
+
+
+def _run_git_ref(
+    client: Client,
+    args: argparse.Namespace,
+    preset: Preset,
+    inputs: dict[str, Any],
+    ref: str,
+    label: str,
+) -> int:
+    """git_ref 제출: 스냅샷·업로드 없이 ③ 제출 → ⑤ wait. 서버가 ref 를 sha 로 확정한다."""
+    try:
+        resp = client.submit(
+            preset.name,
+            inputs,
+            {"mode": "git_ref", "ref": ref},
+            requester_label=label,
+            join=not args.no_join,
+        )
+    except ClientError as e:
+        _err(f"submit failed: {e.message}")
+        return USAGE_EXIT if e.status in (400, 401, 403, 413, 0) else EXIT_UNKNOWN
+    job_id = int(resp["job_id"])
+    joined = bool(resp.get("joined"))
+    sha = resp.get("sha")
+    short = str(sha)[:7] if sha else "—"
+    if joined:
+        _info(f"joined job #{job_id} ({resp.get('state')}) — same preset, inputs, commit {short}")
+    else:
+        _info(f"submitted job #{job_id} ({preset.name} · {ref} @{short}) · {resp.get('url', '')}")
+    if args.no_wait:
+        _print_json(
+            {
+                "job_id": job_id,
+                "joined": joined,
+                "state": resp.get("state") or "submitted",
+                "ref": ref,
+                "sha": sha,
+                "url": resp.get("url"),
+            }
+        )
+        return 0
     return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
 
 
@@ -517,6 +580,8 @@ def cmd_presets(args: argparse.Namespace) -> int:
         if p.get("concurrency_group"):
             extra.append(f"group {p['concurrency_group']}")
         extra.append("modes " + ",".join(p.get("source_modes") or []))
+        if p.get("repo"):
+            extra.append(f"repo {p['repo']}")
         print(f"{p['name']:<16} {p.get('description') or ''}  [{' · '.join(extra)}]")
         for i in p.get("inputs") or []:
             detail = i.get("type", "string")
@@ -664,8 +729,15 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="snapshot the working tree, submit a preset and wait")
     run.add_argument("preset")
     run.add_argument("-f", action="append", metavar="NAME=VALUE", help="preset input (repeatable)")
-    run.add_argument("--source", choices=["tree", "git_ref"], default="tree")
-    run.add_argument("--ref", help="git ref (git_ref mode, M3)")
+    run.add_argument(
+        "--source",
+        choices=["tree", "git_ref"],
+        default=None,
+        help="tree = upload the working tree (default); git_ref = the server fetches --ref",
+    )
+    run.add_argument(
+        "--ref", metavar="REF", help="branch, tag or commit sha for git_ref presets (no upload)"
+    )
     run.add_argument("--by", metavar="LABEL", help="requester label (default: user@host)")
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
