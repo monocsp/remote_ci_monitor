@@ -348,6 +348,7 @@ def eta_for_new(
     preset: Preset,
     key: str,
     workers: Sequence[WorkerInfo],
+    inputs: Mapping[str, Any] | None = None,
     paused: bool,
     medians: Mapping[str, Median],
     presets: Mapping[str, Preset],
@@ -362,7 +363,7 @@ def eta_for_new(
     ghost = Job(
         id=next_id,
         preset=preset.name,
-        inputs={},
+        inputs=dict(inputs or {}),
         key=key,
         concurrency_group=preset.concurrency_group,
         source=Source(mode="tree"),

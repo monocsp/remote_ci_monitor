@@ -9,7 +9,7 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
-Status: **M0** — server, queue, worker, `rcm run` / `rcm wait`. Web UI (M2), host sampler and `rcm top` (M1) are next. The plan lives in `PLAN.md` (Korean).
+Status: **M1** — server, queue, worker, `rcm run` / `rcm wait`, host sampler (CPU · RAM · GPU), live events (SSE) and the `rcm top` / `eta` / `jobs` / `logs` / `presets` session commands. The web UI is M2. The plan lives in `PLAN.md` (Korean).
 
 ## 5-minute setup
 
@@ -68,6 +68,21 @@ Your script can report progress by printing markers at the start of a line:
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
 
+## Session commands
+
+| command | what it shows |
+|---|---|
+| `rcm run PRESET [-f k=v] [--no-wait] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait |
+| `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
+| `rcm eta PRESET [-f k=v]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate |
+| `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
+| `rcm jobs [--mine] [--state S]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
+| `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
+| `rcm presets` | presets the server offers and their inputs |
+| `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
+
+Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (< 5), `low` (preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown values print as `—`, never as 0.
+
 ## Exit codes
 
 | `rcm wait` exit | meaning |
@@ -97,6 +112,20 @@ Usage errors and validation failures that never reach the server exit with 2 as 
 - Step timestamps are **receive** times (`timing: "as_received"`), so buffered output shifts them.
 - A `lost` job died with the server; it is left as `lost`, never silently re-queued or deleted.
 - When the queue is paused or every worker lane is down, ETAs are `null` on purpose.
+- Host samples are polled (default every 5 s). `stale` means the last sample is older than 3 intervals; `hosts_error` means the sampler itself failed. Memory "used" on macOS is `active + wired + compressed` (what Activity Monitor calls Memory Used), which is smaller than `top`'s PhysMem used. GPU numbers come from `ioreg` (Apple Silicon) or `nvidia-smi`; on other machines the GPU shows `unavailable` with the reason.
+
+## Verify on the real build machine
+
+The loopback e2e test proves the flow on one machine. Checking the M1 goal ("another computer submits over Tailscale and sees position, ETA, steps and GPU") is done by hand:
+
+1. On the build machine: `rcm serve --bind <tailscale-ip>` (or `bind = "0.0.0.0"` in `server.toml`). The server warns when it binds off-loopback with open reads — that is expected inside Tailscale.
+2. `rcm token add <laptop-name>` on the build machine; copy the token to the laptop as `RCM_TOKEN`.
+3. On the laptop: `RCM_SERVER=http://<tailscale-ip>:8787 rcm check` — server, token, presets and timezone must all say `ok`.
+4. `rcm run gate --no-wait` from a project checkout on the laptop, then `rcm top` in another terminal: the job must show its position or `running`, an ETA with a confidence badge, and the current step once the script prints markers.
+5. `rcm top` host line: CPU, memory and load must be numbers, `sampled Ns ago` must stay small. GPU shows a percentage on Apple Silicon or NVIDIA machines; elsewhere it must say `unavailable` with a note (that still passes).
+6. `rcm wait --job N` from a third terminal must update on the event stream (no 2 s polling gaps) and exit with the job's code.
+7. From a second session on the same tree, `rcm run gate` must print `joined job #N`, and `rcm jobs --mine` with that session's token must list the job.
+8. Kill the server with the job running, restart it: `rcm wait` must exit 3 with `lost`, and a job that was queued must run afterwards.
 
 ## Development
 

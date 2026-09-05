@@ -110,6 +110,7 @@ class Worker(threading.Thread):
         wake: threading.Event | None = None,
         stop: threading.Event | None = None,
         on_change: Callable[[int], None] | None = None,
+        on_marker: Callable[[int, str, str], None] | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
         environ: dict[str, str] | None = None,
     ):
@@ -120,6 +121,7 @@ class Worker(threading.Thread):
         self.wake = wake or threading.Event()
         self.stop_event = stop or threading.Event()
         self.on_change = on_change
+        self.on_marker = on_marker
         self.now_fn = now_fn
         self.environ = environ if environ is not None else dict(os.environ)
         self._lock = threading.Lock()
@@ -237,6 +239,7 @@ class Worker(threading.Thread):
         started = self.now_fn()
         self.store.set_phase(job.id, PHASE_EXECUTING)
         self.store.set_last_output(job.id, started)
+        self._changed(job.id)  # materializing → executing
         try:
             log = log_path.open("ab")
         except OSError as e:
@@ -364,6 +367,11 @@ class Worker(threading.Thread):
                     parsed = parse_marker(line)
                     if parsed is not None:
                         self.store.add_marker(job.id, parsed[0], parsed[1], now)
+                        if self.on_marker is not None:
+                            try:
+                                self.on_marker(job.id, parsed[0], parsed[1])
+                            except Exception:  # noqa: BLE001
+                                pass
                         self._changed(job.id)
                 if lines:
                     log.flush()
@@ -428,6 +436,7 @@ def start_workers(
     wake: threading.Event,
     stop: threading.Event,
     on_change: Callable[[int], None] | None = None,
+    on_marker: Callable[[int, str, str], None] | None = None,
     now_fn: Callable[[], datetime] = _utcnow,
 ) -> list[Worker]:
     workers = [
@@ -438,6 +447,7 @@ def start_workers(
             wake=wake,
             stop=stop,
             on_change=on_change,
+            on_marker=on_marker,
             now_fn=now_fn,
         )
         for lane in range(1, config.server.lanes + 1)

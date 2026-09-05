@@ -54,6 +54,8 @@ class ServerSection:
     recent_count: int = 8
     upload_stall_seconds: int = 60
     upload_abandon_seconds: int = 300
+    sse_max_connections: int = 16
+    sse_keepalive_seconds: int = 15
     public_url: str = ""
 
 
@@ -379,6 +381,10 @@ def _validate_server(cfg: ServerConfig) -> None:
     ):
         if getattr(s, key) < 1:
             raise ConfigError(f"[server] {key} must be >= 1")
+    if s.sse_max_connections < 0:
+        raise ConfigError("[server] sse_max_connections must be >= 0")
+    if s.sse_keepalive_seconds < 1:
+        raise ConfigError("[server] sse_keepalive_seconds must be >= 1")
     if s.upload_abandon_seconds < s.upload_stall_seconds:
         raise ConfigError("[server] upload_abandon_seconds must be >= upload_stall_seconds")
     e = cfg.estimate

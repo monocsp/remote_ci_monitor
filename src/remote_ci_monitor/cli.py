@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -218,10 +219,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 0
     # ⑤ wait
-    return _wait(client, job_id, timeout=args.timeout, joined=joined)
+    return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
 
 
-def _wait(client: Client, job_id: int, *, timeout: float | None, joined: bool) -> int:
+def _wait(
+    client: Client, job_id: int, *, timeout: float | None, joined: bool, use_sse: bool = True
+) -> int:
     line = _StatusLine()
     last: dict[str, Any] | None = None
 
@@ -231,7 +234,9 @@ def _wait(client: Client, job_id: int, *, timeout: float | None, joined: bool) -
         line.update(describe(job))
 
     try:
-        code, job, reason = wait_for_job(client, job_id, timeout=timeout, on_update=on_update)
+        code, job, reason = wait_for_job(
+            client, job_id, timeout=timeout, on_update=on_update, use_sse=use_sse
+        )
     except KeyboardInterrupt:
         line.done()
         left = False
@@ -261,7 +266,7 @@ def _wait(client: Client, job_id: int, *, timeout: float | None, joined: bool) -
 
 def cmd_wait(args: argparse.Namespace) -> int:
     client = _client(args, need_token=False)
-    return _wait(client, args.job, timeout=args.timeout, joined=False)
+    return _wait(client, args.job, timeout=args.timeout, joined=False, use_sse=not args.poll)
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
@@ -287,6 +292,221 @@ def cmd_pause(args: argparse.Namespace) -> int:
         _err(f"{args.command} failed: {e.message}")
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
     _print_json(resp)
+    return 0
+
+
+# ── eta · top · jobs · logs · presets (M1) ───────────────────────────────────
+
+
+def _local_tz():
+    return datetime.now().astimezone().tzinfo
+
+
+def _fmt_eta_row(row: dict[str, Any], ahead: int | None) -> str:
+    """`rcm eta` 한 줄. 모르는 값은 —, 시작할 수 없으면 이유를 붙인다."""
+    est = row.get("estimate") or {}
+    parts: list[str] = []
+    if row.get("id"):
+        parts.append(f"#{row['id']}")
+    if row.get("position"):
+        parts.append(f"{_ordinal(row['position'])} in line")
+    if ahead is not None:
+        parts.append(f"{ahead} ahead")
+    parts.append(f"wait {fmt_duration(est.get('wait_seconds'))}")
+    parts.append(f"expected {fmt_duration(est.get('expected_seconds'))}")
+    if est.get("finish_at"):
+        parts.append(f"eta {fmt_clock(est['finish_at'], _local_tz())}")
+    else:
+        parts.append("eta —")
+        reason = row.get("reason")
+        if reason in ("paused", "worker_down", "overdue", "stuck"):
+            parts.append(reason.replace("_", " "))
+    conf = est.get("confidence")
+    source = est.get("source")
+    n = est.get("sample_count")
+    tail = f"{conf} · {source}" if conf else f"{source}"
+    if source == "measured" and n:
+        tail += f" n={n}"
+    parts.append(tail)
+    return " · ".join(parts)
+
+
+def cmd_eta(args: argparse.Namespace) -> int:
+    client = _client(args, need_token=False)
+    try:
+        if args.job is not None:
+            doc = client.status()
+            pool = (doc.get("pools") or [{}])[0]
+            queue = pool.get("queue")
+            if queue is None:
+                return _usage(f"queue unavailable: {pool.get('queue_error') or 'unknown'}")
+            row = next((r for r in queue if r.get("id") == args.job), None)
+            if row is None:
+                job = client.job(args.job)
+                _print_json(job) if args.json else print(
+                    f"#{args.job} {job.get('state')} · finished "
+                    f"{fmt_clock(job.get('finished_at'), _local_tz())} · {job.get('summary') or ''}"
+                )
+                return 0
+            busy_others = sum(
+                1 for r in queue if r.get("id") != args.job and r.get("position") is None
+            )
+            ahead = busy_others + (row["position"] - 1) if row.get("position") else 0
+            if args.json:
+                _print_json(row)
+            else:
+                print(_fmt_eta_row(row, ahead))
+            return 0
+        if not args.preset:
+            return _usage("give a PRESET or --job ID")
+        try:
+            inputs = parse_kv(args.f or [])
+        except InputError as e:
+            return _usage(str(e))
+        resp = client.eta(args.preset, inputs)
+    except ClientError as e:
+        return _usage(f"eta failed: {e.message}") if e.status else EXIT_UNKNOWN
+    if args.json:
+        _print_json(resp)
+    else:
+        print(_fmt_eta_row(resp["job"], resp.get("ahead")))
+    return 0
+
+
+def cmd_top(args: argparse.Namespace) -> int:
+    from remote_ci_monitor.core.render_text import render
+
+    client = _client(args, need_token=False)
+    try:
+        while True:
+            try:
+                doc = client.status()
+            except ClientError as e:
+                if args.json:
+                    _print_json({"error": e.message, "server": client.server})
+                    return EXIT_UNKNOWN
+                text = f"━━━ rcm · {client.server} · unreachable: {e.message}\n"
+                doc = None
+            else:
+                text = render(doc, tz=_local_tz())
+            if args.json:
+                _print_json(doc)
+                return 0
+            if args.watch:
+                sys.stdout.write("\x1b[2J\x1b[H")
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            if not args.watch:
+                return 0 if doc is not None else EXIT_UNKNOWN
+            time.sleep(max(1.0, float(args.watch)))
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    client = _client(args, need_token=bool(args.mine))
+    me: str | None = None
+    try:
+        if args.mine:
+            me = client.whoami()["name"]
+        doc = client.status()
+    except ClientError as e:
+        return _usage(f"jobs failed: {e.message}") if e.status else EXIT_UNKNOWN
+    pool = (doc.get("pools") or [{}])[0]
+    rows: list[dict[str, Any]] = []
+    if pool.get("queue") is None:
+        print(f"queue unavailable: {pool.get('queue_error') or 'unknown'}", file=sys.stderr)
+    else:
+        rows.extend(pool["queue"])
+    if pool.get("recent") is None:
+        print(f"recent unavailable: {pool.get('recent_error') or 'unknown'}", file=sys.stderr)
+    else:
+        rows.extend(pool["recent"])
+    if me is not None:
+        rows = [
+            r
+            for r in rows
+            if (r.get("requester") or {}).get("name") == me
+            or any(j.get("name") == me for j in r.get("joiners") or [])
+        ]
+    if args.state:
+        rows = [r for r in rows if r.get("state") == args.state]
+    if args.json:
+        _print_json(rows)
+        return 0
+    tz = _local_tz()
+    if not rows:
+        print("no jobs")
+        return 0
+    for r in rows:
+        est = r.get("estimate") or {}
+        state = r.get("state", "?")
+        if state in ("running", "cancelling"):
+            timing = f"elapsed {fmt_duration(est.get('elapsed_seconds'))}"
+        elif state in ("queued", "uploading"):
+            timing = f"waiting {fmt_duration(est.get('waited_seconds'))}"
+        else:
+            timing = f"took {fmt_duration(r.get('job_seconds'))}"
+        when = est.get("finish_at") or r.get("finished_at")
+        pos = f"{_ordinal(r['position'])} in line · " if r.get("position") else ""
+        label = (r.get("requester") or {}).get("label") or "?"
+        summary = r.get("summary") or ""
+        print(
+            f"#{r.get('id')}  {state:<10} {r.get('key', '?'):<16} {label:<20} {pos}{timing:<16} "
+            f"{fmt_clock(when, tz)}  {summary}".rstrip()
+        )
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    client = _client(args)
+    try:
+        if args.follow:
+            for chunk in client.log_follow(args.job):
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+        else:
+            data, _, _ = client.log(args.job, 0)
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+    except ClientError as e:
+        return _usage(f"logs failed: {e.message}") if e.status else EXIT_UNKNOWN
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+def cmd_presets(args: argparse.Namespace) -> int:
+    client = _client(args, need_token=False)
+    try:
+        doc = client.status()
+    except ClientError as e:
+        return _usage(f"presets failed: {e.message}") if e.status else EXIT_UNKNOWN
+    presets = doc.get("presets") or []
+    if args.json:
+        _print_json(presets)
+        return 0
+    if not presets:
+        print("no presets configured on the server")
+        return 0
+    for p in presets:
+        extra = []
+        if p.get("expected_seconds"):
+            extra.append(f"expected {fmt_duration(p['expected_seconds'])}")
+        if p.get("timeout_seconds"):
+            extra.append(f"timeout {fmt_duration(p['timeout_seconds'])}")
+        if p.get("concurrency_group"):
+            extra.append(f"group {p['concurrency_group']}")
+        extra.append("modes " + ",".join(p.get("source_modes") or []))
+        print(f"{p['name']:<16} {p.get('description') or ''}  [{' · '.join(extra)}]")
+        for i in p.get("inputs") or []:
+            detail = i.get("type", "string")
+            if i.get("choices"):
+                detail += " " + "|".join(i["choices"])
+            if i.get("pattern"):
+                detail += f" /{i['pattern']}/"
+            default = "" if i.get("default") is None else f" (default {i['default']})"
+            print(f"    -f {i['name']}=<{detail}>{default}")
     return 0
 
 
@@ -429,12 +649,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--dir", help="directory to snapshot (default: current directory)")
     run.add_argument("--timeout", type=float, help="give up waiting after N seconds (exit 3)")
+    run.add_argument(
+        "--poll", action="store_true", help="poll every 2s instead of the event stream"
+    )
     client_opts(run)
     run.set_defaults(func=cmd_run)
 
     wait = sub.add_parser("wait", help="wait for a job and exit with 0/1/2/3")
     wait.add_argument("--job", type=int, required=True)
     wait.add_argument("--timeout", type=float, help="give up waiting after N seconds (exit 3)")
+    wait.add_argument(
+        "--poll", action="store_true", help="poll every 2s instead of the event stream"
+    )
     client_opts(wait)
     wait.set_defaults(func=cmd_wait)
 
@@ -450,6 +676,38 @@ def build_parser() -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=help_text)
         client_opts(sp)
         sp.set_defaults(func=cmd_pause)
+
+    eta = sub.add_parser("eta", help="estimate wait and finish time for a job or a new submission")
+    eta.add_argument("preset", nargs="?")
+    eta.add_argument("-f", action="append", metavar="NAME=VALUE", help="preset input (repeatable)")
+    eta.add_argument("--job", type=int, help="an existing job id")
+    eta.add_argument("--json", action="store_true")
+    client_opts(eta)
+    eta.set_defaults(func=cmd_eta)
+
+    top = sub.add_parser("top", help="one screen: queue, recent, medians, host")
+    top.add_argument("--watch", type=float, metavar="N", help="refresh every N seconds")
+    top.add_argument("--json", action="store_true", help="print /api/status as JSON")
+    client_opts(top)
+    top.set_defaults(func=cmd_top)
+
+    jobs = sub.add_parser("jobs", help="list queued, running and recent jobs")
+    jobs.add_argument("--mine", action="store_true", help="only jobs you requested or joined")
+    jobs.add_argument("--state", help="filter by state (running, queued, failed, ...)")
+    jobs.add_argument("--json", action="store_true")
+    client_opts(jobs)
+    jobs.set_defaults(func=cmd_jobs)
+
+    logs = sub.add_parser("logs", help="print a job log (token required)")
+    logs.add_argument("job", type=int)
+    logs.add_argument("--follow", action="store_true", help="keep printing until the job ends")
+    client_opts(logs)
+    logs.set_defaults(func=cmd_logs)
+
+    presets = sub.add_parser("presets", help="list presets and their inputs")
+    presets.add_argument("--json", action="store_true")
+    client_opts(presets)
+    presets.set_defaults(func=cmd_presets)
 
     def server_opts(sp: argparse.ArgumentParser) -> None:
         sp.add_argument(

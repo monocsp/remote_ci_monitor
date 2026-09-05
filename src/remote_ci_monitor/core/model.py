@@ -309,6 +309,7 @@ class ServerInfo:
     paused: Paused | None
     last_error: str | None
     workers: tuple[WorkerInfo, ...]
+    sse_connections: int = 0
 
 
 @dataclass(frozen=True)

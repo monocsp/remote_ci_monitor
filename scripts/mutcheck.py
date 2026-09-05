@@ -5,10 +5,12 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 3종:
+변이 5종:
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
+  ④ stale-threshold  — 호스트 표본 stale 판정의 3×interval 을 0 으로 (`core/hostparse.py`, M1)
+  ⑤ top-first-sample — macOS top 의 마지막 표본 대신 첫 표본 사용 (`core/hostparse.py`, M1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -58,6 +60,20 @@ MUTANTS = (
         old="recover_state = LOST",
         new='recover_state = "succeeded"',
         tests=("tests/test_store.py",),
+    ),
+    Mutant(
+        name="stale-threshold",
+        path="src/remote_ci_monitor/core/hostparse.py",
+        old="return age > STALE_MULTIPLIER * interval_seconds",
+        new="return age > 0 * interval_seconds",
+        tests=("tests/test_hostparse.py", "tests/test_status_schema.py"),
+    ),
+    Mutant(
+        name="top-first-sample",
+        path="src/remote_ci_monitor/core/hostparse.py",
+        old="user_s, sys_s, idle_s = matches[-1]",
+        new="user_s, sys_s, idle_s = matches[0]",
+        tests=("tests/test_hostparse.py",),
     ),
 )
 

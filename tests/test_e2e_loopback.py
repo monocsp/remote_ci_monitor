@@ -211,6 +211,40 @@ def test_rcm_run_exit_codes_0_1_2_3_and_restart_leaves_lost(server, tree, tmp_pa
     out = rcm("run", "gate", "-f", "scope=huge", env=env, cwd=tree)
     assert out.returncode == 2 and "is not one of" in out.stderr
 
+    # M1 — rcm top shows the host sample and the queue; rcm eta/jobs/presets answer
+    deadline = time.monotonic() + 20  # 첫 표본은 top -l 2 때문에 1~2초 걸린다
+    while time.monotonic() < deadline:
+        topj = json.loads(rcm("top", "--json", env=env).stdout)
+        pool = topj["pools"][0]
+        if pool["hosts"] or pool["hosts_error"]:
+            break
+        time.sleep(0.3)
+    assert topj["schema_version"] == 1
+    assert pool["hosts_error"] is None, pool["hosts_error"]
+    host = pool["hosts"][0]
+    assert host["cpu"] is not None and host["memory"]["total_bytes"]
+    assert host["stale"] is False and host["history"]
+    top = rcm("top", env=env)
+    assert top.returncode == 0, top.stderr
+    assert "━━━ rcm ·" in top.stdout and "host " in top.stdout
+    assert "no sample yet" not in top.stdout and "CPU " in top.stdout
+    eta = rcm("eta", "gate", "-f", "scope=fast", env=env)
+    assert eta.returncode == 0 and "in line" in eta.stdout and "expected" in eta.stdout
+    assert rcm("presets", env=env).stdout.count("gate") >= 1
+    assert rcm("jobs", "--mine", env=env).returncode == 0
+    # M1 — a second session on the same tree joins instead of running twice
+    first = rcm("run", "gate", "-f", "scope=slow", "--no-wait", env=env, cwd=tree)
+    jid = last_json(first.stdout)["job_id"]
+    second = rcm(
+        "run", "gate", "-f", "scope=slow", "--no-wait", env=server.client_env(admin), cwd=tree
+    )
+    body = last_json(second.stdout)
+    assert body["joined"] is True and body["job_id"] == jid
+    mine = rcm("jobs", "--mine", env=server.client_env(admin))
+    assert f"#{jid}" in mine.stdout  # 합류자도 「내 잡」
+    assert rcm("cancel", str(jid), env=env).returncode == 0
+    assert rcm("wait", "--job", str(jid), env=env).returncode == 2
+
     # admin pause/resume via CLI; non-admin is refused
     assert rcm("pause", env=env).returncode == 2
     assert rcm("pause", env=server.client_env(admin)).returncode == 0

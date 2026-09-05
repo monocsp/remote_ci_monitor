@@ -109,7 +109,7 @@ uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 
 - **취소**: 자기 토큰의 잡(요청자)만, `admin` 토큰은 전부. `uploading`·`queued` 면 즉시 `cancelled`(진행 중이던 `PUT` 은 409), `running` 이면 `cancelling` 으로 바꾸고 SIGTERM → `grace_seconds` → SIGKILL → `cancelled`. `cancel.{requested_at, by, kill_at}` 을 싣는다. 원 요청자의 취소는 합류자의 `rcm wait` 에 종료 코드 2 로 전파된다. 합류자의 취소는 잡을 건드리지 않고 자기 `joiners[]` 항목만 지운다(오너 결정 16).
 - **표본**: 같은 `key` 의 완료 잡 중 `sample_policy`(기본 `success`) · `min_job_seconds`(30) 이상 · `sample_days`(45) 안. 소요는 `started_at`~`finished_at`(큐 대기는 안 섞인다 — 우리가 시각을 찍으니 v1 의 「run 시각 vs 잡 시각」 함정이 없다). 대기 중앙값(`medians[key].wait_seconds`)은 같은 표본의 `created_at`~`started_at`.
 - **중앙값**: 키별, `min_samples`(2) 이상일 때만. 아니면 프리셋의 `expected_seconds` → `default_seconds`(600). 출력에 `source: measured|preset|default` 와 `sample_count`.
-- **신뢰도**(화면 배지, 서버가 계산하지 않고 UI·`rcm top` 이 같은 규칙으로 그린다): `measured` 이고 `sample_count ≥ 5` → `high`, `measured` 이고 `< 5` → `med`, `preset`·`default` → `low`. 그룹 대기 잡은 `low · group wait`, 초과 실행 잡은 `overdue`.
+- **신뢰도**(화면 배지): `measured` 이고 `sample_count ≥ 5` → `high`, `measured` 이고 `< 5` → `med`, `preset`·`default` → `low`. 그룹 대기 잡은 `group wait`, 초과 실행·stuck 잡은 `overdue`. **서버가 `estimate.confidence` 로 싣는다**(M1 결정 B — UI 와 `rcm top` 이 어긋날 수 없게. `core/queue.confidence()`).
 - **잔여**: `queued` → expected 전체. `running` → `max(expected − elapsed, floor 30초)`. `overdue = elapsed > expected`. 초과 실행·stuck 잡의 `finish_at` 은 **null**(`now + 30s` 는 하한이 만든 자신있는 틀린 시각이라 싣지 않는다) — 대신 `remaining_seconds` 하한은 뒤 잡의 대기 계산에만 쓴다. `wait_seconds` 는 `running`·`cancelling` 이면 항상 0 이고, 대기 잡이 정지·레인 0 이면 null 이다.
 - **stuck**: `running` 이고 `elapsed > stuck_multiplier(3) × expected` 이거나 `now − progress.last_output_at > no_output_seconds(240)` 이면 `estimate.stuck: true`. `overdue` 와 다르다(overdue 는 「늦다」, stuck 은 「죽었을지 모른다」).
 - **대기**: 살아 있는 레인 1 → 앞선 잔여 합. 레인 k → 잔여를 큰 순으로 가장 빨리 비는 레인에 얹는 그리디. 그룹 제약은 근사로 무시하되, 그룹에 막힌 잡은 **`finish_at ≥ 막는 잡의 finish_at + 자기 expected`** 하한을 적용한다(막는 잡보다 이른 시각이 나오지 않게. 정확한 스케줄 시뮬레이션은 M5). 실행 중 잡의 `waited_seconds` 는 `created_at`~`started_at`.
@@ -220,12 +220,13 @@ default = "full"
 | `PUT /jobs/{id}/tree` | 토큰(그 잡의) | 본문 tar.gz(`Content-Length` 필수, 상한) → 풀지 않고 저장만 → `queued`. 수신 중 `source.received_bytes`·`last_received_at` 갱신. 이미 취소된 잡이면 409 |
 | `GET /jobs/{id}?tail=N` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(스키마의 queue/recent 행과 같은 모양). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null. `tail` 기본 5줄, 잡당 8KiB 상한, `rcm wait` 는 `tail=0` |
 | `GET /jobs/{id}/log?offset=N` | 토큰(그 잡의·합류자·admin) | 로그 바이트 스트림(증분) |
-| `GET /jobs/{id}/events` | 없음 | SSE: 상태 변화·스텝 마커·요약(로그 줄은 아님) |
+| `GET /jobs/{id}/events` | 없음 | SSE: 그 잡의 `job_changed`·`job_finished`·`marker` 만(로그 줄은 아님). 이미 끝난 잡이면 `hello` 뒤 `job_finished` 하나를 보내고 닫는다 |
 | `POST /jobs/{id}/cancel` | 토큰(그 잡의 또는 admin) | 취소 → `{job_id, state}`. 합류자 토큰이면 잡은 두고 자기 `joiners[]` 항목만 지운다 → `{left: true, job_id, job_state}` 이고 그 세션의 `rcm wait` 는 같은 JSON 을 찍고 **2** 로 끝난다 |
 | `GET /api/whoami` | 토큰 | `{name, admin}`. 401 이면 UI 가 저장 토큰을 지운다(네트워크 오류는 지우지 않는다) |
 | `POST /pause` · `POST /resume` | admin | 큐 정지·재개. 실행 중 잡은 끝까지 돌고 새 잡만 안 올라간다. `server.paused: {by, at}` 또는 null |
 | `GET /api/status` | `read_auth` | 전체 `StatusModel`. `ETag` 지원. `log_tail` 은 토큰 조건(위) |
-| `GET /events` | `read_auth` | SSE: 큐 변화·호스트 표본(UI 용). 이벤트 `job_changed`·`job_finished`·`host_sample`·`server` |
+| `GET /events` | `read_auth` | SSE: `hello` → `job_changed`·`job_finished`·`marker`·`host_sample`·`server`(+ `reset`·`lag` = 전체 재조회). `Last-Event-ID` 재생, 15초 keep-alive. 동시 연결 `sse_max_connections`(16) 초과는 503 + `Retry-After` + `{fallback: "poll", poll_seconds: 10}` — 웹은 백오프로 재시도하며 10초 폴링, CLI `wait` 는 2초 폴링 |
+| `POST /api/eta` | `read_auth` | `{preset, inputs}` → 가상 잡의 큐 행(`id` null, `position` = 대기 수 + 1) + `ahead`. `rcm eta` 용 |
 | `GET /api/health` | 없음 | 워커 스레드 살아 있고 DB 열리면 200, 아니면 503 + 사유 |
 | `GET /` · `/static/*` | `read_auth` | 정적 UI |
 
@@ -264,6 +265,8 @@ retention_days_success = 14
 retention_days_failure = 30
 keep_workspace_on_failure = true
 recent_count = 8                    # /api/status.recent 건수 (오너 결정 14)
+sse_max_connections = 16            # 초과는 503 + fallback: poll
+sse_keepalive_seconds = 15
 upload_stall_seconds = 60           # 이 동안 바이트가 안 오면 reason = upload_stalled
 upload_abandon_seconds = 300        # 이 동안 바이트가 안 오면 cancelled + "upload abandoned after 5m"
 
@@ -488,7 +491,7 @@ docs/reviews/
 
 - **픽스처**: 마커가 섞인 로그 3종(선언 있음·없음·실패) · 스냅샷용 임시 git 레포(추적·수정·미추적·무시·삭제·심링크) · macOS `vm_stat`/`top`/`ps`/`ioreg` · Linux `/proc/*`/`ps`/`nvidia-smi` 캡처(팀 정보 제거).
 - **테스트**(M0~M1): `test_queue.py`(v1 의 21 시나리오 이식 + 그룹 대기 하한 + 합류 키 + `position` 은 대기 잡만 + 살아 있는 레인 0·정지면 `finish_at` null + 초과 실행 `finish_at` null + `reason` + `stuck`) · `test_progress.py`(마커 6 함정 + `phase` + `steps[].ok`) · `test_snapshot.py` · `test_inputs.py` · `test_hostparse.py`(두 OS + GPU) · `test_status_schema.py`(`json.dumps` · null+`*_error` · pools 한 개) · `test_render_text.py`(빈 큐 vs 실패가 다르게) · `test_config.py`(우선순위·프리셋 오류 메시지·시간대) · `test_store.py`(enqueue·claim 원자성·재시작 lost·마이그레이션) · `test_worker.py`(가짜 프리셋 `sh -c` 로 성공·실패·타임아웃·취소·마커) · `test_server.py`(in-process: 401 · 합류 · 413 · tar 탈출 거부 · SSE 한 이벤트 · 로그 인증) · `test_client.py`(제출→업로드→wait 종료 코드 매핑, 서버 끊김 → 3).
-- **뮤테이션 확인** `scripts/mutcheck.py`: `src/`+`tests/` 를 tmpdir 에 복사해 변이 하나를 넣고 그 복사본에서 pytest 가 **빨개지는지** 본다. 패턴이 없으면 그 자체로 실패. 3종 — ① 잔여 하한 제거 ② 합류 키에서 `inputs` 제외 ③ 재시작 시 `running` 을 `succeeded` 로. 셋 다 빨개져야 「검증됨」.
+- **뮤테이션 확인** `scripts/mutcheck.py`: `src/`+`tests/` 를 tmpdir 에 복사해 변이 하나를 넣고 그 복사본에서 pytest 가 **빨개지는지** 본다. 패턴이 없으면 그 자체로 실패. M0 3종 — ① 잔여 하한 제거 ② 합류 키에서 `inputs` 제외 ③ 재시작 시 `running` 을 `succeeded` 로. M1 2종 — ④ 호스트 stale 판정의 3×interval 제거 ⑤ macOS `top` 첫 표본 사용. 전부 빨개져야 「검증됨」.
 - **CI**(`ci.yml`): `unit`(matrix: py 3.11·3.13 × ubuntu, macos-latest 는 3.13 만 — `hostparse`·`snapshot`·`worker` 가 실제 OS 에서 돈다) → `ruff check` · `ruff format --check` · `pytest` · `mutcheck.py`. `secrets` → `gitleaks/gitleaks-action@v3`(개인 계정은 라이선스 불필요, 2026-09-04 확인). 집계 잡 **`test`**: `needs: [unit, secrets]` + `if: always()`, 두 `needs.*.result` 가 모두 `success` 가 아니면 `exit 1`.
 - 스타일: ruff(기본 + `I`), 줄 100자, 타입 힌트 필수.
 
@@ -503,7 +506,7 @@ docs/reviews/
 
 ## 마일스톤과 완료 기준
 
-- **M0 — 서버·큐·워커·run/wait** (한 세션 이상): 모듈 뼈대 · 설정+프리셋 스키마 · SQLite 저장소 · 워커(tree 모드) · 스냅샷 클라이언트 · `POST /jobs`·`PUT tree`·`GET /jobs/{id}`·`/api/health`·`/api/whoami`·`/api/status` · 토큰 · `rcm run`/`wait`(폴링) · 순수 계산 + 테스트 · `mutcheck.py` · CI. `/api/status` 는 스키마 v1 의 **완전한 모양**을 내되 `hosts: []`(샘플러는 M1)·`medians: {}`(표본 쌓이기 전) 같은 빈 값은 허용한다. 완료 기준: 한 머신에서 루프백으로 `rcm run gate` 가 실제 스크립트를 돌리고 종료 코드 0/1/2/3 이 맞다 · 서버를 죽였다 살려도 큐가 남고 실행 중이던 잡은 `lost` 다 · 테스트 전부 통과 · 뮤테이션 3종 빨개짐 · CI 초록.
+- **M0 — 서버·큐·워커·run/wait** (**완료 2026-09-05**, PR #5~#11, 테스트 150개 · mutcheck 3/3 · 루프백 종료 코드 4종 확인): 모듈 뼈대 · 설정+프리셋 스키마 · SQLite 저장소 · 워커(tree 모드) · 스냅샷 클라이언트 · `POST /jobs`·`PUT tree`·`GET /jobs/{id}`·`/api/health`·`/api/whoami`·`/api/status` · 토큰 · `rcm run`/`wait`(폴링) · 순수 계산 + 테스트 · `mutcheck.py` · CI. `/api/status` 는 스키마 v1 의 **완전한 모양**을 내되 `hosts: []`(샘플러는 M1)·`medians: {}`(표본 쌓이기 전) 같은 빈 값은 허용한다. 완료 기준: 한 머신에서 루프백으로 `rcm run gate` 가 실제 스크립트를 돌리고 종료 코드 0/1/2/3 이 맞다 · 서버를 죽였다 살려도 큐가 남고 실행 중이던 잡은 `lost` 다 · 테스트 전부 통과 · 뮤테이션 3종 빨개짐 · CI 초록.
 - **M1 — 보이는 것**: 호스트 자원(CPU·RAM·**GPU**) · 중앙값/ETA/합류 · 스텝 마커 진행 · SSE · `rcm eta`/`top`/`jobs`/`logs`/`cancel`/`presets` · `/api/status` 완성. 완료 기준: 다른 컴퓨터에서 Tailscale 로 `rcm run` 을 넣고 `rcm top` 에 위치·ETA·스텝·GPU 가 보인다 · 같은 트리를 두 세션이 넣으면 두 번째는 합류한다.
 - **M2 — 웹 UI**: `docs/wireframes/web-queue.html` 대로 — 요약 세 칸 · 큐 표(Reason·신뢰도) · 호스트 카드(sparkline) · 최근 완료 · Estimates · 변형 19개 · SSE 갱신 · 토큰 입력 · 로그 뷰어·취소(토큰) · 모바일 · 다크/라이트. 완료 기준: 폰에서 큐·스텝·자원이 읽히고, **서버를 끊으면 `Lost connection` 띠가, 샘플러만 멈추면 `stale` 배지가** 뜬다.
 - **M3 — 운영**: `git_ref` 소스 · concurrency 그룹 · 보존 정리 · 타임아웃/취소 신호 검증 · launchd/systemd · macOS CI 잡. 완료 기준: 배포 프리셋이 원격 ref 로 돌고, QA 두 개가 그룹으로 직렬화된다.
@@ -531,17 +534,22 @@ docs/reviews/
 | 15 | 토큰 입력 | 웹의 토큰 입력(로그 tail·로그·취소)은 **M2 에 포함**한다. 폰에서 로그 확인과 취소가 실제 운영 행동이다 |
 | 16 | 합류자 취소 | 합류자가 취소하면 **자기 대기만 빠진다**(`rcm wait` 중단, 잡은 원 요청자 것으로 유지). 원 요청자가 취소하면 합류자의 `rcm wait` 는 2 로 끝나고, 취소 대화상자가 대기 세션 수를 미리 알린다 |
 
-12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 바꾸려면 여기서 고친다.
+| 17 | `rcm run` Ctrl-C | **detach** — 잡은 계속 돌고 `rcm wait --job N` / `rcm cancel N` 을 안내(종료 코드 3). 합류자면 자기 `joiners[]` 항목만 best-effort 로 뺀다. 잡 취소는 명시적 `rcm cancel` 만. (Codex M0 리뷰 추천값으로 구현, **오너 확인 대기**) |
+| 18 | 부분 업로드 재개 | **M0 범위 밖**. 끊기면 `cancelled` + `upload interrupted after N MB` 로 남기고 새 `rcm run` 으로 다시 제출. (Codex M0 리뷰 추천값으로 구현, **오너 확인 대기**) |
+| 19 | macOS 메모리 used | `active + wired + compressor`(Activity Monitor 「Memory Used」). `top` 의 PhysMem used 와 다르다. (Codex M1 리뷰, 추천값으로 구현, **오너 확인 대기**) |
+| 20 | GPU 없는 머신의 M1 완료 | `ioreg`/`nvidia-smi` 로 못 읽는 머신은 `gpu: null` + `gpu_note` 로 **통과**로 본다. 숫자는 Apple Silicon · NVIDIA 에서만. (Codex M1 리뷰, **오너 확인 대기**) |
+
+12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
 ## 참고 구현과 이전 설계
 
 - `fmmc-tech/dolomood-app-renew`(로컬에선 `dolomood-ci-monitor` 워크트리)의 `scripts/remote_ci.sh`(dispatch·가드·합류·대기) · `ci_queue.py`(큐·중앙값·잔여 21 자기검증) · `ci_top.py`(진행률·파서·렌더 18 자기검증) · `docs/renew-guide/ci-cd/30-remote-dispatch.md`. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
 - v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220`. jobs API 함정 6개·rate limit 예산·큐 판정 규칙은 M5 GitHub 백엔드 때 그대로 쓴다.
-- Codex 크로스리뷰 기록: `docs/reviews/2026-09-04-codex-plan-v1.md`(v1 설계) · `docs/reviews/2026-09-04-codex-github-dependency.md`(방향 전환) · `docs/reviews/2026-09-04-codex-web-queue.md`(웹 큐 화면 디자인) · `docs/reviews/2026-09-04-codex-m0-design.md`(v2.1 정합성 + M0 구현 결정 — Ctrl-C detach·부분 업로드 재개 제외는 추천값으로 구현, 오너 확인 대기). 서브에이전트 리뷰: `docs/reviews/2026-09-04-subagent-spec-gaps.md`(기획 누락 30건 — v2.1 의 데이터 모델 변경 근거) · `docs/reviews/2026-09-04-subagent-reference-comparison.md`(제품 비교 리서치).
+- Codex 크로스리뷰 기록: `docs/reviews/2026-09-04-codex-plan-v1.md`(v1 설계) · `docs/reviews/2026-09-04-codex-github-dependency.md`(방향 전환) · `docs/reviews/2026-09-04-codex-web-queue.md`(웹 큐 화면 디자인) · `docs/reviews/2026-09-04-codex-m0-design.md`(v2.1 정합성 + M0 구현 결정 — Ctrl-C detach·부분 업로드 재개 제외는 추천값으로 구현, 오너 확인 대기) · `docs/reviews/2026-09-05-codex-m1-design.md`(M1 명세 `docs/m1-workplan.md` — 캐시·SSE 폴백·재조회 합치기·macOS 메모리 정의·GPU 집계). 서브에이전트 리뷰: `docs/reviews/2026-09-04-subagent-spec-gaps.md`(기획 누락 30건 — v2.1 의 데이터 모델 변경 근거) · `docs/reviews/2026-09-04-subagent-reference-comparison.md`(제품 비교 리서치).
 
 ---
 
-## 세션 시작 프롬프트 (M0 — 복사해서 붙여 넣기)
+## 세션 시작 프롬프트 (M1 — 복사해서 붙여 넣기)
 
 ```
 이 레포(remote_ci_monitor)는 빌드 머신 한 대에 여러 컴퓨터의 세션이 잡을 던지면 서버가 자기 큐로 순차 실행하고,
@@ -549,48 +557,69 @@ docs/reviews/
 GitHub 에 의존하지 않는다(git 원격은 배포용 소스 모드에서만).
 
 정본 — 이 순서로 먼저 끝까지 읽어라:
-  1. PLAN.md (v2.1): 구조 · 잡 모델 · 큐 규칙 · 프리셋 · 코드 전달 · 워커 · 스텝 마커 · 보안 · 서버 API · 저장소 · 설정 ·
-     /api/status 스키마 v1 · CLI · 테스트·CI · 마일스톤 · 결정 항목.
-  2. docs/wireframes/web-queue.html: 웹 큐 화면의 정본. 소스의 <article class="spec"> 35개와 「4. 규칙」「5. PLAN 반영 제안」
-     「6. 오너에게 묻는 것」을 읽어라. 5절은 PLAN.md v2.1 에 반영됐다(결정 항목 12~16). 화면을 눈으로 보려면:
+  1. PLAN.md (v2.1): 구조 · 잡 모델 · 큐 규칙 · 프리셋 · 워커 · 스텝 마커 · 호스트 자원 · 보안 · 서버 API · 저장소 · 설정 ·
+     /api/status 스키마 v1 · CLI · 터미널 rcm top · 테스트·CI · 마일스톤 · 결정 항목(1~18).
+  2. docs/wireframes/web-queue.html: 웹 큐 화면의 정본(항목 35개 · 「4. 규칙」). M1 의 /api/status 완성과 rcm top 은 이 화면이
+     요구하는 필드·문구를 그대로 낸다. 화면을 눈으로 보려면:
      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --window-size=1240,2500 \
        --virtual-time-budget=8000 --screenshot=/tmp/q.png "file://$PWD/docs/wireframes/web-queue.html"
-  3. docs/reviews/*.md: 왜 그렇게 정했는지(Codex 리뷰 3건 · 기획 누락 리뷰 · 제품 비교 리서치). 훑어만 봐라.
+  3. docs/reviews/*.md: 왜 그렇게 정했는지. 특히 2026-09-04-codex-m0-design.md(M0 구현 결정 · 오너 확인 2건 = 결정 17·18).
+  4. 지금 있는 코드 (M0, 2026-09-05 dev 에 머지, PR #5~#11): src/remote_ci_monitor/{config,store,worker,materialize,server,client,cli}.py ·
+     core/{model,inputs,queue,progress,snapshot,status,render_text}.py · tests/ 150개 · scripts/mutcheck.py(3종) · README.md.
+     시작하자마자 `pip install -e ".[dev]" && ruff check . && pytest && python scripts/mutcheck.py` 가 초록인 걸 확인해라.
 
-이번 세션 목표 — 아래 순서로. 단계마다 dev 에서 feature 브랜치를 파고 dev 로 PR 을 보낸다.
+지금 상태: 루프백에서 rcm run 이 종료 코드 0/1/2/3 을 맞게 낸다. /api/status 는 스키마 v1 의 완전한 모양을 내지만
+  hosts: [] 이고(샘플러 없음), 요청마다 DB 에서 다시 만들며(이벤트 갱신 없음), SSE 가 없고, rcm wait 는 2초 폴링이다.
+  rcm eta/top/jobs/logs/presets 는 없다. core/queue.eta_for_new · core/render_text.render · store.markers_for ·
+  GET /jobs/{id}/log 의 X-RCM-Next-Offset/X-RCM-More 는 M1 용으로 이미 있다.
 
-  1. M0 — PLAN.md 「마일스톤과 완료 기준」의 M0 그대로:
-     모듈 뼈대 + pyproject(런타임 의존성 0) · 서버/클라이언트 설정 + 프리셋 입력 스키마 검증 ·
-     store.py(SQLite WAL: jobs·events·tokens·joiners, claim 원자성, 시작 시 running·cancelling→lost, user_version 마이그레이션) ·
-     worker.py(tree 모드: tarfile data 필터로 풀기 · Popen argv · env · 로그 파일 · 스텝 마커 · SIGTERM→SIGKILL · 타임아웃 · cancelling) ·
-     server.py(POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id} · POST cancel · GET /api/health · GET /api/whoami · GET /api/status ·
-       토큰 인증 · hardening 목록 전부) ·
-     client.py + cli.py(rcm run: 스냅샷 규칙·tree_hash·제출·합류·업로드 / rcm wait: 폴링, 종료 코드 0/1/2/3, JSON 한 줄 /
-       rcm serve · rcm check · rcm token add|list|revoke) ·
-     순수 계산(queue · progress · snapshot · inputs · status · render_text) + 픽스처 테스트 — 「진행 규칙」 표의 테스트 6개는
-       그 이름 그대로 · /api/status 는 스키마 v1 을 처음부터 낸다(UI 는 M2 라 만들지 않는다) ·
-     scripts/mutcheck.py 3종 · CI(unit matrix ubuntu+macos · secrets gitleaks v3 · 집계 잡 `test` — 이름은 main 룰셋 필수 체크라 바꾸지 마라).
-     PR 은 모듈 단위로 잘라라(예: feat/m0-config, feat/m0-store, feat/m0-worker, feat/m0-server, feat/m0-cli). 각 PR 은 테스트와 함께.
+이번 세션 목표 — M1 「보이는 것」(PLAN 「마일스톤과 완료 기준」의 M1 그대로). 단계마다 dev 에서 feature 브랜치를 파고 dev 로 PR.
 
-  2. 완료 기준(PLAN M0): 한 머신에서 루프백으로 `rcm run gate` 가 실제 스크립트를 돌리고 종료 코드 4종(0/1/2/3)이 맞다 ·
-     서버를 죽였다 살려도 큐가 남고 실행 중이던 잡은 lost 다 · 테스트 전부 통과 · 뮤테이션 3종이 빨개진다 · CI 초록.
+  0. 먼저 정할 것 — 아래 넷은 코드를 쓰기 전에 `codex exec --sandbox read-only` 크로스리뷰를 받고(프롬프트·원문·반영표를
+     docs/reviews/2026-09-05-codex-m1-design.md 에 남겨라) 그 다음 오너에게 물어라. 추천값은 병기했다.
+     - 이벤트 갱신 모델: 상태 모델을 요청마다 재구성하는 대신 이벤트(job_changed · job_finished · marker · host_sample · server)로
+       다시 만들어 참조를 교체한다. 워커·업로드·janitor·샘플러가 App 의 이벤트 버스에 쏘고, SSE 는 그 버스를 구독한다.
+       동시 SSE 연결 상한 16 초과는 503 이 아니라 「폴링으로 폴백하라」는 응답이어야 한다. 추천: 큐 하나 + 구독자 리스트, 이벤트마다 id.
+     - 신뢰도 배지: estimate.confidence(high|med|low|group wait|overdue)를 서버가 싣는다(키 추가는 schema_version 유지).
+       추천: 싣는다 — UI 와 rcm top 이 어긋날 수 없다. core/queue.confidence() 가 이미 있다.
+     - hosts[].history[](60표본)의 보관: 서버 메모리(재시작하면 비움) vs DB. 추천: 메모리 — 5분치 스파크라인이 목적이다.
+     - GPU 파서 픽스처: 실제 Mac mini 의 `ioreg -r -d 1 -w 0 -c IOAccelerator` 와 `top -l 2 -n 0 -s 1`, `vm_stat`, `ps -Aro %cpu=,rss=,comm=`
+       출력을 오너에게 받아 tests/fixtures/host/ 에 넣는다(팀 정보 제거). Linux 는 /proc/loadavg · /proc/meminfo · /proc/stat ·
+       `ps -eo %cpu=,rss=,comm= --sort=-%cpu` · nvidia-smi 캡처(CI 의 ubuntu 러너에서 직접 떠도 된다).
+
+  1. feat/m1-hostparse: core/hostparse.py — macOS(vm_stat · top 두 번째 표본만 · ps · ioreg PerformanceStatistics 의
+     Device Utilization % / In use system memory) · Linux(/proc/* · ps · nvidia-smi 있을 때만). 값 없는 칸은 null(0 아님),
+     부분 실패는 그 칸만. 두 OS 의 실제 캡처를 픽스처로 잠근다(test_hostparse.py).
+  2. feat/m1-hostsample: hostsample.py 샘플러 스레드 — interval_seconds(하한 2) · gpu auto/off · top_processes · history_samples.
+     hosts[] 의 sampled_at · age_seconds · stale(3×interval) · interval_seconds · history[] · gpu_note · 전부 실패면 hosts_error.
+     M0 의 hosts: [] 를 실제 표본으로 바꾼다.
+  3. feat/m1-events: 이벤트 버스 + 상태 모델 참조 교체 + GET /events(SSE: 큐 변화·호스트 표본·server) +
+     GET /jobs/{id}/events(SSE: 상태·마커·요약 — 로그 줄은 아님). Last-Event-ID 재연결 · 동시 연결 상한 · SSE 소켓 타임아웃 별도 ·
+     keep-alive 코멘트 15초. test_server 에 「SSE 한 이벤트」와 「상한 초과 폴백」을 넣어라.
+  4. feat/m1-cli: rcm eta (--job ID | PRESET [-f K=V]) · rcm top [--watch N] [--json](core/render_text 사용, --json 은 /api/status 그대로) ·
+     rcm jobs [--mine] [--state S](--mine 은 요청자+합류자) · rcm logs ID [--follow](offset 증분) · rcm presets ·
+     rcm wait 를 SSE 우선 + 끊기면 2초 폴링 폴백으로. stderr 진행 줄은 위치·스텝·경과·ETA(TTY 면 한 줄 덮어쓰기).
+  5. 완료 기준(PLAN M1): 다른 컴퓨터에서 Tailscale 로 rcm run 을 넣고 rcm top 에 위치·ETA·스텝·GPU 가 보인다 ·
+     같은 트리를 두 세션이 넣으면 두 번째는 합류한다. 실제 Mac mini 에서 확인하는 절차(서버 설정 · 토큰 · Tailscale IP 바인드 ·
+     랩탑에서 rcm check → rcm run → rcm top)를 README 에 적고, 네가 못 하는 실기 확인은 오너가 할 일로 명시해라.
 
 지킬 것:
-  - 「반드시 지킬 것 — 이식성」: 팀 명령·머신 이름을 코드에 박지 말고 프리셋과 설정으로 받아라. 핵심 경로에서 GitHub 을 부르지 마라.
-  - 「보안」: 쓰기는 토큰 필수(sha256 저장, compare_digest), 등록된 프리셋만 실행, argv 배열·셸 보간 금지, tarfile data 필터,
-    오류 응답에 스택·토큰·경로 금지, 로그는 항상 토큰. 바인드 기본 127.0.0.1.
-  - 「fail-open 금지」: 모르는 값은 null, wait 의 「모른다」는 3(실패 1 이 아니다), lost 는 lost 로 남긴다, 큐에서 사라지는 잡 없음.
-  - 순수 계층(core/)은 I/O 도 시계도 안 본다. now 는 인자다. 순수 모듈은 픽스처 테스트가 있어야 하고,
-    mutcheck 3종이 실제로 빨개지는 걸 확인한 뒤에만 「검증됨」이라고 말해라.
+  - 「반드시 지킬 것 — 이식성」: 머신 이름·팀 명령을 코드에 박지 마라. 핵심 경로에서 GitHub 을 부르지 마라. macOS·Linux 둘 다.
+  - 「보안」: 쓰기는 토큰, 로그·SSE 의 로그성 데이터는 토큰, 오류 응답에 스택·토큰·경로 금지. 바인드 기본 127.0.0.1.
+  - 「fail-open 금지」: 모르는 값은 null, 수집 실패는 null + hosts_error, stale 은 stale 로, wait 의 「모른다」는 3.
+  - 순수 계층(core/)은 I/O 도 시계도 안 본다. hostparse 는 실제 캡처 픽스처가 있어야 한다.
+  - 스키마 v1 은 키 **추가만**. 삭제·의미 변경이 필요하면 멈추고 물어라.
+  - mutcheck 에 M1 변이를 최소 1개 더해라(예: stale 판정의 3×interval 제거 · top 첫 번째 표본 사용). 넷 이상 빨개져야 「검증됨」.
   - 식별자·UI 문자열·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 커밋 메시지는 Conventional Commits.
-  - 브랜치 정책: main·dev 직접 push 금지(룰셋이 막는다). 세션 시작 `git switch dev && git pull` → `git switch -c <type>/<topic>`.
-    워크트리를 써도 된다.
-  - gh 계정: 이 레포는 monocsp 소유인데 활성 계정이 pcs-fmmc 로 되돌아가는 일이 있다. PR·머지는 토큰을 고정해서 해라:
-      TOK=$(gh auth token --user monocsp); GH_TOKEN=$TOK gh pr create --base dev …
-    먼저 `GH_TOKEN=$TOK gh api user --jq .login` 이 monocsp 인지 확인.
-  - 기술 결정이 필요하면 `codex exec --sandbox read-only` 로 먼저 크로스리뷰를 받고(프롬프트·원문·반영표를 docs/reviews/ 에 남겨라)
-    그 다음 오너에게 물어라. 결정 항목의 확정값에서 벗어나야 할 이유가 생기면 그때 물어라.
+  - 브랜치 정책: main·dev 직접 push 금지. `git switch dev && git pull` → `git switch -c <type>/<topic>` → dev 로 PR. 워크트리를 써도 된다.
+  - gh 계정·머지: 활성 계정이 pcs-fmmc 로 되돌아가는 일이 있다. 모든 GitHub 동작은 토큰을 고정해라:
+      TOK=$(gh auth token --user monocsp); GH_TOKEN=$TOK gh api user --jq .login   # monocsp 인지 확인
+      GH_TOKEN=$TOK git push -u origin <branch>; GH_TOKEN=$TOK gh pr create --base dev …
+    `gh pr merge` 는 자동 모드 분류기가 막는다. CI 초록을 확인한 뒤 REST 로 머지하고 브랜치를 지워라:
+      GH_TOKEN=$TOK gh api -X PUT repos/monocsp/remote_ci_monitor/pulls/N/merge -f merge_method=merge -f commit_title="<제목> (#N)"
+      GH_TOKEN=$TOK gh api -X DELETE repos/monocsp/remote_ci_monitor/git/refs/heads/<branch>
+  - 기술 결정이 필요하면 codex 크로스리뷰 → docs/reviews/ 기록 → 오너. 결정 항목 확정값에서 벗어나야 할 이유가 생기면 그때 물어라.
 
-끝나면 짧게 보고해라: 만든 것 · 테스트 수와 뮤테이션 결과 · 루프백 e2e 에서 rcm run 이 돌려준 것(종료 코드 4종) ·
-올린 PR 목록 · M1(세션 명령 eta/top/jobs/logs/cancel · 호스트 자원 CPU/RAM/GPU · SSE)에서 먼저 정해야 할 것.
+끝나면 짧게 보고해라: 만든 것 · 테스트 수와 뮤테이션 결과(몇 종) · 루프백에서 rcm top 이 보여준 것(호스트 표본 포함) ·
+올린 PR 과 머지 여부 · 오너가 실기로 확인할 절차 · M2(웹 UI)에서 먼저 정해야 할 것.
 ```
