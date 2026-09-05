@@ -1,4 +1,4 @@
-"""워크스페이스 자재화 — tree(tar 안전 추출) · git_ref(M3).
+"""워크스페이스 자재화 — tree(tar 안전 추출) · git_ref(미러 fetch · 체크아웃).
 
 `tarfile.extractall(filter="data")`(3.11.4+)로 절대 경로 · `..` · 바깥을 가리키는 링크 · 장치 파일을
 거부한다. 거부 사유는 짧은 문구로만 돌려준다(서버 경로를 싣지 않는다).
@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import shutil
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
+
+from remote_ci_monitor.core.gitref import is_full_sha, short_sha
+from remote_ci_monitor.core.model import Job
+from remote_ci_monitor.gitops import GitError, checkout, ensure_mirror, fetch_ref, has_commit
 
 
 class MaterializeError(Exception):
@@ -55,6 +60,38 @@ def extract_tree(tar_path: Path, workspace: Path) -> int:
     return count
 
 
-def prepare_git_ref(*args: object, **kwargs: object) -> None:
-    """git_ref 소스 모드는 M3. 지금은 명확히 거부한다."""
-    raise MaterializeError("git_ref source mode is not implemented yet (planned for M3)")
+def prepare_git_ref(
+    job: Job,
+    workspace: Path,
+    *,
+    repo_name: str,
+    repo_url: str,
+    mirror: Path,
+    timeout: float,
+    log: Callable[[str], None],
+) -> None:
+    """미러를 원격과 맞추고 제출 때 확정한 sha 를 워크스페이스에 체크아웃한다.
+
+    ref 가 그 사이 옮겨갔어도 **제출 시점의 sha** 를 돈다(재현성). 미러에 그 커밋이 없으면
+    강제 push 로 사라진 것이니 실패로 남긴다. 오류 문구에는 URL·경로가 없다.
+    """
+    sha = job.source.sha
+    ref = job.source.ref or ""
+    if not sha or not is_full_sha(sha):
+        raise MaterializeError("git_ref job has no commit sha")
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    log(f"[rcm] fetching {ref or short_sha(sha)} from {repo_name}")
+    try:
+        ensure_mirror(mirror, repo_url, timeout=timeout, log=log)
+        if not (is_full_sha(ref) and has_commit(mirror, sha)):
+            fetch_ref(mirror, repo_url, ref, timeout=timeout, log=log, want_sha=sha)
+        if not has_commit(mirror, sha):
+            raise MaterializeError(
+                f"commit {short_sha(sha)} not found after fetch — ref moved or was force-pushed?"
+            )
+        checkout(mirror, workspace, sha, timeout=timeout, log=log)
+    except GitError as e:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise MaterializeError(str(e)) from e
+    log(f"[rcm] checked out {short_sha(sha)}")
