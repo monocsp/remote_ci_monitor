@@ -444,7 +444,7 @@ def test_hardening_404_405_400_413(srv):
     )
     assert status == 400 and "unknown preset" in body["error"]
     status, body = srv.req("GET", "/")
-    assert status == 200 and b"rcm server" in body
+    assert status == 200 and b"<!doctype html>" in body.lower()  # M2: 정적 UI
 
 
 def test_recent_and_medians_appear_after_jobs_finish(live):

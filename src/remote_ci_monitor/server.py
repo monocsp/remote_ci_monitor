@@ -16,6 +16,7 @@ M0 에서 `/api/status` 는 요청 때마다 DB 에서 다시 만든다(이벤�
 from __future__ import annotations
 
 import hashlib
+import importlib.resources
 import json
 import re
 import signal
@@ -85,6 +86,11 @@ MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
 _JOB_RE = re.compile(r"^/jobs/(\d+)(/tree|/log|/cancel)?$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
+_STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "/static/style.css": ("style.css", "text/css; charset=utf-8"),
+}
 SNAPSHOT_MAX_AGE_SECONDS = 0.2
 SSE_TICK_SECONDS = 1.0
 SSE_WRITE_TIMEOUT_SECONDS = 30.0
@@ -769,6 +775,15 @@ class App:
         return (200 if ok else 503), body
 
 
+def read_web_asset(name: str) -> bytes | None:
+    """패키지 안의 `web/<name>` 을 읽는다(wheel 에 같이 들어간다). 없으면 None."""
+    try:
+        path = importlib.resources.files("remote_ci_monitor") / "web" / name
+        return path.read_bytes()
+    except (FileNotFoundError, OSError, TypeError):
+        return None
+
+
 def _opt_str(v: Any, limit: int) -> str | None:
     if v is None:
         return None
@@ -1002,19 +1017,46 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_body()
                 self._send_json(200, self.app.cancel(job_id, t))
                 return
-        if path == "/":
+        if path in _STATIC_FILES or path.startswith("/static/"):
             self._only(method, "GET")
-            body = (
-                f"rcm server {self.app.version} — web UI arrives in M2; see /api/status\n".encode()
-            )
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
+            self._read_only_ok()
+            self._static(path)
             return
         raise ApiError(404, "not found")
+
+    def _static(self, path: str) -> None:
+        """정적 UI. 세 파일만 준다. ETag 는 sha256 앞 16자, 나머지 /static/* 는 404."""
+        entry = _STATIC_FILES.get(path)
+        if entry is None:
+            raise ApiError(404, "not found")
+        name, ctype = entry
+        body = read_web_asset(name)
+        if body is None:
+            raise ApiError(404, "web assets missing from this installation")
+        etag = '"' + hashlib.sha256(body).hexdigest()[:16] + '"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store" if name == "index.html" else "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("ETag", etag)
+        if name == "index.html":
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+                "img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; "
+                "frame-ancestors 'none'",
+            )
+            self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _only(self, method: str, allowed: str) -> None:
         if method != allowed:

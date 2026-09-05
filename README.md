@@ -104,6 +104,9 @@ Usage errors and validation failures that never reach the server exit with 2 as 
   private network; job logs always need the job's token or an admin token.
 - Run the server as a dedicated OS user without sudo. Keep build secrets in files on the build
   machine that your preset scripts read; never send them in a job.
+- The web UI keeps your client token in the browser's `localStorage` (never in the URL). Do not
+  paste it into a shared or public browser; a cross-site-scripting bug would expose it, which is why
+  the page ships with a strict Content-Security-Policy and loads nothing from third parties.
 
 ## Why the numbers can be wrong
 

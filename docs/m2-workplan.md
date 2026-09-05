@@ -11,9 +11,9 @@
 | A | 파일 | `src/remote_ci_monitor/web/index.html` · `app.js` · `style.css` 세 개. 빌드 도구·번들러·외부 CDN 없음(폰트도 시스템 스택). 서버가 `GET /` 로 `index.html`, `GET /static/app.js`·`/static/style.css` 로 나머지를 준다. `read_auth` 적용, 그 밖의 `/static/*` 는 404 |
 | B | JS 구조 | `app.js` 하나. 순수 함수(표기·문구·요약 계산·상태기계 전이)는 `window.rcm` 에 노출하고, 파일 끝에서 `typeof document !== "undefined"` 일 때만 `boot()`. Node 에서 `require()` 하면 `module.exports = rcm` 이 되어 **순수 함수를 `node --test` 로 검사**한다(런타임 의존성 0 은 패키지 얘기, 개발 도구는 node 허용 — CI 러너에 있다) |
 | C | 렌더 | 상태 → HTML 문자열 → 섹션별 `innerHTML` 교체(요약 · 큐 · 호스트 · 최근 · Estimates). 1초 틱은 `[data-tick]` 요소만 텍스트 갱신. 펼침·서랍·다이얼로그 상태는 DOM 교체와 무관하게 `state` 에 둔다. 가상 DOM 없음 |
-| D | 갱신 | 처음 `GET /api/status` → `EventSource("/events")`. 잡·호스트·서버 이벤트가 오면 `GET /api/status` 재조회(300ms 합침). `reset`/`lag` 도 재조회. `onerror` → 2→30s 지수 백오프 재접속, 그 사이 10초 폴링. **30초 넘게 성공 응답이 없으면 `Lost connection`**. 503(`fallback: poll`)도 같은 백오프로 재시도 |
+| D | 갱신 | 처음 `GET /api/status` → `EventSource("/events")`. 잡·호스트·서버 이벤트가 오면 `GET /api/status` 재조회(300ms 합침). `reset`/`lag` 도 재조회. **`EventSource` 는 503 본문·`Retry-After` 를 JS 에서 읽을 수 없다**(Codex M2 리뷰 3) — `onerror` 하나로 처리: 즉시 `polling`, 10초 폴링, SSE 재접속은 2→30s 타이머로 직접 다시 만든다. **30초 넘게 성공 응답이 없으면 `Lost connection`** — 화면은 dim 하지 않고 띠 + 나이만(dim 은 호스트 stale 에만) |
 | E | 시계 | 응답마다 `skew = Date.parse(generated_at) − Date.now()`. 모든 상대 시간은 `now = Date.now() + skew`. \|skew\| > 30s 면 `clock ±Nm` 칩 |
-| F | 토큰 | `localStorage["rcm.token"]`. 저장·삭제는 `storage` 이벤트로 탭 간 동기화. `GET /api/whoami` 로 검증; 401/403 만 지운다, 네트워크 오류는 `couldn't verify — kept`. 토큰이 있으면 `/api/status` 와 `/jobs/{id}` 를 `Authorization` 헤더와 함께 부른다(그래야 `log_tail` 이 온다) |
+| F | 토큰 | `localStorage["rcm.token"]`. 저장·삭제는 `storage` 이벤트로 탭 간 동기화. `GET /api/whoami` 로 검증; 401/403 만 지운다, 네트워크 오류는 `couldn't verify — kept`. 토큰이 있으면 `/api/status` 와 `/jobs/{id}` 를 `Authorization` 헤더와 함께 부른다(그래야 `log_tail` 이 온다). 모든 라우트의 401/403 은 같은 `tokenRejected()` 경로. 토큰 없이 `/api/status` 가 401 이면(read_auth) 버튼은 `Read auth required`. XSS 대비 CSP(`default-src 'none'; script-src 'self'; …; frame-ancestors 'none'`) 를 `index.html` 응답에 붙이고 인라인 스크립트·스타일 금지. localStorage 토큰의 위험은 README 에 명시(공용 브라우저 금지) — 오너 확인 대기(PLAN 결정 22) |
 | G | 신뢰도·이유 | 서버가 준 `estimate.confidence` 와 `reason` 을 그대로 그린다. UI 는 계산하지 않는다(어긋남 방지) |
 | H | 첫 PR 범위 | **PR A**(`feat/m2-ui`): 정적 서빙 + 화면 전부(1~35) 중 토큰이 필요 없는 것 + 갱신 상태기계 + 모바일 + 다크/라이트 + 토큰 입력(4·29) + 내 잡(23) + 로그 tail(13 의 tail) + 로그 서랍 + 취소 다이얼로그(13·30). 즉 M2 전부를 한 PR 로 하되 커밋은 섹션별로 자른다 |
 
@@ -120,7 +120,7 @@ overlays: #banner-lost(role=alert)  dialog#tok-dialog  dialog#cancel-dialog  #dr
 | 28 | `server.paused` | 필 `paused`, 띠 `Queue paused by <by> at <at> — running jobs finish, nothing new starts · rcm resume`, 대기 행 Reason `paused`, ETA `—` |
 | 29 | whoami 401/403 | 토큰 버튼 빨강, tail 숨김, Log/Cancel 비활성, 23 은 `Add a token to highlight your jobs` |
 | 30 | `state == cancelling` | 필 `■ cancelling…`, Reason `SIGTERM sent by <cancel.by> · kill in <kill_at 카운트다운>`, Cancel 비활성 |
-| 31 | `reason == upload_stalled` | Reason 빗금 `upload stalled 2m · 30 / 48 MB` + `cancelled in <upload_abandon − 경과> if nothing arrives`(설정값은 모르므로 `soon` 대신 서버 summary 가 올 때까지 경과만) |
+| 31 | `reason == upload_stalled` | Reason 빗금 `upload stalled 2m · 30 / 48 MB` + `will be cancelled by the server if it stays stalled`(UI 는 `upload_abandon_seconds` 를 모르므로 카운트다운 금지 — Codex M2 리뷰 8) |
 | 32 | `recent: null` / `[]` | 빨간 띠 `Recent unavailable — <recent_error>` / 점선 `No completed jobs yet` |
 | 33 | `progress.phase == materializing` | 스텝 블록 대신 Reason `preparing workspace · unpacking 48 MB` |
 | 34 | `estimate.stuck` | Reason `⚠ likely stuck · N× expected · no output for Nm`, 24 의 맨 위 |
