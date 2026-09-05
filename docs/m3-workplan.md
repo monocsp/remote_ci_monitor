@@ -81,7 +81,7 @@ def checkout(mirror: Path, workspace: Path, sha: str, *, timeout: float, log) ->
 2. `validate_ref(ref)` 실패 → 400 `source.ref: <사유>`. `ref` 가 없거나 문자열이 아니면 400.
 3. `resolve_ref(repo.url, ref, timeout=git_resolve_timeout_seconds)` — 핸들러 스레드에서 돈다(DB 락 밖). (리뷰 반영) 동시에 도는 해석은 `BoundedSemaphore(2)` 로 제한 — 핸들러 32개가 20초짜리 원격 호출에 묶이지 않게; 못 얻으면 503. 실패 → **502** `cannot resolve '<ref>' in repo '<name>': <GitError>` (사유에 URL 없음), 타임아웃 → 504 `resolving '<ref>' timed out after 20s`. 40 hex 면 원격을 부르지 않는다.
 4. `Source(mode="git_ref", repo=repo.name, ref=ref, sha=sha, base_sha=sha, dirty=False)` → `join_key(preset, inputs, sha)` 로 합류 판정(같은 sha 면 합류, ref 이름이 달라도 합류) → 없으면 `create_job(..., state=QUEUED)`(트리 업로드 없음, `queued_at = created_at`).
-5. 응답 200 `{job_id, joined: false, state: "queued", sha, url}` (`upload` 키 없음). 합류면 기존과 같은 모양 + `sha`.
+5. 응답 **201** `{job_id, joined: false, state: "queued", sha, url}` (`upload` 키 없음 — tree 경로와 같은 201). 합류면 200 + 기존과 같은 모양 + `sha`. 타임아웃 판정은 `GitTimeout(GitError)` 하위 클래스로(문자열 검사 아님).
 6. `PUT /jobs/{id}/tree` 를 git_ref 잡에 하면 409 `job takes no tree upload`.
 
 워커: `execute` 의 자재화 분기 — `prepare_git_ref(job, workspace, repo=cfg.repo(job.source.repo), mirror=data_dir/"mirrors"/name, timeout=git_fetch_timeout_seconds, log=append_to_log)`. 제출 시점의 repo 이름이 설정에서 사라졌으면 `failed` + `repo 'app' is no longer configured`. env 에 `RCM_REF=<ref>` 추가, `RCM_BASE_SHA=<sha>`, `RCM_DIRTY=0`.
