@@ -540,6 +540,7 @@ docs/reviews/
 | 20 | GPU 없는 머신의 M1 완료 | `ioreg`/`nvidia-smi` 로 못 읽는 머신은 `gpu: null` + `gpu_note` 로 **통과**로 본다. 숫자는 Apple Silicon · NVIDIA 에서만. (Codex M1 리뷰, **오너 확인 대기**) |
 | 21 | 연결 끊김 표시 | `Lost connection` 띠 + 나이 증가만. **화면 전체를 dim 하지 않는다**(dim 은 호스트 stale 에만). (Codex M2 리뷰, **오너 확인 대기**) |
 | 22 | 웹 토큰 저장 | `localStorage` 에 둔다(M2 허용) + `index.html` 에 CSP 강제 + README 에 「공용 브라우저에서 쓰지 마라, XSS 면 토큰이 샌다」 명시. (Codex M2 리뷰, **오너 확인 대기**) |
+| 23 | `read_auth = basic` 과 웹 | M0 구현은 `read_auth ≠ none` 을 「읽기에도 bearer 토큰」으로 다뤄서 브라우저가 `/` 를 열 수 없다(`<script src>` 는 헤더를 못 붙인다). M2 는 `read_auth = none`(Tailscale/LAN) 만 지원하고, `basic` 은 M3 에서 진짜 HTTP Basic(브라우저 프롬프트, 자격은 설정 파일)으로 만들지 정한다. (**오너 확인 대기**) |
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
