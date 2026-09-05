@@ -89,9 +89,12 @@ step "rcm token add"
 TOKEN=$("$RCM" token add laptop)
 [ -n "$TOKEN" ] || { echo "smoke: empty token" >&2; exit 1; }
 
+# The server must read the same data dir `rcm token add` wrote to — the template default
+# `~/.local/share/rcm` under the isolated HOME. Do not add --data-dir here (that silently split
+# the token store from the server and every `rcm check` failed with "a valid token is required").
 start_server() {
   PORT=$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-  "$RCM" serve --port "$PORT" --data-dir "$WORK/data" >"$WORK/server.log" 2>&1 &
+  "$RCM" serve --port "$PORT" >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 60); do
     if curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then return 0; fi
