@@ -8,7 +8,7 @@ M0 에서 이미 있는 것: `core/queue.eta_for_new` · `core/queue.confidence`
 
 | # | 항목 | 결정 |
 |---|---|---|
-| A | 이벤트 갱신 모델 | `EventBus`(단조 증가 id · 링 버퍼 500 · 구독자별 bounded queue). 워커·업로드·취소·정지·janitor·샘플러가 `publish(kind, data)`. App 은 **DB 스냅샷 캐시**(활성 잡 · 마커 · 최근 · 표본 · paused)를 잡 이벤트 때 다시 읽고(0.2초 디바운스), `/api/status` 는 캐시 + `now` 로 순수 계산만 한다. SSE 는 버스를 구독한다 |
+| A | 이벤트 갱신 모델 | `EventBus`(단조 증가 id · 링 버퍼 2048 · 구독자별 bounded queue, 같은 크기). 워커·업로드·취소·정지·janitor·샘플러가 `publish(kind, data)`. App 은 **DB 스냅샷 캐시**(활성 잡 · 마커 · 최근 · 표본 · paused)를 잡 이벤트 때 다시 읽고(0.2초 디바운스), `/api/status` 는 캐시 + `now` 로 순수 계산만 한다. SSE 는 버스를 구독한다 |
 | B | 신뢰도 배지 | `estimate.confidence ∈ high·med·low·group wait·overdue` 를 **서버가 싣는다**(키 추가 — `schema_version` 1 유지). `rcm top`·웹은 그 값을 그대로 쓴다 |
 | C | `hosts[].history[]` | **서버 메모리**(`collections.deque(maxlen=history_samples)`). 재시작하면 비운다 |
 | D | GPU 픽스처 | 이 Mac(Apple Silicon, macOS 26)의 실제 `ioreg -r -d 1 -w 0 -c IOAccelerator` · `top -l 2 -n 0 -s 1` · `vm_stat` · `ps -Aro %cpu=,rss=,comm=` · `sysctl -n hw.memsize` 를 `tests/fixtures/host/macos/` 에 넣었다(사용자 경로 제거). Linux 는 `/proc/loadavg` · `/proc/meminfo` · `/proc/stat` 두 표본 · `ps -eo %cpu=,rss=,comm= --sort=-%cpu` · `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` 형식대로 합성 픽스처 + CI 의 ubuntu 러너에서 실제 `/proc` 을 읽는 스모크 테스트 |
@@ -97,9 +97,10 @@ class HostSampler(threading.Thread):
 class Event: id: int; kind: str; data: dict[str, Any]; at: datetime
 
 class EventBus:
-    def __init__(self, history: int = 500)
+    def __init__(self, history: int = 2048)   # DEFAULT_HISTORY. Codex M1 리뷰(좋음 1): marker burst 대비
     def publish(self, kind: str, data: dict[str, Any], *, at: datetime) -> Event
-    def subscribe(self, *, last_id: int | None = None, maxsize: int = 256) -> Subscription
+    def subscribe(self, *, last_id: int | None = None, maxsize: int | None = None) -> Subscription
+        # maxsize 기본은 링 버퍼 크기(2048)와 같다(Codex M1 리뷰 좋음 2)
         # last_id 가 링 버퍼 안이면 그 뒤 이벤트를 먼저 큐에 채운다(재연결 재생). 밖이면 "reset" 이벤트 하나를 넣는다.
     def unsubscribe(self, sub: Subscription) -> None
     @property
