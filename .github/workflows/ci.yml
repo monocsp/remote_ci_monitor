@@ -27,6 +27,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: 개발 의존성 (pytest · ruff)
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
       - name: ruff check
@@ -35,6 +38,9 @@ jobs:
         run: ruff format --check .
       - name: pytest
         run: pytest
+      - name: 웹 UI 순수 함수 (node --test)
+        if: hashFiles('tests/web/*.test.js') != ''
+        run: node --test tests/web/*.test.js
       - name: 뮤테이션 확인 (테스트가 실제로 빨개지는지)
         if: hashFiles('scripts/mutcheck.py') != ''
         run: python scripts/mutcheck.py

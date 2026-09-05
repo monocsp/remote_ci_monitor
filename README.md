@@ -83,6 +83,25 @@ or `flutter --no-color` style flags in your scripts when timing matters. Job ela
 
 Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (< 5), `low` (preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown values print as `—`, never as 0.
 
+## Web UI
+
+Open `http://<build-machine>:8787/` in a browser (phone included). No build step, no third-party
+assets — three static files served by `rcm serve`. The first screen answers three questions in
+one glance: **Your jobs** (needs your token), **Not moving** (only actionable causes, worst first:
+worker down → likely stuck → upload stalled → not scheduled → blocked by a concurrency group →
+overdue → paused) and **Host pressure**. Below that: the queue with a *Reason* column and ETA
+confidence badges, the host card (CPU · memory · GPU · 5-minute sparklines), recent results and how
+estimates are computed.
+
+- Updates arrive over the event stream; if it drops, the page polls every 10 s and reconnects with
+  backoff. After 30 s without a successful response a **Lost connection** banner appears and the
+  ages keep counting — the page never pretends to be current.
+- Paste your token with the 🔑 button to highlight your jobs, see log tails, open full logs and
+  cancel. Only a 401/403 clears a saved token; network errors keep it.
+- `#/jobs/N` deep-links to a job. `?poll=1` disables the event stream (polling only), `?debug=1`
+  prints layout diagnostics in the footer — both are for troubleshooting.
+- Dark/light follow the system. Below 720 px the queue turns into cards.
+
 ## Exit codes
 
 | `rcm wait` exit | meaning |
@@ -104,6 +123,9 @@ Usage errors and validation failures that never reach the server exit with 2 as 
   private network; job logs always need the job's token or an admin token.
 - Run the server as a dedicated OS user without sudo. Keep build secrets in files on the build
   machine that your preset scripts read; never send them in a job.
+- The web UI keeps your client token in the browser's `localStorage` (never in the URL). Do not
+  paste it into a shared or public browser; a cross-site-scripting bug would expose it, which is why
+  the page ships with a strict Content-Security-Policy and loads nothing from third parties.
 
 ## Why the numbers can be wrong
 
@@ -125,7 +147,8 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
 5. `rcm top` host line: CPU, memory and load must be numbers, `sampled Ns ago` must stay small. GPU shows a percentage on Apple Silicon or NVIDIA machines; elsewhere it must say `unavailable` with a note (that still passes).
 6. `rcm wait --job N` from a third terminal must update on the event stream (no 2 s polling gaps) and exit with the job's code.
 7. From a second session on the same tree, `rcm run gate` must print `joined job #N`, and `rcm jobs --mine` with that session's token must list the job.
-8. Kill the server with the job running, restart it: `rcm wait` must exit 3 with `lost`, and a job that was queued must run afterwards. (`kill -9` cannot signal the job's process group, so the script itself keeps running as an orphan until it ends on its own; a normal stop — SIGTERM or Ctrl-C — terminates it.)
+8. Kill the server with the job running, restart it: `rcm wait` must exit 3 with `lost`, and a job that was queued must run afterwards.
+9. Web UI: open `http://<tailscale-ip>:8787/` on the phone. The queue, the running job's steps and the host card must be readable in one column; paste the laptop token via 🔑 and confirm **Your jobs** lists the job and **Log** opens. Stop the server: within ~30 s the **Lost connection** banner must appear at the top; start it again and the banner must go away by itself. Then pause only the sampler's view of the world — `kill -STOP <server pid>` for 20 s and `kill -CONT` — and the host card must show a `stale` badge briefly (the queue keeps working). (`kill -9` cannot signal the job's process group, so the script itself keeps running as an orphan until it ends on its own; a normal stop — SIGTERM or Ctrl-C — terminates it.)
 
 ## Development
 

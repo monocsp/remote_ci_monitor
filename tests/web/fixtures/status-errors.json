@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T00:52:12Z",
+  "display_timezone": "Asia/Seoul",
+  "server": {
+    "version": "0.1.0",
+    "uptime_seconds": 3012,
+    "lanes": 2,
+    "paused": null,
+    "last_error": "database locked (retrying)",
+    "sse_connections": 1,
+    "workers": [
+      {
+        "lane": 1,
+        "state": "idle",
+        "job_id": null,
+        "error": null,
+        "since": "2026-09-04T00:47:03Z"
+      },
+      {
+        "lane": 2,
+        "state": "idle",
+        "job_id": null,
+        "error": null,
+        "since": "2026-09-04T00:40:00Z"
+      }
+    ]
+  },
+  "presets": [
+    {
+      "name": "gate",
+      "description": "Full local gate",
+      "source_modes": [
+        "tree"
+      ],
+      "concurrency_group": null,
+      "expected_seconds": 480,
+      "timeout_seconds": 1200,
+      "inputs": [
+        {
+          "name": "scope",
+          "type": "choice",
+          "choices": [
+            "full",
+            "commit",
+            "fast"
+          ],
+          "default": "full",
+          "pattern": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "qa",
+      "description": "QA on shared simulators",
+      "source_modes": [
+        "tree"
+      ],
+      "concurrency_group": "devices",
+      "expected_seconds": 540,
+      "timeout_seconds": 1800,
+      "inputs": [
+        {
+          "name": "suite",
+          "type": "choice",
+          "choices": [
+            "smoke",
+            "device-smoke"
+          ],
+          "default": "smoke",
+          "pattern": null,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "deploy-dev",
+      "description": "Deploy dev branch",
+      "source_modes": [
+        "git_ref"
+      ],
+      "concurrency_group": null,
+      "expected_seconds": 300,
+      "timeout_seconds": 900,
+      "inputs": []
+    }
+  ],
+  "pools": [
+    {
+      "name": "default",
+      "lanes": 2,
+      "queue": null,
+      "queue_error": "database locked (retrying)",
+      "recent": null,
+      "recent_count": 8,
+      "recent_error": "database locked (retrying)",
+      "medians": null,
+      "medians_error": "database locked (retrying)",
+      "hosts": null,
+      "hosts_error": "sampler: all collectors failed"
+    }
+  ]
+}
