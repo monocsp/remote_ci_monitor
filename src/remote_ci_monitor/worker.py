@@ -28,6 +28,7 @@ from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
     FAILED,
+    LOST,
     MODE_TREE,
     PHASE_EXECUTING,
     SUCCEEDED,
@@ -92,6 +93,7 @@ def tail_lines(path: Path, n: int = 5, max_bytes: int = 8192) -> list[str] | Non
 class _Outcome:
     cancelled: bool = False
     timed_out: bool = False
+    lost: bool = False
     term_sent_at: datetime | None = None
     kill_sent: bool = False
 
@@ -125,6 +127,17 @@ class Worker(threading.Thread):
         self._job_id: int | None = None
         self._error: str | None = None
         self._since: datetime = now_fn()
+        self._proc: subprocess.Popen | None = None
+        self._shutting_down = False
+
+    def shutdown(self) -> None:
+        """서버 종료. 도는 잡의 프로세스 그룹을 죽이고 잡은 `lost` 로 남긴다."""
+        self._shutting_down = True
+        self.stop_event.set()
+        self.wake.set()
+        proc = self._proc
+        if proc is not None:
+            self._signal(proc, signal.SIGTERM)
 
     # ── 상태 ────────────────────────────────────────────────────────────────
 
@@ -243,7 +256,11 @@ class Worker(threading.Thread):
             except OSError as e:
                 self._fail(job, f"cannot start {preset.argv[0]!r}: {_safe_error(e)}")
                 return
-            outcome = self._pump(job, proc, log, started)
+            self._proc = proc
+            try:
+                outcome = self._pump(job, proc, log, started)
+            finally:
+                self._proc = None
         rc = proc.returncode
         markers = self.store.markers(job.id)
         finished = self.now_fn()
@@ -252,9 +269,11 @@ class Worker(threading.Thread):
             started_at=started,
             finished_at=finished,
             now=finished,
-            exit_code=rc if not (outcome.cancelled or outcome.timed_out) else 1,
+            exit_code=rc if not (outcome.cancelled or outcome.timed_out or outcome.lost) else 1,
         )
-        if outcome.cancelled:
+        if outcome.lost:
+            state, summary = LOST, "server stopped while running"
+        elif outcome.cancelled:
             state, summary = CANCELLED, None
         elif outcome.timed_out:
             state, summary = TIMED_OUT, format_limit(job.timeout_seconds)
@@ -354,7 +373,11 @@ class Worker(threading.Thread):
             # ── 취소 · 타임아웃 (1초마다) ──
             if (now - last_check).total_seconds() >= POLL_SECONDS or eof:
                 last_check = now
-                if not outcome.cancelled and not outcome.timed_out:
+                if self._shutting_down and outcome.term_sent_at is None:
+                    outcome.lost = True
+                    self._signal(proc, signal.SIGTERM)
+                    outcome.term_sent_at = now
+                if not (outcome.cancelled or outcome.timed_out or outcome.lost):
                     current = self.store.get_job(job.id)
                     if current is not None and current.state == CANCELLING:
                         outcome.cancelled = True
