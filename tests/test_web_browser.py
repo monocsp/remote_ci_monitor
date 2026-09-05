@@ -87,12 +87,19 @@ class Chrome:
             "--remote-debugging-pipe",
             "about:blank",
         ]
-        # Chrome 은 fd 3·4 를 고정으로 쓴다. preexec_fn 대신 sh 리다이렉션으로 맞춘다(fork-safe).
-        wrapper = f'exec "$0" "$@" 3<&{child_r} 4>&{child_w}'
+        # Chrome 은 fd 3·4 를 고정으로 쓴다. 자식에서 dup2 로 맞춘다 — sh 리다이렉션은 dash
+        # (ubuntu 의 sh)가 두 자리 fd(`3<&10`)를 못 받아 "Bad fd number" 로 죽는다. preexec_fn 은
+        # close_fds 보다 먼저 돌므로 3·4 도 pass_fds 에 넣어야 닫히지 않는다.
         self.stderr = open(profile / "chrome.err", "wb")
+
+        def _wire_pipe_fds() -> None:  # pragma: no cover — 자식 프로세스에서만 돈다
+            os.dup2(child_r, 3)
+            os.dup2(child_w, 4)
+
         self.proc = subprocess.Popen(
-            ["sh", "-c", wrapper, *cmd],
-            pass_fds=(child_r, child_w),
+            cmd,
+            pass_fds=(child_r, child_w, 3, 4),
+            preexec_fn=_wire_pipe_fds,
             stdout=subprocess.DEVNULL,
             stderr=self.stderr,
         )
