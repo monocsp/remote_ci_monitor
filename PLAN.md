@@ -1,7 +1,8 @@
-# remote_ci_monitor — 계획서 (v2, 2026-09-04)
+# remote_ci_monitor — 계획서 (v2.1, 2026-09-04)
 
-> 정본이다. 세션을 시작하면 끝까지 읽는다.
+> 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
+> **v2.1 은 웹 큐 화면 기획(v1.3)의 「5. PLAN 반영 제안」을 데이터 모델·큐 규칙·스키마·API·설정에 반영한 것**이다. 바뀐 곳: 잡 상태 `cancelling` · 합류자 `joiners[]` · `position`/`reason` 규칙 · 살아 있는 레인 수로 대기 계산 · 그룹 대기 하한 · 신뢰도 규칙 · `stuck` 판정 · 스키마 v1 필드 추가 · `GET /api/whoami`·`POST /pause`·`/resume` · 설정 키 6개 · 「웹 UI (M2)」 절 교체 · 오너 결정 5개(12~16).
 > ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」).
 
 ## 한 줄
@@ -73,7 +74,10 @@ rcm run gate -f scope=full ──HTTP/Tailscale──▶ rcm serve              
 
 ```
 uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 겹침)──▶ running ──▶ succeeded | failed | timed_out
-                                   └─ cancelled(대기 중 취소)          └─ cancelled(실행 중 취소) | lost(서버 재시작 중 죽음)
+   │                          │                                    │
+   │                          └─ cancelled(대기 중 취소)            ├─ cancelling ──(SIGTERM → grace → SIGKILL)──▶ cancelled
+   ├─ cancelled(업로드 포기 · 413 · 업로드 중 취소)                  └─ lost(서버 재시작 중 죽음)
+   └─ failed(tar 거부 · 프리셋 소멸 — exit_code null + summary)
 ```
 
 | 필드 | 뜻 |
@@ -81,23 +85,34 @@ uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 
 | `id` | 서버가 발급하는 단조 증가 정수(순서 = 큐 순서) |
 | `preset` · `inputs` | 실행할 프리셋 이름과 검증된 입력값 |
 | `key` | 소요시간 버킷. `preset` + 프리셋이 `duration_key_inputs` 로 지정한 입력값(예 `gate:full`) |
-| `source` | `{mode: "tree", base_sha, dirty, tree_hash, repo, bytes}` 또는 `{mode: "git_ref", repo, ref, sha}` |
+| `concurrency_group` | 제출 시점 프리셋의 그룹을 잡에 **박아 둔다**(프리셋을 다시 설정해도 큐에 있는 잡은 안 바뀐다) |
+| `source` | `{mode: "tree", base_sha, dirty, tree_hash, repo, bytes, received_bytes, last_received_at}` 또는 `{mode: "git_ref", repo, ref, sha}` |
 | `requester` | `{name: 토큰 이름, label: "<이름>@<호스트>" 또는 --by 값}` |
-| `state` · `created_at` · `started_at` · `finished_at` · `exit_code` · `summary` · `failed_step` | 서버 시계 기준 |
+| `joiners[]` | 합류한 세션 `[{name, label, joined_at}]`. 요청자와 합류자 **모두** 「내 잡」이다(화면의 Your jobs · `rcm jobs --mine`) |
+| `cancel` | 취소 요청 `{requested_at, by, kill_at}`. `cancelling` 동안만 값이 있고 나머지는 null |
+| `state` · `created_at` · `started_at` · `finished_at` · `exit_code` · `summary` · `failed_step` · `cancelled_by` · `timeout_seconds` | 서버 시계 기준. `exit_code` 는 프로세스가 돌지 못한 실패(자재화 실패 등)면 null |
+| `transitions[]` | 상태 전이 이력 `[{state, at}]`(events 테이블에서 만든다). 최근 완료 서랍의 `uploading 09:50:40 → queued → running 09:51:13 → failed 09:52:15` |
 
-- **`rcm wait` 종료 코드**: `succeeded` 0 · `failed` 1 · `cancelled`/`timed_out` 2 · `lost`/조회 실패/`--timeout` 초과 3. 세션 스크립트는 이 코드로 바로 분기한다. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지).
-- 잡은 서버 재시작을 넘어 살아남는다(`queued` 는 그대로, `running` 이던 것은 `lost`). 워크스페이스·로그·스냅샷은 보존 기간 뒤 정리한다.
+- **`rcm wait` 종료 코드**: `succeeded` 0 · `failed` 1 · `cancelled`/`timed_out` 2 · `lost`/조회 실패/`--timeout` 초과 3. 세션 스크립트는 이 코드로 바로 분기한다. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지). `cancelling` 은 종료 상태가 아니라 `wait` 는 계속 기다린다.
+- **큐에서 조용히 사라지는 잡은 없다.** 업로드 포기(`upload_abandon_seconds`)·413(즉시)·업로드 중 취소는 `cancelled` + `summary`(`upload abandoned after 5m` · `snapshot 600 MB exceeds 512 MB`), tar 거부·claim 시 프리셋 소멸·입력이 새 설정에서 무효는 `failed` + `exit_code: null` + `summary`. 전부 최근 완료에 남고 SSE `job_finished` 로 알린다.
+- **취소 전파**: 원 요청자(또는 admin)의 취소는 잡을 죽이고, 합류자의 `rcm wait` 는 2 로 끝난다. 합류자가 취소하면 **자기 대기만 빠진다**(`rcm wait` 중단, 잡은 원 요청자 것으로 유지 — 2026-09-04 오너 결정 16).
+- 잡은 서버 재시작을 넘어 살아남는다(`queued` 는 그대로, `running`·`cancelling` 이던 것은 `lost`). 워크스페이스·로그·스냅샷은 보존 기간 뒤 정리한다.
 
 ## 큐 규칙 (순수 · `core/queue.py`)
 
-- **순서**: `id` 오름차순 = 생성 순 FIFO. 우선순위는 없다(필요해지면 M5). `position` 을 1부터 싣는다.
-- **레인**: `server.lanes`(기본 1). 레인이 비어 있어도 **concurrency 그룹**이 겹치면 못 올라간다 — 프리셋에 `concurrency_group = "devices"` 를 주면 같은 그룹의 잡은 동시에 하나만 돈다(시뮬레이터·에뮬레이터를 공유하는 QA·배포용). 막고 있는 잡을 `blocked_by` 로 보여준다.
-- **합류**(`join_duplicates`): 활성 잡(`uploading`·`queued`·`running`) 중 같은 `preset` · 같은 `inputs` · 같은 소스 신원(`tree` 면 `tree_hash`, `git_ref` 면 `sha`)이 있으면 새 잡을 만들지 않고 그 잡 id 를 돌려준다(`joined: true`). 두 세션이 같은 코드를 확인하려는 것뿐이라 두 번 돌릴 이유가 없다. 스냅샷 업로드도 생략된다. `--no-join` 으로 끈다. (v1 의 GitHub 경로에선 inputs 를 비교할 수 없어 run 이름 규약에 기대야 했다 — 이제 정확히 비교한다.)
-- **취소**: 자기 토큰의 잡만, `admin` 토큰은 전부. 대기 중이면 즉시 `cancelled`, 실행 중이면 SIGTERM → 유예 → SIGKILL.
-- **표본**: 같은 `key` 의 완료 잡 중 `sample_policy`(기본 `success`) · `min_job_seconds`(30) 이상 · `sample_days`(45) 안. 소요는 `started_at`~`finished_at`(큐 대기는 안 섞인다 — 우리가 시각을 찍으니 v1 의 「run 시각 vs 잡 시각」 함정이 없다).
+- **순서**: `id` 오름차순 = 생성 순 FIFO. 우선순위는 없다(필요해지면 M5). 화면 정렬은 running → cancelling → 대기(순번순).
+- **순번 `position`**: **대기 잡(`uploading`·`queued`)에만 1부터** 매긴다. `running`·`cancelling` 은 null. `#` 는 언제나 잡 id 이고 순번은 `2nd in line` 으로 따로 쓴다(둘을 섞지 않는다).
+- **레인**: `server.lanes`(기본 1). 레인이 비어 있어도 **concurrency 그룹**이 겹치면 못 올라간다 — 프리셋에 `concurrency_group = "devices"` 를 주면 같은 그룹의 잡은 동시에 하나만 돈다(시뮬레이터·에뮬레이터를 공유하는 QA·배포용). 막고 있는 잡을 `blocked_by: {job_id, group, remaining_seconds}` 로 보여준다. 그룹은 제출 시점에 잡에 박힌 `concurrency_group` 을 쓴다. 레인 1 이면 `blocked_by` 는 자연히 안 나온다(오너 결정 12).
+- **살아 있는 레인**: 대기 계산은 `server.lanes` 가 아니라 **`state ≠ down` 인 워커 수**로 한다. 그 수가 0 이거나 `server.paused` 면 대기 잡의 `wait_seconds`·`finish_at` 은 **null**(ETA `—`) — 시작할 수 없는 잡에 시각을 주지 않는다.
+- **이유 `reason`**: 잡이 지금 왜 이 상태인지 서버가 계산해 싣는다. `running` · `waiting_for_lane`(`ahead_job_id` = 가장 먼저 비는 레인의 잡) · `blocked_by_group` · `uploading` · `upload_stalled`(`upload_stall_seconds` 동안 바이트가 안 옴) · `materializing` · `overdue` · `stuck` · `cancelling` · `paused` · `not_scheduled`(대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 10초 넘게 있음 — 스케줄러 이상) · `worker_down`(모든 레인 다운). 행동 가능한 이유(`worker_down` → `stuck` → `upload_stalled` → `not_scheduled` → `blocked_by_group` → `overdue` → `paused`)는 화면 요약 「Not moving」에 이 순서로 오른다.
+- **합류**(`join_duplicates`): 활성 잡(`uploading`·`queued`·`running`) 중 같은 `preset` · 같은 `inputs` · 같은 소스 신원(`tree` 면 `tree_hash`, `git_ref` 면 `sha`)이 있으면 새 잡을 만들지 않고 그 잡 id 를 돌려준다(`joined: true`). 두 세션이 같은 코드를 확인하려는 것뿐이라 두 번 돌릴 이유가 없다. 스냅샷 업로드도 생략된다. `--no-join` 으로 끈다. (v1 의 GitHub 경로에선 inputs 를 비교할 수 없어 run 이름 규약에 기대야 했다 — 이제 정확히 비교한다.) 합류한 세션은 `joiners[]` 에 `{name, label, joined_at}` 으로 남고, 요청자와 합류자 모두 「내 잡」이다.
+- **취소**: 자기 토큰의 잡(요청자)만, `admin` 토큰은 전부. `uploading`·`queued` 면 즉시 `cancelled`(진행 중이던 `PUT` 은 409), `running` 이면 `cancelling` 으로 바꾸고 SIGTERM → `grace_seconds` → SIGKILL → `cancelled`. `cancel.{requested_at, by, kill_at}` 을 싣는다. 원 요청자의 취소는 합류자의 `rcm wait` 에 종료 코드 2 로 전파된다. 합류자의 취소는 잡을 건드리지 않고 자기 `joiners[]` 항목만 지운다(오너 결정 16).
+- **표본**: 같은 `key` 의 완료 잡 중 `sample_policy`(기본 `success`) · `min_job_seconds`(30) 이상 · `sample_days`(45) 안. 소요는 `started_at`~`finished_at`(큐 대기는 안 섞인다 — 우리가 시각을 찍으니 v1 의 「run 시각 vs 잡 시각」 함정이 없다). 대기 중앙값(`medians[key].wait_seconds`)은 같은 표본의 `created_at`~`started_at`.
 - **중앙값**: 키별, `min_samples`(2) 이상일 때만. 아니면 프리셋의 `expected_seconds` → `default_seconds`(600). 출력에 `source: measured|preset|default` 와 `sample_count`.
-- **잔여**: `queued` → expected 전체. `running` → `max(expected − elapsed, floor 30초)`. `overdue = elapsed > expected`.
-- **대기**: 레인 1 → 앞선 잔여 합. 레인 k → 잔여를 큰 순으로 가장 빨리 비는 레인에 얹는 그리디. 그룹 제약은 근사로 무시하고 UI 에 「그룹 대기」 표시만(정확한 스케줄 시뮬레이션은 M5).
+- **신뢰도**(화면 배지, 서버가 계산하지 않고 UI·`rcm top` 이 같은 규칙으로 그린다): `measured` 이고 `sample_count ≥ 5` → `high`, `measured` 이고 `< 5` → `med`, `preset`·`default` → `low`. 그룹 대기 잡은 `low · group wait`, 초과 실행 잡은 `overdue`.
+- **잔여**: `queued` → expected 전체. `running` → `max(expected − elapsed, floor 30초)`. `overdue = elapsed > expected`. 초과 실행 잡의 `finish_at` 은 **null**(`now + 30s` 는 하한이 만든 자신있는 틀린 시각이라 싣지 않는다) — 대신 `remaining_seconds` 하한은 뒤 잡의 대기 계산에만 쓴다.
+- **stuck**: `running` 이고 `elapsed > stuck_multiplier(3) × expected` 이거나 `now − progress.last_output_at > no_output_seconds(240)` 이면 `estimate.stuck: true`. `overdue` 와 다르다(overdue 는 「늦다」, stuck 은 「죽었을지 모른다」).
+- **대기**: 살아 있는 레인 1 → 앞선 잔여 합. 레인 k → 잔여를 큰 순으로 가장 빨리 비는 레인에 얹는 그리디. 그룹 제약은 근사로 무시하되, 그룹에 막힌 잡은 **`finish_at ≥ 막는 잡의 finish_at + 자기 expected`** 하한을 적용한다(막는 잡보다 이른 시각이 나오지 않게. 정확한 스케줄 시뮬레이션은 M5). 실행 중 잡의 `waited_seconds` 는 `created_at`~`started_at`.
 - **완료 시각**: `now + wait + remaining`. 시각은 전부 UTC aware, 표시 때만 시간대.
 
 ## 프리셋
@@ -147,8 +162,10 @@ default = "full"
 ## 워커 실행 (`worker.py`)
 
 - 레인마다 스레드 하나: `claim`(SQLite 트랜잭션으로 원자적) → 워크스페이스 준비 → `subprocess.Popen(argv, cwd=workspace, env=…, stdout=PIPE, stderr=STDOUT, start_new_session=True)` → 로그 줄을 파일에 쓰며 스텝 마커를 파싱 → 종료 코드로 상태 확정.
-- 타임아웃·취소: 프로세스 그룹에 SIGTERM → `grace_seconds`(10) → SIGKILL. 자식이 만든 손자까지 죽이려고 `start_new_session` 을 쓴다.
-- 로그: `<data_dir>/jobs/<id>/log.txt` 줄 단위 flush. 최근 `tail` 은 상태 JSON 에 싣고 전체는 `GET /jobs/{id}/log`. 로그엔 시크릿이 섞일 수 있어 **읽기에 그 잡의 토큰 또는 admin** 이 필요하다.
+- 타임아웃·취소: 프로세스 그룹에 SIGTERM → `grace_seconds`(10) → SIGKILL. 자식이 만든 손자까지 죽이려고 `start_new_session` 을 쓴다. 취소는 `cancelling` 상태를 거친다(`cancel.kill_at` = 요청 시각 + grace). 타임아웃은 `timed_out` + `summary: "limit 20m"` + `timeout_seconds`.
+- 워크스페이스 준비(tar 풀기·`git_ref` fetch)는 `running` 이지만 `progress.phase: "materializing"` 이다(스텝이 없는 것과 구분). 프로세스가 뜨면 `executing`. 준비 실패는 `failed` + `exit_code: null` + `summary`.
+- 로그: `<data_dir>/jobs/<id>/log.txt` 줄 단위 flush. 최근 `tail` 은 상태 JSON 에 싣고 전체는 `GET /jobs/{id}/log`. 로그엔 시크릿이 섞일 수 있어 **읽기에 그 잡의 토큰 또는 admin** 이 필요하다. 마지막 줄을 받은 시각을 `progress.last_output_at` 으로 싣는다(stuck 판정).
+- 워커 상태: 레인마다 `{lane, state ∈ idle|busy|down, job_id, error, since}` 를 `server.workers[]` 로 싣는다. 스레드가 예외로 죽으면 `down` + `error`(앞 200자, 경로·토큰 없이) 로 남고 `server.last_error` 에도 적는다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다.
 - ⚠️ 자식 프로세스의 stdout 버퍼링 때문에 마커가 늦게 도착한다. README 에 `PYTHONUNBUFFERED=1`·`stdbuf -oL`·`flutter --no-color` 같은 팁을 쓴다. 마커가 늦어도 잡 전체 경과는 정확하다.
 - 정리: 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 실패는 보존 기간까지), 로그·스냅샷은 `retention_days`(성공 14 · 실패 30).
 - 권한: 서버가 도는 OS 사용자로 실행된다. README 에 「전용 사용자로 돌리고 sudo 를 주지 말라」.
@@ -199,14 +216,16 @@ default = "full"
 
 | 라우트 | 인증 | 동작 |
 |---|---|---|
-| `POST /jobs` | 토큰 | `{preset, inputs, source, requester_label, join}` → 검증 → 합류면 `{job_id, joined: true}`, 아니면 새 잡(`uploading` 또는 `git_ref` 면 바로 `queued`) `{job_id, joined: false, upload: "/jobs/{id}/tree"}` |
-| `PUT /jobs/{id}/tree` | 토큰(그 잡의) | 본문 tar.gz(`Content-Length` 필수, 상한) → 풀지 않고 저장만 → `queued` |
-| `GET /jobs/{id}` | 없음 | 잡 스냅샷(스키마의 queue/recent 행과 같은 모양 + `log_tail`) |
-| `GET /jobs/{id}/log?offset=N` | 토큰 | 로그 바이트 스트림(증분) |
+| `POST /jobs` | 토큰 | `{preset, inputs, source, requester_label, join}` → 검증 → 합류면 `{job_id, joined: true}`(+ `joiners[]` 에 기록), 아니면 새 잡(`uploading` 또는 `git_ref` 면 바로 `queued`) `{job_id, joined: false, upload: "/jobs/{id}/tree"}` |
+| `PUT /jobs/{id}/tree` | 토큰(그 잡의) | 본문 tar.gz(`Content-Length` 필수, 상한) → 풀지 않고 저장만 → `queued`. 수신 중 `source.received_bytes`·`last_received_at` 갱신. 이미 취소된 잡이면 409 |
+| `GET /jobs/{id}` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(스키마의 queue/recent 행과 같은 모양). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null |
+| `GET /jobs/{id}/log?offset=N` | 토큰(그 잡의·합류자·admin) | 로그 바이트 스트림(증분) |
 | `GET /jobs/{id}/events` | 없음 | SSE: 상태 변화·스텝 마커·요약(로그 줄은 아님) |
-| `POST /jobs/{id}/cancel` | 토큰(그 잡의 또는 admin) | 취소 |
-| `GET /api/status` | `read_auth` | 전체 `StatusModel`. `ETag` 지원 |
-| `GET /events` | `read_auth` | SSE: 큐 변화·호스트 표본(UI 용) |
+| `POST /jobs/{id}/cancel` | 토큰(그 잡의 또는 admin) | 취소. 합류자 토큰이면 잡은 두고 자기 `joiners[]` 항목만 지운다(`{left: true}`) |
+| `GET /api/whoami` | 토큰 | `{name, admin}`. 401 이면 UI 가 저장 토큰을 지운다(네트워크 오류는 지우지 않는다) |
+| `POST /pause` · `POST /resume` | admin | 큐 정지·재개. 실행 중 잡은 끝까지 돌고 새 잡만 안 올라간다. `server.paused: {by, at}` 또는 null |
+| `GET /api/status` | `read_auth` | 전체 `StatusModel`. `ETag` 지원. `log_tail` 은 토큰 조건(위) |
+| `GET /events` | `read_auth` | SSE: 큐 변화·호스트 표본(UI 용). 이벤트 `job_changed`·`job_finished`·`host_sample`·`server` |
 | `GET /api/health` | 없음 | 워커 스레드 살아 있고 DB 열리면 200, 아니면 503 + 사유 |
 | `GET /` · `/static/*` | `read_auth` | 정적 UI |
 
@@ -223,8 +242,8 @@ default = "full"
   mirrors/<repo>/                 # git_ref 모드용 로컬 미러
 ```
 
-- `jobs(id, preset, inputs_json, key, source_json, requester_name, requester_label, state, created_at, started_at, finished_at, exit_code, summary, failed_step, lane, tree_hash, sha)` · `events(job_id, at, kind, payload)` · `tokens(name, sha256, admin, created_at, revoked_at)`.
-- 마이그레이션은 `PRAGMA user_version` 으로 번호를 매긴다. 시작 시 `running` → `lost` 로 정리한다.
+- `jobs(id, preset, inputs_json, key, concurrency_group, source_json, requester_name, requester_label, state, created_at, started_at, finished_at, exit_code, summary, failed_step, lane, tree_hash, sha, timeout_seconds, cancel_requested_at, cancel_by, cancel_kill_at, cancelled_by)` · `joiners(job_id, name, label, joined_at)` · `events(job_id, at, kind, payload)`(상태 전이는 `kind = "state"` 로 남겨 `transitions[]` 를 만든다) · `tokens(name, sha256, admin, created_at, revoked_at)` · `server_state(key, value)`(`paused` 등).
+- 마이그레이션은 `PRAGMA user_version` 으로 번호를 매긴다. 시작 시 `running`·`cancelling` → `lost` 로 정리한다(`summary: "server restarted <시각>"`).
 
 ## 설정
 
@@ -244,6 +263,9 @@ grace_seconds = 10                  # SIGTERM 뒤 SIGKILL 까지
 retention_days_success = 14
 retention_days_failure = 30
 keep_workspace_on_failure = true
+recent_count = 8                    # /api/status.recent 건수 (오너 결정 14)
+upload_stall_seconds = 60           # 이 동안 바이트가 안 오면 reason = upload_stalled
+upload_abandon_seconds = 300        # 이 동안 바이트가 안 오면 cancelled + "upload abandoned after 5m"
 
 [estimate]
 sample_days = 45
@@ -252,11 +274,14 @@ min_job_seconds = 30
 sample_policy = "success"           # "success" | "completed"
 default_seconds = 600
 floor_remaining_seconds = 30
+stuck_multiplier = 3                # elapsed > 3 × expected → stuck
+no_output_seconds = 240             # 로그가 이만큼 없으면 → stuck
 
 [host]
 interval_seconds = 5                # 하한 2
 gpu = "auto"                        # "auto" | "off"
 top_processes = 5
+history_samples = 60                # hosts[].history[] 길이 (5초 × 60 = 5분 sparkline)
 
 [display]
 timezone = ""                       # IANA. 시작 시 zoneinfo 로 검증. 비면 서버 로컬 / 브라우저 로컬
@@ -286,47 +311,73 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
   "schema_version": 1,
   "generated_at": "2026-09-04T00:52:12Z",
   "display_timezone": null,
-  "server": {"version": "0.1.0", "uptime_seconds": 8123, "lanes": 1, "last_error": null,
-             "workers": [{"lane": 1, "state": "busy", "job_id": 412}]},
+  "server": {"version": "0.1.0", "uptime_seconds": 8123, "lanes": 1, "paused": null, "last_error": null,
+             "workers": [{"lane": 1, "state": "busy", "job_id": 412, "error": null, "since": "2026-09-04T00:51:13Z"}]},
   "presets": [{"name": "gate", "description": "Full local gate", "source_modes": ["tree"], "concurrency_group": null,
+               "expected_seconds": 480, "timeout_seconds": 1200,
                "inputs": [{"name": "scope", "type": "choice", "choices": ["full", "commit", "fast"], "default": "full"}]}],
   "pools": [{
     "name": "default", "lanes": 1,
     "queue": [{
-      "position": 1, "id": 412, "preset": "gate", "key": "gate:full", "inputs": {"scope": "full"},
+      "id": 412, "position": null, "preset": "gate", "key": "gate:full", "inputs": {"scope": "full"},
+      "concurrency_group": null,
       "requester": {"name": "alice-laptop", "label": "alice@laptop"},
-      "state": "running", "blocked_by": null,
-      "source": {"mode": "tree", "repo": "org/app", "base_sha": "abc123…", "dirty": true, "tree_hash": "9f8e…", "bytes": 48213344},
+      "joiners": [{"name": "eve-ci", "label": "eve@ci", "joined_at": "2026-09-04T00:50:58Z"}],
+      "state": "running", "reason": "running", "lane": 1, "ahead_job_id": null, "blocked_by": null, "cancel": null,
+      "source": {"mode": "tree", "repo": "org/app", "base_sha": "abc123…", "dirty": true, "tree_hash": "9f8e…",
+                 "bytes": 48213344, "received_bytes": 48213344, "last_received_at": "2026-09-04T00:50:52Z"},
       "created_at": "2026-09-04T00:50:40Z", "started_at": "2026-09-04T00:51:13Z",
       "estimate": {"expected_seconds": 369, "source": "measured", "sample_count": 7,
-                   "elapsed_seconds": 59, "remaining_seconds": 310, "wait_seconds": 0,
-                   "overdue": false, "finish_at": "2026-09-04T00:57:22Z"},
-      "progress": {"timing": "as_received", "steps_total": 8, "steps_total_partial": false, "steps_done": 4,
+                   "elapsed_seconds": 59, "waited_seconds": 33, "remaining_seconds": 310, "wait_seconds": 0,
+                   "overdue": false, "stuck": false, "finish_at": "2026-09-04T00:57:22Z"},
+      "progress": {"timing": "as_received", "phase": "executing", "last_output_at": "2026-09-04T00:52:10Z",
+                   "steps_total": 8, "steps_total_partial": false, "steps_done": 4,
                    "current_index": 5, "current_name": "test", "current_seconds": 51, "job_seconds": 59,
                    "failed_step": null,
                    "steps": [{"index": 1, "name": "analyze", "state": "done", "ok": true, "seconds": 12},
                              {"index": 5, "name": "test", "state": "running", "ok": null, "seconds": 51}]},
       "log_tail": ["[test] 3/9 packages…"],
       "url": "http://macmini:8787/#/jobs/412"
+    }, {
+      "id": 413, "position": 1, "preset": "qa", "key": "qa:smoke", "inputs": {}, "concurrency_group": "devices",
+      "requester": {"name": "bob-desk", "label": "bob@desk"}, "joiners": [],
+      "state": "queued", "reason": "blocked_by_group", "lane": null, "ahead_job_id": null,
+      "blocked_by": {"job_id": 409, "group": "devices", "remaining_seconds": 160}, "cancel": null,
+      "source": {"mode": "tree", "repo": "org/app", "base_sha": "def456…", "dirty": false, "tree_hash": "1a2b…",
+                 "bytes": 48213344, "received_bytes": 48213344, "last_received_at": "2026-09-04T00:50:20Z"},
+      "created_at": "2026-09-04T00:50:37Z", "started_at": null,
+      "estimate": {"expected_seconds": 540, "source": "preset", "sample_count": 1,
+                   "elapsed_seconds": null, "waited_seconds": 95, "remaining_seconds": 540, "wait_seconds": 160,
+                   "overdue": false, "stuck": false, "finish_at": "2026-09-04T01:03:52Z"},
+      "progress": null, "log_tail": null, "url": "http://macmini:8787/#/jobs/413"
     }],
     "queue_error": null,
-    "recent": [{"id": 411, "preset": "gate", "key": "gate:fast", "requester": {"name": "bob-desk", "label": "bob@desk"},
-                "state": "failed", "exit_code": 1, "job_seconds": 62, "finished_at": "2026-09-04T00:47:03Z",
-                "summary": "2 tests failed", "failed_step": "test", "url": "…"}],
+    "recent": [{"id": 411, "preset": "gate", "key": "gate:fast", "inputs": {"scope": "fast"},
+                "requester": {"name": "bob-desk", "label": "bob@desk"},
+                "state": "failed", "exit_code": 1, "job_seconds": 62, "waited_seconds": 21,
+                "started_at": "2026-09-04T00:46:01Z", "finished_at": "2026-09-04T00:47:03Z",
+                "summary": "2 tests failed", "failed_step": "test", "cancelled_by": null, "timeout_seconds": 1200,
+                "transitions": [{"state": "uploading", "at": "2026-09-04T00:45:40Z"}, {"state": "queued", "at": "2026-09-04T00:45:40Z"},
+                                {"state": "running", "at": "2026-09-04T00:46:01Z"}, {"state": "failed", "at": "2026-09-04T00:47:03Z"}],
+                "url": "…"}],
+    "recent_count": 8,
     "recent_error": null,
-    "medians": {"gate:full": {"seconds": 369, "sample_count": 7}},
+    "medians": {"gate:full": {"seconds": 369, "wait_seconds": 80, "sample_count": 7}},
+    "medians_error": null,
     "hosts": [{"name": "macmini", "source": "local", "sampled_at": "2026-09-04T00:52:08Z", "age_seconds": 4, "stale": false,
+               "interval_seconds": 5,
                "os": "darwin", "cores": 10, "load": [3.48, 3.1, 2.9],
                "cpu": {"user": 17.0, "sys": 4.0, "idle": 79.0, "busy": 21.0},
-               "memory": {"total_bytes": 25769803776, "used_bytes": 15032385536},
+               "memory": {"total_bytes": 25769803776, "used_bytes": 15032385536, "compressed_bytes": 2254857830},
                "gpu": {"util_pct": 13, "mem_used_bytes": 594411520, "mem_total_bytes": null, "source": "ioreg"}, "gpu_note": null,
-               "top": [{"comm": "dart", "cpu": 180.4, "rss_mb": 500}]}],
+               "top": [{"comm": "dart", "cpu": 180.4, "rss_mb": 500}],
+               "history": [{"at": "2026-09-04T00:47:08Z", "cpu_busy": 18.0, "mem_used_bytes": 14900000000, "gpu_util_pct": 10}]}],
     "hosts_error": null
   }]
 }
 ```
 
-규칙: 시각은 UTC ISO-8601(`Z`). 조회·수집 실패 섹션은 `null` + `*_error`. 모르는 숫자는 `null`. M0~M4 는 `pools` 가 한 개. 키 삭제·의미 변경은 `schema_version` 을 올리고 CHANGELOG 에 적는다.
+규칙: 시각은 UTC ISO-8601(`Z`). 조회·수집 실패 섹션은 `null` + `*_error` — `queue`·`recent`·`medians`·`hosts` 넷 다 같은 규칙(`recent: null` + `recent_error` 는 「조회 실패」, `recent: []` 는 「완료 잡 없음」으로 다른 모양). 모르는 숫자는 `null`. `position` 은 대기 잡에만 1부터, `running`·`cancelling` 은 null. `finish_at`·`wait_seconds` 는 정지·살아 있는 레인 0·초과 실행이면 null. `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 인 잡에만**, 아니면 null. `progress` 는 `queued`/`uploading` 이면 null(0/0 금지), `phase: "materializing"` 이면 `steps: []`. `hosts[].history[]` 는 `history_samples` 개, 빠진 표본은 그 시각을 건너뛴다(UI 가 점선으로 끊어 그린다). M0~M4 는 `pools` 가 한 개. M0 서버는 이 스키마를 처음부터 낸다(`hosts: []`·`medians: {}` 로 시작). 키 삭제·의미 변경은 `schema_version` 을 올리고 CHANGELOG 에 적는다.
 
 ## CLI (`cli.py`)
 
@@ -336,7 +387,8 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 | `rcm wait --job ID [--timeout S]` | SSE 로 기다리며 stderr 에 위치·스텝·경과·ETA 갱신(TTY 면 한 줄 덮어쓰기), 끝나면 stdout JSON + **종료 코드 0/1/2/3**. SSE 가 끊기면 폴링(5초)으로 폴백 |
 | `rcm eta (--job ID \| PRESET [-f K=V])` | 앞선 건수·대기·자기 소요·예상 완료·표본 출처 |
 | `rcm top [--watch N] [--json]` | 한 화면(아래) |
-| `rcm jobs [--mine] [--state S]` · `rcm logs ID [--follow]` · `rcm cancel ID` · `rcm presets` | 큐·로그·취소·프리셋 |
+| `rcm jobs [--mine] [--state S]` · `rcm logs ID [--follow]` · `rcm cancel ID` · `rcm presets` | 큐·로그·취소·프리셋. `--mine` 은 요청자와 합류자 둘 다. 합류자의 `cancel` 은 자기 대기만 뺀다 |
+| `rcm pause` · `rcm resume` | 큐 정지·재개(admin 토큰). `POST /pause`·`/resume` |
 | `rcm serve [--config] [--bind] [--port] [--data-dir]` · `rcm check` · `rcm token add\|list\|revoke` · `rcm version` | 서버·셋업·토큰 |
 
 **`rcm run` 흐름**: ① 프리셋·입력을 서버 스키마로 검증(`GET /api/status.presets`, 실패면 서버에 안 보내고 종료 2) ② `tree` 면 스냅샷 규칙으로 파일 목록·`tree_hash` 계산 ③ `POST /jobs` → 합류면 업로드 생략 ④ `PUT …/tree` 업로드(진행률 stderr) ⑤ `rcm wait`. `--no-wait` 면 ③/④ 뒤 JSON 만 찍고 0 으로 끝난다(제출 성공 ≠ 잡 성공 — JSON 의 `state` 를 보라).
@@ -373,23 +425,14 @@ host  macmini (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · me
 
 ## 웹 UI (M2)
 
-빌드 도구 없이 `index.html` + `app.js` + `style.css`. `GET /api/status` 한 번 + `GET /events` SSE 로 갱신(끊기면 10초 폴링). 문자열은 영어. `pools[]` 를 순회한다.
+빌드 도구 없이 `index.html` + `app.js` + `style.css`. 문자열은 영어. `pools[]` 를 순회한다.
 
-```
-┌ rcm · macmini                                   ● worker busy · 4s ago · [live] ┐
-│ QUEUE (lanes 1)                                                                 │
-│  # │ state   │ key       │ source            │ requester    │ elapsed │ eta     │
-│  1 │ ▶ run   │ gate:full │ abc123 +dirty     │ alice@laptop │ 0:59    │ 09:57 ▾ │
-│      ├ step 5/8 · test · 51s     ████████░░░░░░  [log ▾]                        │
-│  2 │ · queue │ qa:smoke  │ def456            │ bob@desk     │ wait 35s│ 10:05   │
-│ RECENT  ❌ gate:fast bob 1m02s 09:47 "2 tests failed"   ✅ gate:full alice 5m50s │
-│ HOST  macmini · 4s ago  load 3.48/10  CPU 21% ▮▮▮▯▯  mem 14/24GB ▮▮▮▮▮▯▯  GPU 13% │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+**배치·상태·문구·표기 규칙은 `docs/wireframes/web-queue.html` 이 정본이다**(기획 항목 35개 + 「4. 이 화면이 정한 규칙」). 요지: 큐 표 **위에** 요약 세 칸 — **Your jobs**(요청자·합류자 기준 내 잡의 순번·ETA) · **Not moving**(행동 가능한 이유만, `worker_down → stuck → upload_stalled → not_scheduled → blocked_by_group → overdue → paused` 순) · **Host pressure**(CPU·Mem·GPU·load 한 줄) — 를 먼저 보이고, 그 아래 큐 표(Job · Key · Requester · **Reason** · Elapsed · ETA+신뢰도 · Source), 호스트 카드(구간 막대 + 5분 sparkline), 최근 완료 `recent_count` 건, Estimates(접힘). 변형 상태 19개(빈 큐 ≠ 조회 실패, 연결 끊김, stale, 초과, stuck, 워커 다운, 정지, 토큰 거부, 취소 중, 업로드 멈춤, 워크스페이스 준비, …)는 목업의 2절.
 
-- 배지: `stale` · `overdue` · `blocked by #N (devices)` · `lost` · `hosts_error`. 초과 실행은 잔여 대신 경과를 강조.
-- 로그 보기와 취소는 토큰이 필요하다 → UI 상단 「token」 입력(localStorage). 없으면 읽기 전용.
-- 모바일 한 열 · 다크/라이트 `prefers-color-scheme` · 시간대는 `display_timezone` 또는 브라우저 로컬.
+- **갱신 규칙**: 처음 `GET /api/status`, 이후 `GET /events` SSE 부분 갱신. SSE 재연결은 **2s → 30s 지수 백오프**, 그 사이 **폴링 10s 고정**, 둘 다 **30s 무응답이면 `Lost connection` 띠**(마지막 상태를 dim 으로 유지). 경과·대기·나이는 `generated_at` 으로 보정한 클라이언트 시계로 1초마다 올리고(30s 넘게 어긋나면 `clock +2m` 칩), 서버 값이 오면 덮어쓴다. 재조회에서 `server.uptime_seconds` 가 줄면 `Server restarted — running jobs were marked lost` 띠. **`schema_version` 이나 `server.version` 이 바뀌면 `UI out of date — reload`(자동 새로고침 1회)**. 탭이 60초 넘게 숨겨지면 정지, 돌아오면 재조회. live 토글로 수동 정지.
+- **권한**: 보기는 토큰 없이. 내 잡 강조·로그 tail·로그·취소만 토큰(`localStorage` 의 `rcm.token`, URL 금지, `GET /api/whoami` 로 확인, 401/403 만 저장값 삭제). 토큰 입력은 M2 에 포함한다(오너 결정 15).
+- **펼침**: 실행 중 행은 전부 펼친다. 접힘만 잡 id 별로 기억한다(오너 결정 13). 레인 1 이면 워커 필을 하나로 접는다(오너 결정 12).
+- 모바일 한 열 · 다크/라이트 `prefers-color-scheme` · 시간대는 `display_timezone` 또는 브라우저 로컬 · 키보드·보조기기 규칙은 목업 4절.
 
 ## fail-open 금지 (이 도구의 핵심 규칙)
 
@@ -400,6 +443,9 @@ host  macmini (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · me
 - 서버 재시작 중 죽은 잡은 `lost` 로 남긴다. 조용히 `queued` 로 되돌리거나 지우지 않는다(같은 트리를 다시 넣는 건 세션의 결정).
 - 스텝 시각은 수신 시각임을 스키마가 밝힌다(`timing: "as_received"`).
 - 서버 건강(워커 스레드·마지막 오류·호스트 표본 나이)을 JSON 과 화면 머리에 찍는다.
+- **요약 줄의 긍정 문구(`Nothing is stuck` · `fine`)는 해당 섹션 조회가 성공했고 값이 전부 있을 때만 그린다.** `queue_error`·연결 끊김·`reason` 없음·호스트 값 일부 null 은 `unknown`/`partial` 이지 `fine` 이 아니다.
+- **큐에서 조용히 사라지는 잡은 없다.** 업로드 포기·413·tar 거부·프리셋 소멸도 전부 종료 상태(`cancelled`/`failed` + summary)로 최근 완료에 남는다.
+- 시작할 수 없는 잡(정지·모든 레인 다운)과 초과 실행 잡에는 `finish_at` 을 주지 않는다(null → `—`). 하한이 만든 「자신있는 틀린 시각」을 보이지 않는다.
 - 순수 계산 모듈은 픽스처 테스트를 갖고 CI 가 매번 돌린다. 테스트가 실제로 빨개지는지 `scripts/mutcheck.py` 로 확인한다.
 
 ## 패키지·모듈 구조
@@ -441,7 +487,7 @@ docs/reviews/
 ## 테스트·품질
 
 - **픽스처**: 마커가 섞인 로그 3종(선언 있음·없음·실패) · 스냅샷용 임시 git 레포(추적·수정·미추적·무시·삭제·심링크) · macOS `vm_stat`/`top`/`ps`/`ioreg` · Linux `/proc/*`/`ps`/`nvidia-smi` 캡처(팀 정보 제거).
-- **테스트**(M0~M1): `test_queue.py`(v1 의 21 시나리오 이식 + 그룹 대기 + 합류 키) · `test_progress.py`(마커 6 함정) · `test_snapshot.py` · `test_inputs.py` · `test_hostparse.py`(두 OS + GPU) · `test_status_schema.py`(`json.dumps` · null+`*_error` · pools 한 개) · `test_render_text.py`(빈 큐 vs 실패가 다르게) · `test_config.py`(우선순위·프리셋 오류 메시지·시간대) · `test_store.py`(enqueue·claim 원자성·재시작 lost·마이그레이션) · `test_worker.py`(가짜 프리셋 `sh -c` 로 성공·실패·타임아웃·취소·마커) · `test_server.py`(in-process: 401 · 합류 · 413 · tar 탈출 거부 · SSE 한 이벤트 · 로그 인증) · `test_client.py`(제출→업로드→wait 종료 코드 매핑, 서버 끊김 → 3).
+- **테스트**(M0~M1): `test_queue.py`(v1 의 21 시나리오 이식 + 그룹 대기 하한 + 합류 키 + `position` 은 대기 잡만 + 살아 있는 레인 0·정지면 `finish_at` null + 초과 실행 `finish_at` null + `reason` + `stuck`) · `test_progress.py`(마커 6 함정 + `phase` + `steps[].ok`) · `test_snapshot.py` · `test_inputs.py` · `test_hostparse.py`(두 OS + GPU) · `test_status_schema.py`(`json.dumps` · null+`*_error` · pools 한 개) · `test_render_text.py`(빈 큐 vs 실패가 다르게) · `test_config.py`(우선순위·프리셋 오류 메시지·시간대) · `test_store.py`(enqueue·claim 원자성·재시작 lost·마이그레이션) · `test_worker.py`(가짜 프리셋 `sh -c` 로 성공·실패·타임아웃·취소·마커) · `test_server.py`(in-process: 401 · 합류 · 413 · tar 탈출 거부 · SSE 한 이벤트 · 로그 인증) · `test_client.py`(제출→업로드→wait 종료 코드 매핑, 서버 끊김 → 3).
 - **뮤테이션 확인** `scripts/mutcheck.py`: `src/`+`tests/` 를 tmpdir 에 복사해 변이 하나를 넣고 그 복사본에서 pytest 가 **빨개지는지** 본다. 패턴이 없으면 그 자체로 실패. 3종 — ① 잔여 하한 제거 ② 합류 키에서 `inputs` 제외 ③ 재시작 시 `running` 을 `succeeded` 로. 셋 다 빨개져야 「검증됨」.
 - **CI**(`ci.yml`): `unit`(matrix: py 3.11·3.13 × ubuntu, macos-latest 는 3.13 만 — `hostparse`·`snapshot`·`worker` 가 실제 OS 에서 돈다) → `ruff check` · `ruff format --check` · `pytest` · `mutcheck.py`. `secrets` → `gitleaks/gitleaks-action@v3`(개인 계정은 라이선스 불필요, 2026-09-04 확인). 집계 잡 **`test`**: `needs: [unit, secrets]` + `if: always()`, 두 `needs.*.result` 가 모두 `success` 가 아니면 `exit 1`.
 - 스타일: ruff(기본 + `I`), 줄 100자, 타입 힌트 필수.
@@ -459,7 +505,7 @@ docs/reviews/
 
 - **M0 — 서버·큐·워커·run/wait** (한 세션 이상): 모듈 뼈대 · 설정+프리셋 스키마 · SQLite 저장소 · 워커(tree 모드) · 스냅샷 클라이언트 · `POST /jobs`·`PUT tree`·`GET /jobs/{id}`·`/api/health` · 토큰 · `rcm run`/`wait`(폴링) · 순수 계산 + 테스트 · `mutcheck.py` · CI. 완료 기준: 한 머신에서 루프백으로 `rcm run gate` 가 실제 스크립트를 돌리고 종료 코드 0/1/2/3 이 맞다 · 서버를 죽였다 살려도 큐가 남고 실행 중이던 잡은 `lost` 다 · 테스트 전부 통과 · 뮤테이션 3종 빨개짐 · CI 초록.
 - **M1 — 보이는 것**: 호스트 자원(CPU·RAM·**GPU**) · 중앙값/ETA/합류 · 스텝 마커 진행 · SSE · `rcm eta`/`top`/`jobs`/`logs`/`cancel`/`presets` · `/api/status` 완성. 완료 기준: 다른 컴퓨터에서 Tailscale 로 `rcm run` 을 넣고 `rcm top` 에 위치·ETA·스텝·GPU 가 보인다 · 같은 트리를 두 세션이 넣으면 두 번째는 합류한다.
-- **M2 — 웹 UI**: 정적 UI · SSE 갱신 · 배지 · 로그 뷰어(토큰) · 모바일 · 다크/라이트. 완료 기준: 폰에서 큐·스텝·자원이 읽히고 서버를 끊으면 stale 이 뜬다.
+- **M2 — 웹 UI**: `docs/wireframes/web-queue.html` 대로 — 요약 세 칸 · 큐 표(Reason·신뢰도) · 호스트 카드(sparkline) · 최근 완료 · Estimates · 변형 19개 · SSE 갱신 · 토큰 입력 · 로그 뷰어·취소(토큰) · 모바일 · 다크/라이트. 완료 기준: 폰에서 큐·스텝·자원이 읽히고, **서버를 끊으면 `Lost connection` 띠가, 샘플러만 멈추면 `stale` 배지가** 뜬다.
 - **M3 — 운영**: `git_ref` 소스 · concurrency 그룹 · 보존 정리 · 타임아웃/취소 신호 검증 · launchd/systemd · macOS CI 잡. 완료 기준: 배포 프리셋이 원격 ref 로 돌고, QA 두 개가 그룹으로 직렬화된다.
 - **M4 — 배포·문서**: pipx/uvx · PyPI 릴리스 · `examples/` · README. 완료 기준: 새 머신에서 README 만 보고 5분 안에 `rcm run` 이 된다.
 - **M5 — 확장**: GitHub 백엔드(Actions run 관찰·dispatch — v1.1 설계 참조) · 원격 워커(빌드 머신 여러 대, 수집기 push) · 우선순위 · 내용 주소 스냅샷 캐시 · 알림.
@@ -479,43 +525,72 @@ docs/reviews/
 | 9 | 표본 | 성공 잡만 기본(`sample_policy`), `sample_count` 노출, 스키마 `pools[]` 축 |
 | 10 | 코드 언어 | 식별자·README·UI·CLI 도움말 영어, 주석·docstring·계획서·커밋 본문 한국어 |
 | 11 | CI | matrix `unit` + 집계 `test`(필수 체크 이름), gitleaks v3, `mutcheck.py` |
+| 12 | 레인 1 표시 | 레인이 1 이면 워커 필을 하나로 접는다(`worker busy #412`). Reason 의 `blocked` 는 자연히 안 나온다 |
+| 13 | 행 펼침 | 실행 중 행은 **전부** 펼친다. 접힘만 잡 id 별로 기억한다(localStorage, 큐에 없는 id 는 정리) |
+| 14 | 최근 완료 | **건수** 기준 `recent_count = 8`(24시간이 아니다). 표본 정책과 무관하게 전부 보인다 |
+| 15 | 토큰 입력 | 웹의 토큰 입력(로그 tail·로그·취소)은 **M2 에 포함**한다. 폰에서 로그 확인과 취소가 실제 운영 행동이다 |
+| 16 | 합류자 취소 | 합류자가 취소하면 **자기 대기만 빠진다**(`rcm wait` 중단, 잡은 원 요청자 것으로 유지). 원 요청자가 취소하면 합류자의 `rcm wait` 는 2 로 끝나고, 취소 대화상자가 대기 세션 수를 미리 알린다 |
+
+12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 바꾸려면 여기서 고친다.
 
 ## 참고 구현과 이전 설계
 
 - `fmmc-tech/dolomood-app-renew`(로컬에선 `dolomood-ci-monitor` 워크트리)의 `scripts/remote_ci.sh`(dispatch·가드·합류·대기) · `ci_queue.py`(큐·중앙값·잔여 21 자기검증) · `ci_top.py`(진행률·파서·렌더 18 자기검증) · `docs/renew-guide/ci-cd/30-remote-dispatch.md`. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
 - v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220`. jobs API 함정 6개·rate limit 예산·큐 판정 규칙은 M5 GitHub 백엔드 때 그대로 쓴다.
-- Codex 크로스리뷰 기록: `docs/reviews/2026-09-04-codex-plan-v1.md`(v1 설계) · `docs/reviews/2026-09-04-codex-github-dependency.md`(방향 전환).
+- Codex 크로스리뷰 기록: `docs/reviews/2026-09-04-codex-plan-v1.md`(v1 설계) · `docs/reviews/2026-09-04-codex-github-dependency.md`(방향 전환) · `docs/reviews/2026-09-04-codex-web-queue.md`(웹 큐 화면 디자인). 서브에이전트 리뷰: `docs/reviews/2026-09-04-subagent-spec-gaps.md`(기획 누락 30건 — v2.1 의 데이터 모델 변경 근거) · `docs/reviews/2026-09-04-subagent-reference-comparison.md`(제품 비교 리서치).
 
 ---
 
 ## 세션 시작 프롬프트 (M0 — 복사해서 붙여 넣기)
 
 ```
-이 레포(remote_ci_monitor)는 빌드 머신 한 대에 여러 컴퓨터의 세션이 잡을 던지면 서버가 자기 큐로
-순차 실행하고, 대기 위치·예상 완료·스텝 진행·CPU/RAM/GPU 를 보여주며, 결과를 종료 코드로 돌려주는
-도구다. GitHub 에 의존하지 않는다. PLAN.md 가 정본이다 — 먼저 끝까지 읽어라.
+이 레포(remote_ci_monitor)는 빌드 머신 한 대에 여러 컴퓨터의 세션이 잡을 던지면 서버가 자기 큐로 순차 실행하고,
+대기 위치·예상 완료·스텝 진행·CPU/RAM/GPU 를 보여주며, 결과를 종료 코드로 돌려주는 로컬 잡 서버다.
+GitHub 에 의존하지 않는다(git 원격은 배포용 소스 모드에서만).
 
-이번 세션 목표: M0 를 끝낸다 (PLAN.md 「마일스톤과 완료 기준」의 M0).
-  1. 「패키지·모듈 구조」대로 뼈대 + pyproject(런타임 의존성 0) + 서버/클라이언트 설정 로딩 + 프리셋 스키마 검증
-  2. store.py(SQLite WAL: jobs·events·tokens, claim 원자성, 시작 시 running→lost, user_version 마이그레이션)
-  3. worker.py(tree 모드: tarfile data 필터로 풀기 · Popen argv · env · 로그 파일 · SIGTERM→SIGKILL · 타임아웃)
-  4. server.py(POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id} · POST cancel · GET /api/health · 토큰 인증 · hardening)
-  5. client.py + cli.py: rcm run(스냅샷 규칙·tree_hash·제출·합류·업로드) · rcm wait(폴링, 종료 코드 0/1/2/3, JSON 한 줄) ·
-     rcm serve · rcm check · rcm token add|list|revoke
-  6. 순수 계산(queue · progress 마커 · snapshot · inputs · status · render_text) + 픽스처 테스트.
-     「진행 규칙」 표의 테스트 6개는 그 이름 그대로.
-  7. CI: unit(matrix, ubuntu + macos) · secrets(gitleaks v3) · 집계 잡 `test`. `test` 이름은 main 룰셋 필수 체크라 바꾸지 마라.
-  8. scripts/mutcheck.py 3종을 만들고 셋 다 빨개지는 걸 확인한 뒤에만 「검증됨」이라고 써라.
+정본 — 이 순서로 먼저 끝까지 읽어라:
+  1. PLAN.md (v2.1): 구조 · 잡 모델 · 큐 규칙 · 프리셋 · 코드 전달 · 워커 · 스텝 마커 · 보안 · 서버 API · 저장소 · 설정 ·
+     /api/status 스키마 v1 · CLI · 테스트·CI · 마일스톤 · 결정 항목.
+  2. docs/wireframes/web-queue.html: 웹 큐 화면의 정본. 소스의 <article class="spec"> 35개와 「4. 규칙」「5. PLAN 반영 제안」
+     「6. 오너에게 묻는 것」을 읽어라. 5절은 PLAN.md v2.1 에 반영됐다(결정 항목 12~16). 화면을 눈으로 보려면:
+     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --window-size=1240,2500 \
+       --virtual-time-budget=8000 --screenshot=/tmp/q.png "file://$PWD/docs/wireframes/web-queue.html"
+  3. docs/reviews/*.md: 왜 그렇게 정했는지(Codex 리뷰 3건 · 기획 누락 리뷰 · 제품 비교 리서치). 훑어만 봐라.
+
+이번 세션 목표 — 아래 순서로. 단계마다 dev 에서 feature 브랜치를 파고 dev 로 PR 을 보낸다.
+
+  1. M0 — PLAN.md 「마일스톤과 완료 기준」의 M0 그대로:
+     모듈 뼈대 + pyproject(런타임 의존성 0) · 서버/클라이언트 설정 + 프리셋 입력 스키마 검증 ·
+     store.py(SQLite WAL: jobs·events·tokens·joiners, claim 원자성, 시작 시 running·cancelling→lost, user_version 마이그레이션) ·
+     worker.py(tree 모드: tarfile data 필터로 풀기 · Popen argv · env · 로그 파일 · 스텝 마커 · SIGTERM→SIGKILL · 타임아웃 · cancelling) ·
+     server.py(POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id} · POST cancel · GET /api/health · GET /api/whoami · GET /api/status ·
+       토큰 인증 · hardening 목록 전부) ·
+     client.py + cli.py(rcm run: 스냅샷 규칙·tree_hash·제출·합류·업로드 / rcm wait: 폴링, 종료 코드 0/1/2/3, JSON 한 줄 /
+       rcm serve · rcm check · rcm token add|list|revoke) ·
+     순수 계산(queue · progress · snapshot · inputs · status · render_text) + 픽스처 테스트 — 「진행 규칙」 표의 테스트 6개는
+       그 이름 그대로 · /api/status 는 스키마 v1 을 처음부터 낸다(UI 는 M2 라 만들지 않는다) ·
+     scripts/mutcheck.py 3종 · CI(unit matrix ubuntu+macos · secrets gitleaks v3 · 집계 잡 `test` — 이름은 main 룰셋 필수 체크라 바꾸지 마라).
+     PR 은 모듈 단위로 잘라라(예: feat/m0-config, feat/m0-store, feat/m0-worker, feat/m0-server, feat/m0-cli). 각 PR 은 테스트와 함께.
+
+  2. 완료 기준(PLAN M0): 한 머신에서 루프백으로 `rcm run gate` 가 실제 스크립트를 돌리고 종료 코드 4종(0/1/2/3)이 맞다 ·
+     서버를 죽였다 살려도 큐가 남고 실행 중이던 잡은 lost 다 · 테스트 전부 통과 · 뮤테이션 3종이 빨개진다 · CI 초록.
 
 지킬 것:
-  - 「반드시 지킬 것 — 이식성」. 팀 명령·머신 이름을 코드에 박지 말고 프리셋과 설정으로 받아라. 핵심 경로에서 GitHub 을 부르지 마라.
-  - 「보안」. 쓰기는 토큰 필수, 프리셋만 실행, 셸 보간 금지, tar 탈출 차단, 오류 응답에 스택·토큰 금지.
-  - 「fail-open 금지」. 모르는 값은 null, wait 의 「모른다」는 3, lost 는 lost.
-  - 순수 계층(core/)은 I/O 도 시계도 안 본다. now 는 인자다.
-  - 결정 항목은 PLAN.md 「결정 항목」대로. 벗어나야 할 이유가 생기면 그때 물어라.
-  - 브랜치 정책: dev 에서 feat/<topic> 을 파서 작업하고 dev 로 PR. main·dev 직접 push 금지(룰셋이 막는다).
+  - 「반드시 지킬 것 — 이식성」: 팀 명령·머신 이름을 코드에 박지 말고 프리셋과 설정으로 받아라. 핵심 경로에서 GitHub 을 부르지 마라.
+  - 「보안」: 쓰기는 토큰 필수(sha256 저장, compare_digest), 등록된 프리셋만 실행, argv 배열·셸 보간 금지, tarfile data 필터,
+    오류 응답에 스택·토큰·경로 금지, 로그는 항상 토큰. 바인드 기본 127.0.0.1.
+  - 「fail-open 금지」: 모르는 값은 null, wait 의 「모른다」는 3(실패 1 이 아니다), lost 는 lost 로 남긴다, 큐에서 사라지는 잡 없음.
+  - 순수 계층(core/)은 I/O 도 시계도 안 본다. now 는 인자다. 순수 모듈은 픽스처 테스트가 있어야 하고,
+    mutcheck 3종이 실제로 빨개지는 걸 확인한 뒤에만 「검증됨」이라고 말해라.
   - 식별자·UI 문자열·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 커밋 메시지는 Conventional Commits.
+  - 브랜치 정책: main·dev 직접 push 금지(룰셋이 막는다). 세션 시작 `git switch dev && git pull` → `git switch -c <type>/<topic>`.
+    워크트리를 써도 된다.
+  - gh 계정: 이 레포는 monocsp 소유인데 활성 계정이 pcs-fmmc 로 되돌아가는 일이 있다. PR·머지는 토큰을 고정해서 해라:
+      TOK=$(gh auth token --user monocsp); GH_TOKEN=$TOK gh pr create --base dev …
+    먼저 `GH_TOKEN=$TOK gh api user --jq .login` 이 monocsp 인지 확인.
+  - 기술 결정이 필요하면 `codex exec --sandbox read-only` 로 먼저 크로스리뷰를 받고(프롬프트·원문·반영표를 docs/reviews/ 에 남겨라)
+    그 다음 오너에게 물어라. 결정 항목의 확정값에서 벗어나야 할 이유가 생기면 그때 물어라.
 
-끝나면: 무엇을 만들었는지, 테스트가 몇 개이고 어떤 뮤테이션으로 확인했는지, 루프백 e2e 에서 rcm run 이 무엇을
-돌려줬는지(종료 코드 4종), M1 에서 먼저 정해야 할 것이 무엇인지 짧게 보고해라.
+끝나면 짧게 보고해라: 만든 것 · 테스트 수와 뮤테이션 결과 · 루프백 e2e 에서 rcm run 이 돌려준 것(종료 코드 4종) ·
+올린 PR 목록 · M1(세션 명령 eta/top/jobs/logs/cancel · 호스트 자원 CPU/RAM/GPU · SSE)에서 먼저 정해야 할 것.
 ```
