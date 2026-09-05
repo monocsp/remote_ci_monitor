@@ -731,7 +731,24 @@
       }
     }
     renderHeaderConn();
-    $("[data-foot-server]").textContent = "rcm " + (server.version || DASH) + " · up " + fmtDuration(server.uptime_seconds) + " · schema v" + (st.schema_version || DASH);
+    state.footBase = "rcm " + (server.version || DASH) + " · up " + fmtDuration(server.uptime_seconds) + " · schema v" + (st.schema_version || DASH);
+    $("[data-foot-server]").textContent = state.footBase;
+    if (state.debug) setTimeout(debugLayout, 0);
+  }
+  // `?debug=1`: 레이아웃 진단 — 뷰포트보다 넓은 요소를 푸터에 적는다(모바일 넘침 추적용)
+  function debugLayout() {
+    var vw = document.documentElement.clientWidth;
+    var wide = [];
+    $$("body *").forEach(function (el) {
+      var r = el.getBoundingClientRect();
+      if (r.width > 0 && r.right > vw + 1) wide.push({ el: el, right: Math.round(r.right) });
+    });
+    wide.sort(function (a, b) { return b.right - a.right; });
+    var desc = wide.slice(0, 8).map(function (w) {
+      var e = w.el;
+      return (e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (e.className && typeof e.className === "string" ? "." + e.className.trim().split(/\s+/).join(".") : "")) + "@" + w.right;
+    });
+    $("[data-foot-server]").textContent = state.footBase + " · debug vw=" + vw + " scroll=" + document.documentElement.scrollWidth + " wide=" + desc.join(" | ");
   }
   function notScheduledRow() {
     var q = queueOf(state.status);
@@ -1229,6 +1246,7 @@
   }
   function boot() {
     state.noSse = /[?&]poll=1(&|$)/.test(location.search);
+    state.debug = /[?&]debug=1(&|$)/.test(location.search);
     loadCollapsed();
     state.token = lsGet("rcm.token");
     wireTokenDialog(); wireClicks(); renderTokenButton();
