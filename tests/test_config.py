@@ -1,16 +1,19 @@
 """설정 로딩 — 우선순위(플래그 > env > 파일 > 기본값) · 프리셋 오류 메시지 · 시간대."""
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 
 from remote_ci_monitor.config import (
     ConfigError,
+    ServerConfig,
     load_client_config,
     load_server_config,
     parse_preset,
 )
+from remote_ci_monitor.core.status import preset_json
 
 GOOD = """
 [server]
@@ -172,3 +175,207 @@ def test_client_config_remembers_token_env_name(tmp_path):
     p = write(tmp_path, 'server = "http://mini:8787"\ntoken_env = "MY_TOK"\n', "client.toml")
     cfg = load_client_config(p, environ={})
     assert cfg.token == "" and cfg.token_env == "MY_TOK"  # `rcm check` 안내가 이 이름을 말한다
+
+
+# ── M3: [[repos]] · git_ref 프리셋의 repo · 새 [server] 키 (명세 §1.1 · §2.2) ──────────────
+# 성공 로딩이 필요한 케이스는 git 이 PATH 에 있어야 한다(`[[repos]]` 가 있으면 시작 시 확인).
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
+
+REPO_APP = """
+[[repos]]
+name = "app"
+url = "git@example.com:org/app.git"
+"""
+
+REPO_LIB = """
+[[repos]]
+name = "lib"
+url = "https://example.com/org/lib.git"
+"""
+
+DEPLOY = """
+[[presets]]
+name = "deploy"
+argv = ["bash", "scripts/deploy.sh"]
+source_modes = ["git_ref"]
+"""
+
+GATE_TREE = """
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+source_modes = ["tree"]
+"""
+
+
+def load(tmp_path: Path, text: str, environ: dict[str, str] | None = None) -> ServerConfig:
+    return load_server_config(write(tmp_path, text), environ=environ or {})
+
+
+@needs_git
+def test_git_ref_preset_with_explicit_repo(tmp_path):
+    cfg = load(tmp_path, REPO_APP + REPO_LIB + DEPLOY + 'repo = "app"\n')
+    assert cfg.preset("deploy").repo == "app"
+    assert [r.name for r in cfg.repos] == ["app", "lib"]
+    assert cfg.repo("app").url == "git@example.com:org/app.git"  # 워커가 §1.4 에서 쓴다
+    assert cfg.repo("nope") is None
+
+
+@needs_git
+def test_git_ref_preset_autofills_repo_when_exactly_one_repo(tmp_path):
+    cfg = load(tmp_path, REPO_APP + DEPLOY)
+    assert cfg.preset("deploy").repo == "app"
+
+
+@needs_git
+def test_git_ref_preset_without_repo_is_ambiguous_with_two_repos(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, REPO_APP + REPO_LIB + DEPLOY)
+    assert "preset 'deploy'" in str(e.value) and "repo" in str(e.value)
+
+
+@needs_git
+def test_git_ref_preset_unknown_repo(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, REPO_APP + DEPLOY + 'repo = "nope"\n')
+    assert "preset 'deploy'" in str(e.value) and "'nope'" in str(e.value)
+
+
+@needs_git
+def test_tree_only_preset_rejects_repo(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, REPO_APP + GATE_TREE + 'repo = "app"\n')
+    assert "preset 'gate'" in str(e.value) and "only valid with" in str(e.value)
+
+
+def test_tree_only_preset_rejects_repo_even_without_repos(tmp_path):
+    # repos 가 없어도 같은 오류 — repo 키 자체가 git_ref 전용이다
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, GATE_TREE + 'repo = "app"\n')
+    assert "only valid with" in str(e.value)
+
+
+@needs_git
+def test_mixed_modes_preset_accepts_repo(tmp_path):
+    text = REPO_APP + GATE_TREE.replace('["tree"]', '["tree", "git_ref"]') + 'repo = "app"\n'
+    assert load(tmp_path, text).preset("gate").repo == "app"
+
+
+def test_tree_preset_has_no_repo(tmp_path):
+    assert not load(tmp_path, GATE_TREE).preset("gate").repo
+
+
+def test_parse_preset_repo_must_be_a_string():
+    with pytest.raises(ConfigError) as e:
+        parse_preset({"name": "deploy", "argv": ["x"], "source_modes": ["git_ref"], "repo": 5})
+    assert "preset 'deploy'" in str(e.value) and "repo" in str(e.value)
+
+
+# [[repos]] 자체의 검증 — url 비어 있음 · `-` 로 시작(옵션 주입) · 이름 중복 · 이름 규칙
+
+
+@needs_git
+def test_repo_url_must_not_be_empty(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, '[[repos]]\nname = "app"\nurl = ""\n')
+    assert "url" in str(e.value)
+
+
+@needs_git
+def test_repo_url_must_not_start_with_dash(tmp_path):
+    # git 호출은 `--` 뒤에 url 을 두지만, 설정 단계에서도 막는다
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, '[[repos]]\nname = "app"\nurl = "--upload-pack=evil"\n')
+    assert "url" in str(e.value)
+
+
+@needs_git
+def test_duplicate_repo_names(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, REPO_APP + REPO_APP)
+    assert "duplicate" in str(e.value).lower() and "app" in str(e.value)
+
+
+@needs_git
+def test_repo_name_must_be_an_identifier(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, '[[repos]]\nname = "bad name"\nurl = "https://example.com/x.git"\n')
+    assert "name" in str(e.value)
+
+
+def test_repos_require_git_on_path(tmp_path, monkeypatch):
+    # 빈 디렉터리만 PATH 에 두면 git 을 못 찾는다. environ 에도 같은 PATH 를 줘야
+    # (env 단계에서 os.environ 을 통째로 바꾸므로) os.defpath 의 /usr/bin 으로 새지 않는다
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, REPO_APP, environ={"PATH": str(tmp_path)})
+    assert "git" in str(e.value)
+
+
+def test_no_repos_needs_no_git(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    cfg = load(tmp_path, GATE_TREE, environ={"PATH": str(tmp_path)})
+    assert cfg.preset("gate") is not None and cfg.repos == ()
+
+
+# 새 [server] 키 — git 타임아웃 둘 · janitor 주기(하한 60) · 보존 일수는 음수 금지
+
+
+def test_m3_server_keys_have_defaults(tmp_path):
+    cfg = load(tmp_path, GOOD)
+    assert cfg.server.git_resolve_timeout_seconds == 20
+    assert cfg.server.git_fetch_timeout_seconds == 600
+    assert cfg.server.retention_sweep_interval_seconds == 3600
+
+
+def test_m3_server_keys_from_file(tmp_path):
+    text = (
+        "[server]\ngit_resolve_timeout_seconds = 5\ngit_fetch_timeout_seconds = 30\n"
+        "retention_sweep_interval_seconds = 60\n"
+    )
+    cfg = load(tmp_path, text)
+    assert cfg.server.git_resolve_timeout_seconds == 5
+    assert cfg.server.git_fetch_timeout_seconds == 30
+    assert cfg.server.retention_sweep_interval_seconds == 60
+
+
+def test_sweep_interval_floor_is_60(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, "[server]\nretention_sweep_interval_seconds = 59\n")
+    assert "retention_sweep_interval_seconds" in str(e.value)
+
+
+@pytest.mark.parametrize("key", ["retention_days_success", "retention_days_failure"])
+def test_retention_days_must_not_be_negative(tmp_path, key):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, f"[server]\n{key} = -1\n")
+    assert key in str(e.value)
+    # 0 은 「끝나자마자 다음 sweep 에」(명세 §2.1) — 허용
+    assert getattr(load(tmp_path, f"[server]\n{key} = 0\n").server, key) == 0
+
+
+@pytest.mark.parametrize("key", ["git_resolve_timeout_seconds", "git_fetch_timeout_seconds"])
+def test_git_timeouts_must_be_positive(tmp_path, key):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, f"[server]\n{key} = 0\n")
+    assert key in str(e.value)
+
+
+def test_env_overrides_git_fetch_timeout(tmp_path):
+    p = write(tmp_path, GOOD)
+    cfg = load_server_config(p, environ={"RCM_SERVER_GIT_FETCH_TIMEOUT_SECONDS": "30"})
+    assert cfg.server.git_fetch_timeout_seconds == 30
+    with pytest.raises(ConfigError) as e:
+        load_server_config(p, environ={"RCM_SERVER_GIT_FETCH_TIMEOUT_SECONDS": "soon"})
+    assert "[server] git_fetch_timeout_seconds" in str(e.value)
+
+
+# 프리셋 JSON(`/api/status.presets[]` · `rcm presets`)에 repo 가 실린다 — 없으면 null
+
+
+@needs_git
+def test_preset_json_carries_repo(tmp_path):
+    cfg = load(tmp_path, REPO_APP + DEPLOY + GATE_TREE)
+    assert preset_json(cfg.preset("deploy"))["repo"] == "app"
+    assert preset_json(cfg.preset("gate"))["repo"] is None

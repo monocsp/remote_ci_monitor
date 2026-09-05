@@ -212,6 +212,7 @@ def preset_json(p: Preset) -> dict[str, Any]:
         "name": p.name,
         "description": p.description,
         "source_modes": list(p.source_modes),
+        "repo": p.repo or None,
         "concurrency_group": p.concurrency_group,
         "expected_seconds": p.expected_seconds,
         "timeout_seconds": p.timeout_seconds,
