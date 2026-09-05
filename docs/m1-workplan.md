@@ -12,8 +12,8 @@ M0 에서 이미 있는 것: `core/queue.eta_for_new` · `core/queue.confidence`
 | B | 신뢰도 배지 | `estimate.confidence ∈ high·med·low·group wait·overdue` 를 **서버가 싣는다**(키 추가 — `schema_version` 1 유지). `rcm top`·웹은 그 값을 그대로 쓴다 |
 | C | `hosts[].history[]` | **서버 메모리**(`collections.deque(maxlen=history_samples)`). 재시작하면 비운다 |
 | D | GPU 픽스처 | 이 Mac(Apple Silicon, macOS 26)의 실제 `ioreg -r -d 1 -w 0 -c IOAccelerator` · `top -l 2 -n 0 -s 1` · `vm_stat` · `ps -Aro %cpu=,rss=,comm=` · `sysctl -n hw.memsize` 를 `tests/fixtures/host/macos/` 에 넣었다(사용자 경로 제거). Linux 는 `/proc/loadavg` · `/proc/meminfo` · `/proc/stat` 두 표본 · `ps -eo %cpu=,rss=,comm= --sort=-%cpu` · `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` 형식대로 합성 픽스처 + CI 의 ubuntu 러너에서 실제 `/proc` 을 읽는 스모크 테스트 |
-| E | SSE 상한 초과 | 17번째 연결은 `503` + `Retry-After: 10` + `{"error": "too many event streams", "fallback": "poll", "poll_seconds": 10}`. 클라이언트는 폴링으로 폴백 |
-| F | `rcm wait` 갱신 | `GET /jobs/{id}/events` SSE 를 먼저 열고, 이벤트가 올 때마다 `GET /jobs/{id}?tail=0` 을 다시 읽어 한 줄을 갱신. SSE 가 안 열리거나 끊기면 2초 폴링(M0 그대로). 30초 동안 이벤트도 keep-alive 도 없으면 폴링으로 |
+| E | SSE 상한 초과 | 17번째 연결은 `503` + `Retry-After: 10` + `{"error": "too many event streams", "fallback": "poll", "poll_seconds": 10}`. **웹 UI** 는 503 뒤에도 `Retry-After` 와 2→30s 백오프로 SSE 를 계속 재시도하고 그 사이 10초 폴링(4절 그대로). **CLI `rcm wait`** 는 별도로 2초 폴링으로 떨어진다 |
+| F | `rcm wait` 갱신 | `GET /jobs/{id}/events` SSE 를 먼저 열고, 이벤트가 올 때마다 `GET /jobs/{id}?tail=0` 을 다시 읽어 한 줄을 갱신 — **재조회는 초당 1회로 합친다**(`job_finished` 는 즉시). SSE 가 503 이거나 안 열리면 2초 폴링(M0 그대로). 5초 동안 조용하면 한 번 재조회하고 다시 연다(`--timeout` 도 이 틱에서 본다) |
 | G | `rcm eta` 계산 위치 | 서버 `POST /api/eta {preset, inputs}` → `core/queue.eta_for_new` 결과(가상 잡의 큐 행 + `ahead`)를 돌려준다. 클라이언트는 그리기만 |
 
 ## 1. `core/hostparse.py` — 순수 파서 (I/O 없음)
@@ -111,13 +111,27 @@ class Subscription:
     # 큐가 가득 차면 가장 오래된 것을 버리고 "lag" 이벤트를 넣는다(구독자가 재조회하게)
 ```
 
+**발행 지점(고정)**: `App` 만 발행한다(`store` 는 모른다).
+
+| 언제 | 이벤트 |
+|---|---|
+| `POST /jobs` 새 잡 · 합류자 추가 | `job_changed` |
+| `PUT tree` 완료(queued) · 413 · 수신 중 끊김 · janitor 포기 | `job_changed` / `job_finished` |
+| `POST cancel`(취소·cancelling·합류자 이탈) | `job_changed` / `job_finished` |
+| `POST /pause`·`/resume` · 워커 상태 변화 | `server` |
+| 워커 claim(running) · materializing→executing · 종료 | `job_changed` / `job_finished` (워커 `on_change`) |
+| 마커 수신 | `marker` (워커 `on_marker`) |
+| 서버 시작 정리(lost · cancelled) | `job_finished` |
+| 샘플러 표본 | `host_sample` |
+| 업로드 진행(`received_bytes`) · `last_output_at` | 이벤트 없음 — 캐시 TTL(0.2초)이 잡는다 |
+
 이벤트 종류와 data:
 - `job_changed` `{job_id, state}` — 생성 · uploading→queued · claim(running) · cancelling · 합류자 변경 · phase 변경
 - `job_finished` `{job_id, state, exit_code}` — 종료 상태로 들어갈 때(취소·포기·lost 포함)
 - `marker` `{job_id, kind, value}` — 스텝 마커 수신
 - `host_sample` `{name, sampled_at}` — 샘플러가 표본을 만들 때
 - `server` `{paused: {...}|null, workers: [...]}` — 정지/재개 · 워커 상태 변화
-- `reset` `{}` — Last-Event-ID 가 너무 옛날 · `lag` `{}` — 구독 큐 넘침. 둘 다 「전체 재조회하라」
+- `reset` `{}` — Last-Event-ID 가 링 버퍼 밖: 현재 `last_id` 부터 새 이벤트만 구독되고, 클라이언트는 즉시 전체 재조회 · `lag` `{}` — 구독 큐가 넘쳐 **큐를 비우고** lag 하나 + 방금 이벤트만 남김: 클라이언트는 전체 재조회. 링 버퍼 기본 2048, 구독 큐도 같은 크기
 
 워커·서버·store 가 발행하는 지점: `store` 는 모른다(순수 저장). `App` 이 `store` 호출 뒤에 발행한다. 워커는 `on_change(job_id)` 콜백(M0 에 이미 있음)을 통해 `App` 이 잡을 다시 읽고 `job_changed`/`job_finished`/`marker` 를 발행한다 — 워커에 `on_marker(job_id, kind, value)` 콜백을 추가한다.
 
@@ -156,7 +170,7 @@ SSE 핸들러: 소켓 타임아웃을 없애고(`settimeout(None)`), 요청 세�
 | `rcm eta (--job ID \| PRESET [-f K=V…]) [--json]` | `--job`: `/api/status` 에서 그 행. 아니면 `POST /api/eta`. stdout 한 줄: `#413 · 2nd in line · 1 ahead · wait 2m 40s · expected 9m 00s · eta 10:04 · low · preset`. `--json` 이면 행 JSON. 모르는 값은 `—`. 정지·레인 0 이면 `eta —` 와 이유 |
 | `rcm top [--watch N] [--json]` | `render_text.render(status, tz=로컬)`. `--watch N` 은 N 초마다 화면을 지우고 다시(Ctrl-C 로 종료 0). `--json` 은 `/api/status` 그대로 한 번 |
 | `rcm jobs [--mine] [--state S] [--json]` | 큐 + 최근을 표로: `#id state key requester elapsed/wait eta summary`. `--mine` 은 토큰 필요, `requester.name == me` 또는 `joiners[].name == me`. `--state` 는 running·queued·… 필터 |
-| `rcm logs ID [--follow]` | `GET /jobs/{id}/log?offset=` 증분을 stdout 에 그대로. `--follow` 는 `X-RCM-More: 1` 인 동안 1초 간격. 토큰 필수, 남의 잡은 403 → 종료 2 |
+| `rcm logs ID [--follow]` | `GET /jobs/{id}/log?offset=` 증분을 stdout 에 그대로. `--follow` 는 `X-RCM-More: 1` 인 동안 1초 간격. 토큰 필수. 종료 코드: 정상 0 · 서버가 거부(401/403/404) 2 · 네트워크 불명 3 · Ctrl-C 130 |
 | `rcm presets` | 이름 · 설명 · 입력 스키마 · timeout · expected · 그룹 표 |
 | `rcm wait` | 결정 F: SSE 우선 → 폴링 폴백. 종료 코드는 M0 그대로. `--poll` 플래그로 SSE 끄기 |
 | `rcm run` | 변화 없음(내부에서 `_wait` 가 SSE 를 쓴다) |
@@ -177,6 +191,11 @@ SSE 핸들러: 소켓 타임아웃을 없애고(`settimeout(None)`), 요청 세�
 - `tests/test_cli_m1.py`: `rcm eta`/`top`/`jobs`/`logs --follow`/`presets` 출력 · `rcm wait` SSE 경로와 폴백(서버가 SSE 를 503 으로 거부할 때).
 - `tests/test_e2e_loopback.py` 확장: `rcm top` 에 호스트 표본과 위치·ETA·스텝이 보인다 · 두 세션 합류.
 - Linux 스모크: `sys.platform.startswith("linux")` 일 때만 실제 `/proc` 을 읽어 `sample_once()` 가 None 이 아니다.
+
+## 7b. 오너 확인 대기 (Codex 리뷰가 사람 결정이라고 본 것 — 추천값으로 구현, PLAN 결정 항목 19·20)
+
+- macOS 메모리 「used」 = `active + wired + compressor`(Activity Monitor 「Memory Used」) — `top` 의 PhysMem used 와 다르다.
+- GPU 를 못 읽는 머신은 `gpu: null` + `gpu_note` 로 M1 완료 기준을 통과한 것으로 본다.
 
 ## 8. 완료 기준 (PLAN M1)
 

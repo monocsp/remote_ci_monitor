@@ -12,7 +12,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from remote_ci_monitor import SCHEMA_VERSION
+from remote_ci_monitor.core.hostparse import stale as _stale
 from remote_ci_monitor.core.model import (
+    REASON_BLOCKED_BY_GROUP,
     Estimate,
     HostSample,
     Job,
@@ -24,6 +26,7 @@ from remote_ci_monitor.core.model import (
     Source,
     StatusModel,
 )
+from remote_ci_monitor.core.queue import confidence
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -67,8 +70,9 @@ def source_json(s: Source) -> dict[str, Any]:
     }
 
 
-def estimate_json(e: Estimate) -> dict[str, Any]:
+def estimate_json(e: Estimate, *, confidence: str | None = None) -> dict[str, Any]:
     return {
+        "confidence": confidence,
         "expected_seconds": _num(e.expected_seconds),
         "source": e.source,
         "sample_count": e.sample_count,
@@ -159,7 +163,15 @@ def queue_row_json(
         "created_at": iso(job.created_at),
         "queued_at": iso(job.queued_at),
         "started_at": iso(job.started_at),
-        "estimate": estimate_json(row.estimate),
+        "estimate": estimate_json(
+            row.estimate,
+            confidence=confidence(
+                row.estimate.source,
+                row.estimate.sample_count,
+                group_wait=row.reason == REASON_BLOCKED_BY_GROUP,
+                overdue=row.estimate.overdue or row.estimate.stuck,
+            ),
+        ),
         "progress": progress_json(row.progress),
         "log_tail": log_tail,
         "url": job_url(base_url, job.id),
@@ -224,6 +236,7 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
         "lanes": s.lanes,
         "paused": {"by": s.paused.by, "at": iso(s.paused.at)} if s.paused else None,
         "last_error": s.last_error,
+        "sse_connections": s.sse_connections,
         "workers": [
             {
                 "lane": w.lane,
@@ -244,7 +257,7 @@ def host_json(h: HostSample, *, now: datetime) -> dict[str, Any]:
         "source": h.source,
         "sampled_at": iso(h.sampled_at),
         "age_seconds": _num(age),
-        "stale": age > 3 * h.interval_seconds,
+        "stale": _stale(h.sampled_at, now, h.interval_seconds),
         "interval_seconds": h.interval_seconds,
         "os": h.os,
         "cores": h.cores,

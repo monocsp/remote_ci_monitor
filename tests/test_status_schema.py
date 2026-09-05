@@ -44,6 +44,7 @@ ROW_KEYS = {
     "url",
 }
 ESTIMATE_KEYS = {
+    "confidence",
     "expected_seconds",
     "source",
     "sample_count",
@@ -202,6 +203,7 @@ def test_status_is_json_serializable_with_expected_shape():
         "lanes",
         "paused",
         "last_error",
+        "sse_connections",
         "workers",
     }
     assert set(back["server"]["workers"][0]) == {"lane", "state", "job_id", "error", "since"}

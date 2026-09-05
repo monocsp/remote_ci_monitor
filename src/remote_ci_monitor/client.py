@@ -20,7 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,17 @@ from remote_ci_monitor.core.snapshot import (
 POLL_SECONDS = 2.0
 CONNECTION_GRACE_SECONDS = 60.0
 RCMIGNORE = ".rcmignore"
+SSE_IDLE_TIMEOUT_SECONDS = 30.0
+SSE_TICK_SECONDS = 5.0
+REFETCH_MIN_SECONDS = 1.0
+SSE_WAKE_KINDS = frozenset({"hello", "job_changed", "job_finished", "marker", "reset", "lag"})
+
+
+@dataclass(frozen=True)
+class SseEvent:
+    kind: str
+    id: int | None
+    data: dict[str, Any]
 
 
 class ClientError(Exception):
@@ -344,6 +355,104 @@ class Client:
         _, headers, body = self._request("GET", f"/jobs/{job_id}/log?offset={offset}")
         return body, int(headers.get("X-RCM-Next-Offset", offset)), headers.get("X-RCM-More") == "1"
 
+    def log_follow(
+        self,
+        job_id: int,
+        *,
+        offset: int = 0,
+        poll_seconds: float = 1.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> Iterator[bytes]:
+        """로그를 증분으로 흘린다. 잡이 끝나고(`X-RCM-More: 0`) 남은 바이트가 없으면 멈춘다."""
+        while True:
+            data, offset, more = self.log(job_id, offset)
+            if data:
+                yield data
+            if not more and not data:
+                return
+            if not data:
+                sleep(poll_seconds)
+
+    def eta(self, preset: str, inputs: dict[str, Any]) -> dict[str, Any]:
+        return self.post_json("/api/eta", {"preset": preset, "inputs": inputs})
+
+    def events(
+        self,
+        path: str = "/events",
+        *,
+        last_id: int | None = None,
+        idle_timeout: float = SSE_IDLE_TIMEOUT_SECONDS,
+    ) -> Iterator[SseEvent]:
+        """SSE 스트림. 503(상한 초과)·연결 실패·`idle_timeout` 무응답이면 ClientError → 폴링."""
+        url = self.server + path
+        headers = {"User-Agent": f"rcm/{__version__}", "Accept": "text/event-stream"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        if last_id is not None:
+            headers["Last-Event-ID"] = str(last_id)
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        try:
+            resp = urllib.request.urlopen(req, timeout=idle_timeout)
+        except urllib.error.HTTPError as e:
+            payload = e.read()
+            try:
+                parsed = json.loads(payload) if payload else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            msg = parsed.get("error") if isinstance(parsed, dict) else None
+            raise ClientError(e.code, msg or f"HTTP {e.code}", parsed or {}) from e
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            raise ClientError(0, f"cannot open event stream: {getattr(e, 'reason', e)}") from e
+        with resp:
+            ctype = resp.headers.get("Content-Type", "")
+            if "text/event-stream" not in ctype:
+                raise ClientError(0, f"not an event stream ({ctype or 'no content type'})")
+            kind = "message"
+            event_id: int | None = None
+            data_lines: list[str] = []
+            try:
+                while True:
+                    raw = resp.readline()
+                    if not raw:
+                        return
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if line == "":
+                        if data_lines:
+                            text = "\n".join(data_lines)
+                            try:
+                                data = json.loads(text)
+                            except json.JSONDecodeError:
+                                data = {"raw": text}
+                            yield SseEvent(kind=kind, id=event_id, data=data)
+                        kind, event_id, data_lines = "message", None, []
+                        continue
+                    if line.startswith(":"):
+                        continue  # keep-alive
+                    field, _, value = line.partition(":")
+                    value = value[1:] if value.startswith(" ") else value
+                    if field == "event":
+                        kind = value
+                    elif field == "id":
+                        try:
+                            event_id = int(value)
+                        except ValueError:
+                            event_id = None
+                    elif field == "data":
+                        data_lines.append(value)
+            except (TimeoutError, OSError, http.client.HTTPException) as e:
+                raise ClientError(
+                    0, f"event stream stalled: {type(e).__name__}", {"stalled": True}
+                ) from e
+
+    def job_events(
+        self,
+        job_id: int,
+        *,
+        last_id: int | None = None,
+        idle_timeout: float = SSE_IDLE_TIMEOUT_SECONDS,
+    ) -> Iterator[SseEvent]:
+        return self.events(f"/jobs/{job_id}/events", last_id=last_id, idle_timeout=idle_timeout)
+
 
 def preset_from_json(p: dict[str, Any]) -> Preset:
     """`/api/status.presets[]` 항목 → Preset(입력 스키마 검증용. argv 는 서버에만 있다)."""
@@ -388,10 +497,86 @@ def wait_for_job(
     on_update: Callable[[dict[str, Any]], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    use_sse: bool = True,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
-    """잡이 끝날 때까지 폴링. (종료 코드, 마지막 잡 JSON, 사유). 3 은 「모른다」."""
+    """잡이 끝날 때까지 기다린다. SSE 우선, 안 되면 폴링(명세 0-F). 3 은 「모른다」.
+
+    반환 (종료 코드, 마지막 잡 JSON, 사유).
+    """
     started = clock()
     last: dict[str, Any] | None = None
+
+    def check() -> tuple[int, dict[str, Any] | None, str | None] | None:
+        nonlocal last
+        job = client.job(job_id)
+        last = job
+        if on_update:
+            on_update(job)
+        if job.get("state") in TERMINAL_STATES:
+            return exit_code_for(job), job, None
+        if timeout is not None and clock() - started > timeout:
+            return (
+                EXIT_UNKNOWN,
+                job,
+                f"--timeout {timeout:g}s elapsed; job {job_id} is still {job.get('state')}",
+            )
+        return None
+
+    sse_ok = use_sse
+    while sse_ok:
+        try:
+            done = check()
+            if done is not None:
+                return done
+            remaining = None if timeout is None else max(0.1, timeout - (clock() - started))
+            idle = SSE_TICK_SECONDS if remaining is None else min(SSE_TICK_SECONDS, remaining)
+            last_check = clock()
+            for ev in client.job_events(job_id, idle_timeout=idle):
+                if ev.kind not in SSE_WAKE_KINDS:
+                    continue
+                if ev.kind != "job_finished" and clock() - last_check < REFETCH_MIN_SECONDS:
+                    continue  # 마커가 몰려도 재조회는 초당 한 번(리뷰 F)
+                last_check = clock()
+                done = check()
+                if done is not None:
+                    return done
+            done = check()  # 스트림이 닫혔다 — 마지막으로 한 번 더 본다
+            if done is not None:
+                return done
+        except ClientError as e:
+            if e.status == 404:
+                return EXIT_UNKNOWN, last, f"job {job_id} not found on the server"
+            if e.status not in (0, 503, 502, 504):
+                return EXIT_UNKNOWN, last, f"server error: {e.message}"
+            if e.status == 0 and e.body.get("stalled"):
+                continue  # 조용한 스트림 — 다시 보고(check) 다시 연다
+            sse_ok = False  # 상한 초과(503)·연결 실패 → 폴링으로
+    return _poll_for_job(
+        client,
+        job_id,
+        timeout=timeout,
+        poll_seconds=poll_seconds,
+        on_update=on_update,
+        sleep=sleep,
+        clock=clock,
+        started=started,
+        last=last,
+    )
+
+
+def _poll_for_job(
+    client: Client,
+    job_id: int,
+    *,
+    timeout: float | None,
+    poll_seconds: float,
+    on_update: Callable[[dict[str, Any]], None] | None,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+    started: float,
+    last: dict[str, Any] | None,
+) -> tuple[int, dict[str, Any] | None, str | None]:
+    """2초 폴링. 서버 연결 실패가 60초 넘게 이어지면 3."""
     unreachable_since: float | None = None
     while True:
         try:
@@ -435,6 +620,7 @@ __all__ = [
     "Snapshot",
     "make_snapshot",
     "wait_for_job",
+    "SseEvent",
     "exit_code_for",
     "preset_from_json",
     "default_label",
