@@ -355,3 +355,43 @@ def test_wait_missing_job_is_3_not_2(srv, env, capsys):
     env(srv)
     code, _, err = run(capsys, ["wait", "--job", "999"])
     assert code == 3 and "not found" in err
+
+
+# ── 실기 검증에서 나온 문구 (2026-09-05) ──────────────────────────────────────
+
+
+def test_eta_row_for_a_running_job_shows_elapsed_not_wait():
+    """도는 잡에 「0 ahead · wait 0s」 는 곧 시작할 것처럼 읽힌다 — 상태와 경과를 보인다."""
+    from remote_ci_monitor.cli import _fmt_eta_row
+
+    row = {
+        "id": 2,
+        "position": None,
+        "state": "running",
+        "estimate": {
+            "elapsed_seconds": 6.6,
+            "expected_seconds": 480,
+            "wait_seconds": 0,
+            "finish_at": "2026-09-05T07:26:31Z",
+            "confidence": "low",
+            "source": "preset",
+            "sample_count": 0,
+        },
+    }
+    line = _fmt_eta_row(row, 0)
+    assert line.startswith("#2 · running · elapsed 7s · expected 8m 00s · eta "), line
+    assert "wait 0s" not in line and "ahead" not in line
+    assert line.endswith("· low · preset")
+    queued = {**row, "position": 1, "state": "queued"}
+    assert "1st in line · 0 ahead · wait 0s" in _fmt_eta_row(queued, 0)
+
+
+def test_check_names_the_configured_token_env(srv, env, capsys, tmp_path):
+    """client.toml 이 token_env 를 바꿨는데 안내가 RCM_TOKEN 만 말하면 헤맨다."""
+    env(srv, token=None)
+    p = tmp_path / "client.toml"
+    p.write_text(f'server = "http://127.0.0.1:{srv.port}"\ntoken_env = "MY_TOK"\n')
+    code, out, err = run(capsys, ["check", "--client-config", str(p)])
+    assert code == 1 and "ok   server" in out, out + err
+    assert "FAIL  token" in out and "MY_TOK" in out, out
+    assert "no server configured" not in err  # 실패 행으로만 말한다(같은 말을 두 번 하지 않는다)

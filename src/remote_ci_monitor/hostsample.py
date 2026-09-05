@@ -78,9 +78,10 @@ def _read_file(path: str) -> str | None:
 
 
 def _safe_loadavg() -> tuple[float, float, float] | None:
+    """`os.getloadavg()` 를 두 자리로 — 이진 소수(6.60693359375)를 JSON 에 그대로 싣지 않는다."""
     try:
         a, b, c = os.getloadavg()
-        return (a, b, c)
+        return (round(a, 2), round(b, 2), round(c, 2))
     except (OSError, AttributeError):
         return None
 

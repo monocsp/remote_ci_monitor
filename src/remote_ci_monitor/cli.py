@@ -109,19 +109,31 @@ def describe(job: dict[str, Any]) -> str:
     return " · ".join(parts)
 
 
+NO_SERVER_HINT = "no server configured (use --server, RCM_SERVER or client.toml)"
+
+
+def _no_token_hint(cfg) -> str:
+    # client.toml 이 token_env 를 바꿨으면 그 이름을 말해 준다(RCM_TOKEN 만 말하면 헤맨다)
+    return f"no token (use --token, {cfg.token_env} or client.toml token)"
+
+
+def _client_config(args: argparse.Namespace):
+    return load_client_config(
+        getattr(args, "client_config", None),
+        server=getattr(args, "server", None),
+        token=getattr(args, "token", None),
+    )
+
+
 def _client(args: argparse.Namespace, *, need_token: bool = True) -> Client:
     try:
-        cfg = load_client_config(
-            getattr(args, "client_config", None),
-            server=getattr(args, "server", None),
-            token=getattr(args, "token", None),
-        )
+        cfg = _client_config(args)
     except ConfigError as e:
         raise SystemExit(_usage(str(e))) from e
     if not cfg.server:
-        raise SystemExit(_usage("no server configured (use --server, RCM_SERVER or client.toml)"))
+        raise SystemExit(_usage(NO_SERVER_HINT))
     if need_token and not cfg.token:
-        raise SystemExit(_usage("no token (use --token, RCM_TOKEN or client.toml token_env)"))
+        raise SystemExit(_usage(_no_token_hint(cfg)))
     return Client(cfg.server, cfg.token or None)
 
 
@@ -303,16 +315,23 @@ def _local_tz():
 
 
 def _fmt_eta_row(row: dict[str, Any], ahead: int | None) -> str:
-    """`rcm eta` 한 줄. 모르는 값은 —, 시작할 수 없으면 이유를 붙인다."""
+    """`rcm eta` 한 줄. 모르는 값은 —, 시작할 수 없으면 이유를 붙인다.
+
+    이미 도는 잡은 「0 ahead · wait 0s」(곧 시작할 것처럼 읽힌다) 대신 상태와 경과를 보인다.
+    """
     est = row.get("estimate") or {}
     parts: list[str] = []
     if row.get("id"):
         parts.append(f"#{row['id']}")
-    if row.get("position"):
-        parts.append(f"{_ordinal(row['position'])} in line")
-    if ahead is not None:
-        parts.append(f"{ahead} ahead")
-    parts.append(f"wait {fmt_duration(est.get('wait_seconds'))}")
+    if row.get("position") is None and row.get("state") in ("running", "cancelling"):
+        parts.append(str(row["state"]))
+        parts.append(f"elapsed {fmt_duration(est.get('elapsed_seconds'))}")
+    else:
+        if row.get("position"):
+            parts.append(f"{_ordinal(row['position'])} in line")
+        if ahead is not None:
+            parts.append(f"{ahead} ahead")
+        parts.append(f"wait {fmt_duration(est.get('wait_seconds'))}")
     parts.append(f"expected {fmt_duration(est.get('expected_seconds'))}")
     if est.get("finish_at"):
         parts.append(f"eta {fmt_clock(est['finish_at'], _local_tz())}")
@@ -542,11 +561,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     rows: list[tuple[str, bool, str]] = []
     client = None
+    cfg = None
     try:
-        client = _client(args, need_token=False)
-    except SystemExit:
-        rows.append(("server", False, "no server configured"))
-    if client is not None:
+        cfg = _client_config(args)
+    except ConfigError as e:
+        rows.append(("client config", False, str(e)))
+    if cfg is not None:
+        if cfg.server:
+            client = Client(cfg.server, cfg.token or None)
+        else:
+            rows.append(("server", False, NO_SERVER_HINT))
+    if client is not None and cfg is not None:
         try:
             h = client.health()
             rows.append(("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}"))
@@ -561,7 +586,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             except ClientError as e:
                 rows.append(("token", False, e.message))
         else:
-            rows.append(("token", False, "no token (RCM_TOKEN or client.toml)"))
+            rows.append(("token", False, _no_token_hint(cfg)))
         try:
             doc = client.status()
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"

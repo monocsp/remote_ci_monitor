@@ -349,3 +349,19 @@ def test_linux_smoke_reads_real_proc():
     assert sample.load is not None and len(sample.load) == 3
     assert sample.memory is not None and sample.memory["total_bytes"] > 0
     assert sample.cpu is not None and 0 <= sample.cpu["busy"] <= 100
+
+
+def test_safe_loadavg_rounds_to_two_decimals(monkeypatch):
+    """macOS 의 os.getloadavg() 는 6.60693359375 같은 이진 소수를 준다 — 그대로 싣지 않는다."""
+    import os
+
+    from remote_ci_monitor.hostsample import _safe_loadavg
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (6.60693359375, 5.7744140625, 3.357421875))
+    assert _safe_loadavg() == (6.61, 5.77, 3.36)
+
+    def boom():
+        raise OSError("no loadavg")
+
+    monkeypatch.setattr(os, "getloadavg", boom)
+    assert _safe_loadavg() is None

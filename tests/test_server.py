@@ -368,6 +368,7 @@ def test_pause_resume_admin_only_and_visible_in_status(live):
     assert live.req("POST", "/pause", json_body={})[0] == 401
     status, body = live.req("POST", "/pause", token="admin", json_body={})
     assert status == 200 and body["paused"]["by"] == "macmini-admin"
+    assert body["paused"]["at"].endswith("Z")  # 다른 시각과 같은 UTC·초 단위 표기
     jid = live.submit()[1]["job_id"]
     live.upload(jid)
     time.sleep(1.0)
