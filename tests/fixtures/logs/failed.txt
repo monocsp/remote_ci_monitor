@@ -1,0 +1,9 @@
+::rcm::steps::3
+::rcm::step::analyze
+No issues found!
+::rcm::step::test
+00:00 +0: loading test/widget_test.dart
+00:04 +10 -2: Some tests failed.
+::rcm::step-end::fail
+::rcm::summary::2 tests failed
+this line is not a marker ::rcm::step::nope
