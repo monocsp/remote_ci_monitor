@@ -29,6 +29,33 @@ ENV_PREFIX = "RCM"
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
 SERVER_CONFIG_CANDIDATES = ("./rcm.toml", "~/.config/rcm/server.toml")
 CLIENT_CONFIG_CANDIDATES = ("~/.config/rcm/client.toml",)
+
+
+def user_config_dir() -> Path:
+    """`$XDG_CONFIG_HOME/rcm` 또는 `~/.config/rcm` — `rcm init` 이 쓰고 탐색이 먼저 본다."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "rcm"
+
+
+def _candidates(kind: str, static: tuple[str, ...]) -> list[Path]:
+    """고정 후보 순서는 그대로, `~/.config/rcm` 바로 앞에 `$XDG_CONFIG_HOME/rcm` 을 끼운다.
+
+    `./rcm.toml` 이 사용자 설정보다 앞서는 기존 순서(PLAN 「설정」)는 바뀌지 않는다. XDG 가 없거나
+    `~/.config` 이면 두 경로가 같아 한 번만 본다.
+    """
+    legacy = Path("~/.config/rcm").expanduser() / f"{kind}.toml"
+    xdg = user_config_dir() / f"{kind}.toml"
+    out: list[Path] = []
+    for cand in static:
+        p = Path(cand).expanduser()
+        if p == legacy and xdg not in out:
+            out.append(xdg)
+        if p not in out:
+            out.append(p)
+    return out
+
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -205,7 +232,8 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def find_server_config(explicit: str | os.PathLike[str] | None) -> Path | None:
-    """탐색 순서: `--config` → `$RCM_CONFIG` → `./rcm.toml` → `~/.config/rcm/server.toml`."""
+    """탐색 순서: `--config` → `$RCM_CONFIG` → `./rcm.toml` → `$XDG_CONFIG_HOME/rcm/server.toml`
+    → `~/.config/rcm/server.toml`."""
     if explicit:
         p = Path(explicit).expanduser()
         if not p.is_file():
@@ -217,8 +245,7 @@ def find_server_config(explicit: str | os.PathLike[str] | None) -> Path | None:
         if not p.is_file():
             raise ConfigError(f"$RCM_CONFIG points to a missing file: {p}")
         return p
-    for cand in SERVER_CONFIG_CANDIDATES:
-        p = Path(cand).expanduser()
+    for p in _candidates("server", SERVER_CONFIG_CANDIDATES):
         if p.is_file():
             return p
     return None
@@ -385,7 +412,7 @@ _SECTIONS = ("server", "estimate", "host", "display")
 _TOP_KEYS = set(_SECTIONS) | {"repos", "presets"}
 
 
-def _validate_server(cfg: ServerConfig) -> None:
+def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
     if s.lanes < 1:
         raise ConfigError("[server] lanes must be >= 1")
@@ -461,7 +488,7 @@ def _validate_server(cfg: ServerConfig) -> None:
         problem = validate_repo_url(r.url)
         if problem is not None:
             raise ConfigError(f"[[repos]] '{r.name}': {problem}")
-    if cfg.repos and shutil.which("git") is None:
+    if check_tools and cfg.repos and shutil.which("git") is None:
         raise ConfigError("[[repos]] configured but git is not on PATH")
     resolved: list[Preset] = []
     for p in cfg.presets:
@@ -488,8 +515,12 @@ def load_server_config(
     *,
     overrides: dict[str, dict[str, Any]] | None = None,
     environ: dict[str, str] | None = None,
+    check_tools: bool = True,
 ) -> ServerConfig:
-    """서버 설정을 만든다. `overrides` 는 플래그({"server": {"port": 1}}), 최우선."""
+    """서버 설정을 만든다. `overrides` 는 플래그({"server": {"port": 1}}), 최우선.
+
+    `check_tools=False` 면 외부 도구(git) 유무는 검사하지 않는다 — `rcm check` 가 행으로 보여준다.
+    """
     cfg = ServerConfig()
     found = find_server_config(path)
     if found is not None:
@@ -537,7 +568,7 @@ def load_server_config(
             raise ConfigError(f"unknown section '{name}' in overrides")
         clean = {k: v for k, v in values.items() if v is not None}
         _apply_section(getattr(cfg, name), name, clean, "flag")
-    _validate_server(cfg)
+    _validate_server(cfg, check_tools=check_tools)
     return cfg
 
 
@@ -552,8 +583,7 @@ def find_client_config(explicit: str | os.PathLike[str] | None) -> Path | None:
         if not p.is_file():
             raise ConfigError(f"client config not found: {p}")
         return p
-    for cand in CLIENT_CONFIG_CANDIDATES:
-        p = Path(cand).expanduser()
+    for p in _candidates("client", CLIENT_CONFIG_CANDIDATES):
         if p.is_file():
             return p
     return None

@@ -1,0 +1,5 @@
+# remote_ci_monitor — example client config. Copy to ~/.config/rcm/client.toml on each session machine.
+server = "http://macmini:8787"      # Tailscale / LAN address of the build machine
+token_env = "RCM_TOKEN"             # name of the environment variable holding the bearer token
+# token = "..."                     # or put the token here and chmod 600 this file
+label = ""                          # empty = "<user>@<host>"; shown as the requester in the queue

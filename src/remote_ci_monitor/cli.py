@@ -10,15 +10,20 @@ Ctrl-C 는 detach — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID`
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import os
+import platform
+import re
+import shutil
 import sys
+import tarfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor import __version__
+from remote_ci_monitor import SCHEMA_VERSION, __version__
 from remote_ci_monitor.client import (
     Client,
     ClientError,
@@ -30,6 +35,7 @@ from remote_ci_monitor.config import (
     ConfigError,
     load_client_config,
     load_server_config,
+    user_config_dir,
 )
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
@@ -625,8 +631,107 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return _usage(f"cannot start server: {e.strerror or e}")
 
 
+# ── init · version ───────────────────────────────────────────────────────────
+
+MIN_PYTHON = (3, 11, 4)  # tarfile data 필터
+
+
+def read_template(name: str) -> bytes:
+    """패키지 안 `templates/<name>` — `examples/` 와 바이트 단위로 같다(테스트가 잠근다)."""
+    return (importlib.resources.files("remote_ci_monitor") / "templates" / name).read_bytes()
+
+
+_SERVER_LINE_RE = re.compile(r'^server\s*=\s*"[^"]*"', re.M)
+
+
+def client_template(server: str) -> bytes:
+    """클라이언트 템플릿의 `server = "…"` 를 주어진 URL 로 바꾼다.
+
+    정확히 한 줄이어야 한다 — 0개나 2개면 템플릿이 바뀐 것이니 조용히 기본 URL 을 남기지 않고 실패.
+    """
+    text = read_template("client.toml").decode("utf-8")
+    if len(_SERVER_LINE_RE.findall(text)) != 1:
+        raise RuntimeError("client template must have exactly one 'server = \"…\"' line")
+    return _SERVER_LINE_RE.sub(f'server = "{server}"', text, count=1).encode("utf-8")
+
+
+def write_private(path: Path, data: bytes, mode: int) -> None:
+    """임시 파일을 올바른 권한으로 만들고 `os.replace` — 잘못된 권한의 순간이 없다."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)  # umask 가 깎은 비트를 되돌린다
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    kind = args.init_kind
+    server = ""
+    if kind == "client":
+        server = (args.server or "").strip().rstrip("/")
+        if not server.startswith(("http://", "https://")):
+            return _usage("--server must be a URL starting with http:// or https://")
+        # 템플릿의 `server = "…"` 안에 그대로 들어간다 — 따옴표·역슬래시·공백이 있으면 TOML 이
+        # 깨지거나 엉뚱한 주소가 조용히 남으니 여기서 막는다.
+        if any(c in '"\\' or c.isspace() for c in server):
+            return _usage("--server must not contain quotes, backslashes or whitespace")
+    path = Path(args.path).expanduser() if args.path else user_config_dir() / f"{kind}.toml"
+    if path.exists() and not args.force:
+        return _usage(f"refusing to overwrite {path} (use --force)")
+    data = client_template(server) if kind == "client" else read_template("server.toml")
+    mode = 0o600 if kind == "client" else 0o644  # 클라이언트 파일엔 토큰이 들어갈 수 있다
+    try:
+        write_private(path, data, mode)
+    except OSError as e:
+        return _usage(f"cannot write {path}: {e.strerror or e}")
+    print(path, flush=True)
+    if kind == "server":
+        _info(
+            "next: edit the [[presets]] in that file, then `rcm token add <client-name>` "
+            "and `rcm serve`"
+        )
+    else:
+        _info("next: `export RCM_TOKEN=<token from rcm token add>` then `rcm check`")
+    return 0
+
+
+def version_info() -> dict[str, Any]:
+    return {
+        "version": __version__,
+        "python": platform.python_version(),
+        "platform": sys.platform,
+        "machine": platform.machine(),
+        "schema_version": SCHEMA_VERSION,
+    }
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    info = version_info()
+    if getattr(args, "json", False):
+        _print_json(info)
+    else:
+        py, plat, mach = info["python"], info["platform"], info["machine"]
+        print(f"rcm {info['version']} (Python {py}, {plat} {mach})")
+    return 0
+
+
+def python_row() -> tuple[str, bool, str]:
+    """`rcm check` 첫 행 — tar 안전 추출에 필요한 3.11.4+ 인가."""
+    ok = sys.version_info >= MIN_PYTHON and hasattr(tarfile, "data_filter")
+    detail = platform.python_version() + (
+        " · tarfile data filter" if ok else " — tarfile data filter needs Python 3.11.4+"
+    )
+    return ("python", ok, detail)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
-    rows: list[tuple[str, bool, str]] = []
+    rows: list[tuple[str, bool, str]] = [python_row()]
     client = None
     cfg = None
     try:
@@ -662,13 +767,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         except ClientError as e:
             rows.append(("presets", False, e.message))
     try:
-        cfg = load_server_config(getattr(args, "config", None))
+        cfg = load_server_config(getattr(args, "config", None), check_tools=False)
         if cfg.path is not None:
             d = cfg.data_dir
             writable = os.access(d, os.W_OK) if d.exists() else os.access(d.parent, os.W_OK)
             rows.append(
                 ("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})")
             )
+            if cfg.repos:
+                git = shutil.which("git")
+                rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
     except ConfigError as e:
         rows.append(("server config", False, str(e)))
     ok_all = all(ok for _, ok, _ in rows)
@@ -842,8 +950,19 @@ def build_parser() -> argparse.ArgumentParser:
     revoke.add_argument("name")
     token.set_defaults(func=cmd_token)
 
-    version = sub.add_parser("version", help="print the version")
-    version.set_defaults(func=lambda a: print(f"rcm {__version__}") or 0)
+    init = sub.add_parser("init", help="write a starter config file (server or client)")
+    isub = init.add_subparsers(dest="init_kind", required=True)
+    iserver = isub.add_parser("server", help="~/.config/rcm/server.toml from the packaged example")
+    iclient = isub.add_parser("client", help="~/.config/rcm/client.toml pointing at your server")
+    iclient.add_argument("--server", required=True, metavar="URL", help="http://build-machine:8787")
+    for sp in (iserver, iclient):
+        sp.add_argument("--path", help="write here instead of the default location")
+        sp.add_argument("--force", action="store_true", help="overwrite an existing file")
+        sp.set_defaults(func=cmd_init)
+
+    version = sub.add_parser("version", help="print the version (and Python/OS with --json)")
+    version.add_argument("--json", action="store_true")
+    version.set_defaults(func=cmd_version)
     return p
 
 

@@ -379,3 +379,82 @@ def test_preset_json_carries_repo(tmp_path):
     cfg = load(tmp_path, REPO_APP + DEPLOY + GATE_TREE)
     assert preset_json(cfg.preset("deploy"))["repo"] == "app"
     assert preset_json(cfg.preset("gate"))["repo"] is None
+
+
+# ── 탐색 순서: ./rcm.toml → $XDG_CONFIG_HOME/rcm → ~/.config/rcm (M4 XDG 도입의 회귀 방지) ──
+
+
+@pytest.fixture
+def search_home(tmp_path, monkeypatch):
+    """HOME 을 tmp 로, cwd 는 빈 tmp/cwd 로, XDG_CONFIG_HOME · RCM_CONFIG 는 없이."""
+    home = tmp_path / "home"
+    cwd = tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("RCM_CONFIG", raising=False)
+    monkeypatch.chdir(cwd)
+    return home, cwd
+
+
+def _put(path: Path, port: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"[server]\nport = {port}\n")
+    return path
+
+
+def test_legacy_user_config_is_found_without_xdg(search_home):
+    home, _ = search_home
+    p = _put(home / ".config" / "rcm" / "server.toml", 9001)
+    cfg = load_server_config(None, environ={})
+    assert cfg.path is not None and cfg.path.resolve() == p.resolve()
+    assert cfg.server.port == 9001
+
+
+def test_legacy_user_config_is_found_when_xdg_dir_has_no_rcm(search_home, tmp_path, monkeypatch):
+    home, _ = search_home
+    xdg = tmp_path / "xdg"
+    xdg.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    p = _put(home / ".config" / "rcm" / "server.toml", 9002)
+    cfg = load_server_config(None, environ={})
+    assert cfg.path is not None and cfg.path.resolve() == p.resolve()
+    assert cfg.server.port == 9002
+
+
+def test_xdg_config_wins_over_legacy_user_config(search_home, tmp_path, monkeypatch):
+    home, _ = search_home
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _put(home / ".config" / "rcm" / "server.toml", 9003)
+    p = _put(xdg / "rcm" / "server.toml", 9004)
+    cfg = load_server_config(None, environ={})
+    assert cfg.path is not None and cfg.path.resolve() == p.resolve()
+    assert cfg.server.port == 9004
+
+
+def test_local_rcm_toml_wins_over_user_configs(search_home, tmp_path, monkeypatch):
+    """`./rcm.toml` 이 사용자 설정(XDG · ~/.config)보다 앞선다 — PLAN 「설정」의 탐색 순서."""
+    home, cwd = search_home
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _put(home / ".config" / "rcm" / "server.toml", 9005)
+    _put(xdg / "rcm" / "server.toml", 9006)
+    p = _put(cwd / "rcm.toml", 9007)
+    cfg = load_server_config(None, environ={})
+    assert cfg.path is not None and cfg.path.resolve() == p.resolve()
+    assert cfg.server.port == 9007
+
+
+def test_legacy_client_config_is_found_when_xdg_dir_has_no_rcm(search_home, tmp_path, monkeypatch):
+    home, _ = search_home
+    xdg = tmp_path / "xdg"
+    xdg.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    p = home / ".config" / "rcm" / "client.toml"
+    p.parent.mkdir(parents=True)
+    p.write_text('server = "http://legacy:8787"\n')
+    cfg = load_client_config(None, environ={})
+    assert cfg.path is not None and cfg.path.resolve() == p.resolve()
+    assert cfg.server == "http://legacy:8787"
