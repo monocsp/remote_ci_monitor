@@ -83,7 +83,7 @@ MUTANTS = (
         path="src/remote_ci_monitor/web/app.js",
         old='if (!Array.isArray(q)) return { kind: "unknown", lines: [] };\n    var lines = [];',
         new='if (!Array.isArray(q)) return { kind: "ok", lines: [] };\n    var lines = [];',
-        tests=("tests/web/",),
+        tests=("tests/web/summary.test.js",),
         runner="node",
     ),
 )

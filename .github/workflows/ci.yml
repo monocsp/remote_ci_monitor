@@ -40,7 +40,7 @@ jobs:
         run: pytest
       - name: 웹 UI 순수 함수 (node --test)
         if: hashFiles('tests/web/*.test.js') != ''
-        run: node --test tests/web/
+        run: node --test tests/web/*.test.js
       - name: 뮤테이션 확인 (테스트가 실제로 빨개지는지)
         if: hashFiles('scripts/mutcheck.py') != ''
         run: python scripts/mutcheck.py
