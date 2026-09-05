@@ -254,7 +254,9 @@ def test_parse_ioreg_gpu_partial_keys_leave_missing_none():
     )
 
 
-def test_parse_ioreg_gpu_multiple_accelerators_first_wins():
+def test_parse_ioreg_gpu_multiple_accelerators_max_util_and_summed_memory():
+    # workplan §1 · Codex M1 리뷰 8: PerformanceStatistics 가 있는 가속기만 모아 util 은 max,
+    # 메모리는 합. 첫 가속기 고정이 아니다 — 「주」GPU 가 무엇인지 ioreg 순서는 보장하지 않는다.
     text = (
         "+-o AGXAcceleratorA  <class AGXAcceleratorA, id 0x1>\n    {\n"
         '      "PerformanceStatistics" = {"Device Utilization %"=5,"In use system memory"=100}\n'
@@ -262,10 +264,27 @@ def test_parse_ioreg_gpu_multiple_accelerators_first_wins():
         "+-o AGXAcceleratorB  <class AGXAcceleratorB, id 0x2>\n    {\n"
         '      "PerformanceStatistics" = {"Device Utilization %"=90,"In use system memory"=900}\n'
         "    }\n"
+        "+-o AGXAcceleratorC  <class AGXAcceleratorC, id 0x3>\n    {\n"
+        '      "IOClass" = "AGXAcceleratorC"\n'  # PerformanceStatistics 없음 → 집계에서 빠진다
+        "    }\n"
     )
     gpu, note = parse_ioreg_gpu(text)
     assert note is None
-    assert gpu["util_pct"] == 5 and gpu["mem_used_bytes"] == 100
+    assert gpu == {
+        "util_pct": 90,
+        "mem_used_bytes": 1000,
+        "mem_total_bytes": None,
+        "source": "ioreg",
+    }
+    # 한쪽에만 있는 키는 있는 쪽 값으로(없는 쪽을 0 으로 치지 않는다)
+    partial = (
+        '      "PerformanceStatistics" = {"Device Utilization %"=7}\n'
+        '      "PerformanceStatistics" = {"In use system memory"=4096}\n'
+    )
+    assert parse_ioreg_gpu(partial) == (
+        {"util_pct": 7, "mem_used_bytes": 4096, "mem_total_bytes": None, "source": "ioreg"},
+        None,
+    )
 
 
 # ── /proc (Linux) ────────────────────────────────────────────────────────────

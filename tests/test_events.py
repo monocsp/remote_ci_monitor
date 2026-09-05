@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from remote_ci_monitor.events import Event, EventBus
+from remote_ci_monitor.events import DEFAULT_HISTORY, Event, EventBus
 
 T0 = datetime(2026, 9, 5, 0, 0, 0, tzinfo=UTC)
 
@@ -148,12 +148,14 @@ def test_reset_when_last_id_is_older_than_ring_buffer():
     bus.unsubscribe(inside)
 
 
-def test_default_history_is_500():
+def test_default_history_is_2048():
+    # 명세 3절(Codex M1 리뷰 좋음 1): marker burst 에 대비해 링 버퍼 기본은 2048
+    assert DEFAULT_HISTORY == 2048
     bus = EventBus()
-    publish_n(bus, 502)  # 버퍼에는 3..502
-    sub = bus.subscribe(last_id=3, maxsize=1000)  # 재생 499개가 큐에 다 들어가야 한다
-    replayed = drain(sub, limit=1000)
-    assert len(replayed) == 499 and replayed[0].id == 4 and replayed[-1].id == 502
+    publish_n(bus, 2050)  # 버퍼에는 3..2050
+    sub = bus.subscribe(last_id=3, maxsize=5000)  # 재생 2047개가 큐에 다 들어가야 한다
+    replayed = drain(sub, limit=5000)
+    assert len(replayed) == 2047 and replayed[0].id == 4 and replayed[-1].id == 2050
     bus.unsubscribe(sub)
     old = bus.subscribe(last_id=1)  # 2 는 밀려났다 → reset
     first = old.get(1.0)
@@ -188,16 +190,28 @@ def test_lag_on_overflow_keeps_newest_events():
     bus.unsubscribe(sub)
 
 
-def test_default_subscription_queue_is_256():
+def test_default_subscription_queue_matches_ring_size():
+    # 명세 3절(Codex M1 리뷰 좋음 2): subscribe(maxsize=None) 의 기본은 링 버퍼 크기(2048)
     bus = EventBus()
-    sub = bus.subscribe()  # maxsize 기본값 256 (명세 3절 시그니처)
-    publish_n(bus, 300)
-    drained = drain(sub, limit=1000)
+    full = bus.subscribe()
+    publish_n(bus, DEFAULT_HISTORY)  # 정확히 링 크기만큼은 넘치지 않는다
+    kept = drain(full, limit=5000)
+    assert [e.kind for e in kept].count("lag") == 0 and len(kept) == DEFAULT_HISTORY
+    bus.unsubscribe(full)
+    sub = bus.subscribe()
+    publish_n(bus, DEFAULT_HISTORY + 52, start=DEFAULT_HISTORY)
+    drained = drain(sub, limit=5000)
     kinds = [e.kind for e in drained]
-    assert "lag" in kinds, "300 events must overflow the default 256-slot queue"
-    assert len(drained) <= 257
-    assert drained[-1].id == 300
+    assert "lag" in kinds, "ring size + 52 events must overflow the default queue"
+    assert len(drained) <= DEFAULT_HISTORY + 1
+    assert drained[-1].id == 2 * DEFAULT_HISTORY + 52
     bus.unsubscribe(sub)
+    # 링이 작으면 구독 큐 기본도 같이 작다
+    small = EventBus(history=4)
+    tiny = small.subscribe()
+    publish_n(small, 6)
+    assert "lag" in [e.kind for e in drain(tiny)]
+    small.unsubscribe(tiny)
 
 
 def test_lag_does_not_affect_other_subscribers():
