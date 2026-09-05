@@ -1,39 +1,63 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "remote-ci-monitor"
-version = "0.1.0"
+# 버전의 단일 출처는 src/remote_ci_monitor/__init__.py 의 __version__ (rcm version · /api/status 와 같다)
+dynamic = ["version"]
 description = "Local job server for a single build machine: queue, run presets, show ETA/steps/host load, return exit codes."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["ci", "build-server", "job-queue", "build-machine", "monitoring"]
 # 런타임 의존성 0 — 표준 라이브러리만 쓴다(PLAN.md 「의존성 원칙」).
 dependencies = []
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Environment :: Console",
+  "Environment :: Web Environment",
   "Topic :: Software Development :: Build Tools",
+  "Topic :: System :: Monitoring",
 ]
 
 [project.urls]
+Homepage = "https://github.com/monocsp/remote_ci_monitor"
 Repository = "https://github.com/monocsp/remote_ci_monitor"
+Issues = "https://github.com/monocsp/remote_ci_monitor/issues"
+Changelog = "https://github.com/monocsp/remote_ci_monitor/blob/main/CHANGELOG.md"
 
 [project.scripts]
 rcm = "remote_ci_monitor.cli:main"
 remote-ci-monitor = "remote_ci_monitor.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
+
+[tool.hatch.version]
+path = "src/remote_ci_monitor/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/remote_ci_monitor"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/remote_ci_monitor", "README.md", "pyproject.toml"]
+include = [
+  "src/remote_ci_monitor",
+  "examples",
+  "README.md",
+  "CHANGELOG.md",
+  "LICENSE",
+  "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100
