@@ -1,10 +1,11 @@
-# remote_ci_monitor — 계획서 (v2.2, 2026-09-05)
+# remote_ci_monitor — 계획서 (v2.3, 2026-09-06)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
 > **v2.1 은 웹 큐 화면 기획(v1.3)의 「5. PLAN 반영 제안」을 데이터 모델·큐 규칙·스키마·API·설정에 반영한 것**이다. 바뀐 곳: 잡 상태 `cancelling` · 합류자 `joiners[]` · `position`/`reason` 규칙 · 살아 있는 레인 수로 대기 계산 · 그룹 대기 하한 · 신뢰도 규칙 · `stuck` 판정 · 스키마 v1 필드 추가 · `GET /api/whoami`·`POST /pause`·`/resume` · 설정 키 6개 · 「웹 UI (M2)」 절 교체 · 오너 결정 5개(12~16).
 > **v2.2** 는 M3(운영) 반영: `git_ref` 소스 모드의 실제 동작(제출 시 sha 확정 · 미러 · 로컬 clone) · 프리셋 `repo` · 보존 정리(janitor · `metadata_retention_days`) · `read_auth = basic` 의 확정(결정 23) · 서비스 파일. 명세 `docs/m3-workplan.md`, 리뷰 `docs/reviews/2026-09-05-codex-m3-design.md`.
-> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~25 는 추천값으로 구현, 오너 확인 대기).
+> **v2.3** 은 M4(배포·문서) 반영: 동적 버전 · MIT · `rcm init` · 설치 스모크 · 릴리스 워크플로 · Docker · README 재구성. 명세 `docs/m4-workplan.md`, 리뷰 `docs/reviews/2026-09-06-codex-m4-design.md`.
+> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 는 추천값으로 구현, 오너 확인 대기).
 
 ## 한 줄
 
@@ -508,14 +509,16 @@ docs/reviews/
 - **CI**(`ci.yml`): `unit`(matrix: py 3.11·3.13 × ubuntu, macos-latest 는 3.13 만 — `hostparse`·`snapshot`·`worker` 가 실제 OS 에서 돈다) → `ruff check` · `ruff format --check` · `pytest` · `mutcheck.py`. `secrets` → `gitleaks/gitleaks-action@v3`(개인 계정은 라이선스 불필요, 2026-09-04 확인). 집계 잡 **`test`**: `needs: [unit, secrets]` + `if: always()`, 두 `needs.*.result` 가 모두 `success` 가 아니면 `exit 1`.
 - 스타일: ruff(기본 + `I`), 줄 100자, 타입 힌트 필수.
 
-## 패키징·배포 (M4)
+## 패키징·배포 (M4 — 구현됨, 명세 `docs/m4-workplan.md`)
 
-- `pyproject.toml`: hatchling · `dependencies = []` · dev `pytest`·`ruff` · scripts `rcm`·`remote-ci-monitor` · `web/` 패키지 데이터.
-- 설치: 빌드 머신 `pipx install remote-ci-monitor && rcm serve` · 세션 `uvx --from remote-ci-monitor rcm run gate`.
-- 서비스: `examples/launchd/com.remote-ci-monitor.server.plist` · `examples/systemd/rcm-server.service`. 빌드 머신 잠자기 금지 안내.
-- Docker: Linux 빌드 머신용 서버 이미지만(macOS 툴체인은 Docker 밖). M4 에서 필요하면.
-- 릴리스: 태그 `vX.Y.Z` → PyPI trusted publishing(OIDC). `main` 에서만.
-- README(영어): 5분 셋업(서버 → 토큰 → 클라이언트 설정 → `rcm check` → `rcm run`) · 프리셋 쓰는 법과 마커 · 보안 런북(전용 사용자·Tailscale·시크릿 위치) · 「why the numbers can be wrong」(default 추정 · so-far 스텝 · 마커 지연 · stale · lost).
+- `pyproject.toml`: hatchling ≥ 1.27 · `dynamic = ["version"]`(단일 출처 `__init__.__version__`) · `license = "MIT"` + `LICENSE`(결정 26) · `dependencies = []` · dev `pytest`·`ruff`·`build` · scripts `rcm`·`remote-ci-monitor` · 패키지 데이터 `web/`·`templates/`(`examples/*.toml` 과 바이트 동일 — 테스트가 잠근다) · sdist 에 `examples/`·`LICENSE`·`CHANGELOG.md`.
+- 설정 만들기: `rcm init server`(`$XDG_CONFIG_HOME/rcm` 또는 `~/.config/rcm/server.toml`, 덮어쓰기는 `--force`) · `rcm init client --server URL`(0600, `server = "…"` 정규식 치환). 탐색도 XDG 를 먼저 본다. 템플릿에 `ok` 프리셋(`sh -c "echo ::rcm::step::hello; echo ok"`)이 있어 새 설치가 `rcm run ok` 로 전체 경로를 증명한다.
+- `rcm version [--json]`(python · OS · schema_version) · `rcm check` 첫 행 `python`(3.11.4+ tar 필터) · `[[repos]]` 가 있으면 `git` 행(`load_server_config(check_tools=False)`).
+- 설치 스모크 `scripts/smoke_install.sh [WHEEL]`: 새 venv 에 wheel 설치 → README `<!-- smoke:begin/end -->` 블록의 `rcm …` 명령이 스크립트 본문에 전부 있는지 대조 → 빌드 머신 절차(init server · token add · serve, 빈 포트) → 세션 절차(init client · check · run ok · top · jobs --json) → 웹 `/` → SIGTERM. CI `smoke` 잡(ubuntu · macos)이 PR 마다 돌리고 집계 `test` 가 `needs` 에 포함(결정 29).
+- 릴리스 `.github/workflows/release.yml`: 태그 `v*` → main 위 확인(`fetch` 뒤 `merge-base --is-ancestor`) · 태그 == `__version__` → `python -m build` + `twine check` + METADATA 재검사 → 두 OS 스모크 → GitHub Release(CHANGELOG 절, 있으면 파일만 갱신) → PyPI trusted publishing 은 저장소 변수 `PYPI_PUBLISH = true` 일 때만(environment `pypi`, 결정 27). 절차는 README 「Releasing」.
+- Docker: `Dockerfile`(python:3.12-slim · git·openssh·procps·bash · 비루트 `rcm` · `/config`·`/data` · 8787) + `.dockerignore`. Linux 서버 이미지만, 이미지 빌드는 CI 밖. 컨테이너 안 `ps` 의 한계를 README 에 명시.
+- 서비스: `examples/launchd/com.remote-ci-monitor.server.plist` · `examples/systemd/rcm-server.service`(M3). 빌드 머신 잠자기 금지 안내.
+- README(영어): Install(pipx · uvx · git) → Build machine 3 명령 → Session machine 3 명령 → 프리셋·마커 · 세션 명령 · 웹 UI · 종료 코드 · 보안 · 보존 · 서비스 · Docker · 「why the numbers can be wrong」 · 실기 검증 10단계 · Releasing · Development. `CHANGELOG.md`(Keep a Changelog).
 
 ## 마일스톤과 완료 기준
 
@@ -523,7 +526,7 @@ docs/reviews/
 - **M1 — 보이는 것** (**완료 2026-09-05**, PR #12 · #13, 테스트 258 · mutcheck 5/5 · 실기 검증 12단계 PASS — Tailscale 원격 실기는 오너): 호스트 자원(CPU·RAM·**GPU**) · 중앙값/ETA/합류 · 스텝 마커 진행 · SSE · `rcm eta`/`top`/`jobs`/`logs`/`cancel`/`presets` · `/api/status` 완성. 완료 기준: 다른 컴퓨터에서 Tailscale 로 `rcm run` 을 넣고 `rcm top` 에 위치·ETA·스텝·GPU 가 보인다 · 같은 트리를 두 세션이 넣으면 두 번째는 합류한다.
 - **M2 — 웹 UI** (**완료 2026-09-05**, PR #14, 명세 `docs/m2-workplan.md` · 테스트 pytest 270 + node 194 · mutcheck 6/6 · headless Chrome DOM/스크린샷 — 폰·Lost connection·stale 실기는 오너, README 9단계): `docs/wireframes/web-queue.html` 대로 — 요약 세 칸 · 큐 표(Reason·신뢰도) · 호스트 카드(sparkline) · 최근 완료 · Estimates · 변형 19개 · SSE 갱신 · 토큰 입력 · 로그 뷰어·취소(토큰) · 모바일 · 다크/라이트. 완료 기준: 폰에서 큐·스텝·자원이 읽히고, **서버를 끊으면 `Lost connection` 띠가, 샘플러만 멈추면 `stale` 배지가** 뜬다.
 - **M3 — 운영** (**완료 2026-09-05**, 명세 `docs/m3-workplan.md` · 리뷰 `docs/reviews/2026-09-05-codex-m3-design.md`): `git_ref` 소스(제출 시 sha 확정 · 미러 · 로컬 clone) · 프리셋 `repo` · concurrency 그룹 e2e(레인 2 에서 실제 프로세스 두 개가 직렬화, 그룹 없는 잡은 병행) · 보존 정리(janitor · DB v2 · `metadata_retention_days`) · 신호 e2e(손자 프로세스 · TERM 무시 → KILL · 타임아웃) · `examples/launchd/` · `examples/systemd/` · `read_auth = basic` 확정 · mutcheck 8종. macOS CI 잡은 M0 부터 있다. 완료 기준: 배포 프리셋이 원격 ref 로 돌고(로컬 bare 레포로 e2e — 실제 원격·자격은 오너 실기), QA 두 개가 그룹으로 직렬화된다.
-- **M4 — 배포·문서**: pipx/uvx · PyPI 릴리스 · `examples/` · README. 완료 기준: 새 머신에서 README 만 보고 5분 안에 `rcm run` 이 된다.
+- **M4 — 배포·문서** (**완료 2026-09-06**, 명세 `docs/m4-workplan.md` · 리뷰 `docs/reviews/2026-09-06-codex-m4-design.md`): 동적 버전 · MIT · `rcm init` · `rcm version/check` · 설치 스모크(CI 잡) · 릴리스 워크플로 · Dockerfile · README 재구성 · CHANGELOG. 완료 기준: 새 머신에서 README 만 보고 5분 안에 `rcm run` 이 된다 — `scripts/smoke_install.sh` 가 새 venv 에서 README 명령을 그대로 돌려 매 PR 마다 증명한다(ubuntu · macOS). PyPI 실제 게시는 오너가 publisher 를 등록하고 변수를 켠 뒤.
 - **M5 — 확장**: GitHub 백엔드(Actions run 관찰·dispatch — v1.1 설계 참조) · 원격 워커(빌드 머신 여러 대, 수집기 push) · 우선순위 · 내용 주소 스냅샷 캐시 · 알림.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
@@ -556,6 +559,10 @@ docs/reviews/
 | 23 | `read_auth = basic` 과 웹 | **M3 확정**: 진짜 HTTP Basic. 사용자명 = 토큰 이름, 비밀번호 = 토큰(별도 자격 저장소 없음). 읽기 라우트만 Basic 을 받고 쓰기는 Bearer 만(CSRF). TLS 프록시 뒤 전용. 브라우저 로그아웃은 불가하므로 README 에 안내. (Codex M3 리뷰, **오너 확인 대기**) |
 | 24 | git_ref 워크스페이스 모양 | 로컬 clone(`.git` 유지, detached) — `git describe` 가 되고 submodule 은 스크립트가 `git submodule update --init`. `git archive`(더 단순·`.git` 없음)는 배포 스크립트가 `.git` 을 안 쓸 때만 나은 선택. (Codex M3 리뷰, **오너 확인 대기**) |
 | 25 | 잡 메타데이터 보존 | `metadata_retention_days = 180` 뒤 잡 행·이벤트·합류자 삭제(산출물이 먼저 지워진 잡만). 감사 요구가 있으면 늘린다. `sample_days`·`retention_days_*` 보다 짧으면 설정 오류. (Codex M3 리뷰, **오너 확인 대기**) |
+| 26 | 라이선스 | **MIT**(`LICENSE` · `license = "MIT"`). 공개 PyPI 패키지엔 라이선스가 필요하다. (**오너 확인 대기**) |
+| 27 | PyPI 게시 | trusted publishing(OIDC, 토큰 없음). 오너가 PyPI 에 pending publisher(owner `monocsp` · repo `remote_ci_monitor` · workflow `release.yml` · environment `pypi`)를 만들고 저장소 environment `pypi` 와 변수 `PYPI_PUBLISH=true` 를 켜기 전까지 워크플로는 PyPI 잡을 건너뛴다(GitHub Release 는 항상). (**오너 확인 대기**) |
+| 28 | 태그 룰셋 | `v*` 태그 생성·삭제를 제한하는 룰셋은 없다. 관리자만 만들게 하려면 태그 룰셋을 추가한다. (**오너 확인 대기**) |
+| 29 | 스모크 필수 체크 | PR 집계 `test` 에 ubuntu·macOS 스모크를 모두 포함한다(macOS unit 잡이 이미 필수라 러너 리스크가 새로 늘지 않는다). 릴리스 워크플로도 둘 다 필수. (Codex M4 리뷰는 macOS 를 비필수로 제안 — **오너 확인 대기**) |
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
@@ -563,6 +570,7 @@ docs/reviews/
 
 - `fmmc-tech/dolomood-app-renew`(로컬에선 `dolomood-ci-monitor` 워크트리)의 `scripts/remote_ci.sh`(dispatch·가드·합류·대기) · `ci_queue.py`(큐·중앙값·잔여 21 자기검증) · `ci_top.py`(진행률·파서·렌더 18 자기검증) · `docs/renew-guide/ci-cd/30-remote-dispatch.md`. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
 - v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220`. jobs API 함정 6개·rate limit 예산·큐 판정 규칙은 M5 GitHub 백엔드 때 그대로 쓴다.
+- Codex 크로스리뷰 기록(M4): `docs/reviews/2026-09-06-codex-m4-design.md`(배포 명세 `docs/m4-workplan.md` — PEP 639 · XDG 탐색 · 원자적 쓰기 · README↔스모크 대조 · 릴리스 태그 검증 · Docker 패키지).
 - Codex 크로스리뷰 기록(M3): `docs/reviews/2026-09-05-codex-m3-design.md`(운영 명세 `docs/m3-workplan.md` — 제출 시 sha 확정 · `--shared` 폐기 · 부분 fetch · URL 허용 목록 · Basic 은 읽기만 · 메타데이터 보존 · janitor symlink/health).
 - Codex 크로스리뷰 기록(M2): `docs/reviews/2026-09-05-codex-m2-design.md`(웹 UI 명세 `docs/m2-workplan.md` — XSS/CSP · 포커스 보존 · EventSource 503 · fail-open 문구 · Chrome 테스트).
 - Codex 크로스리뷰 기록: `docs/reviews/2026-09-04-codex-plan-v1.md`(v1 설계) · `docs/reviews/2026-09-04-codex-github-dependency.md`(방향 전환) · `docs/reviews/2026-09-04-codex-web-queue.md`(웹 큐 화면 디자인) · `docs/reviews/2026-09-04-codex-m0-design.md`(v2.1 정합성 + M0 구현 결정 — Ctrl-C detach·부분 업로드 재개 제외는 추천값으로 구현, 오너 확인 대기) · `docs/reviews/2026-09-05-codex-m1-design.md`(M1 명세 `docs/m1-workplan.md` — 캐시·SSE 폴백·재조회 합치기·macOS 메모리 정의·GPU 집계). 서브에이전트 리뷰: `docs/reviews/2026-09-04-subagent-spec-gaps.md`(기획 누락 30건 — v2.1 의 데이터 모델 변경 근거) · `docs/reviews/2026-09-04-subagent-reference-comparison.md`(제품 비교 리서치).

@@ -9,28 +9,54 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
-Status: **M1** — server, queue, worker, `rcm run` / `rcm wait`, host sampler (CPU · RAM · GPU), live events (SSE) and the `rcm top` / `eta` / `jobs` / `logs` / `presets` session commands. The web UI is M2. The plan lives in `PLAN.md` (Korean).
+Status: **M0–M4 done (v0.1.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
+retention, service files, packaging and release. M5 (several build machines, GitHub backend) is
+next. The plan lives in `PLAN.md` (Korean); changes in `CHANGELOG.md`.
 
-## 5-minute setup
+## Install
 
-On the build machine:
-
-```sh
-pipx install remote-ci-monitor          # or: pip install -e . in a checkout
-cp examples/server.toml ~/.config/rcm/server.toml   # edit presets, bind address
-rcm token add alice-laptop              # prints the token ONCE; hand it to that client
-rcm serve                               # http://127.0.0.1:8787 by default
-```
-
-On each session machine:
+Needs Python **3.11.4+** (the safe `tarfile` filter) on both machines. One package, no runtime
+dependencies:
 
 ```sh
-pipx install remote-ci-monitor
-export RCM_SERVER=http://macmini:8787 RCM_TOKEN=<token>   # or ~/.config/rcm/client.toml
-rcm check                               # server · token · presets · timezone
-cd ~/src/app && rcm run gate -f scope=full
-echo $?                                 # 0 succeeded · 1 failed · 2 cancelled/timed out · 3 unknown
+pipx install remote-ci-monitor                      # from PyPI
+uvx --from remote-ci-monitor rcm version            # or run it through uv without installing
+pipx install git+https://github.com/monocsp/remote_ci_monitor   # latest dev branch / before the first PyPI release
 ```
+
+No `pipx` yet? `python3 -m pip install --user pipx && python3 -m pipx ensurepath`, then open a new
+shell. A release wheel from the GitHub Releases page also installs with `pipx install <wheel-url>`.
+
+## Build machine (3 commands)
+
+<!-- smoke:begin -->
+```sh
+rcm init server            # writes ~/.config/rcm/server.toml — edit presets and the bind address
+rcm token add laptop       # prints the token ONCE; hand it to that session machine
+rcm serve                  # http://127.0.0.1:8787 · Ctrl-C or SIGTERM stops it cleanly
+```
+<!-- smoke:end -->
+
+The generated config ships a harmless `ok` preset so you can prove the path end to end before
+writing your own presets. To accept sessions from other computers set `bind` to the machine's
+Tailscale/LAN address (or `0.0.0.0`) and, on macOS, allow Python through the firewall prompt.
+Check from another computer with `curl http://<build-machine>:8787/api/health`. For a service that
+survives logins and reboots see [Run as a service](#run-as-a-service).
+
+## Session machine (3 commands)
+
+<!-- smoke:begin -->
+```sh
+rcm init client --server http://<build-machine>:8787   # ~/.config/rcm/client.toml (mode 600)
+export RCM_TOKEN=<token from rcm token add>            # or put it in that file as token = "…"
+rcm check                  # python · server · token · presets · timezone must all say ok
+rcm run ok                 # first job: exit 0 and one JSON line means everything works
+rcm top                    # queue, ETAs, recent results, host load
+```
+<!-- smoke:end -->
+
+Then run real work from a project directory: `cd ~/src/app && rcm run gate -f scope=full`, and
+branch on `$?` — 0 succeeded · 1 failed · 2 cancelled/timed out · 3 unknown.
 
 `rcm run` snapshots the current directory (git-tracked + untracked-but-not-ignored files, minus
 `.rcmignore`), uploads it over the same HTTP connection, waits, and prints one JSON line on stdout.
@@ -203,6 +229,23 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
   toolchains there. Keep the machine awake (`pmset -a sleep 0` on macOS).
 
+## Docker (Linux build machine)
+
+`Dockerfile` builds a server image (`python:3.12-slim` + git for `git_ref` presets, non-root user
+`rcm`, config at `/config/server.toml`, data volume `/data`, port 8787). macOS build machines should
+use launchd instead — the toolchains live outside containers there.
+
+```sh
+docker build -t rcm .
+docker run -d --name rcm -p 127.0.0.1:8787:8787 \
+  -v rcm-data:/data -v "$PWD/server.toml:/config/server.toml:ro" rcm
+docker exec rcm rcm token add laptop --data-dir /data
+```
+
+Publish the port on `127.0.0.1` or a Tailscale IP only. Inside a container `ps` and `/proc` see
+just the container, so **Host pressure** is less accurate than with a native service, and GPU
+numbers need an NVIDIA base image plus `--gpus all`. Your presets' toolchains must be in the image.
+
 ## Why the numbers can be wrong
 
 - ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs.
@@ -226,14 +269,40 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
 8. Kill the server with the job running, restart it: `rcm wait` must exit 3 with `lost`, and a job that was queued must run afterwards.
 9. Web UI: open `http://<tailscale-ip>:8787/` on the phone. The queue, the running job's steps and the host card must be readable in one column; paste the laptop token via 🔑 and confirm **Your jobs** lists the job and **Log** opens. Stop the server: within ~30 s the **Lost connection** banner must appear at the top; start it again and the banner must go away by itself. Then pause only the sampler's view of the world — `kill -STOP <server pid>` for 20 s and `kill -CONT` — and the host card must show a `stale` badge briefly (the queue keeps working). (`kill -9` cannot signal the job's process group, so the script itself keeps running as an orphan until it ends on its own; a normal stop — SIGTERM or Ctrl-C — terminates it.)
 
+10. M3 items: a `git_ref` preset against your real remote — `rcm run deploy --ref <branch>` must
+    print the pinned sha and the job log must show `[rcm] fetching … from <repo>` (ssh keys or a
+    credential helper must be set up for the server's OS user). With `read_auth = "basic"` behind
+    your TLS proxy, the browser must prompt and accept token name + token. With
+    `retention_days_success = 0` a finished job's log must answer `log expired` after the next
+    sweep while the job stays in **Recent**.
+
+## Releasing
+
+Releases come from `main`, and `main` only takes PRs from `dev`:
+
+1. Bump `__version__` in `src/remote_ci_monitor/__init__.py` and add the section to
+   `CHANGELOG.md` (on a feature branch → PR to `dev`).
+2. `gh pr create --base main --head dev`, wait for `test` and `main-from-dev-only`, merge.
+3. `git tag v0.1.0 <main-sha> && git push origin v0.1.0`.
+
+The `Release` workflow then checks the tag is on `main` and equals `__version__`, builds sdist +
+wheel, runs the install smoke on Ubuntu and macOS, and creates the GitHub Release with the files
+and the CHANGELOG section. PyPI publishing (trusted publishing, no API token) runs only when the
+repository variable `PYPI_PUBLISH` is `true`: register the publisher on PyPI first (owner
+`monocsp`, repository `remote_ci_monitor`, workflow `release.yml`, environment `pypi` — the
+environment name must match exactly), create that environment in the repository settings, then
+set the variable.
+
 ## Development
 
 ```sh
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 ruff check . && ruff format --check . && pytest
-python scripts/mutcheck.py      # proves the tests go red for three known mutations
+node --test tests/web/*.test.js  # web UI pure functions
+python scripts/mutcheck.py      # proves the tests go red for 8 known mutations
+scripts/smoke_install.sh        # README setup on a fresh venv (builds the wheel first)
 ```
 
-CI runs the same on Ubuntu (3.11, 3.13) and macOS (3.13), plus gitleaks. Contributions follow
+CI runs the same on Ubuntu (3.11, 3.13) and macOS (3.13), plus the install smoke and gitleaks. Contributions follow
 `PLAN.md`: comments and docstrings in Korean, identifiers, CLI help and UI strings in English.
