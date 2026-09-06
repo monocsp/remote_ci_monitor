@@ -165,7 +165,8 @@ class Janitor:
             try:
                 path.unlink(missing_ok=True)
             except OSError as e:
-                self.on_error(f"retention: blob {b.sha256[:7]}: {_errname(e)}")
+                sha7 = b.sha256.rpartition("/")[2][:7]  # token 범위 키(`<token>/<sha>`)도 sha 만
+                self.on_error(f"retention: blob {sha7}: {_errname(e)}")
                 continue
             gone.append(b.sha256)
         if gone:
