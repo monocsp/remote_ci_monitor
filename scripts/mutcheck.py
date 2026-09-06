@@ -119,7 +119,7 @@ MUTANTS = (
         path="src/remote_ci_monitor/core/manifest.py",
         old=(
             '    if resolved == ".." or resolved.startswith("../") or resolved.startswith("/"):\n'
-            "        raise ManifestError(f\"link {path!r}: target escapes the workspace\")\n"
+            '        raise ManifestError(f"link {path!r}: target escapes the workspace")\n'
         ),
         new="",
         tests=("tests/test_manifest.py",),
