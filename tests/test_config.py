@@ -458,3 +458,271 @@ def test_legacy_client_config_is_found_when_xdg_dir_has_no_rcm(search_home, tmp_
     cfg = load_client_config(None, environ={})
     assert cfg.path is not None and cfg.path.resolve() == p.resolve()
     assert cfg.server == "http://legacy:8787"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── M5a (test-first, 2026-09-06): 프리셋 `priority` · `[server] snapshot_cache*` · `[[notify]]`
+#    명세는 docs/m5-workplan.md M5a-1 · M5a-2 「저장 · 정리」 · M5a-3. 구현 전이라 빨갛다.
+#    `core.notify.NotifyRule` 은 아직 없으므로 모듈 상단이 아니라 테스트 안에서 import 한다 —
+#    수집 단계에서 이 파일 전체(기존 테스트)가 깨지지 않게.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+M5_GATE = """
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+"""
+
+M5_DEPLOY = """
+[[presets]]
+name = "deploy"
+argv = ["bash", "scripts/deploy.sh"]
+"""
+
+# 종료 상태 다섯 — `[[notify]] on` 의 기본값이자 허용 집합
+TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost"}
+
+
+def notify_toml(**fields: object) -> str:
+    """`[[notify]]` 테이블 하나를 TOML 로. 파이썬 리터럴을 TOML 로 맞춘다(문자열·리스트·정수)."""
+    lines = ["[[notify]]"]
+    for k, v in fields.items():
+        if isinstance(v, str):
+            lines.append(f'{k} = "{v}"')
+        elif isinstance(v, list):
+            items = ", ".join(f'"{x}"' if isinstance(x, str) else str(x) for x in v)
+            lines.append(f"{k} = [{items}]")
+        else:
+            lines.append(f"{k} = {v}")
+    return "\n".join(lines) + "\n"
+
+
+def notify_rule(tmp_path: Path, **fields: object):
+    """규칙 하나 + gate 프리셋으로 로드해 `cfg.notify[0]` 을 돌려준다."""
+    cfg = load(tmp_path, M5_GATE + notify_toml(**fields))
+    assert len(cfg.notify) == 1
+    return cfg.notify[0]
+
+
+# ── 프리셋 priority (M5a-1) ───────────────────────────────────────────────────
+
+
+def test_preset_priority_defaults_to_normal():
+    from remote_ci_monitor.core.model import Preset
+
+    assert parse_preset({"name": "gate", "argv": ["x"]}).priority == 0
+    assert Preset(name="gate", argv=("x",)).priority == 0  # 모델 기본값도 normal
+
+
+@pytest.mark.parametrize(("word", "value"), [("high", 1), ("normal", 0), ("low", -1)])
+def test_preset_priority_words_map_to_ints(word: str, value: int):
+    assert parse_preset({"name": "gate", "argv": ["x"], "priority": word}).priority == value
+
+
+@pytest.mark.parametrize("bad", ["urgent", "HIGH", 1, True])
+def test_preset_priority_invalid_names_preset_and_key(bad: object):
+    # 세 단어만 받는다(명세: 숫자 우선순위는 기아를 만들고 설명이 어렵다). 오류엔 프리셋·키 이름.
+    with pytest.raises(ConfigError) as e:
+        parse_preset({"name": "gate", "argv": ["x"], "priority": bad})
+    assert "preset 'gate'" in str(e.value) and "priority" in str(e.value)
+
+
+def test_preset_priority_loads_from_file(tmp_path):
+    cfg = load(tmp_path, M5_GATE + 'priority = "high"\n' + M5_DEPLOY)
+    assert cfg.preset("gate").priority == 1
+    assert cfg.preset("deploy").priority == 0
+
+
+# ── [server] snapshot_cache · _days · _max_bytes · _scope (M5a-2) ────────────
+
+
+def test_snapshot_cache_keys_have_defaults(tmp_path):
+    cfg = load(tmp_path, GOOD)
+    assert cfg.server.snapshot_cache is True
+    assert cfg.server.snapshot_cache_days == 30
+    assert cfg.server.snapshot_cache_max_bytes == 4 * 2**30  # 4 GiB
+    assert cfg.server.snapshot_cache_scope == "global"
+
+
+def test_snapshot_cache_keys_from_file(tmp_path):
+    text = (
+        "[server]\nsnapshot_cache = false\nsnapshot_cache_days = 7\n"
+        'snapshot_cache_max_bytes = 1048576\nsnapshot_cache_scope = "token"\n'
+    )
+    cfg = load(tmp_path, text)
+    assert cfg.server.snapshot_cache is False
+    assert cfg.server.snapshot_cache_days == 7
+    assert cfg.server.snapshot_cache_max_bytes == 1_048_576
+    assert cfg.server.snapshot_cache_scope == "token"
+
+
+def test_snapshot_cache_keys_from_env(tmp_path):
+    p = write(tmp_path, GOOD)
+    cfg = load_server_config(
+        p,
+        environ={
+            "RCM_SERVER_SNAPSHOT_CACHE": "false",
+            "RCM_SERVER_SNAPSHOT_CACHE_DAYS": "3",
+            "RCM_SERVER_SNAPSHOT_CACHE_SCOPE": "token",
+        },
+    )
+    assert cfg.server.snapshot_cache is False and cfg.server.snapshot_cache_days == 3
+    assert cfg.server.snapshot_cache_scope == "token"
+    with pytest.raises(ConfigError) as e:
+        load_server_config(p, environ={"RCM_SERVER_SNAPSHOT_CACHE_DAYS": "soon"})
+    assert "[server] snapshot_cache_days" in str(e.value)
+
+
+def test_snapshot_cache_days_must_be_at_least_1(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, "[server]\nsnapshot_cache_days = 0\n")
+    assert "snapshot_cache_days" in str(e.value)
+    assert load(tmp_path, "[server]\nsnapshot_cache_days = 1\n").server.snapshot_cache_days == 1
+
+
+def test_snapshot_cache_max_bytes_floor_is_1_mib(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, "[server]\nsnapshot_cache_max_bytes = 1048575\n")
+    assert "snapshot_cache_max_bytes" in str(e.value)
+    cfg = load(tmp_path, "[server]\nsnapshot_cache_max_bytes = 1048576\n")
+    assert cfg.server.snapshot_cache_max_bytes == 1_048_576
+
+
+@pytest.mark.parametrize("scope", ["team", "Global", ""])
+def test_snapshot_cache_scope_must_be_global_or_token(tmp_path, scope: str):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, f'[server]\nsnapshot_cache_scope = "{scope}"\n')
+    assert "snapshot_cache_scope" in str(e.value)
+
+
+def msg(e: pytest.ExceptionInfo, tmp_path: Path) -> str:
+    """오류 문구에서 tmp 경로를 뺀다 — 경로에 든 테스트 이름(`…notify_on_accepts…`)이 단어 검사를
+    우연히 통과시키지 않게."""
+    return str(e.value).replace(str(tmp_path), "")
+
+
+# ── [[notify]] (M5a-3) ────────────────────────────────────────────────────────
+
+
+def test_no_notify_section_gives_an_empty_tuple(tmp_path):
+    assert load(tmp_path, M5_GATE).notify == ()
+
+
+def test_notify_argv_rule_defaults(tmp_path):
+    from remote_ci_monitor.core.notify import NotifyRule
+
+    rule = notify_rule(tmp_path, name="slack-fail", argv=["bash", "/opt/rcm/notify.sh"])
+    assert isinstance(rule, NotifyRule)
+    assert rule.name == "slack-fail"
+    assert tuple(rule.argv) == ("bash", "/opt/rcm/notify.sh")
+    assert not rule.url  # argv 규칙엔 url 이 없다
+    assert set(rule.on) == TERMINAL  # 기본 = 종료 상태 전부
+    assert not rule.presets  # 비면 전부
+    assert rule.timeout_seconds == 30
+
+
+def test_notify_url_rule(tmp_path):
+    rule = notify_rule(tmp_path, name="hook", url="https://hooks.example/abc", timeout_seconds=5)
+    assert rule.url == "https://hooks.example/abc"
+    assert not rule.argv
+    assert rule.timeout_seconds == 5
+    # 로컬 훅은 http:// 도 된다
+    rule = notify_rule(tmp_path, name="local", url="http://127.0.0.1:9/hook")
+    assert rule.url == "http://127.0.0.1:9/hook"
+
+
+def test_notify_requires_exactly_one_of_argv_or_url(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="both", argv=["x"], url="https://h.example/")
+    assert "both" in msg(e, tmp_path) and "argv" in msg(e, tmp_path) and "url" in msg(e, tmp_path)
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="neither")
+    assert (
+        "neither" in msg(e, tmp_path) and "argv" in msg(e, tmp_path) and "url" in msg(e, tmp_path)
+    )
+
+
+def test_notify_argv_must_be_a_non_empty_list_of_strings(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="empty", argv=[])
+    assert "empty" in msg(e, tmp_path) and "argv" in msg(e, tmp_path)
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="str", argv="bash notify.sh")  # 셸 문자열 금지
+    assert "str" in msg(e, tmp_path) and "argv" in msg(e, tmp_path)
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="mixed", argv=["bash", 1])
+    assert "mixed" in msg(e, tmp_path) and "argv" in msg(e, tmp_path)
+
+
+@pytest.mark.parametrize("url", ["ftp://hooks.example/x", "hooks.example/x", "//h/x", ""])
+def test_notify_url_must_be_http_or_https(tmp_path, url: str):
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="hook", url=url)
+    assert "hook" in msg(e, tmp_path) and "url" in msg(e, tmp_path)
+
+
+def test_notify_on_accepts_terminal_states_only(tmp_path):
+    rule = notify_rule(tmp_path, name="fail-only", argv=["x"], on=["failed", "timed_out", "lost"])
+    assert set(rule.on) == {"failed", "timed_out", "lost"}
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="slack-fail", argv=["x"], on=["failed", "running"])
+    assert (
+        "slack-fail" in msg(e, tmp_path)
+        and "on" in msg(e, tmp_path)
+        and "running" in msg(e, tmp_path)
+    )
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="none", argv=["x"], on=[])  # 빈 목록 = 아무것도 안 보냄 — 오류
+    assert "none" in msg(e, tmp_path) and "on" in msg(e, tmp_path)
+
+
+def test_notify_presets_must_exist(tmp_path):
+    cfg = load(
+        tmp_path,
+        M5_GATE + M5_DEPLOY + notify_toml(name="deploys", argv=["x"], presets=["gate", "deploy"]),
+    )
+    assert set(cfg.notify[0].presets) == {"gate", "deploy"}  # 집합이든 튜플이든 내용만 본다
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="deploys", argv=["x"], presets=["gate", "nope"])
+    assert "deploys" in msg(e, tmp_path) and "'nope'" in msg(e, tmp_path)
+
+
+def test_notify_timeout_seconds_must_be_positive(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="hook", argv=["x"], timeout_seconds=0)
+    assert "hook" in msg(e, tmp_path) and "timeout_seconds" in msg(e, tmp_path)
+    with pytest.raises(ConfigError):
+        notify_rule(tmp_path, name="hook", argv=["x"], timeout_seconds=-1)
+
+
+def test_notify_duplicate_names(tmp_path):
+    text = M5_GATE + notify_toml(name="hook", argv=["x"]) + notify_toml(name="hook", argv=["y"])
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, text)
+    assert "duplicate" in msg(e, tmp_path).lower() and "hook" in msg(e, tmp_path)
+
+
+def test_notify_name_must_be_an_identifier(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="bad name", argv=["x"])
+    assert "name" in msg(e, tmp_path)
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, M5_GATE + '[[notify]]\nargv = ["x"]\n')  # name 없음
+    assert "name" in msg(e, tmp_path)
+
+
+def test_notify_unknown_key_names_the_rule(tmp_path):
+    # 프리셋과 같은 「등록된 명령만」 규칙 — 셸 문자열 키 같은 건 조용히 무시하지 않는다
+    with pytest.raises(ConfigError) as e:
+        notify_rule(tmp_path, name="hook", argv=["x"], shell="curl …")
+    assert "hook" in msg(e, tmp_path) and "shell" in msg(e, tmp_path)
+
+
+def test_notify_rules_keep_file_order(tmp_path):
+    text = (
+        M5_GATE
+        + notify_toml(name="b", argv=["x"], on=["failed"])
+        + notify_toml(name="a", url="https://h.example/")
+    )
+    cfg = load(tmp_path, text)
+    assert [r.name for r in cfg.notify] == ["b", "a"]

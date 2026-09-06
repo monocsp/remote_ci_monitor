@@ -336,8 +336,8 @@ def finished_job(store, *, state=SUCCEEDED, finished, created=NOW, tree="9f8e", 
     return store.get_job(j.id)
 
 
-def test_fresh_db_is_schema_v2_with_artifacts_purged_at(store, tmp_path):
-    assert DB_VERSION == 2 and store.user_version() == 2
+def test_fresh_db_is_latest_schema_with_artifacts_purged_at(store, tmp_path):
+    assert DB_VERSION == 3 and store.user_version() == 3
     j = enqueue(store)
     assert store.get_job(j.id).artifacts_purged_at is None
     with sqlite3.connect(tmp_path / "rcm.sqlite3") as c:
@@ -345,7 +345,7 @@ def test_fresh_db_is_schema_v2_with_artifacts_purged_at(store, tmp_path):
     assert "artifacts_purged_at" in cols
 
 
-def test_migration_v1_to_v2_adds_the_column_and_keeps_rows(tmp_path):
+def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
     j = enqueue(s)
@@ -358,6 +358,10 @@ def test_migration_v1_to_v2_adds_the_column_and_keeps_rows(tmp_path):
         ).fetchall():
             c.execute(f"DROP INDEX {name}")
         c.execute("ALTER TABLE jobs DROP COLUMN artifacts_purged_at")
+        # v3 가 더한 것도 뗀다(priority 열 · blobs · notifications) — 진짜 v1 모양
+        c.execute("ALTER TABLE jobs DROP COLUMN priority")
+        c.execute("DROP TABLE blobs")
+        c.execute("DROP TABLE notifications")
         c.execute("PRAGMA user_version=1")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 1
@@ -367,7 +371,7 @@ def test_migration_v1_to_v2_adds_the_column_and_keeps_rows(tmp_path):
         c.close()
     s2 = Store(path)  # 1 → 2 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 2 and s2.healthy()
+        assert s2.user_version() == 3 and s2.healthy()
         got = s2.get_job(j.id)
         assert got is not None and got.key == "gate:full" and got.state == QUEUED
         assert got.created_at == NOW and got.artifacts_purged_at is None
@@ -375,7 +379,7 @@ def test_migration_v1_to_v2_adds_the_column_and_keeps_rows(tmp_path):
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 2 and s3.get_job(j.id).key == "gate:full"
+    assert s3.user_version() == 3 and s3.get_job(j.id).key == "gate:full"
     s3.close()
 
 
