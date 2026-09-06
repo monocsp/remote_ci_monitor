@@ -143,6 +143,8 @@ class Source:
     last_received_at: datetime | None = None
     ref: str | None = None
     sha: str | None = None
+    uploaded_bytes: int | None = None  # M5 캐시: 이번에 실제로 받은 바이트
+    cached_bytes: int | None = None  # M5 캐시: 캐시 히트 바이트
 
     @property
     def identity(self) -> str | None:

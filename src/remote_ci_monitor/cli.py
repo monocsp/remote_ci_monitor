@@ -29,6 +29,7 @@ from remote_ci_monitor.client import (
     ClientError,
     default_label,
     make_snapshot,
+    upload_cached,
     wait_for_job,
 )
 from remote_ci_monitor.config import (
@@ -61,8 +62,8 @@ def _ordinal(n: int) -> str:
 class _StatusLine:
     """TTY 면 한 줄을 덮어쓰고, 아니면 바뀔 때만 새 줄을 찍는다."""
 
-    def __init__(self, stream=sys.stderr, clock=time.monotonic):
-        self.stream = stream
+    def __init__(self, stream=None, clock=time.monotonic):
+        self.stream = stream if stream is not None else sys.stderr  # 호출 시점의 stderr(캡처 포함)
         self.tty = hasattr(stream, "isatty") and stream.isatty()
         self.last = ""
         self.clock = clock
@@ -249,7 +250,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         # ③ 제출 (합류면 업로드 생략)
         try:
             resp = client.submit(
-                preset.name, inputs, source, requester_label=label, join=not args.no_join
+                preset.name,
+                inputs,
+                source,
+                requester_label=label,
+                join=not args.no_join,
+                priority=args.priority,
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -269,10 +275,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
 
             try:
-                client.upload(job_id, snap.tar_path, progress=progress)
+                if resp.get("cache") and not args.no_cache:
+                    up = upload_cached(client, job_id, snap, progress=progress)
+                    total = snap.total_bytes
+                    cached = up.get("cached_bytes") or 0
+                    pct = 100 * cached // total if total else 100
+                    line.update(
+                        f"uploading #{job_id}: {max(0, total - cached) / 1e6:.1f} / "
+                        f"{total / 1e6:.1f} MB (cache {pct}%)"
+                    )
+                else:
+                    client.upload(job_id, snap.tar_path, progress=progress)
             except ClientError as e:
                 line.done()
-                _err(f"upload failed: {e.message}")
+                hint = " (retry with --no-cache)" if e.status in (400, 409) else ""
+                _err(f"upload failed: {e.message}{hint}")
                 return EXIT_UNKNOWN
             line.done()
             _info(f"submitted job #{job_id} · {resp.get('url', '')}")
@@ -306,6 +323,7 @@ def _run_git_ref(
             {"mode": "git_ref", "ref": ref},
             requester_label=label,
             join=not args.no_join,
+            priority=args.priority,
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -402,6 +420,19 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bump(args: argparse.Namespace) -> int:
+    """대기 잡의 우선순위 변경(admin)."""
+    client = _client(args)
+    try:
+        resp = client.set_priority(args.job, args.priority)
+    except ClientError as e:
+        _err(f"bump failed: {e.message}")
+        return USAGE_EXIT if e.status else EXIT_UNKNOWN
+    _print_json(resp)
+    _info(f"job #{args.job} priority is now {resp.get('priority')}")
+    return 0
+
+
 def cmd_pause(args: argparse.Namespace) -> int:
     client = _client(args)
     try:
@@ -488,7 +519,7 @@ def cmd_eta(args: argparse.Namespace) -> int:
             inputs = parse_kv(args.f or [])
         except InputError as e:
             return _usage(str(e))
-        resp = client.eta(args.preset, inputs)
+        resp = client.eta(args.preset, inputs, priority=getattr(args, "priority", None))
     except ClientError as e:
         return _client_fail(client, "eta failed", e)
     if args.json:
@@ -884,6 +915,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--ref", metavar="REF", help="branch, tag or commit sha for git_ref presets (no upload)"
     )
+    run.add_argument(
+        "--priority",
+        choices=["low", "normal", "high"],
+        default=None,
+        help="queue priority (default: the preset's; raising above it needs an admin token)",
+    )
+    run.add_argument(
+        "--no-cache", action="store_true", help="upload a full tarball instead of changed files"
+    )
     run.add_argument("--by", metavar="LABEL", help="requester label (default: user@host)")
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
@@ -907,6 +947,12 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(wait)
     wait.set_defaults(func=cmd_wait)
 
+    bump = sub.add_parser("bump", help="change a waiting job's priority (admin token)")
+    bump.add_argument("job", type=int)
+    bump.add_argument("--priority", choices=["low", "normal", "high"], default="high")
+    client_opts(bump)
+    bump.set_defaults(func=cmd_bump)
+
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
     client_opts(cancel)
@@ -925,6 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
     eta.add_argument("-f", action="append", metavar="NAME=VALUE", help="preset input (repeatable)")
     eta.add_argument("--job", type=int, help="an existing job id")
     eta.add_argument("--json", action="store_true")
+    eta.add_argument("--priority", choices=["low", "normal", "high"], default=None)
     client_opts(eta)
     eta.set_defaults(func=cmd_eta)
 

@@ -107,6 +107,23 @@ MUTANTS = (
         new="",
         tests=("tests/test_gitref.py",),
     ),
+    Mutant(
+        name="priority-order",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="key=lambda j: (-j.priority, j.id)",
+        new="key=lambda j: j.id",
+        tests=("tests/test_priority.py",),
+    ),
+    Mutant(
+        name="manifest-link-escape",
+        path="src/remote_ci_monitor/core/manifest.py",
+        old=(
+            '    if resolved == ".." or resolved.startswith("../") or resolved.startswith("/"):\n'
+            "        raise ManifestError(f\"link {path!r}: target escapes the workspace\")\n"
+        ),
+        new="",
+        tests=("tests/test_manifest.py",),
+    ),
 )
 
 

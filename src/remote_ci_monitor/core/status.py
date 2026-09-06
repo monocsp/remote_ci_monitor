@@ -67,6 +67,8 @@ def source_json(s: Source) -> dict[str, Any]:
         "bytes": s.bytes,
         "received_bytes": s.received_bytes,
         "last_received_at": iso(s.last_received_at),
+        "uploaded_bytes": s.uploaded_bytes,
+        "cached_bytes": s.cached_bytes,
     }
 
 

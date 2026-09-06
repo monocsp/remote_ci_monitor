@@ -7,6 +7,19 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Priority** (M5a): `rcm run --priority low|normal|high`, preset `priority` defaults that non-admin
+  sessions cannot exceed, `rcm bump N` (admin), queue order by priority then age, `queue[].priority`
+  and `presets[].priority` in the status document.
+- **Snapshot cache** (M5a): content-addressed upload — `POST /jobs/{id}/tree/manifest` returns the
+  missing hashes and `PUT …/tree` with `X-RCM-Tree: blobs` sends only those files; blobs are
+  purged by age/size but never while an active job references them; `snapshot_cache`,
+  `snapshot_cache_days`, `snapshot_cache_max_bytes`, `snapshot_cache_scope`; `source.uploaded_bytes`
+  and `source.cached_bytes`; `--no-cache`.
+- **Notifications** (M5a): `[[notify]]` rules (argv or url) on job completion, exactly once per
+  (job, rule) including after restarts; `server.notify_failures`.
+- Database schema version 3 (`priority` column, `blobs` and `notifications` tables); migrates on start.
+
 ## [0.1.0] - 2026-09-06
 
 First release. One package for the build machine (`rcm serve`) and every session (`rcm run`).

@@ -26,6 +26,7 @@ import socket
 import socketserver
 import sqlite3
 import sys
+import tarfile
 import threading
 import time
 from collections.abc import Callable
@@ -40,6 +41,7 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.config import ServerConfig
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
+from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
@@ -67,6 +69,7 @@ from remote_ci_monitor.core.queue import (
     eta_for_new,
     join_key,
     medians_from,
+    priority_from_name,
 )
 from remote_ci_monitor.core.status import iso, queue_row_json, recent_json, status_json
 from remote_ci_monitor.events import (
@@ -81,10 +84,13 @@ from remote_ci_monitor.events import (
 from remote_ci_monitor.gitops import STDERR_TAIL_LINES, GitError, GitTimeout, resolve_ref
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
+from remote_ci_monitor.materialize import blob_path
+from remote_ci_monitor.notify import Notifier
 from remote_ci_monitor.store import Store, TokenInfo
 from remote_ci_monitor.worker import Worker, start_workers, tail_lines
 
 MAX_JSON_BODY = 64 * 1024
+MAX_MANIFEST_BODY = 32 * 1024 * 1024  # 팀 트리(수만 파일)의 manifest 는 64 KB 를 훌쩍 넘는다
 UPLOAD_CHUNK = 64 * 1024
 REQUEST_TIMEOUT = 10
 UPLOAD_TIMEOUT = 60
@@ -93,7 +99,8 @@ MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-_\[\]:]{1,255}$")  # Host 헤더 — URL 에 넣을 만한 모양만
 RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
-_JOB_RE = re.compile(r"^/jobs/(\d+)(/tree|/log|/cancel)?$")
+_JOB_RE = re.compile(r"^/jobs/(\d+)(/tree/manifest|/tree|/log|/cancel|/priority)?$")
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -168,6 +175,7 @@ class App:
         self._lock = threading.Lock()
         self._janitor: threading.Thread | None = None
         self.retention: Janitor | None = None
+        self.notifier: Notifier | None = None
         self._resolve_sem = threading.BoundedSemaphore(RESOLVE_CONCURRENCY)
         self.bus = EventBus()
         self.sampler: HostSampler | None = None
@@ -205,6 +213,16 @@ class App:
             stop=self.stop,
         )
         self.retention.start()
+        self.notifier = Notifier(
+            self.store,
+            self.config,
+            self.bus,
+            now_fn=self.now_fn,
+            log=self.log,
+            base_url=self.base_url(),
+            stop=self.stop,
+        )
+        self.notifier.start()
         host = socket.gethostname().split(".")[0] or "host"
         self.sampler = HostSampler(
             self.config.host, name=host, publish=self.publish, stop=self.stop, now_fn=self.now_fn
@@ -221,6 +239,12 @@ class App:
             w.join(timeout=self.config.server.grace_seconds + 10)
         if self.retention is not None:
             self.retention.stop()
+        if self.notifier is not None:
+            self.notifier.stop()
+
+    @property
+    def notify_failures(self) -> int:
+        return self.notifier.failures if self.notifier is not None else 0
 
     def _janitor_loop(self) -> None:
         while not self.stop.wait(JANITOR_SECONDS):
@@ -510,6 +534,12 @@ class App:
         except Exception as e:  # noqa: BLE001
             queue, queue_error = None, _error_text(e)
         hosts, hosts_error = self._hosts()
+        blob_count = blob_bytes = None
+        if self.config.server.snapshot_cache:
+            try:
+                blob_count, blob_bytes = self.store.blob_stats()
+            except Exception:  # noqa: BLE001 — 통계 실패가 상태 전체를 막으면 안 된다
+                blob_count = blob_bytes = None
         server = ServerInfo(
             version=self.version,
             uptime_seconds=(now - self.started_at).total_seconds(),
@@ -518,6 +548,9 @@ class App:
             last_error=self.last_error,
             workers=tuple(self.worker_infos()),
             sse_connections=self.sse_connections,
+            snapshot_cache_blobs=blob_count,
+            snapshot_cache_bytes=blob_bytes,
+            notify_failures=self.notify_failures,
         )
         pool = Pool(
             name="default",
@@ -586,6 +619,7 @@ class App:
         snap = self._snapshot()
         if snap.queue_error is not None:
             raise ApiError(503, f"queue unavailable: {snap.queue_error}")
+        priority = self._parse_priority(body.get("priority"), preset.priority)
         row, ahead = eta_for_new(
             snap.jobs,
             preset=preset,
@@ -597,6 +631,7 @@ class App:
             presets={p.name: p for p in self.config.presets},
             cfg=self.queue_config(),
             now=now,
+            priority=priority,
         )
         doc = queue_row_json(row, base_url=None)
         doc["id"] = None
@@ -628,8 +663,9 @@ class App:
         label = body.get("requester_label") or f"{token.name}"
         if not isinstance(label, str) or len(label) > 120:
             raise ApiError(400, "requester_label must be a string of at most 120 characters")
+        priority = self._requested_priority(body, preset, token)
         if mode == MODE_GIT_REF:
-            return self._submit_git_ref(preset, inputs, src, label, token, body, host)
+            return self._submit_git_ref(preset, inputs, src, label, token, body, host, priority)
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
         tree_hash = src.get("tree_hash")
@@ -656,15 +692,14 @@ class App:
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         if want_join:
-            existing = self.store.find_joinable(jk)
+            existing = self.store.join_or_bump(jk, token.name, label, priority, now)
             if existing is not None:
-                if existing.requester.name != token.name:
-                    self.store.add_joiner(existing.id, token.name, label, now)
-                    self._publish_job(None, existing.id)
+                self._publish_job(None, existing.id)
                 return 200, {
                     "job_id": existing.id,
                     "joined": True,
                     "state": existing.state,
+                    "priority": existing.priority,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                 }
         job = self.store.create_job(
@@ -678,15 +713,257 @@ class App:
             join_key=jk,
             now=now,
             state=UPLOADING,
+            priority=priority,
         )
         self._publish_job(job, job.id)
         return 201, {
             "job_id": job.id,
             "joined": False,
             "state": job.state,
+            "priority": job.priority,
+            "cache": bool(self.config.server.snapshot_cache),
             "upload": f"/jobs/{job.id}/tree",
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
         }
+
+    def _parse_priority(self, raw: Any, default: int) -> int:
+        """`priority` 값(이름 또는 -1·0·1). 없으면 default(프리셋 기본)."""
+        if raw is None:
+            return default
+        if isinstance(raw, bool):
+            raise ApiError(400, "priority must be low, normal, high or -1/0/1")
+        if isinstance(raw, int):
+            if raw in (-1, 0, 1):
+                return raw
+            raise ApiError(400, "priority must be low, normal, high or -1/0/1")
+        try:
+            return priority_from_name(raw)
+        except ValueError as e:
+            raise ApiError(400, str(e)) from e
+
+    def _requested_priority(self, body: dict[str, Any], preset: Preset, token: TokenInfo) -> int:
+        priority = self._parse_priority(body.get("priority"), preset.priority)
+        if priority > preset.priority and not token.admin:
+            raise ApiError(403, "priority above the preset default needs an admin token")
+        return priority
+
+    def set_job_priority(
+        self, job_id: int, body: dict[str, Any], token: TokenInfo
+    ) -> dict[str, Any]:
+        """`POST /jobs/{id}/priority` — admin 이 대기 잡의 우선순위를 바꾼다(`rcm bump`)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        if body.get("priority") is None:
+            raise ApiError(400, "priority is required: low, normal or high")
+        priority = self._parse_priority(body.get("priority"), 0)
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "no such job")
+        if not self.store.set_priority(job_id, priority, self.now_fn()):
+            raise ApiError(409, f"job is {job.state}, not waiting", state=job.state)
+        self._publish_job(None, job_id)
+        self.wake.set()
+        return {"job_id": job_id, "priority": priority}
+
+    # ── 내용 주소 스냅샷 캐시 (M5) ──────────────────────────────────────────
+
+    def blobs_dir(self) -> Path:
+        return self.config.data_dir / "blobs"
+
+    def _blob_prefix(self, token: TokenInfo) -> str:
+        return f"{token.name}/" if self.config.server.snapshot_cache_scope == "token" else ""
+
+    def receive_manifest(self, job_id: int, token: TokenInfo, body: Any) -> dict[str, Any]:
+        """manifest 를 받아 저장하고 빠진 blob 해시를 돌려준다. 빠진 게 없으면 바로 queued."""
+        if not self.config.server.snapshot_cache:
+            raise ApiError(404, "snapshot cache is disabled on this server")
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "no such job")
+        if job.requester.name != token.name and not token.admin:
+            raise ApiError(403, "not your job")
+        if job.source.mode == MODE_GIT_REF:
+            raise ApiError(409, "job takes no tree upload (git_ref source)", state=job.state)
+        if job.state != UPLOADING:
+            raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
+        limit = self.config.server.max_snapshot_bytes
+        try:
+            manifest = validate_manifest(body, max_bytes=limit)
+        except ManifestError as e:
+            if "exceeds" in str(e):
+                total = 0
+                for f in body.get("files", []) if isinstance(body, dict) else []:
+                    size = f.get("size") if isinstance(f, dict) else None
+                    if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                        total += size
+                summary = f"snapshot {_mb(total)} exceeds {_mb(limit)}"
+                self.store.finish(
+                    job_id, CANCELLED, now=self.now_fn(), summary=summary, cancelled_by="server"
+                )
+                self._publish_job(None, job_id)
+                raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore") from e
+            raise ApiError(400, f"manifest rejected: {e}") from e
+        prefix = self._blob_prefix(token)
+        have_keys = self.store.have_blobs(prefix + h for h in manifest.unique_hashes)
+        have = {k[len(prefix) :] for k in have_keys}
+        missing = missing_hashes(manifest, have)
+        now = self.now_fn()
+        if have_keys:
+            self.store.touch_blobs(have_keys, now)
+        sizes: dict[str, int] = {}
+        for f in manifest.files:
+            sizes.setdefault(f.sha256, f.size)
+        missing_set = set(missing)
+        cached_bytes = sum(f.size for f in manifest.files if f.sha256 not in missing_set)
+        doc = {
+            "files": [
+                {"path": f.path, "mode": f.mode, "size": f.size, "sha256": f.sha256}
+                for f in manifest.files
+            ],
+            "links": [{"path": link.path, "target": link.target} for link in manifest.links],
+            "missing": missing,
+            "blob_prefix": prefix,
+        }
+        job_dir = self.job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        tmp = job_dir / ".manifest.json.tmp"
+        tmp.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(job_dir / "manifest.json")
+        self.store.update_source_fields(job_id, cached_bytes=cached_bytes, uploaded_bytes=0)
+        self.store.update_received(job_id, 0, now)  # PUT 이 안 오면 abandon 경로가 덮는다
+        state = UPLOADING
+        if not missing:
+            declared = job.source.bytes or 0  # source.bytes 는 세션이 선언한 트리 크기 그대로
+            if not self.store.mark_uploaded(job_id, declared, now):
+                current = self.store.get_job(job_id)
+                st = current.state if current else "unknown"
+                raise ApiError(409, f"job was {st} during upload", state=st)
+            state = QUEUED
+            self.wake.set()
+        self._publish_job(None, job_id)
+        return {
+            "missing": missing,
+            "missing_bytes": sum(sizes.get(h, 0) for h in missing),
+            "state": state,
+        }
+
+    def receive_blobs(self, job: Job, reader: Any, length: int) -> dict[str, Any]:
+        """`PUT …/tree` + `X-RCM-Tree: blobs`: 멤버 이름이 sha256 인 tar.gz → blob 저장소."""
+        job_dir = self.job_dir(job.id)
+        manifest_path = job_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise ApiError(409, "send the manifest before the blobs", state=job.state)
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected: dict[str, int] = {}
+        for f in doc.get("files", []):
+            expected.setdefault(f["sha256"], int(f["size"]))
+        missing = set(doc.get("missing") or [])
+        prefix = doc.get("blob_prefix") or ""
+        part = job_dir / "blobs.tar.gz.part"
+        received = 0
+        try:
+            with part.open("wb") as fh:
+                while received < length:
+                    chunk = reader.read(min(UPLOAD_CHUNK, length - received))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    received += len(chunk)
+        except (OSError, TimeoutError) as e:
+            self._interrupted(job, received, part)
+            raise ApiError(400, f"upload interrupted: {type(e).__name__}") from e
+        if received < length:
+            self._interrupted(job, received, part)
+            raise ApiError(400, f"upload interrupted after {_mb(received)}")
+        got: set[str] = set()
+        stored: list[tuple[str, int]] = []
+        thread_id = threading.get_ident()
+        try:
+            with tarfile.open(part, "r:gz") as tf:
+                for member in tf:
+                    name = member.name
+                    if not _SHA_RE.fullmatch(name) or not member.isfile():
+                        raise ApiError(400, "snapshot rejected: blob member is not a sha256 file")
+                    if name not in missing:
+                        raise ApiError(400, "snapshot rejected: blob not in the missing list")
+                    src = tf.extractfile(member)
+                    if src is None:
+                        raise ApiError(400, "snapshot rejected: unreadable blob")
+                    final = blob_path(self.blobs_dir(), prefix + name)
+                    final.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = final.parent / f".{name}.{job.id}.{thread_id}.part"
+                    h = hashlib.sha256()
+                    size = 0
+                    with tmp.open("wb") as out:
+                        while True:
+                            chunk = src.read(UPLOAD_CHUNK)
+                            if not chunk:
+                                break
+                            h.update(chunk)
+                            size += len(chunk)
+                            out.write(chunk)
+                    if h.hexdigest() != name:
+                        tmp.unlink(missing_ok=True)
+                        raise ApiError(400, "snapshot rejected: blob hash mismatch")
+                    if size != expected.get(name):
+                        tmp.unlink(missing_ok=True)
+                        raise ApiError(400, "snapshot rejected: blob size mismatch")
+                    if final.exists():
+                        tmp.unlink(missing_ok=True)  # 다른 잡이 먼저 올렸다 — 내용이 같다
+                    else:
+                        tmp.replace(final)
+                    got.add(name)
+                    stored.append((prefix + name, size))
+        except ApiError as e:
+            part.unlink(missing_ok=True)
+            self.store.finish(
+                job.id,
+                CANCELLED,
+                now=self.now_fn(),
+                summary=e.message[:200],
+                cancelled_by="server",
+                only_from=(UPLOADING,),
+            )
+            self._publish_job(None, job.id)
+            raise
+        except (tarfile.TarError, EOFError, OSError) as e:
+            part.unlink(missing_ok=True)
+            self.store.finish(
+                job.id,
+                CANCELLED,
+                now=self.now_fn(),
+                summary=f"snapshot rejected: {type(e).__name__}",
+                cancelled_by="server",
+                only_from=(UPLOADING,),
+            )
+            self._publish_job(None, job.id)
+            raise ApiError(400, "snapshot rejected: not a valid tar.gz") from e
+        part.unlink(missing_ok=True)
+        absent = missing - got
+        if absent:
+            summary = f"snapshot rejected: {len(absent)} blob(s) missing in upload"
+            self.store.finish(
+                job.id,
+                CANCELLED,
+                now=self.now_fn(),
+                summary=summary,
+                cancelled_by="server",
+                only_from=(UPLOADING,),
+            )
+            self._publish_job(None, job.id)
+            raise ApiError(400, summary)
+        now = self.now_fn()
+        if stored:
+            self.store.record_blobs(stored, now)
+        self.store.update_source_fields(job.id, uploaded_bytes=received)
+        declared = job.source.bytes if job.source.bytes is not None else received
+        if not self.store.mark_uploaded(job.id, declared, now):
+            current = self.store.get_job(job.id)
+            state = current.state if current else "unknown"
+            raise ApiError(409, f"job was {state} during upload", state=state)
+        self._publish_job(None, job.id)
+        self.wake.set()
+        return {"job_id": job.id, "state": QUEUED, "bytes": received, "blobs": len(stored)}
 
     def _submit_git_ref(
         self,
@@ -697,6 +974,7 @@ class App:
         token: TokenInfo,
         body: dict[str, Any],
         host: str | None = None,
+        priority: int = 0,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         repo = self.config.repo(preset.repo)
@@ -731,15 +1009,14 @@ class App:
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         if want_join:
-            existing = self.store.find_joinable(jk)
+            existing = self.store.join_or_bump(jk, token.name, label, priority, now)
             if existing is not None:
-                if existing.requester.name != token.name:
-                    self.store.add_joiner(existing.id, token.name, label, now)
-                    self._publish_job(None, existing.id)
+                self._publish_job(None, existing.id)
                 return 200, {
                     "job_id": existing.id,
                     "joined": True,
                     "state": existing.state,
+                    "priority": existing.priority,
                     "sha": existing.source.sha,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                 }
@@ -754,6 +1031,7 @@ class App:
             join_key=jk,
             now=now,
             state=QUEUED,
+            priority=priority,
         )
         self._publish_job(job, job.id)
         self.wake.set()
@@ -761,6 +1039,7 @@ class App:
             "job_id": job.id,
             "joined": False,
             "state": job.state,
+            "priority": job.priority,
             "sha": sha,
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
         }
@@ -813,6 +1092,7 @@ class App:
             self._interrupted(job, received, part)
             raise ApiError(400, f"upload interrupted after {_mb(received)}")
         part.replace(final)
+        self.store.update_source_fields(job.id, uploaded_bytes=received, cached_bytes=0)
         if not self.store.mark_uploaded(job.id, received, self.now_fn()):
             final.unlink(missing_ok=True)
             current = self.store.get_job(job.id)
@@ -1057,10 +1337,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "invalid Content-Length")
         return n
 
-    def _json_body(self) -> Any:
+    def _json_body(self, limit: int = MAX_JSON_BODY) -> Any:
         n = self._content_length()
-        if n > MAX_JSON_BODY:
-            raise ApiError(413, f"JSON body larger than {MAX_JSON_BODY} bytes")
+        if n > limit:
+            raise ApiError(413, f"JSON body larger than {limit} bytes")
         data = self.rfile.read(n) if n else b""
         if not data:
             return {}
@@ -1166,14 +1446,29 @@ class Handler(BaseHTTPRequestHandler):
                 host = self.headers.get("Host")
                 self._send_json(200, self.app.job_view(job_id, self._read_token(), tail, host))
                 return
+            if sub == "/tree/manifest":
+                self._only(method, "POST")
+                t = self.app.require_token(self._token())
+                body = self._json_body(limit=MAX_MANIFEST_BODY)
+                self._send_json(200, self.app.receive_manifest(job_id, t, body))
+                return
+            if sub == "/priority":
+                self._only(method, "POST")
+                t = self.app.require_admin(self._token())
+                self._send_json(200, self.app.set_job_priority(job_id, self._json_body(), t))
+                return
             if sub == "/tree":
                 self._only(method, "PUT")
                 t = self.app.require_token(self._token())
                 length = self._content_length()
                 job = self.app.begin_upload(job_id, t, length)
+                blobs = self.headers.get("X-RCM-Tree", "").strip().lower() == "blobs"
                 self.connection.settimeout(UPLOAD_TIMEOUT)
                 try:
-                    body = self.app.receive_upload(job, self.rfile, length)
+                    if blobs:
+                        body = self.app.receive_blobs(job, self.rfile, length)
+                    else:
+                        body = self.app.receive_upload(job, self.rfile, length)
                 finally:
                     self.connection.settimeout(REQUEST_TIMEOUT)
                 self._send_json(200, body)

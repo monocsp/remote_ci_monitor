@@ -466,6 +466,20 @@
     if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
     return "'" + s.replace(/'/g, "'\\''") + "'";
   }
+  // ── 우선순위 칩 · 캐시 요약 (M5) — 우선순위는 이유가 아니다, 칩만 ──
+  function priorityChip(row) {
+    var p = row && row.priority;
+    if (typeof p !== "number" || p === 0) return "";
+    if (p > 0) return '<span class="chip prio high">high</span>';
+    return '<span class="chip prio low">low</span>';
+  }
+  function cacheText(server) {
+    var c = server && server.snapshot_cache;
+    if (!c || typeof c !== "object") return null;
+    var blobs = isNum(c.blobs) ? String(c.blobs) : DASH;
+    var mb = isNum(c.bytes) ? fmtBytes(c.bytes) : DASH;
+    return "cache " + blobs + " blobs · " + mb;
+  }
   function rerunCommand(job) {
     if (!job || !job.preset) return DASH;  // 빈 명령을 복사하게 두지 않는다
     var cmd = "rcm run " + job.preset;
@@ -545,7 +559,7 @@
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
-    sourceHtml: sourceHtml,
+    sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
   };
@@ -921,6 +935,7 @@
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
     if (row.concurrency_group) chips += '<span class="chip">group ' + esc(row.concurrency_group) + "</span>";
+    chips += priorityChip(row);
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners : [];
     var requester = '<span title="token: ' + esc(req.name || "") + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>" + (mine && req.name === state.me ? '<span class="you">you</span>' : "") +

@@ -269,6 +269,8 @@ class Store:
             last_received_at=_dt(row["last_received_at"]),
             ref=src.get("ref"),
             sha=src.get("sha"),
+            uploaded_bytes=src.get("uploaded_bytes"),
+            cached_bytes=src.get("cached_bytes"),
         )
         joiners = tuple(
             Joiner(name=j["name"], label=j["label"], joined_at=_dt(j["joined_at"]))
@@ -700,6 +702,24 @@ class Store:
     def remove_joiner(self, job_id: int, name: str) -> bool:
         cur = self._conn().execute("DELETE FROM joiners WHERE job_id=? AND name=?", (job_id, name))
         return cur.rowcount == 1
+
+    def update_source_fields(self, job_id: int, **fields: Any) -> None:
+        """source_json 의 키 몇 개를 갱신한다(M5 캐시의 uploaded_bytes · cached_bytes)."""
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT source_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is not None:
+                src = json.loads(row["source_json"])
+                src.update(fields)
+                conn.execute(
+                    "UPDATE jobs SET source_json=? WHERE id=?",
+                    (json.dumps(src, separators=(",", ":")), job_id),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def update_received(self, job_id: int, received_bytes: int, now: datetime) -> None:
         self._conn().execute(
