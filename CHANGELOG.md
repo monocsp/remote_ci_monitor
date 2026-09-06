@@ -19,6 +19,10 @@ of a key bumps that number and is listed here.
 - **Notifications** (M5a): `[[notify]]` rules (argv or url) on job completion, exactly once per
   (job, rule) including after restarts; `server.notify_failures`.
 - Database schema version 3 (`priority` column, `blobs` and `notifications` tables); migrates on start.
+- **Pools** (M5b-1): `pools[]` in the status document now has one entry per worker pool
+  (`default` first); jobs carry `pool`, presets `pool`/`pools`, `rcm run --pool`, `rcm eta --pool`,
+  `rcm jobs --pool`; a pool without workers shows `worker_down` and no ETA. Schema version 4
+  (`pool` column). All additive keys.
 
 ## [0.1.0] - 2026-09-06
 

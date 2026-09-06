@@ -269,6 +269,8 @@ _PRESET_KEYS = {
     "source_modes",
     "repo",
     "priority",
+    "pool",
+    "pools",
     "concurrency_group",
     "expected_seconds",
     "duration_key_inputs",
@@ -430,6 +432,13 @@ def parse_preset(raw: Any) -> Preset:
     if not isinstance(group, str):
         raise ConfigError(f"{where}: concurrency_group must be a string")
     priority = parse_priority(raw.get("priority", "normal"), where)
+    pool = raw.get("pool", "default")
+    if not isinstance(pool, str) or not _NAME_RE.match(pool):
+        raise ConfigError(f"{where}: pool must be a short identifier, got {pool!r}")
+    pools = _str_list(f"{where} pools", raw.get("pools", []), allow_empty=True)
+    for extra in pools:
+        if not _NAME_RE.match(extra):
+            raise ConfigError(f"{where}: pools entries must be short identifiers, got {extra!r}")
     expected = raw.get("expected_seconds")
     if expected is not None and (
         isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0
@@ -466,6 +475,8 @@ def parse_preset(raw: Any) -> Preset:
         source_modes=modes,
         repo=repo,
         priority=priority,
+        pool=pool,
+        pools=tuple(pools),
         concurrency_group=group or None,
         expected_seconds=expected,
         duration_key_inputs=dki,

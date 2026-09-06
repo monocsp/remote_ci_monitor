@@ -28,6 +28,7 @@ from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
     CANCELLING,
+    DEFAULT_POOL,
     LOST,
     PHASE_MATERIALIZING,
     QUEUED,
@@ -46,7 +47,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo
 
-DB_VERSION = 3
+DB_VERSION = 4
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -82,7 +83,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   received_bytes INTEGER,
   last_received_at REAL,
   artifacts_purged_at REAL,
-  priority INTEGER NOT NULL DEFAULT 0
+  priority INTEGER NOT NULL DEFAULT 0,
+  pool TEXT NOT NULL DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
@@ -149,6 +151,8 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _BLOBS_SQL,
         _NOTIFICATIONS_SQL,
     ),
+    # v3 → v4(M5b): 잡이 어느 풀의 워커에서 도는가. 옛 행은 전부 기본 풀.
+    4: ("ALTER TABLE jobs ADD COLUMN pool TEXT NOT NULL DEFAULT 'default'",),
 }
 
 
@@ -320,6 +324,7 @@ class Store:
             transitions=transitions,
             artifacts_purged_at=_dt(row["artifacts_purged_at"]),
             priority=int(row["priority"] or 0),
+            pool=row["pool"] or DEFAULT_POOL,
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -410,6 +415,12 @@ class Store:
             raise
         return len(ids)
 
+    def list_pools(self) -> list[str]:
+        """활성 + 종료 잡이 있는 풀 이름. 기본 풀은 잡이 없어도 맨 앞."""
+        conn = self._conn()
+        names = [r[0] for r in conn.execute("SELECT DISTINCT pool FROM jobs").fetchall()]
+        return [DEFAULT_POOL, *sorted(n for n in names if n != DEFAULT_POOL)]
+
     def list_jobs_by_state(self, states: Iterable[str]) -> list[Job]:
         states = tuple(states)
         marks = ",".join("?" * len(states))
@@ -449,6 +460,7 @@ class Store:
         now: datetime,
         state: str = UPLOADING,
         priority: int = 0,
+        pool: str = DEFAULT_POOL,
     ) -> Job:
         """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다."""
         if state not in (UPLOADING, QUEUED):
@@ -470,8 +482,8 @@ class Store:
             cur = conn.execute(
                 "INSERT INTO jobs (preset, inputs_json, key, concurrency_group, source_json, "
                 "requester_name, requester_label, state, created_at, queued_at, tree_hash, sha, "
-                "timeout_seconds, join_key, priority) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "timeout_seconds, join_key, priority, pool) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset,
                     json.dumps(inputs, sort_keys=True, separators=(",", ":")),
@@ -488,6 +500,7 @@ class Store:
                     timeout_seconds,
                     join_key,
                     int(priority),
+                    pool,
                 ),
             )
             job_id = int(cur.lastrowid)
@@ -752,19 +765,19 @@ class Store:
             conn.execute("ROLLBACK")
             raise
 
-    def claim(self, lane: int, now: datetime) -> Job | None:
-        """queued 잡 하나를 원자적으로 running 으로. 그룹이 겹치면 건너뛴다."""
+    def claim(self, lane: int, now: datetime, pool: str = DEFAULT_POOL) -> Job | None:
+        """그 풀의 queued 잡 하나를 원자적으로 running 으로. 그룹 배제는 **풀 안에서**(M5b)."""
         conn = self._conn()
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
             busy = ",".join("?" * len(BUSY_STATES))
             row = conn.execute(
-                "SELECT id FROM jobs WHERE state=? AND (concurrency_group IS NULL OR "
+                "SELECT id FROM jobs WHERE state=? AND pool=? AND (concurrency_group IS NULL OR "
                 "concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
-                f"WHERE state IN ({busy}) "
+                f"WHERE state IN ({busy}) AND pool=? "
                 "AND concurrency_group IS NOT NULL)) ORDER BY priority DESC, id LIMIT 1",
-                (QUEUED, *sorted(BUSY_STATES)),
+                (QUEUED, pool, *sorted(BUSY_STATES), pool),
             ).fetchone()
             if row is None:
                 conn.execute("COMMIT")

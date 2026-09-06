@@ -61,6 +61,7 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 # Preset keys: name (required) · argv (required) · description · timeout_seconds · expected_seconds
 #   (used until enough real samples exist) · duration_key_inputs (inputs whose value gets its own
 #   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ("low" | "normal" | "high") ·
+#   pool (worker pool, default "default") · pools (extra pools a session may pick with --pool) ·
 #   env_passthrough (default: PATH HOME LANG) · [presets.env].
 # Input keys: name · type = "choice" | "string" | "int" | "bool" · choices (choice) · pattern (string)
 #   · default · description.
@@ -81,6 +82,8 @@ argv = ["bash", "scripts/gate.sh"]
 timeout_seconds = 1200
 source_modes = ["tree"]
 priority = "normal"         # "low" | "normal" | "high" — default for this preset and the ceiling for non-admin sessions
+pool = "default"            # worker pool for this preset's jobs
+# pools = ["linux"]         # extra pools a session may pick with --pool (remote workers, M5b)
 expected_seconds = 480
 duration_key_inputs = ["scope"]
 env_passthrough = ["PATH", "HOME", "LANG"]

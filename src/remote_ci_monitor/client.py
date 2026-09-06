@@ -380,12 +380,15 @@ class Client:
         requester_label: str | None,
         join: bool = True,
         priority: str | int | None = None,
+        pool: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
         if requester_label:
             body["requester_label"] = requester_label
         if priority is not None:
             body["priority"] = priority
+        if pool is not None:
+            body["pool"] = pool
         resp = self.post_json("/jobs", body)
         # 서버가 캐시를 지원하는지 기억한다 — upload_cached 가 manifest 를 헛되이 보내지 않게
         if isinstance(resp, dict) and "cache" in resp:
@@ -497,11 +500,18 @@ class Client:
                 sleep(poll_seconds)
 
     def eta(
-        self, preset: str, inputs: dict[str, Any], *, priority: str | int | None = None
+        self,
+        preset: str,
+        inputs: dict[str, Any],
+        *,
+        priority: str | int | None = None,
+        pool: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs}
         if priority is not None:
             body["priority"] = priority
+        if pool is not None:
+            body["pool"] = pool
         return self.post_json("/api/eta", body)
 
     def events(
@@ -642,6 +652,8 @@ def preset_from_json(p: dict[str, Any]) -> Preset:
         source_modes=tuple(p.get("source_modes") or ("tree",)),
         repo=p.get("repo") or "",
         priority=int(p.get("priority") or 0),
+        pool=p.get("pool") or "default",
+        pools=tuple(p.get("pools") or ()),
         concurrency_group=p.get("concurrency_group"),
         expected_seconds=p.get("expected_seconds"),
         inputs=inputs,

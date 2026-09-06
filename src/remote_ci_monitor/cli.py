@@ -229,8 +229,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     except ConfigError:
         cfg_label = ""
     label = args.by or cfg_label or default_label(None)
+    pool = getattr(args, "pool", None)
+    if pool is not None and pool != preset.pool and pool not in preset.pools:
+        allowed = ", ".join([preset.pool, *preset.pools])
+        return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
     if mode == "git_ref":
-        return _run_git_ref(client, args, preset, inputs, ref or "", label)
+        return _run_git_ref(client, args, preset, inputs, ref or "", label, pool)
     # ② 스냅샷
     root = Path(args.dir or os.getcwd())
     try:
@@ -257,6 +261,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 requester_label=label,
                 join=not args.no_join,
                 priority=args.priority,
+                pool=pool,
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -315,6 +320,7 @@ def _run_git_ref(
     inputs: dict[str, Any],
     ref: str,
     label: str,
+    pool: str | None = None,
 ) -> int:
     """git_ref 제출: 스냅샷·업로드 없이 ③ 제출 → ⑤ wait. 서버가 ref 를 sha 로 확정한다."""
     try:
@@ -325,6 +331,7 @@ def _run_git_ref(
             requester_label=label,
             join=not args.no_join,
             priority=args.priority,
+            pool=pool,
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -394,6 +401,7 @@ def _wait(
     if reason:
         _err(reason)
     out = dict(job or {"job_id": job_id, "state": None})
+    out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
     out["wait_exit_code"] = code
     if joined:
         out["joined"] = True
@@ -493,10 +501,11 @@ def cmd_eta(args: argparse.Namespace) -> int:
     try:
         if args.job is not None:
             doc = client.status()
-            pool = (doc.get("pools") or [{}])[0]
-            queue = pool.get("queue")
-            if queue is None:
-                return _usage(f"queue unavailable: {pool.get('queue_error') or 'unknown'}")
+            pools = doc.get("pools") or [{}]
+            bad = next((p for p in pools if p.get("queue") is None), None)
+            if bad is not None:
+                return _usage(f"queue unavailable: {bad.get('queue_error') or 'unknown'}")
+            queue = [r for p in pools for r in p.get("queue") or []]
             row = next((r for r in queue if r.get("id") == args.job), None)
             if row is None:
                 job = client.job(args.job)
@@ -520,7 +529,12 @@ def cmd_eta(args: argparse.Namespace) -> int:
             inputs = parse_kv(args.f or [])
         except InputError as e:
             return _usage(str(e))
-        resp = client.eta(args.preset, inputs, priority=getattr(args, "priority", None))
+        resp = client.eta(
+            args.preset,
+            inputs,
+            priority=getattr(args, "priority", None),
+            pool=getattr(args, "pool", None),
+        )
     except ClientError as e:
         return _client_fail(client, "eta failed", e)
     if args.json:
@@ -570,16 +584,19 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         doc = client.status()
     except ClientError as e:
         return _client_fail(client, "jobs failed", e)
-    pool = (doc.get("pools") or [{}])[0]
     rows: list[dict[str, Any]] = []
-    if pool.get("queue") is None:
-        print(f"queue unavailable: {pool.get('queue_error') or 'unknown'}", file=sys.stderr)
-    else:
-        rows.extend(pool["queue"])
-    if pool.get("recent") is None:
-        print(f"recent unavailable: {pool.get('recent_error') or 'unknown'}", file=sys.stderr)
-    else:
-        rows.extend(pool["recent"])
+    for pool in doc.get("pools") or [{}]:
+        pname = pool.get("pool") or pool.get("name") or "default"
+        if args.pool and pname != args.pool:
+            continue
+        if pool.get("queue") is None:
+            print(f"queue unavailable: {pool.get('queue_error') or 'unknown'}", file=sys.stderr)
+        else:
+            rows.extend({**r, "pool": r.get("pool") or pname} for r in pool["queue"])
+        if pool.get("recent") is None:
+            print(f"recent unavailable: {pool.get('recent_error') or 'unknown'}", file=sys.stderr)
+        else:
+            rows.extend({**r, "pool": r.get("pool") or pname} for r in pool["recent"])
     if me is not None:
         rows = [
             r
@@ -596,7 +613,12 @@ def cmd_jobs(args: argparse.Namespace) -> int:
     if not rows:
         print("no jobs")
         return 0
+    pools_seen = {r.get("pool") or "default" for r in rows}
+    current_pool: str | None = None
     for r in rows:
+        if len(pools_seen) > 1 and r.get("pool") != current_pool:  # 풀이 둘 이상일 때만 헤더
+            current_pool = r.get("pool")
+            print(f"pool {current_pool}")
         est = r.get("estimate") or {}
         state = r.get("state", "?")
         if state in ("running", "cancelling"):
@@ -925,6 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--no-cache", action="store_true", help="upload a full tarball instead of changed files"
     )
+    run.add_argument("--pool", metavar="NAME", help="worker pool (must be allowed by the preset)")
     run.add_argument("--by", metavar="LABEL", help="requester label (default: user@host)")
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
@@ -973,6 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
     eta.add_argument("--job", type=int, help="an existing job id")
     eta.add_argument("--json", action="store_true")
     eta.add_argument("--priority", choices=["low", "normal", "high"], default=None)
+    eta.add_argument("--pool", metavar="NAME", help="worker pool to estimate for")
     client_opts(eta)
     eta.set_defaults(func=cmd_eta)
 
@@ -985,6 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
     jobs = sub.add_parser("jobs", help="list queued, running and recent jobs")
     jobs.add_argument("--mine", action="store_true", help="only jobs you requested or joined")
     jobs.add_argument("--state", help="filter by state (running, queued, failed, ...)")
+    jobs.add_argument("--pool", metavar="NAME", help="only jobs of this worker pool")
     jobs.add_argument("--json", action="store_true")
     client_opts(jobs)
     jobs.set_defaults(func=cmd_jobs)

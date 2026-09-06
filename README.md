@@ -88,6 +88,8 @@ arrive as `RCM_INPUT_<NAME>` environment variables (never spliced into the comma
 [[presets]]
 name = "gate"
 argv = ["bash", "scripts/gate.sh"]      # runs from the uploaded workspace root
+pool = "default"                        # worker pool for this preset's jobs (default "default")
+pools = []                              # extra pools a session may choose with --pool
 timeout_seconds = 1200
 expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
@@ -149,11 +151,11 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low|normal|high`; `--no-cache` uploads a full tarball; `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low|normal|high`; `--no-cache` uploads a full tarball; `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
-| `rcm eta PRESET [-f k=v] [--priority P] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
+| `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
-| `rcm jobs [--mine] [--state S] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
+| `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
 | `rcm presets [--json]` | presets the server offers and their inputs |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
@@ -179,6 +181,10 @@ Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (
   blobs separate (by default identical content is shared between clients, which also means a
   client can learn whether a given file already exists on the server). `--no-cache` sends a full
   tarball; combine it with `--no-join` to force a fresh job for an unchanged tree.
+- **Pools** — a job runs in a worker pool. The local worker is pool `default`; a preset can
+  declare `pool = "linux"` (its default) and `pools = ["default"]` (extra pools a session may pick
+  with `--pool`). Jobs of a pool with no workers wait with reason `worker_down` and no ETA —
+  nothing pretends they will start. Remote workers that serve other pools arrive in M5b.
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
   when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,

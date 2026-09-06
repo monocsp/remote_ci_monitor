@@ -261,7 +261,36 @@
   }
 
   function pool0(status) { return status && Array.isArray(status.pools) && status.pools.length ? status.pools[0] : null; }
-  function queueOf(status) { var p = pool0(status); return p ? p.queue : undefined; }
+  function poolsOf(status) { return status && Array.isArray(status.pools) ? status.pools : []; }
+  // 모든 풀의 큐를 이어 붙인다. 어느 풀이든 queue 가 null(조회 실패)이면 undefined — unknown 이지 ok 가 아니다
+  function queueOf(status) {
+    var pools = poolsOf(status);
+    if (!pools.length) return undefined;
+    var all = [];
+    for (var i = 0; i < pools.length; i++) {
+      if (!Array.isArray(pools[i].queue)) return undefined;
+      all = all.concat(pools[i].queue);
+    }
+    return all;
+  }
+  // ── 풀 (M5b) ──
+  function poolHeader(pool) {
+    if (!pool || pool.name === "default" || !pool.name) return "";
+    var noWorkers = isNum(pool.lanes) && pool.lanes === 0;
+    return "pool " + pool.name + (noWorkers ? " · no workers" : "");
+  }
+  function poolSummary(pools) {
+    if (!Array.isArray(pools)) return { running: null, waiting: null, pools: 0 };
+    var running = 0, waiting = 0;
+    for (var i = 0; i < pools.length; i++) {
+      var q = pools[i] && pools[i].queue;
+      if (!Array.isArray(q)) return { running: null, waiting: null, pools: pools.length };
+      for (var j = 0; j < q.length; j++) {
+        if (q[j].state === "running" || q[j].state === "cancelling") running++; else waiting++;
+      }
+    }
+    return { running: running, waiting: waiting, pools: pools.length };
+  }
 
   // ── 요약 (항목 23 · 24 · 25) ──
   function notMoving(status, me) {
@@ -560,6 +589,7 @@
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
+    poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
   };

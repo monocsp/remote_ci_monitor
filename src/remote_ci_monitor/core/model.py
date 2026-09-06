@@ -48,6 +48,9 @@ PRIORITY_HIGH = 1
 PRIORITY_NAMES = {"low": PRIORITY_LOW, "normal": PRIORITY_NORMAL, "high": PRIORITY_HIGH}
 PRIORITY_LABELS = {PRIORITY_LOW: "low", PRIORITY_NORMAL: "normal", PRIORITY_HIGH: "high"}
 
+# ── 풀 (M5b) — 로컬 워커는 "default", 원격 워커는 자기 풀 이름으로 claim 한다 ──────────
+DEFAULT_POOL = "default"
+
 # ── 소스 모드 ────────────────────────────────────────────────────────────────
 MODE_TREE = "tree"
 MODE_GIT_REF = "git_ref"
@@ -115,6 +118,8 @@ class Preset:
     source_modes: tuple[str, ...] = (MODE_TREE,)
     repo: str = ""  # git_ref 를 받는 프리셋이 가리키는 `[[repos]].name`
     priority: int = PRIORITY_NORMAL  # 이 프리셋 잡의 기본값이자 비-admin 의 상한 (M5)
+    pool: str = DEFAULT_POOL  # 이 프리셋 잡의 기본 풀 (M5b)
+    pools: tuple[str, ...] = ()  # 세션이 --pool 로 고를 수 있는 추가 풀(자기 pool 은 언제나 허용)
     concurrency_group: str | None = None
     expected_seconds: int | None = None
     duration_key_inputs: tuple[str, ...] = ()
@@ -207,6 +212,7 @@ class Job:
     transitions: tuple[Transition, ...] = ()
     artifacts_purged_at: datetime | None = None  # 보존 정리로 로그·스냅샷·워크스페이스를 지운 시각
     priority: int = PRIORITY_NORMAL  # -1 low · 0 normal · 1 high (M5)
+    pool: str = DEFAULT_POOL  # 어느 풀의 워커가 돌리는가 (M5b)
 
     @property
     def is_waiting(self) -> bool:

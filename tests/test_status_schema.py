@@ -23,6 +23,7 @@ ROW_KEYS = {
     "id",
     "position",
     "priority",
+    "pool",
     "preset",
     "key",
     "inputs",
@@ -58,6 +59,7 @@ ESTIMATE_KEYS = {
     "finish_at",
 }
 RECENT_KEYS = {
+    "pool",
     "id",
     "preset",
     "key",
@@ -223,6 +225,8 @@ def test_status_is_json_serializable_with_expected_shape():
         "source_modes",
         "repo",
         "priority",
+        "pool",
+        "pools",
         "concurrency_group",
         "expected_seconds",
         "timeout_seconds",
