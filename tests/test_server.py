@@ -281,7 +281,7 @@ def test_tar_escape_is_rejected_and_left_as_failed(live):
     assert live.upload(jid, data=evil)[0] == 200  # 저장만 하고 풀지 않는다
     j = live.wait_terminal(jid)
     assert j.state == "failed" and j.exit_code is None
-    assert j.summary == "snapshot rejected: member escapes the workspace"
+    assert j.summary.startswith("snapshot rejected: member escapes the workspace")  # 뒤에 멤버 이름
     assert not list(live.cfg.data_dir.parent.glob("escape.txt"))
 
 
@@ -474,3 +474,31 @@ def test_shutdown_marks_running_job_lost(tmp_path):
     j = s.store.get_job(jid) if False else Store(s.cfg.data_dir / "rcm.sqlite3").get_job(jid)
     assert j.state == "lost" and j.summary == "server stopped while running"
     assert time.monotonic() - t0 < 15
+
+
+def test_job_urls_use_the_request_host_when_public_url_is_empty(tmp_path):
+    """사용자 검사: bind 0.0.0.0 의 bind:port url 은 다른 컴퓨터에서 안 열린다 — Host 를 쓴다."""
+    s = Server(tmp_path, workers=False)
+    try:
+        body = {
+            "preset": "ok",
+            "inputs": {},
+            "source": {"mode": "tree", "tree_hash": TREE_HASH, "bytes": len(TAR)},
+            "requester_label": "alice@host",
+        }
+        status, resp = s.req(
+            "POST",
+            "/jobs",
+            token="alice",
+            json_body=body,
+            headers={"Host": "macmini.tail1234.ts.net:8787"},
+        )
+        assert status == 201, resp
+        assert resp["url"].startswith("http://macmini.tail1234.ts.net:8787/#/jobs/")
+        job = s.req("GET", f"/jobs/{resp['job_id']}", headers={"Host": "10.0.0.5:8787"})[1]
+        assert job["url"].startswith("http://10.0.0.5:8787/#/jobs/")
+        # 이상한 Host 는 무시하고 bind:port 로
+        job = s.req("GET", f"/jobs/{resp['job_id']}", headers={"Host": "evil host/../x"})[1]
+        assert job["url"].startswith("http://127.0.0.1:")
+    finally:
+        s.close()

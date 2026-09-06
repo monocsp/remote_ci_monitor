@@ -61,10 +61,13 @@ def _ordinal(n: int) -> str:
 class _StatusLine:
     """TTY 면 한 줄을 덮어쓰고, 아니면 바뀔 때만 새 줄을 찍는다."""
 
-    def __init__(self, stream=sys.stderr):
+    def __init__(self, stream=sys.stderr, clock=time.monotonic):
         self.stream = stream
         self.tty = hasattr(stream, "isatty") and stream.isatty()
         self.last = ""
+        self.clock = clock
+        self.last_write = 0.0
+        self.pending: str | None = None  # 비 TTY 에서 1초 안에 몰린 줄은 마지막 것만 나중에
 
     def update(self, text: str) -> None:
         if text == self.last:
@@ -72,14 +75,25 @@ class _StatusLine:
         self.last = text
         if self.tty:
             self.stream.write("\r\x1b[2K" + text)
-        else:
-            self.stream.write(text + "\n")
+            self.stream.flush()
+            return
+        now = self.clock()
+        if now - self.last_write < 1.0:  # CI 로그·파일에 진행 줄이 수백 줄 쌓이지 않게
+            self.pending = text
+            return
+        self.pending = None
+        self.last_write = now
+        self.stream.write(text + "\n")
         self.stream.flush()
 
     def done(self) -> None:
         if self.tty and self.last:
             self.stream.write("\n")
             self.stream.flush()
+        elif self.pending is not None:
+            self.stream.write(self.pending + "\n")
+            self.stream.flush()
+            self.pending = None
 
 
 def describe(job: dict[str, Any]) -> str:
@@ -149,6 +163,17 @@ def _usage(msg: str) -> int:
     return USAGE_EXIT
 
 
+def _client_fail(client: Client, what: str, e: ClientError) -> int:
+    """읽기 명령의 실패 문구. 조용한 3 은 없다(사용자 검사 U2.9)."""
+    if e.status == 401 and "read access" in e.message:
+        _err(f"{what}: read access denied — this server needs a token for reads (RCM_TOKEN)")
+        return USAGE_EXIT
+    if e.status:
+        return _usage(f"{what}: {e.message}")
+    _err(f"{what}: cannot reach {client.server}: {e.message}")
+    return EXIT_UNKNOWN
+
+
 def _print_json(obj: Any) -> None:
     print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), flush=True)
 
@@ -196,7 +221,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         inputs = validate_inputs(preset, inputs_raw)
     except InputError as e:
         return _usage(str(e))
-    label = args.by or default_label(None)
+    # --by > client.toml 의 label / RCM_LABEL > "<user>@<host>" (수용 검사 J2 지적)
+    try:
+        cfg_label = _client_config(args).label
+    except ConfigError:
+        cfg_label = ""
+    label = args.by or cfg_label or default_label(None)
     if mode == "git_ref":
         return _run_git_ref(client, args, preset, inputs, ref or "", label)
     # ② 스냅샷
@@ -318,7 +348,12 @@ def _wait(
 
     try:
         code, job, reason = wait_for_job(
-            client, job_id, timeout=timeout, on_update=on_update, use_sse=use_sse
+            client,
+            job_id,
+            timeout=timeout,
+            on_update=on_update,
+            use_sse=use_sse,
+            on_info=line.update,
         )
     except KeyboardInterrupt:
         line.done()
@@ -455,7 +490,7 @@ def cmd_eta(args: argparse.Namespace) -> int:
             return _usage(str(e))
         resp = client.eta(args.preset, inputs)
     except ClientError as e:
-        return _usage(f"eta failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "eta failed", e)
     if args.json:
         _print_json(resp)
     else:
@@ -475,7 +510,8 @@ def cmd_top(args: argparse.Namespace) -> int:
                 if args.json:
                     _print_json({"error": e.message, "server": client.server})
                     return EXIT_UNKNOWN
-                text = f"━━━ rcm · {client.server} · unreachable: {e.message}\n"
+                label = "read access denied" if e.status == 401 else "unreachable"
+                text = f"━━━ rcm · {client.server} · {label}: {e.message}\n"
                 doc = None
             else:
                 text = render(doc, tz=_local_tz())
@@ -501,7 +537,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             me = client.whoami()["name"]
         doc = client.status()
     except ClientError as e:
-        return _usage(f"jobs failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "jobs failed", e)
     pool = (doc.get("pools") or [{}])[0]
     rows: list[dict[str, Any]] = []
     if pool.get("queue") is None:
@@ -560,7 +596,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
     except ClientError as e:
-        return _usage(f"logs failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "logs failed", e)
     except KeyboardInterrupt:
         return 130
     return 0
@@ -571,7 +607,7 @@ def cmd_presets(args: argparse.Namespace) -> int:
     try:
         doc = client.status()
     except ClientError as e:
-        return _usage(f"presets failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "presets failed", e)
     presets = doc.get("presets") or []
     if args.json:
         _print_json(presets)

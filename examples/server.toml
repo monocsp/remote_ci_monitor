@@ -54,6 +54,12 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   ::rcm::step::analyze
 #   ::rcm::step-end::ok
 #   ::rcm::summary::all green
+# Preset keys: name (required) · argv (required) · description · timeout_seconds · expected_seconds
+#   (used until enough real samples exist) · duration_key_inputs (inputs whose value gets its own
+#   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ·
+#   env_passthrough (default: PATH HOME LANG) · [presets.env].
+# Input keys: name · type = "choice" | "string" | "int" | "bool" · choices (choice) · pattern (string)
+#   · default · description.
 
 # `ok` exists so a fresh install can prove the whole path (`rcm run ok`) before you write real
 # presets. It runs no project code — delete it once your own presets work.

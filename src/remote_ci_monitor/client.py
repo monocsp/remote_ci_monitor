@@ -137,6 +137,24 @@ def _digest(path: Path) -> tuple[int, str]:
     return normalize_mode(st.st_mode, is_symlink=False), h.hexdigest()
 
 
+def _link_stays_inside(root: Path, rel: str, progress: Callable[[str], None] | None) -> bool:
+    """밖을 가리키는 심링크(절대 경로 · `..` 탈출)는 서버가 거부한다 — 미리 이름을 말하고 뺀다."""
+    path = root / rel
+    if not os.path.islink(path):
+        return True
+    target = os.readlink(path)
+    if os.path.isabs(target):
+        reason = "absolute target"
+    else:
+        joined = os.path.normpath(os.path.join(os.path.dirname(rel), target))
+        reason = "points outside the tree" if joined.startswith("..") else ""
+    if not reason:
+        return True
+    if progress:
+        progress(f"snapshot: skipping symlink {rel} -> {target} ({reason})")
+    return False
+
+
 def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
     # 사용자 이름·uid 는 빌드 머신과 무관하고 개인정보다 — 비운다
     info.uid = info.gid = 0
@@ -166,8 +184,14 @@ def make_snapshot(
     if candidates is None:
         candidates = _walk_candidates(root)
     files = select_files(candidates, rules=rules, present=lambda p: os.path.lexists(root / p))
+    files = [rel for rel in files if _link_stays_inside(root, rel, progress)]
     if progress:
         progress(f"snapshot: {len(files)} files")
+        if not is_git and len(files) > 200:
+            progress(
+                f"snapshot: {root} is not a git checkout — everything under it is included; "
+                "add a .rcmignore or use --dir"
+            )
     entries: list[tuple[str, int, str]] = []
     for rel in files:
         mode, digest = _digest(root / rel)
@@ -499,8 +523,11 @@ def wait_for_job(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     use_sse: bool = True,
+    on_info: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
     """잡이 끝날 때까지 기다린다. SSE 우선, 안 되면 폴링(명세 0-F). 3 은 「모른다」.
+
+    `on_info` 는 잡 JSON 이 아닌 상황 문구(서버 연결 실패 → 재접속 중)를 받는다.
 
     반환 (종료 코드, 마지막 잡 JSON, 사유).
     """
@@ -562,6 +589,7 @@ def wait_for_job(
         clock=clock,
         started=started,
         last=last,
+        on_info=on_info,
     )
 
 
@@ -576,6 +604,7 @@ def _poll_for_job(
     clock: Callable[[], float],
     started: float,
     last: dict[str, Any] | None,
+    on_info: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
     """2초 폴링. 서버 연결 실패가 60초 넘게 이어지면 3."""
     unreachable_since: float | None = None
@@ -591,6 +620,11 @@ def _poll_for_job(
             now = clock()
             if unreachable_since is None:
                 unreachable_since = now
+                if on_info:  # 60초 동안 아무 말이 없으면 왜 기다리는지 모른다(사용자 검사 U2.9)
+                    on_info(
+                        f"server unreachable ({e.message}) — reconnecting for up to "
+                        f"{CONNECTION_GRACE_SECONDS:.0f}s"
+                    )
             if now - unreachable_since > CONNECTION_GRACE_SECONDS:
                 return EXIT_UNKNOWN, last, f"lost contact with the server: {e.message}"
             if timeout is not None and now - started > timeout:

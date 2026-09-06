@@ -33,7 +33,11 @@ def _reject_reason(e: BaseException) -> str:
         "CompressionError": "unsupported compression",
         "EOFError": "truncated archive",
     }
-    return mapping.get(name, name)
+    reason = mapping.get(name, name)
+    member = getattr(getattr(e, "tarinfo", None), "name", None)
+    if isinstance(member, str) and member:
+        reason += f": {member[:120]}"  # 클라이언트가 보낸 상대 경로 — 서버 경로가 아니다
+    return reason
 
 
 def extract_tree(tar_path: Path, workspace: Path) -> int:

@@ -279,7 +279,9 @@ def render(
         out.append("recent")
         for r in recent:
             glyph = _GLYPH.get(r["state"], "?")
-            exit_txt = f" · exit {r['exit_code']}" if r.get("exit_code") is not None else ""
+            # 웹과 같은 규칙: 프로세스 종료 코드는 failed 에만(취소·타임아웃의 -15/-9 는 신호일 뿐)
+            show_exit = r.get("state") == "failed" and r.get("exit_code") is not None
+            exit_txt = f" · exit {r['exit_code']}" if show_exit else ""
             req = (r.get("requester") or {}).get("label") or "?"
             tail = r.get("summary") or ""
             if r.get("failed_step"):

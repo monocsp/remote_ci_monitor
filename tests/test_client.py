@@ -125,6 +125,25 @@ def test_snapshot_without_git_walks_the_tree(tmp_path):
         snap.tar_path.unlink()
 
 
+def test_snapshot_skips_symlinks_that_point_outside_and_names_them(tmp_path):
+    """사용자 검사 U2.1: venv 의 절대 경로 링크로 서버가 통째로 거부하지 않게 — 미리 뺀다."""
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "a.txt").write_text("a")
+    os.symlink("/usr/bin/env", root / "env-abs")
+    os.symlink("../outside", root / "escape")
+    os.symlink("a.txt", root / "inside")
+    seen: list[str] = []
+    snap = make_snapshot(root, tar_dir=tmp_path, progress=seen.append)
+    try:
+        assert snap.files == ("a.txt", "inside")
+        warn = [m for m in seen if "skipping symlink" in m]
+        assert any("env-abs -> /usr/bin/env (absolute target)" in m for m in warn)
+        assert any("escape -> ../outside (points outside the tree)" in m for m in warn)
+    finally:
+        snap.tar_path.unlink()
+
+
 # ── 서버와 함께 ───────────────────────────────────────────────────────────────
 
 
