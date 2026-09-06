@@ -125,6 +125,25 @@ def test_snapshot_without_git_walks_the_tree(tmp_path):
         snap.tar_path.unlink()
 
 
+def test_snapshot_skips_symlinks_that_point_outside_and_names_them(tmp_path):
+    """사용자 검사 U2.1: venv 의 절대 경로 링크로 서버가 통째로 거부하지 않게 — 미리 뺀다."""
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "a.txt").write_text("a")
+    os.symlink("/usr/bin/env", root / "env-abs")
+    os.symlink("../outside", root / "escape")
+    os.symlink("a.txt", root / "inside")
+    seen: list[str] = []
+    snap = make_snapshot(root, tar_dir=tmp_path, progress=seen.append)
+    try:
+        assert snap.files == ("a.txt", "inside")
+        warn = [m for m in seen if "skipping symlink" in m]
+        assert any("env-abs -> /usr/bin/env (absolute target)" in m for m in warn)
+        assert any("escape -> ../outside (points outside the tree)" in m for m in warn)
+    finally:
+        snap.tar_path.unlink()
+
+
 # ── 서버와 함께 ───────────────────────────────────────────────────────────────
 
 
@@ -201,6 +220,24 @@ def test_joiner_cancel_leaves_and_wait_keeps_going(live, tmp_path):
     assert alice.cancel(first["job_id"])["state"] in ("cancelled", "cancelling")
     code, job, _ = wait_for_job(alice, first["job_id"], poll_seconds=0.1)
     assert code == 2
+
+
+def test_timeout_is_honoured_while_server_is_unreachable(tmp_path):
+    """수용 검사 J3: 서버 연결이 안 돼도 --timeout 이 60초 grace 보다 먼저 온다."""
+    from remote_ci_monitor.client import Client, wait_for_job
+
+    client = Client("http://127.0.0.1:9", None)  # 아무도 안 듣는 포트 → 즉시 연결 실패
+    clock = [0.0]
+
+    def fake_sleep(s: float) -> None:
+        clock[0] += s
+
+    code, job, reason = wait_for_job(
+        client, 1, timeout=3, sleep=fake_sleep, clock=lambda: clock[0], use_sse=False
+    )
+    assert code == 3 and job is None
+    assert reason and "--timeout 3s" in reason
+    assert clock[0] < 60
 
 
 def test_unreachable_server_is_3_not_1(tmp_path):

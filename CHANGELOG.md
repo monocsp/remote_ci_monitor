@@ -31,7 +31,7 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
   password = token; writes stay Bearer-only), launchd and systemd unit examples, concurrency-group
   and signal e2e coverage.
 - **Packaging** (M4): `rcm init server` / `rcm init client --server URL`, `rcm version --json`,
-  `rcm check` Python/git rows, install smoke script, release workflow (GitHub Release + optional
+  `rcm check` Python row (with `--config server.toml` also data-dir and git rows), install smoke script, release workflow (GitHub Release + optional
   PyPI trusted publishing), Linux server `Dockerfile`.
 
 ### Known limits

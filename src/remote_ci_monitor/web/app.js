@@ -933,6 +933,9 @@
     var reasonCell = r.cls === "blocked" ? '<span class="blocked">' + reasonHtml + "</span>" : r.cls === "stalled" ? '<span class="stalled">' + reasonHtml + "</span>" : r.cls === "stuck" ? '<span class="stuck">' + reasonHtml + "</span>" : '<span class="reason' + (r.actionable || busy ? " act" : "") + '">' + reasonHtml + "</span>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">will be cancelled by the server if it stays stalled</div>';
     if (row._cancelRequested) reasonCell += '<div class="sub">cancel requested…</div>';
+    // 대기 잡(펼침 없음)도 내 잡이면 취소할 수 있어야 한다 — 폰에서 유일한 취소 경로다(사용자 검사 U3.6)
+    var canActRow = !!state.token && !state.tokenBad && (mine || state.me === null);
+    if (!busy && canActRow && !row._cancelRequested) reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">Cancel</button></div>';
     var el = elapsedText(row, now());
     var elapsedCell = busy && isNum(est.elapsed_seconds)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
@@ -1232,7 +1235,7 @@
     var body;
     if (isJoiner) body = "You joined this job. You will leave the join list; the job keeps running for " + (req.label || req.name || "its requester") + ".";
     else if (row.state === "running") body = "SIGTERM now, SIGKILL after the grace period." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "") + " Cannot be undone.";
-    else body = "Removed from the queue. Run rcm run again to resubmit." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "");
+    else body = "Removed from the queue; sessions waiting on it get exit 2. Run rcm run again to resubmit." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "");
     $("[data-cancel-body]").textContent = body;
     $("[data-cancel-go]").textContent = isJoiner ? "Leave" : "Cancel job";
     var dlg = $("#cancel-dialog");

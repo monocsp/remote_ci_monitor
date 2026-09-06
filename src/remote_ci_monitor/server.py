@@ -24,6 +24,7 @@ import re
 import signal
 import socket
 import socketserver
+import sqlite3
 import sys
 import threading
 import time
@@ -90,6 +91,7 @@ UPLOAD_TIMEOUT = 60
 DEFAULT_TAIL = 5
 MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
+_HOST_RE = re.compile(r"^[A-Za-z0-9.\-_\[\]:]{1,255}$")  # Host 헤더 — URL 에 넣을 만한 모양만
 RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
 _JOB_RE = re.compile(r"^/jobs/(\d+)(/tree|/log|/cancel)?$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
@@ -335,9 +337,17 @@ class App:
     def log_path(self, job_id: int) -> Path:
         return self.job_dir(job_id) / "log.txt"
 
-    def base_url(self) -> str:
+    def base_url(self, host: str | None = None) -> str:
+        """잡 url 의 앞부분. public_url > 요청의 Host(세션이 실제로 쓴 주소) > bind:port.
+
+        bind 가 0.0.0.0 이면 bind:port 는 다른 컴퓨터에서 열리지 않는다(사용자 검사 U2 발견).
+        """
         s = self.config.server
-        return s.public_url.rstrip("/") if s.public_url else f"http://{s.bind}:{s.port}"
+        if s.public_url:
+            return s.public_url.rstrip("/")
+        if host and _HOST_RE.fullmatch(host):
+            return f"http://{host}"
+        return f"http://{s.bind}:{s.port}"
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 
@@ -413,20 +423,20 @@ class App:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
         except Exception as e:  # noqa: BLE001
-            queue_error = f"{type(e).__name__}: {_safe(str(e))}"
+            queue_error = _error_text(e)
         medians: dict[str, Median] | None
         medians_error = None
         try:
             since = now - timedelta(days=cfg.sample_days)
             medians = medians_from(self.store.list_samples(since), now, cfg)
         except Exception as e:  # noqa: BLE001
-            medians, medians_error = None, f"{type(e).__name__}: {_safe(str(e))}"
+            medians, medians_error = None, _error_text(e)
         recent: list[Job] | None
         recent_error = None
         try:
             recent = self.store.list_recent(self.config.server.recent_count)
         except Exception as e:  # noqa: BLE001
-            recent, recent_error = None, f"{type(e).__name__}: {_safe(str(e))}"
+            recent, recent_error = None, _error_text(e)
         try:
             paused = self.store.get_paused()
         except Exception:  # noqa: BLE001
@@ -490,7 +500,7 @@ class App:
             return None, error
         return tuple(hosts), None
 
-    def status(self, token: TokenInfo | None) -> dict[str, Any]:
+    def status(self, token: TokenInfo | None, host: str | None = None) -> dict[str, Any]:
         now = self.now_fn()
         snap = self._snapshot()
         queue: list[QueueRow] | None
@@ -498,7 +508,7 @@ class App:
         try:
             queue = self._queue_rows(now, snap)
         except Exception as e:  # noqa: BLE001
-            queue, queue_error = None, f"{type(e).__name__}: {_safe(str(e))}"
+            queue, queue_error = None, _error_text(e)
         hosts, hosts_error = self._hosts()
         server = ServerInfo(
             version=self.version,
@@ -528,7 +538,7 @@ class App:
             server=server,
             presets=tuple(self.config.presets),
             pools=(pool,),
-            base_url=self.base_url(),
+            base_url=self.base_url(host),
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
@@ -539,24 +549,26 @@ class App:
                         tails[row.job.id] = t
         return status_json(model, log_tails=tails)
 
-    def job_view(self, job_id: int, token: TokenInfo | None, tail: int) -> dict[str, Any]:
+    def job_view(
+        self, job_id: int, token: TokenInfo | None, tail: int, host: str | None = None
+    ) -> dict[str, Any]:
         job = self.store.get_job(job_id)
         if job is None:
             raise ApiError(404, "no such job")
         now = self.now_fn()
         if job.is_terminal:
-            return recent_json(job, base_url=self.base_url())
+            return recent_json(job, base_url=self.base_url(host))
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)
         if row is None:  # 방금 끝났다
             job = self.store.get_job(job_id)
             assert job is not None
-            return recent_json(job, base_url=self.base_url())
+            return recent_json(job, base_url=self.base_url(host))
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
-        return queue_row_json(row, base_url=self.base_url(), log_tail=log_tail)
+        return queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail)
 
     def eta(self, body: dict[str, Any]) -> dict[str, Any]:
         """`POST /api/eta` — 이 프리셋·입력의 잡을 지금 넣으면 어디에 서나(가상 잡, 명세 0-G)."""
@@ -593,7 +605,9 @@ class App:
 
     # ── 제출 ────────────────────────────────────────────────────────────────
 
-    def submit(self, body: dict[str, Any], token: TokenInfo) -> tuple[int, dict[str, Any]]:
+    def submit(
+        self, body: dict[str, Any], token: TokenInfo, host: str | None = None
+    ) -> tuple[int, dict[str, Any]]:
         if not isinstance(body, dict):
             raise ApiError(400, "body must be a JSON object")
         name = body.get("preset")
@@ -615,7 +629,7 @@ class App:
         if not isinstance(label, str) or len(label) > 120:
             raise ApiError(400, "requester_label must be a string of at most 120 characters")
         if mode == MODE_GIT_REF:
-            return self._submit_git_ref(preset, inputs, src, label, token, body)
+            return self._submit_git_ref(preset, inputs, src, label, token, body, host)
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
         tree_hash = src.get("tree_hash")
@@ -651,7 +665,7 @@ class App:
                     "job_id": existing.id,
                     "joined": True,
                     "state": existing.state,
-                    "url": f"{self.base_url()}/#/jobs/{existing.id}",
+                    "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                 }
         job = self.store.create_job(
             preset=preset.name,
@@ -671,7 +685,7 @@ class App:
             "joined": False,
             "state": job.state,
             "upload": f"/jobs/{job.id}/tree",
-            "url": f"{self.base_url()}/#/jobs/{job.id}",
+            "url": f"{self.base_url(host)}/#/jobs/{job.id}",
         }
 
     def _submit_git_ref(
@@ -682,6 +696,7 @@ class App:
         label: str,
         token: TokenInfo,
         body: dict[str, Any],
+        host: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         repo = self.config.repo(preset.repo)
@@ -726,7 +741,7 @@ class App:
                     "joined": True,
                     "state": existing.state,
                     "sha": existing.source.sha,
-                    "url": f"{self.base_url()}/#/jobs/{existing.id}",
+                    "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                 }
         job = self.store.create_job(
             preset=preset.name,
@@ -747,7 +762,7 @@ class App:
             "joined": False,
             "state": job.state,
             "sha": sha,
-            "url": f"{self.base_url()}/#/jobs/{job.id}",
+            "url": f"{self.base_url(host)}/#/jobs/{job.id}",
         }
 
     # ── 업로드 ──────────────────────────────────────────────────────────────
@@ -921,6 +936,13 @@ def read_web_asset(name: str) -> bytes | None:
         return None
 
 
+def _error_text(e: BaseException) -> str:
+    """섹션 오류 문구. DB 오류는 「database error: …」 로 — 예외 이름 사슬은 사람이 못 읽는다."""
+    if isinstance(e, sqlite3.Error):
+        return f"database error: {_safe(str(e))}"
+    return f"{type(e).__name__}: {_safe(str(e))}"
+
+
 def _opt_str(v: Any, limit: int) -> str | None:
     if v is None:
         return None
@@ -1015,7 +1037,8 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             sem.release()
 
-    do_GET = do_POST = do_PUT = do_HEAD = _dispatch
+    # 모르는 메서드도 우리 라우터로 — 표준 라이브러리의 HTML 501 대신 JSON 405/404 를 낸다
+    do_GET = do_POST = do_PUT = do_HEAD = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
 
     def _token(self) -> TokenInfo | None:
         return self.app.authenticate(self.headers.get("Authorization"))
@@ -1097,7 +1120,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             self._only(method, "GET")
             self._read_only_ok()
-            doc = self.app.status(self._read_token())
+            doc = self.app.status(self._read_token(), host=self.headers.get("Host"))
             body = json.dumps(doc, separators=(",", ":")).encode()
             etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
             if self.headers.get("If-None-Match") == etag:
@@ -1118,7 +1141,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/jobs":
             self._only(method, "POST")
             t = self.app.require_token(self._token())
-            status, body = self.app.submit(self._json_body(), t)
+            status, body = self.app.submit(self._json_body(), t, host=self.headers.get("Host"))
             self._send_json(status, body)
             return
         if path == "/api/eta":
@@ -1140,7 +1163,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._only(method, "GET")
                 self._read_only_ok()
                 tail = _int_param(query, "tail", DEFAULT_TAIL, 0, MAX_TAIL)
-                self._send_json(200, self.app.job_view(job_id, self._read_token(), tail))
+                host = self.headers.get("Host")
+                self._send_json(200, self.app.job_view(job_id, self._read_token(), tail, host))
                 return
             if sub == "/tree":
                 self._only(method, "PUT")

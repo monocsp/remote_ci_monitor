@@ -6,6 +6,7 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 
 - No GitHub dependency. Runs on your LAN or Tailscale.
 - Runtime dependencies: **zero** (Python 3.11+ standard library only). Same package for server and client.
+- Build machines: macOS (Apple Silicon and Intel) and Linux. Windows is out of scope (sessions on Windows can still submit through WSL).
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
@@ -19,9 +20,9 @@ Needs Python **3.11.4+** (the safe `tarfile` filter) on both machines. One packa
 dependencies:
 
 ```sh
-pipx install remote-ci-monitor                      # from PyPI
-uvx --from remote-ci-monitor rcm version            # or run it through uv without installing
-pipx install git+https://github.com/monocsp/remote_ci_monitor   # from git (main); add @dev for the dev branch — use this before the first PyPI release
+pipx install git+https://github.com/monocsp/remote_ci_monitor   # from git (main) — the way to install until the first PyPI release; add @dev for the dev branch
+pipx install remote-ci-monitor                      # from PyPI (not published yet — see Releasing)
+uvx --from remote-ci-monitor rcm version            # or run it through uv without installing (uv: https://docs.astral.sh/uv/getting-started/installation/)
 ```
 
 No `pipx` yet? `python3 -m pip install --user pipx && python3 -m pipx ensurepath`, then open a new
@@ -46,6 +47,11 @@ Tailscale/LAN address (or `0.0.0.0`) and, on macOS, allow Python through the fir
 Check from another computer with `curl http://<build-machine>:8787/api/health`. For a service that
 survives logins and reboots see [Run as a service](#run-as-a-service).
 
+Tokens: `rcm token add ops --admin` makes an admin token (pause/resume, cancel any job, read any
+log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another port:
+`rcm serve --port 8790` (or `port = …` in server.toml). Set `public_url = "http://macmini:8787"`
+when you bind to `0.0.0.0` so job URLs in `rcm run` output open from other computers.
+
 ## Session machine (3 commands)
 
 <!-- smoke:begin -->
@@ -53,6 +59,7 @@ survives logins and reboots see [Run as a service](#run-as-a-service).
 rcm init client --server http://<build-machine>:8787   # ~/.config/rcm/client.toml (mode 600)
 export RCM_TOKEN=<token from rcm token add>            # or put it in that file as token = "…"
 rcm check                  # python · server · token · presets · timezone must all say ok
+cd ~/src/app               # any project directory — rcm run uploads the *current directory*
 rcm run ok                 # first job: exit 0 and one JSON line means everything works
 rcm top                    # queue, ETAs, recent results, host load
 ```
@@ -60,9 +67,15 @@ rcm top                    # queue, ETAs, recent results, host load
 
 Then run real work from a project directory: `cd ~/src/app && rcm run gate -f scope=full`, and
 branch on `$?` — 0 succeeded · 1 failed · 2 cancelled/timed out · 3 unknown.
+`examples/session/ci-gate.sh` is a ready-made wrapper that branches on `$?` (needs `jq`).
 
-`rcm run` snapshots the current directory (git-tracked + untracked-but-not-ignored files, minus
-`.rcmignore`), uploads it over the same HTTP connection, waits, and prints one JSON line on stdout.
+`rcm run` snapshots the **current directory** (git-tracked + untracked-but-not-ignored files, minus
+patterns in `.rcmignore` — gitignore syntax, e.g. `dist/`, `*.bin`; `--exclude PATTERN` adds one),
+uploads it over the same HTTP connection, waits, and prints one JSON line on stdout. The server
+refuses snapshots above `max_snapshot_bytes` (default 512 MB) before anything is uploaded. Symlinks
+that point outside the tree (absolute targets, e.g. a venv's `bin/python`) are skipped with a
+warning that names them. The workspace on the build machine has **no `.git`**; scripts that need
+git history belong in a `git_ref` preset (`RCM_BASE_SHA` still tells the script the commit).
 Progress goes to stderr. Ctrl-C detaches — the job keeps running; resume with `rcm wait --job N`,
 stop it with `rcm cancel N`.
 
@@ -136,14 +149,16 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--no-wait] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref |
+| `rcm run PRESET [-f k=v] [--ref REF] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
-| `rcm eta PRESET [-f k=v]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
+| `rcm eta PRESET [-f k=v] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
-| `rcm jobs [--mine] [--state S]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
+| `rcm jobs [--mine] [--state S] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
-| `rcm presets` | presets the server offers and their inputs |
+| `rcm presets [--json]` | presets the server offers and their inputs |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
+
+`rcm check --config server.toml` validates a server config (and its data dir, git) without starting it.
 
 Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (< 5), `low` (preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown values print as `—`, never as 0.
 
@@ -161,7 +176,7 @@ estimates are computed.
   backoff. After 30 s without a successful response a **Lost connection** banner appears and the
   ages keep counting — the page never pretends to be current.
 - Paste your token with the 🔑 button to highlight your jobs, see log tails, open full logs and
-  cancel. Only a 401/403 clears a saved token; network errors keep it.
+  cancel your running or queued jobs. Only a 401/403 clears a saved token; network errors keep it.
 - `#/jobs/N` deep-links to a job. `?poll=1` disables the event stream (polling only), `?debug=1`
   prints layout diagnostics in the footer — both are for troubleshooting.
 - Dark/light follow the system. Below 720 px the queue turns into cards.
@@ -175,7 +190,10 @@ estimates are computed.
 | 2 | cancelled or timed out |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
 
-Usage errors and validation failures that never reach the server exit with 2 as well.
+Usage errors and validation failures that never reach the server exit with 2 as well — including
+`rcm run` when the server cannot be reached before submit. `rcm wait` gives an unreachable server
+60 s to come back (printing `reconnecting…`) before exiting 3; `rcm eta`, `rcm jobs` and `rcm top`
+fail fast with `cannot reach <url>` and exit 3.
 
 ## Security notes
 
@@ -215,15 +233,27 @@ every `retention_sweep_interval_seconds` (3600). Running jobs are never touched;
 purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
 `/api/health` turns 503 — nothing here fails silently.
 
+## Upgrade
+
+`pipx upgrade remote-ci-monitor` (or `pipx install --force <wheel>`), then restart `rcm serve`
+(`launchctl kickstart -k gui/$(id -u)/com.remote-ci-monitor.server` · `systemctl restart rcm-server`).
+The database migrates on start; queued jobs and a paused queue survive, jobs that were running
+become `lost` (exit 3 for waiting sessions). Sessions may run a different patch version —
+`rcm check` shows both versions.
+
 ## Run as a service
 
 Keep `rcm serve` alive across logins and reboots with the example units in `examples/`:
 
-- **macOS (launchd)** — `examples/launchd/com.remote-ci-monitor.server.plist`. Edit the paths,
-  copy it to `~/Library/LaunchAgents/` of the dedicated `rcm` user and run
+- **macOS (launchd)** — `examples/launchd/com.remote-ci-monitor.server.plist`. Create the
+  dedicated user in System Settings → Users & Groups (Standard, no admin). Replace every
+  `/Users/rcm` in the file (7 places: the `rcm` binary, `server.toml`, WorkingDirectory, the two
+  log paths, `PATH`, `HOME`), then as that user `mkdir -p ~/Library/Logs/rcm ~/Library/LaunchAgents`,
+  copy the file there and run
   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.server.plist`
-  (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` to stop). Logs go to
-  `~/Library/Logs/rcm/server.log`. launchd does not expand `~`, so every path in the file is absolute.
+  (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` to stop). launchd does not create
+  the log directory (a missing one makes the job exit silently) and does not expand `~`, so every
+  path in the file is absolute. Logs go to `~/Library/Logs/rcm/server.log`.
 - **Linux (systemd)** — `examples/systemd/rcm-server.service`. Copy to `/etc/systemd/system/`,
   then `sudo systemctl daemon-reload && sudo systemctl enable --now rcm-server`;
   `journalctl -u rcm-server -f` shows the log.

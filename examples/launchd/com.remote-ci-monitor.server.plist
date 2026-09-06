@@ -5,7 +5,8 @@
 
   1. Create a dedicated user (here: rcm) without sudo, install with `pipx install remote-ci-monitor`.
   2. Put the config at /Users/rcm/.config/rcm/server.toml and create tokens with `rcm token add`.
-  3. Edit the paths below (rcm binary, config, log directory), then as that user:
+  3. Replace every /Users/rcm below (7 places: rcm binary, config, WorkingDirectory, two log paths,
+     PATH, HOME), then as that user:
        mkdir -p ~/Library/Logs/rcm ~/Library/LaunchAgents
        cp com.remote-ci-monitor.server.plist ~/Library/LaunchAgents/
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.server.plist

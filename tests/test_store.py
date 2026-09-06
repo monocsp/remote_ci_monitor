@@ -317,6 +317,13 @@ def test_abandon_stale_uploads_keeps_the_job_as_cancelled(store):
     assert store.get_job(fresh.id).state == UPLOADING
 
 
+def test_abandon_summary_uses_seconds_below_a_minute(store):
+    """수용 검사 B3: upload_abandon_seconds < 60 이면 「0m」 이 아니라 초로 적는다."""
+    stale = enqueue(store, now=at(0), tree="s", state=UPLOADING)
+    assert store.abandon_stale_uploads(at(100), 45) == [stale.id]
+    assert store.get_job(stale.id).summary == "upload abandoned after 45s"
+
+
 # ── M3 — 스키마 v2 · artifacts_purged_at · 보존 정리용 조회 (docs/m3-workplan.md §2) ──────────
 
 
