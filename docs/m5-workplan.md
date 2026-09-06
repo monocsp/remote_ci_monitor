@@ -7,7 +7,7 @@
 ## M5a-1. 우선순위
 
 - 값: `priority ∈ {-1, 0, 1}`(low · normal · high). 세 단계면 충분하다 — 숫자 우선순위는 기아를 만들고 설명이 어렵다.
-- 어디서: `rcm run … --priority high|normal|low`(기본 normal) · 프리셋 `priority = "high"`(기본값, 세션이 낮출 수는 있어도 admin 이 아니면 프리셋 기본보다 **높일 수 없다** — 게이트를 모두 high 로 넣는 일을 막는다) · admin 은 `rcm bump N --priority high`(`POST /jobs/{id}/priority`, admin 토큰, 대기 잡만; running 은 409).
+- 어디서: `rcm run … --priority high|normal|low`(플래그가 없으면 **프리셋의 `priority`**, 프리셋에도 없으면 normal) · 프리셋 `priority = "high"`(그 프리셋 잡의 기본값이자 비-admin 의 상한 — 세션이 낮출 수는 있어도 admin 이 아니면 프리셋 기본보다 **높일 수 없다**; 게이트를 모두 high 로 넣는 일을 막는다) · admin 은 `rcm bump N [--priority high]`(기본 high; `POST /jobs/{id}/priority`, admin 토큰, 대기 잡만; running 은 409). `presets[].priority`(추가 키)를 상태 JSON 에 실어 클라이언트가 403 을 미리 안다.
 - 순서(순수 `core/queue.py`): 대기 잡 정렬 키 `(-priority, id)`. `position` 도 이 순서. `store.claim` 은 `ORDER BY priority DESC, id`(리뷰 반영 — FIFO 잔재 제거, 순수 정렬과 같은 키). 합류 판정은 priority 와 무관. (리뷰 반영) 합류 시 priority 상향은 **한 트랜잭션** `store.join_or_bump(join_key, name, label, priority, now)` — `max(existing.priority, requested)` 로만 올린다, 낮으면 그대로.
 - (리뷰 반영) `Preset.priority: int = 0`(설정 `priority = "high"|"normal"|"low"`). 서버 `submit`: 비-admin 토큰은 `requested <= preset.priority` 여야 한다(아니면 403 `priority above the preset default needs an admin token`). `POST /jobs/{id}/priority` 는 admin 이고 대기 잡(`uploading`·`queued`)만, 아니면 409.
 - 표시: `queue[].priority`(int, 추가 키) · `rcm top` 행 앞에 `↑`(high) / `↓`(low) · 웹 행에 `high`/`low` 칩 · `reason` 은 그대로(우선순위는 이유가 아니다).
@@ -54,7 +54,8 @@ timeout_seconds = 30
 
 - 트리거: 이벤트 버스의 `job_finished` **+ (리뷰 반영) 시작 시 스캔**. `notifications(job_id, notify_name, claimed_at, delivered_at, failed)` 테이블(v3, `UNIQUE(job_id, notify_name)`): 알림 스레드(`notify.py`)는 실행 전에 그 행을 **unique insert 로 claim** 한다 — 같은 `job_finished` 가 두 번 와도(recover · finish · 재발행) 한 번만 실행된다(이벤트 중복은 정상 입력). 시작 시 최근 `metadata_retention_days` 안의 종료 잡 중 행이 없는 것을 스캔해 보낸다(재시작 직후 recover 이벤트를 놓치지 않는다). 동시 1. argv 는 env `RCM_JOB_ID · RCM_STATE · RCM_PRESET · RCM_KEY · RCM_REQUESTER · RCM_SUMMARY · RCM_FAILED_STEP · RCM_EXIT_CODE · RCM_JOB_SECONDS · RCM_URL · RCM_NOTIFY`(이름) 로 — (리뷰 반영) 사용자 문자열(summary · failed_step · requester)은 NUL·제어문자 제거, 4 KB 로 자른다. url 은 `POST` JSON(최근 완료 행 + `notify` 이름, `Content-Type: application/json`, `urllib.request` 에 (리뷰 반영) `redirect_request` 가 None 인 opener — 3xx 는 실패, 응답 본문 무시). 셸 없음 · 보간 없음.
 - 실패(종료 ≠ 0 · 타임아웃 · HTTP ≠ 2xx): 재시도 없음. 서버 로그 한 줄 + `server.notify_failures`(추가 키, 시작 후 누적 수) — `last_error` 는 안 건드린다(알림 실패로 큐가 아픈 것처럼 보이면 안 된다).
-- 설정 검증: argv/url 중 하나만 · `on` 은 종료 상태만 · `presets` 는 존재하는 프리셋 · url 은 `https://` 또는 `http://`(로컬 훅). 알림 명령도 프리셋과 같은 「등록된 명령만」 규칙.
+- 설정 검증: argv/url 중 하나만 · `on` 은 종료 상태만 · `presets` 는 존재하는 프리셋 · url 은 `https://` 또는 `http://`(로컬 훅). 알림 명령도 프리셋과 같은 「등록된 명령만」 규칙. `examples/server.toml` 의 주석 예시는 주석을 풀면 그대로 유효해야 한다(`presets` 에 주석 처리된 프리셋을 넣지 않는다).
+- README: `--no-cache` 로 같은 트리를 다시 올리려면 합류를 피해야 하므로 `--no-join` 도 같이 쓴다는 것을 적는다.
 - 서버 재시작 중 끝난 잡(lost)도 알림 대상(recover_on_start 가 `job_finished` 를 낸다 — 이미 낸다).
 
 ## M5b. 원격 워커 (빌드 머신 여러 대)
