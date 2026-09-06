@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import shutil
 import threading
 from collections.abc import Callable
@@ -21,7 +22,8 @@ from pathlib import Path
 
 from remote_ci_monitor.config import ServerConfig
 from remote_ci_monitor.core.model import TERMINAL_STATES, Job
-from remote_ci_monitor.core.retention import RetentionPolicy, due_for_purge
+from remote_ci_monitor.core.retention import RetentionPolicy, blobs_to_purge, due_for_purge
+from remote_ci_monitor.materialize import blob_path
 from remote_ci_monitor.store import Store
 
 CANDIDATE_LIMIT = 1000
@@ -120,10 +122,56 @@ class Janitor:
         deleted = self.store.delete_old_jobs(cutoff)
         if deleted:
             self.log(f"retention: deleted {deleted} job records older than {cutoff:%Y-%m-%d}")
+        if self.config.server.snapshot_cache:
+            gone = self.sweep_blobs(now)
+            if gone:
+                self.log(f"retention: purged {gone} snapshot blobs")
         with self._lock:
             self.last_sweep_at = now
             self.purged_total += len(purged)
         return len(purged)
+
+    def _referenced_blob_keys(self) -> set[str]:
+        """활성 잡의 manifest 가 참조하는 blob 키 — 이것들은 GC 대상이 아니다."""
+        keys: set[str] = set()
+        for job in self.store.list_active():
+            path = self.config.data_dir / "jobs" / str(job.id) / "manifest.json"
+            if not path.is_file():
+                continue
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                prefix = doc.get("blob_prefix") or ""
+                for f in doc.get("files", []):
+                    sha = f.get("sha256") if isinstance(f, dict) else None
+                    if isinstance(sha, str):
+                        keys.add(prefix + sha)
+            except (OSError, ValueError) as e:
+                self.on_error(f"retention: job {job.id} manifest: {type(e).__name__}")
+        return keys
+
+    def sweep_blobs(self, now: datetime) -> int:
+        """안 쓰인 지 오래된 blob 과 상한 초과분을 지운다(파일 → 행). 참조된 것은 절대 안 지운다."""
+        referenced = self._referenced_blob_keys()
+        victims = blobs_to_purge(
+            self.store.list_blobs(),
+            referenced,
+            now,
+            days=self.config.server.snapshot_cache_days,
+            max_bytes=self.config.server.snapshot_cache_max_bytes,
+        )
+        gone: list[str] = []
+        for b in victims:
+            path = blob_path(self.config.data_dir / "blobs", b.sha256)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                sha7 = b.sha256.rpartition("/")[2][:7]  # token 범위 키(`<token>/<sha>`)도 sha 만
+                self.on_error(f"retention: blob {sha7}: {_errname(e)}")
+                continue
+            gone.append(b.sha256)
+        if gone:
+            self.store.delete_blobs(gone)
+        return len(gone)
 
     # ── 스레드 ──────────────────────────────────────────────────────────────
 

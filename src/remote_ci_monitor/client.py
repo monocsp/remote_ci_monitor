@@ -20,7 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -71,6 +71,18 @@ class ClientError(Exception):
 
 
 @dataclass(frozen=True)
+class Entry:
+    """스냅샷 파일 하나 — manifest · 전체 tar · 부분 tar 의 **단일 출처**(M5)."""
+
+    path: str
+    mode: int
+    size: int
+    sha256: str
+    kind: str  # "file" | "link" (실행 비트는 mode)
+    target: str | None = None
+
+
+@dataclass(frozen=True)
 class Snapshot:
     root: Path
     files: tuple[str, ...]
@@ -80,6 +92,24 @@ class Snapshot:
     repo: str | None
     tar_path: Path
     bytes: int
+    entries: tuple[Entry, ...] = ()
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(e.size for e in self.entries if e.kind != "link")
+
+    def manifest(self) -> dict[str, Any]:
+        """서버 `POST /jobs/{id}/tree/manifest` 본문."""
+        return {
+            "files": [
+                {"path": e.path, "mode": e.mode, "size": e.size, "sha256": e.sha256}
+                for e in self.entries
+                if e.kind != "link"
+            ],
+            "links": [
+                {"path": e.path, "target": e.target} for e in self.entries if e.kind == "link"
+            ],
+        }
 
 
 def _git(root: Path, *args: str) -> str | None:
@@ -193,9 +223,15 @@ def make_snapshot(
                 "add a .rcmignore or use --dir"
             )
     entries: list[tuple[str, int, str]] = []
+    full: list[Entry] = []
     for rel in files:
         mode, digest = _digest(root / rel)
         entries.append((rel, mode, digest))
+        path = root / rel
+        if os.path.islink(path):
+            full.append(Entry(rel, mode, 0, digest, "link", os.readlink(path)))
+        else:  # 실행 비트는 mode 가 말한다 — kind 는 file | link 둘뿐
+            full.append(Entry(rel, mode, os.path.getsize(path), digest, "file"))
     th = tree_hash(entries)
     base_sha = dirty = repo = None
     if is_git:
@@ -223,6 +259,7 @@ def make_snapshot(
         repo=repo,
         tar_path=tar_path,
         bytes=size,
+        entries=tuple(full),
     )
 
 
@@ -251,6 +288,8 @@ class _Reader:
 
 
 class Client:
+    cache_supported: bool | None = None  # 마지막 submit 응답의 cache 플래그(모르면 None)
+
     def __init__(self, server: str, token: str | None = None, *, timeout: float = 15.0):
         if not server:
             raise ClientError(0, "no server configured (use --server, RCM_SERVER or client.toml)")
@@ -270,9 +309,12 @@ class Client:
         content_length: int | None = None,
         timeout: float | None = None,
         content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], bytes]:
         url = self.server + path
         headers = {"User-Agent": f"rcm/{__version__}", "Accept": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         body: Any = None
@@ -337,11 +379,18 @@ class Client:
         *,
         requester_label: str | None,
         join: bool = True,
+        priority: str | int | None = None,
     ) -> dict[str, Any]:
-        body = {"preset": preset, "inputs": inputs, "source": source, "join": join}
+        body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
         if requester_label:
             body["requester_label"] = requester_label
-        return self.post_json("/jobs", body)
+        if priority is not None:
+            body["priority"] = priority
+        resp = self.post_json("/jobs", body)
+        # 서버가 캐시를 지원하는지 기억한다 — upload_cached 가 manifest 를 헛되이 보내지 않게
+        if isinstance(resp, dict) and "cache" in resp:
+            self.cache_supported = bool(resp.get("cache"))
+        return resp
 
     def upload(
         self,
@@ -362,6 +411,56 @@ class Client:
                 content_type="application/gzip",
             )
         return json.loads(body)
+
+    # ── 내용 주소 캐시 업로드 (M5) ──
+
+    def manifest(self, job_id: int, snapshot: Snapshot) -> dict[str, Any]:
+        """manifest 를 보내고 `{missing, missing_bytes, state}` 를 받는다. 구버전 서버는 404."""
+        return self.post_json(f"/jobs/{job_id}/tree/manifest", snapshot.manifest())
+
+    def upload_blobs(
+        self,
+        job_id: int,
+        snapshot: Snapshot,
+        missing: Iterable[str],
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, Any]:
+        """빠진 해시의 파일만 tar.gz(멤버 이름 = sha256, 같은 해시는 한 번)로 PUT."""
+        want = set(missing)
+        by_hash: dict[str, Entry] = {}
+        for e in snapshot.entries:
+            if e.kind != "link" and e.sha256 in want and e.sha256 not in by_hash:
+                by_hash[e.sha256] = e
+        fd, tmp_name = tempfile.mkstemp(prefix="rcm-blobs-", suffix=".tar.gz")
+        os.close(fd)
+        tar_path = Path(tmp_name)
+        try:
+            with tarfile.open(tar_path, "w:gz", compresslevel=6) as tf:
+                for sha in sorted(by_hash):
+                    e = by_hash[sha]
+                    info = tf.gettarinfo(str(snapshot.root / e.path), arcname=sha)
+                    info = _tar_filter(info)
+                    with (snapshot.root / e.path).open("rb") as fh:
+                        tf.addfile(info, fh)
+            size = tar_path.stat().st_size
+            with tar_path.open("rb") as fh:
+                reader = _Reader(fh, size, progress)
+                _, _, body = self._request(
+                    "PUT",
+                    f"/jobs/{job_id}/tree",
+                    data=reader,
+                    content_length=size,
+                    timeout=max(self.timeout, 600),
+                    content_type="application/gzip",
+                    extra_headers={"X-RCM-Tree": "blobs"},
+                )
+            return json.loads(body)
+        finally:
+            tar_path.unlink(missing_ok=True)
+
+    def set_priority(self, job_id: int, priority: str | int) -> dict[str, Any]:
+        return self.post_json(f"/jobs/{job_id}/priority", {"priority": priority})
 
     def job(self, job_id: int, *, tail: int = 0) -> dict[str, Any]:
         return self.get_json(f"/jobs/{job_id}?tail={tail}")
@@ -397,8 +496,13 @@ class Client:
             if not data:
                 sleep(poll_seconds)
 
-    def eta(self, preset: str, inputs: dict[str, Any]) -> dict[str, Any]:
-        return self.post_json("/api/eta", {"preset": preset, "inputs": inputs})
+    def eta(
+        self, preset: str, inputs: dict[str, Any], *, priority: str | int | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"preset": preset, "inputs": inputs}
+        if priority is not None:
+            body["priority"] = priority
+        return self.post_json("/api/eta", body)
 
     def events(
         self,
@@ -478,6 +582,45 @@ class Client:
         return self.events(f"/jobs/{job_id}/events", last_id=last_id, idle_timeout=idle_timeout)
 
 
+def upload_cached(
+    client: Client,
+    job_id: int,
+    snapshot: Snapshot,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """manifest → missing → blob tar. **404(구버전 서버)일 때만** 전체 tar 로 간다.
+
+    400/401/403/413/5xx 는 그대로 올린다(조용한 폴백은 왜 느린지 숨긴다 — 잡은 cancelled 로 남는다).
+    반환에는 서버 응답 + `cached_bytes` · `uploaded_files` 를 더한다.
+    """
+    if getattr(client, "cache_supported", None) is False:  # 서버가 캐시 없다고 했다
+        return client.upload(job_id, snapshot.tar_path, progress=progress)
+    try:
+        resp = client.manifest(job_id, snapshot)
+    except ClientError as e:
+        if e.status == 404:
+            return client.upload(job_id, snapshot.tar_path, progress=progress)
+        raise
+    missing = list(resp.get("missing") or [])
+    sizes: dict[str, int] = {}
+    for e in snapshot.entries:
+        if e.kind != "link":
+            sizes.setdefault(e.sha256, e.size)
+    missing_bytes = sum(sizes.get(h, 0) for h in missing)
+    total = snapshot.total_bytes
+    if not missing:
+        resp.setdefault("state", "queued")
+        resp.setdefault("job_id", job_id)
+        resp["cached_bytes"] = total
+        resp["uploaded_files"] = 0
+        return resp
+    out = client.upload_blobs(job_id, snapshot, missing, progress=progress)
+    out["cached_bytes"] = max(0, total - missing_bytes)
+    out["uploaded_files"] = len(missing)
+    return out
+
+
 def preset_from_json(p: dict[str, Any]) -> Preset:
     """`/api/status.presets[]` 항목 → Preset(입력 스키마 검증용. argv 는 서버에만 있다)."""
     inputs = tuple(
@@ -498,6 +641,7 @@ def preset_from_json(p: dict[str, Any]) -> Preset:
         timeout_seconds=p.get("timeout_seconds") or 1200,
         source_modes=tuple(p.get("source_modes") or ("tree",)),
         repo=p.get("repo") or "",
+        priority=int(p.get("priority") or 0),
         concurrency_group=p.get("concurrency_group"),
         expected_seconds=p.get("expected_seconds"),
         inputs=inputs,

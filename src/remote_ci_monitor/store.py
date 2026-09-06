@@ -34,6 +34,7 @@ from remote_ci_monitor.core.model import (
     RUNNING,
     TERMINAL_STATES,
     UPLOADING,
+    WAITING_STATES,
     CancelInfo,
     Job,
     Joiner,
@@ -43,8 +44,9 @@ from remote_ci_monitor.core.model import (
     Transition,
 )
 from remote_ci_monitor.core.progress import Marker
+from remote_ci_monitor.core.retention import BlobInfo
 
-DB_VERSION = 2
+DB_VERSION = 3
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -79,7 +81,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   join_key TEXT,
   received_bytes INTEGER,
   last_received_at REAL,
-  artifacts_purged_at REAL
+  artifacts_purged_at REAL,
+  priority INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
@@ -110,12 +113,42 @@ CREATE TABLE IF NOT EXISTS server_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS blobs (
+  sha256 TEXT PRIMARY KEY,
+  size INTEGER NOT NULL,
+  created_at REAL NOT NULL,
+  last_used_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notifications (
+  job_id INTEGER NOT NULL,
+  notify_name TEXT NOT NULL,
+  claimed_at REAL NOT NULL,
+  delivered_at REAL,
+  failed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (job_id, notify_name)
+);
 """
+
+_BLOBS_SQL = (
+    "CREATE TABLE IF NOT EXISTS blobs (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, "
+    "created_at REAL NOT NULL, last_used_at REAL NOT NULL)"
+)
+_NOTIFICATIONS_SQL = (
+    "CREATE TABLE IF NOT EXISTS notifications (job_id INTEGER NOT NULL, notify_name TEXT NOT NULL, "
+    "claimed_at REAL NOT NULL, delivered_at REAL, failed INTEGER NOT NULL DEFAULT 0, "
+    "PRIMARY KEY (job_id, notify_name))"
+)
 
 
 #: v1 → v2: 보존 정리가 산출물을 지운 시각. 기존 DB 에 컬럼만 더한다.
+#: v2 → v3(M5): 우선순위 컬럼 · 스냅샷 캐시 blob 표 · 알림 전송 기록.
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE jobs ADD COLUMN artifacts_purged_at REAL",),
+    3: (
+        "ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+        _BLOBS_SQL,
+        _NOTIFICATIONS_SQL,
+    ),
 }
 
 
@@ -236,6 +269,8 @@ class Store:
             last_received_at=_dt(row["last_received_at"]),
             ref=src.get("ref"),
             sha=src.get("sha"),
+            uploaded_bytes=src.get("uploaded_bytes"),
+            cached_bytes=src.get("cached_bytes"),
         )
         joiners = tuple(
             Joiner(name=j["name"], label=j["label"], joined_at=_dt(j["joined_at"]))
@@ -284,6 +319,7 @@ class Store:
             joiners=joiners,
             transitions=transitions,
             artifacts_purged_at=_dt(row["artifacts_purged_at"]),
+            priority=int(row["priority"] or 0),
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -412,6 +448,7 @@ class Store:
         join_key: str | None,
         now: datetime,
         state: str = UPLOADING,
+        priority: int = 0,
     ) -> Job:
         """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다."""
         if state not in (UPLOADING, QUEUED):
@@ -433,7 +470,8 @@ class Store:
             cur = conn.execute(
                 "INSERT INTO jobs (preset, inputs_json, key, concurrency_group, source_json, "
                 "requester_name, requester_label, state, created_at, queued_at, tree_hash, sha, "
-                "timeout_seconds, join_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "timeout_seconds, join_key, priority) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset,
                     json.dumps(inputs, sort_keys=True, separators=(",", ":")),
@@ -449,6 +487,7 @@ class Store:
                     source.sha,
                     timeout_seconds,
                     join_key,
+                    int(priority),
                 ),
             )
             job_id = int(cur.lastrowid)
@@ -469,6 +508,189 @@ class Store:
         )
         return rows[0] if rows else None
 
+    def join_or_bump(
+        self, join_key: str, name: str, label: str, priority: int, now: datetime
+    ) -> Job | None:
+        """합류 판정 + 합류자 기록 + 우선순위 상향을 **한 트랜잭션**으로(M5).
+
+        요청자 본인이면 합류자를 안 넣는다. 우선순위는 `max(기존, 요청)` 로만 올라간다.
+        """
+        marks = ",".join("?" * len(ACTIVE_STATES))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                f"SELECT id, requester_name, priority FROM jobs WHERE join_key=? "
+                f"AND state IN ({marks}) ORDER BY id LIMIT 1",
+                (join_key, *sorted(ACTIVE_STATES)),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            job_id = int(row["id"])
+            if row["requester_name"] != name:
+                conn.execute(
+                    "INSERT OR IGNORE INTO joiners (job_id, name, label, joined_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (job_id, name, label, _ts(now)),
+                )
+            if int(priority) > int(row["priority"] or 0):
+                conn.execute("UPDATE jobs SET priority=? WHERE id=?", (int(priority), job_id))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return self.get_job(job_id)
+
+    def set_priority(self, job_id: int, priority: int, now: datetime) -> bool:
+        """대기 잡(uploading · queued)의 우선순위를 바꾼다. 아니면 False."""
+        marks = ",".join("?" * len(WAITING_STATES))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                f"UPDATE jobs SET priority=? WHERE id=? AND state IN ({marks})",
+                (int(priority), job_id, *sorted(WAITING_STATES)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return cur.rowcount == 1
+
+    # ── 스냅샷 캐시 blob (M5) ────────────────────────────────────────────────
+
+    def have_blobs(self, keys: Iterable[str]) -> set[str]:
+        """주어진 키 중 표에 있는 것."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return set()
+        conn = self._conn()
+        out: set[str] = set()
+        for i in range(0, len(keys), 500):
+            chunk = keys[i : i + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = conn.execute(f"SELECT sha256 FROM blobs WHERE sha256 IN ({marks})", chunk)
+            out.update(r[0] for r in rows.fetchall())
+        return out
+
+    def record_blobs(self, items: Iterable[tuple[str, int]], now: datetime) -> int:
+        """받은 blob 을 기록한다(있으면 크기·last_used_at 갱신). 기록한 수."""
+        rows = [(k, int(size), _ts(now), _ts(now)) for k, size in items]
+        if not rows:
+            return 0
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "INSERT INTO blobs (sha256, size, created_at, last_used_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(sha256) DO UPDATE SET size=excluded.size, "
+                "last_used_at=excluded.last_used_at",
+                rows,
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return len(rows)
+
+    def touch_blobs(self, keys: Iterable[str], now: datetime) -> int:
+        """참조된 blob 의 last_used_at 갱신(GC 가 안 지우게)."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return 0
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            n = 0
+            for i in range(0, len(keys), 500):
+                chunk = keys[i : i + 500]
+                marks = ",".join("?" * len(chunk))
+                n += conn.execute(
+                    f"UPDATE blobs SET last_used_at=? WHERE sha256 IN ({marks})",
+                    (_ts(now), *chunk),
+                ).rowcount
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return n
+
+    def list_blobs(self) -> list[BlobInfo]:
+        conn = self._conn()
+        return [
+            BlobInfo(sha256=r["sha256"], size=int(r["size"]), last_used_at=_dt(r["last_used_at"]))
+            for r in conn.execute(
+                "SELECT sha256, size, last_used_at FROM blobs ORDER BY last_used_at, sha256"
+            ).fetchall()
+        ]
+
+    def blob_stats(self) -> tuple[int, int]:
+        """(blob 수, 합계 바이트)."""
+        row = self._conn().execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM blobs").fetchone()
+        return int(row[0]), int(row[1])
+
+    def delete_blobs(self, keys: Iterable[str]) -> int:
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return 0
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            n = 0
+            for i in range(0, len(keys), 500):
+                chunk = keys[i : i + 500]
+                marks = ",".join("?" * len(chunk))
+                n += conn.execute(f"DELETE FROM blobs WHERE sha256 IN ({marks})", chunk).rowcount
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return n
+
+    # ── 알림 전송 기록 (M5) ─────────────────────────────────────────────────
+
+    def claim_notification(self, job_id: int, notify_name: str, now: datetime) -> bool:
+        """(잡, 규칙) 행을 unique insert 로 선점한다. 이미 있으면 False — 중복 발송 방지."""
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO notifications (job_id, notify_name, claimed_at) "
+                "VALUES (?, ?, ?)",
+                (job_id, notify_name, _ts(now)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return cur.rowcount == 1
+
+    def mark_notification(
+        self, job_id: int, notify_name: str, *, delivered: bool, now: datetime
+    ) -> None:
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE notifications SET delivered_at=?, failed=? "
+                "WHERE job_id=? AND notify_name=?",
+                (_ts(now) if delivered else None, 0 if delivered else 1, job_id, notify_name),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def list_unnotified_finished(self, since: datetime) -> list[Job]:
+        """알림 행이 하나도 없는 종료 잡(since 이후에 끝난 것). 시작 시 스캔용."""
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE state IN ({marks}) AND finished_at >= ? "
+            "AND id NOT IN (SELECT job_id FROM notifications) ORDER BY id",
+            (*sorted(TERMINAL_STATES), _ts(since)),
+        )
+
     def add_joiner(self, job_id: int, name: str, label: str, now: datetime) -> bool:
         conn = self._conn()
         cur = conn.execute(
@@ -480,6 +702,24 @@ class Store:
     def remove_joiner(self, job_id: int, name: str) -> bool:
         cur = self._conn().execute("DELETE FROM joiners WHERE job_id=? AND name=?", (job_id, name))
         return cur.rowcount == 1
+
+    def update_source_fields(self, job_id: int, **fields: Any) -> None:
+        """source_json 의 키 몇 개를 갱신한다(M5 캐시의 uploaded_bytes · cached_bytes)."""
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT source_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is not None:
+                src = json.loads(row["source_json"])
+                src.update(fields)
+                conn.execute(
+                    "UPDATE jobs SET source_json=? WHERE id=?",
+                    (json.dumps(src, separators=(",", ":")), job_id),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def update_received(self, job_id: int, received_bytes: int, now: datetime) -> None:
         self._conn().execute(
@@ -523,7 +763,7 @@ class Store:
                 "SELECT id FROM jobs WHERE state=? AND (concurrency_group IS NULL OR "
                 "concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
                 f"WHERE state IN ({busy}) "
-                "AND concurrency_group IS NOT NULL)) ORDER BY id LIMIT 1",
+                "AND concurrency_group IS NOT NULL)) ORDER BY priority DESC, id LIMIT 1",
                 (QUEUED, *sorted(BUSY_STATES)),
             ).fetchone()
             if row is None:

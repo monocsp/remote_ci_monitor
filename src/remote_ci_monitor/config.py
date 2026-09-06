@@ -20,10 +20,13 @@ from typing import Any
 from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     INPUT_TYPES,
+    PRIORITY_NAMES,
     SOURCE_MODES,
+    TERMINAL_STATES,
     InputSpec,
     Preset,
 )
+from remote_ci_monitor.core.notify import NotifyRule
 
 ENV_PREFIX = "RCM"
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
@@ -92,6 +95,10 @@ class ServerSection:
     metadata_retention_days: int = (
         180  # 잡 행·이벤트 삭제. sample_days · retention_days_failure 이상
     )
+    snapshot_cache: bool = True  # 내용 주소 스냅샷 캐시 (M5)
+    snapshot_cache_days: int = 30  # 이만큼 안 쓰인 blob 은 지운다
+    snapshot_cache_max_bytes: int = 4 * 1024**3  # 넘으면 오래된 blob 부터
+    snapshot_cache_scope: str = "global"  # "global" | "token" — token 이면 토큰별로 blob 을 나눈다
 
 
 @dataclass
@@ -133,6 +140,7 @@ class ServerConfig:
     display: DisplaySection = field(default_factory=DisplaySection)
     repos: tuple[RepoConfig, ...] = ()
     presets: tuple[Preset, ...] = ()
+    notify: tuple[NotifyRule, ...] = ()
     path: Path | None = None
 
     @property
@@ -260,6 +268,7 @@ _PRESET_KEYS = {
     "timeout_seconds",
     "source_modes",
     "repo",
+    "priority",
     "concurrency_group",
     "expected_seconds",
     "duration_key_inputs",
@@ -331,6 +340,64 @@ def _parse_input(preset_name: str, raw: Any) -> InputSpec:
     )
 
 
+def parse_priority(value: Any, where: str) -> int:
+    """`"high"|"normal"|"low"` → 1·0·-1. 숫자·대문자·다른 말은 키 이름을 찍고 실패."""
+    if isinstance(value, str) and value in PRIORITY_NAMES:
+        return PRIORITY_NAMES[value]
+    raise ConfigError(f'{where}: priority must be "low", "normal" or "high", got {value!r}')
+
+
+_NOTIFY_KEYS = {"name", "on", "presets", "argv", "url", "timeout_seconds"}
+
+
+def parse_notify(raw: Any) -> NotifyRule:
+    """`[[notify]]` 하나. argv 와 url 중 정확히 하나. 오류에 규칙 이름을 넣는다."""
+    if not isinstance(raw, dict):
+        raise ConfigError("[[notify]]: each rule must be a table")
+    name = raw.get("name")
+    if not isinstance(name, str) or not _NAME_RE.match(name):
+        raise ConfigError(f"[[notify]]: 'name' must be a short identifier, got {name!r}")
+    where = f"notify '{name}'"
+    unknown = sorted(set(raw) - _NOTIFY_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
+    on_raw = raw.get("on")
+    if on_raw is None:
+        on = frozenset(TERMINAL_STATES)
+    else:
+        on_list = _str_list(f"{where} on", on_raw, allow_empty=False)
+        bad = [st for st in on_list if st not in TERMINAL_STATES]
+        if bad:
+            raise ConfigError(f"{where}: on must be terminal states, got {bad}")
+        on = frozenset(on_list)
+    presets_raw = raw.get("presets")
+    presets = (
+        None
+        if presets_raw is None
+        else frozenset(_str_list(f"{where} presets", presets_raw, allow_empty=False))
+    )
+    argv_raw = raw.get("argv")
+    url = raw.get("url")
+    if (argv_raw is None) == (url is None):
+        raise ConfigError(f"{where}: exactly one of argv or url is required")
+    argv = None if argv_raw is None else _str_list(f"{where} argv", argv_raw, allow_empty=False)
+    if url is not None and (
+        not isinstance(url, str) or not url.startswith(("http://", "https://"))
+    ):
+        raise ConfigError(f"{where}: url must start with http:// or https://")
+    timeout = raw.get("timeout_seconds", 30)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+        raise ConfigError(f"{where}: timeout_seconds must be an integer >= 1")
+    return NotifyRule(
+        name=name,
+        on=on,
+        presets=presets,
+        argv=None if argv is None else tuple(argv),
+        url=url,
+        timeout_seconds=timeout,
+    )
+
+
 def parse_preset(raw: Any) -> Preset:
     """`[[presets]]` 테이블 하나를 검증해 Preset 으로. 오류에 프리셋·키 이름을 넣는다."""
     if not isinstance(raw, dict):
@@ -362,6 +429,7 @@ def parse_preset(raw: Any) -> Preset:
     group = raw.get("concurrency_group", "")
     if not isinstance(group, str):
         raise ConfigError(f"{where}: concurrency_group must be a string")
+    priority = parse_priority(raw.get("priority", "normal"), where)
     expected = raw.get("expected_seconds")
     if expected is not None and (
         isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0
@@ -397,6 +465,7 @@ def parse_preset(raw: Any) -> Preset:
         timeout_seconds=timeout,
         source_modes=modes,
         repo=repo,
+        priority=priority,
         concurrency_group=group or None,
         expected_seconds=expected,
         duration_key_inputs=dki,
@@ -409,7 +478,7 @@ def parse_preset(raw: Any) -> Preset:
 # ── 서버 설정 ────────────────────────────────────────────────────────────────
 
 _SECTIONS = ("server", "estimate", "host", "display")
-_TOP_KEYS = set(_SECTIONS) | {"repos", "presets"}
+_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify"}
 
 
 def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
@@ -442,6 +511,12 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
             raise ConfigError(f"[server] {key} must be >= 1")
     if s.retention_sweep_interval_seconds < 60:
         raise ConfigError("[server] retention_sweep_interval_seconds must be at least 60")
+    if s.snapshot_cache_days < 1:
+        raise ConfigError("[server] snapshot_cache_days must be >= 1")
+    if s.snapshot_cache_max_bytes < 1024 * 1024:
+        raise ConfigError("[server] snapshot_cache_max_bytes must be at least 1 MiB")
+    if s.snapshot_cache_scope not in ("global", "token"):
+        raise ConfigError("[server] snapshot_cache_scope must be 'global' or 'token'")
     floor = max(cfg.estimate.sample_days, s.retention_days_failure, s.retention_days_success)
     if s.metadata_retention_days < floor:
         raise ConfigError(
@@ -508,6 +583,15 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
                 raise ConfigError(f"preset '{p.name}': repo '{p.repo}' is not in [[repos]]")
         resolved.append(p)
     cfg.presets = tuple(resolved)
+    rule_names = [r.name for r in cfg.notify]
+    if len(rule_names) != len(set(rule_names)):
+        dupes = sorted({n for n in rule_names if rule_names.count(n) > 1})
+        raise ConfigError(f"[[notify]] duplicate rule name(s): {', '.join(dupes)}")
+    preset_names = {p.name for p in cfg.presets}
+    for r in cfg.notify:
+        for name in sorted(r.presets or ()):
+            if name not in preset_names:
+                raise ConfigError(f"notify '{r.name}': presets refers to unknown preset '{name}'")
 
 
 def load_server_config(
@@ -548,6 +632,10 @@ def load_server_config(
         if not isinstance(presets, list):
             raise ConfigError(f"{found}: [[presets]] must be an array of tables")
         cfg.presets = tuple(parse_preset(p) for p in presets)
+        notify = raw.get("notify", [])
+        if not isinstance(notify, list):
+            raise ConfigError(f"{found}: [[notify]] must be an array of tables")
+        cfg.notify = tuple(parse_notify(n) for n in notify)
         cfg.path = found
     saved = None
     if environ is not None:

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from remote_ci_monitor.core.gitref import is_full_sha, short_sha
+from remote_ci_monitor.core.manifest import ManifestError, assemble_plan, validate_manifest
 from remote_ci_monitor.core.model import Job
 from remote_ci_monitor.gitops import GitError, checkout, ensure_mirror, fetch_ref, has_commit
 
@@ -61,6 +62,60 @@ def extract_tree(tar_path: Path, workspace: Path) -> int:
     except (tarfile.TarError, EOFError, OSError) as e:
         shutil.rmtree(workspace, ignore_errors=True)
         raise MaterializeError(f"snapshot rejected: {_reject_reason(e)}") from e
+    return count
+
+
+def blob_path(blobs_dir: Path, key: str) -> Path:
+    """blob 키 → 파일 경로. 키는 `<sha>` 또는 `<token>/<sha>`(token 범위) — 둘 다 `aa/` 로 분산."""
+    prefix, _, sha = key.rpartition("/")
+    base = blobs_dir / prefix if prefix else blobs_dir
+    return base / sha[:2] / sha
+
+
+def _copy_blob(src: Path, dst: Path) -> None:
+    """blob → 워크스페이스 파일. 복사다(하드링크 금지 — 잡이 파일을 고치면 blob 이 깨진다)."""
+    shutil.copyfile(src, dst)
+
+
+def assemble_from_manifest(manifest_path: Path, blobs_dir: Path, workspace: Path) -> int:
+    """`jobs/<id>/manifest.json` 과 blob 저장소로 워크스페이스를 만든다. 만든 항목 수.
+
+    manifest 는 받을 때 검증했지만 여기서 한 번 더 한다(파일이 바뀌었을 수 있다). blob 이 없으면
+    blob 이 없으면 `snapshot blob missing <sha7>` — 보존 정리가 지웠거나 손상(--no-cache 재제출).
+    """
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True)
+    try:
+        import json
+
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = validate_manifest(doc, max_bytes=1 << 62)
+    except (OSError, ValueError, ManifestError) as e:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise MaterializeError(f"snapshot manifest unreadable: {type(e).__name__}") from e
+    prefix = doc.get("blob_prefix") or ""
+    count = 0
+    try:
+        for op in assemble_plan(manifest):
+            target = workspace / op.path
+            if op.kind == "mkdir":
+                target.mkdir(exist_ok=True)
+            elif op.kind == "copy":
+                src = blob_path(blobs_dir, prefix + (op.sha256 or ""))
+                if not src.is_file():
+                    raise MaterializeError(f"snapshot blob missing {short_sha(op.sha256)}")
+                _copy_blob(src, target)
+                target.chmod(op.mode or 0o644)
+            elif op.kind == "symlink":
+                target.symlink_to(op.target or "")
+            count += 1
+    except MaterializeError:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
+    except OSError as e:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise MaterializeError(f"cannot assemble workspace: {type(e).__name__}") from e
     return count
 
 

@@ -19,6 +19,10 @@ metadata_retention_days = 180   # job rows/events are deleted after this (>= sam
 retention_sweep_interval_seconds = 3600
 git_resolve_timeout_seconds = 20    # git ls-remote at submit time (git_ref presets)
 git_fetch_timeout_seconds = 600     # fetch + checkout while materializing
+snapshot_cache = true               # content-addressed uploads: only changed files travel
+snapshot_cache_days = 30            # blobs unused this long are purged (never while a job references them)
+snapshot_cache_max_bytes = 4294967296
+snapshot_cache_scope = "global"     # "global" shares identical content between clients | "token"
 
 [estimate]
 sample_days = 45
@@ -56,7 +60,7 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   ::rcm::summary::all green
 # Preset keys: name (required) · argv (required) · description · timeout_seconds · expected_seconds
 #   (used until enough real samples exist) · duration_key_inputs (inputs whose value gets its own
-#   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ·
+#   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ("low" | "normal" | "high") ·
 #   env_passthrough (default: PATH HOME LANG) · [presets.env].
 # Input keys: name · type = "choice" | "string" | "int" | "bool" · choices (choice) · pattern (string)
 #   · default · description.
@@ -76,6 +80,7 @@ description = "Full local gate: analyze, test, lint"
 argv = ["bash", "scripts/gate.sh"]
 timeout_seconds = 1200
 source_modes = ["tree"]
+priority = "normal"         # "low" | "normal" | "high" — default for this preset and the ceiling for non-admin sessions
 expected_seconds = 480
 duration_key_inputs = ["scope"]
 env_passthrough = ["PATH", "HOME", "LANG"]
@@ -106,6 +111,17 @@ name = "device"
 type = "string"
 pattern = "[A-Za-z0-9._-]+"
 default = "default"
+
+# ── Notifications ──────────────────────────────────────────────────────────
+# Run a command (no shell) or POST JSON to a URL when jobs finish. Env for argv: RCM_JOB_ID RCM_STATE
+# RCM_PRESET RCM_KEY RCM_REQUESTER RCM_SUMMARY RCM_FAILED_STEP RCM_EXIT_CODE RCM_JOB_SECONDS RCM_URL
+# RCM_NOTIFY. Exactly one of argv / url. `on` defaults to every terminal state.
+# [[notify]]
+# name = "on-failure"
+# on = ["failed", "timed_out", "lost"]
+# presets = ["gate"]
+# argv = ["bash", "/opt/rcm/notify.sh"]
+# timeout_seconds = 30
 
 # A deploy preset runs a remote ref instead of an uploaded tree: `rcm run deploy --ref v1.2.3`.
 # The server pins the commit sha at submit time; the workspace is a detached checkout (.git kept,

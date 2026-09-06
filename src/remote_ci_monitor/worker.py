@@ -40,7 +40,12 @@ from remote_ci_monitor.core.model import (
     WorkerInfo,
 )
 from remote_ci_monitor.core.progress import parse_marker, progress_from_markers
-from remote_ci_monitor.materialize import MaterializeError, extract_tree, prepare_git_ref
+from remote_ci_monitor.materialize import (
+    MaterializeError,
+    assemble_from_manifest,
+    extract_tree,
+    prepare_git_ref,
+)
 from remote_ci_monitor.store import Store
 
 READ_CHUNK = 65536
@@ -234,10 +239,14 @@ class Worker(threading.Thread):
         # ── 자재화 ──
         try:
             if job.source.mode == MODE_TREE:
+                manifest_path = job_dir / "manifest.json"
                 tar_path = job_dir / "tree.tar.gz"
-                if not tar_path.is_file():
+                if manifest_path.is_file():  # M5 캐시 업로드
+                    assemble_from_manifest(manifest_path, self.config.data_dir / "blobs", workspace)
+                elif tar_path.is_file():
+                    extract_tree(tar_path, workspace)
+                else:
                     raise MaterializeError("snapshot file is missing")
-                extract_tree(tar_path, workspace)
             else:
                 repo = self.config.repo(job.source.repo)
                 if repo is None:

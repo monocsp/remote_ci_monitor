@@ -24,6 +24,8 @@ from remote_ci_monitor.core.model import (
     CANCELLING,
     FAILED,
     PHASE_MATERIALIZING,
+    PRIORITY_NAMES,
+    PRIORITY_NORMAL,
     QUEUED,
     REASON_BLOCKED_BY_GROUP,
     REASON_CANCELLING,
@@ -224,7 +226,8 @@ def compute_queue(
     progress = progress or {}
     active = sorted((j for j in jobs if j.state in ACTIVE_STATES), key=lambda j: j.id)
     busy = [j for j in active if j.is_busy]
-    waiting = [j for j in active if j.is_waiting]
+    # 대기 순서 = (우선순위 높은 것 먼저, 같은 우선순위는 id) — store.claim 의 ORDER BY 와 같은 키
+    waiting = sorted((j for j in active if j.is_waiting), key=lambda j: (-j.priority, j.id))
 
     live = [w for w in workers if w.state != WORKER_DOWN]
     live_lanes = [w.lane for w in live]
@@ -354,10 +357,12 @@ def eta_for_new(
     presets: Mapping[str, Preset],
     cfg: QueueConfig,
     now: datetime,
+    priority: int = PRIORITY_NORMAL,
 ) -> tuple[QueueRow, int]:
-    """지금 이 키의 잡을 넣으면 어떻게 되나 — 가상 잡을 맨 뒤에 붙여 계산한다(`rcm eta`).
+    """지금 이 키의 잡을 넣으면 어떻게 되나 — 가상 잡을 붙여 계산한다(`rcm eta`).
 
-    반환: (가상 잡의 큐 행, 앞선 활성 잡 수).
+    가상 잡은 같은 우선순위의 맨 뒤에 선다(더 낮은 우선순위 잡보다는 앞).
+    반환: (가상 잡의 큐 행, 실제로 앞선 활성 잡 수 — 실행 중 + 우선순위가 같거나 높은 대기 잡).
     """
     next_id = max((j.id for j in jobs), default=0) + 1
     ghost = Job(
@@ -371,6 +376,7 @@ def eta_for_new(
         state=QUEUED,
         created_at=now,
         queued_at=now,
+        priority=priority,
     )
     rows = compute_queue(
         list(jobs) + [ghost],
@@ -382,5 +388,19 @@ def eta_for_new(
         now=now,
     )
     row = next(r for r in rows if r.job.id == next_id)
-    ahead = sum(1 for j in jobs if j.state in ACTIVE_STATES)
+    ahead = sum(
+        1 for j in jobs if j.state in ACTIVE_STATES and (j.is_busy or j.priority >= priority)
+    )
     return row, ahead
+
+
+def priority_from_name(name: str) -> int:
+    """`low` · `normal` · `high` → -1 · 0 · 1. 다른 값은 ValueError(대소문자·공백 그대로 비교)."""
+    if not isinstance(name, str) or name not in PRIORITY_NAMES:
+        raise ValueError(f"priority must be one of low, normal, high — got {name!r}")
+    return PRIORITY_NAMES[name]
+
+
+def join_priority(existing: int, requested: int) -> int:
+    """합류하면 기존 잡의 우선순위는 올라가기만 한다(내리지 않는다)."""
+    return max(existing, requested)

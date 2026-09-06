@@ -194,9 +194,11 @@ def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | Non
     conf_text = f"{conf} · {est.get('source')}" + (
         f" n={n}" if est.get("source") == "measured" else ""
     )
+    prio = row.get("priority") or 0
+    arrow = "↑" if prio > 0 else ("↓" if prio < 0 else "")  # 우선순위는 이유가 아니다 — 표시만
     lines = [
-        f"  {pos:>3} {glyph} {_state_word(state):<10} #{row['id']} {row.get('key', '?'):<16} "
-        f"{src:<28} ← {req:<18} {timing:<24} {eta}  ({conf_text})",
+        f"  {pos:>3} {glyph} {_state_word(state):<10} {arrow}#{row['id']} "
+        f"{row.get('key', '?'):<16} {src:<28} ← {req:<18} {timing:<24} {eta}  ({conf_text})",
         f"        {_reason_text(row)}",
     ]
     prog = row.get("progress")
@@ -249,9 +251,15 @@ def render(
         wtxt += f" · DOWN: lane {', '.join(str(w['lane']) for w in down)}"
     if server.get("paused"):
         wtxt += f" · PAUSED by {server['paused'].get('by')}"
+    cache = server.get("snapshot_cache")
+    if isinstance(cache, dict):  # 캐시가 켜져 있으면 모르는 숫자는 — 로(0 이 아니다)
+        blobs = cache.get("blobs")
+        wtxt += f" · cache {DASH if blobs is None else blobs} blobs · {_mb(cache.get('bytes'))}"
     clock = fmt_clock(status.get("generated_at"), tz)
     tzname = status.get("display_timezone") or "local"
     out = [f"━━━ rcm · {name} · {clock} {tzname} · {wtxt}"]
+    if server.get("notify_failures"):
+        out.append(f"  notify failures {server['notify_failures']} · see the server log")
     if server.get("last_error"):
         out.append(f"  error · {str(server['last_error'])[:60]}")
 

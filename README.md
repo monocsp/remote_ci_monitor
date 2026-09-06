@@ -149,18 +149,43 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low|normal|high`; `--no-cache` uploads a full tarball; `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
-| `rcm eta PRESET [-f k=v] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
+| `rcm eta PRESET [-f k=v] [--priority P] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
 | `rcm jobs [--mine] [--state S] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
 | `rcm presets [--json]` | presets the server offers and their inputs |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
+| `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
 
 `rcm check --config server.toml` validates a server config (and its data dir, git) without starting it.
 
 Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (< 5), `low` (preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown values print as `—`, never as 0.
+
+## Priority, snapshot cache and notifications
+
+- **Priority** — three levels, `low` · `normal` · `high`. `rcm run gate --priority high` starts
+  before waiting normal jobs (queue order is priority, then age). A preset can set its default
+  (`priority = "high"`); without an admin token a session can lower but not raise a job above the
+  preset default. Admins reorder waiting jobs with `rcm bump N --priority high`. While `high` jobs
+  keep arriving, `normal` jobs wait — the queue shows it; nothing hides it. A joined submission with
+  a higher priority raises the existing job.
+- **Snapshot cache** — the server keeps uploaded files by content hash (`snapshot_cache = true`,
+  default). `rcm run` sends a manifest first and then only the files the server does not have:
+  the second upload of a mostly unchanged tree transfers a few percent of it. Blobs unused for
+  `snapshot_cache_days` (30) or beyond `snapshot_cache_max_bytes` (4 GiB) are purged; blobs
+  referenced by active jobs never are. Set `snapshot_cache_scope = "token"` to keep each client's
+  blobs separate (by default identical content is shared between clients, which also means a
+  client can learn whether a given file already exists on the server). `--no-cache` sends a full
+  tarball; combine it with `--no-join` to force a fresh job for an unchanged tree.
+- **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
+  when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
+  `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
+  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL` and `RCM_NOTIFY` (rule name);
+  user strings are sanitised and capped at 4 KB. Each (job, rule) fires exactly once, including
+  jobs that finished while the server was down. Failures are logged and counted
+  (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
 
 ## Web UI
 
