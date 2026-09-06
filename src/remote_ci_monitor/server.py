@@ -99,6 +99,7 @@ MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-_\[\]:]{1,255}$")  # Host 헤더 — URL 에 넣을 만한 모양만
 RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
+MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
 _JOB_RE = re.compile(r"^/jobs/(\d+)(/tree/manifest|/tree|/log|/cancel|/priority)?$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
@@ -177,6 +178,7 @@ class App:
         self.retention: Janitor | None = None
         self.notifier: Notifier | None = None
         self._resolve_sem = threading.BoundedSemaphore(RESOLVE_CONCURRENCY)
+        self.manifest_slots = threading.BoundedSemaphore(MANIFEST_CONCURRENCY)
         self.bus = EventBus()
         self.sampler: HostSampler | None = None
         self._snap: _DbSnapshot | None = None
@@ -886,6 +888,10 @@ class App:
                         raise ApiError(400, "snapshot rejected: blob member is not a sha256 file")
                     if name not in missing:
                         raise ApiError(400, "snapshot rejected: blob not in the missing list")
+                    if member.size != expected.get(name):
+                        # tar 헤더의 크기가 manifest 와 다르면 내용도 다르다(해시가 맞을 수 없다) —
+                        # 디스크에 쓰기 전에 거른다(gzip 폭탄이 선언 크기 이상을 쓰지 못하게)
+                        raise ApiError(400, "snapshot rejected: blob hash mismatch (size differs)")
                     src = tf.extractfile(member)
                     if src is None:
                         raise ApiError(400, "snapshot rejected: unreadable blob")
@@ -894,24 +900,23 @@ class App:
                     tmp = final.parent / f".{name}.{job.id}.{thread_id}.part"
                     h = hashlib.sha256()
                     size = 0
-                    with tmp.open("wb") as out:
-                        while True:
-                            chunk = src.read(UPLOAD_CHUNK)
-                            if not chunk:
-                                break
-                            h.update(chunk)
-                            size += len(chunk)
-                            out.write(chunk)
-                    if h.hexdigest() != name:
-                        tmp.unlink(missing_ok=True)
-                        raise ApiError(400, "snapshot rejected: blob hash mismatch")
-                    if size != expected.get(name):
-                        tmp.unlink(missing_ok=True)
-                        raise ApiError(400, "snapshot rejected: blob size mismatch")
-                    if final.exists():
-                        tmp.unlink(missing_ok=True)  # 다른 잡이 먼저 올렸다 — 내용이 같다
-                    else:
-                        tmp.replace(final)
+                    try:
+                        with tmp.open("wb") as out:
+                            while True:
+                                chunk = src.read(UPLOAD_CHUNK)
+                                if not chunk:
+                                    break
+                                h.update(chunk)
+                                size += len(chunk)
+                                out.write(chunk)
+                        if h.hexdigest() != name:
+                            raise ApiError(400, "snapshot rejected: blob hash mismatch")
+                        if size != expected.get(name):
+                            raise ApiError(400, "snapshot rejected: blob size mismatch")
+                        if not final.exists():  # 있으면 다른 잡이 먼저 올렸다 — 내용이 같다
+                            tmp.replace(final)
+                    finally:
+                        tmp.unlink(missing_ok=True)  # 실패 · 중복 · OSError 어느 쪽이든 .part 없음
                     got.add(name)
                     stored.append((prefix + name, size))
         except ApiError as e:
@@ -1449,8 +1454,9 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "/tree/manifest":
                 self._only(method, "POST")
                 t = self.app.require_token(self._token())
-                body = self._json_body(limit=MAX_MANIFEST_BODY)
-                self._send_json(200, self.app.receive_manifest(job_id, t, body))
+                with self.app.manifest_slots:  # 본문 읽기·파싱·검증을 몇 개만 동시에
+                    body = self._json_body(limit=MAX_MANIFEST_BODY)
+                    self._send_json(200, self.app.receive_manifest(job_id, t, body))
                 return
             if sub == "/priority":
                 self._only(method, "POST")
