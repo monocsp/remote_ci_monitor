@@ -41,6 +41,13 @@ EXIT_CODE_BY_STATE = {
 }
 EXIT_UNKNOWN = 3
 
+# ── 우선순위 (M5) — 세 단계면 충분하다. 숫자 우선순위는 기아를 만들고 설명이 어렵다 ─────
+PRIORITY_LOW = -1
+PRIORITY_NORMAL = 0
+PRIORITY_HIGH = 1
+PRIORITY_NAMES = {"low": PRIORITY_LOW, "normal": PRIORITY_NORMAL, "high": PRIORITY_HIGH}
+PRIORITY_LABELS = {PRIORITY_LOW: "low", PRIORITY_NORMAL: "normal", PRIORITY_HIGH: "high"}
+
 # ── 소스 모드 ────────────────────────────────────────────────────────────────
 MODE_TREE = "tree"
 MODE_GIT_REF = "git_ref"
@@ -107,6 +114,7 @@ class Preset:
     timeout_seconds: int = 1200
     source_modes: tuple[str, ...] = (MODE_TREE,)
     repo: str = ""  # git_ref 를 받는 프리셋이 가리키는 `[[repos]].name`
+    priority: int = PRIORITY_NORMAL  # 이 프리셋 잡의 기본값이자 비-admin 의 상한 (M5)
     concurrency_group: str | None = None
     expected_seconds: int | None = None
     duration_key_inputs: tuple[str, ...] = ()
@@ -196,6 +204,7 @@ class Job:
     joiners: tuple[Joiner, ...] = ()
     transitions: tuple[Transition, ...] = ()
     artifacts_purged_at: datetime | None = None  # 보존 정리로 로그·스냅샷·워크스페이스를 지운 시각
+    priority: int = PRIORITY_NORMAL  # -1 low · 0 normal · 1 high (M5)
 
     @property
     def is_waiting(self) -> bool:
@@ -312,6 +321,9 @@ class ServerInfo:
     last_error: str | None
     workers: tuple[WorkerInfo, ...]
     sse_connections: int = 0
+    snapshot_cache_blobs: int | None = None  # 캐시가 꺼져 있으면 None (M5)
+    snapshot_cache_bytes: int | None = None
+    notify_failures: int = 0
 
 
 @dataclass(frozen=True)
