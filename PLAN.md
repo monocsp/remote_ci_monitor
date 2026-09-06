@@ -143,7 +143,7 @@ default = "full"
 ```
 
 - 입력은 스키마로 검증하고(타입·choices·정규식 `pattern`·길이 256), `RCM_INPUT_<NAME>` 환경변수로 넘긴다. `argv` 에 입력을 끼워 넣지 않는다.
-- 워커가 항상 주는 env: `RCM_JOB_ID` · `RCM_PRESET` · `RCM_REQUESTER` · `RCM_SOURCE_MODE` · `RCM_BASE_SHA` · `RCM_DIRTY` · `RCM_WORKSPACE` · `RCM_LOG_FILE`.
+- 워커가 항상 주는 env: `RCM_JOB_ID` · `RCM_PRESET` · `RCM_REQUESTER` · `RCM_SOURCE_MODE` · `RCM_BASE_SHA` · `RCM_DIRTY` · `RCM_REF`(tree 잡은 빈 값) · `RCM_WORKSPACE` · `RCM_LOG_FILE`.
 - 프리셋 목록은 `GET /api/status.presets` 와 `rcm presets` 로 세션이 볼 수 있다(입력 스키마 포함).
 - 설정 오류(모르는 키·argv 비어 있음·choices 없는 choice)는 서버 시작 시 **프리셋 이름과 키 이름**을 찍고 실패한다.
 
@@ -156,7 +156,7 @@ default = "full"
 - **파일 선택**(순수 · `core/snapshot.py`): git 체크아웃이면 `git ls-files -z --cached --others --exclude-standard` (추적 + 무시되지 않은 미추적) 에서 작업 트리에 없는 것(삭제)을 빼고, `.git/` 은 항상 제외. `.rcmignore`(gitignore 문법)와 `--exclude` 를 더한다. git 이 아니면 `.rcmignore` 만. 심볼릭 링크는 링크로 담는다.
 - **신원**: `base_sha = HEAD`, `dirty = 작업 트리가 HEAD 와 다른가`, `tree_hash = sha256(정렬된 (경로, 모드, 내용 sha256) 목록)`. 합류 판정과 감사에 쓴다. `repo = git remote get-url origin`(표시용).
 - **전송**: `tar.gz` 를 `PUT /jobs/{id}/tree` 로 올린다(같은 HTTP·같은 Bearer). rsync·SSH 를 안 쓰는 이유: 두 번째 접속·인증 경로가 생기고 rsync 데몬·키 관리가 따라온다. 크기 상한 `max_snapshot_bytes`(기본 512MB) 초과는 413 + 「.rcmignore 로 빌드 산출물을 빼라」. 참고 팀의 앱 트리(에셋 포함 수십 MB)는 Tailscale 에서 수 초다. 내용 주소 캐시(이미 있는 파일은 안 보냄)는 M5.
-- **서버 풀기**: `tarfile.extractall(filter="data")`(3.11.4+) — 절대 경로·`..`·바깥을 가리키는 링크·장치 파일을 거부한다. 워크스페이스 `<data_dir>/workspaces/<job_id>/`.
+- **서버 풀기**: `tarfile.extractall(filter="data")`(3.11.4+) — `..`·바깥을 가리키는 링크·장치 파일을 거부하고, 절대 경로 멤버는 앞의 `/` 를 떼어 워크스페이스 안으로 **상대화**한다(표준 라이브러리 data 필터의 동작 — 밖으로는 못 나간다). 워크스페이스 `<data_dir>/workspaces/<job_id>/`.
 
 ### `git_ref` — 원격 브랜치 (배포·릴리스용, M3 구현)
 
@@ -175,7 +175,7 @@ default = "full"
 - 로그: `<data_dir>/jobs/<id>/log.txt` 줄 단위 flush. 최근 `tail` 은 상태 JSON 에 싣고 전체는 `GET /jobs/{id}/log`. 로그엔 시크릿이 섞일 수 있어 **읽기에 그 잡의 토큰 또는 admin** 이 필요하다. 마지막 줄을 받은 시각을 `progress.last_output_at` 으로 싣는다(stuck 판정).
 - 워커 상태: 레인마다 `{lane, state ∈ idle|busy|down, job_id, error, since}` 를 `server.workers[]` 로 싣는다. 스레드가 예외로 죽으면 `down` + `error`(앞 200자, 경로·토큰 없이) 로 남고 `server.last_error` 에도 적는다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다.
 - ⚠️ 자식 프로세스의 stdout 버퍼링 때문에 마커가 늦게 도착한다. README 에 `PYTHONUNBUFFERED=1`·`stdbuf -oL`·`flutter --no-color` 같은 팁을 쓴다. 마커가 늦어도 잡 전체 경과는 정확하다.
-- 정리(M3 `janitor.py` + 순수 `core/retention.py`): 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 실패는 보존 기간까지). 서버 안 청소 스레드가 시작 직후와 `retention_sweep_interval_seconds`(3600)마다 `retention_days_success`(14) · `retention_days_failure`(30) 지난 종료 잡의 `jobs/<id>/`·`workspaces/<id>/` 를 지우고 `jobs.artifacts_purged_at` 에 표시한다(DB v2). 활성 잡은 삼중으로 보호(순수 규칙 · janitor 재확인 · UPDATE 조건). 심볼릭 링크는 링크만, data_dir 밖을 가리키면 손대지 않는다. 산출물이 지워진 뒤 `metadata_retention_days`(180, `sample_days` 이상) 지난 잡 행·이벤트·합류자는 삭제한다. 미러는 안 지운다. 지운 잡의 로그는 404 `log expired`. 스레드가 죽거나 주기의 2배가 지나도록 sweep 이 없으면 `/api/health` 503.
+- 정리(M3 `janitor.py` + 순수 `core/retention.py`): 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 succeeded 가 아닌 모든 종료 상태 — failed·timed_out·cancelled·lost — 는 보존 기간까지). 서버 안 청소 스레드가 시작 직후와 `retention_sweep_interval_seconds`(3600)마다 `retention_days_success`(14) · `retention_days_failure`(30) 지난 종료 잡의 `jobs/<id>/`·`workspaces/<id>/` 를 지우고 `jobs.artifacts_purged_at` 에 표시한다(DB v2). 활성 잡은 삼중으로 보호(순수 규칙 · janitor 재확인 · UPDATE 조건). 심볼릭 링크는 링크만, data_dir 밖을 가리키면 손대지 않는다. 산출물이 지워진 뒤 `metadata_retention_days`(180, `sample_days` 이상) 지난 잡 행·이벤트·합류자는 삭제한다. 미러는 안 지운다. 지운 잡의 로그는 404 `log expired`. 스레드가 죽거나 주기의 2배가 지나도록 sweep 이 없으면 `/api/health` 503.
 - 권한: 서버가 도는 OS 사용자로 실행된다. README 에 「전용 사용자로 돌리고 sudo 를 주지 말라」.
 
 ## 진행 — 스텝 마커 프로토콜 (순수 · `core/progress.py`)
@@ -226,7 +226,7 @@ default = "full"
 |---|---|---|
 | `POST /jobs` | 토큰 | `{preset, inputs, source, requester_label, join}` → 검증 → 합류면 `{job_id, joined: true}`(+ `joiners[]` 에 기록), 아니면 새 잡(`uploading` 또는 `git_ref` 면 바로 `queued`) `{job_id, joined: false, upload: "/jobs/{id}/tree"}`. `git_ref` 는 `source: {mode, ref}` → 서버가 sha 확정 → `{job_id, joined, state: "queued", sha, url}`(400 ref 검증 · 502 해석 실패 · 504 타임아웃). git_ref 잡에 `PUT tree` 는 409 |
 | `PUT /jobs/{id}/tree` | 토큰(그 잡의) | 본문 tar.gz(`Content-Length` 필수, 상한) → 풀지 않고 저장만 → `queued`. 수신 중 `source.received_bytes`·`last_received_at` 갱신. 이미 취소된 잡이면 409 |
-| `GET /jobs/{id}?tail=N` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(스키마의 queue/recent 행과 같은 모양). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null. `tail` 기본 5줄, 잡당 8KiB 상한, `rcm wait` 는 `tail=0` |
+| `GET /jobs/{id}?tail=N` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(활성 잡은 queue 행, 종료 잡은 recent 행 모양 — recent 행엔 `log_tail` 키가 없다). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null. `tail` 기본 5줄, 잡당 8KiB 상한, `rcm wait` 는 `tail=0` |
 | `GET /jobs/{id}/log?offset=N` | 토큰(그 잡의·합류자·admin) | 로그 바이트 스트림(증분). 보존 정리로 지워졌으면 404 `log expired` |
 | `GET /jobs/{id}/events` | 없음 | SSE: 그 잡의 `job_changed`·`job_finished`·`marker` 만(로그 줄은 아님). 이미 끝난 잡이면 `hello` 뒤 `job_finished` 하나를 보내고 닫는다 |
 | `POST /jobs/{id}/cancel` | 토큰(그 잡의 또는 admin) | 취소 → `{job_id, state}`. 합류자 토큰이면 잡은 두고 자기 `joiners[]` 항목만 지운다 → `{left: true, job_id, job_state}` 이고 그 세션의 `rcm wait` 는 같은 JSON 을 찍고 **2** 로 끝난다 |
@@ -238,7 +238,7 @@ default = "full"
 | `GET /api/health` | 없음 | 워커 스레드 살아 있고 DB 열리면 200, 아니면 503 + 사유 |
 | `GET /` · `/static/*` | `read_auth` | 정적 UI |
 
-- `http.server.ThreadingHTTPServer`(표준 라이브러리). SSE 는 응답을 열어 두고 줄을 흘리는 스레드라 keep-alive 문제가 없다(요청당 스레드). **hardening**: 소켓 타임아웃(일반 10초, SSE·업로드는 별도) · `Content-Length` 필수, chunked 거부 · 동시 요청 `max_concurrent_requests`(32) 초과 503 · SSE 동시 연결 상한(16) · 정적 경로 정규화 · 405/400/413/401/403 명확히 · 예외는 500 한 줄.
+- `http.server.ThreadingHTTPServer`(표준 라이브러리). SSE 는 응답을 열어 두고 줄을 흘리는 스레드라 keep-alive 문제가 없다(요청당 스레드). **hardening**: 소켓 타임아웃(일반 10초, SSE·업로드는 별도) · `Content-Length` 필수(없거나 chunked 면 411) · 동시 요청 `max_concurrent_requests`(32) 초과 503 · SSE 동시 연결 상한(16) · 정적 경로 정규화(`http.server` 가 앞의 `//` 는 `/` 로 합치고, 안쪽 `//`·`..` 는 400) · 모르는 메서드도 JSON 405/404(표준 라이브러리의 HTML 501 이 아니다) · 405/400/413/401/403 명확히 · 예외는 500 한 줄.
 - 상태 모델은 폴러가 아니라 **이벤트로 갱신**한다(잡 상태 변화·마커·호스트 표본이 들어올 때 모델을 다시 만들어 참조 교체). `/api/status` 는 항상 최신이다.
 
 ## 저장소 (`store.py` · SQLite WAL · 표준 `sqlite3`)
@@ -246,7 +246,7 @@ default = "full"
 ```
 <data_dir>/                       # 기본 ~/.local/share/rcm (XDG), --data-dir
   rcm.sqlite3                     # jobs · events · tokens · duration_samples
-  jobs/<id>/log.txt · tree.tar.gz · meta.json
+  jobs/<id>/log.txt · tree.tar.gz        # 메타데이터는 DB 에만(meta.json 은 두지 않는다)
   workspaces/<id>/                # 실행 중·실패 보존
   mirrors/<repo>/                 # git_ref 모드용 로컬 미러
 ```
@@ -275,6 +275,7 @@ keep_workspace_on_failure = true
 recent_count = 8                    # /api/status.recent 건수 (오너 결정 14)
 sse_max_connections = 16            # 초과는 503 + fallback: poll
 sse_keepalive_seconds = 15
+public_url = ""                     # 잡 url 에 쓸 바깥 주소(예 http://macmini:8787). 비면 요청의 Host 로
 upload_stall_seconds = 60           # 이 동안 바이트가 안 오면 reason = upload_stalled
 upload_abandon_seconds = 300        # 이 동안 바이트가 안 오면 cancelled + "upload abandoned after 5m"
 retention_sweep_interval_seconds = 3600  # 보존 정리 주기(하한 60) — M3
@@ -399,7 +400,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 | 명령 | 하는 일 |
 |---|---|
 | `rcm run PRESET [-f K=V …] [--source tree\|git_ref] [--ref REF] [--by LABEL] [--no-join] [--no-wait] [--exclude PAT]` | 스냅샷 → 제출(합류) → 업로드 → 기본으로 `wait` 이어짐. stdout 에 JSON 한 줄, stderr 에 사람용 |
-| `rcm wait --job ID [--timeout S]` | SSE(M1)로 기다리며 stderr 에 위치·스텝·경과·ETA 갱신(TTY 면 한 줄 덮어쓰기), 끝나면 stdout JSON + **종료 코드 0/1/2/3**. SSE 가 끊기면 폴링(2초)으로 폴백(M0 는 폴링만). 서버 연결 실패가 60초 넘게 이어지면 3. **Ctrl-C 는 detach** — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID` 를 안내한다(합류자면 자기 `joiners[]` 항목만 best-effort 로 뺀다). 잡 취소는 명시적 `rcm cancel` 만 |
+| `rcm wait --job ID [--timeout S]` | SSE(M1)로 기다리며 stderr 에 위치·스텝·경과·ETA 갱신(TTY 면 한 줄 덮어쓰기), 끝나면 stdout JSON + **종료 코드 0/1/2/3**. SSE 가 끊기면 폴링(2초)으로 폴백(M0 는 폴링만). 서버 연결 실패가 60초 넘게 이어지면 3(`--timeout` 이 더 짧으면 그때 3). **Ctrl-C 는 detach** — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID` 를 안내한다(합류자면 자기 `joiners[]` 항목만 best-effort 로 뺀다). 잡 취소는 명시적 `rcm cancel` 만 |
 | `rcm eta (--job ID \| PRESET [-f K=V])` | 앞선 건수·대기·자기 소요·예상 완료·표본 출처 |
 | `rcm top [--watch N] [--json]` | 한 화면(아래) |
 | `rcm jobs [--mine] [--state S]` · `rcm logs ID [--follow]` · `rcm cancel ID` · `rcm presets` | 큐·로그·취소·프리셋. `--mine` 은 요청자와 합류자 둘 다. 합류자의 `cancel` 은 자기 대기만 뺀다 |
@@ -479,6 +480,8 @@ src/remote_ci_monitor/
     snapshot.py                # 파일 선택 규칙 · tree_hash · 제외 패턴(gitignore 문법)
     inputs.py                  # 프리셋 입력 스키마 검증
     hostparse.py               # macOS: vm_stat/top/ps/ioreg · Linux: /proc/*, ps, nvidia-smi
+    gitref.py                  # ref 검증 · ls-remote 출력에서 sha 고르기 · repo url 허용 목록 (M3)
+    retention.py               # 보존 정리 규칙(어느 잡의 산출물을 지울 때인가) (M3)
     status.py                  # 조각들 → StatusModel → to_json() (스키마 v1)
     render_text.py             # StatusModel → 터미널 문자열
   store.py                     # SQLite: jobs · events · tokens · samples · 마이그레이션 · claim
@@ -486,16 +489,17 @@ src/remote_ci_monitor/
   materialize.py               # tree(tar 안전 추출) · git_ref(미러 fetch · 체크아웃 — gitops.py 를 부른다)
   gitops.py                    # git 호출: ls-remote · 미러 fetch(부분 → 전체) · clone · checkout (M3)
   janitor.py                   # 보존 정리 스레드 (M3)
+  events.py                    # 이벤트 버스(링 2048 · Last-Event-ID 재생 · lag) (M1)
+  templates/                   # rcm init 이 쓰는 server.toml · client.toml (examples/ 와 바이트 동일) (M4)
   hostsample.py                # 샘플러 스레드(명령 실행·파일 읽기 → hostparse)
   server.py                    # ThreadingHTTPServer · 라우트 · 인증 · SSE · hardening
   client.py                    # 세션 쪽: 스냅샷 tar 만들기 · 제출 · 업로드 · SSE/폴링 wait
   web/                         # index.html · app.js · style.css
 tests/  fixtures/ · test_*.py
 examples/
-  server.toml                  # 일반 프리셋 예시(gate / gate-fast / qa 를 셸 스크립트로)
-  server.flutter-team.toml     # 참고 팀의 프리셋(local_ci 게이트 · 시뮬 QA 그룹 · 배포 git_ref) — 예시일 뿐
+  server.toml                  # 프리셋 예시(ok / gate / gate-fast / qa-smoke · 주석으로 [[repos]]·deploy). 참고 팀 전용 예시 파일은 두지 않는다(이식성)
   client.toml · session/ci-gate.sh · launchd/ · systemd/
-scripts/mutcheck.py
+scripts/mutcheck.py · scripts/smoke_install.sh · Dockerfile · CHANGELOG.md · LICENSE
 docs/reviews/
 ```
 

@@ -203,6 +203,24 @@ def test_joiner_cancel_leaves_and_wait_keeps_going(live, tmp_path):
     assert code == 2
 
 
+def test_timeout_is_honoured_while_server_is_unreachable(tmp_path):
+    """수용 검사 J3: 서버 연결이 안 돼도 --timeout 이 60초 grace 보다 먼저 온다."""
+    from remote_ci_monitor.client import Client, wait_for_job
+
+    client = Client("http://127.0.0.1:9", None)  # 아무도 안 듣는 포트 → 즉시 연결 실패
+    clock = [0.0]
+
+    def fake_sleep(s: float) -> None:
+        clock[0] += s
+
+    code, job, reason = wait_for_job(
+        client, 1, timeout=3, sleep=fake_sleep, clock=lambda: clock[0], use_sse=False
+    )
+    assert code == 3 and job is None
+    assert reason and "--timeout 3s" in reason
+    assert clock[0] < 60
+
+
 def test_unreachable_server_is_3_not_1(tmp_path):
     client = Client("http://127.0.0.1:1", "tok", timeout=0.5)
     with pytest.raises(ClientError) as e:

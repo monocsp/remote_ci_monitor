@@ -791,12 +791,16 @@ class Store:
             "SELECT id FROM jobs WHERE state=? AND COALESCE(last_received_at, created_at) < ?",
             (UPLOADING, cutoff),
         ).fetchall():
-            mins = int(abandon_seconds // 60)
+            span = (
+                f"{int(abandon_seconds // 60)}m"
+                if abandon_seconds >= 60
+                else f"{int(abandon_seconds)}s"
+            )
             if self.finish(
                 int(row["id"]),
                 CANCELLED,
                 now=now,
-                summary=f"upload abandoned after {mins}m",
+                summary=f"upload abandoned after {span}",
                 cancelled_by="server",
                 only_from=(UPLOADING,),
             ):

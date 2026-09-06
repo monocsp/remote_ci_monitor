@@ -593,6 +593,9 @@ def _poll_for_job(
                 unreachable_since = now
             if now - unreachable_since > CONNECTION_GRACE_SECONDS:
                 return EXIT_UNKNOWN, last, f"lost contact with the server: {e.message}"
+            if timeout is not None and now - started > timeout:
+                # 서버가 안 보여도 --timeout 은 지킨다
+                return EXIT_UNKNOWN, last, f"--timeout {timeout:g}s elapsed; server unreachable"
             sleep(poll_seconds)
             continue
         last = job

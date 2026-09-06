@@ -6,6 +6,7 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 
 - No GitHub dependency. Runs on your LAN or Tailscale.
 - Runtime dependencies: **zero** (Python 3.11+ standard library only). Same package for server and client.
+- Build machines: macOS (Apple Silicon and Intel) and Linux. Windows is out of scope (sessions on Windows can still submit through WSL).
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 

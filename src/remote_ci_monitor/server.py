@@ -1015,7 +1015,8 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             sem.release()
 
-    do_GET = do_POST = do_PUT = do_HEAD = _dispatch
+    # 모르는 메서드도 우리 라우터로 — 표준 라이브러리의 HTML 501 대신 JSON 405/404 를 낸다
+    do_GET = do_POST = do_PUT = do_HEAD = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
 
     def _token(self) -> TokenInfo | None:
         return self.app.authenticate(self.headers.get("Authorization"))
