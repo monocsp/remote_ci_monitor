@@ -427,4 +427,3 @@ def test_run_uses_label_from_config_or_env(env, capsys, tmp_path, monkeypatch):
         assert srv.req("GET", f"/jobs/{jid}")[1]["requester"]["label"] == "me@laptop"
     finally:
         srv.close()
-
