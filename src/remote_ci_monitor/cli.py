@@ -64,7 +64,8 @@ class _StatusLine:
 
     def __init__(self, stream=None, clock=time.monotonic):
         self.stream = stream if stream is not None else sys.stderr  # 호출 시점의 stderr(캡처 포함)
-        self.tty = hasattr(stream, "isatty") and stream.isatty()
+        # self.stream 으로 본다 — 인자 stream(None) 을 보면 진짜 터미널에서도 줄을 덮어쓰지 못한다
+        self.tty = hasattr(self.stream, "isatty") and self.stream.isatty()
         self.last = ""
         self.clock = clock
         self.last_write = 0.0

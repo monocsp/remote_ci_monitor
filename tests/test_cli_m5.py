@@ -428,3 +428,48 @@ def test_run_high_job_still_waits_and_exits_with_the_job_code(live, env, tree, c
     assert body["state"] == "succeeded" and body["wait_exit_code"] == 0
     assert body.get("priority", 1) == 1
     assert time.monotonic() - t0 < 30
+
+
+# ── `_StatusLine` — 진짜 터미널이면 한 줄을 덮어쓴다(M5a 의 `stream=None` 기본값 회귀) ────────
+
+
+class _Tty:
+    def __init__(self, tty: bool):
+        self._tty = tty
+        self.chunks: list[str] = []
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def write(self, text: str) -> None:
+        self.chunks.append(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_status_line_overwrites_on_a_tty_and_appends_lines_otherwise(monkeypatch):
+    from remote_ci_monitor import cli as cli_mod
+
+    tty = _Tty(True)
+    monkeypatch.setattr(cli_mod.sys, "stderr", tty)
+    line = cli_mod._StatusLine()  # 기본값 — 호출 시점의 stderr 를 본다
+    line.update("uploading #1: 0.0 / 30.0 MB (0%)")
+    line.update("uploading #1: 30.0 / 30.0 MB (cache 0%)")
+    line.done()
+    assert line.tty is True
+    assert tty.chunks[0].startswith("\r\x1b[2K") and tty.chunks[1].startswith("\r\x1b[2K")
+    assert tty.chunks[-1] == "\n"
+
+    plain = _Tty(False)
+    monkeypatch.setattr(cli_mod.sys, "stderr", plain)
+    clock = iter([100.0, 100.5, 100.6])  # 두 번째 갱신은 1초 안 — 마지막 줄은 done() 이 찍는다
+    line = cli_mod._StatusLine(clock=lambda: next(clock))
+    line.update("uploading #2: 0.0 / 30.0 MB (0%)")
+    line.update("uploading #2: 0.0 / 30.0 MB (cache 99%)")
+    line.done()
+    assert line.tty is False
+    assert "".join(plain.chunks).splitlines() == [
+        "uploading #2: 0.0 / 30.0 MB (0%)",
+        "uploading #2: 0.0 / 30.0 MB (cache 99%)",
+    ]
