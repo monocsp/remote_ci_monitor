@@ -584,3 +584,48 @@ def test_server_without_notify_rules_reports_zero_failures_and_no_thread(tmp_pat
         assert srv.req("GET", "/api/status")[1]["server"]["last_error"] is None
     finally:
         srv.close()
+
+
+# ── 시작 스캔은 스레드 안 · lag 뒤 재스캔 (격리 검증에서 추가) ─────────────────────────────
+
+
+class _SlowRun(FakeRun):
+    """훅 하나가 오래 걸린다 — 시작 스캔이 `start()` 를 붙잡으면 안 된다."""
+
+    def __call__(self, argv: Any, **kw: Any) -> subprocess.CompletedProcess:
+        time.sleep(1.0)
+        return super().__call__(argv, **kw)
+
+
+def test_start_returns_at_once_even_when_the_startup_scan_runs_a_slow_hook(env, started):
+    store, cfg, bus = env
+    cfg.notify = (rule("slow", argv=("sleep", "1")),)
+    missed = finished_job(store, finished=at(-30))
+    run = _SlowRun()
+    n, _ = notifier_for(store, cfg, bus, run=run)
+    t = time.monotonic()
+    n.start()
+    started.append(n)
+    assert time.monotonic() - t < 0.5  # 스캔은 스레드가 한다 — 서버 기동(HTTP)이 기다리지 않는다
+    poll(lambda: len(run.calls) == 1, 5.0, "startup scan in the thread")
+    assert [e["RCM_JOB_ID"] for e in run.envs()] == [str(missed.id)]
+
+
+def test_lag_on_the_bus_triggers_a_rescan_so_nothing_is_lost(env, started):
+    from remote_ci_monitor.events import KIND_LAG
+
+    store, cfg, bus = env
+    cfg.notify = (rule("all", argv=("true",)),)
+    run = FakeRun()
+    n, _ = notifier_for(store, cfg, bus, run=run)
+    n.start()
+    started.append(n)
+    settle()
+    job = finished_job(store, finished=at(-1))  # job_finished 이벤트는 (넘쳐서) 오지 않았다
+    settle()
+    assert run.calls == []
+    bus.publish(KIND_LAG, {}, at=NOW)
+    poll(lambda: len(run.calls) == 1, 3.0, "rescan after lag")
+    settle()
+    assert [e["RCM_JOB_ID"] for e in run.envs()] == [str(job.id)]
+    assert store.claim_notification(job.id, "all", at(1)) is False

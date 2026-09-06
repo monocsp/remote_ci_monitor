@@ -24,7 +24,7 @@ from remote_ci_monitor.config import ServerConfig
 from remote_ci_monitor.core.model import Job
 from remote_ci_monitor.core.notify import NotifyRule, notify_env, rules_for, sanitize_text
 from remote_ci_monitor.core.status import recent_json
-from remote_ci_monitor.events import KIND_JOB_FINISHED, EventBus
+from remote_ci_monitor.events import KIND_JOB_FINISHED, KIND_LAG, KIND_RESET, EventBus
 from remote_ci_monitor.store import Store
 
 POLL_SECONDS = 1.0
@@ -166,12 +166,30 @@ class Notifier:
 
     # ── 스레드 ──────────────────────────────────────────────────────────────
 
+    def _safe_scan(self, what: str) -> None:
+        try:
+            self.scan()
+        except Exception as e:  # noqa: BLE001 — 스캔 실패가 스레드를 죽이면 안 된다
+            self.log(f"{what}: {type(e).__name__}")
+            with self._lock:
+                self.failures += 1
+
     def _loop(self) -> None:
         sub = self.bus.subscribe()
         try:
+            # 시작 스캔은 이 스레드 안에서 — 느린 훅(타임아웃까지 붙잡는 명령)이 서버 기동과
+            # HTTP 응답을 미루면 안 된다. 구독을 먼저 하고 스캔하므로 그 사이의 job_finished 도
+            # 놓치지 않는다(겹치면 claim 이 한 번만 보내게 한다).
+            self._safe_scan("notify scan")
             while not self.stop_event.is_set():
                 ev = sub.get(timeout=POLL_SECONDS)
-                if ev is None or ev.kind != KIND_JOB_FINISHED:
+                if ev is None:
+                    continue
+                if ev.kind in (KIND_LAG, KIND_RESET):
+                    # 구독 큐가 넘쳐 job_finished 를 잃었을 수 있다 — 행이 없는 종료 잡을 다시
+                    self._safe_scan("notify rescan")
+                    continue
+                if ev.kind != KIND_JOB_FINISHED:
                     continue
                 job_id = ev.data.get("job_id")
                 if not isinstance(job_id, int):
@@ -190,10 +208,6 @@ class Notifier:
     def start(self) -> None:
         if self._thread is not None or not self.rules:
             return
-        try:
-            self.scan()
-        except Exception as e:  # noqa: BLE001
-            self.log(f"notify scan: {type(e).__name__}")
         self._thread = threading.Thread(target=self._loop, name="rcm-notify", daemon=True)
         self._thread.start()
 
