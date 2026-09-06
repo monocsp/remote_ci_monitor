@@ -916,6 +916,10 @@
       return;
     }
     var server = st.server || {};
+    if (!p.queue.length && extraPoolsQueueHtml(st)) {
+      body.innerHTML = '<div class="empty">Queue is empty here — jobs wait in other pools.</div>' + extraPoolsQueueHtml(st);
+      return;
+    }
     if (!p.queue.length) {
       var allDown = Array.isArray(server.workers) && server.workers.length && server.workers.every(function (w) { return w.state === "down"; });
       var presets = Array.isArray(st.presets) ? st.presets.map(function (x) { return x.name; }).join(" · ") : "";
@@ -939,7 +943,27 @@
     rows.forEach(function (row) { html += queueRowHtml(row, st); });
     html += "</tbody></table></div>";
     if (hiddenCount) html += '<button type="button" class="more" data-more-queue>and ' + hiddenCount + " more ▾</button>";
+    html += extraPoolsQueueHtml(st);
     body.innerHTML = html;
+  }
+  // 기본 풀 밖의 풀(M5b): 풀 헤더 + 같은 표. 워커가 없으면 그 대기 행은 서버가 worker_down 으로 준다
+  function extraPoolsQueueHtml(st) {
+    var pools = poolsOf(st).slice(1);
+    var html = "";
+    var tzName = st.display_timezone || "local";
+    pools.forEach(function (p) {
+      var head = poolHeader(p);
+      if (p.queue === null || p.queue === undefined) {
+        html += '<div class="pool-h">' + esc(head) + '</div><div class="banner bad" role="alert" data-error="queue">Queue unavailable — ' + esc(p.queue_error || "unknown error") + "</div>";
+        return;
+      }
+      if (!p.queue.length) return;  // 잡 없는 풀은 자리를 차지하지 않는다
+      html += '<div class="pool-h" data-pool="' + esc(p.name || "") + '">' + esc(head) + " · " + p.queue.length + " job" + (p.queue.length === 1 ? "" : "s") + "</div>";
+      html += '<div class="qwrap"><table class="q"><thead><tr><th>Job</th><th>Key</th><th>Requester</th><th>Reason</th><th>Elapsed</th><th>ETA <span class="tzh">· ' + esc(tzName) + '</span></th><th class="source">Source</th></tr></thead><tbody>';
+      sortQueue(p.queue).forEach(function (row) { html += queueRowHtml(row, st); });
+      html += "</tbody></table></div>";
+    });
+    return html;
   }
   function queueRowHtml(row, st) {
     var est = row.estimate || {};
@@ -1105,7 +1129,11 @@
     if (!p) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
     if (p.recent === null || p.recent === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">Recent unavailable — ' + esc(p.recent_error || "unknown error") + "</div>"; head.textContent = ""; renderEstimates(p); return; }
     if (!p.recent.length) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
-    var all = p.recent;
+    var all = p.recent.slice();
+    poolsOf(state.status).slice(1).forEach(function (pl) {
+      if (Array.isArray(pl.recent)) pl.recent.forEach(function (j) { all.push(Object.assign({}, j, { _pool: pl.name })); });
+    });
+    all.sort(function (a, b) { return (Date.parse(b.finished_at) || 0) - (Date.parse(a.finished_at) || 0); });
     var shown = state.showAllRecent ? all : all.slice(0, 5);
     head.textContent = "last " + shown.length + " of " + all.length;
     var html = '<div class="recent">';
@@ -1115,7 +1143,7 @@
       var failedish = job.state === "failed" || job.state === "timed_out";
       html += '<div class="rrow' + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="pill ' + esc(l.cls) + '"><span aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + esc(job.key || DASH) + "</span>" +
+        '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">pool ' + esc(job._pool) + "</span>" : "") + "</span>" +
         '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
@@ -1126,6 +1154,12 @@
     });
     html += "</div>";
     if (all.length > 5) html += '<button type="button" class="more" data-more-recent>' + (state.showAllRecent ? "show fewer ▴" : "show " + (all.length - 5) + " more ▾") + "</button>";
+    poolsOf(state.status).slice(1).forEach(function (pl) {
+      var head = poolHeader(pl);
+      if (!head) return;
+      var hs = Array.isArray(pl.hosts) ? pl.hosts : [];
+      html += '<div class="pool-h" data-pool="' + esc(pl.name || "") + '">' + esc(head) + (hs.length ? "" : " · no host sample") + "</div>";
+    });
     body.innerHTML = html;
     renderEstimates(p);
   }
