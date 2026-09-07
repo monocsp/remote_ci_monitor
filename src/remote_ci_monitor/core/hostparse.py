@@ -288,9 +288,34 @@ def stale(sampled_at: datetime, now: datetime, interval_seconds: float) -> bool:
 # ── 원격 워커가 보낸 표본 (M5b-2) ─────────────────────────────────────────────
 
 _SAMPLE_STR_LIMIT = 200
-_SAMPLE_DICT_KEYS = 16
 _SAMPLE_TOP_LIMIT = 10
 _SAMPLE_HISTORY_LIMIT = 60
+#: 알려진 키만 받는다 — 서버 샘플러(`hostsample.py`)가 내는 모양 그대로. 모르는 키는 표본 거부.
+_SAMPLE_KEYS = frozenset(
+    {
+        "interval_seconds",
+        "os",
+        "cores",
+        "load",
+        "cpu",
+        "memory",
+        "gpu",
+        "gpu_note",
+        "top",
+        "history",
+    }
+)
+_SAMPLE_IGNORED = frozenset(
+    {"name", "source", "sampled_at", "age_seconds", "stale"}
+)  # 서버가 정한다
+_NESTED_KEYS: dict[str, frozenset[str]] = {
+    "cpu": frozenset({"user", "sys", "idle", "busy"}),
+    "memory": frozenset({"total_bytes", "used_bytes", "compressed_bytes", "free_bytes"}),
+    "gpu": frozenset({"source", "name", "model", "util_pct", "mem_used_bytes", "mem_total_bytes"}),
+    "top": frozenset({"pid", "comm", "cpu", "rss_mb"}),
+    "history": frozenset({"at", "cpu_busy", "mem_used_bytes", "gpu_util_pct"}),
+}
+_NESTED_STR_KEYS = frozenset({"source", "name", "model", "comm", "at"})
 
 
 def _finite_number(v: Any) -> float | None:
@@ -312,26 +337,18 @@ def _opt_text(v: Any) -> str | None:
     return v[:_SAMPLE_STR_LIMIT]
 
 
-def _scalar(v: Any) -> Any:
-    if isinstance(v, str):
-        return v[:_SAMPLE_STR_LIMIT]
-    return _finite_number(v)
-
-
-def _scalar_dict(v: Any, *, allow_str: bool) -> dict[str, Any] | None:
-    """`cpu`·`memory`·`gpu`·`top[]`·`history[]` 항목: 문자열 키 → 스칼라. 키 수·길이 상한."""
+def _known_dict(v: Any, what: str) -> dict[str, Any] | None:
+    """`cpu`·`memory`·`gpu`·`top[]`·`history[]` 항목: 알려진 키 → 스칼라. 모르는 키면 거부."""
     if v is None:
         return None
     if not isinstance(v, dict):
-        raise ValueError("object expected")
+        raise ValueError(f"{what} must be an object")
+    allowed = _NESTED_KEYS[what]
     out: dict[str, Any] = {}
-    for key, val in list(v.items())[:_SAMPLE_DICT_KEYS]:
-        if not isinstance(key, str) or not key:
-            raise ValueError("object keys must be strings")
-        key = key[:32]
-        if isinstance(val, str) and not allow_str:
-            raise ValueError("number expected")
-        out[key] = _scalar(val)
+    for key, val in v.items():
+        if not isinstance(key, str) or key not in allowed:
+            raise ValueError(f"unknown {what} key")
+        out[key] = _opt_text(val) if key in _NESTED_STR_KEYS else _finite_number(val)
     return out
 
 
@@ -339,10 +356,13 @@ def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) 
     """워커의 heartbeat `host_sample` → `HostSample`. 모양이 어긋나면 `ValueError`.
 
     `name`·`source`·`sampled_at` 은 **서버가 정한 값**으로만 채운다(워커 payload 의 이름·시각은
-    쓰지 않는다). 알려진 키만 읽고 나머지는 버린다.
+    쓰지 않는다). 알려진 키만 받고, 모르는 키가 있거나 아는 키가 하나도 없으면 거부한다.
     """
     if not isinstance(doc, dict):
         raise ValueError("host_sample must be an object")
+    keys = {k for k in doc if k not in _SAMPLE_IGNORED}
+    if not keys or not keys <= _SAMPLE_KEYS:
+        raise ValueError("host_sample has unknown or no known keys")
     interval = _finite_number(doc.get("interval_seconds"))
     if interval is None or interval <= 0:
         interval = 5.0
@@ -362,14 +382,8 @@ def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) 
     hist_raw = doc.get("history") or []
     if not isinstance(top_raw, list) or not isinstance(hist_raw, list):
         raise ValueError("top and history must be lists")
-    top = tuple(
-        _scalar_dict(t, allow_str=True) or {} for t in top_raw[:_SAMPLE_TOP_LIMIT] if t is not None
-    )
-    history = tuple(
-        _scalar_dict(h, allow_str=False) or {}
-        for h in hist_raw[-_SAMPLE_HISTORY_LIMIT:]
-        if h is not None
-    )
+    top = tuple(_known_dict(t, "top") or {} for t in top_raw[:_SAMPLE_TOP_LIMIT])
+    history = tuple(_known_dict(h, "history") or {} for h in hist_raw[-_SAMPLE_HISTORY_LIMIT:])
     return HostSample(
         name=name,
         source=source,
@@ -378,9 +392,9 @@ def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) 
         os=_opt_text(doc.get("os")),
         cores=cores,
         load=load,
-        cpu=_scalar_dict(doc.get("cpu"), allow_str=False),
-        memory=_scalar_dict(doc.get("memory"), allow_str=False),
-        gpu=_scalar_dict(doc.get("gpu"), allow_str=True),
+        cpu=_known_dict(doc.get("cpu"), "cpu"),
+        memory=_known_dict(doc.get("memory"), "memory"),
+        gpu=_known_dict(doc.get("gpu"), "gpu"),
         gpu_note=_opt_text(doc.get("gpu_note")),
         top=top,
         history=history,

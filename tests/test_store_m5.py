@@ -138,6 +138,7 @@ def test_migration_v2_to_v3_adds_priority_and_tables_and_keeps_rows(tmp_path):
         c.execute("ALTER TABLE jobs DROP COLUMN worker_name")
         c.execute("ALTER TABLE tokens DROP COLUMN kind")
         c.execute("DROP TABLE IF EXISTS workers")
+        c.execute("DROP INDEX IF EXISTS jobs_pool")  # v5 가 pool 에 인덱스를 건다
         c.execute("ALTER TABLE jobs DROP COLUMN pool")
         c.execute("DROP TABLE IF EXISTS blobs")
         c.execute("DROP TABLE IF EXISTS notifications")

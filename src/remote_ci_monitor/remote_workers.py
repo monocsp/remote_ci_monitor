@@ -21,6 +21,7 @@ HTTP 핸들러는 얇게 여기를 부른다.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,7 +49,7 @@ from remote_ci_monitor.core.model import (
     WorkerInfo,
 )
 from remote_ci_monitor.core.progress import parse_marker
-from remote_ci_monitor.core.status import source_json
+from remote_ci_monitor.core.status import iso, source_json
 from remote_ci_monitor.materialize import MaterializeError, assemble_tar_from_manifest
 from remote_ci_monitor.store import LaneBusy, TokenInfo, WorkerRow
 
@@ -275,12 +276,16 @@ class RemoteWorkersMixin:
                 "preset": job.preset,
                 "pool": job.pool,
                 "priority": job.priority,
+                "state": job.state,
+                "lane": job.lane,
                 "source": source_json(job.source),
                 "inputs": dict(job.inputs),
+                "requester": {"name": job.requester.name, "label": job.requester.label},
                 "requested_by": job.requester.label,
+                "concurrency_group": job.concurrency_group,
                 "group": job.concurrency_group,
                 "timeout_seconds": job.timeout_seconds,
-                "lane": job.lane,
+                "started_at": iso(job.started_at),
             },
             "tree_url": f"/worker/jobs/{job.id}/tree",
             "preset": preset_doc,
@@ -303,14 +308,13 @@ class RemoteWorkersMixin:
         if wait <= 0 or not self._claim_slots.acquire(blocking=False):
             return None
         try:
-            deadline = now + timedelta(seconds=wait)
+            deadline = time.monotonic() + wait  # 주입 시계(now_fn)가 아니라 실제 경과 시간
             while not self.stop.is_set():
                 self.wake.wait(CLAIM_POLL_SECONDS)
-                now = self.now_fn()
-                job = self._try_claim(token.name, row.pool, lane, now)
+                job = self._try_claim(token.name, row.pool, lane, self.now_fn())
                 if job is not None:
                     return self._claim_payload(job)
-                if now >= deadline:
+                if time.monotonic() >= deadline:
                     break
         finally:
             self._claim_slots.release()
@@ -427,8 +431,9 @@ class RemoteWorkersMixin:
             lost=outcome == LOST,
             lost_summary=(given or "worker stopped while running")[:200],
         )
-        if given and state in (FAILED, SUCCEEDED) and not summary:
-            summary = given[:200]
+        if state in (FAILED, SUCCEEDED) and not summary:
+            summary = (given or ("failed on the worker" if state == FAILED else None)) or None
+            summary = summary[:200] if summary else None
         with self._remote_lock:
             self._log_partial.pop(job.id, None)
         if not self.store.finish(
@@ -447,7 +452,7 @@ class RemoteWorkersMixin:
     def worker_heartbeat(self, token: TokenInfo, body: Any) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
-        row = self._registered(token)
+        self._registered(token)
         now = self.now_fn()
         self.store.touch_worker(token.name, now)
         active = self.store.jobs_of_worker(token.name)
@@ -481,7 +486,6 @@ class RemoteWorkersMixin:
             "cancel": cancel,
             "paused": self.store.get_paused() is not None,
             "timeout_seconds": self.config.server.worker_timeout_seconds,
-            "pool": row.pool,
         }
 
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:

@@ -135,7 +135,8 @@ def outcome_for(
     elif rc == 0:
         state, summary = SUCCEEDED, progress.summary
     else:
-        state, summary = FAILED, progress.summary or f"exit {rc}"
+        state = FAILED
+        summary = progress.summary or (f"exit {rc}" if rc is not None else None)
     failed_step = progress.failed_step if state != SUCCEEDED else None
     return state, summary, failed_step
 
