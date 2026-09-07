@@ -913,9 +913,15 @@ def cmd_check(args: argparse.Namespace) -> int:
     client = None
     cfg = None
     try:
-        cfg = _resolve_server(_client_config(args))
+        cfg = _client_config(args)
     except ConfigError as e:
         rows.append(("client config", False, str(e)))
+    if cfg is not None:
+        try:
+            _resolve_server(cfg)  # 주소가 없으면 같은 네트워크에서 찾는다 — 결과는 server 행에
+        except ConfigError as e:
+            rows.append(("server", False, str(e)))
+            cfg = None
     if cfg is not None:
         if cfg.server:
             client = Client(cfg.server, cfg.token or None)

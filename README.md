@@ -48,9 +48,10 @@ The generated config ships a harmless `ok` preset so you can prove the path end 
 writing your own presets. To accept sessions from other computers set `bind` to the machine's
 Tailscale/LAN address (or `0.0.0.0`) and, on macOS, allow Python through the firewall prompt.
 Check from another computer with `curl http://<build-machine>:8787/api/health`. With `bind` set to a
-non-loopback address the server also advertises itself on the LAN (`_rcm._tcp`, mDNS/DNS-SD), so
-sessions on the same network run `rcm discover` — or nothing at all: `rcm run` finds it. For a
-service that survives logins and reboots see [Run as a service](#run-as-a-service).
+non-loopback address the server also advertises itself on the LAN (`_rcm._tcp`, mDNS/DNS-SD;
+`advertise = false` turns it off, `advertise_name` renames it), so sessions on the same network run
+`rcm discover` — or nothing at all: `rcm run` finds it. For a service that survives logins and
+reboots see [Run as a service](#run-as-a-service).
 
 Tokens: `rcm token add ops --admin` makes an admin token (pause/resume, cancel any job, read any
 log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another port:
