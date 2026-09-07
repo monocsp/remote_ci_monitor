@@ -23,6 +23,17 @@ of a key bumps that number and is listed here.
   (`default` first); jobs carry `pool`, presets `pool`/`pools`, `rcm run --pool`, `rcm eta --pool`,
   `rcm jobs --pool`; a pool without workers shows `worker_down` and no ETA. Schema version 4
   (`pool` column). All additive keys.
+- **Remote worker protocol** (M5b-2): worker tokens (`rcm token add NAME --worker`, `kind` column in
+  `rcm token list`, `/api/whoami.kind`), `POST /worker/register|claim|heartbeat`,
+  `GET /worker/jobs/{id}/tree` (cache jobs are assembled into a tarball on demand),
+  `POST /worker/jobs/{id}/phase|log|finish`; a worker only ever touches jobs it claimed; a
+  worker silent for `worker_timeout_seconds` is `down` and its running jobs become `lost`;
+  re-registering closes the old jobs as lost; unconfirmed cancels are closed by the server.
+  `server.workers[]` gains `worker` and `display_name`, `pools[].lanes` counts live remote
+  lanes, remote host samples appear in the pool's `hosts[]` with `source = "worker"`,
+  `/api/health` reports `pools_without_workers`. Config `worker_timeout_seconds`,
+  `worker_heartbeat_seconds`, `worker_claim_wait_seconds`. Schema version 5 (`tokens.kind`,
+  `jobs.worker_name`, `workers` table). Server restarts no longer mark remote running jobs lost.
 
 ## [0.1.0] - 2026-09-06
 
