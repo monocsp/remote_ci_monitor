@@ -7,7 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- Notification hooks now inherit `PATH`, `HOME` and `LANG` from the server (a hook calling
+  `date` or `$HOME` used to exit 1).
+
+### Added
+- Notification env carries the job source (`RCM_SOURCE_MODE/REF/SHA/BASE_SHA/DIRTY/REPO`) and
+  `RCM_INPUTS`, so a hook can post a commit status for the tested commit.
 
 ## [0.2.0] - 2026-09-07
 
