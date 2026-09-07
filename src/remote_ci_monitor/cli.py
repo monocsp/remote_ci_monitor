@@ -173,7 +173,12 @@ def _client_fail(client: Client, what: str, e: ClientError) -> int:
         return USAGE_EXIT
     if e.status:
         return _usage(f"{what}: {e.message}")
-    _err(f"{what}: cannot reach {client.server}: {e.message}")
+    msg = (
+        e.message
+        if e.message.startswith("cannot reach")
+        else f"cannot reach {client.server}: {e.message}"
+    )
+    _err(f"{what}: {msg}")
     return EXIT_UNKNOWN
 
 
@@ -234,6 +239,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     if pool is not None and pool != preset.pool and pool not in preset.pools:
         allowed = ", ".join([preset.pool, *preset.pools])
         return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
+    # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
+    try:
+        client.whoami()
+    except ClientError as e:
+        if e.status in (401, 403):
+            return _usage(
+                f"token rejected by {client.server}: {e.message} — check RCM_TOKEN/client.toml"
+            )
+        if e.status == 0:
+            return _client_fail(client, "run", e)
     if mode == "git_ref":
         return _run_git_ref(client, args, preset, inputs, ref or "", label, pool)
     # ② 스냅샷
