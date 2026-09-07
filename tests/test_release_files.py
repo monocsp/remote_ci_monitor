@@ -363,8 +363,9 @@ README_MENTIONS = [
 
 
 def test_readme_status_line_says_m4():
+    """Status 줄은 M4 이후(v0.1.0 · M5/v0.2.0 …)를 말한다 — M1 시절 문구가 남으면 안 된다."""
     text = read(README)
-    assert has(text, r"^[*_ ]*Status[*_]*:[^\n]*(M4|v0\.1\.0)"), "Status line is not M4 / v0.1.0"
+    assert has(text, r"^[*_ ]*Status[*_]*:[^\n]*(M[4-9]|v0\.[1-9]\.0)"), "Status line is stale"
     assert "Status: **M1**" not in text
 
 
