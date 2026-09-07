@@ -305,3 +305,33 @@ def test_describe_lines():
     assert describe(running) == "#412 running · step 5/8 test · elapsed 59s · overdue"
     done = {"id": 1, "state": "failed", "summary": "2 tests failed", "estimate": {}}
     assert describe(done) == "#1 failed · 2 tests failed"
+
+
+# ── 중첩 checkout (실배치: `.claude/worktrees/<x>/` 가 `Is a directory` 로 스냅샷을 깼다) ─────
+
+
+def test_snapshot_skips_a_nested_git_checkout_instead_of_failing(tmp_path):
+    """`git ls-files --others` 는 안에 `.git` 이 있는 디렉터리를 `dir/` 로 준다. 스냅샷은 그것을
+    파일처럼 열지 않고 건너뛰며 이름을 말한다. 나머지 파일은 그대로 들어간다."""
+    import subprocess
+
+    from remote_ci_monitor.client import make_snapshot
+
+    root = tmp_path / "app"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", str(root), "add", "a.txt"], check=True)
+    inner = root / ".claude" / "worktrees" / "wt"
+    inner.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(inner)], check=True)  # 중첩 checkout
+    (inner / "inside.txt").write_text("not part of the tree\n")
+    (root / "untracked.txt").write_text("u\n")
+    notes: list[str] = []
+    snap = make_snapshot(root, tar_dir=tmp_path, progress=notes.append)
+    try:
+        names = sorted(e.path for e in snap.entries)
+        assert names == ["a.txt", "untracked.txt"], names
+        assert any("skipping nested checkout .claude/worktrees/wt/" in n for n in notes), notes
+    finally:
+        snap.tar_path.unlink(missing_ok=True)
