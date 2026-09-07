@@ -3,7 +3,8 @@
 - 트리거는 이벤트 버스의 `job_finished` + 시작 시 미전송 스캔(재시작 직후 recover 이벤트를
   놓치지 않는다). 실행 전에 `notifications` 행을 unique insert 로 **claim** 하므로 같은 이벤트가
   두 번 와도(recover · finish · 재발행) 한 번만 보낸다 — 이벤트 중복은 정상 입력이다.
-- argv 는 셸 없이, 규칙에 적힌 그대로. 사용자 문자열은 `core/notify.sanitize_text` 로 정화된 env.
+- argv 는 셸 없이, 규칙에 적힌 그대로. env 는 PATH·HOME·LANG(서버 것) + `core/notify.sanitize_text`
+  로 정화된 RCM_*.
 - url 은 리다이렉트를 따라가지 않는다(3xx 는 실패). 응답 본문은 버린다.
 - 실패는 재시도하지 않는다. 서버 로그 한 줄 + `failures` 카운터. `server.last_error` 는 안 건드린다
   (알림 실패로 큐가 아픈 것처럼 보이면 안 된다).
@@ -12,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import urllib.error
@@ -28,6 +30,7 @@ from remote_ci_monitor.events import KIND_JOB_FINISHED, KIND_LAG, KIND_RESET, Ev
 from remote_ci_monitor.store import Store
 
 POLL_SECONDS = 1.0
+NOTIFY_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG")  # 프리셋의 env_passthrough 기본값과 같다
 
 
 def _utcnow() -> datetime:
@@ -85,7 +88,10 @@ class Notifier:
     # ── 실행 ────────────────────────────────────────────────────────────────
 
     def _run_rule(self, rule: NotifyRule, row: dict[str, Any]) -> bool:
-        env = notify_env(row, rule.name)
+        # 프리셋과 같은 통과 변수(PATH · HOME · LANG) 위에 RCM_* — 없으면 `date` 조차 못 찾는
+        # 훅 스크립트가 exit 1 로 끝난다(실배치에서 발견). 사용자 문자열은 RCM_* 뿐이다.
+        env = {k: os.environ[k] for k in NOTIFY_ENV_PASSTHROUGH if k in os.environ}
+        env.update(notify_env(row, rule.name))
         tag = f"notify {rule.name} #{row.get('id')}"
         if rule.argv:
             try:
