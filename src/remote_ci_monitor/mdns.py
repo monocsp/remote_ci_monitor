@@ -153,12 +153,15 @@ class Responder:
 
     def _loop(self) -> None:
         assert self._sock is not None
-        self._sock.settimeout(0.5)
-        for _ in range(ANNOUNCE_TIMES):
-            self._send(self.response())
-            if self._stop.wait(1.0):
-                break
+        self._sock.settimeout(0.2)
+        # announce 는 recv 루프 안에서 시각으로 — 시작 직후에도 질의에 바로 답한다(실측: 2초 귀먹음)
+        announces_left = ANNOUNCE_TIMES
+        next_announce = self.clock()
         while not self._stop.is_set():
+            if announces_left and self.clock() >= next_announce:
+                self._send(self.response())
+                announces_left -= 1
+                next_announce = self.clock() + 1.0
             try:
                 packet, addr = self._sock.recvfrom(RECV_SIZE)
             except TimeoutError:

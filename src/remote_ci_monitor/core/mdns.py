@@ -323,6 +323,8 @@ def found_from_records(records: list[Record]) -> list[Found]:
     instances: list[str] = []
     for r in records:
         if r.rtype == TYPE_PTR and _norm(r.name) == SERVICE and isinstance(r.data, str):
+            if r.ttl == 0:  # goodbye — 떠나는 서버는 목록에 넣지 않는다
+                continue
             inst = _norm(r.data)
             if inst not in instances:
                 instances.append(inst)
