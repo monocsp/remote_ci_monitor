@@ -6,6 +6,7 @@ requester)은 NUL·제어문자를 지우고 4 KB 로 자른다 — 알림 스�
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -66,6 +67,7 @@ def notify_env(job_row: dict[str, Any], rule_name: str) -> dict[str, str]:
         requester_label = str(requester)
     exit_code = job_row.get("exit_code")
     seconds = job_row.get("job_seconds")
+    source = job_row.get("source") if isinstance(job_row.get("source"), dict) else {}
     return {
         "RCM_JOB_ID": str(job_row.get("id") or ""),
         "RCM_STATE": sanitize_text(job_row.get("state")),
@@ -78,4 +80,15 @@ def notify_env(job_row: dict[str, Any], rule_name: str) -> dict[str, str]:
         "RCM_JOB_SECONDS": "" if seconds is None else str(seconds),
         "RCM_URL": sanitize_text(job_row.get("url")),
         "RCM_NOTIFY": sanitize_text(rule_name),
+        # 소스(M5 실배치에서 필요해짐): 훅이 커밋 status 를 남기려면 sha 가 있어야 한다.
+        # tree 잡은 sha 가 없고 base_sha + dirty 로 말한다; git_ref 잡은 ref + sha.
+        "RCM_SOURCE_MODE": sanitize_text(source.get("mode")),
+        "RCM_SOURCE_REF": sanitize_text(source.get("ref")),
+        "RCM_SOURCE_SHA": sanitize_text(source.get("sha")),
+        "RCM_SOURCE_BASE_SHA": sanitize_text(source.get("base_sha")),
+        "RCM_SOURCE_DIRTY": ""
+        if source.get("dirty") is None
+        else ("1" if source.get("dirty") else "0"),
+        "RCM_SOURCE_REPO": sanitize_text(source.get("repo")),
+        "RCM_INPUTS": sanitize_text(json.dumps(job_row.get("inputs") or {}, sort_keys=True)),
     }

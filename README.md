@@ -225,7 +225,10 @@ Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
   when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
-  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL` and `RCM_NOTIFY` (rule name);
+  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
+  source (`RCM_SOURCE_MODE`, `RCM_SOURCE_REF`, `RCM_SOURCE_SHA`, `RCM_SOURCE_BASE_SHA`,
+  `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status) and `RCM_INPUTS` (JSON);
+  the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB. Each (job, rule) fires exactly once, including
   jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
