@@ -384,7 +384,7 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
     give a preset `pool = "mac2"`, and `rcm run` it — the job must run there, its steps and host
     card must show under **pool mac2** in `rcm top` and the web page, and `rcm logs` must return
     the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the job
-    must be `lost` with `worker … unreachable`, the header must show `mac2-worker/1 down`, and a
+    must be `lost` with `worker … unreachable`, the header must show `<token name>/1 down`, and a
     restarted worker must pick up the next job.
 
 ## Releasing

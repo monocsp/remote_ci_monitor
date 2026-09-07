@@ -50,6 +50,7 @@ CLAIM_MIN_INTERVAL = 1.0  # 빈 204 가 이보다 빨리 오면 이만큼 쉰다
 REPORT_RETRIES = (1.0, 2.0, 4.0)
 LOG_FLUSH_SECONDS = 1.0
 LOG_BATCH_BYTES = 256 * 1024
+LOG_KEEP_BYTES = 4 * 1024 * 1024  # 서버에 못 보낸 로그를 메모리에 두는 상한
 WORKSPACE_KEEP_DAYS = 7
 STOP_SUMMARY = "worker stopped"
 
@@ -85,6 +86,7 @@ class _RemoteObserver:
         self._buf = bytearray()
         self._last_flush = time.monotonic()
         self._lock = threading.Lock()
+        self._pending_failures = 0
         self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등)
 
     def phase(self, phase: str) -> None:
@@ -103,17 +105,47 @@ class _RemoteObserver:
             self.flush()
 
     def flush(self) -> None:
+        """로그 배치를 한 번만 보낸다 — 펌프(취소·정지 감지)를 재시도로 막지 않는다. 서버에 못
+        닿으면 되돌려 두고 다음 배치와 함께 다시 보낸다(`LOG_KEEP_BYTES` 까지; 넘치면 오래된 쪽을
+        버린다 — 워커 로컬 `log.txt` 에는 남는다). 409 는 서버가 잡을 닫은 것."""
         with self._lock:
             if not self._buf:
                 return
             chunk = bytes(self._buf)
             self._buf.clear()
             self._last_flush = time.monotonic()
-        ok = self.proc.report(
-            lambda: self.proc.client.log(self.job_id, chunk), f"#{self.job_id} log"
-        )
-        if ok is None:
-            self.closed_by_server = True
+        try:
+            self.proc.client.log(self.job_id, chunk)
+        except ClientError as e:
+            if e.status == 409:
+                self.proc.log(f"#{self.job_id} log: server says {e.message}")
+                self.closed_by_server = True
+                return
+            if e.status and e.status != 503:
+                self.proc.log(f"#{self.job_id} log: {e.message}")
+                return
+            with self._lock:
+                self._buf[:0] = chunk  # 되돌린다
+                if len(self._buf) > LOG_KEEP_BYTES:
+                    del self._buf[: len(self._buf) - LOG_KEEP_BYTES]
+                self._pending_failures += 1
+            if self._pending_failures in (1, 10) or self._pending_failures % 60 == 0:
+                self.proc.log(f"#{self.job_id} log: {e.message} — keeping {len(self._buf)} bytes")
+            return
+        self._pending_failures = 0
+
+    def final_flush(self) -> None:
+        """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다)."""
+        self.flush()
+        with self._lock:
+            chunk = bytes(self._buf)
+            self._buf.clear()
+        if chunk and not self.closed_by_server:
+            ok = self.proc.report(
+                lambda: self.proc.client.log(self.job_id, chunk), f"#{self.job_id} log"
+            )
+            if ok is None:
+                self.closed_by_server = True
 
     def should_cancel(self) -> bool:
         return self.job_id in self.proc.cancel_requested or self.closed_by_server
@@ -398,13 +430,13 @@ class RemoteWorker:
                 materialize=lambda s: self._materialize(s, job),
             )
         except (MaterializeError, RunnerError) as e:
-            observer.flush()
+            observer.final_flush()
             summary = str(e)[:200]
             self._finish(job.id, FAILED, None, summary, observer)
             self.log(f"lane {lane}: #{job.id} failed — {summary}")
             self._cleanup(spec, failed=True)
             return
-        observer.flush()
+        observer.final_flush()
         rc = result.rc
         if result.lost:
             outcome, summary = LOST, STOP_SUMMARY
@@ -474,7 +506,9 @@ class RemoteWorker:
         hb = threading.Thread(target=self._heartbeat_loop, name="rcm-worker-heartbeat", daemon=True)
         hb.start()
         self._threads = [
-            threading.Thread(target=self._lane_loop, args=(lane,), name=f"rcm-worker-lane-{lane}")
+            threading.Thread(
+                target=self._lane_loop, args=(lane,), name=f"rcm-worker-lane-{lane}", daemon=True
+            )
             for lane in range(1, self.config.lanes + 1)
         ]
         for t in self._threads:
