@@ -392,6 +392,24 @@ def test_decode_follows_compression_pointers_in_owner_names_and_rdata() -> None:
     )
 
 
+@pytest.mark.parametrize("rtype", [TYPE_PTR, TYPE_SRV], ids=["ptr", "srv"])
+def test_decode_rejects_rdata_names_that_run_past_the_record(rtype: int) -> None:
+    """rdata 안 이름(PTR 대상 · SRV target)은 rdlength 안에서 끝나야 한다 — 패킷 안이라도 레코드
+    밖 바이트를 이름으로 읽지 않는다(격리 검증의 적대 패킷 `ptr-rdata-overrun`)."""
+    hdr = struct.pack("!6H", 0, QR_AA, 0, 1, 0, 0)
+    owner = labels("a.local.")
+    rdata = labels("b.local.")
+    if rtype == TYPE_SRV:
+        rdata = struct.pack("!HHH", 0, 0, PORT) + rdata
+    whole = rr(owner, rtype, CLASS_IN, 120, rdata)
+    assert decode(hdr + whole)[1][0].rtype == rtype  # 온전한 레코드는 읽힌다
+    # rdlength 만 3 줄인다 — 패킷 길이는 그대로라 이름이 레코드 밖으로 이어진다
+    head = len(owner) + 10
+    cut = whole[: head - 2] + struct.pack("!H", len(rdata) - 3) + whole[head:]
+    with pytest.raises(MdnsError):
+        decode(hdr + cut)
+
+
 def test_decode_reads_answer_authority_and_additional_sections_in_order() -> None:
     """세 섹션의 레코드가 한 목록에 순서대로 온다. 모르는 타입(NSEC 47)은 rdata 를 bytes 그대로.
     TXT 안의 빈 문자열은 버린다. cache-flush 비트는 데이터에 영향이 없다."""
@@ -870,6 +888,85 @@ def test_local_ipv4s_never_lists_loopback() -> None:
     assert isinstance(ips, list) and len(ips) == len(set(ips))
     for ip in ips:
         assert re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip) and not ip.startswith("127.")
+
+
+def test_order_ipv4s_is_route_first_then_lan_then_tailscale_then_link_local() -> None:
+    """A 레코드 순서 = `Found.address`. `first`(기본 경로 · 질의자 쪽 인터페이스)가 맨 앞, 다음
+    LAN, CGNAT(Tailscale 100.64/10), 링크로컬. 루프백 없음 · 중복 없음 · `getaddrinfo` 의 순서와
+    무관(실측: 같은 머신에서 호출마다 뒤집혔다)."""
+    from remote_ci_monitor.core.mdns import ipv4_rank, order_ipv4s
+
+    cands = ["100.75.116.13", "192.168.0.15", "127.0.0.1", "169.254.7.7", "192.168.10.125"]
+    want = ["192.168.10.125", "192.168.0.15", "100.75.116.13", "169.254.7.7"]
+    assert order_ipv4s(cands, first="192.168.10.125") == want
+    assert order_ipv4s(reversed(cands), first="192.168.10.125") == want
+    assert order_ipv4s(cands + ["192.168.0.15"], first="192.168.10.125") == want
+    assert order_ipv4s(cands) == ["192.168.0.15", "192.168.10.125", "100.75.116.13", "169.254.7.7"]
+    assert order_ipv4s(cands, first="127.0.0.1")[0] == "192.168.0.15"  # 루프백은 first 여도 뺀다
+    assert order_ipv4s(["100.64.0.1"], first="10.0.0.9") == ["10.0.0.9", "100.64.0.1"]
+    assert order_ipv4s([]) == [] and order_ipv4s([], first=None) == []
+    assert [ipv4_rank(ip) for ip in want] == [0, 0, 1, 2]
+    assert ipv4_rank("100.63.0.1") == 0 and ipv4_rank("100.128.0.1") == 0  # CGNAT 는 100.64–127
+
+
+def test_handle_puts_the_address_that_routes_to_the_querier_first() -> None:
+    """멀티홈 서버(유선 + Wi-Fi): 질의자에게 가는 인터페이스의 주소를 첫 A 로 — 노트북은 첫 A 로
+    붙는다. `route_fn(querier_ip)` 이 그 판단이고, 우리 주소가 아니거나 모르면 순서 그대로.
+    announce(주소 없음)도 순서 그대로."""
+    from remote_ci_monitor.mdns import Responder
+
+    def responder(route: Any) -> Any:
+        return Responder(
+            INSTANCE,
+            HOST,
+            PORT,
+            ips_fn=lambda: list(IPS),
+            txt_fn=lambda: dict(TXT),
+            clock=FakeClock(),
+            route_fn=route,
+        )
+
+    asked: list[str] = []
+
+    def via_second(ip: str) -> str:
+        asked.append(ip)
+        return "192.0.2.11"
+
+    q = encode_query([(SERVICE, TYPE_PTR)])
+    r = responder(via_second)
+    assert r.handle(q, ("192.0.2.77", 5353)) == response(ips=["192.0.2.11", "192.0.2.10"])
+    assert asked == ["192.0.2.77"]
+    assert r.response() == response()  # announce
+    assert responder(lambda ip: "10.1.1.1").handle(q, ADDR) == response()  # 우리 주소가 아니다
+    assert responder(lambda ip: None).handle(q, ADDR) == response()
+
+    def broken(ip: str) -> str:
+        raise OSError("no route")
+
+    assert responder(broken).handle(q, ADDR) == response()
+
+
+def test_handle_survives_a_raising_ips_or_txt_fn() -> None:
+    """응답기 스레드는 절대 죽지 않는다 — ips_fn/txt_fn 이 MdnsError 가 아닌 것을 던져도 None +
+    로그 한 줄(이름이 든다)."""
+    from remote_ci_monitor.mdns import Responder
+
+    logs: list[str] = []
+
+    def boom() -> dict[str, str]:
+        raise RuntimeError("lanes unavailable")
+
+    r = Responder(
+        INSTANCE,
+        HOST,
+        PORT,
+        ips_fn=lambda: list(IPS),
+        txt_fn=boom,
+        log=logs.append,
+        clock=FakeClock(),
+    )
+    assert r.handle(encode_query([(SERVICE, TYPE_PTR)]), ADDR) is None
+    assert len(logs) == 1 and "RuntimeError" in logs[0]
 
 
 # ── discover (가짜 소켓) ─────────────────────────────────────────────────────

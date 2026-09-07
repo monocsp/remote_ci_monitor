@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -236,14 +237,20 @@ def _parse_rdata(packet: bytes, rtype: int, start: int, length: int) -> Any:
         if length != 4:
             raise MdnsError("A record is not 4 bytes")
         return ".".join(str(b) for b in raw)
+    # rdata 안 이름(PTR 대상 · SRV target)은 rdlength 안에서 끝나야 한다 — 패킷 안이라도 레코드
+    # 밖 바이트를 이름으로 읽지 않는다(압축 포인터로 앞을 가리키는 것은 그대로 허용)
     if rtype == TYPE_PTR:
-        name, _ = decode_name(packet, start)
+        name, end = decode_name(packet, start)
+        if end > start + length:
+            raise MdnsError("PTR name runs past the record")
         return name
     if rtype == TYPE_SRV:
         if length < 7:
             raise MdnsError("SRV record too short")
         prio, weight, port = struct.unpack("!HHH", raw[:6])
-        target, _ = decode_name(packet, start + 6)
+        target, end = decode_name(packet, start + 6)
+        if end > start + length:
+            raise MdnsError("SRV target runs past the record")
         return (prio, weight, port, target)
     if rtype == TYPE_TXT:
         items: list[str] = []
@@ -386,6 +393,45 @@ class RateLimiter:
         return True
 
 
+# ── A 레코드 순서 ─────────────────────────────────────────────────────────────
+
+
+def _octets(ip: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in ip.split("."))
+    except ValueError:
+        return (999,)
+
+
+def ipv4_rank(ip: str) -> int:
+    """A 레코드 등급 — 0 LAN · 1 CGNAT(100.64/10, Tailscale) · 2 링크로컬(169.254/16) · 3 모름.
+    같은 Wi-Fi 의 노트북이 닿는 LAN 주소가 먼저다."""
+    parts = _octets(ip)
+    if len(parts) != 4:
+        return 3
+    a, b = parts[0], parts[1]
+    if a == 169 and b == 254:
+        return 2
+    if a == 100 and 64 <= b <= 127:
+        return 1
+    return 0
+
+
+def order_ipv4s(candidates: Iterable[str], *, first: str | None = None) -> list[str]:
+    """발견 응답에 실을 IPv4 순서 — 첫 A 가 곧 `Found.address` 다. `first`(기본 경로 인터페이스,
+    또는 질의자에게 가는 인터페이스의 주소)가 있으면 맨 앞, 나머지는 등급(LAN → CGNAT → 링크로컬)
+    다음 숫자 순. `getaddrinfo` 의 순서는 호출마다 바뀌므로(실측) 여기서 고정한다.
+    루프백은 빼고 중복은 없앤다."""
+    seen: list[str] = []
+    for ip in ([first] if first else []) + list(candidates):
+        if not ip or ip.startswith("127.") or ip in seen:
+            continue
+        seen.append(ip)
+    head = seen[:1] if first and seen and seen[0] == first else []
+    rest = sorted(seen[len(head) :], key=lambda ip: (ipv4_rank(ip), _octets(ip)))
+    return head + rest
+
+
 __all__ = [
     "CACHE_FLUSH",
     "CLASS_IN",
@@ -414,7 +460,9 @@ __all__ = [
     "encode_response",
     "found_from_records",
     "instance_name",
+    "ipv4_rank",
     "is_query",
+    "order_ipv4s",
     "query_id",
     "should_answer",
     "txt_rdata",

@@ -12,6 +12,8 @@ of a key bumps that number and is listed here.
   over mDNS/DNS-SD (stdlib responder, coexists with mDNSResponder/avahi on port 5353; `advertise`,
   `advertise_name`); sessions with no `server` configured (or `server = "auto"`) find it —
   `rcm discover [--json]`, `rcm check` marks `(found on this network)`, `/api/health.advertise`.
+  A multi-homed server (wired + Wi-Fi) listens on every interface and answers with the address
+  that routes to the querier first; Tailscale (100.64/10) addresses sort last.
 
 ### Fixed
 - A notification hook that times out is now killed as a whole process group — grandchildren

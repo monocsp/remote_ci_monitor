@@ -1,8 +1,9 @@
 """mDNS/DNS-SD 소켓 쪽(M5c) — 서버의 응답기 스레드와 클라이언트의 질의기.
 
 - 응답기: UDP `0.0.0.0:5353`(SO_REUSEADDR/SO_REUSEPORT — macOS mDNSResponder · avahi 와 공존),
-  `224.0.0.251` 가입. 우리 서비스에 대한 질의에만 멀티캐스트로 답한다. 시작 announce 2회,
-  종료 goodbye.
+  `224.0.0.251` 가입 — 인터페이스마다(멀티홈 서버: 유선 + Wi-Fi 어느 쪽 질의든 듣는다). 우리
+  서비스에 대한 질의에만 답한다. 시작 announce 2회, 종료 goodbye. A 레코드는 질의자에게 가는
+  인터페이스의 주소를 맨 앞에 — 노트북은 첫 A 로 붙는다.
 - 질의기: 임의 포트에서 PTR 질의를 멀티캐스트하고 timeout 동안 응답을 모은다. 표준 라이브러리만.
 - 소켓은 `sock_factory` 로 바꿔 끼울 수 있다(테스트 · 다른 포트).
 """
@@ -30,6 +31,7 @@ from remote_ci_monitor.core.mdns import (
     encode_response,
     found_from_records,
     is_query,
+    order_ipv4s,
     query_id,
     should_answer,
 )
@@ -39,45 +41,68 @@ ANNOUNCE_TIMES = 2
 
 
 def _multicast_socket(port: int, *, bind_ip: str = "0.0.0.0", loop: bool = True) -> socket.socket:
-    """그룹에 가입한 UDP 소켓. 같은 포트를 다른 데몬과 나눠 듣는다."""
+    """그룹에 가입한 UDP 소켓. 같은 포트를 다른 데몬과 나눠 듣는다. 실패하면 소켓을 닫고 OSError."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
-        try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except OSError:
-            pass
-    s.bind((bind_ip, port))
-    mreq = struct.pack("4s4s", socket.inet_aton(MDNS_GROUP), socket.inet_aton("0.0.0.0"))
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1 if loop else 0)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+        s.bind((bind_ip, port))
+        # 그룹 가입 — 기본 인터페이스(INADDR_ANY)에 더해 주소가 있는 인터페이스마다 한 번씩.
+        # INADDR_ANY 만 가입하면 기본 경로 인터페이스에서만 듣는다(실측: 유선 + Wi-Fi 멀티홈
+        # 서버가 Wi-Fi 쪽 질의를 못 들었다). 이미 가입한 인터페이스는 EADDRINUSE — 무시.
+        joined = 0
+        failure: OSError | None = None
+        for iface in ("0.0.0.0", *local_ipv4s()):
+            mreq = struct.pack("4s4s", socket.inet_aton(MDNS_GROUP), socket.inet_aton(iface))
+            try:
+                s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                joined += 1
+            except OSError as e:
+                failure = e
+        if not joined:
+            raise failure if failure is not None else OSError("cannot join the multicast group")
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1 if loop else 0)
+    except OSError:
+        s.close()
+        raise
     return s
 
 
-def local_ipv4s() -> list[str]:
-    """이 머신의 비루프백 IPv4 들(발견 응답의 A 레코드). 실패하면 빈 목록."""
-    ips: list[str] = []
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-    except OSError:
-        pass
-    # 기본 경로의 주소도 하나 더(호스트명이 루프백에만 묶인 머신)
+def _source_ipv4_for(peer_ip: str, port: int = MDNS_PORT) -> str | None:
+    """`peer_ip` 로 갈 때 커널이 고르는 출발 주소(라우팅 표 그대로 — 패킷은 나가지 않는다).
+    멀티홈 서버가 질의자와 같은 네트워크의 주소를 A 레코드 맨 앞에 싣는 근거. 모르면 None."""
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            probe.connect((MDNS_GROUP, MDNS_PORT))
-            ip = probe.getsockname()[0]
-            if ip and not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-        finally:
-            probe.close()
     except OSError:
-        pass
-    return ips
+        return None
+    try:
+        probe.connect((peer_ip, port))
+        ip = probe.getsockname()[0]
+        return ip or None
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def _hostname_ipv4s() -> list[str]:
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    return [info[4][0] for info in infos]
+
+
+def local_ipv4s() -> list[str]:
+    """이 머신의 비루프백 IPv4 들(발견 응답의 A 레코드). 순서가 곧 `Found.address` 다 — 기본 경로
+    인터페이스(멀티캐스트 그룹으로 나가는 쪽)의 주소가 먼저, 그다음 LAN → Tailscale(100.64/10) →
+    링크로컬(`order_ipv4s`). 실패하면 빈 목록."""
+    return order_ipv4s(_hostname_ipv4s(), first=_source_ipv4_for(MDNS_GROUP))
 
 
 class Responder:
@@ -95,6 +120,7 @@ class Responder:
         mdns_port: int = MDNS_PORT,
         sock_factory: Callable[[], socket.socket] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        route_fn: Callable[[str], str | None] = _source_ipv4_for,
     ):
         self.instance = instance
         self.host = host
@@ -105,6 +131,7 @@ class Responder:
         self.mdns_port = mdns_port
         self.sock_factory = sock_factory or (lambda: _multicast_socket(mdns_port))
         self.clock = clock
+        self.route_fn = route_fn  # 질의자 IP → 그쪽으로 나가는 우리 주소(멀티홈: 첫 A 로)
         self.limiter = RateLimiter()
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -114,13 +141,18 @@ class Responder:
 
     # ── 규칙 ────────────────────────────────────────────────────────────────
 
-    def response(self, query_id: int = 0) -> bytes:
+    def response(self, query_id: int = 0, *, prefer: str | None = None) -> bytes:
+        """응답 바이트. `prefer` 가 우리 주소 중 하나면 그것을 첫 A 로(질의자가 닿는 주소)."""
+        ips = list(self.ips_fn())
+        if prefer and prefer in ips:
+            ips = [prefer, *(ip for ip in ips if ip != prefer)]
         return encode_response(
-            self.instance, self.host, self.port, self.ips_fn(), self.txt_fn(), query_id=query_id
+            self.instance, self.host, self.port, ips, self.txt_fn(), query_id=query_id
         )
 
     def handle(self, packet: bytes, addr: Any = None) -> bytes | None:
-        """질의(QR=0)이고 우리 이름을 묻고 속도 상한 안이면 응답 바이트, 아니면 None."""
+        """질의(QR=0)이고 우리 이름을 묻고 속도 상한 안이면 응답 바이트, 아니면 None. 예외는 나가지
+        않는다 — 응답기 스레드는 어떤 패킷·콜백에도 죽지 않는다."""
         if not is_query(packet):
             return None
         try:
@@ -135,10 +167,19 @@ class Responder:
         # 5353 이 아닌 포트에서 온 질의는 legacy unicast — 응답에 질의 id 를 되돌려 준다
         # (RFC 6762 §6.7)
         legacy = bool(addr) and addr[1] != self.mdns_port
+        prefer: str | None = None
+        if addr:
+            try:
+                prefer = self.route_fn(addr[0])
+            except Exception:  # noqa: BLE001 — 라우팅을 못 알아내면 기본 순서
+                prefer = None
         try:
-            return self.response(query_id=query_id(packet) if legacy else 0)
+            return self.response(query_id=query_id(packet) if legacy else 0, prefer=prefer)
         except MdnsError as e:
             self.log(f"mdns: cannot build response: {e}")
+            return None
+        except Exception as e:  # noqa: BLE001 — ips_fn/txt_fn 이 무엇을 던져도 응답기는 산다
+            self.log(f"mdns: cannot build response: {type(e).__name__}: {e}")
             return None
 
     # ── 스레드 ──────────────────────────────────────────────────────────────
@@ -152,6 +193,13 @@ class Responder:
             self.log(f"mdns: send failed: {type(e).__name__}")
 
     def _loop(self) -> None:
+        try:
+            self._serve()
+        except Exception as e:  # noqa: BLE001 — 스레드가 조용히 죽지 않게: 로그 + error(health 에)
+            self.error = f"{type(e).__name__}: {e}"
+            self.log(f"mdns: responder stopped — {self.error}")
+
+    def _serve(self) -> None:
         assert self._sock is not None
         self._sock.settimeout(0.2)
         # announce 는 recv 루프 안에서 시각으로 — 시작 직후에도 질의에 바로 답한다(실측: 2초 귀먹음)
