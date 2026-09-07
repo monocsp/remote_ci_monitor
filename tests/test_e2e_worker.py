@@ -146,9 +146,11 @@ name = "app"
 url = "{url}"
 """
 
+# `sleep 0.3`: 잡 자체는 수 ms 라 50 ms 폴링(StatusWatcher)이 busy 순간을 못 본다 — 관찰 창을 넓힌다
 CACHED_SH = """#!/bin/sh
 echo "::rcm::step::size"
 wc -c < assets/blob.bin
+sleep 0.3
 echo "::rcm::summary::cached ok"
 """
 
