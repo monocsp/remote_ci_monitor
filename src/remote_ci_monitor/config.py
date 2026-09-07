@@ -33,6 +33,7 @@ ENV_PREFIX = "RCM"
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
 SERVER_CONFIG_CANDIDATES = ("./rcm.toml", "~/.config/rcm/server.toml")
 CLIENT_CONFIG_CANDIDATES = ("~/.config/rcm/client.toml",)
+LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")  # 여기 묶이면 다른 머신은 못 붙는다
 
 
 def user_config_dir() -> Path:
@@ -184,7 +185,19 @@ def advertise_enabled(section: ServerSection) -> bool:
     """mDNS 광고를 켤까 — 명시값이 있으면 그것, 없으면 bind 가 루프백이 아닐 때만."""
     if section.advertise is not None:
         return bool(section.advertise)
-    return section.bind not in ("127.0.0.1", "localhost", "::1")
+    return section.bind not in LOOPBACK_BINDS
+
+
+def advertise_warning(section: ServerSection) -> str | None:
+    """`advertise = true` 인데 bind 가 루프백이면 서버 로그 한 줄 — 명시값은 존중해 광고하지만
+    다른 머신은 발견만 되고 못 붙는다(실기: `rcm discover` 에 뜨고 connection refused).
+    아니면 None."""
+    if advertise_enabled(section) and section.bind in LOOPBACK_BINDS:
+        return (
+            f'warning: advertise is on but bind = "{section.bind}" — other machines will find '
+            'this server but cannot connect (set bind = "0.0.0.0" or a LAN/Tailscale IP)'
+        )
+    return None
 
 
 @dataclass

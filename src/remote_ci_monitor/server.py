@@ -38,7 +38,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
-from remote_ci_monitor.config import ServerConfig, advertise_enabled
+from remote_ci_monitor.config import (
+    LOOPBACK_BINDS,
+    ServerConfig,
+    advertise_enabled,
+    advertise_warning,
+)
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
@@ -255,6 +260,9 @@ class App(RemoteWorkersMixin):
                 log=self.log,
             )
             self.responder.start()
+            warning = advertise_warning(self.config.server)
+            if warning:
+                self.log(warning)
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -1941,10 +1949,7 @@ def serve(config: ServerConfig, *, debug: bool = False) -> int:
         f"rcm {app.version} listening on http://{host}:{port} · lanes {config.server.lanes} · "
         f"presets {', '.join(p.name for p in config.presets) or '(none)'} · data {data_dir}"
     )
-    if (
-        config.server.bind not in ("127.0.0.1", "localhost", "::1")
-        and config.server.read_auth == "none"
-    ):
+    if config.server.bind not in LOOPBACK_BINDS and config.server.read_auth == "none":
         app.log(
             "warning: bound to a non-loopback address with read_auth = none — LAN/Tailscale only"
         )

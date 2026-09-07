@@ -13,7 +13,8 @@ of a key bumps that number and is listed here.
   `advertise_name`); sessions with no `server` configured (or `server = "auto"`) find it —
   `rcm discover [--json]`, `rcm check` marks `(found on this network)`, `/api/health.advertise`.
   A multi-homed server (wired + Wi-Fi) listens on every interface and answers with the address
-  that routes to the querier first; Tailscale (100.64/10) addresses sort last.
+  that routes to the querier first; Tailscale (100.64/10) addresses sort last. `advertise = true`
+  with a loopback `bind` logs a warning (found, but unreachable from other machines).
 
 ### Fixed
 - A notification hook that times out is now killed as a whole process group — grandchildren

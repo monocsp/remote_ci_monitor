@@ -1054,6 +1054,31 @@ def test_advertise_enabled_follows_the_loaded_bind(tmp_path):
     assert advertise_enabled(off) is False
 
 
+@pytest.mark.parametrize(
+    ("advertise", "bind", "warns"),
+    [
+        (True, "127.0.0.1", True),  # 격리 검증: 목록에는 뜨는데 LAN IP 로 curl → connection refused
+        (True, "localhost", True),
+        (True, "0.0.0.0", False),
+        (None, "127.0.0.1", False),  # 기본값이면 광고 자체를 안 한다 — 경고할 것도 없다
+        (None, "0.0.0.0", False),
+        (False, "127.0.0.1", False),
+    ],
+)
+def test_advertise_warning_only_when_advertising_on_a_loopback_bind(
+    advertise: bool | None, bind: str, warns: bool
+):
+    """`advertise = true` + 루프백 bind: 광고는 하되(명시값 존중) 다른 머신은 발견만 되고
+    못 붙는다고 서버 로그 한 줄. 그 외는 None."""
+    from remote_ci_monitor.config import ServerSection, advertise_warning
+
+    msg = advertise_warning(ServerSection(bind=bind, advertise=advertise))
+    if warns:
+        assert msg and msg.startswith("warning:") and bind in msg and "cannot connect" in msg
+    else:
+        assert msg is None
+
+
 def test_example_server_toml_accepts_the_advertise_keys_if_present():
     """예시 파일에 키를 넣어도 된다(필수는 아니다 — 문서 테스트가 `advertise` 줄을 요구하되 주석을
     허용한다). 넣었다면 검증을 통과해야 한다."""
