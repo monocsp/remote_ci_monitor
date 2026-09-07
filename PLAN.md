@@ -1,4 +1,4 @@
-# remote_ci_monitor — 계획서 (v2.6, 2026-09-07)
+# remote_ci_monitor — 계획서 (v2.7, 2026-09-08)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
@@ -6,7 +6,7 @@
 > **v2.2** 는 M3(운영) 반영: `git_ref` 소스 모드의 실제 동작(제출 시 sha 확정 · 미러 · 로컬 clone) · 프리셋 `repo` · 보존 정리(janitor · `metadata_retention_days`) · `read_auth = basic` 의 확정(결정 23) · 서비스 파일. 명세 `docs/m3-workplan.md`, 리뷰 `docs/reviews/2026-09-05-codex-m3-design.md`.
 > **v2.3** 은 M4(배포·문서) 반영: 동적 버전 · MIT · `rcm init` · 설치 스모크 · 릴리스 워크플로 · Docker · README 재구성. 명세 `docs/m4-workplan.md`, 리뷰 `docs/reviews/2026-09-06-codex-m4-design.md`.
 > **v2.4** 는 M5a(우선순위 · 내용 주소 스냅샷 캐시 · 알림) 반영 + 수용 검사(`docs/acceptance/`) 결과. **v2.5** 는 M5b-1(풀 축 · DB v4). 명세 `docs/m5-workplan.md`, 리뷰 `docs/reviews/2026-09-06-codex-m5-design.md`.
-> **v2.6** 은 M5b 완료 · v0.2.0 릴리스 · 오너 결정 30(GitHub 백엔드 폐기 — 계획서는 M5 로 끝).
+> **v2.6** 은 M5b 완료 · v0.2.0 릴리스 · 오너 결정 30(GitHub 백엔드 폐기). **v2.7** 은 M5c(내부망 자동 발견) 계획 추가 — 계획서의 마지막 기능 항목.
 > ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 는 추천값으로 구현, 오너 확인 대기; 30 은 확정).
 
 ## 한 줄
@@ -539,6 +539,7 @@ docs/reviews/
   - **M5b-2 워커 프로토콜** (**완료 2026-09-07**, 명세 `docs/m5b2-workplan.md` · 리뷰 `docs/reviews/2026-09-06-codex-m5b2-design.md`): DB v5(`tokens.kind` · `jobs.worker_name` · `workers`) · `rcm token add --worker` · `/worker/register·claim(long-poll)·heartbeat` · `/worker/jobs/{id}/tree(캐시 잡 tar 조립)·phase·log(서버가 마커 파싱)·finish` · 워커 상태는 서버가 받은 `last_seen_at` 로만(timeout → down · 잡 lost · 재등록 = 옛 잡 lost · 미확인 취소는 서버가 닫음) · 재시작 복구는 로컬 잡만 · 인증 분리(워커 토큰은 `/worker/*` 만) · `server.workers[].worker/display_name` · `pools[].lanes` 는 살아 있는 레인 · 풀 hosts 에 워커 표본 · `/api/health.pools_without_workers`.
   - **M5b-3 `rcm worker`** (**완료 2026-09-07**, 명세 `docs/m5b3-workplan.md` — Codex 는 이날 모델 접근 불가로 생략): `runner.run_job`(자재화 → Popen → 펌프 → 신호; 로컬·원격 공용) · `WorkerClient` · `WorkerConfig`/`worker.toml`(`[[repos]]` 규칙은 서버와 같다) · `remote_worker.RemoteWorker`(등록 재시도 · heartbeat 스레드 · 레인 스레드 · 보고 재시도 · 409 면 정리 · SIGTERM → lost `worker stopped`) · `rcm worker --check/--once`. 두 프로세스 e2e 7건(실행·캐시 잡·취소·kill -9 → lost·SIGTERM·git_ref·서버 재시작). M5 완료 기준 ④ 달성.
   - **M5b-4 다중 풀 표시** (**완료 2026-09-07**, 명세 `docs/m5b4-workplan.md`): `rcm top` 원격 풀 헤더에 언제나 풀 이름(`queue — empty (pool linux)` · `· paused`) · 머리줄 원격 필 5개 초과는 `+N workers`(down 은 안 접음) · 웹 Host 절에 워커 표본 카드(`build-02 · pool linux`, Recent 밑 풀 host 헤더 제거) · `rcm check` `pools` 행(`default (1 lane) · linux (build-02/1 idle)`, 풀 워커 전부 down 이면 FAIL) · `server.workers[].pool`.
+- **M5c — 내부망 자동 발견**(계획 2026-09-08, 명세 `docs/m5c-workplan.md`): 서버가 `_rcm._tcp` 를 mDNS/DNS-SD 로 광고하고 클라이언트가 `server` 없이도 같은 네트워크의 서버를 찾는다(표준 라이브러리만 · 외부 도구 없음). `rcm discover` · `client.toml server = "auto"`. 실배치(노트북이 Tailscale 밖) 요청. 완료 기준은 명세 §6.
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
