@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-09-07
+
+M5: priority, content-addressed snapshot cache, notifications, worker pools and remote workers
+(`rcm worker`). Database schema 3 → 5 (migrates on start). API schema stays `schema_version 1`
+(additive keys only). Upgrade: install the same release on the server and on every worker
+(`rcm worker` refuses a version mismatch).
+
 ### Added
 - **Priority** (M5a): `rcm run --priority low|normal|high`, preset `priority` defaults that non-admin
   sessions cannot exceed, `rcm bump N` (admin), queue order by priority then age, `queue[].priority`
@@ -79,5 +88,6 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/monocsp/remote_ci_monitor/releases/tag/v0.1.0
