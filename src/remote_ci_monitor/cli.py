@@ -886,15 +886,20 @@ def cmd_token(args: argparse.Namespace) -> int:
     now = datetime.now(UTC)
     try:
         if args.token_command == "add":
-            secret = store.add_token(args.name, admin=args.admin, now=now)
-            _info(f"token '{args.name}' created — shown once, store it as RCM_TOKEN on the client:")
+            worker = bool(getattr(args, "worker", False))
+            if args.admin and worker:
+                return _usage("--admin and --worker cannot be combined")
+            kind = "worker" if worker else ("admin" if args.admin else "client")
+            secret = store.add_token(args.name, kind=kind, now=now)
+            where = "RCM_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
+            _info(f"token '{args.name}' created — shown once, store it as {where}:")
             print(secret, flush=True)
             return 0
         if args.token_command == "list":
+            print(f"{'name':<24} {'kind':<7} {'created':<11} revoked")
             for t in store.list_tokens():
-                flag = "admin" if t.admin else "user "
-                state = f"revoked {t.revoked_at:%Y-%m-%d}" if t.revoked_at else "active"
-                print(f"{t.name:<24} {flag}  created {t.created_at:%Y-%m-%d}  {state}")
+                revoked = f"{t.revoked_at:%Y-%m-%d}" if t.revoked_at else "—"
+                print(f"{t.name:<24} {t.kind:<7} {t.created_at:%Y-%m-%d}  {revoked}")
             return 0
         if args.token_command == "revoke":
             if store.revoke_token(args.name, now):
@@ -1046,13 +1051,18 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--config", help="server.toml to check the data dir of")
     check.set_defaults(func=cmd_check)
 
-    token = sub.add_parser("token", help="manage client tokens (run on the build machine)")
+    token = sub.add_parser("token", help="manage client/worker tokens (run on the server)")
     server_opts(token)
     tsub = token.add_subparsers(dest="token_command", required=True)
     add = tsub.add_parser("add", help="create a token and print it once")
     add.add_argument("name")
     add.add_argument(
         "--admin", action="store_true", help="admin token (cancel any job, pause/resume)"
+    )
+    add.add_argument(
+        "--worker",
+        action="store_true",
+        help="worker token for `rcm worker` on another machine (/worker/* only)",
     )
     tsub.add_parser("list", help="list tokens (never shows secrets)")
     revoke = tsub.add_parser("revoke", help="revoke a token")

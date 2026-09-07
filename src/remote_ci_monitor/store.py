@@ -4,7 +4,8 @@
 - `claim` 은 한 트랜잭션 안에서 「queued 이고 그룹이 running/cancelling 잡과 안 겹치는
   가장 작은 id」를 골라 `UPDATE … WHERE state='queued'` 로 잡는다(rowcount 로 원자성 확인).
 - 상태 전이는 잡 갱신과 **같은 트랜잭션**에서 `events(kind='state')` 로 남긴다 → `transitions[]`.
-- 시작 시 `running`·`cancelling` → `lost`, `uploading` → `cancelled`. 큐에서 사라지는 잡은 없다.
+- 시작 시 로컬 레인의 `running`·`cancelling` → `lost`, `uploading` → `cancelled`. 큐에서
+  사라지는 잡은 없다. 원격 워커(`worker_name`)의 잡은 그대로 두고 heartbeat 시각으로 판정한다.
 - 마이그레이션은 `PRAGMA user_version` 으로 번호를 매긴다.
 - 시각은 DB 에 epoch 초(REAL)로 두고 모델에서는 UTC aware datetime.
 """
@@ -34,6 +35,9 @@ from remote_ci_monitor.core.model import (
     QUEUED,
     RUNNING,
     TERMINAL_STATES,
+    TOKEN_ADMIN,
+    TOKEN_CLIENT,
+    TOKEN_KINDS,
     UPLOADING,
     WAITING_STATES,
     CancelInfo,
@@ -47,7 +51,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo
 
-DB_VERSION = 4
+DB_VERSION = 5
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -84,9 +88,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_received_at REAL,
   artifacts_purged_at REAL,
   priority INTEGER NOT NULL DEFAULT 0,
-  pool TEXT NOT NULL DEFAULT 'default'
+  pool TEXT NOT NULL DEFAULT 'default',
+  worker_name TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
+CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
 CREATE TABLE IF NOT EXISTS joiners (
@@ -109,7 +115,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   sha256 TEXT NOT NULL UNIQUE,
   admin INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
-  revoked_at REAL
+  revoked_at REAL,
+  kind TEXT NOT NULL DEFAULT 'client'
 );
 CREATE TABLE IF NOT EXISTS server_state (
   key TEXT PRIMARY KEY,
@@ -129,11 +136,25 @@ CREATE TABLE IF NOT EXISTS notifications (
   failed INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (job_id, notify_name)
 );
+CREATE TABLE IF NOT EXISTS workers (
+  name TEXT PRIMARY KEY,
+  pool TEXT NOT NULL,
+  lanes INTEGER NOT NULL,
+  host_name TEXT,
+  version TEXT,
+  registered_at REAL NOT NULL,
+  last_seen_at REAL NOT NULL
+);
 """
 
 _BLOBS_SQL = (
     "CREATE TABLE IF NOT EXISTS blobs (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, "
     "created_at REAL NOT NULL, last_used_at REAL NOT NULL)"
+)
+_WORKERS_SQL = (
+    "CREATE TABLE IF NOT EXISTS workers (name TEXT PRIMARY KEY, pool TEXT NOT NULL, "
+    "lanes INTEGER NOT NULL, host_name TEXT, version TEXT, registered_at REAL NOT NULL, "
+    "last_seen_at REAL NOT NULL)"
 )
 _NOTIFICATIONS_SQL = (
     "CREATE TABLE IF NOT EXISTS notifications (job_id INTEGER NOT NULL, notify_name TEXT NOT NULL, "
@@ -153,11 +174,23 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     # v3 → v4(M5b): 잡이 어느 풀의 워커에서 도는가. 옛 행은 전부 기본 풀.
     4: ("ALTER TABLE jobs ADD COLUMN pool TEXT NOT NULL DEFAULT 'default'",),
+    # v4 → v5(M5b-2): 토큰 종류 · 원격 워커 표 · 잡을 claim 한 워커 이름. 옛 admin=1 은 kind admin.
+    5: (
+        "ALTER TABLE tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'client'",
+        "UPDATE tokens SET kind='admin' WHERE admin=1",
+        "ALTER TABLE jobs ADD COLUMN worker_name TEXT",
+        "CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state)",
+        _WORKERS_SQL,
+    ),
 }
 
 
 class StoreError(RuntimeError):
     pass
+
+
+class LaneBusy(StoreError):
+    """그 워커의 그 레인에 이미 running·cancelling 잡이 있다 — 레인 과할당 금지(M5b-2)."""
 
 
 @dataclass(frozen=True)
@@ -166,6 +199,20 @@ class TokenInfo:
     admin: bool
     created_at: datetime
     revoked_at: datetime | None = None
+    kind: str = TOKEN_CLIENT  # client | admin | worker — `admin` 불리언과 항상 일치(M5b-2)
+
+
+@dataclass(frozen=True)
+class WorkerRow:
+    """원격 워커 등록 행. 상태(up/down)는 `last_seen_at` 과 서버 시각으로만 판정한다."""
+
+    name: str
+    pool: str
+    lanes: int
+    host_name: str | None
+    version: str | None
+    registered_at: datetime
+    last_seen_at: datetime
 
 
 def _ts(dt: datetime | None) -> float | None:
@@ -325,6 +372,7 @@ class Store:
             artifacts_purged_at=_dt(row["artifacts_purged_at"]),
             priority=int(row["priority"] or 0),
             pool=row["pool"] or DEFAULT_POOL,
+            worker_name=row["worker_name"],
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -765,13 +813,32 @@ class Store:
             conn.execute("ROLLBACK")
             raise
 
-    def claim(self, lane: int, now: datetime, pool: str = DEFAULT_POOL) -> Job | None:
-        """그 풀의 queued 잡 하나를 원자적으로 running 으로. 그룹 배제는 **풀 안에서**(M5b)."""
+    def claim(
+        self,
+        lane: int,
+        now: datetime,
+        pool: str = DEFAULT_POOL,
+        worker_name: str | None = None,
+    ) -> Job | None:
+        """그 풀의 queued 잡 하나를 원자적으로 running 으로. 그룹 배제는 **풀 안에서**(M5b).
+
+        `worker_name` 이 있으면(원격 워커) 같은 트랜잭션에서 그 워커의 그 레인에 활성 잡이
+        없는지 확인한다 — 있으면 `LaneBusy`(M5b-2, 레인 과할당 금지). 로컬 레인은 None.
+        """
         conn = self._conn()
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
             busy = ",".join("?" * len(BUSY_STATES))
+            if worker_name is not None:
+                taken = conn.execute(
+                    f"SELECT id FROM jobs WHERE worker_name=? AND lane=? AND state IN ({busy}) "
+                    "ORDER BY id LIMIT 1",
+                    (worker_name, lane, *sorted(BUSY_STATES)),
+                ).fetchone()
+                if taken is not None:
+                    conn.execute("ROLLBACK")
+                    raise LaneBusy(f"lane {lane} already has job #{int(taken['id'])}")
             row = conn.execute(
                 "SELECT id FROM jobs WHERE state=? AND pool=? AND (concurrency_group IS NULL OR "
                 "concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
@@ -784,15 +851,17 @@ class Store:
                 return None
             job_id = int(row["id"])
             cur = conn.execute(
-                "UPDATE jobs SET state=?, lane=?, started_at=?, phase=?, last_output_at=? "
-                "WHERE id=? AND state=?",
-                (RUNNING, lane, ts, PHASE_MATERIALIZING, ts, job_id, QUEUED),
+                "UPDATE jobs SET state=?, lane=?, started_at=?, phase=?, last_output_at=?, "
+                "worker_name=? WHERE id=? AND state=?",
+                (RUNNING, lane, ts, PHASE_MATERIALIZING, ts, worker_name, job_id, QUEUED),
             )
             if cur.rowcount != 1:
                 conn.execute("ROLLBACK")
                 return None
             self._event(conn, job_id, EVENT_STATE, {"state": RUNNING}, ts)
             conn.execute("COMMIT")
+        except LaneBusy:
+            raise
         except Exception:
             conn.execute("ROLLBACK")
             raise
@@ -896,7 +965,11 @@ class Store:
             raise
 
     def recover_on_start(self, now: datetime) -> tuple[list[int], list[int]]:
-        """서버 시작 정리. running·cancelling → lost, uploading → cancelled."""
+        """서버 시작 정리. 로컬 레인의 running·cancelling → lost, uploading → cancelled.
+
+        원격 워커(`worker_name`)의 잡은 건드리지 않는다 — 워커는 살아 있을 수 있고, 아니면
+        `mark_lost_for_worker` 가 heartbeat 시각으로 닫는다(M5b-2).
+        """
         conn = self._conn()
         ts = _ts(now)
         when = now.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
@@ -906,7 +979,8 @@ class Store:
         conn.execute("BEGIN IMMEDIATE")
         try:
             for row in conn.execute(
-                "SELECT id FROM jobs WHERE state IN (?, ?) ORDER BY id", (RUNNING, CANCELLING)
+                "SELECT id FROM jobs WHERE state IN (?, ?) AND worker_name IS NULL ORDER BY id",
+                (RUNNING, CANCELLING),
             ).fetchall():
                 self._set_state(
                     conn,
@@ -970,13 +1044,23 @@ class Store:
 
     # ── 토큰 ────────────────────────────────────────────────────────────────
 
-    def add_token(self, name: str, *, admin: bool, now: datetime) -> str:
-        """무작위 32바이트 토큰을 만들어 **한 번만** 돌려준다. DB 에는 sha256 만 남는다."""
+    def add_token(
+        self, name: str, *, admin: bool = False, now: datetime, kind: str | None = None
+    ) -> str:
+        """무작위 32바이트 토큰을 만들어 **한 번만** 돌려준다. DB 에는 sha256 만 남는다.
+
+        `kind` 가 없으면 `admin` 으로 정한다(client|admin). `admin` 열은 `kind == "admin"` 과
+        항상 같게 둔다(옛 코드 경로 호환).
+        """
+        if kind is None:
+            kind = TOKEN_ADMIN if admin else TOKEN_CLIENT
+        if kind not in TOKEN_KINDS:
+            raise ValueError(f"unknown token kind {kind!r}")
         secret = secrets.token_urlsafe(32)
         try:
             self._conn().execute(
-                "INSERT INTO tokens (name, sha256, admin, created_at) VALUES (?, ?, ?, ?)",
-                (name, hash_token(secret), 1 if admin else 0, _ts(now)),
+                "INSERT INTO tokens (name, sha256, admin, created_at, kind) VALUES (?, ?, ?, ?, ?)",
+                (name, hash_token(secret), 1 if kind == TOKEN_ADMIN else 0, _ts(now), kind),
             )
         except sqlite3.IntegrityError as e:
             raise StoreError(f"token '{name}' already exists") from e
@@ -988,11 +1072,14 @@ class Store:
             return None
         digest = hash_token(secret)
         for row in self._conn().execute(
-            "SELECT name, sha256, admin, created_at FROM tokens WHERE revoked_at IS NULL"
+            "SELECT name, sha256, admin, created_at, kind FROM tokens WHERE revoked_at IS NULL"
         ):
             if hmac.compare_digest(row["sha256"], digest):
                 return TokenInfo(
-                    name=row["name"], admin=bool(row["admin"]), created_at=_dt(row["created_at"])
+                    name=row["name"],
+                    admin=bool(row["admin"]),
+                    created_at=_dt(row["created_at"]),
+                    kind=row["kind"] or TOKEN_CLIENT,
                 )
         return None
 
@@ -1003,9 +1090,11 @@ class Store:
                 admin=bool(r["admin"]),
                 created_at=_dt(r["created_at"]),
                 revoked_at=_dt(r["revoked_at"]),
+                kind=r["kind"] or TOKEN_CLIENT,
             )
             for r in self._conn().execute(
-                "SELECT name, admin, created_at, revoked_at FROM tokens ORDER BY created_at, name"
+                "SELECT name, admin, created_at, revoked_at, kind FROM tokens "
+                "ORDER BY created_at, name"
             )
         ]
 
@@ -1014,6 +1103,97 @@ class Store:
             "UPDATE tokens SET revoked_at=? WHERE name=? AND revoked_at IS NULL", (_ts(now), name)
         )
         return cur.rowcount == 1
+
+    # ── 원격 워커 (M5b-2) ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _row_to_worker(row: sqlite3.Row) -> WorkerRow:
+        return WorkerRow(
+            name=row["name"],
+            pool=row["pool"],
+            lanes=int(row["lanes"]),
+            host_name=row["host_name"],
+            version=row["version"],
+            registered_at=_dt(row["registered_at"]),
+            last_seen_at=_dt(row["last_seen_at"]),
+        )
+
+    def register_worker(
+        self,
+        name: str,
+        *,
+        pool: str,
+        lanes: int,
+        host_name: str | None,
+        version: str | None,
+        now: datetime,
+    ) -> WorkerRow:
+        """등록/갱신(upsert). `last_seen_at = now`. 처음 등록 시각은 유지한다."""
+        ts = _ts(now)
+        self._conn().execute(
+            "INSERT INTO workers (name, pool, lanes, host_name, version, registered_at, "
+            "last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET "
+            "pool=excluded.pool, lanes=excluded.lanes, host_name=excluded.host_name, "
+            "version=excluded.version, last_seen_at=excluded.last_seen_at",
+            (name, pool, int(lanes), host_name, version, ts, ts),
+        )
+        row = self.get_worker(name)
+        assert row is not None
+        return row
+
+    def get_worker(self, name: str) -> WorkerRow | None:
+        row = self._conn().execute("SELECT * FROM workers WHERE name=?", (name,)).fetchone()
+        return self._row_to_worker(row) if row else None
+
+    def list_workers(self) -> list[WorkerRow]:
+        return [
+            self._row_to_worker(r)
+            for r in self._conn().execute("SELECT * FROM workers ORDER BY name").fetchall()
+        ]
+
+    def touch_worker(self, name: str, now: datetime) -> bool:
+        """heartbeat — `last_seen_at` 은 **서버 시각**으로만 쓴다. 모르는 워커면 False."""
+        cur = self._conn().execute(
+            "UPDATE workers SET last_seen_at=? WHERE name=?", (_ts(now), name)
+        )
+        return cur.rowcount == 1
+
+    def jobs_of_worker(self, name: str) -> list[Job]:
+        """그 워커가 claim 해서 아직 running·cancelling 인 잡(레인 순)."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE worker_name=? AND state IN ({busy}) ORDER BY lane, id",
+            (name, *sorted(BUSY_STATES)),
+        )
+
+    def mark_lost_for_worker(self, name: str, now: datetime, summary: str) -> list[int]:
+        """그 워커의 running·cancelling 잡을 전부 lost 로. 닫은 잡 id 목록."""
+        conn = self._conn()
+        ts = _ts(now)
+        busy = ",".join("?" * len(BUSY_STATES))
+        lost: list[int] = []
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for row in conn.execute(
+                f"SELECT id FROM jobs WHERE worker_name=? AND state IN ({busy}) ORDER BY id",
+                (name, *sorted(BUSY_STATES)),
+            ).fetchall():
+                self._set_state(
+                    conn,
+                    row["id"],
+                    LOST,
+                    ts,
+                    finished_at=ts,
+                    summary=summary[:200],
+                    lane=None,
+                    phase=None,
+                )
+                lost.append(int(row["id"]))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return lost
 
     # ── 서버 상태 ────────────────────────────────────────────────────────────
 

@@ -125,16 +125,17 @@
   function stateWord(state) { return state === "timed_out" ? "timed out" : (state || "unknown"); }
   function stateGlyph(state) { return GLYPH[state] || "·"; }
 
+  // 로컬 레인만 센다 — server.lanes 가 로컬 수라 원격(worker 키) 항목을 섞으면 "3/2" 가 된다 (M5b-2)
   function busyCount(status) {
     var w = status && status.server && status.server.workers;
     if (!Array.isArray(w)) return null;
-    return w.filter(function (x) { return x.state === "busy"; }).length;
+    return w.filter(function (x) { return !x.worker && x.state === "busy"; }).length;
   }
   function laneCount(status) {
     var s = status && status.server;
     if (!s) return null;
     if (isNum(s.lanes)) return s.lanes;
-    return Array.isArray(s.workers) ? s.workers.length : null;
+    return Array.isArray(s.workers) ? s.workers.filter(function (x) { return !x.worker; }).length : null;
   }
   function secondsSince(iso, nowMs) {
     var t = parseIso(iso);
@@ -399,9 +400,17 @@
     });
   }
 
+  // 원격 워커(M5b-2)의 표시 이름: 서버가 준 display_name, 없으면 `<worker>/<lane>`
+  function workerName(w) {
+    if (!w || !w.worker) return null;
+    return w.display_name || (w.worker + "/" + w.lane);
+  }
+
   function workerPills(server) {
     server = server || {};
-    var workers = Array.isArray(server.workers) ? server.workers : [];
+    var all = Array.isArray(server.workers) ? server.workers : [];
+    var workers = all.filter(function (w) { return !w.worker; });   // 로컬 레인은 오늘 그대로
+    var remote = all.filter(function (w) { return !!w.worker; });   // 원격은 이름 필로 뒤에
     var lanes = isNum(server.lanes) ? server.lanes : workers.length;
     var pills = [];
     if (lanes === 1 && workers.length === 1) {
@@ -414,6 +423,11 @@
         else pills.push({ text: "lane " + w.lane + " · " + (w.state || DASH), cls: w.state || "", jobId: null, lane: w.lane });
       });
     }
+    remote.forEach(function (w) {
+      var name = workerName(w);
+      var busy = w.state === "busy" && isNum(w.job_id);
+      pills.push({ text: name + " " + (w.state || DASH) + (busy ? " #" + w.job_id : ""), cls: w.state || "", jobId: busy ? w.job_id : null, lane: w.lane, worker: w.worker });
+    });
     if (server.paused) pills.push({ text: "paused", cls: "paused", jobId: null, lane: null });
     return pills;
   }
@@ -586,7 +600,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
-    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
+    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf,
@@ -819,11 +833,18 @@
       noteEl.hidden = false; noteEl.className = "banner warn";
       noteEl.innerHTML = "Queue paused by " + esc(server.paused.by || DASH) + " at " + esc(fmtClock(server.paused.at, tz(), now())) + " — running jobs finish, nothing new starts · <span class=\"mono\">rcm resume</span>";
     } else {
-      var downs = (server.workers || []).filter(function (w) { return w.state === "down"; });
+      var localWorkers = (server.workers || []).filter(function (w) { return !w.worker; });
+      var downs = localWorkers.filter(function (w) { return w.state === "down"; });
+      var remoteDown = (server.workers || []).filter(function (w) { return w.worker && w.state === "down"; });
       if (downs.length) {
-        var live = (server.workers || []).filter(function (w) { return w.state !== "down"; }).map(function (w) { return w.lane; });
+        var live = localWorkers.filter(function (w) { return w.state !== "down"; }).map(function (w) { return w.lane; });
         noteEl.hidden = false; noteEl.className = "banner bad";
         noteEl.textContent = "Worker on lane " + downs.map(function (w) { return w.lane; }).join(", ") + " stopped: " + (downs[0].error || "unknown error") + (live.length ? " · waiting jobs use lane " + live.join(", ") + " only" : " · nothing can start");
+      } else if (remoteDown.length) {
+        // 원격 워커(M5b-2)가 heartbeat 을 멈췄다 — 그 풀의 잡은 서버가 lost 로 남긴다
+        var names = []; remoteDown.forEach(function (w) { if (names.indexOf(w.worker) < 0) names.push(w.worker); });
+        noteEl.hidden = false; noteEl.className = "banner warn";
+        noteEl.textContent = "Worker " + names.join(", ") + " unreachable — no heartbeat · its running jobs are marked lost";
       } else {
         var stalled = notScheduledRow();
         if (stalled) { noteEl.hidden = false; noteEl.className = "banner warn"; noteEl.textContent = "Lane is idle but #" + stalled.id + " has not started for " + fmtDuration(stalled.estimate && stalled.estimate.waited_seconds) + " — check the server log"; }
@@ -921,7 +942,8 @@
       return;
     }
     if (!p.queue.length) {
-      var allDown = Array.isArray(server.workers) && server.workers.length && server.workers.every(function (w) { return w.state === "down"; });
+      var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
+      var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
       var presets = Array.isArray(st.presets) ? st.presets.map(function (x) { return x.name; }).join(" · ") : "";
       body.innerHTML = '<div class="empty">' + (server.paused || allDown ? "Queue is empty but paused — nothing will start." : "Queue is empty — <code>rcm run &lt;preset&gt;</code> starts immediately.") + (presets ? '<br><span class="sub">presets: ' + esc(presets) + "</span>" : "") + "</div>";
       return;

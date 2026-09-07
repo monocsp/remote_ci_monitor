@@ -17,7 +17,7 @@ import shutil
 import signal
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,7 +39,7 @@ from remote_ci_monitor.core.model import (
     Job,
     WorkerInfo,
 )
-from remote_ci_monitor.core.progress import parse_marker, progress_from_markers
+from remote_ci_monitor.core.progress import Marker, parse_marker, progress_from_markers
 from remote_ci_monitor.materialize import (
     MaterializeError,
     assemble_from_manifest,
@@ -101,6 +101,43 @@ class _Outcome:
     lost: bool = False
     term_sent_at: datetime | None = None
     kill_sent: bool = False
+
+
+def outcome_for(
+    job: Job,
+    markers: Sequence[Marker],
+    *,
+    started: datetime,
+    finished: datetime,
+    rc: int | None,
+    cancelled: bool = False,
+    timed_out: bool = False,
+    lost: bool = False,
+    lost_summary: str = "server stopped while running",
+) -> tuple[str, str | None, str | None]:
+    """종료 규칙 — (상태, 요약, failed_step). 로컬 워커와 원격 워커 보고(`/worker/.../finish`)가
+    같은 함수를 쓴다(M5b-2). 요약은 마커의 `summary`, 없으면 `exit N`; 취소는 요청자 이름."""
+    forced = cancelled or timed_out or lost
+    progress = progress_from_markers(
+        markers,
+        started_at=started,
+        finished_at=finished,
+        now=finished,
+        exit_code=rc if not forced else 1,
+    )
+    if lost:
+        state, summary = LOST, lost_summary
+    elif cancelled:
+        state = CANCELLED
+        summary = f"cancelled by {job.cancel.by}" if job.cancel is not None else None
+    elif timed_out:
+        state, summary = TIMED_OUT, format_limit(job.timeout_seconds)
+    elif rc == 0:
+        state, summary = SUCCEEDED, progress.summary
+    else:
+        state, summary = FAILED, progress.summary or f"exit {rc}"
+    failed_step = progress.failed_step if state != SUCCEEDED else None
+    return state, summary, failed_step
 
 
 class Worker(threading.Thread):
@@ -298,33 +335,19 @@ class Worker(threading.Thread):
         rc = proc.returncode
         markers = self.store.markers(job.id)
         finished = self.now_fn()
-        progress = progress_from_markers(
+        job_now = self.store.get_job(job.id) or job
+        state, summary, failed_step = outcome_for(
+            job_now,
             markers,
-            started_at=started,
-            finished_at=finished,
-            now=finished,
-            exit_code=rc if not (outcome.cancelled or outcome.timed_out or outcome.lost) else 1,
+            started=started,
+            finished=finished,
+            rc=rc,
+            cancelled=outcome.cancelled,
+            timed_out=outcome.timed_out,
+            lost=outcome.lost,
         )
-        if outcome.lost:
-            state, summary = LOST, "server stopped while running"
-        elif outcome.cancelled:
-            state, summary = CANCELLED, None
-        elif outcome.timed_out:
-            state, summary = TIMED_OUT, format_limit(job.timeout_seconds)
-        elif rc == 0:
-            state, summary = SUCCEEDED, progress.summary
-        else:
-            state, summary = FAILED, progress.summary or f"exit {rc}"
-        job_now = self.store.get_job(job.id)
-        if state == CANCELLED and job_now is not None and job_now.cancel is not None:
-            summary = f"cancelled by {job_now.cancel.by}"
         self.store.finish(
-            job.id,
-            state,
-            now=finished,
-            exit_code=rc,
-            summary=summary,
-            failed_step=progress.failed_step if state != SUCCEEDED else None,
+            job.id, state, now=finished, exit_code=rc, summary=summary, failed_step=failed_step
         )
         # ── 정리 ──
         keep = state != SUCCEEDED and self.config.server.keep_workspace_on_failure
@@ -489,4 +512,4 @@ def start_workers(
     return workers
 
 
-__all__ = ["Worker", "start_workers", "tail_lines", "format_limit"]
+__all__ = ["Worker", "start_workers", "tail_lines", "format_limit", "outcome_for"]

@@ -211,7 +211,15 @@ def test_status_is_json_serializable_with_expected_shape():
         "sse_connections",
         "workers",
     }
-    assert set(back["server"]["workers"][0]) == {"lane", "state", "job_id", "error", "since"}
+    assert set(back["server"]["workers"][0]) == {
+        "lane",
+        "state",
+        "job_id",
+        "error",
+        "since",
+        "worker",  # M5b-2 추가 키
+        "display_name",
+    }
     assert len(back["pools"]) == 1
     pool = back["pools"][0]
     assert set(pool) == POOL_KEYS

@@ -238,7 +238,10 @@ def render(
     pool = pools[0] if pools else {}
     hosts = pool.get("hosts")
     name = host_name or ((hosts or [{}])[0].get("name") if hosts else None) or "server"
-    workers = server.get("workers") or []
+    all_workers = server.get("workers") or []
+    # 로컬 레인은 오늘 그대로, 원격 워커(M5b-2)는 `<name>/<lane> <state>[ #job]` 로 뒤에 붙인다
+    workers = [w for w in all_workers if not w.get("worker")]
+    remote = [w for w in all_workers if w.get("worker")]
     busy = sum(1 for w in workers if w.get("state") == "busy")
     down = [w for w in workers if w.get("state") == "down"]
     lanes = server.get("lanes") or len(workers) or 0
@@ -249,6 +252,11 @@ def render(
         wtxt = f"lanes {busy}/{lanes} busy"
     if down:
         wtxt += f" · DOWN: lane {', '.join(str(w['lane']) for w in down)}"
+    for w in remote:
+        label = w.get("display_name") or f"{w.get('worker')}/{w.get('lane')}"
+        wtxt += f" · {label} {w.get('state') or DASH}"
+        if w.get("job_id"):
+            wtxt += f" #{w['job_id']}"
     if server.get("paused"):
         wtxt += f" · PAUSED by {server['paused'].get('by')}"
     cache = server.get("snapshot_cache")

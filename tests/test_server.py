@@ -171,7 +171,7 @@ def test_health_and_whoami(srv):
     assert srv.req("GET", "/api/whoami")[0] == 401
     assert srv.req("GET", "/api/whoami", token="garbage")[0] == 401
     status, body = srv.req("GET", "/api/whoami", token="admin")
-    assert status == 200 and body == {"name": "macmini-admin", "admin": True}
+    assert status == 200 and body == {"name": "macmini-admin", "admin": True, "kind": "admin"}
 
 
 def test_writes_require_token_and_errors_are_one_line(srv):
@@ -404,6 +404,8 @@ def test_status_schema_v1_shape_and_etag(srv):
             "job_id": None,
             "error": None,
             "since": doc["server"]["workers"][0]["since"],
+            "worker": None,  # 로컬 레인 (M5b-2 추가 키)
+            "display_name": None,
         }
     ]
     assert [p["name"] for p in doc["presets"]] == ["ok", "bad", "slow", "gate"]

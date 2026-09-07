@@ -3,7 +3,7 @@
 라우트(PLAN.md 「서버 API」):
   POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id}?tail=N · GET /jobs/{id}/log?offset=N ·
   POST /jobs/{id}/cancel · GET /api/status · GET /api/health · GET /api/whoami ·
-  POST /pause · POST /resume
+  POST /pause · POST /resume · `/worker/*`(원격 워커, `remote_workers.py`)
 
 hardening: 소켓 타임아웃(일반 10초, 업로드 60초) · `Content-Length` 필수(chunked 는 411) ·
 JSON 본문 64KB · 동시 요청 `max_concurrent_requests` 초과 503 · 경로 정규화 ·
@@ -49,6 +49,7 @@ from remote_ci_monitor.core.model import (
     MODE_GIT_REF,
     MODE_TREE,
     QUEUED,
+    TOKEN_WORKER,
     UPLOADING,
     HostSample,
     Job,
@@ -88,6 +89,7 @@ from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
 from remote_ci_monitor.materialize import blob_path
 from remote_ci_monitor.notify import Notifier
+from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
 from remote_ci_monitor.store import Store, TokenInfo
 from remote_ci_monitor.worker import Worker, start_workers, tail_lines
 
@@ -105,6 +107,8 @@ MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB 
 _JOB_RE = re.compile(r"^/jobs/(\d+)(/tree/manifest|/tree|/log|/cancel|/priority)?$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
+_WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
+_WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish)$")
 _STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
@@ -154,7 +158,7 @@ class _DbSnapshot:
     pool_medians: dict[str, dict[str, Median]] = field(default_factory=dict)  # 기본 풀 밖 (M5b)
 
 
-class App:
+class App(RemoteWorkersMixin):
     """서버의 상태와 동작. HTTP 핸들러는 얇고, 규칙은 여기에 있다(테스트하기 쉽게)."""
 
     def __init__(
@@ -189,6 +193,7 @@ class App:
         self._dirty = True
         self._sse_lock = threading.Lock()
         self._sse_connections = 0
+        self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
 
@@ -263,6 +268,10 @@ class App:
                         self._publish_job(None, job_id)
             except Exception as e:  # noqa: BLE001
                 self.record_error(f"janitor: {type(e).__name__}: {_safe(str(e))}")
+            try:
+                self.mark_lost_workers(self.now_fn())
+            except Exception as e:  # noqa: BLE001
+                self.record_error(f"worker janitor: {type(e).__name__}: {_safe(str(e))}")
 
     def log(self, msg: str) -> None:
         print(f"[rcm] {msg}", file=sys.stderr, flush=True)
@@ -283,6 +292,7 @@ class App:
         return err
 
     def worker_infos(self) -> list[WorkerInfo]:
+        """로컬 레인(같은 프로세스)."""
         if self.workers:
             return [w.info() for w in self.workers]
         # 워커를 띄우지 않은 상태(테스트)에서는 설정된 레인 수만큼 idle 로 본다
@@ -290,6 +300,21 @@ class App:
             WorkerInfo(lane=n, state="idle", since=self.started_at)
             for n in range(1, self.config.server.lanes + 1)
         ]
+
+    def pool_workers(self, pool: str, now: datetime) -> list[WorkerInfo]:
+        """그 풀의 레인 전부 — 기본 풀은 로컬 + 원격 `default` 워커, 다른 풀은 원격만(M5b-2)."""
+        remote = self.remote_worker_infos(pool, now)
+        if pool == DEFAULT_POOL:
+            return [*self.worker_infos(), *remote]
+        return remote
+
+    def all_worker_infos(self, now: datetime) -> list[WorkerInfo]:
+        """로컬 레인 먼저, 원격은 워커 이름순(`server.workers[]`)."""
+        return [*self.worker_infos(), *self.remote_worker_infos(None, now)]
+
+    def pool_lanes(self, pool: str, now: datetime) -> int:
+        local = self.config.server.lanes if pool == DEFAULT_POOL else 0
+        return local + self.remote_lanes(pool, now)
 
     # ── 이벤트 ──────────────────────────────────────────────────────────────
 
@@ -336,8 +361,8 @@ class App:
             {
                 "paused": {"by": paused.by, "at": iso(paused.at)} if paused else None,
                 "workers": [
-                    {"lane": w.lane, "state": w.state, "job_id": w.job_id}
-                    for w in self.worker_infos()
+                    {"lane": w.lane, "state": w.state, "job_id": w.job_id, "worker": w.worker}
+                    for w in self.all_worker_infos(self.now_fn())
                 ],
             },
         )
@@ -415,8 +440,15 @@ class App:
             raise ApiError(401, "a valid bearer token is required")
         return token
 
-    def require_admin(self, token: TokenInfo | None) -> TokenInfo:
+    def require_client_token(self, token: TokenInfo | None) -> TokenInfo:
+        """클라이언트 API(제출 · 취소 · 정지 …). 워커 토큰은 `/worker/*` 만 쓴다(M5b-2)."""
         t = self.require_token(token)
+        if t.kind == TOKEN_WORKER:
+            raise ApiError(403, "worker tokens cannot use the client API")
+        return t
+
+    def require_admin(self, token: TokenInfo | None) -> TokenInfo:
+        t = self.require_client_token(token)
         if not t.admin:
             raise ApiError(403, "admin token required")
         return t
@@ -521,12 +553,11 @@ class App:
         names = [pool] if pool is not None else list(by_pool) or [DEFAULT_POOL]
         for name in names:
             jobs = by_pool.get(name, [])
-            # 로컬 워커는 기본 풀만. 다른 풀은 원격 워커(M5b-2)가 오기 전까지 워커 0 → worker_down
-            workers = self.worker_infos() if name == DEFAULT_POOL else []
+            # 풀의 레인 = 로컬(기본 풀) + 살아 있는 원격 워커. 없거나 다 down 이면 worker_down
             rows.extend(
                 compute_queue(
                     jobs,
-                    workers=workers,
+                    workers=self.pool_workers(name, now),
                     paused=snap.paused is not None,
                     medians=self._pool_medians(snap, name) or {},
                     presets={p.name: p for p in self.config.presets},
@@ -578,7 +609,7 @@ class App:
             lanes=self.config.server.lanes,
             paused=snap.paused,
             last_error=self.last_error,
-            workers=tuple(self.worker_infos()),
+            workers=tuple(self.all_worker_infos(now)),
             sse_connections=self.sse_connections,
             snapshot_cache_blobs=blob_count,
             snapshot_cache_bytes=blob_bytes,
@@ -588,15 +619,24 @@ class App:
             pool_names = self.store.list_pools()
         except Exception:  # noqa: BLE001
             pool_names = [DEFAULT_POOL]
+        for row in self._workers():  # 잡이 없어도 워커가 등록된 풀은 보인다(M5b-2)
+            if row.pool not in pool_names:
+                pool_names.append(row.pool)
         pools: list[Pool] = []
         for name in pool_names:
             local = name == DEFAULT_POOL
             pool_queue = [r for r in queue if r.job.pool == name] if queue is not None else None
             recent = [j for j in snap.recent if j.pool == name] if snap.recent is not None else None
+            remote_hosts = self.remote_hosts(name, now)
+            pool_hosts: tuple[HostSample, ...] | None
+            if local:
+                pool_hosts = None if hosts is None else (*hosts, *remote_hosts)
+            else:
+                pool_hosts = remote_hosts
             pools.append(
                 Pool(
                     name=name,
-                    lanes=self.config.server.lanes if local else 0,
+                    lanes=self.pool_lanes(name, now),
                     queue=tuple(pool_queue) if pool_queue is not None else None,
                     queue_error=queue_error,
                     recent=tuple(recent) if recent is not None else None,
@@ -604,7 +644,7 @@ class App:
                     recent_count=self.config.server.recent_count,
                     medians=self._pool_medians(snap, name),
                     medians_error=snap.medians_error,
-                    hosts=hosts if local else (),  # 원격 워커 표본은 M5b-2
+                    hosts=pool_hosts,  # 원격 워커 표본은 heartbeat 에서(M5b-2)
                     hosts_error=hosts_error if local else None,
                 )
             )
@@ -669,7 +709,7 @@ class App:
             preset=preset,
             key=duration_key(preset, inputs),
             inputs=inputs,
-            workers=self.worker_infos() if pool == DEFAULT_POOL else [],
+            workers=self.pool_workers(pool, now),
             paused=snap.paused is not None,
             medians=self._pool_medians(snap, pool) or {},
             presets={p.name: p for p in self.config.presets},
@@ -1257,6 +1297,10 @@ class App:
             elif self.retention.stale(self.now_fn()):
                 janitor_error = "janitor stale"
         ok = db_ok and not down and janitor_error is None
+        try:
+            idle_pools = self.pools_without_workers(self.now_fn())
+        except Exception:  # noqa: BLE001
+            idle_pools = []
         body = {
             "ok": ok,
             "db": db_ok,
@@ -1264,6 +1308,7 @@ class App:
             "janitor": janitor_error is None,
             "lanes": self.config.server.lanes,
             "version": self.version,
+            "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
         }
         if not ok:
             if not db_ok:
@@ -1463,7 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/whoami":
             self._only(method, "GET")
             t = self._require_read_token()
-            self._send_json(200, {"name": t.name, "admin": t.admin})
+            self._send_json(200, {"name": t.name, "admin": t.admin, "kind": t.kind})
             return
         if path == "/api/status":
             self._only(method, "GET")
@@ -1488,14 +1533,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/jobs":
             self._only(method, "POST")
-            t = self.app.require_token(self._token())
+            t = self.app.require_client_token(self._token())
             status, body = self.app.submit(self._json_body(), t, host=self.headers.get("Host"))
             self._send_json(status, body)
             return
         if path == "/api/eta":
             self._only(method, "POST")
             self._read_only_ok()
+            self._no_worker_token()
             self._send_json(200, self.app.eta(self._json_body()))
+            return
+        if path.startswith("/worker/"):
+            self._worker_route(method, path)
             return
         if path == "/pause" or path == "/resume":
             self._only(method, "POST")
@@ -1516,7 +1565,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "/tree/manifest":
                 self._only(method, "POST")
-                t = self.app.require_token(self._token())
+                t = self.app.require_client_token(self._token())
                 with self.app.manifest_slots:  # 본문 읽기·파싱·검증을 몇 개만 동시에
                     body = self._json_body(limit=MAX_MANIFEST_BODY)
                     self._send_json(200, self.app.receive_manifest(job_id, t, body))
@@ -1528,7 +1577,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "/tree":
                 self._only(method, "PUT")
-                t = self.app.require_token(self._token())
+                t = self.app.require_client_token(self._token())
                 length = self._content_length()
                 job = self.app.begin_upload(job_id, t, length)
                 blobs = self.headers.get("X-RCM-Tree", "").strip().lower() == "blobs"
@@ -1559,7 +1608,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "/cancel":
                 self._only(method, "POST")
-                t = self.app.require_token(self._token())
+                t = self.app.require_client_token(self._token())
                 self._json_body()
                 self._send_json(200, self.app.cancel(job_id, t))
                 return
@@ -1569,6 +1618,88 @@ class Handler(BaseHTTPRequestHandler):
             self._static(path)
             return
         raise ApiError(404, "not found")
+
+    def _no_worker_token(self) -> None:
+        """읽기 규칙의 라우트라도 워커 토큰이 제시되면 거절한다(워커 토큰은 `/worker/*` 만)."""
+        t = self._token()
+        if t is not None and t.kind == TOKEN_WORKER:
+            raise ApiError(403, "worker tokens cannot use the client API")
+
+    def _worker_route(self, method: str, path: str) -> None:
+        """`/worker/*` — 워커 토큰만. 인증을 먼저 해 라우트 존재 여부를 익명에게 알리지 않는다."""
+        t = self.app.require_worker_token(self._token())
+        m = _WORKER_RE.match(path)
+        if m:
+            self._only(method, "POST")
+            what = m.group(1)
+            body = self._json_body()
+            if what == "register":
+                self._send_json(200, self.app.worker_register(t, body))
+            elif what == "claim":
+                self.connection.settimeout(UPLOAD_TIMEOUT)  # long-poll 은 일반 타임아웃보다 길다
+                try:
+                    out = self.app.worker_claim(t, body)
+                finally:
+                    self.connection.settimeout(REQUEST_TIMEOUT)
+                if out is None:
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                else:
+                    self._send_json(200, out)
+            else:
+                self._send_json(200, self.app.worker_heartbeat(t, body))
+            return
+        m = _WORKER_JOB_RE.match(path)
+        if not m:
+            raise ApiError(404, "not found")
+        job_id = int(m.group(1))
+        what = m.group(2)
+        if what == "tree":
+            self._only(method, "GET")
+            tar_path = self.app.worker_tree_path(t, job_id)
+            size = tar_path.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            self.connection.settimeout(UPLOAD_TIMEOUT)
+            try:
+                with tar_path.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(UPLOAD_CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            finally:
+                self.connection.settimeout(REQUEST_TIMEOUT)
+            return
+        self._only(method, "POST")
+        if what == "log":
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/octet-stream":
+                raise ApiError(415, "log body must be application/octet-stream")
+            n = self._content_length()
+            if n > MAX_WORKER_LOG_BODY:
+                raise ApiError(413, f"log body larger than {MAX_WORKER_LOG_BODY} bytes")
+            self.connection.settimeout(UPLOAD_TIMEOUT)
+            try:
+                data = self.rfile.read(n) if n else b""
+            finally:
+                self.connection.settimeout(REQUEST_TIMEOUT)
+            if len(data) < n:
+                raise ApiError(400, "log body interrupted")
+            self._send_json(200, self.app.worker_log(t, job_id, data))
+            return
+        body = self._json_body()
+        if what == "phase":
+            self._send_json(200, self.app.worker_phase(t, job_id, body))
+        else:
+            self._send_json(200, self.app.worker_finish(t, job_id, body))
 
     def _static(self, path: str) -> None:
         """정적 UI. 세 파일만 준다. ETag 는 sha256 앞 16자, 나머지 /static/* 는 404."""
