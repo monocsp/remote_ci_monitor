@@ -142,6 +142,7 @@ def queue_row_json(
         "id": job.id,
         "position": row.position,
         "priority": job.priority,
+        "pool": job.pool,
         "preset": job.preset,
         "key": job.key,
         "inputs": dict(job.inputs),
@@ -187,6 +188,7 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
     job_seconds = (finished - started).total_seconds() if started and finished else None
     waited = (started - job.created_at).total_seconds() if started else None
     return {
+        "pool": job.pool,
         "id": job.id,
         "preset": job.preset,
         "key": job.key,
@@ -217,6 +219,8 @@ def preset_json(p: Preset) -> dict[str, Any]:
         "source_modes": list(p.source_modes),
         "repo": p.repo or None,
         "priority": p.priority,
+        "pool": p.pool,
+        "pools": list(p.pools),
         "concurrency_group": p.concurrency_group,
         "expected_seconds": p.expected_seconds,
         "timeout_seconds": p.timeout_seconds,

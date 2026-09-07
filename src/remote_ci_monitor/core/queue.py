@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import median
@@ -22,6 +22,7 @@ from typing import Any
 from remote_ci_monitor.core.model import (
     ACTIVE_STATES,
     CANCELLING,
+    DEFAULT_POOL,
     FAILED,
     PHASE_MATERIALIZING,
     PRIORITY_NAMES,
@@ -358,12 +359,14 @@ def eta_for_new(
     cfg: QueueConfig,
     now: datetime,
     priority: int = PRIORITY_NORMAL,
+    pool: str = DEFAULT_POOL,
 ) -> tuple[QueueRow, int]:
     """지금 이 키의 잡을 넣으면 어떻게 되나 — 가상 잡을 붙여 계산한다(`rcm eta`).
 
-    가상 잡은 같은 우선순위의 맨 뒤에 선다(더 낮은 우선순위 잡보다는 앞).
+    가상 잡은 같은 우선순위의 맨 뒤에 선다(더 낮은 우선순위보다는 앞). 다른 풀의 잡은 세지 않는다.
     반환: (가상 잡의 큐 행, 실제로 앞선 활성 잡 수 — 실행 중 + 우선순위가 같거나 높은 대기 잡).
     """
+    jobs = [j for j in jobs if j.pool == pool]
     next_id = max((j.id for j in jobs), default=0) + 1
     ghost = Job(
         id=next_id,
@@ -377,6 +380,7 @@ def eta_for_new(
         created_at=now,
         queued_at=now,
         priority=priority,
+        pool=pool,
     )
     rows = compute_queue(
         list(jobs) + [ghost],
@@ -392,6 +396,19 @@ def eta_for_new(
         1 for j in jobs if j.state in ACTIVE_STATES and (j.is_busy or j.priority >= priority)
     )
     return row, ahead
+
+
+def split_by_pool(jobs: Iterable[Job]) -> dict[str, list[Job]]:
+    """풀별로 나눈다(상태로 거르지 않는다). 키: 기본 풀 먼저, 나머지 이름순. 풀 안은 입력 순서."""
+    by: dict[str, list[Job]] = {}
+    for job in jobs:
+        by.setdefault(job.pool, []).append(job)
+    ordered: dict[str, list[Job]] = {}
+    if DEFAULT_POOL in by:
+        ordered[DEFAULT_POOL] = by[DEFAULT_POOL]
+    for name in sorted(k for k in by if k != DEFAULT_POOL):
+        ordered[name] = by[name]
+    return ordered
 
 
 def priority_from_name(name: str) -> int:

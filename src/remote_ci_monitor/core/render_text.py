@@ -129,7 +129,7 @@ def _reason_text(row: dict[str, Any]) -> str:
     if reason == "paused":
         return "paused"
     if reason == "worker_down":
-        return "no worker"
+        return "worker down"
     if reason == "not_scheduled":
         return "not scheduled"
     if reason == "running":
@@ -255,6 +255,15 @@ def render(
     if isinstance(cache, dict):  # 캐시가 켜져 있으면 모르는 숫자는 — 로(0 이 아니다)
         blobs = cache.get("blobs")
         wtxt += f" · cache {DASH if blobs is None else blobs} blobs · {_mb(cache.get('bytes'))}"
+    if len(pools) > 1:  # 풀이 둘 이상이면 머리줄에 전체 집계(풀 하나면 오늘 그대로)
+        running = waiting = 0
+        for pl in pools:
+            for r in pl.get("queue") or []:
+                if r.get("state") in (RUNNING, CANCELLING):
+                    running += 1
+                else:
+                    waiting += 1
+        wtxt += f" · pools {len(pools)} · {running} running · {waiting} waiting"
     clock = fmt_clock(status.get("generated_at"), tz)
     tzname = status.get("display_timezone") or "local"
     out = [f"━━━ rcm · {name} · {clock} {tzname} · {wtxt}"]
@@ -262,19 +271,47 @@ def render(
         out.append(f"  notify failures {server['notify_failures']} · see the server log")
     if server.get("last_error"):
         out.append(f"  error · {str(server['last_error'])[:60]}")
+    for pl in pools or [{}]:  # pools 가 비면 조회 실패 모양(오늘과 같다)
+        out.extend(render_pool(pl, tz=tz, now=now, server=server, workers=workers))
+    return "\n".join(out) + "\n"
 
+
+def render_pool(
+    pool: dict[str, Any],
+    *,
+    tz: tzinfo | None = None,
+    now: datetime | None = None,
+    server: dict[str, Any] | None = None,
+    workers: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """풀 하나(큐 · recent · medians · host)를 줄 목록으로. 기본 풀은 M1 모양 그대로."""
+    server = server or {}
+    workers = workers if workers is not None else (server.get("workers") or [])
+    out: list[str] = []
+    hosts = pool.get("hosts")
+    remote = pool.get("name") not in (None, "default")
+    lanes = pool.get("lanes")
+    no_workers = remote and (lanes == 0 or (not lanes and not hosts))
+    label = ""
+    if remote:
+        label = f" (pool {pool.get('name')}{' · no workers' if no_workers else ''})"
     queue = pool.get("queue")
     if queue is None:
-        out.append(f"queue — unavailable: {pool.get('queue_error') or 'unknown error'}")
+        out.append(f"queue — unavailable: {pool.get('queue_error') or 'unknown error'}{label}")
     elif not queue:
-        if server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
+        if remote and no_workers:
+            out.append(f"queue — empty{label}")
+        elif server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
             out.append("queue — empty but paused/no worker — nothing will start")
         else:
             out.append("queue — empty (rcm run <preset> starts immediately)")
     else:
         running = sum(1 for r in queue if r["state"] in (RUNNING, CANCELLING))
         waiting = len(queue) - running
-        out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
+        if remote:  # 다른 풀은 짧게 — 「queue — N (pool linux · no workers)」
+            out.append(f"queue — {len(queue)}{label}")
+        else:
+            out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
         for row in queue:
             out.extend(render_queue_row(row, tz, now))
 
@@ -340,4 +377,4 @@ def render(
                         f"{t.get('comm')} {_pct(t.get('cpu'))} {t.get('rss_mb')}MB" for t in top
                     )
                 )
-    return "\n".join(out) + "\n"
+    return out

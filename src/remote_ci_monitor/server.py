@@ -30,7 +30,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +45,7 @@ from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, valid
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
+    DEFAULT_POOL,
     MODE_GIT_REF,
     MODE_TREE,
     QUEUED,
@@ -70,6 +71,7 @@ from remote_ci_monitor.core.queue import (
     join_key,
     medians_from,
     priority_from_name,
+    split_by_pool,
 )
 from remote_ci_monitor.core.status import iso, queue_row_json, recent_json, status_json
 from remote_ci_monitor.events import (
@@ -149,6 +151,7 @@ class _DbSnapshot:
     medians: dict[str, Median] | None
     medians_error: str | None
     paused: Paused | None
+    pool_medians: dict[str, dict[str, Median]] = field(default_factory=dict)  # 기본 풀 밖 (M5b)
 
 
 class App:
@@ -452,9 +455,14 @@ class App:
             queue_error = _error_text(e)
         medians: dict[str, Median] | None
         medians_error = None
+        pool_medians: dict[str, dict[str, Median]] = {}
         try:
             since = now - timedelta(days=cfg.sample_days)
-            medians = medians_from(self.store.list_samples(since), now, cfg)
+            samples = split_by_pool(self.store.list_samples(since))
+            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
+            for name, sample_jobs in samples.items():
+                if name != DEFAULT_POOL:
+                    pool_medians[name] = medians_from(sample_jobs, now, cfg)
         except Exception as e:  # noqa: BLE001
             medians, medians_error = None, _error_text(e)
         recent: list[Job] | None
@@ -468,6 +476,7 @@ class App:
         except Exception:  # noqa: BLE001
             paused = None
         return _DbSnapshot(
+            pool_medians=pool_medians,
             loaded_at=time.monotonic(),
             jobs=jobs,
             markers=markers,
@@ -495,7 +504,10 @@ class App:
             self._dirty = False
             return snap
 
-    def _queue_rows(self, now: datetime, snap: _DbSnapshot) -> list[QueueRow]:
+    def _queue_rows(
+        self, now: datetime, snap: _DbSnapshot, pool: str | None = None
+    ) -> list[QueueRow]:
+        """큐 행. `pool=None` 이면 모든 풀(풀마다 따로 계산해 이어 붙인다 — 그룹·레인은 풀 단위)."""
         if snap.queue_error is not None:
             raise RuntimeError(snap.queue_error)
         progress = {
@@ -504,16 +516,34 @@ class App:
             if j.id in snap.markers
             and (p := progress_for_job(j, snap.markers[j.id], now)) is not None
         }
-        return compute_queue(
-            snap.jobs,
-            workers=self.worker_infos(),
-            paused=snap.paused is not None,
-            medians=snap.medians or {},
-            presets={p.name: p for p in self.config.presets},
-            cfg=self.queue_config(),
-            now=now,
-            progress=progress,
-        )
+        rows: list[QueueRow] = []
+        by_pool = split_by_pool(snap.jobs)
+        names = [pool] if pool is not None else list(by_pool) or [DEFAULT_POOL]
+        for name in names:
+            jobs = by_pool.get(name, [])
+            # 로컬 워커는 기본 풀만. 다른 풀은 원격 워커(M5b-2)가 오기 전까지 워커 0 → worker_down
+            workers = self.worker_infos() if name == DEFAULT_POOL else []
+            rows.extend(
+                compute_queue(
+                    jobs,
+                    workers=workers,
+                    paused=snap.paused is not None,
+                    medians=self._pool_medians(snap, name) or {},
+                    presets={p.name: p for p in self.config.presets},
+                    cfg=self.queue_config(),
+                    now=now,
+                    progress=progress,
+                )
+            )
+        return rows
+
+    def _pool_medians(self, snap: _DbSnapshot, pool: str) -> dict[str, Median] | None:
+        """풀별 중앙값(같은 키라도 머신이 다르면 소요가 다르다). 기본 풀은 스냅샷 값 그대로."""
+        if snap.medians is None:
+            return None
+        if pool == DEFAULT_POOL:
+            return snap.medians
+        return snap.pool_medians.get(pool, {})
 
     def _hosts(self) -> tuple[tuple[HostSample, ...] | None, str | None]:
         if self.sampler is None:
@@ -554,25 +584,36 @@ class App:
             snapshot_cache_bytes=blob_bytes,
             notify_failures=self.notify_failures,
         )
-        pool = Pool(
-            name="default",
-            lanes=self.config.server.lanes,
-            queue=tuple(queue) if queue is not None else None,
-            queue_error=queue_error,
-            recent=tuple(snap.recent) if snap.recent is not None else None,
-            recent_error=snap.recent_error,
-            recent_count=self.config.server.recent_count,
-            medians=snap.medians,
-            medians_error=snap.medians_error,
-            hosts=hosts,
-            hosts_error=hosts_error,
-        )
+        try:
+            pool_names = self.store.list_pools()
+        except Exception:  # noqa: BLE001
+            pool_names = [DEFAULT_POOL]
+        pools: list[Pool] = []
+        for name in pool_names:
+            local = name == DEFAULT_POOL
+            pool_queue = [r for r in queue if r.job.pool == name] if queue is not None else None
+            recent = [j for j in snap.recent if j.pool == name] if snap.recent is not None else None
+            pools.append(
+                Pool(
+                    name=name,
+                    lanes=self.config.server.lanes if local else 0,
+                    queue=tuple(pool_queue) if pool_queue is not None else None,
+                    queue_error=queue_error,
+                    recent=tuple(recent) if recent is not None else None,
+                    recent_error=snap.recent_error,
+                    recent_count=self.config.server.recent_count,
+                    medians=self._pool_medians(snap, name),
+                    medians_error=snap.medians_error,
+                    hosts=hosts if local else (),  # 원격 워커 표본은 M5b-2
+                    hosts_error=hosts_error if local else None,
+                )
+            )
         model = StatusModel(
             generated_at=now,
             display_timezone=self.config.display.timezone or None,
             server=server,
             presets=tuple(self.config.presets),
-            pools=(pool,),
+            pools=tuple(pools),
             base_url=self.base_url(host),
         )
         tails: dict[int, list[str]] = {}
@@ -622,18 +663,20 @@ class App:
         if snap.queue_error is not None:
             raise ApiError(503, f"queue unavailable: {snap.queue_error}")
         priority = self._parse_priority(body.get("priority"), preset.priority)
+        pool = self._requested_pool(body, preset)
         row, ahead = eta_for_new(
             snap.jobs,
             preset=preset,
             key=duration_key(preset, inputs),
             inputs=inputs,
-            workers=self.worker_infos(),
+            workers=self.worker_infos() if pool == DEFAULT_POOL else [],
             paused=snap.paused is not None,
-            medians=snap.medians or {},
+            medians=self._pool_medians(snap, pool) or {},
             presets={p.name: p for p in self.config.presets},
             cfg=self.queue_config(),
             now=now,
             priority=priority,
+            pool=pool,
         )
         doc = queue_row_json(row, base_url=None)
         doc["id"] = None
@@ -666,8 +709,11 @@ class App:
         if not isinstance(label, str) or len(label) > 120:
             raise ApiError(400, "requester_label must be a string of at most 120 characters")
         priority = self._requested_priority(body, preset, token)
+        pool = self._requested_pool(body, preset)
         if mode == MODE_GIT_REF:
-            return self._submit_git_ref(preset, inputs, src, label, token, body, host, priority)
+            return self._submit_git_ref(
+                preset, inputs, src, label, token, body, host, priority, pool
+            )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
         tree_hash = src.get("tree_hash")
@@ -716,6 +762,7 @@ class App:
             now=now,
             state=UPLOADING,
             priority=priority,
+            pool=pool,
         )
         self._publish_job(job, job.id)
         return 201, {
@@ -723,6 +770,7 @@ class App:
             "joined": False,
             "state": job.state,
             "priority": job.priority,
+            "pool": job.pool,
             "cache": bool(self.config.server.snapshot_cache),
             "upload": f"/jobs/{job.id}/tree",
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
@@ -742,6 +790,18 @@ class App:
             return priority_from_name(raw)
         except ValueError as e:
             raise ApiError(400, str(e)) from e
+
+    def _requested_pool(self, body: dict[str, Any], preset: Preset) -> str:
+        """`pool` 은 프리셋의 기본 풀 또는 `pools` 에 있는 것만. 없으면 프리셋 기본."""
+        raw = body.get("pool")
+        if raw is None:
+            return preset.pool
+        allowed = [preset.pool, *preset.pools]
+        if not isinstance(raw, str) or raw not in allowed:
+            raise ApiError(
+                400, f"preset '{preset.name}' runs in pools: {', '.join(allowed)} — not {raw!r}"
+            )
+        return raw
 
     def _requested_priority(self, body: dict[str, Any], preset: Preset, token: TokenInfo) -> int:
         priority = self._parse_priority(body.get("priority"), preset.priority)
@@ -980,6 +1040,7 @@ class App:
         body: dict[str, Any],
         host: str | None = None,
         priority: int = 0,
+        pool: str = DEFAULT_POOL,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         repo = self.config.repo(preset.repo)
@@ -1037,6 +1098,7 @@ class App:
             now=now,
             state=QUEUED,
             priority=priority,
+            pool=pool,
         )
         self._publish_job(job, job.id)
         self.wake.set()
@@ -1045,6 +1107,7 @@ class App:
             "joined": False,
             "state": job.state,
             "priority": job.priority,
+            "pool": job.pool,
             "sha": sha,
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
         }

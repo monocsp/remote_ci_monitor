@@ -726,3 +726,87 @@ def test_notify_rules_keep_file_order(tmp_path):
     )
     cfg = load(tmp_path, text)
     assert [r.name for r in cfg.notify] == ["b", "a"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── M5b-1 (test-first, 2026-09-06): 프리셋 `pool` · `pools`
+#    명세는 docs/m5-workplan.md 「M5b. 원격 워커」 「모델」: 잡의 풀은 프리셋 `pool = "linux"`(기본
+#    "default") 로 정하고, 세션은 `--pool` 로 프리셋이 허용한 풀(`pools = ["default", "linux"]`)
+#    안에서 고른다. 구현 전이라 빨갛다. 가정(docs/m5b1-test-scenarios-b.md §5): 풀 이름은
+#    프리셋·토큰·저장소 이름과 같은 규칙(`_NAME_RE`) · `Preset.pools` 는 **추가로** 허용하는
+#    풀(기본 `()`) 이고 자기 `pool` 은 규칙으로 언제나 허용된다(tests/test_server_m5b.py ·
+#    tests/test_pools.py 와 같은 해석) · `pools` 는 파일 순서를 지킨다.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def pool_preset(**extra: object):
+    """`gate` 프리셋에 `pool`/`pools` 키를 얹어 파싱한다."""
+    return parse_preset({"name": "gate", "argv": ["x"], **extra})
+
+
+def test_preset_pool_defaults_to_default_with_no_extra_pools():
+    from remote_ci_monitor.core.model import Preset
+
+    p = pool_preset()
+    assert p.pool == "default"
+    assert tuple(p.pools) == ()  # 추가 허용 풀 없음 — 자기 풀(default)만 된다
+    model = Preset(name="gate", argv=("x",))
+    assert model.pool == "default" and tuple(model.pools) == ()  # 모델 기본값도 같다
+
+
+def test_preset_pool_alone_allows_only_that_pool():
+    p = pool_preset(pool="linux")
+    assert p.pool == "linux"
+    assert tuple(p.pools) == ()
+
+
+def test_preset_pools_lists_the_pools_a_session_may_pick_in_file_order():
+    p = pool_preset(pool="linux", pools=["default", "linux"])
+    assert p.pool == "linux"
+    assert tuple(p.pools) == ("default", "linux")  # 준 그대로 — 자기 풀이 섞여 있어도 된다
+    p = pool_preset(pools=["linux", "default"])
+    assert p.pool == "default"
+    assert tuple(p.pools) == ("linux", "default")
+
+
+def test_preset_pools_without_the_own_pool_is_kept_as_given():
+    """`pool = "linux"` + `pools = ["default"]` — CLI 의 `lin`. `--pool linux` 는 규칙으로 허용."""
+    p = pool_preset(pool="linux", pools=["default"])
+    assert p.pool == "linux" and tuple(p.pools) == ("default",)
+
+
+def test_preset_pool_loads_from_file(tmp_path):
+    text = M5_GATE + 'pool = "linux"\npools = ["default", "linux"]\n' + M5_DEPLOY
+    cfg = load(tmp_path, text)
+    assert cfg.preset("gate").pool == "linux"
+    assert tuple(cfg.preset("gate").pools) == ("default", "linux")
+    assert cfg.preset("deploy").pool == "default"
+    assert tuple(cfg.preset("deploy").pools) == ()
+
+
+@pytest.mark.parametrize("bad", [1, True, "", "bad name", "-linux", ["linux"], "a" * 65])
+def test_preset_pool_invalid_names_preset_and_key(bad: object):
+    # 문자열이어야 하고 이름 규칙(`_NAME_RE`)을 따라야 한다. 오류엔 프리셋·키 이름.
+    with pytest.raises(ConfigError) as e:
+        pool_preset(pool=bad)
+    assert "preset 'gate'" in str(e.value) and "pool" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "bad", ["linux", 1, [1], ["linux", 2], ["bad name"], [""], [["linux"]], {"name": "linux"}]
+)
+def test_preset_pools_invalid_names_preset_and_key(bad: object):
+    # 문자열 목록이어야 하고 항목마다 이름 규칙. 오류엔 프리셋·키 이름.
+    with pytest.raises(ConfigError) as e:
+        pool_preset(pools=bad)
+    assert "preset 'gate'" in str(e.value) and "pools" in str(e.value)
+
+
+def test_preset_json_carries_pool_and_pools():
+    """`/api/status.presets[]` · `rcm presets` 에 실린다(추가 키). 목록은 JSON 배열(list)."""
+    j = preset_json(pool_preset(pool="linux", pools=["default", "linux"]))
+    assert j["pool"] == "linux"
+    assert j["pools"] == ["default", "linux"]
+    j = preset_json(pool_preset())
+    assert j["pool"] == "default"
+    assert j["pools"] == []  # 추가 풀 없음 — null 이 아니라 빈 배열
