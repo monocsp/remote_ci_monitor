@@ -216,3 +216,56 @@ describe("regression: one pool behaves as before", () => {
     }
   });
 });
+
+// Recent 는 모든 풀의 완료 잡을 본다 — 기본 풀이 비었다고 「No completed jobs yet」으로 끝내면 다른 풀의
+// 완료 잡(취소된 리눅스 잡 등)이 사라진다(M5b-1 격리 검증에서 잡은 회귀). rcm.recentOf(status) 가 순수 층.
+describe("recentOf — Recent merges every pool's finished jobs", () => {
+  test("contract", () => {
+    assert.equal(typeof rcm.recentOf, "function");
+  });
+
+  test("one pool: the same rows in the same order, no _pool marker", () => {
+    const s = fixture("main");
+    const all = rcm.recentOf(s);
+    assert.deepEqual(all.map((r) => r.id), s.pools[0].recent.map((r) => r.id));
+    assert.ok(all.every((r) => !("_pool" in r)));
+  });
+
+  test("default pool has no finished job but linux has one → that job, tagged _pool linux", () => {
+    const s = fixture("main");
+    const done = Object.assign(structuredClone(s.pools[0].recent[2]), { id: 530, pool: "linux", finished_at: fromNow(-60) });
+    s.pools[0].recent = [];
+    withLinux(s, [], { recent: [done] });
+    assert.deepEqual(rcm.recentOf(s).map((r) => [r.id, r._pool]), [[530, "linux"]]);
+  });
+
+  test("both pools: merged newest first", () => {
+    const s = fixture("main");
+    const newer = Object.assign(structuredClone(s.pools[0].recent[0]), { id: 531, pool: "linux", finished_at: fromNow(-10) });
+    const older = Object.assign(structuredClone(s.pools[0].recent[0]), { id: 532, pool: "linux", finished_at: "2026-09-04T00:45:00Z" });
+    withLinux(s, [], { recent: [newer, older] });
+    const ids = rcm.recentOf(s).map((r) => r.id);
+    assert.deepEqual(ids.slice(0, 4), [531, 411, 532, 410]);
+    assert.equal(ids.length, s.pools[0].recent.length + 2);
+  });
+
+  test("any pool with recent null → undefined (unknown, not empty — fail-open 금지)", () => {
+    assert.equal(rcm.recentOf(fixture("errors")), undefined);
+    const s = withLinux(fixture("main"), [], { recent: null, recent_error: "database locked" });
+    assert.equal(rcm.recentOf(s), undefined);
+  });
+
+  test("no pools / no status → undefined; empty fixture → []", () => {
+    assert.equal(rcm.recentOf({ pools: [] }), undefined);
+    assert.equal(rcm.recentOf(null), undefined);
+    assert.deepEqual(rcm.recentOf(fixture("empty")), []);
+  });
+
+  test("input is not mutated", () => {
+    const extra = Object.assign(structuredClone(fixture("main").pools[0].recent[0]), { id: 533 });
+    const s = withLinux(fixture("main"), [], { recent: [extra] });
+    const before = JSON.stringify(s);
+    rcm.recentOf(s);
+    assert.equal(JSON.stringify(s), before);
+  });
+});

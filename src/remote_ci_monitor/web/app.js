@@ -273,6 +273,20 @@
     }
     return all;
   }
+  // 모든 풀의 완료 잡을 끝난 시각 내림차순으로. 기본 풀 밖의 잡은 `_pool` 을 달아 Recent 가 칩을 그린다.
+  // 어느 풀이든 recent 가 null(조회 실패)이면 undefined — 「완료 잡 없음」이 아니라 unknown 이다
+  function recentOf(status) {
+    var pools = poolsOf(status);
+    if (!pools.length) return undefined;
+    var all = [];
+    for (var i = 0; i < pools.length; i++) {
+      var r = pools[i] && pools[i].recent;
+      if (!Array.isArray(r)) return undefined;
+      for (var j = 0; j < r.length; j++) all.push(i === 0 ? r[j] : Object.assign({}, r[j], { _pool: pools[i].name }));
+    }
+    all.sort(function (a, b) { return (Date.parse(b.finished_at) || 0) - (Date.parse(a.finished_at) || 0); });
+    return all;
+  }
   // ── 풀 (M5b) ──
   function poolHeader(pool) {
     if (!pool || pool.name === "default" || !pool.name) return "";
@@ -589,7 +603,7 @@
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
-    poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf,
+    poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
   };
@@ -1127,13 +1141,13 @@
     var body = $("[data-recent-body]");
     var head = $("[data-recent-header]");
     if (!p) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
-    if (p.recent === null || p.recent === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">Recent unavailable — ' + esc(p.recent_error || "unknown error") + "</div>"; head.textContent = ""; renderEstimates(p); return; }
-    if (!p.recent.length) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
-    var all = p.recent.slice();
-    poolsOf(state.status).slice(1).forEach(function (pl) {
-      if (Array.isArray(pl.recent)) pl.recent.forEach(function (j) { all.push(Object.assign({}, j, { _pool: pl.name })); });
-    });
-    all.sort(function (a, b) { return (Date.parse(b.finished_at) || 0) - (Date.parse(a.finished_at) || 0); });
+    // 모든 풀의 완료 잡을 모은 뒤에 「없음」을 판단한다 — 기본 풀이 비어도 다른 풀의 완료 잡은 보여야 한다
+    var all = recentOf(state.status);
+    if (all === undefined) {
+      var bad = poolsOf(state.status).filter(function (pl) { return !Array.isArray(pl.recent); })[0] || p;
+      body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">Recent unavailable — ' + esc(bad.recent_error || "unknown error") + "</div>"; head.textContent = ""; renderEstimates(p); return;
+    }
+    if (!all.length) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
     var shown = state.showAllRecent ? all : all.slice(0, 5);
     head.textContent = "last " + shown.length + " of " + all.length;
     var html = '<div class="recent">';
