@@ -1,4 +1,4 @@
-# remote_ci_monitor — 계획서 (v2.5, 2026-09-06)
+# remote_ci_monitor — 계획서 (v2.6, 2026-09-07)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
@@ -6,7 +6,8 @@
 > **v2.2** 는 M3(운영) 반영: `git_ref` 소스 모드의 실제 동작(제출 시 sha 확정 · 미러 · 로컬 clone) · 프리셋 `repo` · 보존 정리(janitor · `metadata_retention_days`) · `read_auth = basic` 의 확정(결정 23) · 서비스 파일. 명세 `docs/m3-workplan.md`, 리뷰 `docs/reviews/2026-09-05-codex-m3-design.md`.
 > **v2.3** 은 M4(배포·문서) 반영: 동적 버전 · MIT · `rcm init` · 설치 스모크 · 릴리스 워크플로 · Docker · README 재구성. 명세 `docs/m4-workplan.md`, 리뷰 `docs/reviews/2026-09-06-codex-m4-design.md`.
 > **v2.4** 는 M5a(우선순위 · 내용 주소 스냅샷 캐시 · 알림) 반영 + 수용 검사(`docs/acceptance/`) 결과. **v2.5** 는 M5b-1(풀 축 · DB v4). 명세 `docs/m5-workplan.md`, 리뷰 `docs/reviews/2026-09-06-codex-m5-design.md`.
-> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~32 는 추천값으로 구현, 오너 확인 대기).
+> **v2.6** 은 M5b 완료 · v0.2.0 릴리스 · 오너 결정 30(GitHub 백엔드 폐기 — 계획서는 M5 로 끝).
+> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 는 추천값으로 구현, 오너 확인 대기; 30 은 확정).
 
 ## 한 줄
 
@@ -538,13 +539,13 @@ docs/reviews/
   - **M5b-2 워커 프로토콜** (**완료 2026-09-07**, 명세 `docs/m5b2-workplan.md` · 리뷰 `docs/reviews/2026-09-06-codex-m5b2-design.md`): DB v5(`tokens.kind` · `jobs.worker_name` · `workers`) · `rcm token add --worker` · `/worker/register·claim(long-poll)·heartbeat` · `/worker/jobs/{id}/tree(캐시 잡 tar 조립)·phase·log(서버가 마커 파싱)·finish` · 워커 상태는 서버가 받은 `last_seen_at` 로만(timeout → down · 잡 lost · 재등록 = 옛 잡 lost · 미확인 취소는 서버가 닫음) · 재시작 복구는 로컬 잡만 · 인증 분리(워커 토큰은 `/worker/*` 만) · `server.workers[].worker/display_name` · `pools[].lanes` 는 살아 있는 레인 · 풀 hosts 에 워커 표본 · `/api/health.pools_without_workers`.
   - **M5b-3 `rcm worker`** (**완료 2026-09-07**, 명세 `docs/m5b3-workplan.md` — Codex 는 이날 모델 접근 불가로 생략): `runner.run_job`(자재화 → Popen → 펌프 → 신호; 로컬·원격 공용) · `WorkerClient` · `WorkerConfig`/`worker.toml`(`[[repos]]` 규칙은 서버와 같다) · `remote_worker.RemoteWorker`(등록 재시도 · heartbeat 스레드 · 레인 스레드 · 보고 재시도 · 409 면 정리 · SIGTERM → lost `worker stopped`) · `rcm worker --check/--once`. 두 프로세스 e2e 7건(실행·캐시 잡·취소·kill -9 → lost·SIGTERM·git_ref·서버 재시작). M5 완료 기준 ④ 달성.
   - **M5b-4 다중 풀 표시** (**완료 2026-09-07**, 명세 `docs/m5b4-workplan.md`): `rcm top` 원격 풀 헤더에 언제나 풀 이름(`queue — empty (pool linux)` · `· paused`) · 머리줄 원격 필 5개 초과는 `+N workers`(down 은 안 접음) · 웹 Host 절에 워커 표본 카드(`build-02 · pool linux`, Recent 밑 풀 host 헤더 제거) · `rcm check` `pools` 행(`default (1 lane) · linux (build-02/1 idle)`, 풀 워커 전부 down 이면 FAIL) · `server.workers[].pool`.
-- **M6 — GitHub 백엔드**(보류): Actions run 관찰·dispatch(v1.1 설계 참조). 2026-09-04 「GitHub 비의존」 방향과 상충 — 오너 결정 30 뒤에.
+- ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
 
 | # | 결정 | 내용 |
 |---|---|---|
-| 1 | 방향 | **로컬 잡 서버**. 도구가 큐·실행을 소유한다. GitHub 관찰/디스패치 백엔드는 M5. 기존 Actions 러너는 배포·QA 용으로 유지 |
+| 1 | 방향 | **로컬 잡 서버**. 도구가 큐·실행을 소유한다. GitHub 관찰/디스패치 백엔드는 두지 않는다(결정 30). 배포·QA 는 원격 워커(M5b)로 |
 | 2 | 코드 전달 | 게이트는 **작업 트리 스냅샷**(미커밋 포함) 기본, 배포·릴리스는 `git_ref`. 전송은 rsync/SSH 가 아니라 같은 HTTP·같은 토큰의 tar 업로드 |
 | 3 | 명령 범위 | **등록된 프리셋만**. 임의 명령 없음, 셸 보간 없음 |
 | 4 | 쓰기 인증 | **클라이언트별 bearer 토큰**(서버엔 sha256 만). 읽기는 `none` 기본(Tailscale/LAN 전제), 로그는 항상 토큰 |
@@ -574,7 +575,7 @@ docs/reviews/
 | 27 | PyPI 게시 | trusted publishing(OIDC, 토큰 없음). 오너가 PyPI 에 pending publisher(owner `monocsp` · repo `remote_ci_monitor` · workflow `release.yml` · environment `pypi`)를 만들고 저장소 environment `pypi` 와 변수 `PYPI_PUBLISH=true` 를 켜기 전까지 워크플로는 PyPI 잡을 건너뛴다(GitHub Release 는 항상). (**오너 확인 대기**) |
 | 28 | 태그 룰셋 | `v*` 태그 생성·삭제를 제한하는 룰셋은 없다. 관리자만 만들게 하려면 태그 룰셋을 추가한다. (**오너 확인 대기**) |
 | 29 | 스모크 필수 체크 | PR 집계 `test` 에 ubuntu·macOS 스모크를 모두 포함한다(macOS unit 잡이 이미 필수라 러너 리스크가 새로 늘지 않는다). 릴리스 워크플로도 둘 다 필수. (Codex M4 리뷰는 macOS 를 비필수로 제안 — **오너 확인 대기**) |
-| 30 | GitHub 백엔드 | M5 에서 빼고 M6 으로 보류. 제품 방향이 「GitHub 비의존」이라 여전히 원하는지 확인. (**오너 확인 대기**) |
+| 30 | GitHub 백엔드 | **폐기(오너 확정 2026-09-07)**. GitHub 은 커밋·푸시·PR 머지에만 쓴다 — Actions run 을 이 도구로 보거나 띄우지 않는다. 배포·QA 도 로컬/원격 워커(`rcm worker`)로. v1/v1.1 의 GitHub 경로와 참고 구현의 dispatch 코드는 가져오지 않는다 |
 | 31 | 우선순위 | low/normal/high 세 단계. 프리셋 `priority` 가 그 프리셋 잡의 기본이자 비-admin 상한. 기아 보정 없음(화면이 보여준다). (Codex M5 리뷰, **오너 확인 대기**) |
 | 32 | 캐시 blob 공유 범위 | 기본 `snapshot_cache_scope = "global"`(같은 내용은 클라이언트 간 공유 — `missing` 목록으로 존재 여부를 알 수 있다). 토큰별 분리는 `"token"`. (Codex M5 리뷰, **오너 확인 대기**) |
 
@@ -583,7 +584,7 @@ docs/reviews/
 ## 참고 구현과 이전 설계
 
 - `fmmc-tech/dolomood-app-renew`(로컬에선 `dolomood-ci-monitor` 워크트리)의 `scripts/remote_ci.sh`(dispatch·가드·합류·대기) · `ci_queue.py`(큐·중앙값·잔여 21 자기검증) · `ci_top.py`(진행률·파서·렌더 18 자기검증) · `docs/renew-guide/ci-cd/30-remote-dispatch.md`. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
-- v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220`. jobs API 함정 6개·rate limit 예산·큐 판정 규칙은 M5 GitHub 백엔드 때 그대로 쓴다.
+- v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220` 에 역사로만 남는다(결정 30 으로 폐기 — jobs API 함정·rate limit 예산은 더 쓰지 않는다). 큐 판정 규칙은 이미 `core/queue.py` 에 들어갔다.
 - 수용 검사(2026-09-06): `docs/acceptance/plan-conformance-checklist.md`(A~M 90항목) · `docs/acceptance/user-checklist.md`(페르소나 3) · 보고서 `docs/acceptance/reports/` — 계획서 준수 PASS 93 · PARTIAL 7 · FAIL 0, 사용자 관점 막힘 2·헷갈림 9 → 전부 반영(PR #20).
 - Codex 크로스리뷰 기록(M5): `docs/reviews/2026-09-06-codex-m5-design.md`(확장 명세 `docs/m5-workplan.md` — 제출 시 sha 확정 유지 · blob 경합/GC · 존재 오라클 · 알림 unique claim · pools 다중화 · M5b 4 PR).
 - Codex 크로스리뷰 기록(M4): `docs/reviews/2026-09-06-codex-m4-design.md`(배포 명세 `docs/m4-workplan.md` — PEP 639 · XDG 탐색 · 원자적 쓰기 · README↔스모크 대조 · 릴리스 태그 검증 · Docker 패키지).

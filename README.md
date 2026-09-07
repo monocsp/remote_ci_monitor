@@ -12,8 +12,8 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 
 Status: **M0–M5 done (v0.2.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
 retention, service files, packaging, priority, snapshot cache, notifications, worker pools and
-remote workers (`rcm worker`). A GitHub backend (M6) is deferred. The plan lives in `PLAN.md`
-(Korean); changes in `CHANGELOG.md`.
+remote workers (`rcm worker`). There is no GitHub backend and none is planned: GitHub is for
+commits, pushes and PR merges only. The plan lives in `PLAN.md` (Korean); changes in `CHANGELOG.md`.
 
 ## Install
 
