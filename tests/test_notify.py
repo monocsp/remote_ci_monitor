@@ -655,3 +655,42 @@ def test_argv_hook_gets_path_home_lang_from_the_server_environment(env, monkeypa
     assert e["PATH"] == "/usr/bin:/bin" and e["HOME"] == str(tmp_path)
     assert e["LANG"] == "en_US.UTF-8" and e["RCM_STATE"] == "failed"
     assert "RCM_SECRET_TOKEN" not in e
+
+
+# ── 훅 타임아웃은 프로세스 그룹째 (실배치: /bin/sh 만 죽고 python 손자 11개가 고아로 남았다) ──────
+
+
+def test_hook_timeout_kills_the_whole_process_group(env, tmp_path):
+    """훅이 `/bin/sh -c 'sleep 30 & wait'` 처럼 손자를 남기면 타임아웃 뒤 손자도 없어야 한다."""
+    import os
+    import signal
+    import subprocess as sp
+
+    pidfile = tmp_path / "grandchild.pid"
+    script = tmp_path / "hook.sh"
+    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nwait\n")
+    script.chmod(0o755)
+    store, cfg, bus = env
+    cfg.notify = (rule("slow", argv=("/bin/sh", str(script)), timeout_seconds=1),)
+    from remote_ci_monitor.notify import run_hook
+
+    n, logs = notifier_for(store, cfg, bus, run=run_hook)  # 실제 실행기(그룹째 죽이는 쪽)
+    job = finished_job(store, state=FAILED, preset="gate", finished=at(0))
+    assert n.deliver(job) == 1
+    assert any("timed out after 1s" in line for line in logs), logs
+    gpid = int(pidfile.read_text().strip())
+    deadline = time.monotonic() + 3
+    alive = True
+    while time.monotonic() < deadline:
+        try:
+            os.kill(gpid, 0)
+            out = sp.run(["ps", "-o", "stat=", "-p", str(gpid)], capture_output=True, text=True)
+            alive = bool(out.stdout.strip()) and not out.stdout.strip().startswith("Z")
+        except ProcessLookupError:
+            alive = False
+        if not alive:
+            break
+        time.sleep(0.1)
+    if alive:
+        os.kill(gpid, signal.SIGKILL)
+    assert not alive, f"grandchild {gpid} survived the hook timeout"

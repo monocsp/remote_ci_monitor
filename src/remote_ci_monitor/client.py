@@ -850,7 +850,7 @@ def wait_for_job(
         except ClientError as e:
             if e.status == 404:
                 return EXIT_UNKNOWN, last, f"job {job_id} not found on the server"
-            if e.status not in (0, 503, 502, 504):
+            if e.status not in (0, 500, 503, 502, 504):
                 return EXIT_UNKNOWN, last, f"server error: {e.message}"
             if e.status == 0 and e.body.get("stalled"):
                 continue  # 조용한 스트림 — 다시 보고(check) 다시 연다
@@ -882,7 +882,7 @@ def _poll_for_job(
     last: dict[str, Any] | None,
     on_info: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
-    """2초 폴링. 서버 연결 실패가 60초 넘게 이어지면 3."""
+    """2초 폴링. 서버 연결 실패(5xx 포함 — 바쁜 SQLite 의 500 도)가 60초 넘게 이어지면 3."""
     unreachable_since: float | None = None
     while True:
         try:
@@ -891,7 +891,7 @@ def _poll_for_job(
         except ClientError as e:
             if e.status == 404:
                 return EXIT_UNKNOWN, last, f"job {job_id} not found on the server"
-            if e.status not in (0, 502, 503, 504):
+            if e.status not in (0, 500, 502, 503, 504):
                 return EXIT_UNKNOWN, last, f"server error: {e.message}"
             now = clock()
             if unreachable_since is None:

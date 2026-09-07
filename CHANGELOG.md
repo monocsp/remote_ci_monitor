@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- A notification hook that times out is now killed as a whole process group — grandchildren
+  (`python`, `gh`) no longer survive as orphans.
+- `rcm run`/`rcm wait` treat a transient `500` from the server like `502/503/504` (retry within
+  the 60 s budget) instead of giving up with exit 3.
+- `rcm run` checks the token (`/api/whoami`) before building the snapshot, so a rejected token
+  fails in a second instead of after packing a large tree.
+- "cannot reach" messages are no longer prefixed twice.
+
 ### Changed
 - README (both languages): "Run as a service" now records three deployment lessons — the
   service `PATH` is the presets' `PATH` (never put the rcm venv first), macOS TCC blocks launchd
