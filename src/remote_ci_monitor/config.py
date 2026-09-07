@@ -524,6 +524,21 @@ _SECTIONS = ("server", "estimate", "host", "display")
 _TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify"}
 
 
+def _validate_repos(repos: tuple[RepoConfig, ...]) -> None:
+    """`[[repos]]` 규칙 — 서버와 워커(M5b-3)가 같이 쓴다: 이름 중복 없음 · 짧은 식별자 · 안전한 URL
+    (`-` 로 시작하는 URL 은 git 옵션이 된다)."""
+    repo_names = [r.name for r in repos]
+    if len(repo_names) != len(set(repo_names)):
+        dupes = sorted({n for n in repo_names if repo_names.count(n) > 1})
+        raise ConfigError(f"[[repos]] duplicate repo name(s): {', '.join(dupes)}")
+    for r in repos:
+        if not _NAME_RE.match(r.name):
+            raise ConfigError(f"[[repos]] name must be a short identifier, got {r.name!r}")
+        problem = validate_repo_url(r.url)
+        if problem is not None:
+            raise ConfigError(f"[[repos]] '{r.name}': {problem}")
+
+
 def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
     if s.lanes < 1:
@@ -604,16 +619,7 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     if len(names) != len(set(names)):
         dupes = sorted({n for n in names if names.count(n) > 1})
         raise ConfigError(f"[[presets]] duplicate preset name(s): {', '.join(dupes)}")
-    repo_names = [r.name for r in cfg.repos]
-    if len(repo_names) != len(set(repo_names)):
-        dupes = sorted({n for n in repo_names if repo_names.count(n) > 1})
-        raise ConfigError(f"[[repos]] duplicate repo name(s): {', '.join(dupes)}")
-    for r in cfg.repos:
-        if not _NAME_RE.match(r.name):
-            raise ConfigError(f"[[repos]] name must be a short identifier, got {r.name!r}")
-        problem = validate_repo_url(r.url)
-        if problem is not None:
-            raise ConfigError(f"[[repos]] '{r.name}': {problem}")
+    _validate_repos(cfg.repos)
     if check_tools and cfg.repos and shutil.which("git") is None:
         raise ConfigError("[[repos]] configured but git is not on PATH")
     resolved: list[Preset] = []
@@ -860,6 +866,7 @@ def load_worker_config(
         raise ConfigError("worker lanes must be between 1 and 64")
     if cfg.grace_seconds < 1:
         raise ConfigError("worker grace_seconds must be >= 1")
+    _validate_repos(cfg.repos)
     if cfg.git_fetch_timeout_seconds < 1:
         raise ConfigError("worker git_fetch_timeout_seconds must be >= 1")
     h = cfg.host

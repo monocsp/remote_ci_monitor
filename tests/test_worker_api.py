@@ -683,6 +683,7 @@ def test_claim_returns_204_when_empty_and_the_job_with_preset_when_not(srv):
         "since": iso(at(10)),
         "worker": "build-02",
         "display_name": "build-02/1",
+        "pool": DEFAULT_POOL,  # M5b-4: rcm check 가 워커를 풀에 묶는 키
     }
     assert srv.worker_lane(None, 1)["state"] == "idle"  # 로컬 레인은 놀고 있다
     assert srv.claim("build-02")[0] == 409  # 같은 레인은 잡을 하나만

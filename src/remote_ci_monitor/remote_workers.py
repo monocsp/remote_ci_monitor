@@ -152,6 +152,7 @@ class RemoteWorkersMixin:
                             error="no heartbeat",
                             since=row.last_seen_at,
                             worker=row.name,
+                            pool=row.pool,
                         )
                     )
                 elif job is not None:
@@ -162,12 +163,17 @@ class RemoteWorkersMixin:
                             job_id=job.id,
                             since=job.started_at,
                             worker=row.name,
+                            pool=row.pool,
                         )
                     )
                 else:
                     infos.append(
                         WorkerInfo(
-                            lane=lane, state=WORKER_IDLE, since=row.registered_at, worker=row.name
+                            lane=lane,
+                            state=WORKER_IDLE,
+                            since=row.registered_at,
+                            worker=row.name,
+                            pool=row.pool,
                         )
                     )
         return infos

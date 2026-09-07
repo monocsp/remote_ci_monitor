@@ -320,6 +320,7 @@ class WorkerInfo:
     error: str | None = None
     since: datetime | None = None
     worker: str | None = None  # 원격 워커 이름. 로컬 레인은 None (M5b-2)
+    pool: str = DEFAULT_POOL  # 이 레인이 섬기는 풀 (M5b-4: rcm check 가 워커를 풀에 묶는다)
 
     @property
     def display_name(self) -> str | None:

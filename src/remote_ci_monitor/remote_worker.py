@@ -46,6 +46,7 @@ from remote_ci_monitor.runner import RunnerError, RunSpec, run_job
 from remote_ci_monitor.worker import format_limit
 
 REGISTER_RETRY_SECONDS = 5.0
+CLAIM_MIN_INTERVAL = 1.0  # 빈 204 가 이보다 빨리 오면 이만큼 쉰다
 REPORT_RETRIES = (1.0, 2.0, 4.0)
 LOG_FLUSH_SECONDS = 1.0
 LOG_BATCH_BYTES = 256 * 1024
@@ -257,6 +258,7 @@ class RemoteWorker:
                 if self.stopping.wait(1.0):
                     break
                 continue
+            asked_at = time.monotonic()
             try:
                 claimed = self.client.claim(lane, self.claim_wait_seconds)
             except ClientError as e:
@@ -276,6 +278,9 @@ class RemoteWorker:
                 self.stopping.wait(2.0)
                 continue
             if claimed is None:
+                # 서버가 기다리지 않고 204 를 줬다(wait 0 · long-poll 슬롯 소진) — 뜨거운 루프 금지
+                if time.monotonic() - asked_at < CLAIM_MIN_INTERVAL:
+                    self.stopping.wait(CLAIM_MIN_INTERVAL)
                 continue
             try:
                 self.run_claimed(lane, claimed)

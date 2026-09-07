@@ -406,6 +406,7 @@ def test_status_schema_v1_shape_and_etag(srv):
             "since": doc["server"]["workers"][0]["since"],
             "worker": None,  # 로컬 레인 (M5b-2 추가 키)
             "display_name": None,
+            "pool": "default",  # M5b-4
         }
     ]
     assert [p["name"] for p in doc["presets"]] == ["ok", "bad", "slow", "gate"]

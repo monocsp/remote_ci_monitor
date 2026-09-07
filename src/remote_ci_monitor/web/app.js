@@ -289,6 +289,21 @@
     return all;
   }
   // ── 풀 (M5b) ──
+  // Host 절의 카드 목록(M5b-4): 기본 풀의 표본이 먼저(제목 = 이름, 오늘 그대로), 그 뒤 다른 풀의
+  // 워커 표본(제목 `<이름> · pool <풀>`). 표본이 없거나 null 인 원격 풀은 카드를 만들지 않는다.
+  function hostCards(status) {
+    var pools = poolsOf(status);
+    var out = [];
+    pools.forEach(function (pl, i) {
+      if (!pl || !Array.isArray(pl.hosts)) return;
+      pl.hosts.forEach(function (h) {
+        if (!h) return;
+        out.push({ title: i === 0 ? (h.name || DASH) : (h.name || DASH) + " · pool " + (pl.name || DASH), pool: pl.name || "default", host: h });
+      });
+    });
+    return out;
+  }
+
   function poolHeader(pool) {
     if (!pool || pool.name === "default" || !pool.name) return "";
     var noWorkers = isNum(pool.lanes) && pool.lanes === 0;
@@ -614,7 +629,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
-    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, headerNote: headerNote, progressHead: progressHead,
+    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
@@ -951,8 +966,9 @@
       return;
     }
     var server = st.server || {};
-    if (!p.queue.length && extraPoolsQueueHtml(st)) {
-      body.innerHTML = '<div class="empty">Queue is empty here — jobs wait in other pools.</div>' + extraPoolsQueueHtml(st);
+    var extra = !p.queue.length ? extraPoolsQueueHtml(st) : "";
+    if (extra) {
+      body.innerHTML = '<div class="empty">Queue is empty here — jobs wait in other pools.</div>' + extra;
       return;
     }
     if (!p.queue.length) {
@@ -1134,8 +1150,12 @@
     var body = $("[data-host-body]");
     if (!p) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
     if (p.hosts === null || p.hosts === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="hosts">Host unavailable — ' + esc(p.hosts_error || "unknown error") + "</div>"; return; }
-    if (!p.hosts.length) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
-    var h = p.hosts[0];
+    var cards = hostCards(state.status);
+    if (!cards.length) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
+    body.innerHTML = cards.map(function (c) { return hostCardHtml(c.host, c.title); }).join("");
+  }
+
+  function hostCardHtml(h, title) {
     var age = secondsSince(h.sampled_at, now());
     var stale = h.stale || (isNum(age) && isNum(h.interval_seconds) && age > 3 * h.interval_seconds);
     var cpu = h.cpu || {}, mem = h.memory || {}, gpu = h.gpu;
@@ -1148,13 +1168,13 @@
         '<div class="bar"><i style="width:' + (known ? Math.max(0, Math.min(100, pct - (pct2 || 0))) : 0) + '%"></i>' + (pct2 ? '<i class="b" style="width:' + Math.min(100, pct2) + '%"></i>' : "") + "</div>" +
         (spark ? '<div class="spark">' + spark + "<span>5 min</span></div>" : "") + "</div>";
     };
-    var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">stale ' + fmtDuration(age) + "</span> · " : "sampled <span data-tick=\"age\" data-from=\"" + esc(h.sampled_at || "") + "\">" + esc(fmtAgo(age)) + "</span> · ") + esc(h.os || DASH) + " · " + (isNum(h.cores) ? h.cores + " cores" : DASH) + " · load " + (Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH) + "</span></div>";
+    var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">stale ' + fmtDuration(age) + "</span> · " : "sampled <span data-tick=\"age\" data-from=\"" + esc(h.sampled_at || "") + "\">" + esc(fmtAgo(age)) + "</span> · ") + esc(h.os || DASH) + " · " + (isNum(h.cores) ? h.cores + " cores" : DASH) + " · load " + (Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH) + "</span></div>";
     html += meter("cpu", "CPU " + fmtPct(cpu.busy), isNum(cpu.user) && isNum(cpu.sys) ? "user " + Math.round(cpu.user) + " · sys " + Math.round(cpu.sys) : (stale ? "last known" : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
     html += meter("mem", "Memory " + fmtMemory(mem.used_bytes) + " / " + fmtMemory(mem.total_bytes), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · comp " + fmtMemory(mem.compressed_bytes) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
     if (gpu) html += meter("gpu", "GPU " + fmtPct(gpu.util_pct) + " busy", isNum(gpu.mem_used_bytes) ? fmtMemory(gpu.mem_used_bytes) + " in use" : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
     else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>GPU — ' + esc(h.gpu_note || "unavailable") + "</span><span></span></div></div>";
     if (Array.isArray(h.top) && h.top.length) html += '<div class="top">top: ' + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
-    body.innerHTML = html + "</div>";
+    return html + "</div>";
   }
 
   // ── 렌더: 최근 (항목 14 · 15 · 32) ──
@@ -1190,13 +1210,7 @@
     });
     html += "</div>";
     if (all.length > 5) html += '<button type="button" class="more" data-more-recent>' + (state.showAllRecent ? "show fewer ▴" : "show " + (all.length - 5) + " more ▾") + "</button>";
-    poolsOf(state.status).slice(1).forEach(function (pl) {
-      var head = poolHeader(pl);
-      if (!head) return;
-      var hs = Array.isArray(pl.hosts) ? pl.hosts : [];
-      html += '<div class="pool-h" data-pool="' + esc(pl.name || "") + '">' + esc(head) + (hs.length ? "" : " · no host sample") + "</div>";
-    });
-    body.innerHTML = html;
+    body.innerHTML = html;  // 원격 풀의 host 는 Host 절 카드로(M5b-4) — 여기엔 풀 헤더를 두지 않는다
     renderEstimates(p);
   }
   function renderEstimates(p) {

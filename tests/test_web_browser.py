@@ -438,3 +438,78 @@ def test_recent_shows_another_pools_finished_job_when_default_has_none(tmp_path)
         srv.close()
     assert "cancelled" in row_text and "pool linux" in row_text, row_text
     assert "No completed jobs yet" not in recent_text
+
+
+def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(tmp_path):
+    """M5b-4 §2: 원격 워커의 호스트 표본은 **Host 절**의 카드(제목 `build-02 · pool linux`)로
+    보이고, Recent 절 밑에 붙던 풀별 host 블록(`POOL LINUX[ · NO WORKERS][ · NO HOST SAMPLE]`
+    헤더)은 없다.
+    기본 풀의 로컬 카드는 오늘 그대로(제목 = 호스트 이름). 배치: 로컬 표본(스텁 샘플러) + linux
+    풀 워커 `build-02` 가 heartbeat 로 표본을 보낸 상태 — 잡은 없다."""
+    # 이 테스트가 덧붙여진 M5b-4 에서만 쓰는 이름이라 여기서 들여온다
+    from remote_ci_monitor import __version__
+    from test_worker_api import SAMPLE
+
+    srv = Server(tmp_path, workers=False)
+    try:
+        srv.app.sampler = FreshStubSampler()
+        srv.tokens["build-02"] = srv.store.add_token(
+            "build-02", admin=False, now=datetime.now(UTC), kind="worker"
+        )
+        reg = {"pool": "linux", "lanes": 1, "host_name": "build-02.local", "version": __version__}
+        status, body = srv.req("POST", "/worker/register", token="build-02", json_body=reg)
+        assert status == 200, body
+        status, body = srv.req(
+            "POST", "/worker/heartbeat", token="build-02", json_body={"host_sample": SAMPLE}
+        )
+        assert status == 200, body
+
+        def settled(d: dict) -> bool:
+            return (
+                len(d["pools"]) == 2
+                and bool(d["pools"][0]["hosts"])
+                and bool(d["pools"][1]["hosts"])
+            )
+
+        doc = status_until(srv, settled, timeout=5.0)
+        assert settled(doc), doc["pools"]
+        local, linux = doc["pools"]
+        assert local["hosts"][0]["name"] == "macmini" and local["hosts"][0]["source"] == "local"
+        assert linux["name"] == "linux" and linux["queue"] == [] and linux["lanes"] == 1
+        (sample,) = linux["hosts"]
+        assert sample["name"] == "build-02" and sample["source"] == "worker", sample
+        with Chrome(tmp_path / "chrome-hosts", window="1240,1400") as c:
+            c.open(
+                f"http://127.0.0.1:{srv.port}/?poll=1",
+                ready_js="document.querySelector('#host .meter[data-metric=\"cpu\"]') !== null",
+            )
+            # 카드 제목 = `.hn` 에서 나이·OS 부제(`.age`)를 뺀 글자
+            card_titles = c.eval(
+                "[...document.querySelectorAll('#host .hostcard')].map(card => { "
+                "const hn = card.querySelector('.hn'); if (!hn) return null; "
+                "const k = hn.cloneNode(true); "
+                "k.querySelectorAll('.age').forEach(a => a.remove()); "
+                "return k.textContent.replace(/\\s+/g, ' ').trim(); })"
+            )
+            host_text = c.eval("document.getElementById('host').textContent")
+            recent_inner = c.eval("document.getElementById('recent').innerText")
+            recent_text = c.eval("document.getElementById('recent').textContent")
+            pool_heads_outside_queue = c.eval(
+                "[...document.querySelectorAll('.pool-h')].filter(e => !e.closest('#queue')).length"
+            )
+            visible_text = c.eval("document.body.innerText")
+    finally:
+        srv.close()
+
+    # Host 절: 로컬 카드는 오늘 그대로, 원격 표본은 `build-02 · pool linux` 카드로
+    assert "macmini" in card_titles, card_titles
+    assert "build-02 · pool linux" in card_titles, card_titles
+    assert card_titles.index("macmini") < card_titles.index("build-02 · pool linux"), card_titles
+    assert "12%" in host_text or "13%" in host_text, host_text[:600]  # SAMPLE 의 CPU busy 12.5
+    # Recent 절 밑의 풀별 host 헤더는 없다(innerText 는 CSS uppercase 를 따른다 → `POOL LINUX`)
+    assert pool_heads_outside_queue == 0
+    assert "POOL LINUX" not in recent_inner, recent_inner
+    assert "pool linux" not in recent_text.lower(), recent_text
+    assert "no host sample" not in recent_text.lower(), recent_text
+    assert "NO HOST SAMPLE" not in visible_text and "NO WORKERS" not in visible_text
+    assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
