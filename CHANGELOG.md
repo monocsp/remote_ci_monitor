@@ -34,6 +34,12 @@ of a key bumps that number and is listed here.
   `/api/health` reports `pools_without_workers`. Config `worker_timeout_seconds`,
   `worker_heartbeat_seconds`, `worker_claim_wait_seconds`. Schema version 5 (`tokens.kind`,
   `jobs.worker_name`, `workers` table). Server restarts no longer mark remote running jobs lost.
+- **`rcm worker`** (M5b-3): a remote worker process for a pool — `rcm worker --server URL --pool
+  NAME --lanes N [--config worker.toml] [--data DIR] [--check] [--once]`, token via
+  `RCM_WORKER_TOKEN` or `worker.toml`; downloads snapshots (cache jobs are assembled by the
+  server), fetches `git_ref` jobs from its own `[[repos]]`, streams the raw log, reports the
+  outcome, heartbeats with a host sample; SIGTERM reports running jobs as `lost` (`worker
+  stopped`). Job execution (`runner.py`) is shared with the local worker. `examples/worker.toml`.
 
 ## [0.1.0] - 2026-09-06
 

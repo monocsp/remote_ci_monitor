@@ -1,0 +1,22 @@
+# rcm worker configuration — a second build machine serving one pool.
+# Run: RCM_WORKER_TOKEN=<token> rcm worker --config worker.toml
+# Flags (--server, --pool, --lanes, --name, --data) override these values.
+# Create the token on the server: rcm token add build-02 --worker
+
+server = "http://macmini:8787"      # the rcm server (outbound only — works from behind NAT)
+# token = "…"                       # or export RCM_WORKER_TOKEN (never pass it as a flag)
+pool = "linux"                      # presets with pool = "linux" run here
+lanes = 1                           # parallel jobs on this machine (1-64)
+# name = "build-02"                 # display name for the host sample (default: hostname)
+# data_dir = "~/.local/share/rcm-worker"   # workspaces and local log copies
+# grace_seconds = 10                # SIGTERM → SIGKILL on cancel/timeout/stop
+# keep_workspace_on_failure = true  # failed workspaces stay 7 days for debugging
+
+[host]                              # resource sampler shown under the pool in rcm top / web
+interval_seconds = 5
+gpu = "auto"                        # "auto" | "off"
+
+# git_ref presets need the same repo names as the server's [[repos]]:
+# [[repos]]
+# name = "app"
+# url = "git@github.com:org/app.git"

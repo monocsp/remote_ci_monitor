@@ -79,6 +79,32 @@ git history belong in a `git_ref` preset (`RCM_BASE_SHA` still tells the script 
 Progress goes to stderr. Ctrl-C detaches — the job keeps running; resume with `rcm wait --job N`,
 stop it with `rcm cancel N`.
 
+## Second build machine (remote worker)
+
+A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs
+`rcm worker`, which talks to the server outbound only (it works from behind NAT; the server never
+connects to workers):
+
+```sh
+# on the server
+rcm token add build-02 --worker             # printed once; a worker token only speaks /worker/*
+# on the second machine (same rcm release as the server)
+export RCM_WORKER_TOKEN=<that token>
+rcm worker --server http://macmini:8787 --pool linux --lanes 1 --check   # server · token kind · pool
+rcm worker --server http://macmini:8787 --pool linux --lanes 1           # Ctrl-C or SIGTERM stops it
+```
+
+The worker registers, claims one queued job of its pool per lane, downloads the snapshot (or
+fetches the `git_ref` from its own `[[repos]]` — put a `worker.toml` next to it and pass
+`--config`), streams the raw log to the server, which parses the step markers, and reports the
+outcome. `rcm top` and the web header show it as `build-02/1 busy #511`; its host sample appears
+under that pool. If the server hears no heartbeat for `worker_timeout_seconds` (60) the worker
+shows `down`, its running jobs become `lost` (`worker build-02 unreachable for 61s`) and are not
+resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`worker stopped`).
+`worker.toml` keys: `server`, `token` (or the env var), `pool`, `lanes`, `name`, `data_dir`,
+`grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
+`examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
+
 ## Presets and step markers
 
 The server only runs **presets** from its config. A session sends a preset name and inputs; inputs
@@ -352,6 +378,14 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
     your TLS proxy, the browser must prompt and accept token name + token. With
     `retention_days_success = 0` a finished job's log must answer `log expired` after the next
     sweep while the job stays in **Recent**.
+
+11. M5b items: on a second computer (or the same one with another data dir) run
+    `rcm worker --server http://<build-machine>:8787 --pool mac2 --lanes 1` with a worker token,
+    give a preset `pool = "mac2"`, and `rcm run` it — the job must run there, its steps and host
+    card must show under **pool mac2** in `rcm top` and the web page, and `rcm logs` must return
+    the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the job
+    must be `lost` with `worker … unreachable`, the header must show `mac2-worker/1 down`, and a
+    restarted worker must pick up the next job.
 
 ## Releasing
 
