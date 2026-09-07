@@ -228,6 +228,7 @@ class RemoteWorkersMixin:
         for job_id in lost:
             self._publish_job(None, job_id)
         if lost:
+            self._drop_log_partial(lost)
             self.log(f"worker {token.name} re-registered: lost={lost}")
         s = self.config.server
         row = self.store.register_worker(
@@ -310,12 +311,16 @@ class RemoteWorkersMixin:
         try:
             deadline = time.monotonic() + wait  # 주입 시계(now_fn)가 아니라 실제 경과 시간
             while not self.stop.is_set():
-                self.wake.wait(CLAIM_POLL_SECONDS)
+                woke = self.wake.wait(CLAIM_POLL_SECONDS)
                 job = self._try_claim(token.name, row.pool, lane, self.now_fn())
                 if job is not None:
                     return self._claim_payload(job)
                 if time.monotonic() >= deadline:
                     break
+                if woke:
+                    # `wake` 는 로컬 워커 스레드가 지우는 이벤트라 로컬 레인이 바쁘면 세워진 채로
+                    # 남는다 — 그대로 돌면 매 반복 DB 를 두드리므로 한 주기 쉬고 다시 본다
+                    self.stop.wait(CLAIM_POLL_SECONDS)
         finally:
             self._claim_slots.release()
         return None
@@ -333,6 +338,13 @@ class RemoteWorkersMixin:
         return job
 
     # ── 잡 보고 ─────────────────────────────────────────────────────────────
+
+    def _drop_log_partial(self, job_ids: list[int]) -> None:
+        """종료된 잡의 잘린 마지막 줄 조각을 버린다 — 늦은 보고는 409 라 다시 쓰일 일이 없고, 두면
+        lost 로 닫힌 잡마다 조각이 남는다."""
+        with self._remote_lock:
+            for job_id in job_ids:
+                self._log_partial.pop(job_id, None)
 
     def _owned_active(self, token: TokenInfo, job_id: int) -> Job:
         """이 워커가 claim 한 활성 잡. 남의 잡 403 · 종료 잡 409(늦은 보고는 무시)."""
@@ -434,8 +446,7 @@ class RemoteWorkersMixin:
         if state in (FAILED, SUCCEEDED) and not summary:
             summary = (given or ("failed on the worker" if state == FAILED else None)) or None
             summary = summary[:200] if summary else None
-        with self._remote_lock:
-            self._log_partial.pop(job.id, None)
+        self._drop_log_partial([job.id])
         if not self.store.finish(
             job.id, state, now=now, exit_code=rc, summary=summary, failed_step=failed_step
         ):
@@ -469,6 +480,7 @@ class RemoteWorkersMixin:
                 )
                 self._publish_job(None, job.id)
             if forgotten:
+                self._drop_log_partial([f.id for f in forgotten])
                 active = [j for j in active if j.id not in {f.id for f in forgotten}]
         sample = body.get("host_sample")
         if sample is not None:
@@ -502,6 +514,7 @@ class RemoteWorkersMixin:
                     summary=SUMMARY_CANCEL_UNCONFIRMED,
                     only_from=(CANCELLING,),
                 ):
+                    self._drop_log_partial([job.id])
                     self._publish_job(None, job.id)
 
     # ── down · lost 판정 (janitor 루프) ─────────────────────────────────────
@@ -519,6 +532,7 @@ class RemoteWorkersMixin:
             )
             if ids:
                 self.log(f"worker {row.name} unreachable for {gone}s: lost={ids}")
+                self._drop_log_partial(ids)
                 for job_id in ids:
                     self._publish_job(None, job_id)
                 lost.extend(ids)

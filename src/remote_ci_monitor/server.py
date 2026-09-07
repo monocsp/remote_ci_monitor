@@ -1418,7 +1418,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._route()
         except ApiError as e:
-            self._send_error(e, close=e.status in (413, 411))
+            # 본문을 읽기 전에 거절한 응답(411·413·415)은 연결을 닫는다 — HTTP/1.1 keep-alive 에서
+            # 안 읽은 본문이 다음 요청으로 파싱되지 않게
+            self._send_error(e, close=e.status in (413, 411, 415))
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as e:  # noqa: BLE001 — 스택은 로그에만, 응답은 한 줄
