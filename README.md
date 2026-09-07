@@ -10,9 +10,10 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
-Status: **M0–M4 done (v0.1.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
-retention, service files, packaging and release. M5 (several build machines, GitHub backend) is
-next. The plan lives in `PLAN.md` (Korean); changes in `CHANGELOG.md`.
+Status: **M0–M5 done (v0.2.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
+retention, service files, packaging, priority, snapshot cache, notifications, worker pools and
+remote workers (`rcm worker`). A GitHub backend (M6) is deferred. The plan lives in `PLAN.md`
+(Korean); changes in `CHANGELOG.md`.
 
 ## Install
 

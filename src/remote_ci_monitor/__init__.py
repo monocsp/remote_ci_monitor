@@ -4,5 +4,5 @@
 `rcm wait` 가 결과를 종료 코드(0/1/2/3)로 돌려준다. 계획서는 PLAN.md.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 SCHEMA_VERSION = 1
