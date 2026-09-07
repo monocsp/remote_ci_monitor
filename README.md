@@ -1,5 +1,7 @@
 # remote_ci_monitor
 
+한국어 안내: [README.ko.md](README.ko.md)
+
 A local job server for a team that shares **one build machine**. Sessions on any computer submit a
 preset (`rcm run gate`); the server queues and runs them one at a time, shows queue position,
 ETA, step progress and host load, and hands the result back as an **exit code**.
