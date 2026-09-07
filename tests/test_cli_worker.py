@@ -351,6 +351,28 @@ def test_check_repos_row_runs_ls_remote(home, srv, token, tmp_path, capsys):
     code, out, err = run(capsys, ["worker", "--config", str(bad), "--check"])
     assert code == 1, out + err
     assert row_status(out, "repos") == "FAIL" and "app" in row_line(out, "repos"), out
+    repos = row_line(out, "repos")
+    assert str(tmp_path) not in repos, repos  # 경로는 찍지 않는다
+    # git 의 마지막 줄은 일반 안내문(`and the repository exists.`)이라 사유가 아니다 — 첫 줄을 쓴다
+    assert "and the repository exists" not in repos, repos
+    assert "repository" in repos, repos
+
+
+def test_check_default_data_dir_is_ok_on_a_fresh_home(
+    home, srv, token, monkeypatch, tmp_path, capsys
+):
+    """§2 `--check` 의 data dir 행: 기본 `~/.local/share/rcm-worker` 는 새 머신처럼 `~/.local/share`
+    가 아직 없어도 가장 가까운 있는 조상(HOME)이 쓰기 가능하면 ok — 워커가 `mkdir -p` 로 만든다.
+    `--check` 자체는 만들지 않는다."""
+    token(srv)
+    fresh = tmp_path / "fresh-home"
+    fresh.mkdir()
+    monkeypatch.setenv("HOME", str(fresh))
+    code, out, err = run(capsys, worker_argv(srv, "--check"))
+    assert code == 0, out + err
+    assert row_status(out, "data dir") == "ok", out
+    assert str(fresh) in row_line(out, "data dir"), out
+    assert not (fresh / ".local").exists()
 
 
 def test_check_with_a_bad_config_file_is_usage_2(home, srv, token, tmp_path, capsys):

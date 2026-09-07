@@ -821,6 +821,18 @@ def python_row() -> tuple[str, bool, str]:
     return ("python", ok, detail)
 
 
+def _dir_writable(d: Path) -> bool:
+    """`rcm check`·`rcm worker --check` 의 data dir 행 — 있으면 그 디렉터리, 없으면 **가장 가까운
+    있는 조상**이 쓰기 가능한가(서버·워커가 `mkdir -p` 로 만든다). 부모만 보면 새 머신의 기본
+    `~/.local/share/rcm-worker` 는 `~/.local/share` 가 없어 거짓 FAIL 이 난다."""
+    p = d
+    while not p.exists():
+        if p.parent == p:
+            return False
+        p = p.parent
+    return p.is_dir() and os.access(p, os.W_OK)
+
+
 def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
     """`rcm check` 의 pools 행(M5b-4): `default (1 lane) · linux (build-02/1 idle · build-03 down)`.
     어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`)."""
@@ -895,7 +907,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         cfg = load_server_config(getattr(args, "config", None), check_tools=False)
         if cfg.path is not None:
             d = cfg.data_dir
-            writable = os.access(d, os.W_OK) if d.exists() else os.access(d.parent, os.W_OK)
+            writable = _dir_writable(d)
             rows.append(
                 ("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})")
             )
@@ -944,8 +956,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
     def _stop(signum: int, _frame: Any) -> None:
         if worker.stopping.is_set():
+            # 두 번째 신호는 즉시 — SystemExit 은 `run()` 의 finally 가 레인 join(grace+10초)으로
+            # 붙잡고, 레인 스레드는 daemon 이 아니라 인터프리터 종료도 기다린다
             _info(f"signal {signum} again: exiting now")
-            raise SystemExit(1)
+            sys.stderr.flush()
+            os._exit(1)
         _info(f"signal {signum}: stopping — running jobs are reported as lost")
         worker.stop()
 
@@ -977,8 +992,14 @@ def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
         return f"cannot run git: {type(e).__name__}"
     if proc.returncode == 0:
         return None
-    tail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
-    reason = tail[-1].strip() if tail else f"exit {proc.returncode}"
+    lines = [ln.strip() for ln in proc.stderr.decode("utf-8", errors="replace").splitlines()]
+    lines = [ln for ln in lines if ln]
+    # git 은 사유를 첫 줄(`fatal: '…' does not appear to be a git repository` · `ssh: …`)에 두고
+    # 마지막 줄은 일반 안내문(`and the repository exists.`)이다 — 첫 줄을 쓰고 경로·자격은 지운다
+    reason = lines[0] if lines else f"exit {proc.returncode}"
+    reason = re.sub(r"^(fatal|error|warning):\s*", "", reason)
+    reason = re.sub(r"://[^/\s@]+@", "://<redacted>@", reason)
+    reason = re.sub(r"/[^\s'\"]+", "<path>", reason)
     return "unreachable: " + reason[:80]
 
 
@@ -1020,7 +1041,7 @@ def _worker_check(cfg: Any, client: Any) -> int:
     else:
         rows.append(("repos", True, "none (git_ref presets cannot run on this worker)"))
     d = cfg.data_path
-    writable = os.access(d, os.W_OK) if d.exists() else os.access(d.parent, os.W_OK)
+    writable = _dir_writable(d)
     rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
     ok_all = all(ok for _, ok, _ in rows)
     for name, ok, detail in rows:
