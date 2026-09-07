@@ -7,7 +7,10 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- README (both languages): "Run as a service" now records three deployment lessons — the
+  service `PATH` is the presets' `PATH` (never put the rcm venv first), macOS TCC blocks launchd
+  services from `~/Documents`, and notification hooks must read tokens from files.
 
 ## [0.2.1] - 2026-09-08
 

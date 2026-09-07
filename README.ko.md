@@ -412,6 +412,19 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 - 유닛의 `PATH` 가 프리셋이 물려받는 값이다(`env_passthrough`) — Homebrew 와 툴체인을 거기 넣는다.
   머신은 깨어 있어야 한다(macOS 는 `pmset -a sleep 0`).
 
+실배치(Mac mini 의 Flutter 모노레포 게이트)에서 배운 세 가지:
+
+- **서비스의 `PATH` 가 곧 프리셋의 `PATH` 다**(`env_passthrough` 로 넘어간다). 툴체인을 앞에 두고,
+  rcm 을 설치한 venv 의 인터프리터는 절대 앞에 두지 않는다 — 그러면 프리셋의 `python3` 가 조용히 그
+  venv 의 Python(패키지 없음)이 된다. 서비스 파일에서는 `rcm` 바이너리를 절대 경로로 부른다. macOS 는
+  `/usr/sbin` 도 넣는다(`sysctl` · `ioreg` 가 호스트 카드를 채운다).
+- **macOS 개인정보 보호(TCC)는 launchd 서비스에도 걸린다.** 서비스는 사용자가 허용하지 않는 한
+  `~/Documents` · `~/Desktop` · `~/Downloads` 를 읽지 못하고, 실패는 멈춤이나 `Operation not permitted`
+  로 보인다. `data_dir` · 프리셋 · `[[repos]]` 미러 · 알림 훅이 부르는 스크립트는 전부 `~/.local/share`
+  나 `~/.config` 아래에 둔다.
+- **훅에는 키체인이 없다.** `gh` · `aws` 같은 도구를 부르는 `[[notify]]` 명령은 토큰을 파일(600)에서
+  환경변수로 읽어야 한다. 대화형 키링은 없어서 호출이 훅 타임아웃까지 멈춘다.
+
 ## Docker (Linux build machine)
 
 `Dockerfile` 이 서버 이미지를 만든다(`python:3.12-slim` + `git_ref` 프리셋용 git, 비루트 사용자

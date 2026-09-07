@@ -338,6 +338,21 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
   toolchains there. Keep the machine awake (`pmset -a sleep 0` on macOS).
 
+Three things learned from a real deployment (a Flutter monorepo gate on a Mac mini):
+
+- **The service `PATH` is what your presets run with** (`env_passthrough` hands it over). Put the
+  toolchains first and never the interpreter of the rcm install itself: if the venv that holds
+  `rcm` comes first, a preset's `python3` silently becomes that venv's Python (no packages) —
+  reference the `rcm` binary by absolute path in the service file instead. On macOS include
+  `/usr/sbin` (`sysctl`, `ioreg` feed the host card).
+- **macOS privacy (TCC) applies to launchd services.** A service cannot read `~/Documents`,
+  `~/Desktop` or `~/Downloads` unless the user grants it, and the failure looks like a hang or
+  `Operation not permitted`. Keep `data_dir`, presets, `[[repos]]` mirrors and every script a
+  notification hook runs under `~/.local/share` or `~/.config`.
+- **Hooks have no keychain.** A `[[notify]]` command that calls `gh`, `aws` or similar must read
+  its token from a file (mode 600) via an environment variable; the interactive keyring is not
+  available and the call blocks until the hook times out.
+
 ## Docker (Linux build machine)
 
 `Dockerfile` builds a server image (`python:3.12-slim` + git for `git_ref` presets, non-root user
