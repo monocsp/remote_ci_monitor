@@ -48,18 +48,19 @@ def paragraphs(text: str) -> list[str]:
 
 
 def unreleased(text: str) -> str:
-    """`[Unreleased]` 절. 릴리스 직후라 자리만 있으면(`Nothing yet.`) 그 아래 첫 버전 절 —
-    M5 항목은 릴리스되어도 CHANGELOG 의 맨 위 실제 절에 남아 있어야 한다."""
+    """`[Unreleased]` 절 + 바로 아래 최신 버전 절. M5 항목은 v0.2.0 으로 릴리스됐고 그 위에 새
+    미릴리스 항목이 쌓이므로, 「가장 최근 내용」 = 두 절을 합친 것이다."""
     m = re.search(r"^## \[Unreleased\][^\n]*$", text, re.M)
     assert m, "no `## [Unreleased]`"
     rest = text[m.end() :]
     nxt = re.search(r"^## \[", rest, re.M)
-    section = rest[: nxt.start()] if nxt else rest
-    if nxt and re.fullmatch(r"\s*(Nothing yet\.?)?\s*", section):
-        rest = rest[nxt.end() :]
-        nxt2 = re.search(r"^## \[", rest, re.M)
-        section = rest[: nxt2.start()] if nxt2 else rest
-    return section
+    if not nxt:
+        return rest
+    section = rest[: nxt.start()]
+    after = rest[nxt.end() :]
+    nxt2 = re.search(r"^## \[", after, re.M)
+    latest = after[: nxt2.start()] if nxt2 else after
+    return section + "\n" + latest
 
 
 # ── README ───────────────────────────────────────────────────────────────────

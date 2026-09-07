@@ -68,6 +68,14 @@ ENV_KEYS = {
     "RCM_JOB_SECONDS",
     "RCM_URL",
     "RCM_NOTIFY",
+    # 소스 (실배치: 훅이 커밋 status 를 남긴다)
+    "RCM_SOURCE_MODE",
+    "RCM_SOURCE_REF",
+    "RCM_SOURCE_SHA",
+    "RCM_SOURCE_BASE_SHA",
+    "RCM_SOURCE_DIRTY",
+    "RCM_SOURCE_REPO",
+    "RCM_INPUTS",
 }
 
 
