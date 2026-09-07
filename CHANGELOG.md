@@ -7,11 +7,20 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.1] - 2026-09-08
+
+First fixes from real use (a Flutter monorepo gate moved onto rcm) plus the Korean guide.
+
 ### Fixed
+- Snapshots skip nested git checkouts (`.claude/worktrees/<x>/`, submodule-like directories)
+  instead of failing with `snapshot failed: Is a directory`.
 - Notification hooks now inherit `PATH`, `HOME` and `LANG` from the server (a hook calling
   `date` or `$HOME` used to exit 1).
 
 ### Added
+- `README.ko.md` — Korean end-user guide with annotated screenshots (`docs/images/ko/`).
 - Notification env carries the job source (`RCM_SOURCE_MODE/REF/SHA/BASE_SHA/DIRTY/REPO`) and
   `RCM_INPUTS`, so a hook can post a commit status for the tested commit.
 
@@ -94,6 +103,7 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/monocsp/remote_ci_monitor/releases/tag/v0.1.0
