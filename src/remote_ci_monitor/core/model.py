@@ -51,6 +51,12 @@ PRIORITY_LABELS = {PRIORITY_LOW: "low", PRIORITY_NORMAL: "normal", PRIORITY_HIGH
 # ── 풀 (M5b) — 로컬 워커는 "default", 원격 워커는 자기 풀 이름으로 claim 한다 ──────────
 DEFAULT_POOL = "default"
 
+#: 토큰 종류(M5b-2). client = 세션 · admin = 관리 · worker = 원격 워커(`/worker/*` 만).
+TOKEN_CLIENT = "client"
+TOKEN_ADMIN = "admin"
+TOKEN_WORKER = "worker"
+TOKEN_KINDS = (TOKEN_CLIENT, TOKEN_ADMIN, TOKEN_WORKER)
+
 # ── 소스 모드 ────────────────────────────────────────────────────────────────
 MODE_TREE = "tree"
 MODE_GIT_REF = "git_ref"
@@ -213,6 +219,7 @@ class Job:
     artifacts_purged_at: datetime | None = None  # 보존 정리로 로그·스냅샷·워크스페이스를 지운 시각
     priority: int = PRIORITY_NORMAL  # -1 low · 0 normal · 1 high (M5)
     pool: str = DEFAULT_POOL  # 어느 풀의 워커가 돌리는가 (M5b)
+    worker_name: str | None = None  # 원격 워커가 claim 했으면 그 이름, 로컬 레인은 None (M5b-2)
 
     @property
     def is_waiting(self) -> bool:
@@ -312,6 +319,12 @@ class WorkerInfo:
     job_id: int | None = None
     error: str | None = None
     since: datetime | None = None
+    worker: str | None = None  # 원격 워커 이름. 로컬 레인은 None (M5b-2)
+
+    @property
+    def display_name(self) -> str | None:
+        """원격 레인의 표시 이름 `<worker>/<lane>`. 로컬 레인은 None(화면이 `lane N` 으로)."""
+        return f"{self.worker}/{self.lane}" if self.worker else None
 
 
 @dataclass(frozen=True)

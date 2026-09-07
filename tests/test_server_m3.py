@@ -375,7 +375,7 @@ def test_basic_credentials_are_accepted_for_reads_events_log_and_whoami(basic_sr
     assert basic_srv.req("GET", "/static/app.js", headers=alice)[0] == 200
     assert basic_srv.req("POST", "/api/eta", json_body={"preset": "gate"}, headers=alice)[0] == 200
     status, body = basic_srv.req("GET", "/api/whoami", headers=alice)
-    assert status == 200 and body == {"name": "alice-laptop", "admin": False}
+    assert status == 200 and body == {"name": "alice-laptop", "admin": False, "kind": "client"}
     admin = basic("macmini-admin", basic_srv.tokens["admin"])
     assert basic_srv.req("GET", "/api/whoami", headers=admin)[1]["admin"] is True
     assert sse_first_event(basic_srv, alice) == (200, "hello")
@@ -450,6 +450,7 @@ def test_bearer_still_works_and_challenges_depend_on_the_route(basic_srv):
     assert basic_srv.req("GET", "/api/whoami", token="admin")[1] == {
         "name": "macmini-admin",
         "admin": True,
+        "kind": "admin",
     }
     bearer = {"Authorization": f"Bearer {basic_srv.tokens['alice']}"}
     assert sse_first_event(basic_srv, bearer) == (200, "hello")

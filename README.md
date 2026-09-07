@@ -184,7 +184,17 @@ Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (
 - **Pools** — a job runs in a worker pool. The local worker is pool `default`; a preset can
   declare `pool = "linux"` (its default) and `pools = ["default"]` (extra pools a session may pick
   with `--pool`). Jobs of a pool with no workers wait with reason `worker_down` and no ETA —
-  nothing pretends they will start. Remote workers that serve other pools arrive in M5b.
+  nothing pretends they will start.
+- **Remote workers** — another machine serves a pool by talking to the server with a worker token
+  (`rcm token add build-02 --worker`; worker tokens can only use `/worker/*`, never submit or
+  cancel). The worker registers, claims one queued job per lane, downloads the snapshot, streams
+  the raw log (the server parses step markers) and reports the outcome; a heartbeat every
+  `worker_heartbeat_seconds` (5) keeps it alive. If the server hears nothing for
+  `worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
+  (`worker build-02 unreachable for 61s`) and are not resumed — resubmit. A worker that restarts
+  re-registers and its old jobs are closed as lost too. `rcm top` and the web header show each
+  remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
+  process itself (`rcm worker`) ships in the next release step (M5b-3).
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
   when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
@@ -229,6 +239,9 @@ fail fast with `cannot reach <url>` and exit 3.
 ## Security notes
 
 - Every write (submit, upload, cancel) needs a bearer token. The server stores only a SHA-256 of it.
+  Tokens have a kind: `client` (sessions), `admin` (cancel any job, pause, bump) and `worker`
+  (remote workers — `/worker/*` only). A worker can report only on jobs it claimed itself; the
+  log bytes and host samples it sends are treated as data, never parsed as commands.
 - Only configured presets run. No shell interpolation. Uploads are extracted with Python's
   `tarfile` data filter (no absolute paths, no `..`, no links outside the workspace).
 - The server binds to `127.0.0.1` unless you set `bind`. It does not do TLS — put it behind

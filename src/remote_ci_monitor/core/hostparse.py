@@ -12,6 +12,8 @@ import re
 from datetime import datetime
 from typing import Any
 
+from remote_ci_monitor.core.model import HostSample
+
 PAGE_SIZE_DEFAULT = 4096
 STALE_MULTIPLIER = 3.0
 
@@ -281,3 +283,119 @@ def stale(sampled_at: datetime, now: datetime, interval_seconds: float) -> bool:
     """표본 나이가 3×주기를 넘으면 낡았다. 정확히 3×주기는 아직 아니다."""
     age = (now - sampled_at).total_seconds()
     return age > STALE_MULTIPLIER * interval_seconds  # mutcheck ④ 표적
+
+
+# ── 원격 워커가 보낸 표본 (M5b-2) ─────────────────────────────────────────────
+
+_SAMPLE_STR_LIMIT = 200
+_SAMPLE_TOP_LIMIT = 10
+_SAMPLE_HISTORY_LIMIT = 60
+#: 알려진 키만 받는다 — 서버 샘플러(`hostsample.py`)가 내는 모양 그대로. 모르는 키는 표본 거부.
+_SAMPLE_KEYS = frozenset(
+    {
+        "interval_seconds",
+        "os",
+        "cores",
+        "load",
+        "cpu",
+        "memory",
+        "gpu",
+        "gpu_note",
+        "top",
+        "history",
+    }
+)
+_SAMPLE_IGNORED = frozenset(
+    {"name", "source", "sampled_at", "age_seconds", "stale"}
+)  # 서버가 정한다
+_NESTED_KEYS: dict[str, frozenset[str]] = {
+    "cpu": frozenset({"user", "sys", "idle", "busy"}),
+    "memory": frozenset({"total_bytes", "used_bytes", "compressed_bytes", "free_bytes"}),
+    "gpu": frozenset({"source", "name", "model", "util_pct", "mem_used_bytes", "mem_total_bytes"}),
+    "top": frozenset({"pid", "comm", "cpu", "rss_mb"}),
+    "history": frozenset({"at", "cpu_busy", "mem_used_bytes", "gpu_util_pct"}),
+}
+_NESTED_STR_KEYS = frozenset({"source", "name", "model", "comm", "at"})
+
+
+def _finite_number(v: Any) -> float | None:
+    """JSON 숫자만. bool 은 숫자가 아니고 NaN·Infinity 도 받지 않는다. None 은 그대로."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError("number expected")
+    if v != v or v in (float("inf"), float("-inf")):
+        raise ValueError("number must be finite")
+    return v
+
+
+def _opt_text(v: Any) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ValueError("string expected")
+    return v[:_SAMPLE_STR_LIMIT]
+
+
+def _known_dict(v: Any, what: str) -> dict[str, Any] | None:
+    """`cpu`·`memory`·`gpu`·`top[]`·`history[]` 항목: 알려진 키 → 스칼라. 모르는 키면 거부."""
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise ValueError(f"{what} must be an object")
+    allowed = _NESTED_KEYS[what]
+    out: dict[str, Any] = {}
+    for key, val in v.items():
+        if not isinstance(key, str) or key not in allowed:
+            raise ValueError(f"unknown {what} key")
+        out[key] = _opt_text(val) if key in _NESTED_STR_KEYS else _finite_number(val)
+    return out
+
+
+def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) -> HostSample:
+    """워커의 heartbeat `host_sample` → `HostSample`. 모양이 어긋나면 `ValueError`.
+
+    `name`·`source`·`sampled_at` 은 **서버가 정한 값**으로만 채운다(워커 payload 의 이름·시각은
+    쓰지 않는다). 알려진 키만 받고, 모르는 키가 있거나 아는 키가 하나도 없으면 거부한다.
+    """
+    if not isinstance(doc, dict):
+        raise ValueError("host_sample must be an object")
+    keys = {k for k in doc if k not in _SAMPLE_IGNORED}
+    if not keys or not keys <= _SAMPLE_KEYS:
+        raise ValueError("host_sample has unknown or no known keys")
+    interval = _finite_number(doc.get("interval_seconds"))
+    if interval is None or interval <= 0:
+        interval = 5.0
+    cores = doc.get("cores")
+    if cores is not None:
+        cores = int(_finite_number(cores) or 0)
+    load_raw = doc.get("load")
+    load: tuple[float, float, float] | None = None
+    if load_raw is not None:
+        if not isinstance(load_raw, list) or len(load_raw) != 3:
+            raise ValueError("load must be three numbers")
+        nums = [_finite_number(x) for x in load_raw]
+        if any(x is None for x in nums):
+            raise ValueError("load must be three numbers")
+        load = (float(nums[0]), float(nums[1]), float(nums[2]))  # type: ignore[arg-type]
+    top_raw = doc.get("top") or []
+    hist_raw = doc.get("history") or []
+    if not isinstance(top_raw, list) or not isinstance(hist_raw, list):
+        raise ValueError("top and history must be lists")
+    top = tuple(_known_dict(t, "top") or {} for t in top_raw[:_SAMPLE_TOP_LIMIT])
+    history = tuple(_known_dict(h, "history") or {} for h in hist_raw[-_SAMPLE_HISTORY_LIMIT:])
+    return HostSample(
+        name=name,
+        source=source,
+        sampled_at=sampled_at,
+        interval_seconds=float(interval),
+        os=_opt_text(doc.get("os")),
+        cores=cores,
+        load=load,
+        cpu=_known_dict(doc.get("cpu"), "cpu"),
+        memory=_known_dict(doc.get("memory"), "memory"),
+        gpu=_known_dict(doc.get("gpu"), "gpu"),
+        gpu_note=_opt_text(doc.get("gpu_note")),
+        top=top,
+        history=history,
+    )

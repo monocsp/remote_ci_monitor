@@ -455,6 +455,23 @@ def test_job_events_unknown_job_is_404(srv):
         s.close()
 
 
+def test_job_events_never_carry_server_or_host_sample_events(srv):
+    """잡별 스트림은 그 잡의 job_changed·job_finished·marker 만(PLAN). `server` 는 마커 한 줄에도
+    발행되므로(레인 상태) 걸러야 한다 — 안 거르면 실행 중 잡의 스트림에 섞여 들어온다."""
+    jid = srv.submit()[1]["job_id"]
+    assert srv.upload(jid)[0] == 200  # 워커가 없어 queued 로 남는다
+    s = SseStream(srv, f"/jobs/{jid}/events")
+    try:
+        hello_of(s)
+        srv.app._publish_server()
+        srv.app.publish("host_sample", {"name": "macmini", "sampled_at": "2026-09-04T00:00:00Z"})
+        srv.app.publish("marker", {"job_id": jid, "kind": "step", "value": "build"})
+        fr = s.frame()
+        assert fr is not None and fr["event"] == "marker" and fr["data"]["job_id"] == jid, fr
+    finally:
+        s.close()
+
+
 # ── POST /api/eta ────────────────────────────────────────────────────────────
 
 

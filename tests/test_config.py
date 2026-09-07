@@ -810,3 +810,145 @@ def test_preset_json_carries_pool_and_pools():
     j = preset_json(pool_preset())
     assert j["pool"] == "default"
     assert j["pools"] == []  # 추가 풀 없음 — null 이 아니라 빈 배열
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── M5b-2 (test-first, 2026-09-06): `[server] worker_timeout_seconds` · `worker_heartbeat_seconds`
+#    · `worker_claim_wait_seconds`. 명세는 docs/m5b2-workplan.md §2(기본값 60 · 5 · 20, 하한 10 · 1,
+#    claim wait 0~60) · §6 「설정」(heartbeat 은 timeout 보다 작아야 한다). 오류는 다른 [server]
+#    키처럼 `[server] <키>` 를 찍는다. examples/server.toml 에 키가 있어도 없어도 된다 — 있으면
+#    검증을 통과해야 한다(키를 요구하지는 않는다).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WORKER_KEYS = ("worker_timeout_seconds", "worker_heartbeat_seconds", "worker_claim_wait_seconds")
+EXAMPLE_SERVER_TOML = Path(__file__).resolve().parents[1] / "examples" / "server.toml"
+
+
+def server_toml(**keys: object) -> str:
+    """`[server]` 표 하나를 TOML 로. 값은 파이썬 리터럴 그대로(문자열은 따옴표를 직접 준다)."""
+    return "[server]\n" + "".join(f"{k} = {v}\n" for k, v in keys.items())
+
+
+def test_worker_keys_have_defaults(tmp_path):
+    from remote_ci_monitor.config import ServerSection
+
+    s = ServerSection()
+    assert s.worker_timeout_seconds == 60
+    assert s.worker_heartbeat_seconds == 5
+    assert s.worker_claim_wait_seconds == 20
+    cfg = load(tmp_path, GOOD)  # 파일에 키가 없으면 기본값 그대로
+    assert cfg.server.worker_timeout_seconds == 60
+    assert cfg.server.worker_heartbeat_seconds == 5
+    assert cfg.server.worker_claim_wait_seconds == 20
+
+
+def test_worker_keys_from_file(tmp_path):
+    cfg = load(
+        tmp_path,
+        server_toml(
+            worker_timeout_seconds=30, worker_heartbeat_seconds=2, worker_claim_wait_seconds=0
+        ),
+    )
+    assert cfg.server.worker_timeout_seconds == 30
+    assert cfg.server.worker_heartbeat_seconds == 2
+    assert cfg.server.worker_claim_wait_seconds == 0
+
+
+def test_worker_keys_from_env(tmp_path):
+    p = write(tmp_path, GOOD)
+    cfg = load_server_config(
+        p,
+        environ={
+            "RCM_SERVER_WORKER_TIMEOUT_SECONDS": "120",
+            "RCM_SERVER_WORKER_HEARTBEAT_SECONDS": "10",
+            "RCM_SERVER_WORKER_CLAIM_WAIT_SECONDS": "60",
+        },
+    )
+    assert cfg.server.worker_timeout_seconds == 120
+    assert cfg.server.worker_heartbeat_seconds == 10
+    assert cfg.server.worker_claim_wait_seconds == 60
+    with pytest.raises(ConfigError) as e:
+        load_server_config(p, environ={"RCM_SERVER_WORKER_TIMEOUT_SECONDS": "soon"})
+    assert "[server] worker_timeout_seconds" in msg(e, tmp_path)
+
+
+def test_worker_timeout_floor_is_10(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, server_toml(worker_timeout_seconds=9))
+    assert "[server] worker_timeout_seconds" in msg(e, tmp_path)
+    with pytest.raises(ConfigError):
+        load(tmp_path, server_toml(worker_timeout_seconds=0))
+    assert (
+        load(tmp_path, server_toml(worker_timeout_seconds=10)).server.worker_timeout_seconds == 10
+    )
+
+
+def test_worker_heartbeat_floor_is_1(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, server_toml(worker_heartbeat_seconds=0))
+    assert "[server] worker_heartbeat_seconds" in msg(e, tmp_path)
+    with pytest.raises(ConfigError):
+        load(tmp_path, server_toml(worker_heartbeat_seconds=-5))
+    cfg = load(tmp_path, server_toml(worker_heartbeat_seconds=1))
+    assert cfg.server.worker_heartbeat_seconds == 1
+
+
+@pytest.mark.parametrize("timeout,heartbeat", [(10, 10), (10, 11), (60, 60), (60, 90)])
+def test_worker_heartbeat_must_be_less_than_timeout(tmp_path, timeout: int, heartbeat: int):
+    # 같거나 크면 워커가 heartbeat 한 번 거르기도 전에 down 이다 — 두 키를 다 말해 준다
+    with pytest.raises(ConfigError) as e:
+        load(
+            tmp_path,
+            server_toml(worker_timeout_seconds=timeout, worker_heartbeat_seconds=heartbeat),
+        )
+    m = msg(e, tmp_path)
+    assert "[server] worker_heartbeat_seconds" in m and "worker_timeout_seconds" in m, m
+    # 바로 아래 값은 된다
+    cfg = load(
+        tmp_path,
+        server_toml(worker_timeout_seconds=timeout, worker_heartbeat_seconds=timeout - 1),
+    )
+    assert cfg.server.worker_heartbeat_seconds == timeout - 1
+
+
+def test_worker_timeout_at_the_floor_keeps_the_default_heartbeat(tmp_path):
+    # timeout 만 10 으로 줄여도 기본 heartbeat 5 는 그 아래라 그대로 된다
+    cfg = load(tmp_path, server_toml(worker_timeout_seconds=10))
+    assert cfg.server.worker_heartbeat_seconds == 5
+
+
+@pytest.mark.parametrize("value", [-1, 61, 1000])
+def test_worker_claim_wait_must_be_between_0_and_60(tmp_path, value: int):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, server_toml(worker_claim_wait_seconds=value))
+    assert "[server] worker_claim_wait_seconds" in msg(e, tmp_path)
+
+
+@pytest.mark.parametrize("value", [0, 60])
+def test_worker_claim_wait_bounds_are_inclusive(tmp_path, value: int):
+    # 0 은 「기다리지 않는다」(테스트용 즉시 204) · 60 은 상한 — 둘 다 된다
+    cfg = load(tmp_path, server_toml(worker_claim_wait_seconds=value))
+    assert cfg.server.worker_claim_wait_seconds == value
+
+
+@pytest.mark.parametrize("key", WORKER_KEYS)
+@pytest.mark.parametrize(
+    "bad", ['"soon"', "true", "5.5", "[5]"], ids=["str", "bool", "float", "list"]
+)
+def test_worker_keys_must_be_integers(tmp_path, key: str, bad: str):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, f"[server]\n{key} = {bad}\n")
+    assert f"[server] {key}" in msg(e, tmp_path)
+
+
+def test_example_server_toml_accepts_the_worker_keys_if_present():
+    """예시 파일에 키를 넣어도 된다(필수는 아니다).
+
+    넣었다면 검증을 통과하고 값이 규칙 안이어야 한다.
+    """
+    assert EXAMPLE_SERVER_TOML.is_file()
+    cfg = load_server_config(EXAMPLE_SERVER_TOML, environ={}, check_tools=False)
+    s = cfg.server
+    assert s.worker_timeout_seconds >= 10
+    assert 1 <= s.worker_heartbeat_seconds < s.worker_timeout_seconds
+    assert 0 <= s.worker_claim_wait_seconds <= 60

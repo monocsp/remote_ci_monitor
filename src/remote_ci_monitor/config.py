@@ -99,6 +99,9 @@ class ServerSection:
     snapshot_cache_days: int = 30  # 이만큼 안 쓰인 blob 은 지운다
     snapshot_cache_max_bytes: int = 4 * 1024**3  # 넘으면 오래된 blob 부터
     snapshot_cache_scope: str = "global"  # "global" | "token" — token 이면 토큰별로 blob 을 나눈다
+    worker_timeout_seconds: int = 60  # heartbeat 이 이만큼 없으면 워커 down · 잡 lost (M5b-2)
+    worker_heartbeat_seconds: int = 5  # 워커에게 알려 주는 heartbeat 주기
+    worker_claim_wait_seconds: int = 20  # `/worker/claim` long-poll 상한
 
 
 @dataclass
@@ -536,6 +539,14 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         )
     if s.upload_abandon_seconds < s.upload_stall_seconds:
         raise ConfigError("[server] upload_abandon_seconds must be >= upload_stall_seconds")
+    if s.worker_timeout_seconds < 10:
+        raise ConfigError("[server] worker_timeout_seconds must be >= 10")
+    if s.worker_heartbeat_seconds < 1:
+        raise ConfigError("[server] worker_heartbeat_seconds must be >= 1")
+    if s.worker_heartbeat_seconds >= s.worker_timeout_seconds:
+        raise ConfigError("[server] worker_heartbeat_seconds must be < worker_timeout_seconds")
+    if not (0 <= s.worker_claim_wait_seconds <= 60):
+        raise ConfigError("[server] worker_claim_wait_seconds must be between 0 and 60")
     e = cfg.estimate
     if e.sample_policy not in ("success", "completed"):
         raise ConfigError("[estimate] sample_policy must be 'success' or 'completed'")

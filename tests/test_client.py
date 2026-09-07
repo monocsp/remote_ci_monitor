@@ -178,7 +178,7 @@ def test_run_flow_success_and_failure_exit_codes(live, tmp_path):
     root.mkdir()
     (root / "hello.txt").write_text("hello\n")
     client = Client(f"http://127.0.0.1:{live.port}", live.tokens["alice"])
-    assert client.whoami() == {"name": "alice-laptop", "admin": False}
+    assert client.whoami() == {"name": "alice-laptop", "admin": False, "kind": "client"}
     assert set(client.presets()) == {"ok", "bad", "slow", "gate"}
     ok = submit_and_upload(live, client, root, "ok", tmp_path)
     code, job, reason = wait_for_job(client, ok["job_id"], poll_seconds=0.1)

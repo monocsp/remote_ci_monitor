@@ -23,6 +23,9 @@ snapshot_cache = true               # content-addressed uploads: only changed fi
 snapshot_cache_days = 30            # blobs unused this long are purged (never while a job references them)
 snapshot_cache_max_bytes = 4294967296
 snapshot_cache_scope = "global"     # "global" shares identical content between clients | "token"
+worker_timeout_seconds = 60         # remote worker with no heartbeat this long: down, its jobs lost
+worker_heartbeat_seconds = 5        # heartbeat period handed to `rcm worker`
+worker_claim_wait_seconds = 20      # how long /worker/claim may long-poll for a job
 
 [estimate]
 sample_days = 45

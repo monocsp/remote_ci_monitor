@@ -119,6 +119,53 @@ def assemble_from_manifest(manifest_path: Path, blobs_dir: Path, workspace: Path
     return count
 
 
+def assemble_tar_from_manifest(manifest_path: Path, blobs_dir: Path, out_path: Path) -> int:
+    """캐시 잡의 manifest + blob 으로 원격 워커에게 줄 tar.gz 를 만든다(M5b-2). 항목 수.
+
+    `.part` 에 쓰고 마지막에 바꿔 넣는다 — 반쯤 만든 파일을 다른 요청이 읽지 않게. 디렉터리는
+    파일 경로에서 자연히 생기므로 넣지 않는다(`extract_tree` 가 만든다).
+    """
+    import json
+
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = validate_manifest(doc, max_bytes=1 << 62)
+    except (OSError, ValueError, ManifestError) as e:
+        raise MaterializeError(f"snapshot manifest unreadable: {type(e).__name__}") from e
+    prefix = doc.get("blob_prefix") or ""
+    part = out_path.with_name(out_path.name + ".part")
+    count = 0
+    try:
+        with tarfile.open(part, "w:gz") as tar:
+            for op in assemble_plan(manifest):
+                if op.kind == "copy":
+                    src = blob_path(blobs_dir, prefix + (op.sha256 or ""))
+                    if not src.is_file():
+                        raise MaterializeError(f"snapshot blob missing {short_sha(op.sha256)}")
+                    info = tar.gettarinfo(str(src), arcname=op.path)
+                    info.mode = op.mode or 0o644
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    with src.open("rb") as fh:
+                        tar.addfile(info, fh)
+                elif op.kind == "symlink":
+                    info = tarfile.TarInfo(op.path)
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = op.target or ""
+                    tar.addfile(info)
+                else:
+                    continue
+                count += 1
+        part.replace(out_path)
+    except MaterializeError:
+        part.unlink(missing_ok=True)
+        raise
+    except (OSError, tarfile.TarError) as e:
+        part.unlink(missing_ok=True)
+        raise MaterializeError(f"cannot assemble snapshot: {type(e).__name__}") from e
+    return count
+
+
 def prepare_git_ref(
     job: Job,
     workspace: Path,

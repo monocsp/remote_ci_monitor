@@ -535,7 +535,8 @@ docs/reviews/
 - **M5a — 확장 1** (**완료 2026-09-06**, 명세 `docs/m5-workplan.md`): 우선순위(low/normal/high · 프리셋 기본이 비-admin 상한 · `rcm bump` · 합류 시 상향) · 내용 주소 스냅샷 캐시(manifest → 빠진 blob 만 · `X-RCM-Tree: blobs` · blob GC · `--no-cache`) · 알림(`[[notify]]` argv/url · 정확히 한 번 · 재시작 스캔). 완료 기준 ①②③: e2e 로 잠금(high 가 normal 보다 먼저 · 1 MB 난수 트리 두 번째 업로드 uploaded_bytes ≤ 4 KB · 알림 잡당 한 번). DB v3 · 스키마 v1 에 추가 키(`queue[].priority` · `presets[].priority` · `source.uploaded_bytes/cached_bytes` · `server.snapshot_cache/notify_failures`).
 - **M5b — 확장 2 (원격 워커)**: 빌드 머신 여러 대. 4 PR(명세 M5b-1~4).
   - **M5b-1 풀 축** (**완료 2026-09-06**): DB v4 `jobs.pool` · 프리셋 `pool`/`pools` · `rcm run/eta/jobs --pool` · `status()` 가 풀마다 `pools[]` 항목(기본 풀은 로컬 워커·호스트, 다른 풀은 lanes 0 → 대기 잡 `worker_down`·ETA 없음 — fail-open 금지) · 풀별 중앙값 · `rcm top`/웹이 풀을 순회(풀 하나면 화면 그대로).
-  - M5b-2 워커 토큰 + `/worker/register·claim·heartbeat` + `last_seen_at` 기반 down/lost · M5b-3 `runner.py` + `rcm worker` · M5b-4 UI/CLI 다중 풀 표시 + 실기.
+  - **M5b-2 워커 프로토콜** (**완료 2026-09-07**, 명세 `docs/m5b2-workplan.md` · 리뷰 `docs/reviews/2026-09-06-codex-m5b2-design.md`): DB v5(`tokens.kind` · `jobs.worker_name` · `workers`) · `rcm token add --worker` · `/worker/register·claim(long-poll)·heartbeat` · `/worker/jobs/{id}/tree(캐시 잡 tar 조립)·phase·log(서버가 마커 파싱)·finish` · 워커 상태는 서버가 받은 `last_seen_at` 로만(timeout → down · 잡 lost · 재등록 = 옛 잡 lost · 미확인 취소는 서버가 닫음) · 재시작 복구는 로컬 잡만 · 인증 분리(워커 토큰은 `/worker/*` 만) · `server.workers[].worker/display_name` · `pools[].lanes` 는 살아 있는 레인 · 풀 hosts 에 워커 표본 · `/api/health.pools_without_workers`.
+  - M5b-3 `runner.py` + `rcm worker` · M5b-4 UI/CLI 다중 풀 표시 + 실기.
 - **M6 — GitHub 백엔드**(보류): Actions run 관찰·dispatch(v1.1 설계 참조). 2026-09-04 「GitHub 비의존」 방향과 상충 — 오너 결정 30 뒤에.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
