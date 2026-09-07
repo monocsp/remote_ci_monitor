@@ -260,7 +260,8 @@ def test_logs_follow_returns_after_job_ends(live, env, capsys):
 def test_wait_uses_sse_and_exits_with_job_code(live, env, capsys, monkeypatch):
     calls = count_events(monkeypatch)
     env(live)
-    jid = run_ok_job(live)
+    # `slow`: `ok` 는 수 ms 에 끝나 wait 가 열기 전에 종료 잡이 되면 SSE 를 안 연다(빠른 CI 에서 흔들림)
+    jid = run_ok_job(live, preset="slow")
     code, out, _ = run(capsys, ["wait", "--job", str(jid)])
     assert code == 0
     body = last_json(out)
