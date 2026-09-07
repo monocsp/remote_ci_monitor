@@ -1,5 +1,7 @@
 # remote_ci_monitor
 
+한국어 안내: [README.ko.md](README.ko.md)
+
 A local job server for a team that shares **one build machine**. Sessions on any computer submit a
 preset (`rcm run gate`); the server queues and runs them one at a time, shows queue position,
 ETA, step progress and host load, and hands the result back as an **exit code**.
@@ -10,10 +12,10 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
-Status: **M0–M5 done (v0.2.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
+Status: **M0–M5 done (v0.2.1)** — server, queue, worker, live events, web UI, `git_ref` deploys,
 retention, service files, packaging, priority, snapshot cache, notifications, worker pools and
-remote workers (`rcm worker`). A GitHub backend (M6) is deferred. The plan lives in `PLAN.md`
-(Korean); changes in `CHANGELOG.md`.
+remote workers (`rcm worker`). There is no GitHub backend and none is planned: GitHub is for
+commits, pushes and PR merges only. The plan lives in `PLAN.md` (Korean); changes in `CHANGELOG.md`.
 
 ## Install
 
@@ -225,7 +227,10 @@ Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
   when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
-  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL` and `RCM_NOTIFY` (rule name);
+  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
+  source (`RCM_SOURCE_MODE`, `RCM_SOURCE_REF`, `RCM_SOURCE_SHA`, `RCM_SOURCE_BASE_SHA`,
+  `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status) and `RCM_INPUTS` (JSON);
+  the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB. Each (job, rule) fires exactly once, including
   jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy.

@@ -68,6 +68,14 @@ ENV_KEYS = {
     "RCM_JOB_SECONDS",
     "RCM_URL",
     "RCM_NOTIFY",
+    # 소스 (실배치: 훅이 커밋 status 를 남긴다)
+    "RCM_SOURCE_MODE",
+    "RCM_SOURCE_REF",
+    "RCM_SOURCE_SHA",
+    "RCM_SOURCE_BASE_SHA",
+    "RCM_SOURCE_DIRTY",
+    "RCM_SOURCE_REPO",
+    "RCM_INPUTS",
 }
 
 
@@ -310,3 +318,36 @@ def test_sanitize_text_survives_lone_surrogates() -> None:
 def test_sanitize_text_is_identity_on_clean_short_text() -> None:
     s = "ok: 12 passed in 3.2s\n"
     assert sanitize_text(s) == s
+
+
+# ── 소스 변수 (실배치: 훅이 커밋 status 를 남기려면 sha 가 필요하다) ─────────────
+
+
+def test_notify_env_carries_the_source_so_hooks_can_post_a_commit_status():
+    """git_ref 잡: RCM_SOURCE_REF · RCM_SOURCE_SHA. tree 잡: sha 는 비고 base_sha + dirty(0/1).
+    inputs 는 정렬된 JSON 한 줄. 값은 전부 문자열이고 없는 값은 빈 문자열이다."""
+    row = {
+        "id": 7,
+        "state": "succeeded",
+        "preset": "gate",
+        "key": "gate",
+        "inputs": {"scope": "full", "smoke": False},
+        "source": {"mode": "git_ref", "repo": "app", "ref": "feat/x", "sha": "a" * 40},
+    }
+    env = notify_env(row, "gate-status")
+    assert env["RCM_SOURCE_MODE"] == "git_ref" and env["RCM_SOURCE_REPO"] == "app"
+    assert env["RCM_SOURCE_REF"] == "feat/x" and env["RCM_SOURCE_SHA"] == "a" * 40
+    assert env["RCM_SOURCE_BASE_SHA"] == "" and env["RCM_SOURCE_DIRTY"] == ""
+    assert env["RCM_INPUTS"] == '{"scope": "full", "smoke": false}'
+    tree = {
+        "id": 8,
+        "state": "failed",
+        "preset": "gate-fast",
+        "source": {"mode": "tree", "base_sha": "b" * 40, "dirty": True, "tree_hash": "c" * 64},
+    }
+    env = notify_env(tree, "gate-status")
+    assert env["RCM_SOURCE_MODE"] == "tree" and env["RCM_SOURCE_SHA"] == ""
+    assert env["RCM_SOURCE_BASE_SHA"] == "b" * 40 and env["RCM_SOURCE_DIRTY"] == "1"
+    assert env["RCM_INPUTS"] == "{}"
+    assert all(isinstance(v, str) for v in env.values())
+    assert notify_env({"id": 1, "state": "lost"}, "x")["RCM_SOURCE_MODE"] == ""  # source 없음

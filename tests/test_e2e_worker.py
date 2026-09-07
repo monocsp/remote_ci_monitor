@@ -73,7 +73,8 @@ LIN_SCRIPT = (
 PID_LINE = 'echo $$ > "$RCM_MARK_DIR/$RCM_JOB_ID.pid"'
 SLOWL_SCRIPT = f"{PID_LINE}; exec sleep 30"
 SLOW4_SCRIPT = f"{PID_LINE}; sleep 4; {LIN_SCRIPT}"
-DEPLOY_SCRIPT = "cat hello.txt; echo RCM_REF=$RCM_REF; echo HEAD=$(git rev-parse HEAD)"
+# `sleep 0.3`: 캐시 잡과 같은 이유 — 수 ms 짜리 잡은 50 ms 폴링이 busy 를 못 본다
+DEPLOY_SCRIPT = "cat hello.txt; echo RCM_REF=$RCM_REF; sleep 0.3; echo HEAD=$(git rev-parse HEAD)"
 
 SERVER_TOML = """\
 [server]
