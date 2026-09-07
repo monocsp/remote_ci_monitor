@@ -1418,7 +1418,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._route()
         except ApiError as e:
-            self._send_error(e, close=e.status in (413, 411))
+            # 본문을 읽기 전에 거절한 응답(411·413·415)은 연결을 닫는다 — HTTP/1.1 keep-alive 에서
+            # 안 읽은 본문이 다음 요청으로 파싱되지 않게
+            self._send_error(e, close=e.status in (413, 411, 415))
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as e:  # noqa: BLE001 — 스택은 로그에만, 응답은 한 줄
@@ -1831,7 +1833,9 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if job_id is not None and ev.kind in JOB_KINDS and ev.data.get("job_id") != job_id:
                     continue
-                if job_id is not None and ev.kind == KIND_HOST_SAMPLE:
+                if job_id is not None and ev.kind in (KIND_HOST_SAMPLE, KIND_SERVER):
+                    # 잡별 스트림은 그 잡의 job_changed·job_finished·marker 만(PLAN).
+                    # `server`(레인 상태)는 마커 한 줄에도 발행되므로 여기서 걸러야 한다
                     continue
                 self._sse_write(ev.kind, ev.id, ev.data)
                 last_write = time.monotonic()

@@ -1265,3 +1265,62 @@ def test_heartbeat_truncates_an_oversized_top_list(srv):
     assert srv.heartbeat("build-02", host_sample={**SAMPLE, "top": top})[0] == 200
     (h,) = srv.pools()["default"]["hosts"]
     assert h["top"] == top[:10]
+
+
+# ── 격리 검증에서 더한 것 (2026-09-07) ────────────────────────────────────────
+
+
+def test_claim_long_poll_polls_the_db_once_per_period_when_wake_stays_set(srv, monkeypatch):
+    """`wake` 는 로컬 워커 스레드만 지우는 이벤트라 로컬 레인이 바쁠 때 잡이 올라오면 세워진 채로
+    남는다. 그 동안의 빈 풀 long-poll 은 주기(0.5초)마다 한 번만 DB 를 봐야 한다 — 이벤트가
+    세워져 있다고 매 반복 바로 돌면 1초에 수천 번 `claim` 을 두드린다."""
+    srv.registered("lin-01", pool="linux")
+    calls = 0
+    real = srv.store.claim
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(srv.store, "claim", counting)
+    srv.app.wake.set()
+    t0 = time.monotonic()
+    status, body = srv.claim("lin-01", wait_seconds=1)
+    elapsed = time.monotonic() - t0
+    assert status == 204 and body is None, (status, body)
+    assert elapsed >= 0.9, elapsed
+    assert calls <= 5, calls  # 즉시 한 번 + 0.5초마다 한 번(여유 두 번)
+
+
+def test_partial_log_line_is_dropped_when_the_job_is_closed_as_lost(srv):
+    """잘린 마지막 줄 조각(`_log_partial`)은 잡이 lost 로 닫히면 버린다 — 재등록이든 timeout 이든
+    남기지 않는다(늦은 보고는 409 라 다시 쓰일 일이 없다)."""
+    jid = running_job(srv)
+    assert srv.log("build-02", jid, b"::rcm::st")[0] == 200
+    assert jid in srv.app._log_partial
+    srv.registered("build-02")  # 재등록 = 옛 잡 lost
+    assert srv.store.get_job(jid).state == "lost"
+    assert jid not in srv.app._log_partial
+    jid2 = running_job(srv)
+    assert srv.log("build-02", jid2, b"partial")[0] == 200
+    srv.clock.advance(TIMEOUT + 1)
+    assert srv.app.mark_lost_workers(srv.clock()) == [jid2]
+    assert jid2 not in srv.app._log_partial
+
+
+def test_log_415_closes_the_connection_before_the_unread_body(srv):
+    """415 는 본문을 읽기 전에 낸다 — HTTP/1.1 keep-alive 라 연결을 닫지 않으면 안 읽은 본문이
+    다음 요청으로 파싱된다(411·413 과 같은 규칙)."""
+    jid = running_job(srv)
+    status, headers, _ = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/log",
+        token="build-02",
+        body=b"x\n",
+        headers={"Content-Type": "text/plain"},
+        raw=True,
+    )
+    assert status == 415
+    connection = {k.lower(): v for k, v in headers.items()}.get("connection", "")
+    assert connection.lower() == "close", headers
