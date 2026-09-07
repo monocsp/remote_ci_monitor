@@ -47,8 +47,10 @@ rcm serve                  # http://127.0.0.1:8787 · Ctrl-C or SIGTERM stops it
 The generated config ships a harmless `ok` preset so you can prove the path end to end before
 writing your own presets. To accept sessions from other computers set `bind` to the machine's
 Tailscale/LAN address (or `0.0.0.0`) and, on macOS, allow Python through the firewall prompt.
-Check from another computer with `curl http://<build-machine>:8787/api/health`. For a service that
-survives logins and reboots see [Run as a service](#run-as-a-service).
+Check from another computer with `curl http://<build-machine>:8787/api/health`. With `bind` set to a
+non-loopback address the server also advertises itself on the LAN (`_rcm._tcp`, mDNS/DNS-SD), so
+sessions on the same network run `rcm discover` — or nothing at all: `rcm run` finds it. For a
+service that survives logins and reboots see [Run as a service](#run-as-a-service).
 
 Tokens: `rcm token add ops --admin` makes an admin token (pause/resume, cancel any job, read any
 log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another port:
@@ -56,6 +58,12 @@ log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another por
 when you bind to `0.0.0.0` so job URLs in `rcm run` output open from other computers.
 
 ## Session machine (3 commands)
+
+On the same Wi-Fi/LAN as the build machine the session needs no address at all: leave `server`
+empty (or `server = "auto"`) and `rcm` finds the server by mDNS/DNS-SD (`rcm discover` lists what
+it sees). From another network you need a route — Tailscale, or a tunnel of your own — and then
+the server's address goes into `client.toml`. Discovery is off when the server binds to loopback
+(`advertise = false` turns it off explicitly).
 
 <!-- smoke:begin -->
 ```sh
@@ -187,6 +195,7 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
 | `rcm presets [--json]` | presets the server offers and their inputs |
+| `rcm discover [--json] [--timeout S]` | rcm servers on this network (mDNS); `rcm check` says `(found on this network)` when it used one |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
 
@@ -270,6 +279,9 @@ fail fast with `cannot reach <url>` and exit 3.
 
 ## Security notes
 
+- Discovery answers (`_rcm._tcp`) carry only the server name, port, version, lane count and LAN
+  IPs — never tokens, presets or paths. Anyone on the LAN can learn that a build server exists;
+  the read API is open on the LAN unless `read_auth = "basic"`.
 - Every write (submit, upload, cancel) needs a bearer token. The server stores only a SHA-256 of it.
   Tokens have a kind: `client` (sessions), `admin` (cancel any job, pause, bump) and `worker`
   (remote workers — `/worker/*` only). A worker can report only on jobs it claimed itself; the

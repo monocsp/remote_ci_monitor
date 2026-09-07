@@ -59,6 +59,11 @@ rcm serve                  # http://127.0.0.1:8787 · Ctrl-C or SIGTERM stops it
 
 ## Session machine (3 commands)
 
+빌드 머신과 **같은 Wi-Fi/LAN** 이면 주소를 몰라도 된다: `server` 를 비워 두면(또는 `server = "auto"`)
+`rcm` 이 mDNS/DNS-SD 로 서버를 찾는다(`rcm discover` 가 보이는 서버를 나열한다). 다른 네트워크에서는
+길이 필요하다 — Tailscale 이든 직접 둔 터널이든 — 그러면 서버 주소를 `client.toml` 에 적는다. 서버가
+루프백에만 묶여 있으면 광고하지 않는다(`advertise = false` 로 명시적으로 끌 수도 있다).
+
 ```sh
 rcm init client --server http://<build-machine>:8787   # ~/.config/rcm/client.toml (mode 600)
 export RCM_TOKEN=<token from rcm token add>            # or put it in that file as token = "…"
@@ -219,6 +224,7 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함 |
 | `rcm logs N [--follow]` | 잡 로그(내 잡, 합류한 잡, 또는 admin 토큰이면 아무 잡) |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
+| `rcm discover [--json] [--timeout S]` | 같은 네트워크의 rcm 서버 목록(mDNS). 발견한 서버를 쓴 `rcm check` 는 `(found on this network)` 라고 말한다 |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류 목록에서만 빠진다) · 큐 정지/재개(admin) |
 | `rcm bump N [--priority high]` | 대기 잡의 우선순위 변경(admin) |
 

@@ -26,6 +26,8 @@ snapshot_cache_scope = "global"     # "global" shares identical content between 
 worker_timeout_seconds = 60         # remote worker with no heartbeat this long: down, its jobs lost
 worker_heartbeat_seconds = 5        # heartbeat period handed to `rcm worker`
 worker_claim_wait_seconds = 20      # how long /worker/claim may long-poll for a job
+# advertise = true                  # mDNS/DNS-SD: sessions on the same network find this server without an address
+#                                   # (default: on when bind is not loopback). advertise_name = "macmini" to rename
 
 [estimate]
 sample_days = 45

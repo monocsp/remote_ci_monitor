@@ -103,6 +103,8 @@ class ServerSection:
     worker_timeout_seconds: int = 60  # heartbeat 이 이만큼 없으면 워커 down · 잡 lost (M5b-2)
     worker_heartbeat_seconds: int = 5  # 워커에게 알려 주는 heartbeat 주기
     worker_claim_wait_seconds: int = 20  # `/worker/claim` long-poll 상한
+    advertise: bool | None = None  # mDNS 광고(M5c). None = bind 가 루프백이 아니면 켠다
+    advertise_name: str = ""  # 발견 응답의 이름. 비면 짧은 호스트명
 
 
 @dataclass
@@ -171,6 +173,18 @@ class ClientConfig:
     label: str = ""
     token_env: str = "RCM_TOKEN"  # 토큰을 찾은/찾을 환경변수 이름 — 안내 문구에 쓴다
     path: Path | None = None
+
+    @property
+    def wants_discovery(self) -> bool:
+        """서버 주소가 없거나 `"auto"` 면 같은 네트워크에서 찾는다(M5c)."""
+        return self.server.strip().lower() in ("", "auto")
+
+
+def advertise_enabled(section: ServerSection) -> bool:
+    """mDNS 광고를 켤까 — 명시값이 있으면 그것, 없으면 bind 가 루프백이 아닐 때만."""
+    if section.advertise is not None:
+        return bool(section.advertise)
+    return section.bind not in ("127.0.0.1", "localhost", "::1")
 
 
 @dataclass
@@ -245,6 +259,9 @@ def _coerce_scalar(where: str, value: Any, kind: type) -> Any:
 
 def _apply_section(section: Any, name: str, values: dict[str, Any], origin: str) -> None:
     kinds = {f.name: type(getattr(section, f.name)) for f in fields(section)}
+    for key, kind in list(kinds.items()):
+        if kind is type(None):  # `bool | None`(advertise) — 값이 오면 bool 로 읽는다
+            kinds[key] = bool
     for key, value in values.items():
         if key not in kinds:
             raise ConfigError(f"[{name}] unknown key '{key}' ({origin})")
@@ -591,6 +608,10 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[server] worker_heartbeat_seconds must be < worker_timeout_seconds")
     if not (0 <= s.worker_claim_wait_seconds <= 60):
         raise ConfigError("[server] worker_claim_wait_seconds must be between 0 and 60")
+    if s.advertise_name and not _NAME_RE.match(s.advertise_name):
+        raise ConfigError(
+            "[server] advertise_name must be a short identifier (letters, digits, . _ -)"
+        )
     e = cfg.estimate
     if e.sample_policy not in ("success", "completed"):
         raise ConfigError("[estimate] sample_policy must be 'success' or 'completed'")

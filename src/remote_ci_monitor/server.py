@@ -38,10 +38,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
-from remote_ci_monitor.config import ServerConfig
+from remote_ci_monitor.config import ServerConfig, advertise_enabled
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
+from remote_ci_monitor.core.mdns import instance_name
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
@@ -88,6 +89,7 @@ from remote_ci_monitor.gitops import STDERR_TAIL_LINES, GitError, GitTimeout, re
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
 from remote_ci_monitor.materialize import blob_path
+from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
 from remote_ci_monitor.store import Store, TokenInfo
@@ -238,9 +240,26 @@ class App(RemoteWorkersMixin):
             self.config.host, name=host, publish=self.publish, stop=self.stop, now_fn=self.now_fn
         )
         self.sampler.start()
+        self.responder = None
+        if advertise_enabled(self.config.server):
+            name = self.config.server.advertise_name or host
+            self.responder = Responder(
+                instance_name(name),
+                f"{host}.local.",
+                self.config.server.port,
+                txt_fn=lambda: {
+                    "v": self.version,
+                    "name": name,
+                    "lanes": str(self.config.server.lanes),
+                },
+                log=self.log,
+            )
+            self.responder.start()
 
     def shutdown(self) -> None:
         self.stop.set()
+        if getattr(self, "responder", None) is not None:
+            self.responder.stop()
         self.wake.set()
         self.bus.shutdown()
         for w in self.workers:
@@ -1287,6 +1306,12 @@ class App(RemoteWorkersMixin):
             raise ApiError(404, "no log — the job ended before its process started") from None
         return data, next_offset, not job.is_terminal
 
+    def _advertise_json(self) -> dict[str, Any]:
+        r = getattr(self, "responder", None)
+        if r is None:
+            return {"on": False, "name": None, "error": None}
+        return {"on": r.error is None, "name": r.instance.split("._rcm.")[0], "error": r.error}
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -1313,6 +1338,7 @@ class App(RemoteWorkersMixin):
             "lanes": self.config.server.lanes,
             "version": self.version,
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
+            "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
         }
         if not ok:
             if not db_ok:
@@ -1401,6 +1427,17 @@ class Handler(BaseHTTPRequestHandler):
     # ── 요청 처리 ───────────────────────────────────────────────────────────
 
     def _dispatch(self) -> None:
+        # 요청마다 스레드가 생기고 스레드마다 DB 연결이 생긴다 — 끝나면 꼭 닫는다
+        # (안 닫으면 핸들이 쌓여 'Too many open files' → 모든 요청이 500)
+        try:
+            self._dispatch_inner()
+        finally:
+            try:
+                self.app.store.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _dispatch_inner(self) -> None:
         path = urlsplit(self.path).path.rstrip("/")
         m = _JOB_EVENTS_RE.match(path)
         if path == "/events" or m:

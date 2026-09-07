@@ -505,3 +505,18 @@ def test_job_urls_use_the_request_host_when_public_url_is_empty(tmp_path):
         assert job["url"].startswith("http://127.0.0.1:")
     finally:
         s.close()
+
+
+# ── 요청 스레드의 DB 연결 누수 (실배치: 252개 핸들 → 'Too many open files' → 전부 500) ────────
+
+
+def test_request_threads_close_their_db_connection(srv):
+    """요청마다 새 스레드·새 연결이 생긴다. 끝나면 닫혀야 한다 — 50번 부른 뒤 열린 연결 수가
+    요청 수만큼 늘어 있으면 안 된다(살아 있는 상시 스레드 몫만 남는다)."""
+    import gc
+
+    for _ in range(50):
+        assert srv.req("GET", "/api/health")[0] == 200
+        assert srv.req("GET", "/api/status")[0] == 200
+    gc.collect()
+    assert srv.app.store.open_connections <= 4, srv.app.store.open_connections
