@@ -24,6 +24,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
 
+MAX_REMOTE_PILLS = 5  # 머리줄의 원격 워커 필 상한(M5b-4). down 은 세지 않는다
 DASH = "—"
 _GLYPH = {
     RUNNING: "▶",
@@ -252,11 +253,22 @@ def render(
         wtxt = f"lanes {busy}/{lanes} busy"
     if down:
         wtxt += f" · DOWN: lane {', '.join(str(w['lane']) for w in down)}"
+    # 원격 필은 5개까지, 넘치면 `+N workers` 로 접는다. down 은 접지 않는다(항상 보여야 한다)
+    shown_live = 0
+    folded = 0
     for w in remote:
+        is_down = w.get("state") == "down"
+        if not is_down:
+            if shown_live >= MAX_REMOTE_PILLS:
+                folded += 1
+                continue
+            shown_live += 1
         label = w.get("display_name") or f"{w.get('worker')}/{w.get('lane')}"
         wtxt += f" · {label} {w.get('state') or DASH}"
         if w.get("job_id"):
             wtxt += f" #{w['job_id']}"
+    if folded:
+        wtxt += f" · +{folded} workers"
     if server.get("paused"):
         wtxt += f" · PAUSED by {server['paused'].get('by')}"
     cache = server.get("snapshot_cache")
@@ -307,8 +319,8 @@ def render_pool(
     if queue is None:
         out.append(f"queue — unavailable: {pool.get('queue_error') or 'unknown error'}{label}")
     elif not queue:
-        if remote and no_workers:
-            out.append(f"queue — empty{label}")
+        if remote:  # 원격 풀 헤더는 언제나 풀 이름을 단다(M5b-4). 정지는 뒤에 붙인다
+            out.append(f"queue — empty{label}{' · paused' if server.get('paused') else ''}")
         elif server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
             out.append("queue — empty but paused/no worker — nothing will start")
         else:

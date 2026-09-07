@@ -219,6 +219,7 @@ def test_status_is_json_serializable_with_expected_shape():
         "since",
         "worker",  # M5b-2 추가 키
         "display_name",
+        "pool",  # M5b-4
     }
     assert len(back["pools"]) == 1
     pool = back["pools"][0]

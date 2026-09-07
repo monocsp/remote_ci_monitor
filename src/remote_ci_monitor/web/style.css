@@ -164,6 +164,7 @@ td.elapsed { font-family: var(--mono); white-space: nowrap; }
 
 /* ── 호스트 (항목 16 · 19) ── */
 .hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 12px 22px; align-items: start; }
+.hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
 .hostcard.dim .meter { opacity: 0.55; }
 .hostcard .hn { font-family: var(--mono); }
 .hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }

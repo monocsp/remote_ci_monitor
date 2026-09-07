@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import sys
 import tarfile
 import time
@@ -820,6 +821,51 @@ def python_row() -> tuple[str, bool, str]:
     return ("python", ok, detail)
 
 
+def _dir_writable(d: Path) -> bool:
+    """`rcm check`·`rcm worker --check` 의 data dir 행 — 있으면 그 디렉터리, 없으면 **가장 가까운
+    있는 조상**이 쓰기 가능한가(서버·워커가 `mkdir -p` 로 만든다). 부모만 보면 새 머신의 기본
+    `~/.local/share/rcm-worker` 는 `~/.local/share` 가 없어 거짓 FAIL 이 난다."""
+    p = d
+    while not p.exists():
+        if p.parent == p:
+            return False
+        p = p.parent
+    return p.is_dir() and os.access(p, os.W_OK)
+
+
+def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
+    """`rcm check` 의 pools 행(M5b-4): `default (1 lane) · linux (build-02/1 idle · build-03 down)`.
+    어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`)."""
+    server = doc.get("server") or {}
+    lanes = server.get("lanes") or 0
+    parts = [f"default ({lanes} lane{'s' if lanes != 1 else ''})"]
+    by_pool: dict[str, list[dict[str, Any]]] = {}
+    for w in server.get("workers") or []:
+        if w.get("worker"):
+            by_pool.setdefault(w.get("pool") or "default", []).append(w)
+    for name in sorted(by_pool):
+        pills: list[str] = []
+        for w in sorted(by_pool[name], key=lambda x: (str(x.get("worker")), x.get("lane") or 0)):
+            if w.get("state") == "down":
+                pill = f"{w['worker']} down"
+                if pill not in pills:
+                    pills.append(pill)
+                continue
+            pill = f"{w.get('display_name') or w['worker']}/{w.get('lane')} {w.get('state')}"
+            if w.get("display_name"):
+                pill = f"{w['display_name']} {w.get('state')}"
+            if w.get("job_id"):
+                pill += f" #{w['job_id']}"
+            pills.append(pill)
+        parts.append(f"{name} ({' · '.join(pills)})")
+    dead: list[str] = []
+    try:
+        dead = list(client.health().get("pools_without_workers") or [])
+    except ClientError:
+        dead = [n for n, ws in by_pool.items() if all(w.get("state") == "down" for w in ws)]
+    return ("pools", not dead, " · ".join(parts))
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     rows: list[tuple[str, bool, str]] = [python_row()]
     client = None
@@ -853,6 +899,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             doc = client.status()
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"
             rows.append(("presets", bool(doc.get("presets")), names))
+            rows.append(_pools_row(doc, client))
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
         except ClientError as e:
             rows.append(("presets", False, e.message))
@@ -860,7 +907,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         cfg = load_server_config(getattr(args, "config", None), check_tools=False)
         if cfg.path is not None:
             d = cfg.data_dir
-            writable = os.access(d, os.W_OK) if d.exists() else os.access(d.parent, os.W_OK)
+            writable = _dir_writable(d)
             rows.append(
                 ("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})")
             )
@@ -869,6 +916,133 @@ def cmd_check(args: argparse.Namespace) -> int:
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
     except ConfigError as e:
         rows.append(("server config", False, str(e)))
+    ok_all = all(ok for _, ok, _ in rows)
+    for name, ok, detail in rows:
+        print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
+    return 0 if ok_all else 1
+
+
+def _worker_config(args: argparse.Namespace):
+    from remote_ci_monitor.config import load_worker_config
+
+    overrides = {
+        "server": getattr(args, "server", None),
+        "pool": getattr(args, "pool", None),
+        "lanes": getattr(args, "lanes", None),
+        "name": getattr(args, "name", None),
+        "data_dir": getattr(args, "data", None),
+    }
+    return load_worker_config(getattr(args, "config", None), overrides=overrides)
+
+
+def cmd_worker(args: argparse.Namespace) -> int:
+    """`rcm worker` — 원격 워커 프로세스(M5b-3). 토큰은 RCM_WORKER_TOKEN 또는 worker.toml 로만."""
+    from remote_ci_monitor.client import WorkerClient
+    from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
+
+    try:
+        cfg = _worker_config(args)
+    except ConfigError as e:
+        return _usage(str(e))
+    if not cfg.token:
+        return _usage(
+            "no worker token: set RCM_WORKER_TOKEN (create one on the server with "
+            "`rcm token add NAME --worker`)"
+        )
+    client = WorkerClient(cfg.server, cfg.token)
+    if getattr(args, "check", False):
+        return _worker_check(cfg, client)
+    worker = RemoteWorker(cfg, client=client, once=bool(getattr(args, "once", False)))
+
+    def _stop(signum: int, _frame: Any) -> None:
+        if worker.stopping.is_set():
+            # 두 번째 신호는 즉시 — SystemExit 은 `run()` 의 finally 가 레인 join(grace+10초)으로
+            # 붙잡고, 레인 스레드는 daemon 이 아니라 인터프리터 종료도 기다린다
+            _info(f"signal {signum} again: exiting now")
+            sys.stderr.flush()
+            os._exit(1)
+        _info(f"signal {signum}: stopping — running jobs are reported as lost")
+        worker.stop()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        return worker.run()
+    except WorkerExit as e:
+        if e.message:
+            _err(e.message)
+        return e.code
+
+
+def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
+    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--exit-code", url, "HEAD"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired:
+        return f"unreachable: timed out after {int(timeout)}s"
+    except OSError as e:
+        return f"cannot run git: {type(e).__name__}"
+    if proc.returncode == 0:
+        return None
+    lines = [ln.strip() for ln in proc.stderr.decode("utf-8", errors="replace").splitlines()]
+    lines = [ln for ln in lines if ln]
+    # git 은 사유를 첫 줄(`fatal: '…' does not appear to be a git repository` · `ssh: …`)에 두고
+    # 마지막 줄은 일반 안내문(`and the repository exists.`)이다 — 첫 줄을 쓰고 경로·자격은 지운다
+    reason = lines[0] if lines else f"exit {proc.returncode}"
+    reason = re.sub(r"^(fatal|error|warning):\s*", "", reason)
+    reason = re.sub(r"://[^/\s@]+@", "://<redacted>@", reason)
+    reason = re.sub(r"/[^\s'\"]+", "<path>", reason)
+    return "unreachable: " + reason[:80]
+
+
+def _worker_check(cfg: Any, client: Any) -> int:
+    """`rcm worker --check` — 서버 · 토큰(kind worker) · 풀 · repos 를 표로."""
+    from remote_ci_monitor.client import ClientError
+
+    rows: list[tuple[str, bool, str]] = [python_row()]
+    try:
+        h = client.health()
+        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}"))
+    except ClientError as e:
+        rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
+    try:
+        me = client.whoami()
+        kind = me.get("kind") or ("admin" if me.get("admin") else "client")
+        ok = kind == "worker"
+        rows.append(
+            (
+                "token",
+                ok,
+                f"{me.get('name')} ({kind})"
+                + ("" if ok else " — worker token required: rcm token add NAME --worker"),
+            )
+        )
+    except ClientError as e:
+        rows.append(("token", False, e.message if e.status else f"cannot reach {client.server}"))
+    rows.append(("pool", True, f"{cfg.pool} · lanes {cfg.lanes}"))
+    if cfg.repos:
+        git = shutil.which("git")
+        rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+        details: list[str] = []
+        all_ok = git is not None
+        for r in cfg.repos:
+            problem = _ls_remote_problem(r.url) if git else "git missing"
+            all_ok = all_ok and problem is None
+            details.append(f"{r.name} ({'ok' if problem is None else problem})")
+        rows.append(("repos", all_ok, " · ".join(details)))
+    else:
+        rows.append(("repos", True, "none (git_ref presets cannot run on this worker)"))
+    d = cfg.data_path
+    writable = _dir_writable(d)
+    rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
     ok_all = all(ok for _, ok, _ in rows)
     for name, ok, detail in rows:
         print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
@@ -1068,6 +1242,25 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = tsub.add_parser("revoke", help="revoke a token")
     revoke.add_argument("name")
     token.set_defaults(func=cmd_token)
+
+    worker = sub.add_parser(
+        "worker", help="run a remote worker for a pool (token via RCM_WORKER_TOKEN)"
+    )
+    worker.add_argument("--server", help="server URL (or `server` in worker.toml)")
+    worker.add_argument(
+        "--pool", help="worker pool to serve (default: worker.toml pool or 'default')"
+    )
+    worker.add_argument("--lanes", type=int, help="parallel jobs on this machine (1-64)")
+    worker.add_argument("--name", help="display name for the host sample (default: hostname)")
+    worker.add_argument("--config", help="worker.toml path (repos, host sampler, data_dir)")
+    worker.add_argument("--data", help="worker data dir (workspaces, logs)")
+    worker.add_argument(
+        "--check", action="store_true", help="verify server, token kind, pool and repos, then exit"
+    )
+    worker.add_argument(
+        "--once", action="store_true", help="run at most one job, then exit (tests, cron)"
+    )
+    worker.set_defaults(func=cmd_worker)
 
     init = sub.add_parser("init", help="write a starter config file (server or client)")
     isub = init.add_subparsers(dest="init_kind", required=True)

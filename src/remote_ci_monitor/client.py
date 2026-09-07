@@ -67,6 +67,118 @@ class ClientError(Exception):
         self.body = body or {}
 
 
+class WorkerClient:
+    """원격 워커가 서버에 말하는 쪽(M5b-3) — `/worker/*` 만. 재시도는 없다(정책은 워커 루프가).
+
+    `Client` 와 같은 `_request` 규칙: Bearer 토큰 · JSON 오류 본문의 `error` → `ClientError`.
+    """
+
+    def __init__(self, server: str, token: str, *, timeout: float = 15.0):
+        self._inner = Client(server, token, timeout=timeout)
+        self.server = self._inner.server
+        self.token = token
+        self.timeout = timeout
+
+    def _post(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> Any:
+        status, _, raw = self._inner._request("POST", path, json_body=body, timeout=timeout)
+        if status == 204 or not raw:
+            return None
+        return json.loads(raw)
+
+    def register(
+        self, *, pool: str, lanes: int, host_name: str | None, version: str
+    ) -> dict[str, Any]:
+        body = {"pool": pool, "lanes": lanes, "host_name": host_name, "version": version}
+        return self._post("/worker/register", body)
+
+    def claim(self, lane: int, wait_seconds: int = 0) -> dict[str, Any] | None:
+        """잡이 있으면 claim 응답, 없으면(204) None. long-poll 이라 타임아웃을 넉넉히 둔다."""
+        return self._post(
+            "/worker/claim",
+            {"lane": lane, "wait_seconds": wait_seconds},
+            timeout=self.timeout + wait_seconds + 5,
+        )
+
+    def heartbeat(
+        self, jobs: list[int], host_sample: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"jobs": list(jobs)}
+        if host_sample is not None:
+            body["host_sample"] = host_sample
+        return self._post("/worker/heartbeat", body) or {}
+
+    def download_tree(self, job_id: int, dest: Path) -> int:
+        """`GET /worker/jobs/{id}/tree` 를 `dest` 에 흘려 받는다(`.part` → 교체). 받은 바이트 수.
+        `Content-Length` 와 다르면 `ClientError`(잘린 다운로드로 자재화하지 않는다)."""
+        url = self.server + f"/worker/jobs/{job_id}/tree"
+        headers = {
+            "User-Agent": f"rcm/{__version__}",
+            "Accept": "application/gzip",
+            "Authorization": f"Bearer {self.token}",
+        }
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        received = 0
+        try:
+            with urllib.request.urlopen(req, timeout=max(self.timeout, 60.0)) as resp:
+                expected_raw = resp.headers.get("Content-Length")
+                expected = int(expected_raw) if expected_raw else None
+                with part.open("wb") as fh:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        received += len(chunk)
+        except urllib.error.HTTPError as e:
+            part.unlink(missing_ok=True)
+            payload = e.read()
+            try:
+                parsed = json.loads(payload) if payload else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            msg = parsed.get("error") if isinstance(parsed, dict) else None
+            raise ClientError(e.code, msg or f"HTTP {e.code}") from e
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            part.unlink(missing_ok=True)
+            reason = getattr(e, "reason", None) or e
+            raise ClientError(0, f"cannot reach {self.server}: {reason}") from e
+        if expected is not None and received != expected:
+            part.unlink(missing_ok=True)
+            raise ClientError(0, f"snapshot download incomplete: {received} of {expected} bytes")
+        part.replace(dest)
+        return received
+
+    def phase(self, job_id: int, phase: str) -> dict[str, Any]:
+        return self._post(f"/worker/jobs/{job_id}/phase", {"phase": phase}) or {}
+
+    def log(self, job_id: int, data: bytes) -> dict[str, Any]:
+        status, _, raw = self._inner._request(
+            "POST",
+            f"/worker/jobs/{job_id}/log",
+            data=data,
+            content_length=len(data),
+            content_type="application/octet-stream",
+            timeout=max(self.timeout, 60.0),
+        )
+        return json.loads(raw) if raw else {}
+
+    def finish(
+        self, job_id: int, outcome: str, exit_code: int | None, summary: str | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
+        if summary is not None:
+            body["summary"] = summary
+        return self._post(f"/worker/jobs/{job_id}/finish", body) or {}
+
+    def health(self) -> dict[str, Any]:
+        return self._inner.health()
+
+    def whoami(self) -> dict[str, Any]:
+        return self._inner.whoami()
+
+
 # ── 스냅샷 ───────────────────────────────────────────────────────────────────
 
 

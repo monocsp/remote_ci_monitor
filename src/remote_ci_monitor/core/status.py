@@ -261,6 +261,7 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
                 "since": iso(w.since),
                 "worker": w.worker,  # 원격 워커 이름 · 로컬 레인은 null (M5b-2)
                 "display_name": w.display_name,
+                "pool": w.pool,
             }
             for w in s.workers
         ],
