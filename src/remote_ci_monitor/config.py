@@ -19,6 +19,7 @@ from typing import Any
 
 from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
+    DEFAULT_POOL,
     INPUT_TYPES,
     PRIORITY_NAMES,
     SOURCE_MODES,
@@ -170,6 +171,34 @@ class ClientConfig:
     label: str = ""
     token_env: str = "RCM_TOKEN"  # 토큰을 찾은/찾을 환경변수 이름 — 안내 문구에 쓴다
     path: Path | None = None
+
+
+@dataclass
+class WorkerConfig:
+    """`rcm worker` 설정(M5b-3). 토큰은 env `RCM_WORKER_TOKEN` 또는 파일 `token` 으로만."""
+
+    server: str = ""
+    token: str = ""
+    pool: str = DEFAULT_POOL
+    lanes: int = 1
+    name: str = ""  # 표시용. 서버가 아는 이름은 토큰 이름이다
+    data_dir: str = "~/.local/share/rcm-worker"
+    grace_seconds: int = 10
+    keep_workspace_on_failure: bool = True
+    git_fetch_timeout_seconds: int = 600
+    host: HostSection = field(default_factory=HostSection)
+    repos: tuple[RepoConfig, ...] = ()
+    path: Path | None = None
+
+    @property
+    def data_path(self) -> Path:
+        return Path(self.data_dir).expanduser()
+
+    def repo(self, name: str | None) -> RepoConfig | None:
+        for r in self.repos:
+            if r.name == name:
+                return r
+        return None
 
 
 # ── 도우미 ───────────────────────────────────────────────────────────────────
@@ -749,4 +778,95 @@ def load_client_config(
     if label:
         cfg.label = label
     cfg.server = cfg.server.rstrip("/")
+    return cfg
+
+
+# ── 워커 설정 (M5b-3) ────────────────────────────────────────────────────────
+
+_WORKER_KEYS = {
+    "server",
+    "token",
+    "pool",
+    "lanes",
+    "name",
+    "data_dir",
+    "grace_seconds",
+    "keep_workspace_on_failure",
+    "git_fetch_timeout_seconds",
+}
+_WORKER_OVERRIDE_KEYS = {"server", "pool", "lanes", "name", "data_dir"}
+
+
+def _parse_repos(raw: Any, where: str) -> tuple[RepoConfig, ...]:
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}: [[repos]] must be an array of tables")
+    out: list[RepoConfig] = []
+    for r in raw:
+        if not isinstance(r, dict) or set(r) != {"name", "url"}:
+            raise ConfigError(f"{where}: each [[repos]] needs exactly 'name' and 'url'")
+        if not isinstance(r["name"], str) or not isinstance(r["url"], str):
+            raise ConfigError(f"{where}: [[repos]] name and url must be strings")
+        out.append(RepoConfig(name=r["name"], url=r["url"]))
+    return tuple(out)
+
+
+def load_worker_config(
+    path: str | os.PathLike[str] | None = None,
+    *,
+    overrides: dict[str, Any] | None = None,
+    environ: dict[str, str] | None = None,
+) -> WorkerConfig:
+    """`worker.toml`(선택) + env `RCM_WORKER_TOKEN` + 플래그(`overrides`, 파일보다 우선).
+
+    토큰은 플래그로 줄 수 없다(`overrides` 에 `token` 이 있으면 `ConfigError` — 프로세스 목록에
+    노출된다). `server` 는 꼭 있어야 한다.
+    """
+    env = os.environ if environ is None else environ
+    cfg = WorkerConfig()
+    if path is not None:
+        found = Path(path).expanduser()
+        raw = _read_toml(found)
+        unknown = sorted(set(raw) - _WORKER_KEYS - {"host", "repos"})
+        if unknown:
+            raise ConfigError(f"{found}: unknown key(s): {', '.join(unknown)}")
+        scalars = {k: v for k, v in raw.items() if k in _WORKER_KEYS}
+        _apply_section(cfg, "worker", scalars, str(found))
+        if cfg.token:
+            _check_private(found)
+        host = raw.get("host", {})
+        if not isinstance(host, dict):
+            raise ConfigError(f"{found}: [host] must be a table")
+        _apply_section(cfg.host, "host", host, str(found))
+        cfg.repos = _parse_repos(raw.get("repos", []), str(found))
+        cfg.path = found
+    if env.get("RCM_WORKER_TOKEN"):
+        cfg.token = env["RCM_WORKER_TOKEN"]
+    for key, value in (overrides or {}).items():
+        if value is None:
+            continue
+        if key == "token":
+            raise ConfigError("the worker token cannot be passed as a flag — use RCM_WORKER_TOKEN")
+        if key not in _WORKER_OVERRIDE_KEYS:
+            raise ConfigError(f"unknown worker override '{key}'")
+        setattr(
+            cfg, key, _coerce_scalar(f"--{key.replace('_', '-')}", value, type(getattr(cfg, key)))
+        )
+    cfg.server = cfg.server.rstrip("/")
+    if not cfg.server:
+        raise ConfigError('worker needs a server: --server URL or `server = "…"` in worker.toml')
+    if not _NAME_RE.match(cfg.pool):
+        raise ConfigError("worker pool must be a name (letters, digits, . _ -)")
+    if not (1 <= cfg.lanes <= 64):
+        raise ConfigError("worker lanes must be between 1 and 64")
+    if cfg.grace_seconds < 1:
+        raise ConfigError("worker grace_seconds must be >= 1")
+    if cfg.git_fetch_timeout_seconds < 1:
+        raise ConfigError("worker git_fetch_timeout_seconds must be >= 1")
+    h = cfg.host
+    if h.interval_seconds < 2:
+        raise ConfigError("[host] interval_seconds must be >= 2")
+    if h.gpu not in ("auto", "off"):
+        raise ConfigError("[host] gpu must be 'auto' or 'off'")
+    if h.history_samples < 1:
+        raise ConfigError("[host] history_samples must be >= 1")
     return cfg

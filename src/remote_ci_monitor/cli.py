@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import sys
 import tarfile
 import time
@@ -875,6 +876,95 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0 if ok_all else 1
 
 
+def _worker_config(args: argparse.Namespace):
+    from remote_ci_monitor.config import load_worker_config
+
+    overrides = {
+        "server": getattr(args, "server", None),
+        "pool": getattr(args, "pool", None),
+        "lanes": getattr(args, "lanes", None),
+        "name": getattr(args, "name", None),
+        "data_dir": getattr(args, "data", None),
+    }
+    return load_worker_config(getattr(args, "config", None), overrides=overrides)
+
+
+def cmd_worker(args: argparse.Namespace) -> int:
+    """`rcm worker` — 원격 워커 프로세스(M5b-3). 토큰은 RCM_WORKER_TOKEN 또는 worker.toml 로만."""
+    from remote_ci_monitor.client import WorkerClient
+    from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
+
+    try:
+        cfg = _worker_config(args)
+    except ConfigError as e:
+        return _usage(str(e))
+    if not cfg.token:
+        return _usage(
+            "no worker token: set RCM_WORKER_TOKEN (create one on the server with "
+            "`rcm token add NAME --worker`)"
+        )
+    client = WorkerClient(cfg.server, cfg.token)
+    if getattr(args, "check", False):
+        return _worker_check(cfg, client)
+    worker = RemoteWorker(cfg, client=client, once=bool(getattr(args, "once", False)))
+
+    def _stop(signum: int, _frame: Any) -> None:
+        if worker.stopping.is_set():
+            _info(f"signal {signum} again: exiting now")
+            raise SystemExit(1)
+        _info(f"signal {signum}: stopping — running jobs are reported as lost")
+        worker.stop()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        return worker.run()
+    except WorkerExit as e:
+        if e.message:
+            _err(e.message)
+        return e.code
+
+
+def _worker_check(cfg: Any, client: Any) -> int:
+    """`rcm worker --check` — 서버 · 토큰(kind worker) · 풀 · repos 를 표로."""
+    from remote_ci_monitor.client import ClientError
+
+    rows: list[tuple[str, bool, str]] = [python_row()]
+    try:
+        h = client.health()
+        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}"))
+    except ClientError as e:
+        rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
+    try:
+        me = client.whoami()
+        kind = me.get("kind") or ("admin" if me.get("admin") else "client")
+        ok = kind == "worker"
+        rows.append(
+            (
+                "token",
+                ok,
+                f"{me.get('name')} ({kind})"
+                + ("" if ok else " — worker token required: rcm token add NAME --worker"),
+            )
+        )
+    except ClientError as e:
+        rows.append(("token", False, e.message if e.status else f"cannot reach {client.server}"))
+    rows.append(("pool", True, f"{cfg.pool} · lanes {cfg.lanes}"))
+    if cfg.repos:
+        git = shutil.which("git")
+        rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+        rows.append(("repos", True, ", ".join(r.name for r in cfg.repos)))
+    else:
+        rows.append(("repos", True, "none (git_ref presets cannot run on this worker)"))
+    d = cfg.data_path
+    writable = os.access(d, os.W_OK) if d.exists() else os.access(d.parent, os.W_OK)
+    rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
+    ok_all = all(ok for _, ok, _ in rows)
+    for name, ok, detail in rows:
+        print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
+    return 0 if ok_all else 1
+
+
 def cmd_token(args: argparse.Namespace) -> int:
     from remote_ci_monitor.store import Store, StoreError
 
@@ -1068,6 +1158,25 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = tsub.add_parser("revoke", help="revoke a token")
     revoke.add_argument("name")
     token.set_defaults(func=cmd_token)
+
+    worker = sub.add_parser(
+        "worker", help="run a remote worker for a pool (token via RCM_WORKER_TOKEN)"
+    )
+    worker.add_argument("--server", help="server URL (or `server` in worker.toml)")
+    worker.add_argument(
+        "--pool", help="worker pool to serve (default: worker.toml pool or 'default')"
+    )
+    worker.add_argument("--lanes", type=int, help="parallel jobs on this machine (1-64)")
+    worker.add_argument("--name", help="display name for the host sample (default: hostname)")
+    worker.add_argument("--config", help="worker.toml path (repos, host sampler, data_dir)")
+    worker.add_argument("--data", help="worker data dir (workspaces, logs)")
+    worker.add_argument(
+        "--check", action="store_true", help="verify server, token kind, pool and repos, then exit"
+    )
+    worker.add_argument(
+        "--once", action="store_true", help="run at most one job, then exit (tests, cron)"
+    )
+    worker.set_defaults(func=cmd_worker)
 
     init = sub.add_parser("init", help="write a starter config file (server or client)")
     isub = init.add_subparsers(dest="init_kind", required=True)
