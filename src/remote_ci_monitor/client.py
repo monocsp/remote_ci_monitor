@@ -325,6 +325,14 @@ def make_snapshot(
     is_git = candidates is not None
     if candidates is None:
         candidates = _walk_candidates(root)
+    # `git ls-files --others` 는 안에 자기 `.git` 이 있는 디렉터리(중첩 checkout · worktree)를
+    # `dir/` 로 준다 — 파일이 아니라 열 수 없고 그 안은 이 트리의 일부도 아니다(실배치에서
+    # `snapshot failed: Is a directory` 로 발견). 빼고 이름을 말한다.
+    nested = [c[:-1] for c in candidates if c.endswith("/")]
+    candidates = [c for c in candidates if not c.endswith("/")]
+    if nested and progress:
+        for rel in nested[:5]:
+            progress(f"snapshot: skipping nested checkout {rel}/ (its own .git)")
     files = select_files(candidates, rules=rules, present=lambda p: os.path.lexists(root / p))
     files = [rel for rel in files if _link_stays_inside(root, rel, progress)]
     if progress:
