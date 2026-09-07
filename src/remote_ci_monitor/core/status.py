@@ -67,6 +67,8 @@ def source_json(s: Source) -> dict[str, Any]:
         "bytes": s.bytes,
         "received_bytes": s.received_bytes,
         "last_received_at": iso(s.last_received_at),
+        "uploaded_bytes": s.uploaded_bytes,
+        "cached_bytes": s.cached_bytes,
     }
 
 
@@ -139,6 +141,8 @@ def queue_row_json(
     return {
         "id": job.id,
         "position": row.position,
+        "priority": job.priority,
+        "pool": job.pool,
         "preset": job.preset,
         "key": job.key,
         "inputs": dict(job.inputs),
@@ -184,6 +188,7 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
     job_seconds = (finished - started).total_seconds() if started and finished else None
     waited = (started - job.created_at).total_seconds() if started else None
     return {
+        "pool": job.pool,
         "id": job.id,
         "preset": job.preset,
         "key": job.key,
@@ -213,6 +218,9 @@ def preset_json(p: Preset) -> dict[str, Any]:
         "description": p.description,
         "source_modes": list(p.source_modes),
         "repo": p.repo or None,
+        "priority": p.priority,
+        "pool": p.pool,
+        "pools": list(p.pools),
         "concurrency_group": p.concurrency_group,
         "expected_seconds": p.expected_seconds,
         "timeout_seconds": p.timeout_seconds,
@@ -238,6 +246,12 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
         "paused": {"by": s.paused.by, "at": iso(s.paused.at)} if s.paused else None,
         "last_error": s.last_error,
         "sse_connections": s.sse_connections,
+        "snapshot_cache": (
+            {"blobs": s.snapshot_cache_blobs, "bytes": s.snapshot_cache_bytes}
+            if s.snapshot_cache_blobs is not None
+            else None
+        ),
+        "notify_failures": s.notify_failures,
         "workers": [
             {
                 "lane": w.lane,
@@ -245,6 +259,9 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
                 "job_id": w.job_id,
                 "error": w.error,
                 "since": iso(w.since),
+                "worker": w.worker,  # 원격 워커 이름 · 로컬 레인은 null (M5b-2)
+                "display_name": w.display_name,
+                "pool": w.pool,
             }
             for w in s.workers
         ],

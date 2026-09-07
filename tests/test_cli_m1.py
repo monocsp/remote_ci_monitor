@@ -395,3 +395,35 @@ def test_check_names_the_configured_token_env(srv, env, capsys, tmp_path):
     assert code == 1 and "ok   server" in out, out + err
     assert "FAIL  token" in out and "MY_TOK" in out, out
     assert "no server configured" not in err  # 실패 행으로만 말한다(같은 말을 두 번 하지 않는다)
+
+
+def test_read_commands_say_cannot_reach_when_server_is_down(monkeypatch, capsys, tmp_path):
+    """사용자 검사 U2.9: 서버가 꺼져 있으면 조용한 3 이 아니라 「cannot reach <url>」 을 찍는다."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("RCM_SERVER", "http://127.0.0.1:9")
+    monkeypatch.delenv("RCM_TOKEN", raising=False)
+    for argv in (["jobs"], ["eta", "ok"], ["presets"]):
+        code, _, err = run(capsys, argv)
+        assert code == 3, argv
+        assert "cannot reach http://127.0.0.1:9" in err, (argv, err)
+
+
+def test_run_uses_label_from_config_or_env(env, capsys, tmp_path, monkeypatch):
+    """수용 검사 J2: client.toml 의 label / RCM_LABEL 이 요청자 라벨이 된다(--by 가 더 우선)."""
+    srv = Server(tmp_path / "srv", workers=False)
+    try:
+        env(srv, "alice")
+        monkeypatch.setenv("RCM_LABEL", "alice@from-env")
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "f.txt").write_text("x")
+        monkeypatch.chdir(proj)
+        code, out, _ = run(capsys, ["run", "ok", "--no-wait"])
+        assert code == 0, out
+        jid = last_json(out)["job_id"]
+        assert srv.req("GET", f"/jobs/{jid}")[1]["requester"]["label"] == "alice@from-env"
+        code, out, _ = run(capsys, ["run", "ok", "--no-wait", "--no-join", "--by", "me@laptop"])
+        jid = last_json(out)["job_id"]
+        assert srv.req("GET", f"/jobs/{jid}")[1]["requester"]["label"] == "me@laptop"
+    finally:
+        srv.close()

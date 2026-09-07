@@ -125,16 +125,17 @@
   function stateWord(state) { return state === "timed_out" ? "timed out" : (state || "unknown"); }
   function stateGlyph(state) { return GLYPH[state] || "·"; }
 
+  // 로컬 레인만 센다 — server.lanes 가 로컬 수라 원격(worker 키) 항목을 섞으면 "3/2" 가 된다 (M5b-2)
   function busyCount(status) {
     var w = status && status.server && status.server.workers;
     if (!Array.isArray(w)) return null;
-    return w.filter(function (x) { return x.state === "busy"; }).length;
+    return w.filter(function (x) { return !x.worker && x.state === "busy"; }).length;
   }
   function laneCount(status) {
     var s = status && status.server;
     if (!s) return null;
     if (isNum(s.lanes)) return s.lanes;
-    return Array.isArray(s.workers) ? s.workers.length : null;
+    return Array.isArray(s.workers) ? s.workers.filter(function (x) { return !x.worker; }).length : null;
   }
   function secondsSince(iso, nowMs) {
     var t = parseIso(iso);
@@ -261,7 +262,65 @@
   }
 
   function pool0(status) { return status && Array.isArray(status.pools) && status.pools.length ? status.pools[0] : null; }
-  function queueOf(status) { var p = pool0(status); return p ? p.queue : undefined; }
+  function poolsOf(status) { return status && Array.isArray(status.pools) ? status.pools : []; }
+  // 모든 풀의 큐를 이어 붙인다. 어느 풀이든 queue 가 null(조회 실패)이면 undefined — unknown 이지 ok 가 아니다
+  function queueOf(status) {
+    var pools = poolsOf(status);
+    if (!pools.length) return undefined;
+    var all = [];
+    for (var i = 0; i < pools.length; i++) {
+      if (!Array.isArray(pools[i].queue)) return undefined;
+      all = all.concat(pools[i].queue);
+    }
+    return all;
+  }
+  // 모든 풀의 완료 잡을 끝난 시각 내림차순으로. 기본 풀 밖의 잡은 `_pool` 을 달아 Recent 가 칩을 그린다.
+  // 어느 풀이든 recent 가 null(조회 실패)이면 undefined — 「완료 잡 없음」이 아니라 unknown 이다
+  function recentOf(status) {
+    var pools = poolsOf(status);
+    if (!pools.length) return undefined;
+    var all = [];
+    for (var i = 0; i < pools.length; i++) {
+      var r = pools[i] && pools[i].recent;
+      if (!Array.isArray(r)) return undefined;
+      for (var j = 0; j < r.length; j++) all.push(i === 0 ? r[j] : Object.assign({}, r[j], { _pool: pools[i].name }));
+    }
+    all.sort(function (a, b) { return (Date.parse(b.finished_at) || 0) - (Date.parse(a.finished_at) || 0); });
+    return all;
+  }
+  // ── 풀 (M5b) ──
+  // Host 절의 카드 목록(M5b-4): 기본 풀의 표본이 먼저(제목 = 이름, 오늘 그대로), 그 뒤 다른 풀의
+  // 워커 표본(제목 `<이름> · pool <풀>`). 표본이 없거나 null 인 원격 풀은 카드를 만들지 않는다.
+  function hostCards(status) {
+    var pools = poolsOf(status);
+    var out = [];
+    pools.forEach(function (pl, i) {
+      if (!pl || !Array.isArray(pl.hosts)) return;
+      pl.hosts.forEach(function (h) {
+        if (!h) return;
+        out.push({ title: i === 0 ? (h.name || DASH) : (h.name || DASH) + " · pool " + (pl.name || DASH), pool: pl.name || "default", host: h });
+      });
+    });
+    return out;
+  }
+
+  function poolHeader(pool) {
+    if (!pool || pool.name === "default" || !pool.name) return "";
+    var noWorkers = isNum(pool.lanes) && pool.lanes === 0;
+    return "pool " + pool.name + (noWorkers ? " · no workers" : "");
+  }
+  function poolSummary(pools) {
+    if (!Array.isArray(pools)) return { running: null, waiting: null, pools: 0 };
+    var running = 0, waiting = 0;
+    for (var i = 0; i < pools.length; i++) {
+      var q = pools[i] && pools[i].queue;
+      if (!Array.isArray(q)) return { running: null, waiting: null, pools: pools.length };
+      for (var j = 0; j < q.length; j++) {
+        if (q[j].state === "running" || q[j].state === "cancelling") running++; else waiting++;
+      }
+    }
+    return { running: running, waiting: waiting, pools: pools.length };
+  }
 
   // ── 요약 (항목 23 · 24 · 25) ──
   function notMoving(status, me) {
@@ -370,9 +429,17 @@
     });
   }
 
+  // 원격 워커(M5b-2)의 표시 이름: 서버가 준 display_name, 없으면 `<worker>/<lane>`
+  function workerName(w) {
+    if (!w || !w.worker) return null;
+    return w.display_name || (w.worker + "/" + w.lane);
+  }
+
   function workerPills(server) {
     server = server || {};
-    var workers = Array.isArray(server.workers) ? server.workers : [];
+    var all = Array.isArray(server.workers) ? server.workers : [];
+    var workers = all.filter(function (w) { return !w.worker; });   // 로컬 레인은 오늘 그대로
+    var remote = all.filter(function (w) { return !!w.worker; });   // 원격은 이름 필로 뒤에
     var lanes = isNum(server.lanes) ? server.lanes : workers.length;
     var pills = [];
     if (lanes === 1 && workers.length === 1) {
@@ -385,6 +452,11 @@
         else pills.push({ text: "lane " + w.lane + " · " + (w.state || DASH), cls: w.state || "", jobId: null, lane: w.lane });
       });
     }
+    remote.forEach(function (w) {
+      var name = workerName(w);
+      var busy = w.state === "busy" && isNum(w.job_id);
+      pills.push({ text: name + " " + (w.state || DASH) + (busy ? " #" + w.job_id : ""), cls: w.state || "", jobId: busy ? w.job_id : null, lane: w.lane, worker: w.worker });
+    });
     if (server.paused) pills.push({ text: "paused", cls: "paused", jobId: null, lane: null });
     return pills;
   }
@@ -466,6 +538,20 @@
     if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
     return "'" + s.replace(/'/g, "'\\''") + "'";
   }
+  // ── 우선순위 칩 · 캐시 요약 (M5) — 우선순위는 이유가 아니다, 칩만 ──
+  function priorityChip(row) {
+    var p = row && row.priority;
+    if (typeof p !== "number" || p === 0) return "";
+    if (p > 0) return '<span class="chip prio high">high</span>';
+    return '<span class="chip prio low">low</span>';
+  }
+  function cacheText(server) {
+    var c = server && server.snapshot_cache;
+    if (!c || typeof c !== "object") return null;
+    var blobs = isNum(c.blobs) ? String(c.blobs) : DASH;
+    var mb = isNum(c.bytes) ? fmtBytes(c.bytes) : DASH;
+    return "cache " + blobs + " blobs · " + mb;
+  }
   function rerunCommand(job) {
     if (!job || !job.preset) return DASH;  // 빈 명령을 복사하게 두지 않는다
     var cmd = "rcm run " + job.preset;
@@ -543,9 +629,10 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
-    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, headerNote: headerNote, progressHead: progressHead,
+    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead,
     stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
-    sourceHtml: sourceHtml,
+    sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
+    poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
   };
@@ -775,11 +862,18 @@
       noteEl.hidden = false; noteEl.className = "banner warn";
       noteEl.innerHTML = "Queue paused by " + esc(server.paused.by || DASH) + " at " + esc(fmtClock(server.paused.at, tz(), now())) + " — running jobs finish, nothing new starts · <span class=\"mono\">rcm resume</span>";
     } else {
-      var downs = (server.workers || []).filter(function (w) { return w.state === "down"; });
+      var localWorkers = (server.workers || []).filter(function (w) { return !w.worker; });
+      var downs = localWorkers.filter(function (w) { return w.state === "down"; });
+      var remoteDown = (server.workers || []).filter(function (w) { return w.worker && w.state === "down"; });
       if (downs.length) {
-        var live = (server.workers || []).filter(function (w) { return w.state !== "down"; }).map(function (w) { return w.lane; });
+        var live = localWorkers.filter(function (w) { return w.state !== "down"; }).map(function (w) { return w.lane; });
         noteEl.hidden = false; noteEl.className = "banner bad";
         noteEl.textContent = "Worker on lane " + downs.map(function (w) { return w.lane; }).join(", ") + " stopped: " + (downs[0].error || "unknown error") + (live.length ? " · waiting jobs use lane " + live.join(", ") + " only" : " · nothing can start");
+      } else if (remoteDown.length) {
+        // 원격 워커(M5b-2)가 heartbeat 을 멈췄다 — 그 풀의 잡은 서버가 lost 로 남긴다
+        var names = []; remoteDown.forEach(function (w) { if (names.indexOf(w.worker) < 0) names.push(w.worker); });
+        noteEl.hidden = false; noteEl.className = "banner warn";
+        noteEl.textContent = "Worker " + names.join(", ") + " unreachable — no heartbeat · its running jobs are marked lost";
       } else {
         var stalled = notScheduledRow();
         if (stalled) { noteEl.hidden = false; noteEl.className = "banner warn"; noteEl.textContent = "Lane is idle but #" + stalled.id + " has not started for " + fmtDuration(stalled.estimate && stalled.estimate.waited_seconds) + " — check the server log"; }
@@ -872,8 +966,14 @@
       return;
     }
     var server = st.server || {};
+    var extra = !p.queue.length ? extraPoolsQueueHtml(st) : "";
+    if (extra) {
+      body.innerHTML = '<div class="empty">Queue is empty here — jobs wait in other pools.</div>' + extra;
+      return;
+    }
     if (!p.queue.length) {
-      var allDown = Array.isArray(server.workers) && server.workers.length && server.workers.every(function (w) { return w.state === "down"; });
+      var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
+      var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
       var presets = Array.isArray(st.presets) ? st.presets.map(function (x) { return x.name; }).join(" · ") : "";
       body.innerHTML = '<div class="empty">' + (server.paused || allDown ? "Queue is empty but paused — nothing will start." : "Queue is empty — <code>rcm run &lt;preset&gt;</code> starts immediately.") + (presets ? '<br><span class="sub">presets: ' + esc(presets) + "</span>" : "") + "</div>";
       return;
@@ -895,7 +995,27 @@
     rows.forEach(function (row) { html += queueRowHtml(row, st); });
     html += "</tbody></table></div>";
     if (hiddenCount) html += '<button type="button" class="more" data-more-queue>and ' + hiddenCount + " more ▾</button>";
+    html += extraPoolsQueueHtml(st);
     body.innerHTML = html;
+  }
+  // 기본 풀 밖의 풀(M5b): 풀 헤더 + 같은 표. 워커가 없으면 그 대기 행은 서버가 worker_down 으로 준다
+  function extraPoolsQueueHtml(st) {
+    var pools = poolsOf(st).slice(1);
+    var html = "";
+    var tzName = st.display_timezone || "local";
+    pools.forEach(function (p) {
+      var head = poolHeader(p);
+      if (p.queue === null || p.queue === undefined) {
+        html += '<div class="pool-h">' + esc(head) + '</div><div class="banner bad" role="alert" data-error="queue">Queue unavailable — ' + esc(p.queue_error || "unknown error") + "</div>";
+        return;
+      }
+      if (!p.queue.length) return;  // 잡 없는 풀은 자리를 차지하지 않는다
+      html += '<div class="pool-h" data-pool="' + esc(p.name || "") + '">' + esc(head) + " · " + p.queue.length + " job" + (p.queue.length === 1 ? "" : "s") + "</div>";
+      html += '<div class="qwrap"><table class="q"><thead><tr><th>Job</th><th>Key</th><th>Requester</th><th>Reason</th><th>Elapsed</th><th>ETA <span class="tzh">· ' + esc(tzName) + '</span></th><th class="source">Source</th></tr></thead><tbody>';
+      sortQueue(p.queue).forEach(function (row) { html += queueRowHtml(row, st); });
+      html += "</tbody></table></div>";
+    });
+    return html;
   }
   function queueRowHtml(row, st) {
     var est = row.estimate || {};
@@ -921,6 +1041,7 @@
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
     if (row.concurrency_group) chips += '<span class="chip">group ' + esc(row.concurrency_group) + "</span>";
+    chips += priorityChip(row);
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners : [];
     var requester = '<span title="token: ' + esc(req.name || "") + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>" + (mine && req.name === state.me ? '<span class="you">you</span>' : "") +
@@ -933,6 +1054,9 @@
     var reasonCell = r.cls === "blocked" ? '<span class="blocked">' + reasonHtml + "</span>" : r.cls === "stalled" ? '<span class="stalled">' + reasonHtml + "</span>" : r.cls === "stuck" ? '<span class="stuck">' + reasonHtml + "</span>" : '<span class="reason' + (r.actionable || busy ? " act" : "") + '">' + reasonHtml + "</span>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">will be cancelled by the server if it stays stalled</div>';
     if (row._cancelRequested) reasonCell += '<div class="sub">cancel requested…</div>';
+    // 대기 잡(펼침 없음)도 내 잡이면 취소할 수 있어야 한다 — 폰에서 유일한 취소 경로다(사용자 검사 U3.6)
+    var canActRow = !!state.token && !state.tokenBad && (mine || state.me === null);
+    if (!busy && canActRow && !row._cancelRequested) reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">Cancel</button></div>';
     var el = elapsedText(row, now());
     var elapsedCell = busy && isNum(est.elapsed_seconds)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
@@ -1026,8 +1150,12 @@
     var body = $("[data-host-body]");
     if (!p) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
     if (p.hosts === null || p.hosts === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="hosts">Host unavailable — ' + esc(p.hosts_error || "unknown error") + "</div>"; return; }
-    if (!p.hosts.length) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
-    var h = p.hosts[0];
+    var cards = hostCards(state.status);
+    if (!cards.length) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
+    body.innerHTML = cards.map(function (c) { return hostCardHtml(c.host, c.title); }).join("");
+  }
+
+  function hostCardHtml(h, title) {
     var age = secondsSince(h.sampled_at, now());
     var stale = h.stale || (isNum(age) && isNum(h.interval_seconds) && age > 3 * h.interval_seconds);
     var cpu = h.cpu || {}, mem = h.memory || {}, gpu = h.gpu;
@@ -1040,13 +1168,13 @@
         '<div class="bar"><i style="width:' + (known ? Math.max(0, Math.min(100, pct - (pct2 || 0))) : 0) + '%"></i>' + (pct2 ? '<i class="b" style="width:' + Math.min(100, pct2) + '%"></i>' : "") + "</div>" +
         (spark ? '<div class="spark">' + spark + "<span>5 min</span></div>" : "") + "</div>";
     };
-    var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">stale ' + fmtDuration(age) + "</span> · " : "sampled <span data-tick=\"age\" data-from=\"" + esc(h.sampled_at || "") + "\">" + esc(fmtAgo(age)) + "</span> · ") + esc(h.os || DASH) + " · " + (isNum(h.cores) ? h.cores + " cores" : DASH) + " · load " + (Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH) + "</span></div>";
+    var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">stale ' + fmtDuration(age) + "</span> · " : "sampled <span data-tick=\"age\" data-from=\"" + esc(h.sampled_at || "") + "\">" + esc(fmtAgo(age)) + "</span> · ") + esc(h.os || DASH) + " · " + (isNum(h.cores) ? h.cores + " cores" : DASH) + " · load " + (Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH) + "</span></div>";
     html += meter("cpu", "CPU " + fmtPct(cpu.busy), isNum(cpu.user) && isNum(cpu.sys) ? "user " + Math.round(cpu.user) + " · sys " + Math.round(cpu.sys) : (stale ? "last known" : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
     html += meter("mem", "Memory " + fmtMemory(mem.used_bytes) + " / " + fmtMemory(mem.total_bytes), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · comp " + fmtMemory(mem.compressed_bytes) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
     if (gpu) html += meter("gpu", "GPU " + fmtPct(gpu.util_pct) + " busy", isNum(gpu.mem_used_bytes) ? fmtMemory(gpu.mem_used_bytes) + " in use" : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
     else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>GPU — ' + esc(h.gpu_note || "unavailable") + "</span><span></span></div></div>";
     if (Array.isArray(h.top) && h.top.length) html += '<div class="top">top: ' + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
-    body.innerHTML = html + "</div>";
+    return html + "</div>";
   }
 
   // ── 렌더: 최근 (항목 14 · 15 · 32) ──
@@ -1055,9 +1183,13 @@
     var body = $("[data-recent-body]");
     var head = $("[data-recent-header]");
     if (!p) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
-    if (p.recent === null || p.recent === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">Recent unavailable — ' + esc(p.recent_error || "unknown error") + "</div>"; head.textContent = ""; renderEstimates(p); return; }
-    if (!p.recent.length) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
-    var all = p.recent;
+    // 모든 풀의 완료 잡을 모은 뒤에 「없음」을 판단한다 — 기본 풀이 비어도 다른 풀의 완료 잡은 보여야 한다
+    var all = recentOf(state.status);
+    if (all === undefined) {
+      var bad = poolsOf(state.status).filter(function (pl) { return !Array.isArray(pl.recent); })[0] || p;
+      body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">Recent unavailable — ' + esc(bad.recent_error || "unknown error") + "</div>"; head.textContent = ""; renderEstimates(p); return;
+    }
+    if (!all.length) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
     var shown = state.showAllRecent ? all : all.slice(0, 5);
     head.textContent = "last " + shown.length + " of " + all.length;
     var html = '<div class="recent">';
@@ -1067,7 +1199,7 @@
       var failedish = job.state === "failed" || job.state === "timed_out";
       html += '<div class="rrow' + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="pill ' + esc(l.cls) + '"><span aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + esc(job.key || DASH) + "</span>" +
+        '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">pool ' + esc(job._pool) + "</span>" : "") + "</span>" +
         '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
@@ -1078,7 +1210,7 @@
     });
     html += "</div>";
     if (all.length > 5) html += '<button type="button" class="more" data-more-recent>' + (state.showAllRecent ? "show fewer ▴" : "show " + (all.length - 5) + " more ▾") + "</button>";
-    body.innerHTML = html;
+    body.innerHTML = html;  // 원격 풀의 host 는 Host 절 카드로(M5b-4) — 여기엔 풀 헤더를 두지 않는다
     renderEstimates(p);
   }
   function renderEstimates(p) {
@@ -1232,7 +1364,7 @@
     var body;
     if (isJoiner) body = "You joined this job. You will leave the join list; the job keeps running for " + (req.label || req.name || "its requester") + ".";
     else if (row.state === "running") body = "SIGTERM now, SIGKILL after the grace period." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "") + " Cannot be undone.";
-    else body = "Removed from the queue. Run rcm run again to resubmit." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "");
+    else body = "Removed from the queue; sessions waiting on it get exit 2. Run rcm run again to resubmit." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "");
     $("[data-cancel-body]").textContent = body;
     $("[data-cancel-go]").textContent = isJoiner ? "Leave" : "Cancel job";
     var dlg = $("#cancel-dialog");

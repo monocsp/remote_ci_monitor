@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import sys
 import tarfile
 import time
@@ -29,6 +30,7 @@ from remote_ci_monitor.client import (
     ClientError,
     default_label,
     make_snapshot,
+    upload_cached,
     wait_for_job,
 )
 from remote_ci_monitor.config import (
@@ -61,10 +63,14 @@ def _ordinal(n: int) -> str:
 class _StatusLine:
     """TTY 면 한 줄을 덮어쓰고, 아니면 바뀔 때만 새 줄을 찍는다."""
 
-    def __init__(self, stream=sys.stderr):
-        self.stream = stream
-        self.tty = hasattr(stream, "isatty") and stream.isatty()
+    def __init__(self, stream=None, clock=time.monotonic):
+        self.stream = stream if stream is not None else sys.stderr  # 호출 시점의 stderr(캡처 포함)
+        # self.stream 으로 본다 — 인자 stream(None) 을 보면 진짜 터미널에서도 줄을 덮어쓰지 못한다
+        self.tty = hasattr(self.stream, "isatty") and self.stream.isatty()
         self.last = ""
+        self.clock = clock
+        self.last_write = 0.0
+        self.pending: str | None = None  # 비 TTY 에서 1초 안에 몰린 줄은 마지막 것만 나중에
 
     def update(self, text: str) -> None:
         if text == self.last:
@@ -72,14 +78,25 @@ class _StatusLine:
         self.last = text
         if self.tty:
             self.stream.write("\r\x1b[2K" + text)
-        else:
-            self.stream.write(text + "\n")
+            self.stream.flush()
+            return
+        now = self.clock()
+        if now - self.last_write < 1.0:  # CI 로그·파일에 진행 줄이 수백 줄 쌓이지 않게
+            self.pending = text
+            return
+        self.pending = None
+        self.last_write = now
+        self.stream.write(text + "\n")
         self.stream.flush()
 
     def done(self) -> None:
         if self.tty and self.last:
             self.stream.write("\n")
             self.stream.flush()
+        elif self.pending is not None:
+            self.stream.write(self.pending + "\n")
+            self.stream.flush()
+            self.pending = None
 
 
 def describe(job: dict[str, Any]) -> str:
@@ -149,6 +166,17 @@ def _usage(msg: str) -> int:
     return USAGE_EXIT
 
 
+def _client_fail(client: Client, what: str, e: ClientError) -> int:
+    """읽기 명령의 실패 문구. 조용한 3 은 없다(사용자 검사 U2.9)."""
+    if e.status == 401 and "read access" in e.message:
+        _err(f"{what}: read access denied — this server needs a token for reads (RCM_TOKEN)")
+        return USAGE_EXIT
+    if e.status:
+        return _usage(f"{what}: {e.message}")
+    _err(f"{what}: cannot reach {client.server}: {e.message}")
+    return EXIT_UNKNOWN
+
+
 def _print_json(obj: Any) -> None:
     print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), flush=True)
 
@@ -196,9 +224,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         inputs = validate_inputs(preset, inputs_raw)
     except InputError as e:
         return _usage(str(e))
-    label = args.by or default_label(None)
+    # --by > client.toml 의 label / RCM_LABEL > "<user>@<host>" (수용 검사 J2 지적)
+    try:
+        cfg_label = _client_config(args).label
+    except ConfigError:
+        cfg_label = ""
+    label = args.by or cfg_label or default_label(None)
+    pool = getattr(args, "pool", None)
+    if pool is not None and pool != preset.pool and pool not in preset.pools:
+        allowed = ", ".join([preset.pool, *preset.pools])
+        return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
     if mode == "git_ref":
-        return _run_git_ref(client, args, preset, inputs, ref or "", label)
+        return _run_git_ref(client, args, preset, inputs, ref or "", label, pool)
     # ② 스냅샷
     root = Path(args.dir or os.getcwd())
     try:
@@ -219,7 +256,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         # ③ 제출 (합류면 업로드 생략)
         try:
             resp = client.submit(
-                preset.name, inputs, source, requester_label=label, join=not args.no_join
+                preset.name,
+                inputs,
+                source,
+                requester_label=label,
+                join=not args.no_join,
+                priority=args.priority,
+                pool=pool,
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -239,10 +282,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
 
             try:
-                client.upload(job_id, snap.tar_path, progress=progress)
+                if resp.get("cache") and not args.no_cache:
+                    up = upload_cached(client, job_id, snap, progress=progress)
+                    total = snap.total_bytes
+                    cached = up.get("cached_bytes") or 0
+                    pct = 100 * cached // total if total else 100
+                    line.update(
+                        f"uploading #{job_id}: {max(0, total - cached) / 1e6:.1f} / "
+                        f"{total / 1e6:.1f} MB (cache {pct}%)"
+                    )
+                else:
+                    client.upload(job_id, snap.tar_path, progress=progress)
             except ClientError as e:
                 line.done()
-                _err(f"upload failed: {e.message}")
+                hint = " (retry with --no-cache)" if e.status in (400, 409) else ""
+                _err(f"upload failed: {e.message}{hint}")
                 return EXIT_UNKNOWN
             line.done()
             _info(f"submitted job #{job_id} · {resp.get('url', '')}")
@@ -267,6 +321,7 @@ def _run_git_ref(
     inputs: dict[str, Any],
     ref: str,
     label: str,
+    pool: str | None = None,
 ) -> int:
     """git_ref 제출: 스냅샷·업로드 없이 ③ 제출 → ⑤ wait. 서버가 ref 를 sha 로 확정한다."""
     try:
@@ -276,6 +331,8 @@ def _run_git_ref(
             {"mode": "git_ref", "ref": ref},
             requester_label=label,
             join=not args.no_join,
+            priority=args.priority,
+            pool=pool,
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -318,7 +375,12 @@ def _wait(
 
     try:
         code, job, reason = wait_for_job(
-            client, job_id, timeout=timeout, on_update=on_update, use_sse=use_sse
+            client,
+            job_id,
+            timeout=timeout,
+            on_update=on_update,
+            use_sse=use_sse,
+            on_info=line.update,
         )
     except KeyboardInterrupt:
         line.done()
@@ -340,6 +402,7 @@ def _wait(
     if reason:
         _err(reason)
     out = dict(job or {"job_id": job_id, "state": None})
+    out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
     out["wait_exit_code"] = code
     if joined:
         out["joined"] = True
@@ -364,6 +427,19 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         _info(f"left the join list of job #{args.job} (job keeps running)")
     else:
         _info(f"job #{args.job} is now {resp.get('state')}")
+    return 0
+
+
+def cmd_bump(args: argparse.Namespace) -> int:
+    """대기 잡의 우선순위 변경(admin)."""
+    client = _client(args)
+    try:
+        resp = client.set_priority(args.job, args.priority)
+    except ClientError as e:
+        _err(f"bump failed: {e.message}")
+        return USAGE_EXIT if e.status else EXIT_UNKNOWN
+    _print_json(resp)
+    _info(f"job #{args.job} priority is now {resp.get('priority')}")
     return 0
 
 
@@ -426,10 +502,11 @@ def cmd_eta(args: argparse.Namespace) -> int:
     try:
         if args.job is not None:
             doc = client.status()
-            pool = (doc.get("pools") or [{}])[0]
-            queue = pool.get("queue")
-            if queue is None:
-                return _usage(f"queue unavailable: {pool.get('queue_error') or 'unknown'}")
+            pools = doc.get("pools") or [{}]
+            bad = next((p for p in pools if p.get("queue") is None), None)
+            if bad is not None:
+                return _usage(f"queue unavailable: {bad.get('queue_error') or 'unknown'}")
+            queue = [r for p in pools for r in p.get("queue") or []]
             row = next((r for r in queue if r.get("id") == args.job), None)
             if row is None:
                 job = client.job(args.job)
@@ -453,9 +530,14 @@ def cmd_eta(args: argparse.Namespace) -> int:
             inputs = parse_kv(args.f or [])
         except InputError as e:
             return _usage(str(e))
-        resp = client.eta(args.preset, inputs)
+        resp = client.eta(
+            args.preset,
+            inputs,
+            priority=getattr(args, "priority", None),
+            pool=getattr(args, "pool", None),
+        )
     except ClientError as e:
-        return _usage(f"eta failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "eta failed", e)
     if args.json:
         _print_json(resp)
     else:
@@ -475,7 +557,8 @@ def cmd_top(args: argparse.Namespace) -> int:
                 if args.json:
                     _print_json({"error": e.message, "server": client.server})
                     return EXIT_UNKNOWN
-                text = f"━━━ rcm · {client.server} · unreachable: {e.message}\n"
+                label = "read access denied" if e.status == 401 else "unreachable"
+                text = f"━━━ rcm · {client.server} · {label}: {e.message}\n"
                 doc = None
             else:
                 text = render(doc, tz=_local_tz())
@@ -501,17 +584,20 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             me = client.whoami()["name"]
         doc = client.status()
     except ClientError as e:
-        return _usage(f"jobs failed: {e.message}") if e.status else EXIT_UNKNOWN
-    pool = (doc.get("pools") or [{}])[0]
+        return _client_fail(client, "jobs failed", e)
     rows: list[dict[str, Any]] = []
-    if pool.get("queue") is None:
-        print(f"queue unavailable: {pool.get('queue_error') or 'unknown'}", file=sys.stderr)
-    else:
-        rows.extend(pool["queue"])
-    if pool.get("recent") is None:
-        print(f"recent unavailable: {pool.get('recent_error') or 'unknown'}", file=sys.stderr)
-    else:
-        rows.extend(pool["recent"])
+    for pool in doc.get("pools") or [{}]:
+        pname = pool.get("pool") or pool.get("name") or "default"
+        if args.pool and pname != args.pool:
+            continue
+        if pool.get("queue") is None:
+            print(f"queue unavailable: {pool.get('queue_error') or 'unknown'}", file=sys.stderr)
+        else:
+            rows.extend({**r, "pool": r.get("pool") or pname} for r in pool["queue"])
+        if pool.get("recent") is None:
+            print(f"recent unavailable: {pool.get('recent_error') or 'unknown'}", file=sys.stderr)
+        else:
+            rows.extend({**r, "pool": r.get("pool") or pname} for r in pool["recent"])
     if me is not None:
         rows = [
             r
@@ -528,7 +614,12 @@ def cmd_jobs(args: argparse.Namespace) -> int:
     if not rows:
         print("no jobs")
         return 0
+    pools_seen = {r.get("pool") or "default" for r in rows}
+    current_pool: str | None = None
     for r in rows:
+        if len(pools_seen) > 1 and r.get("pool") != current_pool:  # 풀이 둘 이상일 때만 헤더
+            current_pool = r.get("pool")
+            print(f"pool {current_pool}")
         est = r.get("estimate") or {}
         state = r.get("state", "?")
         if state in ("running", "cancelling"):
@@ -560,7 +651,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
     except ClientError as e:
-        return _usage(f"logs failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "logs failed", e)
     except KeyboardInterrupt:
         return 130
     return 0
@@ -571,7 +662,7 @@ def cmd_presets(args: argparse.Namespace) -> int:
     try:
         doc = client.status()
     except ClientError as e:
-        return _usage(f"presets failed: {e.message}") if e.status else EXIT_UNKNOWN
+        return _client_fail(client, "presets failed", e)
     presets = doc.get("presets") or []
     if args.json:
         _print_json(presets)
@@ -730,6 +821,51 @@ def python_row() -> tuple[str, bool, str]:
     return ("python", ok, detail)
 
 
+def _dir_writable(d: Path) -> bool:
+    """`rcm check`·`rcm worker --check` 의 data dir 행 — 있으면 그 디렉터리, 없으면 **가장 가까운
+    있는 조상**이 쓰기 가능한가(서버·워커가 `mkdir -p` 로 만든다). 부모만 보면 새 머신의 기본
+    `~/.local/share/rcm-worker` 는 `~/.local/share` 가 없어 거짓 FAIL 이 난다."""
+    p = d
+    while not p.exists():
+        if p.parent == p:
+            return False
+        p = p.parent
+    return p.is_dir() and os.access(p, os.W_OK)
+
+
+def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
+    """`rcm check` 의 pools 행(M5b-4): `default (1 lane) · linux (build-02/1 idle · build-03 down)`.
+    어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`)."""
+    server = doc.get("server") or {}
+    lanes = server.get("lanes") or 0
+    parts = [f"default ({lanes} lane{'s' if lanes != 1 else ''})"]
+    by_pool: dict[str, list[dict[str, Any]]] = {}
+    for w in server.get("workers") or []:
+        if w.get("worker"):
+            by_pool.setdefault(w.get("pool") or "default", []).append(w)
+    for name in sorted(by_pool):
+        pills: list[str] = []
+        for w in sorted(by_pool[name], key=lambda x: (str(x.get("worker")), x.get("lane") or 0)):
+            if w.get("state") == "down":
+                pill = f"{w['worker']} down"
+                if pill not in pills:
+                    pills.append(pill)
+                continue
+            pill = f"{w.get('display_name') or w['worker']}/{w.get('lane')} {w.get('state')}"
+            if w.get("display_name"):
+                pill = f"{w['display_name']} {w.get('state')}"
+            if w.get("job_id"):
+                pill += f" #{w['job_id']}"
+            pills.append(pill)
+        parts.append(f"{name} ({' · '.join(pills)})")
+    dead: list[str] = []
+    try:
+        dead = list(client.health().get("pools_without_workers") or [])
+    except ClientError:
+        dead = [n for n, ws in by_pool.items() if all(w.get("state") == "down" for w in ws)]
+    return ("pools", not dead, " · ".join(parts))
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     rows: list[tuple[str, bool, str]] = [python_row()]
     client = None
@@ -763,6 +899,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             doc = client.status()
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"
             rows.append(("presets", bool(doc.get("presets")), names))
+            rows.append(_pools_row(doc, client))
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
         except ClientError as e:
             rows.append(("presets", False, e.message))
@@ -770,7 +907,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         cfg = load_server_config(getattr(args, "config", None), check_tools=False)
         if cfg.path is not None:
             d = cfg.data_dir
-            writable = os.access(d, os.W_OK) if d.exists() else os.access(d.parent, os.W_OK)
+            writable = _dir_writable(d)
             rows.append(
                 ("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})")
             )
@@ -779,6 +916,133 @@ def cmd_check(args: argparse.Namespace) -> int:
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
     except ConfigError as e:
         rows.append(("server config", False, str(e)))
+    ok_all = all(ok for _, ok, _ in rows)
+    for name, ok, detail in rows:
+        print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
+    return 0 if ok_all else 1
+
+
+def _worker_config(args: argparse.Namespace):
+    from remote_ci_monitor.config import load_worker_config
+
+    overrides = {
+        "server": getattr(args, "server", None),
+        "pool": getattr(args, "pool", None),
+        "lanes": getattr(args, "lanes", None),
+        "name": getattr(args, "name", None),
+        "data_dir": getattr(args, "data", None),
+    }
+    return load_worker_config(getattr(args, "config", None), overrides=overrides)
+
+
+def cmd_worker(args: argparse.Namespace) -> int:
+    """`rcm worker` — 원격 워커 프로세스(M5b-3). 토큰은 RCM_WORKER_TOKEN 또는 worker.toml 로만."""
+    from remote_ci_monitor.client import WorkerClient
+    from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
+
+    try:
+        cfg = _worker_config(args)
+    except ConfigError as e:
+        return _usage(str(e))
+    if not cfg.token:
+        return _usage(
+            "no worker token: set RCM_WORKER_TOKEN (create one on the server with "
+            "`rcm token add NAME --worker`)"
+        )
+    client = WorkerClient(cfg.server, cfg.token)
+    if getattr(args, "check", False):
+        return _worker_check(cfg, client)
+    worker = RemoteWorker(cfg, client=client, once=bool(getattr(args, "once", False)))
+
+    def _stop(signum: int, _frame: Any) -> None:
+        if worker.stopping.is_set():
+            # 두 번째 신호는 즉시 — SystemExit 은 `run()` 의 finally 가 레인 join(grace+10초)으로
+            # 붙잡고, 레인 스레드는 daemon 이 아니라 인터프리터 종료도 기다린다
+            _info(f"signal {signum} again: exiting now")
+            sys.stderr.flush()
+            os._exit(1)
+        _info(f"signal {signum}: stopping — running jobs are reported as lost")
+        worker.stop()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        return worker.run()
+    except WorkerExit as e:
+        if e.message:
+            _err(e.message)
+        return e.code
+
+
+def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
+    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--exit-code", url, "HEAD"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired:
+        return f"unreachable: timed out after {int(timeout)}s"
+    except OSError as e:
+        return f"cannot run git: {type(e).__name__}"
+    if proc.returncode == 0:
+        return None
+    lines = [ln.strip() for ln in proc.stderr.decode("utf-8", errors="replace").splitlines()]
+    lines = [ln for ln in lines if ln]
+    # git 은 사유를 첫 줄(`fatal: '…' does not appear to be a git repository` · `ssh: …`)에 두고
+    # 마지막 줄은 일반 안내문(`and the repository exists.`)이다 — 첫 줄을 쓰고 경로·자격은 지운다
+    reason = lines[0] if lines else f"exit {proc.returncode}"
+    reason = re.sub(r"^(fatal|error|warning):\s*", "", reason)
+    reason = re.sub(r"://[^/\s@]+@", "://<redacted>@", reason)
+    reason = re.sub(r"/[^\s'\"]+", "<path>", reason)
+    return "unreachable: " + reason[:80]
+
+
+def _worker_check(cfg: Any, client: Any) -> int:
+    """`rcm worker --check` — 서버 · 토큰(kind worker) · 풀 · repos 를 표로."""
+    from remote_ci_monitor.client import ClientError
+
+    rows: list[tuple[str, bool, str]] = [python_row()]
+    try:
+        h = client.health()
+        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}"))
+    except ClientError as e:
+        rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
+    try:
+        me = client.whoami()
+        kind = me.get("kind") or ("admin" if me.get("admin") else "client")
+        ok = kind == "worker"
+        rows.append(
+            (
+                "token",
+                ok,
+                f"{me.get('name')} ({kind})"
+                + ("" if ok else " — worker token required: rcm token add NAME --worker"),
+            )
+        )
+    except ClientError as e:
+        rows.append(("token", False, e.message if e.status else f"cannot reach {client.server}"))
+    rows.append(("pool", True, f"{cfg.pool} · lanes {cfg.lanes}"))
+    if cfg.repos:
+        git = shutil.which("git")
+        rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+        details: list[str] = []
+        all_ok = git is not None
+        for r in cfg.repos:
+            problem = _ls_remote_problem(r.url) if git else "git missing"
+            all_ok = all_ok and problem is None
+            details.append(f"{r.name} ({'ok' if problem is None else problem})")
+        rows.append(("repos", all_ok, " · ".join(details)))
+    else:
+        rows.append(("repos", True, "none (git_ref presets cannot run on this worker)"))
+    d = cfg.data_path
+    writable = _dir_writable(d)
+    rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
     ok_all = all(ok for _, ok, _ in rows)
     for name, ok, detail in rows:
         print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
@@ -796,15 +1060,20 @@ def cmd_token(args: argparse.Namespace) -> int:
     now = datetime.now(UTC)
     try:
         if args.token_command == "add":
-            secret = store.add_token(args.name, admin=args.admin, now=now)
-            _info(f"token '{args.name}' created — shown once, store it as RCM_TOKEN on the client:")
+            worker = bool(getattr(args, "worker", False))
+            if args.admin and worker:
+                return _usage("--admin and --worker cannot be combined")
+            kind = "worker" if worker else ("admin" if args.admin else "client")
+            secret = store.add_token(args.name, kind=kind, now=now)
+            where = "RCM_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
+            _info(f"token '{args.name}' created — shown once, store it as {where}:")
             print(secret, flush=True)
             return 0
         if args.token_command == "list":
+            print(f"{'name':<24} {'kind':<7} {'created':<11} revoked")
             for t in store.list_tokens():
-                flag = "admin" if t.admin else "user "
-                state = f"revoked {t.revoked_at:%Y-%m-%d}" if t.revoked_at else "active"
-                print(f"{t.name:<24} {flag}  created {t.created_at:%Y-%m-%d}  {state}")
+                revoked = f"{t.revoked_at:%Y-%m-%d}" if t.revoked_at else "—"
+                print(f"{t.name:<24} {t.kind:<7} {t.created_at:%Y-%m-%d}  {revoked}")
             return 0
         if args.token_command == "revoke":
             if store.revoke_token(args.name, now):
@@ -848,6 +1117,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--ref", metavar="REF", help="branch, tag or commit sha for git_ref presets (no upload)"
     )
+    run.add_argument(
+        "--priority",
+        choices=["low", "normal", "high"],
+        default=None,
+        help="queue priority (default: the preset's; raising above it needs an admin token)",
+    )
+    run.add_argument(
+        "--no-cache", action="store_true", help="upload a full tarball instead of changed files"
+    )
+    run.add_argument("--pool", metavar="NAME", help="worker pool (must be allowed by the preset)")
     run.add_argument("--by", metavar="LABEL", help="requester label (default: user@host)")
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
@@ -871,6 +1150,12 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(wait)
     wait.set_defaults(func=cmd_wait)
 
+    bump = sub.add_parser("bump", help="change a waiting job's priority (admin token)")
+    bump.add_argument("job", type=int)
+    bump.add_argument("--priority", choices=["low", "normal", "high"], default="high")
+    client_opts(bump)
+    bump.set_defaults(func=cmd_bump)
+
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
     client_opts(cancel)
@@ -889,6 +1174,8 @@ def build_parser() -> argparse.ArgumentParser:
     eta.add_argument("-f", action="append", metavar="NAME=VALUE", help="preset input (repeatable)")
     eta.add_argument("--job", type=int, help="an existing job id")
     eta.add_argument("--json", action="store_true")
+    eta.add_argument("--priority", choices=["low", "normal", "high"], default=None)
+    eta.add_argument("--pool", metavar="NAME", help="worker pool to estimate for")
     client_opts(eta)
     eta.set_defaults(func=cmd_eta)
 
@@ -901,6 +1188,7 @@ def build_parser() -> argparse.ArgumentParser:
     jobs = sub.add_parser("jobs", help="list queued, running and recent jobs")
     jobs.add_argument("--mine", action="store_true", help="only jobs you requested or joined")
     jobs.add_argument("--state", help="filter by state (running, queued, failed, ...)")
+    jobs.add_argument("--pool", metavar="NAME", help="only jobs of this worker pool")
     jobs.add_argument("--json", action="store_true")
     client_opts(jobs)
     jobs.set_defaults(func=cmd_jobs)
@@ -937,7 +1225,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--config", help="server.toml to check the data dir of")
     check.set_defaults(func=cmd_check)
 
-    token = sub.add_parser("token", help="manage client tokens (run on the build machine)")
+    token = sub.add_parser("token", help="manage client/worker tokens (run on the server)")
     server_opts(token)
     tsub = token.add_subparsers(dest="token_command", required=True)
     add = tsub.add_parser("add", help="create a token and print it once")
@@ -945,10 +1233,34 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument(
         "--admin", action="store_true", help="admin token (cancel any job, pause/resume)"
     )
+    add.add_argument(
+        "--worker",
+        action="store_true",
+        help="worker token for `rcm worker` on another machine (/worker/* only)",
+    )
     tsub.add_parser("list", help="list tokens (never shows secrets)")
     revoke = tsub.add_parser("revoke", help="revoke a token")
     revoke.add_argument("name")
     token.set_defaults(func=cmd_token)
+
+    worker = sub.add_parser(
+        "worker", help="run a remote worker for a pool (token via RCM_WORKER_TOKEN)"
+    )
+    worker.add_argument("--server", help="server URL (or `server` in worker.toml)")
+    worker.add_argument(
+        "--pool", help="worker pool to serve (default: worker.toml pool or 'default')"
+    )
+    worker.add_argument("--lanes", type=int, help="parallel jobs on this machine (1-64)")
+    worker.add_argument("--name", help="display name for the host sample (default: hostname)")
+    worker.add_argument("--config", help="worker.toml path (repos, host sampler, data_dir)")
+    worker.add_argument("--data", help="worker data dir (workspaces, logs)")
+    worker.add_argument(
+        "--check", action="store_true", help="verify server, token kind, pool and repos, then exit"
+    )
+    worker.add_argument(
+        "--once", action="store_true", help="run at most one job, then exit (tests, cron)"
+    )
+    worker.set_defaults(func=cmd_worker)
 
     init = sub.add_parser("init", help="write a starter config file (server or client)")
     isub = init.add_subparsers(dest="init_kind", required=True)

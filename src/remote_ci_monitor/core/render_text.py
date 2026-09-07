@@ -24,6 +24,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
 
+MAX_REMOTE_PILLS = 5  # 머리줄의 원격 워커 필 상한(M5b-4). down 은 세지 않는다
 DASH = "—"
 _GLYPH = {
     RUNNING: "▶",
@@ -129,7 +130,7 @@ def _reason_text(row: dict[str, Any]) -> str:
     if reason == "paused":
         return "paused"
     if reason == "worker_down":
-        return "no worker"
+        return "worker down"
     if reason == "not_scheduled":
         return "not scheduled"
     if reason == "running":
@@ -194,9 +195,11 @@ def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | Non
     conf_text = f"{conf} · {est.get('source')}" + (
         f" n={n}" if est.get("source") == "measured" else ""
     )
+    prio = row.get("priority") or 0
+    arrow = "↑" if prio > 0 else ("↓" if prio < 0 else "")  # 우선순위는 이유가 아니다 — 표시만
     lines = [
-        f"  {pos:>3} {glyph} {_state_word(state):<10} #{row['id']} {row.get('key', '?'):<16} "
-        f"{src:<28} ← {req:<18} {timing:<24} {eta}  ({conf_text})",
+        f"  {pos:>3} {glyph} {_state_word(state):<10} {arrow}#{row['id']} "
+        f"{row.get('key', '?'):<16} {src:<28} ← {req:<18} {timing:<24} {eta}  ({conf_text})",
         f"        {_reason_text(row)}",
     ]
     prog = row.get("progress")
@@ -236,7 +239,10 @@ def render(
     pool = pools[0] if pools else {}
     hosts = pool.get("hosts")
     name = host_name or ((hosts or [{}])[0].get("name") if hosts else None) or "server"
-    workers = server.get("workers") or []
+    all_workers = server.get("workers") or []
+    # 로컬 레인은 오늘 그대로, 원격 워커(M5b-2)는 `<name>/<lane> <state>[ #job]` 로 뒤에 붙인다
+    workers = [w for w in all_workers if not w.get("worker")]
+    remote = [w for w in all_workers if w.get("worker")]
     busy = sum(1 for w in workers if w.get("state") == "busy")
     down = [w for w in workers if w.get("state") == "down"]
     lanes = server.get("lanes") or len(workers) or 0
@@ -247,26 +253,85 @@ def render(
         wtxt = f"lanes {busy}/{lanes} busy"
     if down:
         wtxt += f" · DOWN: lane {', '.join(str(w['lane']) for w in down)}"
+    # 원격 필은 5개까지, 넘치면 `+N workers` 로 접는다. down 은 접지 않는다(항상 보여야 한다)
+    shown_live = 0
+    folded = 0
+    for w in remote:
+        is_down = w.get("state") == "down"
+        if not is_down:
+            if shown_live >= MAX_REMOTE_PILLS:
+                folded += 1
+                continue
+            shown_live += 1
+        label = w.get("display_name") or f"{w.get('worker')}/{w.get('lane')}"
+        wtxt += f" · {label} {w.get('state') or DASH}"
+        if w.get("job_id"):
+            wtxt += f" #{w['job_id']}"
+    if folded:
+        wtxt += f" · +{folded} workers"
     if server.get("paused"):
         wtxt += f" · PAUSED by {server['paused'].get('by')}"
+    cache = server.get("snapshot_cache")
+    if isinstance(cache, dict):  # 캐시가 켜져 있으면 모르는 숫자는 — 로(0 이 아니다)
+        blobs = cache.get("blobs")
+        wtxt += f" · cache {DASH if blobs is None else blobs} blobs · {_mb(cache.get('bytes'))}"
+    if len(pools) > 1:  # 풀이 둘 이상이면 머리줄에 전체 집계(풀 하나면 오늘 그대로)
+        running = waiting = 0
+        for pl in pools:
+            for r in pl.get("queue") or []:
+                if r.get("state") in (RUNNING, CANCELLING):
+                    running += 1
+                else:
+                    waiting += 1
+        wtxt += f" · pools {len(pools)} · {running} running · {waiting} waiting"
     clock = fmt_clock(status.get("generated_at"), tz)
     tzname = status.get("display_timezone") or "local"
     out = [f"━━━ rcm · {name} · {clock} {tzname} · {wtxt}"]
+    if server.get("notify_failures"):
+        out.append(f"  notify failures {server['notify_failures']} · see the server log")
     if server.get("last_error"):
         out.append(f"  error · {str(server['last_error'])[:60]}")
+    for pl in pools or [{}]:  # pools 가 비면 조회 실패 모양(오늘과 같다)
+        out.extend(render_pool(pl, tz=tz, now=now, server=server, workers=workers))
+    return "\n".join(out) + "\n"
 
+
+def render_pool(
+    pool: dict[str, Any],
+    *,
+    tz: tzinfo | None = None,
+    now: datetime | None = None,
+    server: dict[str, Any] | None = None,
+    workers: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """풀 하나(큐 · recent · medians · host)를 줄 목록으로. 기본 풀은 M1 모양 그대로."""
+    server = server or {}
+    workers = workers if workers is not None else (server.get("workers") or [])
+    out: list[str] = []
+    hosts = pool.get("hosts")
+    remote = pool.get("name") not in (None, "default")
+    lanes = pool.get("lanes")
+    no_workers = remote and (lanes == 0 or (not lanes and not hosts))
+    label = ""
+    if remote:
+        label = f" (pool {pool.get('name')}{' · no workers' if no_workers else ''})"
     queue = pool.get("queue")
     if queue is None:
-        out.append(f"queue — unavailable: {pool.get('queue_error') or 'unknown error'}")
+        out.append(f"queue — unavailable: {pool.get('queue_error') or 'unknown error'}{label}")
     elif not queue:
-        if server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
+        if remote:  # 원격 풀 헤더는 언제나 풀 이름을 단다(M5b-4). 정지는 뒤에 붙인다
+            out.append(f"queue — empty{label}{' · paused' if server.get('paused') else ''}")
+        elif server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
             out.append("queue — empty but paused/no worker — nothing will start")
         else:
             out.append("queue — empty (rcm run <preset> starts immediately)")
     else:
         running = sum(1 for r in queue if r["state"] in (RUNNING, CANCELLING))
         waiting = len(queue) - running
-        out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
+        if remote:  # 다른 풀은 짧게 — 「queue — N (pool linux · no workers)」
+            out.append(f"queue — {len(queue)}{label}")
+        else:
+            out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
         for row in queue:
             out.extend(render_queue_row(row, tz, now))
 
@@ -279,7 +344,9 @@ def render(
         out.append("recent")
         for r in recent:
             glyph = _GLYPH.get(r["state"], "?")
-            exit_txt = f" · exit {r['exit_code']}" if r.get("exit_code") is not None else ""
+            # 웹과 같은 규칙: 프로세스 종료 코드는 failed 에만(취소·타임아웃의 -15/-9 는 신호일 뿐)
+            show_exit = r.get("state") == "failed" and r.get("exit_code") is not None
+            exit_txt = f" · exit {r['exit_code']}" if show_exit else ""
             req = (r.get("requester") or {}).get("label") or "?"
             tail = r.get("summary") or ""
             if r.get("failed_step"):
@@ -330,4 +397,4 @@ def render(
                         f"{t.get('comm')} {_pct(t.get('cpu'))} {t.get('rss_mb')}MB" for t in top
                     )
                 )
-    return "\n".join(out) + "\n"
+    return out

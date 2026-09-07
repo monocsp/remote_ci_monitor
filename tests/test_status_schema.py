@@ -22,6 +22,8 @@ from remote_ci_monitor.core.status import iso, parse_iso, status_json
 ROW_KEYS = {
     "id",
     "position",
+    "priority",
+    "pool",
     "preset",
     "key",
     "inputs",
@@ -57,6 +59,7 @@ ESTIMATE_KEYS = {
     "finish_at",
 }
 RECENT_KEYS = {
+    "pool",
     "id",
     "preset",
     "key",
@@ -201,12 +204,23 @@ def test_status_is_json_serializable_with_expected_shape():
         "version",
         "uptime_seconds",
         "lanes",
+        "snapshot_cache",
+        "notify_failures",
         "paused",
         "last_error",
         "sse_connections",
         "workers",
     }
-    assert set(back["server"]["workers"][0]) == {"lane", "state", "job_id", "error", "since"}
+    assert set(back["server"]["workers"][0]) == {
+        "lane",
+        "state",
+        "job_id",
+        "error",
+        "since",
+        "worker",  # M5b-2 추가 키
+        "display_name",
+        "pool",  # M5b-4
+    }
     assert len(back["pools"]) == 1
     pool = back["pools"][0]
     assert set(pool) == POOL_KEYS
@@ -219,6 +233,9 @@ def test_status_is_json_serializable_with_expected_shape():
         "description",
         "source_modes",
         "repo",
+        "priority",
+        "pool",
+        "pools",
         "concurrency_group",
         "expected_seconds",
         "timeout_seconds",

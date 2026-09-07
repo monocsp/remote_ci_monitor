@@ -230,7 +230,7 @@ def test_tar_escape_is_rejected_and_job_fails(env, tmp_path):
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code is None
-    assert j.summary == "snapshot rejected: member escapes the workspace"
+    assert j.summary.startswith("snapshot rejected: member escapes the workspace")  # 뒤에 멤버 이름
     assert not (tmp_path / "data" / "escape.txt").exists()
     with pytest.raises(MaterializeError):
         extract_tree(tar_path, tmp_path / "ws2")

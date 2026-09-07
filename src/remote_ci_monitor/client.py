@@ -20,7 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -67,7 +67,131 @@ class ClientError(Exception):
         self.body = body or {}
 
 
+class WorkerClient:
+    """원격 워커가 서버에 말하는 쪽(M5b-3) — `/worker/*` 만. 재시도는 없다(정책은 워커 루프가).
+
+    `Client` 와 같은 `_request` 규칙: Bearer 토큰 · JSON 오류 본문의 `error` → `ClientError`.
+    """
+
+    def __init__(self, server: str, token: str, *, timeout: float = 15.0):
+        self._inner = Client(server, token, timeout=timeout)
+        self.server = self._inner.server
+        self.token = token
+        self.timeout = timeout
+
+    def _post(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> Any:
+        status, _, raw = self._inner._request("POST", path, json_body=body, timeout=timeout)
+        if status == 204 or not raw:
+            return None
+        return json.loads(raw)
+
+    def register(
+        self, *, pool: str, lanes: int, host_name: str | None, version: str
+    ) -> dict[str, Any]:
+        body = {"pool": pool, "lanes": lanes, "host_name": host_name, "version": version}
+        return self._post("/worker/register", body)
+
+    def claim(self, lane: int, wait_seconds: int = 0) -> dict[str, Any] | None:
+        """잡이 있으면 claim 응답, 없으면(204) None. long-poll 이라 타임아웃을 넉넉히 둔다."""
+        return self._post(
+            "/worker/claim",
+            {"lane": lane, "wait_seconds": wait_seconds},
+            timeout=self.timeout + wait_seconds + 5,
+        )
+
+    def heartbeat(
+        self, jobs: list[int], host_sample: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"jobs": list(jobs)}
+        if host_sample is not None:
+            body["host_sample"] = host_sample
+        return self._post("/worker/heartbeat", body) or {}
+
+    def download_tree(self, job_id: int, dest: Path) -> int:
+        """`GET /worker/jobs/{id}/tree` 를 `dest` 에 흘려 받는다(`.part` → 교체). 받은 바이트 수.
+        `Content-Length` 와 다르면 `ClientError`(잘린 다운로드로 자재화하지 않는다)."""
+        url = self.server + f"/worker/jobs/{job_id}/tree"
+        headers = {
+            "User-Agent": f"rcm/{__version__}",
+            "Accept": "application/gzip",
+            "Authorization": f"Bearer {self.token}",
+        }
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        received = 0
+        try:
+            with urllib.request.urlopen(req, timeout=max(self.timeout, 60.0)) as resp:
+                expected_raw = resp.headers.get("Content-Length")
+                expected = int(expected_raw) if expected_raw else None
+                with part.open("wb") as fh:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        received += len(chunk)
+        except urllib.error.HTTPError as e:
+            part.unlink(missing_ok=True)
+            payload = e.read()
+            try:
+                parsed = json.loads(payload) if payload else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            msg = parsed.get("error") if isinstance(parsed, dict) else None
+            raise ClientError(e.code, msg or f"HTTP {e.code}") from e
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            part.unlink(missing_ok=True)
+            reason = getattr(e, "reason", None) or e
+            raise ClientError(0, f"cannot reach {self.server}: {reason}") from e
+        if expected is not None and received != expected:
+            part.unlink(missing_ok=True)
+            raise ClientError(0, f"snapshot download incomplete: {received} of {expected} bytes")
+        part.replace(dest)
+        return received
+
+    def phase(self, job_id: int, phase: str) -> dict[str, Any]:
+        return self._post(f"/worker/jobs/{job_id}/phase", {"phase": phase}) or {}
+
+    def log(self, job_id: int, data: bytes) -> dict[str, Any]:
+        status, _, raw = self._inner._request(
+            "POST",
+            f"/worker/jobs/{job_id}/log",
+            data=data,
+            content_length=len(data),
+            content_type="application/octet-stream",
+            timeout=max(self.timeout, 60.0),
+        )
+        return json.loads(raw) if raw else {}
+
+    def finish(
+        self, job_id: int, outcome: str, exit_code: int | None, summary: str | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
+        if summary is not None:
+            body["summary"] = summary
+        return self._post(f"/worker/jobs/{job_id}/finish", body) or {}
+
+    def health(self) -> dict[str, Any]:
+        return self._inner.health()
+
+    def whoami(self) -> dict[str, Any]:
+        return self._inner.whoami()
+
+
 # ── 스냅샷 ───────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Entry:
+    """스냅샷 파일 하나 — manifest · 전체 tar · 부분 tar 의 **단일 출처**(M5)."""
+
+    path: str
+    mode: int
+    size: int
+    sha256: str
+    kind: str  # "file" | "link" (실행 비트는 mode)
+    target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +204,24 @@ class Snapshot:
     repo: str | None
     tar_path: Path
     bytes: int
+    entries: tuple[Entry, ...] = ()
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(e.size for e in self.entries if e.kind != "link")
+
+    def manifest(self) -> dict[str, Any]:
+        """서버 `POST /jobs/{id}/tree/manifest` 본문."""
+        return {
+            "files": [
+                {"path": e.path, "mode": e.mode, "size": e.size, "sha256": e.sha256}
+                for e in self.entries
+                if e.kind != "link"
+            ],
+            "links": [
+                {"path": e.path, "target": e.target} for e in self.entries if e.kind == "link"
+            ],
+        }
 
 
 def _git(root: Path, *args: str) -> str | None:
@@ -137,6 +279,24 @@ def _digest(path: Path) -> tuple[int, str]:
     return normalize_mode(st.st_mode, is_symlink=False), h.hexdigest()
 
 
+def _link_stays_inside(root: Path, rel: str, progress: Callable[[str], None] | None) -> bool:
+    """밖을 가리키는 심링크(절대 경로 · `..` 탈출)는 서버가 거부한다 — 미리 이름을 말하고 뺀다."""
+    path = root / rel
+    if not os.path.islink(path):
+        return True
+    target = os.readlink(path)
+    if os.path.isabs(target):
+        reason = "absolute target"
+    else:
+        joined = os.path.normpath(os.path.join(os.path.dirname(rel), target))
+        reason = "points outside the tree" if joined.startswith("..") else ""
+    if not reason:
+        return True
+    if progress:
+        progress(f"snapshot: skipping symlink {rel} -> {target} ({reason})")
+    return False
+
+
 def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
     # 사용자 이름·uid 는 빌드 머신과 무관하고 개인정보다 — 비운다
     info.uid = info.gid = 0
@@ -166,12 +326,24 @@ def make_snapshot(
     if candidates is None:
         candidates = _walk_candidates(root)
     files = select_files(candidates, rules=rules, present=lambda p: os.path.lexists(root / p))
+    files = [rel for rel in files if _link_stays_inside(root, rel, progress)]
     if progress:
         progress(f"snapshot: {len(files)} files")
+        if not is_git and len(files) > 200:
+            progress(
+                f"snapshot: {root} is not a git checkout — everything under it is included; "
+                "add a .rcmignore or use --dir"
+            )
     entries: list[tuple[str, int, str]] = []
+    full: list[Entry] = []
     for rel in files:
         mode, digest = _digest(root / rel)
         entries.append((rel, mode, digest))
+        path = root / rel
+        if os.path.islink(path):
+            full.append(Entry(rel, mode, 0, digest, "link", os.readlink(path)))
+        else:  # 실행 비트는 mode 가 말한다 — kind 는 file | link 둘뿐
+            full.append(Entry(rel, mode, os.path.getsize(path), digest, "file"))
     th = tree_hash(entries)
     base_sha = dirty = repo = None
     if is_git:
@@ -199,6 +371,7 @@ def make_snapshot(
         repo=repo,
         tar_path=tar_path,
         bytes=size,
+        entries=tuple(full),
     )
 
 
@@ -227,6 +400,8 @@ class _Reader:
 
 
 class Client:
+    cache_supported: bool | None = None  # 마지막 submit 응답의 cache 플래그(모르면 None)
+
     def __init__(self, server: str, token: str | None = None, *, timeout: float = 15.0):
         if not server:
             raise ClientError(0, "no server configured (use --server, RCM_SERVER or client.toml)")
@@ -246,9 +421,12 @@ class Client:
         content_length: int | None = None,
         timeout: float | None = None,
         content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], bytes]:
         url = self.server + path
         headers = {"User-Agent": f"rcm/{__version__}", "Accept": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         body: Any = None
@@ -313,11 +491,21 @@ class Client:
         *,
         requester_label: str | None,
         join: bool = True,
+        priority: str | int | None = None,
+        pool: str | None = None,
     ) -> dict[str, Any]:
-        body = {"preset": preset, "inputs": inputs, "source": source, "join": join}
+        body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
         if requester_label:
             body["requester_label"] = requester_label
-        return self.post_json("/jobs", body)
+        if priority is not None:
+            body["priority"] = priority
+        if pool is not None:
+            body["pool"] = pool
+        resp = self.post_json("/jobs", body)
+        # 서버가 캐시를 지원하는지 기억한다 — upload_cached 가 manifest 를 헛되이 보내지 않게
+        if isinstance(resp, dict) and "cache" in resp:
+            self.cache_supported = bool(resp.get("cache"))
+        return resp
 
     def upload(
         self,
@@ -338,6 +526,56 @@ class Client:
                 content_type="application/gzip",
             )
         return json.loads(body)
+
+    # ── 내용 주소 캐시 업로드 (M5) ──
+
+    def manifest(self, job_id: int, snapshot: Snapshot) -> dict[str, Any]:
+        """manifest 를 보내고 `{missing, missing_bytes, state}` 를 받는다. 구버전 서버는 404."""
+        return self.post_json(f"/jobs/{job_id}/tree/manifest", snapshot.manifest())
+
+    def upload_blobs(
+        self,
+        job_id: int,
+        snapshot: Snapshot,
+        missing: Iterable[str],
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, Any]:
+        """빠진 해시의 파일만 tar.gz(멤버 이름 = sha256, 같은 해시는 한 번)로 PUT."""
+        want = set(missing)
+        by_hash: dict[str, Entry] = {}
+        for e in snapshot.entries:
+            if e.kind != "link" and e.sha256 in want and e.sha256 not in by_hash:
+                by_hash[e.sha256] = e
+        fd, tmp_name = tempfile.mkstemp(prefix="rcm-blobs-", suffix=".tar.gz")
+        os.close(fd)
+        tar_path = Path(tmp_name)
+        try:
+            with tarfile.open(tar_path, "w:gz", compresslevel=6) as tf:
+                for sha in sorted(by_hash):
+                    e = by_hash[sha]
+                    info = tf.gettarinfo(str(snapshot.root / e.path), arcname=sha)
+                    info = _tar_filter(info)
+                    with (snapshot.root / e.path).open("rb") as fh:
+                        tf.addfile(info, fh)
+            size = tar_path.stat().st_size
+            with tar_path.open("rb") as fh:
+                reader = _Reader(fh, size, progress)
+                _, _, body = self._request(
+                    "PUT",
+                    f"/jobs/{job_id}/tree",
+                    data=reader,
+                    content_length=size,
+                    timeout=max(self.timeout, 600),
+                    content_type="application/gzip",
+                    extra_headers={"X-RCM-Tree": "blobs"},
+                )
+            return json.loads(body)
+        finally:
+            tar_path.unlink(missing_ok=True)
+
+    def set_priority(self, job_id: int, priority: str | int) -> dict[str, Any]:
+        return self.post_json(f"/jobs/{job_id}/priority", {"priority": priority})
 
     def job(self, job_id: int, *, tail: int = 0) -> dict[str, Any]:
         return self.get_json(f"/jobs/{job_id}?tail={tail}")
@@ -373,8 +611,20 @@ class Client:
             if not data:
                 sleep(poll_seconds)
 
-    def eta(self, preset: str, inputs: dict[str, Any]) -> dict[str, Any]:
-        return self.post_json("/api/eta", {"preset": preset, "inputs": inputs})
+    def eta(
+        self,
+        preset: str,
+        inputs: dict[str, Any],
+        *,
+        priority: str | int | None = None,
+        pool: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"preset": preset, "inputs": inputs}
+        if priority is not None:
+            body["priority"] = priority
+        if pool is not None:
+            body["pool"] = pool
+        return self.post_json("/api/eta", body)
 
     def events(
         self,
@@ -454,6 +704,45 @@ class Client:
         return self.events(f"/jobs/{job_id}/events", last_id=last_id, idle_timeout=idle_timeout)
 
 
+def upload_cached(
+    client: Client,
+    job_id: int,
+    snapshot: Snapshot,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """manifest → missing → blob tar. **404(구버전 서버)일 때만** 전체 tar 로 간다.
+
+    400/401/403/413/5xx 는 그대로 올린다(조용한 폴백은 왜 느린지 숨긴다 — 잡은 cancelled 로 남는다).
+    반환에는 서버 응답 + `cached_bytes` · `uploaded_files` 를 더한다.
+    """
+    if getattr(client, "cache_supported", None) is False:  # 서버가 캐시 없다고 했다
+        return client.upload(job_id, snapshot.tar_path, progress=progress)
+    try:
+        resp = client.manifest(job_id, snapshot)
+    except ClientError as e:
+        if e.status == 404:
+            return client.upload(job_id, snapshot.tar_path, progress=progress)
+        raise
+    missing = list(resp.get("missing") or [])
+    sizes: dict[str, int] = {}
+    for e in snapshot.entries:
+        if e.kind != "link":
+            sizes.setdefault(e.sha256, e.size)
+    missing_bytes = sum(sizes.get(h, 0) for h in missing)
+    total = snapshot.total_bytes
+    if not missing:
+        resp.setdefault("state", "queued")
+        resp.setdefault("job_id", job_id)
+        resp["cached_bytes"] = total
+        resp["uploaded_files"] = 0
+        return resp
+    out = client.upload_blobs(job_id, snapshot, missing, progress=progress)
+    out["cached_bytes"] = max(0, total - missing_bytes)
+    out["uploaded_files"] = len(missing)
+    return out
+
+
 def preset_from_json(p: dict[str, Any]) -> Preset:
     """`/api/status.presets[]` 항목 → Preset(입력 스키마 검증용. argv 는 서버에만 있다)."""
     inputs = tuple(
@@ -474,6 +763,9 @@ def preset_from_json(p: dict[str, Any]) -> Preset:
         timeout_seconds=p.get("timeout_seconds") or 1200,
         source_modes=tuple(p.get("source_modes") or ("tree",)),
         repo=p.get("repo") or "",
+        priority=int(p.get("priority") or 0),
+        pool=p.get("pool") or "default",
+        pools=tuple(p.get("pools") or ()),
         concurrency_group=p.get("concurrency_group"),
         expected_seconds=p.get("expected_seconds"),
         inputs=inputs,
@@ -499,8 +791,11 @@ def wait_for_job(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     use_sse: bool = True,
+    on_info: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
     """잡이 끝날 때까지 기다린다. SSE 우선, 안 되면 폴링(명세 0-F). 3 은 「모른다」.
+
+    `on_info` 는 잡 JSON 이 아닌 상황 문구(서버 연결 실패 → 재접속 중)를 받는다.
 
     반환 (종료 코드, 마지막 잡 JSON, 사유).
     """
@@ -562,6 +857,7 @@ def wait_for_job(
         clock=clock,
         started=started,
         last=last,
+        on_info=on_info,
     )
 
 
@@ -576,6 +872,7 @@ def _poll_for_job(
     clock: Callable[[], float],
     started: float,
     last: dict[str, Any] | None,
+    on_info: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
     """2초 폴링. 서버 연결 실패가 60초 넘게 이어지면 3."""
     unreachable_since: float | None = None
@@ -591,8 +888,16 @@ def _poll_for_job(
             now = clock()
             if unreachable_since is None:
                 unreachable_since = now
+                if on_info:  # 60초 동안 아무 말이 없으면 왜 기다리는지 모른다(사용자 검사 U2.9)
+                    on_info(
+                        f"server unreachable ({e.message}) — reconnecting for up to "
+                        f"{CONNECTION_GRACE_SECONDS:.0f}s"
+                    )
             if now - unreachable_since > CONNECTION_GRACE_SECONDS:
                 return EXIT_UNKNOWN, last, f"lost contact with the server: {e.message}"
+            if timeout is not None and now - started > timeout:
+                # 서버가 안 보여도 --timeout 은 지킨다
+                return EXIT_UNKNOWN, last, f"--timeout {timeout:g}s elapsed; server unreachable"
             sleep(poll_seconds)
             continue
         last = job

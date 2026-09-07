@@ -7,6 +7,54 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-09-07
+
+M5: priority, content-addressed snapshot cache, notifications, worker pools and remote workers
+(`rcm worker`). Database schema 3 → 5 (migrates on start). API schema stays `schema_version 1`
+(additive keys only). Upgrade: install the same release on the server and on every worker
+(`rcm worker` refuses a version mismatch).
+
+### Added
+- **Priority** (M5a): `rcm run --priority low|normal|high`, preset `priority` defaults that non-admin
+  sessions cannot exceed, `rcm bump N` (admin), queue order by priority then age, `queue[].priority`
+  and `presets[].priority` in the status document.
+- **Snapshot cache** (M5a): content-addressed upload — `POST /jobs/{id}/tree/manifest` returns the
+  missing hashes and `PUT …/tree` with `X-RCM-Tree: blobs` sends only those files; blobs are
+  purged by age/size but never while an active job references them; `snapshot_cache`,
+  `snapshot_cache_days`, `snapshot_cache_max_bytes`, `snapshot_cache_scope`; `source.uploaded_bytes`
+  and `source.cached_bytes`; `--no-cache`.
+- **Notifications** (M5a): `[[notify]]` rules (argv or url) on job completion, exactly once per
+  (job, rule) including after restarts; `server.notify_failures`.
+- Database schema version 3 (`priority` column, `blobs` and `notifications` tables); migrates on start.
+- **Pools** (M5b-1): `pools[]` in the status document now has one entry per worker pool
+  (`default` first); jobs carry `pool`, presets `pool`/`pools`, `rcm run --pool`, `rcm eta --pool`,
+  `rcm jobs --pool`; a pool without workers shows `worker_down` and no ETA. Schema version 4
+  (`pool` column). All additive keys.
+- **Remote worker protocol** (M5b-2): worker tokens (`rcm token add NAME --worker`, `kind` column in
+  `rcm token list`, `/api/whoami.kind`), `POST /worker/register|claim|heartbeat`,
+  `GET /worker/jobs/{id}/tree` (cache jobs are assembled into a tarball on demand),
+  `POST /worker/jobs/{id}/phase|log|finish`; a worker only ever touches jobs it claimed; a
+  worker silent for `worker_timeout_seconds` is `down` and its running jobs become `lost`;
+  re-registering closes the old jobs as lost; unconfirmed cancels are closed by the server.
+  `server.workers[]` gains `worker` and `display_name`, `pools[].lanes` counts live remote
+  lanes, remote host samples appear in the pool's `hosts[]` with `source = "worker"`,
+  `/api/health` reports `pools_without_workers`. Config `worker_timeout_seconds`,
+  `worker_heartbeat_seconds`, `worker_claim_wait_seconds`. Schema version 5 (`tokens.kind`,
+  `jobs.worker_name`, `workers` table). Server restarts no longer mark remote running jobs lost.
+- **`rcm worker`** (M5b-3): a remote worker process for a pool — `rcm worker --server URL --pool
+  NAME --lanes N [--config worker.toml] [--data DIR] [--check] [--once]`, token via
+  `RCM_WORKER_TOKEN` or `worker.toml`; downloads snapshots (cache jobs are assembled by the
+  server), fetches `git_ref` jobs from its own `[[repos]]`, streams the raw log, reports the
+  outcome, heartbeats with a host sample; SIGTERM reports running jobs as `lost` (`worker
+  stopped`). Job execution (`runner.py`) is shared with the local worker. `examples/worker.toml`.
+- **Multi-pool display** (M5b-4): remote pool headers in `rcm top` always name the pool
+  (`queue — empty (pool linux)`, `· paused`), more than five remote worker pills fold into
+  `+N workers` (down workers never fold), remote worker host samples are cards in the web Host
+  section (`build-02 · pool linux`), `rcm check` gains a `pools` row that fails when every worker
+  of a pool is down, and `server.workers[]` entries carry `pool`.
+
 ## [0.1.0] - 2026-09-06
 
 First release. One package for the build machine (`rcm serve`) and every session (`rcm run`).
@@ -31,7 +79,7 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
   password = token; writes stay Bearer-only), launchd and systemd unit examples, concurrency-group
   and signal e2e coverage.
 - **Packaging** (M4): `rcm init server` / `rcm init client --server URL`, `rcm version --json`,
-  `rcm check` Python/git rows, install smoke script, release workflow (GitHub Release + optional
+  `rcm check` Python row (with `--config server.toml` also data-dir and git rows), install smoke script, release workflow (GitHub Release + optional
   PyPI trusted publishing), Linux server `Dockerfile`.
 
 ### Known limits
@@ -40,5 +88,6 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/monocsp/remote_ci_monitor/releases/tag/v0.1.0

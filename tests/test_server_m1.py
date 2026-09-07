@@ -378,6 +378,16 @@ def test_head_and_post_on_event_streams_are_405(srv):
     assert srv.req("POST", f"/jobs/{jid}/events", json_body={})[0] == 405
 
 
+def test_unknown_http_methods_get_json_not_stdlib_html(srv):
+    """수용 검사 H8: DELETE·PATCH·OPTIONS 도 라우터가 받아 JSON 405/404 를 낸다(HTML 501 아님)."""
+    for method in ("DELETE", "PATCH", "OPTIONS"):
+        status, headers, body = srv.req(method, "/api/status", raw=True)
+        assert status == 405, (method, status)
+        assert headers.get("Content-Type", "").startswith("application/json"), method
+        assert b"<html" not in body.lower()
+    assert srv.req("DELETE", "/nope", raw=True)[0] == 404
+
+
 def test_read_auth_basic_guards_events_and_eta(tmp_path):
     srv = Server(tmp_path, workers=False, read_auth="basic")
     try:
@@ -441,6 +451,23 @@ def test_job_events_unknown_job_is_404(srv):
     s = SseStream(srv, "/jobs/999/events")
     try:
         assert s.status == 404
+    finally:
+        s.close()
+
+
+def test_job_events_never_carry_server_or_host_sample_events(srv):
+    """잡별 스트림은 그 잡의 job_changed·job_finished·marker 만(PLAN). `server` 는 마커 한 줄에도
+    발행되므로(레인 상태) 걸러야 한다 — 안 거르면 실행 중 잡의 스트림에 섞여 들어온다."""
+    jid = srv.submit()[1]["job_id"]
+    assert srv.upload(jid)[0] == 200  # 워커가 없어 queued 로 남는다
+    s = SseStream(srv, f"/jobs/{jid}/events")
+    try:
+        hello_of(s)
+        srv.app._publish_server()
+        srv.app.publish("host_sample", {"name": "macmini", "sampled_at": "2026-09-04T00:00:00Z"})
+        srv.app.publish("marker", {"job_id": jid, "kind": "step", "value": "build"})
+        fr = s.frame()
+        assert fr is not None and fr["event"] == "marker" and fr["data"]["job_id"] == jid, fr
     finally:
         s.close()
 

@@ -17,6 +17,52 @@ DAY_SECONDS = 86_400.0
 
 
 @dataclass(frozen=True)
+class BlobInfo:
+    """스냅샷 캐시 blob 하나(M5). `sha256` 은 캐시 키(token 범위면 `<token>/<sha>`)."""
+
+    sha256: str
+    size: int
+    last_used_at: datetime
+
+
+def blobs_to_purge(
+    blobs: Iterable[BlobInfo],
+    referenced: set[str],
+    now: datetime,
+    *,
+    days: int,
+    max_bytes: int,
+) -> list[BlobInfo]:
+    """지울 blob. 활성 잡이 참조하는 것은 **절대** 안 지운다.
+
+    ① `days` 이상 안 쓰인 것(경계 `>=`) ② 그래도 합계가 `max_bytes` 를 넘으면 오래된 것부터
+    (참조 안 된 것만) 넘지 않을 때까지. 출력은 `last_used_at` 오름차순.
+    """
+    items = sorted(blobs, key=lambda b: (b.last_used_at, b.sha256))
+    keep = days * DAY_SECONDS
+    purge: list[BlobInfo] = []
+    remaining: list[BlobInfo] = []
+    for b in items:
+        if b.sha256 in referenced:
+            remaining.append(b)
+            continue
+        if (now - b.last_used_at).total_seconds() >= keep:
+            purge.append(b)
+        else:
+            remaining.append(b)
+    total = sum(b.size for b in remaining)
+    for b in remaining:  # 오래된 것부터 — 참조된 것은 건너뛴다
+        if total <= max_bytes:
+            break
+        if b.sha256 in referenced:
+            continue
+        purge.append(b)
+        total -= b.size
+    purge.sort(key=lambda b: (b.last_used_at, b.sha256))
+    return purge
+
+
+@dataclass(frozen=True)
 class RetentionPolicy:
     """`[server] retention_days_success` · `retention_days_failure`."""
 

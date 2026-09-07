@@ -164,6 +164,7 @@ td.elapsed { font-family: var(--mono); white-space: nowrap; }
 
 /* ── 호스트 (항목 16 · 19) ── */
 .hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 12px 22px; align-items: start; }
+.hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
 .hostcard.dim .meter { opacity: 0.55; }
 .hostcard .hn { font-family: var(--mono); }
 .hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }
@@ -248,3 +249,6 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 @media (prefers-reduced-motion: no-preference) {
   .banner, .toast { transition: opacity 120ms ease; }
 }
+
+/* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
+.pool-h { margin: 14px 0 6px; font: 500 12px var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }

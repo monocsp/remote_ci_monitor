@@ -6,12 +6,14 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 
 - No GitHub dependency. Runs on your LAN or Tailscale.
 - Runtime dependencies: **zero** (Python 3.11+ standard library only). Same package for server and client.
+- Build machines: macOS (Apple Silicon and Intel) and Linux. Windows is out of scope (sessions on Windows can still submit through WSL).
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
-Status: **M0–M4 done (v0.1.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
-retention, service files, packaging and release. M5 (several build machines, GitHub backend) is
-next. The plan lives in `PLAN.md` (Korean); changes in `CHANGELOG.md`.
+Status: **M0–M5 done (v0.2.0)** — server, queue, worker, live events, web UI, `git_ref` deploys,
+retention, service files, packaging, priority, snapshot cache, notifications, worker pools and
+remote workers (`rcm worker`). A GitHub backend (M6) is deferred. The plan lives in `PLAN.md`
+(Korean); changes in `CHANGELOG.md`.
 
 ## Install
 
@@ -19,9 +21,9 @@ Needs Python **3.11.4+** (the safe `tarfile` filter) on both machines. One packa
 dependencies:
 
 ```sh
-pipx install remote-ci-monitor                      # from PyPI
-uvx --from remote-ci-monitor rcm version            # or run it through uv without installing
-pipx install git+https://github.com/monocsp/remote_ci_monitor   # from git (main); add @dev for the dev branch — use this before the first PyPI release
+pipx install git+https://github.com/monocsp/remote_ci_monitor   # from git (main) — the way to install until the first PyPI release; add @dev for the dev branch
+pipx install remote-ci-monitor                      # from PyPI (not published yet — see Releasing)
+uvx --from remote-ci-monitor rcm version            # or run it through uv without installing (uv: https://docs.astral.sh/uv/getting-started/installation/)
 ```
 
 No `pipx` yet? `python3 -m pip install --user pipx && python3 -m pipx ensurepath`, then open a new
@@ -46,6 +48,11 @@ Tailscale/LAN address (or `0.0.0.0`) and, on macOS, allow Python through the fir
 Check from another computer with `curl http://<build-machine>:8787/api/health`. For a service that
 survives logins and reboots see [Run as a service](#run-as-a-service).
 
+Tokens: `rcm token add ops --admin` makes an admin token (pause/resume, cancel any job, read any
+log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another port:
+`rcm serve --port 8790` (or `port = …` in server.toml). Set `public_url = "http://macmini:8787"`
+when you bind to `0.0.0.0` so job URLs in `rcm run` output open from other computers.
+
 ## Session machine (3 commands)
 
 <!-- smoke:begin -->
@@ -53,6 +60,7 @@ survives logins and reboots see [Run as a service](#run-as-a-service).
 rcm init client --server http://<build-machine>:8787   # ~/.config/rcm/client.toml (mode 600)
 export RCM_TOKEN=<token from rcm token add>            # or put it in that file as token = "…"
 rcm check                  # python · server · token · presets · timezone must all say ok
+cd ~/src/app               # any project directory — rcm run uploads the *current directory*
 rcm run ok                 # first job: exit 0 and one JSON line means everything works
 rcm top                    # queue, ETAs, recent results, host load
 ```
@@ -60,11 +68,43 @@ rcm top                    # queue, ETAs, recent results, host load
 
 Then run real work from a project directory: `cd ~/src/app && rcm run gate -f scope=full`, and
 branch on `$?` — 0 succeeded · 1 failed · 2 cancelled/timed out · 3 unknown.
+`examples/session/ci-gate.sh` is a ready-made wrapper that branches on `$?` (needs `jq`).
 
-`rcm run` snapshots the current directory (git-tracked + untracked-but-not-ignored files, minus
-`.rcmignore`), uploads it over the same HTTP connection, waits, and prints one JSON line on stdout.
+`rcm run` snapshots the **current directory** (git-tracked + untracked-but-not-ignored files, minus
+patterns in `.rcmignore` — gitignore syntax, e.g. `dist/`, `*.bin`; `--exclude PATTERN` adds one),
+uploads it over the same HTTP connection, waits, and prints one JSON line on stdout. The server
+refuses snapshots above `max_snapshot_bytes` (default 512 MB) before anything is uploaded. Symlinks
+that point outside the tree (absolute targets, e.g. a venv's `bin/python`) are skipped with a
+warning that names them. The workspace on the build machine has **no `.git`**; scripts that need
+git history belong in a `git_ref` preset (`RCM_BASE_SHA` still tells the script the commit).
 Progress goes to stderr. Ctrl-C detaches — the job keeps running; resume with `rcm wait --job N`,
 stop it with `rcm cancel N`.
+
+## Second build machine (remote worker)
+
+A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs
+`rcm worker`, which talks to the server outbound only (it works from behind NAT; the server never
+connects to workers):
+
+```sh
+# on the server
+rcm token add build-02 --worker             # printed once; a worker token only speaks /worker/*
+# on the second machine (same rcm release as the server)
+export RCM_WORKER_TOKEN=<that token>
+rcm worker --server http://macmini:8787 --pool linux --lanes 1 --check   # server · token kind · pool
+rcm worker --server http://macmini:8787 --pool linux --lanes 1           # Ctrl-C or SIGTERM stops it
+```
+
+The worker registers, claims one queued job of its pool per lane, downloads the snapshot (or
+fetches the `git_ref` from its own `[[repos]]` — put a `worker.toml` next to it and pass
+`--config`), streams the raw log to the server, which parses the step markers, and reports the
+outcome. `rcm top` and the web header show it as `build-02/1 busy #511`; its host sample appears
+under that pool. If the server hears no heartbeat for `worker_timeout_seconds` (60) the worker
+shows `down`, its running jobs become `lost` (`worker build-02 unreachable for 61s`) and are not
+resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`worker stopped`).
+`worker.toml` keys: `server`, `token` (or the env var), `pool`, `lanes`, `name`, `data_dir`,
+`grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
+`examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
 
 ## Presets and step markers
 
@@ -75,6 +115,8 @@ arrive as `RCM_INPUT_<NAME>` environment variables (never spliced into the comma
 [[presets]]
 name = "gate"
 argv = ["bash", "scripts/gate.sh"]      # runs from the uploaded workspace root
+pool = "default"                        # worker pool for this preset's jobs (default "default")
+pools = []                              # extra pools a session may choose with --pool
 timeout_seconds = 1200
 expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
@@ -136,16 +178,57 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--no-wait] [--poll]` | snapshot → submit (joins an identical active job) → upload → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low|normal|high`; `--no-cache` uploads a full tarball; `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
-| `rcm eta PRESET [-f k=v]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
+| `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
-| `rcm jobs [--mine] [--state S]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
+| `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
-| `rcm presets` | presets the server offers and their inputs |
+| `rcm presets [--json]` | presets the server offers and their inputs |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
+| `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
+
+`rcm check --config server.toml` validates a server config (and its data dir, git) without starting it.
 
 Every estimate carries `confidence`: `high` (median of ≥ 5 real runs), `med` (< 5), `low` (preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown values print as `—`, never as 0.
+
+## Priority, snapshot cache and notifications
+
+- **Priority** — three levels, `low` · `normal` · `high`. `rcm run gate --priority high` starts
+  before waiting normal jobs (queue order is priority, then age). A preset can set its default
+  (`priority = "high"`); without an admin token a session can lower but not raise a job above the
+  preset default. Admins reorder waiting jobs with `rcm bump N --priority high`. While `high` jobs
+  keep arriving, `normal` jobs wait — the queue shows it; nothing hides it. A joined submission with
+  a higher priority raises the existing job.
+- **Snapshot cache** — the server keeps uploaded files by content hash (`snapshot_cache = true`,
+  default). `rcm run` sends a manifest first and then only the files the server does not have:
+  the second upload of a mostly unchanged tree transfers a few percent of it. Blobs unused for
+  `snapshot_cache_days` (30) or beyond `snapshot_cache_max_bytes` (4 GiB) are purged; blobs
+  referenced by active jobs never are. Set `snapshot_cache_scope = "token"` to keep each client's
+  blobs separate (by default identical content is shared between clients, which also means a
+  client can learn whether a given file already exists on the server). `--no-cache` sends a full
+  tarball; combine it with `--no-join` to force a fresh job for an unchanged tree.
+- **Pools** — a job runs in a worker pool. The local worker is pool `default`; a preset can
+  declare `pool = "linux"` (its default) and `pools = ["default"]` (extra pools a session may pick
+  with `--pool`). Jobs of a pool with no workers wait with reason `worker_down` and no ETA —
+  nothing pretends they will start.
+- **Remote workers** — another machine serves a pool by talking to the server with a worker token
+  (`rcm token add build-02 --worker`; worker tokens can only use `/worker/*`, never submit or
+  cancel). The worker registers, claims one queued job per lane, downloads the snapshot, streams
+  the raw log (the server parses step markers) and reports the outcome; a heartbeat every
+  `worker_heartbeat_seconds` (5) keeps it alive. If the server hears nothing for
+  `worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
+  (`worker build-02 unreachable for 61s`) and are not resumed — resubmit. A worker that restarts
+  re-registers and its old jobs are closed as lost too. `rcm top` and the web header show each
+  remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
+  process itself (`rcm worker`) ships in the next release step (M5b-3).
+- **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
+  when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
+  `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
+  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL` and `RCM_NOTIFY` (rule name);
+  user strings are sanitised and capped at 4 KB. Each (job, rule) fires exactly once, including
+  jobs that finished while the server was down. Failures are logged and counted
+  (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
 
 ## Web UI
 
@@ -161,7 +244,7 @@ estimates are computed.
   backoff. After 30 s without a successful response a **Lost connection** banner appears and the
   ages keep counting — the page never pretends to be current.
 - Paste your token with the 🔑 button to highlight your jobs, see log tails, open full logs and
-  cancel. Only a 401/403 clears a saved token; network errors keep it.
+  cancel your running or queued jobs. Only a 401/403 clears a saved token; network errors keep it.
 - `#/jobs/N` deep-links to a job. `?poll=1` disables the event stream (polling only), `?debug=1`
   prints layout diagnostics in the footer — both are for troubleshooting.
 - Dark/light follow the system. Below 720 px the queue turns into cards.
@@ -175,11 +258,17 @@ estimates are computed.
 | 2 | cancelled or timed out |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
 
-Usage errors and validation failures that never reach the server exit with 2 as well.
+Usage errors and validation failures that never reach the server exit with 2 as well — including
+`rcm run` when the server cannot be reached before submit. `rcm wait` gives an unreachable server
+60 s to come back (printing `reconnecting…`) before exiting 3; `rcm eta`, `rcm jobs` and `rcm top`
+fail fast with `cannot reach <url>` and exit 3.
 
 ## Security notes
 
 - Every write (submit, upload, cancel) needs a bearer token. The server stores only a SHA-256 of it.
+  Tokens have a kind: `client` (sessions), `admin` (cancel any job, pause, bump) and `worker`
+  (remote workers — `/worker/*` only). A worker can report only on jobs it claimed itself; the
+  log bytes and host samples it sends are treated as data, never parsed as commands.
 - Only configured presets run. No shell interpolation. Uploads are extracted with Python's
   `tarfile` data filter (no absolute paths, no `..`, no links outside the workspace).
 - The server binds to `127.0.0.1` unless you set `bind`. It does not do TLS — put it behind
@@ -215,15 +304,27 @@ every `retention_sweep_interval_seconds` (3600). Running jobs are never touched;
 purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
 `/api/health` turns 503 — nothing here fails silently.
 
+## Upgrade
+
+`pipx upgrade remote-ci-monitor` (or `pipx install --force <wheel>`), then restart `rcm serve`
+(`launchctl kickstart -k gui/$(id -u)/com.remote-ci-monitor.server` · `systemctl restart rcm-server`).
+The database migrates on start; queued jobs and a paused queue survive, jobs that were running
+become `lost` (exit 3 for waiting sessions). Sessions may run a different patch version —
+`rcm check` shows both versions.
+
 ## Run as a service
 
 Keep `rcm serve` alive across logins and reboots with the example units in `examples/`:
 
-- **macOS (launchd)** — `examples/launchd/com.remote-ci-monitor.server.plist`. Edit the paths,
-  copy it to `~/Library/LaunchAgents/` of the dedicated `rcm` user and run
+- **macOS (launchd)** — `examples/launchd/com.remote-ci-monitor.server.plist`. Create the
+  dedicated user in System Settings → Users & Groups (Standard, no admin). Replace every
+  `/Users/rcm` in the file (7 places: the `rcm` binary, `server.toml`, WorkingDirectory, the two
+  log paths, `PATH`, `HOME`), then as that user `mkdir -p ~/Library/Logs/rcm ~/Library/LaunchAgents`,
+  copy the file there and run
   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.server.plist`
-  (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` to stop). Logs go to
-  `~/Library/Logs/rcm/server.log`. launchd does not expand `~`, so every path in the file is absolute.
+  (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` to stop). launchd does not create
+  the log directory (a missing one makes the job exit silently) and does not expand `~`, so every
+  path in the file is absolute. Logs go to `~/Library/Logs/rcm/server.log`.
 - **Linux (systemd)** — `examples/systemd/rcm-server.service`. Copy to `/etc/systemd/system/`,
   then `sudo systemctl daemon-reload && sudo systemctl enable --now rcm-server`;
   `journalctl -u rcm-server -f` shows the log.
@@ -278,6 +379,14 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
     your TLS proxy, the browser must prompt and accept token name + token. With
     `retention_days_success = 0` a finished job's log must answer `log expired` after the next
     sweep while the job stays in **Recent**.
+
+11. M5b items: on a second computer (or the same one with another data dir) run
+    `rcm worker --server http://<build-machine>:8787 --pool mac2 --lanes 1` with a worker token,
+    give a preset `pool = "mac2"`, and `rcm run` it — the job must run there, its steps and host
+    card must show under **pool mac2** in `rcm top` and the web page, and `rcm logs` must return
+    the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the job
+    must be `lost` with `worker … unreachable`, the header must show `<token name>/1 down`, and a
+    restarted worker must pick up the next job.
 
 ## Releasing
 
