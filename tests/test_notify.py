@@ -629,3 +629,29 @@ def test_lag_on_the_bus_triggers_a_rescan_so_nothing_is_lost(env, started):
     settle()
     assert [e["RCM_JOB_ID"] for e in run.envs()] == [str(job.id)]
     assert store.claim_notification(job.id, "all", at(1)) is False
+
+
+# ── 훅 env 에 PATH · HOME · LANG (실배치에서 발견: `date` 를 못 찾아 exit 1) ──────────
+
+
+def test_argv_hook_gets_path_home_lang_from_the_server_environment(env, monkeypatch, tmp_path):
+    """훅 스크립트는 프리셋처럼 PATH·HOME·LANG 을 물려받는다 — RCM_* 만 주면 `date` 도 `$HOME` 도
+    없어 대부분의 셸 스크립트가 exit 1 로 끝난다. 다른 서버 변수(토큰 등)는 넘기지 않는다."""
+    from remote_ci_monitor.notify import NOTIFY_ENV_PASSTHROUGH
+
+    assert NOTIFY_ENV_PASSTHROUGH == ("PATH", "HOME", "LANG")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    monkeypatch.setenv("RCM_SECRET_TOKEN", "must-not-leak")
+    store, cfg, bus = env
+    cfg.notify = (rule("hook", argv=("/bin/sh", "/opt/rcm/notify.sh")),)
+    run = FakeRun()
+    n, _logs = notifier_for(store, cfg, bus, run=run)
+    job = finished_job(store, state=FAILED, preset="gate", finished=at(0))
+    assert n.deliver(job) == 1
+    _argv, kw = run.calls[0]
+    e = kw["env"]
+    assert e["PATH"] == "/usr/bin:/bin" and e["HOME"] == str(tmp_path)
+    assert e["LANG"] == "en_US.UTF-8" and e["RCM_STATE"] == "failed"
+    assert "RCM_SECRET_TOKEN" not in e
