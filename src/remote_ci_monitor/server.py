@@ -622,6 +622,10 @@ class App(RemoteWorkersMixin):
         for row in self._workers():  # 잡이 없어도 워커가 등록된 풀은 보인다(M5b-2)
             if row.pool not in pool_names:
                 pool_names.append(row.pool)
+        # list_pools 가 실패해도 큐·최근에 보이는 풀은 떨어뜨리지 않는다(격리 검증 리뷰 노트)
+        for job in [*(r.job for r in queue or []), *(snap.recent or [])]:
+            if job.pool not in pool_names:
+                pool_names.append(job.pool)
         pools: list[Pool] = []
         for name in pool_names:
             local = name == DEFAULT_POOL

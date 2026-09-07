@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
+CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
 CREATE TABLE IF NOT EXISTS joiners (
@@ -180,6 +181,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "UPDATE tokens SET kind='admin' WHERE admin=1",
         "ALTER TABLE jobs ADD COLUMN worker_name TEXT",
         "CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state)",
+        "CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool)",  # list_pools 가 status 마다 돈다
         _WORKERS_SQL,
     ),
 }
