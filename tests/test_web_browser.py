@@ -30,7 +30,8 @@ from typing import Any
 
 import pytest
 
-from test_server import Server
+from remote_ci_monitor.config import parse_preset
+from test_server import PRESETS, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
@@ -405,3 +406,35 @@ def test_screenshot_for_owner_review(scene, tmp_path):
     print("screenshot:", path)
     assert path.is_file() and path.stat().st_size == size
     assert size > 10_000, f"screenshot is only {size} bytes — blank page?"
+
+
+def test_recent_shows_another_pools_finished_job_when_default_has_none(tmp_path):
+    """기본 풀에 완료 잡이 없어도 다른 풀의 완료 잡은 Recent 에 보인다 — 첫 풀의 recent 만 보고
+    「No completed jobs yet」으로 끝내던 회귀(M5b-1 격리 검증). `pool linux` 칩도 같이 본다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        srv.cfg.presets = tuple(
+            parse_preset(p) for p in [*PRESETS, sh("lin", "echo lin", pool="linux")]
+        )
+        jid = srv.submit(preset="lin")[1]["job_id"]
+        assert srv.upload(jid)[0] == 200
+        assert srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})[0] < 300
+        doc = status_until(
+            srv,
+            lambda d: (
+                len(d["pools"]) == 2 and any(r["id"] == jid for r in d["pools"][1]["recent"] or [])
+            ),
+            timeout=5.0,
+        )
+        assert doc["pools"][0]["recent"] == [] and doc["pools"][1]["name"] == "linux", doc["pools"]
+        with Chrome(tmp_path / "chrome-recent", window="1240,900") as c:
+            c.open(
+                f"http://127.0.0.1:{srv.port}/?poll=1",
+                ready_js=f"document.querySelector('#recent [data-job=\"{jid}\"]') !== null",
+            )
+            row_text = c.eval(f"document.querySelector('#recent [data-job=\"{jid}\"]').textContent")
+            recent_text = c.eval("document.querySelector('[data-recent-body]').textContent")
+    finally:
+        srv.close()
+    assert "cancelled" in row_text and "pool linux" in row_text, row_text
+    assert "No completed jobs yet" not in recent_text
