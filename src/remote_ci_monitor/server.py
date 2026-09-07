@@ -1831,7 +1831,9 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if job_id is not None and ev.kind in JOB_KINDS and ev.data.get("job_id") != job_id:
                     continue
-                if job_id is not None and ev.kind == KIND_HOST_SAMPLE:
+                if job_id is not None and ev.kind in (KIND_HOST_SAMPLE, KIND_SERVER):
+                    # 잡별 스트림은 그 잡의 job_changed·job_finished·marker 만(PLAN).
+                    # `server`(레인 상태)는 마커 한 줄에도 발행되므로 여기서 걸러야 한다
                     continue
                 self._sse_write(ev.kind, ev.id, ev.data)
                 last_write = time.monotonic()
