@@ -154,7 +154,8 @@ resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`w
 
 ## Client and worker files
 
-`client.toml` (mode 600 — it holds a token):
+`client.toml` (mode 600 — a file that holds a token and is readable by anyone else is
+**refused**, not warned about):
 
 ```toml
 server = "http://macmini.local:8787"   # leave empty (or "auto") to find the server on this network

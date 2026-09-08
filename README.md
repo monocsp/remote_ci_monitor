@@ -92,9 +92,19 @@ Keep it running across logins and reboots with the launchd and systemd examples 
 
 ## Session machine (3 commands)
 
-On the same Wi-Fi or LAN as the build machine a session needs no address: leave `server` empty
-(or `server = "auto"`) and rcm finds it, which `rcm discover` shows. From another network you need
-a route of your own — Tailscale, or a tunnel — and then that address goes in `client.toml`.
+A session needs two things: **where** the server is, and **who you are**. Only the first one can
+be automatic.
+
+On the same Wi-Fi or LAN as the build machine, leave `server` empty (or `server = "auto"`) and rcm
+finds it, which `rcm discover` shows. That needs rcm **0.2.2 or newer on both sides** — an older
+client has no discovery and stops with `no server configured`, and unlike `rcm worker` it never
+compares its version with the server's. From another network you need a route of your own —
+Tailscale, or a tunnel — and then that address goes in `client.toml`.
+
+The token is the other half, and it is deliberately manual. `rcm token add` runs **on the build
+machine** and writes straight to the server's database; there is no API that hands a token out, and
+there will not be one. So on a machine that has just found the server, `rcm check` showing a green
+**server** row and a red **token** row is not a bug — copying the token over is the one step left.
 
 <!-- smoke:begin -->
 ```sh
