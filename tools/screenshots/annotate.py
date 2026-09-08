@@ -35,7 +35,7 @@ def draw_boxes(
     """빨간 사각형 + 번호 원을 그린다.
 
     boxes: `[(번호, (x, y, w, h)[, 위치]), …]` — 이미지 픽셀 좌표.
-    위치: `tl`(기본) · `tr` · `l`(왼쪽 바깥) · `t`(위 바깥).
+    위치: `tl`(기본) · `tr` · `r`(오른쪽 바깥) · `l`(왼쪽 바깥) · `t`(위 바깥).
     """
     img = img.convert("RGBA")
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -52,7 +52,9 @@ def draw_boxes(
         x0, y0 = max(1, x - pad), max(1, y - pad)
         x1 = min(img.width - 2, x + w + pad)
         r = badge / 2
-        if pos == "tr":
+        if pos == "r":  # 상자 바깥 오른쪽 — 글자를 덮지 않는다
+            cx, cy = x1 + r + 2, y0 + r - 4
+        elif pos == "tr":
             cx, cy = x1, y0
         elif pos == "l":
             cx, cy = x0 - r + 2, y0 + r - 4
