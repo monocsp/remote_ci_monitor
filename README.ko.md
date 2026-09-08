@@ -57,7 +57,16 @@ rcm serve                  # http://127.0.0.1:8787 · Ctrl-C or SIGTERM stops it
 `rcm serve --port 8790`(또는 server.toml 의 `port = …`). `0.0.0.0` 에 바인드하면
 `public_url = "http://macmini:8787"` 을 두어 `rcm run` 출력의 잡 URL 이 다른 컴퓨터에서도 열리게 한다.
 
+`bind` 를 루프백이 아닌 주소로 두면 서버는 같은 네트워크에 자신을 광고한다(`_rcm._tcp`, mDNS/DNS-SD —
+`advertise = false` 로 끄고 `advertise_name` 으로 이름을 바꾼다). 그러면 같은 네트워크의 세션은
+`rcm discover` 로 서버를 보거나, 아무것도 안 해도 `rcm run` 이 찾는다.
+
 ## Session machine (3 commands)
+
+빌드 머신과 **같은 Wi-Fi/LAN** 이면 주소를 몰라도 된다: `server` 를 비워 두면(또는 `server = "auto"`)
+`rcm` 이 mDNS/DNS-SD 로 서버를 찾는다(`rcm discover` 가 보이는 서버를 나열한다). 다른 네트워크에서는
+길이 필요하다 — Tailscale 이든 직접 둔 터널이든 — 그러면 서버 주소를 `client.toml` 에 적는다. 서버가
+루프백에만 묶여 있으면 광고하지 않는다(`advertise = false` 로 명시적으로 끌 수도 있다).
 
 ```sh
 rcm init client --server http://<build-machine>:8787   # ~/.config/rcm/client.toml (mode 600)
@@ -219,6 +228,7 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함 |
 | `rcm logs N [--follow]` | 잡 로그(내 잡, 합류한 잡, 또는 admin 토큰이면 아무 잡) |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
+| `rcm discover [--json] [--timeout S]` | 같은 네트워크의 rcm 서버 목록(mDNS). 발견한 서버를 쓴 `rcm check` 는 `(found on this network)` 라고 말한다 |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류 목록에서만 빠진다) · 큐 정지/재개(admin) |
 | `rcm bump N [--priority high]` | 대기 잡의 우선순위 변경(admin) |
 
@@ -346,6 +356,10 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 `rcm eta` · `rcm jobs` · `rcm top` 은 `cannot reach <url>` 로 바로 3 이다.
 
 ## Security notes
+
+- 발견 응답(`_rcm._tcp`)에는 서버 이름 · 포트 · 버전 · 레인 수 · LAN IP 만 들어 있다 — 토큰 · 프리셋 · 경로는
+  없다. 같은 LAN 의 누구나 빌드 서버가 있다는 것은 알 수 있고, 읽기 API 는 `read_auth = "basic"` 이 아니면
+  LAN 에 열려 있다.
 
 - 모든 쓰기(제출, 업로드, 취소)에는 bearer 토큰이 필요하다. 서버는 그 SHA-256 만 저장한다. 토큰에는
   종류가 있다: `client`(세션), `admin`(아무 잡이나 취소, 정지, bump), `worker`(원격 워커 —

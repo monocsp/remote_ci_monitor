@@ -952,3 +952,170 @@ def test_example_server_toml_accepts_the_worker_keys_if_present():
     assert s.worker_timeout_seconds >= 10
     assert 1 <= s.worker_heartbeat_seconds < s.worker_timeout_seconds
     assert 0 <= s.worker_claim_wait_seconds <= 60
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── M5c (test-first, 2026-09-08): `[server] advertise` · `advertise_name` · `advertise_enabled()` ·
+#    클라이언트 `server = "auto"` / `ClientConfig.wants_discovery`. 명세는 docs/m5c-workplan.md §2
+#    (`advertise = true|false`, 기본: `bind` 가 루프백이 아니면 true · `advertise_name` 은
+#    이름 규칙, 빈 값 = 짧은 호스트명) · §3(`client.toml` 의 `server = "auto"` 허용 · 결정 순서는
+#    그대로) ·
+#    §6 결정 33(광고는 bind 가 루프백이 아닐 때만). 구현 전이라 빨갛다.
+#    잠그는 모양: `ServerSection.advertise: bool | None = None`(None = 자동) ·
+#    `ServerSection.advertise_name: str = ""` · `config.advertise_enabled(section) -> bool` ·
+#    `load_client_config` 는 "auto" 를 **그대로** 둔다(빈 문자열로 바꾸지 않는다) ·
+#    `ClientConfig.wants_discovery` 는 "" 와 "auto" 에서 True. 오류는 `[server] <키>` 를 찍는다.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_advertise_keys_have_defaults(tmp_path):
+    from remote_ci_monitor.config import ServerSection
+
+    s = ServerSection()
+    assert s.advertise is None  # None = 자동(bind 로 정한다)
+    assert s.advertise_name == ""  # 빈 값 = 짧은 호스트명
+    cfg = load(tmp_path, GOOD)  # 파일에 키가 없으면 기본값 그대로
+    assert cfg.server.advertise is None and cfg.server.advertise_name == ""
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_advertise_from_file(tmp_path, value: str):
+    cfg = load(tmp_path, server_toml(advertise=value))
+    assert cfg.server.advertise is (value == "true")
+
+
+def test_advertise_name_from_file(tmp_path):
+    cfg = load(tmp_path, server_toml(advertise_name='"macmini"'))
+    assert cfg.server.advertise_name == "macmini"
+
+
+def test_advertise_keys_from_env(tmp_path):
+    p = write(tmp_path, GOOD)
+    cfg = load_server_config(
+        p, environ={"RCM_SERVER_ADVERTISE": "false", "RCM_SERVER_ADVERTISE_NAME": "build-02"}
+    )
+    assert cfg.server.advertise is False and cfg.server.advertise_name == "build-02"
+    assert load_server_config(p, environ={"RCM_SERVER_ADVERTISE": "true"}).server.advertise is True
+    with pytest.raises(ConfigError) as e:
+        load_server_config(p, environ={"RCM_SERVER_ADVERTISE": "maybe"})
+    assert "[server] advertise" in msg(e, tmp_path)
+
+
+@pytest.mark.parametrize("bad", ["1", "[true]"], ids=["int", "list"])
+def test_advertise_must_be_a_boolean(tmp_path, bad: str):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, server_toml(advertise=bad))
+    assert "[server] advertise" in msg(e, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ['"bad name"', '"-mini"', '"mac/mini"', '"mac mini.local"', f'"{"a" * 65}"', "5"],
+    ids=["space", "dash-first", "slash", "space-dot", "too-long", "int"],
+)
+def test_advertise_name_must_be_a_short_identifier(tmp_path, bad: str):
+    # 프리셋·토큰·풀 이름과 같은 규칙(`_NAME_RE`) — DNS 라벨로 나간다. 오류엔 키 이름.
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, server_toml(advertise_name=bad))
+    assert "[server] advertise_name" in msg(e, tmp_path)
+
+
+def test_advertise_name_accepts_dots_dashes_and_empty(tmp_path):
+    cfg = load(tmp_path, server_toml(advertise_name='"mac-mini.lab"'))
+    assert cfg.server.advertise_name == "mac-mini.lab"
+    assert load(tmp_path, server_toml(advertise_name='""')).server.advertise_name == ""
+
+
+@pytest.mark.parametrize(
+    ("advertise", "bind", "expected"),
+    [
+        (None, "127.0.0.1", False),  # 기본: 루프백이면 광고하지 않는다(결정 33)
+        (None, "localhost", False),
+        (None, "0.0.0.0", True),
+        (None, "192.168.0.10", True),
+        (None, "100.64.0.1", True),  # Tailscale 주소도 「루프백이 아님」
+        (True, "127.0.0.1", True),  # 명시 true 는 bind 와 무관
+        (False, "0.0.0.0", False),  # 명시 false 도 bind 와 무관
+        (False, "127.0.0.1", False),
+    ],
+)
+def test_advertise_enabled(advertise: bool | None, bind: str, expected: bool):
+    from remote_ci_monitor.config import ServerSection, advertise_enabled
+
+    assert advertise_enabled(ServerSection(bind=bind, advertise=advertise)) is expected
+
+
+def test_advertise_enabled_follows_the_loaded_bind(tmp_path):
+    from remote_ci_monitor.config import advertise_enabled
+
+    assert advertise_enabled(load(tmp_path, GOOD).server) is False  # 기본 bind 127.0.0.1
+    assert advertise_enabled(load(tmp_path, server_toml(bind='"0.0.0.0"')).server) is True
+    off = load(tmp_path, server_toml(bind='"0.0.0.0"', advertise="false")).server
+    assert advertise_enabled(off) is False
+
+
+@pytest.mark.parametrize(
+    ("advertise", "bind", "warns"),
+    [
+        (True, "127.0.0.1", True),  # 격리 검증: 목록에는 뜨는데 LAN IP 로 curl → connection refused
+        (True, "localhost", True),
+        (True, "0.0.0.0", False),
+        (None, "127.0.0.1", False),  # 기본값이면 광고 자체를 안 한다 — 경고할 것도 없다
+        (None, "0.0.0.0", False),
+        (False, "127.0.0.1", False),
+    ],
+)
+def test_advertise_warning_only_when_advertising_on_a_loopback_bind(
+    advertise: bool | None, bind: str, warns: bool
+):
+    """`advertise = true` + 루프백 bind: 광고는 하되(명시값 존중) 다른 머신은 발견만 되고
+    못 붙는다고 서버 로그 한 줄. 그 외는 None."""
+    from remote_ci_monitor.config import ServerSection, advertise_warning
+
+    msg = advertise_warning(ServerSection(bind=bind, advertise=advertise))
+    if warns:
+        assert msg and msg.startswith("warning:") and bind in msg and "cannot connect" in msg
+    else:
+        assert msg is None
+
+
+def test_example_server_toml_accepts_the_advertise_keys_if_present():
+    """예시 파일에 키를 넣어도 된다(필수는 아니다 — 문서 테스트가 `advertise` 줄을 요구하되 주석을
+    허용한다). 넣었다면 검증을 통과해야 한다."""
+    import re
+
+    from remote_ci_monitor.config import _NAME_RE
+
+    cfg = load_server_config(EXAMPLE_SERVER_TOML, environ={}, check_tools=False)
+    assert cfg.server.advertise in (None, True, False)
+    assert cfg.server.advertise_name == "" or re.match(_NAME_RE, cfg.server.advertise_name)
+
+
+# ── 클라이언트: server = "auto" · wants_discovery ─────────────────────────────
+
+
+def test_client_server_auto_is_kept_and_wants_discovery(tmp_path):
+    p = write(tmp_path, 'server = "auto"\n', "client.toml")
+    cfg = load_client_config(p, environ={})
+    assert cfg.server == "auto"  # 빈 문자열로 바꾸지 않는다 — 사용자가 적은 그대로
+    assert cfg.wants_discovery is True
+
+
+def test_client_wants_discovery_when_server_is_empty(tmp_path):
+    from remote_ci_monitor.config import ClientConfig
+
+    assert ClientConfig().wants_discovery is True
+    assert ClientConfig(server="http://mini:8787").wants_discovery is False
+    p = write(tmp_path, 'token_env = "RCM_TOKEN"\n', "client.toml")  # server 줄 없음
+    cfg = load_client_config(p, environ={})
+    assert cfg.server == "" and cfg.wants_discovery is True
+    cfg = load_client_config(p, environ={"RCM_SERVER": "http://mini:8787/"})
+    assert cfg.server == "http://mini:8787" and cfg.wants_discovery is False
+
+
+def test_client_env_and_flag_override_auto(tmp_path):
+    p = write(tmp_path, 'server = "auto"\n', "client.toml")
+    cfg = load_client_config(p, environ={"RCM_SERVER": "http://mini:8787/"})
+    assert cfg.server == "http://mini:8787" and cfg.wants_discovery is False
+    cfg = load_client_config(p, environ={"RCM_SERVER": "http://mini:8787"}, server="http://x:1")
+    assert cfg.server == "http://x:1" and cfg.wants_discovery is False

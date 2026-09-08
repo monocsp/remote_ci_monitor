@@ -242,6 +242,7 @@ class Store:
         self.path = Path(path)
         self._local = threading.local()
         self._lock = threading.Lock()
+        self.open_connections = 0  # 지금 열린 연결 수(스레드마다 하나) — 누수 감시
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
 
@@ -256,13 +257,19 @@ class Store:
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA foreign_keys=ON")
             self._local.conn = conn
+            with self._lock:
+                self.open_connections += 1
         return conn
 
     def close(self) -> None:
+        """이 스레드의 연결을 닫는다. 요청 스레드는 끝날 때 꼭 부른다 — 스레드가 죽어도 연결은
+        스스로 닫히지 않아 파일 핸들이 쌓였다(실배치: 252개 → 'Too many open files' → 전부 500)."""
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             conn.close()
             self._local.conn = None
+            with self._lock:
+                self.open_connections -= 1
 
     def migrate(self) -> None:
         """`PRAGMA user_version` 기준으로 빠진 마이그레이션만 적용한다."""
