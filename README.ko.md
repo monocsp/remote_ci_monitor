@@ -11,7 +11,7 @@ English: [README.md](README.md)
 - 빌드 머신은 macOS(Apple Silicon · Intel)와 Linux. Windows 는 범위 밖이다(Windows 의 세션은 WSL 로 제출한다).
 - 세션은 **작업 트리를 있는 그대로**(미커밋 변경 포함) 올린다. 게이트가 초록이면 *이* 트리가 통과한 것이다.
 
-Status: **M0–M5 done (v0.2.1)** — 서버 · 큐 · 워커 · 실시간 이벤트 · 웹 UI · `git_ref` 배포 · 보존
+Status: **M0–M5 done (v0.2.2)** — 서버 · 큐 · 워커 · 실시간 이벤트 · 웹 UI · `git_ref` 배포 · 보존
 정리 · 서비스 파일 · 패키징 · 우선순위 · 스냅샷 캐시 · 알림 · 워커 풀 · 원격 워커(`rcm worker`).
 GitHub 백엔드는 없고 계획도 없다. GitHub 은 커밋 · 푸시 · PR 머지 전용이다. 계획서는 `PLAN.md`,
 변경 이력은 `CHANGELOG.md`.
@@ -57,7 +57,16 @@ rcm serve                  # http://127.0.0.1:8787 · Ctrl-C or SIGTERM stops it
 `rcm serve --port 8790`(또는 server.toml 의 `port = …`). `0.0.0.0` 에 바인드하면
 `public_url = "http://macmini:8787"` 을 두어 `rcm run` 출력의 잡 URL 이 다른 컴퓨터에서도 열리게 한다.
 
+`bind` 를 루프백이 아닌 주소로 두면 서버는 같은 네트워크에 자신을 광고한다(`_rcm._tcp`, mDNS/DNS-SD —
+`advertise = false` 로 끄고 `advertise_name` 으로 이름을 바꾼다). 그러면 같은 네트워크의 세션은
+`rcm discover` 로 서버를 보거나, 아무것도 안 해도 `rcm run` 이 찾는다.
+
 ## Session machine (3 commands)
+
+빌드 머신과 **같은 Wi-Fi/LAN** 이면 주소를 몰라도 된다: `server` 를 비워 두면(또는 `server = "auto"`)
+`rcm` 이 mDNS/DNS-SD 로 서버를 찾는다(`rcm discover` 가 보이는 서버를 나열한다). 다른 네트워크에서는
+길이 필요하다 — Tailscale 이든 직접 둔 터널이든 — 그러면 서버 주소를 `client.toml` 에 적는다. 서버가
+루프백에만 묶여 있으면 광고하지 않는다(`advertise = false` 로 명시적으로 끌 수도 있다).
 
 ```sh
 rcm init client --server http://<build-machine>:8787   # ~/.config/rcm/client.toml (mode 600)
@@ -219,6 +228,7 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함 |
 | `rcm logs N [--follow]` | 잡 로그(내 잡, 합류한 잡, 또는 admin 토큰이면 아무 잡) |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
+| `rcm discover [--json] [--timeout S]` | 같은 네트워크의 rcm 서버 목록(mDNS). 발견한 서버를 쓴 `rcm check` 는 `(found on this network)` 라고 말한다 |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류 목록에서만 빠진다) · 큐 정지/재개(admin) |
 | `rcm bump N [--priority high]` | 대기 잡의 우선순위 변경(admin) |
 
@@ -347,6 +357,10 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 
 ## Security notes
 
+- 발견 응답(`_rcm._tcp`)에는 서버 이름 · 포트 · 버전 · 레인 수 · LAN IP 만 들어 있다 — 토큰 · 프리셋 · 경로는
+  없다. 같은 LAN 의 누구나 빌드 서버가 있다는 것은 알 수 있고, 읽기 API 는 `read_auth = "basic"` 이 아니면
+  LAN 에 열려 있다.
+
 - 모든 쓰기(제출, 업로드, 취소)에는 bearer 토큰이 필요하다. 서버는 그 SHA-256 만 저장한다. 토큰에는
   종류가 있다: `client`(세션), `admin`(아무 잡이나 취소, 정지, bump), `worker`(원격 워커 —
   `/worker/*` 만). 워커는 자기가 가져간 잡만 보고할 수 있고, 워커가 보내는 로그 바이트와 호스트 표본은
@@ -411,6 +425,19 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
   코드 3)가 된다. 대기 잡은 살아남아 재시작 뒤 시작된다.
 - 유닛의 `PATH` 가 프리셋이 물려받는 값이다(`env_passthrough`) — Homebrew 와 툴체인을 거기 넣는다.
   머신은 깨어 있어야 한다(macOS 는 `pmset -a sleep 0`).
+
+실배치(Mac mini 의 Flutter 모노레포 게이트)에서 배운 세 가지:
+
+- **서비스의 `PATH` 가 곧 프리셋의 `PATH` 다**(`env_passthrough` 로 넘어간다). 툴체인을 앞에 두고,
+  rcm 을 설치한 venv 의 인터프리터는 절대 앞에 두지 않는다 — 그러면 프리셋의 `python3` 가 조용히 그
+  venv 의 Python(패키지 없음)이 된다. 서비스 파일에서는 `rcm` 바이너리를 절대 경로로 부른다. macOS 는
+  `/usr/sbin` 도 넣는다(`sysctl` · `ioreg` 가 호스트 카드를 채운다).
+- **macOS 개인정보 보호(TCC)는 launchd 서비스에도 걸린다.** 서비스는 사용자가 허용하지 않는 한
+  `~/Documents` · `~/Desktop` · `~/Downloads` 를 읽지 못하고, 실패는 멈춤이나 `Operation not permitted`
+  로 보인다. `data_dir` · 프리셋 · `[[repos]]` 미러 · 알림 훅이 부르는 스크립트는 전부 `~/.local/share`
+  나 `~/.config` 아래에 둔다.
+- **훅에는 키체인이 없다.** `gh` · `aws` 같은 도구를 부르는 `[[notify]]` 명령은 토큰을 파일(600)에서
+  환경변수로 읽어야 한다. 대화형 키링은 없어서 호출이 훅 타임아웃까지 멈춘다.
 
 ## Docker (Linux build machine)
 

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -35,6 +37,41 @@ NOTIFY_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG")  # 프리셋의 env_passthroug
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _pid_of(exc: BaseException) -> int | None:
+    """`TimeoutExpired` 에서 프로세스 그룹을 찾는다 — 표준 예외엔 pid 가 없어 `subprocess.run` 을
+    감싼 `_run_group` 이 `pid` 속성을 붙여 준다. 없으면 None(가짜 run 등)."""
+    return getattr(exc, "pid", None)
+
+
+def _kill_group(pid: int | None) -> None:
+    if not pid:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        time.sleep(0.2)
+
+
+def run_hook(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+    """`subprocess.run` 과 같되, 타임아웃 예외에 `pid` 를 실어 호출자가 그룹째 죽일 수 있게 한다."""
+    timeout = kw.pop("timeout", None)
+    if kw.pop("capture_output", False):  # subprocess.run 의 편의 인자를 Popen 용으로 푼다
+        kw["stdout"] = subprocess.PIPE
+        kw["stderr"] = subprocess.PIPE
+    with subprocess.Popen(argv, **kw) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            e.pid = proc.pid  # type: ignore[attr-defined]
+            _kill_group(proc.pid)
+            proc.kill()
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -59,7 +96,7 @@ class Notifier:
         *,
         now_fn: Callable[[], datetime] = _utcnow,
         log: Callable[[str], None] | None = None,
-        run: Callable[..., Any] = subprocess.run,
+        run: Callable[..., Any] = run_hook,
         opener: urllib.request.OpenerDirector | None = None,
         base_url: str | None = None,
         stop: threading.Event | None = None,
@@ -103,7 +140,10 @@ class Notifier:
                     timeout=rule.timeout_seconds,
                     start_new_session=True,
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as e:
+                # subprocess.run 은 자식(보통 /bin/sh)만 죽인다 — 훅이 띄운 손자(python · gh)가
+                # 고아로 남아 쌓였다(실배치: 11개). 세션 = 프로세스 그룹이므로 그룹째 정리한다.
+                _kill_group(getattr(e, "pid", None) or _pid_of(e))
                 self.log(f"{tag}: timed out after {rule.timeout_seconds}s")
                 return False
             except OSError as e:

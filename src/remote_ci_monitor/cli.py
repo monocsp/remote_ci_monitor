@@ -43,6 +43,7 @@ from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.render_text import fmt_clock, fmt_duration
+from remote_ci_monitor.mdns import discover
 
 USAGE_EXIT = 2
 
@@ -149,9 +150,35 @@ def _client_config(args: argparse.Namespace):
     )
 
 
+DISCOVER_NONE_HINT = (
+    "no rcm server found on this network (is the server's advertise on? same Wi-Fi?)"
+)
+
+
+def _resolve_server(cfg: Any, *, timeout: float = 1.5) -> Any:
+    """서버 주소가 없으면 같은 네트워크에서 찾는다(M5c). 정확히 하나면 그것, 아니면 `ConfigError`.
+    찾은 서버는 `cfg.discovered` 에 남는다(`rcm check` 표시용)."""
+    cfg.discovered = None
+    if not cfg.wants_discovery:
+        return cfg
+    found = discover(timeout=timeout)
+    if len(found) == 1:
+        cfg.server = found[0].address
+        cfg.discovered = found[0]
+        ip = found[0].ips[0] if found[0].ips else found[0].host.rstrip(".")
+        _info(f"server: found {found[0].name} ({ip}:{found[0].port}) on this network")
+        return cfg
+    if not found:
+        raise ConfigError(f"{NO_SERVER_HINT} — {DISCOVER_NONE_HINT}")
+    names = ", ".join(f"{f.name} ({f.address})" for f in found)
+    raise ConfigError(
+        f"several rcm servers on this network: {names} — pick one with --server or client.toml"
+    )
+
+
 def _client(args: argparse.Namespace, *, need_token: bool = True) -> Client:
     try:
-        cfg = _client_config(args)
+        cfg = _resolve_server(_client_config(args))
     except ConfigError as e:
         raise SystemExit(_usage(str(e))) from e
     if not cfg.server:
@@ -173,7 +200,12 @@ def _client_fail(client: Client, what: str, e: ClientError) -> int:
         return USAGE_EXIT
     if e.status:
         return _usage(f"{what}: {e.message}")
-    _err(f"{what}: cannot reach {client.server}: {e.message}")
+    msg = (
+        e.message
+        if e.message.startswith("cannot reach")
+        else f"cannot reach {client.server}: {e.message}"
+    )
+    _err(f"{what}: {msg}")
     return EXIT_UNKNOWN
 
 
@@ -234,6 +266,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     if pool is not None and pool != preset.pool and pool not in preset.pools:
         allowed = ", ".join([preset.pool, *preset.pools])
         return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
+    # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
+    try:
+        client.whoami()
+    except ClientError as e:
+        if e.status in (401, 403):
+            return _usage(
+                f"token rejected by {client.server}: {e.message} — check RCM_TOKEN/client.toml"
+            )
+        if e.status == 0:
+            return _client_fail(client, "run", e)
     if mode == "git_ref":
         return _run_git_ref(client, args, preset, inputs, ref or "", label, pool)
     # ② 스냅샷
@@ -875,14 +917,23 @@ def cmd_check(args: argparse.Namespace) -> int:
     except ConfigError as e:
         rows.append(("client config", False, str(e)))
     if cfg is not None:
+        try:
+            _resolve_server(cfg)  # 주소가 없으면 같은 네트워크에서 찾는다 — 결과는 server 행에
+        except ConfigError as e:
+            rows.append(("server", False, str(e)))
+            cfg = None
+    if cfg is not None:
         if cfg.server:
             client = Client(cfg.server, cfg.token or None)
         else:
             rows.append(("server", False, NO_SERVER_HINT))
     if client is not None and cfg is not None:
+        found_tag = " (found on this network)" if getattr(cfg, "discovered", None) else ""
         try:
             h = client.health()
-            rows.append(("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}"))
+            rows.append(
+                ("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}{found_tag}")
+            )
         except ClientError as e:
             rows.append(("server", False, e.message))
         if client.token:
@@ -920,6 +971,35 @@ def cmd_check(args: argparse.Namespace) -> int:
     for name, ok, detail in rows:
         print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
     return 0 if ok_all else 1
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """`rcm discover` — 같은 네트워크의 rcm 서버들(mDNS). 없으면 1."""
+    found = discover(timeout=float(getattr(args, "timeout", 1.5) or 1.5))
+    if getattr(args, "json", False):
+        _print_json(
+            [
+                {
+                    "name": f.name,
+                    "host": f.host,
+                    "port": f.port,
+                    "ips": list(f.ips),
+                    "address": f.address,
+                    "version": f.version,
+                    "lanes": f.lanes,
+                }
+                for f in found
+            ]
+        )
+        return 0 if found else 1
+    if not found:
+        _err(DISCOVER_NONE_HINT)
+        return 1
+    print(f"{'name':<20} {'address':<30} {'version':<9} lanes")
+    for f in found:
+        lanes = "—" if f.lanes is None else str(f.lanes)
+        print(f"{f.name:<20} {f.address:<30} {f.version or '—':<9} {lanes}")
+    return 0
 
 
 def _worker_config(args: argparse.Namespace):
@@ -1242,6 +1322,11 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = tsub.add_parser("revoke", help="revoke a token")
     revoke.add_argument("name")
     token.set_defaults(func=cmd_token)
+
+    disc = sub.add_parser("discover", help="find rcm servers on this network (mDNS)")
+    disc.add_argument("--json", action="store_true", help="machine-readable list")
+    disc.add_argument("--timeout", type=float, default=1.5, help="seconds to listen (default 1.5)")
+    disc.set_defaults(func=cmd_discover)
 
     worker = sub.add_parser(
         "worker", help="run a remote worker for a pool (token via RCM_WORKER_TOKEN)"

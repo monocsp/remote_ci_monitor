@@ -9,6 +9,33 @@ of a key bumps that number and is listed here.
 
 Nothing yet.
 
+## [0.2.2] - 2026-09-08
+
+LAN auto-discovery (M5c) and the fixes from the first week of real use.
+
+### Added
+- **LAN auto-discovery** (M5c): a server bound to a non-loopback address advertises `_rcm._tcp`
+  over mDNS/DNS-SD (stdlib responder, coexists with mDNSResponder/avahi on port 5353; `advertise`,
+  `advertise_name`); sessions with no `server` configured (or `server = "auto"`) find it —
+  `rcm discover [--json]`, `rcm check` marks `(found on this network)`, `/api/health.advertise`.
+  A multi-homed server (wired + Wi-Fi) listens on every interface and answers with the address
+  that routes to the querier first; Tailscale (100.64/10) addresses sort last. `advertise = true`
+  with a loopback `bind` logs a warning (found, but unreachable from other machines).
+
+### Fixed
+- A notification hook that times out is now killed as a whole process group — grandchildren
+  (`python`, `gh`) no longer survive as orphans.
+- `rcm run`/`rcm wait` treat a transient `500` from the server like `502/503/504` (retry within
+  the 60 s budget) instead of giving up with exit 3.
+- `rcm run` checks the token (`/api/whoami`) before building the snapshot, so a rejected token
+  fails in a second instead of after packing a large tree.
+- "cannot reach" messages are no longer prefixed twice.
+
+### Changed
+- README (both languages): "Run as a service" now records three deployment lessons — the
+  service `PATH` is the presets' `PATH` (never put the rcm venv first), macOS TCC blocks launchd
+  services from `~/Documents`, and notification hooks must read tokens from files.
+
 ## [0.2.1] - 2026-09-08
 
 First fixes from real use (a Flutter monorepo gate moved onto rcm) plus the Korean guide.
@@ -103,7 +130,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/monocsp/remote_ci_monitor/releases/tag/v0.1.0

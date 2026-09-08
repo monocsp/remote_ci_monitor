@@ -12,7 +12,7 @@ ETA, step progress and host load, and hands the result back as an **exit code**.
 - Sessions upload their **working tree as it is** (uncommitted changes included), so a green gate
   means *this* tree passed.
 
-Status: **M0–M5 done (v0.2.1)** — server, queue, worker, live events, web UI, `git_ref` deploys,
+Status: **M0–M5 done (v0.2.2)** — server, queue, worker, live events, web UI, `git_ref` deploys,
 retention, service files, packaging, priority, snapshot cache, notifications, worker pools and
 remote workers (`rcm worker`). There is no GitHub backend and none is planned: GitHub is for
 commits, pushes and PR merges only. The plan lives in `PLAN.md` (Korean); changes in `CHANGELOG.md`.
@@ -47,8 +47,11 @@ rcm serve                  # http://127.0.0.1:8787 · Ctrl-C or SIGTERM stops it
 The generated config ships a harmless `ok` preset so you can prove the path end to end before
 writing your own presets. To accept sessions from other computers set `bind` to the machine's
 Tailscale/LAN address (or `0.0.0.0`) and, on macOS, allow Python through the firewall prompt.
-Check from another computer with `curl http://<build-machine>:8787/api/health`. For a service that
-survives logins and reboots see [Run as a service](#run-as-a-service).
+Check from another computer with `curl http://<build-machine>:8787/api/health`. With `bind` set to a
+non-loopback address the server also advertises itself on the LAN (`_rcm._tcp`, mDNS/DNS-SD;
+`advertise = false` turns it off, `advertise_name` renames it), so sessions on the same network run
+`rcm discover` — or nothing at all: `rcm run` finds it. For a service that survives logins and
+reboots see [Run as a service](#run-as-a-service).
 
 Tokens: `rcm token add ops --admin` makes an admin token (pause/resume, cancel any job, read any
 log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another port:
@@ -56,6 +59,12 @@ log); `rcm token list` never shows secrets; `rcm token revoke NAME`. Another por
 when you bind to `0.0.0.0` so job URLs in `rcm run` output open from other computers.
 
 ## Session machine (3 commands)
+
+On the same Wi-Fi/LAN as the build machine the session needs no address at all: leave `server`
+empty (or `server = "auto"`) and `rcm` finds the server by mDNS/DNS-SD (`rcm discover` lists what
+it sees). From another network you need a route — Tailscale, or a tunnel of your own — and then
+the server's address goes into `client.toml`. Discovery is off when the server binds to loopback
+(`advertise = false` turns it off explicitly).
 
 <!-- smoke:begin -->
 ```sh
@@ -187,6 +196,7 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
 | `rcm presets [--json]` | presets the server offers and their inputs |
+| `rcm discover [--json] [--timeout S]` | rcm servers on this network (mDNS); `rcm check` says `(found on this network)` when it used one |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
 
@@ -270,6 +280,9 @@ fail fast with `cannot reach <url>` and exit 3.
 
 ## Security notes
 
+- Discovery answers (`_rcm._tcp`) carry only the server name, port, version, lane count and LAN
+  IPs — never tokens, presets or paths. Anyone on the LAN can learn that a build server exists;
+  the read API is open on the LAN unless `read_auth = "basic"`.
 - Every write (submit, upload, cancel) needs a bearer token. The server stores only a SHA-256 of it.
   Tokens have a kind: `client` (sessions), `admin` (cancel any job, pause, bump) and `worker`
   (remote workers — `/worker/*` only). A worker can report only on jobs it claimed itself; the
@@ -337,6 +350,21 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
   marked `lost` (exit 3 for waiting sessions); queued jobs survive and start after the restart.
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
   toolchains there. Keep the machine awake (`pmset -a sleep 0` on macOS).
+
+Three things learned from a real deployment (a Flutter monorepo gate on a Mac mini):
+
+- **The service `PATH` is what your presets run with** (`env_passthrough` hands it over). Put the
+  toolchains first and never the interpreter of the rcm install itself: if the venv that holds
+  `rcm` comes first, a preset's `python3` silently becomes that venv's Python (no packages) —
+  reference the `rcm` binary by absolute path in the service file instead. On macOS include
+  `/usr/sbin` (`sysctl`, `ioreg` feed the host card).
+- **macOS privacy (TCC) applies to launchd services.** A service cannot read `~/Documents`,
+  `~/Desktop` or `~/Downloads` unless the user grants it, and the failure looks like a hang or
+  `Operation not permitted`. Keep `data_dir`, presets, `[[repos]]` mirrors and every script a
+  notification hook runs under `~/.local/share` or `~/.config`.
+- **Hooks have no keychain.** A `[[notify]]` command that calls `gh`, `aws` or similar must read
+  its token from a file (mode 600) via an environment variable; the interactive keyring is not
+  available and the call blocks until the hook times out.
 
 ## Docker (Linux build machine)
 
