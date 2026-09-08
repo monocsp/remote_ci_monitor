@@ -14,6 +14,7 @@ of a key bumps that number and is listed here.
   default. Two consecutive failures set `/api/health.advertise.error`, so a server that advertises
   but cannot be reached no longer reports itself as advertising; `rcm check` shows it as a `warn`
   row (`server cannot be discovered: …`) without failing the check.
+  ([#40](https://github.com/monocsp/remote_ci_monitor/pull/40))
 
 ## [0.2.2] - 2026-09-08
 
