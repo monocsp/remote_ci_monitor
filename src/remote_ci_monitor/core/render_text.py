@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -38,6 +39,35 @@ _GLYPH = {
     LOST: "?",
 }
 _STATE_WORD = {TIMED_OUT: "timed out"}
+
+
+def _fmt_bytes(n: int) -> str:
+    """산출물 크기 — 사람이 읽는 짧은 문면. 0 은 0 으로 찍는다(모르는 것과 다르다)."""
+    if n < 1024:
+        return f"{n} bytes"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _artifacts_line(art: Mapping[str, Any] | None) -> str:
+    """최근 결과 한 줄 아래에 붙는 산출물 줄(명세 §13).
+
+    모르는 수는 `—` 다. **`0` 은 「모았는데 없었다」일 때만** — `unknown` 과 `empty` 는 화면에서도
+    구분된다. 파일 이름은 여기 없다(공개 문서에 경로가 없다, §10).
+    """
+    if not art:
+        return ""
+    state = art.get("state")
+    if state in (None, "disabled", "pending"):
+        return ""
+    count = art.get("file_count")
+    size = art.get("bundle_bytes")
+    files = DASH if count is None else f"{count} files"
+    bytes_txt = DASH if size is None else _fmt_bytes(size)
+    reason = art.get("reason_code")
+    tail = f" · {reason}" if reason else ""
+    return f"artifacts {state} · {files} · {bytes_txt}{tail}"
 
 
 def fmt_duration(seconds: float | None) -> str:
@@ -371,6 +401,9 @@ def render_pool(
                 f"  {glyph} {_state_word(r['state'])}{exit_txt} {r.get('key', '?'):<16} "
                 f"← {req:<18} {dur:>8}  {when}  {tail}".rstrip()
             )
+            art = _artifacts_line(r.get("artifacts"))
+            if art:
+                out.append(f"      {art}")
 
     medians = pool.get("medians")
     if medians is None:

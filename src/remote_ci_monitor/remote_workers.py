@@ -20,14 +20,20 @@ HTTP 핸들러는 얇게 여기를 부른다.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
+import tarfile
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from remote_ci_monitor.collect import CollectResult
 from remote_ci_monitor.config import _NAME_RE
+from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core import outcome
+from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.hostparse import sample_from_json
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
@@ -76,6 +82,12 @@ def _api_error(status: int, message: str, **extra: Any) -> Exception:
     return ApiError(status, message, **extra)
 
 
+def _api_error_type() -> type[Exception]:
+    from remote_ci_monitor.server import ApiError
+
+    return ApiError
+
+
 def _int_field(body: dict[str, Any], key: str, lo: int, hi: int, *, default: int | None = None):
     v = body.get(key, default)
     if isinstance(v, bool) or not isinstance(v, int):
@@ -89,6 +101,74 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
     """`store.finish` 에 바로 넣을 요약 세 값(결정 37)."""
     text, code, clean = outcome.summary(code, **args)
     return {"summary": text, "summary_code": code, "summary_args": clean}
+
+
+def _stream_to_file(stream: Any, dest: Path, length: int) -> str:
+    """`length` 바이트를 그대로 파일에 흘려 넣고 sha256 을 돌려준다. 메모리에 안 올린다."""
+    digest = hashlib.sha256()
+    left = length
+    with dest.open("wb") as fh:
+        while left > 0:
+            chunk = stream.read(min(1 << 16, left))
+            if not chunk:
+                raise _api_error(400, "artifact upload ended early")
+            digest.update(chunk)
+            fh.write(chunk)
+            left -= len(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_from_tar(path: Path, max_files: int) -> list[BundleFile] | None:
+    """올라온 tar 에서 매니페스트를 만든다 — 목록은 서버가 **본 것**이지 워커가 말한 것이 아니다.
+
+    finish 본문으로 받지 않는 이유: 파일 만 개짜리 목록은 JSON 본문 상한을 훌쩍 넘는다.
+
+    읽을 수 없는 묶음이면 `None` — 「목록을 모른다」다. 바이트와 해시는 그대로 검증하고
+    저장한다. 못 본 파일을 봤다고 말하지 않는다(§3). 안전하지 않은 경로는 그때도 거절한다.
+    """
+    files: list[BundleFile] = []
+    try:
+        tar = tarfile.open(path, "r:")
+    except (tarfile.TarError, OSError):
+        return None
+    with tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            if len(files) >= max_files:
+                raise _api_error(413, f"artifact bundle has more than {max_files} files")
+            try:
+                art.check_path(member.name)
+            except art.PolicyError as e:
+                raise _api_error(400, f"artifact bundle has an unsafe path: {e}") from e
+            fh = tar.extractfile(member)
+            digest = hashlib.sha256()
+            if fh is not None:
+                while True:
+                    chunk = fh.read(1 << 16)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+            files.append(
+                BundleFile(
+                    path=member.name,
+                    size=member.size,
+                    sha256=digest.hexdigest(),
+                    mode=0o755 if member.mode & 0o111 else 0o644,
+                )
+            )
+    return files
+
+
+def _parse_iso(raw: Any) -> datetime | None:
+    """워커가 보낸 ISO Z 시각. 이상하면 None — 조용히 수신 시각으로 물러선다."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 class RemoteWorkersMixin:
@@ -430,6 +510,96 @@ class RemoteWorkersMixin:
             self._mark_dirty()
         return {"job_id": job.id, "bytes": len(data), "markers": markers}
 
+    # ── 잡 산출물 (M5e) ─────────────────────────────────────────────────────
+
+    def _worker_job(self, token: TokenInfo, job_id: int) -> Job:
+        """그 워커가 잡은 잡. **종료됐어도 답한다** — 모호한 finish 를 푸는 것이 이 라우트다(§6)."""
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise _api_error(404, "no such job")
+        if job.worker_name != token.name:
+            raise _api_error(403, "not your job")
+        return job
+
+    def worker_artifacts_status(self, token: TokenInfo, job_id: int) -> dict[str, Any]:
+        """업로드 처리 상태와 잡 상태. 내용은 주지 않는다(§6)."""
+        job = self._worker_job(token, job_id)
+        row = self.store.get_bundle(job.id)
+        return {
+            "job_id": job.id,
+            "state": row["state"] if row else None,
+            "bundle_sha256": row["bundle_sha256"] if row else None,
+            "job_state": job.state,
+        }
+
+    def job_artifact_policy(self, job: Job) -> Any:
+        """그 잡에 얼린 정책. 프리셋의 글롭 + 서버의 잡당 상한(§9)."""
+        s = self.config.server
+        preset = self.config.preset(job.preset)
+        return art.ArtifactPolicy(
+            globs=tuple(preset.artifacts) if preset is not None else (),
+            max_bytes=s.max_artifact_bytes,
+            max_files=s.max_artifact_files,
+            timeout_seconds=s.artifact_timeout_seconds,
+            cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+        )
+
+    def worker_receive_artifacts(
+        self, token: TokenInfo, job_id: int, stream: Any, length: int
+    ) -> tuple[int, dict[str, Any]]:
+        """워커가 올린 묶음을 받는다. (상태 코드, 본문). 같은 해시의 재시도는 멱등이다(§6)."""
+        job = self._owned_active(token, job_id)  # 종료된 잡은 409 — 죽은 잡을 되살리지 않는다
+        policy = self.job_artifact_policy(job)
+        allowance = art.archive_allowance(policy.max_bytes, policy.max_files)
+        if length > allowance:
+            raise _api_error(413, f"artifact bundle larger than {allowance} bytes")
+        now = self.now_fn()
+        limit = self.config.server.artifact_storage_max_bytes
+        if not self.store.reserve_bundle_bytes(job.id, length, limit, now):
+            raise _api_error(503, "artifact storage is full")
+        root = self.config.data_dir / "artifacts"
+        staging = root / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        part = staging / f"{job.id}.{secrets.token_hex(8)}.part"
+        try:
+            digest = _stream_to_file(stream, part, length)
+            row = self.store.get_bundle(job.id)
+            stored = row["bundle_sha256"] if row else None
+            if stored and stored != digest:
+                # 묶음은 불변이다 — 한 번 받은 내용은 바뀌지 않는다(§3)
+                raise _api_error(409, "a different bundle is already stored for this job")
+            if stored == digest:
+                return 200, {"job_id": job.id, "bundle_sha256": digest, "bytes": length}
+            dest = root / str(job.id)
+            dest.mkdir(parents=True, exist_ok=True)
+            files = _manifest_from_tar(part, policy.max_files) or []
+            part.replace(dest / "bundle.tar")
+        except _api_error_type():
+            part.unlink(missing_ok=True)
+            self.store.release_bundle_bytes(job.id)
+            raise
+        except OSError as e:
+            part.unlink(missing_ok=True)
+            self.store.release_bundle_bytes(job.id)
+            raise _api_error(503, f"cannot store the bundle ({type(e).__name__})") from e
+        result = CollectResult(
+            state=art.UPLOADING,
+            files=tuple(files),
+            total_bytes=sum(f.size for f in files),
+            bundle_bytes=length,
+            bundle_sha256=digest,
+        )
+        self.store.publish_bundle(
+            job.id,
+            result,
+            now=now,
+            # 영수증만 남고 finish 가 안 오면 sweep 이 가져간다 — 만료 없는 행을 안 만든다(§9 ⑤)
+            expires_at=art.expires_at(now, self.config.server.artifact_retention_hours),
+        )
+        self.store.set_bundle_state(job.id, art.UPLOADING)
+        self.publish_artifacts(job.id, art.UPLOADING)
+        return 201, {"job_id": job.id, "bundle_sha256": digest, "bytes": length}
+
     def worker_finish(self, token: TokenInfo, job_id: int, body: Any) -> dict[str, Any]:
         from remote_ci_monitor.worker import outcome_for
 
@@ -446,6 +616,12 @@ class RemoteWorkersMixin:
         if given is not None and not isinstance(given, str):
             raise _api_error(400, "summary must be a string")
         now = self.now_fn()
+        # 실행 종료 시각(선택). 수집·업로드가 끼어도 v1 의 `finished_at`·`job_seconds` 가
+        # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다.
+        ended = _parse_iso(body.get("finished_at")) or now
+        disposition = body.get("artifacts")
+        if disposition is not None and not isinstance(disposition, dict):
+            raise _api_error(400, "artifacts must be an object")
         markers = self.store.markers(job.id)
         lost_text, lost_code, lost_args = outcome.summary("worker_stopped_while_running")
         if given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
@@ -453,8 +629,8 @@ class RemoteWorkersMixin:
         oc = outcome_for(
             job,
             markers,
-            started=job.started_at or now,
-            finished=now,
+            started=job.started_at or ended,
+            finished=ended,
             rc=rc,
             cancelled=reported == CANCELLED,
             timed_out=reported == TIMED_OUT,
@@ -471,10 +647,12 @@ class RemoteWorkersMixin:
             elif state == FAILED:
                 summary, code, args = outcome.summary("worker_failed")
         self._drop_log_partial([job.id])
+        if disposition is not None:
+            self._record_disposition(job.id, disposition, now)
         if not self.store.finish(
             job.id,
             state,
-            now=now,
+            now=ended,
             exit_code=rc,
             summary=summary,
             summary_code=code,
@@ -488,6 +666,63 @@ class RemoteWorkersMixin:
         self._publish_server()
         self.wake.set()
         return {"job_id": job.id, "state": state}
+
+    def _record_disposition(self, job_id: int, reported: dict[str, Any], now: datetime) -> None:
+        """워커가 보고한 산출물 처분을 쓴다(§5).
+
+        필드가 통째로 없으면 이 함수를 부르지 않는다 — 그게 `unknown` 이고 `empty` 와 다르다.
+        """
+        state = reported.get("state")
+        if state not in art.ARTIFACT_STATES:
+            raise _api_error(400, "artifacts.state is not a known state")
+        row = self.store.get_bundle(job_id)
+        if state == art.READY:
+            # 무엇을 모았는지는 **워커가** 안다. 서버는 자기가 받은 바이트를 안다 — 올라온 행이
+            # 있으면 그 해시·바이트를 쓰고, 없으면 워커 말을 그대로 적는다. 파일이 실제로 없으면
+            # 내려받기가 503 을 내고 재시작 화해가 `unavailable` 로 고친다(§3 · §9).
+            files = tuple(
+                BundleFile(path=f["path"], size=f["size"], sha256=f["sha256"], mode=f["mode"])
+                for f in ((row or {}).get("files") or [])
+            )
+            digest = (row or {}).get("bundle_sha256") or reported.get("bundle_sha256")
+            self.store.publish_bundle(
+                job_id,
+                CollectResult(
+                    state=art.READY,
+                    files=files,
+                    total_bytes=int(reported.get("total_bytes") or 0),
+                    bundle_bytes=int((row or {}).get("bundle_bytes") or 0),
+                    skipped_count=int(reported.get("skipped_count") or 0),
+                    bundle_sha256=digest if isinstance(digest, str) else None,
+                ),
+                now=now,
+                expires_at=art.expires_at(now, self.config.server.artifact_retention_hours),
+            )
+            if reported.get("file_count") is not None and not files:
+                # 매니페스트는 못 봤지만 워커가 센 수는 있다 — 지어내지 말고 그대로 적는다
+                self.store.set_bundle_counts(job_id, int(reported["file_count"]))
+            return
+        reason = reported.get("reason_code")
+        if reason is not None and reason not in art.REASONS:
+            raise _api_error(400, "artifacts.reason_code is not a known code")
+        args = reported.get("reason_args")
+        if args is not None and not isinstance(args, dict):
+            raise _api_error(400, "artifacts.reason_args must be an object")
+        if state == art.EMPTY:
+            self.store.publish_bundle(
+                job_id,
+                CollectResult(
+                    state=art.EMPTY,
+                    total_bytes=int(reported.get("total_bytes") or 0),
+                    skipped_count=int(reported.get("skipped_count") or 0),
+                    reason_code=reason,
+                    reason_args=args,
+                ),
+                now=now,
+                expires_at=art.expires_at(now, self.config.server.artifact_retention_hours),
+            )
+            return
+        self.store.set_bundle_failed(job_id, state, reason or "collect_failed", args, now)
 
     # ── heartbeat ───────────────────────────────────────────────────────────
 

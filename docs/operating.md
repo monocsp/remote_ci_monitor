@@ -117,6 +117,20 @@ every `retention_sweep_interval_seconds` (3600). Running jobs are never touched;
 purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
 `/api/health` turns 503 — nothing here fails silently.
 
+**Job artifacts keep their own clock.** A bundle a session can fetch back
+([Configuration](configuration.md#getting-files-back-out-of-a-job)) lives for
+`artifact_retention_hours` (24) from the moment it is ready, and the retention days above do not
+shorten that — with `retention_days_success = 0` the logs go on the next sweep and the bundle still
+has its full day. It goes earlier only when the submitting session says it has written every file
+and nobody else joined that job. Deleting is reported only after the files are actually gone: a
+failed unlink leaves the bundle counted and tries again on the next sweep, and a download already
+in flight finishes even if the bundle expires mid-transfer.
+
+`/api/status` carries `server.artifact_storage` — `stored_bytes`, `reserved_bytes` and
+`limit_bytes` (`artifact_storage_max_bytes`, 10 GiB). When the server is full it refuses **new**
+bundles rather than evicting bundles somebody is still waiting for; the affected jobs say
+`storage_full` and still report their own success or failure.
+
 ## Why the numbers can be wrong
 
 - ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs.
