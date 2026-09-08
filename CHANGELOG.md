@@ -7,6 +7,31 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Motion says what is still moving** (M5d-3). A running, queued, uploading or cancelling job now
+  pulses; a finished one is still. That is a second channel beside colour, so a glance at the
+  corner of the screen separates "still going" from "done" — and every animation sits behind
+  `prefers-reduced-motion: no-preference`, so a viewer who turns motion off gets none of it. A
+  test proves both halves: zero animations under `reduce`, and at least one without it (a control
+  that would otherwise pass on a page that simply has no motion).
+
+### Fixed
+- **The phone layout had never actually been tested on a phone** (M5d-3). The mobile test opened
+  Chrome at `390,844`, but a macOS Chrome window will not go below 500px, so the viewport was 500
+  and the assertion (`<= 720`) passed anyway. It now overrides the viewport through CDP and pins
+  it at exactly 390 — and checks that the key and requester cells still have both text *and* size,
+  which is what a `max-width: 0` regression breaks while leaving the text in place. The phone
+  screenshot in the guides is a real 390px too.
+- **Four state pills failed contrast in the light theme** (M5d-3). Measured against their own
+  backgrounds, `succeeded` was 3.79:1, `cancelling` 3.72:1, `queued`/`cancelled` 3.83:1 and
+  `failed` 4.32:1, where 12px semibold text needs 4.5:1. The hues are unchanged; only their
+  lightness moved. Dark already passed everywhere.
+- **`queued` and `cancelled` had no shape of their own** (M5d-3). `queued` drew the same faint `·`
+  used for "unknown", and `cancelled` drew the same filled square as `cancelling` — so those pairs
+  were told apart by colour alone. They are now a hollow circle and a hollow square: filled means
+  moving, hollow means stopped. (`rcm top` keeps its own glyphs; a terminal has no colour to fail
+  back to.)
+
 ### Changed
 - **The page reads like a page, not a terminal** (M5d-2). Sentences, labels, buttons and state
   words are set in the system sans face; the monospace face is now kept for what it is for —

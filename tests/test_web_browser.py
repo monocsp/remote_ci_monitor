@@ -182,6 +182,26 @@ class Chrome:
             raise AssertionError(f"JS threw in {expression!r}: {r['exceptionDetails'].get('text')}")
         return r["result"].get("value")
 
+    def viewport(self, width: int, height: int = 844, *, mobile: bool = False) -> None:
+        """뷰포트를 CDP 로 덮어쓴다 — `--window-size` 만으로는 폰 폭이 안 나온다.
+
+        macOS 의 크롬 창은 500px 밑으로 줄지 않아 `--window-size=390,844` 로 띄워도 실제 뷰포트는
+        500 이다(docs/m5d-workplan.md §4.7). `tools/screenshots/capture.py` 의 폰 사진과 같은
+        방법으로 덮어쓴다. 덮어쓴 값은 같은 세션의 다음 이동에도 남는다.
+        """
+        self.call(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": mobile},
+        )
+
+    def emulate_media(self, features: dict[str, str]) -> None:
+        """미디어 특성을 흉내낸다(예: `{"prefers-reduced-motion": "reduce"}`).
+
+        헤드리스 크롬에는 OS 설정이 없어 이 방법 말고는 `prefers-reduced-motion` 을 켤 수 없다.
+        """
+        params = {"features": [{"name": n, "value": v} for n, v in features.items()]}
+        self.call("Emulation.setEmulatedMedia", params)
+
     def open(self, url: str, *, ready_js: str, timeout: float = 15.0) -> str:
         """url 로 가서 `ready_js` 가 true 가 될 때까지 기다린 뒤 outerHTML 을 돌려준다."""
         self.call("Page.navigate", {"url": url})
@@ -373,15 +393,35 @@ def test_desktop_dom_shows_running_and_queued_jobs(scene, tmp_path):
     assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
 
 
+# 큐 행의 키·요청자 칸이 폰에서도 **글자와 폭을 둘 다** 가지는가. `max-width: 0` 이 표 아닌
+# 레이아웃에 새면 칸이 통째로 사라지는데(§4.7 회귀) 글자만 보면 안 걸린다 — 폭도 같이 잰다.
+ROW_CELLS_JS = """
+(() => Object.fromEntries([...document.querySelectorAll('#queue tr[data-job]')]
+  .filter(tr => !tr.classList.contains('expanded'))
+  .map(tr => [tr.dataset.job, Object.fromEntries(['key', 'requester'].map(name => {
+    const td = tr.querySelector('td.' + name);
+    return [name, td === null ? null : {
+      text: td.textContent.replace(/\\s+/g, ' ').trim(),
+      width: Math.round(td.getBoundingClientRect().width),
+      height: Math.round(td.getBoundingClientRect().height),
+    }];
+  }))])))()
+"""
+
+
 def test_mobile_viewport_keeps_queue_content(scene, tmp_path):
-    with Chrome(tmp_path / "chrome-mobile", window="390,844") as c:
+    # `--window-size` 는 macOS 에서 500px 로 걸린다 — 실제 폰 폭은 `Chrome.viewport()` 가 만든다
+    with Chrome(tmp_path / "chrome-mobile", window="900,844") as c:
+        c.viewport(390, 844, mobile=True)
         dom = c.open(scene.url, ready_js=scene.ready_js())
         width = c.eval("window.innerWidth")
         visible_text = c.eval("document.body.innerText")
         summary_text = c.eval("document.getElementById('summary').textContent")
+        cells = c.eval(ROW_CELLS_JS)
     scene.assert_still_running()
-    # 720px 미만이 카드 레이아웃 구간(§4 모바일)
-    assert width <= 720, f"viewport is {width}px wide — not the mobile layout"
+    # 720px 미만이 카드 레이아웃 구간(§4 모바일). 진짜 390 인지 못 박는다 —
+    # `<= 720` 은 macOS 가 만들어 주는 500 도 통과시킨다
+    assert width == 390, f"viewport is {width}px wide — the device metrics override did not take"
     assert f'data-job="{scene.running}"' in dom
     assert f'data-job="{scene.queued}"' in dom
     assert "1st in line" in visible_text
@@ -390,6 +430,21 @@ def test_mobile_viewport_keeps_queue_content(scene, tmp_path):
     for label in ("Your jobs", "Not moving", "Host pressure"):
         assert label in summary_text, (label, summary_text)
     assert "lost connection" not in visible_text.lower()
+    # 폰에서도 키(프리셋 이름)와 요청자 칸이 남아 있다 — 글자도, 자리도
+    for job_id in (scene.running, scene.queued):
+        row = cells.get(str(job_id))
+        assert row, (job_id, cells)
+        for name in ("key", "requester"):
+            cell = row[name]
+            assert cell is not None, f"job {job_id}: td.{name} is missing at 390px"
+            assert cell["text"] and cell["text"] != "—", f"job {job_id}: td.{name} is empty: {cell}"
+            assert cell["width"] > 0 and cell["height"] > 0, (
+                f"job {job_id}: td.{name} has no box at 390px ({cell}) — a `max-width: 0` "
+                "meant for the table layout leaked into the phone cards"
+            )
+    assert "slow" in cells[str(scene.running)]["key"]["text"], cells
+    assert "alice" in cells[str(scene.running)]["requester"]["text"], cells
+    assert "bob" in cells[str(scene.queued)]["requester"]["text"], cells
 
 
 def test_korean_is_the_default_and_the_switch_flips_the_page(scene, tmp_path):

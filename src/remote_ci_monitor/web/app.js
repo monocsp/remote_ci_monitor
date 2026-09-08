@@ -15,8 +15,12 @@
   var DASH = "—";
   var ACTIONABLE = ["worker_down", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
   var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1 };
-  var GLYPH = { running: "▶", queued: "·", uploading: "↑", cancelling: "■", succeeded: "✓",
-    failed: "✗", timed_out: "⏱", cancelled: "■", lost: "?" };
+  // 상태마다 모양이 하나씩. 채운 것은 도는 상태, 빈 것은 멈춘 상태다(§4.2) — `취소 중`(채운 사각)과
+  // `취소됨`(빈 사각)이 색으로만 갈리면 색을 못 보는 사람에게 같은 것이 된다(WCAG 1.4.1).
+  // `core/render_text._GLYPH` 와는 **일부러 다르다**: 터미널에는 색이 없어 상태 글자가 곧 채널이고,
+  // 거기는 `✅`·`❌` 처럼 원래 다른 모양을 쓴다. 이 표는 색을 쓰는 화면의 것이다.
+  var GLYPH = { running: "▶", queued: "○", uploading: "↑", cancelling: "■", succeeded: "✓",
+    failed: "✗", timed_out: "⏱", cancelled: "□", lost: "?" };
   var BACKOFF = [2, 4, 8, 16, 30];
   var LOST_AFTER_MS = 30000;
   var POLL_MS = 10000;
@@ -1248,9 +1252,9 @@
     if (row.state === "uploading") {
       var src = row.source || {};
       var pct = isNum(src.received_bytes) && isNum(src.bytes) && src.bytes > 0 ? Math.min(100, Math.round(src.received_bytes / src.bytes * 100)) : 0;
-      pill = '<span class="pill uploading"><span aria-hidden="true">↑</span> ' + esc(stateWord("uploading", L())) + ' <span class="ub"><i style="width:' + pct + '%"></i></span></span>';
-    } else if (row.state === "cancelling") pill = '<span class="pill cancelling"><span aria-hidden="true">■</span> ' + esc(stateWord("cancelling", L())) + "</span>";
-    else pill = '<span class="pill ' + esc(row.state) + '"><span aria-hidden="true">' + stateGlyph(row.state) + "</span> " + esc(stateWord(row.state, L())) + "</span>";
+      pill = '<span class="pill uploading"><span class="g" aria-hidden="true">↑</span> ' + esc(stateWord("uploading", L())) + ' <span class="ub"><i style="width:' + pct + '%"></i></span></span>';
+    } else if (row.state === "cancelling") pill = '<span class="pill cancelling"><span class="g" aria-hidden="true">■</span> ' + esc(stateWord("cancelling", L())) + "</span>";
+    else pill = '<span class="pill ' + esc(row.state) + '"><span class="g" aria-hidden="true">' + stateGlyph(row.state) + "</span> " + esc(stateWord(row.state, L())) + "</span>";
     var expBtn = busy ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-controls="exp-' + row.id + '" title="' + esc(tr(expanded ? "row.collapse" : "row.expand")) + '">' + (expanded ? "▾" : "▸") + "</button>" : "";
     var chips = "";
     var inputs = row.inputs || {};
@@ -1504,7 +1508,7 @@
       var open = !!state.expandedRecent[job.id];
       var failedish = job.state === "failed" || job.state === "timed_out";
       html += '<div class="rrow' + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
-        '<span class="pill ' + esc(l.cls) + '"><span aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
+        '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
         '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
         '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +

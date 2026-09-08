@@ -4,8 +4,11 @@
 
 :root {
   --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
-  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1E8A4C; --ok-soft: #E1F3E8; --warn: #B26A00; --warn-soft: #FBEFD9;
-  --bad: #C23B32; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #6B7A8B; --queued-soft: #ECF0F4;
+  /* 밝은 판의 상태 색은 자기 -soft 배경 위에서 4.5:1 을 넘긴다(WCAG 1.4.3, 필 글자는 12px 600
+     이라 「큰 글자」가 아니다). 재 보니 succeeded 3.79 · failed 4.32 · queued 3.83 · cancelling
+     3.72 로 넷이 모자랐다 — 색상은 그대로 두고 밝기만 낮췄다. 어두운 판은 원래 다 넘겼다. */
+  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1B7C44; --ok-soft: #E1F3E8; --warn: #9E5E00; --warn-soft: #FBEFD9;
+  --bad: #BC3930; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #606E7D; --queued-soft: #ECF0F4;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   /* mono 에도 한글 대체를 둔다 — 없으면 고정폭 칸의 한글이 제멋대로 떨어진다(§4.3) */
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", "Apple SD Gothic Neo", monospace;
@@ -125,6 +128,7 @@ table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8p
 .you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 600 12px var(--sans); vertical-align: 1px; }
 .joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 600 12px var(--sans); vertical-align: 1px; background: none; cursor: default; }
 .pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font: 600 12px var(--sans); white-space: nowrap; }
+.pill .g { display: inline-block; }
 .pill.running { background: var(--accent-soft); color: var(--accent); }
 .pill.queued { background: var(--queued-soft); color: var(--queued); }
 .pill.uploading { background: var(--surface); color: var(--queued); border: 1px dashed var(--queued); }
@@ -289,8 +293,19 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   .rrow .k, .rrow .s { grid-column: span 2; }
   #drawer { width: 100%; }
 }
+/* 움직임도 상태 채널이다(§4.2) — **끝나지 않은** 상태만 움직인다. 끝난 잡은 가만히 있어서,
+   화면 구석으로 흘긋 봐도 「아직 도는 중」과 「끝났다」가 갈린다.
+   전부 `prefers-reduced-motion: no-preference` 뒤에 둔다 — 움직임을 끈 사람에게는 하나도 안 돈다.
+   대비는 색이 아니라 투명도로만 흔든다(1.4.11 의 3:1 을 깨지 않는다). */
 @media (prefers-reduced-motion: no-preference) {
   .banner, .toast { transition: opacity 120ms ease; }
+  @keyframes rcm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .pill.running .g,
+  .pill.cancelling .g,
+  .pill.uploading .g { animation: rcm-pulse 1.4s ease-in-out infinite; }
+  .pill.queued .g { animation: rcm-pulse 3s ease-in-out infinite; }   /* 대기는 느리게 */
+  .step.run .g { animation: rcm-pulse 1.4s ease-in-out infinite; }
+  .wk.busy i { animation: rcm-pulse 1.4s ease-in-out infinite; }
 }
 
 /* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
