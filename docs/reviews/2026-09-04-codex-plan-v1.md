@@ -31,9 +31,9 @@ Codex 가 「사용자에게 물어야 한다」고 한 5개 중 3개(큐 판정
 ## 대상
 - 이 레포(작업 디렉터리)의 `PLAN.md` — remote_ci_monitor 계획서 v1 초안. 끝까지 읽어라.
 - 참고 구현(private 레포의 워크트리, 읽기 전용): 
-  - /Users/fmmentalcare/Documents/GitHub/dolomood-ci-monitor/scripts/ci_queue.py
-  - /Users/fmmentalcare/Documents/GitHub/dolomood-ci-monitor/scripts/ci_top.py
-  - /Users/fmmentalcare/Documents/GitHub/dolomood-ci-monitor/docs/renew-guide/ci-cd/30-remote-dispatch.md
+  - <team-repo>/scripts/ci_queue.py
+  - <team-repo>/scripts/ci_top.py
+  - <team-repo>/docs/renew-guide/ci-cd/30-remote-dispatch.md
   이 셋은 한 팀·한 머신에 묶인 기존 스크립트이고, PLAN.md 는 그걸 누구나 쓸 수 있는 독립 도구(Python 패키지 + 서버 + 웹 UI + 수집기)로 다시 만드는 계획이다.
 
 ## 프로젝트 요약

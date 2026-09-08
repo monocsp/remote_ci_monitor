@@ -12,7 +12,7 @@
 
 ## 상황
 - 작업 디렉터리의 `PLAN.md`(v1.1, 534줄)는 self-hosted GitHub Actions 러너(Mac mini 1대)를 **GitHub REST 로 관찰**하고, 세션이 `rcm run` 으로 **workflow_dispatch 를 넣고** `rcm wait` 로 결과를 종료 코드로 받는 도구의 계획이다. 끝까지 읽어라.
-- 참고: 팀의 기존 원격 실행 구조 문서(읽기 전용) /Users/fmmentalcare/Documents/GitHub/dolomood-ci-monitor/docs/renew-guide/ci-cd/30-remote-dispatch.md — 2026-07 에 「Tailscale SSH · 웹훅 리스너 · 폴링 데몬」과 비교해 GitHub dispatch 방식을 골랐던 기록이 있다(큐·권한·감사로그가 공짜, 인바운드 포트 불필요).
+- 참고: 팀의 기존 원격 실행 구조 문서(읽기 전용) <team-repo>/docs/renew-guide/ci-cd/30-remote-dispatch.md — 2026-07 에 「Tailscale SSH · 웹훅 리스너 · 폴링 데몬」과 비교해 GitHub dispatch 방식을 골랐던 기록이 있다(큐·권한·감사로그가 공짜, 인바운드 포트 불필요).
 - 오너(1인 개발, Mac mini M4 10코어 24GB 한 대, 여러 컴퓨터의 Claude Code 세션에서 CI·QA·배포를 던짐, Tailscale 사용)가 방금 이렇게 말했다:
   「github에 되게 많이 의존하는 거 같은데 맞아? github에 의존하지 않으면 좋겠는데?」
 
@@ -42,7 +42,7 @@ F. 오너에게 물어야 할 결정 — 답에 따라 만들 물건이 달라�
 
 추천은 **③ 백엔드 플러그인 구조**다. 다만 순서는 `local` 백엔드를 먼저 세워서 GitHub-free 잡 서버를 만들고, `github` 백엔드는 기존 Actions 기반 실행·배포·QA 호환용으로 남긴다. 현재 GitHub-only 계획을 그대로 밀면 오너의 “큐·실행을 누가 소유하나” 질문에 답하지 못한다.
 
-참고: 요청 경로의 `dolomood-ci-monitor`는 현재 파일시스템에서 보이지 않았고, 같은 문서는 `dolomood-app-renew` 및 그 worktree에서 확인했다.
+참고: 요청 경로의 워크트리는 현재 파일시스템에서 보이지 않았고, 같은 문서는 팀 저장소 및 그 worktree 에서 확인했다.
 
 **A. GitHub가 맡는 역할**
 

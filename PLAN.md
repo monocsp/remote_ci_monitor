@@ -16,13 +16,13 @@
 ## 왜 만드나
 
 빌드 머신이 한 대뿐인 팀은 CI·QA 요청이 여러 사람·여러 세션에서 겹친다. 「내 차례가 언제 오는지」「앞 잡이 걸린 건지 느린 건지」「머신이 지금 버거운지」「끝났는지, 성공인지」를 한 화면·한 명령으로 알고 싶다.
-참고 구현(private `fmmc-tech/dolomood-app-renew` 의 `remote_ci.sh`·`ci_queue.py`·`ci_top.py`)은 이걸 GitHub Actions dispatch 위에서 풀었다. 잘 돌지만 큐·실행·진행 데이터·코드 전달이 전부 GitHub 에 묶여, 폴링 지연·rate limit·「dispatch 는 원격 HEAD 만 본다」(미커밋 변경이 조용히 빠져 초록이 가짜가 된다) 같은 함정을 가드로 막아야 했다. v2 는 **큐와 실행을 도구가 소유**해서 그 함정을 없애고, 세션이 **미커밋 작업 트리를 그대로 보내** 검사할 수 있게 한다. 기존 GitHub Actions 러너는 배포·QA 용으로 그대로 둔다.
+참고 구현(한 팀의 비공개 저장소에 있던 dispatch 래퍼·큐 스크립트·top 스크립트)은 이걸 GitHub Actions dispatch 위에서 풀었다. 잘 돌지만 큐·실행·진행 데이터·코드 전달이 전부 GitHub 에 묶여, 폴링 지연·rate limit·「dispatch 는 원격 HEAD 만 본다」(미커밋 변경이 조용히 빠져 초록이 가짜가 된다) 같은 함정을 가드로 막아야 했다. v2 는 **큐와 실행을 도구가 소유**해서 그 함정을 없애고, 세션이 **미커밋 작업 트리를 그대로 보내** 검사할 수 있게 한다. 기존 GitHub Actions 러너는 배포·QA 용으로 그대로 둔다.
 
 ## 반드시 지킬 것 — 이식성
 
 이 레포는 public 이고 다른 사람이 자기 빌드 머신에 쓴다.
 
-- 특정 머신·계정·팀 규약·팀 명령을 코드에 박지 않는다. 금지 예: 러너 이름 `dolomood-macmini`, 시간대 KST 고정, `local_ci.sh` 같은 팀 스크립트 이름, 시뮬레이터·Flutter 가정. **실행할 명령은 전부 설정의 프리셋**으로 받고, 참고 팀의 프리셋은 `examples/` 에만 둔다.
+- 특정 머신·계정·팀 규약·팀 명령을 코드에 박지 않는다. 금지 예: 특정 러너 이름, 시간대 KST 고정, 팀 CI 스크립트 이름, 시뮬레이터·Flutter 가정. **실행할 명령은 전부 설정의 프리셋**으로 받고, 참고 팀의 프리셋은 `examples/` 에만 둔다.
 - 핵심 경로(제출·큐·실행·진행·결과)는 GitHub 을 부르지 않는다. `git_ref` 소스 모드가 git 원격을 fetch 하는 건 git 의존이지 GitHub 의존이 아니다(어느 호스팅이든 된다).
 - macOS 와 Linux 빌드 머신을 둘 다 지원한다(호스트 자원 수집·프로세스 실행). Windows 는 범위 밖으로 명시한다.
 - 설치가 한 줄이어야 한다: `pipx install remote-ci-monitor` / `uvx remote-ci-monitor`. 서버와 세션 클라이언트가 같은 패키지다. 런타임 의존성 0.
@@ -584,7 +584,7 @@ docs/reviews/
 
 ## 참고 구현과 이전 설계
 
-- `fmmc-tech/dolomood-app-renew`(로컬에선 `dolomood-ci-monitor` 워크트리)의 `scripts/remote_ci.sh`(dispatch·가드·합류·대기) · `ci_queue.py`(큐·중앙값·잔여 21 자기검증) · `ci_top.py`(진행률·파서·렌더 18 자기검증) · `docs/renew-guide/ci-cd/30-remote-dispatch.md`. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
+- 한 팀의 비공개 저장소에 있던 dispatch 래퍼(dispatch·가드·합류·대기) · 큐 스크립트(큐·중앙값·잔여 21 자기검증) · top 스크립트(진행률·파서·렌더 18 자기검증) · 그 팀의 원격 dispatch 문서. **가져오는 것**: 큐·ETA 수식과 하한 · 실패/빈 큐 분리 · `top` 두 번째 표본 · 파서 픽스처 · 취소 대신 합류 · 시뮬 공유 직렬화(concurrency 그룹) · 요청자 라벨 `계정@호스트`. **버리는 것**: GitHub API 전부 · run 이름 규약 · `gh` · KST 상수 · `~/actions-runner` 판별 · 팀 스크립트 이름.
 - v1/v1.1(GitHub 경로) 계획은 커밋 `9abef42`·`15e8220` 에 역사로만 남는다(결정 30 으로 폐기 — jobs API 함정·rate limit 예산은 더 쓰지 않는다). 큐 판정 규칙은 이미 `core/queue.py` 에 들어갔다.
 - 수용 검사(2026-09-06): `docs/acceptance/plan-conformance-checklist.md`(A~M 90항목) · `docs/acceptance/user-checklist.md`(페르소나 3) · 보고서 `docs/acceptance/reports/` — 계획서 준수 PASS 93 · PARTIAL 7 · FAIL 0, 사용자 관점 막힘 2·헷갈림 9 → 전부 반영(PR #20).
 - Codex 크로스리뷰 기록(M5): `docs/reviews/2026-09-06-codex-m5-design.md`(확장 명세 `docs/m5-workplan.md` — 제출 시 sha 확정 유지 · blob 경합/GC · 존재 오라클 · 알림 unique claim · pools 다중화 · M5b 4 PR).
@@ -658,7 +658,7 @@ GitHub 에 의존하지 않는다(git 원격은 배포용 소스 모드에서만
   - mutcheck 에 M1 변이를 최소 1개 더해라(예: stale 판정의 3×interval 제거 · top 첫 번째 표본 사용). 넷 이상 빨개져야 「검증됨」.
   - 식별자·UI 문자열·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 커밋 메시지는 Conventional Commits.
   - 브랜치 정책: main·dev 직접 push 금지. `git switch dev && git pull` → `git switch -c <type>/<topic>` → dev 로 PR. 워크트리를 써도 된다.
-  - gh 계정·머지: 활성 계정이 pcs-fmmc 로 되돌아가는 일이 있다. 모든 GitHub 동작은 토큰을 고정해라:
+  - gh 계정·머지: 활성 gh 계정이 다른 계정으로 되돌아가는 일이 있다. 모든 GitHub 동작은 토큰을 고정해라:
       TOK=$(gh auth token --user monocsp); GH_TOKEN=$TOK gh api user --jq .login   # monocsp 인지 확인
       GH_TOKEN=$TOK git push -u origin <branch>; GH_TOKEN=$TOK gh pr create --base dev …
     `gh pr merge` 는 자동 모드 분류기가 막는다. CI 초록을 확인한 뒤 REST 로 머지하고 브랜치를 지워라:

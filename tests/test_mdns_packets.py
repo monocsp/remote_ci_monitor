@@ -896,12 +896,12 @@ def test_order_ipv4s_is_route_first_then_lan_then_tailscale_then_link_local() ->
     무관(실측: 같은 머신에서 호출마다 뒤집혔다)."""
     from remote_ci_monitor.core.mdns import ipv4_rank, order_ipv4s
 
-    cands = ["100.75.116.13", "192.168.0.15", "127.0.0.1", "169.254.7.7", "192.168.10.125"]
-    want = ["192.168.10.125", "192.168.0.15", "100.75.116.13", "169.254.7.7"]
+    cands = ["100.64.0.7", "192.168.0.15", "127.0.0.1", "169.254.7.7", "192.168.10.125"]
+    want = ["192.168.10.125", "192.168.0.15", "100.64.0.7", "169.254.7.7"]
     assert order_ipv4s(cands, first="192.168.10.125") == want
     assert order_ipv4s(reversed(cands), first="192.168.10.125") == want
     assert order_ipv4s(cands + ["192.168.0.15"], first="192.168.10.125") == want
-    assert order_ipv4s(cands) == ["192.168.0.15", "192.168.10.125", "100.75.116.13", "169.254.7.7"]
+    assert order_ipv4s(cands) == ["192.168.0.15", "192.168.10.125", "100.64.0.7", "169.254.7.7"]
     assert order_ipv4s(cands, first="127.0.0.1")[0] == "192.168.0.15"  # 루프백은 first 여도 뺀다
     assert order_ipv4s(["100.64.0.1"], first="10.0.0.9") == ["10.0.0.9", "100.64.0.1"]
     assert order_ipv4s([]) == [] and order_ipv4s([], first=None) == []

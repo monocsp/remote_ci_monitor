@@ -1,4 +1,4 @@
-"""예시 파일 잠금 — launchd plist · systemd unit · server.toml · README 의 M3 절 (명세 §4 · §5).
+"""예시 파일 잠금 — launchd plist · systemd unit · server.toml · docs/ 의 M3 절 (명세 §4 · §5).
 
 파일이 아직 없으면 빨갛다(구현이 만든다). launchctl/systemctl 은 부르지 않고 파싱만 한다.
 """
@@ -21,6 +21,8 @@ PLIST = ROOT / "examples" / "launchd" / "com.remote-ci-monitor.server.plist"
 UNIT = ROOT / "examples" / "systemd" / "rcm-server.service"
 SERVER_TOML = ROOT / "examples" / "server.toml"
 README = ROOT / "README.md"
+OPERATING = ROOT / "docs" / "operating.md"
+CONFIGURATION = ROOT / "docs" / "configuration.md"
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
 
@@ -131,28 +133,28 @@ def test_example_server_config_shows_git_ref():
 
 def _section(text: str, heading: str) -> str:
     m = re.search(rf"^#{{2,3}}\s+{re.escape(heading)}\s*$", text, re.M)
-    assert m, f"README has no '{heading}' heading"
+    assert m, f"no '{heading}' heading"
     rest = text[m.end() :]
     nxt = re.search(r"^##\s", rest, re.M)
     return rest[: nxt.start()] if nxt else rest
 
 
-def test_readme_run_as_a_service():
-    sec = _section(README.read_text(), "Run as a service")
+def test_docs_run_as_a_service():
+    sec = _section(OPERATING.read_text(), "Run as a service")
     assert "launchctl" in sec and "systemctl" in sec
     assert "SIGTERM" in sec and "lost" in sec  # 서버 SIGTERM = 실행 중 잡 lost
     assert "caffeinate" in sec or "pmset" in sec  # 잠자기 금지
 
 
-def test_readme_documents_basic_read_auth():
-    text = README.read_text()
+def test_docs_document_basic_read_auth():
+    text = OPERATING.read_text()
     assert 'read_auth = "basic"' in text
     assert "username" in text and "token name" in text  # 사용자명 = 토큰 이름, 비밀번호 = 토큰
     assert "TLS" in text  # Basic 은 평문 — TLS 프록시 뒤에서만
 
 
-def test_readme_documents_git_ref_runs():
-    text = README.read_text()
+def test_docs_document_git_ref_runs():
+    text = CONFIGURATION.read_text()
     assert "--ref" in text
     assert "[[repos]]" in text
     assert "git submodule" in text  # 서브모듈은 프리셋 스크립트가 직접 update --init

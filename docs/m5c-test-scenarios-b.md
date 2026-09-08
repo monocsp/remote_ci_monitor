@@ -101,7 +101,7 @@ HTTP · 워커 없음)를 127.0.0.1 에 띄우고 발견 결과의 `ips=("127.0.
 - `rcm check --config` 서버 쪽 행의 `advertise: on|off(사유)`(§2) — 응답기 상태는 서버 몫.
 - `RCM_SERVER=auto` · `--server auto` 가 발견을 강제하는지(`wants_discovery` 는 값만 본다).
 - `advertise = "yes"`(문자열) — 다른 bool 키처럼 받아들일지(`_coerce_scalar` 의 오늘 동작).
-- `examples/client.toml` 의 `server = "auto"` 안내 주석 · dolomood `scripts/remote_ci.sh` 기본값(§4, 이 저장소 밖).
+- `examples/client.toml` 의 `server = "auto"` 안내 주석 · 팀 래퍼 스크립트의 기본값(§4, 이 저장소 밖).
 
 ## 실행
 
