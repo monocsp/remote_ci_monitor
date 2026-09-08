@@ -7,8 +7,10 @@ the same rules for humans.
 
 - **Zero runtime dependencies.** Standard library only, server and client. Dev and docs extras are
   fine.
-- **Comments and docstrings in Korean. Identifiers, CLI help, UI strings and documentation in
-  English.**
+- **Comments and docstrings in Korean. Identifiers, CLI help and documentation in English.**
+- **The web UI ships Korean first**, with an English switch in the page. Identifiers, preset names,
+  commands, SHAs and repository URLs stay untranslated in both languages, and text the *server*
+  sends is the server's own — the page does not translate it.
 - **Tests first.** A fix ships with the test that was red before it. Never weaken a test to make a
   change pass.
 - **Never invent a number.** Unknown prints as `—`; `rcm wait` exit 3 means unknown and is never

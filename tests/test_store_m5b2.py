@@ -157,7 +157,7 @@ def test_fresh_db_is_schema_v5_with_token_kind_worker_name_and_workers_table(sto
     """§1 · §2: 새 DB 는 v5 — `tokens.kind TEXT NOT NULL DEFAULT 'client'`(admin 열은 유지) ·
     `jobs.worker_name TEXT`(NULL 허용) · `workers` 표의 열·PK·NOT NULL 이 명세 그대로."""
     path = tmp_path / "rcm.db"
-    assert DB_VERSION == 5 and store.user_version() == 5
+    assert DB_VERSION == 6 and store.user_version() == 6
     tok = columns(path, "tokens")
     assert tok["kind"]["type"].upper() == "TEXT" and tok["kind"]["notnull"] == 1
     assert str(tok["kind"]["dflt_value"]).strip("'\"") == "client"
@@ -207,6 +207,8 @@ def test_migration_v4_to_v5_fills_kind_from_admin_and_adds_worker_name_and_worke
         c.execute("ALTER TABLE tokens DROP COLUMN kind")
         c.execute("ALTER TABLE jobs DROP COLUMN worker_name")
         c.execute("DROP TABLE workers")
+        c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
+        c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
         c.execute("PRAGMA user_version=4")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 4
@@ -216,7 +218,7 @@ def test_migration_v4_to_v5_fills_kind_from_admin_and_adds_worker_name_and_worke
     assert "workers" not in table_names(path)
     s2 = Store(path)  # 4 → 5 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 5 and s2.healthy()
+        assert s2.user_version() == 6 and s2.healthy()
         tok = columns(path, "tokens")
         assert tok["kind"]["notnull"] == 1
         assert str(tok["kind"]["dflt_value"]).strip("'\"") == "client"
@@ -239,7 +241,7 @@ def test_migration_v4_to_v5_fills_kind_from_admin_and_adds_worker_name_and_worke
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 5
+    assert s3.user_version() == 6
     assert s3.verify_token(admin_secret).kind == "admin"
     assert s3.get_job(queued.id).worker_name == "build-02"
     s3.close()

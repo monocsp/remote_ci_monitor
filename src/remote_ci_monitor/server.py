@@ -44,6 +44,7 @@ from remote_ci_monitor.config import (
     advertise_enabled,
     advertise_warning,
 )
+from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
@@ -135,6 +136,12 @@ def _safe(text: str) -> str:
     return _PATH_RE.sub("<path>", text)[:200]
 
 
+def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
+    """`store.finish` 에 바로 넣을 요약 세 값. 결정 37 — 문장은 outcome 표가 만든다."""
+    text, code, clean = outcome.summary(code, **args)
+    return {"summary": text, "summary_code": code, "summary_args": clean}
+
+
 def _mb(n: int) -> str:
     return f"{n / 1e6:.0f} MB" if n >= 1e6 else f"{n / 1e3:.0f} KB"
 
@@ -163,6 +170,10 @@ class _DbSnapshot:
     medians_error: str | None
     paused: Paused | None
     pool_medians: dict[str, dict[str, Median]] = field(default_factory=dict)  # 기본 풀 밖 (M5b)
+    #: 섹션 실패의 **종류**(결정 37). 원문은 위의 `*_error` 에 남는다.
+    queue_error_code: str | None = None
+    recent_error_code: str | None = None
+    medians_error_code: str | None = None
 
 
 class App(RemoteWorkersMixin):
@@ -507,13 +518,15 @@ class App(RemoteWorkersMixin):
         jobs: list[Job] = []
         markers: dict[int, list[Marker]] = {}
         queue_error = None
+        queue_error_code: str | None = None
         try:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
         except Exception as e:  # noqa: BLE001
-            queue_error = _error_text(e)
+            queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians: dict[str, Median] | None
         medians_error = None
+        medians_error_code: str | None = None
         pool_medians: dict[str, dict[str, Median]] = {}
         try:
             since = now - timedelta(days=cfg.sample_days)
@@ -524,12 +537,15 @@ class App(RemoteWorkersMixin):
                     pool_medians[name] = medians_from(sample_jobs, now, cfg)
         except Exception as e:  # noqa: BLE001
             medians, medians_error = None, _error_text(e)
+            medians_error_code = _error_code(e)
         recent: list[Job] | None
         recent_error = None
+        recent_error_code: str | None = None
         try:
             recent = self.store.list_recent(self.config.server.recent_count)
         except Exception as e:  # noqa: BLE001
             recent, recent_error = None, _error_text(e)
+            recent_error_code = _error_code(e)
         try:
             paused = self.store.get_paused()
         except Exception:  # noqa: BLE001
@@ -540,10 +556,13 @@ class App(RemoteWorkersMixin):
             jobs=jobs,
             markers=markers,
             queue_error=queue_error,
+            queue_error_code=queue_error_code,
             recent=recent,
             recent_error=recent_error,
+            recent_error_code=recent_error_code,
             medians=medians,
             medians_error=medians_error,
+            medians_error_code=medians_error_code,
             paused=paused,
         )
 
@@ -619,10 +638,12 @@ class App(RemoteWorkersMixin):
         snap = self._snapshot()
         queue: list[QueueRow] | None
         queue_error = None
+        queue_error_code: str | None = None
         try:
             queue = self._queue_rows(now, snap)
         except Exception as e:  # noqa: BLE001
             queue, queue_error = None, _error_text(e)
+            queue_error_code = _error_code(e)
         hosts, hosts_error = self._hosts()
         blob_count = blob_bytes = None
         if self.config.server.snapshot_cache:
@@ -670,13 +691,17 @@ class App(RemoteWorkersMixin):
                     lanes=self.pool_lanes(name, now),
                     queue=tuple(pool_queue) if pool_queue is not None else None,
                     queue_error=queue_error,
+                    queue_error_code=queue_error_code,
                     recent=tuple(recent) if recent is not None else None,
                     recent_error=snap.recent_error,
+                    recent_error_code=snap.recent_error_code,
                     recent_count=self.config.server.recent_count,
                     medians=self._pool_medians(snap, name),
                     medians_error=snap.medians_error,
+                    medians_error_code=snap.medians_error_code,
                     hosts=pool_hosts,  # 원격 워커 표본은 heartbeat 에서(M5b-2)
                     hosts_error=hosts_error if local else None,
+                    hosts_error_code=("sampler_failed" if hosts_error and local else None),
                 )
             )
         model = StatusModel(
@@ -929,9 +954,15 @@ class App(RemoteWorkersMixin):
                     size = f.get("size") if isinstance(f, dict) else None
                     if isinstance(size, int) and not isinstance(size, bool) and size > 0:
                         total += size
-                summary = f"snapshot {_mb(total)} exceeds {_mb(limit)}"
+                summary, code, args = outcome.summary("snapshot_too_big", bytes=total, limit=limit)
                 self.store.finish(
-                    job_id, CANCELLED, now=self.now_fn(), summary=summary, cancelled_by="server"
+                    job_id,
+                    CANCELLED,
+                    now=self.now_fn(),
+                    summary=summary,
+                    summary_code=code,
+                    summary_args=args,
+                    cancelled_by="server",
                 )
                 self._publish_job(None, job_id)
                 raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore") from e
@@ -1068,7 +1099,7 @@ class App(RemoteWorkersMixin):
                 job.id,
                 CANCELLED,
                 now=self.now_fn(),
-                summary=f"snapshot rejected: {type(e).__name__}",
+                **_finish_outcome("snapshot_rejected", kind=type(e).__name__),
                 cancelled_by="server",
                 only_from=(UPLOADING,),
             )
@@ -1077,7 +1108,7 @@ class App(RemoteWorkersMixin):
         part.unlink(missing_ok=True)
         absent = missing - got
         if absent:
-            summary = f"snapshot rejected: {len(absent)} blob(s) missing in upload"
+            summary, _code, _args = outcome.summary("snapshot_blobs_missing", count=len(absent))
             self.store.finish(
                 job.id,
                 CANCELLED,
@@ -1197,9 +1228,15 @@ class App(RemoteWorkersMixin):
             raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
         limit = self.config.server.max_snapshot_bytes
         if length > limit:
-            summary = f"snapshot {_mb(length)} exceeds {_mb(limit)}"
+            summary, code, args = outcome.summary("snapshot_too_big", bytes=length, limit=limit)
             self.store.finish(
-                job_id, CANCELLED, now=self.now_fn(), summary=summary, cancelled_by="server"
+                job_id,
+                CANCELLED,
+                now=self.now_fn(),
+                summary=summary,
+                summary_code=code,
+                summary_args=args,
+                cancelled_by="server",
             )
             self._publish_job(None, job_id)
             raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore")
@@ -1247,7 +1284,7 @@ class App(RemoteWorkersMixin):
             job.id,
             CANCELLED,
             now=self.now_fn(),
-            summary=f"upload interrupted after {_mb(received)}",
+            **_finish_outcome("upload_interrupted", bytes=received),
             cancelled_by="server",
             only_from=(UPLOADING,),
         )
@@ -1372,6 +1409,11 @@ def _error_text(e: BaseException) -> str:
     if isinstance(e, sqlite3.Error):
         return f"database error: {_safe(str(e))}"
     return f"{type(e).__name__}: {_safe(str(e))}"
+
+
+def _error_code(e: BaseException) -> str:
+    """오류의 **종류**(결정 37). 원문은 `_error_text` 가 만든다 — 화면은 종류를 자기 말로 쓴다."""
+    return "database_unavailable" if isinstance(e, sqlite3.Error) else "internal_error"
 
 
 def _opt_str(v: Any, limit: int) -> str | None:

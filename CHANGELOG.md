@@ -7,6 +7,17 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **The server says what happened in codes, not sentences** (M5d-0). Every summary the *server*
+  writes now carries `summary_code` and `summary_args` beside the English `summary`, so a client
+  can render the same fact in its own language: `cancelled_before_start`, `server_restarted`,
+  `upload_abandoned`, `snapshot_too_big`, `worker_unreachable` and thirteen more, collected in one
+  table (`core/outcome.py`). Arguments are raw values (bytes, seconds, exit codes, names) — the
+  side that shows them decides how to format. A summary the *job* printed with `::rcm::summary::`
+  has no code; it is the team's own sentence and travels unchanged. The four `*_error` fields, the
+  server's `last_error` and a host's `gpu_note` gained `*_code` companions the same way. Database
+  schema 5 → 6 (migrates on start); API `schema_version` stays 1 — keys are only added.
+
 ### Changed
 - Documentation: say plainly that **discovery resolves the address, not who you are**. A token is
   only ever created on the build machine (`rcm token add` writes to the server's database; there

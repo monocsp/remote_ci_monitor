@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from remote_ci_monitor.config import _NAME_RE
+from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.hostparse import sample_from_json
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
@@ -63,6 +64,7 @@ MAX_WORKER_LOG_BODY = 4 * 1024 * 1024
 MAX_WORKER_LANES = 64
 WORKER_PHASES = (PHASE_MATERIALIZING, PHASE_EXECUTING)
 WORKER_OUTCOMES = (SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST)
+#: 문장은 `core.outcome` 표가 만든다(결정 37). 이 이름들은 옛 호출부와 테스트를 위해 남긴다.
 SUMMARY_RESTARTED = "worker {name} restarted without the job"
 SUMMARY_UNREACHABLE = "worker {name} unreachable for {seconds}s"
 SUMMARY_CANCEL_UNCONFIRMED = "worker did not confirm the cancel"
@@ -81,6 +83,12 @@ def _int_field(body: dict[str, Any], key: str, lo: int, hi: int, *, default: int
     if not lo <= v <= hi:
         raise _api_error(400, f"{key} must be between {lo} and {hi}")
     return v
+
+
+def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
+    """`store.finish` 에 바로 넣을 요약 세 값(결정 37)."""
+    text, code, clean = outcome.summary(code, **args)
+    return {"summary": text, "summary_code": code, "summary_args": clean}
 
 
 class RemoteWorkersMixin:
@@ -228,8 +236,9 @@ class RemoteWorkersMixin:
             )
         now = self.now_fn()
         # 등록 = 새 프로세스. 옛 프로세스가 잡고 있던 잡은 아무도 이어 받지 않는다(재현성)
+        text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
         lost = self.store.mark_lost_for_worker(
-            token.name, now, SUMMARY_RESTARTED.format(name=token.name)
+            token.name, now, text, summary_code=code, summary_args=args
         )
         for job_id in lost:
             self._publish_job(None, job_id)
@@ -427,8 +436,8 @@ class RemoteWorkersMixin:
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
         job = self._owned_active(token, job_id)
-        outcome = body.get("outcome")
-        if outcome not in WORKER_OUTCOMES:
+        reported = body.get("outcome")
+        if reported not in WORKER_OUTCOMES:
             raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
         rc = body.get("exit_code")
         if rc is not None and (isinstance(rc, bool) or not isinstance(rc, int)):
@@ -438,23 +447,39 @@ class RemoteWorkersMixin:
             raise _api_error(400, "summary must be a string")
         now = self.now_fn()
         markers = self.store.markers(job.id)
-        state, summary, failed_step = outcome_for(
+        lost_text, lost_code, lost_args = outcome.summary("worker_stopped_while_running")
+        if given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
+            lost_text, lost_code, lost_args = given[:200], None, {}
+        oc = outcome_for(
             job,
             markers,
             started=job.started_at or now,
             finished=now,
             rc=rc,
-            cancelled=outcome == CANCELLED,
-            timed_out=outcome == TIMED_OUT,
-            lost=outcome == LOST,
-            lost_summary=(given or "worker stopped while running")[:200],
+            cancelled=reported == CANCELLED,
+            timed_out=reported == TIMED_OUT,
+            lost=reported == LOST,
+            lost_summary=lost_text,
+            lost_code=lost_code,
+            lost_args=lost_args,
         )
+        state, summary, failed_step = oc.state, oc.summary, oc.failed_step
+        code, args = oc.code, oc.args
         if state in (FAILED, SUCCEEDED) and not summary:
-            summary = (given or ("failed on the worker" if state == FAILED else None)) or None
-            summary = summary[:200] if summary else None
+            if given:
+                summary, code, args = given[:200], None, {}
+            elif state == FAILED:
+                summary, code, args = outcome.summary("worker_failed")
         self._drop_log_partial([job.id])
         if not self.store.finish(
-            job.id, state, now=now, exit_code=rc, summary=summary, failed_step=failed_step
+            job.id,
+            state,
+            now=now,
+            exit_code=rc,
+            summary=summary,
+            summary_code=code,
+            summary_args=args,
+            failed_step=failed_step,
         ):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"
@@ -481,8 +506,9 @@ class RemoteWorkersMixin:
                 raise _api_error(400, "jobs must be a list of job ids")
             forgotten = [j for j in active if j.id not in set(known)]
             for job in forgotten:
+                text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
                 self.store.finish(
-                    job.id, LOST, now=now, summary=SUMMARY_RESTARTED.format(name=token.name)
+                    job.id, LOST, now=now, summary=text, summary_code=code, summary_args=args
                 )
                 self._publish_job(None, job.id)
             if forgotten:
@@ -517,7 +543,7 @@ class RemoteWorkersMixin:
                     job.id,
                     CANCELLED,
                     now=now,
-                    summary=SUMMARY_CANCEL_UNCONFIRMED,
+                    **_finish_outcome("cancel_unconfirmed"),
                     only_from=(CANCELLING,),
                 ):
                     self._drop_log_partial([job.id])
@@ -533,8 +559,9 @@ class RemoteWorkersMixin:
                 self._close_unconfirmed_cancels(self.store.jobs_of_worker(row.name), now)
                 continue
             gone = int((now - row.last_seen_at).total_seconds())
+            text, code, args = outcome.summary("worker_unreachable", name=row.name, seconds=gone)
             ids = self.store.mark_lost_for_worker(
-                row.name, now, SUMMARY_UNREACHABLE.format(name=row.name, seconds=gone)
+                row.name, now, text, summary_code=code, summary_args=args
             )
             if ids:
                 self.log(f"worker {row.name} unreachable for {gone}s: lost={ids}")

@@ -203,6 +203,10 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "started_at": iso(started),
         "finished_at": iso(finished),
         "summary": job.summary,
+        # 서버가 만든 요약이면 코드와 원시 인자가 함께 온다(결정 37) — 화면이 자기 말로 그린다.
+        # 잡이 `::rcm::summary::` 로 찍은 문장에는 코드가 없다.
+        "summary_code": job.summary_code,
+        "summary_args": dict(job.summary_args) if job.summary_args else None,
         "failed_step": job.failed_step,
         "cancelled_by": job.cancelled_by,
         "timeout_seconds": job.timeout_seconds,
@@ -245,6 +249,7 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
         "lanes": s.lanes,
         "paused": {"by": s.paused.by, "at": iso(s.paused.at)} if s.paused else None,
         "last_error": s.last_error,
+        "last_error_code": s.last_error_code,
         "sse_connections": s.sse_connections,
         "snapshot_cache": (
             {"blobs": s.snapshot_cache_blobs, "bytes": s.snapshot_cache_bytes}
@@ -284,6 +289,7 @@ def host_json(h: HostSample, *, now: datetime) -> dict[str, Any]:
         "memory": dict(h.memory) if h.memory else None,
         "gpu": dict(h.gpu) if h.gpu else None,
         "gpu_note": h.gpu_note,
+        "gpu_note_code": h.gpu_note_code,
         "top": [dict(t) for t in h.top],
         "history": [dict(x) for x in h.history],
     }
@@ -306,6 +312,7 @@ def pool_json(
             else None
         ),
         "queue_error": pool.queue_error,
+        "queue_error_code": pool.queue_error_code,
         "recent": (
             [recent_json(j, base_url=base_url) for j in pool.recent]
             if pool.recent is not None
@@ -313,6 +320,7 @@ def pool_json(
         ),
         "recent_count": pool.recent_count,
         "recent_error": pool.recent_error,
+        "recent_error_code": pool.recent_error_code,
         "medians": (
             {
                 k: {
@@ -326,8 +334,10 @@ def pool_json(
             else None
         ),
         "medians_error": pool.medians_error,
+        "medians_error_code": pool.medians_error_code,
         "hosts": [host_json(h, now=now) for h in pool.hosts] if pool.hosts is not None else None,
         "hosts_error": pool.hosts_error,
+        "hosts_error_code": pool.hosts_error_code,
     }
 
 

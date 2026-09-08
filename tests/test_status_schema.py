@@ -74,6 +74,10 @@ RECENT_KEYS = {
     "started_at",
     "finished_at",
     "summary",
+    # M5d-0(결정 37): 서버가 만든 요약이면 코드와 원시 인자가 함께 온다.
+    # 키 추가만 — 스키마 v1 그대로.
+    "summary_code",
+    "summary_args",
     "failed_step",
     "cancelled_by",
     "timeout_seconds",
@@ -93,6 +97,11 @@ POOL_KEYS = {
     "medians_error",
     "hosts",
     "hosts_error",
+    # M5d-0(결정 37): 실패의 종류를 코드로도 말한다. 원문은 위의 `*_error` 에 남는다.
+    "queue_error_code",
+    "recent_error_code",
+    "medians_error_code",
+    "hosts_error_code",
 }
 
 
@@ -208,6 +217,7 @@ def test_status_is_json_serializable_with_expected_shape():
         "notify_failures",
         "paused",
         "last_error",
+        "last_error_code",  # M5d-0(결정 37) — 키 추가만
         "sse_connections",
         "workers",
     }
