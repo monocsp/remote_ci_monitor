@@ -42,6 +42,8 @@ remote-ci-monitor = "remote_ci_monitor.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
+# 문서용 스크린샷 도구(tools/screenshots) — 런타임과 무관하다. Chrome 도 필요하다.
+docs = ["pillow>=10"]
 
 [tool.hatch.version]
 path = "src/remote_ci_monitor/__init__.py"
