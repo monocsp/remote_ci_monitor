@@ -12,19 +12,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
 import secrets
+import shutil
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor.core import outcome
+from remote_ci_monitor.core import artifacts, outcome
 from remote_ci_monitor.core.model import (
     ACTIVE_STATES,
     BUSY_STATES,
@@ -51,9 +53,9 @@ from remote_ci_monitor.core.model import (
 )
 from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
-from remote_ci_monitor.core.retention import BlobInfo
+from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 6
+DB_VERSION = 7
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -93,13 +95,35 @@ CREATE TABLE IF NOT EXISTS jobs (
   pool TEXT NOT NULL DEFAULT 'default',
   worker_name TEXT,
   summary_code TEXT,
-  summary_args TEXT
+  summary_args TEXT,
+  join_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
 CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
+CREATE TABLE IF NOT EXISTS job_artifacts (
+  job_id INTEGER PRIMARY KEY,
+  state TEXT NOT NULL,
+  policy_json TEXT,
+  manifest_json TEXT,
+  bundle_sha256 TEXT,
+  file_count INTEGER,
+  total_bytes INTEGER,
+  bundle_bytes INTEGER,
+  reserved_bytes INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER,
+  collected_at REAL,
+  ready_at REAL,
+  expires_at REAL,
+  acked_at REAL,
+  purged_at REAL,
+  reason_code TEXT,
+  reason_args TEXT,
+  detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS job_artifacts_expiry ON job_artifacts(state, expires_at);
 CREATE TABLE IF NOT EXISTS joiners (
   job_id INTEGER NOT NULL,
   name TEXT NOT NULL,
@@ -170,6 +194,21 @@ _NOTIFICATIONS_SQL = (
 
 #: v1 → v2: 보존 정리가 산출물을 지운 시각. 기존 DB 에 컬럼만 더한다.
 #: v2 → v3(M5): 우선순위 컬럼 · 스냅샷 캐시 blob 표 · 알림 전송 기록.
+#: 잡이 만든 파일 묶음(M5e). `jobs.artifacts_purged_at`(M3: 로그·스냅샷·워크스페이스)과 **다른
+#: 것**이다 — 섞으면 청소기가 남의 것을 지운다(명세 §1).
+_BUNDLES_SQL = (
+    "CREATE TABLE IF NOT EXISTS job_artifacts ("
+    "job_id INTEGER PRIMARY KEY, state TEXT NOT NULL, policy_json TEXT, manifest_json TEXT, "
+    "bundle_sha256 TEXT, file_count INTEGER, total_bytes INTEGER, bundle_bytes INTEGER, "
+    "reserved_bytes INTEGER NOT NULL DEFAULT 0, skipped_count INTEGER, collected_at REAL, "
+    "ready_at REAL, expires_at REAL, acked_at REAL, purged_at REAL, reason_code TEXT, "
+    "reason_args TEXT, detail_json TEXT)"
+)
+_BUNDLES_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS job_artifacts_expiry ON job_artifacts(state, expires_at)"
+)
+
+
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE jobs ADD COLUMN artifacts_purged_at REAL",),
     3: (
@@ -193,6 +232,13 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     6: (
         "ALTER TABLE jobs ADD COLUMN summary_code TEXT",
         "ALTER TABLE jobs ADD COLUMN summary_args TEXT",
+    ),
+    # v6 → v7(M5e): 합류 횟수(삭제 규칙 · 결정 40)와 잡 산출물 묶음. 옛 잡은 join_count 0 이고
+    # 묶음 행이 없다 — 공개 상태로는 `unknown` 이지 `empty` 가 아니다(명세 §3 · §9).
+    7: (
+        "ALTER TABLE jobs ADD COLUMN join_count INTEGER NOT NULL DEFAULT 0",
+        _BUNDLES_SQL,
+        _BUNDLES_INDEX_SQL,
     ),
 }
 
@@ -251,6 +297,78 @@ def hash_token(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+def _bundle_manifest(result: Any) -> str | None:
+    """`CollectResult` → `manifest_json`. 파일 목록은 보호 라우트에서만 나간다(§10)."""
+    files = getattr(result, "files", ()) or ()
+    if not files:
+        return None
+    return json.dumps(
+        {
+            "bundle_sha256": result.bundle_sha256,
+            "files": [
+                {"path": f.path, "size": f.size, "sha256": f.sha256, "mode": f.mode} for f in files
+            ],
+        },
+        separators=(",", ":"),
+    )
+
+
+def _upsert_bundle(
+    conn: sqlite3.Connection,
+    job_id: int,
+    result: Any,
+    *,
+    now: datetime,
+    ttl_hours: int = 24,
+    expires_at: datetime | None = None,
+) -> None:
+    """묶음 행 하나를 쓴다(열려 있는 트랜잭션 안에서). 이미 발행된 묶음은 **불변**이다.
+
+    만료는 `ready` 일 때만 박는다 — 버리거나 깨진 묶음은 지울 파일이 없다. 발행된 묶음은 만료가
+    반드시 있다(만료 없는 행을 만들면 sweep 이 영영 못 가져간다, §9 ⑤).
+    """
+    row = conn.execute(
+        "SELECT state, bundle_sha256 FROM job_artifacts WHERE job_id=?", (job_id,)
+    ).fetchone()
+    if row is not None and row["bundle_sha256"] and row["state"] == artifacts.READY:
+        return  # 불변 — 두 번째 finish 가 발행된 묶음을 갈아치우지 않는다
+    ready = result.state == artifacts.READY
+    # 수를 아는 것은 수집이 끝까지 간 경우다 — `empty` 의 0 은 「모았는데 없었다」는 사실이고
+    # `dropped`·`failed` 의 None 은 「모른다」다. 둘을 섞으면 §10 의 정직성이 깨진다.
+    known = result.state in (artifacts.READY, artifacts.EMPTY)
+    expiry = expires_at if expires_at is not None else artifacts.expires_at(now, ttl_hours)
+    conn.execute(
+        "INSERT INTO job_artifacts (job_id, state, manifest_json, bundle_sha256, file_count, "
+        "total_bytes, bundle_bytes, reserved_bytes, skipped_count, collected_at, ready_at, "
+        "expires_at, reason_code, reason_args, detail_json) "
+        "VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?) "
+        "ON CONFLICT(job_id) DO UPDATE SET state=excluded.state, "
+        "manifest_json=excluded.manifest_json, bundle_sha256=excluded.bundle_sha256, "
+        "file_count=excluded.file_count, total_bytes=excluded.total_bytes, "
+        "bundle_bytes=excluded.bundle_bytes, reserved_bytes=0, "
+        "skipped_count=excluded.skipped_count, collected_at=excluded.collected_at, "
+        "ready_at=excluded.ready_at, expires_at=excluded.expires_at, "
+        "reason_code=excluded.reason_code, reason_args=excluded.reason_args, "
+        "detail_json=excluded.detail_json",
+        (
+            job_id,
+            result.state,
+            _bundle_manifest(result),
+            result.bundle_sha256,
+            len(result.files or ()) if known else None,
+            result.total_bytes if known else None,
+            result.bundle_bytes if known else None,
+            result.skipped_count,
+            _ts(now),
+            _ts(now) if ready else None,
+            _ts(expiry) if ready else None,
+            result.reason_code,
+            outcome.dump_args(result.reason_args),
+            json.dumps(result.detail, separators=(",", ":")) if result.detail else None,
+        ),
+    )
+
+
 class Store:
     """SQLite 저장소. 한 프로세스 안에서 여러 스레드가 같이 쓴다."""
 
@@ -259,6 +377,7 @@ class Store:
         self._local = threading.local()
         self._lock = threading.Lock()
         self.open_connections = 0  # 지금 열린 연결 수(스레드마다 하나) — 누수 감시
+        self._holds: dict[int, int] = {}  # 지금 내려보내는 중인 묶음(M5e) — 프로세스 안에서만
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
 
@@ -475,7 +594,11 @@ class Store:
                 for r in conn.execute(
                     f"SELECT id FROM jobs WHERE state IN ({marks}) "
                     "AND artifacts_purged_at IS NOT NULL "
-                    "AND COALESCE(finished_at, created_at) < ?",
+                    "AND COALESCE(finished_at, created_at) < ? "
+                    # M5e: 묶음 파일도 예약도 없어야 지운다 — 삭제에 실패한 번들이 소유 기록과
+                    # 회계를 잃으면 안 된다(§8). 번들 행이 아예 없는 옛 잡은 예전 규칙 그대로.
+                    "AND id NOT IN (SELECT job_id FROM job_artifacts "
+                    "WHERE purged_at IS NULL OR reserved_bytes > 0)",
                     (*sorted(TERMINAL_STATES), _ts(cutoff)),
                 ).fetchall()
             ]
@@ -483,12 +606,345 @@ class Store:
                 id_marks = ",".join("?" * len(ids))
                 conn.execute(f"DELETE FROM events WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM joiners WHERE job_id IN ({id_marks})", ids)
+                conn.execute(f"DELETE FROM job_artifacts WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM jobs WHERE id IN ({id_marks})", ids)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
         return len(ids)
+
+    # ── 잡 산출물 묶음 (M5e) ─────────────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def hold_bundle(self, job_id: int) -> Iterator[None]:
+        """묶음을 내려보내는 동안 잡아 둔다(§6).
+
+        unlink 로는 공간이 안 돌아온다 — 마지막 독자가 닫을 때까지 바이트를 회계에 남긴다.
+        잡고 있는 동안 만료가 지나면 청소기가 파일만 지우고 `purged_at` 은 안 찍는다.
+        """
+        job_id = int(job_id)
+        with self._lock:
+            self._holds[job_id] = self._holds.get(job_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                left = self._holds.get(job_id, 1) - 1
+                if left <= 0:
+                    self._holds.pop(job_id, None)
+                else:
+                    self._holds[job_id] = left
+
+    def bundle_is_held(self, job_id: int) -> bool:
+        with self._lock:
+            return int(job_id) in self._holds
+
+    def set_bundle_state(self, job_id: int, state: str) -> None:
+        """상태만 바꾼다 — `purged_at` 은 안 찍는다(아직 독자가 있다)."""
+        self._conn().execute(
+            "UPDATE job_artifacts SET state=? WHERE job_id=? AND purged_at IS NULL",
+            (state, int(job_id)),
+        )
+
+    def _artifacts_root(self) -> Path:
+        return self.path.parent / "artifacts"
+
+    def get_bundle(self, job_id: int) -> dict[str, Any] | None:
+        """묶음 행 하나. 시각은 UTC aware datetime, `reason_args` 는 푼 dict 다(§18)."""
+        row = (
+            self._conn()
+            .execute("SELECT * FROM job_artifacts WHERE job_id=?", (int(job_id),))
+            .fetchone()
+        )
+        if row is None:
+            return None
+        manifest = json.loads(row["manifest_json"]) if row["manifest_json"] else None
+        return {
+            "job_id": int(row["job_id"]),
+            "state": row["state"],
+            "policy": json.loads(row["policy_json"]) if row["policy_json"] else None,
+            "files": (manifest or {}).get("files", []),
+            "bundle_sha256": row["bundle_sha256"],
+            "file_count": row["file_count"],
+            "total_bytes": row["total_bytes"],
+            "bundle_bytes": row["bundle_bytes"],
+            "reserved_bytes": int(row["reserved_bytes"] or 0),
+            "skipped_count": row["skipped_count"],
+            "collected_at": _dt(row["collected_at"]),
+            "ready_at": _dt(row["ready_at"]),
+            "expires_at": _dt(row["expires_at"]),
+            "acked_at": _dt(row["acked_at"]),
+            "purged_at": _dt(row["purged_at"]),
+            "reason_code": row["reason_code"],
+            "reason_args": outcome.load_args(row["reason_args"]) if row["reason_args"] else None,
+            "detail": json.loads(row["detail_json"]) if row["detail_json"] else None,
+        }
+
+    def start_collect(self, job_id: int, policy: Any, now: datetime) -> None:
+        """수집을 시작했다고 표시하고 **얼린 정책**을 남긴다(§9)."""
+        frozen = json.dumps(
+            {
+                "globs": list(policy.globs),
+                "max_bytes": policy.max_bytes,
+                "max_files": policy.max_files,
+                "timeout_seconds": policy.timeout_seconds,
+                "cancel_timeout_seconds": policy.cancel_timeout_seconds,
+            },
+            separators=(",", ":"),
+        )
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT INTO job_artifacts (job_id, state, policy_json, collected_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET state=excluded.state, "
+                "policy_json=excluded.policy_json, collected_at=excluded.collected_at",
+                (int(job_id), artifacts.COLLECTING, frozen, _ts(now)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def bundle_storage_totals(self) -> tuple[int, int]:
+        """(발행되어 디스크에 있는 바이트, 예약된 바이트). 지운 묶음은 세지 않는다."""
+        row = (
+            self._conn()
+            .execute(
+                "SELECT COALESCE(SUM(CASE WHEN purged_at IS NULL THEN bundle_bytes ELSE 0 END), 0) "
+                "AS stored, COALESCE(SUM(reserved_bytes), 0) AS reserved FROM job_artifacts"
+            )
+            .fetchone()
+        )
+        return int(row["stored"] or 0), int(row["reserved"] or 0)
+
+    def reserve_bundle_bytes(self, job_id: int, want: int, limit: int, now: datetime) -> bool:
+        """전체 상한 안에서 자리를 잡는다. **잡당 예약은 하나**라 다시 잡으면 더하지 않고 바꾼다.
+
+        넘으면 아무것도 바꾸지 않고 False — 만료되지 않은 남의 묶음을 쫓아내지 않는다(§8).
+        """
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN purged_at IS NULL THEN bundle_bytes ELSE 0 END), 0) "
+                "AS stored, COALESCE(SUM(CASE WHEN job_id=? THEN 0 ELSE reserved_bytes END), 0) "
+                "AS others FROM job_artifacts",
+                (int(job_id),),
+            ).fetchone()
+            if int(row["stored"] or 0) + int(row["others"] or 0) + int(want) > int(limit):
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute(
+                "INSERT INTO job_artifacts (job_id, state, reserved_bytes, collected_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET "
+                "reserved_bytes=excluded.reserved_bytes",
+                (int(job_id), artifacts.COLLECTING, int(want), _ts(now)),
+            )
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def release_bundle_bytes(self, job_id: int) -> None:
+        """예약을 반납한다. 두 번 불러도 조용하다."""
+        self._conn().execute(
+            "UPDATE job_artifacts SET reserved_bytes=0 WHERE job_id=?", (int(job_id),)
+        )
+
+    def publish_bundle(
+        self, job_id: int, result: Any, *, now: datetime, expires_at: datetime
+    ) -> None:
+        """모은 묶음을 발행한다. 예약은 실측으로 바뀌고 TTL 시계가 여기서 시작한다(§8)."""
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _upsert_bundle(conn, int(job_id), result, now=now, expires_at=expires_at)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def set_bundle_failed(
+        self,
+        job_id: int,
+        state: str,
+        reason_code: str,
+        reason_args: dict[str, Any] | None,
+        now: datetime,
+    ) -> None:
+        """산출물만 실패시킨다 — 잡의 상태·요약은 건드리지 않는다(§3)."""
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT INTO job_artifacts (job_id, state, reason_code, reason_args, "
+                "reserved_bytes, collected_at) VALUES (?,?,?,?,0,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET state=excluded.state, "
+                "reason_code=excluded.reason_code, reason_args=excluded.reason_args, "
+                "reserved_bytes=0, collected_at=excluded.collected_at",
+                (int(job_id), state, reason_code, outcome.dump_args(reason_args), _ts(now)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def ack_bundle(self, job_id: int, sent_sha: str, *, owner: bool, now: datetime) -> Any:
+        """확인(ack) 하나를 처리한다. 판정은 순수 규칙이 하고 여기서는 기록만 한다(§7).
+
+        **지울 자격만 준다** — 물리적으로 지우는 것은 청소기다. 동시에 온 마지막 확인 둘 중
+        하나에만 `purge` 를 준다(두 번 지우면 회계가 두 번 줄어든다).
+        """
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT state, bundle_sha256, expires_at, acked_at FROM job_artifacts "
+                "WHERE job_id=?",
+                (int(job_id),),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return artifacts.AckDecision(409, False, False, "not_ready")
+            expiry = _dt(row["expires_at"])
+            decision = artifacts.ack_decision(
+                state=row["state"],
+                join_count=self._join_count(conn, job_id),
+                owner=owner,
+                stored_sha=row["bundle_sha256"],
+                sent_sha=sent_sha,
+                expired=expiry is not None and now >= expiry,
+            )
+            if decision.record and row["acked_at"] is not None:
+                # 이미 누가 확인했다 — 두 번 지우라고 하지 않는다.
+                decision = artifacts.AckDecision(
+                    decision.status, False, False, decision.reason_code
+                )
+            if decision.record:
+                conn.execute(
+                    "UPDATE job_artifacts SET acked_at=? WHERE job_id=? AND acked_at IS NULL",
+                    (_ts(now), int(job_id)),
+                )
+            conn.execute("COMMIT")
+            return decision
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _join_count(conn: sqlite3.Connection, job_id: int) -> int:
+        row = conn.execute("SELECT join_count FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+        return int(row["join_count"] or 0) if row is not None else 0
+
+    def set_bundle_counts(self, job_id: int, file_count: int) -> None:
+        """워커가 센 파일 수를 적는다 — 서버가 매니페스트를 못 봤을 때만 쓴다."""
+        self._conn().execute(
+            "UPDATE job_artifacts SET file_count=? WHERE job_id=?", (int(file_count), int(job_id))
+        )
+
+    def bundles_due(self, now: datetime, limit: int = 1000) -> list[Any]:
+        """TTL 이 지난 묶음. 만료 없는 행과 이미 사라진 것은 절대 대상이 아니다(§8)."""
+        marks = ",".join("?" * len(artifacts.GONE_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT job_id, state, expires_at, bundle_bytes FROM job_artifacts "
+                f"WHERE expires_at IS NOT NULL AND expires_at <= ? AND state NOT IN ({marks}) "
+                "ORDER BY job_id LIMIT ?",
+                (_ts(now), *sorted(artifacts.GONE_STATES), int(limit)),
+            )
+            .fetchall()
+        )
+        return [
+            BundleInfo(
+                job_id=int(r["job_id"]),
+                state=r["state"],
+                expires_at=_dt(r["expires_at"]),
+                bytes=int(r["bundle_bytes"] or 0),
+            )
+            for r in rows
+        ]
+
+    def mark_bundles_purged(self, job_ids: Iterable[int], state: str, now: datetime) -> int:
+        """지웠다고 표시하고 예약을 반납한다. 이미 표시된 것은 다시 세지 않는다."""
+        ids = [int(i) for i in job_ids]
+        if not ids:
+            return 0
+        id_marks = ",".join("?" * len(ids))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                f"UPDATE job_artifacts SET state=?, purged_at=?, reserved_bytes=0 "
+                f"WHERE job_id IN ({id_marks}) AND purged_at IS NULL",
+                (state, _ts(now), *ids),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return int(cur.rowcount)
+
+    def reconcile_bundles_on_start(self, now: datetime) -> tuple[list[int], list[int]]:
+        """시작할 때 파일과 DB 를 화해시킨다(§9). (중단으로 닫은 잡, 파일이 없어진 잡).
+
+        파일 설치와 커밋은 한 트랜잭션이 될 수 없다 — 그 사이에 죽으면 고아가 남는다.
+        **묶음이 있다고 해서 `lost` 잡이 성공이 되지는 않는다** — 잡 상태는 건드리지 않는다.
+        """
+        root = self._artifacts_root()
+        staging = root / ".staging"
+        if staging.is_dir():
+            for entry in staging.iterdir():
+                shutil.rmtree(entry, ignore_errors=True) if entry.is_dir() else entry.unlink(
+                    missing_ok=True
+                )
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            interrupted = [
+                int(r["job_id"])
+                for r in conn.execute(
+                    "SELECT job_id FROM job_artifacts WHERE state IN (?,?) ORDER BY job_id",
+                    (artifacts.COLLECTING, artifacts.UPLOADING),
+                ).fetchall()
+            ]
+            if interrupted:
+                marks = ",".join("?" * len(interrupted))
+                conn.execute(
+                    f"UPDATE job_artifacts SET state=?, reason_code='interrupted', "
+                    f"reserved_bytes=0 WHERE job_id IN ({marks})",
+                    (artifacts.FAILED, *interrupted),
+                )
+            ready = [
+                int(r["job_id"])
+                for r in conn.execute(
+                    "SELECT job_id FROM job_artifacts WHERE state=? ORDER BY job_id",
+                    (artifacts.READY,),
+                ).fetchall()
+            ]
+            gone = [j for j in ready if not (root / str(j) / "bundle.tar").is_file()]
+            if gone:
+                marks = ",".join("?" * len(gone))
+                conn.execute(
+                    f"UPDATE job_artifacts SET state=? WHERE job_id IN ({marks})",
+                    (artifacts.UNAVAILABLE, *gone),
+                )
+            known = {
+                int(r["job_id"])
+                for r in conn.execute("SELECT job_id FROM job_artifacts").fetchall()
+            }
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        if root.is_dir():  # 행 없는 설치 디렉터리 — 커밋 전에 죽은 자국이다(§9 ④)
+            for entry in root.iterdir():
+                if entry.is_dir() and entry.name.isdigit() and int(entry.name) not in known:
+                    shutil.rmtree(entry, ignore_errors=True)
+        return interrupted, gone
 
     def list_pools(self) -> list[str]:
         """활성 + 종료 잡이 있는 풀 이름. 기본 풀은 잡이 없어도 맨 앞."""
@@ -622,6 +1078,9 @@ class Store:
                     "VALUES (?, ?, ?, ?)",
                     (job_id, name, label, _ts(now)),
                 )
+            # 합류자 줄이 안 늘어도 센다 — 요청자 본인 재제출(줄 없음)도, 같은 합류자의 재제출
+            # (`INSERT OR IGNORE`)도 「이 잡을 기다리는 세션이 하나 더 생겼다」는 뜻이다(§7).
+            conn.execute("UPDATE jobs SET join_count=join_count+1 WHERE id=?", (job_id,))
             if int(priority) > int(row["priority"] or 0):
                 conn.execute("UPDATE jobs SET priority=? WHERE id=?", (int(priority), job_id))
             conn.execute("COMMIT")
@@ -959,8 +1418,15 @@ class Store:
         failed_step: str | None = None,
         cancelled_by: str | None = None,
         only_from: Iterable[str] | None = None,
+        bundle: Any | None = None,
+        ttl_hours: int = 24,
     ) -> bool:
-        """종료 상태로. `only_from` 을 주면 그 상태에서만 바뀐다(경쟁 방지)."""
+        """종료 상태로. `only_from` 을 주면 그 상태에서만 바뀐다(경쟁 방지).
+
+        `bundle`(`collect.CollectResult`)을 주면 산출물 묶음을 **같은 트랜잭션**에 쓴다 — 거절된
+        finish 는 묶음도 안 남긴다(§5). 잡의 요약은 건드리지 않는다: 「테스트가 깨졌다」와
+        「산출물을 못 올렸다」는 다른 사실이다(§3).
+        """
         if state not in TERMINAL_STATES:
             raise StoreError(f"{state} is not a terminal state")
         conn = self._conn()
@@ -989,6 +1455,8 @@ class Store:
                 lane=None,
                 phase=None,
             )
+            if bundle is not None:
+                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
             conn.execute("COMMIT")
             return True
         except Exception:

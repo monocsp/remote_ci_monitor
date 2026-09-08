@@ -102,7 +102,7 @@ def assert_code_redraws_the_sentence(job: Job) -> None:
 
 
 def test_fresh_db_is_schema_v6_with_the_two_summary_columns(store, tmp_path):
-    assert DB_VERSION == 6 and store.user_version() == 6
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     assert {"summary_code", "summary_args"} <= job_columns(tmp_path / "rcm.sqlite3")
 
 
@@ -119,6 +119,10 @@ def test_migration_v5_to_v6_adds_the_columns_and_old_rows_have_no_code(tmp_path)
     try:
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        # v7(M5e)이 더한 것도 뗀다 — 안 그러면 6 뒤에 도는 7 이 중복 열로 죽는다
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("PRAGMA user_version=5")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 5
@@ -127,7 +131,7 @@ def test_migration_v5_to_v6_adds_the_columns_and_old_rows_have_no_code(tmp_path)
     assert not ({"summary_code", "summary_args"} & job_columns(path))
     s2 = Store(path)  # 5 → 6 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 6 and s2.healthy()
+        assert s2.user_version() == DB_VERSION and s2.healthy()
         assert {"summary_code", "summary_args"} <= job_columns(path)
         old = s2.get_job(done.id)
         assert old is not None and old.state == FAILED
@@ -149,7 +153,7 @@ def test_migration_v5_to_v6_adds_the_columns_and_old_rows_have_no_code(tmp_path)
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 6 and s3.get_job(done.id).summary_code is None
+    assert s3.user_version() == DB_VERSION and s3.get_job(done.id).summary_code is None
     s3.close()
 
 

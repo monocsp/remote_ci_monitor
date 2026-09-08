@@ -618,6 +618,10 @@ docs/reviews/
 | 49 | M5f **밖**의 병목은 별도 PR | `/api/status` 의 `list_samples`(요청의 91~93%, 1만 행 245 ms) · `remote_worker_infos` N+1(마커 줄당 SQL 555개) · `workers` 표 미정리 · `PRAGMA synchronous=NORMAL`(쓰기 5.6배, 내구성 변경이라 오너가 정한다) |
 | 50 | 같은 레포의 병렬 레인은 직렬화된다 — 적고 안 고친다 | `gitops.py` 의 미러 락은 `git` 서브프로세스를 안고 잡는다(상한 600초). 「레인을 늘려도 같은 레포의 자재화는 겹치지 않는다」를 `docs/configuration.md` 에 적는다 |
 | 38 | 기본 언어 | 브라우저 언어와 **무관하게 한국어가 기본**이다. 영어는 오른쪽 위에서 고르고, 고른 값은 그 브라우저에 남는다 (2026-09-08) |
+| 39 | 잡 산출물 되돌려주기 | 프리셋이 선언한 글롭(`artifacts`)에 맞는 파일을 워커가 **워크스페이스를 지우기 전에** 모아 서버에 불변 묶음으로 두고, 그 잡의 자격자(요청자·합류자·admin)가 받아 간다. 로컬 워커·원격 워커 둘 다. 잡이 만든 파일은 코드에서 `bundle` 로 부른다 — `jobs.artifacts_purged_at`(M3, 로그·스냅샷·워크스페이스)과 **다른 것**이다 (M5e, 오너 결정 2026-09-08) |
+| 40 | 산출물 삭제 규칙 | `jobs.join_count == 0` 인 잡은 클라이언트 확인(ack)이 오면 **즉시 삭제**, 한 번이라도 합류가 있었던 잡은 확인이 와도 **TTL 까지 유지**한다. TTL 은 `artifact_retention_hours = 24`. 합류자 표의 키가 토큰 이름이라 세션은 셀 수 없고(`store.py` `joiners`), 합류는 `ACTIVE_STATES` 에서만 일어나고 판정·종료가 같은 트랜잭션 직렬화를 쓰므로 `join_count` 는 **터미널 커밋에** 얼어붙는다 (M5e, 오너 결정 2026-09-08) |
+| 41 | 산출물 상한 | 전부 설정 키다: `max_artifact_bytes`(1 GiB) · `artifact_storage_max_bytes`(10 GiB) · `max_artifact_files`(10000) · `artifact_timeout_seconds`(60) · `max_concurrent_artifact_transfers`(2). 넘으면 **잡은 그대로 성공/실패하고** 산출물만 버린다. 만료되지 않은 남의 묶음을 쫓아내지 않는다 (M5e, 오너 결정 2026-09-08) |
+| 42 | 받기·덮어쓰기 | 받기는 옵트인(`--fetch-artifacts`). 트리에 쓸 때 제출 당시와 내용이 같은 파일은 덮어쓰고, 제출 뒤 사람이 손댄 파일(`conflicted`)은 `--force` 여야 덮는다. 골든 갱신이 플래그 하나로 돌아야 하고, 기다리는 동안 손댄 것만 지키면 된다 (M5e, **오너 확정 2026-09-09**) |
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
