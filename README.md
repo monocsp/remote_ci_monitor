@@ -45,7 +45,7 @@ or just slow, is the machine on fire, did it pass? rcm answers that in one scree
 Build machines run macOS (Apple Silicon or Intel) and Linux. Windows is out of scope; sessions on
 Windows submit through WSL.
 
-Status: **M0–M5 done (v0.2.2)**. There is no GitHub backend and none is planned. `PLAN.md` (Korean)
+Status: **M0–M5 done (v0.2.3)**. There is no GitHub backend and none is planned. `PLAN.md` (Korean)
 is the plan of record; `CHANGELOG.md` is what changed.
 
 ## Install

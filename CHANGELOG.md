@@ -7,6 +7,12 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.3] - 2026-09-08
+
+The documentation rewrite, and discovery failures that explain themselves.
+
 ### Changed
 - **The documentation was split up.** `README.md` is now a front door (what it is, install, a first
   job, where to go next) and the depth moved into `docs/`: a step-by-step
@@ -149,7 +155,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...v0.2.0
