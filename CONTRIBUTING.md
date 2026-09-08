@@ -20,8 +20,9 @@ CI runs the same on Ubuntu (3.11, 3.13) and macOS (3.13), plus the install smoke
 
 - **Runtime dependencies stay at zero.** The standard library only, on the server and the client.
   Development and test dependencies are fine.
-- **Comments and docstrings in Korean; identifiers, CLI help, UI strings and documentation in
-  English.** `PLAN.md` (Korean) is the source of truth for scope.
+- **Comments and docstrings in Korean; identifiers, CLI help and documentation in English.**
+  The web UI is Korean-first with an English switch; identifiers, preset names, commands, SHAs and
+  repository URLs are never translated. `PLAN.md` (Korean) is the source of truth for scope.
 - **Tests come first.** A change that fixes a bug carries the test that was red before it.
 - **The status document is versioned.** Adding a key is free; removing one or changing what it
   means bumps `schema_version` and is listed in the changelog.

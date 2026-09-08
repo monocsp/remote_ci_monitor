@@ -28,7 +28,8 @@
 - 설치가 한 줄이어야 한다: `pipx install remote-ci-monitor` / `uvx remote-ci-monitor`. 서버와 세션 클라이언트가 같은 패키지다. 런타임 의존성 0.
 - 세션 쪽은 SSH·rsync 데몬 같은 두 번째 접속 경로를 요구하지 않는다. 코드 전달도 **같은 HTTP·같은 토큰**으로 한다.
 - 시크릿(토큰)은 환경변수·설정 파일로만 받고 절대 커밋하지 않는다. `.gitignore` 와 gitleaks 를 CI 에 건다. 잡 페이로드에 시크릿을 싣지 않는다(빌드 머신에 상주).
-- README·CLI 도움말·UI 문자열·식별자는 영어, **주석·docstring·이 계획서·커밋 본문·리뷰 기록은 한국어**(2026-09-04 오너 결정).
+- README·CLI 도움말·식별자는 영어, **주석·docstring·이 계획서·커밋 본문·리뷰 기록은 한국어**(2026-09-04 오너 결정).
+- **웹 UI 문자열은 한국어가 기본이고 영어를 고를 수 있다**(2026-09-08 오너 결정 36). 화면 오른쪽 위에서 바꾼다. 식별자·프리셋 이름·명령·커밋 해시·저장소 주소는 어느 언어에서도 번역하지 않는다. 서버가 내려보내는 문장은 서버의 것이라 페이지가 번역하지 않는다 — 무엇을 서버가 말하고 무엇을 페이지가 말하는지 명세에서 가른다.
 
 ## 브랜치 정책 (2026-09-04 적용 — GitHub 룰셋으로 강제)
 
@@ -540,6 +541,8 @@ docs/reviews/
   - **M5b-3 `rcm worker`** (**완료 2026-09-07**, 명세 `docs/m5b3-workplan.md` — Codex 는 이날 모델 접근 불가로 생략): `runner.run_job`(자재화 → Popen → 펌프 → 신호; 로컬·원격 공용) · `WorkerClient` · `WorkerConfig`/`worker.toml`(`[[repos]]` 규칙은 서버와 같다) · `remote_worker.RemoteWorker`(등록 재시도 · heartbeat 스레드 · 레인 스레드 · 보고 재시도 · 409 면 정리 · SIGTERM → lost `worker stopped`) · `rcm worker --check/--once`. 두 프로세스 e2e 7건(실행·캐시 잡·취소·kill -9 → lost·SIGTERM·git_ref·서버 재시작). M5 완료 기준 ④ 달성.
   - **M5b-4 다중 풀 표시** (**완료 2026-09-07**, 명세 `docs/m5b4-workplan.md`): `rcm top` 원격 풀 헤더에 언제나 풀 이름(`queue — empty (pool linux)` · `· paused`) · 머리줄 원격 필 5개 초과는 `+N workers`(down 은 안 접음) · 웹 Host 절에 워커 표본 카드(`build-02 · pool linux`, Recent 밑 풀 host 헤더 제거) · `rcm check` `pools` 행(`default (1 lane) · linux (build-02/1 idle)`, 풀 워커 전부 down 이면 FAIL) · `server.workers[].pool`.
 - **M5c — 내부망 자동 발견** (**완료 2026-09-08**, PR #37 · v0.2.2, 명세 `docs/m5c-workplan.md`): 서버가 `_rcm._tcp` 를 mDNS/DNS-SD 로 광고하고 클라이언트가 `server` 없이도 같은 네트워크의 서버를 찾는다(표준 라이브러리만 · 외부 도구 없음). `rcm discover` · `client.toml server = "auto"`. 실배치(노트북이 Tailscale 밖) 요청. 완료 기준은 명세 §6.
+- **M5d — 웹 UI: 한국어 기본 + 정보 위계**(계획 2026-09-08, 명세 `docs/m5d-workplan.md`): 화면이 한국어로 뜨고 오른쪽 위에서 영어로 바꾼다(결정 36). 그리고 「내 잡 끝났나 · 왜 안 움직이나 · 언제 내 차례인가」 순서로 위계를 다시 세운다 — 호스트 지표와 소스 주소를 접고, 상태를 색이 아니라 모양·글자·움직임으로 표시하고, UI 글꼴을 산세리프로 되돌린다. 근거는 `docs/reviews/2026-09-08-codex-web-ui-design.md`(코덱스가 화면을 보고 낸 진단)와 `docs/reviews/2026-09-08-ui-hierarchy-research.md`(1차 자료 조사). PR 은 셋으로 나눈다 — 언어 장치 · 위계 · 폰.
+
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
@@ -579,6 +582,12 @@ docs/reviews/
 | 30 | GitHub 백엔드 | **폐기(오너 확정 2026-09-07)**. GitHub 은 커밋·푸시·PR 머지에만 쓴다 — Actions run 을 이 도구로 보거나 띄우지 않는다. 배포·QA 도 로컬/원격 워커(`rcm worker`)로. v1/v1.1 의 GitHub 경로와 참고 구현의 dispatch 코드는 가져오지 않는다 |
 | 31 | 우선순위 | low/normal/high 세 단계. 프리셋 `priority` 가 그 프리셋 잡의 기본이자 비-admin 상한. 기아 보정 없음(화면이 보여준다). (Codex M5 리뷰, **오너 확인 대기**) |
 | 32 | 캐시 blob 공유 범위 | 기본 `snapshot_cache_scope = "global"`(같은 내용은 클라이언트 간 공유 — `missing` 목록으로 존재 여부를 알 수 있다). 토큰별 분리는 `"token"`. (Codex M5 리뷰, **오너 확인 대기**) |
+| 33 | 광고 기본값 | `rcm init server` 템플릿의 `bind` 는 `127.0.0.1` 로 두고, 광고는 `bind` 가 루프백이 아닐 때만 켠다 — 「설치하자마자 LAN 에 열리는」 것을 피한다 (M5c, 2026-09-08) |
+| 34 | 발견 응답 내용 | TXT 에 `v`·`name`·`lanes` 만 넣는다. 토큰·프리셋·경로는 넣지 않는다(비밀 아님) (M5c, 2026-09-08) |
+| 35 | IPv6 발견 | v1 범위 밖. IPv4 만 응답한다 (M5c, 2026-09-08) |
+| 36 | 웹 UI 언어 | **한국어가 기본**, 오른쪽 위에서 영어로 바꾼다(브라우저에 기억). 식별자·프리셋 이름·명령·커밋 해시·저장소 주소는 번역하지 않는다. **서버가 내려보내는 문장은 서버의 것** — 페이지가 번역하지 않고, 무엇이 서버 문장인지 명세에 적는다 (오너 결정 2026-09-08) |
+| 37 | 서버 문장 | **서버는 문장이 아니라 코드를 내려보낸다**(2026-09-08). `summary_code`·`summary_args`·`*_error_code`·`gpu_note_code` 를 **추가**하고(스키마 v1 그대로) 화면·CLI 가 각자의 말로 그린다. 잡이 `::rcm::summary::` 로 찍은 문장만 예외 — 팀이 쓴 것이라 그대로 보여 준다. 인자는 원시 값으로 보내고 포맷은 표시하는 쪽이 한다 |
+| 38 | 기본 언어 | 브라우저 언어와 **무관하게 한국어가 기본**이다. 영어는 오른쪽 위에서 고르고, 고른 값은 그 브라우저에 남는다 (2026-09-08) |
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
@@ -656,7 +665,7 @@ GitHub 에 의존하지 않는다(git 원격은 배포용 소스 모드에서만
   - 순수 계층(core/)은 I/O 도 시계도 안 본다. hostparse 는 실제 캡처 픽스처가 있어야 한다.
   - 스키마 v1 은 키 **추가만**. 삭제·의미 변경이 필요하면 멈추고 물어라.
   - mutcheck 에 M1 변이를 최소 1개 더해라(예: stale 판정의 3×interval 제거 · top 첫 번째 표본 사용). 넷 이상 빨개져야 「검증됨」.
-  - 식별자·UI 문자열·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 커밋 메시지는 Conventional Commits.
+  - 식별자·README·CLI 도움말은 영어, 주석·docstring 은 한국어. 웹 UI 문자열은 한국어 기본 + 영어 선택(결정 36). 커밋 메시지는 Conventional Commits.
   - 브랜치 정책: main·dev 직접 push 금지. `git switch dev && git pull` → `git switch -c <type>/<topic>` → dev 로 PR. 워크트리를 써도 된다.
   - gh 계정·머지: 활성 gh 계정이 다른 계정으로 되돌아가는 일이 있다. 모든 GitHub 동작은 토큰을 고정해라:
       TOK=$(gh auth token --user monocsp); GH_TOKEN=$TOK gh api user --jq .login   # monocsp 인지 확인
