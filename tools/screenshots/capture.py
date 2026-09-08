@@ -28,6 +28,7 @@ from pathlib import Path
 
 CAP = Path(__file__).resolve().parent
 ROOT = CAP.parents[1]
+SHOT_LANG = os.environ.get("RCM_SHOT_LANG") or "en"
 WORK = Path(os.environ.get("RCM_SHOT_WORK") or Path(tempfile.gettempdir()) / "rcm-screenshots")
 SRV = WORK / "srv"
 RAW = WORK / "raw"
@@ -77,6 +78,8 @@ SELECTORS = [
     ".you",
     ".conf",
     ".pool-h",
+    "tr.qgroup.running",
+    "tr.qgroup.waiting",
     ".pill",
     ".chip",
     ".uncommitted",
@@ -87,6 +90,7 @@ SELECTORS = [
     ".hostcard .hn",
     '[data-metric="cpu"]',
     '[data-metric="mem"]',
+    '[data-metric="disk"]',
     '[data-metric="gpu"]',
     ".spark",
     ".hostcard .top",
@@ -397,7 +401,10 @@ class Shooter:
 
         self.st = st
         self.chrome = Chrome(WORK / "chrome-profile", window=window)
-        self.url = f"{st['url']}/?poll=1"
+        # 언어를 못 박는다. M5d-1 이후 화면 기본은 한국어지만, `docs/images/ui/` 의 이미지는 두
+        # 사용 설명서가 **함께** 쓰고 `build.py` 의 글자 선택자도 영어다. `RCM_SHOT_LANG=ko` 로
+        # 한국어 판을 찍을 수는 있다(그때는 build.py 의 text= 선택자를 같이 바꿔야 한다).
+        self.url = f"{st['url']}/?poll=1&lang={SHOT_LANG}"
 
     def open(self, ready_js: str, timeout: float = 20.0) -> None:
         self.chrome.open(self.url, ready_js=ready_js, timeout=timeout)

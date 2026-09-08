@@ -500,6 +500,7 @@ class RemoteWorker:
             publish=lambda kind, data: None,
             stop=self.stopping,
             now_fn=self.now_fn,
+            disk_path=str(self.config.data_path),
         )
         self.sampler.start()
         self.heartbeat_once()

@@ -102,6 +102,8 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
         "current_name": p.current_name,
         "current_seconds": _num(p.current_seconds),
         "job_seconds": _num(p.job_seconds),
+        # 초를 세는 기준점(M5d-2 §4.6-다) — 화면이 폴링 사이에도 부드럽게 올린다
+        "job_started_at": iso(p.started_at),
         "failed_step": p.failed_step,
         "steps": [
             {
@@ -110,6 +112,8 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
                 "state": s.state,
                 "ok": s.ok,
                 "seconds": _num(s.seconds),
+                "started_at": iso(s.started_at),
+                "ended_at": iso(s.ended_at),
             }
             for s in p.steps
         ],
@@ -288,6 +292,8 @@ def host_json(h: HostSample, *, now: datetime) -> dict[str, Any]:
         "cpu": dict(h.cpu) if h.cpu else None,
         "memory": dict(h.memory) if h.memory else None,
         "gpu": dict(h.gpu) if h.gpu else None,
+        # 잡이 쓰는 디스크 — 「얼마 남았나」를 화면이 보여 준다(M5d-2)
+        "disk": dict(h.disk) if h.disk else None,
         "gpu_note": h.gpu_note,
         "gpu_note_code": h.gpu_note_code,
         "top": [dict(t) for t in h.top],

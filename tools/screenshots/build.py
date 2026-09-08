@@ -119,11 +119,12 @@ def main() -> int:
         "queue",
         [
             (1, pick(d, "#summary")),
-            (2, row_a),
-            (3, steps_a),
-            (4, pick(d, "tr[data-job]", job="5")),
-            (5, pick(d, "td.eta", idx=1)),
-            (6, pool),
+            (2, pick(d, "tr.qgroup.running"), "l"),
+            (3, row_a),
+            (4, steps_a),
+            (5, union(pick(d, "tr.qgroup.waiting"), pick(d, "tr[data-job]", job="5")), "l"),
+            (6, pick(d, "td.eta", idx=1)),
+            (7, pool),
         ],
         crop=(0, 0, 1280, 745),
     )
@@ -187,11 +188,13 @@ def main() -> int:
             (1, pick(h, ".hostcard .hn", idx=0), "l"),
             (2, pick(h, '[data-metric="cpu"]', idx=0), "t"),
             (3, pick(h, '[data-metric="mem"]', idx=0), "t"),
-            (4, pick(h, '[data-metric="gpu"]', idx=0), "t"),
-            (5, pick(h, ".hostcard .top", idx=0), "l"),
-            (6, pick(h, ".hostcard", idx=1), "l"),
+            (4, pick(h, '[data-metric="disk"]', idx=0), "t"),
+            (5, pick(h, '[data-metric="gpu"]', idx=0), "t"),
+            (6, pick(h, ".hostcard .top", idx=0), "l"),
+            (7, pick(h, ".hostcard", idx=1), "l"),
         ],
-        crop=(0, 205, 1280, 490),
+        # 카드가 디스크 미터만큼 자랐다(M5d-2) — `#host` 절 전체를 담게 잘라 낸다
+        crop=(0, 55, 1280, 486),
     )
 
     dn = rects("down")

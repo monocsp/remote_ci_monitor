@@ -74,8 +74,9 @@
     "summary.verdict_partial": "partial",
     "summary.verdict_unknown": "unknown",
     "summary.pressure": function (a) {
-      return "CPU " + a.cpu + " · Mem " + a.mem + " · GPU " + a.gpu;
+      return "CPU " + a.cpu + " · Mem " + a.mem + " · Disk " + a.disk + " · GPU " + a.gpu;
     },
+    "summary.disk_free": function (a) { return a.free + " free"; },
     "summary.load": function (a) { return "load " + a.load; },
     "queue.no_status": "Queue unavailable — no status yet",
     "queue.unavailable": function (a) { return "Queue unavailable — " + a.error; },
@@ -85,6 +86,10 @@
     "queue.empty_hint": " starts immediately.",
     "queue.presets": function (a) { return "presets: " + a.names; },
     "queue.more": function (a) { return "and " + a.n + " more ▾"; },
+    "queue.group_running": function (a) { return "Running now (" + a.n + ")"; },
+    "queue.group_waiting": function (a) { return "Waiting (" + a.n + ")"; },
+    "queue.group_none_running": "Nothing is running right now.",
+    "queue.group_none_waiting": "Nothing is waiting.",
     "queue.col_job": "Job",
     "queue.col_key": "Key",
     "queue.col_requester": "Requester",
@@ -125,6 +130,8 @@
     "host.cpu": function (a) { return "CPU " + a.pct; },
     "host.cpu_detail": function (a) { return "user " + a.user + " · sys " + a.sys; },
     "host.memory": function (a) { return "Memory " + a.used + " / " + a.total; },
+    "host.disk": function (a) { return "Disk " + a.used + " / " + a.total; },
+    "host.disk_free": function (a) { return a.free + " free"; },
     "host.compressed": function (a) { return "comp " + a.size; },
     "host.gpu": function (a) { return "GPU " + a.pct + " busy"; },
     "host.gpu_used": function (a) { return a.size + " in use"; },
@@ -288,6 +295,7 @@
       return "step " + a.cur + " of " + (a.soFar ? "at least " : "") + a.total;
     },
     "progress.timing_note": "step times are server receive times (as_received)",
+    "progress.now": function (a) { return "step " + a.cur + "/" + a.total + " " + a.step; },
 
     // ── 최근 결과 ───────────────────────────────────────────────────────────
     "recent.succeeded": "succeeded",
@@ -407,8 +415,9 @@
     "summary.verdict_partial": "일부만 앎",
     "summary.verdict_unknown": "알 수 없음",
     "summary.pressure": function (a) {
-      return "CPU " + a.cpu + " · 메모리 " + a.mem + " · GPU " + a.gpu;
+      return "CPU " + a.cpu + " · 메모리 " + a.mem + " · 디스크 " + a.disk + " · GPU " + a.gpu;
     },
+    "summary.disk_free": function (a) { return a.free + " 남음"; },
     "summary.load": function (a) { return "load " + a.load; },
     "queue.no_status": "큐를 읽지 못했습니다 — 아직 상태가 없습니다",
     "queue.unavailable": function (a) { return "큐를 읽지 못했습니다 — " + a.error; },
@@ -418,6 +427,10 @@
     "queue.empty_hint": " 하면 바로 시작합니다.",
     "queue.presets": function (a) { return "프리셋: " + a.names; },
     "queue.more": function (a) { return a.n + "개 더 보기 ▾"; },
+    "queue.group_running": function (a) { return "지금 도는 것 (" + a.n + ")"; },
+    "queue.group_waiting": function (a) { return "기다리는 것 (" + a.n + ")"; },
+    "queue.group_none_running": "지금 도는 잡이 없습니다.",
+    "queue.group_none_waiting": "기다리는 잡이 없습니다.",
     "queue.col_job": "잡",
     "queue.col_key": "키",
     "queue.col_requester": "요청자",
@@ -456,6 +469,8 @@
     "host.cpu": function (a) { return "CPU " + a.pct; },
     "host.cpu_detail": function (a) { return "user " + a.user + " · sys " + a.sys; },
     "host.memory": function (a) { return "메모리 " + a.used + " / " + a.total; },
+    "host.disk": function (a) { return "디스크 " + a.used + " / " + a.total; },
+    "host.disk_free": function (a) { return a.free + " 남음"; },
     "host.compressed": function (a) { return "압축 " + a.size; },
     "host.gpu": function (a) { return "GPU " + a.pct + " 사용"; },
     "host.gpu_used": function (a) { return a.size + " 사용 중"; },
@@ -608,6 +623,7 @@
       return "스텝 " + a.cur + " / " + (a.soFar ? "최소 " : "") + a.total;
     },
     "progress.timing_note": "스텝 시각은 서버가 받은 시각입니다 (as_received)",
+    "progress.now": function (a) { return "스텝 " + a.cur + "/" + a.total + " " + a.step; },
 
     "recent.succeeded": "성공",
     "recent.failed": "실패",

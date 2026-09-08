@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="웹 큐 화면 — 스텝까지 보이는 실행 중 잡, ETA 가 붙은 대기 잡, 그 아래 빌드 머신의 CPU · 메모리 · GPU" width="820">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="웹 큐 화면 — 스텝까지 보이는 실행 중 잡, ETA 가 붙은 대기 잡, 그 아래 빌드 머신의 CPU · 메모리 · 디스크 · GPU" width="820">
 </p>
 
 빌드 머신 **한 대**를 팀이 나눠 쓰면 결국 손으로 줄을 선다. 지금 누가 뭘 돌리는지, 앞 잡이 걸린
@@ -127,7 +127,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
 | `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 잡이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--no-join` 은 절대 합류하지 않기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 잡 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 잡은 대기 대신 상태와 경과 |
-| `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · GPU · top 프로세스) |
+| `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함한다 |
 | `rcm logs N [--follow]` | 잡 로그(내 잡 · 내가 합류한 잡, 관리자 토큰이면 아무 잡) |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |

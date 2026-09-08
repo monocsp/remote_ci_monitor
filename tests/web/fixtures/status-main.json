@@ -903,6 +903,12 @@
             "mem_total_bytes": null,
             "source": "ioreg"
           },
+          "disk": {
+            "used_bytes": 289995948032,
+            "free_bytes": 704666636288,
+            "total_bytes": 994662584320,
+            "path": "/Users/ci/.local/share/rcm"
+          },
           "gpu_note": null,
           "top": [
             {

@@ -154,6 +154,7 @@ def progress_from_markers(
         failed_step=failed,
         summary=summary,
         last_output_at=last_output_at,
+        started_at=started_at,
     )
 
 

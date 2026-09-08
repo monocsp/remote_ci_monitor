@@ -96,6 +96,15 @@ table.q tr.overdue td:first-child { box-shadow: inset 4px 0 0 var(--warn); }
 table.q tr.mine.overdue td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 7px 0 0 var(--warn); }
 table.q tr.hl td { background: var(--accent-soft); }
 table.q tr.dim td { opacity: 0.55; }
+/* 묶음 머리 — 「지금 도는 것 / 기다리는 것」(§4.6-라). 색이 아니라 자리와 굵기로 가른다. */
+table.q tr.qgroup th { text-transform: none; letter-spacing: 0; font: 600 12px var(--sans); color: var(--ink);
+  background: var(--surface-2); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+table.q tr.qgroup.running th { box-shadow: inset 3px 0 0 var(--accent); }
+table.q tr.qgroup.waiting th { color: var(--muted); font-weight: 500; }
+table.q tr.qgroup:not(:first-child) th { border-top: 1px solid var(--line); }
+table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8px; }
+/* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
+.step-now { font-family: var(--mono); color: var(--ink); opacity: 0.8; }
 .pos { display: block; font: 11.5px var(--mono); color: var(--muted); margin-top: 2px; }
 .you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 500 10.5px var(--mono); vertical-align: 1px; }
 .joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 500 10.5px var(--mono); vertical-align: 1px; background: none; cursor: default; }
@@ -167,6 +176,9 @@ td.elapsed { font-family: var(--mono); white-space: nowrap; }
 .hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
 .hostcard.dim .meter { opacity: 0.55; }
 .hostcard .hn { font-family: var(--mono); }
+/* 미터가 넷이면(디스크가 있으면) 이름 칸이 두 줄을 차지한다 — 그래야 네 번째 미터가 이름 밑
+   좁은 칸으로 떨어지지 않고 제 폭을 갖는다. 메모리 라벨이 4열에는 안 들어가서 3열을 지킨다. */
+.hostcard.m4 .hn { grid-row: 1 / span 2; }
 .hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }
 .meter { display: grid; gap: 4px; }
 .meter .lab { display: flex; justify-content: space-between; font: 12px var(--mono); }
@@ -252,3 +264,9 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 
 /* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
 .pool-h { margin: 14px 0 6px; font: 500 12px var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+/* 한국어에서는 대문자 변환이 위계를 주지 못하고, 섞인 로마자만 망가뜨린다(「5s 전」 → 「5S 전」).
+   명세 §4.3. 위계는 굵기·색이 이미 주고 있어서 여기서는 변환만 끈다. */
+html[lang="ko"] .sum .lab,
+html[lang="ko"] .s-h .t,
+html[lang="ko"] table.q th,
+html[lang="ko"] .pool-h { text-transform: none; letter-spacing: 0; }

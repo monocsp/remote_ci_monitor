@@ -272,6 +272,8 @@ class Progress:
     summary: str | None = None
     last_output_at: datetime | None = None
     timing: str = "as_received"
+    #: 잡이 시작한 시각. 화면이 「도는 잡의 초」를 스스로 세는 기준점이다(M5d-2 §4.6-다).
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -368,6 +370,9 @@ class HostSample:
     cpu: dict[str, float | None] | None = None
     memory: dict[str, int | None] | None = None
     gpu: dict[str, Any] | None = None
+    #: 잡이 쓰는 디스크(데이터 디렉터리가 앉은 파일 시스템).
+    #: `{used_bytes, free_bytes, total_bytes, path}`. 못 읽으면 None.
+    disk: dict[str, Any] | None = None
     gpu_note: str | None = None
     #: GPU 표본이 없는 **이유**(결정 37). `no_sampler` · `no_gpu` · `sampler_failed`.
     gpu_note_code: str | None = None

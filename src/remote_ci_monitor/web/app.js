@@ -23,6 +23,8 @@
   var TICK_MS = 1000;
   var REFETCH_COALESCE_MS = 300;
   var HIDDEN_PAUSE_MS = 60000;
+  // 남은 저장 공간이 이 밑이면 사용률과 무관하게 경고한다 — 스냅샷 하나가 못 풀린다(§4.6-가)
+  var DISK_LOW_FREE = 10 * 1024 * 1024 * 1024;
 
   function isNum(v) { return typeof v === "number" && isFinite(v); }
   function esc(s) {
@@ -116,6 +118,13 @@
     var gib = n / 1073741824;
     if (gib >= 0.95) return gib.toFixed(1) + " GB";
     return Math.round(n / 1048576) + " MB";
+  }
+  // 디스크는 십진 GB 정수 — Finder·`df -H` 와 같은 눈금이고, 소수점을 빼야 미터 한 칸에 들어간다
+  function fmtDisk(n) {
+    if (!isNum(n)) return DASH;
+    if (n >= 1e9) return Math.round(n / 1e9) + " GB";
+    if (n >= 1e6) return Math.round(n / 1e6) + " MB";
+    return Math.round(n / 1e3) + " KB";
   }
   function fmtPct(v) { return isNum(v) ? Math.round(v) + "%" : DASH; }
   function ordinal(n, lang) {
@@ -332,6 +341,20 @@
     return out;
   }
 
+  /**
+   * 큐를 「지금 도는 것」과 「기다리는 것」으로 나눈다(§4.6-라). 빈 묶음도 남긴다 — 화면이
+   * 「지금 도는 것 없음」을 그릴 수 있어야 한다. 행 순서는 `sortQueue` 가 정한 그대로.
+   */
+  function queueGroups(rows, lang) {
+    var list = Array.isArray(rows) ? rows : [];
+    var running = list.filter(function (r) { return r && (r.state === "running" || r.state === "cancelling"); });
+    var waiting = list.filter(function (r) { return !r || (r.state !== "running" && r.state !== "cancelling"); });
+    return [
+      { key: "running", title: T(lang, "queue.group_running", { n: running.length }), rows: running },
+      { key: "waiting", title: T(lang, "queue.group_waiting", { n: waiting.length }), rows: waiting }
+    ];
+  }
+
   function poolHeader(pool, lang) {
     if (!pool || pool.name === "default" || !pool.name) return "";
     var noWorkers = isNum(pool.lanes) && pool.lanes === 0;
@@ -410,26 +433,34 @@
     return { kind: "list", lines: lines, more: Math.max(0, mine.length - 2) };
   }
 
-  // {cpu, mem, gpu, load, verdict} — 퍼센트는 정수(목업 4절), load 는 「3.5 / 10」 문자열(§2).
-  // 85% 이상이면 busy(아는 값이 이미 바쁘다고 말하므로 partial 보다 우선), 하나라도 모르면 partial, 셋 다 모르면 unknown.
+  // {cpu, mem, gpu, disk, diskFree, load, verdict} — 퍼센트는 정수(목업 4절), load 는 「3.5 / 10」 문자열(§2).
+  // 85% 이상이면 busy(아는 값이 이미 바쁘다고 말하므로 partial 보다 우선), 하나라도 모르면 partial, 넷 다 모르면 unknown.
+  // 디스크는 기준이 둘이다(§4.6-가): 사용률 85% 이상, 또는 남은 공간 10 GiB 미만. 큰 디스크는 90%
+  // 라도 넉넉하고 작은 디스크는 80% 라도 빌드가 안 돈다 — 하나만 보면 틀린다.
   // load·cores 는 판정에 안 들어간다 — 텍스트만 —.
   function hostPressure(host) {
-    if (!host) return { cpu: null, mem: null, gpu: null, load: DASH, verdict: "no_sample" };
+    if (!host) return { cpu: null, mem: null, gpu: null, disk: null, diskFree: null, load: DASH, verdict: "no_sample" };
     var pct = function (v) { return isNum(v) ? Math.round(v) : null; };
     var cpu = pct(host.cpu && host.cpu.busy);
     var mem = host.memory && isNum(host.memory.used_bytes) && isNum(host.memory.total_bytes) && host.memory.total_bytes > 0
       ? pct(host.memory.used_bytes / host.memory.total_bytes * 100) : null;
     var gpu = pct(host.gpu && host.gpu.util_pct);
+    var d = host.disk || null;
+    var disk = d && isNum(d.used_bytes) && isNum(d.total_bytes) && d.total_bytes > 0
+      ? pct(d.used_bytes / d.total_bytes * 100) : null;
+    var diskFree = d && isNum(d.free_bytes) ? d.free_bytes : null;
+    var lowDisk = isNum(diskFree) && diskFree < DISK_LOW_FREE;
     var load1 = Array.isArray(host.load) && isNum(host.load[0]) ? host.load[0] : null;
     var load = isNum(load1) ? load1.toFixed(1) + " / " + (isNum(host.cores) ? host.cores : DASH) : DASH;
-    var vals = [cpu, mem, gpu];
+    var vals = [cpu, mem, gpu, disk];
     var known = vals.filter(isNum);
     var verdict;
-    if (!known.length) verdict = "unknown";
+    if (lowDisk) verdict = "busy";
+    else if (!known.length) verdict = "unknown";
     else if (known.some(function (v) { return v >= 85; })) verdict = "busy";
     else if (known.length < vals.length) verdict = "partial";
     else verdict = "fine";
-    return { cpu: cpu, mem: mem, gpu: gpu, load: load, verdict: verdict };
+    return { cpu: cpu, mem: mem, gpu: gpu, disk: disk, diskFree: diskFree, load: load, verdict: verdict };
   }
 
   function queueHeader(status, nowMs, lang) {
@@ -550,6 +581,47 @@
     var f = failedStepCount(prog);
     if (f) t += " · " + T(lang, "progress.steps_failed", { n: f });
     return t;
+  }
+  /** 도는 스텝(끝나지 않은 마지막 스텝). 없으면 null — 끝난 잡의 초는 올라가면 안 된다. */
+  function runningStep(prog) {
+    var steps = Array.isArray(prog && prog.steps) ? prog.steps : [];
+    var last = steps.length ? steps[steps.length - 1] : null;
+    return last && last.state === "running" ? last : null;
+  }
+  /**
+   * 진행 머리줄을 HTML 로. **태그를 벗기면 `progressHead(prog, lang)` 와 글자가 같다**(§4.6-다).
+   *
+   * `live` 는 「이 잡은 아직 도는 중이다」는 뜻이다(DOM 층이 `state` 로 판단해 넘긴다). 그러면 잡
+   * 초가 기준점에서 스스로 오른다. 스텝 초는 **도는 스텝이 있을 때만** — 마지막 스텝이 끝나고
+   * 잡이 정리 중일 때 끝난 스텝의 초가 계속 오르면 거짓말이 된다.
+   * 서버는 상태 문서를 만든 순간의 초를 보내므로, 그것만 그리면 폴링 간격만큼 숫자가 튄다.
+   * 시계 차이를 모르면 DOM 층이 `live=false` 로 부른다 — 조용히 브라우저 시계로 넘어가지 않는다.
+   */
+  function progressHeadHtml(prog, lang, live) {
+    if (!prog || prog.phase === "materializing") return null;
+    var steps = Array.isArray(prog.steps) ? prog.steps : [];
+    var cur = live ? runningStep(prog) : null;
+    // 기준점이 있는 자리만 틱으로 감싼다. 없으면(옛 서버) 서버가 준 숫자를 그대로 둔다.
+    var span = function (from, dur) {
+      return from ? '<span data-tick="elapsed" data-from="' + esc(from) + '">' + esc(dur) + "</span>" : esc(dur);
+    };
+    // 「job 1m 2s」의 소요만 틱으로 — 라벨은 언어마다 앞뒤가 달라 자리표시자로 갈아 끼운다
+    var JOB = "\u0000job\u0000";
+    var jobSpan = function (key) {
+      return esc(T(lang, key, { dur: JOB })).replace(JOB, span(live && prog.job_started_at, fmtDuration(prog.job_seconds)));
+    };
+    // 마커가 없는 잡은 머리줄에 잡 초 하나뿐이다 — 그것마저 얼면 도는 잡이 통째로 멈춰 보인다
+    if (!steps.length) return jobSpan("progress.no_markers");
+    var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
+    var total = isNum(prog.steps_total) ? prog.steps_total : "?";
+    var h = esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
+    if (prog.current_name) {
+      h += " · " + esc(prog.current_name) + " · " + span(cur && cur.started_at, fmtDuration(prog.current_seconds));
+    }
+    h += " · " + jobSpan("progress.job");
+    var f = failedStepCount(prog);
+    if (f) h += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
+    return h;
   }
   function stepMark(step) {
     if (!step) return "·";
@@ -680,11 +752,11 @@
 
   var rcm = {
     DASH: DASH, esc: esc, fmtDuration: fmtDuration, fmtClock: fmtClock, fmtClockSeconds: fmtClockSeconds, fmtAgo: fmtAgo,
-    fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtMb: fmtMb, fmtPct: fmtPct,
+    fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtDisk: fmtDisk, fmtMb: fmtMb, fmtPct: fmtPct,
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
-    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead,
+    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, recentLine: recentLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
@@ -1056,8 +1128,13 @@
       var vcls = hp.verdict === "fine" ? "ok" : hp.verdict === "busy" ? "warn" : "muted";
       var vkey = "summary.verdict_" + (hp.verdict === "fine" || hp.verdict === "busy" || hp.verdict === "partial" ? hp.verdict : "unknown");
       var verdict = '<span class="' + vcls + '">· ' + esc(tr(vkey)) + "</span>";
-      h = esc(tr("summary.pressure", { cpu: "\u0000cpu\u0000", mem: "\u0000mem\u0000", gpu: "\u0000gpu\u0000" }))
+      var freeMark = isNum(hp.diskFree)
+        ? " " + (hp.diskFree < DISK_LOW_FREE ? '<b class="warn">' : "<b>") + esc(tr("summary.disk_free", { free: fmtDisk(hp.diskFree) })) + "</b>"
+        : "";
+      h = esc(tr("summary.pressure", { cpu: "\u0000cpu\u0000", mem: "\u0000mem\u0000", gpu: "\u0000gpu\u0000", disk: "\u0000disk\u0000" }))
         .replace("\u0000cpu\u0000", mark(hp.cpu)).replace("\u0000mem\u0000", mark(hp.mem)).replace("\u0000gpu\u0000", mark(hp.gpu))
+        .replace("\u0000disk\u0000", (isNum(hp.disk) && hp.disk >= 85) || (isNum(hp.diskFree) && hp.diskFree < DISK_LOW_FREE) ? '<b class="warn">' + fmtPct(hp.disk) + "</b>" : "<b>" + fmtPct(hp.disk) + "</b>")
+        + freeMark
         + "<br>" + esc(tr("summary.load", { load: hp.load })) + " " + verdict
         + (stale ? ' <span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span>" : "");
     }
@@ -1121,8 +1198,16 @@
       rows = rows.filter(function (r) { var w = r.state !== "running" && r.state !== "cancelling"; if (!w) return true; if (keep[r.id] || isMine(r, state.me) || stuckIds[r.id] || r.id === state.hl) return true; hiddenCount++; return false; });
     }
     var tzName = st.display_timezone || "local";
+    // 도는 것과 기다리는 것을 눈으로 갈라 놓는다 — 한 덩어리면 뭐가 도는지 안 읽힌다(§4.6-라)
     var html = '<div class="qwrap"><table class="q">' + queueHeadHtml(tzName) + "<tbody>";
-    rows.forEach(function (row) { html += queueRowHtml(row, st); });
+    queueGroups(rows, L()).forEach(function (g) {
+      html += '<tr class="qgroup ' + g.key + '"><th colspan="7" scope="colgroup">' + esc(g.title) + "</th></tr>";
+      if (!g.rows.length) {
+        html += '<tr class="qgroup-empty"><td colspan="7">' + esc(tr(g.key === "running" ? "queue.group_none_running" : "queue.group_none_waiting")) + "</td></tr>";
+        return;
+      }
+      g.rows.forEach(function (row) { html += queueRowHtml(row, st); });
+    });
     html += "</tbody></table></div>";
     if (hiddenCount) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.more", { n: hiddenCount })) + "</button>";
     html += extraPoolsQueueHtml(st);
@@ -1183,6 +1268,9 @@
     var reasonHtml = esc(r.text);
     r.links.forEach(function (l) { var id = l.jobId; reasonHtml = reasonHtml.replace("#" + id, '<button type="button" class="jlink" data-goto="' + id + '">#' + id + "</button>"); });
     var reasonCell = r.cls === "blocked" ? '<span class="blocked">' + reasonHtml + "</span>" : r.cls === "stalled" ? '<span class="stalled">' + reasonHtml + "</span>" : r.cls === "stuck" ? '<span class="stuck">' + reasonHtml + "</span>" : '<span class="reason' + (r.actionable || busy ? " act" : "") + '">' + reasonHtml + "</span>";
+    // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
+    var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
+    if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">' + esc(tr("row.stalled_note")) + "</div>";
     if (row._cancelRequested) reasonCell += '<div class="sub">' + esc(tr("row.cancel_requested")) + "</div>";
     // 대기 잡(펼침 없음)도 내 잡이면 취소할 수 있어야 한다 — 폰에서 유일한 취소 경로다(사용자 검사 U3.6)
@@ -1215,14 +1303,32 @@
     var sha = (s.base_sha || "").slice(0, 7);
     return '<button type="button" class="sha" data-src="' + row.id + '" title="' + esc(T(lang, "row.tree", { hash: s.tree_hash || DASH })) + '">' + esc(sha || DASH) + "</button>" + (s.dirty ? '<span class="uncommitted">' + esc(T(lang, "row.uncommitted")) + "</span>" : "") + '<div class="sub">' + esc(s.repo || "") + "</div>";
   }
+  /** 시계 차이를 아는가 — 모르면 기준점으로 세지 않는다(조용히 브라우저 시계로 넘어가지 않는다). */
+  function canTick() { return !state.skewUnknown; }
+
+  /** 도는 행 한 줄: 「스텝 2/4 analyze 12s」. 초는 1초 틱이 스스로 센다. */
+  function stepNowHtml(prog) {
+    if (!prog || prog.phase === "materializing" || !prog.current_name) return "";
+    var cur = runningStep(prog);
+    if (!cur) return "";
+    var total = isNum(prog.steps_total) ? prog.steps_total : "?";
+    var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
+    var dur = fmtDuration(prog.current_seconds);
+    var secs = canTick() && cur.started_at
+      ? '<span data-tick="elapsed" data-from="' + esc(cur.started_at) + '">' + esc(dur) + "</span>"
+      : esc(dur);
+    return esc(tr("progress.now", { cur: i, total: total, step: prog.current_name })) + " " + secs;
+  }
+
   function progressHtml(row) {
     var prog = row.progress;
     if (!prog || prog.phase === "materializing") return "";
-    var head = progressHead(prog, L());
+    var busyRow = row.state === "running" || row.state === "cancelling";
+    var head = progressHeadHtml(prog, L(), busyRow && canTick());
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
     var total = isNum(prog.steps_total) ? prog.steps_total : steps.length;
     var failed = failedStepCount(prog);
-    var h = '<div class="head"><b>' + esc(head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
+    var h = '<div class="head"><b>' + (head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
     if (steps.length) {
       var segs = "";
       var pending = Math.max(0, total - steps.length);
@@ -1232,9 +1338,11 @@
       var vt = tr("progress.aria", { cur: isNum(prog.current_index) ? prog.current_index : prog.steps_done, total: total, soFar: !!prog.steps_total_partial });
       h += '<div class="minibar" role="progressbar" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + prog.steps_done + '" aria-valuetext="' + esc(vt) + '">' + segs + "</div>";
       h += '<div class="steps">';
+      var live = busyRow && canTick();
       steps.forEach(function (s) {
         var c = s.state === "running" ? "run" : s.ok === false ? "fail" : "";
-        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + "</span><span>" + esc(s.name) + '</span><span class="s">' + esc(fmtDuration(s.seconds)) + "</span></div>";
+        var tick = live && s.state === "running" && s.started_at ? ' data-tick="elapsed" data-from="' + esc(s.started_at) + '"' : "";
+        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + "</span><span>" + esc(s.name) + '</span><span class="s"' + tick + ">" + esc(fmtDuration(s.seconds)) + "</span></div>";
       });
       for (var j = 0; j < pending; j++) h += '<div class="step pend"><span class="g" aria-hidden="true">·</span><span>…</span><span class="s">' + DASH + "</span></div>";
       h += "</div>";
@@ -1306,9 +1414,17 @@
         '<div class="bar"><i style="width:' + (known ? Math.max(0, Math.min(100, pct - (pct2 || 0))) : 0) + '%"></i>' + (pct2 ? '<i class="b" style="width:' + Math.min(100, pct2) + '%"></i>' : "") + "</div>" +
         (spark ? '<div class="spark">' + spark + "<span>" + esc(tr("host.window")) + "</span></div>" : "") + "</div>";
     };
-    var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(h.os || DASH) + " · " + esc(tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })) + "</span></div>";
+    var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(h.os || DASH) + " · " + esc(tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })) + "</span></div>";
     html += meter("cpu", tr("host.cpu", { pct: fmtPct(cpu.busy) }), isNum(cpu.user) && isNum(cpu.sys) ? tr("host.cpu_detail", { user: Math.round(cpu.user), sys: Math.round(cpu.sys) }) : (stale ? tr("host.last_known") : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
     html += meter("mem", tr("host.memory", { used: fmtMemory(mem.used_bytes), total: fmtMemory(mem.total_bytes) }), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · " + tr("host.compressed", { size: fmtMemory(mem.compressed_bytes) }) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
+    var disk = h.disk || null;
+    if (disk) {
+      var diskPct = isNum(disk.used_bytes) && isNum(disk.total_bytes) && disk.total_bytes > 0 ? disk.used_bytes / disk.total_bytes * 100 : null;
+      var lowFree = isNum(disk.free_bytes) && disk.free_bytes < DISK_LOW_FREE;
+      // 남은 양은 오른쪽에 글자로 — 막대만으로는 「얼마 남았나」를 못 읽는다. 경로는 그리지 않는다.
+      var right = (isNum(diskPct) ? fmtPct(diskPct) : DASH) + (isNum(disk.free_bytes) ? " · " + tr("host.disk_free", { free: fmtDisk(disk.free_bytes) }) : "");
+      html += meter("disk", tr("host.disk", { used: fmtDisk(disk.used_bytes), total: fmtDisk(disk.total_bytes) }), right, diskPct, 0, lowFree || (isNum(diskPct) && diskPct >= 85), "");
+    }
     if (gpu) html += meter("gpu", tr("host.gpu", { pct: fmtPct(gpu.util_pct) }), isNum(gpu.mem_used_bytes) ? tr("host.gpu_used", { size: fmtMemory(gpu.mem_used_bytes) }) : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
     else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";
     if (Array.isArray(h.top) && h.top.length) html += '<div class="top">' + esc(tr("host.top")) + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
