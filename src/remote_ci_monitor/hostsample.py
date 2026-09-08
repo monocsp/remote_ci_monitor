@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -45,6 +46,11 @@ MAC_VM_STAT = ["vm_stat"]
 MAC_MEMSIZE = ["sysctl", "-n", "hw.memsize"]
 MAC_TOP = ["top", "-l", "2", "-n", "0", "-s", "1"]
 MAC_PS = ["ps", "-Aro", "%cpu=,rss=,comm="]
+#: GPU 표본이 없는 이유(결정 37). 화면이 「GPU — 없음」을 자기 말로 쓴다.
+GPU_NO_SAMPLER = "no_sampler"
+GPU_NO_GPU = "no_gpu"
+GPU_SAMPLER_FAILED = "sampler_failed"
+
 MAC_IOREG = ["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"]
 LINUX_PS = ["ps", "-eo", "%cpu=,rss=,comm=", "--sort=-%cpu"]
 LINUX_NVIDIA = [
@@ -77,6 +83,25 @@ def _read_file(path: str) -> str | None:
         return None
 
 
+def _disk_usage(path: str | None) -> dict[str, Any] | None:
+    """그 경로가 앉은 파일 시스템의 사용량. 잡이 쓰는 공간이라 데이터 디렉터리를 본다.
+
+    못 읽으면 None — 표본의 다른 칸은 그대로 산다(부분 실패는 그 칸만 None).
+    """
+    if not path:
+        return None
+    try:
+        u = shutil.disk_usage(path)
+    except (OSError, ValueError):
+        return None
+    return {
+        "used_bytes": int(u.used),
+        "free_bytes": int(u.free),
+        "total_bytes": int(u.total),
+        "path": str(path),
+    }
+
+
 def _safe_loadavg() -> tuple[float, float, float] | None:
     """`os.getloadavg()` 를 두 자리로 — 이진 소수(6.60693359375)를 JSON 에 그대로 싣지 않는다."""
     try:
@@ -103,6 +128,8 @@ class HostSampler(threading.Thread):
         cpu_count: int | None = None,
         loadavg: Callable[[], tuple[float, float, float] | None] | None = _safe_loadavg,
         sleep: Callable[[float], None] | None = None,
+        disk_path: str | None = None,
+        disk_usage: Callable[[str | None], dict[str, Any] | None] = _disk_usage,
     ):
         super().__init__(name="rcm-hostsample", daemon=True)
         self.config = config
@@ -115,6 +142,9 @@ class HostSampler(threading.Thread):
         self.platform = platform
         self.cpu_count = cpu_count if cpu_count is not None else os.cpu_count()
         self.loadavg = loadavg
+        # 잡이 쓰는 디스크. 데이터 디렉터리가 앉은 파일 시스템을 본다.
+        self.disk_path = disk_path
+        self.disk_usage = disk_usage
         # 기본은 stop 이벤트를 기다리는 sleep — Linux 1초 차분 중에도 shutdown 이 안 늦어진다
         self.sleep = sleep or (lambda seconds: self.stop_event.wait(seconds) and None)
         self._lock = threading.Lock()
@@ -149,10 +179,12 @@ class HostSampler(threading.Thread):
         top = parse_ps(self.runner(MAC_PS) or "", self.config.top_processes)
         gpu: dict[str, Any] | None = None
         note: str | None = None
+        code: str | None = None
         if self.config.gpu == "off":
-            note = "disabled"
+            note, code = "disabled", GPU_NO_GPU
         else:
             gpu, note = parse_ioreg_gpu(self.runner(MAC_IOREG) or "")
+            code = None if gpu is not None else GPU_SAMPLER_FAILED
         return {
             "cpu": cpu,
             "memory": mac_memory(vm, total),
@@ -160,6 +192,7 @@ class HostSampler(threading.Thread):
             "top": top,
             "gpu": gpu,
             "gpu_note": note,
+            "gpu_note_code": code,
         }
 
     def _collect_linux(self) -> dict[str, Any]:
@@ -174,16 +207,17 @@ class HostSampler(threading.Thread):
         top = parse_ps(self.runner(LINUX_PS) or "", self.config.top_processes)
         gpu: dict[str, Any] | None = None
         note: str | None = None
+        code: str | None = None
         if self.config.gpu == "off":
-            note = "disabled"
+            note, code = "disabled", GPU_NO_GPU
         else:
             out = self.runner(LINUX_NVIDIA)
             if out is None:
-                note = "nvidia-smi not found"
+                note, code = "nvidia-smi not found", GPU_NO_SAMPLER
             else:
                 gpu = parse_nvidia_smi(out)
                 if gpu is None:
-                    note = "nvidia-smi returned no usable data"
+                    note, code = "nvidia-smi returned no usable data", GPU_SAMPLER_FAILED
         return {
             "cpu": cpu,
             "memory": memory,
@@ -191,6 +225,7 @@ class HostSampler(threading.Thread):
             "top": top,
             "gpu": gpu,
             "gpu_note": note,
+            "gpu_note_code": code,
         }
 
     def sample_once(self) -> HostSample | None:
@@ -212,6 +247,8 @@ class HostSampler(threading.Thread):
             self._set_error("sampler: all collectors failed (cpu, memory, load are unknown)")
             return None
         now = self.now_fn()
+        # 잠금 밖에서 잰다 — 멈춘 마운트에서 syscall 이 걸려도 `latest()` 가 같이 서면 안 된다
+        disk = self.disk_usage(self.disk_path)
         entry = {
             "at": iso(now),
             "cpu_busy": (raw["cpu"] or {}).get("busy"),
@@ -231,7 +268,9 @@ class HostSampler(threading.Thread):
                 cpu=raw["cpu"],
                 memory=memory,
                 gpu=raw["gpu"],
+                disk=disk,
                 gpu_note=raw["gpu_note"],
+                gpu_note_code=raw.get("gpu_note_code"),
                 top=tuple(raw["top"]),
                 history=tuple(self._history),
             )

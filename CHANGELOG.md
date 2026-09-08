@@ -7,7 +7,63 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
-Nothing yet.
+## [0.2.4] - 2026-09-08
+
+The page speaks Korean, the host card says how much disk is left, and a running step's seconds
+count up instead of standing still and then jumping.
+
+### Added
+- **How much disk is left, next to CPU and memory** (M5d-2). A host sample now carries `disk`
+  (`used_bytes`, `free_bytes`, `total_bytes`, `path`) for the filesystem the jobs actually write
+  to — the server's data directory, or a remote worker's own — not the root partition. The host
+  card gains a meter reading `Disk 120 GB / 460 GB` with the remaining amount spelled out beside
+  it, and Host pressure counts it. Two thresholds decide "full", because one gets it wrong: 85%
+  used, **or** under 10 GiB free. A 4 TB disk at 90% is fine; a 60 GB disk at 80% cannot unpack a
+  snapshot. API `schema_version` stays 1 — the key is added. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
+- **Step timers count up instead of jumping** (M5d-2). A running step used to show whatever second
+  the server put in the last status document and then leap ten or twenty seconds when the next one
+  arrived. Progress now ships `job_started_at` and per-step `started_at`/`ended_at`, and the page
+  counts from those anchors once a second, so `analyze 9s` becomes `10s`, not `26s`. Finished jobs
+  keep the server's fixed number, and a browser whose clock offset is unknown keeps showing the
+  server's value rather than quietly counting on its own clock. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
+- **The queue says what is running** (M5d-2). Rows are split under two headings, "Running now" and
+  "Waiting", each with a count, and an empty group says so instead of vanishing. A running row now
+  carries what it is doing right now — `step 2/4 analyze 12s` — without being expanded. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
+
+- **The web page speaks Korean, and you can switch it** (M5d-1). It opens in Korean regardless of
+  the browser's language and a button at the top right flips it to English; the choice is kept in
+  that browser and follows into other tabs. Everything the page writes comes from one catalogue
+  (`web/i18n.js`), including the server's outcome codes from M5d-0, so a job the server closed
+  reads in the viewer's language while a summary the *job* printed stays exactly as the team wrote
+  it. Identifiers never move: preset names, job keys, requester labels, commit shas, refs,
+  repository URLs, step names, logs and the `rcm run …` command are the same in both languages.
+- **The server says what happened in codes, not sentences** (M5d-0). Every summary the *server*
+  writes now carries `summary_code` and `summary_args` beside the English `summary`, so a client
+  can render the same fact in its own language: `cancelled_before_start`, `server_restarted`,
+  `upload_abandoned`, `snapshot_too_big`, `worker_unreachable` and thirteen more, collected in one
+  table (`core/outcome.py`). Arguments are raw values (bytes, seconds, exit codes, names) — the
+  side that shows them decides how to format. A summary the *job* printed with `::rcm::summary::`
+  has no code; it is the team's own sentence and travels unchanged. The four `*_error` fields, the
+  server's `last_error` and a host's `gpu_note` gained `*_code` companions the same way. Database
+  schema 5 → 6 (migrates on start); API `schema_version` stays 1 — keys are only added.
+
+### Fixed
+- **A remote worker's host sample was being thrown away whole** (regression from M5d-0). M5d-0 added
+  `gpu_note_code` to the host document, but the heartbeat parser rejected any sample containing a
+  key it did not know, so an up-to-date worker's CPU, memory and GPU silently disappeared from its
+  pool's host card. Unknown top-level keys are now ignored and the sample is kept; a sample with no
+  recognised key at all is still rejected, and every value is still validated as strictly as before.
+  This is what lets a newer worker talk to an older server without going blank. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
+
+### Changed
+- Documentation: say plainly that **discovery resolves the address, not who you are**. A token is
+  only ever created on the build machine (`rcm token add` writes to the server's database; there
+  is no API that hands one out), so a session that has just found the server and shows a green
+  `server` row next to a red `token` row is in the expected state, with one step left. Leaving
+  `server` out of `client.toml` is also now stated to need 0.2.2+ on both machines, since an older
+  client has no discovery and does not compare versions the way `rcm worker` does. And `mode 600`
+  on a file holding a token is documented as refused, not merely advised.
+  ([#44](https://github.com/monocsp/remote_ci_monitor/pull/44))
 
 ## [0.2.3] - 2026-09-08
 
@@ -155,7 +211,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...v0.2.1

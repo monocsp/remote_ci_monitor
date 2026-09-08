@@ -221,7 +221,8 @@ SMOKE_PATTERNS = [
     r"/api/health",
     r"RCM_TOKEN",
     r"succeeded",  # `rcm run ok` 의 JSON state
-    r"rcm queue",  # `GET /` 의 <title>
+    r"<title",  # `GET /` 가 제목을 그린다(M5d-1 부터 제목 문면은 언어를 따른다)
+    r"rcmI18n",  # 문자열 카탈로그가 wheel 에 실려 서빙된다
     r"kill -TERM|kill -15|SIGTERM",  # 서버는 SIGTERM 으로 끝낸다(§3.5)
     r"smoke: ok",
 ]

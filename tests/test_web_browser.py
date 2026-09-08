@@ -251,7 +251,8 @@ class Scene:
     @property
     def url(self) -> str:
         # `?poll=1`: SSE 대신 10초 폴링. 열린 EventSource 는 headless Chrome 의 종료를 막는다.
-        return f"http://127.0.0.1:{self.srv.port}/?poll=1"
+        # `lang=en`: 화면 기본은 한국어다(결정 38). 아래 단언은 영어 문면을 잠그므로 명시한다.
+        return f"http://127.0.0.1:{self.srv.port}/?poll=1&lang=en"
 
     def ready_js(self) -> str:
         """두 잡의 행과 호스트 CPU 막대가 다 그려졌는가."""
@@ -368,7 +369,7 @@ def test_desktop_dom_shows_running_and_queued_jobs(scene, tmp_path):
         tag_with_id(dom, element_id)
     assert tag_with_id(dom, "tok-dialog").startswith("<dialog")
     assert tag_with_id(dom, "cancel-dialog").startswith("<dialog")
-    assert re.search(r"<title>[^<]+</title>", dom)
+    assert re.search(r"<title[^>]*>[^<]+</title>", dom)  # M5d-1: data-i18n 속성이 붙는다
     assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
 
 
@@ -389,6 +390,40 @@ def test_mobile_viewport_keeps_queue_content(scene, tmp_path):
     for label in ("Your jobs", "Not moving", "Host pressure"):
         assert label in summary_text, (label, summary_text)
     assert "lost connection" not in visible_text.lower()
+
+
+def test_korean_is_the_default_and_the_switch_flips_the_page(scene, tmp_path):
+    """결정 36·38 — 주소에 `lang` 이 없으면 한국어로 뜨고, 오른쪽 위 버튼이 영어로 바꾼다.
+
+    다시 그려지지 않는 정적 문자열(요약 라벨 · 섹션 제목)까지 바뀌는지가 핵심이다 —
+    화면 본문은 `render()` 가 새로 만들지만 그 라벨들은 아무도 다시 쓰지 않는다.
+    """
+    url = f"http://127.0.0.1:{scene.srv.port}/?poll=1"  # lang 없음 = 기본
+    with Chrome(tmp_path / "chrome-lang", window="1280,900") as c:
+        c.open(url, ready_js=scene.ready_js(), timeout=30)
+        lang = c.eval("document.documentElement.lang")
+        summary = c.eval("document.getElementById('summary').textContent")
+        queue_head = c.eval("document.querySelector('#queue .s-h .t').textContent")
+        body = c.eval("document.body.innerText")
+        assert lang == "ko", "기본 언어가 한국어가 아니다"
+        assert "내 잡" in summary and "안 움직이는 것" in summary, summary
+        assert queue_head == "큐", queue_head
+        assert "실행 중" in body, body[:400]
+        assert "undefined" not in body and "NaN" not in body
+        # 전환 — 정적 라벨까지 따라와야 한다
+        c.eval("document.getElementById('lang-btn').click()")
+        after_lang = c.eval("document.documentElement.lang")
+        after_summary = c.eval("document.getElementById('summary').textContent")
+        after_queue = c.eval("document.querySelector('#queue .s-h .t').textContent")
+        after_body = c.eval("document.body.innerText")
+        stored = c.eval("localStorage.getItem('rcm.lang')")
+        assert after_lang == "en"
+        assert "Your jobs" in after_summary and "Not moving" in after_summary, after_summary
+        assert after_queue == "Queue", after_queue
+        assert "running" in after_body
+        assert "내 잡" not in after_summary, "한국어 라벨이 남았다"
+        assert stored == "en", "고른 언어가 브라우저에 남지 않는다"
+        assert "undefined" not in after_body and "NaN" not in after_body
 
 
 def test_screenshot_for_owner_review(scene, tmp_path):
@@ -429,7 +464,7 @@ def test_recent_shows_another_pools_finished_job_when_default_has_none(tmp_path)
         assert doc["pools"][0]["recent"] == [] and doc["pools"][1]["name"] == "linux", doc["pools"]
         with Chrome(tmp_path / "chrome-recent", window="1240,900") as c:
             c.open(
-                f"http://127.0.0.1:{srv.port}/?poll=1",
+                f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
                 ready_js=f"document.querySelector('#recent [data-job=\"{jid}\"]') !== null",
             )
             row_text = c.eval(f"document.querySelector('#recent [data-job=\"{jid}\"]').textContent")
@@ -480,7 +515,7 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
         assert sample["name"] == "build-02" and sample["source"] == "worker", sample
         with Chrome(tmp_path / "chrome-hosts", window="1240,1400") as c:
             c.open(
-                f"http://127.0.0.1:{srv.port}/?poll=1",
+                f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
                 ready_js="document.querySelector('#host .meter[data-metric=\"cpu\"]') !== null",
             )
             # 카드 제목 = `.hn` 에서 나이·OS 부제(`.age`)를 뺀 글자

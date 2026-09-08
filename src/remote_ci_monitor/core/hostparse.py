@@ -290,7 +290,9 @@ def stale(sampled_at: datetime, now: datetime, interval_seconds: float) -> bool:
 _SAMPLE_STR_LIMIT = 200
 _SAMPLE_TOP_LIMIT = 10
 _SAMPLE_HISTORY_LIMIT = 60
-#: 알려진 키만 받는다 — 서버 샘플러(`hostsample.py`)가 내는 모양 그대로. 모르는 키는 표본 거부.
+#: 서버 샘플러(`hostsample.py`)가 내는 모양. 여기 없는 최상위 키는 **읽지 않고 버린다** — 워커가
+#: 서버보다 새 버전이면 새 키를 보내는데(예: M5d-0 의 `gpu_note_code`), 그때 표본 전체를 버리면
+#: 호스트 칸이 통째로 빈다. 값 검사는 아래 `_NESTED_KEYS` 가 키마다 그대로 한다.
 _SAMPLE_KEYS = frozenset(
     {
         "interval_seconds",
@@ -300,7 +302,9 @@ _SAMPLE_KEYS = frozenset(
         "cpu",
         "memory",
         "gpu",
+        "disk",
         "gpu_note",
+        "gpu_note_code",
         "top",
         "history",
     }
@@ -312,10 +316,11 @@ _NESTED_KEYS: dict[str, frozenset[str]] = {
     "cpu": frozenset({"user", "sys", "idle", "busy"}),
     "memory": frozenset({"total_bytes", "used_bytes", "compressed_bytes", "free_bytes"}),
     "gpu": frozenset({"source", "name", "model", "util_pct", "mem_used_bytes", "mem_total_bytes"}),
+    "disk": frozenset({"used_bytes", "free_bytes", "total_bytes", "path"}),
     "top": frozenset({"pid", "comm", "cpu", "rss_mb"}),
     "history": frozenset({"at", "cpu_busy", "mem_used_bytes", "gpu_util_pct"}),
 }
-_NESTED_STR_KEYS = frozenset({"source", "name", "model", "comm", "at"})
+_NESTED_STR_KEYS = frozenset({"source", "name", "model", "comm", "at", "path"})
 
 
 def _finite_number(v: Any) -> float | None:
@@ -356,13 +361,12 @@ def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) 
     """워커의 heartbeat `host_sample` → `HostSample`. 모양이 어긋나면 `ValueError`.
 
     `name`·`source`·`sampled_at` 은 **서버가 정한 값**으로만 채운다(워커 payload 의 이름·시각은
-    쓰지 않는다). 알려진 키만 받고, 모르는 키가 있거나 아는 키가 하나도 없으면 거부한다.
+    쓰지 않는다). 아는 키가 하나도 없으면 거부하고, 모르는 최상위 키는 조용히 버린다(버전 차이).
     """
     if not isinstance(doc, dict):
         raise ValueError("host_sample must be an object")
-    keys = {k for k in doc if k not in _SAMPLE_IGNORED}
-    if not keys or not keys <= _SAMPLE_KEYS:
-        raise ValueError("host_sample has unknown or no known keys")
+    if not {k for k in doc if k in _SAMPLE_KEYS}:
+        raise ValueError("host_sample has no known keys")
     interval = _finite_number(doc.get("interval_seconds"))
     if interval is None or interval <= 0:
         interval = 5.0
@@ -395,7 +399,9 @@ def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) 
         cpu=_known_dict(doc.get("cpu"), "cpu"),
         memory=_known_dict(doc.get("memory"), "memory"),
         gpu=_known_dict(doc.get("gpu"), "gpu"),
+        disk=_known_dict(doc.get("disk"), "disk"),
         gpu_note=_opt_text(doc.get("gpu_note")),
+        gpu_note_code=_opt_text(doc.get("gpu_note_code")),
         top=top,
         history=history,
     )

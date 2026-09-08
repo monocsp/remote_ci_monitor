@@ -207,6 +207,10 @@ class Job:
     finished_at: datetime | None = None
     exit_code: int | None = None
     summary: str | None = None
+    #: 서버가 만든 요약이면 코드와 원시 인자가 함께 온다(결정 37). 잡이 `::rcm::summary::` 로
+    #: 찍은 문장에는 코드가 없다 — 팀이 쓴 문장이라 그대로 보여 준다.
+    summary_code: str | None = None
+    summary_args: dict[str, Any] = field(default_factory=dict)
     failed_step: str | None = None
     lane: int | None = None
     timeout_seconds: int | None = None
@@ -268,6 +272,8 @@ class Progress:
     summary: str | None = None
     last_output_at: datetime | None = None
     timing: str = "as_received"
+    #: 잡이 시작한 시각. 화면이 「도는 잡의 초」를 스스로 세는 기준점이다(M5d-2 §4.6-다).
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -342,6 +348,8 @@ class ServerInfo:
     paused: Paused | None
     last_error: str | None
     workers: tuple[WorkerInfo, ...]
+    #: 실패의 **종류**(결정 37). 원문은 `last_error` 에 남는다.
+    last_error_code: str | None = None
     sse_connections: int = 0
     snapshot_cache_blobs: int | None = None  # 캐시가 꺼져 있으면 None (M5)
     snapshot_cache_bytes: int | None = None
@@ -362,7 +370,12 @@ class HostSample:
     cpu: dict[str, float | None] | None = None
     memory: dict[str, int | None] | None = None
     gpu: dict[str, Any] | None = None
+    #: 잡이 쓰는 디스크(데이터 디렉터리가 앉은 파일 시스템).
+    #: `{used_bytes, free_bytes, total_bytes, path}`. 못 읽으면 None.
+    disk: dict[str, Any] | None = None
     gpu_note: str | None = None
+    #: GPU 표본이 없는 **이유**(결정 37). `no_sampler` · `no_gpu` · `sampler_failed`.
+    gpu_note_code: str | None = None
     top: tuple[dict[str, Any], ...] = ()
     history: tuple[dict[str, Any], ...] = ()
 
@@ -382,6 +395,12 @@ class Pool:
     medians_error: str | None
     hosts: tuple[HostSample, ...] | None
     hosts_error: str | None
+    #: 실패의 **종류**(결정 37). 원문은 위의 `*_error` 에 남는다 — 화면은 종류를 자기 말로 쓰고
+    #: 원문은 접어서 보여 준다. 실패가 없으면 둘 다 None.
+    queue_error_code: str | None = None
+    recent_error_code: str | None = None
+    medians_error_code: str | None = None
+    hosts_error_code: str | None = None
 
 
 @dataclass(frozen=True)

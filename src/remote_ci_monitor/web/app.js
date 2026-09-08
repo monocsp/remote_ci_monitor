@@ -4,6 +4,14 @@
 (function (root) {
   "use strict";
 
+  // 문자열 카탈로그(i18n.js). 브라우저는 앞서 실린 전역, node 테스트는 require.
+  var I18N = (typeof require !== "undefined" && typeof module !== "undefined" && module.exports)
+    ? require("./i18n.js")
+    : ((typeof globalThis !== "undefined" && globalThis.rcmI18n) || (root && root.rcmI18n));
+  var EN = "en";
+  /** 키를 문장으로. `lang` 이 없으면 영어 — 순수 함수의 기존 계약을 지킨다. */
+  function T(lang, key, args) { return I18N.t(lang || EN, key, args); }
+
   var DASH = "—";
   var ACTIONABLE = ["worker_down", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
   var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1 };
@@ -15,6 +23,8 @@
   var TICK_MS = 1000;
   var REFETCH_COALESCE_MS = 300;
   var HIDDEN_PAUSE_MS = 60000;
+  // 남은 저장 공간이 이 밑이면 사용률과 무관하게 경고한다 — 스냅샷 하나가 못 풀린다(§4.6-가)
+  var DISK_LOW_FREE = 10 * 1024 * 1024 * 1024;
 
   function isNum(v) { return typeof v === "number" && isFinite(v); }
   function esc(s) {
@@ -79,11 +89,11 @@
     if (s < 3600) return Math.floor(s / 60) + "m";
     return Math.floor(s / 3600) + "h";
   }
-  function fmtAgo(seconds) { return isNum(seconds) ? fmtCoarse(seconds) + " ago" : DASH; }
-  function fmtCountdown(seconds) {
+  function fmtAgo(seconds, lang) { return isNum(seconds) ? T(lang, "time.ago", { dur: fmtCoarse(seconds) }) : DASH; }
+  function fmtCountdown(seconds, lang) {
     if (!isNum(seconds)) return DASH;
-    if (seconds <= 0) return "now";
-    return "in " + fmtDuration(seconds);
+    if (seconds <= 0) return T(lang, "time.now");
+    return T(lang, "time.in", { dur: fmtDuration(seconds) });
   }
   function fmtBytes(n) {
     if (!isNum(n)) return DASH;
@@ -109,12 +119,17 @@
     if (gib >= 0.95) return gib.toFixed(1) + " GB";
     return Math.round(n / 1048576) + " MB";
   }
-  function fmtPct(v) { return isNum(v) ? Math.round(v) + "%" : DASH; }
-  function ordinal(n) {
+  // 디스크는 십진 GB 정수 — Finder·`df -H` 와 같은 눈금이고, 소수점을 빼야 미터 한 칸에 들어간다
+  function fmtDisk(n) {
     if (!isNum(n)) return DASH;
-    var r100 = n % 100, r10 = n % 10, suf = "th";
-    if (r100 < 11 || r100 > 13) suf = r10 === 1 ? "st" : r10 === 2 ? "nd" : r10 === 3 ? "rd" : "th";
-    return n + suf;
+    if (n >= 1e9) return Math.round(n / 1e9) + " GB";
+    if (n >= 1e6) return Math.round(n / 1e6) + " MB";
+    return Math.round(n / 1e3) + " KB";
+  }
+  function fmtPct(v) { return isNum(v) ? Math.round(v) + "%" : DASH; }
+  function ordinal(n, lang) {
+    if (!isNum(n)) return DASH;
+    return T(lang, "ordinal", { n: n });
   }
   function truncate(label, n) {
     if (label == null) return DASH;
@@ -122,7 +137,11 @@
     var s = String(label);
     return s.length <= n ? s : s.slice(0, n - 1) + "…";
   }
-  function stateWord(state) { return state === "timed_out" ? "timed out" : (state || "unknown"); }
+  function stateWord(state, lang) {
+    if (!state) return T(lang, "state.unknown");
+    var key = "state." + state;
+    return I18N.has(key) ? T(lang, key) : state;
+  }
   function stateGlyph(state) { return GLYPH[state] || "·"; }
 
   // 로컬 레인만 센다 — server.lanes 가 로컬 수라 원격(worker 키) 항목을 섞으면 "3/2" 가 된다 (M5b-2)
@@ -158,106 +177,123 @@
   }
 
   // ── Reason 열 (항목 11) ──
-  function reasonText(row, a, b) {
+  function reasonText(row, a, b, lang) {
     var nowMs = isNum(a) ? a : (isNum(b) ? b : null);
     var status = (a && typeof a === "object") ? a : ((b && typeof b === "object") ? b : null);
     var reason = row && row.reason;
     var est = (row && row.estimate) || {};
     var src = (row && row.source) || {};
     var links = [];
-    var out = { text: "unknown", actionable: false, links: links, cls: "" };
+    var out = { text: T(lang, "reason.unknown"), actionable: false, links: links, cls: "" };
     if (!row || !reason) return out;
+    // 조각을 모아 ` · ` 로 잇는다. 조각의 문구와 안쪽 어순은 언어마다 다르고, 잇는 방식은 같다.
+    var parts = [];
     switch (reason) {
       case "running":
-        out.text = isNum(row.lane) ? "running · lane " + row.lane : "running"; break;
+        out.text = isNum(row.lane)
+          ? T(lang, "reason.running_lane", { lane: row.lane })
+          : T(lang, "reason.running");
+        break;
       case "waiting_for_lane": {
-        var t = "waiting for lane";
+        parts.push(T(lang, "reason.waiting_for_lane"));
         var busy = busyCount(status), lanes = laneCount(status);
-        if (isNum(busy) && isNum(lanes)) t += " · " + busy + "/" + lanes + " busy";
-        if (isNum(row.ahead_job_id)) { t += " · behind #" + row.ahead_job_id; links.push({ jobId: row.ahead_job_id }); }
-        if (isNum(est.wait_seconds)) t += " · frees in " + fmtDuration(est.wait_seconds);
-        out.text = t; break;
+        if (isNum(busy) && isNum(lanes)) parts.push(T(lang, "reason.lanes_busy", { busy: busy, lanes: lanes }));
+        if (isNum(row.ahead_job_id)) { parts.push(T(lang, "reason.behind", { id: row.ahead_job_id })); links.push({ jobId: row.ahead_job_id }); }
+        if (isNum(est.wait_seconds)) parts.push(T(lang, "reason.frees_in", { dur: fmtDuration(est.wait_seconds) }));
+        out.text = parts.join(" · "); break;
       }
       case "blocked_by_group": {
         var bb = row.blocked_by || {};
         // 조각은 남기고 모르는 숫자만 —(「frees in —」): 막는 잡이 있는 한 「언제 풀리나」는 늘 묻는 질문이다
-        var t2 = "⛓ blocked by " + (isNum(bb.job_id) ? "#" + bb.job_id : DASH) + " · " + (bb.group || row.concurrency_group || DASH) + " · frees in " + fmtDuration(bb.remaining_seconds);
+        out.text = T(lang, "reason.blocked_by", {
+          job: isNum(bb.job_id) ? "#" + bb.job_id : DASH,
+          group: bb.group || row.concurrency_group || DASH
+        }) + " · " + T(lang, "reason.frees_in", { dur: fmtDuration(bb.remaining_seconds) });
         if (isNum(bb.job_id)) links.push({ jobId: bb.job_id });
-        out.text = t2; out.actionable = true; out.cls = "blocked"; break;
+        out.actionable = true; out.cls = "blocked"; break;
       }
       case "uploading":
-        out.text = "uploading · " + fmtBytesPair(src.received_bytes, src.bytes); break;
+        out.text = T(lang, "reason.uploading", { bytes: fmtBytesPair(src.received_bytes, src.bytes) }); break;
       case "upload_stalled": {
         var since = secondsSince(src.last_received_at, nowMs);
-        out.text = "upload stalled " + fmtCoarse(since) + " · " + fmtBytesPair(src.received_bytes, src.bytes);
+        out.text = T(lang, "reason.upload_stalled", {
+          since: fmtCoarse(since), bytes: fmtBytesPair(src.received_bytes, src.bytes)
+        });
         out.actionable = true; out.cls = "stalled"; break;
       }
       case "materializing":
         // 목업 33: tree 는 「unpacking 48 MB」, git_ref 는 「fetching dev」, 둘 다 모르면 조각 없이
-        out.text = "preparing workspace";
-        if (src.mode === "git_ref") { if (src.ref) out.text += " · fetching " + src.ref; }
-        else if (isNum(src.bytes)) out.text += " · unpacking " + fmtBytes(src.bytes);
+        parts.push(T(lang, "reason.preparing"));
+        if (src.mode === "git_ref") { if (src.ref) parts.push(T(lang, "reason.fetching", { ref: src.ref })); }
+        else if (isNum(src.bytes)) parts.push(T(lang, "reason.unpacking", { bytes: fmtBytes(src.bytes) }));
+        out.text = parts.join(" · ");
         break;
       case "overdue": {
         var over = isNum(est.elapsed_seconds) && isNum(est.expected_seconds) ? est.elapsed_seconds - est.expected_seconds : null;
-        out.text = "over by " + fmtDuration(over) + " · expected " + fmtDuration(est.expected_seconds);
+        out.text = T(lang, "reason.over_by", {
+          over: fmtDuration(over), expected: fmtDuration(est.expected_seconds)
+        });
         out.actionable = true; out.cls = "over"; break;
       }
       case "stuck": {
-        var t3 = "⚠ likely stuck";
-        if (isNum(est.elapsed_seconds) && isNum(est.expected_seconds) && est.expected_seconds > 0) t3 += " · " + Math.floor(est.elapsed_seconds / est.expected_seconds) + "× expected";
+        parts.push(T(lang, "reason.stuck"));
+        if (isNum(est.elapsed_seconds) && isNum(est.expected_seconds) && est.expected_seconds > 0) parts.push(T(lang, "reason.times_expected", { n: Math.floor(est.elapsed_seconds / est.expected_seconds) }));
         var lo = row.progress && row.progress.last_output_at;
         var quiet = secondsSince(lo, nowMs);
-        if (isNum(quiet)) t3 += " · no output for " + fmtCoarse(quiet);
-        out.text = t3; out.actionable = true; out.cls = "stuck"; break;
+        if (isNum(quiet)) parts.push(T(lang, "reason.no_output_for", { since: fmtCoarse(quiet) }));
+        out.text = parts.join(" · "); out.actionable = true; out.cls = "stuck"; break;
       }
       case "cancelling": {
         var c = row.cancel || {};
         var kill = secondsUntil(c.kill_at, nowMs);
-        out.text = "SIGTERM sent by " + personLabel(row, c.by) + " · kill " + fmtCountdown(kill); break;
+        out.text = T(lang, "reason.sigterm", { by: personLabel(row, c.by), kill: fmtCountdown(kill, lang) }); break;
       }
-      case "paused": out.text = "paused"; out.actionable = true; break;
-      case "not_scheduled": out.text = "not scheduled"; out.actionable = true; break;
-      case "worker_down": out.text = "no worker"; out.actionable = true; break;
-      default: out.text = "unknown";
+      case "paused": out.text = T(lang, "reason.paused"); out.actionable = true; break;
+      case "not_scheduled": out.text = T(lang, "reason.not_scheduled"); out.actionable = true; break;
+      case "worker_down": out.text = T(lang, "reason.no_worker"); out.actionable = true; break;
+      default: out.text = T(lang, "reason.unknown");
     }
     return out;
   }
 
-  function confidenceBadge(est) {
+  function confidenceBadge(est, lang) {
     est = est || {};
     var n = isNum(est.sample_count) ? est.sample_count : null;
     var c = est.confidence;
     if (!c) {
       if (est.source === "measured") c = (n != null && n >= 5) ? "high" : "med";
       else if (est.source) c = "low";
-      else return { cls: "low", text: "low · " + DASH };
+      else return { cls: "low", text: T(lang, "conf.low_dash", { dash: DASH }) };
     }
-    if (c === "overdue") return { cls: "over", text: "overdue" };
-    if (c === "group wait") return { cls: "low", text: "low · group wait" };
-    if (c === "high" || c === "med") return { cls: c, text: c + " · measured" + (n != null ? " n=" + n : "") };
-    return { cls: "low", text: "low · " + (est.source || DASH) };
+    if (c === "overdue") return { cls: "over", text: T(lang, "conf.overdue") };
+    // `group wait` 는 서버가 보내는 문구다(core/queue.py) — 화면에서만 자기 말로 바꾼다
+    if (c === "group wait") return { cls: "low", text: T(lang, "conf.group_wait") };
+    if (c === "high" || c === "med") {
+      var word = T(lang, "conf." + c);
+      return { cls: c, text: n != null ? T(lang, "conf.measured", { conf: word, n: n }) : word + " · measured" };
+    }
+    return { cls: "low", text: T(lang, "conf.source", { source: est.source || DASH }) };
   }
 
-  function etaText(row, tz, nowMs) {
+  function etaText(row, tz, nowMs, lang) {
     var est = (row && row.estimate) || {};
     if (!est.finish_at) return { clock: DASH, rel: null };
     var busy = row.state === "running" || row.state === "cancelling";
     var total = busy ? est.remaining_seconds : (isNum(est.wait_seconds) && isNum(est.remaining_seconds) ? est.wait_seconds + est.remaining_seconds : null);
     if (row.reason === "blocked_by_group" && row.blocked_by && isNum(row.blocked_by.job_id)) {
-      return { clock: "after #" + row.blocked_by.job_id, rel: "~" + fmtClock(est.finish_at, tz, nowMs) };
+      return { clock: T(lang, "eta.after", { id: row.blocked_by.job_id }), rel: "~" + fmtClock(est.finish_at, tz, nowMs) };
     }
-    return { clock: fmtClock(est.finish_at, tz, nowMs), rel: isNum(total) ? "in " + fmtDuration(total) : null };
+    return { clock: fmtClock(est.finish_at, tz, nowMs), rel: isNum(total) ? T(lang, "eta.in", { dur: fmtDuration(total) }) : null };
   }
 
-  function elapsedText(row, nowMs) {
+  function elapsedText(row, nowMs, lang) {
     var est = (row && row.estimate) || {};
     var st = row && row.state;
     if (st === "running" || st === "cancelling") {
-      var sub = isNum(est.waited_seconds) && est.waited_seconds > 0 ? "waited " + fmtDuration(est.waited_seconds) : null;
+      var sub = isNum(est.waited_seconds) && est.waited_seconds > 0 ? T(lang, "elapsed.waited", { dur: fmtDuration(est.waited_seconds) }) : null;
       return { main: fmtDuration(est.elapsed_seconds), sub: sub };
     }
-    if (st === "queued") return { main: "waiting " + fmtDuration(est.waited_seconds), sub: null };
+    if (st === "queued") return { main: T(lang, "elapsed.waiting", { dur: fmtDuration(est.waited_seconds) }), sub: null };
     return { main: DASH, sub: null };
   }
 
@@ -291,23 +327,38 @@
   // ── 풀 (M5b) ──
   // Host 절의 카드 목록(M5b-4): 기본 풀의 표본이 먼저(제목 = 이름, 오늘 그대로), 그 뒤 다른 풀의
   // 워커 표본(제목 `<이름> · pool <풀>`). 표본이 없거나 null 인 원격 풀은 카드를 만들지 않는다.
-  function hostCards(status) {
+  function hostCards(status, lang) {
     var pools = poolsOf(status);
     var out = [];
     pools.forEach(function (pl, i) {
       if (!pl || !Array.isArray(pl.hosts)) return;
       pl.hosts.forEach(function (h) {
         if (!h) return;
-        out.push({ title: i === 0 ? (h.name || DASH) : (h.name || DASH) + " · pool " + (pl.name || DASH), pool: pl.name || "default", host: h });
+        var title = i === 0 ? (h.name || DASH) : T(lang, "host.pool", { host: h.name || DASH, pool: pl.name || DASH });
+        out.push({ title: title, pool: pl.name || "default", host: h });
       });
     });
     return out;
   }
 
-  function poolHeader(pool) {
+  /**
+   * 큐를 「지금 도는 것」과 「기다리는 것」으로 나눈다(§4.6-라). 빈 묶음도 남긴다 — 화면이
+   * 「지금 도는 것 없음」을 그릴 수 있어야 한다. 행 순서는 `sortQueue` 가 정한 그대로.
+   */
+  function queueGroups(rows, lang) {
+    var list = Array.isArray(rows) ? rows : [];
+    var running = list.filter(function (r) { return r && (r.state === "running" || r.state === "cancelling"); });
+    var waiting = list.filter(function (r) { return !r || (r.state !== "running" && r.state !== "cancelling"); });
+    return [
+      { key: "running", title: T(lang, "queue.group_running", { n: running.length }), rows: running },
+      { key: "waiting", title: T(lang, "queue.group_waiting", { n: waiting.length }), rows: waiting }
+    ];
+  }
+
+  function poolHeader(pool, lang) {
     if (!pool || pool.name === "default" || !pool.name) return "";
     var noWorkers = isNum(pool.lanes) && pool.lanes === 0;
-    return "pool " + pool.name + (noWorkers ? " · no workers" : "");
+    return T(lang, "pool.name", { name: pool.name }) + (noWorkers ? " · " + T(lang, "pool.no_workers") : "");
   }
   function poolSummary(pools) {
     if (!Array.isArray(pools)) return { running: null, waiting: null, pools: 0 };
@@ -323,7 +374,7 @@
   }
 
   // ── 요약 (항목 23 · 24 · 25) ──
-  function notMoving(status, me) {
+  function notMoving(status, me, lang) {
     var q = queueOf(status);
     if (!Array.isArray(q)) return { kind: "unknown", lines: [] };
     var lines = [];
@@ -332,7 +383,7 @@
       if (!("reason" in row)) { unknown = true; return; }
       if (row.reason === "running" || row.reason === "waiting_for_lane" || row.reason === "uploading" || row.reason === "materializing" || row.reason === "cancelling") return;
       if (ACTIONABLE.indexOf(row.reason) === -1) return;
-      var r = reasonText(row, status, Date.parse(status.generated_at));
+      var r = reasonText(row, status, Date.parse(status.generated_at), lang);
       lines.push({ jobId: row.id, reason: row.reason, text: r.text, rank: ACTIONABLE.indexOf(row.reason) });
     });
     if (unknown && !lines.length) return { kind: "unknown", lines: [] };
@@ -348,7 +399,7 @@
 
   // 시각은 status.display_timezone · generated_at 기준(§2 시그니처가 (status, me) 라 다른 데서 올 수 없다).
   // text 에 잡 id 는 넣지 않는다 — id 는 렌더 층이 버튼으로 따로 그린다(목업 23 「<b>#412</b> running …」).
-  function yourJobs(status, me) {
+  function yourJobs(status, me, lang) {
     if (!me) return { kind: "no_token", lines: [], more: 0 };
     var q = queueOf(status);
     if (!Array.isArray(q)) return { kind: "unknown", lines: [], more: 0 };
@@ -358,47 +409,63 @@
     if (!mine.length) return { kind: "none", lines: [], more: 0 };
     var lines = mine.slice(0, 2).map(function (row) {
       var busy = row.state === "running" || row.state === "cancelling";
-      var eta = etaText(row, tz, nowMs);
+      var eta = etaText(row, tz, nowMs, lang);
       var t;
-      if (busy) t = stateWord(row.state) + " · ETA " + eta.clock + (eta.rel ? " · " + eta.rel : "");
+      if (busy) t = T(lang, "your.eta", { state: stateWord(row.state, lang), clock: eta.clock }) + (eta.rel ? " · " + eta.rel : "");
       else {
         // 대기 줄은 짧게: 순번 · ETA · 이유의 첫 조각(「2nd in line · ETA 09:58 · waiting for lane」). 그룹 대기는 ~시각
-        t = (isNum(row.position) ? ordinal(row.position) + " in line" : stateWord(row.state)) + " · ETA " + (eta.rel && /^after /.test(eta.clock) ? eta.rel : eta.clock);
-        var brief = reasonText(row, nowMs, status).text.replace(/^⛓ /, "").split(" · ")[0];
-        if (brief && brief !== "unknown") t += " · " + brief;
+        // `after #N` 은 카탈로그가 만든 문구라 언어마다 다르다 — 조각 비교 대신 blocked 여부로 고른다
+        var blocked = row.reason === "blocked_by_group";
+        var clock = blocked && eta.rel ? eta.rel : eta.clock;
+        var head = isNum(row.position)
+          ? T(lang, "ordinal.in_line", { ordinal: ordinal(row.position, lang) })
+          : stateWord(row.state, lang);
+        t = T(lang, "your.in_line", { ordinal: head, clock: clock });
+        // 이유의 첫 조각. 「알 수 없음」이면 붙이지 않는다(언어와 무관하게 같은 판정)
+        var reason = reasonText(row, nowMs, status, lang);
+        var brief = reason.text.replace(/^⛓ /, "").split(" · ")[0];
+        if (brief && row.reason && row.reason !== "unknown" && reason.text !== T(lang, "reason.unknown")) t += " · " + brief;
       }
       var joined = Array.isArray(row.joiners) ? row.joiners.length : 0;
-      if (joined) t += " · +" + joined + " joined";
+      if (joined) t += " · " + T(lang, "your.joined", { n: joined });
       return { jobId: row.id, text: t, state: row.state };
     });
     return { kind: "list", lines: lines, more: Math.max(0, mine.length - 2) };
   }
 
-  // {cpu, mem, gpu, load, verdict} — 퍼센트는 정수(목업 4절), load 는 「3.5 / 10」 문자열(§2).
-  // 85% 이상이면 busy(아는 값이 이미 바쁘다고 말하므로 partial 보다 우선), 하나라도 모르면 partial, 셋 다 모르면 unknown.
+  // {cpu, mem, gpu, disk, diskFree, load, verdict} — 퍼센트는 정수(목업 4절), load 는 「3.5 / 10」 문자열(§2).
+  // 85% 이상이면 busy(아는 값이 이미 바쁘다고 말하므로 partial 보다 우선), 하나라도 모르면 partial, 넷 다 모르면 unknown.
+  // 디스크는 기준이 둘이다(§4.6-가): 사용률 85% 이상, 또는 남은 공간 10 GiB 미만. 큰 디스크는 90%
+  // 라도 넉넉하고 작은 디스크는 80% 라도 빌드가 안 돈다 — 하나만 보면 틀린다.
   // load·cores 는 판정에 안 들어간다 — 텍스트만 —.
   function hostPressure(host) {
-    if (!host) return { cpu: null, mem: null, gpu: null, load: DASH, verdict: "no_sample" };
+    if (!host) return { cpu: null, mem: null, gpu: null, disk: null, diskFree: null, load: DASH, verdict: "no_sample" };
     var pct = function (v) { return isNum(v) ? Math.round(v) : null; };
     var cpu = pct(host.cpu && host.cpu.busy);
     var mem = host.memory && isNum(host.memory.used_bytes) && isNum(host.memory.total_bytes) && host.memory.total_bytes > 0
       ? pct(host.memory.used_bytes / host.memory.total_bytes * 100) : null;
     var gpu = pct(host.gpu && host.gpu.util_pct);
+    var d = host.disk || null;
+    var disk = d && isNum(d.used_bytes) && isNum(d.total_bytes) && d.total_bytes > 0
+      ? pct(d.used_bytes / d.total_bytes * 100) : null;
+    var diskFree = d && isNum(d.free_bytes) ? d.free_bytes : null;
+    var lowDisk = isNum(diskFree) && diskFree < DISK_LOW_FREE;
     var load1 = Array.isArray(host.load) && isNum(host.load[0]) ? host.load[0] : null;
     var load = isNum(load1) ? load1.toFixed(1) + " / " + (isNum(host.cores) ? host.cores : DASH) : DASH;
-    var vals = [cpu, mem, gpu];
+    var vals = [cpu, mem, gpu, disk];
     var known = vals.filter(isNum);
     var verdict;
-    if (!known.length) verdict = "unknown";
+    if (lowDisk) verdict = "busy";
+    else if (!known.length) verdict = "unknown";
     else if (known.some(function (v) { return v >= 85; })) verdict = "busy";
     else if (known.length < vals.length) verdict = "partial";
     else verdict = "fine";
-    return { cpu: cpu, mem: mem, gpu: gpu, load: load, verdict: verdict };
+    return { cpu: cpu, mem: mem, gpu: gpu, disk: disk, diskFree: diskFree, load: load, verdict: verdict };
   }
 
-  function queueHeader(status, nowMs) {
+  function queueHeader(status, nowMs, lang) {
     var q = queueOf(status);
-    if (!Array.isArray(q)) return "unknown";
+    if (!Array.isArray(q)) return T(lang, "queue.unknown");
     var running = 0, waiting = 0, oldest = null;
     q.forEach(function (r) {
       if (r.state === "running" || r.state === "cancelling") running++;
@@ -408,10 +475,10 @@
         if (isNum(w) && (oldest == null || w > oldest)) oldest = w;
       }
     });
-    var t = q.length + " jobs · " + running + " running · " + waiting + " waiting";
-    if (waiting) t += " · oldest waiting " + fmtDuration(oldest);
+    var t = T(lang, "queue.counts", { total: q.length, running: running, waiting: waiting });
+    if (waiting) t += " · " + T(lang, "queue.oldest_waiting", { dur: fmtDuration(oldest) });
     var busy = busyCount(status), lanes = laneCount(status);
-    if (isNum(busy) && isNum(lanes)) t += " · lanes " + busy + "/" + lanes + " busy";
+    if (isNum(busy) && isNum(lanes)) t += " · " + T(lang, "queue.lanes_busy", { busy: busy, lanes: lanes });
     return t;
   }
 
@@ -435,7 +502,25 @@
     return w.display_name || (w.worker + "/" + w.lane);
   }
 
-  function workerPills(server) {
+  /** 워커 상태 낱말. enum 값은 그대로 두고 표시만 바꾼다(CSS 클래스·정렬이 값을 쓴다). */
+  function workerState(state, lang) {
+    if (!state) return DASH;
+    var key = "state." + state;
+    return I18N.has(key) ? T(lang, key) : state;
+  }
+
+  /** 서버가 코드로 말한 요약(결정 37)을 그 언어의 문장으로. 코드가 없으면 저장된 문장 그대로 —
+      잡이 `::rcm::summary::` 로 찍은 것은 팀이 쓴 문장이라 번역하지 않는다. */
+  function outcomeText(job, lang) {
+    var code = job && job.summary_code;
+    if (!code) return (job && job.summary) || "";
+    var key = "outcome." + code;
+    if (!I18N.has(key)) return (job && job.summary) || "";
+    try { return T(lang, key, job.summary_args || {}); }
+    catch (e) { return (job && job.summary) || ""; }
+  }
+
+  function workerPills(server, lang) {
     server = server || {};
     var all = Array.isArray(server.workers) ? server.workers : [];
     var workers = all.filter(function (w) { return !w.worker; });   // 로컬 레인은 오늘 그대로
@@ -444,40 +529,39 @@
     var pills = [];
     if (lanes === 1 && workers.length === 1) {
       var w = workers[0];
-      pills.push({ text: "worker " + (w.state || DASH) + (isNum(w.job_id) ? " #" + w.job_id : ""), cls: w.state || "", jobId: isNum(w.job_id) ? w.job_id : null, lane: w.lane });
+      pills.push({ text: T(lang, "worker.state", { state: workerState(w.state, lang) }) + (isNum(w.job_id) ? " #" + w.job_id : ""), cls: w.state || "", jobId: isNum(w.job_id) ? w.job_id : null, lane: w.lane });
     } else {
       workers.forEach(function (w) {
         if (w.state === "busy" && isNum(w.job_id)) pills.push({ text: "#" + w.job_id, cls: "busy", jobId: w.job_id, lane: w.lane });
-        else if (w.state === "down") pills.push({ text: "lane " + w.lane + " · down", cls: "down", jobId: null, lane: w.lane });
-        else pills.push({ text: "lane " + w.lane + " · " + (w.state || DASH), cls: w.state || "", jobId: null, lane: w.lane });
+        else pills.push({ text: T(lang, "worker.lane_state", { lane: w.lane, state: workerState(w.state, lang) }), cls: w.state || "", jobId: null, lane: w.lane });
       });
     }
     remote.forEach(function (w) {
       var name = workerName(w);
       var busy = w.state === "busy" && isNum(w.job_id);
-      pills.push({ text: name + " " + (w.state || DASH) + (busy ? " #" + w.job_id : ""), cls: w.state || "", jobId: busy ? w.job_id : null, lane: w.lane, worker: w.worker });
+      pills.push({ text: name + " " + workerState(w.state, lang) + (busy ? " #" + w.job_id : ""), cls: w.state || "", jobId: busy ? w.job_id : null, lane: w.lane, worker: w.worker });
     });
-    if (server.paused) pills.push({ text: "paused", cls: "paused", jobId: null, lane: null });
+    if (server.paused) pills.push({ text: T(lang, "worker.paused"), cls: "paused", jobId: null, lane: null });
     return pills;
   }
 
   // {kind: "reload"|"restart", text} | null — DOM 은 kind 로 띠 색을 고르고, 공개 headerNote 는 §2 대로 문자열만 준다.
   // 버전·스키마 변화가 재시작보다 우선. uptime 이 어느 쪽이든 null 이면 재시작을 주장하지 않는다. prev 없으면(첫 조회) null.
-  function headerNoteKind(status, nowMs, prev) {
+  function headerNoteKind(status, nowMs, prev, lang) {
     if (!status || !prev || typeof prev !== "object") return null;
     if (status.schema_version !== prev.schema_version || (status.server && prev.server && status.server.version !== prev.server.version)) {
-      return { kind: "reload", text: "UI out of date — reload" };
+      return { kind: "reload", text: T(lang, "note.stale_ui") };
     }
     if (status.server && prev.server && isNum(status.server.uptime_seconds) && isNum(prev.server.uptime_seconds) && status.server.uptime_seconds < prev.server.uptime_seconds) {
       var startMs = parseIso(status.generated_at);
       var tz = status.display_timezone || undefined;
       var at = startMs != null ? fmtClock(new Date(startMs - status.server.uptime_seconds * 1000).toISOString(), tz, nowMs) : DASH;
-      return { kind: "restart", text: "Server restarted at " + at + " — running jobs were marked lost" };
+      return { kind: "restart", text: T(lang, "note.restarted", { clock: at }) };
     }
     return null;
   }
-  function headerNote(status, nowMs, prev) {
-    var note = headerNoteKind(status, nowMs, prev);
+  function headerNote(status, nowMs, prev, lang) {
+    var note = headerNoteKind(status, nowMs, prev, lang);
     return note ? note.text : null;
   }
 
@@ -485,18 +569,59 @@
   function failedStepCount(prog) {
     return Array.isArray(prog && prog.steps) ? prog.steps.filter(function (s) { return s.ok === false; }).length : 0;
   }
-  function progressHead(prog) {
+  function progressHead(prog, lang) {
     if (!prog || prog.phase === "materializing") return null;
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
-    if (!steps.length) return "no step markers · job " + fmtDuration(prog.job_seconds);
+    if (!steps.length) return T(lang, "progress.no_markers", { dur: fmtDuration(prog.job_seconds) });
     var cur = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
-    var t = "step " + cur + "/" + total + (prog.steps_total_partial ? " (so far)" : "");
+    var t = T(lang, "progress.step", { cur: cur, total: total, soFar: !!prog.steps_total_partial });
     if (prog.current_name) t += " · " + prog.current_name + " · " + fmtDuration(prog.current_seconds);
-    t += " · job " + fmtDuration(prog.job_seconds);
+    t += " · " + T(lang, "progress.job", { dur: fmtDuration(prog.job_seconds) });
     var f = failedStepCount(prog);
-    if (f) t += " · " + f + " step" + (f > 1 ? "s" : "") + " failed";
+    if (f) t += " · " + T(lang, "progress.steps_failed", { n: f });
     return t;
+  }
+  /** 도는 스텝(끝나지 않은 마지막 스텝). 없으면 null — 끝난 잡의 초는 올라가면 안 된다. */
+  function runningStep(prog) {
+    var steps = Array.isArray(prog && prog.steps) ? prog.steps : [];
+    var last = steps.length ? steps[steps.length - 1] : null;
+    return last && last.state === "running" ? last : null;
+  }
+  /**
+   * 진행 머리줄을 HTML 로. **태그를 벗기면 `progressHead(prog, lang)` 와 글자가 같다**(§4.6-다).
+   *
+   * `live` 는 「이 잡은 아직 도는 중이다」는 뜻이다(DOM 층이 `state` 로 판단해 넘긴다). 그러면 잡
+   * 초가 기준점에서 스스로 오른다. 스텝 초는 **도는 스텝이 있을 때만** — 마지막 스텝이 끝나고
+   * 잡이 정리 중일 때 끝난 스텝의 초가 계속 오르면 거짓말이 된다.
+   * 서버는 상태 문서를 만든 순간의 초를 보내므로, 그것만 그리면 폴링 간격만큼 숫자가 튄다.
+   * 시계 차이를 모르면 DOM 층이 `live=false` 로 부른다 — 조용히 브라우저 시계로 넘어가지 않는다.
+   */
+  function progressHeadHtml(prog, lang, live) {
+    if (!prog || prog.phase === "materializing") return null;
+    var steps = Array.isArray(prog.steps) ? prog.steps : [];
+    var cur = live ? runningStep(prog) : null;
+    // 기준점이 있는 자리만 틱으로 감싼다. 없으면(옛 서버) 서버가 준 숫자를 그대로 둔다.
+    var span = function (from, dur) {
+      return from ? '<span data-tick="elapsed" data-from="' + esc(from) + '">' + esc(dur) + "</span>" : esc(dur);
+    };
+    // 「job 1m 2s」의 소요만 틱으로 — 라벨은 언어마다 앞뒤가 달라 자리표시자로 갈아 끼운다
+    var JOB = "\u0000job\u0000";
+    var jobSpan = function (key) {
+      return esc(T(lang, key, { dur: JOB })).replace(JOB, span(live && prog.job_started_at, fmtDuration(prog.job_seconds)));
+    };
+    // 마커가 없는 잡은 머리줄에 잡 초 하나뿐이다 — 그것마저 얼면 도는 잡이 통째로 멈춰 보인다
+    if (!steps.length) return jobSpan("progress.no_markers");
+    var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
+    var total = isNum(prog.steps_total) ? prog.steps_total : "?";
+    var h = esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
+    if (prog.current_name) {
+      h += " · " + esc(prog.current_name) + " · " + span(cur && cur.started_at, fmtDuration(prog.current_seconds));
+    }
+    h += " · " + jobSpan("progress.job");
+    var f = failedStepCount(prog);
+    if (f) h += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
+    return h;
   }
   function stepMark(step) {
     if (!step) return "·";
@@ -505,24 +630,26 @@
     if (step.state === "done") return "✔";
     return "·";
   }
-  function recentLine(job, tz, nowMs) {
+  function recentLine(job, tz, nowMs, lang) {
     job = job || {};
     var state = job.state;
     var pill;
-    if (state === "succeeded") pill = "succeeded";
-    else if (state === "failed") pill = isNum(job.exit_code) ? "failed · exit " + job.exit_code : "failed";
-    else if (state === "cancelled") pill = "cancelled · exit 2";
-    else if (state === "timed_out") pill = "timed out · exit 2";
-    else if (state === "lost") pill = "lost · exit 3";
-    else pill = stateWord(state);
+    if (state === "succeeded") pill = T(lang, "recent.succeeded");
+    else if (state === "failed") pill = isNum(job.exit_code) ? T(lang, "recent.failed_exit", { code: job.exit_code }) : T(lang, "recent.failed");
+    else if (state === "cancelled") pill = T(lang, "recent.cancelled");
+    else if (state === "timed_out") pill = T(lang, "recent.timed_out");
+    else if (state === "lost") pill = T(lang, "recent.lost");
+    else pill = stateWord(state, lang);
     var summary = job.summary || "";
     if (state === "cancelled" && !job.started_at) {
       var who = job.cancelled_by ? personLabel(job, job.cancelled_by) : null;
-      summary = "before start" + (who ? " · by " + who : "");
+      summary = T(lang, "recent.before_start") + (who ? " · " + T(lang, "recent.by", { who: who }) : "");
     } else if (state === "lost") {
-      summary = job.summary || "lost";
+      summary = outcomeText(job, lang) || T(lang, "state.lost");
     } else if (job.failed_step) {
-      summary = (summary ? summary + " · " : "") + "step " + job.failed_step;
+      summary = (outcomeText(job, lang) ? outcomeText(job, lang) + " · " : "") + T(lang, "recent.step", { step: job.failed_step });
+    } else {
+      summary = outcomeText(job, lang) || "";
     }
     return {
       pill: pill, glyph: stateGlyph(state), cls: state || "",
@@ -539,18 +666,18 @@
     return "'" + s.replace(/'/g, "'\\''") + "'";
   }
   // ── 우선순위 칩 · 캐시 요약 (M5) — 우선순위는 이유가 아니다, 칩만 ──
-  function priorityChip(row) {
+  function priorityChip(row, lang) {
     var p = row && row.priority;
     if (typeof p !== "number" || p === 0) return "";
-    if (p > 0) return '<span class="chip prio high">high</span>';
-    return '<span class="chip prio low">low</span>';
+    if (p > 0) return '<span class="chip prio high">' + esc(T(lang, "priority.high")) + '</span>';
+    return '<span class="chip prio low">' + esc(T(lang, "priority.low")) + '</span>';
   }
-  function cacheText(server) {
+  function cacheText(server, lang) {
     var c = server && server.snapshot_cache;
     if (!c || typeof c !== "object") return null;
     var blobs = isNum(c.blobs) ? String(c.blobs) : DASH;
     var mb = isNum(c.bytes) ? fmtBytes(c.bytes) : DASH;
-    return "cache " + blobs + " blobs · " + mb;
+    return T(lang, "cache.text", { blobs: blobs, size: mb });
   }
   function rerunCommand(job) {
     if (!job || !job.preset) return DASH;  // 빈 명령을 복사하게 두지 않는다
@@ -564,18 +691,18 @@
     if (src.mode === "git_ref" && src.ref) cmd += " --ref " + shellQuote(src.ref);  // git_ref 잡은 --ref 없이는 usage 오류
     return cmd;
   }
-  function transitionsLine(job, tz) {
+  function transitionsLine(job, tz, lang) {
     var tr = Array.isArray(job && job.transitions) ? job.transitions : [];
     if (!tr.length) return DASH;
     var parts = [];
     for (var i = 0; i < tr.length; i++) {
       var t = tr[i];
-      var seg = stateWord(t.state);
+      var seg = stateWord(t.state, lang);
       if (t.state === "queued") {
         var next = tr[i + 1];
         if (next && next.state === "running") {
           var waited = secondsSince(t.at, parseIso(next.at));
-          if (isNum(waited)) seg += " (waited " + fmtDuration(waited) + ")";
+          if (isNum(waited)) seg += " " + T(lang, "transitions.waited", { dur: fmtDuration(waited) });
         } else seg += " " + fmtClockSeconds(t.at, tz);
       } else seg += " " + fmtClockSeconds(t.at, tz);
       parts.push(seg);
@@ -625,12 +752,12 @@
 
   var rcm = {
     DASH: DASH, esc: esc, fmtDuration: fmtDuration, fmtClock: fmtClock, fmtClockSeconds: fmtClockSeconds, fmtAgo: fmtAgo,
-    fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtMb: fmtMb, fmtPct: fmtPct,
+    fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtDisk: fmtDisk, fmtMb: fmtMb, fmtPct: fmtPct,
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
-    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead,
-    stepMark: stepMark, recentLine: recentLine, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
+    stepMark: stepMark, recentLine: recentLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
@@ -649,6 +776,7 @@
   var state = {
     status: null, prev: null, skewMs: 0, conn: connection(null, "init", Date.now()),
     token: null, me: null, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
+    lang: I18N.DEFAULT_LANG,
     collapsed: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
     drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null
@@ -661,6 +789,50 @@
   function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* 비공개 탭 등 */ } }
   function loadCollapsed() { try { (JSON.parse(lsGet("rcm.collapsed") || "[]") || []).forEach(function (id) { state.collapsed[id] = true; }); } catch (e) { state.collapsed = {}; } }
   function saveCollapsed() { lsSet("rcm.collapsed", JSON.stringify(Object.keys(state.collapsed).map(Number))); }
+
+  // ── 언어 (결정 36·38) ──
+  // 기본은 한국어다. 브라우저 언어를 보지 않는다 — 고르면 그 브라우저에 남는다.
+  function L() { return state.lang; }
+  function tr(key, args) { return T(state.lang, key, args); }
+  function loadLang() {
+    var m = /[?&]lang=(ko|en)(&|$)/.exec(location.search);
+    if (m) { state.lang = m[1]; lsSet("rcm.lang", m[1]); return; }
+    state.lang = I18N.normalize(lsGet("rcm.lang"));
+  }
+  function setLang(lang) {
+    var next = I18N.normalize(lang);
+    if (next === state.lang) return;
+    state.lang = next;
+    lsSet("rcm.lang", next);
+    applyLang();
+  }
+  /** 정적 노드(`data-i18n*`)와 문서 언어를 지금 언어로. 다시 그려지지 않는 것들이라 직접 훑는다. */
+  function applyStatic() {
+    document.documentElement.lang = state.lang;
+    $$("[data-i18n]").forEach(function (el) { el.textContent = tr(el.getAttribute("data-i18n")); });
+    $$("[data-i18n-html]").forEach(function (el) { el.innerHTML = tr(el.getAttribute("data-i18n-html")); });
+    $$("[data-i18n-attr]").forEach(function (el) {
+      el.getAttribute("data-i18n-attr").split(",").forEach(function (pair) {
+        var bits = pair.split(":");
+        if (bits.length === 2) el.setAttribute(bits[0].trim(), tr(bits[1].trim()));
+      });
+    });
+    var title = $("[data-i18n='page.title']");
+    if (title) document.title = title.textContent;
+    var btn = $("#lang-btn");
+    if (btn) { btn.textContent = tr("lang.button"); btn.setAttribute("aria-pressed", state.lang === "en" ? "true" : "false"); }
+  }
+  /** 언어를 바꾼 뒤 화면 전체를 다시 그린다. 열려 있는 대화상자·서랍도 다시 쓴다. */
+  function applyLang() {
+    applyStatic();
+    render();
+    renderTokenButton();
+    if (state.cancelTarget) openCancel(state.cancelTarget);
+    if (state.drawer.jobId != null) {
+      var d = $("[data-drawer-title]");
+      if (d) d.textContent = tr("drawer.job", { id: state.drawer.jobId, key: state.drawer.key || "" });
+    }
+  }
 
   // ── HTTP ──
   function api(path, opts) {
@@ -751,21 +923,21 @@
   }
   function verifyToken(tok, silent) {
     var status = $("[data-tok-status]");
-    if (status && !silent) status.textContent = "checking…";
+    if (status && !silent) status.textContent = tr("token.checking");
     var headers = tok ? { Authorization: "Bearer " + tok } : {};
     return fetch("/api/whoami", { headers: headers, cache: "no-store" }).then(function (r) {
       if (r.status === 401 || r.status === 403) return { bad: true };
       if (!r.ok) throw new Error("http " + r.status);
       return r.json();
     }).then(function (me) {
-      if (me && me.bad) { state.token = null; state.me = null; state.tokenBad = true; lsSet("rcm.token", null); if (status) status.textContent = "Token rejected"; return false; }
+      if (me && me.bad) { state.token = null; state.me = null; state.tokenBad = true; lsSet("rcm.token", null); if (status) status.textContent = tr("token.rejected"); return false; }
       state.token = tok; state.me = me && me.name ? me.name : null; state.tokenBad = false; lsSet("rcm.token", tok);
       if (status) status.textContent = "ok · " + (state.me || "") + (me && me.admin ? " (admin)" : "");
       return true;
     }).catch(function () {
       // 네트워크 오류 — 저장값은 지키고 검증만 못 한 것
       state.token = tok; state.tokenBad = false;
-      if (status) status.textContent = "couldn’t verify — kept";
+      if (status) status.textContent = tr("token.kept");
       return null;
     }).then(function (ok) { renderTokenButton(); if (ok !== false) fetchStatus(); return ok; });
   }
@@ -773,13 +945,16 @@
     var b = $("#tok-btn");
     if (!b) return;
     b.classList.toggle("bad", !!state.tokenBad);
-    b.textContent = state.tokenBad ? "🔑 Token rejected" : (state.me ? "🔑 " + state.me : (state.token ? "🔑 token (unverified)" : (state.readAuth ? "🔑 Read auth required" : "🔑 add token")));
+    b.textContent = state.tokenBad ? tr("token.bad_button")
+      : (state.me ? tr("token.named", { name: state.me })
+        : (state.token ? tr("token.unverified")
+          : (state.readAuth ? tr("token.read_auth") : tr("token.add"))));
   }
   function wireTokenDialog() {
     var dlg = $("#tok-dialog"), input = $("#tok-input");
     if (!dlg) return;
     $("#tok-btn").addEventListener("click", function () {
-      $("[data-tok-status]").textContent = state.tokenBad ? "Token rejected — paste a new one" : "";
+      $("[data-tok-status]").textContent = state.tokenBad ? tr("token.rejected_hint") : "";
       input.value = "";
       if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "");
       input.focus();
@@ -797,6 +972,8 @@
     window.addEventListener("storage", function (ev) {
       if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); } }
       if (ev.key === "rcm.collapsed") { state.collapsed = {}; loadCollapsed(); renderQueue(); }
+      // 다른 탭에서 언어를 바꾸면 이 탭도 따라온다
+      if (ev.key === "rcm.lang") { state.lang = I18N.normalize(ev.newValue); applyLang(); }
     });
   }
 
@@ -811,14 +988,14 @@
     var b = $("#live-btn");
     if (!b) return;
     var c = state.conn;
-    var age = isNum(c.lastOkAt) ? fmtAgo((now() - c.lastOkAt) / 1000) : DASH;
+    var age = isNum(c.lastOkAt) ? fmtAgo((now() - c.lastOkAt) / 1000, L()) : DASH;
     var text;
     b.className = "livebtn " + c.mode;
     b.setAttribute("aria-pressed", c.mode === "paused" ? "true" : "false");
-    if (c.mode === "live") text = "live · updated " + age;
-    else if (c.mode === "polling") text = "polling · updated " + age;
-    else if (c.mode === "lost") text = "lost · last update " + age;
-    else text = "paused · resume";
+    if (c.mode === "live") text = tr("conn.live", { age: age });
+    else if (c.mode === "polling") text = tr("conn.polling", { age: age });
+    else if (c.mode === "lost") text = tr("conn.lost", { age: age });
+    else text = tr("conn.paused");
     $("[data-live-text]").textContent = text;
     renderLostBanner();
   }
@@ -828,9 +1005,9 @@
     var c = state.conn;
     if (c.mode !== "lost") { el.hidden = true; return; }
     el.hidden = false;
-    var age = isNum(c.lastOkAt) ? fmtAgo((now() - c.lastOkAt) / 1000) : DASH;
-    $("[data-lost-text]").textContent = "Lost connection to " + hostName() + " · last update " + age + " · showing last known state";
-    var retry = state.retryTimer ? "reconnecting " + fmtCountdown(c.retryIn) + "…" : (state.pollTimer ? "polling every 10s…" : "");
+    var age = isNum(c.lastOkAt) ? fmtAgo((now() - c.lastOkAt) / 1000, L()) : DASH;
+    $("[data-lost-text]").textContent = tr("conn.lost_banner", { host: hostName(), age: age });
+    var retry = state.retryTimer ? tr("conn.reconnecting", { countdown: fmtCountdown(c.retryIn, L()) }) : (state.pollTimer ? tr("conn.polling_every") : "");
     $("[data-lost-sub]").textContent = retry;
   }
   function renderHeader() {
@@ -838,8 +1015,8 @@
     var server = st.server || {};
     $("[data-host-name]").textContent = hostName();
     var busy = busyCount(st), lanes = laneCount(st);
-    $("[data-lanes-text]").textContent = isNum(busy) && isNum(lanes) && lanes > 1 ? "lanes " + busy + "/" + lanes + " busy" : "";
-    var pills = workerPills(server).map(function (p) {
+    $("[data-lanes-text]").textContent = isNum(busy) && isNum(lanes) && lanes > 1 ? tr("header.lanes_busy", { busy: busy, lanes: lanes }) : "";
+    var pills = workerPills(server, L()).map(function (p) {
       var tag = p.jobId != null ? "button" : "span";
       return "<" + tag + ' class="wk ' + esc(p.cls) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i>' + esc(p.text) + "</" + tag + ">";
     }).join("");
@@ -851,7 +1028,7 @@
     if (state.skewUnknown) { skew.hidden = false; skew.textContent = "clock unknown"; }
     else if (Math.abs(state.skewMs) > 30000) { skew.hidden = false; skew.textContent = "clock " + (state.skewMs > 0 ? "+" : "-") + fmtDuration(Math.abs(state.skewMs) / 1000); }
     else skew.hidden = true;
-    var note = headerNoteKind(state.status, now(), state.prev);
+    var note = headerNoteKind(state.status, now(), state.prev, L());
     var noteEl = $("#banner-note");
     if (note && note.kind === "reload") {
       if (!sessionStorage.getItem("rcm.reloaded")) { sessionStorage.setItem("rcm.reloaded", "1"); location.reload(); return; }
@@ -860,7 +1037,7 @@
       noteEl.hidden = false; noteEl.textContent = note.text; noteEl.className = "banner warn";
     } else if (server.paused) {
       noteEl.hidden = false; noteEl.className = "banner warn";
-      noteEl.innerHTML = "Queue paused by " + esc(server.paused.by || DASH) + " at " + esc(fmtClock(server.paused.at, tz(), now())) + " — running jobs finish, nothing new starts · <span class=\"mono\">rcm resume</span>";
+      noteEl.innerHTML = esc(tr("header.paused", { by: server.paused.by || DASH, clock: fmtClock(server.paused.at, tz(), now()) })) + '<span class="mono">rcm resume</span>';
     } else {
       var localWorkers = (server.workers || []).filter(function (w) { return !w.worker; });
       var downs = localWorkers.filter(function (w) { return w.state === "down"; });
@@ -868,20 +1045,23 @@
       if (downs.length) {
         var live = localWorkers.filter(function (w) { return w.state !== "down"; }).map(function (w) { return w.lane; });
         noteEl.hidden = false; noteEl.className = "banner bad";
-        noteEl.textContent = "Worker on lane " + downs.map(function (w) { return w.lane; }).join(", ") + " stopped: " + (downs[0].error || "unknown error") + (live.length ? " · waiting jobs use lane " + live.join(", ") + " only" : " · nothing can start");
+        noteEl.textContent = tr("header.worker_stopped", {
+          lanes: downs.map(function (w) { return w.lane; }).join(", "),
+          error: errorText(downs[0].error, downs[0].error_code)
+        }) + (live.length ? tr("header.lanes_left", { lanes: live.join(", ") }) : tr("header.nothing_can_start"));
       } else if (remoteDown.length) {
         // 원격 워커(M5b-2)가 heartbeat 을 멈췄다 — 그 풀의 잡은 서버가 lost 로 남긴다
         var names = []; remoteDown.forEach(function (w) { if (names.indexOf(w.worker) < 0) names.push(w.worker); });
         noteEl.hidden = false; noteEl.className = "banner warn";
-        noteEl.textContent = "Worker " + names.join(", ") + " unreachable — no heartbeat · its running jobs are marked lost";
+        noteEl.textContent = tr("header.worker_unreachable", { names: names.join(", ") });
       } else {
         var stalled = notScheduledRow();
-        if (stalled) { noteEl.hidden = false; noteEl.className = "banner warn"; noteEl.textContent = "Lane is idle but #" + stalled.id + " has not started for " + fmtDuration(stalled.estimate && stalled.estimate.waited_seconds) + " — check the server log"; }
+        if (stalled) { noteEl.hidden = false; noteEl.className = "banner warn"; noteEl.textContent = tr("header.not_scheduled", { id: stalled.id, dur: fmtDuration(stalled.estimate && stalled.estimate.waited_seconds) }); }
         else noteEl.hidden = true;
       }
     }
     renderHeaderConn();
-    state.footBase = "rcm " + (server.version || DASH) + " · up " + fmtDuration(server.uptime_seconds) + " · schema v" + (st.schema_version || DASH);
+    state.footBase = tr("footer.server", { version: server.version || DASH, uptime: fmtDuration(server.uptime_seconds), schema: st.schema_version || DASH });
     $("[data-foot-server]").textContent = state.footBase;
     if (state.debug) setTimeout(debugLayout, 0);
   }
@@ -914,34 +1094,49 @@
     var p = pool0(st);
     var lost = state.conn.mode === "lost";
     // 23
-    var yj = yourJobs(st, state.me);
+    var yj = yourJobs(st, state.me, L());
     var y;
-    if (yj.kind === "no_token") y = '<span class="muted">Add a token to highlight your jobs</span>';
-    else if (yj.kind === "unknown") y = '<span class="muted">unknown — queue unavailable</span>';
-    else if (yj.kind === "none") y = '<span class="muted">No jobs of yours in the queue</span>';
-    else y = yj.lines.map(function (l) { return jl(l.jobId, "#" + l.jobId) + " " + esc(l.text); }).join("<br>") + (yj.more ? '<br><span class="muted">and ' + yj.more + " more</span>" : "");
-    $("[data-yours]").innerHTML = (lost ? '<span class="muted">last known: </span>' : "") + y;
+    if (yj.kind === "no_token") y = '<span class="muted">' + esc(tr("summary.add_token")) + "</span>";
+    else if (yj.kind === "unknown") y = '<span class="muted">' + esc(tr("summary.queue_unknown")) + "</span>";
+    else if (yj.kind === "none") y = '<span class="muted">' + esc(tr("summary.no_jobs")) + "</span>";
+    else y = yj.lines.map(function (l) { return jl(l.jobId, "#" + l.jobId) + " " + esc(l.text); }).join("<br>") + (yj.more ? '<br><span class="muted">' + esc(tr("summary.and_more", { n: yj.more })) + "</span>" : "");
+    $("[data-yours]").innerHTML = (lost ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span>" : "") + y;
     // 24
-    var nm = notMoving(st, state.me);
+    var nm = notMoving(st, state.me, L());
     var s;
-    if (nm.kind === "unknown") s = '<span class="muted">unknown — queue unavailable</span>';
-    else if (nm.kind === "ok") s = lost ? '<span class="muted">last known: nothing stuck</span>' : '<span class="ok">Nothing is stuck</span>';
-    else s = nm.lines.slice(0, 3).map(function (l) { return jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span>"; }).join("<br>") + '<br><span class="muted">nothing else is stuck</span>';
-    $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">last known:</span><br>' : "") + s;
+    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr("summary.queue_unknown")) + "</span>";
+    else if (nm.kind === "ok") s = lost
+      ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
+      : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
+    else s = nm.lines.slice(0, 3).map(function (l) { return jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span>"; }).join("<br>") + '<br><span class="muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
+    $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
     var hp = hostPressure(host);
     var lab = $("[data-host-lab]");
     var h;
-    if (p && p.hosts === null) { h = '<span class="bad">host: unavailable</span>' + (p.hosts_error ? ' <span class="muted">' + esc(truncate(p.hosts_error, 60)) + "</span>" : ""); lab.textContent = "Host pressure"; }
-    else if (hp.verdict === "no_sample") { h = '<span class="muted">host: no sample yet</span>'; lab.textContent = "Host pressure"; }
+    if (p && p.hosts === null) {
+      h = '<span class="bad">' + esc(tr("summary.host_unavailable")) + "</span>"
+        + (p.hosts_error ? ' <span class="muted">' + esc(truncate(errorText(p.hosts_error, p.hosts_error_code), 60)) + "</span>" : "");
+      lab.textContent = tr("summary.host");
+    } else if (hp.verdict === "no_sample") { h = '<span class="muted">' + esc(tr("summary.host_no_sample")) + "</span>"; lab.textContent = tr("summary.host"); }
     else {
       var age = secondsSince(host.sampled_at, now());
       var stale = host.stale || (isNum(age) && isNum(host.interval_seconds) && age > 3 * host.interval_seconds);
-      lab.textContent = "Host pressure · sampled " + fmtAgo(age);
+      lab.textContent = tr("summary.host_sampled", { age: fmtAgo(age, L()) });
       var mark = function (v) { return isNum(v) ? (v >= 85 ? '<b class="warn">' + fmtPct(v) + "</b>" : "<b>" + fmtPct(v) + "</b>") : "<b>" + DASH + "</b>"; };
-      var verdict = hp.verdict === "fine" ? '<span class="ok">· fine</span>' : hp.verdict === "busy" ? '<span class="warn">· busy</span>' : hp.verdict === "partial" ? '<span class="muted">· partial</span>' : '<span class="muted">· unknown</span>';
-      h = "CPU " + mark(hp.cpu) + " · Mem " + mark(hp.mem) + " · GPU " + mark(hp.gpu) + "<br>load " + esc(hp.load) + " " + verdict + (stale ? ' <span class="stale-badge">stale ' + fmtDuration(age) + "</span>" : "");
+      var vcls = hp.verdict === "fine" ? "ok" : hp.verdict === "busy" ? "warn" : "muted";
+      var vkey = "summary.verdict_" + (hp.verdict === "fine" || hp.verdict === "busy" || hp.verdict === "partial" ? hp.verdict : "unknown");
+      var verdict = '<span class="' + vcls + '">· ' + esc(tr(vkey)) + "</span>";
+      var freeMark = isNum(hp.diskFree)
+        ? " " + (hp.diskFree < DISK_LOW_FREE ? '<b class="warn">' : "<b>") + esc(tr("summary.disk_free", { free: fmtDisk(hp.diskFree) })) + "</b>"
+        : "";
+      h = esc(tr("summary.pressure", { cpu: "\u0000cpu\u0000", mem: "\u0000mem\u0000", gpu: "\u0000gpu\u0000", disk: "\u0000disk\u0000" }))
+        .replace("\u0000cpu\u0000", mark(hp.cpu)).replace("\u0000mem\u0000", mark(hp.mem)).replace("\u0000gpu\u0000", mark(hp.gpu))
+        .replace("\u0000disk\u0000", (isNum(hp.disk) && hp.disk >= 85) || (isNum(hp.diskFree) && hp.diskFree < DISK_LOW_FREE) ? '<b class="warn">' + fmtPct(hp.disk) + "</b>" : "<b>" + fmtPct(hp.disk) + "</b>")
+        + freeMark
+        + "<br>" + esc(tr("summary.load", { load: hp.load })) + " " + verdict
+        + (stale ? ' <span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span>" : "");
     }
     $("[data-pressure]").innerHTML = h;
   }
@@ -955,32 +1150,44 @@
     Object.keys(state.collapsed).forEach(function (k) { if (!ids[k]) { delete state.collapsed[k]; changed = true; } });
     if (changed) saveCollapsed();
   }
+  /** 큐 표의 머리줄. 두 곳(기본 풀·다른 풀)이 같은 것을 쓴다 — 갈라지지 않게 한 함수로. */
+  function queueHeadHtml(tzName) {
+    return "<thead><tr><th>" + esc(tr("queue.col_job")) + "</th><th>" + esc(tr("queue.col_key"))
+      + "</th><th>" + esc(tr("queue.col_requester")) + "</th><th>" + esc(tr("queue.col_reason"))
+      + "</th><th>" + esc(tr("queue.col_elapsed")) + "</th><th>" + esc(tr("queue.col_eta"))
+      + ' <span class="tzh">· ' + esc(tzName) + '</span></th><th class="source">'
+      + esc(tr("queue.col_source")) + "</th></tr></thead>";
+  }
+
   function renderQueue() {
     var st = state.status;
     var p = pool0(st);
     var body = $("[data-queue-body]");
-    $("[data-queue-header]").textContent = queueHeader(st, now());
-    if (!p) { body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">Queue unavailable — no status yet</div>'; return; }
+    $("[data-queue-header]").textContent = queueHeader(st, now(), L());
+    if (!p) { body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">' + esc(tr("queue.no_status")) + "</div>"; return; }
     if (p.queue === null || p.queue === undefined) {
-      body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">Queue unavailable — ' + esc(p.queue_error || "unknown error") + "</div>";
+      body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">' + esc(tr("queue.unavailable", { error: errorText(p.queue_error, p.queue_error_code) })) + "</div>";
       return;
     }
     var server = st.server || {};
     var extra = !p.queue.length ? extraPoolsQueueHtml(st) : "";
     if (extra) {
-      body.innerHTML = '<div class="empty">Queue is empty here — jobs wait in other pools.</div>' + extra;
+      body.innerHTML = '<div class="empty">' + esc(tr("queue.empty_other_pools")) + "</div>" + extra;
       return;
     }
     if (!p.queue.length) {
       var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
       var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
       var presets = Array.isArray(st.presets) ? st.presets.map(function (x) { return x.name; }).join(" · ") : "";
-      body.innerHTML = '<div class="empty">' + (server.paused || allDown ? "Queue is empty but paused — nothing will start." : "Queue is empty — <code>rcm run &lt;preset&gt;</code> starts immediately.") + (presets ? '<br><span class="sub">presets: ' + esc(presets) + "</span>" : "") + "</div>";
+      var emptyHtml = server.paused || allDown
+        ? esc(tr("queue.empty_paused"))
+        : esc(tr("queue.empty")) + "<code>rcm run &lt;preset&gt;</code>" + esc(tr("queue.empty_hint"));
+      body.innerHTML = '<div class="empty">' + emptyHtml + (presets ? '<br><span class="sub">' + esc(tr("queue.presets", { names: presets })) + "</span>" : "") + "</div>";
       return;
     }
     collapsedGc();
     var rows = sortQueue(p.queue);
-    var nm = notMoving(st, state.me);
+    var nm = notMoving(st, state.me, L());
     var stuckIds = {};
     nm.lines.forEach(function (l) { stuckIds[l.jobId] = true; });
     var waiting = rows.filter(function (r) { return r.state !== "running" && r.state !== "cancelling"; });
@@ -991,10 +1198,18 @@
       rows = rows.filter(function (r) { var w = r.state !== "running" && r.state !== "cancelling"; if (!w) return true; if (keep[r.id] || isMine(r, state.me) || stuckIds[r.id] || r.id === state.hl) return true; hiddenCount++; return false; });
     }
     var tzName = st.display_timezone || "local";
-    var html = '<div class="qwrap"><table class="q"><thead><tr><th>Job</th><th>Key</th><th>Requester</th><th>Reason</th><th>Elapsed</th><th>ETA <span class="tzh">· ' + esc(tzName) + '</span></th><th class="source">Source</th></tr></thead><tbody>';
-    rows.forEach(function (row) { html += queueRowHtml(row, st); });
+    // 도는 것과 기다리는 것을 눈으로 갈라 놓는다 — 한 덩어리면 뭐가 도는지 안 읽힌다(§4.6-라)
+    var html = '<div class="qwrap"><table class="q">' + queueHeadHtml(tzName) + "<tbody>";
+    queueGroups(rows, L()).forEach(function (g) {
+      html += '<tr class="qgroup ' + g.key + '"><th colspan="7" scope="colgroup">' + esc(g.title) + "</th></tr>";
+      if (!g.rows.length) {
+        html += '<tr class="qgroup-empty"><td colspan="7">' + esc(tr(g.key === "running" ? "queue.group_none_running" : "queue.group_none_waiting")) + "</td></tr>";
+        return;
+      }
+      g.rows.forEach(function (row) { html += queueRowHtml(row, st); });
+    });
     html += "</tbody></table></div>";
-    if (hiddenCount) html += '<button type="button" class="more" data-more-queue>and ' + hiddenCount + " more ▾</button>";
+    if (hiddenCount) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.more", { n: hiddenCount })) + "</button>";
     html += extraPoolsQueueHtml(st);
     body.innerHTML = html;
   }
@@ -1004,14 +1219,14 @@
     var html = "";
     var tzName = st.display_timezone || "local";
     pools.forEach(function (p) {
-      var head = poolHeader(p);
+      var head = poolHeader(p, L());
       if (p.queue === null || p.queue === undefined) {
-        html += '<div class="pool-h">' + esc(head) + '</div><div class="banner bad" role="alert" data-error="queue">Queue unavailable — ' + esc(p.queue_error || "unknown error") + "</div>";
+        html += '<div class="pool-h">' + esc(head) + '</div><div class="banner bad" role="alert" data-error="queue">' + esc(tr("queue.unavailable", { error: errorText(p.queue_error, p.queue_error_code) })) + "</div>";
         return;
       }
       if (!p.queue.length) return;  // 잡 없는 풀은 자리를 차지하지 않는다
-      html += '<div class="pool-h" data-pool="' + esc(p.name || "") + '">' + esc(head) + " · " + p.queue.length + " job" + (p.queue.length === 1 ? "" : "s") + "</div>";
-      html += '<div class="qwrap"><table class="q"><thead><tr><th>Job</th><th>Key</th><th>Requester</th><th>Reason</th><th>Elapsed</th><th>ETA <span class="tzh">· ' + esc(tzName) + '</span></th><th class="source">Source</th></tr></thead><tbody>';
+      html += '<div class="pool-h" data-pool="' + esc(p.name || "") + '">' + esc(tr("queue.pool_jobs", { head: head, n: p.queue.length })) + "</div>";
+      html += '<div class="qwrap"><table class="q">' + queueHeadHtml(tzName) + "<tbody>";
       sortQueue(p.queue).forEach(function (row) { html += queueRowHtml(row, st); });
       html += "</tbody></table></div>";
     });
@@ -1028,44 +1243,48 @@
     if (expanded) cls.push("exp");
     if (state.hl === row.id) cls.push("hl");
     if (row._dim) cls.push("dim");
-    var pos = isNum(row.position) ? '<span class="pos">' + esc(ordinal(row.position)) + " in line</span>" : "";
+    var pos = isNum(row.position) ? '<span class="pos">' + esc(tr("ordinal.in_line", { ordinal: ordinal(row.position, L()) })) + "</span>" : "";
     var pill;
     if (row.state === "uploading") {
       var src = row.source || {};
       var pct = isNum(src.received_bytes) && isNum(src.bytes) && src.bytes > 0 ? Math.min(100, Math.round(src.received_bytes / src.bytes * 100)) : 0;
-      pill = '<span class="pill uploading"><span aria-hidden="true">↑</span> uploading <span class="ub"><i style="width:' + pct + '%"></i></span></span>';
-    } else if (row.state === "cancelling") pill = '<span class="pill cancelling"><span aria-hidden="true">■</span> cancelling…</span>';
-    else pill = '<span class="pill ' + esc(row.state) + '"><span aria-hidden="true">' + stateGlyph(row.state) + "</span> " + esc(stateWord(row.state)) + "</span>";
-    var expBtn = busy ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-controls="exp-' + row.id + '" title="' + (expanded ? "collapse" : "expand") + '">' + (expanded ? "▾" : "▸") + "</button>" : "";
+      pill = '<span class="pill uploading"><span aria-hidden="true">↑</span> ' + esc(stateWord("uploading", L())) + ' <span class="ub"><i style="width:' + pct + '%"></i></span></span>';
+    } else if (row.state === "cancelling") pill = '<span class="pill cancelling"><span aria-hidden="true">■</span> ' + esc(stateWord("cancelling", L())) + "</span>";
+    else pill = '<span class="pill ' + esc(row.state) + '"><span aria-hidden="true">' + stateGlyph(row.state) + "</span> " + esc(stateWord(row.state, L())) + "</span>";
+    var expBtn = busy ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-controls="exp-' + row.id + '" title="' + esc(tr(expanded ? "row.collapse" : "row.expand")) + '">' + (expanded ? "▾" : "▸") + "</button>" : "";
     var chips = "";
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
-    if (row.concurrency_group) chips += '<span class="chip">group ' + esc(row.concurrency_group) + "</span>";
-    chips += priorityChip(row);
+    if (row.concurrency_group) chips += '<span class="chip">' + esc(tr("row.group", { name: row.concurrency_group })) + "</span>";
+    chips += priorityChip(row, L());
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners : [];
-    var requester = '<span title="token: ' + esc(req.name || "") + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>" + (mine && req.name === state.me ? '<span class="you">you</span>' : "") +
-      (joiners.length ? '<button type="button" class="joiners" title="also waiting: ' + esc(joiners.map(function (j) { return j.label || j.name; }).join(", ")) + '">+' + joiners.length + "</button>" : "");
-    if (mine && req.name !== state.me) requester += '<span class="you">you joined</span>';
-    var r = reasonText(row, st, now());
+    var requester = '<span title="' + esc(tr("row.token_of", { name: req.name || "" })) + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>"
+      + (mine && req.name === state.me ? '<span class="you">' + esc(tr("row.you")) + "</span>" : "")
+      + (joiners.length ? '<button type="button" class="joiners" title="' + esc(tr("row.also_waiting", { labels: joiners.map(function (j) { return j.label || j.name; }).join(", ") })) + '">+' + joiners.length + "</button>" : "");
+    if (mine && req.name !== state.me) requester += '<span class="you">' + esc(tr("row.you_joined")) + "</span>";
+    var r = reasonText(row, st, now(), L());
     // 이유 문구에는 서버가 준 문자열(ref · group · label)이 들어간다 — escape 한 뒤 잡 링크만 버튼으로 바꾼다
     var reasonHtml = esc(r.text);
     r.links.forEach(function (l) { var id = l.jobId; reasonHtml = reasonHtml.replace("#" + id, '<button type="button" class="jlink" data-goto="' + id + '">#' + id + "</button>"); });
     var reasonCell = r.cls === "blocked" ? '<span class="blocked">' + reasonHtml + "</span>" : r.cls === "stalled" ? '<span class="stalled">' + reasonHtml + "</span>" : r.cls === "stuck" ? '<span class="stuck">' + reasonHtml + "</span>" : '<span class="reason' + (r.actionable || busy ? " act" : "") + '">' + reasonHtml + "</span>";
-    if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">will be cancelled by the server if it stays stalled</div>';
-    if (row._cancelRequested) reasonCell += '<div class="sub">cancel requested…</div>';
+    // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
+    var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
+    if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
+    if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">' + esc(tr("row.stalled_note")) + "</div>";
+    if (row._cancelRequested) reasonCell += '<div class="sub">' + esc(tr("row.cancel_requested")) + "</div>";
     // 대기 잡(펼침 없음)도 내 잡이면 취소할 수 있어야 한다 — 폰에서 유일한 취소 경로다(사용자 검사 U3.6)
     var canActRow = !!state.token && !state.tokenBad && (mine || state.me === null);
-    if (!busy && canActRow && !row._cancelRequested) reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">Cancel</button></div>';
-    var el = elapsedText(row, now());
+    if (!busy && canActRow && !row._cancelRequested) reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button></div>";
+    var el = elapsedText(row, now(), L());
     var elapsedCell = busy && isNum(est.elapsed_seconds)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
       : (row.state === "queued" ? '<span data-tick="waiting" data-from="' + esc(row.created_at || "") + '">' + esc(el.main) + "</span>" : esc(el.main));
-    var eta = etaText(row, tz(), now());
-    var conf = confidenceBadge(est);
+    var eta = etaText(row, tz(), now(), L());
+    var conf = confidenceBadge(est, L());
     var etaCell = '<span class="eta">' + esc(eta.clock) + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
-    if (est.overdue && !est.stuck) etaCell = '<span class="eta">' + DASH + '</span><br><span class="conf over">overdue</span>';
-    var source = sourceHtml(row);
+    if (est.overdue && !est.stuck) etaCell = '<span class="eta">' + DASH + '</span><br><span class="conf over">' + esc(tr("eta.overdue")) + "</span>";
+    var source = sourceHtml(row, L());
     var h = '<tr class="' + cls.join(" ") + '" data-job="' + row.id + '" id="job-' + row.id + '">' +
       '<td class="job">' + expBtn + '<span class="id">#' + row.id + "</span> " + pill + pos + "</td>" +
       '<td class="key"><span class="key">' + esc(row.key || row.preset || DASH) + "</span>" + chips + "</td>" +
@@ -1077,33 +1296,53 @@
     if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + source + "</div>" + tailHtml(row) + "</td></tr>";
     return h;
   }
-  function sourceHtml(row) {
+  function sourceHtml(row, lang) {
     var s = row.source || {};
-    if (s.mode === "git_ref") return '<button type="button" class="sha" data-src="' + row.id + '">' + esc((s.sha || "").slice(0, 7) || DASH) + "</button>" + '<div class="sub">' + esc(s.repo || "") + " · ref " + esc(s.ref || DASH) + "</div>";
-    if (row.state === "uploading" && !s.base_sha) return '<span class="sub">not received yet</span>';
+    if (s.mode === "git_ref") return '<button type="button" class="sha" data-src="' + row.id + '">' + esc((s.sha || "").slice(0, 7) || DASH) + "</button>" + '<div class="sub">' + esc(s.repo || "") + " · " + esc(T(lang, "row.ref", { ref: s.ref || DASH })) + "</div>";
+    if (row.state === "uploading" && !s.base_sha) return '<span class="sub">' + esc(T(lang, "row.not_received")) + "</span>";
     var sha = (s.base_sha || "").slice(0, 7);
-    return '<button type="button" class="sha" data-src="' + row.id + '" title="' + esc("tree " + (s.tree_hash || DASH)) + '">' + esc(sha || DASH) + "</button>" + (s.dirty ? '<span class="uncommitted">uncommitted</span>' : "") + '<div class="sub">' + esc(s.repo || "") + "</div>";
+    return '<button type="button" class="sha" data-src="' + row.id + '" title="' + esc(T(lang, "row.tree", { hash: s.tree_hash || DASH })) + '">' + esc(sha || DASH) + "</button>" + (s.dirty ? '<span class="uncommitted">' + esc(T(lang, "row.uncommitted")) + "</span>" : "") + '<div class="sub">' + esc(s.repo || "") + "</div>";
   }
+  /** 시계 차이를 아는가 — 모르면 기준점으로 세지 않는다(조용히 브라우저 시계로 넘어가지 않는다). */
+  function canTick() { return !state.skewUnknown; }
+
+  /** 도는 행 한 줄: 「스텝 2/4 analyze 12s」. 초는 1초 틱이 스스로 센다. */
+  function stepNowHtml(prog) {
+    if (!prog || prog.phase === "materializing" || !prog.current_name) return "";
+    var cur = runningStep(prog);
+    if (!cur) return "";
+    var total = isNum(prog.steps_total) ? prog.steps_total : "?";
+    var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
+    var dur = fmtDuration(prog.current_seconds);
+    var secs = canTick() && cur.started_at
+      ? '<span data-tick="elapsed" data-from="' + esc(cur.started_at) + '">' + esc(dur) + "</span>"
+      : esc(dur);
+    return esc(tr("progress.now", { cur: i, total: total, step: prog.current_name })) + " " + secs;
+  }
+
   function progressHtml(row) {
     var prog = row.progress;
     if (!prog || prog.phase === "materializing") return "";
-    var head = progressHead(prog);
+    var busyRow = row.state === "running" || row.state === "cancelling";
+    var head = progressHeadHtml(prog, L(), busyRow && canTick());
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
     var total = isNum(prog.steps_total) ? prog.steps_total : steps.length;
     var failed = failedStepCount(prog);
-    var h = '<div class="head"><b>' + esc(head || "") + "</b>" + (failed ? ' <span class="fail">' + failed + " step failed</span>" : "") + ' <span class="note" title="step times are server receive times (as_received)">ⓘ</span></div>';
+    var h = '<div class="head"><b>' + (head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
     if (steps.length) {
       var segs = "";
       var pending = Math.max(0, total - steps.length);
       var n = steps.length + pending;
       steps.forEach(function (s) { segs += '<i class="' + (s.state === "running" ? "run" : s.ok === false ? "fail" : "") + '" style="width:' + (100 / n) + '%"></i>'; });
       for (var i = 0; i < pending; i++) segs += '<i class="pend" style="width:' + (100 / n) + '%"></i>';
-      var vt = "step " + (isNum(prog.current_index) ? prog.current_index : prog.steps_done) + " of " + (prog.steps_total_partial ? "at least " : "") + total;
+      var vt = tr("progress.aria", { cur: isNum(prog.current_index) ? prog.current_index : prog.steps_done, total: total, soFar: !!prog.steps_total_partial });
       h += '<div class="minibar" role="progressbar" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + prog.steps_done + '" aria-valuetext="' + esc(vt) + '">' + segs + "</div>";
       h += '<div class="steps">';
+      var live = busyRow && canTick();
       steps.forEach(function (s) {
         var c = s.state === "running" ? "run" : s.ok === false ? "fail" : "";
-        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + "</span><span>" + esc(s.name) + '</span><span class="s">' + esc(fmtDuration(s.seconds)) + "</span></div>";
+        var tick = live && s.state === "running" && s.started_at ? ' data-tick="elapsed" data-from="' + esc(s.started_at) + '"' : "";
+        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + "</span><span>" + esc(s.name) + '</span><span class="s"' + tick + ">" + esc(fmtDuration(s.seconds)) + "</span></div>";
       });
       for (var j = 0; j < pending; j++) h += '<div class="step pend"><span class="g" aria-hidden="true">·</span><span>…</span><span class="s">' + DASH + "</span></div>";
       h += "</div>";
@@ -1115,12 +1354,12 @@
     var mine = isMine(row, state.me);
     var h = "";
     if (Array.isArray(row.log_tail) && row.log_tail.length) h += '<div class="tail">' + esc(row.log_tail.slice(-5).join("\n")) + "</div>";
-    else if (!state.token) h += '<div class="sub" style="margin-top:8px">Add a token to see the log</div>';
+    else if (!state.token) h += '<div class="sub" style="margin-top:8px">' + esc(tr("row.add_token_for_log")) + "</div>";
     var canAct = !!state.token && !state.tokenBad && (mine || state.me === null);
     var joiners = Array.isArray(row.joiners) ? row.joiners.length : 0;
-    h += '<div class="actions"><button type="button" class="btn log" data-log="' + row.id + '"' + (canAct ? "" : " disabled") + ">Log</button>" +
-      '<button type="button" class="btn danger cancel" data-cancel="' + row.id + '"' + (canAct && busy && row.state !== "cancelling" ? "" : " disabled") + ">Cancel</button>" +
-      (!state.token ? "" : (!mine ? '<span class="sub">not your job</span>' : (joiners ? '<span class="sub">' + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on this job</span>" : ""))) + "</div>";
+    h += '<div class="actions"><button type="button" class="btn log" data-log="' + row.id + '"' + (canAct ? "" : " disabled") + ">" + esc(tr("row.log")) + "</button>" +
+      '<button type="button" class="btn danger cancel" data-cancel="' + row.id + '"' + (canAct && busy && row.state !== "cancelling" ? "" : " disabled") + ">" + esc(tr("row.cancel")) + "</button>" +
+      (!state.token ? "" : (!mine ? '<span class="sub">' + esc(tr("row.not_your_job")) + "</span>" : (joiners ? '<span class="sub">' + esc(tr("row.others_waiting", { n: joiners })) + "</span>" : ""))) + "</div>";
     return h;
   }
 
@@ -1150,9 +1389,16 @@
     var body = $("[data-host-body]");
     if (!p) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
     if (p.hosts === null || p.hosts === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="hosts">Host unavailable — ' + esc(p.hosts_error || "unknown error") + "</div>"; return; }
-    var cards = hostCards(state.status);
-    if (!cards.length) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
+    var cards = hostCards(state.status, L());
+    if (!cards.length) { body.innerHTML = '<div class="empty">' + esc(tr("host.no_sample")) + "</div>"; return; }
     body.innerHTML = cards.map(function (c) { return hostCardHtml(c.host, c.title); }).join("");
+  }
+
+  /** GPU 표본이 없는 이유(결정 37). 코드가 있으면 그 언어로, 없으면 서버가 준 문구. */
+  function gpuNote(h) {
+    var code = h && h.gpu_note_code;
+    if (code && I18N.has("gpu." + code)) return tr("gpu." + code);
+    return (h && h.gpu_note) || DASH;
   }
 
   function hostCardHtml(h, title) {
@@ -1166,14 +1412,22 @@
       return '<div class="meter' + (warn ? " warn" : "") + (stale ? " stale" : "") + '" data-metric="' + metric + '"><div class="lab"><span>' + esc(label) + "</span><span>" + esc(right) + "</span></div>" +
         '<meter min="0" max="100" value="' + (known ? Math.round(pct) : 0) + '" aria-label="' + esc(label) + '"></meter>' +
         '<div class="bar"><i style="width:' + (known ? Math.max(0, Math.min(100, pct - (pct2 || 0))) : 0) + '%"></i>' + (pct2 ? '<i class="b" style="width:' + Math.min(100, pct2) + '%"></i>' : "") + "</div>" +
-        (spark ? '<div class="spark">' + spark + "<span>5 min</span></div>" : "") + "</div>";
+        (spark ? '<div class="spark">' + spark + "<span>" + esc(tr("host.window")) + "</span></div>" : "") + "</div>";
     };
-    var html = '<div class="hostcard' + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">stale ' + fmtDuration(age) + "</span> · " : "sampled <span data-tick=\"age\" data-from=\"" + esc(h.sampled_at || "") + "\">" + esc(fmtAgo(age)) + "</span> · ") + esc(h.os || DASH) + " · " + (isNum(h.cores) ? h.cores + " cores" : DASH) + " · load " + (Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH) + "</span></div>";
-    html += meter("cpu", "CPU " + fmtPct(cpu.busy), isNum(cpu.user) && isNum(cpu.sys) ? "user " + Math.round(cpu.user) + " · sys " + Math.round(cpu.sys) : (stale ? "last known" : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
-    html += meter("mem", "Memory " + fmtMemory(mem.used_bytes) + " / " + fmtMemory(mem.total_bytes), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · comp " + fmtMemory(mem.compressed_bytes) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
-    if (gpu) html += meter("gpu", "GPU " + fmtPct(gpu.util_pct) + " busy", isNum(gpu.mem_used_bytes) ? fmtMemory(gpu.mem_used_bytes) + " in use" : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
-    else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>GPU — ' + esc(h.gpu_note || "unavailable") + "</span><span></span></div></div>";
-    if (Array.isArray(h.top) && h.top.length) html += '<div class="top">top: ' + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
+    var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(h.os || DASH) + " · " + esc(tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })) + "</span></div>";
+    html += meter("cpu", tr("host.cpu", { pct: fmtPct(cpu.busy) }), isNum(cpu.user) && isNum(cpu.sys) ? tr("host.cpu_detail", { user: Math.round(cpu.user), sys: Math.round(cpu.sys) }) : (stale ? tr("host.last_known") : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
+    html += meter("mem", tr("host.memory", { used: fmtMemory(mem.used_bytes), total: fmtMemory(mem.total_bytes) }), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · " + tr("host.compressed", { size: fmtMemory(mem.compressed_bytes) }) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
+    var disk = h.disk || null;
+    if (disk) {
+      var diskPct = isNum(disk.used_bytes) && isNum(disk.total_bytes) && disk.total_bytes > 0 ? disk.used_bytes / disk.total_bytes * 100 : null;
+      var lowFree = isNum(disk.free_bytes) && disk.free_bytes < DISK_LOW_FREE;
+      // 남은 양은 오른쪽에 글자로 — 막대만으로는 「얼마 남았나」를 못 읽는다. 경로는 그리지 않는다.
+      var right = (isNum(diskPct) ? fmtPct(diskPct) : DASH) + (isNum(disk.free_bytes) ? " · " + tr("host.disk_free", { free: fmtDisk(disk.free_bytes) }) : "");
+      html += meter("disk", tr("host.disk", { used: fmtDisk(disk.used_bytes), total: fmtDisk(disk.total_bytes) }), right, diskPct, 0, lowFree || (isNum(diskPct) && diskPct >= 85), "");
+    }
+    if (gpu) html += meter("gpu", tr("host.gpu", { pct: fmtPct(gpu.util_pct) }), isNum(gpu.mem_used_bytes) ? tr("host.gpu_used", { size: fmtMemory(gpu.mem_used_bytes) }) : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
+    else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";
+    if (Array.isArray(h.top) && h.top.length) html += '<div class="top">' + esc(tr("host.top")) + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
     return html + "</div>";
   }
 
@@ -1182,58 +1436,66 @@
     var p = pool0(state.status);
     var body = $("[data-recent-body]");
     var head = $("[data-recent-header]");
-    if (!p) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
+    if (!p) { body.innerHTML = '<div class="empty">' + esc(tr("recent.none")) + "</div>"; head.textContent = ""; renderEstimates(p); return; }
     // 모든 풀의 완료 잡을 모은 뒤에 「없음」을 판단한다 — 기본 풀이 비어도 다른 풀의 완료 잡은 보여야 한다
     var all = recentOf(state.status);
     if (all === undefined) {
       var bad = poolsOf(state.status).filter(function (pl) { return !Array.isArray(pl.recent); })[0] || p;
-      body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">Recent unavailable — ' + esc(bad.recent_error || "unknown error") + "</div>"; head.textContent = ""; renderEstimates(p); return;
+      body.innerHTML = '<div class="banner bad" role="alert" data-error="recent">' + esc(tr("recent.unavailable", { error: errorText(bad.recent_error, bad.recent_error_code) })) + "</div>"; head.textContent = ""; renderEstimates(p); return;
     }
-    if (!all.length) { body.innerHTML = '<div class="empty">No completed jobs yet</div>'; head.textContent = ""; renderEstimates(p); return; }
+    if (!all.length) { body.innerHTML = '<div class="empty">' + esc(tr("recent.none")) + "</div>"; head.textContent = ""; renderEstimates(p); return; }
     var shown = state.showAllRecent ? all : all.slice(0, 5);
-    head.textContent = "last " + shown.length + " of " + all.length;
+    head.textContent = tr("recent.count", { shown: shown.length, total: all.length });
     var html = '<div class="recent">';
     shown.forEach(function (job) {
-      var l = recentLine(job, tz(), now());
+      var l = recentLine(job, tz(), now(), L());
       var open = !!state.expandedRecent[job.id];
       var failedish = job.state === "failed" || job.state === "timed_out";
       html += '<div class="rrow' + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="pill ' + esc(l.cls) + '"><span aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">pool ' + esc(job._pool) + "</span>" : "") + "</span>" +
+        '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
         '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
         '<span class="s">' + (l.summary ? "<b>" + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") : "") +
-        (l.rerun ? ' · <button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="copy">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
-      if (open) html += '<div class="rdetail">' + esc(transitionsLine(job, tz())) + (job.failed_step ? "<br>failed step: <b>" + esc(job.failed_step) + "</b>" : "") + (job.summary ? "<br>" + esc(job.summary) : "") + "</div>";
+        (l.rerun ? ' · <button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="' + esc(tr("row.copy")) + '">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
+      if (open) html += '<div class="rdetail">' + esc(transitionsLine(job, tz(), L())) + (job.failed_step ? "<br>" + esc(tr("recent.failed_step")) + "<b>" + esc(job.failed_step) + "</b>" : "") + (outcomeText(job, L()) ? "<br>" + esc(outcomeText(job, L())) : "") + "</div>";
       html += "</div>";
     });
     html += "</div>";
-    if (all.length > 5) html += '<button type="button" class="more" data-more-recent>' + (state.showAllRecent ? "show fewer ▴" : "show " + (all.length - 5) + " more ▾") + "</button>";
+    if (all.length > 5) html += '<button type="button" class="more" data-more-recent>' + (state.showAllRecent ? tr("recent.show_fewer") : tr("recent.show_more", { n: all.length - 5 })) + "</button>";
     body.innerHTML = html;  // 원격 풀의 host 는 Host 절 카드로(M5b-4) — 여기엔 풀 헤더를 두지 않는다
     renderEstimates(p);
   }
   function renderEstimates(p) {
     var sum = $("[data-est-summary]"), body = $("[data-est-body]"), det = $("#estimates");
-    if (!p || p.medians === null || p.medians === undefined) { sum.textContent = "Estimates · unavailable"; body.innerHTML = '<span class="bad">' + esc((p && p.medians_error) || "medians unavailable") + "</span>"; return; }
+    if (!p || p.medians === null || p.medians === undefined) {
+      sum.textContent = tr("est.unavailable", { error: tr("est.medians_unavailable") });
+      body.innerHTML = '<span class="bad">' + esc(p && p.medians_error ? errorText(p.medians_error, p.medians_error_code) : tr("est.medians_unavailable")) + "</span>";
+      return;
+    }
     var keys = Object.keys(p.medians);
     var presets = {};
     (state.status.presets || []).forEach(function (x) { presets[x.name] = x; });
     if (!keys.length) {
-      sum.textContent = "Estimates · no samples yet — using preset/default until 2 successful jobs per key";
+      sum.textContent = tr("est.no_samples");
       det.open = true;
-      body.innerHTML = (state.status.presets || []).map(function (x) { return "<span><b>" + esc(x.name) + "</b> " + (isNum(x.expected_seconds) ? "preset " + fmtDuration(x.expected_seconds) : "default") + " · low</span>"; }).join("") || "<span>no presets</span>";
+      body.innerHTML = (state.status.presets || []).map(function (x) {
+        var src = isNum(x.expected_seconds) ? tr("est.preset", { dur: fmtDuration(x.expected_seconds) }) : tr("est.default");
+        return "<span><b>" + esc(x.name) + "</b> " + esc(src) + " · " + esc(tr("conf.low")) + "</span>";
+      }).join("") || "<span>" + esc(tr("est.no_presets")) + "</span>";
       return;
     }
-    sum.textContent = "Estimates · " + keys.length + " key" + (keys.length > 1 ? "s" : "") + " · how ETA is computed";
+    sum.textContent = tr("est.keys", { n: keys.length });
     body.innerHTML = keys.map(function (k) {
       var m = p.medians[k] || {};
       var n = isNum(m.sample_count) ? m.sample_count : 0;
-      var conf = n >= 5 ? "high" : n >= 2 ? "med" : "low";
-      var main = n >= 2 ? fmtDuration(m.seconds) : "n=" + n + " → preset";
-      return "<span><b>" + esc(k) + "</b> " + esc(main) + (isNum(m.wait_seconds) ? " · wait " + fmtDuration(m.wait_seconds) : "") + " · n=" + n + " · " + conf + "</span>";
+      var conf = tr("conf." + (n >= 5 ? "high" : n >= 2 ? "med" : "low"));
+      var main = n >= 2 ? fmtDuration(m.seconds) : tr("est.to_preset", { n: n });
+      var tail = tr("est.row", { wait: isNum(m.wait_seconds) ? fmtDuration(m.wait_seconds) : DASH, n: n, conf: conf });
+      return "<span><b>" + esc(k) + "</b> " + esc(main) + " · " + esc(tail) + "</span>";
     }).join("");
-    body.title = "measured n≥5 → high, n<5 → med, preset/default → low";
+    body.title = tr("est.how");
   }
 
   // ── 1초 틱 ──
@@ -1244,8 +1506,9 @@
       if (from == null) return;
       var s = (n - from) / 1000;
       if (kind === "elapsed") el.textContent = fmtDuration(s);
-      else if (kind === "waiting") el.textContent = "waiting " + fmtDuration(s);
-      else if (kind === "age") el.textContent = fmtAgo(s);
+      // 1초마다 다시 쓰는 자리 — 렌더 시점이 아니라 **지금** 언어를 읽는다
+      else if (kind === "waiting") el.textContent = tr("elapsed.waiting", { dur: fmtDuration(s) });
+      else if (kind === "age") el.textContent = tr("host.sampled", { age: fmtAgo(s, L()) });
     });
     renderHeaderConn();
   }
@@ -1283,8 +1546,11 @@
       return;
     }
     api("/jobs/" + id).then(function (r) { return r.ok ? r.json() : null; }).then(function (job) {
-      if (!job) toast("#" + id + " not found"); else toast("#" + id + " " + stateWord(job.state) + (job.finished_at ? " · finished " + fmtClock(job.finished_at, tz(), now()) : ""));
-    }).catch(function () { toast("#" + id + " — could not look up"); });
+      if (!job) toast(tr("toast.not_found", { id: id }));
+      else toast(job.finished_at
+        ? tr("toast.finished", { id: id, state: stateWord(job.state, L()), clock: fmtClock(job.finished_at, tz(), now()) })
+        : "#" + id + " " + stateWord(job.state, L()));
+    }).catch(function () { toast(tr("toast.lookup_failed", { id: id })); });
   }
   function restoreTrigger() {
     var t = state.lastTrigger; state.lastTrigger = null;
@@ -1303,7 +1569,8 @@
     var d = $("#drawer");
     var row = findRow(id);
     state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0;
-    $("[data-drawer-title]").textContent = "#" + id + (row ? " " + (row.key || "") : "") + " · log";
+    state.drawer.key = row ? (row.key || "") : "";
+    $("[data-drawer-title]").textContent = tr("drawer.job", { id: id, key: state.drawer.key });
     $("[data-drawer-sub]").textContent = "";
     $("[data-drawer-log]").textContent = "";
     d.hidden = false;
@@ -1322,7 +1589,7 @@
     var id = state.drawer.jobId;
     if (id == null) return;
     api("/jobs/" + id + "/log?offset=" + state.drawer.offset).then(function (r) {
-      if (r.status === 401 || r.status === 403) { $("[data-drawer-sub]").textContent = r.status === 401 ? "Add a token to see the log" : "not your job"; return null; }
+      if (r.status === 401 || r.status === 403) { $("[data-drawer-sub]").textContent = r.status === 401 ? tr("row.add_token_for_log") : tr("row.not_your_job"); return null; }
       if (!r.ok) throw new Error("http " + r.status);
       var more = r.headers.get("X-RCM-More") === "1";
       var next = parseInt(r.headers.get("X-RCM-Next-Offset") || "0", 10);
@@ -1347,9 +1614,9 @@
         state.drawer.lines += 1;
       }
       state.drawer.offset = res.next;
-      $("[data-drawer-sub]").textContent = res.more ? "live · " + fmtBytes(res.next) : "finished · " + fmtBytes(res.next);
+      $("[data-drawer-sub]").textContent = res.more ? tr("drawer.live", { bytes: fmtBytes(res.next) }) : tr("drawer.finished", { bytes: fmtBytes(res.next) });
       if (res.more) state.drawer.timer = setTimeout(pollLog, 2000);
-    }).catch(function () { $("[data-drawer-sub]").textContent = "couldn’t load — retrying"; state.drawer.timer = setTimeout(pollLog, 5000); });
+    }).catch(function () { $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
   }
 
   // 취소 (항목 13 · 30)
@@ -1360,13 +1627,14 @@
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners.length : 0;
     var isJoiner = state.me && req.name !== state.me;
-    $("[data-cancel-title]").textContent = "Cancel #" + id + " " + (row.key || "") + " (" + (req.label || req.name || DASH) + ")?";
+    $("[data-cancel-title]").textContent = tr("cancel.confirm_title", { id: id, key: row.key || "", who: req.label || req.name || DASH });
     var body;
-    if (isJoiner) body = "You joined this job. You will leave the join list; the job keeps running for " + (req.label || req.name || "its requester") + ".";
-    else if (row.state === "running") body = "SIGTERM now, SIGKILL after the grace period." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "") + " Cannot be undone.";
-    else body = "Removed from the queue; sessions waiting on it get exit 2. Run rcm run again to resubmit." + (joiners ? " " + joiners + " other session" + (joiners > 1 ? "s are" : " is") + " waiting on it." : "");
+    var others = joiners ? " " + tr("cancel.others_waiting", { n: joiners }) : "";
+    if (isJoiner) body = tr("cancel.joiner_body", { who: req.label || req.name || DASH });
+    else if (row.state === "running") body = tr("cancel.running_body") + others + " " + tr("cancel.cannot_undo");
+    else body = tr("cancel.queued_body") + others;
     $("[data-cancel-body]").textContent = body;
-    $("[data-cancel-go]").textContent = isJoiner ? "Leave" : "Cancel job";
+    $("[data-cancel-go]").textContent = isJoiner ? tr("cancel.leave") : tr("cancel.go");
     var dlg = $("#cancel-dialog");
     if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "");
   }
@@ -1378,12 +1646,23 @@
     api("/jobs/" + id + "/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(function (r) {
       return r.json().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
     }).then(function (res) {
-      if (!res.ok) { toast("cancel failed: " + ((res.body && res.body.error) || res.status)); if (row) { row._cancelRequested = false; row._dim = false; } if (res.status === 401 || res.status === 403) tokenRejected(); fetchStatus(); return; }
-      if (res.body && res.body.left) toast("left the join list of #" + id);
-      else toast("#" + id + " " + (res.body && res.body.state ? res.body.state : "cancel requested"));
+      if (!res.ok) { toast(tr("toast.cancel_failed", { detail: (res.body && res.body.error) || res.status })); if (row) { row._cancelRequested = false; row._dim = false; } if (res.status === 401 || res.status === 403) tokenRejected(); fetchStatus(); return; }
+      if (res.body && res.body.left) toast(tr("toast.left_join", { id: id }));
+      else toast("#" + id + " " + (res.body && res.body.state ? stateWord(res.body.state, L()) : tr("toast.cancel_requested")));
       setTimeout(function () { fetchStatus(); }, 5000);
       scheduleRefetch();
-    }).catch(function () { toast("cancel failed — network"); if (row) { row._cancelRequested = false; row._dim = false; renderQueue(); } });
+    }).catch(function () { toast(tr("toast.cancel_network")); if (row) { row._cancelRequested = false; row._dim = false; renderQueue(); } });
+  }
+
+  /** 서버가 준 오류 — 코드가 있으면 그 언어로, 없으면 원문 그대로(결정 37). */
+  function errorText(text, code) {
+    if (code && I18N.has("error." + code)) return tr("error." + code);
+    return text || tr("error.internal_error");
+  }
+
+  function wireLang() {
+    var btn = $("#lang-btn");
+    if (btn) btn.addEventListener("click", function () { setLang(state.lang === "ko" ? "en" : "ko"); });
   }
 
   function wireClicks() {
@@ -1401,8 +1680,8 @@
       if (t.hasAttribute("data-more-queue")) { state.showAllQueue = true; renderQueue(); return; }
       if (t.hasAttribute("data-more-recent")) { state.showAllRecent = !state.showAllRecent; renderRecent(); return; }
       if (t.hasAttribute("data-rtoggle")) { var rid = parseInt(t.getAttribute("data-rtoggle"), 10); if (ev.target.closest("[data-copy]")) return; state.expandedRecent[rid] = !state.expandedRecent[rid]; renderRecent(); return; }
-      if (t.hasAttribute("data-copy")) { var text = t.getAttribute("data-copy"); if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { toast("copied: " + text); }, function () { toast(text); }); else toast(text); return; }
-      if (t.hasAttribute("data-inputs")) { var r = findRow(parseInt(t.getAttribute("data-inputs"), 10)); if (r) toast("#" + r.id + " inputs: " + JSON.stringify(r.inputs || {})); return; }
+      if (t.hasAttribute("data-copy")) { var text = t.getAttribute("data-copy"); if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { toast(tr("toast.copied", { text: text })); }, function () { toast(text); }); else toast(text); return; }
+      if (t.hasAttribute("data-inputs")) { var r = findRow(parseInt(t.getAttribute("data-inputs"), 10)); if (r) toast(tr("toast.inputs", { id: r.id, json: JSON.stringify(r.inputs || {}) })); return; }
       if (t.hasAttribute("data-src")) { var rs = findRow(parseInt(t.getAttribute("data-src"), 10)); if (rs && rs.source) toast("#" + rs.id + " " + (rs.source.mode === "git_ref" ? (rs.source.sha || DASH) + " · ref " + (rs.source.ref || DASH) : (rs.source.base_sha || DASH) + (rs.source.dirty ? " · tree differs from base sha" : "") + (rs.source.tree_hash ? " · tree " + rs.source.tree_hash : ""))); return; }
     });
     document.addEventListener("keydown", function (ev) {
@@ -1436,9 +1715,11 @@
   function boot() {
     state.noSse = /[?&]poll=1(&|$)/.test(location.search);
     state.debug = /[?&]debug=1(&|$)/.test(location.search);
+    loadLang();
+    applyStatic();
     loadCollapsed();
     state.token = lsGet("rcm.token");
-    wireTokenDialog(); wireClicks(); renderTokenButton();
+    wireTokenDialog(); wireClicks(); wireLang(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });
     first.then(function () {
       state.tz = state.status && state.status.display_timezone ? state.status.display_timezone : null;

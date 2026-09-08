@@ -50,7 +50,8 @@ Leave that terminal alone for now. To keep it running after you log out, use the
 
 ## 3. Your machine
 
-The session needs to know two things: where the server is, and who you are.
+The session needs to know two things: **where** the server is, and **who you are**. Only the first
+one can be automatic, and the difference is worth knowing before you start.
 
 On the same network you do not have to answer the first one. Ask what is out there:
 
@@ -60,6 +61,26 @@ On the same network you do not have to answer the first one. Ask what is out the
 2. One line per server. If exactly one shows up, you can leave `server` out of your config
    entirely and rcm will use it. Nothing found? The server is on another network, or its
    `advertise` is off — put its address in the file by hand.
+
+Leaving `server` out needs rcm **0.2.2 or newer on both machines**. An older client has no
+discovery at all: it stops with `no server configured` and, unlike `rcm worker`, it never compares
+its version with the server's, so nothing points at the real cause. When in doubt, write the
+address (`http://<build-machine>.local:8787`) — it costs nothing and always works.
+
+**The token is not discovered, and never will be.** `rcm token add` runs on the build machine and
+writes straight to the server's database; no API hands one out. Somebody has to carry it over. So
+on a fresh machine this is the normal, correct state:
+
+```
+ok    server    v0.2.3 (found on this network)
+FAIL  token     no token
+ok    presets   gate, gate-smoke, ...
+ok    pools     default (1 lane)
+```
+
+Three green rows and one red one. The server is open enough to show you its queue without a token
+(`read_auth = "none"`), which makes it look finished. It is not: every write needs the token, and
+copying it over is the one step left.
 
 Write `~/.config/rcm/client.toml`. It holds a token, so it must not be readable by others:
 
@@ -155,7 +176,7 @@ Two people testing the same commit should not queue twice.
    ETA. The reason a job is not moving is stated, never guessed.
 3. **Recent results and medians** — how long this preset usually takes, from real runs, which is
    where the ETAs come from.
-4. **The host**: load, CPU, memory, GPU and the top processes. This is how you tell "stuck" from
+4. **The host**: load, CPU, memory, disk, GPU and the top processes. This is how you tell "stuck" from
    "the machine is busy".
 5. **Other pools** get their own section, so a second build machine is visible from the same
    screen.
@@ -182,12 +203,17 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 1. **Three answers at a glance**: your jobs, anything not moving, and how hard the machine is
    working.
-2. **The running job**, with who asked for it and what tree it is testing.
-3. **Its steps**, in order, with the finished ones ticked and the current one timed.
-4. **A waiting job**, with its position in the queue.
-5. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
+2. **Running now, and waiting**, each with a count. An empty group says so rather than vanishing,
+   so "nothing is running" never looks the same as "the page did not load".
+3. **The running job**, with who asked for it and what tree it is testing. Collapse it with **▾**
+   and the current step moves into the reason column as `step 2/4 build 2s`, so a folded row still
+   says what is happening.
+4. **Its steps**, in order, with the finished ones ticked and the current one timed. The seconds
+   count up as you watch; they do not sit still and then jump when the page refreshes.
+5. **A waiting job**, with its position in the queue.
+6. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
    from the preset; `—` means it will not pretend to know.
-6. **Another pool**, with its own workers and queue.
+7. **Another pool**, with its own workers and queue.
 
 ### Your jobs
 
@@ -224,10 +250,12 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 1. The machine and **how old the sample is**. Anything stale is labelled, never quietly shown as
    current.
-2. **CPU**, 3. **memory** and 4. **GPU**, with five minutes of history behind each. A machine
-   without a readable GPU says so instead of showing zero.
-5. **The heaviest processes**, which is usually enough to see what else is competing for it.
-6. Each **remote worker** gets its own card under its pool.
+2. **CPU**, 3. **memory**, 4. **disk** and 5. **GPU**. CPU, memory and GPU carry five minutes of
+   history; a machine without a readable GPU says so instead of showing zero. Disk is the
+   filesystem the jobs write to, and how much is left is spelled out beside the bar — a build
+   fails on a full disk long before it fails on a busy one.
+6. **The heaviest processes**, which is usually enough to see what else is competing for it.
+7. Each **remote worker** gets its own card under its pool.
 
 ### When a worker stops
 

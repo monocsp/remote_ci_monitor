@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="웹 큐 화면 — 스텝까지 보이는 실행 중 잡, ETA 가 붙은 대기 잡, 그 아래 빌드 머신의 CPU · 메모리 · GPU" width="820">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="웹 큐 화면 — 스텝까지 보이는 실행 중 잡, ETA 가 붙은 대기 잡, 그 아래 빌드 머신의 CPU · 메모리 · 디스크 · GPU" width="820">
 </p>
 
 빌드 머신 **한 대**를 팀이 나눠 쓰면 결국 손으로 줄을 선다. 지금 누가 뭘 돌리는지, 앞 잡이 걸린
@@ -85,9 +85,19 @@ macOS 면 방화벽 허용 창에서 Python 을 허용한다. 다른 컴퓨터�
 
 ## Session machine (3 commands)
 
-빌드 머신과 **같은 Wi-Fi·LAN** 이면 세션은 주소가 필요 없다. `server` 를 비워 두면(또는
-`server = "auto"`) rcm 이 알아서 찾는다. `rcm discover` 로 무엇이 보이는지 확인할 수 있다. 다른
-네트워크에서는 경로를 직접 마련해야 한다 — Tailscale 이나 터널 — 그 주소를 `client.toml` 에 적는다.
+세션에 필요한 건 두 가지다. 서버가 **어디** 있는지, 그리고 **내가 누구**인지. 자동이 되는 건
+앞의 하나뿐이다.
+
+빌드 머신과 **같은 Wi-Fi·LAN** 이면 `server` 를 비워 두면 된다(또는 `server = "auto"`). rcm 이
+알아서 찾고, `rcm discover` 로 무엇이 보이는지 확인할 수 있다. 단 **양쪽 다 rcm 0.2.2 이상**
+이어야 한다. 그 아래 클라이언트에는 발견 기능이 아예 없어서 `no server configured` 로 멈추고,
+`rcm worker` 와 달리 클라이언트는 서버와 버전을 맞춰 보지도 않는다. 다른 네트워크에서는 경로를
+직접 마련해야 한다 — Tailscale 이나 터널 — 그 주소를 `client.toml` 에 적는다.
+
+나머지 반쪽인 토큰은 **일부러 손으로 옮긴다**. `rcm token add` 는 **빌드 머신에서** 돌고 서버의
+DB 에 바로 쓴다. 토큰을 내주는 API 는 없고 앞으로도 두지 않는다. 그래서 서버를 막 찾은 머신에서
+`rcm check` 의 **server** 는 초록인데 **token** 만 빨간 건 고장이 아니다. 토큰을 옮기는 것이
+남은 유일한 단계다.
 
 ```sh
 rcm init client --server http://<빌드머신>:8787   # ~/.config/rcm/client.toml (모드 600)
@@ -117,7 +127,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
 | `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 잡이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--no-join` 은 절대 합류하지 않기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 잡 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 잡은 대기 대신 상태와 경과 |
-| `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · GPU · top 프로세스) |
+| `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함한다 |
 | `rcm logs N [--follow]` | 잡 로그(내 잡 · 내가 합류한 잡, 관리자 토큰이면 아무 잡) |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |

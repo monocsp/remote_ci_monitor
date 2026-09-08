@@ -78,6 +78,20 @@ def _gb(b: int | None) -> str:
     return DASH if b is None else f"{b / 2**30:.1f} GB"
 
 
+def _disk(d: dict[str, Any] | None) -> str:
+    """「120 / 460 GB (340 GB free)」.
+
+    디스크는 십진 GB 로 센다 — Finder·`df -H` 와 같은 눈금이다(메모리는 GiB 라 `_gb` 와 다르다).
+    """
+    if not d:
+        return DASH
+    used, total, free = d.get("used_bytes"), d.get("total_bytes"), d.get("free_bytes")
+    if used is None or total is None:
+        return DASH
+    tail = f" ({free / 10**9:.0f} GB free)" if free is not None else ""
+    return f"{used / 10**9:.0f} / {total / 10**9:.0f} GB{tail}"
+
+
 def _load(v: float | None) -> str:
     # os.getloadavg() 는 이진 소수(6.60693359375)라 두 자리로 자른다
     return DASH if v is None else f"{v:.2f}"
@@ -389,6 +403,8 @@ def render_pool(
                 f" · mem {_gb(mem.get('used_bytes'))} / {_gb(mem.get('total_bytes'))}"
                 f" · GPU {_pct(gpu.get('util_pct')) if gpu else DASH}"
             )
+            if h.get("disk"):
+                out.append(f"      disk: {_disk(h.get('disk'))}")
             top = h.get("top") or []
             if top:
                 out.append(

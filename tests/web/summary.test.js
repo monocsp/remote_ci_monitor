@@ -173,8 +173,11 @@ describe("yourJobs", () => {
 describe("hostPressure", () => {
   const host = () => fixture("main").pools[0].hosts[0];
 
-  test("main sample → fine with CPU 21, Mem 58, GPU 13, load 3.5 / 10", () => {
-    assert.deepEqual(rcm.hostPressure(host()), { cpu: 21, mem: 58, gpu: 13, load: "3.5 / 10", verdict: "fine" });
+  test("main sample → fine with CPU 21, Mem 58, GPU 13, Disk 29, load 3.5 / 10", () => {
+    // M5d-2: 디스크가 네 번째 값으로 들어왔다. 남은 656 GiB 는 10 GiB 문턱 위라 fine 그대로.
+    assert.deepEqual(rcm.hostPressure(host()), {
+      cpu: 21, mem: 58, gpu: 13, disk: 29, diskFree: 704666636288, load: "3.5 / 10", verdict: "fine"
+    });
   });
 
   test("85% or more on any value → busy", () => {
@@ -235,16 +238,18 @@ describe("hostPressure", () => {
     assert.equal(rcm.hostPressure(h).verdict, "busy");
   });
 
-  test("all of cpu, memory, gpu null → unknown", () => {
+  test("all of cpu, memory, gpu, disk null → unknown", () => {
     const h = host();
     h.cpu = null;
     h.memory = null;
     h.gpu = null;
+    h.disk = null;   // M5d-2: 디스크도 판정에 들어간다 — 하나라도 알면 unknown 이 아니다
     const r = rcm.hostPressure(h);
     assert.equal(r.verdict, "unknown");
     assert.equal(r.cpu, null);
     assert.equal(r.mem, null);
     assert.equal(r.gpu, null);
+    assert.equal(r.disk, null);
   });
 
   test("load or cores unknown → — in the load text; the verdict is about the three percentages only", () => {

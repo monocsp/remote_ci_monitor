@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="The web queue: one job running with its steps, one waiting with an ETA, and the build machine's CPU, memory and GPU below" width="820">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="The web queue: one job running with its steps, one waiting with an ETA, and the build machine's CPU, memory, disk and GPU below" width="820">
 </p>
 
 A team that shares **one build machine** ends up queueing by hand: who is running what, is it stuck
@@ -92,9 +92,19 @@ Keep it running across logins and reboots with the launchd and systemd examples 
 
 ## Session machine (3 commands)
 
-On the same Wi-Fi or LAN as the build machine a session needs no address: leave `server` empty
-(or `server = "auto"`) and rcm finds it, which `rcm discover` shows. From another network you need
-a route of your own — Tailscale, or a tunnel — and then that address goes in `client.toml`.
+A session needs two things: **where** the server is, and **who you are**. Only the first one can
+be automatic.
+
+On the same Wi-Fi or LAN as the build machine, leave `server` empty (or `server = "auto"`) and rcm
+finds it, which `rcm discover` shows. That needs rcm **0.2.2 or newer on both sides** — an older
+client has no discovery and stops with `no server configured`, and unlike `rcm worker` it never
+compares its version with the server's. From another network you need a route of your own —
+Tailscale, or a tunnel — and then that address goes in `client.toml`.
+
+The token is the other half, and it is deliberately manual. `rcm token add` runs **on the build
+machine** and writes straight to the server's database; there is no API that hands a token out, and
+there will not be one. So on a machine that has just found the server, `rcm check` showing a green
+**server** row and a red **token** row is not a bug — copying the token over is the one step left.
 
 <!-- smoke:begin -->
 ```sh
@@ -127,7 +137,7 @@ screenshots.**
 | `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
-| `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
+| `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · disk · GPU · top processes) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
 | `rcm presets [--json]` | presets the server offers and their inputs |
