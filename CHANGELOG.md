@@ -15,6 +15,12 @@ of a key bumps that number and is listed here.
   test proves both halves: zero animations under `reduce`, and at least one without it (a control
   that would otherwise pass on a page that simply has no motion).
 
+### Changed
+- **The answer you came for is the biggest thing on the page** (M5d-3). "Your jobs" — did it
+  finish, did it pass — is the question this screen gets most often, and it was set at 13px, one
+  step *smaller* than body text. It is 20px now, with the other two summary cells at body size, so
+  size carries the priority instead of weight alone.
+
 ### Fixed
 - **The phone layout had never actually been tested on a phone** (M5d-3). The mobile test opened
   Chrome at `390,844`, but a macOS Chrome window will not go below 500px, so the viewport was 500

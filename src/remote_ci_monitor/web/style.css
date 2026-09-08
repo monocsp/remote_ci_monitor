@@ -65,15 +65,18 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 
 /* ── 요약 ── */
 .summary { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-top: 0; background: var(--surface-2); }
-.sum { display: grid; gap: 3px; font-size: 13px; align-content: start; }
+.sum { display: grid; gap: 3px; align-content: start; }
 .sum .lab { font: 600 12px var(--sans); color: var(--muted); word-break: keep-all; }
-.sum .v { font-family: var(--sans); font-size: 13px; line-height: 1.6; font-variant-numeric: tabular-nums; word-break: keep-all; }
+.sum .v { font-family: var(--sans); font-size: 14px; line-height: 1.55; font-variant-numeric: tabular-nums; word-break: keep-all; }
+/* 「내 잡 끝났나」가 이 화면이 가장 자주 받는 질문이다(§1) — 그 답이 페이지에서 가장 큰 글자다.
+   나머지 두 칸은 본문 크기로 둬서 크기 차이가 곧 우선순위가 되게 한다(§4.3 의 14 / 20 단계). */
+.sum-yours .v { font-size: 20px; line-height: 1.4; }
 .sum .v b { font-weight: 600; }
 .sum .v .ok { color: var(--ok); }
 .sum .v .warn { color: var(--warn); }
 .sum .v .bad { color: var(--bad); }
-.sum .v .muted { color: var(--muted); }
-.sum .v button.jlink { font: 600 13px var(--mono); color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+.sum .v .muted { color: var(--muted); font-size: 14px; }
+.sum .v button.jlink { font-family: var(--mono); font-size: 0.9em; font-weight: 600; color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
 
 /* ── 섹션 ── */
 .s-section { padding: 12px 14px 14px; border: 1px solid var(--line); border-top: 0; background: var(--surface); }

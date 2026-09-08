@@ -541,7 +541,18 @@ docs/reviews/
   - **M5b-3 `rcm worker`** (**완료 2026-09-07**, 명세 `docs/m5b3-workplan.md` — Codex 는 이날 모델 접근 불가로 생략): `runner.run_job`(자재화 → Popen → 펌프 → 신호; 로컬·원격 공용) · `WorkerClient` · `WorkerConfig`/`worker.toml`(`[[repos]]` 규칙은 서버와 같다) · `remote_worker.RemoteWorker`(등록 재시도 · heartbeat 스레드 · 레인 스레드 · 보고 재시도 · 409 면 정리 · SIGTERM → lost `worker stopped`) · `rcm worker --check/--once`. 두 프로세스 e2e 7건(실행·캐시 잡·취소·kill -9 → lost·SIGTERM·git_ref·서버 재시작). M5 완료 기준 ④ 달성.
   - **M5b-4 다중 풀 표시** (**완료 2026-09-07**, 명세 `docs/m5b4-workplan.md`): `rcm top` 원격 풀 헤더에 언제나 풀 이름(`queue — empty (pool linux)` · `· paused`) · 머리줄 원격 필 5개 초과는 `+N workers`(down 은 안 접음) · 웹 Host 절에 워커 표본 카드(`build-02 · pool linux`, Recent 밑 풀 host 헤더 제거) · `rcm check` `pools` 행(`default (1 lane) · linux (build-02/1 idle)`, 풀 워커 전부 down 이면 FAIL) · `server.workers[].pool`.
 - **M5c — 내부망 자동 발견** (**완료 2026-09-08**, PR #37 · v0.2.2, 명세 `docs/m5c-workplan.md`): 서버가 `_rcm._tcp` 를 mDNS/DNS-SD 로 광고하고 클라이언트가 `server` 없이도 같은 네트워크의 서버를 찾는다(표준 라이브러리만 · 외부 도구 없음). `rcm discover` · `client.toml server = "auto"`. 실배치(노트북이 Tailscale 밖) 요청. 완료 기준은 명세 §6.
-- **M5d — 웹 UI: 한국어 기본 + 정보 위계**(계획 2026-09-08, 명세 `docs/m5d-workplan.md`): 화면이 한국어로 뜨고 오른쪽 위에서 영어로 바꾼다(결정 36). 그리고 「내 잡 끝났나 · 왜 안 움직이나 · 언제 내 차례인가」 순서로 위계를 다시 세운다 — 호스트 지표와 소스 주소를 접고, 상태를 색이 아니라 모양·글자·움직임으로 표시하고, UI 글꼴을 산세리프로 되돌린다. 근거는 `docs/reviews/2026-09-08-codex-web-ui-design.md`(코덱스가 화면을 보고 낸 진단)와 `docs/reviews/2026-09-08-ui-hierarchy-research.md`(1차 자료 조사). PR 은 셋으로 나눈다 — 언어 장치 · 위계 · 폰.
+- **M5d — 웹 UI: 한국어 기본 + 정보 위계** (**완료 2026-09-08**, PR #47 · #48 · #51 · #52, 명세 `docs/m5d-workplan.md` — 완료 기준 7개 대조표는 명세 §7): 화면이 한국어로 뜨고 오른쪽 위에서 영어로 바꾼다(결정 36). 그리고 「내 잡 끝났나 · 왜 안 움직이나 · 언제 내 차례인가」 순서로 위계를 다시 세운다 — 호스트 지표와 소스 주소를 접고, 상태를 색이 아니라 모양·글자·움직임으로 표시하고, UI 글꼴을 산세리프로 되돌린다. 근거는 `docs/reviews/2026-09-08-codex-web-ui-design.md`(코덱스가 화면을 보고 낸 진단)와 `docs/reviews/2026-09-08-ui-hierarchy-research.md`(1차 자료 조사). PR 은 넷으로 나눴다 — 서버가 문장 대신 코드를 내려보낸다(M5d-0, 결정 37) · 언어 장치와 한국어
+  카탈로그(M5d-1) · 위계(M5d-2) · 폰과 접근성(M5d-3). M5d-2 는 둘로 갈렸다: 오너가 화면을 보고 낸
+  피드백 세 건(저장 공간 · 초가 튀는 것 · 뭐가 도는지 안 보이는 것, 명세 §4.6)을 먼저 고치고, 그
+  다음에 위계 재구성을 했다. 마일스톤을 도는 동안 값을 치른 것 셋: M5d-0 이 호스트 문서에 키를
+  더하면서 원격 워커 표본 파서를 안 고쳐 **최신 워커의 표본이 통째로 버려지고 있었다**(#48 에서
+  수정, 이제 왕복 시험이 잠근다) · 표의 칸 폭을 무조건 못 박아 **폰에서 키·요청자 칸이 사라졌다**
+  (사람 눈으로만 잡혔다 — #52 가 390px 에서 「글자와 자리」를 함께 본다) · 폰 시험이 macOS 크롬의
+  최소 창 폭 때문에 **실제로는 500px 에서 돌고 있었다**(§4.7).
+
+
+**계획서의 마일스톤은 여기서 끝난다.** M0~M5 가 전부 완료됐고(M6 는 결정 30 으로 폐기), 이후는 오너
+실기 결과에 따른 수정과 운영 개선이다.
 
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
