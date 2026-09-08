@@ -33,7 +33,7 @@
 
 - README/README.ko 「Session machine」: 같은 네트워크면 `client.toml` 의 `server` 를 비워도 된다(자동 발견) · 다른 네트워크는 Tailscale. 「Build machine」: `bind = "0.0.0.0"` + `advertise`. 「Security notes」: 발견 응답에는 비밀이 없고, 읽기 API 가 내부망에 열린다는 것(`read_auth = basic` 안내).
 - `examples/server.toml`(=템플릿): `advertise = true` 주석.
-- CHANGELOG [Unreleased]. dolomood `scripts/remote_ci.sh`: 기본 서버를 「발견 → Tailscale 주소 → 안내」로.
+- CHANGELOG [Unreleased]. 팀 래퍼 스크립트(이 저장소 밖): 기본 서버를 「발견 → VPN 주소 → 안내」로.
 
 ## 5. 테스트 배치
 
@@ -48,7 +48,7 @@
 
 ## 6. 순서 · 완료 기준 · 결정
 
-- **PR 순서**: M5c-1 `core/mdns.py`(패킷 인코딩·디코딩 순수 함수 + 규칙, 테스트-퍼스트 A) → M5c-2 응답기·질의기·설정·`rcm discover`·`_client` 결정 순서(테스트-퍼스트 B) → M5c-3 문서·예시·dolomood 래퍼 기본값. 각 PR 은 테스트-퍼스트 → 구현 → 격리 검증(실제 LAN 왕복은 이 Mac 의 두 프로세스로: 서버 `bind = 0.0.0.0` + 새 HOME 의 클라이언트가 `server` 없이 `rcm check` 로 찾는다).
+- **PR 순서**: M5c-1 `core/mdns.py`(패킷 인코딩·디코딩 순수 함수 + 규칙, 테스트-퍼스트 A) → M5c-2 응답기·질의기·설정·`rcm discover`·`_client` 결정 순서(테스트-퍼스트 B) → M5c-3 문서·예시·팀 래퍼 기본값. 각 PR 은 테스트-퍼스트 → 구현 → 격리 검증(실제 LAN 왕복은 이 Mac 의 두 프로세스로: 서버 `bind = 0.0.0.0` + 새 HOME 의 클라이언트가 `server` 없이 `rcm check` 로 찾는다).
 - **완료 기준**: ① 같은 Wi-Fi 의 노트북(새 HOME, `client.toml` 에 토큰만)에서 `rcm check` 가 서버를 찾아 `ok server … (found on this network)` 를 찍고 `rcm run demo` 가 돈다 ② `rcm discover` 가 서버 이름·주소·버전을 1.5초 안에 보여 준다 ③ `advertise = false` 면 아무것도 응답하지 않는다(패킷 캡처 대신 질의기 테스트로) ④ mDNSResponder 가 켜진 macOS 에서 5353 공존이 깨지지 않는다(`dns-sd -B _rcm._tcp` 로도 보인다 — 수동 확인) ⑤ 기존 테스트 전부 초록 · 스키마 v1 그대로.
 - **오너 결정(제안값으로 구현, 확인 대기)**: 33 `rcm init server` 템플릿 기본 `bind` 를 `127.0.0.1` 로 유지(광고는 bind 가 루프백이 아닐 때만) — "설치하자마자 LAN 에 열리는" 것은 피한다. 34 발견 응답 TXT 에 `lanes` 를 넣는다(비밀 아님). 35 IPv6 는 v1 범위 밖.
 - **위험**: 회사망이 멀티캐스트를 막으면 발견이 안 된다 → 그때는 `.local` 이름 직접 입력(`server = "http://macmini.local:8787"`)이 차선이고 안내 문구에 넣는다. 클라이언트 실행마다 1.5초 지연 → `client.toml` 에 주소가 있으면 발견을 건너뛴다.

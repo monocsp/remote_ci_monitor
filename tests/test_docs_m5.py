@@ -1,6 +1,7 @@
-"""문서 문면 잠금(M5a) — README 의 `--priority` · `rcm bump` · high 기아 안내 · `snapshot_cache` ·
-`--no-cache` · `[[notify]]` + `RCM_STATE`, `examples/server.toml` 의 주석 `[[notify]]` 예시와
-`snapshot_cache*` 키, CHANGELOG `[Unreleased]` 의 priority · cache · notify.
+"""문서 문면 잠금(M5a) — 문서 묶음(README · docs/configuration.md · docs/operating.md)의
+`--priority` · `rcm bump` · high 기아 안내 · `snapshot_cache` · `--no-cache` · `[[notify]]` +
+`RCM_STATE`, `examples/server.toml` 의 주석 `[[notify]]` 예시와 `snapshot_cache*` 키,
+CHANGELOG `[Unreleased]` 의 priority · cache · notify.
 
 test_release_files 처럼 정규식과 문단 스캔만 한다. 구현보다 먼저 썼다(test-first) — 문서가 없으면
 빨갛다.
@@ -17,8 +18,13 @@ from remote_ci_monitor.config import load_server_config
 
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
+README_KO = ROOT / "README.ko.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 SERVER_TOML = ROOT / "examples" / "server.toml"
+CONFIGURATION = ROOT / "docs" / "configuration.md"
+OPERATING = ROOT / "docs" / "operating.md"
+#: 기능 문면은 이 묶음 어딘가에 있으면 된다 — README 는 앞문이고 상세는 docs/ 로 나뉘어 있다.
+DOC_SET = (README, CONFIGURATION, OPERATING)
 
 
 # ── 도우미 ───────────────────────────────────────────────────────────────────
@@ -31,6 +37,11 @@ def read(path: Path) -> str:
 
 def has(text: str, pattern: str, flags: int = re.M) -> bool:
     return re.search(pattern, text, flags) is not None
+
+
+def docs() -> str:
+    """README + 상세 문서를 이어 붙인 텍스트. 문단·정규식 검사는 이걸 본다."""
+    return "\n\n".join(read(p) for p in DOC_SET)
 
 
 def paragraphs(text: str) -> list[str]:
@@ -71,19 +82,19 @@ def unreleased(text: str) -> str:
         r"RCM_STATE",
     ],
 )
-def test_readme_mentions(pattern: str):
-    assert has(read(README), pattern), f"README lacks /{pattern}/"
+def test_docs_mention(pattern: str):
+    assert has(docs(), pattern), f"the docs lack /{pattern}/"
 
 
 def test_readme_priority_paragraph_names_the_three_levels():
-    ps = [p for p in paragraphs(read(README)) if "--priority" in p]
+    ps = [p for p in paragraphs(docs()) if "--priority" in p]
     assert ps, "no paragraph mentions --priority"
     assert any(all(w in p for w in ("high", "normal", "low")) for p in ps), ps
 
 
 def test_readme_says_high_keeps_normal_waiting():
     """기아 안내(Codex 리뷰 M5 「고치면 좋은 것」 3): high 가 계속 오면 normal 은 기다린다."""
-    ps = paragraphs(read(README))
+    ps = paragraphs(docs())
     hits = [
         p
         for p in ps
@@ -92,17 +103,17 @@ def test_readme_says_high_keeps_normal_waiting():
         and has(p, r"\bnormal\b")
         and has(p, r"\bwait", re.I)
     ]
-    assert hits, "README has no paragraph with 'high', 'normal' and 'wait' together"
+    assert hits, "the docs have no paragraph with 'high', 'normal' and 'wait' together"
 
 
 def test_readme_bump_is_an_admin_command():
-    ps = [p for p in paragraphs(read(README)) if "rcm bump" in p]
+    ps = [p for p in paragraphs(docs()) if "rcm bump" in p]
     assert ps, "no paragraph mentions rcm bump"
     assert any("admin" in p.lower() for p in ps), ps
 
 
 def test_readme_no_cache_is_next_to_the_cache_explanation():
-    ps = [p for p in paragraphs(read(README)) if "--no-cache" in p]
+    ps = [p for p in paragraphs(docs()) if "--no-cache" in p]
     assert ps, "no paragraph mentions --no-cache"
     detail = r"\bblob|sha256|changed"
     explained = [p for p in ps if has(p, r"\bcache", re.I) and has(p, detail, re.I)]
@@ -110,7 +121,7 @@ def test_readme_no_cache_is_next_to_the_cache_explanation():
 
 
 def test_readme_notify_paragraph_shows_the_env_and_the_two_transports():
-    text = read(README)
+    text = docs()
     ps = [p for p in paragraphs(text) if "[[notify]]" in p or "RCM_STATE" in p]
     assert ps
     joined = "\n".join(ps)

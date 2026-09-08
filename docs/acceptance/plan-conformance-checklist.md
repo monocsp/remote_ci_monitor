@@ -8,7 +8,7 @@
 
 | ID | 규칙 | 확인 방법 | 기대 |
 |---|---|---|---|
-| A1 | 특정 머신·계정·팀 규약·팀 명령을 코드에 박지 않는다 | `grep -rniE "dolomood|macmini-admin|fmmc|local_ci|flutter|KST|Asia/Seoul" src/` | src/ 에 0건(주석의 예시 문구 제외 — 있으면 목록으로 보고) |
+| A1 | 특정 머신·계정·팀 규약·팀 명령을 코드에 박지 않는다 | `grep -rniE "<팀 이름>|<러너 이름>|<팀 스크립트 이름>|flutter|KST|Asia/Seoul" src/` | src/ 에 0건(주석의 예시 문구 제외 — 있으면 목록으로 보고) |
 | A2 | 핵심 경로가 GitHub 을 부르지 않는다 | `grep -rniE "github|api\.github|gh " src/remote_ci_monitor/*.py src/remote_ci_monitor/core/*.py` | 0건(예시 URL `git@github.com:org/app.git` 같은 문서 문자열만 허용) |
 | A3 | 런타임 의존성 0 | `pyproject` 의 `dependencies == []`; wheel METADATA 에 `Requires-Dist` 없음; `python -X importtime -c "import remote_ci_monitor.cli"` 에서 표준 라이브러리 밖 모듈 없음 | 셋 다 |
 | A4 | Python 3.11+ · 표준 라이브러리만 | `grep -rn "^import\|^from" src/ \| grep -vE "remote_ci_monitor|__future__"` 로 모듈 목록을 만들고 전부 stdlib 인지 | 전부 stdlib |

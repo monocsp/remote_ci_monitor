@@ -23,6 +23,8 @@ SMOKE = ROOT / "scripts" / "smoke_install.sh"
 DOCKERFILE = ROOT / "Dockerfile"
 DOCKERIGNORE = ROOT / ".dockerignore"
 README = ROOT / "README.md"
+OPERATING = ROOT / "docs" / "operating.md"
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 LICENSE = ROOT / "LICENSE"
 PYPROJECT = ROOT / "pyproject.toml"
@@ -337,7 +339,17 @@ def test_dockerignore_excludes(entry: str):
 
 # ── README (§6) ──────────────────────────────────────────────────────────────
 
-README_ORDER = ["Install", "Build machine", "Session machine", "Docker", "Releasing", "Development"]
+README_ORDER = ["Install", "Build machine", "Session machine"]
+#: 절이 어느 파일에 사는지 — README 는 앞문이고 깊은 내용은 docs/ 와 CONTRIBUTING.md 에 있다.
+SECTION_FILE = {
+    "Install": README,
+    "Build machine": README,
+    "Session machine": README,
+    "Docker": OPERATING,
+    "Verify on the real build machine": OPERATING,
+    "Releasing": CONTRIBUTING,
+    "Development": CONTRIBUTING,
+}
 README_MENTIONS = [
     ("Install", r"pipx install remote-ci-monitor"),
     ("Install", r"\buvx\b"),
@@ -379,13 +391,20 @@ def test_readme_sections_exist_in_order():
     assert positions == sorted(positions), f"headings out of order: {README_ORDER}"
 
 
+@pytest.mark.parametrize("prefix", sorted(SECTION_FILE))
+def test_every_documented_section_exists_where_it_belongs(prefix: str):
+    path = SECTION_FILE[prefix]
+    assert heading(read(path), prefix), f"{path.name} has no '## {prefix}' heading"
+
+
 @pytest.mark.parametrize(("prefix", "pattern"), README_MENTIONS)
 def test_readme_section_mentions(prefix: str, pattern: str):
-    assert has(section(read(README), prefix), pattern), f"'## {prefix}' lacks /{pattern}/"
+    path = SECTION_FILE[prefix]
+    assert has(section(read(path), prefix), pattern), f"{path.name} '## {prefix}' lacks /{pattern}/"
 
 
-def test_readme_development_counts_eight_mutations():
-    text = read(README)
+def test_contributing_development_counts_eight_mutations():
+    text = read(CONTRIBUTING)
     assert "three known mutations" not in text
     dev = section(text, "Development")
     assert has(dev, r"\b8\b[^\n]{0,40}mutation|mutation[^\n]{0,40}\b8\b", re.M | re.I)
