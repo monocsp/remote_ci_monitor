@@ -365,6 +365,14 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
 - **Hooks have no keychain.** A `[[notify]]` command that calls `gh`, `aws` or similar must read
   its token from a file (mode 600) via an environment variable; the interactive keyring is not
   available and the call blocks until the hook times out.
+- **macOS blocks local-network traffic for services you have not allowed.** On macOS 15 and later
+  a process without Local Network permission cannot send to the LAN at all — multicast *and*
+  ordinary unicast fail with `EHOSTUNREACH` — and launchd services are denied by default. Incoming
+  HTTP still works, so the queue looks healthy while `rcm discover` finds nothing and the server log
+  says `mdns: send failed: EHOSTUNREACH`. Grant it once in System Settings ▸ Privacy & Security ▸
+  Local Network (the entry is the interpreter or binary named in the service file) and restart the
+  service. Until then sessions reach the server by address — `server = "http://<host>.local:8787"`
+  in `client.toml` works on the same Wi-Fi without any permission.
 
 ## Docker (Linux build machine)
 

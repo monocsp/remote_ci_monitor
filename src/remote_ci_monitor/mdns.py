@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import errno
 import socket
 import struct
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -38,6 +40,16 @@ from remote_ci_monitor.core.mdns import (
 
 RECV_SIZE = 2048
 ANNOUNCE_TIMES = 2
+#: 로컬 네트워크로 못 나갈 때의 errno. macOS 는 Local Network 권한이 없는 프로세스의
+#: LAN 트래픽을 멀티캐스트든 유니캐스트든 EHOSTUNREACH 로 막는다(launchd 서비스는 기본 거부).
+BLOCKED_CODES = frozenset({"EHOSTUNREACH", "ENETUNREACH", "EPERM", "EACCES"})
+LOCAL_NETWORK_HINT = (
+    "macOS needs Local Network permission for this process "
+    "(System Settings > Privacy & Security > Local Network); launchd services are denied by default"
+)
+SEND_ERROR = "cannot send on this network: "
+#: 이만큼 연속으로 실패하면 광고가 실제로 안 되는 것으로 보고 health 에 올린다.
+SEND_FAILURES_BEFORE_ERROR = 2
 
 
 def _multicast_socket(port: int, *, bind_ip: str = "0.0.0.0", loop: bool = True) -> socket.socket:
@@ -138,6 +150,8 @@ class Responder:
         self._stop = threading.Event()
         self.error: str | None = None
         self.answered = 0
+        self.send_failures = 0  # 연속 송신 실패 수(성공하면 0)
+        self._last_send_code: str | None = None  # 같은 errno 를 로그에 반복하지 않으려고
 
     # ── 규칙 ────────────────────────────────────────────────────────────────
 
@@ -184,13 +198,32 @@ class Responder:
 
     # ── 스레드 ──────────────────────────────────────────────────────────────
 
-    def _send(self, payload: bytes) -> None:
+    def _send(self, payload: bytes, addr: tuple[str, int] | None = None) -> None:
+        """멀티캐스트(기본)나 질의자에게 그대로. 실패는 errno 이름으로 남긴다 — 「OSError」만으로는
+        무엇이 막았는지 알 수 없다(실측: macOS launchd 서비스의 EHOSTUNREACH)."""
         if self._sock is None:
             return
         try:
-            self._sock.sendto(payload, (MDNS_GROUP, self.mdns_port))
+            self._sock.sendto(payload, addr or (MDNS_GROUP, self.mdns_port))
         except OSError as e:
-            self.log(f"mdns: send failed: {type(e).__name__}")
+            self._send_failed(e)
+            return
+        self.send_failures = 0
+        self._last_send_code = None
+        if self.error is not None and self.error.startswith(SEND_ERROR):
+            self.error = None
+
+    def _send_failed(self, e: OSError) -> None:
+        code = errno.errorcode.get(e.errno or 0, str(e.errno))
+        self.send_failures += 1
+        if code != self._last_send_code:
+            hint = ""
+            if code in BLOCKED_CODES and sys.platform == "darwin":
+                hint = f" — {LOCAL_NETWORK_HINT}"
+            self.log(f"mdns: send failed: {code}{hint}")
+            self._last_send_code = code
+        if self.send_failures >= SEND_FAILURES_BEFORE_ERROR:
+            self.error = f"{SEND_ERROR}{code}"
 
     def _loop(self) -> None:
         try:
@@ -220,10 +253,7 @@ class Responder:
             if out is None:
                 continue
             if addr and addr[1] != self.mdns_port:  # legacy unicast: 물어본 그 주소로
-                try:
-                    self._sock.sendto(out, addr)
-                except OSError as e:
-                    self.log(f"mdns: unicast reply failed: {type(e).__name__}")
+                self._send(out, addr)
             else:
                 self._send(out)
 

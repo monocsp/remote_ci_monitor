@@ -7,7 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- Discovery failures now say **why**. A responder that cannot send logs the errno by name
+  (`mdns: send failed: EHOSTUNREACH`) instead of `OSError`, once per cause rather than per packet,
+  and on macOS the line names the Local Network permission that a launchd service is denied by
+  default. Two consecutive failures set `/api/health.advertise.error`, so a server that advertises
+  but cannot be reached no longer reports itself as advertising; `rcm check` shows it as a `warn`
+  row (`server cannot be discovered: …`) without failing the check.
 
 ## [0.2.2] - 2026-09-08
 
