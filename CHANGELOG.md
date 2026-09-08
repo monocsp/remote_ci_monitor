@@ -7,6 +7,23 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **The page reads like a page, not a terminal** (M5d-2). Sentences, labels, buttons and state
+  words are set in the system sans face; the monospace face is now kept for what it is for —
+  job ids, keys, commit shas, refs, repository URLs, step names, logs and the `rcm run …` command.
+  Numbers line up in columns (`tabular-nums`), section headings carry weight instead of
+  `text-transform: uppercase` (which gave Korean no hierarchy at all and mangled the Latin mixed
+  into it — `5s ago` became `5S AGO`), and the monospace stack finally names a Korean fallback.
+- **The host section is folded** (M5d-2). It is the fourth question the page answers, not the
+  first, and it was taking a third of the screen. A one-line summary beside the heading says which
+  machines are reporting and how they are doing; the section opens itself when a machine is busy or
+  a sample has gone stale, and if you open or close it yourself that choice is kept.
+- **The queue stopped repeating itself** (M5d-2). The Source column shows the commit alone — the
+  repository URL, identical on every row, moved into the expanded block — and the columns have
+  fixed widths so the reason takes the slack instead of leaving a hole in the middle of the table.
+  In Host pressure, the free space now reads as part of the disk figure (`Disk 30% (699 GB free)`)
+  instead of trailing off the end of the line where it looked like it belonged to the GPU.
+
 ## [0.2.4] - 2026-09-08
 
 The page speaks Korean, the host card says how much disk is left, and a running step's seconds

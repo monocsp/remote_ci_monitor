@@ -501,8 +501,10 @@ def round1() -> None:
         )
         sh.shot("log")
         sh.js("document.querySelector('[data-drawer-close]').click()")
+        # 호스트 절은 평소 접혀 있다(M5d-2 §4.1) — 문서 사진은 펼친 모습을 찍는다
+        sh.js("var d=document.querySelector('#host-details'); if (d) d.open = true")
         sh.js("document.querySelector('#host').scrollIntoView({block:'start'})")
-        time.sleep(0.3)
+        time.sleep(0.4)
         sh.shot("host")
         sh.chrome.call(
             "Emulation.setDeviceMetricsOverride",
