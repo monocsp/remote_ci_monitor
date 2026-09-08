@@ -17,6 +17,8 @@ BG = (24, 27, 31)
 FG = (230, 237, 243)
 DIM = (139, 148, 158)
 PROMPT = (126, 231, 135)
+#: 상자 번호를 글자 밖에 두기 위해 오른쪽에 비워 두는 폭
+BADGE_GUTTER = 34
 JSON_C = (210, 168, 255)
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 EMOJI_CHARS = {"✅", "❌", "⚠️", "⏳", "🔑", "⚠"}
@@ -49,7 +51,8 @@ def render(
     adv = font.getlength("M")
     ncols = width_chars or max(len(ln) for ln in lines)
     ncols = max(ncols, 40)
-    W = int(PAD_X * 2 + adv * ncols)
+    gutter = BADGE_GUTTER if boxes else 0
+    W = int(PAD_X * 2 + adv * ncols + gutter)
     top = PAD_Y + (28 if title else 0)
     H = int(top + LINE * len(lines) + PAD_Y)
     img = Image.new("RGB", (W, H), BG)
@@ -91,5 +94,5 @@ def render(
             (n, (PAD_X - 2, top + a * LINE + 1, adv * ncols + 4, (b - a + 1) * LINE - 3))
             for n, a, b in boxes
         ]
-        out = draw_boxes(img, px, pad=0, width=2, badge_at="tr")
+        out = draw_boxes(img, px, pad=0, width=2, badge_at="r")
     return save_png(out, dst)
