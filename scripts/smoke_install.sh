@@ -135,7 +135,9 @@ step "rcm jobs --json"
 "$RCM" jobs --json | "$PY" -c 'import json,sys; rows=json.load(sys.stdin); assert any(r.get("preset")=="ok" for r in rows), rows'
 
 step "web UI"
-curl -sf "$SERVER_URL/" | grep -q '<title>rcm queue</title>' || { echo "smoke: web UI missing" >&2; exit 1; }
+# 제목에는 `data-i18n` 속성이 붙는다(M5d-1) — 태그 이름으로만 찾는다
+curl -sf "$SERVER_URL/" | grep -q '<title' || { echo "smoke: web UI missing" >&2; exit 1; }
+curl -sf "$SERVER_URL/static/i18n.js" | grep -q "rcmI18n" || { echo "smoke: i18n.js missing" >&2; exit 1; }
 
 # ── 4. stop cleanly ──
 step "SIGTERM stops the server"

@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>rcm queue</title>
+<title data-i18n="page.title">rcm 큐</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <!-- 연결 끊김 띠 (항목 18). 30초 넘게 성공 응답이 없을 때만 보인다 -->
   <div id="banner-lost" class="banner warn" role="alert" hidden>
     <span class="live-dot" aria-hidden="true"></span>
-    <span data-lost-text>Lost connection</span>
+    <span data-lost-text data-i18n="conn.lost_short">연결 끊김</span>
     <span class="sub" data-lost-sub></span>
   </div>
   <div id="banner-note" class="banner info" role="alert" hidden></div>
@@ -25,36 +25,37 @@
     <span class="errchip" data-errchip hidden></span>
     <span class="skew" data-skew hidden></span>
     <span class="spacer"></span>
-    <button id="live-btn" class="livebtn" type="button" title="Click to pause updates" aria-pressed="false">
-      <span class="live" aria-hidden="true"></span><span data-live-text>connecting…</span>
+    <button id="live-btn" class="livebtn" type="button" title="갱신 멈추기" data-i18n-attr="title:conn.pause_hint" aria-pressed="false">
+      <span class="live" aria-hidden="true"></span><span data-live-text data-i18n="conn.connecting">연결 중…</span>
     </button>
-    <button id="tok-btn" class="tokbtn" type="button" aria-haspopup="dialog">🔑 add token</button>
+    <button id="lang-btn" class="langbtn" type="button" aria-pressed="false" title="언어 바꾸기" data-i18n-attr="title:lang.hint">EN</button>
+    <button id="tok-btn" class="tokbtn" type="button" aria-haspopup="dialog" data-i18n="token.add">🔑 토큰 넣기</button>
   </header>
 
   <!-- 요약 세 칸 (항목 23 · 24 · 25) — 5초 안에 답할 세 질문 -->
-  <section id="summary" class="summary" aria-label="Summary">
-    <div class="sum sum-yours" data-c="23"><span class="lab">Your jobs</span><span class="v" data-yours>—</span></div>
-    <div class="sum sum-stuck" data-c="24"><span class="lab">Not moving</span><span class="v" data-stuck>—</span></div>
-    <div class="sum sum-host" data-c="25"><span class="lab" data-host-lab>Host pressure</span><span class="v" data-pressure>—</span></div>
+  <section id="summary" class="summary" aria-label="요약" data-i18n-attr="aria-label:section.summary">
+    <div class="sum sum-yours" data-c="23"><span class="lab" data-i18n="summary.yours">내 잡</span><span class="v" data-yours>—</span></div>
+    <div class="sum sum-stuck" data-c="24"><span class="lab" data-i18n="summary.stuck">안 움직이는 것</span><span class="v" data-stuck>—</span></div>
+    <div class="sum sum-host" data-c="25"><span class="lab" data-host-lab data-i18n="summary.host">호스트 부하</span><span class="v" data-pressure>—</span></div>
   </section>
 
   <!-- 큐 (항목 5 ~ 13) -->
-  <section id="queue" class="s-section" aria-label="Queue">
-    <div class="s-h queue-header"><span class="t">Queue</span><span class="n" data-queue-header>—</span></div>
+  <section id="queue" class="s-section" aria-label="큐" data-i18n-attr="aria-label:section.queue">
+    <div class="s-h queue-header"><span class="t" data-i18n="section.queue">큐</span><span class="n" data-queue-header>—</span></div>
     <div data-queue-body></div>
   </section>
 
   <!-- 호스트 (항목 16 · 19) -->
-  <section id="host" class="s-section" aria-label="Host">
-    <div class="s-h"><span class="t">Host</span></div>
+  <section id="host" class="s-section" aria-label="호스트" data-i18n-attr="aria-label:section.host">
+    <div class="s-h"><span class="t" data-i18n="section.host">호스트</span></div>
     <div data-host-body></div>
   </section>
 
   <!-- 최근 완료 (항목 14 · 15 · 32) -->
-  <section id="recent" class="s-section last" aria-label="Recent">
-    <div class="s-h"><span class="t">Recent</span><span class="n" data-recent-header></span></div>
+  <section id="recent" class="s-section last" aria-label="최근" data-i18n-attr="aria-label:section.recent">
+    <div class="s-h"><span class="t" data-i18n="section.recent">최근</span><span class="n" data-recent-header></span></div>
     <div data-recent-body></div>
-    <details class="est" id="estimates"><summary data-est-summary>Estimates</summary><div class="row" data-est-body></div></details>
+    <details class="est" id="estimates"><summary data-est-summary data-i18n="est.title">추정</summary><div class="row" data-est-body></div></details>
   </section>
 
   <footer class="foot sub">
@@ -66,14 +67,14 @@
 <!-- 토큰 입력 (항목 4 · 29). 저장은 localStorage 뿐, URL 금지 -->
 <dialog id="tok-dialog" aria-labelledby="tok-title">
   <form method="dialog" class="dlg">
-    <h2 id="tok-title">Client token</h2>
-    <p class="sub">Paste the token from <code>rcm token add</code>. It stays in this browser only and unlocks your jobs, log tails, logs and cancel.</p>
-    <input id="tok-input" type="password" autocomplete="off" spellcheck="false" placeholder="token" aria-label="token">
+    <h2 id="tok-title" data-i18n="token.title">클라이언트 토큰</h2>
+    <p class="sub" data-i18n-html="token.help"><code>rcm token add</code> 로 받은 토큰을 붙여 넣으세요. 이 브라우저에만 남고, 내 잡 표시 · 로그 꼬리 · 전체 로그 · 취소가 열립니다.</p>
+    <input id="tok-input" type="password" autocomplete="off" spellcheck="false" placeholder="토큰" aria-label="토큰" data-i18n-attr="placeholder:token.field,aria-label:token.field">
     <p class="dlg-status sub" data-tok-status></p>
     <div class="dlg-actions">
-      <button type="button" class="btn" data-tok-forget>Forget</button>
-      <button type="button" class="btn" data-tok-cancel>Close</button>
-      <button type="submit" class="btn primary" data-tok-save>Save</button>
+      <button type="button" class="btn" data-tok-forget data-i18n="token.forget">지우기</button>
+      <button type="button" class="btn" data-tok-cancel data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-tok-save data-i18n="dialog.save">저장</button>
     </div>
   </form>
 </dialog>
@@ -81,11 +82,11 @@
 <!-- 취소 확인 (항목 13 · 30) -->
 <dialog id="cancel-dialog" aria-labelledby="cancel-title">
   <form method="dialog" class="dlg">
-    <h2 id="cancel-title" data-cancel-title>Cancel job?</h2>
+    <h2 id="cancel-title" data-cancel-title data-i18n="cancel.title">잡을 취소할까요?</h2>
     <p data-cancel-body></p>
     <div class="dlg-actions">
-      <button type="button" class="btn" data-cancel-keep autofocus>Keep</button>
-      <button type="submit" class="btn danger" data-cancel-go>Cancel job</button>
+      <button type="button" class="btn" data-cancel-keep autofocus data-i18n="cancel.keep">그대로 두기</button>
+      <button type="submit" class="btn danger" data-cancel-go data-i18n="cancel.go">취소하기</button>
     </div>
   </form>
 </dialog>
@@ -93,16 +94,17 @@
 <!-- 로그 서랍 (항목 13) — 토큰 필요 -->
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">
-    <h2 id="drawer-title" data-drawer-title>Log</h2>
+    <h2 id="drawer-title" data-drawer-title data-i18n="drawer.title">로그</h2>
     <span class="sub" data-drawer-sub></span>
     <span class="spacer"></span>
-    <button type="button" class="btn" data-drawer-close aria-label="Close log">✕</button>
+    <button type="button" class="btn" data-drawer-close aria-label="로그 닫기" data-i18n-attr="aria-label:drawer.close">✕</button>
   </div>
   <pre class="drawer-log" data-drawer-log tabindex="0"></pre>
 </aside>
 
 <div id="toast" class="toast" aria-live="polite" hidden></div>
 
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

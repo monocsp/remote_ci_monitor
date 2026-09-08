@@ -8,6 +8,13 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **The web page speaks Korean, and you can switch it** (M5d-1). It opens in Korean regardless of
+  the browser's language and a button at the top right flips it to English; the choice is kept in
+  that browser and follows into other tabs. Everything the page writes comes from one catalogue
+  (`web/i18n.js`), including the server's outcome codes from M5d-0, so a job the server closed
+  reads in the viewer's language while a summary the *job* printed stays exactly as the team wrote
+  it. Identifiers never move: preset names, job keys, requester labels, commit shas, refs,
+  repository URLs, step names, logs and the `rcm run …` command are the same in both languages.
 - **The server says what happened in codes, not sentences** (M5d-0). Every summary the *server*
   writes now carries `summary_code` and `summary_args` beside the English `summary`, so a client
   can render the same fact in its own language: `cancelled_before_start`, `server_restarted`,

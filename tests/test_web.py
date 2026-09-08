@@ -18,7 +18,7 @@ import pytest
 from test_server import Server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WEB_FILES = ("index.html", "app.js", "style.css")
+WEB_FILES = ("index.html", "app.js", "i18n.js", "style.css")
 # ETag 는 sha256 앞 16자. 따옴표는 있어도 없어도 되고, If-None-Match 는 받은 값 그대로 보낸다.
 ETAG_RE = re.compile(r'^"?([0-9a-f]{16})"?$')
 # `pip wheel .` 은 격리된 빌드 환경에 hatchling 을 내려받는다 — 오프라인이면 실패가 아니라 skip.
@@ -53,11 +53,12 @@ def test_index_html_is_served_with_no_cache_and_nosniff(srv):
     assert int(headers["Content-Length"]) == len(body)
     assert body == web_file("index.html")  # 패키지 안의 파일 그대로
     html = body.decode("utf-8")
-    assert "<title>" in html
+    assert "<title" in html  # M5d-1: `data-i18n` 속성이 붙는다
     for needle in (
         'id="hdr"',
         'id="queue"',
         'id="banner-lost"',
+        '<script src="/static/i18n.js"',
         '<script src="/static/app.js"',
         '<link rel="stylesheet" href="/static/style.css"',
     ):
@@ -69,7 +70,11 @@ def test_index_html_is_served_with_no_cache_and_nosniff(srv):
 
 @pytest.mark.parametrize(
     "path,ctype",
-    [("/static/app.js", "application/javascript"), ("/static/style.css", "text/css")],
+    [
+        ("/static/app.js", "application/javascript"),
+        ("/static/i18n.js", "application/javascript"),
+        ("/static/style.css", "text/css"),
+    ],
 )
 def test_static_asset_content_type_etag_and_304(srv, path, ctype):
     name = path.rsplit("/", 1)[1]
