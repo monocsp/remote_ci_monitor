@@ -7,6 +7,11 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-08
+
+The page speaks Korean, the host card says how much disk is left, and a running step's seconds
+count up instead of standing still and then jumping.
+
 ### Added
 - **How much disk is left, next to CPU and memory** (M5d-2). A host sample now carries `disk`
   (`used_bytes`, `free_bytes`, `total_bytes`, `path`) for the filesystem the jobs actually write
@@ -206,7 +211,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...v0.2.1
