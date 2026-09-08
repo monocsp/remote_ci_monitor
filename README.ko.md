@@ -42,7 +42,7 @@
 빌드 머신은 macOS(Apple Silicon · Intel)와 Linux. Windows 는 범위 밖이고, Windows 의 세션은 WSL
 로 제출한다.
 
-Status: **M0–M5 done (v0.2.2)**. GitHub 백엔드는 없고 계획도 없다. 계획서는 `PLAN.md`, 변경 이력은
+Status: **M0–M5 done (v0.2.3)**. GitHub 백엔드는 없고 계획도 없다. 계획서는 `PLAN.md`, 변경 이력은
 `CHANGELOG.md`.
 
 ## Install
