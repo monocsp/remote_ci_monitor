@@ -45,6 +45,11 @@ MAC_VM_STAT = ["vm_stat"]
 MAC_MEMSIZE = ["sysctl", "-n", "hw.memsize"]
 MAC_TOP = ["top", "-l", "2", "-n", "0", "-s", "1"]
 MAC_PS = ["ps", "-Aro", "%cpu=,rss=,comm="]
+#: GPU 표본이 없는 이유(결정 37). 화면이 「GPU — 없음」을 자기 말로 쓴다.
+GPU_NO_SAMPLER = "no_sampler"
+GPU_NO_GPU = "no_gpu"
+GPU_SAMPLER_FAILED = "sampler_failed"
+
 MAC_IOREG = ["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"]
 LINUX_PS = ["ps", "-eo", "%cpu=,rss=,comm=", "--sort=-%cpu"]
 LINUX_NVIDIA = [
@@ -149,10 +154,12 @@ class HostSampler(threading.Thread):
         top = parse_ps(self.runner(MAC_PS) or "", self.config.top_processes)
         gpu: dict[str, Any] | None = None
         note: str | None = None
+        code: str | None = None
         if self.config.gpu == "off":
-            note = "disabled"
+            note, code = "disabled", GPU_NO_GPU
         else:
             gpu, note = parse_ioreg_gpu(self.runner(MAC_IOREG) or "")
+            code = None if gpu is not None else GPU_SAMPLER_FAILED
         return {
             "cpu": cpu,
             "memory": mac_memory(vm, total),
@@ -160,6 +167,7 @@ class HostSampler(threading.Thread):
             "top": top,
             "gpu": gpu,
             "gpu_note": note,
+            "gpu_note_code": code,
         }
 
     def _collect_linux(self) -> dict[str, Any]:
@@ -174,16 +182,17 @@ class HostSampler(threading.Thread):
         top = parse_ps(self.runner(LINUX_PS) or "", self.config.top_processes)
         gpu: dict[str, Any] | None = None
         note: str | None = None
+        code: str | None = None
         if self.config.gpu == "off":
-            note = "disabled"
+            note, code = "disabled", GPU_NO_GPU
         else:
             out = self.runner(LINUX_NVIDIA)
             if out is None:
-                note = "nvidia-smi not found"
+                note, code = "nvidia-smi not found", GPU_NO_SAMPLER
             else:
                 gpu = parse_nvidia_smi(out)
                 if gpu is None:
-                    note = "nvidia-smi returned no usable data"
+                    note, code = "nvidia-smi returned no usable data", GPU_SAMPLER_FAILED
         return {
             "cpu": cpu,
             "memory": memory,
@@ -191,6 +200,7 @@ class HostSampler(threading.Thread):
             "top": top,
             "gpu": gpu,
             "gpu_note": note,
+            "gpu_note_code": code,
         }
 
     def sample_once(self) -> HostSample | None:
@@ -232,6 +242,7 @@ class HostSampler(threading.Thread):
                 memory=memory,
                 gpu=raw["gpu"],
                 gpu_note=raw["gpu_note"],
+                gpu_note_code=raw.get("gpu_note_code"),
                 top=tuple(raw["top"]),
                 history=tuple(self._history),
             )

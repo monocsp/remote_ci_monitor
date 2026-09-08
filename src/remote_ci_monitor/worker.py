@@ -16,10 +16,13 @@ import os
 import shutil
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from remote_ci_monitor.config import ServerConfig
+from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
@@ -91,6 +94,24 @@ def tail_lines(path: Path, n: int = 5, max_bytes: int = 8192) -> list[str] | Non
     return lines[-n:]
 
 
+@dataclass(frozen=True)
+class Outcome:
+    """잡을 끝낼 때 필요한 값.
+
+    `summary` 는 사람이 읽는 문장, `code`/`args` 는 화면이 자기 말로 다시 그릴 재료다(결정 37).
+    """
+
+    state: str
+    summary: str | None
+    failed_step: str | None
+    code: str | None = None
+    args: dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self):
+        """옛 3-튜플처럼 풀 수 있게 — `state, summary, failed_step = outcome_for(...)`."""
+        return iter((self.state, self.summary, self.failed_step))
+
+
 def outcome_for(
     job: Job,
     markers: Sequence[Marker],
@@ -102,9 +123,15 @@ def outcome_for(
     timed_out: bool = False,
     lost: bool = False,
     lost_summary: str = "server stopped while running",
-) -> tuple[str, str | None, str | None]:
-    """종료 규칙 — (상태, 요약, failed_step). 로컬 워커와 원격 워커 보고(`/worker/.../finish`)가
-    같은 함수를 쓴다(M5b-2). 요약은 마커의 `summary`, 없으면 `exit N`; 취소는 요청자 이름."""
+    lost_code: str | None = "server_stopped_while_running",
+    lost_args: dict[str, Any] | None = None,
+) -> Outcome:
+    """종료 규칙 — 상태 · 요약 · failed_step, 그리고 서버가 만든 요약이면 코드와 인자(결정 37).
+
+    로컬 워커와 원격 워커 보고(`/worker/.../finish`)가 같은 함수를 쓴다(M5b-2). 요약은 마커의
+    `summary`, 없으면 `exit N`; 취소는 요청자 이름. **잡이 찍은 요약에는 코드가 없다** — 팀이 쓴
+    문장이라 번역 대상이 아니다.
+    """
     forced = cancelled or timed_out or lost
     progress = progress_from_markers(
         markers,
@@ -113,20 +140,31 @@ def outcome_for(
         now=finished,
         exit_code=rc if not forced else 1,
     )
+    code: str | None = None
+    args: dict[str, Any] = {}
     if lost:
-        state, summary = LOST, lost_summary
+        state, summary, code, args = LOST, lost_summary, lost_code, dict(lost_args or {})
     elif cancelled:
         state = CANCELLED
-        summary = f"cancelled by {job.cancel.by}" if job.cancel is not None else None
+        if job.cancel is not None:
+            summary, code, args = outcome.summary("cancelled_by", by=job.cancel.by)
+        else:
+            summary = None
     elif timed_out:
-        state, summary = TIMED_OUT, format_limit(job.timeout_seconds)
+        state = TIMED_OUT
+        summary, code, args = outcome.summary("timed_out", seconds=job.timeout_seconds)
     elif rc == 0:
-        state, summary = SUCCEEDED, progress.summary
+        state, summary = SUCCEEDED, progress.summary  # 잡이 찍은 문장 — 코드 없음
     else:
         state = FAILED
-        summary = progress.summary or (f"exit {rc}" if rc is not None else None)
+        if progress.summary:
+            summary = progress.summary  # 잡이 찍은 문장 — 코드 없음
+        elif rc is not None:
+            summary, code, args = outcome.summary("exit_code", code=rc)
+        else:
+            summary = None
     failed_step = progress.failed_step if state != SUCCEEDED else None
-    return state, summary, failed_step
+    return Outcome(state=state, summary=summary, failed_step=failed_step, code=code, args=args)
 
 
 class Worker(threading.Thread):
@@ -221,11 +259,14 @@ class Worker(threading.Thread):
             err = _safe_error(e)
             if current is not None:
                 try:
+                    text, code, args = outcome.summary("worker_error", detail=str(err))
                     self.store.finish(
                         current.id,
                         FAILED,
                         now=self.now_fn(),
-                        summary=f"worker error: {err}"[:200],
+                        summary=text,
+                        summary_code=code,
+                        summary_args=args,
                     )
                     self._changed(current.id)
                 except Exception:  # noqa: BLE001
@@ -314,7 +355,7 @@ class Worker(threading.Thread):
             return
         markers = self.store.markers(job.id)
         job_now = self.store.get_job(job.id) or job
-        state, summary, failed_step = outcome_for(
+        oc = outcome_for(
             job_now,
             markers,
             started=result.started,
@@ -326,14 +367,16 @@ class Worker(threading.Thread):
         )
         self.store.finish(
             job.id,
-            state,
+            oc.state,
             now=result.finished,
             exit_code=result.rc,
-            summary=summary,
-            failed_step=failed_step,
+            summary=oc.summary,
+            summary_code=oc.code,
+            summary_args=oc.args,
+            failed_step=oc.failed_step,
         )
         # ── 정리 ──
-        keep = state != SUCCEEDED and self.config.server.keep_workspace_on_failure
+        keep = oc.state != SUCCEEDED and self.config.server.keep_workspace_on_failure
         if not keep:
             shutil.rmtree(workspace, ignore_errors=True)
 
@@ -415,6 +458,7 @@ __all__ = [
     "tail_lines",
     "format_limit",
     "outcome_for",
+    "Outcome",
     "MAX_LINE_BYTES",
     "POLL_SECONDS",
     "READ_CHUNK",

@@ -186,7 +186,7 @@ WCAG 1.4.1. 그리고 **움직임도 상태 채널**이다(Vercel: 종료 아닌
 | `cancelled_before_start` | — | `cancelled before start` | `store.py:906` |
 | `server_restarted` | `at` | `server restarted {when}` | `store.py:1000` |
 | `server_restarted_during_upload` | — | `server restarted during upload` | `store.py:1014` |
-| `upload_abandoned` | `bytes` | `upload abandoned after {span}` | `store.py:1245` |
+| `upload_abandoned` | `seconds` | `upload abandoned after {span}` | `store.py:1245` |
 | `upload_interrupted` | `bytes` | `upload interrupted after {n}` | `server.py:1250` |
 | `snapshot_too_big` | `bytes`, `limit` | `snapshot {n} exceeds {limit}` | `server.py:932`, `1200` |
 | `snapshot_rejected` | `kind` | `snapshot rejected: {ExceptionType}` | `server.py:1071` |

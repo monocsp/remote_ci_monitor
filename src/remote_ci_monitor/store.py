@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.model import (
     ACTIVE_STATES,
     BUSY_STATES,
@@ -48,10 +49,11 @@ from remote_ci_monitor.core.model import (
     Source,
     Transition,
 )
+from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo
 
-DB_VERSION = 5
+DB_VERSION = 6
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -89,7 +91,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   artifacts_purged_at REAL,
   priority INTEGER NOT NULL DEFAULT 0,
   pool TEXT NOT NULL DEFAULT 'default',
-  worker_name TEXT
+  worker_name TEXT,
+  summary_code TEXT,
+  summary_args TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -184,7 +188,19 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool)",  # list_pools 가 status 마다 돈다
         _WORKERS_SQL,
     ),
+    # v5 → v6(M5d-0): 서버가 만든 요약의 코드와 원시 인자(결정 37). 옛 행은 코드가 없다 —
+    # 화면은 저장된 문장으로 물러선다.
+    6: (
+        "ALTER TABLE jobs ADD COLUMN summary_code TEXT",
+        "ALTER TABLE jobs ADD COLUMN summary_args TEXT",
+    ),
 }
+
+
+def _outcome(code: str, **args: Any) -> dict[str, Any]:
+    """`_set_state` 에 바로 넣을 요약 세 값(문장·코드·인자 JSON). 결정 37."""
+    text, code, clean = outcome.summary(code, **args)
+    return {"summary": text, "summary_code": code, "summary_args": dump_args(clean)}
 
 
 class StoreError(RuntimeError):
@@ -369,6 +385,8 @@ class Store:
             finished_at=_dt(row["finished_at"]),
             exit_code=row["exit_code"],
             summary=row["summary"],
+            summary_code=row["summary_code"],
+            summary_args=load_args(row["summary_args"]),
             failed_step=row["failed_step"],
             lane=row["lane"],
             timeout_seconds=row["timeout_seconds"],
@@ -903,7 +921,7 @@ class Store:
                     ts,
                     finished_at=ts,
                     cancelled_by=by,
-                    summary="cancelled before start",
+                    **_outcome("cancelled_before_start"),
                 )
                 new = CANCELLED
             elif state == RUNNING:
@@ -936,6 +954,8 @@ class Store:
         now: datetime,
         exit_code: int | None = None,
         summary: str | None = None,
+        summary_code: str | None = None,
+        summary_args: dict[str, Any] | None = None,
         failed_step: str | None = None,
         cancelled_by: str | None = None,
         only_from: Iterable[str] | None = None,
@@ -962,6 +982,8 @@ class Store:
                 finished_at=ts,
                 exit_code=exit_code,
                 summary=summary,
+                summary_code=summary_code,
+                summary_args=dump_args(summary_args),
                 failed_step=failed_step,
                 cancelled_by=cancelled_by if cancelled_by is not None else row["cancel_by"],
                 lane=None,
@@ -997,7 +1019,7 @@ class Store:
                     recover_state,
                     ts,
                     finished_at=ts,
-                    summary=f"server restarted {when}",
+                    **_outcome("server_restarted", at=when),
                     lane=None,
                     phase=None,
                 )
@@ -1011,7 +1033,7 @@ class Store:
                     CANCELLED,
                     ts,
                     finished_at=ts,
-                    summary="server restarted during upload",
+                    **_outcome("server_restarted_during_upload"),
                     cancelled_by="server",
                 )
                 cancelled.append(int(row["id"]))
@@ -1175,7 +1197,15 @@ class Store:
             (name, *sorted(BUSY_STATES)),
         )
 
-    def mark_lost_for_worker(self, name: str, now: datetime, summary: str) -> list[int]:
+    def mark_lost_for_worker(
+        self,
+        name: str,
+        now: datetime,
+        summary: str,
+        *,
+        summary_code: str | None = None,
+        summary_args: dict[str, Any] | None = None,
+    ) -> list[int]:
         """그 워커의 running·cancelling 잡을 전부 lost 로. 닫은 잡 id 목록."""
         conn = self._conn()
         ts = _ts(now)
@@ -1194,6 +1224,8 @@ class Store:
                     ts,
                     finished_at=ts,
                     summary=summary[:200],
+                    summary_code=summary_code,
+                    summary_args=dump_args(summary_args),
                     lane=None,
                     phase=None,
                 )
@@ -1233,16 +1265,14 @@ class Store:
             "SELECT id FROM jobs WHERE state=? AND COALESCE(last_received_at, created_at) < ?",
             (UPLOADING, cutoff),
         ).fetchall():
-            span = (
-                f"{int(abandon_seconds // 60)}m"
-                if abandon_seconds >= 60
-                else f"{int(abandon_seconds)}s"
-            )
+            text, code, args = outcome.summary("upload_abandoned", seconds=int(abandon_seconds))
             if self.finish(
                 int(row["id"]),
                 CANCELLED,
                 now=now,
-                summary=f"upload abandoned after {span}",
+                summary=text,
+                summary_code=code,
+                summary_args=args,
                 cancelled_by="server",
                 only_from=(UPLOADING,),
             ):
