@@ -50,7 +50,8 @@ Leave that terminal alone for now. To keep it running after you log out, use the
 
 ## 3. Your machine
 
-The session needs to know two things: where the server is, and who you are.
+The session needs to know two things: **where** the server is, and **who you are**. Only the first
+one can be automatic, and the difference is worth knowing before you start.
 
 On the same network you do not have to answer the first one. Ask what is out there:
 
@@ -60,6 +61,26 @@ On the same network you do not have to answer the first one. Ask what is out the
 2. One line per server. If exactly one shows up, you can leave `server` out of your config
    entirely and rcm will use it. Nothing found? The server is on another network, or its
    `advertise` is off — put its address in the file by hand.
+
+Leaving `server` out needs rcm **0.2.2 or newer on both machines**. An older client has no
+discovery at all: it stops with `no server configured` and, unlike `rcm worker`, it never compares
+its version with the server's, so nothing points at the real cause. When in doubt, write the
+address (`http://<build-machine>.local:8787`) — it costs nothing and always works.
+
+**The token is not discovered, and never will be.** `rcm token add` runs on the build machine and
+writes straight to the server's database; no API hands one out. Somebody has to carry it over. So
+on a fresh machine this is the normal, correct state:
+
+```
+ok    server    v0.2.3 (found on this network)
+FAIL  token     no token
+ok    presets   gate, gate-smoke, ...
+ok    pools     default (1 lane)
+```
+
+Three green rows and one red one. The server is open enough to show you its queue without a token
+(`read_auth = "none"`), which makes it look finished. It is not: every write needs the token, and
+copying it over is the one step left.
 
 Write `~/.config/rcm/client.toml`. It holds a token, so it must not be readable by others:
 

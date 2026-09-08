@@ -7,7 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- Documentation: say plainly that **discovery resolves the address, not who you are**. A token is
+  only ever created on the build machine (`rcm token add` writes to the server's database; there
+  is no API that hands one out), so a session that has just found the server and shows a green
+  `server` row next to a red `token` row is in the expected state, with one step left. Leaving
+  `server` out of `client.toml` is also now stated to need 0.2.2+ on both machines, since an older
+  client has no discovery and does not compare versions the way `rcm worker` does. And `mode 600`
+  on a file holding a token is documented as refused, not merely advised.
+  ([#44](https://github.com/monocsp/remote_ci_monitor/pull/44))
 
 ## [0.2.3] - 2026-09-08
 

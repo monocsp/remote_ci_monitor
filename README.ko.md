@@ -85,9 +85,19 @@ macOS 면 방화벽 허용 창에서 Python 을 허용한다. 다른 컴퓨터�
 
 ## Session machine (3 commands)
 
-빌드 머신과 **같은 Wi-Fi·LAN** 이면 세션은 주소가 필요 없다. `server` 를 비워 두면(또는
-`server = "auto"`) rcm 이 알아서 찾는다. `rcm discover` 로 무엇이 보이는지 확인할 수 있다. 다른
-네트워크에서는 경로를 직접 마련해야 한다 — Tailscale 이나 터널 — 그 주소를 `client.toml` 에 적는다.
+세션에 필요한 건 두 가지다. 서버가 **어디** 있는지, 그리고 **내가 누구**인지. 자동이 되는 건
+앞의 하나뿐이다.
+
+빌드 머신과 **같은 Wi-Fi·LAN** 이면 `server` 를 비워 두면 된다(또는 `server = "auto"`). rcm 이
+알아서 찾고, `rcm discover` 로 무엇이 보이는지 확인할 수 있다. 단 **양쪽 다 rcm 0.2.2 이상**
+이어야 한다. 그 아래 클라이언트에는 발견 기능이 아예 없어서 `no server configured` 로 멈추고,
+`rcm worker` 와 달리 클라이언트는 서버와 버전을 맞춰 보지도 않는다. 다른 네트워크에서는 경로를
+직접 마련해야 한다 — Tailscale 이나 터널 — 그 주소를 `client.toml` 에 적는다.
+
+나머지 반쪽인 토큰은 **일부러 손으로 옮긴다**. `rcm token add` 는 **빌드 머신에서** 돌고 서버의
+DB 에 바로 쓴다. 토큰을 내주는 API 는 없고 앞으로도 두지 않는다. 그래서 서버를 막 찾은 머신에서
+`rcm check` 의 **server** 는 초록인데 **token** 만 빨간 건 고장이 아니다. 토큰을 옮기는 것이
+남은 유일한 단계다.
 
 ```sh
 rcm init client --server http://<빌드머신>:8787   # ~/.config/rcm/client.toml (모드 600)
