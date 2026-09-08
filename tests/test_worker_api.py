@@ -916,7 +916,16 @@ def test_log_appends_raw_bytes_and_parses_markers_on_the_server(srv):
     assert srv.log_text(jid) == (first + second).decode()
     p = srv.row(jid)["progress"]
     assert p["current_name"] == "test" and p["steps_done"] == 1
-    assert p["steps"][0] == {"index": 1, "name": "build", "state": "done", "ok": True, "seconds": 7}
+    # M5d-2: 스텝마다 `started_at`·`ended_at` 이 붙었다(화면이 도는 스텝의 초를 스스로 센다).
+    assert p["steps"][0] == {
+        "index": 1,
+        "name": "build",
+        "state": "done",
+        "ok": True,
+        "seconds": 7,
+        "started_at": iso(T0),
+        "ended_at": iso(at(7)),
+    }
     assert p["last_output_at"] == iso(at(7))
     markers = srv.store.markers(jid)
     assert [(m.kind, m.value, m.at) for m in markers] == [
@@ -1265,6 +1274,58 @@ def test_heartbeat_truncates_an_oversized_top_list(srv):
     assert srv.heartbeat("build-02", host_sample={**SAMPLE, "top": top})[0] == 200
     (h,) = srv.pools()["default"]["hosts"]
     assert h["top"] == top[:10]
+
+
+# ── 호스트 표본의 새 칸 (M5d-2 §4.6 (가)·(나)) ───────────────────────────────
+
+#: 잡이 쓰는 파일 시스템 — 워커는 자기 `data_path` 를 본다.
+DISK = {
+    "used_bytes": 120 * 10**9,
+    "free_bytes": 340 * 10**9,
+    "total_bytes": 460 * 10**9,
+    "path": "/var/lib/rcm",
+}
+
+
+def test_heartbeat_host_sample_carries_the_disk_and_the_gpu_note_code(srv):
+    """§4.6 (가)·(나): 새 워커가 `disk`·`gpu_note_code` 를 실어 보내면 `hosts[]` 에 그대로 온다.
+
+    M5d-0 회귀 — 파서가 `gpu_note_code` 를 모른다고 표본 **전체**를 버리면 hosts[] 가 조용히
+    빈다. 여기가 그걸 잡는다.
+    """
+    srv.registered("build-02")
+    srv.clock.advance(7)
+    sample = {**SAMPLE, "disk": DISK, "gpu_note_code": "no_sampler"}
+    assert srv.heartbeat("build-02", host_sample=sample)[0] == 200
+    (h,) = srv.pools()["default"]["hosts"]
+    assert h["disk"] == DISK
+    assert h["gpu_note_code"] == "no_sampler"
+    assert h["gpu_note"] == "nvidia-smi not found"  # 원문도 그대로
+    assert h["name"] == "build-02" and h["source"] == "worker"
+    assert h["cores"] == 8 and h["cpu"]["busy"] == 12.5  # 나머지 칸도 살아 있다
+    assert srv.pools()["default"]["hosts_error"] is None
+
+
+def test_heartbeat_keeps_a_sample_that_carries_a_key_this_server_does_not_know(srv):
+    """§4.6 (나): 버전이 어긋나도 호스트 칸은 산다 — 모르는 최상위 키는 버리고 나머지를 읽는다."""
+    srv.registered("build-02")
+    srv.clock.advance(7)
+    newer = {**SAMPLE, "brand_new_key_from_a_newer_worker": 1, "npu": {"util_pct": 3}}
+    assert srv.heartbeat("build-02", host_sample=newer)[0] == 200
+    (h,) = srv.pools()["default"]["hosts"]
+    assert h["cores"] == 8 and h["cpu"]["busy"] == 12.5
+    assert h["top"] == SAMPLE["top"] and h["history"] == SAMPLE["history"]
+    assert "brand_new_key_from_a_newer_worker" not in h and "npu" not in h
+
+
+def test_heartbeat_drops_a_disk_with_an_unknown_nested_key(srv):
+    """중첩 dict 의 검사 강도는 안 낮춘다 — 모르는 **최상위** 키만 버린다."""
+    srv.registered("build-02")
+    srv.clock.advance(7)
+    bad = {**SAMPLE, "disk": {**DISK, "mount_point": "/"}}
+    assert srv.heartbeat("build-02", host_sample=bad)[0] == 200
+    assert srv.pools()["default"]["hosts"] == []
+    assert srv.store.get_worker("build-02").last_seen_at == at(7)
 
 
 # ── 격리 검증에서 더한 것 (2026-09-07) ────────────────────────────────────────

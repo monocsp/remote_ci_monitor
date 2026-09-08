@@ -254,7 +254,12 @@ class App(RemoteWorkersMixin):
         self.notifier.start()
         host = socket.gethostname().split(".")[0] or "host"
         self.sampler = HostSampler(
-            self.config.host, name=host, publish=self.publish, stop=self.stop, now_fn=self.now_fn
+            self.config.host,
+            name=host,
+            publish=self.publish,
+            stop=self.stop,
+            now_fn=self.now_fn,
+            disk_path=str(self.config.server.data_dir),
         )
         self.sampler.start()
         self.responder = None

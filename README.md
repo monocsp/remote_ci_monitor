@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="The web queue: one job running with its steps, one waiting with an ETA, and the build machine's CPU, memory and GPU below" width="820">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="The web queue: one job running with its steps, one waiting with an ETA, and the build machine's CPU, memory, disk and GPU below" width="820">
 </p>
 
 A team that shares **one build machine** ends up queueing by hand: who is running what, is it stuck
@@ -137,7 +137,7 @@ screenshots.**
 | `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--no-join` never joins an identical job; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
-| `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · GPU · top processes) |
+| `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · disk · GPU · top processes) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
 | `rcm presets [--json]` | presets the server offers and their inputs |

@@ -149,7 +149,7 @@ NEW_POOL = frozenset(
 )
 NEW_RECENT = frozenset({"summary_code", "summary_args"})
 NEW_ROW = frozenset({"summary", "summary_code", "summary_args"})
-NEW_HOST = frozenset({"gpu_note_code"})
+NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)
 
 
 # ── 조립 도우미 ───────────────────────────────────────────────────────────────
@@ -432,6 +432,42 @@ def test_a_host_with_a_gpu_has_neither_note_nor_code():
     doc = host_json(host, now=NOW)
     assert doc["gpu_note"] is None
     assert doc.get("gpu_note_code") is None
+
+
+# ── disk (M5d-2 §4.6 (가)) ───────────────────────────────────────────────────
+
+#: 잡이 쓰는 파일 시스템 — 루트 파티션이 아니라 데이터 디렉터리다.
+DISK = {
+    "used_bytes": 120 * 10**9,
+    "free_bytes": 340 * 10**9,
+    "total_bytes": 460 * 10**9,
+    "path": "/var/lib/rcm",
+}
+
+
+def test_host_carries_the_disk_of_the_filesystem_the_jobs_use():
+    host = sample_host(disk=DISK)
+    doc = host_json(host, now=NOW)
+    assert doc["disk"] == DISK
+    assert doc["disk"] is not host.disk  # 사본 — 문서를 고쳐도 표본이 안 바뀐다
+    assert doc["disk"]["free_bytes"] == 340 * 10**9  # 원시 바이트 — `340 GB` 가 아니다
+
+
+def test_a_host_that_could_not_read_its_disk_still_has_the_key():
+    doc = host_json(sample_host(), now=NOW)
+    assert "disk" in doc and doc["disk"] is None
+    assert doc["cpu"] is not None and doc["memory"] is not None  # 나머지 칸은 그대로 산다
+
+
+def test_disk_survives_the_whole_status_document_and_the_schema_is_still_v1():
+    pool = make_pool(hosts=[sample_host(disk=DISK)])
+    doc = status_json(make_model(pool))
+    (host,) = doc["pools"][0]["hosts"]
+    assert host["disk"] == DISK
+    assert BASE_HOST <= set(host)
+    assert set(host) - BASE_HOST <= NEW_HOST
+    assert doc["schema_version"] == SCHEMA_VERSION == 1
+    assert json.loads(json.dumps(doc))["pools"][0]["hosts"][0]["disk"] == DISK
 
 
 # ── 취소된 잡의 문장은 그대로 ────────────────────────────────────────────────
