@@ -14,16 +14,16 @@ of a key bumps that number and is listed here.
   card gains a meter reading `Disk 120 GB / 460 GB` with the remaining amount spelled out beside
   it, and Host pressure counts it. Two thresholds decide "full", because one gets it wrong: 85%
   used, **or** under 10 GiB free. A 4 TB disk at 90% is fine; a 60 GB disk at 80% cannot unpack a
-  snapshot. API `schema_version` stays 1 — the key is added.
+  snapshot. API `schema_version` stays 1 — the key is added. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
 - **Step timers count up instead of jumping** (M5d-2). A running step used to show whatever second
   the server put in the last status document and then leap ten or twenty seconds when the next one
   arrived. Progress now ships `job_started_at` and per-step `started_at`/`ended_at`, and the page
   counts from those anchors once a second, so `analyze 9s` becomes `10s`, not `26s`. Finished jobs
   keep the server's fixed number, and a browser whose clock offset is unknown keeps showing the
-  server's value rather than quietly counting on its own clock.
+  server's value rather than quietly counting on its own clock. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
 - **The queue says what is running** (M5d-2). Rows are split under two headings, "Running now" and
   "Waiting", each with a count, and an empty group says so instead of vanishing. A running row now
-  carries what it is doing right now — `step 2/4 analyze 12s` — without being expanded.
+  carries what it is doing right now — `step 2/4 analyze 12s` — without being expanded. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
 
 - **The web page speaks Korean, and you can switch it** (M5d-1). It opens in Korean regardless of
   the browser's language and a button at the top right flips it to English; the choice is kept in
@@ -48,7 +48,7 @@ of a key bumps that number and is listed here.
   key it did not know, so an up-to-date worker's CPU, memory and GPU silently disappeared from its
   pool's host card. Unknown top-level keys are now ignored and the sample is kept; a sample with no
   recognised key at all is still rejected, and every value is still validated as strictly as before.
-  This is what lets a newer worker talk to an older server without going blank.
+  This is what lets a newer worker talk to an older server without going blank. ([#48](https://github.com/monocsp/remote_ci_monitor/pull/48))
 
 ### Changed
 - Documentation: say plainly that **discovery resolves the address, not who you are**. A token is
