@@ -438,6 +438,13 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
   나 `~/.config` 아래에 둔다.
 - **훅에는 키체인이 없다.** `gh` · `aws` 같은 도구를 부르는 `[[notify]]` 명령은 토큰을 파일(600)에서
   환경변수로 읽어야 한다. 대화형 키링은 없어서 호출이 훅 타임아웃까지 멈춘다.
+- **macOS 는 허용하지 않은 서비스의 내부망 통신을 막는다.** macOS 15 부터 Local Network 권한이
+  없는 프로세스는 LAN 으로 아예 못 나간다(멀티캐스트는 물론 평범한 유니캐스트도 `EHOSTUNREACH`).
+  launchd 서비스는 기본이 거부다. 들어오는 HTTP 는 그대로 되기 때문에 큐는 멀쩡해 보이는데
+  `rcm discover` 만 아무것도 못 찾고 서버 로그에 `mdns: send failed: EHOSTUNREACH` 가 남는다.
+  시스템 설정 ▸ 개인정보 보호 및 보안 ▸ 로컬 네트워크에서 한 번 켜고(항목은 서비스 파일이 가리키는
+  실행 파일 이름) 서비스를 재시작한다. 그 전까지는 세션이 주소로 붙으면 된다 — 같은 Wi-Fi 면
+  `client.toml` 의 `server = "http://<호스트>.local:8787"` 은 권한 없이도 된다.
 
 ## Docker (Linux build machine)
 

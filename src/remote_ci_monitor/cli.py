@@ -909,7 +909,8 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    rows: list[tuple[str, bool, str]] = [python_row()]
+    # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
+    rows: list[tuple[str, bool | None, str]] = [python_row()]
     client = None
     cfg = None
     try:
@@ -934,6 +935,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(
                 ("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}{found_tag}")
             )
+            adv = h.get("advertise") or {}
+            if adv.get("error"):
+                # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
+                rows.append(("advertise", None, f"server cannot be discovered: {adv['error']}"))
         except ClientError as e:
             rows.append(("server", False, e.message))
         if client.token:
@@ -967,9 +972,10 @@ def cmd_check(args: argparse.Namespace) -> int:
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
     except ConfigError as e:
         rows.append(("server config", False, str(e)))
-    ok_all = all(ok for _, ok, _ in rows)
+    ok_all = all(ok is not False for _, ok, _ in rows)
     for name, ok, detail in rows:
-        print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
+        label = "ok " if ok else ("warn" if ok is None else "FAIL")
+        print(f"{label}  {name:<13} {detail}")
     return 0 if ok_all else 1
 
 

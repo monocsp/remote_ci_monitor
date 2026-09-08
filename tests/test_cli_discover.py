@@ -34,6 +34,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -133,9 +134,9 @@ def found_lines(err: str) -> list[str]:
 def row(out: str, name: str) -> tuple[str, str] | None:
     """`rcm check` 출력에서 `name` 행의 (상태, 상세). 행이 없으면 None.
 
-    형식은 cmd_check 의 `{'ok ' if ok else 'FAIL'}  {name:<13} {detail}`.
+    형식은 cmd_check 의 `{ok |FAIL|warn}  {name:<13} {detail}`.
     """
-    m = re.search(rf"^(ok |FAIL)  {re.escape(name)} +(.*)$", out, re.M)
+    m = re.search(rf"^(ok |FAIL|warn)  {re.escape(name)} +(.*)$", out, re.M)
     return (m.group(1).strip(), m.group(2).strip()) if m else None
 
 
@@ -407,3 +408,32 @@ def test_check_with_no_discovered_server_keeps_the_no_server_row(home, fake, cap
         out + err
     )  # 같은 네트워크에 서버가 없거나 advertise 가 꺼져 있다
     assert rec.called
+
+
+def test_check_warns_when_the_server_says_it_cannot_be_discovered(srv, home, monkeypatch, capsys):
+    """광고가 켜져 있는데 서버가 패킷을 못 내보내는 상태(실측: macOS launchd 의 EHOSTUNREACH).
+
+    발견은 부가 기능이라 `rcm check` 를 FAIL 로 만들지는 않는다 — 대신 warn 행으로 알린다.
+    """
+    srv.app.responder = SimpleNamespace(
+        error="cannot send on this network: EHOSTUNREACH",
+        instance="macmini._rcm._tcp.local.",
+        stop=lambda: None,  # App.shutdown 이 부른다
+    )
+    monkeypatch.setenv("RCM_TOKEN", srv.tokens["alice"])
+    client_toml(home, f'server = "http://127.0.0.1:{srv.port}"\n')
+    code, out, err = run(capsys, ["check"])
+    assert code == 0, out + err
+    assert row(out, "advertise") is not None, out
+    status, detail = row(out, "advertise")
+    assert status == "warn", out
+    assert "EHOSTUNREACH" in detail, detail
+    assert row(out, "server")[0] == "ok", out
+
+
+def test_check_says_nothing_about_advertise_when_the_server_is_fine(srv, home, monkeypatch, capsys):
+    monkeypatch.setenv("RCM_TOKEN", srv.tokens["alice"])
+    client_toml(home, f'server = "http://127.0.0.1:{srv.port}"\n')
+    code, out, err = run(capsys, ["check"])
+    assert code == 0, out + err
+    assert row(out, "advertise") is None, out
