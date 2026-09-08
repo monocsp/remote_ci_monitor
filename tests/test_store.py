@@ -337,7 +337,7 @@ def finished_job(store, *, state=SUCCEEDED, finished, created=NOW, tree="9f8e", 
 
 
 def test_fresh_db_is_latest_schema_with_artifacts_purged_at(store, tmp_path):
-    assert DB_VERSION == 6 and store.user_version() == 6
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     j = enqueue(store)
     assert store.get_job(j.id).artifacts_purged_at is None
     with sqlite3.connect(tmp_path / "rcm.sqlite3") as c:
@@ -370,6 +370,10 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         # v6(M5d-0)이 더한 것도 뗀다(요약 코드·인자)
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        # v7(M5e)이 더한 것도 뗀다(합류 횟수 · 잡 산출물 묶음)
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("DROP TABLE blobs")
         c.execute("DROP TABLE notifications")
         c.execute("PRAGMA user_version=1")
@@ -381,7 +385,7 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         c.close()
     s2 = Store(path)  # 1 → 2 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 6 and s2.healthy()
+        assert s2.user_version() == DB_VERSION and s2.healthy()
         got = s2.get_job(j.id)
         assert got is not None and got.key == "gate:full" and got.state == QUEUED
         assert got.created_at == NOW and got.artifacts_purged_at is None
@@ -389,7 +393,7 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 6 and s3.get_job(j.id).key == "gate:full"
+    assert s3.user_version() == DB_VERSION and s3.get_job(j.id).key == "gate:full"
     s3.close()
 
 

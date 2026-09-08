@@ -110,7 +110,7 @@ def job_columns(path) -> set[str]:
 
 def test_fresh_db_is_schema_v3_with_priority_blobs_and_notifications(store, tmp_path):
     path = tmp_path / "rcm.sqlite3"
-    assert DB_VERSION == 6 and store.user_version() == 6
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     assert "priority" in job_columns(path)
     assert {"blobs", "notifications"} <= table_names(path)
     with sqlite3.connect(path) as c:
@@ -144,6 +144,9 @@ def test_migration_v2_to_v3_adds_priority_and_tables_and_keeps_rows(tmp_path):
         c.execute("DROP TABLE IF EXISTS notifications")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("PRAGMA user_version=2")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 2
@@ -152,7 +155,7 @@ def test_migration_v2_to_v3_adds_priority_and_tables_and_keeps_rows(tmp_path):
     assert "priority" not in job_columns(path)
     s2 = Store(path)  # 2 → 3 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 6 and s2.healthy()
+        assert s2.user_version() == DB_VERSION and s2.healthy()
         got = s2.get_job(j.id)
         assert got is not None and got.state == QUEUED and got.key == "gate:full"
         assert got.priority == NORMAL  # 기존 행은 normal
@@ -162,7 +165,7 @@ def test_migration_v2_to_v3_adds_priority_and_tables_and_keeps_rows(tmp_path):
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 6 and s3.get_job(j.id).priority == NORMAL
+    assert s3.user_version() == DB_VERSION and s3.get_job(j.id).priority == NORMAL
     s3.close()
 
 

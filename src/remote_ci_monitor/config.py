@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
+from remote_ci_monitor.core.artifacts import PolicyError, validate_globs
 from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
@@ -104,6 +105,15 @@ class ServerSection:
     worker_timeout_seconds: int = 60  # heartbeat 이 이만큼 없으면 워커 down · 잡 lost (M5b-2)
     worker_heartbeat_seconds: int = 5  # 워커에게 알려 주는 heartbeat 주기
     worker_claim_wait_seconds: int = 20  # `/worker/claim` long-poll 상한
+    # 잡 산출물(M5e). 전부 설정 키다 — 기본값만 결정 41 이고 운영자가 바꾼다.
+    artifact_retention_hours: int = 24  # TTL. `ready` 가 된 시각부터 잰다
+    max_artifact_bytes: int = 1_073_741_824  # 잡당 원본 바이트 상한 (1 GiB)
+    max_artifact_files: int = 10_000  # 잡당 파일 수(바이트와 따로 건다)
+    artifact_storage_max_bytes: int = 10 * 1024**3  # 서버 전체(발행 + 예약 + 스테이징)
+    artifact_timeout_seconds: int = 60  # 수집·검증·설치 예산
+    artifact_cancel_timeout_seconds: int = 5  # 취소·타임아웃 뒤 예산. 2 × heartbeat 미만
+    artifact_transfer_timeout_seconds: int = 300  # 업로드·다운로드 한 건의 시한
+    max_concurrent_artifact_transfers: int = 2  # 동시 전송 슬롯. 기다리지 않고 503
     advertise: bool | None = None  # mDNS 광고(M5c). None = bind 가 루프백이 아니면 켠다
     advertise_name: str = ""  # 발견 응답의 이름. 비면 짧은 호스트명
 
@@ -339,6 +349,7 @@ _PRESET_KEYS = {
     "env_passthrough",
     "env",
     "inputs",
+    "artifacts",
 }
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
 
@@ -529,6 +540,12 @@ def parse_preset(raw: Any) -> Preset:
     description = raw.get("description", "")
     if not isinstance(description, str):
         raise ConfigError(f"{where}: description must be a string")
+    try:
+        globs = validate_globs(raw.get("artifacts", []))
+    except PolicyError as e:
+        raise ConfigError(f"{where}: artifacts: {e}") from e
+    except TypeError as e:
+        raise ConfigError(f"{where}: artifacts must be a list of glob strings") from e
     return Preset(
         name=name,
         argv=argv,
@@ -543,6 +560,7 @@ def parse_preset(raw: Any) -> Preset:
         expected_seconds=expected,
         duration_key_inputs=dki,
         env_passthrough=passthrough,
+        artifacts=globs,
         env=dict(env),
         inputs=inputs,
     )
@@ -619,6 +637,27 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[server] worker_heartbeat_seconds must be >= 1")
     if s.worker_heartbeat_seconds >= s.worker_timeout_seconds:
         raise ConfigError("[server] worker_heartbeat_seconds must be < worker_timeout_seconds")
+    for key in (
+        "artifact_retention_hours",
+        "max_artifact_bytes",
+        "max_artifact_files",
+        "artifact_storage_max_bytes",
+        "artifact_timeout_seconds",
+        "artifact_cancel_timeout_seconds",
+        "artifact_transfer_timeout_seconds",
+        "max_concurrent_artifact_transfers",
+    ):
+        if getattr(s, key) < 1:
+            raise ConfigError(f"[server] {key} must be >= 1")
+    if any(p.artifacts for p in cfg.presets) and (
+        s.artifact_cancel_timeout_seconds >= 2 * s.worker_heartbeat_seconds
+    ):
+        # 서버는 미확인 취소를 `kill_at + 2 × heartbeat` 에 닫는다(`remote_workers.py`). 수집이
+        # 그보다 길면 워커의 finish 가 409 를 받고 모은 것이 버려진다(명세 §5). 산출물을 쓰는
+        # 프리셋이 하나도 없으면 이 짝은 의미가 없으므로 보지 않는다.
+        raise ConfigError(
+            "[server] artifact_cancel_timeout_seconds must be < 2 × worker_heartbeat_seconds"
+        )
     if not (0 <= s.worker_claim_wait_seconds <= 60):
         raise ConfigError("[server] worker_claim_wait_seconds must be between 0 and 60")
     if s.advertise_name and not _NAME_RE.match(s.advertise_name):
