@@ -7,6 +7,12 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.2] - 2026-09-08
+
+LAN auto-discovery (M5c) and the fixes from the first week of real use.
+
 ### Added
 - **LAN auto-discovery** (M5c): a server bound to a non-loopback address advertises `_rcm._tcp`
   over mDNS/DNS-SD (stdlib responder, coexists with mDNSResponder/avahi on port 5353; `advertise`,
@@ -124,7 +130,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/monocsp/remote_ci_monitor/releases/tag/v0.1.0

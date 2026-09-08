@@ -11,7 +11,7 @@ English: [README.md](README.md)
 - 빌드 머신은 macOS(Apple Silicon · Intel)와 Linux. Windows 는 범위 밖이다(Windows 의 세션은 WSL 로 제출한다).
 - 세션은 **작업 트리를 있는 그대로**(미커밋 변경 포함) 올린다. 게이트가 초록이면 *이* 트리가 통과한 것이다.
 
-Status: **M0–M5 done (v0.2.1)** — 서버 · 큐 · 워커 · 실시간 이벤트 · 웹 UI · `git_ref` 배포 · 보존
+Status: **M0–M5 done (v0.2.2)** — 서버 · 큐 · 워커 · 실시간 이벤트 · 웹 UI · `git_ref` 배포 · 보존
 정리 · 서비스 파일 · 패키징 · 우선순위 · 스냅샷 캐시 · 알림 · 워커 풀 · 원격 워커(`rcm worker`).
 GitHub 백엔드는 없고 계획도 없다. GitHub 은 커밋 · 푸시 · PR 머지 전용이다. 계획서는 `PLAN.md`,
 변경 이력은 `CHANGELOG.md`.
