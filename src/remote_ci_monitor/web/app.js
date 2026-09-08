@@ -1128,13 +1128,13 @@
       var vcls = hp.verdict === "fine" ? "ok" : hp.verdict === "busy" ? "warn" : "muted";
       var vkey = "summary.verdict_" + (hp.verdict === "fine" || hp.verdict === "busy" || hp.verdict === "partial" ? hp.verdict : "unknown");
       var verdict = '<span class="' + vcls + '">· ' + esc(tr(vkey)) + "</span>";
-      var freeMark = isNum(hp.diskFree)
-        ? " " + (hp.diskFree < DISK_LOW_FREE ? '<b class="warn">' : "<b>") + esc(tr("summary.disk_free", { free: fmtDisk(hp.diskFree) })) + "</b>"
-        : "";
+      // 남은 공간은 디스크 숫자에 **붙여서** 그린다 — 문장 끝에 매달면 바로 앞의 GPU 것처럼 읽힌다
+      var diskLow = (isNum(hp.disk) && hp.disk >= 85) || (isNum(hp.diskFree) && hp.diskFree < DISK_LOW_FREE);
+      var diskMark = (diskLow ? '<b class="warn">' : "<b>") + fmtPct(hp.disk) + "</b>"
+        + (isNum(hp.diskFree) ? ' <span class="' + (diskLow ? "warn" : "muted") + '">(' + esc(tr("summary.disk_free", { free: fmtDisk(hp.diskFree) })) + ")</span>" : "");
       h = esc(tr("summary.pressure", { cpu: "\u0000cpu\u0000", mem: "\u0000mem\u0000", gpu: "\u0000gpu\u0000", disk: "\u0000disk\u0000" }))
         .replace("\u0000cpu\u0000", mark(hp.cpu)).replace("\u0000mem\u0000", mark(hp.mem)).replace("\u0000gpu\u0000", mark(hp.gpu))
-        .replace("\u0000disk\u0000", (isNum(hp.disk) && hp.disk >= 85) || (isNum(hp.diskFree) && hp.diskFree < DISK_LOW_FREE) ? '<b class="warn">' + fmtPct(hp.disk) + "</b>" : "<b>" + fmtPct(hp.disk) + "</b>")
-        + freeMark
+        .replace("\u0000disk\u0000", diskMark)
         + "<br>" + esc(tr("summary.load", { load: hp.load })) + " " + verdict
         + (stale ? ' <span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span>" : "");
     }
@@ -1284,7 +1284,7 @@
     var conf = confidenceBadge(est, L());
     var etaCell = '<span class="eta">' + esc(eta.clock) + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
     if (est.overdue && !est.stuck) etaCell = '<span class="eta">' + DASH + '</span><br><span class="conf over">' + esc(tr("eta.overdue")) + "</span>";
-    var source = sourceHtml(row, L());
+    var source = sourceHtml(row, L(), false);
     var h = '<tr class="' + cls.join(" ") + '" data-job="' + row.id + '" id="job-' + row.id + '">' +
       '<td class="job">' + expBtn + '<span class="id">#' + row.id + "</span> " + pill + pos + "</td>" +
       '<td class="key"><span class="key">' + esc(row.key || row.preset || DASH) + "</span>" + chips + "</td>" +
@@ -1293,15 +1293,27 @@
       '<td class="elapsed">' + elapsedCell + "</td>" +
       '<td class="eta">' + etaCell + "</td>" +
       '<td class="source">' + source + "</td></tr>";
-    if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + source + "</div>" + tailHtml(row) + "</td></tr>";
+    if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + sourceHtml(row, L(), true) + "</div>" + tailHtml(row) + "</td></tr>";
     return h;
   }
-  function sourceHtml(row, lang) {
+  /**
+   * 소스 칸. `full` 이 false 면 커밋 해시(와 uncommitted 표지)만 — 저장소 주소는 행마다 같은 값이
+   * 되풀이돼 표를 옆으로 늘린다(§4.1). 펼친 블록이 `full` 로 한 번 보여 준다.
+   * 기본은 true 라 이 함수를 직접 부르는 쪽(그리고 오늘의 단언)은 그대로다.
+   */
+  function sourceHtml(row, lang, full) {
     var s = row.source || {};
-    if (s.mode === "git_ref") return '<button type="button" class="sha" data-src="' + row.id + '">' + esc((s.sha || "").slice(0, 7) || DASH) + "</button>" + '<div class="sub">' + esc(s.repo || "") + " · " + esc(T(lang, "row.ref", { ref: s.ref || DASH })) + "</div>";
+    var showAll = full !== false;
+    if (s.mode === "git_ref") {
+      var refLine = '<div class="sub">' + esc(s.repo || "") + " · " + esc(T(lang, "row.ref", { ref: s.ref || DASH })) + "</div>";
+      return '<button type="button" class="sha" data-src="' + row.id + '">' + esc((s.sha || "").slice(0, 7) || DASH) + "</button>"
+        + (showAll ? refLine : '<div class="sub">' + esc(T(lang, "row.ref", { ref: s.ref || DASH })) + "</div>");
+    }
     if (row.state === "uploading" && !s.base_sha) return '<span class="sub">' + esc(T(lang, "row.not_received")) + "</span>";
     var sha = (s.base_sha || "").slice(0, 7);
-    return '<button type="button" class="sha" data-src="' + row.id + '" title="' + esc(T(lang, "row.tree", { hash: s.tree_hash || DASH })) + '">' + esc(sha || DASH) + "</button>" + (s.dirty ? '<span class="uncommitted">' + esc(T(lang, "row.uncommitted")) + "</span>" : "") + '<div class="sub">' + esc(s.repo || "") + "</div>";
+    return '<button type="button" class="sha" data-src="' + row.id + '" title="' + esc(T(lang, "row.tree", { hash: s.tree_hash || DASH })) + '">' + esc(sha || DASH) + "</button>"
+      + (s.dirty ? '<span class="uncommitted">' + esc(T(lang, "row.uncommitted")) + "</span>" : "")
+      + (showAll ? '<div class="sub">' + esc(s.repo || "") + "</div>" : "");
   }
   /** 시계 차이를 아는가 — 모르면 기준점으로 세지 않는다(조용히 브라우저 시계로 넘어가지 않는다). */
   function canTick() { return !state.skewUnknown; }
@@ -1384,9 +1396,49 @@
     }
     return svg + "</svg>";
   }
+  /**
+   * 접힌 호스트 절의 한 줄. 「세 질문」에 호스트는 없다(§4.1) — 평소엔 접어 두고, 뭔가 잘못됐을
+   * 때만 저절로 펼친다. 사람이 직접 여닫으면 그 선택이 이긴다(`rcm.host` 에 저장).
+   */
+  function hostDigest() {
+    var p = pool0(state.status);
+    if (!p) return { text: tr("host.no_sample"), warn: false };
+    if (p.hosts === null || p.hosts === undefined) {
+      return { text: tr("host.unavailable", { error: errorText(p.hosts_error, p.hosts_error_code) }), warn: true };
+    }
+    var cards = hostCards(state.status, L());
+    if (!cards.length) return { text: tr("host.no_sample"), warn: false };
+    var worst = null, stale = false;
+    cards.forEach(function (c) {
+      var hp = hostPressure(c.host);
+      var age = secondsSince(c.host.sampled_at, now());
+      if (c.host.stale || (isNum(age) && isNum(c.host.interval_seconds) && age > 3 * c.host.interval_seconds)) stale = true;
+      if (!worst || (hp.verdict === "busy" && worst.verdict !== "busy")) worst = hp;
+    });
+    var names = cards.map(function (c) { return c.host.name || DASH; }).join(" · ");
+    var vkey = "summary.verdict_" + (worst.verdict === "fine" || worst.verdict === "busy" || worst.verdict === "partial" ? worst.verdict : "unknown");
+    return {
+      text: tr("host.digest", { names: names, n: cards.length, state: tr(vkey) }),
+      warn: worst.verdict === "busy" || stale
+    };
+  }
+
+  function renderHostDigest() {
+    var d = hostDigest();
+    var el = $("[data-host-digest]");
+    if (el) { el.textContent = d.text; el.className = "n" + (d.warn ? " warn" : ""); }
+    var det = $("#host-details");
+    if (!det) return;
+    // 사람이 직접 연 적이 있으면 그 선택이 이긴다. 없으면 경고일 때만 펼친다.
+    var choice = lsGet("rcm.host");
+    var want = choice === "open" ? true : choice === "closed" ? false : d.warn;
+    if (det.open !== want) { det.dataset.byRender = "1"; det.open = want; }
+  }
+
   function renderHost() {
     var p = pool0(state.status);
     var body = $("[data-host-body]");
+    renderHostDigest();
     if (!p) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
     if (p.hosts === null || p.hosts === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="hosts">Host unavailable — ' + esc(p.hosts_error || "unknown error") + "</div>"; return; }
     var cards = hostCards(state.status, L());
@@ -1660,6 +1712,16 @@
     return text || tr("error.internal_error");
   }
 
+  function wireHostDetails() {
+    var det = $("#host-details");
+    if (!det) return;
+    det.addEventListener("toggle", function () {
+      // 렌더가 다시 쓰는 값이 아니라 **사람의 선택**만 저장한다
+      if (det.dataset.byRender === "1") { det.dataset.byRender = ""; return; }
+      lsSet("rcm.host", det.open ? "open" : "closed");
+    });
+  }
+
   function wireLang() {
     var btn = $("#lang-btn");
     if (btn) btn.addEventListener("click", function () { setLang(state.lang === "ko" ? "en" : "ko"); });
@@ -1719,7 +1781,7 @@
     applyStatic();
     loadCollapsed();
     state.token = lsGet("rcm.token");
-    wireTokenDialog(); wireClicks(); wireLang(); renderTokenButton();
+    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });
     first.then(function () {
       state.tz = state.status && state.status.display_timezone ? state.status.display_timezone : null;
