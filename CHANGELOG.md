@@ -45,6 +45,18 @@ of a key bumps that number and is listed here.
   finish, did it pass — is the question this screen gets most often, and it was set at 13px, one
   step *smaller* than body text. It is 20px now, with the other two summary cells at body size, so
   size carries the priority instead of weight alone.
+- **Running the build machine from a git checkout is written down.** The service's virtual
+  environment can point at a working copy (`pip install -e`) instead of a released wheel, which
+  turns an upgrade into `git pull --ff-only` plus a restart. [Operating the build
+  machine](docs/operating.md#from-a-git-checkout) now says what keeps that safe: the checkout stays
+  on `main` and nothing is edited in it, development happens in a worktree with its own virtual
+  environment, and a test server gets its own config, `port` and `data_dir`. The upgrade section
+  also shows how to copy the database first — `sqlite3 ".backup"`, not `cp`, which misses the
+  write-ahead log. For sessions using Claude Code the rule is enforced rather than trusted: a
+  `PreToolUse` hook (`tools/guard_production.py`, wired in `.claude/settings.json`) finds the
+  production checkout from the machine's own editable install, refuses edits to it and to the
+  server's config and data, and asks before a deploy. A machine with no such install sees nothing.
+  ([#61](https://github.com/monocsp/remote_ci_monitor/pull/61))
 
 ### Fixed
 - **The phone layout had never actually been tested on a phone** (M5d-3). The mobile test opened
