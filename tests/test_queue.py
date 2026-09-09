@@ -27,6 +27,7 @@ from remote_ci_monitor.core.model import (
     UPLOADING,
     CancelInfo,
     Source,
+    WorkerInfo,
 )
 from remote_ci_monitor.core.queue import (
     QueueConfig,
@@ -341,3 +342,77 @@ def test_join_key_differs_by_inputs_and_source_identity():
     assert a != join_key("gate", {"scope": "full"}, "0000")
     assert a != join_key("gate-fast", {"scope": "full"}, "9f8e")
     assert join_key("gate", {"b": 1, "a": 2}, None) == join_key("gate", {"a": 2, "b": 1}, None)
+
+
+# ── M5f: 레인 배정은 레인 **번호**가 아니라 (worker, lane) 로 센다 ────────────
+#
+# 기본 풀에는 로컬 레인 1..N 과 모든 원격 `default` 워커의 레인 1..M 이 함께 들어온다
+# (`server.pool_workers`). `rcm worker` 의 pool 기본값이 `default` 라 이건 예외가 아니라
+# 기본 설정이다. 레인 번호로 키를 잡으면 로컬 레인 2 와 `build-02/2` 가 뭉개진다.
+
+
+def mixed_lanes(*, held_lane2: bool = False, drop_local2: bool = False):
+    """로컬 레인 1·2 + 원격 build-02 의 레인 1·2 — 서로 다른 레인 넷."""
+    out = [WorkerInfo(lane=1, state="idle", since=ago(minutes=30))]
+    if not drop_local2:
+        out.append(
+            WorkerInfo(lane=2, state="held" if held_lane2 else "idle", since=ago(minutes=30))
+        )
+    out += [
+        WorkerInfo(lane=1, state="idle", since=ago(minutes=30), worker="build-02"),
+        WorkerInfo(lane=2, state="idle", since=ago(minutes=30), worker="build-02"),
+    ]
+    return out
+
+
+def test_four_lanes_across_a_local_and_a_remote_worker_are_four_lanes():
+    """오늘은 [0, 0, 400, 400] — 2레인 풀과 바이트 단위로 같다."""
+    jobs = [job(i, created_min=5 - i) for i in (1, 2, 3, 4)]
+    rows = rows_for(jobs, wk=mixed_lanes())
+    assert [r.estimate.wait_seconds for r in rows] == [0, 0, 0, 0]
+
+
+def test_busy_job_is_attributed_to_its_own_worker_lane():
+    """로컬 `#500` 이 레인 1 을 쓰는 것이 원격 `build-02/1` 을 막으면 안 된다."""
+    running = job(500, state=RUNNING, created_min=10, started_min=5, lane=1)  # 로컬
+    waiting = job(501, created_min=1)
+    wk = [
+        WorkerInfo(lane=1, state="busy", job_id=500, since=ago(minutes=5)),
+        WorkerInfo(lane=1, state="idle", since=ago(minutes=30), worker="build-02"),
+    ]
+    row = {r.job.id: r for r in rows_for([running, waiting], wk=wk)}[501]
+    assert row.estimate.wait_seconds == 0 and row.ahead_job_id is None
+
+
+def test_ahead_job_id_names_the_lane_that_frees_first():
+    """`lane_last_job` 도 뭉개져 「내가 누구 뒤인가」가 엉뚱한 잡을 가리킨다."""
+    remote = replace(
+        job(500, state=RUNNING, created_min=10, started_min=5, lane=1), worker_name="build-02"
+    )
+    local = job(501, state=RUNNING, created_min=10, started_min=1, lane=1)  # 340초 뒤 빔
+    waiting = job(502, created_min=1)
+    wk = [
+        WorkerInfo(lane=1, state="busy", job_id=501, since=ago(minutes=1)),
+        WorkerInfo(lane=1, state="busy", job_id=500, since=ago(minutes=5), worker="build-02"),
+    ]
+    row = {r.job.id: r for r in rows_for([remote, local, waiting], wk=wk)}[502]
+    assert row.ahead_job_id == 500 and row.estimate.wait_seconds == 100  # 먼저 비는 레인
+
+
+def test_idle_since_counts_every_idle_lane_not_every_lane_number():
+    """진짜 idle 레인 셋인데 키가 둘이면 세 번째 잡이 not_scheduled 를 놓친다."""
+    jobs = [job(i, created_min=1, queued_min=1) for i in (1, 2, 3)]
+    wk = [
+        WorkerInfo(lane=1, state="idle", since=ago(minutes=5)),
+        WorkerInfo(lane=1, state="idle", since=ago(minutes=5), worker="build-02"),
+        WorkerInfo(lane=2, state="idle", since=ago(minutes=5), worker="build-02"),
+    ]
+    assert [r.reason for r in rows_for(jobs, wk=wk)] == ["not_scheduled"] * 3
+
+
+def test_removing_a_held_lane_actually_changes_the_eta():
+    """오늘은 뺀 것과 안 뺀 것이 완전히 같다 — 키 `2` 를 원격이 다시 채우기 때문이다."""
+    jobs = [job(i, created_min=5 - i) for i in (1, 2, 3, 4)]
+    with_all = [r.estimate.wait_seconds for r in rows_for(jobs, wk=mixed_lanes())]
+    without = [r.estimate.wait_seconds for r in rows_for(jobs, wk=mixed_lanes(drop_local2=True))]
+    assert with_all == [0, 0, 0, 0] and without == [0, 0, 0, 400]

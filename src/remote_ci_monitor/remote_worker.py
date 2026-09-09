@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import dataclasses
+import random
 import secrets
 import shutil
 import socket
@@ -51,6 +52,7 @@ from remote_ci_monitor.worker import format_limit
 
 REGISTER_RETRY_SECONDS = 5.0
 CLAIM_MIN_INTERVAL = 1.0  # 빈 204 가 이보다 빨리 오면 이만큼 쉰다
+RETRY_WAIT_SECONDS = 2.0  # 503 · 연결 실패 뒤 다시 claim 하기까지
 REPORT_RETRIES = (1.0, 2.0, 4.0)
 LOG_FLUSH_SECONDS = 1.0
 LOG_BATCH_BYTES = 256 * 1024
@@ -213,6 +215,7 @@ class RemoteWorker:
         *,
         client: WorkerClient | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
+        rand_fn: Callable[[], float] = random.random,  # 지터 — 테스트가 주입한다
         log: Callable[[str], None] | None = None,
         environ: dict[str, str] | None = None,
         once: bool = False,
@@ -220,6 +223,7 @@ class RemoteWorker:
         self.config = config
         self.client = client or WorkerClient(config.server, config.token)
         self.now_fn = now_fn
+        self.rand_fn = rand_fn
         self.log = log or (lambda msg: print(f"[rcm worker] {msg}", file=sys.stderr, flush=True))
         self.environ = environ
         self.once = once
@@ -334,6 +338,16 @@ class RemoteWorker:
 
     # ── 레인 ────────────────────────────────────────────────────────────────
 
+    def _backoff(self, base: float) -> float:
+        """`[base, 2 × base)` 의 대기. **하한을 낮추지 않는다** — `uniform(0, base)` 로 하면 뜨거운
+        루프가 된다.
+
+        지터가 없으면 빈 204 를 받은 레인들이 같은 1초 격자에 묶여 영영 안 흩어진다. 실측: 같은
+        격자 32레인이면 요청 세마포어(`max_concurrent_requests`)가 정확히 가득 차고, 48레인에서
+        첫 `/api/status` 503 이 난다(M5f §15-C4).
+        """
+        return base + self.rand_fn() * base
+
     def _lane_loop(self, lane: int) -> None:
         while not self.stopping.is_set():
             if self.paused:
@@ -354,15 +368,15 @@ class RemoteWorker:
                         break
                     continue
                 if e.status == 0 or e.status == 503:
-                    self.stopping.wait(2.0)
+                    self.stopping.wait(self._backoff(RETRY_WAIT_SECONDS))
                     continue
                 self.log(f"lane {lane}: claim: {e.message}")
-                self.stopping.wait(2.0)
+                self.stopping.wait(self._backoff(RETRY_WAIT_SECONDS))
                 continue
             if claimed is None:
                 # 서버가 기다리지 않고 204 를 줬다(wait 0 · long-poll 슬롯 소진) — 뜨거운 루프 금지
                 if time.monotonic() - asked_at < CLAIM_MIN_INTERVAL:
-                    self.stopping.wait(CLAIM_MIN_INTERVAL)
+                    self.stopping.wait(self._backoff(CLAIM_MIN_INTERVAL))
                 continue
             try:
                 self.run_claimed(lane, claimed)

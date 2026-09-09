@@ -18,6 +18,7 @@ import http.client
 import io
 import json
 import socket
+import sqlite3
 import tarfile
 import threading
 import time
@@ -1385,3 +1386,98 @@ def test_log_415_closes_the_connection_before_the_unread_body(srv):
     assert status == 415
     connection = {k.lower(): v for k, v in headers.items()}.get("connection", "")
     assert connection.lower() == "close", headers
+
+
+# ── M5f PR 2a-0: 마커 배치 · 바쁜 DB 는 503 ─────────────────────────────────
+
+
+def test_worker_log_writes_all_markers_in_one_call_and_publishes_after(srv):
+    """줄마다 트랜잭션을 열면 다른 레인의 claim 이 밀린다. 발행은 쓰기 **뒤**여야 한다.
+
+    트랜잭션이 하나인 것은 `test_store.py` 가 잠근다 — 여기서는 라우트가 배치 API 를 **한 번**
+    부르고 단수 API 는 안 부르는 것, 그리고 발행 순서를 잠근다(핸들러는 다른 스레드라
+    스레드 로컬 커넥션에 트레이스를 걸 수 없다).
+    """
+    jid = running_job(srv)
+    order: list[str] = []
+    batched: list[list[tuple[str, str]]] = []
+    real_many, real_one = srv.app.store.add_markers, srv.app.store.add_marker
+    real_pub = srv.app._on_marker
+
+    def spy_many(job_id, items, at):
+        items = list(items)
+        batched.append(items)
+        order.append("write")
+        return real_many(job_id, items, at)
+
+    def spy_one(*a, **kw):
+        order.append("write-one")
+        return real_one(*a, **kw)
+
+    srv.app.store.add_markers = spy_many
+    srv.app.store.add_marker = spy_one
+    srv.app._on_marker = lambda j, k, v: (order.append(f"pub:{v}"), real_pub(j, k, v))[1]
+    try:
+        status, _ = srv.log("build-02", jid, b"::rcm::steps::3\n::rcm::step::a\n::rcm::step::b\n")
+    finally:
+        srv.app.store.add_markers, srv.app.store.add_marker = real_many, real_one
+        srv.app._on_marker = real_pub
+    assert status == 200
+    assert batched == [[("steps", "3"), ("step", "a"), ("step", "b")]]  # 한 번에 셋
+    assert order == ["write", "pub:3", "pub:a", "pub:b"], order  # 쓰기 먼저, 발행이 뒤
+    assert [(m.kind, m.value) for m in srv.app.store.markers(jid)] == [
+        ("steps", "3"),
+        ("step", "a"),
+        ("step", "b"),
+    ]
+
+
+def test_worker_log_without_markers_writes_no_markers(srv):
+    """마커가 없는 본문은 빈 배치를 넘기고, 배치는 빈 목록에 트랜잭션을 안 연다(test_store)."""
+    jid = running_job(srv)
+    seen: list[list[tuple[str, str]]] = []
+    real = srv.app.store.add_markers
+    srv.app.store.add_markers = lambda j, items, at: (seen.append(list(items)), real(j, items, at))[
+        1
+    ]
+    try:
+        status, _ = srv.log("build-02", jid, b"plain line\nanother\n")
+    finally:
+        srv.app.store.add_markers = real
+    assert status == 200 and seen == [[]] and srv.app.store.markers(jid) == []
+
+
+def test_claim_on_a_busy_database_is_503_not_500(srv):
+    """워커는 503 을 이미 일시 오류로 다룬다. 500 이면 뜻 모를 오류로 2초 자고 만다."""
+    srv.registered("build-02")
+    srv.queued_job()
+    real = srv.app.store.claim
+
+    def busy(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    srv.app.store.claim = busy
+    try:
+        status, body = srv.claim("build-02")
+    finally:
+        srv.app.store.claim = real
+    assert status == 503
+    assert body["code"] == "database_busy" and body["retry_after"] == 1
+    assert srv.app.last_error is None  # 서버 결함이 아니다
+
+
+def test_claim_on_a_permanently_broken_database_is_not_reported_transient(srv):
+    """`no such table` 을 「다시 해 보라」고 하면 워커가 영원히 재시도한다."""
+    srv.registered("build-02")
+    srv.queued_job()
+    real = srv.app.store.claim
+
+    def broken(*a, **kw):
+        raise sqlite3.OperationalError("no such table: jobs")
+
+    srv.app.store.claim = broken
+    try:
+        status, _ = srv.claim("build-02")
+    finally:
+        srv.app.store.claim = real
+    assert status == 500

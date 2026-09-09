@@ -231,13 +231,16 @@ def compute_queue(
     waiting = sorted((j for j in active if j.is_waiting), key=lambda j: (-j.priority, j.id))
 
     live = [w for w in workers if w.state != WORKER_DOWN]
-    live_lanes = [w.lane for w in live]
-    lane_free: dict[int, datetime] = {w.lane: now for w in live}
-    lane_last_job: dict[int, int | None] = {w.lane: None for w in live}
-    idle_since: dict[int, datetime] = {}
+    # 레인은 **번호가 아니라 (워커, 번호)** 로 센다. 기본 풀에는 로컬 레인 1..N 과 원격 워커의
+    # 레인 1..M 이 함께 들어오므로(`server.pool_workers`), 번호로 키를 잡으면 로컬 레인 2 와
+    # `build-02/2` 가 뭉개져 4레인 풀이 2레인처럼 계산된다(M5f).
+    live_lanes = [(w.worker, w.lane) for w in live]
+    lane_free: dict[tuple[str | None, int], datetime] = {k: now for k in live_lanes}
+    lane_last_job: dict[tuple[str | None, int], int | None] = {k: None for k in live_lanes}
+    idle_since: dict[tuple[str | None, int], datetime] = {}
     for w in live:
         if w.state == WORKER_IDLE and w.job_id is None:
-            idle_since[w.lane] = w.since or now
+            idle_since[(w.worker, w.lane)] = w.since or now
     group_free: dict[str, datetime] = {}
     group_holder: dict[str, tuple[Job, Estimate]] = {}
 
@@ -246,10 +249,11 @@ def compute_queue(
         expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
         est = _busy_estimate(job, expected, source, n, now, cfg)
         free_at = now + timedelta(seconds=est.remaining_seconds or 0)
-        if job.lane is not None and job.lane in lane_free:
-            lane_free[job.lane] = max(lane_free[job.lane], free_at)
-            lane_last_job[job.lane] = job.id
-            idle_since.pop(job.lane, None)
+        holder_lane = (job.worker_name, job.lane) if job.lane is not None else None
+        if holder_lane is not None and holder_lane in lane_free:
+            lane_free[holder_lane] = max(lane_free[holder_lane], free_at)
+            lane_last_job[holder_lane] = job.id
+            idle_since.pop(holder_lane, None)
         if job.concurrency_group:
             group_free[job.concurrency_group] = max(
                 group_free.get(job.concurrency_group, now), free_at
@@ -287,7 +291,8 @@ def compute_queue(
         finish: datetime | None = None
         ahead: int | None = None
         if can_start:
-            lane = min(live_lanes, key=lambda ln: (lane_free[ln], ln))
+            # None(로컬)과 워커 이름을 같이 정렬하려면 키를 평평하게 만들어야 한다
+            lane = min(live_lanes, key=lambda ln: (lane_free[ln], ln[0] or "", ln[1]))
             start = lane_free[lane]
             ahead = lane_last_job[lane]
             if job.concurrency_group and job.concurrency_group in group_free:
