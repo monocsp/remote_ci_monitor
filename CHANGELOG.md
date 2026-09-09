@@ -7,6 +7,14 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **The production guard stopped objecting to a worktree that has its own `rcm.toml`.** It read a
+  bare `rcm serve` as "this would take the production config", but the search order stops at
+  `./rcm.toml` (and `$RCM_CONFIG`) long before `~/.config/rcm/server.toml`, so a test server in a
+  worktree was refused for no reason. Naming the production config or data directory explicitly is
+  still refused. [Operating the build machine](docs/operating.md#from-a-git-checkout) now spells
+  out the search order and what a test server's config should set.
+
 ## [0.2.5] - 2026-09-09
 
 A job can send its files back, the queue page answers "did mine finish?" before anything else, and

@@ -39,8 +39,8 @@ PROD = guard.Production(checkout=CHECKOUT, venv=VENV, config_dir=CONFIG, data_di
 NO_PROD = guard.Production()
 
 
-def bash(command: str, cwd: Path = WORKTREE, prod=PROD):
-    return guard.decide("Bash", {"command": command}, prod, cwd)
+def bash(command: str, cwd: Path = WORKTREE, prod=PROD, local_config: bool = False):
+    return guard.decide("Bash", {"command": command}, prod, cwd, local_config=local_config)
 
 
 def edit(file_path: str, cwd: Path = WORKTREE, prod=PROD):
@@ -140,6 +140,17 @@ def test_every_way_of_starting_a_server_is_seen(command):
 
 def test_a_server_with_its_own_config_is_free():
     assert bash("rcm serve --config /tmp/test.toml --port 8788") is None
+
+
+def test_a_worktree_that_has_its_own_rcm_toml_is_free():
+    """설정 탐색은 `./rcm.toml` 에서 멈춘다 — 운영 설정까지 내려가지 않는다."""
+    assert bash("rcm serve", local_config=True) is None
+    assert bash("rcm serve") is not None  # 대조: 자기 설정이 없으면 여전히 막힌다
+
+
+def test_a_local_config_does_not_excuse_naming_the_production_one():
+    assert bash(f"rcm serve --config {CONFIG}/server.toml", local_config=True) is not None
+    assert bash(f"rcm serve --data {DATA}", local_config=True) is not None
 
 
 def test_a_server_pointed_at_the_production_config_or_data_is_denied():

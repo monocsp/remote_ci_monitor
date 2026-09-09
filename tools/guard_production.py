@@ -279,18 +279,20 @@ def _edit_verdict(file_path: str, cwd: Path, prod: Production) -> Verdict | None
     return None
 
 
-def _bash_verdict(command: str, cwd: Path, prod: Production) -> Verdict | None:
+def _bash_verdict(command: str, cwd: Path, prod: Production, local_config: bool) -> Verdict | None:
     for segment in _split_segments(command):
         argv = _argv(segment)
         if not argv:
             continue
-        verdict = _segment_verdict(argv, cwd, prod)
+        verdict = _segment_verdict(argv, cwd, prod, local_config)
         if verdict is not None:
             return verdict
     return None
 
 
-def _segment_verdict(argv: list[str], cwd: Path, prod: Production) -> Verdict | None:
+def _segment_verdict(
+    argv: list[str], cwd: Path, prod: Production, local_config: bool
+) -> Verdict | None:
     head = _name(argv[0])
 
     if head in DESTRUCTIVE:
@@ -356,7 +358,7 @@ def _segment_verdict(argv: list[str], cwd: Path, prod: Production) -> Verdict | 
 
     subcommand = _rcm_subcommand(argv)
     if subcommand in ("serve", "worker") and not _wants_help(argv):
-        verdict = _server_verdict(argv, cwd, prod, subcommand)
+        verdict = _server_verdict(argv, cwd, prod, subcommand, local_config)
         if verdict is not None:
             return verdict
 
@@ -372,7 +374,7 @@ def _mentions_service(argv: list[str]) -> bool:
 
 
 def _server_verdict(
-    argv: list[str], cwd: Path, prod: Production, subcommand: str
+    argv: list[str], cwd: Path, prod: Production, subcommand: str, local_config: bool
 ) -> Verdict | None:
     config = _option_value(argv, ("--config", "-c"))
     data = _option_value(argv, ("--data", "--data-dir"))
@@ -391,6 +393,10 @@ def _server_verdict(
                 f"point `--config` at the copy. See {DOCS}.",
             )
         return None
+    # 설정 탐색 순서는 `--config` → `$RCM_CONFIG` → `./rcm.toml` → XDG → `~/.config/rcm`.
+    # 앞의 둘 중 하나가 있으면 운영 설정까지 내려가지 않는다.
+    if local_config:
+        return None
     if prod.config_dir is not None:
         return Verdict(
             "deny",
@@ -402,9 +408,18 @@ def _server_verdict(
 
 
 def decide(
-    tool_name: str, tool_input: dict[str, object], prod: Production, cwd: Path
+    tool_name: str,
+    tool_input: dict[str, object],
+    prod: Production,
+    cwd: Path,
+    *,
+    local_config: bool = False,
 ) -> Verdict | None:
-    """막을 이유가 있으면 Verdict, 없으면 None. 운영 설치를 못 찾았으면 언제나 None."""
+    """막을 이유가 있으면 Verdict, 없으면 None. 운영 설치를 못 찾았으면 언제나 None.
+
+    `local_config` 는 이 세션이 자기 서버 설정을 이미 갖고 있다는 뜻이다(`./rcm.toml` ·
+    `$RCM_CONFIG`). 그러면 `--config` 없는 `rcm serve` 도 운영 설정을 집지 않는다.
+    """
     if not prod.known:
         return None
     if tool_name in ("Write", "Edit", "NotebookEdit"):
@@ -412,7 +427,9 @@ def decide(
         return _edit_verdict(str(file_path), cwd, prod) if isinstance(file_path, str) else None
     if tool_name == "Bash":
         command = tool_input.get("command")
-        return _bash_verdict(command, cwd, prod) if isinstance(command, str) else None
+        if not isinstance(command, str):
+            return None
+        return _bash_verdict(command, cwd, prod, local_config)
     return None
 
 
@@ -491,6 +508,7 @@ def main() -> int:
             payload.get("tool_input") or {},
             find_production(),
             cwd,
+            local_config=bool(os.environ.get("RCM_CONFIG")) or (cwd / "rcm.toml").exists(),
         )
     except Exception as error:  # 가드가 터져도 작업은 막지 않는다 — 대신 눈에 보이게 알린다
         print(json.dumps({"systemMessage": f"guard_production.py failed: {error!r}"}))
