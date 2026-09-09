@@ -7,6 +7,11 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-09
+
+A job can send its files back, the queue page answers "did mine finish?" before anything else, and
+the build machine can run from a git checkout.
+
 ### Added
 - **A job can send its files back** (M5e). A preset that declares `artifacts = ["test/**/goldens/*.png"]`
   has those files collected before its workspace is deleted, and `rcm run goldens --fetch-artifacts`
@@ -57,6 +62,21 @@ of a key bumps that number and is listed here.
   production checkout from the machine's own editable install, refuses edits to it and to the
   server's config and data, and asks before a deploy. A machine with no such install sees nothing.
   ([#61](https://github.com/monocsp/remote_ci_monitor/pull/61))
+- **The page reads like a page, not a terminal** (M5d-2). Sentences, labels, buttons and state
+  words are set in the system sans face; the monospace face is now kept for what it is for —
+  job ids, keys, commit shas, refs, repository URLs, step names, logs and the `rcm run …` command.
+  Numbers line up in columns (`tabular-nums`), section headings carry weight instead of
+  `text-transform: uppercase` (which gave Korean no hierarchy at all and mangled the Latin mixed
+  into it — `5s ago` became `5S AGO`), and the monospace stack finally names a Korean fallback.
+- **The host section is folded** (M5d-2). It is the fourth question the page answers, not the
+  first, and it was taking a third of the screen. A one-line summary beside the heading says which
+  machines are reporting and how they are doing; the section opens itself when a machine is busy or
+  a sample has gone stale, and if you open or close it yourself that choice is kept.
+- **The queue stopped repeating itself** (M5d-2). The Source column shows the commit alone — the
+  repository URL, identical on every row, moved into the expanded block — and the columns have
+  fixed widths so the reason takes the slack instead of leaving a hole in the middle of the table.
+  In Host pressure, the free space now reads as part of the disk figure (`Disk 30% (699 GB free)`)
+  instead of trailing off the end of the line where it looked like it belonged to the GPU.
 
 ### Fixed
 - **The phone layout had never actually been tested on a phone** (M5d-3). The mobile test opened
@@ -74,23 +94,6 @@ of a key bumps that number and is listed here.
   were told apart by colour alone. They are now a hollow circle and a hollow square: filled means
   moving, hollow means stopped. (`rcm top` keeps its own glyphs; a terminal has no colour to fail
   back to.)
-
-### Changed
-- **The page reads like a page, not a terminal** (M5d-2). Sentences, labels, buttons and state
-  words are set in the system sans face; the monospace face is now kept for what it is for —
-  job ids, keys, commit shas, refs, repository URLs, step names, logs and the `rcm run …` command.
-  Numbers line up in columns (`tabular-nums`), section headings carry weight instead of
-  `text-transform: uppercase` (which gave Korean no hierarchy at all and mangled the Latin mixed
-  into it — `5s ago` became `5S AGO`), and the monospace stack finally names a Korean fallback.
-- **The host section is folded** (M5d-2). It is the fourth question the page answers, not the
-  first, and it was taking a third of the screen. A one-line summary beside the heading says which
-  machines are reporting and how they are doing; the section opens itself when a machine is busy or
-  a sample has gone stale, and if you open or close it yourself that choice is kept.
-- **The queue stopped repeating itself** (M5d-2). The Source column shows the commit alone — the
-  repository URL, identical on every row, moved into the expanded block — and the columns have
-  fixed widths so the reason takes the slack instead of leaving a hole in the middle of the table.
-  In Host pressure, the free space now reads as part of the disk figure (`Disk 30% (699 GB free)`)
-  instead of trailing off the end of the line where it looked like it belonged to the GPU.
 
 ## [0.2.4] - 2026-09-08
 
@@ -296,7 +299,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2
