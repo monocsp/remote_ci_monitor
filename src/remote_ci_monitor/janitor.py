@@ -36,8 +36,15 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _errname(e: OSError) -> str:
-    return errno.errorcode.get(e.errno or 0, type(e).__name__)
+def _errname(e: BaseException) -> str:
+    """오류의 **종류**만. 경로도 메시지도 안 싣는다(로그에 시크릿이 섞이지 않게).
+
+    `errno` 는 `OSError` 에만 있다 — DB 오류를 이걸로 포맷하다 `AttributeError` 가 나면 sweep
+    스레드가 죽고 보존 정리가 영구히 멈춘다.
+    """
+    if isinstance(e, OSError):
+        return errno.errorcode.get(e.errno or 0, type(e).__name__)
+    return type(e).__name__
 
 
 class Janitor:

@@ -200,3 +200,159 @@ def test_a_forgotten_worker_never_takes_a_job_with_it(store):
     store.claim(1, old, worker_name="busy-one")
     assert store.forget_workers(NOW - timedelta(days=7)) == []
     assert [w.name for w in store.list_workers()] == ["busy-one"]
+
+
+# ── 실패는 캐시하지 않는다 ──────────────────────────────────────────────────
+
+
+def test_a_transient_read_failure_is_retried_on_the_next_request(tmp_path):
+    """중앙값 읽기가 한 번 실패했다고 그 결과를 캐시하면, SQLite 가 잠깐 잠긴 것만으로
+    `medians: null` 이 다음 잡이 끝날 때까지 모든 상태 문서에 박힌다 — 한가한 서버면 몇 시간이다."""
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        real = app.store.list_sample_rows
+        calls: list[int] = []
+
+        def flaky(since):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("database is locked")
+            return real(since)
+
+        app.store.list_sample_rows = flaky
+        assert app._snapshot().medians_error is not None  # 첫 요청은 실패한다
+        app._mark_dirty()
+        assert app._snapshot().medians_error is None  # 다음 요청은 **다시 시도한다**
+        assert len(calls) == 2
+    finally:
+        srv.close()
+
+
+def test_the_median_window_cannot_drift_forever_on_a_quiet_server(tmp_path):
+    """잡이 하나도 안 끝나는 동안에도 45일 창은 흘러간다 — 시간으로도 상한을 둔다."""
+    import time as _time
+
+    from remote_ci_monitor.server import MEDIANS_MAX_AGE_SECONDS
+
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        app._snapshot()
+        before = app._snapshot().medians
+        app._medians_loaded_at -= MEDIANS_MAX_AGE_SECONDS + 1
+        app._mark_dirty()
+        assert app._snapshot().medians is not before
+        assert MEDIANS_MAX_AGE_SECONDS <= 3600  # 창이 한 시간 넘게 굳으면 안 된다
+        assert _time is not None
+    finally:
+        srv.close()
+
+
+def test_recent_jobs_do_not_scan_every_terminal_row(store):
+    """`list_recent(8)` 이 `/api/status` 의 새 지배항이었다 — 5만 행에서 7.1 ms.
+
+    `state IN (...)` 때문에 `jobs_finished` 를 못 타고 종료 잡 전체를 정렬한다. 여덟 개를
+    고르려고 5만 개를 줄 세우는 셈이다. 커버링 인덱스면 0.009 ms 다(790배).
+    """
+    finished(store, 3)
+    plan = " | ".join(
+        r[3]
+        for r in store._conn().execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM jobs WHERE state IN "
+            "('cancelled','failed','lost','succeeded','timed_out') "
+            "ORDER BY finished_at DESC, id DESC LIMIT 8"
+        )
+    )
+    assert "jobs_recent" in plan, plan
+
+
+def test_recent_still_returns_the_newest_first(store):
+    """빠르게 고른다고 순서가 틀리면 안 된다."""
+    finished(store, 5)
+    rows = store.list_recent(3)
+    assert len(rows) == 3
+    assert [r.finished_at for r in rows] == sorted((r.finished_at for r in rows), reverse=True)
+
+
+# ── 검증에서 나온 것들 ──────────────────────────────────────────────────────
+
+
+def test_a_worker_cleanup_failure_does_not_kill_the_janitor(tmp_path):
+    """`_errname` 은 OSError 전용이다(`e.errno`). SQLite 오류를 그걸로 포맷하면 AttributeError 가
+    나고 janitor 스레드가 죽어 보존 정리가 **영구히** 멈춘다 — /api/health 는 503 이 된다."""
+    import sqlite3
+
+    from remote_ci_monitor.config import ServerConfig
+    from remote_ci_monitor.janitor import Janitor
+
+    cfg = ServerConfig()
+    cfg.server.data_dir = str(tmp_path)
+    store = Store(tmp_path / "rcm.sqlite3")
+    errors: list[str] = []
+
+    def boom(cutoff):
+        raise sqlite3.OperationalError("database is locked")
+
+    store.forget_workers = boom
+    j = Janitor(store, cfg, now_fn=lambda: NOW, on_error=errors.append, log=lambda m: None)
+    try:
+        j.sweep_once()  # 죽지 않아야 한다
+    finally:
+        store.close()
+    assert errors and "OperationalError" in errors[0], errors
+
+
+def test_a_lane_query_failure_never_claims_the_lane_is_idle(tmp_path):
+    """조회가 실패하면 「busy 를 모르는」 것이지 「안 바쁜」 것이 아니다.
+
+    `idle` 로 그리면 `since` 까지 등록 시각으로 바뀌어, 화면이 「그 레인은 등록 이후 계속
+    놀았다」고 **없는 사실을 지어낸다**. 집안 규칙은 fail-open 금지다.
+    """
+    import sqlite3
+
+    from test_worker_api import WorkerServer
+
+    srv = WorkerServer(tmp_path, admission="always")
+    try:
+        srv.registered("build-02", lanes=1)
+        jid = srv.queued_job()
+        assert srv.claimed("build-02") == jid
+        assert srv.worker_lane("build-02", 1)["state"] == "busy"
+
+        def boom():
+            raise sqlite3.OperationalError("database is locked")
+
+        srv.app.store.active_worker_lanes = boom
+        status, body = srv.req("GET", "/api/status", token="admin")
+        # 무엇이 되든 「idle」은 아니다 — 실패는 실패로 드러난다
+        if status == 200:
+            lanes = [w for w in body["server"]["workers"] if w.get("worker") == "build-02"]
+            assert not lanes or lanes[0]["state"] != "idle", lanes
+        else:
+            assert status >= 500
+    finally:
+        srv.close()
+
+
+def test_forgetting_a_worker_does_not_silence_the_dead_pool_alarm(store):
+    """마지막 워커를 잊으면 `pools_without_workers` 가 비어 `rcm check` 가 PASS 로 바뀐다 —
+    그 풀에 잡이 아직 기다리고 있는데도."""
+    old = NOW - timedelta(days=30)
+    store.register_worker("lin-01", pool="linux", lanes=1, host_name="x", version="1", now=old)
+    src = Source(mode="tree", repo="org/app", tree_hash="9f8e")
+    store.create_job(
+        preset="gate",
+        inputs={},
+        key="gate:full",
+        concurrency_group=None,
+        source=src,
+        requester=ALICE,
+        timeout_seconds=1200,
+        join_key=join_key("gate:full", {}, "9f8e"),
+        now=old,
+        state=QUEUED,
+        pool="linux",
+    )
+    assert store.forget_workers(NOW - timedelta(days=7)) == []
+    assert [w.name for w in store.list_workers()] == ["lin-01"]

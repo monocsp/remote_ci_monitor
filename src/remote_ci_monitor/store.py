@@ -55,7 +55,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 8
+DB_VERSION = 9
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -102,6 +102,7 @@ CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
 CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool);
 CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id);
+CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
 CREATE TABLE IF NOT EXISTS job_artifacts (
@@ -246,6 +247,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # 안에서 돈다. 통계(ANALYZE)로 고치지 않는 이유: 통계는 이미 열린 커넥션에 반영되지 않고
     # (`_conn()` 은 스레드 로컬이라 로컬 레인 스레드는 커넥션을 안 닫는다) 임시 B-tree 도 안 없앤다.
     8: ("CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id)",),
+    # v8 → v9(M5f): 최근 완료 잡. `state IN (…)` 때문에 `jobs_finished` 를 못 타고 종료 잡
+    # **전체**를 정렬한다 — 여덟 개를 고르려고 5만 개를 줄 세운다(7.1 ms). 커버링 인덱스면
+    # 0.009 ms 다. 중앙값을 요청 경로에서 뗀 뒤 이게 `/api/status` 의 지배항이 됐다.
+    9: ("CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC)",),
 }
 
 
@@ -559,12 +564,32 @@ class Store:
         )
 
     def list_recent(self, limit: int) -> list[Job]:
+        """최근 완료 잡 `limit` 개, 새것부터.
+
+        **두 단계로 고른다.** `SELECT *` 한 방이면 `jobs_recent` 가 커버링이 아니게 돼 플래너가
+        `jobs_state` 로 물러서고 종료 잡 **전체**를 정렬한다 — 여덟 개를 고르려고 5만 개를 줄
+        세우는 셈이라 22.5 ms 다. id 만 커버링 인덱스로 고른 뒤 그 행만 읽으면 0.02 ms 다.
+        """
+        if limit <= 0:
+            return []
         marks = ",".join("?" * len(TERMINAL_STATES))
-        return self._jobs(
-            f"SELECT * FROM jobs WHERE state IN ({marks}) "
-            "ORDER BY finished_at DESC, id DESC LIMIT ?",
-            (*sorted(TERMINAL_STATES), limit),
-        )
+        ids = [
+            int(r["id"])
+            for r in self._conn().execute(
+                f"SELECT id FROM jobs WHERE state IN ({marks}) "
+                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (*sorted(TERMINAL_STATES), limit),
+            )
+        ]
+        if not ids:
+            return []
+        found = {
+            j.id: j
+            for j in self._jobs(
+                f"SELECT * FROM jobs WHERE id IN ({','.join('?' * len(ids))})", tuple(ids)
+            )
+        }
+        return [found[i] for i in ids if i in found]  # 고른 순서를 지킨다
 
     def active_worker_lanes(self) -> dict[tuple[str, int], tuple[int, datetime | None]]:
         """`(워커, 레인) → (잡 id, 시작 시각)` — 원격 레인의 busy 판정에 필요한 전부.
@@ -1762,11 +1787,17 @@ class Store:
         conn = self._conn()
         conn.execute("BEGIN IMMEDIATE")
         try:
+            waiting = ",".join("?" * len(WAITING_STATES))
             rows = conn.execute(
                 f"SELECT name FROM workers WHERE last_seen_at < ? AND name NOT IN "
                 f"(SELECT worker_name FROM jobs WHERE worker_name IS NOT NULL "
-                f"AND state IN ({busy})) ORDER BY name",
-                (_ts(cutoff), *sorted(BUSY_STATES)),
+                f"AND state IN ({busy})) "
+                # 그 풀에 아직 기다리는 잡이 있으면 「은퇴」가 아니라 「일주일째 고장」이다.
+                # 지우면 `pools_without_workers` 가 비어 `rcm check` 의 경보가 꺼진다 —
+                # 잡은 그대로 멈춰 있는데.
+                f"AND pool NOT IN (SELECT DISTINCT pool FROM jobs WHERE state IN ({waiting})) "
+                "ORDER BY name",
+                (_ts(cutoff), *sorted(BUSY_STATES), *sorted(WAITING_STATES)),
             ).fetchall()
             gone = [r["name"] for r in rows]
             if gone:

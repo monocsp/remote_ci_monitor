@@ -233,11 +233,11 @@ class RemoteWorkersMixin:
         heartbeat 이 오래됐으면 전부 down. 워커 이름순 · 레인순."""
         infos: list[WorkerInfo] = []
         rows = [r for r in self._workers() if pool is None or r.pool == pool]
-        # 워커마다 묻지 않고 **한 문장**으로 읽는다 — 이 경로는 마커 줄마다 돈다
-        try:
-            lanes_busy = self.store.active_worker_lanes() if rows else {}
-        except Exception:  # noqa: BLE001 — 조회 실패면 busy 를 모르는 것이지 워커가 없는 게 아니다
-            lanes_busy = {}
+        # 워커마다 묻지 않고 **한 문장**으로 읽는다.
+        # 실패를 삼키지 않는다: 빈 map 으로 물러서면 도는 레인이 `idle` 로, `since` 까지 등록
+        # 시각으로 바뀌어 「그 레인은 등록 이후 계속 놀았다」는 **없는 사실**을 지어낸다.
+        # 모르는 것은 모르는 대로 올린다(fail-open 금지).
+        lanes_busy = self.store.active_worker_lanes() if rows else {}
         for row in rows:
             alive = self.worker_alive(row, now)
             for lane in range(1, row.lanes + 1):
@@ -414,7 +414,10 @@ class RemoteWorkersMixin:
         wait = _int_field(body, "wait_seconds", 0, 60, default=s.worker_claim_wait_seconds)
         wait = min(wait, s.worker_claim_wait_seconds)
         now = self.now_fn()
-        self.store.touch_worker(token.name, now)
+        if not self.store.touch_worker(token.name, now):
+            # 이제 워커 행이 사라질 수 있다(은퇴 정리) — 그 뒤에 claim 하면 아무도 못 거두는
+            # 잡이 된다. 다시 등록하라고 말한다.
+            raise _api_error(409, "worker is not registered")
         job, hold = self._try_claim(token.name, row.pool, lane, now)
         if job is not None:
             return self._claim_payload(job)
