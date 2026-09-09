@@ -17,34 +17,35 @@ of a key bumps that number and is listed here.
   `rcm top` (`lanes 1/2 busy · 1 held (cpu 92%)`), on the web page, and as the queue reason
   `held_by_load`; `rcm check` reports it without failing, and warns if a lane has been held for
   more than five minutes. `admission = "always"` restores the old behaviour.
-  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66),
+  [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
 
 ### Changed
 - **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
   `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
   `held`. `schema_version` is unchanged.
-  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66))
 - **Behaviour change for anyone already running two or more lanes**, whether that is
   `[server] lanes` or a worker's own `--lanes`: those lanes now wait for the machine to be quiet.
   The server logs the effective policy at startup. Set `admission = "always"` to keep the old
-  behaviour. ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  behaviour. ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66))
 - **The queue's lane accounting counts `(worker, lane)` instead of the lane number.** A pool with
   local lanes and a remote worker's lanes used to collapse them — a four-lane pool was estimated as
   two, and "behind #N" could name the wrong job.
-  ([#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
+  ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
 - **A worker's log flush no longer stalls other lanes.** Every step marker in a batch opened its
   own SQLite transaction, so one 256 KB flush pushed another lane's claim from 0.03 ms to 275 ms,
   and a large body could exhaust the busy timeout and hand the worker an HTTP 500. Markers are now
   written in one transaction, and a busy database answers `503` with `Retry-After` instead of a
-  server error. ([#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
+  server error. ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 - **Claiming a job no longer scans every job the pool has ever had.** A dedicated index makes it
   constant-time (8.5 ms → 0.003 ms at 200k retained jobs). Database schema 8.
-  ([#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
+  ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 - **Workers no longer poll in lockstep.** Their retry interval was a fixed one second, so a fleet
   that restarted together stayed synchronised and could fill the server's request slots. It is now
-  spread over one to two seconds. ([#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
+  spread over one to two seconds. ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 - **The production guard stopped objecting to a worktree that has its own `rcm.toml`.** It read a
   bare `rcm serve` as "this would take the production config", but the search order stops at
   `./rcm.toml` (and `$RCM_CONFIG`) long before `~/.config/rcm/server.toml`, so a test server in a
