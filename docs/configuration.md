@@ -187,9 +187,22 @@ config and the data directory and deletes nothing, and it does not need the serv
 rcm gc --dry-run --config ~/.config/rcm/server.toml
 ```
 
-`rcm gc` (admin token) runs the same plan for real against a running server. `/api/status` carries
-the same numbers under `server.job_storage`, `rcm check` prints one line, and the web host card
-shows what the data directory holds and when the next sweep is.
+```
+job     workspace   snapshot   reason
+#118       1.7 GB          —   age
+#131       0.8 GB     0.0 GB   budget
+would free 2.5 GB from 2 jobs · 28.9 GB left
+```
+
+`rcm gc` (admin token) runs the same plan for real against a running server, and reports what it
+planned, what it deleted and what failed separately — a plan is not a receipt. A `gc` that outruns
+its `--timeout` (600 s) exits **3, unknown**, not failure: the server may still be deleting, so run
+the dry run again to see what is left.
+
+The same numbers are on `/api/status` under `server.job_storage`
+(`volume_bytes = workspace_bytes + snapshot_bytes = evictable_bytes + non_evictable_bytes`), in
+`/api/health` under `storage`, as one line in `rcm check`, and under the disk meter on the web host
+card. What cannot be measured reads `—`, never `0`.
 
 Git mirrors are never pruned.
 

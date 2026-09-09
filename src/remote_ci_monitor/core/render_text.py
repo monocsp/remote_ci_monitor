@@ -122,6 +122,131 @@ def _disk(d: dict[str, Any] | None) -> str:
     return f"{used / 10**9:.0f} / {total / 10**9:.0f} GB{tail}"
 
 
+def _bytes(b: int | None) -> str:
+    """디스크 바이트 — 십진 눈금(Finder·`df -H` 와 같다)이되 **크기에 맞는 단위**로.
+
+    GB 로만 그리면 50 KB 짜리 스냅샷이 `0.0 GB` 가 되어 「없다」로 읽힌다. 회수 목록은 큰 것과
+    작은 것이 한 표에 섞이는 자리다. **모르는 값은 대시다** — 0 으로 그리면 「지키고 있다」는
+    거짓말이 된다.
+    """
+    if b is None:
+        return DASH
+    if b < 10**3:
+        return f"{b} B"  # 0 은 「없다」는 사실이다 — `0.0 KB` 는 눈을 미끄러뜨린다
+    if b < 10**6:
+        return f"{b / 10**3:.1f} KB"
+    if b < 10**9:
+        return f"{b / 10**6:.1f} MB"
+    return f"{b / 10**9:.1f} GB"
+
+
+def _next_sweep(doc: dict[str, Any], now: str | None) -> str:
+    """「next sweep in 42m」. 시각을 모르거나 `now` 가 없으면 빈 문자열."""
+    at = doc.get("next_sweep_at")
+    if not at or not now:
+        return ""
+    try:
+        left = (parse_iso(at) - parse_iso(now)).total_seconds()
+    except (TypeError, ValueError):
+        return ""
+    return f" · next sweep in {fmt_duration(max(0.0, left))}"
+
+
+def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `storage` 행 — (이름, ok, 설명). 영어다(CLI 규칙).
+
+    등급은 **다음 sweep 이 고칠 수 있나**로 가른다. 고칠 수 있으면 warn, 사람이 와야 하면 FAIL.
+    삭제가 효과 없었던 상황을 warn 으로 숨기지 않는다.
+
+    **아직 한 번도 안 잰 서버는 행이 없다**(None). 「못 쟀다」와 「아직 안 쟀다」는 다른 사실이고,
+    막 뜬 서버를 경고로 그리면 첫 화면이 늘 노랗다. 청소기가 영영 안 도는 것은 `/api/health` 가
+    503 으로 잡고 그건 `server` 행에 나온다.
+    """
+    if doc.get("measured_at") is None and not doc.get("error_code"):
+        return None
+    volume, free = doc.get("volume_bytes"), doc.get("free_bytes")
+    limit, floor = doc.get("limit_bytes"), doc.get("min_free_bytes")
+    under_floor = floor is not None and free is not None and free < floor
+
+    if doc.get("no_progress"):
+        return (
+            "storage",
+            False,
+            f"{_bytes(free)} free: deleting stopped helping — free space did not move, "
+            "so the floor rule is paused until `rcm gc`",
+        )
+    if doc.get("budget_unreachable"):
+        held = doc.get("non_evictable_bytes")
+        return (
+            "storage",
+            False,
+            f"{_bytes(volume)} over the {_bytes(limit)} budget, and {_bytes(held)} of it is held "
+            "by running jobs and orphan directories — nothing the sweep may delete brings it under",
+        )
+    if under_floor and not doc.get("evictable_bytes"):
+        return (
+            "storage",
+            False,
+            f"{_bytes(free)} free, under the {_bytes(floor)} floor, and nothing left to delete",
+        )
+    if doc.get("error_code") or volume is None:
+        return (
+            "storage",
+            None,
+            "a size could not be measured — the byte rules are not enforced this sweep "
+            f"({doc.get('error_code') or 'unknown'})",
+        )
+    if limit is not None and volume > limit:
+        return (
+            "storage",
+            None,
+            f"rcm data {_bytes(volume)} is over the {_bytes(limit)} budget — "
+            "the next sweep will trim it",
+        )
+    if under_floor:
+        return (
+            "storage",
+            None,
+            f"{_bytes(free)} free, under the {_bytes(floor)} floor — the next sweep will reclaim",
+        )
+    of_limit = f" of {_bytes(limit)}" if limit is not None else ""
+    tail = _next_sweep(doc, now)
+    return "storage", True, f"rcm data {_bytes(volume)}{of_limit} · {_bytes(free)} free{tail}"
+
+
+def render_gc(body: dict[str, Any]) -> str:
+    """`rcm gc` 사람용 표. **계획과 결과를 가른다** — 계획을 회수처럼 쓰면 거짓이다."""
+    planned = body.get("planned") or []
+    lines = ["job     workspace   snapshot   reason"]
+    for item in planned:
+        lines.append(
+            f"#{item.get('job_id'):<6} {_bytes(item.get('workspace_bytes')):>9}  "
+            f"{_bytes(item.get('snapshot_bytes')):>9}   {item.get('reason', DASH)}"
+        )
+    if not planned:
+        lines.append("(nothing to reclaim)")
+    before = body.get("storage_before") or {}
+    after = body.get("storage_after") or {}
+    if body.get("dry_run"):
+        # dry-run 의 「남는다」는 **예측**이다. 지금 총량을 「남을 양」이라고 쓰면 거짓이 된다.
+        total = sum(
+            (i.get("workspace_bytes") or 0) + (i.get("snapshot_bytes") or 0) for i in planned
+        )
+        held = before.get("volume_bytes")
+        rest = DASH if held is None else _bytes(max(0, held - total))
+        lines.append(f"would free {_bytes(total)} from {len(planned)} jobs · {rest} would remain")
+        return "\n".join(lines)
+    tail = f" · {_bytes(after.get('volume_bytes'))} left"
+    failed = body.get("failed") or []
+    gone = len(body.get("deleted") or [])
+    line = f"freed {_bytes(body.get('freed_bytes'))} from {gone} jobs{tail}"
+    if failed:
+        codes = ", ".join(sorted({f.get("error_code", "?") for f in failed}))
+        line += f" · {len(failed)} failed ({codes})"
+    lines.append(line)
+    return "\n".join(lines)
+
+
 def _load(v: float | None) -> str:
     # os.getloadavg() 는 이진 소수(6.60693359375)라 두 자리로 자른다
     return DASH if v is None else f"{v:.2f}"

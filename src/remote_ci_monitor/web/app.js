@@ -903,6 +903,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
+    jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
@@ -1595,6 +1596,36 @@
     };
   }
 
+  // 호스트 카드의 「rcm 데이터」 한 줄 (M5g §5.4) — 이 서버가 쥔 부피와 천장.
+  // 경고는 셋 중 하나면 켠다: 예산 초과 · 바닥 아래 · 무진전 latch.
+  // **모르는 값은 0 이 아니다** — 못 잰 회계를 0 GB 로 그리면 「지키고 있다」는 거짓말이 된다.
+  function jobStorageLine(doc, now, lang) {
+    if (!doc || !isNum(doc.volume_bytes) && !doc.error_code) return null;
+    var limit = isNum(doc.limit_bytes) ? doc.limit_bytes : null;
+    var free = isNum(doc.free_bytes) ? doc.free_bytes : null;
+    var floor = isNum(doc.min_free_bytes) ? doc.min_free_bytes : null;
+    var warn = Boolean(
+      doc.no_progress ||
+      doc.budget_unreachable ||
+      (limit !== null && isNum(doc.volume_bytes) && doc.volume_bytes > limit) ||
+      (floor !== null && free !== null && free < floor)
+    );
+    if (!isNum(doc.volume_bytes)) return { text: T(lang, "host.job_storage_unknown"), warn: true };
+    var left = null;
+    if (doc.next_sweep_at && now) {
+      var secs = (Date.parse(doc.next_sweep_at) - Date.parse(now)) / 1000;
+      if (isNum(secs)) left = fmtDuration(Math.max(0, secs));
+    }
+    return {
+      text: T(lang, "host.job_storage", {
+        used: fmtDisk(doc.volume_bytes),
+        limit: limit === null ? "" : fmtDisk(limit),
+        next: left || ""
+      }),
+      warn: warn
+    };
+  }
+
   function renderHostDigest() {
     var d = hostDigest();
     var el = $("[data-host-digest]");
@@ -1648,6 +1679,9 @@
       // 남은 양은 오른쪽에 글자로 — 막대만으로는 「얼마 남았나」를 못 읽는다. 경로는 그리지 않는다.
       var right = (isNum(diskPct) ? fmtPct(diskPct) : DASH) + (isNum(disk.free_bytes) ? " · " + tr("host.disk_free", { free: fmtDisk(disk.free_bytes) }) : "");
       html += meter("disk", tr("host.disk", { used: fmtDisk(disk.used_bytes), total: fmtDisk(disk.total_bytes) }), right, diskPct, 0, lowFree || (isNum(diskPct) && diskPct >= 85), "");
+      // 데이터 디렉터리가 쥔 부피는 서버의 사실이라 **서버 자신의 카드에만** 그린다.
+      var js = local ? jobStorageLine((state.status && state.status.server || {}).job_storage, state.status && state.status.generated_at, L()) : null;
+      if (js) html += '<div class="substat' + (js.warn ? " warn" : "") + '">' + esc(js.text) + "</div>";
     }
     if (gpu) html += meter("gpu", tr("host.gpu", { pct: fmtPct(gpu.util_pct) }), isNum(gpu.mem_used_bytes) ? tr("host.gpu_used", { size: fmtMemory(gpu.mem_used_bytes) }) : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
     else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";

@@ -288,20 +288,35 @@ def _raise():
     raise OSError(errno.EACCES, "nope")
 
 
-def test_one_plan_and_one_disk_read_per_sweep(env):
+def test_one_deletion_plan_and_two_disk_reads_per_sweep(env):
+    """「여유가 오를 때까지 지운다」 루프가 없다 — 한 회차는 **한 계획만** 실행한다.
+
+    지운 뒤 한 번 더 재는 것은 표시용이다(회계가 지우기 전 숫자를 들고 있으면 화면이 이미 한 일을
+    「다음 sweep 이 할 것」이라고 말한다). 그건 삭제를 안 한다.
+    """
     store, cfg = env
     for _ in range(3):
         job = finished(store, state=FAILED, finished_at=NOW - 2 * DAY)
         workspace(cfg, job)
     cfg.server.min_free_bytes = GB
     jan, _ = make_janitor(store, cfg)
-    plans, frees = [], []
-    real_plan, real_free = jan.plan, jan._free_bytes
-    jan.plan = lambda now, **kw: (plans.append(now), real_plan(now, **kw))[1]
+    applied, frees = [], []
+    real_apply, real_free = jan.apply, jan._free_bytes
+    jan.apply = lambda plan, now: (applied.append(plan), real_apply(plan, now))[1]
     jan._free_bytes = lambda: (frees.append(1), real_free())[1]
     jan.sweep_volume(NOW)
-    assert len(plans) == 1  # 「여유가 오를 때까지」 루프가 없다
-    assert len(frees) == 2  # 계획 전에 한 번, 실행 뒤 확인에 한 번
+    assert len(applied) == 1  # 지우는 것은 한 계획뿐이다
+    assert len(frees) == 2  # 계획 전에 한 번, 실행 뒤 확인에 한 번(재측정은 그 값을 물려받는다)
+
+
+def test_the_accounting_reflects_the_sweep_that_just_ran(env):
+    """지운 뒤에도 지우기 전 숫자를 들고 있으면 `rcm check` 가 이미 한 일을 예고한다."""
+    store, cfg = env
+    job = finished(store, state=FAILED, finished_at=NOW - 2 * DAY)
+    workspace(cfg, job, files={"big": 65536})
+    jan, _ = make_janitor(store, cfg)
+    jan.sweep_once(NOW)
+    assert jan.storage(NOW)["volume_bytes"] == 0
 
 
 # ── 무진전 latch ─────────────────────────────────────────────────────────────
@@ -403,3 +418,13 @@ def test_artifact_storage_reports_the_real_last_sweep_time(tmp_path):
         assert srv.app.artifact_storage()["last_sweep_at"] is not None
     finally:
         srv.close()
+
+
+def test_planning_counts_as_measuring_so_a_dry_run_can_report_totals(env):
+    """`rcm gc --dry-run` 이 「모른다」로 요약하면 쓸모가 없다 — 계획은 곧 측정이다."""
+    store, cfg = env
+    job = finished(store, state=FAILED, finished_at=NOW)
+    workspace(cfg, job)
+    jan, _ = make_janitor(store, cfg)
+    jan.plan(NOW)
+    assert jan.storage(NOW)["volume_bytes"] is not None

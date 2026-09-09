@@ -691,6 +691,39 @@ class App(RemoteWorkersMixin):
             row = None
         return artifacts_json(row, self.artifact_state(job, row))
 
+    def job_storage(self) -> dict[str, Any]:
+        """부피 회계(M5g §5.1). 청소기가 **마지막에 잰 값**을 쓴다 — 상태 요청이 디스크를 훑지
+        않는다. 실패해도 상태 문서를 막지 않는다."""
+        if self.retention is None:
+            return Janitor(self.store, self.config, now_fn=self.now_fn).storage(self.now_fn())
+        try:
+            return self.retention.storage(self.now_fn())
+        except Exception as e:  # noqa: BLE001
+            return {"error_code": _error_code(e)}
+
+    def gc(self, body: Any) -> dict[str, Any]:
+        """`POST /gc`(admin). 청소기와 **같은 계획 함수**를 돌린다(§5.5).
+
+        보장되는 것은 「같은 입력에 같은 판정」이지 「보여준 것과 실제가 같다」가 아니다 — 두
+        요청 사이에 잡이 끝나고 디렉터리가 생긴다.
+        """
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        unknown = set(body) - {"dry_run"}
+        if unknown:
+            raise ApiError(400, f"unknown key '{sorted(unknown)[0]}'")
+        dry_run = body.get("dry_run", False)
+        if not isinstance(dry_run, bool):  # "false" 는 참이 아니라 오류다
+            raise ApiError(400, "dry_run must be true or false")
+        if self.retention is None:
+            raise ApiError(503, "retention is not running")
+        now = self.now_fn()
+        before = self.retention.storage(now)
+        result = self.retention.gc_report(now, dry_run=dry_run)
+        result["storage_before"] = before
+        result["storage_after"] = None if dry_run else self.retention.storage(now)
+        return result
+
     def artifact_storage(self) -> dict[str, Any]:
         """서버 전체 회계(§10). 실패해도 상태 문서를 막지 않는다."""
         try:
@@ -1079,6 +1112,7 @@ class App(RemoteWorkersMixin):
                 if job is not None:
                     row["artifacts"] = self.artifacts_public(job)
         doc["server"]["artifact_storage"] = self.artifact_storage()
+        doc["server"]["job_storage"] = self.job_storage()
 
     def job_view(
         self, job_id: int, token: TokenInfo | None, tail: int, host: str | None = None
@@ -1723,6 +1757,26 @@ class App(RemoteWorkersMixin):
             return {"on": False, "name": None, "error": None}
         return {"on": r.error is None, "name": r.instance.split("._rcm.")[0], "error": r.error}
 
+    def _health_storage(self) -> dict[str, Any]:
+        """health 판 회계 — **경로는 안 싣는다**(토큰 없이 열린다).
+
+        예산 초과·바닥 아래는 **503 조건이 아니다.** 다음 sweep 이 할 일이고, 청소기가 죽는 것은
+        이미 503 이다. 사실만 싣고 판단은 `rcm check` 와 사람에게 맡긴다.
+        """
+        doc = self.job_storage()
+        free, floor = doc.get("free_bytes"), doc.get("min_free_bytes")
+        return {
+            "volume_bytes": doc.get("volume_bytes"),
+            "free_bytes": free,
+            "limit_bytes": doc.get("limit_bytes"),
+            "min_free_bytes": floor,
+            "last_sweep_at": doc.get("last_sweep_at"),
+            "next_sweep_at": doc.get("next_sweep_at"),
+            "budget_unreachable": bool(doc.get("budget_unreachable")),
+            "no_progress": bool(doc.get("no_progress")),
+            "under_floor": bool(floor and free is not None and free < floor),
+        }
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -1748,6 +1802,7 @@ class App(RemoteWorkersMixin):
             "janitor": janitor_error is None,
             "lanes": self.config.server.lanes,
             "version": self.version,
+            "storage": self._health_storage(),  # 부피 회계(M5g, 정보 — 503 조건은 아니다)
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
             "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
         }
@@ -2010,6 +2065,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/worker/"):
             self._worker_route(method, path)
+            return
+        if path == "/gc":
+            self._only(method, "POST")
+            self.app.require_admin(self._token())
+            self._send_json(200, self.app.gc(self._json_body()))
             return
         if path == "/pause" or path == "/resume":
             self._only(method, "POST")
