@@ -240,13 +240,17 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 3. **The running job**, with who asked for it and what tree it is testing. Rows arrive folded; the
    current step stays in the reason column as `step 2/4 build 2s`, so a folded row still says what
    is happening.
-4. **How far along it is**, on one bar. The label says what the bar is measuring: `50% · 4/8 steps`
-   when the job declares how many steps it has, `70% · by expected time` when it does not. A job
-   that has run longer than its estimate reads `past the estimate`, and one nothing can be said
-   about reads `progress —` — never a percentage the page cannot stand behind.
+4. **How far along it is**, on one bar, and — always — what the bar measured. `50% · 4/8 steps`
+   when the job declares how many steps it has; `70% · by measured time` or `by preset estimate`
+   when it does not, so you can see how much the number is worth. A job past its estimate reads
+   `past the estimate`, one that finished every declared step but has not exited reads
+   `finalizing`, and a job nothing can be said about — no samples at all, preparing its workspace,
+   or likely stuck — reads `progress —`. A running job never fills the bar: a full bar means
+   finished, and this one is still going.
 5. **Its steps**, opened with **▸**, in order, with the finished ones ticked and the current one
    timed. The seconds count up as you watch; they do not sit still and then jump when the page
-   refreshes. The log tail and the **Log** and **Cancel** buttons are in the same block.
+   refreshes. The log tail and the **Log** button are in the same block. **Cancel** does not hide
+   there: it stays in the row while the row is folded, so stopping a runaway job is one tap.
 6. **A waiting job**, with its position in the queue.
 7. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
    from the preset; `—` means it will not pretend to know.

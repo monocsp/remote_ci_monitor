@@ -620,12 +620,14 @@ FOLD_JS = """
     steps_blocks: document.querySelectorAll('#queue .steps').length,
     bars: document.querySelectorAll('#queue tr.qbar').length,
     bar: pbar === null ? null : {
-      cls: pbar.className,
+      basis: pbar.getAttribute('data-basis'),
+      cond: pbar.getAttribute('data-cond'),
       label: bar.querySelector('.plab').textContent.trim(),
       valuetext: pbar.getAttribute('aria-valuetext'),
       width: pbar.querySelector('i').getAttribute('style'),
       tick: bar.querySelector('.pwrap').getAttribute('data-tick'),
       expected: bar.querySelector('.pwrap').getAttribute('data-expected'),
+      aria: pbar.outerHTML.slice(0, 400),
     },
     reason: row ? row.querySelector('td.reason').textContent.replace(/\\s+/g, ' ').trim() : null,
     stored: localStorage.getItem('rcm.expanded'),
@@ -664,10 +666,13 @@ def test_running_row_is_folded_and_carries_an_overall_bar(scene, tmp_path):
     assert bar["valuetext"] == bar["label"], bar  # 보조기기가 읽는 값과 눈에 보이는 값이 같다
     assert re.search(r"width:\s*\d+(\.\d+)?%", bar["width"] or ""), bar
     assert "step" in folded["reason"].lower(), folded["reason"]
-    # `slow` 은 총 스텝 수를 안 알린다 → 시간 눈금. 그러면 1초 틱이 스스로 밀 기준점이 붙는다
-    assert "by expected time" in bar["label"], bar
-    assert bar["cls"] == "pbar time", bar
-    assert bar["tick"] == "progress" and float(bar["expected"]) > 0, bar
+    # `slow` 은 총 스텝 수를 안 알리고, 이 서버엔 표본도 프리셋 추정도 없다(설치 기본값 600초뿐).
+    # 그러면 막대는 **눈금을 주지 않는다** — 기본값을 70% 로 그리면
+    # 자신있는 거짓말이다(Codex 리뷰 1).
+    assert bar["label"] == "progress —", bar
+    assert (bar["basis"], bar["cond"]) == ("none", "normal"), bar
+    assert bar["tick"] is None, bar
+    assert "aria-valuenow" not in (bar["aria"] or ""), bar
 
     # ▸ 를 누르면 펼쳐지고 그 선택이 남는다
     assert opened["expanded_rows"] == 1, "▸ 를 눌러도 펼쳐지지 않는다"
@@ -710,3 +715,132 @@ def test_recent_rows_show_the_job_id(tmp_path):
         srv.close()
     assert row_id.strip() == f"#{jid}", row_id
     assert f"#{jid}" in row_text, row_text
+
+
+# 막대가 **무엇으로 셌는지**를 화면에서 확인한다. 순수 함수 시험(tests/web/progress_overall)이
+# 규칙을 잠그고, 여기서는 진짜 서버가 만든 상태 문서로 같은 규칙이 그려지는지를 본다.
+BARS_JS = """
+(ids => Object.fromEntries(ids.map(id => {
+  const bar = document.querySelector('#queue tr.qbar[data-bar="' + id + '"]');
+  const row = document.querySelector('#queue tr[data-job="' + id + '"]');
+  const pbar = bar ? bar.querySelector('.pbar') : null;
+  const fill = pbar ? pbar.querySelector('i') : null;
+  const track = pbar ? pbar.getBoundingClientRect().width : 0;
+  return [id, {
+    basis: pbar ? pbar.getAttribute('data-basis') : null,
+    cond: pbar ? pbar.getAttribute('data-cond') : null,
+    // 그려진 길이 — 자동 레이아웃 표 안에서 퍼센트 폭이 틀어지던 회귀를 여기서 잡는다
+    drawn: fill && track ? Math.round(fill.getBoundingClientRect().width / track * 100) : null,
+    valuenow: pbar ? pbar.getAttribute('aria-valuenow') : null,
+    label: bar ? bar.querySelector('.plab').textContent.trim() : null,
+    valuetext: pbar ? pbar.getAttribute('aria-valuetext') : null,
+    source: bar ? bar.querySelector('.pwrap').getAttribute('data-source') : null,
+    tick: bar ? bar.querySelector('.pwrap').getAttribute('data-tick') : null,
+    bars: document.querySelectorAll('[role="progressbar"]').length,
+    cancel_in_row: row ? row.querySelectorAll('td.reason [data-cancel]').length : null,
+    toggle: row && row.querySelector('[data-toggle]')
+      ? row.querySelector('[data-toggle]').getAttribute('aria-label') : null,
+  }];
+})))(%s)
+"""
+
+
+def test_progress_bar_names_what_it_measured_and_keeps_cancel_one_tap_away(tmp_path):
+    """Codex 리뷰(2026-09-09) 1·4·5 — 막대는 눈금의 근거를 밝히고, 접힌 도는 행에서도 내 잡을
+    한 번에 취소할 수 있고, 한 잡에 `role="progressbar"` 는 하나다."""
+    srv = Server(tmp_path, workers=False, lanes=2, admission="always")
+    srv.cfg.presets = tuple(
+        parse_preset(p)
+        for p in [
+            *PRESETS,
+            # 총계를 선언한다 → 스텝 눈금(a 가 끝나고 b 가 도는 순간 1/4)
+            sh(
+                "steps4",
+                "echo '::rcm::steps::4'; echo '::rcm::step::a'; echo '::rcm::step-end::ok'; "
+                "echo '::rcm::step::b'; sleep 20",
+            ),
+            # 총계는 없고 프리셋 추정만 있다 → 시간 눈금, 라벨이 「프리셋」이라고 밝힌다
+            sh("timed", "echo '::rcm::step::run'; sleep 20", expected_seconds=120),
+        ]
+    )
+    jobs: list[int] = []
+    try:
+        a = srv.submit(preset="steps4")[1]["job_id"]
+        assert srv.upload(a)[0] == 200
+        b = srv.submit(preset="timed", tree_hash=OTHER_TREE)[1]["job_id"]
+        assert srv.upload(b)[0] == 200
+        jobs = [a, b]
+        srv.app.start()
+
+        def running_with_markers(doc: dict) -> bool:
+            rows = {r["id"]: r for r in (doc["pools"][0]["queue"] or [])}
+            ra, rb = rows.get(a) or {}, rows.get(b) or {}
+            return (
+                ra.get("state") == "running"
+                and (ra.get("progress") or {}).get("steps_done") == 1
+                and rb.get("state") == "running"
+                and (rb.get("estimate") or {}).get("source") == "preset"
+            )
+
+        status_until(srv, running_with_markers, timeout=20.0)
+        url = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = (
+            f"[{a}, {b}].every(id => "
+            "document.querySelector('#queue tr.qbar[data-bar=\"' + id + '\"]') !== null)"
+        )
+        with Chrome(tmp_path / "chrome-bars", window="1240,900") as c:
+            c.open(url, ready_js=ready)
+            # 토큰이 있어야 내 잡의 취소 버튼이 열린다(읽기는 토큰 없이)
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
+            c.open(
+                url,
+                ready_js=ready + " && document.querySelector('#tok-btn').textContent"
+                ".indexOf('alice') >= 0 && document.querySelector('td.reason [data-cancel]')"
+                " !== null",
+            )
+            time.sleep(0.3)  # 표 레이아웃이 끝난 뒤에 잰다 — 막대 길이는 레이아웃의 결과다
+            bars = c.eval(BARS_JS % json.dumps([a, b]))
+            expanded_before = c.eval("document.querySelectorAll('#queue tr.expanded').length")
+            c.eval(f"document.querySelector('[data-toggle=\"{a}\"]').click()")
+            open_bars = c.eval(
+                "({expanded: document.querySelectorAll('#queue tr.expanded').length,"
+                " progressbars: document.querySelectorAll('[role=\"progressbar\"]').length,"
+                f' cancel_in_row: document.querySelectorAll(\'tr[data-job="{a}"] td.reason'
+                " [data-cancel]').length,"
+                f' actions_cancel: document.querySelectorAll(\'tr.expanded[data-job="{a}"]'
+                " .actions .cancel:not([disabled])').length})"
+            )
+            visible_text = c.eval("document.body.innerText")
+    finally:
+        for jid in jobs:
+            srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})
+        srv.close()
+
+    # 스텝 총계를 선언한 잡: 스텝 눈금
+    assert (bars[str(a)]["basis"], bars[str(a)]["cond"]) == ("steps", "normal"), bars[str(a)]
+    assert bars[str(a)]["label"] == "25% · 1/4 steps", bars[str(a)]
+    assert bars[str(a)]["tick"] is None, "스텝 눈금은 저절로 자라지 않는다"
+    # 총계가 없고 프리셋 추정만 있는 잡: 시간 눈금 + 출처를 밝히는 라벨 + 1초 틱 기준점
+    assert (bars[str(b)]["basis"], bars[str(b)]["cond"]) == ("time", "normal"), bars[str(b)]
+    assert re.fullmatch(r"\d+% · by preset estimate", bars[str(b)]["label"]), bars[str(b)]
+    assert bars[str(b)]["source"] == "preset" and bars[str(b)]["tick"] == "progress", bars[str(b)]
+    # 보조기기가 읽는 값과 눈에 보이는 값이 같다
+    for jid in (a, b):
+        assert bars[str(jid)]["valuetext"] == bars[str(jid)]["label"], bars[str(jid)]
+    # **막대의 길이가 그 숫자와 같다.** 자동 레이아웃 표 안에서 `width: 25%` 가 중간 폭으로 굳어
+    # 11% 로 그려지던 적이 있다 — 길이가 거짓말을 하면 라벨이 정직해도 소용없다.
+    for jid in (a, b):
+        drawn, valuenow = bars[str(jid)]["drawn"], bars[str(jid)]["valuenow"]
+        assert valuenow is not None, bars[str(jid)]
+        assert abs(drawn - int(valuenow)) <= 1, (jid, bars[str(jid)])
+    # 접힌 도는 행에서 취소가 한 번에 닿는다. ▸ 의 접근 이름에는 잡 번호가 있다
+    assert expanded_before == 0
+    assert bars[str(a)]["cancel_in_row"] == 1, bars[str(a)]
+    assert bars[str(b)]["cancel_in_row"] == 1, bars[str(b)]
+    assert f"#{a}" in (bars[str(a)]["toggle"] or ""), bars[str(a)]
+    # 도는 잡 둘 → progressbar 둘. 하나를 펼쳐도 늘지 않는다(스텝 띠는 장식이다)
+    assert bars[str(a)]["bars"] == 2, bars[str(a)]
+    assert open_bars["expanded"] == 1 and open_bars["progressbars"] == 2, open_bars
+    # 펼친 행에서는 액션 블록이 취소를 맡는다 — 같은 행에 취소 버튼이 둘이 되지 않는다
+    assert open_bars["cancel_in_row"] == 0 and open_bars["actions_cancel"] == 1, open_bars
+    assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]

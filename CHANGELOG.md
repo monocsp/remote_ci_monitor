@@ -9,12 +9,17 @@ of a key bumps that number and is listed here.
 
 ### Added
 - **A progress bar on every running job.** The web page draws one bar under each running row and
-  says what it measures: `50% · 4/8 steps` when the job declares its step count with
-  `::rcm::steps::N`, `70% · by expected time` when it does not. A job past its estimate reads
-  `past the estimate` and a job nothing can be said about — stuck, preparing its workspace, or
-  with no estimate at all — reads `progress —`. The time-based bar grows every second instead of
-  jumping between refreshes, and no bar ever shows a percentage the page cannot stand behind.
-  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+  always says what it measured: `50% · 4/8 steps` when the job declares its step count with
+  `::rcm::steps::N`, `70% · by measured time` or `by preset estimate` when it does not — so the
+  number carries the worth of the estimate behind it. A job past its estimate reads
+  `past the estimate`, one that finished every declared step without exiting reads `finalizing`,
+  and a job nothing can be said about — likely stuck, preparing its workspace, or with no samples
+  at all (the 600-second installation default is not a measurement) — reads `progress —`. **A
+  running job never fills the bar**: a full bar means finished, so a forecast stops at 99% and the
+  two "we are past what we know" states are hatched instead. The time bar grows every second
+  instead of jumping between refreshes, and stops growing while updates are paused or lost.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
 - **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
   stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
   a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
@@ -30,10 +35,11 @@ of a key bumps that number and is listed here.
 ### Changed
 - **Queue rows now arrive folded.** Running rows used to open themselves, so two or three running
   jobs filled the screen with step lists and log tails. The row keeps what answers "how is it
-  going" — the progress bar and `step 2/4 build 2s` in the reason column — and **▸** opens the step
-  list, the log tail and the Log/Cancel buttons. The page remembers which rows *you* opened
+  going" — the progress bar, `step 2/4 build 2s` in the reason column, and **Cancel** for your own
+  job — and **▸** opens the step list and the log tail. The page remembers which rows *you* opened
   (`rcm.expanded` in that browser), not which ones you closed.
-  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
 - **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
   and it was the one place the page dropped it.
   ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
