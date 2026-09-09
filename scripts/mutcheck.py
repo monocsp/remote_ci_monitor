@@ -5,7 +5,7 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 13종:
+변이 15종:
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -17,6 +17,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ⑫ admission-samples-any — 창의 **전부**가 아니라 **하나라도** 기준 아래면 열림 (같은 파일)
   ⑬ web-progress-partial-total — 전체 진행 막대가 「지금까지 본」 스텝 총계를 확정 총계처럼 씀
      (`web/app.js`, node --test)
+  ⑭ web-progress-default-estimate — 표본도 프리셋 값도 없는 설치 기본값(600초)으로 눈금을 그림
+     (같은 파일 · Codex 리뷰 1)
+  ⑮ web-progress-full-bar — 도는 잡의 예측 막대가 100% 까지 차오름 (같은 파일 · Codex 리뷰 2)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -89,6 +92,22 @@ MUTANTS = (
             "if (isNum(total) && total > 0 && isNum(done) && !(prog && prog.steps_total_partial)) {"
         ),
         new="if (isNum(total) && total > 0 && isNum(done)) {",
+        tests=("tests/web/progress_overall.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        name="web-progress-default-estimate",
+        path="src/remote_ci_monitor/web/app.js",
+        old='&& est.source !== "default"',
+        new="",
+        tests=("tests/web/progress_overall.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        name="web-progress-full-bar",
+        path="src/remote_ci_monitor/web/app.js",
+        old="Math.max(0, Math.min(99, Math.floor(elapsed / expected * 100)))",
+        new="Math.max(0, Math.min(100, Math.round(elapsed / expected * 100)))",
         tests=("tests/web/progress_overall.test.js",),
         runner="node",
     ),
