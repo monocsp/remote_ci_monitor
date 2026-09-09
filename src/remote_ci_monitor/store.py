@@ -28,17 +28,21 @@ from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor.core import artifacts, outcome
+from remote_ci_monitor.core.failures import FailureRow
 from remote_ci_monitor.core.model import (
     ACTIVE_STATES,
     BUSY_STATES,
     CANCELLED,
     CANCELLING,
     DEFAULT_POOL,
+    FAILED,
     LOST,
     PHASE_MATERIALIZING,
     QUEUED,
     RUNNING,
+    SUCCEEDED,
     TERMINAL_STATES,
+    TIMED_OUT,
     TOKEN_ADMIN,
     TOKEN_CLIENT,
     TOKEN_KINDS,
@@ -56,7 +60,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 11
+DB_VERSION = 15
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -100,7 +104,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   summary_args TEXT,
   join_count INTEGER NOT NULL DEFAULT 0,
   -- 시작할 때 그 풀에서 돌고 있던 잡 수(자기 포함). 옛 잡은 NULL = 모른다 (M5f)
-  concurrent_at_start INTEGER
+  concurrent_at_start INTEGER,
+  -- 마지막으로 시작한 스텝. `failed_step` 과 달리 인과를 주장하지 않는다 (M5h)
+  last_step TEXT,
+  -- 실패 이름이 상한(100)을 넘어 버려진 것이 있다 (M5h)
+  fail_truncated INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -109,6 +117,16 @@ CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id);
 CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
+CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC);
+-- 잡이 `::rcm::fail::<이름>` 으로 지목한 것들. 이름 하나가 한 번(같은 잡에서 두 번 찍어도
+-- 한 가지 사실이다). `seq` 는 잡이 찍은 순서 — 첫 줄이 대개 진짜 원인이다 (M5h)
+CREATE TABLE IF NOT EXISTS job_failures (
+  job_id INTEGER NOT NULL,
+  name   TEXT    NOT NULL,
+  seq    INTEGER NOT NULL,
+  PRIMARY KEY (job_id, name)
+);
+CREATE INDEX IF NOT EXISTS job_failures_name ON job_failures(name);
 CREATE TABLE IF NOT EXISTS job_artifacts (
   job_id INTEGER PRIMARY KEY,
   state TEXT NOT NULL,
@@ -261,7 +279,37 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     10: ("ALTER TABLE jobs ADD COLUMN concurrent_at_start INTEGER",),
     # v10 → v11: `failed_step` 이 확정인가 추측인가. 마이그레이션 전에 끝난 잡은 **NULL = 모름**
     # 이다 — 0 으로 채우면 그때의 추측이 「확정」으로 둔갑한다(2026-09-08 운영 사고).
+    # ⚠️ M5h(결정 63) 뒤로 이 열은 **안 쓴다** — 추측을 아예 안 하므로 늘 거짓이 된다.
+    #    지우는 마이그레이션을 따로 두지 않는 이유: 열 하나가 남는 비용보다 되돌릴 여지를
+    #    남기는 값이 크다(두 설계 중 하나를 고르는 일은 오너의 것이다).
     11: ("ALTER TABLE jobs ADD COLUMN failed_step_guessed INTEGER",),
+    # v11 → v12(M5h): 마지막으로 시작한 스텝. `failed_step` 이 「선언된 것만」이 되면서
+    # 「끝났을 때 어디였나」를 말할 칸이 필요해졌다. 옛 잡은 NULL = 모른다.
+    12: ("ALTER TABLE jobs ADD COLUMN last_step TEXT",),
+    # v12 → v13(M5h): 실패 이름 대장. 이름별 최근 이력(`GET /jobs/{id}` 의 `failures[]`)이
+    # 이 표 위에 선다. 창 질의가 `(key, finished_at)` 을 타야 해서 인덱스도 같이 만든다.
+    13: (
+        "CREATE TABLE IF NOT EXISTS job_failures ("
+        " job_id INTEGER NOT NULL, name TEXT NOT NULL, seq INTEGER NOT NULL,"
+        " PRIMARY KEY (job_id, name))",
+        "CREATE INDEX IF NOT EXISTS job_failures_name ON job_failures(name)",
+        "CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC)",
+        "ALTER TABLE jobs ADD COLUMN fail_truncated INTEGER NOT NULL DEFAULT 0",
+    ),
+    # v13 → v14(M5h): 옛 코드는 취소·유실 잡에도 실패 스텝을 남겼다(운영 잡 #176 — 사람이 세운
+    # 잡에 「이게 깨졌다」로 읽히는 라벨이 붙었다). 그 라벨은 증거가 아니라 **추론의 부산물**이라
+    # 지운다. 표시도 같은 규칙을 강제하지만(결정 64) JSON 을 읽는 래퍼까지 고쳐 준다.
+    14: ("UPDATE jobs SET failed_step=NULL WHERE state IN ('cancelled','lost')",),
+    # v14 → v15(M5h): 옛 실패 잡의 라벨을 **덜 주장하는 칸으로 옮긴다**. 그 값은 대개 추론값
+    # (「마지막으로 시작한 스텝」)이고, 선언값이었는지는 이제 와서 구분할 수 없다 — 그래서
+    # 인과를 주장하는 `failed_step` 이 아니라 자리만 말하는 `last_step` 에 둔다. 안 그러면
+    # 신고자가 #162 를 다시 열었을 때 **고쳤다는 그 문자열을 그대로** 본다.
+    # 새 코드가 쓴 행은 라벨이 있으면 `last_step` 도 항상 있어서 이 조건에 안 걸린다.
+    15: (
+        "UPDATE jobs SET last_step=failed_step, failed_step=NULL "
+        "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
+        "AND last_step IS NULL",
+    ),
 }
 
 
@@ -520,6 +568,7 @@ class Store:
         source = Source(
             mode=src.get("mode", "tree"),
             repo=src.get("repo"),
+            branch=src.get("branch"),
             base_sha=src.get("base_sha"),
             dirty=src.get("dirty"),
             tree_hash=src.get("tree_hash"),
@@ -571,7 +620,8 @@ class Store:
             summary_code=row["summary_code"],
             summary_args=load_args(row["summary_args"]),
             failed_step=row["failed_step"],
-            failed_step_guessed=_opt_bool(row["failed_step_guessed"]),
+            last_step=row["last_step"],
+            fail_truncated=bool(row["fail_truncated"]),
             lane=row["lane"],
             timeout_seconds=row["timeout_seconds"],
             cancel=cancel if row["state"] == CANCELLING else None,
@@ -721,6 +771,84 @@ class Store:
             raise
         return int(cur.rowcount)
 
+    # ── 실패 이름 대장 (M5h) ────────────────────────────────────────────────
+
+    def failure_stats(
+        self, job_id: int, key: str, finished_at: datetime | None, *, window: int
+    ) -> tuple[list[FailureRow], int, int]:
+        """이 잡이 지목한 이름들이 **같은 key 의 최근 창**에서 몇 번 보였나.
+
+        창은 `finished_at` 을 **앵커로** 그 잡까지 최근 `window` 개다(취소·유실은 아무 말도
+        안 하므로 뺀다). 이 잡이 늘 창의 맨 앞이라 자기 이름의 `seen` 은 1 이상이고, 한 달
+        뒤에 같은 잡을 다시 열어도 **같은 답**이 나온다(창이 흘러가지 않는다 — 명세 §2.1).
+
+        돌려주는 것은 `(줄 목록, 창의 잡 수, 이름 없이 실패한 잡 수)`. 줄 순서는 그 잡이 찍은
+        순서(`seq`)다.
+        """
+        conn = self._conn()
+        at = _ts(finished_at) if finished_at is not None else None
+        if at is None or window < 1:
+            return [], 0, 0
+        states = (SUCCEEDED, FAILED, TIMED_OUT)
+        marks = ",".join("?" * len(states))
+        ids = [
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT id FROM jobs WHERE key=? AND state IN ({marks}) "
+                "AND finished_at IS NOT NULL "
+                "AND (finished_at < ? OR (finished_at = ? AND id <= ?)) "
+                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (key, *states, at, at, job_id, window),
+            ).fetchall()
+        ]
+        if not ids:
+            return [], 0, 0
+        id_marks = ",".join("?" * len(ids))
+        mine = [
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM job_failures WHERE job_id=? ORDER BY seq", (job_id,)
+            ).fetchall()
+        ]
+        rows: list[FailureRow] = []
+        if mine:
+            name_marks = ",".join("?" * len(mine))
+            counted = {
+                r["name"]: (int(r["seen"]), r["first_id"], r["last_id"])
+                for r in conn.execute(
+                    f"SELECT name, COUNT(*) AS seen, MIN(job_id) AS first_id, "
+                    f"MAX(job_id) AS last_id FROM job_failures "
+                    f"WHERE job_id IN ({id_marks}) AND name IN ({name_marks}) GROUP BY name",
+                    (*ids, *mine),
+                ).fetchall()
+            }
+            for name in mine:  # 잡이 찍은 순서를 지킨다
+                seen, first_id, last_id = counted.get(name, (0, None, None))
+                rows.append(
+                    FailureRow(
+                        name=name,
+                        seen=seen,
+                        first_seen_job_id=int(first_id) if first_id is not None else None,
+                        last_seen_job_id=int(last_id) if last_id is not None else None,
+                    )
+                )
+        # 이름을 남긴 잡을 한 번에 받아 파이썬에서 센다 — id 목록을 두 번 바인딩하면
+        # `failure_window_jobs` 상한(500)에서 파라미터가 1000개를 넘어 옛 SQLite 가 거절한다.
+        named = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT DISTINCT job_id FROM job_failures WHERE job_id IN ({id_marks})", ids
+            ).fetchall()
+        }
+        failed_ids = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT id FROM jobs WHERE id IN ({id_marks}) AND state IN (?,?)",
+                (*ids, FAILED, TIMED_OUT),
+            ).fetchall()
+        }
+        return rows, len(ids), len(failed_ids - named)
+
     def delete_old_jobs(self, cutoff: datetime) -> int:
         """산출물이 이미 지워진 종료 잡 중 cutoff 전에 끝난 것의 행·이벤트·합류자를 지운다."""
         marks = ",".join("?" * len(TERMINAL_STATES))
@@ -745,6 +873,7 @@ class Store:
                 conn.execute(f"DELETE FROM events WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM joiners WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM job_artifacts WHERE job_id IN ({id_marks})", ids)
+                conn.execute(f"DELETE FROM job_failures WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM jobs WHERE id IN ({id_marks})", ids)
             conn.execute("COMMIT")
         except Exception:
@@ -1138,6 +1267,7 @@ class Store:
         src = {
             "mode": source.mode,
             "repo": source.repo,
+            "branch": source.branch,
             "base_sha": source.base_sha,
             "dirty": source.dirty,
             "tree_hash": source.tree_hash,
@@ -1583,7 +1713,9 @@ class Store:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
         failed_step: str | None = None,
-        failed_step_guessed: bool | None = None,
+        last_step: str | None = None,
+        fail_names: Sequence[str] = (),
+        fail_truncated: bool = False,
         cancelled_by: str | None = None,
         only_from: Iterable[str] | None = None,
         bundle: Any | None = None,
@@ -1619,13 +1751,18 @@ class Store:
                 summary_code=summary_code,
                 summary_args=dump_args(summary_args),
                 failed_step=failed_step,
-                failed_step_guessed=(
-                    None if failed_step_guessed is None else int(failed_step_guessed)
-                ),
+                last_step=last_step,
+                fail_truncated=1 if fail_truncated else 0,
                 cancelled_by=cancelled_by if cancelled_by is not None else row["cancel_by"],
                 lane=None,
                 phase=None,
             )
+            # 증거와 결과는 **같은 커밋**이다 — 거절된 finish 는 대장도 안 남긴다.
+            for seq, name in enumerate(fail_names, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
+                    (job_id, name, seq),
+                )
             if bundle is not None:
                 _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
             conn.execute("COMMIT")

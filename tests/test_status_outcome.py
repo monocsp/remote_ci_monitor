@@ -87,6 +87,7 @@ BASE_RECENT = frozenset(
         "finished_at",
         "summary",
         "failed_step",
+        "last_step",  # M5h — 「끝났을 때 어디였나」
         "cancelled_by",
         "timeout_seconds",
         "source",

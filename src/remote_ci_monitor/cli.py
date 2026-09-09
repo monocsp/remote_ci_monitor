@@ -46,7 +46,15 @@ from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
-from remote_ci_monitor.core.render_text import fmt_clock, fmt_duration, render_gc, storage_row
+from remote_ci_monitor.core.render_text import (
+    MAX_IDENT,
+    failure_lines,
+    fmt_clock,
+    fmt_duration,
+    render_gc,
+    source_ident,
+    storage_row,
+)
 from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
 
@@ -380,6 +388,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         source = {
             "mode": "tree",
             "repo": snap.repo,
+            "branch": snap.branch,  # 목록에서 「내 잡」을 알아보는 칸 (M5h)
             "base_sha": snap.base_sha,
             "dirty": snap.dirty,
             "tree_hash": snap.tree_hash,
@@ -460,6 +469,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             force=bool(getattr(args, "force", False)),
             dry_run=bool(getattr(args, "dry_run", False)),
         )
+    # 장부를 놓는다 — 대기는 20분이고 tar 은 이미 지웠다. 2만 파일 트리에서 64 → 32 MB 다
+    # (M5h §4.6). `--fetch-artifacts` 가 쓰는 것은 위에서 뽑은 해시 사전 하나뿐이다.
+    snap = None  # noqa: F841 — 참조를 끊는 것이 목적이다
+    del snap
     return _wait(
         client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll, fetch=spec
     )
@@ -574,6 +587,11 @@ def _wait(
     line.done()
     if reason:
         _err(reason)
+    # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
+    # 붙인다 — 모를수록 로그가 필요하다.
+    if code != 0:
+        for text in failure_lines(job or {}, job_id=job_id, url=(job or {}).get("url")):
+            _err(text)
     out = dict(job or {"job_id": job_id, "state": None})
     out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
     out["wait_exit_code"] = code
@@ -823,6 +841,17 @@ def cmd_top(args: argparse.Namespace) -> int:
         return 0
 
 
+def _cut(text: str, width: int) -> str:
+    """칸에 맞춰 자른다 — 안 자르면 긴 값 하나가 그 줄의 뒤 칸을 전부 민다."""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _row_ref(row: dict[str, Any]) -> str:
+    """그 잡이 돌린 ref(git_ref) 또는 브랜치(tree). `--ref` 는 여기에 부분 일치한다."""
+    src = row.get("source") or {}
+    return str(src.get("ref") or src.get("branch") or "")
+
+
 def cmd_jobs(args: argparse.Namespace) -> int:
     client = _client(args, need_token=bool(args.mine))
     me: str | None = None
@@ -854,6 +883,11 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         ]
     if args.state:
         rows = [r for r in rows if r.get("state") == args.state]
+    if getattr(args, "ref", None):
+        # 한 기계의 세션들이 토큰을 나눠 쓰면 `--mine` 은 「이 기계의 잡」이다. 브랜치·ref 는
+        # 세션이 자기 잡을 알아보는 가장 가까운 칸이다(M5h §4.3).
+        want = args.ref
+        rows = [r for r in rows if want in _row_ref(r)]
     if args.json:
         _print_json(rows)
         return 0
@@ -879,8 +913,11 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         pos = f"{_ordinal(r['position'])} in line · " if r.get("position") else ""
         label = (r.get("requester") or {}).get("label") or "?"
         summary = r.get("summary") or ""
+        jid = f"#{r.get('id')}"
+        key = str(r.get("key") or "?")
         print(
-            f"#{r.get('id')}  {state:<10} {r.get('key', '?'):<16} {label:<20} {pos}{timing:<16} "
+            f"{jid:<6} {state:<10} {_cut(key, 16):<16} {label:<20} "
+            f"{source_ident(r.get('source')):<{MAX_IDENT}} {pos}{timing:<16} "
             f"{fmt_clock(when, tz)}  {summary}".rstrip()
         )
     return 0
@@ -1675,6 +1712,7 @@ def build_parser() -> argparse.ArgumentParser:
     jobs.add_argument("--mine", action="store_true", help="only jobs you requested or joined")
     jobs.add_argument("--state", help="filter by state (running, queued, failed, ...)")
     jobs.add_argument("--pool", metavar="NAME", help="only jobs of this worker pool")
+    jobs.add_argument("--ref", metavar="REF", help="only jobs whose ref or branch contains REF")
     jobs.add_argument("--json", action="store_true")
     client_opts(jobs)
     jobs.set_defaults(func=cmd_jobs)

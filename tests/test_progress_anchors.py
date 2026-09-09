@@ -37,6 +37,7 @@ BASE_PROGRESS = frozenset(
         "current_seconds",
         "job_seconds",
         "failed_step",
+        "last_step",  # M5h — 「끝났을 때 어디였나」
         "steps",
     }
 )

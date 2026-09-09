@@ -21,13 +21,16 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (같은 파일 · Codex 리뷰 1)
   ⑮ web-progress-full-bar — 도는 잡의 예측 막대가 100% 까지 차오름 (같은 파일 · Codex 리뷰 2)
   ⑯ nowait-view-trusted — `--no-wait` 의 표시용 조회가 문서를 곧이곧대로 믿음 (`cli.py`)
-  ⑰ failed-step-guess-flag — 추측한 실패 스텝을 확정이라고 말함 (`core/progress.py`)
-  ⑱ retention-budget-active — 부피 회수가 **도는 잡과 고아**까지 후보로 삼음
+  ⑰ retention-budget-active — 부피 회수가 **도는 잡과 고아**까지 후보로 삼음
      (`core/retention.py`, M5g — 이 기능의 최대 사고)
-  ⑲ retention-measure-fail-open — 못 잰 크기를 None 이 아니라 0 으로 세어 예산을 지키는 척함
+  ⑱ retention-measure-fail-open — 못 잰 크기를 None 이 아니라 0 으로 세어 예산을 지키는 척함
      (같은 파일)
-  ⑳ retention-budget-unreachable — 못 이룰 목표(지울 수 없는 바이트가 이미 상한 초과)에도
+  ⑲ retention-budget-unreachable — 못 이룰 목표(지울 수 없는 바이트가 이미 상한 초과)에도
      종료 잡을 전부 태움 (같은 파일 · Codex 2차 리뷰 E)
+  ⑳ failed-step-fallback — 실패 스텝이 다시 「마지막으로 시작한 스텝」으로 추론됨
+     (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
+  ㉑ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
+  ㉒ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -173,14 +176,6 @@ MUTANTS = (
         tests=("tests/test_admission.py",),
     ),
     Mutant(
-        # 추측한 실패 스텝을 확정이라고 말하면 무죄인 스텝이 범인이 된다(2026-09-08 사고)
-        name="failed-step-guess-flag",
-        path="src/remote_ci_monitor/core/progress.py",
-        old="        guessed = not blamed.marked",
-        new="        guessed = False",
-        tests=("tests/test_progress.py", "tests/test_failed_step_guess.py"),
-    ),
-    Mutant(
         name="retention-budget-active",
         path="src/remote_ci_monitor/core/retention.py",
         old="        (i for i in inventory if i.evictable),",
@@ -225,6 +220,53 @@ MUTANTS = (
         ),
         new="    return view if isinstance(view, dict) else None",
         tests=("tests/test_nowait_resilience.py",),
+    ),
+    # ⑰ M5h 결정 63 — 이 폴백이 운영 잡 #162 에서 **성공한 스텝**을 범인으로 지목했다.
+    Mutant(
+        name="failed-step-fallback",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="""    failed = next((s.name for s in steps if s.ok is False), None)
+""",
+        new="""    failed = next((s.name for s in steps if s.ok is False), None)
+    if failed is None and exit_code not in (None, 0) and steps:
+        failed = steps[-1].name
+""",
+        tests=("tests/test_progress_m5h.py", "tests/test_progress.py"),
+    ),
+    # ⑱ M5h 결정 66 — 취소·유실 잡은 아무 말도 안 한다. 분모에 넣으면 간헐 판정이 흐려진다.
+    Mutant(
+        name="failure-window-cancelled",
+        path="src/remote_ci_monitor/store.py",
+        old="""        states = (SUCCEEDED, FAILED, TIMED_OUT)
+""",
+        new="""        states = (SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST)
+""",
+        tests=("tests/test_store_m5h.py",),
+    ),
+    # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 대장을 커밋 **뒤로** 옮기면(= 실패한 대장
+    # 쓰기가 finish 를 되돌리지 못하면) 빨개져야 한다.
+    Mutant(
+        name="ledger-outside-tx",
+        path="src/remote_ci_monitor/store.py",
+        old="""            for seq, name in enumerate(fail_names, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
+                    (job_id, name, seq),
+                )
+            if bundle is not None:
+                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+            conn.execute("COMMIT")
+""",
+        new="""            if bundle is not None:
+                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+            conn.execute("COMMIT")
+            for seq, name in enumerate(fail_names, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
+                    (job_id, name, seq),
+                )
+""",
+        tests=("tests/test_store_m5h.py",),
     ),
 )
 

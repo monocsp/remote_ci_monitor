@@ -4,14 +4,19 @@
 set -u
 out=$(rcm run gate -f scope="${1:-full}" --by "$(whoami)@$(hostname -s)")
 rc=$?
+job=$(jq -r .job_id <<<"$out")
 case $rc in
   0) echo "gate green: $(jq -r .url <<<"$out")" ;;
-  # The failed step is a guess unless the script printed ::rcm::step-end::fail — say so rather
-  # than blaming a step that may have passed.
-  1) step=$(jq -r '.failed_step // "—"' <<<"$out")
-     [ "$(jq -r '.failed_step_guessed // false' <<<"$out")" = "true" ] && step="$step (guessed)"
-     echo "gate red — failed step: $step"; jq -r .summary <<<"$out" ;;
+  1)
+    # failed_step is only set when the script declared it (::rcm::step-end::fail or
+    # ::rcm::fail::<name>); otherwise last_step says where the job was, without blaming it.
+    echo "gate red — $(jq -r '.failed_step // ("last step " + (.last_step // "unknown"))' <<<"$out")"
+    jq -r .summary <<<"$out"
+    # names the job declared, with how often each was red in the recent runs of this key
+    jq -r '(.failures // [])[] | "  \(.name): \(.seen)/\(.window) recent runs (\(.verdict))"' <<<"$out"
+    echo "log: rcm logs $job"
+    ;;
   2) echo "cancelled or timed out: $(jq -r .state <<<"$out")" ;;
-  *) echo "unknown (exit $rc) — check $(jq -r .url <<<"$out")" ;;
+  *) echo "unknown (exit $rc) — check $(jq -r .url <<<"$out"); log: rcm logs $job" ;;
 esac
 exit $rc

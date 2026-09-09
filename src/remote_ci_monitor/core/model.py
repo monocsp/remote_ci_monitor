@@ -163,6 +163,8 @@ class Source:
     sha: str | None = None
     uploaded_bytes: int | None = None  # M5 캐시: 이번에 실제로 받은 바이트
     cached_bytes: int | None = None  # M5 캐시: 캐시 히트 바이트
+    #: tree 잡의 브랜치 이름(표시용, M5h). 신원은 `tree_hash` 이고 여기는 안 들어간다
+    branch: str | None = None
 
     @property
     def identity(self) -> str | None:
@@ -219,10 +221,10 @@ class Job:
     summary_code: str | None = None
     summary_args: dict[str, Any] = field(default_factory=dict)
     failed_step: str | None = None
-    #: `failed_step` 이 `step-end::fail` 로 확정된 것이면 False, 「종료 코드가 0 이 아니니
-    #: 마지막 스텝」 폴백이 고른 **추측**이면 True. 옛 행(v11 마이그레이션 전에 끝난 잡)은
-    #: None — 모른다. 확정과 추측을 섞으면 무죄인 스텝을 자신있게 범인으로 지목하게 된다.
-    failed_step_guessed: bool | None = None
+    #: 마지막으로 시작한 스텝 — 인과를 주장하지 않는다. 취소·유실 잡에는 없다 (M5h)
+    last_step: str | None = None
+    #: 실패 이름이 상한을 넘어 버려진 것이 있다. 공개 JSON 은 `failures_truncated` (M5h)
+    fail_truncated: bool = False
     lane: int | None = None
     timeout_seconds: int | None = None
     cancel: CancelInfo | None = None
@@ -280,9 +282,12 @@ class Progress:
     current_seconds: float | None = None
     job_seconds: float | None = None
     failed_step: str | None = None
-    #: 위 이름이 `step-end::fail` 로 확정된 것인가(False), 마지막-스텝 폴백의 추측인가(True).
-    #: 마커에서 만드는 값이라 여기서는 언제나 답이 있다 — 「모름」은 저장된 옛 행에만 있다.
-    failed_step_guessed: bool = False
+    #: 마지막으로 시작한 스텝. 「끝났을 때 어디였나」만 말하고 원인은 주장하지 않는다 (M5h)
+    last_step: str | None = None
+    #: 잡이 `::rcm::fail::` 로 지목한 이름. 잡이 찍은 순서, 서로 다른 이름만 (M5h)
+    fail_names: tuple[str, ...] = ()
+    #: MAX_FAIL_NAMES 를 넘겨 버린 이름이 있다 — 공개 JSON 에서는 `failures_truncated` (M5h)
+    fail_truncated: bool = False
     summary: str | None = None
     last_output_at: datetime | None = None
     timing: str = "as_received"

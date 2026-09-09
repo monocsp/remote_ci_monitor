@@ -190,13 +190,18 @@ def test_docs_say_why_the_service_needs_file_descriptor_headroom():
     assert "LimitNOFILE" in sec and "NumberOfFiles" in sec  # 두 서비스 파일의 키 이름
 
 
-def test_docs_say_a_failed_step_is_a_guess_without_the_fail_marker():
-    """`step-end::fail` 을 찍어야 실패 스텝이 사실이 된다 — 이 문단이 사라지면 빨개진다."""
+def test_docs_say_a_failed_step_has_to_be_declared():
+    """선언하지 않으면 실패 스텝이 없다 — 이 문단이 사라지면 빨개진다.
+
+    dev 의 PR #71 은 같은 자리에서 「추측이라고 밝힌다」를 잠갔다. M5h(결정 63)가 그 답을
+    **이름을 안 댄다**로 바꿨으므로 잠그는 문장도 바뀐다 — 약화가 아니라 같은 사실의 다음
+    판이다: 왜 틀리는지(병렬·되재생)와 무엇이 그 자리를 대신하는지(`last_step`)를 함께 건다.
+    """
     text = CONFIGURATION.read_text()
     assert "::rcm::step-end::fail" in text
-    assert "failed_step_guessed" in text
-    assert "RCM_FAILED_STEP_GUESSED" in text  # 알림 훅도 같은 사실을 받는다
-    assert "guess" in text.lower()
+    assert "::rcm::fail::" in text  # 이름으로 지목하는 새 마커
+    assert "last_step" in text  # 선언이 없을 때 그 자리를 대신하는 칸
+    assert "declared" in text.lower()
     # 왜 틀리는지(병렬로 돌리고 마커를 몰아 찍는 스크립트)가 같이 있어야 한다
     assert "parallel" in text.lower()
 

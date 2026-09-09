@@ -266,13 +266,17 @@ def test_upload_then_worker_runs_job_to_success(live):
     assert view["job_seconds"] is not None and view["waited_seconds"] is not None
 
 
-def test_failed_job_reports_exit_code_and_failed_step(live):
+def test_failed_job_reports_exit_code_and_the_last_step(live):
+    """M5h 결정 63 — `bad` 프리셋은 실패를 선언하지 않으므로 `failed_step` 은 null 이고
+    `last_step` 이 「어디였나」를 말한다. 선언한 잡은 `tests/test_server_m5h.py` 가 잠근다."""
     jid = live.submit(preset="bad")[1]["job_id"]
     live.upload(jid)
     j = live.wait_terminal(jid)
-    assert j.state == "failed" and j.exit_code == 2 and j.failed_step == "t"
+    assert j.state == "failed" and j.exit_code == 2
+    assert j.failed_step is None and j.last_step == "t"
     view = live.req("GET", f"/jobs/{jid}")[1]
-    assert view["failed_step"] == "t" and view["summary"] == "exit 2"
+    assert view["failed_step"] is None and view["last_step"] == "t"
+    assert view["summary"] == "exit 2"
 
 
 def test_tar_escape_is_rejected_and_left_as_failed(live):

@@ -118,6 +118,11 @@ def test_migration_v5_to_v6_adds_the_columns_and_old_rows_have_no_code(tmp_path)
     c = sqlite3.connect(path)
     try:
         c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
+        c.execute("DROP INDEX IF EXISTS job_failures_name")
+        c.execute("DROP INDEX IF EXISTS jobs_key_finished")
+        c.execute("DROP TABLE IF EXISTS job_failures")
+        c.execute("ALTER TABLE jobs DROP COLUMN fail_truncated")
+        c.execute("ALTER TABLE jobs DROP COLUMN last_step")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
         # v7(M5e)이 더한 것도 뗀다 — 안 그러면 6 뒤에 도는 7 이 중복 열로 죽는다

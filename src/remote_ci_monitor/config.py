@@ -102,6 +102,9 @@ class ServerSection:
     workspace_storage_max_bytes: int = 107_374_182_400  # 100 GiB. 0 = 무제한
     min_free_bytes: int = 10_737_418_240  # 파일 시스템 여유 바닥 10 GiB. 0 = 안 본다
     recent_count: int = 8
+    # 실패 이름의 최근 이력(M5h). 창은 같은 key 의 **이 잡까지** 최근 종료 잡 수다.
+    failure_window_jobs: int = 20
+    failure_min_jobs: int = 3  # 창이 이보다 얕으면 판정하지 않는다(unknown)
     upload_stall_seconds: int = 60
     upload_abandon_seconds: int = 300
     sse_max_connections: int = 16
@@ -690,6 +693,12 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     ):
         if getattr(s, key) < 1:
             raise ConfigError(f"[server] {key} must be >= 1")
+    if not 1 <= s.failure_window_jobs <= 500:
+        raise ConfigError("[server] failure_window_jobs must be between 1 and 500")
+    if s.failure_min_jobs < 1:
+        raise ConfigError("[server] failure_min_jobs must be >= 1")
+    if s.failure_min_jobs > s.failure_window_jobs:
+        raise ConfigError("[server] failure_min_jobs must be <= failure_window_jobs")
     if s.sse_max_connections < 0:
         raise ConfigError("[server] sse_max_connections must be >= 0")
     if s.sse_keepalive_seconds < 1:

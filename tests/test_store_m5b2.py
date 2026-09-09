@@ -205,6 +205,11 @@ def test_migration_v4_to_v5_fills_kind_from_admin_and_adds_worker_name_and_worke
         ).fetchall():
             c.execute(f"DROP INDEX {name}")
         c.execute("ALTER TABLE tokens DROP COLUMN kind")
+        c.execute("DROP INDEX IF EXISTS job_failures_name")  # v12(M5h)
+        c.execute("DROP INDEX IF EXISTS jobs_key_finished")
+        c.execute("DROP TABLE IF EXISTS job_failures")
+        c.execute("ALTER TABLE jobs DROP COLUMN fail_truncated")
+        c.execute("ALTER TABLE jobs DROP COLUMN last_step")  # v11(M5h)
         c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
         c.execute("ALTER TABLE jobs DROP COLUMN worker_name")
         c.execute("DROP TABLE workers")

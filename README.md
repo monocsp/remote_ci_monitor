@@ -204,7 +204,7 @@ The page never pretends to be current. `#/jobs/N` deep-links to a job.
 | `rcm wait` exit | meaning |
 |---|---|
 | 0 | job succeeded |
-| 1 | job failed (see `failed_step` and `summary` in the JSON; `failed_step_guessed` says whether that step is a fact or the last one the job reached) |
+| 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise) |
 | 2 | cancelled or timed out |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
 
