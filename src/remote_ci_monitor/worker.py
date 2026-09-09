@@ -171,8 +171,11 @@ def outcome_for(
         else:
             summary = None
     failed_step = progress.failed_step if state != SUCCEEDED else None
-    # 취소·타임아웃·유실은 위에서 종료 코드를 1 로 쳐서 폴백을 타므로 그 지목도 추측이다.
-    guessed = bool(failed_step) and progress.failed_step_guessed
+    # 죽임당한 잡(취소·타임아웃·유실)의 실패 스텝은 **언제나** 추측이다. 스텝이 실패해서 끝난 게
+    # 아니라 밖에서 끊겨서 끝났기 때문이다 — 스크립트가 앞 스텝에 `step-end::fail` 을 찍어 뒀어도
+    # 그건 「그 스텝이 깨졌다」는 사실이지 「이 잡이 왜 끝났나」의 답이 아니다. 게이트가 `test`
+    # 실패를 찍고도 계속 돌다가 `build web` 에서 타임아웃으로 죽는 모양이 실제로 나온다.
+    guessed = bool(failed_step) and (forced or progress.failed_step_guessed)
     return Outcome(
         state=state,
         summary=summary,

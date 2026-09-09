@@ -54,7 +54,8 @@ or `flutter --no-color` style flags in your scripts when timing matters. Job ela
 **`::rcm::step-end::fail` is what makes the failed step a fact.** Print it and rcm reports that step
 as the failure. Without it a job that exits non-zero still gets a `failed_step` — the last step it
 reached — but rcm marks that as a guess (`failed_step_guessed: true` in `/api/status`, `(guessed)`
-in the queue page and `rcm top`, `RCM_FAILED_STEP_GUESSED=1` for notification hooks). The guess is
+beside the step in the recent results on the web page and in `rcm top`, and
+`RCM_FAILED_STEP_GUESSED=1` for notification hooks). The guess is
 wrong whenever a script runs its steps in parallel and prints the markers afterwards in a fixed
 order: the last marker is then whichever step the script prints last, not the one that broke.
 

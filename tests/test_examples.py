@@ -182,6 +182,25 @@ def test_docs_run_as_a_service():
     assert "caffeinate" in sec or "pmset" in sec  # 잠자기 금지
 
 
+def test_docs_say_why_the_service_needs_file_descriptor_headroom():
+    """운영이 fd 고갈로 12분 죽은 뒤 넣은 값이다 — 왜 그 숫자인지가 문서에 남아야 한다."""
+    sec = _section(OPERATING.read_text(), "Run as a service")
+    assert str(NOFILE) in sec
+    assert "maxfiles" in sec and "256" in sec  # launchd 기본값이 모자란다는 근거
+    assert "LimitNOFILE" in sec and "NumberOfFiles" in sec  # 두 서비스 파일의 키 이름
+
+
+def test_docs_say_a_failed_step_is_a_guess_without_the_fail_marker():
+    """`step-end::fail` 을 찍어야 실패 스텝이 사실이 된다 — 이 문단이 사라지면 빨개진다."""
+    text = CONFIGURATION.read_text()
+    assert "::rcm::step-end::fail" in text
+    assert "failed_step_guessed" in text
+    assert "RCM_FAILED_STEP_GUESSED" in text  # 알림 훅도 같은 사실을 받는다
+    assert "guess" in text.lower()
+    # 왜 틀리는지(병렬로 돌리고 마커를 몰아 찍는 스크립트)가 같이 있어야 한다
+    assert "parallel" in text.lower()
+
+
 def test_docs_document_basic_read_auth():
     text = OPERATING.read_text()
     assert 'read_auth = "basic"' in text

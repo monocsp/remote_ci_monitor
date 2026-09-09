@@ -568,8 +568,13 @@ def test_the_public_last_error_still_says_only_the_class(srv, capsys):
     assert "unable to open database file" not in err, err
 
 
-def test_no_secret_reaches_the_log_or_the_public_field(srv, capsys):
-    """예외 문구에 실린 경로·비밀은 로그에서도 지워진다(`_safe`)."""
+def test_absolute_paths_are_scrubbed_from_the_log_and_the_public_field(srv, capsys):
+    """예외 문구의 **절대 경로**는 로그에서도 `<path>` 로 지워진다.
+
+    `_safe()` 는 경로 지우개지 비밀 지우개가 아니다 — 경로 밖에 맨몸으로 있는 토큰은 못 지운다
+    (아래 `test_safe_does_not_pretend_to_scrub_secrets_outside_paths` 가 그 한계를 적어 둔다).
+    그러니 자세한 문구는 **로그에만** 두고 공개되는 `last_error` 는 예외 이름까지만 낸다.
+    """
     secret = "rcm_" + "z" * 20  # 토큰처럼 생긴 값
     srv.app.status = _boom(RuntimeError(f"open /Users/rcm/.config/rcm/{secret}.toml failed"))
     assert srv.req("GET", "/api/status")[0] == 500
@@ -586,3 +591,38 @@ def test_the_500_body_is_still_one_line_with_nothing_in_it(srv):
     srv.app.status = _boom(sqlite3.OperationalError("database is locked"))
     status, body = srv.req("GET", "/api/status")
     assert status == 500 and body == {"error": "internal error"}
+
+
+def test_safe_does_not_pretend_to_scrub_secrets_outside_paths():
+    """`_safe()` 의 한계를 문서 대신 테스트로 적어 둔다 — 이걸 비밀 지우개로 믿으면 안 된다.
+
+    경로 안에 있으면 지워지지만 맨몸으로 있는 토큰·헤더 값·Windows 경로는 그대로 남는다.
+    그래서 자세한 문구가 가는 곳은 로그뿐이고, 인증 없이 읽히는 `last_error` 에는 안 간다.
+    """
+    from remote_ci_monitor.server import _safe
+
+    token = "rcm_" + "A1b2C3d4" * 2
+    assert token not in _safe(f"open /Users/rcm/.config/{token}.toml")  # 경로 안 → 지워진다
+    assert token in _safe(f"bad token {token}")  # 맨몸 → 남는다. 이게 오늘의 한계다
+    assert token in _safe(f"Authorization: Bearer {token}")
+    assert "C:\\Users\\alice" in _safe("open C:\\Users\\alice\\rcm.toml")
+
+
+def test_safe_keeps_an_error_on_one_line(srv, capsys):
+    """예외 문구의 개행이 로그 줄을 위조하지 못하게 한다.
+
+    바뀌기 전에는 500 로그가 예외 **이름**만 실어서 개행이 들어갈 수 없었다. 이제 문구까지
+    실으므로, 문구 안의 `\n` 이 그대로 나가면 진짜 `[rcm] error:` 줄처럼 생긴 두 번째 줄을
+    만들어 낼 수 있다 — 로그를 읽는 사람도, 로그를 긁는 경보도 속는다.
+    """
+    from remote_ci_monitor.server import _safe
+
+    forged = "boom\n[rcm] error: worker lane 1 down: FORGED ENTRY"
+    assert "\n" not in _safe(forged) and "\r" not in _safe("a\rb")
+    assert "\x1b" not in _safe("a\x1b[2Jb") and "\x00" not in _safe("a\x00b")
+    assert "FORGED ENTRY" in _safe(forged)  # 지우는 게 아니라 한 줄로 접는 것이다
+
+    srv.app.status = _boom(RuntimeError(forged))
+    assert srv.req("GET", "/api/status")[0] == 500
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.strip()]
+    assert len(lines) == 1, lines

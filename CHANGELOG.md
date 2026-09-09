@@ -80,15 +80,18 @@ of a key bumps that number and is listed here.
 - **A failed step that rcm only guessed at now says so.** When a job exits non-zero and its script
   never printed `::rcm::step-end::fail`, rcm still names the last step the job reached — but that
   name is a guess, and it was being reported as a fact. A gate that runs its steps in parallel and
-  prints the markers afterwards in a fixed order always ends on the same step, so 16 of 55 failures
-  in one week were blamed on `build web`, which the log shows had *passed*; the real failure was
-  `test`. Nothing can recover the true step from the markers alone, so rcm no longer pretends:
-  `/api/status` carries `failed_step_guessed`, the queue page and `rcm top` write `(guessed)` next
-  to the step, and notification hooks get `RCM_FAILED_STEP_GUESSED`. A step confirmed by
-  `::rcm::step-end::fail` looks exactly as it did before — print that marker and the blame is a
-  fact. Jobs that finished before this release report `null`: unknown, which is neither.
-  Database schema v9 (one added column; `/api/status` `schema_version` is unchanged — keys were
-  only added).
+  prints the markers afterwards in a fixed order always ends on the same step, so across two days
+  of one repository's gate — 145 jobs, 55 of them failing — 16 were blamed on `build web`, which
+  the log shows had *passed*; the real failure was `test`. Nothing can recover the true step from
+  the markers alone, so rcm no longer pretends: `/api/status` carries `failed_step_guessed`, the
+  recent results — on the web page and in `rcm top` — write `(guessed)` next to the step, and
+  notification hooks get `RCM_FAILED_STEP_GUESSED`. A running job never carries a guess, because
+  it has no exit code yet. A step confirmed by `::rcm::step-end::fail` looks exactly as it did
+  before — print that marker and the blame is a fact. A job that was cancelled, timed out or lost
+  reports its step as a guess whatever the markers say: it ended because it was killed, not
+  because that step failed. Jobs that finished before this release report `null`: unknown, which
+  is neither. Database schema v9 (one added column; `/api/status` `schema_version` is unchanged —
+  keys were only added).
 - **The server log now says what a 500 actually was**, not just the exception class. During the
   2026-09-08 outage it recorded `OperationalError` 314 times, which does not distinguish "database
   is locked" from "unable to open database file" — two different problems with two different

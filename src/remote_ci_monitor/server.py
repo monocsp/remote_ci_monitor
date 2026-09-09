@@ -143,6 +143,8 @@ MEDIANS_MAX_AGE_SECONDS = 300.0
 SSE_TICK_SECONDS = 1.0
 SSE_WRITE_TIMEOUT_SECONDS = 30.0
 _PATH_RE = re.compile(r"/[^\s'\"]+")
+#: 제어문자(개행 포함) — 로그 줄 위조를 막는다. 문면은 남기고 한 줄로 접는다.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 def _utcnow() -> datetime:
@@ -150,7 +152,15 @@ def _utcnow() -> datetime:
 
 
 def _safe(text: str) -> str:
-    return _PATH_RE.sub("<path>", text)[:200]
+    """오류 문구를 로그·상태 문서에 실을 수 있게 다듬는다 — 절대 경로를 지우고 한 줄로 접는다.
+
+    **경로 지우개지 비밀 지우개가 아니다.** 경로 밖에 맨몸으로 있는 토큰은 못 지운다. 그래서
+    자세한 문구는 로그에만 두고, 인증 없이 읽히는 `last_error` 에는 예외 이름까지만 낸다.
+
+    제어문자를 공백으로 바꾸는 이유: 문구 안의 `\\n` 이 그대로 나가면 진짜 `[rcm] error:` 줄처럼
+    생긴 두 번째 줄이 로그에 찍힌다 — 사람도 로그를 긁는 경보도 속는다.
+    """
+    return _CTRL_RE.sub(" ", _PATH_RE.sub("<path>", text))[:200]
 
 
 def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:

@@ -61,7 +61,7 @@ nothing. The procedure is in
 ```sh
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for 14 known mutations
+python scripts/mutcheck.py           # the tests must go red for 17 known mutations
 scripts/smoke_install.sh             # the README's own commands on a fresh venv
 ```
 

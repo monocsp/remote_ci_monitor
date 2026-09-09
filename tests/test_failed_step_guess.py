@@ -24,8 +24,10 @@ import pytest
 from remote_ci_monitor.core.model import (
     CANCELLED,
     FAILED,
+    LOST,
     QUEUED,
     SUCCEEDED,
+    TIMED_OUT,
     Job,
     Requester,
     Source,
@@ -116,13 +118,39 @@ def test_a_succeeded_job_has_no_failed_step_and_no_guess():
     assert oc.failed_step is None and oc.failed_step_guessed is False
 
 
-def test_a_cancelled_job_never_claims_a_step_as_a_fact():
-    """취소·타임아웃·유실은 종료 코드를 1 로 쳐서 폴백을 탄다 — 그것도 추측이다."""
-    oc = outcome_for(
-        _job(), parallel_markers(), started=NOW, finished=at(60), rc=None, cancelled=True
+@pytest.mark.parametrize(
+    ("kw", "state"),
+    [({"cancelled": True}, CANCELLED), ({"timed_out": True}, TIMED_OUT), ({"lost": True}, LOST)],
+)
+def test_a_killed_job_never_claims_a_step_as_a_fact(kw, state):
+    """취소·타임아웃·유실은 **어떤 마커가 있든** 실패 스텝을 확정이라고 말하지 않는다.
+
+    이 잡은 스텝이 실패해서 끝난 게 아니라 죽임을 당해서 끝났다. 종료 코드를 1 로 쳐서 폴백을
+    태우므로 마커가 없으면 마지막 스텝을 고르고(추측), 스크립트가 앞 스텝에 `step-end::fail` 을
+    찍어 뒀으면 그 이름을 고른다 — **그것도 「이 잡이 왜 끝났나」의 답은 아니다.**
+
+    실제로 겪는 모양: 게이트가 `test` 실패를 찍고도 계속 돌다가 `build web` 에서 타임아웃으로
+    죽는다. 그때 `test` 를 확정 실패로 단언하면 사람이 엉뚱한 데를 판다.
+    """
+    guessed_only = outcome_for(
+        _job(), parallel_markers(), started=NOW, finished=at(60), rc=None, **kw
     )
-    assert oc.state == CANCELLED
-    assert oc.failed_step == "build web" and oc.failed_step_guessed is True
+    assert guessed_only.state == state
+    assert guessed_only.failed_step == "build web" and guessed_only.failed_step_guessed is True
+
+    confirmed_earlier = outcome_for(
+        _job(), parallel_markers(fail_marker=True), started=NOW, finished=at(60), rc=None, **kw
+    )
+    assert confirmed_earlier.state == state
+    assert confirmed_earlier.failed_step == "test"
+    assert confirmed_earlier.failed_step_guessed is True  # 스텝은 정말 깨졌지만 사인은 아니다
+
+
+def test_a_job_that_really_failed_still_reports_a_confirmed_step():
+    """죽임당한 잡과 달리, 종료 코드로 실패한 잡의 확정 표시는 그대로다(회귀 금지)."""
+    oc = outcome_for(_job(), parallel_markers(fail_marker=True), started=NOW, finished=at(60), rc=1)
+    assert oc.state == FAILED
+    assert oc.failed_step == "test" and oc.failed_step_guessed is False
 
 
 def test_outcome_still_unpacks_as_the_old_three_tuple():
