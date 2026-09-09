@@ -1,4 +1,4 @@
-# remote_ci_monitor — 계획서 (v2.9, 2026-09-09)
+# remote_ci_monitor — 계획서 (v2.10, 2026-09-09)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
@@ -8,7 +8,8 @@
 > **v2.4** 는 M5a(우선순위 · 내용 주소 스냅샷 캐시 · 알림) 반영 + 수용 검사(`docs/acceptance/`) 결과. **v2.5** 는 M5b-1(풀 축 · DB v4). 명세 `docs/m5-workplan.md`, 리뷰 `docs/reviews/2026-09-06-codex-m5-design.md`.
 > **v2.6** 은 M5b 완료 · v0.2.0 릴리스 · 오너 결정 30(GitHub 백엔드 폐기). **v2.7** 은 M5c(내부망 자동 발견) 계획, **v2.8** 은 그 완료(v0.2.2) — 계획서의 마지막 기능 항목.
 > **v2.9** 는 웹 화면 손질(2026-09-09 오너 요청): 도는 잡의 **전체 진행 막대** · 상세는 **기본 접힘**(결정 13 개정) · 최근 완료 행에도 잡 번호. 「웹 UI (M2)」 절과 목업(`docs/wireframes/web-queue.html`)이 정본이다.
-> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 는 추천값으로 구현, 오너 확인 대기; 30 은 확정).
+> **v2.10** 은 마일스톤이 끝난 뒤의 운영 개선 둘 — M5f(부하를 보는 병렬 레인, 결정 39~50)와 **M5g(증거를 얼마나·얼마나 오래 들고 있을지, 결정 51~62)**. 명세 `docs/m5f-workplan.md` · `docs/m5g-workplan.md`.
+> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 · 39~50 · **51~62** 는 추천값으로 구현하거나 구현 예정, 오너 확인 대기; 30 은 확정).
 
 ## 한 줄
 
@@ -179,7 +180,7 @@ default = "full"
 - 로그: `<data_dir>/jobs/<id>/log.txt` 줄 단위 flush. 최근 `tail` 은 상태 JSON 에 싣고 전체는 `GET /jobs/{id}/log`. 로그엔 시크릿이 섞일 수 있어 **읽기에 그 잡의 토큰 또는 admin** 이 필요하다. 마지막 줄을 받은 시각을 `progress.last_output_at` 으로 싣는다(stuck 판정).
 - 워커 상태: 레인마다 `{lane, state ∈ idle|busy|held|down, job_id, error, since}` 를 `server.workers[]` 로 싣는다. `held` 는 부하 게이트가 막고 있는 레인이고 `hold_code`(`cpu_busy`·`no_sample`·`cooldown`)·`hold_detail`·`held_since` 를 함께 싣는다(M5f). 스레드가 예외로 죽으면 `down` + `error`(앞 200자, 경로·토큰 없이) 로 남고 `server.last_error` 에도 적는다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다.
 - ⚠️ 자식 프로세스의 stdout 버퍼링 때문에 마커가 늦게 도착한다. README 에 `PYTHONUNBUFFERED=1`·`stdbuf -oL`·`flutter --no-color` 같은 팁을 쓴다. 마커가 늦어도 잡 전체 경과는 정확하다.
-- 정리(M3 `janitor.py` + 순수 `core/retention.py`): 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 succeeded 가 아닌 모든 종료 상태 — failed·timed_out·cancelled·lost — 는 보존 기간까지). 서버 안 청소 스레드가 시작 직후와 `retention_sweep_interval_seconds`(3600)마다 `retention_days_success`(14) · `retention_days_failure`(30) 지난 종료 잡의 `jobs/<id>/`·`workspaces/<id>/` 를 지우고 `jobs.artifacts_purged_at` 에 표시한다(DB v2). 활성 잡은 삼중으로 보호(순수 규칙 · janitor 재확인 · UPDATE 조건). 심볼릭 링크는 링크만, data_dir 밖을 가리키면 손대지 않는다. 산출물이 지워진 뒤 `metadata_retention_days`(180, `sample_days` 이상) 지난 잡 행·이벤트·합류자는 삭제한다. 미러는 안 지운다. 지운 잡의 로그는 404 `log expired`. 스레드가 죽거나 주기의 2배가 지나도록 sweep 이 없으면 `/api/health` 503.
+- 정리(M3 `janitor.py` + 순수 `core/retention.py`): 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 succeeded 가 아닌 모든 종료 상태 — failed·timed_out·cancelled·lost — 는 보존 기간까지). 서버 안 청소 스레드가 시작 직후와 `retention_sweep_interval_seconds`(3600)마다 `retention_days_success`(14) · `retention_days_failure`(30) 지난 종료 잡의 `jobs/<id>/`·`workspaces/<id>/` 를 지우고 `jobs.artifacts_purged_at` 에 표시한다(DB v2). 활성 잡은 삼중으로 보호(순수 규칙 · janitor 재확인 · UPDATE 조건). 심볼릭 링크는 링크만, data_dir 밖을 가리키면 손대지 않는다. 산출물이 지워진 뒤 `metadata_retention_days`(180, `sample_days` 이상) 지난 잡 행·이벤트·합류자는 삭제한다. 미러는 안 지운다. 지운 잡의 로그는 404 `log expired`. 스레드가 죽거나 주기의 2배가 지나도록 sweep 이 없으면 `/api/health` 503. **M5g 부터 워크스페이스는 로그와 다른 시계로 잔다** — `workspace_retention_days`(1)가 남겨 둔 워크스페이스와 그 잡의 스냅샷 tar 을 지배하고, 로그·메타데이터는 위 값 그대로다. 거기에 날짜와 무관한 `workspace_storage_max_bytes`(100 GiB)와 `min_free_bytes`(10 GiB)가 오래된 종료 잡부터 부피를 회수한다. **증거(로그·잡 행)는 어떤 압박에서도 안 지우고, 크기를 못 재면 그 회차의 예산·바닥을 건너뛴다**(나이 규칙만 돈다). 회계는 `server.job_storage`·`/api/health.storage`·`rcm check`·웹 호스트 카드에 싣고 `rcm gc [--dry-run]` 이 같은 계획을 손으로 돌린다.
 - 권한: 서버가 도는 OS 사용자로 실행된다. README 에 「전용 사용자로 돌리고 sudo 를 주지 말라」.
 
 ## 진행 — 스텝 마커 프로토콜 (순수 · `core/progress.py`)
@@ -280,6 +281,9 @@ grace_seconds = 10                  # SIGTERM 뒤 SIGKILL 까지
 retention_days_success = 14
 retention_days_failure = 30
 keep_workspace_on_failure = true
+workspace_retention_days = 1        # 남겨 둔 워크스페이스와 그 잡의 스냅샷 tar — 로그보다 짧다 (M5g)
+workspace_storage_max_bytes = 107374182400  # 부피의 상한(100 GiB). 0 = 무제한 (M5g)
+min_free_bytes = 10737418240        # 파일 시스템 여유 바닥(10 GiB). 0 = 안 본다 (M5g)
 recent_count = 8                    # /api/status.recent 건수 (오너 결정 14)
 sse_max_connections = 16            # 초과는 503 + fallback: poll
 sse_keepalive_seconds = 15
@@ -565,6 +569,8 @@ docs/reviews/
 - **M5f — 부하를 보는 병렬 레인**(계획 2026-09-08~09, 명세 `docs/m5f-workplan.md` · 리뷰 `docs/reviews/2026-09-08-m5f-design-review.md`): 오너 요청 — 「CPU 를 너무 잡아먹지 않도록 설정하는 값을 주고 **기본값 80%**, 그거에 맞게 설정되면 병렬도 돌릴 수 있게」. `lanes` 를 올려도 안전하게 만든다. 레인 2 부터는 호스트 CPU 가 `cpu_max_percent`(80) 아래일 때만 claim 하고, 레인 1 은 게이트를 안 지난다(큐가 절대 안 멈춘다). 판정은 **서버가 claim 직전에** 한 곳에서 — 로컬 레인과 원격 워커의 claim 이 둘 다 서버 프로세스 안에서 돌고 서버가 두 머신의 표본을 이미 들고 있기 때문이다. `rcm worker` 프로토콜과 `store.claim` 의 SQL 은 안 바뀐다. 보류 레인은 `held` + 사유 코드로, 대기 잡은 `held_by_load` 로 보인다. 결정 39~50. PR 은 다섯 — 명세(1) · 선행 병목(2a-0) · 게이트(2a) · 화면·문서(2b) · 동시 실행 ETA(2c).
   - **재고 나서 정했다**: 리뷰(격리 에이전트 둘)와 실측 프로브가 초안의 다섯 곳을 뒤집었다 — 쿨다운이 버스트를 못 막던 것(락 없이는 20회 중 20회 전부 통과) · ETA 그리디의 레인 번호 충돌(4레인이 2레인처럼) · 메모리 게이트(두 OS 의 `used` 가 다른 뜻) · `held_by_load` 의 「Not moving」 자리 · 「마이그레이션 불필요」(overdue·stuck 이 같은 중앙값에서 나온다). 명세 §13~§15 에 근거가 있다.
   - **게이트 자체는 공짜다**(실측): `decide()` 1.29 µs, 보류 레인 48개가 코어의 0.012%, 그리고 보류하면 claim 을 안 하므로 오늘보다 싸다. 비싼 것은 게이트가 **앉는 자리**였다 — 마커 줄마다 SQLite 트랜잭션(다른 레인 claim 을 275 ms 로 밀어냄) · `store.claim` 이 `jobs_state` 를 두고 `jobs_pool` 을 타는 것(`ANALYZE` 하나로 3727배) · 지터 없는 1초 폴링 격자(48레인에서 `/api/status` 503). 그래서 PR 2a-0 이 먼저다.
+- **M5g — 증거를 얼마나, 얼마나 오래 들고 있을지**(계획 2026-09-09, 명세 `docs/m5g-workplan.md`): 오너 요청 — 「지금은 조절값이 날짜뿐이고, 그 날짜가 오기 전에 디스크가 먼저 찬다.」 실측(오너의 Mac mini 운영 인스턴스): 워크스페이스 62개 27 GB(평균 435 MB) · 잡 로그 137개 39 MB · 여유 628 GiB · 비성공 잡 하루 최대 50개 → **하루 50개 × 30일 × 0.5 GB ≈ 750 GB > 여유 628 GB**. 보존 기간이 한 번도 발동하기 전에 디스크가 찬다. 고치는 것 셋 — ① **로그(증거)와 워크스페이스(부피)를 다른 시계로** 재운다(`workspace_retention_days = 1`, 로그는 14/30 그대로. 스냅샷 tar 은 부피 쪽) ② 날짜와 무관한 **바이트 예산**(`workspace_storage_max_bytes = 100 GiB`)과 **여유 공간 바닥**(`min_free_bytes = 10 GiB`) ③ **보이게** 한다(`server.job_storage` · `/api/health.storage` · `rcm check` 의 `storage` 행 · 웹 호스트 카드 · `rcm gc [--dry-run]`). 안전 성질 둘: **증거는 어떤 압박에서도 안 지운다**(부피만 내놓는다) · **못 재면 압박 삭제만 멈춘다**(예산·바닥을 건너뛰고 `error_code` 로 알린다. 나이 규칙은 그대로 돈다). 계획은 한 회차에 한 번만 세우고, 회차 사이는 무진전 latch 가 막는다(결정 62) — 「여유가 오를 때까지 지운다」는 지워도 여유가 안 오르는 파일 시스템에서 결국 전부 지운다. DB 마이그레이션 없음(워크스페이스 삭제는 멱등이라 표시가 필요 없다). 결정 51~62. PR 은 넷 — 명세(1) · 규칙·janitor(2) · 표시·`rcm gc`(3) · 프리셋 권고·`artifacts_on`(4). 크로스리뷰(`docs/reviews/2026-09-09-codex-m5g-design.md`)는 1차가 모델 접근이 끊겨 중단됐고 **2차가 완주해 「조건부 승인」**을 냈다 — P0 넷 · P1 넷 · P2 셋을 반영했다. 가장 큰 것은 **업그레이드 게이트가 실행 불가능했던 것**(「올리기 전에 dry-run」인데 `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자 sweep 한다 → 결정 61) · **순수 모델이 비어 있던 것**(`created_at`·고아·활성·`budget_unreachable`·null 가능 파생값) · **「dry-run 과 실제가 다를 수 없다」가 틀린 말이었던 것**(결정 57) · **검증이 `min(success, failure)` 여야 하는 것** · **「한 번만 계획」이 한 회차짜리 보호인 것**(결정 62). 그리고 리뷰를 쫓다가 **원격 워커가 산출물을 하나도 안 모으는 것**을 찾았다 — `_claim_payload` 가 얼린 정책을 안 실어서 워커의 `_policy_from_claim` 이 `None` 을 돌려준다(명세 §13 D, 실측 확인). **M5e 가 원격 풀에서 죽어 있다.**
+  - 프리셋 쪽 문제도 같이 답한다: 참고 팀의 게이트 스크립트가 무거운 구간 출력을 `TMPDIR` 로 돌리고 지워서 **실패 잡 #133 의 로그 50,788 바이트 안에 `Expected:` 0줄 · 스택트레이스 0줄**이었다. 정본 권고는 새 개념 없이 — 판정 몇 줄은 stdout 으로(로그 30일), 부피 있는 나머지는 워크스페이스에 두고 M5e `artifacts` 로 선언(가져가는 통로, 24시간). 프리셋별 TTL 은 안 만들고 `artifacts_on = "failure"` 만 더한다.
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
@@ -626,6 +632,20 @@ docs/reviews/
 | 40 | 산출물 삭제 규칙 | `jobs.join_count == 0` 인 잡은 클라이언트 확인(ack)이 오면 **즉시 삭제**, 한 번이라도 합류가 있었던 잡은 확인이 와도 **TTL 까지 유지**한다. TTL 은 `artifact_retention_hours = 24`. 합류자 표의 키가 토큰 이름이라 세션은 셀 수 없고(`store.py` `joiners`), 합류는 `ACTIVE_STATES` 에서만 일어나고 판정·종료가 같은 트랜잭션 직렬화를 쓰므로 `join_count` 는 **터미널 커밋에** 얼어붙는다 (M5e, 오너 결정 2026-09-08) |
 | 41 | 산출물 상한 | 전부 설정 키다: `max_artifact_bytes`(1 GiB) · `artifact_storage_max_bytes`(10 GiB) · `max_artifact_files`(10000) · `artifact_timeout_seconds`(60) · `max_concurrent_artifact_transfers`(2). 넘으면 **잡은 그대로 성공/실패하고** 산출물만 버린다. 만료되지 않은 남의 묶음을 쫓아내지 않는다 (M5e, 오너 결정 2026-09-08) |
 | 42 | 받기·덮어쓰기 | 받기는 옵트인(`--fetch-artifacts`). 트리에 쓸 때 제출 당시와 내용이 같은 파일은 덮어쓰고, 제출 뒤 사람이 손댄 파일(`conflicted`)은 `--force` 여야 덮는다. 골든 갱신이 플래그 하나로 돌아야 하고, 기다리는 동안 손댄 것만 지키면 된다 (M5e, **오너 확정 2026-09-09**) |
+| 51 | 로그와 부피를 따로 재운다 | `workspace_retention_days = 1`(**오너 확정 2026-09-09**, 초안 2일) 을 새로 두고 로그·메타데이터는 그대로(14 · 30 · 180). 부피에는 **그 잡의 스냅샷 `tree.tar.gz` 도 포함**한다 — 종료된 잡에서 아무도 안 읽는다. 성공 잡의 tar 이 14일 → 하루로 짧아지는 것이 유일한 부수 효과다. 이름에 `_failure` 를 안 붙이는 이유: 성공 잡의 워크스페이스는 애초에 남지 않는다 (M5g, 2026-09-09) |
+| 52 | 부피의 바이트 예산 | `workspace_storage_max_bytes = 107374182400`(100 GiB), `0` = 무제한. 재고 지우는 대상은 **워크스페이스 + 스냅샷 tar** 뿐 — 로그·번들·blob 은 각자의 예산이 있고 이 예산이 손대지 않는다. 정상 상태(하루 50개 × 435 MB ≈ 22 GB)의 네 배가 넘어 **평소에는 안 발동하는 천장**이다 |
+| 53 | 여유 공간 바닥 | `min_free_bytes = 10737418240`(10 GiB), `0` = 안 본다. 웹 호스트 카드의 `DISK_LOW_FREE` 와 같은 값. **비율(85%)은 안 쓴다** — 926 GiB 디스크의 85% 는 여유가 139 GiB 다. 그건 사람에게 알리는 기준이지 지우는 기준이 아니다 |
+| 54 | 한 회차에 한 번만 계획한다 | 잰 값으로 계획 → 실행 → 다시 잰다. 「여유가 바닥을 넘을 때까지 지운다」 루프는 두지 않는다 — macOS 로컬 스냅샷처럼 지워도 `df` 가 안 움직이는 경우에 **워크스페이스를 전부 지우고도** 못 넘는다. ⚠️ 그 보호는 **한 회차짜리**다 — 회차 사이는 결정 62 의 latch 가 막는다. `min_free_bytes` 는 유지되는 불변식이 아니라 **회수 시도**다 |
+| 55 | 못 재면 **압박 삭제만** 멈춘다 | 크기를 못 잰 항목이 **인벤토리 어디든**(종료·활성·고아·tar) 하나라도 있거나 스캔·DB 가 실패하면 그 회차의 **예산·바닥을 건너뛰고** `job_storage.error_code` 와 `rcm check` warn 으로 알린다. **나이 규칙은 그대로 돈다** — 오늘도 도는 정상 보존 정책이고 크기를 안 본다. 둘을 한 문장으로 묶어 잠그면 디스크가 차는 동안 나이 규칙까지 멈춘다. 그리고 **지울 수 없는 바이트(도는 잡 + 고아)만으로 예산을 넘으면 예산 규칙은 아무것도 안 고른다**(`budget_unreachable`) — 못 이룰 목표를 위해 증거를 태우지 않는다. 바닥 규칙은 응급이라 그래도 돈다. ⚠️ 이 상태에서 **디스크는 계속 찬다** — 「fail-closed 니까 안전」이 아니다 |
+| 56 | 어디에 보여주나 | 셋 다 — `/api/status` 의 `server.job_storage` · `/api/health` 의 `storage` · `rcm check` 의 `storage` 행 · 웹 호스트 카드 한 줄. 스키마 v1 에 **키를 더한다**(값·의미는 안 바꾼다) |
+| 57 | 손으로 청소하기 | `rcm gc [--dry-run] [--json] [--timeout]` · `POST /gc`(admin 토큰). dry-run 은 janitor 와 **같은 계획 함수**를 돌린다 — 보장되는 것은 「같은 입력에 같은 판정」이지 「보여준 것과 실제가 같다」가 **아니다**(두 요청 사이에 잡이 끝난다). 실제 gc 응답은 `planned`/`deleted`/`failed` 를 가르고, CLI 타임아웃은 실패가 아니라 **3(모른다)** 이다 |
+| 58 | 프리셋이 증거를 남기는 법 | 새 개념을 안 만든다 — 무거운 구간 출력은 `TMPDIR` 이 아니라 **워크스페이스**에 두고 M5e `artifacts` 로 선언하고, 「왜 깨졌는지」는 stdout 으로 흘려 **로그**(30일)에 남긴다. 묶음은 보관소가 아니라 가져가는 통로다(24시간 ≈ 워크스페이스 하루). **프리셋별 TTL 은 안 만든다** |
+| 60 | 설정 표면 | 세 키를 `examples/server.toml`(= `templates/server.toml`, `rcm init server` 가 쓰는 파일)에 **주석 없이 기본값과 함께** 넣고 `docs/configuration.md` 에 보존 키 표를 새로 만든다. **데이터를 지우는 값은 설치할 때 파일에서 보여야 한다** — 오너의 운영 설정이 `recent_count` 한 줄만 바뀐 채 나머지가 전부 「보이지 않는 코드 기본값」이었다. 진짜 「고급 설정」 화면이 생기면 이 셋이 거기 첫 줄이다(그 화면은 M5g 범위 밖) (M5g, 오너 요청 2026-09-09) |
+| 59 | 실패했을 때만 모으기 | 프리셋 키 `artifacts_on = "always"`(기본 — 오늘의 동작) \| `"failure"`. 초록 잡마다 무거운 로그를 모아 24시간 들고 있을 이유가 없고, 그 비용이 결정 58 의 권고를 안 따르게 만든다. ⚠️ 워커 호출부만 고쳐서는 **원격에서 안 돈다** — claim 응답의 얼린 정책에 `artifacts_on` 을 실어야 하고, 필드가 없는 옛 서버는 `"always"` 로 본다 |
+| 61 | 업그레이드 안전 게이트 | `rcm gc --dry-run` 이 **서버 없이도** 돈다 — `rcm check --config` 처럼 설정과 데이터 디렉터리만 읽어(DB 는 읽기 전용) 같은 계획을 낸다. 절차는 `git pull --ff-only` → **오프라인 dry-run** → 서비스 재시작. 초안의 「올리기 전에 dry-run」은 불가능했다: `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자 sweep 한다 (M5g, 코덱스 P0) |
+| 62 | 무진전 latch | 바닥 규칙으로 지웠는데 여유가 **지운 바이트의 절반도 안 늘면** `no_progress` 를 세우고 그 뒤 자동 sweep 의 **바닥 규칙만** 멈춘다(나이·예산은 돈다). `rcm gc` 나 재시작으로 풀린다. 지워도 `df` 가 안 움직이면 계속 지우는 것은 증거를 태우는 일 말고 아무것도 아니다 (M5g, 코덱스 P1) |
+
+⚠️ **결정 번호 39~42 가 두 번 나온다** — M5e(산출물)와 M5f(부하 게이트)가 같은 번호를 각각 붙인 채 머지 `d26b3f4` 에서 합쳐졌다. `docs/m5e-*.md` 와 `docs/m5f-*.md` 가 이미 각자의 번호로 서로를 가리키고 있어 여기서 한쪽을 옮기면 그 문서들의 상호 참조가 깨진다. 고칠 때 한 PR 에서 문서까지 같이 바꾼다. 새 결정은 **51번부터**다.
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 
