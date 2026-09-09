@@ -52,6 +52,9 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .wk.busy i { background: var(--accent); }
 .wk.down { border-color: var(--bad); color: var(--bad); }
 .wk.down i { background: var(--bad); border-radius: 1px; }
+/* 보류 레인은 살아 있지만 지금은 못 집는다 — idle 과 같아 보이면 안 된다(M5f) */
+.wk.held { border-color: var(--warn); color: var(--warn); }
+.wk.held i { background: var(--warn); border-radius: 1px; }
 .wk.paused { border-color: var(--warn); color: var(--warn); }
 .wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
 .livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }

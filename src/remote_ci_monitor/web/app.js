@@ -206,6 +206,13 @@
         if (isNum(est.wait_seconds)) parts.push(T(lang, "reason.frees_in", { dur: fmtDuration(est.wait_seconds) }));
         out.text = parts.join(" · "); break;
       }
+      case "held_by_load": {
+        // 숫자는 행이 아니라 `server.workers[]` 의 `hold_detail` 에서 온다 — 행 키를 안 늘린다
+        parts.push(T(lang, "reason.held_by_load"));
+        var why = holdWord(status, lang);
+        if (why) parts.push(why);
+        out.text = parts.join(" · "); break;
+      }
       case "blocked_by_group": {
         var bb = row.blocked_by || {};
         // 조각은 남기고 모르는 숫자만 —(「frees in —」): 막는 잡이 있는 한 「언제 풀리나」는 늘 묻는 질문이다
@@ -507,6 +514,23 @@
   }
 
   /** 워커 상태 낱말. enum 값은 그대로 두고 표시만 바꾼다(CSS 클래스·정렬이 값을 쓴다). */
+  /** 그 풀에서 막고 있는 이유를 사람 말로. cpu 로 막힌 레인이 있으면 **최댓값**을 쓴다 —
+      창이 [85,70,70] 인데 「cpu 70%」라고 쓰면 거짓말이다. 이유를 모르면 null. */
+  function holdWord(status, lang) {
+    var workers = ((status || {}).server || {}).workers || [];
+    var held = workers.filter(function (w) { return w && w.state === "held"; });
+    if (!held.length) return null;
+    var busy = [];
+    held.forEach(function (w) {
+      var v = w.hold_code === "cpu_busy" && w.hold_detail ? w.hold_detail.cpu_busy : null;
+      if (isNum(v)) busy.push(v);
+    });
+    if (busy.length) return T(lang, "hold.cpu_busy", { cpu: Math.round(Math.max.apply(null, busy)) });
+    var code = null;
+    held.forEach(function (w) { if (!code && w.hold_code) code = w.hold_code; });
+    return code && I18N.has("hold." + code) ? T(lang, "hold." + code) : null;
+  }
+
   function workerState(state, lang) {
     if (!state) return DASH;
     var key = "state." + state;

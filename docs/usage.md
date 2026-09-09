@@ -314,6 +314,9 @@ are reporting and how they are doing. Open or close it yourself and that choice 
 ## 11. What to do next
 
 - Write the preset your team actually needs: [Configuration](configuration.md).
+- Run two jobs at once. Set `[server] lanes = 2` — lane 2 only picks up work while the machine has
+  CPU to spare, so it is safe to try. If the queue says `held by load`, that is the machine telling
+  you it is full: [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).
 - Make your script print step markers, so the queue shows progress instead of a spinner.
 - Wrap `rcm run` in your CI script and branch on the exit code. `examples/session/ci-gate.sh` is a
   working example.

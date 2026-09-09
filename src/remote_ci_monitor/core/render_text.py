@@ -143,7 +143,32 @@ def _tz_from(status: dict[str, Any], tz: tzinfo | None) -> tzinfo | None:
     return None
 
 
-def _reason_text(row: dict[str, Any]) -> str:
+#: 보류 사유를 사람 말로. 서버는 코드만 보낸다(결정 37).
+_HOLD_WORD = {"cpu_busy": "cpu", "no_sample": "no sample", "cooldown": "cooling down"}
+
+
+def held_summary(workers: list[dict[str, Any]] | None) -> tuple[int, str | None]:
+    """보류 레인 수와 사람이 읽을 이유. 숫자는 `cpu_busy` 로 막힌 레인의 **최댓값**이다.
+
+    `hold_detail` 은 `server.workers[]` 에만 있고 큐 행에는 없다 — 그래서 행 키를 늘리지 않고
+    렌더러가 이미 받는 워커 목록에서 읽는다(M5f §5.4).
+    """
+    held = [w for w in (workers or []) if w.get("state") == "held"]
+    if not held:
+        return 0, None
+    busy = [
+        v
+        for w in held
+        if w.get("hold_code") == "cpu_busy"
+        and (v := (w.get("hold_detail") or {}).get("cpu_busy")) is not None
+    ]
+    if busy:
+        return len(held), f"cpu {max(busy):.0f}%"
+    codes = [w.get("hold_code") for w in held if w.get("hold_code")]
+    return len(held), _HOLD_WORD.get(codes[0], codes[0]) if codes else None
+
+
+def _reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = None) -> str:
     reason = row.get("reason")
     est = row.get("estimate") or {}
     blocked = row.get("blocked_by")
@@ -153,6 +178,9 @@ def _reason_text(row: dict[str, Any]) -> str:
     if reason == "waiting_for_lane":
         ahead = row.get("ahead_job_id")
         return f"waiting for lane · behind #{ahead}" if ahead else "waiting for lane"
+    if reason == "held_by_load":
+        _n, why = held_summary(workers)
+        return f"held by load · {why}" if why else "held by load"
     if reason == "overdue":
         over = (est.get("elapsed_seconds") or 0) - (est.get("expected_seconds") or 0)
         return (
@@ -201,7 +229,12 @@ def _source_text(src: dict[str, Any]) -> str:
     return f"{repo} @{sha or DASH}{dirty}".strip()
 
 
-def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | None) -> list[str]:
+def render_queue_row(
+    row: dict[str, Any],
+    tz: tzinfo | None,
+    now: datetime | None,
+    workers: list[dict[str, Any]] | None = None,
+) -> list[str]:
     est = row.get("estimate") or {}
     state = row["state"]
     glyph = _GLYPH.get(state, "·")
@@ -244,7 +277,7 @@ def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | Non
     lines = [
         f"  {pos:>3} {glyph} {_state_word(state):<10} {arrow}#{row['id']} "
         f"{row.get('key', '?'):<16} {src:<28} ← {req:<18} {timing:<24} {eta}  ({conf_text})",
-        f"        {_reason_text(row)}",
+        f"        {_reason_text(row, workers)}",
     ]
     prog = row.get("progress")
     if prog and prog.get("phase") == "executing":
@@ -295,6 +328,11 @@ def render(
         wtxt = f"worker {w.get('state')}" + (f" #{w['job_id']}" if w.get("job_id") else "")
     else:
         wtxt = f"lanes {busy}/{lanes} busy"
+        # 보류 레인은 busy 도 down 도 아니라 오늘은 **아예 안 보인다** — idle 과 글자 하나까지
+        # 같아서 레인이 왜 노는지 알 수 없다(M5f §5.4).
+        n_held, why = held_summary(workers)
+        if n_held:
+            wtxt += f" · {n_held} held" + (f" ({why})" if why else "")
     if down:
         wtxt += f" · DOWN: lane {', '.join(str(w['lane']) for w in down)}"
     # 원격 필은 5개까지, 넘치면 `+N workers` 로 접는다. down 은 접지 않는다(항상 보여야 한다)
@@ -377,7 +415,7 @@ def render_pool(
         else:
             out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
         for row in queue:
-            out.extend(render_queue_row(row, tz, now))
+            out.extend(render_queue_row(row, tz, now, workers))
 
     recent = pool.get("recent")
     if recent is None:
