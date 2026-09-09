@@ -347,6 +347,39 @@ def pool_json(
     }
 
 
+def artifacts_json(row: Mapping[str, Any] | None, state: str) -> dict[str, Any]:
+    """잡 하나의 산출물 처분 — **공개 문서용**(명세 §10).
+
+    파일 목록·경로·해시는 여기 없다. 그건 보호 라우트에만 있다. `reason_args` 도 수치만 담는다.
+    모르는 수는 `null` 이고 `0` 은 「모았는데 없었다」일 때만이다.
+    """
+    if row is None:
+        return {
+            "state": state,
+            "file_count": None,
+            "total_bytes": None,
+            "bundle_bytes": None,
+            "skipped_count": None,
+            "ready_at": None,
+            "expires_at": None,
+            "purged_at": None,
+            "reason_code": None,
+            "reason_args": None,
+        }
+    return {
+        "state": state,
+        "file_count": row["file_count"],
+        "total_bytes": row["total_bytes"],
+        "bundle_bytes": row["bundle_bytes"],
+        "skipped_count": row["skipped_count"],
+        "ready_at": iso(row["ready_at"]),
+        "expires_at": iso(row["expires_at"]),
+        "purged_at": iso(row["purged_at"]),
+        "reason_code": row["reason_code"],
+        "reason_args": row["reason_args"] or None,
+    }
+
+
 def status_json(
     model: StatusModel, *, log_tails: Mapping[int, list[str]] | None = None
 ) -> dict[str, Any]:
