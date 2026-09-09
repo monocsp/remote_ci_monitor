@@ -166,6 +166,14 @@ MUTANTS = (
         tests=("tests/test_admission.py",),
     ),
     Mutant(
+        # 추측한 실패 스텝을 확정이라고 말하면 무죄인 스텝이 범인이 된다(2026-09-08 사고)
+        name="failed-step-guess-flag",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="        guessed = not blamed.marked",
+        new="        guessed = False",
+        tests=("tests/test_progress.py", "tests/test_failed_step_guess.py"),
+    ),
+    Mutant(
         name="manifest-link-escape",
         path="src/remote_ci_monitor/core/manifest.py",
         old=(

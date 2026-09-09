@@ -218,6 +218,10 @@ class Job:
     summary_code: str | None = None
     summary_args: dict[str, Any] = field(default_factory=dict)
     failed_step: str | None = None
+    #: `failed_step` 이 `step-end::fail` 로 확정된 것이면 False, 「종료 코드가 0 이 아니니
+    #: 마지막 스텝」 폴백이 고른 **추측**이면 True. 옛 행(v9 마이그레이션 전에 끝난 잡)은
+    #: None — 모른다. 확정과 추측을 섞으면 무죄인 스텝을 자신있게 범인으로 지목하게 된다.
+    failed_step_guessed: bool | None = None
     lane: int | None = None
     timeout_seconds: int | None = None
     cancel: CancelInfo | None = None
@@ -275,6 +279,9 @@ class Progress:
     current_seconds: float | None = None
     job_seconds: float | None = None
     failed_step: str | None = None
+    #: 위 이름이 `step-end::fail` 로 확정된 것인가(False), 마지막-스텝 폴백의 추측인가(True).
+    #: 마커에서 만드는 값이라 여기서는 언제나 답이 있다 — 「모름」은 저장된 옛 행에만 있다.
+    failed_step_guessed: bool = False
     summary: str | None = None
     last_output_at: datetime | None = None
     timing: str = "as_received"

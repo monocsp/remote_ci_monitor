@@ -111,6 +111,8 @@ class Outcome:
     failed_step: str | None
     code: str | None = None
     args: dict[str, Any] = field(default_factory=dict)
+    #: `failed_step` 이 `step-end::fail` 로 확정된 것이면 False, 종료 코드로 미룬 추측이면 True.
+    failed_step_guessed: bool = False
 
     def __iter__(self):
         """옛 3-튜플처럼 풀 수 있게 — `state, summary, failed_step = outcome_for(...)`."""
@@ -169,7 +171,16 @@ def outcome_for(
         else:
             summary = None
     failed_step = progress.failed_step if state != SUCCEEDED else None
-    return Outcome(state=state, summary=summary, failed_step=failed_step, code=code, args=args)
+    # 취소·타임아웃·유실은 위에서 종료 코드를 1 로 쳐서 폴백을 타므로 그 지목도 추측이다.
+    guessed = bool(failed_step) and progress.failed_step_guessed
+    return Outcome(
+        state=state,
+        summary=summary,
+        failed_step=failed_step,
+        code=code,
+        args=args,
+        failed_step_guessed=guessed,
+    )
 
 
 class Worker(threading.Thread):
@@ -469,6 +480,7 @@ class Worker(threading.Thread):
             summary_code=oc.code,
             summary_args=oc.args,
             failed_step=oc.failed_step,
+            failed_step_guessed=oc.failed_step_guessed,
             bundle=bundle,
             ttl_hours=self.config.server.artifact_retention_hours,
         )

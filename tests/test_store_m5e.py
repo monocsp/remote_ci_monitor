@@ -265,6 +265,7 @@ def test_migration_from_6_to_7_keeps_rows_and_defaults_join_count_to_zero(data_d
         conn.execute("DROP INDEX IF EXISTS jobs_claim")  # v8(M5f)
         conn.execute("DROP INDEX IF EXISTS jobs_recent")  # v9(M5f)
         conn.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
+        conn.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         conn.execute("PRAGMA user_version=6")
         conn.commit()
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 6

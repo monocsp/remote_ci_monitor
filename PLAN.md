@@ -194,7 +194,7 @@ default = "full"
 | `::rcm::summary::<한 줄>` | 결과 요약(선택). 마지막 것이 `summary` |
 
 - 마커가 하나도 없는 잡은 `steps: []`, `steps_total: null`(0 이 아니다) 로 「스텝 정보 없음」. 잡 전체 경과와 로그 tail 은 그대로.
-- 실패 스텝: 종료 코드 ≠ 0 이면 마지막 스텝(또는 `step-end::fail` 이 찍힌 스텝)이 `failed_step`.
+- 실패 스텝: `step-end::fail` 이 찍힌 스텝이 `failed_step` 이고 그건 **확정**이다(`failed_step_guessed: false`). 그 마커가 없는데 종료 코드가 ≠ 0 이면 마지막 스텝을 고르되 **추측으로 표시한다**(`failed_step_guessed: true`). 이름을 아예 안 대는 것보다는 낫지만 사실인 척하면 무죄인 스텝을 범인으로 만든다 — 2026-09-08 운영에서 실패 55건 중 16건이 그랬다(함정 #7). 스키마 v9 앞에 끝난 잡은 `null`(모른다).
 - 함정과 테스트(픽스처로 잠근다):
 
 | # | 사실 | 규칙 | 테스트 |
@@ -205,6 +205,7 @@ default = "full"
 | 4 | 같은 이름 스텝이 반복된다(매트릭스) | 위치(`index`)로 세고 이름은 표시용 | `test_duplicate_step_names_by_index` |
 | 5 | 잡이 시작 전이면 스텝이 없다 | state `queued` 엔 진행 칸 없음, 0/0 금지 | `test_queued_job_has_no_progress` |
 | 6 | 초과 실행 잡의 잔여를 음수로 두면 큐 전체가 앞당겨진다 | 하한 30초 · `overdue` · 실제 경과 표시 | `test_overdue_run_floors_remaining` |
+| 7 | 스텝을 병렬로 돌리고 마커를 정해진 순서로 몰아 내보내는 스크립트가 있다 | 마지막 마커가 **성공한** 스텝일 수 있다. 마커만으로는 진짜 범인을 못 고르니 폴백이 고른 이름은 `failed_step_guessed: true` 로 밝히고 화면·CLI·알림이 추측으로 그린다 | `test_parallel_script_blames_a_step_that_actually_passed` |
 
 ## 호스트 자원 (서버 프로세스 안의 샘플러 · `hostsample.py` + 순수 `core/hostparse.py`)
 
@@ -357,7 +358,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
       "progress": {"timing": "as_received", "phase": "executing", "last_output_at": "2026-09-04T00:52:10Z",
                    "steps_total": 8, "steps_total_partial": false, "steps_done": 4,
                    "current_index": 5, "current_name": "test", "current_seconds": 51, "job_seconds": 59,
-                   "failed_step": null,
+                   "failed_step": null, "failed_step_guessed": false,
                    "steps": [{"index": 1, "name": "analyze", "state": "done", "ok": true, "seconds": 12},
                              {"index": 5, "name": "test", "state": "running", "ok": null, "seconds": 51}]},
       "log_tail": ["[test] 3/9 packages…"],
@@ -380,7 +381,8 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
                 "requester": {"name": "bob-desk", "label": "bob@desk"},
                 "state": "failed", "exit_code": 1, "job_seconds": 62, "waited_seconds": 21,
                 "started_at": "2026-09-04T00:46:01Z", "finished_at": "2026-09-04T00:47:03Z",
-                "summary": "2 tests failed", "failed_step": "test", "cancelled_by": null, "timeout_seconds": 1200,
+                "summary": "2 tests failed", "failed_step": "test", "failed_step_guessed": false,
+                "cancelled_by": null, "timeout_seconds": 1200,
                 "transitions": [{"state": "uploading", "at": "2026-09-04T00:45:40Z"}, {"state": "queued", "at": "2026-09-04T00:45:40Z"},
                                 {"state": "running", "at": "2026-09-04T00:46:01Z"}, {"state": "failed", "at": "2026-09-04T00:47:03Z"}],
                 "url": "…"}],
@@ -423,7 +425,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 out=$(rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"); rc=$?
 case $rc in
   0) echo "gate green: $(jq -r .url <<<"$out")";;
-  1) echo "gate red — failed step: $(jq -r .failed_step <<<"$out")"; echo "$(jq -r .summary <<<"$out")";;
+  1) step=$(jq -r '.failed_step // "—"' <<<"$out"); [ "$(jq -r '.failed_step_guessed // false' <<<"$out")" = true ] && step="$step (guessed)"; echo "gate red — failed step: $step"; echo "$(jq -r .summary <<<"$out")";;
   2) echo "cancelled or timed out";;
   *) echo "unknown — check $(jq -r .url <<<"$out")";;
 esac

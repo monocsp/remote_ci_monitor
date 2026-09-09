@@ -77,6 +77,18 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **A failed step that rcm only guessed at now says so.** When a job exits non-zero and its script
+  never printed `::rcm::step-end::fail`, rcm still names the last step the job reached — but that
+  name is a guess, and it was being reported as a fact. A gate that runs its steps in parallel and
+  prints the markers afterwards in a fixed order always ends on the same step, so 16 of 55 failures
+  in one week were blamed on `build web`, which the log shows had *passed*; the real failure was
+  `test`. Nothing can recover the true step from the markers alone, so rcm no longer pretends:
+  `/api/status` carries `failed_step_guessed`, the queue page and `rcm top` write `(guessed)` next
+  to the step, and notification hooks get `RCM_FAILED_STEP_GUESSED`. A step confirmed by
+  `::rcm::step-end::fail` looks exactly as it did before — print that marker and the blame is a
+  fact. Jobs that finished before this release report `null`: unknown, which is neither.
+  Database schema v9 (one added column; `/api/status` `schema_version` is unchanged — keys were
+  only added).
 - **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
   50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
   time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request

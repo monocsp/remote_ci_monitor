@@ -377,6 +377,8 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         c.execute("DROP TABLE IF EXISTS job_artifacts")
         c.execute("ALTER TABLE jobs DROP COLUMN join_count")
+        # v9 가 더한 것도 뗀다(실패 스텝이 확정인가 추측인가)
+        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")
         c.execute("DROP TABLE blobs")
         c.execute("DROP TABLE notifications")
         c.execute("PRAGMA user_version=1")
@@ -534,6 +536,7 @@ def test_migration_adds_the_claim_index_to_an_old_database(tmp_path):
         c.execute("DROP INDEX IF EXISTS jobs_claim")  # v8
         c.execute("DROP INDEX IF EXISTS jobs_recent")  # v9
         c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10
+        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         c.execute("PRAGMA user_version=7")
         c.commit()
     finally:

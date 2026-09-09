@@ -155,7 +155,12 @@ A failed job is not an error in the tool, so the output stays calm and specific.
 1. **The verdict line** names the step that failed and the summary your script printed.
 2. **The JSON** carries `failed_step`, `exit_code` and the per-step timings, so a wrapper script
    can report which stage broke without scraping the log.
-3. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
+3. **`failed_step` is a guess unless your script said otherwise.** Print
+   `::rcm::step-end::fail` and rcm reports that step as a fact. Without it rcm names the last step
+   the job reached and sets `failed_step_guessed: true` — shown as `(guessed)` — because a script
+   that runs steps in parallel and prints its markers afterwards ends on a step that passed. Do not
+   act on a guessed step without reading the log.
+4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
    treats 3 as red, it will be red for the wrong reason.
 

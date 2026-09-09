@@ -107,6 +107,8 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
         # 초를 세는 기준점(M5d-2 §4.6-다) — 화면이 폴링 사이에도 부드럽게 올린다
         "job_started_at": iso(p.started_at),
         "failed_step": p.failed_step,
+        # 위 이름이 확정인가 추측인가(false/true). 화면·CLI 가 추측을 추측으로 그린다.
+        "failed_step_guessed": p.failed_step_guessed,
         "steps": [
             {
                 "index": s.index,
@@ -215,6 +217,8 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "summary_code": job.summary_code,
         "summary_args": dict(job.summary_args) if job.summary_args else None,
         "failed_step": job.failed_step,
+        # v9 마이그레이션 전에 끝난 잡은 `null` — 「추측이었는지 모른다」이지 「확정」이 아니다.
+        "failed_step_guessed": job.failed_step_guessed,
         "cancelled_by": job.cancelled_by,
         "timeout_seconds": job.timeout_seconds,
         "source": source_json(job.source),

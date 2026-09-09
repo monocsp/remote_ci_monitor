@@ -64,6 +64,8 @@ ENV_KEYS = {
     "RCM_REQUESTER",
     "RCM_SUMMARY",
     "RCM_FAILED_STEP",
+    # 그 스텝이 확정인가 추측인가(2026-09-08 사고) — "1"·"0"·""(모름)
+    "RCM_FAILED_STEP_GUESSED",
     "RCM_EXIT_CODE",
     "RCM_JOB_SECONDS",
     "RCM_URL",
@@ -198,6 +200,7 @@ def test_env_missing_optional_row_keys_become_empty_strings() -> None:
     assert set(env) == ENV_KEYS
     assert env["RCM_JOB_ID"] == "7" and env["RCM_REQUESTER"] == "bob@desk"
     assert env["RCM_SUMMARY"] == env["RCM_FAILED_STEP"] == env["RCM_URL"] == ""
+    assert env["RCM_FAILED_STEP_GUESSED"] == ""  # 말한 적 없으면 모름이다
     assert env["RCM_EXIT_CODE"] == env["RCM_JOB_SECONDS"] == ""
 
 
