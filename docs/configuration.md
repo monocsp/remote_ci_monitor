@@ -46,10 +46,34 @@ Your script can report progress by printing markers at the start of a line:
 ::rcm::step::analyze       # a new step starts (the previous one ends)
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
+::rcm::fail::flaky_test    # optional: names something that failed (a step, a test, a file)
 ```
 
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
+
+### Saying what failed
+
+`failed_step` is only ever a step your script **declared** as failed, with `::rcm::step-end::fail`
+or `::rcm::fail::<step name>`. Without a declaration the field is `null` and the job carries
+`last_step` instead — where it was when it ended, with no claim about the cause. This matters for
+scripts that run several things at once and replay their logs afterwards: the last
+`::rcm::step::` heading is not the failure, and rcm will not pretend it is.
+
+`::rcm::fail::<name>` takes any name, not only step names — a test file, a case, a check. The
+server never parses your output; it only counts the names you print. It keeps them per job (120
+characters each, 100 per job) and, when a job fails, tells you how often each name was red in the
+recent runs of the same key:
+
+```
+failed: test — every one of the last 8 gate runs
+failed: just_audio_screen_music_port_test.dart — 1 of the last 8 gate runs · intermittent?
+```
+
+The window is `failure_window_jobs` (20) finished jobs of that key — cancelled and lost jobs say
+nothing, so they are left out — and nothing is judged until there are `failure_min_jobs` (3) of
+them. Runs that failed without naming anything stay in the denominator and are reported
+separately, so the count can understate a flaky test but never overstate it.
 
 ### Deploy presets: run a remote ref instead of an upload
 
@@ -171,7 +195,8 @@ dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, 
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
   when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
-  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
+  `RCM_FAILED_STEP` (declared failures only) and `RCM_LAST_STEP`, `RCM_EXIT_CODE`,
+  `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
   source (`RCM_SOURCE_MODE`, `RCM_SOURCE_REF`, `RCM_SOURCE_SHA`, `RCM_SOURCE_BASE_SHA`,
   `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status) and `RCM_INPUTS` (JSON);
   the hook also inherits `PATH`, `HOME` and `LANG`;

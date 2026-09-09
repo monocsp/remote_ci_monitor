@@ -1,4 +1,4 @@
-# remote_ci_monitor — 계획서 (v2.10, 2026-09-09)
+# remote_ci_monitor — 계획서 (v2.11, 2026-09-09)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
@@ -9,7 +9,8 @@
 > **v2.6** 은 M5b 완료 · v0.2.0 릴리스 · 오너 결정 30(GitHub 백엔드 폐기). **v2.7** 은 M5c(내부망 자동 발견) 계획, **v2.8** 은 그 완료(v0.2.2) — 계획서의 마지막 기능 항목.
 > **v2.9** 는 웹 화면 손질(2026-09-09 오너 요청): 도는 잡의 **전체 진행 막대** · 상세는 **기본 접힘**(결정 13 개정) · 최근 완료 행에도 잡 번호. 「웹 UI (M2)」 절과 목업(`docs/wireframes/web-queue.html`)이 정본이다.
 > **v2.10** 은 마일스톤이 끝난 뒤의 운영 개선 둘 — M5f(부하를 보는 병렬 레인, 결정 39~50)와 **M5g(증거를 얼마나·얼마나 오래 들고 있을지, 결정 51~62)**. 명세 `docs/m5f-workplan.md` · `docs/m5g-workplan.md`.
-> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 · 39~50 · **51~62** 는 추천값으로 구현하거나 구현 예정, 오너 확인 대기; 30 은 확정).
+> **v2.11** 은 M5h(끝난 잡이 무엇이 왜 깨졌는지 말하게 한다, 결정 63~72) — 다른 머신의 세션이 운영 인스턴스를 쓰며 남긴 사용기 여섯 개에서 나왔다. 명세 `docs/m5h-workplan.md`, 구현 `docs/m5h-implementation.md`.
+> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 · 39~50 · 51~62 · **63~72** 는 추천값으로 구현하거나 구현 예정, 오너 확인 대기; 30 은 확정).
 
 ## 한 줄
 
@@ -193,9 +194,12 @@ default = "full"
 | `::rcm::step::<이름>` | 새 스텝 시작. 앞 스텝은 이 시각에 끝난 것으로 본다 |
 | `::rcm::step-end::<ok|fail>` | 스텝 끝을 명시(선택). 없으면 다음 마커나 잡 종료가 끝이다 |
 | `::rcm::summary::<한 줄>` | 결과 요약(선택). 마지막 것이 `summary` |
+| `::rcm::fail::<이름>` | **무엇이 실패했는지 이름으로 지목한다**(선택, M5h). 스텝 이름이면 그 스텝이 실패이고, 아니면 실패한 단위(테스트·파일)다. 여러 번 찍을 수 있다 — 이름 120자 · 잡당 100개 |
 
 - 마커가 하나도 없는 잡은 `steps: []`, `steps_total: null`(0 이 아니다) 로 「스텝 정보 없음」. 잡 전체 경과와 로그 tail 은 그대로.
-- 실패 스텝: 종료 코드 ≠ 0 이면 마지막 스텝(또는 `step-end::fail` 이 찍힌 스텝)이 `failed_step`.
+- **실패 스텝은 선언된 것만이다**(M5h · 결정 63). `::rcm::step-end::fail` 또는 `::rcm::fail::<스텝 이름>` 으로 밝힌 스텝만 `failed_step` 이고, 없으면 **`null`** 이다 — 종료 코드로 스텝을 고르지 않는다. 대신 `last_step`(마지막으로 시작한 스텝)을 실어 「끝났을 때 어디였나」를 인과 없이 말한다. 옛 규칙(「종료 코드 ≠ 0 이면 마지막 스텝」)은 되재생·병렬 스크립트에서 **성공한 스텝을 실패로 불렀다**(운영 잡 #162 · `docs/m5h-workplan.md` §2.1).
+- 선언이 추론을 이긴다: 새 스텝이 시작해 앞 스텝이 암묵적으로 닫힐 때는 `ok: true` 지만, 뒤에 온 `::rcm::fail::` 이 그 값을 덮는다. 잡이 끝나며 닫히는 마지막 스텝은 exit 0 이면 `true`, 아니면 `null`(모른다)이다.
+- `cancelled`·`lost` 잡에는 `failed_step`·`last_step` 이 **둘 다 없다**(결정 64 — 운영 잡 #176 이 취소되고도 실패 스텝을 달고 있었다). `succeeded` 는 잡 자신의 판정이 이겨 실패 이름을 안 남긴다.
 - 함정과 테스트(픽스처로 잠근다):
 
 | # | 사실 | 규칙 | 테스트 |
@@ -231,7 +235,7 @@ default = "full"
 |---|---|---|
 | `POST /jobs` | 토큰 | `{preset, inputs, source, requester_label, join}` → 검증 → 합류면 `{job_id, joined: true}`(+ `joiners[]` 에 기록), 아니면 새 잡(`uploading` 또는 `git_ref` 면 바로 `queued`) `{job_id, joined: false, upload: "/jobs/{id}/tree"}`. `git_ref` 는 `source: {mode, ref}` → 서버가 sha 확정 → `{job_id, joined, state: "queued", sha, url}`(400 ref 검증 · 502 해석 실패 · 504 타임아웃). git_ref 잡에 `PUT tree` 는 409 |
 | `PUT /jobs/{id}/tree` | 토큰(그 잡의) | 본문 tar.gz(`Content-Length` 필수, 상한) → 풀지 않고 저장만 → `queued`. 수신 중 `source.received_bytes`·`last_received_at` 갱신. 이미 취소된 잡이면 409 |
-| `GET /jobs/{id}?tail=N` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(활성 잡은 queue 행, 종료 잡은 recent 행 모양 — recent 행엔 `log_tail` 키가 없다). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null. `tail` 기본 5줄, 잡당 8KiB 상한, `rcm wait` 는 `tail=0` |
+| `GET /jobs/{id}?tail=N` | 없음(`log_tail` 은 토큰) | 잡 스냅샷(활성 잡은 queue 행, 종료 잡은 recent 행 모양 — recent 행엔 `log_tail` 키가 없다). **`failed`·`timed_out` 잡에만 `failures[]`·`failures_truncated` 를 더 싣는다**(M5h · 결정 67 — 이 이력 질의는 여기에만 있고 `/api/status` 에는 없다). `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 일 때만** 싣고 아니면 null. `tail` 기본 5줄, 잡당 8KiB 상한, `rcm wait` 는 `tail=0` |
 | `GET /jobs/{id}/log?offset=N` | 토큰(그 잡의·합류자·admin) | 로그 바이트 스트림(증분). 보존 정리로 지워졌으면 404 `log expired` |
 | `GET /jobs/{id}/events` | 없음 | SSE: 그 잡의 `job_changed`·`job_finished`·`marker` 만(로그 줄은 아님). 이미 끝난 잡이면 `hello` 뒤 `job_finished` 하나를 보내고 닫는다 |
 | `POST /jobs/{id}/cancel` | 토큰(그 잡의 또는 admin) | 취소 → `{job_id, state}`. 합류자 토큰이면 잡은 두고 자기 `joiners[]` 항목만 지운다 → `{left: true, job_id, job_state}` 이고 그 세션의 `rcm wait` 는 같은 JSON 을 찍고 **2** 로 끝난다 |
@@ -285,6 +289,8 @@ workspace_retention_days = 1        # 남겨 둔 워크스페이스와 그 잡�
 workspace_storage_max_bytes = 107374182400  # 부피의 상한(100 GiB). 0 = 무제한 (M5g)
 min_free_bytes = 10737418240        # 파일 시스템 여유 바닥(10 GiB). 0 = 안 본다 (M5g)
 recent_count = 8                    # /api/status.recent 건수 (오너 결정 14)
+failure_window_jobs = 20            # 실패 이름의 이력 창 — 같은 key 의 최근 종료 잡 수 (M5h)
+failure_min_jobs = 3                # 창이 이보다 얕으면 판정하지 않는다(unknown) (M5h)
 sse_max_connections = 16            # 초과는 503 + fallback: poll
 sse_keepalive_seconds = 15
 public_url = ""                     # 잡 url 에 쓸 바깥 주소(예 http://macmini:8787). 비면 요청의 Host 로
@@ -405,7 +411,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 }
 ```
 
-규칙: 시각은 UTC ISO-8601(`Z`). 조회·수집 실패 섹션은 `null` + `*_error` — `queue`·`recent`·`medians`·`hosts` 넷 다 같은 규칙(`recent: null` + `recent_error` 는 「조회 실패」, `recent: []` 는 「완료 잡 없음」으로 다른 모양). 모르는 숫자는 `null`. `position` 은 대기 잡에만 1부터, `running`·`cancelling` 은 null. `finish_at`·`wait_seconds` 는 정지·살아 있는 레인 0·초과 실행이면 null. `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 인 잡에만**, 아니면 null. `progress` 는 `queued`/`uploading` 이면 null(0/0 금지), `phase: "materializing"` 이면 `steps: []`. `hosts[].history[]` 는 `history_samples` 개의 `{at, cpu_busy, mem_used_bytes, gpu_util_pct}`(각 값 nullable), 빠진 표본은 그 시각을 건너뛴다(UI 가 점선으로 끊어 그린다). 바이트 필드 이름은 전부 `_bytes` 로 끝난다. M0~M4 는 `pools` 가 한 개. M0 서버는 이 스키마를 처음부터 낸다(`hosts: []`·`medians: {}` 로 시작). 키 삭제·의미 변경은 `schema_version` 을 올리고 CHANGELOG 에 적는다.
+규칙: `last_step`(마지막으로 시작한 스텝)은 큐 행의 `progress` 와 최근 행에 있고, `failed_step` 은 **선언된 것만**이다(M5h · 결정 63). 이름별 실패 이력 `failures[]` 는 `GET /jobs/{id}` 의 종료 잡에만 있다(결정 67). 시각은 UTC ISO-8601(`Z`). 조회·수집 실패 섹션은 `null` + `*_error` — `queue`·`recent`·`medians`·`hosts` 넷 다 같은 규칙(`recent: null` + `recent_error` 는 「조회 실패」, `recent: []` 는 「완료 잡 없음」으로 다른 모양). 모르는 숫자는 `null`. `position` 은 대기 잡에만 1부터, `running`·`cancelling` 은 null. `finish_at`·`wait_seconds` 는 정지·살아 있는 레인 0·초과 실행이면 null. `log_tail` 은 **유효 토큰(그 잡의·합류자·admin) 요청이고 `running`/`cancelling` 인 잡에만**, 아니면 null. `progress` 는 `queued`/`uploading` 이면 null(0/0 금지), `phase: "materializing"` 이면 `steps: []`. `hosts[].history[]` 는 `history_samples` 개의 `{at, cpu_busy, mem_used_bytes, gpu_util_pct}`(각 값 nullable), 빠진 표본은 그 시각을 건너뛴다(UI 가 점선으로 끊어 그린다). 바이트 필드 이름은 전부 `_bytes` 로 끝난다. M0~M4 는 `pools` 가 한 개. M0 서버는 이 스키마를 처음부터 낸다(`hosts: []`·`medians: {}` 로 시작). 키 삭제·의미 변경은 `schema_version` 을 올리고 CHANGELOG 에 적는다.
 
 ## CLI (`cli.py`)
 
@@ -415,7 +421,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 | `rcm wait --job ID [--timeout S]` | SSE(M1)로 기다리며 stderr 에 위치·스텝·경과·ETA 갱신(TTY 면 한 줄 덮어쓰기), 끝나면 stdout JSON + **종료 코드 0/1/2/3**. SSE 가 끊기면 폴링(2초)으로 폴백(M0 는 폴링만). 서버 연결 실패가 60초 넘게 이어지면 3(`--timeout` 이 더 짧으면 그때 3). **Ctrl-C 는 detach** — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID` 를 안내한다(합류자면 자기 `joiners[]` 항목만 best-effort 로 뺀다). 잡 취소는 명시적 `rcm cancel` 만 |
 | `rcm eta (--job ID \| PRESET [-f K=V])` | 앞선 건수·대기·자기 소요·예상 완료·표본 출처 |
 | `rcm top [--watch N] [--json]` | 한 화면(아래) |
-| `rcm jobs [--mine] [--state S]` · `rcm logs ID [--follow]` · `rcm cancel ID` · `rcm presets` | 큐·로그·취소·프리셋. `--mine` 은 요청자와 합류자 둘 다. 합류자의 `cancel` 은 자기 대기만 뺀다 |
+| `rcm jobs [--mine] [--state S] [--ref REF]` · `rcm logs ID [--follow]` · `rcm cancel ID` · `rcm presets` | 큐·로그·취소·프리셋. 한 줄에 `<ref\|branch> @<짧은 sha>` 를 싣고 `--ref` 는 그 값이 들어간 잡만 남긴다(M5h). `--mine` 은 요청자와 합류자 둘 다. 합류자의 `cancel` 은 자기 대기만 뺀다 |
 | `rcm pause` · `rcm resume` | 큐 정지·재개(admin 토큰). `POST /pause`·`/resume` |
 | `rcm serve [--config] [--bind] [--port] [--data-dir]` · `rcm check` · `rcm token add\|list\|revoke` · `rcm version` | 서버·셋업·토큰 |
 
@@ -571,6 +577,7 @@ docs/reviews/
   - **게이트 자체는 공짜다**(실측): `decide()` 1.29 µs, 보류 레인 48개가 코어의 0.012%, 그리고 보류하면 claim 을 안 하므로 오늘보다 싸다. 비싼 것은 게이트가 **앉는 자리**였다 — 마커 줄마다 SQLite 트랜잭션(다른 레인 claim 을 275 ms 로 밀어냄) · `store.claim` 이 `jobs_state` 를 두고 `jobs_pool` 을 타는 것(`ANALYZE` 하나로 3727배) · 지터 없는 1초 폴링 격자(48레인에서 `/api/status` 503). 그래서 PR 2a-0 이 먼저다.
 - **M5g — 증거를 얼마나, 얼마나 오래 들고 있을지**(계획 2026-09-09, 명세 `docs/m5g-workplan.md`): 오너 요청 — 「지금은 조절값이 날짜뿐이고, 그 날짜가 오기 전에 디스크가 먼저 찬다.」 실측(오너의 Mac mini 운영 인스턴스): 워크스페이스 62개 27 GB(평균 435 MB) · 잡 로그 137개 39 MB · 여유 628 GiB · 비성공 잡 하루 최대 50개 → **하루 50개 × 30일 × 0.5 GB ≈ 750 GB > 여유 628 GB**. 보존 기간이 한 번도 발동하기 전에 디스크가 찬다. 고치는 것 셋 — ① **로그(증거)와 워크스페이스(부피)를 다른 시계로** 재운다(`workspace_retention_days = 1`, 로그는 14/30 그대로. 스냅샷 tar 은 부피 쪽) ② 날짜와 무관한 **바이트 예산**(`workspace_storage_max_bytes = 100 GiB`)과 **여유 공간 바닥**(`min_free_bytes = 10 GiB`) ③ **보이게** 한다(`server.job_storage` · `/api/health.storage` · `rcm check` 의 `storage` 행 · 웹 호스트 카드 · `rcm gc [--dry-run]`). 안전 성질 둘: **증거는 어떤 압박에서도 안 지운다**(부피만 내놓는다) · **못 재면 압박 삭제만 멈춘다**(예산·바닥을 건너뛰고 `error_code` 로 알린다. 나이 규칙은 그대로 돈다). 계획은 한 회차에 한 번만 세우고, 회차 사이는 무진전 latch 가 막는다(결정 62) — 「여유가 오를 때까지 지운다」는 지워도 여유가 안 오르는 파일 시스템에서 결국 전부 지운다. DB 마이그레이션 없음(워크스페이스 삭제는 멱등이라 표시가 필요 없다). 결정 51~62. PR 은 넷 — 명세(1) · 규칙·janitor(2) · 표시·`rcm gc`(3) · 프리셋 권고·`artifacts_on`(4). 크로스리뷰(`docs/reviews/2026-09-09-codex-m5g-design.md`)는 1차가 모델 접근이 끊겨 중단됐고 **2차가 완주해 「조건부 승인」**을 냈다 — P0 넷 · P1 넷 · P2 셋을 반영했다. 가장 큰 것은 **업그레이드 게이트가 실행 불가능했던 것**(「올리기 전에 dry-run」인데 `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자 sweep 한다 → 결정 61) · **순수 모델이 비어 있던 것**(`created_at`·고아·활성·`budget_unreachable`·null 가능 파생값) · **「dry-run 과 실제가 다를 수 없다」가 틀린 말이었던 것**(결정 57) · **검증이 `min(success, failure)` 여야 하는 것** · **「한 번만 계획」이 한 회차짜리 보호인 것**(결정 62). 그리고 리뷰를 쫓다가 **원격 워커가 산출물을 하나도 안 모으는 것**을 찾았다 — `_claim_payload` 가 얼린 정책을 안 실어서 워커의 `_policy_from_claim` 이 `None` 을 돌려준다(명세 §13 D, 실측 확인). **M5e 가 원격 풀에서 죽어 있다.**
   - 프리셋 쪽 문제도 같이 답한다: 참고 팀의 게이트 스크립트가 무거운 구간 출력을 `TMPDIR` 로 돌리고 지워서 **실패 잡 #133 의 로그 50,788 바이트 안에 `Expected:` 0줄 · 스택트레이스 0줄**이었다. 정본 권고는 새 개념 없이 — 판정 몇 줄은 stdout 으로(로그 30일), 부피 있는 나머지는 워크스페이스에 두고 M5e `artifacts` 로 선언(가져가는 통로, 24시간). 프리셋별 TTL 은 안 만들고 `artifacts_on = "failure"` 만 더한다.
+- **M5h — 끝난 잡이 무엇이 왜 깨졌는지 말하게 한다**(계획 2026-09-09, 명세 `docs/m5h-workplan.md` · 구현 `docs/m5h-implementation.md`): 출처는 **다른 머신의 세션**이 운영 인스턴스(v0.2.5)를 쓰며 남긴 사용기 여섯 개다. 여섯 중 다섯이 「끝난 잡을 읽는 일」에 몰려 있었다. 실측으로 확인한 것 — ① `failed_step` 이 **성공한 스텝을 실패로 불렀다**(#162: 되재생·병렬 스크립트에서 마지막 머리말 `build web` 이 라벨을 가져갔고, 실제 실패는 `test` 였다. #169~#171 도 같은 라벨) ② 취소한 #176 의 요약 옆 문자열은 프리셋 설명 유출이 아니라 **취소된 잡이 들고 있던 `failed_step`** 이었다(①과 같은 버그) ③ `/api/jobs/162`·`/logs/162` 는 `{"error":"not found"}` 한 줄이라 로그로 가는 길을 안 알려 준다 ④ 종료 잡의 코드 신원(`source`)은 `/api/status` 에 **이미 있는데** `rcm jobs`·최근 줄이 안 그린다 ⑤ 대기 클라이언트는 **31.6 MB 로 평평**하고 누수가 없다(2만 파일 tree 잡만 스냅샷 장부 32 MB 를 대기 내내 쥔다) ⑥ 「이 테스트가 최근 몇 번 빨갰나」의 답은 **서버에 없다** — 로그는 30일 남지만 무엇이 깨졌는지는 저장되지 않는다. 고치는 것 — **선언된 실패 스텝만**(`failed_step` 은 `step-end::fail`·새 마커 `::rcm::fail::<이름>` 로만, 아니면 null + `last_step`) · **실패 대장과 최근 이력**(DB v12 `job_failures`, 같은 key 의 최근 20회 창에서 `first_seen`·`intermittent`·`persistent` 를 서버가 코드로 판정해 `GET /jobs/{id}` 에만 싣는다) · **404 의 `hint` 와 실패한 대기의 `rcm logs <N>` 줄** · **목록의 `<ref|branch> @<sha>` 와 `rcm jobs --ref`** · **대기 전에 스냅샷 놓기**. 서버는 임의 출력을 파싱하지 않는다 — 이름은 프리셋 스크립트가 마커로 말한다. 결정 63~72. DB v11(`last_step`) · v12(대장). 단계 다섯, PR 하나.
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
@@ -644,6 +651,17 @@ docs/reviews/
 | 59 | 실패했을 때만 모으기 | 프리셋 키 `artifacts_on = "always"`(기본 — 오늘의 동작) \| `"failure"`. 초록 잡마다 무거운 로그를 모아 24시간 들고 있을 이유가 없고, 그 비용이 결정 58 의 권고를 안 따르게 만든다. ⚠️ 워커 호출부만 고쳐서는 **원격에서 안 돈다** — claim 응답의 얼린 정책에 `artifacts_on` 을 실어야 하고, 필드가 없는 옛 서버는 `"always"` 로 본다 |
 | 61 | 업그레이드 안전 게이트 | `rcm gc --dry-run` 이 **서버 없이도** 돈다 — `rcm check --config` 처럼 설정과 데이터 디렉터리만 읽어(DB 는 읽기 전용) 같은 계획을 낸다. 절차는 `git pull --ff-only` → **오프라인 dry-run** → 서비스 재시작. 초안의 「올리기 전에 dry-run」은 불가능했다: `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자 sweep 한다 (M5g, 코덱스 P0) |
 | 62 | 무진전 latch | 바닥 규칙으로 지웠는데 여유가 **지운 바이트의 절반도 안 늘면** `no_progress` 를 세우고 그 뒤 자동 sweep 의 **바닥 규칙만** 멈춘다(나이·예산은 돈다). `rcm gc` 나 재시작으로 풀린다. 지워도 `df` 가 안 움직이면 계속 지우는 것은 증거를 태우는 일 말고 아무것도 아니다 (M5g, 코덱스 P1) |
+
+| 63 | 추론된 실패 스텝 | **없앤다.** `failed_step` 은 `::rcm::step-end::fail` 또는 `::rcm::fail::<이름>` 으로 **선언된 것만**이고, 아니면 null 이다. 「어디였나」는 `last_step` 이 말한다. 오늘 라벨이 붙던 잡의 상당수가 앞으로 빈칸이 된다 — CHANGELOG 에 동작 변경으로 적는다 (M5h, 2026-09-09) |
+| 64 | 취소·유실 잡 | `failed_step`·`last_step` **둘 다 안 싣는다**(#176). `timed_out` 은 `last_step` 만. `succeeded` 는 잡 자신의 판정이 이겨 실패 이름을 안 남긴다 |
+| 65 | 새 마커 | `::rcm::fail::<이름>` 하나로 **스텝과 단위를 같이** 받는다. 이름 120자 · 잡당 100개(넘으면 `failures_truncated`) · 옛 서버는 모르는 kind 라 조용히 무시한다 |
+| 66 | 이력 창 | 같은 `key` 의 최근 `failure_window_jobs = 20` 개 **종료 잡**(`succeeded`·`failed`·`timed_out`. 취소·유실은 아무 말도 안 하므로 뺀다), 최소 `failure_min_jobs = 3`. 목록 명령(`rcm flaky`)은 나중에 |
+| 67 | 어디에 싣나 | `GET /jobs/{id}` 의 **종료 잡에만**. `/api/status` 는 안 건드린다 — 이미 가장 뜨거운 요청이고(결정 49) 최근 행마다 이력 질의를 붙이면 그 병목 위에 짐을 얹는다 |
+| 68 | 분모의 품질 | 이름을 안 찍고 실패한 잡은 분모에 남기고 `window_unnamed` 로 밝힌다. 분자는 과소일지언정 **과대는 아니다**. 판정 문구의 `intermittent?` 물음표는 계약이다 — 판정이 아니라 제안 |
+| 69 | 404 | 모르는 경로에 `hint` 를 준다(숫자가 있으면 그 잡의 진짜 경로, 없으면 주요 라우트). `/api/jobs/…` **별칭은 안 만든다** — 한 가지에 이름 하나 |
+| 70 | 실패한 대기의 끝줄 | 종료 코드 1·2·3 **모두** `log: rcm logs <N>` 과 URL 을 적는다. 모를수록 로그가 필요하다 |
+| 71 | 목록의 코드 신원 | `rcm jobs`·`rcm top` 최근 줄에 `<ref\|branch> @<짧은 sha>`(32자에서 자른다). tree 잡의 `branch` 는 클라이언트가 실어 보내되 **표시용**이다 — `tree_hash` 와 합류 신원은 안 바뀐다 |
+| 72 | 대기 클라이언트 | 대기 전에 스냅샷 장부를 놓는다(2만 파일 64 → 32 MB). 게으른 import 다이어트는 **안 한다**(31.6 MB 중 13.3 MB 는 파이썬 자체). `--no-wait` + `rcm wait` 를 메모리가 빠듯한 기계의 패턴으로 문서에 적는다 |
 
 ⚠️ **결정 번호 39~42 가 두 번 나온다** — M5e(산출물)와 M5f(부하 게이트)가 같은 번호를 각각 붙인 채 머지 `d26b3f4` 에서 합쳐졌다. `docs/m5e-*.md` 와 `docs/m5f-*.md` 가 이미 각자의 번호로 서로를 가리키고 있어 여기서 한쪽을 옮기면 그 문서들의 상호 참조가 깨진다. 고칠 때 한 PR 에서 문서까지 같이 바꾼다. 새 결정은 **51번부터**다.
 
