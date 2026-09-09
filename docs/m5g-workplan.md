@@ -255,6 +255,19 @@ def _measure_dir(self, path: Path) -> int | None:
 - **여유 공간**은 `shutil.disk_usage(data_dir)` — 호스트 표본과 같은 함수이지 표본을 재사용하지
   않는다. 표본은 낡을 수 있고(`stale`), 청소는 **지금** 값으로 판단해야 한다.
 
+**후보는 DB 가 아니라 디렉터리에서 얻는다.** `workspaces/` 를 `os.scandir` 로 한 번 훑어 실제로 있는
+정수 이름을 모으고, 그 id 들의 잡 행을 붙여 상태·`finished_at` 을 채운다. 이유 셋:
+
+- **원격 워커에서 돈 잡은 서버에 워크스페이스가 없다**(워커의 `data_dir` 에 있다). DB 에서 후보를
+  뽑으면 그 잡들이 전부 「크기를 못 잼」이 되고, 결정 55 의 fail-closed 가 **항상** 발동해서 예산이
+  영영 안 돌아간다. 디렉터리에서 뽑으면 애초에 후보가 아니다.
+- `list_unpurged_finished` 는 한 번에 `CANDIDATE_LIMIT`(1000)개만 준다. 총량을 그 페이지로 재면
+  1000개가 넘는 순간 **총량이 작게 나오고 예산이 조용히 안 지켜진다.**
+- 잡 행이 없는 디렉터리(고아)는 회계에 **싣기만** 하고 안 지운다(§7). 디스크는 그 바이트를 실제로
+  쥐고 있으니 총량에는 들어가야 한다.
+
+`jobs/<id>/tree.tar.gz` 도 같은 방식으로 `jobs/` 를 훑어 잰다(파일 하나라 `lstat` 한 번이다).
+
 ### 4.5 한 회차에 한 번만 계획한다 (결정 54)
 
 계획은 **잰 값으로 한 번** 세우고, 실행하고, 끝난 뒤 여유를 **다시 잰다.** 「여유가 바닥을 넘을
@@ -282,6 +295,10 @@ def _measure_dir(self, path: Path) -> int | None:
   다시 계획에 올라도 무해하다 — **DB 마이그레이션이 필요 없는 이유가 이것이다.**
 - 활성 잡 보호는 삼중 그대로: 순수 규칙이 거르고 · `_purge_workspace` 가 상태를 다시 보고 ·
   실행 중 잡의 워크스페이스 경로는 워커가 쥐고 있다.
+- **청소기가 죽어 있어도 `rcm gc` 는 돈다.** 자동 청소가 멈춘 것을 사람이 손으로 메우는 통로다
+  (`/api/health` 는 그 사이에도 503 으로 죽음을 말한다).
+- `next_sweep_at` 은 `last_sweep_at + retention_sweep_interval_seconds`. 아직 한 번도 안 돌았으면
+  둘 다 `null` 이다 — 0 이나 지금 시각으로 채우지 않는다.
 
 ## 5. 보이게 하기 (결정 37 — 서버는 문장이 아니라 코드를 내려보낸다)
 
@@ -424,7 +441,7 @@ artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure
 | 파일 | 무엇 |
 |---|---|
 | `tests/test_retention_workspace.py` | 순수 전수: 나이 경계(`>=`) · 활성 네 상태(`uploading`·`queued`·`running`·`cancelling`) 전부 후보 아님 · 예산이 오래된 것부터 · 예산 0 은 무제한 · 바닥이 오래된 것부터 · 바닥 0 은 안 봄 · `free_bytes is None` 이면 바닥 규칙 없음 · **`bytes is None` 이 하나면 예산·바닥이 아무것도 안 고르고 나이는 그대로 돈다** · `over_budget_bytes`·`short_free_bytes` · 같은 잡이 두 규칙에 걸려도 한 번만 · 정렬 |
-| `tests/test_janitor_m5g.py` | 측정 캐시(종료 잡은 한 번, 활성 잡은 매번) · `st_blocks` 눈금 · 심링크를 안 따라감 · 측정 실패 → `error_code` 하고 나이만 · **한 회차에 한 번만 계획한다**(여유가 안 오르는 가짜 `disk_usage` 로 전부 지우지 않는 것을 잠근다) · 삭제 실패는 다음 회차 · `last_sweep_at`/`next_sweep_at` |
+| `tests/test_janitor_m5g.py` | 측정 캐시(종료 잡은 한 번, 활성 잡은 매번) · `st_blocks` 눈금 · 심링크를 안 따라감 · 측정 실패 → `error_code` 하고 나이만 · **한 회차에 한 번만 계획한다**(여유가 안 오르는 가짜 `disk_usage` 로 전부 지우지 않는 것을 잠근다) · 삭제 실패는 다음 회차 · **후보를 디렉터리에서 얻는다**(원격 워커 잡은 후보가 아니다 · 고아는 세되 안 지운다 · 1000개 넘어도 총량이 맞는다) · `last_sweep_at`/`next_sweep_at` 은 한 번도 안 돌았으면 null |
 | `tests/test_server_m5g.py` | `job_storage` 키 집합·null 규칙 · `/api/health.storage` · `POST /gc` 는 admin 만(401/403) · `dry_run` 은 아무것도 안 지운다 · gc 와 sweep 이 겹치지 않는다 |
 | `tests/test_cli_m5g.py` | `rcm gc` 표·`--json` · `rcm check` 의 storage 행 세 모양(ok/warn/FAIL) |
 | `tests/web/storage.test.js` | 호스트 카드 줄 두 언어 · `error_code` 면 숫자 대신 문구 · 예산 초과 `warn` · 옛 문서(키 없음)에서 안 깨짐 |
