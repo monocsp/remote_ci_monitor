@@ -301,6 +301,9 @@ class Estimate:
     overdue: bool
     stuck: bool
     finish_at: datetime | None
+    #: 이 잡이 **지금** 같은 풀의 다른 잡과 한 머신을 나눠 쓰고 있나(M5f). 중앙값은 혼자 잰
+    #: 것이라 그동안은 덜 확실하다 — 배수를 지어내지 않고 신뢰도만 한 칸 내린다.
+    shared: bool = False
 
 
 @dataclass(frozen=True)

@@ -132,6 +132,7 @@ def test_migration_v2_to_v3_adds_priority_and_tables_and_keeps_rows(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='index' AND sql LIKE '%priority%'"
         ).fetchall():
             c.execute(f"DROP INDEX {name}")
+        c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
         c.execute("ALTER TABLE jobs DROP COLUMN priority")
         # v5(M5b-2)가 더한 것도 뗀다(worker_name · tokens.kind · workers)
         c.execute("DROP INDEX IF EXISTS jobs_worker")

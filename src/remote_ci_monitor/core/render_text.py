@@ -258,6 +258,7 @@ def render_queue_row(
         est.get("sample_count") or 0,
         group_wait=row.get("reason") == "blocked_by_group",
         overdue=bool(est.get("overdue")) or bool(est.get("stuck")),
+        shared=bool(est.get("shared")),
     )
     if finish:
         eta = f"eta {fmt_clock(finish, tz, now=now)}"

@@ -75,6 +75,8 @@ def source_json(s: Source) -> dict[str, Any]:
 def estimate_json(e: Estimate, *, confidence: str | None = None) -> dict[str, Any]:
     return {
         "confidence": confidence,
+        # 같은 풀의 다른 잡과 머신을 나눠 쓰는 중인가 — 화면이 배지를 스스로 그릴 재료 (M5f)
+        "shared": e.shared,
         "expected_seconds": _num(e.expected_seconds),
         "source": e.source,
         "sample_count": e.sample_count,
@@ -178,6 +180,7 @@ def queue_row_json(
                 row.estimate.sample_count,
                 group_wait=row.reason == REASON_BLOCKED_BY_GROUP,
                 overdue=row.estimate.overdue or row.estimate.stuck,
+                shared=row.estimate.shared,
             ),
         ),
         "progress": progress_json(row.progress),

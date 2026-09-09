@@ -33,6 +33,13 @@ of a key bumps that number and is listed here.
   [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
 
 ### Changed
+- **An ETA says it is less sure while a job shares the machine.** Medians are measured from runs
+  that mostly had the machine to themselves, so a job running beside another finishes later than
+  the median suggests. The confidence badge now drops one step for as long as that is true — the
+  estimate itself is not inflated by a guessed factor. `estimate.shared` carries the fact so the
+  page and `rcm top` agree. Jobs also record how many were running when they started, so a future
+  release can measure the real effect instead of guessing at it. Database schema 10.
+  ([#74](https://github.com/monocsp/remote_ci_monitor/pull/74))
 - **Queue rows now arrive folded.** Running rows used to open themselves, so two or three running
   jobs filled the screen with step lists and log tails. The row keeps what answers "how is it
   going" — the progress bar, `step 2/4 build 2s` in the reason column, and **Cancel** for your own

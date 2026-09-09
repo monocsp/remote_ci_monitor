@@ -272,7 +272,12 @@
     var n = isNum(est.sample_count) ? est.sample_count : null;
     var c = est.confidence;
     if (!c) {
-      if (est.source === "measured") c = (n != null && n >= 5) ? "high" : "med";
+      // 서버가 안 보냈을 때의 대체 계산 — 서버(core/queue.confidence)와 규칙이 같아야 한다.
+      // 같이 도는 중이면 한 칸 내린다: 중앙값은 혼자 잰 것이다 (M5f).
+      if (est.source === "measured") {
+        var high = n != null && n >= 5;
+        c = est.shared ? (high ? "med" : "low") : (high ? "high" : "med");
+      }
       else if (est.source) c = "low";
       else return { cls: "low", text: T(lang, "conf.low_dash", { dash: DASH }) };
     }
