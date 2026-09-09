@@ -8,7 +8,10 @@ import pytest
 
 from remote_ci_monitor.config import (
     ConfigError,
+    HostSection,
     ServerConfig,
+    ServerSection,
+    admission_warnings,
     load_client_config,
     load_server_config,
     parse_preset,
@@ -1119,3 +1122,56 @@ def test_client_env_and_flag_override_auto(tmp_path):
     assert cfg.server == "http://mini:8787" and cfg.wants_discovery is False
     cfg = load_client_config(p, environ={"RCM_SERVER": "http://mini:8787"}, server="http://x:1")
     assert cfg.server == "http://x:1" and cfg.wants_discovery is False
+
+
+# ── M5f: 부하 게이트 설정 ───────────────────────────────────────────────────
+
+
+def test_admission_defaults():
+    s = ServerSection()
+    assert s.admission == "load" and s.cpu_max_percent == 80.0
+    assert s.admission_samples == 3 and s.admission_cooldown_seconds == 30
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("admission", "maybe", "[server] admission must be 'load' or 'always'"),
+        ("cpu_max_percent", 0, "[server] cpu_max_percent must be between 1 and 100"),
+        ("cpu_max_percent", 101, "[server] cpu_max_percent must be between 1 and 100"),
+        ("admission_samples", 0, "[server] admission_samples must be >= 1"),
+        ("admission_cooldown_seconds", -1, "[server] admission_cooldown_seconds must be >= 0"),
+    ],
+)
+def test_admission_values_out_of_range_are_config_errors(tmp_path, key, value, message):
+    rendered = f'"{value}"' if isinstance(value, str) else value
+    path = tmp_path / "server.toml"
+    path.write_text(f"[server]\ndata_dir = {str(tmp_path)!r}\n{key} = {rendered}\n")
+    with pytest.raises(ConfigError) as e:
+        load_server_config(path, check_tools=False)
+    assert message in str(e.value)
+
+
+def test_a_percentage_may_be_fractional():
+    """`_apply_section` 이 기본값의 타입으로 맞춘다 — int 기본값이면 80.5 가 오류가 된다."""
+    assert isinstance(ServerSection().cpu_max_percent, float)
+
+
+def test_admission_coherence_is_a_warning_not_an_error():
+    """업그레이드만으로 돌던 서버가 안 뜨면 안 된다 — 게이트는 런타임에 옳게 닫힌다."""
+    short = ServerSection(lanes=2, admission_samples=3)
+    assert admission_warnings(short, HostSection(history_samples=2))
+    assert admission_warnings(short, HostSection(history_samples=60)) == []
+
+
+def test_a_long_sampler_interval_decouples_the_two_constants():
+    server = ServerSection(lanes=2)  # samples 3 · cooldown 30
+    warnings = admission_warnings(server, HostSection(interval_seconds=60))
+    assert any("no longer relate" in w for w in warnings)
+
+
+def test_no_admission_warning_when_the_gate_cannot_apply():
+    """레인 1 이거나 게이트가 꺼져 있으면 상수가 어긋나도 아무 일이 없다."""
+    bad = HostSection(history_samples=1, interval_seconds=60)
+    assert admission_warnings(ServerSection(lanes=1), bad) == []
+    assert admission_warnings(ServerSection(lanes=4, admission="always"), bad) == []

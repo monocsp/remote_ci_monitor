@@ -13,6 +13,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ⑤ top-first-sample — macOS top 의 마지막 표본 대신 첫 표본 사용 (`core/hostparse.py`, M1)
   ⑥ web-not-moving-unknown — 웹 UI 「Not moving」이 queue null 을 「Nothing is stuck」으로
      (`web/app.js`, M2, node --test)
+  ⑪ admission-fail-open — 부하 게이트가 「표본 없음」에 열림 (`core/admission.py`, M5f)
+  ⑫ admission-samples-any — 창의 **전부**가 아니라 **하나라도** 기준 아래면 열림 (같은 파일)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -113,6 +115,23 @@ MUTANTS = (
         old="key=lambda j: (-j.priority, j.id)",
         new="key=lambda j: j.id",
         tests=("tests/test_priority.py",),
+    ),
+    Mutant(
+        name="admission-fail-open",
+        path="src/remote_ci_monitor/core/admission.py",
+        old=(
+            "    if sample is None or (now - sample.sampled_at).total_seconds()"
+            " > cfg.stale_seconds:"
+        ),
+        new="    if False:",
+        tests=("tests/test_admission.py",),
+    ),
+    Mutant(
+        name="admission-samples-any",
+        path="src/remote_ci_monitor/core/admission.py",
+        old="    if any(v is None for v in values):",
+        new="    if all(v is None for v in values):",
+        tests=("tests/test_admission.py",),
     ),
     Mutant(
         name="manifest-link-escape",

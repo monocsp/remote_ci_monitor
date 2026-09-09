@@ -73,6 +73,7 @@ PHASE_EXECUTING = "executing"
 # ── 워커 상태 ────────────────────────────────────────────────────────────────
 WORKER_IDLE = "idle"
 WORKER_BUSY = "busy"
+WORKER_HELD = "held"  # 부하 게이트가 막고 있다 — 살아 있지만 지금은 못 집는다 (M5f)
 WORKER_DOWN = "down"
 
 # ── reason 열거값 (PLAN.md 「큐 규칙」) ─────────────────────────────────────
@@ -88,6 +89,10 @@ REASON_CANCELLING = "cancelling"
 REASON_PAUSED = "paused"
 REASON_NOT_SCHEDULED = "not_scheduled"
 REASON_WORKER_DOWN = "worker_down"
+#: 집었을 레인이 호스트 부하로 보류 중이다(M5f). **`ACTIONABLE_REASONS` 에는 안 올린다** —
+#: 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다(오너 결정 45). 오래 닫혀 있으면
+#: `rcm check` 가 경고한다.
+REASON_HELD_BY_LOAD = "held_by_load"
 
 #: 「Not moving」 요약에 오르는 행동 가능한 이유. 순서가 우선순위다.
 ACTIONABLE_REASONS = (
@@ -322,12 +327,18 @@ class Median:
 @dataclass(frozen=True)
 class WorkerInfo:
     lane: int
-    state: str  # idle | busy | down
+    state: str  # idle | busy | held | down
     job_id: int | None = None
     error: str | None = None
     since: datetime | None = None
     worker: str | None = None  # 원격 워커 이름. 로컬 레인은 None (M5b-2)
     pool: str = DEFAULT_POOL  # 이 레인이 섬기는 풀 (M5b-4: rcm check 가 워커를 풀에 묶는다)
+    #: `held` 일 때 **왜**(결정 37) — `cpu_busy` · `no_sample` · `cooldown` (M5f).
+    hold_code: str | None = None
+    #: 화면이 숫자를 그릴 재료. `cpu_busy` 일 때만 `{"cpu_busy": 92.4}`, 아니면 None.
+    hold_detail: dict[str, Any] | None = None
+    #: 언제부터 막혔나. 「게이트가 제 일을 하는 중」과 「누가 두 시간째 잡고 있음」을 가른다.
+    held_since: datetime | None = None
 
     @property
     def display_name(self) -> str | None:

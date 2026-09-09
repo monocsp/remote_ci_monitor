@@ -78,6 +78,11 @@ class ServerSection:
     port: int = 8787
     data_dir: str = DEFAULT_DATA_DIR
     lanes: int = 1
+    # 부하 게이트(M5f) — 레인 2 부터는 호스트가 한가할 때만 잡는다. 레인 1 은 안 지난다.
+    admission: str = "load"  # "load" | "always"("always" 는 M5f 이전 동작)
+    cpu_max_percent: float = 80.0  # 백분율은 소수가 될 수 있다 — `cpu.busy` 도 float 다
+    admission_samples: int = 3  # 연속으로 이만큼의 표본이 전부 기준 아래여야 연다
+    admission_cooldown_seconds: int = 30  # 한 머신에서 게이트를 지나 잡으면 이만큼 쉰다
     read_auth: str = "none"
     max_snapshot_bytes: int = 536_870_912
     max_concurrent_requests: int = 32
@@ -208,6 +213,31 @@ def advertise_warning(section: ServerSection) -> str | None:
             'this server but cannot connect (set bind = "0.0.0.0" or a LAN/Tailscale IP)'
         )
     return None
+
+
+def admission_warnings(server: ServerSection, host: HostSection) -> list[str]:
+    """게이트 상수가 서로 안 맞을 때의 **경고**(M5f §4.1). 오류가 아니다.
+
+    오류로 만들면 **업그레이드만으로 돌던 서버가 안 뜬다** — `[host] history_samples = 2` 나
+    `interval_seconds = 60` 을 쓰던 사람은 admission 키를 만진 적이 없는데 기본값 때문에 걸린다.
+    게이트는 런타임에 이미 옳게 닫히므로(`no_sample`) 경고로 충분하다.
+    """
+    if server.admission != "load" or server.lanes < 2:
+        return []
+    out: list[str] = []
+    if server.admission_samples > host.history_samples:
+        out.append(
+            f"warning: [server] admission_samples ({server.admission_samples}) is more than "
+            f"[host] history_samples ({host.history_samples}) — lanes 2+ will never open"
+        )
+    window = server.admission_samples * host.interval_seconds
+    if window > server.admission_cooldown_seconds:
+        out.append(
+            f"warning: [server] admission_samples * [host] interval_seconds ({window}s) exceeds "
+            f"admission_cooldown_seconds ({server.admission_cooldown_seconds}s) — the two "
+            "constants no longer relate"
+        )
+    return out
 
 
 @dataclass
@@ -591,6 +621,14 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
     if s.lanes < 1:
         raise ConfigError("[server] lanes must be >= 1")
+    if s.admission not in ("load", "always"):
+        raise ConfigError("[server] admission must be 'load' or 'always'")
+    if not 0 < s.cpu_max_percent <= 100:
+        raise ConfigError("[server] cpu_max_percent must be between 1 and 100")
+    if s.admission_samples < 1:
+        raise ConfigError("[server] admission_samples must be >= 1")
+    if s.admission_cooldown_seconds < 0:
+        raise ConfigError("[server] admission_cooldown_seconds must be >= 0")
     if not (1 <= s.port <= 65535):
         raise ConfigError("[server] port must be between 1 and 65535")
     if s.read_auth not in ("none", "basic"):

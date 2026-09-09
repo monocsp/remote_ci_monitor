@@ -42,11 +42,12 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
     ServerConfig,
+    admission_warnings,
     advertise_enabled,
     advertise_warning,
 )
+from remote_ci_monitor.core import admission, outcome
 from remote_ci_monitor.core import artifacts as art
-from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
@@ -230,6 +231,17 @@ class App(RemoteWorkersMixin):
         self._dirty = True
         self._sse_lock = threading.Lock()
         self._sse_connections = 0
+        # 부하 게이트(M5f §4.5). 락은 **하나(전역)** 이고 게이트를 지나는 레인(≥ 2)만 잡는다 —
+        # 재 보니 머신별로 쪼개면 burst 에서 22배 느리다. 전역 락이 BEGIN IMMEDIATE 를 줄
+        # 세우는 유일한 장치라, 없애면 스레드들이 SQLite writer 락의 거친 백오프에 걸린다.
+        self._admit_lock = threading.Lock()
+        # 머신 = 워커 등록 단위. 로컬은 None, 원격은 워커 이름. 한 머신에서 serve 와 worker 를
+        # 같이 돌리면 게이트 없는 레인이 둘이 된다 — 자동 병합은 안 한다(결정 46).
+        self._last_admit: dict[str | None, datetime] = {}
+        # 상태 경로가 **다시 판정하지 않게** claim 경로의 결과를 남긴다. 두 번 부르면 화면과
+        # 실제가 어긋나고, Worker._set 이 상태가 바뀔 때마다 _since 를 되감아 not_scheduled
+        # 알람이 죽는다(§4.5).
+        self._hold: dict[tuple[str | None, int], tuple[admission.Hold | None, datetime]] = {}
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
@@ -248,6 +260,7 @@ class App(RemoteWorkersMixin):
             on_change=self._on_job_change,
             on_marker=self._on_marker,
             now_fn=self.now_fn,
+            admit=self._admit_local,
         )
         self._janitor = threading.Thread(target=self._janitor_loop, name="rcm-janitor", daemon=True)
         self._janitor.start()
@@ -280,6 +293,14 @@ class App(RemoteWorkersMixin):
             disk_path=str(self.config.server.data_dir),
         )
         self.sampler.start()
+        s = self.config.server
+        if s.lanes >= 2 and s.admission == "load":
+            # 안 그러면 첫 증상이 「두 번째 레인이 갑자기 멈췄다」다
+            self.log(
+                f"admission: load (cpu <= {s.cpu_max_percent:g}%, lanes 2+; lane 1 always claims)"
+            )
+        for warning in admission_warnings(s, self.config.host):
+            self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
             name = self.config.server.advertise_name or host
@@ -353,6 +374,85 @@ class App(RemoteWorkersMixin):
                 return f"lane {info.lane} down: {info.error}"
         return err
 
+    # ── 부하 게이트 (M5f) ───────────────────────────────────────────────────
+
+    def admission_config(self, *, remote: bool) -> admission.AdmissionConfig:
+        """서버 설정 → 순수 계층의 설정. `core/queue.QueueConfig` 와 같은 방식이다.
+
+        원격 표본은 서버가 받은 시각으로 다시 찍히므로 나이가 곧 마지막 heartbeat 이후 시간이다.
+        그래서 낡음 상한에 heartbeat 주기도 함께 본다.
+        """
+        s = self.config.server
+        stale = admission.STALE_MULTIPLIER * self.config.host.interval_seconds
+        if remote:
+            stale = max(stale, admission.STALE_MULTIPLIER * s.worker_heartbeat_seconds)
+        return admission.AdmissionConfig(
+            policy=s.admission,
+            cpu_max_percent=s.cpu_max_percent,
+            samples=s.admission_samples,
+            cooldown_seconds=float(s.admission_cooldown_seconds),
+            stale_seconds=float(stale),
+        )
+
+    def _machine_sample(self, worker: str | None) -> HostSample | None:
+        """그 머신의 마지막 표본. 로컬은 프로세스 안 샘플러, 원격은 heartbeat 로 받은 것."""
+        if worker is None:
+            hosts, _error = self._hosts()
+            return hosts[0] if hosts else None
+        with self._remote_lock:
+            return self._worker_samples.get(worker)
+
+    def _decide_admission(self, lane: int, worker: str | None, now: datetime):
+        hold = admission.decide(
+            lane=lane,
+            sample=self._machine_sample(worker),
+            now=now,
+            last_admit_at=self._last_admit.get(worker),
+            cfg=self.admission_config(remote=worker is not None),
+        )
+        previous = self._hold.get((worker, lane))
+        # held_since 는 **막히기 시작한 시각**이다 — 같은 이유로 계속 막혀 있으면 유지한다
+        if hold is not None and previous and previous[0] is not None:
+            self._hold[(worker, lane)] = (hold, previous[1])
+        else:
+            self._hold[(worker, lane)] = (hold, now)
+        return hold
+
+    def hold_of(self, lane: int, worker: str | None, now: datetime):
+        """상태 경로용 — **다시 판정하지 않고** claim 경로가 남긴 것을 읽는다.
+
+        기록이 claim 주기보다 오래됐으면 fail-closed 로 본다(그 레인이 안 도는 것이다).
+        """
+        entry = self._hold.get((worker, lane))
+        if entry is None:
+            return None, None
+        hold, since = entry
+        return hold, (since if hold is not None else None)
+
+    def admit(self, lane: int, worker: str | None, now: datetime, claim):
+        """게이트를 지나 claim 한다. 레인 1 은 락을 안 기다리고, 판정도 안 지난다.
+
+        게이트를 지나는 레인은 `판정 → claim → 쿨다운 기록` 을 **락 안에서** 한다. 안 그러면
+        레인 넷이 같은 순간에 깨어 전부 통과한다(실측: 락 없이 20회 중 20회).
+        """
+        if lane <= 1 or self.config.server.admission != "load":
+            job = claim()
+            if job is not None:
+                self._last_admit[worker] = now  # 레인 1 도 **기록은 한다**(결정 41)
+            return job, None
+        with self._admit_lock:
+            hold = self._decide_admission(lane, worker, now)
+            if hold is not None:
+                return None, hold
+            job = claim()
+            if job is not None:  # 큐가 비어 헛돈 것은 쿨다운을 쓰지 않는다
+                self._last_admit[worker] = now
+            return job, None
+
+    def _admit_local(self, lane: int, now: datetime, claim):
+        """로컬 레인 스레드가 부르는 게이트. 머신 키는 None(서버 자신)이다."""
+        return self.admit(lane, None, now, claim)
+
     def worker_infos(self) -> list[WorkerInfo]:
         """로컬 레인(같은 프로세스)."""
         if self.workers:
@@ -423,7 +523,13 @@ class App(RemoteWorkersMixin):
             {
                 "paused": {"by": paused.by, "at": iso(paused.at)} if paused else None,
                 "workers": [
-                    {"lane": w.lane, "state": w.state, "job_id": w.job_id, "worker": w.worker}
+                    {
+                        "lane": w.lane,
+                        "state": w.state,
+                        "job_id": w.job_id,
+                        "worker": w.worker,
+                        "hold_code": w.hold_code,  # 필이 이유 없는 `held` 로 남지 않게
+                    }
                     for w in self.all_worker_infos(self.now_fn())
                 ],
             },
