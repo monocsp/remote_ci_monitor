@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from statistics import median
 from typing import Any
@@ -145,15 +145,28 @@ def expected_for(
 
 
 def confidence(
-    source: str, sample_count: int, *, group_wait: bool = False, overdue: bool = False
+    source: str,
+    sample_count: int,
+    *,
+    group_wait: bool = False,
+    overdue: bool = False,
+    shared: bool = False,
 ) -> str:
-    """화면 배지의 신뢰도. measured n≥5 → high, n<5 → med, preset/default → low."""
+    """화면 배지의 신뢰도. measured n≥5 → high, n<5 → med, preset/default → low.
+
+    같이 도는 중이면(`shared`) 실측 배지를 **한 칸 내린다** — 중앙값은 혼자 잰 것이라 그동안은
+    덜 맞는다. 배수를 지어내 `expected` 를 늘리지는 않는다(없는 숫자를 만드는 것이다).
+    `low` 는 더 내려갈 곳이 없다. `overdue`·`group wait` 는 이미 더 급한 말이라 먼저 반환된다.
+    """
     if overdue:
         return "overdue"
     if group_wait:
         return "group wait"
     if source == SOURCE_MEASURED:
-        return "high" if sample_count >= 5 else "med"
+        high = sample_count >= 5
+        if shared:
+            return "med" if high else "low"
+        return "high" if high else "med"
     return "low"
 
 
@@ -229,6 +242,10 @@ def compute_queue(
     progress = progress or {}
     active = sorted((j for j in jobs if j.state in ACTIVE_STATES), key=lambda j: j.id)
     busy = [j for j in active if j.is_busy]
+    # 같은 풀에서 둘 이상이 도는 중이면 서로 머신을 나눠 쓰고 있다(M5f §6)
+    busy_per_pool: dict[str, int] = {}
+    for j in busy:
+        busy_per_pool[j.pool] = busy_per_pool.get(j.pool, 0) + 1
     # 대기 순서 = (우선순위 높은 것 먼저, 같은 우선순위는 id) — store.claim 의 ORDER BY 와 같은 키
     waiting = sorted((j for j in active if j.is_waiting), key=lambda j: (-j.priority, j.id))
 
@@ -255,6 +272,8 @@ def compute_queue(
     for job in busy:
         expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
         est = _busy_estimate(job, expected, source, n, now, cfg)
+        if busy_per_pool.get(job.pool, 0) > 1:
+            est = replace(est, shared=True)
         free_at = now + timedelta(seconds=est.remaining_seconds or 0)
         holder_lane = (job.worker_name, job.lane) if job.lane is not None else None
         if holder_lane is not None and holder_lane in lane_free:

@@ -157,9 +157,13 @@ table.q tr.mine.overdue td:first-child { box-shadow: inset 3px 0 0 var(--accent)
 /* 전체 진행 막대 — 도는 행 아래 한 줄. 접혀 있어도 「어디까지 왔나」가 보인다 */
 .pwrap { display: flex; align-items: center; gap: 10px; max-width: 720px; padding: 0 0 4px 46px; }
 .pbar { flex: 1 1 auto; height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+/* 근거·형편은 **data 속성**으로 고른다 — `steps`·`stuck`·`over` 를 class 로 쓰면 스텝 목록 격자와
+   이유 칸 칩의 규칙이 막대에 걸려 길이가 숫자와 달라진다(실측으로 50% 막대가 24% 로 그려졌다). */
 .pbar i { display: block; height: 100%; background: var(--accent); }
-.pbar.over i { background: repeating-linear-gradient(135deg, var(--warn) 0 5px, var(--warn-soft) 5px 10px); }
-.pbar.unknown { background: repeating-linear-gradient(135deg, var(--line-2) 0 5px, var(--surface) 5px 10px); }
+.pbar[data-cond="over"] i { background: repeating-linear-gradient(135deg, var(--warn) 0 5px, var(--warn-soft) 5px 10px); }
+.pbar[data-cond="finalizing"] i { background: repeating-linear-gradient(135deg, var(--accent) 0 5px, var(--accent-soft) 5px 10px); }
+.pbar[data-cond="stuck"] i { background: repeating-linear-gradient(135deg, var(--bad) 0 5px, var(--bad-soft) 5px 10px); }
+.pbar[data-basis="none"] { background: repeating-linear-gradient(135deg, var(--line-2) 0 5px, var(--surface) 5px 10px); }
 .plab { font: 600 12px var(--sans); color: var(--muted); white-space: nowrap; }
 .minibar { display: flex; gap: 2px; height: 4px; max-width: 520px; margin: 0 0 8px; }
 .minibar i { display: block; height: 100%; border-radius: 2px; background: var(--ok); }
@@ -293,11 +297,11 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
               <td class="eta">09:57 <span class="in">· in 5m 10s</span><br><span class="conf high">high · measured n=7</span></td>
               <td data-c="8"><span class="sha">abc123f</span><span class="uncommitted">uncommitted</span><div class="sub">org/app</div></td>
             </tr>
-            <tr class="qbar"><td colspan="7"><div class="pwrap" data-c="12"><div class="pbar steps" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-valuetext="50% · 4/8 steps" aria-label="#412 overall progress"><i style="width:50%"></i></div><span class="plab">50% · 4/8 steps</span></div></td></tr>
+            <tr class="qbar"><td colspan="7"><div class="pwrap" data-c="12"><div class="pbar" data-basis="steps" data-cond="normal" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-valuetext="50% · 4/8 steps" aria-label="#412 progress"><i style="width:50%"></i></div><span class="plab">50% · 4/8 steps</span></div></td></tr>
             <tr><td colspan="7" class="prog">
               <div data-c="12">
                 <div class="head"><b>step 5/8</b><span>test</span><span>51s</span><span class="note">job 59s · waited 33s</span></div>
-                <div class="minibar"><i style="width:12%"></i><i style="width:3%"></i><i style="width:8%"></i><i style="width:21%"></i><i class="run" style="width:34%"></i><i class="pend" style="width:8%"></i><i class="pend" style="width:7%"></i><i class="pend" style="width:7%"></i></div>
+                <div class="minibar" aria-hidden="true"><i style="width:12%"></i><i style="width:3%"></i><i style="width:8%"></i><i style="width:21%"></i><i class="run" style="width:34%"></i><i class="pend" style="width:8%"></i><i class="pend" style="width:7%"></i><i class="pend" style="width:7%"></i></div>
                 <div class="steps">
                   <div class="step"><span class="g" aria-hidden="true">✔</span><span>analyze</span><span class="s">12s</span></div>
                   <div class="step run"><span class="g" aria-hidden="true">▶</span><span>test</span><span class="s">51s</span></div>
@@ -326,7 +330,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
               <td class="eta">09:55 <span class="in">· in 2m 40s</span><br><span class="conf med">med · measured n=3</span></td>
               <td><span class="sha">9e1d2c0</span><div class="sub">org/app · ref dev</div></td>
             </tr>
-            <tr class="qbar"><td colspan="7"><div class="pwrap"><div class="pbar time" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="70" aria-valuetext="70% · by expected time" aria-label="#409 overall progress"><i style="width:70%"></i></div><span class="plab">70% · by expected time</span></div></td></tr>
+            <tr class="qbar"><td colspan="7"><div class="pwrap"><div class="pbar" data-basis="time" data-cond="normal" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="70" aria-valuetext="70% · by measured time" aria-label="#409 progress"><i style="width:70%"></i></div><span class="plab">70% · by measured time</span></div></td></tr>
             <tr>
               <td class="num"><span class="id">#413</span> <span class="pill queued"><span aria-hidden="true">·</span> queued</span><span class="pos">1st in line</span></td>
               <td><span class="key">qa:smoke</span><span class="chip">group devices</span></td>
@@ -567,11 +571,13 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       <dl><dt>보여주는 것</dt><dd><b>행 아래 전체 진행 막대는 접혀 있어도 늘 보인다</b>(2026-09-09): 막대 + 퍼센트 + <b>그 눈금의 근거</b> — <code>50% · 4/8 steps</code>(잡이 <code>::rcm::steps::N</code> 으로 총계를 선언했을 때) 또는 <code>70% · by expected time</code>(추정 소요 대비 경과, 1초마다 자란다). 스텝 목록은 <b>기본 접힘</b>이고 첫 칸의 ▸ 로 편다(<code>aria-expanded</code>). 편 블록: 머리 <code>step 5/8 · test · 51s · job 59s</code>, 얇은 스텝별 막대, 두 열 세로 목록 <code>✔ analyze 12s</code> · <code>▶ test 51s</code> · <code>· build-web —</code>(미시작 소요는 <code>—</code> <span class="src">ref</span>). 스텝이 실패했는데 잡이 계속 돌면 <code>✘ test 51s</code>(빨강) + 머리에 <code>1 step failed</code> <span class="src">gap</span>. 머리 <code>step 5/8 · test · 51s · job 59s · waited 33s</code>, 얇은 요약 막대, 두 열 세로 목록 <code>✔ analyze 12s</code> · <code>▶ test 51s</code> · <code>· build-web —</code>(미시작 소요는 <code>—</code> <span class="src">ref</span>). 스텝이 실패했는데 잡이 계속 돌면 <code>✘ test 51s</code>(빨강) + 머리에 <code>1 step failed</code> <span class="src">gap</span>.</dd>
       <dt>데이터</dt><dd><code>progress.{phase ∈ materializing|executing, steps_total, steps_total_partial, steps_done, current_index, current_name, current_seconds, job_seconds, failed_step, steps[].ok, timing}</code>.</dd>
       <dt>상태</dt><dd><code>phase: materializing</code> 이면 스텝 블록 대신 Reason 한 줄(33). 마커 없음 → <code>no step markers · job 59s</code>. <code>steps_total_partial</code> → <code>5/8 (so far)</code>, 편 블록의 막대는 <code>role="progressbar"</code> + <code>aria-valuetext="step 5 of at least 8"</code>. queued 면 블록도 전체 막대도 없다(0/0 금지).</dd>
-      <dt>전체 막대의 눈금</dt><dd>스텝 총계를 선언했으면 <b>스텝</b>(<code>steps_done / steps_total</code>), 아니면 <b>시간</b>(<code>elapsed / expected</code> — ETA 칸이 쓰는 그 추정). <code>steps_total_partial</code> 은 눈금의 근거가 아니다 — 「5/8 (so far)」의 8 은 지금까지 본 수라 62% 라고 쓰면 자신있는 거짓말이 된다. 추정을 넘긴 잡은 <code>past the estimate</code>(빗금, 퍼센트 없음), <code>stuck</code> · 준비 중 · 근거 없음은 <code>progress —</code>(눈금 없는 빗금). 0% 로 그리지 않는다.</dd>
-      <dt>규칙</dt><dd>목록이 기본, 막대는 요약. 퍼센트 옆에 근거를 늘 글자로 적는다 — 길이와 색만으로 말하지 않는다. <code>timing: as_received</code> 는 ⓘ 툴팁.</dd></dl></div></article>
+      <dt>전체 막대의 눈금</dt><dd>축이 둘이다(2026-09-09 Codex 리뷰) — <b>근거</b>와 <b>형편</b>. 근거: <code>steps</code>(잡이 선언한 총계 → <code>50% · 4/8 steps</code>) · <code>time</code>(추정 소요 대비 경과 → <code>70% · by measured time</code> · <code>by preset estimate</code>) · <code>none</code>. 형편: <code>preparing</code> · <code>stuck</code> · <code>over</code> · <code>finalizing</code> 이 라벨에 <code> · </code> 로 붙는다(<code>50% · 4/8 steps · likely stuck</code>).</dd>
+      <dt>눈금을 안 주는 자리</dt><dd><code>steps_total_partial</code>(「5/8 (so far)」의 8 은 지금까지 본 수다 — 62% 라고 쓰면 자신있는 거짓말) · <code>estimate.source == "default"</code>(표본도 프리셋 값도 없는 설치 기본값 600초 — ETA 는 <code>low · default</code> 로 스스로를 밝히지만 막대는 길이로만 말한다) · stuck 의 시간 눈금 · 준비 중. 이때는 <code>progress —</code>(눈금 없는 빗금)이고 0% 로 그리지 않는다.</dd>
+      <dt>표기</dt><dd>근거·형편은 <code>data-basis</code>·<code>data-cond</code> 로 싣고 class 로 두지 않는다 — <code>steps</code>·<code>stuck</code>·<code>over</code> 는 이 화면에 이미 있는 이름이라 그 규칙이 막대에 걸린다(실측으로 50% 막대가 24% 로 그려졌다). 채움 폭은 표에 넣은 <b>뒤에</b> 준다: 자동 레이아웃 표의 <code>colspan</code> 칸 안에서 파싱된 퍼센트 폭은 100% 로 굳는다.</dd>
+      <dt>규칙</dt><dd>목록이 기본, 막대는 요약. 퍼센트 옆에 근거를 늘 글자로 적는다 — 길이와 색만으로 말하지 않는다. <b>도는 잡은 100% 가 되지 않는다</b>: 예측은 99% 가 상한(내림)이고, 스텝을 다 끝냈거나(<code>4/4 steps · finalizing</code>) 추정을 넘긴 잡(<code>past the estimate</code>)은 퍼센트 대신 빗금이다 — 꽉 찬 막대는 「끝났다」의 그림이다. 갱신이 멈추면 예측도 멈춘다. 한 잡의 <code>role="progressbar"</code> 는 이 막대 <b>하나</b>이고, 펼친 블록의 스텝 띠는 <code>aria-hidden</code> 장식이다. <code>timing: as_received</code> 는 ⓘ 툴팁.</dd></dl></div></article>
 
-    <article class="spec" id="c13" data-for="13"><div class="num">13</div><div><div class="area">queue · expanded · auth</div><h3>로그 tail 과 액션 <span class="tag">v1.3</span></h3>
-      <dl><dt>보여주는 것</dt><dd>로그 마지막 3~5줄, <code>Log</code>·<code>Cancel</code>, 합류 세션이 있으면 <code>1 other session is waiting on this job</code>.</dd>
+    <article class="spec" id="c13" data-for="13"><div class="num">13</div><div><div class="area">queue · row · expanded · auth</div><h3>로그 tail 과 액션 <span class="tag">v2.9</span></h3>
+      <dl><dt>보여주는 것</dt><dd>펼친 블록에 로그 마지막 3~5줄, <code>Log</code>·<code>Cancel</code>, 합류 세션이 있으면 <code>1 other session is waiting on this job</code>. <b>접힌 행에는 이유 칸에 <code>Cancel</code> 이 그대로 있다</b>(도는 잡도, 2026-09-09) — 폭주하는 잡을 세우는 일이 스텝 목록을 여는 일보다 급하고, 폰에서는 그것이 유일한 경로다. 같은 행에 취소 버튼이 둘이 되지 않게 펼치면 이유 칸의 것은 사라진다.</dd>
       <dt>데이터</dt><dd><code>log_tail</code> 은 유효 토큰 요청에만, running 잡에만(없으면 null). <code>Log</code> 는 서랍을 <b>실패 스텝 마커 위치</b>로 열고(GitHub·Blue Ocean 관례 <span class="src">ref</span>) <code>GET /jobs/{id}/log?offset=</code> 증분. <code>Cancel</code> → 대화상자 → <code>POST /jobs/{id}/cancel</code>.</dd>
       <dt>상태</dt><dd>토큰 없음 → <code>Add a token to see the log</code>, 버튼 비활성. 내 잡·합류가 아니고 admin 도 아니면 <code>not your job</code>. 요청 직후 행 dim + <code>cancel requested…</code>, 5초 안에 이벤트가 없으면 재조회 <span class="src">gap</span>.</dd>
       <dt>규칙</dt><dd>대화상자 문구: 제목 <code>Cancel #412 gate:full (alice@laptop)?</code>, running 이면 <code>SIGTERM now, SIGKILL after 10s. 1 other session is waiting on it. Cannot be undone.</code>, queued 면 <code>Removed from the queue. Run rcm run again to resubmit.</code>, 버튼 <code>Cancel job</code> / <code>Keep</code>. uploading 취소는 즉시 <code>cancelled</code>.</dd></dl></div></article>
@@ -641,7 +647,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
     <li><b>표기</b> <span class="src">gap·ref</span>: 시각은 <code>HH:MM</code>(오늘이 아니면 <code>Sep 3 · 23:40</code>). 소요·잔여·대기는 한 함수로 <code>12s</code> · <code>5m 10s</code> · <code>1h 02m</code>, 모름은 <code>—</code>, 앞에 맥락 단어(<code>in</code> · <code>waiting</code> · <code>waited</code> · <code>over by</code> · <code>stale</code> · <code>frees in</code>). 나이·카운트다운은 거칠게(<code>4s ago</code>, 60초 넘으면 <code>3m ago</code>, <code>in 8s</code>). 퍼센트 정수, 메모리 GB 소수 한 자리·MB 정수·단위 앞 공백(<code>500 MB</code>), 표본 <code>n=7</code>, id <code>#412</code>, 순번 <code>2nd in line</code>. 라벨은 40자 절단 + 툴팁.</li>
     <li><b>갱신</b>: 처음 <code>GET /api/status</code>, 이후 SSE 부분 갱신. SSE 재연결 2s→30s 백오프, 그 사이 폴링 10s 고정, 30s 무응답이면 18. 경과·대기·나이는 <code>generated_at</code> 으로 보정한 클라이언트 시계로 1초마다. 탭 숨김 60s → 정지, 복귀 → 재조회. 2 번 토글로 수동 정지.</li>
     <li><b>정렬·많은 잡</b>: running → cancelling → 대기(순번순). 필터 없음. 대기 20행 넘으면 접고 내 잡·안 움직이는 잡은 항상 표시. 최근 완료는 시간 역순 5건 + 더 보기.</li>
-    <li><b>펼침·딥링크</b> <span class="src">gap</span>: 행은 <b>전부 접힌 채로</b> 뜨고(2026-09-09 결정 13 개정), <b>펼침</b>이 잡 id 별 localStorage(<code>rcm.expanded</code>, 큐에 없는 id 는 매 갱신 정리). 접힌 도는 행도 전체 진행 막대와 이유 칸의 <code>step 2/4 build 2s</code> 는 그대로 보인다 — 접기는 자리를 줄이는 것이지 감추는 것이 아니다. <code>#/jobs/&lt;id&gt;</code> = 그 행 스크롤·강조·펼침(+토큰 있으면 서랍); 큐에 없으면 최근으로, 거기도 없으면 토스트 <code>#409 finished 09:55 · succeeded</code>. 서랍 열림도 해시(뒤로가기 = 닫기).</li>
+    <li><b>펼침·딥링크</b> <span class="src">gap</span>: 행은 <b>전부 접힌 채로</b> 뜨고(2026-09-09 결정 13 개정), <b>펼침</b>이 잡 id 별 localStorage(<code>rcm.expanded</code>, 큐에 없는 id 는 매 갱신 정리). 접힌 도는 행도 전체 진행 막대와 이유 칸의 <code>step 2/4 build 2s</code> 는 그대로 보인다 — 접기는 자리를 줄이는 것이지 감추는 것이 아니다. 펼침 버튼은 24px(폰 32px) 표적에 <code>#412 상세 펴기</code> 라는 접근 이름을 갖는다. <code>#/jobs/&lt;id&gt;</code> = 그 행 스크롤·강조·펼침(+토큰 있으면 서랍); 큐에 없으면 최근으로, 거기도 없으면 토스트 <code>#409 finished 09:55 · succeeded</code>. 서랍 열림도 해시(뒤로가기 = 닫기).</li>
     <li><b>권한</b>: 보기는 토큰 없이. 내 잡 강조·로그 tail·로그·취소만 토큰. 여러 탭은 <code>storage</code> 이벤트로 토큰 동기화.</li>
     <li><b>실패 표시</b>: 섹션마다 독립 — 큐(22)·최근(32)·호스트·연결(18)·워커(27)가 따로 실패한다. 실패와 빈 값은 항상 다른 모양. 긍정 문구(<code>Nothing is stuck</code>·<code>fine</code>)는 조회 성공 + 값 완전일 때만. 큐에서 사라지는 잡은 없다 — 전부 종료 상태로 최근에 남는다.</li>
     <li><b>상태 부호화</b>: 색 + 글리프 + 테두리. 빗금 = 낡음/멈춤, 점선 테두리 = 미확정(uploading·cancelling·timed out·low 신뢰도·blocked), 왼쪽 굵은 황토 바 = 초과 실행, 왼쪽 가는 파란 선 = 내 잡(둘 다면 겹쳐 그린다), 회색 = 대기·취소, 빨강 = 실패·타임아웃·stuck·다운, 보라 = lost. 단색 인쇄에서 읽히는지가 수용 기준.</li>

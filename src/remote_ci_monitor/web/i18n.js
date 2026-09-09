@@ -119,6 +119,8 @@
     "row.uncommitted": "uncommitted",
     "row.tree": function (a) { return "tree " + a.hash; },
     "row.collapse": "collapse",
+    "row.collapse_job": function (a) { return "collapse details for #" + a.id; },
+    "row.expand_job": function (a) { return "expand details for #" + a.id; },
     "row.copy": "copy",
     "row.expand": "expand",
     "host.unavailable": function (a) { return "Host unavailable — " + a.error; },
@@ -297,17 +299,21 @@
     "progress.steps_failed": function (a) {
       return a.n + " step" + (a.n > 1 ? "s" : "") + " failed";
     },
-    "progress.aria": function (a) {
-      return "step " + a.cur + " of " + (a.soFar ? "at least " : "") + a.total;
-    },
     "progress.timing_note": "step times are server receive times (as_received)",
     "progress.now": function (a) { return "step " + a.cur + "/" + a.total + " " + a.step; },
-    // 전체 진행 막대 — 퍼센트 옆에 **무엇으로 셌는지**를 늘 붙인다(스텝인가 시간인가)
+    // 전체 진행 막대 — 퍼센트 옆에 **무엇으로 셌는지**를 늘 붙인다. 시간 눈금은 그 추정이
+    // 어디서 왔는지까지 밝힌다(측정인가 프리셋인가) — 막대는 길이로만 말하기 때문이다.
     "pbar.steps": function (a) { return a.percent + "% · " + a.done + "/" + a.total + " steps"; },
+    "pbar.steps_all": function (a) { return a.done + "/" + a.total + " steps"; },
     "pbar.time": function (a) { return a.percent + "% · by expected time"; },
+    "pbar.time_measured": function (a) { return a.percent + "% · by measured time"; },
+    "pbar.time_preset": function (a) { return a.percent + "% · by preset estimate"; },
     "pbar.over": "past the estimate",
-    "pbar.unknown": "progress —",
-    "pbar.aria": function (a) { return "#" + a.id + " overall progress"; },
+    "pbar.stuck": "likely stuck",
+    "pbar.preparing": "preparing workspace",
+    "pbar.finalizing": "finalizing",
+    "pbar.none": "progress —",
+    "pbar.aria": function (a) { return "#" + a.id + " progress"; },
 
     // ── 최근 결과 ───────────────────────────────────────────────────────────
     "recent.succeeded": "succeeded",
@@ -501,6 +507,8 @@
     "row.uncommitted": "미커밋",
     "row.tree": function (a) { return "tree " + a.hash; },
     "row.collapse": "접기",
+    "row.collapse_job": function (a) { return "#" + a.id + " 상세 접기"; },
+    "row.expand_job": function (a) { return "#" + a.id + " 상세 펴기"; },
     "row.copy": "복사",
     "row.expand": "펼치기",
     "host.unavailable": function (a) { return "호스트를 읽지 못했습니다 — " + a.error; },
@@ -668,16 +676,19 @@
     },
     "progress.job": function (a) { return "잡 " + a.dur; },
     "progress.steps_failed": function (a) { return "스텝 " + a.n + "개 실패"; },
-    "progress.aria": function (a) {
-      return "스텝 " + a.cur + " / " + (a.soFar ? "최소 " : "") + a.total;
-    },
     "progress.timing_note": "스텝 시각은 서버가 받은 시각입니다 (as_received)",
     "progress.now": function (a) { return "스텝 " + a.cur + "/" + a.total + " " + a.step; },
     "pbar.steps": function (a) { return a.percent + "% · 스텝 " + a.done + "/" + a.total; },
+    "pbar.steps_all": function (a) { return "스텝 " + a.done + "/" + a.total; },
     "pbar.time": function (a) { return a.percent + "% · 예상 시간 기준"; },
+    "pbar.time_measured": function (a) { return a.percent + "% · 측정 소요 기준"; },
+    "pbar.time_preset": function (a) { return a.percent + "% · 프리셋 예상 기준"; },
     "pbar.over": "예상 시간 초과",
-    "pbar.unknown": "진행률 —",
-    "pbar.aria": function (a) { return "#" + a.id + " 전체 진행률"; },
+    "pbar.stuck": "멈춘 듯",
+    "pbar.preparing": "준비 중",
+    "pbar.finalizing": "마무리 중",
+    "pbar.none": "진행률 —",
+    "pbar.aria": function (a) { return "#" + a.id + " 진행"; },
 
     "recent.succeeded": "성공",
     "recent.failed": "실패",

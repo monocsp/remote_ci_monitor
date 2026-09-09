@@ -272,7 +272,12 @@
     var n = isNum(est.sample_count) ? est.sample_count : null;
     var c = est.confidence;
     if (!c) {
-      if (est.source === "measured") c = (n != null && n >= 5) ? "high" : "med";
+      // 서버가 안 보냈을 때의 대체 계산 — 서버(core/queue.confidence)와 규칙이 같아야 한다.
+      // 같이 도는 중이면 한 칸 내린다: 중앙값은 혼자 잰 것이다 (M5f).
+      if (est.source === "measured") {
+        var high = n != null && n >= 5;
+        c = est.shared ? (high ? "med" : "low") : (high ? "high" : "med");
+      }
       else if (est.source) c = "low";
       else return { cls: "low", text: T(lang, "conf.low_dash", { dash: DASH }) };
     }
@@ -659,64 +664,94 @@
     return "·";
   }
 
-  // ── 전체 진행 막대 (2026-09-09 오너 요청) ──
+  // ── 전체 진행 막대 (2026-09-09 오너 요청 · 같은 날 Codex 리뷰 반영) ──
   function pctOf(part, whole) { return Math.max(0, Math.min(100, Math.round(part / whole * 100))); }
+  // 예측은 99% 를 넘지 않는다 — 100% 는 「끝났다」의 자리다. 반올림도 안 쓴다(59.7/60 이 100% 가 된다).
+  function timePct(elapsed, expected) { return Math.max(0, Math.min(99, Math.floor(elapsed / expected * 100))); }
   /**
-   * 도는 잡이 어디까지 왔나 — 눈금 하나와 **그 눈금의 근거**. 근거를 함께 주는 이유는, 막대만
-   * 그리면 무엇을 재고 있는지 알 수 없고 이 도구에서 모르는 값은 0 이 아니라 —(fail-open 금지)다.
+   * 도는 잡이 어디까지 왔나. **축이 둘이다**(Codex 리뷰 3 — 하나로 뭉치면 「stuck 인데 왜 파란
+   * 막대가 절반 차 있나」 같은 규칙을 사람이 외워야 한다):
    *
-   * | kind | 언제 | 눈금 |
-   * |---|---|---|
-   * | `steps` | 잡이 총 스텝 수를 선언했다(`::rcm::steps::N`) | 끝난 스텝 / 총 스텝 |
-   * | `time` | 총계가 없거나 「지금까지」다 | 경과 / 추정 소요(ETA 칸이 쓰는 그 추정) |
-   * | `over` | 경과가 추정을 넘겼다 | 없다 — 남은 양을 모른다(ETA 가 — 인 것과 같은 이유) |
-   * | `unknown` | stuck · 준비 중 · 근거 없음 | 없다 |
+   * - `basis` — 눈금의 근거. `steps`(잡이 `::rcm::steps::N` 으로 선언한 총계) · `time`(추정 소요
+   *   대비 경과 — ETA 칸이 쓰는 그 추정) · `none`(눈금 없음).
+   * - `condition` — 잡의 형편. `normal` · `preparing`(워크스페이스 준비) · `stuck` · `over`(추정
+   *   초과) · `finalizing`(선언한 스텝을 다 끝냈는데 아직 안 끝남).
    *
-   * `steps_total_partial` 은 근거가 아니다: 「5/8 (so far)」의 8 은 지금까지 본 수라 62% 라고
-   * 쓰면 자신있는 거짓말이 된다. stuck 도 마찬가지다 — 도는 중인지부터 모르는 잡에 시간 눈금을
-   * 주지 않는다. 스텝을 선언한 잡은 예외다: 끝난 스텝 수는 stuck 이어도 사실이다.
+   * 눈금을 주지 않는 자리(fail-open 금지):
+   * - 「지금까지 본」 총계(`steps_total_partial`)는 분모가 아니다 — 그 8 로 62% 를 쓰면 거짓말이다.
+   * - `estimate.source === "default"` 는 표본도 프리셋 값도 없는 설치 기본값(600초)이다. ETA 는
+   *   `low · default` 로 스스로를 밝히지만 막대는 길이로만 말하므로, 아예 눈금을 안 준다.
+   * - stuck 은 시간 눈금을 잃는다(도는 중인지부터 모른다). 끝난 스텝 수는 stuck 이어도 사실이라
+   *   스텝 눈금은 지키되 형편을 라벨과 빗금으로 함께 말한다.
+   * - 스텝을 다 끝냈거나 추정을 넘겼으면 퍼센트가 없다 — 파랗게 꽉 찬 막대는 「끝났다」로 읽힌다.
+   *
    * 도는 잡이 아니면 null — 막대 자체를 그리지 않는다.
    */
   function overallProgress(row) {
     if (!row || (row.state !== "running" && row.state !== "cancelling")) return null;
-    var out = { kind: "unknown", pct: null, done: null, total: null, expected: null, startedAt: null };
+    var out = { basis: "none", condition: "normal", pct: null, done: null, total: null,
+      expected: null, startedAt: null, source: null };
     var prog = row.progress || null;
     var est = row.estimate || {};
-    if (prog && prog.phase === "materializing") return out;
+    var stuck = !!est.stuck;
+    if (prog && prog.phase === "materializing") { out.condition = "preparing"; return out; }
     var total = prog && isNum(prog.steps_total) ? prog.steps_total : null;
     var done = prog && isNum(prog.steps_done) ? prog.steps_done : null;
     if (isNum(total) && total > 0 && isNum(done) && !(prog && prog.steps_total_partial)) {
-      out.kind = "steps"; out.done = done; out.total = total; out.pct = pctOf(done, total);
+      out.basis = "steps"; out.total = total; out.done = Math.min(done, total);
+      if (done >= total) { out.condition = stuck ? "stuck" : "finalizing"; return out; }
+      out.pct = pctOf(done, total);
+      if (stuck) out.condition = "stuck";
       return out;
     }
-    var expected = isNum(est.expected_seconds) && est.expected_seconds > 0 ? est.expected_seconds : null;
+    var expected = isNum(est.expected_seconds) && est.expected_seconds > 0 && est.source !== "default"
+      ? est.expected_seconds : null;
     var elapsed = isNum(est.elapsed_seconds) ? est.elapsed_seconds : null;
-    if (expected == null || elapsed == null) return out;
-    out.expected = expected;
-    if (est.stuck) return out;
-    if (est.overdue || elapsed > expected) { out.kind = "over"; return out; }
-    out.kind = "time"; out.pct = pctOf(elapsed, expected); out.startedAt = row.started_at || null;
+    if (expected == null || elapsed == null) {
+      if (stuck) out.condition = "stuck";
+      return out;
+    }
+    out.expected = expected; out.source = est.source || null;
+    if (stuck) { out.condition = "stuck"; return out; }
+    if (est.overdue || elapsed >= expected) { out.condition = "over"; return out; }
+    out.basis = "time"; out.pct = timePct(elapsed, expected); out.startedAt = row.started_at || null;
     return out;
+  }
+  /** 시간 눈금의 라벨 키 — 추정이 어디서 왔는지 문구가 밝힌다(Codex 리뷰 1). */
+  function timeKey(source) {
+    return source === "measured" ? "pbar.time_measured" : source === "preset" ? "pbar.time_preset" : "pbar.time";
   }
   /**
    * 행 아래에 붙는 전체 진행 막대. 태그를 벗기면 눈금과 근거가 글자로 남는다 — 길이와 색만으로
-   * 말하지 않는다(§4.2). `live` 는 「시계 차이를 알고 이 잡은 아직 돈다」는 뜻이고, **시간 눈금일
-   * 때만** 1초 틱의 기준점을 단다(스텝 눈금은 마커가 올 때 움직이지 저절로 자라지 않는다).
+   * 말하지 않는다(§4.2). `live` 는 「시계 차이를 알고 이 잡은 아직 돈다」는 뜻이고, **평상시 시간
+   * 눈금일 때만** 1초 틱의 기준점을 단다(스텝 눈금은 마커가 올 때 움직이지 저절로 자라지 않는다).
    */
   function progressBarHtml(row, lang, live) {
     var p = overallProgress(row);
     if (!p) return "";
-    var label = p.kind === "steps" ? T(lang, "pbar.steps", { percent: p.pct, done: p.done, total: p.total })
-      : p.kind === "time" ? T(lang, "pbar.time", { percent: p.pct })
-        : p.kind === "over" ? T(lang, "pbar.over") : T(lang, "pbar.unknown");
-    var width = isNum(p.pct) ? p.pct : (p.kind === "over" ? 100 : 0);
-    var tick = live && p.kind === "time" && p.startedAt
-      ? ' data-tick="progress" data-from="' + esc(p.startedAt) + '" data-expected="' + p.expected + '"'
+    var head = null;
+    if (p.basis === "steps") {
+      head = isNum(p.pct)
+        ? T(lang, "pbar.steps", { percent: p.pct, done: p.done, total: p.total })
+        : T(lang, "pbar.steps_all", { done: p.done, total: p.total });
+    } else if (p.basis === "time") {
+      head = T(lang, timeKey(p.source), { percent: p.pct });
+    }
+    var cond = p.condition === "normal" ? null : T(lang, "pbar." + p.condition);
+    var label = [head, cond].filter(Boolean).join(" · ") || T(lang, "pbar.none");
+    var full = p.condition === "over" || p.condition === "finalizing";
+    var width = isNum(p.pct) ? p.pct : (full ? 100 : 0);
+    // 근거·형편은 **data 속성**으로 싣는다. class 로 두면 `steps`·`stuck`·`over` 가 화면의 다른
+    // 규칙(스텝 목록 격자 · 이유 칸 칩)에 걸려 막대가 엉뚱한 폭으로 그려진다 — 실제로 그랬다.
+    var tick = live && p.basis === "time" && p.condition === "normal" && p.startedAt
+      ? ' data-tick="progress" data-from="' + esc(p.startedAt) + '" data-expected="' + p.expected
+        + '" data-source="' + esc(p.source || "") + '"'
       : "";
-    return '<div class="pwrap"' + tick + '><div class="pbar ' + p.kind + '" role="progressbar"'
+    return '<div class="pwrap"' + tick + '><div class="pbar" data-basis="' + p.basis + '" data-cond="'
+      + p.condition + '" role="progressbar"'
       + ' aria-valuemin="0" aria-valuemax="100"' + (isNum(p.pct) ? ' aria-valuenow="' + p.pct + '"' : "")
       + ' aria-valuetext="' + esc(label) + '" aria-label="' + esc(T(lang, "pbar.aria", { id: row.id })) + '">'
-      + '<i style="width:' + width + '%"></i></div><span class="plab">' + esc(label) + "</span></div>";
+      + '<i data-fill="' + width + '"></i></div><span class="plab">' + esc(label) + "</span></div>";
   }
   // 산출물 한 줄(M5e §13). 모르는 수는 —, `0` 은 「모았는데 없었다」일 때만이다. 파일 이름은
   // 공개 문서에 없으므로 여기서도 없다 — 받아 가는 명령만 준다.
@@ -868,7 +903,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
@@ -1254,6 +1289,21 @@
     $("[data-pressure]").innerHTML = h;
   }
 
+  /**
+   * 막대 채움의 폭은 **DOM 에 넣은 뒤에** 스타일로 준다. 자동 레이아웃 표의 `colspan` 칸 안에서는
+   * 파싱 시점의 퍼센트 폭이 「폭을 모름 → auto(=100%)」로 굳어 다시 계산되지 않는다(Chrome 실측:
+   * 616px 막대 안의 `width:25%` 가 616px 로 그려졌다 — 25% 라고 적힌 막대가 가득 차 보인다).
+   * 넣은 뒤에 주면 그때는 칸 폭이 정해져 있어 제대로 풀린다. HTML 에는 값만 `data-fill` 로 싣는다.
+   */
+  function applyBarFills(root) {
+    $$("[data-fill]", root).forEach(function (el) { el.style.width = el.getAttribute("data-fill") + "%"; });
+  }
+  /** 큐 본문을 갈아 끼운다 — 채움 폭 적용을 한자리에 묶어 둔다(빠뜨리면 막대가 거짓말을 한다). */
+  function setQueueHtml(body, html) {
+    body.innerHTML = html;
+    applyBarFills(body);
+  }
+
   // ── 렌더: 큐 ──
   function expandedGc() {
     var q = queueOf(state.status) || [];
@@ -1285,7 +1335,7 @@
     var server = st.server || {};
     var extra = !p.queue.length ? extraPoolsQueueHtml(st) : "";
     if (extra) {
-      body.innerHTML = '<div class="empty">' + esc(tr("queue.empty_other_pools")) + "</div>" + extra;
+      setQueueHtml(body, '<div class="empty">' + esc(tr("queue.empty_other_pools")) + "</div>" + extra);
       return;
     }
     if (!p.queue.length) {
@@ -1324,7 +1374,7 @@
     html += "</tbody></table></div>";
     if (hiddenCount) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.more", { n: hiddenCount })) + "</button>";
     html += extraPoolsQueueHtml(st);
-    body.innerHTML = html;
+    setQueueHtml(body, html);
   }
   // 기본 풀 밖의 풀(M5b): 풀 헤더 + 같은 표. 워커가 없으면 그 대기 행은 서버가 worker_down 으로 준다
   function extraPoolsQueueHtml(st) {
@@ -1369,7 +1419,7 @@
       pill = '<span class="pill uploading"><span class="g" aria-hidden="true">↑</span> ' + esc(stateWord("uploading", L())) + ' <span class="ub"><i style="width:' + pct + '%"></i></span></span>';
     } else if (row.state === "cancelling") pill = '<span class="pill cancelling"><span class="g" aria-hidden="true">■</span> ' + esc(stateWord("cancelling", L())) + "</span>";
     else pill = '<span class="pill ' + esc(row.state) + '"><span class="g" aria-hidden="true">' + stateGlyph(row.state) + "</span> " + esc(stateWord(row.state, L())) + "</span>";
-    var expBtn = busy ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-controls="exp-' + row.id + '" title="' + esc(tr(expanded ? "row.collapse" : "row.expand")) + '">' + (expanded ? "▾" : "▸") + "</button>" : "";
+    var expBtn = busy ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-controls="exp-' + row.id + '" aria-label="' + esc(tr(expanded ? "row.collapse_job" : "row.expand_job", { id: row.id })) + '" title="' + esc(tr(expanded ? "row.collapse" : "row.expand")) + '">' + (expanded ? "▾" : "▸") + "</button>" : "";
     var chips = "";
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
@@ -1391,9 +1441,10 @@
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">' + esc(tr("row.stalled_note")) + "</div>";
     if (row._cancelRequested) reasonCell += '<div class="sub">' + esc(tr("row.cancel_requested")) + "</div>";
-    // 대기 잡(펼침 없음)도 내 잡이면 취소할 수 있어야 한다 — 폰에서 유일한 취소 경로다(사용자 검사 U3.6)
+    // 접힌 행이면 내 잡을 여기서 바로 세울 수 있어야 한다 — 폰에서 유일한 취소 경로이고, 도는
+    // 잡을 멈추는 일이 스텝 목록을 구경하는 일보다 급하다(사용자 검사 U3.6 · Codex 리뷰 4).
     var canActRow = !!state.token && !state.tokenBad && (mine || state.me === null);
-    if (!busy && canActRow && !row._cancelRequested) reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button></div>";
+    if (!expanded && canActRow && !row._cancelRequested && row.state !== "cancelling") reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button></div>";
     var el = elapsedText(row, now(), L());
     var elapsedCell = busy && isNum(est.elapsed_seconds)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
@@ -1463,11 +1514,12 @@
     if (steps.length) {
       var segs = "";
       var pending = Math.max(0, total - steps.length);
-      var n = steps.length + pending;
-      steps.forEach(function (s) { segs += '<i class="' + (s.state === "running" ? "run" : s.ok === false ? "fail" : "") + '" style="width:' + (100 / n) + '%"></i>'; });
-      for (var i = 0; i < pending; i++) segs += '<i class="pend" style="width:' + (100 / n) + '%"></i>';
-      var vt = tr("progress.aria", { cur: isNum(prog.current_index) ? prog.current_index : prog.steps_done, total: total, soFar: !!prog.steps_total_partial });
-      h += '<div class="minibar" role="progressbar" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + prog.steps_done + '" aria-valuetext="' + esc(vt) + '">' + segs + "</div>";
+      // 칸 폭은 CSS 의 flex 가 똑같이 나눈다 — 퍼센트는 표 안에서 틀어진다(style.css `.pbar i` 주석)
+      steps.forEach(function (s) { segs += '<i class="' + (s.state === "running" ? "run" : s.ok === false ? "fail" : "") + '"></i>'; });
+      for (var i = 0; i < pending; i++) segs += '<i class="pend"></i>';
+      // 스텝 띠는 아래 목록을 눈으로 요약할 뿐이다. 한 잡에 progressbar 가 둘이면 보조기기가
+      // 같은 잡의 서로 다른 두 값을 읽는다 — 의미는 행 아래 전체 막대 하나가 진다.
+      h += '<div class="minibar" aria-hidden="true">' + segs + "</div>";
       h += '<div class="steps">';
       var live = busyRow && canTick();
       steps.forEach(function (s) {
@@ -1691,18 +1743,22 @@
 
   /**
    * 시간 눈금 막대를 1초마다 민다 — 서버가 준 숫자만 그리면 폴링 간격마다 툭툭 튄다.
-   * 추정을 넘기는 순간 그 자리에서 「예상 시간 초과」로 바꾼다(다음 조회가 서버 값으로 덮는다):
-   * 100% 를 채워 두면 「끝났다」로 읽힌다.
+   * 경계·상한은 `overallProgress` 와 **같은 규칙**이다(99% 상한, `>=` 면 초과). 추정을 넘기는
+   * 순간 그 자리에서 「예상 시간 초과」로 바꾼다(다음 조회가 서버 값으로 덮는다).
+   * 갱신이 멈춘 동안(사람이 정지 · 연결 끊김)에는 예측도 멈춘다 — 안 받고 있는 데이터로 새 숫자를
+   * 만들어 내면 「마지막으로 안 상태」가 아니라 지어낸 상태가 된다(Codex 리뷰 9).
    */
   function tickProgress(wrap, seconds) {
+    if (state.conn.mode === "paused" || state.conn.mode === "lost") return;
     var expected = parseFloat(wrap.getAttribute("data-expected"));
     var bar = wrap.querySelector(".pbar"), fill = bar && bar.querySelector("i"), lab = wrap.querySelector(".plab");
     if (!isNum(expected) || expected <= 0 || !bar || !fill || !lab) return;
     var over = seconds >= expected;
-    var pct = over ? 100 : Math.max(0, Math.min(100, Math.round(seconds / expected * 100)));
-    var text = over ? tr("pbar.over") : tr("pbar.time", { percent: pct });
-    fill.style.width = pct + "%";
-    bar.className = "pbar " + (over ? "over" : "time");
+    var pct = over ? null : timePct(seconds, expected);
+    var text = over ? tr("pbar.over") : tr(timeKey(wrap.getAttribute("data-source")), { percent: pct });
+    fill.style.width = (over ? 100 : pct) + "%";
+    bar.setAttribute("data-basis", over ? "none" : "time");
+    bar.setAttribute("data-cond", over ? "over" : "normal");
     bar.setAttribute("aria-valuetext", text);
     if (over) bar.removeAttribute("aria-valuenow"); else bar.setAttribute("aria-valuenow", String(pct));
     lab.textContent = text;

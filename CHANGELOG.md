@@ -9,12 +9,17 @@ of a key bumps that number and is listed here.
 
 ### Added
 - **A progress bar on every running job.** The web page draws one bar under each running row and
-  says what it measures: `50% · 4/8 steps` when the job declares its step count with
-  `::rcm::steps::N`, `70% · by expected time` when it does not. A job past its estimate reads
-  `past the estimate` and a job nothing can be said about — stuck, preparing its workspace, or
-  with no estimate at all — reads `progress —`. The time-based bar grows every second instead of
-  jumping between refreshes, and no bar ever shows a percentage the page cannot stand behind.
-  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+  always says what it measured: `50% · 4/8 steps` when the job declares its step count with
+  `::rcm::steps::N`, `70% · by measured time` or `by preset estimate` when it does not — so the
+  number carries the worth of the estimate behind it. A job past its estimate reads
+  `past the estimate`, one that finished every declared step without exiting reads `finalizing`,
+  and a job nothing can be said about — likely stuck, preparing its workspace, or with no samples
+  at all (the 600-second installation default is not a measurement) — reads `progress —`. **A
+  running job never fills the bar**: a full bar means finished, so a forecast stops at 99% and the
+  two "we are past what we know" states are hatched instead. The time bar grows every second
+  instead of jumping between refreshes, and stops growing while updates are paused or lost.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
 - **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
   stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
   a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
@@ -37,16 +42,24 @@ of a key bumps that number and is listed here.
   already running has no position and that piece is left out, never printed as `0th`; a session
   that joined an existing job sees that job's own position; and a queue that cannot start at all —
   paused, or a pool with no live worker — reports no finish time, because there is none to give.
-  The lookup is for display only: if it
-  fails or the server is slow, the line and the JSON come back without those keys and the exit code
-  is still 0 — `--no-wait` exits 0 because the job was submitted, not because it was looked up.
+  The lookup is for display only: if it fails or the server is slow, the line and the JSON come
+  back without those keys and the exit code is still 0 — `--no-wait` exits 0 because the job was
+  submitted, not because it was looked up.
   ([#72](https://github.com/monocsp/remote_ci_monitor/pull/72))
+- **An ETA says it is less sure while a job shares the machine.** Medians are measured from runs
+  that mostly had the machine to themselves, so a job running beside another finishes later than
+  the median suggests. The confidence badge now drops one step for as long as that is true — the
+  estimate itself is not inflated by a guessed factor. `estimate.shared` carries the fact so the
+  page and `rcm top` agree. Jobs also record how many were running when they started, so a future
+  release can measure the real effect instead of guessing at it. Database schema 10.
+  ([#74](https://github.com/monocsp/remote_ci_monitor/pull/74))
 - **Queue rows now arrive folded.** Running rows used to open themselves, so two or three running
   jobs filled the screen with step lists and log tails. The row keeps what answers "how is it
-  going" — the progress bar and `step 2/4 build 2s` in the reason column — and **▸** opens the step
-  list, the log tail and the Log/Cancel buttons. The page remembers which rows *you* opened
+  going" — the progress bar, `step 2/4 build 2s` in the reason column, and **Cancel** for your own
+  job — and **▸** opens the step list and the log tail. The page remembers which rows *you* opened
   (`rcm.expanded` in that browser), not which ones you closed.
-  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
 - **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
   and it was the one place the page dropped it.
   ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
@@ -64,6 +77,19 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
+  50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
+  time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request
+  as full job objects (two extra queries and two JSON parses per row, for six fields it reads),
+  and picking the eight most recent jobs sorted every finished job in the database. Samples are
+  now read as plain rows and only re-read when a job actually finishes; recent jobs use an index.
+  Database schema 9. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **Remote worker lanes are read in one query instead of one per worker**, which also cuts the
+  work behind every server event — 552 statements down to 3 on a fleet of fifty workers.
+  ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **Retired workers are forgotten after a week.** Nothing ever deleted them, so every worker that
+  ever registered kept adding `down` lanes to every status document. A worker with a job still
+  running is never forgotten. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
 - **A worker's log flush no longer stalls other lanes.** Every step marker in a batch opened its
   own SQLite transaction, so one 256 KB flush pushed another lane's claim from 0.03 ms to 275 ms,
   and a large body could exhaust the busy timeout and hand the worker an HTTP 500. Markers are now

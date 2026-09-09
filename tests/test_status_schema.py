@@ -57,6 +57,7 @@ ESTIMATE_KEYS = {
     "overdue",
     "stuck",
     "finish_at",
+    "shared",  # M5f — 같은 풀의 다른 잡과 머신을 나눠 쓰는 중인가
 }
 RECENT_KEYS = {
     "pool",

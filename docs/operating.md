@@ -172,9 +172,16 @@ bundles rather than evicting bundles somebody is still waiting for; the affected
 ## Why the numbers can be wrong
 
 - ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs.
+- A job sharing the machine with another job takes longer than a median measured from runs that
+  had it alone, so the confidence badge drops one step while that is true. The estimate itself is
+  not padded — a guessed slowdown factor would be a number nobody measured.
 - Step counts marked "so far" come from scripts that did not declare `::rcm::steps::N`.
 - Step timestamps are **receive** times (`timing: "as_received"`), so buffered output shifts them.
 - A `lost` job died with the server; it is left as `lost`, never silently re-queued or deleted.
+- Medians are recomputed when a job finishes, not on every request. A status document served
+  seconds after a job ends already includes it; nothing else moves a 45-day median.
+- A worker the server has not heard from in a week is forgotten, and its lanes stop appearing as
+  `down`. A worker with a job still running is never forgotten, however long it has been silent.
 - When the queue is paused or every worker lane is down, ETAs are `null` on purpose.
 - Host samples are polled (default every 5 s). `stale` means the last sample is older than 3 intervals; `hosts_error` means the sampler itself failed. Memory "used" on macOS is `active + wired + compressed` (what Activity Monitor calls Memory Used), which is smaller than `top`'s PhysMem used. Memory is shown in GiB under the `GB` label, like Activity Monitor and `free -h`, so a 24 GB machine reads `24.0 GB`. GPU numbers come from `ioreg` (Apple Silicon) or `nvidia-smi`; on other machines the GPU shows `unavailable` with the reason. Disk is the filesystem holding the **data directory** — where snapshots, mirrors and workspaces land — not the root partition, and a remote worker reports its own. It is counted in decimal GB, like Finder. The card warns at 85% used **or** under 10 GiB free, whichever comes first: a large disk at 90% still has room, a small one at 80% cannot unpack a snapshot.
 
