@@ -31,7 +31,7 @@ of a key bumps that number and is listed here.
   that joined an existing job sees that job's own position. The lookup is for display only: if it
   fails or the server is slow, the line and the JSON come back without those keys and the exit code
   is still 0 — `--no-wait` exits 0 because the job was submitted, not because it was looked up.
-  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+  ([#72](https://github.com/monocsp/remote_ci_monitor/pull/72))
 - **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
   `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
   `held`. `schema_version` is unchanged.
