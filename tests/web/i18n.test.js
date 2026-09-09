@@ -67,7 +67,7 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     mem: "56%", gpu: "4%", load: "3.5 / 10", shown: 5, json: "{}", text: "rcm run demo",
     key: "gate", wait: "5m", pct: "12%", user: 7, sys: 7, used: "13 GB", note: "no GPU",
     countdown: "in 8s", cores: 10, delta: "+2s", head: "pool linux",
-    disk: "26%", free: "340 GB"
+    disk: "26%", free: "340 GB", percent: 62, done: 4
   };
   LANGS.forEach((lang) => {
     Object.keys(I18N.MESSAGES[lang]).forEach((k) => {

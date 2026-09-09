@@ -5,7 +5,7 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 6종:
+변이 13종:
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -15,6 +15,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`web/app.js`, M2, node --test)
   ⑪ admission-fail-open — 부하 게이트가 「표본 없음」에 열림 (`core/admission.py`, M5f)
   ⑫ admission-samples-any — 창의 **전부**가 아니라 **하나라도** 기준 아래면 열림 (같은 파일)
+  ⑬ web-progress-partial-total — 전체 진행 막대가 「지금까지 본」 스텝 총계를 확정 총계처럼 씀
+     (`web/app.js`, node --test)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -79,6 +81,16 @@ MUTANTS = (
         old="user_s, sys_s, idle_s = matches[-1]",
         new="user_s, sys_s, idle_s = matches[0]",
         tests=("tests/test_hostparse.py",),
+    ),
+    Mutant(
+        name="web-progress-partial-total",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "if (isNum(total) && total > 0 && isNum(done) && !(prog && prog.steps_total_partial)) {"
+        ),
+        new="if (isNum(total) && total > 0 && isNum(done)) {",
+        tests=("tests/web/progress_overall.test.js",),
+        runner="node",
     ),
     Mutant(
         name="web-not-moving-unknown",

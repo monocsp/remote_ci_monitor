@@ -302,6 +302,12 @@
     },
     "progress.timing_note": "step times are server receive times (as_received)",
     "progress.now": function (a) { return "step " + a.cur + "/" + a.total + " " + a.step; },
+    // 전체 진행 막대 — 퍼센트 옆에 **무엇으로 셌는지**를 늘 붙인다(스텝인가 시간인가)
+    "pbar.steps": function (a) { return a.percent + "% · " + a.done + "/" + a.total + " steps"; },
+    "pbar.time": function (a) { return a.percent + "% · by expected time"; },
+    "pbar.over": "past the estimate",
+    "pbar.unknown": "progress —",
+    "pbar.aria": function (a) { return "#" + a.id + " overall progress"; },
 
     // ── 최근 결과 ───────────────────────────────────────────────────────────
     "recent.succeeded": "succeeded",
@@ -667,6 +673,11 @@
     },
     "progress.timing_note": "스텝 시각은 서버가 받은 시각입니다 (as_received)",
     "progress.now": function (a) { return "스텝 " + a.cur + "/" + a.total + " " + a.step; },
+    "pbar.steps": function (a) { return a.percent + "% · 스텝 " + a.done + "/" + a.total; },
+    "pbar.time": function (a) { return a.percent + "% · 예상 시간 기준"; },
+    "pbar.over": "예상 시간 초과",
+    "pbar.unknown": "진행률 —",
+    "pbar.aria": function (a) { return "#" + a.id + " 전체 진행률"; },
 
     "recent.succeeded": "성공",
     "recent.failed": "실패",
