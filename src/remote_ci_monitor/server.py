@@ -146,10 +146,10 @@ def not_found_hint(path: str) -> str:
     `/api/status` 가 `/api` 아래인데 잡은 `/jobs` 아래라 `/api/jobs/162` 는 자연스러운
     오추측이다. 그 오추측에 아무 말도 안 하면 사람이 로그를 못 찾는다(신고 2).
     """
-    m = _ID_IN_PATH.search(path)
-    if m is None:
+    found = _ID_IN_PATH.findall(path)
+    if not found:
         return _ROUTES_HINT
-    n = m.group(1)
+    n = found[-1]  # `/v1/jobs/162` 의 잡 번호는 앞의 버전이 아니라 **뒤의 숫자**다
     return (
         f"job #{n} is GET /jobs/{n} · its log is GET /jobs/{n}/log "
         f"with that job's token (try: rcm logs {n})"
@@ -2091,7 +2091,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "/log":
                 self._only(method, "GET")
-                t = self._require_read_token()
+                # 404 가 여기로 보냈다(§3) — 문 앞에서 말이 끊기면 안내가 반쪽이다
+                try:
+                    t = self._require_read_token()
+                except ApiError as e:
+                    if e.status in (401, 403):
+                        e.extra.setdefault(
+                            "hint", f"job logs need that job's token — rcm logs {job_id}"
+                        )
+                    raise
                 offset = _int_param(query, "offset", 0, 0, None)
                 data, next_offset, more = self.app.log_bytes(job_id, t, offset)
                 self.send_response(200)

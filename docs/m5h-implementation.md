@@ -147,7 +147,8 @@ _MIGRATIONS[11] = ("ALTER TABLE jobs ADD COLUMN last_step TEXT",)
 | `recent.failed_step` | `failed step: ` | `실패한 스텝: ` |
 | `recent.last_step_label` | `last step: ` | `마지막 스텝: ` |
 
-CLI(영어, 한 줄): `❌ failed · exit 1 gate  ← macbook@…  11m 0s  16:50  exit 1 (last step build web …)`
+CLI(영어, 한 줄 — §4.1 의 코드 신원 칸이 요청자와 소요 사이에 들어간다):
+`❌ failed · exit 1 gate  ← macbook@…  chore/ci-guard @25e1494  11m 0s  16:50  exit 1 (last step build web …)`
 
 ### 1.6 문서 (단계 1 과 같은 커밋)
 
@@ -307,8 +308,8 @@ def failure_lines(job: dict, *, job_id: int, url: str | None, limit: int = 3) ->
 | persistent | `every one of the last {window} {key} runs` |
 | intermittent | `{seen} of the last {window} {key} runs · intermittent?` |
 | first_seen | `first time in the last {window} {key} runs` |
-| unknown | `{seen} of {window} {key} runs so far` |
-| 더 있음 | `… and {n} more (rcm logs {id})` |
+| unknown | `{seen} of {window} {key} runs so far — too few to judge` |
+| 더 있음 | `… and {n} more (rcm logs {id})`. 이름이 잘린 잡은 `… and at least {n} more (…)` |
 | 분모 품질 | `note: {n} of those {window} runs failed without naming anything` |
 
 `intermittent?` 의 물음표는 계약이다 — **판정이 아니라 제안**이다.
@@ -326,6 +327,13 @@ def failure_lines(job: dict, *, job_id: int, url: str | None, limit: int = 3) ->
 - `url` 은 **잡 문서의 `url` 키**에서 온다. 없으면 `log: rcm logs {id}` 만.
 - 성공 잡은 `failure_lines()` 가 **빈 목록**을 돌려준다 — 갈래는 순수 함수 안에 있다.
 - 들여쓰기와 `rcm: ` 접두는 `_err` 의 것이고 계약이 아니다.
+- **`key` 에 공백이나 `·` 가 있으면 문장에서 그 자리를 뺀다** — 어디서 끊기는지 알 수 없고
+  문장 자신의 `·` 와 부딪힌다(검증 라운드 7).
+- 이름과 스텝 이름은 **파서에서 제어문자를 지운다**(`core/progress.clean_name`). 이름은 잡의
+  출력에서 오고 터미널까지 흐른다 — `\r` 하나면 앞 줄을 지우고 ESC 하나면 색을 바꿔
+  「all green」이라고 써 놓을 수 있다(검증 라운드 2).
+- **`::rcm::step-end::fail` 도 대장에 남는다**(그 스텝 이름으로). 안 그러면 그 잡이 나중 창에서
+  「이름 없이 실패했다」로 세어져 분모의 품질이 거짓이 된다(검증 라운드 5).
 
 `cli._wait()` 는 `line.done()` 뒤 · `_print_json(out)` **앞**에 이 줄들을 `_err` 로 찍는다.
 종료 코드 1 · 2 · 3 모두 로그 줄은 찍고(모를수록 로그가 필요하다), 이름 줄은 `failures` 가
@@ -401,7 +409,7 @@ def source_ident(src: dict[str, Any] | None) -> str:
 | `tree` + `branch` | `{branch} @{base_sha[:7]}` + dirty 면 `+` |
 | `tree` + branch 없음 | `{repo 의 마지막 조각} @{base_sha[:7]}` + dirty 면 `+` |
 | 아무것도 없음 | `—`(DASH) |
-| 32자 초과 | `full[:31] + "…"` — 결과 길이는 정확히 32 |
+| 32자 초과 | **이름을 자르고 sha 를 남긴다**: `이름[:k]… @sha`(길이 32). `@sha` 조각이 없으면 `full[:31] + "…"` |
 
 결손 갈래(`_source_text` 와 달리 이 칸은 좁다 — 못 채우면 조각만 낸다):
 
@@ -506,3 +514,20 @@ scripts/smoke_install.sh
 - `RCM_FAIL_NAMES` 알림 env — 훅이 필요해지면 그때.
 - 종료 잡에 스텝 목록 싣기(workplan §13-1) — 최근 행의 크기를 바꾸는 일이라 따로 잰다.
 - `rcm flaky` 목록 명령 · `/api/jobs/…` 별칭 · 게으른 import 다이어트(workplan §7).
+
+## 14. 검증 라운드가 바꾼 것 (2026-09-09~10)
+
+격리 검증자 셋(계약 대조 · 실기 · 엣지)이 낸 것 중 **계약을 바꾼** 것만 적는다.
+
+| # | 무엇 | 왜 |
+|---|---|---|
+| 1 | DB **v13**: 취소·유실 잡의 `failed_step` 을 지운다 | 결정 64 를 쓰기 시점에만 걸면 옛 행에는 #176 의 라벨이 그대로 남는다 |
+| 2 | DB **v14**: 옛 실패 잡의 `failed_step` → `last_step` | 신고자가 #162 를 다시 열면 「고쳤다는 그 문자열」을 그대로 본다. 선언인지 추론인지 이제 와서 구분할 수 없으니 **덜 주장하는 칸**으로 옮긴다 |
+| 3 | 이름을 파서에서 씻는다 | 이름은 잡의 출력에서 오고 터미널까지 흐른다 — `\r`+ESC 로 「all green」을 써 놓을 수 있었다 |
+| 4 | `step-end::fail` 이 대장에 남는다 | 안 그러면 그 잡이 「이름 없이 실패했다」로 세어져 결정 68 의 분모가 거짓이 된다 |
+| 5 | 자를 때 sha 를 남긴다 · 큐 행도 브랜치를 말한다 | 신고자가 자기 잡을 찾은 것은 **sha** 였는데 새 칸이 그 sha 를 먹고 있었다 |
+| 6 | `unknown` 에 「too few to judge」 | 「1 of 1 runs so far」는 통계처럼 읽힌다 — 결정 66 은 「아무 말도 안 한다」였다 |
+| 7 | 웹이 펼칠 때 `/jobs/{id}` 를 받아 온다 | 결정 67 이 `/api/status` 에서 이력을 뺐는데 웹은 그 문서만 그린다 — 배지가 **영영 안 나왔다** |
+| 8 | 웹 배지가 스텝과 단위를 구분한다 | §2.5 가 그 구분을 웹에 맡겨 놓고 웹이 `step` 을 안 읽고 있었다 |
+| 9 | 401 에도 `hint` | 404 가 보낸 문 앞에서 말이 끊기면 안내가 반쪽이다 |
+| 10 | 목록의 id·key 칸을 자른다 | 잡 번호가 9→10 이 되면 그 줄의 뒤 칸이 전부 밀렸다(이전부터 있던 것) |

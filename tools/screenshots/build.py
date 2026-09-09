@@ -307,12 +307,22 @@ def main() -> int:
     )
 
     ls = lines("x-fail", wrap=96)
-    i_fail = at(ls, "#", after=at(ls, "submitted job") + 1)
+    # 판정 줄은 「로그로 가는 길」 바로 위다 — 진행 줄이 몇 개 오는지는 실행마다 다르다
+    i_log = at(ls, "rcm: log: ")
+    i_fail = i_log - 1
     i_json, i_rc = at(ls, "{"), at(ls, "$ echo")
+    assert ls[i_fail].lstrip().startswith("#"), ls[i_fail]
+    assert i_log < i_json, "로그·이름 줄이 JSON 앞에 있어야 한다"
     term(
         "cli-fail.png",
         ls,
-        [(1, i_json - 1, i_json - 1), (2, i_json, i_rc - 1), (3, i_rc + 1, i_rc + 1)],
+        # ① 판정 줄 ② 로그로 가는 길과 이름별 이력 ③ JSON ④ 종료 코드 (M5h)
+        [
+            (1, i_fail, i_fail),
+            (2, i_log, i_json - 1),
+            (3, i_json, i_rc - 1),
+            (4, i_rc + 1, i_rc + 1),
+        ],
         title="rcm run fail-demo",
     )
     assert i_fail < i_json

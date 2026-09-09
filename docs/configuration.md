@@ -67,7 +67,7 @@ recent runs of the same key:
 
 ```
 failed: test — every one of the last 8 gate runs
-failed: just_audio_screen_music_port_test.dart — 1 of the last 8 gate runs · intermittent?
+failed: just_audio_screen_music_port_test.dart — 2 of the last 8 gate runs · intermittent?
 ```
 
 The window is `failure_window_jobs` (20) finished jobs of that key — cancelled and lost jobs say

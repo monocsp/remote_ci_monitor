@@ -233,7 +233,8 @@ def test_a_shallow_window_says_so_far_and_never_judges():
     """창이 얕으면(`window < min_jobs`) 숫자만 말한다 — 「간헐」이라고 부르지 않는다."""
     rows = [fail_item("test", seen=1, window=2, verdict="unknown")]
     lines = failure_lines(failed_job(rows), job_id=162, url=None)
-    assert lines[1] == "failed: test — 1 of 2 gate runs so far"
+    # 「모른다」가 통계처럼 읽히면 안 된다(검증 6) — 숫자 뒤에 그 말을 붙인다
+    assert lines[1] == "failed: test — 1 of 2 gate runs so far — too few to judge"
     assert "intermittent" not in lines[1]
 
 
@@ -312,13 +313,16 @@ def test_a_source_without_anything_to_say_is_a_dash(src):
     assert source_ident(src) == DASH
 
 
-def test_a_long_identity_is_cut_from_the_back_and_marked():
-    """목록의 칸 하나다 — 길면 앞을 남기고 잘렸다고 말한다."""
+def test_a_long_identity_keeps_the_sha_and_marks_the_cut_name():
+    """길면 **이름**을 자르고 sha 를 남긴다 — 신고자가 자기 잡을 찾은 것이 sha 였다(검증 3).
+
+    자르는 자리가 이름이라 「어느 브랜치인지」는 흐려지지만 「어느 커밋인지」는 안 흐려진다.
+    """
     src = {**TREE_SOURCE, "branch": "feature/a-very-long-branch-name-that-runs-on"}
-    full = "feature/a-very-long-branch-name-that-runs-on @25e1494"
     out = source_ident(src)
-    assert len(out) == MAX_IDENT and out.endswith("…")
-    assert out == full[: MAX_IDENT - 1] + "…"
+    assert len(out) == MAX_IDENT
+    assert out.endswith(" @25e1494"), out
+    assert "…" in out and out.startswith("feature/a-very-long"), out
 
 
 def test_an_identity_of_exactly_thirty_two_characters_is_left_alone():
@@ -329,7 +333,7 @@ def test_an_identity_of_exactly_thirty_two_characters_is_left_alone():
     assert "…" not in out
 
 
-def test_no_branch_ever_makes_the_column_wider_than_the_limit():
+def test_no_branch_ever_makes_the_identity_longer_than_the_limit():
     """표의 칸이 흔들리면 목록이 읽히지 않는다 — 모든 갈래에 대한 상한이다."""
     sources = [
         TREE_SOURCE,
@@ -366,3 +370,36 @@ def test_the_queue_row_still_uses_the_long_source_text():
     }
     line = render_queue_row(row, UTC, NOW)[0]
     assert "git@github.com:org/app @25e1494+uncommitted" in line
+
+
+# ── 검증 라운드에서 드러난 구멍 (격리 에이전트가 살아남은 뮤테이션으로 증명한 것) ──
+
+
+def test_the_note_line_survives_the_three_name_budget():
+    """§2.5 — `note:` 는 이름 상한 **밖**이다. 이름에 밀려 사라지면 결정 68 이 무의미하다."""
+    job = failed_job(
+        failures=[
+            fail_item(f"n{i}", seen=2, window=8, verdict="intermittent", window_unnamed=3)
+            for i in range(5)
+        ]
+    )
+    lines = failure_lines(job, job_id=162, url=None)
+    assert sum(1 for line in lines if line.startswith("failed: ")) == 3
+    assert lines[-2].startswith("… and 2 more")
+    assert lines[-1] == "note: 3 of those 8 runs failed without naming anything"
+
+
+def test_the_repo_tail_drops_a_git_suffix():
+    """§4.1 — `git@github.com:org/app.git` 의 마지막 조각은 `app` 이다(칸이 좁다)."""
+    src = {"mode": "tree", "repo": "git@github.com:org/app.git", "base_sha": "25e1494aaa"}
+    assert source_ident(src) == "app @25e1494"
+    assert source_ident({**src, "repo": "https://example.com/org/app.git/"}) == "app @25e1494"
+
+
+def test_the_identity_column_does_not_shift_the_columns_after_it():
+    """§4.1 · MAX_IDENT — 32자짜리 신원이 와도 뒤의 칸이 안 밀린다. 목록은 표다."""
+    short = recent_row(last_step="build web")
+    long_branch = recent_row(last_step="build web")
+    long_branch["source"] = {"mode": "git_ref", "ref": "f" * 40, "sha": "25e1494aaa"}
+    a, b = recent_line(short), recent_line(long_branch)
+    assert a.index("11m") == b.index("11m"), f"\n{a}\n{b}"

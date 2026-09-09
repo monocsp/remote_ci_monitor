@@ -840,6 +840,9 @@
     if (src.mode === "git_ref" && src.ref) cmd += " --ref " + shellQuote(src.ref);  // git_ref 잡은 --ref 없이는 usage 오류
     return cmd;
   }
+  //: 상세에 그리는 이름 줄 수. 넘치면 `failures.more` 한 줄로 접는다(CLI 는 3줄이다).
+  var RECENT_FAILURES_SHOWN = 8;
+
   /* 최근 행 상세의 줄들 — 순수(§2.6). 스텝 라벨은 **선언된 것만** 「실패한 스텝」이고,
      아니면 「마지막 스텝」이다(M5h 결정 63). 이름별 최근 이력은 서버가 코드로 준 판정을
      문장으로만 바꾼다(결정 37) — 여기서 다시 계산하지 않는다. */
@@ -848,15 +851,25 @@
     var out = [];
     if (job.failed_step) out.push(T(lang, "recent.failed_step") + job.failed_step);
     else if (job.last_step) out.push(T(lang, "recent.last_step_label") + job.last_step);
-    var items = job.failures || [];
+    var items = Array.isArray(job.failures) ? job.failures.filter(function (f) {
+      return f && typeof f === "object" && f.name;
+    }) : [];
     if (items.length) {
       out.push(T(lang, "failures.title"));
-      items.forEach(function (f) {
+      // 이름은 100개까지 올 수 있다(§4.2) — 상세가 스크롤 한 화면을 먹지 않게 자른다
+      var shown = items.slice(0, RECENT_FAILURES_SHOWN);
+      shown.forEach(function (f) {
         var key = "failures." + f.verdict;
-        var text = I18N.has(key) ? T(lang, key, { seen: f.seen, window: f.window }) : "";
-        out.push(text ? f.name + " — " + text : f.name);
+        var known = I18N.has(key) && isNum(f.window) && (f.verdict !== "intermittent" || isNum(f.seen));
+        var text = known ? T(lang, key, { seen: f.seen, window: f.window }) : "";
+        // 스텝인지 단위(테스트·파일)인지는 **여기서** 구분한다 — CLI 는 한 모양이다(§2.5)
+        var name = f.step ? f.name + " (" + T(lang, "failures.step_kind") + ")" : f.name;
+        out.push(text ? name + " — " + text : name);
       });
-      var unnamed = items[0] && items[0].window_unnamed;
+      if (items.length > shown.length) out.push(T(lang, "failures.more", { n: items.length - shown.length }));
+      // 분모의 품질은 어느 줄에 실려 와도 읽는다 — 서버는 줄마다 같은 값을 싣는다(결정 68)
+      var unnamed = 0;
+      items.forEach(function (f) { if (isNum(f.window_unnamed) && f.window_unnamed > unnamed) unnamed = f.window_unnamed; });
       if (unnamed) out.push(T(lang, "failures.unnamed", { n: unnamed }));
     }
     return out;
@@ -949,6 +962,8 @@
     token: null, me: null, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
     lang: I18N.DEFAULT_LANG,
     expanded: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
+    // 이름별 실패 이력은 `/api/status` 에 없다(결정 67) — 행을 펼칠 때 그 잡만 한 번 받는다
+    recentFailures: {},
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
     drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null
   };
@@ -1713,7 +1728,9 @@
         (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
       if (open) {
         var detail = [esc(transitionsLine(job, tz(), L()))];
-        recentDetail(job, L()).forEach(function (line) { detail.push(esc(line)); });
+        var extra = state.recentFailures[job.id];
+        var full = extra && extra.failures ? Object.assign({}, job, extra) : job;
+        recentDetail(full, L()).forEach(function (line) { detail.push(esc(line)); });
         if (outcomeText(job, L())) detail.push(esc(outcomeText(job, L())));
         html += '<div class="rdetail">' + detail.join("<br>") + "</div>";
       }
@@ -1838,6 +1855,19 @@
         : "#" + id + " " + stateWord(job.state, L()));
     }).catch(function () { toast(tr("toast.lookup_failed", { id: id })); });
   }
+  /* 펼친 최근 행의 이름별 이력. `/api/status` 에는 없고(결정 67) 이 잡의 문서에만 있다 —
+     펼칠 때 한 번만 받고 캐시한다. 실패하면 **아무것도 안 그린다**(없는 것과 못 받은 것을
+     같게 보이지 않으려면 빈 배열을 지어내지 않는 쪽이 맞다). */
+  function loadRecentFailures(id) {
+    if (state.recentFailures[id] !== undefined) return;
+    state.recentFailures[id] = null;  // 재요청 방지
+    api("/jobs/" + id).then(function (r) { return r.ok ? r.json() : null; }).then(function (job) {
+      if (!job || !Array.isArray(job.failures)) return;
+      state.recentFailures[id] = { failures: job.failures, failures_truncated: !!job.failures_truncated };
+      renderRecent();
+    }).catch(function () { /* 조용히 — 상세의 나머지는 그대로 보인다 */ });
+  }
+
   function restoreTrigger() {
     var t = state.lastTrigger; state.lastTrigger = null;
     if (t && document.contains(t)) { try { t.focus({ preventScroll: true }); } catch (e) { t.focus(); } }
@@ -1975,7 +2005,7 @@
       if (t.hasAttribute("data-cancel")) { state.lastTrigger = t; openCancel(parseInt(t.getAttribute("data-cancel"), 10)); return; }
       if (t.hasAttribute("data-more-queue")) { state.showAllQueue = true; renderQueue(); return; }
       if (t.hasAttribute("data-more-recent")) { state.showAllRecent = !state.showAllRecent; renderRecent(); return; }
-      if (t.hasAttribute("data-rtoggle")) { var rid = parseInt(t.getAttribute("data-rtoggle"), 10); if (ev.target.closest("[data-copy]")) return; state.expandedRecent[rid] = !state.expandedRecent[rid]; renderRecent(); return; }
+      if (t.hasAttribute("data-rtoggle")) { var rid = parseInt(t.getAttribute("data-rtoggle"), 10); if (ev.target.closest("[data-copy]")) return; state.expandedRecent[rid] = !state.expandedRecent[rid]; if (state.expandedRecent[rid]) loadRecentFailures(rid); renderRecent(); return; }
       if (t.hasAttribute("data-copy")) { var text = t.getAttribute("data-copy"); if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { toast(tr("toast.copied", { text: text })); }, function () { toast(text); }); else toast(text); return; }
       if (t.hasAttribute("data-inputs")) { var r = findRow(parseInt(t.getAttribute("data-inputs"), 10)); if (r) toast(tr("toast.inputs", { id: r.id, json: JSON.stringify(r.inputs || {}) })); return; }
       if (t.hasAttribute("data-src")) { var rs = findRow(parseInt(t.getAttribute("data-src"), 10)); if (rs && rs.source) toast("#" + rs.id + " " + (rs.source.mode === "git_ref" ? (rs.source.sha || DASH) + " · ref " + (rs.source.ref || DASH) : (rs.source.base_sha || DASH) + (rs.source.dirty ? " · tree differs from base sha" : "") + (rs.source.tree_hash ? " · tree " + rs.source.tree_hash : ""))); return; }

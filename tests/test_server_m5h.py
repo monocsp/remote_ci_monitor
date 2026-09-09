@@ -277,6 +277,8 @@ def test_a_store_error_drops_the_failures_key_instead_of_the_job(srv, monkeypatc
     assert doc["state"] == FAILED and doc["id"] == jid
     assert doc["last_step"] == STEP_162  # 잡 행의 칸은 그대로 온다
     assert "failures" not in doc
+    # §2.3 — 둘 다 안 싣는다. 하나만 남으면 「이름이 없는 잡」처럼 읽힌다
+    assert "failures_truncated" not in doc
 
 
 def test_api_status_recent_rows_have_last_step_but_never_failures(srv):
@@ -386,3 +388,32 @@ def test_a_real_route_is_untouched(srv):
     assert srv.req("GET", "/api/status")[0] == 200
     status, body = srv.req("GET", "/jobs/999999", token="alice")
     assert status == 404 and body["error"] == "no such job"
+
+
+# ── 검증 라운드가 뮤테이션으로 증명한 구멍 ────────────────────────────────────
+
+
+def test_a_running_jobs_progress_carries_the_last_step_value(srv):
+    """§1.4 — 큐 행의 `progress.last_step` 은 **값**이다. 키만 있고 늘 null 이면 소용없다."""
+    srv.registered("build-02")
+    jid = srv.queued_job(tree_hash=tree(60))
+    assert srv.claimed("build-02") == jid
+    srv.log("build-02", jid, b"::rcm::step::build\n::rcm::step::test\n")
+    doc = view(srv, jid)
+    assert doc["state"] == "running"
+    assert doc["progress"]["last_step"] == "test"
+    assert doc["progress"]["failed_step"] is None
+
+
+@pytest.mark.parametrize(
+    "path,number",
+    [("/v1/jobs/162", "162"), ("/api/jobs/9/log", "9"), ("/2/jobs/70", "70")],
+)
+def test_the_hint_reads_the_job_number_not_the_first_number_in_the_path(
+    srv, path: str, number: str
+):
+    """§3 — `/v1/jobs/162` 의 잡은 #1 이 아니다. 앞의 숫자를 집으면 **틀린 길**을 가르친다."""
+    status, body = srv.req("GET", path)
+    assert status == 404
+    assert f"job #{number} is GET /jobs/{number}" in body["hint"]
+    assert f"rcm logs {number}" in body["hint"]

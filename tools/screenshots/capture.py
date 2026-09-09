@@ -266,6 +266,7 @@ lanes = 1
 read_auth = "none"
 grace_seconds = 5
 recent_count = 8
+failure_min_jobs = 2        # 시연용 — 두 번만 돌려도 이름별 이력이 판정을 낸다 (M5h)
 worker_timeout_seconds = 10
 worker_heartbeat_seconds = 5
 public_url = "http://macmini:8787"

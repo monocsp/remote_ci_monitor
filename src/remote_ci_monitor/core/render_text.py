@@ -224,8 +224,22 @@ _HISTORY = {
     "persistent": "every one of the last {window} {key}runs",
     "intermittent": "{seen} of the last {window} {key}runs · intermittent?",
     "first_seen": "first time in the last {window} {key}runs",
-    "unknown": "{seen} of {window} {key}runs so far",
+    "unknown": "{seen} of {window} {key}runs so far — too few to judge",
 }
+
+
+#: 최근 줄의 스텝 라벨 상한. 실제 게이트의 스텝 이름은 60자가 넘는다 — `rcm top` 은 한 화면이다.
+MAX_STEP_LABEL = 40
+
+
+def _short_key(key: Any) -> str:
+    text = str(key or "?")
+    return text if len(text) <= 16 else text[:15] + "…"
+
+
+def _short_step(name: Any) -> str:
+    text = str(name or "")
+    return text if len(text) <= MAX_STEP_LABEL else text[: MAX_STEP_LABEL - 1] + "…"
 
 
 def _short_sha(sha: Any) -> str:
@@ -259,7 +273,14 @@ def source_ident(src: dict[str, Any] | None) -> str:
     text = " ".join(p for p in parts if p)
     if not text:
         return DASH
-    return text if len(text) <= MAX_IDENT else text[: MAX_IDENT - 1] + "…"
+    if len(text) <= MAX_IDENT:
+        return text
+    # 자를 때 **뒤(sha)를 남긴다** — 신고자가 자기 잡을 찾은 것은 브랜치가 아니라 sha 였다.
+    name, sep, tail = text.rpartition(" @")
+    if sep and len(tail) + 3 < MAX_IDENT:
+        keep = MAX_IDENT - len(tail) - 3  # "…" + " @"
+        return f"{name[:keep]}… @{tail}"
+    return text[: MAX_IDENT - 1] + "…"
 
 
 def failure_lines(
@@ -274,28 +295,41 @@ def failure_lines(
         return []
     log = f"log: rcm logs {job_id}" + (f" · {url}" if url else "")
     out = [log]
-    items = job.get("failures") or []
+    # 서버 문서는 우리가 만든 게 아니다 — 이름이 없거나 모양이 이상한 항목 하나 때문에
+    # **이미 끝난 잡의 종료 코드와 JSON 을 잃으면** 안 된다(`_wait` 은 이 뒤에 JSON 을 찍는다).
+    items = [i for i in (job.get("failures") or []) if isinstance(i, dict) and i.get("name")]
     key = str(job.get("key") or "")
     shown = items[: max(0, limit)]
     for item in shown:
-        template = _HISTORY.get(str(item.get("verdict")))
-        history = (
-            template.format(
-                seen=item.get("seen"),
-                window=item.get("window"),
-                key=f"{key} " if key else "",
-            )
-            if template
-            else ""
-        )
-        out.append(f"failed: {item['name']} — {history}" if history else f"failed: {item['name']}")
+        out.append(f"failed: {item['name']}" + _history_tail(item, key))
     if len(items) > len(shown):
-        out.append(f"… and {len(items) - len(shown)} more (rcm logs {job_id})")
-    unnamed = next((i.get("window_unnamed") for i in items), 0) or 0
+        # 이름이 상한에서 잘렸으면 「N개 더」는 **최소값**이다 — 아는 척하지 않는다
+        at_least = "at least " if job.get("failures_truncated") else ""
+        out.append(f"… and {at_least}{len(items) - len(shown)} more (rcm logs {job_id})")
+    # 분모의 품질은 어느 줄에 실려 와도 읽는다 — 서버는 줄마다 같은 값을 싣는다(결정 68)
+    unnamed = max((_int(i.get("window_unnamed")) for i in items), default=0)
     if unnamed:
-        window = next((i.get("window") for i in items), 0)
+        window = max((_int(i.get("window")) for i in items), default=0)
         out.append(f"note: {unnamed} of those {window} runs failed without naming anything")
     return out
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _history_tail(item: dict[str, Any], key: str) -> str:
+    """` — 최근 이력` 조각. 셀 수 없는 항목에는 **아무 말도 안 붙인다**(`None` 을 문장에 넣느니)."""
+    template = _HISTORY.get(str(item.get("verdict")))
+    window, seen = item.get("window"), item.get("seen")
+    if template is None or not isinstance(window, int) or isinstance(window, bool):
+        return ""
+    if "{seen}" in template and (not isinstance(seen, int) or isinstance(seen, bool)):
+        return ""
+    # key 에 공백이나 가운뎃점이 있으면 문장이 어디서 끊기는지 알 수 없다 — 그 자리를 뺀다
+    # (key 는 바로 위 줄의 잡 행이 이미 말한다).
+    safe = key if key and not any(c in key for c in " ·\t") else ""
+    return " — " + template.format(seen=seen, window=window, key=f"{safe} " if safe else "")
 
 
 def _source_text(src: dict[str, Any]) -> str:
@@ -309,7 +343,11 @@ def _source_text(src: dict[str, Any]) -> str:
         return "not received yet"
     dirty = "+uncommitted" if src.get("dirty") else ""
     repo = src.get("repo") or ""
-    return f"{repo} @{sha or DASH}{dirty}".strip()
+    # 도는 tree 잡도 브랜치를 말한다 — 큐 행에만 sha 가 있고 브랜치가 없으면 「내 잡」을
+    # 알아보는 화면이 하나도 없다(M5h 검증 3)
+    branch = src.get("branch") or ""
+    ref = f" branch {branch}" if branch else ""
+    return f"{repo} @{sha or DASH}{dirty}{ref}".strip()
 
 
 def render_queue_row(
@@ -516,16 +554,18 @@ def render_pool(
             req = (r.get("requester") or {}).get("label") or "?"
             tail = r.get("summary") or ""
             # 선언된 스텝만 「step」이다. 아니면 「어디였나」만 말한다 — 인과는 주장하지 않는다
-            # (M5h · 결정 63). 취소·유실 잡에는 둘 다 없다(결정 64 · 운영 잡 #176).
-            if r.get("failed_step"):
-                tail += f" (step {r['failed_step']})"
-            elif r.get("last_step"):
-                tail += f" (last step {r['last_step']})"
+            # (M5h · 결정 63). 취소·유실 잡에는 라벨이 없다(결정 64) — **읽는 쪽에서도** 막는다:
+            # M5h 이전에 쓰인 행에는 취소된 잡에도 `failed_step` 이 남아 있다(운영 잡 #176).
+            if r.get("state") not in (CANCELLED, LOST):
+                if r.get("failed_step"):
+                    tail += f" (step {_short_step(r['failed_step'])})"
+                elif r.get("last_step"):
+                    tail += f" (last step {_short_step(r['last_step'])})"
             when = fmt_clock(r.get("finished_at"), tz, now=now)
             dur = fmt_duration(r.get("job_seconds"))
             out.append(
-                f"  {glyph} {_state_word(r['state'])}{exit_txt} {r.get('key', '?'):<16} "
-                f"← {req:<18} {source_ident(r.get('source')):<20} "
+                f"  {glyph} {_state_word(r['state'])}{exit_txt} {_short_key(r.get('key')):<16} "
+                f"← {req:<18} {source_ident(r.get('source')):<{MAX_IDENT}} "
                 f"{dur:>8}  {when}  {tail}".rstrip()
             )
             art = _artifacts_line(r.get("artifacts"))

@@ -132,3 +132,70 @@ describe("최근 상세의 배선 (§1.5 · app.js 원문)", () => {
     assert.ok(together.test(src), "「마지막 스텝」 라벨과 그 값이 같은 갈래에 있지 않다");
   });
 });
+
+// ── 상세를 값으로 잰다 (검증 G5 — 원문 스캔만으로는 B1 같은 배선 구멍이 안 보인다) ──
+
+describe("recentDetail — 이름별 이력 (§2.6)", () => {
+  const withFailures = (extra) => recent(Object.assign({
+    failed_step: null, last_step: "build web",
+    failures: [
+      { name: "test", step: true, seen: 8, window: 8, window_unnamed: 0, verdict: "persistent" },
+      { name: "a_test.dart", step: false, seen: 2, window: 8, window_unnamed: 2, verdict: "intermittent" },
+      { name: "b_test.dart", step: false, seen: 1, window: 8, window_unnamed: 2, verdict: "first_seen" },
+    ],
+  }, extra || {}));
+
+  test("네 판정이 두 언어에서 문장이 되고 스텝과 단위를 구분한다", () => {
+    LANGS.forEach((lang) => {
+      const lines = rcm.recentDetail(withFailures(), lang);
+      // §2.5 — CLI 는 한 모양이고 스텝/단위 구분은 **웹 배지**의 몫이다
+      const stepLine = lines.find((l) => l.startsWith("test "));
+      assert.ok(stepLine && /\((step|스텝)\)/.test(stepLine), lang + ": " + stepLine);
+      assert.ok(lines.some((l) => l.startsWith("a_test.dart —")), lang + ": " + lines.join(" | "));
+      assert.ok(!lines.some((l) => l.startsWith("a_test.dart (")), lang + ": 단위에 스텝 배지");
+      assert.ok(!lines.join(" ").match(/undefined|NaN|\[object/), lang);
+      // 마지막 줄은 분모의 품질이다(결정 68) — 첫 줄이 0 이어도 읽어야 한다
+      assert.ok(/2/.test(lines[lines.length - 1]), lang + ": " + lines[lines.length - 1]);
+    });
+  });
+
+  test("이름이 많으면 접고 몇 개가 남았는지 말한다", () => {
+    const many = [];
+    for (let i = 0; i < 100; i++) {
+      many.push({ name: "case" + i, seen: 1, window: 8, window_unnamed: 0, verdict: "first_seen" });
+    }
+    LANGS.forEach((lang) => {
+      const lines = rcm.recentDetail(withFailures({ failures: many }), lang);
+      assert.ok(lines.length < 15, lang + ": " + lines.length + " lines");
+      assert.ok(/92/.test(lines[lines.length - 1]), lang + ": " + lines[lines.length - 1]);
+    });
+  });
+
+  test("모양이 이상한 항목에도 안 죽고 null 을 안 흘린다", () => {
+    const junk = [null, {}, { name: "ok" }, { name: "n", verdict: "nope", seen: 1, window: 8 },
+      { name: "m", verdict: "intermittent", window: 8 }];
+    LANGS.forEach((lang) => {
+      const lines = rcm.recentDetail(withFailures({ failures: junk }), lang);
+      assert.ok(!lines.join(" ").match(/undefined|NaN|null|\[object/), lang + ": " + lines.join(" | "));
+      assert.ok(lines.some((l) => l.startsWith("ok")), lang);
+    });
+  });
+
+  test("이력이 없는 행은 스텝 줄만 낸다 — 빈 배열을 지어내지 않는다", () => {
+    LANGS.forEach((lang) => {
+      const lines = rcm.recentDetail(recent({ last_step: "build web" }), lang);
+      assert.equal(lines.length, 1, lang + ": " + lines.join(" | "));
+    });
+  });
+});
+
+describe("상세가 실제로 그려진다 (검증 P2-1 — 호출부가 사라져도 알아야 한다)", () => {
+  test("renderRecent 가 recentDetail 을 부른다", () => {
+    const src = fs.readFileSync(APP_PATH, "utf8");
+    assert.ok(/recentDetail\(full, L\(\)\)|recentDetail\([a-z]+, L\(\)\)/.test(src),
+      "renderRecent 이 recentDetail 을 안 부른다");
+    // 이력은 /api/status 에 없다(결정 67) — 펼칠 때 그 잡의 문서를 받아 와야 한다
+    assert.ok(/loadRecentFailures\(/.test(src), "펼침이 이력을 받아 오지 않는다");
+    assert.ok(/state\.recentFailures/.test(src), "받아 온 이력을 상세에 안 넘긴다");
+  });
+});

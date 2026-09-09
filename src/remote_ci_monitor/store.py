@@ -59,7 +59,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 12
+DB_VERSION = 14
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -287,6 +287,20 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS job_failures_name ON job_failures(name)",
         "CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC)",
         "ALTER TABLE jobs ADD COLUMN fail_truncated INTEGER NOT NULL DEFAULT 0",
+    ),
+    # v12 → v13(M5h): 옛 코드는 취소·유실 잡에도 실패 스텝을 남겼다(운영 잡 #176 — 사람이 세운
+    # 잡에 「이게 깨졌다」로 읽히는 라벨이 붙었다). 그 라벨은 증거가 아니라 **추론의 부산물**이라
+    # 지운다. 표시도 같은 규칙을 강제하지만(결정 64) JSON 을 읽는 래퍼까지 고쳐 준다.
+    13: ("UPDATE jobs SET failed_step=NULL WHERE state IN ('cancelled','lost')",),
+    # v13 → v14(M5h): 옛 실패 잡의 라벨을 **덜 주장하는 칸으로 옮긴다**. 그 값은 대개 추론값
+    # (「마지막으로 시작한 스텝」)이고, 선언값이었는지는 이제 와서 구분할 수 없다 — 그래서
+    # 인과를 주장하는 `failed_step` 이 아니라 자리만 말하는 `last_step` 에 둔다. 안 그러면
+    # 신고자가 #162 를 다시 열었을 때 **고쳤다는 그 문자열을 그대로** 본다.
+    # 새 코드가 쓴 행은 라벨이 있으면 `last_step` 도 항상 있어서 이 조건에 안 걸린다.
+    14: (
+        "UPDATE jobs SET last_step=failed_step, failed_step=NULL "
+        "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
+        "AND last_step IS NULL",
     ),
 }
 
@@ -784,14 +798,22 @@ class Store:
                         last_seen_job_id=int(last_id) if last_id is not None else None,
                     )
                 )
-        unnamed = int(
-            conn.execute(
-                f"SELECT COUNT(*) FROM jobs WHERE id IN ({id_marks}) AND state IN (?,?) "
-                f"AND id NOT IN (SELECT job_id FROM job_failures WHERE job_id IN ({id_marks}))",
-                (*ids, FAILED, TIMED_OUT, *ids),
-            ).fetchone()[0]
-        )
-        return rows, len(ids), unnamed
+        # 이름을 남긴 잡을 한 번에 받아 파이썬에서 센다 — id 목록을 두 번 바인딩하면
+        # `failure_window_jobs` 상한(500)에서 파라미터가 1000개를 넘어 옛 SQLite 가 거절한다.
+        named = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT DISTINCT job_id FROM job_failures WHERE job_id IN ({id_marks})", ids
+            ).fetchall()
+        }
+        failed_ids = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT id FROM jobs WHERE id IN ({id_marks}) AND state IN (?,?)",
+                (*ids, FAILED, TIMED_OUT),
+            ).fetchall()
+        }
+        return rows, len(ids), len(failed_ids - named)
 
     def delete_old_jobs(self, cutoff: datetime) -> int:
         """산출물이 이미 지워진 종료 잡 중 cutoff 전에 끝난 것의 행·이벤트·합류자를 지운다."""

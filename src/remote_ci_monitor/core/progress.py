@@ -43,6 +43,16 @@ MAX_SUMMARY = 200
 MAX_FAIL_NAMES = 100
 
 
+def clean_name(text: str) -> str:
+    """스텝·실패 이름에서 제어문자와 홀로 남은 서로게이트를 지운다(줄바꿈·탭도 지운다).
+
+    `core/notify.sanitize_text` 와 같은 규칙이되 **한 줄 이름**이라 개행도 안 남긴다.
+    """
+    return "".join(
+        ch for ch in text if ord(ch) >= 0x20 and ord(ch) != 0x7F and not 0xD800 <= ord(ch) <= 0xDFFF
+    ).strip()
+
+
 @dataclass(frozen=True)
 class Marker:
     """수신 시각이 붙은 마커 하나. `at` 은 서버가 그 줄을 받은 시각."""
@@ -65,6 +75,10 @@ def parse_marker(line: str) -> tuple[str, str] | None:
         if not value.isdigit():
             return None
     elif kind in (KIND_STEP, KIND_FAIL):  # 이름 규칙이 같다 — 비면 마커가 아니고 120자에서 자른다
+        # 제어문자를 여기서 지운다. 이름은 잡의 출력에서 오고(명세 §6 의 `sed` 권고를 보라)
+        # 터미널까지 그대로 흐른다 — `\r` 하나면 앞 줄을 지우고 ESC 하나면 색을 바꿔
+        # 「all green」이라고 써 놓을 수 있다. 대장·JSON·화면 **전부**의 입구가 여기다.
+        value = clean_name(value)
         if not value:
             return None
         value = value[:MAX_STEP_NAME]
@@ -146,6 +160,12 @@ def progress_from_markers(
     for s in steps:
         if s.name in fail_seen:
             s.ok = False
+    # `::rcm::step-end::fail` 도 **선언**이다 — 대장에 안 남기면 그 잡은 나중 창에서
+    # 「이름 없이 실패했다」로 세어진다(검증 라운드 5). 스텝 순서대로 뒤에 붙인다.
+    for s in steps:
+        if s.ok is False and s.name not in fail_seen and len(fail_names) < MAX_FAIL_NAMES:
+            fail_seen.add(s.name)
+            fail_names.append(s.name)
     out_steps = tuple(
         Step(
             index=s.index,

@@ -77,6 +77,7 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   ::rcm::step::analyze
 #   ::rcm::step-end::ok
 #   ::rcm::summary::all green
+#   ::rcm::fail::flaky_test        # names what broke: a step, a test, a file
 # Preset keys: name (required) · argv (required) · description · timeout_seconds · expected_seconds
 #   (used until enough real samples exist) · duration_key_inputs (inputs whose value gets its own
 #   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ("low" | "normal" | "high") ·

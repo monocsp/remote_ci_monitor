@@ -24,7 +24,7 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ⑰ failed-step-fallback — 실패 스텝이 다시 「마지막으로 시작한 스텝」으로 추론됨
      (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
   ⑱ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
-  ⑲ ledger-outside-tx — 실패 이름 대장을 finish 트랜잭션에 안 씀 (`store.py`, M5h §2.1)
+  ⑲ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -216,7 +216,8 @@ MUTANTS = (
 """,
         tests=("tests/test_store_m5h.py",),
     ),
-    # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 거절된 finish 가 대장을 남기면 안 된다.
+    # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 대장을 커밋 **뒤로** 옮기면(= 실패한 대장
+    # 쓰기가 finish 를 되돌리지 못하면) 빨개져야 한다.
     Mutant(
         name="ledger-outside-tx",
         path="src/remote_ci_monitor/store.py",
@@ -225,8 +226,19 @@ MUTANTS = (
                     "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
                     (job_id, name, seq),
                 )
+            if bundle is not None:
+                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+            conn.execute("COMMIT")
 """,
-        new="",
+        new="""            if bundle is not None:
+                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+            conn.execute("COMMIT")
+            for seq, name in enumerate(fail_names, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
+                    (job_id, name, seq),
+                )
+""",
         tests=("tests/test_store_m5h.py",),
     ),
 )

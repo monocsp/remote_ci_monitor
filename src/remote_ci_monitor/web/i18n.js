@@ -332,6 +332,9 @@
     "failures.first_seen": function (a) { return "first time in the last " + a.window + " runs"; },
     "failures.unknown": function (a) { return a.seen + " of " + a.window + " runs so far"; },
     "failures.unnamed": function (a) { return a.n + " of those runs failed without naming anything"; },
+    "failures.more": function (a) { return "… and " + a.n + " more (see the log)"; },
+    "failures.step_kind": "step",
+
 
     // ── 잡 산출물(M5e) — 모르는 수는 —, 0 은 「모았는데 없었다」일 때만 ────────
     "art.label": "artifacts",
@@ -714,6 +717,9 @@
     "failures.first_seen": function (a) { return "최근 " + a.window + "회 중 처음"; },
     "failures.unknown": function (a) { return "아직 " + a.window + "회 중 " + a.seen + "회"; },
     "failures.unnamed": function (a) { return "그 중 " + a.n + "회는 이름 없이 실패했다"; },
+    "failures.more": function (a) { return "… 그리고 " + a.n + "개 더(로그에서 본다)"; },
+    "failures.step_kind": "스텝",
+
 
     // ── 잡 산출물(M5e) ────────────────────────────────────────────────────
     "art.label": "산출물",

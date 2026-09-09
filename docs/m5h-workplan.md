@@ -273,7 +273,7 @@ CREATE INDEX jobs_key_finished ON jobs(key, finished_at DESC);
   넣는다(큐 행은 이미 있다).
 
   ```
-  #162  failed     gate             macbook@PCS-MACBOOK-PRO  chore/ci-guard-scan-scope @25e1494  took 11m  16:50  exit 1
+  #162  failed     gate             macbook@PCS-MACBOOK-PRO  chore/ci-guard-scan-scope @25e1…  took 11m  16:50  exit 1
   ```
 
 - tree 잡은 클라이언트가 **브랜치를 실어 보낸다** — `source.branch = git rev-parse
@@ -299,7 +299,7 @@ CREATE INDEX jobs_key_finished ON jobs(key, finished_at DESC);
 | 자리 | 오늘 | M5h |
 |---|---|---|
 | `rcm top` 최근 | `❌ failed gate ← macbook 11m 16:50 exit 1 (step build web …)` | `… exit 1 (last step build web …)` + 코드 신원 |
-| `rcm jobs` | 코드 신원 없음 | `chore/ci-guard-scan-scope @25e1494` |
+| `rcm jobs` | 코드 신원 없음 | `chore/ci-guard-scan-scope @25e1…`(32자에서 자른다) |
 | `rcm wait` 실패 끝줄 | `#162 failed · exit 1` | `+ log: rcm logs 162` · 이름별 이력 최대 3줄 |
 | `rcm run` stdout JSON | 잡 문서 그대로 | `failures[]` · `last_step` 이 그대로 실린다(래퍼가 jq 로 읽는다) |
 | 웹 최근 행 | `· 실패한 스텝: build web …` | 선언된 것만 「실패한 스텝」. 아니면 「마지막 스텝」 |
@@ -385,7 +385,7 @@ sed -n 's/.*: \(.*_test\.dart\).*/::rcm::fail::\1/p' "$log" | sort -u | head -50
 | 단계 | 이름 | 내용 | 완료 기준 |
 |---|---|---|---|
 | 1 | `fix(progress)`: 실패 스텝은 선언된 것만 | §4.1 · §4.2 파서 · 표시 문구 · notify env · 문서 | #162 의 마커 픽스처로 `failed_step is None` · 취소 잡에 스텝 없음 · 웹·CLI 문구 갈림 · CHANGELOG **Changed**(동작 변경) |
-| 2 | `feat(failures)`: 실패 대장과 최근 이력 | §4.3 DB v11 · `GET /jobs/{id}` · CLI 3줄 · 웹 배지 · 설정 키 2개 | 같은 key 8회 중 1회 실패한 이름이 `1 of the last 8 · intermittent?` 로 보인다 · `/api/status` 질의 수 그대로 |
+| 2 | `feat(failures)`: 실패 대장과 최근 이력 | §4.3 DB v11 · `GET /jobs/{id}` · CLI 3줄 · 웹 배지 · 설정 키 2개 | 같은 key 8회 중 **2회** 실패한 이름이 `2 of the last 8 gate runs · intermittent?` 로, **1회**뿐인 이름이 `first time in the last 8 gate runs` 로 보인다 · `/api/status` 질의 수 그대로 |
 | 3 | `feat(hints)`: 404 가 길을 알려 준다 | §4.4 | `/api/jobs/162` 가 진짜 경로를 말한다 · 실패한 wait 의 끝줄에 `rcm logs` |
 | 4 | `feat(cli)`: 목록이 코드를 말한다 | §4.5 | `rcm jobs` 한 줄에 `<ref> @<sha>` · `--ref` 필터 · tree 잡의 `branch` 가 해시를 안 바꾼다 |
 | 5 | `perf(cli)`: 대기 전에 스냅샷을 놓는다 | §4.6 + 문서 | 2만 파일 트리에서 대기 RSS 가 절반 · 회귀 테스트 |

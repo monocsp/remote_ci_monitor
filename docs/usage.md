@@ -139,7 +139,8 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
    not because it was looked up.
 2. **On a machine that is short on memory**, make this the default: `rcm run --no-wait` prints
    the job number and returns, and `rcm wait --job N` attaches whenever you like. A waiting client
-   is small (about 32 MB) and idle, but it is still a process sitting there for the length of a
+   is small — tens of megabytes, and it no longer grows with the size of the tree while it waits —
+   and idle, but it is still a process sitting there for the length of a
    build, and if the operating system kills it the shell sees 137 — which is *not* the job
    failing. The job keeps running on the build machine; attach again and you get the real answer.
 3. **`rcm jobs`** lists what is queued, running and recently finished, grouped by pool, with who
@@ -155,24 +156,23 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 
 A failed job is not an error in the tool, so the output stays calm and specific.
 
-![rcm run on a failing preset prints the failed step, the summary, the JSON with failed_step, and exits 1](images/ui/cli-fail.png)
+![rcm run on a failing preset prints the failed step, then the log command and the names it reported with their recent history, then the JSON with failed_step, last_step and failures, and exits 1](images/ui/cli-fail.png)
 
 1. **The verdict line** names the step that failed — but only when your script said so, with
    `::rcm::step-end::fail` or `::rcm::fail::<name>`. Without a declaration rcm does not guess: it
    shows `last step <name>`, which says where the job was when it ended and claims nothing about
    the cause. A script that runs several things in parallel and replays their logs afterwards
    would otherwise have the last replayed heading blamed for a failure that happened earlier.
-2. **The log is one command away**: every non-zero exit prints `log: rcm logs <N>` and the job
-   URL. That includes exit 3 — the less you know, the more you need the log.
-3. **Names you have seen before.** If your script printed `::rcm::fail::<name>` lines, the
-   failure report says how often each name was red in the recent runs of the same preset:
-   `1 of the last 8 gate runs · intermittent?` for something that comes and goes,
+2. **Where to look next.** Every non-zero exit prints `log: rcm logs <N>` and the job URL —
+   including exit 3, where you know least. Under it, one line per name your script reported with
+   `::rcm::fail::<name>`, saying how often each was red in the recent runs of the same preset:
+   `2 of the last 8 gate runs · intermittent?` for something that comes and goes,
    `first time in the last 8 gate runs` for something new, `every one of the last 8 gate runs`
    for something that is simply broken. The question mark is deliberate — it is a suggestion, not
    a verdict, and the counts are next to it.
-4. **The JSON** carries `failed_step`, `last_step`, `failures`, `exit_code` and the per-step
+3. **The JSON** carries `failed_step`, `last_step`, `failures`, `exit_code` and the per-step
    timings, so a wrapper script can report which stage broke without scraping the log.
-5. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
+4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
    treats 3 as red, it will be red for the wrong reason.
 
@@ -307,7 +307,8 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 1. The **job number** and the **result** of every recent job. It is the same `#412` the queue
    showed, so a finished job is still the one you fetch the log or the artifacts for.
-2. Click a failed one to see **which step failed** and what it printed.
+2. Click a failed one to see the step it declared as failed — or, when it declared none, **where
+   it was when it ended** — plus every name it reported and how often each was red recently.
 3. **The command that reproduces it**, ready to copy.
 4. Which **pool** it ran in.
 5. **Estimates** explains where the ETAs come from — how many samples, how old.

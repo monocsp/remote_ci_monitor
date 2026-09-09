@@ -12,7 +12,7 @@ of a key bumps that number and is listed here.
   `::rcm::fail::<name>` for anything that broke — a step, a test file, a check — and rcm keeps
   those names per job. When a job fails, `GET /jobs/<id>` and `rcm run`/`rcm wait` report how
   often each name was red in the recent runs of the same key:
-  `failed: flaky_test.dart — 1 of the last 8 gate runs · intermittent?`, or
+  `failed: flaky_test.dart — 2 of the last 8 gate runs · intermittent?`, or
   `first time in the last 8 gate runs` for something new, or `every one of the last 8 gate runs`
   for something simply broken. The question mark is deliberate — the counts are a suggestion, not
   a verdict, and runs that failed while naming nothing stay in the denominator and are reported
@@ -21,6 +21,10 @@ of a key bumps that number and is listed here.
   including this one**, so the answer does not drift as newer jobs arrive, and nothing is judged
   below `failure_min_jobs` (3). This history is on the single-job route only; `/api/status` is
   unchanged.
+- **Upgrading also cleans up the labels the old inference left behind.** Cancelled and lost jobs
+  lose the step label they should never have had, and a failed job written by an older build
+  keeps its label but under `last_step` — the field that does not claim a cause — because
+  after the fact there is no way to tell an inferred label from a declared one.
 - **Every failed, cancelled or unknown wait now says where the log is.** `rcm run` and `rcm wait`
   end with `log: rcm logs 162 · <url>` — including exit 3, where you know least. A 404 from the
   server now carries a `hint`: `/api/jobs/162` answers with `job #162 is GET /jobs/162 · its log
@@ -113,7 +117,7 @@ of a key bumps that number and is listed here.
 - **A waiting `rcm run` no longer holds the snapshot bookkeeping for the whole build.** The file
   list and per-file hashes were kept alive until the job finished, long after the tarball was
   uploaded and deleted: a 20,000-file tree sat at 64 MB for the length of the run instead of the
-  32 MB a waiting client actually needs. On a machine short on memory, `rcm run --no-wait` plus
+  a waiting client actually needs. On a machine short on memory, `rcm run --no-wait` plus
   `rcm wait --job N` is now documented as the pattern — if the operating system kills the waiting
   client, the shell sees 137, which is not the job failing.
 - **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding

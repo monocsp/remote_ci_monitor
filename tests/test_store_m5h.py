@@ -134,7 +134,7 @@ def ledger(store: Store, job_id: int) -> list[str]:
             "SELECT name, seq FROM job_failures WHERE job_id=? ORDER BY seq", (int(job_id),)
         ).fetchall()
     seqs = [int(r["seq"]) for r in rows]
-    assert seqs == sorted(seqs), seqs  # seq 는 단조 증가한다(시작값은 명세가 안 정했다)
+    assert seqs == sorted(seqs), seqs  # seq 는 1부터 단조 증가한다(§2.1)
     return [r["name"] for r in rows]
 
 
@@ -436,7 +436,7 @@ def test_a_rejected_finish_leaves_no_ledger_rows(store):
 
 
 def test_a_failing_ledger_write_rolls_the_finish_back(store, tmp_path):
-    """대장은 `finish` 와 **같은 트랜잭션**이다(§2.1 · mutcheck 15).
+    """대장은 `finish` 와 **같은 트랜잭션**이다(§2.1 · mutcheck ⑲).
 
     커밋 뒤에 쓰면 잡은 이미 종료 상태로 남고 증거만 사라진다 — 그러면 「실패했는데 이름이
     없는 잡」이 조용히 늘고 `window_unnamed` 가 그것을 사실로 받아들인다. 대장 INSERT 를
@@ -469,6 +469,13 @@ def test_the_ledger_keeps_the_order_the_job_declared(store):
     declared = ["zeta", "alpha", "mid"]
     assert store.finish(j.id, FAILED, now=at(60), exit_code=1, fail_names=declared) is True
     assert ledger(store, j.id) == declared
+    # §2.1 — `seq` 는 **1부터**, 잡이 찍은 순서 그대로다
+    rows = (
+        store._conn()
+        .execute("SELECT name, seq FROM job_failures WHERE job_id=? ORDER BY seq", (j.id,))
+        .fetchall()
+    )
+    assert [int(r["seq"]) for r in rows] == [1, 2, 3]
 
 
 def test_a_job_that_named_nothing_leaves_no_ledger_rows(store):
@@ -515,7 +522,7 @@ def test_the_window_is_the_last_n_terminal_jobs_of_the_same_key(store):
 def test_cancelled_and_lost_jobs_are_left_out_of_the_window(store):
     """취소·유실은 **아무 말도 안 한다** — 창에 들어가면 분모만 늘고 분자는 안 는다.
 
-    mutcheck 14: 창의 `state IN (…)` 을 지우면 앵커 바로 밑의 취소·유실이 창을 채워
+    mutcheck ⑱: 창의 `state IN (…)` 을 지우면 앵커 바로 밑의 취소·유실이 창을 채워
     `seen` 이 3 에서 **1** 로 떨어진다. 그래서 취소·유실을 **앵커와 옛 잡 사이**에 둔다.
     """
     a = finished(store, seconds=10, names=("test",))
@@ -637,3 +644,83 @@ def test_a_job_that_named_nothing_gets_no_rows_but_still_reports_the_window(stor
     rows, window_jobs, unnamed = stats(store, mine, window=20)
     assert rows == []
     assert window_jobs == 2 and unnamed == 1
+
+
+# ── 검증 라운드가 뮤테이션으로 증명한 구멍 ────────────────────────────────────
+
+
+def test_a_cancelled_job_that_overflowed_the_cap_is_not_marked_truncated():
+    """§1.2 「네 값은 늘 같이 움직인다」 — 이름을 안 남기는 잡에 「잘렸다」고 말할 자리가 없다."""
+    markers_over = markers(("step", "test"), *(("fail", f"n{i}") for i in range(150)))
+    for forced, state in (("cancelled", CANCELLED), ("lost", LOST)):
+        oc = outcome_for(
+            running_job(),
+            markers_over,
+            started=STARTED,
+            finished=FINISHED,
+            rc=-15,
+            cancelled=forced == "cancelled",
+            lost=forced == "lost",
+        )
+        assert oc.state == state
+        assert oc.fail_names == () and oc.fail_truncated is False, forced
+        assert oc.last_step is None and oc.failed_step is None, forced
+    ok = outcome_for(running_job(), markers_over, started=STARTED, finished=FINISHED, rc=0)
+    assert ok.state == SUCCEEDED and ok.fail_names == () and ok.fail_truncated is False
+
+
+def test_a_forced_end_does_not_close_the_open_step_as_ok():
+    """§1.2 — 강제 종료는 `exit_code=None` 으로 판다. `rc` 를 그대로 넘기면 프로세스가 0 으로
+    빠져나간 취소 잡의 마지막 스텝이 「성공」으로 굳는다."""
+    oc = outcome_for(
+        running_job(),
+        markers(("step", "build")),
+        started=STARTED,
+        finished=FINISHED,
+        rc=0,
+        cancelled=True,
+    )
+    assert oc.state == CANCELLED and oc.last_step is None
+
+
+def test_a_nameless_timed_out_job_counts_in_the_unnamed_denominator(store):
+    """§2.1 — 분모의 품질은 `failed` 만이 아니라 `timed_out` 도 센다(창에 드는 상태 셋 중 둘)."""
+    finished(store, seconds=10, state=TIMED_OUT)  # 이름을 안 남긴 시간 초과 잡
+    mine = finished(store, seconds=60, names=("test",))
+    rows, window_jobs, unnamed = stats(store, mine)
+    assert window_jobs == 2 and unnamed == 1
+    assert [r.seen for r in rows] == [1]
+
+
+def test_the_upgrade_moves_an_old_failed_label_to_the_last_step_column(tmp_path):
+    """v14 — 신고자가 #162 를 다시 열면 「고쳤다는 그 문자열」을 보면 안 된다(검증 1).
+
+    옛 행의 라벨이 선언이었는지 추론이었는지는 이제 와서 구분할 수 없다. 그래서 인과를
+    주장하는 칸에서 자리만 말하는 칸으로 **옮긴다**.
+    """
+    path = tmp_path / "old.sqlite3"
+    store = Store(path)
+    kept = finished(store, seconds=10, failed_step="test", last_step="test")  # 새 코드가 쓴 행
+    moved = finished(store, seconds=20, failed_step=STEP_162)
+    cancelled = finished(store, seconds=30, state=CANCELLED, failed_step=STEP_162)
+    store.close()
+
+    raw = sqlite3.connect(path)
+    try:  # M5h 이전처럼 되돌린다: 라벨은 failed_step 에만 있고 last_step 은 비어 있다
+        raw.execute("UPDATE jobs SET last_step=NULL WHERE id IN (?,?)", (moved, cancelled))
+        raw.execute("UPDATE jobs SET failed_step=? WHERE id=?", (STEP_162, moved))
+        raw.execute("PRAGMA user_version=12")
+        raw.commit()
+    finally:
+        raw.close()
+
+    store = Store(path)
+    assert store.user_version() == DB_VERSION
+    old_failed = store.get_job(moved)
+    assert old_failed is not None
+    assert old_failed.failed_step is None and old_failed.last_step == STEP_162
+    gone = store.get_job(cancelled)
+    assert gone is not None and gone.failed_step is None and gone.last_step is None
+    fresh = store.get_job(kept)  # 새 코드가 쓴 행은 안 건드린다(둘 다 있었다)
+    assert fresh is not None and fresh.failed_step == "test" and fresh.last_step == "test"
+    store.close()

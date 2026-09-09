@@ -47,6 +47,7 @@ from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.render_text import (
+    MAX_IDENT,
     failure_lines,
     fmt_clock,
     fmt_duration,
@@ -779,6 +780,11 @@ def cmd_top(args: argparse.Namespace) -> int:
         return 0
 
 
+def _cut(text: str, width: int) -> str:
+    """칸에 맞춰 자른다 — 안 자르면 긴 값 하나가 그 줄의 뒤 칸을 전부 민다."""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
 def _row_ref(row: dict[str, Any]) -> str:
     """그 잡이 돌린 ref(git_ref) 또는 브랜치(tree). `--ref` 는 여기에 부분 일치한다."""
     src = row.get("source") or {}
@@ -846,9 +852,11 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         pos = f"{_ordinal(r['position'])} in line · " if r.get("position") else ""
         label = (r.get("requester") or {}).get("label") or "?"
         summary = r.get("summary") or ""
+        jid = f"#{r.get('id')}"
+        key = str(r.get("key") or "?")
         print(
-            f"#{r.get('id')}  {state:<10} {r.get('key', '?'):<16} {label:<20} "
-            f"{source_ident(r.get('source')):<20} {pos}{timing:<16} "
+            f"{jid:<6} {state:<10} {_cut(key, 16):<16} {label:<20} "
+            f"{source_ident(r.get('source')):<{MAX_IDENT}} {pos}{timing:<16} "
             f"{fmt_clock(when, tz)}  {summary}".rstrip()
         )
     return 0

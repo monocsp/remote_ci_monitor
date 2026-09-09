@@ -369,3 +369,43 @@ def test_progress_for_job_carries_the_new_fields():
     assert plain.failed_step is None and plain.last_step == LAST_162
     assert declared.failed_step == "test" and declared.last_step == LAST_162
     assert declared.fail_names == ("test",)
+
+
+# ── 검증 라운드가 실기로 찾은 것 ─────────────────────────────────────────────
+
+
+def test_a_name_cannot_carry_control_characters_into_the_terminal():
+    """이름은 잡의 출력에서 온다(§6 의 `sed` 권고) — `\\r` 하나면 앞 줄을 지우고 ESC 하나면
+    색을 바꿔 「all green」이라고 써 놓을 수 있다. 대장·JSON·화면의 입구가 파서다(검증 2)."""
+    evil = "unit_test.dart\r\x1b[32mall green — nothing to see here"
+    p = progress(["::rcm::step::test", f"::rcm::fail::{evil}"])
+    assert p.fail_names == ("unit_test.dart[32mall green — nothing to see here",)
+    assert "\r" not in p.fail_names[0] and "\x1b" not in p.fail_names[0]
+    step = progress(["::rcm::step::build\x1b[31m\twide"])
+    assert step.last_step == "build[31mwide"
+
+
+def test_a_name_that_is_only_control_characters_is_not_a_marker():
+    assert parse_marker("::rcm::fail::\r\x1b") is None
+    assert parse_marker("::rcm::step::\x00") is None
+
+
+def test_step_end_fail_lands_in_the_ledger_too():
+    """`step-end::fail` 은 선언이다 — 대장에 안 남기면 그 잡이 나중 창에서 「이름 없이
+    실패했다」로 세어져 분모의 품질이 거짓이 된다(검증 5)."""
+    p = progress(["::rcm::step::analyze", "::rcm::step-end::fail"])
+    assert p.failed_step == "analyze"
+    assert p.fail_names == ("analyze",)
+
+
+def test_a_declared_name_comes_before_a_step_end_fail_name():
+    """순서는 「잡이 찍은 순서」가 먼저다 — `fail` 마커가 앞, 닫힌 스텝이 뒤."""
+    p = progress(
+        [
+            "::rcm::step::analyze",
+            "::rcm::fail::port_test.dart",
+            "::rcm::step-end::fail",
+        ]
+    )
+    assert p.fail_names == ("port_test.dart", "analyze")
+    assert p.failed_step == "analyze"
