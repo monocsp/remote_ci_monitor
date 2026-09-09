@@ -40,13 +40,13 @@ of a key bumps that number and is listed here.
   queries and two JSON parses per row, for six fields it actually reads. At ten thousand retained
   jobs that was 160 ms of every status document, and the short-lived cache never helped because a
   single step marker invalidated it. The samples are now read as plain rows (8× faster) and only
-  re-read when a job actually finishes. ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  re-read when a job actually finishes. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
 - **Remote worker lanes are read in one query instead of one per worker.** The old path also ran on
   every step-marker line, which meant hundreds of statements per line on a busy fleet.
-  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
 - **Retired workers are forgotten after a week.** Nothing ever deleted them, so every worker that
   ever registered kept adding `down` lanes to every status document. A worker with a job still
-  running is never forgotten. ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  running is never forgotten. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
 - **A worker's log flush no longer stalls other lanes.** Every step marker in a batch opened its
   own SQLite transaction, so one 256 KB flush pushed another lane's claim from 0.03 ms to 275 ms,
   and a large body could exhaust the busy timeout and hand the worker an HTTP 500. Markers are now
