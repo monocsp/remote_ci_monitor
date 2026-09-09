@@ -131,7 +131,10 @@ def test_sweep_purges_old_success_marks_it_and_keeps_a_younger_failure(env):
     jan, rec = make_janitor(store, cfg)
     assert jan.sweep_once(NOW) == 1
     assert not ok_dirs[0].exists() and not ok_dirs[1].exists()
-    assert bad_dirs[0].exists() and bad_dirs[1].exists()
+    # M5g: 부피는 로그와 **다른 시계**로 잔다. 아직 살아 있는 실패 잡의 로그는 남고
+    # 워크스페이스만 `workspace_retention_days`(1일) 에 간다.
+    assert bad_dirs[0].exists() and (bad_dirs[0] / "log.txt").exists()
+    assert not bad_dirs[1].exists()
     assert store.get_job(ok).artifacts_purged_at == NOW
     assert store.get_job(bad).artifacts_purged_at is None
     assert rec.errors == []
@@ -237,10 +240,11 @@ def test_rmtree_failure_is_reported_without_paths_and_retried_next_sweep(env, mo
     assert "EACCES" in msg or "Permission" in msg, msg
     assert str(cfg.data_dir) not in msg and str(tmp_path_of(cfg)) not in msg, msg
     broken["on"] = False
+    before = len(rec.errors)
     assert jan.sweep_once(NOW + timedelta(hours=1)) == 1  # 다음 sweep 에 다시 시도한다
     assert store.get_job(jid).artifacts_purged_at == NOW + timedelta(hours=1)
     assert not job_dir.exists() and not ws.exists()
-    assert len(rec.errors) == 1
+    assert len(rec.errors) == before  # 성공한 회차는 아무 오류도 안 낸다
 
 
 def tmp_path_of(cfg) -> Path:

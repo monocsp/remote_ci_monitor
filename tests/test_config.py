@@ -12,9 +12,11 @@ from remote_ci_monitor.config import (
     ServerConfig,
     ServerSection,
     admission_warnings,
+    effective_workspace_retention_days,
     load_client_config,
     load_server_config,
     parse_preset,
+    retention_warning,
 )
 from remote_ci_monitor.core.status import preset_json
 
@@ -356,6 +358,81 @@ def test_retention_days_must_not_be_negative(tmp_path, key):
     assert key in str(e.value)
     # 0 은 「끝나자마자 다음 sweep 에」(명세 §2.1) — 허용
     assert getattr(load(tmp_path, f"[server]\n{key} = 0\n").server, key) == 0
+
+
+# 부피 회수의 세 키 (M5g, 명세 §4.2) — 로그와 다른 시계 · 바이트 예산 · 여유 공간 바닥
+
+
+def test_m5g_volume_keys_have_defaults(tmp_path):
+    cfg = load(tmp_path, GOOD)
+    assert cfg.server.workspace_retention_days == 1
+    assert cfg.server.workspace_storage_max_bytes == 107_374_182_400  # 100 GiB
+    assert cfg.server.min_free_bytes == 10_737_418_240  # 10 GiB
+
+
+def test_m5g_volume_keys_from_file(tmp_path):
+    text = (
+        "[server]\nworkspace_retention_days = 3\nworkspace_storage_max_bytes = 2147483648\n"
+        "min_free_bytes = 1073741824\n"
+    )
+    cfg = load(tmp_path, text)
+    assert cfg.server.workspace_retention_days == 3
+    assert cfg.server.workspace_storage_max_bytes == 2 * 1024**3
+    assert cfg.server.min_free_bytes == 1024**3
+
+
+def test_workspace_retention_days_must_not_be_negative(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, "[server]\nworkspace_retention_days = -1\n")
+    assert "workspace_retention_days" in str(e.value)
+    # 0 은 「끝나자마자 다음 sweep 에」 — 허용
+    cfg = load(tmp_path, "[server]\nworkspace_retention_days = 0\n")
+    assert cfg.server.workspace_retention_days == 0
+
+
+@pytest.mark.parametrize("shorter", ["retention_days_success", "retention_days_failure"])
+def test_workspace_retention_longer_than_log_retention_warns_and_is_clamped(tmp_path, shorter):
+    """부피는 잡 디렉터리와 **함께** 지워진다 — 더 긴 값은 지켜질 수 없다.
+
+    **오류가 아니라 경고다.** 오류로 만들면 `retention_days_success = 0` 을 쓰던 설치가
+    새 키를 만진 적도 없이 업그레이드만으로 안 뜬다(M5f 가 같은 함정을 겪었다).
+    """
+    cfg = load(tmp_path, f"[server]\n{shorter} = 3\nworkspace_retention_days = 7\n")
+    assert cfg.server.workspace_retention_days == 7  # 적은 값은 그대로 둔다
+    assert effective_workspace_retention_days(cfg.server) == 3  # 실제로 지켜지는 값
+    warning = retention_warning(cfg.server)
+    assert warning and "workspace_retention_days" in warning and shorter in warning
+
+
+def test_the_new_default_does_not_break_a_config_that_sets_zero_day_log_retention(tmp_path):
+    """업그레이드만으로 돌던 서버가 안 뜨면 안 된다 — 기본값 1 이 0 과 부딪혀도 오류가 아니다."""
+    cfg = load(tmp_path, "[server]\nretention_days_success = 0\n")
+    assert effective_workspace_retention_days(cfg.server) == 0
+    assert retention_warning(cfg.server) is not None
+
+
+def test_no_warning_when_the_volume_clock_is_the_shorter_one(tmp_path):
+    cfg = load(tmp_path, "[server]\nretention_days_success = 7\nworkspace_retention_days = 7\n")
+    assert retention_warning(cfg.server) is None
+    assert effective_workspace_retention_days(cfg.server) == 7
+
+
+def test_workspace_storage_max_bytes_is_zero_or_at_least_a_gib(tmp_path):
+    """0 은 「무제한」이다. 1 GiB 미만은 게이트 잡 하나(720 MB)보다 작아 「끝나는 족족」과 같다."""
+    cfg = load(tmp_path, "[server]\nworkspace_storage_max_bytes = 0\n")
+    assert cfg.server.workspace_storage_max_bytes == 0
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, "[server]\nworkspace_storage_max_bytes = 1048576\n")
+    assert "workspace_storage_max_bytes" in str(e.value)
+    with pytest.raises(ConfigError):
+        load(tmp_path, "[server]\nworkspace_storage_max_bytes = -1\n")
+
+
+def test_min_free_bytes_must_not_be_negative(tmp_path):
+    assert load(tmp_path, "[server]\nmin_free_bytes = 0\n").server.min_free_bytes == 0
+    with pytest.raises(ConfigError) as e:
+        load(tmp_path, "[server]\nmin_free_bytes = -1\n")
+    assert "min_free_bytes" in str(e.value)
 
 
 @pytest.mark.parametrize("key", ["git_resolve_timeout_seconds", "git_fetch_timeout_seconds"])

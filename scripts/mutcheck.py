@@ -22,6 +22,12 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ⑮ web-progress-full-bar — 도는 잡의 예측 막대가 100% 까지 차오름 (같은 파일 · Codex 리뷰 2)
   ⑯ nowait-view-trusted — `--no-wait` 의 표시용 조회가 문서를 곧이곧대로 믿음 (`cli.py`)
   ⑰ failed-step-guess-flag — 추측한 실패 스텝을 확정이라고 말함 (`core/progress.py`)
+  ⑱ retention-budget-active — 부피 회수가 **도는 잡과 고아**까지 후보로 삼음
+     (`core/retention.py`, M5g — 이 기능의 최대 사고)
+  ⑲ retention-measure-fail-open — 못 잰 크기를 None 이 아니라 0 으로 세어 예산을 지키는 척함
+     (같은 파일)
+  ⑳ retention-budget-unreachable — 못 이룰 목표(지울 수 없는 바이트가 이미 상한 초과)에도
+     종료 잡을 전부 태움 (같은 파일 · Codex 2차 리뷰 E)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -173,6 +179,27 @@ MUTANTS = (
         old="        guessed = not blamed.marked",
         new="        guessed = False",
         tests=("tests/test_progress.py", "tests/test_failed_step_guess.py"),
+    ),
+    Mutant(
+        name="retention-budget-active",
+        path="src/remote_ci_monitor/core/retention.py",
+        old="        (i for i in inventory if i.evictable),",
+        new="        (i for i in inventory),",
+        tests=("tests/test_retention_workspace.py",),
+    ),
+    Mutant(
+        name="retention-measure-fail-open",
+        path="src/remote_ci_monitor/core/retention.py",
+        old="        if v is None:\n            return None\n",
+        new="        if v is None:\n            continue\n",
+        tests=("tests/test_retention_workspace.py",),
+    ),
+    Mutant(
+        name="retention-budget-unreachable",
+        path="src/remote_ci_monitor/core/retention.py",
+        old="        if not unreachable:\n",
+        new="        if True:\n",
+        tests=("tests/test_retention_workspace.py",),
     ),
     Mutant(
         name="manifest-link-escape",
