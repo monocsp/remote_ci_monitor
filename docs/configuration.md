@@ -32,6 +32,7 @@ timeout_seconds = 1200
 expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
 artifacts = ["test/**/goldens/*.png"]   # files the job produces that sessions may fetch back
+artifacts_on = "always"                 # "always" | "failure" — collect only when the job fails
 [[presets.inputs]]
 name = "scope"
 type = "choice"
@@ -145,6 +146,53 @@ the TTL so they can fetch it too. Either way it is gone after `artifact_retentio
 
 Over a limit, **the job still succeeds or fails on its own merits** — only the artifacts are
 dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, `storage_full`).
+
+## Making a failure explain itself
+
+rcm stores everything a job writes to stdout and stderr, uncut. What it cannot do is invent output
+the script never printed — and the usual gate script hides exactly the part you need. A run that
+sends its heavy step to a temporary directory and prints the last forty lines on failure leaves a
+50 KB log with no `Expected:`, no `Actual:` and no stack trace: the forty lines were a progress
+bar. The fix is in the preset, and it has two halves.
+
+**Print the verdict, so it lands in the log.** The log is the evidence of record: it lives for
+`retention_days_failure` (30 days), it is what `rcm logs` and the web page show, and it is what
+somebody reads on a phone. A few lines naming the failing test and its diff are worth more than
+forty lines of progress.
+
+**Leave the bulk in the workspace and declare it**, so a session can fetch it. Anything written to
+`TMPDIR` is gone the moment the job ends.
+
+```bash
+# bad — the evidence disappears with the temporary directory
+log=$(mktemp -d)/test.log
+flutter test > "$log" 2>&1 || { tail -5 "$log"; exit 1; }
+
+# good — the bulk stays in the workspace, the verdict goes to the log
+mkdir -p .rcm/logs
+flutter test > .rcm/logs/test.log 2>&1 || {
+  echo "::rcm::summary::2 tests failed"
+  grep -A3 -m5 -E '^(Expected|Actual|#[0-9])' .rcm/logs/test.log
+  exit 1
+}
+```
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+artifacts = [".rcm/logs/*.log"]
+artifacts_on = "failure"      # "always" (default) collects on every run
+```
+
+`artifacts_on = "failure"` collects only when the job did not succeed, which is what makes this
+pattern affordable: a green run has nothing anyone wants, and paying for it on every build is what
+stops people following the advice. Cancelled and timed-out jobs count as failures; a `lost` job is
+never collected.
+
+**A bundle is a way to fetch, not a place to keep.** It lives `artifact_retention_hours` (24) —
+about as long as a workspace, and far less than a log. Put what you will want next week in the log
+and what you will want in the next hour in the bundle.
 
 ## Retention: what is kept, and for how long
 

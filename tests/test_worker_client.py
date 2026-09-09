@@ -215,7 +215,8 @@ def test_claim_returns_none_on_204_and_the_payload_on_200(srv):
     assert time.monotonic() - t0 < 5, "claim ignored wait_seconds=0"
     jid = srv.queued_job()
     payload = wc.claim(lane=1, wait_seconds=0)
-    assert payload is not None and set(payload) == {"job", "tree_url", "preset"}, payload
+    keys = {"job", "tree_url", "preset", "artifacts"}  # artifacts = 얼린 정책(M5g §13 D)
+    assert payload is not None and set(payload) == keys, payload
     assert payload["job"]["id"] == jid and payload["job"]["state"] == RUNNING
     assert payload["tree_url"] == f"/worker/jobs/{jid}/tree"
     assert payload["preset"]["argv"] == list(srv.cfg.preset("ok").argv)

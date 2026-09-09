@@ -339,7 +339,11 @@ class Worker(threading.Thread):
         산출물 때문에 그러면 안 된다(명세 §5).
         """
         policy = artifact_policy(self.config, preset)
-        if not policy.enabled():
+        # 예정 종료 상태로 판정한다 — 수집은 종료를 커밋하기 **전에** 일어난다(M5e §5).
+        state = art.prospective_state(
+            result.rc, cancelled=result.cancelled, timed_out=result.timed_out
+        )
+        if not policy.collects_for(state):
             return None
         data = self.config.data_dir
         staging = data / "artifacts" / ".staging" / f"{job.id}.{secrets.token_hex(8)}"
@@ -502,6 +506,7 @@ def artifact_policy(config: ServerConfig, preset: Preset) -> art.ArtifactPolicy:
         max_files=s.max_artifact_files,
         timeout_seconds=s.artifact_timeout_seconds,
         cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+        collect_on=preset.artifacts_on,
     )
 
 

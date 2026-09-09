@@ -110,6 +110,7 @@ pool = "default"            # worker pool for this preset's jobs
 expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back
+# artifacts_on = "failure"                # "always" (default) | "failure" — when to collect
 env_passthrough = ["PATH", "HOME", "LANG"]
 [presets.env]
 CI = "1"
