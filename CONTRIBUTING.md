@@ -16,6 +16,11 @@ scripts/smoke_install.sh        # the README setup on a fresh venv (builds the w
 
 CI runs the same on Ubuntu (3.11, 3.13) and macOS (3.13), plus the install smoke and gitleaks.
 
+If this machine also *runs* a build server, keep the two apart. The service has its own checkout,
+which stays on `main` and is never edited; your work happens in a `git worktree` with the `.venv`
+above, and a test server gets its own config, `port` and `data_dir`. See [running from a git
+checkout](docs/operating.md#from-a-git-checkout).
+
 ## House rules
 
 - **Runtime dependencies stay at zero.** The standard library only, on the server and the client.

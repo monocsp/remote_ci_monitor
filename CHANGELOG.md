@@ -7,7 +7,45 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **The production guard stopped objecting to a worktree that has its own `rcm.toml`.** It read a
+  bare `rcm serve` as "this would take the production config", but the search order stops at
+  `./rcm.toml` (and `$RCM_CONFIG`) long before `~/.config/rcm/server.toml`, so a test server in a
+  worktree was refused for no reason. Naming the production config or data directory explicitly is
+  still refused. [Operating the build machine](docs/operating.md#from-a-git-checkout) now spells
+  out the search order and what a test server's config should set.
+
+## [0.2.5] - 2026-09-09
+
+A job can send its files back, the queue page answers "did mine finish?" before anything else, and
+the build machine can run from a git checkout.
+
 ### Added
+- **A job can send its files back** (M5e). A preset that declares `artifacts = ["test/**/goldens/*.png"]`
+  has those files collected before its workspace is deleted, and `rcm run goldens --fetch-artifacts`
+  writes them into the same paths in the tree you submitted — the reason this exists is
+  `flutter test --update-goldens`, whose PNGs previously had no way home. A file you edited while
+  waiting is never overwritten: it is counted `conflicted` and left alone unless you pass `--force`.
+  The result line separates what was compared from what was written (`wrote 12, unchanged 51,
+  conflicted 1`). `rcm artifacts N` shows what is there and `rcm artifacts N --fetch --output DIR`
+  fetches it later. Failed jobs deliver their files too — a golden diff is worth more than a passing
+  one. ([#56](https://github.com/monocsp/remote_ci_monitor/pull/56) · [#57](https://github.com/monocsp/remote_ci_monitor/pull/57) · [#58](https://github.com/monocsp/remote_ci_monitor/pull/58))
+- **Artifacts disappear when they are no longer needed** (M5e). Once your session has written every
+  file it acknowledges the bundle; if nobody joined that job the server deletes it immediately, and
+  otherwise it stays until `artifact_retention_hours` (24) so the others can fetch it too. That
+  clock is the bundle's own: `retention_days_success = 0` still leaves it a full day. Deletion is
+  reported only after the files are actually gone, and a download already in flight finishes even
+  if the bundle expires mid-transfer. New keys: `artifact_retention_hours`, `max_artifact_bytes`,
+  `max_artifact_files`, `artifact_storage_max_bytes`, `artifact_timeout_seconds`,
+  `artifact_cancel_timeout_seconds`, `artifact_transfer_timeout_seconds`,
+  `max_concurrent_artifact_transfers`. Over any limit the job still succeeds or fails on its own
+  merits and only the artifacts are dropped, with the reason on the job.
+  ([#56](https://github.com/monocsp/remote_ci_monitor/pull/56) · [#57](https://github.com/monocsp/remote_ci_monitor/pull/57))
+- **The queue page and `rcm top` show the artifacts** (M5e). A finished job's row carries one line —
+  state, file count, size, how long it has left — plus the command that fetches it, copyable. An
+  unknown count prints `—`; `0` appears only when the collection really found nothing. File names
+  never reach the public status document, so they are not on that line either.
+  ([#57](https://github.com/monocsp/remote_ci_monitor/pull/57) · [#60](https://github.com/monocsp/remote_ci_monitor/pull/60))
 - **Motion says what is still moving** (M5d-3). A running, queued, uploading or cancelling job now
   pulses; a finished one is still. That is a second channel beside colour, so a glance at the
   corner of the screen separates "still going" from "done" — and every animation sits behind
@@ -20,6 +58,33 @@ of a key bumps that number and is listed here.
   finish, did it pass — is the question this screen gets most often, and it was set at 13px, one
   step *smaller* than body text. It is 20px now, with the other two summary cells at body size, so
   size carries the priority instead of weight alone.
+- **Running the build machine from a git checkout is written down.** The service's virtual
+  environment can point at a working copy (`pip install -e`) instead of a released wheel, which
+  turns an upgrade into `git pull --ff-only` plus a restart. [Operating the build
+  machine](docs/operating.md#from-a-git-checkout) now says what keeps that safe: the checkout stays
+  on `main` and nothing is edited in it, development happens in a worktree with its own virtual
+  environment, and a test server gets its own config, `port` and `data_dir`. The upgrade section
+  also shows how to copy the database first — `sqlite3 ".backup"`, not `cp`, which misses the
+  write-ahead log. For sessions using Claude Code the rule is enforced rather than trusted: a
+  `PreToolUse` hook (`tools/guard_production.py`, wired in `.claude/settings.json`) finds the
+  production checkout from the machine's own editable install, refuses edits to it and to the
+  server's config and data, and asks before a deploy. A machine with no such install sees nothing.
+  ([#61](https://github.com/monocsp/remote_ci_monitor/pull/61))
+- **The page reads like a page, not a terminal** (M5d-2). Sentences, labels, buttons and state
+  words are set in the system sans face; the monospace face is now kept for what it is for —
+  job ids, keys, commit shas, refs, repository URLs, step names, logs and the `rcm run …` command.
+  Numbers line up in columns (`tabular-nums`), section headings carry weight instead of
+  `text-transform: uppercase` (which gave Korean no hierarchy at all and mangled the Latin mixed
+  into it — `5s ago` became `5S AGO`), and the monospace stack finally names a Korean fallback.
+- **The host section is folded** (M5d-2). It is the fourth question the page answers, not the
+  first, and it was taking a third of the screen. A one-line summary beside the heading says which
+  machines are reporting and how they are doing; the section opens itself when a machine is busy or
+  a sample has gone stale, and if you open or close it yourself that choice is kept.
+- **The queue stopped repeating itself** (M5d-2). The Source column shows the commit alone — the
+  repository URL, identical on every row, moved into the expanded block — and the columns have
+  fixed widths so the reason takes the slack instead of leaving a hole in the middle of the table.
+  In Host pressure, the free space now reads as part of the disk figure (`Disk 30% (699 GB free)`)
+  instead of trailing off the end of the line where it looked like it belonged to the GPU.
 
 ### Fixed
 - **The phone layout had never actually been tested on a phone** (M5d-3). The mobile test opened
@@ -37,23 +102,6 @@ of a key bumps that number and is listed here.
   were told apart by colour alone. They are now a hollow circle and a hollow square: filled means
   moving, hollow means stopped. (`rcm top` keeps its own glyphs; a terminal has no colour to fail
   back to.)
-
-### Changed
-- **The page reads like a page, not a terminal** (M5d-2). Sentences, labels, buttons and state
-  words are set in the system sans face; the monospace face is now kept for what it is for —
-  job ids, keys, commit shas, refs, repository URLs, step names, logs and the `rcm run …` command.
-  Numbers line up in columns (`tabular-nums`), section headings carry weight instead of
-  `text-transform: uppercase` (which gave Korean no hierarchy at all and mangled the Latin mixed
-  into it — `5s ago` became `5S AGO`), and the monospace stack finally names a Korean fallback.
-- **The host section is folded** (M5d-2). It is the fourth question the page answers, not the
-  first, and it was taking a third of the screen. A one-line summary beside the heading says which
-  machines are reporting and how they are doing; the section opens itself when a machine is busy or
-  a sample has gone stale, and if you open or close it yourself that choice is kept.
-- **The queue stopped repeating itself** (M5d-2). The Source column shows the commit alone — the
-  repository URL, identical on every row, moved into the expanded block — and the columns have
-  fixed widths so the reason takes the slack instead of leaving a hole in the middle of the table.
-  In Host pressure, the free space now reads as part of the disk figure (`Disk 30% (699 GB free)`)
-  instead of trailing off the end of the line where it looked like it belonged to the GPU.
 
 ## [0.2.4] - 2026-09-08
 
@@ -259,7 +307,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.1...v0.2.2

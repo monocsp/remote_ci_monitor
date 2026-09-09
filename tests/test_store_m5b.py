@@ -108,7 +108,7 @@ def job_columns(path: Path) -> dict[str, sqlite3.Row]:
 
 
 def test_fresh_db_is_schema_v4_with_a_not_null_pool_column(store, tmp_path):
-    assert DB_VERSION == 7 and store.user_version() == DB_VERSION
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     cols = job_columns(tmp_path / "rcm.sqlite3")
     assert "pool" in cols
     assert cols["pool"]["type"].upper() == "TEXT"
@@ -138,6 +138,9 @@ def test_migration_v3_to_v4_adds_pool_and_reads_old_rows_as_default(tmp_path):
         c.execute("ALTER TABLE jobs DROP COLUMN pool")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("PRAGMA user_version=3")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 3

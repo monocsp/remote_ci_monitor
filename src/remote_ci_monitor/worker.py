@@ -13,15 +13,18 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from remote_ci_monitor.collect import CollectResult, collect
 from remote_ci_monitor.config import ServerConfig
+from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.model import (
     CANCELLED,
@@ -281,6 +284,62 @@ class Worker(threading.Thread):
         workspace = data / "workspaces" / str(job.id)
         return job_dir, workspace, job_dir / "log.txt"
 
+    def _collect_artifacts(
+        self, job: Job, preset: Preset, workspace: Path, result: Any
+    ) -> CollectResult | None:
+        """산출물을 모아 `artifacts/<id>/bundle.tar` 에 설치한다. 없으면 None(행을 안 만든다).
+
+        **오류는 여기서 잡는다.** 바깥 워커 예외 경로로 새면 잡이 실패하고 레인이 `down` 이 된다 —
+        산출물 때문에 그러면 안 된다(명세 §5).
+        """
+        policy = artifact_policy(self.config, preset)
+        if not policy.enabled():
+            return None
+        data = self.config.data_dir
+        staging = data / "artifacts" / ".staging" / f"{job.id}.{secrets.token_hex(8)}"
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            self.store.start_collect(job.id, policy, self.now_fn())
+            # 취소·타임아웃 뒤에는 짧은 예산만 쓴다 — 서버가 미확인 취소를 곧 닫는다(§5)
+            forced = result.cancelled or result.timed_out
+            out = collect(
+                workspace,
+                policy,
+                staging,
+                now_fn=self.now_fn,
+                budget_seconds=policy.cancel_timeout_seconds if forced else None,
+            )
+            return self._install_bundle(job, out)
+        except Exception as e:  # noqa: BLE001 — 수집 실패가 잡을 죽이지 않는다
+            self._note(f"artifacts: job {job.id}: {type(e).__name__}")
+            return CollectResult(
+                state=art.FAILED,
+                reason_code="collect_failed",
+                detail={"error": type(e).__name__},
+            )
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _note(self, msg: str) -> None:
+        """워커에는 로그 통로가 없다 — 산출물 사정은 잡의 묶음 행에 남는다(§3). 여기선 흘린다."""
+
+    def _install_bundle(self, job: Job, out: CollectResult) -> CollectResult:
+        """스테이징의 tar 를 `artifacts/<id>/` 로 옮긴다. 전체 상한을 넘으면 버린다(§8)."""
+        if out.state != art.READY or out.bundle_path is None:
+            return out
+        limit = self.config.server.artifact_storage_max_bytes
+        if not self.store.reserve_bundle_bytes(job.id, out.bundle_bytes, limit, self.now_fn()):
+            return CollectResult(
+                state=art.DROPPED,
+                skipped_count=out.skipped_count,
+                reason_code="storage_full",
+                reason_args={"limit": limit},
+            )
+        dest = self.config.data_dir / "artifacts" / str(job.id)
+        dest.mkdir(parents=True, exist_ok=True)
+        out.bundle_path.replace(dest / "bundle.tar")
+        return replace(out, bundle_path=dest / "bundle.tar")
+
     def _fail(self, job: Job, summary: str) -> None:
         self.store.finish(job.id, FAILED, now=self.now_fn(), exit_code=None, summary=summary[:200])
 
@@ -353,15 +412,19 @@ class Worker(threading.Thread):
         except (MaterializeError, RunnerError) as e:
             self._fail(job, str(e))
             return
+        # 워크스페이스를 지우기 **전에**, 그리고 종료를 커밋하기 **전에** 모은다(명세 §5).
+        bundle = self._collect_artifacts(job, preset, workspace, result)
         markers = self.store.markers(job.id)
         job_now = self.store.get_job(job.id) or job
+        # 수집하는 동안 수용된 취소가 이긴다 — `outcome_for` 도 `finish` 도 자동으로 안 해 준다.
+        cancelled = result.cancelled or job_now.state == CANCELLING
         oc = outcome_for(
             job_now,
             markers,
             started=result.started,
             finished=result.finished,
             rc=result.rc,
-            cancelled=result.cancelled,
+            cancelled=cancelled,
             timed_out=result.timed_out,
             lost=result.lost,
         )
@@ -374,11 +437,25 @@ class Worker(threading.Thread):
             summary_code=oc.code,
             summary_args=oc.args,
             failed_step=oc.failed_step,
+            bundle=bundle,
+            ttl_hours=self.config.server.artifact_retention_hours,
         )
         # ── 정리 ──
         keep = oc.state != SUCCEEDED and self.config.server.keep_workspace_on_failure
         if not keep:
             shutil.rmtree(workspace, ignore_errors=True)
+
+
+def artifact_policy(config: ServerConfig, preset: Preset) -> art.ArtifactPolicy:
+    """그 잡에 얼리는 정책 — 프리셋의 글롭 + 서버의 잡당 상한(명세 §9)."""
+    s = config.server
+    return art.ArtifactPolicy(
+        globs=tuple(preset.artifacts),
+        max_bytes=s.max_artifact_bytes,
+        max_files=s.max_artifact_files,
+        timeout_seconds=s.artifact_timeout_seconds,
+        cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+    )
 
 
 class _LocalObserver:

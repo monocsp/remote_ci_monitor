@@ -73,6 +73,44 @@ The database migrates on start; queued jobs and a paused queue survive, jobs tha
 become `lost` (exit 3 for waiting sessions). Sessions may run a different patch version —
 `rcm check` shows both versions.
 
+A migration is one way, so copy the database before an upgrade that carries one (the changelog says
+which). With the server running, use SQLite's own backup — `cp` misses the write-ahead log:
+
+```sh
+sqlite3 ~/.local/share/rcm/rcm.sqlite3 ".backup ~/rcm-before-upgrade.sqlite3"
+```
+
+### From a git checkout
+
+The service's virtual environment can point at a working copy instead of a released wheel:
+
+```sh
+~/.local/share/rcm-venv/bin/pip install -e /path/to/remote_ci_monitor
+```
+
+The build machine then runs whatever that folder has checked out, and an upgrade becomes `git pull
+--ff-only` in it plus the same restart. Keep it on `main`: `main` only takes pull requests from
+`dev`, so it is the branch CI has already passed on.
+
+| rule | why |
+|---|---|
+| Nothing is edited in that folder | its files *are* the running server, and the next `git pull` conflicts with local changes |
+| Development happens in a `git worktree` with its own `.venv` (`pip install -e ".[dev]"`) | the code you are changing is never the code the machine is running |
+| A test server gets its own config file, `port` and `data_dir` | sharing `data_dir` means two servers writing one SQLite database |
+
+A test server is one file away: the config search order is `--config`, `$RCM_CONFIG`, `./rcm.toml`,
+then `~/.config/rcm/server.toml`, so an `rcm.toml` in the worktree is found before the production
+one — and that name is already in `.gitignore`. Give it `port = 8788`, its own `data_dir` and
+`advertise = false`, so discovery keeps pointing sessions at the real server.
+
+Pull and restart together, with the queue empty. Between the two the running process still holds
+the old modules, so a job that starts in that window can load a mix of both.
+
+Claude Code sessions have this wired as a `PreToolUse` hook: `.claude/settings.json` runs
+`tools/guard_production.py`, which finds the production checkout from the machine's own editable
+install, refuses edits to it and to the server's config and data, and asks before a deploy. A
+machine with no such install sees nothing.
+
 ## Security notes
 
 - Discovery answers (`_rcm._tcp`) carry only the server name, port, version, lane count and LAN
@@ -116,6 +154,20 @@ The server deletes job logs, snapshots and kept workspaces after `retention_days
 every `retention_sweep_interval_seconds` (3600). Running jobs are never touched; `rcm logs N` on a
 purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
 `/api/health` turns 503 — nothing here fails silently.
+
+**Job artifacts keep their own clock.** A bundle a session can fetch back
+([Configuration](configuration.md#getting-files-back-out-of-a-job)) lives for
+`artifact_retention_hours` (24) from the moment it is ready, and the retention days above do not
+shorten that — with `retention_days_success = 0` the logs go on the next sweep and the bundle still
+has its full day. It goes earlier only when the submitting session says it has written every file
+and nobody else joined that job. Deleting is reported only after the files are actually gone: a
+failed unlink leaves the bundle counted and tries again on the next sweep, and a download already
+in flight finishes even if the bundle expires mid-transfer.
+
+`/api/status` carries `server.artifact_storage` — `stored_bytes`, `reserved_bytes` and
+`limit_bytes` (`artifact_storage_max_bytes`, 10 GiB). When the server is full it refuses **new**
+bundles rather than evicting bundles somebody is still waiting for; the affected jobs say
+`storage_full` and still report their own success or failure.
 
 ## Why the numbers can be wrong
 

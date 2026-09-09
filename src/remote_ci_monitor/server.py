@@ -21,6 +21,7 @@ import hmac
 import importlib.resources
 import json
 import re
+import shutil
 import signal
 import socket
 import socketserver
@@ -44,6 +45,7 @@ from remote_ci_monitor.config import (
     advertise_enabled,
     advertise_warning,
 )
+from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
@@ -81,7 +83,13 @@ from remote_ci_monitor.core.queue import (
     priority_from_name,
     split_by_pool,
 )
-from remote_ci_monitor.core.status import iso, queue_row_json, recent_json, status_json
+from remote_ci_monitor.core.status import (
+    artifacts_json,
+    iso,
+    queue_row_json,
+    recent_json,
+    status_json,
+)
 from remote_ci_monitor.events import (
     JOB_KINDS,
     KIND_HOST_SAMPLE,
@@ -112,11 +120,15 @@ JANITOR_SECONDS = 5.0
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-_\[\]:]{1,255}$")  # Host 헤더 — URL 에 넣을 만한 모양만
 RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
 MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
-_JOB_RE = re.compile(r"^/jobs/(\d+)(/tree/manifest|/tree|/log|/cancel|/priority)?$")
+_JOB_RE = re.compile(
+    r"^/jobs/(\d+)"
+    r"(/tree/manifest|/tree|/log|/cancel|/priority"
+    r"|/artifacts/archive|/artifacts/ack|/artifacts)?$"
+)
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
-_WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish)$")
+_WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
 _STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
@@ -150,11 +162,14 @@ def _mb(n: int) -> str:
 class ApiError(Exception):
     challenge = "bearer"  # 401 의 WWW-Authenticate 종류. 읽기 라우트는 basic 모드에서 "basic"
 
-    def __init__(self, status: int, message: str, **extra: Any):
+    def __init__(
+        self, status: int, message: str, *, headers: dict[str, str] | None = None, **extra: Any
+    ):
         super().__init__(message)
         self.status = status
         self.message = message
         self.extra = extra
+        self.headers = headers or {}  # Retry-After 같은 응답 헤더
 
 
 @dataclass
@@ -205,6 +220,9 @@ class App(RemoteWorkersMixin):
         self.notifier: Notifier | None = None
         self._resolve_sem = threading.BoundedSemaphore(RESOLVE_CONCURRENCY)
         self.manifest_slots = threading.BoundedSemaphore(MANIFEST_CONCURRENCY)
+        self.transfer_slots = threading.BoundedSemaphore(
+            max(1, config.server.max_concurrent_artifact_transfers)
+        )
         self.bus = EventBus()
         self.sampler: HostSampler | None = None
         self._snap: _DbSnapshot | None = None
@@ -497,6 +515,145 @@ class App(RemoteWorkersMixin):
             raise ApiError(403, "admin token required")
         return t
 
+    # ── 잡 산출물 (M5e) ─────────────────────────────────────────────────────
+
+    def artifacts_dir(self, job_id: int) -> Path:
+        return self.config.data_dir / "artifacts" / str(int(job_id))
+
+    def artifact_state(self, job: Job, row: dict[str, Any] | None) -> str:
+        """행이 없을 때의 상태는 **파생**이다(명세 §9).
+
+        글롭을 선언하지 않은 프리셋은 `disabled` · 아직 안 끝난 잡은 `pending` · 끝났는데 아무
+        보고가 없으면 `unknown` 이다. **`empty` 로 소급하지 않는다** — 모르는 것과 없는 것은 다르다.
+        """
+        if row is not None:
+            return str(row["state"])
+        preset = self.config.preset(job.preset)
+        if preset is not None and not preset.artifacts:
+            return art.DISABLED
+        if not job.is_terminal:
+            return art.PENDING
+        return art.UNKNOWN
+
+    def artifacts_public(self, job: Job) -> dict[str, Any]:
+        """잡 JSON·상태 문서에 더하는 객체. 경로는 절대 안 싣는다(§10)."""
+        try:
+            row = self.store.get_bundle(job.id)
+        except Exception:  # noqa: BLE001 — 산출물 조회 실패가 상태 전체를 막으면 안 된다
+            row = None
+        return artifacts_json(row, self.artifact_state(job, row))
+
+    def artifact_storage(self) -> dict[str, Any]:
+        """서버 전체 회계(§10). 실패해도 상태 문서를 막지 않는다."""
+        try:
+            stored, reserved = self.store.bundle_storage_totals()
+            error_code = None
+        except Exception as e:  # noqa: BLE001
+            stored = reserved = None
+            error_code = _error_code(e)
+        janitor = getattr(self, "janitor", None)
+        last = getattr(janitor, "last_sweep_at", None) if janitor is not None else None
+        return {
+            "stored_bytes": stored,
+            "reserved_bytes": reserved,
+            "limit_bytes": self.config.server.artifact_storage_max_bytes,
+            "last_sweep_at": iso(last),
+            "error_code": error_code,
+        }
+
+    def _artifact_job(self, job_id: int, token: TokenInfo | None) -> Job:
+        """산출물 라우트의 자격 — 로그와 같되 **워커 토큰은 명시적으로 거부한다**(§6)."""
+        if token is not None and token.kind == TOKEN_WORKER:
+            raise ApiError(403, "worker tokens cannot read job artifacts")
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "no such job")
+        if not self.can_read_log(job, token):
+            raise ApiError(403, "not your job")
+        return job
+
+    def artifacts_view(self, job_id: int, token: TokenInfo | None) -> dict[str, Any]:
+        """보호 문서. `ready` 일 때만 매니페스트와 `detail` 을 담는다(§6)."""
+        job = self._artifact_job(job_id, token)
+        row = self.store.get_bundle(job.id)
+        state = self.artifact_state(job, row)
+        doc = artifacts_json(row, state)
+        doc["bundle_sha256"] = row["bundle_sha256"] if row else None
+        ready = state == art.READY
+        doc["files"] = (row or {}).get("files", []) if ready else []
+        doc["detail"] = (row or {}).get("detail") if ready else None
+        return doc
+
+    def artifact_archive(self, job_id: int, token: TokenInfo | None) -> tuple[Path, int, int]:
+        """아카이브를 내려보낼 준비. (파일, 바이트, 잡 번호). 상태별 코드는 §6 표다."""
+        job = self._artifact_job(job_id, token)
+        row = self.store.get_bundle(job.id)
+        state = self.artifact_state(job, row)
+        if state in art.GONE_STATES:
+            raise ApiError(410, "artifacts are gone")
+        if state in art.PROGRESS_STATES:
+            raise ApiError(409, f"artifacts are {state}")
+        if state in art.NOTHING_STATES:
+            raise ApiError(404, "no artifacts for this job")
+        if state != art.READY or row is None:
+            raise ApiError(503, "artifacts are unavailable")
+        expires = row["expires_at"]
+        if expires is not None and self.now_fn() >= expires:
+            # 청소기가 아직 안 왔어도 만료가 지나면 새 다운로드는 안 준다(§6)
+            raise ApiError(410, "artifacts expired")
+        path = self.artifacts_dir(job.id) / "bundle.tar"
+        try:
+            size = path.stat().st_size
+        except OSError:
+            raise ApiError(503, "artifacts are unavailable") from None
+        return path, size, job.id
+
+    def purge_bundle(self, job_id: int, state: str, now: datetime) -> bool:
+        """묶음 파일을 지우고 표시한다. **물리적으로 지운 뒤에** 지웠다고 말한다(§7)."""
+        try:
+            shutil.rmtree(self.artifacts_dir(job_id))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.log(f"artifacts: job {job_id}: {type(e).__name__}")
+            return False
+        self.store.mark_bundles_purged([job_id], state, now)
+        return True
+
+    def publish_artifacts(self, job_id: int, state: str) -> None:
+        """`artifacts_changed` — `_publish_job` 을 쓰면 끝난 잡에 `job_finished` 가 다시 나간다."""
+        self._mark_dirty()
+        self.publish("artifacts_changed", {"job_id": int(job_id), "state": state})
+
+    def ack_artifacts(self, job_id: int, token: TokenInfo, body: Any) -> dict[str, Any]:
+        """확인(ack). 자격자가 「다 받아서 트리에 썼다」고 말하는 자리다(§7)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        sent = body.get("bundle_sha256")
+        if not isinstance(sent, str) or not re.fullmatch(r"[0-9a-f]{64}", sent):
+            raise ApiError(400, "bundle_sha256 must be a sha256 hex string")
+        job = self._artifact_job(job_id, token)
+        owner = job.owned_by(token.name)  # admin 이라도 남의 몫을 대신 확인해 주지 않는다
+        now = self.now_fn()
+        decision = self.store.ack_bundle(job.id, sent, owner=owner, now=now)
+        if decision.status == 409:
+            raise ApiError(409, "artifacts are not in a state to acknowledge")
+        if decision.status == 410:
+            raise ApiError(410, "artifacts are gone")
+        purged = decision.purge and self.purge_bundle(job.id, art.PURGED, now)
+        if purged:
+            self.publish_artifacts(job.id, art.PURGED)
+        return {"job_id": job.id, "purged": bool(purged), "reason_code": decision.reason_code}
+
+    def finalize_bundle_hold(self, job_id: int) -> None:
+        """마지막 독자가 닫았다. 만료로 파일이 이미 간 묶음이면 그때 회계를 돌려준다(§6)."""
+        if self.store.bundle_is_held(job_id):
+            return
+        row = self.store.get_bundle(job_id)
+        if row is not None and row["state"] == art.EXPIRED and row["purged_at"] is None:
+            self.store.mark_bundles_purged([job_id], art.EXPIRED, self.now_fn())
+            self.publish_artifacts(job_id, art.EXPIRED)
+
     def can_read_log(self, job: Job, token: TokenInfo | None) -> bool:
         return token is not None and (token.admin or job.owned_by(token.name))
 
@@ -725,7 +882,27 @@ class App(RemoteWorkersMixin):
                     t = tail_lines(self.log_path(row.job.id), DEFAULT_TAIL)
                     if t is not None:
                         tails[row.job.id] = t
-        return status_json(model, log_tails=tails)
+        doc = status_json(model, log_tails=tails)
+        self._inject_artifacts(doc, model)
+        return doc
+
+    def _inject_artifacts(self, doc: dict[str, Any], model: StatusModel) -> None:
+        """상태 문서에 산출물 처분과 전체 회계를 **더한다**(§10).
+
+        순수 층(`core/status.py`)은 DB 를 모른다 — 모양은 거기가 정하고 값은 여기서 채운다.
+        """
+        by_id: dict[int, Job] = {}
+        for pool in model.pools:
+            for row in pool.queue or ():
+                by_id[row.job.id] = row.job
+            for job in pool.recent or ():
+                by_id[job.id] = job
+        for pool in doc.get("pools", []):
+            for row in [*pool.get("queue", []), *pool.get("recent", [])]:
+                job = by_id.get(row.get("id"))
+                if job is not None:
+                    row["artifacts"] = self.artifacts_public(job)
+        doc["server"]["artifact_storage"] = self.artifact_storage()
 
     def job_view(
         self, job_id: int, token: TokenInfo | None, tail: int, host: str | None = None
@@ -735,18 +912,25 @@ class App(RemoteWorkersMixin):
             raise ApiError(404, "no such job")
         now = self.now_fn()
         if job.is_terminal:
-            return recent_json(job, base_url=self.base_url(host))
+            return self._with_artifacts(recent_json(job, base_url=self.base_url(host)), job)
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)
         if row is None:  # 방금 끝났다
             job = self.store.get_job(job_id)
             assert job is not None
-            return recent_json(job, base_url=self.base_url(host))
+            return self._with_artifacts(recent_json(job, base_url=self.base_url(host)), job)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
-        return queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail)
+        return self._with_artifacts(
+            queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job
+        )
+
+    def _with_artifacts(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
+        """잡 행 JSON 에 산출물 처분을 **더한다**. 기존 키는 손대지 않는다(스키마 v1, §10)."""
+        doc["artifacts"] = self.artifacts_public(job)
+        return doc
 
     def eta(self, body: dict[str, Any]) -> dict[str, Any]:
         """`POST /api/eta` — 이 프리셋·입력의 잡을 지금 넣으면 어디에 서나(가상 잡, 명세 0-G)."""
@@ -1462,7 +1646,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_error(self, e: ApiError, *, close: bool = False) -> None:
         obj = {"error": e.message, **e.extra}
-        retry_after = e.extra.get("retry_after")
         if e.status == 401:
             self.send_response(401)
             if e.challenge == "basic":
@@ -1477,10 +1660,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        headers: dict[str, str] = {"Connection": "close"} if close else {}
-        if retry_after is not None:  # 503 의 「언제 다시 오라」 — 본문에도 있고 헤더에도 있다
-            headers["Retry-After"] = str(int(retry_after))
-        self._send_json(e.status, obj, extra_headers=headers or None)
+        extra_headers = dict(e.headers)
+        if close:
+            extra_headers["Connection"] = "close"
+        self._send_json(e.status, obj, extra_headers=extra_headers or None)
         if close:
             self.close_connection = True
 
@@ -1709,6 +1892,20 @@ class Handler(BaseHTTPRequestHandler):
                 if self.command != "HEAD":
                     self.wfile.write(data)
                 return
+            if sub == "/artifacts":
+                self._only(method, "GET")
+                # 산출물은 공개 읽기가 아니다 — `read_auth = none` 이어도 토큰을 요구한다(§6)
+                self._send_json(200, self.app.artifacts_view(job_id, self._require_read_token()))
+                return
+            if sub == "/artifacts/archive":
+                self._only(method, "GET")
+                self._artifact_archive(job_id)
+                return
+            if sub == "/artifacts/ack":
+                self._only(method, "POST")
+                t = self.app.require_client_token(self._token())  # 쓰기다 — Bearer 만(CSRF)
+                self._send_json(200, self.app.ack_artifacts(job_id, t, self._json_body()))
+                return
             if sub == "/cancel":
                 self._only(method, "POST")
                 t = self.app.require_client_token(self._token())
@@ -1721,6 +1918,47 @@ class Handler(BaseHTTPRequestHandler):
             self._static(path)
             return
         raise ApiError(404, "not found")
+
+    def _artifact_archive(self, job_id: int) -> None:
+        """묶음을 흘려보낸다. 전송 슬롯은 **기다리지 않는다** — 일반 슬롯을 쥔 채 기다리면
+        heartbeat·cancel·status 가 굶는다(§6)."""
+        path, size, jid = self.app.artifact_archive(job_id, self._require_read_token())
+        if not self.app.transfer_slots.acquire(blocking=False):
+            raise ApiError(
+                503,
+                "too many concurrent artifact transfers",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            with self.app.store.hold_bundle(jid):
+                try:
+                    fh = path.open("rb")
+                except OSError:
+                    raise ApiError(503, "artifacts are unavailable") from None
+                with fh:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-tar")
+                    self.send_header("Content-Length", str(size))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="job-{jid}-artifacts.tar"',
+                    )
+                    self.end_headers()
+                    if self.command == "HEAD":
+                        return
+                    self.connection.settimeout(self.config.server.artifact_transfer_timeout_seconds)
+                    try:
+                        while True:
+                            chunk = fh.read(UPLOAD_CHUNK)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                    finally:
+                        self.connection.settimeout(REQUEST_TIMEOUT)
+        finally:
+            self.app.transfer_slots.release()
+            self.app.finalize_bundle_hold(jid)
 
     def _no_worker_token(self) -> None:
         """읽기 규칙의 라우트라도 워커 토큰이 제시되면 거절한다(워커 토큰은 `/worker/*` 만)."""
@@ -1780,6 +2018,27 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(chunk)
             finally:
                 self.connection.settimeout(REQUEST_TIMEOUT)
+            return
+        if what == "artifacts":
+            if method == "GET":
+                self._send_json(200, self.app.worker_artifacts_status(t, job_id))
+                return
+            self._only(method, "PUT")
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/x-tar":
+                raise ApiError(415, "artifact bundle must be application/x-tar")
+            length = self._content_length()
+            if not self.app.transfer_slots.acquire(blocking=False):
+                raise ApiError(
+                    503, "too many concurrent artifact transfers", headers={"Retry-After": "5"}
+                )
+            self.connection.settimeout(self.config.server.artifact_transfer_timeout_seconds)
+            try:
+                status, body = self.app.worker_receive_artifacts(t, job_id, self.rfile, length)
+            finally:
+                self.connection.settimeout(REQUEST_TIMEOUT)
+                self.app.transfer_slots.release()
+            self._send_json(status, body)
             return
         self._only(method, "POST")
         if what == "log":

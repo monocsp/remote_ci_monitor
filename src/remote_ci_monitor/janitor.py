@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from remote_ci_monitor.config import ServerConfig
+from remote_ci_monitor.core import artifacts
 from remote_ci_monitor.core.model import TERMINAL_STATES, Job
 from remote_ci_monitor.core.retention import RetentionPolicy, blobs_to_purge, due_for_purge
 from remote_ci_monitor.materialize import blob_path
@@ -100,6 +101,31 @@ class Janitor:
             self._remove_tree(path)
         return True
 
+    def _sweep_bundles(self, now: datetime) -> int:
+        """TTL 이 지난 잡 산출물 묶음을 디렉터리째 지운다(명세 §8).
+
+        **번들은 자기 시계로만 지운다** — M3 의 보존 기간(0 일 수 있다)과 무관하다. 삭제에
+        실패하면 표시하지 않고 예약을 그대로 둔 채 다음 sweep 에 다시 시도한다. 물리적으로
+        지우기 전에 지웠다고 말하지 않는다(§7).
+        """
+        root = self.config.data_dir / "artifacts"
+        purged: list[int] = []
+        for info in self.store.bundles_due(now, CANDIDATE_LIMIT):
+            try:
+                self._remove_tree(root / str(info.job_id))
+            except OSError as e:
+                self.on_error(f"retention: bundle {info.job_id}: {_errname(e)}")
+                continue
+            if self.store.bundle_is_held(info.job_id):
+                # 아직 내려보내는 중이다 — 파일은 갔지만 독자가 닫을 때까지 회계에 남긴다(§6).
+                self.store.set_bundle_state(info.job_id, artifacts.EXPIRED)
+                continue
+            purged.append(info.job_id)
+        if purged:
+            self.store.mark_bundles_purged(purged, artifacts.EXPIRED, now)
+            self.log(f"retention: expired {len(purged)} artifact bundles")
+        return len(purged)
+
     def sweep_once(self, now: datetime | None = None) -> int:
         """기간 지난 잡의 산출물을 지우고 표시한다. 지운 잡 수를 돌려준다."""
         now = now or self.now_fn()
@@ -118,6 +144,7 @@ class Janitor:
         if purged:
             self.store.mark_artifacts_purged(purged, now)
             self.log(f"retention: purged {len(purged)} jobs")
+        self._sweep_bundles(now)
         cutoff = now - timedelta(days=self.config.server.metadata_retention_days)
         deleted = self.store.delete_old_jobs(cutoff)
         if deleted:

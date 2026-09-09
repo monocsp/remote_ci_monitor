@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import random
+import secrets
 import shutil
 import socket
 import sys
@@ -27,7 +29,9 @@ from typing import Any
 
 from remote_ci_monitor import __version__
 from remote_ci_monitor.client import ClientError, WorkerClient
+from remote_ci_monitor.collect import CollectResult, collect
 from remote_ci_monitor.config import WorkerConfig
+from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import (
     CANCELLED,
     FAILED,
@@ -154,6 +158,52 @@ class _RemoteObserver:
 
     def should_stop(self) -> bool:
         return self.proc.stopping.is_set()
+
+
+def _iso(at: datetime) -> str:
+    return at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _policy_from_claim(claimed: dict[str, Any]) -> art.ArtifactPolicy | None:
+    """claim 응답에 실려 온 **얼린 정책**(§9). 서버가 안 보냈으면 산출물을 안 모은다."""
+    raw = claimed.get("artifacts")
+    if not isinstance(raw, dict):
+        preset = claimed.get("preset")
+        globs = preset.get("artifacts") if isinstance(preset, dict) else None
+        if not isinstance(globs, list) or not globs:
+            return None
+        raw = {"globs": globs}
+    globs = raw.get("globs")
+    if not isinstance(globs, list) or not globs:
+        return None
+    defaults = art.ArtifactPolicy()
+    return art.ArtifactPolicy(
+        globs=tuple(str(g) for g in globs),
+        max_bytes=int(raw.get("max_bytes") or defaults.max_bytes),
+        max_files=int(raw.get("max_files") or defaults.max_files),
+        timeout_seconds=int(raw.get("timeout_seconds") or defaults.timeout_seconds),
+        cancel_timeout_seconds=int(
+            raw.get("cancel_timeout_seconds") or defaults.cancel_timeout_seconds
+        ),
+    )
+
+
+def _disposition(bundle: CollectResult | None) -> dict[str, Any] | None:
+    """`finish` 에 싣는 구조화된 처분(§5). 해시 하나로는 빈 수집도 시한 초과도 말할 수 없다.
+
+    `None` 이면 필드를 아예 안 보낸다 — 그게 `unknown` 이고 `empty` 와 다르다.
+    """
+    if bundle is None:
+        return None
+    return {
+        "state": bundle.state,
+        "bundle_sha256": bundle.bundle_sha256,
+        "file_count": len(bundle.files) if bundle.files else 0,
+        "total_bytes": bundle.total_bytes,
+        "skipped_count": bundle.skipped_count,
+        "reason_code": bundle.reason_code,
+        "reason_args": bundle.reason_args,
+    }
 
 
 class RemoteWorker:
@@ -446,7 +496,9 @@ class RemoteWorker:
         except (MaterializeError, RunnerError) as e:
             observer.final_flush()
             summary = str(e)[:200]
-            self._finish(job.id, FAILED, None, summary, observer)
+            # 실행이 시작되지 못했다 — 조용히 비우지 않고 그 사실을 처분으로 남긴다(§5)
+            skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
+            self._finish(job.id, FAILED, None, summary, observer, artifacts=_disposition(skipped))
             self.log(f"lane {lane}: #{job.id} failed — {summary}")
             self._cleanup(spec, failed=True)
             return
@@ -462,19 +514,73 @@ class RemoteWorker:
             outcome = SUCCEEDED
         else:
             outcome = FAILED
-        self._finish(job.id, outcome, rc, summary, observer)
+        # 워크스페이스를 지우기 전에 모으고, `self.running` 에서 빠지기 전에 올린다(§5)
+        bundle = self._collect_artifacts(job.id, claimed, spec, result)
+        self._finish(
+            job.id, outcome, rc, summary, observer, artifacts=_disposition(bundle), finished=result
+        )
         self.log(f"lane {lane}: #{job.id} {outcome} in {_fmt_seconds(time.monotonic() - started)}")
         self._cleanup(spec, failed=outcome != SUCCEEDED)
 
+    def _collect_artifacts(
+        self, job_id: int, claimed: dict[str, Any], spec: RunSpec, result: Any
+    ) -> CollectResult | None:
+        """모아서 서버에 올린다. 오류는 여기서 잡는다 — 산출물 때문에 잡이 죽지 않는다(§5)."""
+        policy = _policy_from_claim(claimed)
+        if policy is None or not policy.enabled():
+            return None
+        # 스풀은 **지우지 않는다.** 전송 결과가 불확실하면 다시 보낼 수 있어야 한다(§5).
+        # 무한정 쌓이지 않게 시작할 때 `_sweep_workspaces` 가 나이로 쓸어 간다.
+        staging = self.config.data_path / "artifacts" / f"{job_id}.{secrets.token_hex(8)}"
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            forced = result.cancelled or result.timed_out
+            out = collect(
+                spec.workspace,
+                policy,
+                staging,
+                now_fn=self.now_fn,
+                budget_seconds=policy.cancel_timeout_seconds if forced else None,
+            )
+            if out.state != art.READY or out.bundle_path is None:
+                return out
+            receipt = self.client.upload_bundle(job_id, out.bundle_path)
+            return dataclasses.replace(out, bundle_sha256=receipt.get("bundle_sha256"))
+        except Exception as e:  # noqa: BLE001 — 수집·업로드 실패가 잡을 죽이지 않는다
+            self.log(f"lane: #{job_id} artifacts: {type(e).__name__}")
+            return CollectResult(state=art.FAILED, reason_code="upload_failed")
+
     def _finish(
-        self, job_id: int, outcome: str, rc: int | None, summary: str | None, observer: Any
+        self,
+        job_id: int,
+        outcome: str,
+        rc: int | None,
+        summary: str | None,
+        observer: Any,
+        *,
+        artifacts: dict[str, Any] | None = None,
+        finished: Any = None,
     ) -> None:
+        """완료를 보고하고 **그 뒤에** heartbeat 목록에서 뺀다(§5).
+
+        먼저 빼면 그사이의 heartbeat 에 잡이 안 실려 서버가 `lost` 로 닫는다 — 수집·업로드가
+        길어질수록 그 창이 넓어진다.
+        """
+        with self._lock:
+            self.cancel_requested.discard(job_id)
+        if not getattr(observer, "closed_by_server", False):
+            extra: dict[str, Any] = {}
+            if artifacts is not None:
+                extra["artifacts"] = artifacts
+            if finished is not None and getattr(finished, "finished", None) is not None:
+                # 실행 종료 시각 — 수집·업로드 시간이 job_seconds 에 섞이지 않게(§10)
+                extra["finished_at"] = _iso(finished.finished)
+            self.report(
+                lambda: self.client.finish(job_id, outcome, rc, summary, **extra),
+                f"#{job_id} finish",
+            )
         with self._lock:
             self.running.pop(job_id, None)
-            self.cancel_requested.discard(job_id)
-        if getattr(observer, "closed_by_server", False):
-            return
-        self.report(lambda: self.client.finish(job_id, outcome, rc, summary), f"#{job_id} finish")
 
     def _cleanup(self, spec: RunSpec, *, failed: bool) -> None:
         keep = failed and self.config.keep_workspace_on_failure
@@ -484,7 +590,11 @@ class RemoteWorker:
     def _sweep_workspaces(self) -> None:
         """시작 시 `WORKSPACE_KEEP_DAYS` 넘은 워크스페이스·잡 디렉터리를 지운다."""
         cutoff = time.time() - WORKSPACE_KEEP_DAYS * 86400
-        for base in (self.config.data_path / "workspaces", self.config.data_path / "jobs"):
+        for base in (
+            self.config.data_path / "workspaces",
+            self.config.data_path / "jobs",
+            self.config.data_path / "artifacts",  # 올리고 남긴 묶음 스풀(M5e)
+        ):
             if not base.is_dir():
                 continue
             for entry in base.iterdir():

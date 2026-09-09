@@ -337,7 +337,7 @@ def finished_job(store, *, state=SUCCEEDED, finished, created=NOW, tree="9f8e", 
 
 
 def test_fresh_db_is_latest_schema_with_artifacts_purged_at(store, tmp_path):
-    assert DB_VERSION == 7 and store.user_version() == 7
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     j = enqueue(store)
     assert store.get_job(j.id).artifacts_purged_at is None
     with sqlite3.connect(tmp_path / "rcm.sqlite3") as c:
@@ -372,6 +372,10 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         # v6(M5d-0)이 더한 것도 뗀다(요약 코드·인자)
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        # v7(M5e)이 더한 것도 뗀다(합류 횟수 · 잡 산출물 묶음)
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("DROP TABLE blobs")
         c.execute("DROP TABLE notifications")
         c.execute("PRAGMA user_version=1")
@@ -524,10 +528,10 @@ def test_migration_adds_the_claim_index_to_an_old_database(tmp_path):
     path = tmp_path / "old.sqlite3"
     s = Store(path)
     s.close()
-    c = sqlite3.connect(path)  # v6 모양으로 되돌린다
+    c = sqlite3.connect(path)  # v7 모양으로 되돌린다(M5e 열은 그대로 두고 인덱스만 뗀다)
     try:
         c.execute("DROP INDEX IF EXISTS jobs_claim")
-        c.execute("PRAGMA user_version=6")
+        c.execute("PRAGMA user_version=7")
         c.commit()
     finally:
         c.close()

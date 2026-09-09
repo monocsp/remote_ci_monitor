@@ -634,6 +634,29 @@
     if (step.state === "done") return "✔";
     return "·";
   }
+  // 산출물 한 줄(M5e §13). 모르는 수는 —, `0` 은 「모았는데 없었다」일 때만이다. 파일 이름은
+  // 공개 문서에 없으므로 여기서도 없다 — 받아 가는 명령만 준다.
+  function artifactsLine(job, lang, nowMs) {
+    var a = (job || {}).artifacts;
+    if (!a || !a.state) return null;
+    if (a.state === "disabled" || a.state === "pending") return null;
+    var parts = [T(lang, "art.label"), T(lang, "art.state." + a.state) || a.state];
+    if (a.state === "ready" || a.state === "empty") {
+      parts.push(isNum(a.file_count) ? T(lang, "art.files", { n: a.file_count }) : DASH);
+      parts.push(isNum(a.bundle_bytes) ? fmtBytes(a.bundle_bytes) : DASH);
+    }
+    if (a.reason_code) parts.push(T(lang, "art.reason." + a.reason_code) || a.reason_code);
+    var left = parseIso(a.expires_at);
+    if (a.state === "ready" && left !== null && isNum(nowMs)) {
+      parts.push(T(lang, "art.left", { dur: fmtDuration(Math.max(0, (left - nowMs) / 1000)) }));
+    }
+    return {
+      text: parts.join(" · "),
+      cls: a.state,
+      command: a.state === "ready" ? "rcm artifacts " + job.id + " --fetch --output ." : null
+    };
+  }
+
   function recentLine(job, tz, nowMs, lang) {
     job = job || {};
     var state = job.state;
@@ -761,7 +784,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, recentLine: recentLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
@@ -1515,6 +1538,9 @@
         '<span class="t">' + esc(l.when) + "</span>" +
         '<span class="s">' + (l.summary ? "<b>" + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") : "") +
         (l.rerun ? ' · <button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="' + esc(tr("row.copy")) + '">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
+      var art = artifactsLine(job, L(), now());
+      if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
+        (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
       if (open) html += '<div class="rdetail">' + esc(transitionsLine(job, tz(), L())) + (job.failed_step ? "<br>" + esc(tr("recent.failed_step")) + "<b>" + esc(job.failed_step) + "</b>" : "") + (outcomeText(job, L()) ? "<br>" + esc(outcomeText(job, L())) : "") + "</div>";
       html += "</div>";
     });

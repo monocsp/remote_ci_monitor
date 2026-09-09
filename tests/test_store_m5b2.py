@@ -157,7 +157,7 @@ def test_fresh_db_is_schema_v5_with_token_kind_worker_name_and_workers_table(sto
     """§1 · §2: 새 DB 는 v5 — `tokens.kind TEXT NOT NULL DEFAULT 'client'`(admin 열은 유지) ·
     `jobs.worker_name TEXT`(NULL 허용) · `workers` 표의 열·PK·NOT NULL 이 명세 그대로."""
     path = tmp_path / "rcm.db"
-    assert DB_VERSION == 7 and store.user_version() == DB_VERSION
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     tok = columns(path, "tokens")
     assert tok["kind"]["type"].upper() == "TEXT" and tok["kind"]["notnull"] == 1
     assert str(tok["kind"]["dflt_value"]).strip("'\"") == "client"
@@ -209,6 +209,9 @@ def test_migration_v4_to_v5_fills_kind_from_admin_and_adds_worker_name_and_worke
         c.execute("DROP TABLE workers")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("PRAGMA user_version=4")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 4

@@ -110,7 +110,7 @@ def job_columns(path) -> set[str]:
 
 def test_fresh_db_is_schema_v3_with_priority_blobs_and_notifications(store, tmp_path):
     path = tmp_path / "rcm.sqlite3"
-    assert DB_VERSION == 7 and store.user_version() == DB_VERSION
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 6
     assert "priority" in job_columns(path)
     assert {"blobs", "notifications"} <= table_names(path)
     with sqlite3.connect(path) as c:
@@ -144,6 +144,9 @@ def test_migration_v2_to_v3_adds_priority_and_tables_and_keeps_rows(tmp_path):
         c.execute("DROP TABLE IF EXISTS notifications")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
+        c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
+        c.execute("DROP TABLE IF EXISTS job_artifacts")
+        c.execute("ALTER TABLE jobs DROP COLUMN join_count")
         c.execute("PRAGMA user_version=2")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 2
