@@ -219,7 +219,7 @@ class Job:
     summary_args: dict[str, Any] = field(default_factory=dict)
     failed_step: str | None = None
     #: `failed_step` 이 `step-end::fail` 로 확정된 것이면 False, 「종료 코드가 0 이 아니니
-    #: 마지막 스텝」 폴백이 고른 **추측**이면 True. 옛 행(v9 마이그레이션 전에 끝난 잡)은
+    #: 마지막 스텝」 폴백이 고른 **추측**이면 True. 옛 행(v10 마이그레이션 전에 끝난 잡)은
     #: None — 모른다. 확정과 추측을 섞으면 무죄인 스텝을 자신있게 범인으로 지목하게 된다.
     failed_step_guessed: bool | None = None
     lane: int | None = None

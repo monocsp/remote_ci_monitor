@@ -1,4 +1,4 @@
-"""추측한 실패 스텝은 추측이라고 말한다 — 스키마 v9 · finish 왕복 · 상태 문서 · 알림 env.
+"""추측한 실패 스텝은 추측이라고 말한다 — 스키마 v10 · finish 왕복 · 상태 문서 · 알림 env.
 
 2026-09-08~09 운영(게이트 145잡) 추적에서 나왔다. 실패 55건 중 16건의 `failed_step` 이
 `build web` 이었는데 그 스텝은 로그에서 `ok: build/web` 으로 **성공**했다. 게이트가 스텝을
@@ -184,11 +184,11 @@ def _job() -> Job:
     )
 
 
-# ── 스키마 v9 · 왕복 ──────────────────────────────────────────────────────────
+# ── 스키마 v10 · 왕복 ──────────────────────────────────────────────────────────
 
 
-def test_fresh_db_is_schema_v9_with_the_guess_column(store, tmp_path):
-    assert store.user_version() == DB_VERSION and DB_VERSION >= 9
+def test_fresh_db_is_schema_v10_with_the_guess_column(store, tmp_path):
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 10
     assert "failed_step_guessed" in job_columns(tmp_path / "rcm.sqlite3")
 
 
@@ -231,7 +231,7 @@ def test_recent_rows_keep_each_job_s_own_answer(store):
     }
 
 
-def test_migration_v8_to_v9_leaves_old_rows_saying_unknown(tmp_path):
+def test_migration_v9_to_v10_leaves_old_rows_saying_unknown(tmp_path):
     """옛 행은 「추측이었는지 모른다」다 — 0 으로 채워 확정이라고 우기지 않는다."""
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
@@ -240,16 +240,16 @@ def test_migration_v8_to_v9_leaves_old_rows_saying_unknown(tmp_path):
     s.finish(done.id, FAILED, now=at(2), exit_code=1, failed_step="build web")
     live = enqueue(s, tree="q", now=at(3))
     s.close()
-    # v8 데이터베이스를 흉내 낸다: 새 열을 떼고 user_version 을 8 로 되돌린다
+    # v9 데이터베이스를 흉내 낸다: 새 열을 떼고 user_version 을 9 로 되돌린다
     c = sqlite3.connect(path)
     try:
         c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")
-        c.execute("PRAGMA user_version=8")
+        c.execute("PRAGMA user_version=9")
         c.commit()
     finally:
         c.close()
     assert "failed_step_guessed" not in job_columns(path)
-    s2 = Store(path)  # 8 → 9 마이그레이션이 여기서 돈다
+    s2 = Store(path)  # 9 → 10 마이그레이션이 여기서 돈다
     try:
         assert s2.user_version() == DB_VERSION and s2.healthy()
         assert "failed_step_guessed" in job_columns(path)

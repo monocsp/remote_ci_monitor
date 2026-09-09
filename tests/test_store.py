@@ -377,7 +377,7 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         c.execute("DROP TABLE IF EXISTS job_artifacts")
         c.execute("ALTER TABLE jobs DROP COLUMN join_count")
-        # v9 가 더한 것도 뗀다(실패 스텝이 확정인가 추측인가)
+        # v10 이 더한 것도 뗀다(실패 스텝이 확정인가 추측인가)
         c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")
         c.execute("DROP TABLE blobs")
         c.execute("DROP TABLE notifications")
