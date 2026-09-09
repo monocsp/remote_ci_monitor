@@ -98,6 +98,11 @@ The build machine then runs whatever that folder has checked out, and an upgrade
 | Development happens in a `git worktree` with its own `.venv` (`pip install -e ".[dev]"`) | the code you are changing is never the code the machine is running |
 | A test server gets its own config file, `port` and `data_dir` | sharing `data_dir` means two servers writing one SQLite database |
 
+A test server is one file away: the config search order is `--config`, `$RCM_CONFIG`, `./rcm.toml`,
+then `~/.config/rcm/server.toml`, so an `rcm.toml` in the worktree is found before the production
+one — and that name is already in `.gitignore`. Give it `port = 8788`, its own `data_dir` and
+`advertise = false`, so discovery keeps pointing sessions at the real server.
+
 Pull and restart together, with the queue empty. Between the two the running process still holds
 the old modules, so a job that starts in that window can load a mix of both.
 
