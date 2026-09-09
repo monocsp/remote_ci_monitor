@@ -301,6 +301,9 @@ rcm artifacts 412 --fetch --output ./out   # 지정한 디렉터리에 쓴다
 ## 11. 그다음
 
 - 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md).
+- 잡을 둘씩 돌린다. `[server] lanes = 2` 로 두면 레인 2 는 머신에 CPU 여유가 있을 때만 잡으므로
+  올려 봐도 안전하다. 큐가 `부하로 대기` 라고 하면 머신이 꽉 찼다는 뜻이다:
+  [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).
 - 스크립트가 스텝 마커를 찍게 한다. 그래야 큐가 「도는 중」 대신 진행을 보여 준다.
 - CI 스크립트에서 `rcm run` 을 감싸고 종료 코드로 분기한다. `examples/session/ci-gate.sh` 가
   동작하는 예시다.
