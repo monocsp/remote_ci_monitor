@@ -107,11 +107,14 @@ class _StatusLine:
             self.pending = None
 
 
-def describe(job: dict[str, Any]) -> str:
-    """wait 진행 한 줄: 상태 · 순번/스텝 · 경과 · ETA."""
+def describe(job: dict[str, Any], *, head: str | None = None) -> str:
+    """wait 진행 한 줄: 상태 · 순번/스텝 · 경과 · ETA.
+
+    `head` 를 주면 맨 앞의 `#<id> <state>` 자리에 그 문구가 들어간다(`--no-wait` 의 제출 줄).
+    """
     state = job.get("state", "?")
     est = job.get("estimate") or {}
-    parts = [f"#{job.get('id')} {state}"]
+    parts = [head or f"#{job.get('id')} {state}"]
     if job.get("position"):
         parts.append(f"{_ordinal(job['position'])} in line")
         reason = job.get("reason")
@@ -122,12 +125,13 @@ def describe(job: dict[str, Any]) -> str:
     prog = job.get("progress")
     if prog and prog.get("phase") == "executing" and prog.get("steps"):
         total = prog.get("steps_total")
-        head = f"step {prog.get('current_index') or prog.get('steps_done')}/{total or '?'}"
+        # `head` 를 다시 쓰지 않는다 — 인자를 가리면 순서만 바뀌어도 머리가 조용히 스텝이 된다
+        step = f"step {prog.get('current_index') or prog.get('steps_done')}/{total or '?'}"
         if prog.get("steps_total_partial"):
-            head += "+"
+            step += "+"
         if prog.get("current_name"):
-            head += f" {prog['current_name']}"
-        parts.append(head)
+            step += f" {prog['current_name']}"
+        parts.append(step)
     elif prog and prog.get("phase") == "materializing":
         parts.append("preparing workspace")
     if est.get("elapsed_seconds") is not None:
@@ -139,6 +143,80 @@ def describe(job: dict[str, Any]) -> str:
     if job.get("summary") and state in TERMINAL_STATES:
         parts.append(str(job["summary"]))
     return " · ".join(parts)
+
+
+#: `--no-wait` 의 표시용 조회 상한(초). 제출은 이미 끝났으니 오래 붙들지 않는다.
+NO_WAIT_VIEW_TIMEOUT = 5.0
+
+#: 조회한 잡 문서에서 `--no-wait` JSON 이 그대로 싣는 칸. 모르는 값은 서버가 이미 null 로 준다.
+NO_WAIT_KEYS = ("position", "reason", "ahead_job_id", "blocked_by", "estimate")
+
+
+def _job_view(client: Client, job_id: int) -> dict[str, Any] | None:
+    """순번·ETA 를 그리려고 잡을 **한 번** 조회한다. 표시용이라 실패는 삼킨다.
+
+    이 시점의 잡은 이미 큐에 들어가 있다 — 조회가 깨졌다고 제출을 실패로 만들지 않는다.
+    Ctrl-C 도 여기서는 삼킨다: 잡은 이미 났고 세션이 알아야 하는 건 그 번호다(결정 17 의 뜻).
+
+    문서는 우리가 만든 게 아니라 **값의 타입까지 믿을 수 없다**. `{"position": "3"}` 하나면
+    `describe()` 가 터지고, 그 예외는 `main()` 의 그물에도 안 걸려 이미 큐에 있는 잡을 실패로
+    만든다. 그래서 **한 번 그려 보고** 터지면 조회가 실패한 것과 똑같이 취급한다 — 줄도 JSON 도
+    순번 조각을 통째로 뺀다. `state` 없는 문서는 잡 문서가 아니다(`{}` 를 「순번 없는 대기 잡」
+    으로 읽지 않는다).
+    """
+    try:
+        view = client.job(job_id, timeout=NO_WAIT_VIEW_TIMEOUT)
+    except (ClientError, ValueError, OSError, KeyboardInterrupt):
+        return None
+    if not isinstance(view, dict) or not view.get("state"):
+        return None
+    try:
+        describe(view)  # 그려지는 문서만 쓴다(진짜 줄은 head 만 바꿔 다시 그린다)
+    except Exception:
+        return None
+    return view
+
+
+def _submitted_line(
+    job_id: int,
+    view: dict[str, Any] | None,
+    *,
+    joined: bool,
+    state: str | None,
+    url: str | None,
+    detail: str = "",
+) -> str:
+    """`--no-wait` 이 stderr 에 찍는 한 줄: 무엇을 냈나 · 몇 번째인가 · 언제 끝나나 · 어디서 보나.
+
+    조회가 안 됐으면 순번 조각만 빠진다(`submitted job #155 queued · <url>`).
+    """
+    head = f"{'joined' if joined else 'submitted'} job #{job_id}"
+    if state:
+        head += f" {state}"
+    if view is not None:
+        head = describe(view, head=head)
+    return " · ".join([head, *([detail] if detail else []), *([url] if url else [])])
+
+
+def _no_wait_json(
+    job_id: int,
+    view: dict[str, Any] | None,
+    *,
+    joined: bool,
+    state: str | None,
+    url: str | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """`--no-wait` 의 stdout JSON.
+
+    조회가 안 됐으면 순번 칸을 **아예 넣지 않는다** — null 은 「순번이 없다」는 뜻이라 다르다.
+    """
+    body: dict[str, Any] = {"job_id": job_id, "joined": joined, "state": state}
+    if view is not None:
+        body.update({k: view.get(k) for k in NO_WAIT_KEYS})
+    body.update(extra or {})
+    body["url"] = url
+    return body
 
 
 NO_SERVER_HINT = "no server configured (use --server, RCM_SERVER or client.toml)"
@@ -323,8 +401,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             return USAGE_EXIT if e.status in (400, 401, 403, 413, 0) else EXIT_UNKNOWN
         job_id = int(resp["job_id"])
         joined = bool(resp.get("joined"))
+        state = resp.get("state")  # 합류면 그 잡의 상태, 새 잡이면 uploading
         if joined:
-            _info(f"joined job #{job_id} ({resp.get('state')}) — same preset, inputs and tree")
+            if not args.no_wait:  # --no-wait 은 순번까지 실은 한 줄로 대신 말한다
+                _info(f"joined job #{job_id} ({state}) — same preset, inputs and tree")
         else:
             # ④ 업로드
             line = _StatusLine()
@@ -346,24 +426,30 @@ def cmd_run(args: argparse.Namespace) -> int:
                         f"{total / 1e6:.1f} MB (cache {pct}%)"
                     )
                 else:
-                    client.upload(job_id, snap.tar_path, progress=progress)
+                    up = client.upload(job_id, snap.tar_path, progress=progress)
             except ClientError as e:
                 line.done()
                 hint = " (retry with --no-cache)" if e.status in (400, 409) else ""
                 _err(f"upload failed: {e.message}{hint}")
                 return EXIT_UNKNOWN
             line.done()
-            _info(f"submitted job #{job_id} · {resp.get('url', '')}")
+            state = up.get("state") or state  # 트리를 다 받았다 — 이제 queued 다
+            if not args.no_wait:
+                _info(f"submitted job #{job_id} · {resp.get('url', '')}")
     finally:
         try:
             snap.tar_path.unlink()
         except OSError:
             pass
     if args.no_wait:
+        # 순번·ETA 는 표시용이다 — 조회가 실패해도 잡은 큐에 있고 종료 코드는 0 이다
+        view = _job_view(client, job_id)
+        state = (view or {}).get("state") or state
+        url = resp.get("url")
+        detail = "same preset, inputs and tree" if joined else ""
+        _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _info(f"fetch its artifacts later with `rcm artifacts {job_id} --fetch --output DIR`")
-        _print_json(
-            {"job_id": job_id, "joined": joined, "state": "submitted", "url": resp.get("url")}
-        )
+        _print_json(_no_wait_json(job_id, view, joined=joined, state=state, url=url))
         return 0
     # ⑤ wait — 끝나면 산출물을 제출한 그 트리에 쓴다(§11)
     spec = None
@@ -408,22 +494,28 @@ def _run_git_ref(
     joined = bool(resp.get("joined"))
     sha = resp.get("sha")
     short = str(sha)[:7] if sha else "—"
-    if joined:
-        _info(f"joined job #{job_id} ({resp.get('state')}) — same preset, inputs, commit {short}")
-    else:
-        _info(f"submitted job #{job_id} ({preset.name} · {ref} @{short}) · {resp.get('url', '')}")
+    state = resp.get("state")
+    url = resp.get("url")
     if args.no_wait:
+        # 제출 응답의 state 는 「방금 만들었다」는 뜻이다 — 순번과 함께 지금 상태를 다시 본다
+        view = _job_view(client, job_id)
+        state = (view or {}).get("state") or state
+        detail = (
+            f"same preset, inputs, commit {short}"
+            if joined
+            else f"({preset.name} · {ref} @{short})"  # 안에 `·` 가 있다 — 목록 항목과 안 섞이게
+        )
+        _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _print_json(
-            {
-                "job_id": job_id,
-                "joined": joined,
-                "state": resp.get("state") or "submitted",
-                "ref": ref,
-                "sha": sha,
-                "url": resp.get("url"),
-            }
+            _no_wait_json(
+                job_id, view, joined=joined, state=state, url=url, extra={"ref": ref, "sha": sha}
+            )
         )
         return 0
+    if joined:
+        _info(f"joined job #{job_id} ({state}) — same preset, inputs, commit {short}")
+    else:
+        _info(f"submitted job #{job_id} ({preset.name} · {ref} @{short}) · {url or ''}")
     return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
 
 

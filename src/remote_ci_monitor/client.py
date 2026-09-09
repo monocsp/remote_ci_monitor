@@ -558,8 +558,8 @@ class Client:
         part.replace(dest)
         return received
 
-    def get_json(self, path: str) -> Any:
-        _, _, body = self._request("GET", path)
+    def get_json(self, path: str, *, timeout: float | None = None) -> Any:
+        _, _, body = self._request("GET", path, timeout=timeout)
         return json.loads(body) if body else None
 
     def post_json(self, path: str, obj: Any = None) -> Any:
@@ -675,8 +675,8 @@ class Client:
     def set_priority(self, job_id: int, priority: str | int) -> dict[str, Any]:
         return self.post_json(f"/jobs/{job_id}/priority", {"priority": priority})
 
-    def job(self, job_id: int, *, tail: int = 0) -> dict[str, Any]:
-        return self.get_json(f"/jobs/{job_id}?tail={tail}")
+    def job(self, job_id: int, *, tail: int = 0, timeout: float | None = None) -> dict[str, Any]:
+        return self.get_json(f"/jobs/{job_id}?tail={tail}", timeout=timeout)
 
     def cancel(self, job_id: int) -> dict[str, Any]:
         return self.post_json(f"/jobs/{job_id}/cancel")

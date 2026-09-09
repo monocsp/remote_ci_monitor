@@ -415,7 +415,7 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 | `rcm pause` · `rcm resume` | 큐 정지·재개(admin 토큰). `POST /pause`·`/resume` |
 | `rcm serve [--config] [--bind] [--port] [--data-dir]` · `rcm check` · `rcm token add\|list\|revoke` · `rcm version` | 서버·셋업·토큰 |
 
-**`rcm run` 흐름**: ① 프리셋·입력을 서버 스키마로 검증(`GET /api/status.presets`, 실패면 서버에 안 보내고 종료 2) ② `tree` 면 스냅샷 규칙으로 파일 목록·`tree_hash` 계산 ③ `POST /jobs` → 합류면 업로드 생략 ④ `PUT …/tree` 업로드(진행률 stderr) ⑤ `rcm wait`. `--no-wait` 면 ③/④ 뒤 JSON 만 찍고 0 으로 끝난다(제출 성공 ≠ 잡 성공 — JSON 의 `state` 를 보라).
+**`rcm run` 흐름**: ① 프리셋·입력을 서버 스키마로 검증(`GET /api/status.presets`, 실패면 서버에 안 보내고 종료 2) ② `tree` 면 스냅샷 규칙으로 파일 목록·`tree_hash` 계산 ③ `POST /jobs` → 합류면 업로드 생략 ④ `PUT …/tree` 업로드(진행률 stderr) ⑤ `rcm wait`. `--no-wait` 면 ③/④ 뒤 **순번·ETA 를 한 번 조회해**(`GET /jobs/{id}`) stderr 한 줄(`submitted job #155 queued · 3rd in line · wait 4m 12s · eta 16:02 · <url>`)과 stdout JSON(`state`·`position`·`reason`·`ahead_job_id`·`blocked_by`·`estimate`)을 찍고 0 으로 끝난다(제출 성공 ≠ 잡 성공 — JSON 의 `state` 를 보라). 그 조회가 실패해도 **0** 이다 — 「제출됐다」는뜻이지 「조회됐다」가 아니다. 명세 `docs/nowait-workplan.md`.
 
 **세션에서 쓰는 모양**(`examples/session/ci-gate.sh`):
 

@@ -5,7 +5,7 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 15종:
+변이 16종:
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -20,6 +20,7 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ⑭ web-progress-default-estimate — 표본도 프리셋 값도 없는 설치 기본값(600초)으로 눈금을 그림
      (같은 파일 · Codex 리뷰 1)
   ⑮ web-progress-full-bar — 도는 잡의 예측 막대가 100% 까지 차오름 (같은 파일 · Codex 리뷰 2)
+  ⑯ nowait-view-trusted — `--no-wait` 의 표시용 조회가 문서를 곧이곧대로 믿음 (`cli.py`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -173,6 +174,21 @@ MUTANTS = (
         ),
         new="",
         tests=("tests/test_manifest.py",),
+    ),
+    Mutant(
+        name="nowait-view-trusted",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            '    if not isinstance(view, dict) or not view.get("state"):\n'
+            "        return None\n"
+            "    try:\n"
+            "        describe(view)  # 그려지는 문서만 쓴다(진짜 줄은 head 만 바꿔 다시 그린다)\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    return view"
+        ),
+        new="    return view if isinstance(view, dict) else None",
+        tests=("tests/test_nowait_resilience.py",),
     ),
 )
 
