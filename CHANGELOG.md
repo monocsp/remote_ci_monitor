@@ -14,7 +14,7 @@ of a key bumps that number and is listed here.
   `past the estimate` and a job nothing can be said about — stuck, preparing its workspace, or
   with no estimate at all — reads `progress —`. The time-based bar grows every second instead of
   jumping between refreshes, and no bar ever shows a percentage the page cannot stand behind.
-  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
 - **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
   stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
   a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
@@ -33,10 +33,10 @@ of a key bumps that number and is listed here.
   going" — the progress bar and `step 2/4 build 2s` in the reason column — and **▸** opens the step
   list, the log tail and the Log/Cancel buttons. The page remembers which rows *you* opened
   (`rcm.expanded` in that browser), not which ones you closed.
-  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
 - **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
   and it was the one place the page dropped it.
-  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
 - **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
   `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
   `held`. `schema_version` is unchanged.
