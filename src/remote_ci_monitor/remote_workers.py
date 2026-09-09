@@ -232,17 +232,16 @@ class RemoteWorkersMixin:
         """그 풀(None 이면 전부)의 원격 레인. busy 는 DB 의 running·cancelling 잡, 나머지 idle,
         heartbeat 이 오래됐으면 전부 down. 워커 이름순 · 레인순."""
         infos: list[WorkerInfo] = []
-        for row in self._workers():
-            if pool is not None and row.pool != pool:
-                continue
+        rows = [r for r in self._workers() if pool is None or r.pool == pool]
+        # 워커마다 묻지 않고 **한 문장**으로 읽는다 — 이 경로는 마커 줄마다 돈다
+        try:
+            lanes_busy = self.store.active_worker_lanes() if rows else {}
+        except Exception:  # noqa: BLE001 — 조회 실패면 busy 를 모르는 것이지 워커가 없는 게 아니다
+            lanes_busy = {}
+        for row in rows:
             alive = self.worker_alive(row, now)
-            busy: dict[int, Job] = {}
-            if alive:
-                for job in self.store.jobs_of_worker(row.name):
-                    if job.lane is not None:
-                        busy[job.lane] = job
             for lane in range(1, row.lanes + 1):
-                job = busy.get(lane)
+                job = lanes_busy.get((row.name, lane)) if alive else None
                 if not alive:
                     infos.append(
                         WorkerInfo(
@@ -255,12 +254,13 @@ class RemoteWorkersMixin:
                         )
                     )
                 elif job is not None:
+                    job_id, started_at = job
                     infos.append(
                         WorkerInfo(
                             lane=lane,
                             state=WORKER_BUSY,
-                            job_id=job.id,
-                            since=job.started_at,
+                            job_id=job_id,
+                            since=started_at,
                             worker=row.name,
                             pool=row.pool,
                         )

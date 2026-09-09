@@ -259,6 +259,22 @@ class StoreError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class SampleRow:
+    """중앙값 계산에 필요한 것만 담은 가벼운 행(`Store.list_sample_rows`).
+
+    `core/queue.medians_from` 과 `split_by_pool` 이 읽는 여섯 칸이 전부다 — `Job` 을 흉내 내지
+    않고, 필요한 칸이 늘면 여기와 두 함수가 같이 바뀐다.
+    """
+
+    key: str
+    pool: str
+    state: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class LaneBusy(StoreError):
     """그 워커의 그 레인에 이미 running·cancelling 잡이 있다 — 레인 과할당 금지(M5b-2)."""
 
@@ -549,6 +565,59 @@ class Store:
             "ORDER BY finished_at DESC, id DESC LIMIT ?",
             (*sorted(TERMINAL_STATES), limit),
         )
+
+    def active_worker_lanes(self) -> dict[tuple[str, int], tuple[int, datetime | None]]:
+        """`(워커, 레인) → (잡 id, 시작 시각)` — 원격 레인의 busy 판정에 필요한 전부.
+
+        워커마다 `jobs_of_worker` 를 돌면(옛 방식) 워커 수 × (1 + 잡마다 서브쿼리 둘)이 되고,
+        이 조회는 상태 문서마다 그리고 **마커 줄마다** 돈다 — 워커 50 · 실행 250 에서 한 줄에
+        SQL 555개였다. `WorkerInfo` 가 쓰는 것은 잡 id 와 시작 시각뿐이다(M5f 결정 49).
+        """
+        busy = ",".join("?" * len(BUSY_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT worker_name, lane, id, started_at FROM jobs "
+                f"WHERE worker_name IS NOT NULL AND lane IS NOT NULL AND state IN ({busy}) "
+                "ORDER BY id",
+                tuple(sorted(BUSY_STATES)),
+            )
+            .fetchall()
+        )
+        return {
+            (r["worker_name"], int(r["lane"])): (int(r["id"]), _dt(r["started_at"])) for r in rows
+        }
+
+    def list_sample_rows(self, since: datetime) -> list[SampleRow]:
+        """중앙값이 읽는 여섯 칸만. 행마다 `Job` 을 만들지 않는다.
+
+        `_row_to_job` 은 행마다 joiners·events 서브쿼리를 돌고 JSON 을 두 번 판다. 45일치를
+        그렇게 읽으면 `/api/status` 가 보존된 잡 수에 선형으로 끌려간다(1만 행 168 ms) —
+        그런데 `medians_from` 이 보는 것은 `key · pool · state · created_at · started_at ·
+        finished_at` 여섯 개뿐이다(M5f 결정 49).
+        """
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT key, pool, state, created_at, started_at, finished_at FROM jobs "
+                f"WHERE state IN ({marks}) AND started_at >= ? AND finished_at IS NOT NULL "
+                "ORDER BY id",
+                (*sorted(TERMINAL_STATES), _ts(since)),
+            )
+            .fetchall()
+        )
+        return [
+            SampleRow(
+                key=r["key"],
+                pool=r["pool"] or DEFAULT_POOL,
+                state=r["state"],
+                created_at=_dt(r["created_at"]),
+                started_at=_dt(r["started_at"]),
+                finished_at=_dt(r["finished_at"]),
+            )
+            for r in rows
+        ]
 
     def list_samples(self, since: datetime) -> list[Job]:
         """표본 후보: 시작·종료 시각이 있는 종료 잡. 정책 필터는 순수 계층이 한다."""
@@ -1681,6 +1750,33 @@ class Store:
             self._row_to_worker(r)
             for r in self._conn().execute("SELECT * FROM workers ORDER BY name").fetchall()
         ]
+
+    def forget_workers(self, cutoff: datetime) -> list[str]:
+        """`cutoff` 이전에 마지막으로 보인 워커를 잊는다. 지운 이름을 돌려준다.
+
+        지우는 코드가 없어서 은퇴한 워커가 영원히 남았다 — `server.workers[]` 에 `down` 레인이
+        계속 쌓이고 매 요청에 실린다. **활성 잡이 있는 워커는 아무리 오래됐어도 안 지운다**:
+        그 잡이 큐에서 사라지면 안 된다(M5f 결정 49).
+        """
+        busy = ",".join("?" * len(BUSY_STATES))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                f"SELECT name FROM workers WHERE last_seen_at < ? AND name NOT IN "
+                f"(SELECT worker_name FROM jobs WHERE worker_name IS NOT NULL "
+                f"AND state IN ({busy})) ORDER BY name",
+                (_ts(cutoff), *sorted(BUSY_STATES)),
+            ).fetchall()
+            gone = [r["name"] for r in rows]
+            if gone:
+                marks = ",".join("?" * len(gone))
+                conn.execute(f"DELETE FROM workers WHERE name IN ({marks})", tuple(gone))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return gone
 
     def touch_worker(self, name: str, now: datetime) -> bool:
         """heartbeat — `last_seen_at` 은 **서버 시각**으로만 쓴다. 모르는 워커면 False."""

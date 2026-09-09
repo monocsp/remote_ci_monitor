@@ -27,6 +27,8 @@ from remote_ci_monitor.core.retention import RetentionPolicy, blobs_to_purge, du
 from remote_ci_monitor.materialize import blob_path
 from remote_ci_monitor.store import Store
 
+#: 이만큼 안 보인 워커는 잊는다(활성 잡이 없을 때만).
+WORKER_FORGET_DAYS = 7
 CANDIDATE_LIMIT = 1000
 
 
@@ -145,6 +147,15 @@ class Janitor:
             self.store.mark_artifacts_purged(purged, now)
             self.log(f"retention: purged {len(purged)} jobs")
         self._sweep_bundles(now)
+        # 은퇴한 워커를 잊는다 — 안 지우면 `server.workers[]` 에 `down` 레인이 영원히 쌓인다.
+        # 활성 잡이 있으면 안 지운다(그 잡이 큐에서 사라지면 안 된다).
+        try:
+            gone = self.store.forget_workers(now - timedelta(days=WORKER_FORGET_DAYS))
+        except Exception as e:  # noqa: BLE001 — 워커 정리 실패가 sweep 을 막으면 안 된다
+            gone = []
+            self.on_error(f"retention: workers: {_errname(e)}")
+        if gone:
+            self.log(f"retention: forgot {len(gone)} workers unseen for {WORKER_FORGET_DAYS}d")
         cutoff = now - timedelta(days=self.config.server.metadata_retention_days)
         deleted = self.store.delete_old_jobs(cutoff)
         if deleted:

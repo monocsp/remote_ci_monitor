@@ -229,6 +229,14 @@ class App(RemoteWorkersMixin):
         self._snap: _DbSnapshot | None = None
         self._snap_lock = threading.Lock()
         self._dirty = True
+        # 중앙값은 **잡이 끝났을 때만** 다시 잰다. 45일치 완료 잡을 매 요청 읽으면
+        # `/api/status` 가 보존된 잡 수에 선형으로 끌려간다(1만 행 168 ms) — 그런데 45일치
+        # 중앙값은 `::rcm::step::` 한 줄로 바뀌지 않는다(M5f 결정 49).
+        self._medians: (
+            tuple[dict[str, Median] | None, dict[str, dict[str, Median]], str | None, str | None]
+            | None
+        ) = None
+        self._medians_dirty = True
         self._sse_lock = threading.Lock()
         self._sse_connections = 0
         # 부하 게이트(M5f §4.5). 락은 **하나(전역)** 이고 게이트를 지나는 레인(≥ 2)만 잡는다 —
@@ -483,6 +491,11 @@ class App(RemoteWorkersMixin):
     def publish(self, kind: str, data: dict[str, Any]) -> None:
         self.bus.publish(kind, data, at=self.now_fn())
 
+    def _mark_medians_dirty(self) -> None:
+        """새 표본이 생겼다 — 잡이 종료 상태에 이르렀을 때만."""
+        with self._snap_lock:
+            self._medians_dirty = True
+
     def _mark_dirty(self) -> None:
         with self._snap_lock:
             self._dirty = True
@@ -498,6 +511,7 @@ class App(RemoteWorkersMixin):
         if job is None:
             return
         if job.is_terminal:
+            self._mark_medians_dirty()  # 새 표본이 생겼다 — 여기서만
             self.publish(
                 KIND_JOB_FINISHED,
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
@@ -793,20 +807,7 @@ class App(RemoteWorkersMixin):
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
-        medians: dict[str, Median] | None
-        medians_error = None
-        medians_error_code: str | None = None
-        pool_medians: dict[str, dict[str, Median]] = {}
-        try:
-            since = now - timedelta(days=cfg.sample_days)
-            samples = split_by_pool(self.store.list_samples(since))
-            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
-            for name, sample_jobs in samples.items():
-                if name != DEFAULT_POOL:
-                    pool_medians[name] = medians_from(sample_jobs, now, cfg)
-        except Exception as e:  # noqa: BLE001
-            medians, medians_error = None, _error_text(e)
-            medians_error_code = _error_code(e)
+        medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
@@ -834,6 +835,33 @@ class App(RemoteWorkersMixin):
             medians_error_code=medians_error_code,
             paused=paused,
         )
+
+    def _load_medians(self, now: datetime, cfg):
+        """45일치 표본 → 풀별 중앙값. `_medians_dirty` 일 때만 실제로 읽는다.
+
+        읽을 때도 무거운 `Job` 이 아니라 `Store.list_sample_rows` 의 가벼운 행을 쓴다 —
+        중앙값이 보는 것은 여섯 칸뿐이다.
+        """
+        if not self._medians_dirty and self._medians is not None:
+            return self._medians
+        medians: dict[str, Median] | None
+        medians_error: str | None = None
+        medians_error_code: str | None = None
+        pool_medians: dict[str, dict[str, Median]] = {}
+        try:
+            since = now - timedelta(days=cfg.sample_days)
+            samples = split_by_pool(self.store.list_sample_rows(since))
+            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
+            for name, sample_rows in samples.items():
+                if name != DEFAULT_POOL:
+                    pool_medians[name] = medians_from(sample_rows, now, cfg)
+        except Exception as e:  # noqa: BLE001
+            medians, medians_error = None, _error_text(e)
+            medians_error_code = _error_code(e)
+        out = (medians, pool_medians, medians_error, medians_error_code)
+        self._medians = out
+        self._medians_dirty = False
+        return out
 
     def _snapshot(self) -> _DbSnapshot:
         """dirty 이거나 TTL 이 지났으면 다시 읽고, 아니면 캐시. status 는 이걸로 순수 계산만."""
