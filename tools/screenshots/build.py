@@ -280,7 +280,8 @@ def main() -> int:
         "cli-nowait.png",
         ls,
         [
-            (1, i_sub, i_sub + 1),
+            # 제출 줄에 순번·ETA·URL 이 붙어 접힐 수 있다 — 다음 명령 앞까지가 ①(제출이 준 것)
+            (1, i_sub, i_jobs - 1),
             (2, i_jobs + 1, i_jobs + 2),
             (3, i_wait + 1, i_wait + 1),
             (4, i_rc + 1, i_rc + 1),
@@ -299,12 +300,14 @@ def main() -> int:
     )
     assert i_fail < i_json
 
-    ls = lines("x-join")
+    ls = lines("x-join", wrap=96)
     i_second = at(ls, "$ rcm run demo --no-wait -f speed=fast   #")
+    # 합류 줄도 순번·ETA·URL 이 붙어 접힌다 — 그 다음 안내 줄 앞까지가 ②
+    i_joined = at(ls, "joined job")
     term(
         "cli-join.png",
         ls,
-        [(1, 0, i_second - 1), (2, at(ls, "joined job"), at(ls, "joined job"))],
+        [(1, 0, i_second - 1), (2, i_joined, at(ls, "fetch its artifacts", after=i_joined) - 1)],
         title="같은 트리를 두 세션이 낸다",
     )
 

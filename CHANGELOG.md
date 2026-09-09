@@ -21,6 +21,17 @@ of a key bumps that number and is listed here.
   [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
 
 ### Changed
+- **`rcm run --no-wait` now answers "where am I in the queue?".** It used to print a job id, a URL
+  and `"state": "submitted"` — a state name the server never uses — so a session that submits and
+  leaves had to run `rcm eta --job N` to learn anything. The JSON now carries the job's real
+  `state` plus `position`, `reason`, `ahead_job_id`, `blocked_by` and the whole `estimate`, and the
+  line on stderr reads
+  `submitted job #155 queued · 3rd in line · wait 4m 12s · eta 16:02 · <url>`. A job that is
+  already running has no position and that piece is left out, never printed as `0th`; a session
+  that joined an existing job sees that job's own position. The lookup is for display only: if it
+  fails or the server is slow, the line and the JSON come back without those keys and the exit code
+  is still 0 — `--no-wait` exits 0 because the job was submitted, not because it was looked up.
+  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
 - **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
   `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
   `held`. `schema_version` is unchanged.

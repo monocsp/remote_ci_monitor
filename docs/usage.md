@@ -130,7 +130,11 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 
 ![rcm run --no-wait prints the job id, rcm jobs lists the queue by pool, rcm wait follows the job to its end](images/ui/cli-nowait.png)
 
-1. **Submit and go.** The JSON line tells you the job id and whether you joined an existing job.
+1. **Submit and go.** The line names the job, its state, how many are ahead of it and when it
+   should finish; the JSON repeats that as `position`, `reason` and `estimate`. A job that is
+   already running has no position, so that part is absent rather than guessed. If the queue
+   cannot be read the position is missing and the exit code is still 0 — `--no-wait` exits 0
+   because the job was submitted, not because it was looked up.
 2. **`rcm jobs`** lists what is queued, running and recently finished, grouped by pool, with who
    asked for it and how long it took.
 3. **`rcm wait --job N`** attaches to a job you already have, follows it over the event stream and
