@@ -108,7 +108,7 @@ def job_columns(path: Path) -> dict[str, sqlite3.Row]:
 
 
 def test_fresh_db_is_schema_v4_with_a_not_null_pool_column(store, tmp_path):
-    assert DB_VERSION == 6 and store.user_version() == 6
+    assert DB_VERSION == 7 and store.user_version() == DB_VERSION
     cols = job_columns(tmp_path / "rcm.sqlite3")
     assert "pool" in cols
     assert cols["pool"]["type"].upper() == "TEXT"
@@ -146,7 +146,7 @@ def test_migration_v3_to_v4_adds_pool_and_reads_old_rows_as_default(tmp_path):
     assert "pool" not in job_columns(path)
     s2 = Store(path)  # 3 → 5 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 6 and s2.healthy()
+        assert s2.user_version() == DB_VERSION and s2.healthy()
         cols = job_columns(path)
         assert cols["pool"]["notnull"] == 1
         assert str(cols["pool"]["dflt_value"]).strip("'\"") == "default"
@@ -160,7 +160,7 @@ def test_migration_v3_to_v4_adds_pool_and_reads_old_rows_as_default(tmp_path):
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 6 and s3.get_job(j.id).pool == "default"
+    assert s3.user_version() == DB_VERSION and s3.get_job(j.id).pool == "default"
     s3.close()
 
 

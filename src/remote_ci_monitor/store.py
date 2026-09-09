@@ -18,7 +18,7 @@ import json
 import secrets
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,7 +53,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo
 
-DB_VERSION = 6
+DB_VERSION = 7
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
 CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool);
+CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
 CREATE TABLE IF NOT EXISTS joiners (
@@ -194,6 +195,11 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE jobs ADD COLUMN summary_code TEXT",
         "ALTER TABLE jobs ADD COLUMN summary_args TEXT",
     ),
+    # v6 → v7(M5f): claim 전용 인덱스. 없으면 플래너가 `jobs_pool`(풀 전체)을 타고 ORDER BY 를
+    # 임시 B-tree 로 푼다 — 20만 행에서 8.5 ms 이고, claim 은 레인마다 초당 두 번 BEGIN IMMEDIATE
+    # 안에서 돈다. 통계(ANALYZE)로 고치지 않는 이유: 통계는 이미 열린 커넥션에 반영되지 않고
+    # (`_conn()` 은 스레드 로컬이라 로컬 레인 스레드는 커넥션을 안 닫는다) 임시 B-tree 도 안 없앤다.
+    7: ("CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id)",),
 }
 
 
@@ -1046,7 +1052,33 @@ class Store:
     # ── 이벤트 ──────────────────────────────────────────────────────────────
 
     def add_marker(self, job_id: int, kind: str, value: str, at: datetime) -> None:
+        """마커 하나. 로컬 워커의 펌프는 한 줄씩 흘리므로 묶을 것이 없다(`worker.py`)."""
         self._event(self._conn(), job_id, EVENT_MARKER, {"kind": kind, "value": value}, _ts(at))
+
+    def add_markers(self, job_id: int, items: Sequence[tuple[str, str]], at: datetime) -> None:
+        """마커 여럿을 **트랜잭션 하나**로. 원격 워커의 로그 flush 는 한 번에 수천 줄이 온다.
+
+        줄마다 트랜잭션을 열면(옛 동작) 다른 레인의 `claim` 이 밀린다 — 256 KB flush 하나에
+        0.03 ms → 275.9 ms, 4 MB 본문이면 `busy_timeout` 이 터진다. 빈 목록은 트랜잭션을 열지
+        않고, 중간에 실패하면 통째로 롤백한다(부분 마커를 남기지 않는다).
+        """
+        if not items:
+            return
+        ts = _ts(at)
+        rows = [
+            (job_id, ts, EVENT_MARKER, json.dumps({"kind": k, "value": v}, separators=(",", ":")))
+            for k, v in items
+        ]
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "INSERT INTO events (job_id, at, kind, payload) VALUES (?, ?, ?, ?)", rows
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def markers(self, job_id: int) -> list[Marker]:
         out: list[Marker] = []

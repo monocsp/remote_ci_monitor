@@ -337,7 +337,7 @@ def finished_job(store, *, state=SUCCEEDED, finished, created=NOW, tree="9f8e", 
 
 
 def test_fresh_db_is_latest_schema_with_artifacts_purged_at(store, tmp_path):
-    assert DB_VERSION == 6 and store.user_version() == 6
+    assert DB_VERSION == 7 and store.user_version() == 7
     j = enqueue(store)
     assert store.get_job(j.id).artifacts_purged_at is None
     with sqlite3.connect(tmp_path / "rcm.sqlite3") as c:
@@ -358,6 +358,8 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         ).fetchall():
             c.execute(f"DROP INDEX {name}")
         c.execute("ALTER TABLE jobs DROP COLUMN artifacts_purged_at")
+        # v7(M5f)이 더한 claim 인덱스는 priority·pool 을 참조한다 — 그 열을 떼기 전에 지운다
+        c.execute("DROP INDEX IF EXISTS jobs_claim")
         # v3 가 더한 것도 뗀다(priority 열 · blobs · notifications) — 진짜 v1 모양
         c.execute("ALTER TABLE jobs DROP COLUMN priority")
         # v5(M5b-2)가 더한 것도 뗀다(worker_name · tokens.kind · workers)
@@ -381,7 +383,7 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
         c.close()
     s2 = Store(path)  # 1 → 2 마이그레이션이 여기서 돈다
     try:
-        assert s2.user_version() == 6 and s2.healthy()
+        assert s2.user_version() == DB_VERSION and s2.healthy()
         got = s2.get_job(j.id)
         assert got is not None and got.key == "gate:full" and got.state == QUEUED
         assert got.created_at == NOW and got.artifacts_purged_at is None
@@ -389,7 +391,7 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
     finally:
         s2.close()
     s3 = Store(path)  # 두 번째 열기는 아무것도 바꾸지 않는다
-    assert s3.user_version() == 6 and s3.get_job(j.id).key == "gate:full"
+    assert s3.user_version() == DB_VERSION and s3.get_job(j.id).key == "gate:full"
     s3.close()
 
 
@@ -448,3 +450,89 @@ def test_delete_old_jobs_removes_purged_rows_with_events_and_joiners(store, tmp_
     assert store.get_job(active.id).state == QUEUED
     assert store.delete_old_jobs(at(500)) == 0  # 두 번째는 할 일이 없다
     assert [j.id for j in store.list_recent(8)] == [recent.id, unpurged.id]
+
+
+# ── M5f PR 2a-0: 마커 배치 쓰기 · claim 전용 인덱스 ──────────────────────────
+
+
+def _trace(store):
+    """그 스레드 커넥션이 실행한 SQL 을 모은다. 트랜잭션 수와 행 수를 따로 셀 수 있다."""
+    seen: list[str] = []
+    store._conn().set_trace_callback(seen.append)
+    return seen
+
+
+def test_add_markers_writes_every_marker_in_one_transaction(store):
+    j = enqueue(store)
+    store.claim(1, at(1))
+    seen = _trace(store)
+    store.add_markers(j.id, [("steps", "3"), ("step", "analyze"), ("step", "build")], at(2))
+    begins = [s for s in seen if s.strip().upper().startswith("BEGIN")]
+    assert len(begins) == 1, seen  # 마커마다 하나가 아니라 통틀어 하나
+    assert [(m.kind, m.value, m.at) for m in store.markers(j.id)] == [
+        ("steps", "3", at(2)),
+        ("step", "analyze", at(2)),
+        ("step", "build", at(2)),
+    ]
+
+
+def test_add_markers_with_no_items_opens_no_transaction(store):
+    j = enqueue(store)
+    seen = _trace(store)
+    store.add_markers(j.id, [], at(2))
+    assert not [s for s in seen if s.strip().upper().startswith("BEGIN")]
+    assert store.markers(j.id) == []
+
+
+def test_add_markers_rolls_the_whole_batch_back(store):
+    j = enqueue(store)
+    with pytest.raises((sqlite3.Error, TypeError, ValueError)):
+        store.add_markers(j.id, [("step", "ok"), ("step", object())], at(2))
+    assert store.markers(j.id) == []  # 부분 마커가 남지 않는다
+
+
+def test_add_marker_singular_still_works(store):
+    """로컬 워커(worker.py)는 펌프가 한 줄씩 흘리는 스트림이라 배치하지 않는다."""
+    j = enqueue(store)
+    store.add_marker(j.id, "step", "analyze", at(2))
+    assert [(m.kind, m.value) for m in store.markers(j.id)] == [("step", "analyze")]
+
+
+def test_claim_uses_the_dedicated_index_not_the_pool_scan(store):
+    """claim 은 레인마다 초당 두 번, BEGIN IMMEDIATE 안에서 돈다. 풀 전체를 훑으면 안 된다."""
+    for i in range(3):  # 통계가 없어도 계획이 결정적이어야 한다 — 행이 몇 개는 있어야 의미가 있다
+        j = enqueue(store, tree=f"t{i}")
+        if i:
+            store.claim(1, at(i))
+            store.finish(j.id, SUCCEEDED, now=at(i + 1), exit_code=0)
+    plan = " | ".join(
+        r[3]
+        for r in store._conn().execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id FROM jobs WHERE state=? AND pool=? AND (concurrency_group IS NULL OR "
+            "concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
+            "WHERE state IN (?,?) AND pool=? AND concurrency_group IS NOT NULL)) "
+            "ORDER BY priority DESC, id LIMIT 1",
+            (QUEUED, "default", RUNNING, CANCELLING, "default"),
+        )
+    )
+    assert "jobs_claim" in plan, plan
+    assert "jobs_pool" not in plan, plan
+
+
+def test_migration_adds_the_claim_index_to_an_old_database(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    s = Store(path)
+    s.close()
+    c = sqlite3.connect(path)  # v6 모양으로 되돌린다
+    try:
+        c.execute("DROP INDEX IF EXISTS jobs_claim")
+        c.execute("PRAGMA user_version=6")
+        c.commit()
+    finally:
+        c.close()
+    again = Store(path)
+    again.migrate()
+    rows = again._conn().execute("SELECT name FROM sqlite_master WHERE type='index'")
+    assert "jobs_claim" in {r[0] for r in rows} and again.user_version() == DB_VERSION
+    again.close()

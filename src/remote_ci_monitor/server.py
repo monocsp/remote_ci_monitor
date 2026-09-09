@@ -1462,6 +1462,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_error(self, e: ApiError, *, close: bool = False) -> None:
         obj = {"error": e.message, **e.extra}
+        retry_after = e.extra.get("retry_after")
         if e.status == 401:
             self.send_response(401)
             if e.challenge == "basic":
@@ -1476,7 +1477,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        self._send_json(e.status, obj, extra_headers={"Connection": "close"} if close else None)
+        headers: dict[str, str] = {"Connection": "close"} if close else {}
+        if retry_after is not None:  # 503 의 「언제 다시 오라」 — 본문에도 있고 헤더에도 있다
+            headers["Retry-After"] = str(int(retry_after))
+        self._send_json(e.status, obj, extra_headers=headers or None)
         if close:
             self.close_connection = True
 

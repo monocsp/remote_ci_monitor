@@ -20,6 +20,7 @@ HTTP 핸들러는 얇게 여기를 부른다.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -74,6 +75,15 @@ def _api_error(status: int, message: str, **extra: Any) -> Exception:
     from remote_ci_monitor.server import ApiError  # 순환 import 를 피한다
 
     return ApiError(status, message, **extra)
+
+
+#: SQLite 의 「지금 바쁘다」. 이것만 일시 오류(503)로 본다 — `no such table` 같은 영구 결함은
+#: 그대로 500 으로 올린다.
+_BUSY_MARKERS = ("locked", "busy")
+
+
+def _is_busy_error(e: sqlite3.OperationalError) -> bool:
+    return any(m in str(e).lower() for m in _BUSY_MARKERS)
 
 
 def _int_field(body: dict[str, Any], key: str, lo: int, hi: int, *, default: int | None = None):
@@ -341,12 +351,18 @@ class RemoteWorkersMixin:
         return None
 
     def _try_claim(self, name: str, pool: str, lane: int, now: datetime) -> Job | None:
-        if self.store.get_paused() is not None:
-            return None
         try:
+            if self.store.get_paused() is not None:
+                return None
             job = self.store.claim(lane, now, pool=pool, worker_name=name)
         except LaneBusy as e:
             raise _api_error(409, str(e)) from e
+        except sqlite3.OperationalError as e:
+            # 잠금·바쁨만 일시 오류다. `no such table` 같은 영구 결함을 「다시 해 보라」고 하면
+            # 워커가 영원히 재시도한다. 워커는 503 을 이미 일시 오류로 처리한다.
+            if not _is_busy_error(e):
+                raise
+            raise _api_error(503, "database is busy", code="database_busy", retry_after=1) from e
         if job is not None:
             self._publish_job(job, job.id)
             self._publish_server()
@@ -417,14 +433,15 @@ class RemoteWorkersMixin:
             *lines, rest = buf.split(b"\n")
             if rest:
                 self._log_partial[job.id] = rest[-4096:]
-        markers = 0
-        for raw in lines:
-            parsed = parse_marker(raw.decode("utf-8", errors="replace"))
-            if parsed is None:
-                continue
-            self.store.add_marker(job.id, parsed[0], parsed[1], now)
-            self._on_marker(job.id, parsed[0], parsed[1])
-            markers += 1
+        # 마커는 **한 트랜잭션**으로 쓰고, 발행은 커밋 뒤에 한다. 줄마다 트랜잭션을 열면 다른
+        # 레인의 claim 이 밀린다(256 KB flush 하나에 0.03 ms → 275.9 ms).
+        parsed_markers = [
+            p for raw in lines if (p := parse_marker(raw.decode("utf-8", errors="replace")))
+        ]
+        self.store.add_markers(job.id, parsed_markers, now)
+        for kind, value in parsed_markers:
+            self._on_marker(job.id, kind, value)
+        markers = len(parsed_markers)
         if data:
             self.store.set_last_output(job.id, now)
             self._mark_dirty()
