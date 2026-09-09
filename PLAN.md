@@ -45,7 +45,7 @@
 
 - 승인 수는 0 이다(혼자 하는 레포). 필수 체크는 **잡 이름**으로 잡힌다. `test` · `main-from-dev-only` 를 바꾸면 룰셋도 같이 바꿔야 한다.
 - ⚠️ **matrix 함정**: `strategy.matrix` 를 걸면 체크 이름이 `test (3.11)` 처럼 바뀐다. matrix 잡은 `unit` 으로 두고 `needs` 로 묶은 **집계 잡 `test`** 가 대표한다(「테스트·품질」).
-- 일상 흐름: `git switch dev && git pull` → `git switch -c feat/<topic>` → 작업 · 커밋 → `gh pr create --base dev` → 머지. 릴리스는 `gh pr create --base main --head dev`. (이 레포의 개발 자체는 GitHub 에서 한다 — 도구의 런타임이 GitHub 에 의존하지 않는다는 것과 다른 얘기다.)
+- 일상 흐름: 브랜치마다 워크트리를 하나 판다 — `git worktree add -b feat/<topic> ../remote_ci_monitor-<topic> origin/dev` → 작업 · 커밋 → `gh pr create --base dev` → 머지 → `git worktree remove`. 이미 있는 워크트리의 브랜치를 갈아타지 않는다(다른 세션이 쓰고 있을 수 있다). 릴리스는 `gh pr create --base main --head dev`. (이 레포의 개발 자체는 GitHub 에서 한다 — 도구의 런타임이 GitHub 에 의존하지 않는다는 것과 다른 얘기다.)
 
 ## 무엇을 하나
 
