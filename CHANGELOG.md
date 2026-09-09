@@ -35,7 +35,9 @@ of a key bumps that number and is listed here.
   line on stderr reads
   `submitted job #155 queued · 3rd in line · wait 4m 12s · eta 16:02 · <url>`. A job that is
   already running has no position and that piece is left out, never printed as `0th`; a session
-  that joined an existing job sees that job's own position. The lookup is for display only: if it
+  that joined an existing job sees that job's own position; and a queue that cannot start at all —
+  paused, or a pool with no live worker — reports no finish time, because there is none to give.
+  The lookup is for display only: if it
   fails or the server is slow, the line and the JSON come back without those keys and the exit code
   is still 0 — `--no-wait` exits 0 because the job was submitted, not because it was looked up.
   ([#72](https://github.com/monocsp/remote_ci_monitor/pull/72))

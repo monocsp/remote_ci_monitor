@@ -125,12 +125,13 @@ def describe(job: dict[str, Any], *, head: str | None = None) -> str:
     prog = job.get("progress")
     if prog and prog.get("phase") == "executing" and prog.get("steps"):
         total = prog.get("steps_total")
-        head = f"step {prog.get('current_index') or prog.get('steps_done')}/{total or '?'}"
+        # `head` 를 다시 쓰지 않는다 — 인자를 가리면 순서만 바뀌어도 머리가 조용히 스텝이 된다
+        step = f"step {prog.get('current_index') or prog.get('steps_done')}/{total or '?'}"
         if prog.get("steps_total_partial"):
-            head += "+"
+            step += "+"
         if prog.get("current_name"):
-            head += f" {prog['current_name']}"
-        parts.append(head)
+            step += f" {prog['current_name']}"
+        parts.append(step)
     elif prog and prog.get("phase") == "materializing":
         parts.append("preparing workspace")
     if est.get("elapsed_seconds") is not None:
@@ -155,12 +156,25 @@ def _job_view(client: Client, job_id: int) -> dict[str, Any] | None:
     """순번·ETA 를 그리려고 잡을 **한 번** 조회한다. 표시용이라 실패는 삼킨다.
 
     이 시점의 잡은 이미 큐에 들어가 있다 — 조회가 깨졌다고 제출을 실패로 만들지 않는다.
+    Ctrl-C 도 여기서는 삼킨다: 잡은 이미 났고 세션이 알아야 하는 건 그 번호다(결정 17 의 뜻).
+
+    문서는 우리가 만든 게 아니라 **값의 타입까지 믿을 수 없다**. `{"position": "3"}` 하나면
+    `describe()` 가 터지고, 그 예외는 `main()` 의 그물에도 안 걸려 이미 큐에 있는 잡을 실패로
+    만든다. 그래서 **한 번 그려 보고** 터지면 조회가 실패한 것과 똑같이 취급한다 — 줄도 JSON 도
+    순번 조각을 통째로 뺀다. `state` 없는 문서는 잡 문서가 아니다(`{}` 를 「순번 없는 대기 잡」
+    으로 읽지 않는다).
     """
     try:
         view = client.job(job_id, timeout=NO_WAIT_VIEW_TIMEOUT)
-    except (ClientError, ValueError, OSError):
+    except (ClientError, ValueError, OSError, KeyboardInterrupt):
         return None
-    return view if isinstance(view, dict) else None
+    if not isinstance(view, dict) or not view.get("state"):
+        return None
+    try:
+        describe(view)  # 그려지는 문서만 쓴다(진짜 줄은 head 만 바꿔 다시 그린다)
+    except Exception:
+        return None
+    return view
 
 
 def _submitted_line(
@@ -487,7 +501,9 @@ def _run_git_ref(
         view = _job_view(client, job_id)
         state = (view or {}).get("state") or state
         detail = (
-            f"same preset, inputs, commit {short}" if joined else f"{preset.name} · {ref} @{short}"
+            f"same preset, inputs, commit {short}"
+            if joined
+            else f"({preset.name} · {ref} @{short})"  # 안에 `·` 가 있다 — 목록 항목과 안 섞이게
         )
         _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _print_json(
