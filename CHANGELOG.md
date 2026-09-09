@@ -32,7 +32,7 @@ of a key bumps that number and is listed here.
   state, file count, size, how long it has left — plus the command that fetches it, copyable. An
   unknown count prints `—`; `0` appears only when the collection really found nothing. File names
   never reach the public status document, so they are not on that line either.
-  ([#57](https://github.com/monocsp/remote_ci_monitor/pull/57) · [#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+  ([#57](https://github.com/monocsp/remote_ci_monitor/pull/57) · [#60](https://github.com/monocsp/remote_ci_monitor/pull/60))
 - **Motion says what is still moving** (M5d-3). A running, queued, uploading or cancelling job now
   pulses; a finished one is still. That is a second channel beside colour, so a glance at the
   corner of the screen separates "still going" from "done" — and every animation sits behind
