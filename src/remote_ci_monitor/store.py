@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import shutil
 import sqlite3
@@ -330,6 +331,25 @@ def _dt(ts: float | None) -> datetime | None:
     return datetime.fromtimestamp(ts, tz=UTC)
 
 
+_ADD_COLUMN_RE = re.compile(r"^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b", re.I)
+
+
+def _already_added(conn: sqlite3.Connection, stmt: str) -> bool:
+    """`ALTER TABLE … ADD COLUMN` 이 더하려는 열이 이미 있는가.
+
+    마이그레이션 번호는 옮겨질 수 있다 — `dev` 가 같은 번호를 먼저 가져가면 이쪽이 뒤로 밀린다.
+    그 사이 옛 빌드로 연 데이터베이스는 **낮은 번호인데 열은 이미 있는** 상태가 되고, 그대로
+    두면 `duplicate column name` 으로 죽는다. 버전이 안 올라가니 다음에도 똑같이 죽어 서버가
+    영영 안 뜬다. 열을 더하는 것은 본래 멱등한 일이라 이미 있으면 건너뛴다.
+    """
+    m = _ADD_COLUMN_RE.match(stmt)
+    if m is None:
+        return False
+    table, column = m.group(1), m.group(2)
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
 def _opt_bool(v: Any) -> bool | None:
     """SQLite 의 0/1/NULL → True/False/None. NULL 은 「모름」이라 False 로 접지 않는다."""
     return None if v is None else bool(v)
@@ -470,6 +490,8 @@ class Store:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for stmt in _MIGRATIONS[target]:
+                        if _already_added(conn, stmt):
+                            continue  # 더하려는 열이 이미 있다 — 할 일이 없다
                         conn.execute(stmt)
                     conn.execute(f"PRAGMA user_version={target}")
                     conn.execute("COMMIT")
@@ -1561,7 +1583,7 @@ class Store:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
         failed_step: str | None = None,
-        failed_step_guessed: bool | None = False,
+        failed_step_guessed: bool | None = None,
         cancelled_by: str | None = None,
         only_from: Iterable[str] | None = None,
         bundle: Any | None = None,

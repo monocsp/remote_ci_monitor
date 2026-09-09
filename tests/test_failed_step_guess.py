@@ -208,9 +208,20 @@ def test_finish_persists_the_guess_and_reads_it_back(store):
 
     certain = running(store, tree="b", now=at(20))
     assert store.finish(
-        certain.id, FAILED, now=at(30), exit_code=1, summary="2 tests failed", failed_step="test"
+        certain.id,
+        FAILED,
+        now=at(30),
+        exit_code=1,
+        summary="2 tests failed",
+        failed_step="test",
+        failed_step_guessed=False,
     )
     assert store.get_job(certain.id).failed_step_guessed is False
+
+    # 플래그를 안 주면 「모름」이다 — 안 준 것을 「확정」으로 읽지 않는다
+    silent = running(store, tree="c", now=at(40))
+    assert store.finish(silent.id, FAILED, now=at(50), exit_code=1, failed_step="test")
+    assert store.get_job(silent.id).failed_step_guessed is None
 
 
 def test_recent_rows_keep_each_job_s_own_answer(store):
@@ -367,3 +378,62 @@ def test_terminal_recent_line_says_when_the_step_is_a_guess(store):
     assert "guessed" not in line_for(False)
     # 모르는 옛 잡은 아무 말도 덧붙이지 않는다 — 「확정」이라고도 「추측」이라고도 안 한다
     assert "guessed" not in line_for(None)
+
+
+# ── 마이그레이션 번호를 옮겼을 때 ─────────────────────────────────────────────
+
+
+def test_adding_a_column_that_is_already_there_is_not_fatal(tmp_path):
+    """이 열은 처음에 v9 였다가 `dev` 가 v9 를 먼저 가져가서 v10 으로 밀렸다.
+
+    그 사이 옛 빌드로 한 번이라도 연 데이터베이스는 `user_version = 9` 인데 **열은 이미 있다**.
+    그대로 두면 v10 의 `ADD COLUMN` 이 「duplicate column name」으로 죽고, 버전이 안 올라가니
+    **다음에도 똑같이 죽는다** — 서버가 영영 안 뜬다. 열을 더하는 마이그레이션은 이미 있으면
+    건너뛴다(더하려는 것이 이미 있으니 할 일이 없다).
+    """
+    path = tmp_path / "rcm.sqlite3"
+    s = Store(path)
+    j = enqueue(s, tree="d")
+    assert s.claim(1, at(1)).id == j.id
+    s.finish(
+        j.id, FAILED, now=at(2), exit_code=1, failed_step="build web", failed_step_guessed=True
+    )
+    s.close()
+    # 리베이스 전 빌드가 남긴 모양: 열은 있는데 버전은 9
+    c = sqlite3.connect(path)
+    try:
+        c.execute("PRAGMA user_version=9")
+        c.commit()
+    finally:
+        c.close()
+    assert "failed_step_guessed" in job_columns(path)
+
+    s2 = Store(path)  # 여기서 죽으면 안 된다
+    try:
+        assert s2.user_version() == DB_VERSION and s2.healthy()
+        got = s2.get_job(j.id)
+        assert got.failed_step == "build web" and got.failed_step_guessed is True  # 값도 그대로
+        # 다시 열어도 조용하다 — 버전이 올라갔으니 두 번째부터는 마이그레이션 자체를 안 탄다
+        s3 = Store(path)
+        assert s3.user_version() == DB_VERSION
+        s3.close()
+    finally:
+        s2.close()
+
+
+def test_a_blame_free_finish_leaves_the_flag_unknown(store):
+    """지목할 스텝이 없는 종료(취소·유실·업로드 포기)는 플래그도 「모름」이다.
+
+    기본값이 `False` 면 「확정」이라는 **적극적 주장**을 아무 근거 없이 쓰게 된다 — 훅이
+    `RCM_FAILED_STEP=""` 와 `RCM_FAILED_STEP_GUESSED="0"` 을 같이 받는 꼴이다.
+    """
+    j = running(store)
+    assert store.finish(j.id, CANCELLED, now=at(10), cancelled_by="alice-laptop")
+    got = store.get_job(j.id)
+    assert got.failed_step is None and got.failed_step_guessed is None
+    assert (
+        notify_env({"failed_step": None, "failed_step_guessed": None}, "x")[
+            "RCM_FAILED_STEP_GUESSED"
+        ]
+        == ""
+    )
