@@ -7,7 +7,74 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **A progress bar on every running job.** The web page draws one bar under each running row and
+  says what it measures: `50% · 4/8 steps` when the job declares its step count with
+  `::rcm::steps::N`, `70% · by expected time` when it does not. A job past its estimate reads
+  `past the estimate` and a job nothing can be said about — stuck, preparing its workspace, or
+  with no estimate at all — reads `progress —`. The time-based bar grows every second instead of
+  jumping between refreshes, and no bar ever shows a percentage the page cannot stand behind.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+- **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
+  stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
+  a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
+  `admission_samples` (3) consecutive host samples, with `admission_cooldown_seconds` (30) between
+  admissions on one machine. **Lane 1 is never held**, so the queue keeps moving under any load,
+  and an unknown or stale CPU reading closes a lane rather than opening it. A held lane shows in
+  `rcm top` (`lanes 1/2 busy · 1 held (cpu 92%)`), on the web page, and as the queue reason
+  `held_by_load`; `rcm check` reports it without failing, and warns if a lane has been held for
+  more than five minutes. `admission = "always"` restores the old behaviour.
+  ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66),
+  [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
+
+### Changed
+- **Queue rows now arrive folded.** Running rows used to open themselves, so two or three running
+  jobs filled the screen with step lists and log tails. The row keeps what answers "how is it
+  going" — the progress bar and `step 2/4 build 2s` in the reason column — and **▸** opens the step
+  list, the log tail and the Log/Cancel buttons. The page remembers which rows *you* opened
+  (`rcm.expanded` in that browser), not which ones you closed.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+- **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
+  and it was the one place the page dropped it.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+- **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
+  `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
+  `held`. `schema_version` is unchanged.
+  ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66))
+- **Behaviour change for anyone already running two or more lanes**, whether that is
+  `[server] lanes` or a worker's own `--lanes`: those lanes now wait for the machine to be quiet.
+  The server logs the effective policy at startup. Set `admission = "always"` to keep the old
+  behaviour. ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66))
+- **The queue's lane accounting counts `(worker, lane)` instead of the lane number.** A pool with
+  local lanes and a remote worker's lanes used to collapse them — a four-lane pool was estimated as
+  two, and "behind #N" could name the wrong job.
+  ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+
 ### Fixed
+- **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
+  50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
+  time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request
+  as full job objects (two extra queries and two JSON parses per row, for six fields it reads),
+  and picking the eight most recent jobs sorted every finished job in the database. Samples are
+  now read as plain rows and only re-read when a job actually finishes; recent jobs use an index.
+  Database schema 9. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **Remote worker lanes are read in one query instead of one per worker**, which also cuts the
+  work behind every server event — 552 statements down to 3 on a fleet of fifty workers.
+  ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **Retired workers are forgotten after a week.** Nothing ever deleted them, so every worker that
+  ever registered kept adding `down` lanes to every status document. A worker with a job still
+  running is never forgotten. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **A worker's log flush no longer stalls other lanes.** Every step marker in a batch opened its
+  own SQLite transaction, so one 256 KB flush pushed another lane's claim from 0.03 ms to 275 ms,
+  and a large body could exhaust the busy timeout and hand the worker an HTTP 500. Markers are now
+  written in one transaction, and a busy database answers `503` with `Retry-After` instead of a
+  server error. ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+- **Claiming a job no longer scans every job the pool has ever had.** A dedicated index makes it
+  constant-time (8.5 ms → 0.003 ms at 200k retained jobs). Database schema 8.
+  ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+- **Workers no longer poll in lockstep.** Their retry interval was a fixed one second, so a fleet
+  that restarted together stayed synchronised and could fill the server's request slots. It is now
+  spread over one to two seconds. ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 - **The production guard stopped objecting to a worktree that has its own `rcm.toml`.** It read a
   bare `rcm serve` as "this would take the production config", but the search order stops at
   `./rcm.toml` (and `$RCM_CONFIG`) long before `~/.config/rcm/server.toml`, so a test server in a

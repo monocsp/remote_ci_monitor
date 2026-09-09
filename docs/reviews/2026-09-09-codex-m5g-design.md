@@ -118,7 +118,7 @@ tar 생성·교체·삭제가 signature 를 안 바꾼다. 그리고 하드링�
 
 ### 5. 조건부 동의 — 재현 가능성은 잃는다
 
-종료 잡 reader 가 없다는 좁은 명제는 맞다(`worker.py:387` · `remote_workers.py:491`, 둘 다 활성
+종료 잡 reader 가 없다는 좁은 명제는 맞다(`worker.py:387` · `remote_workers.py:494`, 둘 다 활성
 잡). 그러나 tar 을 지우면 **그 잡을 그대로 다시 돌릴 입력이 서버에 없다.** `tree_hash`·`base_sha` 는
 신원이지 내용이 아니고 manifest 도 blob GC 뒤엔 못 되살린다.
 

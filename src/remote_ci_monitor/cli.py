@@ -47,6 +47,7 @@ from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.render_text import fmt_clock, fmt_duration
+from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
 
 USAGE_EXIT = 2
@@ -928,12 +929,41 @@ def _dir_writable(d: Path) -> bool:
     return p.is_dir() and os.access(p, os.W_OK)
 
 
-def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
+#: 이만큼 넘게 막혀 있으면 「사람이 한번 봐라」. 서버의 `admission_cooldown_seconds` 를 쓰지 않는
+#: 이유: 그건 **원격 서버의** 설정이라 `rcm check` 가 볼 수 없다. 이 경고는 게이트의 타이밍이
+#: 아니라 「누가 이 머신을 오래 잡고 있다」는 뜻이므로 고정 상수가 맞다(M5f §5.4).
+HELD_WARN_SECONDS = 300
+
+
+def _held_too_long(workers: list[dict[str, Any]], now: datetime | None) -> list[str]:
+    out: list[str] = []
+    for w in workers:
+        if w.get("state") != "held":
+            continue
+        since = parse_iso(w.get("held_since"))
+        if now is None or since is None:
+            continue
+        seconds = (now - since).total_seconds()
+        if seconds > HELD_WARN_SECONDS:
+            label = w.get("display_name") or f"lane {w.get('lane')}"
+            out.append(f"{label} held for {fmt_duration(seconds)}")
+    return out
+
+
+def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, str]:
     """`rcm check` 의 pools 행(M5b-4): `default (1 lane) · linux (build-02/1 idle · build-03 down)`.
-    어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`)."""
+    어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`).
+
+    부하로 보류된 레인은 세어서 보이되 **FAIL 이 아니다**(의도된 동작). 다만 오래 막혀 있으면
+    경고한다 — 「게이트가 제 일을 하는 중」과 「누가 두 시간째 잡고 있음」은 다르다(M5f)."""
     server = doc.get("server") or {}
+    now = parse_iso(doc.get("generated_at"))
     lanes = server.get("lanes") or 0
-    parts = [f"default ({lanes} lane{'s' if lanes != 1 else ''})"]
+    all_workers = server.get("workers") or []
+    local_held = [w for w in all_workers if not w.get("worker") and w.get("state") == "held"]
+    head = f"default ({lanes} lane{'s' if lanes != 1 else ''}"
+    head += f" · {len(local_held)} held)" if local_held else ")"
+    parts = [head]
     by_pool: dict[str, list[dict[str, Any]]] = {}
     for w in server.get("workers") or []:
         if w.get("worker"):
@@ -958,7 +988,13 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
         dead = list(client.health().get("pools_without_workers") or [])
     except ClientError:
         dead = [n for n, ws in by_pool.items() if all(w.get("state") == "down" for w in ws)]
-    return ("pools", not dead, " · ".join(parts))
+    text = " · ".join(parts)
+    stuck = _held_too_long(all_workers, now)
+    if dead:
+        return ("pools", False, text)
+    if stuck:  # warn — 실패는 아니다
+        return ("pools", None, f"{text} — {', '.join(stuck)}")
+    return ("pools", True, text)
 
 
 def cmd_check(args: argparse.Namespace) -> int:

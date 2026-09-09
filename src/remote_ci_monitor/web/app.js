@@ -206,6 +206,13 @@
         if (isNum(est.wait_seconds)) parts.push(T(lang, "reason.frees_in", { dur: fmtDuration(est.wait_seconds) }));
         out.text = parts.join(" · "); break;
       }
+      case "held_by_load": {
+        // 숫자는 행이 아니라 `server.workers[]` 의 `hold_detail` 에서 온다 — 행 키를 안 늘린다
+        parts.push(T(lang, "reason.held_by_load"));
+        var why = holdWord(status, lang);
+        if (why) parts.push(why);
+        out.text = parts.join(" · "); break;
+      }
       case "blocked_by_group": {
         var bb = row.blocked_by || {};
         // 조각은 남기고 모르는 숫자만 —(「frees in —」): 막는 잡이 있는 한 「언제 풀리나」는 늘 묻는 질문이다
@@ -507,6 +514,23 @@
   }
 
   /** 워커 상태 낱말. enum 값은 그대로 두고 표시만 바꾼다(CSS 클래스·정렬이 값을 쓴다). */
+  /** 그 풀에서 막고 있는 이유를 사람 말로. cpu 로 막힌 레인이 있으면 **최댓값**을 쓴다 —
+      창이 [85,70,70] 인데 「cpu 70%」라고 쓰면 거짓말이다. 이유를 모르면 null. */
+  function holdWord(status, lang) {
+    var workers = ((status || {}).server || {}).workers || [];
+    var held = workers.filter(function (w) { return w && w.state === "held"; });
+    if (!held.length) return null;
+    var busy = [];
+    held.forEach(function (w) {
+      var v = w.hold_code === "cpu_busy" && w.hold_detail ? w.hold_detail.cpu_busy : null;
+      if (isNum(v)) busy.push(v);
+    });
+    if (busy.length) return T(lang, "hold.cpu_busy", { cpu: Math.round(Math.max.apply(null, busy)) });
+    var code = null;
+    held.forEach(function (w) { if (!code && w.hold_code) code = w.hold_code; });
+    return code && I18N.has("hold." + code) ? T(lang, "hold." + code) : null;
+  }
+
   function workerState(state, lang) {
     if (!state) return DASH;
     var key = "state." + state;
@@ -633,6 +657,66 @@
     if (step.ok === false) return "✘";
     if (step.state === "done") return "✔";
     return "·";
+  }
+
+  // ── 전체 진행 막대 (2026-09-09 오너 요청) ──
+  function pctOf(part, whole) { return Math.max(0, Math.min(100, Math.round(part / whole * 100))); }
+  /**
+   * 도는 잡이 어디까지 왔나 — 눈금 하나와 **그 눈금의 근거**. 근거를 함께 주는 이유는, 막대만
+   * 그리면 무엇을 재고 있는지 알 수 없고 이 도구에서 모르는 값은 0 이 아니라 —(fail-open 금지)다.
+   *
+   * | kind | 언제 | 눈금 |
+   * |---|---|---|
+   * | `steps` | 잡이 총 스텝 수를 선언했다(`::rcm::steps::N`) | 끝난 스텝 / 총 스텝 |
+   * | `time` | 총계가 없거나 「지금까지」다 | 경과 / 추정 소요(ETA 칸이 쓰는 그 추정) |
+   * | `over` | 경과가 추정을 넘겼다 | 없다 — 남은 양을 모른다(ETA 가 — 인 것과 같은 이유) |
+   * | `unknown` | stuck · 준비 중 · 근거 없음 | 없다 |
+   *
+   * `steps_total_partial` 은 근거가 아니다: 「5/8 (so far)」의 8 은 지금까지 본 수라 62% 라고
+   * 쓰면 자신있는 거짓말이 된다. stuck 도 마찬가지다 — 도는 중인지부터 모르는 잡에 시간 눈금을
+   * 주지 않는다. 스텝을 선언한 잡은 예외다: 끝난 스텝 수는 stuck 이어도 사실이다.
+   * 도는 잡이 아니면 null — 막대 자체를 그리지 않는다.
+   */
+  function overallProgress(row) {
+    if (!row || (row.state !== "running" && row.state !== "cancelling")) return null;
+    var out = { kind: "unknown", pct: null, done: null, total: null, expected: null, startedAt: null };
+    var prog = row.progress || null;
+    var est = row.estimate || {};
+    if (prog && prog.phase === "materializing") return out;
+    var total = prog && isNum(prog.steps_total) ? prog.steps_total : null;
+    var done = prog && isNum(prog.steps_done) ? prog.steps_done : null;
+    if (isNum(total) && total > 0 && isNum(done) && !(prog && prog.steps_total_partial)) {
+      out.kind = "steps"; out.done = done; out.total = total; out.pct = pctOf(done, total);
+      return out;
+    }
+    var expected = isNum(est.expected_seconds) && est.expected_seconds > 0 ? est.expected_seconds : null;
+    var elapsed = isNum(est.elapsed_seconds) ? est.elapsed_seconds : null;
+    if (expected == null || elapsed == null) return out;
+    out.expected = expected;
+    if (est.stuck) return out;
+    if (est.overdue || elapsed > expected) { out.kind = "over"; return out; }
+    out.kind = "time"; out.pct = pctOf(elapsed, expected); out.startedAt = row.started_at || null;
+    return out;
+  }
+  /**
+   * 행 아래에 붙는 전체 진행 막대. 태그를 벗기면 눈금과 근거가 글자로 남는다 — 길이와 색만으로
+   * 말하지 않는다(§4.2). `live` 는 「시계 차이를 알고 이 잡은 아직 돈다」는 뜻이고, **시간 눈금일
+   * 때만** 1초 틱의 기준점을 단다(스텝 눈금은 마커가 올 때 움직이지 저절로 자라지 않는다).
+   */
+  function progressBarHtml(row, lang, live) {
+    var p = overallProgress(row);
+    if (!p) return "";
+    var label = p.kind === "steps" ? T(lang, "pbar.steps", { percent: p.pct, done: p.done, total: p.total })
+      : p.kind === "time" ? T(lang, "pbar.time", { percent: p.pct })
+        : p.kind === "over" ? T(lang, "pbar.over") : T(lang, "pbar.unknown");
+    var width = isNum(p.pct) ? p.pct : (p.kind === "over" ? 100 : 0);
+    var tick = live && p.kind === "time" && p.startedAt
+      ? ' data-tick="progress" data-from="' + esc(p.startedAt) + '" data-expected="' + p.expected + '"'
+      : "";
+    return '<div class="pwrap"' + tick + '><div class="pbar ' + p.kind + '" role="progressbar"'
+      + ' aria-valuemin="0" aria-valuemax="100"' + (isNum(p.pct) ? ' aria-valuenow="' + p.pct + '"' : "")
+      + ' aria-valuetext="' + esc(label) + '" aria-label="' + esc(T(lang, "pbar.aria", { id: row.id })) + '">'
+      + '<i style="width:' + width + '%"></i></div><span class="plab">' + esc(label) + "</span></div>";
   }
   // 산출물 한 줄(M5e §13). 모르는 수는 —, `0` 은 「모았는데 없었다」일 때만이다. 파일 이름은
   // 공개 문서에 없으므로 여기서도 없다 — 받아 가는 명령만 준다.
@@ -784,7 +868,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
@@ -804,7 +888,7 @@
     status: null, prev: null, skewMs: 0, conn: connection(null, "init", Date.now()),
     token: null, me: null, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
     lang: I18N.DEFAULT_LANG,
-    collapsed: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
+    expanded: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
     drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null
   };
@@ -814,8 +898,10 @@
   // ── 저장소 ──
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* 비공개 탭 등 */ } }
-  function loadCollapsed() { try { (JSON.parse(lsGet("rcm.collapsed") || "[]") || []).forEach(function (id) { state.collapsed[id] = true; }); } catch (e) { state.collapsed = {}; } }
-  function saveCollapsed() { lsSet("rcm.collapsed", JSON.stringify(Object.keys(state.collapsed).map(Number))); }
+  // 접힘이 아니라 **펼침**을 기억한다(2026-09-09 오너 결정 13 개정): 모든 행은 접힌 채로 뜨고,
+  // 사람이 편 행만 그 브라우저에 남는다. 옛 키(`rcm.collapsed`)는 읽지 않는다 — 뜻이 뒤집혔다.
+  function loadExpanded() { try { (JSON.parse(lsGet("rcm.expanded") || "[]") || []).forEach(function (id) { state.expanded[id] = true; }); } catch (e) { state.expanded = {}; } }
+  function saveExpanded() { lsSet("rcm.expanded", JSON.stringify(Object.keys(state.expanded).map(Number))); }
 
   // ── 언어 (결정 36·38) ──
   // 기본은 한국어다. 브라우저 언어를 보지 않는다 — 고르면 그 브라우저에 남는다.
@@ -998,7 +1084,7 @@
     });
     window.addEventListener("storage", function (ev) {
       if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); } }
-      if (ev.key === "rcm.collapsed") { state.collapsed = {}; loadCollapsed(); renderQueue(); }
+      if (ev.key === "rcm.expanded") { state.expanded = {}; loadExpanded(); renderQueue(); }
       // 다른 탭에서 언어를 바꾸면 이 탭도 따라온다
       if (ev.key === "rcm.lang") { state.lang = I18N.normalize(ev.newValue); applyLang(); }
     });
@@ -1169,13 +1255,13 @@
   }
 
   // ── 렌더: 큐 ──
-  function collapsedGc() {
+  function expandedGc() {
     var q = queueOf(state.status) || [];
     var ids = {};
     q.forEach(function (r) { ids[r.id] = true; });
     var changed = false;
-    Object.keys(state.collapsed).forEach(function (k) { if (!ids[k]) { delete state.collapsed[k]; changed = true; } });
-    if (changed) saveCollapsed();
+    Object.keys(state.expanded).forEach(function (k) { if (!ids[k]) { delete state.expanded[k]; changed = true; } });
+    if (changed) saveExpanded();
   }
   /** 큐 표의 머리줄. 두 곳(기본 풀·다른 풀)이 같은 것을 쓴다 — 갈라지지 않게 한 함수로. */
   function queueHeadHtml(tzName) {
@@ -1212,7 +1298,7 @@
       body.innerHTML = '<div class="empty">' + emptyHtml + (presets ? '<br><span class="sub">' + esc(tr("queue.presets", { names: presets })) + "</span>" : "") + "</div>";
       return;
     }
-    collapsedGc();
+    expandedGc();
     var rows = sortQueue(p.queue);
     var nm = notMoving(st, state.me, L());
     var stuckIds = {};
@@ -1262,7 +1348,10 @@
   function queueRowHtml(row, st) {
     var est = row.estimate || {};
     var busy = row.state === "running" || row.state === "cancelling";
-    var expanded = busy && !state.collapsed[row.id];
+    var expanded = busy && !!state.expanded[row.id];
+    // 전체 진행 막대는 접힘과 무관하게 도는 행에 늘 붙는다 — 접기가 「어디까지 왔나」를 감추면
+    // 접어 둘 수 없다. 스텝 목록·로그 tail·액션만 ▸ 뒤에 있다.
+    var bar = progressBarHtml(row, L(), canTick());
     var mine = isMine(row, state.me);
     var cls = [];
     if (mine) cls.push("mine");
@@ -1270,6 +1359,8 @@
     if (expanded) cls.push("exp");
     if (state.hl === row.id) cls.push("hl");
     if (row._dim) cls.push("dim");
+    // 막대 줄이 붙는 행은 아래 선을 지운다 — 막대까지가 한 행으로 보이게
+    if (bar) cls.push("hasbar");
     var pos = isNum(row.position) ? '<span class="pos">' + esc(tr("ordinal.in_line", { ordinal: ordinal(row.position, L()) })) + "</span>" : "";
     var pill;
     if (row.state === "uploading") {
@@ -1320,6 +1411,7 @@
       '<td class="elapsed">' + elapsedCell + "</td>" +
       '<td class="eta">' + etaCell + "</td>" +
       '<td class="source">' + source + "</td></tr>";
+    if (bar) h += '<tr class="qbar" data-bar="' + row.id + '"><td colspan="7">' + bar + "</td></tr>";
     if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + sourceHtml(row, L(), true) + "</div>" + tailHtml(row) + "</td></tr>";
     return h;
   }
@@ -1531,6 +1623,7 @@
       var open = !!state.expandedRecent[job.id];
       var failedish = job.state === "failed" || job.state === "timed_out";
       html += '<div class="rrow' + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
+        '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
         '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
         '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
@@ -1588,11 +1681,31 @@
       if (from == null) return;
       var s = (n - from) / 1000;
       if (kind === "elapsed") el.textContent = fmtDuration(s);
+      else if (kind === "progress") tickProgress(el, s);
       // 1초마다 다시 쓰는 자리 — 렌더 시점이 아니라 **지금** 언어를 읽는다
       else if (kind === "waiting") el.textContent = tr("elapsed.waiting", { dur: fmtDuration(s) });
       else if (kind === "age") el.textContent = tr("host.sampled", { age: fmtAgo(s, L()) });
     });
     renderHeaderConn();
+  }
+
+  /**
+   * 시간 눈금 막대를 1초마다 민다 — 서버가 준 숫자만 그리면 폴링 간격마다 툭툭 튄다.
+   * 추정을 넘기는 순간 그 자리에서 「예상 시간 초과」로 바꾼다(다음 조회가 서버 값으로 덮는다):
+   * 100% 를 채워 두면 「끝났다」로 읽힌다.
+   */
+  function tickProgress(wrap, seconds) {
+    var expected = parseFloat(wrap.getAttribute("data-expected"));
+    var bar = wrap.querySelector(".pbar"), fill = bar && bar.querySelector("i"), lab = wrap.querySelector(".plab");
+    if (!isNum(expected) || expected <= 0 || !bar || !fill || !lab) return;
+    var over = seconds >= expected;
+    var pct = over ? 100 : Math.max(0, Math.min(100, Math.round(seconds / expected * 100)));
+    var text = over ? tr("pbar.over") : tr("pbar.time", { percent: pct });
+    fill.style.width = pct + "%";
+    bar.className = "pbar " + (over ? "over" : "time");
+    bar.setAttribute("aria-valuetext", text);
+    if (over) bar.removeAttribute("aria-valuenow"); else bar.setAttribute("aria-valuenow", String(pct));
+    lab.textContent = text;
   }
 
   // innerHTML 교체 전후로 포커스를 지킨다(Codex M2 리뷰 2): 같은 data 속성·id 를 가진 요소로 되돌린다
@@ -1619,6 +1732,11 @@
   // ── 상호작용 ──
   function gotoJob(id) {
     state.hl = id;
+    // 「그 잡을 보러 간다」는 뜻이다 — 도는 행이면 펴서 보여 준다(목업 4절 딥링크 규칙)
+    var q = findRow(id);
+    if (q && (q.state === "running" || q.state === "cancelling") && !state.expanded[id]) {
+      state.expanded[id] = true; saveExpanded();
+    }
     var row = $('tr[data-job="' + id + '"]') || $('.rrow[data-job="' + id + '"]');
     if (row) {
       renderQueue(); renderRecent();
@@ -1764,8 +1882,8 @@
       if (t.hasAttribute("data-goto")) { gotoJob(parseInt(t.getAttribute("data-goto"), 10)); return; }
       if (t.hasAttribute("data-toggle")) {
         var id = parseInt(t.getAttribute("data-toggle"), 10);
-        if (state.collapsed[id]) delete state.collapsed[id]; else state.collapsed[id] = true;
-        saveCollapsed(); withFocus(renderQueue); return;
+        if (state.expanded[id]) delete state.expanded[id]; else state.expanded[id] = true;
+        saveExpanded(); withFocus(renderQueue); return;
       }
       if (t.hasAttribute("data-log")) { state.lastTrigger = t; openDrawer(parseInt(t.getAttribute("data-log"), 10)); return; }
       if (t.hasAttribute("data-cancel")) { state.lastTrigger = t; openCancel(parseInt(t.getAttribute("data-cancel"), 10)); return; }
@@ -1809,7 +1927,8 @@
     state.debug = /[?&]debug=1(&|$)/.test(location.search);
     loadLang();
     applyStatic();
-    loadCollapsed();
+    loadExpanded();
+    lsSet("rcm.collapsed", null);   // 뜻이 뒤집힌 옛 키 — 남겨 두면 영영 남는다
     state.token = lsGet("rcm.token");
     wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });

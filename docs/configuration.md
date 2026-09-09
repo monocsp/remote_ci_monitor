@@ -179,6 +179,46 @@ dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, 
   jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
 
+## Parallel lanes without overloading the machine
+
+`[server] lanes` is how many jobs the build machine runs at once. Raising it used to be a gamble:
+two heavy jobs together and the machine crawls. Now lane 2 and above only pick up a job while the
+host CPU is below `cpu_max_percent`.
+
+```toml
+[server]
+lanes = 2
+admission = "load"                 # "always" turns the gate off (the pre-0.2.6 behaviour)
+cpu_max_percent = 80               # lanes 2+ wait while CPU is above this
+admission_samples = 3              # this many host samples in a row must be under the cap
+admission_cooldown_seconds = 30    # after a gated lane starts a job, that machine waits this long
+```
+
+**Lane 1 is never held.** Whatever the load, every machine keeps one lane that takes work, so the
+queue always moves. That is also why there is no "give up and start anyway" timer: nothing starves.
+
+The gate reads the same CPU number the host card shows — the whole machine, not one core. It needs
+`admission_samples` consecutive samples under the cap, and they have to be *consecutive in time*:
+after a sampler outage the window is refused rather than trusted. **If the CPU is unknown, the lane
+closes.** A missing, stale or broken sample never opens a lane.
+
+`rcm top` counts held lanes in its header (`lanes 1/2 busy · 1 held (cpu 92%)`), the queue row of a
+job waiting on one says `held by load`, and `rcm check` reports them without failing — a held lane
+is the feature working. It does warn if a lane has been held for more than five minutes, which
+usually means something outside rcm is using the machine.
+
+Two things worth knowing:
+
+- **The first 15 seconds after `rcm serve` starts, lanes 2+ are closed.** The sampler has not
+  produced `admission_samples` samples yet, and an unknown load closes the lane.
+- **Jobs that use the same `[[repos]]` entry serialise while they fetch.** The git mirror is shared
+  and one lane fetches at a time, so extra lanes do not speed up the materialize phase for jobs on
+  the same repository — only the run itself.
+
+Running `rcm serve` and `rcm worker` on one machine gives that machine **two** ungated lanes, one
+per process, and two independent cooldowns. They both read the true CPU and both hold correctly;
+what they cannot do is coordinate. Keep it in mind when you set `lanes` on both.
+
 ## Second build machine (remote worker)
 
 A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs

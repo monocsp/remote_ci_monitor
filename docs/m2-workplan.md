@@ -56,6 +56,11 @@ rcm.queueHeader(status, nowMs)      // 항목 5: "5 jobs · 2 running · 3 waiti
 rcm.sortQueue(rows)                 // running → cancelling → 대기(position 순)
 rcm.progressHead(prog)              // 항목 12: "step 5/8 · test · 51s · job 59s" · partial → "step 5/8 (so far)" · 실패 스텝 있으면 " · 1 step failed" · 마커 없음 → "no step markers · job 59s" · materializing → null(Reason 한 줄로)
 rcm.stepMark(step)                  // "✔" | "▶" | "✘"(ok===false) | "·"(pending — 목록에는 done/running 만 있으니 pend 는 declared total 로 채운다)
+rcm.overallProgress(row)            // 전체 진행 막대(2026-09-09): {kind: "steps"|"time"|"over"|"unknown", pct, done, total, expected, startedAt}.
+                                    //   steps_total 선언 + partial 아님 → steps(steps_done/steps_total) · 아니면 elapsed/expected → time ·
+                                    //   추정 초과 → over(퍼센트 없음) · stuck·materializing·근거 없음 → unknown. 도는 잡이 아니면 null
+rcm.progressBarHtml(row, lang, live)// 그 막대의 HTML: .pwrap > .pbar[role=progressbar] > i + .plab("50% · 4/8 steps" | "70% · by expected time" |
+                                    //   "past the estimate" | "progress —"). live 이고 time 눈금일 때만 data-tick="progress" 기준점을 단다
 rcm.recentLine(job, tz, nowMs)      // 항목 14: pill 텍스트 "failed · exit 1" · "cancelled · exit 2" · "lost · exit 3" · exit_code null → "failed"; 소요 "1m 02s" 또는 "—"; 요약 "2 tests failed · step test"; lost → "server restarted 09:02"; 시작 전 취소 → "before start · by carol@mbp"
 rcm.rerunCommand(job)               // "rcm run gate -f scope=fast" (inputs 를 -f 로)
 rcm.transitionsLine(job, tz)        // "uploading 09:50:40 → queued (waited 21s) → running 09:51:13 → failed 09:52:15 · exit 1"
@@ -89,17 +94,18 @@ header:   #hdr  .wordmark  .host  [data-workers] .wk(.busy|.down|.paused)  #live
 summary:  #summary  [data-c="23"] .sum-yours  [data-c="24"] .sum-stuck (.ok|.list|.unknown)  [data-c="25"] .sum-host
 queue:    #queue  .queue-header  table.q  tr[data-job="412"](.mine .overdue .exp)  td.job .id .pill.<state> .pos  td.key .key .chip  td.requester .you .joiners
           td.reason .reason(.act) .blocked .stalled .stuck  td.elapsed  td.eta .eta .conf.(high|med|low|over)  td.source .sha .uncommitted
+          tr.qbar[data-bar] .pwrap .pbar(.steps|.time|.over|.unknown)[role=progressbar] .plab   (도는 행마다, 접힘과 무관하게)
           tr.expanded[data-job] .prog .head .minibar .steps .step(.run|.pend|.fail)  .tail  .actions button.log button.cancel  [data-more]
           .empty (빈 큐)  .banner.bad[data-error="queue"] (조회 실패)
 host:     #host  .hostcard(.dim)  .meter[data-metric="cpu|mem|gpu"]  meter  .spark svg  .stale-badge  .top  .banner.bad[data-error="hosts"]
-recent:   #recent  .rrow[data-job]  .pill  .rerun  details.est  .banner.bad[data-error="recent"]  .empty
+recent:   #recent  .rrow[data-job] .id  .pill  .rerun  details.est  .banner.bad[data-error="recent"]  .empty
 overlays: #banner-lost(role=alert)  dialog#tok-dialog  dialog#cancel-dialog  #drawer(role=dialog)  #toast
 ```
 
 - 시각 표기: `<time datetime="...">09:57</time>`. 1초 틱 요소는 `data-tick="elapsed|waiting|age|countdown" data-from="<iso>"`.
 - 접근성(목업 4절): 글리프 `aria-hidden`, 필 텍스트만 읽힘, 띠 `role="alert"`, 진행 막대 `role="progressbar"` + `aria-valuetext="step 5 of at least 8"`, 호스트 막대 `<meter>`, 잡 id·칩·sha·펼침·Log·Cancel·show more·live 토글은 전부 `<button>`, `aria-live="polite"` 는 상태 전이 영역(`#toast`)만.
 - 딥링크 `#/jobs/<id>`: 그 행 스크롤 + 강조 + 펼침(토큰 있으면 서랍). 큐에 없으면 최근으로, 거기도 없으면 토스트 `#409 finished 09:55 · succeeded`(`GET /jobs/{id}` 로 확인).
-- 접힘 상태: `localStorage["rcm.collapsed"]` = 잡 id 배열, 매 갱신 때 큐에 없는 id 정리. 실행 중 행은 기본 펼침(오너 결정 13).
+- 펼침 상태: `localStorage["rcm.expanded"]` = 잡 id 배열, 매 갱신 때 큐에 없는 id 정리. **행은 전부 기본 접힘**(오너 결정 13 — 2026-09-09 개정). 접힌 도는 행도 전체 진행 막대(`tr.qbar`)와 이유 칸의 `step 2/4 build 2s` 는 보인다. `#/jobs/<id>` 딥링크는 그 행을 편다.
 - 레인 1 이면 워커 필 하나(오너 결정 12). 최근 완료는 `recent_count`(8) 중 5 + `show N more`(오너 결정 14).
 - 토큰(오너 결정 15): `#tok-btn` → `dialog#tok-dialog`(붙여넣기 · Enter 제출 · Escape 닫기 · `checking…`) → `GET /api/whoami`. 성공 → 버튼 `🔑 <name>`, 23·13 활성. 401/403 → 버튼 빨강 `Token rejected`, 저장값 삭제. 네트워크 오류 → `couldn't verify — kept`.
 - 로그 tail(13): 토큰 있고 running/cancelling 이면 `/api/status` 의 `log_tail` 3~5줄을 `.tail` 에. `Log` 버튼 → 서랍: `GET /jobs/{id}/log?offset=` 증분 2초, 실패 스텝 마커 줄로 스크롤, 해시 `#/jobs/<id>/log`(뒤로가기 = 닫기). `Cancel` → `dialog#cancel-dialog`(제목 `Cancel #412 gate:full (alice@laptop)?`, running 문구 / queued 문구, 합류 세션 수) → `POST /jobs/{id}/cancel` → 행 dim + `cancel requested…`, 5초 안에 이벤트 없으면 재조회. 합류자면 `left` 응답 → 토스트 `left the join list`.

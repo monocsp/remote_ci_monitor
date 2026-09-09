@@ -63,24 +63,25 @@
 |---|---|---|
 | 보존 규칙(순수) | `core/retention.py` `retention_seconds` · `due_for_purge` | 상태 → 기간 하나. 로그와 워크스페이스를 **가르지 않는다** |
 | 실행 | `janitor.py` `sweep_once` → `_purge_job` | `jobs/<id>/` 와 `workspaces/<id>/` 를 **함께** 지우고 `artifacts_purged_at` 을 찍는다 |
+| sweep 이 하는 일 | `sweep_once` | 잡 산출물 → 번들 TTL → **은퇴 워커 잊기**(`WORKER_FORGET_DAYS = 7`, PR #69 에서 추가) → 메타데이터 → blob. 여기에 부피 정리가 하나 더 붙는다 |
 | 활성 잡 보호 | 순수 규칙(`retention_seconds` → None) · `_purge_job` 재확인 · `mark_artifacts_purged` 의 UPDATE 조건 | 삼중. mutcheck ⑦(`retention-active-guard`)이 지킨다 |
 | 설정 | `config.py:91-104` `retention_days_success`(14) · `retention_days_failure`(30) · `metadata_retention_days`(180) · `retention_sweep_interval_seconds`(3600) | 날짜뿐. **바이트 축이 없다** |
 | 검증 | `config.py:650-668` | `>= 0` · `metadata_retention_days >= max(sample_days, retention_days_*)` |
 | 바이트 예산의 선례 ① | `snapshot_cache_max_bytes`(4 GiB) → `core/retention.blobs_to_purge` | 참조된 blob 은 절대 안 지우고, 넘으면 오래된 것부터 |
 | 바이트 예산의 선례 ② | `artifact_storage_max_bytes`(10 GiB) → `store.reserve_bundle_bytes` | 꽉 차면 **새 묶음을 버린다**. 남의 묶음을 쫓아내지 않는다(결정 41) |
-| 회계가 DB 에 있는 것 | `job_artifacts.bundle_bytes`·`reserved_bytes`(`store.py:721`) · `blobs.size`(`:1183`) | 번들과 blob 만. **워크스페이스·로그는 회계가 없다** |
+| 회계가 DB 에 있는 것 | `job_artifacts.bundle_bytes`·`reserved_bytes`(`store.py:815`) · `blobs.size`(`:1183`) | 번들과 blob 만. **워크스페이스·로그는 회계가 없다** |
 | 호스트 표본의 디스크 | `hostsample._disk_usage`(`:86`) → `hosts[].disk.{used,free,total,path}_bytes` | `shutil.disk_usage(data_dir)`. 못 읽으면 그 칸만 None |
 | 「가득 참」 판정 | 웹 `app.js:31` `DISK_LOW_FREE = 10 GiB` · `:1159` `disk >= 85` | **경고**용 두 기준. `rcm top` 은 `render_text._disk` 로 숫자만 |
-| 산출물 회계 표시 | `server.artifact_storage`(`server.py:652`) → `{stored,reserved,limit}_bytes · last_sweep_at · error_code` | 이 모양을 그대로 따라간다(§5.1) |
+| 산출물 회계 표시 | `server.artifact_storage`(`server.py:672`) → `{stored,reserved,limit}_bytes · last_sweep_at · error_code` | 이 모양을 그대로 따라간다(§5.1) |
 | 수동 청소 | 없다 | 서버 재시작(시작 직후 sweep) 말고는 방법이 없다 |
-| admin 라우트 | `POST /pause` · `/resume`(`server.py:1941`) · `/jobs/{id}/priority` | 최상위 admin 라우트의 선례가 있다 |
+| admin 라우트 | `POST /pause` · `/resume`(`server.py:1988`) · `/jobs/{id}/priority` | 최상위 admin 라우트의 선례가 있다 |
 | 프리셋 산출물 | `presets[].artifacts` 글롭(M5e) → 종료 시 수집 → 24시간 묶음 | **성공·실패를 안 가린다**. 조건이 없다 |
 
 ### 3.1 설계를 정하는 발견
 
 **A. `server.artifact_storage.last_sweep_at` 은 언제나 `null` 이다 — 기존 버그.**
-`server.py:660` 이 `getattr(self, "janitor", None)` 로 청소기를 찾는데 `App` 의 속성 이름은
-`self.retention` 이다(`server.py:220`·`:267`). `self.janitor` 는 어디에도 없다(`_janitor` 는 원격
+`server.py:680` 이 `getattr(self, "janitor", None)` 로 청소기를 찾는데 `App` 의 속성 이름은
+`self.retention` 이다(`server.py:223`·`:279`). `self.janitor` 는 어디에도 없다(`_janitor` 는 원격
 워커 판정 스레드다). 그래서 마지막 청소 시각이 **한 번도 화면에 나온 적이 없다.** 테스트는 키가
 있는지만 본다(`tests/test_server_m5e.py:876`). 「다음 청소가 언제인가」를 이 마일스톤이 싣기로 했으니
 **PR 2 에서 이 한 줄을 먼저 고친다**(회귀 테스트: 값이 실제로 채워지는지).
@@ -96,7 +97,7 @@
 같은 날짜를 줄 이유가 없다는 것이 이 마일스톤의 출발점이고, 숫자가 그것을 그대로 말한다.
 
 **D. 스냅샷 tar 은 종료된 잡에서 아무도 안 읽는다.** `jobs/<id>/tree.tar.gz` 를 읽는 곳은 자재화
-(`worker.py:391`)와 원격 워커의 트리 내려받기(`remote_workers.py:496`) 둘뿐이고 **둘 다 활성 잡에서만**
+(`worker.py:391`)와 원격 워커의 트리 내려받기(`remote_workers.py:499`) 둘뿐이고 **둘 다 활성 잡에서만**
 일어난다. 종료된 잡의 tar 은 감사 기록 이상이 아니다 — 부피 축에 넣는다(결정 51).
 
 ## 4. 설계
@@ -780,7 +781,7 @@ artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure
 
 | # | 무엇 | 어디 | 어떻게 |
 |---|---|---|---|
-| A | `server.artifact_storage.last_sweep_at` 이 **항상 null** | `server.py:660` 이 없는 속성 `self.janitor` 를 본다(실제 이름은 `self.retention`) | PR 2 에서 고친다 + 값이 채워지는 회귀 테스트 |
+| A | `server.artifact_storage.last_sweep_at` 이 **항상 null** | `server.py:680` 이 없는 속성 `self.janitor` 를 본다(실제 이름은 `self.retention`) | PR 2 에서 고친다 + 값이 채워지는 회귀 테스트 |
 | B | 원격 워커는 **시작할 때 한 번만** 워크스페이스를 지우고, 기준이 상수 7일이다 | `remote_worker.py:60`·`:596` | M5g 범위 밖. 별도 이슈 — 오래 사는 워커는 영영 청소하지 않는다 |
 | D | **원격 워커는 산출물을 아예 안 모은다 — M5e 가 원격 풀에서 죽어 있다** | `_claim_payload`(`remote_workers.py:373`)의 `preset_doc` 에 `artifacts` 가 **없고** 최상위 `artifacts` 객체도 안 싣는다. 워커의 `_policy_from_claim`(`remote_worker.py:167`)은 둘 다 못 찾아 `None` 을 돌려주고, `None` 이면 수집을 건너뛴다 | **실측으로 확인했다**(아래). 시험은 손으로 만든 claim payload 를 쓰기 때문에(`tests/test_worker_m5e.py:287`) 이 구멍을 못 잡는다. M5g PR 4 가 같은 자리를 고치므로 거기서 함께 고치거나, 더 급하면 별도 hotfix |
 | C | **PLAN.md 결정 번호 39~42 가 두 번 나온다** | `PLAN.md:608-611`(M5f) 와 `:621-624`(M5e). 머지 `d26b3f4` 의 흔적이고 양쪽 문서가 이미 각자의 번호로 서로를 가리킨다 | 여기서 고치지 않는다(양쪽 문서의 상호 참조가 깨진다). 오너가 어느 쪽을 옮길지 정하면 그 PR 에서 한 번에 바꾼다. M5g 는 **51번부터** 쓴다 |
