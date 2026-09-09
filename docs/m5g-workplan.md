@@ -13,7 +13,7 @@
 
 | 질문 | 오늘 | M5g |
 |---|---|---|
-| 실패한 잡의 로그를 30일 들고 있고 싶다. 워크스페이스도 30일이어야 하나? | 그렇다. `retention_days_failure` 하나가 둘 다 지배한다 | 아니다. 로그 30일 · 워크스페이스 `workspace_retention_days`(2) |
+| 실패한 잡의 로그를 30일 들고 있고 싶다. 워크스페이스도 30일이어야 하나? | 그렇다. `retention_days_failure` 하나가 둘 다 지배한다 | 아니다. 로그 30일 · 워크스페이스 `workspace_retention_days`(1) |
 | 하루에 50개씩 실패하면 30일 뒤에 무슨 일이 나나? | 750 GB 가 필요하다. 여유는 628 GB — **보존 기간이 한 번도 발동하기 전에 디스크가 찬다** | 예산(`workspace_storage_max_bytes`)과 바닥(`min_free_bytes`)이 날짜보다 먼저 잡는다 |
 | 데이터 디렉터리가 지금 얼마를 쥐고 있나? | **어디에도 안 나온다.** `du` 를 직접 쳐야 안다 | `/api/status` · `/api/health` · `rcm check` · 웹 호스트 카드 |
 | 다음 청소가 언제인가? | 안 나온다(`server.artifact_storage.last_sweep_at` 은 **항상 null** — §3.1 A) | `last_sweep_at` · `next_sweep_at` |
@@ -108,7 +108,7 @@
 | 분류 | 파일 | 시계 | 예산·바닥이 지우나 |
 |---|---|---|---|
 | **증거** | `jobs/<id>/log.txt` · `manifest.json` · DB 의 잡 행·이벤트 | `retention_days_success`(14) · `retention_days_failure`(30) · `metadata_retention_days`(180) — **그대로** | **아니다.** 어떤 압박에서도 증거는 안 지운다 |
-| **부피** | `workspaces/<id>/` · `jobs/<id>/tree.tar.gz` | `workspace_retention_days`(2) | 그렇다. 오래된 종료 잡부터 |
+| **부피** | `workspaces/<id>/` · `jobs/<id>/tree.tar.gz` | `workspace_retention_days`(1) | 그렇다. 오래된 종료 잡부터 |
 | 잡 산출물 묶음 | `artifacts/<id>/` | `artifact_retention_hours`(24) — 자기 시계 | 아니다(결정 41: 남의 묶음을 쫓아내지 않는다) |
 | 스냅샷 캐시 | `blobs/` | `snapshot_cache_days`(30) + `snapshot_cache_max_bytes`(4 GiB) — 자기 예산 | 아니다(자기 예산이 있다) |
 | 미러 | `mirrors/` | 없다 — 안 지운다(M3 그대로) | 아니다 |
@@ -125,13 +125,13 @@
 [server]
 retention_days_success = 14              # 이미 있는 키 — 성공 잡의 로그
 retention_days_failure = 30              # 이미 있는 키 — 비성공 잡의 로그
-workspace_retention_days = 2             # 새 키 — 남겨 둔 워크스페이스와 그 잡의 스냅샷 tar
+workspace_retention_days = 1             # 새 키 — 남겨 둔 워크스페이스와 그 잡의 스냅샷 tar
 workspace_storage_max_bytes = 107374182400   # 새 키 — 부피의 상한(100 GiB). 0 = 무제한
 min_free_bytes = 10737418240             # 새 키 — 파일 시스템 여유 바닥(10 GiB). 0 = 안 본다
 ```
 
 **타입**(`_apply_section` 이 기본값의 타입으로 TOML 값을 맞춘다, `config.py:313`):
-`workspace_retention_days: int = 2` · `workspace_storage_max_bytes: int = 107_374_182_400` ·
+`workspace_retention_days: int = 1` · `workspace_storage_max_bytes: int = 107_374_182_400` ·
 `min_free_bytes: int = 10_737_418_240`. 순수 계층의 `WorkspaceBudget` 은 이 셋을 인자로 받는다
 (`core/queue.QueueConfig` · `core/admission.AdmissionConfig` 와 같은 방식 — 순수 계층은 `config.py` 를
 모른다).
@@ -156,8 +156,8 @@ min_free_bytes = 10737418240             # 새 키 — 파일 시스템 여유 �
 
 | 값 | 왜 |
 |---|---|
-| `workspace_retention_days = 2` | 하루 50개 × 435 MB ≈ 21.8 GB/일 → 정상 상태 **약 44 GB**. 여유 628 GB 의 7%. 어제 깨진 잡의 워크스페이스를 이틀 안 열어 봤으면 코드가 이미 앞으로 갔다 — 그때부터 그 720 MB 의 값은 0 이다. 「왜 깨졌나」는 로그(30일)에 남는다 |
-| `workspace_storage_max_bytes = 100 GiB` | 날짜 규칙의 정상 상태(44 GB)보다 넉넉히 위 — **평소에는 안 발동하고**, 하루에 200개가 들어오는 날이나 1.6 GB 짜리 잡이 몰리는 날에만 천장이 된다. 이 머신 여유의 16%. 예산을 정상 상태 가까이(50 GiB) 잡으면 매일 발동해서 「2일 보관」이 거짓말이 된다 |
+| `workspace_retention_days = 1` | 하루 50개 × 435 MB ≈ 21.8 GB/일 → 정상 상태 **약 22 GB**(sweep 주기 때문에 실제 상한은 하루+1시간치 ≈ 23 GB). 여유 628 GB 의 3.6%. 깨진 잡의 워크스페이스는 **그날 안 열어 보면 값이 0 이다** — 코드가 이미 앞으로 갔다. 「왜 깨졌나」는 로그(30일)에 남고, 부피 있는 증거는 `artifacts` 로 가져간다(§6). **⛔ 오너 확정 2026-09-09** — 초안은 2일이었다 |
+| `workspace_storage_max_bytes = 100 GiB` | 날짜 규칙의 정상 상태(22 GB)의 네 배가 넘는다 — **평소에는 안 발동하고**, 하루에 200개가 들어오거나 1.6 GB 짜리 잡이 몰리는 날에만 천장이 된다. 이 머신 여유의 16%. 예산을 정상 상태 가까이 잡으면 매일 발동해서 「하루 보관」이 거짓말이 된다 |
 | `min_free_bytes = 10 GiB` | 웹 호스트 카드가 이미 쓰는 값(`DISK_LOW_FREE`). 「작은 디스크는 80% 에서도 스냅샷을 못 푼다」는 그 카드의 근거가 그대로 삭제 기준의 근거다 |
 
 **비율(`min_free_ratio`)은 두지 않는다.** 화면의 두 기준(85% 또는 10 GiB) 중 **85% 는 사람에게
@@ -248,8 +248,14 @@ def _measure_dir(self, path: Path) -> int | None:
 - **심볼릭 링크는 따라가지 않는다**(`entry.is_dir(follow_symlinks=False)`). `_remove_tree` 가 링크를
   링크로만 지우는 것과 같은 규칙이다. 하드링크(같은 레포의 `git_ref` clone)는 링크마다 세므로 총량이
   살짝 크게 나온다 — 예산이 보수적으로 동작하는 쪽이라 그대로 둔다(문서에 적는다).
-- **한 번 재고 기억한다.** 종료된 잡의 워크스페이스는 다시 안 변한다. `Janitor._sizes: dict[int, int]`
-  에 담고 디렉터리가 사라지면 버린다. 활성 잡은 자라므로 매 sweep 다시 잰다(레인 수만큼이라 싸다).
+- **한 번 재고 기억하되, 안 변했는지 확인하고 쓴다.** 「종료된 잡의 워크스페이스는 다시 안 변한다」는
+  전제는 대체로 참이지만 **믿고만 있으면 안 된다** — 잡이 남긴 백그라운드 프로세스가 계속 쓰거나
+  사람이 그 디렉터리를 손댈 수 있다. 캐시는 `Janitor._sizes: dict[int, tuple[int, int]]`
+  (`job_id → (bytes, 잴 때의 최상위 디렉터리 st_mtime_ns)`)이고, 매 sweep **`lstat` 한 번**으로
+  mtime 이 그대로인지 보고 다르면 다시 잰다(디렉터리 하나에 `lstat` 하나는 공짜다). 디렉터리가
+  사라지면 버린다. 캐시는 **메모리에만** 있고 프로세스와 함께 죽는다 — 재시작하면 전부 다시 잰다.
+  ⚠️ 안쪽 파일만 바뀌면 최상위 mtime 이 안 변할 수 있다. 그건 받아들인다 — 예산이 조금 틀리는 것과
+  매 sweep 38만 파일을 다시 훑는 것 중 후자가 더 나쁘다. 대신 `measured_at` 을 화면에 싣는다. 활성 잡은 자라므로 매 sweep 다시 잰다(레인 수만큼이라 싸다).
   §2.2 의 실측: 첫 sweep 6.65초(38만 파일), 이후 sweep 은 **새로 종료된 잡 몇 개**(하루 50개 · 시간당
   약 2개 → 0.2초). 서버가 뜨자마자 도는 첫 sweep 이 가장 비싸다는 것을 문서에 적는다.
 - **여유 공간**은 `shutil.disk_usage(data_dir)` — 호스트 표본과 같은 함수이지 표본을 재사용하지
@@ -267,6 +273,10 @@ def _measure_dir(self, path: Path) -> int | None:
   쥐고 있으니 총량에는 들어가야 한다.
 
 `jobs/<id>/tree.tar.gz` 도 같은 방식으로 `jobs/` 를 훑어 잰다(파일 하나라 `lstat` 한 번이다).
+**두 스캔은 독립이다** — 원격 워커에서 돈 잡은 서버에 워크스페이스가 없지만 **입력 tar 은 서버에
+남는다.** 워크스페이스 목록에만 기대면 그 tar 이 부피 규칙을 통째로 비껴가 로그 시계(30일)를 타고,
+`--no-cache` 클라이언트가 있는 원격 풀 설치에서 최대 512 MB × 잡 수가 조용히 쌓인다. 서버에 남는
+입력 tar 과 워커 디스크의 워크스페이스는 **서로 다른 문제**다(후자는 §3.1 B, 범위 밖).
 
 ### 4.5 한 회차에 한 번만 계획한다 (결정 54)
 
@@ -309,13 +319,15 @@ def _measure_dir(self, path: Path) -> int | None:
   "workspace_bytes": 30940831744, "snapshot_bytes": 3379809, "log_bytes": 41680896,
   "evictable_bytes": 29884170240,
   "limit_bytes": 107374182400, "free_bytes": 674309865472, "min_free_bytes": 10737418240,
-  "over_budget_bytes": 0, "short_free_bytes": 0,
+  "over_budget_bytes": 0, "short_free_bytes": 0, "orphan_bytes": 0, "budget_unreachable": false,
   "measured_at": "2026-09-09T05:00:03Z",
   "last_sweep_at": "2026-09-09T05:00:03Z", "next_sweep_at": "2026-09-09T06:00:03Z",
   "error_code": null
 }
 ```
 
+- `budget_unreachable` 은 「지울 수 없는 바이트만으로 이미 예산을 넘었다」는 사실이다(§4.3). 이때
+  예산 규칙은 아무것도 안 고르고 `rcm check` 가 원인(도는 잡 · 고아)을 지목한다.
 - `evictable_bytes` 는 **종료 잡의** 워크스페이스+tar 합이다. `workspace_bytes` 와의 차이가 지금
   도는 잡이 쥔 몫이다 — 「예산을 넘었는데 왜 안 줄지?」의 답이 화면에 있다.
 - 못 잰 값은 `null`(0 이 아니다) + `error_code`. `queue_error`·`hosts_error` 와 같은 규칙이다.
@@ -341,6 +353,8 @@ def _measure_dir(self, path: Path) -> int | None:
 ok    storage       rcm data 30.9 GB of 107.4 GB · 674 GB free · next sweep in 42m
 warn  storage       rcm data 118.2 GB over the 107.4 GB budget — the next sweep will trim it
 warn  storage       size of 2 workspaces could not be measured — the budget is not enforced
+warn  storage       118.2 GB over the 107.4 GB budget, held by running jobs and 3 orphan
+                    directories — nothing the sweep may delete would bring it under
 FAIL  storage       4.1 GB free, under the 10.7 GB floor, and nothing left to delete
 ```
 
@@ -378,6 +392,29 @@ would free 2.3 GB from 2 jobs · 62 workspaces left · 28.9 GB of 107.4 GB
 - sweep 락을 잡는다 — 청소기와 동시에 돌지 않는다.
 - `--json` 은 응답 그대로. 사람용 표는 `core/render_text` 에 둔다(순수).
 
+### 5.6 설정 표면 — 처음 설치한 사람이 이 세 값을 찾을 수 있어야 한다 (결정 60)
+
+오너 요청(2026-09-09): 「이 프로젝트를 쓰는 유저가 처음에 **고급**을 눌러 이것저것 설정할 수 있게
+하는데, 이 내용도 있으면 좋겠다.」 오늘 이 레포에 「고급」이라는 화면은 없다. 사람이 값을 만지는
+자리는 **`rcm init server` 가 써 주는 `server.toml`** 이고, 그 파일이 곧 고급 설정 화면이다.
+그래서 세 키를 **숨기지 않는다**:
+
+| 자리 | 어떻게 |
+|---|---|
+| `examples/server.toml` = `templates/server.toml` | 다른 보존 키 바로 밑에 **주석 처리하지 않고** 기본값과 한 줄 설명을 함께 쓴다. 둘은 바이트가 같아야 하고 `tests/test_examples.py` 가 잠근다 — `rcm init server` 로 만든 모든 새 설치의 파일에 이 세 줄이 들어간다 |
+| `docs/configuration.md` | 「Retention」 절과 **키 표**를 새로 둔다(산출물 표와 같은 모양: 키 · 기본값 · 뜻). 지금은 보존 키가 `operating.md` 산문에만 있고 표가 없다 |
+| `docs/operating.md` 「Retention」 | 두 시계 · 예산 · 바닥 · `rcm gc` · **되돌리는 법**을 적는다 |
+| `docs/usage.md` §11 「What to do next」 | 「디스크가 차기 전에 무엇이 지워지는지 보라」 한 줄 + `rcm gc --dry-run` |
+
+기본값이 **파일에 적혀 있어야** 하는 이유: 이 셋은 데이터를 지우는 값이다. 「코드 기본값이라
+파일에 없다」는 상태에서 사람이 `rcm gc --dry-run` 을 보고 놀라는 것보다, 설치할 때 파일에서 보고
+자기 값으로 바꾸는 쪽이 낫다. 실제로 오너의 운영 `server.toml` 은 `recent_count` 한 줄만 바꾼
+상태였고, 나머지가 전부 코드 기본값이라는 것을 아무도 파일에서 볼 수 없었다.
+
+⚠️ 나중에 웹/웹뷰에 **진짜 「고급 설정」 화면**이 생기면 이 세 값이 거기 첫 줄에 있어야 한다.
+그 화면은 M5g 범위가 아니다(설정은 서버 파일이 정본이고, 화면에서 쓰려면 설정을 쓰는 API 가 먼저
+필요하다) — 화면을 만드는 세션이 이 절을 보고 가져간다.
+
 ## 6. 프리셋이 증거를 남기는 법 (결정 58·59)
 
 **문제는 rcm 이 아니라 프리셋 쪽이다.** rcm 은 stdout+stderr 를 전량 저장한다. 참고 팀의 게이트
@@ -414,7 +451,7 @@ artifacts = [".rcm/logs/*.log"]
 artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure"
 ```
 
-- **묶음은 보관소가 아니다.** `artifact_retention_hours`(24)는 워크스페이스의 2일보다 **짧다.**
+- **묶음은 보관소가 아니다.** `artifact_retention_hours`(24)는 워크스페이스의 하루와 **거의 같다.**
   가져가는 통로이지 증거의 서랍이 아니다 — 서랍은 로그(30일)다. 문서에 이 순서를 명시한다.
 - **프리셋별 TTL 은 만들지 않는다.** 24시간이 「가져간다」는 용도를 덮고, 더 길게 두면
   `artifact_storage_max_bytes`(10 GiB)와 싸운다. 필요하면 전역 값을 올린다(결정 58).
@@ -445,7 +482,7 @@ artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure
 | `tests/test_server_m5g.py` | `job_storage` 키 집합·null 규칙 · `/api/health.storage` · `POST /gc` 는 admin 만(401/403) · `dry_run` 은 아무것도 안 지운다 · gc 와 sweep 이 겹치지 않는다 |
 | `tests/test_cli_m5g.py` | `rcm gc` 표·`--json` · `rcm check` 의 storage 행 세 모양(ok/warn/FAIL) |
 | `tests/web/storage.test.js` | 호스트 카드 줄 두 언어 · `error_code` 면 숫자 대신 문구 · 예산 초과 `warn` · 옛 문서(키 없음)에서 안 깨짐 |
-| `tests/test_docs_m5g.py` | `examples/server.toml` 새 키 3줄 · `docs/configuration.md` 의 보존 표 · `docs/operating.md` 「Retention」 · 프리셋 권고 절 · CHANGELOG `[Unreleased]` |
+| `tests/test_docs_m5g.py` | `examples/server.toml` 새 키 3줄(**주석 아님** — 값이 그대로 있어야 한다) · `docs/configuration.md` 의 보존 표 · `docs/operating.md` 「Retention」 · 프리셋 권고 절 · CHANGELOG `[Unreleased]` |
 
 **고쳐야 하는 기존 테스트**
 
@@ -454,7 +491,7 @@ artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure
 | `tests/test_config.py` | 새 키 3개의 기본값 · 범위 밖 · `workspace_retention_days > retention_days_failure` 교차 검증 |
 | `tests/test_status_schema.py` | `server` 의 키 집합에 `job_storage` 추가 |
 | `tests/test_server_m5e.py:876` · `tests/test_compat_m5e.py:171` | `artifact_storage` 키 집합 비교 — `last_sweep_at` 이 **실제로 채워지는** 회귀 테스트를 여기에 더한다(§3.1 A) |
-| `tests/test_janitor.py` | `_purge_job` 이 이제 tar 을 부피 시계로 다룬다 — 성공 잡의 tar 이 2일에 사라지는 것 |
+| `tests/test_janitor.py` | `_purge_job` 이 이제 tar 을 부피 시계로 다룬다 — 성공 잡의 tar 이 하루에 사라지는 것 |
 | `tests/test_examples.py` | `examples/server.toml` ↔ `templates/` 바이트 동일 |
 | `AGENTS.md:64` | 「12 known mutations」 → 14 |
 
@@ -486,7 +523,7 @@ artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure
 
 **완료 기준**
 
-1. 업그레이드만으로 **워크스페이스만** 2일로 짧아진다. 로그(14/30)·메타데이터(180)·번들(24시간)·
+1. 업그레이드만으로 **워크스페이스만** 하루로 짧아진다. 로그(14/30)·메타데이터(180)·번들(24시간)·
    blob(30일/4 GiB)은 그대로다. CHANGELOG 에 동작 변경으로 적는다.
 2. 개발 인스턴스(127.0.0.1:8788 · 자기 `data_dir`)에서 **세 규칙이 각각 발동하는 것을 보인다** —
    ① 나이 ② 예산(작은 `workspace_storage_max_bytes` 로) ③ 바닥(작은 여유를 흉내 낸 `disk_usage`).
@@ -505,27 +542,45 @@ artifacts_on = "failure"        # 새 프리셋 키. "always"(기본) | "failure
 
 | # | 결정 | 기본값(⛔ 이대로 구현) |
 |---|---|---|
-| 51 | 로그와 부피를 따로 재운다 | `workspace_retention_days = 2` 를 새로 두고 로그·메타데이터는 그대로(14 · 30 · 180). 부피에는 **그 잡의 스냅샷 `tree.tar.gz` 도 포함**한다 — 종료된 잡에서 아무도 안 읽는다(§3.1 D). 성공 잡의 tar 이 14일에서 2일로 짧아지는 것이 이 결정의 유일한 부수 효과다. 이름에 `_failure` 를 안 붙이는 이유: 성공 잡의 워크스페이스는 애초에 남지 않는다 |
+| 51 | 로그와 부피를 따로 재운다 | `workspace_retention_days = 1` 을 새로 두고 로그·메타데이터는 그대로(14 · 30 · 180). 부피에는 **그 잡의 스냅샷 `tree.tar.gz` 도 포함**한다 — 종료된 잡에서 아무도 안 읽는다(§3.1 D). 성공 잡의 tar 이 14일에서 하루로 짧아지는 것이 이 결정의 유일한 부수 효과다. **기본값 1일은 오너 확정(2026-09-09)** 이고 명세 초안은 2일이었다. 이름에 `_failure` 를 안 붙이는 이유: 성공 잡의 워크스페이스는 애초에 남지 않는다 |
 | 52 | 바이트 예산 | `workspace_storage_max_bytes = 107374182400`(100 GiB), `0` = 무제한. 재고 지우는 대상은 **워크스페이스 + 스냅샷 tar** 뿐 — 로그·번들·blob 은 각자의 예산이 있고 이 예산이 손대지 않는다. 정상 상태(44 GB)의 두 배가 넘게 잡아 **평소에는 안 발동하는 천장**이다 |
 | 53 | 여유 공간 바닥 | `min_free_bytes = 10737418240`(10 GiB), `0` = 안 본다. 웹 카드의 `DISK_LOW_FREE` 와 같은 값. **비율(85%)은 안 쓴다** — 그건 사람에게 알리는 기준이지 지우는 기준이 아니다 |
 | 54 | 한 회차에 한 번만 계획한다 | 잰 값으로 계획 → 실행 → 다시 잰다. 「여유가 오를 때까지」 루프는 없다. macOS 로컬 스냅샷처럼 지워도 여유가 안 오르는 경우에 **전부 지우게 되는** 것을 막는다 |
-| 55 | 못 재면 안 지운다 | 크기를 못 잰 워크스페이스가 하나라도 있으면 그 회차의 **예산·바닥을 건너뛰고** `job_storage.error_code` 와 `rcm check` warn 으로 알린다. **나이 규칙은 그대로 돈다**(나이는 크기를 안 본다) |
+| 55 | 못 재면 **압박 삭제만** 멈춘다 | 크기를 못 잰 워크스페이스가 하나라도 있으면 그 회차의 **예산·바닥을 건너뛰고** `job_storage.error_code` 와 `rcm check` warn 으로 알린다. **나이 규칙은 그대로 돈다** — 그건 오늘도 도는 정상 보존 정책이고 크기를 안 본다. 둘을 한 문장으로 묶어 잠그면 디스크가 차는 동안 나이 규칙까지 멈춘다. 그리고 **지울 수 없는 바이트(도는 잡 + 고아)만으로 예산을 넘으면 예산 규칙은 아무것도 안 고른다** — 못 이룰 목표를 위해 증거를 태우지 않는다(`budget_unreachable`). 바닥 규칙은 그래도 돈다(응급이고 한 걸음이 이득이다) |
 | 56 | 어디에 보여주나 | 셋 다 — `/api/status server.job_storage` · `/api/health storage` · `rcm check` 의 `storage` 행 · 웹 호스트 카드 한 줄. 스키마 v1 에 **키를 더한다** |
 | 57 | 손으로 청소하기 | `rcm gc [--dry-run] [--json]` · `POST /gc`(admin). dry-run 은 janitor 와 **같은 계획 함수**를 돌려 지울 목록·바이트·사유를 낸다 |
 | 58 | 프리셋이 증거를 남기는 법 | 새 개념을 안 만든다 — 무거운 구간 출력은 `TMPDIR` 이 아니라 **워크스페이스**에 두고 M5e `artifacts` 로 선언하고, 「왜 깨졌는지」는 stdout 으로 흘려 **로그**(30일)에 남긴다. **프리셋별 TTL 은 안 만든다** — 24시간은 「가져간다」는 용도에 맞고, 늘리면 `artifact_storage_max_bytes` 와 싸운다 |
+| 60 | 설정 표면 | 세 키를 `examples/server.toml`(= `templates/server.toml`, `rcm init server` 가 쓰는 파일)에 **주석 없이 기본값과 함께** 넣고, `docs/configuration.md` 에 보존 키 표를 새로 만든다. 데이터를 지우는 값은 설치할 때 파일에서 보여야 한다 — 오너의 운영 설정이 `recent_count` 한 줄만 바뀐 채 나머지가 전부 「보이지 않는 코드 기본값」이었다. 진짜 「고급 설정」 화면이 생기면 이 셋이 거기 첫 줄이다(그 화면은 M5g 범위 밖) |
 | 59 | 실패했을 때만 모으기 | 프리셋 키 `artifacts_on = "always"`(기본, 오늘의 동작) `\| "failure"`. 초록 잡마다 무거운 로그를 모아 24시간 들고 있을 이유가 없다 — 그 비용이 §6 의 권고를 안 따르게 만든다 |
 
 ## 12. 위험
 
 | 위험 | 대응 |
 |---|---|
-| **업그레이드만으로 27 GB 가 사라진다** | 실제로 그렇게 된다(2일 지난 워크스페이스 대부분). 그래서 완료 기준 8 이 **`rcm gc --dry-run` 을 먼저** 돌리는 것이고, CHANGELOG 가 동작 변경으로 적고, 되돌리는 법(`workspace_retention_days = 30`)을 같은 줄에 적는다 |
+| **업그레이드만으로 27 GB 가 사라진다** | 실제로 그렇게 된다(하루 지난 워크스페이스 대부분). 그래서 완료 기준 8 이 **`rcm gc --dry-run` 을 먼저** 돌리는 것이고, CHANGELOG 가 동작 변경으로 적고, 되돌리는 법(`workspace_retention_days = 30`)을 같은 줄에 적는다 |
 | 측정 실패가 예산을 영구히 끈다 | 의도한 fail-closed 다(결정 55). 대신 **조용하지 않다** — `error_code` · `rcm check` warn · 서버 로그 한 줄. 「지우는 쪽이 조용히 틀리는」 것보다 낫다 |
 | 첫 sweep 이 느리다 | 서버 시작 직후 한 번 6.65초(38만 파일). 청소기 스레드에서 돌고 큐를 막지 않는다. 문서에 적는다 |
 | 하드링크를 두 번 센다 | 같은 레포의 `git_ref` clone 이 미러 객체를 하드링크한다. 총량이 크게 나와 예산이 **보수적으로** 동작한다 — 안전한 방향이라 그대로 두고 문서에 적는다 |
 | 폭주하는 로그 하나가 디스크를 채운다 | 이 마일스톤이 안 막는다(§7). `stuck` 이 먼저 잡고, 로그 상한은 증거를 자르는 결정이라 따로 물어야 한다 |
 | 원격 워커 디스크는 그대로 찬다 | §3.1 B. 서버가 지울 수 없다. 별도 이슈로 남기고 `rcm check` 가 워커 디스크를 이미 보여 준다 |
 | `rcm gc` 가 사고를 낸다 | admin 토큰 · 기본은 실행이지만 dry-run 이 같은 계획을 보여 준다 · sweep 락으로 청소기와 안 겹친다 · 지우는 규칙 자체가 janitor 와 **한 벌**이라 gc 전용 버그가 생기지 않는다 |
+
+## 12.5 리뷰 반영 (`docs/reviews/2026-09-09-codex-m5g-design.md`)
+
+크로스리뷰는 **완주하지 못했다** — 코덱스의 모델 접근이 중간에 끊겼다(그 문서의 첫 절). 끊기기 전에
+낸 관찰 넷을 반영했고, 그중 둘은 명세의 실제 구멍이었다.
+
+- **D. 두 스캔은 독립이다**(§4.4). 원격 워커에서 돈 잡은 서버에 워크스페이스가 없지만 **입력 tar 은
+  서버에 남는다.** 워크스페이스 목록에만 기대면 그 tar 이 부피 규칙을 비껴가 로그 시계를 탄다.
+- **E. 못 이룰 목표를 위해 증거를 태우지 않는다**(§4.3). 지울 수 없는 바이트(도는 잡 + 고아)만으로
+  예산을 넘으면 예산 규칙은 그 회차에 아무것도 안 고른다(`budget_unreachable`). 바닥 규칙은 돈다.
+- **F. 압박 삭제와 나이 삭제를 한 문장으로 묶지 않는다**(§4.3 · 결정 55). 잘못 잠그면 디스크가 차는
+  동안 나이 규칙까지 멈춘다.
+- **G. 측정 캐시의 불변 조건을 적었다**(§4.4). `(bytes, 최상위 st_mtime_ns)` 를 `lstat` 로 확인하고
+  쓴다. 메모리에만 있고 재시작하면 다시 잰다.
+
+**아직 답을 못 받은 항목**(그 문서 §3): 결정 54 가 바닥을 무력하게 만드는 조합 · `POST /gc` 의 락
+순서 · mutcheck 2종이 안전 성질을 실제로 잠그나. 모델 접근이 고쳐지면 같은 프롬프트로 이어 받는다.
 
 ## 13. 이 명세가 발견한 기존 문제
 
