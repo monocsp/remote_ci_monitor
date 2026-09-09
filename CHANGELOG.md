@@ -56,6 +56,7 @@ of a key bumps that number and is listed here.
   `PreToolUse` hook (`tools/guard_production.py`, wired in `.claude/settings.json`) finds the
   production checkout from the machine's own editable install, refuses edits to it and to the
   server's config and data, and asks before a deploy. A machine with no such install sees nothing.
+  ([#61](https://github.com/monocsp/remote_ci_monitor/pull/61))
 
 ### Fixed
 - **The phone layout had never actually been tested on a phone** (M5d-3). The mobile test opened
