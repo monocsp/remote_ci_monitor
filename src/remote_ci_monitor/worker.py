@@ -175,6 +175,11 @@ def outcome_for(
             summary = None
     # 스텝 라벨과 실패 이름은 `failed`·`timed_out` 만 갖는다(결정 64). 취소·유실 잡에 스텝
     # 이름을 붙이면 사람이 「그게 깨져서 멈췄나」로 읽는다. 성공 잡은 자신의 판정이 이긴다.
+    #
+    # dev 의 PR #71 이 이 자리에서 옳은 관찰을 했다 — 「게이트가 `test` 실패를 찍고도 계속
+    # 돌다가 `build web` 에서 타임아웃으로 죽는 모양이 실제로 나온다」. M5h 에서는 그 잡이
+    # `failed_step: test`(스크립트가 선언했다 — 참)와 `last_step: build web`(끝났을 때 거기
+    # 있었다 — 참)을 **둘 다** 낸다. 두 사실이 서로 다른 칸에 있어서 추측 표시가 필요 없다.
     labelled = state in (FAILED, TIMED_OUT)
     return Outcome(
         state=state,
@@ -341,7 +346,11 @@ class Worker(threading.Thread):
         산출물 때문에 그러면 안 된다(명세 §5).
         """
         policy = artifact_policy(self.config, preset)
-        if not policy.enabled():
+        # 예정 종료 상태로 판정한다 — 수집은 종료를 커밋하기 **전에** 일어난다(M5e §5).
+        state = art.prospective_state(
+            result.rc, cancelled=result.cancelled, timed_out=result.timed_out
+        )
+        if not policy.collects_for(state):
             return None
         data = self.config.data_dir
         staging = data / "artifacts" / ".staging" / f"{job.id}.{secrets.token_hex(8)}"
@@ -506,6 +515,7 @@ def artifact_policy(config: ServerConfig, preset: Preset) -> art.ArtifactPolicy:
         max_files=s.max_artifact_files,
         timeout_seconds=s.artifact_timeout_seconds,
         cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+        collect_on=preset.artifacts_on,
     )
 
 

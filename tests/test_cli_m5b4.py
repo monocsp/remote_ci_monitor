@@ -35,7 +35,7 @@ POOL = "linux"
 DEFAULT_1 = "default (1 lane)"
 
 #: cmd_check 의 행 형식 `{'ok ' if ok else 'FAIL'}  {name:<13} {detail}` — 이름은 13칸 고정.
-ROW_RE = re.compile(r"^(ok |FAIL)  (.{13}) (.*)$")
+ROW_RE = re.compile(r"^(ok |warn|FAIL)  (.{13}) (.*)$")  # warn 은 `cmd_check` 의 세 번째 등급
 
 
 # ── 도우미 ───────────────────────────────────────────────────────────────────

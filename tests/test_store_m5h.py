@@ -282,18 +282,21 @@ def test_a_fresh_database_is_at_the_newest_schema_with_last_step(store):
     assert "last_step" in _SCHEMA_V1  # 문면으로도 잠근다
 
 
-def test_migrations_11_and_12_are_one_statement_per_tuple_entry():
-    """`_MIGRATIONS` 는 문장 하나씩의 튜플이다 — `executescript` 가 아니다."""
-    for target in (11, 12):
-        stmts = _MIGRATIONS[target]
-        assert isinstance(stmts, tuple) and stmts
-        assert all(isinstance(s, str) for s in stmts)
-    assert "last_step" in " ".join(_MIGRATIONS[11])
-    blob = " ".join(_MIGRATIONS[12])
-    assert "job_failures" in blob and "fail_truncated" in blob
+def test_the_m5h_migrations_are_one_statement_per_tuple_entry():
+    """`_MIGRATIONS` 는 문장 하나씩의 튜플이다 — `executescript` 가 아니다.
+
+    번호는 밀린다: `dev` 가 v11(`failed_step_guessed`)을 먼저 가져가서 M5h 는 12~15 다.
+    그래서 숫자가 아니라 **내용**으로 찾는다 — 다음에 또 밀려도 이 검사는 안 썩는다.
+    """
+    for target, stmts in _MIGRATIONS.items():
+        assert isinstance(stmts, tuple) and stmts, target
+        assert all(isinstance(s, str) for s in stmts), target
+    blob = " ".join(s for stmts in _MIGRATIONS.values() for s in stmts)
+    for needle in ("last_step", "job_failures", "fail_truncated", "jobs_key_finished"):
+        assert needle in blob, needle
 
 
-def test_a_v10_database_migrates_through_11_and_12_and_keeps_its_rows(tmp_path):
+def test_an_old_database_migrates_through_the_m5h_steps_and_keeps_its_rows(tmp_path):
     """v10 에서 만든 DB 를 열면 기존 행이 살아남고 새 칸은 「모른다」로 시작한다."""
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
@@ -724,3 +727,38 @@ def test_the_upgrade_moves_an_old_failed_label_to_the_last_step_column(tmp_path)
     fresh = store.get_job(kept)  # 새 코드가 쓴 행은 안 건드린다(둘 다 있었다)
     assert fresh is not None and fresh.failed_step == "test" and fresh.last_step == "test"
     store.close()
+
+
+def test_adding_a_column_that_is_already_there_is_not_fatal(tmp_path):
+    """번호가 밀린 열 추가 마이그레이션은 이미 있는 열을 만나도 죽으면 안 된다.
+
+    dev 의 `tests/test_failed_step_guess.py` 가 이 성질을 지키고 있었다(그 파일은 M5h 가
+    대체한 설계를 잠그고 있어 사라진다). M5h 의 `last_step` 이 정확히 같은 처지를 겪었다 —
+    `dev` 가 v11 을 먼저 가져가서 v12 로 밀렸다. 옛 빌드로 한 번이라도 연 DB 는 열은 있는데
+    버전이 낮고, 그대로 두면 `ADD COLUMN` 이 「duplicate column name」으로 죽는다. 버전이
+    안 올라가니 **다음에도 똑같이 죽어** 서버가 영영 안 뜬다.
+    """
+    path = tmp_path / "rcm.sqlite3"
+    store = Store(path)
+    jid = finished(store, seconds=10, last_step="build web", names=("test",))
+    store.close()
+
+    raw = sqlite3.connect(path)
+    try:  # 리베이스 전 빌드가 남긴 모양: 열은 있는데 버전은 낮다
+        raw.execute("PRAGMA user_version=11")
+        raw.commit()
+        cols = {r[1] for r in raw.execute("PRAGMA table_info(jobs)")}
+        assert "last_step" in cols and "fail_truncated" in cols
+    finally:
+        raw.close()
+
+    store = Store(path)  # 여기서 죽으면 안 된다
+    try:
+        assert store.user_version() == DB_VERSION and store.healthy()
+        got = store.get_job(jid)
+        assert got is not None and got.last_step == "build web"  # 값도 그대로
+        again = Store(path)  # 다시 열어도 조용하다
+        assert again.user_version() == DB_VERSION
+        again.close()
+    finally:
+        store.close()

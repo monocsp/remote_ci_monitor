@@ -20,6 +20,12 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
 - **Linux (systemd)** — `examples/systemd/rcm-server.service`. Copy to `/etc/systemd/system/`,
   then `sudo systemctl daemon-reload && sudo systemctl enable --now rcm-server`;
   `journalctl -u rcm-server -f` shows the log.
+- Both raise the **file-descriptor limit to 4096** (`SoftResourceLimits`/`NumberOfFiles` in the
+  plist, `LimitNOFILE` in the unit). The server holds descriptors per request thread, per open
+  event stream and per SQLite connection — the database, its `-wal` and its `-shm` — and a launchd
+  session defaults to `maxfiles 256`, which is not enough. When they run out, `sqlite3` cannot open
+  the database and *every* request fails with a database error until the service is restarted; the
+  queue looks alive and answers nothing. If you wrote your own service file, set this.
 - Both send **SIGTERM** on stop: the server shuts down cleanly and jobs that were running are
   marked `lost` (exit 3 for waiting sessions); queued jobs survive and start after the restart.
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
@@ -64,6 +70,10 @@ docker exec rcm rcm token add laptop --data-dir /data
 Publish the port on `127.0.0.1` or a Tailscale IP only. Inside a container `ps` and `/proc` see
 just the container, so **Host pressure** is less accurate than with a native service, and GPU
 numbers need an NVIDIA base image plus `--gpus all`. Your presets' toolchains must be in the image.
+
+A container inherits its file-descriptor limit from the Docker daemon rather than from the image,
+so check it (`docker exec rcm sh -c 'ulimit -n'`) and pass `--ulimit nofile=4096` if it is lower —
+the same reason as the service files above.
 
 ## Upgrade
 
@@ -148,12 +158,33 @@ password** (`rcm token add alice` → user `alice`). API clients keep sending `A
 
 ### Retention
 
-The server deletes job logs, snapshots and kept workspaces after `retention_days_success`
-(default 14) / `retention_days_failure` (30) days, and the job records themselves after
+The server deletes job logs after `retention_days_success` (default 14) /
+`retention_days_failure` (30) days, and the job records themselves after
 `metadata_retention_days` (180, must be ≥ `estimate.sample_days`). A sweep runs at start and then
 every `retention_sweep_interval_seconds` (3600). Running jobs are never touched; `rcm logs N` on a
 purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
 `/api/health` turns 503 — nothing here fails silently.
+
+**Workspaces keep a shorter clock than logs.** A failed job leaves a 50 KB log and a 720 MB
+workspace, so they are not worth the same number of days: the workspace and the snapshot it was
+unpacked from go after `workspace_retention_days` (1), and two byte rules —
+`workspace_storage_max_bytes` (100 GiB) and `min_free_bytes` (10 GiB) — take the oldest finished
+jobs' bulk before any date arrives. Evidence is never given up to make room, and nothing is deleted
+on a guess: a size that cannot be measured skips the byte rules for that sweep and says so. The
+full table is in [Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
+
+**Upgrading to a release that adds these:** the first sweep after the restart applies the new
+defaults, so look first. This needs no server and deletes nothing:
+
+```sh
+git -C ~/Documents/GitHub/remote_ci_monitor pull --ff-only   # the service still runs the old code
+rcm gc --dry-run --config ~/.config/rcm/server.toml          # what the new rules would remove
+launchctl kickstart -k gui/$(id -u)/com.remote-ci-monitor.server
+```
+
+To keep the old behaviour instead, set `workspace_retention_days = 30` (or your
+`retention_days_failure`) before restarting. `rcm gc` with an admin token runs the same plan for
+real on a running server; `rcm gc --dry-run` there shows it first.
 
 **Job artifacts keep their own clock.** A bundle a session can fetch back
 ([Configuration](configuration.md#getting-files-back-out-of-a-job)) lives for

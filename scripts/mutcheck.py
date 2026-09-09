@@ -5,7 +5,7 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 19종:
+변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -21,10 +21,16 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (같은 파일 · Codex 리뷰 1)
   ⑮ web-progress-full-bar — 도는 잡의 예측 막대가 100% 까지 차오름 (같은 파일 · Codex 리뷰 2)
   ⑯ nowait-view-trusted — `--no-wait` 의 표시용 조회가 문서를 곧이곧대로 믿음 (`cli.py`)
-  ⑰ failed-step-fallback — 실패 스텝이 다시 「마지막으로 시작한 스텝」으로 추론됨
+  ⑰ retention-budget-active — 부피 회수가 **도는 잡과 고아**까지 후보로 삼음
+     (`core/retention.py`, M5g — 이 기능의 최대 사고)
+  ⑱ retention-measure-fail-open — 못 잰 크기를 None 이 아니라 0 으로 세어 예산을 지키는 척함
+     (같은 파일)
+  ⑲ retention-budget-unreachable — 못 이룰 목표(지울 수 없는 바이트가 이미 상한 초과)에도
+     종료 잡을 전부 태움 (같은 파일 · Codex 2차 리뷰 E)
+  ⑳ failed-step-fallback — 실패 스텝이 다시 「마지막으로 시작한 스텝」으로 추론됨
      (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
-  ⑱ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
-  ⑲ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
+  ㉑ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
+  ㉒ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -168,6 +174,27 @@ MUTANTS = (
         old="    if any(v is None for v in values):",
         new="    if all(v is None for v in values):",
         tests=("tests/test_admission.py",),
+    ),
+    Mutant(
+        name="retention-budget-active",
+        path="src/remote_ci_monitor/core/retention.py",
+        old="        (i for i in inventory if i.evictable),",
+        new="        (i for i in inventory),",
+        tests=("tests/test_retention_workspace.py",),
+    ),
+    Mutant(
+        name="retention-measure-fail-open",
+        path="src/remote_ci_monitor/core/retention.py",
+        old="        if v is None:\n            return None\n",
+        new="        if v is None:\n            continue\n",
+        tests=("tests/test_retention_workspace.py",),
+    ),
+    Mutant(
+        name="retention-budget-unreachable",
+        path="src/remote_ci_monitor/core/retention.py",
+        old="        if not unreachable:\n",
+        new="        if True:\n",
+        tests=("tests/test_retention_workspace.py",),
     ),
     Mutant(
         name="manifest-link-escape",

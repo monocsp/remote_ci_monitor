@@ -659,7 +659,9 @@ def test_claim_returns_204_when_empty_and_the_job_with_preset_when_not(srv):
     srv.clock.advance(10)
     status, body = srv.claim("build-02")
     assert status == 200, body
-    assert set(body) == {"job", "tree_url", "preset"}
+    # `artifacts` 는 **얼린 산출물 정책**이다(M5g §13 D). 이 집합이 정책 없이 잠겨 있던 것이
+    # 원격 풀에서 산출물이 하나도 안 모이던 버그를 M5e 내내 숨겨 줬다.
+    assert set(body) == {"job", "tree_url", "preset", "artifacts"}
     job = body["job"]
     assert job["id"] == jid and job["preset"] == "ok" and job["pool"] == DEFAULT_POOL
     assert job["priority"] == 0 and job["inputs"] == {} and job["concurrency_group"] is None

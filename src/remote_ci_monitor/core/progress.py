@@ -97,6 +97,8 @@ class _Open:
     started: datetime
     ended: datetime | None = None
     ok: bool | None = None
+    #: `ok` 가 `step-end::` 마커에서 왔는가. 아니면 종료 코드로 미뤄 짐작한 값이다 —
+    #: 실패를 지목할 때 「확정」과 「추측」을 가르는 유일한 근거다.
 
 
 def progress_from_markers(
@@ -187,7 +189,15 @@ def progress_from_markers(
     else:
         total = len(steps) if steps else None
         partial = True
-    # 선언된 것만이다(결정 63) — 종료 코드로 스텝을 고르는 폴백은 없다.
+    # 실패 스텝은 **선언된 것만**이다(M5h 결정 63). 확정은 `::rcm::step-end::fail` 과
+    # `::rcm::fail::<이름>` 둘뿐이고, 아니면 `None` 이다.
+    #
+    # dev 의 앞선 답(PR #71, `failed_step_guessed`)은 추측한 이름을 남기고 「추측」이라고
+    # 밝히는 쪽이었다. 그 커밋의 주석이 이유를 정확히 적었다 — 「무죄인 스텝을 자신있게
+    # 지목하는 것이 아무 이름도 안 대는 것보다 나쁘다」. M5h 는 그 문장을 끝까지 밀어
+    # **이름을 안 댄다**: 「어디였나」는 `last_step` 이 인과 없이 말하고, 「무엇이 깨졌나」는
+    # 스크립트가 이름으로 말한다(`::rcm::fail::`). 그래서 `failed_step_guessed` 는 늘 거짓이
+    # 되어 사라졌다(둘 다 미출시라 이 교체는 사용자를 지나치지 않았다).
     failed = next((s.name for s in steps if s.ok is False), None)
     return Progress(
         phase=phase or PHASE_EXECUTING,

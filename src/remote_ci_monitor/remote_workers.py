@@ -383,7 +383,25 @@ class RemoteWorkersMixin:
                 "source_modes": list(preset.source_modes),
                 "repo": preset.repo or None,
             }
+        # ⚠️ **얼린 산출물 정책을 반드시 실어야 한다.** 안 실으면 워커의 `_policy_from_claim` 이
+        # None 을 돌려주고 **원격 풀에서는 산출물이 하나도 안 모인다** — 잡은 성공하고 화면도
+        # 아무 말을 안 한다. 이 구멍이 M5e 내내 열려 있었다(M5g §13 D). 정책은 업로드 검증에
+        # 쓰는 것과 **같은 값**이어야 한다(`job_artifact_policy`).
+        policy = self.job_artifact_policy(job)
+        artifacts_doc = (
+            {
+                "globs": list(policy.globs),
+                "max_bytes": policy.max_bytes,
+                "max_files": policy.max_files,
+                "timeout_seconds": policy.timeout_seconds,
+                "cancel_timeout_seconds": policy.cancel_timeout_seconds,
+                "collect_on": policy.collect_on,
+            }
+            if policy.enabled()
+            else None
+        )
         return {
+            "artifacts": artifacts_doc,
             "job": {
                 "id": job.id,
                 "preset": job.preset,
@@ -582,6 +600,7 @@ class RemoteWorkersMixin:
             max_files=s.max_artifact_files,
             timeout_seconds=s.artifact_timeout_seconds,
             cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+            collect_on=preset.artifacts_on if preset is not None else art.COLLECT_ALWAYS,
         )
 
     def worker_receive_artifacts(

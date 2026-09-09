@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import shutil
 import sqlite3
@@ -59,7 +60,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 14
+DB_VERSION = 15
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   exit_code INTEGER,
   summary TEXT,
   failed_step TEXT,
+  failed_step_guessed INTEGER,
   lane INTEGER,
   tree_hash TEXT,
   sha TEXT,
@@ -275,12 +277,18 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # 도는 동안은 예상보다 오래 걸리는데, 얼마나 그런지는 **표본이 있어야** 안다. 지금 안
     # 모으면 소급해서 못 얻는다. 옛 잡은 NULL — 0(「혼자 돌았다」)이 아니라 **모른다** 다.
     10: ("ALTER TABLE jobs ADD COLUMN concurrent_at_start INTEGER",),
-    # v10 → v11(M5h): 마지막으로 시작한 스텝. `failed_step` 이 「선언된 것만」이 되면서
+    # v10 → v11: `failed_step` 이 확정인가 추측인가. 마이그레이션 전에 끝난 잡은 **NULL = 모름**
+    # 이다 — 0 으로 채우면 그때의 추측이 「확정」으로 둔갑한다(2026-09-08 운영 사고).
+    # ⚠️ M5h(결정 63) 뒤로 이 열은 **안 쓴다** — 추측을 아예 안 하므로 늘 거짓이 된다.
+    #    지우는 마이그레이션을 따로 두지 않는 이유: 열 하나가 남는 비용보다 되돌릴 여지를
+    #    남기는 값이 크다(두 설계 중 하나를 고르는 일은 오너의 것이다).
+    11: ("ALTER TABLE jobs ADD COLUMN failed_step_guessed INTEGER",),
+    # v11 → v12(M5h): 마지막으로 시작한 스텝. `failed_step` 이 「선언된 것만」이 되면서
     # 「끝났을 때 어디였나」를 말할 칸이 필요해졌다. 옛 잡은 NULL = 모른다.
-    11: ("ALTER TABLE jobs ADD COLUMN last_step TEXT",),
-    # v11 → v12(M5h): 실패 이름 대장. 이름별 최근 이력(`GET /jobs/{id}` 의 `failures[]`)이
+    12: ("ALTER TABLE jobs ADD COLUMN last_step TEXT",),
+    # v12 → v13(M5h): 실패 이름 대장. 이름별 최근 이력(`GET /jobs/{id}` 의 `failures[]`)이
     # 이 표 위에 선다. 창 질의가 `(key, finished_at)` 을 타야 해서 인덱스도 같이 만든다.
-    12: (
+    13: (
         "CREATE TABLE IF NOT EXISTS job_failures ("
         " job_id INTEGER NOT NULL, name TEXT NOT NULL, seq INTEGER NOT NULL,"
         " PRIMARY KEY (job_id, name))",
@@ -288,16 +296,16 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC)",
         "ALTER TABLE jobs ADD COLUMN fail_truncated INTEGER NOT NULL DEFAULT 0",
     ),
-    # v12 → v13(M5h): 옛 코드는 취소·유실 잡에도 실패 스텝을 남겼다(운영 잡 #176 — 사람이 세운
+    # v13 → v14(M5h): 옛 코드는 취소·유실 잡에도 실패 스텝을 남겼다(운영 잡 #176 — 사람이 세운
     # 잡에 「이게 깨졌다」로 읽히는 라벨이 붙었다). 그 라벨은 증거가 아니라 **추론의 부산물**이라
     # 지운다. 표시도 같은 규칙을 강제하지만(결정 64) JSON 을 읽는 래퍼까지 고쳐 준다.
-    13: ("UPDATE jobs SET failed_step=NULL WHERE state IN ('cancelled','lost')",),
-    # v13 → v14(M5h): 옛 실패 잡의 라벨을 **덜 주장하는 칸으로 옮긴다**. 그 값은 대개 추론값
+    14: ("UPDATE jobs SET failed_step=NULL WHERE state IN ('cancelled','lost')",),
+    # v14 → v15(M5h): 옛 실패 잡의 라벨을 **덜 주장하는 칸으로 옮긴다**. 그 값은 대개 추론값
     # (「마지막으로 시작한 스텝」)이고, 선언값이었는지는 이제 와서 구분할 수 없다 — 그래서
     # 인과를 주장하는 `failed_step` 이 아니라 자리만 말하는 `last_step` 에 둔다. 안 그러면
     # 신고자가 #162 를 다시 열었을 때 **고쳤다는 그 문자열을 그대로** 본다.
     # 새 코드가 쓴 행은 라벨이 있으면 `last_step` 도 항상 있어서 이 조건에 안 걸린다.
-    14: (
+    15: (
         "UPDATE jobs SET last_step=failed_step, failed_step=NULL "
         "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
         "AND last_step IS NULL",
@@ -369,6 +377,30 @@ def _dt(ts: float | None) -> datetime | None:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=UTC)
+
+
+_ADD_COLUMN_RE = re.compile(r"^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b", re.I)
+
+
+def _already_added(conn: sqlite3.Connection, stmt: str) -> bool:
+    """`ALTER TABLE … ADD COLUMN` 이 더하려는 열이 이미 있는가.
+
+    마이그레이션 번호는 옮겨질 수 있다 — `dev` 가 같은 번호를 먼저 가져가면 이쪽이 뒤로 밀린다.
+    그 사이 옛 빌드로 연 데이터베이스는 **낮은 번호인데 열은 이미 있는** 상태가 되고, 그대로
+    두면 `duplicate column name` 으로 죽는다. 버전이 안 올라가니 다음에도 똑같이 죽어 서버가
+    영영 안 뜬다. 열을 더하는 것은 본래 멱등한 일이라 이미 있으면 건너뛴다.
+    """
+    m = _ADD_COLUMN_RE.match(stmt)
+    if m is None:
+        return False
+    table, column = m.group(1), m.group(2)
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _opt_bool(v: Any) -> bool | None:
+    """SQLite 의 0/1/NULL → True/False/None. NULL 은 「모름」이라 False 로 접지 않는다."""
+    return None if v is None else bool(v)
 
 
 def hash_token(secret: str) -> str:
@@ -506,6 +538,8 @@ class Store:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for stmt in _MIGRATIONS[target]:
+                        if _already_added(conn, stmt):
+                            continue  # 더하려는 열이 이미 있다 — 할 일이 없다
                         conn.execute(stmt)
                     conn.execute(f"PRAGMA user_version={target}")
                     conn.execute("COMMIT")

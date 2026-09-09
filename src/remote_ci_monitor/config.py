@@ -17,7 +17,12 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor.core.artifacts import PolicyError, validate_globs
+from remote_ci_monitor.core.artifacts import (
+    COLLECT_ALWAYS,
+    COLLECT_ON,
+    PolicyError,
+    validate_globs,
+)
 from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
@@ -91,6 +96,11 @@ class ServerSection:
     retention_days_success: int = 14
     retention_days_failure: int = 30
     keep_workspace_on_failure: bool = True
+    # 부피(워크스페이스 + 그 잡의 스냅샷 tar)는 증거(로그)와 **다른 시계로 잔다**(M5g).
+    # 실패 잡 하나가 로그 50 KB · 워크스페이스 720 MB 를 남긴다 — 같은 기간을 줄 이유가 없다.
+    workspace_retention_days: int = 1  # <= min(retention_days_success, retention_days_failure)
+    workspace_storage_max_bytes: int = 107_374_182_400  # 100 GiB. 0 = 무제한
+    min_free_bytes: int = 10_737_418_240  # 파일 시스템 여유 바닥 10 GiB. 0 = 안 본다
     recent_count: int = 8
     # 실패 이름의 최근 이력(M5h). 창은 같은 key 의 **이 잡까지** 최근 종료 잡 수다.
     failure_window_jobs: int = 20
@@ -216,6 +226,35 @@ def advertise_warning(section: ServerSection) -> str | None:
             'this server but cannot connect (set bind = "0.0.0.0" or a LAN/Tailscale IP)'
         )
     return None
+
+
+def shorter_log_retention(section: ServerSection) -> tuple[str, int]:
+    """부피가 넘을 수 없는 천장 — 두 로그 보존 기간 중 **짧은 쪽**(키 이름과 값)."""
+    keys = ("retention_days_success", "retention_days_failure")
+    key = min(keys, key=lambda k: getattr(section, k))
+    return key, getattr(section, key)
+
+
+def effective_workspace_retention_days(section: ServerSection) -> int:
+    """실제로 지켜지는 부피 보존 일수. 로그보다 길게 줘도 잡 디렉터리 청소가 함께 가져간다."""
+    return min(section.workspace_retention_days, shorter_log_retention(section)[1])
+
+
+def retention_warning(section: ServerSection) -> str | None:
+    """부피 보존이 로그 보존보다 길면 서버 로그 한 줄. **오류가 아니다.**
+
+    오류로 만들면 `retention_days_success = 0` 을 쓰던 설치가 **업그레이드만으로 안 뜬다** —
+    그 사람은 새 키를 만진 적이 없는데 기본값(1) 때문에 걸린다(M5f 가 같은 함정을 이미 겪었다).
+    대신 실제 동작을 `effective_workspace_retention_days` 로 낮추고 그 사실을 말한다.
+    """
+    key, ceiling = shorter_log_retention(section)
+    if section.workspace_retention_days <= ceiling:
+        return None
+    return (
+        f"warning: [server] workspace_retention_days ({section.workspace_retention_days}) is more "
+        f"than {key} ({ceiling}) — a job's whole directory goes at {ceiling}d, so the workspace "
+        f"cannot outlive it; using {ceiling}d"
+    )
 
 
 def admission_warnings(server: ServerSection, host: HostSection) -> list[str]:
@@ -383,6 +422,7 @@ _PRESET_KEYS = {
     "env",
     "inputs",
     "artifacts",
+    "artifacts_on",
 }
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
 
@@ -579,6 +619,12 @@ def parse_preset(raw: Any) -> Preset:
         raise ConfigError(f"{where}: artifacts: {e}") from e
     except TypeError as e:
         raise ConfigError(f"{where}: artifacts must be a list of glob strings") from e
+    collect_on = raw.get("artifacts_on", COLLECT_ALWAYS)
+    if collect_on not in COLLECT_ON:
+        raise ConfigError(f"{where}: artifacts_on must be 'always' or 'failure'")
+    if collect_on != COLLECT_ALWAYS and not globs:
+        # 글롭이 없으면 아무것도 안 모은다 — 조건만 적어 둔 설정은 「모으고 있다」는 오해다
+        raise ConfigError(f"{where}: artifacts_on needs artifacts globs to collect")
     return Preset(
         name=name,
         argv=argv,
@@ -594,6 +640,7 @@ def parse_preset(raw: Any) -> Preset:
         duration_key_inputs=dki,
         env_passthrough=passthrough,
         artifacts=globs,
+        artifacts_on=collect_on,
         env=dict(env),
         inputs=inputs,
     )
@@ -656,9 +703,18 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[server] sse_max_connections must be >= 0")
     if s.sse_keepalive_seconds < 1:
         raise ConfigError("[server] sse_keepalive_seconds must be >= 1")
-    for key in ("retention_days_success", "retention_days_failure"):
+    for key in ("retention_days_success", "retention_days_failure", "workspace_retention_days"):
         if getattr(s, key) < 0:
             raise ConfigError(f"[server] {key} must be >= 0")
+    if s.min_free_bytes < 0:
+        raise ConfigError("[server] min_free_bytes must be >= 0")
+    if s.workspace_storage_max_bytes != 0 and s.workspace_storage_max_bytes < 1024**3:
+        # 게이트 잡 하나가 720 MB 다. 그보다 작은 예산은 「끝나는 족족 지운다」와 같고,
+        # 그건 workspace_retention_days = 0 이 이미 표현한다.
+        raise ConfigError(
+            "[server] workspace_storage_max_bytes must be 0 (no limit) or at least 1 GiB"
+        )
+
     for key in ("git_resolve_timeout_seconds", "git_fetch_timeout_seconds"):
         if getattr(s, key) < 1:
             raise ConfigError(f"[server] {key} must be >= 1")

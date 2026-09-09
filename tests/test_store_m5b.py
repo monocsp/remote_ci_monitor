@@ -147,6 +147,7 @@ def test_migration_v3_to_v4_adds_pool_and_reads_old_rows_as_default(tmp_path):
         c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         c.execute("DROP TABLE IF EXISTS job_artifacts")
         c.execute("ALTER TABLE jobs DROP COLUMN join_count")
+        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         c.execute("PRAGMA user_version=3")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 3

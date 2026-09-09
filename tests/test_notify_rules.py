@@ -199,6 +199,7 @@ def test_env_missing_optional_row_keys_become_empty_strings() -> None:
     assert set(env) == ENV_KEYS
     assert env["RCM_JOB_ID"] == "7" and env["RCM_REQUESTER"] == "bob@desk"
     assert env["RCM_SUMMARY"] == env["RCM_FAILED_STEP"] == env["RCM_URL"] == ""
+    assert env["RCM_LAST_STEP"] == ""  # 말한 적 없으면 빈 문자열이다
     assert env["RCM_EXIT_CODE"] == env["RCM_JOB_SECONDS"] == ""
 
 

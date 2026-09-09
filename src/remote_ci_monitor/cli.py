@@ -51,7 +51,9 @@ from remote_ci_monitor.core.render_text import (
     failure_lines,
     fmt_clock,
     fmt_duration,
+    render_gc,
     source_ident,
+    storage_row,
 )
 from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
@@ -647,6 +649,65 @@ def cmd_bump(args: argparse.Namespace) -> int:
     return 0
 
 
+def _offline_gc(args: argparse.Namespace) -> int:
+    """서버 없이 도는 `--dry-run`(결정 61) — 설정과 데이터 디렉터리만 읽고 아무것도 안 지운다.
+
+    업그레이드 안전 게이트가 이것 위에 서 있다. `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자
+    sweep 하므로, 올리기 **전에** 무엇이 지워질지 보려면 서버 없이 도는 길이 있어야 한다.
+    """
+    from remote_ci_monitor.janitor import Janitor, _item_json
+    from remote_ci_monitor.store import Store
+
+    try:
+        cfg = load_server_config(args.config, check_tools=False)
+    except ConfigError as e:
+        return _usage(str(e))
+    store = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        jan = Janitor(store, cfg)
+        now = datetime.now(UTC)
+        plan = jan.plan(now)
+        body = {
+            "dry_run": True,
+            "planned": [_item_json(i) for i in plan.items],
+            "deleted": [],
+            "failed": [],
+            "freed_bytes": 0,
+            "storage_before": jan.storage(now),
+            "storage_after": None,
+        }
+    finally:
+        store.close()
+    if getattr(args, "json", False):
+        _print_json(body)
+    else:
+        print(render_gc(body), flush=True)
+    return 0
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    """`rcm gc [--dry-run]` — 청소기와 **같은 계획 함수**를 손으로 돌린다(admin 토큰)."""
+    if args.dry_run and args.config:
+        return _offline_gc(args)
+    client = _client(args)
+    try:
+        body = client.gc(dry_run=args.dry_run, timeout=args.timeout)
+    except ClientError as e:
+        if not e.status:  # 연결·시한 — 「모른다」이지 실패가 아니다(`rcm wait` 와 같은 규칙)
+            _err(
+                f"gc: {e.message}. The server may still be deleting — "
+                "run `rcm gc --dry-run` again to see what is left."
+            )
+            return EXIT_UNKNOWN
+        _err(f"gc failed: {e.message}")
+        return USAGE_EXIT
+    if args.json:
+        _print_json(body)
+    else:
+        print(render_gc(body), flush=True)
+    return 0
+
+
 def cmd_pause(args: argparse.Namespace) -> int:
     client = _client(args)
     try:
@@ -1173,6 +1234,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
+            storage = (doc.get("server") or {}).get("job_storage")
+            row = storage_row(storage, now=doc.get("generated_at")) if storage else None
+            if row is not None:  # 옛 서버엔 키가 없고, 갓 뜬 서버는 아직 잰 게 없다
+                rows.append(row)
         except ClientError as e:
             rows.append(("presets", False, e.message))
     try:
@@ -1605,6 +1670,14 @@ def build_parser() -> argparse.ArgumentParser:
     bump.add_argument("--priority", choices=["low", "normal", "high"], default="high")
     client_opts(bump)
     bump.set_defaults(func=cmd_bump)
+
+    gc = sub.add_parser("gc", help="reclaim workspace storage now (admin token)")
+    gc.add_argument("--dry-run", action="store_true", help="show what would go, delete nothing")
+    gc.add_argument("--json", action="store_true")
+    gc.add_argument("--timeout", type=float, default=600.0, help="seconds (default 600)")
+    gc.add_argument("--config", help="server config: run --dry-run without a server")
+    client_opts(gc)
+    gc.set_defaults(func=cmd_gc)
 
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
