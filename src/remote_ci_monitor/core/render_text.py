@@ -229,6 +229,15 @@ def _source_text(src: dict[str, Any]) -> str:
     return f"{repo} @{sha or DASH}{dirty}".strip()
 
 
+def _guess_note(doc: dict[str, Any]) -> str:
+    """실패 스텝이 추측이면 그렇게 밝힌다. 확정이면 빈 문자열 — 표시는 지금 그대로.
+
+    키가 없거나 null 이면(옛 서버 · v11 앞에 끝난 잡) 아무 말도 덧붙이지 않는다. 모르는 것을
+    「확정」이라고도 「추측」이라고도 말하지 않는 것이 fail-open 금지다.
+    """
+    return ", guessed" if doc.get("failed_step_guessed") is True else ""
+
+
 def render_queue_row(
     row: dict[str, Any],
     tz: tzinfo | None,
@@ -292,7 +301,7 @@ def render_queue_row(
                 head += f" · {prog['current_name']} · {fmt_duration(prog.get('current_seconds'))}"
             head += f" · job {fmt_duration(prog.get('job_seconds'))}"
             if prog.get("failed_step"):
-                head += f" · ✘ {prog['failed_step']}"
+                head += f" · ✘ {prog['failed_step']}{_guess_note(prog)}"
             lines.append("        " + head)
             parts = []
             for s in prog["steps"]:
@@ -433,7 +442,7 @@ def render_pool(
             req = (r.get("requester") or {}).get("label") or "?"
             tail = r.get("summary") or ""
             if r.get("failed_step"):
-                tail += f" (step {r['failed_step']})"
+                tail += f" (step {r['failed_step']}{_guess_note(r)})"
             when = fmt_clock(r.get("finished_at"), tz, now=now)
             dur = fmt_duration(r.get("job_seconds"))
             out.append(

@@ -20,6 +20,12 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
 - **Linux (systemd)** — `examples/systemd/rcm-server.service`. Copy to `/etc/systemd/system/`,
   then `sudo systemctl daemon-reload && sudo systemctl enable --now rcm-server`;
   `journalctl -u rcm-server -f` shows the log.
+- Both raise the **file-descriptor limit to 4096** (`SoftResourceLimits`/`NumberOfFiles` in the
+  plist, `LimitNOFILE` in the unit). The server holds descriptors per request thread, per open
+  event stream and per SQLite connection — the database, its `-wal` and its `-shm` — and a launchd
+  session defaults to `maxfiles 256`, which is not enough. When they run out, `sqlite3` cannot open
+  the database and *every* request fails with a database error until the service is restarted; the
+  queue looks alive and answers nothing. If you wrote your own service file, set this.
 - Both send **SIGTERM** on stop: the server shuts down cleanly and jobs that were running are
   marked `lost` (exit 3 for waiting sessions); queued jobs survive and start after the restart.
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
@@ -64,6 +70,10 @@ docker exec rcm rcm token add laptop --data-dir /data
 Publish the port on `127.0.0.1` or a Tailscale IP only. Inside a container `ps` and `/proc` see
 just the container, so **Host pressure** is less accurate than with a native service, and GPU
 numbers need an NVIDIA base image plus `--gpus all`. Your presets' toolchains must be in the image.
+
+A container inherits its file-descriptor limit from the Docker daemon rather than from the image,
+so check it (`docker exec rcm sh -c 'ulimit -n'`) and pass `--ulimit nofile=4096` if it is lower —
+the same reason as the service files above.
 
 ## Upgrade
 

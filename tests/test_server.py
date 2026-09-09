@@ -523,3 +523,106 @@ def test_request_threads_close_their_db_connection(srv):
         assert srv.req("GET", "/api/status")[0] == 200
     gc.collect()
     assert srv.app.store.open_connections <= 4, srv.app.store.open_connections
+
+
+# ── 500 로그 (실배치 2026-09-08: 로그에 `OperationalError` 만 314줄, 원인 추적이 늦었다) ──────
+
+
+def _boom(exc: Exception):
+    """`/api/status` 를 부르면 그 예외를 던지는 서버 앱을 만든다."""
+
+    def raise_it(*a, **kw):
+        raise exc
+
+    return raise_it
+
+
+def test_500_log_says_what_the_error_was_not_just_its_class(srv, capsys):
+    """예외 이름만으로는 「database is locked」와 「unable to open database file」이 안 갈린다.
+
+    사고 내내 로그가 `OperationalError` 만 남겨서 어느 쪽인지 알 수 없었다. 원인 문구가 로그에
+    있어야 다음 사고에서 첫 줄부터 방향이 잡힌다.
+    """
+    import sqlite3
+
+    srv.app.status = _boom(sqlite3.OperationalError("unable to open database file"))
+    assert srv.req("GET", "/api/status")[0] == 500
+    log = capsys.readouterr().err
+    assert "OperationalError" in log
+    assert "unable to open database file" in log, log
+
+
+def test_the_public_last_error_still_says_only_the_class(srv, capsys):
+    """`/api/status.last_error` 는 `read_auth = none` 이면 인증 없이 읽힌다 — 로그와 다르다.
+
+    로그는 서버를 가진 사람만 보지만 이 칸은 화면에 뜬다. 예외 문구에는 경로나 남의 입력이
+    실릴 수 있으니 공개면은 넓히지 않는다: 로그엔 자세히, 공개엔 종류만.
+    """
+    import sqlite3
+
+    srv.app.status = _boom(sqlite3.OperationalError("unable to open database file"))
+    assert srv.req("GET", "/api/status")[0] == 500
+    capsys.readouterr()
+    err = srv.app.last_error
+    assert err is not None and "OperationalError" in err
+    assert "unable to open database file" not in err, err
+
+
+def test_absolute_paths_are_scrubbed_from_the_log_and_the_public_field(srv, capsys):
+    """예외 문구의 **절대 경로**는 로그에서도 `<path>` 로 지워진다.
+
+    `_safe()` 는 경로 지우개지 비밀 지우개가 아니다 — 경로 밖에 맨몸으로 있는 토큰은 못 지운다
+    (아래 `test_safe_does_not_pretend_to_scrub_secrets_outside_paths` 가 그 한계를 적어 둔다).
+    그러니 자세한 문구는 **로그에만** 두고 공개되는 `last_error` 는 예외 이름까지만 낸다.
+    """
+    secret = "rcm_" + "z" * 20  # 토큰처럼 생긴 값
+    srv.app.status = _boom(RuntimeError(f"open /Users/rcm/.config/rcm/{secret}.toml failed"))
+    assert srv.req("GET", "/api/status")[0] == 500
+    log = capsys.readouterr().err
+    assert secret not in log, log
+    assert "/Users/rcm" not in log, log
+    assert "<path>" in log, log
+    assert secret not in (srv.app.last_error or "")
+
+
+def test_the_500_body_is_still_one_line_with_nothing_in_it(srv):
+    import sqlite3
+
+    srv.app.status = _boom(sqlite3.OperationalError("database is locked"))
+    status, body = srv.req("GET", "/api/status")
+    assert status == 500 and body == {"error": "internal error"}
+
+
+def test_safe_does_not_pretend_to_scrub_secrets_outside_paths():
+    """`_safe()` 의 한계를 문서 대신 테스트로 적어 둔다 — 이걸 비밀 지우개로 믿으면 안 된다.
+
+    경로 안에 있으면 지워지지만 맨몸으로 있는 토큰·헤더 값·Windows 경로는 그대로 남는다.
+    그래서 자세한 문구가 가는 곳은 로그뿐이고, 인증 없이 읽히는 `last_error` 에는 안 간다.
+    """
+    from remote_ci_monitor.server import _safe
+
+    token = "rcm_" + "A1b2C3d4" * 2
+    assert token not in _safe(f"open /Users/rcm/.config/{token}.toml")  # 경로 안 → 지워진다
+    assert token in _safe(f"bad token {token}")  # 맨몸 → 남는다. 이게 오늘의 한계다
+    assert token in _safe(f"Authorization: Bearer {token}")
+    assert "C:\\Users\\alice" in _safe("open C:\\Users\\alice\\rcm.toml")
+
+
+def test_safe_keeps_an_error_on_one_line(srv, capsys):
+    """예외 문구의 개행이 로그 줄을 위조하지 못하게 한다.
+
+    바뀌기 전에는 500 로그가 예외 **이름**만 실어서 개행이 들어갈 수 없었다. 이제 문구까지
+    실으므로, 문구 안의 `\n` 이 그대로 나가면 진짜 `[rcm] error:` 줄처럼 생긴 두 번째 줄을
+    만들어 낼 수 있다 — 로그를 읽는 사람도, 로그를 긁는 경보도 속는다.
+    """
+    from remote_ci_monitor.server import _safe
+
+    forged = "boom\n[rcm] error: worker lane 1 down: FORGED ENTRY"
+    assert "\n" not in _safe(forged) and "\r" not in _safe("a\rb")
+    assert "\x1b" not in _safe("a\x1b[2Jb") and "\x00" not in _safe("a\x00b")
+    assert "FORGED ENTRY" in _safe(forged)  # 지우는 게 아니라 한 줄로 접는 것이다
+
+    srv.app.status = _boom(RuntimeError(forged))
+    assert srv.req("GET", "/api/status")[0] == 500
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.strip()]
+    assert len(lines) == 1, lines

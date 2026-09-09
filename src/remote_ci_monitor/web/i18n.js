@@ -325,6 +325,7 @@
     "recent.before_start": "before start",
     "recent.by": function (a) { return "by " + a.who; },
     "recent.step": function (a) { return "step " + a.step; },
+    "recent.step_guessed": function (a) { return "step " + a.step + " (guessed)"; },
 
     // ── 잡 산출물(M5e) — 모르는 수는 —, 0 은 「모았는데 없었다」일 때만 ────────
     "art.label": "artifacts",
@@ -357,6 +358,7 @@
     "art.reason.expired": "expired",
     "art.copy": "copy the fetch command",
     "recent.failed_step": "failed step: ",
+    "recent.failed_step_guessed": "failed step (guessed): ",
     "recent.none": "No completed jobs yet",
     "recent.unavailable": function (a) { return "Recent unavailable — " + a.error; },
     "recent.count": function (a) { return "last " + a.shown + " of " + a.total; },
@@ -699,6 +701,7 @@
     "recent.before_start": "시작 전",
     "recent.by": function (a) { return a.who + " 이(가)"; },
     "recent.step": function (a) { return "스텝 " + a.step; },
+    "recent.step_guessed": function (a) { return "스텝 " + a.step + " (추측)"; },
 
     // ── 잡 산출물(M5e) ────────────────────────────────────────────────────
     "art.label": "산출물",
@@ -731,6 +734,7 @@
     "art.reason.expired": "기간 지남",
     "art.copy": "받아 가는 명령 복사",
     "recent.failed_step": "실패한 스텝: ",
+    "recent.failed_step_guessed": "실패한 스텝(추측): ",
     "recent.none": "아직 끝난 잡이 없습니다",
     "recent.unavailable": function (a) { return "최근 결과를 읽지 못했습니다 — " + a.error; },
     "recent.count": function (a) { return a.total + "개 중 " + a.shown + "개"; },

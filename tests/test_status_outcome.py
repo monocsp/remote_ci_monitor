@@ -147,7 +147,7 @@ NEW_SERVER = frozenset({"last_error_code"})
 NEW_POOL = frozenset(
     {"queue_error_code", "recent_error_code", "medians_error_code", "hosts_error_code"}
 )
-NEW_RECENT = frozenset({"summary_code", "summary_args"})
+NEW_RECENT = frozenset({"summary_code", "summary_args", "failed_step_guessed"})
 NEW_ROW = frozenset({"summary", "summary_code", "summary_args"})
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)
 

@@ -124,6 +124,7 @@ def test_migration_v5_to_v6_adds_the_columns_and_old_rows_have_no_code(tmp_path)
         c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         c.execute("DROP TABLE IF EXISTS job_artifacts")
         c.execute("ALTER TABLE jobs DROP COLUMN join_count")
+        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         c.execute("PRAGMA user_version=5")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 5

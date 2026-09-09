@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import shutil
 import sqlite3
@@ -55,7 +56,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 10
+DB_VERSION = 11
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   exit_code INTEGER,
   summary TEXT,
   failed_step TEXT,
+  failed_step_guessed INTEGER,
   lane INTEGER,
   tree_hash TEXT,
   sha TEXT,
@@ -257,6 +259,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # 도는 동안은 예상보다 오래 걸리는데, 얼마나 그런지는 **표본이 있어야** 안다. 지금 안
     # 모으면 소급해서 못 얻는다. 옛 잡은 NULL — 0(「혼자 돌았다」)이 아니라 **모른다** 다.
     10: ("ALTER TABLE jobs ADD COLUMN concurrent_at_start INTEGER",),
+    # v10 → v11: `failed_step` 이 확정인가 추측인가. 마이그레이션 전에 끝난 잡은 **NULL = 모름**
+    # 이다 — 0 으로 채우면 그때의 추측이 「확정」으로 둔갑한다(2026-09-08 운영 사고).
+    11: ("ALTER TABLE jobs ADD COLUMN failed_step_guessed INTEGER",),
 }
 
 
@@ -324,6 +329,30 @@ def _dt(ts: float | None) -> datetime | None:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=UTC)
+
+
+_ADD_COLUMN_RE = re.compile(r"^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b", re.I)
+
+
+def _already_added(conn: sqlite3.Connection, stmt: str) -> bool:
+    """`ALTER TABLE … ADD COLUMN` 이 더하려는 열이 이미 있는가.
+
+    마이그레이션 번호는 옮겨질 수 있다 — `dev` 가 같은 번호를 먼저 가져가면 이쪽이 뒤로 밀린다.
+    그 사이 옛 빌드로 연 데이터베이스는 **낮은 번호인데 열은 이미 있는** 상태가 되고, 그대로
+    두면 `duplicate column name` 으로 죽는다. 버전이 안 올라가니 다음에도 똑같이 죽어 서버가
+    영영 안 뜬다. 열을 더하는 것은 본래 멱등한 일이라 이미 있으면 건너뛴다.
+    """
+    m = _ADD_COLUMN_RE.match(stmt)
+    if m is None:
+        return False
+    table, column = m.group(1), m.group(2)
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _opt_bool(v: Any) -> bool | None:
+    """SQLite 의 0/1/NULL → True/False/None. NULL 은 「모름」이라 False 로 접지 않는다."""
+    return None if v is None else bool(v)
 
 
 def hash_token(secret: str) -> str:
@@ -461,6 +490,8 @@ class Store:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for stmt in _MIGRATIONS[target]:
+                        if _already_added(conn, stmt):
+                            continue  # 더하려는 열이 이미 있다 — 할 일이 없다
                         conn.execute(stmt)
                     conn.execute(f"PRAGMA user_version={target}")
                     conn.execute("COMMIT")
@@ -540,6 +571,7 @@ class Store:
             summary_code=row["summary_code"],
             summary_args=load_args(row["summary_args"]),
             failed_step=row["failed_step"],
+            failed_step_guessed=_opt_bool(row["failed_step_guessed"]),
             lane=row["lane"],
             timeout_seconds=row["timeout_seconds"],
             cancel=cancel if row["state"] == CANCELLING else None,
@@ -1551,6 +1583,7 @@ class Store:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
         failed_step: str | None = None,
+        failed_step_guessed: bool | None = None,
         cancelled_by: str | None = None,
         only_from: Iterable[str] | None = None,
         bundle: Any | None = None,
@@ -1586,6 +1619,9 @@ class Store:
                 summary_code=summary_code,
                 summary_args=dump_args(summary_args),
                 failed_step=failed_step,
+                failed_step_guessed=(
+                    None if failed_step_guessed is None else int(failed_step_guessed)
+                ),
                 cancelled_by=cancelled_by if cancelled_by is not None else row["cancel_by"],
                 lane=None,
                 phase=None,

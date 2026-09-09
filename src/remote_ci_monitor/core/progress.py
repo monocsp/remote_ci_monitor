@@ -74,6 +74,9 @@ class _Open:
     started: datetime
     ended: datetime | None = None
     ok: bool | None = None
+    #: `ok` 가 `step-end::` 마커에서 왔는가. 아니면 종료 코드로 미뤄 짐작한 값이다 —
+    #: 실패를 지목할 때 「확정」과 「추측」을 가르는 유일한 근거다.
+    marked: bool = False
 
 
 def progress_from_markers(
@@ -107,6 +110,7 @@ def progress_from_markers(
             if steps and steps[-1].ended is None:
                 steps[-1].ended = m.at
                 steps[-1].ok = m.value == "ok"
+                steps[-1].marked = True  # 스크립트가 직접 말했다
         elif m.kind == KIND_SUMMARY:
             summary = m.value
     current: _Open | None = None
@@ -138,9 +142,21 @@ def progress_from_markers(
     else:
         total = len(steps) if steps else None
         partial = True
-    failed = next((s.name for s in steps if s.ok is False), None)
-    if failed is None and exit_code not in (None, 0) and steps:
-        failed = steps[-1].name
+    # 실패 스텝은 **확정** 아니면 **추측**이다(PLAN.md 함정 #7).
+    #   확정 — 스크립트가 `::rcm::step-end::fail` 을 찍은 스텝.
+    #   추측 ① 잡이 0 이 아닌 코드로 끝날 때 아직 안 닫힌 마지막 스텝이 그 코드를 물려받은 것.
+    #   추측 ② 스텝이 전부 닫혔는데 종료 코드만 0 이 아니라 마지막 스텝을 고른 것.
+    # 스텝을 병렬로 돌리고 마커를 나중에 몰아 내보내는 스크립트에서는 마지막 마커가 **성공한**
+    # 스텝일 수 있다. 마커만 보고 진짜 범인을 고를 방법은 없으니, 더 똑똑하게 짐작하는 대신
+    # 짐작이라고 밝힌다 — 무죄인 스텝을 자신있게 지목하는 것이 아무 이름도 안 대는 것보다 나쁘다.
+    blamed = next((s for s in steps if s.ok is False), None)
+    if blamed is not None:
+        failed: str | None = blamed.name
+        guessed = not blamed.marked
+    elif exit_code not in (None, 0) and steps:
+        failed, guessed = steps[-1].name, True
+    else:
+        failed, guessed = None, False
     return Progress(
         phase=phase or PHASE_EXECUTING,
         steps=out_steps,
@@ -152,6 +168,7 @@ def progress_from_markers(
         current_seconds=(now - current.started).total_seconds() if current else None,
         job_seconds=(end - started_at).total_seconds(),
         failed_step=failed,
+        failed_step_guessed=guessed,
         summary=summary,
         last_output_at=last_output_at,
         started_at=started_at,

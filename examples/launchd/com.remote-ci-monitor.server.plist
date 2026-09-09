@@ -14,6 +14,12 @@
   4. Keep the machine awake: `sudo pmset -a sleep 0 disksleep 0` (or run `caffeinate -s`).
   SIGTERM (stop/reboot) shuts the server down cleanly; jobs that were running are marked lost.
   launchd does not expand `~` — every path here is absolute.
+
+  SoftResourceLimits/NumberOfFiles raises the file-descriptor limit. A launchd session defaults to
+  maxfiles 256, and the server holds descriptors per request thread, per open event stream and per
+  SQLite connection (the database, its -wal and its -shm). When they run out every request fails
+  with a database error and the server does not recover until it is restarted, so give it room.
+  Same number as LimitNOFILE in examples/systemd/rcm-server.service.
 -->
 <plist version="1.0">
 <dict>
@@ -35,6 +41,11 @@
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
   <key>WorkingDirectory</key>
   <string>/Users/rcm</string>
   <key>StandardOutPath</key>

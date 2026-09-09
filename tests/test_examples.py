@@ -26,6 +26,17 @@ CONFIGURATION = ROOT / "docs" / "configuration.md"
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
 
+#: 두 서비스 파일이 서버에 주는 파일 서술자 한도. launchd 세션 기본값 256 으로는 죽는다.
+NOFILE = 4096
+
+
+def read_unit() -> configparser.ConfigParser:
+    assert UNIT.is_file(), f"missing {UNIT.relative_to(ROOT)}"
+    # systemd unit 은 INI 꼴이지만 `Environment=` 가 반복될 수 있어 strict=False
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    cp.read_string(UNIT.read_text())
+    return cp
+
 
 @pytest.fixture
 def plist() -> dict[str, Any]:
@@ -35,11 +46,7 @@ def plist() -> dict[str, Any]:
 
 @pytest.fixture
 def unit() -> configparser.ConfigParser:
-    assert UNIT.is_file(), f"missing {UNIT.relative_to(ROOT)}"
-    # systemd unit 은 INI 꼴이지만 `Environment=` 가 반복될 수 있어 strict=False
-    cp = configparser.ConfigParser(strict=False, interpolation=None)
-    cp.read_string(UNIT.read_text())
-    return cp
+    return read_unit()
 
 
 # ── launchd ──────────────────────────────────────────────────────────────────
@@ -72,6 +79,35 @@ def test_launchd_logs_and_path(plist):
     path = plist["EnvironmentVariables"]["PATH"]
     assert "/opt/homebrew/bin" in path.split(":")  # 프리셋이 부르는 도구가 여기 있다
     assert "/usr/bin" in path.split(":")
+
+
+def test_launchd_gives_the_server_file_descriptor_headroom(plist):
+    """launchd 세션의 기본 `maxfiles` 는 256 이다 — 서버가 그 안에서 죽는다.
+
+    2026-09-08 07:48 운영: fd 가 마르자 `sqlite3.connect` 부터 실패해 모든 요청이
+    `OperationalError` 가 됐고(claim 214 · heartbeat 93 · status 7) 알림 훅은
+    `cannot start '/bin/bash': Too many open files` 로 죽었다. 재시작 전까지 12분간 안 풀렸다.
+    systemd 쪽에는 `LimitNOFILE=4096` 이 처음부터 있었고 macOS 예시에만 없었다.
+    """
+    limits = plist["SoftResourceLimits"]
+    assert limits["NumberOfFiles"] >= NOFILE, "systemd 의 LimitNOFILE 과 같은 숫자여야 한다"
+
+
+def test_systemd_gives_the_server_the_same_file_descriptor_headroom(unit):
+    """두 서비스 파일이 **같은 숫자**를 말한다 — 문서가 한 숫자를 말할 수 있게."""
+    assert int(unit["Service"]["LimitNOFILE"]) >= NOFILE
+
+
+def test_both_service_files_agree_on_the_number():
+    plist_n = plistlib.loads(PLIST.read_bytes())["SoftResourceLimits"]["NumberOfFiles"]
+    unit_n = int(read_unit()["Service"]["LimitNOFILE"])
+    assert plist_n == unit_n == NOFILE
+
+
+def test_launchd_comments_say_why_the_limit_is_there():
+    text = PLIST.read_text()
+    assert "maxfiles" in text or "file descriptor" in text
+    assert "256" in text  # 기본값이 얼마라서 올리는지
 
 
 def test_launchd_comments_guide_the_operator():
@@ -144,6 +180,25 @@ def test_docs_run_as_a_service():
     assert "launchctl" in sec and "systemctl" in sec
     assert "SIGTERM" in sec and "lost" in sec  # 서버 SIGTERM = 실행 중 잡 lost
     assert "caffeinate" in sec or "pmset" in sec  # 잠자기 금지
+
+
+def test_docs_say_why_the_service_needs_file_descriptor_headroom():
+    """운영이 fd 고갈로 12분 죽은 뒤 넣은 값이다 — 왜 그 숫자인지가 문서에 남아야 한다."""
+    sec = _section(OPERATING.read_text(), "Run as a service")
+    assert str(NOFILE) in sec
+    assert "maxfiles" in sec and "256" in sec  # launchd 기본값이 모자란다는 근거
+    assert "LimitNOFILE" in sec and "NumberOfFiles" in sec  # 두 서비스 파일의 키 이름
+
+
+def test_docs_say_a_failed_step_is_a_guess_without_the_fail_marker():
+    """`step-end::fail` 을 찍어야 실패 스텝이 사실이 된다 — 이 문단이 사라지면 빨개진다."""
+    text = CONFIGURATION.read_text()
+    assert "::rcm::step-end::fail" in text
+    assert "failed_step_guessed" in text
+    assert "RCM_FAILED_STEP_GUESSED" in text  # 알림 훅도 같은 사실을 받는다
+    assert "guess" in text.lower()
+    # 왜 틀리는지(병렬로 돌리고 마커를 몰아 찍는 스크립트)가 같이 있어야 한다
+    assert "parallel" in text.lower()
 
 
 def test_docs_document_basic_read_auth():
