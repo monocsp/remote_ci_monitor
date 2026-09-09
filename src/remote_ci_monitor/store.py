@@ -55,7 +55,7 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 9
+DB_VERSION = 10
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -96,7 +96,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   worker_name TEXT,
   summary_code TEXT,
   summary_args TEXT,
-  join_count INTEGER NOT NULL DEFAULT 0
+  join_count INTEGER NOT NULL DEFAULT 0,
+  -- 시작할 때 그 풀에서 돌고 있던 잡 수(자기 포함). 옛 잡은 NULL = 모른다 (M5f)
+  concurrent_at_start INTEGER
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -251,6 +253,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # **전체**를 정렬한다 — 여덟 개를 고르려고 5만 개를 줄 세운다(7.1 ms). 커버링 인덱스면
     # 0.009 ms 다. 중앙값을 요청 경로에서 뗀 뒤 이게 `/api/status` 의 지배항이 됐다.
     9: ("CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC)",),
+    # v9 → v10(M5f): 시작할 때 그 풀에서 몇 개가 돌고 있었나. 중앙값은 혼자 잰 것이라 같이
+    # 도는 동안은 예상보다 오래 걸리는데, 얼마나 그런지는 **표본이 있어야** 안다. 지금 안
+    # 모으면 소급해서 못 얻는다. 옛 잡은 NULL — 0(「혼자 돌았다」)이 아니라 **모른다** 다.
+    10: ("ALTER TABLE jobs ADD COLUMN concurrent_at_start INTEGER",),
 }
 
 
@@ -1436,10 +1442,25 @@ class Store:
                 conn.execute("COMMIT")
                 return None
             job_id = int(row["id"])
+            # 같은 트랜잭션에서 센다 — 나중에는 알 수 없는 값이다(자기 포함).
+            busy_now = conn.execute(
+                f"SELECT count(*) AS n FROM jobs WHERE state IN ({busy}) AND pool=?",
+                (*sorted(BUSY_STATES), pool),
+            ).fetchone()["n"]
             cur = conn.execute(
                 "UPDATE jobs SET state=?, lane=?, started_at=?, phase=?, last_output_at=?, "
-                "worker_name=? WHERE id=? AND state=?",
-                (RUNNING, lane, ts, PHASE_MATERIALIZING, ts, worker_name, job_id, QUEUED),
+                "worker_name=?, concurrent_at_start=? WHERE id=? AND state=?",
+                (
+                    RUNNING,
+                    lane,
+                    ts,
+                    PHASE_MATERIALIZING,
+                    ts,
+                    worker_name,
+                    int(busy_now) + 1,
+                    job_id,
+                    QUEUED,
+                ),
             )
             if cur.rowcount != 1:
                 conn.execute("ROLLBACK")
@@ -1452,6 +1473,20 @@ class Store:
             conn.execute("ROLLBACK")
             raise
         return self.get_job(job_id)
+
+    def concurrent_at_start(self, job_id: int) -> int | None:
+        """그 잡이 시작할 때 같은 풀에서 돌던 잡 수(자기 포함). **모르면 None** — 0 이 아니다.
+
+        마이그레이션 이전 잡은 NULL 이고, 그건 「혼자 돌았다」가 아니라 「모른다」다.
+        """
+        row = (
+            self._conn()
+            .execute("SELECT concurrent_at_start FROM jobs WHERE id=?", (job_id,))
+            .fetchone()
+        )
+        if row is None or row["concurrent_at_start"] is None:
+            return None
+        return int(row["concurrent_at_start"])
 
     def set_phase(self, job_id: int, phase: str) -> None:
         self._conn().execute("UPDATE jobs SET phase=? WHERE id=?", (phase, job_id))

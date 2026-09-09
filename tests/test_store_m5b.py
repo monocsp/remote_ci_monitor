@@ -132,6 +132,7 @@ def test_migration_v3_to_v4_adds_pool_and_reads_old_rows_as_default(tmp_path):
             c.execute(f"DROP INDEX {name}")
         # v5(M5b-2)가 더한 것도 뗀다(worker_name · tokens.kind · workers)
         c.execute("DROP INDEX IF EXISTS jobs_worker")
+        c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
         c.execute("ALTER TABLE jobs DROP COLUMN worker_name")
         c.execute("ALTER TABLE tokens DROP COLUMN kind")
         c.execute("DROP TABLE IF EXISTS workers")

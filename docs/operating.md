@@ -172,6 +172,9 @@ bundles rather than evicting bundles somebody is still waiting for; the affected
 ## Why the numbers can be wrong
 
 - ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs.
+- A job sharing the machine with another job takes longer than a median measured from runs that
+  had it alone, so the confidence badge drops one step while that is true. The estimate itself is
+  not padded — a guessed slowdown factor would be a number nobody measured.
 - Step counts marked "so far" come from scripts that did not declare `::rcm::steps::N`.
 - Step timestamps are **receive** times (`timing: "as_received"`), so buffered output shifts them.
 - A `lost` job died with the server; it is left as `lost`, never silently re-queued or deleted.
