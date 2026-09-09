@@ -199,7 +199,7 @@ tree 잡에는 브랜치 이름이 아예 없다 — 클라이언트가 `base_sh
 
 ### 4.3 실패 대장과 간헐 판정 (결정 66·67·68)
 
-**저장** — DB v11, 새 표 하나:
+**저장** — DB v12, 새 표 하나(`last_step` 은 v11 이다 — `docs/m5h-implementation.md` §1.3):
 
 ```sql
 CREATE TABLE job_failures (
@@ -217,9 +217,10 @@ CREATE INDEX jobs_key_finished ON jobs(key, finished_at DESC);
   (`worker.py` · `remote_workers.py`) 배선은 한 곳이다.
 - 지우는 시점은 잡 행과 같다 — `metadata_retention_days`(180) 의 메타데이터 삭제에 얹는다.
 
-**판정** — 창은 **같은 `key` 의 최근 종료 잡 N개**(`succeeded`·`failed`·`timed_out`.
-`cancelled`·`lost` 는 아무 말도 안 하므로 뺀다). 기본 `failure_window_jobs = 20`,
-최소 `failure_min_jobs = 3`.
+**판정** — 창은 같은 `key` 의 종료 잡(`succeeded`·`failed`·`timed_out`. `cancelled`·`lost` 는
+아무 말도 안 하므로 뺀다) 중 **이 잡까지 최근 N개**다. 이 잡이 늘 창의 맨 앞이라 자기가 선언한
+이름은 반드시 한 번 이상 세어지고, **한 달 뒤에 같은 잡을 다시 열어도 답이 같다**. 기본
+`failure_window_jobs = 20`, 최소 `failure_min_jobs = 3`.
 
 | verdict | 조건 | 뜻 |
 |---|---|---|

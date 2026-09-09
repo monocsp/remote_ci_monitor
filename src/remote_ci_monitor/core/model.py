@@ -275,6 +275,12 @@ class Progress:
     current_seconds: float | None = None
     job_seconds: float | None = None
     failed_step: str | None = None
+    #: 마지막으로 시작한 스텝. 「끝났을 때 어디였나」만 말하고 원인은 주장하지 않는다 (M5h)
+    last_step: str | None = None
+    #: 잡이 `::rcm::fail::` 로 지목한 이름. 잡이 찍은 순서, 서로 다른 이름만 (M5h)
+    fail_names: tuple[str, ...] = ()
+    #: MAX_FAIL_NAMES 를 넘겨 버린 이름이 있다 — 공개 JSON 에서는 `failures_truncated` (M5h)
+    fail_truncated: bool = False
     summary: str | None = None
     last_output_at: datetime | None = None
     timing: str = "as_received"

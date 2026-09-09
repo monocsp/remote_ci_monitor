@@ -42,7 +42,10 @@ MAX_FAIL_NAMES = 100          # 한 잡이 남길 수 있는 실패 이름 수
 **`progress_from_markers(...)`** — 세 곳이 바뀐다.
 
 1. **실패 이름을 모은다.** 루프에서 `KIND_FAIL` 을 만나면 순서를 지켜 모으고 중복은 한 번만
-   센다. `MAX_FAIL_NAMES` 를 넘으면 **버리고** `fail_truncated = True`.
+   센다. **중복 제거가 먼저다** — 상한은 *서로 다른* 이름에 걸린다. 이미 센 이름이 101번째로
+   또 와도 잘림이 아니다(`fail_truncated` 는 False 그대로). 서로 다른 새 이름이
+   `MAX_FAIL_NAMES` 를 넘으면 그 이름을 **버리고** `fail_truncated = True`. 버려진 이름은
+   대장에도 안 들어가고 **스텝도 물들이지 않는다**(3번은 「모은」 이름만 본다).
 2. **잡이 끝났을 때 열린 스텝의 마감**을 바꾼다.
 
    ```python
@@ -52,7 +55,9 @@ MAX_FAIL_NAMES = 100          # 한 잡이 남길 수 있는 실패 이름 수
        steps[-1].ok = True if exit_code == 0 else None      # 모르면 None 이다
    ```
 3. **선언이 추론을 이긴다.** 루프가 끝난 **뒤**에, 모은 이름과 같은 이름의 스텝을 전부
-   `ok = False` 로 바꾼다(마커가 스텝보다 먼저 와도 되게 — #162 의 `FAIL: test` 는 되재생된
+   `ok = False` 로 바꾼다. **표시만 하고 닫지는 않는다** — 아직 열린 스텝은
+   `state == "running"` 이면서 `ok is False` 일 수 있다(스크립트가 「이건 깨졌다」고 말하고도
+   계속 도는 경우다). 그리는 쪽은 `state` 를 먼저 본다(`render_text` 의 `▶`)(마커가 스텝보다 먼저 와도 되게 — #162 의 `FAIL: test` 는 되재생된
    `::rcm::step::test` 보다 **위**에 있다). 그리고
 
    ```python
@@ -67,6 +72,9 @@ last_step: str | None = None          # 마지막으로 시작한 스텝. 인과
 fail_names: tuple[str, ...] = ()      # 선언된 실패 이름(순서 유지 · 중복 제거)
 fail_truncated: bool = False          # MAX_FAIL_NAMES 를 넘겨 버린 것이 있다
 ```
+
+⚠️ 이름이 둘인 것은 **의도한 것**이다: 안쪽(`Progress` · `Job` · DB 컬럼)은 `fail_truncated`,
+공개 JSON 키는 `failures_truncated`(옆의 `failures[]` 와 짝이 맞게). 서로 옮겨 쓰지 않는다.
 
 **잠근 규칙 여섯**
 
@@ -168,13 +176,16 @@ ALTER TABLE jobs ADD COLUMN fail_truncated INTEGER NOT NULL DEFAULT 0;
 를 더하고 **같은 트랜잭션 안에서** `INSERT OR IGNORE INTO job_failures(job_id, name, seq)` 를
 돈다. `finish` 가 거절되면(이미 종료) 대장도 안 남는다.
 
-**읽기** — `failure_stats(job_id, key, *, window) -> tuple[list[FailureRow], int, int]`
+**읽기** — `failure_stats(job_id, key, finished_at, *, window) -> tuple[list[FailureRow], int, int]`
 (`rows`, `window_jobs`, `window_unnamed`). 한 번의 호출에 질의 셋:
 
 ```sql
--- ① 창: 같은 key 의 최근 window 개 종료 잡(취소·유실 제외)
+-- ① 창: 같은 key 의 종료 잡(취소·유실 제외) 중 **이 잡까지** 최근 window 개.
+--    이 잡이 늘 창의 맨 앞이다 — 그래서 자기가 선언한 이름의 seen 은 반드시 1 이상이고,
+--    한 달 뒤에 같은 잡을 다시 열어도 **같은 답**이 나온다(창이 흘러가지 않는다).
 SELECT id, state FROM jobs
  WHERE key = ? AND state IN ('succeeded','failed','timed_out') AND finished_at IS NOT NULL
+   AND (finished_at < :at OR (finished_at = :at AND id <= :id))
  ORDER BY finished_at DESC, id DESC LIMIT ?
 -- ② 이 잡의 이름들이 창 안에서 몇 번 보였나
 SELECT name, COUNT(*) seen, MIN(job_id) first_id, MAX(job_id) last_id
@@ -222,12 +233,13 @@ def failures_json(
 - `step` = 이 이름이 그 잡의 스텝 이름이기도 한가(표시가 「스텝」과 「단위」를 구분한다).
 - 판정 규칙(잠금):
 
-  | 조건 | verdict |
-  |---|---|
-  | `window < min_jobs` | `unknown` |
-  | `seen >= window` | `persistent` |
-  | `seen == 1` | `first_seen` |
-  | 그 밖 | `intermittent` |
+  | # | 조건(위에서부터 먼저 맞는 것) | verdict |
+  |---|---|---|
+  | 1 | `window < min_jobs` | `unknown` — 표본이 얕다 |
+  | 2 | `seen <= 0` | `unknown` — 창 안에 증거가 없다(방어용. §2.1 의 창은 이 잡을 포함하므로 자기 이름에는 안 나온다) |
+  | 3 | `seen >= window` | `persistent` |
+  | 4 | `seen == 1` | `first_seen` |
+  | 5 | 그 밖 | `intermittent` |
 
 ### 2.3 `server.py`
 
@@ -238,7 +250,8 @@ def failures_json(
 def _with_failures(self, doc, job):
     if job.state not in (FAILED, TIMED_OUT):     # 성공·취소·유실은 대장이 없다
         return doc
-    rows, window, unnamed = self.store.failure_stats(job.id, job.key, window=cfg.failure_window_jobs)
+    rows, window, unnamed = self.store.failure_stats(
+        job.id, job.key, job.finished_at, window=cfg.failure_window_jobs)
     doc["failures"] = failures_json(rows, steps=…, window=window, window_unnamed=unnamed,
                                     min_jobs=cfg.failure_min_jobs)
     doc["failures_truncated"] = job.fail_truncated

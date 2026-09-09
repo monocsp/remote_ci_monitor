@@ -115,13 +115,17 @@ def test_failed_fixture_marks_failed_step_and_summary():
     assert p.steps_total == 3 and p.steps_done == 2  # 3개 선언, 2개만 돌았다
 
 
-def test_nonzero_exit_without_fail_marker_blames_last_step():
+def test_nonzero_exit_without_a_declaration_names_no_step():
+    """M5h 결정 63 — 옛 규칙은 「종료 코드 ≠ 0 이면 마지막 스텝」이었다. 그 추론이 되재생·병렬
+    스크립트에서 **성공한 스텝을 실패로 불렀다**(운영 잡 #162). 이제 모르면 `None` 이고
+    「어디였나」는 `last_step` 이 인과 없이 말한다. 선언된 실패는 `test_progress_m5h.py`."""
     start = ago(minutes=2)
     markers = [Marker(ago(seconds=90), "step", "a"), Marker(ago(seconds=60), "step", "b")]
     p = progress_from_markers(
         markers, started_at=start, finished_at=ago(seconds=1), now=NOW, exit_code=2
     )
-    assert p.failed_step == "b" and p.steps[-1].ok is False
+    assert p.failed_step is None
+    assert p.last_step == "b" and p.steps[-1].ok is None
 
 
 def test_step_end_fail_while_still_running_keeps_going():
