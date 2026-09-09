@@ -73,6 +73,39 @@ The database migrates on start; queued jobs and a paused queue survive, jobs tha
 become `lost` (exit 3 for waiting sessions). Sessions may run a different patch version —
 `rcm check` shows both versions.
 
+A migration is one way, so copy the database before an upgrade that carries one (the changelog says
+which). With the server running, use SQLite's own backup — `cp` misses the write-ahead log:
+
+```sh
+sqlite3 ~/.local/share/rcm/rcm.sqlite3 ".backup ~/rcm-before-upgrade.sqlite3"
+```
+
+### From a git checkout
+
+The service's virtual environment can point at a working copy instead of a released wheel:
+
+```sh
+~/.local/share/rcm-venv/bin/pip install -e /path/to/remote_ci_monitor
+```
+
+The build machine then runs whatever that folder has checked out, and an upgrade becomes `git pull
+--ff-only` in it plus the same restart. Keep it on `main`: `main` only takes pull requests from
+`dev`, so it is the branch CI has already passed on.
+
+| rule | why |
+|---|---|
+| Nothing is edited in that folder | its files *are* the running server, and the next `git pull` conflicts with local changes |
+| Development happens in a `git worktree` with its own `.venv` (`pip install -e ".[dev]"`) | the code you are changing is never the code the machine is running |
+| A test server gets its own config file, `port` and `data_dir` | sharing `data_dir` means two servers writing one SQLite database |
+
+Pull and restart together, with the queue empty. Between the two the running process still holds
+the old modules, so a job that starts in that window can load a mix of both.
+
+Claude Code sessions have this wired as a `PreToolUse` hook: `.claude/settings.json` runs
+`tools/guard_production.py`, which finds the production checkout from the machine's own editable
+install, refuses edits to it and to the server's config and data, and asks before a deploy. A
+machine with no such install sees nothing.
+
 ## Security notes
 
 - Discovery answers (`_rcm._tcp`) carry only the server name, port, version, lane count and LAN
