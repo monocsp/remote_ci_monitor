@@ -89,6 +89,12 @@ of a key bumps that number and is listed here.
   fact. Jobs that finished before this release report `null`: unknown, which is neither.
   Database schema v9 (one added column; `/api/status` `schema_version` is unchanged — keys were
   only added).
+- **The server log now says what a 500 actually was**, not just the exception class. During the
+  2026-09-08 outage it recorded `OperationalError` 314 times, which does not distinguish "database
+  is locked" from "unable to open database file" — two different problems with two different
+  fixes. The message is now appended to the log line, with paths redacted. `server.last_error` in
+  `/api/status` is unchanged and still carries only the class: reads are unauthenticated by
+  default, so the detail belongs in the log, which only whoever runs the server can read.
 - **The example launchd service now raises the file-descriptor limit**, as the systemd unit
   already did. A launchd session defaults to `maxfiles 256`, and the server holds descriptors per
   request thread, per open event stream and per SQLite connection (the database, its `-wal` and its

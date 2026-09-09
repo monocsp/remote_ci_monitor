@@ -371,10 +371,18 @@ class App(RemoteWorkersMixin):
     def log(self, msg: str) -> None:
         print(f"[rcm] {msg}", file=sys.stderr, flush=True)
 
-    def record_error(self, msg: str) -> None:
+    def record_error(self, msg: str, *, detail: str | None = None) -> None:
+        """`msg` 는 공개되는 `server.last_error`(짧게), `detail` 은 서버 로그에만(자세히).
+
+        `/api/status` 는 `read_auth = none` 이 기본이라 `last_error` 를 인증 없이 읽는다. 예외
+        문구에는 경로나 남의 입력이 실릴 수 있어 공개면은 안 넓힌다. 로그는 서버를 가진 사람만
+        보므로 거기엔 원문을 남긴다 — 2026-09-08 사고 때 로그에 `OperationalError` 만 314줄이
+        남아 「database is locked」인지 「unable to open database file」인지 못 갈랐다.
+        `detail` 은 부르는 쪽이 `_safe()` 로 씻어서 준다.
+        """
         with self._lock:
             self._last_error = msg[:200]
-        self.log(f"error: {msg}")
+        self.log(f"error: {msg}" + (f": {detail}" if detail else ""))
 
     @property
     def last_error(self) -> str | None:
@@ -1857,7 +1865,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as e:  # noqa: BLE001 — 스택은 로그에만, 응답은 한 줄
-            self.app.record_error(f"{self.command} {self.path.split('?')[0]}: {type(e).__name__}")
+            self.app.record_error(
+                f"{self.command} {self.path.split('?')[0]}: {type(e).__name__}",
+                detail=_safe(str(e)),  # 로그에만 — 공개되는 last_error 는 예외 이름까지다
+            )
             if self.app.debug:
                 import traceback
 
