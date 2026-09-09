@@ -160,7 +160,38 @@ chmod 600 ~/.config/rcm/client.toml
    기다리지 않고, 결과는 둘 다 받는다. `--no-join` 으로 끌 수 있고, 합류한 잡을 취소하면 합류만
    빠진다.
 
-## 8. 한 화면으로 보는 큐
+## 8. 파일을 돌려받기
+
+파일을 다시 만드는 잡은 그 결과를 빌드 머신에 남긴다. `--fetch-artifacts` 는 그것을 **제출한 그
+트리의 같은 경로**로 가져온다.
+
+```sh
+rcm run goldens --fetch-artifacts
+```
+
+```
+artifacts: 64 files · 12.4 MB
+artifacts: new 0 · changed 12 · unchanged 51 · conflicted 1
+artifacts: wrote 12, unchanged 51, conflicted 1
+```
+
+1. 프리셋이 무엇을 모을지 먼저 선언해야 한다(`artifacts = ["test/**/goldens/*.png"]` —
+   [설정](configuration.md#getting-files-back-out-of-a-job)). 선언이 없으면 아무것도 안 모으고
+   아무것도 안 온다. 그건 실패가 아니다.
+2. **기다리는 동안 내가 고친 파일은 절대 덮어쓰지 않는다.** `conflicted` 로 세고 그대로 둔다.
+   `--force` 는 그것까지 덮고, `--dry-run` 은 표만 찍고 아무것도 안 쓴다.
+3. 마지막 줄은 「비교한 것」과 「실제로 쓴 것」을 가른다. 골든 갱신에서는 `wrote` 가 곧 답이다.
+4. 전부 쓰고 나면 세션이 서버에 알린다. 아무도 합류하지 않은 잡이면 그 자리에서 지워지고,
+   합류한 사람이 있으면 그 사람도 받을 수 있게 24시간 남는다.
+
+`--no-wait` 로 냈거나 다른 곳에 받고 싶다면:
+
+```sh
+rcm artifacts 412                          # 무엇이 있나
+rcm artifacts 412 --fetch --output ./out   # 지정한 디렉터리에 쓴다
+```
+
+## 9. 한 화면으로 보는 큐
 
 `rcm top` 은 터미널 하나에 띄워 두는 명령이다.
 
@@ -177,7 +208,7 @@ chmod 600 ~/.config/rcm/client.toml
 
 `rcm top --watch 5` 는 5초마다 새로 그리고, `rcm top --json` 은 기계용이다.
 
-## 9. 웹 화면
+## 10. 웹 화면
 
 `http://<빌드머신>:8787/` 을 연다. 설치할 게 없고 폰에서도 된다.
 
@@ -267,7 +298,7 @@ chmod 600 ~/.config/rcm/client.toml
 
 1. 워커, 2. 요약, 3. 카드가 된 잡, 4. 그 스텝, 5. 버튼. 한 열에, 같은 정보를, 가로 스크롤 없이.
 
-## 10. 그다음
+## 11. 그다음
 
 - 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md).
 - 스크립트가 스텝 마커를 찍게 한다. 그래야 큐가 「도는 중」 대신 진행을 보여 준다.

@@ -35,6 +35,9 @@
   변경 포함) 올린다. 초록이면 *이* 트리가 통과한 것이다. 배포용 프리셋은 반대로 푸시된 ref 를 돈다.
 - **모르면 모른다고 한다.** 종료 코드 3 은 *모름*(서버 재시작 · 안 닿음 · 시간 초과)이고 절대
   실패로 포장하지 않는다. ETA 에는 confidence 가 붙고, 모르는 값은 `0` 이 아니라 `—` 로 찍힌다.
+- **파일이 돌아온다.** 프리셋이 무엇을 만드는지 적어 두면
+  (`artifacts = ["test/**/goldens/*.png"]`) `rcm run --fetch-artifacts` 가 그 파일을 내 트리의
+  같은 경로로 가져온다. 기다리는 동안 내가 고친 파일은 절대 덮어쓰지 않는다.
 - **같은 내부망이면 스스로 찾는다.** 세션은 주소를 몰라도 된다. 서버가 `_rcm._tcp` 를 mDNS/DNS-SD
   로 알린다. 밖에서는 어떤 경로든(Tailscale, 터널) 쓰면 된다.
 - **보는 사람을 위한 웹 화면.** 정적 파일 셋, 빌드 단계 없음, 외부 자산 없음, 폰에서도 읽힌다.
@@ -130,6 +133,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함한다 |
 | `rcm logs N [--follow]` | 잡 로그(내 잡 · 내가 합류한 잡, 관리자 토큰이면 아무 잡) |
+| `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | 잡이 만든 파일을 보고, 받는다. `rcm run --fetch-artifacts` 는 제출한 트리로 한 번에 가져온다 |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
 | `rcm discover [--json] [--timeout S]` | 이 네트워크의 rcm 서버들(mDNS). 발견으로 정해지면 `rcm check` 가 `(found on this network)` 를 붙인다 |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류만 취소된다) · 큐 일시정지·재개(관리자) |

@@ -37,6 +37,9 @@ or just slow, is the machine on fire, did it pass? rcm answers that in one scree
 - **It says when it does not know.** Exit code 3 is *unknown* (server restarted, unreachable,
   timed out) and is never dressed up as a failure. ETAs carry their confidence; missing numbers
   print as `—`, not `0`.
+- **The files come back.** A preset can declare what it produces
+  (`artifacts = ["test/**/goldens/*.png"]`); `rcm run --fetch-artifacts` writes those files into the
+  same paths in your tree. A file you edited while waiting is never overwritten.
 - **Finds itself on the LAN.** Sessions on the same network need no address at all: the server
   advertises `_rcm._tcp` over mDNS/DNS-SD. Elsewhere any route works (Tailscale, a tunnel).
 - **A web page for the people watching.** Static, no build step, no third-party assets, readable on
@@ -140,6 +143,7 @@ screenshots.**
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · disk · GPU · top processes) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | queued, running and recent jobs; `--mine` needs your token and includes jobs you joined |
 | `rcm logs N [--follow]` | the job log (your jobs, jobs you joined, or any job with an admin token) |
+| `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | what the job produced, and fetching it. `rcm run --fetch-artifacts` does it in one step, into the tree you submitted |
 | `rcm presets [--json]` | presets the server offers and their inputs |
 | `rcm discover [--json] [--timeout S]` | rcm servers on this network (mDNS); `rcm check` says `(found on this network)` when it used one |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
