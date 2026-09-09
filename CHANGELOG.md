@@ -89,6 +89,17 @@ of a key bumps that number and is listed here.
   fact. Jobs that finished before this release report `null`: unknown, which is neither.
   Database schema v9 (one added column; `/api/status` `schema_version` is unchanged — keys were
   only added).
+- **The example launchd service now raises the file-descriptor limit**, as the systemd unit
+  already did. A launchd session defaults to `maxfiles 256`, and the server holds descriptors per
+  request thread, per open event stream and per SQLite connection (the database, its `-wal` and its
+  `-shm`). On 2026-09-08 a build machine ran out: `sqlite3` could no longer open the database, so
+  every request answered with a database error and notification hooks died with `Too many open
+  files`, and it stayed that way for twelve minutes until the service was restarted — the queue
+  looked alive and answered nothing. The leak behind that particular outage was fixed in 0.2.2
+  (request threads close their connection); this is the headroom that keeps the next one from being
+  fatal. Both service files now say 4096, and [operating the build
+  machine](docs/operating.md#run-as-a-service) says why. Anyone who wrote their own service file
+  should set it too.
 - **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
   50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
   time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request
