@@ -185,6 +185,8 @@ def _policy_from_claim(claimed: dict[str, Any]) -> art.ArtifactPolicy | None:
         cancel_timeout_seconds=int(
             raw.get("cancel_timeout_seconds") or defaults.cancel_timeout_seconds
         ),
+        # 필드가 없는 옛 서버는 `"always"` — **옛 동작이 기본**이다. 조용히 안 모으게 만들지 않는다.
+        collect_on=str(raw.get("collect_on") or defaults.collect_on),
     )
 
 
@@ -533,7 +535,10 @@ class RemoteWorker:
     ) -> CollectResult | None:
         """모아서 서버에 올린다. 오류는 여기서 잡는다 — 산출물 때문에 잡이 죽지 않는다(§5)."""
         policy = _policy_from_claim(claimed)
-        if policy is None or not policy.enabled():
+        state = art.prospective_state(
+            result.rc, cancelled=result.cancelled, timed_out=result.timed_out
+        )
+        if policy is None or not policy.collects_for(state):
             return None
         # 스풀은 **지우지 않는다.** 전송 결과가 불확실하면 다시 보낼 수 있어야 한다(§5).
         # 무한정 쌓이지 않게 시작할 때 `_sweep_workspaces` 가 나이로 쓸어 간다.

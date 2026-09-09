@@ -21,6 +21,13 @@ of a key bumps that number and is listed here.
   than guessing. ([Configuration](docs/configuration.md#retention-what-is-kept-and-for-how-long))
 
 ### Added
+- **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
+  default `"always"` is unchanged). This is what makes the recommended way of leaving evidence
+  affordable: put the heavy step's output in the workspace and declare it, print the verdict to
+  stdout so it lands in the log, and stop paying for a bundle on every green run. Cancelled and
+  timed-out jobs count as failures; a `lost` job is never collected.
+  [Making a failure explain itself](docs/configuration.md#making-a-failure-explain-itself) shows
+  the gate script side by side with the one that loses its evidence to `TMPDIR`.
 - **`rcm gc` reclaims workspace storage now, and `--dry-run` shows what would go.** With an admin
   token it runs the same plan the sweeper does, and reports what it planned, what it deleted and
   what failed separately — a plan is not a receipt. `rcm gc --dry-run --config server.toml` runs
@@ -100,6 +107,11 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **A remote worker collected no artifacts at all.** The server never put the frozen artifact
+  policy in its `/worker/claim` reply, so the worker found no globs and skipped collection
+  entirely: a preset with `artifacts` running in a remote pool produced nothing, while the job
+  succeeded and nothing on the screen said otherwise. The tests missed it because they built the
+  claim payload by hand instead of taking the server's. Local pools were never affected.
 - **`server.artifact_storage.last_sweep_at` was always `null`.** It looked for an attribute the
   server does not have, so the time of the last retention sweep never reached `/api/status`.
 - **A failed step that rcm only guessed at now says so.** When a job exits non-zero and its script

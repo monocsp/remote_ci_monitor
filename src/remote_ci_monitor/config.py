@@ -17,7 +17,12 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor.core.artifacts import PolicyError, validate_globs
+from remote_ci_monitor.core.artifacts import (
+    COLLECT_ALWAYS,
+    COLLECT_ON,
+    PolicyError,
+    validate_globs,
+)
 from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
@@ -414,6 +419,7 @@ _PRESET_KEYS = {
     "env",
     "inputs",
     "artifacts",
+    "artifacts_on",
 }
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
 
@@ -610,6 +616,12 @@ def parse_preset(raw: Any) -> Preset:
         raise ConfigError(f"{where}: artifacts: {e}") from e
     except TypeError as e:
         raise ConfigError(f"{where}: artifacts must be a list of glob strings") from e
+    collect_on = raw.get("artifacts_on", COLLECT_ALWAYS)
+    if collect_on not in COLLECT_ON:
+        raise ConfigError(f"{where}: artifacts_on must be 'always' or 'failure'")
+    if collect_on != COLLECT_ALWAYS and not globs:
+        # 글롭이 없으면 아무것도 안 모은다 — 조건만 적어 둔 설정은 「모으고 있다」는 오해다
+        raise ConfigError(f"{where}: artifacts_on needs artifacts globs to collect")
     return Preset(
         name=name,
         argv=argv,
@@ -625,6 +637,7 @@ def parse_preset(raw: Any) -> Preset:
         duration_key_inputs=dki,
         env_passthrough=passthrough,
         artifacts=globs,
+        artifacts_on=collect_on,
         env=dict(env),
         inputs=inputs,
     )

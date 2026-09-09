@@ -108,3 +108,37 @@ def test_changelog_calls_it_a_behaviour_change_and_says_how_to_undo_it() -> None
     assert has(text, r"workspace_retention_days"), text
     assert has(text, r"upgrade", re.I), text
     assert has(text, r"rcm gc --dry-run"), text
+
+
+# ── 프리셋이 증거를 남기는 법 (결정 58·59) ───────────────────────────────────
+
+
+def test_configuration_shows_the_bad_and_the_good_gate_script() -> None:
+    """말로만 적으면 아무도 안 고친다 — 나쁜 예와 좋은 예가 나란히 있어야 한다."""
+    sec = section(read(CONFIG), "Making a failure explain itself")
+    assert has(sec, r"mktemp|TMPDIR"), "나쁜 예(TMPDIR)가 없다"
+    assert has(sec, r"::rcm::summary::"), "요약 마커를 안 보여 준다"
+    assert has(sec, r"artifacts\s*=\s*\["), "artifacts 선언이 없다"
+
+
+def test_configuration_says_the_log_is_the_evidence_of_record() -> None:
+    sec = section(read(CONFIG), "Making a failure explain itself")
+    assert has(sec, r"retention_days_failure|30 days"), sec
+    assert has(sec, r"Expected:"), "왜 40줄이 쓸모없는지를 보여 주는 예가 없다"
+
+
+def test_configuration_says_a_bundle_is_not_an_archive() -> None:
+    """24시간짜리 묶음을 서랍으로 쓰면 증거를 잃는다."""
+    sec = section(read(CONFIG), "Making a failure explain itself")
+    assert has(sec, r"artifact_retention_hours|24"), sec
+
+
+def test_configuration_documents_artifacts_on() -> None:
+    sec = section(read(CONFIG), "Making a failure explain itself")
+    assert has(sec, r"artifacts_on"), sec
+    assert has(sec, r"\bfailure\b") and has(sec, r"\balways\b"), sec
+    assert has(sec, r"\blost\b"), "lost 잡은 안 모은다는 규칙이 빠졌다"
+
+
+def test_the_example_config_mentions_artifacts_on() -> None:
+    assert has(read(SERVER_TOML), r"artifacts_on"), "examples/server.toml lacks artifacts_on"

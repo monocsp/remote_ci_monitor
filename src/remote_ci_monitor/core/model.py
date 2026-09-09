@@ -138,6 +138,7 @@ class Preset:
     env: dict[str, str] = field(default_factory=dict)
     inputs: tuple[InputSpec, ...] = ()
     artifacts: tuple[str, ...] = ()  # 잡이 만든 파일 중 돌려줄 것의 글롭 (M5e)
+    artifacts_on: str = "always"  # "always"(오늘의 동작) | "failure" — 언제 모으나 (M5g)
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
