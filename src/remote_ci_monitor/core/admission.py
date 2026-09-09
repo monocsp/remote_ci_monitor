@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from remote_ci_monitor.core.hostparse import STALE_MULTIPLIER
 from remote_ci_monitor.core.model import HostSample
 from remote_ci_monitor.core.status import parse_iso
 
@@ -137,6 +138,7 @@ def decide(
 
 
 __all__ = [
+    "STALE_MULTIPLIER",
     "AdmissionConfig",
     "Hold",
     "decide",

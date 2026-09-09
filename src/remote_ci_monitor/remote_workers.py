@@ -51,6 +51,7 @@ from remote_ci_monitor.core.model import (
     TOKEN_WORKER,
     WORKER_BUSY,
     WORKER_DOWN,
+    WORKER_HELD,
     WORKER_IDLE,
     HostSample,
     Job,
@@ -265,13 +266,19 @@ class RemoteWorkersMixin:
                         )
                     )
                 else:
+                    # 상태 경로는 **다시 판정하지 않는다** — claim 경로가 남긴 것을 읽는다.
+                    # 두 번 부르면 화면과 실제가 어긋난다(§4.5).
+                    hold, held_since = self.hold_of(lane, row.name, now)
                     infos.append(
                         WorkerInfo(
                             lane=lane,
-                            state=WORKER_IDLE,
-                            since=row.registered_at,
+                            state=WORKER_HELD if hold else WORKER_IDLE,
+                            since=held_since or row.registered_at,
                             worker=row.name,
                             pool=row.pool,
+                            hold_code=hold.code if hold else None,
+                            hold_detail=dict(hold.detail) if hold and hold.detail else None,
+                            held_since=held_since,
                         )
                     )
         return infos
@@ -408,16 +415,20 @@ class RemoteWorkersMixin:
         wait = min(wait, s.worker_claim_wait_seconds)
         now = self.now_fn()
         self.store.touch_worker(token.name, now)
-        job = self._try_claim(token.name, row.pool, lane, now)
+        job, hold = self._try_claim(token.name, row.pool, lane, now)
         if job is not None:
             return self._claim_payload(job)
+        # 보류된 레인은 **슬롯을 안 잡는다**. 8개뿐인 long-poll 슬롯을 보류 레인이 먹으면
+        # 정작 열린 레인이 즉시 204 를 받고 1초 폴링으로 떨어진다(실측: 0.003초 → 0.394초).
+        if hold is not None:
+            return None
         if wait <= 0 or not self._claim_slots.acquire(blocking=False):
             return None
         try:
             deadline = time.monotonic() + wait  # 주입 시계(now_fn)가 아니라 실제 경과 시간
             while not self.stop.is_set():
                 woke = self.wake.wait(CLAIM_POLL_SECONDS)
-                job = self._try_claim(token.name, row.pool, lane, self.now_fn())
+                job, _hold = self._try_claim(token.name, row.pool, lane, self.now_fn())
                 if job is not None:
                     return self._claim_payload(job)
                 if time.monotonic() >= deadline:
@@ -430,11 +441,14 @@ class RemoteWorkersMixin:
             self._claim_slots.release()
         return None
 
-    def _try_claim(self, name: str, pool: str, lane: int, now: datetime) -> Job | None:
+    def _try_claim(self, name: str, pool: str, lane: int, now: datetime):
+        """(잡, 보류) — 둘 다 None 이면 큐가 빈 것이다."""
         try:
             if self.store.get_paused() is not None:
-                return None
-            job = self.store.claim(lane, now, pool=pool, worker_name=name)
+                return None, None
+            job, hold = self.admit(
+                lane, name, now, lambda: self.store.claim(lane, now, pool=pool, worker_name=name)
+            )
         except LaneBusy as e:
             raise _api_error(409, str(e)) from e
         except sqlite3.OperationalError as e:
@@ -452,7 +466,7 @@ class RemoteWorkersMixin:
         if job is not None:
             self._publish_job(job, job.id)
             self._publish_server()
-        return job
+        return job, hold
 
     # ── 잡 보고 ─────────────────────────────────────────────────────────────
 

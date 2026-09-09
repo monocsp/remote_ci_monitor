@@ -271,6 +271,10 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
                 "worker": w.worker,  # 원격 워커 이름 · 로컬 레인은 null (M5b-2)
                 "display_name": w.display_name,
                 "pool": w.pool,
+                # 부하 게이트가 막고 있으면 **왜**와 **언제부터**(M5f). 아니면 셋 다 null.
+                "hold_code": w.hold_code,
+                "hold_detail": dict(w.hold_detail) if w.hold_detail else None,
+                "held_since": iso(w.held_since),
             }
             for w in s.workers
         ],

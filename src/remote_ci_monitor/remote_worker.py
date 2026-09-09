@@ -305,6 +305,12 @@ class RemoteWorker:
         from remote_ci_monitor.core.status import host_json
 
         doc = host_json(hosts[0], now=self.now_fn())
+        # 낡은 표본은 **아예 안 보낸다**(M5f §3.1). 서버는 받은 시각으로 sampled_at 을 다시
+        # 찍으므로, 샘플러가 죽어도 heartbeat 만 살아 있으면 굳은 표본을 영원히 「새것」으로
+        # 본다 — 부하 게이트가 못 보면서 열리는 fail-open 구멍이다. 안 보내면 서버가 든
+        # 표본이 늙어 게이트가 닫힌다.
+        if doc.get("stale"):
+            return None
         for key in ("name", "source", "sampled_at", "age_seconds", "stale"):
             doc.pop(key, None)
         return doc

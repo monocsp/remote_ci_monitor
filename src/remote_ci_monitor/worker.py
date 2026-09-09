@@ -19,6 +19,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     WORKER_BUSY,
     WORKER_DOWN,
+    WORKER_HELD,
     WORKER_IDLE,
     Job,
     Preset,
@@ -185,6 +187,7 @@ class Worker(threading.Thread):
         on_marker: Callable[[int, str, str], None] | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
         environ: dict[str, str] | None = None,
+        admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
     ):
         super().__init__(name=f"rcm-worker-{lane}", daemon=True)
         self.lane = lane
@@ -195,12 +198,15 @@ class Worker(threading.Thread):
         self.on_change = on_change
         self.on_marker = on_marker
         self.now_fn = now_fn
+        # 부하 게이트(M5f). None 이면 게이트 없이 오늘처럼 집는다(테스트·단독 사용).
+        self.admit = admit
         self.environ = environ if environ is not None else dict(os.environ)
         self._lock = threading.Lock()
         self._state = WORKER_IDLE
         self._job_id: int | None = None
         self._error: str | None = None
         self._since: datetime = now_fn()
+        self._hold: Any = None
         self._shutting_down = False
 
     def shutdown(self) -> None:
@@ -214,12 +220,16 @@ class Worker(threading.Thread):
 
     def info(self) -> WorkerInfo:
         with self._lock:
+            hold = self._hold if self._state == WORKER_HELD else None
             return WorkerInfo(
                 lane=self.lane,
                 state=self._state,
                 job_id=self._job_id,
                 error=self._error,
                 since=self._since,
+                hold_code=hold.code if hold else None,
+                hold_detail=dict(hold.detail) if hold and hold.detail else None,
+                held_since=self._since if hold else None,
             )
 
     def _set(self, state: str, job_id: int | None = None, error: str | None = None) -> None:
@@ -229,6 +239,23 @@ class Worker(threading.Thread):
             self._state = state
             self._job_id = job_id
             self._error = error
+
+    def _claim(self, now: datetime) -> Job | None:
+        return self.store.claim(self.lane, now)
+
+    def _set_hold(self, hold: Any) -> None:
+        """부하로 막혔으면 `held`, 아니면 `idle`. `_set` 이 상태가 바뀔 때만 `_since` 를 되감으므로
+        같은 이유로 계속 막혀 있는 동안 `held_since` 는 유지된다."""
+        if hold is None:
+            self._set(WORKER_IDLE)
+            return
+        with self._lock:
+            if self._state != WORKER_HELD:
+                self._since = self.now_fn()
+            self._state = WORKER_HELD
+            self._job_id = None
+            self._error = None
+            self._hold = hold
 
     def _changed(self, job_id: int) -> None:
         if self.on_change is not None:
@@ -247,8 +274,13 @@ class Worker(threading.Thread):
                     self.wake.wait(IDLE_WAIT_SECONDS)
                     self.wake.clear()
                     continue
-                current = self.store.claim(self.lane, self.now_fn())
+                now = self.now_fn()
+                if self.admit is None:
+                    current, hold = self.store.claim(self.lane, now), None
+                else:
+                    current, hold = self.admit(self.lane, now, partial(self._claim, now))
                 if current is None:
+                    self._set_hold(hold)
                     self.wake.wait(IDLE_WAIT_SECONDS)
                     self.wake.clear()
                     continue
@@ -510,6 +542,7 @@ def start_workers(
     on_change: Callable[[int], None] | None = None,
     on_marker: Callable[[int, str, str], None] | None = None,
     now_fn: Callable[[], datetime] = _utcnow,
+    admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
 ) -> list[Worker]:
     workers = [
         Worker(
@@ -521,6 +554,7 @@ def start_workers(
             on_change=on_change,
             on_marker=on_marker,
             now_fn=now_fn,
+            admit=admit,
         )
         for lane in range(1, config.server.lanes + 1)
     ]

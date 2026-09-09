@@ -136,6 +136,10 @@ class WorkerServer:
         cfg.server.worker_timeout_seconds = TIMEOUT
         cfg.server.worker_heartbeat_seconds = HEARTBEAT
         cfg.server.worker_claim_wait_seconds = CLAIM_WAIT
+        # 이 파일의 주제는 claim · 그룹 · 보고지 부하 게이트가 아니다. 게이트가 켜져 있으면
+        # 표본이 없는 테스트 서버에서 레인 2 가 보류돼(no_sample, 설계대로) 관계없는 시나리오가
+        # 빨개진다. 게이트 자체는 tests/test_admission.py 와 tests/test_server_m5f.py 가 잠근다.
+        cfg.server.admission = "always"
         for k, v in server_overrides.items():
             setattr(cfg.server, k, v)
         cfg.repos = (RepoConfig(name="app", url=str(tmp_path / "nowhere.git")),)
@@ -685,6 +689,10 @@ def test_claim_returns_204_when_empty_and_the_job_with_preset_when_not(srv):
         "worker": "build-02",
         "display_name": "build-02/1",
         "pool": DEFAULT_POOL,  # M5b-4: rcm check 가 워커를 풀에 묶는 키
+        # M5f: 부하 게이트가 막고 있을 때만 값이 있다 — 도는 레인은 셋 다 null 이다
+        "hold_code": None,
+        "hold_detail": None,
+        "held_since": None,
     }
     assert srv.worker_lane(None, 1)["state"] == "idle"  # 로컬 레인은 놀고 있다
     assert srv.claim("build-02")[0] == 409  # 같은 레인은 잡을 하나만

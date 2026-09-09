@@ -576,3 +576,37 @@ def test_backoff_uses_the_real_random_by_default():
     w = RemoteWorker(WorkerConfig(server="http://x", token="t"), client=object())
     seen = {round(w._backoff(1.0), 6) for _ in range(50)}
     assert len(seen) > 1 and all(1.0 <= v < 2.0 for v in seen)
+
+
+def test_a_stale_host_sample_is_not_sent_at_all():
+    """서버가 받은 시각으로 다시 찍으므로, 굳은 표본을 계속 보내면 영원히 「새것」이 된다(§3.1)."""
+    from datetime import UTC, datetime, timedelta
+
+    from remote_ci_monitor.config import WorkerConfig
+    from remote_ci_monitor.core.model import HostSample
+    from remote_ci_monitor.remote_worker import RemoteWorker
+
+    now = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
+
+    class Sampler:
+        def __init__(self, age):
+            self.age = age
+
+        def latest(self):
+            return [
+                HostSample(
+                    name="build-02",
+                    source="local",
+                    sampled_at=now - timedelta(seconds=self.age),
+                    interval_seconds=5.0,
+                    cpu={"busy": 10.0},
+                )
+            ], None
+
+    w = RemoteWorker(
+        WorkerConfig(server="http://x", token="t"), client=object(), now_fn=lambda: now
+    )
+    w.sampler = Sampler(1.0)
+    assert w._host_sample() is not None
+    w.sampler = Sampler(60.0)  # 3 × interval 을 넘었다
+    assert w._host_sample() is None
