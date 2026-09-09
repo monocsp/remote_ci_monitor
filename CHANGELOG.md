@@ -7,6 +7,19 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **A failed job's workspace no longer waits thirty days.** The log and the workspace used to share
+  one date, but a failed job leaves a 50 KB log and a 720 MB workspace — fifty of those a day needs
+  750 GB to reach a thirty-day limit, so the disk filled long before the limit ever applied. The
+  workspace, and the snapshot it was unpacked from, now keep their own clock
+  (`workspace_retention_days`, default **1 day**) while the log keeps the days it always had. Two
+  byte rules catch the bulk before any date does: `workspace_storage_max_bytes` (100 GiB) and
+  `min_free_bytes` (10 GiB). **This changes what an upgrade deletes on its first sweep** — see what
+  it would take with `rcm gc --dry-run --config ~/.config/rcm/server.toml`, which needs no running
+  server, and set `workspace_retention_days = 30` to keep the old behaviour. Evidence is never given
+  up to make room, and a size that cannot be measured skips the byte rules for that sweep rather
+  than guessing. ([Configuration](docs/configuration.md#retention-what-is-kept-and-for-how-long))
+
 ### Added
 - **A progress bar on every running job.** The web page draws one bar under each running row and
   always says what it measured: `50% · 4/8 steps` when the job declares its step count with
@@ -77,6 +90,8 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **`server.artifact_storage.last_sweep_at` was always `null`.** It looked for an attribute the
+  server does not have, so the time of the last retention sweep never reached `/api/status`.
 - **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
   50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
   time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request

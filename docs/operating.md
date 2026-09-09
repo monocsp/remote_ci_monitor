@@ -148,12 +148,33 @@ password** (`rcm token add alice` → user `alice`). API clients keep sending `A
 
 ### Retention
 
-The server deletes job logs, snapshots and kept workspaces after `retention_days_success`
-(default 14) / `retention_days_failure` (30) days, and the job records themselves after
+The server deletes job logs after `retention_days_success` (default 14) /
+`retention_days_failure` (30) days, and the job records themselves after
 `metadata_retention_days` (180, must be ≥ `estimate.sample_days`). A sweep runs at start and then
 every `retention_sweep_interval_seconds` (3600). Running jobs are never touched; `rcm logs N` on a
 purged job answers `log expired`. Git mirrors are never pruned. If the sweeper thread dies,
 `/api/health` turns 503 — nothing here fails silently.
+
+**Workspaces keep a shorter clock than logs.** A failed job leaves a 50 KB log and a 720 MB
+workspace, so they are not worth the same number of days: the workspace and the snapshot it was
+unpacked from go after `workspace_retention_days` (1), and two byte rules —
+`workspace_storage_max_bytes` (100 GiB) and `min_free_bytes` (10 GiB) — take the oldest finished
+jobs' bulk before any date arrives. Evidence is never given up to make room, and nothing is deleted
+on a guess: a size that cannot be measured skips the byte rules for that sweep and says so. The
+full table is in [Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
+
+**Upgrading to a release that adds these:** the first sweep after the restart applies the new
+defaults, so look first. This needs no server and deletes nothing:
+
+```sh
+git -C ~/Documents/GitHub/remote_ci_monitor pull --ff-only   # the service still runs the old code
+rcm gc --dry-run --config ~/.config/rcm/server.toml          # what the new rules would remove
+launchctl kickstart -k gui/$(id -u)/com.remote-ci-monitor.server
+```
+
+To keep the old behaviour instead, set `workspace_retention_days = 30` (or your
+`retention_days_failure`) before restarting. `rcm gc` with an admin token runs the same plan for
+real on a running server; `rcm gc --dry-run` there shows it first.
 
 **Job artifacts keep their own clock.** A bundle a session can fetch back
 ([Configuration](configuration.md#getting-files-back-out-of-a-job)) lives for

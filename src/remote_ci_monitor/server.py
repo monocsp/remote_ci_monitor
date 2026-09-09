@@ -45,6 +45,7 @@ from remote_ci_monitor.config import (
     admission_warnings,
     advertise_enabled,
     advertise_warning,
+    retention_warning,
 )
 from remote_ci_monitor.core import admission, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -311,6 +312,9 @@ class App(RemoteWorkersMixin):
             self.log(
                 f"admission: load (cpu <= {s.cpu_max_percent:g}%, lanes 2+; lane 1 always claims)"
             )
+        warning = retention_warning(s)
+        if warning:
+            self.log(warning)
         for warning in admission_warnings(s, self.config.host):
             self.log(warning)
         self.responder = None
@@ -677,8 +681,9 @@ class App(RemoteWorkersMixin):
         except Exception as e:  # noqa: BLE001
             stored = reserved = None
             error_code = _error_code(e)
-        janitor = getattr(self, "janitor", None)
-        last = getattr(janitor, "last_sweep_at", None) if janitor is not None else None
+        # ⚠️ 청소기의 속성 이름은 `retention` 이다. 예전에 여기서 `getattr(self, "janitor")` 로
+        # 찾는 바람에 이 값이 **언제나 null** 이었다(M5g §3.1 A).
+        last = self.retention.last_sweep_at if self.retention is not None else None
         return {
             "stored_bytes": stored,
             "reserved_bytes": reserved,

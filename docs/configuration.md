@@ -138,6 +138,53 @@ the TTL so they can fetch it too. Either way it is gone after `artifact_retentio
 Over a limit, **the job still succeeds or fails on its own merits** — only the artifacts are
 dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, `storage_full`).
 
+## Retention: what is kept, and for how long
+
+A finished job leaves two very different things behind, and they are worth different amounts:
+
+| | typical size | what it is | how long it lives |
+|---|---|---|---|
+| the log (`jobs/<id>/log.txt`) | **50 KB** | the evidence — why it broke | `retention_days_success` (14) / `retention_days_failure` (30) |
+| the workspace, and the snapshot it was unpacked from | **720 MB** | the bulk — the folder the job ran in | `workspace_retention_days` (1) |
+
+Giving both the same clock is what fills a disk: fifty failing jobs a day at half a gigabyte each
+needs 750 GB to reach a thirty-day limit. So the bulk keeps its own, much shorter clock, and two
+byte rules catch it before any date does.
+
+| key | default | meaning |
+|---|---|---|
+| `retention_days_success` | `14` | logs of succeeded jobs. Their workspace is deleted the moment the job ends |
+| `retention_days_failure` | `30` | logs of failed, cancelled, timed-out and lost jobs |
+| `workspace_retention_days` | `1` | a kept workspace and the job's uploaded snapshot. Cannot outlive the shorter of the two day counts above — set it higher and the server says so at start-up and uses the lower number |
+| `workspace_storage_max_bytes` | `107374182400` (100 GiB) | when the workspaces plus snapshots weigh more than this, the oldest finished jobs give theirs up regardless of age. `0` means no limit |
+| `min_free_bytes` | `10737418240` (10 GiB) | when the filesystem holding the data directory drops below this, the same thing happens. `0` turns it off |
+| `metadata_retention_days` | `180` | job rows and events, deleted only after the job's files are gone. Must be ≥ `estimate.sample_days` |
+| `retention_sweep_interval_seconds` | `3600` | how often the sweep runs. It also runs once at start-up |
+
+Two things this never does. **It does not delete evidence to make room**: under any pressure the
+server gives up a 720 MB workspace, never a 50 KB log, a job row, an artifact bundle or a snapshot
+blob — those keep their own clocks and budgets. And **it does not delete on a guess**: if a size
+cannot be measured, the byte rules are skipped for that sweep and the reason is reported; only the
+day rule, which never needed a size, keeps running.
+
+`min_free_bytes` is a target, not a guarantee. Deleting does not always give space back — a macOS
+local snapshot or an open file can hold the blocks — so if a sweep deletes and free space does not
+move, the floor rule pauses itself and `rcm check` says so rather than deleting everything for
+nothing.
+
+**Before you upgrade**, see what the new defaults would remove on your machine. This reads the
+config and the data directory and deletes nothing, and it does not need the server:
+
+```sh
+rcm gc --dry-run --config ~/.config/rcm/server.toml
+```
+
+`rcm gc` (admin token) runs the same plan for real against a running server. `/api/status` carries
+the same numbers under `server.job_storage`, `rcm check` prints one line, and the web host card
+shows what the data directory holds and when the next sweep is.
+
+Git mirrors are never pruned.
+
 ## Priority, snapshot cache and notifications
 
 - **Priority** — three levels, `low` · `normal` · `high`. `rcm run gate --priority high` starts

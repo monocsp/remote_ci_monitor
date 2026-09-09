@@ -17,8 +17,14 @@ grace_seconds = 10          # SIGTERM → SIGKILL grace on cancel/timeout
 recent_count = 8
 upload_stall_seconds = 60
 upload_abandon_seconds = 300
-retention_days_success = 14     # logs/snapshots of succeeded jobs are removed after this
-retention_days_failure = 30     # failed/cancelled/lost jobs keep logs (and workspace) this long
+retention_days_success = 14     # logs of succeeded jobs are removed after this
+retention_days_failure = 30     # failed/cancelled/lost jobs keep their logs this long
+# A failed job leaves a 50 KB log and a 720 MB workspace. The log is the evidence and keeps the
+# days above; the bulk below goes much sooner. These three delete data - they are written out
+# here on purpose so you can see and change them.
+workspace_retention_days = 1    # kept workspaces (and the snapshot they came from) go after this
+workspace_storage_max_bytes = 107374182400   # 100 GiB ceiling for that bulk, regardless of days. 0 = no limit
+min_free_bytes = 10737418240    # reclaim bulk when the filesystem drops under 10 GiB free. 0 = off
 metadata_retention_days = 180   # job rows/events are deleted after this (>= sample_days)
 retention_sweep_interval_seconds = 3600
 git_resolve_timeout_seconds = 20    # git ls-remote at submit time (git_ref presets)
