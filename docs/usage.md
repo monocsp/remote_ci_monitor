@@ -235,21 +235,26 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ### The queue
 
-![the queue: the three-answer summary, the running job with its steps, the waiting job with an ETA, and the other pool](images/ui/web-queue.png)
+![the queue: the three-answer summary, the running job with its progress bar and steps, the waiting job with an ETA, and the other pool](images/ui/web-queue.png)
 
 1. **Three answers at a glance**: your jobs, anything not moving, and how hard the machine is
    working.
 2. **Running now, and waiting**, each with a count. An empty group says so rather than vanishing,
    so "nothing is running" never looks the same as "the page did not load".
-3. **The running job**, with who asked for it and what tree it is testing. Collapse it with **▾**
-   and the current step moves into the reason column as `step 2/4 build 2s`, so a folded row still
-   says what is happening.
-4. **Its steps**, in order, with the finished ones ticked and the current one timed. The seconds
-   count up as you watch; they do not sit still and then jump when the page refreshes.
-5. **A waiting job**, with its position in the queue.
-6. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
+3. **The running job**, with who asked for it and what tree it is testing. Rows arrive folded; the
+   current step stays in the reason column as `step 2/4 build 2s`, so a folded row still says what
+   is happening.
+4. **How far along it is**, on one bar. The label says what the bar is measuring: `50% · 4/8 steps`
+   when the job declares how many steps it has, `70% · by expected time` when it does not. A job
+   that has run longer than its estimate reads `past the estimate`, and one nothing can be said
+   about reads `progress —` — never a percentage the page cannot stand behind.
+5. **Its steps**, opened with **▸**, in order, with the finished ones ticked and the current one
+   timed. The seconds count up as you watch; they do not sit still and then jump when the page
+   refreshes. The log tail and the **Log** and **Cancel** buttons are in the same block.
+6. **A waiting job**, with its position in the queue.
+7. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
    from the preset; `—` means it will not pretend to know.
-7. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
+8. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
    the repository it came from is in the expanded block, since every row usually repeats it.
 
 ### Your jobs
@@ -275,7 +280,8 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ![a failed job expanded in Recent, with its steps, the command to run it again, its pool, and the estimates block](images/ui/web-recent.png)
 
-1. The **result** of every recent job.
+1. The **job number** and the **result** of every recent job. It is the same `#412` the queue
+   showed, so a finished job is still the one you fetch the log or the artifacts for.
 2. Click a failed one to see **which step failed** and what it printed.
 3. **The command that reproduces it**, ready to copy.
 4. Which **pool** it ran in.

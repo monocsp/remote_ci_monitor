@@ -130,6 +130,21 @@ table.q tr.qgroup:not(:first-child) th { border-top: 1px solid var(--line); }
 table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8px; }
 /* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
 .step-now { font-family: var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); opacity: 0.85; }
+/* 전체 진행 막대(2026-09-09 오너 요청) — 접힌 행에서도 「어디까지 왔나」가 한눈에 보인다.
+   막대는 행의 일부다: 행의 아래 선을 지우고 막대 줄이 그 선을 대신 그린다.
+   길이는 눈에, 퍼센트와 근거는 글자에 — 색과 길이만으로 말하지 않는다(§4.2). */
+table.q tr.hasbar td { border-bottom: 0; }
+table.q tr.qbar td { padding: 0 8px 9px 46px; }
+table.q tr.qbar + tr.expanded td.prog { padding-top: 0; }
+.pwrap { display: flex; align-items: center; gap: 10px; max-width: 720px; }
+.pbar { flex: 1 1 auto; min-width: 80px; height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+.pbar i { display: block; height: 100%; background: var(--accent); }
+/* 추정을 넘긴 잡은 가득 찬 막대가 아니라 **빗금**이다 — 꽉 찬 파란 막대는 「끝났다」로 읽힌다 */
+.pbar.over i { background: repeating-linear-gradient(135deg, var(--warn) 0 5px, var(--warn-soft) 5px 10px); }
+/* 근거가 없으면 눈금도 없다. 빈 막대(0%)로 그리면 「아직 아무것도 안 했다」가 되어 거짓말이 된다 */
+.pbar.unknown { background: repeating-linear-gradient(135deg, var(--line-2) 0 5px, var(--surface) 5px 10px); }
+.plab { font: 600 12px var(--sans); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.pwrap:has(.pbar.over) .plab { color: var(--warn); }
 .pos { display: block; font: 12px var(--sans); color: var(--muted); margin-top: 2px; white-space: nowrap; }
 .you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 600 12px var(--sans); vertical-align: 1px; }
 .joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 600 12px var(--sans); vertical-align: 1px; background: none; cursor: default; }
@@ -237,9 +252,11 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ── 최근 완료 (항목 14 · 15) ── */
 .recent { display: grid; gap: 0; }
-.rrow { display: grid; grid-template-columns: 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow { display: grid; grid-template-columns: 54px 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
 /* 필은 글자만큼만 — 격자 칸을 채우면 결과 색이 행의 배경처럼 번진다 */
 .rrow > .pill { justify-self: start; }
+/* 번호는 큐 행과 같은 모양 — 로그·재실행·문의가 전부 이 번호로 이뤄진다 */
+.rrow .id { font-family: var(--mono); font-weight: 500; color: var(--muted); }
 .rrow.hl { background: var(--accent-soft); }
 .rrow .k { font-family: var(--mono); font-weight: 500; }
 .rrow .d, .rrow .t { color: var(--muted); }
@@ -292,6 +309,8 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   table.q tr { border-bottom: 1px solid var(--line-2); padding: 6px 0; }
   table.q tr.exp { border-bottom: 0; }
   table.q td { border: 0; padding: 2px 8px; }
+  table.q tr.qbar td { padding: 4px 8px 8px; }
+  .pwrap { max-width: 100%; }
   table.q td.job { white-space: normal; }
   table.q td.job .pos { display: inline; margin-left: 6px; }
   table.q td.eta { white-space: normal; }
@@ -314,6 +333,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   .pill.uploading .g { animation: rcm-pulse 1.4s ease-in-out infinite; }
   .pill.queued .g { animation: rcm-pulse 3s ease-in-out infinite; }   /* 대기는 느리게 */
   .step.run .g { animation: rcm-pulse 1.4s ease-in-out infinite; }
+  .pbar i { transition: width 900ms linear; }
   .wk.busy i { animation: rcm-pulse 1.4s ease-in-out infinite; }
 }
 
