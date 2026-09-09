@@ -137,6 +137,9 @@ _STATIC_FILES = {
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
 }
 SNAPSHOT_MAX_AGE_SECONDS = 0.2
+#: 중앙값은 잡이 끝날 때만 다시 재지만, 잡이 하나도 안 끝나는 동안에도 45일 창은 흘러간다 —
+#: 그래서 시간으로도 상한을 둔다. 무효화 경로를 하나 놓쳐도 이 안에 스스로 낫는다.
+MEDIANS_MAX_AGE_SECONDS = 300.0
 SSE_TICK_SECONDS = 1.0
 SSE_WRITE_TIMEOUT_SECONDS = 30.0
 _PATH_RE = re.compile(r"/[^\s'\"]+")
@@ -229,6 +232,15 @@ class App(RemoteWorkersMixin):
         self._snap: _DbSnapshot | None = None
         self._snap_lock = threading.Lock()
         self._dirty = True
+        # 중앙값은 **잡이 끝났을 때만** 다시 잰다. 45일치 완료 잡을 매 요청 읽으면
+        # `/api/status` 가 보존된 잡 수에 선형으로 끌려간다(1만 행 168 ms) — 그런데 45일치
+        # 중앙값은 `::rcm::step::` 한 줄로 바뀌지 않는다(M5f 결정 49).
+        self._medians: (
+            tuple[dict[str, Median] | None, dict[str, dict[str, Median]], str | None, str | None]
+            | None
+        ) = None
+        self._medians_dirty = True
+        self._medians_loaded_at = 0.0
         self._sse_lock = threading.Lock()
         self._sse_connections = 0
         # 부하 게이트(M5f §4.5). 락은 **하나(전역)** 이고 게이트를 지나는 레인(≥ 2)만 잡는다 —
@@ -483,6 +495,11 @@ class App(RemoteWorkersMixin):
     def publish(self, kind: str, data: dict[str, Any]) -> None:
         self.bus.publish(kind, data, at=self.now_fn())
 
+    def _mark_medians_dirty(self) -> None:
+        """새 표본이 생겼다 — 잡이 종료 상태에 이르렀을 때만."""
+        with self._snap_lock:
+            self._medians_dirty = True
+
     def _mark_dirty(self) -> None:
         with self._snap_lock:
             self._dirty = True
@@ -496,8 +513,11 @@ class App(RemoteWorkersMixin):
             except Exception:  # noqa: BLE001
                 job = None
         if job is None:
+            # 종료 상태였는지 못 읽었다 — 표본을 놓치느니 한 번 더 재는 쪽을 고른다
+            self._mark_medians_dirty()
             return
         if job.is_terminal:
+            self._mark_medians_dirty()  # 새 표본이 생겼다 — 여기서만
             self.publish(
                 KIND_JOB_FINISHED,
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
@@ -793,20 +813,7 @@ class App(RemoteWorkersMixin):
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
-        medians: dict[str, Median] | None
-        medians_error = None
-        medians_error_code: str | None = None
-        pool_medians: dict[str, dict[str, Median]] = {}
-        try:
-            since = now - timedelta(days=cfg.sample_days)
-            samples = split_by_pool(self.store.list_samples(since))
-            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
-            for name, sample_jobs in samples.items():
-                if name != DEFAULT_POOL:
-                    pool_medians[name] = medians_from(sample_jobs, now, cfg)
-        except Exception as e:  # noqa: BLE001
-            medians, medians_error = None, _error_text(e)
-            medians_error_code = _error_code(e)
+        medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
@@ -834,6 +841,46 @@ class App(RemoteWorkersMixin):
             medians_error_code=medians_error_code,
             paused=paused,
         )
+
+    def _load_medians(
+        self, now: datetime, cfg: QueueConfig
+    ) -> tuple[dict[str, Median] | None, dict[str, dict[str, Median]], str | None, str | None]:
+        """45일치 표본 → 풀별 중앙값. `_medians_dirty` 이거나 TTL 이 지났을 때만 실제로 읽는다.
+
+        **호출자가 `_snap_lock` 을 들고 있어야 한다** — `self._medians*` 를 잠금 없이 만진다.
+        지금 호출자는 `_load_snapshot` 하나뿐이고 그건 `_snapshot` 의 잠금 안에서 돈다.
+
+        읽을 때도 무거운 `Job` 이 아니라 `Store.list_sample_rows` 의 가벼운 행을 쓴다 —
+        중앙값이 보는 것은 여섯 칸뿐이다.
+        """
+        fresh = (
+            not self._medians_dirty
+            and self._medians is not None
+            and time.monotonic() - self._medians_loaded_at < MEDIANS_MAX_AGE_SECONDS
+        )
+        if fresh:
+            return self._medians  # type: ignore[return-value]
+        medians: dict[str, Median] | None
+        medians_error: str | None = None
+        medians_error_code: str | None = None
+        pool_medians: dict[str, dict[str, Median]] = {}
+        try:
+            since = now - timedelta(days=cfg.sample_days)
+            samples = split_by_pool(self.store.list_sample_rows(since))
+            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
+            for name, sample_rows in samples.items():
+                if name != DEFAULT_POOL:
+                    pool_medians[name] = medians_from(sample_rows, now, cfg)
+        except Exception as e:  # noqa: BLE001
+            # **실패는 캐시하지 않는다.** 캐시하면 SQLite 가 잠깐 잠긴 것만으로 `medians: null`
+            # 이 다음 잡이 끝날 때까지 모든 상태 문서에 박힌다 — 한가한 서버면 몇 시간이다.
+            # 다음 요청이 다시 시도한다(옛 동작 그대로).
+            return (None, {}, _error_text(e), _error_code(e))
+        out = (medians, pool_medians, medians_error, medians_error_code)
+        self._medians = out
+        self._medians_dirty = False
+        self._medians_loaded_at = time.monotonic()
+        return out
 
     def _snapshot(self) -> _DbSnapshot:
         """dirty 이거나 TTL 이 지났으면 다시 읽고, 아니면 캐시. status 는 이걸로 순수 계산만."""
