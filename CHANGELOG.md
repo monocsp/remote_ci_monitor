@@ -19,7 +19,7 @@ of a key bumps that number and is listed here.
   two "we are past what we know" states are hatched instead. The time bar grows every second
   instead of jumping between refreshes, and stops growing while updates are paused or lost.
   ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
-  [#71](https://github.com/monocsp/remote_ci_monitor/pull/71))
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
 - **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
   stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
   a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
@@ -39,7 +39,7 @@ of a key bumps that number and is listed here.
   job — and **▸** opens the step list and the log tail. The page remembers which rows *you* opened
   (`rcm.expanded` in that browser), not which ones you closed.
   ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
-  [#71](https://github.com/monocsp/remote_ci_monitor/pull/71))
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
 - **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
   and it was the one place the page dropped it.
   ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
