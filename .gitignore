@@ -22,3 +22,10 @@ rcm.toml
 
 # 실기 검증 스크래치 (커밋하지 않는다)
 .verify/
+
+# 작업 지시서(세션에 붙여 넣는 것) — 커밋하지 않는다
+PROMPT-*.md
+
+# 에이전트 하네스가 만드는 것. `.claude/settings.json` 과 `.claude/skills/` 만 커밋한다
+.claude/worktrees/
+.claude/settings.local.json

@@ -252,15 +252,18 @@ describe("stateWord", () => {
 describe("stateGlyph", () => {
   test("one glyph per state (§2)", () => {
     assert.equal(rcm.stateGlyph("running"), "▶");
-    assert.equal(rcm.stateGlyph("queued"), "·");
+    assert.equal(rcm.stateGlyph("queued"), "○");
     assert.equal(rcm.stateGlyph("uploading"), "↑");
     assert.equal(rcm.stateGlyph("cancelling"), "■");
     assert.equal(rcm.stateGlyph("succeeded"), "✓");
     assert.equal(rcm.stateGlyph("failed"), "✗");
     assert.equal(rcm.stateGlyph("timed_out"), "⏱");
-    assert.equal(rcm.stateGlyph("cancelled"), "■");
+    assert.equal(rcm.stateGlyph("cancelled"), "□");
     assert.equal(rcm.stateGlyph("lost"), "?");
   });
+
+  // 색이 유일한 채널이면 안 된다(§4.2)는 `tests/web/state_marks.test.js` 가 잠근다 — 상태 목록을
+  // 하드코딩하지 않고 i18n 카탈로그에서 뽑아, 상태를 새로 들이면 모양 없이는 못 지나간다.
 
   test("null → · (same default as render_text's queue rows; the pill word carries the meaning)", () => {
     assert.equal(rcm.stateGlyph(null), "·");

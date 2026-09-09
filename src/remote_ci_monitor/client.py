@@ -165,12 +165,47 @@ class WorkerClient:
         return json.loads(raw) if raw else {}
 
     def finish(
-        self, job_id: int, outcome: str, exit_code: int | None, summary: str | None = None
+        self,
+        job_id: int,
+        outcome: str,
+        exit_code: int | None,
+        summary: str | None = None,
+        *,
+        artifacts: dict[str, Any] | None = None,
+        finished_at: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
         if summary is not None:
             body["summary"] = summary
+        if artifacts is not None:
+            # 처분은 **있으면** 싣는다. 통째로 없으면 서버는 `unknown` 으로 읽는다(M5e §5).
+            body["artifacts"] = artifacts
+        if finished_at is not None:
+            # 실행 종료 시각 — 수집·업로드 시간이 job_seconds 에 섞이지 않게(M5e §10)
+            body["finished_at"] = finished_at
         return self._post(f"/worker/jobs/{job_id}/finish", body) or {}
+
+    def upload_bundle(self, job_id: int, tar_path: Path) -> dict[str, Any]:
+        """`PUT /worker/jobs/{id}/artifacts` — 모은 묶음을 흘려 올리고 영수증을 받는다(M5e §6).
+
+        파일 객체를 그대로 넘긴다 — 기가 단위 묶음을 메모리에 올리지 않는다.
+        """
+        size = tar_path.stat().st_size
+        with tar_path.open("rb") as fh:
+            _status, _headers, raw = self._inner._request(
+                "PUT",
+                f"/worker/jobs/{job_id}/artifacts",
+                data=fh,
+                content_length=size,
+                content_type="application/x-tar",
+                timeout=max(self.timeout, 300.0),
+            )
+        return json.loads(raw) if raw else {}
+
+    def bundle_status(self, job_id: int) -> dict[str, Any]:
+        """`GET /worker/jobs/{id}/artifacts` — 모호한 finish 응답을 푼다(M5e §6)."""
+        _status, _headers, raw = self._inner._request("GET", f"/worker/jobs/{job_id}/artifacts")
+        return json.loads(raw) if raw else {}
 
     def health(self) -> dict[str, Any]:
         return self._inner.health()
@@ -467,6 +502,61 @@ class Client:
         except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as e:
             reason = getattr(e, "reason", None) or e
             raise ClientError(0, f"cannot reach {self.server}: {reason}") from e
+
+    def artifacts(self, job_id: int) -> dict[str, Any]:
+        """`GET /jobs/{id}/artifacts` — 보호 문서(매니페스트 포함, M5e §6)."""
+        return self.get_json(f"/jobs/{job_id}/artifacts") or {}
+
+    def ack_artifacts(self, job_id: int, bundle_sha256: str) -> dict[str, Any]:
+        """`POST /jobs/{id}/artifacts/ack` — 트리에 **적용까지 끝낸 뒤에** 보낸다(M5e §7)."""
+        return (
+            self.post_json(f"/jobs/{job_id}/artifacts/ack", {"bundle_sha256": bundle_sha256}) or {}
+        )
+
+    def download_bundle(self, job_id: int, dest: Path) -> int:
+        """아카이브를 `dest` 에 흘려 받는다(`.part` → 교체). 받은 바이트 수.
+
+        `Content-Length` 와 다르면 `ClientError` — 잘린 묶음을 트리에 풀지 않는다.
+        """
+        url = self.server + f"/jobs/{job_id}/artifacts/archive"
+        headers = {
+            "User-Agent": f"rcm/{__version__}",
+            "Accept": "application/x-tar",
+            "Authorization": f"Bearer {self.token}",
+        }
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        received = 0
+        try:
+            with urllib.request.urlopen(req, timeout=max(self.timeout, 60.0)) as resp:
+                raw = resp.headers.get("Content-Length")
+                expected = int(raw) if raw else None
+                with part.open("wb") as fh:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        received += len(chunk)
+        except urllib.error.HTTPError as e:
+            part.unlink(missing_ok=True)
+            payload = e.read()
+            try:
+                parsed = json.loads(payload) if payload else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            msg = parsed.get("error") if isinstance(parsed, dict) else None
+            raise ClientError(e.code, msg or f"HTTP {e.code}") from e
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            part.unlink(missing_ok=True)
+            reason = getattr(e, "reason", None) or e
+            raise ClientError(0, f"cannot reach {self.server}: {reason}") from e
+        if expected is not None and received != expected:
+            part.unlink(missing_ok=True)
+            raise ClientError(0, f"artifact download incomplete: {received} of {expected} bytes")
+        part.replace(dest)
+        return received
 
     def get_json(self, path: str) -> Any:
         _, _, body = self._request("GET", path)

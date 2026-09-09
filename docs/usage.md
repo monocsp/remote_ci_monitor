@@ -164,7 +164,39 @@ Two people testing the same commit should not queue twice.
    run, no second wait, the same result for both. `--no-join` opts out, and cancelling a joined job
    only removes you from the list.
 
-## 8. The whole queue in one screen
+## 8. Getting the files back
+
+A job that regenerates files leaves them on the build machine. `--fetch-artifacts` brings them
+home, into the same paths in the tree you submitted.
+
+```sh
+rcm run goldens --fetch-artifacts
+```
+
+```
+artifacts: 64 files · 12.4 MB
+artifacts: new 0 · changed 12 · unchanged 51 · conflicted 1
+artifacts: wrote 12, unchanged 51, conflicted 1
+```
+
+1. The preset has to declare what to collect (`artifacts = ["test/**/goldens/*.png"]` — see
+   [Configuration](configuration.md#getting-files-back-out-of-a-job)). Without it nothing is
+   collected and nothing is fetched; that is not an error.
+2. **A file you edited while waiting is never overwritten.** It is counted `conflicted` and left
+   as it is. `--force` overwrites those too. `--dry-run` prints the table and writes nothing.
+3. The last line separates what was compared from what was written. For a golden update, `wrote`
+   is the answer you came for.
+4. Once every file is written, your session tells the server. If nobody joined the job, the bundle
+   is deleted right then; otherwise it waits 24 hours so the others can fetch it too.
+
+Submitted with `--no-wait`, or want them somewhere else?
+
+```sh
+rcm artifacts 412                          # what is there
+rcm artifacts 412 --fetch --output ./out   # write it into a directory you name
+```
+
+## 9. The whole queue in one screen
 
 `rcm top` is the one command to leave open in a terminal.
 
@@ -183,7 +215,7 @@ Two people testing the same commit should not queue twice.
 
 `rcm top --watch 5` refreshes every five seconds; `rcm top --json` is for scripts.
 
-## 9. The web page
+## 10. The web page
 
 Open `http://<build-machine>:8787/` — nothing to install, and it works on a phone.
 
@@ -213,7 +245,8 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 5. **A waiting job**, with its position in the queue.
 6. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
    from the preset; `—` means it will not pretend to know.
-7. **Another pool**, with its own workers and queue.
+7. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
+   the repository it came from is in the expanded block, since every row usually repeats it.
 
 ### Your jobs
 
@@ -248,6 +281,10 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ![the host card with the sample age, CPU, memory and GPU meters, the top processes and the remote worker card](images/ui/web-host.png)
 
+The section is folded by default — it opens itself when something is wrong (a machine is busy or
+its sample has gone stale), and the one-line summary beside the heading always says which machines
+are reporting and how they are doing. Open or close it yourself and that choice is remembered.
+
 1. The machine and **how old the sample is**. Anything stale is labelled, never quietly shown as
    current.
 2. **CPU**, 3. **memory**, 4. **disk** and 5. **GPU**. CPU, memory and GPU carry five minutes of
@@ -274,7 +311,7 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 1. Workers, 2. the summary, 3. a job as a card, 4. its steps and 5. the buttons — one column, same
    information, no horizontal scrolling.
 
-## 10. What to do next
+## 11. What to do next
 
 - Write the preset your team actually needs: [Configuration](configuration.md).
 - Make your script print step markers, so the queue shows progress instead of a spinner.

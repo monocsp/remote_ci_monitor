@@ -32,6 +32,20 @@ gh pr create --base dev
 `main-from-dev-only` (`pr-policy.yml`) are wired into the ruleset: renaming one means changing the
 ruleset too.
 
+## The build machine's own install
+
+A machine that runs `rcm serve` may have its service virtual environment pointing at a checkout of
+this repository (`pip install -e`). That checkout is production: it stays on `main`, nothing is
+edited in it, and it moves only by `git pull --ff-only` plus a service restart with the queue
+empty. Develop in a `git worktree` with its own `.venv`, and give a test server its own config,
+`port` and `data_dir` — never the production ones.
+
+`tools/guard_production.py` enforces this as a `PreToolUse` hook (`.claude/settings.json`). It
+finds the production checkout from the machine's own editable install, refuses edits to it and to
+the server's config and data, and asks before a deploy. On a machine with no such install it does
+nothing. The procedure is in
+[operating a build machine](docs/operating.md#from-a-git-checkout).
+
 ## Checks before a pull request
 
 ```sh

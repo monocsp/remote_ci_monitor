@@ -107,9 +107,9 @@ uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 
 
 - **순서**: `id` 오름차순 = 생성 순 FIFO. 우선순위는 없다(필요해지면 M5). 화면 정렬은 running → cancelling → 대기(순번순).
 - **순번 `position`**: **대기 잡(`uploading`·`queued`)에만 1부터** 매긴다. `running`·`cancelling` 은 null. `#` 는 언제나 잡 id 이고 순번은 `2nd in line` 으로 따로 쓴다(둘을 섞지 않는다).
-- **레인**: `server.lanes`(기본 1). 레인이 비어 있어도 **concurrency 그룹**이 겹치면 못 올라간다 — 프리셋에 `concurrency_group = "devices"` 를 주면 같은 그룹의 잡은 동시에 하나만 돈다(시뮬레이터·에뮬레이터를 공유하는 QA·배포용). 막고 있는 잡을 `blocked_by: {job_id, group, remaining_seconds}` 로 보여준다. 그룹은 제출 시점에 잡에 박힌 `concurrency_group` 을 쓴다. 레인 1 이면 `blocked_by` 는 자연히 안 나온다(오너 결정 12).
-- **살아 있는 레인**: 대기 계산은 `server.lanes` 가 아니라 **`state ≠ down` 인 워커 수**로 한다. 그 수가 0 이거나 `server.paused` 면 대기 잡의 `wait_seconds`·`finish_at` 은 **null**(ETA `—`) — 시작할 수 없는 잡에 시각을 주지 않는다.
-- **이유 `reason`**: 잡이 지금 왜 이 상태인지 서버가 계산해 싣는 **단일 표시 사유**다(`estimate.overdue`·`estimate.stuck` 은 근거 플래그로 따로 싣는다). `running` · `waiting_for_lane`(`ahead_job_id` = 가장 먼저 비는 레인의 잡) · `blocked_by_group` · `uploading` · `upload_stalled`(`upload_stall_seconds` 동안 바이트가 안 옴) · `materializing` · `overdue` · `stuck` · `cancelling` · `paused` · `not_scheduled`(대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 있는 채로 `max(워커 since, 잡 queued_at)` 부터 10초가 넘음 — 스케줄러 이상) · `worker_down`(모든 레인 다운). 행동 가능한 이유(`worker_down` → `stuck` → `upload_stalled` → `not_scheduled` → `blocked_by_group` → `overdue` → `paused`)는 화면 요약 「Not moving」에 이 순서로 오른다.
+- **레인**: `server.lanes`(기본 1). 레인이 비어 있어도 **concurrency 그룹**이 겹치면 못 올라간다 — 프리셋에 `concurrency_group = "devices"` 를 주면 같은 그룹의 잡은 동시에 하나만 돈다(시뮬레이터·에뮬레이터를 공유하는 QA·배포용). 막고 있는 잡을 `blocked_by: {job_id, group, remaining_seconds}` 로 보여준다. 그룹은 제출 시점에 잡에 박힌 `concurrency_group` 을 쓴다. 레인 1 이면 `blocked_by` 는 자연히 안 나온다(오너 결정 12). **레인 2 부터는 호스트 CPU 가 `cpu_max_percent`(기본 80) 아래일 때만 잡을 집는다**(M5f) — 레인 1 은 게이트를 안 지나므로 큐는 어떤 부하에서도 계속 움직인다.
+- **살아 있는 레인**: 대기 계산은 `server.lanes` 가 아니라 **`state ≠ down` 인 워커 수**로 한다. 그 수가 0 이거나 `server.paused` 면 대기 잡의 `wait_seconds`·`finish_at` 은 **null**(ETA `—`) — 시작할 수 없는 잡에 시각을 주지 않는다. **부하로 보류된(`held`) 레인은 ETA 그리디에서 뺀다**(M5f) — 언제 열릴지 모르는 레인에 기대면 「자신있는 틀린 시각」이 된다. 레인 배정은 레인 **번호**가 아니라 `(worker, lane)` 로 센다(로컬 레인 2 와 `build-02/2` 가 뭉개지지 않게).
+- **이유 `reason`**: 잡이 지금 왜 이 상태인지 서버가 계산해 싣는 **단일 표시 사유**다(`estimate.overdue`·`estimate.stuck` 은 근거 플래그로 따로 싣는다). `running` · `waiting_for_lane`(`ahead_job_id` = 가장 먼저 비는 레인의 잡) · `blocked_by_group` · `uploading` · `upload_stalled`(`upload_stall_seconds` 동안 바이트가 안 옴) · `materializing` · `overdue` · `stuck` · `cancelling` · `paused` · `not_scheduled`(대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 있는 채로 `max(워커 since, 잡 queued_at)` 부터 10초가 넘음 — 스케줄러 이상) · `worker_down`(모든 레인 다운) · `held_by_load`(집었을 레인이 호스트 부하로 보류 중 — M5f). 행동 가능한 이유(`worker_down` → `stuck` → `upload_stalled` → `not_scheduled` → `blocked_by_group` → `overdue` → `paused`)는 화면 요약 「Not moving」에 이 순서로 오른다. **`held_by_load` 는 여기 안 올린다**(의도된·자가 치유되는 상태라 `paused` 와 같은 종류다 — 오너 결정 45). 오래 닫혀 있으면 `rcm check` 가 경고한다.
 - **합류**(`join_duplicates`): 활성 잡(`uploading`·`queued`·`running`) 중 같은 `preset` · 같은 `inputs` · 같은 소스 신원(`tree` 면 `tree_hash`, `git_ref` 면 `sha`)이 있으면 새 잡을 만들지 않고 그 잡 id 를 돌려준다(`joined: true`). 두 세션이 같은 코드를 확인하려는 것뿐이라 두 번 돌릴 이유가 없다. 스냅샷 업로드도 생략된다. `--no-join` 으로 끈다. (v1 의 GitHub 경로에선 inputs 를 비교할 수 없어 run 이름 규약에 기대야 했다 — 이제 정확히 비교한다.) 합류한 세션은 `joiners[]` 에 `{name, label, joined_at}` 으로 남고, 요청자와 합류자 모두 「내 잡」이다.
 - **취소**: 자기 토큰의 잡(요청자)만, `admin` 토큰은 전부. `uploading`·`queued` 면 즉시 `cancelled`(진행 중이던 `PUT` 은 409), `running` 이면 `cancelling` 으로 바꾸고 SIGTERM → `grace_seconds` → SIGKILL → `cancelled`. `cancel.{requested_at, by, kill_at}` 을 싣는다. 원 요청자의 취소는 합류자의 `rcm wait` 에 종료 코드 2 로 전파된다. 합류자의 취소는 잡을 건드리지 않고 자기 `joiners[]` 항목만 지운다(오너 결정 16).
 - **표본**: 같은 `key` 의 완료 잡 중 `sample_policy`(기본 `success`) · `min_job_seconds`(30) 이상 · `sample_days`(45) 안. 소요는 `started_at`~`finished_at`(큐 대기는 안 섞인다 — 우리가 시각을 찍으니 v1 의 「run 시각 vs 잡 시각」 함정이 없다). 대기 중앙값(`medians[key].wait_seconds`)은 같은 표본의 `created_at`~`started_at`.
@@ -176,7 +176,7 @@ default = "full"
 - 타임아웃·취소: 프로세스 그룹에 SIGTERM → `grace_seconds`(10) → SIGKILL. 자식이 만든 손자까지 죽이려고 `start_new_session` 을 쓴다. 취소는 `cancelling` 상태를 거친다(`cancel.kill_at` = 요청 시각 + grace). 타임아웃은 `timed_out` + `summary: "limit 20m"` + `timeout_seconds`.
 - 워크스페이스 준비(tar 풀기·`git_ref` fetch)는 `running` 이지만 `progress.phase: "materializing"` 이다(스텝이 없는 것과 구분). 프로세스가 뜨면 `executing`. 준비 실패는 `failed` + `exit_code: null` + `summary`.
 - 로그: `<data_dir>/jobs/<id>/log.txt` 줄 단위 flush. 최근 `tail` 은 상태 JSON 에 싣고 전체는 `GET /jobs/{id}/log`. 로그엔 시크릿이 섞일 수 있어 **읽기에 그 잡의 토큰 또는 admin** 이 필요하다. 마지막 줄을 받은 시각을 `progress.last_output_at` 으로 싣는다(stuck 판정).
-- 워커 상태: 레인마다 `{lane, state ∈ idle|busy|down, job_id, error, since}` 를 `server.workers[]` 로 싣는다. 스레드가 예외로 죽으면 `down` + `error`(앞 200자, 경로·토큰 없이) 로 남고 `server.last_error` 에도 적는다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다.
+- 워커 상태: 레인마다 `{lane, state ∈ idle|busy|held|down, job_id, error, since}` 를 `server.workers[]` 로 싣는다. `held` 는 부하 게이트가 막고 있는 레인이고 `hold_code`(`cpu_busy`·`no_sample`·`cooldown`)·`hold_detail`·`held_since` 를 함께 싣는다(M5f). 스레드가 예외로 죽으면 `down` + `error`(앞 200자, 경로·토큰 없이) 로 남고 `server.last_error` 에도 적는다. 워커가 죽었는데 큐만 멀쩡해 보이는 화면이 가장 위험하다.
 - ⚠️ 자식 프로세스의 stdout 버퍼링 때문에 마커가 늦게 도착한다. README 에 `PYTHONUNBUFFERED=1`·`stdbuf -oL`·`flutter --no-color` 같은 팁을 쓴다. 마커가 늦어도 잡 전체 경과는 정확하다.
 - 정리(M3 `janitor.py` + 순수 `core/retention.py`): 성공 잡 워크스페이스는 완료 즉시 삭제(`keep_workspace_on_failure = true` 면 succeeded 가 아닌 모든 종료 상태 — failed·timed_out·cancelled·lost — 는 보존 기간까지). 서버 안 청소 스레드가 시작 직후와 `retention_sweep_interval_seconds`(3600)마다 `retention_days_success`(14) · `retention_days_failure`(30) 지난 종료 잡의 `jobs/<id>/`·`workspaces/<id>/` 를 지우고 `jobs.artifacts_purged_at` 에 표시한다(DB v2). 활성 잡은 삼중으로 보호(순수 규칙 · janitor 재확인 · UPDATE 조건). 심볼릭 링크는 링크만, data_dir 밖을 가리키면 손대지 않는다. 산출물이 지워진 뒤 `metadata_retention_days`(180, `sample_days` 이상) 지난 잡 행·이벤트·합류자는 삭제한다. 미러는 안 지운다. 지운 잡의 로그는 404 `log expired`. 스레드가 죽거나 주기의 2배가 지나도록 sweep 이 없으면 `/api/health` 503.
 - 권한: 서버가 도는 OS 사용자로 실행된다. README 에 「전용 사용자로 돌리고 sudo 를 주지 말라」.
@@ -267,6 +267,10 @@ bind = "127.0.0.1"                  # Tailscale 로 열려면 그 IP 나 0.0.0.0
 port = 8787
 data_dir = "~/.local/share/rcm"
 lanes = 1
+admission = "load"                  # "load" | "always" — 레인 2 부터 부하를 보고 미룬다 (M5f)
+cpu_max_percent = 80                # 이 위면 레인 2 부터 안 집는다. 레인 1 은 언제나 집는다
+admission_samples = 3               # 연속으로 이만큼의 표본이 전부 기준 아래여야 연다
+admission_cooldown_seconds = 30     # 한 머신에서 게이트를 지나 잡을 집으면 이만큼 쉰다
 read_auth = "none"                  # "none" | "basic" (TLS 프록시 뒤에서만)
 max_snapshot_bytes = 536870912
 max_concurrent_requests = 32
@@ -541,8 +545,22 @@ docs/reviews/
   - **M5b-3 `rcm worker`** (**완료 2026-09-07**, 명세 `docs/m5b3-workplan.md` — Codex 는 이날 모델 접근 불가로 생략): `runner.run_job`(자재화 → Popen → 펌프 → 신호; 로컬·원격 공용) · `WorkerClient` · `WorkerConfig`/`worker.toml`(`[[repos]]` 규칙은 서버와 같다) · `remote_worker.RemoteWorker`(등록 재시도 · heartbeat 스레드 · 레인 스레드 · 보고 재시도 · 409 면 정리 · SIGTERM → lost `worker stopped`) · `rcm worker --check/--once`. 두 프로세스 e2e 7건(실행·캐시 잡·취소·kill -9 → lost·SIGTERM·git_ref·서버 재시작). M5 완료 기준 ④ 달성.
   - **M5b-4 다중 풀 표시** (**완료 2026-09-07**, 명세 `docs/m5b4-workplan.md`): `rcm top` 원격 풀 헤더에 언제나 풀 이름(`queue — empty (pool linux)` · `· paused`) · 머리줄 원격 필 5개 초과는 `+N workers`(down 은 안 접음) · 웹 Host 절에 워커 표본 카드(`build-02 · pool linux`, Recent 밑 풀 host 헤더 제거) · `rcm check` `pools` 행(`default (1 lane) · linux (build-02/1 idle)`, 풀 워커 전부 down 이면 FAIL) · `server.workers[].pool`.
 - **M5c — 내부망 자동 발견** (**완료 2026-09-08**, PR #37 · v0.2.2, 명세 `docs/m5c-workplan.md`): 서버가 `_rcm._tcp` 를 mDNS/DNS-SD 로 광고하고 클라이언트가 `server` 없이도 같은 네트워크의 서버를 찾는다(표준 라이브러리만 · 외부 도구 없음). `rcm discover` · `client.toml server = "auto"`. 실배치(노트북이 Tailscale 밖) 요청. 완료 기준은 명세 §6.
-- **M5d — 웹 UI: 한국어 기본 + 정보 위계**(계획 2026-09-08, 명세 `docs/m5d-workplan.md`): 화면이 한국어로 뜨고 오른쪽 위에서 영어로 바꾼다(결정 36). 그리고 「내 잡 끝났나 · 왜 안 움직이나 · 언제 내 차례인가」 순서로 위계를 다시 세운다 — 호스트 지표와 소스 주소를 접고, 상태를 색이 아니라 모양·글자·움직임으로 표시하고, UI 글꼴을 산세리프로 되돌린다. 근거는 `docs/reviews/2026-09-08-codex-web-ui-design.md`(코덱스가 화면을 보고 낸 진단)와 `docs/reviews/2026-09-08-ui-hierarchy-research.md`(1차 자료 조사). PR 은 셋으로 나눈다 — 언어 장치 · 위계 · 폰.
+- **M5d — 웹 UI: 한국어 기본 + 정보 위계** (**완료 2026-09-08**, PR #47 · #48 · #51 · #52, 명세 `docs/m5d-workplan.md` — 완료 기준 7개 대조표는 명세 §7): 화면이 한국어로 뜨고 오른쪽 위에서 영어로 바꾼다(결정 36). 그리고 「내 잡 끝났나 · 왜 안 움직이나 · 언제 내 차례인가」 순서로 위계를 다시 세운다 — 호스트 지표와 소스 주소를 접고, 상태를 색이 아니라 모양·글자·움직임으로 표시하고, UI 글꼴을 산세리프로 되돌린다. 근거는 `docs/reviews/2026-09-08-codex-web-ui-design.md`(코덱스가 화면을 보고 낸 진단)와 `docs/reviews/2026-09-08-ui-hierarchy-research.md`(1차 자료 조사). PR 은 넷으로 나눴다 — 서버가 문장 대신 코드를 내려보낸다(M5d-0, 결정 37) · 언어 장치와 한국어
+  카탈로그(M5d-1) · 위계(M5d-2) · 폰과 접근성(M5d-3). M5d-2 는 둘로 갈렸다: 오너가 화면을 보고 낸
+  피드백 세 건(저장 공간 · 초가 튀는 것 · 뭐가 도는지 안 보이는 것, 명세 §4.6)을 먼저 고치고, 그
+  다음에 위계 재구성을 했다. 마일스톤을 도는 동안 값을 치른 것 셋: M5d-0 이 호스트 문서에 키를
+  더하면서 원격 워커 표본 파서를 안 고쳐 **최신 워커의 표본이 통째로 버려지고 있었다**(#48 에서
+  수정, 이제 왕복 시험이 잠근다) · 표의 칸 폭을 무조건 못 박아 **폰에서 키·요청자 칸이 사라졌다**
+  (사람 눈으로만 잡혔다 — #52 가 390px 에서 「글자와 자리」를 함께 본다) · 폰 시험이 macOS 크롬의
+  최소 창 폭 때문에 **실제로는 500px 에서 돌고 있었다**(§4.7).
 
+
+**계획서의 마일스톤은 여기서 끝난다.** M0~M5 가 전부 완료됐고(M6 는 결정 30 으로 폐기), 이후는 오너
+실기 결과에 따른 수정과 운영 개선이다.
+
+- **M5f — 부하를 보는 병렬 레인**(계획 2026-09-08~09, 명세 `docs/m5f-workplan.md` · 리뷰 `docs/reviews/2026-09-08-m5f-design-review.md`): 오너 요청 — 「CPU 를 너무 잡아먹지 않도록 설정하는 값을 주고 **기본값 80%**, 그거에 맞게 설정되면 병렬도 돌릴 수 있게」. `lanes` 를 올려도 안전하게 만든다. 레인 2 부터는 호스트 CPU 가 `cpu_max_percent`(80) 아래일 때만 claim 하고, 레인 1 은 게이트를 안 지난다(큐가 절대 안 멈춘다). 판정은 **서버가 claim 직전에** 한 곳에서 — 로컬 레인과 원격 워커의 claim 이 둘 다 서버 프로세스 안에서 돌고 서버가 두 머신의 표본을 이미 들고 있기 때문이다. `rcm worker` 프로토콜과 `store.claim` 의 SQL 은 안 바뀐다. 보류 레인은 `held` + 사유 코드로, 대기 잡은 `held_by_load` 로 보인다. 결정 39~50. PR 은 다섯 — 명세(1) · 선행 병목(2a-0) · 게이트(2a) · 화면·문서(2b) · 동시 실행 ETA(2c).
+  - **재고 나서 정했다**: 리뷰(격리 에이전트 둘)와 실측 프로브가 초안의 다섯 곳을 뒤집었다 — 쿨다운이 버스트를 못 막던 것(락 없이는 20회 중 20회 전부 통과) · ETA 그리디의 레인 번호 충돌(4레인이 2레인처럼) · 메모리 게이트(두 OS 의 `used` 가 다른 뜻) · `held_by_load` 의 「Not moving」 자리 · 「마이그레이션 불필요」(overdue·stuck 이 같은 중앙값에서 나온다). 명세 §13~§15 에 근거가 있다.
+  - **게이트 자체는 공짜다**(실측): `decide()` 1.29 µs, 보류 레인 48개가 코어의 0.012%, 그리고 보류하면 claim 을 안 하므로 오늘보다 싸다. 비싼 것은 게이트가 **앉는 자리**였다 — 마커 줄마다 SQLite 트랜잭션(다른 레인 claim 을 275 ms 로 밀어냄) · `store.claim` 이 `jobs_state` 를 두고 `jobs_pool` 을 타는 것(`ANALYZE` 하나로 3727배) · 지터 없는 1초 폴링 격자(48레인에서 `/api/status` 503). 그래서 PR 2a-0 이 먼저다.
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
@@ -587,7 +605,23 @@ docs/reviews/
 | 35 | IPv6 발견 | v1 범위 밖. IPv4 만 응답한다 (M5c, 2026-09-08) |
 | 36 | 웹 UI 언어 | **한국어가 기본**, 오른쪽 위에서 영어로 바꾼다(브라우저에 기억). 식별자·프리셋 이름·명령·커밋 해시·저장소 주소는 번역하지 않는다. **서버가 내려보내는 문장은 서버의 것** — 페이지가 번역하지 않고, 무엇이 서버 문장인지 명세에 적는다 (오너 결정 2026-09-08) |
 | 37 | 서버 문장 | **서버는 문장이 아니라 코드를 내려보낸다**(2026-09-08). `summary_code`·`summary_args`·`*_error_code`·`gpu_note_code` 를 **추가**하고(스키마 v1 그대로) 화면·CLI 가 각자의 말로 그린다. 잡이 `::rcm::summary::` 로 찍은 문장만 예외 — 팀이 쓴 것이라 그대로 보여 준다. 인자는 원시 값으로 보내고 포맷은 표시하는 쪽이 한다 |
+| 39 | CPU 상한과 기본 동작 | `[server] cpu_max_percent = 80`, `admission = "load"` 를 **기본으로 켠다**. 영향 범위는 「`lanes = 1`」이 아니라 **「서버와 등록된 모든 워커가 각각 레인 1」**이다 — `[server] lanes` 는 로컬 레인만 세고 원격 레인은 `worker.toml` 이 정한다. 레인 ≥ 2 인 설치는 업그레이드만으로 동작이 바뀌므로 CHANGELOG 에 동작 변경으로 적고 기동 로그 한 줄을 남긴다. 끄려면 `admission = "always"` (M5f, 2026-09-09) |
+| 40 | 레인 1 은 게이트를 안 지난다 | `hold_max_seconds`(무한 보류 방지) 대신 **계기**를 단다 — `held_since` 와 `rcm check` 경고. 밸브는 「CPU 95% 인데 두 번째 잡을 밀어 넣는」 장치라 두지 않는다 |
+| 41 | 레인 1 의 claim 도 쿨다운을 **기록**한다 | 판정은 건너뛰되 기록은 남긴다. 안 그러면 레인 1 이 무거운 잡을 집은 0.5초 뒤 레인 2 가 「잡 시작 전」 표본을 보고 통과한다 |
+| 42 | 메모리 게이트는 **넣지 않는다** | 두 OS 의 `used` 정의가 다르다 — 같은 픽스처에서 macOS free 31.9% vs Linux 60.4%(같은 파일의 `MemFree` 로 재면 14.8%). 스왑 압력 신호도 없다. 다시 볼 때의 신호는 macOS `memory.compressed_bytes` |
+| 43 | ETA 는 보류 레인을 뺀다 | 늦게 잡고, 레인이 열리면 앞당겨진다. 전제로 레인 배정 키를 `(worker, lane)` 로 고친다 |
+| 44 | 프리셋 무게(`heavy`)는 안 만든다 | 게이트는 재고 무게는 짐작한다. `concurrency_group` 은 라벨 상호 배제라 「무겁지만 자기들끼리는 병행」을 표현할 수 없다 — 그래도 결론은 같다 |
+| 45 | `held_by_load` 는 「Not moving」에 **안 올린다** | 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다. 늘 켜져 있으면 사람들이 패널을 무시하게 되고 `worker_down`·`stuck` 이 묻힌다 |
+| 46 | 코로케이션은 자동 병합하지 않는다 | 한 머신의 `rcm serve` + `rcm worker` 는 게이트 없는 레인 **둘**을 갖는다(이 저장소 오너의 Mac 이 그 배치다). 합치려면 `/worker/register` 에 머신 식별자를 더해야 한다 — 필요해지면 그때 |
+| 47 | 원격 표본의 낡음 예산 | 기본 15초(`3 × interval`) 그대로. heartbeat 이 두 번 밀리면 경계에 딱 걸리고(15.0초는 아직 fresh) 세 번이면 닫힌다. 거슬리면 `stale_seconds` 를 설정 키로 뺀다 |
+| 48 | 선행 병목을 M5f 안에서 고친다 | PR 2a-0: 마커 배치 쓰기 · `ANALYZE` · `OperationalError` → 503 · `CLAIM_MIN_INTERVAL` 지터 · 레인 키. 게이트를 병목 위에 달지 않기 위해서다 |
+| 49 | M5f **밖**의 병목은 별도 PR | `/api/status` 의 `list_samples`(요청의 91~93%, 1만 행 245 ms) · `remote_worker_infos` N+1(마커 줄당 SQL 555개) · `workers` 표 미정리 · `PRAGMA synchronous=NORMAL`(쓰기 5.6배, 내구성 변경이라 오너가 정한다) |
+| 50 | 같은 레포의 병렬 레인은 직렬화된다 — 적고 안 고친다 | `gitops.py` 의 미러 락은 `git` 서브프로세스를 안고 잡는다(상한 600초). 「레인을 늘려도 같은 레포의 자재화는 겹치지 않는다」를 `docs/configuration.md` 에 적는다 |
 | 38 | 기본 언어 | 브라우저 언어와 **무관하게 한국어가 기본**이다. 영어는 오른쪽 위에서 고르고, 고른 값은 그 브라우저에 남는다 (2026-09-08) |
+| 39 | 잡 산출물 되돌려주기 | 프리셋이 선언한 글롭(`artifacts`)에 맞는 파일을 워커가 **워크스페이스를 지우기 전에** 모아 서버에 불변 묶음으로 두고, 그 잡의 자격자(요청자·합류자·admin)가 받아 간다. 로컬 워커·원격 워커 둘 다. 잡이 만든 파일은 코드에서 `bundle` 로 부른다 — `jobs.artifacts_purged_at`(M3, 로그·스냅샷·워크스페이스)과 **다른 것**이다 (M5e, 오너 결정 2026-09-08) |
+| 40 | 산출물 삭제 규칙 | `jobs.join_count == 0` 인 잡은 클라이언트 확인(ack)이 오면 **즉시 삭제**, 한 번이라도 합류가 있었던 잡은 확인이 와도 **TTL 까지 유지**한다. TTL 은 `artifact_retention_hours = 24`. 합류자 표의 키가 토큰 이름이라 세션은 셀 수 없고(`store.py` `joiners`), 합류는 `ACTIVE_STATES` 에서만 일어나고 판정·종료가 같은 트랜잭션 직렬화를 쓰므로 `join_count` 는 **터미널 커밋에** 얼어붙는다 (M5e, 오너 결정 2026-09-08) |
+| 41 | 산출물 상한 | 전부 설정 키다: `max_artifact_bytes`(1 GiB) · `artifact_storage_max_bytes`(10 GiB) · `max_artifact_files`(10000) · `artifact_timeout_seconds`(60) · `max_concurrent_artifact_transfers`(2). 넘으면 **잡은 그대로 성공/실패하고** 산출물만 버린다. 만료되지 않은 남의 묶음을 쫓아내지 않는다 (M5e, 오너 결정 2026-09-08) |
+| 42 | 받기·덮어쓰기 | 받기는 옵트인(`--fetch-artifacts`). 트리에 쓸 때 제출 당시와 내용이 같은 파일은 덮어쓰고, 제출 뒤 사람이 손댄 파일(`conflicted`)은 `--force` 여야 덮는다. 골든 갱신이 플래그 하나로 돌아야 하고, 기다리는 동안 손댄 것만 지키면 된다 (M5e, **오너 확정 2026-09-09**) |
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 

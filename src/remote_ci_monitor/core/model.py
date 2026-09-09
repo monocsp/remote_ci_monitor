@@ -132,6 +132,7 @@ class Preset:
     env_passthrough: tuple[str, ...] = ("PATH", "HOME", "LANG")
     env: dict[str, str] = field(default_factory=dict)
     inputs: tuple[InputSpec, ...] = ()
+    artifacts: tuple[str, ...] = ()  # 잡이 만든 파일 중 돌려줄 것의 글롭 (M5e)
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:

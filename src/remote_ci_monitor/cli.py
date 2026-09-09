@@ -19,12 +19,15 @@ import shutil
 import signal
 import sys
 import tarfile
+import tempfile
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor import SCHEMA_VERSION, __version__
+from remote_ci_monitor import apply as apply_mod
 from remote_ci_monitor.client import (
     Client,
     ClientError,
@@ -39,6 +42,7 @@ from remote_ci_monitor.config import (
     load_server_config,
     user_config_dir,
 )
+from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
@@ -46,6 +50,8 @@ from remote_ci_monitor.core.render_text import fmt_clock, fmt_duration
 from remote_ci_monitor.mdns import discover
 
 USAGE_EXIT = 2
+#: 전달 실패 전용 종료 코드 — 실행 결과(`wait_exit_code`)는 건드리지 않는다(M5e §12).
+EXIT_DELIVERY = 5
 
 
 def _err(msg: str) -> None:
@@ -252,6 +258,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         return _usage(f"preset '{preset.name}' needs --ref <branch|tag|sha>")
     if mode == "tree" and ref is not None:
         return _usage(f"--ref only applies to git_ref presets; '{preset.name}' takes a tree")
+    fetch = bool(getattr(args, "fetch_artifacts", False))
+    if fetch and args.no_wait:
+        return _usage("--fetch-artifacts cannot be used with --no-wait (you have to wait to fetch)")
+    if fetch and mode == "git_ref" and not getattr(args, "output", None):
+        return _usage("--fetch-artifacts needs --output DIR for a git_ref preset (no local tree)")
     try:
         inputs = validate_inputs(preset, inputs_raw)
     except InputError as e:
@@ -348,12 +359,23 @@ def cmd_run(args: argparse.Namespace) -> int:
         except OSError:
             pass
     if args.no_wait:
+        _info(f"fetch its artifacts later with `rcm artifacts {job_id} --fetch --output DIR`")
         _print_json(
             {"job_id": job_id, "joined": joined, "state": "submitted", "url": resp.get("url")}
         )
         return 0
-    # ⑤ wait
-    return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
+    # ⑤ wait — 끝나면 산출물을 제출한 그 트리에 쓴다(§11)
+    spec = None
+    if fetch:
+        spec = _FetchSpec(
+            root=Path(getattr(args, "output", None) or root),
+            baseline={e.path: e.sha256 for e in snap.entries if e.kind != "link"},
+            force=bool(getattr(args, "force", False)),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+    return _wait(
+        client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll, fetch=spec
+    )
 
 
 def _run_git_ref(
@@ -404,8 +426,24 @@ def _run_git_ref(
     return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
 
 
+@dataclass(frozen=True)
+class _FetchSpec:
+    """`--fetch-artifacts` 가 정해 둔 것. 기준선은 **제출할 때 실제로 보낸** 내용의 해시다(§11)."""
+
+    root: Path
+    baseline: dict[str, str]
+    force: bool = False
+    dry_run: bool = False
+
+
 def _wait(
-    client: Client, job_id: int, *, timeout: float | None, joined: bool, use_sse: bool = True
+    client: Client,
+    job_id: int,
+    *,
+    timeout: float | None,
+    joined: bool,
+    use_sse: bool = True,
+    fetch: _FetchSpec | None = None,
 ) -> int:
     line = _StatusLine()
     last: dict[str, Any] | None = None
@@ -448,6 +486,21 @@ def _wait(
     out["wait_exit_code"] = code
     if joined:
         out["joined"] = True
+    if fetch is not None:
+        delivery = _fetch_artifacts(
+            client,
+            job_id,
+            fetch.root,
+            baseline=fetch.baseline,
+            force=fetch.force,
+            dry_run=fetch.dry_run,
+            journal=fetch.root / ".rcm-artifacts.json",
+        )
+        if delivery is not None:
+            out["artifact_fetch"] = delivery
+            # **실행 실패가 전달 실패보다 우선한다** — 테스트가 깨진 것을 먼저 알아야 한다(§12)
+            if code == 0 and not delivery.get("complete"):
+                code = EXIT_DELIVERY
     _print_json(out)
     return code
 
@@ -1176,6 +1229,122 @@ def cmd_token(args: argparse.Namespace) -> int:
 # ── 파서 ─────────────────────────────────────────────────────────────────────
 
 
+def _fetch_artifacts(
+    client: Client,
+    job_id: int,
+    root: Path,
+    *,
+    baseline: dict[str, str],
+    force: bool = False,
+    dry_run: bool = False,
+    journal: Path | None = None,
+) -> dict[str, Any] | None:
+    """묶음을 받아 트리에 쓴다(M5e §11). 결과 요약을 돌려준다. 받을 것이 없으면 None.
+
+    절차: 스테이징으로 통째로 받고 → 전수 검사와 분류를 **보여 주고** → 쓰고 → 충돌 없이 전부
+    적용됐을 때만 ack 한다. `--dry-run` 은 표만 찍고 아무것도 안 쓴다(ack 도 안 한다).
+    """
+    try:
+        doc = client.artifacts(job_id)
+    except ClientError as e:
+        _err(f"artifacts: {e.message}")
+        return {"state": "error", "complete": False, "wrote": 0, "conflicted": 0}
+    state = doc.get("state")
+    if state != "ready":
+        # `disabled`·`empty` 는 실패가 아니다 — 모을 것을 선언하지 않았거나 없었던 것이다
+        reason = doc.get("reason_code")
+        _info(f"artifacts: {state}" + (f" ({reason})" if reason else ""))
+        return None
+    files = tuple(
+        BundleFile(path=f["path"], size=f["size"], sha256=f["sha256"], mode=f["mode"])
+        for f in (doc.get("files") or [])
+    )
+    _info(f"artifacts: {len(files)} files · {(doc.get('bundle_bytes') or 0) / 1e6:.1f} MB")
+    with tempfile.TemporaryDirectory(prefix="rcm-artifacts-") as tmp:
+        staging = Path(tmp) / "files"
+        staging.mkdir()
+        bundle = Path(tmp) / "bundle.tar"
+        try:
+            client.download_bundle(job_id, bundle)
+            _extract_bundle(bundle, staging)
+        except (ClientError, OSError, tarfile.TarError) as e:
+            _err(f"artifacts: download failed: {e}")
+            return {"state": state, "complete": False, "wrote": 0, "conflicted": 0}
+        plan = apply_mod.plan(files, baseline, root)
+        counts = plan.counts()
+        _info(
+            "artifacts: "
+            + " · ".join(f"{k} {counts.get(k, 0)}" for k in ("new", "changed", "unchanged"))
+            + f" · conflicted {counts.get('conflicted', 0)}"
+        )
+        if not plan.safe():
+            for e in plan.entries:
+                if e.verdict == apply_mod.UNSAFE:
+                    _err(f"artifacts: refusing {e.path}: {e.reason}")
+            return {"state": state, "complete": False, "wrote": 0, "conflicted": 0}
+        if dry_run:
+            _info("artifacts: dry run — wrote 0, unchanged 0, conflicted 0 (nothing written)")
+            return {"state": state, "complete": False, "wrote": 0, "conflicted": 0, "dry_run": True}
+        result = apply_mod.apply(plan, staging, root, force=force, journal=journal)
+    _info(
+        f"artifacts: wrote {result.wrote}, unchanged {result.skipped}, "
+        f"conflicted {result.conflicted}" + (f", failed {result.failed}" if result.failed else "")
+    )
+    if result.complete and doc.get("bundle_sha256"):
+        try:
+            client.ack_artifacts(job_id, doc["bundle_sha256"])
+        except ClientError as e:
+            _err(f"artifacts: acknowledge failed: {e.message}")
+    return {
+        "state": state,
+        "wrote": result.wrote,
+        "unchanged": result.skipped,
+        "conflicted": result.conflicted,
+        "failed": result.failed,
+        "complete": result.complete,
+    }
+
+
+def _extract_bundle(bundle: Path, staging: Path) -> None:
+    """묶음을 **새로 만든** 스테이징에 푼다. `materialize.extract_tree` 는 목적지를 지운다."""
+    with tarfile.open(bundle, "r:") as tar:
+        tar.extractall(path=staging, filter="data")
+
+
+def cmd_artifacts(args: argparse.Namespace) -> int:
+    """`rcm artifacts JOB_ID [--fetch --output DIR]` — 끝난 잡의 산출물을 보고, 받는다(§12)."""
+    if args.fetch and not args.output:
+        # 기준선이 없다 — 어느 트리에 쓸지 사람이 정해야 한다(§11)
+        return _usage("rcm artifacts --fetch needs --output DIR (there is no submitted tree here)")
+    client = _client(args)
+    if not args.fetch:
+        try:
+            doc = client.artifacts(args.job)
+        except ClientError as e:
+            _err(f"artifacts: {e.message}")
+            return USAGE_EXIT if e.status in (400, 401, 403, 404) else EXIT_UNKNOWN
+        _info(f"artifacts: {doc.get('state')}")
+        for f in doc.get("files") or []:
+            _info(f"  {f['path']}  {f['size']} bytes")
+        _print_json(doc)
+        return 0
+    root = Path(args.output)
+    root.mkdir(parents=True, exist_ok=True)
+    journal = root / ".rcm-artifacts.json"
+    out = _fetch_artifacts(
+        client,
+        args.job,
+        root,
+        baseline={},  # 기준선이 없다 — 이미 있는 파일은 --force 여야 덮는다(§11)
+        force=args.force,
+        dry_run=args.dry_run,
+        journal=journal,
+    )
+    if out is None:
+        return 0
+    return 0 if out.get("complete") else EXIT_DELIVERY
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rcm",
@@ -1220,12 +1389,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--exclude", action="append", metavar="PATTERN", help="extra .rcmignore pattern"
     )
     run.add_argument("--dir", help="directory to snapshot (default: current directory)")
+    run.add_argument(
+        "--fetch-artifacts",
+        action="store_true",
+        help="write the job's artifacts back into the submitted tree when it finishes",
+    )
+    run.add_argument(
+        "--force", action="store_true", help="with --fetch-artifacts: overwrite files you edited"
+    )
+    run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --fetch-artifacts: show what would be written and write nothing",
+    )
+    run.add_argument(
+        "--output", metavar="DIR", help="with --fetch-artifacts: write here instead of the tree"
+    )
     run.add_argument("--timeout", type=float, help="give up waiting after N seconds (exit 3)")
     run.add_argument(
         "--poll", action="store_true", help="poll every 2s instead of the event stream"
     )
     client_opts(run)
     run.set_defaults(func=cmd_run)
+
+    artifacts = sub.add_parser("artifacts", help="show or fetch a finished job's artifacts")
+    artifacts.add_argument("job", type=int)
+    artifacts.add_argument("--fetch", action="store_true", help="download and write the files")
+    artifacts.add_argument(
+        "--output", metavar="DIR", help="directory to write into (required with --fetch)"
+    )
+    artifacts.add_argument("--force", action="store_true", help="overwrite existing files")
+    artifacts.add_argument(
+        "--resume", action="store_true", help="continue an interrupted fetch from its journal"
+    )
+    artifacts.add_argument(
+        "--dry-run", action="store_true", help="show what would be written and write nothing"
+    )
+    client_opts(artifacts)
+    artifacts.set_defaults(func=cmd_artifacts)
 
     wait = sub.add_parser("wait", help="wait for a job and exit with 0/1/2/3")
     wait.add_argument("--job", type=int, required=True)

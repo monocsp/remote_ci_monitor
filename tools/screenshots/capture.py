@@ -501,12 +501,18 @@ def round1() -> None:
         )
         sh.shot("log")
         sh.js("document.querySelector('[data-drawer-close]').click()")
+        # 호스트 절은 평소 접혀 있다(M5d-2 §4.1) — 문서 사진은 펼친 모습을 찍는다
+        sh.js("var d=document.querySelector('#host-details'); if (d) d.open = true")
         sh.js("document.querySelector('#host').scrollIntoView({block:'start'})")
-        time.sleep(0.3)
+        time.sleep(0.4)
         sh.shot("host")
         sh.chrome.call(
             "Emulation.setDeviceMetricsOverride",
-            {"width": 500, "height": 900, "deviceScaleFactor": 1, "mobile": True},
+            # 390 은 iPhone 세로 폭이다. 창 크기로는 못 낸다 — macOS 크롬 창은 500px 밑으로 안
+            # 줄어들어서, 이걸 안 쓰면 「폰 사진」이 실은 500px 짜리다(명세 §4.7).
+            # 높이는 900 이면 다섯 번째 주석(버튼 줄)이 화면 밖으로 나간다 — 폭이 레이아웃을
+            # 정하고 높이는 사진에 담기는 양만 정하므로, 높이만 조금 늘린다.
+            {"width": 390, "height": 1000, "deviceScaleFactor": 1, "mobile": True},
         )
         sh.js("window.scrollTo(0,0)")
         time.sleep(0.6)

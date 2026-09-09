@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
+from remote_ci_monitor.core.artifacts import GONE_STATES
 from remote_ci_monitor.core.model import SUCCEEDED, TERMINAL_STATES, Job
 
 DAY_SECONDS = 86_400.0
@@ -97,3 +98,28 @@ def due_for_purge(jobs: Iterable[Job], now: datetime, policy: RetentionPolicy) -
             due.append((ended, job.id, job))
     due.sort(key=lambda t: (t[0], t[1]))
     return [job for _, _, job in due]
+
+
+@dataclass(frozen=True)
+class BundleInfo:
+    """잡 산출물 묶음 하나(M5e). `bytes` 는 디스크가 실제로 쥔 **아카이브** 바이트다."""
+
+    job_id: int
+    state: str
+    expires_at: datetime | None
+    bytes: int = 0
+
+
+def bundles_to_expire(bundles: Iterable[BundleInfo], now: datetime) -> list[BundleInfo]:
+    """TTL 이 지난 묶음. 만료 시각이 **없는 행은 절대 대상이 아니다**(명세 §8).
+
+    번들은 자기 시계로만 지운다 — `retention_days_*` 는 0 이 될 수 있어서(`config.py`) M3 청소에
+    얹으면 합류된 잡이 몇 분 만에 산출물을 잃는다. 이미 사라진 것(`purged`·`expired`)은 다시
+    가져가지 않는다. 경계는 `<=`, 출력은 `job_id` 오름차순.
+    """
+    due = [
+        b
+        for b in bundles
+        if b.state not in GONE_STATES and b.expires_at is not None and b.expires_at <= now
+    ]
+    return sorted(due, key=lambda b: b.job_id)

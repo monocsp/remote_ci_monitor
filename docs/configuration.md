@@ -31,6 +31,7 @@ pools = []                              # extra pools a session may choose with 
 timeout_seconds = 1200
 expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
+artifacts = ["test/**/goldens/*.png"]   # files the job produces that sessions may fetch back
 [[presets.inputs]]
 name = "scope"
 type = "choice"
@@ -84,6 +85,58 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
   path. Extra env for the script: `RCM_REF`; `RCM_BASE_SHA` is the pinned commit, `RCM_DIRTY=0`.
 - A preset with `source_modes = ["git_ref"]` rejects tree uploads (400), and `--ref` on a tree
   preset is a usage error.
+
+## Getting files back out of a job
+
+A job that regenerates files — Flutter goldens are the reason this exists — leaves them in the
+workspace on the build machine, and the workspace is deleted when the job ends. A preset that
+declares `artifacts` gets those files collected **before** the workspace goes, and the session
+that submitted the job can write them back into its own tree.
+
+```toml
+[[presets]]
+name = "goldens"
+argv = ["flutter", "test", "--update-goldens"]
+artifacts = ["test/**/goldens/*.png", "test/failures/*.png"]
+```
+
+```sh
+rcm run goldens --fetch-artifacts          # writes the PNGs back into your tree
+rcm run goldens --fetch-artifacts --dry-run  # show what would be written, write nothing
+rcm artifacts 412 --fetch --output ./out   # fetch later, into a directory you name
+```
+
+The result line separates what was compared from what was written:
+`artifacts: wrote 12, unchanged 51, conflicted 1`.
+
+**What is collected.** Only paths matching the globs, and only regular files inside the workspace.
+Symlinks, hard links, device files and anything named `.git` are skipped and counted. A glob that
+would match the whole workspace (`**`, `*`, `**/*`) is a config error — declare what you want back.
+This is a guard against collecting the wrong thing, not a security boundary: the job runs as the
+worker user and could copy anything it can read into a path the globs allow.
+
+**What is written back.** Files you did not touch are overwritten; files you edited (or deleted)
+while waiting are left alone and reported as `conflicted` — `--force` overwrites those too, except
+one that changed between the preview and the write. Nothing outside the tree is ever written, and a
+local file that is not in the bundle is never deleted.
+
+**When it disappears.** Once your session has written every file, it acknowledges the bundle. If
+nobody else joined that job, the server deletes it immediately; if anyone joined, it stays until
+the TTL so they can fetch it too. Either way it is gone after `artifact_retention_hours` (24).
+
+| key | default | meaning |
+|---|---|---|
+| `artifact_retention_hours` | `24` | how long a bundle lives, measured from when it is ready. Reading it does not extend it |
+| `max_artifact_bytes` | `1073741824` | per job, the size of the collected files |
+| `max_artifact_files` | `10000` | per job, how many files |
+| `artifact_storage_max_bytes` | `10737418240` | for the whole server. When it is full, new bundles are dropped — existing ones are never evicted |
+| `artifact_timeout_seconds` | `60` | how long collecting may take |
+| `artifact_cancel_timeout_seconds` | `5` | the shorter budget after a cancel or timeout. Must be under `2 × worker_heartbeat_seconds` |
+| `artifact_transfer_timeout_seconds` | `300` | one upload or download |
+| `max_concurrent_artifact_transfers` | `2` | transfers at once. Over that, the server answers 503 immediately rather than making you wait |
+
+Over a limit, **the job still succeeds or fails on its own merits** — only the artifacts are
+dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, `storage_full`).
 
 ## Priority, snapshot cache and notifications
 

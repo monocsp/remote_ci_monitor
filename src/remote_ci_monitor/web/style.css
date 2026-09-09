@@ -4,10 +4,14 @@
 
 :root {
   --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
-  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1E8A4C; --ok-soft: #E1F3E8; --warn: #B26A00; --warn-soft: #FBEFD9;
-  --bad: #C23B32; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #6B7A8B; --queued-soft: #ECF0F4;
+  /* 밝은 판의 상태 색은 자기 -soft 배경 위에서 4.5:1 을 넘긴다(WCAG 1.4.3, 필 글자는 12px 600
+     이라 「큰 글자」가 아니다). 재 보니 succeeded 3.79 · failed 4.32 · queued 3.83 · cancelling
+     3.72 로 넷이 모자랐다 — 색상은 그대로 두고 밝기만 낮췄다. 어두운 판은 원래 다 넘겼다. */
+  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1B7C44; --ok-soft: #E1F3E8; --warn: #9E5E00; --warn-soft: #FBEFD9;
+  --bad: #BC3930; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #606E7D; --queued-soft: #ECF0F4;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* mono 에도 한글 대체를 둔다 — 없으면 고정폭 칸의 한글이 제멋대로 떨어진다(§4.3) */
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", "Apple SD Gothic Neo", monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -50,44 +54,62 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .wk.down i { background: var(--bad); border-radius: 1px; }
 .wk.paused { border-color: var(--warn); color: var(--warn); }
 .wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
-.livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--mono); background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
 .livebtn .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
 .livebtn.polling .live { background: var(--warn); box-shadow: none; }
 .livebtn.paused .live, .livebtn.lost .live { background: var(--queued); box-shadow: none; }
-.tokbtn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--surface); font: 12px var(--mono); color: var(--ink); cursor: pointer; }
+.tokbtn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--surface); font: 12px var(--sans); color: var(--ink); cursor: pointer; }
 .tokbtn.bad { border-color: var(--bad); color: var(--bad); }
-.errchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 11.5px var(--mono); cursor: pointer; border: 0; }
-.skew { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 11px var(--mono); }
+.errchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 12px var(--sans); cursor: pointer; border: 0; }
+.skew { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); font-variant-numeric: tabular-nums; }
 
 /* ── 요약 ── */
 .summary { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-top: 0; background: var(--surface-2); }
-.sum { display: grid; gap: 3px; font-size: 13px; align-content: start; }
-.sum .lab { font: 500 11px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-.sum .v { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
-.sum .v b { font-weight: 500; }
+.sum { display: grid; gap: 3px; align-content: start; }
+.sum .lab { font: 600 12px var(--sans); color: var(--muted); word-break: keep-all; }
+.sum .v { font-family: var(--sans); font-size: 14px; line-height: 1.55; font-variant-numeric: tabular-nums; word-break: keep-all; }
+/* 「내 잡 끝났나」가 이 화면이 가장 자주 받는 질문이다(§1) — 그 답이 페이지에서 가장 큰 글자다.
+   나머지 두 칸은 본문 크기로 둬서 크기 차이가 곧 우선순위가 되게 한다(§4.3 의 14 / 20 단계). */
+.sum-yours .v { font-size: 20px; line-height: 1.4; }
+.sum .v b { font-weight: 600; }
 .sum .v .ok { color: var(--ok); }
 .sum .v .warn { color: var(--warn); }
 .sum .v .bad { color: var(--bad); }
-.sum .v .muted { color: var(--muted); }
-.sum .v button.jlink { font: inherit; font-weight: 500; color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+.sum .v .muted { color: var(--muted); font-size: 14px; }
+.sum .v button.jlink { font-family: var(--mono); font-size: 0.9em; font-weight: 600; color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
 
 /* ── 섹션 ── */
 .s-section { padding: 12px 14px 14px; border: 1px solid var(--line); border-top: 0; background: var(--surface); }
 .s-section.last { border-radius: 0 0 10px 10px; }
 .s-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
-.s-h .t { font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; font-size: 12px; color: var(--muted); }
-.s-h .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.s-h .n b { color: var(--ink); font-weight: 500; }
+.s-h .t { font: 600 14px var(--sans); color: var(--ink); }
+.s-h .n { font-family: var(--sans); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; word-break: keep-all; }
+.s-h .n b { color: var(--ink); font-weight: 600; }
 .empty { padding: 18px 12px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }
 .empty code { color: var(--ink); }
-.foot { display: flex; gap: 12px; padding: 10px 4px; font-family: var(--mono); }
+.foot { display: flex; gap: 12px; padding: 10px 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.foot a { font-family: var(--mono); }
 
 /* ── 큐 표 ── */
 .qwrap { overflow-x: auto; }
 table.q { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-table.q th { text-align: left; font-weight: 500; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.q th { text-align: left; font: 600 12px var(--sans); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 table.q th .tzh { text-transform: none; letter-spacing: 0; color: var(--muted); font-family: var(--mono); }
-table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; line-height: 1.3; }
+/* 칸 폭을 못 박아 「이유」가 남는 폭을 가져가게 한다 — 자동 배분이면 이유 칸에 구멍이 생기고
+   소스 칸이 표를 옆으로 늘린다(§4.3 「고정 px 그리드를 다시 잰다」). 한국어 라벨 기준.
+   **표가 표일 때만** 적용한다 — 720px 아래에서는 칸이 블록이라 `max-width: 0` 이 칸을 지운다. */
+@media (min-width: 721px) {
+  table.q th:nth-child(1) { width: 152px; }
+  table.q th:nth-child(2) { width: 16%; }
+  table.q th:nth-child(3) { width: 128px; }
+  table.q th:nth-child(5) { width: 96px; }
+  table.q th:nth-child(6) { width: 152px; }
+  table.q th:nth-child(7) { width: 124px; }
+  /* 식별자 칸은 넘치면 말줄임 — `word-break: keep-all` 은 여기에 안 쓴다(효과가 없다) */
+  table.q td.key, table.q td.requester, table.q td.source { max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  table.q td.key .key, table.q td.requester > span { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+}
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }
 table.q td.job .id { font-weight: 500; }
@@ -104,11 +126,12 @@ table.q tr.qgroup.waiting th { color: var(--muted); font-weight: 500; }
 table.q tr.qgroup:not(:first-child) th { border-top: 1px solid var(--line); }
 table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8px; }
 /* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
-.step-now { font-family: var(--mono); color: var(--ink); opacity: 0.8; }
-.pos { display: block; font: 11.5px var(--mono); color: var(--muted); margin-top: 2px; }
-.you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 500 10.5px var(--mono); vertical-align: 1px; }
-.joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 500 10.5px var(--mono); vertical-align: 1px; background: none; cursor: default; }
-.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font: 500 11.5px var(--mono); white-space: nowrap; }
+.step-now { font-family: var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); opacity: 0.85; }
+.pos { display: block; font: 12px var(--sans); color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 600 12px var(--sans); vertical-align: 1px; }
+.joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 600 12px var(--sans); vertical-align: 1px; background: none; cursor: default; }
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font: 600 12px var(--sans); white-space: nowrap; }
+.pill .g { display: inline-block; }
 .pill.running { background: var(--accent-soft); color: var(--accent); }
 .pill.queued { background: var(--queued-soft); color: var(--queued); }
 .pill.uploading { background: var(--surface); color: var(--queued); border: 1px dashed var(--queued); }
@@ -123,30 +146,30 @@ table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8p
 .key { font-family: var(--mono); font-weight: 500; }
 .chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font: 11.5px var(--mono); color: var(--muted); margin-left: 4px; background: none; cursor: pointer; }
 .sha { font-family: var(--mono); background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; }
-.uncommitted { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--warn); color: var(--warn); font: 500 11px var(--mono); }
+.uncommitted { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--warn); color: var(--warn); font: 600 12px var(--sans); }
 .uncommitted::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--warn); }
-.eta { font-family: var(--mono); white-space: nowrap; }
+.eta { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .eta .in { color: var(--muted); }
-.conf { display: inline-block; margin-top: 2px; padding: 0 6px; border-radius: 4px; font: 500 10.5px var(--mono); white-space: nowrap; }
+.conf { display: inline-block; margin-top: 2px; padding: 0 6px; border-radius: 4px; font: 600 12px var(--sans); white-space: nowrap; }
 .conf.high { background: var(--ok-soft); color: var(--ok); }
 .conf.med { background: var(--queued-soft); color: var(--queued); }
 .conf.low { background: var(--surface); color: var(--muted); border: 1px dashed var(--line); font-style: italic; }
 .conf.over { background: var(--warn-soft); color: var(--warn); }
-.reason { font-family: var(--mono); font-size: 12px; color: var(--muted); line-height: 1.5; }
+.reason { font-size: 12.5px; color: var(--muted); line-height: 1.5; font-variant-numeric: tabular-nums; word-break: keep-all; }
 .reason.act { color: var(--ink); }
-.reason b { font-weight: 500; }
-.reason button.jlink { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
-.blocked { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; border: 1.5px dashed var(--warn); color: var(--warn); font: 500 11.5px var(--mono); }
+.reason b { font-weight: 600; }
+.reason button.jlink { font: 600 12.5px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+.blocked { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; border: 1.5px dashed var(--warn); color: var(--warn); font: 600 12px var(--sans); }
 .over { color: var(--warn); font-weight: 500; }
-.stalled { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 500 11.5px var(--mono); }
-.stuck { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 11.5px var(--mono); }
+.stalled { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 600 12px var(--sans); }
+.stuck { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 600 12px var(--sans); }
 .exp-btn { font: 12px var(--mono); background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); padding: 0 5px; cursor: pointer; margin-right: 4px; }
-td.elapsed { font-family: var(--mono); white-space: nowrap; }
+td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* 펼침 블록 (항목 12 · 13) */
 .prog { padding: 4px 8px 12px 46px; }
-.prog .head { display: flex; gap: 14px; align-items: baseline; font-family: var(--mono); font-size: 12.5px; margin-bottom: 6px; flex-wrap: wrap; }
-.prog .head b { font-weight: 500; }
+.prog .head { display: flex; gap: 14px; align-items: baseline; font-size: 12.5px; margin-bottom: 6px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.prog .head b { font-weight: 600; }
 .prog .note { color: var(--muted); }
 .prog .head .fail { color: var(--bad); }
 .minibar { display: flex; gap: 2px; height: 4px; max-width: 520px; margin: 0 0 8px; }
@@ -169,9 +192,21 @@ td.elapsed { font-family: var(--mono); white-space: nowrap; }
 .btn.danger { color: var(--bad); }
 .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
-.more { display: inline-block; margin-top: 8px; font: 12px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+.more { display: inline-block; margin-top: 8px; font: 500 12px var(--sans); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
 
 /* ── 호스트 (항목 16 · 19) ── */
+/* 평소엔 접어 둔다 — 「내 잡 · 왜 안 도나 · 언제 내 차례냐」 어디에도 1순위가 아니다(§4.1).
+   경고(바쁨·낡은 표본)일 때 저절로 펼치고, 사람이 여닫으면 그 선택이 이긴다. */
+#host-details > summary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  cursor: pointer; list-style: none; margin-bottom: 0; }
+#host-details[open] > summary { margin-bottom: 8px; }
+#host-details > summary::-webkit-details-marker { display: none; }
+#host-details > summary::before { content: "\25B8"; color: var(--muted); font-size: 11px; }
+#host-details[open] > summary::before { content: "\25BE"; }
+#host-details > summary .t { font: 600 14px var(--sans); color: var(--ink); }
+#host-details > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
+#host-details > summary .n.warn { color: var(--warn); font-weight: 600; }
+#host-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 12px 22px; align-items: start; }
 .hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
 .hostcard.dim .meter { opacity: 0.55; }
@@ -179,9 +214,9 @@ td.elapsed { font-family: var(--mono); white-space: nowrap; }
 /* 미터가 넷이면(디스크가 있으면) 이름 칸이 두 줄을 차지한다 — 그래야 네 번째 미터가 이름 밑
    좁은 칸으로 떨어지지 않고 제 폭을 갖는다. 메모리 라벨이 4열에는 안 들어가서 3열을 지킨다. */
 .hostcard.m4 .hn { grid-row: 1 / span 2; }
-.hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }
+.hostcard .hn .age { color: var(--muted); font: 12px var(--sans); display: block; font-variant-numeric: tabular-nums; }
 .meter { display: grid; gap: 4px; }
-.meter .lab { display: flex; justify-content: space-between; font: 12px var(--mono); }
+.meter .lab { display: flex; justify-content: space-between; font: 12px var(--sans); font-variant-numeric: tabular-nums; }
 .meter .lab span:last-child { color: var(--muted); }
 .meter .bar { height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; display: flex; }
 .meter .bar i { display: block; height: 100%; background: var(--accent); }
@@ -189,24 +224,29 @@ td.elapsed { font-family: var(--mono); white-space: nowrap; }
 .meter.warn .bar i { background: var(--warn); }
 .meter.stale .bar i { background: var(--queued); }
 .meter meter { width: 0; height: 0; opacity: 0; position: absolute; }
-.meter .spark { display: flex; align-items: center; gap: 8px; font: 11px var(--mono); color: var(--muted); }
+.meter .spark { display: flex; align-items: center; gap: 8px; font: 12px var(--sans); color: var(--muted); }
 .meter .spark svg { width: 90px; height: 18px; }
 .meter .spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.2; }
 .meter .spark .gap { stroke-dasharray: 2 2; opacity: 0.5; }
 .top { grid-column: 1 / -1; font: 12px var(--mono); color: var(--muted); }
 .top b { color: var(--ink); font-weight: 500; }
-.stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 500 11.5px var(--mono); }
+.stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 600 12px var(--sans); }
 
 /* ── 최근 완료 (항목 14 · 15) ── */
 .recent { display: grid; gap: 0; }
-.rrow { display: grid; grid-template-columns: 150px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow { display: grid; grid-template-columns: 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+/* 필은 글자만큼만 — 격자 칸을 채우면 결과 색이 행의 배경처럼 번진다 */
+.rrow > .pill { justify-self: start; }
 .rrow.hl { background: var(--accent-soft); }
 .rrow .k { font-family: var(--mono); font-weight: 500; }
-.rrow .d, .rrow .t { font-family: var(--mono); color: var(--muted); }
-.rrow .s { color: var(--muted); }
-.rrow .s b { color: var(--ink); font-weight: 500; }
+.rrow .d, .rrow .t { color: var(--muted); }
+.rrow .s { color: var(--muted); word-break: keep-all; }
+.rrow .s b { color: var(--ink); font-weight: 600; }
 .rrow.clickable { cursor: pointer; }
 .rdetail { grid-column: 1 / -1; padding: 4px 0 8px 12px; font: 12px var(--mono); color: var(--muted); }
+/* 산출물 줄(M5e) — 결과 **옆이 아니라 아래**다. 결과를 가리지 않되 같은 행에 속해 보이게 들여쓴다 */
+.rrow .art { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 0 0 12px; font: 12px var(--mono); color: var(--muted); }
+.rrow .art.dropped, .rrow .art.failed, .rrow .art.unavailable { color: var(--bad); }
 .rerun { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font: 11px var(--mono); color: var(--ink); cursor: pointer; }
 details.est { margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
 details.est summary { cursor: pointer; }
@@ -244,6 +284,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   .summary { grid-template-columns: 1fr; }
   .s-top .sub, .workers .wk .lane-word { display: none; }
   table.q thead { display: none; }
+  table.q tr.qgroup, table.q tr.qgroup th, table.q tr.qgroup-empty td { display: block; width: auto; }
   table.q, table.q tbody, table.q tr, table.q td { display: block; }
   table.q tr { border-bottom: 1px solid var(--line-2); padding: 6px 0; }
   table.q tr.exp { border-bottom: 0; }
@@ -258,15 +299,20 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   .rrow .k, .rrow .s { grid-column: span 2; }
   #drawer { width: 100%; }
 }
+/* 움직임도 상태 채널이다(§4.2) — **끝나지 않은** 상태만 움직인다. 끝난 잡은 가만히 있어서,
+   화면 구석으로 흘긋 봐도 「아직 도는 중」과 「끝났다」가 갈린다.
+   전부 `prefers-reduced-motion: no-preference` 뒤에 둔다 — 움직임을 끈 사람에게는 하나도 안 돈다.
+   대비는 색이 아니라 투명도로만 흔든다(1.4.11 의 3:1 을 깨지 않는다). */
 @media (prefers-reduced-motion: no-preference) {
   .banner, .toast { transition: opacity 120ms ease; }
+  @keyframes rcm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .pill.running .g,
+  .pill.cancelling .g,
+  .pill.uploading .g { animation: rcm-pulse 1.4s ease-in-out infinite; }
+  .pill.queued .g { animation: rcm-pulse 3s ease-in-out infinite; }   /* 대기는 느리게 */
+  .step.run .g { animation: rcm-pulse 1.4s ease-in-out infinite; }
+  .wk.busy i { animation: rcm-pulse 1.4s ease-in-out infinite; }
 }
 
 /* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
-.pool-h { margin: 14px 0 6px; font: 500 12px var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-/* 한국어에서는 대문자 변환이 위계를 주지 못하고, 섞인 로마자만 망가뜨린다(「5s 전」 → 「5S 전」).
-   명세 §4.3. 위계는 굵기·색이 이미 주고 있어서 여기서는 변환만 끈다. */
-html[lang="ko"] .sum .lab,
-html[lang="ko"] .s-h .t,
-html[lang="ko"] table.q th,
-html[lang="ko"] .pool-h { text-transform: none; letter-spacing: 0; }
+.pool-h { margin: 14px 0 6px; font: 600 12px var(--sans); color: var(--muted); }
