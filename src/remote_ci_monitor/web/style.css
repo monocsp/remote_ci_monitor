@@ -244,6 +244,9 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rrow .s b { color: var(--ink); font-weight: 600; }
 .rrow.clickable { cursor: pointer; }
 .rdetail { grid-column: 1 / -1; padding: 4px 0 8px 12px; font: 12px var(--mono); color: var(--muted); }
+/* 산출물 줄(M5e) — 결과 **옆이 아니라 아래**다. 결과를 가리지 않되 같은 행에 속해 보이게 들여쓴다 */
+.rrow .art { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 0 0 12px; font: 12px var(--mono); color: var(--muted); }
+.rrow .art.dropped, .rrow .art.failed, .rrow .art.unavailable { color: var(--bad); }
 .rerun { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font: 11px var(--mono); color: var(--ink); cursor: pointer; }
 details.est { margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
 details.est summary { cursor: pointer; }

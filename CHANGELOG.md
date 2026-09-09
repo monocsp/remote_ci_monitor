@@ -8,6 +8,31 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **A job can send its files back** (M5e). A preset that declares `artifacts = ["test/**/goldens/*.png"]`
+  has those files collected before its workspace is deleted, and `rcm run goldens --fetch-artifacts`
+  writes them into the same paths in the tree you submitted — the reason this exists is
+  `flutter test --update-goldens`, whose PNGs previously had no way home. A file you edited while
+  waiting is never overwritten: it is counted `conflicted` and left alone unless you pass `--force`.
+  The result line separates what was compared from what was written (`wrote 12, unchanged 51,
+  conflicted 1`). `rcm artifacts N` shows what is there and `rcm artifacts N --fetch --output DIR`
+  fetches it later. Failed jobs deliver their files too — a golden diff is worth more than a passing
+  one. ([#56](https://github.com/monocsp/remote_ci_monitor/pull/56) · [#57](https://github.com/monocsp/remote_ci_monitor/pull/57) · [#58](https://github.com/monocsp/remote_ci_monitor/pull/58))
+- **Artifacts disappear when they are no longer needed** (M5e). Once your session has written every
+  file it acknowledges the bundle; if nobody joined that job the server deletes it immediately, and
+  otherwise it stays until `artifact_retention_hours` (24) so the others can fetch it too. That
+  clock is the bundle's own: `retention_days_success = 0` still leaves it a full day. Deletion is
+  reported only after the files are actually gone, and a download already in flight finishes even
+  if the bundle expires mid-transfer. New keys: `artifact_retention_hours`, `max_artifact_bytes`,
+  `max_artifact_files`, `artifact_storage_max_bytes`, `artifact_timeout_seconds`,
+  `artifact_cancel_timeout_seconds`, `artifact_transfer_timeout_seconds`,
+  `max_concurrent_artifact_transfers`. Over any limit the job still succeeds or fails on its own
+  merits and only the artifacts are dropped, with the reason on the job.
+  ([#56](https://github.com/monocsp/remote_ci_monitor/pull/56) · [#57](https://github.com/monocsp/remote_ci_monitor/pull/57))
+- **The queue page and `rcm top` show the artifacts** (M5e). A finished job's row carries one line —
+  state, file count, size, how long it has left — plus the command that fetches it, copyable. An
+  unknown count prints `—`; `0` appears only when the collection really found nothing. File names
+  never reach the public status document, so they are not on that line either.
+  ([#57](https://github.com/monocsp/remote_ci_monitor/pull/57) · [#60](https://github.com/monocsp/remote_ci_monitor/pull/60))
 - **Motion says what is still moving** (M5d-3). A running, queued, uploading or cancelling job now
   pulses; a finished one is still. That is a second channel beside colour, so a glance at the
   corner of the screen separates "still going" from "done" — and every animation sits behind

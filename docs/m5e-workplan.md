@@ -791,3 +791,37 @@ CLI 는 §12 표가 계약이다. `rcm run … --fetch-artifacts [--force] [--dr
 `rcm artifacts JOB_ID [--fetch --output DIR] [--resume]`. 전달 실패 종료 코드는 **5**
 (`wait_exit_code` 는 그대로 두고 JSON 에 `artifact_fetch` 를 더한다).
 
+## 19. 완료 기준 대조 (2026-09-09)
+
+§16 의 아홉 줄을 실제로 대조했다. 「했다」가 아니라 **무엇이 그것을 잠그는가**를 적는다 — 시험
+이름이 없는 줄은 완료가 아니다.
+
+| # | 완료 기준 | 결과 | 잠그는 것 |
+|---|---|---|---|
+| 1 | 낸 세션이 자기 트리의 같은 경로에 받고, 몇 개를 **썼는지** 화면에 나온다 | ✅ | `test_cli_m5e::test_fetch_artifacts_writes_the_goldens_back_into_the_submitted_tree` · `…::test_the_result_line_says_how_many_were_written_not_just_compared` |
+| 2 | 확인 전에는 사라지지 않는다. 받다가 끊으면 남아 다시 받을 수 있다 | ✅ | `test_cli_m5e::test_an_incomplete_apply_never_acks` · `test_apply::test_a_resumed_apply_finishes_the_rest` · `test_server_m5e::test_archive_is_410_after_purge_expiry_or_past_the_expiry_moment` |
+| 3 | 아무도 안 붙은 잡은 확인 뒤 즉시 사라지고, 합류가 있었으면 TTL 까지 둘 다 받는다 | ✅ | `test_server_m5e::test_ack_of_an_unjoined_job_purges_the_bundle_immediately` · `…::test_ack_of_a_joined_job_keeps_the_bundle_until_the_ttl` · `test_store_m5e` 의 `join_count` 다섯 줄 |
+| 4 | 아무도 안 받으면 TTL 이 지나 청소기가 지운다. `retention_days_* = 0` 이어도 그렇다 | ✅ | `test_janitor_m5e::test_the_expiry_sweep_deletes_at_the_expiry_moment_and_marks_expired` · `…::test_retention_days_success_zero_does_not_destroy_a_bundle_before_its_ttl` |
+| 5 | 글롭 밖 · 워크스페이스 밖 · 링크는 애초에 안 모인다 | ✅ | `test_collect::test_a_symlinked_directory_is_not_followed` · `…::test_symlinks_hardlinks_and_fifos_are_skipped_and_counted` · `open_anchored` 9줄 · `test_apply::test_an_unsafe_plan_writes_nothing_at_all_not_even_the_safe_entries` |
+| 6 | 상한을 넘으면 잡은 그대로 성공/실패하고 산출물만 버려진 사실이 남는다 | ✅ | `test_collect::test_over_max_bytes_is_dropped_with_over_bytes` · `test_worker_m5e::test_a_collection_budget_overrun_drops_the_bundle_but_not_the_job` · `test_store_m5e::test_finish_records_a_dropped_bundle_next_to_a_successful_job` |
+| 7 | 원격 워커 풀에서도 똑같다. 옛 워커는 `unknown` 이지 조용히 비지 않는다 | ✅ | `test_worker_m5e::test_the_remote_worker_uploads_before_finishing` · `…::test_a_finish_without_an_artifacts_field_reads_back_as_unknown` · `test_server_m5e::test_an_old_worker_that_reports_no_artifacts_field_is_unknown_not_empty` |
+| 8 | 실패한 잡의 diff 이미지도 돌아온다 | ✅ | `test_worker_m5e::test_a_failed_job_is_collected_too` · `test_cli_m5e::test_failed_jobs_still_deliver_their_diff_images` |
+| 9 | 기존 시험 전부 초록 · 스키마 v1 그대로 · 런타임 의존성 0 그대로 | ✅ | 2406 passed · `test_compat_m5e::test_the_artifacts_object_has_exactly_the_documented_keys`(v1 키 추가만) · `test_packaging`(`dependencies == []`) |
+
+**§17 에서 「안 만든다」고 한 것은 전부 안 만들었다.** 산출물 캐시·중복 제거, 잡당 여러 버전,
+range 다운로드, `lost` 잡에 늦게 올리기, 서버측 이미지 비교, 브라우저에서 트리 복원, 매니페스트에
+없는 로컬 파일 삭제.
+
+### 명세가 틀렸던 곳 (구현하며 고친 것)
+
+| 자리 | 초고 | 고친 뒤 |
+|---|---|---|
+| §11 2행 | 기준선 없는 파일은 **내용과 무관하게** `conflicted` | 바이트가 같으면 `unchanged`. 아니면 gitignore 되는 실패 diff 때문에 ack 가 영영 안 나가고 결정 40 이 죽는다 |
+| §8 아카이브 허용치 | `max_bytes + files×512 + 1024` | `+ files×1024 + 10240`. `tarfile` 이 닫을 때 레코드까지 채워서 원본 3584바이트 묶음의 실제 파일이 10240바이트다 — 옛 식이면 정상 묶음이 413 으로 거절된다 |
+| §4 앵커 | `^…$` | `re.fullmatch`. 파이썬의 `$` 는 끝의 개행 앞에서도 맞아 `goldens/evil.png\n` 이 통과한다 |
+| §4 여는 방법 | `O_NOFOLLOW` | `O_NOFOLLOW\|O_NONBLOCK`. 없으면 FIFO 하나에 워커가 선다 |
+| §5 워커 보고 | `finish` 에 해시 하나 | 구조화된 처분. 해시만으로는 빈 수집·시한 초과·건너뛴 수를 말할 수 없다 |
+| §6 ack 검사 순서 | 만료 → 자격 → 해시 | 만료 → **해시** → 상태 → 자격. 남의 잡을 확인하려는 관리자에게도 해시가 틀렸다는 사실을 먼저 알려야 한다 |
+| §10 `empty` 의 수 | 미정 | `0`. 「모았는데 없었다」는 아는 사실이라 `null` 이 아니다 |
+| — | 매니페스트를 `finish` 본문으로 | 서버가 올라온 tar 에서 본 것으로. 파일 만 개 목록은 JSON 본문 상한(64KB)을 넘는다 |
+| — | 업로드한 스풀을 바로 삭제 | 남긴다. 전송 결과가 불확실하면 다시 보내야 한다. 시작할 때 나이로 쓸어 간다 |
