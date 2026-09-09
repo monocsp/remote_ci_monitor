@@ -217,7 +217,7 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "summary_code": job.summary_code,
         "summary_args": dict(job.summary_args) if job.summary_args else None,
         "failed_step": job.failed_step,
-        # v10 마이그레이션 전에 끝난 잡은 `null` — 「추측이었는지 모른다」이지 「확정」이 아니다.
+        # v11 마이그레이션 전에 끝난 잡은 `null` — 「추측이었는지 모른다」이지 「확정」이 아니다.
         "failed_step_guessed": job.failed_step_guessed,
         "cancelled_by": job.cancelled_by,
         "timeout_seconds": job.timeout_seconds,

@@ -213,7 +213,7 @@ def test_migration_v4_to_v5_fills_kind_from_admin_and_adds_worker_name_and_worke
         c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         c.execute("DROP TABLE IF EXISTS job_artifacts")
         c.execute("ALTER TABLE jobs DROP COLUMN join_count")
-        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v10
+        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         c.execute("PRAGMA user_version=4")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 4

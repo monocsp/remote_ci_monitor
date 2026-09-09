@@ -1,4 +1,4 @@
-"""추측한 실패 스텝은 추측이라고 말한다 — 스키마 v10 · finish 왕복 · 상태 문서 · 알림 env.
+"""추측한 실패 스텝은 추측이라고 말한다 — 스키마 v11 · finish 왕복 · 상태 문서 · 알림 env.
 
 2026-09-08~09 운영(게이트 145잡) 추적에서 나왔다. 실패 55건 중 16건의 `failed_step` 이
 `build web` 이었는데 그 스텝은 로그에서 `ok: build/web` 으로 **성공**했다. 게이트가 스텝을
@@ -184,11 +184,11 @@ def _job() -> Job:
     )
 
 
-# ── 스키마 v10 · 왕복 ──────────────────────────────────────────────────────────
+# ── 스키마 v11 · 왕복 ──────────────────────────────────────────────────────────
 
 
-def test_fresh_db_is_schema_v10_with_the_guess_column(store, tmp_path):
-    assert store.user_version() == DB_VERSION and DB_VERSION >= 10
+def test_fresh_db_is_schema_v11_with_the_guess_column(store, tmp_path):
+    assert store.user_version() == DB_VERSION and DB_VERSION >= 11
     assert "failed_step_guessed" in job_columns(tmp_path / "rcm.sqlite3")
 
 
@@ -242,7 +242,7 @@ def test_recent_rows_keep_each_job_s_own_answer(store):
     }
 
 
-def test_migration_v9_to_v10_leaves_old_rows_saying_unknown(tmp_path):
+def test_migration_v10_to_v11_leaves_old_rows_saying_unknown(tmp_path):
     """옛 행은 「추측이었는지 모른다」다 — 0 으로 채워 확정이라고 우기지 않는다."""
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
@@ -251,16 +251,16 @@ def test_migration_v9_to_v10_leaves_old_rows_saying_unknown(tmp_path):
     s.finish(done.id, FAILED, now=at(2), exit_code=1, failed_step="build web")
     live = enqueue(s, tree="q", now=at(3))
     s.close()
-    # v9 데이터베이스를 흉내 낸다: 새 열을 떼고 user_version 을 9 로 되돌린다
+    # v10 데이터베이스를 흉내 낸다: 새 열을 떼고 user_version 을 10 으로 되돌린다
     c = sqlite3.connect(path)
     try:
         c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")
-        c.execute("PRAGMA user_version=9")
+        c.execute("PRAGMA user_version=10")
         c.commit()
     finally:
         c.close()
     assert "failed_step_guessed" not in job_columns(path)
-    s2 = Store(path)  # 9 → 10 마이그레이션이 여기서 돈다
+    s2 = Store(path)  # 10 → 11 마이그레이션이 여기서 돈다
     try:
         assert s2.user_version() == DB_VERSION and s2.healthy()
         assert "failed_step_guessed" in job_columns(path)
@@ -384,10 +384,10 @@ def test_terminal_recent_line_says_when_the_step_is_a_guess(store):
 
 
 def test_adding_a_column_that_is_already_there_is_not_fatal(tmp_path):
-    """이 열은 처음에 v9 였다가 `dev` 가 v9 를 먼저 가져가서 v10 으로 밀렸다.
+    """이 열은 v9 로 시작해 v10 으로, 다시 v11 로 밀렸다 — `dev` 가 그 번호를 먼저 가져갔다.
 
     그 사이 옛 빌드로 한 번이라도 연 데이터베이스는 `user_version = 9` 인데 **열은 이미 있다**.
-    그대로 두면 v10 의 `ADD COLUMN` 이 「duplicate column name」으로 죽고, 버전이 안 올라가니
+    그대로 두면 새 번호의 `ADD COLUMN` 이 「duplicate column name」으로 죽고, 버전이 안 올라가니
     **다음에도 똑같이 죽는다** — 서버가 영영 안 뜬다. 열을 더하는 마이그레이션은 이미 있으면
     건너뛴다(더하려는 것이 이미 있으니 할 일이 없다).
     """
@@ -399,10 +399,10 @@ def test_adding_a_column_that_is_already_there_is_not_fatal(tmp_path):
         j.id, FAILED, now=at(2), exit_code=1, failed_step="build web", failed_step_guessed=True
     )
     s.close()
-    # 리베이스 전 빌드가 남긴 모양: 열은 있는데 버전은 9
+    # 리베이스 전 빌드가 남긴 모양: 열은 있는데 버전은 한 칸 낮다
     c = sqlite3.connect(path)
     try:
-        c.execute("PRAGMA user_version=9")
+        c.execute("PRAGMA user_version=10")
         c.commit()
     finally:
         c.close()

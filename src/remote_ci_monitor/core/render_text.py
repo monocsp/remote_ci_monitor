@@ -232,7 +232,7 @@ def _source_text(src: dict[str, Any]) -> str:
 def _guess_note(doc: dict[str, Any]) -> str:
     """실패 스텝이 추측이면 그렇게 밝힌다. 확정이면 빈 문자열 — 표시는 지금 그대로.
 
-    키가 없거나 null 이면(옛 서버 · v10 앞에 끝난 잡) 아무 말도 덧붙이지 않는다. 모르는 것을
+    키가 없거나 null 이면(옛 서버 · v11 앞에 끝난 잡) 아무 말도 덧붙이지 않는다. 모르는 것을
     「확정」이라고도 「추측」이라고도 말하지 않는 것이 fail-open 금지다.
     """
     return ", guessed" if doc.get("failed_step_guessed") is True else ""

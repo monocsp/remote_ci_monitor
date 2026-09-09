@@ -90,7 +90,7 @@ of a key bumps that number and is listed here.
   before — print that marker and the blame is a fact. A job that was cancelled, timed out or lost
   reports its step as a guess whatever the markers say: it ended because it was killed, not
   because that step failed. Jobs that finished before this release report `null`: unknown, which
-  is neither. Database schema v10 (one added column; `/api/status` `schema_version` is unchanged —
+  is neither. Database schema v11 (one added column; `/api/status` `schema_version` is unchanged —
   keys were only added).
 - **The server log now says what a 500 actually was**, not just the exception class. During the
   2026-09-08 outage it recorded `OperationalError` 314 times, which does not distinguish "database
