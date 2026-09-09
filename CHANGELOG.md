@@ -8,6 +8,28 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **A job can now name what failed, and rcm remembers.** A preset script prints
+  `::rcm::fail::<name>` for anything that broke — a step, a test file, a check — and rcm keeps
+  those names per job. When a job fails, `GET /jobs/<id>` and `rcm run`/`rcm wait` report how
+  often each name was red in the recent runs of the same key:
+  `failed: flaky_test.dart — 1 of the last 8 gate runs · intermittent?`, or
+  `first time in the last 8 gate runs` for something new, or `every one of the last 8 gate runs`
+  for something simply broken. The question mark is deliberate — the counts are a suggestion, not
+  a verdict, and runs that failed while naming nothing stay in the denominator and are reported
+  (`note: 2 of those 8 runs failed without naming anything`) rather than quietly improving the
+  odds. The window is the last `failure_window_jobs` (20) finished jobs of that key **up to and
+  including this one**, so the answer does not drift as newer jobs arrive, and nothing is judged
+  below `failure_min_jobs` (3). This history is on the single-job route only; `/api/status` is
+  unchanged.
+- **Every failed, cancelled or unknown wait now says where the log is.** `rcm run` and `rcm wait`
+  end with `log: rcm logs 162 · <url>` — including exit 3, where you know least. A 404 from the
+  server now carries a `hint`: `/api/jobs/162` answers with `job #162 is GET /jobs/162 · its log
+  is GET /jobs/162/log with that job's token (try: rcm logs 162)`.
+- **`rcm jobs` and the recent list say which code ran.** Each row carries `<ref|branch> @<short
+  sha>`, and `rcm jobs --ref REF` keeps only the jobs whose ref or branch contains `REF` — useful
+  when several sessions on one machine share a token, which made `--mine` mean "this machine".
+  Tree jobs now send their branch name; it is display only and never changes `tree_hash`, so two
+  sessions on different branches with the same tree still join the same job.
 - **A progress bar on every running job.** The web page draws one bar under each running row and
   always says what it measured: `50% · 4/8 steps` when the job declares its step count with
   `::rcm::steps::N`, `70% · by measured time` or `by preset estimate` when it does not — so the
@@ -33,6 +55,17 @@ of a key bumps that number and is listed here.
   [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
 
 ### Changed
+- **Breaking-ish: `failed_step` is now only ever a step your script declared as failed.** It used
+  to be inferred — on a non-zero exit the *last started* step got the label — and that inference
+  named the wrong step for any script that runs things in parallel and replays their logs
+  afterwards: a real gate reported `build web` (which passed) while `test` was what broke, and a
+  **cancelled** job carried a step label at all, which read as "this is what went wrong" next to
+  its summary. Declare a failure with `::rcm::step-end::fail` or `::rcm::fail::<step name>` and
+  nothing changes. Without a declaration `failed_step` is now `null`, and a new `last_step` field
+  says where the job was when it ended, with no claim about the cause — displays read
+  `exit 1 (last step build web)` instead of `(step build web)`. Cancelled and lost jobs carry
+  neither field. Notification hooks get `RCM_LAST_STEP` alongside `RCM_FAILED_STEP`. Keys were
+  added, not removed, so `schema_version` stays 1.
 - **`rcm run --no-wait` now answers "where am I in the queue?".** It used to print a job id, a URL
   and `"state": "submitted"` — a state name the server never uses — so a session that submits and
   leaves had to run `rcm eta --job N` to learn anything. The JSON now carries the job's real
@@ -77,6 +110,12 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **A waiting `rcm run` no longer holds the snapshot bookkeeping for the whole build.** The file
+  list and per-file hashes were kept alive until the job finished, long after the tarball was
+  uploaded and deleted: a 20,000-file tree sat at 64 MB for the length of the run instead of the
+  32 MB a waiting client actually needs. On a machine short on memory, `rcm run --no-wait` plus
+  `rcm wait --job N` is now documented as the pattern — if the operating system kills the waiting
+  client, the shell sees 137, which is not the job failing.
 - **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
   50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
   time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request

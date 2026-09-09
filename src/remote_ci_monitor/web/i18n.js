@@ -325,6 +325,13 @@
     "recent.before_start": "before start",
     "recent.by": function (a) { return "by " + a.who; },
     "recent.step": function (a) { return "step " + a.step; },
+    "recent.last_step": function (a) { return "last step " + a.step; },
+    "failures.title": "failed by name",
+    "failures.persistent": function (a) { return "every one of the last " + a.window + " runs"; },
+    "failures.intermittent": function (a) { return a.seen + " of the last " + a.window + " runs · intermittent?"; },
+    "failures.first_seen": function (a) { return "first time in the last " + a.window + " runs"; },
+    "failures.unknown": function (a) { return a.seen + " of " + a.window + " runs so far"; },
+    "failures.unnamed": function (a) { return a.n + " of those runs failed without naming anything"; },
 
     // ── 잡 산출물(M5e) — 모르는 수는 —, 0 은 「모았는데 없었다」일 때만 ────────
     "art.label": "artifacts",
@@ -357,6 +364,7 @@
     "art.reason.expired": "expired",
     "art.copy": "copy the fetch command",
     "recent.failed_step": "failed step: ",
+    "recent.last_step_label": "last step: ",
     "recent.none": "No completed jobs yet",
     "recent.unavailable": function (a) { return "Recent unavailable — " + a.error; },
     "recent.count": function (a) { return "last " + a.shown + " of " + a.total; },
@@ -699,6 +707,13 @@
     "recent.before_start": "시작 전",
     "recent.by": function (a) { return a.who + " 이(가)"; },
     "recent.step": function (a) { return "스텝 " + a.step; },
+    "recent.last_step": function (a) { return "마지막 스텝 " + a.step; },
+    "failures.title": "이름별 실패",
+    "failures.persistent": function (a) { return "최근 " + a.window + "회 전부"; },
+    "failures.intermittent": function (a) { return "최근 " + a.window + "회 중 " + a.seen + "회 · 간헐?"; },
+    "failures.first_seen": function (a) { return "최근 " + a.window + "회 중 처음"; },
+    "failures.unknown": function (a) { return "아직 " + a.window + "회 중 " + a.seen + "회"; },
+    "failures.unnamed": function (a) { return "그 중 " + a.n + "회는 이름 없이 실패했다"; },
 
     // ── 잡 산출물(M5e) ────────────────────────────────────────────────────
     "art.label": "산출물",
@@ -731,6 +746,7 @@
     "art.reason.expired": "기간 지남",
     "art.copy": "받아 가는 명령 복사",
     "recent.failed_step": "실패한 스텝: ",
+    "recent.last_step_label": "마지막 스텝: ",
     "recent.none": "아직 끝난 잡이 없습니다",
     "recent.unavailable": function (a) { return "최근 결과를 읽지 못했습니다 — " + a.error; },
     "recent.count": function (a) { return a.total + "개 중 " + a.shown + "개"; },

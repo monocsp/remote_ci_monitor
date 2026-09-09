@@ -408,7 +408,7 @@ def test_the_two_usage_mirrors_number_the_same_steps_in_section_5():
     en = numbered_section(read(USAGE), 5)
     ko = numbered_section(read(USAGE_KO), 5)
     heads = [re.findall(r"^(\d+)\. ", s, re.M) for s in (en, ko)]
-    assert heads[0] == heads[1] == ["1", "2", "3", "4"], heads
+    assert heads[0] == heads[1] == ["1", "2", "3", "4", "5"], heads  # M5h 가 다섯째를 더했다
     # 같은 그림을 가리킨다
     assert has(en, r"images/ui/cli-nowait\.png") and has(ko, r"images/ui/cli-nowait\.png")
 

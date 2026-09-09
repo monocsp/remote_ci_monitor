@@ -76,6 +76,8 @@ def notify_env(job_row: dict[str, Any], rule_name: str) -> dict[str, str]:
         "RCM_REQUESTER": sanitize_text(requester_label),
         "RCM_SUMMARY": sanitize_text(job_row.get("summary")),
         "RCM_FAILED_STEP": sanitize_text(job_row.get("failed_step")),
+        # 선언된 실패 스텝과 「끝났을 때 어디였나」는 다른 사실이다 — 훅이 둘을 따로 읽는다 (M5h)
+        "RCM_LAST_STEP": sanitize_text(job_row.get("last_step")),
         "RCM_EXIT_CODE": "" if exit_code is None else str(exit_code),
         "RCM_JOB_SECONDS": "" if seconds is None else str(seconds),
         "RCM_URL": sanitize_text(job_row.get("url")),

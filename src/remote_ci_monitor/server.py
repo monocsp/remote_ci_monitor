@@ -48,6 +48,7 @@ from remote_ci_monitor.config import (
 )
 from remote_ci_monitor.core import admission, outcome
 from remote_ci_monitor.core import artifacts as art
+from remote_ci_monitor.core.failures import failures_json
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
@@ -56,9 +57,11 @@ from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
     DEFAULT_POOL,
+    FAILED,
     MODE_GIT_REF,
     MODE_TREE,
     QUEUED,
+    TIMED_OUT,
     TOKEN_WORKER,
     UPLOADING,
     HostSample,
@@ -130,6 +133,29 @@ _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
+_ID_IN_PATH = re.compile(r"/(\d+)")
+#: 404 가 길을 알려 준다(M5h · 결정 69). 별칭 라우트는 만들지 않는다 — 한 가지에 이름 하나다.
+_ROUTES_HINT = (
+    "routes: GET /api/status · GET /api/health · GET /jobs/<id> · GET /jobs/<id>/log · POST /jobs"
+)
+
+
+def not_found_hint(path: str) -> str:
+    """모르는 경로에 맞는 길 한 줄. 숫자가 있으면 그 잡의 진짜 경로, 없으면 주요 라우트.
+
+    `/api/status` 가 `/api` 아래인데 잡은 `/jobs` 아래라 `/api/jobs/162` 는 자연스러운
+    오추측이다. 그 오추측에 아무 말도 안 하면 사람이 로그를 못 찾는다(신고 2).
+    """
+    m = _ID_IN_PATH.search(path)
+    if m is None:
+        return _ROUTES_HINT
+    n = m.group(1)
+    return (
+        f"job #{n} is GET /jobs/{n} · its log is GET /jobs/{n}/log "
+        f"with that job's token (try: rcm logs {n})"
+    )
+
+
 _STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
@@ -1065,14 +1091,14 @@ class App(RemoteWorkersMixin):
             raise ApiError(404, "no such job")
         now = self.now_fn()
         if job.is_terminal:
-            return self._with_artifacts(recent_json(job, base_url=self.base_url(host)), job)
+            return self._terminal_view(job, host)
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)
         if row is None:  # 방금 끝났다
             job = self.store.get_job(job_id)
             assert job is not None
-            return self._with_artifacts(recent_json(job, base_url=self.base_url(host)), job)
+            return self._terminal_view(job, host)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
@@ -1080,9 +1106,41 @@ class App(RemoteWorkersMixin):
             queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job
         )
 
+    def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
+        """종료 잡의 문서 — 최근 행 모양 + 산출물 + 이름별 이력(M5h)."""
+        doc = recent_json(job, base_url=self.base_url(host))
+        return self._with_failures(self._with_artifacts(doc, job), job)
+
     def _with_artifacts(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
         """잡 행 JSON 에 산출물 처분을 **더한다**. 기존 키는 손대지 않는다(스키마 v1, §10)."""
         doc["artifacts"] = self.artifacts_public(job)
+        return doc
+
+    def _with_failures(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
+        """이름별 최근 이력을 **종료된 실패 잡에만** 더한다(M5h · 결정 67).
+
+        `/api/status` 는 이 길로 안 온다 — 최근 행마다 창 질의를 붙이면 이미 가장 뜨거운
+        요청 위에 짐을 얹는다(결정 49). 질의가 깨지면 **키를 아예 안 싣는다**: 빈 배열은
+        「이름을 안 남겼다」는 뜻이라 「못 읽었다」와 다르다.
+        """
+        if job.state not in (FAILED, TIMED_OUT):
+            return doc
+        cfg = self.config.server
+        try:
+            rows, window, unnamed = self.store.failure_stats(
+                job.id, job.key, job.finished_at, window=cfg.failure_window_jobs
+            )
+        except sqlite3.Error:
+            return doc
+        doc["failures"] = failures_json(
+            rows,
+            # 종료 잡에는 `progress` 가 없다 — 스텝 이름으로 아는 것은 이 두 칸뿐이다(§2.3)
+            steps={job.failed_step, job.last_step},
+            window=window,
+            window_unnamed=unnamed,
+            min_jobs=cfg.failure_min_jobs,
+        )
+        doc["failures_truncated"] = job.fail_truncated
         return doc
 
     def eta(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1169,6 +1227,7 @@ class App(RemoteWorkersMixin):
         source = Source(
             mode=MODE_TREE,
             repo=_opt_str(src.get("repo"), 200),
+            branch=_opt_str(src.get("branch"), 200),  # 표시용 — 신원에는 안 들어간다 (M5h)
             base_sha=_opt_str(src.get("base_sha"), 64),
             dirty=bool(src.get("dirty")) if src.get("dirty") is not None else None,
             tree_hash=tree_hash,
@@ -2070,7 +2129,7 @@ class Handler(BaseHTTPRequestHandler):
             self._read_only_ok()
             self._static(path)
             return
-        raise ApiError(404, "not found")
+        raise ApiError(404, "not found", hint=not_found_hint(path))
 
     def _artifact_archive(self, job_id: int) -> None:
         """묶음을 흘려보낸다. 전송 슬롯은 **기다리지 않는다** — 일반 슬롯을 쥔 채 기다리면

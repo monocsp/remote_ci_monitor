@@ -240,6 +240,8 @@ class Snapshot:
     tar_path: Path
     bytes: int
     entries: tuple[Entry, ...] = ()
+    #: 체크아웃의 브랜치 이름. **표시용**이다 — 신원(`tree_hash`)에는 안 들어간다 (M5h)
+    branch: str | None = None
 
     @property
     def total_bytes(self) -> int:
@@ -388,10 +390,15 @@ def make_snapshot(
         else:  # 실행 비트는 mode 가 말한다 — kind 는 file | link 둘뿐
             full.append(Entry(rel, mode, os.path.getsize(path), digest, "file"))
     th = tree_hash(entries)
-    base_sha = dirty = repo = None
+    base_sha = dirty = repo = branch = None
     if is_git:
         head = _git(root, "rev-parse", "HEAD")
         base_sha = head.strip() if head else None
+        # 표시용이다 — `tree_hash` 에도 합류 신원에도 안 들어간다(M5h §4.2). detached 면
+        # `git` 이 문자열 `HEAD` 를 준다: 그건 브랜치 이름이 아니라 「없다」다.
+        head_ref = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        name = head_ref.strip() if head_ref else ""
+        branch = name if name and name != "HEAD" else None
         status = _git(root, "status", "--porcelain", "--untracked-files=all")
         dirty = bool(status.strip()) if status is not None else None
         remote = _git(root, "remote", "get-url", "origin")
@@ -412,6 +419,7 @@ def make_snapshot(
         base_sha=base_sha,
         dirty=dirty,
         repo=repo,
+        branch=branch,
         tar_path=tar_path,
         bytes=size,
         entries=tuple(full),

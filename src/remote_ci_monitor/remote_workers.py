@@ -698,6 +698,9 @@ class RemoteWorkersMixin:
             summary_code=code,
             summary_args=args,
             failed_step=failed_step,
+            last_step=oc.last_step,
+            fail_names=oc.fail_names,
+            fail_truncated=oc.fail_truncated,
         ):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"

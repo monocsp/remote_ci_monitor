@@ -539,7 +539,13 @@ def test_rcm_wait_still_maps_finished_states_to_0_and_1(live, env, tree, capsys,
     code, out, err = run(capsys, ["wait", "--job", str(jid)])
     assert code == expected, err
     assert last_json(out)["wait_exit_code"] == expected
-    assert err.splitlines()[-1].startswith(f"#{jid} ")
+    lines = err.splitlines()
+    # M5h §2.5 — 0 이 아닌 끝에는 로그로 가는 길이 **마지막 줄**로 붙는다. 진행 줄은 그 위다.
+    if expected == 0:
+        assert lines[-1].startswith(f"#{jid} ")
+    else:
+        assert f"log: rcm logs {jid}" in lines[-1]
+        assert any(ln.startswith(f"#{jid} ") for ln in lines)
 
 
 def test_rcm_wait_still_maps_cancelled_to_2_and_a_waiting_job_to_3(srv, env, tree, capsys):

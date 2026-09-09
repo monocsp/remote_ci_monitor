@@ -357,6 +357,11 @@ def test_migration_from_v1_adds_the_columns_and_keeps_rows(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='index' AND sql LIKE '%artifacts_purged_at%'"
         ).fetchall():
             c.execute(f"DROP INDEX {name}")
+        c.execute("DROP INDEX IF EXISTS job_failures_name")  # v12(M5h)
+        c.execute("DROP INDEX IF EXISTS jobs_key_finished")
+        c.execute("DROP TABLE IF EXISTS job_failures")
+        c.execute("ALTER TABLE jobs DROP COLUMN fail_truncated")
+        c.execute("ALTER TABLE jobs DROP COLUMN last_step")  # v11(M5h)
         c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
         c.execute("ALTER TABLE jobs DROP COLUMN artifacts_purged_at")
         # v7(M5f)이 더한 claim 인덱스는 priority·pool 을 참조한다 — 그 열을 떼기 전에 지운다
@@ -533,6 +538,11 @@ def test_migration_adds_the_claim_index_to_an_old_database(tmp_path):
     try:
         c.execute("DROP INDEX IF EXISTS jobs_claim")  # v8
         c.execute("DROP INDEX IF EXISTS jobs_recent")  # v9
+        c.execute("DROP INDEX IF EXISTS job_failures_name")  # v12(M5h)
+        c.execute("DROP INDEX IF EXISTS jobs_key_finished")
+        c.execute("DROP TABLE IF EXISTS job_failures")
+        c.execute("ALTER TABLE jobs DROP COLUMN fail_truncated")
+        c.execute("ALTER TABLE jobs DROP COLUMN last_step")  # v11(M5h)
         c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10
         c.execute("PRAGMA user_version=7")
         c.commit()

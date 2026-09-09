@@ -162,6 +162,8 @@ class Source:
     sha: str | None = None
     uploaded_bytes: int | None = None  # M5 캐시: 이번에 실제로 받은 바이트
     cached_bytes: int | None = None  # M5 캐시: 캐시 히트 바이트
+    #: tree 잡의 브랜치 이름(표시용, M5h). 신원은 `tree_hash` 이고 여기는 안 들어간다
+    branch: str | None = None
 
     @property
     def identity(self) -> str | None:
@@ -218,6 +220,10 @@ class Job:
     summary_code: str | None = None
     summary_args: dict[str, Any] = field(default_factory=dict)
     failed_step: str | None = None
+    #: 마지막으로 시작한 스텝 — 인과를 주장하지 않는다. 취소·유실 잡에는 없다 (M5h)
+    last_step: str | None = None
+    #: 실패 이름이 상한을 넘어 버려진 것이 있다. 공개 JSON 은 `failures_truncated` (M5h)
+    fail_truncated: bool = False
     lane: int | None = None
     timeout_seconds: int | None = None
     cancel: CancelInfo | None = None

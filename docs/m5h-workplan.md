@@ -110,7 +110,7 @@ found")` 다. `/api/status`·`/api/health`·`/api/whoami`·`/api/eta` 가 `/api`
 ```python
 failed = next((s.name for s in steps if s.ok is False), None)
 if failed is None and exit_code not in (None, 0) and steps:
-    failed = steps[-1].name          # ← 마지막으로 시작한 스텝을 실패로 부른다
+    failed = steps[-1].name  # ← 마지막으로 시작한 스텝을 실패로 부른다
 ```
 
 1. **되재생·병렬 스크립트**에서 마지막 머리말을 실패로 부른다(§2.1).
@@ -170,9 +170,10 @@ tree 잡에는 브랜치 이름이 아예 없다 — 클라이언트가 `base_sh
   | `failed_step: "build web (…)"` | `failed_step: null` · `last_step: "build web (…)"` |
   | 화면: `exit 1 (step build web …)` | 화면: `exit 1 · last step: build web …` |
 
-- `cancelled`·`lost` 는 `failed_step` 도 `last_step` **둘 다 안 싣는다** — 사람이 세운 잡과
-  서버가 잃은 잡에 스텝 라벨을 붙이면 그게 곧 #176 의 오해다. `timed_out` 은 `last_step` 만
-  싣는다(제한 시간에 걸렸을 때 어디였는지는 진짜 정보다).
+- `cancelled`·`lost` 는 `failed_step` 도 `last_step` 도 실패 이름도 **하나도 안 싣는다** —
+  사람이 세운 잡과 서버가 잃은 잡에 스텝 라벨을 붙이면 그게 곧 #176 의 오해다. `timed_out` 은
+  **선언된 것을 그대로** 싣는다(제한 시간에 걸리기 전에 「이건 깨졌다」고 말했다면 그건 참이고,
+  그 잡은 이력 창에도 들어간다).
   ⚠️ 종료된 잡의 문서에는 `progress` 가 **없다**(§13-1). 그래서 `last_step` 은 「어디였나」를
   말하는 **유일한** 칸이 된다 — 취소 잡에서 이걸 빼면 그 정보는 로그에만 남는다. 뒤집고
   싶으면 결정 64 를 `cancelled` 도 `last_step` 을 싣는 쪽으로 고치면 되고, 그때도 문구는
@@ -257,13 +258,13 @@ CREATE INDEX jobs_key_finished ON jobs(key, finished_at DESC);
 
   ```json
   {"error": "not found",
-   "hint": "job #162 is GET /jobs/162 · its log is GET /jobs/162/log with a Bearer token (rcm logs 162)"}
+   "hint": "job #162 is GET /jobs/162 · its log is GET /jobs/162/log with that job's token (try: rcm logs 162)"}
   ```
 
 - **별칭(`/api/jobs/…`)은 만들지 않는다** — 한 가지에 이름 하나. 404 가 가르치면 된다.
-- `rcm wait`·`rcm run` 이 **0 이 아닌 코드로 끝날 때** stderr 마지막 줄에 로그 길을 적는다:
-  `job #162 failed · log: rcm logs 162 · http://macmini:8787/#/jobs/162`.
-  종료 코드 3(모른다)에도 적는다 — 모를수록 로그가 필요하다.
+- `rcm wait`·`rcm run` 이 **0 이 아닌 코드로 끝날 때** stderr 에 로그 길을 적는다:
+  `log: rcm logs 162 · http://macmini:8787/#/jobs/162`(앞머리 없이 이 줄 그대로 — 상태는 바로
+  위 진행 줄이 이미 말한다). 종료 코드 3(모른다)에도 적는다 — 모를수록 로그가 필요하다.
 - `examples/session/ci-gate.sh` 의 실패 갈래에 `rcm logs "$job"` 을 넣는다.
 
 ### 4.5 목록이 코드를 말한다 (결정 71)
@@ -297,7 +298,7 @@ CREATE INDEX jobs_key_finished ON jobs(key, finished_at DESC);
 
 | 자리 | 오늘 | M5h |
 |---|---|---|
-| `rcm top` 최근 | `❌ failed gate ← macbook 11m 16:50 exit 1 (step build web …)` | `… exit 1 · last step: build web …` + 코드 신원 |
+| `rcm top` 최근 | `❌ failed gate ← macbook 11m 16:50 exit 1 (step build web …)` | `… exit 1 (last step build web …)` + 코드 신원 |
 | `rcm jobs` | 코드 신원 없음 | `chore/ci-guard-scan-scope @25e1494` |
 | `rcm wait` 실패 끝줄 | `#162 failed · exit 1` | `+ log: rcm logs 162` · 이름별 이력 최대 3줄 |
 | `rcm run` stdout JSON | 잡 문서 그대로 | `failures[]` · `last_step` 이 그대로 실린다(래퍼가 jq 로 읽는다) |
@@ -310,9 +311,13 @@ CLI 문구(영어, 실패한 잡):
 ```
 #162 failed · exit 1 · 11m 0s
   log: rcm logs 162 · http://macmini:8787/#/jobs/162
-  failed: test                                    every one of the last 8 gate runs
-  failed: just_audio_screen_music_port_test.dart  1 of the last 8 gate runs · intermittent?
+  failed: test — every one of the last 8 gate runs
+  failed: bgm_player_control_test.dart — 2 of the last 8 gate runs · intermittent?
+  failed: just_audio_screen_music_port_test.dart — first time in the last 8 gate runs
+  note: 1 of those 8 runs failed without naming anything
 ```
+
+문면의 정본은 `docs/m5h-implementation.md` §2.5 다(대시 · `note:` · 판정별 문장).
 
 - `intermittent?` 의 물음표는 장식이 아니다 — **판정이 아니라 제안**이다. 숫자를 옆에 두고
   사람이 정한다.

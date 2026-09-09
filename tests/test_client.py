@@ -185,7 +185,9 @@ def test_run_flow_success_and_failure_exit_codes(live, tmp_path):
     assert (code, reason) == (0, None) and job["state"] == "succeeded" and job["summary"] == "green"
     bad = submit_and_upload(live, client, root, "bad", tmp_path)
     code, job, _ = wait_for_job(client, bad["job_id"], poll_seconds=0.1)
-    assert code == 1 and job["exit_code"] == 2 and job["failed_step"] == "t"
+    # M5h 결정 63 — 선언이 없으면 `failed_step` 은 null 이고 `last_step` 이 어디였는지 말한다
+    assert code == 1 and job["exit_code"] == 2
+    assert job["failed_step"] is None and job["last_step"] == "t"
 
 
 def test_cancel_gives_2_and_timeout_gives_3(live, tmp_path):

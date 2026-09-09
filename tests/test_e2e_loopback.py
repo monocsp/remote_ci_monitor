@@ -165,7 +165,9 @@ def test_rcm_run_exit_codes_0_1_2_3_and_restart_leaves_lost(server, tree, tmp_pa
     out = rcm("run", "gate", "-f", "scope=fail", env=env, cwd=tree)
     body = last_json(out.stdout)
     assert out.returncode == 1
-    assert body["state"] == "failed" and body["failed_step"] == "test"
+    # M5h 결정 63 — 선언 없는 실패는 스텝을 지목하지 않는다(`last_step` 이 자리를 말한다)
+    assert body["state"] == "failed"
+    assert body["failed_step"] is None and body["last_step"] == "test"
     assert body["summary"] == "2 tests failed" and body["exit_code"] == 1
 
     # 2 — timed out

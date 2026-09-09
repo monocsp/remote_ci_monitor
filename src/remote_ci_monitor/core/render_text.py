@@ -16,6 +16,7 @@ from remote_ci_monitor.core.model import (
     CANCELLING,
     FAILED,
     LOST,
+    MODE_GIT_REF,
     QUEUED,
     RUNNING,
     SUCCEEDED,
@@ -213,6 +214,88 @@ def _reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = Non
 
 def _mb(b: int | None) -> str:
     return DASH if b is None else f"{int(round(b / 1e6))} MB"
+
+
+#: 목록 한 칸의 폭. 브랜치 이름은 길다 — 자르되 잘렸다고 말한다.
+MAX_IDENT = 32
+
+#: 실패 보고의 문구(M5h §2.5). 물음표는 계약이다 — 판정이 아니라 제안이다.
+_HISTORY = {
+    "persistent": "every one of the last {window} {key}runs",
+    "intermittent": "{seen} of the last {window} {key}runs · intermittent?",
+    "first_seen": "first time in the last {window} {key}runs",
+    "unknown": "{seen} of {window} {key}runs so far",
+}
+
+
+def _short_sha(sha: Any) -> str:
+    return str(sha or "")[:7]
+
+
+def _repo_piece(repo: Any) -> str:
+    """저장소 주소의 마지막 조각. `git@github.com:org/app.git` → `app`(칸이 좁다)."""
+    text = str(repo or "").rstrip("/")
+    if not text:
+        return ""
+    piece = text.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return piece[:-4] if piece.endswith(".git") else piece
+
+
+def source_ident(src: dict[str, Any] | None) -> str:
+    """목록 한 칸용 짧은 코드 신원 — `<ref|branch> @<짧은 sha>`(M5h §4.1).
+
+    큐 행의 `_source_text()` 와 다른 함수다: 저 쪽은 넓고 이 쪽은 좁다. 못 채우면 조각만
+    내고, 아무것도 없으면 `—` 다(빈 문자열이면 그 다음 칸이 앞으로 밀린다).
+    """
+    src = src or {}
+    if src.get("mode") == MODE_GIT_REF:
+        sha = _short_sha(src.get("sha"))
+        parts = [str(src.get("ref") or ""), f"@{sha}" if sha else ""]
+    else:
+        name = str(src.get("branch") or "") or _repo_piece(src.get("repo"))
+        sha = _short_sha(src.get("base_sha"))
+        tail = f"@{sha}{'+' if src.get('dirty') else ''}" if sha else ""
+        parts = [name, tail]
+    text = " ".join(p for p in parts if p)
+    if not text:
+        return DASH
+    return text if len(text) <= MAX_IDENT else text[: MAX_IDENT - 1] + "…"
+
+
+def failure_lines(
+    job: dict[str, Any], *, job_id: int, url: str | None, limit: int = 3
+) -> list[str]:
+    """실패한 잡의 끝줄 — 로그로 가는 길과 이름별 최근 이력(M5h §2.5).
+
+    성공한 잡에는 아무것도 안 붙인다. `failures` 키가 없는 것(못 읽었다)과 빈 배열(이름을 안
+    남겼다)은 뜻이 다르지만 화면은 같다 — 둘 다 로그 줄만 나온다.
+    """
+    if job.get("state") == SUCCEEDED:
+        return []
+    log = f"log: rcm logs {job_id}" + (f" · {url}" if url else "")
+    out = [log]
+    items = job.get("failures") or []
+    key = str(job.get("key") or "")
+    shown = items[: max(0, limit)]
+    for item in shown:
+        template = _HISTORY.get(str(item.get("verdict")))
+        history = (
+            template.format(
+                seen=item.get("seen"),
+                window=item.get("window"),
+                key=f"{key} " if key else "",
+            )
+            if template
+            else ""
+        )
+        out.append(f"failed: {item['name']} — {history}" if history else f"failed: {item['name']}")
+    if len(items) > len(shown):
+        out.append(f"… and {len(items) - len(shown)} more (rcm logs {job_id})")
+    unnamed = next((i.get("window_unnamed") for i in items), 0) or 0
+    if unnamed:
+        window = next((i.get("window") for i in items), 0)
+        out.append(f"note: {unnamed} of those {window} runs failed without naming anything")
+    return out
 
 
 def _source_text(src: dict[str, Any]) -> str:
@@ -432,13 +515,18 @@ def render_pool(
             exit_txt = f" · exit {r['exit_code']}" if show_exit else ""
             req = (r.get("requester") or {}).get("label") or "?"
             tail = r.get("summary") or ""
+            # 선언된 스텝만 「step」이다. 아니면 「어디였나」만 말한다 — 인과는 주장하지 않는다
+            # (M5h · 결정 63). 취소·유실 잡에는 둘 다 없다(결정 64 · 운영 잡 #176).
             if r.get("failed_step"):
                 tail += f" (step {r['failed_step']})"
+            elif r.get("last_step"):
+                tail += f" (last step {r['last_step']})"
             when = fmt_clock(r.get("finished_at"), tz, now=now)
             dur = fmt_duration(r.get("job_seconds"))
             out.append(
                 f"  {glyph} {_state_word(r['state'])}{exit_txt} {r.get('key', '?'):<16} "
-                f"← {req:<18} {dur:>8}  {when}  {tail}".rstrip()
+                f"← {req:<18} {source_ident(r.get('source')):<20} "
+                f"{dur:>8}  {when}  {tail}".rstrip()
             )
             art = _artifacts_line(r.get("artifacts"))
             if art:

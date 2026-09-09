@@ -792,8 +792,11 @@
       summary = T(lang, "recent.before_start") + (who ? " · " + T(lang, "recent.by", { who: who }) : "");
     } else if (state === "lost") {
       summary = outcomeText(job, lang) || T(lang, "state.lost");
-    } else if (job.failed_step) {
-      summary = (outcomeText(job, lang) ? outcomeText(job, lang) + " · " : "") + T(lang, "recent.step", { step: job.failed_step });
+    } else if (job.failed_step || job.last_step) {
+      // 선언된 스텝만 「스텝」이다. 아니면 「마지막 스텝」 — 인과를 주장하지 않는다(M5h 결정 63).
+      var stepKey = job.failed_step ? "recent.step" : "recent.last_step";
+      var stepName = job.failed_step || job.last_step;
+      summary = (outcomeText(job, lang) ? outcomeText(job, lang) + " · " : "") + T(lang, stepKey, { step: stepName });
     } else {
       summary = outcomeText(job, lang) || "";
     }
@@ -837,6 +840,28 @@
     if (src.mode === "git_ref" && src.ref) cmd += " --ref " + shellQuote(src.ref);  // git_ref 잡은 --ref 없이는 usage 오류
     return cmd;
   }
+  /* 최근 행 상세의 줄들 — 순수(§2.6). 스텝 라벨은 **선언된 것만** 「실패한 스텝」이고,
+     아니면 「마지막 스텝」이다(M5h 결정 63). 이름별 최근 이력은 서버가 코드로 준 판정을
+     문장으로만 바꾼다(결정 37) — 여기서 다시 계산하지 않는다. */
+  function recentDetail(job, lang) {
+    job = job || {};
+    var out = [];
+    if (job.failed_step) out.push(T(lang, "recent.failed_step") + job.failed_step);
+    else if (job.last_step) out.push(T(lang, "recent.last_step_label") + job.last_step);
+    var items = job.failures || [];
+    if (items.length) {
+      out.push(T(lang, "failures.title"));
+      items.forEach(function (f) {
+        var key = "failures." + f.verdict;
+        var text = I18N.has(key) ? T(lang, key, { seen: f.seen, window: f.window }) : "";
+        out.push(text ? f.name + " — " + text : f.name);
+      });
+      var unnamed = items[0] && items[0].window_unnamed;
+      if (unnamed) out.push(T(lang, "failures.unnamed", { n: unnamed }));
+    }
+    return out;
+  }
+
   function transitionsLine(job, tz, lang) {
     var tr = Array.isArray(job && job.transitions) ? job.transitions : [];
     if (!tr.length) return DASH;
@@ -903,7 +928,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
@@ -1686,7 +1711,12 @@
       var art = artifactsLine(job, L(), now());
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
         (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
-      if (open) html += '<div class="rdetail">' + esc(transitionsLine(job, tz(), L())) + (job.failed_step ? "<br>" + esc(tr("recent.failed_step")) + "<b>" + esc(job.failed_step) + "</b>" : "") + (outcomeText(job, L()) ? "<br>" + esc(outcomeText(job, L())) : "") + "</div>";
+      if (open) {
+        var detail = [esc(transitionsLine(job, tz(), L()))];
+        recentDetail(job, L()).forEach(function (line) { detail.push(esc(line)); });
+        if (outcomeText(job, L())) detail.push(esc(outcomeText(job, L())));
+        html += '<div class="rdetail">' + detail.join("<br>") + "</div>";
+      }
       html += "</div>";
     });
     html += "</div>";

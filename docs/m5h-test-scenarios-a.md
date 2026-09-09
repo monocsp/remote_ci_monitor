@@ -45,9 +45,9 @@ JOB_162 = (
     "::rcm::step::무거운 셋 병렬 시작 (test[동시 9] · gitleaks · build web)",
     "FAIL: test (exit 1) — 깨진 테스트 1건(최대 80):",
     "  … just_audio_screen_music_port_test.dart: fadeIn — 0 에서 스며든다",
-    "::rcm::step::test",                                    # ← 병렬 로그의 되재생
+    "::rcm::step::test",  # ← 병렬 로그의 되재생
     "::rcm::step::secret-scan (gitleaks — 전체 히스토리)",
-    "::rcm::step::build web (release — 셰이더 impellerc 컴파일 회귀 포함)",   # ← 성공한 스텝
+    "::rcm::step::build web (release — 셰이더 impellerc 컴파일 회귀 포함)",  # ← 성공한 스텝
 )
 LAST_162 = "build web (release — 셰이더 impellerc 컴파일 회귀 포함)"
 ```

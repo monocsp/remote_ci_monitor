@@ -653,7 +653,7 @@ docs/reviews/
 | 62 | 무진전 latch | 바닥 규칙으로 지웠는데 여유가 **지운 바이트의 절반도 안 늘면** `no_progress` 를 세우고 그 뒤 자동 sweep 의 **바닥 규칙만** 멈춘다(나이·예산은 돈다). `rcm gc` 나 재시작으로 풀린다. 지워도 `df` 가 안 움직이면 계속 지우는 것은 증거를 태우는 일 말고 아무것도 아니다 (M5g, 코덱스 P1) |
 
 | 63 | 추론된 실패 스텝 | **없앤다.** `failed_step` 은 `::rcm::step-end::fail` 또는 `::rcm::fail::<이름>` 으로 **선언된 것만**이고, 아니면 null 이다. 「어디였나」는 `last_step` 이 말한다. 오늘 라벨이 붙던 잡의 상당수가 앞으로 빈칸이 된다 — CHANGELOG 에 동작 변경으로 적는다 (M5h, 2026-09-09) |
-| 64 | 취소·유실 잡 | `failed_step`·`last_step` **둘 다 안 싣는다**(#176). `timed_out` 은 `last_step` 만. `succeeded` 는 잡 자신의 판정이 이겨 실패 이름을 안 남긴다 |
+| 64 | 취소·유실 잡 | `failed_step`·`last_step`·실패 이름을 **하나도 안 싣는다**(#176). `timed_out` 은 선언된 것을 그대로 싣는다. `succeeded` 는 잡 자신의 판정이 이겨 실패 이름을 안 남긴다 |
 | 65 | 새 마커 | `::rcm::fail::<이름>` 하나로 **스텝과 단위를 같이** 받는다. 이름 120자 · 잡당 100개(넘으면 `failures_truncated`) · 옛 서버는 모르는 kind 라 조용히 무시한다 |
 | 66 | 이력 창 | 같은 `key` 의 최근 `failure_window_jobs = 20` 개 **종료 잡**(`succeeded`·`failed`·`timed_out`. 취소·유실은 아무 말도 안 하므로 뺀다), 최소 `failure_min_jobs = 3`. 목록 명령(`rcm flaky`)은 나중에 |
 | 67 | 어디에 싣나 | `GET /jobs/{id}` 의 **종료 잡에만**. `/api/status` 는 안 건드린다 — 이미 가장 뜨거운 요청이고(결정 49) 최근 행마다 이력 질의를 붙이면 그 병목 위에 짐을 얹는다 |

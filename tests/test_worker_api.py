@@ -1036,21 +1036,21 @@ def test_finish_succeeded_takes_the_summary_from_markers(srv):
     assert [r["id"] for r in srv.pools()["default"]["recent"]] == [jid]
 
 
-def test_finish_failed_uses_exit_code_and_the_failing_step(srv):
-    """§3: `failed` 이고 마커 summary 가 없으면 summary `exit N`, failed_step 은 마커 규칙(step-end
-    fail 이 있으면 그 스텝, 없으면 마지막 스텝)."""
+def test_finish_failed_uses_exit_code_and_the_declared_step(srv):
+    """§3: `failed` 이고 마커 summary 가 없으면 summary `exit N`. `failed_step` 은 **선언된
+    것만**이고(M5h 결정 63) 선언이 없으면 null + `last_step` 이다."""
     a = running_job(srv)
     srv.log("build-02", a, b"::rcm::step::build\n::rcm::step::test\n")
     assert srv.finish("build-02", a, "failed", exit_code=3)[0] == 200
     v = srv.view(a)
     assert v["state"] == FAILED and v["exit_code"] == 3
-    assert v["summary"] == "exit 3" and v["failed_step"] == "test"
+    assert v["summary"] == "exit 3" and v["failed_step"] is None and v["last_step"] == "test"
     b = srv.queued_job(token="bob")
     assert srv.claimed("build-02") == b
     srv.log("build-02", b, b"::rcm::step::build\n::rcm::step-end::fail\n::rcm::step::test\n")
     assert srv.finish("build-02", b, "failed", exit_code=1)[0] == 200
     v = srv.view(b)
-    assert v["summary"] == "exit 1" and v["failed_step"] == "build"
+    assert v["summary"] == "exit 1" and v["failed_step"] == "build"  # step-end::fail 은 선언이다
 
 
 def test_finish_failed_with_a_summary_and_no_exit_code_keeps_the_summary(srv):
@@ -1067,14 +1067,15 @@ def test_finish_failed_with_a_summary_and_no_exit_code_keeps_the_summary(srv):
 
 
 def test_finish_timed_out_uses_the_limit_summary(srv):
-    """§3: `timed_out` → summary 는 `format_limit(timeout_seconds)`(60초 프리셋이면 `limit 1m`),
-    failed_step 은 열려 있던 마지막 스텝."""
+    """§3: `timed_out` → summary 는 `format_limit(timeout_seconds)`(60초 프리셋이면 `limit 1m`).
+    시간에 걸린 잡은 실패를 선언한 적이 없으므로 `failed_step` 은 null 이고 `last_step` 이
+    열려 있던 스텝을 말한다(M5h 결정 63·64)."""
     jid = running_job(srv)
     srv.log("build-02", jid, b"::rcm::step::build\n")
     assert srv.finish("build-02", jid, "timed_out", exit_code=-9)[0] == 200
     v = srv.view(jid)
     assert v["state"] == TIMED_OUT and v["exit_code"] == -9
-    assert v["summary"] == "limit 1m" and v["failed_step"] == "build"
+    assert v["summary"] == "limit 1m" and v["failed_step"] is None and v["last_step"] == "build"
     assert v["timeout_seconds"] == 60
 
 

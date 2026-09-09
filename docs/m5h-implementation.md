@@ -33,7 +33,7 @@
 ```python
 KIND_FAIL = "fail"
 MARKER_KINDS = (KIND_STEPS, KIND_STEP, KIND_STEP_END, KIND_SUMMARY, KIND_FAIL)
-MAX_FAIL_NAMES = 100          # 한 잡이 남길 수 있는 실패 이름 수
+MAX_FAIL_NAMES = 100  # 한 잡이 남길 수 있는 실패 이름 수
 ```
 
 **`parse_marker(line)`** — `KIND_FAIL` 가지를 `KIND_STEP` 과 같은 규칙으로 더한다: 빈 값이면
@@ -52,7 +52,7 @@ MAX_FAIL_NAMES = 100          # 한 잡이 남길 수 있는 실패 이름 수
    # 지금: steps[-1].ok = exit_code == 0        ← 실패면 False 로 물들여 폴백을 만든다
    # M5h:
    if steps[-1].ok is None:
-       steps[-1].ok = True if exit_code == 0 else None      # 모르면 None 이다
+       steps[-1].ok = True if exit_code == 0 else None  # 모르면 None 이다
    ```
 3. **선언이 추론을 이긴다.** 루프가 끝난 **뒤**에, 모은 이름과 같은 이름의 스텝을 전부
    `ok = False` 로 바꾼다. **표시만 하고 닫지는 않는다** — 아직 열린 스텝은
@@ -61,16 +61,16 @@ MAX_FAIL_NAMES = 100          # 한 잡이 남길 수 있는 실패 이름 수
    `::rcm::step::test` 보다 **위**에 있다). 그리고
 
    ```python
-   failed = next((s.name for s in steps if s.ok is False), None)   # 폴백 없음
-   last   = steps[-1].name if steps else None
+   failed = next((s.name for s in steps if s.ok is False), None)  # 폴백 없음
+   last = steps[-1].name if steps else None
    ```
 
 **`Progress` 에 더하는 칸** (`core/model.py`)
 
 ```python
-last_step: str | None = None          # 마지막으로 시작한 스텝. 인과를 주장하지 않는다
-fail_names: tuple[str, ...] = ()      # 선언된 실패 이름(순서 유지 · 중복 제거)
-fail_truncated: bool = False          # MAX_FAIL_NAMES 를 넘겨 버린 것이 있다
+last_step: str | None = None  # 마지막으로 시작한 스텝. 인과를 주장하지 않는다
+fail_names: tuple[str, ...] = ()  # 선언된 실패 이름(순서 유지 · 중복 제거)
+fail_truncated: bool = False  # MAX_FAIL_NAMES 를 넘겨 버린 것이 있다
 ```
 
 ⚠️ 이름이 둘인 것은 **의도한 것**이다: 안쪽(`Progress` · `Job` · DB 컬럼)은 `fail_truncated`,
@@ -91,18 +91,21 @@ fail_truncated: bool = False          # MAX_FAIL_NAMES 를 넘겨 버린 것이 
 
 ```python
 forced = cancelled or timed_out or lost
-progress = progress_from_markers(..., exit_code=None if forced else rc)   # 1 을 넣지 않는다
+progress = progress_from_markers(..., exit_code=None if forced else rc)  # 1 을 넣지 않는다
 ...
-STEP_STATES = (FAILED, TIMED_OUT)          # 스텝 라벨을 갖는 상태
+STEP_STATES = (FAILED, TIMED_OUT)  # 스텝 라벨을 갖는 상태
 failed_step = progress.failed_step if state in STEP_STATES else None
-last_step   = progress.last_step   if state in STEP_STATES else None
-fail_names  = progress.fail_names  if state in STEP_STATES else ()
+last_step = progress.last_step if state in STEP_STATES else None
+fail_names = progress.fail_names if state in STEP_STATES else ()
 ```
 
 `Outcome` 에 `last_step: str | None = None` · `fail_names: tuple[str, ...] = ()` ·
 `fail_truncated: bool = False` 를 더한다. `__iter__` 의 3-튜플 풀기는 **그대로 둔다**(옛 호출부).
 
-- `cancelled` · `lost` 는 세 칸 모두 비어 있다(결정 64).
+- `cancelled` · `lost` 는 세 칸 모두 비어 있고 `fail_truncated` 도 `False` 다 — **네 값은 늘
+  같이 움직인다**(이름을 안 남기는데 「잘렸다」고 말할 자리가 없다).
+- `timed_out` 은 **선언된 것을 그대로 싣는다**(`failed_step` · `last_step` · 이름). 제한 시간에
+  걸리기 전에 스크립트가 「이건 깨졌다」고 말했다면 그건 참이고, 그 잡은 이력 창에도 들어간다.
 - `succeeded` 는 `failed_step` 도 이름도 안 남긴다 — **잡 자신의 판정이 이긴다**. 정보성
   스텝이 `::rcm::fail::` 를 찍고 exit 0 으로 끝나면 대장에 안 들어간다.
 
@@ -174,7 +177,10 @@ ALTER TABLE jobs ADD COLUMN fail_truncated INTEGER NOT NULL DEFAULT 0;
 
 **쓰기** — `finish(...)` 에 `fail_names: Sequence[str] = ()` · `fail_truncated: bool = False`
 를 더하고 **같은 트랜잭션 안에서** `INSERT OR IGNORE INTO job_failures(job_id, name, seq)` 를
-돈다. `finish` 가 거절되면(이미 종료) 대장도 안 남는다.
+돈다. `seq` 는 **1부터**, 잡이 찍은 순서 그대로다(중복은 `core/progress.py` 가 이미 걸렀으므로
+저장소는 깨끗한 목록을 받는다). `finish` 가 거절되면(이미 종료) 대장도 안 남는다.
+표 셋(`job_failures` · 두 인덱스)과 `fail_truncated` 컬럼은 **`_SCHEMA_V1` 에도** 넣는다 —
+새 DB 는 마이그레이션을 거치지 않고 최신 스키마를 한 번에 만든다.
 
 **읽기** — `failure_stats(job_id, key, finished_at, *, window) -> tuple[list[FailureRow], int, int]`
 (`rows`, `window_jobs`, `window_unnamed`). 한 번의 호출에 질의 셋:
@@ -206,6 +212,7 @@ VERDICT_FIRST_SEEN = "first_seen"
 VERDICT_INTERMITTENT = "intermittent"
 VERDICT_PERSISTENT = "persistent"
 
+
 @dataclass(frozen=True)
 class FailureRow:
     name: str
@@ -213,12 +220,18 @@ class FailureRow:
     first_seen_job_id: int | None
     last_seen_job_id: int | None
 
+
 def verdict(seen: int, window: int, *, min_jobs: int) -> str:
     """창이 얕으면 unknown. seen==window 면 persistent, seen==1 이면 first_seen, 그 사이는 intermittent."""
 
+
 def failures_json(
-    rows: Sequence[FailureRow], *, steps: Container[str], window: int,
-    window_unnamed: int, min_jobs: int,
+    rows: Sequence[FailureRow],
+    *,
+    steps: Container[str],
+    window: int,
+    window_unnamed: int,
+    min_jobs: int,
 ) -> list[dict[str, Any]]:
     """`GET /jobs/{id}` 의 `failures[]`. 이름 순이 아니라 **잡이 찍은 순서**(seq)를 지킨다."""
 ```
@@ -262,14 +275,17 @@ def _with_failures(self, doc, job):
 **`failed_step` · `last_step` 두 칸으로만 판정한다** — 이름이 그 둘 중 하나와 같으면
 `step: true`. 마커를 다시 읽지 않는다(질의를 안 늘린다).
 
+`cfg` 는 `self.config.server` 다.
+
 조회 실패는 fail-open 금지 규칙대로 **잡 문서를 죽이지 않는다**: `sqlite3.Error` 면
-`failures` 키를 **아예 안 싣는다**(빈 배열은 「없다」는 뜻이라 다르다).
+`failures` 와 `failures_truncated` **둘 다 안 싣는다**(빈 배열은 「이름을 안 남겼다」는 뜻이라
+다르다 — 「못 읽었다」는 키가 없는 것이다).
 
 ### 2.4 `config.py`
 
 ```python
-failure_window_jobs: int = 20   # 이력 창 — 같은 key 의 최근 종료 잡 수
-failure_min_jobs: int = 3       # 창이 이보다 얕으면 판정하지 않는다(unknown)
+failure_window_jobs: int = 20  # 이력 창 — 같은 key 의 최근 종료 잡 수
+failure_min_jobs: int = 3  # 창이 이보다 얕으면 판정하지 않는다(unknown)
 ```
 
 검증: `failure_window_jobs` 는 1 이상 500 이하, `failure_min_jobs` 는 1 이상이고
@@ -297,6 +313,20 @@ def failure_lines(job: dict, *, job_id: int, url: str | None, limit: int = 3) ->
 
 `intermittent?` 의 물음표는 계약이다 — **판정이 아니라 제안**이다.
 
+빈 자리를 채운다(역할 C 가 물은 것):
+
+- **`step` 은 CLI 문구를 안 바꾼다** — 스텝이든 단위든 `failed: {name}` 한 모양이다. 구분은
+  웹의 배지가 한다.
+- **`note:` 줄은 3줄 상한에 안 들어간다.** 이름 셋을 자른 뒤 따로 붙는다 — 분모의 품질이
+  이름에 밀려 사라지면 결정 68 이 무의미하다.
+- **`failures_truncated` 에는 문구가 없다**(이번 단계). JSON 에만 있다 — 100개를 넘긴 잡은
+  드물고, 그 줄을 만들면 화면에서 더 급한 세 줄을 민다.
+- **`key` 가 없거나 null 이면** 그 자리를 통째로 뺀다: `2 of the last 8 runs`.
+- **`verdict` 가 모르는 값이면** 그 이름 줄은 `failed: {name}` 만 찍는다(이력 없이).
+- `url` 은 **잡 문서의 `url` 키**에서 온다. 없으면 `log: rcm logs {id}` 만.
+- 성공 잡은 `failure_lines()` 가 **빈 목록**을 돌려준다 — 갈래는 순수 함수 안에 있다.
+- 들여쓰기와 `rcm: ` 접두는 `_err` 의 것이고 계약이 아니다.
+
 `cli._wait()` 는 `line.done()` 뒤 · `_print_json(out)` **앞**에 이 줄들을 `_err` 로 찍는다.
 종료 코드 1 · 2 · 3 모두 로그 줄은 찍고(모를수록 로그가 필요하다), 이름 줄은 `failures` 가
 있을 때만 찍는다.
@@ -314,6 +344,13 @@ def failure_lines(job: dict, *, job_id: int, url: str | None, limit: int = 3) ->
 | `failures.unknown` | `{seen} of {window} runs so far` | `아직 {window}회 중 {seen}회` |
 | `failures.unnamed` | `{n} of those runs failed without naming anything` | `그 중 {n}회는 이름 없이 실패했다` |
 
+웹의 `failures.unnamed` 에는 `{window}` 가 없다 — 바로 위 줄들이 이미 창을 말한다(「최근 8회
+중 3회」). CLI 의 `note:` 는 홀로 서는 줄이라 거기서만 창을 다시 적는다.
+
+최근 행의 **상세**는 지금 `renderRecent` 안의 DOM 문자열이라 `node --test` 가 부를 수 없다.
+순수 함수 `recentDetail(job, lang) -> string[]` 를 빼서 `recentLine` 처럼 노출하고, 상세는 그
+결과를 그린다 — 두 언어를 원문 스캔이 아니라 **값으로** 잴 수 있게 된다.
+
 ---
 
 ## 3. 단계 3 — 404 가 길을 알려 준다
@@ -322,6 +359,7 @@ def failure_lines(job: dict, *, job_id: int, url: str | None, limit: int = 3) ->
 
 ```python
 _ID_IN_PATH = re.compile(r"/(\d+)")
+
 
 def not_found_hint(path: str) -> str:
     """모르는 경로에 맞는 길을 한 줄로. 숫자가 있으면 그 잡의 경로, 없으면 주요 라우트."""
@@ -352,6 +390,7 @@ raise ApiError(404, "not found", hint=not_found_hint(path))
 ```python
 MAX_IDENT = 32
 
+
 def source_ident(src: dict[str, Any] | None) -> str:
     """목록 한 칸용 짧은 코드 신원. `_source_text()` 는 큐 행 전용이라 그대로 둔다."""
 ```
@@ -362,14 +401,27 @@ def source_ident(src: dict[str, Any] | None) -> str:
 | `tree` + `branch` | `{branch} @{base_sha[:7]}` + dirty 면 `+` |
 | `tree` + branch 없음 | `{repo 의 마지막 조각} @{base_sha[:7]}` + dirty 면 `+` |
 | 아무것도 없음 | `—`(DASH) |
-| 32자 초과 | 앞을 남기고 `…` |
+| 32자 초과 | `full[:31] + "…"` — 결과 길이는 정확히 32 |
+
+결손 갈래(`_source_text` 와 달리 이 칸은 좁다 — 못 채우면 조각만 낸다):
+
+| 있는 것 | 결과 |
+|---|---|
+| git_ref · ref 만 | `{ref}` |
+| git_ref · sha 만 | `@{sha7}` |
+| tree · 이름(브랜치 → repo 마지막 조각)만 | `{이름}` |
+| tree · `base_sha` 만 | `@{sha7}` (dirty 면 `+`) |
+| 아무것도 없음 | `—` |
+
+`repo` 의 마지막 조각은 `/` 뒤이고 **끝의 `.git` 은 뗀다**(`git@github.com:org/app.git` → `app`).
 
 `rcm jobs` 한 줄과 `rcm top` 의 최근 줄에 이 칸을 넣는다(큐 행은 이미 `_source_text`).
 
 ### 4.2 `client.py` — tree 잡의 브랜치
 
 `make_snapshot()` 이 git 체크아웃이면 `git rev-parse --abbrev-ref HEAD` 를 읽어
-`Snapshot.branch` 에 담는다. 결과가 `HEAD`(detached)면 **`None`**. `cmd_run` 의 `source` 사전에
+`Snapshot.branch` 에 담는다. 결과가 `HEAD`(detached)면 **`None`**. `_git()` 이 이미 실패를 `None` 으로 삼키므로 빈 레포·
+타임아웃·git 없음도 전부 `None` 이다 — 브랜치를 못 읽었다고 스냅샷이 실패하지 않는다. `cmd_run` 의 `source` 사전에
 `"branch": snap.branch` 를 더한다.
 
 **잠근 불변식**: `tree_hash` 는 `(경로, 모드, 내용 sha256)` 목록만으로 만든다 — 브랜치는
@@ -412,6 +464,9 @@ snap = None      # 장부를 놓는다 — 대기는 20분이고 아무도 안 �
 | **B — 저장·서버** | `docs/m5h-test-scenarios-b.md` | `tests/test_store_m5h.py` · `tests/test_server_m5h.py` | §1.2 `outcome_for` 상태별 · §1.3 v11 · §2.1 v12 · 대장 쓰기/읽기/삭제 · §2.3 `GET /jobs/{id}` · §2.4 설정 검증 · §3 404 hint |
 | **C — 표시·클라이언트** | `docs/m5h-test-scenarios-c.md` | `tests/test_render_m5h.py` · `tests/test_cli_m5h.py` · `tests/test_client_m5h.py` · `tests/web/m5h.test.js` | §1.5 문구 갈림 · §2.5 실패 끝줄 · §2.6 웹 · §4 `source_ident`·`--ref`·`branch` 불변식 · §5 스냅샷 해제 |
 
+§1.4(`recent_json`·`progress_json` 에 `last_step` 을 더하는 일)의 주인은 **B** 다 —
+`test_api_status_recent_rows_have_last_step_but_never_failures` 가 그 키를 잠근다.
+
 공통 규칙:
 
 - 시각은 `tests/jobfactory.py` 의 `NOW` 를 쓴다. sleep 금지, 스레드 금지(B 의 서버 테스트는
@@ -433,7 +488,7 @@ scripts/smoke_install.sh
 | 단계 | 완료 기준 |
 |---|---|
 | 1 | #162 픽스처가 `failed_step is None` · `last_step == "build web …"` · 취소 잡에 스텝 라벨 없음 · 웹·CLI 문구 갈림 · v11 마이그레이션 |
-| 2 | 같은 key 8회 중 1회 실패한 이름이 `1 of the last 8 gate runs · intermittent?` 로 나온다 · `/api/status` 의 질의 수 불변 · 대장이 잡 행과 함께 지워진다 |
+| 2 | 같은 key 8회 중 **2회** 실패한 이름이 `2 of the last 8 gate runs · intermittent?` 로, **1회**뿐인 이름이 `first time in the last 8 gate runs` 로 나온다(§2.2 판정 표) · `/api/status` 의 질의 수 불변 · 대장이 잡 행과 함께 지워진다 |
 | 3 | `/api/jobs/162` 가 진짜 경로를 말한다 · 실패·미상 종료에 `log: rcm logs 162` |
 | 4 | `rcm jobs` 한 줄에 `<ref> @<sha>` · `--ref` 필터 · **브랜치가 `tree_hash` 를 안 바꾼다** |
 | 5 | 2만 파일 트리에서 대기 중 `Snapshot` 이 살아 있지 않다 |

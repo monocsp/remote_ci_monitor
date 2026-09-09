@@ -5,7 +5,7 @@
 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
-변이 16종:
+변이 19종:
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -21,6 +21,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (같은 파일 · Codex 리뷰 1)
   ⑮ web-progress-full-bar — 도는 잡의 예측 막대가 100% 까지 차오름 (같은 파일 · Codex 리뷰 2)
   ⑯ nowait-view-trusted — `--no-wait` 의 표시용 조회가 문서를 곧이곧대로 믿음 (`cli.py`)
+  ⑰ failed-step-fallback — 실패 스텝이 다시 「마지막으로 시작한 스텝」으로 추론됨
+     (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
+  ⑱ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
+  ⑲ ledger-outside-tx — 실패 이름 대장을 finish 트랜잭션에 안 씀 (`store.py`, M5h §2.1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -189,6 +193,41 @@ MUTANTS = (
         ),
         new="    return view if isinstance(view, dict) else None",
         tests=("tests/test_nowait_resilience.py",),
+    ),
+    # ⑰ M5h 결정 63 — 이 폴백이 운영 잡 #162 에서 **성공한 스텝**을 범인으로 지목했다.
+    Mutant(
+        name="failed-step-fallback",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="""    failed = next((s.name for s in steps if s.ok is False), None)
+""",
+        new="""    failed = next((s.name for s in steps if s.ok is False), None)
+    if failed is None and exit_code not in (None, 0) and steps:
+        failed = steps[-1].name
+""",
+        tests=("tests/test_progress_m5h.py", "tests/test_progress.py"),
+    ),
+    # ⑱ M5h 결정 66 — 취소·유실 잡은 아무 말도 안 한다. 분모에 넣으면 간헐 판정이 흐려진다.
+    Mutant(
+        name="failure-window-cancelled",
+        path="src/remote_ci_monitor/store.py",
+        old="""        states = (SUCCEEDED, FAILED, TIMED_OUT)
+""",
+        new="""        states = (SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST)
+""",
+        tests=("tests/test_store_m5h.py",),
+    ),
+    # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 거절된 finish 가 대장을 남기면 안 된다.
+    Mutant(
+        name="ledger-outside-tx",
+        path="src/remote_ci_monitor/store.py",
+        old="""            for seq, name in enumerate(fail_names, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
+                    (job_id, name, seq),
+                )
+""",
+        new="",
+        tests=("tests/test_store_m5h.py",),
     ),
 )
 

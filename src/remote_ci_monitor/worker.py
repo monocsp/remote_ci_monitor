@@ -111,6 +111,10 @@ class Outcome:
     failed_step: str | None
     code: str | None = None
     args: dict[str, Any] = field(default_factory=dict)
+    #: 「끝났을 때 어디였나」. 실패 이름 셋과 함께 움직인다 — 취소·유실은 넷 다 비어 있다 (M5h)
+    last_step: str | None = None
+    fail_names: tuple[str, ...] = ()
+    fail_truncated: bool = False
 
     def __iter__(self):
         """옛 3-튜플처럼 풀 수 있게 — `state, summary, failed_step = outcome_for(...)`."""
@@ -143,7 +147,8 @@ def outcome_for(
         started_at=started,
         finished_at=finished,
         now=finished,
-        exit_code=rc if not forced else 1,
+        # 강제 종료에 1 을 넣으면 마지막 열린 스텝이 실패로 물든다 — 그게 #176 이었다(M5h).
+        exit_code=None if forced else rc,
     )
     code: str | None = None
     args: dict[str, Any] = {}
@@ -168,8 +173,19 @@ def outcome_for(
             summary, code, args = outcome.summary("exit_code", code=rc)
         else:
             summary = None
-    failed_step = progress.failed_step if state != SUCCEEDED else None
-    return Outcome(state=state, summary=summary, failed_step=failed_step, code=code, args=args)
+    # 스텝 라벨과 실패 이름은 `failed`·`timed_out` 만 갖는다(결정 64). 취소·유실 잡에 스텝
+    # 이름을 붙이면 사람이 「그게 깨져서 멈췄나」로 읽는다. 성공 잡은 자신의 판정이 이긴다.
+    labelled = state in (FAILED, TIMED_OUT)
+    return Outcome(
+        state=state,
+        summary=summary,
+        failed_step=progress.failed_step if labelled else None,
+        code=code,
+        args=args,
+        last_step=progress.last_step if labelled else None,
+        fail_names=progress.fail_names if labelled else (),
+        fail_truncated=progress.fail_truncated if labelled else False,
+    )
 
 
 class Worker(threading.Thread):
@@ -469,6 +485,9 @@ class Worker(threading.Thread):
             summary_code=oc.code,
             summary_args=oc.args,
             failed_step=oc.failed_step,
+            last_step=oc.last_step,
+            fail_names=oc.fail_names,
+            fail_truncated=oc.fail_truncated,
             bundle=bundle,
             ttl_hours=self.config.server.artifact_retention_hours,
         )

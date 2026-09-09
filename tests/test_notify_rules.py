@@ -64,6 +64,7 @@ ENV_KEYS = {
     "RCM_REQUESTER",
     "RCM_SUMMARY",
     "RCM_FAILED_STEP",
+    "RCM_LAST_STEP",  # M5h — 선언된 실패 스텝과 「어디였나」는 다른 사실이다
     "RCM_EXIT_CODE",
     "RCM_JOB_SECONDS",
     "RCM_URL",

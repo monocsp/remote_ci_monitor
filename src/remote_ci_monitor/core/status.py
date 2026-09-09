@@ -61,6 +61,7 @@ def source_json(s: Source) -> dict[str, Any]:
     return {
         "mode": s.mode,
         "repo": s.repo,
+        "branch": s.branch,  # 옛 잡은 null — 클라이언트가 안 보내던 때가 있다 (M5h)
         "base_sha": s.base_sha,
         "dirty": s.dirty,
         "tree_hash": s.tree_hash,
@@ -107,6 +108,7 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
         # 초를 세는 기준점(M5d-2 §4.6-다) — 화면이 폴링 사이에도 부드럽게 올린다
         "job_started_at": iso(p.started_at),
         "failed_step": p.failed_step,
+        "last_step": p.last_step,
         "steps": [
             {
                 "index": s.index,
@@ -215,6 +217,7 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "summary_code": job.summary_code,
         "summary_args": dict(job.summary_args) if job.summary_args else None,
         "failed_step": job.failed_step,
+        "last_step": job.last_step,
         "cancelled_by": job.cancelled_by,
         "timeout_seconds": job.timeout_seconds,
         "source": source_json(job.source),

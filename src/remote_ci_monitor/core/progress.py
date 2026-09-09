@@ -167,7 +167,8 @@ def progress_from_markers(
     else:
         total = len(steps) if steps else None
         partial = True
-    failed = next((s.name for s in steps if s.ok is False), None)  # 선언된 것만(결정 63)
+    # 선언된 것만이다(결정 63) — 종료 코드로 스텝을 고르는 폴백은 없다.
+    failed = next((s.name for s in steps if s.ok is False), None)
     return Progress(
         phase=phase or PHASE_EXECUTING,
         steps=out_steps,
