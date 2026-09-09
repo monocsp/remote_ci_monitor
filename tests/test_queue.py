@@ -416,3 +416,78 @@ def test_removing_a_held_lane_actually_changes_the_eta():
     with_all = [r.estimate.wait_seconds for r in rows_for(jobs, wk=mixed_lanes())]
     without = [r.estimate.wait_seconds for r in rows_for(jobs, wk=mixed_lanes(drop_local2=True))]
     assert with_all == [0, 0, 0, 0] and without == [0, 0, 0, 400]
+
+
+# ── M5f: 보류 레인(held)과 사유 held_by_load ────────────────────────────────
+
+
+def held(lane: int, *, worker: str | None = None, code: str = "cpu_busy"):
+    return WorkerInfo(
+        lane=lane,
+        state="held",
+        since=ago(minutes=2),
+        worker=worker,
+        hold_code=code,
+        hold_detail={"cpu_busy": 92.4} if code == "cpu_busy" else None,
+        held_since=ago(minutes=2),
+    )
+
+
+def test_a_held_lane_is_live_but_not_schedulable():
+    """`down` 이 아니므로 살아 있다 — 그러나 그리디에서는 빠진다(언제 열릴지 모른다)."""
+    jobs = [job(1, created_min=2), job(2, created_min=1)]
+    wk = [WorkerInfo(lane=1, state="idle", since=ago(minutes=30)), held(2)]
+    rows = rows_for(jobs, wk=wk)
+    assert [r.estimate.wait_seconds for r in rows] == [0, 400]  # 레인 하나만 센다
+    assert [r.reason for r in rows] == ["not_scheduled", "held_by_load"]
+
+
+def test_one_waiting_job_consumes_one_held_lane():
+    """뒤 잡은 정직하게 `waiting_for_lane` 이다 — 보류 레인은 하나뿐이다."""
+    jobs = [job(i, created_min=4 - i, queued_min=0) for i in (1, 2, 3)]
+    wk = [WorkerInfo(lane=1, state="busy", job_id=9, since=ago(minutes=1)), held(2)]
+    running = job(9, state=RUNNING, created_min=5, started_min=1)
+    rows = {r.job.id: r for r in rows_for([running, *jobs], wk=wk)}
+    assert rows[1].reason == "held_by_load"
+    assert rows[2].reason == "waiting_for_lane" and rows[3].reason == "waiting_for_lane"
+
+
+def test_group_blocking_beats_held_by_load():
+    blocker = job(409, "qa", RUNNING, created_min=7, started_min=6, group="devices", preset="qa")
+    blocked = job(413, "qa", QUEUED, created_min=2, group="devices", preset="qa")
+    wk = [WorkerInfo(lane=1, state="busy", job_id=409, since=ago(minutes=6)), held(2)]
+    rows = {r.job.id: r for r in rows_for([blocker, blocked], wk=wk)}
+    assert rows[413].reason == "blocked_by_group"
+
+
+def test_a_held_lane_never_triggers_not_scheduled():
+    """`idle_since` 는 `WORKER_IDLE` 만 담는다 — 보류 레인이 스케줄러 이상 알람을 울리면 안 된다."""
+    j = job(1, created_min=1, queued_min=1)
+    wk = [WorkerInfo(lane=1, state="busy", job_id=9, since=ago(minutes=5)), held(2)]
+    running = job(9, state=RUNNING, created_min=6, started_min=5)
+    rows = {r.job.id: r for r in rows_for([running, j], wk=wk)}
+    assert rows[1].reason == "held_by_load"
+
+
+def test_lane_one_down_and_lane_two_held_gives_no_eta():
+    """`open` 이 비고 `live` 는 안 빈 새 경우 — 시작할 수 없는 잡에 시각을 주지 않는다.
+
+    진짜 원인인 죽은 레인 1 은 `workers[]` 의 `down` 필과 머리줄에 보인다.
+    """
+    j = job(1, created_min=1)
+    wk = [WorkerInfo(lane=1, state="down", error="ENOSPC", since=ago(minutes=5)), held(2)]
+    row = rows_for([j], wk=wk)[0]
+    assert row.reason == "held_by_load"
+    assert row.estimate.wait_seconds is None and row.estimate.finish_at is None
+
+
+def test_all_lanes_down_still_says_worker_down():
+    row = rows_for([job(1, created_min=1)], wk=workers("down:ENOSPC", "down:ENOSPC"))[0]
+    assert row.reason == "worker_down"
+
+
+def test_held_by_load_is_not_in_the_not_moving_list():
+    """의도된·자가 치유되는 상태다. 늘 켜져 있으면 worker_down·stuck 이 묻힌다(결정 45)."""
+    from remote_ci_monitor.core.model import ACTIONABLE_REASONS, REASON_HELD_BY_LOAD
+
+    assert REASON_HELD_BY_LOAD not in ACTIONABLE_REASONS

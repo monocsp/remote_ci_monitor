@@ -30,6 +30,7 @@ from remote_ci_monitor.core.model import (
     QUEUED,
     REASON_BLOCKED_BY_GROUP,
     REASON_CANCELLING,
+    REASON_HELD_BY_LOAD,
     REASON_MATERIALIZING,
     REASON_NOT_SCHEDULED,
     REASON_OVERDUE,
@@ -44,6 +45,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     UPLOADING,
     WORKER_DOWN,
+    WORKER_HELD,
     WORKER_IDLE,
     BlockedBy,
     Estimate,
@@ -235,6 +237,11 @@ def compute_queue(
     # 레인 1..M 이 함께 들어오므로(`server.pool_workers`), 번호로 키를 잡으면 로컬 레인 2 와
     # `build-02/2` 가 뭉개져 4레인 풀이 2레인처럼 계산된다(M5f).
     live_lanes = [(w.worker, w.lane) for w in live]
+    # 부하로 보류된 레인은 **살아 있지만 지금은 못 집는다**(M5f). 언제 열릴지는 모르는 값이라
+    # 그리디에 넣으면 PLAN 이 금지한 「자신있는 틀린 시각」이 된다 — 빼면 늦게 잡히고, 레인이
+    # 열리면 앞당겨진다.
+    open_lanes = [(w.worker, w.lane) for w in live if w.state != WORKER_HELD]
+    held_lanes = [(w.worker, w.lane) for w in live if w.state == WORKER_HELD]
     lane_free: dict[tuple[str | None, int], datetime] = {k: now for k in live_lanes}
     lane_last_job: dict[tuple[str | None, int], int | None] = {k: None for k in live_lanes}
     idle_since: dict[tuple[str | None, int], datetime] = {}
@@ -274,7 +281,7 @@ def compute_queue(
     # running 먼저, cancelling 그 다음 (각각 id 순)
     rows.sort(key=lambda r: (r.job.state == CANCELLING, r.job.id))
 
-    can_start = not paused and bool(live_lanes)
+    can_start = not paused and bool(open_lanes)
     for position, job in enumerate(waiting, start=1):
         expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
         waited = _seconds(job.created_at, now)
@@ -292,7 +299,7 @@ def compute_queue(
         ahead: int | None = None
         if can_start:
             # None(로컬)과 워커 이름을 같이 정렬하려면 키를 평평하게 만들어야 한다
-            lane = min(live_lanes, key=lambda ln: (lane_free[ln], ln[0] or "", ln[1]))
+            lane = min(open_lanes, key=lambda ln: (lane_free[ln], ln[0] or "", ln[1]))
             start = lane_free[lane]
             ahead = lane_last_job[lane]
             if job.concurrency_group and job.concurrency_group in group_free:
@@ -324,6 +331,11 @@ def compute_queue(
             # 이 잡이 그 idle 레인을 차지한다고 보고 다음 잡은 정상 대기로 센다
             if idle_since:
                 idle_since.pop(next(iter(idle_since)))
+            elif held_lanes:
+                # 「너를 집었을 레인이 부하로 막혀 있다」 — idle 통과 held 통은 별개다.
+                # 대기 잡 하나가 보류 레인 하나를 쓰고, 뒤 잡은 정직하게 waiting_for_lane 이다.
+                reason = REASON_HELD_BY_LOAD
+                held_lanes.pop()
         est = Estimate(
             expected_seconds=expected,
             source=source,
