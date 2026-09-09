@@ -37,7 +37,9 @@ checkout](docs/operating.md#from-a-git-checkout).
 
 `main` and `dev` are protected: no direct pushes, no exceptions.
 
-1. Branch from `dev`: `git switch dev && git pull && git switch -c <type>/<topic>`.
+1. Branch from `dev` **into its own worktree** — do not switch an existing one, someone may be
+   working in it: `git fetch origin && git worktree add -b <type>/<topic>
+   ../remote_ci_monitor-<topic> origin/dev`, then give it its own `.venv`.
 2. Open the pull request against `dev` and let CI (`test`) pass.
 3. `main` only ever takes a pull request from `dev`, which additionally runs `main-from-dev-only`.
 
