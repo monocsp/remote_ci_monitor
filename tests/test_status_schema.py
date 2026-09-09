@@ -80,6 +80,8 @@ RECENT_KEYS = {
     "summary_code",
     "summary_args",
     "failed_step",
+    # 그 이름이 확정인가 추측인가(2026-09-08 운영 사고 후속). 키 추가만 — 스키마 v1 그대로.
+    "failed_step_guessed",
     "cancelled_by",
     "timeout_seconds",
     "source",

@@ -100,6 +100,57 @@ def test_overdue_run_floors_remaining():
     assert remaining_seconds(400, 1000, CFG) > 0
 
 
+def test_parallel_script_blames_a_step_that_actually_passed():
+    """함정 #7 — 스텝을 병렬로 돌리고 마커를 나중에 몰아 내보내는 스크립트.
+
+    2026-09-08 운영에서 나온 모양이다: 게이트가 test·gitleaks·build web 을 동시에 돌린 뒤
+    마커를 정해진 순서로 몰아 찍는다. `::rcm::step-end::fail` 은 하나도 안 나오고 마지막
+    마커는 언제나 `build web` 이라, 실제로 깨진 건 `test` 인데 폴백이 `build web` 을 범인으로
+    찍었다(실패 55건 중 16건). 마커만 보고 `test` 를 골라낼 방법은 없다 — 고칠 것은 추측의
+    정확도가 아니라 **추측을 추측이라고 말하지 않는 것**이다.
+    """
+    start = ago(minutes=5)
+    names = ["test", "gitleaks", "build web"]
+    markers = [Marker(start + timedelta(seconds=i), "step", n) for i, n in enumerate(names)]
+    p = progress_from_markers(
+        markers, started_at=start, finished_at=ago(seconds=1), now=NOW, exit_code=1
+    )
+    assert p.failed_step == "build web"  # 폴백은 그대로 — 없는 척하지 않는다
+    assert p.failed_step_guessed is True  # 다만 사실이 아니라 짐작이라고 밝힌다
+
+
+def test_a_fail_marker_anywhere_makes_the_blame_certain():
+    """같은 스크립트가 `step-end::fail` 을 하나라도 찍으면 폴백을 안 탄다 — 확정이다."""
+    start = ago(minutes=5)
+    markers = [
+        Marker(start + timedelta(seconds=1), "step", "test"),
+        Marker(start + timedelta(seconds=2), "step-end", "fail"),
+        Marker(start + timedelta(seconds=3), "step", "build web"),
+    ]
+    p = progress_from_markers(
+        markers, started_at=start, finished_at=ago(seconds=1), now=NOW, exit_code=1
+    )
+    assert p.failed_step == "test" and p.failed_step_guessed is False
+
+
+def test_a_green_job_has_nothing_to_guess():
+    start = ago(minutes=5)
+    markers = [Marker(start + timedelta(seconds=1), "step", "test")]
+    p = progress_from_markers(
+        markers, started_at=start, finished_at=ago(seconds=1), now=NOW, exit_code=0
+    )
+    assert p.failed_step is None and p.failed_step_guessed is False
+
+
+def test_a_job_with_no_markers_at_all_guesses_nothing():
+    """스텝이 없으면 지목할 이름도 없다 — `failed_step` 은 null 이고 추측도 아니다."""
+    start = ago(minutes=5)
+    p = progress_from_markers(
+        [], started_at=start, finished_at=ago(seconds=1), now=NOW, exit_code=1
+    )
+    assert p.failed_step is None and p.failed_step_guessed is False
+
+
 # ── 실패 · 요약 · 단계 ────────────────────────────────────────────────────────
 
 
@@ -110,18 +161,21 @@ def test_failed_fixture_marks_failed_step_and_summary():
         load("failed.txt", start), started_at=start, finished_at=finished, now=NOW, exit_code=1
     )
     assert p.failed_step == "test"
+    assert p.failed_step_guessed is False  # step-end::fail 이 찍혔다 — 추측이 아니다
     assert p.summary == "2 tests failed"
     assert [s.ok for s in p.steps] == [True, False]
     assert p.steps_total == 3 and p.steps_done == 2  # 3개 선언, 2개만 돌았다
 
 
 def test_nonzero_exit_without_fail_marker_blames_last_step():
+    """폴백은 그대로 마지막 스텝을 고른다 — 다만 **추측이라고 말한다**."""
     start = ago(minutes=2)
     markers = [Marker(ago(seconds=90), "step", "a"), Marker(ago(seconds=60), "step", "b")]
     p = progress_from_markers(
         markers, started_at=start, finished_at=ago(seconds=1), now=NOW, exit_code=2
     )
     assert p.failed_step == "b" and p.steps[-1].ok is False
+    assert p.failed_step_guessed is True
 
 
 def test_step_end_fail_while_still_running_keeps_going():
@@ -133,6 +187,7 @@ def test_step_end_fail_while_still_running_keeps_going():
     ]
     p = progress_from_markers(markers, started_at=start, finished_at=None, now=NOW, exit_code=None)
     assert p.failed_step == "test"
+    assert p.failed_step_guessed is False
     assert p.current_name == "report" and p.steps_done == 1
 
 

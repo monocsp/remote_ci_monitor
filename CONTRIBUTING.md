@@ -10,7 +10,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js  # web UI pure functions
-python scripts/mutcheck.py      # proves the tests go red for 8 known mutations
+python scripts/mutcheck.py      # proves the tests go red for 17 known mutations
 scripts/smoke_install.sh        # the README setup on a fresh venv (builds the wheel first)
 ```
 

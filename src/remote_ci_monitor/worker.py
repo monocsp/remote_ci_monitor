@@ -111,6 +111,8 @@ class Outcome:
     failed_step: str | None
     code: str | None = None
     args: dict[str, Any] = field(default_factory=dict)
+    #: `failed_step` 이 `step-end::fail` 로 확정된 것이면 False, 종료 코드로 미룬 추측이면 True.
+    failed_step_guessed: bool = False
 
     def __iter__(self):
         """옛 3-튜플처럼 풀 수 있게 — `state, summary, failed_step = outcome_for(...)`."""
@@ -169,7 +171,19 @@ def outcome_for(
         else:
             summary = None
     failed_step = progress.failed_step if state != SUCCEEDED else None
-    return Outcome(state=state, summary=summary, failed_step=failed_step, code=code, args=args)
+    # 죽임당한 잡(취소·타임아웃·유실)의 실패 스텝은 **언제나** 추측이다. 스텝이 실패해서 끝난 게
+    # 아니라 밖에서 끊겨서 끝났기 때문이다 — 스크립트가 앞 스텝에 `step-end::fail` 을 찍어 뒀어도
+    # 그건 「그 스텝이 깨졌다」는 사실이지 「이 잡이 왜 끝났나」의 답이 아니다. 게이트가 `test`
+    # 실패를 찍고도 계속 돌다가 `build web` 에서 타임아웃으로 죽는 모양이 실제로 나온다.
+    guessed = bool(failed_step) and (forced or progress.failed_step_guessed)
+    return Outcome(
+        state=state,
+        summary=summary,
+        failed_step=failed_step,
+        code=code,
+        args=args,
+        failed_step_guessed=guessed,
+    )
 
 
 class Worker(threading.Thread):
@@ -469,6 +483,7 @@ class Worker(threading.Thread):
             summary_code=oc.code,
             summary_args=oc.args,
             failed_step=oc.failed_step,
+            failed_step_guessed=oc.failed_step_guessed,
             bundle=bundle,
             ttl_hours=self.config.server.artifact_retention_hours,
         )

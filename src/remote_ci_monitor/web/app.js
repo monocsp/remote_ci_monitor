@@ -793,7 +793,8 @@
     } else if (state === "lost") {
       summary = outcomeText(job, lang) || T(lang, "state.lost");
     } else if (job.failed_step) {
-      summary = (outcomeText(job, lang) ? outcomeText(job, lang) + " · " : "") + T(lang, "recent.step", { step: job.failed_step });
+      var stepKey = job.failed_step_guessed === true ? "recent.step_guessed" : "recent.step";
+      summary = (outcomeText(job, lang) ? outcomeText(job, lang) + " · " : "") + T(lang, stepKey, { step: job.failed_step });
     } else {
       summary = outcomeText(job, lang) || "";
     }
@@ -1686,7 +1687,7 @@
       var art = artifactsLine(job, L(), now());
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
         (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
-      if (open) html += '<div class="rdetail">' + esc(transitionsLine(job, tz(), L())) + (job.failed_step ? "<br>" + esc(tr("recent.failed_step")) + "<b>" + esc(job.failed_step) + "</b>" : "") + (outcomeText(job, L()) ? "<br>" + esc(outcomeText(job, L())) : "") + "</div>";
+      if (open) html += '<div class="rdetail">' + esc(transitionsLine(job, tz(), L())) + (job.failed_step ? "<br>" + esc(tr(job.failed_step_guessed === true ? "recent.failed_step_guessed" : "recent.failed_step")) + "<b>" + esc(job.failed_step) + "</b>" : "") + (outcomeText(job, L()) ? "<br>" + esc(outcomeText(job, L())) : "") + "</div>";
       html += "</div>";
     });
     html += "</div>";

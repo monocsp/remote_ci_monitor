@@ -143,6 +143,8 @@ MEDIANS_MAX_AGE_SECONDS = 300.0
 SSE_TICK_SECONDS = 1.0
 SSE_WRITE_TIMEOUT_SECONDS = 30.0
 _PATH_RE = re.compile(r"/[^\s'\"]+")
+#: 제어문자(개행 포함) — 로그 줄 위조를 막는다. 문면은 남기고 한 줄로 접는다.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 def _utcnow() -> datetime:
@@ -150,7 +152,15 @@ def _utcnow() -> datetime:
 
 
 def _safe(text: str) -> str:
-    return _PATH_RE.sub("<path>", text)[:200]
+    """오류 문구를 로그·상태 문서에 실을 수 있게 다듬는다 — 절대 경로를 지우고 한 줄로 접는다.
+
+    **경로 지우개지 비밀 지우개가 아니다.** 경로 밖에 맨몸으로 있는 토큰은 못 지운다. 그래서
+    자세한 문구는 로그에만 두고, 인증 없이 읽히는 `last_error` 에는 예외 이름까지만 낸다.
+
+    제어문자를 공백으로 바꾸는 이유: 문구 안의 `\\n` 이 그대로 나가면 진짜 `[rcm] error:` 줄처럼
+    생긴 두 번째 줄이 로그에 찍힌다 — 사람도 로그를 긁는 경보도 속는다.
+    """
+    return _CTRL_RE.sub(" ", _PATH_RE.sub("<path>", text))[:200]
 
 
 def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
@@ -371,10 +381,18 @@ class App(RemoteWorkersMixin):
     def log(self, msg: str) -> None:
         print(f"[rcm] {msg}", file=sys.stderr, flush=True)
 
-    def record_error(self, msg: str) -> None:
+    def record_error(self, msg: str, *, detail: str | None = None) -> None:
+        """`msg` 는 공개되는 `server.last_error`(짧게), `detail` 은 서버 로그에만(자세히).
+
+        `/api/status` 는 `read_auth = none` 이 기본이라 `last_error` 를 인증 없이 읽는다. 예외
+        문구에는 경로나 남의 입력이 실릴 수 있어 공개면은 안 넓힌다. 로그는 서버를 가진 사람만
+        보므로 거기엔 원문을 남긴다 — 2026-09-08 사고 때 로그에 `OperationalError` 만 314줄이
+        남아 「database is locked」인지 「unable to open database file」인지 못 갈랐다.
+        `detail` 은 부르는 쪽이 `_safe()` 로 씻어서 준다.
+        """
         with self._lock:
             self._last_error = msg[:200]
-        self.log(f"error: {msg}")
+        self.log(f"error: {msg}" + (f": {detail}" if detail else ""))
 
     @property
     def last_error(self) -> str | None:
@@ -1857,7 +1875,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as e:  # noqa: BLE001 — 스택은 로그에만, 응답은 한 줄
-            self.app.record_error(f"{self.command} {self.path.split('?')[0]}: {type(e).__name__}")
+            self.app.record_error(
+                f"{self.command} {self.path.split('?')[0]}: {type(e).__name__}",
+                detail=_safe(str(e)),  # 로그에만 — 공개되는 last_error 는 예외 이름까지다
+            )
             if self.app.debug:
                 import traceback
 

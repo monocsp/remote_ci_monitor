@@ -77,6 +77,38 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **A failed step that rcm only guessed at now says so.** When a job exits non-zero and its script
+  never printed `::rcm::step-end::fail`, rcm still names the last step the job reached — but that
+  name is a guess, and it was being reported as a fact. A gate that runs its steps in parallel and
+  prints the markers afterwards in a fixed order always ends on the same step, so across two days
+  of one repository's gate — 145 jobs, 55 of them failing — 16 were blamed on `build web`, which
+  the log shows had *passed*; the real failure was `test`. Nothing can recover the true step from
+  the markers alone, so rcm no longer pretends: `/api/status` carries `failed_step_guessed`, the
+  recent results — on the web page and in `rcm top` — write `(guessed)` next to the step, and
+  notification hooks get `RCM_FAILED_STEP_GUESSED`. A running job never carries a guess, because
+  it has no exit code yet. A step confirmed by `::rcm::step-end::fail` looks exactly as it did
+  before — print that marker and the blame is a fact. A job that was cancelled, timed out or lost
+  reports its step as a guess whatever the markers say: it ended because it was killed, not
+  because that step failed. Jobs that finished before this release report `null`: unknown, which
+  is neither. Database schema v11 (one added column; `/api/status` `schema_version` is unchanged —
+  keys were only added).
+- **The server log now says what a 500 actually was**, not just the exception class. During the
+  2026-09-08 outage it recorded `OperationalError` 314 times, which does not distinguish "database
+  is locked" from "unable to open database file" — two different problems with two different
+  fixes. The message is now appended to the log line, with paths redacted. `server.last_error` in
+  `/api/status` is unchanged and still carries only the class: reads are unauthenticated by
+  default, so the detail belongs in the log, which only whoever runs the server can read.
+- **The example launchd service now raises the file-descriptor limit**, as the systemd unit
+  already did. A launchd session defaults to `maxfiles 256`, and the server holds descriptors per
+  request thread, per open event stream and per SQLite connection (the database, its `-wal` and its
+  `-shm`). On 2026-09-08 a build machine ran out: `sqlite3` could no longer open the database, so
+  every request answered with a database error and notification hooks died with `Too many open
+  files`, and it stayed that way for twelve minutes until the service was restarted — the queue
+  looked alive and answered nothing. The leak behind that particular outage was fixed in 0.2.2
+  (request threads close their connection); this is the headroom that keeps the next one from being
+  fatal. Both service files now say 4096, and [operating the build
+  machine](docs/operating.md#run-as-a-service) says why. Anyone who wrote their own service file
+  should set it too.
 - **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
   50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
   time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request

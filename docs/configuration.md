@@ -51,6 +51,14 @@ Your script can report progress by printing markers at the start of a line:
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
 
+**`::rcm::step-end::fail` is what makes the failed step a fact.** Print it and rcm reports that step
+as the failure. Without it a job that exits non-zero still gets a `failed_step` — the last step it
+reached — but rcm marks that as a guess (`failed_step_guessed: true` in `/api/status`, `(guessed)`
+beside the step in the recent results on the web page and in `rcm top`, and
+`RCM_FAILED_STEP_GUESSED=1` for notification hooks). The guess is
+wrong whenever a script runs its steps in parallel and prints the markers afterwards in a fixed
+order: the last marker is then whichever step the script prints last, not the one that broke.
+
 ### Deploy presets: run a remote ref instead of an upload
 
 Gates run the session's working tree. Deploys and releases should run a **committed, pushed** ref,

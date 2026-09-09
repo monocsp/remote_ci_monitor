@@ -76,6 +76,10 @@ def notify_env(job_row: dict[str, Any], rule_name: str) -> dict[str, str]:
         "RCM_REQUESTER": sanitize_text(requester_label),
         "RCM_SUMMARY": sanitize_text(job_row.get("summary")),
         "RCM_FAILED_STEP": sanitize_text(job_row.get("failed_step")),
+        # 훅이 잘못된 지목을 그대로 퍼뜨리지 않게 — "1" 추측 · "0" 확정 · "" 모름
+        "RCM_FAILED_STEP_GUESSED": ""
+        if job_row.get("failed_step_guessed") is None
+        else ("1" if job_row.get("failed_step_guessed") else "0"),
         "RCM_EXIT_CODE": "" if exit_code is None else str(exit_code),
         "RCM_JOB_SECONDS": "" if seconds is None else str(seconds),
         "RCM_URL": sanitize_text(job_row.get("url")),
