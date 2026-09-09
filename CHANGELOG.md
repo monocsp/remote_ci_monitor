@@ -8,6 +8,13 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **A progress bar on every running job.** The web page draws one bar under each running row and
+  says what it measures: `50% · 4/8 steps` when the job declares its step count with
+  `::rcm::steps::N`, `70% · by expected time` when it does not. A job past its estimate reads
+  `past the estimate` and a job nothing can be said about — stuck, preparing its workspace, or
+  with no estimate at all — reads `progress —`. The time-based bar grows every second instead of
+  jumping between refreshes, and no bar ever shows a percentage the page cannot stand behind.
+  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
 - **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
   stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
   a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
@@ -21,6 +28,15 @@ of a key bumps that number and is listed here.
   [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
 
 ### Changed
+- **Queue rows now arrive folded.** Running rows used to open themselves, so two or three running
+  jobs filled the screen with step lists and log tails. The row keeps what answers "how is it
+  going" — the progress bar and `step 2/4 build 2s` in the reason column — and **▸** opens the step
+  list, the log tail and the Log/Cancel buttons. The page remembers which rows *you* opened
+  (`rcm.expanded` in that browser), not which ones you closed.
+  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
+- **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
+  and it was the one place the page dropped it.
+  ([#68](https://github.com/monocsp/remote_ci_monitor/pull/68))
 - **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
   `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
   `held`. `schema_version` is unchanged.

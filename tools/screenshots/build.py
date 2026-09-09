@@ -62,6 +62,19 @@ def sub(r: Rect, *, h: float | None = None, w: float | None = None) -> Rect:
     return (r[0], r[1], w if w is not None else r[2], h if h is not None else r[3])
 
 
+def on_row(d: dict, sel: str, r: Rect) -> Rect:
+    """`r` 과 세로로 겹치는 `sel` 중 가장 왼쪽 것. 같은 줄의 이웃(예: 결과 필 옆의 잡 번호)을
+    고를 때 쓴다 — 문서 순서로 idx 를 세면 위아래 줄을 잘못 집는다."""
+    items = [
+        e
+        for e in (d.get(sel) or [])
+        if e["w"] > 0 and e["h"] > 0 and e["y"] < r[1] + r[3] and e["y"] + e["h"] > r[1]
+    ]
+    assert items, f"{sel} on the row at y={r[1]} not found"
+    e = min(items, key=lambda e: e["x"])
+    return (e["x"], e["y"], e["w"], e["h"])
+
+
 def out(name: str, src: str, boxes, crop=None, **kw) -> None:
     sizes[name] = annotate_file(RAW / f"{src}.png", OUT / name, boxes, crop=crop, **kw)
 
@@ -101,14 +114,16 @@ def main() -> int:
 
     # ── 웹 ──────────────────────────────────────────────────────────────────
     d = rects("queue")
-    row_a = union(pick(d, "tr[data-job]", job="4", idx=0), pick(d, "tr[data-job]", job="4", idx=1))
+    # 3 은 행 자체, 4 는 그 아래 막대, 5 는 펼친 스텝 목록 — 상자를 겹쳐 그리지 않는다
+    row_a = pick(d, "tr[data-job]", job="4", idx=0)
+    bar_a = pick(d, "tr.qbar", job="4")
     steps_a = union(
         pick(d, ".prog .head", idx=0), pick(d, ".minibar", idx=0), pick(d, ".steps", idx=0)
     )
     pool = union(
         pick(d, ".pool-h", job="mac2"),
         pick(d, "tr[data-job]", job="6", idx=0),
-        pick(d, "tr[data-job]", job="6", idx=1),
+        pick(d, "tr.qbar", job="6"),
     )
     # 히어로: 주석 없는 큐 화면(README 맨 위)
     hero = Image.open(RAW / "queue.png").crop((0, 0, 1280, 745))
@@ -121,10 +136,11 @@ def main() -> int:
             (1, pick(d, "#summary")),
             (2, pick(d, "tr.qgroup.running"), "l"),
             (3, row_a),
-            (4, steps_a),
-            (5, union(pick(d, "tr.qgroup.waiting"), pick(d, "tr[data-job]", job="5")), "l"),
-            (6, pick(d, "td.eta", idx=1)),
-            (7, pool),
+            (4, bar_a, "r"),  # 막대 상자는 얇다 — 번호를 오른쪽 밖에 둬야 5 와 안 겹친다
+            (5, steps_a, "l"),
+            (6, union(pick(d, "tr.qgroup.waiting"), pick(d, "tr[data-job]", job="5")), "l"),
+            (7, pick(d, "td.eta", idx=1)),
+            (8, pool),
         ],
         crop=(0, 0, 1280, 745),
     )
@@ -167,11 +183,12 @@ def main() -> int:
     )
 
     r = rects("recent")
+    failed_pill = pick(r, ".pill", text="failed")
     out(
         "web-recent.png",
         "recent",
         [
-            (1, pick(r, ".pill", text="failed"), "l"),
+            (1, union(on_row(r, ".rrow .id", failed_pill), failed_pill), "l"),
             (2, pick(r, ".rdetail"), "l"),
             (3, pick(r, ".rerun"), "tr"),
             (4, pick(r, ".chip", text="pool"), "tr"),

@@ -603,3 +603,110 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
     assert "no host sample" not in recent_text.lower(), recent_text
     assert "NO HOST SAMPLE" not in visible_text and "NO WORKERS" not in visible_text
     assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
+
+
+# ── 접힌 행 · 전체 진행 막대 · 최근 완료의 잡 번호 (2026-09-09 오너 요청) ──────────────
+
+# 도는 행 하나에 대해: 펼침 상태 · 막대 · 이유 칸의 지금 스텝 · 저장된 펼침 목록.
+FOLD_JS = """
+(id => {
+  const row = document.querySelector('#queue tr[data-job="' + id + '"]');
+  const bar = document.querySelector('#queue tr.qbar[data-bar="' + id + '"]');
+  const pbar = bar ? bar.querySelector('.pbar[role="progressbar"]') : null;
+  const btn = document.querySelector('[data-toggle="' + id + '"]');
+  return {
+    expanded_rows: document.querySelectorAll('#queue tr.expanded').length,
+    aria_expanded: btn ? btn.getAttribute('aria-expanded') : null,
+    steps_blocks: document.querySelectorAll('#queue .steps').length,
+    bars: document.querySelectorAll('#queue tr.qbar').length,
+    bar: pbar === null ? null : {
+      cls: pbar.className,
+      label: bar.querySelector('.plab').textContent.trim(),
+      valuetext: pbar.getAttribute('aria-valuetext'),
+      width: pbar.querySelector('i').getAttribute('style'),
+      tick: bar.querySelector('.pwrap').getAttribute('data-tick'),
+      expected: bar.querySelector('.pwrap').getAttribute('data-expected'),
+    },
+    reason: row ? row.querySelector('td.reason').textContent.replace(/\\s+/g, ' ').trim() : null,
+    stored: localStorage.getItem('rcm.expanded'),
+  };
+})(%d)
+"""
+
+
+def test_running_row_is_folded_and_carries_an_overall_bar(scene, tmp_path):
+    """오너 요청(2026-09-09): 상세는 기본으로 접히고, 도는 잡은 전체 진행 막대로 보인다.
+
+    접힌 채로도 「어디까지 왔나」(막대 + 퍼센트)와 「지금 뭘 하나」(이유 칸의 스텝)가 읽혀야
+    한다 — 접기가 정보를 감추는 것이 아니라 자리만 줄이는 것이어야 접어 둘 수 있다.
+    """
+    with Chrome(tmp_path / "chrome-fold", window="1240,900") as c:
+        c.open(scene.url, ready_js=scene.ready_js())
+        folded = c.eval(FOLD_JS % scene.running)
+        c.eval(f"document.querySelector('[data-toggle=\"{scene.running}\"]').click()")
+        opened = c.eval(FOLD_JS % scene.running)
+        c.eval(f"document.querySelector('[data-toggle=\"{scene.running}\"]').click()")
+        closed = c.eval(FOLD_JS % scene.running)
+        visible_text = c.eval("document.body.innerText")
+    scene.assert_still_running()
+
+    # 처음엔 접혀 있다 — 펼친 행도, 스텝 목록도 없다
+    assert folded["expanded_rows"] == 0, "도는 행이 기본으로 펼쳐져 있다"
+    assert folded["steps_blocks"] == 0, "접힌 행에 스텝 목록이 남아 있다"
+    assert folded["aria_expanded"] == "false"
+    assert folded["stored"] in (None, "[]"), folded["stored"]
+
+    # 접혀 있어도 막대와 지금 스텝은 보인다. 막대는 도는 잡 하나에만 붙는다(대기 잡엔 없다)
+    assert folded["bars"] == 1, folded["bars"]
+    bar = folded["bar"]
+    assert bar is not None, "도는 행에 전체 진행 막대가 없다"
+    assert re.search(r"\d+%|—", bar["label"]), bar
+    assert bar["valuetext"] == bar["label"], bar  # 보조기기가 읽는 값과 눈에 보이는 값이 같다
+    assert re.search(r"width:\s*\d+(\.\d+)?%", bar["width"] or ""), bar
+    assert "step" in folded["reason"].lower(), folded["reason"]
+    # `slow` 은 총 스텝 수를 안 알린다 → 시간 눈금. 그러면 1초 틱이 스스로 밀 기준점이 붙는다
+    assert "by expected time" in bar["label"], bar
+    assert bar["cls"] == "pbar time", bar
+    assert bar["tick"] == "progress" and float(bar["expected"]) > 0, bar
+
+    # ▸ 를 누르면 펼쳐지고 그 선택이 남는다
+    assert opened["expanded_rows"] == 1, "▸ 를 눌러도 펼쳐지지 않는다"
+    assert opened["steps_blocks"] == 1
+    assert opened["aria_expanded"] == "true"
+    assert json.loads(opened["stored"]) == [scene.running], opened["stored"]
+    assert opened["bars"] == 1, "펼쳐도 막대는 그대로 하나다"
+
+    # 다시 누르면 접히고 저장된 목록에서도 빠진다
+    assert closed["expanded_rows"] == 0
+    assert closed["aria_expanded"] == "false"
+    assert json.loads(closed["stored"]) == [], closed["stored"]
+
+    assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
+
+
+def test_recent_rows_show_the_job_id(tmp_path):
+    """오너 요청(2026-09-09): 큐 행에 있는 `#412` 가 최근 완료 행에도 있어야 한다 —
+    로그·재실행·문의가 전부 잡 번호로 이뤄지는데 끝난 잡에서만 번호가 사라졌다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        jid = srv.submit(preset="ok")[1]["job_id"]
+        assert srv.upload(jid)[0] == 200
+        assert srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})[0] < 300
+        status_until(
+            srv,
+            lambda d: any(r["id"] == jid for r in d["pools"][0]["recent"] or []),
+            timeout=5.0,
+        )
+        with Chrome(tmp_path / "chrome-recent-id", window="1240,900") as c:
+            c.open(
+                f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
+                ready_js=f"document.querySelector('#recent [data-job=\"{jid}\"]') !== null",
+            )
+            row_id = c.eval(
+                f"document.querySelector('#recent [data-job=\"{jid}\"] .id').textContent"
+            )
+            row_text = c.eval(f"document.querySelector('#recent [data-job=\"{jid}\"]').textContent")
+    finally:
+        srv.close()
+    assert row_id.strip() == f"#{jid}", row_id
+    assert f"#{jid}" in row_text, row_text
