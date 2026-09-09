@@ -562,8 +562,10 @@ class Client:
         _, _, body = self._request("GET", path, timeout=timeout)
         return json.loads(body) if body else None
 
-    def post_json(self, path: str, obj: Any = None) -> Any:
-        _, _, body = self._request("POST", path, json_body=obj if obj is not None else {})
+    def post_json(self, path: str, obj: Any = None, *, timeout: float | None = None) -> Any:
+        _, _, body = self._request(
+            "POST", path, json_body=obj if obj is not None else {}, timeout=timeout
+        )
         return json.loads(body) if body else None
 
     # ── API ──
@@ -680,6 +682,11 @@ class Client:
 
     def cancel(self, job_id: int) -> dict[str, Any]:
         return self.post_json(f"/jobs/{job_id}/cancel")
+
+    def gc(self, *, dry_run: bool = False, timeout: float | None = None) -> dict[str, Any]:
+        """`POST /gc`(admin). 스캔이 오래 걸릴 수 있어 **자기 시한**을 쓴다 — 일반 요청의
+        15초로는 데이터가 조금만 커도 못 기다린다."""
+        return self.post_json("/gc", {"dry_run": dry_run}, timeout=timeout)
 
     def pause(self) -> dict[str, Any]:
         return self.post_json("/pause")

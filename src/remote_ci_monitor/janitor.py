@@ -66,6 +66,16 @@ def _errname(e: BaseException) -> str:
     return type(e).__name__
 
 
+def _item_json(item: Any) -> dict[str, Any]:
+    """계획 한 줄 → JSON. 사유는 **코드**다(결정 37 — 서버는 문장을 안 보낸다)."""
+    return {
+        "job_id": item.job_id,
+        "workspace_bytes": item.workspace_bytes,
+        "snapshot_bytes": item.snapshot_bytes,
+        "reason": item.reason,
+    }
+
+
 class Janitor:
     """보존 정리. `sweep_once` 는 동기, `start` 는 주기 스레드."""
 
@@ -418,9 +428,14 @@ class Janitor:
             self._measured_at = None if error else now
             self._last_totals = {k: (None if error else v) for k, v in totals.items()}
         free = self._free_bytes() if free_bytes is _UNSET else free_bytes
-        return workspaces_to_purge(
+        plan = workspaces_to_purge(
             items, now, self._budget(), free_bytes=free, inventory_error=error
         )
+        # 계획을 세웠다는 것은 **방금 쟀다**는 뜻이다 — dry-run 도 마찬가지다. 회계가 이 값을
+        # 쓰므로 여기서 안 담아 두면 `rcm gc --dry-run` 의 요약이 「모른다」로 나온다.
+        with self._lock:
+            self._last_plan = plan
+        return plan
 
     def _purge_volume(self, job_id: int) -> bool:
         """한 잡의 워크스페이스와 스냅샷 tar. 삭제 직전에 종료 상태를 다시 본다(이중 안전)."""
@@ -452,6 +467,11 @@ class Janitor:
         if gone:
             self.log(f"retention: reclaimed volume from {gone} jobs")
         free_after = self._free_bytes()
+        if gone:
+            # 지운 뒤 다시 재서 회계를 갱신한다. 안 그러면 화면이 **지우기 전** 숫자를 들고 있어
+            # 「예산 초과 — 다음 sweep 이 정리한다」를 이미 정리한 뒤에도 한 시간 동안 말한다.
+            # 표시용 측정이지 두 번째 삭제 계획이 아니다 — `apply` 는 회차당 한 번뿐이다.
+            self.plan(now, free_bytes=free_after)
         if floor_ran and free_before is not None and free_after is not None:
             # 지웠는데 여유가 안 늘면 지우는 게 답이 아니다 — 그때부터는 증거를 태우는 일뿐이다.
             if free_after - free_before < plan.known_freed_bytes * PROGRESS_RATIO:
@@ -461,9 +481,42 @@ class Janitor:
                         "the floor rule is paused until `rcm gc`"
                     )
                 self.no_progress = True
-        with self._lock:
-            self._last_plan = plan
         return plan
+
+    def gc_report(self, now: datetime, *, dry_run: bool) -> dict[str, Any]:
+        """`POST /gc` 의 본문 — **계획과 결과를 가른다**(§5.5).
+
+        계획의 바이트를 실제 회수처럼 내면 거짓이다. 삭제는 실패할 수 있다.
+        """
+        with self._operation_lock:
+            plan = self.plan(now)
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "planned": [_item_json(i) for i in plan.items],
+                    "deleted": [],
+                    "failed": [],
+                    "freed_bytes": 0,
+                }
+            self.no_progress = False  # 사람이 보고 부른 것이라 한 번 더 해 본다
+            deleted, failed, freed = [], [], 0
+            for item in plan.items:
+                try:
+                    if self._purge_volume(item.job_id):
+                        deleted.append(_item_json(item))
+                        freed += (item.workspace_bytes or 0) + (item.snapshot_bytes or 0)
+                except OSError as e:
+                    failed.append({"job_id": item.job_id, "error_code": _errname(e)})
+                    self.on_error(f"retention: volume {item.job_id}: {_errname(e)}")
+            with self._lock:
+                self._last_plan = plan
+            return {
+                "dry_run": False,
+                "planned": [_item_json(i) for i in plan.items],
+                "deleted": deleted,
+                "failed": failed,
+                "freed_bytes": freed,
+            }
 
     def gc(self, now: datetime, *, dry_run: bool) -> PurgePlan:
         """사람이 손으로 부르는 청소. dry-run 은 계획만 낸다.

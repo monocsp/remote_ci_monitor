@@ -21,6 +21,16 @@ of a key bumps that number and is listed here.
   than guessing. ([Configuration](docs/configuration.md#retention-what-is-kept-and-for-how-long))
 
 ### Added
+- **`rcm gc` reclaims workspace storage now, and `--dry-run` shows what would go.** With an admin
+  token it runs the same plan the sweeper does, and reports what it planned, what it deleted and
+  what failed separately — a plan is not a receipt. `rcm gc --dry-run --config server.toml` runs
+  **without a server at all**, reading only the config and the data directory, so you can see what
+  a new release would remove before you restart into it. A run that outruns `--timeout` (600 s)
+  exits 3 (unknown), never failure: the server may still be deleting.
+- **The screen says what the data directory holds and when the next sweep is.** `/api/status`
+  carries `server.job_storage`, `/api/health` carries `storage`, `rcm check` prints one `storage`
+  line, and the web host card shows it under the disk meter in both languages. What cannot be
+  measured reads `—`, never `0`. (`schema_version` is unchanged — keys were only added.)
 - **A progress bar on every running job.** The web page draws one bar under each running row and
   always says what it measured: `50% · 4/8 steps` when the job declares its step count with
   `::rcm::steps::N`, `70% · by measured time` or `by preset estimate` when it does not — so the
