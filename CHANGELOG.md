@@ -28,13 +28,13 @@ of a key bumps that number and is listed here.
   floor and its no-progress check plan with the same estimate, while the byte budget still counts
   every link. `server.job_storage` gains `shared_bytes` and `estimated_reclaimable_bytes`
   (`schema_version` unchanged — keys were only added).
-  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
 - **The storage line says how old its number is.** `rcm check` prints
   `rcm data 30.9 GB · measured 57m ago` and the web host card `rcm 데이터 30.9 GB · 57m 전 측정`.
   A finished workspace is measured once and remembered for up to a day, and the age is that of the
   oldest measurement in the total — a cached figure is never shown as fresh. `server.job_storage`
   also carries `inventory_checked_at`, when the directories were last listed.
-  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
 
 ### Added
 - **The server hands out its own client.** `GET /client/remote_ci_monitor-<version>-py3-none-any.whl`
