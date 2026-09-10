@@ -42,6 +42,8 @@ from test_server import PRESETS, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
+#: Chrome 이 뜨고 첫 CDP 응답을 주기까지의 마감(초). 이후 호출은 `Chrome.call` 의 기본 15초.
+COLD_START_SECONDS = 60.0
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 OTHER_TREE = "ab" * 32
 
@@ -152,12 +154,19 @@ class Chrome:
         self.buf = b""
         self.next_id = 0
         self.session: str | None = None
-        self.session = self._attach_first_page(timeout=15.0)
-        self.call("Page.enable")
+        # 첫 응답까지의 마감은 넉넉하게: CI 러너(ubuntu 3.13)에서 Chrome 의 찬 기동이 15초를 넘겨
+        # 「CDP: no reply before the deadline」로 하루 네 번 빨갰다(2026-09-10 · #85 #87 #92 ×2).
+        # 붙은 뒤의 호출은 15초 그대로다 — 늘어진 페이지를 숨기지 않는다.
+        self.session = self._attach_first_page(timeout=COLD_START_SECONDS)
+        self.call("Page.enable", timeout=COLD_START_SECONDS)
         # 페이지 스크립트보다 **먼저** 도는 수집기. 터진 render() 는 타임아웃이 아니라 이 목록으로
         # 드러난다 — 「page not ready within 15s」보다 「ReferenceError: local is not defined」가
         # 원인이다. `page_errors()` 로 읽고, 테스트는 0건을 단언한다.
-        self.call("Page.addScriptToEvaluateOnNewDocument", {"source": PAGE_ERROR_COLLECTOR_JS})
+        self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": PAGE_ERROR_COLLECTOR_JS},
+            timeout=COLD_START_SECONDS,
+        )
 
     def __enter__(self) -> "Chrome":
         return self
