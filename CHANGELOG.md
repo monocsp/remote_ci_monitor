@@ -49,7 +49,7 @@ of a key bumps that number and is listed here.
   read the key is `null` with `step_timeline_error_code`, never an empty list. The stored
   `failed_step` and `last_step` are unchanged, and `failures[].step` now recognises every step of
   the timeline, not only those two. `schema_version` stays 1 — a key was added.
-  ([#107](https://github.com/monocsp/remote_ci_monitor/pull/107))
+  ([#108](https://github.com/monocsp/remote_ci_monitor/pull/108))
 - **A verified wrapper for gates that cannot be changed to print markers.** The server still records
   only what a script declares with `::rcm::fail::<name>` and `::rcm::step-end::fail` — it never
   parses output, and a failure that prints no markers has no name in the ledger, by design.
