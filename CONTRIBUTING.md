@@ -43,6 +43,22 @@ checkout](docs/operating.md#from-a-git-checkout).
 2. Open the pull request against `dev` and let CI (`test`) pass.
 3. `main` only ever takes a pull request from `dev`, which additionally runs `main-from-dev-only`.
 
+## Names
+
+A branch, a commit and a pull request are read by people who were not there. Each name says
+**what changes**, not only where or which milestone. `tools/guard_naming.py` refuses names that do
+not fit (it is a `PreToolUse` hook for Claude Code sessions, and a CLI for everyone:
+`python3 tools/guard_naming.py branch|commit|pr <text>`). The working checklists are the
+`.claude/skills/branch`, `commit` and `pr` skills; the research behind the rules is in
+[`docs/reviews/2026-09-10-naming-conventions-research.md`](docs/reviews/2026-09-10-naming-conventions-research.md).
+
+| what | shape | rule |
+|---|---|---|
+| branch | `<type>/<scope>-<what-it-does>` | type in `feat fix docs test refactor perf ci build chore`; lowercase, digits, hyphens; 2–7 words; ≤ 48 chars; no hash or session id; not a scope or milestone code alone (`fix/cli-ux` ✗ → `fix/cli-run-no-wait-eta` ✓). `release/vX.Y.Z` is the other shape. The worktree is `../remote_ci_monitor-<what-it-does>` |
+| commit subject | `<type>(<scope>)!: <summary>` | [Conventional Commits](https://www.conventionalcommits.org/) header; type adds `release` and `revert`; scope optional and lowercase; summary in Korean, present tense, no trailing period, first line ≤ 72 chars. `Merge …`, `Revert …`, `fixup!` are git's own and exempt |
+| commit body | blank line, 72 columns | **what** and **why** — the problem, the decision, the trade-off, the plan section or decision number, what the tests lock. Trailers at the end: `Refs: #N`, `Closes #N`, `BREAKING CHANGE:`, and the attribution lines a session is given |
+| pull request | title = commit subject; body = 한 줄 · 왜 · 무엇 · 검사 · 문서 | one concern per PR; `WIP:` + draft until ready; merge only on green CI, as a merge commit titled `<title> (#N)`; delete the branch and remove the worktree after |
+
 ## Documentation
 
 Every user-visible change updates the docs in the same pull request. The rules — which file
