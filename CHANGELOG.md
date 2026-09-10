@@ -210,7 +210,10 @@ of a key bumps that number and is listed here.
   the sha are the same forty characters, and the row read `092dc5854301a87eab47c0… @092dc58`. When
   the ref *is* the sha it now shows once (`@092dc58`; `dolomood @092dc58` in the queue). A ref that
   merely starts like the sha — a `092dc58` branch or tag — still shows both.
-  ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92))
+  ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92)) The `submitted job #1 (gate · …)`
+  line `rcm run` prints on submit follows the same rule: `(gate · @092dc58)` for a full-sha ref,
+  `(gate · main @092dc58)` for a branch.
+  ([#100](https://github.com/monocsp/remote_ci_monitor/pull/100))
 - **`rcm wait --job 999` on a job that does not exist ended with `log: rcm logs 999`** — a hint
   pointing at nothing. The line is now left out only when the server answered a definite 404; a
   connection that was lost, or a `--timeout` that ran out first, still exits 3 (unknown) and still

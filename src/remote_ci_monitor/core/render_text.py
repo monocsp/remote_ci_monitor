@@ -460,6 +460,18 @@ def _repo_piece(repo: Any) -> str:
     return piece[:-4] if piece.endswith(".git") else piece
 
 
+def ref_ident(ref: Any, sha: Any) -> str:
+    """`rcm run --ref` 의 제출 줄 신원 — `<ref> @<짧은 sha>`. ref 가 곧 sha 면 `@<짧은 sha>`.
+
+    `source_ident()` 과 같은 규칙(M5i I2)이지만 자르지 않는다 — 제출 줄은 칸이 아니라 한 줄이고,
+    방금 친 ref 를 그대로 되비쳐 준다. 응답에 sha 가 없으면(옛 서버) `—` 다(수를 지어내지 않는다).
+    """
+    short = _short_sha(sha) or DASH
+    if _ref_is_the_sha(ref, sha):
+        return f"@{short}"
+    return f"{ref} @{short}"
+
+
 def source_ident(src: dict[str, Any] | None) -> str:
     """목록 한 칸용 짧은 코드 신원 — `<ref|branch> @<짧은 sha>`(M5h §4.1).
 
