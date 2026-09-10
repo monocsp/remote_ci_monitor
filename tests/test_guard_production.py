@@ -269,6 +269,39 @@ def test_a_copy_of_the_production_config_still_points_at_the_production_data(tmp
     assert bash(f"rcm token --config {other} list") is None
 
 
+@pytest.mark.parametrize(
+    "prefix", ["RCM_SERVER_DATA_DIR={DATA} ", "env RCM_SERVER_DATA_DIR={DATA} "]
+)
+def test_the_data_dir_env_override_points_a_test_config_at_the_production_data(tmp_path, prefix):
+    """`RCM_SERVER_DATA_DIR` 은 CLI 의 env 덮어쓰기(`RCM_<SECTION>_<KEY>`, config.py
+    `_env_overrides`)라 설정 파일보다 우선한다 — 시험 설정을 줘도 그 변수가 운영을 가리키면 운영
+    DB 가 열린다."""
+    test = tmp_path / "test.toml"
+    test.write_text(f'[server]\nport = 8795\ndata_dir = "{tmp_path}/data"\n')
+    verdict = bash(prefix.format(DATA=DATA) + f"rcm token --config {test} add laptop")
+    assert verdict is not None and verdict.decision == "deny", verdict
+
+
+def test_the_data_dir_env_override_in_the_session_environment_is_seen(tmp_path, monkeypatch):
+    """조각 앞이 아니라 세션 환경에 있어도 CLI 는 읽는다 — `RCM_CONFIG` 와 같은 규칙."""
+    test = tmp_path / "test.toml"
+    test.write_text(f'[server]\nport = 8795\ndata_dir = "{tmp_path}/data"\n')
+    monkeypatch.setenv("RCM_SERVER_DATA_DIR", str(DATA))
+    verdict = bash(f"rcm token --config {test} add laptop")
+    assert verdict is not None and verdict.decision == "deny", verdict
+
+
+def test_the_data_dir_env_override_away_from_production_is_free(monkeypatch):
+    """반대로 변수가 시험 디렉터리를 가리키면 운영 설정을 줘도 운영 DB 는 안 열린다 — 그리고
+    `--data-dir` 은 변수보다 앞선다(CLI 와 같은 순서)."""
+    production_config = f"--config {CONFIG}/server.toml"
+    assert bash(f"RCM_SERVER_DATA_DIR=/tmp/rcm-test rcm token {production_config} list") is None
+    verdict = bash(f"RCM_SERVER_DATA_DIR=/tmp/rcm-test rcm token --data-dir {DATA} add laptop")
+    assert verdict is not None and verdict.decision == "deny", verdict
+    monkeypatch.setenv("RCM_SERVER_DATA_DIR", "/tmp/rcm-test")
+    assert bash(f"rcm token {production_config} list") is None
+
+
 def test_the_service_venvs_own_rcm_may_manage_its_tokens(monkeypatch):
     """운영 빌드가 운영 DB 를 여는 것은 정상 운영이다 — 마이그레이션이 없다."""
     assert bash(f"{VENV}/bin/rcm token --config {CONFIG}/server.toml add laptop") is None
