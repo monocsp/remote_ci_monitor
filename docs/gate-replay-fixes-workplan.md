@@ -9,6 +9,10 @@
 > (「스키마가 다르면 계획하지 않는다」 · 「`user_version=7` 이면 duplicate column」 · B4 를 새 설계로 적은 것)을 고쳤고,
 > 초안에 없던 P0 하나(v16)와 기존 문제 일곱(§4)이 더해졌다. 항목마다 **결정**을 적었다: 채택 · 수정 채택 · 보류 · 기각.
 >
+> v1.1 (2026-09-10 오후): 두 항목이 더해졌다 — **B5**(PR 1 의 실기 확인이 찾은 것: `data_dir = "~/…"` 이면 표본의 `disk` 가
+> `null`)와 **I8**(다른 머신에서 온 보고: 클라이언트가 서버 버전을 못 따라온다 — 서버가 자기 wheel 을 주고, 릴리스는 빠짐없이
+> 끊긴다). 결정 81~83 · PR 1b · 6 · 7. 게이트 재현이 아니라 그 뒤의 실측에서 왔다.
+>
 > 바꾸지 않는 것: 런타임 의존성 0 · 스키마 v1(키 추가만) · 순수 계층은 I/O 도 시계도 안 본다 · **서버는 임의 출력을 파싱하지
 > 않는다**(마커만 믿는다) · fail-open 금지 · 옛 빌드가 새 DB 를 거절하는 것(맞는 동작이다).
 
@@ -28,6 +32,8 @@
 | I5 | 개선 | 웹 렌더 경로 테스트 — Chrome 테스트가 **있는데** 표본에 `disk` 가 없었다 | P0 | 수정 채택: 표본·단언 강화, ubuntu 잡은 Chrome 없으면 실패 · ESLint 보류 | 1 |
 | I6 | 개선 | 회계 나이 미표시 · `measured_at` 이 캐시 시각을 덮는다 | P2 | 수정 채택(가장 오래된 측정 시각 · `measured 57m ago`) | 3 |
 | I7 | 문서 | PLAN 의 CLI 예시가 `failed_step_guessed` · `operating.md` 업그레이드 절차가 B2 를 유발 | P1 | 수정 채택(절차 순서 교체) | 2·5 |
+| B5 | 버그 | `data_dir = "~/…"` 이면 서버 샘플러가 `~` 를 안 푼 경로로 `disk_usage` 를 불러 표본의 `disk` 가 `null` — 디스크 막대·회계 줄이 안 보인다(예시 설정의 기본값이 이 경우) | P1 | 채택(`cfg.data_dir` 프로퍼티를 쓴다) | 1b |
+| I8 | 설계 | 클라이언트가 서버 버전을 못 따라온다 — 서버는 0.2.5(main 소스), 노트북 0.2.2, 릴리스 최신 v0.2.4(`v0.2.5` 태그 없음) | P1 | 수정 채택: 서버가 자기 wheel 을 준다(`/client/…whl` · 결정 81) · main 의 버전 상승이 태그를 만든다(결정 82) · `min_client_version`·`rcm check` 행, `self-update` 는 보류(결정 83) | 6·7 |
 | O1 | 운영 | 이 Mac 의 운영 DB 가 스키마 15 인 채 v0.2.5 가 돌고 있다 | **지금** | 재시작 금지 → PR 1~3 릴리스(v0.2.6) → pause·drain·백업·정지·업그레이드 | — |
 
 ## 1. 방법
@@ -195,6 +201,26 @@ projected to remain …` · 실제 gc 는 삭제 뒤 인벤토리와 여유를 �
 (회수량 과대 → 첫 회차 뒤 latch 가 피해를 제한) · 필드가 `VolumeItem`·`PurgeItem`·JSON·렌더러·캐시·순수 테스트로 전파된다 ·
 APFS 클론은 계속 범위 밖. 17.5 GB 규모의 실제 오차를 바로잡는 가치가 더 크다.
 
+### B5 — `data_dir = "~/…"` 이면 호스트 표본의 `disk` 가 `null` (P1 · 채택 · PR 1 실기 확인에서)
+
+**현상.** PR 1 의 실기 확인(2026-09-10 · 8790 · `data_dir = "~/.local/share/rcm-devtest-pr1"`)에서 `/api/status` 의 로컬 표본이
+`disk: null` 이었다 — 디스크 막대도 「rcm 데이터 …」 줄도 안 그려진다(`rcm top` 도 같다). 절대경로로 바꾸니 나왔다.
+
+**원인.** `server.py:342` 가 `HostSampler(disk_path=str(self.config.server.data_dir))` 로 **설정 파일의 원시 문자열**을 넘긴다.
+`~` 가 안 풀린 채 `shutil.disk_usage("~/…")` 가 `FileNotFoundError` → `_disk_usage()` 가 None(부분 실패는 그 칸만 None — 설계대로다).
+`ServerConfig.data_dir` 프로퍼티(`config.py:182`, `expanduser()`)가 있는데 여기서만 안 썼다. `examples/server.toml` 의 기본값
+`data_dir = "~/.local/share/rcm"` 이 정확히 이 경우라, 예시대로 설치한 서버는 M4 이후 줄곧 디스크 칸이 비어 있었다. 원격 워커
+(`remote_worker.py:638`)는 `config.data_path`(푼 값)를 써서 문제없다.
+
+**왜 지나쳤나.** 이 Mac 의 운영 설정은 절대경로다(그래서 운영에서는 디스크가 보였고 B1 이 터졌다). 테스트의 `Server` 픽스처도
+`tmp_path` 절대경로다. `~` 설정에서는 B1 도 안 났다 — 그 줄이 안 돌아서.
+
+**고치는 법.** `disk_path=str(self.config.data_dir)`. 테스트: `data_dir = "~/x"` 로 만든 `App` 의 `sampler.disk_path` 가 절대경로이고
+`_disk_usage(그 경로)` 가 dict 인 것 — 그리고 `Server` 픽스처와 별개로 `~` 설정 문자열이 `HostSampler` 까지 가는 경로 하나.
+
+**영향 · 반대급부.** 없음. 릴리스 차단은 아니지만 10분짜리라 PR 1 바로 뒤에 **PR 1b**(`fix/hostsample-disk-path-expanduser`)로.
+CHANGELOG Fixed 한 줄(「`~` 로 적은 `data_dir` 에서 디스크 칸이 비어 있던 것」).
+
 ### I1 — 스크립트가 이름을 안 찍으면 대장이 빈다 (설계 · 결정 77)
 
 dolomood `scripts/local_ci.sh` 는 어느 커밋에서도 `::rcm::fail::`·`step-end::fail` 을 안 찍는다(`echo "FAIL: …"` 67곳). 그래서
@@ -253,6 +279,78 @@ exit 3** 에서도 로그 길을 잃는다(결정 70 이 지키려는 경우). �
 - `docs/configuration.md`: I1 의 예시 둘. CHANGELOG: B1·B2·v16 을 Fixed 에 — 기계·잡 번호가 아니라 「오프라인 dry-run 이 스키마를
   바꾸던 문제와 그 영향」으로 일반화해서.
 
+### I8 — 클라이언트가 서버 버전을 따라온다 (P1 · 수정 채택 · 결정 81~83)
+
+**현상(2026-09-10 · 다른 머신의 보고).** 노트북 여러 대가 이 Mac 의 게이트를 `rcm` 클라이언트로 돌린다. 클라이언트가 서버보다
+뒤처진 채 오래 방치되는 일이 반복됐다. 실측: 서버 `/api/health.version` **0.2.5**(main 을 editable 로 실행) · 노트북 **0.2.2** ·
+GitHub 릴리스 최신 **v0.2.4**(`v0.2.5` 태그·릴리스 없음). 호출 쪽 래퍼는 「서버 따라 올라가기」를 이미 한다 — health 로 서버
+버전을 읽고, GitHub `releases/latest`(6시간 캐시)를 읽고, `min(서버, 최신 릴리스)` 까지
+`releases/download/v<X>/remote_ci_monitor-<X>-py3-none-any.whl` 로 올린다. 0.2.5 의 wheel 이 없어 0.2.4 에서 멈춘다.
+
+**원인 둘.**
+
+1. 릴리스 절차의 마지막 걸음이 사람 손이다 — CONTRIBUTING 「Releasing」 3(`git tag vX.Y.Z && git push`)이 빠졌다. main 은
+   `__version__ = "0.2.5"` 이고 CHANGELOG 는 `[0.2.5] - 2026-09-09` 인데 태그가 없어 `release.yml`(태그 push 트리거)이 돌지 않았다.
+2. 구조: 배포 채널이 GitHub 릴리스뿐이라 「서버가 도는 코드」와 「클라가 받을 수 있는 코드」가 다른 물건이다. 미출시 dev 빌드로
+   서버를 돌리는 동안(§1 의 재현이 그랬다)·오프라인 망·릴리스가 밀린 동안엔 따라올 길이 없다. 결정 30(GitHub 는 커밋·push·PR
+   머지에만)에도 어긋난다 — 클라이언트의 런타임 경로에 GitHub 가 있다.
+
+**고치는 법 — 셋.**
+
+1. **서버가 자기 클라이언트 wheel 을 준다** (보고의 안 B · 근본 · 결정 81).
+   - `GET /client/remote_ci_monitor-<X>-py3-none-any.whl` — `<X>` 가 도는 서버의 `__version__` 과 **정확히** 같을 때만 200. 다른
+     이름은 404 + `hint` 에 맞는 파일명. 파일명이 URL 끝에 있어야 pip 가 wheel 로 알아본다 — 그래서
+     `pip install http://<서버>/client/remote_ci_monitor-<X>-py3-none-any.whl` 이 그대로 된다(`/api/client-wheel` 같은 이름 없는
+     별칭은 만들지 않는다 — pip 는 URL 의 마지막 마디로 파일 종류를 정한다).
+   - `/api/health` 에 `client_wheel: {"path": "/client/remote_ci_monitor-0.2.6-py3-none-any.whl", "sha256": "…", "bytes": N}`.
+     못 만들었으면 `client_wheel: null` + `client_wheel_error: "<code>"`. 래퍼는 health 한 번으로 버전·경로·해시를 얻는다.
+   - 응답: `Content-Type: application/zip` · `Content-Disposition: attachment; filename="…"` · `ETag: "<sha256>"` ·
+     `If-None-Match` 일치면 304 · `HEAD` 지원. 인증은 `/api/status` 와 같은 읽기 규칙(`read_auth = none` 이면 없음, `basic` 이면
+     토큰) — 공개 저장소의 코드라 산출물(§6, 언제나 토큰)과 달리 읽기 규칙을 따른다.
+   - **wheel 은 어디서 오나 — 기동할 때 설치된 패키지에서 표준 라이브러리로 조립한다**(`zipfile` + `hashlib` + `importlib.metadata`).
+     내용: `importlib.resources.files("remote_ci_monitor")` 아래의 `.py` · `web/` · `templates/`(`__pycache__` 제외) +
+     `remote_ci_monitor-<X>.dist-info/`(`METADATA` 와 `entry_points.txt` 는 설치된 메타데이터를 그대로, `WHEEL` 과 `RECORD` 는 새로
+     쓴다). 빌드 도구·hatchling 은 안 들인다(런타임 의존성 0). 기동 때 한 번, 메모리에 든다(수백 KB). editable 설치(운영이 그렇다)에서
+     `git pull` 뒤 재시작 전이면 디스크의 파일이 도는 코드와 다를 수 있으므로 **기동 시점에 고정**한다 — 「도는 것을 준다」.
+     조립 실패(파일·메타데이터 없음)는 `client_wheel: null` · 엔드포인트 503 + 이유. 옛 wheel·빈 wheel 은 주지 않는다(fail-open 금지).
+   - 테스트: 조립한 wheel 을 **새 venv 에 `pip install`** 해 `rcm version` 이 서버와 같고 `rcm --help` 가 뜬다(smoke 처럼 pip 가 없으면
+     skip) · 파일 목록이 `release.yml` 의 산출물 검사와 같은 셋(`web/index.html` · `templates/server.toml` · `templates/client.toml`)을
+     담는다 · RECORD 의 해시가 맞다 · 이름이 다른 요청은 404 · `If-None-Match` 304 · `read_auth = basic` 에서 토큰 없으면 401.
+   - 왜 이쪽이 근본인가: 서버 버전이 어디서 왔든(릴리스·dev·오프라인) 클라는 서버에게 묻고 서버에게 받는다. GitHub 는 런타임 경로에서
+     빠진다(결정 30). 반대급부: 서버 프로세스가 자기 코드를 배포한다 — `read_auth = none` + LAN 이면 누구나 받는다(공개 저장소라 새
+     노출은 아니다).
+
+2. **릴리스는 빠짐없이 끊긴다** (보고의 안 A · 수정 채택 · 결정 82). 태그를 손으로 미는 단계를 없앤다: `main` 에 push 가 오면
+   워크플로(`tag-release.yml` · `contents: write` · `main` 만)가 `__version__` 을 읽어 그 태그 `v<X>` 가 없으면 만든다. 있으면
+   아무것도 안 한다. 그러면 `release.yml` 이 지금처럼 wheel·sdist·GitHub Release 를 만든다 — 단 **`GITHUB_TOKEN` 이 만든 태그는 다른
+   워크플로를 깨우지 않는다**(GitHub 의 규칙) → `release.yml` 의 잡을 `workflow_call` 로 재사용해 태그 잡이 같은 run 에서 이어 부르거나,
+   `release.yml` 에 `workflow_dispatch` 를 두고 `gh workflow run` 으로 부른다. 어느 쪽이든 「태그 = main 위 · `__version__` 과 같다」
+   검사는 그대로. CONTRIBUTING 「Releasing」 3 은 「main 에 머지되면 태그와 릴리스는 자동」으로. 밀려 있는 **v0.2.5 는 오너가 지금**
+   `git tag v0.2.5 <main sha> && git push origin v0.2.5` 로 끊는다(main 이 그 코드다 — 노트북들이 오늘 0.2.5 로 올라온다).
+   단점 인정: 서버를 미출시 dev 로 돌리는 동안엔 A 만으로 못 따라온다 — 그래서 1 이 근본이고 2 는 규율이다.
+
+3. **불일치가 보인다** (보고의 부수 개선 · 일부 채택 · 결정 83).
+   - `/api/health.min_client_version` — 서버가 받는 가장 오래된 클라이언트 버전(서버 코드의 상수, 와이어 계약이 깨질 때만 올린다.
+     지금 값은 `"0.2.0"` — 0.2.x 클라는 전부 붙는다). 클라는 자기 버전이 그보다 낮으면 `rcm check` 의 `client` 행이 빨강,
+     `rcm run` 은 stderr 한 줄 경고(막지 않는다 — 실제 거부는 서버의 400 이 하고, 거기엔 이미 `hint` 가 있다).
+   - `rcm check` 의 `server` 행 옆에 `client` 행: `client   v0.2.2 · server v0.2.6 · older — pip install <서버>/client/…whl`.
+     같으면 `v0.2.6 · same as server`. `rcm version --json` 에 서버 값은 넣지 않는다(서버 없이도 돌아야 한다).
+   - `rcm self-update` 는 **보류**. pip 로 자기 venv 를 갈아끼우는 일은 설치 방식(venv · pipx · uv · editable)마다 다르고 도는 프로세스
+     자신을 바꾼다. 대신 `docs/operating.md` 에 **검증된 래퍼 예시**(health → `client_wheel.path`·`sha256` → 임시 파일로 받아 해시
+     확인 → `pip install --upgrade <file>` → `rcm version` 재확인)를 두고 I1 처럼 테스트로 잠근다.
+
+**지켜야 할 것(보고에서).** 릴리스 자산 URL 패턴(`releases/download/v<X>/remote_ci_monitor-<X>-py3-none-any.whl`)은 그대로 —
+이미 여러 머신의 스크립트가 조립해 쓴다 · 옛 클라(0.2.2~0.2.4)가 계속 붙는다(health 키 추가만 · 새 경로만 · 기존 응답 불변) ·
+`schema_version` 을 올려야 하면 릴리스 노트 맨 위에.
+
+**확인 방법.** 서버를 새 버전으로 올린 뒤 아무 클라 머신에서 래퍼 한 번 → `rcm version` == `/api/health.version`. 새 venv 에서
+`pip install http://<서버>/client/remote_ci_monitor-<X>-py3-none-any.whl` 이 성공한다. main 에 버전을 올린 PR 이 머지되면 태그와
+GitHub Release 가 손 없이 생긴다.
+
+**PR.** 6(`feat/server-serves-client-wheel`: I8-1 + I8-3 의 health 키·`check` 행·래퍼 예시) · 7(`ci/tag-release-on-main-version-bump`:
+I8-2 + CONTRIBUTING). 릴리스 차단은 아니지만 **6 은 v0.2.6 에 넣기를 권장** — 운영을 0.2.6 으로 올리는 순간 노트북들이 서버에게서
+받을 수 있다. 7 은 v0.2.6 태그 전에 들어가면 그 태그가 첫 자동 릴리스가 된다.
+
 ## 4. 이 명세가 발견한 기존 문제 (Codex 가 더한 것 포함)
 
 1. **오프라인 GC 의 오류가 성공으로 보인다** — DB·스키마 조회 실패가 `inventory_error` 로 바뀐 뒤 빈 계획처럼 렌더되고 exit 0.
@@ -276,7 +374,10 @@ exit 3** 에서도 로그 길을 잃는다(결정 70 이 지키려는 경우). �
 | 3 회계 | B4(shared · `floor_attempted` · 성공분 분모) · B3(스냅샷 `storage_before` · 사후 재측정 · 필드 분리) · I6 · §4-4 측정 실패 코드 | 운영 데이터 사본에서 `shared_bytes ≈ 17.5 GB` · 「would free」= 예상 회수량 · latch 픽스처(age 로 뽑힌 항목이 바닥을 채운 경우) · mutcheck 1종(`S_ISREG` 조건 제거) |
 | 4 가드 | B2-5(명령 분류 · 유효 `data_dir` · `RCM_SERVER_DATA_DIR` · 운영 venv 판별) | `decide()` 케이스: `token --config <복사본>` deny · `gc --dry-run --config <운영>` allow · `serve` 기존 케이스 그대로 |
 | 5 문서·손질 | I1 예시(테스트로 잠근 래퍼) · I2 · I3 · I4 · I7 나머지 · PLAN 결정 73~80 | 문서 잠금 테스트 · `source_ident` 픽스처 · 래퍼 테스트(종료 코드 보존 · 순서) |
-| 릴리스 | PR 1~3 필수, 4 권장 → **v0.2.6** → 이 Mac 운영 업그레이드(§6) | 재시작 뒤 `rcm check` 초록 · 웹 정상 · `user_version = 16` · #196 등의 라벨이 `last step` 으로 |
+| 1b 디스크 경로 | B5(`disk_path` 에 푼 `data_dir`) | `~` 설정으로 만든 서버의 표본에 `disk` 가 있다 · CHANGELOG Fixed 한 줄 |
+| 6 클라 wheel | I8-1(`/client/<정확한 파일명>` · 기동 시 조립 · health `client_wheel`) · I8-3(`min_client_version` · `rcm check` `client` 행 · 래퍼 예시) | 새 venv 에 `pip install <서버 URL>` 성공 · 이름 불일치 404 · 304 · `basic` 401 · 조립 실패 시 `null`+503 · 문서 잠금 · 래퍼 테스트 |
+| 7 자동 태그 | I8-2(`main` 의 `__version__` 상승 → 태그 → 릴리스 잡 호출) · CONTRIBUTING 「Releasing」 | 버전을 올린 PR 머지 뒤 손 없이 태그·Release 가 생긴다 · 같은 버전 재푸시는 무동작 · 태그≠`__version__` 검사 유지 |
+| 릴리스 | PR 1~3 필수, 1b·4·6 권장 → **v0.2.6** → 이 Mac 운영 업그레이드(§6) | 재시작 뒤 `rcm check` 초록 · 웹 정상 · `user_version = 16` · #196 등의 라벨이 `last step` 으로 |
 
 ## 6. 이 Mac 의 운영 조치 (O1 · 결정 80)
 
@@ -306,6 +407,9 @@ pause 를 빼면: 빈 큐 확인과 정지 사이에 10분 주기 제출이 clai
 | 78 | v16 | 한 번짜리 복구 마이그레이션 — 대장 행이 없는 실패 라벨은 `last_step` 으로, 취소·유실은 비운다. 매 기동 보정은 안 한다 |
 | 79 | 웹 회귀 | 기존 Chrome 테스트를 넓혀 렌더·예외 스모크로 삼고 ubuntu 잡에서 필수로. ESLint 는 보류 |
 | 80 | 업그레이드 절차 | 별도 venv 검증 → 사본 dry-run → pause → drain 확인 → 백업 → 정지 → pull → 기동(마이그레이션) → 확인 → resume. 도는 editable 체크아웃을 먼저 pull 하지 않는다 |
+| 81 | 클라 wheel | 서버가 기동할 때 설치된 패키지에서 표준 라이브러리로 자기 wheel 을 조립해 `/client/remote_ci_monitor-<X>-py3-none-any.whl`(정확한 이름만)로 준다. `/api/health.client_wheel`(path · sha256 · bytes). 인증은 읽기 규칙. 조립 실패는 `null` + 503 — 옛 것·빈 것을 주지 않는다 |
+| 82 | 자동 태그 | `main` 에 push 된 `__version__` 의 태그가 없으면 워크플로가 만들고 릴리스 잡을 같은 run 에서 부른다(`GITHUB_TOKEN` 의 태그는 다른 워크플로를 안 깨운다). 손 태그 단계는 문서에서 뺀다. 밀린 v0.2.5 는 오너가 지금 끊는다 |
+| 83 | 불일치 표시 | `/api/health.min_client_version`(상수 · 계약이 깨질 때만) · `rcm check` 에 `client` 행 · `rcm run` 은 경고만. `rcm self-update` 는 보류 — 검증된 래퍼 예시를 문서에 |
 
 ## 8. 테스트 배치 · mutcheck
 
@@ -316,7 +420,14 @@ pause 를 빼면: 빈 큐 확인과 정지 사이에 10분 주기 제출이 clai
 - `tests/test_web_browser.py`: 표본 확장 · 예외 수집기 · ubuntu 필수.
 - `tests/test_guard_production.py`: 명령 분류 · 유효 `data_dir` · 운영 venv 판별.
 - `tests/test_render_m5i.py`: `source_ident` 40-hex · `failure_lines` 구조화 사유 · gc 문구.
-- mutcheck 3종 추가: ① 오프라인 dry-run 이 사본 대신 원본을 연다 ② `S_ISREG` 조건 제거 ③ v16 의 `NOT EXISTS` 제거.
+- `tests/test_hostsample_disk_path.py`(새 · PR 1b): `~` 설정 → `sampler.disk_path` 절대경로 · 표본에 `disk`.
+- `tests/test_client_wheel.py`(새 · PR 6): 조립 wheel 의 파일 목록·RECORD 해시 · 새 venv `pip install` → `rcm version` 일치(pip 없으면
+  skip) · 정확한 이름만 200 · 304 · `basic` 401 · 조립 실패 → health `null` + 503 · `min_client_version` · `rcm check` `client` 행 ·
+  래퍼 예시(종료 코드 보존 · sha256 불일치면 설치 안 함).
+- `tests/test_ci_release_workflow.py`(새 · PR 7): `tag-release.yml` 이 `main` push 에만 걸리고 `contents: write` 이며 릴리스 잡을 부른다
+  (YAML 은 표준 라이브러리로 못 읽으니 문자열 잠금 — 이 레포의 다른 워크플로 테스트와 같은 방식).
+- mutcheck 3종 추가: ① 오프라인 dry-run 이 사본 대신 원본을 연다 ② `S_ISREG` 조건 제거 ③ v16 의 `NOT EXISTS` 제거. PR 6 에 ④ 「이름이
+  달라도 200」(정확한 파일명 검사 제거)을 더한다.
 
 ## 9. 위험
 
@@ -325,6 +436,10 @@ pause 를 빼면: 빈 큐 확인과 정지 사이에 10분 주기 제출이 clai
 - B4 의 예상 회수량은 하한이라 바닥 규칙이 필요보다 더 지울 수 있다(대신 「지워도 안 는다」는 거짓은 없어진다).
 - 가드의 TOML 해석이 CLI 의 탐색 순서와 어긋나면 오탐·미탐이 생긴다 — 같은 함수를 쓰거나 픽스처로 둘을 맞춘다.
 - 이 문서의 실측은 한 머신·한 팀의 게이트에서 나왔다. 하드링크 비율·간헐 테스트는 그 팀의 사정이다.
+- I8-1 의 조립 wheel 은 릴리스 wheel 과 **바이트가 같지 않다**(RECORD·WHEEL 을 새로 쓴다) — 같아야 하는 것은 설치 결과다. 테스트가
+  「새 venv 에 설치 → `rcm version`·`--help`」로 그것을 잠근다. editable 설치의 `dist-info` 에 `METADATA` 가 없는 환경(아주 옛 pip)은
+  조립 실패 → `null` + 503 으로 드러난다.
+- I8-2 는 `main` 에 쓰기 권한을 가진 워크플로다 — 태그만 만들고(브랜치는 안 건드린다), 룰셋의 태그 보호와 맞춰야 한다.
 
 ## 10. 리뷰 반영
 
@@ -365,8 +480,14 @@ pause 를 빼면: 빈 큐 확인과 정지 사이에 10분 주기 제출이 clai
     v16 · 거절 메시지 · operating.md 절차(결정 80). 테스트는 명세 §8. mutcheck 에 「사본 대신 원본을 연다」 변이.
   PR 3 (예: fix/janitor-shared-bytes-and-latch): B4 · B3 · I6 · §4-4. mutcheck 에 「S_ISREG 조건 제거」 변이.
   PR 4 (예: feat/guard-deny-writes-to-production-data): 결정 75.
-  PR 5 (예: docs/fail-marker-examples-and-list-polish): I1 · I2 · I3 · I4 · I7 나머지 · PLAN 결정 73~80.
-  릴리스: PR 1~3 이 dev 에 들어간 뒤 v0.2.6 — CONTRIBUTING 「Releasing」. 운영 업그레이드는 오너.
+  PR 5 (예: docs/fail-marker-examples-and-list-polish): I1 · I2 · I3 · I4 · I7 나머지 · PLAN 결정 73~83.
+  PR 1b (예: fix/hostsample-disk-path-expanduser): B5 — 서버 샘플러의 disk_path 에 푼 data_dir. 10분짜리, PR 1 바로 뒤.
+  PR 6 (예: feat/server-serves-client-wheel): I8-1 · I8-3 — 기동 시 조립한 자기 wheel 을 /client/<정확한 파일명> 으로,
+    health 에 client_wheel · min_client_version, rcm check 의 client 행, operating.md 의 래퍼 예시(테스트로 잠근다). v0.2.6 권장.
+  PR 7 (예: ci/tag-release-on-main-version-bump): I8-2 — main 의 __version__ 상승이 태그와 릴리스를 만든다(GITHUB_TOKEN 의
+    태그는 워크플로를 안 깨우니 릴리스 잡을 같은 run 에서 부른다) · CONTRIBUTING 「Releasing」.
+  릴리스: PR 1~3 이 dev 에 들어간 뒤 v0.2.6(1b·6 권장) — CONTRIBUTING 「Releasing」. 운영 업그레이드는 오너.
+  오너가 지금 할 것: 밀린 v0.2.5 태그(`git tag v0.2.5 <main sha> && git push origin v0.2.5`) — 노트북들이 오늘 0.2.5 로 올라온다.
 
 지킬 것:
   - 테스트 먼저. 고치기 전에 빨간 테스트를 보고, 고친 뒤 초록을 본다. 테스트를 약하게 만들어 통과시키지 않는다.
