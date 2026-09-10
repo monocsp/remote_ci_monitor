@@ -16,11 +16,12 @@ import errno
 import json
 import os
 import shutil
+import stat
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from remote_ci_monitor.config import ServerConfig, effective_workspace_retention_days
 from remote_ci_monitor.core import artifacts
@@ -67,13 +68,48 @@ def _errname(e: BaseException) -> str:
 
 
 def _item_json(item: Any) -> dict[str, Any]:
-    """계획 한 줄 → JSON. 사유는 **코드**다(결정 37 — 서버는 문장을 안 보낸다)."""
+    """계획 한 줄 → JSON. 사유는 **코드**다(결정 37 — 서버는 문장을 안 보낸다).
+
+    바이트는 charged(링크마다)이고 `shared_bytes` 가 그 안의 공유 몫,
+    `estimated_reclaimable_bytes` 가 지우면 실제로 느는 하한이다(결정 76). 셋을 같이 실어야
+    화면이 「would free」를 과장하지 않는다.
+    """
     return {
         "job_id": item.job_id,
         "workspace_bytes": item.workspace_bytes,
         "snapshot_bytes": item.snapshot_bytes,
+        "shared_bytes": item.shared_bytes,
+        "estimated_reclaimable_bytes": item.estimated_reclaimable_bytes,
         "reason": item.reason,
     }
+
+
+class Measured(NamedTuple):
+    """디렉터리(또는 파일) 하나의 두 눈금. 둘 다 `st_blocks × 512`."""
+
+    charged: int  # 링크마다 센 값
+    shared: int  # 그중 일반 파일의 `nlink > 1` 블록 — 지워도 여유가 안 는다
+
+
+class Applied(NamedTuple):
+    """`apply()` 의 결과 — **실제로 지운 것**만. 계획을 영수증처럼 쓰지 않는다(§5.5)."""
+
+    deleted: tuple[int, ...]
+    failed: tuple[tuple[int, str], ...]  # (job_id, error code)
+    charged_bytes: int  # 지운 항목의 charged 합(아는 것만)
+    estimated_reclaimable_bytes: int  # 지운 항목의 예상 회수량 합(아는 것만) — latch 의 분모
+    unknown_count: int  # 크기를 모르는 채 지운 항목 수
+
+
+def _shared_blocks(st: Any) -> int:
+    """이 stat 이 **공유 블록**이면 그 바이트, 아니면 0.
+
+    일반 파일(`S_ISREG`)의 `nlink > 1` 만이다 — 디렉터리의 `nlink > 1` 은 하위 디렉터리 때문에
+    정상이고, 그 블록은 디렉터리를 지우면 돌아온다.
+    """
+    if st.st_nlink > 1 and stat.S_ISREG(st.st_mode):
+        return getattr(st, "st_blocks", 0) * 512
+    return 0
 
 
 class Janitor:
@@ -103,12 +139,17 @@ class Janitor:
         self._lock = threading.Lock()  # 짧은 상태 락 — 이 락을 쥔 채 I/O 를 하지 않는다
         #: 청소 작업 전체(계획 + 삭제 + 사후 측정)를 직렬화한다. `sweep_once` 와 `gc` 만 잡는다.
         self._operation_lock = threading.Lock()
-        #: job_id → (bytes, 잴 때의 최상위 st_mtime_ns, 잰 시각). 메모리에만 있다.
-        self._sizes: dict[int, tuple[int, int, datetime]] = {}
+        #: job_id → (두 눈금, 잴 때의 최상위 st_mtime_ns, 잰 시각). 메모리에만 있다.
+        self._sizes: dict[int, tuple[Measured, int, datetime]] = {}
         #: 바닥 규칙으로 지웠는데 여유가 안 늘었다 — 자동 sweep 의 바닥 규칙을 멈춘다(결정 62).
         self.no_progress = False
         self._last_plan: PurgePlan | None = None
+        #: 합계에 기여한 측정 중 **가장 오래된** 시각(I6). 캐시된 값이 섞이면 그 값의 시각이다 —
+        #: 「방금 쟀다」는 거짓말을 안 하려고. 인벤토리를 본 시각은 `_inventory_checked_at`.
         self._measured_at: datetime | None = None
+        self._inventory_checked_at: datetime | None = None
+        #: 이번 인벤토리에서 난 개별 측정 실패의 코드(§4-4). 첫 것이 `inventory_error` 가 된다.
+        self._measure_failures: list[str] = []
         #: 마지막 인벤토리의 조각 합(화면용). 하나라도 못 쟀으면 그 칸이 None 이다.
         self._last_totals: dict[str, int | None] = {}
 
@@ -281,59 +322,80 @@ class Janitor:
                     out.add(int(entry.name))
         return out
 
-    def _measure_dir(self, path: Path) -> int | None:
-        """디렉터리 하나가 디스크에서 쥔 바이트. 못 읽으면 None(0 이 아니다).
+    def _measure_dir(self, path: Path) -> Measured | None:
+        """디렉터리 하나가 디스크에서 쥔 바이트, 두 눈금으로. 못 읽으면 `OSError` 를 올린다 —
+        부르는 쪽이 코드를 지켜 `measure_<errname>` 으로 보고한다(§4-4).
 
         `st_blocks × 512` 는 `du` 와 같은 눈금이다 — 희소 파일·APFS 클론에서 `st_size` 는
         디스크가 실제로 쥔 양과 다르다. 심볼릭 링크는 **따라가지 않는다**(`_remove_tree` 와 같은
-        규칙). 하드링크는 링크마다 세므로 회계가 보수적으로 커진다.
+        규칙). 하드링크는 링크마다 세어 `charged` 에 넣고, 일반 파일의 `nlink > 1` 블록을
+        `shared` 로 따로 센다 — 그 블록은 지워도 여유가 안 는다(미러가 쥐고 있다).
         """
-        total = 0
+        charged = shared = 0
         stack = [path]
-        try:
-            while stack:
-                current = stack.pop()
-                with os.scandir(current) as it:
-                    for entry in it:
-                        st = entry.stat(follow_symlinks=False)
-                        total += getattr(st, "st_blocks", 0) * 512
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(Path(entry.path))
-            st = path.lstat()
-        except OSError:
-            return None
-        return total + getattr(st, "st_blocks", 0) * 512
+        while stack:
+            current = stack.pop()
+            with os.scandir(current) as it:
+                for entry in it:
+                    st = entry.stat(follow_symlinks=False)
+                    charged += getattr(st, "st_blocks", 0) * 512
+                    shared += _shared_blocks(st)
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+        st = path.lstat()
+        return Measured(charged + getattr(st, "st_blocks", 0) * 512, shared)
 
-    def _measure_workspace(self, job_id: int, path: Path, now: datetime) -> int | None:
-        """캐시를 쓰되 **안 변했는지 확인하고** 쓴다(`lstat` 한 번은 공짜다).
+    def _measure_failed(self, job_id: int, e: OSError) -> None:
+        """개별 측정 실패 — 코드를 지킨다. None 으로 뭉개면 `error_code`·로그에 원인이 안 남는다."""
+        code = _errname(e)
+        self._measure_failures.append(code)
+        self.on_error(f"retention: measure {job_id}: {code}")
+
+    def _measure_workspace(
+        self, job_id: int, path: Path, now: datetime
+    ) -> tuple[Measured | None, datetime]:
+        """캐시를 쓰되 **안 변했는지 확인하고** 쓴다(`lstat` 한 번은 공짜다). (값, 잰 시각).
 
         종료된 잡의 워크스페이스는 보통 다시 안 변하지만 믿고만 있으면 안 된다 — 잡이 남긴
         백그라운드 프로세스나 사람이 손댈 수 있다. 최상위 mtime 이 그대로여도
         `MEASURE_MAX_AGE` 가 지나면 다시 잰다(안쪽 파일의 append 는 mtime 을 안 건드린다).
+        캐시에서 왔으면 **그때의 시각**을 돌려준다 — 회계의 나이가 이것으로 정해진다(I6).
         """
         try:
             mtime = path.lstat().st_mtime_ns
-        except OSError:
+        except OSError as e:
             self._sizes.pop(job_id, None)
-            return None
+            self._measure_failed(job_id, e)
+            return None, now
         cached = self._sizes.get(job_id)
         if cached is not None and cached[1] == mtime and now - cached[2] < MEASURE_MAX_AGE:
-            return cached[0]
-        size = self._measure_dir(path)
-        if size is None:
+            return cached[0], cached[2]
+        measured = self._measure_now(job_id, path)
+        if measured is None:
             self._sizes.pop(job_id, None)
-            return None
-        self._sizes[job_id] = (size, mtime, now)
-        return size
+            return None, now
+        self._sizes[job_id] = (measured, mtime, now)
+        return measured, now
 
-    def _measure_file(self, path: Path) -> int | None:
-        """파일 하나(스냅샷 tar). 없으면 0, 못 읽으면 None. 캐시하지 않는다 — `lstat` 하나다."""
+    def _measure_now(self, job_id: int, path: Path) -> Measured | None:
+        """캐시 없이 잰다. 실패는 코드를 남기고 None."""
         try:
-            return getattr(path.lstat(), "st_blocks", 0) * 512
-        except FileNotFoundError:
-            return 0
-        except OSError:
+            return self._measure_dir(path)
+        except OSError as e:
+            self._measure_failed(job_id, e)
             return None
+
+    def _measure_file(self, job_id: int, path: Path) -> Measured | None:
+        """파일 하나(스냅샷 tar). 없으면 0, 못 읽으면 None(코드는 남긴다). 캐시하지 않는다 —
+        `lstat` 하나다. 공유 규칙은 디렉터리와 같다."""
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            return Measured(0, 0)
+        except OSError as e:
+            self._measure_failed(job_id, e)
+            return None
+        return Measured(getattr(st, "st_blocks", 0) * 512, _shared_blocks(st))
 
     def _free_bytes(self) -> int | None:
         """데이터 디렉터리가 앉은 파일 시스템의 여유. 호스트 표본을 재사용하지 않는다 —
@@ -368,6 +430,8 @@ class Janitor:
         """
         data = self.config.data_dir
         ws_root, jobs_root = data / "workspaces", data / "jobs"
+        self._measure_failures = []
+        oldest = now  # 합계에 기여한 측정 중 가장 오래된 시각 — 빈 인벤토리도 「지금 봤다」
         ids = self._scan_ids(ws_root)
         tars = {
             i for i in self._scan_ids(jobs_root) if (jobs_root / str(i) / "tree.tar.gz").is_file()
@@ -379,21 +443,25 @@ class Janitor:
             job = rows.get(job_id)  # 행이 없다고 DB 가 **말했을 때만** 고아다
             ws_path = ws_root / str(job_id)
             if not ws_path.exists():
-                ws_bytes: int | None = 0
+                ws: Measured | None = Measured(0, 0)
             elif job is not None and job.state in TERMINAL_STATES:
-                ws_bytes = self._measure_workspace(job_id, ws_path, now)
+                ws, at = self._measure_workspace(job_id, ws_path, now)
+                oldest = min(oldest, at)
             else:  # 활성 잡은 자란다. 고아는 주인이 없어 언제 변할지 모른다 — 매번 잰다
-                ws_bytes = self._measure_dir(ws_path)
+                ws = self._measure_now(job_id, ws_path)
+            tar = self._measure_file(job_id, jobs_root / str(job_id) / "tree.tar.gz")
             items.append(
                 VolumeItem(
                     job_id=job_id,
                     state=job.state if job is not None else None,
                     finished_at=job.finished_at if job is not None else None,
                     created_at=job.created_at if job is not None else None,
-                    workspace_bytes=ws_bytes,
-                    snapshot_bytes=self._measure_file(jobs_root / str(job_id) / "tree.tar.gz"),
+                    workspace_bytes=None if ws is None else ws.charged,
+                    snapshot_bytes=None if tar is None else tar.charged,
+                    shared_bytes=None if ws is None or tar is None else ws.shared + tar.shared,
                 )
             )
+        self._oldest_measured_at = oldest
         return items
 
     def _budget(self) -> WorkspaceBudget:
@@ -411,12 +479,16 @@ class Janitor:
         읽게 하려는 것이다.
         """
         error: str | None = None
+        self._oldest_measured_at = now
         try:
             items = self.inventory(now)
         except OSError as e:
             items, error = [], f"scan_{_errname(e)}"
         except Exception as e:  # noqa: BLE001 — DB 오류는 「고아」가 아니라 회계 실패다
             items, error = [], f"db_{_errname(e)}"
+        if error is None and self._measure_failures:
+            # 개별 측정 실패 — 인벤토리 자체는 있다(나이 규칙은 돈다). 코드를 지켜 올린다(§4-4).
+            error = f"measure_{self._measure_failures[0]}"
         if error:
             self.on_error(f"retention: inventory: {error}")
         totals = {
@@ -425,7 +497,8 @@ class Janitor:
             "orphan_bytes": _sum_or_none(i.bytes for i in items if i.state is None),
         }
         with self._lock:
-            self._measured_at = None if error else now
+            self._measured_at = None if error else self._oldest_measured_at
+            self._inventory_checked_at = None if error else now
             self._last_totals = {k: (None if error else v) for k, v in totals.items()}
         free = self._free_bytes() if free_bytes is _UNSET else free_bytes
         plan = workspaces_to_purge(
@@ -447,75 +520,108 @@ class Janitor:
         self._sizes.pop(job_id, None)
         return True
 
-    def apply(self, plan: PurgePlan, now: datetime) -> int:
-        """계획을 실행한다. 지운 잡 수. 실패한 잡은 표시하지 않고 다음 회차에 다시 시도한다."""
-        gone = 0
+    def apply(self, plan: PurgePlan, now: datetime) -> Applied:
+        """계획을 실행한다. **실제로 지운 것**을 돌려준다 — latch 의 분모와 영수증이 이것이다.
+        실패한 잡은 표시하지 않고 다음 회차에 다시 시도한다."""
+        deleted: list[int] = []
+        failed: list[tuple[int, str]] = []
+        charged = reclaimable = unknown = 0
         for item in plan.items:
             try:
-                if self._purge_volume(item.job_id):
-                    gone += 1
+                if not self._purge_volume(item.job_id):
+                    continue
             except OSError as e:
+                failed.append((item.job_id, _errname(e)))
                 self.on_error(f"retention: volume {item.job_id}: {_errname(e)}")
-        return gone
+                continue
+            deleted.append(item.job_id)
+            if item.bytes is None:
+                unknown += 1
+            else:
+                charged += item.bytes
+            reclaimable += item.estimated_reclaimable_bytes or 0
+        return Applied(tuple(deleted), tuple(failed), charged, reclaimable, unknown)
+
+    def _judge_progress(
+        self, plan: PurgePlan, result: Applied, free_before: int | None, free_after: int | None
+    ) -> None:
+        """무진전 latch(결정 62 · 76). 바닥 아래에서 지웠는데 여유가 **지운 회수량의 절반**도 안
+        늘었으면 세운다. 분모는 계획이 아니라 삭제에 성공한 항목의 예상 회수량이다 — 분모 0 이면
+        판정하지 않는다(부족은 재측정한 계획의 `projected_short_free_bytes` 가 말한다)."""
+        if not plan.floor_attempted or free_before is None or free_after is None:
+            return
+        if result.estimated_reclaimable_bytes <= 0:
+            return
+        if free_after - free_before < result.estimated_reclaimable_bytes * PROGRESS_RATIO:
+            # 지웠는데 여유가 안 늘면 지우는 게 답이 아니다 — 그때부터는 증거를 태우는 일뿐이다.
+            if not self.no_progress:
+                self.on_error(
+                    "retention: deleted volume but free space did not move — "
+                    "the floor rule is paused until `rcm gc`"
+                )
+            self.no_progress = True
 
     def sweep_volume(self, now: datetime) -> PurgePlan:
         """부피 한 회차 — 계획 **한 번** → 실행 → 여유 다시 재기 → latch 판정."""
+        plan, _ = self._run_volume(now)
+        return plan
+
+    def _run_volume(self, now: datetime) -> tuple[PurgePlan, dict[str, Any]]:
+        """부피 한 회차의 몸통. (계획, `POST /gc` 본문). 작업 락은 부르는 쪽이 잡는다."""
         free_before = self._free_bytes()
         plan = self.plan(now, free_bytes=free_before)
-        floor_ran = any(i.reason == "free" for i in plan.items)
-        gone = self.apply(plan, now)
-        if gone:
-            self.log(f"retention: reclaimed volume from {gone} jobs")
+        before = self.storage(now, free_bytes=free_before)  # 그 계획이 잰 스냅샷(B3)
+        result = self.apply(plan, now)
+        if result.deleted:
+            self.log(f"retention: reclaimed volume from {len(result.deleted)} jobs")
         free_after = self._free_bytes()
-        if gone:
+        if result.deleted:
             # 지운 뒤 다시 재서 회계를 갱신한다. 안 그러면 화면이 **지우기 전** 숫자를 들고 있어
             # 「예산 초과 — 다음 sweep 이 정리한다」를 이미 정리한 뒤에도 한 시간 동안 말한다.
             # 표시용 측정이지 두 번째 삭제 계획이 아니다 — `apply` 는 회차당 한 번뿐이다.
             self.plan(now, free_bytes=free_after)
-        if floor_ran and free_before is not None and free_after is not None:
-            # 지웠는데 여유가 안 늘면 지우는 게 답이 아니다 — 그때부터는 증거를 태우는 일뿐이다.
-            if free_after - free_before < plan.known_freed_bytes * PROGRESS_RATIO:
-                if not self.no_progress:
-                    self.on_error(
-                        "retention: deleted volume but free space did not move — "
-                        "the floor rule is paused until `rcm gc`"
-                    )
-                self.no_progress = True
-        return plan
+        self._judge_progress(plan, result, free_before, free_after)
+        by_id = {i.job_id: i for i in plan.items}
+        body = {
+            "dry_run": False,
+            "planned": [_item_json(i) for i in plan.items],
+            "deleted": [_item_json(by_id[j]) for j in result.deleted],
+            "failed": [{"job_id": j, "error_code": code} for j, code in result.failed],
+            "freed_bytes": result.charged_bytes,  # = deleted_charged_bytes. 이름만 옛것이다
+            "deleted_charged_bytes": result.charged_bytes,
+            "estimated_reclaimable_bytes": result.estimated_reclaimable_bytes,
+            "free_bytes_before": free_before,
+            "free_bytes_after": free_after,
+            "storage_before": before,
+            "storage_after": self.storage(now, free_bytes=free_after),  # 지운 **뒤** 잰 값
+        }
+        return plan, body
 
     def gc_report(self, now: datetime, *, dry_run: bool) -> dict[str, Any]:
         """`POST /gc` 의 본문 — **계획과 결과를 가른다**(§5.5).
 
-        계획의 바이트를 실제 회수처럼 내면 거짓이다. 삭제는 실패할 수 있다.
+        계획의 바이트를 실제 회수처럼 내면 거짓이다. 삭제는 실패할 수 있다. `storage_before` 는
+        이 호출의 계획이 잰 스냅샷이고(직전 측정값이 아니다 — B3), `storage_after` 는 지운 뒤 다시
+        잰 값이다. dry-run 의 `storage_after` 는 null — 예측치를 「실측 뒤」 자리에 넣지 않는다.
         """
         with self._operation_lock:
-            plan = self.plan(now)
-            if dry_run:
-                return {
-                    "dry_run": True,
-                    "planned": [_item_json(i) for i in plan.items],
-                    "deleted": [],
-                    "failed": [],
-                    "freed_bytes": 0,
-                }
-            self.no_progress = False  # 사람이 보고 부른 것이라 한 번 더 해 본다
-            deleted, failed, freed = [], [], 0
-            for item in plan.items:
-                try:
-                    if self._purge_volume(item.job_id):
-                        deleted.append(_item_json(item))
-                        freed += (item.workspace_bytes or 0) + (item.snapshot_bytes or 0)
-                except OSError as e:
-                    failed.append({"job_id": item.job_id, "error_code": _errname(e)})
-                    self.on_error(f"retention: volume {item.job_id}: {_errname(e)}")
-            with self._lock:
-                self._last_plan = plan
+            if not dry_run:
+                self.no_progress = False  # 사람이 보고 부른 것이라 한 번 더 해 본다
+                return self._run_volume(now)[1]
+            free_before = self._free_bytes()
+            plan = self.plan(now, free_bytes=free_before)
             return {
-                "dry_run": False,
+                "dry_run": True,
                 "planned": [_item_json(i) for i in plan.items],
-                "deleted": deleted,
-                "failed": failed,
-                "freed_bytes": freed,
+                "deleted": [],
+                "failed": [],
+                "freed_bytes": 0,
+                "deleted_charged_bytes": 0,
+                "estimated_reclaimable_bytes": plan.estimated_reclaimable_bytes,  # would free
+                "free_bytes_before": free_before,
+                "free_bytes_after": None,
+                "storage_before": self.storage(now, free_bytes=free_before),
+                "storage_after": None,
             }
 
     def gc(self, now: datetime, *, dry_run: bool) -> PurgePlan:
@@ -527,16 +633,18 @@ class Janitor:
             if dry_run:
                 return self.plan(now)
             self.no_progress = False
-            return self.sweep_volume(now)
+            return self._run_volume(now)[0]
 
-    def storage(self, now: datetime) -> dict[str, Any]:
+    def storage(self, now: datetime, *, free_bytes: int | None = _UNSET) -> dict[str, Any]:
         """화면용 회계(§5.1). **마지막 측정값**을 쓴다 — 상태 요청이 디스크를 훑지 않는다.
 
         `last_sweep_at` 은 **주기 sweep** 의 것이다. 손으로 부른 `rcm gc` 는 이 값을 갱신하지
         않는다 — 갱신하면 죽은 청소기 스레드가 살아 있는 것처럼 보이고 `/api/health` 가 못 잡는다.
+        `free_bytes` 를 주면 그 값을 싣는다(한 회차가 이미 읽은 값 — 두 번 읽지 않는다).
         """
         with self._lock:
             plan, measured_at, last = self._last_plan, self._measured_at, self.last_sweep_at
+            checked_at = self._inventory_checked_at
         s = self.config.server
         doc: dict[str, Any] = {
             "workspace_bytes": None,
@@ -545,6 +653,8 @@ class Janitor:
             "evictable_bytes": None,
             "non_evictable_bytes": None,
             "orphan_bytes": None,
+            "shared_bytes": None,
+            "estimated_reclaimable_bytes": None,
             "limit_bytes": s.workspace_storage_max_bytes or None,
             "min_free_bytes": s.min_free_bytes or None,
             "free_bytes": None,
@@ -553,6 +663,7 @@ class Janitor:
             "budget_unreachable": False,
             "no_progress": self.no_progress,
             "measured_at": iso(measured_at),
+            "inventory_checked_at": iso(checked_at),
             "last_sweep_at": iso(last),
             "next_sweep_at": iso(last + timedelta(seconds=self.interval)) if last else None,
             "error_code": None,
@@ -563,6 +674,8 @@ class Janitor:
             volume_bytes=plan.volume_bytes,
             evictable_bytes=plan.evictable_bytes,
             non_evictable_bytes=plan.non_evictable_bytes,
+            shared_bytes=plan.shared_bytes,
+            estimated_reclaimable_bytes=plan.evictable_reclaimable_bytes,
             over_budget_bytes=plan.over_budget_bytes,
             projected_short_free_bytes=plan.projected_short_free_bytes,
             budget_unreachable=plan.budget_unreachable,
@@ -570,7 +683,7 @@ class Janitor:
         )
         with self._lock:
             doc.update(self._last_totals)
-        doc["free_bytes"] = self._free_bytes()
+        doc["free_bytes"] = self._free_bytes() if free_bytes is _UNSET else free_bytes
         return doc
 
     # ── 스레드 ──────────────────────────────────────────────────────────────

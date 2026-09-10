@@ -78,6 +78,30 @@ describe("jobStorageLine", () => {
     assert.equal(rcm.jobStorageLine(undefined, null, "en"), null);
     assert.equal(rcm.jobStorageLine({}, null, "en"), null);
   });
+
+  // I6 — 회계의 나이. 캐시된 값이 섞인 합계를 「방금 쟀다」처럼 그리지 않는다.
+  test("회계가 몇 분 전 것인지 두 언어로 말한다", () => {
+    const now = "2026-09-09T05:57:03Z"; // measured_at 에서 57분 뒤
+    const en = rcm.jobStorageLine(doc(), now, "en");
+    assert.match(en.text, /measured 57m ago/, "en: 측정 나이가 없다");
+    const ko = rcm.jobStorageLine(doc(), now, "ko"); // 소요·나이는 두 언어 다 `57m` 꼴(i18n.js 머리말)
+    assert.match(ko.text, /57m 전 측정/, "ko: 측정 나이가 없다");
+  });
+
+  test("measured_at 이 없거나 now 가 없으면 나이를 말하지 않는다", () => {
+    const noAt = rcm.jobStorageLine(doc({ measured_at: null }), "2026-09-09T05:57:03Z", "en");
+    assert.doesNotMatch(noAt.text, /measured|ago|NaN/);
+    const noNow = rcm.jobStorageLine(doc(), null, "en");
+    assert.doesNotMatch(noNow.text, /measured|ago|NaN/);
+  });
+
+  test("나이가 있어도 쥔 양·천장·다음 청소는 그대로다", () => {
+    const line = rcm.jobStorageLine(doc(), "2026-09-09T05:18:03Z", "en");
+    assert.match(line.text, /30(\.0)? GB/);
+    assert.match(line.text, /100(\.0)? GB/);
+    assert.match(line.text, /next sweep/);
+    assert.match(line.text, /measured 18m ago/);
+  });
 });
 
 describe("문자열", () => {
@@ -91,6 +115,17 @@ describe("문자열", () => {
       const line = I18N.t(lang, "host.job_storage", { used: "30.9 GB", limit: "107.4 GB" });
       assert.match(line, /30\.9 GB/, lang + ": 쥔 양이 사라졌다");
       assert.match(line, /107\.4 GB/, lang + ": 천장이 사라졌다");
+    });
+  });
+
+  test("host.job_storage 가 {measured} 를 쓰고, 없으면 자리를 비운다", () => {
+    const en = I18N.t("en", "host.job_storage", { used: "3 GB", limit: "", next: "", measured: "57m ago" });
+    assert.equal(en, "rcm data 3 GB · measured 57m ago");
+    const ko = I18N.t("ko", "host.job_storage", { used: "3 GB", limit: "", next: "", measured: "57m 전" });
+    assert.equal(ko, "rcm 데이터 3 GB · 57m 전 측정");
+    LANGS.forEach((lang) => {
+      const bare = I18N.t(lang, "host.job_storage", { used: "3 GB", limit: "", next: "", measured: "" });
+      assert.doesNotMatch(bare, /measured|측정|undefined/, lang + ": 빈 나이를 그렸다");
     });
   });
 });

@@ -1655,11 +1655,18 @@
       var secs = (Date.parse(doc.next_sweep_at) - Date.parse(now)) / 1000;
       if (isNum(secs)) left = fmtDuration(Math.max(0, secs));
     }
+    // 회계의 나이(I6) — measured_at 은 합계에 기여한 측정 중 가장 오래된 것이라 「방금 쟀다」가 아니다.
+    var measured = "";
+    if (doc.measured_at && now) {
+      var age = (Date.parse(now) - Date.parse(doc.measured_at)) / 1000;
+      if (isNum(age)) measured = fmtAgo(Math.max(0, age), lang);
+    }
     return {
       text: T(lang, "host.job_storage", {
         used: fmtDisk(doc.volume_bytes),
         limit: limit === null ? "" : fmtDisk(limit),
-        next: left || ""
+        next: left || "",
+        measured: measured
       }),
       warn: warn
     };

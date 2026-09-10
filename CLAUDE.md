@@ -35,7 +35,9 @@ PLAN.md 가 정본이다. 세션을 시작하면 먼저 끝까지 읽는다.
 - 그 폴더는 `main` 에 두고 안의 파일을 고치지 않는다. `git pull --ff-only` + 서비스 재시작으로만 바꾼다.
 - 개발은 워크트리와 그 안의 `.venv` 에서 한다. 시험용 서버는 자기 설정 파일 · `port` · `data_dir` 을 쓴다.
 - `tools/guard_production.py` 훅(`.claude/settings.json`)이 막아 준다 — 운영 체크아웃·설정·데이터를
-  고치거나 운영 설정으로 서버를 띄우면 거부되고, 배포(서비스 venv 설치 · 재시작)는 물어본다.
+  고치거나 운영 설정으로 서버를 띄우거나 **서비스 venv 밖의 빌드로 운영 DB 를 열면**(`rcm token` —
+  다른 빌드는 열면서 마이그레이션한다) 거부되고, 배포(서비스 venv 설치 · 재시작)는 물어본다.
+  `rcm gc --dry-run --config` 는 사본 위에서 돌아 허용이다.
 - 절차: `docs/operating.md` 「From a git checkout」.
 
 ## 에이전트 안내
