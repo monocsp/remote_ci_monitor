@@ -177,7 +177,8 @@ def _split_segments(command: str) -> list[str]:
 
 
 def _env_of(segment: str) -> dict[str, str]:
-    """조각 앞의 `VAR=value` 와 `env VAR=value` — CLI 가 읽는 환경(`RCM_CONFIG`)이 여기 온다."""
+    """조각 앞의 `VAR=value` 와 `env VAR=value` — CLI 가 읽는 환경(`RCM_CONFIG` ·
+    `RCM_SERVER_DATA_DIR`)이 여기 온다."""
     try:
         tokens = shlex.split(segment, comments=True)
     except ValueError:
@@ -424,11 +425,18 @@ def _config_data_dir(config: Path) -> Path | None:
 def _effective_data_dir(
     argv: list[str], cwd: Path, prod: Production, local_config: bool, env: dict[str, str]
 ) -> Path | None:
-    """CLI 와 같은 우선순위로 이 명령이 열 데이터 디렉터리를 정한다: `--data-dir` → 선택된 설정
-    (`--config` → `$RCM_CONFIG` → `./rcm.toml` → 운영 설정)의 `[server].data_dir` → 기본값.
-    모르면 None(막지 않는다)."""
+    """CLI 와 같은 우선순위로 이 명령이 열 데이터 디렉터리를 정한다: `--data-dir` →
+    `$RCM_SERVER_DATA_DIR` → 선택된 설정(`--config` → `$RCM_CONFIG` → `./rcm.toml` → 운영 설정)의
+    `[server].data_dir` → 기본값. 모르면 None(막지 않는다).
+
+    `RCM_SERVER_DATA_DIR` 은 CLI 의 env 덮어쓰기(`RCM_<SECTION>_<KEY>`, config.py `_env_overrides`)
+    다 — 설정 파일보다 우선하고 `--data-dir` 보다는 뒤다. 조각 앞의 `VAR=`·`env VAR=` 와 세션
+    환경 둘 다 본다(`RCM_CONFIG` 와 같은 규칙)."""
     data = _option_value(argv, ("--data", "--data-dir"))
     if data is not None:
+        return _as_path(data, cwd)
+    data = env.get("RCM_SERVER_DATA_DIR") or os.environ.get("RCM_SERVER_DATA_DIR")
+    if data:
         return _as_path(data, cwd)
     config = _option_value(argv, ("--config", "-c"))
     if config is None:
