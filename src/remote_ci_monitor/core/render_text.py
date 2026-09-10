@@ -153,6 +153,29 @@ def _next_sweep(doc: dict[str, Any], now: str | None) -> str:
     return f" · next sweep in {fmt_duration(max(0.0, left))}"
 
 
+def _coarse(seconds: float) -> str:
+    """`12s` · `57m` · `3h` — 웹의 `fmtCoarse` 와 같은 눈금(분·시는 내림). 나이에 초는 소음이다."""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
+
+def _measured_ago(doc: dict[str, Any], now: str | None) -> str:
+    """「 · measured 57m ago」 — 회계의 나이(I6). 합계에 기여한 측정 중 가장 오래된 것의 나이라
+    캐시가 섞인 값을 「방금 쟀다」처럼 그리지 않는다. 시각을 모르거나 `now` 가 없으면 빈 문자열."""
+    at = doc.get("measured_at")
+    if not at or not now:
+        return ""
+    try:
+        age = (parse_iso(now) - parse_iso(at)).total_seconds()
+    except (TypeError, ValueError):
+        return ""
+    return f" · measured {_coarse(max(0.0, age))} ago"
+
+
 def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | None, str] | None:
     """`rcm check` 의 `storage` 행 — (이름, ok, 설명). 영어다(CLI 규칙).
 
@@ -202,7 +225,7 @@ def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | No
             "storage",
             None,
             f"rcm data {_bytes(volume)} is over the {_bytes(limit)} budget — "
-            "the next sweep will trim it",
+            f"the next sweep will trim it{_measured_ago(doc, now)}",
         )
     if under_floor:
         return (
@@ -211,12 +234,43 @@ def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | No
             f"{_bytes(free)} free, under the {_bytes(floor)} floor — the next sweep will reclaim",
         )
     of_limit = f" of {_bytes(limit)}" if limit is not None else ""
-    tail = _next_sweep(doc, now)
+    tail = _measured_ago(doc, now) + _next_sweep(doc, now)
     return "storage", True, f"rcm data {_bytes(volume)}{of_limit} · {_bytes(free)} free{tail}"
 
 
+def _planned_totals(items: list[dict[str, Any]]) -> tuple[int, int, int, int]:
+    """계획 항목들의 (charged 합, 공유 몫 합, 예상 회수량 합, 크기를 모르는 항목 수).
+
+    아는 것만 더한다 — 모르는 항목은 0 으로 세지 않고 **개수로** 따로 말한다. `shared_bytes` 가 없는
+    옛 서버의 항목은 공유 몫을 모르는 것이 아니라 그 서버가 안 갈랐던 것이라 charged 를 회수량으로
+    쓴다(그 서버의 dry-run 이 그렇게 말했다).
+    """
+    charged = shared = reclaim = unknown = 0
+    for i in items:
+        ws, tar = i.get("workspace_bytes"), i.get("snapshot_bytes")
+        known = (ws or 0) + (tar or 0)
+        charged += known
+        if ws is None or tar is None:
+            unknown += 1
+        if "shared_bytes" not in i:
+            reclaim += known
+            continue
+        s, r = i.get("shared_bytes"), i.get("estimated_reclaimable_bytes")
+        if s is None or r is None:
+            if ws is not None and tar is not None:
+                unknown += 1
+            continue
+        shared += s
+        reclaim += r
+    return charged, shared, reclaim, unknown
+
+
 def render_gc(body: dict[str, Any]) -> str:
-    """`rcm gc` 사람용 표. **계획과 결과를 가른다** — 계획을 회수처럼 쓰면 거짓이다."""
+    """`rcm gc` 사람용 표. **계획과 결과를 가른다** — 계획을 회수처럼 쓰면 거짓이다.
+
+    「would free」는 **예상 회수량**(charged − 하드링크 공유 몫)이다(결정 76). 표의 항목 값과
+    「would remain」은 charged 다 — 인벤토리가 링크마다 세기 때문이다.
+    """
     planned = body.get("planned") or []
     lines = ["job     workspace   snapshot   reason"]
     for item in planned:
@@ -228,19 +282,29 @@ def render_gc(body: dict[str, Any]) -> str:
         lines.append("(nothing to reclaim)")
     before = body.get("storage_before") or {}
     after = body.get("storage_after") or {}
+    charged, shared, reclaim, unknown = _planned_totals(planned)
     if body.get("dry_run"):
         # dry-run 의 「남는다」는 **예측**이다. 지금 총량을 「남을 양」이라고 쓰면 거짓이 된다.
-        total = sum(
-            (i.get("workspace_bytes") or 0) + (i.get("snapshot_bytes") or 0) for i in planned
-        )
+        line = f"would free {_bytes(reclaim)} from {len(planned)} jobs"
+        if shared:
+            line += f" ({_bytes(charged)} charged · {_bytes(shared)} shared by hard links)"
+        if unknown:
+            line += f" · {unknown} of unknown size"
         held = before.get("volume_bytes")
-        rest = DASH if held is None else _bytes(max(0, held - total))
-        lines.append(f"would free {_bytes(total)} from {len(planned)} jobs · {rest} would remain")
+        rest = DASH if held is None else _bytes(max(0, held - charged))
+        lines.append(f"{line} · {rest} would remain")
         return "\n".join(lines)
-    tail = f" · {_bytes(after.get('volume_bytes'))} left"
     failed = body.get("failed") or []
     gone = len(body.get("deleted") or [])
-    line = f"freed {_bytes(body.get('freed_bytes'))} from {gone} jobs{tail}"
+    freed = body.get("freed_bytes")
+    line = f"freed {_bytes(freed)} from {gone} jobs"
+    est = body.get("estimated_reclaimable_bytes")
+    if est is not None and est != freed:
+        line += f" · est. {_bytes(est)} reclaimable"
+    fb, fa = body.get("free_bytes_before"), body.get("free_bytes_after")
+    if fb is not None and fa is not None:
+        line += f" · free {_bytes(fb)} → {_bytes(fa)}"
+    line += f" · {_bytes(after.get('volume_bytes'))} left"  # 지운 뒤 다시 잰 값
     if failed:
         codes = ", ".join(sorted({f.get("error_code", "?") for f in failed}))
         line += f" · {len(failed)} failed ({codes})"

@@ -86,7 +86,32 @@ def test_job_storage_has_the_documented_keys(srv):
         "last_sweep_at",
         "next_sweep_at",
         "error_code",
+        # M5i PR 3 — 키 추가만(스키마 v1 유지). 결정 76 의 두 눈금과 I6 의 회계 나이.
+        "shared_bytes",
+        "estimated_reclaimable_bytes",
+        "inventory_checked_at",
     }
+
+
+def test_a_dry_run_after_a_new_workspace_reports_it_in_storage_before(srv):
+    """B3 — 「would remain」이 직전 측정값(기동 직후 0 B)이었다. 스냅샷은 그 계획이 잰 것이다."""
+    job = finished_job(srv, days_ago=0.1)  # 하루가 안 됐다 — 계획엔 안 들지만 인벤토리엔 있다
+    volume(srv, job, ws=65536)
+    body = srv.req("POST", "/gc", json_body={"dry_run": True}, token="admin")[1]
+    assert body["planned"] == []
+    assert body["storage_before"]["volume_bytes"] >= 65536  # 첫 sweep 때는 없던 것이 보인다
+    assert body["free_bytes_before"] is not None and body["free_bytes_after"] is None
+
+
+def test_a_real_gc_reports_storage_measured_after_the_delete(srv):
+    job = finished_job(srv, days_ago=3)
+    volume(srv, job, ws=65536)
+    body = srv.req("POST", "/gc", json_body={"dry_run": False}, token="admin")[1]
+    assert body["storage_before"]["volume_bytes"] >= 65536
+    assert body["storage_after"]["volume_bytes"] == 0
+    assert body["deleted_charged_bytes"] == body["freed_bytes"] > 0
+    assert body["estimated_reclaimable_bytes"] == body["freed_bytes"]  # 하드링크가 없으면 같다
+    assert body["free_bytes_after"] is not None
 
 
 def test_the_accounting_adds_up(srv):

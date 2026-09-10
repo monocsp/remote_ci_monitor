@@ -31,6 +31,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
   ㉑ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
   ㉒ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
+  ㉓ retention-shared-any-inode — 공유 블록 판정에서 `S_ISREG` 를 뺌: 디렉터리의 `nlink > 1`
+     (하위 디렉터리 때문에 정상)까지 「지워도 안 는다」로 셈 (`janitor.py`, M5i 결정 76)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -267,6 +269,15 @@ MUTANTS = (
                 )
 """,
         tests=("tests/test_store_m5h.py",),
+    ),
+    # ㉓ M5i 결정 76 — 공유 블록은 **일반 파일**의 `nlink > 1` 만이다. 디렉터리를 세면 ext4 에서
+    # 모든 워크스페이스가 「지워도 안 는다」 쪽으로 새고, 바닥 규칙이 필요 이상 지운다.
+    Mutant(
+        name="retention-shared-any-inode",
+        path="src/remote_ci_monitor/janitor.py",
+        old="    if st.st_nlink > 1 and stat.S_ISREG(st.st_mode):\n",
+        new="    if st.st_nlink > 1:\n",
+        tests=("tests/test_janitor_m5i.py",),
     ),
 )
 
