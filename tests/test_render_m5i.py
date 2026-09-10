@@ -22,6 +22,7 @@ from remote_ci_monitor.core.render_text import (
     CAUSE_UNREACHABLE,
     _source_text,
     failure_lines,
+    ref_ident,
     source_ident,
 )
 
@@ -61,6 +62,27 @@ def test_a_ref_equal_to_the_sha_without_a_sha_is_still_the_ref():
     """sha 를 아직 모르면(체크아웃 전) ref 가 유일한 신원이다 — 비우지 않는다."""
     text = source_ident({**REF_JOB, "sha": None})
     assert text.startswith(SHA[:20]) and text.endswith("…") and "@" not in text, text
+
+
+# ── I2. `ref_ident()` — `rcm run` 의 제출 줄 ─────────────────────────────────
+#
+# `submitted job #1 (gate · <ref> @<sha>)` 도 같은 규칙이다 — 목록 칸만 고치면 제출 줄이
+# `0b605a69823ff83e14018b733927445a568671bb @0b605a6` 로 같은 것을 두 번 찍는다(검증 V6.2).
+
+
+def test_the_submit_ident_shows_a_full_sha_ref_once():
+    assert ref_ident(SHA, SHA) == "@092dc58"
+
+
+def test_the_submit_ident_keeps_a_branch_and_a_prefix_ref():
+    assert ref_ident("main", SHA) == "main @092dc58"
+    assert ref_ident(SHA[:7], SHA) == "092dc58 @092dc58"
+
+
+def test_the_submit_ident_without_a_sha_is_the_ref_and_a_dash():
+    """제출 응답에 sha 가 없으면(옛 서버) 지어내지 않는다 — `—` 다."""
+    assert ref_ident("main", None) == "main @—"
+    assert ref_ident(SHA, None) == f"{SHA} @—"
 
 
 # ── I2. `_source_text()` — 큐 칸 ────────────────────────────────────────────
