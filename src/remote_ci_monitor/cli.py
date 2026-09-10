@@ -52,6 +52,7 @@ from remote_ci_monitor.core.render_text import (
     failure_lines,
     fmt_clock,
     fmt_duration,
+    ref_ident,
     render_gc,
     source_ident,
     storage_row,
@@ -579,7 +580,7 @@ def _run_git_ref(
         detail = (
             f"same preset, inputs, commit {short}"
             if joined
-            else f"({preset.name} · {ref} @{short})"  # 안에 `·` 가 있다 — 목록 항목과 안 섞이게
+            else f"({preset.name} · {ref_ident(ref, sha)})"  # `·` 를 품는다 — 목록 항목과 안 섞이게
         )
         _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _print_json(
@@ -591,7 +592,8 @@ def _run_git_ref(
     if joined:
         _info(f"joined job #{job_id} ({state}) — same preset, inputs, commit {short}")
     else:
-        _info(f"submitted job #{job_id} ({preset.name} · {ref} @{short}) · {url or ''}")
+        # ref 가 곧 sha 면 한 번만 — 목록 칸과 같은 규칙(M5i I2)
+        _info(f"submitted job #{job_id} ({preset.name} · {ref_ident(ref, sha)}) · {url or ''}")
     return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
 
 

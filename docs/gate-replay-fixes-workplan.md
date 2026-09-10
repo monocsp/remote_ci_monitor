@@ -406,7 +406,7 @@ pause 를 빼면: 빈 큐 확인과 정지 사이에 10분 주기 제출이 clai
 | 77 | 실패 이름 | 계속 마커로만. `fail_patterns` 는 만들지 않는다. 검증된 래퍼 예시와 「판정 함수에서 마커」 예시를 문서에 |
 | 78 | v16 | 한 번짜리 복구 마이그레이션 — 대장 행이 없는 실패 라벨은 `last_step` 으로, 취소·유실은 비운다. 매 기동 보정은 안 한다 |
 | 79 | 웹 회귀 | 기존 Chrome 테스트를 넓혀 렌더·예외 스모크로 삼고 ubuntu 잡에서 필수로. ESLint 는 보류 |
-| 80 | 업그레이드 절차 | 별도 venv 검증 → 사본 dry-run → pause → drain 확인 → 백업 → 정지 → pull → 기동(마이그레이션) → 확인 → resume. 도는 editable 체크아웃을 먼저 pull 하지 않는다 |
+| 80 | 업그레이드 절차 | 별도 venv 검증 → 사본 dry-run → pause → drain 확인 → 정지 → 정지 직후 백업 → pull → 기동(마이그레이션) → 확인 → resume. 도는 editable 체크아웃을 먼저 pull 하지 않는다 |
 | 81 | 클라 wheel | 서버가 기동할 때 설치된 패키지에서 표준 라이브러리로 자기 wheel 을 조립해 `/client/remote_ci_monitor-<X>-py3-none-any.whl`(정확한 이름만)로 준다. `/api/health.client_wheel`(path · sha256 · bytes). 인증은 읽기 규칙. 조립 실패는 `null` + 503 — 옛 것·빈 것을 주지 않는다 |
 | 82 | 자동 태그 | `main` 에 push 된 `__version__` 의 태그가 없으면 워크플로가 만들고 릴리스 잡을 같은 run 에서 부른다(`GITHUB_TOKEN` 의 태그는 다른 워크플로를 안 깨운다). 손 태그 단계는 문서에서 뺀다. 밀린 v0.2.5 는 오너가 지금 끊는다 |
 | 83 | 불일치 표시 | `/api/health.min_client_version`(상수 · 계약이 깨질 때만) · `rcm check` 에 `client` 행 · `rcm run` 은 경고만. `rcm self-update` 는 보류 — 검증된 래퍼 예시를 문서에 |
