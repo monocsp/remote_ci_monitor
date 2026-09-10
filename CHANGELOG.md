@@ -153,17 +153,17 @@ of a key bumps that number and is listed here.
   SQLite's online backup into a private temporary directory, migrates and plans on the copy, and
   deletes the copy; if any step is incomplete it exits 3 (unknown) instead of printing an empty
   plan, and a data directory with no database is unknown too rather than a database being created
-  there. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/87))
+  there. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
 - **Every schema migration now starts with a verified backup of the old database**,
   `<data_dir>/backup/rcm.sqlite3.v<old>.bak` (three kept). If the backup cannot be written the
   migration does not start and the server says so. An older build that meets a newer database
   refuses to start as before, and the message now names that backup and the restore steps;
   [Operating](docs/operating.md#going-back-to-the-old-build) says what a database-only downgrade
-  loses. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/87))
+  loses. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
 - **Step labels an older build wrote after such an upgrade are corrected once on the next start**
   (schema v16): a failed job's label that has no entry in the failure ledger is moved to
   `last_step`, and cancelled or lost jobs lose theirs — those were the old build's guesses, not
-  declarations. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/87))
+  declarations. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
 - **The web page came up broken on any server with a disk sample** — since the unreleased data
   directory line under the disk meter, the host card referred to a name that did not exist, the
   render stopped there on every refresh, the recent list stayed empty, and after thirty seconds
@@ -175,7 +175,7 @@ of a key bumps that number and is listed here.
   `~`** — which is what the example `server.toml` does (`~/.local/share/rcm`). The server handed
   the sampler the unexpanded string, the usage call failed on it, and the host sample carried
   `disk: null`, so neither the web page nor `rcm top` drew the disk. A path written in full
-  was never affected. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/87))
+  was never affected. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/84))
 - **A remote worker collected no artifacts at all.** The server never put the frozen artifact
   policy in its `/worker/claim` reply, so the worker found no globs and skipped collection
   entirely: a preset with `artifacts` running in a remote pool produced nothing, while the job
