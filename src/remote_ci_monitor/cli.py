@@ -307,6 +307,66 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), flush=True)
 
 
+# ── 클라이언트 버전 (M5i I8-3 · 결정 83) ─────────────────────────────────────
+
+
+def _version_key(text: str) -> tuple[int, ...]:
+    """`0.2.6` → (0, 2, 6). 숫자가 아닌 꼬리(`0.2.6.dev1`)는 거기서 끊는다 — 비교용이다."""
+    out: list[int] = []
+    for part in str(text).split("."):
+        if not part.isdigit():
+            break
+        out.append(int(part))
+    return tuple(out)
+
+
+def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
+    """올리는 방법 한 토막. 서버가 wheel 경로를 주면 그 `pip install`, 아니면 없다고 말한다 —
+    있지도 않은 URL 을 지어내지 않는다(옛 서버는 `/client/` 가 없고, 조립 실패면 503 이다)."""
+    cw = h.get("client_wheel") or {}
+    if cw.get("path"):
+        return f"pip install {server}{cw['path']}"
+    reason = h.get("client_wheel_error") or "server too old to serve one"
+    return f"no client wheel from this server ({reason})"
+
+
+def _client_row(client: Client, h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `client` 행 — 이 클라이언트와 서버의 버전. 서버가 버전을 안 주면 행도 없다.
+
+    FAIL 은 `min_client_version` 아래일 때만. 그 위의 「older」·「newer」는 warn(알려는 주되
+    실패는 아니다) — 실제 거부는 서버의 400 이 한다.
+    """
+    server_v = h.get("version")
+    if not server_v:
+        return None
+    mine, theirs = _version_key(__version__), _version_key(server_v)
+    if mine == theirs:
+        return ("client", True, f"v{__version__} · same as server")
+    if mine < theirs:
+        floor = h.get("min_client_version")
+        too_old = bool(floor) and mine < _version_key(floor)
+        return (
+            "client",
+            False if too_old else None,
+            f"v{__version__} · server v{server_v} · older — {_upgrade_hint(client.server, h)}",
+        )
+    return ("client", None, f"v{__version__} · server v{server_v} · newer")
+
+
+def _warn_if_client_too_old(client: Client) -> None:
+    """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
+    try:
+        h = client.health()
+    except ClientError:
+        return
+    floor = h.get("min_client_version")
+    if floor and _version_key(__version__) < _version_key(floor):
+        _err(
+            f"warning: this client v{__version__} is older than the server accepts "
+            f"(min_client_version {floor}) — {_upgrade_hint(client.server, h)}"
+        )
+
+
 # ── run ──────────────────────────────────────────────────────────────────────
 
 
@@ -365,6 +425,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if pool is not None and pool != preset.pool and pool not in preset.pools:
         allowed = ", ".join([preset.pool, *preset.pools])
         return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
+    # 사용 오류는 여기까지 — 이 아래부터 서버에 더 묻는다(health 는 경고용, 토큰은 제출 전 확인)
+    _warn_if_client_too_old(client)
     # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
     try:
         client.whoami()
@@ -1070,6 +1132,7 @@ def _server_config(args: argparse.Namespace):
 
 def cmd_serve(args: argparse.Namespace) -> int:
     from remote_ci_monitor.server import serve
+    from remote_ci_monitor.store import StoreError
 
     try:
         cfg = _server_config(args)
@@ -1081,6 +1144,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return serve(cfg, debug=args.debug)
     except OSError as e:
         return _usage(f"cannot start server: {e.strerror or e}")
+    except StoreError as e:
+        # DB 를 못 연다(마이그레이션 백업 실패 · 이 빌드보다 새 스키마) — 결정 74 의 복구 경로가
+        # 이 문장이다. 운영자가 launchd 로그에서 읽는 것이라 트레이스백이 아니라 한 줄로.
+        return _usage(f"cannot start server: {e}")
 
 
 # ── init · version ───────────────────────────────────────────────────────────
@@ -1289,6 +1356,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(
                 ("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}{found_tag}")
             )
+            client_row = _client_row(client, h)
+            if client_row is not None:
+                rows.append(client_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
@@ -1501,7 +1571,10 @@ def cmd_token(args: argparse.Namespace) -> int:
         cfg = _server_config(args)
     except ConfigError as e:
         return _usage(f"config: {e}")
-    store = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        store = Store(cfg.data_dir / "rcm.sqlite3")  # 열면서 마이그레이션한다 — 거절도 여기서
+    except StoreError as e:
+        return _usage(str(e))
     now = datetime.now(UTC)
     try:
         if args.token_command == "add":

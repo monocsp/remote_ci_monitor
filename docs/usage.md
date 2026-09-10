@@ -98,7 +98,11 @@ Now prove the whole path before you trust it with real work:
 ![rcm check prints one row per thing it verified: server, token, presets, pools, timezone](images/ui/cli-check.png)
 
 1. **server** — the address it used and the version it answered with. A version far from yours is
-   worth fixing; `rcm worker` refuses a mismatch outright.
+   worth fixing; `rcm worker` refuses a mismatch outright. The `client` row below it says whether
+   yours is `same as server`, `older` or `newer`, and when it is older it prints the one command
+   that fixes it: the server hands out its own wheel at
+   `/client/remote_ci_monitor-<version>-py3-none-any.whl`, see
+   [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 2. **token** — the name your token belongs to, and whether it is an admin token. `FAIL` here means
    the token is wrong or revoked, and nothing else will work.
 3. **presets and pools** — what this server offers, and whether anything can actually run. A pool

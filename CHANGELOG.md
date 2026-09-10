@@ -28,13 +28,13 @@ of a key bumps that number and is listed here.
   floor and its no-progress check plan with the same estimate, while the byte budget still counts
   every link. `server.job_storage` gains `shared_bytes` and `estimated_reclaimable_bytes`
   (`schema_version` unchanged — keys were only added).
-  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
 - **The storage line says how old its number is.** `rcm check` prints
   `rcm data 30.9 GB · measured 57m ago` and the web host card `rcm 데이터 30.9 GB · 57m 전 측정`.
   A finished workspace is measured once and remembered for up to a day, and the age is that of the
   oldest measurement in the total — a cached figure is never shown as fresh. `server.job_storage`
   also carries `inventory_checked_at`, when the directories were last listed.
-  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
 
 ### Added
 - **A verified wrapper for gates that cannot be changed to print markers.** The server still records
@@ -46,6 +46,18 @@ of a key bumps that number and is listed here.
   reader. The primary way — print the marker from the function that decides something is red — is
   shown next to it in [Naming what failed](docs/configuration.md#naming-what-failed).
   ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92))
+- **The server hands out its own client.** `GET /client/remote_ci_monitor-<version>-py3-none-any.whl`
+  is the wheel of the code the server is running, assembled at start from the installed package —
+  so `pip install http://<build-machine>:8787/client/remote_ci_monitor-<version>-py3-none-any.whl`
+  brings a session machine to the server's version whether that version came from a release, a
+  `dev` checkout or an offline network. `/api/health` names it (`client_wheel.path`, `.sha256`,
+  `.bytes`) and says the oldest client it still accepts (`min_client_version`); `rcm check` gets a
+  `client` row (`same as server` · `older — pip install …` · `newer`), red only below that floor,
+  and `rcm run` prints one warning line when the client is that old. A wheel that could not be
+  assembled is `client_wheel: null` plus `client_wheel_error`, and the URL answers 503 — never an
+  old or empty file. [Keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)
+  has a tested wrapper (`examples/session/update-client.sh`) that verifies the sha256 before it
+  installs. ([#90](https://github.com/monocsp/remote_ci_monitor/pull/90))
 - **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
   default `"always"` is unchanged). This is what makes the recommended way of leaving evidence
   affordable: put the heavy step's output in the workspace and declare it, print the verdict to
@@ -170,6 +182,11 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **`rcm serve` and `rcm token` refuse in one line when the database cannot be opened** — a
+  migration backup that could not be written, or a database a newer build has migrated —
+  instead of a Python traceback with the sentence at the bottom. The sentence is the recovery
+  path ([going back to the old build](docs/operating.md#going-back-to-the-old-build)), and the
+  exit code is 2.
 - **The offline `rcm gc --dry-run --config` migrated the live database.** A command documented as
   read-only opened the database the way the server does, which upgrades its schema on the spot —
   so running the preview from a newer build, as the upgrade procedure said to, left the *running*

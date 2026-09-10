@@ -96,7 +96,10 @@ chmod 600 ~/.config/rcm/client.toml
 ![rcm check 가 확인한 것마다 한 줄씩 찍는다 — server · token · presets · pools · timezone](images/ui/cli-check.png)
 
 1. **server** — 어떤 주소를 썼고 서버가 어떤 버전으로 답했는지. 버전이 많이 다르면 맞추는 게
-   좋다(`rcm worker` 는 아예 거부한다).
+   좋다(`rcm worker` 는 아예 거부한다). 바로 아래 `client` 행이 내 버전이 `same as server` 인지
+   `older`·`newer` 인지 말하고, 낮으면 고치는 명령 한 줄을 그대로 찍는다 — 서버가 자기 wheel 을
+   `/client/remote_ci_monitor-<version>-py3-none-any.whl` 로 주기 때문이다. 자세한 건
+   [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 2. **token** — 이 토큰이 어느 이름의 것인지, 관리자인지. 여기가 `FAIL` 이면 토큰이 틀렸거나
    폐기된 것이고, 나머지는 전부 안 된다.
 3. **presets · pools** — 이 서버가 무엇을 제공하는지, 그리고 지금 실제로 돌 수 있는지. 살아 있는

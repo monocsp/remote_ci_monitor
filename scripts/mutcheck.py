@@ -37,6 +37,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      마이그레이션함 (`cli.py`, M5i 결정 73 — 2026-09-10 운영 DB 7→15 사고)
   ㉕ v16-without-ledger-check — v16 복구가 대장 행이 있는 **선언 라벨까지** 옮김
      (`store.py`, 결정 78)
+  ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
+     `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -267,6 +269,13 @@ MUTANTS = (
         "AND NOT EXISTS (SELECT 1 FROM job_failures WHERE job_failures.job_id=jobs.id)",""",
         new=""""WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL",""",
         tests=("tests/test_store_m5i.py",),
+    ),
+    Mutant(
+        name="client-wheel-any-name",
+        path="src/remote_ci_monitor/server.py",
+        old="        if name != expected:\n            raise ApiError(\n                404,",
+        new="        if False:\n            raise ApiError(\n                404,",
+        tests=("tests/test_client_wheel.py",),
     ),
     Mutant(
         name="ledger-outside-tx",

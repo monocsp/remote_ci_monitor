@@ -164,7 +164,8 @@ def test_pools_row_comes_right_after_presets(srv, env, capsys):
     assert "pools" in order, out
     assert order.index("pools") == order.index("presets") + 1, order
     assert order.index("timezone") > order.index("pools"), order
-    assert order[:4] == ["python", "server", "token", "presets"], order  # 앞쪽은 오늘 그대로
+    # 앞쪽은 그대로 — `client` 는 M5i I8-3(결정 83)이 `server` 옆에 둔 행이다
+    assert order[:5] == ["python", "server", "client", "token", "presets"], order
 
 
 # ── 원격 워커 idle · busy ────────────────────────────────────────────────────
