@@ -65,8 +65,12 @@ def test_usage_guides_point_at_the_server_wheel():
 
 
 def test_changelog_has_the_entry():
-    unreleased = _section(CHANGELOG.read_text(), "[Unreleased]")
-    assert "/client/" in unreleased and "min_client_version" in unreleased
+    """릴리스 뒤에는 항목이 `[Unreleased]` 가 아니라 그 버전의 절에 있다 — 다른 문서 잠금
+    (tests/test_docs_m5.py `unreleased()`)처럼 「0.1.0 이후 전부」를 본다."""
+    from test_docs_m5 import unreleased
+
+    text = unreleased(CHANGELOG.read_text())
+    assert "/client/" in text and "min_client_version" in text
 
 
 def test_mutcheck_lists_the_exact_name_mutant():
