@@ -255,18 +255,34 @@ rcm gc --dry-run --config ~/.config/rcm/server.toml
 job     workspace   snapshot   reason
 #118       1.7 GB          —   age
 #131       0.8 GB     0.0 GB   budget
-would free 2.5 GB from 2 jobs · 28.9 GB left
+would free 1.9 GB from 2 jobs (2.5 GB charged · 0.6 GB shared by hard links) · 28.9 GB would remain
 ```
 
+**Hard links are charged but not reclaimable.** A workspace made from a `git_ref` source is a
+local clone of the server's mirror, and git hard-links the pack files into it, so the same blocks
+are counted once for the mirror and once for every workspace — on one real machine a third of all
+workspace bytes. The accounting therefore keeps two numbers. What a workspace is **charged** counts
+every link: that is what the table shows and what `workspace_storage_max_bytes` is measured
+against, so the budget errs on the safe side. What deleting it would **reclaim** is the charged
+bytes minus the blocks that are hard-linked elsewhere: `would free` is that estimate, the
+free-space floor plans with it, and so does the no-progress check. It is a lower bound — a link
+that lives entirely inside one workspace cannot be told apart — which is why the field is named
+`estimated_reclaimable_bytes`. `would remain` is what the inventory would still charge.
+
 `rcm gc` (admin token) runs the same plan for real against a running server, and reports what it
-planned, what it deleted and what failed separately — a plan is not a receipt. A `gc` that outruns
-its `--timeout` (600 s) exits **3, unknown**, not failure: the server may still be deleting, so run
-the dry run again to see what is left.
+planned, what it deleted and what failed separately — a plan is not a receipt. After deleting it
+measures the inventory and the free space again, so its `… left` figure and `free … → …` are what
+the disk said afterwards, not the plan. A `gc` that outruns its `--timeout` (600 s) exits
+**3, unknown**, not failure: the server may still be deleting, so run the dry run again to see
+what is left.
 
 The same numbers are on `/api/status` under `server.job_storage`
-(`volume_bytes = workspace_bytes + snapshot_bytes = evictable_bytes + non_evictable_bytes`), in
-`/api/health` under `storage`, as one line in `rcm check`, and under the disk meter on the web host
-card. What cannot be measured reads `—`, never `0`.
+(`volume_bytes = workspace_bytes + snapshot_bytes = evictable_bytes + non_evictable_bytes`, plus
+`shared_bytes` and `estimated_reclaimable_bytes`), in `/api/health` under `storage`, as one line
+in `rcm check`, and under the disk meter on the web host card. What cannot be measured reads `—`,
+never `0`. The line also says how old the number is — `rcm data 30.9 GB · measured 57m ago`: a
+finished workspace is measured once and remembered for up to a day, and the age shown is that of
+the **oldest** measurement in the total, so a cached figure is never presented as fresh.
 
 Git mirrors are never pruned.
 

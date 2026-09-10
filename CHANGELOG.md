@@ -19,6 +19,22 @@ of a key bumps that number and is listed here.
   server, and set `workspace_retention_days = 30` to keep the old behaviour. Evidence is never given
   up to make room, and a size that cannot be measured skips the byte rules for that sweep rather
   than guessing. ([Configuration](docs/configuration.md#retention-what-is-kept-and-for-how-long))
+- **`rcm gc --dry-run` says what deleting would actually give back.** A workspace cloned from the
+  git mirror shares its pack files with it by hard link; those bytes are charged to the workspace
+  but deleting it does not free them — on one real machine that was a third of all workspace
+  bytes, and `would free` overstated by as much. `would free` is now the reclaimable estimate, with
+  the charged total and the shared part beside it
+  (`would free 1.9 GB from 2 jobs (2.5 GB charged · 0.6 GB shared by hard links)`); the free-space
+  floor and its no-progress check plan with the same estimate, while the byte budget still counts
+  every link. `server.job_storage` gains `shared_bytes` and `estimated_reclaimable_bytes`
+  (`schema_version` unchanged — keys were only added).
+  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **The storage line says how old its number is.** `rcm check` prints
+  `rcm data 30.9 GB · measured 57m ago` and the web host card `rcm 데이터 30.9 GB · 57m 전 측정`.
+  A finished workspace is measured once and remembered for up to a day, and the age is that of the
+  oldest measurement in the total — a cached figure is never shown as fresh. `server.job_storage`
+  also carries `inventory_checked_at`, when the directories were last listed.
+  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
 
 ### Added
 - **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
@@ -144,6 +160,22 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **`rcm gc --dry-run` on a freshly started server said `0 B would remain`.** The summary used the
+  server's previous measurement, taken before the plan ran; it now uses the snapshot the plan
+  itself measured. A real `rcm gc` also measures again after deleting: `storage_after` and the new
+  `free_bytes_before` / `free_bytes_after` are what the disk said afterwards, and the receipt reads
+  `freed 2.5 GB from 2 jobs · est. 1.9 GB reclaimable · free 600.0 GB → 601.9 GB · 28.9 GB left`.
+  `freed_bytes` keeps its meaning — the planned size of what was deleted, now also as
+  `deleted_charged_bytes` — so nothing that read it changes.
+  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **The no-progress check could miss.** It only armed when the floor rule itself had picked
+  something, so a sweep whose age or budget picks already covered the shortfall could delete under
+  the floor, gain nothing, and never pause. It now judges every sweep that started under the floor,
+  against what was actually deleted rather than what was planned, and not at all when nothing was.
+  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **A workspace that could not be measured now says why.** `error_code` and the server log carry
+  `measure_EACCES` (or whichever error it was) instead of a bare unknown.
+  ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
 - **The web page came up broken on any server with a disk sample** — since the unreleased data
   directory line under the disk meter, the host card referred to a name that did not exist, the
   render stopped there on every refresh, the recent list stayed empty, and after thirty seconds
