@@ -163,6 +163,11 @@ of a key bumps that number and is listed here.
   shape a real deployment sends (a disk sample and `server.job_storage`), checks the line in both
   languages, and fails on any page error; on the Linux CI runner a missing Chrome is a failure,
   not a skip. ([#82](https://github.com/monocsp/remote_ci_monitor/pull/82))
+- **The disk meter and the data-directory line were missing when `data_dir` was written with
+  `~`** — which is what the example `server.toml` does (`~/.local/share/rcm`). The server handed
+  the sampler the unexpanded string, the usage call failed on it, and the host sample carried
+  `disk: null`, so neither the web page nor `rcm top` drew the disk. A path written in full
+  was never affected. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/84))
 - **A remote worker collected no artifacts at all.** The server never put the frozen artifact
   policy in its `/worker/claim` reply, so the worker found no globs and skipped collection
   entirely: a preset with `artifacts` running in a remote pool produced nothing, while the job
