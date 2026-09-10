@@ -28,8 +28,15 @@
 
 ## 2. `tests/test_web_browser.py` — headless Chrome
 
-Chrome 찾기: `RCM_CHROME` → `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` → PATH 의
-`google-chrome` · `google-chrome-stable` · `chromium` · `chromium-browser`. 없으면 모듈 전체 skip.
+Chrome 찾기: `RCM_CHROME`(파일 경로 또는 PATH 의 이름) → `/Applications/Google Chrome.app/Contents/MacOS/Google
+Chrome` → PATH 의 `google-chrome` · `google-chrome-stable` · `chromium` · `chromium-browser`. 없으면 모듈 전체
+skip — 단 `RCM_CHROME` 이 설정돼 있으면 그 값만 보고, 안 풀리면 **실패**다(CI 의 ubuntu 잡이 이 길이다. 2026-09-10
+결정 79 · `docs/gate-replay-fixes-workplan.md` §3 I5).
+
+이 모듈은 렌더 경로의 스모크이기도 하다: 스텁 표본에 `disk` 가 있고(실배치 모양 — B1 이 산 자리), Chrome 은
+페이지 스크립트보다 먼저 `error`·`unhandledrejection` 수집기를 심어(`Page.addScriptToEvaluateOnNewDocument`)
+`open()` 이 기다리는 동안 예외가 잡히면 마감을 채우지 않고 바로 그 메시지로 실패한다. 테스트는 `page_errors()`
+가 빈 목록임을 단언한다.
 
 배치(`scene` 픽스처): `Server(workers=True)` 에 `app.sampler` 를 **부를 때마다 2초 전 표본을 새로 만드는**
 스텁으로 덮고(CPU busy 21.0 · 표본 이름 `macmini`), alice 의 `slow` 잡을 올려 `running`(phase executing) 까지

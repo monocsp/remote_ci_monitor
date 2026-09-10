@@ -1718,8 +1718,9 @@
       // 남은 양은 오른쪽에 글자로 — 막대만으로는 「얼마 남았나」를 못 읽는다. 경로는 그리지 않는다.
       var right = (isNum(diskPct) ? fmtPct(diskPct) : DASH) + (isNum(disk.free_bytes) ? " · " + tr("host.disk_free", { free: fmtDisk(disk.free_bytes) }) : "");
       html += meter("disk", tr("host.disk", { used: fmtDisk(disk.used_bytes), total: fmtDisk(disk.total_bytes) }), right, diskPct, 0, lowFree || (isNum(diskPct) && diskPct >= 85), "");
-      // 데이터 디렉터리가 쥔 부피는 서버의 사실이라 **서버 자신의 카드에만** 그린다.
-      var js = local ? jobStorageLine((state.status && state.status.server || {}).job_storage, state.status && state.status.generated_at, L()) : null;
+      // 데이터 디렉터리가 쥔 부피는 서버의 사실이라 **서버 자신의 카드에만** 그린다 — 로컬 표본은
+      // `source: "local"`, 원격 워커의 표본은 `source: "worker"` 다.
+      var js = h.source === "local" ? jobStorageLine((state.status && state.status.server || {}).job_storage, state.status && state.status.generated_at, L()) : null;
       if (js) html += '<div class="substat' + (js.warn ? " warn" : "") + '">' + esc(js.text) + "</div>";
     }
     if (gpu) html += meter("gpu", tr("host.gpu", { pct: fmtPct(gpu.util_pct) }), isNum(gpu.mem_used_bytes) ? tr("host.gpu_used", { size: fmtMemory(gpu.mem_used_bytes) }) : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));

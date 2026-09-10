@@ -144,6 +144,13 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **The web page came up broken on any server with a disk sample** — since the unreleased data
+  directory line under the disk meter, the host card referred to a name that did not exist, the
+  render stopped there on every refresh, the recent list stayed empty, and after thirty seconds
+  the page reported a lost connection while the server was fine. The browser test now renders the
+  shape a real deployment sends (a disk sample and `server.job_storage`), checks the line in both
+  languages, and fails on any page error; on the Linux CI runner a missing Chrome is a failure,
+  not a skip. ([#82](https://github.com/monocsp/remote_ci_monitor/pull/82))
 - **A remote worker collected no artifacts at all.** The server never put the frozen artifact
   policy in its `/worker/claim` reply, so the worker found no globs and skipped collection
   entirely: a preset with `artifacts` running in a remote pool produced nothing, while the job
