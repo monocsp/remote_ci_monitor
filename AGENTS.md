@@ -38,6 +38,12 @@ gh pr create --base dev
 git worktree remove ../remote_ci_monitor-<topic>   # once it is merged
 ```
 
+**Names are part of the work.** Before creating a branch invoke the `branch` skill, before
+committing the `commit` skill, before opening or merging a PR the `pr` skill — they hold the
+shape (`<type>/<scope>-<what-it-does>`, `<type>(<scope>): <summary>`) and the steps.
+`tools/guard_naming.py` (a `PreToolUse` hook) refuses a branch name, commit subject or PR
+title that does not fit; the rule is in `CONTRIBUTING.md` (Names).
+
 `main` only takes a pull request from `dev`. The workflow job names `test` (`ci.yml`) and
 `main-from-dev-only` (`pr-policy.yml`) are wired into the ruleset: renaming one means changing the
 ruleset too.

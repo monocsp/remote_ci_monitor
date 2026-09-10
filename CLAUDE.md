@@ -22,6 +22,10 @@ PLAN.md 가 정본이다. 세션을 시작하면 먼저 끝까지 읽는다.
   # 작업 → gh pr create --base dev → 머지
   git worktree remove ../remote_ci_monitor-<topic>   # 머지된 뒤에 치운다
   ```
+- **이름은 일의 일부다.** 브랜치를 만들기 전에 `branch` 스킬, 커밋하기 전에 `commit` 스킬, PR 을 열거나
+  머지하기 전에 `pr` 스킬을 부른다(`/branch` `/commit` `/pr`). 브랜치는 `<type>/<scope>-<what-it-does>`
+  (`fix/cli-ux` 처럼 어디인지만 말하는 이름은 안 된다), 커밋·PR 제목은 `<type>(<scope>): 한국어 요약`.
+  `tools/guard_naming.py` 훅이 안 맞는 이름을 거부한다 — 정본은 `CONTRIBUTING.md` 「Names」.
 - 워크플로 잡 이름 `test`(ci.yml)·`main-from-dev-only`(pr-policy.yml)는 룰셋 필수 체크와 묶여 있다. 바꾸면 룰셋도 같이 바꾼다.
 
 ## 운영 설치 — 이 머신이 빌드 머신이면 (AGENTS.md 「The build machine's own install」)
