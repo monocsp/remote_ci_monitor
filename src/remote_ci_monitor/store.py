@@ -16,12 +16,16 @@ import contextlib
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+import time
+import urllib.parse
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -60,7 +64,9 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 15
+DB_VERSION = 16
+#: 마이그레이션 전 자동 백업을 몇 개 남기나(결정 74). 정리는 마이그레이션이 끝난 뒤, 실패는 경고만.
+BACKUPS_KEPT = 3
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -310,6 +316,19 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
         "AND last_step IS NULL",
     ),
+    # v15 → v16(M5i · 결정 78): 2026-09-10 사고의 뒤처리. 새 코드가 운영 DB 를 15 로 올린 뒤에도
+    # 옛 빌드(0.2.5)가 계속 돌며 실패 잡에 **추론 라벨**을 `failed_step` 에 썼다(#196 · #199 ·
+    # #200). v15 는 다시 돌지 않으니 그냥 올리면 그 라벨이 「선언된 실패」로 보인다. 새 코드는 선언
+    # 라벨을 쓸 때 언제나 `job_failures` 행을 같은 트랜잭션에 남기므로(로컬·원격 둘 다
+    # `outcome_for()` 경로 · `timed_out` 도 · 상한에 잘려도 최소 한 행), 「라벨은 있는데 대장 행이
+    # 하나도 없다」가 옛 빌드의 흔적이다. 이름 일치로 가리지 않는 이유: 100개 상한에 잘린 잡은
+    # 라벨이 대장의 어느 이름과도 다를 수 있다. 한 번짜리다 — 매 기동 보정은 안 한다.
+    16: (
+        "UPDATE jobs SET last_step=COALESCE(last_step, failed_step), failed_step=NULL "
+        "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM job_failures WHERE job_failures.job_id=jobs.id)",
+        "UPDATE jobs SET failed_step=NULL, last_step=NULL WHERE state IN ('cancelled','lost')",
+    ),
 }
 
 
@@ -317,6 +336,93 @@ def _outcome(code: str, **args: Any) -> dict[str, Any]:
     """`_set_state` 에 바로 넣을 요약 세 값(문장·코드·인자 JSON). 결정 37."""
     text, code, clean = outcome.summary(code, **args)
     return {"summary": text, "summary_code": code, "summary_args": dump_args(clean)}
+
+
+def _ro_uri(path: Path) -> str:
+    """살아 있는 DB 를 읽기만 하는 URI — 절대경로 · URL 인코딩 · `mode=ro`. `immutable=1` 은 안 쓴다
+    (WAL 을 무시해 다른 프로세스가 쓰는 중인 DB 를 깨진 것처럼 읽는다)."""
+    return f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro"
+
+
+def database_version(path: Path) -> int:
+    """파일을 바꾸지 않고 `PRAGMA user_version` 만 읽는다. 없거나 비어 있으면 0."""
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return 0
+    # ⚠️ 읽기 전용 연결은 WAL DB 옆의 `-wal`·`-shm` 이 없으면 만들고 닫을 때 못 지운다(0바이트 ·
+    # 무해 — 다음 보통 연결이 치운다). 그래도 지우지 않는다: 서버가 막 뜨는 중이면 그 파일은 서버의
+    # 것이고, 「읽기만 한다」는 명령이 데이터 디렉터리에서 무엇을 지우는 일은 없어야 한다.
+    conn = sqlite3.connect(_ro_uri(path), uri=True)
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
+class CopyDeadlineExceeded(RuntimeError):
+    """페이지 단위 복사가 마감 안에 못 끝났다 — 「모른다」이지 실패가 아니다."""
+
+
+def _copy_database(
+    src: Path, dst: Path, *, deadline: float | None = None, pages: int = 256
+) -> None:
+    """`Connection.backup()` 으로 일관된 사본을 뜬다(WAL 에만 있는 쓰기까지). 원본은 `mode=ro`.
+
+    `deadline` 은 `time.monotonic()` 값이다 — 페이지 묶음마다 확인하고 넘으면
+    `CopyDeadlineExceeded`. 반쯤 된 사본은 부르는 쪽이 치운다.
+    """
+
+    def check(status: int, remaining: int, total: int) -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise CopyDeadlineExceeded(f"{remaining} of {total} pages left")
+
+    if deadline is not None and time.monotonic() > deadline:
+        raise CopyDeadlineExceeded("before the first page")
+    source = sqlite3.connect(_ro_uri(src), uri=True)
+    try:
+        target = sqlite3.connect(str(dst))
+        try:
+            source.backup(target, pages=pages, progress=check)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
+def _verify_copy(path: Path, expected_version: int) -> None:
+    """사본이 열리고 무결하며 옛 버전 표식을 갖는지. 아니면 예외.
+
+    보통 연결로 연다(`mode=ro` 가 아니라) — 읽기 전용 연결은 WAL DB 옆에 만든 `-wal`·`-shm` 을
+    닫을 때 못 지워 백업 디렉터리에 찌꺼기가 남는다. 읽기만 하므로 내용은 안 바뀐다.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        (ok,) = conn.execute("PRAGMA integrity_check").fetchone()
+        if ok != "ok":
+            raise sqlite3.DatabaseError(f"integrity_check: {ok}")
+        (version,) = conn.execute("PRAGMA user_version").fetchone()
+        if int(version) != expected_version:
+            raise sqlite3.DatabaseError(f"user_version {version} != {expected_version}")
+    finally:
+        conn.close()
+
+
+def backup_dir(path: Path) -> Path:
+    return Path(path).parent / "backup"
+
+
+def backup_path(path: Path, version: int) -> Path:
+    """`<data_dir>/backup/rcm.sqlite3.v<version>.bak` — 그 버전에서 올리기 직전의 사본."""
+    return backup_dir(path) / f"{Path(path).name}.v{version}.bak"
+
+
+def newer_database_message(path: Path, version: int) -> str:
+    """옛 빌드가 새 DB 를 거절할 때의 문장 — 거절만 하지 않고 길을 붙인다(B2-3)."""
+    return (
+        f"database schema version {version} is newer than this build ({DB_VERSION}) — "
+        f"stop the service, restore {backup_path(path, DB_VERSION)} "
+        f"(and remove {Path(path).name}-wal/-shm), or upgrade"
+    )
 
 
 class StoreError(RuntimeError):
@@ -482,12 +588,14 @@ def _upsert_bundle(
 class Store:
     """SQLite 저장소. 한 프로세스 안에서 여러 스레드가 같이 쓴다."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, log: Callable[[str], None] | None = None):
         self.path = Path(path)
         self._local = threading.local()
         self._lock = threading.Lock()
         self.open_connections = 0  # 지금 열린 연결 수(스레드마다 하나) — 누수 감시
         self._holds: dict[int, int] = {}  # 지금 내려보내는 중인 묶음(M5e) — 프로세스 안에서만
+        # 경고 한 줄을 어디에 쓰나(백업 정리 실패 같은, 멈출 일은 아닌 것). 기본은 stderr.
+        self._log = log or (lambda msg: print(msg, file=sys.stderr))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
 
@@ -517,7 +625,15 @@ class Store:
                 self.open_connections -= 1
 
     def migrate(self) -> None:
-        """`PRAGMA user_version` 기준으로 빠진 마이그레이션만 적용한다."""
+        """`PRAGMA user_version` 기준으로 빠진 마이그레이션만 적용한다.
+
+        실제로 버전을 올릴 때(`1 ≤ version < DB_VERSION`)는 **어떤 변경보다 먼저** — `_conn()` 의
+        `journal_mode=WAL` 보다도 먼저 — 옛 DB 의 검증된 사본을 `backup/` 에 남긴다(결정 74). 못
+        남기면 마이그레이션을 시작하지 않는다. 이것이 「옛 빌드가 새 DB 를 거절한다」의 복구 경로다.
+        """
+        version = database_version(self.path)
+        if 1 <= version < DB_VERSION:
+            self._backup_before_migration(version)
         conn = self._conn()
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
@@ -546,10 +662,44 @@ class Store:
                 except Exception:
                     conn.execute("ROLLBACK")
                     raise
+            self._prune_backups()
         elif version > DB_VERSION:
+            raise StoreError(newer_database_message(self.path, version))
+
+    def _backup_before_migration(self, old: int) -> None:
+        """`backup/rcm.sqlite3.v<old>.bak` — 임시 파일로 뜨고, 열어서 검증하고, 원자적으로 이름을
+        바꾼다. 어느 단계든 실패하면 `StoreError`: DB 는 아직 아무것도 안 바뀌었다(fail-closed)."""
+        final = backup_path(self.path, old)
+        tmp = final.with_name(final.name + ".tmp")
+        try:
+            final.parent.mkdir(parents=True, exist_ok=True)
+            _copy_database(self.path, tmp)
+            _verify_copy(tmp, old)
+            os.replace(tmp, final)
+        except Exception as e:  # noqa: BLE001 — 원인이 무엇이든 마이그레이션을 시작하면 안 된다
+            with contextlib.suppress(OSError):
+                tmp.unlink()
             raise StoreError(
-                f"database schema version {version} is newer than this build ({DB_VERSION})"
-            )
+                f"migration backup failed ({type(e).__name__}: {e}) — the database was not "
+                f"changed. Free space or fix {final.parent}, then start again"
+            ) from e
+
+    def _prune_backups(self) -> None:
+        """자동 백업은 최근 `BACKUPS_KEPT` 개만. 사람이 만든 파일(`.pre-0.2.4.bak` 같은)은 안 본다.
+        정리 실패는 경고만 — 마이그레이션은 이미 끝났다."""
+        pattern = re.compile(rf"^{re.escape(self.path.name)}\.v(\d+)\.bak$")
+        found: list[tuple[int, Path]] = []
+        with contextlib.suppress(OSError):
+            for p in backup_dir(self.path).iterdir():
+                m = pattern.match(p.name)
+                if m:
+                    found.append((int(m.group(1)), p))
+        found.sort()
+        for _version, p in found[:-BACKUPS_KEPT] if len(found) > BACKUPS_KEPT else []:
+            try:
+                p.unlink()
+            except OSError as e:
+                self._log(f"warning: could not remove old backup {p.name}: {e}")
 
     def user_version(self) -> int:
         return int(self._conn().execute("PRAGMA user_version").fetchone()[0])

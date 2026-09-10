@@ -703,7 +703,9 @@ def test_the_upgrade_moves_an_old_failed_label_to_the_last_step_column(tmp_path)
     """
     path = tmp_path / "old.sqlite3"
     store = Store(path)
-    kept = finished(store, seconds=10, failed_step="test", last_step="test")  # 새 코드가 쓴 행
+    # 새 코드가 쓴 행 — 선언 라벨은 언제나 대장(`job_failures`) 행과 함께 쓰인다(v16 은 대장 없는
+    # 라벨만 옛 빌드의 추론으로 본다)
+    kept = finished(store, seconds=10, failed_step="test", last_step="test", names=("test",))
     moved = finished(store, seconds=20, failed_step=STEP_162)
     cancelled = finished(store, seconds=30, state=CANCELLED, failed_step=STEP_162)
     store.close()

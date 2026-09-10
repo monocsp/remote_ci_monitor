@@ -14,6 +14,7 @@ import json
 
 from remote_ci_monitor.cli import main
 from remote_ci_monitor.core.render_text import render_gc, storage_row
+from remote_ci_monitor.store import Store
 
 GB = 1024**3
 
@@ -155,6 +156,7 @@ def test_dry_run_works_without_a_server(tmp_path, capsys, monkeypatch):
     )
     (data / "workspaces" / "7").mkdir(parents=True)
     (data / "workspaces" / "7" / "big").write_bytes(b"x" * 4096)
+    Store(data / "rcm.sqlite3").close()  # 서버가 한 번은 돌았다 — DB 가 없으면 「모른다」(3)다
     monkeypatch.setenv("RCM_SERVER", "http://127.0.0.1:1")  # 닿지 않는 주소 — 안 부른다
     rc = main(["gc", "--dry-run", "--config", str(cfg_path)])
     out = capsys.readouterr().out
@@ -169,10 +171,11 @@ def test_the_offline_dry_run_is_json_too(tmp_path, capsys):
     cfg_path.write_text(
         f'[server]\ndata_dir = "{data}"\n[[presets]]\nname = "ok"\nargv = ["true"]\n'
     )
-    data.mkdir(parents=True)
+    Store(data / "rcm.sqlite3").close()
     rc = main(["gc", "--dry-run", "--config", str(cfg_path), "--json"])
     doc = json.loads(capsys.readouterr().out)
     assert rc == 0 and doc["dry_run"] is True and doc["planned"] == []
+    assert doc["offline"]["copy"] is True
 
 
 # ── 타임아웃은 실패가 아니다 ─────────────────────────────────────────────────
