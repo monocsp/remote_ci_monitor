@@ -31,6 +31,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
   ㉑ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
   ㉒ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
+  ㉓ offline-gc-opens-original — 오프라인 dry-run 이 임시 사본이 아니라 **살아 있는 DB** 를 열어
+     마이그레이션함 (`cli.py`, M5i 결정 73 — 2026-09-10 운영 DB 7→15 사고)
+  ㉔ v16-without-ledger-check — v16 복구가 대장 행이 있는 **선언 라벨까지** 옮김
+     (`store.py`, 결정 78)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -245,6 +249,23 @@ MUTANTS = (
     ),
     # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 대장을 커밋 **뒤로** 옮기면(= 실패한 대장
     # 쓰기가 finish 를 되돌리지 못하면) 빨개져야 한다.
+    # ㉓ 결정 73 — 사본 대신 원본을 열면 원본이 마이그레이션된다(user_version 7 → 16). 사고 그 자체.
+    Mutant(
+        name="offline-gc-opens-original",
+        path="src/remote_ci_monitor/cli.py",
+        old="            store = Store(copy, log=_err)",
+        new="            store = Store(db, log=_err)",
+        tests=("tests/test_offline_gc.py",),
+    ),
+    # ㉔ 결정 78 — 「대장 행이 하나도 없다」 조건을 빼면 새 코드의 선언 라벨도 옮겨진다.
+    Mutant(
+        name="v16-without-ledger-check",
+        path="src/remote_ci_monitor/store.py",
+        old=""""WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM job_failures WHERE job_failures.job_id=jobs.id)",""",
+        new=""""WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL",""",
+        tests=("tests/test_store_m5i.py",),
+    ),
     Mutant(
         name="ledger-outside-tx",
         path="src/remote_ci_monitor/store.py",

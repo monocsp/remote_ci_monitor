@@ -77,18 +77,65 @@ the same reason as the service files above.
 
 ## Upgrade
 
-`pipx upgrade remote-ci-monitor` (or `pipx install --force <wheel>`), then restart `rcm serve`
-(`launchctl kickstart -k gui/$(id -u)/com.remote-ci-monitor.server` · `systemctl restart rcm-server`).
-The database migrates on start; queued jobs and a paused queue survive, jobs that were running
-become `lost` (exit 3 for waiting sessions). Sessions may run a different patch version —
-`rcm check` shows both versions.
+The order matters. The database migrates one way on the first start of the new build, and an
+editable checkout starts serving new code the moment it is pulled — so the running service must
+be stopped **before** the code moves, and the preview must not touch the live database. The
+sequence below is the same for a wheel and for a git checkout; only the "move the code" line
+differs.
 
-A migration is one way, so copy the database before an upgrade that carries one (the changelog says
-which). With the server running, use SQLite's own backup — `cp` misses the write-ahead log:
+1. **Verify the new build somewhere else first** — a separate venv or worktree with its own
+   config, `port` and `data_dir`.
+2. **Preview from that build, against the real config**:
+   ```sh
+   <new build>/bin/rcm gc --dry-run --config ~/.config/rcm/server.toml
+   ```
+   This opens the live database read-only, copies it with SQLite's online backup into a private
+   temporary directory, migrates and plans **on the copy**, and deletes the copy. The database
+   itself is not changed. If the copy cannot be made or migrated, the command exits 3 (unknown)
+   and says why — that is the migration failing *before* your restart, which is the point.
+3. `rcm pause` (admin token), then confirm nothing is `running`, `cancelling` or `uploading`
+   (`rcm top`). Pausing stops the queue, not submissions: stop the service right after the check,
+   or a job that starts uploading in between is cancelled by the stop.
+4. Stop the service (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` ·
+   `systemctl stop rcm-server`).
+5. Keep your own copy of the database at this moment (see below), so there is one that predates
+   the new build regardless of what the build does.
+6. Move the code: `pipx upgrade remote-ci-monitor` (or `pipx install --force <wheel>`), or
+   `git pull --ff-only` in the checkout.
+7. Start the service. The first start migrates the database — and before it changes anything it
+   writes `<data_dir>/backup/rcm.sqlite3.v<old>.bak`, a verified copy of the old database (the
+   three newest are kept). If that backup cannot be written, the server refuses to start and the
+   database stays as it was.
+8. `rcm check`, the web page, then `rcm resume`.
+
+Queued jobs and a paused queue survive; jobs that were running when the service stopped become
+`lost` (exit 3 for waiting sessions). Sessions may run a different patch version — `rcm check`
+shows both versions.
+
+A copy you make yourself, with the server running, must use SQLite's own backup — `cp` misses
+the write-ahead log:
 
 ```sh
 sqlite3 ~/.local/share/rcm/rcm.sqlite3 ".backup ~/rcm-before-upgrade.sqlite3"
 ```
+
+### Going back to the old build
+
+An old build refuses a database a newer build has migrated:
+
+```
+database schema version 16 is newer than this build (15) — stop the service, restore
+~/.local/share/rcm/backup/rcm.sqlite3.v15.bak (and remove rcm.sqlite3-wal/-shm), or upgrade
+```
+
+That refusal is correct — a migration can rewrite data, and reading the columns it knows would
+silently show wrong facts. Restoring the `.bak` is a **database-only downgrade**: stop the
+service, copy the backup over `rcm.sqlite3`, delete `rcm.sqlite3-wal` and `rcm.sqlite3-shm`, start
+the old build. What you lose is everything that happened after the backup was taken — job rows
+finished since then are gone from the database while their `jobs/<id>/` logs and
+`workspaces/<id>/` directories are still on disk (the sweeper treats those as orphans and counts
+them but does not delete them), and a job number handed out after the backup will be reused. Do
+this only when the new build cannot run at all; otherwise fix forward.
 
 ### From a git checkout
 
@@ -174,15 +221,15 @@ on a guess: a size that cannot be measured skips the byte rules for that sweep a
 full table is in [Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
 
 **Upgrading to a release that adds these:** the first sweep after the restart applies the new
-defaults, so look first. This needs no server and deletes nothing:
+defaults, so look first — from the **new** build, before the running checkout moves
+([Upgrade](#upgrade) has the full order):
 
 ```sh
-git -C ~/Documents/GitHub/remote_ci_monitor pull --ff-only   # the service still runs the old code
-rcm gc --dry-run --config ~/.config/rcm/server.toml          # what the new rules would remove
-launchctl kickstart -k gui/$(id -u)/com.remote-ci-monitor.server
+<new build>/bin/rcm gc --dry-run --config ~/.config/rcm/server.toml   # what the new rules would remove
 ```
 
-To keep the old behaviour instead, set `workspace_retention_days = 30` (or your
+It plans on a temporary copy of the database and deletes nothing; the live database is opened
+read-only and is not migrated. To keep the old behaviour instead, set `workspace_retention_days = 30` (or your
 `retention_days_failure`) before restarting. `rcm gc` with an admin token runs the same plan for
 real on a running server; `rcm gc --dry-run` there shows it first.
 

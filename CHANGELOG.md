@@ -31,9 +31,10 @@ of a key bumps that number and is listed here.
 - **`rcm gc` reclaims workspace storage now, and `--dry-run` shows what would go.** With an admin
   token it runs the same plan the sweeper does, and reports what it planned, what it deleted and
   what failed separately — a plan is not a receipt. `rcm gc --dry-run --config server.toml` runs
-  **without a server at all**, reading only the config and the data directory, so you can see what
-  a new release would remove before you restart into it. A run that outruns `--timeout` (600 s)
-  exits 3 (unknown), never failure: the server may still be deleting.
+  **without a server at all** — it reads the config and the data directory and plans on a
+  temporary copy of the database, so you can see what a new release would remove before you
+  restart into it. A run that outruns `--timeout` (600 s) exits 3 (unknown), never failure: the
+  server may still be deleting.
 - **The screen says what the data directory holds and when the next sweep is.** `/api/status`
   carries `server.job_storage`, `/api/health` carries `storage`, `rcm check` prints one `storage`
   line, and the web host card shows it under the disk meter in both languages. What cannot be
@@ -144,6 +145,25 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **The offline `rcm gc --dry-run --config` migrated the live database.** A command documented as
+  read-only opened the database the way the server does, which upgrades its schema on the spot —
+  so running the preview from a newer build, as the upgrade procedure said to, left the *running*
+  older build with a database it did not understand: failed jobs lost their step labels, and the
+  service could not have been restarted. It now opens the live database read-only, copies it with
+  SQLite's online backup into a private temporary directory, migrates and plans on the copy, and
+  deletes the copy; if any step is incomplete it exits 3 (unknown) instead of printing an empty
+  plan, and a data directory with no database is unknown too rather than a database being created
+  there. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/84))
+- **Every schema migration now starts with a verified backup of the old database**,
+  `<data_dir>/backup/rcm.sqlite3.v<old>.bak` (three kept). If the backup cannot be written the
+  migration does not start and the server says so. An older build that meets a newer database
+  refuses to start as before, and the message now names that backup and the restore steps;
+  [Operating](docs/operating.md#going-back-to-the-old-build) says what a database-only downgrade
+  loses. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/84))
+- **Step labels an older build wrote after such an upgrade are corrected once on the next start**
+  (schema v16): a failed job's label that has no entry in the failure ledger is moved to
+  `last_step`, and cancelled or lost jobs lose theirs — those were the old build's guesses, not
+  declarations. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/84))
 - **The web page came up broken on any server with a disk sample** — since the unreleased data
   directory line under the disk meter, the host card referred to a name that did not exist, the
   render stopped there on every refresh, the recent list stayed empty, and after thirty seconds

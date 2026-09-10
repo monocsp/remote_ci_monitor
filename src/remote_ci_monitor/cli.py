@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import sqlite3
 import sys
 import tarfile
 import tempfile
@@ -650,37 +651,109 @@ def cmd_bump(args: argparse.Namespace) -> int:
 
 
 def _offline_gc(args: argparse.Namespace) -> int:
-    """서버 없이 도는 `--dry-run`(결정 61) — 설정과 데이터 디렉터리만 읽고 아무것도 안 지운다.
+    """서버 없이 도는 `--dry-run`(결정 61·73) — 설정과 데이터 디렉터리를 읽고, **DB 는 임시 사본
+    위에서** 실제 마이그레이션과 실제 계획을 돌린 뒤 사본을 지운다. 아무것도 안 지우고, 살아 있는
+    DB 는 `mode=ro` 로만 연다.
 
     업그레이드 안전 게이트가 이것 위에 서 있다. `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자
-    sweep 하므로, 올리기 **전에** 무엇이 지워질지 보려면 서버 없이 도는 길이 있어야 한다.
+    sweep 하므로, 올리기 **전에** 무엇이 지워질지 보려면 서버 없이 도는 길이 있어야 한다. 2026-09-10
+    까지는 여기서 `Store(...)` 를 그냥 열어 **운영 DB 를 마이그레이션했다**(옛 빌드는 재시작하면 못
+    뜬다 — docs/gate-replay-fixes-workplan.md §3 B2). 사본 위에서 돌면 마이그레이션 자체의 실패까지
+    재시작 전에 드러난다. 어느 단계든 불완전하면 exit 3 — 빈 계획을 성공으로 내지 않는다.
     """
     from remote_ci_monitor.janitor import Janitor, _item_json
-    from remote_ci_monitor.store import Store
+    from remote_ci_monitor.store import (
+        DB_VERSION,
+        CopyDeadlineExceeded,
+        Store,
+        StoreError,
+        _copy_database,
+        database_version,
+        newer_database_message,
+    )
 
     try:
         cfg = load_server_config(args.config, check_tools=False)
     except ConfigError as e:
         return _usage(str(e))
-    store = Store(cfg.data_dir / "rcm.sqlite3")
+    db = cfg.data_dir / "rcm.sqlite3"
+    if not db.is_file():
+        _err(
+            f"gc: no database at {db} — the server has not run with this data_dir, or the "
+            "config points elsewhere. Nothing was created; the plan is unknown (exit 3)."
+        )
+        return EXIT_UNKNOWN
     try:
-        jan = Janitor(store, cfg)
-        now = datetime.now(UTC)
-        plan = jan.plan(now)
-        body = {
-            "dry_run": True,
-            "planned": [_item_json(i) for i in plan.items],
-            "deleted": [],
-            "failed": [],
-            "freed_bytes": 0,
-            "storage_before": jan.storage(now),
-            "storage_after": None,
-        }
+        old = database_version(db)
+    except sqlite3.Error as e:
+        _err(f"gc: cannot read {db}: {e} (exit 3: unknown)")
+        return EXIT_UNKNOWN
+    if old > DB_VERSION:
+        _err(f"gc: {newer_database_message(db, old)} (exit 3: unknown)")
+        return EXIT_UNKNOWN
+    now = datetime.now(UTC)
+    timeout = float(getattr(args, "timeout", 600.0) or 0.0)
+    scratch = Path(tempfile.mkdtemp(prefix="rcm-gc-dryrun-"))  # 0700
+    try:
+        copy = scratch / "rcm.sqlite3"
+        try:
+            _copy_database(db, copy, deadline=time.monotonic() + timeout)
+        except CopyDeadlineExceeded as e:
+            _err(
+                f"gc: copying the database did not finish within the deadline "
+                f"(--timeout {timeout:g} s; {e}) — the plan is unknown (exit 3). "
+                "Nothing was changed."
+            )
+            return EXIT_UNKNOWN
+        except (sqlite3.Error, OSError) as e:
+            _err(f"gc: could not copy the database: {e} — the plan is unknown (exit 3).")
+            return EXIT_UNKNOWN
+        try:
+            store = Store(copy, log=_err)  # 사본만 올라간다 — 자동 백업도 임시 디렉터리 안
+        except StoreError as e:
+            _err(
+                f"gc: the copy could not be migrated from schema v{old} to v{DB_VERSION}: {e} "
+                "— a new server would fail the same way on restart. Nothing was changed "
+                "(exit 3: unknown)."
+            )
+            return EXIT_UNKNOWN
+        try:
+            jan = Janitor(store, cfg)
+            plan = jan.plan(now)
+            if plan.inventory_error:
+                _err(
+                    f"gc: inventory failed ({plan.inventory_error}) — the plan is unknown, "
+                    "not empty (exit 3)."
+                )
+                return EXIT_UNKNOWN
+            body = {
+                "dry_run": True,
+                "planned": [_item_json(i) for i in plan.items],
+                "deleted": [],
+                "failed": [],
+                "freed_bytes": 0,
+                "storage_before": jan.storage(now),
+                "storage_after": None,
+                "offline": {
+                    "database": str(db),
+                    "schema_version": old,
+                    "planned_with_schema": DB_VERSION,
+                    "copy": True,
+                },
+            }
+        finally:
+            store.close()
     finally:
-        store.close()
+        shutil.rmtree(scratch, ignore_errors=True)  # 사본 · -wal · -shm · 사본의 backup/
     if getattr(args, "json", False):
         _print_json(body)
     else:
+        upgraded = f"schema v{old} → v{DB_VERSION}" if old != DB_VERSION else f"schema v{old}"
+        print(
+            f"note: planned on a temporary copy of {db} ({upgraded}); "
+            "the database itself was not changed",
+            flush=True,
+        )
         print(render_gc(body), flush=True)
     return 0
 
