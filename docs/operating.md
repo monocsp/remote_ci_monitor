@@ -118,7 +118,10 @@ the old modules, so a job that starts in that window can load a mix of both.
 
 Claude Code sessions have this wired as a `PreToolUse` hook: `.claude/settings.json` runs
 `tools/guard_production.py`, which finds the production checkout from the machine's own editable
-install, refuses edits to it and to the server's config and data, and asks before a deploy. A
+install, refuses edits to it and to the server's config and data, refuses a command that would
+open the production database with a build other than the service's own (`rcm token …` against
+the production config or data directory — a different build migrates the database on open), and
+asks before a deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A
 machine with no such install sees nothing.
 
 ## Security notes
