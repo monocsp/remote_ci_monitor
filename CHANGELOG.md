@@ -7,6 +7,22 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Presets can require tools.** `requires = ["fvm", "gitleaks"]` on a preset names the tools
+  (or absolute paths) the job must find; right before the process starts, on the local lane or on
+  a remote worker, rcm looks them up in the environment the job actually gets — `env_passthrough`
+  then `[presets.env]`, an empty `PATH` if the job has none — and a job that would have silently
+  fallen through to the wrong SDK now does not run: it ends `failed` with
+  `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}`, the name only, no `PATH` and
+  no path anywhere. The job log says `[rcm] required tools: fvm ok · gitleaks ok` or
+  `[rcm] required tool fvm: missing`. Such a failure carries no `failed_step`, no `last_step` and no
+  failure ledger line. Remote workers get `requires` in the claim and report the structured code on
+  finish; older workers keep working. `rcm check --config` gains a `local preset tools` row — a
+  check in your shell, explicitly not the service's, whose `launchd` `PATH` is the usual reason a
+  tool goes missing (`[presets.env] PATH = …` is the fix).
+  ([Configuration](docs/configuration.md#required-tools),
+  [#105](https://github.com/monocsp/remote_ci_monitor/pull/105))
+
 ### Changed
 - **A failed job's workspace no longer waits thirty days.** The log and the workspace used to share
   one date, but a failed job leaves a 50 KB log and a 720 MB workspace — fifty of those a day needs

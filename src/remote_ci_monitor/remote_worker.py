@@ -45,9 +45,10 @@ from remote_ci_monitor.core.model import (
     Requester,
     Source,
 )
+from remote_ci_monitor.core.outcome import summary as outcome_summary
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.materialize import MaterializeError, extract_tree, prepare_git_ref
-from remote_ci_monitor.runner import RunnerError, RunSpec, run_job
+from remote_ci_monitor.runner import RequiredToolMissing, RunnerError, RunSpec, run_job
 from remote_ci_monitor.worker import format_limit
 
 REGISTER_RETRY_SECONDS = 5.0
@@ -418,6 +419,7 @@ class RemoteWorker:
             argv=tuple(str(a) for a in (preset.get("argv") or [])),
             env={str(k): str(v) for k, v in (preset.get("env") or {}).items()},
             env_passthrough=tuple(str(k) for k in (preset.get("env_passthrough") or [])),
+            requires=tuple(str(k) for k in (preset.get("requires") or [])),
             timeout_seconds=job.get("timeout_seconds") or preset.get("timeout_seconds"),
             inputs=dict(job.get("inputs") or {}),
             requester_label=str(requester.get("label") or job.get("requested_by") or ""),
@@ -501,6 +503,25 @@ class RemoteWorker:
                 environ=self.environ,
                 materialize=lambda s: self._materialize(s, job),
             )
+        except RequiredToolMissing as e:
+            observer.final_flush()
+            # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다. 구조화된 코드로 보고한다(M5j G4);
+            # 서버가 로컬 워커와 같은 `tool_missing` 을 남긴다. PATH 는 어디에도 싣지 않는다.
+            summary, code, args = outcome_summary("tool_missing", tool=e.public_name)
+            skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
+            self._finish(
+                job.id,
+                FAILED,
+                None,
+                summary,
+                observer,
+                artifacts=_disposition(skipped),
+                summary_code=code,
+                summary_args=args,
+            )
+            self.log(f"lane {lane}: #{job.id} failed — {summary}")
+            self._cleanup(spec, failed=True)
+            return
         except (MaterializeError, RunnerError) as e:
             observer.final_flush()
             summary = str(e)[:200]
@@ -571,6 +592,8 @@ class RemoteWorker:
         *,
         artifacts: dict[str, Any] | None = None,
         finished: Any = None,
+        summary_code: str | None = None,
+        summary_args: dict[str, Any] | None = None,
     ) -> None:
         """완료를 보고하고 **그 뒤에** heartbeat 목록에서 뺀다(§5).
 
@@ -586,6 +609,9 @@ class RemoteWorker:
             if finished is not None and getattr(finished, "finished", None) is not None:
                 # 실행 종료 시각 — 수집·업로드 시간이 job_seconds 에 섞이지 않게(§10)
                 extra["finished_at"] = _iso(finished.finished)
+            if summary_code is not None:
+                extra["summary_code"] = summary_code
+                extra["summary_args"] = dict(summary_args or {})
             self.report(
                 lambda: self.client.finish(job_id, outcome, rc, summary, **extra),
                 f"#{job_id} finish",

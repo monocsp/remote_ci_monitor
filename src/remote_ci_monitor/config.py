@@ -420,11 +420,30 @@ _PRESET_KEYS = {
     "duration_key_inputs",
     "env_passthrough",
     "env",
+    "requires",
     "inputs",
     "artifacts",
     "artifacts_on",
 }
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
+
+
+def _parse_requires(where: str, value: Any) -> tuple[str, ...]:
+    """`requires` — 도구 이름 또는 절대경로만(M5j G4). 상대경로는 어느 cwd 에서 찾을지 정해져
+    있지 않고, 빈 값·중복은 오타다. 오류에 프리셋과 키 이름을 넣는다."""
+    names = _str_list(where, value, allow_empty=True)
+    seen: set[str] = set()
+    for name in names:
+        if not name.strip():
+            raise ConfigError(f"{where}: entries must not be empty")
+        if "/" in name and not name.startswith("/"):
+            raise ConfigError(
+                f"{where}: entries must be a tool name or an absolute path, got {name!r}"
+            )
+        if name in seen:
+            raise ConfigError(f"{where}: duplicate entry {name!r}")
+        seen.add(name)
+    return names
 
 
 def _str_list(where: str, value: Any, *, allow_empty: bool) -> tuple[str, ...]:
@@ -610,6 +629,7 @@ def parse_preset(raw: Any) -> Preset:
         isinstance(k, str) and isinstance(v, str) for k, v in env.items()
     ):
         raise ConfigError(f"{where}: env must be a table of string values")
+    requires = _parse_requires(f"{where} requires", raw.get("requires", []))
     description = raw.get("description", "")
     if not isinstance(description, str):
         raise ConfigError(f"{where}: description must be a string")
@@ -642,6 +662,7 @@ def parse_preset(raw: Any) -> Preset:
         artifacts=globs,
         artifacts_on=collect_on,
         env=dict(env),
+        requires=requires,
         inputs=inputs,
     )
 

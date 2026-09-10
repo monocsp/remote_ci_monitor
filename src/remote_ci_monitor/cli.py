@@ -1331,6 +1331,33 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     return ("pools", True, text)
 
 
+def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
+    """`local preset tools` — `requires` 를 선언한 프리셋마다 **이 셸**에서 도구를 찾아 본다.
+
+    잡과 같은 규칙(`env_passthrough` → `[presets.env]` 의 PATH · 없으면 빈 PATH)이지만 환경은
+    이 프로세스의 것이다 — launchd 서비스의 PATH 가 아니다. 그래서 이름이 `local` 이고, 정본은
+    잡 시작 전 검사다(M5j G4 · Codex: 셸의 ok 가 서비스의 ok 로 읽히면 fail-open). PATH 값은
+    찍지 않는다.
+    """
+    from remote_ci_monitor.runner import missing_tools
+
+    parts: list[str] = []
+    all_ok = True
+    for preset in cfg.presets:
+        if not preset.requires:
+            continue
+        env = {k: os.environ[k] for k in preset.env_passthrough if k in os.environ}
+        env.update(preset.env)
+        missing = set(missing_tools(tuple(preset.requires), env))
+        all_ok = all_ok and not missing
+        verdicts = " · ".join(f"{n} {'missing' if n in missing else 'ok'}" for n in preset.requires)
+        parts.append(f"{preset.name} ({verdicts})")
+    if not parts:
+        return None
+    detail = " · ".join(parts) + " — checked in this shell, not the service's environment"
+    return ("local preset tools", all_ok, detail)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
     rows: list[tuple[str, bool | None, str]] = [python_row()]
@@ -1398,6 +1425,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             # `--server` 가 가리키는 서버의 디렉터리가 아니다. 이름과 출처가 그렇게 말한다(M5i I4).
             state = "writable" if writable else "not writable"
             rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
+            tools_row = _local_preset_tools_row(cfg)
+            if tools_row is not None:
+                rows.append(tools_row)
             if cfg.repos:
                 git = shutil.which("git")
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))

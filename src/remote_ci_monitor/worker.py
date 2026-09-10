@@ -54,6 +54,7 @@ from remote_ci_monitor.runner import (
     MAX_LINE_BYTES,
     POLL_SECONDS,
     READ_CHUNK,
+    RequiredToolMissing,
     RunnerError,
     RunSpec,
     run_job,
@@ -449,6 +450,7 @@ class Worker(threading.Thread):
             argv=tuple(preset.argv),
             env=preset.env,
             env_passthrough=tuple(preset.env_passthrough),
+            requires=tuple(preset.requires),
             timeout_seconds=job.timeout_seconds,
             inputs=job.inputs,
             requester_label=job.requester.label,
@@ -466,6 +468,23 @@ class Worker(threading.Thread):
                 environ=self.environ,
                 materialize=lambda _spec: self._materialize(job, preset, workspace, log_path),
             )
+        except RequiredToolMissing as e:
+            # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다(M5j G4 · 결정 85). 서버가 만든
+            # 코드라 라벨(`failed_step`·`last_step`)도 대장 행도 없다(M5h 불변식). 인자는 이름
+            # 하나뿐이다 — PATH 와 경로는 상태에 싣지 않는다(PLAN 「보안」).
+            text, code, args = outcome.summary("tool_missing", tool=e.public_name)
+            self.store.finish(
+                job.id,
+                FAILED,
+                now=self.now_fn(),
+                exit_code=None,
+                summary=text,
+                summary_code=code,
+                summary_args=args,
+            )
+            if not self.config.server.keep_workspace_on_failure:
+                shutil.rmtree(workspace, ignore_errors=True)
+            return
         except (MaterializeError, RunnerError) as e:
             self._fail(job, str(e))
             return

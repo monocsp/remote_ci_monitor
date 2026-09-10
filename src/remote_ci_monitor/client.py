@@ -179,10 +179,17 @@ class WorkerClient:
         *,
         artifacts: dict[str, Any] | None = None,
         finished_at: str | None = None,
+        summary_code: str | None = None,
+        summary_args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
         if summary is not None:
             body["summary"] = summary
+        if summary_code is not None:
+            # 구조화된 preflight 실패(`tool_missing`) — 문자열 summary 로 우회하지 않는다(M5j G4).
+            # 서버는 아는 코드만 받고 인자를 이름 하나로 줄인다.
+            body["summary_code"] = summary_code
+            body["summary_args"] = dict(summary_args or {})
         if artifacts is not None:
             # 처분은 **있으면** 싣는다. 통째로 없으면 서버는 `unknown` 으로 읽는다(M5e §5).
             body["artifacts"] = artifacts

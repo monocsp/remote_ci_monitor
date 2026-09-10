@@ -39,6 +39,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ requires-check-skipped — 프리셋 `requires` 검사를 건너뜀: 없는 도구로도 프로세스가 뜬다
+     (`runner.py`, M5j G4 결정 85 — 그게 「옛 SDK 로 초록」이었다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -308,6 +310,14 @@ MUTANTS = (
         old="    if st.st_nlink > 1 and stat.S_ISREG(st.st_mode):\n",
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
+    ),
+    # ㉗ M5j G4 결정 85 — 검사가 아무것도 「없다」고 하지 않으면 없는 도구로도 프로세스가 뜬다.
+    Mutant(
+        name="requires-check-skipped",
+        path="src/remote_ci_monitor/runner.py",
+        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        new="    return []  # noqa: mutant\n",
+        tests=("tests/test_requires.py",),
     ),
 )
 

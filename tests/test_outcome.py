@@ -51,6 +51,7 @@ PLAUSIBLE: dict[str, dict[str, Any]] = {
     "workspace_failed": {"detail": "git checkout failed"},
     "exit_code": {"code": 1},
     "timed_out": {"seconds": 1200},
+    "tool_missing": {"tool": "fvm"},
     "worker_error": {"detail": "boom"},
     "worker_failed": {},
     "worker_stopped_while_running": {},
