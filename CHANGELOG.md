@@ -173,6 +173,11 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **`rcm serve` and `rcm token` refuse in one line when the database cannot be opened** — a
+  migration backup that could not be written, or a database a newer build has migrated —
+  instead of a Python traceback with the sentence at the bottom. The sentence is the recovery
+  path ([going back to the old build](docs/operating.md#going-back-to-the-old-build)), and the
+  exit code is 2.
 - **The offline `rcm gc --dry-run --config` migrated the live database.** A command documented as
   read-only opened the database the way the server does, which upgrades its schema on the spot —
   so running the preview from a newer build, as the upgrade procedure said to, left the *running*

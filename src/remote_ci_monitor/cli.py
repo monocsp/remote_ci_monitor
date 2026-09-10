@@ -1128,6 +1128,7 @@ def _server_config(args: argparse.Namespace):
 
 def cmd_serve(args: argparse.Namespace) -> int:
     from remote_ci_monitor.server import serve
+    from remote_ci_monitor.store import StoreError
 
     try:
         cfg = _server_config(args)
@@ -1139,6 +1140,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return serve(cfg, debug=args.debug)
     except OSError as e:
         return _usage(f"cannot start server: {e.strerror or e}")
+    except StoreError as e:
+        # DB 를 못 연다(마이그레이션 백업 실패 · 이 빌드보다 새 스키마) — 결정 74 의 복구 경로가
+        # 이 문장이다. 운영자가 launchd 로그에서 읽는 것이라 트레이스백이 아니라 한 줄로.
+        return _usage(f"cannot start server: {e}")
 
 
 # ── init · version ───────────────────────────────────────────────────────────
@@ -1561,7 +1566,10 @@ def cmd_token(args: argparse.Namespace) -> int:
         cfg = _server_config(args)
     except ConfigError as e:
         return _usage(f"config: {e}")
-    store = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        store = Store(cfg.data_dir / "rcm.sqlite3")  # 열면서 마이그레이션한다 — 거절도 여기서
+    except StoreError as e:
+        return _usage(str(e))
     now = datetime.now(UTC)
     try:
         if args.token_command == "add":
