@@ -37,6 +37,15 @@ of a key bumps that number and is listed here.
   ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
 
 ### Added
+- **A verified wrapper for gates that cannot be changed to print markers.** The server still records
+  only what a script declares with `::rcm::fail::<name>` and `::rcm::step-end::fail` — it never
+  parses output, and a failure that prints no markers has no name in the ledger, by design.
+  `examples/preset/name-failures.sh` runs one command, passes its output through, and afterwards
+  prints a marker for every line that matched the exact format the script already prints, keeping
+  the command's exit code; `tests/test_examples.py` feeds its output to the server's own marker
+  reader. The primary way — print the marker from the function that decides something is red — is
+  shown next to it in [Naming what failed](docs/configuration.md#naming-what-failed).
+  ([#91](https://github.com/monocsp/remote_ci_monitor/pull/91))
 - **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
   default `"always"` is unchanged). This is what makes the recommended way of leaving evidence
   affordable: put the heavy step's output in the workspace and declare it, print the verdict to
@@ -160,6 +169,20 @@ of a key bumps that number and is listed here.
   ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
 
 ### Fixed
+- **`rcm jobs` showed the commit twice for a job started with `--ref <full sha>`** — the ref and
+  the sha are the same forty characters, and the row read `092dc5854301a87eab47c0… @092dc58`. When
+  the ref *is* the sha it now shows once (`@092dc58`; `dolomood @092dc58` in the queue). A ref that
+  merely starts like the sha — a `092dc58` branch or tag — still shows both.
+  ([#91](https://github.com/monocsp/remote_ci_monitor/pull/91))
+- **`rcm wait --job 999` on a job that does not exist ended with `log: rcm logs 999`** — a hint
+  pointing at nothing. The line is now left out only when the server answered a definite 404; a
+  connection that was lost, or a `--timeout` that ran out first, still exits 3 (unknown) and still
+  says where the log is, because the job may well exist.
+  ([#91](https://github.com/monocsp/remote_ci_monitor/pull/91))
+- **`rcm check` labelled the local config's data directory `data dir`, next to the `server` row,**
+  as if it were the server's. The server never reports its `data_dir`, so the row is now
+  `local data dir` and says which file it came from (`… · from ~/.config/rcm/server.toml`).
+  ([#91](https://github.com/monocsp/remote_ci_monitor/pull/91))
 - **`rcm gc --dry-run` on a freshly started server said `0 B would remain`.** The summary used the
   server's previous measurement, taken before the plan ran; it now uses the snapshot the plan
   itself measured. A real `rcm gc` also measures again after deleting: `storage_after` and the new
