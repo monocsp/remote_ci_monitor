@@ -1,12 +1,22 @@
-# 릴리스. 태그 `vX.Y.Z` 를 push 하면: main 위의 커밋인지 · 버전이 __version__ 과 같은지 확인 → sdist+wheel
+# 릴리스. 태그 `vX.Y.Z` 에 대해: main 위의 커밋인지 · 버전이 __version__ 과 같은지 확인 → sdist+wheel
 # 빌드 → 두 OS 에서 설치 스모크 → GitHub Release(wheel · sdist · CHANGELOG 절) → PyPI(trusted publishing,
 # 저장소 변수 PYPI_PUBLISH=true 일 때만 — 오너가 PyPI 에 publisher 를 등록한 뒤 켠다. environment 이름 `pypi`
 # 는 PyPI 쪽 설정과 정확히 같아야 한다).
+# 입구는 둘. 평소엔 tag-release.yml 이 main push 에서 태그를 만들고 workflow_call 로 이 워크플로를 부른다
+# (GITHUB_TOKEN 이 만든 태그는 `on: push: tags` 를 깨우지 않는다 — 결정 82). 손으로 민 태그도 그대로 돈다(재실행 경로).
+# 태그 이름은 잡 수준 env `TAG` 하나로 정한다(`inputs.tag || github.ref_name`) — 불려 왔을 때 github.ref_name 은
+# 호출한 쪽의 브랜치(main)라 쓰면 안 되고, checkout 도 기본 ref 가 아니라 그 태그를 받아야 한다.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "릴리스할 태그 이름 (v<X> · 이미 origin 에 있어야 한다)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,15 +25,19 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
       - name: 태그가 main 위에 있는지 (릴리스는 main 에서만)
         run: |
           # --tags 를 붙이면 checkout 이 이미 만든 태그를 「would clobber existing tag」 로 거부한다 — main 만 받는다
+          # HEAD 는 받아 온 태그의 커밋이다 — 불려 왔을 때 GITHUB_SHA 는 호출한 쪽(main push)의 것이라 쓰지 않는다
           git fetch origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          if ! git merge-base --is-ancestor HEAD origin/main; then
             echo "::error::release tags must point at a commit on main"
             exit 1
           fi
@@ -31,8 +45,6 @@ jobs:
         with:
           python-version: "3.13"
       - name: 태그 == __version__
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           VER=$(python -c "import sys; sys.path.insert(0, 'src'); import remote_ci_monitor as m; print(m.__version__)")
           if [ "$TAG" != "v$VER" ]; then
@@ -42,8 +54,6 @@ jobs:
       - name: 빌드 (sdist + wheel)
         run: python -m pip install -q build twine && python -m build
       - name: 산출물 검사 (twine check · 버전 · 파일명)
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           python -m twine check dist/*
           ls dist/remote_ci_monitor-${TAG#v}-py3-none-any.whl dist/remote_ci_monitor-${TAG#v}.tar.gz
@@ -92,15 +102,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
       - name: CHANGELOG 의 해당 절을 릴리스 노트로
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           python - "$TAG" <<'PY' > notes.md
           import re, sys
@@ -114,7 +126,6 @@ jobs:
       - name: GitHub Release (있으면 파일만 갱신)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
