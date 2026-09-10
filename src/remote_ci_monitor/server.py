@@ -3,7 +3,8 @@
 라우트(PLAN.md 「서버 API」):
   POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id}?tail=N · GET /jobs/{id}/log?offset=N ·
   POST /jobs/{id}/cancel · GET /api/status · GET /api/health · GET /api/whoami ·
-  POST /pause · POST /resume · `/worker/*`(원격 워커, `remote_workers.py`)
+  POST /pause · POST /resume · `/worker/*`(원격 워커, `remote_workers.py`) ·
+  GET /client/remote_ci_monitor-<X>-py3-none-any.whl(자기 클라이언트 wheel, `clientwheel.py`)
 
 hardening: 소켓 타임아웃(일반 10초, 업로드 60초) · `Content-Length` 필수(chunked 는 411) ·
 JSON 본문 64KB · 동시 요청 `max_concurrent_requests` 초과 503 · 경로 정규화 ·
@@ -39,6 +40,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
+from remote_ci_monitor.clientwheel import (
+    MIN_CLIENT_VERSION,
+    WheelBuildError,
+    build_wheel,
+    wheel_filename,
+)
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
     ServerConfig,
@@ -291,11 +298,18 @@ class App(RemoteWorkersMixin):
         # 실제가 어긋나고, Worker._set 이 상태가 바뀔 때마다 _since 를 되감아 not_scheduled
         # 알람이 죽는다(§4.5).
         self._hold: dict[tuple[str | None, int], tuple[admission.Hold | None, datetime]] = {}
+        # 클라이언트 wheel(I8-1 · 결정 81) — 기동 때 한 번 조립해 메모리에 든다. (바이트, sha256)
+        # 또는 실패 코드. 실패도 한 번만 — 요청마다 다시 시도해서 다른 답을 주지 않는다.
+        self._wheel: tuple[bytes, str] | None = None
+        self._wheel_error: str | None = None
+        self._wheel_done = False
+        self._wheel_lock = threading.Lock()
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
+        self._build_client_wheel()  # 「도는 것을 준다」 — 기동 시점의 파일로 고정한다
         lost, cancelled = self.store.recover_on_start(self.now_fn())
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
@@ -1836,6 +1850,51 @@ class App(RemoteWorkersMixin):
             "under_floor": bool(floor and free is not None and free < floor),
         }
 
+    # ── 클라이언트 wheel (I8-1) ─────────────────────────────────────────────
+
+    def _build_client_wheel(self) -> None:
+        """한 번만 조립한다. `start()` 가 부르고, 안 불렸으면(테스트) 첫 요청이 부른다."""
+        with self._wheel_lock:
+            if self._wheel_done:
+                return
+            self._wheel_done = True
+            try:
+                data = build_wheel(self.version)
+            except WheelBuildError as e:
+                self._wheel_error = e.code
+                self.log(f"client wheel not available: {e}")
+                return
+            except Exception as e:  # noqa: BLE001 — 조립은 부가 기능이라 서버를 죽이지 않는다
+                self._wheel_error = type(e).__name__
+                self.log(f"client wheel not available: {_error_text(e)}")
+                return
+            self._wheel = (data, hashlib.sha256(data).hexdigest())
+            self.log(f"client wheel ready: {wheel_filename(self.version)} ({_mb(len(data))})")
+
+    def client_wheel(self) -> dict[str, Any] | None:
+        """health 의 `client_wheel` — `{path, sha256, bytes}`, 실패면 None(`client_wheel_error`)."""
+        self._build_client_wheel()
+        if self._wheel is None:
+            return None
+        data, sha = self._wheel
+        path = "/client/" + wheel_filename(self.version)
+        return {"path": path, "sha256": sha, "bytes": len(data)}
+
+    def client_wheel_error(self) -> str | None:
+        self._build_client_wheel()
+        return self._wheel_error
+
+    def client_wheel_bytes(self) -> tuple[bytes, str]:
+        """(바이트, sha256). 조립 실패면 503 — 옛 것·빈 것을 주지 않는다(fail-open 금지)."""
+        self._build_client_wheel()
+        if self._wheel is None:
+            raise ApiError(
+                503,
+                f"client wheel unavailable: {self._wheel_error}",
+                client_wheel_error=self._wheel_error,
+            )
+        return self._wheel
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -1864,6 +1923,10 @@ class App(RemoteWorkersMixin):
             "storage": self._health_storage(),  # 부피 회계(M5g, 정보 — 503 조건은 아니다)
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
             "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
+            # 클라이언트가 서버 버전을 따라오는 길(M5i I8 · 결정 81·83, 정보 — 503 조건은 아니다)
+            "client_wheel": self.client_wheel(),
+            "client_wheel_error": self.client_wheel_error(),
+            "min_client_version": MIN_CLIENT_VERSION,
         }
         if not ok:
             if not db_ok:
@@ -2223,6 +2286,12 @@ class Handler(BaseHTTPRequestHandler):
             self._read_only_ok()
             self._static(path)
             return
+        if path == "/client" or path.startswith("/client/"):
+            # 공개 저장소의 코드라 산출물(언제나 토큰)과 달리 `/api/status` 의 읽기 규칙을 따른다
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._client_wheel(path.removeprefix("/client").removeprefix("/"))
+            return
         raise ApiError(404, "not found", hint=not_found_hint(path))
 
     def _artifact_archive(self, job_id: int) -> None:
@@ -2368,6 +2437,35 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, self.app.worker_phase(t, job_id, body))
         else:
             self._send_json(200, self.app.worker_finish(t, job_id, body))
+
+    def _client_wheel(self, name: str) -> None:
+        """`/client/<파일명>` — 도는 버전의 **정확한 파일명**만 200. 다른 이름은 404 + 맞는 이름.
+
+        pip 는 URL 의 마지막 마디로 파일 종류를 정하므로 이름 없는 별칭은 만들지 않는다.
+        """
+        expected = wheel_filename(self.app.version)
+        if name != expected:
+            raise ApiError(
+                404, "not found", hint=f"the client wheel for this server is /client/{expected}"
+            )
+        data, sha = self.app.client_wheel_bytes()
+        etag = f'"{sha}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{expected}"')
+        self.send_header("Cache-Control", "no-cache")  # ETag 재검증은 살리고 캐시 사용은 막는다
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("ETag", etag)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def _static(self, path: str) -> None:
         """정적 UI. 세 파일만 준다. ETag 는 sha256 앞 16자, 나머지 /static/* 는 404."""

@@ -306,6 +306,66 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), flush=True)
 
 
+# ── 클라이언트 버전 (M5i I8-3 · 결정 83) ─────────────────────────────────────
+
+
+def _version_key(text: str) -> tuple[int, ...]:
+    """`0.2.6` → (0, 2, 6). 숫자가 아닌 꼬리(`0.2.6.dev1`)는 거기서 끊는다 — 비교용이다."""
+    out: list[int] = []
+    for part in str(text).split("."):
+        if not part.isdigit():
+            break
+        out.append(int(part))
+    return tuple(out)
+
+
+def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
+    """올리는 방법 한 토막. 서버가 wheel 경로를 주면 그 `pip install`, 아니면 없다고 말한다 —
+    있지도 않은 URL 을 지어내지 않는다(옛 서버는 `/client/` 가 없고, 조립 실패면 503 이다)."""
+    cw = h.get("client_wheel") or {}
+    if cw.get("path"):
+        return f"pip install {server}{cw['path']}"
+    reason = h.get("client_wheel_error") or "server too old to serve one"
+    return f"no client wheel from this server ({reason})"
+
+
+def _client_row(client: Client, h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `client` 행 — 이 클라이언트와 서버의 버전. 서버가 버전을 안 주면 행도 없다.
+
+    FAIL 은 `min_client_version` 아래일 때만. 그 위의 「older」·「newer」는 warn(알려는 주되
+    실패는 아니다) — 실제 거부는 서버의 400 이 한다.
+    """
+    server_v = h.get("version")
+    if not server_v:
+        return None
+    mine, theirs = _version_key(__version__), _version_key(server_v)
+    if mine == theirs:
+        return ("client", True, f"v{__version__} · same as server")
+    if mine < theirs:
+        floor = h.get("min_client_version")
+        too_old = bool(floor) and mine < _version_key(floor)
+        return (
+            "client",
+            False if too_old else None,
+            f"v{__version__} · server v{server_v} · older — {_upgrade_hint(client.server, h)}",
+        )
+    return ("client", None, f"v{__version__} · server v{server_v} · newer")
+
+
+def _warn_if_client_too_old(client: Client) -> None:
+    """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
+    try:
+        h = client.health()
+    except ClientError:
+        return
+    floor = h.get("min_client_version")
+    if floor and _version_key(__version__) < _version_key(floor):
+        _err(
+            f"warning: this client v{__version__} is older than the server accepts "
+            f"(min_client_version {floor}) — {_upgrade_hint(client.server, h)}"
+        )
+
+
 # ── run ──────────────────────────────────────────────────────────────────────
 
 
@@ -327,6 +387,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         presets = client.presets()
     except ClientError as e:
         return _usage(f"cannot read presets: {e.message}")
+    _warn_if_client_too_old(client)
     preset = presets.get(args.preset)
     if preset is None:
         names = ", ".join(sorted(presets)) or "(none)"
@@ -1212,6 +1273,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(
                 ("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}{found_tag}")
             )
+            client_row = _client_row(client, h)
+            if client_row is not None:
+                rows.append(client_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다

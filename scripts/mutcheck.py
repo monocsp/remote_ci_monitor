@@ -31,6 +31,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`core/progress.py`, M5h 결정 63 — 운영 잡 #162 가 이 폴백으로 성공한 스텝을 지목했다)
   ㉑ failure-window-cancelled — 이력 창이 취소·유실 잡을 분모에 넣음 (`store.py`, M5h 결정 66)
   ㉒ ledger-outside-tx — 실패 이름 대장을 finish 커밋 **뒤에** 씀 (`store.py`, M5h §2.1)
+  ㉓ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
+     `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -245,6 +247,13 @@ MUTANTS = (
     ),
     # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 대장을 커밋 **뒤로** 옮기면(= 실패한 대장
     # 쓰기가 finish 를 되돌리지 못하면) 빨개져야 한다.
+    Mutant(
+        name="client-wheel-any-name",
+        path="src/remote_ci_monitor/server.py",
+        old="        if name != expected:\n            raise ApiError(\n                404,",
+        new="        if False:\n            raise ApiError(\n                404,",
+        tests=("tests/test_client_wheel.py",),
+    ),
     Mutant(
         name="ledger-outside-tx",
         path="src/remote_ci_monitor/store.py",
