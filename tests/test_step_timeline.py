@@ -331,3 +331,27 @@ def test_rcm_run_and_rcm_wait_json_carry_the_step_timeline(live, env, checkout, 
     code, out, _err = run(capsys, ["wait", "--job", str(doc["id"])])
     assert code == 0
     assert last_json(out)["step_timeline"] == tl
+
+
+def test_rcm_wait_exit_code_follows_the_state_when_the_timeline_cannot_be_read(
+    live, env, checkout, capsys, monkeypatch
+):
+    """M5j 검증 G1.5 — 타임라인은 부가 정보다. 마커 조회가 깨져도 `rcm wait` 는 3(모른다)이 아니라
+    상태대로 끝나고(`bad` 는 exit 2 로 실패 → 1), JSON 은 `null` + 코드를 그대로 싣는다.
+    """
+    env(live)
+    code, out, err = run(capsys, ["run", "bad", "--dir", str(checkout)])
+    assert code == 1, err
+    jid = last_json(out)["id"]
+
+    def boom(*a: Any, **kw: Any):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(live.store, "markers", boom)
+    code, out, _err = run(capsys, ["wait", "--job", str(jid)])
+    assert code == 1
+    doc = last_json(out)
+    assert doc["state"] == FAILED and doc["wait_exit_code"] == 1
+    assert doc["step_timeline"] is None
+    assert doc["step_timeline_error_code"] == "database_unavailable"
+    assert doc["last_step"] == "t"
