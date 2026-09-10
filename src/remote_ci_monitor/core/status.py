@@ -124,6 +124,39 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
     }
 
 
+def step_timeline_json(p: Progress | None) -> dict[str, Any]:
+    """종료 잡의 `step_timeline` — 저장된 마커로 다시 낸 스텝별 시간(M5j G1 · 결정 84).
+
+    `progress_json` 의 스텝 칸과 같은 값이되 **시간과 `ok` 만** 싣는다. 재구성한 `failed_step`·
+    `last_step` 은 넣지 않는다 — 잡 행에 저장된 것이 정본이다(M5h 결정 63·64, v16 불변식).
+    `p` 가 None(시작 전에 끝난 잡)이거나 마커가 없으면 **조회에 성공한 빈 타임라인**이다 —
+    `steps: []`, `steps_total: null`. 「못 읽었다」는 여기로 오지 않는다(호출자가 `null` 을 싣는다).
+    """
+    if p is None:
+        return {
+            "timing": "as_received",
+            "steps_total": None,
+            "steps_total_partial": True,
+            "steps": [],
+        }
+    return {
+        "timing": p.timing,
+        "steps_total": p.steps_total,
+        "steps_total_partial": p.steps_total_partial,
+        "steps": [
+            {
+                "index": s.index,
+                "name": s.name,
+                "started_at": iso(s.started_at),
+                "ended_at": iso(s.ended_at),
+                "seconds": _num(s.seconds),
+                "ok": s.ok,
+            }
+            for s in p.steps
+        ],
+    }
+
+
 def _requester(job: Job) -> dict[str, str]:
     return {"name": job.requester.name, "label": job.requester.label}
 

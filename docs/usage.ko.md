@@ -167,7 +167,12 @@ chmod 600 ~/.config/rcm/client.toml
    계속 깨져 있으면 `every one of the last 8 gate runs`. 물음표는 일부러 붙인 것이다 — 판정이
    아니라 제안이고, 숫자가 바로 옆에 있다.
 3. **JSON** 에는 `failed_step` · `last_step` · `failures` · `exit_code` · 스텝별 시간이 들어
-   있다. 래퍼 스크립트가 로그를 긁지 않고도 어느 단계가 깨졌는지 보고할 수 있다.
+   있다. 래퍼 스크립트가 로그를 긁지 않고도 어느 단계가 깨졌는지 보고할 수 있다. 스텝별
+   시간은 `step_timeline` 이다 — 스크립트가 찍은 `::rcm::step::` 마다 한 항목씩
+   `started_at` · `ended_at` · `seconds` · `ok` 가 있고, 잡이 도는 동안 큐가 보여 주던 바로
+   그 숫자가 끝난 뒤에도 남는다. `steps: []` 는 스크립트가 스텝 마커를 안 찍은 것이고,
+   `step_timeline: null` 과 `step_timeline_error_code` 는 서버가 마커를 못 읽은 것이다. 같은
+   문서가 `GET /jobs/<N>` 이라 `rcm wait --job N` 도 그대로 찍는다.
 4. **1 은 잡이 실패했다는 뜻이다.** 2 는 취소나 시간 초과. 3 은 *모름* — 서버가 재시작했거나
    못 닿았거나 — 이고 절대 실패로 보고되지 않는다. CI 가 3 을 빨강으로 치면 엉뚱한 이유로
    빨개진다.

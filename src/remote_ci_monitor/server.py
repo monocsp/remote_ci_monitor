@@ -101,6 +101,7 @@ from remote_ci_monitor.core.status import (
     queue_row_json,
     recent_json,
     status_json,
+    step_timeline_json,
 )
 from remote_ci_monitor.events import (
     JOB_KINDS,
@@ -1179,16 +1180,41 @@ class App(RemoteWorkersMixin):
         )
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
-        """종료 잡의 문서 — 최근 행 모양 + 산출물 + 이름별 이력(M5h)."""
+        """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
         doc = recent_json(job, base_url=self.base_url(host))
-        return self._with_failures(self._with_artifacts(doc, job), job)
+        step_names = self._with_step_timeline(self._with_artifacts(doc, job), job)
+        return self._with_failures(doc, job, step_names=step_names)
 
     def _with_artifacts(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
         """잡 행 JSON 에 산출물 처분을 **더한다**. 기존 키는 손대지 않는다(스키마 v1, §10)."""
         doc["artifacts"] = self.artifacts_public(job)
         return doc
 
-    def _with_failures(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
+    def _with_step_timeline(self, doc: dict[str, Any], job: Job) -> set[str]:
+        """저장된 마커로 스텝별 시간을 다시 내어 `step_timeline` 을 **더한다**(M5j G1 · 결정 84).
+
+        계산은 `progress_for_job(job, markers, now=finished_at)` — 순수 함수에 종료 시각을 시계로
+        준다. 마커 조회가 되면 마커가 없어도 빈 타임라인(`steps: []`)이고, **조회가 깨지면**
+        `null` + `step_timeline_error_code` 다 — 빈 목록으로 뭉개면 「스텝을 안 찍었다」로
+        읽힌다(fail-open 금지). `/api/status` 의 최근 행은 이 길로 안 온다(결정 49).
+
+        돌려주는 것은 타임라인의 스텝 이름 집합 — `failures[].step` 판정이 쓴다.
+        """
+        try:
+            markers = self.store.markers(job.id)
+        except sqlite3.Error as e:
+            doc["step_timeline"] = None
+            doc["step_timeline_error_code"] = _error_code(e)
+            return set()
+        # 종료 잡은 늘 `finished_at` 이 있다(`store.finish`·recover 가 같은 시각을 쓴다). 없는
+        # 행이 있다면 옛 DB 의 흔적이다 — 그때만 지금 시각으로 물러선다(마지막 스텝은 열린 채다).
+        progress = progress_for_job(job, markers, now=job.finished_at or self.now_fn())
+        doc["step_timeline"] = step_timeline_json(progress)
+        return {s.name for s in progress.steps} if progress is not None else set()
+
+    def _with_failures(
+        self, doc: dict[str, Any], job: Job, *, step_names: set[str] = frozenset()
+    ) -> dict[str, Any]:
         """이름별 최근 이력을 **종료된 실패 잡에만** 더한다(M5h · 결정 67).
 
         `/api/status` 는 이 길로 안 온다 — 최근 행마다 창 질의를 붙이면 이미 가장 뜨거운
@@ -1206,8 +1232,9 @@ class App(RemoteWorkersMixin):
             return doc
         doc["failures"] = failures_json(
             rows,
-            # 종료 잡에는 `progress` 가 없다 — 스텝 이름으로 아는 것은 이 두 칸뿐이다(§2.3)
-            steps={job.failed_step, job.last_step},
+            # 타임라인의 **모든** 스텝 이름(M5j G1) + 잡 행의 두 칸. 타임라인을 못 읽었으면
+            # 두 칸만 남는다 — 중간 스텝이 「단위」로 읽히지만 없는 이름을 지어내지는 않는다.
+            steps={job.failed_step, job.last_step, *step_names},
             window=window,
             window_unnamed=unnamed,
             min_jobs=cfg.failure_min_jobs,
