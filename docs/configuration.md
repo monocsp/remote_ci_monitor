@@ -419,6 +419,44 @@ Running `rcm serve` and `rcm worker` on one machine gives that machine **two** u
 per process, and two independent cooldowns. They both read the true CPU and both hold correctly;
 what they cannot do is coordinate. Keep it in mind when you set `lanes` on both.
 
+### Two lanes for a gate with a light phase and a heavy phase
+
+A gate often spends its first minutes on checkout, `pub get`, codegen and lints at 20–50 % CPU and
+only then hits the heavy part (tests, web build). With `lanes = 1` the next job waits through the
+light phase for nothing. A second lane lets the next job's light phase overlap the current job's
+heavy phase — **but only if the heavy phase is serialised by the script itself**:
+
+```toml
+[server]
+lanes = 2
+admission = "load"
+
+[[presets]]
+name = "gate"
+argv = ["/bin/bash", "scripts/local_ci.sh"]
+# no concurrency_group — two gate jobs may now run at once
+```
+
+```sh
+# scripts/local_ci.sh — the heavy section takes a machine-wide lock
+exec 9>/tmp/gate-heavy.lock
+flock 9            # waits while another gate job is in its heavy section
+flutter test ...
+```
+
+What the admission gate does and does not do:
+
+- It is decided **once, when a lane picks a job up**. Two jobs that are already running can both
+  enter their heavy section; the CPU cap does not stop that. The lock in the script does.
+- Removing `concurrency_group` removes the server's own guarantee that two `gate` jobs never
+  overlap. Do that only when the script holds a lock like the one above; otherwise keep the group.
+- There is no memory-based admission on purpose: macOS and Linux disagree about what "used" means
+  (PLAN decision 42), so the gate reads CPU only. If memory pressure is your limit, keep
+  `lanes = 1` or narrow the heavy section.
+- ETA estimates assume the lanes are independent. While two jobs overlap, the medians drift; the
+  `concurrent_at_start` field on each job says how many jobs were running when it started, so the
+  effect can be measured afterwards, and a finished job's `step_timeline` shows which step paid.
+
 ## Second build machine (remote worker)
 
 A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs
