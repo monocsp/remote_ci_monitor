@@ -370,20 +370,43 @@ def test_check_client_row_says_newer_without_failing(srv, env, capsys, monkeypat
     assert f"warn  client        v9.0.0 · server v{__version__} · newer" in out, out
 
 
-def test_run_warns_once_on_stderr_when_the_client_is_too_old(srv, env, capsys, monkeypatch):
+def _tree(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "f.txt").write_text("x")
+    monkeypatch.chdir(proj)
+
+
+def test_run_warns_once_on_stderr_when_the_client_is_too_old(
+    srv, env, capsys, monkeypatch, tmp_path
+):
+    """경고는 사용 오류 검사 **뒤**, 제출 앞에 — 사용 오류는 서버에 더 묻지 않고 끝난다."""
     monkeypatch.setattr(cli_module, "__version__", "0.1.9")
     env(srv, "alice")
-    code, _, err = run(capsys, ["run", "no-such-preset"])
-    assert code == 2
+    _tree(tmp_path, monkeypatch)
+    code, _, err = run(capsys, ["run", "ok", "--no-wait"])
+    assert code == 0, err
     warnings = [ln for ln in err.splitlines() if "older than the server accepts" in ln]
     assert len(warnings) == 1, err
     assert "v0.1.9" in warnings[0] and MIN_CLIENT_VERSION in warnings[0]
     assert f"pip install http://127.0.0.1:{srv.port}{WHEEL_PATH}" in warnings[0]
 
 
-def test_run_stays_quiet_when_the_client_is_accepted(srv, env, capsys):
+def test_run_stays_quiet_when_the_client_is_accepted(srv, env, capsys, monkeypatch, tmp_path):
     env(srv, "alice")
-    _, _, err = run(capsys, ["run", "no-such-preset"])
+    _tree(tmp_path, monkeypatch)
+    code, _, err = run(capsys, ["run", "ok", "--no-wait"])
+    assert code == 0, err
+    assert "older than the server accepts" not in err
+
+
+def test_run_usage_errors_end_before_the_version_check_asks_the_server(
+    srv, env, capsys, monkeypatch
+):
+    monkeypatch.setattr(cli_module, "__version__", "0.1.9")
+    env(srv, "alice")
+    code, _, err = run(capsys, ["run", "no-such-preset"])
+    assert code == 2
     assert "older than the server accepts" not in err
 
 

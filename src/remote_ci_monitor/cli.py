@@ -387,7 +387,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         presets = client.presets()
     except ClientError as e:
         return _usage(f"cannot read presets: {e.message}")
-    _warn_if_client_too_old(client)
     preset = presets.get(args.preset)
     if preset is None:
         names = ", ".join(sorted(presets)) or "(none)"
@@ -425,6 +424,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if pool is not None and pool != preset.pool and pool not in preset.pools:
         allowed = ", ".join([preset.pool, *preset.pools])
         return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
+    # 사용 오류는 여기까지 — 이 아래부터 서버에 더 묻는다(health 는 경고용, 토큰은 제출 전 확인)
+    _warn_if_client_too_old(client)
     # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
     try:
         client.whoami()

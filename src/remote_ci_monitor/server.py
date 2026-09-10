@@ -310,6 +310,9 @@ class App(RemoteWorkersMixin):
 
     def start(self) -> None:
         self._build_client_wheel()  # 「도는 것을 준다」 — 기동 시점의 파일로 고정한다
+        if self._wheel is not None:
+            size = _mb(len(self._wheel[0]))
+            self.log(f"client wheel ready: {wheel_filename(self.version)} ({size})")
         lost, cancelled = self.store.recover_on_start(self.now_fn())
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
@@ -1870,7 +1873,6 @@ class App(RemoteWorkersMixin):
                 self.log(f"client wheel not available: {_error_text(e)}")
                 return
             self._wheel = (data, hashlib.sha256(data).hexdigest())
-            self.log(f"client wheel ready: {wheel_filename(self.version)} ({_mb(len(data))})")
 
     def client_wheel(self) -> dict[str, Any] | None:
         """health 의 `client_wheel` — `{path, sha256, bytes}`, 실패면 None(`client_wheel_error`)."""
