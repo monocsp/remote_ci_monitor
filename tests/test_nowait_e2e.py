@@ -363,12 +363,11 @@ def numbered_section(text: str, number: int) -> str:
 
 
 def unreleased_entry(text: str) -> str:
-    """`## [Unreleased]` 절만 — 다음 릴리스 절 앞까지."""
-    m = re.search(r"^## \[Unreleased\][^\n]*$", text, re.M)
-    assert m, "no `## [Unreleased]`"
-    rest = text[m.end() :]
-    nxt = re.search(r"^## \[", rest, re.M)
-    return rest[: nxt.start()] if nxt else rest
+    """`## [Unreleased]` 부터 첫 릴리스 `[0.1.0]` 절 앞까지 — 릴리스 뒤에는 항목이 그 버전의 절로
+    옮겨가므로, 다른 문서 잠금(tests/test_docs_m5.py `unreleased()`)과 같은 범위를 본다."""
+    from test_docs_m5 import unreleased
+
+    return unreleased(text)
 
 
 def table_row(text: str, command: str) -> str:

@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-10
+
 ### Changed
 - **A failed job's workspace no longer waits thirty days.** The log and the workspace used to share
   one date, but a failed job leaves a 50 KB log and a 720 MB workspace — fifty of those a day needs
@@ -619,7 +621,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3
