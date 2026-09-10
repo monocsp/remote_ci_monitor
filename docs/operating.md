@@ -171,8 +171,75 @@ the production config or data directory — a different build migrates the datab
 asks before a deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A
 machine with no such install sees nothing.
 
+## Keeping clients on the server's version
+
+The server hands out the client for the code it is running. It assembles the wheel once at start,
+from its own installed package (no build tools, no GitHub), and serves it at one exact name:
+
+```
+GET /client/remote_ci_monitor-<version>-py3-none-any.whl
+```
+
+`<version>` must be the server's own `version` — any other name is a 404 whose `hint` says the
+right one. The file name sits at the end of the URL so `pip` recognises it as a wheel:
+
+```sh
+pip install --upgrade http://<build-machine>:8787/client/remote_ci_monitor-0.2.6-py3-none-any.whl
+```
+
+`/api/health` tells a script everything it needs in one call:
+
+| key | meaning |
+|---|---|
+| `version` | what the server runs |
+| `client_wheel.path` · `.sha256` · `.bytes` | where the wheel is and what it must hash to |
+| `client_wheel: null` + `client_wheel_error` | the wheel could not be assembled (for instance the installed metadata is missing); the URL answers 503 with the same code — the server never serves an old or empty wheel instead |
+| `min_client_version` | the oldest client the server still talks to; it moves only when the wire contract breaks |
+
+The wheel follows the read rule, like `/api/status`: open with the default `read_auth = "none"`,
+token or Basic credentials with `read_auth = "basic"`. It is the code of a public repository, so
+it is not treated like job artifacts (which always need a token).
+
+On a session machine, `rcm check` prints a `client` row next to `server`:
+
+```
+ok    server    http://macmini.local:8787 · v0.2.6
+warn  client    v0.2.4 · server v0.2.6 · older — pip install http://macmini.local:8787/client/remote_ci_monitor-0.2.6-py3-none-any.whl
+```
+
+`same as server` is `ok`; `older` and `newer` are `warn` (a heads-up, exit 0); `older` turns `FAIL`
+only below `min_client_version`, and then `rcm run` prints one warning line on stderr before it
+goes on — the refusal itself, when it comes, is the server's 400. `rcm version --json` stays
+server-free.
+
+There is no `rcm self-update`: swapping the package under a running process is different for
+every install (venv, pipx, uv, editable). The wrapper below is what the tests run instead
+(`examples/session/update-client.sh`): read health, download to a temporary file, verify the
+sha256, `pip install --upgrade` the file, then check `rcm version`. Any failing step stops it with
+a non-zero exit and nothing installed; a hash mismatch installs nothing.
+
+```sh
+server=http://macmini.local:8787
+health=$(curl -fsS "$server/api/health")
+path=$(jq -r .client_wheel.path <<<"$health")
+expected=$(jq -r .client_wheel.sha256 <<<"$health")
+tmp=$(mktemp -d)
+curl -fsS -o "$tmp/$(basename "$path")" "$server$path"
+actual=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$tmp"/*.whl)
+[ "$actual" = "$expected" ] || { echo "sha256 mismatch" >&2; exit 4; }
+python3 -m pip install --upgrade "$tmp"/*.whl && rm -rf "$tmp"
+rcm version
+```
+
+Point `RCM_VENV` at the virtual environment that holds `rcm` when it is not the one on `PATH`,
+and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
+`pipx install --force "$tmp"/*.whl` in place of the `pip install` line.
+
 ## Security notes
 
+- The client wheel (`/client/…whl`) is the server's own installed code, served under the read
+  rule above. With `read_auth = "none"` on a LAN anyone can download it; it is the code of a
+  public repository, so that exposes nothing new — tokens, presets and data never enter it.
 - Discovery answers (`_rcm._tcp`) carry only the server name, port, version, lane count and LAN
   IPs — never tokens, presets or paths. Anyone on the LAN can learn that a build server exists;
   the read API is open on the LAN unless `read_auth = "basic"`.

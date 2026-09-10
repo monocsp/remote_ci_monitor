@@ -37,6 +37,18 @@ of a key bumps that number and is listed here.
   ([#84](https://github.com/monocsp/remote_ci_monitor/pull/88))
 
 ### Added
+- **The server hands out its own client.** `GET /client/remote_ci_monitor-<version>-py3-none-any.whl`
+  is the wheel of the code the server is running, assembled at start from the installed package —
+  so `pip install http://<build-machine>:8787/client/remote_ci_monitor-<version>-py3-none-any.whl`
+  brings a session machine to the server's version whether that version came from a release, a
+  `dev` checkout or an offline network. `/api/health` names it (`client_wheel.path`, `.sha256`,
+  `.bytes`) and says the oldest client it still accepts (`min_client_version`); `rcm check` gets a
+  `client` row (`same as server` · `older — pip install …` · `newer`), red only below that floor,
+  and `rcm run` prints one warning line when the client is that old. A wheel that could not be
+  assembled is `client_wheel: null` plus `client_wheel_error`, and the URL answers 503 — never an
+  old or empty file. [Keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)
+  has a tested wrapper (`examples/session/update-client.sh`) that verifies the sha256 before it
+  installs. ([#90](https://github.com/monocsp/remote_ci_monitor/pull/90))
 - **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
   default `"always"` is unchanged). This is what makes the recommended way of leaving evidence
   affordable: put the heavy step's output in the workspace and declare it, print the verdict to
