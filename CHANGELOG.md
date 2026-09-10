@@ -32,7 +32,7 @@ of a key bumps that number and is listed here.
   assembled is `client_wheel: null` plus `client_wheel_error`, and the URL answers 503 — never an
   old or empty file. [Keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)
   has a tested wrapper (`examples/session/update-client.sh`) that verifies the sha256 before it
-  installs. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
+  installs. ([#90](https://github.com/monocsp/remote_ci_monitor/pull/90))
 - **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
   default `"always"` is unchanged). This is what makes the recommended way of leaving evidence
   affordable: put the heavy step's output in the workspace and declare it, print the verdict to
