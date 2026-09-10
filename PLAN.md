@@ -10,7 +10,7 @@
 > **v2.9** 는 웹 화면 손질(2026-09-09 오너 요청): 도는 잡의 **전체 진행 막대** · 상세는 **기본 접힘**(결정 13 개정) · 최근 완료 행에도 잡 번호. 「웹 UI (M2)」 절과 목업(`docs/wireframes/web-queue.html`)이 정본이다.
 > **v2.10** 은 마일스톤이 끝난 뒤의 운영 개선 둘 — M5f(부하를 보는 병렬 레인, 결정 39~50)와 **M5g(증거를 얼마나·얼마나 오래 들고 있을지, 결정 51~62)**. 명세 `docs/m5f-workplan.md` · `docs/m5g-workplan.md`.
 > **v2.11** 은 M5h(끝난 잡이 무엇이 왜 깨졌는지 말하게 한다, 결정 63~72) — 다른 머신의 세션이 운영 인스턴스를 쓰며 남긴 사용기 여섯 개에서 나왔다. 명세 `docs/m5h-workplan.md`, 구현 `docs/m5h-implementation.md`.
-> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 · 39~50 · 51~62 · **63~72** 는 추천값으로 구현하거나 구현 예정, 오너 확인 대기; 30 은 확정).
+> ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 · 39~50 · 51~62 · 63~72 · **73~83** 은 추천값으로 구현하거나 구현 예정, 오너 확인 대기; 30 은 확정).
 
 ## 한 줄
 
@@ -433,11 +433,16 @@ label = ""                          # 비면 "<토큰 이름>@<호스트명>"
 
 ```bash
 out=$(rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"); rc=$?
+job=$(jq -r .job_id <<<"$out")
 case $rc in
   0) echo "gate green: $(jq -r .url <<<"$out")";;
-  1) step=$(jq -r '.failed_step // "—"' <<<"$out"); [ "$(jq -r '.failed_step_guessed // false' <<<"$out")" = true ] && step="$step (guessed)"; echo "gate red — failed step: $step"; echo "$(jq -r .summary <<<"$out")";;
-  2) echo "cancelled or timed out";;
-  *) echo "unknown — check $(jq -r .url <<<"$out")";;
+  1) # failed_step 은 스크립트가 선언한 것만이다(결정 63) — 없으면 last_step 이 「어디였나」를 말한다
+     echo "gate red — $(jq -r '.failed_step // ("last step " + (.last_step // "unknown"))' <<<"$out")"
+     jq -r .summary <<<"$out"
+     jq -r '(.failures // [])[] | "  \(.name): \(.seen)/\(.window) recent runs (\(.verdict))"' <<<"$out"
+     echo "log: rcm logs $job";;
+  2) echo "cancelled or timed out: $(jq -r .state <<<"$out")";;
+  *) echo "unknown (exit $rc) — check $(jq -r .url <<<"$out"); log: rcm logs $job";;
 esac
 ```
 
@@ -664,6 +669,17 @@ docs/reviews/
 | 70 | 실패한 대기의 끝줄 | 종료 코드 1·2·3 **모두** `log: rcm logs <N>` 과 URL 을 적는다. 모를수록 로그가 필요하다 |
 | 71 | 목록의 코드 신원 | `rcm jobs`·`rcm top` 최근 줄에 `<ref\|branch> @<짧은 sha>`(32자에서 자른다). tree 잡의 `branch` 는 클라이언트가 실어 보내되 **표시용**이다 — `tree_hash` 와 합류 신원은 안 바뀐다 |
 | 72 | 대기 클라이언트 | 대기 전에 스냅샷 장부를 놓는다(2만 파일 64 → 32 MB). 게으른 import 다이어트는 **안 한다**(31.6 MB 중 13.3 MB 는 파이썬 자체). `--no-wait` + `rcm wait` 를 메모리가 빠듯한 기계의 패턴으로 문서에 적는다 |
+| 73 | 오프라인 dry-run | 살아 있는 DB 는 `mode=ro` 로만 연다. `backup()` 사본 위에서 **실제 마이그레이션과 실제 계획**을 돌리고 사본을 지운다. 어느 단계든 불완전하면 exit 3 — 빈 계획 성공은 없다. 옛 DB(v7)도 이렇게 프리뷰한다(초안의 「스키마가 다르면 계획하지 않는다」를 대체). 「서버 없이 읽기만 한다」던 `rcm gc --dry-run --config` 가 운영 DB 를 7→15 로 올려 옛 빌드가 재시작하지 못한 사고(2026-09-10)의 답이다 (M5i, `docs/gate-replay-fixes-workplan.md` B2) |
+| 74 | 마이그레이션 전 백업 | `migrate()` 경계에서 실제 버전 상승 때 한 번, WAL 변경보다 먼저, `backup()`→검증→원자적 rename. **실패면 마이그레이션 중단.** 3개 보존(정리 실패는 경고). 옛 빌드의 거절 메시지가 복원 절차를 가리키고, 복원의 손실 범위를 문서가 밝힌다 (M5i B2) |
+| 75 | 가드 | `serve`·`worker` 기존 규칙 + `token`(전부 쓰기) + `gc --dry-run --config`(허용). 쓰기 명령은 유효 `data_dir`(`--data-dir` → `RCM_SERVER_DATA_DIR` → 선택된 설정의 `[server].data_dir` → 기본)이 운영이고 실행 파일이 운영 venv 밖이면 deny. TOML 파싱 실패·`PYTHONPATH` 우회는 범위 밖 (M5i B2-5) |
+| 76 | 회계 눈금 둘 | `charged`(링크마다 · 항목 표시·예산)와 `estimated_reclaimable = charged − shared`(일반 파일의 `nlink > 1` 블록 · 바닥·would free·latch). `floor_attempted` 로 latch 를 걸고 분모는 **삭제 성공분**. 하드링크 pack 이 「would free」를 약 1/3 과장하던 것의 답이다 (M5i B4) |
+| 77 | 실패 이름 | 계속 마커로만. `fail_patterns`(프리셋이 준 정규식으로 서버가 stdout 을 대 보기)는 **만들지 않는다** — 출력 형식이 바뀌면 거짓 이름이 저장되고, 병적인 정규식이 로그 소비를 막고, 마커와 패턴의 우선순위라는 계약이 하나 더 생긴다. 대신 검증된 래퍼 예시(`examples/preset/name-failures.sh`, 테스트로 잠근다)와 「판정 함수에서 마커」 예시를 `docs/configuration.md` 에 둔다. 마커 없는 실패는 대장이 비는 것이 맞다 (M5i I1) |
+| 78 | v16 | 한 번짜리 복구 마이그레이션 — 대장 행이 없는 실패 라벨은 `last_step` 으로, 취소·유실은 비운다. 매 기동 보정은 안 한다. 결정 73 의 사고 뒤 옛 빌드가 쓴 추론 라벨은 v15 가 재실행되지 않아 남기 때문이다 (M5i B2-v16) |
+| 79 | 웹 회귀 | 기존 Chrome 테스트를 넓혀 렌더·예외 스모크로 삼고 ubuntu 잡에서 필수로. 표본에 `disk`·`job_storage` 가 있어야 한다 — 정의 안 된 변수 하나(`hostCardHtml` 의 `local`)가 `disk` 있는 모든 배치의 웹을 죽였는데 Chrome 테스트가 **있으면서** 못 잡았다. ESLint 는 보류 (M5i B1·I5) |
+| 80 | 업그레이드 절차 | 별도 venv 검증 → 사본 dry-run → pause → drain 확인 → 백업 → 정지 → pull → 기동(마이그레이션) → 확인 → resume. **도는 editable 체크아웃을 먼저 pull 하지 않는다** — 옛 프로세스가 새 모듈을 늦게 import 할 수 있다고 문서 스스로 경고하면서 그렇게 시켰다 (M5i I7·O1, `docs/operating.md`) |
+| 81 | 클라 wheel | 서버가 기동할 때 설치된 패키지에서 표준 라이브러리로 자기 wheel 을 조립해 `/client/remote_ci_monitor-<X>-py3-none-any.whl`(정확한 이름만)로 준다. `/api/health.client_wheel`(path · sha256 · bytes). 인증은 읽기 규칙. 조립 실패는 `null` + 503 — 옛 것·빈 것을 주지 않는다. 클라이언트가 서버에게 묻고 서버에게 받으니 GitHub 는 런타임 경로에서 빠진다(결정 30) (M5i I8) |
+| 82 | 자동 태그 | `main` 에 push 된 `__version__` 의 태그가 없으면 워크플로가 만들고 릴리스 잡을 같은 run 에서 부른다(`GITHUB_TOKEN` 의 태그는 다른 워크플로를 안 깨운다). 손 태그 단계는 문서에서 뺀다. 밀린 v0.2.5 는 오너가 지금 끊는다 (M5i I8, #85) |
+| 83 | 불일치 표시 | `/api/health.min_client_version`(상수 · 계약이 깨질 때만) · `rcm check` 에 `client` 행 · `rcm run` 은 경고만. `rcm self-update` 는 **보류** — pip 로 자기 venv 를 갈아끼우는 일은 설치 방식마다 다르고 도는 프로세스 자신을 바꾼다. 대신 검증된 래퍼 예시를 문서에 (M5i I8) |
 
 ⚠️ **결정 번호 39~42 가 두 번 나온다** — M5e(산출물)와 M5f(부하 게이트)가 같은 번호를 각각 붙인 채 머지 `d26b3f4` 에서 합쳐졌다. `docs/m5e-*.md` 와 `docs/m5f-*.md` 가 이미 각자의 번호로 서로를 가리키고 있어 여기서 한쪽을 옮기면 그 문서들의 상호 참조가 깨진다. 고칠 때 한 PR 에서 문서까지 같이 바꾼다. 새 결정은 **51번부터**다.
 

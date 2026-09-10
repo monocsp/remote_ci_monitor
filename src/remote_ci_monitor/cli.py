@@ -652,8 +652,12 @@ def _wait(
         _err(reason)
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
+    # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
     if code != 0:
-        for text in failure_lines(job or {}, job_id=job_id, url=(job or {}).get("url")):
+        cause = getattr(reason, "cause", None)
+        for text in failure_lines(
+            job or {}, job_id=job_id, url=(job or {}).get("url"), cause=cause
+        ):
             _err(text)
     out = dict(job or {"job_id": job_id, "state": None})
     out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
@@ -1388,9 +1392,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         if cfg.path is not None:
             d = cfg.data_dir
             writable = _dir_writable(d)
-            rows.append(
-                ("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})")
-            )
+            # 서버는 `data_dir` 을 API 로 내리지 않는다 — 이 행은 **로컬 설정**의 사실이지
+            # `--server` 가 가리키는 서버의 디렉터리가 아니다. 이름과 출처가 그렇게 말한다(M5i I4).
+            state = "writable" if writable else "not writable"
+            rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
             if cfg.repos:
                 git = shutil.which("git")
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))

@@ -210,6 +210,55 @@ never collected.
 about as long as a workspace, and far less than a log. Put what you will want next week in the log
 and what you will want in the next hour in the bundle.
 
+### Naming what failed
+
+The `failed: …` lines, `failed_step` and the history above come from one place: the
+`::rcm::fail::<name>` and `::rcm::step-end::fail` markers your script prints. rcm never parses the
+rest of the output, and there is no pattern list to configure — deliberately. A pattern turns every
+mention of `FAIL` into a verdict, and the day the output format changes it records the wrong name
+with full confidence. A gate that prints no markers leaves the failure ledger empty, by design:
+`last_step` still says where the job was, and `rcm logs` still has everything it printed.
+
+**Print the marker from the function that decides.** The place that knows something is red is the
+place to name it, and one helper covers every check in the script:
+
+```bash
+status=0
+fail() {                   # the one function that decides something is red
+  echo "FAIL: $1"
+  echo "::rcm::fail::$1"   # the same name, for rcm
+  status=1
+}
+
+echo "::rcm::step::analyze"
+dart analyze || fail "analyze"
+echo "::rcm::step::test"
+for f in test/*_test.dart; do
+  flutter test "$f" > ".rcm/logs/$(basename "$f").log" 2>&1 || fail "$f"
+done
+exit $status
+```
+
+**When the script cannot be changed, wrap it.** [`examples/preset/name-failures.sh`](../examples/preset/name-failures.sh)
+runs one command, passes its output through untouched, and once the command has finished prints
+`::rcm::fail::<name>` for every line that matched the exact format the script already prints —
+`^FAIL: (.+)$` by default, `--pattern` for another — then closes the step with the command's own
+exit code, which is also the wrapper's:
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/name-failures.sh", "--step", "test", "--", "bash", "scripts/gate.sh"]
+```
+
+It never guesses: a command that fails without printing a matching line names nothing beyond the
+step. Read the header of the file before copying it. It is bash only (`PIPESTATUS`); it merges
+stderr into stdout, as rcm does; and a program that block-buffers when its stdout is a pipe delivers
+its lines late and in bursts (`stdbuf -oL`, `PYTHONUNBUFFERED=1`, or the tool's own flag). Match
+the exact line your script prints, anchored at the start of the line — a loose `FAIL` anywhere
+turns a mention into a verdict. `tests/test_examples.py` locks the wrapper by feeding its output to
+the same code the server reads markers with.
+
 ## Retention: what is kept, and for how long
 
 A finished job leaves two very different things behind, and they are worth different amounts:
