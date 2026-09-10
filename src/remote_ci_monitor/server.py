@@ -339,7 +339,8 @@ class App(RemoteWorkersMixin):
             publish=self.publish,
             stop=self.stop,
             now_fn=self.now_fn,
-            disk_path=str(self.config.server.data_dir),
+            # 푼 경로(프로퍼티)다 — 원시 문자열 "~/…" 는 disk_usage 가 못 읽는다(M5i B5)
+            disk_path=str(self.config.data_dir),
         )
         self.sampler.start()
         s = self.config.server
