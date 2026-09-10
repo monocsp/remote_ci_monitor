@@ -435,6 +435,22 @@ def _short_sha(sha: Any) -> str:
     return str(sha or "")[:7]
 
 
+#: 완전한 커밋 sha 의 길이. `--ref <sha>` 로 넣은 잡은 ref 가 곧 sha 다(M5i I2).
+FULL_SHA_LEN = 40
+
+
+def _ref_is_the_sha(ref: Any, sha: Any) -> bool:
+    """ref 가 **40자리 hex 이고 정규화(소문자·둘레 공백) 뒤 sha 와 정확히 같을 때만** 참.
+
+    접두 일치(`092dc58`)는 안 친다 — 우연히 sha 접두와 같은 브랜치·태그가 있을 수 있어 넓다.
+    """
+    r = str(ref or "").strip().lower()
+    s = str(sha or "").strip().lower()
+    if len(r) != FULL_SHA_LEN or r != s:
+        return False
+    return all(c in "0123456789abcdef" for c in r)
+
+
 def _repo_piece(repo: Any) -> str:
     """저장소 주소의 마지막 조각. `git@github.com:org/app.git` → `app`(칸이 좁다)."""
     text = str(repo or "").rstrip("/")
@@ -453,7 +469,9 @@ def source_ident(src: dict[str, Any] | None) -> str:
     src = src or {}
     if src.get("mode") == MODE_GIT_REF:
         sha = _short_sha(src.get("sha"))
-        parts = [str(src.get("ref") or ""), f"@{sha}" if sha else ""]
+        # `--ref <sha>` 잡은 ref 가 곧 sha 다 — 두 번 보이면 칸만 먹는다(M5i I2)
+        ref = "" if _ref_is_the_sha(src.get("ref"), src.get("sha")) else str(src.get("ref") or "")
+        parts = [ref, f"@{sha}" if sha else ""]
     else:
         name = str(src.get("branch") or "") or _repo_piece(src.get("repo"))
         sha = _short_sha(src.get("base_sha"))
@@ -472,18 +490,34 @@ def source_ident(src: dict[str, Any] | None) -> str:
     return text[: MAX_IDENT - 1] + "…"
 
 
+#: 대기가 「모른다」로 끝난 이유 — 대기 루프가 문자열 사유에 얹어 돌려주는 구조화된 원인(M5i I3).
+#: 끝줄이 문자열을 뒤지지 않고 「확정 404 였나」를 알게 한다. 잡 문서가 있는 종료(1·2)는 `None`.
+CAUSE_NOT_FOUND = "not_found"  # 서버가 404 로 답했다 — 그 번호의 잡은 없다
+CAUSE_UNREACHABLE = "unreachable"  # 서버에 닿지 못했다 — 잡은 있을 수 있다
+CAUSE_TIMEOUT = "timeout"  # `--timeout` 이 먼저 끝났다
+CAUSE_SERVER_ERROR = "server_error"  # 4xx 등 다른 거부
+
+
 def failure_lines(
-    job: dict[str, Any], *, job_id: int, url: str | None, limit: int = 3
+    job: dict[str, Any],
+    *,
+    job_id: int,
+    url: str | None,
+    limit: int = 3,
+    cause: str | None = None,
 ) -> list[str]:
     """실패한 잡의 끝줄 — 로그로 가는 길과 이름별 최근 이력(M5h §2.5).
 
     성공한 잡에는 아무것도 안 붙인다. `failures` 키가 없는 것(못 읽었다)과 빈 배열(이름을 안
     남겼다)은 뜻이 다르지만 화면은 같다 — 둘 다 로그 줄만 나온다.
+
+    로그 줄을 빼는 것은 **확정 404**(`cause == CAUSE_NOT_FOUND`)뿐이다 — 없는 잡의 로그 길은
+    아무것도 안 가리킨다. 연결 실패·타임아웃은 여전히 「모른다」라 로그 길을 남긴다(결정 70).
     """
     if job.get("state") == SUCCEEDED:
         return []
     log = f"log: rcm logs {job_id}" + (f" · {url}" if url else "")
-    out = [log]
+    out = [] if cause == CAUSE_NOT_FOUND else [log]
     # 서버 문서는 우리가 만든 게 아니다 — 이름이 없거나 모양이 이상한 항목 하나 때문에
     # **이미 끝난 잡의 종료 코드와 JSON 을 잃으면** 안 된다(`_wait` 은 이 뒤에 JSON 을 찍는다).
     items = [i for i in (job.get("failures") or []) if isinstance(i, dict) and i.get("name")]
@@ -526,7 +560,9 @@ def _source_text(src: dict[str, Any]) -> str:
         return DASH
     if src.get("mode") == "git_ref":
         sha = (src.get("sha") or "")[:7] or DASH
-        return f"{src.get('repo') or ''} @{sha} ref {src.get('ref')}".strip()
+        # `--ref <sha>` 잡은 ref 가 곧 sha 다 — 한 번만(M5i I2)
+        ref = "" if _ref_is_the_sha(src.get("ref"), src.get("sha")) else f" ref {src.get('ref')}"
+        return f"{src.get('repo') or ''} @{sha}{ref}".strip()
     sha = (src.get("base_sha") or "")[:7]
     if not sha and src.get("received_bytes") is None:
         return "not received yet"
