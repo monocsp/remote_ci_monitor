@@ -293,8 +293,10 @@ local snapshot or an open file can hold the blocks — so if a sweep deletes and
 move, the floor rule pauses itself and `rcm check` says so rather than deleting everything for
 nothing.
 
-**Before you upgrade**, see what the new defaults would remove on your machine. This reads the
-config and the data directory and deletes nothing, and it does not need the server:
+**Before you upgrade**, see what the new defaults would remove on your machine. Run it from the
+new build: it reads the config and the data directory, plans on a temporary copy of the database
+(the live one is opened read-only and is not migrated), deletes nothing, and does not need the
+server. If the copy cannot be made or migrated it exits 3 — unknown, not "nothing to do":
 
 ```sh
 rcm gc --dry-run --config ~/.config/rcm/server.toml
