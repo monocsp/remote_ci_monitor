@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import sqlite3
 import tarfile
 import threading
 import time
@@ -50,6 +51,7 @@ from remote_ci_monitor.core.model import (
     TOKEN_WORKER,
     WORKER_BUSY,
     WORKER_DOWN,
+    WORKER_HELD,
     WORKER_IDLE,
     HostSample,
     Job,
@@ -80,6 +82,15 @@ def _api_error(status: int, message: str, **extra: Any) -> Exception:
     from remote_ci_monitor.server import ApiError  # 순환 import 를 피한다
 
     return ApiError(status, message, **extra)
+
+
+#: SQLite 의 「지금 바쁘다」. 이것만 일시 오류(503)로 본다 — `no such table` 같은 영구 결함은
+#: 그대로 500 으로 올린다.
+_BUSY_MARKERS = ("locked", "busy")
+
+
+def _is_busy_error(e: sqlite3.OperationalError) -> bool:
+    return any(m in str(e).lower() for m in _BUSY_MARKERS)
 
 
 def _api_error_type() -> type[Exception]:
@@ -221,17 +232,16 @@ class RemoteWorkersMixin:
         """그 풀(None 이면 전부)의 원격 레인. busy 는 DB 의 running·cancelling 잡, 나머지 idle,
         heartbeat 이 오래됐으면 전부 down. 워커 이름순 · 레인순."""
         infos: list[WorkerInfo] = []
-        for row in self._workers():
-            if pool is not None and row.pool != pool:
-                continue
+        rows = [r for r in self._workers() if pool is None or r.pool == pool]
+        # 워커마다 묻지 않고 **한 문장**으로 읽는다.
+        # 실패를 삼키지 않는다: 빈 map 으로 물러서면 도는 레인이 `idle` 로, `since` 까지 등록
+        # 시각으로 바뀌어 「그 레인은 등록 이후 계속 놀았다」는 **없는 사실**을 지어낸다.
+        # 모르는 것은 모르는 대로 올린다(fail-open 금지).
+        lanes_busy = self.store.active_worker_lanes() if rows else {}
+        for row in rows:
             alive = self.worker_alive(row, now)
-            busy: dict[int, Job] = {}
-            if alive:
-                for job in self.store.jobs_of_worker(row.name):
-                    if job.lane is not None:
-                        busy[job.lane] = job
             for lane in range(1, row.lanes + 1):
-                job = busy.get(lane)
+                job = lanes_busy.get((row.name, lane)) if alive else None
                 if not alive:
                     infos.append(
                         WorkerInfo(
@@ -244,24 +254,31 @@ class RemoteWorkersMixin:
                         )
                     )
                 elif job is not None:
+                    job_id, started_at = job
                     infos.append(
                         WorkerInfo(
                             lane=lane,
                             state=WORKER_BUSY,
-                            job_id=job.id,
-                            since=job.started_at,
+                            job_id=job_id,
+                            since=started_at,
                             worker=row.name,
                             pool=row.pool,
                         )
                     )
                 else:
+                    # 상태 경로는 **다시 판정하지 않는다** — claim 경로가 남긴 것을 읽는다.
+                    # 두 번 부르면 화면과 실제가 어긋난다(§4.5).
+                    hold, held_since = self.hold_of(lane, row.name, now)
                     infos.append(
                         WorkerInfo(
                             lane=lane,
-                            state=WORKER_IDLE,
-                            since=row.registered_at,
+                            state=WORKER_HELD if hold else WORKER_IDLE,
+                            since=held_since or row.registered_at,
                             worker=row.name,
                             pool=row.pool,
+                            hold_code=hold.code if hold else None,
+                            hold_detail=dict(hold.detail) if hold and hold.detail else None,
+                            held_since=held_since,
                         )
                     )
         return infos
@@ -366,7 +383,25 @@ class RemoteWorkersMixin:
                 "source_modes": list(preset.source_modes),
                 "repo": preset.repo or None,
             }
+        # ⚠️ **얼린 산출물 정책을 반드시 실어야 한다.** 안 실으면 워커의 `_policy_from_claim` 이
+        # None 을 돌려주고 **원격 풀에서는 산출물이 하나도 안 모인다** — 잡은 성공하고 화면도
+        # 아무 말을 안 한다. 이 구멍이 M5e 내내 열려 있었다(M5g §13 D). 정책은 업로드 검증에
+        # 쓰는 것과 **같은 값**이어야 한다(`job_artifact_policy`).
+        policy = self.job_artifact_policy(job)
+        artifacts_doc = (
+            {
+                "globs": list(policy.globs),
+                "max_bytes": policy.max_bytes,
+                "max_files": policy.max_files,
+                "timeout_seconds": policy.timeout_seconds,
+                "cancel_timeout_seconds": policy.cancel_timeout_seconds,
+                "collect_on": policy.collect_on,
+            }
+            if policy.enabled()
+            else None
+        )
         return {
+            "artifacts": artifacts_doc,
             "job": {
                 "id": job.id,
                 "preset": job.preset,
@@ -397,17 +432,24 @@ class RemoteWorkersMixin:
         wait = _int_field(body, "wait_seconds", 0, 60, default=s.worker_claim_wait_seconds)
         wait = min(wait, s.worker_claim_wait_seconds)
         now = self.now_fn()
-        self.store.touch_worker(token.name, now)
-        job = self._try_claim(token.name, row.pool, lane, now)
+        if not self.store.touch_worker(token.name, now):
+            # 이제 워커 행이 사라질 수 있다(은퇴 정리) — 그 뒤에 claim 하면 아무도 못 거두는
+            # 잡이 된다. 다시 등록하라고 말한다.
+            raise _api_error(409, "worker is not registered")
+        job, hold = self._try_claim(token.name, row.pool, lane, now)
         if job is not None:
             return self._claim_payload(job)
+        # 보류된 레인은 **슬롯을 안 잡는다**. 8개뿐인 long-poll 슬롯을 보류 레인이 먹으면
+        # 정작 열린 레인이 즉시 204 를 받고 1초 폴링으로 떨어진다(실측: 0.003초 → 0.394초).
+        if hold is not None:
+            return None
         if wait <= 0 or not self._claim_slots.acquire(blocking=False):
             return None
         try:
             deadline = time.monotonic() + wait  # 주입 시계(now_fn)가 아니라 실제 경과 시간
             while not self.stop.is_set():
                 woke = self.wake.wait(CLAIM_POLL_SECONDS)
-                job = self._try_claim(token.name, row.pool, lane, self.now_fn())
+                job, _hold = self._try_claim(token.name, row.pool, lane, self.now_fn())
                 if job is not None:
                     return self._claim_payload(job)
                 if time.monotonic() >= deadline:
@@ -420,17 +462,32 @@ class RemoteWorkersMixin:
             self._claim_slots.release()
         return None
 
-    def _try_claim(self, name: str, pool: str, lane: int, now: datetime) -> Job | None:
-        if self.store.get_paused() is not None:
-            return None
+    def _try_claim(self, name: str, pool: str, lane: int, now: datetime):
+        """(잡, 보류) — 둘 다 None 이면 큐가 빈 것이다."""
         try:
-            job = self.store.claim(lane, now, pool=pool, worker_name=name)
+            if self.store.get_paused() is not None:
+                return None, None
+            job, hold = self.admit(
+                lane, name, now, lambda: self.store.claim(lane, now, pool=pool, worker_name=name)
+            )
         except LaneBusy as e:
             raise _api_error(409, str(e)) from e
+        except sqlite3.OperationalError as e:
+            # 잠금·바쁨만 일시 오류다. `no such table` 같은 영구 결함을 「다시 해 보라」고 하면
+            # 워커가 영원히 재시도한다. 워커는 503 을 이미 일시 오류로 처리한다.
+            if not _is_busy_error(e):
+                raise
+            raise _api_error(
+                503,
+                "database is busy",
+                headers={"Retry-After": "1"},
+                code="database_busy",
+                retry_after=1,
+            ) from e
         if job is not None:
             self._publish_job(job, job.id)
             self._publish_server()
-        return job
+        return job, hold
 
     # ── 잡 보고 ─────────────────────────────────────────────────────────────
 
@@ -497,14 +554,15 @@ class RemoteWorkersMixin:
             *lines, rest = buf.split(b"\n")
             if rest:
                 self._log_partial[job.id] = rest[-4096:]
-        markers = 0
-        for raw in lines:
-            parsed = parse_marker(raw.decode("utf-8", errors="replace"))
-            if parsed is None:
-                continue
-            self.store.add_marker(job.id, parsed[0], parsed[1], now)
-            self._on_marker(job.id, parsed[0], parsed[1])
-            markers += 1
+        # 마커는 **한 트랜잭션**으로 쓰고, 발행은 커밋 뒤에 한다. 줄마다 트랜잭션을 열면 다른
+        # 레인의 claim 이 밀린다(256 KB flush 하나에 0.03 ms → 275.9 ms).
+        parsed_markers = [
+            p for raw in lines if (p := parse_marker(raw.decode("utf-8", errors="replace")))
+        ]
+        self.store.add_markers(job.id, parsed_markers, now)
+        for kind, value in parsed_markers:
+            self._on_marker(job.id, kind, value)
+        markers = len(parsed_markers)
         if data:
             self.store.set_last_output(job.id, now)
             self._mark_dirty()
@@ -542,6 +600,7 @@ class RemoteWorkersMixin:
             max_files=s.max_artifact_files,
             timeout_seconds=s.artifact_timeout_seconds,
             cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+            collect_on=preset.artifacts_on if preset is not None else art.COLLECT_ALWAYS,
         )
 
     def worker_receive_artifacts(
@@ -658,6 +717,9 @@ class RemoteWorkersMixin:
             summary_code=code,
             summary_args=args,
             failed_step=failed_step,
+            last_step=oc.last_step,
+            fail_names=oc.fail_names,
+            fail_truncated=oc.fail_truncated,
         ):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"

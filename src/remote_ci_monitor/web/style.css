@@ -52,6 +52,9 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .wk.busy i { background: var(--accent); }
 .wk.down { border-color: var(--bad); color: var(--bad); }
 .wk.down i { background: var(--bad); border-radius: 1px; }
+/* 보류 레인은 살아 있지만 지금은 못 집는다 — idle 과 같아 보이면 안 된다(M5f) */
+.wk.held { border-color: var(--warn); color: var(--warn); }
+.wk.held i { background: var(--warn); border-radius: 1px; }
 .wk.paused { border-color: var(--warn); color: var(--warn); }
 .wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
 .livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
@@ -127,6 +130,29 @@ table.q tr.qgroup:not(:first-child) th { border-top: 1px solid var(--line); }
 table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8px; }
 /* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
 .step-now { font-family: var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); opacity: 0.85; }
+/* 전체 진행 막대(2026-09-09 오너 요청) — 접힌 행에서도 「어디까지 왔나」가 한눈에 보인다.
+   막대는 행의 일부다: 행의 아래 선을 지우고 막대 줄이 그 선을 대신 그린다.
+   길이는 눈에, 퍼센트와 근거는 글자에 — 색과 길이만으로 말하지 않는다(§4.2). */
+table.q tr.hasbar td { border-bottom: 0; }
+table.q tr.qbar td { padding: 0 8px 9px 46px; }
+table.q tr.qbar + tr.expanded td.prog { padding-top: 0; }
+.pwrap { display: flex; align-items: center; gap: 10px; max-width: 720px; }
+.pbar { flex: 1 1 auto; min-width: 80px; height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+/* 근거·형편은 data 속성으로 고른다. `.steps`·`.stuck`·`.over` 를 class 로 쓰면 스텝 목록 격자와
+   이유 칸 칩의 규칙이 막대에 걸려 **길이가 숫자와 달라진다**(실측: 616px 막대의 25% 가 70px 로
+   그려졌다 — `.steps` 가 `display: grid`). 길이가 거짓말하면 라벨이 정직해도 소용없다. */
+.pbar i { display: block; height: 100%; background: var(--accent); }
+/* 눈금의 근거가 없으면 막대에도 눈금이 없다. 빈 막대(0%)로 그리면 「아직 아무것도 안 했다」가
+   되어 거짓말이 된다 — 그래서 채우지 않고 바탕을 빗금으로 둔다. */
+.pbar[data-basis="none"] { background: repeating-linear-gradient(135deg, var(--line-2) 0 5px, var(--surface) 5px 10px); }
+/* 도는 잡에 **파랗게 꽉 찬** 막대를 주지 않는다 — 그건 「끝났다」의 그림이다. 추정을 넘겼거나
+   선언한 스텝을 다 끝냈지만 아직 도는 잡은 가득 찬 빗금으로, 형편은 라벨이 말한다. */
+.pbar[data-cond="over"] i { background: repeating-linear-gradient(135deg, var(--warn) 0 5px, var(--warn-soft) 5px 10px); }
+.pbar[data-cond="finalizing"] i { background: repeating-linear-gradient(135deg, var(--accent) 0 5px, var(--accent-soft) 5px 10px); }
+.pbar[data-cond="stuck"] i { background: repeating-linear-gradient(135deg, var(--bad) 0 5px, var(--bad-soft) 5px 10px); }
+.plab { font: 600 12px var(--sans); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.pwrap:has([data-cond="over"]) .plab { color: var(--warn); }
+.pwrap:has([data-cond="stuck"]) .plab { color: var(--bad); }
 .pos { display: block; font: 12px var(--sans); color: var(--muted); margin-top: 2px; white-space: nowrap; }
 .you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 600 12px var(--sans); vertical-align: 1px; }
 .joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 600 12px var(--sans); vertical-align: 1px; background: none; cursor: default; }
@@ -163,7 +189,7 @@ table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8p
 .over { color: var(--warn); font-weight: 500; }
 .stalled { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 600 12px var(--sans); }
 .stuck { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 600 12px var(--sans); }
-.exp-btn { font: 12px var(--mono); background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); padding: 0 5px; cursor: pointer; margin-right: 4px; }
+.exp-btn { font: 12px var(--mono); background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); cursor: pointer; margin-right: 4px; padding: 0; min-width: 24px; min-height: 24px; line-height: 22px; text-align: center; vertical-align: middle; }
 td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* 펼침 블록 (항목 12 · 13) */
@@ -173,7 +199,8 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .prog .note { color: var(--muted); }
 .prog .head .fail { color: var(--bad); }
 .minibar { display: flex; gap: 2px; height: 4px; max-width: 520px; margin: 0 0 8px; }
-.minibar i { display: block; height: 100%; border-radius: 2px; background: var(--ok); }
+/* 칸은 똑같이 나뉜다 — 폭을 인라인 퍼센트로 주지 않고 flex 가 나눈다(칸 수가 곧 눈금이다) */
+.minibar i { flex: 1 1 0; display: block; height: 100%; border-radius: 2px; background: var(--ok); }
 .minibar i.run { background: var(--accent); }
 .minibar i.pend { background: var(--line); }
 .minibar i.fail { background: var(--bad); }
@@ -234,9 +261,11 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ── 최근 완료 (항목 14 · 15) ── */
 .recent { display: grid; gap: 0; }
-.rrow { display: grid; grid-template-columns: 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow { display: grid; grid-template-columns: 54px 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
 /* 필은 글자만큼만 — 격자 칸을 채우면 결과 색이 행의 배경처럼 번진다 */
 .rrow > .pill { justify-self: start; }
+/* 번호는 큐 행과 같은 모양 — 로그·재실행·문의가 전부 이 번호로 이뤄진다 */
+.rrow .id { font-family: var(--mono); font-weight: 500; color: var(--muted); }
 .rrow.hl { background: var(--accent-soft); }
 .rrow .k { font-family: var(--mono); font-weight: 500; }
 .rrow .d, .rrow .t { color: var(--muted); }
@@ -289,6 +318,9 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   table.q tr { border-bottom: 1px solid var(--line-2); padding: 6px 0; }
   table.q tr.exp { border-bottom: 0; }
   table.q td { border: 0; padding: 2px 8px; }
+  table.q tr.qbar td { padding: 4px 8px 8px; }
+  .exp-btn { min-width: 32px; min-height: 32px; line-height: 30px; }
+  .pwrap { max-width: 100%; }
   table.q td.job { white-space: normal; }
   table.q td.job .pos { display: inline; margin-left: 6px; }
   table.q td.eta { white-space: normal; }

@@ -21,12 +21,28 @@ the same rules for humans.
 
 `main` and `dev` are protected by a ruleset; direct pushes are rejected, admins included.
 
+**One branch, one worktree.** This repository is worked on through sibling worktrees
+(`remote_ci_monitor-<topic>`), several checked out at once. Never `git switch` an existing worktree
+onto another branch: another session may be working in that folder, and the switch pulls the floor
+out from under it. `remote_ci_monitor-dev` is where `dev` lives. New work means a new worktree.
+What is forbidden is *changing* which branch a worktree is on; bringing one up to date with
+`git fetch` or `git pull` on the branch it already has is always fine.
+
 ```sh
-git switch dev && git pull
-git switch -c <type>/<topic>
+git fetch origin
+git worktree add -b <type>/<topic> ../remote_ci_monitor-<topic> origin/dev
+cd ../remote_ci_monitor-<topic>
+python3.11 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]'
 # work
 gh pr create --base dev
+git worktree remove ../remote_ci_monitor-<topic>   # once it is merged
 ```
+
+**Names are part of the work.** Before creating a branch invoke the `branch` skill, before
+committing the `commit` skill, before opening or merging a PR the `pr` skill — they hold the
+shape (`<type>/<scope>-<what-it-does>`, `<type>(<scope>): <summary>`) and the steps.
+`tools/guard_naming.py` (a `PreToolUse` hook) refuses a branch name, commit subject or PR
+title that does not fit; the rule is in `CONTRIBUTING.md` (Names).
 
 `main` only takes a pull request from `dev`. The workflow job names `test` (`ci.yml`) and
 `main-from-dev-only` (`pr-policy.yml`) are wired into the ruleset: renaming one means changing the
@@ -42,8 +58,10 @@ empty. Develop in a `git worktree` with its own `.venv`, and give a test server 
 
 `tools/guard_production.py` enforces this as a `PreToolUse` hook (`.claude/settings.json`). It
 finds the production checkout from the machine's own editable install, refuses edits to it and to
-the server's config and data, and asks before a deploy. On a machine with no such install it does
-nothing. The procedure is in
+the server's config and data, refuses opening the production database with a build other than
+the service's own (`rcm token …` against the production config or data — a different build
+migrates the database on open; `rcm gc --dry-run --config` is allowed, it plans on a copy), and
+asks before a deploy. On a machine with no such install it does nothing. The procedure is in
 [operating a build machine](docs/operating.md#from-a-git-checkout).
 
 ## Checks before a pull request
@@ -51,7 +69,7 @@ nothing. The procedure is in
 ```sh
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for 8 known mutations
+python scripts/mutcheck.py           # the tests must go red for 26 known mutations
 scripts/smoke_install.sh             # the README's own commands on a fresh venv
 ```
 
@@ -63,6 +81,8 @@ Every user-visible change updates the docs in the same pull request. The rules a
 
 ## Traps that have already cost a session
 
+- `git switch` inside an existing worktree took a folder another session was working in. A clean
+  `git status` does not mean the folder is free — read `git worktree list` and add your own.
 - Korean text is double width: a line under 100 characters can still fail `ruff` E501.
 - The doc-lock tests (`tests/test_docs_m5*.py`, `tests/test_examples.py`) fail when a feature has
   no documentation. Read the failure — it names the missing wording.

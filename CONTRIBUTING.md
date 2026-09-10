@@ -10,7 +10,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js  # web UI pure functions
-python scripts/mutcheck.py      # proves the tests go red for 8 known mutations
+python scripts/mutcheck.py      # proves the tests go red for 26 known mutations
 scripts/smoke_install.sh        # the README setup on a fresh venv (builds the wheel first)
 ```
 
@@ -37,9 +37,27 @@ checkout](docs/operating.md#from-a-git-checkout).
 
 `main` and `dev` are protected: no direct pushes, no exceptions.
 
-1. Branch from `dev`: `git switch dev && git pull && git switch -c <type>/<topic>`.
+1. Branch from `dev` **into its own worktree** — do not switch an existing one, someone may be
+   working in it: `git fetch origin && git worktree add -b <type>/<topic>
+   ../remote_ci_monitor-<topic> origin/dev`, then give it its own `.venv`.
 2. Open the pull request against `dev` and let CI (`test`) pass.
 3. `main` only ever takes a pull request from `dev`, which additionally runs `main-from-dev-only`.
+
+## Names
+
+A branch, a commit and a pull request are read by people who were not there. Each name says
+**what changes**, not only where or which milestone. `tools/guard_naming.py` refuses names that do
+not fit (it is a `PreToolUse` hook for Claude Code sessions, and a CLI for everyone:
+`python3 tools/guard_naming.py branch|commit|pr <text>`). The working checklists are the
+`.claude/skills/branch`, `commit` and `pr` skills; the research behind the rules is in
+[`docs/reviews/2026-09-10-naming-conventions-research.md`](docs/reviews/2026-09-10-naming-conventions-research.md).
+
+| what | shape | rule |
+|---|---|---|
+| branch | `<type>/<scope>-<what-it-does>` | type in `feat fix docs test refactor perf ci build chore`; lowercase, digits, hyphens; 2–7 words; ≤ 48 chars; no hash or session id; not a scope or milestone code alone (`fix/cli-ux` ✗ → `fix/cli-run-no-wait-eta` ✓). `release/vX.Y.Z` is the other shape. The worktree is `../remote_ci_monitor-<what-it-does>` |
+| commit subject | `<type>(<scope>)!: <summary>` | [Conventional Commits](https://www.conventionalcommits.org/) header; type adds `release` and `revert`; scope optional and lowercase; summary in Korean, present tense, no trailing period, first line ≤ 72 chars. `Merge …`, `Revert …`, `fixup!` are git's own and exempt |
+| commit body | blank line, 72 columns | **what** and **why** — the problem, the decision, the trade-off, the plan section or decision number, what the tests lock. Trailers at the end: `Refs: #N`, `Closes #N`, `BREAKING CHANGE:`, and the attribution lines a session is given |
+| pull request | title = commit subject; body = 한 줄 · 왜 · 무엇 · 검사 · 문서 | one concern per PR; `WIP:` + draft until ready; merge only on green CI, as a merge commit titled `<title> (#N)`; delete the branch and remove the worktree after |
 
 ## Documentation
 
@@ -55,9 +73,15 @@ Releases come from `main`, and `main` only takes pull requests from `dev`:
    `[Unreleased]` section into `## [x.y.z] - YYYY-MM-DD` with a compare link at the bottom
    (feature branch → pull request to `dev`).
 2. `gh pr create --base main --head dev`, wait for `test` and `main-from-dev-only`, merge.
-3. `git tag v0.1.0 <main-sha> && git push origin v0.1.0`.
+3. Merging into `main` creates the tag and the release: the `Tag release` workflow
+   (`tag-release.yml`) reads `__version__`, creates `v<X>` on the merge commit if that tag does not
+   exist yet, and calls the `Release` workflow in the same run (a tag created with `GITHUB_TOKEN`
+   does not start `on: push: tags` workflows on its own). A merge that does not bump `__version__`
+   is a no-op; a version whose tag already points elsewhere fails the run instead of being reused.
+   To re-run a release by hand, push the tag yourself:
+   `git tag v0.1.0 <main-sha> && git push origin v0.1.0`.
 
-The `Release` workflow then checks that the tag is on `main` and equals `__version__`, builds the
+The `Release` workflow checks that the tag is on `main` and equals `__version__`, builds the
 sdist and wheel, runs the install smoke on Ubuntu and macOS, and creates the GitHub Release with
 the files and the changelog section as its body. PyPI publishing (trusted publishing, no API
 token) runs only when the repository variable `PYPI_PUBLISH` is `true`: register the publisher on

@@ -1,7 +1,8 @@
 """로컬 워커 회귀 잠금(M5b-3 §1) — `Worker` 가 `runner.run_job` 위에 올라가도 오늘과 같아야 한다.
 
 `tests/test_worker.py` 의 도우미(`enqueue` · `run_one` · `sh`)로 실제 `Store` 를 거쳐
-claim → execute → finish 를 돈다. 잠근 것: summary · failed_step · DB 마커 · phase 전이
+claim → execute → finish 를 돈다. 잠근 것: summary · failed_step(선언된 것만) ·
+last_step · DB 마커 · phase 전이
 (claim 의 materializing → executing → 종료 뒤 None) · `last_output_at` 갱신 · 워크스페이스
 (성공 삭제 · 실패 보존) · 취소 `cancelled by <name>` · 타임아웃 `format_limit` · 자재화 실패 ·
 `Worker.shutdown()` → lost `server stopped while running` · 그리고 **`Worker.execute` 가
@@ -122,15 +123,15 @@ def test_success_stores_markers_summary_and_removes_the_workspace(env):
     assert [t.state for t in j.transitions] == ["queued", "running", "succeeded"]
 
 
-def test_failure_keeps_the_workspace_and_blames_the_last_step(env):
-    """failed · exit 3 · summary 는 마커 · `failed_step` 은 마지막 스텝 · 워크스페이스 보존
-    (`keep_workspace_on_failure` 기본 true)."""
+def test_failure_keeps_the_workspace_and_names_no_step(env):
+    """failed · exit 3 · summary 는 마커 · **선언이 없으면 `failed_step` 은 없다**(M5h 결정 63,
+    「어디였나」는 `last_step`) · 워크스페이스 보존(`keep_workspace_on_failure` 기본 true)."""
     store, cfg = env
     jid = enqueue(store, cfg, "bad")
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code == 3 and j.summary == "2 failed"
-    assert j.failed_step == "test" and j.phase is None
+    assert j.failed_step is None and j.last_step == "test" and j.phase is None
     assert (workspace_of(cfg, jid) / "hello.txt").exists()
 
 

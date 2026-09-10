@@ -16,6 +16,7 @@ from remote_ci_monitor.core.model import (
     CANCELLING,
     FAILED,
     LOST,
+    MODE_GIT_REF,
     QUEUED,
     RUNNING,
     SUCCEEDED,
@@ -122,6 +123,195 @@ def _disk(d: dict[str, Any] | None) -> str:
     return f"{used / 10**9:.0f} / {total / 10**9:.0f} GB{tail}"
 
 
+def _bytes(b: int | None) -> str:
+    """디스크 바이트 — 십진 눈금(Finder·`df -H` 와 같다)이되 **크기에 맞는 단위**로.
+
+    GB 로만 그리면 50 KB 짜리 스냅샷이 `0.0 GB` 가 되어 「없다」로 읽힌다. 회수 목록은 큰 것과
+    작은 것이 한 표에 섞이는 자리다. **모르는 값은 대시다** — 0 으로 그리면 「지키고 있다」는
+    거짓말이 된다.
+    """
+    if b is None:
+        return DASH
+    if b < 10**3:
+        return f"{b} B"  # 0 은 「없다」는 사실이다 — `0.0 KB` 는 눈을 미끄러뜨린다
+    if b < 10**6:
+        return f"{b / 10**3:.1f} KB"
+    if b < 10**9:
+        return f"{b / 10**6:.1f} MB"
+    return f"{b / 10**9:.1f} GB"
+
+
+def _next_sweep(doc: dict[str, Any], now: str | None) -> str:
+    """「next sweep in 42m」. 시각을 모르거나 `now` 가 없으면 빈 문자열."""
+    at = doc.get("next_sweep_at")
+    if not at or not now:
+        return ""
+    try:
+        left = (parse_iso(at) - parse_iso(now)).total_seconds()
+    except (TypeError, ValueError):
+        return ""
+    return f" · next sweep in {fmt_duration(max(0.0, left))}"
+
+
+def _coarse(seconds: float) -> str:
+    """`12s` · `57m` · `3h` — 웹의 `fmtCoarse` 와 같은 눈금(분·시는 내림). 나이에 초는 소음이다."""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
+
+def _measured_ago(doc: dict[str, Any], now: str | None) -> str:
+    """「 · measured 57m ago」 — 회계의 나이(I6). 합계에 기여한 측정 중 가장 오래된 것의 나이라
+    캐시가 섞인 값을 「방금 쟀다」처럼 그리지 않는다. 시각을 모르거나 `now` 가 없으면 빈 문자열."""
+    at = doc.get("measured_at")
+    if not at or not now:
+        return ""
+    try:
+        age = (parse_iso(now) - parse_iso(at)).total_seconds()
+    except (TypeError, ValueError):
+        return ""
+    return f" · measured {_coarse(max(0.0, age))} ago"
+
+
+def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `storage` 행 — (이름, ok, 설명). 영어다(CLI 규칙).
+
+    등급은 **다음 sweep 이 고칠 수 있나**로 가른다. 고칠 수 있으면 warn, 사람이 와야 하면 FAIL.
+    삭제가 효과 없었던 상황을 warn 으로 숨기지 않는다.
+
+    **아직 한 번도 안 잰 서버는 행이 없다**(None). 「못 쟀다」와 「아직 안 쟀다」는 다른 사실이고,
+    막 뜬 서버를 경고로 그리면 첫 화면이 늘 노랗다. 청소기가 영영 안 도는 것은 `/api/health` 가
+    503 으로 잡고 그건 `server` 행에 나온다.
+    """
+    if doc.get("measured_at") is None and not doc.get("error_code"):
+        return None
+    volume, free = doc.get("volume_bytes"), doc.get("free_bytes")
+    limit, floor = doc.get("limit_bytes"), doc.get("min_free_bytes")
+    under_floor = floor is not None and free is not None and free < floor
+
+    if doc.get("no_progress"):
+        return (
+            "storage",
+            False,
+            f"{_bytes(free)} free: deleting stopped helping — free space did not move, "
+            "so the floor rule is paused until `rcm gc`",
+        )
+    if doc.get("budget_unreachable"):
+        held = doc.get("non_evictable_bytes")
+        return (
+            "storage",
+            False,
+            f"{_bytes(volume)} over the {_bytes(limit)} budget, and {_bytes(held)} of it is held "
+            "by running jobs and orphan directories — nothing the sweep may delete brings it under",
+        )
+    if under_floor and not doc.get("evictable_bytes"):
+        return (
+            "storage",
+            False,
+            f"{_bytes(free)} free, under the {_bytes(floor)} floor, and nothing left to delete",
+        )
+    if doc.get("error_code") or volume is None:
+        return (
+            "storage",
+            None,
+            "a size could not be measured — the byte rules are not enforced this sweep "
+            f"({doc.get('error_code') or 'unknown'})",
+        )
+    if limit is not None and volume > limit:
+        return (
+            "storage",
+            None,
+            f"rcm data {_bytes(volume)} is over the {_bytes(limit)} budget — "
+            f"the next sweep will trim it{_measured_ago(doc, now)}",
+        )
+    if under_floor:
+        return (
+            "storage",
+            None,
+            f"{_bytes(free)} free, under the {_bytes(floor)} floor — the next sweep will reclaim",
+        )
+    of_limit = f" of {_bytes(limit)}" if limit is not None else ""
+    tail = _measured_ago(doc, now) + _next_sweep(doc, now)
+    return "storage", True, f"rcm data {_bytes(volume)}{of_limit} · {_bytes(free)} free{tail}"
+
+
+def _planned_totals(items: list[dict[str, Any]]) -> tuple[int, int, int, int]:
+    """계획 항목들의 (charged 합, 공유 몫 합, 예상 회수량 합, 크기를 모르는 항목 수).
+
+    아는 것만 더한다 — 모르는 항목은 0 으로 세지 않고 **개수로** 따로 말한다. `shared_bytes` 가 없는
+    옛 서버의 항목은 공유 몫을 모르는 것이 아니라 그 서버가 안 갈랐던 것이라 charged 를 회수량으로
+    쓴다(그 서버의 dry-run 이 그렇게 말했다).
+    """
+    charged = shared = reclaim = unknown = 0
+    for i in items:
+        ws, tar = i.get("workspace_bytes"), i.get("snapshot_bytes")
+        known = (ws or 0) + (tar or 0)
+        charged += known
+        if ws is None or tar is None:
+            unknown += 1
+        if "shared_bytes" not in i:
+            reclaim += known
+            continue
+        s, r = i.get("shared_bytes"), i.get("estimated_reclaimable_bytes")
+        if s is None or r is None:
+            if ws is not None and tar is not None:
+                unknown += 1
+            continue
+        shared += s
+        reclaim += r
+    return charged, shared, reclaim, unknown
+
+
+def render_gc(body: dict[str, Any]) -> str:
+    """`rcm gc` 사람용 표. **계획과 결과를 가른다** — 계획을 회수처럼 쓰면 거짓이다.
+
+    「would free」는 **예상 회수량**(charged − 하드링크 공유 몫)이다(결정 76). 표의 항목 값과
+    「would remain」은 charged 다 — 인벤토리가 링크마다 세기 때문이다.
+    """
+    planned = body.get("planned") or []
+    lines = ["job     workspace   snapshot   reason"]
+    for item in planned:
+        lines.append(
+            f"#{item.get('job_id'):<6} {_bytes(item.get('workspace_bytes')):>9}  "
+            f"{_bytes(item.get('snapshot_bytes')):>9}   {item.get('reason', DASH)}"
+        )
+    if not planned:
+        lines.append("(nothing to reclaim)")
+    before = body.get("storage_before") or {}
+    after = body.get("storage_after") or {}
+    charged, shared, reclaim, unknown = _planned_totals(planned)
+    if body.get("dry_run"):
+        # dry-run 의 「남는다」는 **예측**이다. 지금 총량을 「남을 양」이라고 쓰면 거짓이 된다.
+        line = f"would free {_bytes(reclaim)} from {len(planned)} jobs"
+        if shared:
+            line += f" ({_bytes(charged)} charged · {_bytes(shared)} shared by hard links)"
+        if unknown:
+            line += f" · {unknown} of unknown size"
+        held = before.get("volume_bytes")
+        rest = DASH if held is None else _bytes(max(0, held - charged))
+        lines.append(f"{line} · {rest} would remain")
+        return "\n".join(lines)
+    failed = body.get("failed") or []
+    gone = len(body.get("deleted") or [])
+    freed = body.get("freed_bytes")
+    line = f"freed {_bytes(freed)} from {gone} jobs"
+    est = body.get("estimated_reclaimable_bytes")
+    if est is not None and est != freed:
+        line += f" · est. {_bytes(est)} reclaimable"
+    fb, fa = body.get("free_bytes_before"), body.get("free_bytes_after")
+    if fb is not None and fa is not None:
+        line += f" · free {_bytes(fb)} → {_bytes(fa)}"
+    line += f" · {_bytes(after.get('volume_bytes'))} left"  # 지운 뒤 다시 잰 값
+    if failed:
+        codes = ", ".join(sorted({f.get("error_code", "?") for f in failed}))
+        line += f" · {len(failed)} failed ({codes})"
+    lines.append(line)
+    return "\n".join(lines)
+
+
 def _load(v: float | None) -> str:
     # os.getloadavg() 는 이진 소수(6.60693359375)라 두 자리로 자른다
     return DASH if v is None else f"{v:.2f}"
@@ -143,7 +333,32 @@ def _tz_from(status: dict[str, Any], tz: tzinfo | None) -> tzinfo | None:
     return None
 
 
-def _reason_text(row: dict[str, Any]) -> str:
+#: 보류 사유를 사람 말로. 서버는 코드만 보낸다(결정 37).
+_HOLD_WORD = {"cpu_busy": "cpu", "no_sample": "no sample", "cooldown": "cooling down"}
+
+
+def held_summary(workers: list[dict[str, Any]] | None) -> tuple[int, str | None]:
+    """보류 레인 수와 사람이 읽을 이유. 숫자는 `cpu_busy` 로 막힌 레인의 **최댓값**이다.
+
+    `hold_detail` 은 `server.workers[]` 에만 있고 큐 행에는 없다 — 그래서 행 키를 늘리지 않고
+    렌더러가 이미 받는 워커 목록에서 읽는다(M5f §5.4).
+    """
+    held = [w for w in (workers or []) if w.get("state") == "held"]
+    if not held:
+        return 0, None
+    busy = [
+        v
+        for w in held
+        if w.get("hold_code") == "cpu_busy"
+        and (v := (w.get("hold_detail") or {}).get("cpu_busy")) is not None
+    ]
+    if busy:
+        return len(held), f"cpu {max(busy):.0f}%"
+    codes = [w.get("hold_code") for w in held if w.get("hold_code")]
+    return len(held), _HOLD_WORD.get(codes[0], codes[0]) if codes else None
+
+
+def _reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = None) -> str:
     reason = row.get("reason")
     est = row.get("estimate") or {}
     blocked = row.get("blocked_by")
@@ -153,6 +368,9 @@ def _reason_text(row: dict[str, Any]) -> str:
     if reason == "waiting_for_lane":
         ahead = row.get("ahead_job_id")
         return f"waiting for lane · behind #{ahead}" if ahead else "waiting for lane"
+    if reason == "held_by_load":
+        _n, why = held_summary(workers)
+        return f"held by load · {why}" if why else "held by load"
     if reason == "overdue":
         over = (est.get("elapsed_seconds") or 0) - (est.get("expected_seconds") or 0)
         return (
@@ -187,21 +405,194 @@ def _mb(b: int | None) -> str:
     return DASH if b is None else f"{int(round(b / 1e6))} MB"
 
 
+#: 목록 한 칸의 폭. 브랜치 이름은 길다 — 자르되 잘렸다고 말한다.
+MAX_IDENT = 32
+
+#: 실패 보고의 문구(M5h §2.5). 물음표는 계약이다 — 판정이 아니라 제안이다.
+_HISTORY = {
+    "persistent": "every one of the last {window} {key}runs",
+    "intermittent": "{seen} of the last {window} {key}runs · intermittent?",
+    "first_seen": "first time in the last {window} {key}runs",
+    "unknown": "{seen} of {window} {key}runs so far — too few to judge",
+}
+
+
+#: 최근 줄의 스텝 라벨 상한. 실제 게이트의 스텝 이름은 60자가 넘는다 — `rcm top` 은 한 화면이다.
+MAX_STEP_LABEL = 40
+
+
+def _short_key(key: Any) -> str:
+    text = str(key or "?")
+    return text if len(text) <= 16 else text[:15] + "…"
+
+
+def _short_step(name: Any) -> str:
+    text = str(name or "")
+    return text if len(text) <= MAX_STEP_LABEL else text[: MAX_STEP_LABEL - 1] + "…"
+
+
+def _short_sha(sha: Any) -> str:
+    return str(sha or "")[:7]
+
+
+#: 완전한 커밋 sha 의 길이. `--ref <sha>` 로 넣은 잡은 ref 가 곧 sha 다(M5i I2).
+FULL_SHA_LEN = 40
+
+
+def _ref_is_the_sha(ref: Any, sha: Any) -> bool:
+    """ref 가 **40자리 hex 이고 정규화(소문자·둘레 공백) 뒤 sha 와 정확히 같을 때만** 참.
+
+    접두 일치(`092dc58`)는 안 친다 — 우연히 sha 접두와 같은 브랜치·태그가 있을 수 있어 넓다.
+    """
+    r = str(ref or "").strip().lower()
+    s = str(sha or "").strip().lower()
+    if len(r) != FULL_SHA_LEN or r != s:
+        return False
+    return all(c in "0123456789abcdef" for c in r)
+
+
+def _repo_piece(repo: Any) -> str:
+    """저장소 주소의 마지막 조각. `git@github.com:org/app.git` → `app`(칸이 좁다)."""
+    text = str(repo or "").rstrip("/")
+    if not text:
+        return ""
+    piece = text.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return piece[:-4] if piece.endswith(".git") else piece
+
+
+def ref_ident(ref: Any, sha: Any) -> str:
+    """`rcm run --ref` 의 제출 줄 신원 — `<ref> @<짧은 sha>`. ref 가 곧 sha 면 `@<짧은 sha>`.
+
+    `source_ident()` 과 같은 규칙(M5i I2)이지만 자르지 않는다 — 제출 줄은 칸이 아니라 한 줄이고,
+    방금 친 ref 를 그대로 되비쳐 준다. 응답에 sha 가 없으면(옛 서버) `—` 다(수를 지어내지 않는다).
+    """
+    short = _short_sha(sha) or DASH
+    if _ref_is_the_sha(ref, sha):
+        return f"@{short}"
+    return f"{ref} @{short}"
+
+
+def source_ident(src: dict[str, Any] | None) -> str:
+    """목록 한 칸용 짧은 코드 신원 — `<ref|branch> @<짧은 sha>`(M5h §4.1).
+
+    큐 행의 `_source_text()` 와 다른 함수다: 저 쪽은 넓고 이 쪽은 좁다. 못 채우면 조각만
+    내고, 아무것도 없으면 `—` 다(빈 문자열이면 그 다음 칸이 앞으로 밀린다).
+    """
+    src = src or {}
+    if src.get("mode") == MODE_GIT_REF:
+        sha = _short_sha(src.get("sha"))
+        # `--ref <sha>` 잡은 ref 가 곧 sha 다 — 두 번 보이면 칸만 먹는다(M5i I2)
+        ref = "" if _ref_is_the_sha(src.get("ref"), src.get("sha")) else str(src.get("ref") or "")
+        parts = [ref, f"@{sha}" if sha else ""]
+    else:
+        name = str(src.get("branch") or "") or _repo_piece(src.get("repo"))
+        sha = _short_sha(src.get("base_sha"))
+        tail = f"@{sha}{'+' if src.get('dirty') else ''}" if sha else ""
+        parts = [name, tail]
+    text = " ".join(p for p in parts if p)
+    if not text:
+        return DASH
+    if len(text) <= MAX_IDENT:
+        return text
+    # 자를 때 **뒤(sha)를 남긴다** — 신고자가 자기 잡을 찾은 것은 브랜치가 아니라 sha 였다.
+    name, sep, tail = text.rpartition(" @")
+    if sep and len(tail) + 3 < MAX_IDENT:
+        keep = MAX_IDENT - len(tail) - 3  # "…" + " @"
+        return f"{name[:keep]}… @{tail}"
+    return text[: MAX_IDENT - 1] + "…"
+
+
+#: 대기가 「모른다」로 끝난 이유 — 대기 루프가 문자열 사유에 얹어 돌려주는 구조화된 원인(M5i I3).
+#: 끝줄이 문자열을 뒤지지 않고 「확정 404 였나」를 알게 한다. 잡 문서가 있는 종료(1·2)는 `None`.
+CAUSE_NOT_FOUND = "not_found"  # 서버가 404 로 답했다 — 그 번호의 잡은 없다
+CAUSE_UNREACHABLE = "unreachable"  # 서버에 닿지 못했다 — 잡은 있을 수 있다
+CAUSE_TIMEOUT = "timeout"  # `--timeout` 이 먼저 끝났다
+CAUSE_SERVER_ERROR = "server_error"  # 4xx 등 다른 거부
+
+
+def failure_lines(
+    job: dict[str, Any],
+    *,
+    job_id: int,
+    url: str | None,
+    limit: int = 3,
+    cause: str | None = None,
+) -> list[str]:
+    """실패한 잡의 끝줄 — 로그로 가는 길과 이름별 최근 이력(M5h §2.5).
+
+    성공한 잡에는 아무것도 안 붙인다. `failures` 키가 없는 것(못 읽었다)과 빈 배열(이름을 안
+    남겼다)은 뜻이 다르지만 화면은 같다 — 둘 다 로그 줄만 나온다.
+
+    로그 줄을 빼는 것은 **확정 404**(`cause == CAUSE_NOT_FOUND`)뿐이다 — 없는 잡의 로그 길은
+    아무것도 안 가리킨다. 연결 실패·타임아웃은 여전히 「모른다」라 로그 길을 남긴다(결정 70).
+    """
+    if job.get("state") == SUCCEEDED:
+        return []
+    log = f"log: rcm logs {job_id}" + (f" · {url}" if url else "")
+    out = [] if cause == CAUSE_NOT_FOUND else [log]
+    # 서버 문서는 우리가 만든 게 아니다 — 이름이 없거나 모양이 이상한 항목 하나 때문에
+    # **이미 끝난 잡의 종료 코드와 JSON 을 잃으면** 안 된다(`_wait` 은 이 뒤에 JSON 을 찍는다).
+    items = [i for i in (job.get("failures") or []) if isinstance(i, dict) and i.get("name")]
+    key = str(job.get("key") or "")
+    shown = items[: max(0, limit)]
+    for item in shown:
+        out.append(f"failed: {item['name']}" + _history_tail(item, key))
+    if len(items) > len(shown):
+        # 이름이 상한에서 잘렸으면 「N개 더」는 **최소값**이다 — 아는 척하지 않는다
+        at_least = "at least " if job.get("failures_truncated") else ""
+        out.append(f"… and {at_least}{len(items) - len(shown)} more (rcm logs {job_id})")
+    # 분모의 품질은 어느 줄에 실려 와도 읽는다 — 서버는 줄마다 같은 값을 싣는다(결정 68)
+    unnamed = max((_int(i.get("window_unnamed")) for i in items), default=0)
+    if unnamed:
+        window = max((_int(i.get("window")) for i in items), default=0)
+        out.append(f"note: {unnamed} of those {window} runs failed without naming anything")
+    return out
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _history_tail(item: dict[str, Any], key: str) -> str:
+    """` — 최근 이력` 조각. 셀 수 없는 항목에는 **아무 말도 안 붙인다**(`None` 을 문장에 넣느니)."""
+    template = _HISTORY.get(str(item.get("verdict")))
+    window, seen = item.get("window"), item.get("seen")
+    if template is None or not isinstance(window, int) or isinstance(window, bool):
+        return ""
+    if "{seen}" in template and (not isinstance(seen, int) or isinstance(seen, bool)):
+        return ""
+    # key 에 공백이나 가운뎃점이 있으면 문장이 어디서 끊기는지 알 수 없다 — 그 자리를 뺀다
+    # (key 는 바로 위 줄의 잡 행이 이미 말한다).
+    safe = key if key and not any(c in key for c in " ·\t") else ""
+    return " — " + template.format(seen=seen, window=window, key=f"{safe} " if safe else "")
+
+
 def _source_text(src: dict[str, Any]) -> str:
     if not src:
         return DASH
     if src.get("mode") == "git_ref":
         sha = (src.get("sha") or "")[:7] or DASH
-        return f"{src.get('repo') or ''} @{sha} ref {src.get('ref')}".strip()
+        # `--ref <sha>` 잡은 ref 가 곧 sha 다 — 한 번만(M5i I2)
+        ref = "" if _ref_is_the_sha(src.get("ref"), src.get("sha")) else f" ref {src.get('ref')}"
+        return f"{src.get('repo') or ''} @{sha}{ref}".strip()
     sha = (src.get("base_sha") or "")[:7]
     if not sha and src.get("received_bytes") is None:
         return "not received yet"
     dirty = "+uncommitted" if src.get("dirty") else ""
     repo = src.get("repo") or ""
-    return f"{repo} @{sha or DASH}{dirty}".strip()
+    # 도는 tree 잡도 브랜치를 말한다 — 큐 행에만 sha 가 있고 브랜치가 없으면 「내 잡」을
+    # 알아보는 화면이 하나도 없다(M5h 검증 3)
+    branch = src.get("branch") or ""
+    ref = f" branch {branch}" if branch else ""
+    return f"{repo} @{sha or DASH}{dirty}{ref}".strip()
 
 
-def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | None) -> list[str]:
+def render_queue_row(
+    row: dict[str, Any],
+    tz: tzinfo | None,
+    now: datetime | None,
+    workers: list[dict[str, Any]] | None = None,
+) -> list[str]:
     est = row.get("estimate") or {}
     state = row["state"]
     glyph = _GLYPH.get(state, "·")
@@ -225,6 +616,7 @@ def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | Non
         est.get("sample_count") or 0,
         group_wait=row.get("reason") == "blocked_by_group",
         overdue=bool(est.get("overdue")) or bool(est.get("stuck")),
+        shared=bool(est.get("shared")),
     )
     if finish:
         eta = f"eta {fmt_clock(finish, tz, now=now)}"
@@ -244,7 +636,7 @@ def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | Non
     lines = [
         f"  {pos:>3} {glyph} {_state_word(state):<10} {arrow}#{row['id']} "
         f"{row.get('key', '?'):<16} {src:<28} ← {req:<18} {timing:<24} {eta}  ({conf_text})",
-        f"        {_reason_text(row)}",
+        f"        {_reason_text(row, workers)}",
     ]
     prog = row.get("progress")
     if prog and prog.get("phase") == "executing":
@@ -258,7 +650,7 @@ def render_queue_row(row: dict[str, Any], tz: tzinfo | None, now: datetime | Non
                 head += f" · {prog['current_name']} · {fmt_duration(prog.get('current_seconds'))}"
             head += f" · job {fmt_duration(prog.get('job_seconds'))}"
             if prog.get("failed_step"):
-                head += f" · ✘ {prog['failed_step']}"
+                head += f" · ✘ {prog['failed_step']}"  # 도는 잡의 라벨은 선언된 것뿐이다
             lines.append("        " + head)
             parts = []
             for s in prog["steps"]:
@@ -295,6 +687,11 @@ def render(
         wtxt = f"worker {w.get('state')}" + (f" #{w['job_id']}" if w.get("job_id") else "")
     else:
         wtxt = f"lanes {busy}/{lanes} busy"
+        # 보류 레인은 busy 도 down 도 아니라 오늘은 **아예 안 보인다** — idle 과 글자 하나까지
+        # 같아서 레인이 왜 노는지 알 수 없다(M5f §5.4).
+        n_held, why = held_summary(workers)
+        if n_held:
+            wtxt += f" · {n_held} held" + (f" ({why})" if why else "")
     if down:
         wtxt += f" · DOWN: lane {', '.join(str(w['lane']) for w in down)}"
     # 원격 필은 5개까지, 넘치면 `+N workers` 로 접는다. down 은 접지 않는다(항상 보여야 한다)
@@ -377,7 +774,7 @@ def render_pool(
         else:
             out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
         for row in queue:
-            out.extend(render_queue_row(row, tz, now))
+            out.extend(render_queue_row(row, tz, now, workers))
 
     recent = pool.get("recent")
     if recent is None:
@@ -393,13 +790,20 @@ def render_pool(
             exit_txt = f" · exit {r['exit_code']}" if show_exit else ""
             req = (r.get("requester") or {}).get("label") or "?"
             tail = r.get("summary") or ""
-            if r.get("failed_step"):
-                tail += f" (step {r['failed_step']})"
+            # 선언된 스텝만 「step」이다. 아니면 「어디였나」만 말한다 — 인과는 주장하지 않는다
+            # (M5h · 결정 63). 취소·유실 잡에는 라벨이 없다(결정 64) — **읽는 쪽에서도** 막는다:
+            # M5h 이전에 쓰인 행에는 취소된 잡에도 `failed_step` 이 남아 있다(운영 잡 #176).
+            if r.get("state") not in (CANCELLED, LOST):
+                if r.get("failed_step"):
+                    tail += f" (step {_short_step(r['failed_step'])})"
+                elif r.get("last_step"):
+                    tail += f" (last step {_short_step(r['last_step'])})"
             when = fmt_clock(r.get("finished_at"), tz, now=now)
             dur = fmt_duration(r.get("job_seconds"))
             out.append(
-                f"  {glyph} {_state_word(r['state'])}{exit_txt} {r.get('key', '?'):<16} "
-                f"← {req:<18} {dur:>8}  {when}  {tail}".rstrip()
+                f"  {glyph} {_state_word(r['state'])}{exit_txt} {_short_key(r.get('key')):<16} "
+                f"← {req:<18} {source_ident(r.get('source')):<{MAX_IDENT}} "
+                f"{dur:>8}  {when}  {tail}".rstrip()
             )
             art = _artifacts_line(r.get("artifacts"))
             if art:

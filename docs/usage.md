@@ -98,7 +98,11 @@ Now prove the whole path before you trust it with real work:
 ![rcm check prints one row per thing it verified: server, token, presets, pools, timezone](images/ui/cli-check.png)
 
 1. **server** — the address it used and the version it answered with. A version far from yours is
-   worth fixing; `rcm worker` refuses a mismatch outright.
+   worth fixing; `rcm worker` refuses a mismatch outright. The `client` row below it says whether
+   yours is `same as server`, `older` or `newer`, and when it is older it prints the one command
+   that fixes it: the server hands out its own wheel at
+   `/client/remote_ci_monitor-<version>-py3-none-any.whl`, see
+   [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 2. **token** — the name your token belongs to, and whether it is an admin token. `FAIL` here means
    the token is wrong or revoked, and nothing else will work.
 3. **presets and pools** — what this server offers, and whether anything can actually run. A pool
@@ -128,14 +132,26 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 
 `--no-wait` submits and returns immediately. Come back to it whenever you like.
 
-![rcm run --no-wait prints the job id, rcm jobs lists the queue by pool, rcm wait follows the job to its end](images/ui/cli-nowait.png)
+![rcm run --no-wait prints the job number, its position in line and its ETA; rcm jobs lists the queue by pool; rcm wait follows the job to its end](images/ui/cli-nowait.png)
 
-1. **Submit and go.** The JSON line tells you the job id and whether you joined an existing job.
-2. **`rcm jobs`** lists what is queued, running and recently finished, grouped by pool, with who
+1. **Submit and go.** The line names the job, its state, where it is in line and when it should
+   finish; the JSON repeats that as `position`, `reason` and `estimate`. A job that is
+   already running has no position, so that part is absent rather than guessed, and a queue that
+   cannot start at all — paused, or a pool with no live worker — gets no finish time either,
+   because there is none to give. If the queue cannot be read the position is missing and
+   the exit code is still 0: `--no-wait` exits 0 because the job was submitted,
+   not because it was looked up.
+2. **On a machine that is short on memory**, make this the default: `rcm run --no-wait` prints
+   the job number and returns, and `rcm wait --job N` attaches whenever you like. A waiting client
+   is small — tens of megabytes, and it no longer grows with the size of the tree while it waits —
+   and idle, but it is still a process sitting there for the length of a
+   build, and if the operating system kills it the shell sees 137 — which is *not* the job
+   failing. The job keeps running on the build machine; attach again and you get the real answer.
+3. **`rcm jobs`** lists what is queued, running and recently finished, grouped by pool, with who
    asked for it and how long it took.
-3. **`rcm wait --job N`** attaches to a job you already have, follows it over the event stream and
+4. **`rcm wait --job N`** attaches to a job you already have, follows it over the event stream and
    ends when the job does. Ctrl-C detaches again without stopping anything.
-4. The exit code is the job's, exactly as if you had waited from the start.
+5. The exit code is the job's, exactly as if you had waited from the start.
 
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
@@ -144,14 +160,27 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 
 A failed job is not an error in the tool, so the output stays calm and specific.
 
-![rcm run on a failing preset prints the failed step, the summary, the JSON with failed_step, and exits 1](images/ui/cli-fail.png)
+![rcm run on a failing preset prints the failed step, then the log command and the names it reported with their recent history, then the JSON with failed_step, last_step and failures, and exits 1](images/ui/cli-fail.png)
 
-1. **The verdict line** names the step that failed and the summary your script printed.
-2. **The JSON** carries `failed_step`, `exit_code` and the per-step timings, so a wrapper script
-   can report which stage broke without scraping the log.
-3. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
+1. **The verdict line** names the step that failed — but only when your script said so, with
+   `::rcm::step-end::fail` or `::rcm::fail::<name>`. Without a declaration rcm does not guess: it
+   shows `last step <name>`, which says where the job was when it ended and claims nothing about
+   the cause. A script that runs several things in parallel and replays their logs afterwards
+   would otherwise have the last replayed heading blamed for a failure that happened earlier.
+2. **Where to look next.** Every non-zero exit prints `log: rcm logs <N>` and the job URL —
+   including exit 3, where you know least. Under it, one line per name your script reported with
+   `::rcm::fail::<name>`, saying how often each was red in the recent runs of the same preset:
+   `2 of the last 8 gate runs · intermittent?` for something that comes and goes,
+   `first time in the last 8 gate runs` for something new, `every one of the last 8 gate runs`
+   for something that is simply broken. The question mark is deliberate — it is a suggestion, not
+   a verdict, and the counts are next to it.
+3. **The JSON** carries `failed_step`, `last_step`, `failures`, `exit_code` and the per-step
+   timings, so a wrapper script can report which stage broke without scraping the log.
+4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
    treats 3 as red, it will be red for the wrong reason.
+
+A cancelled job has no failed step and no last step: you stopped it, it did not break.
 
 ## 7. Two sessions, one tree
 
@@ -231,21 +260,30 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ### The queue
 
-![the queue: the three-answer summary, the running job with its steps, the waiting job with an ETA, and the other pool](images/ui/web-queue.png)
+![the queue: the three-answer summary, the running job with its progress bar and steps, the waiting job with an ETA, and the other pool](images/ui/web-queue.png)
 
 1. **Three answers at a glance**: your jobs, anything not moving, and how hard the machine is
    working.
 2. **Running now, and waiting**, each with a count. An empty group says so rather than vanishing,
    so "nothing is running" never looks the same as "the page did not load".
-3. **The running job**, with who asked for it and what tree it is testing. Collapse it with **▾**
-   and the current step moves into the reason column as `step 2/4 build 2s`, so a folded row still
-   says what is happening.
-4. **Its steps**, in order, with the finished ones ticked and the current one timed. The seconds
-   count up as you watch; they do not sit still and then jump when the page refreshes.
-5. **A waiting job**, with its position in the queue.
-6. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
+3. **The running job**, with who asked for it and what tree it is testing. Rows arrive folded; the
+   current step stays in the reason column as `step 2/4 build 2s`, so a folded row still says what
+   is happening.
+4. **How far along it is**, on one bar, and — always — what the bar measured. `50% · 4/8 steps`
+   when the job declares how many steps it has; `70% · by measured time` or `by preset estimate`
+   when it does not, so you can see how much the number is worth. A job past its estimate reads
+   `past the estimate`, one that finished every declared step but has not exited reads
+   `finalizing`, and a job nothing can be said about — no samples at all, preparing its workspace,
+   or likely stuck — reads `progress —`. A running job never fills the bar: a full bar means
+   finished, and this one is still going.
+5. **Its steps**, opened with **▸**, in order, with the finished ones ticked and the current one
+   timed. The seconds count up as you watch; they do not sit still and then jump when the page
+   refreshes. The log tail and the **Log** button are in the same block. **Cancel** does not hide
+   there: it stays in the row while the row is folded, so stopping a runaway job is one tap.
+6. **A waiting job**, with its position in the queue.
+7. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
    from the preset; `—` means it will not pretend to know.
-7. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
+8. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
    the repository it came from is in the expanded block, since every row usually repeats it.
 
 ### Your jobs
@@ -271,8 +309,10 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ![a failed job expanded in Recent, with its steps, the command to run it again, its pool, and the estimates block](images/ui/web-recent.png)
 
-1. The **result** of every recent job.
-2. Click a failed one to see **which step failed** and what it printed.
+1. The **job number** and the **result** of every recent job. It is the same `#412` the queue
+   showed, so a finished job is still the one you fetch the log or the artifacts for.
+2. Click a failed one to see the step it declared as failed — or, when it declared none, **where
+   it was when it ended** — plus every name it reported and how often each was red recently.
 3. **The command that reproduces it**, ready to copy.
 4. Which **pool** it ran in.
 5. **Estimates** explains where the ETAs come from — how many samples, how old.
@@ -314,6 +354,9 @@ are reporting and how they are doing. Open or close it yourself and that choice 
 ## 11. What to do next
 
 - Write the preset your team actually needs: [Configuration](configuration.md).
+- Run two jobs at once. Set `[server] lanes = 2` — lane 2 only picks up work while the machine has
+  CPU to spare, so it is safe to try. If the queue says `held by load`, that is the machine telling
+  you it is full: [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).
 - Make your script print step markers, so the queue shows progress instead of a spinner.
 - Wrap `rcm run` in your CI script and branch on the exit code. `examples/session/ci-gate.sh` is a
   working example.

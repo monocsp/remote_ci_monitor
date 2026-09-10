@@ -7,14 +7,26 @@ bind = "127.0.0.1"          # Set your Tailscale IP or 0.0.0.0 to accept remote 
 port = 8787
 data_dir = "~/.local/share/rcm"
 lanes = 1                   # Parallel job lanes. 1 for a single build machine.
+admission = "load"          # Lanes 2+ wait while the host is busy. "always" turns the gate off.
+cpu_max_percent = 80        # Lanes 2+ do not start a job while CPU is above this. Lane 1 always does.
+admission_samples = 3       # This many host samples in a row must be under the cap.
+admission_cooldown_seconds = 30   # After a gated lane starts a job, that machine waits this long.
 read_auth = "none"          # "none" (LAN/Tailscale) | "basic" (only behind a TLS proxy)
 max_snapshot_bytes = 536870912
 grace_seconds = 10          # SIGTERM → SIGKILL grace on cancel/timeout
 recent_count = 8
+failure_window_jobs = 20    # How many finished jobs of a key the failure history looks back over.
+failure_min_jobs = 3        # Fewer finished jobs than this in the window: no verdict at all.
 upload_stall_seconds = 60
 upload_abandon_seconds = 300
-retention_days_success = 14     # logs/snapshots of succeeded jobs are removed after this
-retention_days_failure = 30     # failed/cancelled/lost jobs keep logs (and workspace) this long
+retention_days_success = 14     # logs of succeeded jobs are removed after this
+retention_days_failure = 30     # failed/cancelled/lost jobs keep their logs this long
+# A failed job leaves a 50 KB log and a 720 MB workspace. The log is the evidence and keeps the
+# days above; the bulk below goes much sooner. These three delete data - they are written out
+# here on purpose so you can see and change them.
+workspace_retention_days = 1    # kept workspaces (and the snapshot they came from) go after this
+workspace_storage_max_bytes = 107374182400   # 100 GiB ceiling for that bulk, regardless of days. 0 = no limit
+min_free_bytes = 10737418240    # reclaim bulk when the filesystem drops under 10 GiB free. 0 = off
 metadata_retention_days = 180   # job rows/events are deleted after this (>= sample_days)
 retention_sweep_interval_seconds = 3600
 git_resolve_timeout_seconds = 20    # git ls-remote at submit time (git_ref presets)
@@ -71,6 +83,7 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   ::rcm::step::analyze
 #   ::rcm::step-end::ok
 #   ::rcm::summary::all green
+#   ::rcm::fail::flaky_test        # names what broke: a step, a test, a file
 # Preset keys: name (required) · argv (required) · description · timeout_seconds · expected_seconds
 #   (used until enough real samples exist) · duration_key_inputs (inputs whose value gets its own
 #   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ("low" | "normal" | "high") ·
@@ -100,6 +113,7 @@ pool = "default"            # worker pool for this preset's jobs
 expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back
+# artifacts_on = "failure"                # "always" (default) | "failure" — when to collect
 env_passthrough = ["PATH", "HOME", "LANG"]
 [presets.env]
 CI = "1"

@@ -17,7 +17,12 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor.core.artifacts import PolicyError, validate_globs
+from remote_ci_monitor.core.artifacts import (
+    COLLECT_ALWAYS,
+    COLLECT_ON,
+    PolicyError,
+    validate_globs,
+)
 from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
@@ -78,6 +83,11 @@ class ServerSection:
     port: int = 8787
     data_dir: str = DEFAULT_DATA_DIR
     lanes: int = 1
+    # 부하 게이트(M5f) — 레인 2 부터는 호스트가 한가할 때만 잡는다. 레인 1 은 안 지난다.
+    admission: str = "load"  # "load" | "always"("always" 는 M5f 이전 동작)
+    cpu_max_percent: float = 80.0  # 백분율은 소수가 될 수 있다 — `cpu.busy` 도 float 다
+    admission_samples: int = 3  # 연속으로 이만큼의 표본이 전부 기준 아래여야 연다
+    admission_cooldown_seconds: int = 30  # 한 머신에서 게이트를 지나 잡으면 이만큼 쉰다
     read_auth: str = "none"
     max_snapshot_bytes: int = 536_870_912
     max_concurrent_requests: int = 32
@@ -86,7 +96,15 @@ class ServerSection:
     retention_days_success: int = 14
     retention_days_failure: int = 30
     keep_workspace_on_failure: bool = True
+    # 부피(워크스페이스 + 그 잡의 스냅샷 tar)는 증거(로그)와 **다른 시계로 잔다**(M5g).
+    # 실패 잡 하나가 로그 50 KB · 워크스페이스 720 MB 를 남긴다 — 같은 기간을 줄 이유가 없다.
+    workspace_retention_days: int = 1  # <= min(retention_days_success, retention_days_failure)
+    workspace_storage_max_bytes: int = 107_374_182_400  # 100 GiB. 0 = 무제한
+    min_free_bytes: int = 10_737_418_240  # 파일 시스템 여유 바닥 10 GiB. 0 = 안 본다
     recent_count: int = 8
+    # 실패 이름의 최근 이력(M5h). 창은 같은 key 의 **이 잡까지** 최근 종료 잡 수다.
+    failure_window_jobs: int = 20
+    failure_min_jobs: int = 3  # 창이 이보다 얕으면 판정하지 않는다(unknown)
     upload_stall_seconds: int = 60
     upload_abandon_seconds: int = 300
     sse_max_connections: int = 16
@@ -208,6 +226,60 @@ def advertise_warning(section: ServerSection) -> str | None:
             'this server but cannot connect (set bind = "0.0.0.0" or a LAN/Tailscale IP)'
         )
     return None
+
+
+def shorter_log_retention(section: ServerSection) -> tuple[str, int]:
+    """부피가 넘을 수 없는 천장 — 두 로그 보존 기간 중 **짧은 쪽**(키 이름과 값)."""
+    keys = ("retention_days_success", "retention_days_failure")
+    key = min(keys, key=lambda k: getattr(section, k))
+    return key, getattr(section, key)
+
+
+def effective_workspace_retention_days(section: ServerSection) -> int:
+    """실제로 지켜지는 부피 보존 일수. 로그보다 길게 줘도 잡 디렉터리 청소가 함께 가져간다."""
+    return min(section.workspace_retention_days, shorter_log_retention(section)[1])
+
+
+def retention_warning(section: ServerSection) -> str | None:
+    """부피 보존이 로그 보존보다 길면 서버 로그 한 줄. **오류가 아니다.**
+
+    오류로 만들면 `retention_days_success = 0` 을 쓰던 설치가 **업그레이드만으로 안 뜬다** —
+    그 사람은 새 키를 만진 적이 없는데 기본값(1) 때문에 걸린다(M5f 가 같은 함정을 이미 겪었다).
+    대신 실제 동작을 `effective_workspace_retention_days` 로 낮추고 그 사실을 말한다.
+    """
+    key, ceiling = shorter_log_retention(section)
+    if section.workspace_retention_days <= ceiling:
+        return None
+    return (
+        f"warning: [server] workspace_retention_days ({section.workspace_retention_days}) is more "
+        f"than {key} ({ceiling}) — a job's whole directory goes at {ceiling}d, so the workspace "
+        f"cannot outlive it; using {ceiling}d"
+    )
+
+
+def admission_warnings(server: ServerSection, host: HostSection) -> list[str]:
+    """게이트 상수가 서로 안 맞을 때의 **경고**(M5f §4.1). 오류가 아니다.
+
+    오류로 만들면 **업그레이드만으로 돌던 서버가 안 뜬다** — `[host] history_samples = 2` 나
+    `interval_seconds = 60` 을 쓰던 사람은 admission 키를 만진 적이 없는데 기본값 때문에 걸린다.
+    게이트는 런타임에 이미 옳게 닫히므로(`no_sample`) 경고로 충분하다.
+    """
+    if server.admission != "load" or server.lanes < 2:
+        return []
+    out: list[str] = []
+    if server.admission_samples > host.history_samples:
+        out.append(
+            f"warning: [server] admission_samples ({server.admission_samples}) is more than "
+            f"[host] history_samples ({host.history_samples}) — lanes 2+ will never open"
+        )
+    window = server.admission_samples * host.interval_seconds
+    if window > server.admission_cooldown_seconds:
+        out.append(
+            f"warning: [server] admission_samples * [host] interval_seconds ({window}s) exceeds "
+            f"admission_cooldown_seconds ({server.admission_cooldown_seconds}s) — the two "
+            "constants no longer relate"
+        )
+    return out
 
 
 @dataclass
@@ -350,6 +422,7 @@ _PRESET_KEYS = {
     "env",
     "inputs",
     "artifacts",
+    "artifacts_on",
 }
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
 
@@ -546,6 +619,12 @@ def parse_preset(raw: Any) -> Preset:
         raise ConfigError(f"{where}: artifacts: {e}") from e
     except TypeError as e:
         raise ConfigError(f"{where}: artifacts must be a list of glob strings") from e
+    collect_on = raw.get("artifacts_on", COLLECT_ALWAYS)
+    if collect_on not in COLLECT_ON:
+        raise ConfigError(f"{where}: artifacts_on must be 'always' or 'failure'")
+    if collect_on != COLLECT_ALWAYS and not globs:
+        # 글롭이 없으면 아무것도 안 모은다 — 조건만 적어 둔 설정은 「모으고 있다」는 오해다
+        raise ConfigError(f"{where}: artifacts_on needs artifacts globs to collect")
     return Preset(
         name=name,
         argv=argv,
@@ -561,6 +640,7 @@ def parse_preset(raw: Any) -> Preset:
         duration_key_inputs=dki,
         env_passthrough=passthrough,
         artifacts=globs,
+        artifacts_on=collect_on,
         env=dict(env),
         inputs=inputs,
     )
@@ -591,6 +671,14 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
     if s.lanes < 1:
         raise ConfigError("[server] lanes must be >= 1")
+    if s.admission not in ("load", "always"):
+        raise ConfigError("[server] admission must be 'load' or 'always'")
+    if not 0 < s.cpu_max_percent <= 100:
+        raise ConfigError("[server] cpu_max_percent must be between 1 and 100")
+    if s.admission_samples < 1:
+        raise ConfigError("[server] admission_samples must be >= 1")
+    if s.admission_cooldown_seconds < 0:
+        raise ConfigError("[server] admission_cooldown_seconds must be >= 0")
     if not (1 <= s.port <= 65535):
         raise ConfigError("[server] port must be between 1 and 65535")
     if s.read_auth not in ("none", "basic"):
@@ -605,13 +693,28 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     ):
         if getattr(s, key) < 1:
             raise ConfigError(f"[server] {key} must be >= 1")
+    if not 1 <= s.failure_window_jobs <= 500:
+        raise ConfigError("[server] failure_window_jobs must be between 1 and 500")
+    if s.failure_min_jobs < 1:
+        raise ConfigError("[server] failure_min_jobs must be >= 1")
+    if s.failure_min_jobs > s.failure_window_jobs:
+        raise ConfigError("[server] failure_min_jobs must be <= failure_window_jobs")
     if s.sse_max_connections < 0:
         raise ConfigError("[server] sse_max_connections must be >= 0")
     if s.sse_keepalive_seconds < 1:
         raise ConfigError("[server] sse_keepalive_seconds must be >= 1")
-    for key in ("retention_days_success", "retention_days_failure"):
+    for key in ("retention_days_success", "retention_days_failure", "workspace_retention_days"):
         if getattr(s, key) < 0:
             raise ConfigError(f"[server] {key} must be >= 0")
+    if s.min_free_bytes < 0:
+        raise ConfigError("[server] min_free_bytes must be >= 0")
+    if s.workspace_storage_max_bytes != 0 and s.workspace_storage_max_bytes < 1024**3:
+        # 게이트 잡 하나가 720 MB 다. 그보다 작은 예산은 「끝나는 족족 지운다」와 같고,
+        # 그건 workspace_retention_days = 0 이 이미 표현한다.
+        raise ConfigError(
+            "[server] workspace_storage_max_bytes must be 0 (no limit) or at least 1 GiB"
+        )
+
     for key in ("git_resolve_timeout_seconds", "git_fetch_timeout_seconds"):
         if getattr(s, key) < 1:
             raise ConfigError(f"[server] {key} must be >= 1")

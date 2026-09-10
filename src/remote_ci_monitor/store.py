@@ -16,28 +16,37 @@ import contextlib
 import hashlib
 import hmac
 import json
+import os
+import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import threading
-from collections.abc import Iterable, Iterator
+import time
+import urllib.parse
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor.core import artifacts, outcome
+from remote_ci_monitor.core.failures import FailureRow
 from remote_ci_monitor.core.model import (
     ACTIVE_STATES,
     BUSY_STATES,
     CANCELLED,
     CANCELLING,
     DEFAULT_POOL,
+    FAILED,
     LOST,
     PHASE_MATERIALIZING,
     QUEUED,
     RUNNING,
+    SUCCEEDED,
     TERMINAL_STATES,
+    TIMED_OUT,
     TOKEN_ADMIN,
     TOKEN_CLIENT,
     TOKEN_KINDS,
@@ -55,7 +64,9 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 7
+DB_VERSION = 16
+#: 마이그레이션 전 자동 백업을 몇 개 남기나(결정 74). 정리는 마이그레이션이 끝난 뒤, 실패는 경고만.
+BACKUPS_KEPT = 3
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -77,6 +88,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   exit_code INTEGER,
   summary TEXT,
   failed_step TEXT,
+  failed_step_guessed INTEGER,
   lane INTEGER,
   tree_hash TEXT,
   sha TEXT,
@@ -96,13 +108,31 @@ CREATE TABLE IF NOT EXISTS jobs (
   worker_name TEXT,
   summary_code TEXT,
   summary_args TEXT,
-  join_count INTEGER NOT NULL DEFAULT 0
+  join_count INTEGER NOT NULL DEFAULT 0,
+  -- 시작할 때 그 풀에서 돌고 있던 잡 수(자기 포함). 옛 잡은 NULL = 모른다 (M5f)
+  concurrent_at_start INTEGER,
+  -- 마지막으로 시작한 스텝. `failed_step` 과 달리 인과를 주장하지 않는다 (M5h)
+  last_step TEXT,
+  -- 실패 이름이 상한(100)을 넘어 버려진 것이 있다 (M5h)
+  fail_truncated INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
 CREATE INDEX IF NOT EXISTS jobs_pool ON jobs(pool);
+CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id);
+CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
+CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC);
+-- 잡이 `::rcm::fail::<이름>` 으로 지목한 것들. 이름 하나가 한 번(같은 잡에서 두 번 찍어도
+-- 한 가지 사실이다). `seq` 는 잡이 찍은 순서 — 첫 줄이 대개 진짜 원인이다 (M5h)
+CREATE TABLE IF NOT EXISTS job_failures (
+  job_id INTEGER NOT NULL,
+  name   TEXT    NOT NULL,
+  seq    INTEGER NOT NULL,
+  PRIMARY KEY (job_id, name)
+);
+CREATE INDEX IF NOT EXISTS job_failures_name ON job_failures(name);
 CREATE TABLE IF NOT EXISTS job_artifacts (
   job_id INTEGER PRIMARY KEY,
   state TEXT NOT NULL,
@@ -240,6 +270,65 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _BUNDLES_SQL,
         _BUNDLES_INDEX_SQL,
     ),
+    # v7 → v8(M5f): claim 전용 인덱스. 없으면 플래너가 `jobs_pool`(풀 전체)을 타고 ORDER BY 를
+    # 임시 B-tree 로 푼다 — 20만 행에서 8.5 ms 이고, claim 은 레인마다 초당 두 번 BEGIN IMMEDIATE
+    # 안에서 돈다. 통계(ANALYZE)로 고치지 않는 이유: 통계는 이미 열린 커넥션에 반영되지 않고
+    # (`_conn()` 은 스레드 로컬이라 로컬 레인 스레드는 커넥션을 안 닫는다) 임시 B-tree 도 안 없앤다.
+    8: ("CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(state, pool, priority DESC, id)",),
+    # v8 → v9(M5f): 최근 완료 잡. `state IN (…)` 때문에 `jobs_finished` 를 못 타고 종료 잡
+    # **전체**를 정렬한다 — 여덟 개를 고르려고 5만 개를 줄 세운다(7.1 ms). 커버링 인덱스면
+    # 0.009 ms 다. 중앙값을 요청 경로에서 뗀 뒤 이게 `/api/status` 의 지배항이 됐다.
+    9: ("CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC)",),
+    # v9 → v10(M5f): 시작할 때 그 풀에서 몇 개가 돌고 있었나. 중앙값은 혼자 잰 것이라 같이
+    # 도는 동안은 예상보다 오래 걸리는데, 얼마나 그런지는 **표본이 있어야** 안다. 지금 안
+    # 모으면 소급해서 못 얻는다. 옛 잡은 NULL — 0(「혼자 돌았다」)이 아니라 **모른다** 다.
+    10: ("ALTER TABLE jobs ADD COLUMN concurrent_at_start INTEGER",),
+    # v10 → v11: `failed_step` 이 확정인가 추측인가. 마이그레이션 전에 끝난 잡은 **NULL = 모름**
+    # 이다 — 0 으로 채우면 그때의 추측이 「확정」으로 둔갑한다(2026-09-08 운영 사고).
+    # ⚠️ M5h(결정 63) 뒤로 이 열은 **안 쓴다** — 추측을 아예 안 하므로 늘 거짓이 된다.
+    #    지우는 마이그레이션을 따로 두지 않는 이유: 열 하나가 남는 비용보다 되돌릴 여지를
+    #    남기는 값이 크다(두 설계 중 하나를 고르는 일은 오너의 것이다).
+    11: ("ALTER TABLE jobs ADD COLUMN failed_step_guessed INTEGER",),
+    # v11 → v12(M5h): 마지막으로 시작한 스텝. `failed_step` 이 「선언된 것만」이 되면서
+    # 「끝났을 때 어디였나」를 말할 칸이 필요해졌다. 옛 잡은 NULL = 모른다.
+    12: ("ALTER TABLE jobs ADD COLUMN last_step TEXT",),
+    # v12 → v13(M5h): 실패 이름 대장. 이름별 최근 이력(`GET /jobs/{id}` 의 `failures[]`)이
+    # 이 표 위에 선다. 창 질의가 `(key, finished_at)` 을 타야 해서 인덱스도 같이 만든다.
+    13: (
+        "CREATE TABLE IF NOT EXISTS job_failures ("
+        " job_id INTEGER NOT NULL, name TEXT NOT NULL, seq INTEGER NOT NULL,"
+        " PRIMARY KEY (job_id, name))",
+        "CREATE INDEX IF NOT EXISTS job_failures_name ON job_failures(name)",
+        "CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC)",
+        "ALTER TABLE jobs ADD COLUMN fail_truncated INTEGER NOT NULL DEFAULT 0",
+    ),
+    # v13 → v14(M5h): 옛 코드는 취소·유실 잡에도 실패 스텝을 남겼다(운영 잡 #176 — 사람이 세운
+    # 잡에 「이게 깨졌다」로 읽히는 라벨이 붙었다). 그 라벨은 증거가 아니라 **추론의 부산물**이라
+    # 지운다. 표시도 같은 규칙을 강제하지만(결정 64) JSON 을 읽는 래퍼까지 고쳐 준다.
+    14: ("UPDATE jobs SET failed_step=NULL WHERE state IN ('cancelled','lost')",),
+    # v14 → v15(M5h): 옛 실패 잡의 라벨을 **덜 주장하는 칸으로 옮긴다**. 그 값은 대개 추론값
+    # (「마지막으로 시작한 스텝」)이고, 선언값이었는지는 이제 와서 구분할 수 없다 — 그래서
+    # 인과를 주장하는 `failed_step` 이 아니라 자리만 말하는 `last_step` 에 둔다. 안 그러면
+    # 신고자가 #162 를 다시 열었을 때 **고쳤다는 그 문자열을 그대로** 본다.
+    # 새 코드가 쓴 행은 라벨이 있으면 `last_step` 도 항상 있어서 이 조건에 안 걸린다.
+    15: (
+        "UPDATE jobs SET last_step=failed_step, failed_step=NULL "
+        "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
+        "AND last_step IS NULL",
+    ),
+    # v15 → v16(M5i · 결정 78): 2026-09-10 사고의 뒤처리. 새 코드가 운영 DB 를 15 로 올린 뒤에도
+    # 옛 빌드(0.2.5)가 계속 돌며 실패 잡에 **추론 라벨**을 `failed_step` 에 썼다(#196 · #199 ·
+    # #200). v15 는 다시 돌지 않으니 그냥 올리면 그 라벨이 「선언된 실패」로 보인다. 새 코드는 선언
+    # 라벨을 쓸 때 언제나 `job_failures` 행을 같은 트랜잭션에 남기므로(로컬·원격 둘 다
+    # `outcome_for()` 경로 · `timed_out` 도 · 상한에 잘려도 최소 한 행), 「라벨은 있는데 대장 행이
+    # 하나도 없다」가 옛 빌드의 흔적이다. 이름 일치로 가리지 않는 이유: 100개 상한에 잘린 잡은
+    # 라벨이 대장의 어느 이름과도 다를 수 있다. 한 번짜리다 — 매 기동 보정은 안 한다.
+    16: (
+        "UPDATE jobs SET last_step=COALESCE(last_step, failed_step), failed_step=NULL "
+        "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM job_failures WHERE job_failures.job_id=jobs.id)",
+        "UPDATE jobs SET failed_step=NULL, last_step=NULL WHERE state IN ('cancelled','lost')",
+    ),
 }
 
 
@@ -249,8 +338,111 @@ def _outcome(code: str, **args: Any) -> dict[str, Any]:
     return {"summary": text, "summary_code": code, "summary_args": dump_args(clean)}
 
 
+def _ro_uri(path: Path) -> str:
+    """살아 있는 DB 를 읽기만 하는 URI — 절대경로 · URL 인코딩 · `mode=ro`. `immutable=1` 은 안 쓴다
+    (WAL 을 무시해 다른 프로세스가 쓰는 중인 DB 를 깨진 것처럼 읽는다)."""
+    return f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro"
+
+
+def database_version(path: Path) -> int:
+    """파일을 바꾸지 않고 `PRAGMA user_version` 만 읽는다. 없거나 비어 있으면 0."""
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return 0
+    # ⚠️ 읽기 전용 연결은 WAL DB 옆의 `-wal`·`-shm` 이 없으면 만들고 닫을 때 못 지운다(0바이트 ·
+    # 무해 — 다음 보통 연결이 치운다). 그래도 지우지 않는다: 서버가 막 뜨는 중이면 그 파일은 서버의
+    # 것이고, 「읽기만 한다」는 명령이 데이터 디렉터리에서 무엇을 지우는 일은 없어야 한다.
+    conn = sqlite3.connect(_ro_uri(path), uri=True)
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
+class CopyDeadlineExceeded(RuntimeError):
+    """페이지 단위 복사가 마감 안에 못 끝났다 — 「모른다」이지 실패가 아니다."""
+
+
+def _copy_database(
+    src: Path, dst: Path, *, deadline: float | None = None, pages: int = 256
+) -> None:
+    """`Connection.backup()` 으로 일관된 사본을 뜬다(WAL 에만 있는 쓰기까지). 원본은 `mode=ro`.
+
+    `deadline` 은 `time.monotonic()` 값이다 — 페이지 묶음마다 확인하고 넘으면
+    `CopyDeadlineExceeded`. 반쯤 된 사본은 부르는 쪽이 치운다.
+    """
+
+    def check(status: int, remaining: int, total: int) -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise CopyDeadlineExceeded(f"{remaining} of {total} pages left")
+
+    if deadline is not None and time.monotonic() > deadline:
+        raise CopyDeadlineExceeded("before the first page")
+    source = sqlite3.connect(_ro_uri(src), uri=True)
+    try:
+        target = sqlite3.connect(str(dst))
+        try:
+            source.backup(target, pages=pages, progress=check)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
+def _verify_copy(path: Path, expected_version: int) -> None:
+    """사본이 열리고 무결하며 옛 버전 표식을 갖는지. 아니면 예외.
+
+    보통 연결로 연다(`mode=ro` 가 아니라) — 읽기 전용 연결은 WAL DB 옆에 만든 `-wal`·`-shm` 을
+    닫을 때 못 지워 백업 디렉터리에 찌꺼기가 남는다. 읽기만 하므로 내용은 안 바뀐다.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        (ok,) = conn.execute("PRAGMA integrity_check").fetchone()
+        if ok != "ok":
+            raise sqlite3.DatabaseError(f"integrity_check: {ok}")
+        (version,) = conn.execute("PRAGMA user_version").fetchone()
+        if int(version) != expected_version:
+            raise sqlite3.DatabaseError(f"user_version {version} != {expected_version}")
+    finally:
+        conn.close()
+
+
+def backup_dir(path: Path) -> Path:
+    return Path(path).parent / "backup"
+
+
+def backup_path(path: Path, version: int) -> Path:
+    """`<data_dir>/backup/rcm.sqlite3.v<version>.bak` — 그 버전에서 올리기 직전의 사본."""
+    return backup_dir(path) / f"{Path(path).name}.v{version}.bak"
+
+
+def newer_database_message(path: Path, version: int) -> str:
+    """옛 빌드가 새 DB 를 거절할 때의 문장 — 거절만 하지 않고 길을 붙인다(B2-3)."""
+    return (
+        f"database schema version {version} is newer than this build ({DB_VERSION}) — "
+        f"stop the service, restore {backup_path(path, DB_VERSION)} "
+        f"(and remove {Path(path).name}-wal/-shm), or upgrade"
+    )
+
+
 class StoreError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SampleRow:
+    """중앙값 계산에 필요한 것만 담은 가벼운 행(`Store.list_sample_rows`).
+
+    `core/queue.medians_from` 과 `split_by_pool` 이 읽는 여섯 칸이 전부다 — `Job` 을 흉내 내지
+    않고, 필요한 칸이 늘면 여기와 두 함수가 같이 바뀐다.
+    """
+
+    key: str
+    pool: str
+    state: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
 
 
 class LaneBusy(StoreError):
@@ -291,6 +483,30 @@ def _dt(ts: float | None) -> datetime | None:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=UTC)
+
+
+_ADD_COLUMN_RE = re.compile(r"^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b", re.I)
+
+
+def _already_added(conn: sqlite3.Connection, stmt: str) -> bool:
+    """`ALTER TABLE … ADD COLUMN` 이 더하려는 열이 이미 있는가.
+
+    마이그레이션 번호는 옮겨질 수 있다 — `dev` 가 같은 번호를 먼저 가져가면 이쪽이 뒤로 밀린다.
+    그 사이 옛 빌드로 연 데이터베이스는 **낮은 번호인데 열은 이미 있는** 상태가 되고, 그대로
+    두면 `duplicate column name` 으로 죽는다. 버전이 안 올라가니 다음에도 똑같이 죽어 서버가
+    영영 안 뜬다. 열을 더하는 것은 본래 멱등한 일이라 이미 있으면 건너뛴다.
+    """
+    m = _ADD_COLUMN_RE.match(stmt)
+    if m is None:
+        return False
+    table, column = m.group(1), m.group(2)
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _opt_bool(v: Any) -> bool | None:
+    """SQLite 의 0/1/NULL → True/False/None. NULL 은 「모름」이라 False 로 접지 않는다."""
+    return None if v is None else bool(v)
 
 
 def hash_token(secret: str) -> str:
@@ -372,12 +588,14 @@ def _upsert_bundle(
 class Store:
     """SQLite 저장소. 한 프로세스 안에서 여러 스레드가 같이 쓴다."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, log: Callable[[str], None] | None = None):
         self.path = Path(path)
         self._local = threading.local()
         self._lock = threading.Lock()
         self.open_connections = 0  # 지금 열린 연결 수(스레드마다 하나) — 누수 감시
         self._holds: dict[int, int] = {}  # 지금 내려보내는 중인 묶음(M5e) — 프로세스 안에서만
+        # 경고 한 줄을 어디에 쓰나(백업 정리 실패 같은, 멈출 일은 아닌 것). 기본은 stderr.
+        self._log = log or (lambda msg: print(msg, file=sys.stderr))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
 
@@ -407,7 +625,15 @@ class Store:
                 self.open_connections -= 1
 
     def migrate(self) -> None:
-        """`PRAGMA user_version` 기준으로 빠진 마이그레이션만 적용한다."""
+        """`PRAGMA user_version` 기준으로 빠진 마이그레이션만 적용한다.
+
+        실제로 버전을 올릴 때(`1 ≤ version < DB_VERSION`)는 **어떤 변경보다 먼저** — `_conn()` 의
+        `journal_mode=WAL` 보다도 먼저 — 옛 DB 의 검증된 사본을 `backup/` 에 남긴다(결정 74). 못
+        남기면 마이그레이션을 시작하지 않는다. 이것이 「옛 빌드가 새 DB 를 거절한다」의 복구 경로다.
+        """
+        version = database_version(self.path)
+        if 1 <= version < DB_VERSION:
+            self._backup_before_migration(version)
         conn = self._conn()
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
@@ -428,16 +654,52 @@ class Store:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for stmt in _MIGRATIONS[target]:
+                        if _already_added(conn, stmt):
+                            continue  # 더하려는 열이 이미 있다 — 할 일이 없다
                         conn.execute(stmt)
                     conn.execute(f"PRAGMA user_version={target}")
                     conn.execute("COMMIT")
                 except Exception:
                     conn.execute("ROLLBACK")
                     raise
+            self._prune_backups()
         elif version > DB_VERSION:
+            raise StoreError(newer_database_message(self.path, version))
+
+    def _backup_before_migration(self, old: int) -> None:
+        """`backup/rcm.sqlite3.v<old>.bak` — 임시 파일로 뜨고, 열어서 검증하고, 원자적으로 이름을
+        바꾼다. 어느 단계든 실패하면 `StoreError`: DB 는 아직 아무것도 안 바뀌었다(fail-closed)."""
+        final = backup_path(self.path, old)
+        tmp = final.with_name(final.name + ".tmp")
+        try:
+            final.parent.mkdir(parents=True, exist_ok=True)
+            _copy_database(self.path, tmp)
+            _verify_copy(tmp, old)
+            os.replace(tmp, final)
+        except Exception as e:  # noqa: BLE001 — 원인이 무엇이든 마이그레이션을 시작하면 안 된다
+            with contextlib.suppress(OSError):
+                tmp.unlink()
             raise StoreError(
-                f"database schema version {version} is newer than this build ({DB_VERSION})"
-            )
+                f"migration backup failed ({type(e).__name__}: {e}) — the database was not "
+                f"changed. Free space or fix {final.parent}, then start again"
+            ) from e
+
+    def _prune_backups(self) -> None:
+        """자동 백업은 최근 `BACKUPS_KEPT` 개만. 사람이 만든 파일(`.pre-0.2.4.bak` 같은)은 안 본다.
+        정리 실패는 경고만 — 마이그레이션은 이미 끝났다."""
+        pattern = re.compile(rf"^{re.escape(self.path.name)}\.v(\d+)\.bak$")
+        found: list[tuple[int, Path]] = []
+        with contextlib.suppress(OSError):
+            for p in backup_dir(self.path).iterdir():
+                m = pattern.match(p.name)
+                if m:
+                    found.append((int(m.group(1)), p))
+        found.sort()
+        for _version, p in found[:-BACKUPS_KEPT] if len(found) > BACKUPS_KEPT else []:
+            try:
+                p.unlink()
+            except OSError as e:
+                self._log(f"warning: could not remove old backup {p.name}: {e}")
 
     def user_version(self) -> int:
         return int(self._conn().execute("PRAGMA user_version").fetchone()[0])
@@ -456,6 +718,7 @@ class Store:
         source = Source(
             mode=src.get("mode", "tree"),
             repo=src.get("repo"),
+            branch=src.get("branch"),
             base_sha=src.get("base_sha"),
             dirty=src.get("dirty"),
             tree_hash=src.get("tree_hash"),
@@ -507,6 +770,8 @@ class Store:
             summary_code=row["summary_code"],
             summary_args=load_args(row["summary_args"]),
             failed_step=row["failed_step"],
+            last_step=row["last_step"],
+            fail_truncated=bool(row["fail_truncated"]),
             lane=row["lane"],
             timeout_seconds=row["timeout_seconds"],
             cancel=cancel if row["state"] == CANCELLING else None,
@@ -537,12 +802,85 @@ class Store:
         )
 
     def list_recent(self, limit: int) -> list[Job]:
+        """최근 완료 잡 `limit` 개, 새것부터.
+
+        **두 단계로 고른다.** `SELECT *` 한 방이면 `jobs_recent` 가 커버링이 아니게 돼 플래너가
+        `jobs_state` 로 물러서고 종료 잡 **전체**를 정렬한다 — 여덟 개를 고르려고 5만 개를 줄
+        세우는 셈이라 22.5 ms 다. id 만 커버링 인덱스로 고른 뒤 그 행만 읽으면 0.02 ms 다.
+        """
+        if limit <= 0:
+            return []
         marks = ",".join("?" * len(TERMINAL_STATES))
-        return self._jobs(
-            f"SELECT * FROM jobs WHERE state IN ({marks}) "
-            "ORDER BY finished_at DESC, id DESC LIMIT ?",
-            (*sorted(TERMINAL_STATES), limit),
+        ids = [
+            int(r["id"])
+            for r in self._conn().execute(
+                f"SELECT id FROM jobs WHERE state IN ({marks}) "
+                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (*sorted(TERMINAL_STATES), limit),
+            )
+        ]
+        if not ids:
+            return []
+        found = {
+            j.id: j
+            for j in self._jobs(
+                f"SELECT * FROM jobs WHERE id IN ({','.join('?' * len(ids))})", tuple(ids)
+            )
+        }
+        return [found[i] for i in ids if i in found]  # 고른 순서를 지킨다
+
+    def active_worker_lanes(self) -> dict[tuple[str, int], tuple[int, datetime | None]]:
+        """`(워커, 레인) → (잡 id, 시작 시각)` — 원격 레인의 busy 판정에 필요한 전부.
+
+        워커마다 `jobs_of_worker` 를 돌면(옛 방식) 워커 수 × (1 + 잡마다 서브쿼리 둘)이 되고,
+        이 조회는 상태 문서마다 그리고 **마커 줄마다** 돈다 — 워커 50 · 실행 250 에서 한 줄에
+        SQL 555개였다. `WorkerInfo` 가 쓰는 것은 잡 id 와 시작 시각뿐이다(M5f 결정 49).
+        """
+        busy = ",".join("?" * len(BUSY_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT worker_name, lane, id, started_at FROM jobs "
+                f"WHERE worker_name IS NOT NULL AND lane IS NOT NULL AND state IN ({busy}) "
+                "ORDER BY id",
+                tuple(sorted(BUSY_STATES)),
+            )
+            .fetchall()
         )
+        return {
+            (r["worker_name"], int(r["lane"])): (int(r["id"]), _dt(r["started_at"])) for r in rows
+        }
+
+    def list_sample_rows(self, since: datetime) -> list[SampleRow]:
+        """중앙값이 읽는 여섯 칸만. 행마다 `Job` 을 만들지 않는다.
+
+        `_row_to_job` 은 행마다 joiners·events 서브쿼리를 돌고 JSON 을 두 번 판다. 45일치를
+        그렇게 읽으면 `/api/status` 가 보존된 잡 수에 선형으로 끌려간다(1만 행 168 ms) —
+        그런데 `medians_from` 이 보는 것은 `key · pool · state · created_at · started_at ·
+        finished_at` 여섯 개뿐이다(M5f 결정 49).
+        """
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT key, pool, state, created_at, started_at, finished_at FROM jobs "
+                f"WHERE state IN ({marks}) AND started_at >= ? AND finished_at IS NOT NULL "
+                "ORDER BY id",
+                (*sorted(TERMINAL_STATES), _ts(since)),
+            )
+            .fetchall()
+        )
+        return [
+            SampleRow(
+                key=r["key"],
+                pool=r["pool"] or DEFAULT_POOL,
+                state=r["state"],
+                created_at=_dt(r["created_at"]),
+                started_at=_dt(r["started_at"]),
+                finished_at=_dt(r["finished_at"]),
+            )
+            for r in rows
+        ]
 
     def list_samples(self, since: datetime) -> list[Job]:
         """표본 후보: 시작·종료 시각이 있는 종료 잡. 정책 필터는 순수 계층이 한다."""
@@ -583,6 +921,84 @@ class Store:
             raise
         return int(cur.rowcount)
 
+    # ── 실패 이름 대장 (M5h) ────────────────────────────────────────────────
+
+    def failure_stats(
+        self, job_id: int, key: str, finished_at: datetime | None, *, window: int
+    ) -> tuple[list[FailureRow], int, int]:
+        """이 잡이 지목한 이름들이 **같은 key 의 최근 창**에서 몇 번 보였나.
+
+        창은 `finished_at` 을 **앵커로** 그 잡까지 최근 `window` 개다(취소·유실은 아무 말도
+        안 하므로 뺀다). 이 잡이 늘 창의 맨 앞이라 자기 이름의 `seen` 은 1 이상이고, 한 달
+        뒤에 같은 잡을 다시 열어도 **같은 답**이 나온다(창이 흘러가지 않는다 — 명세 §2.1).
+
+        돌려주는 것은 `(줄 목록, 창의 잡 수, 이름 없이 실패한 잡 수)`. 줄 순서는 그 잡이 찍은
+        순서(`seq`)다.
+        """
+        conn = self._conn()
+        at = _ts(finished_at) if finished_at is not None else None
+        if at is None or window < 1:
+            return [], 0, 0
+        states = (SUCCEEDED, FAILED, TIMED_OUT)
+        marks = ",".join("?" * len(states))
+        ids = [
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT id FROM jobs WHERE key=? AND state IN ({marks}) "
+                "AND finished_at IS NOT NULL "
+                "AND (finished_at < ? OR (finished_at = ? AND id <= ?)) "
+                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (key, *states, at, at, job_id, window),
+            ).fetchall()
+        ]
+        if not ids:
+            return [], 0, 0
+        id_marks = ",".join("?" * len(ids))
+        mine = [
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM job_failures WHERE job_id=? ORDER BY seq", (job_id,)
+            ).fetchall()
+        ]
+        rows: list[FailureRow] = []
+        if mine:
+            name_marks = ",".join("?" * len(mine))
+            counted = {
+                r["name"]: (int(r["seen"]), r["first_id"], r["last_id"])
+                for r in conn.execute(
+                    f"SELECT name, COUNT(*) AS seen, MIN(job_id) AS first_id, "
+                    f"MAX(job_id) AS last_id FROM job_failures "
+                    f"WHERE job_id IN ({id_marks}) AND name IN ({name_marks}) GROUP BY name",
+                    (*ids, *mine),
+                ).fetchall()
+            }
+            for name in mine:  # 잡이 찍은 순서를 지킨다
+                seen, first_id, last_id = counted.get(name, (0, None, None))
+                rows.append(
+                    FailureRow(
+                        name=name,
+                        seen=seen,
+                        first_seen_job_id=int(first_id) if first_id is not None else None,
+                        last_seen_job_id=int(last_id) if last_id is not None else None,
+                    )
+                )
+        # 이름을 남긴 잡을 한 번에 받아 파이썬에서 센다 — id 목록을 두 번 바인딩하면
+        # `failure_window_jobs` 상한(500)에서 파라미터가 1000개를 넘어 옛 SQLite 가 거절한다.
+        named = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT DISTINCT job_id FROM job_failures WHERE job_id IN ({id_marks})", ids
+            ).fetchall()
+        }
+        failed_ids = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT id FROM jobs WHERE id IN ({id_marks}) AND state IN (?,?)",
+                (*ids, FAILED, TIMED_OUT),
+            ).fetchall()
+        }
+        return rows, len(ids), len(failed_ids - named)
+
     def delete_old_jobs(self, cutoff: datetime) -> int:
         """산출물이 이미 지워진 종료 잡 중 cutoff 전에 끝난 것의 행·이벤트·합류자를 지운다."""
         marks = ",".join("?" * len(TERMINAL_STATES))
@@ -607,6 +1023,7 @@ class Store:
                 conn.execute(f"DELETE FROM events WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM joiners WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM job_artifacts WHERE job_id IN ({id_marks})", ids)
+                conn.execute(f"DELETE FROM job_failures WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM jobs WHERE id IN ({id_marks})", ids)
             conn.execute("COMMIT")
         except Exception:
@@ -1000,6 +1417,7 @@ class Store:
         src = {
             "mode": source.mode,
             "repo": source.repo,
+            "branch": source.branch,
             "base_sha": source.base_sha,
             "dirty": source.dirty,
             "tree_hash": source.tree_hash,
@@ -1336,10 +1754,25 @@ class Store:
                 conn.execute("COMMIT")
                 return None
             job_id = int(row["id"])
+            # 같은 트랜잭션에서 센다 — 나중에는 알 수 없는 값이다(자기 포함).
+            busy_now = conn.execute(
+                f"SELECT count(*) AS n FROM jobs WHERE state IN ({busy}) AND pool=?",
+                (*sorted(BUSY_STATES), pool),
+            ).fetchone()["n"]
             cur = conn.execute(
                 "UPDATE jobs SET state=?, lane=?, started_at=?, phase=?, last_output_at=?, "
-                "worker_name=? WHERE id=? AND state=?",
-                (RUNNING, lane, ts, PHASE_MATERIALIZING, ts, worker_name, job_id, QUEUED),
+                "worker_name=?, concurrent_at_start=? WHERE id=? AND state=?",
+                (
+                    RUNNING,
+                    lane,
+                    ts,
+                    PHASE_MATERIALIZING,
+                    ts,
+                    worker_name,
+                    int(busy_now) + 1,
+                    job_id,
+                    QUEUED,
+                ),
             )
             if cur.rowcount != 1:
                 conn.execute("ROLLBACK")
@@ -1352,6 +1785,20 @@ class Store:
             conn.execute("ROLLBACK")
             raise
         return self.get_job(job_id)
+
+    def concurrent_at_start(self, job_id: int) -> int | None:
+        """그 잡이 시작할 때 같은 풀에서 돌던 잡 수(자기 포함). **모르면 None** — 0 이 아니다.
+
+        마이그레이션 이전 잡은 NULL 이고, 그건 「혼자 돌았다」가 아니라 「모른다」다.
+        """
+        row = (
+            self._conn()
+            .execute("SELECT concurrent_at_start FROM jobs WHERE id=?", (job_id,))
+            .fetchone()
+        )
+        if row is None or row["concurrent_at_start"] is None:
+            return None
+        return int(row["concurrent_at_start"])
 
     def set_phase(self, job_id: int, phase: str) -> None:
         self._conn().execute("UPDATE jobs SET phase=? WHERE id=?", (phase, job_id))
@@ -1416,6 +1863,9 @@ class Store:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
         failed_step: str | None = None,
+        last_step: str | None = None,
+        fail_names: Sequence[str] = (),
+        fail_truncated: bool = False,
         cancelled_by: str | None = None,
         only_from: Iterable[str] | None = None,
         bundle: Any | None = None,
@@ -1451,10 +1901,18 @@ class Store:
                 summary_code=summary_code,
                 summary_args=dump_args(summary_args),
                 failed_step=failed_step,
+                last_step=last_step,
+                fail_truncated=1 if fail_truncated else 0,
                 cancelled_by=cancelled_by if cancelled_by is not None else row["cancel_by"],
                 lane=None,
                 phase=None,
             )
+            # 증거와 결과는 **같은 커밋**이다 — 거절된 finish 는 대장도 안 남긴다.
+            for seq, name in enumerate(fail_names, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
+                    (job_id, name, seq),
+                )
             if bundle is not None:
                 _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
             conn.execute("COMMIT")
@@ -1514,7 +1972,33 @@ class Store:
     # ── 이벤트 ──────────────────────────────────────────────────────────────
 
     def add_marker(self, job_id: int, kind: str, value: str, at: datetime) -> None:
+        """마커 하나. 로컬 워커의 펌프는 한 줄씩 흘리므로 묶을 것이 없다(`worker.py`)."""
         self._event(self._conn(), job_id, EVENT_MARKER, {"kind": kind, "value": value}, _ts(at))
+
+    def add_markers(self, job_id: int, items: Sequence[tuple[str, str]], at: datetime) -> None:
+        """마커 여럿을 **트랜잭션 하나**로. 원격 워커의 로그 flush 는 한 번에 수천 줄이 온다.
+
+        줄마다 트랜잭션을 열면(옛 동작) 다른 레인의 `claim` 이 밀린다 — 256 KB flush 하나에
+        0.03 ms → 275.9 ms, 4 MB 본문이면 `busy_timeout` 이 터진다. 빈 목록은 트랜잭션을 열지
+        않고, 중간에 실패하면 통째로 롤백한다(부분 마커를 남기지 않는다).
+        """
+        if not items:
+            return
+        ts = _ts(at)
+        rows = [
+            (job_id, ts, EVENT_MARKER, json.dumps({"kind": k, "value": v}, separators=(",", ":")))
+            for k, v in items
+        ]
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "INSERT INTO events (job_id, at, kind, payload) VALUES (?, ?, ?, ?)", rows
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def markers(self, job_id: int) -> list[Marker]:
         out: list[Marker] = []
@@ -1649,6 +2133,39 @@ class Store:
             self._row_to_worker(r)
             for r in self._conn().execute("SELECT * FROM workers ORDER BY name").fetchall()
         ]
+
+    def forget_workers(self, cutoff: datetime) -> list[str]:
+        """`cutoff` 이전에 마지막으로 보인 워커를 잊는다. 지운 이름을 돌려준다.
+
+        지우는 코드가 없어서 은퇴한 워커가 영원히 남았다 — `server.workers[]` 에 `down` 레인이
+        계속 쌓이고 매 요청에 실린다. **활성 잡이 있는 워커는 아무리 오래됐어도 안 지운다**:
+        그 잡이 큐에서 사라지면 안 된다(M5f 결정 49).
+        """
+        busy = ",".join("?" * len(BUSY_STATES))
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            waiting = ",".join("?" * len(WAITING_STATES))
+            rows = conn.execute(
+                f"SELECT name FROM workers WHERE last_seen_at < ? AND name NOT IN "
+                f"(SELECT worker_name FROM jobs WHERE worker_name IS NOT NULL "
+                f"AND state IN ({busy})) "
+                # 그 풀에 아직 기다리는 잡이 있으면 「은퇴」가 아니라 「일주일째 고장」이다.
+                # 지우면 `pools_without_workers` 가 비어 `rcm check` 의 경보가 꺼진다 —
+                # 잡은 그대로 멈춰 있는데.
+                f"AND pool NOT IN (SELECT DISTINCT pool FROM jobs WHERE state IN ({waiting})) "
+                "ORDER BY name",
+                (_ts(cutoff), *sorted(BUSY_STATES), *sorted(WAITING_STATES)),
+            ).fetchall()
+            gone = [r["name"] for r in rows]
+            if gone:
+                marks = ",".join("?" * len(gone))
+                conn.execute(f"DELETE FROM workers WHERE name IN ({marks})", tuple(gone))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return gone
 
     def touch_worker(self, name: str, now: datetime) -> bool:
         """heartbeat — `last_seen_at` 은 **서버 시각**으로만 쓴다. 모르는 워커면 False."""

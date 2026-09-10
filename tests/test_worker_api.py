@@ -18,6 +18,7 @@ import http.client
 import io
 import json
 import socket
+import sqlite3
 import tarfile
 import threading
 import time
@@ -135,6 +136,10 @@ class WorkerServer:
         cfg.server.worker_timeout_seconds = TIMEOUT
         cfg.server.worker_heartbeat_seconds = HEARTBEAT
         cfg.server.worker_claim_wait_seconds = CLAIM_WAIT
+        # 이 파일의 주제는 claim · 그룹 · 보고지 부하 게이트가 아니다. 게이트가 켜져 있으면
+        # 표본이 없는 테스트 서버에서 레인 2 가 보류돼(no_sample, 설계대로) 관계없는 시나리오가
+        # 빨개진다. 게이트 자체는 tests/test_admission.py 와 tests/test_server_m5f.py 가 잠근다.
+        cfg.server.admission = "always"
         for k, v in server_overrides.items():
             setattr(cfg.server, k, v)
         cfg.repos = (RepoConfig(name="app", url=str(tmp_path / "nowhere.git")),)
@@ -654,7 +659,9 @@ def test_claim_returns_204_when_empty_and_the_job_with_preset_when_not(srv):
     srv.clock.advance(10)
     status, body = srv.claim("build-02")
     assert status == 200, body
-    assert set(body) == {"job", "tree_url", "preset"}
+    # `artifacts` 는 **얼린 산출물 정책**이다(M5g §13 D). 이 집합이 정책 없이 잠겨 있던 것이
+    # 원격 풀에서 산출물이 하나도 안 모이던 버그를 M5e 내내 숨겨 줬다.
+    assert set(body) == {"job", "tree_url", "preset", "artifacts"}
     job = body["job"]
     assert job["id"] == jid and job["preset"] == "ok" and job["pool"] == DEFAULT_POOL
     assert job["priority"] == 0 and job["inputs"] == {} and job["concurrency_group"] is None
@@ -684,6 +691,10 @@ def test_claim_returns_204_when_empty_and_the_job_with_preset_when_not(srv):
         "worker": "build-02",
         "display_name": "build-02/1",
         "pool": DEFAULT_POOL,  # M5b-4: rcm check 가 워커를 풀에 묶는 키
+        # M5f: 부하 게이트가 막고 있을 때만 값이 있다 — 도는 레인은 셋 다 null 이다
+        "hold_code": None,
+        "hold_detail": None,
+        "held_since": None,
     }
     assert srv.worker_lane(None, 1)["state"] == "idle"  # 로컬 레인은 놀고 있다
     assert srv.claim("build-02")[0] == 409  # 같은 레인은 잡을 하나만
@@ -1027,21 +1038,21 @@ def test_finish_succeeded_takes_the_summary_from_markers(srv):
     assert [r["id"] for r in srv.pools()["default"]["recent"]] == [jid]
 
 
-def test_finish_failed_uses_exit_code_and_the_failing_step(srv):
-    """§3: `failed` 이고 마커 summary 가 없으면 summary `exit N`, failed_step 은 마커 규칙(step-end
-    fail 이 있으면 그 스텝, 없으면 마지막 스텝)."""
+def test_finish_failed_uses_exit_code_and_the_declared_step(srv):
+    """§3: `failed` 이고 마커 summary 가 없으면 summary `exit N`. `failed_step` 은 **선언된
+    것만**이고(M5h 결정 63) 선언이 없으면 null + `last_step` 이다."""
     a = running_job(srv)
     srv.log("build-02", a, b"::rcm::step::build\n::rcm::step::test\n")
     assert srv.finish("build-02", a, "failed", exit_code=3)[0] == 200
     v = srv.view(a)
     assert v["state"] == FAILED and v["exit_code"] == 3
-    assert v["summary"] == "exit 3" and v["failed_step"] == "test"
+    assert v["summary"] == "exit 3" and v["failed_step"] is None and v["last_step"] == "test"
     b = srv.queued_job(token="bob")
     assert srv.claimed("build-02") == b
     srv.log("build-02", b, b"::rcm::step::build\n::rcm::step-end::fail\n::rcm::step::test\n")
     assert srv.finish("build-02", b, "failed", exit_code=1)[0] == 200
     v = srv.view(b)
-    assert v["summary"] == "exit 1" and v["failed_step"] == "build"
+    assert v["summary"] == "exit 1" and v["failed_step"] == "build"  # step-end::fail 은 선언이다
 
 
 def test_finish_failed_with_a_summary_and_no_exit_code_keeps_the_summary(srv):
@@ -1058,14 +1069,15 @@ def test_finish_failed_with_a_summary_and_no_exit_code_keeps_the_summary(srv):
 
 
 def test_finish_timed_out_uses_the_limit_summary(srv):
-    """§3: `timed_out` → summary 는 `format_limit(timeout_seconds)`(60초 프리셋이면 `limit 1m`),
-    failed_step 은 열려 있던 마지막 스텝."""
+    """§3: `timed_out` → summary 는 `format_limit(timeout_seconds)`(60초 프리셋이면 `limit 1m`).
+    시간에 걸린 잡은 실패를 선언한 적이 없으므로 `failed_step` 은 null 이고 `last_step` 이
+    열려 있던 스텝을 말한다(M5h 결정 63·64)."""
     jid = running_job(srv)
     srv.log("build-02", jid, b"::rcm::step::build\n")
     assert srv.finish("build-02", jid, "timed_out", exit_code=-9)[0] == 200
     v = srv.view(jid)
     assert v["state"] == TIMED_OUT and v["exit_code"] == -9
-    assert v["summary"] == "limit 1m" and v["failed_step"] == "build"
+    assert v["summary"] == "limit 1m" and v["failed_step"] is None and v["last_step"] == "build"
     assert v["timeout_seconds"] == 60
 
 
@@ -1385,3 +1397,98 @@ def test_log_415_closes_the_connection_before_the_unread_body(srv):
     assert status == 415
     connection = {k.lower(): v for k, v in headers.items()}.get("connection", "")
     assert connection.lower() == "close", headers
+
+
+# ── M5f PR 2a-0: 마커 배치 · 바쁜 DB 는 503 ─────────────────────────────────
+
+
+def test_worker_log_writes_all_markers_in_one_call_and_publishes_after(srv):
+    """줄마다 트랜잭션을 열면 다른 레인의 claim 이 밀린다. 발행은 쓰기 **뒤**여야 한다.
+
+    트랜잭션이 하나인 것은 `test_store.py` 가 잠근다 — 여기서는 라우트가 배치 API 를 **한 번**
+    부르고 단수 API 는 안 부르는 것, 그리고 발행 순서를 잠근다(핸들러는 다른 스레드라
+    스레드 로컬 커넥션에 트레이스를 걸 수 없다).
+    """
+    jid = running_job(srv)
+    order: list[str] = []
+    batched: list[list[tuple[str, str]]] = []
+    real_many, real_one = srv.app.store.add_markers, srv.app.store.add_marker
+    real_pub = srv.app._on_marker
+
+    def spy_many(job_id, items, at):
+        items = list(items)
+        batched.append(items)
+        order.append("write")
+        return real_many(job_id, items, at)
+
+    def spy_one(*a, **kw):
+        order.append("write-one")
+        return real_one(*a, **kw)
+
+    srv.app.store.add_markers = spy_many
+    srv.app.store.add_marker = spy_one
+    srv.app._on_marker = lambda j, k, v: (order.append(f"pub:{v}"), real_pub(j, k, v))[1]
+    try:
+        status, _ = srv.log("build-02", jid, b"::rcm::steps::3\n::rcm::step::a\n::rcm::step::b\n")
+    finally:
+        srv.app.store.add_markers, srv.app.store.add_marker = real_many, real_one
+        srv.app._on_marker = real_pub
+    assert status == 200
+    assert batched == [[("steps", "3"), ("step", "a"), ("step", "b")]]  # 한 번에 셋
+    assert order == ["write", "pub:3", "pub:a", "pub:b"], order  # 쓰기 먼저, 발행이 뒤
+    assert [(m.kind, m.value) for m in srv.app.store.markers(jid)] == [
+        ("steps", "3"),
+        ("step", "a"),
+        ("step", "b"),
+    ]
+
+
+def test_worker_log_without_markers_writes_no_markers(srv):
+    """마커가 없는 본문은 빈 배치를 넘기고, 배치는 빈 목록에 트랜잭션을 안 연다(test_store)."""
+    jid = running_job(srv)
+    seen: list[list[tuple[str, str]]] = []
+    real = srv.app.store.add_markers
+    srv.app.store.add_markers = lambda j, items, at: (seen.append(list(items)), real(j, items, at))[
+        1
+    ]
+    try:
+        status, _ = srv.log("build-02", jid, b"plain line\nanother\n")
+    finally:
+        srv.app.store.add_markers = real
+    assert status == 200 and seen == [[]] and srv.app.store.markers(jid) == []
+
+
+def test_claim_on_a_busy_database_is_503_not_500(srv):
+    """워커는 503 을 이미 일시 오류로 다룬다. 500 이면 뜻 모를 오류로 2초 자고 만다."""
+    srv.registered("build-02")
+    srv.queued_job()
+    real = srv.app.store.claim
+
+    def busy(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    srv.app.store.claim = busy
+    try:
+        status, body = srv.claim("build-02")
+    finally:
+        srv.app.store.claim = real
+    assert status == 503
+    assert body["code"] == "database_busy" and body["retry_after"] == 1
+    assert srv.app.last_error is None  # 서버 결함이 아니다
+
+
+def test_claim_on_a_permanently_broken_database_is_not_reported_transient(srv):
+    """`no such table` 을 「다시 해 보라」고 하면 워커가 영원히 재시도한다."""
+    srv.registered("build-02")
+    srv.queued_job()
+    real = srv.app.store.claim
+
+    def broken(*a, **kw):
+        raise sqlite3.OperationalError("no such table: jobs")
+
+    srv.app.store.claim = broken
+    try:
+        status, _ = srv.claim("build-02")
+    finally:
+        srv.app.store.claim = real
+    assert status == 500

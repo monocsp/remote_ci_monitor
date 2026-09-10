@@ -60,6 +60,12 @@ SYSTEMCTL_MUTATING = frozenset({"start", "stop", "restart", "reload", "enable", 
 SERVICE_WORDS = ("com.remote-ci-monitor", "rcm-server", "rcm-worker")
 
 DOCS = "docs/operating.md (Upgrade → From a git checkout)"
+#: 운영 데이터 디렉터리 안의 DB 를 **여는** rcm 하위 명령(M5i 결정 75). `token` 은 `list` 도
+#: Store 를 열어 마이그레이션하므로 전부 쓰기다. `gc --dry-run --config` 는 사본 위에서 돌아 허용.
+DB_OPENING = frozenset({"token"})
+DEFAULT_DATA_DIR = "~/.local/share/rcm"
+#: 맨 이름(`rcm`)을 실행 파일로 푸는 함수 — 테스트가 바꿔 끼운다.
+_which = shutil.which
 
 
 @dataclass(frozen=True)
@@ -170,15 +176,34 @@ def _split_segments(command: str) -> list[str]:
     return [segment for segment in out if segment.strip()]
 
 
+def _env_of(segment: str) -> dict[str, str]:
+    """조각 앞의 `VAR=value` 와 `env VAR=value` — CLI 가 읽는 환경(`RCM_CONFIG` ·
+    `RCM_SERVER_DATA_DIR`)이 여기 온다."""
+    try:
+        tokens = shlex.split(segment, comments=True)
+    except ValueError:
+        tokens = segment.split()
+    env: dict[str, str] = {}
+    for head in tokens:
+        if head in ("sudo", "env"):
+            continue
+        name, sep, value = head.partition("=")
+        if sep and not head.startswith("-") and "/" not in name:
+            env[name] = value
+            continue
+        break
+    return env
+
+
 def _argv(segment: str) -> list[str]:
-    """조각 하나를 argv 로. 앞의 `sudo` 와 `VAR=value` 는 떼어 낸다."""
+    """조각 하나를 argv 로. 앞의 `sudo`·`env` 와 `VAR=value` 는 떼어 낸다."""
     try:
         tokens = shlex.split(segment, comments=True)
     except ValueError:
         tokens = segment.split()
     while tokens:
         head = tokens[0]
-        if head == "sudo":
+        if head in ("sudo", "env"):
             tokens = tokens[1:]
             continue
         name, sep, _ = head.partition("=")
@@ -279,18 +304,24 @@ def _edit_verdict(file_path: str, cwd: Path, prod: Production) -> Verdict | None
     return None
 
 
-def _bash_verdict(command: str, cwd: Path, prod: Production) -> Verdict | None:
+def _bash_verdict(command: str, cwd: Path, prod: Production, local_config: bool) -> Verdict | None:
     for segment in _split_segments(command):
         argv = _argv(segment)
         if not argv:
             continue
-        verdict = _segment_verdict(argv, cwd, prod)
+        verdict = _segment_verdict(argv, cwd, prod, local_config, env=_env_of(segment))
         if verdict is not None:
             return verdict
     return None
 
 
-def _segment_verdict(argv: list[str], cwd: Path, prod: Production) -> Verdict | None:
+def _segment_verdict(
+    argv: list[str],
+    cwd: Path,
+    prod: Production,
+    local_config: bool,
+    env: dict[str, str] | None = None,
+) -> Verdict | None:
     head = _name(argv[0])
 
     if head in DESTRUCTIVE:
@@ -356,11 +387,103 @@ def _segment_verdict(argv: list[str], cwd: Path, prod: Production) -> Verdict | 
 
     subcommand = _rcm_subcommand(argv)
     if subcommand in ("serve", "worker") and not _wants_help(argv):
-        verdict = _server_verdict(argv, cwd, prod, subcommand)
+        verdict = _server_verdict(argv, cwd, prod, subcommand, local_config)
+        if verdict is not None:
+            return verdict
+    if subcommand in DB_OPENING and not _wants_help(argv):
+        verdict = _db_write_verdict(argv, cwd, prod, subcommand, local_config, env or {})
         if verdict is not None:
             return verdict
 
     return None
+
+
+def _executable(argv: list[str], cwd: Path) -> Path | None:
+    """이 조각이 실행하는 파일. `python -m …` 이면 그 python, 맨 이름이면 PATH 로 푼다."""
+    token = argv[0]
+    if "/" in token:
+        return _as_path(token, cwd)
+    found = _which(token)
+    return _norm(Path(os.path.realpath(found))) if found else None
+
+
+def _config_data_dir(config: Path) -> Path | None:
+    """설정 파일의 `[server].data_dir`. 못 읽으면 None — CLI 도 그 자리에서 먼저 실패한다."""
+    if tomllib is None:
+        return None
+    try:
+        with config.open("rb") as handle:
+            raw = tomllib.load(handle)
+        declared = raw.get("server", {}).get("data_dir")
+    except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        return None
+    if isinstance(declared, str) and declared:
+        return _norm(Path(os.path.expandvars(os.path.expanduser(declared))))
+    return _norm(Path(DEFAULT_DATA_DIR).expanduser())
+
+
+def _effective_data_dir(
+    argv: list[str], cwd: Path, prod: Production, local_config: bool, env: dict[str, str]
+) -> Path | None:
+    """CLI 와 같은 우선순위로 이 명령이 열 데이터 디렉터리를 정한다: `--data-dir` →
+    `$RCM_SERVER_DATA_DIR` → 선택된 설정(`--config` → `$RCM_CONFIG` → `./rcm.toml` → 운영 설정)의
+    `[server].data_dir` → 기본값. 모르면 None(막지 않는다).
+
+    `RCM_SERVER_DATA_DIR` 은 CLI 의 env 덮어쓰기(`RCM_<SECTION>_<KEY>`, config.py `_env_overrides`)
+    다 — 설정 파일보다 우선하고 `--data-dir` 보다는 뒤다. 조각 앞의 `VAR=`·`env VAR=` 와 세션
+    환경 둘 다 본다(`RCM_CONFIG` 와 같은 규칙)."""
+    data = _option_value(argv, ("--data", "--data-dir"))
+    if data is not None:
+        return _as_path(data, cwd)
+    data = env.get("RCM_SERVER_DATA_DIR") or os.environ.get("RCM_SERVER_DATA_DIR")
+    if data:
+        return _as_path(data, cwd)
+    config = _option_value(argv, ("--config", "-c"))
+    if config is None:
+        config = env.get("RCM_CONFIG") or os.environ.get("RCM_CONFIG")
+    if config is not None:
+        path = _as_path(config, cwd)
+        if path is None:
+            return None
+        if inside(path, prod.config_dir):
+            return prod.data_dir  # 운영 설정 그 자체 — 파일을 읽을 것도 없다
+        return _config_data_dir(path)
+    if local_config:
+        local = cwd / "rcm.toml"
+        return _config_data_dir(local) if local.exists() else None
+    if prod.config_dir is not None:
+        return prod.data_dir  # 탐색이 운영 설정까지 내려간다
+    return _norm(Path(DEFAULT_DATA_DIR).expanduser())
+
+
+def _db_write_verdict(
+    argv: list[str],
+    cwd: Path,
+    prod: Production,
+    subcommand: str,
+    local_config: bool,
+    env: dict[str, str],
+) -> Verdict | None:
+    """운영 DB 를 서비스 venv 밖의 빌드로 여는 것을 막는다(결정 75). 옛 빌드는 새 DB 를 거절하고
+    새 빌드는 옛 DB 를 **그 자리에서 마이그레이션한다** — 2026-09-10 에 그렇게 운영 서비스가
+    재시작 불가가 됐다. 서비스 자신의 rcm 은 정상 운영이라 막지 않는다."""
+    if prod.data_dir is None:
+        return None
+    executable = _executable(argv, cwd)
+    if executable is not None and inside(executable, prod.venv):
+        return None
+    effective = _effective_data_dir(argv, cwd, prod, local_config, env)
+    if not inside(effective, prod.data_dir):
+        return None
+    own = f"{prod.venv}/bin/rcm" if prod.venv else "the service's own rcm"
+    return Verdict(
+        "deny",
+        f"`rcm {subcommand}` here would open the production database in {prod.data_dir} with a "
+        "build that is not the service's — a different build migrates the database on open, and "
+        "the running service may then refuse to start (2026-09-10). Use "
+        f"`{own} {subcommand} …` for production, or point `--config`/`--data-dir` at a test "
+        f"server. `rcm gc --dry-run --config` is fine: it plans on a temporary copy. See {DOCS}.",
+    )
 
 
 def _wants_help(argv: list[str]) -> bool:
@@ -372,7 +495,7 @@ def _mentions_service(argv: list[str]) -> bool:
 
 
 def _server_verdict(
-    argv: list[str], cwd: Path, prod: Production, subcommand: str
+    argv: list[str], cwd: Path, prod: Production, subcommand: str, local_config: bool
 ) -> Verdict | None:
     config = _option_value(argv, ("--config", "-c"))
     data = _option_value(argv, ("--data", "--data-dir"))
@@ -391,6 +514,10 @@ def _server_verdict(
                 f"point `--config` at the copy. See {DOCS}.",
             )
         return None
+    # 설정 탐색 순서는 `--config` → `$RCM_CONFIG` → `./rcm.toml` → XDG → `~/.config/rcm`.
+    # 앞의 둘 중 하나가 있으면 운영 설정까지 내려가지 않는다.
+    if local_config:
+        return None
     if prod.config_dir is not None:
         return Verdict(
             "deny",
@@ -402,9 +529,18 @@ def _server_verdict(
 
 
 def decide(
-    tool_name: str, tool_input: dict[str, object], prod: Production, cwd: Path
+    tool_name: str,
+    tool_input: dict[str, object],
+    prod: Production,
+    cwd: Path,
+    *,
+    local_config: bool = False,
 ) -> Verdict | None:
-    """막을 이유가 있으면 Verdict, 없으면 None. 운영 설치를 못 찾았으면 언제나 None."""
+    """막을 이유가 있으면 Verdict, 없으면 None. 운영 설치를 못 찾았으면 언제나 None.
+
+    `local_config` 는 이 세션이 자기 서버 설정을 이미 갖고 있다는 뜻이다(`./rcm.toml` ·
+    `$RCM_CONFIG`). 그러면 `--config` 없는 `rcm serve` 도 운영 설정을 집지 않는다.
+    """
     if not prod.known:
         return None
     if tool_name in ("Write", "Edit", "NotebookEdit"):
@@ -412,7 +548,9 @@ def decide(
         return _edit_verdict(str(file_path), cwd, prod) if isinstance(file_path, str) else None
     if tool_name == "Bash":
         command = tool_input.get("command")
-        return _bash_verdict(command, cwd, prod) if isinstance(command, str) else None
+        if not isinstance(command, str):
+            return None
+        return _bash_verdict(command, cwd, prod, local_config)
     return None
 
 
@@ -491,6 +629,7 @@ def main() -> int:
             payload.get("tool_input") or {},
             find_production(),
             cwd,
+            local_config=bool(os.environ.get("RCM_CONFIG")) or (cwd / "rcm.toml").exists(),
         )
     except Exception as error:  # 가드가 터져도 작업은 막지 않는다 — 대신 눈에 보이게 알린다
         print(json.dumps({"systemMessage": f"guard_production.py failed: {error!r}"}))

@@ -1,5 +1,12 @@
 """웹 UI(M2) — 진짜 서버(in-process · 워커 on · 가짜 샘플러) 를 headless Chrome 으로 열어 DOM 계약
-(docs/m2-workplan.md §4) 을 확인한다. Chrome 이 없으면 전부 skip.
+(docs/m2-workplan.md §4) 을 확인한다. Chrome 이 없으면 전부 skip — 단 `RCM_CHROME` 이 설정된
+곳(CI 의 ubuntu 잡)에서는 Chrome 이 **필수**라 못 찾으면 skip 이 아니라 실패다.
+
+이 모듈은 렌더 경로의 스모크이기도 하다(결정 79 · docs/gate-replay-fixes-workplan.md §3 I5):
+표본에 `disk`, 상태 문서에 `server.job_storage` 가 있는 **실배치 모양**으로 그리고, 페이지
+스크립트보다 먼저 설치한 `error`·`unhandledrejection` 수집기가 0건임을 단언한다. 2026-09-10 실배치
+재현에서 웹을 통째로 죽인 ReferenceError(B1)는 표본에 `disk` 가 없어 그 줄이 실행되지 않은 탓에
+초록이었다.
 
 Chrome 은 `--remote-debugging-pipe`(CDP, fd 3 읽기 · fd 4 쓰기) 로 몬다 — 표준 라이브러리만 쓴다.
 `--dump-dom` 을 안 쓰는 이유(2026-09-05 macOS · Chrome 152 실측 — 표는
@@ -23,7 +30,7 @@ import select
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,15 +42,24 @@ from test_server import PRESETS, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
+#: Chrome 이 뜨고 첫 CDP 응답을 주기까지의 마감(초). 이후 호출은 `Chrome.call` 의 기본 15초.
+COLD_START_SECONDS = 60.0
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 OTHER_TREE = "ab" * 32
 
 
 def find_chrome() -> str | None:
-    """`RCM_CHROME` → macOS 앱 번들 → PATH 의 이름들. 없으면 None."""
+    """`RCM_CHROME`(파일 경로 또는 PATH 의 이름) → macOS 앱 번들 → PATH 의 이름들. 없으면 None.
+
+    `RCM_CHROME` 이 설정돼 있으면 그 값만 본다 — 안 풀리면 다른 후보로 넘어가지 않는다. 설정한
+    쪽은 「여기엔 Chrome 이 있어야 한다」고 말한 것이고, 그 약속이 깨진 것을 조용히 skip 으로
+    덮으면 이 모듈이 지키는 것이 없어진다.
+    """
     env = os.environ.get("RCM_CHROME")
-    for p in ((env,) if env else ()) + CHROME_PATHS:
-        if p and Path(p).is_file():
+    if env:
+        return env if Path(env).is_file() else shutil.which(env)
+    for p in CHROME_PATHS:
+        if Path(p).is_file():
             return p
     for name in CHROME_NAMES:
         found = shutil.which(name)
@@ -53,10 +69,39 @@ def find_chrome() -> str | None:
 
 
 CHROME = find_chrome()
-pytestmark = pytest.mark.skipif(CHROME is None, reason="no Chrome binary found (set RCM_CHROME)")
+CHROME_REQUIRED = bool(os.environ.get("RCM_CHROME"))
+pytestmark = pytest.mark.skipif(
+    CHROME is None and not CHROME_REQUIRED, reason="no Chrome binary found (set RCM_CHROME)"
+)
+
+
+@pytest.fixture(autouse=True)
+def chrome_is_required_where_rcm_chrome_is_set() -> None:
+    """`RCM_CHROME` 이 있는데 Chrome 이 없으면 **실패**다(skip 이 아니다). CI 의 ubuntu 잡이 이
+    길이다 — 러너 이미지가 바뀌어 Chrome 이 사라지면 초록이 아니라 빨강이어야 한다."""
+    if CHROME is None and CHROME_REQUIRED:
+        pytest.fail(
+            f"RCM_CHROME={os.environ['RCM_CHROME']!r} is neither a file nor a name on PATH — "
+            "Chrome is required where RCM_CHROME is set, so this is a failure, not a skip"
+        )
 
 
 # ── Chrome (CDP over pipe) ───────────────────────────────────────────────────
+
+
+# 페이지 스크립트보다 먼저 설치되는 예외 수집기(`Page.addScriptToEvaluateOnNewDocument`).
+# 메시지만 모은다 — 스택은 실패 메시지에 필요 없고, 원인 한 줄이면 충분하다.
+PAGE_ERROR_COLLECTOR_JS = """
+window.__rcmErrors = [];
+window.addEventListener('error', function (e) {
+  var stack = e.error && e.error.stack ? e.error.stack.split('\\n', 2).join(' @ ') : null;
+  window.__rcmErrors.push(String(stack || e.message || e));
+});
+window.addEventListener('unhandledrejection', function (e) {
+  var r = e.reason;
+  window.__rcmErrors.push('unhandledrejection: ' + String(r && r.message ? r.message : r));
+});
+"""
 
 
 class Chrome:
@@ -109,8 +154,19 @@ class Chrome:
         self.buf = b""
         self.next_id = 0
         self.session: str | None = None
-        self.session = self._attach_first_page(timeout=15.0)
-        self.call("Page.enable")
+        # 첫 응답까지의 마감은 넉넉하게: CI 러너(ubuntu 3.13)에서 Chrome 의 찬 기동이 15초를 넘겨
+        # 「CDP: no reply before the deadline」로 하루 네 번 빨갰다(2026-09-10 · #85 #87 #92 ×2).
+        # 붙은 뒤의 호출은 15초 그대로다 — 늘어진 페이지를 숨기지 않는다.
+        self.session = self._attach_first_page(timeout=COLD_START_SECONDS)
+        self.call("Page.enable", timeout=COLD_START_SECONDS)
+        # 페이지 스크립트보다 **먼저** 도는 수집기. 터진 render() 는 타임아웃이 아니라 이 목록으로
+        # 드러난다 — 「page not ready within 15s」보다 「ReferenceError: local is not defined」가
+        # 원인이다. `page_errors()` 로 읽고, 테스트는 0건을 단언한다.
+        self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": PAGE_ERROR_COLLECTOR_JS},
+            timeout=COLD_START_SECONDS,
+        )
 
     def __enter__(self) -> "Chrome":
         return self
@@ -175,6 +231,14 @@ class Chrome:
 
     # 페이지 -------------------------------------------------------------------
 
+    def page_errors(self) -> list[str]:
+        """페이지가 열린 뒤 지금까지의 `error`·`unhandledrejection` 메시지. 이동 중이면 빈 목록."""
+        try:
+            found = self.eval("Array.isArray(window.__rcmErrors) ? window.__rcmErrors : []")
+        except RuntimeError:  # 실행 컨텍스트가 아직 없다
+            return []
+        return list(found) if isinstance(found, list) else []
+
     def eval(self, expression: str) -> Any:
         """JS 식 하나를 값으로. 예외면 AssertionError."""
         r = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
@@ -203,7 +267,10 @@ class Chrome:
         self.call("Emulation.setEmulatedMedia", params)
 
     def open(self, url: str, *, ready_js: str, timeout: float = 15.0) -> str:
-        """url 로 가서 `ready_js` 가 true 가 될 때까지 기다린 뒤 outerHTML 을 돌려준다."""
+        """url 로 가서 `ready_js` 가 true 가 될 때까지 기다린 뒤 outerHTML 을 돌려준다.
+
+        기다리는 동안 페이지 예외가 하나라도 잡히면 **바로** 실패한다 — 마감을 채우지 않는다.
+        """
         self.call("Page.navigate", {"url": url})
         deadline = time.monotonic() + timeout
         last: Any = None
@@ -212,6 +279,9 @@ class Chrome:
                 last = self.eval(ready_js)
             except RuntimeError:  # 이동 중이라 실행 컨텍스트가 아직 없다
                 last = None
+            errors = self.page_errors()
+            if errors:
+                raise AssertionError(f"page raised while loading {url}: {errors}")
             if last is True:
                 break
             if time.monotonic() >= deadline:
@@ -252,14 +322,25 @@ class Chrome:
 # ── 서버 배치 ────────────────────────────────────────────────────────────────
 
 
+# 실배치의 표본에는 `disk` 가 있다(`hostsample.py` 가 데이터 디렉터리의 파일 시스템을 잰다). 그
+# 칸이 있어야 `hostCardHtml` 의 디스크 막대와 「rcm 데이터 …」 줄이 실행된다 — B1 이 산 자리다.
+DISK = {
+    "used_bytes": 610_000_000_000,
+    "free_bytes": 384_000_000_000,
+    "total_bytes": 994_000_000_000,
+    "path": "/Users/ci/.local/share/rcm",
+}
+
+
 class FreshStubSampler(StubSampler):
-    """부를 때마다 2초 전 표본을 새로 만든다 — 캡처가 늦어져도 `stale` 로 바뀌지 않는다."""
+    """부를 때마다 2초 전 표본을 새로 만든다 — 캡처가 늦어져도 `stale` 로 바뀌지 않는다.
+    표본은 실배치 모양이다: `disk` 가 있다."""
 
     def __init__(self) -> None:
         super().__init__([])
 
     def latest(self):
-        return [host_sample(datetime.now(UTC), age_seconds=2)], None
+        return [replace(host_sample(datetime.now(UTC), age_seconds=2), disk=DISK)], None
 
 
 @dataclass
@@ -530,6 +611,73 @@ def test_recent_shows_another_pools_finished_job_when_default_has_none(tmp_path)
     assert "No completed jobs yet" not in recent_text
 
 
+def job_storage_of(doc: dict) -> dict:
+    """상태 문서의 `server.job_storage`. 없으면 빈 dict — 단언은 부르는 쪽이 한다."""
+    return (doc.get("server") or {}).get("job_storage") or {}
+
+
+def test_local_host_card_draws_the_disk_and_the_rcm_data_line_without_page_errors(tmp_path):
+    """I5(결정 79): 실배치 모양 — 로컬 표본에 `disk`, 상태 문서에 `server.job_storage`(청소기가
+    첫 sweep 에서 잰 값) — 으로 열면 서버 카드에 디스크 막대와 「rcm data …」/「rcm 데이터 …」 줄이
+    그려지고, 그 아래 Recent 절까지 render() 가 끝나며, 페이지 예외는 **0건**이다.
+
+    2026-09-10 실배치 재현(B1): `hostCardHtml` 이 정의 안 된 `local` 을 읽어 `disk` 가 있는 모든
+    로컬 배치에서 render() 가 ReferenceError 로 끊겼다 — 큐 표까지만 그려지고 Recent 가 비고
+    갱신 루프가 죽어 30초 뒤 「연결이 끊겼습니다」 띠가 떴다. 이 테스트는 그 자리를 그대로
+    지난다: `local` 을 되돌리면 수집기가 그 ReferenceError 를 잡아 빨개진다."""
+    srv = Server(tmp_path, workers=True)
+    try:
+        srv.app.sampler = FreshStubSampler()
+
+        def settled(d: dict) -> bool:
+            hosts = d["pools"][0]["hosts"]
+            return (
+                bool(hosts)
+                and hosts[0].get("disk") is not None
+                and isinstance(job_storage_of(d).get("volume_bytes"), int)
+                and job_storage_of(d).get("next_sweep_at") is not None
+            )
+
+        doc = status_until(srv, settled, timeout=5.0)
+        assert settled(doc), (doc["pools"][0]["hosts"], job_storage_of(doc))
+        (host,) = doc["pools"][0]["hosts"]
+        assert host["source"] == "local" and host["disk"]["total_bytes"] == DISK["total_bytes"]
+        seen: dict[str, dict[str, Any]] = {}
+        with Chrome(tmp_path / "chrome-storage", window="1240,1400") as c:
+            for lang in ("en", "ko"):
+                c.open(
+                    f"http://127.0.0.1:{srv.port}/?poll=1&lang={lang}",
+                    ready_js="document.querySelector('#host .hostcard .substat') !== null",
+                )
+                seen[lang] = {
+                    "disk_meters": c.eval(
+                        "document.querySelectorAll('#host .hostcard .meter[data-metric=\"disk\"]')"
+                        ".length"
+                    ),
+                    "substats": c.eval(
+                        "[...document.querySelectorAll('#host .hostcard .substat')]"
+                        ".map(e => e.textContent)"
+                    ),
+                    "recent": c.eval("document.querySelector('[data-recent-body]').textContent"),
+                    "body": c.eval("document.body.innerText"),
+                    "errors": c.page_errors(),
+                }
+    finally:
+        srv.close()
+
+    phrase = {"en": ("rcm data ", " · next sweep "), "ko": ("rcm 데이터 ", " · 다음 청소 ")}
+    for lang, got in seen.items():
+        assert got["errors"] == [], (lang, got["errors"])
+        assert got["disk_meters"] == 1, (lang, got["disk_meters"])
+        (line,) = got["substats"]
+        head, sweep = phrase[lang]
+        assert line.startswith(head) and sweep in line, (lang, line)
+        assert "undefined" not in line and "NaN" not in line and "—" not in line, (lang, line)
+        # Recent 절까지 그려졌다 — B1 은 정확히 여기서 끊겼다(잡이 없으니 「없음」 문구다)
+        assert got["recent"].strip(), (lang, got["recent"])
+        assert "undefined" not in got["body"] and "NaN" not in got["body"], got["body"][:600]
+
+
 def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(tmp_path):
     """M5b-4 §2: 원격 워커의 호스트 표본은 **Host 절**의 카드(제목 `build-02 · pool linux`)로
     보이고, Recent 절 밑에 붙던 풀별 host 블록(`POOL LINUX[ · NO WORKERS][ · NO HOST SAMPLE]`
@@ -540,7 +688,9 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
     from remote_ci_monitor import __version__
     from test_worker_api import SAMPLE
 
-    srv = Server(tmp_path, workers=False)
+    # workers=True: 청소기가 돌아야 `server.job_storage` 가 재어진다 — 그래야 「rcm data …」 줄이
+    # 서버 카드에만 붙는 것을 볼 수 있다. 잡은 없으니 워커는 놀 뿐이다.
+    srv = Server(tmp_path, workers=True)
     try:
         srv.app.sampler = FreshStubSampler()
         srv.tokens["build-02"] = srv.store.add_token(
@@ -549,8 +699,14 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
         reg = {"pool": "linux", "lanes": 1, "host_name": "build-02.local", "version": __version__}
         status, body = srv.req("POST", "/worker/register", token="build-02", json_body=reg)
         assert status == 200, body
+        # 워커 표본에도 `disk` — 디스크 막대는 두 카드 모두에, 「rcm 데이터 …」 줄은 서버 자신의
+        # 카드에만 있어야 한다(데이터 디렉터리의 부피는 서버의 사실이다).
+        worker_sample = {**SAMPLE, "disk": {**DISK, "path": "/var/lib/rcm"}}
         status, body = srv.req(
-            "POST", "/worker/heartbeat", token="build-02", json_body={"host_sample": SAMPLE}
+            "POST",
+            "/worker/heartbeat",
+            token="build-02",
+            json_body={"host_sample": worker_sample},
         )
         assert status == 200, body
 
@@ -559,6 +715,7 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
                 len(d["pools"]) == 2
                 and bool(d["pools"][0]["hosts"])
                 and bool(d["pools"][1]["hosts"])
+                and isinstance(job_storage_of(d).get("volume_bytes"), int)
             )
 
         doc = status_until(srv, settled, timeout=5.0)
@@ -568,11 +725,22 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
         assert linux["name"] == "linux" and linux["queue"] == [] and linux["lanes"] == 1
         (sample,) = linux["hosts"]
         assert sample["name"] == "build-02" and sample["source"] == "worker", sample
+        assert sample["disk"]["total_bytes"] == DISK["total_bytes"], sample["disk"]
         with Chrome(tmp_path / "chrome-hosts", window="1240,1400") as c:
             c.open(
                 f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
                 ready_js="document.querySelector('#host .meter[data-metric=\"cpu\"]') !== null",
             )
+            disk_meters = c.eval(
+                "document.querySelectorAll('#host .hostcard .meter[data-metric=\"disk\"]').length"
+            )
+            # 「rcm data …」 줄이 어느 카드에 있나 — 카드 제목(`.hn` 의 첫 글자 마디)으로 답한다
+            substat_cards = c.eval(
+                "[...document.querySelectorAll('#host .hostcard')]"
+                ".filter(card => card.querySelector('.substat'))"
+                ".map(card => card.querySelector('.hn').firstChild.textContent.trim())"
+            )
+            page_errors = c.page_errors()
             # 카드 제목 = `.hn` 에서 나이·OS 부제(`.age`)를 뺀 글자
             card_titles = c.eval(
                 "[...document.querySelectorAll('#host .hostcard')].map(card => { "
@@ -596,10 +764,255 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
     assert "build-02 · pool linux" in card_titles, card_titles
     assert card_titles.index("macmini") < card_titles.index("build-02 · pool linux"), card_titles
     assert "12%" in host_text or "13%" in host_text, host_text[:600]  # SAMPLE 의 CPU busy 12.5
+    # 디스크 막대는 카드마다, 「rcm data …」 줄은 서버 자신의 카드(로컬 표본)에만
+    assert disk_meters == 2, disk_meters
+    assert substat_cards == ["macmini"], substat_cards
+    assert page_errors == [], page_errors
     # Recent 절 밑의 풀별 host 헤더는 없다(innerText 는 CSS uppercase 를 따른다 → `POOL LINUX`)
     assert pool_heads_outside_queue == 0
     assert "POOL LINUX" not in recent_inner, recent_inner
     assert "pool linux" not in recent_text.lower(), recent_text
     assert "no host sample" not in recent_text.lower(), recent_text
     assert "NO HOST SAMPLE" not in visible_text and "NO WORKERS" not in visible_text
+    assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
+
+
+# ── 접힌 행 · 전체 진행 막대 · 최근 완료의 잡 번호 (2026-09-09 오너 요청) ──────────────
+
+# 도는 행 하나에 대해: 펼침 상태 · 막대 · 이유 칸의 지금 스텝 · 저장된 펼침 목록.
+FOLD_JS = """
+(id => {
+  const row = document.querySelector('#queue tr[data-job="' + id + '"]');
+  const bar = document.querySelector('#queue tr.qbar[data-bar="' + id + '"]');
+  const pbar = bar ? bar.querySelector('.pbar[role="progressbar"]') : null;
+  const btn = document.querySelector('[data-toggle="' + id + '"]');
+  return {
+    expanded_rows: document.querySelectorAll('#queue tr.expanded').length,
+    aria_expanded: btn ? btn.getAttribute('aria-expanded') : null,
+    steps_blocks: document.querySelectorAll('#queue .steps').length,
+    bars: document.querySelectorAll('#queue tr.qbar').length,
+    bar: pbar === null ? null : {
+      basis: pbar.getAttribute('data-basis'),
+      cond: pbar.getAttribute('data-cond'),
+      label: bar.querySelector('.plab').textContent.trim(),
+      valuetext: pbar.getAttribute('aria-valuetext'),
+      width: pbar.querySelector('i').getAttribute('style'),
+      tick: bar.querySelector('.pwrap').getAttribute('data-tick'),
+      expected: bar.querySelector('.pwrap').getAttribute('data-expected'),
+      aria: pbar.outerHTML.slice(0, 400),
+    },
+    reason: row ? row.querySelector('td.reason').textContent.replace(/\\s+/g, ' ').trim() : null,
+    stored: localStorage.getItem('rcm.expanded'),
+  };
+})(%d)
+"""
+
+
+def test_running_row_is_folded_and_carries_an_overall_bar(scene, tmp_path):
+    """오너 요청(2026-09-09): 상세는 기본으로 접히고, 도는 잡은 전체 진행 막대로 보인다.
+
+    접힌 채로도 「어디까지 왔나」(막대 + 퍼센트)와 「지금 뭘 하나」(이유 칸의 스텝)가 읽혀야
+    한다 — 접기가 정보를 감추는 것이 아니라 자리만 줄이는 것이어야 접어 둘 수 있다.
+    """
+    with Chrome(tmp_path / "chrome-fold", window="1240,900") as c:
+        c.open(scene.url, ready_js=scene.ready_js())
+        folded = c.eval(FOLD_JS % scene.running)
+        c.eval(f"document.querySelector('[data-toggle=\"{scene.running}\"]').click()")
+        opened = c.eval(FOLD_JS % scene.running)
+        c.eval(f"document.querySelector('[data-toggle=\"{scene.running}\"]').click()")
+        closed = c.eval(FOLD_JS % scene.running)
+        visible_text = c.eval("document.body.innerText")
+    scene.assert_still_running()
+
+    # 처음엔 접혀 있다 — 펼친 행도, 스텝 목록도 없다
+    assert folded["expanded_rows"] == 0, "도는 행이 기본으로 펼쳐져 있다"
+    assert folded["steps_blocks"] == 0, "접힌 행에 스텝 목록이 남아 있다"
+    assert folded["aria_expanded"] == "false"
+    assert folded["stored"] in (None, "[]"), folded["stored"]
+
+    # 접혀 있어도 막대와 지금 스텝은 보인다. 막대는 도는 잡 하나에만 붙는다(대기 잡엔 없다)
+    assert folded["bars"] == 1, folded["bars"]
+    bar = folded["bar"]
+    assert bar is not None, "도는 행에 전체 진행 막대가 없다"
+    assert re.search(r"\d+%|—", bar["label"]), bar
+    assert bar["valuetext"] == bar["label"], bar  # 보조기기가 읽는 값과 눈에 보이는 값이 같다
+    assert re.search(r"width:\s*\d+(\.\d+)?%", bar["width"] or ""), bar
+    assert "step" in folded["reason"].lower(), folded["reason"]
+    # `slow` 은 총 스텝 수를 안 알리고, 이 서버엔 표본도 프리셋 추정도 없다(설치 기본값 600초뿐).
+    # 그러면 막대는 **눈금을 주지 않는다** — 기본값을 70% 로 그리면
+    # 자신있는 거짓말이다(Codex 리뷰 1).
+    assert bar["label"] == "progress —", bar
+    assert (bar["basis"], bar["cond"]) == ("none", "normal"), bar
+    assert bar["tick"] is None, bar
+    assert "aria-valuenow" not in (bar["aria"] or ""), bar
+
+    # ▸ 를 누르면 펼쳐지고 그 선택이 남는다
+    assert opened["expanded_rows"] == 1, "▸ 를 눌러도 펼쳐지지 않는다"
+    assert opened["steps_blocks"] == 1
+    assert opened["aria_expanded"] == "true"
+    assert json.loads(opened["stored"]) == [scene.running], opened["stored"]
+    assert opened["bars"] == 1, "펼쳐도 막대는 그대로 하나다"
+
+    # 다시 누르면 접히고 저장된 목록에서도 빠진다
+    assert closed["expanded_rows"] == 0
+    assert closed["aria_expanded"] == "false"
+    assert json.loads(closed["stored"]) == [], closed["stored"]
+
+    assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
+
+
+def test_recent_rows_show_the_job_id(tmp_path):
+    """오너 요청(2026-09-09): 큐 행에 있는 `#412` 가 최근 완료 행에도 있어야 한다 —
+    로그·재실행·문의가 전부 잡 번호로 이뤄지는데 끝난 잡에서만 번호가 사라졌다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        jid = srv.submit(preset="ok")[1]["job_id"]
+        assert srv.upload(jid)[0] == 200
+        assert srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})[0] < 300
+        status_until(
+            srv,
+            lambda d: any(r["id"] == jid for r in d["pools"][0]["recent"] or []),
+            timeout=5.0,
+        )
+        with Chrome(tmp_path / "chrome-recent-id", window="1240,900") as c:
+            c.open(
+                f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
+                ready_js=f"document.querySelector('#recent [data-job=\"{jid}\"]') !== null",
+            )
+            row_id = c.eval(
+                f"document.querySelector('#recent [data-job=\"{jid}\"] .id').textContent"
+            )
+            row_text = c.eval(f"document.querySelector('#recent [data-job=\"{jid}\"]').textContent")
+    finally:
+        srv.close()
+    assert row_id.strip() == f"#{jid}", row_id
+    assert f"#{jid}" in row_text, row_text
+
+
+# 막대가 **무엇으로 셌는지**를 화면에서 확인한다. 순수 함수 시험(tests/web/progress_overall)이
+# 규칙을 잠그고, 여기서는 진짜 서버가 만든 상태 문서로 같은 규칙이 그려지는지를 본다.
+BARS_JS = """
+(ids => Object.fromEntries(ids.map(id => {
+  const bar = document.querySelector('#queue tr.qbar[data-bar="' + id + '"]');
+  const row = document.querySelector('#queue tr[data-job="' + id + '"]');
+  const pbar = bar ? bar.querySelector('.pbar') : null;
+  const fill = pbar ? pbar.querySelector('i') : null;
+  const track = pbar ? pbar.getBoundingClientRect().width : 0;
+  return [id, {
+    basis: pbar ? pbar.getAttribute('data-basis') : null,
+    cond: pbar ? pbar.getAttribute('data-cond') : null,
+    // 그려진 길이 — 자동 레이아웃 표 안에서 퍼센트 폭이 틀어지던 회귀를 여기서 잡는다
+    drawn: fill && track ? Math.round(fill.getBoundingClientRect().width / track * 100) : null,
+    valuenow: pbar ? pbar.getAttribute('aria-valuenow') : null,
+    label: bar ? bar.querySelector('.plab').textContent.trim() : null,
+    valuetext: pbar ? pbar.getAttribute('aria-valuetext') : null,
+    source: bar ? bar.querySelector('.pwrap').getAttribute('data-source') : null,
+    tick: bar ? bar.querySelector('.pwrap').getAttribute('data-tick') : null,
+    bars: document.querySelectorAll('[role="progressbar"]').length,
+    cancel_in_row: row ? row.querySelectorAll('td.reason [data-cancel]').length : null,
+    toggle: row && row.querySelector('[data-toggle]')
+      ? row.querySelector('[data-toggle]').getAttribute('aria-label') : null,
+  }];
+})))(%s)
+"""
+
+
+def test_progress_bar_names_what_it_measured_and_keeps_cancel_one_tap_away(tmp_path):
+    """Codex 리뷰(2026-09-09) 1·4·5 — 막대는 눈금의 근거를 밝히고, 접힌 도는 행에서도 내 잡을
+    한 번에 취소할 수 있고, 한 잡에 `role="progressbar"` 는 하나다."""
+    srv = Server(tmp_path, workers=False, lanes=2, admission="always")
+    srv.cfg.presets = tuple(
+        parse_preset(p)
+        for p in [
+            *PRESETS,
+            # 총계를 선언한다 → 스텝 눈금(a 가 끝나고 b 가 도는 순간 1/4)
+            sh(
+                "steps4",
+                "echo '::rcm::steps::4'; echo '::rcm::step::a'; echo '::rcm::step-end::ok'; "
+                "echo '::rcm::step::b'; sleep 20",
+            ),
+            # 총계는 없고 프리셋 추정만 있다 → 시간 눈금, 라벨이 「프리셋」이라고 밝힌다
+            sh("timed", "echo '::rcm::step::run'; sleep 20", expected_seconds=120),
+        ]
+    )
+    jobs: list[int] = []
+    try:
+        a = srv.submit(preset="steps4")[1]["job_id"]
+        assert srv.upload(a)[0] == 200
+        b = srv.submit(preset="timed", tree_hash=OTHER_TREE)[1]["job_id"]
+        assert srv.upload(b)[0] == 200
+        jobs = [a, b]
+        srv.app.start()
+
+        def running_with_markers(doc: dict) -> bool:
+            rows = {r["id"]: r for r in (doc["pools"][0]["queue"] or [])}
+            ra, rb = rows.get(a) or {}, rows.get(b) or {}
+            return (
+                ra.get("state") == "running"
+                and (ra.get("progress") or {}).get("steps_done") == 1
+                and rb.get("state") == "running"
+                and (rb.get("estimate") or {}).get("source") == "preset"
+            )
+
+        status_until(srv, running_with_markers, timeout=20.0)
+        url = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = (
+            f"[{a}, {b}].every(id => "
+            "document.querySelector('#queue tr.qbar[data-bar=\"' + id + '\"]') !== null)"
+        )
+        with Chrome(tmp_path / "chrome-bars", window="1240,900") as c:
+            c.open(url, ready_js=ready)
+            # 토큰이 있어야 내 잡의 취소 버튼이 열린다(읽기는 토큰 없이)
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
+            c.open(
+                url,
+                ready_js=ready + " && document.querySelector('#tok-btn').textContent"
+                ".indexOf('alice') >= 0 && document.querySelector('td.reason [data-cancel]')"
+                " !== null",
+            )
+            time.sleep(0.3)  # 표 레이아웃이 끝난 뒤에 잰다 — 막대 길이는 레이아웃의 결과다
+            bars = c.eval(BARS_JS % json.dumps([a, b]))
+            expanded_before = c.eval("document.querySelectorAll('#queue tr.expanded').length")
+            c.eval(f"document.querySelector('[data-toggle=\"{a}\"]').click()")
+            open_bars = c.eval(
+                "({expanded: document.querySelectorAll('#queue tr.expanded').length,"
+                " progressbars: document.querySelectorAll('[role=\"progressbar\"]').length,"
+                f' cancel_in_row: document.querySelectorAll(\'tr[data-job="{a}"] td.reason'
+                " [data-cancel]').length,"
+                f' actions_cancel: document.querySelectorAll(\'tr.expanded[data-job="{a}"]'
+                " .actions .cancel:not([disabled])').length})"
+            )
+            visible_text = c.eval("document.body.innerText")
+    finally:
+        for jid in jobs:
+            srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})
+        srv.close()
+
+    # 스텝 총계를 선언한 잡: 스텝 눈금
+    assert (bars[str(a)]["basis"], bars[str(a)]["cond"]) == ("steps", "normal"), bars[str(a)]
+    assert bars[str(a)]["label"] == "25% · 1/4 steps", bars[str(a)]
+    assert bars[str(a)]["tick"] is None, "스텝 눈금은 저절로 자라지 않는다"
+    # 총계가 없고 프리셋 추정만 있는 잡: 시간 눈금 + 출처를 밝히는 라벨 + 1초 틱 기준점
+    assert (bars[str(b)]["basis"], bars[str(b)]["cond"]) == ("time", "normal"), bars[str(b)]
+    assert re.fullmatch(r"\d+% · by preset estimate", bars[str(b)]["label"]), bars[str(b)]
+    assert bars[str(b)]["source"] == "preset" and bars[str(b)]["tick"] == "progress", bars[str(b)]
+    # 보조기기가 읽는 값과 눈에 보이는 값이 같다
+    for jid in (a, b):
+        assert bars[str(jid)]["valuetext"] == bars[str(jid)]["label"], bars[str(jid)]
+    # **막대의 길이가 그 숫자와 같다.** 자동 레이아웃 표 안에서 `width: 25%` 가 중간 폭으로 굳어
+    # 11% 로 그려지던 적이 있다 — 길이가 거짓말을 하면 라벨이 정직해도 소용없다.
+    for jid in (a, b):
+        drawn, valuenow = bars[str(jid)]["drawn"], bars[str(jid)]["valuenow"]
+        assert valuenow is not None, bars[str(jid)]
+        assert abs(drawn - int(valuenow)) <= 1, (jid, bars[str(jid)])
+    # 접힌 도는 행에서 취소가 한 번에 닿는다. ▸ 의 접근 이름에는 잡 번호가 있다
+    assert expanded_before == 0
+    assert bars[str(a)]["cancel_in_row"] == 1, bars[str(a)]
+    assert bars[str(b)]["cancel_in_row"] == 1, bars[str(b)]
+    assert f"#{a}" in (bars[str(a)]["toggle"] or ""), bars[str(a)]
+    # 도는 잡 둘 → progressbar 둘. 하나를 펼쳐도 늘지 않는다(스텝 띠는 장식이다)
+    assert bars[str(a)]["bars"] == 2, bars[str(a)]
+    assert open_bars["expanded"] == 1 and open_bars["progressbars"] == 2, open_bars
+    # 펼친 행에서는 액션 블록이 취소를 맡는다 — 같은 행에 취소 버튼이 둘이 되지 않는다
+    assert open_bars["cancel_in_row"] == 0 and open_bars["actions_cancel"] == 1, open_bars
     assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]

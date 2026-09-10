@@ -58,6 +58,9 @@ SELECTORS = [
     "#queue .queue-header",
     "#queue thead",
     "tr[data-job]",
+    "tr.qbar",
+    ".pwrap",
+    ".plab",
     "tr.expanded",
     ".minibar",
     ".steps",
@@ -75,6 +78,7 @@ SELECTORS = [
     "td.elapsed",
     "td.source",
     ".pos",
+    ".rrow .id",
     ".you",
     ".conf",
     ".pool-h",
@@ -121,7 +125,8 @@ RECT_JS = """
         var r = e.getBoundingClientRect();
         return {x: r.x, y: r.y, w: r.width, h: r.height, id: e.id || null,
                 job: e.getAttribute('data-job') || e.getAttribute('data-log')
-                     || e.getAttribute('data-rtoggle') || e.getAttribute('data-pool') || null,
+                     || e.getAttribute('data-rtoggle') || e.getAttribute('data-pool')
+                     || e.getAttribute('data-bar') || null,
                 cls: (typeof e.className === 'string') ? e.className : null,
                 hidden: !!e.hidden, text: (e.innerText || '').slice(0, 80)};
       });
@@ -261,6 +266,7 @@ lanes = 1
 read_auth = "none"
 grace_seconds = 5
 recent_count = 8
+failure_min_jobs = 2        # 시연용 — 두 번만 돌려도 이름별 이력이 판정을 낸다 (M5h)
 worker_timeout_seconds = 10
 worker_heartbeat_seconds = 5
 public_url = "http://macmini:8787"
@@ -482,6 +488,14 @@ def round1() -> None:
     sh = Shooter(st)
     try:
         sh.open(rows_ready_js([a, b]))
+        # 도는 행도 평소엔 접혀 있다(오너 결정 13, 2026-09-09 개정) — 문서 사진은 스텝 목록이
+        # 보이는 펼친 모습을 찍는다. 편 상태는 `rcm.expanded` 에 남아 다음 열기에도 이어진다.
+        sh.js(f"document.querySelector('[data-toggle=\"{a}\"]').click()")
+        wait_for(
+            lambda: sh.js("document.querySelectorAll('#queue tr.expanded').length > 0"),
+            timeout=5,
+            what="the running row expanded",
+        )
         sh.shot("queue")
         sh.js(f"localStorage.setItem('rcm.token', {json.dumps(st['tokens']['alice'])})")
         sh.open(

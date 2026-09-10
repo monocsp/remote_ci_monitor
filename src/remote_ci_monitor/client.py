@@ -33,6 +33,12 @@ from remote_ci_monitor.core.model import (
     InputSpec,
     Preset,
 )
+from remote_ci_monitor.core.render_text import (
+    CAUSE_NOT_FOUND,
+    CAUSE_SERVER_ERROR,
+    CAUSE_TIMEOUT,
+    CAUSE_UNREACHABLE,
+)
 from remote_ci_monitor.core.snapshot import (
     normalize_mode,
     parse_ignore,
@@ -240,6 +246,8 @@ class Snapshot:
     tar_path: Path
     bytes: int
     entries: tuple[Entry, ...] = ()
+    #: 체크아웃의 브랜치 이름. **표시용**이다 — 신원(`tree_hash`)에는 안 들어간다 (M5h)
+    branch: str | None = None
 
     @property
     def total_bytes(self) -> int:
@@ -388,10 +396,15 @@ def make_snapshot(
         else:  # 실행 비트는 mode 가 말한다 — kind 는 file | link 둘뿐
             full.append(Entry(rel, mode, os.path.getsize(path), digest, "file"))
     th = tree_hash(entries)
-    base_sha = dirty = repo = None
+    base_sha = dirty = repo = branch = None
     if is_git:
         head = _git(root, "rev-parse", "HEAD")
         base_sha = head.strip() if head else None
+        # 표시용이다 — `tree_hash` 에도 합류 신원에도 안 들어간다(M5h §4.2). detached 면
+        # `git` 이 문자열 `HEAD` 를 준다: 그건 브랜치 이름이 아니라 「없다」다.
+        head_ref = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        name = head_ref.strip() if head_ref else ""
+        branch = name if name and name != "HEAD" else None
         status = _git(root, "status", "--porcelain", "--untracked-files=all")
         dirty = bool(status.strip()) if status is not None else None
         remote = _git(root, "remote", "get-url", "origin")
@@ -412,6 +425,7 @@ def make_snapshot(
         base_sha=base_sha,
         dirty=dirty,
         repo=repo,
+        branch=branch,
         tar_path=tar_path,
         bytes=size,
         entries=tuple(full),
@@ -558,12 +572,14 @@ class Client:
         part.replace(dest)
         return received
 
-    def get_json(self, path: str) -> Any:
-        _, _, body = self._request("GET", path)
+    def get_json(self, path: str, *, timeout: float | None = None) -> Any:
+        _, _, body = self._request("GET", path, timeout=timeout)
         return json.loads(body) if body else None
 
-    def post_json(self, path: str, obj: Any = None) -> Any:
-        _, _, body = self._request("POST", path, json_body=obj if obj is not None else {})
+    def post_json(self, path: str, obj: Any = None, *, timeout: float | None = None) -> Any:
+        _, _, body = self._request(
+            "POST", path, json_body=obj if obj is not None else {}, timeout=timeout
+        )
         return json.loads(body) if body else None
 
     # ── API ──
@@ -675,11 +691,16 @@ class Client:
     def set_priority(self, job_id: int, priority: str | int) -> dict[str, Any]:
         return self.post_json(f"/jobs/{job_id}/priority", {"priority": priority})
 
-    def job(self, job_id: int, *, tail: int = 0) -> dict[str, Any]:
-        return self.get_json(f"/jobs/{job_id}?tail={tail}")
+    def job(self, job_id: int, *, tail: int = 0, timeout: float | None = None) -> dict[str, Any]:
+        return self.get_json(f"/jobs/{job_id}?tail={tail}", timeout=timeout)
 
     def cancel(self, job_id: int) -> dict[str, Any]:
         return self.post_json(f"/jobs/{job_id}/cancel")
+
+    def gc(self, *, dry_run: bool = False, timeout: float | None = None) -> dict[str, Any]:
+        """`POST /gc`(admin). 스캔이 오래 걸릴 수 있어 **자기 시한**을 쓴다 — 일반 요청의
+        15초로는 데이터가 조금만 커도 못 기다린다."""
+        return self.post_json("/gc", {"dry_run": dry_run}, timeout=timeout)
 
     def pause(self) -> dict[str, Any]:
         return self.post_json("/pause")
@@ -879,6 +900,22 @@ def exit_code_for(job: dict[str, Any] | None) -> int:
     return EXIT_CODE_BY_STATE.get(job.get("state", ""), EXIT_UNKNOWN)
 
 
+class WaitReason(str):
+    """대기가 「모른다」로 끝난 사유 — 사람용 문구(str)에 구조화된 원인 `cause` 를 얹는다(M5i I3).
+
+    문구는 그대로 stderr 로 가고, `cause`(`core.render_text.CAUSE_*`)는 끝줄이 문자열을 뒤지지
+    않고 「확정 404 였나」를 알게 한다. str 그대로라 옛 호출자(`"not found" in reason`)도 그대로
+    읽는다.
+    """
+
+    cause: str
+
+    def __new__(cls, cause: str, message: str) -> WaitReason:
+        obj = super().__new__(cls, message)
+        obj.cause = cause
+        return obj
+
+
 def wait_for_job(
     client: Client,
     job_id: int,
@@ -912,7 +949,10 @@ def wait_for_job(
             return (
                 EXIT_UNKNOWN,
                 job,
-                f"--timeout {timeout:g}s elapsed; job {job_id} is still {job.get('state')}",
+                WaitReason(
+                    CAUSE_TIMEOUT,
+                    f"--timeout {timeout:g}s elapsed; job {job_id} is still {job.get('state')}",
+                ),
             )
         return None
 
@@ -939,9 +979,17 @@ def wait_for_job(
                 return done
         except ClientError as e:
             if e.status == 404:
-                return EXIT_UNKNOWN, last, f"job {job_id} not found on the server"
+                return (
+                    EXIT_UNKNOWN,
+                    last,
+                    WaitReason(CAUSE_NOT_FOUND, f"job {job_id} not found on the server"),
+                )
             if e.status not in (0, 500, 503, 502, 504):
-                return EXIT_UNKNOWN, last, f"server error: {e.message}"
+                return (
+                    EXIT_UNKNOWN,
+                    last,
+                    WaitReason(CAUSE_SERVER_ERROR, f"server error: {e.message}"),
+                )
             if e.status == 0 and e.body.get("stalled"):
                 continue  # 조용한 스트림 — 다시 보고(check) 다시 연다
             sse_ok = False  # 상한 초과(503)·연결 실패 → 폴링으로
@@ -980,9 +1028,17 @@ def _poll_for_job(
             unreachable_since = None
         except ClientError as e:
             if e.status == 404:
-                return EXIT_UNKNOWN, last, f"job {job_id} not found on the server"
+                return (
+                    EXIT_UNKNOWN,
+                    last,
+                    WaitReason(CAUSE_NOT_FOUND, f"job {job_id} not found on the server"),
+                )
             if e.status not in (0, 500, 502, 503, 504):
-                return EXIT_UNKNOWN, last, f"server error: {e.message}"
+                return (
+                    EXIT_UNKNOWN,
+                    last,
+                    WaitReason(CAUSE_SERVER_ERROR, f"server error: {e.message}"),
+                )
             now = clock()
             if unreachable_since is None:
                 unreachable_since = now
@@ -992,10 +1048,20 @@ def _poll_for_job(
                         f"{CONNECTION_GRACE_SECONDS:.0f}s"
                     )
             if now - unreachable_since > CONNECTION_GRACE_SECONDS:
-                return EXIT_UNKNOWN, last, f"lost contact with the server: {e.message}"
+                return (
+                    EXIT_UNKNOWN,
+                    last,
+                    WaitReason(CAUSE_UNREACHABLE, f"lost contact with the server: {e.message}"),
+                )
             if timeout is not None and now - started > timeout:
                 # 서버가 안 보여도 --timeout 은 지킨다
-                return EXIT_UNKNOWN, last, f"--timeout {timeout:g}s elapsed; server unreachable"
+                return (
+                    EXIT_UNKNOWN,
+                    last,
+                    WaitReason(
+                        CAUSE_TIMEOUT, f"--timeout {timeout:g}s elapsed; server unreachable"
+                    ),
+                )
             sleep(poll_seconds)
             continue
         last = job
@@ -1007,7 +1073,10 @@ def _poll_for_job(
             return (
                 EXIT_UNKNOWN,
                 job,
-                f"--timeout {timeout:g}s elapsed; job {job_id} is still {job.get('state')}",
+                WaitReason(
+                    CAUSE_TIMEOUT,
+                    f"--timeout {timeout:g}s elapsed; job {job_id} is still {job.get('state')}",
+                ),
             )
         sleep(poll_seconds)
 

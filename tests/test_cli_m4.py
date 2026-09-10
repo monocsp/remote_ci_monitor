@@ -345,7 +345,8 @@ def test_init_writes_where_serve_and_check_look(srv, home, monkeypatch, tmp_path
     code, out, err = run(capsys, ["check"])
     assert code == 0, out + err
     assert row_status(out, "server") == "ok" and row_status(out, "token") == "ok", out
-    assert row_status(out, "data dir") == "ok", out
+    assert row_status(out, "local data dir") == "ok", out
+    assert row_status(out, "data dir") is None, out  # M5i I4 — 서버의 경로로 읽히지 않게
 
 
 # ── rcm version ──────────────────────────────────────────────────────────────
@@ -423,7 +424,10 @@ def test_check_git_row_is_ok_when_repos_are_configured_and_git_is_found(
     assert code == 0, out + err
     assert first_line(out).startswith("ok   python")
     assert row_status(out, "git") == "ok", out
-    assert row_status(out, "data dir") == "ok", out
+    assert row_status(out, "local data dir") == "ok", out
+    assert row_status(out, "data dir") is None, out  # M5i I4 — 서버의 경로로 읽히지 않게
+    line = next(ln for ln in out.splitlines() if "local data dir" in ln)
+    assert f"· from {cfg}" in line, line  # 어느 설정 파일의 값인지
 
 
 def test_check_git_row_fails_when_repos_are_configured_but_git_is_missing(
@@ -447,4 +451,5 @@ def test_check_has_no_git_row_without_repos(srv, env, server_toml, no_git, capsy
     assert code == 0, out + err  # repos 가 없으면 git 이 없어도 상관없다
     assert first_line(out).startswith("ok   python")
     assert row_status(out, "git") is None, out
-    assert row_status(out, "data dir") == "ok", out
+    assert row_status(out, "local data dir") == "ok", out
+    assert row_status(out, "data dir") is None, out  # M5i I4 — 서버의 경로로 읽히지 않게

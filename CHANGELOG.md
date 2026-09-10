@@ -7,6 +7,328 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-10
+
+### Changed
+- **A failed job's workspace no longer waits thirty days.** The log and the workspace used to share
+  one date, but a failed job leaves a 50 KB log and a 720 MB workspace — fifty of those a day needs
+  750 GB to reach a thirty-day limit, so the disk filled long before the limit ever applied. The
+  workspace, and the snapshot it was unpacked from, now keep their own clock
+  (`workspace_retention_days`, default **1 day**) while the log keeps the days it always had. Two
+  byte rules catch the bulk before any date does: `workspace_storage_max_bytes` (100 GiB) and
+  `min_free_bytes` (10 GiB). **This changes what an upgrade deletes on its first sweep** — see what
+  it would take with `rcm gc --dry-run --config ~/.config/rcm/server.toml`, which needs no running
+  server, and set `workspace_retention_days = 30` to keep the old behaviour. Evidence is never given
+  up to make room, and a size that cannot be measured skips the byte rules for that sweep rather
+  than guessing. ([Configuration](docs/configuration.md#retention-what-is-kept-and-for-how-long))
+- **`rcm gc --dry-run` says what deleting would actually give back.** A workspace cloned from the
+  git mirror shares its pack files with it by hard link; those bytes are charged to the workspace
+  but deleting it does not free them — on one real machine that was a third of all workspace
+  bytes, and `would free` overstated by as much. `would free` is now the reclaimable estimate, with
+  the charged total and the shared part beside it
+  (`would free 1.9 GB from 2 jobs (2.5 GB charged · 0.6 GB shared by hard links)`); the free-space
+  floor and its no-progress check plan with the same estimate, while the byte budget still counts
+  every link. `server.job_storage` gains `shared_bytes` and `estimated_reclaimable_bytes`
+  (`schema_version` unchanged — keys were only added).
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **The storage line says how old its number is.** `rcm check` prints
+  `rcm data 30.9 GB · measured 57m ago` and the web host card `rcm 데이터 30.9 GB · 57m 전 측정`.
+  A finished workspace is measured once and remembered for up to a day, and the age is that of the
+  oldest measurement in the total — a cached figure is never shown as fresh. `server.job_storage`
+  also carries `inventory_checked_at`, when the directories were last listed.
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
+
+### Added
+- **A verified wrapper for gates that cannot be changed to print markers.** The server still records
+  only what a script declares with `::rcm::fail::<name>` and `::rcm::step-end::fail` — it never
+  parses output, and a failure that prints no markers has no name in the ledger, by design.
+  `examples/preset/name-failures.sh` runs one command, passes its output through, and afterwards
+  prints a marker for every line that matched the exact format the script already prints, keeping
+  the command's exit code; `tests/test_examples.py` feeds its output to the server's own marker
+  reader. The primary way — print the marker from the function that decides something is red — is
+  shown next to it in [Naming what failed](docs/configuration.md#naming-what-failed).
+  ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92))
+- **The server hands out its own client.** `GET /client/remote_ci_monitor-<version>-py3-none-any.whl`
+  is the wheel of the code the server is running, assembled at start from the installed package —
+  so `pip install http://<build-machine>:8787/client/remote_ci_monitor-<version>-py3-none-any.whl`
+  brings a session machine to the server's version whether that version came from a release, a
+  `dev` checkout or an offline network. `/api/health` names it (`client_wheel.path`, `.sha256`,
+  `.bytes`) and says the oldest client it still accepts (`min_client_version`); `rcm check` gets a
+  `client` row (`same as server` · `older — pip install …` · `newer`), red only below that floor,
+  and `rcm run` prints one warning line when the client is that old. A wheel that could not be
+  assembled is `client_wheel: null` plus `client_wheel_error`, and the URL answers 503 — never an
+  old or empty file. [Keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)
+  has a tested wrapper (`examples/session/update-client.sh`) that verifies the sha256 before it
+  installs. ([#90](https://github.com/monocsp/remote_ci_monitor/pull/90))
+- **A preset can collect its files only when the job fails** (`artifacts_on = "failure"`; the
+  default `"always"` is unchanged). This is what makes the recommended way of leaving evidence
+  affordable: put the heavy step's output in the workspace and declare it, print the verdict to
+  stdout so it lands in the log, and stop paying for a bundle on every green run. Cancelled and
+  timed-out jobs count as failures; a `lost` job is never collected.
+  [Making a failure explain itself](docs/configuration.md#making-a-failure-explain-itself) shows
+  the gate script side by side with the one that loses its evidence to `TMPDIR`.
+- **`rcm gc` reclaims workspace storage now, and `--dry-run` shows what would go.** With an admin
+  token it runs the same plan the sweeper does, and reports what it planned, what it deleted and
+  what failed separately — a plan is not a receipt. `rcm gc --dry-run --config server.toml` runs
+  **without a server at all** — it reads the config and the data directory and plans on a
+  temporary copy of the database, so you can see what a new release would remove before you
+  restart into it. A run that outruns `--timeout` (600 s) exits 3 (unknown), never failure: the
+  server may still be deleting.
+- **The screen says what the data directory holds and when the next sweep is.** `/api/status`
+  carries `server.job_storage`, `/api/health` carries `storage`, `rcm check` prints one `storage`
+  line, and the web host card shows it under the disk meter in both languages. What cannot be
+  measured reads `—`, never `0`. (`schema_version` is unchanged — keys were only added.)
+- **A job can now name what failed, and rcm remembers.** A preset script prints
+  `::rcm::fail::<name>` for anything that broke — a step, a test file, a check — and rcm keeps
+  those names per job. When a job fails, `GET /jobs/<id>` and `rcm run`/`rcm wait` report how
+  often each name was red in the recent runs of the same key:
+  `failed: flaky_test.dart — 2 of the last 8 gate runs · intermittent?`, or
+  `first time in the last 8 gate runs` for something new, or `every one of the last 8 gate runs`
+  for something simply broken. The question mark is deliberate — the counts are a suggestion, not
+  a verdict, and runs that failed while naming nothing stay in the denominator and are reported
+  (`note: 2 of those 8 runs failed without naming anything`) rather than quietly improving the
+  odds. The window is the last `failure_window_jobs` (20) finished jobs of that key **up to and
+  including this one**, so the answer does not drift as newer jobs arrive, and nothing is judged
+  below `failure_min_jobs` (3). This history is on the single-job route only; `/api/status` is
+  unchanged.
+- **Upgrading also cleans up the labels the old inference left behind.** Cancelled and lost jobs
+  lose the step label they should never have had, and a failed job written by an older build
+  keeps its label but under `last_step` — the field that does not claim a cause — because
+  after the fact there is no way to tell an inferred label from a declared one.
+- **Every failed, cancelled or unknown wait now says where the log is.** `rcm run` and `rcm wait`
+  end with `log: rcm logs 162 · <url>` — including exit 3, where you know least. A 404 from the
+  server now carries a `hint`: `/api/jobs/162` answers with `job #162 is GET /jobs/162 · its log
+  is GET /jobs/162/log with that job's token (try: rcm logs 162)`.
+- **`rcm jobs` and the recent list say which code ran.** Each row carries `<ref|branch> @<short
+  sha>`, and `rcm jobs --ref REF` keeps only the jobs whose ref or branch contains `REF` — useful
+  when several sessions on one machine share a token, which made `--mine` mean "this machine".
+  Tree jobs now send their branch name; it is display only and never changes `tree_hash`, so two
+  sessions on different branches with the same tree still join the same job.
+- **A progress bar on every running job.** The web page draws one bar under each running row and
+  always says what it measured: `50% · 4/8 steps` when the job declares its step count with
+  `::rcm::steps::N`, `70% · by measured time` or `by preset estimate` when it does not — so the
+  number carries the worth of the estimate behind it. A job past its estimate reads
+  `past the estimate`, one that finished every declared step without exiting reads `finalizing`,
+  and a job nothing can be said about — likely stuck, preparing its workspace, or with no samples
+  at all (the 600-second installation default is not a measurement) — reads `progress —`. **A
+  running job never fills the bar**: a full bar means finished, so a forecast stops at 99% and the
+  two "we are past what we know" states are hatched instead. The time bar grows every second
+  instead of jumping between refreshes, and stops growing while updates are paused or lost.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
+- **Parallel lanes you can actually turn on.** `[server] lanes = 2` was always there, but nothing
+  stopped two heavy jobs from bringing the machine to its knees. Lane 2 and above now only pick up
+  a job while the host CPU is below `[server] cpu_max_percent` (80), measured over
+  `admission_samples` (3) consecutive host samples, with `admission_cooldown_seconds` (30) between
+  admissions on one machine. **Lane 1 is never held**, so the queue keeps moving under any load,
+  and an unknown or stale CPU reading closes a lane rather than opening it. A held lane shows in
+  `rcm top` (`lanes 1/2 busy · 1 held (cpu 92%)`), on the web page, and as the queue reason
+  `held_by_load`; `rcm check` reports it without failing, and warns if a lane has been held for
+  more than five minutes. `admission = "always"` restores the old behaviour.
+  ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66),
+  [#67](https://github.com/monocsp/remote_ci_monitor/pull/67))
+
+### Changed
+- **Breaking-ish: `failed_step` is now only ever a step your script declared as failed.** It used
+  to be inferred — on a non-zero exit the *last started* step got the label — and that inference
+  named the wrong step for any script that runs things in parallel and replays their logs
+  afterwards: a real gate reported `build web` (which passed) while `test` was what broke, and a
+  **cancelled** job carried a step label at all, which read as "this is what went wrong" next to
+  its summary. Declare a failure with `::rcm::step-end::fail` or `::rcm::fail::<step name>` and
+  nothing changes. Without a declaration `failed_step` is now `null`, and a new `last_step` field
+  says where the job was when it ended, with no claim about the cause — displays read
+  `exit 1 (last step build web)` instead of `(step build web)`. Cancelled and lost jobs carry
+  neither field. Notification hooks get `RCM_LAST_STEP` alongside `RCM_FAILED_STEP`. Keys were
+  added, not removed, so `schema_version` stays 1.
+- **`rcm run --no-wait` now answers "where am I in the queue?".** It used to print a job id, a URL
+  and `"state": "submitted"` — a state name the server never uses — so a session that submits and
+  leaves had to run `rcm eta --job N` to learn anything. The JSON now carries the job's real
+  `state` plus `position`, `reason`, `ahead_job_id`, `blocked_by` and the whole `estimate`, and the
+  line on stderr reads
+  `submitted job #155 queued · 3rd in line · wait 4m 12s · eta 16:02 · <url>`. A job that is
+  already running has no position and that piece is left out, never printed as `0th`; a session
+  that joined an existing job sees that job's own position; and a queue that cannot start at all —
+  paused, or a pool with no live worker — reports no finish time, because there is none to give.
+  The lookup is for display only: if it fails or the server is slow, the line and the JSON come
+  back without those keys and the exit code is still 0 — `--no-wait` exits 0 because the job was
+  submitted, not because it was looked up.
+  ([#72](https://github.com/monocsp/remote_ci_monitor/pull/72))
+- **An ETA says it is less sure while a job shares the machine.** Medians are measured from runs
+  that mostly had the machine to themselves, so a job running beside another finishes later than
+  the median suggests. The confidence badge now drops one step for as long as that is true — the
+  estimate itself is not inflated by a guessed factor. `estimate.shared` carries the fact so the
+  page and `rcm top` agree. Jobs also record how many were running when they started, so a future
+  release can measure the real effect instead of guessing at it. Database schema 10.
+  ([#74](https://github.com/monocsp/remote_ci_monitor/pull/74))
+- **Queue rows now arrive folded.** Running rows used to open themselves, so two or three running
+  jobs filled the screen with step lists and log tails. The row keeps what answers "how is it
+  going" — the progress bar, `step 2/4 build 2s` in the reason column, and **Cancel** for your own
+  job — and **▸** opens the step list and the log tail. The page remembers which rows *you* opened
+  (`rcm.expanded` in that browser), not which ones you closed.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70),
+  [#73](https://github.com/monocsp/remote_ci_monitor/pull/73))
+- **Recent results show the job number.** `#412` is how you ask for a log, an artifact or a rerun,
+  and it was the one place the page dropped it.
+  ([#70](https://github.com/monocsp/remote_ci_monitor/pull/70))
+- **`/api/status` gains three keys on `server.workers[]`** — `hold_code`, `hold_detail` and
+  `held_since`, all `null` unless the load gate is holding that lane. `state` gains the value
+  `held`. `schema_version` is unchanged.
+  ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66))
+- **Behaviour change for anyone already running two or more lanes**, whether that is
+  `[server] lanes` or a worker's own `--lanes`: those lanes now wait for the machine to be quiet.
+  The server logs the effective policy at startup. Set `admission = "always"` to keep the old
+  behaviour. ([#66](https://github.com/monocsp/remote_ci_monitor/pull/66))
+- **The queue's lane accounting counts `(worker, lane)` instead of the lane number.** A pool with
+  local lanes and a remote worker's lanes used to collapse them — a four-lane pool was estimated as
+  two, and "behind #N" could name the wrong job.
+  ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+
+### Fixed
+- **`rcm serve` and `rcm token` refuse in one line when the database cannot be opened** — a
+  migration backup that could not be written, or a database a newer build has migrated —
+  instead of a Python traceback with the sentence at the bottom. The sentence is the recovery
+  path ([going back to the old build](docs/operating.md#going-back-to-the-old-build)), and the
+  exit code is 2.
+- **The offline `rcm gc --dry-run --config` migrated the live database.** A command documented as
+  read-only opened the database the way the server does, which upgrades its schema on the spot —
+  so running the preview from a newer build, as the upgrade procedure said to, left the *running*
+  older build with a database it did not understand: failed jobs lost their step labels, and the
+  service could not have been restarted. It now opens the live database read-only, copies it with
+  SQLite's online backup into a private temporary directory, migrates and plans on the copy, and
+  deletes the copy; if any step is incomplete it exits 3 (unknown) instead of printing an empty
+  plan, and a data directory with no database is unknown too rather than a database being created
+  there. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
+- **Every schema migration now starts with a verified backup of the old database**,
+  `<data_dir>/backup/rcm.sqlite3.v<old>.bak` (three kept). If the backup cannot be written the
+  migration does not start and the server says so. An older build that meets a newer database
+  refuses to start as before, and the message now names that backup and the restore steps;
+  [Operating](docs/operating.md#going-back-to-the-old-build) says what a database-only downgrade
+  loses. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
+- **Step labels an older build wrote after such an upgrade are corrected once on the next start**
+  (schema v16): a failed job's label that has no entry in the failure ledger is moved to
+  `last_step`, and cancelled or lost jobs lose theirs — those were the old build's guesses, not
+  declarations. ([#87](https://github.com/monocsp/remote_ci_monitor/pull/87))
+- **`rcm jobs` showed the commit twice for a job started with `--ref <full sha>`** — the ref and
+  the sha are the same forty characters, and the row read `092dc5854301a87eab47c0… @092dc58`. When
+  the ref *is* the sha it now shows once (`@092dc58`; `dolomood @092dc58` in the queue). A ref that
+  merely starts like the sha — a `092dc58` branch or tag — still shows both.
+  ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92)) The `submitted job #1 (gate · …)`
+  line `rcm run` prints on submit follows the same rule: `(gate · @092dc58)` for a full-sha ref,
+  `(gate · main @092dc58)` for a branch.
+  ([#100](https://github.com/monocsp/remote_ci_monitor/pull/100))
+- **`rcm wait --job 999` on a job that does not exist ended with `log: rcm logs 999`** — a hint
+  pointing at nothing. The line is now left out only when the server answered a definite 404; a
+  connection that was lost, or a `--timeout` that ran out first, still exits 3 (unknown) and still
+  says where the log is, because the job may well exist.
+  ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92))
+- **`rcm check` labelled the local config's data directory `data dir`, next to the `server` row,**
+  as if it were the server's. The server never reports its `data_dir`, so the row is now
+  `local data dir` and says which file it came from (`… · from ~/.config/rcm/server.toml`).
+  ([#92](https://github.com/monocsp/remote_ci_monitor/pull/92))
+- **`rcm gc --dry-run` on a freshly started server said `0 B would remain`.** The summary used the
+  server's previous measurement, taken before the plan ran; it now uses the snapshot the plan
+  itself measured. A real `rcm gc` also measures again after deleting: `storage_after` and the new
+  `free_bytes_before` / `free_bytes_after` are what the disk said afterwards, and the receipt reads
+  `freed 2.5 GB from 2 jobs · est. 1.9 GB reclaimable · free 600.0 GB → 601.9 GB · 28.9 GB left`.
+  `freed_bytes` keeps its meaning — the planned size of what was deleted, now also as
+  `deleted_charged_bytes` — so nothing that read it changes.
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **The no-progress check could miss.** It only armed when the floor rule itself had picked
+  something, so a sweep whose age or budget picks already covered the shortfall could delete under
+  the floor, gain nothing, and never pause. It now judges every sweep that started under the floor,
+  against what was actually deleted rather than what was planned, and not at all when nothing was.
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **A workspace that could not be measured now says why.** `error_code` and the server log carry
+  `measure_EACCES` (or whichever error it was) instead of a bare unknown.
+  ([#88](https://github.com/monocsp/remote_ci_monitor/pull/88))
+- **The web page came up broken on any server with a disk sample** — since the unreleased data
+  directory line under the disk meter, the host card referred to a name that did not exist, the
+  render stopped there on every refresh, the recent list stayed empty, and after thirty seconds
+  the page reported a lost connection while the server was fine. The browser test now renders the
+  shape a real deployment sends (a disk sample and `server.job_storage`), checks the line in both
+  languages, and fails on any page error; on the Linux CI runner a missing Chrome is a failure,
+  not a skip. ([#82](https://github.com/monocsp/remote_ci_monitor/pull/82))
+- **The disk meter and the data-directory line were missing when `data_dir` was written with
+  `~`** — which is what the example `server.toml` does (`~/.local/share/rcm`). The server handed
+  the sampler the unexpanded string, the usage call failed on it, and the host sample carried
+  `disk: null`, so neither the web page nor `rcm top` drew the disk. A path written in full
+  was never affected. ([#84](https://github.com/monocsp/remote_ci_monitor/pull/84))
+- **A remote worker collected no artifacts at all.** The server never put the frozen artifact
+  policy in its `/worker/claim` reply, so the worker found no globs and skipped collection
+  entirely: a preset with `artifacts` running in a remote pool produced nothing, while the job
+  succeeded and nothing on the screen said otherwise. The tests missed it because they built the
+  claim payload by hand instead of taking the server's. Local pools were never affected.
+- **`server.artifact_storage.last_sweep_at` was always `null`.** It looked for an attribute the
+  server does not have, so the time of the last retention sweep never reached `/api/status`.
+- **A failed step that rcm only guessed at now says so.** When a job exits non-zero and its script
+  never printed `::rcm::step-end::fail`, rcm still names the last step the job reached — but that
+  name is a guess, and it was being reported as a fact. A gate that runs its steps in parallel and
+  prints the markers afterwards in a fixed order always ends on the same step, so across two days
+  of one repository's gate — 145 jobs, 55 of them failing — 16 were blamed on `build web`, which
+  the log shows had *passed*; the real failure was `test`. Nothing can recover the true step from
+  the markers alone, so rcm no longer pretends: `/api/status` carries `failed_step_guessed`, the
+  recent results — on the web page and in `rcm top` — write `(guessed)` next to the step, and
+  notification hooks get `RCM_FAILED_STEP_GUESSED`. A running job never carries a guess, because
+  it has no exit code yet. A step confirmed by `::rcm::step-end::fail` looks exactly as it did
+  before — print that marker and the blame is a fact. A job that was cancelled, timed out or lost
+  reports its step as a guess whatever the markers say: it ended because it was killed, not
+  because that step failed. Jobs that finished before this release report `null`: unknown, which
+  is neither. Database schema v11 (one added column; `/api/status` `schema_version` is unchanged —
+  keys were only added).
+- **The server log now says what a 500 actually was**, not just the exception class. During the
+  2026-09-08 outage it recorded `OperationalError` 314 times, which does not distinguish "database
+  is locked" from "unable to open database file" — two different problems with two different
+  fixes. The message is now appended to the log line, with paths redacted. `server.last_error` in
+  `/api/status` is unchanged and still carries only the class: reads are unauthenticated by
+  default, so the detail belongs in the log, which only whoever runs the server can read.
+- **The example launchd service now raises the file-descriptor limit**, as the systemd unit
+  already did. A launchd session defaults to `maxfiles 256`, and the server holds descriptors per
+  request thread, per open event stream and per SQLite connection (the database, its `-wal` and its
+  `-shm`). On 2026-09-08 a build machine ran out: `sqlite3` could no longer open the database, so
+  every request answered with a database error and notification hooks died with `Too many open
+  files`, and it stayed that way for twelve minutes until the service was restarted — the queue
+  looked alive and answered nothing. The leak behind that particular outage was fixed in 0.2.2
+  (request threads close their connection); this is the headroom that keeps the next one from being
+  fatal. Both service files now say 4096, and [operating the build
+  machine](docs/operating.md#run-as-a-service) says why. Anyone who wrote their own service file
+  should set it too.
+- **A waiting `rcm run` no longer holds the snapshot bookkeeping for the whole build.** The file
+  list and per-file hashes were kept alive until the job finished, long after the tarball was
+  uploaded and deleted: a 20,000-file tree sat at 64 MB for the length of the run instead of the
+  a waiting client actually needs. On a machine short on memory, `rcm run --no-wait` plus
+  `rcm wait --job N` is now documented as the pattern — if the operating system kills the waiting
+  client, the shell sees 137, which is not the job failing.
+- **`/api/status` barely notices how many jobs you have kept.** A status poll on a server holding
+  50,000 finished jobs took 1.4 seconds and now takes about a millisecond. Two things cost that
+  time: the median behind every ETA was rebuilt from 45 days of finished jobs on **every** request
+  as full job objects (two extra queries and two JSON parses per row, for six fields it reads),
+  and picking the eight most recent jobs sorted every finished job in the database. Samples are
+  now read as plain rows and only re-read when a job actually finishes; recent jobs use an index.
+  Database schema 9. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **Remote worker lanes are read in one query instead of one per worker**, which also cuts the
+  work behind every server event — 552 statements down to 3 on a fleet of fifty workers.
+  ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **Retired workers are forgotten after a week.** Nothing ever deleted them, so every worker that
+  ever registered kept adding `down` lanes to every status document. A worker with a job still
+  running is never forgotten. ([#69](https://github.com/monocsp/remote_ci_monitor/pull/69))
+- **A worker's log flush no longer stalls other lanes.** Every step marker in a batch opened its
+  own SQLite transaction, so one 256 KB flush pushed another lane's claim from 0.03 ms to 275 ms,
+  and a large body could exhaust the busy timeout and hand the worker an HTTP 500. Markers are now
+  written in one transaction, and a busy database answers `503` with `Retry-After` instead of a
+  server error. ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+- **Claiming a job no longer scans every job the pool has ever had.** A dedicated index makes it
+  constant-time (8.5 ms → 0.003 ms at 200k retained jobs). Database schema 8.
+  ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+- **Workers no longer poll in lockstep.** Their retry interval was a fixed one second, so a fleet
+  that restarted together stayed synchronised and could fill the server's request slots. It is now
+  spread over one to two seconds. ([#59](https://github.com/monocsp/remote_ci_monitor/pull/59))
+- **The production guard stopped objecting to a worktree that has its own `rcm.toml`.** It read a
+  bare `rcm serve` as "this would take the production config", but the search order stops at
+  `./rcm.toml` (and `$RCM_CONFIG`) long before `~/.config/rcm/server.toml`, so a test server in a
+  worktree was refused for no reason. Naming the production config or data directory explicitly is
+  still refused. [Operating the build machine](docs/operating.md#from-a-git-checkout) now spells
+  out the search order and what a test server's config should set.
+
 ## [0.2.5] - 2026-09-09
 
 A job can send its files back, the queue page answers "did mine finish?" before anything else, and
@@ -299,7 +621,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.2...v0.2.3

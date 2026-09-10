@@ -215,7 +215,8 @@ def test_claim_returns_none_on_204_and_the_payload_on_200(srv):
     assert time.monotonic() - t0 < 5, "claim ignored wait_seconds=0"
     jid = srv.queued_job()
     payload = wc.claim(lane=1, wait_seconds=0)
-    assert payload is not None and set(payload) == {"job", "tree_url", "preset"}, payload
+    keys = {"job", "tree_url", "preset", "artifacts"}  # artifacts = 얼린 정책(M5g §13 D)
+    assert payload is not None and set(payload) == keys, payload
     assert payload["job"]["id"] == jid and payload["job"]["state"] == RUNNING
     assert payload["tree_url"] == f"/worker/jobs/{jid}/tree"
     assert payload["preset"]["argv"] == list(srv.cfg.preset("ok").argv)
@@ -526,3 +527,87 @@ def test_download_tree_creates_missing_parent_directories(srv, tmp_path):
     dest = tmp_path / "jobs" / str(jid) / "tree.tar.gz"
     assert wc.download_tree(jid, dest) == len(TAR)
     assert dest.is_file() and dest.read_bytes() == TAR
+
+
+# ── M5f PR 2a-0: 폴링 지터 ──────────────────────────────────────────────────
+#
+# `CLAIM_MIN_INTERVAL` 이 고정 1.0 초라, 빈 204 를 받은 레인들이 같은 1초 격자에 묶여 영영
+# 안 흩어진다. 실측(§15-C4): 같은 격자 32레인이면 `max_concurrent_requests` 가 정확히 가득 차고
+# 48레인에서 첫 `/api/status` 503 이 난다. M5f 는 보류 레인을 전부 슬롯 없는 폴러로 만들어
+# 이 lockstep 을 정상 상태로 만든다.
+
+
+def _worker(rand):
+    from remote_ci_monitor.config import WorkerConfig
+    from remote_ci_monitor.remote_worker import RemoteWorker
+
+    return RemoteWorker(
+        WorkerConfig(server="http://x", token="t", pool="default", lanes=1),
+        client=object(),
+        rand_fn=rand,
+    )
+
+
+def test_backoff_never_goes_below_the_base():
+    """`uniform(0, base)` 로 하면 하한이 0 이 돼 뜨거운 루프가 된다."""
+    from remote_ci_monitor.remote_worker import CLAIM_MIN_INTERVAL
+
+    assert _worker(lambda: 0.0)._backoff(CLAIM_MIN_INTERVAL) == CLAIM_MIN_INTERVAL
+
+
+def test_backoff_spreads_over_one_whole_base():
+    from remote_ci_monitor.remote_worker import CLAIM_MIN_INTERVAL, RETRY_WAIT_SECONDS
+
+    w = _worker(lambda: 0.999)
+    assert CLAIM_MIN_INTERVAL <= w._backoff(CLAIM_MIN_INTERVAL) < 2 * CLAIM_MIN_INTERVAL
+    assert RETRY_WAIT_SECONDS <= w._backoff(RETRY_WAIT_SECONDS) < 2 * RETRY_WAIT_SECONDS
+
+
+def test_backoff_draws_a_new_number_every_call():
+    """한 번 뽑아 두면 그 워커의 레인들이 다시 같은 격자에 묶인다."""
+    draws = iter([0.0, 0.25, 0.5, 0.75])
+    w = _worker(lambda: next(draws))
+    assert [w._backoff(1.0) for _ in range(4)] == [1.0, 1.25, 1.5, 1.75]
+
+
+def test_backoff_uses_the_real_random_by_default():
+    from remote_ci_monitor.config import WorkerConfig
+    from remote_ci_monitor.remote_worker import RemoteWorker
+
+    w = RemoteWorker(WorkerConfig(server="http://x", token="t"), client=object())
+    seen = {round(w._backoff(1.0), 6) for _ in range(50)}
+    assert len(seen) > 1 and all(1.0 <= v < 2.0 for v in seen)
+
+
+def test_a_stale_host_sample_is_not_sent_at_all():
+    """서버가 받은 시각으로 다시 찍으므로, 굳은 표본을 계속 보내면 영원히 「새것」이 된다(§3.1)."""
+    from datetime import UTC, datetime, timedelta
+
+    from remote_ci_monitor.config import WorkerConfig
+    from remote_ci_monitor.core.model import HostSample
+    from remote_ci_monitor.remote_worker import RemoteWorker
+
+    now = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
+
+    class Sampler:
+        def __init__(self, age):
+            self.age = age
+
+        def latest(self):
+            return [
+                HostSample(
+                    name="build-02",
+                    source="local",
+                    sampled_at=now - timedelta(seconds=self.age),
+                    interval_seconds=5.0,
+                    cpu={"busy": 10.0},
+                )
+            ], None
+
+    w = RemoteWorker(
+        WorkerConfig(server="http://x", token="t"), client=object(), now_fn=lambda: now
+    )
+    w.sampler = Sampler(1.0)
+    assert w._host_sample() is not None
+    w.sampler = Sampler(60.0)  # 3 × interval 을 넘었다
+    assert w._host_sample() is None

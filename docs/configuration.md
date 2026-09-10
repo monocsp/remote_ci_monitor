@@ -32,6 +32,7 @@ timeout_seconds = 1200
 expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
 artifacts = ["test/**/goldens/*.png"]   # files the job produces that sessions may fetch back
+artifacts_on = "always"                 # "always" | "failure" — collect only when the job fails
 [[presets.inputs]]
 name = "scope"
 type = "choice"
@@ -46,10 +47,34 @@ Your script can report progress by printing markers at the start of a line:
 ::rcm::step::analyze       # a new step starts (the previous one ends)
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
+::rcm::fail::flaky_test    # optional: names something that failed (a step, a test, a file)
 ```
 
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
+
+### Saying what failed
+
+`failed_step` is only ever a step your script **declared** as failed, with `::rcm::step-end::fail`
+or `::rcm::fail::<step name>`. Without a declaration the field is `null` and the job carries
+`last_step` instead — where it was when it ended, with no claim about the cause. This matters for
+scripts that run several things at once and replay their logs afterwards: the last
+`::rcm::step::` heading is not the failure, and rcm will not pretend it is.
+
+`::rcm::fail::<name>` takes any name, not only step names — a test file, a case, a check. The
+server never parses your output; it only counts the names you print. It keeps them per job (120
+characters each, 100 per job) and, when a job fails, tells you how often each name was red in the
+recent runs of the same key:
+
+```
+failed: test — every one of the last 8 gate runs
+failed: just_audio_screen_music_port_test.dart — 2 of the last 8 gate runs · intermittent?
+```
+
+The window is `failure_window_jobs` (20) finished jobs of that key — cancelled and lost jobs say
+nothing, so they are left out — and nothing is judged until there are `failure_min_jobs` (3) of
+them. Runs that failed without naming anything stay in the denominator and are reported
+separately, so the count can understate a flaky test but never overstate it.
 
 ### Deploy presets: run a remote ref instead of an upload
 
@@ -138,6 +163,180 @@ the TTL so they can fetch it too. Either way it is gone after `artifact_retentio
 Over a limit, **the job still succeeds or fails on its own merits** — only the artifacts are
 dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, `storage_full`).
 
+## Making a failure explain itself
+
+rcm stores everything a job writes to stdout and stderr, uncut. What it cannot do is invent output
+the script never printed — and the usual gate script hides exactly the part you need. A run that
+sends its heavy step to a temporary directory and prints the last forty lines on failure leaves a
+50 KB log with no `Expected:`, no `Actual:` and no stack trace: the forty lines were a progress
+bar. The fix is in the preset, and it has two halves.
+
+**Print the verdict, so it lands in the log.** The log is the evidence of record: it lives for
+`retention_days_failure` (30 days), it is what `rcm logs` and the web page show, and it is what
+somebody reads on a phone. A few lines naming the failing test and its diff are worth more than
+forty lines of progress.
+
+**Leave the bulk in the workspace and declare it**, so a session can fetch it. Anything written to
+`TMPDIR` is gone the moment the job ends.
+
+```bash
+# bad — the evidence disappears with the temporary directory
+log=$(mktemp -d)/test.log
+flutter test > "$log" 2>&1 || { tail -5 "$log"; exit 1; }
+
+# good — the bulk stays in the workspace, the verdict goes to the log
+mkdir -p .rcm/logs
+flutter test > .rcm/logs/test.log 2>&1 || {
+  echo "::rcm::summary::2 tests failed"
+  grep -A3 -m5 -E '^(Expected|Actual|#[0-9])' .rcm/logs/test.log
+  exit 1
+}
+```
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+artifacts = [".rcm/logs/*.log"]
+artifacts_on = "failure"      # "always" (default) collects on every run
+```
+
+`artifacts_on = "failure"` collects only when the job did not succeed, which is what makes this
+pattern affordable: a green run has nothing anyone wants, and paying for it on every build is what
+stops people following the advice. Cancelled and timed-out jobs count as failures; a `lost` job is
+never collected.
+
+**A bundle is a way to fetch, not a place to keep.** It lives `artifact_retention_hours` (24) —
+about as long as a workspace, and far less than a log. Put what you will want next week in the log
+and what you will want in the next hour in the bundle.
+
+### Naming what failed
+
+The `failed: …` lines, `failed_step` and the history above come from one place: the
+`::rcm::fail::<name>` and `::rcm::step-end::fail` markers your script prints. rcm never parses the
+rest of the output, and there is no pattern list to configure — deliberately. A pattern turns every
+mention of `FAIL` into a verdict, and the day the output format changes it records the wrong name
+with full confidence. A gate that prints no markers leaves the failure ledger empty, by design:
+`last_step` still says where the job was, and `rcm logs` still has everything it printed.
+
+**Print the marker from the function that decides.** The place that knows something is red is the
+place to name it, and one helper covers every check in the script:
+
+```bash
+status=0
+fail() {                   # the one function that decides something is red
+  echo "FAIL: $1"
+  echo "::rcm::fail::$1"   # the same name, for rcm
+  status=1
+}
+
+echo "::rcm::step::analyze"
+dart analyze || fail "analyze"
+echo "::rcm::step::test"
+for f in test/*_test.dart; do
+  flutter test "$f" > ".rcm/logs/$(basename "$f").log" 2>&1 || fail "$f"
+done
+exit $status
+```
+
+**When the script cannot be changed, wrap it.** [`examples/preset/name-failures.sh`](../examples/preset/name-failures.sh)
+runs one command, passes its output through untouched, and once the command has finished prints
+`::rcm::fail::<name>` for every line that matched the exact format the script already prints —
+`^FAIL: (.+)$` by default, `--pattern` for another — then closes the step with the command's own
+exit code, which is also the wrapper's:
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/name-failures.sh", "--step", "test", "--", "bash", "scripts/gate.sh"]
+```
+
+It never guesses: a command that fails without printing a matching line names nothing beyond the
+step. Read the header of the file before copying it. It is bash only (`PIPESTATUS`); it merges
+stderr into stdout, as rcm does; and a program that block-buffers when its stdout is a pipe delivers
+its lines late and in bursts (`stdbuf -oL`, `PYTHONUNBUFFERED=1`, or the tool's own flag). Match
+the exact line your script prints, anchored at the start of the line — a loose `FAIL` anywhere
+turns a mention into a verdict. `tests/test_examples.py` locks the wrapper by feeding its output to
+the same code the server reads markers with.
+
+## Retention: what is kept, and for how long
+
+A finished job leaves two very different things behind, and they are worth different amounts:
+
+| | typical size | what it is | how long it lives |
+|---|---|---|---|
+| the log (`jobs/<id>/log.txt`) | **50 KB** | the evidence — why it broke | `retention_days_success` (14) / `retention_days_failure` (30) |
+| the workspace, and the snapshot it was unpacked from | **720 MB** | the bulk — the folder the job ran in | `workspace_retention_days` (1) |
+
+Giving both the same clock is what fills a disk: fifty failing jobs a day at half a gigabyte each
+needs 750 GB to reach a thirty-day limit. So the bulk keeps its own, much shorter clock, and two
+byte rules catch it before any date does.
+
+| key | default | meaning |
+|---|---|---|
+| `retention_days_success` | `14` | logs of succeeded jobs. Their workspace is deleted the moment the job ends |
+| `retention_days_failure` | `30` | logs of failed, cancelled, timed-out and lost jobs |
+| `workspace_retention_days` | `1` | a kept workspace and the job's uploaded snapshot. Cannot outlive the shorter of the two day counts above — set it higher and the server says so at start-up and uses the lower number |
+| `workspace_storage_max_bytes` | `107374182400` (100 GiB) | when the workspaces plus snapshots weigh more than this, the oldest finished jobs give theirs up regardless of age. `0` means no limit |
+| `min_free_bytes` | `10737418240` (10 GiB) | when the filesystem holding the data directory drops below this, the same thing happens. `0` turns it off |
+| `metadata_retention_days` | `180` | job rows and events, deleted only after the job's files are gone. Must be ≥ `estimate.sample_days` |
+| `retention_sweep_interval_seconds` | `3600` | how often the sweep runs. It also runs once at start-up |
+
+Two things this never does. **It does not delete evidence to make room**: under any pressure the
+server gives up a 720 MB workspace, never a 50 KB log, a job row, an artifact bundle or a snapshot
+blob — those keep their own clocks and budgets. And **it does not delete on a guess**: if a size
+cannot be measured, the byte rules are skipped for that sweep and the reason is reported; only the
+day rule, which never needed a size, keeps running.
+
+`min_free_bytes` is a target, not a guarantee. Deleting does not always give space back — a macOS
+local snapshot or an open file can hold the blocks — so if a sweep deletes and free space does not
+move, the floor rule pauses itself and `rcm check` says so rather than deleting everything for
+nothing.
+
+**Before you upgrade**, see what the new defaults would remove on your machine. Run it from the
+new build: it reads the config and the data directory, plans on a temporary copy of the database
+(the live one is opened read-only and is not migrated), deletes nothing, and does not need the
+server. If the copy cannot be made or migrated it exits 3 — unknown, not "nothing to do":
+
+```sh
+rcm gc --dry-run --config ~/.config/rcm/server.toml
+```
+
+```
+job     workspace   snapshot   reason
+#118       1.7 GB          —   age
+#131       0.8 GB     0.0 GB   budget
+would free 1.9 GB from 2 jobs (2.5 GB charged · 0.6 GB shared by hard links) · 28.9 GB would remain
+```
+
+**Hard links are charged but not reclaimable.** A workspace made from a `git_ref` source is a
+local clone of the server's mirror, and git hard-links the pack files into it, so the same blocks
+are counted once for the mirror and once for every workspace — on one real machine a third of all
+workspace bytes. The accounting therefore keeps two numbers. What a workspace is **charged** counts
+every link: that is what the table shows and what `workspace_storage_max_bytes` is measured
+against, so the budget errs on the safe side. What deleting it would **reclaim** is the charged
+bytes minus the blocks that are hard-linked elsewhere: `would free` is that estimate, the
+free-space floor plans with it, and so does the no-progress check. It is a lower bound — a link
+that lives entirely inside one workspace cannot be told apart — which is why the field is named
+`estimated_reclaimable_bytes`. `would remain` is what the inventory would still charge.
+
+`rcm gc` (admin token) runs the same plan for real against a running server, and reports what it
+planned, what it deleted and what failed separately — a plan is not a receipt. After deleting it
+measures the inventory and the free space again, so its `… left` figure and `free … → …` are what
+the disk said afterwards, not the plan. A `gc` that outruns its `--timeout` (600 s) exits
+**3, unknown**, not failure: the server may still be deleting, so run the dry run again to see
+what is left.
+
+The same numbers are on `/api/status` under `server.job_storage`
+(`volume_bytes = workspace_bytes + snapshot_bytes = evictable_bytes + non_evictable_bytes`, plus
+`shared_bytes` and `estimated_reclaimable_bytes`), in `/api/health` under `storage`, as one line
+in `rcm check`, and under the disk meter on the web host card. What cannot be measured reads `—`,
+never `0`. The line also says how old the number is — `rcm data 30.9 GB · measured 57m ago`: a
+finished workspace is measured once and remembered for up to a day, and the age shown is that of
+the **oldest** measurement in the total, so a cached figure is never presented as fresh.
+
+Git mirrors are never pruned.
+
 ## Priority, snapshot cache and notifications
 
 - **Priority** — three levels, `low` · `normal` · `high`. `rcm run gate --priority high` starts
@@ -171,13 +370,54 @@ dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, 
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
   when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
-  `RCM_FAILED_STEP`, `RCM_EXIT_CODE`, `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
+  `RCM_FAILED_STEP` (declared failures only) and `RCM_LAST_STEP`, `RCM_EXIT_CODE`,
+  `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
   source (`RCM_SOURCE_MODE`, `RCM_SOURCE_REF`, `RCM_SOURCE_SHA`, `RCM_SOURCE_BASE_SHA`,
   `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status) and `RCM_INPUTS` (JSON);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB. Each (job, rule) fires exactly once, including
   jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
+
+## Parallel lanes without overloading the machine
+
+`[server] lanes` is how many jobs the build machine runs at once. Raising it used to be a gamble:
+two heavy jobs together and the machine crawls. Now lane 2 and above only pick up a job while the
+host CPU is below `cpu_max_percent`.
+
+```toml
+[server]
+lanes = 2
+admission = "load"                 # "always" turns the gate off (the pre-0.2.6 behaviour)
+cpu_max_percent = 80               # lanes 2+ wait while CPU is above this
+admission_samples = 3              # this many host samples in a row must be under the cap
+admission_cooldown_seconds = 30    # after a gated lane starts a job, that machine waits this long
+```
+
+**Lane 1 is never held.** Whatever the load, every machine keeps one lane that takes work, so the
+queue always moves. That is also why there is no "give up and start anyway" timer: nothing starves.
+
+The gate reads the same CPU number the host card shows — the whole machine, not one core. It needs
+`admission_samples` consecutive samples under the cap, and they have to be *consecutive in time*:
+after a sampler outage the window is refused rather than trusted. **If the CPU is unknown, the lane
+closes.** A missing, stale or broken sample never opens a lane.
+
+`rcm top` counts held lanes in its header (`lanes 1/2 busy · 1 held (cpu 92%)`), the queue row of a
+job waiting on one says `held by load`, and `rcm check` reports them without failing — a held lane
+is the feature working. It does warn if a lane has been held for more than five minutes, which
+usually means something outside rcm is using the machine.
+
+Two things worth knowing:
+
+- **The first 15 seconds after `rcm serve` starts, lanes 2+ are closed.** The sampler has not
+  produced `admission_samples` samples yet, and an unknown load closes the lane.
+- **Jobs that use the same `[[repos]]` entry serialise while they fetch.** The git mirror is shared
+  and one lane fetches at a time, so extra lanes do not speed up the materialize phase for jobs on
+  the same repository — only the run itself.
+
+Running `rcm serve` and `rcm worker` on one machine gives that machine **two** ungated lanes, one
+per process, and two independent cooldowns. They both read the true CPU and both hold correctly;
+what they cannot do is coordinate. Keep it in mind when you set `lanes` on both.
 
 ## Second build machine (remote worker)
 

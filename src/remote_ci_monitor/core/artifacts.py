@@ -16,6 +16,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+# `model` 로 자격을 붙여 쓴다 — 이 모듈의 `FAILED` 는 **묶음**의 상태이고 잡의 상태가
+# 아니다. 같은 이름을 그냥 import 하면 둘이 조용히 겹친다.
+from remote_ci_monitor.core import model
+
 # 글롭 → 정규식 조각은 스냅샷 무시 규칙과 **같은 문법**을 쓴다. 다만 저쪽은 조각을 `search` 로
 # 쓰고(어디서든 맞는다) 이쪽은 뿌리 기준 전체 일치라, 여기서 앵커를 붙인다(명세 §4).
 from remote_ci_monitor.core.snapshot import _glob_to_regex
@@ -101,6 +105,33 @@ class PolicyError(ValueError):
     """글롭이나 경로가 규칙에 안 맞는다. 설정 검증과 수집기가 둘 다 쓴다."""
 
 
+def prospective_state(
+    rc: int | None, *, cancelled: bool, timed_out: bool, lost: bool = False
+) -> str:
+    """수집을 열지 말지 정할 때 쓰는 **예정 종료 상태**(M5g §6).
+
+    수집은 종료를 커밋하기 **전에** 일어나므로(M5e §5) 그 시점엔 아직 확정 상태가 없다. 이 함수는
+    `worker.outcome_for` 의 상태 결정과 같은 순서를 따른다 — 둘이 어긋나면
+    `tests/test_artifacts_on.py` 가 빨개진다(그 시험이 이 중복의 안전장치다).
+
+    ⚠️ 수집하는 **동안** 수용된 취소는 이 판정 뒤에 온다. 그러면 초록인 줄 알고 안 모은 잡이
+    `cancelled` 로 끝날 수 있다 — 죽은 잡의 산출물이라 받아들인다.
+    """
+    if lost:
+        return model.LOST
+    if cancelled:
+        return model.CANCELLED
+    if timed_out:
+        return model.TIMED_OUT
+    return model.SUCCEEDED if rc == 0 else model.FAILED
+
+
+#: `presets[].artifacts_on` 의 값(결정 59).
+COLLECT_ALWAYS = "always"
+COLLECT_FAILURE = "failure"
+COLLECT_ON = (COLLECT_ALWAYS, COLLECT_FAILURE)
+
+
 @dataclass(frozen=True)
 class ArtifactPolicy:
     """잡 하나에 얼려 두는 수집 정책. 워커 claim 응답에 실려 나가고 업로드 검증도 이것으로 한다."""
@@ -110,10 +141,20 @@ class ArtifactPolicy:
     max_files: int = 10_000
     timeout_seconds: int = 60
     cancel_timeout_seconds: int = 5
+    #: `"always"`(기본 — 오늘의 동작) | `"failure"`. 초록 잡마다 무거운 로그를 모아 24시간
+    #: 들고 있을 이유가 없고, 그 비용이 「증거를 워크스페이스에 두라」는 권고를 안 따르게 만든다.
+    collect_on: str = COLLECT_ALWAYS
 
     def enabled(self) -> bool:
         """글롭을 선언하지 않은 프리셋은 아무것도 모으지 않는다."""
         return bool(self.globs)
+
+    def collects_for(self, state: str) -> bool:
+        """그 종료 상태에서 모으나. `lost` 는 어느 설정에서도 안 모은다(M5e §5) —
+        죽은 잡을 산출물로 되살리지 않는다."""
+        if not self.enabled() or state == model.LOST:
+            return False
+        return self.collect_on != COLLECT_FAILURE or state != model.SUCCEEDED
 
 
 @dataclass(frozen=True)

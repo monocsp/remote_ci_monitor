@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from statistics import median
 from typing import Any
@@ -30,6 +30,7 @@ from remote_ci_monitor.core.model import (
     QUEUED,
     REASON_BLOCKED_BY_GROUP,
     REASON_CANCELLING,
+    REASON_HELD_BY_LOAD,
     REASON_MATERIALIZING,
     REASON_NOT_SCHEDULED,
     REASON_OVERDUE,
@@ -44,6 +45,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     UPLOADING,
     WORKER_DOWN,
+    WORKER_HELD,
     WORKER_IDLE,
     BlockedBy,
     Estimate,
@@ -143,15 +145,28 @@ def expected_for(
 
 
 def confidence(
-    source: str, sample_count: int, *, group_wait: bool = False, overdue: bool = False
+    source: str,
+    sample_count: int,
+    *,
+    group_wait: bool = False,
+    overdue: bool = False,
+    shared: bool = False,
 ) -> str:
-    """화면 배지의 신뢰도. measured n≥5 → high, n<5 → med, preset/default → low."""
+    """화면 배지의 신뢰도. measured n≥5 → high, n<5 → med, preset/default → low.
+
+    같이 도는 중이면(`shared`) 실측 배지를 **한 칸 내린다** — 중앙값은 혼자 잰 것이라 그동안은
+    덜 맞는다. 배수를 지어내 `expected` 를 늘리지는 않는다(없는 숫자를 만드는 것이다).
+    `low` 는 더 내려갈 곳이 없다. `overdue`·`group wait` 는 이미 더 급한 말이라 먼저 반환된다.
+    """
     if overdue:
         return "overdue"
     if group_wait:
         return "group wait"
     if source == SOURCE_MEASURED:
-        return "high" if sample_count >= 5 else "med"
+        high = sample_count >= 5
+        if shared:
+            return "med" if high else "low"
+        return "high" if high else "med"
     return "low"
 
 
@@ -227,17 +242,29 @@ def compute_queue(
     progress = progress or {}
     active = sorted((j for j in jobs if j.state in ACTIVE_STATES), key=lambda j: j.id)
     busy = [j for j in active if j.is_busy]
+    # 같은 풀에서 둘 이상이 도는 중이면 서로 머신을 나눠 쓰고 있다(M5f §6)
+    busy_per_pool: dict[str, int] = {}
+    for j in busy:
+        busy_per_pool[j.pool] = busy_per_pool.get(j.pool, 0) + 1
     # 대기 순서 = (우선순위 높은 것 먼저, 같은 우선순위는 id) — store.claim 의 ORDER BY 와 같은 키
     waiting = sorted((j for j in active if j.is_waiting), key=lambda j: (-j.priority, j.id))
 
     live = [w for w in workers if w.state != WORKER_DOWN]
-    live_lanes = [w.lane for w in live]
-    lane_free: dict[int, datetime] = {w.lane: now for w in live}
-    lane_last_job: dict[int, int | None] = {w.lane: None for w in live}
-    idle_since: dict[int, datetime] = {}
+    # 레인은 **번호가 아니라 (워커, 번호)** 로 센다. 기본 풀에는 로컬 레인 1..N 과 원격 워커의
+    # 레인 1..M 이 함께 들어오므로(`server.pool_workers`), 번호로 키를 잡으면 로컬 레인 2 와
+    # `build-02/2` 가 뭉개져 4레인 풀이 2레인처럼 계산된다(M5f).
+    live_lanes = [(w.worker, w.lane) for w in live]
+    # 부하로 보류된 레인은 **살아 있지만 지금은 못 집는다**(M5f). 언제 열릴지는 모르는 값이라
+    # 그리디에 넣으면 PLAN 이 금지한 「자신있는 틀린 시각」이 된다 — 빼면 늦게 잡히고, 레인이
+    # 열리면 앞당겨진다.
+    open_lanes = [(w.worker, w.lane) for w in live if w.state != WORKER_HELD]
+    held_lanes = [(w.worker, w.lane) for w in live if w.state == WORKER_HELD]
+    lane_free: dict[tuple[str | None, int], datetime] = {k: now for k in live_lanes}
+    lane_last_job: dict[tuple[str | None, int], int | None] = {k: None for k in live_lanes}
+    idle_since: dict[tuple[str | None, int], datetime] = {}
     for w in live:
         if w.state == WORKER_IDLE and w.job_id is None:
-            idle_since[w.lane] = w.since or now
+            idle_since[(w.worker, w.lane)] = w.since or now
     group_free: dict[str, datetime] = {}
     group_holder: dict[str, tuple[Job, Estimate]] = {}
 
@@ -245,11 +272,14 @@ def compute_queue(
     for job in busy:
         expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
         est = _busy_estimate(job, expected, source, n, now, cfg)
+        if busy_per_pool.get(job.pool, 0) > 1:
+            est = replace(est, shared=True)
         free_at = now + timedelta(seconds=est.remaining_seconds or 0)
-        if job.lane is not None and job.lane in lane_free:
-            lane_free[job.lane] = max(lane_free[job.lane], free_at)
-            lane_last_job[job.lane] = job.id
-            idle_since.pop(job.lane, None)
+        holder_lane = (job.worker_name, job.lane) if job.lane is not None else None
+        if holder_lane is not None and holder_lane in lane_free:
+            lane_free[holder_lane] = max(lane_free[holder_lane], free_at)
+            lane_last_job[holder_lane] = job.id
+            idle_since.pop(holder_lane, None)
         if job.concurrency_group:
             group_free[job.concurrency_group] = max(
                 group_free.get(job.concurrency_group, now), free_at
@@ -270,7 +300,7 @@ def compute_queue(
     # running 먼저, cancelling 그 다음 (각각 id 순)
     rows.sort(key=lambda r: (r.job.state == CANCELLING, r.job.id))
 
-    can_start = not paused and bool(live_lanes)
+    can_start = not paused and bool(open_lanes)
     for position, job in enumerate(waiting, start=1):
         expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
         waited = _seconds(job.created_at, now)
@@ -287,7 +317,8 @@ def compute_queue(
         finish: datetime | None = None
         ahead: int | None = None
         if can_start:
-            lane = min(live_lanes, key=lambda ln: (lane_free[ln], ln))
+            # None(로컬)과 워커 이름을 같이 정렬하려면 키를 평평하게 만들어야 한다
+            lane = min(open_lanes, key=lambda ln: (lane_free[ln], ln[0] or "", ln[1]))
             start = lane_free[lane]
             ahead = lane_last_job[lane]
             if job.concurrency_group and job.concurrency_group in group_free:
@@ -319,6 +350,11 @@ def compute_queue(
             # 이 잡이 그 idle 레인을 차지한다고 보고 다음 잡은 정상 대기로 센다
             if idle_since:
                 idle_since.pop(next(iter(idle_since)))
+            elif held_lanes:
+                # 「너를 집었을 레인이 부하로 막혀 있다」 — idle 통과 held 통은 별개다.
+                # 대기 잡 하나가 보류 레인 하나를 쓰고, 뒤 잡은 정직하게 waiting_for_lane 이다.
+                reason = REASON_HELD_BY_LOAD
+                held_lanes.pop()
         est = Estimate(
             expected_seconds=expected,
             source=source,

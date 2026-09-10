@@ -117,12 +117,19 @@ def test_migration_v5_to_v6_adds_the_columns_and_old_rows_have_no_code(tmp_path)
     # v5 데이터베이스를 흉내 낸다: 새 열 둘을 떼고 user_version 을 5 로 되돌린다
     c = sqlite3.connect(path)
     try:
+        c.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
+        c.execute("DROP INDEX IF EXISTS job_failures_name")
+        c.execute("DROP INDEX IF EXISTS jobs_key_finished")
+        c.execute("DROP TABLE IF EXISTS job_failures")
+        c.execute("ALTER TABLE jobs DROP COLUMN fail_truncated")
+        c.execute("ALTER TABLE jobs DROP COLUMN last_step")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_code")
         c.execute("ALTER TABLE jobs DROP COLUMN summary_args")
         # v7(M5e)이 더한 것도 뗀다 — 안 그러면 6 뒤에 도는 7 이 중복 열로 죽는다
         c.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         c.execute("DROP TABLE IF EXISTS job_artifacts")
         c.execute("ALTER TABLE jobs DROP COLUMN join_count")
+        c.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         c.execute("PRAGMA user_version=5")
         c.commit()
         assert c.execute("PRAGMA user_version").fetchone()[0] == 5

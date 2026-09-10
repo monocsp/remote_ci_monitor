@@ -61,6 +61,7 @@ def source_json(s: Source) -> dict[str, Any]:
     return {
         "mode": s.mode,
         "repo": s.repo,
+        "branch": s.branch,  # 옛 잡은 null — 클라이언트가 안 보내던 때가 있다 (M5h)
         "base_sha": s.base_sha,
         "dirty": s.dirty,
         "tree_hash": s.tree_hash,
@@ -75,6 +76,8 @@ def source_json(s: Source) -> dict[str, Any]:
 def estimate_json(e: Estimate, *, confidence: str | None = None) -> dict[str, Any]:
     return {
         "confidence": confidence,
+        # 같은 풀의 다른 잡과 머신을 나눠 쓰는 중인가 — 화면이 배지를 스스로 그릴 재료 (M5f)
+        "shared": e.shared,
         "expected_seconds": _num(e.expected_seconds),
         "source": e.source,
         "sample_count": e.sample_count,
@@ -105,6 +108,7 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
         # 초를 세는 기준점(M5d-2 §4.6-다) — 화면이 폴링 사이에도 부드럽게 올린다
         "job_started_at": iso(p.started_at),
         "failed_step": p.failed_step,
+        "last_step": p.last_step,
         "steps": [
             {
                 "index": s.index,
@@ -178,6 +182,7 @@ def queue_row_json(
                 row.estimate.sample_count,
                 group_wait=row.reason == REASON_BLOCKED_BY_GROUP,
                 overdue=row.estimate.overdue or row.estimate.stuck,
+                shared=row.estimate.shared,
             ),
         ),
         "progress": progress_json(row.progress),
@@ -212,6 +217,7 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "summary_code": job.summary_code,
         "summary_args": dict(job.summary_args) if job.summary_args else None,
         "failed_step": job.failed_step,
+        "last_step": job.last_step,
         "cancelled_by": job.cancelled_by,
         "timeout_seconds": job.timeout_seconds,
         "source": source_json(job.source),
@@ -271,6 +277,10 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
                 "worker": w.worker,  # 원격 워커 이름 · 로컬 레인은 null (M5b-2)
                 "display_name": w.display_name,
                 "pool": w.pool,
+                # 부하 게이트가 막고 있으면 **왜**와 **언제부터**(M5f). 아니면 셋 다 null.
+                "hold_code": w.hold_code,
+                "hold_detail": dict(w.hold_detail) if w.hold_detail else None,
+                "held_since": iso(w.held_since),
             }
             for w in s.workers
         ],
