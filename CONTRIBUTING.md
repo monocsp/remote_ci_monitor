@@ -10,7 +10,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js  # web UI pure functions
-python scripts/mutcheck.py      # proves the tests go red for 24 known mutations
+python scripts/mutcheck.py      # proves the tests go red for 25 known mutations
 scripts/smoke_install.sh        # the README setup on a fresh venv (builds the wheel first)
 ```
 
@@ -73,9 +73,15 @@ Releases come from `main`, and `main` only takes pull requests from `dev`:
    `[Unreleased]` section into `## [x.y.z] - YYYY-MM-DD` with a compare link at the bottom
    (feature branch → pull request to `dev`).
 2. `gh pr create --base main --head dev`, wait for `test` and `main-from-dev-only`, merge.
-3. `git tag v0.1.0 <main-sha> && git push origin v0.1.0`.
+3. Merging into `main` creates the tag and the release: the `Tag release` workflow
+   (`tag-release.yml`) reads `__version__`, creates `v<X>` on the merge commit if that tag does not
+   exist yet, and calls the `Release` workflow in the same run (a tag created with `GITHUB_TOKEN`
+   does not start `on: push: tags` workflows on its own). A merge that does not bump `__version__`
+   is a no-op; a version whose tag already points elsewhere fails the run instead of being reused.
+   To re-run a release by hand, push the tag yourself:
+   `git tag v0.1.0 <main-sha> && git push origin v0.1.0`.
 
-The `Release` workflow then checks that the tag is on `main` and equals `__version__`, builds the
+The `Release` workflow checks that the tag is on `main` and equals `__version__`, builds the
 sdist and wheel, runs the install smoke on Ubuntu and macOS, and creates the GitHub Release with
 the files and the changelog section as its body. PyPI publishing (trusted publishing, no API
 token) runs only when the repository variable `PYPI_PUBLISH` is `true`: register the publisher on

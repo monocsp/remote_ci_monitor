@@ -744,12 +744,9 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, "dry_run must be true or false")
         if self.retention is None:
             raise ApiError(503, "retention is not running")
-        now = self.now_fn()
-        before = self.retention.storage(now)
-        result = self.retention.gc_report(now, dry_run=dry_run)
-        result["storage_before"] = before
-        result["storage_after"] = None if dry_run else self.retention.storage(now)
-        return result
+        # `storage_before`·`storage_after` 는 청소기가 같은 락 안에서 낸다 — 계획이 잰 스냅샷과
+        # 지운 뒤 다시 잰 값이다. 여기서 먼저 읽으면 **직전** 측정값(기동 직후 0 B)이 된다(B3).
+        return self.retention.gc_report(self.now_fn(), dry_run=dry_run)
 
     def artifact_storage(self) -> dict[str, Any]:
         """서버 전체 회계(§10). 실패해도 상태 문서를 막지 않는다."""

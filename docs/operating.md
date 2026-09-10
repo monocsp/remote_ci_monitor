@@ -217,8 +217,12 @@ workspace, so they are not worth the same number of days: the workspace and the 
 unpacked from go after `workspace_retention_days` (1), and two byte rules —
 `workspace_storage_max_bytes` (100 GiB) and `min_free_bytes` (10 GiB) — take the oldest finished
 jobs' bulk before any date arrives. Evidence is never given up to make room, and nothing is deleted
-on a guess: a size that cannot be measured skips the byte rules for that sweep and says so. The
-full table is in [Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
+on a guess: a size that cannot be measured skips the byte rules for that sweep and says so. Bytes a
+workspace shares with the git mirror by hard link are charged to it but do not come back when it
+is deleted, so `rcm gc --dry-run` says what it would free (the reclaimable estimate) next to what
+is charged, and a real `rcm gc` measures the inventory and the free space again after it deleted —
+its receipt is what the disk said, not the plan. The full table is in
+[Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
 
 **Upgrading to a release that adds these:** the first sweep after the restart applies the new
 defaults, so look first — from the **new** build, before the running checkout moves

@@ -173,7 +173,7 @@ def test_size_is_blocks_on_disk_not_apparent_size(env):
     workspace(cfg, job, files={"a": 1})
     jan, _ = make_janitor(store, cfg)
     measured = jan._measure_dir(cfg.data_dir / "workspaces" / str(job))
-    assert measured >= 512  # 1 바이트 파일도 블록 하나를 쥔다
+    assert measured.charged >= 512  # 1 바이트 파일도 블록 하나를 쥔다
 
 
 def test_a_symlink_is_not_followed(env, tmp_path):
@@ -185,7 +185,7 @@ def test_a_symlink_is_not_followed(env, tmp_path):
     (outside / "huge").write_bytes(b"x" * 200_000)
     (ws / "link").symlink_to(outside)
     jan, _ = make_janitor(store, cfg)
-    assert jan._measure_dir(ws) < 200_000
+    assert jan._measure_dir(ws).charged < 200_000
 
 
 def test_a_terminal_workspace_is_measured_once_and_remembered(env):
