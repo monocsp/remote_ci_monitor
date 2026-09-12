@@ -419,6 +419,61 @@ Running `rcm serve` and `rcm worker` on one machine gives that machine **two** u
 per process, and two independent cooldowns. They both read the true CPU and both hold correctly;
 what they cannot do is coordinate. Keep it in mind when you set `lanes` on both.
 
+### Two lanes for a gate with a light phase and a heavy phase
+
+A gate often spends its first minutes on checkout, `pub get`, codegen and lints at 20–50 % CPU and
+only then hits the heavy part (tests, web build). With `lanes = 1` the next job waits through the
+light phase for nothing. A second lane lets the next job's light phase overlap the current job's
+heavy phase — **but only if the heavy phase is serialised by the script itself**:
+
+```toml
+[server]
+lanes = 2
+admission = "load"
+
+[[presets]]
+name = "gate"
+argv = ["/bin/bash", "scripts/local_ci.sh"]
+# no concurrency_group — two gate jobs may now run at once
+```
+
+```sh
+# scripts/local_ci.sh — the heavy section takes a machine-wide lock.
+# `flock(1)` is not on macOS; Python's fcntl.flock on an inherited fd works on macOS and Linux
+# and the lock stays with the shell's fd 9 until the script exits. If the lock cannot be taken
+# the script must stop (`|| exit 3`) — a heavy section that runs unlocked is exactly what this
+# section exists to prevent, and `local_ci.sh` without `set -e` would carry on past the error.
+exec 9>/tmp/gate-heavy.lock || exit 3
+python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)' || exit 3   # waits while another gate job is in its heavy section
+flutter test ...
+```
+
+To see that the lock holds, submit two `gate` jobs back to back and compare the heavy steps in
+their `step_timeline` (or the timestamps in their logs): the heavy sections must not overlap.
+
+The lock is machine-wide: lanes of `rcm serve` and of an `rcm worker` on the same machine share it,
+which is what you want. The fd stays locked in child processes the script starts, so the heavy
+section may be a whole sub-script.
+
+What the admission gate does and does not do:
+
+- It is decided **once, when a lane picks a job up**. Two jobs that are already running can both
+  enter their heavy section; the CPU cap does not stop that. The lock in the script does.
+- The overlap you actually get: while job A is in its light phase, job B is admitted and both
+  light phases run together; while A is in its heavy phase (CPU near 100 %), lane 2 stays closed
+  and B waits at the gate — so the win is the light phases overlapping, not B's light phase running
+  under A's heavy one.
+- Removing `concurrency_group` removes the server's own guarantee that two `gate` jobs never
+  overlap. Do that only when the script holds a lock like the one above; otherwise keep the group.
+- There is no memory-based admission on purpose: macOS and Linux disagree about what "used" means
+  (PLAN decision 42), so the gate reads CPU only. If memory pressure is your limit, keep
+  `lanes = 1` or narrow the heavy section.
+- ETA estimates assume the lanes are independent. While two jobs overlap, the medians drift; the
+  `concurrent_at_start` field on a finished job's document (`GET /jobs/<id>`, `rcm wait --json`)
+  says how many jobs were running when it started — itself included, so a job that ran alone
+  reads `1` and `null` means unknown — so the effect can be measured afterwards, and the same
+  document's `step_timeline` shows which step paid.
+
 ## Second build machine (remote worker)
 
 A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs
