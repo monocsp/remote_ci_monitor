@@ -749,12 +749,13 @@ def _service_install() -> tuple[Path | None, Path | None]:
 
 
 def _config_dir() -> Path | None:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    roots = [Path(xdg) / "rcm"] if xdg else []
-    roots.append(Path("~/.config/rcm").expanduser())
-    for root in roots:
-        if (root / "server.toml").exists() or (root / "worker.toml").exists():
-            return _norm(root)
+    """서비스의 설정 자리 — 문서의 `~/.config/rcm` 뿐이다. 세션의 `XDG_CONFIG_HOME` 은 **이
+    세션의** CLI 가 설정을 찾는 자리지 서비스의 것이 아니다(launchd·systemd 유닛은 셸 환경을
+    물려받지 않는다). 그것을 따르면 시험 XDG 설정이 「운영」이 되어 진짜 data_dir 이 보호에서
+    빠진다(M5l L4.10). 판정 쪽은 `_effective_data_dir` 이 XDG 를 CLI 순서대로 본다."""
+    root = Path("~/.config/rcm").expanduser()
+    if (root / "server.toml").exists() or (root / "worker.toml").exists():
+        return _norm(root)
     return None
 
 

@@ -17,7 +17,10 @@ of a key bumps that number and is listed here.
   copy of the production config or `RCM_SERVER_DATA_DIR` pointing at production is refused —
   `cd <dir> && rcm …` is judged in `<dir>`, `$XDG_CONFIG_HOME` is searched where the CLI searches
   it, and `env -i`, `env -u NAME`, `exec`, `nohup`, `time` and `( … )` groups no longer hide a
-  command. The `RCM_<SECTION>_<KEY>` environment override and what an empty value means are now in
+  command. Discovery no longer takes the session's `$XDG_CONFIG_HOME` for the service's config
+  directory — a service unit does not inherit a shell's environment, and following it made a
+  test config under XDG "production" while the real data directory went unguarded. The
+  `RCM_<SECTION>_<KEY>` environment override and what an empty value means are now in
   [Configuration](docs/configuration.md).
   ([#89](https://github.com/monocsp/remote_ci_monitor/pull/89) review,
   [#93](https://github.com/monocsp/remote_ci_monitor/pull/93) review)

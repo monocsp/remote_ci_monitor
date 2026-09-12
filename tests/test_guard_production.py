@@ -6,6 +6,7 @@
 """
 
 import importlib.util
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -672,3 +673,27 @@ def test_no_config_anywhere_still_means_the_default_data_dir():
     assert bash("rcm token list", prod=prod, environ={}) is not None
     other = guard.Production(checkout=CHECKOUT, venv=VENV, config_dir=None, data_dir=DATA)
     assert bash("rcm token list", prod=other, environ={}) is None
+
+
+# ── 세션의 XDG_CONFIG_HOME 은 운영 설정의 자리가 아니다 (M5l L4.10 실기) ──────────
+
+
+def test_discovery_ignores_the_sessions_xdg_config_home(tmp_path, monkeypatch):
+    """`XDG_CONFIG_HOME` 은 **이 세션의** CLI 가 설정을 찾는 자리지 서비스의 것이 아니다 —
+    launchd·systemd 유닛은 셸 환경을 물려받지 않는다. 발견이 그것을 따르면 시험 XDG 설정이
+    「운영」이 되어 진짜 `~/.local/share/rcm` 이 보호에서 빠지고, `rcm token list` 는 시험
+    DB 를 여는데도 막힌다(오탐과 미탐이 동시에)."""
+    fake = _fake_home(tmp_path, monkeypatch)
+    xdg = tmp_path / "xdg"
+    (xdg / "rcm").mkdir(parents=True)
+    (xdg / "rcm" / "server.toml").write_text(f'[server]\ndata_dir = "{tmp_path}/xdg-data"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("PATH", f"{fake['local']}/bin:/usr/bin:/bin")
+    prod = guard.find_production()
+    assert prod.config_dir == fake["config_dir"] and prod.data_dir == fake["data"], prod
+    # 훅과 같은 조합: 세션 XDG 의 시험 설정을 여는 것은 자유, 운영 data_dir 은 여전히 막힌다
+    decide = lambda command: guard.decide(  # noqa: E731
+        "Bash", {"command": command}, prod, fake["worktree"], environ=os.environ
+    )
+    assert decide("rcm token list") is None
+    assert decide(f"rcm token --data-dir {fake['data']} list") is not None
