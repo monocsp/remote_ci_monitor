@@ -77,9 +77,14 @@ Releases come from `main`, and `main` only takes pull requests from `dev`:
    (`tag-release.yml`) reads `__version__`, creates `v<X>` on the merge commit if that tag does not
    exist yet, and calls the `Release` workflow in the same run (a tag created with `GITHUB_TOKEN`
    does not start `on: push: tags` workflows on its own). A merge that does not bump `__version__`
-   is a no-op; a version whose tag already points elsewhere fails the run instead of being reused.
-   To re-run a release by hand, push the tag yourself:
-   `git tag v0.1.0 <main-sha> && git push origin v0.1.0`.
+   is a no-op (the tag already points at an ancestor of the merge commit); a version whose tag
+   points somewhere else — a commit that is not an ancestor — fails the run instead of being reused.
+   To re-run a release once the tag exists (say `build` or `smoke` failed after `tag` had pushed
+   it), either open that `Tag release` run under Actions and press **Re-run** (the called `Release`
+   jobs run again), or delete the tag and push it again by hand:
+   `git push origin :refs/tags/v0.1.0 && git tag -f v0.1.0 <main-sha> && git push origin v0.1.0`
+   (a hand-pushed tag starts `Release` through `on: push: tags`). `git push origin v0.1.0` alone
+   is a no-op once the tag exists — it prints `Everything up-to-date` and starts nothing.
 
 The `Release` workflow checks that the tag is on `main` and equals `__version__`, builds the
 sdist and wheel, runs the install smoke on Ubuntu and macOS, and creates the GitHub Release with

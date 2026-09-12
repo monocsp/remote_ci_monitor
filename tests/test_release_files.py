@@ -367,7 +367,7 @@ README_MENTIONS = [
     ("Docker", r"127\.0\.0\.1:8787:8787|[Tt]ailscale"),  # 호스트 포트 매핑을 좁히라는 안내
     # dev → main 경로: 화살표 · `--base main --head dev` · "PRs from `dev`" 어느 표현이든
     ("Releasing", r"`?dev`?\s*(→|->|to)\s*`?main`?|--base main --head dev|PRs? from `?dev`?"),
-    ("Releasing", r"git tag v"),
+    ("Releasing", r"git tag (-f )?v"),  # 재실행 길: 태그를 지우고 다시 민다 (M5l L6)
     ("Releasing", r"PYPI_PUBLISH"),
     ("Releasing", r"[Tt]rusted [Pp]ublish"),
     ("Verify on the real build machine", r"--ref"),  # M3 항목 3개

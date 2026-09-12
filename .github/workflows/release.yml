@@ -84,8 +84,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      # 다른 잡과 같은 태그 커밋을 받는다 — 불려 왔을 때 기본 ref 는 호출한 쪽(main push)의 GITHUB_SHA 다
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
