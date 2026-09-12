@@ -2136,6 +2136,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parts.path
         if "//" in path or ".." in path.split("/") or "\\" in path:
             raise ApiError(400, "bad path")
+        raw_path = path  # `/client/<파일명>` 은 끝 `/` 도 이름의 일부로 본다(별칭 없음)
         path = path.rstrip("/") or "/"
         query = parse_qs(parts.query)
         method = self.command
@@ -2290,7 +2291,7 @@ class Handler(BaseHTTPRequestHandler):
             # 공개 저장소의 코드라 산출물(언제나 토큰)과 달리 `/api/status` 의 읽기 규칙을 따른다
             self._only(method, "GET")
             self._read_only_ok()
-            self._client_wheel(path.removeprefix("/client").removeprefix("/"))
+            self._client_wheel(raw_path.removeprefix("/client").removeprefix("/"))
             return
         raise ApiError(404, "not found", hint=not_found_hint(path))
 
