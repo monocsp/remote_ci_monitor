@@ -68,6 +68,11 @@ def test_usage_guides_point_at_the_server_wheel():
         text = path.read_text()
         assert "/client/remote_ci_monitor-" in text, path.name
         assert "operating.md#keeping-clients-on-the-servers-version" in text, path.name
+        # 본문은 「바로 아래 `client` 행」을 설명한다 — 스크린샷의 alt 텍스트도 그 행을 안다
+        # (리뷰 #90 D: 화면과 문서가 충돌했다 · M5l L3.8)
+        alt = re.search(r"!\[([^\]]*)\]\(images/ui/cli-check\.png\)", text)
+        assert alt, f"{path.name}: no cli-check.png screenshot"
+        assert "client" in alt.group(1), f"{path.name}: alt text without the client row"
 
 
 def test_changelog_has_the_entry():

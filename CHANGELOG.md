@@ -20,7 +20,8 @@ of a key bumps that number and is listed here.
   compatibility verdict on the client side either: `rcm check` keeps its `client` row (the
   `server` row is `FAIL` with the reason) and `rcm run` still prints its warning, because
   `Client.health()` returns the 503 body rather than raising. And `/client/<name>.whl/` — the
-  exact name plus a trailing slash — is a 404 like every other name, not an alias.
+  exact name plus a trailing slash — is a 404 like every other name, not an alias. The `rcm check`
+  screenshot in both usage guides now shows the `client` row the text describes.
   ([#119](https://github.com/monocsp/remote_ci_monitor/pull/119) ·
   [Keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version))
 
