@@ -25,10 +25,22 @@ def has(pattern: str) -> bool:
 
 
 def test_the_experiment_needs_a_lock_in_the_script():
-    assert has(r"fcntl\.flock"), section()  # flock(1) 은 macOS 에 없다 — 파이썬 fcntl 로
+    """글자 `flock` 이 아니라 **락의 뜻**을 잠근다 — macOS 에도 있는 락(`fcntl.flock` 또는
+    `lockf`)이 예시에 있고, 그 락을 못 잡으면 스크립트가 **멈춘다**(`|| exit`). `flock(1)` 만 덜렁
+    있으면 macOS 에서 `command not found` 뒤 락 없이 heavy 구간이 돈다(리뷰 #106 B-1)."""
+    assert has(r"fcntl\.flock|\blockf\b"), section()  # flock(1) 은 macOS 에 없다
+    assert has(r"(fcntl\.flock|lockf|flock)[^\n]*\|\| exit \d"), section()  # 못 잡으면 중단
+    assert not has(r"^flock 9\s*(#.*)?$"), section()  # 폴백 없는 flock(1) 한 줄
     assert has(r"machine-wide lock"), section()
-    assert not has(r"^flock 9"), section()
     assert has(r"only if the heavy phase is serialised"), section()
+    assert has(r"must not overlap"), section()  # 락이 걸렸는지 보는 법
+
+
+def test_the_changelog_names_the_section():
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    m = re.search(r"^## \[Unreleased\]\n(.*?)^## \[0\.", text, re.M | re.S)
+    assert m, "no [Unreleased] section above the first release"
+    assert re.search(r"Two lanes for a gate.*?pull/106", m.group(1), re.S), m.group(1)
 
 
 def test_the_overlap_is_light_with_light():

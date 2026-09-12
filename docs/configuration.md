@@ -440,11 +440,16 @@ argv = ["/bin/bash", "scripts/local_ci.sh"]
 ```sh
 # scripts/local_ci.sh — the heavy section takes a machine-wide lock.
 # `flock(1)` is not on macOS; Python's fcntl.flock on an inherited fd works on macOS and Linux
-# and the lock stays with the shell's fd 9 until the script exits.
-exec 9>/tmp/gate-heavy.lock
-python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'   # waits while another gate job is in its heavy section
+# and the lock stays with the shell's fd 9 until the script exits. If the lock cannot be taken
+# the script must stop (`|| exit 3`) — a heavy section that runs unlocked is exactly what this
+# section exists to prevent, and `local_ci.sh` without `set -e` would carry on past the error.
+exec 9>/tmp/gate-heavy.lock || exit 3
+python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)' || exit 3   # waits while another gate job is in its heavy section
 flutter test ...
 ```
+
+To see that the lock holds, submit two `gate` jobs back to back and compare the heavy steps in
+their `step_timeline` (or the timestamps in their logs): the heavy sections must not overlap.
 
 The lock is machine-wide: lanes of `rcm serve` and of an `rcm worker` on the same machine share it,
 which is what you want. The fd stays locked in child processes the script starts, so the heavy
