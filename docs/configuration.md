@@ -438,24 +438,35 @@ argv = ["/bin/bash", "scripts/local_ci.sh"]
 ```
 
 ```sh
-# scripts/local_ci.sh — the heavy section takes a machine-wide lock
+# scripts/local_ci.sh — the heavy section takes a machine-wide lock.
+# `flock(1)` is not on macOS; Python's fcntl.flock on an inherited fd works on macOS and Linux
+# and the lock stays with the shell's fd 9 until the script exits.
 exec 9>/tmp/gate-heavy.lock
-flock 9            # waits while another gate job is in its heavy section
+python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'   # waits while another gate job is in its heavy section
 flutter test ...
 ```
+
+The lock is machine-wide: lanes of `rcm serve` and of an `rcm worker` on the same machine share it,
+which is what you want. The fd stays locked in child processes the script starts, so the heavy
+section may be a whole sub-script.
 
 What the admission gate does and does not do:
 
 - It is decided **once, when a lane picks a job up**. Two jobs that are already running can both
   enter their heavy section; the CPU cap does not stop that. The lock in the script does.
+- The overlap you actually get: while job A is in its light phase, job B is admitted and both
+  light phases run together; while A is in its heavy phase (CPU near 100 %), lane 2 stays closed
+  and B waits at the gate — so the win is the light phases overlapping, not B's light phase running
+  under A's heavy one.
 - Removing `concurrency_group` removes the server's own guarantee that two `gate` jobs never
   overlap. Do that only when the script holds a lock like the one above; otherwise keep the group.
 - There is no memory-based admission on purpose: macOS and Linux disagree about what "used" means
   (PLAN decision 42), so the gate reads CPU only. If memory pressure is your limit, keep
   `lanes = 1` or narrow the heavy section.
 - ETA estimates assume the lanes are independent. While two jobs overlap, the medians drift; the
-  `concurrent_at_start` field on each job says how many jobs were running when it started, so the
-  effect can be measured afterwards, and a finished job's `step_timeline` shows which step paid.
+  `concurrent_at_start` field on a finished job's document (`GET /jobs/<id>`, `rcm wait --json`)
+  says how many jobs were running when it started, so the effect can be measured afterwards, and
+  the same document's `step_timeline` shows which step paid.
 
 ## Second build machine (remote worker)
 

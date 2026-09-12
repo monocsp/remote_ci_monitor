@@ -25,8 +25,14 @@ def has(pattern: str) -> bool:
 
 
 def test_the_experiment_needs_a_lock_in_the_script():
-    assert has(r"flock|machine-wide lock"), section()
+    assert has(r"fcntl\.flock"), section()  # flock(1) 은 macOS 에 없다 — 파이썬 fcntl 로
+    assert has(r"machine-wide lock"), section()
+    assert not has(r"^flock 9"), section()
     assert has(r"only if the heavy phase is serialised"), section()
+
+
+def test_the_overlap_is_light_with_light():
+    assert has(r"light phases run together"), section()
 
 
 def test_admission_is_not_a_section_lock():
@@ -45,6 +51,7 @@ def test_no_memory_admission_by_decision_42():
 
 def test_measurement_hooks_are_named():
     assert has(r"concurrent_at_start"), section()
+    assert has(r"GET /jobs/<id>"), section()  # 어디서 읽는지도 말한다(#108 이 노출한다)
     assert has(r"step_timeline"), section()
 
 
