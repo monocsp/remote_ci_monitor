@@ -1,26 +1,31 @@
 # 자동 태그. main 에 push 가 오면 __version__ 을 읽어 태그 `v<X>` 가 없으면 그 커밋에 만들고, 같은 run 에서
 # release.yml 을 workflow_call 로 불러 wheel · sdist · GitHub Release 를 만든다(docs/gate-replay-fixes-workplan.md
 # §3 I8-2 · 결정 82). 왜 같은 run 에서 부르나: GITHUB_TOKEN 이 만든 태그는 다른 워크플로(`on: push: tags`)를
-# 깨우지 않는다 — GitHub 의 규칙. 태그가 이미 그 커밋에 있으면 무동작(같은 버전 재푸시는 no-op), 다른 커밋을
-# 가리키면 거절(버전을 재사용한 것이다). 브랜치는 절대 건드리지 않는다 — 태그 ref 하나만 push 한다.
+# 깨우지 않는다 — GitHub 의 규칙. 태그가 이미 있고 그 커밋이 GITHUB_SHA 의 조상이면 무동작(버전을 안 올린
+# main push — 문서만 고친 머지, 릴리스 뒤 후속 머지 — 는 전부 이 경우다 · M5l L6 · pr-85 리뷰 B-1), 조상이
+# 아닌 커밋을 가리키면 거절(옛 버전 번호로 되돌린 것, 즉 버전 재사용). 브랜치는 절대 건드리지 않는다 — 태그
+# ref 하나만 push 한다. 권한은 잡 수준이다 — 태그를 미는 `tag` 잡만 contents: write 가 필요하다.
 name: Tag release
 
 on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   tag:
     name: tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       created: ${{ steps.tag.outputs.created }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 조상 검사(merge-base)는 태그 커밋에서 GITHUB_SHA 까지의 이력이 있어야 한다 — 얕은 클론(깊이 1)에선
+          # 태그 커밋을 받아 와도 그 사이가 끊겨 있어 「조상 아님」으로 잘못 거절한다. 전체 이력을 받는다.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -30,7 +35,7 @@ jobs:
           VER=$(python -c "import sys; sys.path.insert(0, 'src'); import remote_ci_monitor as m; print(m.__version__)")
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
           echo "version $VER → tag v$VER"
-      - name: 태그가 이미 있으면 — 같은 커밋이면 무동작, 다른 커밋이면 거절
+      - name: 태그가 이미 있으면 — 그 커밋이 GITHUB_SHA 의 조상이면 무동작, 아니면 거절
         id: tag
         env:
           TAG: ${{ steps.version.outputs.tag }}
@@ -38,12 +43,15 @@ jobs:
           # 주석 달린 태그는 `^{}` 줄(벗겨낸 커밋)이 뒤에 붙는다 — 마지막 줄이 언제나 커밋이다
           AT=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -n1 | cut -f1)
           if [ -n "$AT" ]; then
-            if [ "$AT" = "$GITHUB_SHA" ]; then
-              echo "tag $TAG already points at $GITHUB_SHA — nothing to do"
+            # 태그 커밋이 로컬에 없으면 merge-base 가 오류(128)로 「조상 아님」이 된다 — checkout 이 무엇을
+            # 받았든 그 태그만은 확실히 받아 둔다(`+` 라 이미 있어도 clobber 오류가 없다)
+            git fetch -q origin "+refs/tags/$TAG:refs/tags/$TAG"
+            if git merge-base --is-ancestor "$AT" "$GITHUB_SHA"; then
+              echo "tag $TAG already points at $AT, an ancestor of $GITHUB_SHA — __version__ was not bumped, nothing to do"
               echo "created=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::tag $TAG already exists at $AT, not at $GITHUB_SHA — bump __version__ instead of reusing it"
+            echo "::error::tag $TAG already exists at $AT, which is not an ancestor of $GITHUB_SHA — bump __version__ instead of reusing it"
             exit 1
           fi
           git config user.name "github-actions[bot]"
@@ -54,6 +62,7 @@ jobs:
           echo "created tag $TAG at $GITHUB_SHA"
 
   # 호출된 워크플로의 잡은 이 잡의 권한을 넘지 못한다 — release.yml 의 잡 수준 권한(contents · id-token)을 그대로 준다.
+  # `secrets: inherit` 는 없다 — release.yml 은 비밀을 하나도 안 쓴다(PyPI 는 trusted publishing, gh 는 github.token).
   release:
     name: release
     needs: tag
@@ -64,4 +73,3 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.tag.outputs.tag }}
-    secrets: inherit

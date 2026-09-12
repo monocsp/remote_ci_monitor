@@ -1,13 +1,17 @@
-"""자동 태그 워크플로 문면 잠금 (docs/gate-replay-fixes-workplan.md §3 I8-2 · 결정 82).
+"""자동 태그 워크플로 문면 잠금 (docs/gate-replay-fixes-workplan.md §3 I8-2 · 결정 82 · M5l L6).
 
 `main` 에 push 된 `__version__` 의 태그 `v<X>` 가 없으면 `tag-release.yml` 이 만들고, 같은 run 에서
 `release.yml` 을 `workflow_call` 로 부른다 — `GITHUB_TOKEN` 이 만든 태그는 다른 워크플로를 깨우지
-않는다는 GitHub 의 규칙 때문이다. YAML 파서는 없다(표준 라이브러리만) — tests/test_release_files.py
-와 같은 방식으로 정규식과 줄 스캔으로 문면만 본다. `run: |` 블록은 `bash -n` 까지만.
+않는다는 GitHub 의 규칙 때문이다. 태그가 이미 있으면 그 커밋이 `GITHUB_SHA` 의 조상일 때만
+무동작이고(버전을 안 올린 main push), 아니면 거절한다(버전 재사용 · pr-85 리뷰 B-1). YAML 파서는
+없다(표준 라이브러리만) — tests/test_release_files.py 와 같은 방식으로 정규식과 줄 스캔으로 문면을
+보고, `run: |` 블록은 `bash -n` 을 통과해야 한다. 태그 단계만은 가짜 `git` 아래서 실제로 돌려 세
+분기의 종료 코드를 잠근다(리뷰 C-1 — 문면만으로는 「조상 → 0 · 아니면 → 1」이 잠기지 않는다).
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -112,9 +116,21 @@ def test_tag_release_triggers_only_on_push_to_main():
         assert not has(on, rf"^\s*{other}:"), f"`on.{other}` must not exist — main push only"
 
 
-def test_tag_release_declares_contents_write_at_workflow_level():
+def test_tag_release_grants_contents_write_to_the_tag_job_only():
     text = read(TAG_RELEASE)
-    assert permissions_of(top_block(text, "permissions")) == {"contents": "write"}
+    # 최소 권한: 워크플로 수준 permissions 는 없고, 태그를 미는 `tag` 잡만 contents: write
+    # (리뷰 B-3)
+    assert not has(text, r"^permissions:"), "permissions belong to the jobs, not the workflow"
+    assert permissions_of(job_block(text, "tag")) == {"contents": "write"}
+
+
+def test_tag_release_checks_out_full_history_for_the_ancestor_check():
+    tag = job_block(read(TAG_RELEASE), "tag")
+    checkout = re.search(r"uses: actions/checkout@v4\n(?P<with>(\s{8,}[^\n]*\n)+)", tag)
+    assert checkout, "no checkout with `with:`"
+    assert has(checkout.group("with"), r"^\s*fetch-depth:\s*0\s*$"), (
+        "merge-base needs the history between the tag and GITHUB_SHA — not a depth-1 clone"
+    )
 
 
 def test_tag_release_reads_version_from_the_package():
@@ -125,16 +141,23 @@ def test_tag_release_reads_version_from_the_package():
     assert "import remote_ci_monitor" in tag
 
 
-def test_tag_release_is_idempotent_and_refuses_a_reused_version():
+def test_tag_release_is_a_noop_when_the_tag_is_an_ancestor_and_refuses_otherwise():
     tag = job_block(read(TAG_RELEASE), "tag")
     assert has(tag, r"git ls-remote --tags origin[^\n]*refs/tags/"), (
         "existence check is `ls-remote`"
     )
-    # 같은 커밋에 이미 있으면 무동작(exit 0) · 다른 커밋을 가리키면 거절(::error:: + exit 1)
-    assert has(tag, r'"\$GITHUB_SHA"'), "must compare the existing tag against GITHUB_SHA"
-    assert has(tag, r"::error::[^\n]*(already|exists|points)[^\n]*")
-    assert has(tag, r"^\s*exit 1\s*$")
-    assert has(tag, r"^\s*exit 0\s*$")
+    # 태그 커밋을 확실히 받아 둔다(없으면 merge-base 가 128 로 「조상 아님」이 된다)
+    assert has(tag, r'git fetch [^\n]*"\+refs/tags/\$TAG:refs/tags/\$TAG"')
+    # 조상이면 무동작(exit 0) · 아니면 거절(::error:: + exit 1)
+    # — 같은 커밋 비교(`= "$GITHUB_SHA"`)가 규칙이 아니다
+    ancestor = r'if git merge-base --is-ancestor "\$AT" "\$GITHUB_SHA"; then\n'
+    m = re.search(ancestor + r"(?P<yes>(?:[^\n]*\n)*?)\s*fi\n(?P<no>(?:[^\n]*\n)*?)\s*fi\n", tag)
+    assert m, 'no `if git merge-base --is-ancestor "$AT" "$GITHUB_SHA"` branch'
+    assert has(m.group("yes"), r"^\s*exit 0\s*$") and not has(m.group("yes"), r"::error::")
+    assert has(m.group("yes"), r'echo "created=false" >> "\$GITHUB_OUTPUT"')
+    assert has(m.group("no"), r"::error::[^\n]*(already|exists|points)[^\n]*ancestor")
+    assert has(m.group("no"), r"^\s*exit 1\s*$")
+    assert not has(tag, r'\[ "\$AT" = "\$GITHUB_SHA" \]'), "same-commit equality is not the rule"
 
 
 def test_tag_release_creates_an_annotated_tag_at_github_sha_and_pushes_it():
@@ -154,7 +177,10 @@ def test_tag_release_calls_release_workflow_with_the_tag():
     assert has(release, r"^\s*with:\s*$") and has(
         release, r"^\s*tag:\s*\$\{\{\s*needs\.tag\.outputs\.tag\s*\}\}"
     )
-    assert has(release, r"^\s*secrets:\s*inherit\s*$")
+    assert not has(release, r"^\s*secrets:"), (
+        "release.yml uses no secrets — do not hand it every repository secret"
+    )
+    assert "secrets." not in read(RELEASE), "release.yml must stay secret-free for that to hold"
     assert has(release, r"^\s*steps:") is False, "a `uses:` job has no steps"
     # 태그 잡은 릴리스 잡이 읽는 두 출력을 낸다
     tag = job_block(text, "tag")
@@ -201,14 +227,15 @@ def test_release_resolves_the_tag_once_per_job_and_never_bare():
     ]
     assert not bare, f"bare github.ref_name (wrong ref when called): {bare}"
     assert "GITHUB_REF_NAME" not in text and "GITHUB_REF" not in text
-    for job in ("build", "github-release"):
+    for job in ("build", "smoke", "github-release"):
         head = job_block(text, job).split("steps:", 1)[0]
         assert has(head, r"^\s*TAG:\s*\$\{\{\s*inputs\.tag \|\| github\.ref_name\s*\}\}"), job
 
 
 def test_release_checks_out_the_tag_it_was_given():
     text = read(RELEASE)
-    for job in ("build", "github-release"):
+    # smoke 도 포함 — 불려 왔을 때 기본 ref 는 호출한 쪽의 GITHUB_SHA 다(리뷰 B-4)
+    for job in ("build", "smoke", "github-release"):
         block = job_block(text, job)
         assert has(block, r"^\s*ref:\s*refs/tags/\$\{\{\s*env\.TAG\s*\}\}"), f"{job}: checkout ref"
     build = job_block(text, "build")
@@ -231,6 +258,83 @@ def test_run_blocks_parse_as_bash(path: Path):
         assert proc.returncode == 0, f"{proc.stderr}\n---\n{script}"
 
 
+# ── 태그 단계를 가짜 git 아래서 실제로 돌린다 (리뷰 C-1) ─────────────────────
+
+FAKE_GIT = """#!/bin/bash
+# 가짜 git: ls-remote 는 STUB_AT 가 있을 때만 한 줄, merge-base 는 STUB_ANCESTOR 로 종료,
+# 나머지는 호출만 기록한다
+echo "$*" >> "$STUB_CALLS"
+case "$1" in
+  ls-remote) [ -n "$STUB_AT" ] && printf '%s\\trefs/tags/%s\\n' "$STUB_AT" "$TAG"; exit 0 ;;
+  merge-base) exit "$STUB_ANCESTOR" ;;
+  *) exit 0 ;;
+esac
+"""
+
+
+def tag_step_script() -> str:
+    (script,) = [s for s in run_scripts(read(TAG_RELEASE)) if "ls-remote" in s]
+    return script
+
+
+def run_tag_step(tmp_path: Path, *, at: str, ancestor: int) -> tuple[int, str, list[str]]:
+    """태그 단계 스크립트를 가짜 git 으로 실행 — (종료 코드, GITHUB_OUTPUT, git 호출 목록)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "git").write_text(FAKE_GIT)
+    (bindir / "git").chmod(0o755)
+    out = tmp_path / "output"
+    out.touch()
+    calls = tmp_path / "calls"
+    calls.touch()
+    env = {
+        "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "TAG": "v9.9.9",
+        "GITHUB_SHA": "b" * 40,
+        "GITHUB_OUTPUT": str(out),
+        "STUB_AT": at,
+        "STUB_ANCESTOR": str(ancestor),
+        "STUB_CALLS": str(calls),
+    }
+    proc = subprocess.run(
+        ["bash", "-e", "-o", "pipefail"],
+        input=tag_step_script(),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode, out.read_text(), calls.read_text().splitlines()
+
+
+@needs_bash
+def test_tag_step_creates_and_pushes_the_tag_when_it_does_not_exist(tmp_path: Path):
+    code, output, calls = run_tag_step(tmp_path, at="", ancestor=1)
+    assert code == 0
+    assert "created=true" in output
+    assert any(c.startswith("tag -a v9.9.9") and c.endswith("b" * 40) for c in calls), calls
+    assert "push origin refs/tags/v9.9.9" in calls
+
+
+@needs_bash
+def test_tag_step_is_a_noop_when_the_existing_tag_is_an_ancestor(tmp_path: Path):
+    # 버전을 안 올린 main push: 태그는 옛 릴리스 커밋(조상)에 있다
+    # → exit 0 · created=false · push 없음
+    code, output, calls = run_tag_step(tmp_path, at="a" * 40, ancestor=0)
+    assert code == 0
+    assert "created=false" in output
+    assert any(c.startswith("merge-base --is-ancestor " + "a" * 40 + " " + "b" * 40) for c in calls)
+    assert not any(c.startswith(("tag ", "push ")) for c in calls), calls
+
+
+@needs_bash
+def test_tag_step_refuses_when_the_existing_tag_is_not_an_ancestor(tmp_path: Path):
+    # 버전 재사용: 태그가 GITHUB_SHA 의 조상이 아닌 커밋에 있다 → exit 1 · 출력 없음 · push 없음
+    code, output, calls = run_tag_step(tmp_path, at="a" * 40, ancestor=1)
+    assert code == 1
+    assert "created=" not in output
+    assert not any(c.startswith(("tag ", "push ")) for c in calls), calls
+
+
 # ── CONTRIBUTING 「Releasing」 ────────────────────────────────────────────────
 
 
@@ -242,5 +346,12 @@ def test_contributing_releasing_says_the_tag_is_automatic():
     nxt = re.search(r"^##\s", rest, re.M)
     sec = rest[: nxt.start()] if nxt else rest
     assert "tag-release" in sec
-    assert has(sec, r"git tag v"), "the hand-pushed tag remains the re-run path"
     assert not has(sec, r"^3\.\s+`git tag"), "step 3 is no longer a manual tag push"
+    # 무동작의 뜻: 태그가 머지 커밋의 조상 (리뷰 D-1)
+    assert has(sec, r"no-op[^\n]*\n?[^\n]*ancestor"), "say when a merge is a no-op"
+    # 재실행 길 둘: Actions 의 Re-run, 또는 태그 삭제 후 재푸시
+    # — 태그만 다시 미는 것은 무동작 (리뷰 B-2)
+    assert has(sec, r"Re-run"), "the Actions re-run path"
+    assert has(sec, r"git push origin :refs/tags/v"), "delete the tag before pushing it again"
+    assert has(sec, r"git tag (-f )?v[\d.]+ <main-sha> && git push origin v"), "the hand tag"
+    assert has(sec, r"alone[^\n]*\n?[^\n]*no-op"), "`git push origin vX` alone starts nothing"

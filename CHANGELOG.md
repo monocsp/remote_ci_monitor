@@ -7,6 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A `main` merge that does not bump `__version__` no longer fails the `Tag release` run.** The
+  existing `v<X>` tag is a no-op when it points at an ancestor of the merge commit (a docs-only
+  merge, a follow-up after a release); only a tag on a commit that is *not* an ancestor — a reused
+  version number — still fails. Re-running a release whose tag already exists is documented
+  ([Releasing](CONTRIBUTING.md#releasing)): Actions **Re-run**, or delete the tag and push it again.
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed
