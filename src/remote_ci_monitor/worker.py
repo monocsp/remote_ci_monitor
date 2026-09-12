@@ -54,6 +54,7 @@ from remote_ci_monitor.runner import (
     MAX_LINE_BYTES,
     POLL_SECONDS,
     READ_CHUNK,
+    RequiredToolMissing,
     RunnerError,
     RunSpec,
     run_job,
@@ -397,6 +398,27 @@ class Worker(threading.Thread):
         out.bundle_path.replace(dest / "bundle.tar")
         return replace(out, bundle_path=dest / "bundle.tar")
 
+    def _close_cancelled_before_start(self, job: Job) -> None:
+        """`cancelling` 인 잡을 프로세스 없이 `cancelled` 로 — preflight 가 취소를 덮지 않게
+        (M5l S4). 그새 다른 종료 상태가 됐다면 아무것도 하지 않는다(`finish` 가 거절한다)."""
+        current = self.store.get_job(job.id) or job
+        if current.state != CANCELLING:
+            return
+        if current.cancel is not None:
+            text, code, args = outcome.summary("cancelled_by", by=current.cancel.by)
+        else:
+            text, code, args = None, None, {}
+        self.store.finish(
+            job.id,
+            CANCELLED,
+            now=self.now_fn(),
+            exit_code=None,
+            summary=text,
+            summary_code=code,
+            summary_args=args,
+            only_from=(CANCELLING,),
+        )
+
     def _fail(self, job: Job, summary: str) -> None:
         self.store.finish(job.id, FAILED, now=self.now_fn(), exit_code=None, summary=summary[:200])
 
@@ -449,6 +471,7 @@ class Worker(threading.Thread):
             argv=tuple(preset.argv),
             env=preset.env,
             env_passthrough=tuple(preset.env_passthrough),
+            requires=tuple(preset.requires),
             timeout_seconds=job.timeout_seconds,
             inputs=job.inputs,
             requester_label=job.requester.label,
@@ -466,6 +489,28 @@ class Worker(threading.Thread):
                 environ=self.environ,
                 materialize=lambda _spec: self._materialize(job, preset, workspace, log_path),
             )
+        except RequiredToolMissing as e:
+            # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다(M5j G4 · 결정 85). 서버가 만든
+            # 코드라 라벨(`failed_step`·`last_step`)도 대장 행도 없다(M5h 불변식). 인자는 이름
+            # 하나뿐이다 — PATH 와 경로는 상태에 싣지 않는다(PLAN 「보안」).
+            text, code, args = outcome.summary("tool_missing", tool=e.public_name)
+            closed = self.store.finish(
+                job.id,
+                FAILED,
+                now=self.now_fn(),
+                exit_code=None,
+                summary=text,
+                summary_code=code,
+                summary_args=args,
+                only_from=("running",),
+            )
+            if not closed:
+                # 검사와 finish 사이에 `cancelling` 이 됐다 — 취소가 이긴다(M5l S4). 프로세스는
+                # 없었으니 여느 취소처럼 요청자 이름으로 닫는다.
+                self._close_cancelled_before_start(job)
+            if not self.config.server.keep_workspace_on_failure:
+                shutil.rmtree(workspace, ignore_errors=True)
+            return
         except (MaterializeError, RunnerError) as e:
             self._fail(job, str(e))
             return

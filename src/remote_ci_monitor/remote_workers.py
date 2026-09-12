@@ -21,11 +21,13 @@ HTTP 핸들러는 얇게 여기를 부른다.
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import sqlite3
 import tarfile
 import threading
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -112,6 +114,39 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
     """`store.finish` 에 바로 넣을 요약 세 값(결정 37)."""
     text, code, clean = outcome.summary(code, **args)
     return {"summary": text, "summary_code": code, "summary_args": clean}
+
+
+#: 워커가 finish 에 실어 보낼 수 있는 구조화된 요약 코드 — 프로세스가 뜨기 **전**의 실패뿐이다
+#: (M5j G4). 나머지 코드는 서버가 마커·종료 코드로 스스로 만든다.
+WORKER_PREFLIGHT_CODES = ("tool_missing",)
+MAX_TOOL_NAME = 120
+
+
+def _preflight_summary(
+    body: dict[str, Any], reported: Any, rc: Any
+) -> tuple[str, str, dict[str, Any]] | None:
+    """finish 의 `summary_code`/`summary_args` 를 검증해 `(문장, 코드, 인자)` 로. 키가 없으면
+    None(옛 워커). 아는 코드만, `failed` + `exit_code null` 일 때만 받고, 인자는 **도구 이름
+    하나**로 줄인다 — 워커가 PATH 를 실어 보내도 공개 상태에 남지 않는다(PLAN 「보안」)."""
+    code = body.get("summary_code")
+    if code is None:
+        return None
+    if code not in WORKER_PREFLIGHT_CODES:
+        raise _api_error(400, f"summary_code must be one of {', '.join(WORKER_PREFLIGHT_CODES)}")
+    if reported != FAILED or rc is not None:
+        raise _api_error(400, f"summary_code {code} needs outcome failed and exit_code null")
+    args = body.get("summary_args")
+    if not isinstance(args, dict):
+        raise _api_error(400, "summary_args must be an object")
+    tool = args.get("tool")
+    if not isinstance(tool, str) or len(tool) > MAX_TOOL_NAME:
+        raise _api_error(400, "summary_args.tool must be a short tool name")
+    # 절대경로로 선언한 도구는 로컬 워커처럼 **이름(basename)만** 남긴다 — 워커가 경로를 실어
+    # 보내도 `/api/status.recent` 로 새지 않는다(검증 G4.15 · PLAN 「보안」).
+    tool = os.path.basename(tool.strip())
+    if not tool:
+        raise _api_error(400, "summary_args.tool must be a short tool name")
+    return outcome.summary(code, tool=tool)
 
 
 def _stream_to_file(stream: Any, dest: Path, length: int) -> str:
@@ -380,6 +415,8 @@ class RemoteWorkersMixin:
                 "timeout_seconds": preset.timeout_seconds,
                 "env": dict(preset.env),
                 "env_passthrough": list(preset.env_passthrough),
+                # 워커가 자기 최종 환경에서 같은 규칙으로 검사한다(M5j G4). 옛 워커는 무시한다.
+                "requires": list(preset.requires),
                 "source_modes": list(preset.source_modes),
                 "repo": preset.repo or None,
             }
@@ -674,6 +711,7 @@ class RemoteWorkersMixin:
         given = body.get("summary")
         if given is not None and not isinstance(given, str):
             raise _api_error(400, "summary must be a string")
+        preflight = _preflight_summary(body, reported, rc)
         now = self.now_fn()
         # 실행 종료 시각(선택). 수집·업로드가 끼어도 v1 의 `finished_at`·`job_seconds` 가
         # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다.
@@ -685,6 +723,11 @@ class RemoteWorkersMixin:
         lost_text, lost_code, lost_args = outcome.summary("worker_stopped_while_running")
         if given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
             lost_text, lost_code, lost_args = given[:200], None, {}
+        # 프로세스가 뜨기 전의 실패(`tool_missing`)가 사용자의 취소를 덮어서는 안 된다 — 워커가
+        # 취소를 아직 못 들었어도 잡이 `cancelling` 이면 `cancelled` 로 닫는다(M5l S4).
+        if preflight is not None and job.state == CANCELLING:
+            preflight = None
+            reported = CANCELLED
         oc = outcome_for(
             job,
             markers,
@@ -700,7 +743,13 @@ class RemoteWorkersMixin:
         )
         state, summary, failed_step = oc.state, oc.summary, oc.failed_step
         code, args = oc.code, oc.args
-        if state in (FAILED, SUCCEEDED) and not summary:
+        if preflight is not None:
+            # 프로세스가 뜨기 전의 실패 — 서버가 만든 코드이지 스크립트의 선언이 아니다. 라벨도
+            # 대장 행도 없이 로컬 워커와 같은 모양으로 닫는다(M5h 불변식 · 결정 85).
+            summary, code, args = preflight
+            oc = replace(oc, failed_step=None, last_step=None, fail_names=(), fail_truncated=False)
+            failed_step = None
+        elif state in (FAILED, SUCCEEDED) and not summary:
             if given:
                 summary, code, args = given[:200], None, {}
             elif state == FAILED:

@@ -33,6 +33,7 @@ expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
 artifacts = ["test/**/goldens/*.png"]   # files the job produces that sessions may fetch back
 artifacts_on = "always"                 # "always" | "failure" — collect only when the job fails
+requires = ["fvm", "gitleaks"]          # tools the job needs — looked up before it starts
 [[presets.inputs]]
 name = "scope"
 type = "choice"
@@ -72,9 +73,10 @@ failed: just_audio_screen_music_port_test.dart — 2 of the last 8 gate runs · 
 ```
 
 The window is `failure_window_jobs` (20) finished jobs of that key — cancelled and lost jobs say
-nothing, so they are left out — and nothing is judged until there are `failure_min_jobs` (3) of
-them. Runs that failed without naming anything stay in the denominator and are reported
-separately, so the count can understate a flaky test but never overstate it.
+nothing, so they are left out, and so is a job that ended `tool_missing` before its script could
+start — and nothing is judged until there are `failure_min_jobs` (3) of them. Runs that failed
+without naming anything stay in the denominator and are reported separately, so the count can
+understate a flaky test but never overstate it.
 
 ### Deploy presets: run a remote ref instead of an upload
 
@@ -209,6 +211,51 @@ never collected.
 **A bundle is a way to fetch, not a place to keep.** It lives `artifact_retention_hours` (24) —
 about as long as a workspace, and far less than a log. Put what you will want next week in the log
 and what you will want in the next hour in the bundle.
+
+### Required tools
+
+A gate that cannot find `fvm` does not stop — it falls through to whatever `flutter` is on the
+path, builds with the wrong SDK, and comes back green. `requires` names the tools the job must
+find, and the job does not start without them:
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+requires = ["fvm", "gitleaks", "/opt/homebrew/bin/gh"]   # names or absolute paths
+```
+
+Right before the process starts — on the local lane or on a remote worker alike — rcm looks each
+entry up in the **environment the job will actually run in**: the `env_passthrough` allowlist,
+then `[presets.env]`. A relative path, an empty entry, a duplicate, or an absolute path that does
+not end in a tool name (`/opt/bin/`) is a config error at start; without the key nothing changes.
+If the job's environment has no `PATH`, the check uses an empty one, never the server's own. A
+relative `PATH` entry (`tools`, `.`, or an empty entry between two colons) means the **job's
+workspace**, because that is where the process starts — a tool that only exists next to the
+server's own working directory does not count. When everything is found the job log gets one
+line, `[rcm] required tools: fvm ok · gitleaks ok`; when something is missing the job does not
+run and ends `failed` with `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}` —
+the name only. No `PATH` and no path appears in the job document, the queue or the log: an entry
+declared as `/opt/homebrew/bin/gh` shows up everywhere as `gh`. A `tool_missing` failure carries
+no `failed_step`, no `last_step` and no `failed: …` line: the tool was missing before the script
+could say anything. A job cancelled while its workspace was still being prepared ends `cancelled`,
+not `tool_missing` — the check runs only for a job nobody has stopped.
+
+**The launchd trap.** A service started by `launchd` (or `systemd`) has a short `PATH` —
+`/usr/bin:/bin:/usr/sbin:/sbin` — so `fvm` and `gitleaks` from Homebrew are found in your shell and
+not in the job, and `requires` is what makes that visible. The fix is a `PATH` the job owns:
+
+```toml
+[presets.env]
+PATH = "/Users/build/fvm/default/bin:/opt/homebrew/bin:/usr/bin:/bin"
+```
+
+`rcm check --config server.toml` has a `local preset tools` row that runs the same lookup for every
+preset that declares `requires` — in **this shell**, with this shell's environment. A tool this
+shell cannot find makes the row FAIL and `rcm check` exit 1. It catches a typo and a missing
+install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` here says nothing
+about the job. The check that counts is the one at job start. The row names each entry the way
+the job log does — by its basename, never by the path you declared.
 
 ### Naming what failed
 
