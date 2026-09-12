@@ -67,7 +67,7 @@ def test_measurement_hooks_are_named():
     # 값은 자기 포함(`store.concurrent_at_start` — 혼자 돌면 1). 「돌던 잡 수」만 적으면 0 으로
     # 읽는다(M5l S12.2 실측: 첫 잡 1 · 둘째 2).
     assert has(r"itself included"), section()
-    assert has(r"ran alone[^\n]*reads `1`"), section()
+    assert has(r"ran alone\s+reads `1`"), section()
     assert has(r"step_timeline"), section()
 
 
