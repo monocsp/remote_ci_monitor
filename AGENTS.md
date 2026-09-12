@@ -57,11 +57,14 @@ empty. Develop in a `git worktree` with its own `.venv`, and give a test server 
 `port` and `data_dir` — never the production ones.
 
 `tools/guard_production.py` enforces this as a `PreToolUse` hook (`.claude/settings.json`). It
-finds the production checkout from the machine's own editable install, refuses edits to it and to
-the server's config and data, refuses opening the production database with a build other than
-the service's own (`rcm token …` against the production config or data — a different build
-migrates the database on open; `rcm gc --dry-run --config` is allowed, it plans on a copy), and
-asks before a deploy. On a machine with no such install it does nothing. The procedure is in
+finds the production checkout from the machine's own editable install — the service venv is the
+one whose `direct_url.json` points at the primary checkout, never the `rcm` that happens to be on
+`PATH` — refuses edits to it and to the server's config and data, refuses opening the production
+database with a build other than the service's own (`rcm token …`, `rcm serve`, `rcm worker`
+whose effective `data_dir` is production: the production config, a **copy** of it, or
+`RCM_SERVER_DATA_DIR` — a different build migrates the database on open; `rcm gc --dry-run
+--config` is allowed, it plans on a copy), and asks before a deploy. On a machine with no such
+install it does nothing. The procedure is in
 [operating a build machine](docs/operating.md#from-a-git-checkout).
 
 ## Checks before a pull request
