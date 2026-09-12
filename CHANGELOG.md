@@ -16,8 +16,10 @@ of a key bumps that number and is listed here.
   `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}`, the name only, no `PATH` and
   no path anywhere. The job log says `[rcm] required tools: fvm ok · gitleaks ok` or
   `[rcm] required tool fvm: missing`. Such a failure carries no `failed_step`, no `last_step` and no
-  failure ledger line. Remote workers get `requires` in the claim and report the structured code on
-  finish; older workers keep working. `rcm check --config` gains a `local preset tools` row — a
+  failure ledger line, and it is left out of the failure window like a cancelled job — three real
+  failures after one `tool_missing` read "every one of the last 3", not "3 of the last 4". Remote
+  workers get `requires` in the claim and report the structured code on finish (a path in the
+  reported name is cut to the name); older workers keep working. `rcm check --config` gains a `local preset tools` row — a
   check in your shell, explicitly not the service's, whose `launchd` `PATH` is the usual reason a
   tool goes missing (`[presets.env] PATH = …` is the fix).
   ([Configuration](docs/configuration.md#required-tools),

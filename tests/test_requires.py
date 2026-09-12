@@ -281,6 +281,39 @@ def test_a_missing_absolute_path_reports_only_the_tool_name(wenv):
     assert "[rcm] required tool /nonexistent/dir/fvm: missing" in log
 
 
+def test_a_tool_missing_job_is_left_out_of_the_failure_window(wenv):
+    """검증 G4.4(명세 §2 G4 「대장 행 없음」의 귀결 · 결정 68 의 분모): `tool_missing` 잡은 같은
+    key 의 창(`window`·`window_unnamed`)에 **들지 않는다** — 취소·유실처럼 스크립트에 대해 아무
+    말도 못 한 잡이다. 세지면 결정적 실패 셋이 「4 중 3 · intermittent?」 로 보인다(8801 실측)."""
+    from datetime import UTC, datetime, timedelta
+
+    store, cfg = wenv
+    t0 = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    ids = [enqueue(store, cfg, "needs-missing") for _ in range(4)]
+    tm, *named = ids
+    text, code, args = outcome.summary("tool_missing", tool=MISSING)
+    assert store.finish(
+        tm, FAILED, now=t0, exit_code=None, summary=text, summary_code=code, summary_args=args
+    )
+    for i, jid in enumerate(named, start=1):
+        assert store.finish(
+            jid,
+            FAILED,
+            now=t0 + timedelta(seconds=10 * i),
+            exit_code=1,
+            failed_step="build",
+            fail_names=["build"],
+        )
+    key = store.get_job(named[-1]).key
+    at = t0 + timedelta(seconds=30)
+    rows, window, unnamed = store.failure_stats(named[-1], key, at, window=20)
+    assert (window, unnamed) == (3, 0), (window, unnamed)
+    assert [(r.name, r.seen) for r in rows] == [("build", 3)]
+    # 앵커가 `tool_missing` 잡 자신이어도 창은 이름 실패만 센다
+    rows, window, unnamed = store.failure_stats(tm, key, t0, window=20)
+    assert rows == [] and (window, unnamed) == (0, 0)
+
+
 def run_one_with(store: Store, cfg: ServerConfig, job_id: int, w: Worker, timeout=20.0):
     """`test_worker.run_one` 과 같되 미리 만든 워커(환경을 바꾼)를 쓴다."""
     import time
@@ -371,6 +404,12 @@ def test_finish_keeps_a_structured_tool_missing_and_drops_everything_else(wsrv):
         },
         {
             "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "tool_missing",
+            "summary_args": {"tool": "/opt/bin/"},  # 이름이 없는 경로 — basename 이 비어 있다
+        },
+        {
+            "outcome": "failed",
             "exit_code": 1,  # 프로세스가 떴다면 preflight 실패가 아니다
             "summary_code": "tool_missing",
             "summary_args": {"tool": "fvm"},
@@ -382,6 +421,31 @@ def test_finish_rejects_unknown_or_inconsistent_structured_summaries(wsrv, body)
     status, resp = wsrv.req("POST", f"/worker/jobs/{jid}/finish", token="build-02", json_body=body)
     assert status == 400, resp
     assert wsrv.view(jid)["state"] == "running"
+
+
+def test_finish_reduces_a_tool_given_as_a_path_to_its_name(wsrv):
+    """검증 G4.15: 워커가 `tool` 에 절대경로를 실어 보내도 서버는 **이름(basename)만** 남긴다 —
+    로컬 워커(`RequiredToolMissing.public_name`)와 같은 규칙이고, 서버가 워커를 믿지 않는다.
+    경로는 `GET /jobs/<id>` 에도 `/api/status.recent` 에도 없다(PLAN 「보안」)."""
+    jid = running_job(wsrv)
+    status, body = wsrv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "tool_missing",
+            "summary_args": {"tool": "/opt/secret/bin/fvm"},
+        },
+    )
+    assert status == 200, body
+    v = wsrv.view(jid)
+    assert v["summary_code"] == "tool_missing" and v["summary_args"] == {"tool": "fvm"}
+    assert v["summary"] == outcome.render("tool_missing", {"tool": "fvm"})
+    assert "/opt/secret" not in str(v)
+    status, doc = wsrv.req("GET", "/api/status", token="build-02")
+    assert status == 200 and "/opt/secret" not in str(doc)
 
 
 def test_an_old_worker_without_the_keys_still_finishes(wsrv):

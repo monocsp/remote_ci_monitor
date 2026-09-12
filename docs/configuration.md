@@ -73,9 +73,10 @@ failed: just_audio_screen_music_port_test.dart — 2 of the last 8 gate runs · 
 ```
 
 The window is `failure_window_jobs` (20) finished jobs of that key — cancelled and lost jobs say
-nothing, so they are left out — and nothing is judged until there are `failure_min_jobs` (3) of
-them. Runs that failed without naming anything stay in the denominator and are reported
-separately, so the count can understate a flaky test but never overstate it.
+nothing, so they are left out, and so is a job that ended `tool_missing` before its script could
+start — and nothing is judged until there are `failure_min_jobs` (3) of them. Runs that failed
+without naming anything stay in the denominator and are reported separately, so the count can
+understate a flaky test but never overstate it.
 
 ### Deploy presets: run a remote ref instead of an upload
 
@@ -245,9 +246,10 @@ PATH = "/Users/build/fvm/default/bin:/opt/homebrew/bin:/usr/bin:/bin"
 ```
 
 `rcm check --config server.toml` has a `local preset tools` row that runs the same lookup for every
-preset that declares `requires` — in **this shell**, with this shell's environment. It catches a
-typo and a missing install; it cannot vouch for the service, whose `PATH` is not yours. The check
-that counts is the one at job start.
+preset that declares `requires` — in **this shell**, with this shell's environment. A tool this
+shell cannot find makes the row FAIL and `rcm check` exit 1. It catches a typo and a missing
+install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` here says nothing
+about the job. The check that counts is the one at job start.
 
 ### Naming what failed
 

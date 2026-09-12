@@ -31,6 +31,16 @@ def test_configuration_has_a_required_tools_section_with_the_launchd_trap():
     assert has(body, r"(?i)before (the job|it) starts|at job start|before starting"), body
 
 
+def test_configuration_says_the_local_row_fails_and_the_window_skips_tool_missing():
+    """검증 G4.10 · G4.4: `local preset tools` 가 FAIL(종료 1)인 것과 `tool_missing` 잡이 대장
+    창에서 빠지는 것을 문서가 말한다 — 「FAIL 이면 문서가 그렇게 말한다」."""
+    text = read(CONFIGURATION)
+    body = text.split("### Required tools", 1)[1].split("\n### ", 1)[0]
+    assert has(body, r"FAIL") and has(body, r"exit 1"), body
+    window = [p for p in text.split("\n\n") if "failure_window_jobs" in p]
+    assert window and has(window[0], r"tool_missing"), window
+
+
 def test_the_example_config_mentions_requires():
     assert has(read(SERVER_TOML), r"requires"), "examples/server.toml lacks requires"
 

@@ -21,6 +21,7 @@ HTTP 핸들러는 얇게 여기를 부른다.
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import sqlite3
 import tarfile
@@ -138,7 +139,12 @@ def _preflight_summary(
     if not isinstance(args, dict):
         raise _api_error(400, "summary_args must be an object")
     tool = args.get("tool")
-    if not isinstance(tool, str) or not tool.strip() or len(tool) > MAX_TOOL_NAME:
+    if not isinstance(tool, str) or len(tool) > MAX_TOOL_NAME:
+        raise _api_error(400, "summary_args.tool must be a short tool name")
+    # 절대경로로 선언한 도구는 로컬 워커처럼 **이름(basename)만** 남긴다 — 워커가 경로를 실어
+    # 보내도 `/api/status.recent` 로 새지 않는다(검증 G4.15 · PLAN 「보안」).
+    tool = os.path.basename(tool.strip())
+    if not tool:
         raise _api_error(400, "summary_args.tool must be a short tool name")
     return outcome.summary(code, tool=tool)
 
