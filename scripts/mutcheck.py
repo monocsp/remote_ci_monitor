@@ -39,6 +39,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ offline-gc-ignores-sqlite-error — 오프라인 dry-run 이 사본 마이그레이션의 `sqlite3.Error`
+     를 안 잡음: 트레이스백 + exit 1 (`cli.py`, M5l L1 — 리뷰 #87 B P1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -253,15 +255,15 @@ MUTANTS = (
     ),
     # ⑲ M5h §2.1 — 증거와 결과는 같은 커밋이다. 대장을 커밋 **뒤로** 옮기면(= 실패한 대장
     # 쓰기가 finish 를 되돌리지 못하면) 빨개져야 한다.
-    # ㉓ 결정 73 — 사본 대신 원본을 열면 원본이 마이그레이션된다(user_version 7 → 16). 사고 그 자체.
+    # ㉔ 결정 73 — 사본 대신 원본을 열면 원본이 마이그레이션된다(user_version 7 → 16). 사고 그 자체.
     Mutant(
         name="offline-gc-opens-original",
         path="src/remote_ci_monitor/cli.py",
-        old="            store = Store(copy, log=_err)",
-        new="            store = Store(db, log=_err)",
+        old="        store = Store(copy, log=_err)",
+        new="        store = Store(db, log=_err)",
         tests=("tests/test_offline_gc.py",),
     ),
-    # ㉔ 결정 78 — 「대장 행이 하나도 없다」 조건을 빼면 새 코드의 선언 라벨도 옮겨진다.
+    # ㉕ 결정 78 — 「대장 행이 하나도 없다」 조건을 빼면 새 코드의 선언 라벨도 옮겨진다.
     Mutant(
         name="v16-without-ledger-check",
         path="src/remote_ci_monitor/store.py",
@@ -270,6 +272,16 @@ MUTANTS = (
         new=""""WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL",""",
         tests=("tests/test_store_m5i.py",),
     ),
+    # ㉗ M5l L1 — `_MIGRATIONS` 의 SQL 이 죽으면 `StoreError` 가 아니라 `sqlite3.Error` 다.
+    # 그걸 안 잡으면 업그레이드 전에 잡으라던 바로 그 실패가 트레이스백이 된다(리뷰 #87 B P1).
+    Mutant(
+        name="offline-gc-ignores-sqlite-error",
+        path="src/remote_ci_monitor/cli.py",
+        old="    except (StoreError, sqlite3.Error) as e:\n",
+        new="    except StoreError as e:\n",
+        tests=("tests/test_offline_gc.py",),
+    ),
+    # ㉖ M5i I8 결정 81 — 정확한 파일명 검사를 빼면 이름이 달라도 200.
     Mutant(
         name="client-wheel-any-name",
         path="src/remote_ci_monitor/server.py",

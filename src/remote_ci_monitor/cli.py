@@ -39,6 +39,7 @@ from remote_ci_monitor.client import (
 )
 from remote_ci_monitor.config import (
     ConfigError,
+    ServerConfig,
     load_client_config,
     load_server_config,
     user_config_dir,
@@ -729,16 +730,7 @@ def _offline_gc(args: argparse.Namespace) -> int:
     뜬다 — docs/gate-replay-fixes-workplan.md §3 B2). 사본 위에서 돌면 마이그레이션 자체의 실패까지
     재시작 전에 드러난다. 어느 단계든 불완전하면 exit 3 — 빈 계획을 성공으로 내지 않는다.
     """
-    from remote_ci_monitor.janitor import Janitor, _item_json
-    from remote_ci_monitor.store import (
-        DB_VERSION,
-        CopyDeadlineExceeded,
-        Store,
-        StoreError,
-        _copy_database,
-        database_version,
-        newer_database_message,
-    )
+    from remote_ci_monitor.store import DB_VERSION, database_version, newer_database_message
 
     try:
         cfg = load_server_config(args.config, check_tools=False)
@@ -761,58 +753,26 @@ def _offline_gc(args: argparse.Namespace) -> int:
         return EXIT_UNKNOWN
     now = datetime.now(UTC)
     timeout = float(getattr(args, "timeout", 600.0) or 0.0)
-    scratch = Path(tempfile.mkdtemp(prefix="rcm-gc-dryrun-"))  # 0700
     try:
-        copy = scratch / "rcm.sqlite3"
-        try:
-            _copy_database(db, copy, deadline=time.monotonic() + timeout)
-        except CopyDeadlineExceeded as e:
-            _err(
-                f"gc: copying the database did not finish within the deadline "
-                f"(--timeout {timeout:g} s; {e}) — the plan is unknown (exit 3). "
-                "Nothing was changed."
-            )
-            return EXIT_UNKNOWN
-        except (sqlite3.Error, OSError) as e:
-            _err(f"gc: could not copy the database: {e} — the plan is unknown (exit 3).")
-            return EXIT_UNKNOWN
-        try:
-            store = Store(copy, log=_err)  # 사본만 올라간다 — 자동 백업도 임시 디렉터리 안
-        except StoreError as e:
-            _err(
-                f"gc: the copy could not be migrated from schema v{old} to v{DB_VERSION}: {e} "
-                "— a new server would fail the same way on restart. Nothing was changed "
-                "(exit 3: unknown)."
-            )
-            return EXIT_UNKNOWN
-        try:
-            jan = Janitor(store, cfg)
-            plan = jan.plan(now)
-            if plan.inventory_error:
-                _err(
-                    f"gc: inventory failed ({plan.inventory_error}) — the plan is unknown, "
-                    "not empty (exit 3)."
-                )
-                return EXIT_UNKNOWN
-            body = {
-                "dry_run": True,
-                "planned": [_item_json(i) for i in plan.items],
-                "deleted": [],
-                "failed": [],
-                "freed_bytes": 0,
-                "storage_before": jan.storage(now),
-                "storage_after": None,
-                "offline": {
-                    "database": str(db),
-                    "schema_version": old,
-                    "planned_with_schema": DB_VERSION,
-                    "copy": True,
-                },
-            }
-        finally:
-            store.close()
+        scratch = Path(tempfile.mkdtemp(prefix="rcm-gc-dryrun-"))  # 0700
+    except OSError as e:
+        _err(f"gc: could not make a temporary directory for the copy: {e} (exit 3: unknown).")
+        return EXIT_UNKNOWN
+    try:
+        rc, body = _plan_on_copy(cfg, db, scratch / "rcm.sqlite3", old, now, timeout)
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)  # 사본 · -wal · -shm · 사본의 backup/
+        # 사본 · -wal · -shm · 사본의 backup/ — 못 지우면 운영 DB 전체 사본이 남은 것이다.
+        # 그 위에 「지웠다」는 exit 0 을 내지 않는다(리뷰 #87 B P1 · M5l L1).
+        try:
+            shutil.rmtree(scratch)
+        except OSError as e:
+            _err(
+                f"warning: the temporary copy of the database was left behind in {scratch}: "
+                f"{e} — remove that directory yourself (exit 3: the copy was not cleaned up)."
+            )
+            rc = EXIT_UNKNOWN
+    if body is None:
+        return rc
     if getattr(args, "json", False):
         _print_json(body)
     else:
@@ -823,7 +783,76 @@ def _offline_gc(args: argparse.Namespace) -> int:
             flush=True,
         )
         print(render_gc(body), flush=True)
-    return 0
+    return rc
+
+
+def _plan_on_copy(
+    cfg: ServerConfig, db: Path, copy: Path, old: int, now: datetime, timeout: float
+) -> tuple[int, dict[str, Any] | None]:
+    """`_offline_gc` 의 가운데 — 사본을 뜨고, 올리고, 계획한다. `(exit code, 계획 문서)` 를
+    돌려주고 어느 단계든 불완전하면 `(3, None)`. 사본 정리는 부르는 쪽의 `finally` 다.
+
+    사본의 마이그레이션은 `StoreError` 만 내지 않는다 — `_MIGRATIONS` 의 SQL 이 죽으면
+    `sqlite3.OperationalError`·`IntegrityError` 가 그대로 올라온다(리뷰 #87 B P1). 새 서버가
+    재시작에서 똑같이 죽을 바로 그 실패라, 트레이스백이 아니라 한 줄과 exit 3 이어야 한다.
+    """
+    from remote_ci_monitor.janitor import Janitor, _item_json
+    from remote_ci_monitor.store import (
+        DB_VERSION,
+        CopyDeadlineExceeded,
+        Store,
+        StoreError,
+        _copy_database,
+    )
+
+    try:
+        _copy_database(db, copy, deadline=time.monotonic() + timeout)
+    except CopyDeadlineExceeded as e:
+        _err(
+            f"gc: copying the database did not finish within the deadline "
+            f"(--timeout {timeout:g} s; {e}) — the plan is unknown (exit 3). "
+            "Nothing was changed."
+        )
+        return EXIT_UNKNOWN, None
+    except (sqlite3.Error, OSError) as e:
+        _err(f"gc: could not copy the database: {e} — the plan is unknown (exit 3).")
+        return EXIT_UNKNOWN, None
+    try:
+        store = Store(copy, log=_err)  # 사본만 올라간다 — 자동 백업도 임시 디렉터리 안
+    except (StoreError, sqlite3.Error) as e:
+        _err(
+            f"gc: the copy could not be migrated from schema v{old} to v{DB_VERSION}: {e} "
+            "— a new server would fail the same way on restart. Nothing was changed "
+            "(exit 3: unknown)."
+        )
+        return EXIT_UNKNOWN, None
+    try:
+        jan = Janitor(store, cfg)
+        plan = jan.plan(now)
+        if plan.inventory_error:
+            _err(
+                f"gc: inventory failed ({plan.inventory_error}) — the plan is unknown, "
+                "not empty (exit 3)."
+            )
+            return EXIT_UNKNOWN, None
+        body: dict[str, Any] = {
+            "dry_run": True,
+            "planned": [_item_json(i) for i in plan.items],
+            "deleted": [],
+            "failed": [],
+            "freed_bytes": 0,
+            "storage_before": jan.storage(now),
+            "storage_after": None,
+            "offline": {
+                "database": str(db),
+                "schema_version": old,
+                "planned_with_schema": DB_VERSION,
+                "copy": True,
+            },
+        }
+    finally:
+        store.close()
+    return 0, body
 
 
 def cmd_gc(args: argparse.Namespace) -> int:
@@ -1972,6 +2001,11 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except ClientError as e:
         _err(e.message)
+        return EXIT_UNKNOWN
+    except sqlite3.Error as e:
+        # 안전망 — 어느 서브커맨드가 SQLite 오류를 흘려도 트레이스백 + exit 1 이 아니라
+        # 한 줄 + 3(모른다). 각 명령은 제 자리에서 먼저 잡아 제 문장을 낸다.
+        _err(f"rcm: database error: {type(e).__name__}: {e} (exit 3: unknown)")
         return EXIT_UNKNOWN
 
 

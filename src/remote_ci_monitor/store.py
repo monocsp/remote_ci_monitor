@@ -416,12 +416,42 @@ def backup_path(path: Path, version: int) -> Path:
     return backup_dir(path) / f"{Path(path).name}.v{version}.bak"
 
 
+def _backup_pattern(path: Path) -> re.Pattern[str]:
+    """자동 백업의 이름 — `rcm.sqlite3.v<n>.bak`. 사람이 만든 `.pre-0.2.4.bak` 은 안 맞는다."""
+    return re.compile(rf"^{re.escape(Path(path).name)}\.v(\d+)\.bak$")
+
+
+def existing_backups(path: Path) -> list[tuple[int, Path]]:
+    """`backup/` 에 **실제로 있는** 자동 백업을 버전 오름차순으로. 못 읽으면 `OSError`."""
+    pattern = _backup_pattern(path)
+    found: list[tuple[int, Path]] = []
+    for p in backup_dir(path).iterdir():
+        m = pattern.match(p.name)
+        if m:
+            found.append((int(m.group(1)), p))
+    found.sort()
+    return found
+
+
 def newer_database_message(path: Path, version: int) -> str:
-    """옛 빌드가 새 DB 를 거절할 때의 문장 — 거절만 하지 않고 길을 붙인다(B2-3)."""
+    """옛 빌드가 새 DB 를 거절할 때의 문장 — 거절만 하지 않고 길을 붙인다(B2-3).
+
+    복원할 파일은 이 빌드의 `DB_VERSION` 으로 지어내지 않고 `backup/` 에 **있는** 것 중 가장
+    높은 것을 가리킨다(리뷰 #87 B P1 · M5l L1): v15 DB 를 v21 빌드로 바로 올리면 백업은
+    `v15.bak` 하나라, v16 빌드가 `v16.bak` 을 말하면 없는 파일이다. 하나도 없으면 그렇다고 한다.
+    """
+    head = f"database schema version {version} is newer than this build ({DB_VERSION}) — "
+    tail = f"(and remove {Path(path).name}-wal/-shm), or upgrade"
+    try:
+        found = existing_backups(path)
+    except OSError:
+        found = []
+    if found:
+        _v, newest = found[-1]
+        return f"{head}stop the service, restore {newest} {tail}"
     return (
-        f"database schema version {version} is newer than this build ({DB_VERSION}) — "
-        f"stop the service, restore {backup_path(path, DB_VERSION)} "
-        f"(and remove {Path(path).name}-wal/-shm), or upgrade"
+        f"{head}no migration backup found in {backup_dir(path)} — stop the service, "
+        f"restore a copy of the database made before the upgrade {tail}"
     )
 
 
@@ -687,14 +717,13 @@ class Store:
     def _prune_backups(self) -> None:
         """자동 백업은 최근 `BACKUPS_KEPT` 개만. 사람이 만든 파일(`.pre-0.2.4.bak` 같은)은 안 본다.
         정리 실패는 경고만 — 마이그레이션은 이미 끝났다."""
-        pattern = re.compile(rf"^{re.escape(self.path.name)}\.v(\d+)\.bak$")
-        found: list[tuple[int, Path]] = []
-        with contextlib.suppress(OSError):
-            for p in backup_dir(self.path).iterdir():
-                m = pattern.match(p.name)
-                if m:
-                    found.append((int(m.group(1)), p))
-        found.sort()
+        try:
+            found = existing_backups(self.path)
+        except OSError as e:
+            # 읽기 권한 없는 `backup/` — 새 백업은 써졌지만 옛것은 못 센다. 조용히 쌓이게 두지
+            # 않는다(리뷰 #87 B P2).
+            self._log(f"warning: could not list {backup_dir(self.path)} to prune old backups: {e}")
+            return
         for _version, p in found[:-BACKUPS_KEPT] if len(found) > BACKUPS_KEPT else []:
             try:
                 p.unlink()
