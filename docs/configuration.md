@@ -323,17 +323,30 @@ that lives entirely inside one workspace cannot be told apart — which is why t
 `rcm gc` (admin token) runs the same plan for real against a running server, and reports what it
 planned, what it deleted and what failed separately — a plan is not a receipt. After deleting it
 measures the inventory and the free space again, so its `… left` figure and `free … → …` are what
-the disk said afterwards, not the plan. A `gc` that outruns its `--timeout` (600 s) exits
+the disk said afterwards, not the plan. That re-measure also follows a delete that only half
+succeeded: a job's workspace is removed first and its snapshot tar second, and when the second
+step fails the entry in `failed[]` says what did go (`"removed": ["workspace"]`, empty when nothing
+went), the receipt counts it as `1 failed (EACCES · 1 partly deleted)`, and the numbers are read
+from the disk as it is now — the next sweep retries the rest. A job whose size could not be
+measured can still be deleted by the age rule; the receipt then gives a lower bound instead of a
+figure — `freed ≥ 1.2 GB from 3 jobs (1 of unknown size)`, with `unknown_count` in the JSON —
+never `freed 0 B` as if it had been measured. A `gc` that outruns its `--timeout` (600 s) exits
 **3, unknown**, not failure: the server may still be deleting, so run the dry run again to see
 what is left.
 
 The same numbers are on `/api/status` under `server.job_storage`
 (`volume_bytes = workspace_bytes + snapshot_bytes = evictable_bytes + non_evictable_bytes`, plus
-`shared_bytes` and `estimated_reclaimable_bytes`), in `/api/health` under `storage`, as one line
-in `rcm check`, and under the disk meter on the web host card. What cannot be measured reads `—`,
-never `0`. The line also says how old the number is — `rcm data 30.9 GB · measured 57m ago`: a
-finished workspace is measured once and remembered for up to a day, and the age shown is that of
-the **oldest** measurement in the total, so a cached figure is never presented as fresh.
+`shared_bytes` and `estimated_reclaimable_bytes`), as one line in `rcm check`, and under the disk
+meter on the web host card; `/api/health` carries the totals and the two flags under `storage`
+(`volume_bytes`, `free_bytes`, the limits, `budget_unreachable`, `no_progress`) but not the
+shared/reclaimable split or the measurement time. What cannot be measured reads `—`, never `0`,
+and a size that could not be measured is reported as exactly that — the `rcm check` line says
+`a size could not be measured … (measure_EACCES)` even when free space is under the floor, rather
+than "nothing left to delete". The line also says how old the number is — `rcm data 30.9 GB ·
+measured 57m ago` — in every state that shows a figure, including the one where running jobs alone
+exceed the budget: a finished workspace is measured once and remembered for up to a day, and the
+age shown is that of the **oldest** measurement in the total, so a cached figure is never presented
+as fresh.
 
 Git mirrors are never pruned.
 

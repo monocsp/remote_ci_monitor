@@ -99,6 +99,16 @@ class Applied(NamedTuple):
     charged_bytes: int  # 지운 항목의 charged 합(아는 것만)
     estimated_reclaimable_bytes: int  # 지운 항목의 예상 회수량 합(아는 것만) — latch 의 분모
     unknown_count: int  # 크기를 모르는 채 지운 항목 수
+    #: 실패했지만 **일부는 사라진** 항목 — (job_id, 사라진 조각 이름들). `failed` 에도 들어
+    #: 있다. 디스크가 변했으니 회계는 이것도 보고 다시 재야 한다(리뷰 #88 B2).
+    partial: tuple[tuple[int, tuple[str, ...]], ...] = ()
+
+
+class PurgeOutcome(NamedTuple):
+    """`_purge_volume` 한 번의 결과. 조각(`workspace` · `snapshot`)마다 무엇이 지워졌는지."""
+
+    removed: tuple[str, ...]  # 실제로 디스크에서 사라진 조각 — 없었던 조각은 세지 않는다
+    error: str | None  # 첫 실패의 코드. None 이면 끝까지 갔다
 
 
 def _shared_blocks(st: Any) -> int:
@@ -167,20 +177,25 @@ class Janitor:
 
     # ── 삭제 ────────────────────────────────────────────────────────────────
 
-    def _remove_tree(self, path: Path) -> None:
-        """id 로 만든 경로 하나를 지운다. 링크는 링크만, 밖을 가리키면 손대지 않는다."""
+    def _remove_tree(self, path: Path) -> bool:
+        """id 로 만든 경로 하나를 지운다. 링크는 링크만, 밖을 가리키면 손대지 않는다.
+
+        **있던 것을 지웠으면 True**, 애초에 없었으면 False — 영수증이 「사라진 조각」을 셀 때
+        없었던 조각을 지운 것처럼 적지 않기 위해서다.
+        """
         try:
             st = path.lstat()
         except FileNotFoundError:
-            return
+            return False
         if not (st.st_mode & 0o170000 == 0o040000):  # S_ISDIR 이 아니면(링크 · 파일)
             path.unlink()
-            return
+            return True
         root = self.config.data_dir.resolve()
         real = path.resolve()
         if root != real and root not in real.parents:
             raise OSError(errno.EXDEV, "path resolves outside the data directory")
         shutil.rmtree(path)
+        return True
 
     def _purge_job(self, job: Job) -> bool:
         if job.state not in TERMINAL_STATES:  # 이중 안전
@@ -510,29 +525,54 @@ class Janitor:
             self._last_plan = plan
         return plan
 
-    def _purge_volume(self, job_id: int) -> bool:
-        """한 잡의 워크스페이스와 스냅샷 tar. 삭제 직전에 종료 상태를 다시 본다(이중 안전)."""
-        if not self._is_terminal(job_id):
-            return False
+    def _volume_parts(self, job_id: int) -> tuple[tuple[str, Path], ...]:
+        """부피 한 항목의 조각과 경로 — 이 순서로 지운다."""
         data = self.config.data_dir
-        self._remove_tree(data / "workspaces" / str(job_id))
-        self._remove_tree(data / "jobs" / str(job_id) / "tree.tar.gz")
+        return (
+            ("workspace", data / "workspaces" / str(job_id)),
+            ("snapshot", data / "jobs" / str(job_id) / "tree.tar.gz"),
+        )
+
+    def _purge_volume(self, job_id: int) -> PurgeOutcome | None:
+        """한 잡의 워크스페이스와 스냅샷 tar. 삭제 직전에 종료 상태를 다시 본다(이중 안전).
+
+        활성 잡이면 None(아무것도 안 했다). 조각 하나가 실패해도 **그 앞에서 사라진 조각**은
+        결과에 남긴다 — 워크스페이스는 갔는데 tar 에서 막히면 디스크는 이미 변했다. 손을 댄
+        뒤에는 실패했든 아니든 크기 캐시를 버린다: 반쯤 지운 트리의 옛 크기는 거짓이다.
+        """
+        if not self._is_terminal(job_id):
+            return None
+        removed: list[str] = []
+        error: str | None = None
+        try:
+            for name, path in self._volume_parts(job_id):
+                if self._remove_tree(path):
+                    removed.append(name)
+        except OSError as e:
+            error = _errname(e)
         self._sizes.pop(job_id, None)
-        return True
+        return PurgeOutcome(tuple(removed), error)
 
     def apply(self, plan: PurgePlan, now: datetime) -> Applied:
         """계획을 실행한다. **실제로 지운 것**을 돌려준다 — latch 의 분모와 영수증이 이것이다.
-        실패한 잡은 표시하지 않고 다음 회차에 다시 시도한다."""
+        실패한 잡은 표시하지 않고 다음 회차에 다시 시도한다. 크기를 모르는 채 지운 항목은
+        바이트에 0 으로 섞지 않고 `unknown_count` 로 따로 센다(리뷰 #88 B1)."""
         deleted: list[int] = []
         failed: list[tuple[int, str]] = []
+        partial: list[tuple[int, tuple[str, ...]]] = []
         charged = reclaimable = unknown = 0
         for item in plan.items:
             try:
-                if not self._purge_volume(item.job_id):
-                    continue
-            except OSError as e:
-                failed.append((item.job_id, _errname(e)))
-                self.on_error(f"retention: volume {item.job_id}: {_errname(e)}")
+                outcome = self._purge_volume(item.job_id)
+            except OSError as e:  # 조각 밖의 실패 — 아무것도 안 사라진 것으로 본다
+                outcome = PurgeOutcome((), _errname(e))
+            if outcome is None:
+                continue
+            if outcome.error is not None:
+                failed.append((item.job_id, outcome.error))
+                if outcome.removed:
+                    partial.append((item.job_id, outcome.removed))
+                self.on_error(f"retention: volume {item.job_id}: {outcome.error}")
                 continue
             deleted.append(item.job_id)
             if item.bytes is None:
@@ -540,7 +580,7 @@ class Janitor:
             else:
                 charged += item.bytes
             reclaimable += item.estimated_reclaimable_bytes or 0
-        return Applied(tuple(deleted), tuple(failed), charged, reclaimable, unknown)
+        return Applied(tuple(deleted), tuple(failed), charged, reclaimable, unknown, tuple(partial))
 
     def _judge_progress(
         self, plan: PurgePlan, result: Applied, free_before: int | None, free_after: int | None
@@ -574,21 +614,29 @@ class Janitor:
         result = self.apply(plan, now)
         if result.deleted:
             self.log(f"retention: reclaimed volume from {len(result.deleted)} jobs")
+        if result.partial:
+            self.log(f"retention: partly deleted volume of {len(result.partial)} jobs")
         free_after = self._free_bytes()
-        if result.deleted:
+        if result.deleted or result.partial:
             # 지운 뒤 다시 재서 회계를 갱신한다. 안 그러면 화면이 **지우기 전** 숫자를 들고 있어
             # 「예산 초과 — 다음 sweep 이 정리한다」를 이미 정리한 뒤에도 한 시간 동안 말한다.
-            # 표시용 측정이지 두 번째 삭제 계획이 아니다 — `apply` 는 회차당 한 번뿐이다.
+            # 부분 삭제도 디스크를 바꿨으니 같다(리뷰 #88 B2). 표시용 측정이지 두 번째 삭제
+            # 계획이 아니다 — `apply` 는 회차당 한 번뿐이다.
             self.plan(now, free_bytes=free_after)
         self._judge_progress(plan, result, free_before, free_after)
         by_id = {i.job_id: i for i in plan.items}
+        removed = dict(result.partial)
         body = {
             "dry_run": False,
             "planned": [_item_json(i) for i in plan.items],
             "deleted": [_item_json(by_id[j]) for j in result.deleted],
-            "failed": [{"job_id": j, "error_code": code} for j, code in result.failed],
+            "failed": [
+                {"job_id": j, "error_code": code, "removed": list(removed.get(j, ()))}
+                for j, code in result.failed
+            ],
             "freed_bytes": result.charged_bytes,  # = deleted_charged_bytes. 이름만 옛것이다
             "deleted_charged_bytes": result.charged_bytes,
+            "unknown_count": result.unknown_count,  # 크기 모르는 채 지운 수 — 0 으로 안 섞는다
             "estimated_reclaimable_bytes": result.estimated_reclaimable_bytes,
             "free_bytes_before": free_before,
             "free_bytes_after": free_after,
@@ -617,6 +665,7 @@ class Janitor:
                 "failed": [],
                 "freed_bytes": 0,
                 "deleted_charged_bytes": 0,
+                "unknown_count": 0,
                 "estimated_reclaimable_bytes": plan.estimated_reclaimable_bytes,  # would free
                 "free_bytes_before": free_before,
                 "free_bytes_after": None,

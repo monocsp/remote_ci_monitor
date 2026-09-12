@@ -291,7 +291,9 @@ on a guess: a size that cannot be measured skips the byte rules for that sweep a
 workspace shares with the git mirror by hard link are charged to it but do not come back when it
 is deleted, so `rcm gc --dry-run` says what it would free (the reclaimable estimate) next to what
 is charged, and a real `rcm gc` measures the inventory and the free space again after it deleted —
-its receipt is what the disk said, not the plan. The full table is in
+its receipt is what the disk said, not the plan, also when a delete got only half way (the entry
+in `failed[]` says what went) or the size of what went was never measured (`freed ≥ …`). The full
+table is in
 [Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
 
 **Upgrading to a release that adds these:** the first sweep after the restart applies the new

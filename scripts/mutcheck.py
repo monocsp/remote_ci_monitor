@@ -39,6 +39,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ retention-unknown-deleted-as-zero — 크기를 못 잰 항목을 지웠을 때 `unknown_count` 로 세지
+     않고 0 B 로 더함 — 영수증이 「freed 0 B」를 확정 표시 (`janitor.py`, M5l L2 · 리뷰 #88 B1)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -308,6 +310,20 @@ MUTANTS = (
         old="    if st.st_nlink > 1 and stat.S_ISREG(st.st_mode):\n",
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
+    ),
+    # ㉗ M5l L2 — 크기를 모르는 채 지운 항목은 **개수로** 따로 센다. 0 으로 섞으면 영수증이
+    # 「freed 0 B from 1 jobs」라고 확정한다(리뷰 #88 B1 — 실제 호출에서 그렇게 찍혔다).
+    Mutant(
+        name="retention-unknown-deleted-as-zero",
+        path="src/remote_ci_monitor/janitor.py",
+        old=(
+            "            if item.bytes is None:\n"
+            "                unknown += 1\n"
+            "            else:\n"
+            "                charged += item.bytes\n"
+        ),
+        new="            charged += item.bytes or 0\n",
+        tests=("tests/test_janitor_m5l.py",),
     ),
 )
 
