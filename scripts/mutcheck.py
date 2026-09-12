@@ -39,6 +39,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ web-page-error-collector-removed — Chrome 테스트 하네스가 페이지 예외 수집기를 설치하지
+     않음 (`tests/test_web_browser.py`, M5l L7 · pr-82 리뷰 P2). **Chrome 이 있어야 돈다** —
+     없으면 그 테스트가 skip(exit 0)이라 「못 잡음」과 구별이 안 되므로 SKIP 으로 보고하고
+     실패로 세지 않는다. `RCM_CHROME` 이 설정돼 있으면 무조건 돈다(못 찾으면 대조군이 빨강).
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -46,6 +50,7 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -56,6 +61,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PYTEST_TIMEOUT_SECONDS = 300
+# tests/test_web_browser.py 의 `find_chrome()` 과 같은 후보(그 모듈을 import 하면 서버 픽스처까지
+# 끌려오므로 여기서 다시 적는다).
+CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
+CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+
+
+def chrome_available() -> bool:
+    """Chrome 을 찾을 수 있으면 True. `RCM_CHROME` 이 설정돼 있으면 「있어야 한다」는 약속이므로
+    찾든 못 찾든 True — 못 찾으면 대조군이 빨개져 실패로 드러난다."""
+    if os.environ.get("RCM_CHROME"):
+        return True
+    return any(Path(p).is_file() for p in CHROME_PATHS) or any(
+        shutil.which(n) for n in CHROME_NAMES
+    )
 
 
 @dataclass(frozen=True)
@@ -66,6 +85,7 @@ class Mutant:
     new: str
     tests: tuple[str, ...]
     runner: str = "pytest"  # "pytest" | "node" (tests 는 node --test 에 넘길 경로)
+    needs_chrome: bool = False  # True 면 Chrome 이 없을 때 실패가 아니라 SKIP
 
 
 MUTANTS = (
@@ -309,6 +329,26 @@ MUTANTS = (
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
     ),
+    # ㉗ M5l L7 · pr-82 리뷰 P2 — 수집기 설치를 지우면 `page_errors()` 가 「page error collector
+    # missing」으로 빨개져야 한다. 예전에는 `[]` 를 돌려줘 I5 의 0건 단언이 그대로 초록이었다.
+    Mutant(
+        name="web-page-error-collector-removed",
+        path="tests/test_web_browser.py",
+        old="""        self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": PAGE_ERROR_COLLECTOR_JS},
+            timeout=COLD_START_SECONDS,
+        )
+""",
+        new="",
+        tests=(
+            "tests/test_web_browser.py::"
+            "test_local_host_card_draws_the_disk_and_the_rcm_data_line_without_page_errors",
+            "tests/test_web_browser.py::"
+            "test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header",
+        ),
+        needs_chrome=True,
+    ),
 )
 
 
@@ -326,8 +366,10 @@ def _pytest(cmd: list[str], cwd: Path) -> tuple[int, float, str] | None:
     return proc.returncode, took, "\n".join(lines[-6:])
 
 
-def run_mutant(m: Mutant, keep: bool) -> tuple[bool, str]:
-    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨?, 설명)."""
+def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
+    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명)."""
+    if m.needs_chrome and not chrome_available():
+        return None, "skipped: no Chrome binary found (set RCM_CHROME) — its tests would skip"
     tmp = Path(tempfile.mkdtemp(prefix=f"mutcheck-{m.name}-"))
     try:
         for name in ("src", "tests", "pyproject.toml"):
@@ -378,16 +420,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no mutant named {args.only!r}", file=sys.stderr)
         return 2
     failures = 0
+    skipped = 0
     for m in mutants:
         ok, info = run_mutant(m, args.keep)
-        mark = "OK " if ok else "FAIL"
+        mark = "SKIP" if ok is None else "OK " if ok else "FAIL"
         print(f"[{mark}] {m.name}: {info}")
-        if not ok:
+        if ok is None:
+            skipped += 1
+        elif not ok:
             failures += 1
     if failures:
         print(f"mutcheck: {failures} of {len(mutants)} mutants NOT caught", file=sys.stderr)
         return 1
-    print(f"mutcheck: all {len(mutants)} mutants caught")
+    note = f" ({skipped} skipped: no Chrome)" if skipped else ""
+    print(f"mutcheck: all {len(mutants) - skipped} mutants caught{note}")
     return 0
 
 

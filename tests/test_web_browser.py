@@ -42,7 +42,10 @@ from test_server import PRESETS, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
-#: Chrome 이 뜨고 첫 CDP 응답을 주기까지의 마감(초). 이후 호출은 `Chrome.call` 의 기본 15초.
+#: Chrome 이 뜨고 붙기까지의 마감(초) — `Chrome.__init__` 이 부르는 **모든** CDP 호출
+#: (`Target.getTargets` `Target.attachToTarget` `Page.enable`
+#: `Page.addScriptToEvaluateOnNewDocument` 와 about:blank 의 수집기 심기)이 이 값을 받는다.
+#: 붙은 뒤의 호출은 `Chrome.call` 의 기본 15초.
 COLD_START_SECONDS = 60.0
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 OTHER_TREE = "ab" * 32
@@ -154,19 +157,31 @@ class Chrome:
         self.buf = b""
         self.next_id = 0
         self.session: str | None = None
-        # 첫 응답까지의 마감은 넉넉하게: CI 러너(ubuntu 3.13)에서 Chrome 의 찬 기동이 15초를 넘겨
-        # 「CDP: no reply before the deadline」로 하루 네 번 빨갰다(2026-09-10 · #85 #87 #92 ×2).
-        # 붙은 뒤의 호출은 15초 그대로다 — 늘어진 페이지를 숨기지 않는다.
+        # 붙기까지의 호출은 전부 찬 기동 마감을 받는다: CI 러너(ubuntu 3.11·3.13)에서 Chrome 의 찬
+        # 기동이 15초를 넘겨 「CDP: no reply before the deadline」로 빨갰다(2026-09-10 · #85 #87
+        # #92 ×2). #98 은 `Page.enable`·`addScript…` 에만 60초를 줬고 정작 첫 응답을 기다리는
+        # `_attach_first_page` 안의 `Target.getTargets` 는 15초 그대로라 머지 뒤 세 번 더 같은
+        # 프레임으로 빨갰다(docs/reviews/2026-09-13-impl-reviews/pr-98.md P1 · M5l L7). 붙은 뒤의
+        # 호출은 15초 그대로다 — 늘어진 페이지를 숨기지 않는다.
         self.session = self._attach_first_page(timeout=COLD_START_SECONDS)
         self.call("Page.enable", timeout=COLD_START_SECONDS)
         # 페이지 스크립트보다 **먼저** 도는 수집기. 터진 render() 는 타임아웃이 아니라 이 목록으로
         # 드러난다 — 「page not ready within 15s」보다 「ReferenceError: local is not defined」가
-        # 원인이다. `page_errors()` 로 읽고, 테스트는 0건을 단언한다.
+        # 원인이다. `page_errors()` 로 읽고, 테스트는 0건을 단언한다. 이 호출을 지우면
+        # `page_errors()` 가 「수집기 누락」으로 실패한다(mutcheck ㉗
+        # `web-page-error-collector-removed`).
         self.call(
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": PAGE_ERROR_COLLECTOR_JS},
             timeout=COLD_START_SECONDS,
         )
+        # 이미 떠 있는 about:blank 에는 위 스크립트가 안 들어간다(새 문서부터 돈다). 첫 `navigate`
+        # 가 커밋되기 전에 `page_errors()` 가 그 문서를 읽으면 수집기 누락으로 오판하므로 거기에도
+        # 같은 수집기를 심는다 — 그 뒤로는 모든 문서에 수집기가 있고, 없으면 진짜 누락이다.
+        seeded = self.call(
+            "Runtime.evaluate", {"expression": PAGE_ERROR_COLLECTOR_JS}, timeout=COLD_START_SECONDS
+        )
+        assert "exceptionDetails" not in seeded, seeded
 
     def __enter__(self) -> "Chrome":
         return self
@@ -209,9 +224,20 @@ class Chrome:
                 return m.get("result", {})
 
     def _attach_first_page(self, *, timeout: float) -> str:
+        """첫 페이지 타깃에 붙어 sessionId 를 돌려준다. 안의 CDP 호출마다 **남은** 마감을 넘긴다.
+
+        Chrome 의 찬 기동을 맞는 자리가 여기다 — 첫 `Target.getTargets` 응답이 오기까지가 제일
+        길다. `call` 의 기본 마감을 쓰면 `timeout` 은 「페이지 타깃이 생길 때까지 되묻는 루프」만
+        덮고 응답 하나하나는 15초에서 끊긴다(pr-98 리뷰 P1). 마감이 거의 다 됐어도 응답 한 번은
+        1초 이상 기다린다.
+        """
         deadline = time.monotonic() + timeout
+
+        def remaining() -> float:
+            return max(1.0, deadline - time.monotonic())
+
         while True:
-            targets = self.call("Target.getTargets")["targetInfos"]
+            targets = self.call("Target.getTargets", timeout=remaining())["targetInfos"]
             pages = [t for t in targets if t["type"] == "page"]
             if pages:
                 break
@@ -219,7 +245,7 @@ class Chrome:
                 raise AssertionError("CDP: Chrome never created a page target")
             time.sleep(0.05)
         params = {"targetId": pages[0]["targetId"], "flatten": True}
-        return self.call("Target.attachToTarget", params)["sessionId"]
+        return self.call("Target.attachToTarget", params, timeout=remaining())["sessionId"]
 
     def _stderr_tail(self) -> str:
         try:
@@ -232,12 +258,20 @@ class Chrome:
     # 페이지 -------------------------------------------------------------------
 
     def page_errors(self) -> list[str]:
-        """페이지가 열린 뒤 지금까지의 `error`·`unhandledrejection` 메시지. 이동 중이면 빈 목록."""
+        """페이지가 열린 뒤 지금까지의 `error`·`unhandledrejection` 메시지. 이동 중이면 빈 목록.
+
+        수집기가 없으면(`window.__rcmErrors` 가 배열이 아니면) **실패**다. 빈 목록으로 덮으면 I5 의
+        「0건 단언」이 수집기 없이도 초록이라 아무것도 지키지 않는다 — CDP 메서드 이름 오타든
+        누가 정리하며 지웠든 조용히 통과했다(pr-82 리뷰 P2). 실행 컨텍스트가 아직 없는 이동 중
+        (`RuntimeError`)만 빈 목록이다.
+        """
         try:
-            found = self.eval("Array.isArray(window.__rcmErrors) ? window.__rcmErrors : []")
+            found = self.eval("Array.isArray(window.__rcmErrors) ? window.__rcmErrors : null")
         except RuntimeError:  # 실행 컨텍스트가 아직 없다
             return []
-        return list(found) if isinstance(found, list) else []
+        if not isinstance(found, list):
+            raise AssertionError("page error collector missing")
+        return list(found)
 
     def eval(self, expression: str) -> Any:
         """JS 식 하나를 값으로. 예외면 AssertionError."""
