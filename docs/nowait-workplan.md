@@ -43,8 +43,9 @@ tree 모드는 업로드가 끝나 `queued` 이고(PUT 응답이 그렇게 말�
 | `state` | **조회한 문서** | 없으면 업로드/제출 응답의 상태. `"submitted"` 는 사라진다 |
 | `position` · `reason` · `ahead_job_id` · `blocked_by` · `estimate` | 조회한 문서 | 그대로 옮긴다(형태를 바꾸지 않는다) |
 | `ref` · `sha` | 제출 응답 | git_ref 모드만, 오늘 그대로 |
+| `submission` | 제출 응답 | `{id, cancel_token}` — 나중의 `rcm cancel --cancel-token` 용(M5j G5 · 결정 87). 옛 서버가 안 주면 키도 없다 |
 
-- 키 순서는 `job_id` · `joined` · `state` · 순번 다섯 · (`ref` · `sha`) · `url`.
+- 키 순서는 `job_id` · `joined` · `state` · 순번 다섯 · (`ref` · `sha`) · `submission` · `url`.
 - **조회가 실패하면 순번 다섯 개를 아예 넣지 않는다.** `null` 은 「순번이 없다」는 뜻이라 「모른다」와
   다르다(fail-open 금지 — 모르는 것을 아는 척하지 않는다).
 - **조회에 성공하면 다섯 키를 언제나 싣는다.** 활성 잡(`queue_row_json`)은 `running`·`cancelling`

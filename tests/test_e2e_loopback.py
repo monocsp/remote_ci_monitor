@@ -80,6 +80,8 @@ class ServerProc:
             **os.environ,
             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
             "PYTHONUNBUFFERED": "1",
+            # `rcm run` 이 cancel token 을 두는 상태 파일(M5j G5)은 이 시험의 것 — 진짜 홈이 아니라
+            "XDG_STATE_HOME": str(tmp_path / "state"),
         }
         self.proc: subprocess.Popen | None = None
         self.log = tmp_path / "server.log"

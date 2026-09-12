@@ -48,6 +48,9 @@ artifact_transfer_timeout_seconds = 300     # one upload or download
 max_concurrent_artifact_transfers = 2       # over this, the server answers 503 instead of waiting
 # advertise = true                  # mDNS/DNS-SD: sessions on the same network find this server without an address
 #                                   # (default: on when bind is not loopback). advertise_name = "macmini" to rename
+# cancel_requires_submission_token = false   # true: only the submission's cancel token (rcm run keeps it in
+#                                   # ~/.local/state/rcm/submissions.json) or an admin token cancels a job.
+#                                   # Clients before 0.2.7 then cannot cancel — see docs/configuration.md
 
 [estimate]
 sample_days = 45

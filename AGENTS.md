@@ -69,7 +69,7 @@ asks before a deploy. On a machine with no such install it does nothing. The pro
 ```sh
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for 26 known mutations
+python scripts/mutcheck.py           # the tests must go red for 28 known mutations
 scripts/smoke_install.sh             # the README's own commands on a fresh venv
 ```
 

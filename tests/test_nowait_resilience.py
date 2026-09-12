@@ -264,7 +264,7 @@ def test_a_broken_display_lookup_leaves_the_submission_standing(
     assert body["state"] == "queued" and body["state"] in ALL_STATES
     for key in cli.NO_WAIT_KEYS:
         assert key not in body, key
-    assert list(body) == ["job_id", "joined", "state", "url"]
+    assert list(body) == ["job_id", "joined", "state", "submission", "url"]
     row = queue_rows(srv)[0]  # 잡은 정말로 줄에 서 있다 — 그게 종료 코드 0 의 뜻이다
     assert row["id"] == body["job_id"] and row["state"] == "queued"
     assert len(view_calls(seen)) == 1, view_calls(seen)  # 재시도하지 않는다
@@ -379,7 +379,7 @@ def test_a_broken_display_lookup_on_a_git_ref_submission_keeps_ref_and_sha(
     assert code == 0, err
     body = last_json(out)
     assert body["state"] == "queued" and body["ref"] == "main" and body["sha"] == bare.main_sha
-    assert list(body) == ["job_id", "joined", "state", "ref", "sha", "url"]
+    assert list(body) == ["job_id", "joined", "state", "ref", "sha", "submission", "url"]
     for key in cli.NO_WAIT_KEYS:
         assert key not in body, key
     assert [r["id"] for r in queue_rows(git_srv)] == [body["job_id"]]

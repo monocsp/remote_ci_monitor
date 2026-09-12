@@ -1,4 +1,4 @@
-"""저장소 — SQLite WAL. jobs · joiners · events · tokens · server_state.
+"""저장소 — SQLite WAL. jobs · joiners · submissions · events · tokens · server_state.
 
 - 연결은 스레드마다 하나(`threading.local`). autocommit 모드에서 필요한 곳만 `BEGIN IMMEDIATE`.
 - `claim` 은 한 트랜잭션 안에서 「queued 이고 그룹이 running/cancelling 잡과 안 겹치는
@@ -64,7 +64,10 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
-DB_VERSION = 16
+DB_VERSION = 17
+#: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
+ROLE_CANCEL_JOB = "cancel_job"
+ROLE_LEAVE_SUBMISSION = "leave_submission"
 #: 마이그레이션 전 자동 백업을 몇 개 남기나(결정 74). 정리는 마이그레이션이 끝난 뒤, 실패는 경고만.
 BACKUPS_KEPT = 3
 EVENT_STATE = "state"
@@ -161,6 +164,15 @@ CREATE TABLE IF NOT EXISTS joiners (
   joined_at REAL NOT NULL,
   PRIMARY KEY (job_id, name)
 );
+CREATE TABLE IF NOT EXISTS submissions (
+  job_id INTEGER NOT NULL,
+  submission_id TEXT PRIMARY KEY,
+  role TEXT NOT NULL,
+  capability_hash TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  participant TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS submissions_job ON submissions(job_id);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL,
@@ -328,6 +340,19 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "WHERE state IN ('failed','timed_out') AND failed_step IS NOT NULL "
         "AND NOT EXISTS (SELECT 1 FROM job_failures WHERE job_failures.job_id=jobs.id)",
         "UPDATE jobs SET failed_step=NULL, last_step=NULL WHERE state IN ('cancelled','lost')",
+    ),
+    # v16 → v17(M5j G5 · 결정 87): 제출 참여자별 취소 capability. `POST /jobs` 시도마다(합류
+    # 포함) 행 하나 — 서버는 비밀의 SHA-256 만 둔다. joiner 표의 PK `(job_id, name)` 은 같은
+    # 토큰 이름의 세션들을 못 가르지만 이 표는 시도마다 다르다. 옛 잡은 행이 없다 — 강제 모드
+    # (`cancel_requires_submission_token`)에서는 admin 만 취소할 수 있고, 아니면 오늘 규칙이다.
+    # `participant` 는 비밀을 받은 토큰 이름(M5l S6) — `leave_submission` 은 그 이름의 bearer
+    # 만 쓸 수 있다(남의 leave 비밀로 자기 joiner 행을 지우는 혼동을 막는다).
+    # v16 백업은 `migrate()` 의 경계에서 이 DDL 보다 먼저 만들어진다(결정 74).
+    17: (
+        "CREATE TABLE IF NOT EXISTS submissions ("
+        " job_id INTEGER NOT NULL, submission_id TEXT PRIMARY KEY, role TEXT NOT NULL,"
+        " capability_hash TEXT NOT NULL, created_at REAL NOT NULL, participant TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS submissions_job ON submissions(job_id)",
     ),
 }
 
@@ -1000,7 +1025,7 @@ class Store:
         return rows, len(ids), len(failed_ids - named)
 
     def delete_old_jobs(self, cutoff: datetime) -> int:
-        """산출물이 이미 지워진 종료 잡 중 cutoff 전에 끝난 것의 행·이벤트·합류자를 지운다."""
+        """산출물이 이미 지워진 종료 잡 중 cutoff 전에 끝난 것의 행·이벤트·합류자·제출을 지운다."""
         marks = ",".join("?" * len(TERMINAL_STATES))
         conn = self._conn()
         conn.execute("BEGIN IMMEDIATE")
@@ -1022,6 +1047,8 @@ class Store:
                 id_marks = ",".join("?" * len(ids))
                 conn.execute(f"DELETE FROM events WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM joiners WHERE job_id IN ({id_marks})", ids)
+                # capability 행도 같은 트랜잭션에서(Codex 대안 G5) — 잡 없는 비밀은 남기지 않는다
+                conn.execute(f"DELETE FROM submissions WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM job_artifacts WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM job_failures WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM jobs WHERE id IN ({id_marks})", ids)
@@ -1411,6 +1438,50 @@ class Store:
         pool: str = DEFAULT_POOL,
     ) -> Job:
         """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다."""
+        job, _ = self._create_job_tx(
+            preset=preset,
+            inputs=inputs,
+            key=key,
+            concurrency_group=concurrency_group,
+            source=source,
+            requester=requester,
+            timeout_seconds=timeout_seconds,
+            join_key=join_key,
+            now=now,
+            state=state,
+            priority=priority,
+            pool=pool,
+            participant=None,
+        )
+        return job
+
+    def create_job_with_submission(
+        self, *, participant: str, **kwargs: Any
+    ) -> tuple[Job, str, str]:
+        """새 잡 + 요청자의 `cancel_job` capability 를 **한 트랜잭션**으로(M5l S8) —
+        `(job, submission_id, cancel_token)`. capability 삽입이 실패하면 잡 행도 이벤트도 없다:
+        `git_ref` 잡은 커밋되는 순간 돌 수 있는데 그 잡을 취소할 비밀이 없으면 안 된다."""
+        job, issued = self._create_job_tx(participant=participant, **kwargs)
+        assert issued is not None
+        return job, issued[0], issued[1]
+
+    def _create_job_tx(
+        self,
+        *,
+        preset: str,
+        inputs: dict[str, Any],
+        key: str,
+        concurrency_group: str | None,
+        source: Source,
+        requester: Requester,
+        timeout_seconds: int,
+        join_key: str | None,
+        now: datetime,
+        participant: str | None,
+        state: str = UPLOADING,
+        priority: int = 0,
+        pool: str = DEFAULT_POOL,
+    ) -> tuple[Job, tuple[str, str] | None]:
         if state not in (UPLOADING, QUEUED):
             raise StoreError(f"new job cannot start in state {state}")
         conn = self._conn()
@@ -1426,6 +1497,7 @@ class Store:
             "sha": source.sha,
         }
         ts = _ts(now)
+        issued: tuple[str, str] | None = None
         conn.execute("BEGIN IMMEDIATE")
         try:
             cur = conn.execute(
@@ -1454,13 +1526,15 @@ class Store:
             )
             job_id = int(cur.lastrowid)
             self._event(conn, job_id, EVENT_STATE, {"state": state}, ts)
+            if participant is not None:
+                issued = self._insert_submission(conn, job_id, ROLE_CANCEL_JOB, participant, now)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
         job = self.get_job(job_id)
         assert job is not None
-        return job
+        return job, issued
 
     def find_joinable(self, join_key: str) -> Job | None:
         marks = ",".join("?" * len(ACTIVE_STATES))
@@ -1477,8 +1551,35 @@ class Store:
 
         요청자 본인이면 합류자를 안 넣는다. 우선순위는 `max(기존, 요청)` 로만 올라간다.
         """
+        got = self._join_tx(join_key, name, label, priority, now, with_submission=False)
+        return None if got is None else got[0]
+
+    def join_or_bump_with_submission(
+        self, join_key: str, name: str, label: str, priority: int, now: datetime
+    ) -> tuple[Job, str, str] | None:
+        """`join_or_bump` + 그 참여자의 `leave_submission` capability 를 같은 트랜잭션에(M5l S8)
+        — `(job, submission_id, cancel_token)`, 합류할 잡이 없으면 None. 삽입이 실패하면
+        joiner 행도 `join_count` 도 그대로다."""
+        got = self._join_tx(join_key, name, label, priority, now, with_submission=True)
+        if got is None:
+            return None
+        job, issued = got
+        assert issued is not None
+        return job, issued[0], issued[1]
+
+    def _join_tx(
+        self,
+        join_key: str,
+        name: str,
+        label: str,
+        priority: int,
+        now: datetime,
+        *,
+        with_submission: bool,
+    ) -> tuple[Job, tuple[str, str] | None] | None:
         marks = ",".join("?" * len(ACTIVE_STATES))
         conn = self._conn()
+        issued: tuple[str, str] | None = None
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
@@ -1501,11 +1602,15 @@ class Store:
             conn.execute("UPDATE jobs SET join_count=join_count+1 WHERE id=?", (job_id,))
             if int(priority) > int(row["priority"] or 0):
                 conn.execute("UPDATE jobs SET priority=? WHERE id=?", (int(priority), job_id))
+            if with_submission:
+                issued = self._insert_submission(conn, job_id, ROLE_LEAVE_SUBMISSION, name, now)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        return self.get_job(job_id)
+        job = self.get_job(job_id)
+        assert job is not None
+        return job, issued
 
     def set_priority(self, job_id: int, priority: int, now: datetime) -> bool:
         """대기 잡(uploading · queued)의 우선순위를 바꾼다. 아니면 False."""
@@ -1666,6 +1771,105 @@ class Store:
 
     def remove_joiner(self, job_id: int, name: str) -> bool:
         cur = self._conn().execute("DELETE FROM joiners WHERE job_id=? AND name=?", (job_id, name))
+        return cur.rowcount == 1
+
+    # ── 제출 capability (M5j G5 · 결정 87) ──────────────────────────────────
+
+    def add_submission(
+        self, job_id: int, role: str, now: datetime, *, participant: str
+    ) -> tuple[str, str]:
+        """`POST /jobs` 시도 하나에 capability 하나 — `(submission_id, cancel_token)`.
+
+        비밀은 여기서 한 번 만들어 돌려주고 DB 에는 SHA-256 만 남는다(토큰과 같은 취급). 같은
+        토큰 이름의 세션이 몇 번을 내든 행은 시도마다 다르다 — 참여자는 이름이 아니라 이 행이다.
+        `participant` 는 비밀을 받은 토큰 이름 — `leave_submission` 은 그 이름만 쓸 수 있다.
+        서버 경로는 잡 생성·합류와 같은 트랜잭션인 `create_job_with_submission` ·
+        `join_or_bump_with_submission` 을 쓴다(M5l S8); 이것은 단독 삽입이다.
+        """
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            issued = self._insert_submission(conn, job_id, role, participant, now)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return issued
+
+    def _insert_submission(
+        self, conn: sqlite3.Connection, job_id: int, role: str, participant: str, now: datetime
+    ) -> tuple[str, str]:
+        """열린 트랜잭션 안에서 행 하나 — `(submission_id, cancel_token)`."""
+        if role not in (ROLE_CANCEL_JOB, ROLE_LEAVE_SUBMISSION):
+            raise StoreError(f"unknown submission role {role!r}")
+        submission_id = secrets.token_hex(8)
+        cancel_token = secrets.token_urlsafe(32)
+        # `-` 로 시작하는 비밀은 `rcm cancel N --cancel-token <비밀>` 에서 argparse 가 옵션으로
+        # 읽는다(CI 에서 1/64 확률로 재현). 첫 글자가 `-` 면 다시 뽑는다 — 문서의 명령이 그대로
+        # 되게 하는 쪽이 사용자에게 `--cancel-token=` 을 가르치는 쪽보다 낫다.
+        while cancel_token.startswith("-"):
+            cancel_token = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO submissions (job_id, submission_id, role, capability_hash, created_at, "
+            "participant) VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, submission_id, role, hash_token(cancel_token), _ts(now), participant),
+        )
+        return submission_id, cancel_token
+
+    def submission_role(self, job_id: int, cancel_token: str) -> tuple[str, str, str] | None:
+        """그 잡의 어느 capability 와 맞는가 — `(submission_id, role, participant)`, 아니면 None.
+
+        비교는 해시끼리 `compare_digest` 로. 잡 번호가 다르면 비밀이 맞아도 None 이다 — 한 잡의
+        비밀로 다른 잡을 건드릴 수 없다. role 은 저장된 그대로 돌려준다 — 화이트리스트 판정은
+        부르는 쪽(서버)이 한다(M5l S10: 모르는 값이 `cancel_job` 로 승격되면 안 된다).
+        """
+        want = hash_token(cancel_token)
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT submission_id, role, capability_hash, participant FROM submissions "
+                "WHERE job_id=?",
+                (job_id,),
+            )
+            .fetchall()
+        )
+        for r in rows:
+            if hmac.compare_digest(str(r["capability_hash"]), want):
+                return str(r["submission_id"]), str(r["role"]), str(r["participant"])
+        return None
+
+    def consume_leave(
+        self, job_id: int, submission_id: str, participant: str, *, drop_joiner: bool
+    ) -> bool:
+        """`leave_submission` 을 **한 번** 쓴다(M5l S6): 그 행이 아직 있고 · 그 잡의 것이고 ·
+        `leave_submission` 이고 · 참여자 이름이 맞을 때만 지우고, 같은 트랜잭션에서 joiner 행
+        (`drop_joiner`)도 뺀다. 아니면 False 이고 아무것도 바뀌지 않는다. `BEGIN IMMEDIATE`
+        가 같은 비밀의 동시 요청을 줄 세우므로 둘 중 하나만 True 다."""
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "DELETE FROM submissions WHERE submission_id=? AND job_id=? AND role=? "
+                "AND participant=?",
+                (submission_id, job_id, ROLE_LEAVE_SUBMISSION, participant),
+            )
+            if cur.rowcount != 1:
+                conn.execute("COMMIT")
+                return False
+            if drop_joiner:
+                conn.execute("DELETE FROM joiners WHERE job_id=? AND name=?", (job_id, participant))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return True
+
+    def remove_submission(self, submission_id: str) -> bool:
+        """행 하나를 지운다 — 그 비밀은 더 통하지 않는다. 서버의 leave 경로는 `consume_leave`
+        (참여자 확인 · joiner 삭제와 한 트랜잭션)를 쓴다."""
+        cur = self._conn().execute(
+            "DELETE FROM submissions WHERE submission_id=?", (submission_id,)
+        )
         return cur.rowcount == 1
 
     def update_source_fields(self, job_id: int, **fields: Any) -> None:

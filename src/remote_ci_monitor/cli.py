@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor import SCHEMA_VERSION, __version__
+from remote_ci_monitor import SCHEMA_VERSION, __version__, submissions
 from remote_ci_monitor import apply as apply_mod
 from remote_ci_monitor.client import (
     Client,
@@ -216,17 +216,66 @@ def _no_wait_json(
     state: str | None,
     url: str | None,
     extra: dict[str, Any] | None = None,
+    submission: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """`--no-wait` 의 stdout JSON.
 
     조회가 안 됐으면 순번 칸을 **아예 넣지 않는다** — null 은 「순번이 없다」는 뜻이라 다르다.
+    `submission`(M5j G5 · `{id, cancel_token}`)은 제출 응답이 준 그대로 `url` 앞에 — 래퍼가
+    나중에 `rcm cancel --cancel-token` 으로 쓴다. 옛 서버가 안 주면 키도 없다.
     """
     body: dict[str, Any] = {"job_id": job_id, "joined": joined, "state": state}
     if view is not None:
         body.update({k: view.get(k) for k in NO_WAIT_KEYS})
     body.update(extra or {})
+    if submission is not None:
+        body["submission"] = submission
     body["url"] = url
     return body
+
+
+def _keep_submission(client: Client, job_id: int, resp: dict[str, Any]) -> str | None:
+    """제출 응답의 `submission` 을 상태 파일에 둔다(M5j G5) — 나중의 `rcm cancel N` 이 쓴다.
+
+    돌려주는 값은 cancel token: 합류자의 Ctrl-C 가 자기 참여만 빼는 데 쓴다. 옛 서버(키 없음)면
+    None. 못 두면 stderr 한 줄(경로 없이 — M5l S10) — 잡은 이미 큐에 있고, 비밀은 `--no-wait`
+    JSON 이 아니면 어디에도 찍지 않는다. 상한을 넘으면 이 서버의 끝난 잡만 서버에 물어 버린다
+    (M5l S9); 다른 서버의 항목은 모르니 남긴다.
+    """
+    sub = resp.get("submission")
+    if not isinstance(sub, dict):
+        return None
+    sid, tok = sub.get("id"), sub.get("cancel_token")
+    if not isinstance(sid, str) or not isinstance(tok, str) or not tok:
+        return None
+    role = submissions.ROLE_LEAVE_SUBMISSION if resp.get("joined") else submissions.ROLE_CANCEL_JOB
+    mine = client.server.rstrip("/")
+
+    def finished(server: str, other: int) -> bool | None:
+        if server.rstrip("/") != mine:
+            return None
+        try:
+            return client.job(other, timeout=5).get("state") in TERMINAL_STATES
+        except ClientError as e:
+            return True if e.status == 404 else None  # 지워진 잡의 비밀은 쓸 데가 없다
+
+    try:
+        submissions.remember(
+            client.server,
+            job_id,
+            sid,
+            tok,
+            role=role,
+            token_fingerprint=submissions.fingerprint(client.token),
+            finished=finished,
+        )
+    except OSError as e:
+        _err(
+            f"warning: the cancel token was not saved in the rcm state file "
+            f"({e.strerror or e}) — from another shell, `rcm cancel {job_id}` needs "
+            "--cancel-token (the --no-wait JSON carries it)"
+        )
+    return tok
 
 
 NO_SERVER_HINT = "no server configured (use --server, RCM_SERVER or client.toml)"
@@ -334,24 +383,50 @@ def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
 def _client_row(client: Client, h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     """`rcm check` 의 `client` 행 — 이 클라이언트와 서버의 버전. 서버가 버전을 안 주면 행도 없다.
 
-    FAIL 은 `min_client_version` 아래일 때만. 그 위의 「older」·「newer」는 warn(알려는 주되
-    실패는 아니다) — 실제 거부는 서버의 400 이 한다.
+    FAIL 은 `min_client_version` 아래일 때뿐이고 그것을 **먼저** 본다(M5l S10) — 서버가 취소에
+    capability 를 요구하면 같은 버전 번호라도 바닥이 그 위일 수 있다(0.2.6 서버가 0.2.7 을
+    요구). 그 위의 「older」·「newer」는 warn(알려는 주되 실패는 아니다) — 실제 거부는 서버의
+    400·403 이 한다.
     """
     server_v = h.get("version")
     if not server_v:
         return None
     mine, theirs = _version_key(__version__), _version_key(server_v)
+    floor = h.get("min_client_version")
+    if floor and mine < _version_key(floor):
+        why = "older" if mine < theirs else f"below min client v{floor}"
+        return (
+            "client",
+            False,
+            f"v{__version__} · server v{server_v} · {why} — {_upgrade_hint(client.server, h)}",
+        )
     if mine == theirs:
         return ("client", True, f"v{__version__} · same as server")
     if mine < theirs:
-        floor = h.get("min_client_version")
-        too_old = bool(floor) and mine < _version_key(floor)
         return (
             "client",
-            False if too_old else None,
+            None,
             f"v{__version__} · server v{server_v} · older — {_upgrade_hint(client.server, h)}",
         )
     return ("client", None, f"v{__version__} · server v{server_v} · newer")
+
+
+def _cancel_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `cancel` 행 — 서버가 취소에 제출 capability 를 요구하면(M5j G5) 그 사실과
+    그것을 보낼 줄 아는 최소 클라이언트 버전을 말한다. 키가 꺼진(또는 옛) 서버면 행이 없다.
+
+    버전을 비교하지 않는 이유: 이 코드가 도는 클라이언트는 이미 비밀을 보낸다 — 행은 **옛
+    클라이언트를 쓰는 다른 세션**에게 알려 줄 숫자를 옮기는 것이지 자기 판정이 아니다. 옛
+    클라이언트 자신은 이 키를 모르니 행도 못 그리고, 실제 거부는 서버의 403 이 한다.
+    """
+    floor = h.get("cancel_min_client_version")
+    if not floor:
+        return None
+    return (
+        "cancel",
+        True,
+        f"needs the submission's cancel token · min client v{floor} (this client sends one)",
+    )
 
 
 def _warn_if_client_too_old(client: Client) -> None:
@@ -474,6 +549,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return USAGE_EXIT if e.status in (400, 401, 403, 413, 0) else EXIT_UNKNOWN
         job_id = int(resp["job_id"])
         joined = bool(resp.get("joined"))
+        cancel_token = _keep_submission(client, job_id, resp)
         state = resp.get("state")  # 합류면 그 잡의 상태, 새 잡이면 uploading
         if joined:
             if not args.no_wait:  # --no-wait 은 순번까지 실은 한 줄로 대신 말한다
@@ -522,7 +598,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         detail = "same preset, inputs and tree" if joined else ""
         _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _info(f"fetch its artifacts later with `rcm artifacts {job_id} --fetch --output DIR`")
-        _print_json(_no_wait_json(job_id, view, joined=joined, state=state, url=url))
+        _print_json(
+            _no_wait_json(
+                job_id, view, joined=joined, state=state, url=url, submission=resp.get("submission")
+            )
+        )
         return 0
     # ⑤ wait — 끝나면 산출물을 제출한 그 트리에 쓴다(§11)
     spec = None
@@ -538,7 +618,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     snap = None  # noqa: F841 — 참조를 끊는 것이 목적이다
     del snap
     return _wait(
-        client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll, fetch=spec
+        client,
+        job_id,
+        timeout=args.timeout,
+        joined=joined,
+        use_sse=not args.poll,
+        fetch=spec,
+        cancel_token=cancel_token,
     )
 
 
@@ -569,6 +655,7 @@ def _run_git_ref(
         return USAGE_EXIT if e.status in (400, 401, 403, 413, 502, 0) else EXIT_UNKNOWN
     job_id = int(resp["job_id"])
     joined = bool(resp.get("joined"))
+    cancel_token = _keep_submission(client, job_id, resp)
     sha = resp.get("sha")
     short = str(sha)[:7] if sha else "—"
     state = resp.get("state")
@@ -585,7 +672,13 @@ def _run_git_ref(
         _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _print_json(
             _no_wait_json(
-                job_id, view, joined=joined, state=state, url=url, extra={"ref": ref, "sha": sha}
+                job_id,
+                view,
+                joined=joined,
+                state=state,
+                url=url,
+                extra={"ref": ref, "sha": sha},
+                submission=resp.get("submission"),
             )
         )
         return 0
@@ -594,7 +687,14 @@ def _run_git_ref(
     else:
         # ref 가 곧 sha 면 한 번만 — 목록 칸과 같은 규칙(M5i I2)
         _info(f"submitted job #{job_id} ({preset.name} · {ref_ident(ref, sha)}) · {url or ''}")
-    return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
+    return _wait(
+        client,
+        job_id,
+        timeout=args.timeout,
+        joined=joined,
+        use_sse=not args.poll,
+        cancel_token=cancel_token,
+    )
 
 
 @dataclass(frozen=True)
@@ -615,7 +715,10 @@ def _wait(
     joined: bool,
     use_sse: bool = True,
     fetch: _FetchSpec | None = None,
+    cancel_token: str | None = None,
 ) -> int:
+    """잡을 따라가다 종료 코드를 낸다. Ctrl-C 는 detach — 요청자는 아무것도 보내지 않고, 합류자는
+    자기 `leave_submission` capability(`cancel_token`)로 합류만 뺀다(PLAN 계약 · M5j G5)."""
     line = _StatusLine()
     last: dict[str, Any] | None = None
 
@@ -638,7 +741,7 @@ def _wait(
         left = False
         if joined:
             try:
-                resp = client.cancel(job_id)
+                resp = client.cancel(job_id, cancel_token=cancel_token)
                 left = bool(resp.get("left"))
             except ClientError:
                 pass
@@ -691,12 +794,40 @@ def cmd_wait(args: argparse.Namespace) -> int:
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
+    """`rcm cancel N [--cancel-token T | --submission-id S]` — 비밀은 플래그 > 상태 파일 순.
+    상태 파일에서는 **이 토큰**으로 낸 그 잡의 가장 최근 제출(`--submission-id` 로 특정)이다
+    (M5l S5 — 다른 세션의 항목으로 넘어가는 폴백은 없다). 둘 다 없으면
+    어느 쪽이 없는지 말하고 **그래도 보낸다**(키가 꺼진 서버·admin 토큰은 오늘처럼 받는다).
+    비밀 자체도 상태 파일의 경로도 어디에도 찍지 않는다."""
     client = _client(args)
+    cancel_token = getattr(args, "cancel_token", None) or None
+    submission_id = getattr(args, "submission_id", None) or None
+    entry: dict[str, Any] | None = None
+    if not cancel_token:
+        entry = submissions.find(
+            client.server,
+            args.job,
+            submission_id=submission_id,
+            token_fingerprint=submissions.fingerprint(client.token),
+        )
+        cancel_token = (entry or {}).get("cancel_token")
+    if not cancel_token:
+        which = (
+            f"submission {submission_id} is not in the rcm state file"
+            if submission_id
+            else "none saved in the rcm state file"
+        )
+        _info(
+            f"no cancel token for job #{args.job}: {which} and no --cancel-token — "
+            "sending the cancel without one"
+        )
     try:
-        resp = client.cancel(args.job)
+        resp = client.cancel(args.job, cancel_token=cancel_token)
     except ClientError as e:
         _err(f"cancel failed: {e.message}")
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
+    if entry is not None and isinstance(entry.get("submission_id"), str):
+        submissions.forget(client.server, entry["submission_id"])  # 쓴 비밀은 더 안 통한다
     _print_json(resp)
     if resp.get("left"):
         _info(f"left the join list of job #{args.job} (job keeps running)")
@@ -1361,6 +1492,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             client_row = _client_row(client, h)
             if client_row is not None:
                 rows.append(client_row)
+            cancel_row = _cancel_row(h)
+            if cancel_row is not None:
+                rows.append(cancel_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
@@ -1834,6 +1968,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
+    cancel.add_argument(
+        "--cancel-token",
+        metavar="TOKEN",
+        help="the submission's cancel token (default: the newest one rcm run saved for this job "
+        "with this token in $XDG_STATE_HOME/rcm/submissions.json or "
+        "~/.local/state/rcm/submissions.json)",
+    )
+    cancel.add_argument(
+        "--submission-id",
+        metavar="ID",
+        help="use the saved cancel token of this submission (the id from the --no-wait JSON) "
+        "when two sessions of this user are on the same job",
+    )
     client_opts(cancel)
     cancel.set_defaults(func=cmd_cancel)
 

@@ -134,6 +134,9 @@ class ServerSection:
     max_concurrent_artifact_transfers: int = 2  # 동시 전송 슬롯. 기다리지 않고 503
     advertise: bool | None = None  # mDNS 광고(M5c). None = bind 가 루프백이 아니면 켠다
     advertise_name: str = ""  # 발견 응답의 이름. 비면 짧은 호스트명
+    # 취소에 제출 capability 를 요구한다(M5j G5 · 결정 87). 켜면 `POST /jobs` 가 준 cancel token
+    # 또는 admin 토큰만 취소한다 — 0.2.7 전 클라이언트의 `rcm cancel` 은 403 이다. 기본은 off.
+    cancel_requires_submission_token: bool = False
 
 
 @dataclass

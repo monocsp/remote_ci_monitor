@@ -694,8 +694,11 @@ class Client:
     def job(self, job_id: int, *, tail: int = 0, timeout: float | None = None) -> dict[str, Any]:
         return self.get_json(f"/jobs/{job_id}?tail={tail}", timeout=timeout)
 
-    def cancel(self, job_id: int) -> dict[str, Any]:
-        return self.post_json(f"/jobs/{job_id}/cancel")
+    def cancel(self, job_id: int, *, cancel_token: str | None = None) -> dict[str, Any]:
+        """`POST /jobs/{id}/cancel`. `cancel_token` 은 제출 응답의 `submission.cancel_token`
+        (M5j G5) — 있으면 본문에 싣고, 없으면 오늘처럼 빈 본문이다(옛 서버는 키를 무시한다)."""
+        body = {"cancel_token": cancel_token} if cancel_token else {}
+        return self.post_json(f"/jobs/{job_id}/cancel", body)
 
     def gc(self, *, dry_run: bool = False, timeout: float | None = None) -> dict[str, Any]:
         """`POST /gc`(admin). 스캔이 오래 걸릴 수 있어 **자기 시한**을 쓴다 — 일반 요청의
