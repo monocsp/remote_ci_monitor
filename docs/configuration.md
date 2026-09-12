@@ -461,7 +461,13 @@ with the same token at the same time get one 200 and one 403. `rcm run` saves th
 one entry per submission, locked while written) and `rcm cancel N` sends the newest one that
 this client token saved for that job, never an entry another token saved (`--submission-id`
 picks another); `rcm cancel N --cancel-token …` takes it from a wrapper
-that kept the `--no-wait` JSON, which carries the same `submission` object. Ctrl-C keeps its
+that kept the `--no-wait` JSON, which carries the same `submission` object. A token that worked
+is removed from the file. The file keeps at most 200 entries; above that it drops only entries
+whose job the server says has finished (oldest first) — a running or queued job's entry is never
+dropped, and when the server cannot be asked nothing is dropped. When the file cannot be written
+(`rcm run` prints one `warning: the cancel token was not saved …` line, never the token itself)
+the `--no-wait` JSON is the only copy, and `rcm cancel N --cancel-token …` is the way to use it.
+Ctrl-C keeps its
 meaning: the requester detaches and the job keeps running; a joiner leaves the join list with its
 own token. A token whose role the server does not know (`cancel_job` and `leave_submission` are
 the only two) is refused with 403 and a server log line.
