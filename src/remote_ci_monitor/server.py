@@ -41,6 +41,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
 from remote_ci_monitor.clientwheel import (
+    CANCEL_MIN_CLIENT_VERSION,
     MIN_CLIENT_VERSION,
     WheelBuildError,
     build_wheel,
@@ -118,7 +119,7 @@ from remote_ci_monitor.materialize import blob_path
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
-from remote_ci_monitor.store import Store, TokenInfo
+from remote_ci_monitor.store import ROLE_CANCEL_JOB, ROLE_LEAVE_SUBMISSION, Store, TokenInfo
 from remote_ci_monitor.worker import Worker, start_workers, tail_lines
 
 MAX_JSON_BODY = 64 * 1024
@@ -1154,6 +1155,10 @@ class App(RemoteWorkersMixin):
                     row["artifacts"] = self.artifacts_public(job)
         doc["server"]["artifact_storage"] = self.artifact_storage()
         doc["server"]["job_storage"] = self.job_storage()
+        # 웹의 취소 버튼이 읽는다(M5j G5) — 페이지는 capability 를 가질 수 없어 admin 만 취소한다
+        doc["server"]["cancel_requires_submission_token"] = bool(
+            self.config.server.cancel_requires_submission_token
+        )
 
     def job_view(
         self, job_id: int, token: TokenInfo | None, tail: int, host: str | None = None
@@ -1319,6 +1324,7 @@ class App(RemoteWorkersMixin):
                     "state": existing.state,
                     "priority": existing.priority,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
+                    "submission": self._issue_submission(existing.id, joined=True, now=now),
                 }
         job = self.store.create_job(
             preset=preset.name,
@@ -1344,7 +1350,16 @@ class App(RemoteWorkersMixin):
             "cache": bool(self.config.server.snapshot_cache),
             "upload": f"/jobs/{job.id}/tree",
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
+            "submission": self._issue_submission(job.id, joined=False, now=now),
         }
+
+    def _issue_submission(self, job_id: int, *, joined: bool, now: datetime) -> dict[str, str]:
+        """`POST /jobs` 시도마다 capability 하나(M5j G5 · 결정 87). 응답의 `submission` 키 —
+        비밀은 여기서 한 번 나가고 서버에는 해시만 남는다. 합류는 `leave_submission`(자기 참여만
+        뺀다), 새 잡은 `cancel_job`. 같은 토큰 이름의 두 세션도 서로 다른 참여자다."""
+        role = ROLE_LEAVE_SUBMISSION if joined else ROLE_CANCEL_JOB
+        submission_id, cancel_token = self.store.add_submission(job_id, role, now)
+        return {"id": submission_id, "cancel_token": cancel_token}
 
     def _parse_priority(self, raw: Any, default: int) -> int:
         """`priority` 값(이름 또는 -1·0·1). 없으면 default(프리셋 기본)."""
@@ -1661,6 +1676,7 @@ class App(RemoteWorkersMixin):
                     "priority": existing.priority,
                     "sha": existing.source.sha,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
+                    "submission": self._issue_submission(existing.id, joined=True, now=now),
                 }
         job = self.store.create_job(
             preset=preset.name,
@@ -1686,6 +1702,7 @@ class App(RemoteWorkersMixin):
             "pool": job.pool,
             "sha": sha,
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
+            "submission": self._issue_submission(job.id, joined=False, now=now),
         }
 
     # ── 업로드 ──────────────────────────────────────────────────────────────
@@ -1766,10 +1783,44 @@ class App(RemoteWorkersMixin):
 
     # ── 취소 · 정지 ─────────────────────────────────────────────────────────
 
-    def cancel(self, job_id: int, token: TokenInfo) -> dict[str, Any]:
+    def cancel(
+        self, job_id: int, token: TokenInfo, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """`POST /jobs/{id}/cancel` — 본문 `{"cancel_token": …}` 은 선택(M5j G5 · 결정 87).
+
+        맞는 capability 가 오면 **그 역할대로**: `cancel_job` 은 잡을 취소하고 `leave_submission`
+        은 그 참여자만 나간다(잡은 계속). 비밀이 없거나 안 맞으면 — 키가 꺼져 있으면(기본 ·
+        0.2.x 호환) 오늘 규칙(요청자 이름 · 합류자 · admin), 켜져 있으면 admin 만이고 나머지는
+        403 이다. 비-admin 의 강제 우회는 없다 — 옛 공유 토큰 권한을 되살리면 이 기능은 없는
+        것과 같다(Codex 리뷰 규칙 위반 표). 비밀은 응답·로그 어디에도 다시 쓰지 않는다.
+        """
         job = self.store.get_job(job_id)
         if job is None:
             raise ApiError(404, "no such job")
+        cancel_token = (body or {}).get("cancel_token") if isinstance(body, dict) else None
+        if cancel_token is not None and (
+            not isinstance(cancel_token, str) or len(cancel_token) > 200
+        ):
+            raise ApiError(400, "cancel_token must be a string")
+        capability = self.store.submission_role(job_id, cancel_token) if cancel_token else None
+        if capability is not None:
+            submission_id, role = capability
+            if role == ROLE_LEAVE_SUBMISSION:
+                # 그 참여자만 나간다 — 비밀은 한 번만 통한다. 이름 행(joiners)은 요청자가
+                # 아닐 때만 같이 뺀다(요청자 본인의 두 번째 세션은 이름 행이 없다).
+                self.store.remove_submission(submission_id)
+                if job.requester.name != token.name:
+                    self.store.remove_joiner(job_id, token.name)
+                self._publish_job(None, job_id)
+                return {"left": True, "job_id": job_id, "job_state": job.state}
+            return self._cancel_job(job, token)
+        if self.config.server.cancel_requires_submission_token and not token.admin:
+            raise ApiError(
+                403,
+                "not your submission — pass the cancel token from the submission "
+                "(rcm cancel --cancel-token …)",
+                error_code="cancel_token_required",
+            )
         is_requester = job.requester.name == token.name
         is_joiner = any(j.name == token.name for j in job.joiners)
         if not (token.admin or is_requester or is_joiner):
@@ -1779,6 +1830,11 @@ class App(RemoteWorkersMixin):
             self.store.remove_joiner(job_id, token.name)
             self._publish_job(None, job_id)
             return {"left": True, "job_id": job_id, "job_state": job.state}
+        return self._cancel_job(job, token)
+
+    def _cancel_job(self, job: Job, token: TokenInfo) -> dict[str, Any]:
+        """권한 판정이 끝난 뒤의 취소 — 대기 잡은 즉시, 도는 잡은 `cancelling`(SIGTERM → grace)."""
+        job_id = job.id
         if job.is_terminal:
             raise ApiError(409, f"job already finished ({job.state})", state=job.state)
         new_state = self.store.request_cancel(
@@ -1913,6 +1969,7 @@ class App(RemoteWorkersMixin):
             idle_pools = self.pools_without_workers(self.now_fn())
         except Exception:  # noqa: BLE001
             idle_pools = []
+        strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,
             "db": db_ok,
@@ -1926,7 +1983,15 @@ class App(RemoteWorkersMixin):
             # 클라이언트가 서버 버전을 따라오는 길(M5i I8 · 결정 81·83, 정보 — 503 조건은 아니다)
             "client_wheel": self.client_wheel(),
             "client_wheel_error": self.client_wheel_error(),
-            "min_client_version": MIN_CLIENT_VERSION,
+            # 설정의 **유효** 최소 클라이언트 버전(M5j G5 · 결정 87): 취소에 capability 를
+            # 요구하면 그 전 클라이언트의 `rcm cancel` 이 403 이라, 상수 바닥(결정 83)이 아니라
+            # 그것을 보낼 줄 아는 버전을 알린다 — 옛 클라이언트의 `rcm check` 는 이 키로만 자기
+            # FAIL 을 그린다. 제출은 그대로 받는다(서버는 버전으로 막지 않는다).
+            "min_client_version": (
+                CANCEL_MIN_CLIENT_VERSION if strict_cancel else MIN_CLIENT_VERSION
+            ),
+            # 왜 올랐는지 — 키가 켜져 있을 때만, 꺼져 있으면 null(어느 0.2.x 도 취소할 수 있다)
+            "cancel_min_client_version": CANCEL_MIN_CLIENT_VERSION if strict_cancel else None,
         }
         if not ok:
             if not db_ok:
@@ -2278,8 +2343,7 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "/cancel":
                 self._only(method, "POST")
                 t = self.app.require_client_token(self._token())
-                self._json_body()
-                self._send_json(200, self.app.cancel(job_id, t))
+                self._send_json(200, self.app.cancel(job_id, t, self._json_body()))
                 return
         if path in _STATIC_FILES or path.startswith("/static/"):
             self._only(method, "GET")

@@ -413,6 +413,14 @@
     return Array.isArray(row.joiners) && row.joiners.some(function (j) { return j && j.name === me; });
   }
 
+  // 취소 버튼이 잠기는가(M5j G5). 서버가 취소에 제출 capability 를 요구하면(`server.cancel_requires_submission_token`)
+  // 페이지는 그 비밀을 가질 수 없다 — 비밀은 `rcm run` 을 돌린 세션의 상태 파일에만 있다. admin 토큰만 연다.
+  // 키가 없는 옛 서버·꺼진 서버는 오늘 그대로 열려 있다. `me` 는 `/api/whoami` 의 `{name, admin}` 또는 null.
+  function cancelLocked(server, me) {
+    if (!server || server.cancel_requires_submission_token !== true) return false;
+    return !(me && me.admin === true);
+  }
+
   // 시각은 status.display_timezone · generated_at 기준(§2 시그니처가 (status, me) 라 다른 데서 올 수 없다).
   // text 에 잡 id 는 넣지 않는다 — id 는 렌더 층이 버튼으로 따로 그린다(목업 23 「<b>#412</b> running …」).
   function yourJobs(status, me, lang) {
@@ -939,7 +947,7 @@
     fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtDisk: fmtDisk, fmtMb: fmtMb, fmtPct: fmtPct,
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
-    elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, hostPressure: hostPressure,
+    elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
@@ -960,7 +968,7 @@
   var $$ = function (sel, el) { return Array.prototype.slice.call((el || document).querySelectorAll(sel)); };
   var state = {
     status: null, prev: null, skewMs: 0, conn: connection(null, "init", Date.now()),
-    token: null, me: null, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
+    token: null, me: null, admin: false, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
     lang: I18N.DEFAULT_LANG,
     expanded: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
     // 이름별 실패 이력은 `/api/status` 에 없다(결정 67) — 행을 펼칠 때 그 잡만 한 번 받는다
@@ -1107,7 +1115,7 @@
 
   // ── 토큰 (항목 4 · 29) ──
   function tokenRejected() {
-    state.tokenBad = true; state.me = null; state.token = null; lsSet("rcm.token", null);
+    state.tokenBad = true; state.me = null; state.admin = false; state.token = null; lsSet("rcm.token", null);
     renderTokenButton(); render();
   }
   function verifyToken(tok, silent) {
@@ -1120,7 +1128,7 @@
       return r.json();
     }).then(function (me) {
       if (me && me.bad) { state.token = null; state.me = null; state.tokenBad = true; lsSet("rcm.token", null); if (status) status.textContent = tr("token.rejected"); return false; }
-      state.token = tok; state.me = me && me.name ? me.name : null; state.tokenBad = false; lsSet("rcm.token", tok);
+      state.token = tok; state.me = me && me.name ? me.name : null; state.admin = !!(me && me.admin === true); state.tokenBad = false; lsSet("rcm.token", tok);
       if (status) status.textContent = "ok · " + (state.me || "") + (me && me.admin ? " (admin)" : "");
       return true;
     }).catch(function () {
@@ -1150,7 +1158,7 @@
     });
     $("[data-tok-cancel]").addEventListener("click", function () { dlg.close(); });
     $("[data-tok-forget]").addEventListener("click", function () {
-      state.token = null; state.me = null; state.tokenBad = false; lsSet("rcm.token", null); renderTokenButton(); render(); dlg.close();
+      state.token = null; state.me = null; state.admin = false; state.tokenBad = false; lsSet("rcm.token", null); renderTokenButton(); render(); dlg.close();
     });
     dlg.querySelector("form").addEventListener("submit", function (ev) {
       ev.preventDefault();
@@ -1159,7 +1167,7 @@
       verifyToken(tok).then(function (ok) { if (ok) dlg.close(); });
     });
     window.addEventListener("storage", function (ev) {
-      if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); } }
+      if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; state.admin = false; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); } }
       if (ev.key === "rcm.expanded") { state.expanded = {}; loadExpanded(); renderQueue(); }
       // 다른 탭에서 언어를 바꾸면 이 탭도 따라온다
       if (ev.key === "rcm.lang") { state.lang = I18N.normalize(ev.newValue); applyLang(); }
@@ -1484,8 +1492,12 @@
     if (row._cancelRequested) reasonCell += '<div class="sub">' + esc(tr("row.cancel_requested")) + "</div>";
     // 접힌 행이면 내 잡을 여기서 바로 세울 수 있어야 한다 — 폰에서 유일한 취소 경로이고, 도는
     // 잡을 멈추는 일이 스텝 목록을 구경하는 일보다 급하다(사용자 검사 U3.6 · Codex 리뷰 4).
-    var canActRow = !!state.token && !state.tokenBad && (mine || state.me === null);
+    // 서버가 취소에 제출 capability 를 요구하면(M5j G5) 페이지는 그것을 못 가진다 — admin 이 아니면
+    // 버튼 대신 이유 한 줄. 내 잡에만(남의 잡은 오늘도 버튼이 없다).
+    var locked = cancelLocked(st && st.server, state.me ? { name: state.me, admin: state.admin } : null);
+    var canActRow = !!state.token && !state.tokenBad && (mine || state.me === null) && !locked;
     if (!expanded && canActRow && !row._cancelRequested && row.state !== "cancelling") reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button></div>";
+    else if (!expanded && locked && mine && !!state.token && !state.tokenBad && row.state !== "cancelling") reasonCell += '<div class="sub cancel-locked">' + esc(tr("row.cancel_locked")) + "</div>";
     var el = elapsedText(row, now(), L());
     var elapsedCell = busy && isNum(est.elapsed_seconds)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
@@ -1580,10 +1592,15 @@
     if (Array.isArray(row.log_tail) && row.log_tail.length) h += '<div class="tail">' + esc(row.log_tail.slice(-5).join("\n")) + "</div>";
     else if (!state.token) h += '<div class="sub" style="margin-top:8px">' + esc(tr("row.add_token_for_log")) + "</div>";
     var canAct = !!state.token && !state.tokenBad && (mine || state.me === null);
+    // 취소만 잠긴다(M5j G5) — 로그는 그 잡의 토큰으로 오늘처럼 읽는다
+    var locked = cancelLocked(state.status && state.status.server, state.me ? { name: state.me, admin: state.admin } : null);
     var joiners = Array.isArray(row.joiners) ? row.joiners.length : 0;
+    var note = !state.token ? "" : (!mine ? '<span class="sub">' + esc(tr("row.not_your_job")) + "</span>"
+      : (locked ? '<span class="sub cancel-locked">' + esc(tr("row.cancel_locked")) + "</span>"
+      : (joiners ? '<span class="sub">' + esc(tr("row.others_waiting", { n: joiners })) + "</span>" : "")));
     h += '<div class="actions"><button type="button" class="btn log" data-log="' + row.id + '"' + (canAct ? "" : " disabled") + ">" + esc(tr("row.log")) + "</button>" +
-      '<button type="button" class="btn danger cancel" data-cancel="' + row.id + '"' + (canAct && busy && row.state !== "cancelling" ? "" : " disabled") + ">" + esc(tr("row.cancel")) + "</button>" +
-      (!state.token ? "" : (!mine ? '<span class="sub">' + esc(tr("row.not_your_job")) + "</span>" : (joiners ? '<span class="sub">' + esc(tr("row.others_waiting", { n: joiners })) + "</span>" : ""))) + "</div>";
+      '<button type="button" class="btn danger cancel" data-cancel="' + row.id + '"' + (canAct && !locked && busy && row.state !== "cancelling" ? "" : " disabled") + ">" + esc(tr("row.cancel")) + "</button>" +
+      note + "</div>";
     return h;
   }
 

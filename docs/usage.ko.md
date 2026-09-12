@@ -149,6 +149,15 @@ chmod 600 ~/.config/rcm/client.toml
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
 
+`rcm cancel N` 은 제출할 때 함께 받은 cancel token 을 보낸다 — `rcm run` 이
+`~/.local/state/rcm/submissions.json`(`$XDG_STATE_HOME` 이 있으면 그 아래 `rcm/submissions.json`,
+권한 0600)에 남겨 둔 것이다. 그래서 제출한 세션은 취소할 수 있고, 같은 클라이언트 토큰을 쓰는
+다른 세션은 못 한다. 다른 머신에서, 또는 `--no-wait` JSON(`submission.cancel_token` 이 들어
+있다)을 간직한 래퍼에서는 `--cancel-token` 으로 넘긴다(`rcm cancel N --cancel-token …`). 둘 다 없으면 그렇다고
+말하고 그래도 보낸다: 기본 설정의 서버는 전처럼 받고, `cancel_requires_submission_token = true`
+인 서버([설정](configuration.md#who-may-cancel-a-job))는 관리자 토큰이 아니면 403 으로 거절한다.
+cancel token 은 다른 어디에도 찍히지 않는다.
+
 ## 6. 실패했을 때
 
 잡의 실패는 도구의 오류가 아니다. 그래서 출력이 조용하고 구체적이다.

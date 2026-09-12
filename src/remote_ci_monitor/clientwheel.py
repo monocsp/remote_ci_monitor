@@ -29,6 +29,10 @@ PACKAGE = "remote_ci_monitor"
 #: 서버가 받는 가장 오래된 클라이언트 버전 (I8-3 · 결정 83). 와이어 계약이 깨질 때만 올린다.
 #: 0.2.x 클라이언트는 전부 붙는다.
 MIN_CLIENT_VERSION = "0.2.0"
+#: 취소에 제출 capability 를 요구하는 서버(`cancel_requires_submission_token = true`)에서 취소가
+#: 되는 가장 오래된 클라이언트(M5j G5 · 결정 87). 그 전 버전은 비밀을 보낼 줄 몰라 403 을 받는다.
+#: 제출 계약(`MIN_CLIENT_VERSION`)은 그대로다 — health 는 이 값을 따로 알린다.
+CANCEL_MIN_CLIENT_VERSION = "0.2.7"
 #: 패키지 파일 중 wheel 에 싣는 것 — `.py` 는 어디든, 이 두 디렉터리는 통째로.
 ASSET_DIRS = ("web", "templates")
 #: 이것들이 없으면 wheel 이 아니라 오류다 — release.yml 의 산출물 검사와 같은 셋.

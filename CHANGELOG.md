@@ -7,6 +7,24 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **A cancel token per submission, so a shared client token cannot cancel another session's job.**
+  Every `POST /jobs` — a join too — now answers with `submission: {id, cancel_token}`; the
+  requester's token cancels the job, a joiner's only leaves the join list, and the server keeps a
+  SHA-256 of it (database **v17**, table `submissions`, backed up as `rcm.sqlite3.v16.bak` before
+  the upgrade and deleted with the job's metadata). `rcm run` saves the token in
+  `~/.local/state/rcm/submissions.json` (mode 0600) and `rcm cancel N` sends it — or takes
+  `--cancel-token` from a wrapper that kept the `--no-wait` JSON, which now carries `submission`
+  before `url`. Nothing changes by default: `[server] cancel_requires_submission_token = false`
+  keeps today's rules, so 0.2.x clients keep cancelling. With the key on, only a cancel token or an
+  admin token cancels — there is no non-admin `--force` — and clients before 0.2.7 get 403;
+  `/api/health` then raises `min_client_version` to 0.2.7 (with `cancel_min_client_version` saying
+  why, so an old client's `rcm check` fails its `client` row), `rcm check` prints a `cancel` row, and
+  the web **Cancel** button is disabled for non-admin tokens with the reason in the row. Ctrl-C
+  still detaches the requester and only removes a joiner.
+  ([Configuration](docs/configuration.md#who-may-cancel-a-job))
+  ([#110](https://github.com/monocsp/remote_ci_monitor/pull/110))
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed

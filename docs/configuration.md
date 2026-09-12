@@ -445,6 +445,45 @@ resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`w
 `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
 `examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
 
+## Who may cancel a job
+
+Every `POST /jobs` — a fresh submission and a join alike — answers with a `submission` object,
+`{"id": "…", "cancel_token": "…"}`. The token is a secret that carries exactly one right: the
+requester's token cancels the job (`cancel_job`), a joiner's token only removes that joiner from
+the join list (`leave_submission`). The server keeps a SHA-256 of it (database v17, table
+`submissions`, deleted together with the job's metadata), and two sessions that share one client
+token still receive two different secrets — a session cannot cancel a job that another session
+submitted with the same token. `rcm run` saves the token in `$XDG_STATE_HOME/rcm/submissions.json`
+(or `~/.local/state/rcm/submissions.json`, mode 0600) and `rcm cancel N` sends it;
+`rcm cancel N --cancel-token …` takes it from a wrapper that kept the `--no-wait` JSON, which
+carries the same `submission` object. Ctrl-C keeps its meaning: the requester detaches and the job
+keeps running; a joiner leaves the join list with its own token.
+
+One server key, `cancel_requires_submission_token`, decides whether the token is optional or
+required:
+
+```toml
+[server]
+cancel_requires_submission_token = false   # the default
+```
+
+| value | who may cancel |
+|---|---|
+| `false` (default) | as before — the token that submitted, a joiner (it only leaves) and an admin token — plus any valid cancel token, honoured by its role. Clients on 0.2.x keep cancelling |
+| `true` | a valid cancel token (`rcm cancel N`, or `--cancel-token` when the state file is elsewhere) or an admin token, nothing else. There is no `--force` for a non-admin token: a shared client token does not get the old right back |
+
+Turning it on changes what old clients can do. A 0.2.x client (anything before 0.2.7) never sends
+a cancel token, so its `rcm cancel` and a joiner's Ctrl-C answer 403
+`not your submission — pass the cancel token from the submission (rcm cancel --cancel-token …)`.
+While the key is on, `/api/health` raises `min_client_version` to the effective floor (`0.2.7`
+instead of the usual `0.2.0`, so an old client's own `rcm check` fails its `client` row and its
+`rcm run` warns — both still submit) and adds `cancel_min_client_version` (`0.2.7`; `null` when the
+key is off) to say why; `rcm check` prints a `cancel` row naming it. Keep the key off until every
+session has upgraded (`examples/session/update-client.sh`). The web page
+never holds a cancel token, so with the key on its **Cancel** button is disabled unless the pasted
+token is an admin token, and the row says why. The token appears nowhere else: not in
+`/api/status`, not in job documents, logs, errors or URLs.
+
 ## Client and worker files
 
 `client.toml` (mode 600 — a file that holds a token and is readable by anyone else is

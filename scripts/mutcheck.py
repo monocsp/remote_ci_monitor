@@ -39,6 +39,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ cancel-capability-skipped — 강제 모드(`cancel_requires_submission_token`)에서 capability
+     검사를 건너뛰어 옛 공유 토큰 규칙으로 물러남 (`server.py`, M5j G5 결정 87 — 같은 토큰의
+     다른 세션이 남의 잡을 지운다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -276,6 +279,13 @@ MUTANTS = (
         old="        if name != expected:\n            raise ApiError(\n                404,",
         new="        if False:\n            raise ApiError(\n                404,",
         tests=("tests/test_client_wheel.py",),
+    ),
+    Mutant(
+        name="cancel-capability-skipped",
+        path="src/remote_ci_monitor/server.py",
+        old="if self.config.server.cancel_requires_submission_token and not token.admin:",
+        new="if False and not token.admin:",
+        tests=("tests/test_cancel_capability.py",),
     ),
     Mutant(
         name="ledger-outside-tx",

@@ -156,6 +156,16 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
 
+`rcm cancel N` sends the cancel token that came back with the submission — `rcm run` saved it in
+`~/.local/state/rcm/submissions.json` (`$XDG_STATE_HOME/rcm/submissions.json` if set, mode
+0600), so the session that submitted can cancel and a different session with the same client
+token cannot. From another machine, or from a wrapper that kept the `--no-wait` JSON (it carries
+`submission.cancel_token`), pass it with `--cancel-token`: `rcm cancel N --cancel-token …`. Without either, the
+command says so and still sends the cancel: a server on the default settings accepts it as before,
+a server with `cancel_requires_submission_token = true`
+([configuration](configuration.md#who-may-cancel-a-job)) answers 403 unless the token is an
+admin token. The cancel token is never printed anywhere else.
+
 ## 6. When it fails
 
 A failed job is not an error in the tool, so the output stays calm and specific.
