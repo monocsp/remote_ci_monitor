@@ -355,6 +355,8 @@ def test_rcm_wait_exit_code_follows_the_state_when_the_timeline_cannot_be_read(
     assert doc["step_timeline"] is None
     assert doc["step_timeline_error_code"] == "database_unavailable"
     assert doc["last_step"] == "t"
+
+
 # ── M5l S11 (구현 리뷰 pr-108 B-1 · B-2) ─────────────────────────────────────
 
 
