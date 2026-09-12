@@ -9,7 +9,10 @@
 from __future__ import annotations
 
 import errno
+import os
 from pathlib import Path
+
+import pytest
 
 from remote_ci_monitor.core.model import FAILED
 from remote_ci_monitor.core.render_text import render_gc
@@ -135,3 +138,34 @@ def test_the_periodic_sweep_remeasures_after_a_partial_delete_too(env, monkeypat
     _tar_fails(jan, monkeypatch)
     jan.sweep_volume(NOW)
     assert jan.storage(NOW)["volume_bytes"] < before
+
+
+# ── L2.2: 읽을 수 없는 `jobs/<id>` 는 그 항목만 모른다 — 인벤토리 전체가 아니다 ────────
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root 는 권한 비트를 무시한다")
+def test_an_unreadable_job_dir_is_one_unknown_item_not_a_lost_inventory(env):
+    """`chmod 000 jobs/<id>` — tar 의 lstat 이 EACCES. `Path.is_file()` 은 EACCES 를 삼키지 않아
+    스캔 전체가 `scan_EACCES` 로 죽고 나이 규칙까지 멈췄다(M5l L2.2 실기). 그 항목의 스냅샷만
+    모르고, 코드는 `measure_EACCES`, 계획은 `1 of unknown size` 여야 한다."""
+    store, cfg = env
+    job = finished(store, state=FAILED, finished_at=NOW - 2 * DAY)
+    workspace(cfg, job, files={"a": 4 * BLOCK})
+    snapshot(cfg, job, size=BLOCK)
+    other = finished(store, state=FAILED, finished_at=NOW - 2 * DAY)
+    workspace(cfg, other, files={"a": 4 * BLOCK})
+    job_dir = cfg.data_dir / "jobs" / str(job)
+    job_dir.chmod(0)
+    try:
+        jan, rec = make_janitor(store, cfg)
+        plan = jan.plan(NOW)
+        assert plan.inventory_error == "measure_EACCES"
+        assert sorted(i.job_id for i in plan.items) == sorted([job, other])
+        hit = next(i for i in plan.items if i.job_id == job)
+        assert hit.snapshot_bytes is None and hit.workspace_bytes is not None
+        assert "retention: measure" in " ".join(rec.errors)
+        body = jan.gc_report(NOW, dry_run=True)
+        assert body["storage_before"]["error_code"] == "measure_EACCES"
+        assert "1 of unknown size" in render_gc(body)
+    finally:
+        job_dir.chmod(0o755)

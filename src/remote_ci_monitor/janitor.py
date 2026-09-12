@@ -111,6 +111,17 @@ class PurgeOutcome(NamedTuple):
     error: str | None  # 첫 실패의 코드. None 이면 끝까지 갔다
 
 
+def _may_have_tar(job_dir: Path) -> bool:
+    """`jobs/<id>/tree.tar.gz` 가 있을 수 있나. **못 본 것은 있는 것으로** 친다 — `Path.is_file()`
+    은 ENOENT 는 삼키지만 EACCES 는 올려서, 읽을 수 없는 잡 디렉터리 하나가 인벤토리 전체를
+    `scan_EACCES` 로 죽이고 나이 규칙까지 멈췄다(M5l L2.2). 항목으로 넣어 두면 `_measure_file`
+    이 그 항목만 「모름」으로 두고 코드(`measure_EACCES`)를 남긴다."""
+    try:
+        return (job_dir / "tree.tar.gz").is_file()
+    except OSError:
+        return True
+
+
 def _shared_blocks(st: Any) -> int:
     """이 stat 이 **공유 블록**이면 그 바이트, 아니면 0.
 
@@ -448,10 +459,7 @@ class Janitor:
         self._measure_failures = []
         oldest = now  # 합계에 기여한 측정 중 가장 오래된 시각 — 빈 인벤토리도 「지금 봤다」
         ids = self._scan_ids(ws_root)
-        tars = {
-            i for i in self._scan_ids(jobs_root) if (jobs_root / str(i) / "tree.tar.gz").is_file()
-        }
-        ids |= tars
+        ids |= {i for i in self._scan_ids(jobs_root) if _may_have_tar(jobs_root / str(i))}
         rows = self._jobs_by_id(ids)
         items: list[VolumeItem] = []
         for job_id in sorted(ids):

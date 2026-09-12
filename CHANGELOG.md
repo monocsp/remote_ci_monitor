@@ -19,8 +19,11 @@ of a key bumps that number and is listed here.
   cache entry is dropped and the inventory is re-measured. In `rcm check`, a measurement failure
   while free space is under the floor read as `… and nothing left to delete` (FAIL); it now reads
   as the measurement failure it is (warn, with the error code), and the row for a budget that
-  running jobs alone exceed says how old its number is like the other rows. `schema_version`
-  unchanged — keys were only added. (M5l L2, review of #88)
+  running jobs alone exceed says how old its number is like the other rows. A job directory
+  the server cannot read (`jobs/<id>` without permission) used to fail the whole inventory as
+  `scan_EACCES` — no age rule ran for anyone and every figure read `—`; now only that job's
+  snapshot is unknown (`measure_EACCES`, `1 of unknown size`) and the rest is measured and
+  purged as usual. `schema_version` unchanged — keys were only added. (M5l L2, review of #88)
 
 ## [0.2.6] - 2026-09-10
 
