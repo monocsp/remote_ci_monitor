@@ -1202,7 +1202,7 @@ class App(RemoteWorkersMixin):
         """
         try:
             markers = self.store.markers(job.id)
-        except Exception as e:  # noqa: BLE001 — 깨진 payload 행(ValueError·KeyError)도 DB 오류다
+        except Exception as e:  # noqa: BLE001 — 깨진 payload 행도 DB 오류다
             doc["step_timeline"] = None
             doc["step_timeline_error_code"] = _error_code(e)
             return set()

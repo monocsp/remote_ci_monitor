@@ -314,12 +314,12 @@ MUTANTS = (
     Mutant(
         name="step-timeline-db-error-empty",
         path="src/remote_ci_monitor/server.py",
-        old="""        except sqlite3.Error as e:
+        old="""        except Exception as e:  # noqa: BLE001 — 깨진 payload 행도 DB 오류다
             doc["step_timeline"] = None
             doc["step_timeline_error_code"] = _error_code(e)
             return set()
 """,
-        new="""        except sqlite3.Error:
+        new="""        except Exception:  # noqa: BLE001
             doc["step_timeline"] = step_timeline_json(None)
             return set()
 """,
