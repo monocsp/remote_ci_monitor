@@ -17,9 +17,9 @@ docs/m2-test-scenarios-python.md §2): `--dump-dom` 은 `load` 시점, 즉 첫 `
 읽고, 같은 세션에서 `querySelector` 로 구조를 묻고 스크린샷도 찍는다. 페이지는 `?poll=1` 로
 연다(열린 `EventSource` 는 headless Chrome 의 종료를 막는다 — 코디네이터 확인).
 
-잡 배치: `slow`(20초) 잡 하나 running(lane 1) + 다른 트리의 `slow` 잡 하나 queued(1st in line).
-캡처는 몇 초면 끝나므로 20초 안에 든다 — 캡처 뒤 잡이 아직 running 인지 다시 확인해 타이밍 실패를
-명확한 메시지로 만든다. 테스트가 끝나면 두 잡을 취소해 teardown 을 빠르게 한다.
+잡 배치: `slow`(`SCENE_SLOW_SECONDS` 초 — Chrome 의 찬 기동 마감보다 길다) 잡 하나 running(lane 1)
++ 다른 트리의 `slow` 잡 하나 queued(1st in line). 캡처 뒤 잡이 아직 running 인지 다시 확인해 타이밍
+실패를 명확한 메시지로 만든다. 테스트가 끝나면 두 잡을 취소해 teardown 을 빠르게 한다.
 """
 
 import base64
@@ -47,6 +47,20 @@ CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
 #: `Page.addScriptToEvaluateOnNewDocument` 와 about:blank 의 수집기 심기)이 이 값을 받는다.
 #: 붙은 뒤의 호출은 `Chrome.call` 의 기본 15초.
 COLD_START_SECONDS = 60.0
+#: 장면의 `slow` 잡이 자는 초. Chrome 은 장면이 선 **뒤에** 뜨므로 찬 기동이 길어질수록 잡의 남은
+#: 시간이 줄어든다 — `test_server.PRESETS` 의 20초짜리 `slow` 로는 마감 60초가 헛것이었다(M5l L7.1
+#: 실측). 찬 기동 마감 + `open()` 15초 + 자리잡기 여유보다 길게. teardown 은 취소로 끝낸다.
+SCENE_SLOW_SECONDS = 120
+SCENE_PRESETS = [
+    p
+    if p["name"] != "slow"
+    else sh(
+        "slow",
+        f"echo '::rcm::step::wait'; echo line1; echo line2; sleep {SCENE_SLOW_SECONDS}",
+        timeout_seconds=SCENE_SLOW_SECONDS + 60,
+    )
+    for p in PRESETS
+]
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 OTHER_TREE = "ab" * 32
 
@@ -401,13 +415,28 @@ class Scene:
         j = self.srv.store.get_job(self.running)
         assert j.state == "running", (
             f"job {self.running} is {j.state} — it finished before the DOM was captured "
-            "(capture took too long for the 20 s `slow` preset)"
+            f"(capture took longer than the {SCENE_SLOW_SECONDS} s `slow` preset)"
         )
+
+
+def test_the_scene_outlives_the_cold_start_deadline(scene):
+    """Chrome 은 장면이 선 **뒤에** 뜬다 — 찬 기동이 길어도 `COLD_START_SECONDS` 안이면 붙지만,
+    그 사이 장면의 `slow` 잡이 끝나 버리면 마감은 헛것이다(M5l L7.1 실측: `Target.getTargets`
+    20초 지연에 「no reply」가 아니라 「page not ready」— 20초 `slow` 가 먼저 끝났다). 장면의
+    running 잡은 찬 기동 마감 + `open()` 의 15초 + 자리잡기 여유보다 오래 살아야 한다."""
+    slow = next(p for p in scene.srv.cfg.presets if p.name == "slow")
+    m = re.search(r"sleep (\d+)", " ".join(slow.argv))
+    assert m, slow.argv
+    assert int(m.group(1)) >= COLD_START_SECONDS + 15 + 5, (
+        f"the scene's slow job sleeps {m.group(1)} s — shorter than the cold-start deadline "
+        "it must outlive"
+    )
 
 
 @pytest.fixture
 def scene(tmp_path):
     srv = Server(tmp_path, workers=True)
+    srv.cfg.presets = tuple(parse_preset(p) for p in SCENE_PRESETS)  # 긴 `slow`
     # start() 가 만든 진짜 샘플러를 덮는다. shutdown 은 stop 이벤트로 하므로 스텁이어도 된다.
     srv.app.sampler = FreshStubSampler()
     jobs: list[tuple[int, str]] = []
