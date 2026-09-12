@@ -20,7 +20,7 @@ of a key bumps that number and is listed here.
   highest `rcm.sqlite3.v<n>.bak` actually present in `backup/`, and says
   `no migration backup found` when there is none. A `backup/` directory that cannot be listed
   while pruning old backups warns instead of silently keeping every file.
-  ([#115](https://github.com/monocsp/remote_ci_monitor/pull/115))
+  ([#117](https://github.com/monocsp/remote_ci_monitor/pull/117))
 
 ## [0.2.6] - 2026-09-10
 
