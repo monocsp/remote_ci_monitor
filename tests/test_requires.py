@@ -165,7 +165,7 @@ def test_a_missing_tool_stops_the_job_before_the_process_starts(tmp_path):
 
 def test_present_tools_are_named_in_the_log_and_the_job_runs(tmp_path):
     """다 있으면 한 줄 `[rcm] required tools: <name> ok · <name> ok` 뒤에 프로세스가 돈다.
-    절대경로는 PATH 없이도 그 자리에서 본다."""
+    절대경로는 PATH 없이도 그 자리에서 보고, 로그에는 basename 만(M5l S3)."""
     tools = tmp_path / "tools"
     fake_tool(tools, "fvm")
     gitleaks = fake_tool(tools, "gitleaks")
@@ -174,7 +174,8 @@ def test_present_tools_are_named_in_the_log_and_the_job_runs(tmp_path):
     result = run_job(spec, obs, environ={"PATH": f"{tools}{os.pathsep}/usr/bin:/bin"})
     assert result.rc == 0
     log = spec.log_path.read_text()
-    assert f"[rcm] required tools: fvm ok · {gitleaks} ok" in log, log
+    assert "[rcm] required tools: fvm ok · gitleaks ok" in log, log
+    assert str(tools) not in log
     assert "STARTED" in log
     assert log.index("required tools") < log.index("STARTED")
     # 관찰자(원격 워커의 로그 업로드)도 같은 줄을 받는다
@@ -268,8 +269,8 @@ def test_worker_runs_when_the_tool_is_present(wenv):
 
 
 def test_a_missing_absolute_path_reports_only_the_tool_name(wenv):
-    """절대경로로 선언한 도구가 없으면 공개 args 에는 **이름만**(basename) 실린다 — 서버의
-    디렉터리 배치는 `/api/status.recent` 로 새지 않는다. 전체 선언은 잡 로그(토큰 필요)에."""
+    """절대경로로 선언한 도구가 없으면 공개 args 에도 잡 로그에도 **이름만**(basename) 실린다 —
+    서버의 디렉터리 배치는 `/api/status.recent` 로도 토큰 보호 로그로도 새지 않는다(M5l S3)."""
     store, cfg = wenv
     jid = enqueue(store, cfg, "needs-abs")
     run_one(store, cfg, jid)
@@ -278,7 +279,8 @@ def test_a_missing_absolute_path_reports_only_the_tool_name(wenv):
     assert j.summary_args == {"tool": "fvm"}
     assert "/nonexistent" not in (j.summary or "")
     log = (cfg.data_dir / "jobs" / str(jid) / "log.txt").read_text()
-    assert "[rcm] required tool /nonexistent/dir/fvm: missing" in log
+    assert "[rcm] required tool fvm: missing" in log, log
+    assert "/nonexistent" not in log
 
 
 def test_a_tool_missing_job_is_left_out_of_the_failure_window(wenv):

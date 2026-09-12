@@ -430,7 +430,8 @@ _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
 
 def _parse_requires(where: str, value: Any) -> tuple[str, ...]:
     """`requires` — 도구 이름 또는 절대경로만(M5j G4). 상대경로는 어느 cwd 에서 찾을지 정해져
-    있지 않고, 빈 값·중복은 오타다. 오류에 프리셋과 키 이름을 넣는다."""
+    있지 않고, 빈 값·중복은 오타다. 절대경로는 도구 이름으로 끝나야 한다(`/opt/bin/`·`/` 처럼
+    basename 이 비면 공개 이름이 경로로 물러난다 — M5l S2). 오류에 프리셋과 키 이름을 넣는다."""
     names = _str_list(where, value, allow_empty=True)
     seen: set[str] = set()
     for name in names:
@@ -440,6 +441,8 @@ def _parse_requires(where: str, value: Any) -> tuple[str, ...]:
             raise ConfigError(
                 f"{where}: entries must be a tool name or an absolute path, got {name!r}"
             )
+        if "/" in name and os.path.basename(name) in ("", ".", ".."):
+            raise ConfigError(f"{where}: an absolute path must end in a tool name, got {name!r}")
         if name in seen:
             raise ConfigError(f"{where}: duplicate entry {name!r}")
         seen.add(name)

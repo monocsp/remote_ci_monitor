@@ -227,14 +227,19 @@ requires = ["fvm", "gitleaks", "/opt/homebrew/bin/gh"]   # names or absolute pat
 
 Right before the process starts — on the local lane or on a remote worker alike — rcm looks each
 entry up in the **environment the job will actually run in**: the `env_passthrough` allowlist,
-then `[presets.env]`. A relative path, an empty entry or a duplicate is a config error at start;
-without the key nothing changes. If the job's environment has no `PATH`, the check uses an empty
-one, never the server's own. When everything is found the job log gets one line,
-`[rcm] required tools: fvm ok · gitleaks ok`; when something is missing the job does not run and
-ends `failed` with `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}` — the name
-only. No `PATH` and no path appears in the job document, the queue or the log (the log names the
-missing entry as you declared it). A `tool_missing` failure carries no `failed_step`, no
-`last_step` and no `failed: …` line: the tool was missing before the script could say anything.
+then `[presets.env]`. A relative path, an empty entry, a duplicate, or an absolute path that does
+not end in a tool name (`/opt/bin/`) is a config error at start; without the key nothing changes.
+If the job's environment has no `PATH`, the check uses an empty one, never the server's own. A
+relative `PATH` entry (`tools`, `.`, or an empty entry between two colons) means the **job's
+workspace**, because that is where the process starts — a tool that only exists next to the
+server's own working directory does not count. When everything is found the job log gets one
+line, `[rcm] required tools: fvm ok · gitleaks ok`; when something is missing the job does not
+run and ends `failed` with `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}` —
+the name only. No `PATH` and no path appears in the job document, the queue or the log: an entry
+declared as `/opt/homebrew/bin/gh` shows up everywhere as `gh`. A `tool_missing` failure carries
+no `failed_step`, no `last_step` and no `failed: …` line: the tool was missing before the script
+could say anything. A job cancelled while its workspace was still being prepared ends `cancelled`,
+not `tool_missing` — the check runs only for a job nobody has stopped.
 
 **The launchd trap.** A service started by `launchd` (or `systemd`) has a short `PATH` —
 `/usr/bin:/bin:/usr/sbin:/sbin` — so `fvm` and `gitleaks` from Homebrew are found in your shell and

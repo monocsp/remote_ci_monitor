@@ -505,10 +505,20 @@ class RemoteWorker:
             )
         except RequiredToolMissing as e:
             observer.final_flush()
+            skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
+            if observer.should_stop() or observer.should_cancel():
+                # 검사와 보고 사이에 종료·취소가 왔다 — 그게 이긴다(M5l S4). 프로세스는 없었다.
+                outcome = LOST if observer.should_stop() else CANCELLED
+                summary = STOP_SUMMARY if outcome == LOST else None
+                self._finish(
+                    job.id, outcome, None, summary, observer, artifacts=_disposition(skipped)
+                )
+                self.log(f"lane {lane}: #{job.id} {outcome} before start")
+                self._cleanup(spec, failed=True)
+                return
             # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다. 구조화된 코드로 보고한다(M5j G4);
             # 서버가 로컬 워커와 같은 `tool_missing` 을 남긴다. PATH 는 어디에도 싣지 않는다.
             summary, code, args = outcome_summary("tool_missing", tool=e.public_name)
-            skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
             self._finish(
                 job.id,
                 FAILED,

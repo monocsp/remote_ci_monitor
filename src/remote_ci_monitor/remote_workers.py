@@ -723,6 +723,11 @@ class RemoteWorkersMixin:
         lost_text, lost_code, lost_args = outcome.summary("worker_stopped_while_running")
         if given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
             lost_text, lost_code, lost_args = given[:200], None, {}
+        # 프로세스가 뜨기 전의 실패(`tool_missing`)가 사용자의 취소를 덮어서는 안 된다 — 워커가
+        # 취소를 아직 못 들었어도 잡이 `cancelling` 이면 `cancelled` 로 닫는다(M5l S4).
+        if preflight is not None and job.state == CANCELLING:
+            preflight = None
+            reported = CANCELLED
         oc = outcome_for(
             job,
             markers,
