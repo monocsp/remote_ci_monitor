@@ -166,10 +166,24 @@ the old modules, so a job that starts in that window can load a mix of both.
 Claude Code sessions have this wired as a `PreToolUse` hook: `.claude/settings.json` runs
 `tools/guard_production.py`, which finds the production checkout from the machine's own editable
 install, refuses edits to it and to the server's config and data, refuses a command that would
-open the production database with a build other than the service's own (`rcm token …` against
-the production config or data directory — a different build migrates the database on open), and
-asks before a deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A
-machine with no such install sees nothing.
+open the production database with a build other than the service's own (`rcm token …`, `rcm
+serve`, `rcm worker` — a different build migrates the database on open), and asks before a
+deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A machine with no
+such install sees nothing.
+
+The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
+primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's
+`.venv` activated is the worktree's build. The hook looks at `~/.local/share/rcm-venv`, then at
+the `rcm` named by the installed launchd or systemd unit, then at every `rcm` on `PATH`, and
+takes the first whose editable source is not a linked worktree. What counts is the data
+directory the command would *actually* open, in the CLI's own order: `--data-dir`, then
+`RCM_SERVER_DATA_DIR`, then the `data_dir` of the config it would pick (`--config`,
+`$RCM_CONFIG`, `./rcm.toml`, `$XDG_CONFIG_HOME/rcm/server.toml`, `~/.config/rcm/server.toml`).
+So a **copy of the production config** that only changes `port` is refused too — its `data_dir`
+is still the production one — and so is a test config run with `RCM_SERVER_DATA_DIR` pointing at
+production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `exec`, `nohup`,
+`time`, `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
+inside `bash -c '…'`, `xargs`, `uv run` or `$(…)`, and does not resolve symlinks.
 
 ## Keeping clients on the server's version
 
