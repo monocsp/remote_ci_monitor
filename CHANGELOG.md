@@ -7,6 +7,21 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **A finished job keeps its step times.** While a job ran, the queue showed how long each
+  `::rcm::step::` took; once it finished those numbers were gone, and a team measuring its gate
+  had to read the log. `GET /jobs/<id>` for a finished job now carries `step_timeline` — one entry
+  per step with `started_at`, `ended_at`, `seconds` and `ok`, recomputed from the markers the
+  server already stored, with the same `timing: "as_received"` caveat as live progress. `rcm run`
+  and `rcm wait` print that document, so their JSON carries the key too — this is now part of the
+  contract. A job that printed no step markers has `steps: []`; when the markers could not be
+  read the key is `null` with `step_timeline_error_code`, never an empty list. The stored
+  `failed_step` and `last_step` are unchanged, and `failures[].step` now recognises every step of
+  the timeline, not only those two. The finished document also carries `concurrent_at_start`
+  (how many jobs were running when it started; `null` when unknown), the raw material for the
+  two-lane experiment. `schema_version` stays 1 — keys were added.
+  ([#108](https://github.com/monocsp/remote_ci_monitor/pull/108))
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed

@@ -53,6 +53,19 @@ Your script can report progress by printing markers at the start of a line:
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
 
+A finished job keeps its step times. `GET /jobs/<id>` (and so the JSON `rcm run` and `rcm wait`
+print) carries `step_timeline`: `timing` (`as_received`, as above), `steps_total`,
+`steps_total_partial` and `steps[]` with `index`, `name`, `started_at`, `ended_at`, `seconds` and
+`ok` — the same values the queue showed while the job ran, recomputed from the markers the server
+stored. A job that printed no step markers has `steps: []` and `steps_total: null`; a job that
+failed before it started has the same empty timeline. When the server cannot read the markers the
+key is `null` and `step_timeline_error_code` says why — an empty list is never used to cover a
+read that failed. `ok` is what the markers said: a step closed by the next `::rcm::step::` is
+`true`, the last step of a job that exited 0 is `true`, and the last step of a failed or cancelled
+job is `null` — a failure is never inferred, and the stored `failed_step` and `last_step` are
+not changed by the timeline. Running jobs keep `progress`; `/api/status` rows never carry
+`step_timeline`.
+
 ### Saying what failed
 
 `failed_step` is only ever a step your script **declared** as failed, with `::rcm::step-end::fail`
