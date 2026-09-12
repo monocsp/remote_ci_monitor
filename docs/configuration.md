@@ -470,8 +470,9 @@ What the admission gate does and does not do:
   `lanes = 1` or narrow the heavy section.
 - ETA estimates assume the lanes are independent. While two jobs overlap, the medians drift; the
   `concurrent_at_start` field on a finished job's document (`GET /jobs/<id>`, `rcm wait --json`)
-  says how many jobs were running when it started, so the effect can be measured afterwards, and
-  the same document's `step_timeline` shows which step paid.
+  says how many jobs were running when it started — itself included, so a job that ran alone
+  reads `1` and `null` means unknown — so the effect can be measured afterwards, and the same
+  document's `step_timeline` shows which step paid.
 
 ## Second build machine (remote worker)
 
