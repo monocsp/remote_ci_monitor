@@ -1337,9 +1337,9 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     잡과 같은 규칙(`env_passthrough` → `[presets.env]` 의 PATH · 없으면 빈 PATH)이지만 환경은
     이 프로세스의 것이다 — launchd 서비스의 PATH 가 아니다. 그래서 이름이 `local` 이고, 정본은
     잡 시작 전 검사다(M5j G4 · Codex: 셸의 ok 가 서비스의 ok 로 읽히면 fail-open). PATH 값은
-    찍지 않는다.
+    찍지 않고, 절대경로로 선언한 항목도 잡 로그와 같은 규칙으로 basename 만 찍는다(M5l S3).
     """
-    from remote_ci_monitor.runner import missing_tools
+    from remote_ci_monitor.runner import missing_tools, public_tool_name
 
     parts: list[str] = []
     all_ok = True
@@ -1350,7 +1350,9 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
         env.update(preset.env)
         missing = set(missing_tools(tuple(preset.requires), env))
         all_ok = all_ok and not missing
-        verdicts = " · ".join(f"{n} {'missing' if n in missing else 'ok'}" for n in preset.requires)
+        verdicts = " · ".join(
+            f"{public_tool_name(n)} {'missing' if n in missing else 'ok'}" for n in preset.requires
+        )
         parts.append(f"{preset.name} ({verdicts})")
     if not parts:
         return None

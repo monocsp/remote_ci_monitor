@@ -58,13 +58,28 @@ def test_check_row_local_preset_tools_names_each_tool_and_its_verdict(
 
 
 def test_check_row_local_preset_tools_is_ok_when_everything_is_found(srv, env, server_toml, capsys):
+    """절대경로로 선언한 항목도 행에는 basename 만 — 잡 로그와 같은 정책(M5l S3 · 시나리오 S3.2)."""
     env(srv)
-    cfg = server_toml(REQUIRES_SERVER_TOML % "/bin/sh")
+    cfg = server_toml(REQUIRES_SERVER_TOML % "/usr/bin/true")
     code, out, err = run(capsys, ["check", "--config", str(cfg)])
     assert code == 0, out + err
     assert row_status(out, "local preset tools") == "ok", out
     line = next(ln for ln in out.splitlines() if "local preset tools" in ln)
-    assert "gate (sh ok · /bin/sh ok)" in line and "deploy (sh ok)" in line, line
+    assert "gate (sh ok · true ok)" in line and "deploy (sh ok)" in line, line
+    assert "/usr/bin" not in line, line
+
+
+def test_check_row_local_preset_tools_names_a_missing_absolute_declaration_by_basename(
+    srv, env, server_toml, capsys
+):
+    """없는 절대경로도 basename + 판정만 — 선언한 경로(`/opt/private-toolchains`)는 행에 없다."""
+    env(srv)
+    cfg = server_toml(REQUIRES_SERVER_TOML % "/opt/private-toolchains/fvm")
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 1, out + err
+    line = next(ln for ln in out.splitlines() if "local preset tools" in ln)
+    assert "gate (sh ok · fvm missing)" in line, line
+    assert "/opt/private-toolchains" not in line and "/" not in line.split("—")[0], line
 
 
 def test_check_has_no_local_preset_tools_row_without_requires(srv, env, server_toml, capsys):

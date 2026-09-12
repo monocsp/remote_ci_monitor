@@ -254,7 +254,8 @@ PATH = "/Users/build/fvm/default/bin:/opt/homebrew/bin:/usr/bin:/bin"
 preset that declares `requires` — in **this shell**, with this shell's environment. A tool this
 shell cannot find makes the row FAIL and `rcm check` exit 1. It catches a typo and a missing
 install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` here says nothing
-about the job. The check that counts is the one at job start.
+about the job. The check that counts is the one at job start. The row names each entry the way
+the job log does — by its basename, never by the path you declared.
 
 ### Naming what failed
 
