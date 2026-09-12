@@ -355,3 +355,49 @@ def test_rcm_wait_exit_code_follows_the_state_when_the_timeline_cannot_be_read(
     assert doc["step_timeline"] is None
     assert doc["step_timeline_error_code"] == "database_unavailable"
     assert doc["last_step"] == "t"
+# ── M5l S11 (구현 리뷰 pr-108 B-1 · B-2) ─────────────────────────────────────
+
+
+def test_a_broken_marker_row_is_null_plus_a_code_not_a_500(srv):
+    """`Store.markers()` 는 행마다 payload 를 JSON 으로 푼다 — 깨진 행은 `sqlite3.Error` 가 아니라
+    `ValueError`/`KeyError` 다. 그것도 「못 읽었다」이지 500 이 아니다(형제 경로와 같은 폭)."""
+    jid = running(srv, 5, (5, b"::rcm::step::a\n"))
+    finish(srv, jid, "failed", after=5, exit_code=1)
+    raw = sqlite3.connect(srv.store.path)
+    try:
+        raw.execute("UPDATE events SET payload='not json' WHERE job_id=? AND kind='marker'", (jid,))
+        raw.commit()
+    finally:
+        raw.close()
+    srv.store.close()  # 스레드 로컬 연결이 옛 페이지를 보지 않게
+    doc = view(srv, jid)
+    assert doc["state"] == FAILED and doc["id"] == jid
+    assert doc["step_timeline"] is None
+    assert doc["step_timeline_error_code"]  # 종류 코드만 — 문장·SQL 없음
+    assert "not json" not in str(doc)
+
+
+def test_a_finished_job_without_finished_at_is_unknown_not_a_moving_timeline(srv):
+    """옛 DB 의 흔적(`finished_at` NULL)에 지금 시각으로 물러서면 요청마다 초가 자란다 —
+    「모른다」로 낸다."""
+    jid = running(srv, 6, (5, b"::rcm::step::a\n"))
+    finish(srv, jid, "failed", after=5, exit_code=1)
+    raw = sqlite3.connect(srv.store.path)
+    try:
+        raw.execute("UPDATE jobs SET finished_at=NULL WHERE id=?", (jid,))
+        raw.commit()
+    finally:
+        raw.close()
+    srv.store.close()
+    first, second = view(srv, jid), view(srv, jid)
+    assert first["step_timeline"] is None and first["step_timeline_error_code"] == "no_finished_at"
+    assert second == first
+
+
+def test_the_finished_document_carries_concurrent_at_start(srv):
+    """두 레인 실험(G3 · #106)의 측정 재료 — v10 열을 종료 문서에 그대로(모르면 null)."""
+    jid = running(srv, 7, (5, b"::rcm::step::a\n"))
+    finish(srv, jid, "succeeded", after=5, exit_code=0)
+    doc = view(srv, jid)
+    assert "concurrent_at_start" in doc
+    assert doc["concurrent_at_start"] is None or doc["concurrent_at_start"] >= 1

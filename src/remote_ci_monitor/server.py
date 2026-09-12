@@ -1202,14 +1202,21 @@ class App(RemoteWorkersMixin):
         """
         try:
             markers = self.store.markers(job.id)
-        except sqlite3.Error as e:
+        except Exception as e:  # noqa: BLE001 — 깨진 payload 행(ValueError·KeyError)도 DB 오류다
             doc["step_timeline"] = None
             doc["step_timeline_error_code"] = _error_code(e)
             return set()
         # 종료 잡은 늘 `finished_at` 이 있다(`store.finish`·recover 가 같은 시각을 쓴다). 없는
-        # 행이 있다면 옛 DB 의 흔적이다 — 그때만 지금 시각으로 물러선다(마지막 스텝은 열린 채다).
-        progress = progress_for_job(job, markers, now=job.finished_at or self.now_fn())
+        # 행은 옛 DB 의 흔적이다 — 지금 시각으로 물러서면 요청마다 다른 타임라인이 나오므로
+        # 「모른다」로 낸다(M5l S11).
+        if job.finished_at is None:
+            doc["step_timeline"] = None
+            doc["step_timeline_error_code"] = "no_finished_at"
+            return set()
+        progress = progress_for_job(job, markers, now=job.finished_at)
         doc["step_timeline"] = step_timeline_json(progress)
+        # 같이 돈 잡 수(v10 열) — 두 레인 실험(G3)의 측정 재료. 모르면 null(0 이 아니다).
+        doc["concurrent_at_start"] = self.store.concurrent_at_start(job.id)
         return {s.name for s in progress.steps} if progress is not None else set()
 
     def _with_failures(

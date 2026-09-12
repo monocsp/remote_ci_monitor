@@ -180,6 +180,8 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    `started_at`, `ended_at`, `seconds` and `ok` — the same numbers the queue showed while the
    job ran, kept after it finished. `steps: []` means the script printed no step markers;
    `step_timeline: null` with `step_timeline_error_code` means the server could not read them.
+   `concurrent_at_start` is how many jobs were running when this one started (`null` when the
+   server does not know) — the number to look at when you try two lanes.
    The same document is `GET /jobs/<N>`, so `rcm wait --job N` prints it too.
 4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
