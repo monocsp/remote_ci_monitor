@@ -17,9 +17,9 @@ docs/m2-test-scenarios-python.md §2): `--dump-dom` 은 `load` 시점, 즉 첫 `
 읽고, 같은 세션에서 `querySelector` 로 구조를 묻고 스크린샷도 찍는다. 페이지는 `?poll=1` 로
 연다(열린 `EventSource` 는 headless Chrome 의 종료를 막는다 — 코디네이터 확인).
 
-잡 배치: `slow`(20초) 잡 하나 running(lane 1) + 다른 트리의 `slow` 잡 하나 queued(1st in line).
-캡처는 몇 초면 끝나므로 20초 안에 든다 — 캡처 뒤 잡이 아직 running 인지 다시 확인해 타이밍 실패를
-명확한 메시지로 만든다. 테스트가 끝나면 두 잡을 취소해 teardown 을 빠르게 한다.
+잡 배치: `slow`(`SCENE_SLOW_SECONDS` 초 — Chrome 의 찬 기동 마감보다 길다) 잡 하나 running(lane 1)
++ 다른 트리의 `slow` 잡 하나 queued(1st in line). 캡처 뒤 잡이 아직 running 인지 다시 확인해 타이밍
+실패를 명확한 메시지로 만든다. 테스트가 끝나면 두 잡을 취소해 teardown 을 빠르게 한다.
 """
 
 import base64
@@ -42,8 +42,25 @@ from test_server import PRESETS, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
-#: Chrome 이 뜨고 첫 CDP 응답을 주기까지의 마감(초). 이후 호출은 `Chrome.call` 의 기본 15초.
+#: Chrome 이 뜨고 붙기까지의 마감(초) — `Chrome.__init__` 이 부르는 **모든** CDP 호출
+#: (`Target.getTargets` `Target.attachToTarget` `Page.enable`
+#: `Page.addScriptToEvaluateOnNewDocument` 와 about:blank 의 수집기 심기)이 이 값을 받는다.
+#: 붙은 뒤의 호출은 `Chrome.call` 의 기본 15초.
 COLD_START_SECONDS = 60.0
+#: 장면의 `slow` 잡이 자는 초. Chrome 은 장면이 선 **뒤에** 뜨므로 찬 기동이 길어질수록 잡의 남은
+#: 시간이 줄어든다 — `test_server.PRESETS` 의 20초짜리 `slow` 로는 마감 60초가 헛것이었다(M5l L7.1
+#: 실측). 찬 기동 마감 + `open()` 15초 + 자리잡기 여유보다 길게. teardown 은 취소로 끝낸다.
+SCENE_SLOW_SECONDS = 120
+SCENE_PRESETS = [
+    p
+    if p["name"] != "slow"
+    else sh(
+        "slow",
+        f"echo '::rcm::step::wait'; echo line1; echo line2; sleep {SCENE_SLOW_SECONDS}",
+        timeout_seconds=SCENE_SLOW_SECONDS + 60,
+    )
+    for p in PRESETS
+]
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 OTHER_TREE = "ab" * 32
 
@@ -154,19 +171,31 @@ class Chrome:
         self.buf = b""
         self.next_id = 0
         self.session: str | None = None
-        # 첫 응답까지의 마감은 넉넉하게: CI 러너(ubuntu 3.13)에서 Chrome 의 찬 기동이 15초를 넘겨
-        # 「CDP: no reply before the deadline」로 하루 네 번 빨갰다(2026-09-10 · #85 #87 #92 ×2).
-        # 붙은 뒤의 호출은 15초 그대로다 — 늘어진 페이지를 숨기지 않는다.
+        # 붙기까지의 호출은 전부 찬 기동 마감을 받는다: CI 러너(ubuntu 3.11·3.13)에서 Chrome 의 찬
+        # 기동이 15초를 넘겨 「CDP: no reply before the deadline」로 빨갰다(2026-09-10 · #85 #87
+        # #92 ×2). #98 은 `Page.enable`·`addScript…` 에만 60초를 줬고 정작 첫 응답을 기다리는
+        # `_attach_first_page` 안의 `Target.getTargets` 는 15초 그대로라 머지 뒤 세 번 더 같은
+        # 프레임으로 빨갰다(docs/reviews/2026-09-13-impl-reviews/pr-98.md P1 · M5l L7). 붙은 뒤의
+        # 호출은 15초 그대로다 — 늘어진 페이지를 숨기지 않는다.
         self.session = self._attach_first_page(timeout=COLD_START_SECONDS)
         self.call("Page.enable", timeout=COLD_START_SECONDS)
         # 페이지 스크립트보다 **먼저** 도는 수집기. 터진 render() 는 타임아웃이 아니라 이 목록으로
         # 드러난다 — 「page not ready within 15s」보다 「ReferenceError: local is not defined」가
-        # 원인이다. `page_errors()` 로 읽고, 테스트는 0건을 단언한다.
+        # 원인이다. `page_errors()` 로 읽고, 테스트는 0건을 단언한다. 이 호출을 지우면
+        # `page_errors()` 가 「수집기 누락」으로 실패한다(mutcheck ㉗
+        # `web-page-error-collector-removed`).
         self.call(
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": PAGE_ERROR_COLLECTOR_JS},
             timeout=COLD_START_SECONDS,
         )
+        # 이미 떠 있는 about:blank 에는 위 스크립트가 안 들어간다(새 문서부터 돈다). 첫 `navigate`
+        # 가 커밋되기 전에 `page_errors()` 가 그 문서를 읽으면 수집기 누락으로 오판하므로 거기에도
+        # 같은 수집기를 심는다 — 그 뒤로는 모든 문서에 수집기가 있고, 없으면 진짜 누락이다.
+        seeded = self.call(
+            "Runtime.evaluate", {"expression": PAGE_ERROR_COLLECTOR_JS}, timeout=COLD_START_SECONDS
+        )
+        assert "exceptionDetails" not in seeded, seeded
 
     def __enter__(self) -> "Chrome":
         return self
@@ -209,9 +238,20 @@ class Chrome:
                 return m.get("result", {})
 
     def _attach_first_page(self, *, timeout: float) -> str:
+        """첫 페이지 타깃에 붙어 sessionId 를 돌려준다. 안의 CDP 호출마다 **남은** 마감을 넘긴다.
+
+        Chrome 의 찬 기동을 맞는 자리가 여기다 — 첫 `Target.getTargets` 응답이 오기까지가 제일
+        길다. `call` 의 기본 마감을 쓰면 `timeout` 은 「페이지 타깃이 생길 때까지 되묻는 루프」만
+        덮고 응답 하나하나는 15초에서 끊긴다(pr-98 리뷰 P1). 마감이 거의 다 됐어도 응답 한 번은
+        1초 이상 기다린다.
+        """
         deadline = time.monotonic() + timeout
+
+        def remaining() -> float:
+            return max(1.0, deadline - time.monotonic())
+
         while True:
-            targets = self.call("Target.getTargets")["targetInfos"]
+            targets = self.call("Target.getTargets", timeout=remaining())["targetInfos"]
             pages = [t for t in targets if t["type"] == "page"]
             if pages:
                 break
@@ -219,7 +259,7 @@ class Chrome:
                 raise AssertionError("CDP: Chrome never created a page target")
             time.sleep(0.05)
         params = {"targetId": pages[0]["targetId"], "flatten": True}
-        return self.call("Target.attachToTarget", params)["sessionId"]
+        return self.call("Target.attachToTarget", params, timeout=remaining())["sessionId"]
 
     def _stderr_tail(self) -> str:
         try:
@@ -232,12 +272,20 @@ class Chrome:
     # 페이지 -------------------------------------------------------------------
 
     def page_errors(self) -> list[str]:
-        """페이지가 열린 뒤 지금까지의 `error`·`unhandledrejection` 메시지. 이동 중이면 빈 목록."""
+        """페이지가 열린 뒤 지금까지의 `error`·`unhandledrejection` 메시지. 이동 중이면 빈 목록.
+
+        수집기가 없으면(`window.__rcmErrors` 가 배열이 아니면) **실패**다. 빈 목록으로 덮으면 I5 의
+        「0건 단언」이 수집기 없이도 초록이라 아무것도 지키지 않는다 — CDP 메서드 이름 오타든
+        누가 정리하며 지웠든 조용히 통과했다(pr-82 리뷰 P2). 실행 컨텍스트가 아직 없는 이동 중
+        (`RuntimeError`)만 빈 목록이다.
+        """
         try:
-            found = self.eval("Array.isArray(window.__rcmErrors) ? window.__rcmErrors : []")
+            found = self.eval("Array.isArray(window.__rcmErrors) ? window.__rcmErrors : null")
         except RuntimeError:  # 실행 컨텍스트가 아직 없다
             return []
-        return list(found) if isinstance(found, list) else []
+        if not isinstance(found, list):
+            raise AssertionError("page error collector missing")
+        return list(found)
 
     def eval(self, expression: str) -> Any:
         """JS 식 하나를 값으로. 예외면 AssertionError."""
@@ -367,13 +415,28 @@ class Scene:
         j = self.srv.store.get_job(self.running)
         assert j.state == "running", (
             f"job {self.running} is {j.state} — it finished before the DOM was captured "
-            "(capture took too long for the 20 s `slow` preset)"
+            f"(capture took longer than the {SCENE_SLOW_SECONDS} s `slow` preset)"
         )
+
+
+def test_the_scene_outlives_the_cold_start_deadline(scene):
+    """Chrome 은 장면이 선 **뒤에** 뜬다 — 찬 기동이 길어도 `COLD_START_SECONDS` 안이면 붙지만,
+    그 사이 장면의 `slow` 잡이 끝나 버리면 마감은 헛것이다(M5l L7.1 실측: `Target.getTargets`
+    20초 지연에 「no reply」가 아니라 「page not ready」— 20초 `slow` 가 먼저 끝났다). 장면의
+    running 잡은 찬 기동 마감 + `open()` 의 15초 + 자리잡기 여유보다 오래 살아야 한다."""
+    slow = next(p for p in scene.srv.cfg.presets if p.name == "slow")
+    m = re.search(r"sleep (\d+)", " ".join(slow.argv))
+    assert m, slow.argv
+    assert int(m.group(1)) >= COLD_START_SECONDS + 15 + 5, (
+        f"the scene's slow job sleeps {m.group(1)} s — shorter than the cold-start deadline "
+        "it must outlive"
+    )
 
 
 @pytest.fixture
 def scene(tmp_path):
     srv = Server(tmp_path, workers=True)
+    srv.cfg.presets = tuple(parse_preset(p) for p in SCENE_PRESETS)  # 긴 `slow`
     # start() 가 만든 진짜 샘플러를 덮는다. shutdown 은 stop 이벤트로 하므로 스텁이어도 된다.
     srv.app.sampler = FreshStubSampler()
     jobs: list[tuple[int, str]] = []
