@@ -1146,9 +1146,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return serve(cfg, debug=args.debug)
     except OSError as e:
         return _usage(f"cannot start server: {e.strerror or e}")
-    except StoreError as e:
-        # DB 를 못 연다(마이그레이션 백업 실패 · 이 빌드보다 새 스키마) — 결정 74 의 복구 경로가
-        # 이 문장이다. 운영자가 launchd 로그에서 읽는 것이라 트레이스백이 아니라 한 줄로.
+    except (StoreError, sqlite3.Error) as e:
+        # DB 를 못 연다(마이그레이션 백업 실패 · 이 빌드보다 새 스키마 · 깨진 파일 · 읽기 전용 ·
+        # 마이그레이션 SQL 실패) — 결정 74 의 복구 경로가 이 문장이다. 운영자가 launchd 로그에서
+        # 읽는 것이라 트레이스백이 아니라 한 줄로(M5l L5 · 리뷰 pr-94 B-2).
         return _usage(f"cannot start server: {e}")
 
 
@@ -1575,7 +1576,10 @@ def cmd_token(args: argparse.Namespace) -> int:
         return _usage(f"config: {e}")
     try:
         store = Store(cfg.data_dir / "rcm.sqlite3")  # 열면서 마이그레이션한다 — 거절도 여기서
-    except StoreError as e:
+    except OSError as e:
+        # `data_dir` 이 파일이거나 만들 수 없는 곳 — `serve` 와 같은 모양으로(리뷰 pr-94 B-3)
+        return _usage(str(e.strerror or e))
+    except (StoreError, sqlite3.Error) as e:
         return _usage(str(e))
     now = datetime.now(UTC)
     try:
@@ -1600,7 +1604,8 @@ def cmd_token(args: argparse.Namespace) -> int:
                 _info(f"token '{args.name}' revoked")
                 return 0
             return _usage(f"no active token named '{args.name}'")
-    except StoreError as e:
+    except (StoreError, sqlite3.Error) as e:
+        # 중복 이름(StoreError) · 다른 프로세스의 쓰기 잠금(`database is locked`) 도 한 줄로
         return _usage(str(e))
     finally:
         store.close()

@@ -39,6 +39,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ serve-store-before-bind — `serve()` 가 포트를 잡기 **전에** DB 를 열어 마이그레이션함
+     (`server.py`, M5l L5 · 리뷰 pr-94 B-1 — 도는 서비스 곁에서 다른 빌드로 치면 DB 가 먼저 바뀐다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -308,6 +310,25 @@ MUTANTS = (
         old="    if st.st_nlink > 1 and stat.S_ISREG(st.st_mode):\n",
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
+    ),
+    # ㉗ M5l L5 · 리뷰 pr-94 B-1 — 포트를 못 잡으면 DB 를 열지도 않는다. 순서를 되돌리면(먼저
+    # Store, 그 다음 bind) 「Address already in use」 뒤에 DB 는 이미 새 버전이다.
+    Mutant(
+        name="serve-store-before-bind",
+        path="src/remote_ci_monitor/server.py",
+        old="""    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        store = Store(data_dir / "rcm.sqlite3")
+    except BaseException:
+        httpd.server_close()
+        raise
+""",
+        new="""    data_dir.mkdir(parents=True, exist_ok=True)
+    store = Store(data_dir / "rcm.sqlite3")
+    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+""",
+        tests=("tests/test_cli_serve_refusal.py",),
     ),
 )
 
