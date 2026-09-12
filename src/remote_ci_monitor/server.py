@@ -2626,9 +2626,19 @@ class RcmHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], app: App):
-        handler = type("BoundHandler", (Handler,), {"app": app})
-        super().__init__(address, handler)
+    def __init__(self, address: tuple[str, int], app: App | None = None):
+        # `app` 없이도 만들 수 있다 — `serve()` 는 포트를 **먼저** 잡고 그 다음에 DB 를 연다
+        # (M5l L5 · 리뷰 pr-94 B-1). 요청은 `attach()` 뒤 `serve_forever()` 에서야 처리된다.
+        self._handler = type("BoundHandler", (Handler,), {"app": None})
+        super().__init__(address, self._handler)  # 여기서 bind + listen
+        self.app: App | None = None
+        self.slots: threading.BoundedSemaphore | None = None
+        if app is not None:
+            self.attach(app)
+
+    def attach(self, app: App) -> None:
+        """바인딩된 소켓에 앱을 붙인다 — 이때부터 핸들러가 `app` 을 본다."""
+        self._handler.app = app
         self.app = app
         self.slots = threading.BoundedSemaphore(app.config.server.max_concurrent_requests)
 
@@ -2642,7 +2652,7 @@ class RcmHTTPServer(ThreadingHTTPServer):
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # 소켓 오류 스택을 stderr 에 쏟지 않는다(debug 에만)
-        if self.app.debug:
+        if self.app is not None and self.app.debug:
             super().handle_error(request, client_address)
 
 
@@ -2654,10 +2664,23 @@ def make_server(app: App, *, bind: str | None = None, port: int | None = None) -
 def serve(config: ServerConfig, *, debug: bool = False) -> int:
     """`rcm serve` 본체. SIGINT/SIGTERM 으로 멈춘다."""
     data_dir = config.data_dir
-    data_dir.mkdir(parents=True, exist_ok=True)
-    store = Store(data_dir / "rcm.sqlite3")
-    app = App(config, store, debug=debug)
-    httpd = make_server(app)
+    # 순서가 곧 안전장치다: 포트 → DB → 앱. 포트를 못 잡으면(도는 서비스 곁에서 다른 빌드로
+    # `rcm serve --config <같은 설정>`) DB 를 열지도 않는다 — 열면 마이그레이션이 먼저 일어나고
+    # 옛 서비스는 다음 재시작에서 못 뜬다(2026-09-10 사고 · M5l L5 · 리뷰 pr-94 B-1).
+    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        store = Store(data_dir / "rcm.sqlite3")
+    except BaseException:
+        httpd.server_close()
+        raise
+    try:
+        app = App(config, store, debug=debug)
+        httpd.attach(app)
+    except BaseException:
+        httpd.server_close()
+        store.close()
+        raise
     app.start()
     host, port = httpd.server_address[0], httpd.server_address[1]
     app.log(

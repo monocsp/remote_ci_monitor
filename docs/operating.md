@@ -105,7 +105,9 @@ differs.
 7. Start the service. The first start migrates the database — and before it changes anything it
    writes `<data_dir>/backup/rcm.sqlite3.v<old>.bak`, a verified copy of the old database (the
    three newest are kept). If that backup cannot be written, the server refuses to start and the
-   database stays as it was.
+   database stays as it was. The server takes its port before it opens the database, so a build
+   started by mistake next to the running service stops at `Address already in use` without
+   touching the database.
 8. `rcm check`, the web page, then `rcm resume`.
 
 Queued jobs and a paused queue survive; jobs that were running when the service stopped become

@@ -7,6 +7,19 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **`rcm serve` takes its port before it opens the database.** Started next to a running
+  service with the same config — another build, a copy of the config — it used to migrate the
+  database first and only then print `cannot start server: Address already in use`, leaving the
+  running service unable to restart. The socket is bound first; if that fails the database is not
+  opened, not backed up and not changed. Also, `rcm serve` and `rcm token` now refuse in one
+  `rcm:` line (exit 2) for every way the database cannot be opened — a file that is not a
+  database, a read-only data directory, a migration statement that fails, a `data_dir` that is a
+  file, another process holding the write lock — where before only a failed migration backup and
+  a newer schema were one line and the rest was a traceback. (`rcm gc --dry-run` keeps its exit
+  3 for the newer-schema case: it answers "unknown", the other two answer "fix the setup".)
+  ([#118](https://github.com/monocsp/remote_ci_monitor/pull/118))
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed
