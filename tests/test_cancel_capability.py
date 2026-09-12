@@ -242,6 +242,30 @@ def test_metadata_expiry_deletes_the_submissions_in_the_same_transaction_as_the_
     s.close()
 
 
+def test_a_failed_metadata_delete_rolls_back_the_job_and_its_submissions_together(tmp_path):
+    """같은 트랜잭션의 반대쪽(검증 시나리오 G5.21 ②): 삭제 중간에 실패하면 잡 행도 제출 행도
+    그대로다 — 제출 행만 먼저 지워진 채 잡이 남으면 옛 잡처럼 보여 강제 모드의 권한이 바뀐다."""
+    path = tmp_path / "rcm.sqlite3"
+    s = Store(path)
+    old = finished_job(s, finished=at(10))
+    s.add_submission(old.id, ROLE_CANCEL_JOB, at(0))
+    s.add_submission(old.id, ROLE_LEAVE_SUBMISSION, at(1))
+    s.mark_artifacts_purged([old.id], at(2000))
+    # 제출 행 DELETE 뒤에 오는 문장(jobs 행 삭제)을 실패시킨다 — 디스크 오류와 같은 자리
+    with sqlite3.connect(path) as raw_conn:
+        raw_conn.execute(
+            "CREATE TRIGGER refuse_job_delete BEFORE DELETE ON jobs "
+            "BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
+        )
+    with pytest.raises(sqlite3.DatabaseError, match="disk I/O error"):
+        s.delete_old_jobs(at(500))
+    assert s.get_job(old.id) is not None, "the job row must survive a failed delete"
+    assert raw(path, "SELECT count(*) FROM submissions WHERE job_id=?", (old.id,)) == [(2,)], (
+        "the submissions were deleted outside the job's transaction"
+    )
+    s.close()
+
+
 # ── 서버: 제출마다 capability ────────────────────────────────────────────────
 
 
