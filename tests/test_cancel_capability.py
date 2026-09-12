@@ -226,6 +226,21 @@ def test_a_submission_issues_a_secret_the_store_keeps_only_as_a_hash(tmp_path):
     assert tok.encode() not in on_disk and tok2.encode() not in on_disk
 
 
+def test_a_cancel_token_never_starts_with_a_dash_so_the_flag_can_carry_it(tmp_path, monkeypatch):
+    """`secrets.token_urlsafe` 는 `-` 로 시작할 수 있다(64분의 1). 그러면
+    `rcm cancel N --cancel-token <비밀>` 에서 argparse 가 비밀을 옵션으로 읽어 exit 2 다 —
+    CI 의 `test_rcm_cancel_sends_the_saved_token_or_the_flag…` 가 그렇게 한 번 빨갛게 됐다."""
+    dashed = "-" + "A" * 42
+    plain = "B" * 43
+    served = iter([dashed, dashed, plain])
+    monkeypatch.setattr(store_mod.secrets, "token_urlsafe", lambda n: next(served))
+    s = Store(tmp_path / "rcm.sqlite3")
+    j = enqueue(s, now=NOW)
+    _sid, tok = s.add_submission(j.id, ROLE_CANCEL_JOB, NOW)
+    s.close()
+    assert tok == plain, "a token starting with '-' must be drawn again"
+
+
 def test_metadata_expiry_deletes_the_submissions_in_the_same_transaction_as_the_job(tmp_path):
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)

@@ -1704,6 +1704,11 @@ class Store:
             raise StoreError(f"unknown submission role {role!r}")
         submission_id = secrets.token_hex(8)
         cancel_token = secrets.token_urlsafe(32)
+        # `-` 로 시작하는 비밀은 `rcm cancel N --cancel-token <비밀>` 에서 argparse 가 옵션으로
+        # 읽는다(CI 에서 1/64 확률로 재현). 첫 글자가 `-` 면 다시 뽑는다 — 문서의 명령이 그대로
+        # 되게 하는 쪽이 사용자에게 `--cancel-token=` 을 가르치는 쪽보다 낫다.
+        while cancel_token.startswith("-"):
+            cancel_token = secrets.token_urlsafe(32)
         self._conn().execute(
             "INSERT INTO submissions (job_id, submission_id, role, capability_hash, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
