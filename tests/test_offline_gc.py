@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -208,6 +210,98 @@ def test_a_migration_that_fails_on_the_copy_is_unknown_and_names_the_restart_ris
     rc = main(["gc", "--dry-run", "--config", str(old_db["cfg"])])
     err = capsys.readouterr().err
     assert rc == 3 and "simulated: ALTER TABLE failed" in err and "restart" in err, err
+    assert raw_version(old_db["db"]) == OLD
+
+
+def test_a_raw_sqlite_error_on_the_copy_is_unknown_without_a_traceback(old_db, capsys, monkeypatch):
+    """리뷰 #87 B P1(첫째) · M5l L1: `_MIGRATIONS` 의 SQL 이 실제로 죽으면 `StoreError` 가 아니라
+    `sqlite3.OperationalError` 가 올라온다 — 그걸 안 잡으면 트레이스백 + exit 1 이었다.
+    mutcheck: `except (StoreError, sqlite3.Error)` 에서 `sqlite3.Error` 를 빼면 여기가 빨개진다."""
+    from remote_ci_monitor import store as store_mod
+
+    stale = scratch_copies()
+    monkeypatch.setitem(store_mod._MIGRATIONS, DB_VERSION, ("UPDATE jobs SET no_such_column=1",))
+    rc = main(["gc", "--dry-run", "--config", str(old_db["cfg"])])
+    err = capsys.readouterr().err
+    assert rc == 3, err
+    assert "no such column" in err and "restart" in err, err
+    assert f"schema v{OLD}" in err and "Nothing was changed" in err, err
+    assert "Traceback" not in err, err
+    assert raw_version(old_db["db"]) == OLD
+    assert scratch_copies() == stale
+
+
+def test_a_sqlite_error_raised_by_migrate_itself_is_also_unknown(old_db, capsys, monkeypatch):
+    """L1.2 의 둘째 짝 — `Store.migrate` 가 `sqlite3.IntegrityError` 를 던져도 같은 문장, exit 3."""
+    from remote_ci_monitor import store as store_mod
+
+    def boom(self):
+        raise sqlite3.IntegrityError("simulated: UNIQUE constraint failed")
+
+    monkeypatch.setattr(store_mod.Store, "migrate", boom)
+    rc = main(["gc", "--dry-run", "--config", str(old_db["cfg"]), "--json"])
+    captured = capsys.readouterr()
+    assert rc == 3 and "UNIQUE constraint failed" in captured.err, captured.err
+    assert "restart" in captured.err and "Traceback" not in captured.err, captured.err
+    assert captured.out == ""  # 계획도 JSON 도 없다 — 빈 계획 성공은 없다
+    assert raw_version(old_db["db"]) == OLD
+
+
+def test_main_does_not_let_a_sqlite_error_escape_as_a_traceback(monkeypatch, capsys, tmp_path):
+    """`main()` 의 안전망 — 어느 서브커맨드가 `sqlite3.Error` 를 흘려도 한 줄 + exit 3."""
+    from remote_ci_monitor import cli as cli_mod
+
+    def leak(args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(cli_mod, "_offline_gc", leak)
+    rc = main(["gc", "--dry-run", "--config", str(tmp_path / "nonexistent.toml")])
+    err = capsys.readouterr().err
+    assert rc == 3 and "database is locked" in err and "Traceback" not in err, err
+
+
+def test_a_scratch_copy_that_cannot_be_removed_is_reported_and_is_not_a_success(
+    old_db, capsys, monkeypatch
+):
+    """리뷰 #87 B P1(둘째) · L1.3: `rmtree` 가 실패하면 운영 DB 전체 사본이 `$TMPDIR` 에 남는데
+    exit 0 이었다 — 「사본을 지웠다」는 거짓 성공. 이제 stderr 가 무엇이 어디 남았는지 말하고 3."""
+    from remote_ci_monitor import cli as cli_mod
+
+    stale = scratch_copies()
+    real_rmtree = shutil.rmtree
+
+    def busy(path, *a, **kw):
+        raise OSError(errno.EBUSY, "Resource busy", str(path))
+
+    monkeypatch.setattr(cli_mod.shutil, "rmtree", busy)
+    rc = main(["gc", "--dry-run", "--config", str(old_db["cfg"]), "--json"])
+    captured = capsys.readouterr()
+    monkeypatch.undo()
+    left = [n for n in scratch_copies() if n not in stale]
+    for n in left:  # 테스트가 남긴 사본은 테스트가 치운다
+        real_rmtree(Path(tempfile.gettempdir()) / n, ignore_errors=True)
+    assert rc == 3, captured.err
+    assert len(left) == 1, left
+    assert "warning" in captured.err and "copy" in captured.err, captured.err
+    assert left[0] in captured.err and "Resource busy" in captured.err, captured.err
+    assert "exit 3" in captured.err, captured.err
+    # 계획 자체는 유효하므로 찍혀도 된다 — 하지만 종료 코드는 3 이다
+    doc = json.loads(captured.out)
+    assert doc["offline"]["copy"] is True
+    assert raw_version(old_db["db"]) == OLD
+
+
+def test_a_scratch_directory_that_cannot_be_made_is_unknown(old_db, capsys, monkeypatch):
+    """리뷰 #87 C: `mkdtemp()` 실패는 검사되지 않았다 — `OSError` 가 그대로 올라왔다."""
+    from remote_ci_monitor import cli as cli_mod
+
+    def full(*a, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(cli_mod.tempfile, "mkdtemp", full)
+    rc = main(["gc", "--dry-run", "--config", str(old_db["cfg"])])
+    err = capsys.readouterr().err
+    assert rc == 3 and "No space left" in err and "exit 3" in err, err
     assert raw_version(old_db["db"]) == OLD
 
 

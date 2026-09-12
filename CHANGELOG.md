@@ -7,6 +7,21 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **`rcm gc --dry-run --config` now exits 3 on every incomplete path, and the old-build refusal
+  names a backup that exists.** A migration statement that failed on the temporary copy raised a
+  raw `sqlite3.Error` past the command and `main()` — a traceback and exit 1, for exactly the
+  failure the preview exists to catch before a restart; it is now one line on stderr and exit 3.
+  A temporary directory that could not be created, or a copy that could not be removed afterwards,
+  is exit 3 as well — the copy of the live database left in `$TMPDIR` is named on stderr instead
+  of being reported as cleaned up. The `newer than this build` refusal used to compute the file to
+  restore from the running build's own schema version, so a v15 database upgraded straight to a
+  much newer build told a v16 build to restore a `v16.bak` that never existed; it now points at the
+  highest `rcm.sqlite3.v<n>.bak` actually present in `backup/`, and says
+  `no migration backup found` when there is none. A `backup/` directory that cannot be listed
+  while pruning old backups warns instead of silently keeping every file.
+  ([#117](https://github.com/monocsp/remote_ci_monitor/pull/117))
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed

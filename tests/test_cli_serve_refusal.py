@@ -71,7 +71,11 @@ def test_a_failed_migration_backup_is_one_line_and_the_database_is_untouched(
 
 @pytest.mark.parametrize("argv", [["serve"], ["token", "list"]])
 def test_a_newer_database_is_refused_in_one_line_with_the_restore_hint(tmp_path, capsys, argv):
+    """힌트는 `backup/` 에 **있는** 파일이다 — 새 빌드가 올리기 전에 남긴 이 빌드 버전의 백업."""
     cfg, db = marked(tmp_path, DB_VERSION + 1)
+    bak = db.parent / "backup" / f"rcm.sqlite3.v{DB_VERSION}.bak"
+    bak.parent.mkdir()
+    bak.write_bytes(b"backup")
     if argv[0] == "serve":
         rc = main(["serve", "--config", str(cfg)])
     else:
@@ -79,6 +83,22 @@ def test_a_newer_database_is_refused_in_one_line_with_the_restore_hint(tmp_path,
     err = capsys.readouterr().err
     assert rc == USAGE_EXIT
     assert f"newer than this build ({DB_VERSION})" in err, err
-    assert str(db.parent / "backup" / f"rcm.sqlite3.v{DB_VERSION}.bak") in err, err
+    assert f"restore {bak}" in err, err
     assert "Traceback" not in err and len(err.strip().splitlines()) == 1, err
     assert version_of(db) == DB_VERSION + 1
+
+
+@pytest.mark.parametrize("argv", [["serve"], ["token", "list"]])
+def test_a_newer_database_without_any_backup_says_so_instead_of_inventing_one(
+    tmp_path, capsys, argv
+):
+    """M5l L1.7: 백업이 없으면 `.bak` 이름을 지어내지 않는다."""
+    cfg, db = marked(tmp_path, DB_VERSION + 1)
+    if argv[0] == "serve":
+        rc = main(["serve", "--config", str(cfg)])
+    else:
+        rc = main(["token", "--config", str(cfg), "list"])
+    err = capsys.readouterr().err
+    assert rc == USAGE_EXIT
+    assert "no migration backup found" in err and ".bak" not in err, err
+    assert len(err.strip().splitlines()) == 1, err
