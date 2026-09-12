@@ -7,6 +7,24 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **The `rcm gc` receipt no longer states what it does not know.** A job whose size could not be
+  measured can still be deleted by the age rule; the receipt then printed `freed 0 B from 1 jobs`
+  as if it had been measured. It now gives a lower bound — `freed ≥ 0 B from 1 jobs (1 of unknown
+  size)` — and the JSON carries `unknown_count`. A delete that got only half way (workspace
+  removed, snapshot tar not) was counted as a plain failure, so the inventory was not measured
+  again and the size cache kept the old figure: `storage_after` equalled `storage_before` and
+  `/api/status` went on showing bytes that were gone. The `failed[]` entry now says what went
+  (`"removed": ["workspace"]`), the receipt counts it (`1 failed (EACCES · 1 partly deleted)`), the
+  cache entry is dropped and the inventory is re-measured. In `rcm check`, a measurement failure
+  while free space is under the floor read as `… and nothing left to delete` (FAIL); it now reads
+  as the measurement failure it is (warn, with the error code), and the row for a budget that
+  running jobs alone exceed says how old its number is like the other rows. A job directory
+  the server cannot read (`jobs/<id>` without permission) used to fail the whole inventory as
+  `scan_EACCES` — no age rule ran for anyone and every figure read `—`; now only that job's
+  snapshot is unknown (`measure_EACCES`, `1 of unknown size`) and the rest is measured and
+  purged as usual. `schema_version` unchanged — keys were only added. (M5l L2, review of #88)
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed
