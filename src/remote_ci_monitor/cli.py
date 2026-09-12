@@ -238,8 +238,9 @@ def _keep_submission(client: Client, job_id: int, resp: dict[str, Any]) -> str |
     """제출 응답의 `submission` 을 상태 파일에 둔다(M5j G5) — 나중의 `rcm cancel N` 이 쓴다.
 
     돌려주는 값은 cancel token: 합류자의 Ctrl-C 가 자기 참여만 빼는 데 쓴다. 옛 서버(키 없음)면
-    None. 못 두면 경고 한 줄 — 잡은 이미 큐에 있고, 비밀은 `--no-wait` JSON 이 아니면 어디에도
-    찍지 않는다.
+    None. 못 두면 stderr 한 줄(경로 없이 — M5l S10) — 잡은 이미 큐에 있고, 비밀은 `--no-wait`
+    JSON 이 아니면 어디에도 찍지 않는다. 상한을 넘으면 이 서버의 끝난 잡만 서버에 물어 버린다
+    (M5l S9); 다른 서버의 항목은 모르니 남긴다.
     """
     sub = resp.get("submission")
     if not isinstance(sub, dict):
@@ -248,6 +249,16 @@ def _keep_submission(client: Client, job_id: int, resp: dict[str, Any]) -> str |
     if not isinstance(sid, str) or not isinstance(tok, str) or not tok:
         return None
     role = submissions.ROLE_LEAVE_SUBMISSION if resp.get("joined") else submissions.ROLE_CANCEL_JOB
+    mine = client.server.rstrip("/")
+
+    def finished(server: str, other: int) -> bool | None:
+        if server.rstrip("/") != mine:
+            return None
+        try:
+            return client.job(other, timeout=5).get("state") in TERMINAL_STATES
+        except ClientError as e:
+            return True if e.status == 404 else None  # 지워진 잡의 비밀은 쓸 데가 없다
+
     try:
         submissions.remember(
             client.server,
@@ -256,11 +267,13 @@ def _keep_submission(client: Client, job_id: int, resp: dict[str, Any]) -> str |
             tok,
             role=role,
             token_fingerprint=submissions.fingerprint(client.token),
+            finished=finished,
         )
     except OSError as e:
         _err(
-            f"warning: could not save the cancel token to {submissions.state_path()} "
-            f"({e.strerror or e}) — `rcm cancel {job_id}` will need --cancel-token"
+            f"warning: the cancel token was not saved in the rcm state file "
+            f"({e.strerror or e}) — from another shell, `rcm cancel {job_id}` needs "
+            "--cancel-token (the --no-wait JSON carries it)"
         )
     return tok
 
@@ -370,21 +383,29 @@ def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
 def _client_row(client: Client, h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     """`rcm check` 의 `client` 행 — 이 클라이언트와 서버의 버전. 서버가 버전을 안 주면 행도 없다.
 
-    FAIL 은 `min_client_version` 아래일 때만. 그 위의 「older」·「newer」는 warn(알려는 주되
-    실패는 아니다) — 실제 거부는 서버의 400 이 한다.
+    FAIL 은 `min_client_version` 아래일 때뿐이고 그것을 **먼저** 본다(M5l S10) — 서버가 취소에
+    capability 를 요구하면 같은 버전 번호라도 바닥이 그 위일 수 있다(0.2.6 서버가 0.2.7 을
+    요구). 그 위의 「older」·「newer」는 warn(알려는 주되 실패는 아니다) — 실제 거부는 서버의
+    400·403 이 한다.
     """
     server_v = h.get("version")
     if not server_v:
         return None
     mine, theirs = _version_key(__version__), _version_key(server_v)
+    floor = h.get("min_client_version")
+    if floor and mine < _version_key(floor):
+        why = "older" if mine < theirs else f"below min client v{floor}"
+        return (
+            "client",
+            False,
+            f"v{__version__} · server v{server_v} · {why} — {_upgrade_hint(client.server, h)}",
+        )
     if mine == theirs:
         return ("client", True, f"v{__version__} · same as server")
     if mine < theirs:
-        floor = h.get("min_client_version")
-        too_old = bool(floor) and mine < _version_key(floor)
         return (
             "client",
-            False if too_old else None,
+            None,
             f"v{__version__} · server v{server_v} · older — {_upgrade_hint(client.server, h)}",
         )
     return ("client", None, f"v{__version__} · server v{server_v} · newer")
@@ -773,25 +794,40 @@ def cmd_wait(args: argparse.Namespace) -> int:
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
-    """`rcm cancel N [--cancel-token T]` — 비밀은 플래그 > 상태 파일 순. 둘 다 없으면 어느 쪽이
-    없는지 말하고 **그래도 보낸다**(키가 꺼진 서버·admin 토큰은 오늘처럼 받는다). 비밀 자체는
-    어디에도 찍지 않는다."""
+    """`rcm cancel N [--cancel-token T | --submission-id S]` — 비밀은 플래그 > 상태 파일 순.
+    상태 파일에서는 **이 토큰**으로 낸 그 잡의 가장 최근 제출(`--submission-id` 로 특정)이다
+    (M5l S5 — 다른 세션의 항목으로 넘어가는 폴백은 없다). 둘 다 없으면
+    어느 쪽이 없는지 말하고 **그래도 보낸다**(키가 꺼진 서버·admin 토큰은 오늘처럼 받는다).
+    비밀 자체도 상태 파일의 경로도 어디에도 찍지 않는다."""
     client = _client(args)
     cancel_token = getattr(args, "cancel_token", None) or None
+    submission_id = getattr(args, "submission_id", None) or None
+    entry: dict[str, Any] | None = None
     if not cancel_token:
-        cancel_token = submissions.lookup(
-            client.server, args.job, token_fingerprint=submissions.fingerprint(client.token)
+        entry = submissions.find(
+            client.server,
+            args.job,
+            submission_id=submission_id,
+            token_fingerprint=submissions.fingerprint(client.token),
         )
+        cancel_token = (entry or {}).get("cancel_token")
     if not cancel_token:
+        which = (
+            f"submission {submission_id} is not in the rcm state file"
+            if submission_id
+            else "none saved in the rcm state file"
+        )
         _info(
-            f"no cancel token for job #{args.job}: none saved in {submissions.state_path()} "
-            "and no --cancel-token — sending the cancel without one"
+            f"no cancel token for job #{args.job}: {which} and no --cancel-token — "
+            "sending the cancel without one"
         )
     try:
         resp = client.cancel(args.job, cancel_token=cancel_token)
     except ClientError as e:
         _err(f"cancel failed: {e.message}")
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
+    if entry is not None and isinstance(entry.get("submission_id"), str):
+        submissions.forget(client.server, entry["submission_id"])  # 쓴 비밀은 더 안 통한다
     _print_json(resp)
     if resp.get("left"):
         _info(f"left the join list of job #{args.job} (job keeps running)")
@@ -1935,8 +1971,15 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument(
         "--cancel-token",
         metavar="TOKEN",
-        help="the submission's cancel token (default: the one rcm run saved in "
-        "$XDG_STATE_HOME/rcm/submissions.json or ~/.local/state/rcm/submissions.json)",
+        help="the submission's cancel token (default: the newest one rcm run saved for this job "
+        "with this token in $XDG_STATE_HOME/rcm/submissions.json or "
+        "~/.local/state/rcm/submissions.json)",
+    )
+    cancel.add_argument(
+        "--submission-id",
+        metavar="ID",
+        help="use the saved cancel token of this submission (the id from the --no-wait JSON) "
+        "when two sessions of this user are on the same job",
     )
     client_opts(cancel)
     cancel.set_defaults(func=cmd_cancel)

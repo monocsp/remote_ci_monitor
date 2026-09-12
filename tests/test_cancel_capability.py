@@ -171,7 +171,14 @@ def test_a_fresh_database_is_v17_with_a_submissions_table_and_its_job_index(tmp_
     s.close()
     assert {"submissions", "submissions_job"} <= names(path)
     cols = {r[1] for r in raw(path, "PRAGMA table_info(submissions)")}
-    assert cols == {"job_id", "submission_id", "role", "capability_hash", "created_at"}
+    assert cols == {
+        "job_id",
+        "submission_id",
+        "role",
+        "capability_hash",
+        "created_at",
+        "participant",
+    }
 
 
 def test_v16_to_v17_takes_the_boundary_backup_first_and_a_failed_backup_adds_no_table(
@@ -207,11 +214,11 @@ def test_a_submission_issues_a_secret_the_store_keeps_only_as_a_hash(tmp_path):
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
     j = enqueue(s, now=NOW)
-    sid, tok = s.add_submission(j.id, ROLE_CANCEL_JOB, NOW)
-    sid2, tok2 = s.add_submission(j.id, ROLE_LEAVE_SUBMISSION, at(1))
+    sid, tok = s.add_submission(j.id, ROLE_CANCEL_JOB, NOW, participant="alice-laptop")
+    sid2, tok2 = s.add_submission(j.id, ROLE_LEAVE_SUBMISSION, at(1), participant="bob-desk")
     assert sid != sid2 and tok != tok2 and len(tok) >= 32
-    assert s.submission_role(j.id, tok) == (sid, ROLE_CANCEL_JOB)
-    assert s.submission_role(j.id, tok2) == (sid2, ROLE_LEAVE_SUBMISSION)
+    assert s.submission_role(j.id, tok) == (sid, ROLE_CANCEL_JOB, "alice-laptop")
+    assert s.submission_role(j.id, tok2) == (sid2, ROLE_LEAVE_SUBMISSION, "bob-desk")
     assert s.submission_role(j.id, "nope") is None
     assert s.submission_role(j.id + 1, tok) is None  # 다른 잡의 비밀은 이 잡을 못 건드린다
     assert s.remove_submission(sid2) is True
@@ -236,7 +243,7 @@ def test_a_cancel_token_never_starts_with_a_dash_so_the_flag_can_carry_it(tmp_pa
     monkeypatch.setattr(store_mod.secrets, "token_urlsafe", lambda n: next(served))
     s = Store(tmp_path / "rcm.sqlite3")
     j = enqueue(s, now=NOW)
-    _sid, tok = s.add_submission(j.id, ROLE_CANCEL_JOB, NOW)
+    _sid, tok = s.add_submission(j.id, ROLE_CANCEL_JOB, NOW, participant="a")
     s.close()
     assert tok == plain, "a token starting with '-' must be drawn again"
 
@@ -245,10 +252,10 @@ def test_metadata_expiry_deletes_the_submissions_in_the_same_transaction_as_the_
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
     old = finished_job(s, finished=at(10))
-    s.add_submission(old.id, ROLE_CANCEL_JOB, at(0))
-    s.add_submission(old.id, ROLE_LEAVE_SUBMISSION, at(1))
+    s.add_submission(old.id, ROLE_CANCEL_JOB, at(0), participant="a")
+    s.add_submission(old.id, ROLE_LEAVE_SUBMISSION, at(1), participant="b")
     keep = enqueue(s, now=at(30), tree="a")
-    s.add_submission(keep.id, ROLE_CANCEL_JOB, at(30))
+    s.add_submission(keep.id, ROLE_CANCEL_JOB, at(30), participant="a")
     s.mark_artifacts_purged([old.id], at(2000))
     assert s.delete_old_jobs(at(500)) == 1
     assert s.get_job(old.id) is None
@@ -263,8 +270,8 @@ def test_a_failed_metadata_delete_rolls_back_the_job_and_its_submissions_togethe
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
     old = finished_job(s, finished=at(10))
-    s.add_submission(old.id, ROLE_CANCEL_JOB, at(0))
-    s.add_submission(old.id, ROLE_LEAVE_SUBMISSION, at(1))
+    s.add_submission(old.id, ROLE_CANCEL_JOB, at(0), participant="a")
+    s.add_submission(old.id, ROLE_LEAVE_SUBMISSION, at(1), participant="b")
     s.mark_artifacts_purged([old.id], at(2000))
     # 제출 행 DELETE 뒤에 오는 문장(jobs 행 삭제)을 실패시킨다 — 디스크 오류와 같은 자리
     with sqlite3.connect(path) as raw_conn:
@@ -505,7 +512,8 @@ def test_rcm_cancel_sends_the_saved_token_or_the_flag_and_says_when_it_has_neith
     state_file.unlink()
     code, out, err = run(capsys, ["cancel", str(jid2)])
     assert code == 2, err
-    assert STATE_FILE in err and "--cancel-token" in err and NEEDS_TOKEN in err
+    assert "rcm state file" in err and "--cancel-token" in err and NEEDS_TOKEN in err
+    assert str(state_file.parent) not in err  # 경로는 안 찍는다(M5l S10)
     assert srv.store.get_job(jid2).state == "queued"
     with pytest.raises(SystemExit) as no_force:  # 비-admin `--force` 는 없다(G5.11)
         run(capsys, ["cancel", str(jid2), "--force"])
@@ -578,7 +586,12 @@ def test_a_waiting_run_never_prints_the_cancel_token(tmp_path, env, tree, state_
         live.close()
 
 
-def test_rcm_check_mentions_the_cancel_floor_only_when_the_key_is_on(srv, env, tmp_path, capsys):
+def test_rcm_check_mentions_the_cancel_floor_only_when_the_key_is_on(
+    srv, env, tmp_path, capsys, monkeypatch
+):
+    # 이 클라이언트는 비밀을 보내지만 버전 번호는 릴리스 전까지 0.2.6 이라 strict 서버의 바닥
+    # (0.2.7)에 걸린다 — 릴리스된 모양(0.2.7)으로 본다. 옛 클라이언트의 FAIL 은 M5l S10 테스트.
+    monkeypatch.setattr(cli_mod, "__version__", CANCEL_MIN_CLIENT_VERSION)
     env(srv)
     code, out, err = run(capsys, ["check"])
     assert code == 0, err
@@ -595,54 +608,34 @@ def test_rcm_check_mentions_the_cancel_floor_only_when_the_key_is_on(srv, env, t
     assert "cancel token" in rows[0]
 
 
-def test_the_state_file_is_written_atomically_and_keeps_the_newest_entries(tmp_path, monkeypatch):
+def test_the_state_file_is_written_atomically_and_prunes_only_finished_jobs(tmp_path, monkeypatch):
     from remote_ci_monitor import submissions
 
     path = tmp_path / "state" / "rcm" / STATE_FILE
-    A, B = submissions.fingerprint("alice-secret"), submissions.fingerprint("bob-secret")
-    assert len(A) == 16 and A != B and submissions.fingerprint(None) == ""
     for i in range(submissions.MAX_ENTRIES + 5):
         submissions.remember(
-            "http://h:1", i, f"s{i}", f"t{i}", role=ROLE_CANCEL_JOB, token_fingerprint=A, path=path
+            "http://h:1", i, f"s{i}", f"t{i}", role=ROLE_CANCEL_JOB, path=path, finished=_done
         )
     entries = json.loads(path.read_text())
     assert len(entries) == submissions.MAX_ENTRIES
     assert entries[-1]["job_id"] == submissions.MAX_ENTRIES + 4
-    assert submissions.lookup("http://h:1", 3, path=path) is None  # 잘려 나갔다
+    assert submissions.lookup("http://h:1", 3, path=path) is None  # 끝난 잡이라 잘려 나갔다
     assert submissions.lookup("http://h:1", submissions.MAX_ENTRIES + 4, path=path) == (
         f"t{submissions.MAX_ENTRIES + 4}"
     )
-    # 같은 세션이 같은 잡에 두 번 냈으면 최근 것 · 다른 서버의 같은 번호는 남이다
-    submissions.remember(
-        "http://h:1", 7, "again", "newer", role=ROLE_CANCEL_JOB, token_fingerprint=A, path=path
-    )
+    # 같은 제출을 다시 기억하면 최근 것 · 다른 서버의 같은 번호는 남이다
+    submissions.remember("http://h:1", 7, "s7", "newer", role=ROLE_CANCEL_JOB, path=path)
     assert submissions.lookup("http://h:1", 7, path=path) == "newer"
     assert submissions.lookup("http://other:1", 7, path=path) is None
-    # 한 머신의 두 세션이 한 잡에 얽히면: 내 토큰의 항목이 먼저, 그중 cancel_job 이 먼저.
-    # 합류자(bob)의 나가기 비밀이 요청자(alice)의 취소를 「나가기」로 바꾸지 않고, 그 반대도 없다
+    # 한 머신의 두 세션이 한 잡에 얽히면(M5l S5): 그 잡의 가장 최근 제출이 간다 — 합류한
+    # 세션의 `rcm cancel` 이 요청자의 비밀로 잡을 죽이지 않는다. 특정 제출은 `submission_id` 로.
     submissions.remember(
-        "http://h:1",
-        7,
-        "bobs",
-        "bob-leave",
-        role=ROLE_LEAVE_SUBMISSION,
-        token_fingerprint=B,
-        path=path,
+        "http://h:1", 7, "a2", "alice-leave", role=ROLE_LEAVE_SUBMISSION, path=path
     )
-    assert submissions.lookup("http://h:1", 7, token_fingerprint=A, path=path) == "newer"
-    assert submissions.lookup("http://h:1", 7, token_fingerprint=B, path=path) == "bob-leave"
-    submissions.remember(  # 같은 토큰의 두 번째 세션이 합류했다 — 요청자 비밀이 여전히 이긴다
-        "http://h:1",
-        7,
-        "a2",
-        "alice-leave",
-        role=ROLE_LEAVE_SUBMISSION,
-        token_fingerprint=A,
-        path=path,
-    )
-    assert submissions.lookup("http://h:1", 7, token_fingerprint=A, path=path) == "newer"
-    assert submissions.lookup("http://h:1", 7, token_fingerprint="", path=path) == "newer"
-    assert not [p for p in path.parent.iterdir() if p.name != STATE_FILE]  # 임시 파일 없음
+    assert submissions.lookup("http://h:1", 7, path=path) == "alice-leave"
+    assert submissions.lookup("http://h:1", 7, submission_id="s7", path=path) == "newer"
+    names = sorted(p.name for p in path.parent.iterdir())
+    assert names == [STATE_FILE, STATE_FILE + ".lock"]  # 임시 파일은 안 남는다
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     # 깨진 파일은 「없음」이지 예외가 아니다 — 취소는 서버가 최종 판정한다
     path.write_text("{not json")
@@ -654,3 +647,7 @@ def test_the_state_file_is_written_atomically_and_keeps_the_newest_entries(tmp_p
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert submissions.state_path() == tmp_path / "home" / ".local" / "state" / "rcm" / STATE_FILE
     assert os.environ.get("XDG_STATE_HOME") is None
+
+
+def _done(server: str, job_id: int) -> bool:
+    return True

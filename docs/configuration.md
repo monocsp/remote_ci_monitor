@@ -451,13 +451,20 @@ Every `POST /jobs` — a fresh submission and a join alike — answers with a `s
 `{"id": "…", "cancel_token": "…"}`. The token is a secret that carries exactly one right: the
 requester's token cancels the job (`cancel_job`), a joiner's token only removes that joiner from
 the join list (`leave_submission`). The server keeps a SHA-256 of it (database v17, table
-`submissions`, deleted together with the job's metadata), and two sessions that share one client
-token still receive two different secrets — a session cannot cancel a job that another session
-submitted with the same token. `rcm run` saves the token in `$XDG_STATE_HOME/rcm/submissions.json`
-(or `~/.local/state/rcm/submissions.json`, mode 0600) and `rcm cancel N` sends it;
-`rcm cancel N --cancel-token …` takes it from a wrapper that kept the `--no-wait` JSON, which
-carries the same `submission` object. Ctrl-C keeps its meaning: the requester detaches and the job
-keeps running; a joiner leaves the join list with its own token.
+`submissions`, written in the same transaction as the job or the join and deleted together with
+the job's metadata), and two sessions that share one client token still receive two different
+secrets — a session cannot cancel a job that another session submitted with the same token unless
+it also shares that session's state file. A `leave_submission` token is bound to the token name it
+was issued to: sent with another bearer token it answers 403, and it works once — two requests
+with the same token at the same time get one 200 and one 403. `rcm run` saves the token in
+`$XDG_STATE_HOME/rcm/submissions.json` (or `~/.local/state/rcm/submissions.json`, mode 0600,
+one entry per submission, locked while written) and `rcm cancel N` sends the newest one that
+this client token saved for that job, never an entry another token saved (`--submission-id`
+picks another); `rcm cancel N --cancel-token …` takes it from a wrapper
+that kept the `--no-wait` JSON, which carries the same `submission` object. Ctrl-C keeps its
+meaning: the requester detaches and the job keeps running; a joiner leaves the join list with its
+own token. A token whose role the server does not know (`cancel_job` and `leave_submission` are
+the only two) is refused with 403 and a server log line.
 
 One server key, `cancel_requires_submission_token`, decides whether the token is optional or
 required:

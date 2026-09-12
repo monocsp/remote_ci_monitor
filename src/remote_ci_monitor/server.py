@@ -1315,8 +1315,9 @@ class App(RemoteWorkersMixin):
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         if want_join:
-            existing = self.store.join_or_bump(jk, token.name, label, priority, now)
-            if existing is not None:
+            joined = self.store.join_or_bump_with_submission(jk, token.name, label, priority, now)
+            if joined is not None:
+                existing, sid, cancel_token = joined
                 self._publish_job(None, existing.id)
                 return 200, {
                     "job_id": existing.id,
@@ -1324,9 +1325,10 @@ class App(RemoteWorkersMixin):
                     "state": existing.state,
                     "priority": existing.priority,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
-                    "submission": self._issue_submission(existing.id, joined=True, now=now),
+                    "submission": {"id": sid, "cancel_token": cancel_token},
                 }
-        job = self.store.create_job(
+        job, sid, cancel_token = self.store.create_job_with_submission(
+            participant=token.name,
             preset=preset.name,
             inputs=inputs,
             key=key,
@@ -1350,16 +1352,10 @@ class App(RemoteWorkersMixin):
             "cache": bool(self.config.server.snapshot_cache),
             "upload": f"/jobs/{job.id}/tree",
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
-            "submission": self._issue_submission(job.id, joined=False, now=now),
+            # `POST /jobs` 시도마다 capability 하나(M5j G5 · 결정 87) — 잡 행과 같은 트랜잭션
+            # 에서 났다(M5l S8). 비밀은 여기서 한 번 나가고 서버에는 해시만 남는다.
+            "submission": {"id": sid, "cancel_token": cancel_token},
         }
-
-    def _issue_submission(self, job_id: int, *, joined: bool, now: datetime) -> dict[str, str]:
-        """`POST /jobs` 시도마다 capability 하나(M5j G5 · 결정 87). 응답의 `submission` 키 —
-        비밀은 여기서 한 번 나가고 서버에는 해시만 남는다. 합류는 `leave_submission`(자기 참여만
-        뺀다), 새 잡은 `cancel_job`. 같은 토큰 이름의 두 세션도 서로 다른 참여자다."""
-        role = ROLE_LEAVE_SUBMISSION if joined else ROLE_CANCEL_JOB
-        submission_id, cancel_token = self.store.add_submission(job_id, role, now)
-        return {"id": submission_id, "cancel_token": cancel_token}
 
     def _parse_priority(self, raw: Any, default: int) -> int:
         """`priority` 값(이름 또는 -1·0·1). 없으면 default(프리셋 기본)."""
@@ -1666,8 +1662,9 @@ class App(RemoteWorkersMixin):
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         if want_join:
-            existing = self.store.join_or_bump(jk, token.name, label, priority, now)
-            if existing is not None:
+            joined = self.store.join_or_bump_with_submission(jk, token.name, label, priority, now)
+            if joined is not None:
+                existing, sid, cancel_token = joined
                 self._publish_job(None, existing.id)
                 return 200, {
                     "job_id": existing.id,
@@ -1676,9 +1673,10 @@ class App(RemoteWorkersMixin):
                     "priority": existing.priority,
                     "sha": existing.source.sha,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
-                    "submission": self._issue_submission(existing.id, joined=True, now=now),
+                    "submission": {"id": sid, "cancel_token": cancel_token},
                 }
-        job = self.store.create_job(
+        job, sid, cancel_token = self.store.create_job_with_submission(
+            participant=token.name,
             preset=preset.name,
             inputs=inputs,
             key=key,
@@ -1702,7 +1700,7 @@ class App(RemoteWorkersMixin):
             "pool": job.pool,
             "sha": sha,
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
-            "submission": self._issue_submission(job.id, joined=False, now=now),
+            "submission": {"id": sid, "cancel_token": cancel_token},  # 잡 행과 같은 트랜잭션
         }
 
     # ── 업로드 ──────────────────────────────────────────────────────────────
@@ -1804,16 +1802,41 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, "cancel_token must be a string")
         capability = self.store.submission_role(job_id, cancel_token) if cancel_token else None
         if capability is not None:
-            submission_id, role = capability
+            submission_id, role, participant = capability
             if role == ROLE_LEAVE_SUBMISSION:
-                # 그 참여자만 나간다 — 비밀은 한 번만 통한다. 이름 행(joiners)은 요청자가
-                # 아닐 때만 같이 뺀다(요청자 본인의 두 번째 세션은 이름 행이 없다).
-                self.store.remove_submission(submission_id)
-                if job.requester.name != token.name:
-                    self.store.remove_joiner(job_id, token.name)
+                # 그 참여자만 나간다 — 비밀은 그것을 받은 토큰 이름만 쓸 수 있고(M5l S6) 한 번만
+                # 통한다: 행 확인·삭제·joiner 삭제가 `consume_leave` 의 한 트랜잭션이라 같은
+                # 비밀의 동시 요청은 하나만 200 이다. 이름 행(joiners)은 요청자가 아닐 때만
+                # 같이 뺀다(요청자 본인의 두 번째 세션은 이름 행이 없다).
+                if participant != token.name:
+                    raise ApiError(
+                        403,
+                        "not your submission — that cancel token belongs to another participant",
+                        error_code="cancel_token_mismatch",
+                    )
+                consumed = self.store.consume_leave(
+                    job_id,
+                    submission_id,
+                    participant,
+                    drop_joiner=job.requester.name != participant,
+                )
+                if not consumed:
+                    raise ApiError(
+                        403,
+                        "not your submission — that cancel token was already used",
+                        error_code="cancel_token_used",
+                    )
                 self._publish_job(None, job_id)
                 return {"left": True, "job_id": job_id, "job_state": job.state}
-            return self._cancel_job(job, token)
+            if role == ROLE_CANCEL_JOB:
+                return self._cancel_job(job, token)
+            # 화이트리스트 밖의 role(M5l S10) — DB 손상·수동 복구·미래 값이 취소 권한이 되면
+            # 안 된다. 비밀은 로그에도 안 쓴다; 행 번호와 role 만.
+            self.log(
+                f"cancel job #{job_id}: submission {submission_id} has unknown role "
+                f"{role!r} — refused"
+            )
+            raise ApiError(403, "not your submission", error_code="cancel_token_role")
         if self.config.server.cancel_requires_submission_token and not token.admin:
             raise ApiError(
                 403,
