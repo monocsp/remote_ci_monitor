@@ -213,21 +213,38 @@ goes on — the refusal itself, when it comes, is the server's 400. `rcm version
 server-free.
 
 There is no `rcm self-update`: swapping the package under a running process is different for
-every install (venv, pipx, uv, editable). The wrapper below is what the tests run instead
-(`examples/session/update-client.sh`): read health, download to a temporary file, verify the
-sha256, `pip install --upgrade` the file, then check `rcm version`. Any failing step stops it with
-a non-zero exit and nothing installed; a hash mismatch installs nothing.
+every install (venv, pipx, uv, editable). `examples/session/update-client.sh` is the wrapper the
+tests run — copy it as it is. What it does, and what the inline sketch below keeps:
+
+- **One private directory.** Everything — the health document, the wheel, the curl config — lives
+  in its own `mktemp -d` (mode 0700) and is deleted on exit, success or failure. There is no shared
+  `$TMPDIR/remote_ci_monitor-<version>….whl`: two wrappers running at once against two servers of
+  the same version each install exactly the bytes they verified, and a file of yours at that name
+  is never touched.
+- **The token is never an argument.** `RCM_TOKEN` is written to a 0600 curl config file inside
+  that directory and passed with `-K`; `ps` on a shared machine shows no `Authorization: Bearer`.
+- **The status code is read, not trusted.** `curl -f` would stop on a 503 — but `janitor stale`
+  or a worker down is a 503 whose body still carries `version` and `client_wheel`. The wrapper
+  judges by the body, says `server health is 503 (…) but its client wheel is fine` on stderr and
+  installs. A response with no `version` (a 500, a proxy page) is exit 3 with the status and the
+  body's `error`; a wheel URL that is not 200 is exit 3 too; a sha256 mismatch is exit 4; a
+  version that does not match after the install is exit 5. `pip` itself failing half-way is the
+  one step the wrapper cannot undo — its exit code is pip's, and the environment is what pip left.
 
 ```sh
 server=http://macmini.local:8787
-health=$(curl -fsS "$server/api/health")
-path=$(jq -r .client_wheel.path <<<"$health")
-expected=$(jq -r .client_wheel.sha256 <<<"$health")
+umask 077
 tmp=$(mktemp -d)
-curl -fsS -o "$tmp/$(basename "$path")" "$server$path"
+trap 'rm -rf "$tmp"' EXIT
+printf 'header = "Authorization: Bearer %s"\n' "$RCM_TOKEN" >"$tmp/curlrc"   # or leave it empty
+status=$(curl -sS -K "$tmp/curlrc" -o "$tmp/health.json" -w '%{http_code}' "$server/api/health")
+path=$(jq -r '.client_wheel.path // empty' "$tmp/health.json")
+expected=$(jq -r '.client_wheel.sha256 // empty' "$tmp/health.json")
+[ -n "$path" ] || { echo "no client wheel ($status)" >&2; exit 3; }
+curl -sS -K "$tmp/curlrc" -o "$tmp/$(basename "$path")" "$server$path"
 actual=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$tmp"/*.whl)
 [ "$actual" = "$expected" ] || { echo "sha256 mismatch" >&2; exit 4; }
-python3 -m pip install --upgrade "$tmp"/*.whl && rm -rf "$tmp"
+python3 -m pip install --upgrade "$tmp"/*.whl
 rcm version
 ```
 

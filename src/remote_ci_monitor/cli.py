@@ -1354,9 +1354,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     if client is not None and cfg is not None:
         found_tag = " (found on this network)" if getattr(cfg, "discovered", None) else ""
         try:
-            h = client.health()
+            h = client.health()  # 503 이어도 본문이 온다 — server 행은 FAIL, client 행은 그대로
+            unwell = "" if h.get("ok") else f" · {h.get('error') or 'not ok'}"
             rows.append(
-                ("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}{found_tag}")
+                (
+                    "server",
+                    bool(h.get("ok")),
+                    f"{client.server} · v{h.get('version')}{found_tag}{unwell}",
+                )
             )
             client_row = _client_row(client, h)
             if client_row is not None:

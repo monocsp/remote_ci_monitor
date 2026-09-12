@@ -585,7 +585,15 @@ class Client:
     # ── API ──
 
     def health(self) -> dict[str, Any]:
-        return self.get_json("/api/health")
+        """`GET /api/health`. 503 은 「서버가 아프다」이지 문서가 없다는 뜻이 아니다 — janitor
+        stale · worker down 에도 본문(`ok: false` · `error` · `version` · `client_wheel`)은
+        그대로 오므로, 그 본문을 돌려준다(M5l L3). 다른 오류는 그대로 `ClientError`."""
+        try:
+            return self.get_json("/api/health")
+        except ClientError as e:
+            if e.status == 503 and "version" in e.body:
+                return e.body
+            raise
 
     def whoami(self) -> dict[str, Any]:
         return self.get_json("/api/whoami")
