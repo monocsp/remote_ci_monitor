@@ -192,6 +192,17 @@ def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | No
     limit, floor = doc.get("limit_bytes"), doc.get("min_free_bytes")
     under_floor = floor is not None and free is not None and free < floor
 
+    # 측정 실패는 숫자로 내리는 판정보다 **먼저** 읽힌다 — 못 잰 것을 바닥 아래의 「지울 것이
+    # 없다」(FAIL) 로 말하면 권한 장애와 진짜 빈 상태를 가를 수 없다(리뷰 #88 B3). 무진전 latch
+    # (`no_progress`) 도 잰 숫자로 내린 판정이라 그 뒤에 온다 — 못 잰 회차에는 「삭제가 효과
+    # 없다」의 근거가 없다(검증 L2.5).
+    if doc.get("error_code") or volume is None:
+        return (
+            "storage",
+            None,
+            "a size could not be measured — the byte rules are not enforced this sweep "
+            f"({doc.get('error_code') or 'unknown'})",
+        )
     if doc.get("no_progress"):
         return (
             "storage",
@@ -205,20 +216,14 @@ def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | No
             "storage",
             False,
             f"{_bytes(volume)} over the {_bytes(limit)} budget, and {_bytes(held)} of it is held "
-            "by running jobs and orphan directories — nothing the sweep may delete brings it under",
+            "by running jobs and orphan directories — nothing the sweep may delete brings it under"
+            f"{_measured_ago(doc, now)}",
         )
     if under_floor and not doc.get("evictable_bytes"):
         return (
             "storage",
             False,
             f"{_bytes(free)} free, under the {_bytes(floor)} floor, and nothing left to delete",
-        )
-    if doc.get("error_code") or volume is None:
-        return (
-            "storage",
-            None,
-            "a size could not be measured — the byte rules are not enforced this sweep "
-            f"({doc.get('error_code') or 'unknown'})",
         )
     if limit is not None and volume > limit:
         return (
@@ -295,18 +300,29 @@ def render_gc(body: dict[str, Any]) -> str:
         lines.append(f"{line} · {rest} would remain")
         return "\n".join(lines)
     failed = body.get("failed") or []
-    gone = len(body.get("deleted") or [])
+    deleted = body.get("deleted") or []
     freed = body.get("freed_bytes")
-    line = f"freed {_bytes(freed)} from {gone} jobs"
+    # 크기를 모르는 채 지운 항목이 있으면 아는 합은 **하한**이다 — 「freed 0 B」로 확정하면
+    # 거짓이다(리뷰 #88 B1). 옛 서버는 `unknown_count` 가 없으니 지운 항목에서 센다.
+    unknown_gone = body.get("unknown_count")
+    if unknown_gone is None:
+        unknown_gone = _planned_totals(deleted)[3]
+    bound = "≥ " if unknown_gone else ""
+    line = f"freed {bound}{_bytes(freed)} from {len(deleted)} jobs"
+    if unknown_gone:
+        line += f" ({unknown_gone} of unknown size)"
     est = body.get("estimated_reclaimable_bytes")
     if est is not None and est != freed:
-        line += f" · est. {_bytes(est)} reclaimable"
+        line += f" · est. {bound}{_bytes(est)} reclaimable"
     fb, fa = body.get("free_bytes_before"), body.get("free_bytes_after")
     if fb is not None and fa is not None:
         line += f" · free {_bytes(fb)} → {_bytes(fa)}"
     line += f" · {_bytes(after.get('volume_bytes'))} left"  # 지운 뒤 다시 잰 값
     if failed:
         codes = ", ".join(sorted({f.get("error_code", "?") for f in failed}))
+        partly = sum(1 for f in failed if f.get("removed"))
+        if partly:  # 반쯤 지워진 것 — 다음 회차가 나머지를 다시 시도한다
+            codes += f" · {partly} partly deleted"
         line += f" · {len(failed)} failed ({codes})"
     lines.append(line)
     return "\n".join(lines)

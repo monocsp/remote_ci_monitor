@@ -39,6 +39,23 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ retention-unknown-deleted-as-zero — 크기를 못 잰 항목을 지웠을 때 `unknown_count` 로 세지
+     않고 0 B 로 더함 — 영수증이 「freed 0 B」를 확정 표시 (`janitor.py`, M5l L2 · 리뷰 #88 B1)
+  ㉗ web-page-error-collector-removed — Chrome 테스트 하네스가 페이지 예외 수집기를 설치하지
+     않음 (`tests/test_web_browser.py`, M5l L7 · pr-82 리뷰 P2). **Chrome 이 있어야 돈다** —
+     없으면 그 테스트가 skip(exit 0)이라 「못 잡음」과 구별이 안 되므로 SKIP 으로 보고하고
+     실패로 세지 않는다. `RCM_CHROME` 이 설정돼 있으면 무조건 돈다(못 찾으면 대조군이 빨강).
+  ㉗ cancel-capability-skipped — 강제 모드(`cancel_requires_submission_token`)에서 capability
+     검사를 건너뛰어 옛 공유 토큰 규칙으로 물러남 (`server.py`, M5j G5 결정 87 — 같은 토큰의
+     다른 세션이 남의 잡을 지운다)
+  ㉘ leave-binding-removed — `leave_submission` 비밀을 받은 참여자 확인을 뺌: 남의 leave 비밀로
+     자기 joiner 행을 지운다 (`server.py`, M5l S6 — Bob 비밀 + Charlie bearer 가 Charlie 를 뺐다)
+  ㉗ requires-check-skipped — 프리셋 `requires` 검사를 건너뜀: 없는 도구로도 프로세스가 뜬다
+     (`runner.py`, M5j G4 결정 85 — 그게 「옛 SDK 로 초록」이었다)
+  ㉘ requires-path-server-cwd — PATH 의 상대 항목을 워크스페이스가 아니라 검사 프로세스의 cwd
+     기준으로 푼다: 서버 폴더에만 있는 도구로 통과한다(`runner.py`, M5l S1 — PR #109 리뷰 B)
+  ㉙ requires-cancel-ignored — preflight 직전의 취소 확인 제거: 취소한 잡이 `tool_missing` 으로
+     끝난다(`runner.py`, M5l S4)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -46,6 +63,7 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -56,6 +74,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PYTEST_TIMEOUT_SECONDS = 300
+# tests/test_web_browser.py 의 `find_chrome()` 과 같은 후보(그 모듈을 import 하면 서버 픽스처까지
+# 끌려오므로 여기서 다시 적는다).
+CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
+CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+
+
+def chrome_available() -> bool:
+    """Chrome 을 찾을 수 있으면 True. `RCM_CHROME` 이 설정돼 있으면 「있어야 한다」는 약속이므로
+    찾든 못 찾든 True — 못 찾으면 대조군이 빨개져 실패로 드러난다."""
+    if os.environ.get("RCM_CHROME"):
+        return True
+    return any(Path(p).is_file() for p in CHROME_PATHS) or any(
+        shutil.which(n) for n in CHROME_NAMES
+    )
 
 
 @dataclass(frozen=True)
@@ -66,6 +98,7 @@ class Mutant:
     new: str
     tests: tuple[str, ...]
     runner: str = "pytest"  # "pytest" | "node" (tests 는 node --test 에 넘길 경로)
+    needs_chrome: bool = False  # True 면 Chrome 이 없을 때 실패가 아니라 SKIP
 
 
 MUTANTS = (
@@ -278,6 +311,22 @@ MUTANTS = (
         tests=("tests/test_client_wheel.py",),
     ),
     Mutant(
+        name="cancel-capability-skipped",
+        path="src/remote_ci_monitor/server.py",
+        old="if self.config.server.cancel_requires_submission_token and not token.admin:",
+        new="if False and not token.admin:",
+        tests=("tests/test_cancel_capability.py",),
+    ),
+    # ㉘ M5l S6 — leave 비밀은 그것을 받은 토큰 이름만 쓸 수 있다. 확인을 빼면 남의 비밀로 남을
+    # 뺀다(리뷰 pr-110 B P1).
+    Mutant(
+        name="leave-binding-removed",
+        path="src/remote_ci_monitor/server.py",
+        old="                if participant != token.name:",
+        new="                if False:",
+        tests=("tests/test_cancel_capability_m5l.py",),
+    ),
+    Mutant(
         name="ledger-outside-tx",
         path="src/remote_ci_monitor/store.py",
         old="""            for seq, name in enumerate(fail_names, start=1):
@@ -309,6 +358,81 @@ MUTANTS = (
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
     ),
+    # ㉗ M5l L2 — 크기를 모르는 채 지운 항목은 **개수로** 따로 센다. 0 으로 섞으면 영수증이
+    # 「freed 0 B from 1 jobs」라고 확정한다(리뷰 #88 B1 — 실제 호출에서 그렇게 찍혔다).
+    Mutant(
+        name="retention-unknown-deleted-as-zero",
+        path="src/remote_ci_monitor/janitor.py",
+        old=(
+            "            if item.bytes is None:\n"
+            "                unknown += 1\n"
+            "            else:\n"
+            "                charged += item.bytes\n"
+        ),
+        new="            charged += item.bytes or 0\n",
+        tests=("tests/test_janitor_m5l.py",),
+        # ㉗ M5l L7 · pr-82 리뷰 P2 — 수집기 설치를 지우면 `page_errors()` 가 「page error collector
+        # missing」으로 빨개져야 한다. 예전에는 `[]` 를 돌려줘 I5 의 0건 단언이 그대로 초록이었다.
+    ),
+    Mutant(
+        name="web-page-error-collector-removed",
+        path="tests/test_web_browser.py",
+        old="""        self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": PAGE_ERROR_COLLECTOR_JS},
+            timeout=COLD_START_SECONDS,
+        )
+""",
+        new="",
+        tests=(
+            "tests/test_web_browser.py::"
+            "test_local_host_card_draws_the_disk_and_the_rcm_data_line_without_page_errors",
+            "tests/test_web_browser.py::"
+            "test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header",
+        ),
+        needs_chrome=True,
+        # ㉔ M5j G1 결정 84 — 마커 조회가 깨지면 `step_timeline` 은 `null` + 코드다. 빈 타임라인으로
+        # 뭉개면 「스텝을 안 찍은 잡」과 「못 읽은 잡」이 같은 모양이 된다(fail-open 금지).
+    ),
+    Mutant(
+        name="step-timeline-db-error-empty",
+        path="src/remote_ci_monitor/server.py",
+        old="""        except Exception as e:  # noqa: BLE001 — 깨진 payload 행도 DB 오류다
+            doc["step_timeline"] = None
+            doc["step_timeline_error_code"] = _error_code(e)
+            return set()
+""",
+        new="""        except Exception:  # noqa: BLE001
+            doc["step_timeline"] = step_timeline_json(None)
+            return set()
+""",
+        tests=("tests/test_step_timeline.py",),
+    ),
+    # ㉗ M5j G4 결정 85 — 검사가 아무것도 「없다」고 하지 않으면 없는 도구로도 프로세스가 뜬다.
+    Mutant(
+        name="requires-check-skipped",
+        path="src/remote_ci_monitor/runner.py",
+        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        new="    return []  # noqa: mutant\n",
+        tests=("tests/test_requires.py",),
+    ),
+    # ㉘ M5l S1 — 상대 PATH 항목은 프로세스가 뜨는 워크스페이스 기준이다. 검사 프로세스의 cwd 로
+    # 풀면 서버 폴더의 `tools/fvm` 으로 통과하고 워크스페이스의 것은 못 찾는다(fail-open).
+    Mutant(
+        name="requires-path-server-cwd",
+        path="src/remote_ci_monitor/runner.py",
+        old="    base = os.fspath(cwd) if cwd is not None else os.getcwd()\n",
+        new="    base = os.getcwd()  # noqa: mutant\n",
+        tests=("tests/test_requires_m5l.py",),
+    ),
+    # ㉙ M5l S4 — preflight 직전의 취소 확인이 없으면 자재화 중 취소한 잡이 `tool_missing` 이 된다.
+    Mutant(
+        name="requires-cancel-ignored",
+        path="src/remote_ci_monitor/runner.py",
+        old="            if observer.should_cancel():\n                at = now_fn()\n",
+        new="            if False:  # noqa: mutant\n                at = now_fn()\n",
+        tests=("tests/test_requires_m5l.py",),
+    ),
 )
 
 
@@ -326,8 +450,10 @@ def _pytest(cmd: list[str], cwd: Path) -> tuple[int, float, str] | None:
     return proc.returncode, took, "\n".join(lines[-6:])
 
 
-def run_mutant(m: Mutant, keep: bool) -> tuple[bool, str]:
-    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨?, 설명)."""
+def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
+    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명)."""
+    if m.needs_chrome and not chrome_available():
+        return None, "skipped: no Chrome binary found (set RCM_CHROME) — its tests would skip"
     tmp = Path(tempfile.mkdtemp(prefix=f"mutcheck-{m.name}-"))
     try:
         for name in ("src", "tests", "pyproject.toml"):
@@ -378,16 +504,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no mutant named {args.only!r}", file=sys.stderr)
         return 2
     failures = 0
+    skipped = 0
     for m in mutants:
         ok, info = run_mutant(m, args.keep)
-        mark = "OK " if ok else "FAIL"
+        mark = "SKIP" if ok is None else "OK " if ok else "FAIL"
         print(f"[{mark}] {m.name}: {info}")
-        if not ok:
+        if ok is None:
+            skipped += 1
+        elif not ok:
             failures += 1
     if failures:
         print(f"mutcheck: {failures} of {len(mutants)} mutants NOT caught", file=sys.stderr)
         return 1
-    print(f"mutcheck: all {len(mutants)} mutants caught")
+    note = f" ({skipped} skipped: no Chrome)" if skipped else ""
+    print(f"mutcheck: all {len(mutants) - skipped} mutants caught{note}")
     return 0
 
 

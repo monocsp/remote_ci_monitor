@@ -409,7 +409,7 @@ def test_a_failed_delete_is_not_in_the_deleted_bytes(env, monkeypatch):
     monkeypatch.setattr(jan, "_purge_volume", lambda job_id: _raise())
     body = jan.gc_report(NOW, dry_run=False)
     assert body["deleted_charged_bytes"] == 0 and body["estimated_reclaimable_bytes"] == 0
-    assert body["failed"] == [{"job_id": job, "error_code": "EACCES"}]
+    assert body["failed"] == [{"job_id": job, "error_code": "EACCES", "removed": []}]
     assert body["storage_after"]["volume_bytes"] == body["storage_before"]["volume_bytes"]
 
 

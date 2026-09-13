@@ -136,6 +136,9 @@ class Preset:
     duration_key_inputs: tuple[str, ...] = ()
     env_passthrough: tuple[str, ...] = ("PATH", "HOME", "LANG")
     env: dict[str, str] = field(default_factory=dict)
+    #: 잡 시작 전에 최종 환경에서 찾아야 하는 도구 — 이름 또는 절대경로. 없으면 프로세스를
+    #: 띄우지 않고 `tool_missing` 으로 실패한다 (M5j G4 · 결정 85)
+    requires: tuple[str, ...] = ()
     inputs: tuple[InputSpec, ...] = ()
     artifacts: tuple[str, ...] = ()  # 잡이 만든 파일 중 돌려줄 것의 글롭 (M5e)
     artifacts_on: str = "always"  # "always"(오늘의 동작) | "failure" — 언제 모으나 (M5g)
