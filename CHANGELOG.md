@@ -19,6 +19,22 @@ of a key bumps that number and is listed here.
   a newer schema were one line and the rest was a traceback. (`rcm gc --dry-run` keeps its exit
   3 for the newer-schema case: it answers "unknown", the other two answer "fix the setup".)
   ([#118](https://github.com/monocsp/remote_ci_monitor/pull/118))
+- **The client-update wrapper keeps to its own directory, keeps the token out of `ps`, and reads
+  the status code instead of trusting it.** `examples/session/update-client.sh` verified the wheel
+  in a private file but then moved it to a shared `$TMPDIR/remote_ci_monitor-<version>….whl` to
+  install — two wrappers against two `dev` servers of the same version could install each other's
+  bytes, and a file of yours at that name was overwritten. It also put `RCM_TOKEN` on curl's
+  command line, where any user of the machine could read it with `ps`, and used `curl -f`, which
+  died on a 503 that still carried a perfectly good wheel. Now everything lives in one
+  `mktemp -d` (0700) deleted on exit, the token travels in a 0600 curl config file (`-K`), and a
+  503 from `janitor stale` or a worker down is judged by its body. The same 503 no longer hides the
+  compatibility verdict on the client side either: `rcm check` keeps its `client` row (the
+  `server` row is `FAIL` with the reason) and `rcm run` still prints its warning, because
+  `Client.health()` returns the 503 body rather than raising. And `/client/<name>.whl/` — the
+  exact name plus a trailing slash — is a 404 like every other name, not an alias. The `rcm check`
+  screenshot in both usage guides now shows the `client` row the text describes.
+  ([#119](https://github.com/monocsp/remote_ci_monitor/pull/119) ·
+  [Keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version))
 - **`rcm gc --dry-run --config` now exits 3 on every incomplete path, and the old-build refusal
   names a backup that exists.** A migration statement that failed on the temporary copy raised a
   raw `sqlite3.Error` past the command and `main()` — a traceback and exit 1, for exactly the
