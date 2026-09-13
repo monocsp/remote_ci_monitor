@@ -179,7 +179,14 @@ def last_json(out: str) -> dict[str, Any]:
 
 def clean_env(home: Path) -> dict[str, str]:
     """개발자의 rcm 설정·HOME(git 설정 포함)이 끼어들지 않는 프로세스 환경."""
-    drop = ("RCM_SERVER", "RCM_TOKEN", "RCM_CONFIG", "RCM_WORKER_TOKEN", "XDG_CONFIG_HOME")
+    drop = (
+        "RCM_SERVER",
+        "RCM_TOKEN",
+        "RCM_CONFIG",
+        "RCM_WORKER_TOKEN",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",  # cancel token 상태 파일(M5j G5)도 이 HOME 아래로
+    )
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env.update(
         PYTHONPATH=str(ROOT / "src"),

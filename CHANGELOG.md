@@ -25,6 +25,77 @@ of a key bumps that number and is listed here.
   `scan_EACCES` — no age rule ran for anyone and every figure read `—`; now only that job's
   snapshot is unknown (`measure_EACCES`, `1 of unknown size`) and the rest is measured and
   purged as usual. `schema_version` unchanged — keys were only added. (M5l L2, review of #88)
+- **A `main` merge that does not bump `__version__` no longer fails the `Tag release` run.** The
+  existing `v<X>` tag is a no-op when it points at an ancestor of the merge commit (a docs-only
+  merge, a follow-up after a release); only a tag on a commit that is *not* an ancestor — a reused
+  version number — still fails. Re-running a release whose tag already exists is documented
+  ([Releasing](CONTRIBUTING.md#releasing)): Actions **Re-run**, or delete the tag and push it again.
+### Added
+- **A cancel token per submission, so a shared client token cannot cancel another session's job.**
+  Every `POST /jobs` — a join too — now answers with `submission: {id, cancel_token}`; the
+  requester's token cancels the job, a joiner's only leaves the join list, and the server keeps a
+  SHA-256 of it (database **v17**, table `submissions`, backed up as `rcm.sqlite3.v16.bak` before
+  the upgrade and deleted with the job's metadata). `rcm run` saves the token in
+  `~/.local/state/rcm/submissions.json` (mode 0600) and `rcm cancel N` sends it — or takes
+  `--cancel-token` from a wrapper that kept the `--no-wait` JSON, which now carries `submission`
+  before `url`. Nothing changes by default: `[server] cancel_requires_submission_token = false`
+  keeps today's rules, so 0.2.x clients keep cancelling. With the key on, only a cancel token or an
+  admin token cancels — there is no non-admin `--force` — and clients before 0.2.7 get 403;
+  `/api/health` then raises `min_client_version` to 0.2.7 (with `cancel_min_client_version` saying
+  why, so an old client's `rcm check` fails its `client` row), `rcm check` prints a `cancel` row, and
+  the web **Cancel** button is disabled for non-admin tokens with the reason in the row. Ctrl-C
+  still detaches the requester and only removes a joiner. Two sessions of the same user share the
+  state file: `rcm cancel N` sends the newest token that this client token saved for that job —
+  never one another token saved — so a session that joined only leaves (`--submission-id` picks
+  another); a joiner's token is bound to the token
+  name it was issued to and works once; a token that worked is removed from the file, which keeps
+  200 entries and above that drops only finished jobs; the file is locked while written, and a
+  save that fails is said in one line without a path. `rcm check` fails its `client` row whenever
+  the client is below the server's `min_client_version`, even at an equal version number.
+  ([Configuration](docs/configuration.md#who-may-cancel-a-job))
+  ([#110](https://github.com/monocsp/remote_ci_monitor/pull/110))
+- **Two lanes for a gate with a light phase and a heavy phase.** `docs/configuration.md` now has
+  a section on the two-lane experiment: `lanes = 2` with the gate preset's `concurrency_group`
+  removed is safe only when the script itself serialises its heavy section with a machine-wide
+  lock (the example uses Python's `fcntl.flock`, which works on macOS and Linux, and stops the
+  script when the lock cannot be taken). CPU admission is decided once, when a lane picks a job
+  up — it is not a section lock — and there is no memory-based admission (decision 42). No
+  configuration key changed. ([#106](https://github.com/monocsp/remote_ci_monitor/pull/106))
+- **A finished job keeps its step times.** While a job ran, the queue showed how long each
+  `::rcm::step::` took; once it finished those numbers were gone, and a team measuring its gate
+  had to read the log. `GET /jobs/<id>` for a finished job now carries `step_timeline` — one entry
+  per step with `started_at`, `ended_at`, `seconds` and `ok`, recomputed from the markers the
+  server already stored, with the same `timing: "as_received"` caveat as live progress. `rcm run`
+  and `rcm wait` print that document, so their JSON carries the key too — this is now part of the
+  contract. A job that printed no step markers has `steps: []`; when the markers could not be
+  read the key is `null` with `step_timeline_error_code`, never an empty list. The stored
+  `failed_step` and `last_step` are unchanged, and `failures[].step` now recognises every step of
+  the timeline, not only those two. The finished document also carries `concurrent_at_start`
+  (how many jobs were running when it started, itself included — a job that ran alone reads
+  `1`; `null` when unknown), the raw material for the two-lane experiment. `schema_version`
+  stays 1 — keys were added.
+  ([#108](https://github.com/monocsp/remote_ci_monitor/pull/108))
+- **Presets can require tools.** `requires = ["fvm", "gitleaks"]` on a preset names the tools
+  (or absolute paths) the job must find; right before the process starts, on the local lane or on
+  a remote worker, rcm looks them up in the environment the job actually gets — `env_passthrough`
+  then `[presets.env]`, an empty `PATH` if the job has none — and a job that would have silently
+  fallen through to the wrong SDK now does not run: it ends `failed` with
+  `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}`, the name only, no `PATH` and
+  no path anywhere — an entry declared as an absolute path is named by its basename in the job
+  log too, and an entry without one (`/opt/bin/`) is a config error. A relative `PATH` entry is
+  resolved against the job's workspace, where the process starts, not against the server's own
+  directory. The job log says `[rcm] required tools: fvm ok · gitleaks ok` or
+  `[rcm] required tool fvm: missing`. Such a failure carries no `failed_step`, no `last_step` and no
+  failure ledger line, and it is left out of the failure window like a cancelled job — three real
+  failures after one `tool_missing` read "every one of the last 3", not "3 of the last 4". A job
+  cancelled while its workspace was being prepared ends `cancelled`, never `tool_missing`. Remote
+  workers get `requires` in the claim and report the structured code on finish (a path in the
+  reported name is cut to the name); a worker build that does not know the keys ignores them.
+  `rcm check --config` gains a `local preset tools` row — a
+  check in your shell, explicitly not the service's, whose `launchd` `PATH` is the usual reason a
+  tool goes missing (`[presets.env] PATH = …` is the fix).
+  ([Configuration](docs/configuration.md#required-tools),
+  [#109](https://github.com/monocsp/remote_ci_monitor/pull/109))
 
 ## [0.2.6] - 2026-09-10
 
