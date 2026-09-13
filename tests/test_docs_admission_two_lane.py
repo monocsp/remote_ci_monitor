@@ -37,10 +37,12 @@ def test_the_experiment_needs_a_lock_in_the_script():
 
 
 def test_the_changelog_names_the_section():
-    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    m = re.search(r"^## \[Unreleased\]\n(.*?)^## \[0\.", text, re.M | re.S)
-    assert m, "no [Unreleased] section above the first release"
-    assert re.search(r"Two lanes for a gate.*?pull/106", m.group(1), re.S), m.group(1)
+    """릴리스 뒤에는 항목이 `[Unreleased]` 가 아니라 그 버전의 절(0.2.7)에 있다 — 다른 문서 잠금
+    (tests/test_docs_m5.py `unreleased()`)처럼 「0.1.0 이후 전부」를 본다."""
+    from test_docs_m5 import unreleased
+
+    text = unreleased((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+    assert re.search(r"Two lanes for a gate.*?pull/106", text, re.S), text[:400]
 
 
 def test_the_overlap_is_light_with_light():

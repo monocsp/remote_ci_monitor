@@ -32,10 +32,11 @@ def has(text: str, pattern: str) -> bool:
 
 
 def unreleased() -> str:
-    text = read(CHANGELOG)
-    m = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[)", text, re.S | re.M)
-    assert m, "CHANGELOG has no [Unreleased] section"
-    return m.group(1)
+    """릴리스 뒤에는 항목이 `[Unreleased]` 가 아니라 그 버전의 절(0.2.7)에 있다 — 다른 문서 잠금
+    (tests/test_docs_m5.py `unreleased()`)처럼 「0.1.0 이후 전부」를 본다."""
+    from test_docs_m5 import unreleased as since_first_release
+
+    return since_first_release(read(CHANGELOG))
 
 
 @pytest.mark.parametrize(
