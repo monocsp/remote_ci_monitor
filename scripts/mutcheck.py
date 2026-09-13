@@ -39,6 +39,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ serve-store-before-bind — `serve()` 가 포트를 잡기 **전에** DB 를 열어 마이그레이션함
+     (`server.py`, M5l L5 · 리뷰 pr-94 B-1 — 도는 서비스 곁에서 다른 빌드로 치면 DB 가 먼저 바뀐다)
   ㉗ offline-gc-ignores-sqlite-error — 오프라인 dry-run 이 사본 마이그레이션의 `sqlite3.Error`
      를 안 잡음: 트레이스백 + exit 1 (`cli.py`, M5l L1 — 리뷰 #87 B P1)
   ㉗ retention-unknown-deleted-as-zero — 크기를 못 잰 항목을 지웠을 때 `unknown_count` 로 세지
@@ -310,8 +312,12 @@ MUTANTS = (
     Mutant(
         name="offline-gc-ignores-sqlite-error",
         path="src/remote_ci_monitor/cli.py",
-        old="    except (StoreError, sqlite3.Error) as e:\n",
-        new="    except StoreError as e:\n",
+        old="""임시 디렉터리 안
+    except (StoreError, sqlite3.Error) as e:
+""",
+        new="""임시 디렉터리 안
+    except StoreError as e:
+""",
         tests=("tests/test_offline_gc.py",),
     ),
     # ㉖ M5i I8 결정 81 — 정확한 파일명 검사를 빼면 이름이 달라도 200.
@@ -370,8 +376,27 @@ MUTANTS = (
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
     ),
-    # ㉗ M5l L2 — 크기를 모르는 채 지운 항목은 **개수로** 따로 센다. 0 으로 섞으면 영수증이
-    # 「freed 0 B from 1 jobs」라고 확정한다(리뷰 #88 B1 — 실제 호출에서 그렇게 찍혔다).
+    # ㉗ M5l L5 · 리뷰 pr-94 B-1 — 포트를 못 잡으면 DB 를 열지도 않는다. 순서를 되돌리면(먼저
+    # Store, 그 다음 bind) 「Address already in use」 뒤에 DB 는 이미 새 버전이다.
+    Mutant(
+        name="serve-store-before-bind",
+        path="src/remote_ci_monitor/server.py",
+        old="""    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        store = Store(data_dir / "rcm.sqlite3")
+    except BaseException:
+        httpd.server_close()
+        raise
+""",
+        new="""    data_dir.mkdir(parents=True, exist_ok=True)
+    store = Store(data_dir / "rcm.sqlite3")
+    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+""",
+        tests=("tests/test_cli_serve_refusal.py",),
+        # ㉗ M5l L2 — 크기를 모르는 채 지운 항목은 **개수로** 따로 센다. 0 으로 섞으면 영수증이
+        # 「freed 0 B from 1 jobs」라고 확정한다(리뷰 #88 B1 — 실제 호출에서 그렇게 찍혔다).
+    ),
     Mutant(
         name="retention-unknown-deleted-as-zero",
         path="src/remote_ci_monitor/janitor.py",
