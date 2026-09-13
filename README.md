@@ -133,6 +133,51 @@ has **no `.git`** — scripts that need history belong in a `git_ref` preset.
 **New here? The [usage guide](docs/usage.md) walks through all of this with annotated
 screenshots.**
 
+## Running a gate from a session
+
+A **gate** is the preset your build machine runs before a merge — analysis, tests and lint in one
+script, usually with a `scope` input for a full or a quick pass. This is the whole loop from a
+project directory on your machine; every command works the same from a terminal, a CI wrapper or
+an agent session.
+
+1. **Check once.** `rcm check` — `python`, `server`, `token`, `presets`, `timezone`, `client` and
+   `cancel` must all say `ok`. If `presets` does not list `gate`, the server owner has not defined
+   it yet ([Configuration](docs/configuration.md)); `rcm presets` shows every preset with its
+   inputs.
+2. **Look before you queue.** `rcm eta gate -f scope=full` prints your position, the jobs ahead,
+   the wait, the expected duration, the finish time and the `confidence` of that estimate —
+   without submitting anything.
+3. **Submit from the repository root.** `rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"`
+   snapshots the current directory (tracked files plus untracked files that are not ignored, minus
+   `.rcmignore`), joins an identical job that is already queued or running, uploads only the files
+   the server has not seen, and waits. Progress — one line per `::rcm::step::` — goes to stderr;
+   the result is one JSON line on stdout. Inputs are `-f name=value`; `--by` is the name the queue
+   shows (default `user@host`). A gate that needs git history runs from a pushed ref instead:
+   `rcm run gate --source git_ref --ref my-branch` uploads nothing, so push first.
+4. **Branch on the exit code.** 0 succeeded · 1 failed · 2 cancelled or timed out · 3 unknown,
+   which is never a failure ([Exit codes](#exit-codes)). The JSON carries `job_id`, `url`, `state`,
+   `exit_code`, `summary`, `failed_step` (only when the script declared it), `last_step`,
+   `failures` (each name the script reported, with how often it was red in the recent runs of this
+   preset) and `step_timeline`. `examples/session/ci-gate.sh` is a complete wrapper (needs `jq`).
+5. **When it is red.** `rcm logs N` shows the log (`--follow` while it runs); the verdict line
+   names the failed step when your script declared one and `last step …` otherwise;
+   `rcm artifacts N --fetch` brings back the reports the preset published. Exit 3 means rcm does
+   not know — the server restarted or you lost the route — so look at `rcm jobs` before you retry.
+6. **Detach and come back.** `--no-wait` prints the job number, its position and its ETA and
+   returns; `rcm wait --job N` follows it later. Ctrl-C during `rcm run` detaches too — the job
+   keeps running.
+7. **Cancel.** `rcm cancel N` stops your own job (`rcm run` saved the submission's cancel token in
+   `~/.local/state/rcm/submissions.json`); if you only joined someone else's job it removes you
+   from the list and the job goes on. Admin tokens cancel anything.
+8. **Two sessions, one commit.** A second `rcm run` with the same preset, inputs and tree joins
+   the first job and gets the same result; `--no-join` forces a separate run.
+9. **Faster passes.** If the preset defines a lighter scope (`-f scope=fast` · `commit`), use it
+   while iterating and keep `full` for the merge; `rcm eta` says what each costs right now.
+10. **Keep the client current.** `rcm check` fails its `client` row when the server requires a
+    newer client; `examples/session/update-client.sh` installs the server's own wheel.
+
+The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
+
 ## Session commands
 
 | command | what it shows |

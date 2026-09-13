@@ -123,6 +123,47 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
 
 **처음이라면 [사용법 가이드](docs/usage.ko.md)를 보자.** 주석을 단 화면으로 첫 잡까지 따라간다.
 
+## Running a gate from a session
+
+**게이트**는 머지 전에 빌드 머신이 돌리는 프리셋이다 — 분석 · 테스트 · 린트를 스크립트 하나로,
+보통 전체와 빠른 통과를 고르는 `scope` 입력과 함께. 아래가 내 머신의 프로젝트 디렉터리에서
+도는 전체 흐름이다. 터미널 · CI 래퍼 · 에이전트 세션 어디서든 명령은 같다.
+
+1. **한 번 확인.** `rcm check` — `python` · `server` · `token` · `presets` · `timezone` · `client` ·
+   `cancel` 이 전부 `ok` 여야 한다. `presets` 에 `gate` 가 없으면 서버 쪽에서 아직 정의하지 않은
+   것이다([Configuration](docs/configuration.md)). `rcm presets` 가 프리셋과 입력을 전부 보여
+   준다.
+2. **줄 서기 전에 본다.** `rcm eta gate -f scope=full` 은 아무것도 제출하지 않고 내 순번 · 앞 잡
+   수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 `confidence` 를 찍는다.
+3. **저장소 루트에서 제출.** `rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"` 은
+   현재 디렉터리를 스냅샷하고(추적 파일 + 무시되지 않은 미추적 파일, `.rcmignore` 제외), 같은
+   잡이 이미 대기·실행 중이면 합류하고, 서버에 없는 파일만 올리고, 기다린다. 진행은 stderr 로
+   `::rcm::step::` 마다 한 줄, 결과는 stdout 에 JSON 한 줄. 입력은 `-f 이름=값`, `--by` 는
+   큐에 보이는 이름(기본 `user@host`). git 이력이 필요한 게이트는 푸시된 ref 로 돈다 —
+   `rcm run gate --source git_ref --ref my-branch` 는 아무것도 올리지 않으니 먼저 푸시한다.
+4. **종료 코드로 분기.** 0 성공 · 1 실패 · 2 취소나 시간 초과 · 3 모름 — 3 은 실패가 아니다
+   ([Exit codes](#exit-codes)). JSON 에는 `job_id` · `url` · `state` · `exit_code` · `summary` ·
+   `failed_step`(스크립트가 선언했을 때만) · `last_step` · `failures`(스크립트가 보고한 이름마다
+   이 프리셋의 최근 실행에서 몇 번 빨갰는지) · `step_timeline` 이 실린다.
+   `examples/session/ci-gate.sh` 가 완성된 래퍼다(`jq` 필요).
+5. **빨갈 때.** `rcm logs N` 이 로그를 보여 준다(도는 중이면 `--follow`). 판정 줄은 스크립트가
+   선언한 실패 스텝을, 선언이 없으면 `last step …` 을 말한다. `rcm artifacts N --fetch` 는
+   프리셋이 낸 보고서를 가져온다. 종료 3 은 rcm 이 모른다는 뜻이다 — 서버가 재시작됐거나 경로가
+   끊긴 것 — 다시 돌리기 전에 `rcm jobs` 를 본다.
+6. **떼어 놓고 나중에.** `--no-wait` 는 잡 번호 · 순번 · ETA 를 찍고 돌아온다. `rcm wait --job N`
+   으로 다시 붙는다. `rcm run` 중 Ctrl-C 도 떼어 놓기다 — 잡은 계속 돈다.
+7. **취소.** `rcm cancel N` 은 내 잡을 멈춘다(`rcm run` 이 제출의 취소 토큰을
+   `~/.local/state/rcm/submissions.json` 에 저장해 둔다). 남의 잡에 합류만 했다면 목록에서
+   나만 빠지고 잡은 계속 돈다. 관리자 토큰은 무엇이든 취소한다.
+8. **두 세션, 한 커밋.** 같은 프리셋 · 입력 · 트리로 두 번째 `rcm run` 을 하면 첫 잡에 합류해
+   같은 결과를 받는다. `--no-join` 은 따로 돌린다.
+9. **빠른 통과.** 프리셋에 가벼운 scope(`-f scope=fast` · `commit`)가 있으면 반복할 땐 그걸
+   쓰고 머지에는 `full` 을 쓴다. 지금 각각 얼마나 걸리는지는 `rcm eta` 가 말해 준다.
+10. **클라이언트를 맞춘다.** 서버가 더 새 클라이언트를 요구하면 `rcm check` 의 `client` 행이
+    실패한다. `examples/session/update-client.sh` 가 서버의 wheel 을 설치한다.
+
+[사용법 가이드](docs/usage.ko.md)가 이 단계들을 주석 단 화면으로 보여 준다.
+
 ## Session commands
 
 | 명령 | 무엇을 보여 주나 |

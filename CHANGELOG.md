@@ -7,6 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **The README walks through a gate from a session.** A numbered section — `rcm check`,
+  `rcm eta`, `rcm run` and its inputs, the exit codes and the JSON keys, logs and artifacts when
+  it is red, detaching and `rcm wait`, cancel and join, lighter scopes, keeping the client
+  current — now sits between the session set-up and the command table, mirrored in
+  `README.ko.md`. ([#122](https://github.com/monocsp/remote_ci_monitor/pull/122))
+
 ## [0.2.7] - 2026-09-13
 
 ### Fixed
