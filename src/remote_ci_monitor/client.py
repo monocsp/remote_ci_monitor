@@ -179,10 +179,17 @@ class WorkerClient:
         *,
         artifacts: dict[str, Any] | None = None,
         finished_at: str | None = None,
+        summary_code: str | None = None,
+        summary_args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
         if summary is not None:
             body["summary"] = summary
+        if summary_code is not None:
+            # 구조화된 preflight 실패(`tool_missing`) — 문자열 summary 로 우회하지 않는다(M5j G4).
+            # 서버는 아는 코드만 받고 인자를 이름 하나로 줄인다.
+            body["summary_code"] = summary_code
+            body["summary_args"] = dict(summary_args or {})
         if artifacts is not None:
             # 처분은 **있으면** 싣는다. 통째로 없으면 서버는 `unknown` 으로 읽는다(M5e §5).
             body["artifacts"] = artifacts
@@ -694,8 +701,11 @@ class Client:
     def job(self, job_id: int, *, tail: int = 0, timeout: float | None = None) -> dict[str, Any]:
         return self.get_json(f"/jobs/{job_id}?tail={tail}", timeout=timeout)
 
-    def cancel(self, job_id: int) -> dict[str, Any]:
-        return self.post_json(f"/jobs/{job_id}/cancel")
+    def cancel(self, job_id: int, *, cancel_token: str | None = None) -> dict[str, Any]:
+        """`POST /jobs/{id}/cancel`. `cancel_token` 은 제출 응답의 `submission.cancel_token`
+        (M5j G5) — 있으면 본문에 싣고, 없으면 오늘처럼 빈 본문이다(옛 서버는 키를 무시한다)."""
+        body = {"cancel_token": cancel_token} if cancel_token else {}
+        return self.post_json(f"/jobs/{job_id}/cancel", body)
 
     def gc(self, *, dry_run: bool = False, timeout: float | None = None) -> dict[str, Any]:
         """`POST /gc`(admin). 스캔이 오래 걸릴 수 있어 **자기 시한**을 쓴다 — 일반 요청의
