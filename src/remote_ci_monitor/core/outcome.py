@@ -80,6 +80,9 @@ CODES: dict[str, Renderer] = {
     # ── 실행 결과 ──────────────────────────────────────────────────────────
     "exit_code": lambda a: f"exit {_s(a, 'code')}",
     "timed_out": lambda a: _limit(a.get("seconds")),
+    # 프리셋 `requires` 의 도구를 잡의 최종 환경에서 못 찾았다 — 프로세스는 뜨지 않았다(M5j G4).
+    # 인자는 선언된 이름 하나뿐이다: PATH 도 경로도 공개 상태에 싣지 않는다(PLAN 「보안」).
+    "tool_missing": lambda a: f"required tool {_s(a, 'tool')} is missing",
     # ── 워커 ───────────────────────────────────────────────────────────────
     "worker_error": lambda a: f"worker error: {_s(a, 'detail')}",
     "worker_failed": lambda a: "failed on the worker",

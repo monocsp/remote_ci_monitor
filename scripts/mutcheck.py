@@ -43,6 +43,17 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      않음 (`tests/test_web_browser.py`, M5l L7 · pr-82 리뷰 P2). **Chrome 이 있어야 돈다** —
      없으면 그 테스트가 skip(exit 0)이라 「못 잡음」과 구별이 안 되므로 SKIP 으로 보고하고
      실패로 세지 않는다. `RCM_CHROME` 이 설정돼 있으면 무조건 돈다(못 찾으면 대조군이 빨강).
+  ㉗ cancel-capability-skipped — 강제 모드(`cancel_requires_submission_token`)에서 capability
+     검사를 건너뛰어 옛 공유 토큰 규칙으로 물러남 (`server.py`, M5j G5 결정 87 — 같은 토큰의
+     다른 세션이 남의 잡을 지운다)
+  ㉘ leave-binding-removed — `leave_submission` 비밀을 받은 참여자 확인을 뺌: 남의 leave 비밀로
+     자기 joiner 행을 지운다 (`server.py`, M5l S6 — Bob 비밀 + Charlie bearer 가 Charlie 를 뺐다)
+  ㉗ requires-check-skipped — 프리셋 `requires` 검사를 건너뜀: 없는 도구로도 프로세스가 뜬다
+     (`runner.py`, M5j G4 결정 85 — 그게 「옛 SDK 로 초록」이었다)
+  ㉘ requires-path-server-cwd — PATH 의 상대 항목을 워크스페이스가 아니라 검사 프로세스의 cwd
+     기준으로 푼다: 서버 폴더에만 있는 도구로 통과한다(`runner.py`, M5l S1 — PR #109 리뷰 B)
+  ㉙ requires-cancel-ignored — preflight 직전의 취소 확인 제거: 취소한 잡이 `tool_missing` 으로
+     끝난다(`runner.py`, M5l S4)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -298,6 +309,22 @@ MUTANTS = (
         tests=("tests/test_client_wheel.py",),
     ),
     Mutant(
+        name="cancel-capability-skipped",
+        path="src/remote_ci_monitor/server.py",
+        old="if self.config.server.cancel_requires_submission_token and not token.admin:",
+        new="if False and not token.admin:",
+        tests=("tests/test_cancel_capability.py",),
+    ),
+    # ㉘ M5l S6 — leave 비밀은 그것을 받은 토큰 이름만 쓸 수 있다. 확인을 빼면 남의 비밀로 남을
+    # 뺀다(리뷰 pr-110 B P1).
+    Mutant(
+        name="leave-binding-removed",
+        path="src/remote_ci_monitor/server.py",
+        old="                if participant != token.name:",
+        new="                if False:",
+        tests=("tests/test_cancel_capability_m5l.py",),
+    ),
+    Mutant(
         name="ledger-outside-tx",
         path="src/remote_ci_monitor/store.py",
         old="""            for seq, name in enumerate(fail_names, start=1):
@@ -348,6 +375,47 @@ MUTANTS = (
             "test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header",
         ),
         needs_chrome=True,
+    # ㉔ M5j G1 결정 84 — 마커 조회가 깨지면 `step_timeline` 은 `null` + 코드다. 빈 타임라인으로
+    # 뭉개면 「스텝을 안 찍은 잡」과 「못 읽은 잡」이 같은 모양이 된다(fail-open 금지).
+    ),
+    Mutant(
+        name="step-timeline-db-error-empty",
+        path="src/remote_ci_monitor/server.py",
+        old="""        except Exception as e:  # noqa: BLE001 — 깨진 payload 행도 DB 오류다
+            doc["step_timeline"] = None
+            doc["step_timeline_error_code"] = _error_code(e)
+            return set()
+""",
+        new="""        except Exception:  # noqa: BLE001
+            doc["step_timeline"] = step_timeline_json(None)
+            return set()
+""",
+        tests=("tests/test_step_timeline.py",),
+    ),
+    # ㉗ M5j G4 결정 85 — 검사가 아무것도 「없다」고 하지 않으면 없는 도구로도 프로세스가 뜬다.
+    Mutant(
+        name="requires-check-skipped",
+        path="src/remote_ci_monitor/runner.py",
+        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        new="    return []  # noqa: mutant\n",
+        tests=("tests/test_requires.py",),
+    ),
+    # ㉘ M5l S1 — 상대 PATH 항목은 프로세스가 뜨는 워크스페이스 기준이다. 검사 프로세스의 cwd 로
+    # 풀면 서버 폴더의 `tools/fvm` 으로 통과하고 워크스페이스의 것은 못 찾는다(fail-open).
+    Mutant(
+        name="requires-path-server-cwd",
+        path="src/remote_ci_monitor/runner.py",
+        old="    base = os.fspath(cwd) if cwd is not None else os.getcwd()\n",
+        new="    base = os.getcwd()  # noqa: mutant\n",
+        tests=("tests/test_requires_m5l.py",),
+    ),
+    # ㉙ M5l S4 — preflight 직전의 취소 확인이 없으면 자재화 중 취소한 잡이 `tool_missing` 이 된다.
+    Mutant(
+        name="requires-cancel-ignored",
+        path="src/remote_ci_monitor/runner.py",
+        old="            if observer.should_cancel():\n                at = now_fn()\n",
+        new="            if False:  # noqa: mutant\n                at = now_fn()\n",
+        tests=("tests/test_requires_m5l.py",),
     ),
 )
 

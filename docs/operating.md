@@ -247,6 +247,12 @@ and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
   Tokens have a kind: `client` (sessions), `admin` (cancel any job, pause, bump) and `worker`
   (remote workers — `/worker/*` only). A worker can report only on jobs it claimed itself; the
   log bytes and host samples it sends are treated as data, never parsed as commands.
+- Every `POST /jobs` also answers with a **cancel token** for that one submission — a secret with
+  a single right: cancel that job (the requester's), or leave its join list (a joiner's). The
+  server keeps its SHA-256 only; `rcm run` stores it in a 0600 file under `~/.local/state/rcm`.
+  It never appears in `/api/status`, job documents, logs, errors or URLs. With
+  `cancel_requires_submission_token = true` it is the only non-admin way to cancel
+  ([configuration](configuration.md#who-may-cancel-a-job)).
 - Only configured presets run. No shell interpolation. Uploads are extracted with Python's
   `tarfile` data filter (no absolute paths, no `..`, no links outside the workspace).
 - The server binds to `127.0.0.1` unless you set `bind`. It does not do TLS — put it behind

@@ -33,6 +33,7 @@ expected_seconds = 480                  # used until enough real samples exist
 duration_key_inputs = ["scope"]
 artifacts = ["test/**/goldens/*.png"]   # files the job produces that sessions may fetch back
 artifacts_on = "always"                 # "always" | "failure" — collect only when the job fails
+requires = ["fvm", "gitleaks"]          # tools the job needs — looked up before it starts
 [[presets.inputs]]
 name = "scope"
 type = "choice"
@@ -53,6 +54,20 @@ Your script can report progress by printing markers at the start of a line:
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
 
+A finished job keeps its step times. `GET /jobs/<id>` (and so the JSON `rcm run` and `rcm wait`
+print) carries `step_timeline`: `timing` (`as_received`, as above), `steps_total`,
+`steps_total_partial` and `steps[]` with `index`, `name`, `started_at`, `ended_at`, `seconds` and
+`ok` — the same values the queue showed while the job ran, recomputed from the markers the server
+stored. A job that printed no step markers has `steps: []` and `steps_total: null`; a job that
+failed before it started has the same empty timeline. When the server cannot read the markers the
+key is `null` and `step_timeline_error_code` says why — an empty list is never used to cover a
+read that failed. `ok` is what the markers said: a step closed by the next `::rcm::step::` is
+`true`, the last step of a job that exited 0 is `true`, and the last step of a failed or cancelled
+job is `null` unless the script declared it failed (`::rcm::fail::<name>` or
+`::rcm::step-end::fail`), in which case it is `false` — a failure is never inferred, and the stored
+`failed_step` and `last_step` are not changed by the timeline. Running jobs keep `progress`;
+`/api/status` rows never carry `step_timeline`.
+
 ### Saying what failed
 
 `failed_step` is only ever a step your script **declared** as failed, with `::rcm::step-end::fail`
@@ -72,9 +87,10 @@ failed: just_audio_screen_music_port_test.dart — 2 of the last 8 gate runs · 
 ```
 
 The window is `failure_window_jobs` (20) finished jobs of that key — cancelled and lost jobs say
-nothing, so they are left out — and nothing is judged until there are `failure_min_jobs` (3) of
-them. Runs that failed without naming anything stay in the denominator and are reported
-separately, so the count can understate a flaky test but never overstate it.
+nothing, so they are left out, and so is a job that ended `tool_missing` before its script could
+start — and nothing is judged until there are `failure_min_jobs` (3) of them. Runs that failed
+without naming anything stay in the denominator and are reported separately, so the count can
+understate a flaky test but never overstate it.
 
 ### Deploy presets: run a remote ref instead of an upload
 
@@ -209,6 +225,51 @@ never collected.
 **A bundle is a way to fetch, not a place to keep.** It lives `artifact_retention_hours` (24) —
 about as long as a workspace, and far less than a log. Put what you will want next week in the log
 and what you will want in the next hour in the bundle.
+
+### Required tools
+
+A gate that cannot find `fvm` does not stop — it falls through to whatever `flutter` is on the
+path, builds with the wrong SDK, and comes back green. `requires` names the tools the job must
+find, and the job does not start without them:
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+requires = ["fvm", "gitleaks", "/opt/homebrew/bin/gh"]   # names or absolute paths
+```
+
+Right before the process starts — on the local lane or on a remote worker alike — rcm looks each
+entry up in the **environment the job will actually run in**: the `env_passthrough` allowlist,
+then `[presets.env]`. A relative path, an empty entry, a duplicate, or an absolute path that does
+not end in a tool name (`/opt/bin/`) is a config error at start; without the key nothing changes.
+If the job's environment has no `PATH`, the check uses an empty one, never the server's own. A
+relative `PATH` entry (`tools`, `.`, or an empty entry between two colons) means the **job's
+workspace**, because that is where the process starts — a tool that only exists next to the
+server's own working directory does not count. When everything is found the job log gets one
+line, `[rcm] required tools: fvm ok · gitleaks ok`; when something is missing the job does not
+run and ends `failed` with `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}` —
+the name only. No `PATH` and no path appears in the job document, the queue or the log: an entry
+declared as `/opt/homebrew/bin/gh` shows up everywhere as `gh`. A `tool_missing` failure carries
+no `failed_step`, no `last_step` and no `failed: …` line: the tool was missing before the script
+could say anything. A job cancelled while its workspace was still being prepared ends `cancelled`,
+not `tool_missing` — the check runs only for a job nobody has stopped.
+
+**The launchd trap.** A service started by `launchd` (or `systemd`) has a short `PATH` —
+`/usr/bin:/bin:/usr/sbin:/sbin` — so `fvm` and `gitleaks` from Homebrew are found in your shell and
+not in the job, and `requires` is what makes that visible. The fix is a `PATH` the job owns:
+
+```toml
+[presets.env]
+PATH = "/Users/build/fvm/default/bin:/opt/homebrew/bin:/usr/bin:/bin"
+```
+
+`rcm check --config server.toml` has a `local preset tools` row that runs the same lookup for every
+preset that declares `requires` — in **this shell**, with this shell's environment. A tool this
+shell cannot find makes the row FAIL and `rcm check` exit 1. It catches a typo and a missing
+install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` here says nothing
+about the job. The check that counts is the one at job start. The row names each entry the way
+the job log does — by its basename, never by the path you declared.
 
 ### Naming what failed
 
@@ -419,6 +480,61 @@ Running `rcm serve` and `rcm worker` on one machine gives that machine **two** u
 per process, and two independent cooldowns. They both read the true CPU and both hold correctly;
 what they cannot do is coordinate. Keep it in mind when you set `lanes` on both.
 
+### Two lanes for a gate with a light phase and a heavy phase
+
+A gate often spends its first minutes on checkout, `pub get`, codegen and lints at 20–50 % CPU and
+only then hits the heavy part (tests, web build). With `lanes = 1` the next job waits through the
+light phase for nothing. A second lane lets the next job's light phase overlap the current job's
+heavy phase — **but only if the heavy phase is serialised by the script itself**:
+
+```toml
+[server]
+lanes = 2
+admission = "load"
+
+[[presets]]
+name = "gate"
+argv = ["/bin/bash", "scripts/local_ci.sh"]
+# no concurrency_group — two gate jobs may now run at once
+```
+
+```sh
+# scripts/local_ci.sh — the heavy section takes a machine-wide lock.
+# `flock(1)` is not on macOS; Python's fcntl.flock on an inherited fd works on macOS and Linux
+# and the lock stays with the shell's fd 9 until the script exits. If the lock cannot be taken
+# the script must stop (`|| exit 3`) — a heavy section that runs unlocked is exactly what this
+# section exists to prevent, and `local_ci.sh` without `set -e` would carry on past the error.
+exec 9>/tmp/gate-heavy.lock || exit 3
+python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)' || exit 3   # waits while another gate job is in its heavy section
+flutter test ...
+```
+
+To see that the lock holds, submit two `gate` jobs back to back and compare the heavy steps in
+their `step_timeline` (or the timestamps in their logs): the heavy sections must not overlap.
+
+The lock is machine-wide: lanes of `rcm serve` and of an `rcm worker` on the same machine share it,
+which is what you want. The fd stays locked in child processes the script starts, so the heavy
+section may be a whole sub-script.
+
+What the admission gate does and does not do:
+
+- It is decided **once, when a lane picks a job up**. Two jobs that are already running can both
+  enter their heavy section; the CPU cap does not stop that. The lock in the script does.
+- The overlap you actually get: while job A is in its light phase, job B is admitted and both
+  light phases run together; while A is in its heavy phase (CPU near 100 %), lane 2 stays closed
+  and B waits at the gate — so the win is the light phases overlapping, not B's light phase running
+  under A's heavy one.
+- Removing `concurrency_group` removes the server's own guarantee that two `gate` jobs never
+  overlap. Do that only when the script holds a lock like the one above; otherwise keep the group.
+- There is no memory-based admission on purpose: macOS and Linux disagree about what "used" means
+  (PLAN decision 42), so the gate reads CPU only. If memory pressure is your limit, keep
+  `lanes = 1` or narrow the heavy section.
+- ETA estimates assume the lanes are independent. While two jobs overlap, the medians drift; the
+  `concurrent_at_start` field on a finished job's document (`GET /jobs/<id>`, `rcm wait --json`)
+  says how many jobs were running when it started — itself included, so a job that ran alone
+  reads `1` and `null` means unknown — so the effect can be measured afterwards, and the same
+  document's `step_timeline` shows which step paid.
+
 ## Second build machine (remote worker)
 
 A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs
@@ -444,6 +560,58 @@ resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`w
 `worker.toml` keys: `server`, `token` (or the env var), `pool`, `lanes`, `name`, `data_dir`,
 `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
 `examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
+
+## Who may cancel a job
+
+Every `POST /jobs` — a fresh submission and a join alike — answers with a `submission` object,
+`{"id": "…", "cancel_token": "…"}`. The token is a secret that carries exactly one right: the
+requester's token cancels the job (`cancel_job`), a joiner's token only removes that joiner from
+the join list (`leave_submission`). The server keeps a SHA-256 of it (database v17, table
+`submissions`, written in the same transaction as the job or the join and deleted together with
+the job's metadata), and two sessions that share one client token still receive two different
+secrets — a session cannot cancel a job that another session submitted with the same token unless
+it also shares that session's state file. A `leave_submission` token is bound to the token name it
+was issued to: sent with another bearer token it answers 403, and it works once — two requests
+with the same token at the same time get one 200 and one 403. `rcm run` saves the token in
+`$XDG_STATE_HOME/rcm/submissions.json` (or `~/.local/state/rcm/submissions.json`, mode 0600,
+one entry per submission, locked while written) and `rcm cancel N` sends the newest one that
+this client token saved for that job, never an entry another token saved (`--submission-id`
+picks another); `rcm cancel N --cancel-token …` takes it from a wrapper
+that kept the `--no-wait` JSON, which carries the same `submission` object. A token that worked
+is removed from the file. The file keeps at most 200 entries; above that it drops only entries
+whose job the server says has finished (oldest first) — a running or queued job's entry is never
+dropped, and when the server cannot be asked nothing is dropped. When the file cannot be written
+(`rcm run` prints one `warning: the cancel token was not saved …` line, never the token itself)
+the `--no-wait` JSON is the only copy, and `rcm cancel N --cancel-token …` is the way to use it.
+Ctrl-C keeps its
+meaning: the requester detaches and the job keeps running; a joiner leaves the join list with its
+own token. A token whose role the server does not know (`cancel_job` and `leave_submission` are
+the only two) is refused with 403 and a server log line.
+
+One server key, `cancel_requires_submission_token`, decides whether the token is optional or
+required:
+
+```toml
+[server]
+cancel_requires_submission_token = false   # the default
+```
+
+| value | who may cancel |
+|---|---|
+| `false` (default) | as before — the token that submitted, a joiner (it only leaves) and an admin token — plus any valid cancel token, honoured by its role. Clients on 0.2.x keep cancelling |
+| `true` | a valid cancel token (`rcm cancel N`, or `--cancel-token` when the state file is elsewhere) or an admin token, nothing else. There is no `--force` for a non-admin token: a shared client token does not get the old right back |
+
+Turning it on changes what old clients can do. A 0.2.x client (anything before 0.2.7) never sends
+a cancel token, so its `rcm cancel` and a joiner's Ctrl-C answer 403
+`not your submission — pass the cancel token from the submission (rcm cancel --cancel-token …)`.
+While the key is on, `/api/health` raises `min_client_version` to the effective floor (`0.2.7`
+instead of the usual `0.2.0`, so an old client's own `rcm check` fails its `client` row and its
+`rcm run` warns — both still submit) and adds `cancel_min_client_version` (`0.2.7`; `null` when the
+key is off) to say why; `rcm check` prints a `cancel` row naming it. Keep the key off until every
+session has upgraded (`examples/session/update-client.sh`). The web page
+never holds a cancel token, so with the key on its **Cancel** button is disabled unless the pasted
+token is an admin token, and the row says why. The token appears nowhere else: not in
+`/api/status`, not in job documents, logs, errors or URLs.
 
 ## Client and worker files
 

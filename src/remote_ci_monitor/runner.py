@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -51,6 +52,26 @@ class RunnerError(Exception):
     """프로세스를 띄우지 못했다(argv[0] 없음 · 로그 파일 못 엶). 문구에 경로 없음."""
 
 
+class RequiredToolMissing(Exception):
+    """프리셋 `requires` 의 도구가 잡의 최종 환경에 없다 — 프로세스는 뜨지 않았다(M5j G4).
+
+    `tool` 은 선언된 그대로(절대경로일 수 있다), `public_name` 은 상태·요약·로그에 싣는 이름 —
+    언제나 basename 이다(설정이 basename 없는 경로를 거절한다, M5l S2). 선언한 경로도 PATH 값도
+    어디에도 들지 않는다(M5l S3).
+    """
+
+    def __init__(self, tool: str):
+        super().__init__(f"required tool {public_tool_name(tool)} is missing")
+        self.tool = tool
+        self.public_name = public_tool_name(tool)
+
+
+def public_tool_name(tool: str) -> str:
+    """선언 항목의 공개 이름 — 이름이면 그대로, 절대경로면 basename. 설정 검증이 basename 이
+    비는 선언을 거절하므로 여기서 경로로 물러나지 않는다(M5l S2)."""
+    return os.path.basename(tool)
+
+
 @dataclass(frozen=True)
 class RunSpec:
     """실행에 필요한 것 전부 — 서버 DB 의 잡이든 claim 응답이든 여기로 정규화한다."""
@@ -67,6 +88,38 @@ class RunSpec:
     workspace: Path
     log_path: Path
     grace_seconds: int = 10
+    #: 시작 전에 최종 환경에서 찾아야 하는 도구(이름 또는 절대경로). 비어 있으면 검사 없음.
+    requires: tuple[str, ...] = ()
+
+
+def missing_tools(
+    requires: tuple[str, ...], env: Mapping[str, str], cwd: str | os.PathLike[str] | None = None
+) -> list[str]:
+    """`requires` 중 `env` 의 PATH 에서 못 찾은 것 — 선언 순서대로.
+
+    **잡의 PATH 가 정본이다.** PATH 가 없으면 빈 PATH 로 본다(`shutil.which` 는 `path=None`
+    이면 검사 프로세스의 `os.environ["PATH"]` 로 물러난다 — 그게 launchd 서비스에서 「셸에선
+    되는데 잡에선 안 되는」 사고를 숨긴다). 절대경로는 PATH 와 무관하게 그 자리에서 본다.
+
+    PATH 의 상대 항목(`tools`·`.`·빈 항목)은 `cwd` — 잡이라면 **워크스페이스** — 기준으로 푼다.
+    프로세스는 `cwd=spec.workspace` 로 뜨므로 그 셸이 보는 곳이 거기다. 검사 프로세스의 cwd 로
+    보면 서버 폴더에만 있는 도구로 통과하고(fail-open), 워크스페이스 안의 도구는 못 찾는다
+    (M5l S1 · PR #109 리뷰 B). `cwd` 가 None 이면 이 프로세스의 cwd — `rcm check` 의 셸 검사.
+    """
+    base = os.fspath(cwd) if cwd is not None else os.getcwd()
+    raw = env.get("PATH", "")
+    entries = [os.path.join(base, entry) for entry in raw.split(os.pathsep)] if raw else []
+    path = os.pathsep.join(entries)
+    return [name for name in requires if shutil.which(name, path=path) is None]
+
+
+def _preflight_lines(requires: tuple[str, ...], missing: list[str]) -> list[str]:
+    """잡 로그에 남길 판정 줄 — 공개 이름(basename)과 ok/missing 만. 선언한 절대경로도 PATH 값도
+    찍지 않는다(명세 §2 G4 · M5l S3)."""
+    if missing:
+        return [f"[rcm] required tool {public_tool_name(name)}: missing" for name in missing]
+    verdicts = " · ".join(f"{public_tool_name(name)} ok" for name in requires)
+    return [f"[rcm] required tools: {verdicts}"]
 
 
 class RunObserver(Protocol):
@@ -135,8 +188,9 @@ def run_job(
     environ: Mapping[str, str] | None = None,
     materialize: Callable[[RunSpec], None] | None = None,
 ) -> RunResult:
-    """자재화(있으면) → `phase executing` → Popen → 펌프 → 결과. 종료 규칙은 호출자가
-    `worker.outcome_for` 로 정한다. `MaterializeError` 는 그대로 올린다(호출자가 failed 로)."""
+    """자재화(있으면) → `requires` 검사 → `phase executing` → Popen → 펌프 → 결과. 종료 규칙은
+    호출자가 `worker.outcome_for` 로 정한다. `MaterializeError` 는 그대로 올린다(호출자가 failed
+    로). 도구가 없으면 `RequiredToolMissing` — 프로세스를 띄우지 않는다(M5j G4)."""
     if materialize is not None:
         materialize(spec)
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +200,26 @@ def run_job(
     except OSError as e:
         raise RunnerError(f"cannot open log file: {safe_error(e)}") from e
     with log:
+        if spec.requires:
+            # 자재화가 길었다면 그사이 취소·종료 요청이 와 있을 수 있다 — 그게 이긴다. 프로세스도
+            # 판정 줄도 없이 돌려주고, 호출자가 여느 취소·유실처럼 닫는다(M5l S4 · 리뷰 B P2).
+            # 없는 도구가 사용자의 취소를 `tool_missing` 으로 덮어서는 안 된다.
+            if observer.should_stop():
+                at = now_fn()
+                return RunResult(rc=None, started=at, finished=at, lost=True)
+            if observer.should_cancel():
+                at = now_fn()
+                return RunResult(rc=None, started=at, finished=at, cancelled=True)
+            # Popen 직전, **최종 환경**에서 — 프로세스가 볼 PATH 그대로, 상대 항목은 워크스페이스
+            # 기준. 같은 줄을 관찰자에게도 주어 원격 워커의 서버 로그에도 남는다(마커는 아니다).
+            missing = missing_tools(spec.requires, env, spec.workspace)
+            batch = "".join(f"{ln}\n" for ln in _preflight_lines(spec.requires, missing))
+            data = batch.encode("utf-8", errors="replace")
+            log.write(data)
+            log.flush()
+            observer.output(data)
+            if missing:
+                raise RequiredToolMissing(missing[0])
         started = now_fn()
         observer.phase(PHASE_EXECUTING)
         try:
@@ -259,11 +333,14 @@ __all__ = [
     "MAX_LINE_BYTES",
     "POLL_SECONDS",
     "READ_CHUNK",
+    "RequiredToolMissing",
     "RunObserver",
     "RunResult",
     "RunSpec",
     "RunnerError",
     "build_env",
+    "missing_tools",
+    "public_tool_name",
     "run_job",
     "safe_error",
     "signal_group",
