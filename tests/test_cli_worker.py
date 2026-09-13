@@ -484,7 +484,8 @@ def test_an_immediate_204_is_not_retried_in_a_hot_loop(home, srv0, token, data_d
 
 def test_once_reports_a_failed_job_and_still_exits_0(home, srv, token, data_dir, capsys):
     """§2: 잡이 실패해도 워커는 서비스다 — `finish failed` 를 보고하고 `--once` 는 종료 0. 서버에
-    exit 코드와 failed_step. 실패한 워크스페이스는 남긴다(`keep_workspace_on_failure` 기본 true)."""
+    exit 코드와 스텝 칸(선언이 없으면 `last_step`). 실패한 워크스페이스는 남긴다
+    (`keep_workspace_on_failure` 기본 true)."""
     token(srv)
     srv.cfg.presets = (
         *srv.cfg.presets,
@@ -494,7 +495,9 @@ def test_once_reports_a_failed_job_and_still_exits_0(home, srv, token, data_dir,
     code, out, err = run(capsys, worker_argv(srv, "--once", data=data_dir))
     assert code == 0, out + err
     j = srv.store.get_job(jid)
-    assert j.state == FAILED and j.exit_code == 2 and j.failed_step == "t", (j.state, j.summary)
+    # M5h 결정 63 — 이 프리셋은 실패를 선언하지 않는다. 라벨 대신 `last_step` 이 말한다.
+    assert j.state == FAILED and j.exit_code == 2, (j.state, j.summary)
+    assert j.failed_step is None and j.last_step == "t"
     assert f"#{jid} failed" in err, err
     assert (data_dir / "workspaces" / str(jid)).is_dir()
 

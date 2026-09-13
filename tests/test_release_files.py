@@ -31,6 +31,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 CI_GATE = ROOT / "examples" / "session" / "ci-gate.sh"
 PLIST = ROOT / "examples" / "launchd" / "com.remote-ci-monitor.server.plist"
 UNIT = ROOT / "examples" / "systemd" / "rcm-server.service"
+MUTCHECK = ROOT / "scripts" / "mutcheck.py"
 
 needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not on PATH")
 
@@ -404,11 +405,14 @@ def test_readme_section_mentions(prefix: str, pattern: str):
     assert has(section(read(path), prefix), pattern), f"{path.name} '## {prefix}' lacks /{pattern}/"
 
 
-def test_contributing_development_counts_eight_mutations():
+def test_contributing_development_counts_the_mutations_mutcheck_actually_has():
+    """문서의 숫자와 `scripts/mutcheck.py` 의 변이 수가 같아야 한다 — 손으로 센 숫자는 썩는다."""
+    n = len(re.findall(r"^        name=", read(MUTCHECK), re.M))
+    assert n >= 8
     text = read(CONTRIBUTING)
     assert "three known mutations" not in text
     dev = section(text, "Development")
-    assert has(dev, r"\b8\b[^\n]{0,40}mutation|mutation[^\n]{0,40}\b8\b", re.M | re.I)
+    assert has(dev, rf"\b{n}\b[^\n]{{0,40}}mutation|mutation[^\n]{{0,40}}\b{n}\b", re.M | re.I)
 
 
 # ── CHANGELOG.md (§6) ────────────────────────────────────────────────────────

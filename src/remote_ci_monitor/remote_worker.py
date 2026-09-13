@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import dataclasses
+import random
 import secrets
 import shutil
 import socket
@@ -51,6 +52,7 @@ from remote_ci_monitor.worker import format_limit
 
 REGISTER_RETRY_SECONDS = 5.0
 CLAIM_MIN_INTERVAL = 1.0  # 빈 204 가 이보다 빨리 오면 이만큼 쉰다
+RETRY_WAIT_SECONDS = 2.0  # 503 · 연결 실패 뒤 다시 claim 하기까지
 REPORT_RETRIES = (1.0, 2.0, 4.0)
 LOG_FLUSH_SECONDS = 1.0
 LOG_BATCH_BYTES = 256 * 1024
@@ -183,6 +185,8 @@ def _policy_from_claim(claimed: dict[str, Any]) -> art.ArtifactPolicy | None:
         cancel_timeout_seconds=int(
             raw.get("cancel_timeout_seconds") or defaults.cancel_timeout_seconds
         ),
+        # 필드가 없는 옛 서버는 `"always"` — **옛 동작이 기본**이다. 조용히 안 모으게 만들지 않는다.
+        collect_on=str(raw.get("collect_on") or defaults.collect_on),
     )
 
 
@@ -213,6 +217,7 @@ class RemoteWorker:
         *,
         client: WorkerClient | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
+        rand_fn: Callable[[], float] = random.random,  # 지터 — 테스트가 주입한다
         log: Callable[[str], None] | None = None,
         environ: dict[str, str] | None = None,
         once: bool = False,
@@ -220,6 +225,7 @@ class RemoteWorker:
         self.config = config
         self.client = client or WorkerClient(config.server, config.token)
         self.now_fn = now_fn
+        self.rand_fn = rand_fn
         self.log = log or (lambda msg: print(f"[rcm worker] {msg}", file=sys.stderr, flush=True))
         self.environ = environ
         self.once = once
@@ -301,6 +307,12 @@ class RemoteWorker:
         from remote_ci_monitor.core.status import host_json
 
         doc = host_json(hosts[0], now=self.now_fn())
+        # 낡은 표본은 **아예 안 보낸다**(M5f §3.1). 서버는 받은 시각으로 sampled_at 을 다시
+        # 찍으므로, 샘플러가 죽어도 heartbeat 만 살아 있으면 굳은 표본을 영원히 「새것」으로
+        # 본다 — 부하 게이트가 못 보면서 열리는 fail-open 구멍이다. 안 보내면 서버가 든
+        # 표본이 늙어 게이트가 닫힌다.
+        if doc.get("stale"):
+            return None
         for key in ("name", "source", "sampled_at", "age_seconds", "stale"):
             doc.pop(key, None)
         return doc
@@ -334,6 +346,16 @@ class RemoteWorker:
 
     # ── 레인 ────────────────────────────────────────────────────────────────
 
+    def _backoff(self, base: float) -> float:
+        """`[base, 2 × base)` 의 대기. **하한을 낮추지 않는다** — `uniform(0, base)` 로 하면 뜨거운
+        루프가 된다.
+
+        지터가 없으면 빈 204 를 받은 레인들이 같은 1초 격자에 묶여 영영 안 흩어진다. 실측: 같은
+        격자 32레인이면 요청 세마포어(`max_concurrent_requests`)가 정확히 가득 차고, 48레인에서
+        첫 `/api/status` 503 이 난다(M5f §15-C4).
+        """
+        return base + self.rand_fn() * base
+
     def _lane_loop(self, lane: int) -> None:
         while not self.stopping.is_set():
             if self.paused:
@@ -354,15 +376,15 @@ class RemoteWorker:
                         break
                     continue
                 if e.status == 0 or e.status == 503:
-                    self.stopping.wait(2.0)
+                    self.stopping.wait(self._backoff(RETRY_WAIT_SECONDS))
                     continue
                 self.log(f"lane {lane}: claim: {e.message}")
-                self.stopping.wait(2.0)
+                self.stopping.wait(self._backoff(RETRY_WAIT_SECONDS))
                 continue
             if claimed is None:
                 # 서버가 기다리지 않고 204 를 줬다(wait 0 · long-poll 슬롯 소진) — 뜨거운 루프 금지
                 if time.monotonic() - asked_at < CLAIM_MIN_INTERVAL:
-                    self.stopping.wait(CLAIM_MIN_INTERVAL)
+                    self.stopping.wait(self._backoff(CLAIM_MIN_INTERVAL))
                 continue
             try:
                 self.run_claimed(lane, claimed)
@@ -513,7 +535,10 @@ class RemoteWorker:
     ) -> CollectResult | None:
         """모아서 서버에 올린다. 오류는 여기서 잡는다 — 산출물 때문에 잡이 죽지 않는다(§5)."""
         policy = _policy_from_claim(claimed)
-        if policy is None or not policy.enabled():
+        state = art.prospective_state(
+            result.rc, cancelled=result.cancelled, timed_out=result.timed_out
+        )
+        if policy is None or not policy.collects_for(state):
             return None
         # 스풀은 **지우지 않는다.** 전송 결과가 불확실하면 다시 보낼 수 있어야 한다(§5).
         # 무한정 쌓이지 않게 시작할 때 `_sweep_workspaces` 가 나이로 쓸어 간다.

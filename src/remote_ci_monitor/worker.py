@@ -19,6 +19,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     WORKER_BUSY,
     WORKER_DOWN,
+    WORKER_HELD,
     WORKER_IDLE,
     Job,
     Preset,
@@ -109,6 +111,10 @@ class Outcome:
     failed_step: str | None
     code: str | None = None
     args: dict[str, Any] = field(default_factory=dict)
+    #: 「끝났을 때 어디였나」. 실패 이름 셋과 함께 움직인다 — 취소·유실은 넷 다 비어 있다 (M5h)
+    last_step: str | None = None
+    fail_names: tuple[str, ...] = ()
+    fail_truncated: bool = False
 
     def __iter__(self):
         """옛 3-튜플처럼 풀 수 있게 — `state, summary, failed_step = outcome_for(...)`."""
@@ -141,7 +147,8 @@ def outcome_for(
         started_at=started,
         finished_at=finished,
         now=finished,
-        exit_code=rc if not forced else 1,
+        # 강제 종료에 1 을 넣으면 마지막 열린 스텝이 실패로 물든다 — 그게 #176 이었다(M5h).
+        exit_code=None if forced else rc,
     )
     code: str | None = None
     args: dict[str, Any] = {}
@@ -166,8 +173,24 @@ def outcome_for(
             summary, code, args = outcome.summary("exit_code", code=rc)
         else:
             summary = None
-    failed_step = progress.failed_step if state != SUCCEEDED else None
-    return Outcome(state=state, summary=summary, failed_step=failed_step, code=code, args=args)
+    # 스텝 라벨과 실패 이름은 `failed`·`timed_out` 만 갖는다(결정 64). 취소·유실 잡에 스텝
+    # 이름을 붙이면 사람이 「그게 깨져서 멈췄나」로 읽는다. 성공 잡은 자신의 판정이 이긴다.
+    #
+    # dev 의 PR #71 이 이 자리에서 옳은 관찰을 했다 — 「게이트가 `test` 실패를 찍고도 계속
+    # 돌다가 `build web` 에서 타임아웃으로 죽는 모양이 실제로 나온다」. M5h 에서는 그 잡이
+    # `failed_step: test`(스크립트가 선언했다 — 참)와 `last_step: build web`(끝났을 때 거기
+    # 있었다 — 참)을 **둘 다** 낸다. 두 사실이 서로 다른 칸에 있어서 추측 표시가 필요 없다.
+    labelled = state in (FAILED, TIMED_OUT)
+    return Outcome(
+        state=state,
+        summary=summary,
+        failed_step=progress.failed_step if labelled else None,
+        code=code,
+        args=args,
+        last_step=progress.last_step if labelled else None,
+        fail_names=progress.fail_names if labelled else (),
+        fail_truncated=progress.fail_truncated if labelled else False,
+    )
 
 
 class Worker(threading.Thread):
@@ -185,6 +208,7 @@ class Worker(threading.Thread):
         on_marker: Callable[[int, str, str], None] | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
         environ: dict[str, str] | None = None,
+        admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
     ):
         super().__init__(name=f"rcm-worker-{lane}", daemon=True)
         self.lane = lane
@@ -195,12 +219,15 @@ class Worker(threading.Thread):
         self.on_change = on_change
         self.on_marker = on_marker
         self.now_fn = now_fn
+        # 부하 게이트(M5f). None 이면 게이트 없이 오늘처럼 집는다(테스트·단독 사용).
+        self.admit = admit
         self.environ = environ if environ is not None else dict(os.environ)
         self._lock = threading.Lock()
         self._state = WORKER_IDLE
         self._job_id: int | None = None
         self._error: str | None = None
         self._since: datetime = now_fn()
+        self._hold: Any = None
         self._shutting_down = False
 
     def shutdown(self) -> None:
@@ -214,12 +241,16 @@ class Worker(threading.Thread):
 
     def info(self) -> WorkerInfo:
         with self._lock:
+            hold = self._hold if self._state == WORKER_HELD else None
             return WorkerInfo(
                 lane=self.lane,
                 state=self._state,
                 job_id=self._job_id,
                 error=self._error,
                 since=self._since,
+                hold_code=hold.code if hold else None,
+                hold_detail=dict(hold.detail) if hold and hold.detail else None,
+                held_since=self._since if hold else None,
             )
 
     def _set(self, state: str, job_id: int | None = None, error: str | None = None) -> None:
@@ -229,6 +260,23 @@ class Worker(threading.Thread):
             self._state = state
             self._job_id = job_id
             self._error = error
+
+    def _claim(self, now: datetime) -> Job | None:
+        return self.store.claim(self.lane, now)
+
+    def _set_hold(self, hold: Any) -> None:
+        """부하로 막혔으면 `held`, 아니면 `idle`. `_set` 이 상태가 바뀔 때만 `_since` 를 되감으므로
+        같은 이유로 계속 막혀 있는 동안 `held_since` 는 유지된다."""
+        if hold is None:
+            self._set(WORKER_IDLE)
+            return
+        with self._lock:
+            if self._state != WORKER_HELD:
+                self._since = self.now_fn()
+            self._state = WORKER_HELD
+            self._job_id = None
+            self._error = None
+            self._hold = hold
 
     def _changed(self, job_id: int) -> None:
         if self.on_change is not None:
@@ -247,8 +295,13 @@ class Worker(threading.Thread):
                     self.wake.wait(IDLE_WAIT_SECONDS)
                     self.wake.clear()
                     continue
-                current = self.store.claim(self.lane, self.now_fn())
+                now = self.now_fn()
+                if self.admit is None:
+                    current, hold = self.store.claim(self.lane, now), None
+                else:
+                    current, hold = self.admit(self.lane, now, partial(self._claim, now))
                 if current is None:
+                    self._set_hold(hold)
                     self.wake.wait(IDLE_WAIT_SECONDS)
                     self.wake.clear()
                     continue
@@ -293,7 +346,11 @@ class Worker(threading.Thread):
         산출물 때문에 그러면 안 된다(명세 §5).
         """
         policy = artifact_policy(self.config, preset)
-        if not policy.enabled():
+        # 예정 종료 상태로 판정한다 — 수집은 종료를 커밋하기 **전에** 일어난다(M5e §5).
+        state = art.prospective_state(
+            result.rc, cancelled=result.cancelled, timed_out=result.timed_out
+        )
+        if not policy.collects_for(state):
             return None
         data = self.config.data_dir
         staging = data / "artifacts" / ".staging" / f"{job.id}.{secrets.token_hex(8)}"
@@ -437,6 +494,9 @@ class Worker(threading.Thread):
             summary_code=oc.code,
             summary_args=oc.args,
             failed_step=oc.failed_step,
+            last_step=oc.last_step,
+            fail_names=oc.fail_names,
+            fail_truncated=oc.fail_truncated,
             bundle=bundle,
             ttl_hours=self.config.server.artifact_retention_hours,
         )
@@ -455,6 +515,7 @@ def artifact_policy(config: ServerConfig, preset: Preset) -> art.ArtifactPolicy:
         max_files=s.max_artifact_files,
         timeout_seconds=s.artifact_timeout_seconds,
         cancel_timeout_seconds=s.artifact_cancel_timeout_seconds,
+        collect_on=preset.artifacts_on,
     )
 
 
@@ -510,6 +571,7 @@ def start_workers(
     on_change: Callable[[int], None] | None = None,
     on_marker: Callable[[int, str, str], None] | None = None,
     now_fn: Callable[[], datetime] = _utcnow,
+    admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
 ) -> list[Worker]:
     workers = [
         Worker(
@@ -521,6 +583,7 @@ def start_workers(
             on_change=on_change,
             on_marker=on_marker,
             now_fn=now_fn,
+            admit=admit,
         )
         for lane in range(1, config.server.lanes + 1)
     ]

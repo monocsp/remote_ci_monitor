@@ -39,8 +39,8 @@ PROD = guard.Production(checkout=CHECKOUT, venv=VENV, config_dir=CONFIG, data_di
 NO_PROD = guard.Production()
 
 
-def bash(command: str, cwd: Path = WORKTREE, prod=PROD):
-    return guard.decide("Bash", {"command": command}, prod, cwd)
+def bash(command: str, cwd: Path = WORKTREE, prod=PROD, local_config: bool = False):
+    return guard.decide("Bash", {"command": command}, prod, cwd, local_config=local_config)
 
 
 def edit(file_path: str, cwd: Path = WORKTREE, prod=PROD):
@@ -142,6 +142,17 @@ def test_a_server_with_its_own_config_is_free():
     assert bash("rcm serve --config /tmp/test.toml --port 8788") is None
 
 
+def test_a_worktree_that_has_its_own_rcm_toml_is_free():
+    """설정 탐색은 `./rcm.toml` 에서 멈춘다 — 운영 설정까지 내려가지 않는다."""
+    assert bash("rcm serve", local_config=True) is None
+    assert bash("rcm serve") is not None  # 대조: 자기 설정이 없으면 여전히 막힌다
+
+
+def test_a_local_config_does_not_excuse_naming_the_production_one():
+    assert bash(f"rcm serve --config {CONFIG}/server.toml", local_config=True) is not None
+    assert bash(f"rcm serve --data {DATA}", local_config=True) is not None
+
+
 def test_a_server_pointed_at_the_production_config_or_data_is_denied():
     assert bash(f"rcm serve --config {CONFIG}/server.toml") is not None
     assert bash(f"rcm serve --config /tmp/test.toml --data {DATA}") is not None
@@ -203,3 +214,125 @@ def test_without_a_production_install_edits_are_free():
 def test_other_tools_are_not_judged():
     assert guard.decide("Read", {"file_path": f"{CHECKOUT}/PLAN.md"}, PROD, WORKTREE) is None
     assert guard.decide("Bash", {}, PROD, WORKTREE) is None
+
+
+# ── 운영 데이터에 쓰는 명령 (M5i 결정 75) ────────────────────────────────────
+#
+# 2026-09-10: dev 워크트리의 `rcm gc --dry-run --config <운영 설정>` 이 운영 DB 를 마이그레이션했다.
+# 훅은 `serve`·`worker` 만 봐서 못 막았다. 이제 `token`(list 도 Store 를 열어 마이그레이션한다 —
+# 전부 쓰기)은 유효 `data_dir` 이 운영 데이터이고 실행 파일이 서비스 venv 밖이면 deny 다.
+# `gc --dry-run --config` 는 PR 2 뒤 사본 위에서 돌므로 **명시 허용**이다.
+
+
+def which_worktree(name: str) -> str | None:
+    return f"{WORKTREE}/.venv/bin/{name}"
+
+
+def which_production(name: str) -> str | None:
+    return f"{VENV}/bin/{name}"
+
+
+@pytest.fixture(autouse=True)
+def _bare_rcm_is_a_worktree_build(monkeypatch):
+    """맨 `rcm` 은 PATH 로 푼다 — 기본 픽스처에서는 워크트리 venv 의 것이다."""
+    monkeypatch.setattr(guard, "_which", which_worktree, raising=False)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"rcm token --config {CONFIG}/server.toml list",
+        f"rcm token --config {CONFIG}/server.toml add laptop",
+        f"rcm token --config={CONFIG}/server.toml revoke laptop",
+        f"rcm token --data-dir {DATA} add laptop",
+        f"python -m remote_ci_monitor.cli token --config {CONFIG}/server.toml list",
+        f"RCM_CONFIG={CONFIG}/server.toml rcm token list",
+        f"env RCM_CONFIG={CONFIG}/server.toml rcm token list",
+        f"{WORKTREE}/.venv/bin/rcm token --config {CONFIG}/server.toml list",
+    ],
+)
+def test_a_token_command_on_the_production_data_from_another_build_is_denied(command):
+    verdict = bash(command)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert "migrat" in verdict.reason and str(DATA) in verdict.reason, verdict.reason
+
+
+def test_a_copy_of_the_production_config_still_points_at_the_production_data(tmp_path):
+    """설정을 복사해도 `data_dir` 이 운영이면 같은 DB 다 — 훅이 TOML 을 읽어 유효 data_dir 을
+    본다."""
+    copy = tmp_path / "server-copy.toml"
+    copy.write_text(f'[server]\nport = 8791\ndata_dir = "{DATA}"\n')
+    verdict = bash(f"rcm token --config {copy} list")
+    assert verdict is not None and verdict.decision == "deny"
+    other = tmp_path / "test.toml"
+    other.write_text(f'[server]\nport = 8791\ndata_dir = "{tmp_path}/data"\n')
+    assert bash(f"rcm token --config {other} list") is None
+
+
+@pytest.mark.parametrize(
+    "prefix", ["RCM_SERVER_DATA_DIR={DATA} ", "env RCM_SERVER_DATA_DIR={DATA} "]
+)
+def test_the_data_dir_env_override_points_a_test_config_at_the_production_data(tmp_path, prefix):
+    """`RCM_SERVER_DATA_DIR` 은 CLI 의 env 덮어쓰기(`RCM_<SECTION>_<KEY>`, config.py
+    `_env_overrides`)라 설정 파일보다 우선한다 — 시험 설정을 줘도 그 변수가 운영을 가리키면 운영
+    DB 가 열린다."""
+    test = tmp_path / "test.toml"
+    test.write_text(f'[server]\nport = 8795\ndata_dir = "{tmp_path}/data"\n')
+    verdict = bash(prefix.format(DATA=DATA) + f"rcm token --config {test} add laptop")
+    assert verdict is not None and verdict.decision == "deny", verdict
+
+
+def test_the_data_dir_env_override_in_the_session_environment_is_seen(tmp_path, monkeypatch):
+    """조각 앞이 아니라 세션 환경에 있어도 CLI 는 읽는다 — `RCM_CONFIG` 와 같은 규칙."""
+    test = tmp_path / "test.toml"
+    test.write_text(f'[server]\nport = 8795\ndata_dir = "{tmp_path}/data"\n')
+    monkeypatch.setenv("RCM_SERVER_DATA_DIR", str(DATA))
+    verdict = bash(f"rcm token --config {test} add laptop")
+    assert verdict is not None and verdict.decision == "deny", verdict
+
+
+def test_the_data_dir_env_override_away_from_production_is_free(monkeypatch):
+    """반대로 변수가 시험 디렉터리를 가리키면 운영 설정을 줘도 운영 DB 는 안 열린다 — 그리고
+    `--data-dir` 은 변수보다 앞선다(CLI 와 같은 순서)."""
+    production_config = f"--config {CONFIG}/server.toml"
+    assert bash(f"RCM_SERVER_DATA_DIR=/tmp/rcm-test rcm token {production_config} list") is None
+    verdict = bash(f"RCM_SERVER_DATA_DIR=/tmp/rcm-test rcm token --data-dir {DATA} add laptop")
+    assert verdict is not None and verdict.decision == "deny", verdict
+    monkeypatch.setenv("RCM_SERVER_DATA_DIR", "/tmp/rcm-test")
+    assert bash(f"rcm token {production_config} list") is None
+
+
+def test_the_service_venvs_own_rcm_may_manage_its_tokens(monkeypatch):
+    """운영 빌드가 운영 DB 를 여는 것은 정상 운영이다 — 마이그레이션이 없다."""
+    assert bash(f"{VENV}/bin/rcm token --config {CONFIG}/server.toml add laptop") is None
+    monkeypatch.setattr(guard, "_which", which_production)
+    assert bash(f"rcm token --config {CONFIG}/server.toml add laptop") is None
+
+
+def test_a_token_command_with_no_config_finds_the_production_one():
+    assert bash("rcm token list") is not None
+    assert bash("rcm token list", local_config=True) is None  # `./rcm.toml` 에서 멈춘다
+
+
+def test_a_token_command_on_a_test_data_dir_is_free():
+    assert bash("rcm token --data-dir /tmp/rcm-test add laptop") is None
+    assert bash(f"rcm token --config {CONFIG}/server.toml --data-dir /tmp/rcm-test list") is None
+    assert bash("rcm token --help") is None
+
+
+def test_an_unreadable_config_is_not_a_reason_to_deny(tmp_path):
+    """TOML 을 못 읽으면 CLI 도 먼저 실패한다 — 훅이 대신 막지 않는다."""
+    broken = tmp_path / "broken.toml"
+    broken.write_text("[server\nthis is not toml")
+    assert bash(f"rcm token --config {broken} list") is None
+    assert bash(f"rcm token --config {tmp_path}/missing.toml list") is None
+
+
+def test_the_offline_dry_run_against_the_production_config_is_allowed():
+    """PR 2 뒤 dry-run 은 임시 사본 위에서 돈다 — 결정 75 의 명시 허용."""
+    assert bash(f"rcm gc --dry-run --config {CONFIG}/server.toml") is None
+    assert bash(f"{WORKTREE}/.venv/bin/rcm gc --dry-run --config {CONFIG}/server.toml") is None
+
+
+def test_without_a_production_install_token_commands_are_free():
+    assert bash(f"rcm token --config {CONFIG}/server.toml list", prod=NO_PROD) is None

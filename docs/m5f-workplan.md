@@ -87,17 +87,34 @@ admission_cooldown_seconds = 30    # 한 머신에서 게이트를 지나 잡을
 
 메모리 게이트는 **넣지 않는다**(결정 42, §13-F).
 
-검증 — 오류 문구에 섹션·키 이름이 들어가는 오늘의 방식(`config.py:574`), 교차 검증은 `config.py:609-613`
-스타일:
+**타입**(중요 — `_apply_section` 이 **기본값의 타입으로** TOML 값을 맞춘다, `config.py:274`):
+`admission: str` · `cpu_max_percent: float = 80.0`(백분율은 소수가 될 수 있고 `cpu.busy` 도 float 다) ·
+`admission_samples: int = 3` · `admission_cooldown_seconds: int = 30`(이 저장소의 `*_seconds` 는 전부 int).
+순수 계층의 `AdmissionConfig` 는 초를 float 로 받는다 — `core/queue.QueueConfig` 가
+`EstimateSection` 의 int 를 float 로 받는 것과 같은 방식이다.
+
+**검증(오류)** — 문구는 섹션·키 이름이 들어가고 **작은따옴표**를 쓰는 오늘의 방식(`config.py:579`):
 
 | 키 | 규칙 | 문구 |
 |---|---|---|
-| `admission` | `"load"` \| `"always"` | `[server] admission must be "load" or "always"` |
-| `cpu_max_percent` | `1 <= x <= 100` | `[server] cpu_max_percent must be between 1 and 100` |
+| `admission` | `'load'` \| `'always'` | `[server] admission must be 'load' or 'always'` |
+| `cpu_max_percent` | `0 < x <= 100` | `[server] cpu_max_percent must be between 1 and 100` |
 | `admission_samples` | `>= 1` | `[server] admission_samples must be >= 1` |
-| `admission_samples` | `<= [host] history_samples` | `[server] admission_samples must be <= [host] history_samples` |
-| `admission_samples × [host] interval_seconds` | `<= admission_cooldown_seconds` | `[server] admission_samples × [host] interval_seconds must not exceed admission_cooldown_seconds` |
 | `admission_cooldown_seconds` | `>= 0` | `[server] admission_cooldown_seconds must be >= 0` |
+
+**정합성(경고 — 오류가 아니다)**: 아래 둘은 `advertise_warning()`(`config.py:191`)과 같은 방식으로
+**기동 로그 한 줄**로만 알린다. 오류로 만들면 **업그레이드만으로 돌던 서버가 안 뜬다** —
+`[host] history_samples = 2` 나 `interval_seconds = 60` 을 쓰던 사람은 admission 키를 만진 적이 없는데
+기본값 때문에 걸린다. 게이트는 런타임에 이미 옳게 닫히므로(`no_sample`) 경고로 충분하다.
+
+| 조건 | 경고 문구 |
+|---|---|
+| `admission_samples > [host] history_samples` | `warning: [server] admission_samples (3) is more than [host] history_samples (2) — lanes 2+ will never open` |
+| `admission_samples * [host] interval_seconds > admission_cooldown_seconds` | `warning: [server] admission_samples * [host] interval_seconds (180s) exceeds admission_cooldown_seconds (30s) — the two constants no longer relate` |
+
+같은 경고를 **원격 워커에도** 낸다. 워커의 `[host] history_samples` 는 다른 함수에서 따로 검사되고
+(`config.py:911-912`) 서버가 못 보므로, `rcm check` 가 워커의 표본 history 길이가 `admission_samples`
+보다 짧으면 경고한다(§5.4).
 
 `worker.toml` 에는 **아무것도 더하지 않는다** — 판정은 서버가 한다. 워커의 `[host] interval_seconds` 는
 그 머신 표본의 신선도를 정하므로 그대로 쓰인다.
@@ -138,8 +155,9 @@ def decide(*, lane, sample, now, last_admit_at, cfg) -> Hold | None
 
 순서대로:
 
-1. `lane == 1` → **언제나 열림.** 머신마다 레인 하나는 게이트를 안 지난다. **쿨다운 판정은 건너뛰지만
-   쿨다운 기록은 남긴다**(§4.5, 결정 41).
+1. `lane <= 1` → **언제나 열림.** 머신마다 레인 하나는 게이트를 안 지난다. **쿨다운 판정은 건너뛰지만
+   쿨다운 기록은 남긴다**(§4.5, 결정 41). 레인은 1부터인데(`worker.py:448` · `remote_workers.py:315`)
+   `<= 1` 로 두는 건 방어다 — 0 이나 음수가 들어와도 잠기지 않는다.
 2. `cfg.policy == "always"` → 열림.
 3. 표본이 없거나 `now − sample.sampled_at > cfg.stale_seconds` → `Hold("no_sample")`.
 4. `sample.cpu` 가 `None` 이거나 `sample.cpu.get("busy")` 가 `None` → `Hold("no_sample")`.
@@ -152,12 +170,23 @@ def decide(*, lane, sample, now, last_admit_at, cfg) -> Hold | None
    → `Hold("no_sample")`.
    - **간격 판정은 항목끼리만 비교한다.** `history[].at` 은 표본을 만든 머신의 시계이고 `sampled_at` 은
      서버 시계다(`hostparse.py:360-366`) — 둘을 빼면 시계 차가 섞인다. 이웃한 `at` 차이가
-     `2 × sample.interval_seconds` 를 넘으면 끊긴 것으로 본다. `at` 은 ISO 문자열이라
-     `core/status.parse_iso`(`:41`)로 읽는다.
-7. 그 표본 전부가 `cpu_busy <= cpu_max_percent` 가 **아니면** → `Hold("cpu_busy", detail=최신값)`.
+     `2 × max(sample.interval_seconds, 1.0)` 를 넘으면 끊긴 것으로 본다(하한을 두는 건 방어 —
+     `interval_seconds` 가 0 이면 모든 창이 「끊김」이 돼 그 머신이 영영 잠긴다). `at` 은 ISO
+     문자열이라 `core/status.parse_iso`(`:41`)로 읽고, 못 읽으면 `Hold("no_sample")` 이다.
+7. 그 창의 값이 전부 `cpu_busy <= cpu_max_percent` 가 **아니면** →
+   `Hold("cpu_busy", detail={"cpu_busy": 창의 최댓값})`. **최신값이 아니라 최댓값**이다 — 막은 값이
+   그것이고, 창이 `[85, 70, 70]` 인데 화면이 `held (cpu 70%)` 라고 쓰면 거짓말이 된다.
+   `no_sample`·`cooldown` 의 `detail` 은 `None`(얼마나 오래 막혔는지는 `held_since` 가 말한다).
 8. 그 외 → 열림.
 
 **fail-open 금지**: 3·4·6 은 전부 「모르면 닫는다」다. **모르는 채로 여는 분기는 하나도 없다.**
+
+**`decide()` 는 어떤 입력에도 예외를 던지지 않는다.** 읽을 수 없는 모양은 전부 `Hold("no_sample")` 이다.
+단 **통짜 `try/except` 로 감싸지 않는다** — 그러면 진짜 버그가 「표본 없음」으로 숨는다. 필드마다
+명시적으로 검사한다. 이 계약을 테스트가 잠근다(§8).
+
+**판정 순서는 규범이다.** stale 이면서 상한도 넘은 표본은 `no_sample` 이지 `cpu_busy` 가 아니고,
+쿨다운은 창을 걷기 **전에** 본다. 화면이 「왜 막혔나」를 한 가지로만 말해야 하기 때문이다.
 
 **`hold_max_seconds`(무한 보류 방지)는 두지 않는다.** 레인 1 이 게이트를 안 지나므로 큐는 계속 움직인다.
 다만 「게이트가 제 일을 하는 중」과 「누가 두 시간째 이 머신을 잡고 있음」을 구분할 수단이 필요하므로
@@ -248,10 +277,16 @@ GIL 아래 원자적). 큐가 비어 claim 이 `None` 이면 기록하지 않는
 `held_since: datetime | None`. `state` 에 **값이 하나 느는 것**이지 키가 바뀌는 게 아니다 —
 `schema_version` 그대로.
 
-⚠️ 키를 더하면 **테스트 셋이 빨개진다**(실측 §14-A3): `tests/test_status_schema.py:224`(키 집합 완전
-일치) · `tests/test_server.py:400`(`assert doc["server"]["workers"] == [{…}]`, dict **전체** 비교) ·
-`tests/test_worker_api.py:678`(`assert lane == {…}`, 원격 레인 dict 전체 비교). §8 의 「추가」가 아니라
-기존 단언의 수정이다.
+⚠️ 키를 더하면 **기존 단언 넷이 빨개진다**: `tests/test_status_schema.py:224`(워커 키 집합 완전 일치) ·
+`tests/test_server.py:400`(`assert doc["server"]["workers"] == [{…}]`, dict **전체** 비교) ·
+`tests/test_worker_api.py:678`(`assert lane == {…}`) · 그리고 §6 의 `Estimate.shared` 가
+`tests/test_status_schema.py:48` `ESTIMATE_KEYS`(를 `tests/test_status_m5b.py:145` 가 재사용한다)를
+깬다. §8 의 「추가」가 아니라 기존 단언의 수정이다.
+
+**워커 버전은 스키마에 안 넣는다.** §3.1 의 fail-open 구멍(옛 워커가 굳은 표본을 계속 보냄)은
+`rcm check` 가 아니라 **서버가 등록 시점에 로그 한 줄**로 알린다 — `WorkerRow.version` 이 이미 있고
+(`store.py:231`) `rcm check` 는 `/api/status` 만 읽어서 버전을 못 본다. 스키마를 키 하나 더 늘리는 것보다
+아는 쪽이 말하는 게 싸다.
 
 ### 5.2 큐 사유 `held_by_load`
 
@@ -274,6 +309,8 @@ GIL 아래 원자적). 큐가 비어 claim 이 `None` 이면 기록하지 않는
 
   「너를 집었을 레인이 부하로 막혀 있다」는 뜻이므로, 오늘의 `idle_since` 처리와 같은 방식으로 **대기 잡
   하나가 보류 레인 하나를 소비**한다. 뒤 잡은 정직하게 `waiting_for_lane` 이다.
+  **`idle_since`(열려 있는 idle 레인)와 held 레인은 별개의 통이다** — `not_scheduled` 로 판정된 잡이
+  held 레인까지 같이 먹지 않는다.
 - **`open` 이 비면 ETA 는 null 이다**(시작할 수 없는 잡에 시각을 주지 않는다 — PLAN 「큐 규칙」).
   `live` 는 안 비었는데 `open` 이 빈 경우가 새로 생긴다: **레인 1 이 down 이고 레인 2 가 held**. 그러면
   사유는 `held_by_load` 이고 ETA 는 `—` 인데, 진짜 원인인 죽은 레인 1 은 `workers[]` 의 `down` 필과
@@ -291,6 +328,9 @@ GIL 아래 원자적). 큐가 비어 claim 이 `None` 이면 기록하지 않는
 기본값이 `default`(`config.py:209`)다. 그래서 로컬 레인 2 와 `build-02/2` 가 같은 키로 뭉개진다 — 오늘도
 용량을 적게 세고 있고, 이걸 안 고치면 **보류 레인을 빼는 §5.2 가 아무 효과가 없다.**
 
+`lane_last_job` 도 같이 뭉개져 **`ahead_job_id` 가 엉뚱한 잡을 가리킨다** — 실측: 원격 `#500`(100초 뒤
+빔)과 로컬 `#501`(340초 뒤 빔)이 있을 때 오늘은 `wait 340 · ahead 501`, 고치면 `wait 100 · ahead 500`.
+
 고침: 세 dict 를 `(w.worker, w.lane)` 로 키를 잡고 잡 귀속을 `(job.worker_name, job.lane)` 로 한다.
 `Job.worker_name` 은 이미 있다(`core/model.py:226`). ETA 숫자가 바뀌므로 **자기 테스트와 CHANGELOG 한 줄**을
 붙인다.
@@ -305,15 +345,26 @@ PLAN 이 금지한 「자신있는 틀린 시각」이 된다. 빼면 시각이 
   ⚠️ 오늘은 `lanes >= 2` 면 `busy` 수와 `down` 목록만 찍으므로(`:260`·`:261`·`:267`·`:268`) **보류 레인이
   아예 안 보인다** — 세는 자리를 새로 넣어야 한다. 레인 1 이면 오늘처럼 필 하나로 접는다(결정 12).
 - 원격 필(`:281`)은 상태 문자열을 그대로 찍으므로 `build-02/2 held` 가 저절로 나온다.
-- 큐 행 사유(`:123~`): `held by load · cpu 92%`.
+- 큐 행 사유(`:123~`): `held by load · cpu 92%`. **숫자는 큐 행이 아니라 워커에서 온다** —
+  `hold_detail` 은 `server.workers[]` 에 있고 큐 행에는 없다. 다행히 양쪽 렌더러가 이미 그 값을 손에
+  들고 있다: 터미널은 `render_pool(..., server=, workers=)` 로 받고, 웹은
+  `reasonText(row, status, …)`(`app.js:390`)로 받는다. **그러니 행 키(`ROW_KEYS`)를 늘리지 않는다** —
+  사유 텍스트 함수에 워커 목록을 넘겨 그 풀에서 `cpu_busy` 로 막힌 레인의 **최댓값**을 쓴다.
+  `cpu_busy` 로 막힌 레인이 하나도 없으면 숫자 없이 코드만(`held by load · no sample`).
 - `rcm check` pools 행(`cli.py:879`): `default (2 lanes · 1 held) · linux (build-02/1 idle)`. **FAIL 이
   아니다.** 여기에 경고 두 가지를 더한다(`ok=None` = warn, FAIL 아님):
-  - 어떤 레인이 `10 × admission_cooldown_seconds` 넘게 held → 「게이트가 오래 닫혀 있다」.
-  - 레인 ≥ 2 인 등록 워커의 `version` 이 서버보다 낮음 → §3.1 의 구멍이 남아 있다.
+  - 어떤 레인이 **5분**(`HELD_WARN_SECONDS = 300`, 클라이언트 상수) 넘게 held → 「게이트가 오래 닫혀
+    있다」. 서버 설정값(`admission_cooldown_seconds`)을 쓰지 않는 이유: 그건 **원격 서버의** 설정이라
+    `rcm check` 가 볼 수 없다. 이 경고는 게이트의 타이밍이 아니라 「사람이 한번 봐야 한다」는 뜻이므로
+    고정 상수가 맞다.
+  - 워커의 표본 history 길이가 `admission_samples` 보다 짧음 → 그 워커의 레인 ≥ 2 는 영영 안 열린다.
 - SSE: `_publish_server`(`server.py:405-410`)가 `{lane, state, job_id, worker}` 만 보낸다. `hold_code` 를
   같이 실어야 필이 다음 전체 폴링(10초)까지 이유 없는 `held` 로 남지 않는다.
-- 웹: `i18n.js` 두 언어에 `state.held` · `reason.held_by_load` · `hold.cpu_busy`/`hold.no_sample`/
-  `hold.cooldown`. `app.js` 는 `reasonText` 분기 + `:388` 정상 대기 목록. `workerState()`(`:510-514`)가
+- 웹: `i18n.js` **두 언어 모두**에 `state.held` · `reason.held_by_load` · `hold.cpu_busy` ·
+  `hold.no_sample` · `hold.cooldown` (지금은 다섯 다 없어서 `workerState("held")` 가 원문 `held` 를,
+  `reasonText` 가 `unknown`/`알 수 없음` 을 낸다).
+  ⚠️ `style.css` 에 `.wk.busy`·`.wk.down` 은 있는데 `.wk.idle` 이 없다 — 그대로 두면 **`held` 필이
+  idle 과 똑같이 보인다**. 터미널에서 고치려는 바로 그 문제이므로 `.wk.held` 를 같이 넣는다. `app.js` 는 `reasonText` 분기 + `:388` 정상 대기 목록. `workerState()`(`:510-514`)가
   `I18N.has` 로 막고 있어 옛 페이지도 안 깨진다.
 
 한국어 문구(초안): 「부하로 대기」 · 「CPU 가 바빠서 안 집는 중 (92%)」 · 「표본 없음 — 안전하게 멈춤」.
@@ -339,8 +390,13 @@ expected = 같이-실행 중앙값(sample_count >= min_samples 일 때)
 
 - **PR 2a**: `jobs.concurrent_at_start INTEGER`(**DB v7**)를 더하고 `store.claim` 의 **같은 트랜잭션**에서
   쓴다(그 풀의 busy 잡 수 + 1). 15줄이고, **지금 안 모으면 나중에 소급해서 못 얻는다.**
-- **PR 2c**(표본이 쌓인 뒤): 위 계층 대체 + `Estimate` 에 `shared: bool` **새 필드**를 실어 신뢰도까지
-  잇는다. ⚠️ `confidence()` 는 `compute_queue` 가 부르는 게 아니라 **렌더 시점에 세 곳에서 따로**
+- **PR 2b**: `Estimate` 에 `shared: bool` **새 필드**(사실 그대로 — 「이 잡이 같은 풀의 다른 잡과 함께
+  돌고 있다」). 신뢰도는 `shared and source == SOURCE_MEASURED` 일 때만 한 칸 내린다 — 혼자 잰
+  중앙값을 나눠 쓰는 상황이기 때문이다. `overdue`·`group wait` 는 `confidence()` 가 먼저 반환하므로
+  영향이 없다.
+- **PR 2c**(표본이 쌓인 뒤): 위 계층 대체 + `SOURCE_SHARED = "shared"` 를 `Estimate.source` 에 더한다.
+  그 값을 썼다는 건 **맞는 표본으로 쟀다**는 뜻이므로 그때는 신뢰도를 **안 내린다**. 화면의
+  `· measured n=7` 옆에 `· shared n=3` 이 생긴다. ⚠️ `confidence()` 는 `compute_queue` 가 부르는 게 아니라 **렌더 시점에 세 곳에서 따로**
   계산된다(`core/status.py:176` · `render_text.py:193` · `web/app.js:263`) — 셋을 같이 고치지 않으면
   `rcm top` 과 웹이 서로 다른 배지를 찍는다. `low` 는 더 내려갈 곳이 없으므로 `low` 로 둔다.
 - **그 사이(PR 2a·2b)**: 배수를 지어내지 않는다. 「레인을 올리면 같이 도는 동안 `overdue` 가 일찍 뜬다」를
@@ -402,9 +458,9 @@ M3 e2e 가 잠가 놓았다). 그룹은 「무겁지만 자기들끼리는 병�
 - **PR 1(이 문서)**: `docs/m5f-workplan.md` + `docs/reviews/2026-09-08-m5f-design-review.md` +
   `PLAN.md`(마일스톤 M5f · 설정 키 · reason·워커 상태 목록 · 결정 39~46). 코드 없음.
 - **PR 2a-0(선행 병목)**: 게이트를 다는 자리 자체가 느리면 게이트가 아니라 그게 병목이 된다(§15).
-  ① `store.add_markers()` 배치(마커 줄마다 트랜잭션 하나 → 한 번) ② janitor 주기 sweep 에 `ANALYZE`
-  ③ `_try_claim` 이 `sqlite3.OperationalError` 를 500 이 아니라 503 으로 ④ `CLAIM_MIN_INTERVAL` 지터
-  ⑤ §5.3 의 레인 키 버그. 넷 다 M5f 없이도 옳고, M5f 가 있으면 필수다.
+  ① `store.add_markers()` 배치(마커 줄마다 트랜잭션 하나 → 한 번) ② **claim 전용 인덱스**
+  `jobs_claim(state, pool, priority DESC, id)`(DB v7) ③ `_try_claim` 의 잠금 오류를 500 이 아니라 503 으로
+  ④ `CLAIM_MIN_INTERVAL` 지터 ⑤ §5.3 의 레인 키 버그. 다섯 다 M5f 없이도 옳고, M5f 가 있으면 필수다.
 - **PR 2a**: `core/admission.py` + 설정 키·검증 + 서버 배선(락 · `_hold` ·
   슬롯 순서 · 시작 로그) + `remote_worker._host_sample` 의 stale 구멍(§3.1) + `core/queue.py` 사유·ETA +
   상태 JSON + SSE + `jobs.concurrent_at_start`(DB v7). 테스트-퍼스트.
@@ -443,7 +499,7 @@ M3 e2e 가 잠가 놓았다). 그룹은 「무겁지만 자기들끼리는 병�
 | 45 | `held_by_load` 는 「Not moving」에 **안 올린다** | 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다. 늘 켜져 있으면 사람들이 패널을 무시하게 되고 `worker_down`·`stuck` 이 묻힌다. 대신 행 사유로 보이고, 오래 닫히면 `rcm check` 가 경고한다 |
 | 46 | 코로케이션은 자동 병합하지 않는다 | 한 머신의 `rcm serve` + `rcm worker` 는 게이트 없는 레인 **둘**을 갖는다. 합치려면 `/worker/register` 에 머신 식별자를 더해야 한다 — 필요해지면 그때 |
 | 47 | 원격 표본의 낡음 예산 | 기본 15초(`3 × interval`) 그대로 둔다. heartbeat 이 두 번 밀리면 경계에 걸리고 세 번이면 닫힌다 — 한가한 머신인데도 닫히는 게 거슬리면 `stale_seconds` 를 설정 키로 뺀다. 지금은 fail-closed 를 택했다 |
-| 48 | 선행 병목을 M5f 안에서 고친다 | PR 2a-0 의 다섯 가지. 근거는 §15 의 실측 — `ANALYZE` 하나로 claim 이 16.5 ms → 0.004 ms(3727배), 마커 배치로 로그 폭주 중 claim 이 275.9 ms → 0.03 ms |
+| 48 | 선행 병목을 M5f 안에서 고친다 | PR 2a-0 의 다섯 가지. 근거는 §15 의 실측 — 전용 인덱스로 claim 이 8.55 ms → **0.0033 ms**, 마커 배치로 로그 폭주 중 claim 이 275.9 ms → 0.03 ms. `ANALYZE` 는 **안 쓴다**(통계가 커넥션을 안 넘고 temp B-tree 도 안 없앤다) |
 | 49 | M5f **밖**의 병목은 별도 PR | `/api/status` 의 `list_samples`(요청의 91~93%, 1만 행 245 ms) · `remote_worker_infos` N+1(마커 줄당 SQL 555개) · `workers` 표 미정리 · `PRAGMA synchronous=NORMAL`(쓰기 5.6배, WAL 에서 표준·안전하지만 내구성 변경이라 오너가 정한다). 전부 M5f 전에도 후에도 참인 문제다 |
 | 50 | 같은 레포의 병렬 레인은 직렬화된다 — 고치지 않고 적는다 | `gitops.py` 의 미러 락은 공유 객체를 지키는 것이라 함부로 풀 수 없다. 「같은 레포를 쓰는 프리셋은 레인을 늘려도 자재화가 겹치지 않는다」를 `docs/configuration.md` 에 적는다 |
 
@@ -543,9 +599,26 @@ A5 의 워커 쪽 검증 사각, B2 의 `idle_since` 동반 붕괴. 전부 위 �
 |---|---|---|---|
 | C1 | **`worker_log` 이 마커 줄마다 트랜잭션 하나**(`remote_workers.py:425`) | 11.5k~31k txn/s — claim 이 굶기 시작하는 2000 txn/s 를 5~15배 넘는다. **256 KB flush 한 번에 다른 레인의 claim 이 0.03 ms → 275.9 ms**. 4 MB 본문이면 `busy_timeout` 이 터져 워커에 **5.43초 뒤 HTTP 500** | `Store.add_markers()`(`BEGIN IMMEDIATE` + `executemany`) 하나로. 4 MB 12.14초 → 0.38초(**32배**), `database is locked` 1 → 0. SSE 는 커밋 뒤 두 번째 루프에서 발행 |
 | C1b | `_try_claim` 이 `LaneBusy` 만 잡는다(`remote_workers.py:345`) | `sqlite3.OperationalError` 가 일반 500 으로 새고, 워커는 2초 잔다 → 레인 7.4초 정지 + 뜻 모를 메시지 | 503 + `Retry-After` 로 |
-| D6 | **`store.claim` 이 `jobs_pool` 을 탄다** — `jobs_state(state, id)` 가 **이미 있는데** 통계가 없어 플래너가 안 쓴다 | 20만 행에서 **16.5 ms**, 레인마다 초당 2회, `BEGIN IMMEDIATE` 안 | janitor sweep 에 `ANALYZE` 한 줄 → **0.004 ms(3727배)**. `list_recent` 102배, `list_pools` 3.875 → 0.002 ms |
+| D6 | **`store.claim` 이 `jobs_pool` 을 탄다** — `jobs_state(state, id)` 가 **이미 있는데** 통계가 없어 플래너가 안 쓴다 | 20만 행에서 **8.6 ms**(cold 8.3), 레인마다 초당 2회, `BEGIN IMMEDIATE` 안 | **`ANALYZE` 가 아니라 전용 인덱스**(아래) |
 | C4 | `CLAIM_MIN_INTERVAL = 1.0` 에 지터가 없다(`remote_worker.py:315`) | 같은 격자 32레인 = `max_concurrent_requests` 가 정확히 만석. 48레인에서 첫 `/api/status` 503, 128레인이면 워커 claim 406건 거절 | 0~1초 지터 → 503 **406 → 36건** |
 | §5.3 | ETA 그리디의 레인 번호 충돌 | 4레인이 2레인처럼 — 대기 잡이 0초 대신 400초 | `(worker, lane)` 키 |
+
+**왜 `ANALYZE` 가 아니라 인덱스인가**(재 봤다, 20만 행 · 차가운 커넥션):
+
+| | cold | warm | 계획 |
+|---|---|---|---|
+| 통계 없음(오늘) | 8.263 ms | 8.551 ms | `jobs_pool` + **temp B-tree** |
+| `ANALYZE` | 0.041 ms | 0.0124 ms | `jobs_state` + **temp B-tree** |
+| **`jobs_claim(state, pool, priority DESC, id)`** | 0.024 ms | **0.0033 ms** | `jobs_claim (state=? AND pool=?)` — **temp B-tree 없음** |
+
+인덱스가 ANALYZE 보다 **3.8배 빠르고** ORDER BY 의 임시 B-tree 를 아예 없앤다(ANALYZE 는 못 없앤다).
+그리고 결정적으로 **통계가 아니라 스키마라서 커넥션 문제가 없다**: `Store._conn()` 은 스레드 로컬이고
+로컬 레인 스레드와 janitor 스레드는 프로세스 수명 내내 커넥션을 안 닫는다 — 다른 커넥션이 `ANALYZE` 를
+해도 **이미 열린 커넥션의 계획은 안 바뀐다**(실측). 인덱스는 `CREATE INDEX` 가 스키마 쿠키를 올려
+모든 커넥션이 다음 문장에서 스키마를 다시 읽는다. 검증도 `EXPLAIN QUERY PLAN` 에 `jobs_pool` 이
+안 나오는지 보면 끝이라 결정적이다.
+
+`list_recent`·`list_pools` 의 통계 이득은 `/api/status` 쪽이라 **결정 49(PR 3)** 로 넘긴다.
 
 ### 15.3 M5f 밖이지만 같이 봐야 할 것 — 결정 49
 
@@ -564,3 +637,28 @@ A5 의 워커 쪽 검증 사각, B2 의 `idle_since` 동반 붕괴. 전부 위 �
 - SSE — 구독자별 재계산 없음(`_publish_server` 가 구독자 0명 1026 µs, 128명 1084 µs). `EventBus` 링은 2048 로 묶여 있고, `_log_partial`·`_worker_samples` 도 유계다.
 - long-poll 의 요청 슬롯 점유 — `CLAIM_WAIT_SLOTS = 8` 이 구조적으로 묶어 32슬롯 중 8을 넘지 않는다.
 - 실제 부하(워커 3 · 레인 11 · 로그 200줄/초)에서 쓰기 21 txn/s, claim p50 0.12 ms, lock 오류 0건.
+
+## 16. PR 2a-0 의 계약 (시나리오 C 의 질문에 대한 답)
+
+1. **`Store.add_markers(job_id, items, at)`** — `items` 는 `(kind, value)` 목록. `BEGIN IMMEDIATE` 하나에
+   `executemany` 로 넣는다. 빈 목록이면 **트랜잭션을 열지 않는다**. 중간에 실패하면 통째로 롤백하고
+   부분 마커를 남기지 않는다. **`at` 은 요청당 하나**(오늘 그대로) — M5d-2 가 스텝 초를 마커 `at` 으로
+   재므로 바꾸면 한 flush 안의 두 마커가 0초로 측정된다.
+2. **SSE 는 커밋 뒤 두 번째 루프에서** 마커마다 한 번씩 발행한다(순서 유지).
+3. **로컬 워커 경로(`worker.py:407`)는 배치하지 않는다** — 펌프가 한 줄씩 흘리는 스트림이라 묶을 게
+   없다. 그래서 단수 `add_marker` 는 남는다.
+4. **잠금 오류만 503 이다.** `sqlite3.OperationalError` 는 `no such table` 같은 영구 결함도 포함하므로
+   메시지에 `locked`/`busy` 가 있을 때만 503 이고 나머지는 그대로 올라가 500 이 된다 — 영구 결함을
+   영원히 「일시적」이라고 말하면 안 된다. `_try_claim` 전체(`get_paused`·`touch_worker` 포함)를 감싼다.
+   응답은 `503` + 본문 `{"error": …, "code": "database_busy", "retry_after": 1}` + **`Retry-After` 헤더**
+   (`_send_error` 가 `extra["retry_after"]` 가 있으면 붙인다 — 오늘은 401 에만 헤더를 붙인다).
+   워커는 `remote_worker.py:306` 에서 **이미 503 을 일시 오류로 처리**하므로 워커 변경이 없다.
+5. **지터**: `CLAIM_MIN_INTERVAL + uniform(0, CLAIM_MIN_INTERVAL)` → `[1.0, 2.0)`. **하한을 낮추지
+   않는다**(`uniform(0, base)` 는 뜨거운 루프를 만든다). 「204 가 base 보다 빨리 왔나」 판정은 **base** 로
+   하고, 자는 시간만 지터를 쓴다. 난수는 `now_fn` 처럼 **주입 가능**하게 둬서 테스트가 결정적이게 한다.
+   같은 이유로 503·연결 실패의 고정 `2.0` 대기에도 지터를 준다(그 경로가 바로 lockstep 복구 경로다).
+6. **인덱스**: `CREATE INDEX jobs_claim ON jobs(state, pool, priority DESC, id)`, DB **v7**. 검증은
+   `EXPLAIN QUERY PLAN` 에 `jobs_pool` 이 **안 나오는 것**으로 한다(`USE TEMP B-TREE` 는 사라지는 게
+   맞지만 단정은 안 한다 — 플래너 판단이다). 빈 DB 는 통계가 없어도 인덱스는 있으므로 계획이 결정적이다.
+7. **타이밍 단언 금지.** 「빨라졌다」는 CI 에서 흔들린다. 트랜잭션 수(`set_trace_callback` 의 `BEGIN` 줄)와
+   쿼리 계획으로 잠근다.

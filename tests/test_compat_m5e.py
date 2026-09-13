@@ -157,12 +157,12 @@ def test_the_artifacts_object_has_exactly_the_documented_keys(srv):
     assert "files" not in art and "bundle_sha256" not in art and "detail" not in art, art
 
 
-def test_the_server_block_gains_only_artifact_storage(srv):
-    """§10: `server.artifact_storage` 하나만 더한다."""
+def test_the_server_block_gains_only_the_two_storage_objects(srv):
+    """§10: `server.artifact_storage` 하나. M5g 가 `job_storage` 를 하나 더 얹는다 —
+    스키마 v1 은 **키를 더하지** 값이나 뜻을 바꾸지 않는다."""
     server = srv.status()["server"]
-    assert set(server) == SERVER_KEYS_V1 | {"artifact_storage"}, sorted(
-        set(server) ^ (SERVER_KEYS_V1 | {"artifact_storage"})
-    )
+    added = {"artifact_storage", "job_storage"}
+    assert set(server) == SERVER_KEYS_V1 | added, sorted(set(server) ^ (SERVER_KEYS_V1 | added))
     storage = server["artifact_storage"]
     assert set(storage) == {
         "stored_bytes",

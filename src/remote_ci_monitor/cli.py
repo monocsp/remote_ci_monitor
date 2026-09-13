@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import sqlite3
 import sys
 import tarfile
 import tempfile
@@ -46,7 +47,17 @@ from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
-from remote_ci_monitor.core.render_text import fmt_clock, fmt_duration
+from remote_ci_monitor.core.render_text import (
+    MAX_IDENT,
+    failure_lines,
+    fmt_clock,
+    fmt_duration,
+    ref_ident,
+    render_gc,
+    source_ident,
+    storage_row,
+)
+from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
 
 USAGE_EXIT = 2
@@ -106,11 +117,14 @@ class _StatusLine:
             self.pending = None
 
 
-def describe(job: dict[str, Any]) -> str:
-    """wait 진행 한 줄: 상태 · 순번/스텝 · 경과 · ETA."""
+def describe(job: dict[str, Any], *, head: str | None = None) -> str:
+    """wait 진행 한 줄: 상태 · 순번/스텝 · 경과 · ETA.
+
+    `head` 를 주면 맨 앞의 `#<id> <state>` 자리에 그 문구가 들어간다(`--no-wait` 의 제출 줄).
+    """
     state = job.get("state", "?")
     est = job.get("estimate") or {}
-    parts = [f"#{job.get('id')} {state}"]
+    parts = [head or f"#{job.get('id')} {state}"]
     if job.get("position"):
         parts.append(f"{_ordinal(job['position'])} in line")
         reason = job.get("reason")
@@ -121,12 +135,13 @@ def describe(job: dict[str, Any]) -> str:
     prog = job.get("progress")
     if prog and prog.get("phase") == "executing" and prog.get("steps"):
         total = prog.get("steps_total")
-        head = f"step {prog.get('current_index') or prog.get('steps_done')}/{total or '?'}"
+        # `head` 를 다시 쓰지 않는다 — 인자를 가리면 순서만 바뀌어도 머리가 조용히 스텝이 된다
+        step = f"step {prog.get('current_index') or prog.get('steps_done')}/{total or '?'}"
         if prog.get("steps_total_partial"):
-            head += "+"
+            step += "+"
         if prog.get("current_name"):
-            head += f" {prog['current_name']}"
-        parts.append(head)
+            step += f" {prog['current_name']}"
+        parts.append(step)
     elif prog and prog.get("phase") == "materializing":
         parts.append("preparing workspace")
     if est.get("elapsed_seconds") is not None:
@@ -138,6 +153,80 @@ def describe(job: dict[str, Any]) -> str:
     if job.get("summary") and state in TERMINAL_STATES:
         parts.append(str(job["summary"]))
     return " · ".join(parts)
+
+
+#: `--no-wait` 의 표시용 조회 상한(초). 제출은 이미 끝났으니 오래 붙들지 않는다.
+NO_WAIT_VIEW_TIMEOUT = 5.0
+
+#: 조회한 잡 문서에서 `--no-wait` JSON 이 그대로 싣는 칸. 모르는 값은 서버가 이미 null 로 준다.
+NO_WAIT_KEYS = ("position", "reason", "ahead_job_id", "blocked_by", "estimate")
+
+
+def _job_view(client: Client, job_id: int) -> dict[str, Any] | None:
+    """순번·ETA 를 그리려고 잡을 **한 번** 조회한다. 표시용이라 실패는 삼킨다.
+
+    이 시점의 잡은 이미 큐에 들어가 있다 — 조회가 깨졌다고 제출을 실패로 만들지 않는다.
+    Ctrl-C 도 여기서는 삼킨다: 잡은 이미 났고 세션이 알아야 하는 건 그 번호다(결정 17 의 뜻).
+
+    문서는 우리가 만든 게 아니라 **값의 타입까지 믿을 수 없다**. `{"position": "3"}` 하나면
+    `describe()` 가 터지고, 그 예외는 `main()` 의 그물에도 안 걸려 이미 큐에 있는 잡을 실패로
+    만든다. 그래서 **한 번 그려 보고** 터지면 조회가 실패한 것과 똑같이 취급한다 — 줄도 JSON 도
+    순번 조각을 통째로 뺀다. `state` 없는 문서는 잡 문서가 아니다(`{}` 를 「순번 없는 대기 잡」
+    으로 읽지 않는다).
+    """
+    try:
+        view = client.job(job_id, timeout=NO_WAIT_VIEW_TIMEOUT)
+    except (ClientError, ValueError, OSError, KeyboardInterrupt):
+        return None
+    if not isinstance(view, dict) or not view.get("state"):
+        return None
+    try:
+        describe(view)  # 그려지는 문서만 쓴다(진짜 줄은 head 만 바꿔 다시 그린다)
+    except Exception:
+        return None
+    return view
+
+
+def _submitted_line(
+    job_id: int,
+    view: dict[str, Any] | None,
+    *,
+    joined: bool,
+    state: str | None,
+    url: str | None,
+    detail: str = "",
+) -> str:
+    """`--no-wait` 이 stderr 에 찍는 한 줄: 무엇을 냈나 · 몇 번째인가 · 언제 끝나나 · 어디서 보나.
+
+    조회가 안 됐으면 순번 조각만 빠진다(`submitted job #155 queued · <url>`).
+    """
+    head = f"{'joined' if joined else 'submitted'} job #{job_id}"
+    if state:
+        head += f" {state}"
+    if view is not None:
+        head = describe(view, head=head)
+    return " · ".join([head, *([detail] if detail else []), *([url] if url else [])])
+
+
+def _no_wait_json(
+    job_id: int,
+    view: dict[str, Any] | None,
+    *,
+    joined: bool,
+    state: str | None,
+    url: str | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """`--no-wait` 의 stdout JSON.
+
+    조회가 안 됐으면 순번 칸을 **아예 넣지 않는다** — null 은 「순번이 없다」는 뜻이라 다르다.
+    """
+    body: dict[str, Any] = {"job_id": job_id, "joined": joined, "state": state}
+    if view is not None:
+        body.update({k: view.get(k) for k in NO_WAIT_KEYS})
+    body.update(extra or {})
+    body["url"] = url
+    return body
 
 
 NO_SERVER_HINT = "no server configured (use --server, RCM_SERVER or client.toml)"
@@ -219,6 +308,66 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), flush=True)
 
 
+# ── 클라이언트 버전 (M5i I8-3 · 결정 83) ─────────────────────────────────────
+
+
+def _version_key(text: str) -> tuple[int, ...]:
+    """`0.2.6` → (0, 2, 6). 숫자가 아닌 꼬리(`0.2.6.dev1`)는 거기서 끊는다 — 비교용이다."""
+    out: list[int] = []
+    for part in str(text).split("."):
+        if not part.isdigit():
+            break
+        out.append(int(part))
+    return tuple(out)
+
+
+def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
+    """올리는 방법 한 토막. 서버가 wheel 경로를 주면 그 `pip install`, 아니면 없다고 말한다 —
+    있지도 않은 URL 을 지어내지 않는다(옛 서버는 `/client/` 가 없고, 조립 실패면 503 이다)."""
+    cw = h.get("client_wheel") or {}
+    if cw.get("path"):
+        return f"pip install {server}{cw['path']}"
+    reason = h.get("client_wheel_error") or "server too old to serve one"
+    return f"no client wheel from this server ({reason})"
+
+
+def _client_row(client: Client, h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `client` 행 — 이 클라이언트와 서버의 버전. 서버가 버전을 안 주면 행도 없다.
+
+    FAIL 은 `min_client_version` 아래일 때만. 그 위의 「older」·「newer」는 warn(알려는 주되
+    실패는 아니다) — 실제 거부는 서버의 400 이 한다.
+    """
+    server_v = h.get("version")
+    if not server_v:
+        return None
+    mine, theirs = _version_key(__version__), _version_key(server_v)
+    if mine == theirs:
+        return ("client", True, f"v{__version__} · same as server")
+    if mine < theirs:
+        floor = h.get("min_client_version")
+        too_old = bool(floor) and mine < _version_key(floor)
+        return (
+            "client",
+            False if too_old else None,
+            f"v{__version__} · server v{server_v} · older — {_upgrade_hint(client.server, h)}",
+        )
+    return ("client", None, f"v{__version__} · server v{server_v} · newer")
+
+
+def _warn_if_client_too_old(client: Client) -> None:
+    """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
+    try:
+        h = client.health()
+    except ClientError:
+        return
+    floor = h.get("min_client_version")
+    if floor and _version_key(__version__) < _version_key(floor):
+        _err(
+            f"warning: this client v{__version__} is older than the server accepts "
+            f"(min_client_version {floor}) — {_upgrade_hint(client.server, h)}"
+        )
+
+
 # ── run ──────────────────────────────────────────────────────────────────────
 
 
@@ -277,6 +426,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if pool is not None and pool != preset.pool and pool not in preset.pools:
         allowed = ", ".join([preset.pool, *preset.pools])
         return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
+    # 사용 오류는 여기까지 — 이 아래부터 서버에 더 묻는다(health 는 경고용, 토큰은 제출 전 확인)
+    _warn_if_client_too_old(client)
     # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
     try:
         client.whoami()
@@ -301,6 +452,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         source = {
             "mode": "tree",
             "repo": snap.repo,
+            "branch": snap.branch,  # 목록에서 「내 잡」을 알아보는 칸 (M5h)
             "base_sha": snap.base_sha,
             "dirty": snap.dirty,
             "tree_hash": snap.tree_hash,
@@ -322,8 +474,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             return USAGE_EXIT if e.status in (400, 401, 403, 413, 0) else EXIT_UNKNOWN
         job_id = int(resp["job_id"])
         joined = bool(resp.get("joined"))
+        state = resp.get("state")  # 합류면 그 잡의 상태, 새 잡이면 uploading
         if joined:
-            _info(f"joined job #{job_id} ({resp.get('state')}) — same preset, inputs and tree")
+            if not args.no_wait:  # --no-wait 은 순번까지 실은 한 줄로 대신 말한다
+                _info(f"joined job #{job_id} ({state}) — same preset, inputs and tree")
         else:
             # ④ 업로드
             line = _StatusLine()
@@ -345,24 +499,30 @@ def cmd_run(args: argparse.Namespace) -> int:
                         f"{total / 1e6:.1f} MB (cache {pct}%)"
                     )
                 else:
-                    client.upload(job_id, snap.tar_path, progress=progress)
+                    up = client.upload(job_id, snap.tar_path, progress=progress)
             except ClientError as e:
                 line.done()
                 hint = " (retry with --no-cache)" if e.status in (400, 409) else ""
                 _err(f"upload failed: {e.message}{hint}")
                 return EXIT_UNKNOWN
             line.done()
-            _info(f"submitted job #{job_id} · {resp.get('url', '')}")
+            state = up.get("state") or state  # 트리를 다 받았다 — 이제 queued 다
+            if not args.no_wait:
+                _info(f"submitted job #{job_id} · {resp.get('url', '')}")
     finally:
         try:
             snap.tar_path.unlink()
         except OSError:
             pass
     if args.no_wait:
+        # 순번·ETA 는 표시용이다 — 조회가 실패해도 잡은 큐에 있고 종료 코드는 0 이다
+        view = _job_view(client, job_id)
+        state = (view or {}).get("state") or state
+        url = resp.get("url")
+        detail = "same preset, inputs and tree" if joined else ""
+        _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _info(f"fetch its artifacts later with `rcm artifacts {job_id} --fetch --output DIR`")
-        _print_json(
-            {"job_id": job_id, "joined": joined, "state": "submitted", "url": resp.get("url")}
-        )
+        _print_json(_no_wait_json(job_id, view, joined=joined, state=state, url=url))
         return 0
     # ⑤ wait — 끝나면 산출물을 제출한 그 트리에 쓴다(§11)
     spec = None
@@ -373,6 +533,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             force=bool(getattr(args, "force", False)),
             dry_run=bool(getattr(args, "dry_run", False)),
         )
+    # 장부를 놓는다 — 대기는 20분이고 tar 은 이미 지웠다. 2만 파일 트리에서 64 → 32 MB 다
+    # (M5h §4.6). `--fetch-artifacts` 가 쓰는 것은 위에서 뽑은 해시 사전 하나뿐이다.
+    snap = None  # noqa: F841 — 참조를 끊는 것이 목적이다
+    del snap
     return _wait(
         client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll, fetch=spec
     )
@@ -407,22 +571,29 @@ def _run_git_ref(
     joined = bool(resp.get("joined"))
     sha = resp.get("sha")
     short = str(sha)[:7] if sha else "—"
-    if joined:
-        _info(f"joined job #{job_id} ({resp.get('state')}) — same preset, inputs, commit {short}")
-    else:
-        _info(f"submitted job #{job_id} ({preset.name} · {ref} @{short}) · {resp.get('url', '')}")
+    state = resp.get("state")
+    url = resp.get("url")
     if args.no_wait:
+        # 제출 응답의 state 는 「방금 만들었다」는 뜻이다 — 순번과 함께 지금 상태를 다시 본다
+        view = _job_view(client, job_id)
+        state = (view or {}).get("state") or state
+        detail = (
+            f"same preset, inputs, commit {short}"
+            if joined
+            else f"({preset.name} · {ref_ident(ref, sha)})"  # `·` 를 품는다 — 목록 항목과 안 섞이게
+        )
+        _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _print_json(
-            {
-                "job_id": job_id,
-                "joined": joined,
-                "state": resp.get("state") or "submitted",
-                "ref": ref,
-                "sha": sha,
-                "url": resp.get("url"),
-            }
+            _no_wait_json(
+                job_id, view, joined=joined, state=state, url=url, extra={"ref": ref, "sha": sha}
+            )
         )
         return 0
+    if joined:
+        _info(f"joined job #{job_id} ({state}) — same preset, inputs, commit {short}")
+    else:
+        # ref 가 곧 sha 면 한 번만 — 목록 칸과 같은 규칙(M5i I2)
+        _info(f"submitted job #{job_id} ({preset.name} · {ref_ident(ref, sha)}) · {url or ''}")
     return _wait(client, job_id, timeout=args.timeout, joined=joined, use_sse=not args.poll)
 
 
@@ -481,6 +652,15 @@ def _wait(
     line.done()
     if reason:
         _err(reason)
+    # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
+    # 붙인다 — 모를수록 로그가 필요하다.
+    # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
+    if code != 0:
+        cause = getattr(reason, "cause", None)
+        for text in failure_lines(
+            job or {}, job_id=job_id, url=(job or {}).get("url"), cause=cause
+        ):
+            _err(text)
     out = dict(job or {"job_id": job_id, "state": None})
     out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
     out["wait_exit_code"] = code
@@ -535,6 +715,137 @@ def cmd_bump(args: argparse.Namespace) -> int:
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
     _print_json(resp)
     _info(f"job #{args.job} priority is now {resp.get('priority')}")
+    return 0
+
+
+def _offline_gc(args: argparse.Namespace) -> int:
+    """서버 없이 도는 `--dry-run`(결정 61·73) — 설정과 데이터 디렉터리를 읽고, **DB 는 임시 사본
+    위에서** 실제 마이그레이션과 실제 계획을 돌린 뒤 사본을 지운다. 아무것도 안 지우고, 살아 있는
+    DB 는 `mode=ro` 로만 연다.
+
+    업그레이드 안전 게이트가 이것 위에 서 있다. `POST /gc` 는 새 서버에만 있고 새 서버는 뜨자마자
+    sweep 하므로, 올리기 **전에** 무엇이 지워질지 보려면 서버 없이 도는 길이 있어야 한다. 2026-09-10
+    까지는 여기서 `Store(...)` 를 그냥 열어 **운영 DB 를 마이그레이션했다**(옛 빌드는 재시작하면 못
+    뜬다 — docs/gate-replay-fixes-workplan.md §3 B2). 사본 위에서 돌면 마이그레이션 자체의 실패까지
+    재시작 전에 드러난다. 어느 단계든 불완전하면 exit 3 — 빈 계획을 성공으로 내지 않는다.
+    """
+    from remote_ci_monitor.janitor import Janitor, _item_json
+    from remote_ci_monitor.store import (
+        DB_VERSION,
+        CopyDeadlineExceeded,
+        Store,
+        StoreError,
+        _copy_database,
+        database_version,
+        newer_database_message,
+    )
+
+    try:
+        cfg = load_server_config(args.config, check_tools=False)
+    except ConfigError as e:
+        return _usage(str(e))
+    db = cfg.data_dir / "rcm.sqlite3"
+    if not db.is_file():
+        _err(
+            f"gc: no database at {db} — the server has not run with this data_dir, or the "
+            "config points elsewhere. Nothing was created; the plan is unknown (exit 3)."
+        )
+        return EXIT_UNKNOWN
+    try:
+        old = database_version(db)
+    except sqlite3.Error as e:
+        _err(f"gc: cannot read {db}: {e} (exit 3: unknown)")
+        return EXIT_UNKNOWN
+    if old > DB_VERSION:
+        _err(f"gc: {newer_database_message(db, old)} (exit 3: unknown)")
+        return EXIT_UNKNOWN
+    now = datetime.now(UTC)
+    timeout = float(getattr(args, "timeout", 600.0) or 0.0)
+    scratch = Path(tempfile.mkdtemp(prefix="rcm-gc-dryrun-"))  # 0700
+    try:
+        copy = scratch / "rcm.sqlite3"
+        try:
+            _copy_database(db, copy, deadline=time.monotonic() + timeout)
+        except CopyDeadlineExceeded as e:
+            _err(
+                f"gc: copying the database did not finish within the deadline "
+                f"(--timeout {timeout:g} s; {e}) — the plan is unknown (exit 3). "
+                "Nothing was changed."
+            )
+            return EXIT_UNKNOWN
+        except (sqlite3.Error, OSError) as e:
+            _err(f"gc: could not copy the database: {e} — the plan is unknown (exit 3).")
+            return EXIT_UNKNOWN
+        try:
+            store = Store(copy, log=_err)  # 사본만 올라간다 — 자동 백업도 임시 디렉터리 안
+        except StoreError as e:
+            _err(
+                f"gc: the copy could not be migrated from schema v{old} to v{DB_VERSION}: {e} "
+                "— a new server would fail the same way on restart. Nothing was changed "
+                "(exit 3: unknown)."
+            )
+            return EXIT_UNKNOWN
+        try:
+            jan = Janitor(store, cfg)
+            plan = jan.plan(now)
+            if plan.inventory_error:
+                _err(
+                    f"gc: inventory failed ({plan.inventory_error}) — the plan is unknown, "
+                    "not empty (exit 3)."
+                )
+                return EXIT_UNKNOWN
+            body = {
+                "dry_run": True,
+                "planned": [_item_json(i) for i in plan.items],
+                "deleted": [],
+                "failed": [],
+                "freed_bytes": 0,
+                "storage_before": jan.storage(now),
+                "storage_after": None,
+                "offline": {
+                    "database": str(db),
+                    "schema_version": old,
+                    "planned_with_schema": DB_VERSION,
+                    "copy": True,
+                },
+            }
+        finally:
+            store.close()
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)  # 사본 · -wal · -shm · 사본의 backup/
+    if getattr(args, "json", False):
+        _print_json(body)
+    else:
+        upgraded = f"schema v{old} → v{DB_VERSION}" if old != DB_VERSION else f"schema v{old}"
+        print(
+            f"note: planned on a temporary copy of {db} ({upgraded}); "
+            "the database itself was not changed",
+            flush=True,
+        )
+        print(render_gc(body), flush=True)
+    return 0
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    """`rcm gc [--dry-run]` — 청소기와 **같은 계획 함수**를 손으로 돌린다(admin 토큰)."""
+    if args.dry_run and args.config:
+        return _offline_gc(args)
+    client = _client(args)
+    try:
+        body = client.gc(dry_run=args.dry_run, timeout=args.timeout)
+    except ClientError as e:
+        if not e.status:  # 연결·시한 — 「모른다」이지 실패가 아니다(`rcm wait` 와 같은 규칙)
+            _err(
+                f"gc: {e.message}. The server may still be deleting — "
+                "run `rcm gc --dry-run` again to see what is left."
+            )
+            return EXIT_UNKNOWN
+        _err(f"gc failed: {e.message}")
+        return USAGE_EXIT
+    if args.json:
+        _print_json(body)
+    else:
+        print(render_gc(body), flush=True)
     return 0
 
 
@@ -671,6 +982,17 @@ def cmd_top(args: argparse.Namespace) -> int:
         return 0
 
 
+def _cut(text: str, width: int) -> str:
+    """칸에 맞춰 자른다 — 안 자르면 긴 값 하나가 그 줄의 뒤 칸을 전부 민다."""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _row_ref(row: dict[str, Any]) -> str:
+    """그 잡이 돌린 ref(git_ref) 또는 브랜치(tree). `--ref` 는 여기에 부분 일치한다."""
+    src = row.get("source") or {}
+    return str(src.get("ref") or src.get("branch") or "")
+
+
 def cmd_jobs(args: argparse.Namespace) -> int:
     client = _client(args, need_token=bool(args.mine))
     me: str | None = None
@@ -702,6 +1024,11 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         ]
     if args.state:
         rows = [r for r in rows if r.get("state") == args.state]
+    if getattr(args, "ref", None):
+        # 한 기계의 세션들이 토큰을 나눠 쓰면 `--mine` 은 「이 기계의 잡」이다. 브랜치·ref 는
+        # 세션이 자기 잡을 알아보는 가장 가까운 칸이다(M5h §4.3).
+        want = args.ref
+        rows = [r for r in rows if want in _row_ref(r)]
     if args.json:
         _print_json(rows)
         return 0
@@ -727,8 +1054,11 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         pos = f"{_ordinal(r['position'])} in line · " if r.get("position") else ""
         label = (r.get("requester") or {}).get("label") or "?"
         summary = r.get("summary") or ""
+        jid = f"#{r.get('id')}"
+        key = str(r.get("key") or "?")
         print(
-            f"#{r.get('id')}  {state:<10} {r.get('key', '?'):<16} {label:<20} {pos}{timing:<16} "
+            f"{jid:<6} {state:<10} {_cut(key, 16):<16} {label:<20} "
+            f"{source_ident(r.get('source')):<{MAX_IDENT}} {pos}{timing:<16} "
             f"{fmt_clock(when, tz)}  {summary}".rstrip()
         )
     return 0
@@ -804,6 +1134,7 @@ def _server_config(args: argparse.Namespace):
 
 def cmd_serve(args: argparse.Namespace) -> int:
     from remote_ci_monitor.server import serve
+    from remote_ci_monitor.store import StoreError
 
     try:
         cfg = _server_config(args)
@@ -815,6 +1146,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return serve(cfg, debug=args.debug)
     except OSError as e:
         return _usage(f"cannot start server: {e.strerror or e}")
+    except StoreError as e:
+        # DB 를 못 연다(마이그레이션 백업 실패 · 이 빌드보다 새 스키마) — 결정 74 의 복구 경로가
+        # 이 문장이다. 운영자가 launchd 로그에서 읽는 것이라 트레이스백이 아니라 한 줄로.
+        return _usage(f"cannot start server: {e}")
 
 
 # ── init · version ───────────────────────────────────────────────────────────
@@ -928,12 +1263,41 @@ def _dir_writable(d: Path) -> bool:
     return p.is_dir() and os.access(p, os.W_OK)
 
 
-def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
+#: 이만큼 넘게 막혀 있으면 「사람이 한번 봐라」. 서버의 `admission_cooldown_seconds` 를 쓰지 않는
+#: 이유: 그건 **원격 서버의** 설정이라 `rcm check` 가 볼 수 없다. 이 경고는 게이트의 타이밍이
+#: 아니라 「누가 이 머신을 오래 잡고 있다」는 뜻이므로 고정 상수가 맞다(M5f §5.4).
+HELD_WARN_SECONDS = 300
+
+
+def _held_too_long(workers: list[dict[str, Any]], now: datetime | None) -> list[str]:
+    out: list[str] = []
+    for w in workers:
+        if w.get("state") != "held":
+            continue
+        since = parse_iso(w.get("held_since"))
+        if now is None or since is None:
+            continue
+        seconds = (now - since).total_seconds()
+        if seconds > HELD_WARN_SECONDS:
+            label = w.get("display_name") or f"lane {w.get('lane')}"
+            out.append(f"{label} held for {fmt_duration(seconds)}")
+    return out
+
+
+def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, str]:
     """`rcm check` 의 pools 행(M5b-4): `default (1 lane) · linux (build-02/1 idle · build-03 down)`.
-    어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`)."""
+    어떤 풀의 원격 워커가 전부 down 이면 FAIL(`/api/health.pools_without_workers`).
+
+    부하로 보류된 레인은 세어서 보이되 **FAIL 이 아니다**(의도된 동작). 다만 오래 막혀 있으면
+    경고한다 — 「게이트가 제 일을 하는 중」과 「누가 두 시간째 잡고 있음」은 다르다(M5f)."""
     server = doc.get("server") or {}
+    now = parse_iso(doc.get("generated_at"))
     lanes = server.get("lanes") or 0
-    parts = [f"default ({lanes} lane{'s' if lanes != 1 else ''})"]
+    all_workers = server.get("workers") or []
+    local_held = [w for w in all_workers if not w.get("worker") and w.get("state") == "held"]
+    head = f"default ({lanes} lane{'s' if lanes != 1 else ''}"
+    head += f" · {len(local_held)} held)" if local_held else ")"
+    parts = [head]
     by_pool: dict[str, list[dict[str, Any]]] = {}
     for w in server.get("workers") or []:
         if w.get("worker"):
@@ -958,7 +1322,13 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool, str]:
         dead = list(client.health().get("pools_without_workers") or [])
     except ClientError:
         dead = [n for n, ws in by_pool.items() if all(w.get("state") == "down" for w in ws)]
-    return ("pools", not dead, " · ".join(parts))
+    text = " · ".join(parts)
+    stuck = _held_too_long(all_workers, now)
+    if dead:
+        return ("pools", False, text)
+    if stuck:  # warn — 실패는 아니다
+        return ("pools", None, f"{text} — {', '.join(stuck)}")
+    return ("pools", True, text)
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -988,6 +1358,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(
                 ("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}{found_tag}")
             )
+            client_row = _client_row(client, h)
+            if client_row is not None:
+                rows.append(client_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
@@ -1010,6 +1383,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
+            storage = (doc.get("server") or {}).get("job_storage")
+            row = storage_row(storage, now=doc.get("generated_at")) if storage else None
+            if row is not None:  # 옛 서버엔 키가 없고, 갓 뜬 서버는 아직 잰 게 없다
+                rows.append(row)
         except ClientError as e:
             rows.append(("presets", False, e.message))
     try:
@@ -1017,9 +1394,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         if cfg.path is not None:
             d = cfg.data_dir
             writable = _dir_writable(d)
-            rows.append(
-                ("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})")
-            )
+            # 서버는 `data_dir` 을 API 로 내리지 않는다 — 이 행은 **로컬 설정**의 사실이지
+            # `--server` 가 가리키는 서버의 디렉터리가 아니다. 이름과 출처가 그렇게 말한다(M5i I4).
+            state = "writable" if writable else "not writable"
+            rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
             if cfg.repos:
                 git = shutil.which("git")
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
@@ -1195,7 +1573,10 @@ def cmd_token(args: argparse.Namespace) -> int:
         cfg = _server_config(args)
     except ConfigError as e:
         return _usage(f"config: {e}")
-    store = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        store = Store(cfg.data_dir / "rcm.sqlite3")  # 열면서 마이그레이션한다 — 거절도 여기서
+    except StoreError as e:
+        return _usage(str(e))
     now = datetime.now(UTC)
     try:
         if args.token_command == "add":
@@ -1443,6 +1824,14 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(bump)
     bump.set_defaults(func=cmd_bump)
 
+    gc = sub.add_parser("gc", help="reclaim workspace storage now (admin token)")
+    gc.add_argument("--dry-run", action="store_true", help="show what would go, delete nothing")
+    gc.add_argument("--json", action="store_true")
+    gc.add_argument("--timeout", type=float, default=600.0, help="seconds (default 600)")
+    gc.add_argument("--config", help="server config: run --dry-run without a server")
+    client_opts(gc)
+    gc.set_defaults(func=cmd_gc)
+
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
     client_opts(cancel)
@@ -1476,6 +1865,7 @@ def build_parser() -> argparse.ArgumentParser:
     jobs.add_argument("--mine", action="store_true", help="only jobs you requested or joined")
     jobs.add_argument("--state", help="filter by state (running, queued, failed, ...)")
     jobs.add_argument("--pool", metavar="NAME", help="only jobs of this worker pool")
+    jobs.add_argument("--ref", metavar="REF", help="only jobs whose ref or branch contains REF")
     jobs.add_argument("--json", action="store_true")
     client_opts(jobs)
     jobs.set_defaults(func=cmd_jobs)

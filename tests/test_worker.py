@@ -138,13 +138,16 @@ def test_success_records_markers_summary_and_deletes_workspace(env):
     assert [t.state for t in j.transitions] == ["queued", "running", "succeeded"]
 
 
-def test_failure_keeps_workspace_and_blames_last_step(env):
+def test_failure_keeps_workspace_and_names_no_step_without_a_declaration(env):
+    """M5h 결정 63 — `bad` 는 실패를 선언하지 않는다(`::rcm::step-end::fail` 도 `::rcm::fail::`
+    도 없다). 그래서 `failed_step` 은 비고 「어디였나」만 `last_step` 이 말한다. 선언하는 잡은
+    `tests/test_progress_m5h.py` · `tests/test_store_m5h.py` 가 잠근다."""
     store, cfg = env
     jid = enqueue(store, cfg, "bad")
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code == 3 and j.summary == "2 failed"
-    assert j.failed_step == "test"
+    assert j.failed_step is None and j.last_step == "test"
     assert (cfg.data_dir / "workspaces" / str(jid) / "hello.txt").exists()
 
 

@@ -3,7 +3,8 @@
 라우트(PLAN.md 「서버 API」):
   POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id}?tail=N · GET /jobs/{id}/log?offset=N ·
   POST /jobs/{id}/cancel · GET /api/status · GET /api/health · GET /api/whoami ·
-  POST /pause · POST /resume · `/worker/*`(원격 워커, `remote_workers.py`)
+  POST /pause · POST /resume · `/worker/*`(원격 워커, `remote_workers.py`) ·
+  GET /client/remote_ci_monitor-<X>-py3-none-any.whl(자기 클라이언트 wheel, `clientwheel.py`)
 
 hardening: 소켓 타임아웃(일반 10초, 업로드 60초) · `Content-Length` 필수(chunked 는 411) ·
 JSON 본문 64KB · 동시 요청 `max_concurrent_requests` 초과 503 · 경로 정규화 ·
@@ -39,14 +40,23 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
+from remote_ci_monitor.clientwheel import (
+    MIN_CLIENT_VERSION,
+    WheelBuildError,
+    build_wheel,
+    wheel_filename,
+)
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
     ServerConfig,
+    admission_warnings,
     advertise_enabled,
     advertise_warning,
+    retention_warning,
 )
+from remote_ci_monitor.core import admission, outcome
 from remote_ci_monitor.core import artifacts as art
-from remote_ci_monitor.core import outcome
+from remote_ci_monitor.core.failures import failures_json
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
@@ -55,9 +65,11 @@ from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
     DEFAULT_POOL,
+    FAILED,
     MODE_GIT_REF,
     MODE_TREE,
     QUEUED,
+    TIMED_OUT,
     TOKEN_WORKER,
     UPLOADING,
     HostSample,
@@ -129,6 +141,29 @@ _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
+_ID_IN_PATH = re.compile(r"/(\d+)")
+#: 404 가 길을 알려 준다(M5h · 결정 69). 별칭 라우트는 만들지 않는다 — 한 가지에 이름 하나다.
+_ROUTES_HINT = (
+    "routes: GET /api/status · GET /api/health · GET /jobs/<id> · GET /jobs/<id>/log · POST /jobs"
+)
+
+
+def not_found_hint(path: str) -> str:
+    """모르는 경로에 맞는 길 한 줄. 숫자가 있으면 그 잡의 진짜 경로, 없으면 주요 라우트.
+
+    `/api/status` 가 `/api` 아래인데 잡은 `/jobs` 아래라 `/api/jobs/162` 는 자연스러운
+    오추측이다. 그 오추측에 아무 말도 안 하면 사람이 로그를 못 찾는다(신고 2).
+    """
+    found = _ID_IN_PATH.findall(path)
+    if not found:
+        return _ROUTES_HINT
+    n = found[-1]  # `/v1/jobs/162` 의 잡 번호는 앞의 버전이 아니라 **뒤의 숫자**다
+    return (
+        f"job #{n} is GET /jobs/{n} · its log is GET /jobs/{n}/log "
+        f"with that job's token (try: rcm logs {n})"
+    )
+
+
 _STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
@@ -136,9 +171,14 @@ _STATIC_FILES = {
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
 }
 SNAPSHOT_MAX_AGE_SECONDS = 0.2
+#: 중앙값은 잡이 끝날 때만 다시 재지만, 잡이 하나도 안 끝나는 동안에도 45일 창은 흘러간다 —
+#: 그래서 시간으로도 상한을 둔다. 무효화 경로를 하나 놓쳐도 이 안에 스스로 낫는다.
+MEDIANS_MAX_AGE_SECONDS = 300.0
 SSE_TICK_SECONDS = 1.0
 SSE_WRITE_TIMEOUT_SECONDS = 30.0
 _PATH_RE = re.compile(r"/[^\s'\"]+")
+#: 제어문자(개행 포함) — 로그 줄 위조를 막는다. 문면은 남기고 한 줄로 접는다.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 def _utcnow() -> datetime:
@@ -146,7 +186,15 @@ def _utcnow() -> datetime:
 
 
 def _safe(text: str) -> str:
-    return _PATH_RE.sub("<path>", text)[:200]
+    """오류 문구를 로그·상태 문서에 실을 수 있게 다듬는다 — 절대 경로를 지우고 한 줄로 접는다.
+
+    **경로 지우개지 비밀 지우개가 아니다.** 경로 밖에 맨몸으로 있는 토큰은 못 지운다. 그래서
+    자세한 문구는 로그에만 두고, 인증 없이 읽히는 `last_error` 에는 예외 이름까지만 낸다.
+
+    제어문자를 공백으로 바꾸는 이유: 문구 안의 `\\n` 이 그대로 나가면 진짜 `[rcm] error:` 줄처럼
+    생긴 두 번째 줄이 로그에 찍힌다 — 사람도 로그를 긁는 경보도 속는다.
+    """
+    return _CTRL_RE.sub(" ", _PATH_RE.sub("<path>", text))[:200]
 
 
 def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
@@ -228,13 +276,43 @@ class App(RemoteWorkersMixin):
         self._snap: _DbSnapshot | None = None
         self._snap_lock = threading.Lock()
         self._dirty = True
+        # 중앙값은 **잡이 끝났을 때만** 다시 잰다. 45일치 완료 잡을 매 요청 읽으면
+        # `/api/status` 가 보존된 잡 수에 선형으로 끌려간다(1만 행 168 ms) — 그런데 45일치
+        # 중앙값은 `::rcm::step::` 한 줄로 바뀌지 않는다(M5f 결정 49).
+        self._medians: (
+            tuple[dict[str, Median] | None, dict[str, dict[str, Median]], str | None, str | None]
+            | None
+        ) = None
+        self._medians_dirty = True
+        self._medians_loaded_at = 0.0
         self._sse_lock = threading.Lock()
         self._sse_connections = 0
+        # 부하 게이트(M5f §4.5). 락은 **하나(전역)** 이고 게이트를 지나는 레인(≥ 2)만 잡는다 —
+        # 재 보니 머신별로 쪼개면 burst 에서 22배 느리다. 전역 락이 BEGIN IMMEDIATE 를 줄
+        # 세우는 유일한 장치라, 없애면 스레드들이 SQLite writer 락의 거친 백오프에 걸린다.
+        self._admit_lock = threading.Lock()
+        # 머신 = 워커 등록 단위. 로컬은 None, 원격은 워커 이름. 한 머신에서 serve 와 worker 를
+        # 같이 돌리면 게이트 없는 레인이 둘이 된다 — 자동 병합은 안 한다(결정 46).
+        self._last_admit: dict[str | None, datetime] = {}
+        # 상태 경로가 **다시 판정하지 않게** claim 경로의 결과를 남긴다. 두 번 부르면 화면과
+        # 실제가 어긋나고, Worker._set 이 상태가 바뀔 때마다 _since 를 되감아 not_scheduled
+        # 알람이 죽는다(§4.5).
+        self._hold: dict[tuple[str | None, int], tuple[admission.Hold | None, datetime]] = {}
+        # 클라이언트 wheel(I8-1 · 결정 81) — 기동 때 한 번 조립해 메모리에 든다. (바이트, sha256)
+        # 또는 실패 코드. 실패도 한 번만 — 요청마다 다시 시도해서 다른 답을 주지 않는다.
+        self._wheel: tuple[bytes, str] | None = None
+        self._wheel_error: str | None = None
+        self._wheel_done = False
+        self._wheel_lock = threading.Lock()
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
+        self._build_client_wheel()  # 「도는 것을 준다」 — 기동 시점의 파일로 고정한다
+        if self._wheel is not None:
+            size = _mb(len(self._wheel[0]))
+            self.log(f"client wheel ready: {wheel_filename(self.version)} ({size})")
         lost, cancelled = self.store.recover_on_start(self.now_fn())
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
@@ -248,6 +326,7 @@ class App(RemoteWorkersMixin):
             on_change=self._on_job_change,
             on_marker=self._on_marker,
             now_fn=self.now_fn,
+            admit=self._admit_local,
         )
         self._janitor = threading.Thread(target=self._janitor_loop, name="rcm-janitor", daemon=True)
         self._janitor.start()
@@ -277,9 +356,21 @@ class App(RemoteWorkersMixin):
             publish=self.publish,
             stop=self.stop,
             now_fn=self.now_fn,
-            disk_path=str(self.config.server.data_dir),
+            # 푼 경로(프로퍼티)다 — 원시 문자열 "~/…" 는 disk_usage 가 못 읽는다(M5i B5)
+            disk_path=str(self.config.data_dir),
         )
         self.sampler.start()
+        s = self.config.server
+        if s.lanes >= 2 and s.admission == "load":
+            # 안 그러면 첫 증상이 「두 번째 레인이 갑자기 멈췄다」다
+            self.log(
+                f"admission: load (cpu <= {s.cpu_max_percent:g}%, lanes 2+; lane 1 always claims)"
+            )
+        warning = retention_warning(s)
+        if warning:
+            self.log(warning)
+        for warning in admission_warnings(s, self.config.host):
+            self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
             name = self.config.server.advertise_name or host
@@ -338,10 +429,18 @@ class App(RemoteWorkersMixin):
     def log(self, msg: str) -> None:
         print(f"[rcm] {msg}", file=sys.stderr, flush=True)
 
-    def record_error(self, msg: str) -> None:
+    def record_error(self, msg: str, *, detail: str | None = None) -> None:
+        """`msg` 는 공개되는 `server.last_error`(짧게), `detail` 은 서버 로그에만(자세히).
+
+        `/api/status` 는 `read_auth = none` 이 기본이라 `last_error` 를 인증 없이 읽는다. 예외
+        문구에는 경로나 남의 입력이 실릴 수 있어 공개면은 안 넓힌다. 로그는 서버를 가진 사람만
+        보므로 거기엔 원문을 남긴다 — 2026-09-08 사고 때 로그에 `OperationalError` 만 314줄이
+        남아 「database is locked」인지 「unable to open database file」인지 못 갈랐다.
+        `detail` 은 부르는 쪽이 `_safe()` 로 씻어서 준다.
+        """
         with self._lock:
             self._last_error = msg[:200]
-        self.log(f"error: {msg}")
+        self.log(f"error: {msg}" + (f": {detail}" if detail else ""))
 
     @property
     def last_error(self) -> str | None:
@@ -352,6 +451,85 @@ class App(RemoteWorkersMixin):
             if info.state == "down" and info.error:
                 return f"lane {info.lane} down: {info.error}"
         return err
+
+    # ── 부하 게이트 (M5f) ───────────────────────────────────────────────────
+
+    def admission_config(self, *, remote: bool) -> admission.AdmissionConfig:
+        """서버 설정 → 순수 계층의 설정. `core/queue.QueueConfig` 와 같은 방식이다.
+
+        원격 표본은 서버가 받은 시각으로 다시 찍히므로 나이가 곧 마지막 heartbeat 이후 시간이다.
+        그래서 낡음 상한에 heartbeat 주기도 함께 본다.
+        """
+        s = self.config.server
+        stale = admission.STALE_MULTIPLIER * self.config.host.interval_seconds
+        if remote:
+            stale = max(stale, admission.STALE_MULTIPLIER * s.worker_heartbeat_seconds)
+        return admission.AdmissionConfig(
+            policy=s.admission,
+            cpu_max_percent=s.cpu_max_percent,
+            samples=s.admission_samples,
+            cooldown_seconds=float(s.admission_cooldown_seconds),
+            stale_seconds=float(stale),
+        )
+
+    def _machine_sample(self, worker: str | None) -> HostSample | None:
+        """그 머신의 마지막 표본. 로컬은 프로세스 안 샘플러, 원격은 heartbeat 로 받은 것."""
+        if worker is None:
+            hosts, _error = self._hosts()
+            return hosts[0] if hosts else None
+        with self._remote_lock:
+            return self._worker_samples.get(worker)
+
+    def _decide_admission(self, lane: int, worker: str | None, now: datetime):
+        hold = admission.decide(
+            lane=lane,
+            sample=self._machine_sample(worker),
+            now=now,
+            last_admit_at=self._last_admit.get(worker),
+            cfg=self.admission_config(remote=worker is not None),
+        )
+        previous = self._hold.get((worker, lane))
+        # held_since 는 **막히기 시작한 시각**이다 — 같은 이유로 계속 막혀 있으면 유지한다
+        if hold is not None and previous and previous[0] is not None:
+            self._hold[(worker, lane)] = (hold, previous[1])
+        else:
+            self._hold[(worker, lane)] = (hold, now)
+        return hold
+
+    def hold_of(self, lane: int, worker: str | None, now: datetime):
+        """상태 경로용 — **다시 판정하지 않고** claim 경로가 남긴 것을 읽는다.
+
+        기록이 claim 주기보다 오래됐으면 fail-closed 로 본다(그 레인이 안 도는 것이다).
+        """
+        entry = self._hold.get((worker, lane))
+        if entry is None:
+            return None, None
+        hold, since = entry
+        return hold, (since if hold is not None else None)
+
+    def admit(self, lane: int, worker: str | None, now: datetime, claim):
+        """게이트를 지나 claim 한다. 레인 1 은 락을 안 기다리고, 판정도 안 지난다.
+
+        게이트를 지나는 레인은 `판정 → claim → 쿨다운 기록` 을 **락 안에서** 한다. 안 그러면
+        레인 넷이 같은 순간에 깨어 전부 통과한다(실측: 락 없이 20회 중 20회).
+        """
+        if lane <= 1 or self.config.server.admission != "load":
+            job = claim()
+            if job is not None:
+                self._last_admit[worker] = now  # 레인 1 도 **기록은 한다**(결정 41)
+            return job, None
+        with self._admit_lock:
+            hold = self._decide_admission(lane, worker, now)
+            if hold is not None:
+                return None, hold
+            job = claim()
+            if job is not None:  # 큐가 비어 헛돈 것은 쿨다운을 쓰지 않는다
+                self._last_admit[worker] = now
+            return job, None
+
+    def _admit_local(self, lane: int, now: datetime, claim):
+        """로컬 레인 스레드가 부르는 게이트. 머신 키는 None(서버 자신)이다."""
+        return self.admit(lane, None, now, claim)
 
     def worker_infos(self) -> list[WorkerInfo]:
         """로컬 레인(같은 프로세스)."""
@@ -383,6 +561,11 @@ class App(RemoteWorkersMixin):
     def publish(self, kind: str, data: dict[str, Any]) -> None:
         self.bus.publish(kind, data, at=self.now_fn())
 
+    def _mark_medians_dirty(self) -> None:
+        """새 표본이 생겼다 — 잡이 종료 상태에 이르렀을 때만."""
+        with self._snap_lock:
+            self._medians_dirty = True
+
     def _mark_dirty(self) -> None:
         with self._snap_lock:
             self._dirty = True
@@ -396,8 +579,11 @@ class App(RemoteWorkersMixin):
             except Exception:  # noqa: BLE001
                 job = None
         if job is None:
+            # 종료 상태였는지 못 읽었다 — 표본을 놓치느니 한 번 더 재는 쪽을 고른다
+            self._mark_medians_dirty()
             return
         if job.is_terminal:
+            self._mark_medians_dirty()  # 새 표본이 생겼다 — 여기서만
             self.publish(
                 KIND_JOB_FINISHED,
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
@@ -423,7 +609,13 @@ class App(RemoteWorkersMixin):
             {
                 "paused": {"by": paused.by, "at": iso(paused.at)} if paused else None,
                 "workers": [
-                    {"lane": w.lane, "state": w.state, "job_id": w.job_id, "worker": w.worker}
+                    {
+                        "lane": w.lane,
+                        "state": w.state,
+                        "job_id": w.job_id,
+                        "worker": w.worker,
+                        "hold_code": w.hold_code,  # 필이 이유 없는 `held` 로 남지 않게
+                    }
                     for w in self.all_worker_infos(self.now_fn())
                 ],
             },
@@ -543,6 +735,36 @@ class App(RemoteWorkersMixin):
             row = None
         return artifacts_json(row, self.artifact_state(job, row))
 
+    def job_storage(self) -> dict[str, Any]:
+        """부피 회계(M5g §5.1). 청소기가 **마지막에 잰 값**을 쓴다 — 상태 요청이 디스크를 훑지
+        않는다. 실패해도 상태 문서를 막지 않는다."""
+        if self.retention is None:
+            return Janitor(self.store, self.config, now_fn=self.now_fn).storage(self.now_fn())
+        try:
+            return self.retention.storage(self.now_fn())
+        except Exception as e:  # noqa: BLE001
+            return {"error_code": _error_code(e)}
+
+    def gc(self, body: Any) -> dict[str, Any]:
+        """`POST /gc`(admin). 청소기와 **같은 계획 함수**를 돌린다(§5.5).
+
+        보장되는 것은 「같은 입력에 같은 판정」이지 「보여준 것과 실제가 같다」가 아니다 — 두
+        요청 사이에 잡이 끝나고 디렉터리가 생긴다.
+        """
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        unknown = set(body) - {"dry_run"}
+        if unknown:
+            raise ApiError(400, f"unknown key '{sorted(unknown)[0]}'")
+        dry_run = body.get("dry_run", False)
+        if not isinstance(dry_run, bool):  # "false" 는 참이 아니라 오류다
+            raise ApiError(400, "dry_run must be true or false")
+        if self.retention is None:
+            raise ApiError(503, "retention is not running")
+        # `storage_before`·`storage_after` 는 청소기가 같은 락 안에서 낸다 — 계획이 잰 스냅샷과
+        # 지운 뒤 다시 잰 값이다. 여기서 먼저 읽으면 **직전** 측정값(기동 직후 0 B)이 된다(B3).
+        return self.retention.gc_report(self.now_fn(), dry_run=dry_run)
+
     def artifact_storage(self) -> dict[str, Any]:
         """서버 전체 회계(§10). 실패해도 상태 문서를 막지 않는다."""
         try:
@@ -551,8 +773,9 @@ class App(RemoteWorkersMixin):
         except Exception as e:  # noqa: BLE001
             stored = reserved = None
             error_code = _error_code(e)
-        janitor = getattr(self, "janitor", None)
-        last = getattr(janitor, "last_sweep_at", None) if janitor is not None else None
+        # ⚠️ 청소기의 속성 이름은 `retention` 이다. 예전에 여기서 `getattr(self, "janitor")` 로
+        # 찾는 바람에 이 값이 **언제나 null** 이었다(M5g §3.1 A).
+        last = self.retention.last_sweep_at if self.retention is not None else None
         return {
             "stored_bytes": stored,
             "reserved_bytes": reserved,
@@ -687,20 +910,7 @@ class App(RemoteWorkersMixin):
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
-        medians: dict[str, Median] | None
-        medians_error = None
-        medians_error_code: str | None = None
-        pool_medians: dict[str, dict[str, Median]] = {}
-        try:
-            since = now - timedelta(days=cfg.sample_days)
-            samples = split_by_pool(self.store.list_samples(since))
-            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
-            for name, sample_jobs in samples.items():
-                if name != DEFAULT_POOL:
-                    pool_medians[name] = medians_from(sample_jobs, now, cfg)
-        except Exception as e:  # noqa: BLE001
-            medians, medians_error = None, _error_text(e)
-            medians_error_code = _error_code(e)
+        medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
@@ -728,6 +938,46 @@ class App(RemoteWorkersMixin):
             medians_error_code=medians_error_code,
             paused=paused,
         )
+
+    def _load_medians(
+        self, now: datetime, cfg: QueueConfig
+    ) -> tuple[dict[str, Median] | None, dict[str, dict[str, Median]], str | None, str | None]:
+        """45일치 표본 → 풀별 중앙값. `_medians_dirty` 이거나 TTL 이 지났을 때만 실제로 읽는다.
+
+        **호출자가 `_snap_lock` 을 들고 있어야 한다** — `self._medians*` 를 잠금 없이 만진다.
+        지금 호출자는 `_load_snapshot` 하나뿐이고 그건 `_snapshot` 의 잠금 안에서 돈다.
+
+        읽을 때도 무거운 `Job` 이 아니라 `Store.list_sample_rows` 의 가벼운 행을 쓴다 —
+        중앙값이 보는 것은 여섯 칸뿐이다.
+        """
+        fresh = (
+            not self._medians_dirty
+            and self._medians is not None
+            and time.monotonic() - self._medians_loaded_at < MEDIANS_MAX_AGE_SECONDS
+        )
+        if fresh:
+            return self._medians  # type: ignore[return-value]
+        medians: dict[str, Median] | None
+        medians_error: str | None = None
+        medians_error_code: str | None = None
+        pool_medians: dict[str, dict[str, Median]] = {}
+        try:
+            since = now - timedelta(days=cfg.sample_days)
+            samples = split_by_pool(self.store.list_sample_rows(since))
+            medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
+            for name, sample_rows in samples.items():
+                if name != DEFAULT_POOL:
+                    pool_medians[name] = medians_from(sample_rows, now, cfg)
+        except Exception as e:  # noqa: BLE001
+            # **실패는 캐시하지 않는다.** 캐시하면 SQLite 가 잠깐 잠긴 것만으로 `medians: null`
+            # 이 다음 잡이 끝날 때까지 모든 상태 문서에 박힌다 — 한가한 서버면 몇 시간이다.
+            # 다음 요청이 다시 시도한다(옛 동작 그대로).
+            return (None, {}, _error_text(e), _error_code(e))
+        out = (medians, pool_medians, medians_error, medians_error_code)
+        self._medians = out
+        self._medians_dirty = False
+        self._medians_loaded_at = time.monotonic()
+        return out
 
     def _snapshot(self) -> _DbSnapshot:
         """dirty 이거나 TTL 이 지났으면 다시 읽고, 아니면 캐시. status 는 이걸로 순수 계산만."""
@@ -903,6 +1153,7 @@ class App(RemoteWorkersMixin):
                 if job is not None:
                     row["artifacts"] = self.artifacts_public(job)
         doc["server"]["artifact_storage"] = self.artifact_storage()
+        doc["server"]["job_storage"] = self.job_storage()
 
     def job_view(
         self, job_id: int, token: TokenInfo | None, tail: int, host: str | None = None
@@ -912,14 +1163,14 @@ class App(RemoteWorkersMixin):
             raise ApiError(404, "no such job")
         now = self.now_fn()
         if job.is_terminal:
-            return self._with_artifacts(recent_json(job, base_url=self.base_url(host)), job)
+            return self._terminal_view(job, host)
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)
         if row is None:  # 방금 끝났다
             job = self.store.get_job(job_id)
             assert job is not None
-            return self._with_artifacts(recent_json(job, base_url=self.base_url(host)), job)
+            return self._terminal_view(job, host)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
@@ -927,9 +1178,41 @@ class App(RemoteWorkersMixin):
             queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job
         )
 
+    def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
+        """종료 잡의 문서 — 최근 행 모양 + 산출물 + 이름별 이력(M5h)."""
+        doc = recent_json(job, base_url=self.base_url(host))
+        return self._with_failures(self._with_artifacts(doc, job), job)
+
     def _with_artifacts(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
         """잡 행 JSON 에 산출물 처분을 **더한다**. 기존 키는 손대지 않는다(스키마 v1, §10)."""
         doc["artifacts"] = self.artifacts_public(job)
+        return doc
+
+    def _with_failures(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
+        """이름별 최근 이력을 **종료된 실패 잡에만** 더한다(M5h · 결정 67).
+
+        `/api/status` 는 이 길로 안 온다 — 최근 행마다 창 질의를 붙이면 이미 가장 뜨거운
+        요청 위에 짐을 얹는다(결정 49). 질의가 깨지면 **키를 아예 안 싣는다**: 빈 배열은
+        「이름을 안 남겼다」는 뜻이라 「못 읽었다」와 다르다.
+        """
+        if job.state not in (FAILED, TIMED_OUT):
+            return doc
+        cfg = self.config.server
+        try:
+            rows, window, unnamed = self.store.failure_stats(
+                job.id, job.key, job.finished_at, window=cfg.failure_window_jobs
+            )
+        except sqlite3.Error:
+            return doc
+        doc["failures"] = failures_json(
+            rows,
+            # 종료 잡에는 `progress` 가 없다 — 스텝 이름으로 아는 것은 이 두 칸뿐이다(§2.3)
+            steps={job.failed_step, job.last_step},
+            window=window,
+            window_unnamed=unnamed,
+            min_jobs=cfg.failure_min_jobs,
+        )
+        doc["failures_truncated"] = job.fail_truncated
         return doc
 
     def eta(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1016,6 +1299,7 @@ class App(RemoteWorkersMixin):
         source = Source(
             mode=MODE_TREE,
             repo=_opt_str(src.get("repo"), 200),
+            branch=_opt_str(src.get("branch"), 200),  # 표시용 — 신원에는 안 들어간다 (M5h)
             base_sha=_opt_str(src.get("base_sha"), 64),
             dirty=bool(src.get("dirty")) if src.get("dirty") is not None else None,
             tree_hash=tree_hash,
@@ -1547,6 +1831,70 @@ class App(RemoteWorkersMixin):
             return {"on": False, "name": None, "error": None}
         return {"on": r.error is None, "name": r.instance.split("._rcm.")[0], "error": r.error}
 
+    def _health_storage(self) -> dict[str, Any]:
+        """health 판 회계 — **경로는 안 싣는다**(토큰 없이 열린다).
+
+        예산 초과·바닥 아래는 **503 조건이 아니다.** 다음 sweep 이 할 일이고, 청소기가 죽는 것은
+        이미 503 이다. 사실만 싣고 판단은 `rcm check` 와 사람에게 맡긴다.
+        """
+        doc = self.job_storage()
+        free, floor = doc.get("free_bytes"), doc.get("min_free_bytes")
+        return {
+            "volume_bytes": doc.get("volume_bytes"),
+            "free_bytes": free,
+            "limit_bytes": doc.get("limit_bytes"),
+            "min_free_bytes": floor,
+            "last_sweep_at": doc.get("last_sweep_at"),
+            "next_sweep_at": doc.get("next_sweep_at"),
+            "budget_unreachable": bool(doc.get("budget_unreachable")),
+            "no_progress": bool(doc.get("no_progress")),
+            "under_floor": bool(floor and free is not None and free < floor),
+        }
+
+    # ── 클라이언트 wheel (I8-1) ─────────────────────────────────────────────
+
+    def _build_client_wheel(self) -> None:
+        """한 번만 조립한다. `start()` 가 부르고, 안 불렸으면(테스트) 첫 요청이 부른다."""
+        with self._wheel_lock:
+            if self._wheel_done:
+                return
+            self._wheel_done = True
+            try:
+                data = build_wheel(self.version)
+            except WheelBuildError as e:
+                self._wheel_error = e.code
+                self.log(f"client wheel not available: {e}")
+                return
+            except Exception as e:  # noqa: BLE001 — 조립은 부가 기능이라 서버를 죽이지 않는다
+                self._wheel_error = type(e).__name__
+                self.log(f"client wheel not available: {_error_text(e)}")
+                return
+            self._wheel = (data, hashlib.sha256(data).hexdigest())
+
+    def client_wheel(self) -> dict[str, Any] | None:
+        """health 의 `client_wheel` — `{path, sha256, bytes}`, 실패면 None(`client_wheel_error`)."""
+        self._build_client_wheel()
+        if self._wheel is None:
+            return None
+        data, sha = self._wheel
+        path = "/client/" + wheel_filename(self.version)
+        return {"path": path, "sha256": sha, "bytes": len(data)}
+
+    def client_wheel_error(self) -> str | None:
+        self._build_client_wheel()
+        return self._wheel_error
+
+    def client_wheel_bytes(self) -> tuple[bytes, str]:
+        """(바이트, sha256). 조립 실패면 503 — 옛 것·빈 것을 주지 않는다(fail-open 금지)."""
+        self._build_client_wheel()
+        if self._wheel is None:
+            raise ApiError(
+                503,
+                f"client wheel unavailable: {self._wheel_error}",
+                client_wheel_error=self._wheel_error,
+            )
+        return self._wheel
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -1572,8 +1920,13 @@ class App(RemoteWorkersMixin):
             "janitor": janitor_error is None,
             "lanes": self.config.server.lanes,
             "version": self.version,
+            "storage": self._health_storage(),  # 부피 회계(M5g, 정보 — 503 조건은 아니다)
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
             "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
+            # 클라이언트가 서버 버전을 따라오는 길(M5i I8 · 결정 81·83, 정보 — 503 조건은 아니다)
+            "client_wheel": self.client_wheel(),
+            "client_wheel_error": self.client_wheel_error(),
+            "min_client_version": MIN_CLIENT_VERSION,
         }
         if not ok:
             if not db_ok:
@@ -1704,7 +2057,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as e:  # noqa: BLE001 — 스택은 로그에만, 응답은 한 줄
-            self.app.record_error(f"{self.command} {self.path.split('?')[0]}: {type(e).__name__}")
+            self.app.record_error(
+                f"{self.command} {self.path.split('?')[0]}: {type(e).__name__}",
+                detail=_safe(str(e)),  # 로그에만 — 공개되는 last_error 는 예외 이름까지다
+            )
             if self.app.debug:
                 import traceback
 
@@ -1832,6 +2188,11 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/worker/"):
             self._worker_route(method, path)
             return
+        if path == "/gc":
+            self._only(method, "POST")
+            self.app.require_admin(self._token())
+            self._send_json(200, self.app.gc(self._json_body()))
+            return
         if path == "/pause" or path == "/resume":
             self._only(method, "POST")
             t = self.app.require_admin(self._token())
@@ -1879,7 +2240,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "/log":
                 self._only(method, "GET")
-                t = self._require_read_token()
+                # 404 가 여기로 보냈다(§3) — 문 앞에서 말이 끊기면 안내가 반쪽이다
+                try:
+                    t = self._require_read_token()
+                except ApiError as e:
+                    if e.status in (401, 403):
+                        e.extra.setdefault(
+                            "hint", f"job logs need that job's token — rcm logs {job_id}"
+                        )
+                    raise
                 offset = _int_param(query, "offset", 0, 0, None)
                 data, next_offset, more = self.app.log_bytes(job_id, t, offset)
                 self.send_response(200)
@@ -1917,7 +2286,13 @@ class Handler(BaseHTTPRequestHandler):
             self._read_only_ok()
             self._static(path)
             return
-        raise ApiError(404, "not found")
+        if path == "/client" or path.startswith("/client/"):
+            # 공개 저장소의 코드라 산출물(언제나 토큰)과 달리 `/api/status` 의 읽기 규칙을 따른다
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._client_wheel(path.removeprefix("/client").removeprefix("/"))
+            return
+        raise ApiError(404, "not found", hint=not_found_hint(path))
 
     def _artifact_archive(self, job_id: int) -> None:
         """묶음을 흘려보낸다. 전송 슬롯은 **기다리지 않는다** — 일반 슬롯을 쥔 채 기다리면
@@ -2062,6 +2437,35 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, self.app.worker_phase(t, job_id, body))
         else:
             self._send_json(200, self.app.worker_finish(t, job_id, body))
+
+    def _client_wheel(self, name: str) -> None:
+        """`/client/<파일명>` — 도는 버전의 **정확한 파일명**만 200. 다른 이름은 404 + 맞는 이름.
+
+        pip 는 URL 의 마지막 마디로 파일 종류를 정하므로 이름 없는 별칭은 만들지 않는다.
+        """
+        expected = wheel_filename(self.app.version)
+        if name != expected:
+            raise ApiError(
+                404, "not found", hint=f"the client wheel for this server is /client/{expected}"
+            )
+        data, sha = self.app.client_wheel_bytes()
+        etag = f'"{sha}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{expected}"')
+        self.send_header("Cache-Control", "no-cache")  # ETag 재검증은 살리고 캐시 사용은 막는다
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("ETag", etag)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def _static(self, path: str) -> None:
         """정적 UI. 세 파일만 준다. ETag 는 sha256 앞 16자, 나머지 /static/* 는 404."""

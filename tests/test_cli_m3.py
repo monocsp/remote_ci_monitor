@@ -127,6 +127,25 @@ def test_run_ref_no_wait_prints_ref_and_sha_and_skips_the_snapshot(
     assert snapshots == []
 
 
+def test_run_ref_no_wait_reports_the_queue_position_and_the_eta(git_srv, bare, env, cwd, capsys):
+    """git_ref 의 `--no-wait` 도 순번·대기·ETA 를 싣는다. `state` 는 제출 응답이 아니라 지금 상태다.
+
+    제출만 하고 빠지는 세션이 `rcm eta --job N` 을 따로 칠 일이 없어야 한다.
+    """
+    env(git_srv)
+    code, out, err = run(capsys, ["run", "deploy", "--ref", "main", "--no-wait"])
+    assert code == 0, err
+    body = last_json(out)
+    assert body["state"] == "queued" and body["position"] == 1
+    assert body["reason"] == "waiting_for_lane"
+    assert body["ahead_job_id"] is None and body["blocked_by"] is None
+    assert body["estimate"]["finish_at"] and body["estimate"]["expected_seconds"] > 0
+    assert body["ref"] == "main" and body["sha"] == bare.main_sha
+    line = next(ln for ln in err.splitlines() if "submitted job" in ln)
+    assert "1st in line" in line and "eta " in line, line
+    assert bare.main_sha[:7] in line, line  # ref·커밋은 그대로 남는다
+
+
 def test_run_git_ref_preset_without_ref_is_a_usage_error(git_srv, env, cwd, capsys, monkeypatch):
     env(git_srv)
     calls = refuse_submit(monkeypatch)

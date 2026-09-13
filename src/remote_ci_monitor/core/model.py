@@ -73,6 +73,7 @@ PHASE_EXECUTING = "executing"
 # ── 워커 상태 ────────────────────────────────────────────────────────────────
 WORKER_IDLE = "idle"
 WORKER_BUSY = "busy"
+WORKER_HELD = "held"  # 부하 게이트가 막고 있다 — 살아 있지만 지금은 못 집는다 (M5f)
 WORKER_DOWN = "down"
 
 # ── reason 열거값 (PLAN.md 「큐 규칙」) ─────────────────────────────────────
@@ -88,6 +89,10 @@ REASON_CANCELLING = "cancelling"
 REASON_PAUSED = "paused"
 REASON_NOT_SCHEDULED = "not_scheduled"
 REASON_WORKER_DOWN = "worker_down"
+#: 집었을 레인이 호스트 부하로 보류 중이다(M5f). **`ACTIONABLE_REASONS` 에는 안 올린다** —
+#: 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다(오너 결정 45). 오래 닫혀 있으면
+#: `rcm check` 가 경고한다.
+REASON_HELD_BY_LOAD = "held_by_load"
 
 #: 「Not moving」 요약에 오르는 행동 가능한 이유. 순서가 우선순위다.
 ACTIONABLE_REASONS = (
@@ -133,6 +138,7 @@ class Preset:
     env: dict[str, str] = field(default_factory=dict)
     inputs: tuple[InputSpec, ...] = ()
     artifacts: tuple[str, ...] = ()  # 잡이 만든 파일 중 돌려줄 것의 글롭 (M5e)
+    artifacts_on: str = "always"  # "always"(오늘의 동작) | "failure" — 언제 모으나 (M5g)
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -157,6 +163,8 @@ class Source:
     sha: str | None = None
     uploaded_bytes: int | None = None  # M5 캐시: 이번에 실제로 받은 바이트
     cached_bytes: int | None = None  # M5 캐시: 캐시 히트 바이트
+    #: tree 잡의 브랜치 이름(표시용, M5h). 신원은 `tree_hash` 이고 여기는 안 들어간다
+    branch: str | None = None
 
     @property
     def identity(self) -> str | None:
@@ -213,6 +221,10 @@ class Job:
     summary_code: str | None = None
     summary_args: dict[str, Any] = field(default_factory=dict)
     failed_step: str | None = None
+    #: 마지막으로 시작한 스텝 — 인과를 주장하지 않는다. 취소·유실 잡에는 없다 (M5h)
+    last_step: str | None = None
+    #: 실패 이름이 상한을 넘어 버려진 것이 있다. 공개 JSON 은 `failures_truncated` (M5h)
+    fail_truncated: bool = False
     lane: int | None = None
     timeout_seconds: int | None = None
     cancel: CancelInfo | None = None
@@ -270,6 +282,12 @@ class Progress:
     current_seconds: float | None = None
     job_seconds: float | None = None
     failed_step: str | None = None
+    #: 마지막으로 시작한 스텝. 「끝났을 때 어디였나」만 말하고 원인은 주장하지 않는다 (M5h)
+    last_step: str | None = None
+    #: 잡이 `::rcm::fail::` 로 지목한 이름. 잡이 찍은 순서, 서로 다른 이름만 (M5h)
+    fail_names: tuple[str, ...] = ()
+    #: MAX_FAIL_NAMES 를 넘겨 버린 이름이 있다 — 공개 JSON 에서는 `failures_truncated` (M5h)
+    fail_truncated: bool = False
     summary: str | None = None
     last_output_at: datetime | None = None
     timing: str = "as_received"
@@ -296,6 +314,9 @@ class Estimate:
     overdue: bool
     stuck: bool
     finish_at: datetime | None
+    #: 이 잡이 **지금** 같은 풀의 다른 잡과 한 머신을 나눠 쓰고 있나(M5f). 중앙값은 혼자 잰
+    #: 것이라 그동안은 덜 확실하다 — 배수를 지어내지 않고 신뢰도만 한 칸 내린다.
+    shared: bool = False
 
 
 @dataclass(frozen=True)
@@ -322,12 +343,18 @@ class Median:
 @dataclass(frozen=True)
 class WorkerInfo:
     lane: int
-    state: str  # idle | busy | down
+    state: str  # idle | busy | held | down
     job_id: int | None = None
     error: str | None = None
     since: datetime | None = None
     worker: str | None = None  # 원격 워커 이름. 로컬 레인은 None (M5b-2)
     pool: str = DEFAULT_POOL  # 이 레인이 섬기는 풀 (M5b-4: rcm check 가 워커를 풀에 묶는다)
+    #: `held` 일 때 **왜**(결정 37) — `cpu_busy` · `no_sample` · `cooldown` (M5f).
+    hold_code: str | None = None
+    #: 화면이 숫자를 그릴 재료. `cpu_busy` 일 때만 `{"cpu_busy": 92.4}`, 아니면 None.
+    hold_detail: dict[str, Any] | None = None
+    #: 언제부터 막혔나. 「게이트가 제 일을 하는 중」과 「누가 두 시간째 잡고 있음」을 가른다.
+    held_since: datetime | None = None
 
     @property
     def display_name(self) -> str | None:

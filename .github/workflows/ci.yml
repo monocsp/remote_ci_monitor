@@ -18,9 +18,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `chrome`: `RCM_CHROME` 에 들어가는 값. 설정된 곳에서는 Chrome 테스트(tests/test_web_browser.py)가
+        # **필수**다 — 못 찾으면 skip 이 아니라 실패(결정 79 · docs/gate-replay-fixes-workplan.md §3 I5).
+        # ubuntu 러너 이미지에는 google-chrome 이 있다. macOS 러너는 비워 두어 skip 을 허용한다.
         include:
-          - { os: ubuntu-latest, python: "3.11" }
-          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-latest, python: "3.11", chrome: google-chrome }
+          - { os: ubuntu-latest, python: "3.13", chrome: google-chrome }
           - { os: macos-latest, python: "3.13" }
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +40,8 @@ jobs:
       - name: ruff format --check
         run: ruff format --check .
       - name: pytest
+        env:
+          RCM_CHROME: ${{ matrix.chrome }}
         run: pytest
       - name: 웹 UI 순수 함수 (node --test)
         if: hashFiles('tests/web/*.test.js') != ''

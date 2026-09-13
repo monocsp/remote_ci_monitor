@@ -288,7 +288,11 @@ def test_metadata_deletion_waits_until_the_bundle_is_really_gone(env):
 
 
 def test_existing_log_and_workspace_retention_is_unchanged(env):
-    """M3 회귀 — 번들이 없는 잡은 예전 그대로 지워지고 표시된다."""
+    """M3 회귀 — 번들이 없는 잡은 예전 그대로 지워지고 표시된다.
+
+    M5g 뒤로 부피(워크스페이스)는 로그와 다른 시계를 타므로 실패 잡의 워크스페이스는 먼저
+    간다. **로그와 `artifacts_purged_at` 표시는 M3 그대로**라는 것이 이 회귀의 요지다.
+    """
     store, cfg = env
     ok = finished(store, finished_at=NOW - 1.5 * DAY)
     bad = finished(store, state=FAILED, finished_at=NOW - 1.5 * DAY)
@@ -297,7 +301,7 @@ def test_existing_log_and_workspace_retention_is_unchanged(env):
     jan, rec = make_janitor(store, cfg)
     assert jan.sweep_once(NOW) == 1
     assert not ok_dirs[0].exists() and not ok_dirs[1].exists()
-    assert bad_dirs[0].exists() and bad_dirs[1].exists()
+    assert bad_dirs[0].exists() and (bad_dirs[0] / "log.txt").exists()
     assert store.get_job(ok).artifacts_purged_at == NOW
     assert store.get_job(bad).artifacts_purged_at is None
     assert jan.purged_total == 1 and jan.last_sweep_at == NOW

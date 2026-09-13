@@ -57,6 +57,7 @@ ESTIMATE_KEYS = {
     "overdue",
     "stuck",
     "finish_at",
+    "shared",  # M5f — 같은 풀의 다른 잡과 머신을 나눠 쓰는 중인가
 }
 RECENT_KEYS = {
     "pool",
@@ -79,6 +80,7 @@ RECENT_KEYS = {
     "summary_code",
     "summary_args",
     "failed_step",
+    "last_step",  # M5h — 「끝났을 때 어디였나」
     "cancelled_by",
     "timeout_seconds",
     "source",
@@ -230,6 +232,9 @@ def test_status_is_json_serializable_with_expected_shape():
         "worker",  # M5b-2 추가 키
         "display_name",
         "pool",  # M5b-4
+        "hold_code",  # M5f — 부하 게이트가 막고 있으면 왜 · 얼마나 · 얼마부터
+        "hold_detail",
+        "held_since",
     }
     assert len(back["pools"]) == 1
     pool = back["pools"][0]

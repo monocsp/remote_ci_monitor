@@ -82,7 +82,10 @@ def is_dead(pid: int) -> bool:
 
 
 def test_group_serializes_while_the_other_lane_keeps_working(tmp_path):
-    s, marks = start_server(tmp_path, workers=False, lanes=2)
+    # 주제는 **그룹 직렬화**지 부하 게이트가 아니다. 게이트가 켜져 있으면 표본이 아직 없는
+    # `app.start()` 직후 레인 2 가 no_sample 로 보류돼(설계대로) 이 시나리오가 빨개진다 —
+    # 게이트는 tests/test_admission.py 와 tests/test_server_m5f.py 가 잠근다.
+    s, marks = start_server(tmp_path, workers=False, lanes=2, admission="always")
     try:
         first = submit_tree(s, "qa", 1)
         second = submit_tree(s, "qa", 2)

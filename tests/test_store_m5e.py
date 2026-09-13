@@ -222,10 +222,10 @@ def ready_bundle(
 def test_fresh_database_is_schema_7_with_join_count_and_job_artifacts(store, data_dir):
     """새 DB 는 마이그레이션을 건너뛰고 `_SCHEMA_V1` 만 실행한다(`store.py:294`) — 마이그레이션만
     고치면 새 DB 에 표가 없다. 그래서 6→7 만 보는 검사로는 이 버그를 못 잡는다."""
-    assert DB_VERSION == 7
-    assert store.user_version() == 7
+    assert DB_VERSION >= 7  # M5e 는 7, M5f 가 claim 인덱스로 8 을 더한다
+    assert store.user_version() == DB_VERSION
     with raw(store) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == DB_VERSION
         job_cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(jobs)")}
         bundle_cols = {r["name"] for r in conn.execute("PRAGMA table_info(job_artifacts)")}
         indexes = {r["name"] for r in conn.execute("PRAGMA index_list(job_artifacts)")}
@@ -262,6 +262,15 @@ def test_migration_from_6_to_7_keeps_rows_and_defaults_join_count_to_zero(data_d
         conn.execute("DROP INDEX IF EXISTS job_artifacts_expiry")
         conn.execute("DROP TABLE IF EXISTS job_artifacts")
         conn.execute("ALTER TABLE jobs DROP COLUMN join_count")
+        conn.execute("DROP INDEX IF EXISTS jobs_claim")  # v8(M5f)
+        conn.execute("DROP INDEX IF EXISTS jobs_recent")  # v9(M5f)
+        conn.execute("DROP INDEX IF EXISTS job_failures_name")  # v12(M5h)
+        conn.execute("DROP INDEX IF EXISTS jobs_key_finished")
+        conn.execute("DROP TABLE IF EXISTS job_failures")
+        conn.execute("ALTER TABLE jobs DROP COLUMN fail_truncated")
+        conn.execute("ALTER TABLE jobs DROP COLUMN last_step")  # v11(M5h)
+        conn.execute("ALTER TABLE jobs DROP COLUMN concurrent_at_start")  # v10(M5f)
+        conn.execute("ALTER TABLE jobs DROP COLUMN failed_step_guessed")  # v11
         conn.execute("PRAGMA user_version=6")
         conn.commit()
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
@@ -271,7 +280,7 @@ def test_migration_from_6_to_7_keeps_rows_and_defaults_join_count_to_zero(data_d
         conn.close()
     s2 = Store(path)  # 6 → 7 이 여기서 돈다
     try:
-        assert s2.user_version() == 7
+        assert s2.user_version() == DB_VERSION
         got = s2.get_job(kept.id)
         assert got is not None and got.state == QUEUED and got.created_at == NOW
         assert [j.name for j in s2.get_job(joined.id).joiners] == ["bob-desk"]
@@ -292,12 +301,12 @@ def test_reopening_twice_changes_nothing(data_dir):
     sha = ready_bundle(first, job.id)
     first.close()
     second = Store(path)
-    assert second.user_version() == 7
+    assert second.user_version() == DB_VERSION
     assert second.get_bundle(job.id)["bundle_sha256"] == sha
     second.close()
     third = Store(path)
     try:
-        assert third.user_version() == 7
+        assert third.user_version() == DB_VERSION
         assert third.get_job(job.id).key == "goldens"
         assert third.get_bundle(job.id)["bundle_sha256"] == sha
     finally:

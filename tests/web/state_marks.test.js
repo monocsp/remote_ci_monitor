@@ -22,7 +22,9 @@ const rcm = load();
 
 const FALLBACK_GLYPH = "·"; // 모르는 상태의 자리표시자
 // 워커 상태와 `unknown` 은 잡 상태가 아니다 — 상태 필을 만들지 않는다.
-const NOT_A_JOB_STATE = new Set(["unknown", "busy", "idle", "down"]);
+// (`held` 는 M5f 의 워커 상태다 — 잡 필이 아니라 워커 필이고, `.wk.held` 가 색과 함께
+//  네모 점으로 모양 채널을 따로 준다: idle 은 둥근 점, held·down·paused 는 네모다.)
+const NOT_A_JOB_STATE = new Set(["unknown", "busy", "idle", "down", "held"]);
 // 카탈로그에서 뽑는다. 상태를 새로 들이면 글리프 없이 지나갈 수 없다.
 const JOB_STATES = Object.keys(I18N.MESSAGES.en)
   .filter((k) => k.startsWith("state."))
