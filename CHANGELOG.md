@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-13
+
 ### Fixed
 - **`rcm serve` takes its port before it opens the database.** Started next to a running
   service with the same config — another build, a copy of the config — it used to migrate the
@@ -767,7 +769,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.3...v0.2.4

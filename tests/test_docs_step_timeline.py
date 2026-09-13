@@ -70,9 +70,10 @@ def test_the_changelog_entry_sits_above_the_first_release_heading():
     항목은 첫 `## [0.` 제목보다 **위**, 즉 `[Unreleased]` 안에 있어야 한다."""
     text = read(CHANGELOG)
     entry = re.search(r"A finished job keeps its step times", text)
-    first_release = re.search(r"^## \[0\.", text, re.M)
+    # 0.2.7 릴리스로 항목이 `[0.2.7]` 절에 들어갔다 — 그 아래 `[0.2.6]` 제목보다는 위여야 한다.
+    older_release = re.search(r"^## \[0\.2\.6\]", text, re.M)
     assert entry, "CHANGELOG has no step_timeline entry"
-    assert first_release, "CHANGELOG has no released section"
-    assert entry.start() < first_release.start(), (
-        "the step_timeline entry sits inside a released section, not in [Unreleased]"
+    assert older_release, "CHANGELOG has no [0.2.6] section"
+    assert entry.start() < older_release.start(), (
+        "the step_timeline entry slid below the 0.2.6 heading — it belongs to 0.2.7"
     )
