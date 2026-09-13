@@ -171,10 +171,24 @@ the old modules, so a job that starts in that window can load a mix of both.
 Claude Code sessions have this wired as a `PreToolUse` hook: `.claude/settings.json` runs
 `tools/guard_production.py`, which finds the production checkout from the machine's own editable
 install, refuses edits to it and to the server's config and data, refuses a command that would
-open the production database with a build other than the service's own (`rcm token …` against
-the production config or data directory — a different build migrates the database on open), and
-asks before a deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A
-machine with no such install sees nothing.
+open the production database with a build other than the service's own (`rcm token …`, `rcm
+serve`, `rcm worker` — a different build migrates the database on open), and asks before a
+deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A machine with no
+such install sees nothing.
+
+The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
+primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's
+`.venv` activated is the worktree's build. The hook looks at `~/.local/share/rcm-venv`, then at
+the `rcm` named by the installed launchd or systemd unit, then at every `rcm` on `PATH`, and
+takes the first whose editable source is not a linked worktree. What counts is the data
+directory the command would *actually* open, in the CLI's own order: `--data-dir`, then
+`RCM_SERVER_DATA_DIR`, then the `data_dir` of the config it would pick (`--config`,
+`$RCM_CONFIG`, `./rcm.toml`, `$XDG_CONFIG_HOME/rcm/server.toml`, `~/.config/rcm/server.toml`).
+So a **copy of the production config** that only changes `port` is refused too — its `data_dir`
+is still the production one — and so is a test config run with `RCM_SERVER_DATA_DIR` pointing at
+production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `exec`, `nohup`,
+`time`, `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
+inside `bash -c '…'`, `xargs`, `uv run` or `$(…)`, and does not resolve symlinks.
 
 ## Keeping clients on the server's version
 
@@ -252,6 +266,12 @@ and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
   Tokens have a kind: `client` (sessions), `admin` (cancel any job, pause, bump) and `worker`
   (remote workers — `/worker/*` only). A worker can report only on jobs it claimed itself; the
   log bytes and host samples it sends are treated as data, never parsed as commands.
+- Every `POST /jobs` also answers with a **cancel token** for that one submission — a secret with
+  a single right: cancel that job (the requester's), or leave its join list (a joiner's). The
+  server keeps its SHA-256 only; `rcm run` stores it in a 0600 file under `~/.local/state/rcm`.
+  It never appears in `/api/status`, job documents, logs, errors or URLs. With
+  `cancel_requires_submission_token = true` it is the only non-admin way to cancel
+  ([configuration](configuration.md#who-may-cancel-a-job)).
 - Only configured presets run. No shell interpolation. Uploads are extracted with Python's
   `tarfile` data filter (no absolute paths, no `..`, no links outside the workspace).
 - The server binds to `127.0.0.1` unless you set `bind`. It does not do TLS — put it behind
@@ -296,7 +316,9 @@ on a guess: a size that cannot be measured skips the byte rules for that sweep a
 workspace shares with the git mirror by hard link are charged to it but do not come back when it
 is deleted, so `rcm gc --dry-run` says what it would free (the reclaimable estimate) next to what
 is charged, and a real `rcm gc` measures the inventory and the free space again after it deleted —
-its receipt is what the disk said, not the plan. The full table is in
+its receipt is what the disk said, not the plan, also when a delete got only half way (the entry
+in `failed[]` says what went) or the size of what went was never measured (`freed ≥ …`). The full
+table is in
 [Configuration](configuration.md#retention-what-is-kept-and-for-how-long).
 
 **Upgrading to a release that adds these:** the first sweep after the restart applies the new

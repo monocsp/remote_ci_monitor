@@ -111,6 +111,7 @@
     "row.log": "Log",
     "row.add_token_for_log": "Add a token to see the log",
     "row.not_your_job": "not your job",
+    "row.cancel_locked": "cancelling needs the submission’s cancel token — run rcm cancel in the session that submitted, or use an admin token",
     "row.others_waiting": function (a) {
       return a.n + " other session" + (a.n > 1 ? "s are" : " is") + " waiting on this job";
     },
@@ -514,6 +515,7 @@
     "row.log": "로그",
     "row.add_token_for_log": "토큰을 넣으면 로그가 보입니다",
     "row.not_your_job": "내 잡이 아닙니다",
+    "row.cancel_locked": "취소에는 제출할 때 받은 cancel token 이 필요합니다 — 제출한 세션에서 rcm cancel 을 쓰거나 관리자 토큰으로",
     "row.others_waiting": function (a) { return "다른 세션 " + a.n + "개가 이 잡을 기다립니다"; },
     "row.ref": function (a) { return "ref " + a.ref; },
     "row.not_received": "아직 받지 못함",
