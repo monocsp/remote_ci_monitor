@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -26,10 +27,26 @@ def test_both_usage_guides_name_the_timeline_in_the_json(path: Path):
     assert has(read(path), r"`step_timeline`"), f"{path.name} never names step_timeline"
 
 
+@pytest.mark.parametrize("path", [USAGE, USAGE_KO], ids=["en", "ko"])
+def test_both_usage_guides_say_concurrent_at_start_counts_itself(path: Path):
+    """`store.concurrent_at_start` 는 자기를 센다(혼자 돌면 1 · 모르면 None). 「돌던 잡 수」만
+    적으면 0 으로 읽는다 — M5l S12.2 실측: 첫 잡 1 · 둘째 2. 두 거울과 CHANGELOG 가 같이 말한다."""
+    text = read(path)
+    assert has(text, r"`concurrent_at_start`"), f"{path.name} never names concurrent_at_start"
+    assert has(text, r"itself included|자기 포함"), f"{path.name} does not say it counts itself"
+    assert has(text, r"ran alone[^\n]*`1`|혼자 돌았으면 `1`"), f"{path.name}: alone reads 1"
+    assert has(unreleased(read(CHANGELOG)), r"itself included"), "CHANGELOG: itself included"
+
+
 def test_configuration_says_a_finished_job_keeps_its_step_times():
     text = read(CONFIGURATION)
     assert has(text, r"`step_timeline`"), "configuration.md never names step_timeline"
     assert has(text, r"step_timeline_error_code"), "configuration.md lacks the error code"
+    # `ok` 의 마지막 스텝 규칙은 코드 폭 그대로 — 스크립트가 `::rcm::fail::` 로 선언한 스텝은
+    # `false` 다(`progress.py` `fail_seen`). 「실패·취소면 null」만 적으면 그 가지를 숨긴다(D-3).
+    assert has(text, r"`null` unless the script declared it failed"), (
+        "configuration.md's `ok` sentence hides the declared-failure branch"
+    )
 
 
 def test_the_plan_names_the_key_on_the_job_route():
@@ -45,3 +62,17 @@ def test_the_changelog_has_an_unreleased_entry_with_a_pr_link():
         r"remote_ci_monitor/pull/\d+\)\)",
     )
     assert m, "the step_timeline entry has no PR link"
+
+
+def test_the_changelog_entry_sits_above_the_first_release_heading():
+    """`unreleased()` 는 `[0.1.0]` 앞까지 전부를 돌려주므로 항목이 `[0.2.6]` 절에 미끄러져도
+    초록이었다(리뷰 #108 C-1 · D-1 — 0.2.6 릴리스 커밋 위로 리베이스하면서 실제로 그렇게 됐다).
+    항목은 첫 `## [0.` 제목보다 **위**, 즉 `[Unreleased]` 안에 있어야 한다."""
+    text = read(CHANGELOG)
+    entry = re.search(r"A finished job keeps its step times", text)
+    first_release = re.search(r"^## \[0\.", text, re.M)
+    assert entry, "CHANGELOG has no step_timeline entry"
+    assert first_release, "CHANGELOG has no released section"
+    assert entry.start() < first_release.start(), (
+        "the step_timeline entry sits inside a released section, not in [Unreleased]"
+    )

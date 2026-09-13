@@ -18,8 +18,9 @@ of a key bumps that number and is listed here.
   read the key is `null` with `step_timeline_error_code`, never an empty list. The stored
   `failed_step` and `last_step` are unchanged, and `failures[].step` now recognises every step of
   the timeline, not only those two. The finished document also carries `concurrent_at_start`
-  (how many jobs were running when it started; `null` when unknown), the raw material for the
-  two-lane experiment. `schema_version` stays 1 — keys were added.
+  (how many jobs were running when it started, itself included — a job that ran alone reads
+  `1`; `null` when unknown), the raw material for the two-lane experiment. `schema_version`
+  stays 1 — keys were added.
   ([#108](https://github.com/monocsp/remote_ci_monitor/pull/108))
 
 ## [0.2.6] - 2026-09-10

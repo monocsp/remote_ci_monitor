@@ -62,9 +62,10 @@ failed before it started has the same empty timeline. When the server cannot rea
 key is `null` and `step_timeline_error_code` says why — an empty list is never used to cover a
 read that failed. `ok` is what the markers said: a step closed by the next `::rcm::step::` is
 `true`, the last step of a job that exited 0 is `true`, and the last step of a failed or cancelled
-job is `null` — a failure is never inferred, and the stored `failed_step` and `last_step` are
-not changed by the timeline. Running jobs keep `progress`; `/api/status` rows never carry
-`step_timeline`.
+job is `null` unless the script declared it failed (`::rcm::fail::<name>` or
+`::rcm::step-end::fail`), in which case it is `false` — a failure is never inferred, and the stored
+`failed_step` and `last_step` are not changed by the timeline. Running jobs keep `progress`;
+`/api/status` rows never carry `step_timeline`.
 
 ### Saying what failed
 
