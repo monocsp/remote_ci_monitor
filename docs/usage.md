@@ -156,6 +156,24 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
 
+`rcm cancel N` sends the cancel token that came back with the submission — `rcm run` saved it in
+`~/.local/state/rcm/submissions.json` (`$XDG_STATE_HOME/rcm/submissions.json` if set, mode
+0600), so the session that submitted can cancel and a session in another state directory — a
+different user, or a different machine — cannot, even with the same client token. Two sessions of
+the same user share that file: `rcm cancel N` then sends the token of the **newest** submission
+of that job made with this client token — never one another token saved — so a session that
+joined only leaves the join list and never cancels the job; pass
+`--submission-id` (the `submission.id` from the `--no-wait` JSON) to pick a specific one. From
+another machine, or from a wrapper that kept the `--no-wait` JSON (it carries
+`submission.cancel_token`), pass it with `--cancel-token`: `rcm cancel N --cancel-token …`. Without either, the
+command says so and still sends the cancel: a server on the default settings accepts it as before,
+a server with `cancel_requires_submission_token = true`
+([configuration](configuration.md#who-may-cancel-a-job)) answers 403 unless the token is an
+admin token. A token that worked is removed from the file; the file keeps the newest 200 entries
+and, above that, drops only jobs the server says are finished. If the file cannot be written,
+`rcm run` says so in one line and the job runs anyway — cancel it with `--cancel-token`. The cancel
+token is never printed anywhere else, and neither is the path of the state file.
+
 ## 6. When it fails
 
 A failed job is not an error in the tool, so the output stays calm and specific.
@@ -175,7 +193,15 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    for something that is simply broken. The question mark is deliberate — it is a suggestion, not
    a verdict, and the counts are next to it.
 3. **The JSON** carries `failed_step`, `last_step`, `failures`, `exit_code` and the per-step
-   timings, so a wrapper script can report which stage broke without scraping the log.
+   timings, so a wrapper script can report which stage broke without scraping the log. The
+   timings are `step_timeline`: one entry per `::rcm::step::` your script printed, with
+   `started_at`, `ended_at`, `seconds` and `ok` — the same numbers the queue showed while the
+   job ran, kept after it finished. `steps: []` means the script printed no step markers;
+   `step_timeline: null` with `step_timeline_error_code` means the server could not read them.
+   `concurrent_at_start` is how many jobs were running when this one started, itself included
+   — a job that ran alone reads `1`, and `null` means the server does not know — the number to
+   look at when you try two lanes.
+   The same document is `GET /jobs/<N>`, so `rcm wait --job N` prints it too.
 4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
    treats 3 as red, it will be red for the wrong reason.

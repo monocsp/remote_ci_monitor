@@ -26,10 +26,10 @@ from test_server_m3 import build_bare_repo, git_server
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
 
-#: 명세 §3 의 키 순서. 순번 다섯은 조회한 문서에서 온다.
+#: 명세 §3 의 키 순서. 순번 다섯은 조회한 문서에서 온다. `submission`(M5j G5)은 제출 응답에서.
 QUEUE_KEYS = ["position", "reason", "ahead_job_id", "blocked_by", "estimate"]
-TREE_KEYS = ["job_id", "joined", "state", *QUEUE_KEYS, "url"]
-GIT_KEYS = ["job_id", "joined", "state", *QUEUE_KEYS, "ref", "sha", "url"]
+TREE_KEYS = ["job_id", "joined", "state", *QUEUE_KEYS, "submission", "url"]
+GIT_KEYS = ["job_id", "joined", "state", *QUEUE_KEYS, "ref", "sha", "submission", "url"]
 
 FINISH = "2026-09-04T01:03:52Z"
 URL = "http://macmini:8787/#/jobs/8"

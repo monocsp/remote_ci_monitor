@@ -161,7 +161,9 @@ def test_the_server_block_gains_only_the_two_storage_objects(srv):
     """§10: `server.artifact_storage` 하나. M5g 가 `job_storage` 를 하나 더 얹는다 —
     스키마 v1 은 **키를 더하지** 값이나 뜻을 바꾸지 않는다."""
     server = srv.status()["server"]
-    added = {"artifact_storage", "job_storage"}
+    # M5j G5 가 불리언 하나를 더 얹는다(`cancel_requires_submission_token` — 웹 취소 버튼이
+    # 읽는다). 키 추가만.
+    added = {"artifact_storage", "job_storage", "cancel_requires_submission_token"}
     assert set(server) == SERVER_KEYS_V1 | added, sorted(set(server) ^ (SERVER_KEYS_V1 | added))
     storage = server["artifact_storage"]
     assert set(storage) == {
