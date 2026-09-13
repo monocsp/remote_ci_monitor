@@ -8,6 +8,13 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **Two lanes for a gate with a light phase and a heavy phase.** `docs/configuration.md` now has
+  a section on the two-lane experiment: `lanes = 2` with the gate preset's `concurrency_group`
+  removed is safe only when the script itself serialises its heavy section with a machine-wide
+  lock (the example uses Python's `fcntl.flock`, which works on macOS and Linux, and stops the
+  script when the lock cannot be taken). CPU admission is decided once, when a lane picks a job
+  up — it is not a section lock — and there is no memory-based admission (decision 42). No
+  configuration key changed. ([#106](https://github.com/monocsp/remote_ci_monitor/pull/106))
 - **A finished job keeps its step times.** While a job ran, the queue showed how long each
   `::rcm::step::` took; once it finished those numbers were gone, and a team measuring its gate
   had to read the log. `GET /jobs/<id>` for a finished job now carries `step_timeline` — one entry
