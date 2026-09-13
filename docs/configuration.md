@@ -8,6 +8,14 @@ keeps `worker.toml`.
 `rcm check --config server.toml` validates a server file (and its data dir and git) without
 starting anything.
 
+The server file is found in this order: `--config`, `$RCM_CONFIG`, `./rcm.toml`,
+`$XDG_CONFIG_HOME/rcm/server.toml`, `~/.config/rcm/server.toml`. Any key of the `[server]`,
+`[estimate]`, `[host]` and `[display]` sections can be overridden by an environment variable
+named `RCM_<SECTION>_<KEY>` — `RCM_SERVER_DATA_DIR=/srv/rcm rcm serve` — which wins over the
+file and loses to the matching flag (`--data-dir`, `--port`). A variable that is set but empty
+is applied as the empty string, not ignored: `RCM_SERVER_DATA_DIR=` means `data_dir = ""`, the
+current directory, and creates `rcm.sqlite3` there.
+
 | file | who reads it | how to create it |
 |---|---|---|
 | `server.toml` | the build machine (`rcm serve`) | `rcm init server` |
