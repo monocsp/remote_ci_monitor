@@ -371,8 +371,8 @@ MUTANTS = (
         ),
         new="            charged += item.bytes or 0\n",
         tests=("tests/test_janitor_m5l.py",),
-    # ㉗ M5l L7 · pr-82 리뷰 P2 — 수집기 설치를 지우면 `page_errors()` 가 「page error collector
-    # missing」으로 빨개져야 한다. 예전에는 `[]` 를 돌려줘 I5 의 0건 단언이 그대로 초록이었다.
+        # ㉗ M5l L7 · pr-82 리뷰 P2 — 수집기 설치를 지우면 `page_errors()` 가 「page error collector
+        # missing」으로 빨개져야 한다. 예전에는 `[]` 를 돌려줘 I5 의 0건 단언이 그대로 초록이었다.
     ),
     Mutant(
         name="web-page-error-collector-removed",
