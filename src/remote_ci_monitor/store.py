@@ -64,6 +64,10 @@ from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 
+#: 실패 대장 창(`failure_stats`)에서 빼는 요약 코드 — 프로세스가 뜨기 **전**에 서버가 닫은 잡
+#: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
+WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
+
 DB_VERSION = 16
 #: 마이그레이션 전 자동 백업을 몇 개 남기나(결정 74). 정리는 마이그레이션이 끝난 뒤, 실패는 경고만.
 BACKUPS_KEPT = 3
@@ -932,6 +936,10 @@ class Store:
         안 하므로 뺀다). 이 잡이 늘 창의 맨 앞이라 자기 이름의 `seen` 은 1 이상이고, 한 달
         뒤에 같은 잡을 다시 열어도 **같은 답**이 나온다(창이 흘러가지 않는다 — 명세 §2.1).
 
+        프로세스가 뜨기 전에 서버가 닫은 잡(`WINDOW_EXCLUDED_CODES` · `tool_missing`, M5j G4)도
+        취소·유실과 같이 뺀다 — 스크립트에 대해 아무 말도 못 한 잡이 분모에 들면 결정적 실패
+        셋이 「4 중 3 · intermittent?」 로 보인다(결정 68 의 분모는 스크립트가 **돈** 잡이다).
+
         돌려주는 것은 `(줄 목록, 창의 잡 수, 이름 없이 실패한 잡 수)`. 줄 순서는 그 잡이 찍은
         순서(`seq`)다.
         """
@@ -941,14 +949,16 @@ class Store:
             return [], 0, 0
         states = (SUCCEEDED, FAILED, TIMED_OUT)
         marks = ",".join("?" * len(states))
+        excluded = ",".join("?" * len(WINDOW_EXCLUDED_CODES))
         ids = [
             int(r[0])
             for r in conn.execute(
                 f"SELECT id FROM jobs WHERE key=? AND state IN ({marks}) "
                 "AND finished_at IS NOT NULL "
+                f"AND (summary_code IS NULL OR summary_code NOT IN ({excluded})) "
                 "AND (finished_at < ? OR (finished_at = ? AND id <= ?)) "
                 "ORDER BY finished_at DESC, id DESC LIMIT ?",
-                (key, *states, at, at, job_id, window),
+                (key, *states, *WINDOW_EXCLUDED_CODES, at, at, job_id, window),
             ).fetchall()
         ]
         if not ids:
