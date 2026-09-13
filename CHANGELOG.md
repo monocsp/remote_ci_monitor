@@ -7,6 +7,29 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Presets can require tools.** `requires = ["fvm", "gitleaks"]` on a preset names the tools
+  (or absolute paths) the job must find; right before the process starts, on the local lane or on
+  a remote worker, rcm looks them up in the environment the job actually gets — `env_passthrough`
+  then `[presets.env]`, an empty `PATH` if the job has none — and a job that would have silently
+  fallen through to the wrong SDK now does not run: it ends `failed` with
+  `summary_code: "tool_missing"` and `summary_args: {"tool": "fvm"}`, the name only, no `PATH` and
+  no path anywhere — an entry declared as an absolute path is named by its basename in the job
+  log too, and an entry without one (`/opt/bin/`) is a config error. A relative `PATH` entry is
+  resolved against the job's workspace, where the process starts, not against the server's own
+  directory. The job log says `[rcm] required tools: fvm ok · gitleaks ok` or
+  `[rcm] required tool fvm: missing`. Such a failure carries no `failed_step`, no `last_step` and no
+  failure ledger line, and it is left out of the failure window like a cancelled job — three real
+  failures after one `tool_missing` read "every one of the last 3", not "3 of the last 4". A job
+  cancelled while its workspace was being prepared ends `cancelled`, never `tool_missing`. Remote
+  workers get `requires` in the claim and report the structured code on finish (a path in the
+  reported name is cut to the name); a worker build that does not know the keys ignores them.
+  `rcm check --config` gains a `local preset tools` row — a
+  check in your shell, explicitly not the service's, whose `launchd` `PATH` is the usual reason a
+  tool goes missing (`[presets.env] PATH = …` is the fix).
+  ([Configuration](docs/configuration.md#required-tools),
+  [#109](https://github.com/monocsp/remote_ci_monitor/pull/109))
+
 ## [0.2.6] - 2026-09-10
 
 ### Changed

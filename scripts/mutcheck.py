@@ -39,6 +39,12 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      (`store.py`, 결정 78)
   ㉖ client-wheel-any-name — `/client/*.whl` 이 이름이 달라도 200 (정확한 파일명 검사 제거 —
      `server.py`, M5i I8 결정 81. pip 는 URL 의 파일명으로 버전을 믿는다)
+  ㉗ requires-check-skipped — 프리셋 `requires` 검사를 건너뜀: 없는 도구로도 프로세스가 뜬다
+     (`runner.py`, M5j G4 결정 85 — 그게 「옛 SDK 로 초록」이었다)
+  ㉘ requires-path-server-cwd — PATH 의 상대 항목을 워크스페이스가 아니라 검사 프로세스의 cwd
+     기준으로 푼다: 서버 폴더에만 있는 도구로 통과한다(`runner.py`, M5l S1 — PR #109 리뷰 B)
+  ㉙ requires-cancel-ignored — preflight 직전의 취소 확인 제거: 취소한 잡이 `tool_missing` 으로
+     끝난다(`runner.py`, M5l S4)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -308,6 +314,31 @@ MUTANTS = (
         old="    if st.st_nlink > 1 and stat.S_ISREG(st.st_mode):\n",
         new="    if st.st_nlink > 1:\n",
         tests=("tests/test_janitor_m5i.py",),
+    ),
+    # ㉗ M5j G4 결정 85 — 검사가 아무것도 「없다」고 하지 않으면 없는 도구로도 프로세스가 뜬다.
+    Mutant(
+        name="requires-check-skipped",
+        path="src/remote_ci_monitor/runner.py",
+        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        new="    return []  # noqa: mutant\n",
+        tests=("tests/test_requires.py",),
+    ),
+    # ㉘ M5l S1 — 상대 PATH 항목은 프로세스가 뜨는 워크스페이스 기준이다. 검사 프로세스의 cwd 로
+    # 풀면 서버 폴더의 `tools/fvm` 으로 통과하고 워크스페이스의 것은 못 찾는다(fail-open).
+    Mutant(
+        name="requires-path-server-cwd",
+        path="src/remote_ci_monitor/runner.py",
+        old="    base = os.fspath(cwd) if cwd is not None else os.getcwd()\n",
+        new="    base = os.getcwd()  # noqa: mutant\n",
+        tests=("tests/test_requires_m5l.py",),
+    ),
+    # ㉙ M5l S4 — preflight 직전의 취소 확인이 없으면 자재화 중 취소한 잡이 `tool_missing` 이 된다.
+    Mutant(
+        name="requires-cancel-ignored",
+        path="src/remote_ci_monitor/runner.py",
+        old="            if observer.should_cancel():\n                at = now_fn()\n",
+        new="            if False:  # noqa: mutant\n                at = now_fn()\n",
+        tests=("tests/test_requires_m5l.py",),
     ),
 )
 
