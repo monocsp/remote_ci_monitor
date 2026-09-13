@@ -248,6 +248,7 @@ def test_head_and_if_none_match(srv):
         "/client/remote_ci_monitor-99.0.0-py3-none-any.whl",
         f"/client/remote_ci_monitor-{__version__}-py3-none-any.tar.gz",
         f"/client/other-{__version__}-py3-none-any.whl",
+        f"{WHEEL_PATH}/",  # 끝 `/` 별칭도 없다 — 마지막 URL 마디가 wheel 파일명이 아니다(M5l L3)
         "/client/",
         "/client",
     ],
@@ -408,6 +409,58 @@ def test_run_usage_errors_end_before_the_version_check_asks_the_server(
     code, _, err = run(capsys, ["run", "no-such-preset"])
     assert code == 2
     assert "older than the server accepts" not in err
+
+
+# ── health 503 이어도 본문으로 판정한다 (M5l L3 · 리뷰 #90 B P2) ────────────────
+
+
+def _make_health_503(srv: Server) -> None:
+    """janitor 를 stale 로 — health 는 503 이지만 본문의 `client_wheel` 은 멀쩡하다."""
+    from datetime import UTC, datetime, timedelta
+
+    from test_janitor import poll
+
+    srv.app.start()
+    poll(lambda: srv.app.retention.last_sweep_at is not None, 3.0, "first sweep")
+    interval = srv.cfg.server.retention_sweep_interval_seconds
+    srv.app.retention.last_sweep_at = datetime.now(UTC) - timedelta(seconds=3 * interval)
+    status, body = srv.req("GET", "/api/health")
+    assert status == 503 and body["client_wheel"]["path"] == WHEEL_PATH, body
+
+
+def test_client_health_returns_the_body_on_503(srv):
+    """503 은 「서버가 아프다」이지 「health 문서가 없다」가 아니다 — 본문을 그대로 준다."""
+    from remote_ci_monitor.client import Client
+
+    _make_health_503(srv)
+    h = Client(f"http://127.0.0.1:{srv.port}", None).health()
+    assert h["ok"] is False and "janitor stale" in h["error"]
+    assert h["version"] == __version__ and h["client_wheel"]["path"] == WHEEL_PATH
+
+
+def test_check_still_judges_the_client_when_health_is_503(srv, env, capsys, monkeypatch):
+    monkeypatch.setattr(cli_module, "__version__", "0.1.9")
+    _make_health_503(srv)
+    env(srv, "alice")
+    code, out, _ = run(capsys, ["check"])
+    assert code == 1, out
+    server_line = next(ln for ln in out.splitlines() if "  server " in ln)
+    assert server_line.startswith("FAIL  server") and "janitor stale" in server_line, out
+    url = f"http://127.0.0.1:{srv.port}{WHEEL_PATH}"
+    line = f"FAIL  client        v0.1.9 · server v{__version__} · older — pip install {url}"
+    assert line in out, out
+
+
+def test_run_still_warns_when_health_is_503(srv, env, capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli_module, "__version__", "0.1.9")
+    _make_health_503(srv)
+    env(srv, "alice")
+    _tree(tmp_path, monkeypatch)
+    code, _, err = run(capsys, ["run", "ok", "--no-wait"])
+    assert code == 0, err
+    warnings = [ln for ln in err.splitlines() if "older than the server accepts" in ln]
+    assert len(warnings) == 1, err
+    assert f"pip install http://127.0.0.1:{srv.port}{WHEEL_PATH}" in warnings[0]
 
 
 def test_version_json_stays_server_free(capsys, monkeypatch):

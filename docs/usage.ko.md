@@ -93,7 +93,7 @@ chmod 600 ~/.config/rcm/client.toml
 
 진짜 작업을 맡기기 전에 경로 전체를 증명한다:
 
-![rcm check 가 확인한 것마다 한 줄씩 찍는다 — server · token · presets · pools · timezone](images/ui/cli-check.png)
+![rcm check 가 확인한 것마다 한 줄씩 찍는다 — server · client · token · presets · pools · timezone · storage](images/ui/cli-check.png)
 
 1. **server** — 어떤 주소를 썼고 서버가 어떤 버전으로 답했는지. 버전이 많이 다르면 맞추는 게
    좋다(`rcm worker` 는 아예 거부한다). 바로 아래 `client` 행이 내 버전이 `same as server` 인지
@@ -149,6 +149,22 @@ chmod 600 ~/.config/rcm/client.toml
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
 
+`rcm cancel N` 은 제출할 때 함께 받은 cancel token 을 보낸다 — `rcm run` 이
+`~/.local/state/rcm/submissions.json`(`$XDG_STATE_HOME` 이 있으면 그 아래 `rcm/submissions.json`,
+권한 0600)에 남겨 둔 것이다. 그래서 제출한 세션은 취소할 수 있고, 다른 상태 디렉터리의
+세션 — 다른 사용자나 다른 머신 — 은 같은 클라이언트 토큰이어도 못 한다. 같은 사용자의 두
+세션은 그 파일을 나눠 쓴다: 그때 `rcm cancel N` 은 이 클라이언트 토큰으로 낸 그 잡의 **가장
+최근** 제출의 token 을 보내고(다른 토큰이 남긴 항목은 절대 집지 않는다), 합류한 세션은 합류만
+빠지고 잡을 취소하지 않는다; 특정 제출을 고르려면
+`--submission-id`(`--no-wait` JSON 의 `submission.id`)를 준다. 다른 머신에서, 또는 `--no-wait`
+JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `--cancel-token` 으로
+넘긴다(`rcm cancel N --cancel-token …`). 둘 다 없으면 그렇다고 말하고 그래도 보낸다: 기본 설정의
+서버는 전처럼 받고, `cancel_requires_submission_token = true` 인
+서버([설정](configuration.md#who-may-cancel-a-job))는 관리자 토큰이 아니면 403 으로 거절한다.
+쓴 token 은 파일에서 지워진다; 파일은 최근 200 개를 두고, 그 위로는 서버가 끝났다고 하는 잡만
+버린다. 파일을 못 쓰면 `rcm run` 이 한 줄로 말하고 잡은 그대로 돈다 — 그 잡은 `--cancel-token`
+으로 취소한다. cancel token 은 다른 어디에도 찍히지 않고, 상태 파일의 경로도 찍히지 않는다.
+
 ## 6. 실패했을 때
 
 잡의 실패는 도구의 오류가 아니다. 그래서 출력이 조용하고 구체적이다.
@@ -167,7 +183,14 @@ chmod 600 ~/.config/rcm/client.toml
    계속 깨져 있으면 `every one of the last 8 gate runs`. 물음표는 일부러 붙인 것이다 — 판정이
    아니라 제안이고, 숫자가 바로 옆에 있다.
 3. **JSON** 에는 `failed_step` · `last_step` · `failures` · `exit_code` · 스텝별 시간이 들어
-   있다. 래퍼 스크립트가 로그를 긁지 않고도 어느 단계가 깨졌는지 보고할 수 있다.
+   있다. 래퍼 스크립트가 로그를 긁지 않고도 어느 단계가 깨졌는지 보고할 수 있다. 스텝별
+   시간은 `step_timeline` 이다 — 스크립트가 찍은 `::rcm::step::` 마다 한 항목씩
+   `started_at` · `ended_at` · `seconds` · `ok` 가 있고, 잡이 도는 동안 큐가 보여 주던 바로
+   그 숫자가 끝난 뒤에도 남는다. `steps: []` 는 스크립트가 스텝 마커를 안 찍은 것이고,
+   `step_timeline: null` 과 `step_timeline_error_code` 는 서버가 마커를 못 읽은 것이다.
+   `concurrent_at_start` 는 이 잡이 시작할 때 돌던 잡 수 — 자기 포함이라 혼자 돌았으면 `1`,
+   `null` 은 서버가 모르는 것 — 이고, 레인 둘을 시험할 때 볼 숫자다. 같은 문서가
+   `GET /jobs/<N>` 이라 `rcm wait --job N` 도 그대로 찍는다.
 4. **1 은 잡이 실패했다는 뜻이다.** 2 는 취소나 시간 초과. 3 은 *모름* — 서버가 재시작했거나
    못 닿았거나 — 이고 절대 실패로 보고되지 않는다. CI 가 3 을 빨강으로 치면 엉뚱한 이유로
    빨개진다.
