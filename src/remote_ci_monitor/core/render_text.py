@@ -192,21 +192,23 @@ def storage_row(doc: dict[str, Any], *, now: str | None) -> tuple[str, bool | No
     limit, floor = doc.get("limit_bytes"), doc.get("min_free_bytes")
     under_floor = floor is not None and free is not None and free < floor
 
-    if doc.get("no_progress"):
-        return (
-            "storage",
-            False,
-            f"{_bytes(free)} free: deleting stopped helping — free space did not move, "
-            "so the floor rule is paused until `rcm gc`",
-        )
     # 측정 실패는 숫자로 내리는 판정보다 **먼저** 읽힌다 — 못 잰 것을 바닥 아래의 「지울 것이
-    # 없다」(FAIL) 로 말하면 권한 장애와 진짜 빈 상태를 가를 수 없다(리뷰 #88 B3).
+    # 없다」(FAIL) 로 말하면 권한 장애와 진짜 빈 상태를 가를 수 없다(리뷰 #88 B3). 무진전 latch
+    # (`no_progress`) 도 잰 숫자로 내린 판정이라 그 뒤에 온다 — 못 잰 회차에는 「삭제가 효과
+    # 없다」의 근거가 없다(검증 L2.5).
     if doc.get("error_code") or volume is None:
         return (
             "storage",
             None,
             "a size could not be measured — the byte rules are not enforced this sweep "
             f"({doc.get('error_code') or 'unknown'})",
+        )
+    if doc.get("no_progress"):
+        return (
+            "storage",
+            False,
+            f"{_bytes(free)} free: deleting stopped helping — free space did not move, "
+            "so the floor rule is paused until `rcm gc`",
         )
     if doc.get("budget_unreachable"):
         held = doc.get("non_evictable_bytes")

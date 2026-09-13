@@ -342,7 +342,9 @@ meter on the web host card; `/api/health` carries the totals and the two flags u
 shared/reclaimable split or the measurement time. What cannot be measured reads `—`, never `0`,
 and a size that could not be measured is reported as exactly that — the `rcm check` line says
 `a size could not be measured … (measure_EACCES)` even when free space is under the floor, rather
-than "nothing left to delete". The line also says how old the number is — `rcm data 30.9 GB ·
+than "nothing left to delete", and even after the floor rule has paused itself (`no_progress`),
+rather than "deleting stopped helping" — those verdicts rest on numbers the sweep did not get. The
+line also says how old the number is — `rcm data 30.9 GB ·
 measured 57m ago` — in every state that shows a figure, including the one where running jobs alone
 exceed the budget: a finished workspace is measured once and remembered for up to a day, and the
 age shown is that of the **oldest** measurement in the total, so a cached figure is never presented

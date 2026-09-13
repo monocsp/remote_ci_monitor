@@ -17,8 +17,9 @@ of a key bumps that number and is listed here.
   `/api/status` went on showing bytes that were gone. The `failed[]` entry now says what went
   (`"removed": ["workspace"]`), the receipt counts it (`1 failed (EACCES · 1 partly deleted)`), the
   cache entry is dropped and the inventory is re-measured. In `rcm check`, a measurement failure
-  while free space is under the floor read as `… and nothing left to delete` (FAIL); it now reads
-  as the measurement failure it is (warn, with the error code), and the row for a budget that
+  while free space is under the floor read as `… and nothing left to delete` (FAIL), and one after
+  the floor rule had paused itself read as `deleting stopped helping`; it now reads as the
+  measurement failure it is (warn, with the error code) ahead of both, and the row for a budget that
   running jobs alone exceed says how old its number is like the other rows. A job directory
   the server cannot read (`jobs/<id>` without permission) used to fail the whole inventory as
   `scan_EACCES` — no age rule ran for anyone and every figure read `—`; now only that job's

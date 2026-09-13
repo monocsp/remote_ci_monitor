@@ -103,6 +103,26 @@ def test_a_measurement_failure_under_the_floor_reads_as_a_measurement_failure() 
     assert "nothing left to delete" not in detail
 
 
+def test_a_measurement_failure_is_read_before_the_no_progress_latch() -> None:
+    """바닥 규칙이 「효과 없음」으로 멈춘(`no_progress`) 뒤 다음 sweep 이 못 재면, 행은 못 쟀다는
+    사실을 말한다 — 「삭제가 효과 없다」는 잰 숫자로 내린 판정이라 못 잰 회차에는 근거가 없다
+    (검증 L2.5: 10 TiB 바닥에서 latch 는 곧 걸리고, 그 뒤의 EACCES 가 그 문장에 가려졌다)."""
+    doc = base(
+        volume_bytes=None,
+        evictable_bytes=None,
+        non_evictable_bytes=None,
+        free_bytes=1,
+        min_free_bytes=10,
+        measured_at=None,
+        error_code="measure_EACCES",
+        no_progress=True,
+    )
+    _, ok, detail = storage_row(doc, now=NOW)
+    assert ok is None
+    assert "could not be measured" in detail and "measure_EACCES" in detail
+    assert "did not move" not in detail and "paused" not in detail
+
+
 def test_under_the_floor_with_nothing_evictable_still_fails_when_measured() -> None:
     doc = base(free_bytes=4 * GB, evictable_bytes=0, projected_short_free_bytes=6 * GB)
     _, ok, detail = storage_row(doc, now=NOW)
