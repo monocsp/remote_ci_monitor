@@ -95,7 +95,7 @@ chmod 600 ~/.config/rcm/client.toml
 
 Now prove the whole path before you trust it with real work:
 
-![rcm check prints one row per thing it verified: server, token, presets, pools, timezone](images/ui/cli-check.png)
+![rcm check prints one row per thing it verified: server, client, token, presets, pools, timezone, storage](images/ui/cli-check.png)
 
 1. **server** — the address it used and the version it answered with. A version far from yours is
    worth fixing; `rcm worker` refuses a mismatch outright. The `client` row below it says whether
