@@ -312,8 +312,12 @@ MUTANTS = (
     Mutant(
         name="offline-gc-ignores-sqlite-error",
         path="src/remote_ci_monitor/cli.py",
-        old="    except (StoreError, sqlite3.Error) as e:\n",
-        new="    except StoreError as e:\n",
+        old="""임시 디렉터리 안
+    except (StoreError, sqlite3.Error) as e:
+""",
+        new="""임시 디렉터리 안
+    except StoreError as e:
+""",
         tests=("tests/test_offline_gc.py",),
     ),
     # ㉖ M5i I8 결정 81 — 정확한 파일명 검사를 빼면 이름이 달라도 200.
