@@ -375,8 +375,8 @@ MUTANTS = (
             "test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header",
         ),
         needs_chrome=True,
-    # ㉔ M5j G1 결정 84 — 마커 조회가 깨지면 `step_timeline` 은 `null` + 코드다. 빈 타임라인으로
-    # 뭉개면 「스텝을 안 찍은 잡」과 「못 읽은 잡」이 같은 모양이 된다(fail-open 금지).
+        # ㉔ M5j G1 결정 84 — 마커 조회가 깨지면 `step_timeline` 은 `null` + 코드다. 빈 타임라인으로
+        # 뭉개면 「스텝을 안 찍은 잡」과 「못 읽은 잡」이 같은 모양이 된다(fail-open 금지).
     ),
     Mutant(
         name="step-timeline-db-error-empty",
