@@ -91,8 +91,10 @@ differs.
    ```
    This opens the live database read-only, copies it with SQLite's online backup into a private
    temporary directory, migrates and plans **on the copy**, and deletes the copy. The database
-   itself is not changed. If the copy cannot be made or migrated, the command exits 3 (unknown)
-   and says why — that is the migration failing *before* your restart, which is the point.
+   itself is not changed. If the copy cannot be made or migrated — a `StoreError` or any SQLite
+   error from a migration statement alike — the command exits 3 (unknown) and says why in one line:
+   that is the migration failing *before* your restart, which is the point. If the copy cannot be
+   removed afterwards, the command also exits 3 and names the directory that was left behind.
 3. `rcm pause` (admin token), then confirm nothing is `running`, `cancelling` or `uploading`
    (`rcm top`). Pausing stops the queue, not submissions: stop the service right after the check,
    or a job that starts uploading in between is cancelled by the stop.
@@ -129,9 +131,12 @@ database schema version 16 is newer than this build (15) — stop the service, r
 ```
 
 That refusal is correct — a migration can rewrite data, and reading the columns it knows would
-silently show wrong facts. Restoring the `.bak` is a **database-only downgrade**: stop the
-service, copy the backup over `rcm.sqlite3`, delete `rcm.sqlite3-wal` and `rcm.sqlite3-shm`, start
-the old build. What you lose is everything that happened after the backup was taken — job rows
+silently show wrong facts. The file the message names is the highest `rcm.sqlite3.v<n>.bak` that
+actually exists in `backup/` — after an upgrade that skipped versions it is older than the build
+you are going back to, and if there is none the message says `no migration backup found` and
+leaves you the copy you made in step 5. Restoring the `.bak` is a **database-only downgrade**:
+stop the service, copy the file the message names over `rcm.sqlite3`, delete `rcm.sqlite3-wal`
+and `rcm.sqlite3-shm`, start the old build. What you lose is everything that happened after the backup was taken — job rows
 finished since then are gone from the database while their `jobs/<id>/` logs and
 `workspaces/<id>/` directories are still on disk (the sweeper treats those as orphans and counts
 them but does not delete them), and a job number handed out after the backup will be reused. Do

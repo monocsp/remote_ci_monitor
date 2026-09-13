@@ -151,17 +151,85 @@ def test_only_the_three_newest_backups_are_kept_and_a_cleanup_failure_only_warns
 # ── 옛 빌드의 거절 메시지 (B2-3) ─────────────────────────────────────────────
 
 
-def test_the_newer_database_message_points_at_the_backup_to_restore(tmp_path):
+def newer_database(tmp_path: Path, *backups: int) -> Path:
+    """이 빌드보다 새 DB 하나와, `backup/` 에 **실제로 있는** 자동 백업들(버전 목록)."""
     path = tmp_path / "data" / "rcm.sqlite3"
     Store(path).close()
+    bdir = path.parent / "backup"
+    for v in backups:
+        bdir.mkdir(exist_ok=True)
+        (bdir / f"rcm.sqlite3.v{v}.bak").write_bytes(b"backup")
     set_version(path, DB_VERSION + 5)
+    return path
+
+
+def refusal(path: Path) -> str:
     with pytest.raises(StoreError) as e:
         Store(path)
     msg = str(e.value)
     assert f"schema version {DB_VERSION + 5} is newer than this build ({DB_VERSION})" in msg
-    assert "stop the service" in msg
-    assert str(path.parent / "backup" / f"rcm.sqlite3.v{DB_VERSION}.bak") in msg
-    assert "-wal" in msg and "-shm" in msg and "upgrade" in msg
+    assert "stop the service" in msg and "upgrade" in msg
+    return msg
+
+
+def test_the_newer_database_message_points_at_the_backup_that_actually_exists(tmp_path):
+    """리뷰 #87 B P1(셋째) · M5l L1: v15 DB 를 v21 빌드로 바로 올리면 백업은 `v15.bak` 하나다 —
+    v16 빌드가 「`v16.bak` 을 복원하라」고 하면 없는 파일을 가리킨다. 이 빌드의 `DB_VERSION` 이
+    아니라 `backup/` 에 있는 가장 높은 `.bak` 을 가리켜야 한다."""
+    path = newer_database(tmp_path, DB_VERSION - 1)
+    msg = refusal(path)
+    bak = path.parent / "backup" / f"rcm.sqlite3.v{DB_VERSION - 1}.bak"
+    assert bak.exists() and f"restore {bak}" in msg, msg
+    assert f"v{DB_VERSION}.bak" not in msg, msg
+    assert "-wal" in msg and "-shm" in msg
+
+
+def test_the_newer_database_message_picks_the_highest_backup_and_ignores_hand_made_ones(
+    tmp_path,
+):
+    path = newer_database(tmp_path, DB_VERSION - 2, DB_VERSION - 1)
+    bdir = path.parent / "backup"
+    (bdir / "rcm.sqlite3.pre-0.2.4.bak").write_bytes(b"hand-made")
+    (bdir / f"rcm.sqlite3.v{DB_VERSION + 9}.bak.tmp").write_bytes(b"half")  # 검증 전 임시 파일
+    msg = refusal(path)
+    assert f"restore {bdir / f'rcm.sqlite3.v{DB_VERSION - 1}.bak'}" in msg, msg
+    assert f"v{DB_VERSION - 2}.bak" not in msg and "pre-0.2.4" not in msg, msg
+    assert f"v{DB_VERSION + 9}" not in msg, msg
+
+
+def test_the_newer_database_message_says_so_when_there_is_no_backup(tmp_path):
+    """L1.7: 백업이 하나도 없으면 `.bak` 이름을 지어내지 않는다 — 「백업 없음」과 남은 길."""
+    path = newer_database(tmp_path)
+    msg = refusal(path)
+    assert "no migration backup found" in msg, msg
+    assert ".bak" not in msg, msg
+    assert "-wal" in msg and "-shm" in msg
+    # `backup/` 이 있지만 비어 있어도 같다
+    (path.parent / "backup").mkdir()
+    assert "no migration backup found" in refusal(path)
+
+
+def test_a_backup_directory_that_cannot_be_listed_only_warns(tmp_path, monkeypatch):
+    """리뷰 #87 B P2 · L1.8: `backup/` 에 쓰기·실행 권한만 있으면 새 백업은 만들어지지만
+    `iterdir()` 가 실패한다 — 결정 74 가 약속한 경고 없이 조용히 넘어갔고 백업이 계속 쌓였다."""
+    path = old_database(tmp_path, version=15)
+    bdir = path.parent / "backup"
+    real_iterdir = Path.iterdir
+
+    def unreadable(self):
+        if self == bdir:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable)
+    warned: list[str] = []
+    s = Store(path, log=warned.append)
+    assert s.user_version() == DB_VERSION
+    s.close()
+    assert (bdir / "rcm.sqlite3.v15.bak").exists()
+    assert len(warned) == 1 and warned[0].startswith("warning:"), warned
+    assert "backup" in warned[0] and "Permission denied" in warned[0], warned
+    assert "Traceback" not in warned[0]
 
 
 # ── v16 복구 (결정 78) ──────────────────────────────────────────────────────
