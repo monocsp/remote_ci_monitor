@@ -7,6 +7,19 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **The host section no longer opens and closes itself while you read.** On a build machine that
+  is actually building, CPU crosses 85% every few seconds; the page re-applied that verdict to the
+  section's open state on every refresh, so the host panel unfolded and folded again and the
+  recent-jobs list below it jumped by 315 pixels each time — three times in two minutes on the
+  reference machine, a cumulative layout shift of 0.245. Load now only colours the one-line
+  summary. The section opens by itself for the things you have to act on — a stale sample, a host
+  that cannot be read, a disk with less than 10 GiB free — and never folds itself back up;
+  closing it is yours to do, and your own choice still wins over both. The `busy` verdict also
+  gained hysteresis: it turns on at 85% and only clears once every value is below 80%, so the word
+  beside the heading stops flickering with each sample. The percentages themselves still turn
+  amber at 85%.
+
 ### Changed
 - **The README walks through a gate from a session.** A numbered section — `rcm check`,
   `rcm eta`, `rcm run` and its inputs, the exit codes and the JSON keys, logs and artifacts when

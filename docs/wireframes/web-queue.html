@@ -267,6 +267,8 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
   <div class="legend"><span><span class="b">1</span> 기획 항목 번호</span><span><span class="ln"></span> 요소를 가리키는 선</span><span>UI 문자열은 영어(제품 규칙), 설명은 한국어</span><span>레인 2 로 그렸다 — 그룹 대기를 보이기 위해</span></div>
   <p class="rev"><b>v1.3</b> — 리뷰 세 건을 반영했다: Codex 디자인 리뷰(<code>docs/reviews/2026-09-04-codex-web-queue.md</code>), 기획 누락 리뷰(<code>…subagent-spec-gaps.md</code>), 제품 비교 리서치(<code>…subagent-reference-comparison.md</code>). 바뀐 것: <code>#</code> 는 잡 id 전용이고 순번은 <code>2nd in line</code> 으로 따로(1·6·23) · 합류자 <code>+1</code>(9·23) · Reason 에 근거 숫자(<code>2/2 busy · frees in 2m 40s</code>)와 <code>likely stuck</code> 분리(11·34) · 정지·다운이면 ETA <code>—</code>(28·27) · 소요는 <code>5m 10s</code>, 시각은 <code>09:57</code> 로 통일(4절) · cancelled 는 회색, timed out 은 빨강 점선(14) · 큐 헤더에 <code>oldest waiting</code>(5) · live 토글(2) · 호스트 막대 구간·sparkline(16) · 실패 행 재실행 명령(14) · 변형 4개 추가(32~35). 항목 35개.</p>
 
+  <p class="rev"><b>v1.4</b> (2026-09-14) — 화면이 읽는 사람 발밑을 빼지 않는다. 호스트 절(16)은 <b>부하로는 저절로 펼쳐지지 않고</b>(펼치는 것은 stale · 조회 실패 · 디스크 바닥뿐) <b>저절로 닫히지도 않는다</b>, 그리고 호스트 압력(25)의 <code>busy</code> 판정에 <b>이력</b>이 붙었다(85 켜짐 / 80 꺼짐). 근거는 운영 인스턴스 실측 — 기본 브라우저 2분에 세 번 여닫히며 페이지 높이가 1183 ↔ 868px, CLS 0.245 였고, 사람이 「열림」을 고른 대조군은 0번이었다.</p>
+
   <h2>1. 기본 화면 — 잡 두 개 실행 중, 세 개 대기 (토큰 있음: alice-laptop)</h2>
   <div class="annot-wrap"><div class="annot" id="main">
     <div class="screen">
@@ -523,6 +525,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       <dl><dt>보여주는 것</dt><dd><code>CPU 21% · Mem 58% · GPU 13% · load 3.5 / 10 · fine</code> 와 <code>sampled 4s ago</code>.</dd>
       <dt>데이터</dt><dd><code>hosts[0].{cpu.busy, memory, gpu.util_pct, load, cores, age_seconds, stale, interval_seconds}</code>.</dd>
       <dt>상태</dt><dd>어느 값이든 85% 이상 → 그 숫자 황토 + <code>· busy</code>. 값 하나라도 null → <code>· partial</code>, 전부 null → <code>· unknown</code>(fine 으로 접지 않는다 <span class="src">gap</span>). <code>hosts: []</code> → 회색 <code>host: no sample yet</code>. <code>hosts_error</code> → 빨강 <code>host: unavailable</code>. stale → <code>stale 3m</code> 빗금 배지(19).</dd>
+      <dt>규칙</dt><dd><b><code>busy</code> 판정에는 이력이 있다</b>: 85% 에서 켜지고 <b>전부 80% 아래로 내려와야</b> 꺼진다. 한 경계뿐이면 빌드 머신의 CPU 가 그 위아래를 오갈 때마다 <code>busy ↔ fine</code> 이 표본마다 뒤집힌다. 푸는 값 80 은 새 숫자가 아니다 — 부하 게이트의 <code>cpu_max_percent</code> 기본값과 같은 「이 아래면 여유」다. <b>숫자의 황토는 그대로 85% 기준</b>이다 — 판정은 머신의 상태고 색은 그 값 하나의 사실이라, GPU 가 바쁜 탓에 CPU 숫자까지 물들지 않는다.</dd>
       <dt>상호작용</dt><dd>누르면 16 번 호스트 카드로.</dd></dl></div></article>
   </div>
 
@@ -589,7 +592,8 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       <dl><dt>보여주는 것</dt><dd>이름 · 나이 · OS · 코어 · load. CPU 막대는 <code>user | sys</code> 두 구간, 메모리는 <code>used | compressed</code>(macOS), GPU 는 사용률 막대만 + <code>0.6 GB in use</code> 텍스트. 각 미터 아래 최근 5분(60표본) sparkline — 「지금 바쁜가」와 「10분째 바쁜가」를 가른다 <span class="src">ref</span>(htop 구간 막대 · Grafana). 표본이 빠진 구간은 점선으로 끊어 그린다.</dd>
       <dt>데이터</dt><dd><code>hosts[].{name, sampled_at, age_seconds, stale, interval_seconds, os, cores, load, cpu.{user,sys,idle,busy}, memory.{total,used,compressed}, gpu, gpu_note, top, history[]}</code>. 85% 이상 황토. <code>&lt;meter&gt;</code> 로 시맨틱.</dd>
       <dt>상태</dt><dd><code>gpu: null</code> → <code>GPU — &lt;gpu_note&gt;</code>. 부분 null → <code>—</code>. <code>hosts_error</code> → 빨간 띠. stale → 19.</dd>
-      <dt>규칙</dt><dd>Apple Silicon GPU 메모리는 total 이 없어 비율로 그리지 않는다. 폴링 값이라 나이를 항상 보인다.</dd></dl></div></article>
+      <dt>규칙</dt><dd>Apple Silicon GPU 메모리는 total 이 없어 비율로 그리지 않는다. 폴링 값이라 나이를 항상 보인다.
+      <b>절은 접힌 채로 뜨고, 화면이 스스로 펼치는 것은 「사람이 손대야 하는 것」뿐이다</b> — 표본이 stale(19) · <code>hosts_error</code>(조회 실패) · 남은 디스크 10 GiB 미만. <b>부하로는 펼치지 않는다</b>: 빌드 머신의 CPU 85% 는 이상이 아니라 일하는 중이라는 뜻이고, 그 값은 5초마다 경계를 넘나든다. 그리고 <b>화면이 스스로 닫지는 않는다</b> — 닫는 것은 사람의 일이다. 사람이 여닫은 선택은 <code>rcm.host</code> 에 남아 그 뒤로는 그 선택이 이긴다. (2026-09-14: 렌더마다 열림 상태를 판정으로 다시 쓰던 탓에 운영에서 호스트 절이 2분에 세 번 여닫히며 그 아래가 통째로 315px 뛰었다 — CLS 0.245.)</dd></dl></div></article>
 
     <article class="spec" id="c14" data-for="14"><div class="num">14</div><div><div class="area">recent</div><h3>최근 완료 <span class="tag">v1.3</span></h3>
       <dl><dt>보여주는 것</dt><dd>최근 5건 + <code>show 3 more</code>. 맨 앞은 <b>잡 번호</b> <code>#411</code> — 큐 행과 같은 자리 값이다(로그·재실행·문의가 전부 번호로 이뤄진다, 2026-09-09). 결과 필에 종료 코드까지: <code>✓ succeeded</code>(초록) · <code>✗ failed · exit 1</code>(빨강) · <code>■ cancelled · exit 2</code>(<b>회색</b> — 황토는 「봐야 할 것」색이라 뺐다 <span class="src">ref</span>) · <code>⏱ timed out · exit 2</code>(빨강 점선 — 업계는 실패의 하위) · <code>? lost · exit 3</code>(보라). 실패·타임아웃 행엔 복사 버튼 <code>⧉ rcm run gate -f scope=fast</code> <span class="src">ref</span>(Vercel errorMessage 발상). lost 는 <code>server restarted 09:02 · workspace kept 30d</code>.</dd>
