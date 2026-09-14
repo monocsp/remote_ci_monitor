@@ -347,9 +347,12 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ![the host card with the sample age, CPU, memory and GPU meters, the top processes and the remote worker card](images/ui/web-host.png)
 
-The section is folded by default — it opens itself when something is wrong (a machine is busy or
-its sample has gone stale), and the one-line summary beside the heading always says which machines
-are reporting and how they are doing. Open or close it yourself and that choice is remembered.
+The section is folded by default, and the one-line summary beside the heading always says which
+machines are reporting and how they are doing — including `busy`. It opens itself only for
+something you have to act on: a sample that has gone stale, a host that cannot be read, or a disk
+with less than 10 GiB left. A busy machine is a build machine doing its job, so load alone never
+opens it, and the page never folds the section back up while you are reading — closing it is
+yours to do. Open or close it yourself and that choice is remembered.
 
 1. The machine and **how old the sample is**. Anything stale is labelled, never quietly shown as
    current.
