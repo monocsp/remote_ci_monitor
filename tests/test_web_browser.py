@@ -1079,3 +1079,131 @@ def test_progress_bar_names_what_it_measured_and_keeps_cancel_one_tap_away(tmp_p
     # 펼친 행에서는 액션 블록이 취소를 맡는다 — 같은 행에 취소 버튼이 둘이 되지 않는다
     assert open_bars["cancel_in_row"] == 0 and open_bars["actions_cancel"] == 1, open_bars
     assert "undefined" not in visible_text and "NaN" not in visible_text, visible_text[:600]
+
+
+# ── 호스트 절은 저절로 여닫히지 않는다 ───────────────────────────────────────
+
+
+class LoadSampler(StubSampler):
+    """시험이 정한 CPU 와 표본 나이로 매번 새 표본을 만든다 — 85 를 오가게 하려고.
+
+    `FreshStubSampler` 와 같은 실배치 모양(`disk` 있음)이되 부하와 나이를 시험이 쥔다.
+    """
+
+    def __init__(self, cpu: float = 21.0, age_seconds: float = 2.0) -> None:
+        super().__init__([])
+        self.cpu = cpu
+        self.age_seconds = age_seconds
+
+    def latest(self):
+        s = host_sample(datetime.now(UTC), age_seconds=self.age_seconds)
+        cpu = dict(s.cpu, busy=self.cpu, idle=round(100.0 - self.cpu, 1))
+        return [replace(s, cpu=cpu, disk=DISK)], None
+
+
+def host_panel(c: Chrome) -> dict[str, Any]:
+    """지금 화면의 호스트 절 — 열림 · 페이지 높이 · 접힌 한 줄 · 카드에 그려진 CPU."""
+    return c.eval(
+        "({open: document.querySelector('#host-details').open,"
+        " height: document.body.scrollHeight,"
+        " digest: document.querySelector('[data-host-digest]').textContent,"
+        " cpu: (document.querySelector('#host .meter[data-metric=\"cpu\"] .lab span')"
+        " || {}).textContent})"
+    )
+
+
+def refetch(c: Chrome, *, until: str, timeout: float = 10.0) -> dict[str, Any]:
+    """live 토글을 껐다 켜 **즉시** 다시 받아 그린다 — 10초 폴링을 기다리지 않는다.
+
+    `resumeUpdates` 가 `fetchStatus()` 를 바로 부른다(`app.js` 의 `#live-btn`). `until` 이 참이
+    될 때까지 기다린 뒤 호스트 절을 돌려준다.
+    """
+    for _ in range(2):  # 멈춤 → 재개
+        c.eval("document.querySelector('#live-btn').click()")
+    deadline = time.monotonic() + timeout
+    while True:
+        if c.eval(until) is True:
+            return host_panel(c)
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{until!r} not true within {timeout}s: {host_panel(c)}")
+        time.sleep(0.1)
+
+
+def cpu_drawn(pct: int) -> str:
+    """호스트 카드의 CPU 막대에 이 퍼센트가 그려졌는가."""
+    return (
+        "document.querySelector('#host .meter[data-metric=\"cpu\"] .lab span')"
+        f".textContent.includes('CPU {pct}%')"
+    )
+
+
+def test_a_busy_host_does_not_open_the_host_panel_and_flipping_the_verdict_moves_nothing(tmp_path):
+    """호스트 절은 **부하로는 저절로 펼쳐지지 않는다.** CPU 가 85 를 오가도 `#host-details` 의
+    열림과 페이지 높이가 그대로고, 부하는 접힌 한 줄의 글자(`busy`)로만 말한다.
+
+    2026-09-14 운영 인스턴스(v0.2.7) 실측 회귀: `renderHostDigest()` 가 렌더마다
+    `det.open = warn` 을 다시 적용해서, CPU 가 85 를 스칠 때마다 호스트 절이 저절로 펴졌다
+    접히며 그 아래 「최근」이 통째로 **315px** 뛰었다(기본 브라우저 2분에 3번 · CLS 0.245 ·
+    사람이 「열림」을 고른 대조군은 0번). 빌드 머신의 CPU 85% 는 이상이 아니라 **일하는 중**
+    이라는 뜻이라 펼칠 일이 아니다 — 읽는 사람 발밑을 빼는 일만 한다.
+    """
+    srv = Server(tmp_path, workers=True)
+    try:
+        sampler = LoadSampler(cpu=90.0)
+        srv.app.sampler = sampler
+        status_until(srv, lambda d: bool(d["pools"][0]["hosts"]), timeout=5.0)
+        seen: list[dict[str, Any]] = []
+        with Chrome(tmp_path / "chrome-host-quiet", window="1240,1400") as c:
+            c.open(
+                f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
+                ready_js="document.querySelector('#host .meter[data-metric=\"cpu\"]') !== null",
+            )
+            seen.append(dict(host_panel(c), label="busy 90"))
+            # 85 아래 → 위 → 사이(80~84). 사람은 아무것도 안 눌렀다.
+            for cpu in (40.0, 90.0, 82.0):
+                sampler.cpu = cpu
+                seen.append(dict(refetch(c, until=cpu_drawn(int(cpu))), label=f"cpu {cpu:.0f}"))
+            errors = c.page_errors()
+    finally:
+        srv.close()
+
+    assert errors == [], errors
+    # 저절로 펼쳐지지 않는다 — 네 번의 렌더 내내 닫혀 있다
+    assert [s["open"] for s in seen] == [False, False, False, False], seen
+    # 그리고 아무것도 안 움직인다 — 페이지 높이가 하나뿐이다
+    assert len({s["height"] for s in seen}) == 1, seen
+    # 부하를 감추는 것이 아니다: 접힌 한 줄이 「busy」라고 말한다
+    assert seen[0]["digest"].endswith("busy"), seen[0]
+    assert seen[1]["digest"].endswith("fine"), seen[1]
+    # 80~84 는 이력이 잡는다 — 85 를 한 번 넘었으면 80 아래로 내려와야 여유다
+    assert seen[3]["digest"].endswith("busy"), seen[3]
+
+
+def test_a_stale_sample_opens_the_host_panel_once_and_nothing_closes_it_again(tmp_path):
+    """표본이 안 오는 것은 **사람이 손대야 하는 일**이라 호스트 절이 저절로 펼쳐진다. 그리고
+    표본이 다시 신선해져도 **저절로 닫히지 않는다** — 닫는 것은 사람의 일이다. 읽는 중에
+    접히면 그 아래가 통째로 올라온다.
+    """
+    srv = Server(tmp_path, workers=True)
+    try:
+        sampler = LoadSampler(cpu=21.0)
+        srv.app.sampler = sampler
+        status_until(srv, lambda d: bool(d["pools"][0]["hosts"]), timeout=5.0)
+        with Chrome(tmp_path / "chrome-host-stale", window="1240,1400") as c:
+            c.open(
+                f"http://127.0.0.1:{srv.port}/?poll=1&lang=en",
+                ready_js="document.querySelector('#host .meter[data-metric=\"cpu\"]') !== null",
+            )
+            fresh = host_panel(c)
+            sampler.age_seconds = 90.0  # 3 × interval(5초)보다 한참 지난 표본
+            stale = refetch(c, until="document.querySelector('#host .stale-badge') !== null")
+            sampler.age_seconds = 2.0
+            again = refetch(c, until="document.querySelector('#host .stale-badge') === null")
+            errors = c.page_errors()
+    finally:
+        srv.close()
+
+    assert errors == [], errors
+    assert fresh["open"] is False, fresh  # 멀쩡할 때는 접혀 있다
+    assert stale["open"] is True, stale  # 이상이면 한 번 펼친다
+    assert again["open"] is True, again  # 그리고 저절로 닫지 않는다

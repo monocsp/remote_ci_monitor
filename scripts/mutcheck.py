@@ -60,6 +60,11 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      기준으로 푼다: 서버 폴더에만 있는 도구로 통과한다(`runner.py`, M5l S1 — PR #109 리뷰 B)
   ㉙ requires-cancel-ignored — preflight 직전의 취소 확인 제거: 취소한 잡이 `tool_missing` 으로
      끝난다(`runner.py`, M5l S4)
+  ㉚ web-host-panel-follows-load — 호스트 절의 열림을 다시 압력 판정으로 매 렌더 덮어씀:
+     CPU 가 85 를 스칠 때마다 절이 여닫히며 그 아래가 315px 뛴다 (`web/app.js`, 2026-09-14 실측).
+     **Chrome 이 있어야 돈다**
+  ㉚ web-host-busy-no-history — 「바쁨」 판정에서 이력을 뺌(경계 하나로 되돌림): 같은 표본 열 개에
+     판정이 여덟 번 뒤집힌다 (`web/app.js`, node --test)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -469,6 +474,30 @@ MUTANTS = (
         old="            if observer.should_cancel():\n                at = now_fn()\n",
         new="            if False:  # noqa: mutant\n                at = now_fn()\n",
         tests=("tests/test_requires_m5l.py",),
+    ),
+    Mutant(
+        name="web-host-panel-follows-load",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            'var want = choice === "open" ? true : choice === "closed" ? false '
+            ": (d.alert || det.open);"
+        ),
+        new='var want = choice === "open" ? true : choice === "closed" ? false : d.warn;',
+        tests=(
+            "tests/test_web_browser.py::"
+            "test_a_busy_host_does_not_open_the_host_panel_and_flipping_the_verdict_moves_nothing",
+            "tests/test_web_browser.py::"
+            "test_a_stale_sample_opens_the_host_panel_once_and_nothing_closes_it_again",
+        ),
+        needs_chrome=True,
+    ),
+    Mutant(
+        name="web-host-busy-no-history",
+        path="src/remote_ci_monitor/web/app.js",
+        old='var limit = prev === "busy" ? BUSY_OFF : BUSY_ON;',
+        new="var limit = BUSY_ON;",
+        tests=("tests/web/host_hysteresis.test.js",),
+        runner="node",
     ),
 )
 

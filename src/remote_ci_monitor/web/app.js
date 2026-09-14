@@ -29,6 +29,10 @@
   var HIDDEN_PAUSE_MS = 60000;
   // 남은 저장 공간이 이 밑이면 사용률과 무관하게 경고한다 — 스냅샷 하나가 못 풀린다(§4.6-가)
   var DISK_LOW_FREE = 10 * 1024 * 1024 * 1024;
+  // 「바쁨」은 85 에서 켜지고 **80 아래로 내려와야** 꺼진다. 빌드 머신의 CPU 는 일하는 동안
+  // 85 를 계속 스쳐서, 경계가 하나면 판정이 표본마다 뒤집힌다. 푸는 값 80 은 새 숫자가 아니다 —
+  // M5f 의 `cpu_max_percent` 기본값과 같은 「이 아래면 여유」다.
+  var BUSY_ON = 85, BUSY_OFF = 80;
 
   function isNum(v) { return typeof v === "number" && isFinite(v); }
   function esc(s) {
@@ -462,7 +466,10 @@
   // 디스크는 기준이 둘이다(§4.6-가): 사용률 85% 이상, 또는 남은 공간 10 GiB 미만. 큰 디스크는 90%
   // 라도 넉넉하고 작은 디스크는 80% 라도 빌드가 안 돈다 — 하나만 보면 틀린다.
   // load·cores 는 판정에 안 들어간다 — 텍스트만 —.
-  function hostPressure(host) {
+  // `prev` 는 이 호스트의 **직전 판정**이다. 주면 이력이 붙는다: 한 번 busy 가 된 호스트는
+  // 전부 80 아래로 내려와야 busy 를 놓는다(85 를 스칠 때마다 「바쁨↔여유」가 깜빡이지 않게).
+  // 안 주면 오늘 규칙 그대로다 — 첫 렌더와 순수 호출부가 안 바뀐다.
+  function hostPressure(host, prev) {
     if (!host) return { cpu: null, mem: null, gpu: null, disk: null, diskFree: null, load: DASH, verdict: "no_sample" };
     var pct = function (v) { return isNum(v) ? Math.round(v) : null; };
     var cpu = pct(host.cpu && host.cpu.busy);
@@ -478,10 +485,11 @@
     var load = isNum(load1) ? load1.toFixed(1) + " / " + (isNum(host.cores) ? host.cores : DASH) : DASH;
     var vals = [cpu, mem, gpu, disk];
     var known = vals.filter(isNum);
+    var limit = prev === "busy" ? BUSY_OFF : BUSY_ON;
     var verdict;
     if (lowDisk) verdict = "busy";
     else if (!known.length) verdict = "unknown";
-    else if (known.some(function (v) { return v >= 85; })) verdict = "busy";
+    else if (known.some(function (v) { return v >= limit; })) verdict = "busy";
     else if (known.length < vals.length) verdict = "partial";
     else verdict = "fine";
     return { cpu: cpu, mem: mem, gpu: gpu, disk: disk, diskFree: diskFree, load: load, verdict: verdict };
@@ -973,6 +981,8 @@
     expanded: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
     // 이름별 실패 이력은 `/api/status` 에 없다(결정 67) — 행을 펼칠 때 그 잡만 한 번 받는다
     recentFailures: {},
+    // 호스트 이름 → 직전 압력 판정. 「바쁨」에 이력을 주는 기억이고 이 페이지에만 산다.
+    hostVerdicts: {},
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
     drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null
   };
@@ -1285,6 +1295,18 @@
   }
 
   // ── 렌더: 요약 ──
+  /**
+   * 호스트 하나의 압력 — **직전 판정을 기억해서** 넘긴다(이력). 요약 한 줄과 호스트 절이 같은
+   * 기억을 쓰므로 둘이 갈라질 수 없다. 같은 표본을 다시 먹여도 결과가 같아(고정점) 한 렌더에서
+   * 몇 번을 불러도 안전하다.
+   */
+  function pressureOf(host) {
+    if (!host) return hostPressure(host);
+    var key = host.name || "";
+    var hp = hostPressure(host, state.hostVerdicts[key]);
+    state.hostVerdicts[key] = hp.verdict;
+    return hp;
+  }
   function jl(id, text) { return '<button type="button" class="jlink" data-goto="' + id + '">' + esc(text) + "</button>"; }
   function renderSummary() {
     var st = state.status;
@@ -1309,7 +1331,7 @@
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
-    var hp = hostPressure(host);
+    var hp = pressureOf(host);
     var lab = $("[data-host-lab]");
     var h;
     if (p && p.hosts === null) {
@@ -1626,29 +1648,34 @@
     return svg + "</svg>";
   }
   /**
-   * 접힌 호스트 절의 한 줄. 「세 질문」에 호스트는 없다(§4.1) — 평소엔 접어 두고, 뭔가 잘못됐을
-   * 때만 저절로 펼친다. 사람이 직접 여닫으면 그 선택이 이긴다(`rcm.host` 에 저장).
+   * 접힌 호스트 절의 한 줄. 「세 질문」에 호스트는 없다(§4.1) — 평소엔 접어 둔다.
+   *
+   * `warn` 은 그 한 줄을 물들이고, `alert` 는 절을 **한 번** 펼친다. 둘이 다른 이유: 부하가
+   * 높은 것은 빌드 머신이 **일하는 중**이라는 뜻이지 사람이 손댈 일이 아니다. 펼치는 것은
+   * 사람이 봐야 하는 것 — 표본이 안 온다 · 호스트를 못 읽는다 · 디스크가 바닥이다 — 뿐이다.
    */
   function hostDigest() {
     var p = pool0(state.status);
-    if (!p) return { text: tr("host.no_sample"), warn: false };
+    if (!p) return { text: tr("host.no_sample"), warn: false, alert: false };
     if (p.hosts === null || p.hosts === undefined) {
-      return { text: tr("host.unavailable", { error: errorText(p.hosts_error, p.hosts_error_code) }), warn: true };
+      return { text: tr("host.unavailable", { error: errorText(p.hosts_error, p.hosts_error_code) }), warn: true, alert: true };
     }
     var cards = hostCards(state.status, L());
-    if (!cards.length) return { text: tr("host.no_sample"), warn: false };
-    var worst = null, stale = false;
+    if (!cards.length) return { text: tr("host.no_sample"), warn: false, alert: false };
+    var worst = null, stale = false, lowDisk = false;
     cards.forEach(function (c) {
-      var hp = hostPressure(c.host);
+      var hp = pressureOf(c.host);
       var age = secondsSince(c.host.sampled_at, now());
       if (c.host.stale || (isNum(age) && isNum(c.host.interval_seconds) && age > 3 * c.host.interval_seconds)) stale = true;
+      if (isNum(hp.diskFree) && hp.diskFree < DISK_LOW_FREE) lowDisk = true;
       if (!worst || (hp.verdict === "busy" && worst.verdict !== "busy")) worst = hp;
     });
     var names = cards.map(function (c) { return c.host.name || DASH; }).join(" · ");
     var vkey = "summary.verdict_" + (worst.verdict === "fine" || worst.verdict === "busy" || worst.verdict === "partial" ? worst.verdict : "unknown");
     return {
       text: tr("host.digest", { names: names, n: cards.length, state: tr(vkey) }),
-      warn: worst.verdict === "busy" || stale
+      warn: worst.verdict === "busy" || stale,
+      alert: stale || lowDisk
     };
   }
 
@@ -1695,9 +1722,12 @@
     if (el) { el.textContent = d.text; el.className = "n" + (d.warn ? " warn" : ""); }
     var det = $("#host-details");
     if (!det) return;
-    // 사람이 직접 연 적이 있으면 그 선택이 이긴다. 없으면 경고일 때만 펼친다.
+    // 사람이 직접 여닫은 적이 있으면 그 선택이 이긴다. 없으면 `alert` 일 때 **한 번** 펼치고,
+    // **저절로 닫지는 않는다**(`|| det.open`) — 화면은 읽는 사람 발밑을 빼지 않는다. 닫는 것은
+    // 사람의 일이다. 판정으로 열림 상태를 매 렌더 다시 쓰면 85 를 스칠 때마다 절이 여닫히며
+    // 그 아래가 통째로 뛴다(2026-09-14 실측: 2분에 3번 · 315px · CLS 0.245).
     var choice = lsGet("rcm.host");
-    var want = choice === "open" ? true : choice === "closed" ? false : d.warn;
+    var want = choice === "open" ? true : choice === "closed" ? false : (d.alert || det.open);
     if (det.open !== want) { det.dataset.byRender = "1"; det.open = want; }
   }
 
