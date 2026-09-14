@@ -7,6 +7,11 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-09-15
+
+The page stops moving under your cursor while the build machine works, and the README walks
+through a gate from a session.
+
 ### Fixed
 - **The host section no longer opens and closes itself while you read.** On a build machine that
   is actually building, CPU crosses 85% every few seconds; the page re-applied that verdict to the
@@ -789,7 +794,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.4...v0.2.5
