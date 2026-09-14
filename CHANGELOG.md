@@ -18,7 +18,7 @@ of a key bumps that number and is listed here.
   closing it is yours to do, and your own choice still wins over both. The `busy` verdict also
   gained hysteresis: it turns on at 85% and only clears once every value is below 80%, so the word
   beside the heading stops flickering with each sample. The percentages themselves still turn
-  amber at 85%.
+  amber at 85%. ([#124](https://github.com/monocsp/remote_ci_monitor/pull/124))
 
 ### Changed
 - **The README walks through a gate from a session.** A numbered section — `rcm check`,
