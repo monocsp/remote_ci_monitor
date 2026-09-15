@@ -191,7 +191,19 @@ WCAG 1.4.1. 그리고 **움직임도 상태 채널**이다(Vercel: 종료 아닌
 | `snapshot_too_big` | `bytes`, `limit` | `snapshot {n} exceeds {limit}` | `server.py:932`, `1200` |
 | `snapshot_rejected` | `kind` | `snapshot rejected: {ExceptionType}` | `server.py:1071` |
 | `snapshot_blobs_missing` | `count` | `snapshot rejected: {n} blob(s) missing` | `server.py:1080` |
-| `workspace_failed` | `detail` | materialize 오류 | `materialize.py` |
+| `snapshot_missing` | — | `snapshot file is missing` | `worker.py` |
+| `blob_missing` | `sha` | `snapshot blob missing {sha7}` | `materialize.py` |
+| `repo_missing` | `repo`, `where` | `repo '{name}' is no longer configured` | `worker.py`, `remote_worker.py` |
+| `commit_missing` | `sha` | `commit {sha7} not found after fetch (…)` | `materialize.py` |
+| `git_failed` | `op`, `kind`, `seconds`, `code`, `error` | `git fetch timed out after {n}` | `materialize.py` |
+| `snapshot_download_failed` | `status` | `cannot download the snapshot from the server` | `remote_worker.py` |
+| `launch_executable_missing` | — | `the preset's command was not found` | `runner.py` |
+| `launch_permission_denied` | — | `the preset's command is not executable` | `runner.py` |
+| `launch_failed` | `error` | `the preset's command could not be started ({error})` | `runner.py` |
+| `log_unavailable` | `error` | `the job log file could not be opened ({error})` | `runner.py` |
+| `workspace_failed` | `error` | `the workspace could not be prepared ({error})` | `materialize.py` |
+| `preset_missing` | `preset` | `preset '{name}' is no longer configured` | `worker.py`, `remote_worker.py` |
+| `tool_missing` | `tool` | `required tool {name} is missing` | `worker.py`, `remote_worker.py` |
 | `exit_code` | `code` | `exit {rc}` | `worker.py:127` |
 | `cancelled_by` | `by` | `cancelled by {who}` | `worker.py:120` |
 | `worker_error` | `detail` | `worker error: {err}` | `worker.py:228` |
