@@ -7,6 +7,10 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-09-15
+
+Starting the server says what it is turning on, one line per step.
+
 ### Added
 - **Starting says what it is turning on.** `rcm serve` used to print nothing until everything was
   up, and then one `listening on …` line; a slow migration or an mDNS responder waiting on Local
@@ -818,7 +822,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...v0.2.6
