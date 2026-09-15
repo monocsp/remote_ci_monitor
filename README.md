@@ -236,9 +236,11 @@ the snapshot cache, remote workers, notifications, retention — is in
 
 Open `http://<build-machine>:8787/` in any browser, phone included: three static files served by
 `rcm serve`, no build step and no third-party assets. The first screen answers three questions at
-a glance — **Your jobs** (paste your token with 🔑), **Not moving** (only actionable causes, worst
-first) and **Host pressure** — and below them sit the queue with its reasons and ETA confidence,
-the host card, recent results and how the estimates were computed.
+a glance — **Your jobs** (paste your token with the key button), **Needs a look** (only actionable
+causes, worst first) and **Host pressure** — and below them sit the queue with its status column
+and ETA confidence, the host card, recent results and how the estimates were computed. A job that
+has merely gone quiet is not listed as needing a look; see
+[Configuration](docs/configuration.md#estimates-and-when-a-job-is-called-not-responding).
 
 Updates arrive over the event stream; if it drops, the page polls every 10 s, and after 30 s
 without a successful response a **Lost connection** banner appears while the ages keep counting.

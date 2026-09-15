@@ -23,10 +23,10 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="웹 큐 화면 — 스텝까지 보이는 실행 중 잡, ETA 가 붙은 대기 잡, 그 아래 빌드 머신의 CPU · 메모리 · 디스크 · GPU" width="820">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/hero-queue.png" alt="웹 큐 화면 — 단계까지 보이는 실행 중 작업, ETA 가 붙은 대기 작업, 그 아래 빌드 머신의 CPU · 메모리 · 디스크 · GPU" width="820">
 </p>
 
-빌드 머신 **한 대**를 팀이 나눠 쓰면 결국 손으로 줄을 선다. 지금 누가 뭘 돌리는지, 앞 잡이 걸린
+빌드 머신 **한 대**를 팀이 나눠 쓰면 결국 손으로 줄을 선다. 지금 누가 뭘 돌리는지, 앞 작업이 걸린
 건지 느린 건지, 머신이 버거운지, 통과했는지. rcm 은 그걸 한 화면과 종료 코드 하나로 답한다.
 
 - **따로 띄울 게 없다.** 패키지 하나, 런타임 의존성 0, Python 3.11+ 표준 라이브러리만. 서버와
@@ -78,10 +78,10 @@ macOS 면 방화벽 허용 창에서 Python 을 허용한다. 다른 컴퓨터�
 **광고**한다(`_rcm._tcp`, mDNS/DNS-SD — `advertise = false` 로 끄고 `advertise_name` 으로 이름을
 바꾼다). 그래서 같은 네트워크의 세션은 주소가 아예 필요 없다.
 
-토큰: `rcm token add ops --admin` 은 관리자 토큰(pause·resume·남의 잡 취소·아무 로그 읽기).
+토큰: `rcm token add ops --admin` 은 관리자 토큰(pause·resume·남의 작업 취소·아무 로그 읽기).
 `rcm token list` 는 비밀을 보여 주지 않는다. `rcm token revoke NAME`. 포트를 바꾸려면
 `rcm serve --port 8790`(또는 설정의 `port`). `0.0.0.0` 으로 열 때는 `public_url` 을 적어야
-`rcm run` 이 찍는 잡 URL 이 다른 컴퓨터에서 열린다.
+`rcm run` 이 찍는 작업 URL 이 다른 컴퓨터에서 열린다.
 
 로그인·재부팅을 넘겨 계속 돌리는 방법은
 [빌드 머신 운영](docs/operating.md#run-as-a-service)의 launchd·systemd 예시에 있다.
@@ -107,7 +107,7 @@ rcm init client --server http://<빌드머신>:8787   # ~/.config/rcm/client.tom
 export RCM_TOKEN=<rcm token add 로 받은 토큰>      # 또는 그 파일에 token = "…" 로 적는다
 rcm check                  # python · server · token · presets · timezone 이 전부 ok 여야 한다
 cd ~/src/app               # 아무 프로젝트 디렉터리 — rcm run 은 *현재 디렉터리*를 올린다
-rcm run ok                 # 첫 잡: 종료 0 과 JSON 한 줄이면 전부 통한 것이다
+rcm run ok                 # 첫 작업: 종료 0 과 JSON 한 줄이면 전부 통한 것이다
 rcm top                    # 큐 · ETA · 최근 결과 · 호스트 부하
 ```
 
@@ -117,11 +117,11 @@ rcm top                    # 큐 · ETA · 최근 결과 · 호스트 부하
 
 `rcm run` 은 **현재 디렉터리**를 스냅샷한다(git 추적 파일 + 무시되지 않은 미추적 파일, `.rcmignore`
 패턴 제외). 서버에 없는 파일만 올리고, 기다리고, stdout 에 JSON 한 줄을 찍는다. 진행 표시는
-stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait --job N` 으로 다시 붙고
+stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wait --job N` 으로 다시 붙고
 `rcm cancel N` 으로 멈춘다. 빌드 머신의 작업 공간에는 **`.git` 이 없다**. git 이력이 필요한
 스크립트는 `git_ref` 프리셋으로 돌린다.
 
-**처음이라면 [사용법 가이드](docs/usage.ko.md)를 보자.** 주석을 단 화면으로 첫 잡까지 따라간다.
+**처음이라면 [사용법 가이드](docs/usage.ko.md)를 보자.** 주석을 단 화면으로 첫 작업까지 따라간다.
 
 ## Running a gate from a session
 
@@ -133,11 +133,11 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
    `cancel` 이 전부 `ok` 여야 한다. `presets` 에 `gate` 가 없으면 서버 쪽에서 아직 정의하지 않은
    것이다([Configuration](docs/configuration.md)). `rcm presets` 가 프리셋과 입력을 전부 보여
    준다.
-2. **줄 서기 전에 본다.** `rcm eta gate -f scope=full` 은 아무것도 제출하지 않고 내 순번 · 앞 잡
+2. **줄 서기 전에 본다.** `rcm eta gate -f scope=full` 은 아무것도 제출하지 않고 내 순번 · 앞 작업
    수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 `confidence` 를 찍는다.
 3. **저장소 루트에서 제출.** `rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"` 은
    현재 디렉터리를 스냅샷하고(추적 파일 + 무시되지 않은 미추적 파일, `.rcmignore` 제외), 같은
-   잡이 이미 대기·실행 중이면 합류하고, 서버에 없는 파일만 올리고, 기다린다. 진행은 stderr 로
+   작업이 이미 대기·실행 중이면 합류하고, 서버에 없는 파일만 올리고, 기다린다. 진행은 stderr 로
    `::rcm::step::` 마다 한 줄, 결과는 stdout 에 JSON 한 줄. 입력은 `-f 이름=값`, `--by` 는
    큐에 보이는 이름(기본 `user@host`). git 이력이 필요한 게이트는 푸시된 ref 로 돈다 —
    `rcm run gate --source git_ref --ref my-branch` 는 아무것도 올리지 않으니 먼저 푸시한다.
@@ -147,15 +147,15 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
    이 프리셋의 최근 실행에서 몇 번 빨갰는지) · `step_timeline` 이 실린다.
    `examples/session/ci-gate.sh` 가 완성된 래퍼다(`jq` 필요).
 5. **빨갈 때.** `rcm logs N` 이 로그를 보여 준다(도는 중이면 `--follow`). 판정 줄은 스크립트가
-   선언한 실패 스텝을, 선언이 없으면 `last step …` 을 말한다. `rcm artifacts N --fetch` 는
+   선언한 실패 단계을, 선언이 없으면 `last step …` 을 말한다. `rcm artifacts N --fetch` 는
    프리셋이 낸 보고서를 가져온다. 종료 3 은 rcm 이 모른다는 뜻이다 — 서버가 재시작됐거나 경로가
    끊긴 것 — 다시 돌리기 전에 `rcm jobs` 를 본다.
-6. **떼어 놓고 나중에.** `--no-wait` 는 잡 번호 · 순번 · ETA 를 찍고 돌아온다. `rcm wait --job N`
-   으로 다시 붙는다. `rcm run` 중 Ctrl-C 도 떼어 놓기다 — 잡은 계속 돈다.
-7. **취소.** `rcm cancel N` 은 내 잡을 멈춘다(`rcm run` 이 제출의 취소 토큰을
-   `~/.local/state/rcm/submissions.json` 에 저장해 둔다). 남의 잡에 합류만 했다면 목록에서
-   나만 빠지고 잡은 계속 돈다. 관리자 토큰은 무엇이든 취소한다.
-8. **두 세션, 한 커밋.** 같은 프리셋 · 입력 · 트리로 두 번째 `rcm run` 을 하면 첫 잡에 합류해
+6. **떼어 놓고 나중에.** `--no-wait` 는 작업 번호 · 순번 · ETA 를 찍고 돌아온다. `rcm wait --job N`
+   으로 다시 붙는다. `rcm run` 중 Ctrl-C 도 떼어 놓기다 — 작업은 계속 돈다.
+7. **취소.** `rcm cancel N` 은 내 작업을 멈춘다(`rcm run` 이 제출의 취소 토큰을
+   `~/.local/state/rcm/submissions.json` 에 저장해 둔다). 남의 작업에 합류만 했다면 목록에서
+   나만 빠지고 작업은 계속 돈다. 관리자 토큰은 무엇이든 취소한다.
+8. **두 세션, 한 커밋.** 같은 프리셋 · 입력 · 트리로 두 번째 `rcm run` 을 하면 첫 작업에 합류해
    같은 결과를 받는다. `--no-join` 은 따로 돌린다.
 9. **빠른 통과.** 프리셋에 가벼운 scope(`-f scope=fast` · `commit`)가 있으면 반복할 땐 그걸
    쓰고 머지에는 `full` 을 쓴다. 지금 각각 얼마나 걸리는지는 `rcm eta` 가 말해 준다.
@@ -168,17 +168,17 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
 
 | 명령 | 무엇을 보여 주나 |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 잡이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
-| `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 잡 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 잡은 대기 대신 상태와 경과 |
+| `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 작업 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 작업은 대기 대신 상태와 경과 |
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
-| `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 잡. `--mine` 은 토큰이 필요하고 합류한 잡도 포함한다 |
-| `rcm logs N [--follow]` | 잡 로그(내 잡 · 내가 합류한 잡, 관리자 토큰이면 아무 잡) |
-| `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | 잡이 만든 파일을 보고, 받는다. `rcm run --fetch-artifacts` 는 제출한 트리로 한 번에 가져온다 |
+| `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 작업. `--mine` 은 토큰이 필요하고 합류한 작업도 포함한다 |
+| `rcm logs N [--follow]` | 작업 로그(내 작업 · 내가 합류한 작업, 관리자 토큰이면 아무 작업) |
+| `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | 작업이 만든 파일을 보고, 받는다. `rcm run --fetch-artifacts` 는 제출한 트리로 한 번에 가져온다 |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
 | `rcm discover [--json] [--timeout S]` | 이 네트워크의 rcm 서버들(mDNS). 발견으로 정해지면 `rcm check` 가 `(found on this network)` 를 붙인다 |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류만 취소된다) · 큐 일시정지·재개(관리자) |
-| `rcm bump N [--priority high]` | 대기 중인 잡의 우선순위 변경(관리자) |
+| `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
 
 모든 추정에는 `confidence` 가 붙는다. `high`(실제 5회 이상의 중앙값) · `med`(그보다 적음) ·
 `low`(프리셋이나 기본 추측) · `group wait`(동시성 그룹에 막힘) · `overdue`. 모르는 값은 `0` 이
@@ -193,7 +193,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 잡은 계속 돈다. `rcm wait 
 [[presets]]
 name = "gate"
 argv = ["bash", "scripts/gate.sh"]      # 올라온 작업 공간 루트에서 돈다
-pool = "default"                        # 이 프리셋의 잡이 도는 워커 풀(기본 "default")
+pool = "default"                        # 이 프리셋의 작업이 도는 워커 풀(기본 "default")
 pools = []                              # 세션이 --pool 로 고를 수 있는 추가 풀
 timeout_seconds = 1200
 expected_seconds = 480                  # 실제 표본이 쌓이기 전까지 쓰는 값
@@ -207,8 +207,8 @@ default = "full"
 스크립트는 줄 머리에 마커를 찍어 진행을 알린다:
 
 ```
-::rcm::steps::3            # 선택: 전체 스텝 수
-::rcm::step::analyze       # 새 스텝 시작(앞 스텝은 끝난다)
+::rcm::steps::3            # 선택: 전체 단계 수
+::rcm::step::analyze       # 새 단계 시작(앞 단계는 끝난다)
 ::rcm::step-end::ok        # 선택: "ok" 또는 "fail"
 ::rcm::summary::all green  # 선택: 큐에 보이는 한 줄 결과
 ```
@@ -220,12 +220,14 @@ default = "full"
 ## Web UI
 
 `http://<빌드머신>:8787/` 을 브라우저로 연다(폰 포함). `rcm serve` 가 내주는 정적 파일 셋이고,
-빌드 단계도 외부 자산도 없다. 첫 화면이 세 가지를 한눈에 답한다. **Your jobs**(🔑 로 토큰을 넣는다),
-**Not moving**(손쓸 수 있는 원인만, 나쁜 것부터), **Host pressure**. 그 아래에 이유와 ETA
-confidence 가 붙은 큐, 호스트 카드, 최근 결과, 추정 근거가 있다.
+빌드 단계도 외부 자산도 없다. 첫 화면이 세 가지를 한눈에 답한다. **내 작업**(열쇠 버튼으로 토큰을
+넣는다), **확인이 필요한 작업**(손쓸 수 있는 원인만, 나쁜 것부터), **호스트 부하**. 그 아래에
+상태와 ETA confidence 가 붙은 큐, 호스트 카드, 최근 결과, 추정 근거가 있다. 출력만 조용해진 작업은
+「확인이 필요한 작업」에 오르지 않는다 — 판정 규칙은
+[설정 문서](docs/configuration.md#estimates-and-when-a-job-is-called-not-responding)에 있다.
 
 갱신은 이벤트 스트림으로 온다. 끊기면 10초마다 폴링하고, 30초 동안 응답이 없으면 **Lost
-connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하지 않는다. `#/jobs/N` 은 잡 하나로
+connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하지 않는다. `#/jobs/N` 은 작업 하나로
 바로 간다.
 
 ## Exit codes
@@ -235,7 +237,7 @@ connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하�
 | 0 | 성공 |
 | 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`) |
 | 2 | 취소되었거나 시간 초과 |
-| 3 | **모름**: 서버 재시작으로 잡을 잃음 · 서버에 못 닿음 · `--timeout` 경과. 절대 실패로 치지 않는다 |
+| 3 | **모름**: 서버 재시작으로 작업을 잃음 · 서버에 못 닿음 · `--timeout` 경과. 절대 실패로 치지 않는다 |
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·
@@ -244,16 +246,16 @@ connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하�
 ## Security notes
 
 - 쓰기(제출 · 업로드 · 취소)에는 전부 토큰이 필요하다. 서버는 SHA-256 해시만 저장한다. 토큰에는
-  종류가 있다. `client` · `admin`(남의 잡 취소 · pause · bump) · `worker`(`/worker/*` 전용).
+  종류가 있다. `client` · `admin`(남의 작업 취소 · pause · bump) · `worker`(`/worker/*` 전용).
 - 설정된 프리셋만 돈다. 셸 보간은 없다. 업로드는 Python `tarfile` data 필터로 푼다(절대 경로 · `..`
   · 작업 공간 밖 링크 금지).
 - 발견 응답에는 서버 이름 · 포트 · 버전 · lane 수 · LAN 주소만 들어간다. 토큰 · 프리셋 · 경로는
   없다. 같은 LAN 의 누구나 「빌드 서버가 있다」는 사실은 알 수 있다.
 - 서버는 따로 정하지 않으면 `127.0.0.1` 에만 열리고 **TLS 는 하지 않는다**. Tailscale 이나 TLS
   프록시 뒤에 둔다. 읽기는 그 네트워크에 기본으로 열려 있고(`read_auth = "basic"` 으로 잠근다),
-  잡 로그는 언제나 그 잡의 토큰이나 관리자 토큰이 필요하다.
+  작업 로그는 언제나 그 작업의 토큰이나 관리자 토큰이 필요하다.
 - sudo 없는 전용 OS 사용자로 돌린다. 빌드 비밀은 빌드 머신의 파일에 두고 프리셋이 읽게 한다.
-  잡으로 보내지 않는다.
+  작업으로 보내지 않는다.
 
 웹 UI 가 `localStorage` 에 무엇을 두는지까지 전부는
 [빌드 머신 운영](docs/operating.md#security-notes)에 있다.
@@ -262,7 +264,7 @@ connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하�
 
 | 문서 | 내용 |
 |---|---|
-| [사용법 가이드](docs/usage.ko.md) · [English](docs/usage.md) | 첫 잡까지 한 단계씩, 주석 단 화면과 함께 |
+| [사용법 가이드](docs/usage.ko.md) · [English](docs/usage.md) | 첫 작업까지 한 단계씩, 주석 단 화면과 함께 |
 | [Configuration](docs/configuration.md) | 프리셋 · 입력 · 마커 · 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 풀과 원격 워커 · 알림 · 클라이언트와 워커 파일 |
 | [Operating the build machine](docs/operating.md) | 서비스로 돌리기 · Docker · 업그레이드 · 보안 · 숫자가 틀릴 수 있는 이유 · 실제 머신에서의 수동 점검 |
 | [CHANGELOG.md](CHANGELOG.md) | 사용자에게 보이는 모든 변경, 최신순 |

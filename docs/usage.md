@@ -276,8 +276,8 @@ rcm artifacts 412 --fetch --output ./out   # write it into a directory you name
    ETA. The reason a job is not moving is stated, never guessed.
 3. **Recent results and medians** — how long this preset usually takes, from real runs, which is
    where the ETAs come from.
-4. **The host**: load, CPU, memory, disk, GPU and the top processes. This is how you tell "stuck" from
-   "the machine is busy".
+4. **The host**: load, CPU, memory, disk, GPU and the top processes. This is how you tell "not
+   responding" from "the machine is busy".
 5. **Other pools** get their own section, so a second build machine is visible from the same
    screen.
 
@@ -295,26 +295,29 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 2. Each **remote worker**, with its pool and job. A worker that stopped answering shows `down`.
 3. The **connection state**. `live` means the event stream is open; `polling` means it fell back,
    with the age of the last successful update.
-4. **🔑** takes your token. It is kept in this browser only, never in the URL.
+4. The **key button** takes your token. It is kept in this browser only, never in the URL.
 
 ### The queue
 
 ![the queue: the three-answer summary, the running job with its progress bar and steps, the waiting job with an ETA, and the other pool](images/ui/web-queue.png)
 
-1. **Three answers at a glance**: your jobs, anything not moving, and how hard the machine is
-   working.
+1. **Three answers at a glance**: your jobs, anything that needs a look, and how hard the machine
+   is working.
 2. **Running now, and waiting**, each with a count. An empty group says so rather than vanishing,
    so "nothing is running" never looks the same as "the page did not load".
 3. **The running job**, with who asked for it and what tree it is testing. Rows arrive folded; the
-   current step stays in the reason column as `step 2/4 build 2s`, so a folded row still says what
+   current step stays in the status column as `step 2/4 build 2s`, so a folded row still says what
    is happening.
-4. **How far along it is**, on one bar, and — always — what the bar measured. `50% · 4/8 steps`
-   when the job declares how many steps it has; `70% · by measured time` or `by preset estimate`
-   when it does not, so you can see how much the number is worth. A job past its estimate reads
-   `past the estimate`, one that finished every declared step but has not exited reads
-   `finalizing`, and a job nothing can be said about — no samples at all, preparing its workspace,
-   or likely stuck — reads `progress —`. A running job never fills the bar: a full bar means
-   finished, and this one is still going.
+4. **How far along it is**, on a short bar inside the **Elapsed** column, and — always — what the
+   bar measured. `50% · 4/8 steps` when the job declares how many steps it has; `70% · by measured
+   time` or `by preset estimate` when it does not, so you can see how much the number is worth.
+   A job that finished every declared step but has not exited reads `4/4 steps`, and a job nothing
+   can be said about — no samples at all, preparing its workspace, past its estimate, or not
+   responding — reads `progress —`. The label stops there: whether the job is past its estimate,
+   not responding or merely quiet is told by the bar's colour and hatching and by the status
+   column, which already says it in words. Point at the bar, or read it with a screen reader, and
+   the condition is spelled out in full (`50% · 4/8 steps · not responding`). A running job never
+   fills the bar: a full bar means finished, and this one is still going.
 5. **Its steps**, opened with **▸**, in order, with the finished ones ticked and the current one
    timed. The seconds count up as you watch; they do not sit still and then jump when the page
    refreshes. The log tail and the **Log** button are in the same block. **Cancel** does not hide
@@ -329,7 +332,7 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ![after pasting a token: the token button shows your name, your jobs are marked, the log tail and buttons appear](images/ui/web-your-jobs.png)
 
-1. Paste the token behind **🔑**. The button then shows the token's name.
+1. Paste the token behind the **key button**. The button then shows the token's name.
 2. **Your jobs** in the summary counts what you asked for, including jobs you joined.
 3. Your rows are marked **you**.
 4. The last lines of the log appear under your running job, updating as it goes.

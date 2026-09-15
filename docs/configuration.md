@@ -328,6 +328,48 @@ the exact line your script prints, anchored at the start of the line — a loose
 turns a mention into a verdict. `tests/test_examples.py` locks the wrapper by feeding its output to
 the same code the server reads markers with.
 
+## Estimates, and when a job is called not responding
+
+Every ETA on the page comes from the same place: the median of this preset's own finished runs.
+`[estimate]` says how that median is built (`sample_days`, `sample_policy`, `min_job_seconds`,
+`min_samples`, `default_seconds`, `floor_remaining_seconds` — each with a comment in
+`examples/server.toml`) and when the server stops believing a running job is alive.
+
+Silence is not that moment. A job that has stopped printing has not necessarily stopped working:
+a preset whose last step runs nine test shards, gitleaks and a web build in parallel says nothing
+for minutes and is perfectly healthy, because those tools buffer their output until they finish.
+The server decides in this order, and the screen names only the rule that fired:
+
+1. **The current step against its own history.** For the last successful runs of the same preset
+   the server reads the step markers those runs already wrote, takes the median time of the step
+   the job is in now, and calls the job not responding once the step has run longer than
+   `step_stuck_multiplier` times that median. A step median counts only once `step_min_samples`
+   runs have measured it — a step nobody has measured yet says nothing either way.
+2. **The whole job against its estimate.** `elapsed > stuck_multiplier × expected`, unchanged.
+3. **Silence, and only for a job that prints no step markers at all.** With no steps to look at,
+   `no_output_seconds` of silence is the only signal there is, so there it is the verdict.
+
+The step threshold never drops below `no_output_seconds`: it is
+`max(step_stuck_multiplier × step median, no_output_seconds)`. Without that floor a step whose
+median is half a second would be called dead a second and a half in — a claim the silence rule
+could never have made.
+
+A job that is stepping along normally and has merely gone silent is **quiet**: grey on the page,
+never red, and deliberately not in the "needs a look" summary, which lists only what a person can
+act on. A job that has no history yet is quiet too, not red, until its steps have been measured.
+
+| key | default | what it is |
+|---|---|---|
+| `stuck_multiplier` | `3` | how many times its estimate the whole job may run before it is called not responding |
+| `step_stuck_multiplier` | `3` | how many times its own measured median the current step may run |
+| `step_min_samples` | `3` | successful runs a step needs before its median is trusted. Higher than `min_samples` (2) on purpose: step times are noisier than job times |
+| `no_output_seconds` | `240` | silence this long makes a job quiet. It is also the floor under the step threshold, and the verdict for a job that declares no steps at all |
+
+`step_stuck_multiplier` must be greater than 1 and `step_min_samples` at least 2; `rcm serve`
+refuses to start otherwise. Nothing here changes the status document's `schema_version` — the
+three keys `estimate.quiet`, `estimate.stuck_code` (`over_step`, `over_elapsed`, `no_output`) and
+`estimate.step_expected_seconds` were added, and adding keys is free.
+
 ## Retention: what is kept, and for how long
 
 A finished job leaves two very different things behind, and they are worth different amounts:
