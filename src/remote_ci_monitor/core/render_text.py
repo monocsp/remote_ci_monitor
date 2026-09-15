@@ -374,6 +374,28 @@ def held_summary(workers: list[dict[str, Any]] | None) -> tuple[int, str | None]
     return len(held), _HOLD_WORD.get(codes[0], codes[0]) if codes else None
 
 
+def _stall_text(row: dict[str, Any], est: dict[str, Any]) -> str:
+    """`stuck` 한 줄 — 근거(`stuck_code`)마다 다른 문장.
+
+    경고 기호는 안 붙인다. 「몇 배」는 근거가 **경과 초과**(`over_elapsed`)일 때만 말한다 —
+    단계 소요로 판정한 잡에 「예상의 1배」가 붙던 것이 2026-09-15 사고의 한 조각이었다.
+    옛 문서(`stuck_code` 없음)는 배수가 2 이상일 때만 말한다.
+    """
+    code = est.get("stuck_code")
+    if code == "over_step":
+        name = (row.get("progress") or {}).get("current_name") or "current step"
+        usual = fmt_duration(est.get("step_expected_seconds"))
+        return f"Not responding · step {name} · usually {usual}"
+    if code == "no_output":
+        return "Not responding · no output"
+    expected = est.get("expected_seconds") or 0
+    elapsed = est.get("elapsed_seconds") or 0
+    times = int(elapsed // expected) if expected > 0 else 0
+    if code == "over_elapsed" or times >= 2:
+        return f"Not responding · {times}x longer than usual"
+    return "Not responding"
+
+
 def _reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = None) -> str:
     reason = row.get("reason")
     est = row.get("estimate") or {}
@@ -393,7 +415,9 @@ def _reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = Non
             f"over by {fmt_duration(over)} · expected {fmt_duration(est.get('expected_seconds'))}"
         )
     if reason == "stuck":
-        return "⚠ likely stuck"
+        return _stall_text(row, est)
+    if reason == "quiet":
+        return "output has gone quiet"
     if reason == "upload_stalled":
         src = row.get("source") or {}
         return f"upload stalled · {_mb(src.get('received_bytes'))} / {_mb(src.get('bytes'))}"

@@ -58,6 +58,12 @@ ESTIMATE_KEYS = {
     "stuck",
     "finish_at",
     "shared",  # M5f — 같은 풀의 다른 잡과 머신을 나눠 쓰는 중인가
+    # 멈춤 판정이 단계 실측으로 바뀌면서 더한 셋. **키 추가만 — 스키마 v1 그대로다.**
+    # 키를 더하는 것과 `reason` 열거값을 더하는 것은 공짜다(CHANGELOG 머리말·CONTRIBUTING).
+    # `estimate.stuck` 의 **뜻**은 그대로이고 바뀐 것은 그 판단의 **근거**다.
+    "quiet",
+    "stuck_code",
+    "step_expected_seconds",
 }
 RECENT_KEYS = {
     "pool",
@@ -335,3 +341,21 @@ def test_queued_job_without_started_has_null_numbers():
         est["elapsed_seconds"] is None and est["wait_seconds"] is None and est["finish_at"] is None
     )
     assert est["source"] == "preset" and est["expected_seconds"] == 480
+
+
+def test_quiet_does_not_lower_the_eta_confidence():
+    """조용한 잡의 ETA 신뢰도 배지는 오늘 그대로다 — `confidence(overdue=)` 에 `quiet` 를 안 섞는다.
+
+    「출력이 조용하다」는 **예상 시간이 덜 맞는다**는 말이 아니다. 섞으면 조용해질 때마다
+    배지가 `overdue` 로 바뀐다.
+    """
+    from dataclasses import replace
+
+    from remote_ci_monitor.core.status import queue_row_json
+
+    row = sample_rows()[0]  # running · measured · sample_count 7
+    loud = queue_row_json(row)["estimate"]
+    assert loud["quiet"] is False and loud["confidence"] == "high"
+    quiet = replace(row, estimate=replace(row.estimate, quiet=True))
+    out = queue_row_json(quiet)["estimate"]
+    assert out["quiet"] is True and out["confidence"] == "high"

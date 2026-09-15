@@ -87,10 +87,10 @@ def test_medians_from_accepts_the_lean_rows(store):
 # ── 중앙값은 잡이 끝났을 때만 다시 잰다 ────────────────────────────────────
 
 
-def app_for(tmp_path):
+def app_for(tmp_path, **kw):
     from test_server import Server
 
-    return Server(tmp_path, workers=False)
+    return Server(tmp_path, workers=False, **kw)
 
 
 def test_a_marker_line_does_not_invalidate_the_medians(tmp_path):
@@ -356,3 +356,191 @@ def test_forgetting_a_worker_does_not_silence_the_dead_pool_alarm(store):
     )
     assert store.forget_workers(NOW - timedelta(days=7)) == []
     assert [w.name for w in store.list_workers()] == ["lin-01"]
+
+
+# ── 단계 중앙값은 도는 잡의 key 에만, key 당 한 벌 ─────────────────────────────
+
+
+def counting(app, name="list_step_sample_ids"):
+    """`store.<name>` 을 호출 인자를 세는 래퍼로 바꾼다. 반환 목록이 곧 호출 기록이다."""
+    real = getattr(app.store, name)
+    calls: list = []
+
+    def wrapper(*a, **kw):
+        calls.append((a, kw))
+        return real(*a, **kw)
+
+    setattr(app.store, name, wrapper)
+    return calls
+
+
+def busy_job(store, *, key="gate:full", tree="0000", lane=1, now=NOW):
+    """도는 잡 하나. 큐에 넣고 그 자리에서 claim 한다."""
+    src = Source(mode="tree", repo="org/app", tree_hash=tree)
+    store.create_job(
+        preset=key.split(":")[0],
+        inputs={},
+        key=key,
+        concurrency_group=None,
+        source=src,
+        requester=ALICE,
+        timeout_seconds=1200,
+        join_key=join_key(key, {}, tree),
+        now=now,
+        state=QUEUED,
+    )
+    claimed = store.claim(lane, now)
+    assert claimed is not None
+    return claimed.id
+
+
+def test_an_idle_server_reads_no_step_samples(tmp_path):
+    """도는 잡이 없으면 단계 중앙값 질의는 0회다."""
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        finished(app.store, 5)
+        ids = counting(app)
+        markers = counting(app, "markers_for")
+        app._mark_dirty()
+        snap = app._snapshot()
+        assert ids == []
+        # 스냅샷이 도는 잡의 마커를 읽는 호출 하나뿐이고, 그것도 빈 목록이다
+        assert all(not call[0][0] for call in markers)
+        assert snap.step_medians == {} and snap.step_medians_error is None
+    finally:
+        srv.close()
+
+
+def test_step_samples_are_read_once_per_key(tmp_path):
+    """같은 key 의 잡이 셋 돌아도 표본은 한 벌이다 — 질의는 잡 수가 아니라 key 수를 따른다."""
+    srv = app_for(tmp_path, lanes=4)
+    try:
+        app = srv.app
+        for i in range(3):
+            busy_job(app.store, key="gate:full", tree=f"{i:04x}", lane=i + 1)
+        busy_job(app.store, key="demo:quick", tree="ffff", lane=4)
+        ids = counting(app)
+        markers = counting(app, "markers_for")
+        app._mark_dirty()
+        app._snapshot()
+        assert {c[0][0] for c in ids} == {"gate:full", "demo:quick"}
+        assert len(ids) == 2  # 잡 4개가 아니다
+        assert len(markers) <= 2  # 스냅샷의 활성 마커 1회 + 표본 마커 1회
+    finally:
+        srv.close()
+
+
+def test_step_samples_do_not_scale_with_retained_events(tmp_path):
+    """보존된 잡·이벤트가 늘어도 단계 중앙값 경로의 문장 수는 그대로다 (M5f 결정 49).
+
+    타이밍은 안 잰다 — 이 파일의 머리말이 그렇게 정했다. 구조로 잠근다.
+    """
+    from remote_ci_monitor.server import STEP_SAMPLE_JOBS
+
+    def step_selects(app):
+        app._step_medians_at.clear()  # 캐시를 비워 실제로 읽게 한다
+        seen = count_statements(app.store)
+        app._load_step_medians(NOW, app.queue_config(), {"gate:full"})
+        app.store._conn().set_trace_callback(None)
+        return [s for s in seen if s.strip().upper().startswith("SELECT")]
+
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        finished(app.store, 5)
+        small = step_selects(app)
+
+        finished(app.store, 45)  # 표본 후보 50개
+        for job_id in range(2, 42):  # 그 중 40개에 잡당 200줄 = 8000 이벤트 행
+            app.store.add_markers(
+                job_id, [("step", f"s{i}") for i in range(200)], at=NOW - timedelta(days=1)
+            )
+        ids = counting(app)
+        markers = counting(app, "markers_for")
+        big = step_selects(app)
+
+        # key 당 표본 id 1 + 묶어서 읽는 마커 1 + 종료 시각 1
+        assert len(big) == len(small) == 3, (small, big)
+        assert ids[0][1]["limit"] == STEP_SAMPLE_JOBS
+        assert len(markers[0][0][0]) <= STEP_SAMPLE_JOBS  # 50 이 아니다
+    finally:
+        srv.close()
+
+
+def test_a_marker_line_does_not_invalidate_the_step_medians(tmp_path):
+    """단계 중앙값의 원천이 마커라 「마커가 오면 다시 재자」가 자연스러워 보인다 — 그게 버그다."""
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        busy_job(app.store, tree="beef")
+        app._mark_dirty()
+        before = app._snapshot().step_medians
+        app._on_marker(1, "step", "build")
+        assert app._snapshot().step_medians is before  # 같은 객체
+    finally:
+        srv.close()
+
+
+def test_a_new_key_is_measured_without_rereading_the_old_ones(tmp_path):
+    """캐시는 **key 별 항목**이다.
+
+    `_load_medians` 처럼 TTL 만 보면 새로 뜬 key 의 잡은 최대 `MEDIANS_MAX_AGE_SECONDS`
+    동안 단계 판정을 못 받는다 — 안전한 쪽으로 틀리지만 조용히 무력하다.
+    """
+    srv = app_for(tmp_path, lanes=2)
+    try:
+        app = srv.app
+        busy_job(app.store, key="gate:full", tree="beef", lane=1)
+        app._mark_dirty()
+        app._snapshot()  # 캐시를 데운다
+        ids = counting(app)
+        busy_job(app.store, key="demo:quick", tree="cafe", lane=2)
+        app._mark_dirty()
+        app._snapshot()
+        assert [c[0][0] for c in ids] == ["demo:quick"]  # 옛 key 를 다시 읽지 않는다
+    finally:
+        srv.close()
+
+
+def test_a_step_median_failure_only_falls_back_the_verdict(tmp_path):
+    """DB 가 잠깐 잠겨도 `/api/status` 는 200 이고, 판정만 「모른다」로 떨어진다."""
+    import sqlite3
+
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        busy_job(app.store, tree="beef")
+        calls: list[int] = []
+
+        def boom(*a, **kw):
+            calls.append(1)
+            raise sqlite3.OperationalError("database is locked")
+
+        app.store.list_step_sample_ids = boom
+        app._mark_dirty()
+        snap = app._snapshot()
+        assert snap.step_medians == {}
+        # 오류 코드는 이 레포의 `_error_code` 어휘를 따른다(결정 37) — 예외 클래스 이름이 아니다
+        assert snap.step_medians_error and snap.step_medians_error_code == "database_unavailable"
+        status, doc = srv.req("GET", "/api/status", token="alice")
+        assert status == 200 and doc["schema_version"] == 1
+        app._mark_dirty()
+        app._snapshot()
+        assert len(calls) == 2  # 실패는 캐시하지 않는다
+    finally:
+        srv.close()
+
+
+def test_the_queue_config_carries_the_step_stall_keys(tmp_path):
+    """설정 → `QueueConfig` 배선. 여기가 끊기면 판정이 조용히 기본값으로 돈다."""
+    srv = app_for(tmp_path)
+    try:
+        q = srv.app.queue_config()
+        assert q.step_stuck_multiplier == 3.0 and q.step_min_samples == 3
+        srv.app.config.estimate.step_stuck_multiplier = 5.0
+        srv.app.config.estimate.step_min_samples = 4
+        q = srv.app.queue_config()
+        assert q.step_stuck_multiplier == 5.0 and q.step_min_samples == 4
+    finally:
+        srv.close()

@@ -87,6 +87,12 @@ def estimate_json(e: Estimate, *, confidence: str | None = None) -> dict[str, An
         "wait_seconds": _num(e.wait_seconds),
         "overdue": e.overdue,
         "stuck": e.stuck,
+        # 출력이 조용하다 — 경보가 아니다. `stuck` 과 동시에 참이 되지 않는다.
+        "quiet": e.quiet,
+        # `stuck` 의 근거: "over_step" · "over_elapsed" · "no_output". 아니면 null.
+        "stuck_code": e.stuck_code,
+        # 현재 단계가 평소 걸리는 시간(초). 실측이 없으면 null — 지어내지 않는다.
+        "step_expected_seconds": _num(e.step_expected_seconds),
         "finish_at": iso(e.finish_at),
     }
 

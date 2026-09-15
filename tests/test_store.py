@@ -556,3 +556,73 @@ def test_migration_adds_the_claim_index_to_an_old_database(tmp_path):
     rows = again._conn().execute("SELECT name FROM sqlite_master WHERE type='index'")
     assert "jobs_claim" in {r[0] for r in rows} and again.user_version() == DB_VERSION
     again.close()
+
+
+# ── 단계 실측의 표본 고르기 ─────────────────────────────────────────────────
+
+
+def sample_job(store, *, key, state, finished, tree):
+    j = enqueue(store, key=key, tree=tree, now=finished - timedelta(seconds=600))
+    store.claim(1, finished - timedelta(seconds=500))
+    store.finish(j.id, state, now=finished, exit_code=0 if state == SUCCEEDED else 1)
+    return j.id
+
+
+def test_list_step_sample_ids_takes_only_recent_successes(store):
+    """표본은 **최근 성공 잡**이다. 실패는 대개 단계를 일찍 끊어 「평소」가 아니다."""
+    since = NOW - timedelta(days=45)
+    rare = [
+        sample_job(store, key="rare", state=SUCCEEDED, finished=at(-i * 60), tree=f"a{i:03x}")
+        for i in range(4)
+    ]
+    got = store.list_step_sample_ids("rare", since=since, limit=10)
+    assert len(got) == 4 and got == rare  # 늦게 끝난 것부터 (rare[0] 이 가장 늦다)
+
+    for i in range(20):  # 45일보다 오래 끝난 것만 있다
+        sample_job(
+            store,
+            key="stale",
+            state=SUCCEEDED,
+            finished=NOW - timedelta(days=60, seconds=i),
+            tree=f"b{i:03x}",
+        )
+    assert store.list_step_sample_ids("stale", since=since, limit=10) == []
+
+    for i in range(3):
+        sample_job(store, key="mixed", state=SUCCEEDED, finished=at(-600 - i), tree=f"c{i:03x}")
+    for i in range(7):  # 실패가 더 최근이다 — 그래도 안 센다
+        sample_job(store, key="mixed", state=FAILED, finished=at(-i), tree=f"d{i:03x}")
+    assert len(store.list_step_sample_ids("mixed", since=since, limit=10)) == 3
+
+    running = enqueue(store, key="rare", tree="ffff")
+    store.claim(1, NOW)
+    assert running.id not in store.list_step_sample_ids("rare", since=since, limit=10)
+
+
+def test_list_step_sample_ids_rides_the_key_index(store):
+    """45일치를 훑으면 `/api/status` 가 다시 보존 잡 수에 끌려간다(M5f 결정 49)."""
+    plan = " | ".join(
+        r[3]
+        for r in store._conn().execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM jobs INDEXED BY jobs_key_finished "
+            "WHERE key=? AND state=? AND finished_at IS NOT NULL AND finished_at >= ? "
+            "ORDER BY finished_at DESC, id DESC LIMIT ?",
+            ("gate:full", SUCCEEDED, "x", 10),
+        )
+    )
+    assert "jobs_key_finished" in plan, plan
+
+
+def test_finished_at_for_reads_every_id_in_one_statement(store):
+    """마지막 단계를 닫는 데 필요한 값이다 — 잡 행을 하나씩 만들지 않는다."""
+    ids = [
+        sample_job(store, key="rare", state=SUCCEEDED, finished=at(-i * 60), tree=f"e{i:03x}")
+        for i in range(3)
+    ]
+    seen = []
+    store._conn().set_trace_callback(seen.append)
+    ends = store.finished_at_for(ids)
+    store._conn().set_trace_callback(None)
+    assert set(ends) == set(ids) and len(seen) == 1, seen
+    assert store.finished_at_for([]) == {}
+    assert store.finished_at_for([999]) == {}
