@@ -7,6 +7,24 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A fetch that got nothing no longer exits 0.** `rcm run --fetch-artifacts` and
+  `rcm artifacts --fetch` asked the server for the bundle and, for **every** state other than
+  `ready`, returned no verdict at all — both callers read that as success. The comment defended
+  two of them (`disabled`, `empty`: the preset declared no globs, or they matched nothing, and
+  neither is a delivery failure). The code also covered `pending`, `collecting`, `uploading`,
+  `dropped`, `failed`, `skipped`, `purged`, `expired`, `unavailable` and `unknown`. So fetching
+  from a job that had not finished left an empty directory and exited 0, and a script read that
+  as "I have the files". Now only `disabled` and `empty` are 0; everything else is the delivery
+  code 5, and a state added later is 5 until someone decides otherwise. The reason is on the
+  `artifact_fetch` JSON object, which now also appears for these states instead of being absent.
+- **`--dry-run` no longer reports a clean preview as a failure.** It always returned
+  `complete: false`, so a preview with nothing conflicting still exited 5. It now exits with the
+  code the real run would have used — 0 for a clean plan, 5 if anything is `conflicted` — which
+  makes it a cheap "would this apply cleanly?" check. Its summary line also stopped contradicting
+  the table printed directly above it: it said `wrote 0, unchanged 0, conflicted 0` no matter what
+  the plan held, and now reads `would write N, unchanged N, conflicted N`.
+
 ## [0.2.9] - 2026-09-15
 
 Starting the server says what it is turning on, one line per step.
