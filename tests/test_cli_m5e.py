@@ -24,9 +24,11 @@ from pathlib import Path
 import pytest
 
 from gitrepo import build_remote
+from remote_ci_monitor import cli as cli_mod
 from remote_ci_monitor.cli import build_parser, main
 from remote_ci_monitor.client import Client
 from remote_ci_monitor.config import RepoConfig, parse_preset
+from remote_ci_monitor.core import artifacts as art
 from test_cli_m1 import last_json
 from test_server import PRESETS, Server, sh
 
@@ -44,6 +46,10 @@ ARTIFACT_PRESETS = [
     sh("gold", f"{GOLD_BODY}; exit 0", artifacts=["out/*.txt"]),
     sh("goldfail", f"{GOLD_BODY}; exit 3", artifacts=["out/*.txt"]),
     sh("plain", "echo nothing to collect; exit 0"),
+    # 글롭은 선언했는데 맞는 파일이 없다 → `empty`. `disabled` 와 다른 갈래다.
+    sh("goldempty", "echo nothing here; exit 0", artifacts=["out/*.png"]),
+    # 아직 도는 중인 잡 → `pending`. 「끝나지도 않았는데 빈 손으로 초록」을 잡는 자리다.
+    sh("goldslow", f"sleep 20; {GOLD_BODY}", artifacts=["out/*.txt"]),
     sh("golddeploy", "echo deploy", source_modes=["git_ref"], artifacts=["out/*.txt"]),
 ]
 
@@ -51,6 +57,10 @@ GIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 #: §12 결과 줄 — 「비교해서 다른 것」과 「실제로 쓴 것」을 낱말로 가른다.
 RESULT_RE = re.compile(r"wrote (\d+), unchanged (\d+), conflicted (\d+)")
+
+#: `--dry-run` 의 줄. **「썼다」가 아니라 「썼을 것」이다** — 옛 문면은 늘 `wrote 0, unchanged 0,
+#: conflicted 0` 이라, 바로 윗줄의 분류 표가 `conflicted 1` 이라고 해도 밑에서 0 이라고 했다.
+DRY_RUN_RE = re.compile(r"would write (\d+), unchanged (\d+), conflicted (\d+)")
 
 
 # ── 도우미 ───────────────────────────────────────────────────────────────────
@@ -341,16 +351,36 @@ def test_force_overwrites_the_conflicted_file_and_the_run_ends_clean(live, env, 
 
 
 def test_dry_run_prints_the_table_and_writes_nothing(live, env, tree, capsys):
-    """§12: `--dry-run` 은 분류 표만 찍는다. 쓰지도, ack 하지도 않는다."""
+    """§12: `--dry-run` 은 분류 표만 찍는다. 쓰지도, ack 하지도 않는다.
+
+    ⚠️ 종료 코드는 시나리오 c #13 이 **열어 뒀던** 자리다(0·5 둘 다 받았다). 매듭: **진짜로
+    돌렸다면 나왔을 코드**를 그대로 낸다. 이 트리는 `out/c.txt` 가 스냅샷 밖이라 `conflicted`
+    가 하나 있다 — 그러니 5 다. 깨끗한 계획이 0 인 것은 바로 아래 시험이 본다."""
     env(live)
     code, out, err = gold(capsys, tree, "--fetch-artifacts", "--dry-run")
     assert (tree / "out" / "a.txt").read_text() == "v1\n"
     assert (tree / "out" / "c.txt").read_text() == "mine\n"
-    wrote, _unchanged, _conflicted = counts(out, err)
-    assert wrote == 0, (out, err)
+    m = DRY_RUN_RE.search(out + "\n" + err)
+    assert m, f"dry run 줄이 없다:\nSTDOUT {out!r}\nSTDERR {err!r}"
+    assert not RESULT_RE.search(out + "\n" + err), "쓰지도 않고 「wrote」라고 하면 안 된다"
+    assert m.group(3) == "1", f"표는 conflicted 1 인데 줄은 {m.group(3)} 이라고 한다"
     jid = int(last_json(out)["job_id"])
     assert bundle(live, jid)["state"] == "ready", bundle(live, jid)  # ack 가 가지 않았다
-    assert code in (0, EXIT_DELIVERY), code
+    assert code == EXIT_DELIVERY, (code, out, err)
+    assert last_json(out)["artifact_fetch"]["conflicted"] == 1, last_json(out)
+
+
+def test_a_clean_dry_run_is_not_a_failure(live, env, tree, capsys):
+    """옛 동작은 `complete=False` 라 **충돌이 없어도 늘 5** 였다 — 멀쩡한 미리보기가 실패로
+    보였다. `out/c.txt` 를 지워 기준선 밖 파일을 없애면 계획이 깨끗하고, 그러면 0 이다."""
+    env(live)
+    (tree / "out" / "c.txt").unlink()
+    code, out, err = gold(capsys, tree, "--fetch-artifacts", "--dry-run")
+    assert code == 0, (code, out, err)
+    fetch = last_json(out)["artifact_fetch"]
+    assert fetch["conflicted"] == 0, fetch
+    assert fetch["wrote"] == 0, fetch  # 미리보기다 — 쓴 것은 없다
+    assert (tree / "out" / "a.txt").read_text() == "v1\n", "dry run 이 파일을 건드렸다"
 
 
 def test_a_complete_apply_acks_and_the_unjoined_bundle_disappears(live, env, tree, capsys):
@@ -439,6 +469,102 @@ def test_resume_never_reports_success_without_the_files(live, env, tree, tmp_pat
 
 
 # ── 종료 코드 (§12) ─────────────────────────────────────────────────────────
+
+#: 비-ready 상태별 종료 코드의 **정본**(시나리오 c #12 를 전체 어휘로 넓힌 것).
+#: 「없는 것을 **설계상** 못 받은 것」만 0 이고, 나머지는 전부 전달 실패다 —
+#: 물어봐 놓고 빈 손으로 초록을 내지 않는다(Codex m5e 리뷰: "Never return overall success
+#: when explicitly requested delivery failed").
+EXIT_BY_STATE = {
+    art.DISABLED: 0,  # 프리셋이 모을 것을 선언하지 않았다
+    art.EMPTY: 0,  # 모았는데 내보낼 것이 없었다
+    art.PENDING: EXIT_DELIVERY,  # 아직 안 끝났다 — 빈 디렉터리에 0 을 주면 안 된다
+    art.COLLECTING: EXIT_DELIVERY,
+    art.UPLOADING: EXIT_DELIVERY,
+    art.DROPPED: EXIT_DELIVERY,  # 상한·충돌로 버렸다
+    art.FAILED: EXIT_DELIVERY,  # 수집·업로드가 깨졌다
+    art.SKIPPED: EXIT_DELIVERY,  # 실행이 시작되지 못했다
+    art.PURGED: EXIT_DELIVERY,  # 이미 확인받고 지웠다
+    art.EXPIRED: EXIT_DELIVERY,  # TTL 이 지났다
+    art.UNAVAILABLE: EXIT_DELIVERY,  # 메타는 있는데 파일이 없다
+    art.UNKNOWN: EXIT_DELIVERY,  # 옛 잡 — 모르면 초록이 아니다
+}
+
+
+def test_the_exit_table_covers_every_state_the_server_can_report():
+    """상태를 하나 더하면서 종료 코드를 안 정하면 **여기서** 빨개진다.
+
+    이 잠금이 없으면 새 상태는 `state != "ready"` 갈래로 흘러 조용히 0 이 된다 — 바로 그 틈이었다.
+    `ready` 는 표에 없다: 그 갈래의 종료 코드는 상태가 아니라 적용 계획이 정한다."""
+    decided = set(EXIT_BY_STATE) | {art.READY}
+    assert decided == set(art.ARTIFACT_STATES), (
+        f"종료 코드를 안 정한 상태: {sorted(set(art.ARTIFACT_STATES) - decided)} · "
+        f"없는 상태를 정했다: {sorted(decided - set(art.ARTIFACT_STATES))}"
+    )
+
+
+class _OneDoc:
+    """`artifacts()` 에만 답하는 가짜 클라이언트. 비-ready 는 내려받기 전에 판정이 끝난다."""
+
+    def __init__(self, doc: dict) -> None:
+        self.doc = doc
+
+    def artifacts(self, job_id: int) -> dict:
+        return self.doc
+
+
+@pytest.mark.parametrize(("state", "expected"), sorted(EXIT_BY_STATE.items()))
+def test_a_state_that_delivered_nothing_decides_the_exit_code(state, expected, tmp_path):
+    """부르는 쪽 둘(`rcm run --fetch-artifacts` · `rcm artifacts --fetch`)이 **같은** 판정을
+    쓴다 — 그 판정이 `ok` 다. 여기서는 판정만 본다; 배선은 아래 두 시험이 본다."""
+    out = cli_mod._fetch_artifacts(
+        _OneDoc({"state": state, "reason_code": None}), 7, tmp_path, baseline={}
+    )
+    assert out is not None, f"{state}: 판정을 안 돌려줬다 — 부르는 쪽이 종료 코드를 정할 수 없다"
+    assert out["state"] == state, out
+    got = 0 if out.get("ok") else EXIT_DELIVERY
+    assert got == expected, f"{state}: {got} 인데 {expected} 여야 한다 — {out}"
+
+
+def test_fetching_a_job_that_has_not_finished_is_not_a_pass(live, env, tree, tmp_path, capsys):
+    """배선 ① `rcm artifacts N --fetch`. 아직 도는 잡에 받기를 걸면 **빈 디렉터리**가 남는다.
+    옛 동작은 거기에 0 을 줬다 — 스크립트가 「받았다」고 읽고 다음 단계로 간다."""
+    env(live)
+    code, out, _err = gold(capsys, tree, "--no-wait", preset="goldslow")
+    jid = int(last_json(out)["job_id"])
+    dest = tmp_path / "tooearly"
+    code, out, err = run(capsys, ["artifacts", str(jid), "--fetch", "--output", str(dest)])
+    assert code == EXIT_DELIVERY, (code, out, err)
+    assert not list(dest.rglob("*.txt")), f"빈 손이어야 한다: {list(dest.rglob('*'))}"
+    assert "pending" in (out + err), (out, err)
+    run(capsys, ["cancel", str(jid)])
+
+
+def test_a_standalone_fetch_of_an_empty_bundle_is_not_a_failure(live, env, tree, tmp_path, capsys):
+    """배선 ③ `rcm artifacts N --fetch` 의 **by-design 쪽**.
+
+    ⚠️ 이 시험이 없으면 `cmd_artifacts` 의 배선이 안 잠긴다. `pending` 으로는 못 가른다 —
+    거기선 `ok` 와 `complete` 가 둘 다 False 라, 옛 키를 읽어도 같은 답이 나온다(독으로 실측:
+    `complete` 로 되돌려도 19 passed). 가르는 건 **둘이 갈라지는** 상태뿐이다: `empty` 는
+    `ok=True` 인데 `complete=False` 다."""
+    env(live)
+    code, out, _err = run(capsys, ["run", "goldempty", "--dir", str(tree), "--no-wait"])
+    jid = int(last_json(out)["job_id"])
+    live.wait_terminal(jid)
+    dest = tmp_path / "nothing"
+    code, out, err = run(capsys, ["artifacts", str(jid), "--fetch", "--output", str(dest)])
+    assert code == 0, (code, out, err)
+    assert "empty" in (out + err), (out, err)
+
+
+def test_a_preset_whose_globs_matched_nothing_is_not_a_delivery_failure(live, env, tree, capsys):
+    """배선 ② `rcm run --fetch-artifacts`. `empty` 는 `disabled` 와 **다른 상태**인데 같은 답이다 —
+    모을 것을 선언했지만 없었던 것도 전달 실패가 아니다."""
+    env(live)
+    code, out, err = run(capsys, ["run", "goldempty", "--dir", str(tree), "--fetch-artifacts"])
+    assert code == 0, (code, err)
+    body = last_json(out)
+    assert body["wait_exit_code"] == 0, body
+    assert body["artifact_fetch"]["state"] == "empty", body
 
 
 def test_wait_exit_codes_and_the_json_field_are_unchanged_without_fetching(live, env, tree, capsys):

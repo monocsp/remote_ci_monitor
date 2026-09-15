@@ -44,6 +44,7 @@ from remote_ci_monitor.config import (
     load_server_config,
     user_config_dir,
 )
+from remote_ci_monitor.core import artifacts as art_core
 from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
@@ -64,6 +65,13 @@ from remote_ci_monitor.mdns import discover
 USAGE_EXIT = 2
 #: 전달 실패 전용 종료 코드 — 실행 결과(`wait_exit_code`)는 건드리지 않는다(M5e §12).
 EXIT_DELIVERY = 5
+
+#: 받을 것이 **설계상** 없었던 상태. 「없는 것을 못 받은 것」은 전달 실패가 아니다
+#: (m5e 시나리오 c #12). 나머지 비-ready 는 전부 전달 실패다 — 물어봐 놓고 빈 손인데
+#: 초록을 내면, 「검사가 대상을 놓친 상태」와 「문제가 없는 상태」가 같은 색이 된다.
+#: ⚠️ 여기 없는 상태는 **자동으로 전달 실패**다. 새 상태가 조용히 0 으로 새지 않게 하려는
+#: 쪽 열림이다(fail-closed) — `tests/test_cli_m5e.py::EXIT_BY_STATE` 가 어휘 전체를 잠근다.
+NOTHING_TO_DELIVER_BY_DESIGN = frozenset({art_core.DISABLED, art_core.EMPTY})
 
 
 def _err(msg: str) -> None:
@@ -799,11 +807,10 @@ def _wait(
             dry_run=fetch.dry_run,
             journal=fetch.root / ".rcm-artifacts.json",
         )
-        if delivery is not None:
-            out["artifact_fetch"] = delivery
-            # **실행 실패가 전달 실패보다 우선한다** — 테스트가 깨진 것을 먼저 알아야 한다(§12)
-            if code == 0 and not delivery.get("complete"):
-                code = EXIT_DELIVERY
+        out["artifact_fetch"] = delivery
+        # **실행 실패가 전달 실패보다 우선한다** — 테스트가 깨진 것을 먼저 알아야 한다(§12)
+        if code == 0 and not delivery.get("ok"):
+            code = EXIT_DELIVERY
     _print_json(out)
     return code
 
@@ -1843,8 +1850,12 @@ def _fetch_artifacts(
     force: bool = False,
     dry_run: bool = False,
     journal: Path | None = None,
-) -> dict[str, Any] | None:
-    """묶음을 받아 트리에 쓴다(M5e §11). 결과 요약을 돌려준다. 받을 것이 없으면 None.
+) -> dict[str, Any]:
+    """묶음을 받아 트리에 쓴다(M5e §11). 결과 요약을 돌려준다 — **어느 갈래든 판정이 나온다**.
+
+    `ok` 가 종료 코드를 정한다: 참이면 0, 거짓이면 `EXIT_DELIVERY`. 부르는 쪽 둘
+    (`rcm run --fetch-artifacts` 의 `_wait` · `rcm artifacts --fetch` 의 `cmd_artifacts`)이
+    같은 키를 읽는다. 한때 비-ready 에 `None` 을 돌려줬고 둘 다 그걸 0 으로 읽었다.
 
     절차: 스테이징으로 통째로 받고 → 전수 검사와 분류를 **보여 주고** → 쓰고 → 충돌 없이 전부
     적용됐을 때만 ack 한다. `--dry-run` 은 표만 찍고 아무것도 안 쓴다(ack 도 안 한다).
@@ -1853,13 +1864,23 @@ def _fetch_artifacts(
         doc = client.artifacts(job_id)
     except ClientError as e:
         _err(f"artifacts: {e.message}")
-        return {"state": "error", "complete": False, "wrote": 0, "conflicted": 0}
+        return {"state": "error", "ok": False, "complete": False, "wrote": 0, "conflicted": 0}
     state = doc.get("state")
     if state != "ready":
-        # `disabled`·`empty` 는 실패가 아니다 — 모을 것을 선언하지 않았거나 없었던 것이다
+        # ⚠️ 한때 여기서 `None` 을 돌려줬고, 부르는 쪽 둘은 그걸 **전부 0** 으로 읽었다.
+        #    주석은 `disabled`·`empty` 만 변호했는데 코드는 `pending`·`uploading`·`dropped`·
+        #    `failed`·`expired`·`purged` 까지 같이 초록으로 만들었다 — 아직 끝나지도 않은 잡에
+        #    받기를 걸면 빈 디렉터리에 종료 0 이 떨어졌다. 이제 판정을 실어 돌려준다.
         reason = doc.get("reason_code")
         _info(f"artifacts: {state}" + (f" ({reason})" if reason else ""))
-        return None
+        return {
+            "state": state,
+            "reason_code": reason,
+            "ok": state in NOTHING_TO_DELIVER_BY_DESIGN,
+            "complete": False,
+            "wrote": 0,
+            "conflicted": 0,
+        }
     files = tuple(
         BundleFile(path=f["path"], size=f["size"], sha256=f["sha256"], mode=f["mode"])
         for f in (doc.get("files") or [])
@@ -1874,7 +1895,7 @@ def _fetch_artifacts(
             _extract_bundle(bundle, staging)
         except (ClientError, OSError, tarfile.TarError) as e:
             _err(f"artifacts: download failed: {e}")
-            return {"state": state, "complete": False, "wrote": 0, "conflicted": 0}
+            return {"state": state, "ok": False, "complete": False, "wrote": 0, "conflicted": 0}
         plan = apply_mod.plan(files, baseline, root)
         counts = plan.counts()
         _info(
@@ -1886,10 +1907,27 @@ def _fetch_artifacts(
             for e in plan.entries:
                 if e.verdict == apply_mod.UNSAFE:
                     _err(f"artifacts: refusing {e.path}: {e.reason}")
-            return {"state": state, "complete": False, "wrote": 0, "conflicted": 0}
+            return {"state": state, "ok": False, "complete": False, "wrote": 0, "conflicted": 0}
         if dry_run:
-            _info("artifacts: dry run — wrote 0, unchanged 0, conflicted 0 (nothing written)")
-            return {"state": state, "complete": False, "wrote": 0, "conflicted": 0, "dry_run": True}
+            # 시나리오 c #13 은 이 종료 코드를 열어 뒀다(0·5 둘 다 받았다). 매듭: **진짜로 돌렸다면
+            # 나왔을 코드**를 그대로 낸다 — 깨끗한 계획이면 0, 충돌이 있으면 5. 그래야
+            # `--dry-run` 이 「이거 깨끗하게 적용되나?」의 값싼 사전 검사가 된다. 옛 동작은
+            # `complete=False` 라 **충돌이 없어도 늘 5** 였다 — 멀쩡한 미리보기가 실패로 보였다.
+            would_conflict = counts.get("conflicted", 0)
+            would_write = counts.get("new", 0) + counts.get("changed", 0)
+            _info(
+                f"artifacts: dry run — would write {would_write}, "
+                f"unchanged {counts.get('unchanged', 0)}, conflicted {would_conflict}"
+                " (nothing written)"
+            )
+            return {
+                "state": state,
+                "ok": would_conflict == 0 or force,
+                "complete": False,
+                "wrote": 0,
+                "conflicted": would_conflict,
+                "dry_run": True,
+            }
         result = apply_mod.apply(plan, staging, root, force=force, journal=journal)
     _info(
         f"artifacts: wrote {result.wrote}, unchanged {result.skipped}, "
@@ -1902,6 +1940,7 @@ def _fetch_artifacts(
             _err(f"artifacts: acknowledge failed: {e.message}")
     return {
         "state": state,
+        "ok": result.complete,
         "wrote": result.wrote,
         "unchanged": result.skipped,
         "conflicted": result.conflicted,
@@ -1945,9 +1984,7 @@ def cmd_artifacts(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         journal=journal,
     )
-    if out is None:
-        return 0
-    return 0 if out.get("complete") else EXIT_DELIVERY
+    return 0 if out.get("ok") else EXIT_DELIVERY
 
 
 def build_parser() -> argparse.ArgumentParser:
