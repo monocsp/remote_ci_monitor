@@ -208,6 +208,15 @@ table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8p
 .uncommitted::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--warn); }
 .eta { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .eta .in { color: var(--muted); }
+/* **신뢰도 배지는 「한 행에 채운 칩은 하나」의 예외다**(2026-09-15 판단). 원칙을 「행의 **상태**를
+   말하는 채운 칩은 하나」로 좁히고 이 네 줄을 남긴다. 근거: 이 배지가 말하는 것은 잡의 상태가
+   아니라 **완료 예상을 얼마나 믿나**이고, 자리도 상태·이유 칸이 아니라 「완료 예상」 칸이다.
+   `over` 도 잡의 형편이 아니라 **추정**에 대한 말이며(「예상을 넘겨 더 이상 시각을 못 준다」),
+   그 칸에서 시각이 `—` 로 빠진 뒤 유일하게 남는 내용이라 배경을 걷으면 옆 행의 `high`·`med`
+   칩과 모양만 어긋난다. 소음을 만들던 중복은 **같은 사실을 세 번 칠하던 것**이지 서로 다른
+   두 사실이 각자 칩을 갖는 것이 아니다.
+   예외는 여기 네 줄뿐이다 — 상태를 말하는 칩을 하나 더 채우면
+   `tests/test_web_layout.py::test_a_row_never_shows_two_filled_status_chips` 가 빨개진다. */
 .conf { display: inline-block; margin-top: 2px; padding: 0 6px; border-radius: 4px; font: 600 12px var(--sans); white-space: nowrap; }
 .conf.high { background: var(--ok-soft); color: var(--ok); }
 .conf.med { background: var(--queued-soft); color: var(--queued); }

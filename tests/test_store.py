@@ -600,17 +600,27 @@ def test_list_step_sample_ids_takes_only_recent_successes(store):
 
 
 def test_list_step_sample_ids_rides_the_key_index(store):
-    """45일치를 훑으면 `/api/status` 가 다시 보존 잡 수에 끌려간다(M5f 결정 49)."""
-    plan = " | ".join(
-        r[3]
-        for r in store._conn().execute(
-            "EXPLAIN QUERY PLAN SELECT id FROM jobs INDEXED BY jobs_key_finished "
-            "WHERE key=? AND state=? AND finished_at IS NOT NULL AND finished_at >= ? "
-            "ORDER BY finished_at DESC, id DESC LIMIT ?",
-            ("gate:full", SUCCEEDED, "x", 10),
-        )
-    )
-    assert "jobs_key_finished" in plan, plan
+    """45일치를 훑으면 `/api/status` 가 다시 보존 잡 수에 끌려간다(M5f 결정 49).
+
+    **SQL 을 여기 베껴 적지 않는다.** 베끼면 시험은 자기가 쓴 문장의 계획을 보게 되고,
+    `store.py` 에서 `INDEXED BY` 를 지워도 초록이다(실측: 잡 10만 개에서 10µs → 633µs,
+    계획이 `jobs_recent` 전체 스캔으로 바뀐다). `set_trace_callback` 으로 **메서드가 실제로
+    낸 문장**을 받아 그것을 `EXPLAIN QUERY PLAN` 에 넣는다.
+    """
+    for i in range(3):  # 통계가 없어도 계획이 결정적이어야 한다 — 행이 몇 개는 있어야 의미가 있다
+        sample_job(store, key="gate:full", state=SUCCEEDED, finished=at(-i * 60), tree=f"f{i:03x}")
+    seen: list[str] = []
+    store._conn().set_trace_callback(seen.append)
+    store.list_step_sample_ids("gate:full", since=NOW - timedelta(days=45), limit=10)
+    store._conn().set_trace_callback(None)
+
+    selects = [s for s in seen if s.strip().upper().startswith("SELECT")]
+    assert len(selects) == 1, seen
+    sql = selects[0]
+    # 추적 콜백은 인자를 끼워 넣은 문장을 준다. 안 끼워졌으면 자리표시자를 채워 준비시킨다.
+    params = ("gate:full", SUCCEEDED, "2026-01-01T00:00:00Z", 10)[: sql.count("?")]
+    plan = " | ".join(r[3] for r in store._conn().execute("EXPLAIN QUERY PLAN " + sql, params))
+    assert "jobs_key_finished" in plan, (plan, sql)
 
 
 def test_finished_at_for_reads_every_id_in_one_statement(store):

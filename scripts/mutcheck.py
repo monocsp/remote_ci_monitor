@@ -67,7 +67,7 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      판정이 여덟 번 뒤집힌다 (`web/app.js`, node --test)
   ㉛ step-stuck-ignores-step-median — 단계 판정이 다시 침묵으로 돌아감: 단계 실측을 재 놓고
      쓰지 않는다 (`core/queue.py`, 2026-09-15 사고 — 정상으로 도는 `gate` 가 매 실행 빨개졌다)
-  ㉛ web-quiet-is-actionable — 「조용함」을 「확인이 필요한 작업」 패널에 올림: 빨간 소음이
+  ㉜ web-quiet-is-actionable — 「조용함」을 「확인이 필요한 작업」 패널에 올림: 빨간 소음이
      이름만 바꿔 그대로 남는다 (`web/app.js`, node --test)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]

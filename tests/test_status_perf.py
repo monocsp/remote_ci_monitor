@@ -9,6 +9,12 @@
 여기서는 **타이밍이 아니라 구조**를 잠근다(타이밍 단언은 CI 에서 흔들린다):
 - 표본 읽기가 무거운 `Job` 을 안 만든다 — 행당 서브쿼리가 0 이다.
 - 중앙값은 잡이 **끝났을 때만** 다시 계산한다. 마커 한 줄이 45일치를 다시 읽게 하면 안 된다.
+
+이 파일은 단계 중앙값(`step_medians`)의 **서버 배선**도 함께 진다 — 읽는 쪽이 여기이기 때문이다.
+마지막 절은 값싼 구조 단언이 아니라 **2026-09-15 사고를 통째로 재생**한다: 진짜 표본 잡에 진짜
+스텝 마커를 찍고, 진짜 서버를 세우고, `/api/status` 가 그 행을 무엇이라 부르는지 읽는다. 순수
+함수 시험(`tests/test_queue.py`)은 배선이 끊겨도 초록이다(잠긴 키 집합이 M5e 내내 원격 산출물
+수집이 죽은 것을 못 잡은 것과 같은 함정) — 그래서 실제 생산자를 실제 소비자에 물려서 잰다.
 """
 
 from __future__ import annotations
@@ -17,9 +23,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from remote_ci_monitor.core.model import QUEUED, SUCCEEDED, Requester, Source
+from remote_ci_monitor.core.model import (
+    PHASE_EXECUTING,
+    QUEUED,
+    SUCCEEDED,
+    Requester,
+    Source,
+)
 from remote_ci_monitor.core.queue import join_key, medians_from
-from remote_ci_monitor.store import Store
+from remote_ci_monitor.store import Store, _ts
 
 NOW = datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC)
 ALICE = Requester(name="alice-laptop", label="alice@laptop")
@@ -374,23 +386,29 @@ def counting(app, name="list_step_sample_ids"):
     return calls
 
 
-def busy_job(store, *, key="gate:full", tree="0000", lane=1, now=NOW):
-    """도는 잡 하나. 큐에 넣고 그 자리에서 claim 한다."""
+def queued_job(store, *, key="gate:full", tree="dead", now=NOW, timeout=1200) -> int:
+    """대기 잡 하나. **claim 하지 않는다** — `is_busy` 가 거짓이다."""
     src = Source(mode="tree", repo="org/app", tree_hash=tree)
-    store.create_job(
+    job = store.create_job(
         preset=key.split(":")[0],
         inputs={},
         key=key,
         concurrency_group=None,
         source=src,
         requester=ALICE,
-        timeout_seconds=1200,
+        timeout_seconds=timeout,
         join_key=join_key(key, {}, tree),
         now=now,
         state=QUEUED,
     )
+    return job.id
+
+
+def busy_job(store, *, key="gate:full", tree="0000", lane=1, now=NOW, timeout=1200):
+    """도는 잡 하나. 큐에 넣고 그 자리에서 claim 한다."""
+    job_id = queued_job(store, key=key, tree=tree, now=now, timeout=timeout)
     claimed = store.claim(lane, now)
-    assert claimed is not None
+    assert claimed is not None and claimed.id == job_id
     return claimed.id
 
 
@@ -408,6 +426,29 @@ def test_an_idle_server_reads_no_step_samples(tmp_path):
         # 스냅샷이 도는 잡의 마커를 읽는 호출 하나뿐이고, 그것도 빈 목록이다
         assert all(not call[0][0] for call in markers)
         assert snap.step_medians == {} and snap.step_medians_error is None
+    finally:
+        srv.close()
+
+
+def test_a_queue_of_waiting_jobs_reads_no_step_samples(tmp_path):
+    """**도는 잡만** 단계 중앙값을 부른다 — 대기 잡의 key 로는 안 읽는다.
+
+    활성 잡이 0개인 서버만 재면 `server.py` 의 `if j.is_busy` 를 지워도 초록이다(읽을 key
+    자체가 없다). 여기서는 표본이 있는 key 로 잡 셋이 **줄 서 있다** — 필터가 빠지면
+    `list_step_sample_ids("gate:full", ...)` 가 불린다. 대기 잡의 단계 소요는 아직 없다.
+    """
+    srv = app_for(tmp_path)
+    try:
+        app = srv.app
+        finished(app.store, 5)  # `gate:full` 의 성공 표본
+        for i in range(3):
+            queued_job(app.store, tree=f"c{i:03x}")
+        ids = counting(app)
+        app._mark_dirty()
+        snap = app._snapshot()
+        assert ids == [], ids
+        assert snap.step_medians == {} and snap.step_medians_error is None
+        assert [j.state for j in snap.jobs] == ["queued"] * 3  # 장면이 비어 있지 않다
     finally:
         srv.close()
 
@@ -435,8 +476,11 @@ def test_step_samples_do_not_scale_with_retained_events(tmp_path):
     """보존된 잡·이벤트가 늘어도 단계 중앙값 경로의 문장 수는 그대로다 (M5f 결정 49).
 
     타이밍은 안 잰다 — 이 파일의 머리말이 그렇게 정했다. 구조로 잠근다.
+
+    상한은 **리터럴 10** 으로 못 박는다. `STEP_SAMPLE_JOBS` 를 import 해서 그 상수와 비교하면
+    항진명제다 — 10 을 500 으로 바꿔도 초록이라 시나리오 C-59 가 못 박은 「`markers_for` 에
+    넘어간 id 는 10개 이하, 50 이 아니다」가 하나도 안 잠긴다.
     """
-    from remote_ci_monitor.server import STEP_SAMPLE_JOBS
 
     def step_selects(app):
         app._step_medians_at.clear()  # 캐시를 비워 실제로 읽게 한다
@@ -462,8 +506,8 @@ def test_step_samples_do_not_scale_with_retained_events(tmp_path):
 
         # key 당 표본 id 1 + 묶어서 읽는 마커 1 + 종료 시각 1
         assert len(big) == len(small) == 3, (small, big)
-        assert ids[0][1]["limit"] == STEP_SAMPLE_JOBS
-        assert len(markers[0][0][0]) <= STEP_SAMPLE_JOBS  # 50 이 아니다
+        assert ids[0][1]["limit"] == 10  # 상수와 비교하지 않는다 — 값 자체가 계약이다
+        assert len(markers[0][0][0]) <= 10  # 50 이 아니다
     finally:
         srv.close()
 
@@ -542,5 +586,111 @@ def test_the_queue_config_carries_the_step_stall_keys(tmp_path):
         srv.app.config.estimate.step_min_samples = 4
         q = srv.app.queue_config()
         assert q.step_stuck_multiplier == 5.0 and q.step_min_samples == 4
+    finally:
+        srv.close()
+
+
+# ── 2026-09-15 사고를 통째로 재생한다 (진짜 마커 → 진짜 서버 → `/api/status`) ──
+
+
+def sample_run(store, key: str, *, start: datetime) -> int:
+    """성공 표본 하나. 진짜 스텝 마커를 찍는다 — lint 60s · test 480s · build web 540s.
+
+    **마지막 단계는 끝 마커 없이 `finished_at` 으로 닫힌다.** 실제 잡이 그렇다(마지막
+    `::rcm::step-end::` 를 안 찍고 끝난다), 그리고 그 닫기가 `_read_step_medians` 의
+    `finished_at_for` 배선이다 — 거기가 끊기면 `build web` 이 표본에서 통째로 빠진다.
+    """
+    job_id = busy_job(
+        store, key=key, tree=f"{start.timestamp():.0f}"[-4:], lane=1, now=start, timeout=1800
+    )
+    walk_the_steps(store, job_id, start=start, build_web_at=start + timedelta(seconds=540))
+    store.finish(job_id, SUCCEEDED, now=start + timedelta(seconds=1080), exit_code=0)
+    return job_id
+
+
+def walk_the_steps(store, job_id: int, *, start: datetime, build_web_at: datetime) -> None:
+    """`lint` → `test` → `build web` 을 진짜 마커로 찍는다. **`build web` 은 안 닫는다.**"""
+    store.add_markers(job_id, [("step", "lint")], at=start)
+    store.add_markers(
+        job_id, [("step-end", "ok"), ("step", "test")], at=start + timedelta(seconds=60)
+    )
+    store.add_markers(job_id, [("step-end", "ok"), ("step", "build web")], at=build_web_at)
+
+
+def running_run(store, key: str, *, now: datetime, elapsed: float, silent: float, lane: int) -> int:
+    """도는 잡 하나. `build web` 단계에 들어간 지 `silent` 초, 그동안 출력이 없다."""
+    start = now - timedelta(seconds=elapsed)
+    quiet_since = now - timedelta(seconds=silent)
+    job_id = busy_job(store, key=key, tree=f"b{lane:03x}", lane=lane, now=start, timeout=3600)
+    store.set_phase(job_id, PHASE_EXECUTING)  # 자재화가 아니다 — 침묵이 실제로 침묵으로 읽힌다
+    walk_the_steps(store, job_id, start=start, build_web_at=quiet_since)
+    conn = store._conn()
+    conn.execute("UPDATE jobs SET last_output_at=? WHERE id=?", (_ts(quiet_since), job_id))
+    conn.commit()
+    return job_id
+
+
+def incident_row(srv, job_id: int) -> dict:
+    """`/api/status` 가 그 잡에 대해 실제로 말한 것. 순수 함수가 아니라 **문서**를 본다."""
+    status, doc = srv.req("GET", "/api/status", token="alice")
+    assert status == 200 and doc["schema_version"] == 1, (status, doc)
+    rows = [r for pool in doc["pools"] for r in (pool["queue"] or []) if r["id"] == job_id]
+    assert len(rows) == 1, doc["pools"]
+    return rows[0]
+
+
+def test_the_2026_09_15_incident_reads_quiet_through_the_real_server(tmp_path):
+    """이 작업 전체의 존재 이유 — 그 사고가 `/api/status` 에서 `quiet` 로 나오는가.
+
+    **순수 함수 시험으로는 이것을 못 잡는다.** `server.py` 가 `compute_queue(...)` 에
+    `step_medians` 를 안 넘겨도(또는 `None` 으로 넘겨도) 판정은 §1.4-③ 으로 떨어져
+    `quiet` 이 그대로 나온다 — 달라지는 것은 `step_expected_seconds` 뿐이다. 그래서
+    여기서 **540 을 못 박는다**. 진짜 표본 5개 · 진짜 마커 · 진짜 HTTP 응답이다.
+    """
+    srv = app_for(tmp_path, lanes=2)
+    try:
+        store = srv.app.store
+        now = datetime.now(UTC)
+        for i in range(5):  # 성공 표본 5개 — `step_min_samples`(3) 를 넘긴다
+            sample_run(store, "gate:full", start=now - timedelta(days=1, seconds=i * 3600))
+        live = running_run(store, "gate:full", now=now, elapsed=1044, silent=473, lane=1)
+        srv.app._mark_medians_dirty()
+        srv.app._mark_dirty()
+
+        row = incident_row(srv, live)
+        est = row["estimate"]
+        assert row["reason"] == "quiet", (row["reason"], est)
+        assert est["stuck"] is False and est["stuck_code"] is None
+        assert est["quiet"] is True
+        # 여기가 배선이다: 서버가 읽어 온 `build web` 의 실측 중앙값이 그대로 실린다
+        assert est["step_expected_seconds"] == 540, est
+        assert row["progress"]["current_name"] == "build web"
+    finally:
+        srv.close()
+
+
+def test_a_step_over_its_measured_median_reads_stuck_through_the_real_server(tmp_path):
+    """반대쪽 — 같은 배선으로 **죽은 잡은 여전히 빨갛다**.
+
+    `quiet` 쪽만 잠그면 「단계 판정을 통째로 끄기」가 초록으로 지나간다. 여기서는 단계가 자기
+    실측(540s)의 3배(1620s)를 넘겼고, 경과는 잡 중앙값의 3배 아래다 — `over_elapsed` 가 아니라
+    **`over_step`** 이어야 한다.
+    """
+    srv = app_for(tmp_path, lanes=2)
+    try:
+        store = srv.app.store
+        now = datetime.now(UTC)
+        for i in range(5):
+            sample_run(store, "gate:full", start=now - timedelta(days=1, seconds=i * 3600))
+        live = running_run(store, "gate:full", now=now, elapsed=1750, silent=1700, lane=1)
+        srv.app._mark_medians_dirty()
+        srv.app._mark_dirty()
+
+        row = incident_row(srv, live)
+        est = row["estimate"]
+        assert row["reason"] == "stuck", (row["reason"], est)
+        assert est["stuck"] is True and est["stuck_code"] == "over_step"
+        assert est["step_expected_seconds"] == 540, est
+        assert est["elapsed_seconds"] < 3 * est["expected_seconds"], est  # over_elapsed 가 아니다
     finally:
         srv.close()

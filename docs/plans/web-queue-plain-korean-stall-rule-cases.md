@@ -685,7 +685,10 @@ preparing  >  stuck  >  over  >  finalizing  >  quiet  >  normal
 - **넣는 것** —
 - **나와야 하는 것** `reason.stuck === "Not responding"`(결정 A1) ·
   `pbar.stuck === "not responding"` · `reason.quiet === "output has gone quiet"` ·
-  `pbar.quiet === "quiet"` · `state.running === "Running"` · `state.busy === "Running"`.
+  `pbar.quiet === "quiet"` · `state.running === "running"` · `state.busy === "busy"`.
+  (2026-09-15 정정: 처음에 둘 다 `"Running"` 으로 적었다. 계획서 §2.5 의 규칙은 「영어는
+  그대로 — 한국어만 갈라 쓴다」이고, 그대로 둔 영어가 소문자 `running`·`busy` 다. 표의
+  `Running` 은 그 규칙을 가리키는 이름이지 새 문면이 아니다)
   **`pbar.none` 의 EN 은 `"progress —"` 그대로다** —
   `tests/test_web_browser.py:907` 이 글자 그대로 잠근다.
 - **위험도** 보통
@@ -827,22 +830,27 @@ preparing  >  stuck  >  over  >  finalizing  >  quiet  >  normal
 - **위험도** 높음
 - **자동화** `tests/test_web_browser.py::test_the_bar_keeps_its_contract_on_a_narrow_window`
 
-### C-53 · 한 행에 채운 칩이 둘 이상 나오지 않는다
-- **어디** `app.js::queueRowHtml` · `style.css` · `tests/test_web_browser.py`
-- **넣는 것** 한 잡이 여러 조건을 동시에 만족하는 장면: `mine` + `overdue` +
-  `reason: "stuck"` + 단계 표시 있음
-- **나와야 하는 것** 그 `tr` 안에서
-  `document.querySelectorAll('tr[data-job="N"] .stuck, … .stalled, … .blocked')` 중
-  **`background` 가 `transparent`/`none` 이 아닌 것이 0 개**다. 즉
-  `getComputedStyle(el).backgroundImage === "none"` 이고
-  `backgroundColor` 가 `rgba(0, 0, 0, 0)` 이다(계획서 §3.2 — 배경을 없애고 글자색만 남긴다).
-  상태 필(`.pill.running`)은 예외로 배경을 유지한다 — **행에 채운 칩은 상태 필 하나**다.
+### C-53 · 한 행에 상태를 말하는 채운 칩이 둘 이상 나오지 않는다
+- **어디** `app.js::queueRowHtml` · `style.css` · `tests/test_web_layout.py`
+- **넣는 것** 한 잡이 여러 조건을 동시에 만족하는 장면: `overdue` + `reason: "stuck"` +
+  단계 표시 있음(`estimate.default_seconds = 1` 로 낮추면 장면의 도는 잡이 그대로 그런 행이
+  된다). `mine` 까지 얹으려면 브라우저에 신원을 심어야 하는데, 레인 색 우선순위는 아래 줄에서
+  따로 본다
+- **나와야 하는 것** 그 `tr` 안에서 **채운 칩**(글자를 담은 인라인 조각 중 `backgroundColor`
+  가 `rgba(0, 0, 0, 0)` 이 아니거나 `backgroundImage !== "none"` 인 것)을 세어, **상태를
+  말하는 것이 정확히 하나**이고 그것이 상태 필(`.pill.running`)이다.
+  `.stuck`·`.stalled`·`.blocked` 는 배경 없이 글자색만이다(계획서 §3.2).
+  세는 대상을 세 칩으로 한정하지 않는다 — 한정하면 새로 생긴 채운 칩을 못 본다.
+  **신뢰도 배지(`.conf.*`)는 유일한 예외로 채운 채 남는다**(2026-09-15 판단, 계획서 §3.1 의
+  좁힘). 잡의 상태가 아니라 「완료 예상을 얼마나 믿나」를 말하고 자리도 「완료 예상」 칸이라
+  같은 사실을 되풀이하지 않는다. 근거는 `style.css` 의 `.conf` 위 주석에 있다.
   왼쪽 레인 색 우선순위도 함께 잠근다: **stuck(`--bad`) > overdue(`--warn`) >
   quiet(`--queued`) > running(`--accent`)**, `mine` 은 3px `--accent` 를 유지하고 상태색은
   7px 자리로 밀린다(오늘 `tr.mine.overdue` 의 두 겹 그림자 규칙 그대로).
   계획서는 `mine` 과 상태색이 겹칠 때를 안 적었다(**계획서 구멍**).
 - **위험도** 보통
-- **자동화** `tests/test_web_browser.py::test_a_row_never_shows_two_filled_chips`
+- **자동화** `tests/test_web_layout.py::test_a_row_never_shows_two_filled_status_chips`
+  (이유 칩이 실제로 그려진 행에서 잰다 — 멈춘 행이 없으면 아무것도 안 재는 시험이 된다)
 
 ### C-54 · 대비 — `.stuck`·`.quiet`·`.stalled`·`.blocked` 글자색
 - **어디** `style.css` · 계산은 손으로 + 주석 갱신
@@ -1000,7 +1008,10 @@ preparing  >  stuck  >  over  >  finalizing  >  quiet  >  normal
 - **나와야 하는 것**
   - `/api/status` 가 **200**
   - `snap.step_medians == {}`, `snap.step_medians_error` 가 비어 있지 않다,
-    `snap.step_medians_error_code == "OperationalError"`
+    `snap.step_medians_error_code == "database_unavailable"`
+    (2026-09-15 정정: 처음에 예외 클래스 이름 `"OperationalError"` 로 적었다. 이 레포의
+    `_error_code` 는 sqlite 예외를 **닫힌 어휘**로 옮기는 관행이고 다른 `*_error_code` 가
+    전부 그렇다 — 클래스 이름을 그대로 내보내면 어휘가 파이썬 구현에 묶인다)
   - 판정은 §1.4-③ 으로 폴백 → 그 잡은 `quiet`(stuck 아님).
     **침묵 폴백(②)으로 떨어지면 안 된다** — 단계는 여전히 돌고 있고, 「중앙값을 못 읽었다」는
     「단계 이야기를 안 한다」와 다른 사실이다
