@@ -1,4 +1,4 @@
-"""문서 문면 잠금(F2b) — 「시작조차 못 한 잡」의 코드와 그 보안 약속.
+"""문서 문면 잠금(F2b) — 「시작조차 못 한 작업」의 코드와 그 보안 약속.
 
 **무효 잠금을 만들지 않는 것이 이 파일의 요점이다.** 문서 전체에서 낱말을 찾으면, 그 낱말이 딴
 절에도 있는 순간 주장을 통째로 지워도 초록이다. 그래서 여기서는 **주장을 담은 절/항목만 떼어**
@@ -126,7 +126,7 @@ def test_configuration_says_what_is_in_the_summary_and_what_needs_a_token():
 
 def test_both_usage_mirrors_name_the_same_codes():
     en = block(USAGE_EN, "5. **A job that never started says so.**", "\n\nA cancelled job")
-    ko = block(USAGE_KO, "5. **시작조차 못 한 잡은 그렇다고 말한다.**", "\n\n취소한 잡에는")
+    ko = block(USAGE_KO, "5. **시작조차 못 한 작업은 그렇다고 말한다.**", "\n\n취소한 작업에는")
     assert codes_in(en) == codes_in(ko), "두 거울이 다른 코드를 말한다"
     assert len(codes_in(en)) >= 10
 
@@ -138,6 +138,8 @@ def test_the_english_usage_mirror_keeps_the_two_promises():
 
 
 def test_the_korean_usage_mirror_keeps_the_two_promises():
-    ko = flat(block(USAGE_KO, "5. **시작조차 못 한 잡은 그렇다고 말한다.**", "\n\n취소한 잡에는"))
+    ko = flat(
+        block(USAGE_KO, "5. **시작조차 못 한 작업은 그렇다고 말한다.**", "\n\n취소한 작업에는")
+    )
     assert "`exit_code` 는 `null`" in ko and "`summary_code`" in ko
     assert "자유 문구가 **하나도**" in ko and "토큰이 있어야" in ko
