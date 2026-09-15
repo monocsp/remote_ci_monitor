@@ -204,7 +204,9 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    The same document is `GET /jobs/<N>`, so `rcm wait --job N` prints it too.
 4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
-   treats 3 as red, it will be red for the wrong reason.
+   treats 3 as red, it will be red for the wrong reason. Exit 5 is a **delivery** failure and only
+   appears with `--fetch-artifacts`: the job's own result is in `wait_exit_code`, and the files
+   are what did not arrive ([Getting the files back](#8-getting-the-files-back)).
 
 A cancelled job has no failed step and no last step: you stopped it, it did not break.
 
@@ -246,6 +248,14 @@ artifacts: wrote 12, unchanged 51, conflicted 1
 5. A `git_ref` preset has no submitted tree, so `--output DIR` says where to write, and the
    baseline is empty: a file already sitting there with different bytes is `conflicted` and only
    `--force` overwrites it.
+6. **The exit code says whether you got the files.** 0 means you have them — or that there were
+   never any to have, because the preset declares no `artifacts` globs (`disabled`) or they
+   matched nothing (`empty`). Everything else is **5**: the job has not finished yet (`pending`),
+   the bundle was dropped, failed, expired or already purged, or a file on disk would have been
+   overwritten and you did not pass `--force`. A job that failed still reports its own exit code
+   first — a broken test matters more than a missing file.
+7. `--dry-run` answers "would this apply cleanly?" with the code it would have used: 0 for a clean
+   plan, 5 if anything is `conflicted`. It writes nothing either way.
 
 Submitted with `--no-wait`, or want them somewhere else?
 
