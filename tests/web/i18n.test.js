@@ -114,7 +114,8 @@ test("순수 함수의 기본 언어는 영어다 — 오늘의 단언이 그래
 });
 
 test("한국어 문면 — 상태 · 이유 · 큐 머리줄", () => {
-  assert.equal(rcm.stateWord("running", "ko"), "실행 중");
+  // 결정 A3 — 묶음 머리는 「작업 중」, 개별 행의 상태 필은 「진행 중」이다.
+  assert.equal(rcm.stateWord("running", "ko"), "진행 중");
   assert.equal(rcm.stateWord("timed_out", "ko"), "시간 초과");
   assert.equal(rcm.stateWord(null, "ko"), "알 수 없음");
   assert.equal(rcm.ordinal(2, "ko"), "2번째");
@@ -179,4 +180,113 @@ test("소요 시간은 두 언어에서 같은 꼴이다 — 숫자 칸이 흔�
   const row = { state: "queued", estimate: { waited_seconds: 310 } };
   assert.match(rcm.elapsedText(row, 0, "ko").main, /5m 10s/);
   assert.match(rcm.elapsedText(row, 0, "en").main, /5m 10s/);
+});
+
+// ── 카탈로그 전수 검사 (2026-09-15 · 시나리오 C-38 ~ C-42 · C-44) ─────────────
+//
+// 문구를 한 줄씩 눈으로 바꾸는 일을 **시험이 강제한다**. `sed` 로 훑으면 고유어까지 먹고,
+// 한 곳을 빠뜨리면 화면에 옛말이 남는다.
+
+// 함수 키에 줄 인자. 위 「모든 키가 …」 케이스의 표와 같은 값이다.
+const CATALOGUE_ARGS = {
+  lane: 1, busy: 2, lanes: 2, id: 412, dur: "5m 10s", job: "#409", group: "devices",
+  bytes: "48 MB", since: "2m", ref: "main", over: "3m", expected: "6m", n: 3, by: "alice",
+  kill: "in 8s", conf: "high", source: "preset", dash: "—", ordinal: "2nd", clock: "09:57",
+  total: 5, running: 2, waiting: 3, state: "running", name: "build-02", pool: "linux",
+  host: "macmini", cur: 2, soFar: true, code: 1, who: "alice", step: "test", size: "48 MB",
+  blobs: 12, at: "2026-09-08 01:02:03Z", seconds: 61, limit: "512 MB", kind: "TarError",
+  count: 3, detail: "boom", age: "3s 전", error: "database is locked", names: "build-02",
+  labels: "bob@desk", hash: "9f8e", version: "0.2.3", uptime: "2m", schema: 1, cpu: "12%",
+  mem: "56%", gpu: "4%", load: "3.5 / 10", shown: 5, json: "{}", text: "rcm run demo",
+  key: "gate", wait: "5m", pct: "12%", user: 7, sys: 7, used: "13 GB", note: "no GPU",
+  countdown: "in 8s", cores: 10, delta: "+2s", head: "pool linux",
+  disk: "26%", free: "340 GB", percent: 62, done: 4, window: 8, seen: 3
+};
+
+/** 한 언어의 모든 키를 문장으로 펼친다. `[키, 문장]` 쌍의 배열. */
+function rendered(lang) {
+  return Object.keys(I18N.MESSAGES[lang]).map((k) => [k, I18N.t(lang, k, CATALOGUE_ARGS)]);
+}
+
+test("한국어 문장에 괄호 조사가 없다 (C-38)", () => {
+  // 「이(가)」를 없애는 것이 조사 헬퍼의 존재 이유다. 하나라도 남으면 헬퍼가 안 붙은 자리다.
+  const PAREN = /이\(가\)|을\(를\)|은\(는\)|와\(과\)|가\(이\)|를\(을\)/;
+  rendered("ko").forEach(([k, out]) => {
+    assert.ok(!PAREN.test(out), `${k}: 괄호 조사가 남아 있다 — ${out}`);
+  });
+});
+
+test("한국어에 「잡」이 남아 있지 않다 (C-39)", () => {
+  // 「잡」은 다른 낱말의 일부일 수 있다(복잡 · 잡음 · 붙잡다). 그래서 정규식으로 단어 경계를
+  // 흉내 내지 않고 **허용 목록**으로 가른다 — 새 낱말이 들어오면 사람이 한 번 보고 여기 적는다.
+  const JAP_ALLOWED = new Set([]);  // 지금은 비어 있다
+  rendered("ko").forEach(([k, out]) => {
+    if (JAP_ALLOWED.has(k)) return;
+    assert.ok(!/잡/.test(out), `${k}: 「잡」이 남아 있다 — ${out}`);
+  });
+});
+
+test("「스텝」·「멈춘 듯」·「레인 기다리는」이 없다 (C-40)", () => {
+  // 「레인」 자체는 남는다(`reason.running_lane` = 「진행 중 · 레인 n」) — 금지어는 그 표현이다.
+  rendered("ko").forEach(([k, out]) => {
+    assert.ok(!/스텝/.test(out), `${k}: 「스텝」 — ${out}`);
+    assert.ok(!/멈춘\s*듯/.test(out), `${k}: 「멈춘 듯」 — ${out}`);
+    assert.ok(!/레인\s*기다리는/.test(out), `${k}: 「레인 기다리는」 — ${out}`);
+  });
+});
+
+test("카탈로그는 글자만 담는다 — 이모지·장식 기호가 없다 (C-41)", () => {
+  // `app.js` 의 `GLYPH`(▶ ○ ↑ ■ …)는 이 시험의 대상이 **아니다** — 그것은 상태 필의 모양
+  // 채널(WCAG 1.4.1)이고, 시험이 읽는 것은 `i18n.js` 뿐이라 자동으로 지켜진다.
+  const DECOR = /[\u{1F300}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{25A0}-\u{25FF}\u{FE0F}]/u;
+  // 남아야 하는 것들은 이 범위 밖이다 — 확인용으로 함께 잰다
+  assert.ok(!DECOR.test("5m · 진행 중 — 예상 … ’"));
+  LANGS.forEach((lang) => {
+    rendered(lang).forEach(([k, out]) => {
+      if (k === "token.help") return;  // 유일한 `data-i18n-html` — `<code>` 하나를 허용한다
+      assert.ok(!DECOR.test(out), `${lang}/${k}: 장식 기호가 남아 있다 — ${out}`);
+    });
+  });
+});
+
+test("종결어미는 합쇼체다 (C-42)", () => {
+  // 종결어미로 끝나는 문장만 본다. 명사형·조각(「진행 중」·「대기」·「응답 없음」·
+  // 「머신이 바빠 대기 중」)은 마침표도 종결어미도 없이 끝나므로 이 규칙 밖이다.
+  const ENDS_SENTENCE = /[가-힣]다$/;
+  const HAPSYO = /니다$/;
+  rendered("ko").forEach(([k, out]) => {
+    const trimmed = out.trim().replace(/[.·\s]+$/, "");
+    if (ENDS_SENTENCE.test(trimmed)) {
+      assert.ok(HAPSYO.test(trimmed), `${k}: 합쇼체가 아니다 — ${out}`);
+    }
+  });
+});
+
+test("죽은 키 두 개는 두 언어에서 사라졌다", () => {
+  // `row.uploading` · `row.cancelling` — `app.js` 가 필을 직접 조립하므로 아무도 안 읽었다.
+  ["row.uploading", "row.cancelling"].forEach((k) => {
+    assert.equal(I18N.has(k), false, k);
+    LANGS.forEach((lang) => assert.throws(() => I18N.t(lang, k), /unknown key/, `${lang}/${k}`));
+  });
+});
+
+test("새 키의 문면 — 멈춤과 조용함 (C-44)", () => {
+  assert.equal(I18N.t("en", "reason.stuck"), "Not responding");
+  assert.equal(I18N.t("ko", "reason.stuck"), "응답 없음");
+  assert.equal(I18N.t("en", "pbar.stuck"), "not responding");
+  assert.equal(I18N.t("ko", "pbar.stuck"), "응답 없음");
+  assert.equal(I18N.t("en", "reason.quiet"), "output has gone quiet");
+  assert.equal(I18N.t("ko", "reason.quiet"), "출력이 조용합니다");
+  assert.equal(I18N.t("en", "pbar.quiet"), "quiet");
+  assert.equal(I18N.t("ko", "pbar.quiet"), "조용함");
+  // `pbar.none` 의 EN 은 그대로다 — `tests/test_web_browser.py` 가 글자 그대로 잠근다
+  assert.equal(I18N.t("en", "pbar.none"), "progress —");
+});
+
+test("reason.step_over 가 두 인자를 실제로 쓴다 (C-37)", () => {
+  LANGS.forEach((lang) => {
+    const out = I18N.t(lang, "reason.step_over", { step: "build web", n: 3 });
+    assert.ok(out.includes("build web"), `${lang}: ${out}`);
+    assert.ok(out.includes("3"), `${lang}: ${out}`);
+  });
 });
