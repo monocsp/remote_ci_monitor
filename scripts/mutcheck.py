@@ -386,7 +386,9 @@ MUTANTS = (
     Mutant(
         name="serve-store-before-bind",
         path="src/remote_ci_monitor/server.py",
-        old="""    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+        old="""    began = time.monotonic()
+    httpd = RcmHTTPServer((config.server.bind, config.server.port))
+    bound_at = time.monotonic()
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         store = Store(data_dir / "rcm.sqlite3")
@@ -394,9 +396,12 @@ MUTANTS = (
         httpd.server_close()
         raise
 """,
-        new="""    data_dir.mkdir(parents=True, exist_ok=True)
+        # 시각 변수는 남긴다 — 변이본이 NameError 로 죽으면 엉뚱한 이유로 빨개진다
+        new="""    began = time.monotonic()
+    data_dir.mkdir(parents=True, exist_ok=True)
     store = Store(data_dir / "rcm.sqlite3")
     httpd = RcmHTTPServer((config.server.bind, config.server.port))
+    bound_at = time.monotonic()
 """,
         tests=("tests/test_cli_serve_refusal.py",),
         # ㉗ M5l L2 — 크기를 모르는 채 지운 항목은 **개수로** 따로 센다. 0 으로 섞으면 영수증이

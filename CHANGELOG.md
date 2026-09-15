@@ -7,6 +7,17 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Starting says what it is turning on.** `rcm serve` used to print nothing until everything was
+  up, and then one `listening on …` line; a slow migration or an mDNS responder waiting on Local
+  Network permission looked exactly like a hang. Startup is now ten steps — the port, the
+  database, the presets, then the seven services — and each prints as it finishes with the seconds
+  it took (`start 3/10 presets · 10 · gate, gate-fast, gate-commit …`). The banner still closes
+  the sequence and still lists every preset. This is what to read after a restart that added
+  presets: the count in the step line is the server's own, so a preset that did not load is
+  visible before the first job is submitted.
+  ([#128](https://github.com/monocsp/remote_ci_monitor/pull/128))
+
 ## [0.2.8] - 2026-09-15
 
 The page stops moving under your cursor while the build machine works, and the README walks
