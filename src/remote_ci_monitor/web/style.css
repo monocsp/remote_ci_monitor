@@ -6,7 +6,17 @@
   --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
   /* 밝은 판의 상태 색은 자기 -soft 배경 위에서 4.5:1 을 넘긴다(WCAG 1.4.3, 필 글자는 12px 600
      이라 「큰 글자」가 아니다). 재 보니 succeeded 3.79 · failed 4.32 · queued 3.83 · cancelling
-     3.72 로 넷이 모자랐다 — 색상은 그대로 두고 밝기만 낮췄다. 어두운 판은 원래 다 넘겼다. */
+     3.72 로 넷이 모자랐다 — 색상은 그대로 두고 밝기만 낮췄다. 어두운 판은 원래 다 넘겼다.
+
+     2026-09-15 재계산: 이유 칸의 칩에서 **배경을 없앴다**. 그러면 글자가 앉는 바탕은 칸 배경이고,
+     강조된 행(`tr.hl`)에서는 `--accent-soft` 다. 그 조합들을 새로 재서 여기 적는다 —
+     오늘의 위 기록은 `-soft` 배경 위의 것이라 이 조합이 없었다.
+       --bad  #BC3930 on #FFFFFF 5.58 · on #E3EBFB(tr.hl) **4.66** ← 가장 아슬하다
+       --bad  #F06E63 on #171F29 5.63 · on #1E2C49(다크 tr.hl) 4.71
+       --warn #9E5E00 on #FFFFFF 5.18 · #E0A23A on #171F29 7.43 · on #1E2C49 6.22
+       --muted(= .quiet) #5D6B7B on #FFFFFF 5.45 · #97A5B6 on #171F29 6.62 · on #1E2C49 5.54
+     여덟 조합 모두 4.5:1 을 넘는다. `--bad` on `tr.hl` 의 여유는 0.16 뿐이라, 이 세 값 중
+     하나라도 손대면 **여기를 다시 재고 이 표를 고친다**. */
   --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1B7C44; --ok-soft: #E1F3E8; --warn: #9E5E00; --warn-soft: #FBEFD9;
   --bad: #BC3930; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #606E7D; --queued-soft: #ECF0F4;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
@@ -68,7 +78,12 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 
 /* ── 요약 ── */
 .summary { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-top: 0; background: var(--surface-2); }
-.sum { display: grid; gap: 3px; align-content: start; }
+/* 세 질문은 **카드 셋**이다 — 머리의 3px 선이 그 칸이 무엇을 말하는지 색으로 한 번 더 말한다. */
+.sum { display: grid; gap: 3px; align-content: start; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; border-top: 3px solid var(--line); padding: 11px 12px; }
+.sum-yours { border-top-color: var(--accent); }
+.sum-stuck { border-top-color: var(--bad); }
+.sum-host { border-top-color: var(--queued); }
 .sum .lab { font: 600 12px var(--sans); color: var(--muted); word-break: keep-all; }
 .sum .v { font-family: var(--sans); font-size: 14px; line-height: 1.55; font-variant-numeric: tabular-nums; word-break: keep-all; }
 /* 「내 잡 끝났나」가 이 화면이 가장 자주 받는 질문이다(§1) — 그 답이 페이지에서 가장 큰 글자다.
@@ -106,7 +121,8 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
   table.q th:nth-child(1) { width: 152px; }
   table.q th:nth-child(2) { width: 16%; }
   table.q th:nth-child(3) { width: 128px; }
-  table.q th:nth-child(5) { width: 96px; }
+  /* 진행 시간 칸은 이제 막대(84px)와 그 아래 라벨을 함께 안는다 — 폭을 넓힌다 */
+  table.q th:nth-child(5) { width: 168px; }
   table.q th:nth-child(6) { width: 152px; }
   table.q th:nth-child(7) { width: 124px; }
   /* 식별자 칸은 넘치면 말줄임 — `word-break: keep-all` 은 여기에 안 쓴다(효과가 없다) */
@@ -116,9 +132,19 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }
 table.q td.job .id { font-weight: 500; }
+/* 왼쪽 레인 — 한 행의 형편을 여기서 **한 번만** 말한다(이유 칸의 칩은 배경을 잃었다).
+   우선순위는 `stuck > overdue > quiet > running`: 아래로 갈수록 나중에 선언해 뒤가 이긴다.
+   내 잡(`mine`)의 3px 파란 선은 그대로 두고 상태색이 7px 자리로 밀린다 — 두 사실이 서로를
+   덮지 않는다(오늘 `tr.mine.overdue` 의 두 겹 그림자 규칙 그대로다). */
 table.q tr.mine td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-table.q tr.overdue td:first-child { box-shadow: inset 4px 0 0 var(--warn); }
+table.q tr.run td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.q tr.quiet td:first-child { box-shadow: inset 3px 0 0 var(--queued); }
+table.q tr.overdue td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+table.q tr.stuck td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+table.q tr.mine.run td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.q tr.mine.quiet td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 7px 0 0 var(--queued); }
 table.q tr.mine.overdue td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 7px 0 0 var(--warn); }
+table.q tr.mine.stuck td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 7px 0 0 var(--bad); }
 table.q tr.hl td { background: var(--accent-soft); }
 table.q tr.dim td { opacity: 0.55; }
 /* 묶음 머리 — 「지금 도는 것 / 기다리는 것」(§4.6-라). 색이 아니라 자리와 굵기로 가른다. */
@@ -131,13 +157,12 @@ table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8p
 /* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
 .step-now { font-family: var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); opacity: 0.85; }
 /* 전체 진행 막대(2026-09-09 오너 요청) — 접힌 행에서도 「어디까지 왔나」가 한눈에 보인다.
-   막대는 행의 일부다: 행의 아래 선을 지우고 막대 줄이 그 선을 대신 그린다.
-   길이는 눈에, 퍼센트와 근거는 글자에 — 색과 길이만으로 말하지 않는다(§4.2). */
-table.q tr.hasbar td { border-bottom: 0; }
-table.q tr.qbar td { padding: 0 8px 9px 46px; }
-table.q tr.qbar + tr.expanded td.prog { padding-top: 0; }
-.pwrap { display: flex; align-items: center; gap: 10px; max-width: 720px; }
-.pbar { flex: 1 1 auto; min-width: 80px; height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+   2026-09-15: 막대 **행**을 없애고 진행 시간 칸 안으로 넣었다 — 한 작업이 한 줄이다.
+   길이는 눈에, 퍼센트와 근거는 글자에 — 색과 길이만으로 말하지 않는다(§4.2).
+   폭은 **84px 고정**이다. 자동 폭(`flex: 1 1 auto`)이면 칸이 줄 때 막대가 눌려 그려진 길이가
+   `aria-valuenow` 와 갈라진다(실측: 616px 막대의 25% 가 가득 찬 것처럼 보였다). */
+.pwrap { display: grid; gap: 3px; justify-items: start; margin-top: 4px; }
+.pbar { width: 84px; flex: 0 0 84px; height: 7px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
 /* 근거·형편은 data 속성으로 고른다. `.steps`·`.stuck`·`.over` 를 class 로 쓰면 스텝 목록 격자와
    이유 칸 칩의 규칙이 막대에 걸려 **길이가 숫자와 달라진다**(실측: 616px 막대의 25% 가 70px 로
    그려졌다 — `.steps` 가 `display: grid`). 길이가 거짓말하면 라벨이 정직해도 소용없다. */
@@ -150,9 +175,16 @@ table.q tr.qbar + tr.expanded td.prog { padding-top: 0; }
 .pbar[data-cond="over"] i { background: repeating-linear-gradient(135deg, var(--warn) 0 5px, var(--warn-soft) 5px 10px); }
 .pbar[data-cond="finalizing"] i { background: repeating-linear-gradient(135deg, var(--accent) 0 5px, var(--accent-soft) 5px 10px); }
 .pbar[data-cond="stuck"] i { background: repeating-linear-gradient(135deg, var(--bad) 0 5px, var(--bad-soft) 5px 10px); }
-.plab { font: 600 12px var(--sans); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.pbar[data-cond="quiet"] i { background: var(--queued); }
+/* 라벨은 막대 **아래** 작은 글씨다. **한 줄로 못 박는다** — 두 줄로 접히면 그 행만 이웃보다
+   30% 높아지고(2026-09-15 실측 78px vs 60px) 어구 한가운데서 끊긴다. 넘치면 말줄임이고 전문은
+   `title` 에 있다. `max-width` 는 칸 폭(168px) 빼기 좌우 여백(8+8)이다 — 이보다 넓으면 라벨이
+   칸을 밀어 표가 옆으로 샌다(C-52). */
+.plab { display: block; max-width: 152px; font: 500 11px var(--sans); font-variant-numeric: tabular-nums;
+  color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.25; }
 .pwrap:has([data-cond="over"]) .plab { color: var(--warn); }
 .pwrap:has([data-cond="stuck"]) .plab { color: var(--bad); }
+.pwrap:has([data-cond="quiet"]) .plab { color: var(--muted); }
 .pos { display: block; font: 12px var(--sans); color: var(--muted); margin-top: 2px; white-space: nowrap; }
 .you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 600 12px var(--sans); vertical-align: 1px; }
 .joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 600 12px var(--sans); vertical-align: 1px; background: none; cursor: default; }
@@ -185,10 +217,26 @@ table.q tr.qbar + tr.expanded td.prog { padding-top: 0; }
 .reason.act { color: var(--ink); }
 .reason b { font-weight: 600; }
 .reason button.jlink { font: 600 12.5px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
-.blocked { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; border: 1.5px dashed var(--warn); color: var(--warn); font: 600 12px var(--sans); }
-.over { color: var(--warn); font-weight: 500; }
-.stalled { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 600 12px var(--sans); }
-.stuck { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 600 12px var(--sans); }
+/* **한 행에 채운 칩은 상태 필 하나다.** 이유 칸의 세 칩(빗금 · 점선 · 채운 배경)은 행의 이상을
+   왼쪽 레인·진행바와 함께 세 번째로 되풀이하던 것이다 — 배경과 테두리를 걷고 글자색만 남긴다.
+   `.reason.act` 가 `.stuck` 보다 특정적이라 여기 세 줄도 `.reason` 을 달고 있어야 이긴다. */
+/* 선택자에 `.reason` 을 붙여 **이유 칸 안으로 가둔다** — 같은 이름이 행(`tr.stuck`·`tr.quiet`)의
+   레인 클래스로도 쓰이므로, 맨 클래스로 두면 색과 굵기가 `<tr>` 전체에 걸린다.
+   **여기에 flex 를 쓰지 않는다.** `gap` 은 자식 사이를 전부 벌리는데, 이 칸의 첫 자식은 아이콘이고
+   둘째는 `#409` 잡 링크이며 그 뒤가 조사로 시작하는 글이다 — flex 면 `#409` 와 「가」 사이가 5px
+   벌어지고, 칸이 좁으면 flex 줄바꿈이 「가」만 다음 줄로 내린다. 조사를 붙이려고 `이(가)` 를
+   없앴는데 CSS 가 도로 떼어 놓는 꼴이다. 간격은 아이콘 자신이 들고 간다. */
+.reason.blocked { color: var(--warn); font-weight: 600; }
+.reason .ic { margin-right: 5px; }
+.reason.over { color: var(--warn); font-weight: 600; }
+.reason.stalled { color: var(--warn); font-weight: 600; }
+.reason.stuck { color: var(--bad); font-weight: 600; }
+/* 조용함은 **경보가 아니다** — 회색 본문 글자다. 그래도 아무 표시도 아닌 것과는 달라야 해서
+   왼쪽 레인(`tr.quiet`)이 자리를 잡는다. */
+.reason.quiet { color: var(--muted); font-weight: 500; }
+/* 인라인 SVG 아이콘 — 글자 크기(1em)와 기준선에 맞춘다. 색은 둘러싼 글자를 따라간다. */
+.ic { display: inline-flex; align-items: center; vertical-align: -0.14em; }
+.ic svg { display: block; width: 1em; height: 1em; }
 .exp-btn { font: 12px var(--mono); background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); cursor: pointer; margin-right: 4px; padding: 0; min-width: 24px; min-height: 24px; line-height: 22px; text-align: center; vertical-align: middle; }
 td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
@@ -234,13 +282,16 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 #host-details > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
 #host-details > summary .n.warn { color: var(--warn); font-weight: 600; }
 #host-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 12px 22px; align-items: start; }
+/* 호스트는 이름 한 칸 + **지표 카드**다. 칸 수를 못 박지 않고 `auto-fit` 에 맡기면 좁은 화면에서
+   3장 · 2장으로 저절로 접힌다 — 미터가 셋일 때와 넷일 때 격자를 따로 안 짜도 된다. */
+.hostcard { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: start; }
+.hostcard .meter { background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 8px; padding: 9px 10px; }
+.hostcard .hn { grid-column: 1 / -1; }
 .hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
 .hostcard.dim .meter { opacity: 0.55; }
 .hostcard .hn { font-family: var(--mono); }
-/* 미터가 넷이면(디스크가 있으면) 이름 칸이 두 줄을 차지한다 — 그래야 네 번째 미터가 이름 밑
-   좁은 칸으로 떨어지지 않고 제 폭을 갖는다. 메모리 라벨이 4열에는 안 들어가서 3열을 지킨다. */
-.hostcard.m4 .hn { grid-row: 1 / span 2; }
+/* 2026-09-15: 미터 넷일 때의 `grid-row: 1 / span 2` 는 없앴다 — `auto-fit` 이 칸 수를 스스로
+   고르고 이름 줄이 한 줄을 통째로 쓰므로, 네 번째 미터가 좁은 칸으로 떨어지지 않는다. */
 .hostcard .hn .age { color: var(--muted); font: 12px var(--sans); display: block; font-variant-numeric: tabular-nums; }
 .meter { display: grid; gap: 4px; }
 .meter .lab { display: flex; justify-content: space-between; font: 12px var(--sans); font-variant-numeric: tabular-nums; }
@@ -261,7 +312,13 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ── 최근 완료 (항목 14 · 15) ── */
 .recent { display: grid; gap: 0; }
-.rrow { display: grid; grid-template-columns: 54px 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+/* 왼쪽 3px 레인 — 큐 표와 같은 채널이다. 결과를 색으로 한 번 더 말한다(성공 · 실패 · 취소 ·
+   결과를 잃음). 그림자라 격자 폭을 안 건드린다. */
+.rrow { display: grid; grid-template-columns: 54px 124px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0 6px 9px; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow.succeeded { box-shadow: inset 3px 0 0 var(--ok); }
+.rrow.failed, .rrow.timed_out { box-shadow: inset 3px 0 0 var(--bad); }
+.rrow.cancelled { box-shadow: inset 3px 0 0 var(--queued); }
+.rrow.lost { box-shadow: inset 3px 0 0 var(--lost); }
 /* 필은 글자만큼만 — 격자 칸을 채우면 결과 색이 행의 배경처럼 번진다 */
 .rrow > .pill { justify-self: start; }
 /* 번호는 큐 행과 같은 모양 — 로그·재실행·문의가 전부 이 번호로 이뤄진다 */
@@ -305,7 +362,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 @media (min-width: 961px) { .prog .src-block { display: none; } }
 @media (max-width: 720px) {
   .page { padding: 8px 8px 60px; }
-  .s-h .n, .reason, .eta, .blocked, .stalled, .stuck, .pill, td.elapsed, .sum .v { white-space: normal; overflow-wrap: anywhere; }
+  .s-h .n, .reason, .eta, .pill, td.elapsed, .sum .v { white-space: normal; overflow-wrap: anywhere; }
   .qwrap { overflow: visible; }
   .hostcard .meter, .hostcard .hn, .hostcard .top { min-width: 0; overflow-wrap: anywhere; }
   .meter .lab { flex-wrap: wrap; gap: 0 8px; }
@@ -318,9 +375,10 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   table.q tr { border-bottom: 1px solid var(--line-2); padding: 6px 0; }
   table.q tr.exp { border-bottom: 0; }
   table.q td { border: 0; padding: 2px 8px; }
-  table.q tr.qbar td { padding: 4px 8px 8px; }
   .exp-btn { min-width: 32px; min-height: 32px; line-height: 30px; }
-  .pwrap { max-width: 100%; }
+  /* 칸이 블록이 되어도 막대는 84px 그대로다 — 폭이 흔들리면 그려진 길이가 `aria-valuenow` 와
+     갈라진다(C-51·C-52). 라벨만 칸 폭 안에서 접힌다. */
+  .plab { max-width: 100%; }
   table.q td.job { white-space: normal; }
   table.q td.job .pos { display: inline; margin-left: 6px; }
   table.q td.eta { white-space: normal; }

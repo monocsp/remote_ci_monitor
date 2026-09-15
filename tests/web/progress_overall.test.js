@@ -10,7 +10,10 @@
 // - **도는 잡은 100% 가 되지 않는다.** 예측은 99% 가 상한이고(반올림도 안 쓴다), 선언한 스텝을 다
 //   끝냈으면 퍼센트 대신 「마무리 중」이다 — 꽉 찬 막대는 「끝났다」로 읽힌다.
 // - 경계는 `>=` 다: 경과가 추정과 **같으면** 이미 초과다(1초 틱과 첫 렌더가 같은 자리에서 넘어간다).
-// - 보조기기가 읽는 값(`aria-valuetext`)과 눈에 보이는 글자(`.plab`)가 같다.
+// - 화면의 글자(`.plab`)는 **눈금과 근거만** 말한다. 형편(`조용함`·`응답 없음`…)은 막대의 색·빗금과
+//   상태 칸이 이미 말했다 — 라벨이 또 말하면 84px 칸에서 두 줄로 접혀 그 행만 이웃보다 높아진다.
+//   대신 `aria-valuetext` 와 `title` 에는 형편이 **그대로** 남는다(화면에서 뺀 것이지 보조기기에서
+//   뺀 것이 아니다).
 // - 채움 폭은 HTML 에 `data-fill` 로만 싣는다(실제 폭은 DOM 에 넣은 뒤 화면 층이 준다 —
 //   자동 레이아웃 표 안에서 파싱된 퍼센트 폭이 100% 로 굳는 크롬 동작 때문. 그린 길이가 숫자와
 //   같은지는 tests/test_web_browser.py 가 진짜 브라우저에서 잰다).
@@ -195,8 +198,10 @@ describe("timePct — 1초 틱과 첫 렌더가 같은 규칙을 쓴다", () => 
 
 describe("progressBarHtml", () => {
   const html = (r, lang, live) => rcm.progressBarHtml(r, lang, live);
-  // 태그를 벗긴 라벨 = 보조기기가 읽는 값
-  const label = (h) => /class="plab">([^<]*)</.exec(h)[1];
+  // 눈에 보이는 글자 · 보조기기가 읽는 값 · 마우스가 얻는 전문. 형편이 붙는 자리는 뒤의 둘뿐이다.
+  const label = (h) => /class="plab" title="[^"]*">([^<]*)</.exec(h)[1];
+  const spoken = (h) => /aria-valuetext="([^"]*)"/.exec(h)[1];
+  const hint = (h) => /class="plab" title="([^"]*)"/.exec(h)[1];
 
   test("스텝 눈금 — 폭·퍼센트·근거가 한 줄에 다 있다", () => {
     const h = html(row(412), "en", false);
@@ -208,16 +213,44 @@ describe("progressBarHtml", () => {
     assert.match(h, /aria-label="#412 progress"/);
   });
 
-  test("보이는 글자와 읽히는 글자가 같다", () => {
-    [row(412), timeRow(), timeRow({ stuck: true }), timeRow({ elapsed_seconds: 400 })].forEach((r) => {
+  test("형편이 없는 잡은 보이는 글자와 읽히는 글자가 같다", () => {
+    [row(412), timeRow()].forEach((r) => {
       const h = html(r, "ko", false);
-      assert.equal(label(h), /aria-valuetext="([^"]*)"/.exec(h)[1]);
+      assert.equal(rcm.overallProgress(r).condition, "normal");
+      assert.equal(label(h), spoken(h));
+      assert.equal(hint(h), spoken(h));
+    });
+  });
+
+  test("형편이 있는 잡은 화면에서 빠지고 보조기기·툴팁에는 남는다", () => {
+    // 세 번째로 말하는 자리를 없앤 것이다 — 상태 칩과 상태 칸이 이미 말했고, 라벨까지 말하면
+    // 84px 칸 안에서 두 줄로 접혀 그 행만 높아진다. 사실 자체는 어디로도 사라지지 않는다.
+    [
+      [timeRow({ stuck: true }), "응답 없음"],
+      [timeRow({ elapsed_seconds: 400 }), "예상 시간 초과"],
+      [timeRow({ quiet: true }), "조용함"]
+    ].forEach(([r, word]) => {
+      const h = html(r, "ko", false);
+      assert.ok(!label(h).includes(word), label(h));
+      assert.ok(spoken(h).includes(word), spoken(h));
+      assert.equal(hint(h), spoken(h));
+    });
+  });
+
+  test("라벨은 한 줄에 들어갈 만큼 짧다 — 형편을 뺀 뒤의 상한", () => {
+    // 접힘을 막는 것은 CSS 의 `nowrap` 이지만, 말줄임이 **일상**이 되면 안 된다. 가장 긴 문구
+    // (한국어 `설정한 예상 시간 기준`)도 152px 안에 들어가는 길이여야 한다.
+    ["ko", "en"].forEach((lang) => {
+      [row(412), row(409), timeRow({ source: "preset" }), timeRow({ stuck: true }),
+        timeRow({ elapsed_seconds: 400 })].forEach((r) => {
+        assert.ok(label(html(r, lang, false)).length <= 24, lang + ": " + label(html(r, lang, false)));
+      });
     });
   });
 
   test("한국어도 같은 눈금 — 숫자는 그대로, 문구만 그 언어", () => {
     const h = html(row(412), "ko", false);
-    assert.equal(label(h), "50% · 스텝 4/8");
+    assert.equal(label(h), "50% · 단계 4/8");
     assert.match(h, /aria-label="#412 진행"/);
   });
 
@@ -225,7 +258,7 @@ describe("progressBarHtml", () => {
     assert.equal(label(html(row(409), "en", false)), "70% · by measured time");
     assert.equal(label(html(timeRow({ source: "preset" }), "en", false)), "15% · by preset estimate");
     assert.equal(label(html(timeRow({ source: null }), "en", false)), "15% · by expected time");
-    assert.equal(label(html(row(409), "ko", false)), "70% · 측정 소요 기준");
+    assert.equal(label(html(row(409), "ko", false)), "70% · 지난 실행 기준");
   });
 
   test("살아 있으면 1초 틱의 기준점과 출처를 단다", () => {
@@ -247,7 +280,9 @@ describe("progressBarHtml", () => {
   test("추정을 넘긴 잡 — 가득 찬 빗금, 퍼센트도 틱도 없다", () => {
     const h = html(timeRow({ elapsed_seconds: 400 }), "en", true);
     assert.match(h, /data-basis="none" data-cond="over"/);
-    assert.equal(label(h), "past the estimate");
+    // 눈금이 없으니 화면 글자도 눈금을 말하지 않는다. 「추정을 넘겼다」는 빗금과 상태 칸의 말이다.
+    assert.equal(label(h), "progress —");
+    assert.equal(spoken(h), "past the estimate");
     assert.match(h, /data-fill="100"/);
     assert.doesNotMatch(h, /aria-valuenow/);
     assert.doesNotMatch(h, /data-tick/);
@@ -258,24 +293,27 @@ describe("progressBarHtml", () => {
     r.progress.steps_done = 8;
     const h = html(r, "en", true);
     assert.match(h, /data-basis="steps" data-cond="finalizing"/);
-    assert.equal(label(h), "8/8 steps · finalizing");
+    assert.equal(label(h), "8/8 steps");
+    assert.equal(spoken(h), "8/8 steps · finalizing");
     assert.doesNotMatch(h, /aria-valuenow/);
     assert.doesNotMatch(label(h), /100%/);
   });
 
-  test("stuck — 스텝 눈금은 남기고 형편을 함께 말한다", () => {
+  test("stuck — 스텝 눈금은 남기고 형편은 막대와 보조기기가 말한다", () => {
     const r = row(412);
     r.estimate.stuck = true;
     const h = html(r, "en", false);
     assert.match(h, /data-basis="steps" data-cond="stuck"/);
-    assert.equal(label(h), "50% · 4/8 steps · likely stuck");
+    assert.equal(label(h), "50% · 4/8 steps");
+    assert.equal(spoken(h), "50% · 4/8 steps · not responding");
     assert.match(h, /aria-valuenow="50"/);
   });
 
   test("준비 중 · 근거 없음은 눈금 없는 막대다", () => {
     const r = row(412);
     r.progress = { timing: "as_received", phase: "materializing", steps: [], steps_total: null, steps_done: 0 };
-    assert.equal(label(html(r, "en", true)), "preparing workspace");
+    assert.equal(label(html(r, "en", true)), "progress —");
+    assert.equal(spoken(html(r, "en", true)), "preparing workspace");
     assert.match(html(r, "en", true), /data-basis="none" data-cond="preparing"/);
 
     const none = timeRow({ source: "default" });
