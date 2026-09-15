@@ -16,6 +16,7 @@ of a key bumps that number and is listed here.
   the sequence and still lists every preset. This is what to read after a restart that added
   presets: the count in the step line is the server's own, so a preset that did not load is
   visible before the first job is submitted.
+  ([#128](https://github.com/monocsp/remote_ci_monitor/pull/128))
 
 ## [0.2.8] - 2026-09-15
 
