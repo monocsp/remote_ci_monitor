@@ -10,11 +10,12 @@
   `grace_seconds` → SIGKILL(손자까지 `killpg`).
 - 출력은 줄 단위로 `log_path` 에 flush 하고 같은 바이트를 관찰자 `output` 에 준다. 개행 없는
   긴 줄은 `MAX_LINE_BYTES` 에서 잘라 흘린다. EOF 뒤 남은 조각도 준다.
-- 종료 코드로 예외를 내지 않는다. 시작 실패는 `RunnerError`("cannot start …").
+- 종료 코드로 예외를 내지 않는다. 시작 실패는 `RunnerError` — 문구가 아니라 코드다.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 import queue
 import re
@@ -28,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.inputs import env_for_inputs
 from remote_ci_monitor.core.model import PHASE_EXECUTING, Source
 
@@ -49,7 +51,36 @@ def safe_error(e: BaseException) -> str:
 
 
 class RunnerError(Exception):
-    """프로세스를 띄우지 못했다(argv[0] 없음 · 로그 파일 못 엶). 문구에 경로 없음."""
+    """프로세스를 띄우지 못했다(argv[0] 없음 · 로그 파일 못 엶).
+
+    `MaterializeError` 와 같은 규칙이다: **문구가 아니라 코드**(`outcome.PREFLIGHT_CODES`)를 들고,
+    원문은 `log` 로 보호된 잡 로그에만 간다. `argv[0]` 이 공개 요약에 들어가면 안 되는 이유가
+    바로 여기다 — 프리셋의 명령은 비공개 SDK 의 절대 경로이거나 토큰이 박힌 러너 이름일 수 있고,
+    `/api/status` 는 기본 설정에서 토큰 없이 읽힌다(PLAN 「보안」).
+    """
+
+    def __init__(self, code: str, /, *, log: str = "", **args: Any) -> None:
+        self.code = code
+        self.args_public = args
+        self.log = log
+        super().__init__(outcome.render(code, args) or code)
+
+
+def _launch_error(e: OSError, argv0: str) -> RunnerError:
+    """프로세스를 못 띄운 `OSError` → 코드. 고칠 곳이 다르다: 없는 명령은 프리셋의 `argv` 를,
+    권한은 파일 모드를 고치라는 말이다. 나머지는 클래스 이름만 인자로 남긴다(`E2BIG` · FD 고갈).
+
+    코드를 표에서 꺼내지 않고 그 자리에 적는 이유: 예외 자리를 정적으로 훑어 「표에 없는 코드로
+    잡을 닫으려는 자리」를 잡는 시험이 있다. 오타 하나가 레인을 `down` 으로 만든다.
+    """
+    # 원문에는 `argv[0]` 을 그대로 둔다 — 잡 로그는 토큰이 있어야 읽고, 이게 없으면 「명령을 못
+    # 찾았다」만 남아 어느 명령인지 모른 채로 프리셋을 뒤져야 한다.
+    log = f"cannot start {argv0!r}: {safe_error(e)}"
+    if e.errno == errno.ENOENT:
+        return RunnerError("launch_executable_missing", log=log)
+    if e.errno in (errno.EACCES, errno.EPERM):
+        return RunnerError("launch_permission_denied", log=log)
+    return RunnerError("launch_failed", error=type(e).__name__, log=log)
 
 
 class RequiredToolMissing(Exception):
@@ -198,7 +229,9 @@ def run_job(
     try:
         log = spec.log_path.open("ab")
     except OSError as e:
-        raise RunnerError(f"cannot open log file: {safe_error(e)}") from e
+        raise RunnerError(
+            "log_unavailable", error=type(e).__name__, log=f"cannot open log file: {safe_error(e)}"
+        ) from e
     with log:
         if spec.requires:
             # 자재화가 길었다면 그사이 취소·종료 요청이 와 있을 수 있다 — 그게 이긴다. 프로세스도
@@ -233,7 +266,7 @@ def run_job(
                 start_new_session=True,
             )
         except OSError as e:
-            raise RunnerError(f"cannot start {spec.argv[0]!r}: {safe_error(e)}") from e
+            raise _launch_error(e, spec.argv[0]) from e
         result = _pump(spec, proc, log, observer, started, now_fn)
     return result
 

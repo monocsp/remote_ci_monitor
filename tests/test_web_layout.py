@@ -252,3 +252,73 @@ def test_state_pills_carry_a_glyph_and_a_word(scene, tmp_path):  # noqa: F811
     # 같은 잡이 언어만 바뀌었다 — 글리프는 그대로, 글자는 번역된다
     assert [p["glyph"] for p in pills_ko] == [p["glyph"] for p in pills_en], (pills_ko, pills_en)
     assert [p["word"] for p in pills_ko] != [p["word"] for p in pills_en], (pills_ko, pills_en)
+
+
+# ── (마) 한 행에 채운 칩은 상태 필 하나다 (§3.1 · C-53) ──────────────────────
+
+# 그 행 안에서 **채운 칩**을 센다. 칩은 「글자를 담은 인라인 조각」이다 — 칸(`td`)·막대(`.pbar`)
+# 처럼 글자가 없거나 블록인 것은 칩이 아니고, 버튼은 자기 배경이 곧 누를 수 있다는 표시라 뺀다.
+# 「채웠다」는 배경색이 투명이 아니거나 배경 이미지(빗금)가 있는 것이다.
+FILLED_CHIPS_JS = """
+(() => {
+  const row = document.querySelector('#queue tr[data-job="__JOB__"]');
+  if (!row) return null;
+  const painted = (s) => s.backgroundImage !== 'none'
+    || !(s.backgroundColor === 'rgba(0, 0, 0, 0)' || s.backgroundColor === 'transparent');
+  const chips = [];
+  row.querySelectorAll('span, b, i, em, strong').forEach((el) => {
+    const s = getComputedStyle(el);
+    if (!el.textContent.trim()) return;
+    if (!s.display.startsWith('inline')) return;
+    if (!painted(s)) return;
+    chips.push({
+      cls: String(el.className || '').trim().split(/\\s+/).filter(Boolean),
+      text: el.textContent.trim().slice(0, 40),
+      bg: s.backgroundColor,
+      bgi: s.backgroundImage,
+    });
+  });
+  const reason = row.querySelector('td.reason span.reason');  // 칸(`td.reason`)이 아니라 칩이다
+  return {
+    chips: chips,
+    rowClass: row.className,
+    reasonClass: reason ? String(reason.className) : null,
+    reasonPainted: reason ? painted(getComputedStyle(reason)) : null,
+    reasonText: reason ? reason.textContent.trim().slice(0, 40) : null,
+  };
+})()
+"""
+
+
+def test_a_row_never_shows_two_filled_status_chips(scene, tmp_path):  # noqa: F811
+    """행의 **상태**를 말하는 채운 칩은 하나다 — 상태 필.
+
+    §3.1 의 원칙을 2026-09-15 에 한 칸 좁혔다: 신뢰도 배지(`.conf.*`)는 예외다. 그 배지가
+    말하는 것은 잡의 상태가 아니라 「완료 예상을 얼마나 믿나」이고, 자리도 「완료 예상」
+    칸이다. 그 판단의 근거는 `style.css` 의 `.conf` 위 주석에 있다.
+
+    **비어 있는 시험이 되지 않게** 진짜로 멈춘 행을 만든다. `estimate.default_seconds` 를
+    1초로 낮추면 장면의 도는 잡이 `elapsed > 3 × expected` 로 `stuck` 이 되고, 이유 칸에
+    `.reason.stuck` 이 실제로 그려진다 — 그 칩에 배경을 도로 넣으면 여기가 빨개진다.
+    """
+    scene.srv.cfg.estimate.default_seconds = 1  # 요청마다 `queue_config()` 가 새로 읽는다
+    job = scene.running
+    ready = ready_at(scene, "ko") + (
+        f" && document.querySelector('#queue tr[data-job=\"{job}\"].stuck') !== null"
+    )
+    with Chrome(tmp_path / "chrome-chips", window="1240,900") as c:
+        c.open(page_url(scene, "ko"), ready_js=ready, timeout=30)
+        m = c.eval(FILLED_CHIPS_JS.replace("__JOB__", str(job)))
+    scene.assert_still_running()
+
+    assert m is not None, f"job {job} 의 큐 행이 없다"
+    assert "stuck" in m["rowClass"].split(), m
+    # 장면 확인 — 이유 칩이 정말로 그려졌다. 아니면 아래 단언은 아무것도 재지 않는다
+    assert m["reasonClass"] and "stuck" in m["reasonClass"].split(), m
+    assert m["reasonPainted"] is False, f"이유 칩이 배경을 도로 얻었다: {m}"
+
+    status = [c for c in m["chips"] if "conf" not in c["cls"]]
+    assert len(status) == 1, f"한 행에 상태를 말하는 채운 칩이 {len(status)}개다: {status}"
+    assert "pill" in status[0]["cls"], f"채운 칩 하나는 상태 필이어야 한다: {status[0]}"
+    badges = [c for c in m["chips"] if "conf" in c["cls"]]
+    assert len(badges) <= 1, f"신뢰도 배지는 행마다 하나뿐이다(유일한 예외): {badges}"

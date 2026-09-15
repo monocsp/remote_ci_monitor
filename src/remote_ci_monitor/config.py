@@ -149,6 +149,12 @@ class EstimateSection:
     floor_remaining_seconds: int = 30
     stuck_multiplier: float = 3.0
     no_output_seconds: int = 240
+    # 현재 단계가 자기 실측 중앙값의 몇 배를 넘으면 「응답 없음」인가. 판정은 단계 실측이
+    # 먼저고, 단계 이야기를 안 하는 잡만 `no_output_seconds` 로 떨어진다.
+    step_stuck_multiplier: float = 3.0
+    # 단계 중앙값을 믿기 시작하는 실행 수. 단계 소요는 잡 소요보다 시끄러워 `min_samples`(2)
+    # 보다 높다 — 3 이면 중앙값이 한 번의 이상치에 끌려가지 않는다.
+    step_min_samples: int = 3
 
 
 @dataclass
@@ -805,6 +811,10 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[estimate] stuck_multiplier must be > 1")
     if e.no_output_seconds < 1:
         raise ConfigError("[estimate] no_output_seconds must be >= 1")
+    if e.step_stuck_multiplier <= 1:
+        raise ConfigError("[estimate] step_stuck_multiplier must be > 1")
+    if e.step_min_samples < 2:
+        raise ConfigError("[estimate] step_min_samples must be >= 2")
     h = cfg.host
     if h.interval_seconds < 2:
         raise ConfigError("[host] interval_seconds must be >= 2")

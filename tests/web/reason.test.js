@@ -118,9 +118,9 @@ describe("reasonText — normal (not actionable)", () => {
 });
 
 describe("reasonText — actionable", () => {
-  test("blocked_by_group → ⛓ blocker, group, frees in remaining", () => {
+  test("blocked_by_group → blocker, group, frees in remaining (쇠사슬은 글자가 아니라 아이콘이다)", () => {
     const r = rcm.reasonText(row(413), NOW, status);
-    assert.equal(r.text, "⛓ blocked by #409 · devices · frees in 2m 40s");
+    assert.equal(r.text, "blocked by #409 · devices · frees in 2m 40s");
     assert.equal(r.actionable, true);
     assert.deepEqual(r.links, [{ jobId: 409 }]);
   });
@@ -128,7 +128,7 @@ describe("reasonText — actionable", () => {
   test("blocked_by_group with remaining unknown → 'frees in —'", () => {
     const v = variant(413, {});
     v.blocked_by.remaining_seconds = null;
-    assert.equal(rcm.reasonText(v, NOW, status).text, "⛓ blocked by #409 · devices · frees in —");
+    assert.equal(rcm.reasonText(v, NOW, status).text, "blocked by #409 · devices · frees in —");
   });
 
   test("upload_stalled → coarse time since last_received_at + received / total", () => {
@@ -162,23 +162,41 @@ describe("reasonText — actionable", () => {
     assert.deepEqual(r.links, []);
   });
 
-  test("stuck → ⚠ multiplier (floor of elapsed/expected) and coarse silence since last_output_at", () => {
+  test("stuck → multiplier (floor of elapsed/expected) and coarse silence since last_output_at", () => {
+    // 경보 기호(⚠)는 글자에서 뗐다 — 빨강은 왼쪽 레인과 이유 칸 글자색이 이미 말한다.
     const v = variant(412, { reason: "stuck" });
     Object.assign(v.estimate, { confidence: "overdue", elapsed_seconds: 1150, remaining_seconds: 30,
       overdue: true, stuck: true, finish_at: null });
     v.progress.last_output_at = fromNow(-250);
     const r = rcm.reasonText(v, NOW, status);
-    assert.equal(r.text, "⚠ likely stuck · 3× expected · no output for 4m");
+    assert.equal(r.text, "Not responding · 3× longer than usual · no output for 4m");
     assert.equal(r.actionable, true);
+    assert.equal(r.cls, "stuck");
+    assert.ok(!/⚠/.test(r.text), r.text);
   });
 
   test("stuck without last_output_at → multiplier only", () => {
     const v = variant(412, { reason: "stuck" });
     Object.assign(v.estimate, { confidence: "overdue", elapsed_seconds: 1150, stuck: true, overdue: true, finish_at: null });
     v.progress.last_output_at = null;
-    assert.equal(rcm.reasonText(v, NOW, status).text, "⚠ likely stuck · 3× expected");
+    assert.equal(rcm.reasonText(v, NOW, status).text, "Not responding · 3× longer than usual");
     v.progress = null;
-    assert.equal(rcm.reasonText(v, NOW, status).text, "⚠ likely stuck · 3× expected");
+    assert.equal(rcm.reasonText(v, NOW, status).text, "Not responding · 3× longer than usual");
+  });
+
+  test("조용한 잡 — 경보가 아니다(actionable false · 회색)", () => {
+    // C-55. 출력이 조용한 것은 **관측**이지 「멈췄다」가 아니다.
+    const v = variant(412, { reason: "quiet" });
+    Object.assign(v.estimate, { elapsed_seconds: 1044, expected_seconds: 1080, quiet: true,
+      stuck: false, overdue: false });
+    v.progress.last_output_at = fromNow(-473);
+    const en = rcm.reasonText(v, NOW, status);
+    assert.equal(en.text, "output has gone quiet · no output for 7m");
+    assert.equal(en.actionable, false);
+    assert.equal(en.cls, "quiet");
+    const ko = rcm.reasonText(v, status, NOW, "ko");
+    assert.equal(ko.text, "출력이 조용합니다 · 7m 동안 출력 없음");
+    assert.ok(!/배|멈춘|⚠/.test(ko.text), ko.text);
   });
 
   test("paused → 'paused'", () => {

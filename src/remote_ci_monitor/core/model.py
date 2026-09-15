@@ -93,6 +93,18 @@ REASON_WORKER_DOWN = "worker_down"
 #: 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다(오너 결정 45). 오래 닫혀 있으면
 #: `rcm check` 가 경고한다.
 REASON_HELD_BY_LOAD = "held_by_load"
+#: 출력이 조용하다 — 아직 죽었다고 말할 근거는 없다. **`ACTIONABLE_REASONS` 에는 안 올린다.**
+#: `held_by_load` 와 같은 종류다: 의도되지 않았지만 **경보가 아니다**. 「확인이 필요한 작업」
+#: 패널에 올리면 오늘의 빨간 소음이 이름만 바꿔 그대로 남는다 — 그것이 고치려던 사고다
+#: (gate 프리셋은 마지막 단계에서 도구 셋을 병렬로 돌리고, 그것들은 끝날 때 출력을 몰아 뱉어
+#: **정상 실행마다** 4분 침묵 조건에 걸렸다). 진짜로 죽은 잡은 `stuck` 과 프리셋의
+#: `timeout_seconds` 가 잡는다.
+REASON_QUIET = "quiet"
+
+#: `Estimate.stuck_code` — 「왜 죽었다고 보나」. 화면·CLI 가 근거별로 다른 문장을 그린다.
+STUCK_ELAPSED = "over_elapsed"  # 경과가 예상의 `stuck_multiplier` 배를 넘었다
+STUCK_STEP = "over_step"  # 현재 단계가 자기 실측 중앙값의 배수를 넘었다
+STUCK_NO_OUTPUT = "no_output"  # 단계 이야기를 안 하는 잡이 `no_output_seconds` 동안 조용하다
 
 #: 「Not moving」 요약에 오르는 행동 가능한 이유. 순서가 우선순위다.
 ACTIONABLE_REASONS = (
@@ -320,6 +332,13 @@ class Estimate:
     #: 이 잡이 **지금** 같은 풀의 다른 잡과 한 머신을 나눠 쓰고 있나(M5f). 중앙값은 혼자 잰
     #: 것이라 그동안은 덜 확실하다 — 배수를 지어내지 않고 신뢰도만 한 칸 내린다.
     shared: bool = False
+    #: 출력이 조용하다(`no_output_seconds` 초과). **관측이지 경보가 아니다** — `stuck` 과
+    #: 절대 동시에 참이 아니고, 취소 중·워크스페이스 준비 중에는 나지 않는다.
+    quiet: bool = False
+    #: `stuck` 의 근거 — `STUCK_ELAPSED` · `STUCK_STEP` · `STUCK_NO_OUTPUT`. `stuck` 이 아니면 None.
+    stuck_code: str | None = None
+    #: 현재 단계가 평소 걸리는 시간(초). 그 단계의 실측 중앙값이 없으면 None.
+    step_expected_seconds: float | None = None
 
 
 @dataclass(frozen=True)

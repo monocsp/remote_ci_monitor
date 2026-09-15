@@ -132,3 +132,63 @@ def test_host_line_uses_gib_and_two_decimal_load():
     assert "load 6.61 / 10 cores" in out, out
     assert "mem 14.1 GB / 24.0 GB" in out, out  # 1e9 로 나누면 25.8 GB 가 되어 기계 사양과 어긋난다
     assert "GPU —" in out
+
+
+# ── 멈춤 / 조용함 문면 ───────────────────────────────────────────────────────
+
+
+def reason_text(reason, *, progress=None, **est):
+    """이유 칸 한 줄. `est` 는 그대로 `estimate` 가 된다."""
+    from remote_ci_monitor.core.render_text import _reason_text
+
+    return _reason_text({"reason": reason, "estimate": est, "progress": progress})
+
+
+def test_the_stall_reasons_read_differently():
+    """근거마다 다른 문장이어야 「무엇을 볼지」가 문면에서 나온다.
+
+    오늘 이 자리를 잠그는 시험이 하나도 없었다 — `"⚠ likely stuck"` 한 줄이 세 가지 사실을
+    똑같이 말했다.
+    """
+    over_step = reason_text(
+        "stuck",
+        stuck_code="over_step",
+        step_expected_seconds=540.0,
+        progress={"current_name": "build web"},
+    )
+    over_elapsed = reason_text(
+        "stuck", stuck_code="over_elapsed", elapsed_seconds=1500.0, expected_seconds=400.0
+    )
+    no_output = reason_text("stuck", stuck_code="no_output")
+    quiet = reason_text("quiet")
+    assert "build web" in over_step and "9m" in over_step
+    assert "3x" in over_elapsed
+    assert "no output" in no_output
+    assert quiet == "output has gone quiet"
+    assert len({over_step, over_elapsed, no_output, quiet}) == 4
+    for line in (over_step, over_elapsed, no_output, quiet):
+        assert "⚠" not in line and "likely stuck" not in line
+
+
+def test_an_old_document_without_a_stuck_code_never_says_one_time():
+    """옛 서버 문서에는 `stuck_code` 가 없다. 「예상의 1배」는 절대 안 나온다."""
+    one = reason_text("stuck", elapsed_seconds=1044.0, expected_seconds=1020.0)
+    assert one == "Not responding" and "1x" not in one
+    three = reason_text("stuck", elapsed_seconds=1500.0, expected_seconds=400.0)
+    assert three == "Not responding · 3x longer than usual"
+
+
+def test_an_unknown_reason_is_returned_as_is():
+    """모르는 값에 던지지 않는다 — 새 서버 + 옛 CLI 가 이 자리로 온다."""
+    assert reason_text("brand_new") == "brand_new"
+
+
+def test_the_queue_line_shows_quiet_and_not_responding():
+    """표 한 줄에 실제로 실려 나오는지 — 이유 칸이 조립되는 자리까지 본다."""
+    from dataclasses import replace
+
+    j = job(1, state=RUNNING, created_min=6, started_min=5)
+    row = rows([j], busy=[1])[0]
+    quiet = replace(row, reason="quiet", estimate=replace(row.estimate, quiet=True))
+    out = text(queue=[quiet])
+    assert "output has gone quiet" in out and "⚠" not in out

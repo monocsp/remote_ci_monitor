@@ -1252,3 +1252,34 @@ def test_no_admission_warning_when_the_gate_cannot_apply():
     bad = HostSection(history_samples=1, interval_seconds=60)
     assert admission_warnings(ServerSection(lanes=1), bad) == []
     assert admission_warnings(ServerSection(lanes=4, admission="always"), bad) == []
+
+
+# ── 단계 실측 멈춤 판정의 두 키 ─────────────────────────────────────────────
+
+
+def test_step_stall_keys_have_defaults(tmp_path):
+    """새 키는 기본값으로 살아 있다. `queue_config` 배선은 `tests/test_status_perf.py` 가 본다."""
+    cfg = load_server_config(write(tmp_path, GOOD), environ={})
+    assert cfg.estimate.step_stuck_multiplier == 3.0
+    assert cfg.estimate.step_min_samples == 3
+
+
+@pytest.mark.parametrize(
+    ("text", "needle"),
+    [
+        ("[estimate]\nstep_stuck_multiplier = 1.0\n", "[estimate] step_stuck_multiplier"),
+        ("[estimate]\nstep_stuck_multiplier = 0.5\n", "[estimate] step_stuck_multiplier"),
+        ("[estimate]\nstep_min_samples = 1\n", "[estimate] step_min_samples"),
+    ],
+)
+def test_step_stall_keys_are_validated(tmp_path, text, needle):
+    """배수 1 이하는 「자기 평소 시간보다 빠른데 죽었다」는 말이 된다. 표본 1 은 중앙값이 아니다."""
+    with pytest.raises(ConfigError) as e:
+        load_server_config(write(tmp_path, text), environ={})
+    assert needle in str(e.value)
+
+
+def test_step_min_samples_two_is_allowed(tmp_path):
+    """경계는 허용이다 — 팀이 더 민감하게 쓰겠다면 막지 않는다."""
+    cfg = load_server_config(write(tmp_path, "[estimate]\nstep_min_samples = 2\n"), environ={})
+    assert cfg.estimate.step_min_samples == 2

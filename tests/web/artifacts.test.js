@@ -90,7 +90,7 @@ describe("artifactsLine", () => {
   test("두 언어 다 문장이 있고 서로 다르다", () => {
     const ko = rcm.artifactsLine(job(ready()), "ko", NOW_MS);
     const en = rcm.artifactsLine(job(ready()), "en", NOW_MS);
-    assert.ok(ko.text.includes("산출물"), ko.text);
+    assert.ok(ko.text.includes("결과 파일"), ko.text);
     assert.ok(en.text.includes("artifacts"), en.text);
     assert.notEqual(ko.text, en.text);
     assert.equal(ko.command, en.command); // 명령은 번역하지 않는다

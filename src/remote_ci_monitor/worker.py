@@ -33,6 +33,7 @@ from remote_ci_monitor.core.model import (
     FAILED,
     LOST,
     MODE_TREE,
+    RUNNING,
     SUCCEEDED,
     TIMED_OUT,
     WORKER_BUSY,
@@ -419,8 +420,37 @@ class Worker(threading.Thread):
             only_from=(CANCELLING,),
         )
 
-    def _fail(self, job: Job, summary: str) -> None:
-        self.store.finish(job.id, FAILED, now=self.now_fn(), exit_code=None, summary=summary[:200])
+    def _fail_before_start(self, job: Job, code: str, /, **args: Any) -> None:
+        """프로세스가 뜨기 전에 끝난 잡을 닫는다 — **코드와 함께**, 그리고 취소에 진다.
+
+        코드 없이 닫으면 「테스트가 깨졌다」와 「스냅샷을 못 펼쳤다」가 화면에서 같은 모양이 되어
+        사람이 엉뚱한 것을 고치러 간다 — 그게 이 함수가 생긴 이유다(F2b). 시작 전 실패는
+        `outcome.PREFLIGHT_CODES` 전부인데, 한 자리로 모으지 않으면 그중 하나만 코드를 다는
+        오늘 같은 상태로 다시 갈라진다.
+
+        `only_from` 이 없으면 자재화 중에 **수용된 취소를 이 실패가 덮는다**: 취소는 `git fetch` 를
+        끊지 못하므로 「5분째라 취소했는데 fetch 가 시간 초과로 끝난」 잡이 사람이 멈춘 잡이 아니라
+        실패로 남는다. 프로세스는 뜨지 않았으니 사용자의 취소가 이겨야 한다(M5l S4 와 같은 경주).
+
+        서버가 만든 코드이므로 라벨(`failed_step`·`last_step`)도 대장 행도 남기지 않는다
+        (M5h 불변식) — 스크립트가 선언한 실패가 아니다.
+        """
+        text, summary_code, clean = outcome.summary(code, **args)
+        closed = self.store.finish(
+            job.id,
+            FAILED,
+            now=self.now_fn(),
+            exit_code=None,
+            summary=text,
+            summary_code=summary_code,
+            summary_args=clean,
+            only_from=(RUNNING,),
+        )
+        if not closed:
+            # 검사와 finish 사이에 `cancelling` 이 됐다 — 취소가 이긴다. 프로세스는 없었으니
+            # 여느 취소처럼 요청자 이름으로 닫는다. 이 대체 경로가 없으면 잡은 종료 상태에 못 가고
+            # `running` 으로 영영 남는다.
+            self._close_cancelled_before_start(job)
 
     @staticmethod
     def _append_log(log_path: Path, line: str) -> None:
@@ -441,13 +471,11 @@ class Worker(threading.Thread):
             elif tar_path.is_file():
                 extract_tree(tar_path, workspace)
             else:
-                raise MaterializeError("snapshot file is missing")
+                raise MaterializeError("snapshot_missing")
             return
         repo = self.config.repo(job.source.repo)
         if repo is None:
-            raise MaterializeError(
-                f"repo '{job.source.repo or preset.repo}' is no longer configured"
-            )
+            raise MaterializeError("repo_missing", repo=job.source.repo or preset.repo)
         prepare_git_ref(
             job,
             workspace,
@@ -463,7 +491,10 @@ class Worker(threading.Thread):
         job_dir.mkdir(parents=True, exist_ok=True)
         preset = self.config.preset(job.preset)
         if preset is None:
-            self._fail(job, f"preset '{job.preset}' is no longer configured")
+            # 잡이 큐에 있는 사이 설정에서 프리셋이 사라졌다 — 프리셋 하나를 지우고 재기동하면 그
+            # 프리셋의 대기 잡이 한꺼번에 이렇게 죽는다. 코드가 있어야 「게이트가 깨진 게 아니라
+            # 방금 한 편집 때문」임을 세어서 말할 수 있다. 문장은 예전과 글자까지 같다.
+            self._fail_before_start(job, "preset_missing", preset=job.preset)
             return
         spec = RunSpec(
             job_id=job.id,
@@ -493,26 +524,19 @@ class Worker(threading.Thread):
             # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다(M5j G4 · 결정 85). 서버가 만든
             # 코드라 라벨(`failed_step`·`last_step`)도 대장 행도 없다(M5h 불변식). 인자는 이름
             # 하나뿐이다 — PATH 와 경로는 상태에 싣지 않는다(PLAN 「보안」).
-            text, code, args = outcome.summary("tool_missing", tool=e.public_name)
-            closed = self.store.finish(
-                job.id,
-                FAILED,
-                now=self.now_fn(),
-                exit_code=None,
-                summary=text,
-                summary_code=code,
-                summary_args=args,
-                only_from=("running",),
-            )
-            if not closed:
-                # 검사와 finish 사이에 `cancelling` 이 됐다 — 취소가 이긴다(M5l S4). 프로세스는
-                # 없었으니 여느 취소처럼 요청자 이름으로 닫는다.
-                self._close_cancelled_before_start(job)
+            self._fail_before_start(job, "tool_missing", tool=e.public_name)
             if not self.config.server.keep_workspace_on_failure:
                 shutil.rmtree(workspace, ignore_errors=True)
             return
         except (MaterializeError, RunnerError) as e:
-            self._fail(job, str(e))
+            # 워크스페이스를 못 만들었거나 프로세스를 못 띄웠다 — 잡의 테스트가 깨진 것이 아니고,
+            # 둘은 고칠 곳이 다르다(스냅샷·레포 vs 프리셋의 `argv`). 예외가 **코드**를 들고 오므로
+            # 여기서 문구를 만들지 않는다: 문구를 만들던 시절 `argv[0]` 의 절대 경로와 git stderr
+            # 가 토큰 없이 읽히는 `/api/status` 로 나갔다(PLAN 「보안」). 원문은 잡 로그에만 —
+            # 로그를 못 연 경우(`log_unavailable`)는 여기서도 못 쓴다(같은 파일이다).
+            if e.log:
+                self._append_log(log_path, f"[rcm] {e.log}")
+            self._fail_before_start(job, e.code, **e.args_public)
             return
         # 워크스페이스를 지우기 **전에**, 그리고 종료를 커밋하기 **전에** 모은다(명세 §5).
         bundle = self._collect_artifacts(job, preset, workspace, result)

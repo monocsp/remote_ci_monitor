@@ -65,6 +65,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      **Chrome 이 있어야 돈다**
   ㉚ web-host-busy-no-history — 「바쁨」 판정에서 이력을 뺌(경계 하나로 되돌림): 같은 표본 열 개에
      판정이 여덟 번 뒤집힌다 (`web/app.js`, node --test)
+  ㉛ step-stuck-ignores-step-median — 단계 판정이 다시 침묵으로 돌아감: 단계 실측을 재 놓고
+     쓰지 않는다 (`core/queue.py`, 2026-09-15 사고 — 정상으로 도는 `gate` 가 매 실행 빨개졌다)
+  ㉜ web-quiet-is-actionable — 「조용함」을 「확인이 필요한 작업」 패널에 올림: 빨간 소음이
+     이름만 바꿔 그대로 남는다 (`web/app.js`, node --test)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -502,6 +506,21 @@ MUTANTS = (
         old='var limit = prev === "busy" ? BUSY_OFF : BUSY_ON;',
         new="var limit = BUSY_ON;",
         tests=("tests/web/host_hysteresis.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        name="step-stuck-ignores-step-median",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="        step_stuck = current_seconds > threshold",
+        new="        step_stuck = silent",
+        tests=("tests/test_queue.py",),
+    ),
+    Mutant(
+        name="web-quiet-is-actionable",
+        path="src/remote_ci_monitor/web/app.js",
+        old='"blocked_by_group", "overdue", "paused"];',
+        new='"blocked_by_group", "overdue", "paused", "quiet"];',
+        tests=("tests/web/summary.test.js",),
         runner="node",
     ),
 )

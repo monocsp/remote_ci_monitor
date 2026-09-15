@@ -940,6 +940,47 @@ class Store:
             for r in rows
         ]
 
+    def list_step_sample_ids(self, key: str, *, since: datetime, limit: int) -> list[int]:
+        """그 key 의 최근 **성공** 잡 id, 늦게 끝난 것부터 `limit` 개.
+
+        단계 실측 중앙값의 표본이다. `jobs_key_finished ON jobs(key, finished_at DESC)`(v13)를
+        타고 그 key 의 꼬리만 읽는다 — **45일치 표본 전체의 마커를 훑지 않는다**. `events` 에는
+        `kind` 로 훑는 인덱스가 없어서(`events_job ON events(job_id, id)` 하나뿐) 그렇게 설계하면
+        `/api/status` 가 보존된 이벤트 수에 선형으로 끌려간다. M5f 결정 49 가 `list_sample_rows`
+        로 이미 한 번 고친 함정이다.
+
+        `sample_policy` 는 **보지 않는다** — 항상 `succeeded` 다. 실패한 잡의 단계 소요는
+        「평소 얼마나 걸리나」의 표본이 아니다. 실패는 대개 단계를 일찍 끊는다.
+        """
+        rows = (
+            self._conn()
+            .execute(
+                # `INDEXED BY` 는 계약이다. 플래너는 통계 없이 `jobs_recent`(state, finished_at)
+                # 를 고르는데, 그러면 key 와 무관하게 45일치 성공 잡을 전부 훑는다 — 피하려던
+                # 바로 그 스캔이다. 여기서는 key 하나의 꼬리만 읽어야 한다.
+                "SELECT id FROM jobs INDEXED BY jobs_key_finished "
+                "WHERE key=? AND state=? AND finished_at IS NOT NULL "
+                "AND finished_at >= ? ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (key, SUCCEEDED, _ts(since), int(limit)),
+            )
+            .fetchall()
+        )
+        return [int(r["id"]) for r in rows]
+
+    def finished_at_for(self, job_ids: Iterable[int]) -> dict[int, datetime]:
+        """잡 id → 종료 시각. 마커를 Progress 로 접을 때 마지막 단계를 닫는 데 쓴다.
+
+        `progress_from_markers` 는 끝 마커가 없는 마지막 단계를 `finished_at` 으로 닫는다 —
+        `gate` 의 마지막 단계가 딱 그 꼴이라 이 값이 없으면 사고가 난 그 단계가 표본에서
+        통째로 빠진다. 기본키 하나로 **한 문장**이다(표본 잡 수·이벤트 수와 무관하다).
+        """
+        ids = tuple(job_ids)
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        rows = self._conn().execute(f"SELECT id, finished_at FROM jobs WHERE id IN ({marks})", ids)
+        return {int(r["id"]): at for r in rows if (at := _dt(r["finished_at"])) is not None}
+
     def list_samples(self, since: datetime) -> list[Job]:
         """표본 후보: 시작·종료 시각이 있는 종료 잡. 정책 필터는 순수 계층이 한다."""
         marks = ",".join("?" * len(TERMINAL_STATES))

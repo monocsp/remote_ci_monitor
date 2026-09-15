@@ -114,17 +114,17 @@ def main() -> int:
 
     # ── 웹 ──────────────────────────────────────────────────────────────────
     d = rects("queue")
-    # 3 은 행 자체, 4 는 그 아래 막대, 5 는 펼친 스텝 목록 — 상자를 겹쳐 그리지 않는다
-    row_a = pick(d, "tr[data-job]", job="4", idx=0)
-    bar_a = pick(d, "tr.qbar", job="4")
+    # 3 은 행 자체, 4 는 그 행의 「진행 시간」 칸 안 막대, 5 는 펼친 스텝 목록 — 겹쳐 그리지 않는다.
+    # 막대는 더 이상 자기 행(`tr.qbar`)이 아니다 — `td.elapsed` 안의 84px 짜리다.
+    # 막대가 행 안으로 들어왔으니 3 은 행의 **왼쪽 절반**(누가 · 무엇을 · 지금 뭘 하나)만 두른다 —
+    # 행 전체를 두르면 4 의 상자가 3 의 상자 안에 들어가 어느 쪽을 가리키는지 알 수 없다.
+    row_a = union(*(pick(d, f"td.{c}", job="4") for c in ("job", "key", "requester", "reason")))
+    bar_a = pick(d, "td.elapsed .pwrap", job="4")
     steps_a = union(
         pick(d, ".prog .head", idx=0), pick(d, ".minibar", idx=0), pick(d, ".steps", idx=0)
     )
-    pool = union(
-        pick(d, ".pool-h", job="mac2"),
-        pick(d, "tr[data-job]", job="6", idx=0),
-        pick(d, "tr.qbar", job="6"),
-    )
+    # 풀 절: 머리 줄부터 그 아래 잡 행까지. 막대가 행 안으로 들어와 행 상자가 막대까지 담는다.
+    pool = union(pick(d, ".pool-h", job="mac2"), pick(d, "tr[data-job]", job="6", idx=0))
     # 히어로: 주석 없는 큐 화면(README 맨 위)
     hero = Image.open(RAW / "queue.png").crop((0, 0, 1280, 745))
     sizes["hero-queue.png"] = save_png(hero, OUT / "hero-queue.png")
@@ -136,7 +136,9 @@ def main() -> int:
             (1, pick(d, "#summary")),
             (2, pick(d, "tr.qgroup.running"), "l"),
             (3, row_a),
-            (4, bar_a, "r"),  # 막대 상자는 얇다 — 번호를 오른쪽 밖에 둬야 5 와 안 겹친다
+            # 막대는 이제 「진행 시간」 칸 안이다 — 번호를 오른쪽에 두면 옆 칸의 확신도 배지를
+            # 덮는다. 왼쪽(상태 칸의 빈자리)에 둔다.
+            (4, bar_a, "l"),
             (5, steps_a, "l"),
             (6, union(pick(d, "tr.qgroup.waiting"), pick(d, "tr[data-job]", job="5")), "l"),
             (7, pick(d, "td.eta", idx=1)),
@@ -194,7 +196,9 @@ def main() -> int:
             (4, pick(r, ".chip", text="pool"), "tr"),
             (5, union(pick(r, "[data-more-recent]"), pick(r, "#estimates")), "l"),
         ],
-        crop=(0, 300, 1280, 700),
+        # 절 머리(「Recent · last 5 of 6」)부터 추정 근거 줄까지 — 위가 잘려 첫 행이 반만 보이던
+        # 자리를 절 머리에 맞춘다
+        crop=(0, 255, 1280, 655),
     )
 
     h = rects("host")
@@ -203,8 +207,12 @@ def main() -> int:
         "host",
         [
             (1, pick(h, ".hostcard .hn", idx=0), "l"),
-            (2, pick(h, '[data-metric="cpu"]', idx=0), "t"),
-            (3, pick(h, '[data-metric="mem"]', idx=0), "t"),
+            # 카드 **위**의 12px 짜리 틈에는 26px 번호 원이 안 들어간다 — `t` 로 두면 바로 위의
+            # 「sampled 5s ago · darwin · 10 cores · load 11.2」 를 덮어 `pled 5s ago` · `10 c…es`
+            # 로 읽힌다(2026-09-15 실측). 그 줄의 글자는 x≈323 에서 끝나므로 ④⑤ 는 `t` 로 두어도
+            # 빈자리를 짚지만, ② 는 왼쪽 여백으로 ③ 은 자기 카드 안쪽 아래로 내린다.
+            (2, pick(h, '[data-metric="cpu"]', idx=0), "l"),
+            (3, pick(h, '[data-metric="mem"]', idx=0), "b"),
             (4, pick(h, '[data-metric="disk"]', idx=0), "t"),
             (5, pick(h, '[data-metric="gpu"]', idx=0), "t"),
             (6, pick(h, ".hostcard .top", idx=0), "l"),
@@ -223,7 +231,8 @@ def main() -> int:
             (2, pick(dn, ".wk", text="down")),
             (3, pick(dn, ".pool-h", job="mac2"), "l"),
         ],
-        crop=(0, 0, 1280, 330),
+        # 요약이 카드 격자가 되며 큐가 아래로 밀렸다 — 풀 머리와 그 잡 행까지 담게 늘린다
+        crop=(0, 0, 1280, 500),
     )
 
     p = rects("phone")

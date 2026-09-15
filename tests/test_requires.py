@@ -30,7 +30,7 @@ import pytest
 import test_cli_worker as cliw
 from remote_ci_monitor.config import ConfigError, ServerConfig, parse_preset
 from remote_ci_monitor.core import outcome
-from remote_ci_monitor.core.model import FAILED, SUCCEEDED, Source
+from remote_ci_monitor.core.model import CANCELLING, FAILED, SUCCEEDED, Source
 from remote_ci_monitor.runner import RequiredToolMissing, RunSpec, run_job
 from remote_ci_monitor.store import Store
 from remote_ci_monitor.worker import Worker
@@ -416,6 +416,35 @@ def test_finish_keeps_a_structured_tool_missing_and_drops_everything_else(wsrv):
             "summary_code": "tool_missing",
             "summary_args": {"tool": "fvm"},
         },
+        # F2b 로 어휘가 늘어도 fail-closed 는 그대로다 — 모르는 코드는 400 이지 「그냥 저장」이
+        # 아니고, 아는 키의 값이 모양에 안 맞으면 400 이다.
+        {"outcome": "failed", "exit_code": None, "summary_code": "rm_rf_everything"},
+        {
+            "outcome": "failed",
+            "exit_code": 3,
+            "summary_code": "snapshot_missing",
+            "summary_args": {},
+        },
+        {
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "blob_missing",
+            "summary_args": {"sha": "../../etc/passwd"},  # 16진이 아니다
+        },
+        {
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "snapshot_rejected",
+            "summary_args": {"kind": "rm -rf /"},  # 닫힌 까닭도 클래스 이름도 아니다
+        },
+        # 코드만 오고 인자가 없으면 문장이 `?` 밖에 못 말한다 — 로컬 레인이 남기는 행과 달라진다
+        {"outcome": "failed", "exit_code": None, "summary_code": "repo_missing"},
+        {
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "git_failed",
+            "summary_args": {"kind": "timeout", "op": "rm -rf", "seconds": 1},
+        },
     ],
 )
 def test_finish_rejects_unknown_or_inconsistent_structured_summaries(wsrv, body):
@@ -423,6 +452,102 @@ def test_finish_rejects_unknown_or_inconsistent_structured_summaries(wsrv, body)
     status, resp = wsrv.req("POST", f"/worker/jobs/{jid}/finish", token="build-02", json_body=body)
     assert status == 400, resp
     assert wsrv.view(jid)["state"] == "running"
+
+
+def test_finish_keeps_only_the_arguments_the_code_declares(wsrv):
+    """T12(F2b): 워커는 토큰이 있을 뿐 신뢰 경계 안이 아니다 — 잡 요약을 짜낼 권한까지 준 적은
+    없다. `tool` 을 다시 basename 뜨는 것과 같은 이유로 멤버 이름도 서버가 **다시** 이름만 남기고,
+    표에 없는 키는 통째로 버린다. 문장은 워커가 보낸 것이 아니라 서버가 코드로 그린 것이다."""
+    jid = running_job(wsrv)
+    wsrv.log("build-02", jid, b"::rcm::step::build\n")  # 있어도 라벨이 되지 않는다
+    status, body = wsrv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "snapshot_rejected",
+            "summary_args": {
+                "kind": "absolute_path",
+                "member": "/srv/private/blobs/aa/secret.txt",
+                "detail": "cannot download snapshot: 503 from /srv/private/blobs/aa",
+                "path": "/etc/shadow",
+            },
+        },
+    )
+    assert status == 200, body
+    v = wsrv.view(jid)
+    assert v["summary_code"] == "snapshot_rejected"
+    assert v["summary_args"] == {"kind": "absolute_path", "member": "secret.txt"}
+    assert v["summary"] == "snapshot rejected: absolute path in archive: secret.txt"
+    assert v["failed_step"] is None and v["last_step"] is None
+    assert ledger_rows(wsrv.store, jid) == []
+    status, doc = wsrv.req("GET", "/api/status", token="build-02")
+    assert status == 200 and "/srv/private" not in str(doc) and "/etc/shadow" not in str(doc)
+
+
+def test_the_server_closes_a_cancelling_job_as_cancelled_over_a_preflight_finish(wsrv):
+    """T13(F2b) 취소 경주: 자재화 실패도 사용자의 취소를 덮지 않는다 — 코드가 늘어도 같은 규칙이다
+    (`tool_missing` 에 대한 M5l S4 의 쌍둥이)."""
+    jid = running_job(wsrv)
+    assert wsrv.cancel(jid)[1]["state"] == "cancelling"
+    status, body = wsrv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "snapshot_missing",
+            "summary_args": {},
+        },
+    )
+    assert status == 200, body
+    v = wsrv.view(jid)
+    assert v["state"] == "cancelled" and v["exit_code"] is None, v
+    assert v["summary_code"] == "cancelled_by" and v["summary_args"] == {"by": "alice-laptop"}
+
+
+def test_a_cancel_that_lands_after_the_server_read_the_job_still_wins(wsrv):
+    """T14(F2b · 검토 2): 원격 취소 경주의 **마지막 틈**. 서버는 요청 맨 앞에서 잡 상태를 한 번
+    읽고, 그 사본으로 「취소 중인가」를 판단한 뒤, 맨 끝에서 finish 를 쓴다. 취소가 그 둘 **사이**
+    에 착륙하면 낡은 사본은 `running` 이라 preflight 실패가 살아남고, 조건 없는 finish 가
+    `cancelling` 을 `failed` 로 덮었다 — 사용자가 멈춘 잡이 실패로 기록된다.
+
+    로컬 레인은 `only_from=(RUNNING,)` 으로 이 틈을 닫았다(M5l S4). 여기서는 서버가 잡을 읽은
+    **뒤에** 부르는 `store.markers` 에 취소를 끼워 넣어 그 순서를 그대로 만든다.
+    """
+    jid = running_job(wsrv)
+    real_markers = wsrv.store.markers
+    landed = []
+
+    def cancel_then_read(job_id: int):
+        if not landed:
+            landed.append(wsrv.store.request_cancel(jid, "alice-laptop", wsrv.clock(), 1))
+        return real_markers(job_id)
+
+    wsrv.store.markers = cancel_then_read  # type: ignore[method-assign]
+    try:
+        status, body = wsrv.req(
+            "POST",
+            f"/worker/jobs/{jid}/finish",
+            token="build-02",
+            json_body={
+                "outcome": "failed",
+                "exit_code": None,
+                "summary_code": "git_failed",
+                "summary_args": {"kind": "timeout", "op": "git fetch", "seconds": 300},
+            },
+        )
+    finally:
+        wsrv.store.markers = real_markers  # type: ignore[method-assign]
+    assert landed == [CANCELLING], landed  # 취소가 정말 그 사이에 들어갔다
+    assert status == 200, body
+    v = wsrv.view(jid)
+    assert v["state"] == "cancelled" and v["exit_code"] is None, v
+    assert v["summary_code"] == "cancelled_by" and v["summary_args"] == {"by": "alice-laptop"}
+    assert [t["state"] for t in v["transitions"]][-2:] == ["cancelling", "cancelled"]
 
 
 def test_finish_reduces_a_tool_given_as_a_path_to_its_name(wsrv):

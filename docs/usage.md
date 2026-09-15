@@ -204,7 +204,22 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    The same document is `GET /jobs/<N>`, so `rcm wait --job N` prints it too.
 4. **Exit 1 means the job failed.** Exit 2 is cancelled or timed out. Exit 3 is *unknown* — the
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
-   treats 3 as red, it will be red for the wrong reason.
+   treats 3 as red, it will be red for the wrong reason. Exit 5 is a **delivery** failure and only
+   appears with `--fetch-artifacts`: the job's own result is in `wait_exit_code`, and the files
+   are what did not arrive ([Getting the files back](#8-getting-the-files-back)).
+
+5. **A job that never started says so.** Some failures happen before your script runs, and the
+   summary names which: the workspace could not be built (`snapshot_missing`,
+   `snapshot_rejected`, `blob_missing`, `repo_missing`, `commit_missing`, `git_failed`,
+   `snapshot_download_failed`), the process could not be launched
+   (`launch_executable_missing`, `launch_permission_denied`, `launch_failed`,
+   `log_unavailable`), the preset left the config while the job waited (`preset_missing`), or a
+   `requires` entry was not there (`tool_missing`). All of them carry a `summary_code` and have
+   `exit_code: null`, so a script can tell "my tests failed" from "the job never ran" without
+   reading the sentence. These summaries carry no free text at all: the arguments are a code, a
+   name already in the job, or a number. The original text — including the command that could
+   not be started — is in the job log, which needs a token; the one case with nothing to read
+   there is `log_unavailable`, where the log file is what could not be opened.
 
 A cancelled job has no failed step and no last step: you stopped it, it did not break.
 
@@ -246,6 +261,14 @@ artifacts: wrote 12, unchanged 51, conflicted 1
 5. A `git_ref` preset has no submitted tree, so `--output DIR` says where to write, and the
    baseline is empty: a file already sitting there with different bytes is `conflicted` and only
    `--force` overwrites it.
+6. **The exit code says whether you got the files.** 0 means you have them — or that there were
+   never any to have, because the preset declares no `artifacts` globs (`disabled`) or they
+   matched nothing (`empty`). Everything else is **5**: the job has not finished yet (`pending`),
+   the bundle was dropped, failed, expired or already purged, or a file on disk would have been
+   overwritten and you did not pass `--force`. A job that failed still reports its own exit code
+   first — a broken test matters more than a missing file.
+7. `--dry-run` answers "would this apply cleanly?" with the code it would have used: 0 for a clean
+   plan, 5 if anything is `conflicted`. It writes nothing either way.
 
 Submitted with `--no-wait`, or want them somewhere else?
 
@@ -266,8 +289,8 @@ rcm artifacts 412 --fetch --output ./out   # write it into a directory you name
    ETA. The reason a job is not moving is stated, never guessed.
 3. **Recent results and medians** — how long this preset usually takes, from real runs, which is
    where the ETAs come from.
-4. **The host**: load, CPU, memory, disk, GPU and the top processes. This is how you tell "stuck" from
-   "the machine is busy".
+4. **The host**: load, CPU, memory, disk, GPU and the top processes. This is how you tell "not
+   responding" from "the machine is busy".
 5. **Other pools** get their own section, so a second build machine is visible from the same
    screen.
 
@@ -285,26 +308,29 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 2. Each **remote worker**, with its pool and job. A worker that stopped answering shows `down`.
 3. The **connection state**. `live` means the event stream is open; `polling` means it fell back,
    with the age of the last successful update.
-4. **🔑** takes your token. It is kept in this browser only, never in the URL.
+4. The **key button** takes your token. It is kept in this browser only, never in the URL.
 
 ### The queue
 
 ![the queue: the three-answer summary, the running job with its progress bar and steps, the waiting job with an ETA, and the other pool](images/ui/web-queue.png)
 
-1. **Three answers at a glance**: your jobs, anything not moving, and how hard the machine is
-   working.
+1. **Three answers at a glance**: your jobs, anything that needs a look, and how hard the machine
+   is working.
 2. **Running now, and waiting**, each with a count. An empty group says so rather than vanishing,
    so "nothing is running" never looks the same as "the page did not load".
 3. **The running job**, with who asked for it and what tree it is testing. Rows arrive folded; the
-   current step stays in the reason column as `step 2/4 build 2s`, so a folded row still says what
+   current step stays in the status column as `step 2/4 build 2s`, so a folded row still says what
    is happening.
-4. **How far along it is**, on one bar, and — always — what the bar measured. `50% · 4/8 steps`
-   when the job declares how many steps it has; `70% · by measured time` or `by preset estimate`
-   when it does not, so you can see how much the number is worth. A job past its estimate reads
-   `past the estimate`, one that finished every declared step but has not exited reads
-   `finalizing`, and a job nothing can be said about — no samples at all, preparing its workspace,
-   or likely stuck — reads `progress —`. A running job never fills the bar: a full bar means
-   finished, and this one is still going.
+4. **How far along it is**, on a short bar inside the **Elapsed** column, and — always — what the
+   bar measured. `50% · 4/8 steps` when the job declares how many steps it has; `70% · by measured
+   time` or `by preset estimate` when it does not, so you can see how much the number is worth.
+   A job that finished every declared step but has not exited reads `4/4 steps`, and a job nothing
+   can be said about — no samples at all, preparing its workspace, past its estimate, or not
+   responding — reads `progress —`. The label stops there: whether the job is past its estimate,
+   not responding or merely quiet is told by the bar's colour and hatching and by the status
+   column, which already says it in words. Point at the bar, or read it with a screen reader, and
+   the condition is spelled out in full (`50% · 4/8 steps · not responding`). A running job never
+   fills the bar: a full bar means finished, and this one is still going.
 5. **Its steps**, opened with **▸**, in order, with the finished ones ticked and the current one
    timed. The seconds count up as you watch; they do not sit still and then jump when the page
    refreshes. The log tail and the **Log** button are in the same block. **Cancel** does not hide
@@ -319,7 +345,7 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 
 ![after pasting a token: the token button shows your name, your jobs are marked, the log tail and buttons appear](images/ui/web-your-jobs.png)
 
-1. Paste the token behind **🔑**. The button then shows the token's name.
+1. Paste the token behind the **key button**. The button then shows the token's name.
 2. **Your jobs** in the summary counts what you asked for, including jobs you joined.
 3. Your rows are marked **you**.
 4. The last lines of the log appear under your running job, updating as it goes.

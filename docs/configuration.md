@@ -263,6 +263,35 @@ no `failed_step`, no `last_step` and no `failed: …` line: the tool was missing
 could say anything. A job cancelled while its workspace was still being prepared ends `cancelled`,
 not `tool_missing` — the check runs only for a job nobody has stopped.
 
+**When a job never starts.** `tool_missing` is one of a family of failures that happen before the
+process exists, and the code says which one — because the thing to fix is different each time.
+The workspace could not be built: `snapshot_missing` (the server has no snapshot for this job),
+`snapshot_rejected` (the archive was refused; the argument names the reason and the member),
+`blob_missing` (retention had already deleted a file the snapshot needs), `repo_missing` (the
+repository left `[[repos]]` — `where: "worker"` means it is the worker's config, not the
+server's), `commit_missing` (the ref moved or was force-pushed), `git_failed` (a fetch or
+checkout timed out or exited non-zero) and `snapshot_download_failed` (a remote worker could not
+download it). The process could not be launched: `launch_executable_missing`,
+`launch_permission_denied`, `launch_failed` and `log_unavailable`. The config changed while the
+job waited: `preset_missing`. And `requires` was not satisfied: `tool_missing`. Anything else
+that stopped the workspace from being built — a manifest the server could not read, a disk that
+filled — is `workspace_failed`, with the exception class as its argument. All of them end
+`failed` with `exit_code: null`, no `failed_step`, no `last_step` and no `failed: …` line, and
+all of them lose to a cancel that arrives while the workspace is being prepared — on a remote
+worker as well as a local lane. A remote worker reports from the same table; a worker still
+running an older build than the server is the exception, because the version is compared when it
+registers and not on every report, so its jobs keep arriving with a sentence and no code until it
+is restarted.
+
+These summaries carry **no free text**. `summary_args` holds only what the code declares — an
+exception class name, a git operation and exit code, a hex sha, a repository or preset name that
+is already in the job document — because `/api/status` is readable without a token in the default
+configuration. The original text (`argv[0]`, the git stderr, the exception) is written to the job
+log, which always needs a token; a remote worker sends it to the same place. The one exception is
+`log_unavailable`: the log file is what could not be opened, so there is nowhere to write it, and
+the code itself is the diagnosis. A rejected archive member keeps its **name** (`escape.txt` from
+`../escape.txt`) — it came from the snapshot you sent and it is what you need to fix it.
+
 **The launchd trap.** A service started by `launchd` (or `systemd`) has a short `PATH` —
 `/usr/bin:/bin:/usr/sbin:/sbin` — so `fvm` and `gitleaks` from Homebrew are found in your shell and
 not in the job, and `requires` is what makes that visible. The fix is a `PATH` the job owns:
@@ -327,6 +356,48 @@ its lines late and in bursts (`stdbuf -oL`, `PYTHONUNBUFFERED=1`, or the tool's 
 the exact line your script prints, anchored at the start of the line — a loose `FAIL` anywhere
 turns a mention into a verdict. `tests/test_examples.py` locks the wrapper by feeding its output to
 the same code the server reads markers with.
+
+## Estimates, and when a job is called not responding
+
+Every ETA on the page comes from the same place: the median of this preset's own finished runs.
+`[estimate]` says how that median is built (`sample_days`, `sample_policy`, `min_job_seconds`,
+`min_samples`, `default_seconds`, `floor_remaining_seconds` — each with a comment in
+`examples/server.toml`) and when the server stops believing a running job is alive.
+
+Silence is not that moment. A job that has stopped printing has not necessarily stopped working:
+a preset whose last step runs nine test shards, gitleaks and a web build in parallel says nothing
+for minutes and is perfectly healthy, because those tools buffer their output until they finish.
+The server decides in this order, and the screen names only the rule that fired:
+
+1. **The current step against its own history.** For the last successful runs of the same preset
+   the server reads the step markers those runs already wrote, takes the median time of the step
+   the job is in now, and calls the job not responding once the step has run longer than
+   `step_stuck_multiplier` times that median. A step median counts only once `step_min_samples`
+   runs have measured it — a step nobody has measured yet says nothing either way.
+2. **The whole job against its estimate.** `elapsed > stuck_multiplier × expected`, unchanged.
+3. **Silence, and only for a job that prints no step markers at all.** With no steps to look at,
+   `no_output_seconds` of silence is the only signal there is, so there it is the verdict.
+
+The step threshold never drops below `no_output_seconds`: it is
+`max(step_stuck_multiplier × step median, no_output_seconds)`. Without that floor a step whose
+median is half a second would be called dead a second and a half in — a claim the silence rule
+could never have made.
+
+A job that is stepping along normally and has merely gone silent is **quiet**: grey on the page,
+never red, and deliberately not in the "needs a look" summary, which lists only what a person can
+act on. A job that has no history yet is quiet too, not red, until its steps have been measured.
+
+| key | default | what it is |
+|---|---|---|
+| `stuck_multiplier` | `3` | how many times its estimate the whole job may run before it is called not responding |
+| `step_stuck_multiplier` | `3` | how many times its own measured median the current step may run |
+| `step_min_samples` | `3` | successful runs a step needs before its median is trusted. Higher than `min_samples` (2) on purpose: step times are noisier than job times |
+| `no_output_seconds` | `240` | silence this long makes a job quiet. It is also the floor under the step threshold, and the verdict for a job that declares no steps at all |
+
+`step_stuck_multiplier` must be greater than 1 and `step_min_samples` at least 2; `rcm serve`
+refuses to start otherwise. Nothing here changes the status document's `schema_version` — the
+three keys `estimate.quiet`, `estimate.stuck_code` (`over_step`, `over_elapsed`, `no_output`) and
+`estimate.step_expected_seconds` were added, and adding keys is free.
 
 ## Retention: what is kept, and for how long
 

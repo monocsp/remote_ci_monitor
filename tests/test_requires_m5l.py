@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -23,7 +24,9 @@ from datetime import UTC, datetime
 import pytest
 
 from remote_ci_monitor.config import ConfigError, WorkerConfig, parse_preset
-from remote_ci_monitor.core.model import CANCELLED, CANCELLING, LOST
+from remote_ci_monitor.core import outcome
+from remote_ci_monitor.core.model import CANCELLED, CANCELLING, FAILED, LOST
+from remote_ci_monitor.materialize import MaterializeError
 from remote_ci_monitor.remote_worker import RemoteWorker
 from remote_ci_monitor.runner import RequiredToolMissing, run_job
 from remote_ci_monitor.store import Store
@@ -230,6 +233,51 @@ def test_a_job_cancelled_while_materialising_ends_cancelled_not_tool_missing(wen
     assert preflight_lines(log) == [] and "STARTED" not in log
 
 
+def test_a_job_cancelled_while_materialising_ends_cancelled_not_failed(wenv, monkeypatch):
+    """T9(F2b): 같은 경주가 자재화 실패에도 있다. 취소는 `git fetch` 를 끊지 못하므로 「5분째라
+    취소했는데 fetch 가 시간 초과로 끝난」 잡이 오늘은 `failed` 로 남는다 — 사람이 멈춘 잡이
+    실패로 기록된다. 프로세스는 뜨지 않았으니 취소가 이겨야 한다."""
+    store, cfg = wenv
+    jid = enqueue(store, cfg, "ok")
+    gate = threading.Event()
+
+    def hold_then_fail(self, *a):
+        gate.wait(10)
+        raise MaterializeError("git_failed", kind="timeout", op="git fetch", seconds=300)
+
+    monkeypatch.setattr(Worker, "_materialize", hold_then_fail)
+
+    def cancel_then_release() -> None:
+        _cancel_when_running(store, jid)
+        gate.set()
+
+    run_one(store, cfg, jid, before_wait=cancel_then_release)
+    j = store.get_job(jid)
+    assert j.state == CANCELLED and j.exit_code is None, (j.state, j.summary)
+    assert j.summary_code == "cancelled_by" and j.summary_args == {"by": "alice-laptop"}
+    assert j.cancelled_by == "alice-laptop"
+    assert [t.state for t in j.transitions] == ["queued", "running", "cancelling", "cancelled"]
+
+
+def test_a_cancel_landing_between_the_check_and_a_materialize_failure_still_wins(wenv, monkeypatch):
+    """T10(F2b): 경주의 마지막 틈 — 취소가 `only_from` 검사와 `finish` **사이**에 착륙한다.
+    `finish` 가 거절하고, 대체 경로가 `cancelled` 로 닫는다. 대체 경로가 없으면 잡은 종료 상태에
+    가지 못하고 `running` 으로 영영 남는다."""
+    store, cfg = wenv
+    jid = enqueue(store, cfg, "ok")
+
+    def cancel_then_fail(self, *a):
+        assert store.request_cancel(jid, "alice-laptop", datetime.now(UTC), 1) == CANCELLING
+        raise MaterializeError("snapshot_missing")
+
+    monkeypatch.setattr(Worker, "_materialize", cancel_then_fail)
+    run_one(store, cfg, jid)
+    j = store.get_job(jid)
+    assert j.state == CANCELLED and j.exit_code is None, (j.state, j.summary)
+    assert j.summary_code == "cancelled_by" and j.summary_args == {"by": "alice-laptop"}
+    assert [t.state for t in j.transitions] == ["queued", "running", "cancelling", "cancelled"]
+
+
 def test_a_cancel_that_lands_between_the_check_and_the_finish_still_wins(wenv, monkeypatch):
     """경쟁의 마지막 틈: 취소 확인 뒤·finish 전에 `cancelling` 이 됐다 — `only_from=("running",)`
     이 `failed` 를 거절하고 잡은 `cancelled` 로 닫힌다."""
@@ -292,6 +340,54 @@ def test_the_remote_worker_reports_lost_when_stopping_before_the_preflight(remot
     worker.run_claimed(1, _claim_needing(7, MISSING))
     assert fake.finish_kwargs["outcome"] == LOST, fake.finish_kwargs
     assert "summary_code" not in fake.finish_kwargs, fake.finish_kwargs
+
+
+def test_the_remote_worker_reports_repo_missing_with_the_same_code_as_a_local_lane(remote):
+    """T11(F2b): 원격에서 자재화가 막히면 로컬 레인이 남길 행과 **같은 코드**를 보낸다. 문장만
+    보내면 서버는 그것을 그대로 저장하고, 화면은 「테스트가 깨졌다」와 구별하지 못한다."""
+    worker, fake = remote
+    payload = claim_payload(7, argv=["sh", "-c", "echo hi"])
+    # 워커 설정에 `[[repos]]` 가 없으니 git_ref 잡은 자재화에서 막힌다
+    payload["job"]["source"] = {"mode": "git_ref", "repo": "app", "ref": "main", "sha": "0" * 40}
+    worker.run_claimed(1, payload)
+    assert fake.finish_kwargs["outcome"] == FAILED, fake.finish_kwargs
+    assert fake.finish_kwargs["exit_code"] is None
+    assert fake.finish_kwargs["summary_code"] == "repo_missing"
+    assert fake.finish_kwargs["summary_args"] == {"repo": "app", "where": "worker"}
+    # `where` 하나로 **어느 쪽 설정**을 고칠지가 갈린다 — 서버에는 있고 이 워커에는 없다
+    assert fake.finish_kwargs["summary"] == "repo 'app' is not configured on this worker"
+    # 실행이 시작되지 못했다는 사실은 처분으로 남는다(§5) — 코드를 붙이면서 잃으면 안 된다
+    assert fake.finish_kwargs["artifacts"]["state"] == "skipped"
+    assert worker.running == {}
+
+
+def test_the_remote_worker_reports_preset_missing_when_the_server_sent_no_preset(remote):
+    """원격 풀의 잡이 큐에 있는 사이 서버 설정에서 프리셋이 사라지면 claim payload 의 `preset` 이
+    `null` 로 온다. 로컬 레인이 같은 입력에 남기는 코드는 `preset_missing` 이다 — 원격만 다른
+    코드를 내면 「어느 레인이 집었나」가 요약을 바꾼다. CHANGELOG 가 「원격도 같은 코드」라고
+    말하려면 여기가 참이어야 한다(검토 4)."""
+    worker, fake = remote
+    worker.run_claimed(1, claim_payload(7, argv=[]))
+    assert fake.finish_kwargs["outcome"] == FAILED, fake.finish_kwargs
+    assert fake.finish_kwargs["summary_code"] == "preset_missing"
+    assert fake.finish_kwargs["summary_args"] == {"preset": "gold"}
+    assert fake.finish_kwargs["summary"] == "preset 'gold' is no longer configured"
+    assert fake.finish_kwargs["summary_code"] in outcome.PREFLIGHT_CODES
+
+
+def test_the_remote_worker_sends_the_raw_reason_to_the_protected_job_log(remote):
+    """검토 7: 공개 요약에서 원문을 뺀 만큼 **토큰 뒤에는 있어야** 한다. 로컬 레인은
+    `_append_log` 로 잡 로그에 남긴다; 원격은 아무 데도 안 남겨서, 코드는 「명령을 못 찾았다」고
+    말하는데 어느 명령인지 아무 데도 없었다. 이제 같은 자리(서버의 잡 로그 API)로 보낸다."""
+    worker, fake = remote
+    payload = claim_payload(7, argv=["/opt/private-sdk/definitely-missing"])
+    worker.run_claimed(1, payload)
+    assert fake.finish_kwargs["summary_code"] == "launch_executable_missing"
+    assert fake.finish_kwargs["summary_args"] == {}
+    sent = b"".join(fake.logged).decode("utf-8", "replace")
+    assert "/opt/private-sdk/definitely-missing" in sent, sent
+    # 공개 쪽에는 한 글자도 없다
+    assert "private-sdk" not in json.dumps(fake.finish_kwargs, default=str)
 
 
 @pytest.fixture

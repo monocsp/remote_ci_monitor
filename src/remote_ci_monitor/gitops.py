@@ -29,11 +29,44 @@ _mirror_locks_guard = threading.Lock()
 
 
 class GitError(Exception):
-    """git 호출 실패. 메시지는 짧고 경로·URL 이 없다(잡 summary 에 실린다)."""
+    """git 호출 실패.
 
-    def __init__(self, message: str, stderr: str = ""):
+    `kind`·`op`·`code`·`seconds` 는 잡 요약(`outcome.git_failed`)이 쓰는 **구조**다. 문구를
+    파싱해서 다시 만들지 않는 이유: 요약은 토큰 없이 읽히는 문서에 실리는데 메시지에 URL·경로가
+    섞이는 날 아무도 그 자리를 다시 안 본다. 원문(`stderr` 포함)은 잡 로그에만 간다.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        stderr: str = "",
+        *,
+        kind: str = "exit",
+        op: str = "",
+        code: int | None = None,
+        seconds: int | None = None,
+        error: str = "",
+    ):
         super().__init__(message)
         self.stderr = stderr
+        self.kind = kind
+        self.op = op
+        self.code = code
+        self.seconds = seconds
+        self.error = error
+
+    def outcome_args(self) -> dict[str, Any]:
+        """`outcome.summary("git_failed", **…)` 에 그대로 넣을 인자."""
+        args: dict[str, Any] = {"kind": self.kind}
+        if self.op:
+            args["op"] = self.op
+        if self.code is not None:
+            args["code"] = self.code
+        if self.seconds is not None:
+            args["seconds"] = self.seconds
+        if self.error:
+            args["error"] = self.error
+        return args
 
 
 class GitTimeout(GitError):
@@ -117,11 +150,21 @@ def _run_git(
     try:
         proc = run(["git", *argv], **kwargs)
     except subprocess.TimeoutExpired as e:
-        raise GitTimeout(f"{what} timed out after {_fmt_seconds(timeout)}") from e
+        raise GitTimeout(
+            f"{what} timed out after {_fmt_seconds(timeout)}",
+            kind="timeout",
+            op=what,
+            seconds=int(timeout),
+        ) from e
     except FileNotFoundError as e:
-        raise GitError("git is not installed on the build machine") from e
+        raise GitError("git is not installed on the build machine", kind="no_git", op=what) from e
     except OSError as e:
-        raise GitError(f"{what} could not start git: {type(e).__name__}") from e
+        raise GitError(
+            f"{what} could not start git: {type(e).__name__}",
+            kind="spawn",
+            op=what,
+            error=type(e).__name__,
+        ) from e
     stderr = getattr(proc, "stderr", "") or ""
     if log is not None and stderr.strip():
         for line in stderr.strip().splitlines()[-STDERR_TAIL_LINES:]:
@@ -129,7 +172,13 @@ def _run_git(
     if proc.returncode != 0:
         # 「잡 로그를 보라」는 stderr 가 실제로 그리로 갔을 때만 — 제출 시점(ls-remote)엔 잡이 없다
         where = " — see the job log" if log is not None else ""
-        raise GitError(f"{what} failed (exit {proc.returncode}){where}", stderr)
+        raise GitError(
+            f"{what} failed (exit {proc.returncode}){where}",
+            stderr,
+            kind="exit",
+            op=what,
+            code=proc.returncode,
+        )
     return proc
 
 

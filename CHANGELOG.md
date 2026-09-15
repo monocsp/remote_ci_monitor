@@ -7,6 +7,123 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **A job that has gone quiet is no longer called stuck.** A running job was marked
+  `likely stuck` — the loudest red on the page — as soon as it went `no_output_seconds`
+  (4 minutes) without writing a line. That is a normal shape for real work: the `gate` preset
+  spends its last step running nine test shards, gitleaks and a web build in parallel, and those
+  tools buffer their output until they finish. So `gate` tripped the alarm on **every healthy
+  run**. Observed on 2026-09-15: 17m 24s elapsed, one times its own estimate, step 49/49 still
+  advancing, and the screen said the job had stopped.
+  Silence alone is now its own state, `quiet` — grey, not an alarm, and deliberately not in
+  `ACTIONABLE_REASONS`, so it stays out of the "needs a look" summary. A job is called stuck when
+  its **current step** has run past its own measured median (`[estimate] step_stuck_multiplier`,
+  default 3), which the server learns from the step markers past successful runs already wrote;
+  no migration, and the threshold never drops below `no_output_seconds`, so a step that normally
+  takes half a second cannot be declared dead in a second and a half. The old whole-job rule
+  (`elapsed > stuck_multiplier * expected`) is unchanged, and silence is still the verdict for a
+  job that prints no step markers at all — there the screen has nothing else to go on.
+  `estimate` gained three keys (`quiet`, `stuck_code`, `step_expected_seconds`) and `reason`
+  gained one value; `schema_version` stays 1, because adding keys is free and the meaning of
+  `estimate.stuck` did not change — what changed is the evidence behind it, which
+  `no_output_seconds` already moved. `[estimate] step_min_samples` (default 3) is how many past
+  runs a step needs before its median is trusted.
+- **The reason for calling a job stuck now matches the evidence.** The screen appended
+  `n× expected` to every stuck job whether or not the multiple was what tripped it, so a job
+  caught by silence read `likely stuck · 1× expected` — a warning next to the evidence that it
+  was exactly on schedule. The server now names the trigger (`over_step`, `over_elapsed`,
+  `no_output`) and the screen prints only that.
+- **The Korean screen says what it means.** 311 strings were read end to end against the
+  translationese rules of [im-not-ai](https://github.com/cloudhat/im-not-ai). The classic
+  patterns were already absent, but the copy leaned on implementation words — `잡`, `레인`,
+  `키`, `소스`, `풀`, `프리셋`, `표본`, `load`, `스텝` — and on `멈춘 듯`, a literal rendering of
+  Jenkins' `likely stuck` that is not a form Korean interfaces use. 47 strings changed:
+  `잡` is now `작업` throughout, queue groups read `작업 중` and `대기열` while a row's own state
+  reads `진행 중`, `멈춘 듯` is `응답 없음`, `레인 1/1 사용 중` is `동시 실행 1/1`, and
+  `load 10.3` is `처리 대기 10.3 · 코어 10개 기준`. Three strings had drifted out of the
+  catalogue's polite register and were brought back. Seven strings dodged Korean particle
+  agreement by printing `이(가)`; a helper now picks the particle from the final consonant of
+  whatever name the server sent, including digits and Latin letters read aloud. The emoji and
+  box-drawing glyphs in twelve strings are inline SVG in the renderer — the pill glyphs stay,
+  because those are the shape channel that carries state without color.
+- **The queue table says a job is in trouble once, not three times.** The same fact was painted
+  red in three places at once: the summary panel, a filled block inside the reason cell, and a
+  hatched progress bar with its own label. A row now carries one 3px status rail on its left and
+  one filled chip, the reason cell is plain text, and the progress bar moved inside the elapsed
+  column, which drops a whole table row per running job. The label under that bar says only how
+  far along the job is and what the number was measured against — `41% · 20/49 steps`, `88% · by
+  measured time`. It no longer repeats the condition the chip and the status column have already
+  said twice: inside a 168px column `41% · 20/49 steps · not responding` wrapped onto a second
+  line and mid-phrase, and that row stood 13px taller than the ones around it. The condition is
+  now carried by the bar's own colour and hatching, and it stays word for word in the bar's
+  `aria-valuetext` and in the label's tooltip — it left the pixels, not the page.
+  The summary cells and the host section
+  are cards with a coloured top edge, and recent results carry a rail in their outcome's colour.
+  No new colour tokens; the light-theme contrast figures in `style.css` were re-measured against
+  the new backgrounds and the note updated.
+
+### Fixed
+- **A fetch that got nothing no longer exits 0.** `rcm run --fetch-artifacts` and
+  `rcm artifacts --fetch` asked the server for the bundle and, for **every** state other than
+  `ready`, returned no verdict at all — both callers read that as success. The comment defended
+  two of them (`disabled`, `empty`: the preset declared no globs, or they matched nothing, and
+  neither is a delivery failure). The code also covered `pending`, `collecting`, `uploading`,
+  `dropped`, `failed`, `skipped`, `purged`, `expired`, `unavailable` and `unknown`. So fetching
+  from a job that had not finished left an empty directory and exited 0, and a script read that
+  as "I have the files". Now only `disabled` and `empty` are 0; everything else is the delivery
+  code 5, and a state added later is 5 until someone decides otherwise. The reason is on the
+  `artifact_fetch` JSON object, which now also appears for these states instead of being absent.
+- **`--dry-run` no longer reports a clean preview as a failure.** It always returned
+  `complete: false`, so a preview with nothing conflicting still exited 5. It now exits with the
+  code the real run would have used — 0 for a clean plan, 5 if anything is `conflicted` — which
+  makes it a cheap "would this apply cleanly?" check. Its summary line also stopped contradicting
+  the table printed directly above it: it said `wrote 0, unchanged 0, conflicted 0` no matter what
+  the plan held, and now reads `would write N, unchanged N, conflicted N`.
+- **A job that never started now says so.** A job whose workspace could not be built — a snapshot
+  the server could not unpack, a blob retention had already deleted, a `git fetch` that timed out,
+  a repository no longer in `[[repos]]` — ended `failed` with a sentence and no code, which is
+  exactly what a job whose tests failed looks like. Only one of these failures carried a code.
+  Every one of them has its own now, and the code says which thing to fix: `snapshot_missing`,
+  `snapshot_rejected`, `blob_missing`, `repo_missing`, `commit_missing`, `git_failed` and
+  `snapshot_download_failed` for a workspace that could not be built; `launch_executable_missing`,
+  `launch_permission_denied`, `launch_failed` and `log_unavailable` for a process that could not
+  be started; `preset_missing` for a preset that left the config while the job waited;
+  `tool_missing` as before. All of them have `exit_code: null`, so a script can tell "my tests
+  failed" from "the job never ran" without reading the sentence. `summary_args` carries the
+  arguments, so the web page says it in Korean or English instead of repeating the server's
+  English — and `tool_missing`, which had never been added to either locale, is in both now.
+  Remote workers report from the same table, so the code on a row does not depend on which lane
+  picked the job up — including a preset deleted while the job waited, which the remote worker
+  used to report as a launch failure. A worker still running an older build is the exception: the
+  version is only checked when it registers, so until it is restarted it keeps reporting the
+  sentence it used to and the server stores that with no code. Jobs that ended before this release
+  keep their stored sentence and `summary_code: null`; nothing is invented for them.
+- **Cancelling a job while its workspace is being prepared now wins.** A cancel accepted during a
+  long `git fetch` was overwritten by whatever the fetch failed with, so a job you stopped was
+  recorded as a failure. It ends `cancelled`, named after whoever cancelled it, the way a job
+  stopped before a missing tool already did. This holds on a remote worker too: the server used
+  to decide with a copy of the job state it had read before the cancel landed, and then write the
+  failure unconditionally.
+- **A snapshot member whose name is not valid UTF-8 no longer takes the lane down.** The rejection
+  message carried the raw name into the database, the write raised, and the worker thread died
+  `down` instead of failing that one job.
+
+### Security
+- **The job document no longer carries free text from a failure before the job starts.** A preset
+  whose `argv[0]` could not be launched put that absolute path into the job summary, and
+  `/api/status` is readable without a token in the default configuration — the same exposure that
+  was closed for `requires` entries in 0.2.6. Scrubbing the text was not enough: a relative path,
+  `~/…`, `$HOME/…`, a Windows or UNC path, a host name or a token-shaped string passes any path
+  pattern. So these summaries no longer carry text at all. They carry a code from a closed list
+  and arguments of a declared shape — an exception class name, a git operation, an exit code, a
+  hex sha, a repository or preset name already in the job document. The original text — `argv[0]`,
+  the git stderr, the exception — goes to the job log, which always needs a token, from a remote
+  worker as well as a local lane. The name of a rejected archive member is kept, because it came
+  from the snapshot you sent and it is what you need to fix it, but only its last segment, with
+  `\` read as a separator and invisible and direction-changing characters removed. A remote
+  worker's report is checked against the same table on the server: the worker is authenticated,
+  not trusted.
+
 ## [0.2.9] - 2026-09-15
 
 Starting the server says what it is turning on, one line per step.
