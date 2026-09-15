@@ -54,11 +54,39 @@ describe("notMoving", () => {
     assert.deepEqual(r.lines.map((l) => l.jobId), [421, 422, 423, 424, 413, 425, 426]);
     const text = Object.fromEntries(r.lines.map((l) => [l.reason, l.text]));
     assert.ok(text.worker_down.includes("no worker"), text.worker_down);
-    assert.ok(text.stuck.includes("3× expected"), text.stuck);
+    assert.ok(text.stuck.includes("3× longer than usual"), text.stuck);
     assert.ok(text.upload_stalled.includes("upload stalled 2m"), text.upload_stalled);
     assert.ok(text.not_scheduled.includes("not scheduled"), text.not_scheduled);
     assert.ok(text.overdue.includes("over by 3m 31s"), text.overdue);
     assert.ok(text.paused.includes("paused"), text.paused);
+  });
+
+  // 「조용함」은 관측이지 경보가 아니다(C-47). 이 절이 그 자리를 지키는 곳이다 — `ACTIONABLE` 에
+  // `quiet` 을 끼워 넣으면 빨간 소음이 이름만 바꿔 그대로 돌아온다(mutcheck `web-quiet-is-actionable`).
+  test("a quiet job never reaches the panel, while stuck and overdue still do", () => {
+    const s = fixture("main");
+    const quiet = rowLike(s, 412, { id: 431, reason: "quiet" });
+    Object.assign(quiet.estimate, { quiet: true, stuck: false, overdue: false });
+    quiet.progress.last_output_at = fromNow(-300);
+    const stuck = rowLike(s, 412, { id: 432, reason: "stuck" });
+    Object.assign(stuck.estimate, { stuck: true, stuck_code: "no_output", overdue: false });
+    stuck.progress.last_output_at = fromNow(-300);
+    const overdue = rowLike(s, 412, { id: 433, reason: "overdue" });
+    Object.assign(overdue.estimate,
+      { confidence: "overdue", elapsed_seconds: 580, overdue: true, finish_at: null });
+    s.pools[0].queue = [quiet, stuck, overdue];
+    const r = rcm.notMoving(s, null);
+    assert.equal(r.kind, "list");
+    assert.deepEqual(r.lines.map((l) => l.jobId), [432, 433]);
+    assert.ok(!rcm.ACTIONABLE.includes("quiet"), rcm.ACTIONABLE.join(" "));
+  });
+
+  test("a queue of nothing but quiet jobs is an 'ok', not a list", () => {
+    const s = fixture("main");
+    const quiet = rowLike(s, 412, { id: 434, reason: "quiet" });
+    Object.assign(quiet.estimate, { quiet: true, stuck: false, overdue: false });
+    s.pools[0].queue = [quiet];
+    assert.equal(rcm.notMoving(s, null).kind, "ok");
   });
 
   test("two rows with the same reason are both listed, in queue order", () => {

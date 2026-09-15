@@ -31,8 +31,8 @@ function recent(patch) {
   }, patch || {});
 }
 
-const STEP = { en: "step test", ko: "스텝 test" };
-const LAST = { en: "last step build web", ko: "마지막 스텝 build web" };
+const STEP = { en: "step test", ko: "단계 test" };
+const LAST = { en: "last step build web", ko: "마지막 단계 build web" };
 
 describe("recentLine — 선언된 스텝과 마지막 스텝 (§1.5)", () => {
   test("선언된 failed_step 은 오늘 그대로 「스텝 X」", () => {
@@ -79,13 +79,13 @@ describe("recentLine — 선언된 스텝과 마지막 스텝 (§1.5)", () => {
 describe("문자열 카탈로그 (§1.5 · §2.6)", () => {
   test("스텝 두 갈래의 문구가 두 언어에 있다", () => {
     assert.equal(I18N.t("en", "recent.step", { step: "test" }), "step test");
-    assert.equal(I18N.t("ko", "recent.step", { step: "test" }), "스텝 test");
+    assert.equal(I18N.t("ko", "recent.step", { step: "test" }), "단계 test");
     assert.equal(I18N.t("en", "recent.last_step", { step: "build web" }), "last step build web");
-    assert.equal(I18N.t("ko", "recent.last_step", { step: "build web" }), "마지막 스텝 build web");
+    assert.equal(I18N.t("ko", "recent.last_step", { step: "build web" }), "마지막 단계 build web");
     assert.equal(I18N.t("en", "recent.failed_step"), "failed step: ");
-    assert.equal(I18N.t("ko", "recent.failed_step"), "실패한 스텝: ");
+    assert.equal(I18N.t("ko", "recent.failed_step"), "실패한 단계: ");
     assert.equal(I18N.t("en", "recent.last_step_label"), "last step: ");
-    assert.equal(I18N.t("ko", "recent.last_step_label"), "마지막 스텝: ");
+    assert.equal(I18N.t("ko", "recent.last_step_label"), "마지막 단계: ");
   });
 
   test("이름별 실패 배지의 여섯 문구가 두 언어에 있다", () => {
@@ -97,7 +97,7 @@ describe("문자열 카탈로그 (§1.5 · §2.6)", () => {
     assert.equal(I18N.t("en", "failures.intermittent", { seen: 3, window: 8 }),
       "3 of the last 8 runs · intermittent?");
     assert.equal(I18N.t("ko", "failures.intermittent", { seen: 3, window: 8 }),
-      "최근 8회 중 3회 · 간헐?");
+      "최근 8회 중 3회 실패 · 가끔 실패합니다");
     assert.equal(I18N.t("en", "failures.first_seen", { window: 8 }),
       "first time in the last 8 runs");
     assert.equal(I18N.t("ko", "failures.first_seen", { window: 8 }), "최근 8회 중 처음");
@@ -105,7 +105,7 @@ describe("문자열 카탈로그 (§1.5 · §2.6)", () => {
     assert.equal(I18N.t("ko", "failures.unknown", { seen: 1, window: 2 }), "아직 2회 중 1회");
     assert.equal(I18N.t("en", "failures.unnamed", { n: 2 }),
       "2 of those runs failed without naming anything");
-    assert.equal(I18N.t("ko", "failures.unnamed", { n: 2 }), "그 중 2회는 이름 없이 실패했다");
+    assert.equal(I18N.t("ko", "failures.unnamed", { n: 2 }), "그 중 2회는 이름 없이 실패했습니다");
   });
 
   test("판정 이름(verdict)은 번역하지 않는다 — 문구만 언어를 탄다", () => {
@@ -150,7 +150,7 @@ describe("recentDetail — 이름별 이력 (§2.6)", () => {
       const lines = rcm.recentDetail(withFailures(), lang);
       // §2.5 — CLI 는 한 모양이고 스텝/단위 구분은 **웹 배지**의 몫이다
       const stepLine = lines.find((l) => l.startsWith("test "));
-      assert.ok(stepLine && /\((step|스텝)\)/.test(stepLine), lang + ": " + stepLine);
+      assert.ok(stepLine && /\((step|단계)\)/.test(stepLine), lang + ": " + stepLine);
       assert.ok(lines.some((l) => l.startsWith("a_test.dart —")), lang + ": " + lines.join(" | "));
       assert.ok(!lines.some((l) => l.startsWith("a_test.dart (")), lang + ": 단위에 스텝 배지");
       assert.ok(!lines.join(" ").match(/undefined|NaN|\[object/), lang);

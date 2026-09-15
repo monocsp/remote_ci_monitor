@@ -35,7 +35,9 @@ def draw_boxes(
     """빨간 사각형 + 번호 원을 그린다.
 
     boxes: `[(번호, (x, y, w, h)[, 위치]), …]` — 이미지 픽셀 좌표.
-    위치: `tl`(기본) · `tr` · `r`(오른쪽 바깥) · `l`(왼쪽 바깥) · `t`(위 바깥).
+    위치: `tl`(기본) · `tr` · `r`(오른쪽 바깥) · `l`(왼쪽 바깥) · `t`(위 바깥) ·
+    `b`(상자 안쪽 아래 왼쪽). `b` 는 상자 **위**에 글자가 붙어 있어 `t` 가 그 글자를 덮을 때 쓴다
+    — 카드 위 12px 짜리 틈에는 26px 짜리 번호 원이 들어가지 않는다(web-host 의 「sampled …」 줄).
     """
     img = img.convert("RGBA")
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -48,9 +50,10 @@ def draw_boxes(
         x1, y1 = min(img.width - 2, x1), min(img.height - 2, y1)
         d.rounded_rectangle((x0, y0, x1, y1), radius=radius, outline=RED, width=width)
     # 번호 원은 사각형 위에 그린다(겹쳐도 번호가 보이게)
-    for n, (x, y, w, _h), pos in boxes:
+    for n, (x, y, w, h), pos in boxes:
         x0, y0 = max(1, x - pad), max(1, y - pad)
         x1 = min(img.width - 2, x + w + pad)
+        y1 = min(img.height - 2, y + h + pad)
         r = badge / 2
         if pos == "r":  # 상자 바깥 오른쪽 — 글자를 덮지 않는다
             cx, cy = x1 + r + 2, y0 + r - 4
@@ -60,6 +63,8 @@ def draw_boxes(
             cx, cy = x0 - r + 2, y0 + r - 4
         elif pos == "t":
             cx, cy = x0 + r - 2, y0 - r + 2
+        elif pos == "b":  # 상자 안쪽 아래 왼쪽 — 위가 글자로 막혔을 때
+            cx, cy = x0 + r - 2, y1 - r + 4
         else:
             cx, cy = x0, y0
         cx = min(max(cx, r + 1), img.width - r - 1)

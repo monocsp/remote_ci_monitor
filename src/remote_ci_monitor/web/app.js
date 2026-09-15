@@ -21,6 +21,25 @@
   // 거기는 `✅`·`❌` 처럼 원래 다른 모양을 쓴다. 이 표는 색을 쓰는 화면의 것이다.
   var GLYPH = { running: "▶", queued: "○", uploading: "↑", cancelling: "■", succeeded: "✓",
     failed: "✗", timed_out: "⏱", cancelled: "□", lost: "?" };
+  /** 인라인 SVG 아이콘. 색은 `currentColor`, 크기는 1em — 문장 흐름에 붙어 산다.
+      i18n 문자열에는 태그를 넣지 않는다(카탈로그는 글자만 담는다 — `token.help` 가 유일한 예외다).
+      **위의 `GLYPH` 와는 다른 것이다**: 글리프는 상태 필의 모양 채널(WCAG 1.4.1)이라 글자로
+      남아야 하고, 여기 아이콘은 장식이라 `aria-hidden` 으로 붙는다. */
+  var ICON = {
+    key: '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+      + '<circle cx="5.5" cy="10.5" r="3.2"/><path d="M7.9 8.1 13.5 2.5"/>'
+      + '<path d="M11 5l1.6 1.6"/></svg>',
+    chain: '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M6.4 9.6a2.6 2.6 0 0 1 0-3.7l2-2a2.6 2.6 0 0 1 3.7 3.7l-1 1"/>'
+      + '<path d="M9.6 6.4a2.6 2.6 0 0 1 0 3.7l-2 2a2.6 2.6 0 0 1-3.7-3.7l1-1"/></svg>',
+    chevronDown: '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6 8 10.5 12.5 6"/></svg>',
+    chevronUp: '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 10 8 5.5 12.5 10"/></svg>'
+  };
+  function icon(name) { return '<span class="ic" aria-hidden="true">' + ICON[name] + "</span>"; }
   var BACKOFF = [2, 4, 8, 16, 30];
   var LOST_AFTER_MS = 30000;
   var POLL_MS = 10000;
@@ -251,12 +270,46 @@
         out.actionable = true; out.cls = "over"; break;
       }
       case "stuck": {
+        // 근거(`estimate.stuck_code`)마다 다른 문장을 쓴다. 근거가 「현재 단계가 평소보다 오래」인데
+        // 「지난 실행보다 n배 오래」를 함께 그리면 두 사실이 섞여 하나도 안 읽힌다.
         parts.push(T(lang, "reason.stuck"));
-        if (isNum(est.elapsed_seconds) && isNum(est.expected_seconds) && est.expected_seconds > 0) parts.push(T(lang, "reason.times_expected", { n: Math.floor(est.elapsed_seconds / est.expected_seconds) }));
+        var code = est.stuck_code;
+        var prog = row.progress || null;
+        if (code === "over_step") {
+          var stepName = prog && prog.current_name;
+          var stepSeconds = prog && isNum(prog.current_seconds) ? prog.current_seconds : null;
+          var usual = isNum(est.step_expected_seconds) ? est.step_expected_seconds : null;
+          // 배수 가드는 `over_elapsed` 쪽과 **같은 규칙**이다(아래 주석). 서버가 하한
+          // (`max(배수 × 단계중앙값, no_output_seconds)`) 때문에 배수가 2 에 못 미치는
+          // `over_step` 을 보낼 수 있고, 그러면 「평소보다 1배 오래」가 또 나온다.
+          if (stepName && isNum(stepSeconds) && usual !== null && usual > 0) {
+            var stepTimes = Math.floor(stepSeconds / usual);
+            if (stepTimes >= 2) parts.push(T(lang, "reason.step_over", { step: stepName, n: stepTimes }));
+            else parts.push(T(lang, "reason.step_slow", { step: stepName }));
+          }
+        } else if (code !== "no_output") {
+          // `over_elapsed`, 그리고 `stuck_code` 를 안 보내는 **옛 서버 문서**가 여기로 온다.
+          // 배수가 2 이상일 때만 붙인다 — 2026-09-15 화면의 「예상의 1배」가 바로 이 자리에서
+          // 나왔다(`floor(1044 / 1020) === 1`). 1배는 사실이지만 아무것도 말하지 않는다.
+          if (isNum(est.elapsed_seconds) && isNum(est.expected_seconds) && est.expected_seconds > 0) {
+            var times = Math.floor(est.elapsed_seconds / est.expected_seconds);
+            if (times >= 2) parts.push(T(lang, "reason.times_expected", { n: times }));
+          }
+        }
         var lo = row.progress && row.progress.last_output_at;
-        var quiet = secondsSince(lo, nowMs);
-        if (isNum(quiet)) parts.push(T(lang, "reason.no_output_for", { since: fmtCoarse(quiet) }));
+        var silentFor = secondsSince(lo, nowMs);
+        if (isNum(silentFor)) parts.push(T(lang, "reason.no_output_for", { since: fmtCoarse(silentFor) }));
         out.text = parts.join(" · "); out.actionable = true; out.cls = "stuck"; break;
+      }
+      case "quiet": {
+        // 조용함은 **관측**이지 경보가 아니다 — `actionable` 은 false 로 두고(`ACTIONABLE` 에도
+        // 없다) 색은 회색이다. 이것을 「확인이 필요한 작업」에 올리면 오늘의 빨간 소음이 이름만
+        // 바꿔 남는다.
+        parts.push(T(lang, "reason.quiet"));
+        var quietLo = row.progress && row.progress.last_output_at;
+        var quietFor = secondsSince(quietLo, nowMs);
+        if (isNum(quietFor)) parts.push(T(lang, "reason.no_output_for", { since: fmtCoarse(quietFor) }));
+        out.text = parts.join(" · "); out.cls = "quiet"; break;
       }
       case "cancelling": {
         var c = row.cancel || {};
@@ -710,6 +763,11 @@
     var prog = row.progress || null;
     var est = row.estimate || {};
     var stuck = !!est.stuck;
+    // 형편의 우선순위: `preparing > stuck > over > finalizing > quiet > normal`.
+    // `quiet`(조용함)은 관측이라 가장 약하다 — 「추정을 넘겼다」·「선언한 단계를 다 끝냈다」가
+    // 더 행동 가능한 사실이다. 서버가 `stuck` 과 `quiet` 을 같이 보내면 **stuck 이 이긴다**:
+    // 경보를 먹는 쪽(quiet 이 이기는 것)은 fail-open 이라 금지다.
+    var quiet = !!est.quiet && !stuck;
     if (prog && prog.phase === "materializing") { out.condition = "preparing"; return out; }
     var total = prog && isNum(prog.steps_total) ? prog.steps_total : null;
     var done = prog && isNum(prog.steps_done) ? prog.steps_done : null;
@@ -718,6 +776,7 @@
       if (done >= total) { out.condition = stuck ? "stuck" : "finalizing"; return out; }
       out.pct = pctOf(done, total);
       if (stuck) out.condition = "stuck";
+      else if (quiet) out.condition = "quiet";
       return out;
     }
     var expected = isNum(est.expected_seconds) && est.expected_seconds > 0 && est.source !== "default"
@@ -725,12 +784,15 @@
     var elapsed = isNum(est.elapsed_seconds) ? est.elapsed_seconds : null;
     if (expected == null || elapsed == null) {
       if (stuck) out.condition = "stuck";
+      else if (quiet) out.condition = "quiet";
       return out;
     }
     out.expected = expected; out.source = est.source || null;
     if (stuck) { out.condition = "stuck"; return out; }
     if (est.overdue || elapsed >= expected) { out.condition = "over"; return out; }
     out.basis = "time"; out.pct = timePct(elapsed, expected); out.startedAt = row.started_at || null;
+    // 조용한 것과 진행률을 모르는 것은 다른 일이다 — 눈금(`basis`·`pct`)은 그대로 둔다.
+    if (quiet) out.condition = "quiet";
     return out;
   }
   /** 시간 눈금의 라벨 키 — 추정이 어디서 왔는지 문구가 밝힌다(Codex 리뷰 1). */
@@ -753,21 +815,30 @@
     } else if (p.basis === "time") {
       head = T(lang, timeKey(p.source), { percent: p.pct });
     }
+    // 한 작업의 이상은 **한 곳에서만** 말한다. 형편(`조용함`·`응답 없음`…)은 이미 같은 행의 상태
+    // 칩과 상태 칸이 두 번 말했다 — 라벨이 세 번째로 말하면서 84px 칸 안에서 두 줄로 접혀 행 높이를
+    // 이웃보다 30% 키웠다(2026-09-15 실측: 응답 없음 행 78px vs 이웃 60px, 게다가 어구 한가운데서
+    // 끊겼다). 그래서 **화면 글자는 눈금과 근거만** 말하고, 형편은 막대의 색·빗금(`data-cond`)이
+    // 말한다. 뺀 것은 픽셀이지 사실이 아니다 — `aria-valuetext` 와 `title` 에는 그대로 남는다.
     var cond = p.condition === "normal" ? null : T(lang, "pbar." + p.condition);
-    var label = [head, cond].filter(Boolean).join(" · ") || T(lang, "pbar.none");
+    var none = T(lang, "pbar.none");
+    var spoken = [head, cond].filter(Boolean).join(" · ") || none;
+    var label = head || none;
     var full = p.condition === "over" || p.condition === "finalizing";
     var width = isNum(p.pct) ? p.pct : (full ? 100 : 0);
     // 근거·형편은 **data 속성**으로 싣는다. class 로 두면 `steps`·`stuck`·`over` 가 화면의 다른
     // 규칙(스텝 목록 격자 · 이유 칸 칩)에 걸려 막대가 엉뚱한 폭으로 그려진다 — 실제로 그랬다.
-    var tick = live && p.basis === "time" && p.condition === "normal" && p.startedAt
+    // 조용해도 시간 눈금은 계속 자란다 — 「출력이 없다」와 「시계가 멈췄다」는 다른 말이다.
+    var tick = live && p.basis === "time" && (p.condition === "normal" || p.condition === "quiet") && p.startedAt
       ? ' data-tick="progress" data-from="' + esc(p.startedAt) + '" data-expected="' + p.expected
         + '" data-source="' + esc(p.source || "") + '"'
       : "";
     return '<div class="pwrap"' + tick + '><div class="pbar" data-basis="' + p.basis + '" data-cond="'
       + p.condition + '" role="progressbar"'
       + ' aria-valuemin="0" aria-valuemax="100"' + (isNum(p.pct) ? ' aria-valuenow="' + p.pct + '"' : "")
-      + ' aria-valuetext="' + esc(label) + '" aria-label="' + esc(T(lang, "pbar.aria", { id: row.id })) + '">'
-      + '<i data-fill="' + width + '"></i></div><span class="plab">' + esc(label) + "</span></div>";
+      + ' aria-valuetext="' + esc(spoken) + '" aria-label="' + esc(T(lang, "pbar.aria", { id: row.id })) + '">'
+      + '<i data-fill="' + width + '"></i></div><span class="plab" title="' + esc(spoken) + '">'
+      + esc(label) + "</span></div>";
   }
   // 산출물 한 줄(M5e §13). 모르는 수는 —, `0` 은 「모았는데 없었다」일 때만이다. 파일 이름은
   // 공개 문서에 없으므로 여기서도 없다 — 받아 가는 명령만 준다.
@@ -1152,10 +1223,13 @@
     var b = $("#tok-btn");
     if (!b) return;
     b.classList.toggle("bad", !!state.tokenBad);
-    b.textContent = state.tokenBad ? tr("token.bad_button")
+    // 열쇠는 **여기서** 붙인다 — 카탈로그는 글자만 담는다(§2.4). `index.html` 의 `data-i18n` 을
+    // 뗀 것도 그래서다: `applyStatic` 이 textContent 로 덮으면 아이콘이 사라진다.
+    var label = state.tokenBad ? tr("token.bad_button")
       : (state.me ? tr("token.named", { name: state.me })
         : (state.token ? tr("token.unverified")
           : (state.readAuth ? tr("token.read_auth") : tr("token.add"))));
+    b.innerHTML = icon("key") + " " + esc(label);
   }
   function wireTokenDialog() {
     var dlg = $("#tok-dialog"), input = $("#tok-input");
@@ -1443,7 +1517,7 @@
       g.rows.forEach(function (row) { html += queueRowHtml(row, st); });
     });
     html += "</tbody></table></div>";
-    if (hiddenCount) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.more", { n: hiddenCount })) + "</button>";
+    if (hiddenCount) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.more", { n: hiddenCount })) + " " + icon("chevronDown") + "</button>";
     html += extraPoolsQueueHtml(st);
     setQueueHtml(body, html);
   }
@@ -1471,17 +1545,21 @@
     var busy = row.state === "running" || row.state === "cancelling";
     var expanded = busy && !!state.expanded[row.id];
     // 전체 진행 막대는 접힘과 무관하게 도는 행에 늘 붙는다 — 접기가 「어디까지 왔나」를 감추면
-    // 접어 둘 수 없다. 스텝 목록·로그 tail·액션만 ▸ 뒤에 있다.
+    // 접어 둘 수 없다. 단계 목록·로그 tail·액션만 ▸ 뒤에 있다.
+    // 막대는 **진행 시간 칸 안**에 산다(별도의 막대 행이 아니다) — 한 작업이 한 줄이다.
     var bar = progressBarHtml(row, L(), canTick());
     var mine = isMine(row, state.me);
     var cls = [];
     if (mine) cls.push("mine");
-    if (est.overdue || est.stuck) cls.push("overdue");
+    // 왼쪽 레인 하나가 행의 형편을 말한다. 우선순위 `stuck > overdue > quiet > running` —
+    // 한 행에 채운 칩은 상태 필 하나뿐이고, 이상은 레인에서 한 번만 빨강으로 말한다.
+    if (est.stuck) cls.push("stuck");
+    else if (est.overdue) cls.push("overdue");
+    else if (est.quiet) cls.push("quiet");
+    else if (busy) cls.push("run");
     if (expanded) cls.push("exp");
     if (state.hl === row.id) cls.push("hl");
     if (row._dim) cls.push("dim");
-    // 막대 줄이 붙는 행은 아래 선을 지운다 — 막대까지가 한 행으로 보이게
-    if (bar) cls.push("hasbar");
     var pos = isNum(row.position) ? '<span class="pos">' + esc(tr("ordinal.in_line", { ordinal: ordinal(row.position, L()) })) + "</span>" : "";
     var pill;
     if (row.state === "uploading") {
@@ -1506,7 +1584,9 @@
     // 이유 문구에는 서버가 준 문자열(ref · group · label)이 들어간다 — escape 한 뒤 잡 링크만 버튼으로 바꾼다
     var reasonHtml = esc(r.text);
     r.links.forEach(function (l) { var id = l.jobId; reasonHtml = reasonHtml.replace("#" + id, '<button type="button" class="jlink" data-goto="' + id + '">#' + id + "</button>"); });
-    var reasonCell = r.cls === "blocked" ? '<span class="blocked">' + reasonHtml + "</span>" : r.cls === "stalled" ? '<span class="stalled">' + reasonHtml + "</span>" : r.cls === "stuck" ? '<span class="stuck">' + reasonHtml + "</span>" : '<span class="reason' + (r.actionable || busy ? " act" : "") + '">' + reasonHtml + "</span>";
+    // 한 갈래다 — 형편은 class 하나로만 말한다(칩 세 갈래를 따로 조립하던 자리).
+    var reasonCell = '<span class="reason' + (r.actionable || busy ? " act" : "") + (r.cls ? " " + r.cls : "")
+      + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
     // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
     var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
@@ -1524,6 +1604,7 @@
     var elapsedCell = busy && isNum(est.elapsed_seconds)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
       : (row.state === "queued" ? '<span data-tick="waiting" data-from="' + esc(row.created_at || "") + '">' + esc(el.main) + "</span>" : esc(el.main));
+    if (bar) elapsedCell += bar;
     var eta = etaText(row, tz(), now(), L());
     var conf = confidenceBadge(est, L());
     var etaCell = '<span class="eta">' + esc(eta.clock) + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
@@ -1537,7 +1618,6 @@
       '<td class="elapsed">' + elapsedCell + "</td>" +
       '<td class="eta">' + etaCell + "</td>" +
       '<td class="source">' + source + "</td></tr>";
-    if (bar) h += '<tr class="qbar" data-bar="' + row.id + '"><td colspan="7">' + bar + "</td></tr>";
     if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + sourceHtml(row, L(), true) + "</div>" + tailHtml(row) + "</td></tr>";
     return h;
   }
@@ -1803,7 +1883,8 @@
       var l = recentLine(job, tz(), now(), L());
       var open = !!state.expandedRecent[job.id];
       var failedish = job.state === "failed" || job.state === "timed_out";
-      html += '<div class="rrow' + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
+      // 결과마다 왼쪽 3px 레인 — 큐 표와 같은 채널이다(성공 · 실패 · 취소 · 결과를 잃음)
+      html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
         '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
@@ -1826,7 +1907,11 @@
       html += "</div>";
     });
     html += "</div>";
-    if (all.length > 5) html += '<button type="button" class="more" data-more-recent>' + (state.showAllRecent ? tr("recent.show_fewer") : tr("recent.show_more", { n: all.length - 5 })) + "</button>";
+    if (all.length > 5) {
+      html += '<button type="button" class="more" data-more-recent>'
+        + esc(state.showAllRecent ? tr("recent.show_fewer") : tr("recent.show_more", { n: all.length - 5 }))
+        + " " + icon(state.showAllRecent ? "chevronUp" : "chevronDown") + "</button>";
+    }
     body.innerHTML = html;  // 원격 풀의 host 는 Host 절 카드로(M5b-4) — 여기엔 풀 헤더를 두지 않는다
     renderEstimates(p);
   }
@@ -1890,14 +1975,19 @@
     var bar = wrap.querySelector(".pbar"), fill = bar && bar.querySelector("i"), lab = wrap.querySelector(".plab");
     if (!isNum(expected) || expected <= 0 || !bar || !fill || !lab) return;
     var over = seconds >= expected;
+    // 「조용함」은 1초 틱이 지울 사실이 아니다 — 지금 그려진 형편에서 읽어 그대로 들고 간다.
+    var quiet = bar.getAttribute("data-cond") === "quiet";
     var pct = over ? null : timePct(seconds, expected);
-    var text = over ? tr("pbar.over") : tr(timeKey(wrap.getAttribute("data-source")), { percent: pct });
+    // 첫 렌더와 같은 갈래다: 화면 글자는 눈금과 근거만, 형편은 막대와 `aria-valuetext`·`title` 이.
+    var head = over ? null : tr(timeKey(wrap.getAttribute("data-source")), { percent: pct });
+    var spoken = over ? tr("pbar.over") : head + (quiet ? " · " + tr("pbar.quiet") : "");
     fill.style.width = (over ? 100 : pct) + "%";
     bar.setAttribute("data-basis", over ? "none" : "time");
-    bar.setAttribute("data-cond", over ? "over" : "normal");
-    bar.setAttribute("aria-valuetext", text);
+    bar.setAttribute("data-cond", over ? "over" : (quiet ? "quiet" : "normal"));
+    bar.setAttribute("aria-valuetext", spoken);
     if (over) bar.removeAttribute("aria-valuenow"); else bar.setAttribute("aria-valuenow", String(pct));
-    lab.textContent = text;
+    lab.textContent = head || tr("pbar.none");
+    lab.title = spoken;
   }
 
   // innerHTML 교체 전후로 포커스를 지킨다(Codex M2 리뷰 2): 같은 data 속성·id 를 가진 요소로 되돌린다

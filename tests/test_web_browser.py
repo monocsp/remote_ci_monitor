@@ -516,7 +516,7 @@ def test_desktop_dom_shows_running_and_queued_jobs(scene, tmp_path):
     # 요약 세 칸 (§4 summary · 항목 23·24·25)
     assert all(summary_labels), summary_labels
     assert "Your jobs" in summary_labels[0]
-    assert "Not moving" in summary_labels[1]
+    assert "Needs a look" in summary_labels[1]
     assert "Host pressure" in summary_labels[2]
 
     # 호스트 (§4 host) — 스텁 표본의 CPU busy 21.0 → "21%"
@@ -562,6 +562,11 @@ def test_mobile_viewport_keeps_queue_content(scene, tmp_path):
         visible_text = c.eval("document.body.innerText")
         summary_text = c.eval("document.getElementById('summary').textContent")
         cells = c.eval(ROW_CELLS_JS)
+        # 막대는 「진행 시간」 칸 안에 산다 — 칸이 블록이 되는 폰에서도 84px 그대로여야 한다(C-52)
+        bar_track = c.eval(
+            "(() => { const p = document.querySelector('#queue td.elapsed .pwrap .pbar');"
+            " return p === null ? null : Math.round(p.getBoundingClientRect().width); })()"
+        )
     scene.assert_still_running()
     # 720px 미만이 카드 레이아웃 구간(§4 모바일). 진짜 390 인지 못 박는다 —
     # `<= 720` 은 macOS 가 만들어 주는 500 도 통과시킨다
@@ -571,7 +576,7 @@ def test_mobile_viewport_keeps_queue_content(scene, tmp_path):
     assert "1st in line" in visible_text
     assert "21%" in visible_text
     # 라벨은 textContent 로 — innerText 는 CSS `text-transform: uppercase` 를 반영한다
-    for label in ("Your jobs", "Not moving", "Host pressure"):
+    for label in ("Your jobs", "Needs a look", "Host pressure"):
         assert label in summary_text, (label, summary_text)
     assert "lost connection" not in visible_text.lower()
     # 폰에서도 키(프리셋 이름)와 요청자 칸이 남아 있다 — 글자도, 자리도
@@ -586,6 +591,8 @@ def test_mobile_viewport_keeps_queue_content(scene, tmp_path):
                 f"job {job_id}: td.{name} has no box at 390px ({cell}) — a `max-width: 0` "
                 "meant for the table layout leaked into the phone cards"
             )
+    assert bar_track is not None, "390px 에서 도는 행의 진행 막대가 사라졌다"
+    assert abs(bar_track - 84) <= 1, f"390px 에서 막대가 {bar_track}px 로 눌렸다 — 84px 고정이다"
     assert "slow" in cells[str(scene.running)]["key"]["text"], cells
     assert "alice" in cells[str(scene.running)]["requester"]["text"], cells
     assert "bob" in cells[str(scene.queued)]["requester"]["text"], cells
@@ -605,9 +612,9 @@ def test_korean_is_the_default_and_the_switch_flips_the_page(scene, tmp_path):
         queue_head = c.eval("document.querySelector('#queue .s-h .t').textContent")
         body = c.eval("document.body.innerText")
         assert lang == "ko", "기본 언어가 한국어가 아니다"
-        assert "내 잡" in summary and "안 움직이는 것" in summary, summary
+        assert "내 작업" in summary and "확인이 필요한 작업" in summary, summary
         assert queue_head == "큐", queue_head
-        assert "실행 중" in body, body[:400]
+        assert "진행 중" in body, body[:400]
         assert "undefined" not in body and "NaN" not in body
         # 전환 — 정적 라벨까지 따라와야 한다
         c.eval("document.getElementById('lang-btn').click()")
@@ -617,10 +624,10 @@ def test_korean_is_the_default_and_the_switch_flips_the_page(scene, tmp_path):
         after_body = c.eval("document.body.innerText")
         stored = c.eval("localStorage.getItem('rcm.lang')")
         assert after_lang == "en"
-        assert "Your jobs" in after_summary and "Not moving" in after_summary, after_summary
+        assert "Your jobs" in after_summary and "Needs a look" in after_summary, after_summary
         assert after_queue == "Queue", after_queue
         assert "running" in after_body
-        assert "내 잡" not in after_summary, "한국어 라벨이 남았다"
+        assert "내 작업" not in after_summary, "한국어 라벨이 남았다"
         assert stored == "en", "고른 언어가 브라우저에 남지 않는다"
         assert "undefined" not in after_body and "NaN" not in after_body
 
@@ -846,22 +853,24 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
 FOLD_JS = """
 (id => {
   const row = document.querySelector('#queue tr[data-job="' + id + '"]');
-  const bar = document.querySelector('#queue tr.qbar[data-bar="' + id + '"]');
-  const pbar = bar ? bar.querySelector('.pbar[role="progressbar"]') : null;
+  const wrap = row ? row.querySelector('td.elapsed .pwrap') : null;
+  const pbar = wrap ? wrap.querySelector('.pbar[role="progressbar"]') : null;
   const btn = document.querySelector('[data-toggle="' + id + '"]');
   return {
     expanded_rows: document.querySelectorAll('#queue tr.expanded').length,
     aria_expanded: btn ? btn.getAttribute('aria-expanded') : null,
     steps_blocks: document.querySelectorAll('#queue .steps').length,
-    bars: document.querySelectorAll('#queue tr.qbar').length,
+    bars: document.querySelectorAll('#queue td.elapsed .pwrap').length,
     bar: pbar === null ? null : {
       basis: pbar.getAttribute('data-basis'),
       cond: pbar.getAttribute('data-cond'),
-      label: bar.querySelector('.plab').textContent.trim(),
+      label: wrap.querySelector('.plab').textContent.trim(),
       valuetext: pbar.getAttribute('aria-valuetext'),
       width: pbar.querySelector('i').getAttribute('style'),
-      tick: bar.querySelector('.pwrap').getAttribute('data-tick'),
-      expected: bar.querySelector('.pwrap').getAttribute('data-expected'),
+      // 막대는 84px 고정이다 — 칸 안에서 눌리면 그려진 길이가 `aria-valuenow` 와 갈린다(C-51)
+      track: Math.round(pbar.getBoundingClientRect().width),
+      tick: wrap.getAttribute('data-tick'),
+      expected: wrap.getAttribute('data-expected'),
       aria: pbar.outerHTML.slice(0, 400),
     },
     reason: row ? row.querySelector('td.reason').textContent.replace(/\\s+/g, ' ').trim() : null,
@@ -900,6 +909,9 @@ def test_running_row_is_folded_and_carries_an_overall_bar(scene, tmp_path):
     assert re.search(r"\d+%|—", bar["label"]), bar
     assert bar["valuetext"] == bar["label"], bar  # 보조기기가 읽는 값과 눈에 보이는 값이 같다
     assert re.search(r"width:\s*\d+(\.\d+)?%", bar["width"] or ""), bar
+    # 막대는 「진행 시간」 칸 안의 **84px 고정폭**이다(C-51). 자동 폭으로 되돌아가면 칸이 줄 때
+    # 막대가 눌려 `width: 25%` 가 25% 로 안 보인다 — 아래 `drawn` 단언이 통과해도 뜻이 없어진다.
+    assert abs(bar["track"] - 84) <= 1, bar
     assert "step" in folded["reason"].lower(), folded["reason"]
     # `slow` 은 총 스텝 수를 안 알리고, 이 서버엔 표본도 프리셋 추정도 없다(설치 기본값 600초뿐).
     # 그러면 막대는 **눈금을 주지 않는다** — 기본값을 70% 로 그리면
@@ -956,9 +968,9 @@ def test_recent_rows_show_the_job_id(tmp_path):
 # 규칙을 잠그고, 여기서는 진짜 서버가 만든 상태 문서로 같은 규칙이 그려지는지를 본다.
 BARS_JS = """
 (ids => Object.fromEntries(ids.map(id => {
-  const bar = document.querySelector('#queue tr.qbar[data-bar="' + id + '"]');
   const row = document.querySelector('#queue tr[data-job="' + id + '"]');
-  const pbar = bar ? bar.querySelector('.pbar') : null;
+  const wrap = row ? row.querySelector('td.elapsed .pwrap') : null;
+  const pbar = wrap ? wrap.querySelector('.pbar') : null;
   const fill = pbar ? pbar.querySelector('i') : null;
   const track = pbar ? pbar.getBoundingClientRect().width : 0;
   return [id, {
@@ -966,11 +978,13 @@ BARS_JS = """
     cond: pbar ? pbar.getAttribute('data-cond') : null,
     // 그려진 길이 — 자동 레이아웃 표 안에서 퍼센트 폭이 틀어지던 회귀를 여기서 잡는다
     drawn: fill && track ? Math.round(fill.getBoundingClientRect().width / track * 100) : null,
+    // 막대 그릇의 폭. 84 가 아니면 위의 `drawn` 이 통과해도 뜻이 없다(C-51)
+    track: Math.round(track),
     valuenow: pbar ? pbar.getAttribute('aria-valuenow') : null,
-    label: bar ? bar.querySelector('.plab').textContent.trim() : null,
+    label: wrap ? wrap.querySelector('.plab').textContent.trim() : null,
     valuetext: pbar ? pbar.getAttribute('aria-valuetext') : null,
-    source: bar ? bar.querySelector('.pwrap').getAttribute('data-source') : null,
-    tick: bar ? bar.querySelector('.pwrap').getAttribute('data-tick') : null,
+    source: wrap ? wrap.getAttribute('data-source') : null,
+    tick: wrap ? wrap.getAttribute('data-tick') : null,
     bars: document.querySelectorAll('[role="progressbar"]').length,
     cancel_in_row: row ? row.querySelectorAll('td.reason [data-cancel]').length : null,
     toggle: row && row.querySelector('[data-toggle]')
@@ -1021,7 +1035,8 @@ def test_progress_bar_names_what_it_measured_and_keeps_cancel_one_tap_away(tmp_p
         url = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
         ready = (
             f"[{a}, {b}].every(id => "
-            "document.querySelector('#queue tr.qbar[data-bar=\"' + id + '\"]') !== null)"
+            "document.querySelector('#queue tr[data-job=\"' + id + '\"] td.elapsed .pwrap')"
+            " !== null)"
         )
         with Chrome(tmp_path / "chrome-bars", window="1240,900") as c:
             c.open(url, ready_js=ready)
@@ -1035,6 +1050,16 @@ def test_progress_bar_names_what_it_measured_and_keeps_cancel_one_tap_away(tmp_p
             )
             time.sleep(0.3)  # 표 레이아웃이 끝난 뒤에 잰다 — 막대 길이는 레이아웃의 결과다
             bars = c.eval(BARS_JS % json.dumps([a, b]))
+            # 좁은 화면(720px 미만 — 표 칸이 블록이 되는 자리)에서도 같은 계약이다(C-52).
+            # 같은 크롬을 뷰포트만 바꿔 다시 잰다 — 한 번 더 띄우면 그만큼 느려진다.
+            c.viewport(680, 900)
+            time.sleep(0.3)
+            narrow = c.eval(BARS_JS % json.dumps([a, b]))
+            narrow_overflow = c.eval(
+                "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+            )
+            c.call("Emulation.clearDeviceMetricsOverride")
+            time.sleep(0.3)
             expanded_before = c.eval("document.querySelectorAll('#queue tr.expanded').length")
             c.eval(f"document.querySelector('[data-toggle=\"{a}\"]').click()")
             open_bars = c.eval(
@@ -1068,6 +1093,17 @@ def test_progress_bar_names_what_it_measured_and_keeps_cancel_one_tap_away(tmp_p
         drawn, valuenow = bars[str(jid)]["drawn"], bars[str(jid)]["valuenow"]
         assert valuenow is not None, bars[str(jid)]
         assert abs(drawn - int(valuenow)) <= 1, (jid, bars[str(jid)])
+        # 그릇이 84px 이 아니면 위의 단언은 통과해도 뜻이 없다 — 칸이 눌려 막대가 같이 줄면
+        # 「25%」가 그 줄어든 폭의 25% 다(C-51). 폭도 함께 잠근다.
+        assert abs(bars[str(jid)]["track"] - 84) <= 1, (jid, bars[str(jid)])
+    # 680px: 표 칸이 블록이 되어도 막대는 살아 있고, 폭도 그려진 길이도 그대로다(C-52)
+    for jid in (a, b):
+        n = narrow[str(jid)]
+        assert n["valuenow"] is not None, (jid, n)
+        assert abs(n["track"] - 84) <= 1, (jid, n)
+        assert abs(n["drawn"] - int(n["valuenow"])) <= 1, (jid, n)
+    # 84px 칸 안의 라벨이 `nowrap` 으로 남아 있으면 표가 라벨 폭만큼 옆으로 샌다
+    assert narrow_overflow <= 1, (narrow_overflow, narrow)
     # 접힌 도는 행에서 취소가 한 번에 닿는다. ▸ 의 접근 이름에는 잡 번호가 있다
     assert expanded_before == 0
     assert bars[str(a)]["cancel_in_row"] == 1, bars[str(a)]

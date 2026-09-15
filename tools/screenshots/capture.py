@@ -58,7 +58,8 @@ SELECTORS = [
     "#queue .queue-header",
     "#queue thead",
     "tr[data-job]",
-    "tr.qbar",
+    # 진행 막대는 「진행 시간」 칸 안에 산다 — 예전의 `tr.qbar` 행은 없어졌다
+    "td.elapsed .pwrap",
     ".pwrap",
     ".plab",
     "tr.expanded",
@@ -126,7 +127,10 @@ RECT_JS = """
         return {x: r.x, y: r.y, w: r.width, h: r.height, id: e.id || null,
                 job: e.getAttribute('data-job') || e.getAttribute('data-log')
                      || e.getAttribute('data-rtoggle') || e.getAttribute('data-pool')
-                     || e.getAttribute('data-bar') || null,
+                     // 행 안쪽 요소(진행 막대 등)는 자기 행의 잡 번호를 물려받는다 —
+                     // 막대가 제 행(`tr.qbar`)을 잃은 뒤로는 이것 말고 집을 길이 없다
+                     || (e.closest('[data-job]')
+                         ? e.closest('[data-job]').getAttribute('data-job') : null),
                 cls: (typeof e.className === 'string') ? e.className : null,
                 hidden: !!e.hidden, text: (e.innerText || '').slice(0, 80)};
       });
@@ -525,8 +529,9 @@ def round1() -> None:
             # 390 은 iPhone 세로 폭이다. 창 크기로는 못 낸다 — macOS 크롬 창은 500px 밑으로 안
             # 줄어들어서, 이걸 안 쓰면 「폰 사진」이 실은 500px 짜리다(명세 §4.7).
             # 높이는 900 이면 다섯 번째 주석(버튼 줄)이 화면 밖으로 나간다 — 폭이 레이아웃을
-            # 정하고 높이는 사진에 담기는 양만 정하므로, 높이만 조금 늘린다.
-            {"width": 390, "height": 1000, "deviceScaleFactor": 1, "mobile": True},
+            # 정하고 높이는 사진에 담기는 양만 정하므로, 높이만 조금 늘린다. 요약이 카드
+            # 격자가 된 뒤로 1000 도 모자란다(버튼 줄이 y≈1070 이다).
+            {"width": 390, "height": 1120, "deviceScaleFactor": 1, "mobile": True},
         )
         sh.js("window.scrollTo(0,0)")
         time.sleep(0.6)

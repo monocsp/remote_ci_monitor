@@ -26,11 +26,15 @@ from remote_ci_monitor.core.model import (
     SUCCEEDED,
     UPLOADING,
     CancelInfo,
+    Median,
+    Progress,
     Source,
+    Step,
     WorkerInfo,
 )
 from remote_ci_monitor.core.queue import (
     QueueConfig,
+    StepMedian,
     compute_queue,
     confidence,
     eta_for_new,
@@ -38,13 +42,34 @@ from remote_ci_monitor.core.queue import (
     join_key,
     medians_from,
     remaining_seconds,
+    step_medians_from,
 )
 
 
-def rows_for(jobs, *, lanes=1, busy=None, paused=False, medians=MEDIANS, now=NOW, cfg=CFG, wk=None):
+def rows_for(
+    jobs,
+    *,
+    lanes=1,
+    busy=None,
+    paused=False,
+    medians=MEDIANS,
+    now=NOW,
+    cfg=CFG,
+    wk=None,
+    progress=None,
+    step_medians=None,
+):
     wk = wk if wk is not None else default_workers(busy or [], lanes=lanes)
     return compute_queue(
-        jobs, workers=wk, paused=paused, medians=medians, presets=PRESETS, cfg=cfg, now=now
+        jobs,
+        workers=wk,
+        paused=paused,
+        medians=medians,
+        presets=PRESETS,
+        cfg=cfg,
+        now=now,
+        progress=progress,
+        step_medians=step_medians,
     )
 
 
@@ -266,21 +291,32 @@ def test_overdue_running_job_has_null_finish_and_reason_overdue():
     assert row.estimate.finish_at is None
     assert row.reason == "overdue"
     assert row.estimate.remaining_seconds == 30
+    assert row.estimate.quiet is False  # 방금 출력이 있었다
 
 
-def test_stuck_by_multiplier_and_by_no_output():
+def test_compute_queue_without_step_medians_is_todays_rule():
+    """`step_medians` 를 안 받으면 단계 이야기를 안 하는 잡과 같다 — 옛 규칙 그대로 돈다.
+
+    (옛 이름: `test_stuck_by_multiplier_and_by_no_output`. 기존 호출자 — `rows_for` 픽스처 ·
+    `render_text` · CLI — 가 전부 그대로 살아야 한다.)
+    """
     long = job(1, state=RUNNING, created_min=25, started_min=25, last_output_at=ago(seconds=5))
-    assert rows_for([long], busy=[1])[0].reason == "stuck"  # 1500s > 3×400
+    row = rows_for([long], busy=[1])[0]
+    assert row.reason == "stuck" and row.estimate.stuck_code == "over_elapsed"  # 1500s > 3×400
     silent = job(2, state=RUNNING, created_min=6, started_min=5, last_output_at=ago(seconds=300))
-    assert rows_for([silent], busy=[2])[0].reason == "stuck"  # 300s > 240s 무출력
+    row = rows_for([silent], busy=[2])[0]
+    assert row.reason == "stuck" and row.estimate.stuck_code == "no_output"  # 300s > 240s 무출력
+    assert row.estimate.quiet is False  # 죽었다고 말했으면 「조용하다」고 또 말하지 않는다
     talking = job(3, state=RUNNING, created_min=6, started_min=5, last_output_at=ago(seconds=10))
-    assert rows_for([talking], busy=[3])[0].reason == "running"
+    row = rows_for([talking], busy=[3])[0]
+    assert row.reason == "running" and row.estimate.stuck_code is None
 
 
 def test_materializing_phase_is_its_own_reason_and_not_stuck():
     j = job(1, state=RUNNING, created_min=6, started_min=5, phase=PHASE_MATERIALIZING)
     row = rows_for([j], busy=[1])[0]
     assert row.reason == "materializing" and row.estimate.stuck is False
+    assert row.estimate.quiet is False
 
 
 def test_upload_stalled_reason():
@@ -491,3 +527,457 @@ def test_held_by_load_is_not_in_the_not_moving_list():
     from remote_ci_monitor.core.model import ACTIONABLE_REASONS, REASON_HELD_BY_LOAD
 
     assert REASON_HELD_BY_LOAD not in ACTIONABLE_REASONS
+
+
+# ── 멈춤 / 조용함 판정 — 단계 실측 (2026-09-15 사고) ───────────────────────────
+#
+# 규칙: 침묵만으로는 `stuck` 이 아니다. 침묵은 `quiet`(관측, 경보 아님)다. 죽었다는 말은
+# **현재 단계의 실측**이 있을 때 그 실측으로만 한다. 단계 이야기를 아예 안 하는 잡만
+# 옛 침묵 규칙으로 떨어진다.
+
+KEY = "gate:full"
+
+
+def stalling(
+    *,
+    elapsed: float,
+    expected: float,
+    silent: float | None = 0.0,
+    current: str | None = None,
+    current_seconds: float | None = None,
+    steps: tuple[str, ...] | None = None,
+    step_medians: dict[str, StepMedian] | None = None,
+    state: str = RUNNING,
+    phase: str | None = None,
+):
+    """도는 잡 한 줄 — 멈춤/조용함 판정에 필요한 것만 조립한다.
+
+    `steps=None` 이면 Progress 자체가 없다(마커를 안 찍는 잡). `silent=None` 이면
+    `last_output_at` 이 아예 없다(한 줄도 안 뱉었다).
+    """
+    started = NOW - timedelta(seconds=elapsed)
+    j = replace(
+        job(1, KEY, state, lane=1),
+        created_at=started,
+        queued_at=started,
+        started_at=started,
+        last_output_at=None if silent is None else NOW - timedelta(seconds=silent),
+        phase=phase,
+    )
+    progress = None
+    if steps is not None:
+        progress = {
+            1: Progress(
+                phase="executing",
+                steps=tuple(
+                    Step(index=i + 1, name=name, state="done", ok=True, seconds=1.0)
+                    for i, name in enumerate(steps)
+                ),
+                steps_total=len(steps),
+                steps_done=len(steps),
+                current_name=current,
+                current_seconds=current_seconds,
+            )
+        }
+    return rows_for(
+        [j],
+        busy=[1],
+        medians={KEY: Median(seconds=expected, wait_seconds=0.0, sample_count=6)},
+        progress=progress,
+        step_medians={KEY: step_medians} if step_medians else None,
+    )[0]
+
+
+def measured(seconds: float, samples: int = 3) -> dict[str, StepMedian]:
+    return StepMedian(seconds=seconds, sample_count=samples)
+
+
+def run_of(*pairs, state: str = "done") -> tuple[Step, ...]:
+    """(이름, 초) 쌍으로 한 실행의 단계 목록을 만든다."""
+    return tuple(
+        Step(index=i + 1, name=name, state=state, ok=True, seconds=seconds)
+        for i, (name, seconds) in enumerate(pairs)
+    )
+
+
+def test_a_step_exactly_at_the_multiplier_is_not_stuck():
+    """C-1 — 경계는 `>` 다. `>=` 로 두면 정상 실행이 매번 빨개진다."""
+    common = dict(elapsed=1900, expected=3600, current="test", steps=("lint", "test"))
+    at = stalling(**common, current_seconds=1800.0, step_medians={"test": measured(600.0)})
+    assert at.estimate.stuck is False and at.estimate.stuck_code is None
+    assert at.estimate.step_expected_seconds == 600.0
+    over = stalling(**common, current_seconds=1800.001, step_medians={"test": measured(600.0)})
+    assert over.estimate.stuck is True and over.estimate.stuck_code == "over_step"
+
+
+def test_a_half_second_step_never_goes_stuck_in_two_seconds():
+    """C-2 — 단계 임계의 하한은 `no_output_seconds` 다.
+
+    침묵 규칙이 낼 수 있었던 것보다 빨리 죽었다고 말하지 않는다. 하한이 없으면 짧은 단계를
+    가진 모든 프리셋이 매 실행마다 1.5초 만에 빨개진다.
+    """
+    common = dict(elapsed=40, expected=120, current="lint", steps=("lint",))
+    short = measured(0.5)
+    assert (
+        stalling(**common, current_seconds=2.0, step_medians={"lint": short}).estimate.stuck
+        is False
+    )
+    at = stalling(**common, current_seconds=240.0, step_medians={"lint": short})
+    assert at.estimate.stuck is False  # 경계는 `>`
+    over = stalling(**common, current_seconds=240.001, step_medians={"lint": short})
+    assert over.estimate.stuck is True and over.estimate.stuck_code == "over_step"
+
+
+def test_a_zero_second_median_does_not_make_every_step_stuck():
+    """C-3 — 0 은 실측이다(지어내지 않는다). 곱셈으로는 못 막고 하한만이 막는다."""
+    runs = {KEY: [run_of(("noop", 0.0)), run_of(("noop", 0.0)), run_of(("noop", 0.0))]}
+    table = step_medians_from(runs, CFG)
+    assert table[KEY]["noop"] == StepMedian(seconds=0.0, sample_count=3)
+    row = stalling(
+        elapsed=10,
+        expected=600,
+        current="noop",
+        current_seconds=0.2,
+        steps=("noop",),
+        step_medians=table[KEY],
+    )
+    assert row.estimate.stuck is False
+
+
+def test_two_samples_are_not_enough_for_a_step_median():
+    """C-4 — 2개는 「중앙값」이 아니라 「둘 중 하나」다. 호출자가 거르게 하지 않는다."""
+    runs = {KEY: [run_of(("build", 100.0)), run_of(("build", 140.0))]}
+    assert step_medians_from(runs, CFG) == {}
+
+
+def test_three_samples_give_the_median_not_the_mean():
+    """C-5 — `mean` 을 쓰면 한 번의 느린 실행이 임계를 두 배로 만든다."""
+    runs = {KEY: [run_of(("build", 100.0)), run_of(("build", 140.0)), run_of(("build", 400.0))]}
+    assert step_medians_from(runs, CFG)[KEY]["build"] == StepMedian(seconds=140.0, sample_count=3)
+
+
+def test_a_step_name_the_history_never_saw_only_goes_quiet():
+    """C-6 — 스크립트에 단계 하나 추가한 날 전부 빨개지면 안 된다."""
+    row = stalling(
+        elapsed=1000,
+        expected=1800,
+        silent=420,
+        current="e2e",
+        current_seconds=900,
+        steps=("lint", "test", "build"),
+        step_medians={"lint": measured(60.0), "test": measured(600.0)},
+    )
+    assert row.estimate.stuck is False and row.estimate.stuck_code is None
+    assert row.estimate.quiet is True and row.reason == "quiet"
+    assert row.estimate.step_expected_seconds is None
+
+
+def test_a_conditional_step_counts_only_the_runs_that_had_it():
+    """C-7 — 「단계의 신원은 이름」이 무너지는 첫 자리. 번호로 맞추면 안 된다."""
+    runs = {
+        KEY: [
+            run_of(("lint", 60.0), ("e2e", 300.0)),
+            run_of(("lint", 62.0), ("e2e", 340.0)),
+            run_of(("lint", 58.0)),
+            run_of(("lint", 61.0)),
+            run_of(("lint", 59.0)),
+        ]
+    }
+    table = step_medians_from(runs, CFG)[KEY]
+    assert "e2e" not in table and table["lint"].sample_count == 5
+    row = stalling(
+        elapsed=900,
+        expected=1800,
+        current="e2e",
+        current_seconds=700,
+        steps=("lint", "e2e"),
+        step_medians=table,
+    )
+    assert row.estimate.stuck is False
+
+
+def test_a_looping_step_contributes_one_sample_per_run():
+    """C-8 — `sample_count` 는 **실행 수**다.
+
+    출현 수를 세면 루프 도는 스크립트 하나가 혼자 표본을 채워 한 번의 실행이 「평소」를
+    정의하게 된다. 비교 대상인 `current_seconds` 는 한 번의 출현이다.
+    """
+    one = {KEY: [run_of(("retry", 10.0), ("retry", 20.0), ("retry", 30.0))]}
+    assert step_medians_from(one, CFG) == {}  # 실행 1개 < step_min_samples
+
+    three = {
+        KEY: [
+            run_of(("retry", 10.0), ("retry", 20.0), ("retry", 30.0)),  # 이 실행의 중앙값 20
+            run_of(("retry", 40.0), ("retry", 50.0), ("retry", 60.0)),  # 50
+            run_of(("retry", 70.0), ("retry", 80.0), ("retry", 90.0)),  # 80
+        ]
+    }
+    assert step_medians_from(three, CFG)[KEY]["retry"] == StepMedian(seconds=50.0, sample_count=3)
+
+
+def test_a_none_current_seconds_is_zero_not_an_error():
+    """C-9 · C-10 — `None` 을 큰 수로 읽거나 예외를 내면 `/api/status` 가 500 이 된다."""
+    unknown = stalling(
+        elapsed=1000,
+        expected=1800,
+        silent=420,
+        current="build",
+        current_seconds=None,
+        steps=("build",),
+        step_medians={"build": measured(600.0)},
+    )
+    assert unknown.estimate.stuck is False and unknown.estimate.quiet is True
+    fresh = stalling(
+        elapsed=1000,
+        expected=1800,
+        current="build",
+        current_seconds=0.0,
+        steps=("build",),
+        step_medians={"build": measured(600.0)},
+    )
+    assert fresh.estimate.stuck is False
+
+
+def test_a_job_with_no_steps_still_falls_back_to_silence():
+    """C-11 · C-12 — 마커를 전혀 안 찍는 잡의 안전망이 여기 하나뿐이다."""
+    none = stalling(elapsed=500, expected=1800, silent=300, steps=None)
+    assert none.estimate.stuck is True and none.estimate.stuck_code == "no_output"
+    assert none.estimate.quiet is False and none.reason == "stuck"
+    # Progress 는 있는데 단계가 하나도 없다 — `progress is None` 만 보면 여기가 샌다
+    empty = stalling(elapsed=500, expected=1800, silent=300, steps=())
+    assert empty.estimate.stuck is True and empty.estimate.stuck_code == "no_output"
+
+
+def test_a_job_past_its_last_step_is_quiet_not_stuck():
+    """C-13 — 선언한 단계를 다 끝낸 뒤의 침묵은 **의도된 구멍**이다.
+
+    안전망은 `elapsed > 3 × expected` 와 프리셋 `timeout_seconds` 둘뿐이다.
+    """
+    row = stalling(
+        elapsed=2000,
+        expected=1800,
+        silent=1200,
+        current=None,
+        steps=tuple(f"s{i}" for i in range(49)),
+        step_medians={"s0": measured(60.0)},
+    )
+    assert row.estimate.stuck is False and row.estimate.quiet is True
+    assert row.reason == "overdue"  # overdue 가 quiet 을 이긴다
+
+
+def test_cancelling_is_neither_stuck_nor_quiet():
+    """C-14 — 취소 중인 잡은 정의상 조용하다. `quiet` 를 내면 취소마다 회색 칩이 뜬다."""
+    row = stalling(
+        elapsed=10000,
+        expected=600,
+        silent=1000,
+        current="build",
+        current_seconds=6000,
+        steps=("build",),
+        step_medians={"build": measured(600.0)},
+        state=CANCELLING,
+    )
+    assert row.estimate.stuck is False and row.estimate.quiet is False
+    assert row.estimate.stuck_code is None and row.reason == "cancelling"
+    assert row.estimate.overdue is True  # overdue 는 상태를 안 본다 — 옛 동작 그대로
+
+
+def test_materializing_is_neither_stuck_nor_quiet():
+    """C-15 — 48 MB 트리를 푸는 동안 출력이 없는 것은 정상이다."""
+    row = stalling(elapsed=900, expected=1800, silent=900, steps=None, phase=PHASE_MATERIALIZING)
+    assert row.estimate.stuck is False and row.estimate.quiet is False
+    assert row.reason == "materializing"
+
+
+def test_overdue_beats_quiet_in_the_reason():
+    """C-16 — 뒤집으면 초과 실행이 회색 「조용함」 뒤에 숨는다."""
+    row = stalling(
+        elapsed=2000,
+        expected=1800,
+        silent=500,
+        current="build",
+        current_seconds=400,
+        steps=("build",),
+        step_medians={"build": measured(600.0)},
+    )
+    assert row.estimate.overdue is True and row.estimate.quiet is True
+    assert row.estimate.stuck is False and row.reason == "overdue"
+
+
+def test_stuck_and_quiet_are_mutually_exclusive():
+    """C-17 — 둘 다 참이면 화면이 어느 색을 쓸지 서버가 안 정해 준 셈이다."""
+    over_step = stalling(
+        elapsed=3000,
+        expected=6000,
+        silent=500,
+        current="build",
+        current_seconds=2500,
+        steps=("build",),
+        step_medians={"build": measured(600.0)},
+    )
+    over_elapsed = stalling(elapsed=2000, expected=400, silent=500, steps=None)
+    no_progress = stalling(elapsed=500, expected=1800, silent=300, steps=None)
+    no_median = stalling(
+        elapsed=500,
+        expected=1800,
+        silent=300,
+        current="build",
+        current_seconds=300,
+        steps=("build",),
+    )
+    for row in (over_step, over_elapsed, no_progress, no_median):
+        assert not (row.estimate.stuck and row.estimate.quiet)
+    assert [r.estimate.stuck for r in (over_step, over_elapsed, no_progress)] == [True] * 3
+    assert over_step.estimate.stuck_code == "over_step"
+    # ② 는 침묵 **이면서** 3배 초과다. 단계 이야기를 안 하는 잡이라 근거는 침묵이 먼저 잡는다
+    assert over_elapsed.estimate.stuck_code == "no_output"
+    assert no_progress.estimate.stuck_code == "no_output"
+    assert no_median.estimate.stuck is False and no_median.estimate.quiet is True
+    # 조용하지 않은데 3배를 넘었으면 근거는 경과다
+    talking = stalling(elapsed=2000, expected=400, silent=0, steps=None)
+    assert talking.estimate.stuck is True and talking.estimate.stuck_code == "over_elapsed"
+
+
+def test_a_job_that_never_printed_measures_silence_from_its_start():
+    """C-18 — `last_output_at` 이 없으면 침묵은 시작 시각부터 잰다(옛 동작 그대로)."""
+    young = stalling(elapsed=5, expected=1800, silent=None, steps=None)
+    assert young.estimate.stuck is False and young.estimate.quiet is False
+    assert young.reason == "running"
+    old = stalling(elapsed=300, expected=1800, silent=None, steps=None)
+    assert old.estimate.stuck is True and old.estimate.stuck_code == "no_output"
+
+
+def test_a_clock_that_went_backwards_raises_no_alarm():
+    """C-19 — 노트북 뚜껑을 닫았다 여는 것만으로 화면이 빨개지면 안 된다."""
+    row = stalling(
+        elapsed=-120,
+        expected=1800,
+        silent=-60,
+        current="build",
+        current_seconds=-30.0,
+        steps=("build",),
+        step_medians={"build": measured(600.0)},
+    )
+    assert row.estimate.elapsed_seconds == -120.0
+    assert row.estimate.overdue is False and row.estimate.stuck is False
+    assert row.estimate.quiet is False and row.reason == "running"
+    assert row.estimate.remaining_seconds >= CFG.floor_remaining_seconds
+
+
+def test_the_2026_09_15_gate_incident_is_quiet_not_stuck():
+    """C-20 — 이 한 줄이 이 작업의 존재 이유다.
+
+    경과 17m 24s · 예상 18m · 7m 53s 무출력 · 단계 49/49 진행 중이었고 화면은 「멈춘 듯」에
+    「예상의 1배」를 붙였다. `build web` 은 평소 9분 걸리는 단계다.
+    """
+    row = stalling(
+        elapsed=1044,
+        expected=1080.0,
+        silent=473,
+        current="build web",
+        current_seconds=473.0,
+        steps=("lint", "test", "build web"),
+        step_medians={"build web": measured(540.0, samples=5)},
+    )
+    assert row.estimate.stuck is False and row.estimate.stuck_code is None
+    assert row.estimate.step_expected_seconds == 540.0
+    assert row.estimate.overdue is False  # 1044 < 1080
+    assert row.estimate.quiet is True and row.reason == "quiet"
+
+    from remote_ci_monitor.core.status import estimate_json
+
+    out = estimate_json(row.estimate)
+    assert out["quiet"] is True
+    assert out["stuck_code"] is None and out["step_expected_seconds"] == 540.0
+
+
+def test_the_same_incident_one_minute_later_reads_as_overdue():
+    """C-21 — 사고 기록의 「예상 약 17m」쪽 해석. 둘 다 「멈춘 듯」과 「1배」가 사라진다."""
+    row = stalling(
+        elapsed=1044,
+        expected=1020.0,
+        silent=473,
+        current="build web",
+        current_seconds=473.0,
+        steps=("lint", "test", "build web"),
+        step_medians={"build web": measured(540.0, samples=5)},
+    )
+    assert row.estimate.overdue is True and row.estimate.quiet is True
+    assert row.estimate.stuck is False and row.reason == "overdue"
+
+
+def test_a_running_step_is_not_a_sample():
+    """C-22 — 도는 중인 단계는 아직 「평소 얼마나 걸리나」가 아니다."""
+    one = run_of(("build", 600.0)) + (
+        Step(index=2, name="deploy", state="running", ok=None, seconds=900.0),
+    )
+    table = step_medians_from({KEY: [one, one, one]}, CFG)[KEY]
+    assert set(table) == {"build"}
+
+
+def test_a_step_with_no_duration_is_skipped():
+    """C-23 — `statistics.median([600, None, ...])` 로 TypeError 가 나면 안 된다."""
+    runs = {
+        KEY: [
+            run_of(("build", 600.0)),
+            (Step(index=1, name="build", state="done", ok=True, seconds=None),),
+            run_of(("build", 640.0)),
+            run_of(("build", 620.0)),
+        ]
+    }
+    assert step_medians_from(runs, CFG)[KEY]["build"].sample_count == 3
+
+
+def test_step_medians_from_handles_empty_input():
+    """C-24 — 빈 key 는 아예 넣지 않는다(빈 dict 를 남기면 「몇 개를 쟀나」가 거짓말이 된다)."""
+    assert step_medians_from({}, CFG) == {}
+    assert step_medians_from({KEY: []}, CFG) == {}
+    assert step_medians_from({KEY: [(), (), ()]}, CFG) == {}
+
+
+def test_a_step_closed_by_job_end_is_still_a_sample():
+    """C-25 — 끝 마커가 없는 마지막 단계는 `finished_at` 이 닫는다.
+
+    「끝 마커가 없으니 버린다」로 고치면 `gate` 의 마지막 단계는 표본을 영원히 못 채우고,
+    사고가 난 바로 그 단계가 판정 대상에서 빠진다. 중앙값이 실제 단계보다 길어지는 쪽이라
+    오경보가 줄어드는 방향이다.
+    """
+    from remote_ci_monitor.core.progress import Marker, progress_from_markers
+
+    runs = []
+    for extra in (30, 60, 90):  # 산출물 업로드에 걸린 시간이 실행마다 다르다
+        start = NOW - timedelta(seconds=1000)
+        markers = [Marker(at=start, kind="step", value="build web")]
+        p = progress_from_markers(
+            markers,
+            started_at=start,
+            finished_at=start + timedelta(seconds=600 + extra),
+            now=NOW,
+            exit_code=0,
+        )
+        assert p.steps[0].state == "done"
+        runs.append(p.steps)
+    table = step_medians_from({KEY: runs}, CFG)[KEY]
+    assert table["build web"] == StepMedian(seconds=660.0, sample_count=3)
+
+
+def test_jobs_with_no_markers_produce_no_step_medians():
+    """C-62 — 마커가 한 줄도 없는 잡은 아무 표본도 안 낸다. 예외도 없다."""
+    from remote_ci_monitor.core.progress import progress_from_markers
+
+    start = NOW - timedelta(seconds=1000)
+    silent = progress_from_markers(
+        [], started_at=start, finished_at=NOW, now=NOW, exit_code=0
+    ).steps
+    assert silent == ()
+    assert step_medians_from({"silent:job": [silent, silent, silent]}, CFG) == {}
+
+
+def test_quiet_is_not_in_the_not_moving_list():
+    """`held_by_load` 와 같은 종류다 — 의도되지 않았지만 경보가 아니다.
+
+    올리면 오늘의 빨간 소음이 이름만 바꿔 「확인이 필요한 작업」에 그대로 남는다.
+    """
+    from remote_ci_monitor.core.model import ACTIONABLE_REASONS, REASON_QUIET
+
+    assert REASON_QUIET not in ACTIONABLE_REASONS

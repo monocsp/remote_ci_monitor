@@ -35,12 +35,16 @@ from remote_ci_monitor.core.model import (
     REASON_NOT_SCHEDULED,
     REASON_OVERDUE,
     REASON_PAUSED,
+    REASON_QUIET,
     REASON_RUNNING,
     REASON_STUCK,
     REASON_UPLOAD_STALLED,
     REASON_UPLOADING,
     REASON_WAITING_FOR_LANE,
     REASON_WORKER_DOWN,
+    STUCK_ELAPSED,
+    STUCK_NO_OUTPUT,
+    STUCK_STEP,
     SUCCEEDED,
     TIMED_OUT,
     UPLOADING,
@@ -56,6 +60,7 @@ from remote_ci_monitor.core.model import (
     QueueRow,
     Requester,
     Source,
+    Step,
     WorkerInfo,
 )
 
@@ -72,6 +77,11 @@ class QueueConfig:
     floor_remaining_seconds: float = 30
     stuck_multiplier: float = 3.0
     no_output_seconds: float = 240
+    #: 현재 단계가 자기 실측 중앙값의 몇 배를 넘으면 stuck 인가
+    step_stuck_multiplier: float = 3.0
+    #: 단계 중앙값을 믿기 시작하는 표본(실행) 수. 잡 중앙값의 `min_samples`(2)보다 높다 —
+    #: 단계 소요는 잡 소요보다 훨씬 시끄럽다(캐시 적중·병렬도·기계 부하가 단계 단위로 다르다).
+    step_min_samples: int = 3
     upload_stall_seconds: float = 60
     not_scheduled_seconds: float = 10
     min_samples: int = 2
@@ -125,6 +135,51 @@ def medians_from(jobs: Sequence[Job], now: datetime, cfg: QueueConfig) -> dict[s
             wait_seconds=float(median(waits[key])) if waits.get(key) else None,
             sample_count=len(ds),
         )
+    return out
+
+
+@dataclass(frozen=True)
+class StepMedian:
+    """한 key 의 한 **단계 이름**이 평소 얼마나 걸리나. `medians_from` 의 단계판이다."""
+
+    seconds: float
+    sample_count: int
+
+
+def step_medians_from(
+    runs: Mapping[str, Sequence[Sequence[Step]]], cfg: QueueConfig
+) -> dict[str, dict[str, StepMedian]]:
+    """key → 단계 이름 → 중앙값. `step_min_samples` 미만이면 넣지 않는다.
+
+    **단계의 신원은 이름이다**(번호가 아니다). 되재생·병렬 스크립트에서 번호는 실행마다
+    흔들리지만 이름은 잡이 선언한 것이다(M5h 결정 63 이 `failed_step` 에서 배운 것과 같다).
+    끝난(`state == "done"`) 단계의 `seconds` 만 센다 — 도는 중인 단계는 아직 표본이 아니다.
+
+    `sample_count` 는 **실행 수**다(출현 수가 아니다). 한 실행 안에서 같은 이름이 여러 번
+    나오면(루프 도는 스크립트) 그 실행의 **중앙값 하나**로 접는다. 출현 수를 세면 루프
+    하나가 혼자 표본을 채워 **한 번의 실행이 「평소」를 정의**하게 된다. 비교 대상인
+    `Progress.current_seconds` 도 한 번의 출현이라 표본의 단위가 그래야 맞는다.
+
+    표가 빈 key 는 아예 넣지 않는다 — 빈 dict 를 남기면 「몇 개 key 를 쟀나」가 거짓말이 된다.
+    """
+    out: dict[str, dict[str, StepMedian]] = {}
+    for key, key_runs in runs.items():
+        per_name: dict[str, list[float]] = {}
+        for steps in key_runs:
+            in_run: dict[str, list[float]] = {}
+            for s in steps:
+                if s.state != "done" or s.seconds is None:
+                    continue
+                in_run.setdefault(s.name, []).append(float(s.seconds))
+            for name, values in in_run.items():
+                per_name.setdefault(name, []).append(float(median(values)))
+        table = {
+            name: StepMedian(seconds=float(median(values)), sample_count=len(values))
+            for name, values in per_name.items()
+            if len(values) >= cfg.step_min_samples
+        }
+        if table:
+            out[key] = table
     return out
 
 
@@ -184,18 +239,67 @@ def remaining_seconds(expected: float, elapsed: float | None, cfg: QueueConfig) 
 
 
 def _busy_estimate(
-    job: Job, expected: float, source: str, n: int, now: datetime, cfg: QueueConfig
+    job: Job,
+    expected: float,
+    source: str,
+    n: int,
+    now: datetime,
+    cfg: QueueConfig,
+    *,
+    progress: Progress | None = None,
+    step_medians: Mapping[str, StepMedian] | None = None,
 ) -> Estimate:
+    """도는 잡 하나의 추정과 **멈춤/조용함 판정**.
+
+    침묵만으로는 `stuck` 이 아니다. 침묵은 `quiet` — 관측이지 경보가 아니다. 죽었다는 말은
+    **현재 단계의 실측**이 있을 때만 그 실측으로 한다.
+    """
     started = job.started_at or now
     elapsed = _seconds(started, now)
     waited = _seconds(job.created_at, started)
     remaining = remaining_seconds(expected, elapsed, cfg)
     overdue = elapsed > expected
     last_output = job.last_output_at or started
-    stuck = job.state != CANCELLING and (
-        elapsed > cfg.stuck_multiplier * expected
-        or (job.phase != PHASE_MATERIALIZING and _seconds(last_output, now) > cfg.no_output_seconds)
-    )
+    silent = job.phase != PHASE_MATERIALIZING and _seconds(last_output, now) > cfg.no_output_seconds
+
+    medians = step_medians or {}
+    current = progress.current_name if progress is not None else None
+    m = medians.get(current) if current else None
+    step_stuck = False
+    stuck_code: str | None = None
+    step_expected: float | None = None
+    if m is not None:
+        # ① 이 단계의 실측이 있다 — 그것으로 판정한다.
+        step_expected = m.seconds
+        current_seconds = (progress.current_seconds if progress is not None else None) or 0.0
+        # 하한이 곱셈보다 세다. **침묵 규칙이 낼 수 있었던 것보다 빨리 죽었다고 말하지
+        # 않는다** — 중앙값 0.5초짜리 `lint` 의 3배(1.5초)로 「죽었다」고 하는 것이 그 짓이고,
+        # 중앙값이 정확히 0 초인 단계(마커 두 줄이 같은 `at` 을 받았다)는 곱셈으로는 아예
+        # 못 막는다(임계가 0 이라 시작하자마자 stuck 이다). 새 설정 키는 만들지 않고
+        # `no_output_seconds` 를 그대로 하한으로 쓴다 — 규칙이 한 문장으로 읽힌다.
+        threshold = max(cfg.step_stuck_multiplier * m.seconds, cfg.no_output_seconds)
+        step_stuck = current_seconds > threshold
+        if step_stuck:
+            stuck_code = STUCK_STEP
+    elif progress is None or not progress.steps:
+        # ② 단계 이야기를 아예 안 한다 — 침묵이 우리가 가진 유일한 신호다(옛 규칙 그대로).
+        step_stuck = silent
+        if step_stuck:
+            stuck_code = STUCK_NO_OUTPUT
+    # ③ 단계는 도는데 그 이름의 실측이 아직 없다 → `stuck` 이 아니다. `quiet` 만 낸다.
+    #    「몇 번째 단계에 있다」가 이미 살아 있다는 증거이고, 그 단계가 얼마나 걸려야 하는지
+    #    **모르는 것은 모르는 것**이지 죽은 것이 아니다. 여기를 ② 로 보내면 이력이 없는 새
+    #    key 는 오늘과 똑같이 매번 빨개진다 — 고치려던 바로 그 사고다.
+    #    **단계를 다 끝낸 뒤(`current_name is None`, `steps` 는 남아 있다)의 침묵도 ③ 이다.**
+    #    의도된 구멍이다: 마지막 단계를 끝내고 산출물 업로드에서 죽으면 여기로 온다. 안전망은
+    #    `elapsed > stuck_multiplier × expected` 와 프리셋 `timeout_seconds` 둘이다.
+
+    stuck = job.state != CANCELLING and (elapsed > cfg.stuck_multiplier * expected or step_stuck)
+    if not stuck:
+        stuck_code = None
+    elif stuck_code is None:
+        stuck_code = STUCK_ELAPSED
+    quiet = silent and not stuck and job.state != CANCELLING
     finish = (
         None
         if (overdue or stuck or job.state == CANCELLING)
@@ -212,10 +316,18 @@ def _busy_estimate(
         overdue=overdue,
         stuck=stuck,
         finish_at=finish,
+        quiet=quiet,
+        stuck_code=stuck_code,
+        step_expected_seconds=step_expected,
     )
 
 
 def _busy_reason(job: Job, est: Estimate) -> str:
+    """표시 사유 하나. `cancelling → materializing → stuck → overdue → quiet → running`.
+
+    초과 실행이면서 조용한 잡은 `overdue` 로 낸다 — 더 행동 가능한 사실이 이긴다. 뒤집으면
+    초과 실행이 회색 「조용함」 뒤에 숨는다.
+    """
     if job.state == CANCELLING:
         return REASON_CANCELLING
     if job.phase == PHASE_MATERIALIZING:
@@ -224,6 +336,8 @@ def _busy_reason(job: Job, est: Estimate) -> str:
         return REASON_STUCK
     if est.overdue:
         return REASON_OVERDUE
+    if est.quiet:
+        return REASON_QUIET
     return REASON_RUNNING
 
 
@@ -237,9 +351,14 @@ def compute_queue(
     cfg: QueueConfig,
     now: datetime,
     progress: Mapping[int, Progress] | None = None,
+    step_medians: Mapping[str, Mapping[str, StepMedian]] | None = None,
 ) -> list[QueueRow]:
-    """활성 잡 → 큐 행. 출력 순서는 running → cancelling → 대기(순번순)."""
+    """활성 잡 → 큐 행. 출력 순서는 running → cancelling → 대기(순번순).
+
+    `step_medians` 는 key → 단계 이름 → 중앙값. 없으면 멈춤 판정은 옛 규칙(침묵)으로 돈다.
+    """
     progress = progress or {}
+    step_medians = step_medians or {}
     active = sorted((j for j in jobs if j.state in ACTIVE_STATES), key=lambda j: j.id)
     busy = [j for j in active if j.is_busy]
     # 같은 풀에서 둘 이상이 도는 중이면 서로 머신을 나눠 쓰고 있다(M5f §6)
@@ -271,7 +390,16 @@ def compute_queue(
     rows: list[QueueRow] = []
     for job in busy:
         expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
-        est = _busy_estimate(job, expected, source, n, now, cfg)
+        est = _busy_estimate(
+            job,
+            expected,
+            source,
+            n,
+            now,
+            cfg,
+            progress=progress.get(job.id),
+            step_medians=step_medians.get(job.key),
+        )
         if busy_per_pool.get(job.pool, 0) > 1:
             est = replace(est, shared=True)
         free_at = now + timedelta(seconds=est.remaining_seconds or 0)

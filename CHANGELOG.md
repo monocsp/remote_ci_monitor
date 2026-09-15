@@ -7,6 +7,61 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **A job that has gone quiet is no longer called stuck.** A running job was marked
+  `likely stuck` — the loudest red on the page — as soon as it went `no_output_seconds`
+  (4 minutes) without writing a line. That is a normal shape for real work: the `gate` preset
+  spends its last step running nine test shards, gitleaks and a web build in parallel, and those
+  tools buffer their output until they finish. So `gate` tripped the alarm on **every healthy
+  run**. Observed on 2026-09-15: 17m 24s elapsed, one times its own estimate, step 49/49 still
+  advancing, and the screen said the job had stopped.
+  Silence alone is now its own state, `quiet` — grey, not an alarm, and deliberately not in
+  `ACTIONABLE_REASONS`, so it stays out of the "needs a look" summary. A job is called stuck when
+  its **current step** has run past its own measured median (`[estimate] step_stuck_multiplier`,
+  default 3), which the server learns from the step markers past successful runs already wrote;
+  no migration, and the threshold never drops below `no_output_seconds`, so a step that normally
+  takes half a second cannot be declared dead in a second and a half. The old whole-job rule
+  (`elapsed > stuck_multiplier * expected`) is unchanged, and silence is still the verdict for a
+  job that prints no step markers at all — there the screen has nothing else to go on.
+  `estimate` gained three keys (`quiet`, `stuck_code`, `step_expected_seconds`) and `reason`
+  gained one value; `schema_version` stays 1, because adding keys is free and the meaning of
+  `estimate.stuck` did not change — what changed is the evidence behind it, which
+  `no_output_seconds` already moved. `[estimate] step_min_samples` (default 3) is how many past
+  runs a step needs before its median is trusted.
+- **The reason for calling a job stuck now matches the evidence.** The screen appended
+  `n× expected` to every stuck job whether or not the multiple was what tripped it, so a job
+  caught by silence read `likely stuck · 1× expected` — a warning next to the evidence that it
+  was exactly on schedule. The server now names the trigger (`over_step`, `over_elapsed`,
+  `no_output`) and the screen prints only that.
+- **The Korean screen says what it means.** 311 strings were read end to end against the
+  translationese rules of [im-not-ai](https://github.com/cloudhat/im-not-ai). The classic
+  patterns were already absent, but the copy leaned on implementation words — `잡`, `레인`,
+  `키`, `소스`, `풀`, `프리셋`, `표본`, `load`, `스텝` — and on `멈춘 듯`, a literal rendering of
+  Jenkins' `likely stuck` that is not a form Korean interfaces use. 47 strings changed:
+  `잡` is now `작업` throughout, queue groups read `작업 중` and `대기열` while a row's own state
+  reads `진행 중`, `멈춘 듯` is `응답 없음`, `레인 1/1 사용 중` is `동시 실행 1/1`, and
+  `load 10.3` is `처리 대기 10.3 · 코어 10개 기준`. Three strings had drifted out of the
+  catalogue's polite register and were brought back. Seven strings dodged Korean particle
+  agreement by printing `이(가)`; a helper now picks the particle from the final consonant of
+  whatever name the server sent, including digits and Latin letters read aloud. The emoji and
+  box-drawing glyphs in twelve strings are inline SVG in the renderer — the pill glyphs stay,
+  because those are the shape channel that carries state without color.
+- **The queue table says a job is in trouble once, not three times.** The same fact was painted
+  red in three places at once: the summary panel, a filled block inside the reason cell, and a
+  hatched progress bar with its own label. A row now carries one 3px status rail on its left and
+  one filled chip, the reason cell is plain text, and the progress bar moved inside the elapsed
+  column, which drops a whole table row per running job. The label under that bar says only how
+  far along the job is and what the number was measured against — `41% · 20/49 steps`, `88% · by
+  measured time`. It no longer repeats the condition the chip and the status column have already
+  said twice: inside a 168px column `41% · 20/49 steps · not responding` wrapped onto a second
+  line and mid-phrase, and that row stood 13px taller than the ones around it. The condition is
+  now carried by the bar's own colour and hatching, and it stays word for word in the bar's
+  `aria-valuetext` and in the label's tooltip — it left the pixels, not the page.
+  The summary cells and the host section
+  are cards with a coloured top edge, and recent results carry a rail in their outcome's colour.
+  No new colour tokens; the light-theme contrast figures in `style.css` were re-measured against
+  the new backgrounds and the note updated.
+
 ### Fixed
 - **A fetch that got nothing no longer exits 0.** `rcm run --fetch-artifacts` and
   `rcm artifacts --fetch` asked the server for the bundle and, for **every** state other than

@@ -84,17 +84,20 @@ from remote_ci_monitor.core.model import (
     ServerInfo,
     Source,
     StatusModel,
+    Step,
     WorkerInfo,
 )
-from remote_ci_monitor.core.progress import Marker, progress_for_job
+from remote_ci_monitor.core.progress import Marker, progress_for_job, progress_from_markers
 from remote_ci_monitor.core.queue import (
     QueueConfig,
+    StepMedian,
     compute_queue,
     eta_for_new,
     join_key,
     medians_from,
     priority_from_name,
     split_by_pool,
+    step_medians_from,
 )
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
@@ -206,6 +209,9 @@ SNAPSHOT_MAX_AGE_SECONDS = 0.2
 #: 중앙값은 잡이 끝날 때만 다시 재지만, 잡이 하나도 안 끝나는 동안에도 45일 창은 흘러간다 —
 #: 그래서 시간으로도 상한을 둔다. 무효화 경로를 하나 놓쳐도 이 안에 스스로 낫는다.
 MEDIANS_MAX_AGE_SECONDS = 300.0
+#: 단계 중앙값 하나를 만드는 데 읽는 **성공 잡 수**. 설정 키가 아니라 모듈 상수다 — 성능
+#: 손잡이일 뿐이고, 남의 `server.toml` 에 들어가면 되돌리기 어려운 이름이 하나 더 는다.
+STEP_SAMPLE_JOBS = 10
 SSE_TICK_SECONDS = 1.0
 SSE_WRITE_TIMEOUT_SECONDS = 30.0
 _PATH_RE = re.compile(r"/[^\s'\"]+")
@@ -270,6 +276,10 @@ class _DbSnapshot:
     queue_error_code: str | None = None
     recent_error_code: str | None = None
     medians_error_code: str | None = None
+    #: 도는 잡의 key → 단계 이름 → 중앙값. 멈춤 판정이 이걸로 돈다 (M5m)
+    step_medians: dict[str, dict[str, StepMedian]] = field(default_factory=dict)
+    step_medians_error: str | None = None
+    step_medians_error_code: str | None = None
 
 
 class App(RemoteWorkersMixin):
@@ -317,6 +327,11 @@ class App(RemoteWorkersMixin):
         ) = None
         self._medians_dirty = True
         self._medians_loaded_at = 0.0
+        # 단계 중앙값의 캐시는 **key 별 항목**이다(`_load_step_medians` 의 주석이 이유).
+        self._step_medians: dict[str, dict[str, StepMedian]] = {}
+        self._step_medians_at: dict[str, float] = {}  # key → 잰 시각(monotonic)
+        self._step_medians_view: dict[str, dict[str, StepMedian]] = {}
+        self._step_medians_view_keys: frozenset[str] = frozenset()
         self._sse_lock = threading.Lock()
         self._sse_connections = 0
         # 부하 게이트(M5f §4.5). 락은 **하나(전역)** 이고 게이트를 지나는 레인(≥ 2)만 잡는다 —
@@ -612,9 +627,14 @@ class App(RemoteWorkersMixin):
         self.bus.publish(kind, data, at=self.now_fn())
 
     def _mark_medians_dirty(self) -> None:
-        """새 표본이 생겼다 — 잡이 종료 상태에 이르렀을 때만."""
+        """새 표본이 생겼다 — 잡이 종료 상태에 이르렀을 때만.
+
+        단계 중앙값도 같은 때 늙는다. 마커 한 줄로는 늙지 않는다 — 단계 중앙값의 원천이
+        마커라 「마커가 오면 다시 재자」가 자연스러워 보이지만, 그것이 정확히 M5f 가 고친 버그다.
+        """
         with self._snap_lock:
             self._medians_dirty = True
+            self._step_medians_at.clear()
 
     def _mark_dirty(self) -> None:
         with self._snap_lock:
@@ -940,6 +960,8 @@ class App(RemoteWorkersMixin):
             floor_remaining_seconds=e.floor_remaining_seconds,
             stuck_multiplier=e.stuck_multiplier,
             no_output_seconds=e.no_output_seconds,
+            step_stuck_multiplier=e.step_stuck_multiplier,
+            step_min_samples=e.step_min_samples,
             upload_stall_seconds=s.upload_stall_seconds,
             min_samples=e.min_samples,
             min_job_seconds=e.min_job_seconds,
@@ -961,6 +983,10 @@ class App(RemoteWorkersMixin):
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
+        # 단계 중앙값은 **도는 잡의 key** 에만 필요하다 — 도는 잡이 없으면 질의 0회다.
+        step_medians, step_error, step_error_code = self._load_step_medians(
+            now, cfg, {j.key for j in jobs if j.is_busy}
+        )
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
@@ -986,6 +1012,9 @@ class App(RemoteWorkersMixin):
             medians=medians,
             medians_error=medians_error,
             medians_error_code=medians_error_code,
+            step_medians=step_medians,
+            step_medians_error=step_error,
+            step_medians_error_code=step_error_code,
             paused=paused,
         )
 
@@ -1028,6 +1057,86 @@ class App(RemoteWorkersMixin):
         self._medians_dirty = False
         self._medians_loaded_at = time.monotonic()
         return out
+
+    def _load_step_medians(
+        self, now: datetime, cfg: QueueConfig, keys: set[str]
+    ) -> tuple[dict[str, dict[str, StepMedian]], str | None, str | None]:
+        """도는 잡의 key 들만 단계 중앙값을 읽는다. 없으면 질의 0회.
+
+        **호출자가 `_snap_lock` 을 들고 있어야 한다** — `self._step_medians*` 를 잠금 없이 만진다.
+
+        캐시 정책은 `_load_medians` 와 **같을 수 없다**. 잡 중앙값의 입력은 45일치 전부라 TTL
+        하나로 충분하지만, 단계 중앙값의 입력(`keys`)은 **요청마다 바뀐다**. TTL 만 보면
+        캐시가 신선한 동안 새로 뜬 key 의 잡은 최대 `MEDIANS_MAX_AGE_SECONDS` 동안 단계
+        판정을 못 받는다 — 안전한 쪽으로 틀리지만(§1.4-③ 로 `quiet` 만 난다) 조용히 무력하다.
+        그래서 캐시를 **key 별 항목**으로 두고 **캐시에 없거나 늙은 key 만** 읽는다.
+
+        키 집합과 항목이 그대로면 **같은 dict 객체**를 돌려준다 — 마커 한 줄이 스냅샷을
+        더럽혀도 단계 중앙값은 다시 재지 않는다(M5f 결정 49 와 같은 함정).
+        """
+        at = time.monotonic()
+        stale = sorted(
+            k
+            for k in keys
+            if k not in self._step_medians_at
+            or at - self._step_medians_at[k] >= MEDIANS_MAX_AGE_SECONDS
+        )
+        if not stale and self._step_medians_view_keys == keys:
+            return self._step_medians_view, None, None
+        if stale:
+            try:
+                self._read_step_medians(now, cfg, stale)
+            except Exception as e:  # noqa: BLE001
+                # **실패는 캐시하지 않는다**(`_load_medians` 와 같은 판단). 판정은 §1.4-③ 으로
+                # 폴백해 `quiet` 만 난다 — 침묵 폴백(②)으로 떨어지지 않는다. 「중앙값을 못
+                # 읽었다」는 「단계 이야기를 안 한다」와 다른 사실이다.
+                return {}, _error_text(e), _error_code(e)
+        self._step_medians_view = {
+            k: self._step_medians[k] for k in sorted(keys) if k in self._step_medians
+        }
+        self._step_medians_view_keys = frozenset(keys)
+        return self._step_medians_view, None, None
+
+    def _read_step_medians(self, now: datetime, cfg: QueueConfig, keys: list[str]) -> None:
+        """`keys` 의 단계 중앙값을 실제로 읽어 캐시 항목을 갈아 끼운다.
+
+        질의는 key 당 표본 id 하나 + 전체를 한 번에 묶은 마커·종료 시각 둘이다. 보존된 잡 수도
+        이벤트 수도 여기 안 들어온다 — 읽는 잡은 key 당 `STEP_SAMPLE_JOBS` 개가 상한이다.
+        """
+        since = now - timedelta(days=cfg.sample_days)
+        ids_by_key = {
+            key: self.store.list_step_sample_ids(key, since=since, limit=STEP_SAMPLE_JOBS)
+            for key in keys
+        }
+        all_ids = [i for ids in ids_by_key.values() for i in ids]
+        markers = self.store.markers_for(all_ids)
+        ends = self.store.finished_at_for(all_ids)
+        runs: dict[str, list[tuple[Step, ...]]] = {}
+        for key, ids in ids_by_key.items():
+            steps: list[tuple[Step, ...]] = []
+            for job_id in ids:
+                end = ends.get(job_id)
+                if end is None:
+                    continue
+                # 표본은 끝난 잡이다. `started_at` 은 `job_seconds` 에만 쓰이고 단계 소요에는
+                # 안 들어가므로 종료 시각을 그대로 준다 — 잡 행을 다시 읽지 않기 위해서다.
+                steps.append(
+                    progress_from_markers(
+                        markers.get(job_id, []),
+                        started_at=end,
+                        finished_at=end,
+                        now=end,
+                        exit_code=0,
+                    ).steps
+                )
+            runs[key] = steps
+        table = step_medians_from(runs, cfg)
+        for key in keys:
+            self._step_medians.pop(key, None)
+            if key in table:
+                self._step_medians[key] = table[key]
+            self._step_medians_at[key] = time.monotonic()
+        self._step_medians_view_keys = frozenset()  # 다음 호출이 view 를 새로 만든다
 
     def _snapshot(self) -> _DbSnapshot:
         """dirty 이거나 TTL 이 지났으면 다시 읽고, 아니면 캐시. status 는 이걸로 순수 계산만."""
@@ -1073,6 +1182,9 @@ class App(RemoteWorkersMixin):
                     cfg=self.queue_config(),
                     now=now,
                     progress=progress,
+                    # 풀별로 나누지 않는다 — 단계 소요는 key 에 붙고, 풀 차이는 `expected`
+                    # 쪽(`_pool_medians`)이 이미 흡수한다.
+                    step_medians=snap.step_medians,
                 )
             )
         return rows
