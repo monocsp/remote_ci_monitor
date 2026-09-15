@@ -87,6 +87,7 @@ store.list_step_sample_ids(key)  →  store.markers_for(ids)
 @dataclass(frozen=True)
 class StepMedian:
     """한 key 의 한 **단계 이름**이 평소 얼마나 걸리나. `medians_from` 의 단계판이다."""
+
     seconds: float
     sample_count: int
 
@@ -119,13 +120,13 @@ stuck_code: str | None = None
 step_expected: float | None = None
 cur = progress.current_name if progress else None
 m = step_medians.get(cur) if cur else None
-if m is not None:                       # ① 이 단계의 실측이 있다 — 그것으로 판정한다
+if m is not None:  # ① 이 단계의 실측이 있다 — 그것으로 판정한다
     step_expected = m.seconds
     cur_seconds = progress.current_seconds or 0.0
     step_stuck = cur_seconds > cfg.step_stuck_multiplier * m.seconds
     if step_stuck:
         stuck_code = STUCK_STEP
-elif progress is None or not progress.steps:   # ② 단계 이야기를 아예 안 한다 — 오늘 규칙으로
+elif progress is None or not progress.steps:  # ② 단계 이야기를 아예 안 한다 — 오늘 규칙으로
     step_stuck = silent
     if step_stuck:
         stuck_code = STUCK_NO_OUTPUT
@@ -184,8 +185,8 @@ quiet = silent and not stuck and job.state != CANCELLING
 `config.py::EstimateSection`(`config.py:141`):
 
 ```python
-step_stuck_multiplier: float = 3.0   # 현재 단계가 자기 실측 중앙값의 몇 배를 넘으면 stuck 인가
-step_min_samples: int = 3            # 단계 중앙값을 믿기 시작하는 표본 수(잡 중앙값보다 높다)
+step_stuck_multiplier: float = 3.0  # 현재 단계가 자기 실측 중앙값의 몇 배를 넘으면 stuck 인가
+step_min_samples: int = 3  # 단계 중앙값을 믿기 시작하는 표본 수(잡 중앙값보다 높다)
 ```
 
 `step_min_samples` 가 `min_samples`(2)보다 높은 이유: 단계 소요는 잡 소요보다 훨씬 시끄럽다
