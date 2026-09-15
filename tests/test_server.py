@@ -285,7 +285,10 @@ def test_tar_escape_is_rejected_and_left_as_failed(live):
     assert live.upload(jid, data=evil)[0] == 200  # 저장만 하고 풀지 않는다
     j = live.wait_terminal(jid)
     assert j.state == "failed" and j.exit_code is None
-    assert j.summary.startswith("snapshot rejected: member escapes the workspace")  # 뒤에 멤버 이름
+    assert j.summary_code == "snapshot_rejected"
+    # 까닭은 닫힌 열쇠, 멤버는 **이름 하나** — 어느 파일인지는 남기되 경로는 안 싣는다
+    assert j.summary_args == {"kind": "escapes_workspace", "member": "escape.txt"}
+    assert j.summary == "snapshot rejected: member escapes the workspace: escape.txt"
     assert not list(live.cfg.data_dir.parent.glob("escape.txt"))
 
 

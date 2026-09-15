@@ -66,6 +66,8 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     labels: "bob@desk", hash: "9f8e", version: "0.2.3", uptime: "2m", schema: 1, cpu: "12%",
     mem: "56%", gpu: "4%", load: "3.5 / 10", shown: 5, json: "{}", text: "rcm run demo",
     key: "gate", wait: "5m", pct: "12%", user: 7, sys: 7, used: "13 GB", note: "no GPU",
+    preset: "gate", tool: "fvm", sha: "1234567", repo: "app", member: "escape.txt",
+    op: "git fetch", status: 503,  // F2b — 시작 전에 끝난 잡의 인자
     countdown: "in 8s", cores: 10, delta: "+2s", head: "pool linux",
     disk: "26%", free: "340 GB", percent: 62, done: 4,
     window: 8, seen: 3  // M5h — 이름별 실패 이력의 창과 본 횟수
@@ -154,16 +156,89 @@ test("서버가 코드로 말한 요약은 그 언어로, 잡이 찍은 문장�
 
 test("outcome 코드가 두 언어 모두에 있다 — 서버가 보내는 것을 화면이 다 그릴 수 있다", () => {
   // 서버의 core/outcome.CODES 와 짝이다. 하나라도 빠지면 그 요약이 영어로 남는다.
+  // 이 목록은 손으로 적은 것이라 생산자를 못 본다 — `tool_missing` 이 두 로케일 모두에 없는 채로
+  // M5j 부터 살아 있었고 여기서 안 걸렸다. **정본 잠금은 파이썬 쪽**이다(F2b):
+  // tests/test_outcome.py::test_every_outcome_code_is_defined_once_in_each_locale_… 가
+  // core/outcome.CODES 를 직접 읽는다. 여기는 그 잠금이 죽었을 때를 위한 두 번째 그물이다.
   const codes = [
     "cancelled_before_start", "cancelled_by", "server_restarted",
     "server_restarted_during_upload", "server_stopped_while_running", "upload_abandoned",
     "upload_interrupted", "snapshot_too_big", "snapshot_rejected", "snapshot_blobs_missing",
-    "workspace_failed", "exit_code", "timed_out", "worker_error", "worker_failed",
+    "exit_code", "timed_out", "worker_error", "worker_failed",
     "worker_stopped_while_running", "worker_restarted_without_job", "worker_unreachable",
-    "cancel_unconfirmed"
+    "cancel_unconfirmed",
+    // 프로세스가 뜨기 전에 끝난 잡(core/outcome.PREFLIGHT_CODES)
+    "preset_missing", "tool_missing", "snapshot_missing", "blob_missing", "repo_missing",
+    "commit_missing", "git_failed", "snapshot_download_failed", "launch_executable_missing",
+    "launch_permission_denied", "launch_failed", "log_unavailable", "workspace_failed"
   ];
   codes.forEach((c) => {
     assert.ok(I18N.has("outcome." + c), "카탈로그에 outcome." + c + " 이 없다");
+    // `has()` 는 영어만 본다 — KO 프로퍼티를 지우고 주석에 같은 문자열만 남겨도 통과한다.
+    // 그래서 **두 언어에서 실제로 부른다**. 빈 문자열도, 자리표시자가 샌 것도 여기서 걸린다.
+    LANGS.forEach((lang) => {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(I18N.MESSAGES[lang], "outcome." + c),
+        lang + " 카탈로그에 outcome." + c + " 정의가 없다"
+      );
+    });
+  });
+});
+
+// 서버가 저장한 영어 문장(core/outcome.py 의 PINNED)과 **글자까지 같아야** 한다: 저장된 문장과
+// 화면이 코드로 다시 그린 문장이 다르면 CLI 와 브라우저가 같은 잡을 다르게 말한다(결정 37).
+// 인자는 서버가 보내는 **원시 값** 그대로다 — 꼴을 만드는 일은 화면 몫이다.
+const PREFLIGHT_EN = [
+  ["preset_missing", { preset: "ok" }, "preset 'ok' is no longer configured"],
+  ["tool_missing", { tool: "fvm" }, "required tool fvm is missing"],
+  ["snapshot_missing", {}, "snapshot file is missing"],
+  ["blob_missing", { sha: "1234567" }, "snapshot blob missing 1234567"],
+  ["repo_missing", { repo: "app" }, "repo 'app' is no longer configured"],
+  ["repo_missing", { repo: "app", where: "worker" },
+    "repo 'app' is not configured on this worker"],
+  ["commit_missing", { sha: "1234567" },
+    "commit 1234567 not found after fetch (ref moved or was force-pushed?)"],
+  ["git_failed", { op: "git fetch", kind: "timeout", seconds: 1 },
+    "git fetch timed out after 1s"],
+  ["git_failed", { op: "git fetch", kind: "timeout", seconds: 3600 },
+    "git fetch timed out after 1h"],
+  ["git_failed", { op: "git fetch", kind: "exit", code: 128 },
+    "git fetch failed (exit 128), see the job log"],
+  ["git_failed", { kind: "no_git" }, "git is not installed on the build machine"],
+  ["git_failed", { op: "git init", kind: "spawn", error: "OSError" },
+    "git init could not start git: OSError"],
+  ["snapshot_download_failed", { status: 503 },
+    "cannot download the snapshot from the server (HTTP 503)"],
+  ["launch_executable_missing", {}, "the preset's command was not found"],
+  ["launch_permission_denied", {}, "the preset's command is not executable"],
+  ["launch_failed", { error: "OSError" },
+    "the preset's command could not be started (OSError)"],
+  ["log_unavailable", { error: "PermissionError" },
+    "the job log file could not be opened (PermissionError)"],
+  ["workspace_failed", { error: "OSError" }, "the workspace could not be prepared (OSError)"],
+  ["snapshot_rejected", { kind: "escapes_workspace", member: "escape.txt" },
+    "snapshot rejected: member escapes the workspace: escape.txt"],
+  ["snapshot_rejected", { kind: "TarError" }, "snapshot rejected: TarError"]
+];
+
+test("시작 전에 끝난 잡의 영어 문장이 서버가 저장한 문장과 같다 (결정 37)", () => {
+  PREFLIGHT_EN.forEach(([code, args, expected]) => {
+    assert.equal(I18N.t("en", "outcome." + code, args), expected, code);
+  });
+});
+
+test("같은 인자로 두 언어가 각각 자기 말을 만든다 — 한국어가 영어로 물러서지 않는다", () => {
+  PREFLIGHT_EN.forEach(([code, args]) => {
+    LANGS.forEach((lang) => {
+      const out = I18N.t(lang, "outcome." + code, args);
+      assert.equal(typeof out, "string", lang + "/" + code);
+      assert.ok(out.length > 0, lang + "/" + code + " 이 비었다");
+      assert.ok(!/undefined|NaN|\[object/.test(out), lang + "/" + code + ": " + out);
+    });
+    // 한국어 화면이 영어 문장을 그대로 보여 주면 그건 fallback 이지 번역이 아니다
+    const ko = I18N.t("ko", "outcome." + code, args);
+    const en = I18N.t("en", "outcome." + code, args);
+    assert.notEqual(ko, en, "ko/" + code + " 이 영어와 같다 — KO 프로퍼티가 지워졌는가?");
   });
 });
 

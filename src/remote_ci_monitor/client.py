@@ -186,8 +186,8 @@ class WorkerClient:
         if summary is not None:
             body["summary"] = summary
         if summary_code is not None:
-            # 구조화된 preflight 실패(`tool_missing`) — 문자열 summary 로 우회하지 않는다(M5j G4).
-            # 서버는 아는 코드만 받고 인자를 이름 하나로 줄인다.
+            # 프로세스가 뜨기 전의 실패(`outcome.PREFLIGHT_CODES`) — 문자열 summary 로 우회하지
+            # 않는다(M5j G4 · F2b). 서버는 아는 코드만 받고, 인자도 코드가 선언한 모양만 남긴다.
             body["summary_code"] = summary_code
             body["summary_args"] = dict(summary_args or {})
         if artifacts is not None:
