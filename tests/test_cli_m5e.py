@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
 
+from gitrepo import build_remote
 from remote_ci_monitor.cli import build_parser, main
 from remote_ci_monitor.client import Client
-from remote_ci_monitor.config import parse_preset
+from remote_ci_monitor.config import RepoConfig, parse_preset
 from test_cli_m1 import last_json
 from test_server import PRESETS, Server, sh
 
@@ -204,6 +206,76 @@ def test_a_git_ref_job_needs_an_output_directory(live, env, monkeypatch, capsys)
     assert code == 2, (code, out, err)
     assert "--output" in err, err
     assert seen["submit"] == [], seen
+
+
+@pytest.fixture
+def live_git(tmp_path):
+    """진짜 워커 + 진짜 git 원격 — git_ref 잡이 **실제로 돌고** 산출물을 남긴다.
+
+    `golddeploy` 는 사용법 거절만 보는 프리셋이라 본문이 `echo deploy` 다(아무것도 안 쓴다).
+    회수를 끝까지 보려면 골든을 쓰는 본문이 필요해 따로 둔다.
+    """
+    git_root = tmp_path / "git"
+    git_root.mkdir()  # build_remote 는 root 가 이미 있다고 본다
+    remote = build_remote(git_root)
+    s = Server(tmp_path, workers=True, max_snapshot_bytes=200_000)
+    try:
+        s.cfg.presets = tuple(
+            parse_preset(p)
+            for p in [
+                *ARTIFACT_PRESETS,
+                sh(
+                    "golddeployreal",
+                    GOLD_BODY,
+                    source_modes=["git_ref"],
+                    repo="app",
+                    artifacts=["out/*.txt"],
+                ),
+            ]
+        )
+        s.cfg.repos = (RepoConfig(name="app", url=remote.url),)
+    except BaseException:
+        s.close()
+        raise
+    yield s, remote
+    s.close()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git 이 필요하다")
+def test_a_git_ref_run_with_fetch_artifacts_actually_writes_the_files(
+    live_git, env, capsys, tmp_path
+):
+    """★ git_ref 잡도 `--fetch-artifacts` 로 **파일을 받는다**.
+
+    ⚠️ 한때 `_run_git_ref` 가 `_wait` 에 `fetch=` 를 안 넘겼다. 사용법 검사(`--output` 필수 ·
+      `--no-wait` 와 동시 불가)는 **두 단계나 통과시켜 놓고** 정작 회수를 건너뛰어서
+      **잡 초록 · 종료코드 0 · 받은 파일 0** 이 됐다 — 빈 손이 통과로 보였고 아무 신호도 없었다.
+      운영에서 산출물을 선언한 프리셋은 **전부 git_ref** 였으므로(release-plan · scenario-qa ·
+      release-upload · build-dev · deploy-dev) 회수가 통째로 죽어 있던 셈이다.
+
+      그때도 거절 시험(위 `…needs_an_output_directory`)은 초록이었다. 「사용법만 맞고 동작이
+      없는 조합」은 거절만 잠가서는 안 잡힌다 — **받은 파일을 세야** 잡힌다.
+    """
+    srv, remote = live_git
+    env(srv)
+    out_dir = tmp_path / "picked"
+    code, out, err = run(
+        capsys,
+        [
+            "run",
+            "golddeployreal",
+            "--ref",
+            remote.main,
+            "--fetch-artifacts",
+            "--output",
+            str(out_dir),
+        ],
+    )
+    assert code == 0, f"잡이 초록이어야 한다\nSTDOUT {out}\nSTDERR {err}"
+    got = sorted(f.name for f in (out_dir / "out").glob("*.txt"))
+    assert got == ["a.txt", "b.txt", "c.txt"], f"빈 손이 초록이 됐다 — 받은 것: {got}"
+    assert (out_dir / "out" / "a.txt").read_text() == "v2\n"
+    assert last_json(out).get("artifact_fetch"), "회수 요약이 결과 JSON 에 없다"
 
 
 def test_a_standalone_fetch_needs_an_output_directory(live, env, capsys):

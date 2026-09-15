@@ -243,6 +243,9 @@ artifacts: wrote 12, unchanged 51, conflicted 1
    is the answer you came for.
 4. Once every file is written, your session tells the server. If nobody joined the job, the bundle
    is deleted right then; otherwise it waits 24 hours so the others can fetch it too.
+5. A `git_ref` preset has no submitted tree, so `--output DIR` says where to write, and the
+   baseline is empty: a file already sitting there with different bytes is `conflicted` and only
+   `--force` overwrites it.
 
 Submitted with `--no-wait`, or want them somewhere else?
 

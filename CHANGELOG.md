@@ -18,6 +18,19 @@ of a key bumps that number and is listed here.
   visible before the first job is submitted.
   ([#128](https://github.com/monocsp/remote_ci_monitor/pull/128))
 
+### Fixed
+- **`rcm run --fetch-artifacts` now writes the files for a `git_ref` preset.** It checked the
+  usage twice — `--output DIR` is required because there is no local tree, and it cannot be
+  combined with `--no-wait` — and then skipped the fetch: the job went green, the exit code was
+  0, and nothing was written. An empty hand looked like a pass, with no signal anywhere. On the
+  build machine this was not an edge: **every preset that declares `artifacts` is `git_ref`**
+  (`release-plan`, `scenario-qa`, `release-upload`, `build-dev`, `deploy-dev`), so the flag
+  delivered nothing for any of them and the two-step `rcm artifacts <id> --fetch --output DIR`
+  was the only way to get a file. The baseline is empty — there is no submitted tree to compare
+  against — so an existing file still needs `--force`, the same rule `rcm artifacts` follows.
+  A test now runs a `git_ref` job to the end and counts the files it received; refusing a bad
+  usage was locked before, and that is what let the gap through.
+
 ## [0.2.8] - 2026-09-15
 
 The page stops moving under your cursor while the build machine works, and the README walks
