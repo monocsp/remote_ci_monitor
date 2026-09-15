@@ -688,12 +688,31 @@ def _run_git_ref(
     else:
         # ref 가 곧 sha 면 한 번만 — 목록 칸과 같은 규칙(M5i I2)
         _info(f"submitted job #{job_id} ({preset.name} · {ref_ident(ref, sha)}) · {url or ''}")
+    # ⑤ wait — git_ref 잡도 산출물을 회수한다. 제출한 트리가 없으니 `--output DIR` 이 그 자리다
+    #   (사용법은 `cmd_run` 이 이미 검사했다 — git_ref 면 `--output` 필수 · `--no-wait` 와 못 쓴다).
+    #   기준선은 **빈 사전**이다 — 대조할 제출 트리가 없으므로 이미 있는 파일은 `--force` 여야
+    #   덮는다. `cmd_artifacts` 와 같은 규칙이다.
+    # ⚠️ 한때 이 자리가 `fetch=` 를 안 넘겼다. 사용법 검사는 두 단계나 통과시켜 놓고 정작
+    #   회수를 건너뛰어서 **잡 초록 · 종료코드 0 · 받은 파일 0** 이 됐다 — 빈 손이 통과로 보였고
+    #   아무 신호도 없었다. 산출물을 선언한 프리셋이 전부 git_ref 인 배치에서는 회수가 통째로
+    #   죽어 있던 셈이다. 사용법만 맞고 동작이 없는 조합을 남기지 마라.
+    spec = None
+    if bool(getattr(args, "fetch_artifacts", False)):
+        out_root = Path(args.output)
+        out_root.mkdir(parents=True, exist_ok=True)
+        spec = _FetchSpec(
+            root=out_root,
+            baseline={},
+            force=bool(getattr(args, "force", False)),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
     return _wait(
         client,
         job_id,
         timeout=args.timeout,
         joined=joined,
         use_sse=not args.poll,
+        fetch=spec,
         cancel_token=cancel_token,
     )
 

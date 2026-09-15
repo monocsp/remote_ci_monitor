@@ -96,6 +96,7 @@ from remote_ci_monitor.core.queue import (
     priority_from_name,
     split_by_pool,
 )
+from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     artifacts_json,
     iso,
@@ -120,7 +121,13 @@ from remote_ci_monitor.materialize import blob_path
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
-from remote_ci_monitor.store import ROLE_CANCEL_JOB, ROLE_LEAVE_SUBMISSION, Store, TokenInfo
+from remote_ci_monitor.store import (
+    DB_VERSION,
+    ROLE_CANCEL_JOB,
+    ROLE_LEAVE_SUBMISSION,
+    Store,
+    TokenInfo,
+)
 from remote_ci_monitor.worker import Worker, start_workers, tail_lines
 
 MAX_JSON_BODY = 64 * 1024
@@ -144,6 +151,29 @@ _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
 _ID_IN_PATH = re.compile(r"/(\d+)")
+
+
+def log_line(msg: str) -> None:
+    """서버 로그 한 줄. `App` 이 생기기 전 기동 단계도 같은 모양으로 남긴다."""
+    print(f"[rcm] {msg}", file=sys.stderr, flush=True)
+
+
+#: 기동 단계 수 — port · database · presets(`serve`) + `App.start` 가 켜는 일곱
+STARTUP_STEPS = 10
+#: 프리셋 이름을 다 싣지 않는다 — 전부는 「listening」 배너에 있다
+STARTUP_PRESET_NAMES = 3
+
+
+def _presets_detail(config: ServerConfig) -> str:
+    """`10 · gate, gate-fast, gate-commit …` — 없으면 「none」."""
+    names = [p.name for p in config.presets]
+    if not names:
+        return "none"
+    head = ", ".join(names[:STARTUP_PRESET_NAMES])
+    more = " …" if len(names) > STARTUP_PRESET_NAMES else ""
+    return f"{len(names)} · {head}{more}"
+
+
 #: 404 가 길을 알려 준다(M5h · 결정 69). 별칭 라우트는 만들지 않는다 — 한 가지에 이름 하나다.
 _ROUTES_HINT = (
     "routes: GET /api/status · GET /api/health · GET /jobs/<id> · GET /jobs/<id>/log · POST /jobs"
@@ -310,16 +340,26 @@ class App(RemoteWorkersMixin):
 
     # ── 수명 ────────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
+    def start(self, *, progress: Startup | None = None) -> None:
+        # 진행 표시는 선택이다 — 테스트와 안에서 서버를 띄우는 곳은 안 넘긴다(그러면 조용하다)
+        step = progress.step if progress is not None else noop_step
         self._build_client_wheel()  # 「도는 것을 준다」 — 기동 시점의 파일로 고정한다
         if self._wheel is not None:
             size = _mb(len(self._wheel[0]))
-            self.log(f"client wheel ready: {wheel_filename(self.version)} ({size})")
+            step("client wheel", f"{wheel_filename(self.version)} · {size}")
+        else:
+            step("client wheel", "unavailable")
         lost, cancelled = self.store.recover_on_start(self.now_fn())
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
             for job_id in [*lost, *cancelled]:
                 self._publish_job(None, job_id)
+        step(
+            "recovery",
+            f"lost {len(lost)} · cancelled uploads {len(cancelled)}"
+            if (lost or cancelled)
+            else "nothing to recover",
+        )
         self.workers = start_workers(
             self.store,
             self.config,
@@ -330,6 +370,7 @@ class App(RemoteWorkersMixin):
             now_fn=self.now_fn,
             admit=self._admit_local,
         )
+        step("lanes", f"{self.config.server.lanes}")
         self._janitor = threading.Thread(target=self._janitor_loop, name="rcm-janitor", daemon=True)
         self._janitor.start()
         self.retention = Janitor(
@@ -341,6 +382,7 @@ class App(RemoteWorkersMixin):
             stop=self.stop,
         )
         self.retention.start()
+        step("janitor", f"sweep every {self.config.server.retention_sweep_interval_seconds:g}s")
         self.notifier = Notifier(
             self.store,
             self.config,
@@ -351,6 +393,8 @@ class App(RemoteWorkersMixin):
             stop=self.stop,
         )
         self.notifier.start()
+        hooks = [n.name for n in self.config.notify]
+        step("notify", f"{len(hooks)} · {', '.join(hooks)}" if hooks else "no hooks")
         host = socket.gethostname().split(".")[0] or "host"
         self.sampler = HostSampler(
             self.config.host,
@@ -362,6 +406,7 @@ class App(RemoteWorkersMixin):
             disk_path=str(self.config.data_dir),
         )
         self.sampler.start()
+        step("host sampler", f"every {self.config.host.interval_seconds:g}s")
         s = self.config.server
         if s.lanes >= 2 and s.admission == "load":
             # 안 그러면 첫 증상이 「두 번째 레인이 갑자기 멈췄다」다
@@ -388,9 +433,12 @@ class App(RemoteWorkersMixin):
                 log=self.log,
             )
             self.responder.start()
+            step("discovery", instance_name(name))
             warning = advertise_warning(self.config.server)
             if warning:
                 self.log(warning)
+        else:
+            step("discovery", "off")
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -429,7 +477,7 @@ class App(RemoteWorkersMixin):
                 self.record_error(f"worker janitor: {type(e).__name__}: {_safe(str(e))}")
 
     def log(self, msg: str) -> None:
-        print(f"[rcm] {msg}", file=sys.stderr, flush=True)
+        log_line(msg)
 
     def record_error(self, msg: str, *, detail: str | None = None) -> None:
         """`msg` 는 공개되는 `server.last_error`(짧게), `detail` 은 서버 로그에만(자세히).
@@ -2789,13 +2837,25 @@ def serve(config: ServerConfig, *, debug: bool = False) -> int:
     # 순서가 곧 안전장치다: 포트 → DB → 앱. 포트를 못 잡으면(도는 서비스 곁에서 다른 빌드로
     # `rcm serve --config <같은 설정>`) DB 를 열지도 않는다 — 열면 마이그레이션이 먼저 일어나고
     # 옛 서비스는 다음 재시작에서 못 뜬다(2026-09-10 사고 · M5l L5 · 리뷰 pr-94 B-1).
+    # 기동 단계를 하나씩 남긴다 — 「listening」 만 있으면 느린 구간(마이그레이션·mDNS)이 안 보인다.
+    # 개수는 미리 안다: port · database · presets + App.start 가 켜는 일곱.
+    progress = Startup(STARTUP_STEPS, log=log_line, now=time.monotonic)
+    began = time.monotonic()
     httpd = RcmHTTPServer((config.server.bind, config.server.port))
+    bound_at = time.monotonic()
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         store = Store(data_dir / "rcm.sqlite3")
     except BaseException:
         httpd.server_close()
         raise
+    # 두 줄은 **DB 가 열린 뒤에** 찍는다 — 못 열면 거절이 `rcm:` 한 줄이어야 하기
+    # 때문이다(2026-09-10 사고 · tests/test_cli_serve_refusal.py). 잰 값은 각 구간의
+    # 실제 소요라, 어느 쪽이 느렸는지는 그대로 남는다.
+    opened_at = time.monotonic()
+    bound_host, bound_port = httpd.server_address[0], httpd.server_address[1]
+    progress.step("port", f"http://{bound_host}:{bound_port}", seconds=bound_at - began)
+    progress.step("database", f"schema v{DB_VERSION}", seconds=opened_at - bound_at)
     try:
         app = App(config, store, debug=debug)
         httpd.attach(app)
@@ -2803,7 +2863,8 @@ def serve(config: ServerConfig, *, debug: bool = False) -> int:
         httpd.server_close()
         store.close()
         raise
-    app.start()
+    progress.step("presets", _presets_detail(config))
+    app.start(progress=progress)
     host, port = httpd.server_address[0], httpd.server_address[1]
     app.log(
         f"rcm {app.version} listening on http://{host}:{port} · lanes {config.server.lanes} · "

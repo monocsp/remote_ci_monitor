@@ -7,6 +7,34 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-09-15
+
+Starting the server says what it is turning on, one line per step.
+
+### Added
+- **Starting says what it is turning on.** `rcm serve` used to print nothing until everything was
+  up, and then one `listening on …` line; a slow migration or an mDNS responder waiting on Local
+  Network permission looked exactly like a hang. Startup is now ten steps — the port, the
+  database, the presets, then the seven services — and each prints as it finishes with the seconds
+  it took (`start 3/10 presets · 10 · gate, gate-fast, gate-commit …`). The banner still closes
+  the sequence and still lists every preset. This is what to read after a restart that added
+  presets: the count in the step line is the server's own, so a preset that did not load is
+  visible before the first job is submitted.
+  ([#128](https://github.com/monocsp/remote_ci_monitor/pull/128))
+
+### Fixed
+- **`rcm run --fetch-artifacts` now writes the files for a `git_ref` preset.** It checked the
+  usage twice — `--output DIR` is required because there is no local tree, and it cannot be
+  combined with `--no-wait` — and then skipped the fetch: the job went green, the exit code was
+  0, and nothing was written. An empty hand looked like a pass, with no signal anywhere. On the
+  build machine this was not an edge: **every preset that declares `artifacts` is `git_ref`**
+  (`release-plan`, `scenario-qa`, `release-upload`, `build-dev`, `deploy-dev`), so the flag
+  delivered nothing for any of them and the two-step `rcm artifacts <id> --fetch --output DIR`
+  was the only way to get a file. The baseline is empty — there is no submitted tree to compare
+  against — so an existing file still needs `--force`, the same rule `rcm artifacts` follows.
+  A test now runs a `git_ref` job to the end and counts the files it received; refusing a bad
+  usage was locked before, and that is what let the gap through.
+
 ## [0.2.8] - 2026-09-15
 
 The page stops moving under your cursor while the build machine works, and the README walks
@@ -794,7 +822,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.5...v0.2.6

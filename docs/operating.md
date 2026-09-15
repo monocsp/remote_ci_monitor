@@ -28,6 +28,23 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
   queue looks alive and answers nothing. If you wrote your own service file, set this.
 - Both send **SIGTERM** on stop: the server shuts down cleanly and jobs that were running are
   marked `lost` (exit 3 for waiting sessions); queued jobs survive and start after the restart.
+- **The log says what is being turned on.** Starting is ten steps — the port, the database, the
+  presets, then the seven services the server brings up — and each prints as it finishes, with the
+  seconds it took:
+
+  ```
+  [rcm] start 1/10 port · http://0.0.0.0:8787 (0.00s)
+  [rcm] start 2/10 database · schema v17 (0.31s)
+  [rcm] start 3/10 presets · 10 · gate, gate-fast, gate-commit … (0.00s)
+  …
+  [rcm] start 10/10 discovery · macmini._rcm._tcp.local. (0.02s)
+  [rcm] rcm 0.2.8 listening on http://0.0.0.0:8787 · lanes 1 · presets … · data …
+  ```
+
+  The `listening on …` banner still closes the sequence and still lists every preset. The steps
+  are what to read after a restart that added presets, and they are where a slow start shows
+  itself — before this the log stayed empty until everything was up, so a long migration or an
+  mDNS responder waiting on Local Network permission looked the same as a hang.
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
   toolchains there. Keep the machine awake (`pmset -a sleep 0` on macOS).
 
