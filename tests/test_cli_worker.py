@@ -506,12 +506,14 @@ def test_once_git_ref_job_without_the_repo_fails_naming_the_repo(
     home, srv, token, data_dir, capsys
 ):
     """§2: git_ref 잡인데 워커 `[[repos]]` 에 그 레포가 없으면 tree 를 받지 않고 `finish failed`
-    summary `repo 'app' is not configured on this worker`(exit_code null). 워커는 계속 서비스 —
-    종료 0."""
+    `repo_missing` / `repo 'app' is not configured on this worker`(exit_code null). `where` 가
+    **어느 쪽 설정**을 고칠지 말한다. 워커는 계속 서비스 — 종료 0."""
     token(srv)
     jid = srv.git_ref_job()  # preset deploy · repo app · 기본 풀
     code, out, err = run(capsys, worker_argv(srv, "--once", pool="default", data=data_dir))
     assert code == 0, out + err
     j = srv.store.get_job(jid)
     assert j.state == FAILED, (j.state, j.summary, err)
-    assert j.summary == "repo 'app' is not configured on this worker" and j.exit_code is None
+    assert j.summary_code == "repo_missing" and j.exit_code is None
+    assert j.summary_args == {"repo": "app", "where": "worker"}
+    assert j.summary == "repo 'app' is not configured on this worker"

@@ -208,6 +208,19 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    appears with `--fetch-artifacts`: the job's own result is in `wait_exit_code`, and the files
    are what did not arrive ([Getting the files back](#8-getting-the-files-back)).
 
+5. **A job that never started says so.** Some failures happen before your script runs, and the
+   summary names which: the workspace could not be built (`snapshot_missing`,
+   `snapshot_rejected`, `blob_missing`, `repo_missing`, `commit_missing`, `git_failed`,
+   `snapshot_download_failed`), the process could not be launched
+   (`launch_executable_missing`, `launch_permission_denied`, `launch_failed`,
+   `log_unavailable`), the preset left the config while the job waited (`preset_missing`), or a
+   `requires` entry was not there (`tool_missing`). All of them carry a `summary_code` and have
+   `exit_code: null`, so a script can tell "my tests failed" from "the job never ran" without
+   reading the sentence. These summaries carry no free text at all: the arguments are a code, a
+   name already in the job, or a number. The original text — including the command that could
+   not be started — is in the job log, which needs a token; the one case with nothing to read
+   there is `log_unavailable`, where the log file is what could not be opened.
+
 A cancelled job has no failed step and no last step: you stopped it, it did not break.
 
 ## 7. Two sessions, one tree
