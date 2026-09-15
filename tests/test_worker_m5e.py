@@ -244,6 +244,9 @@ class FakeWorkerClient:
         self.worker: RemoteWorker | None = None
         self.download_error: ClientError | None = None
         self.uploads: list[Path] = []
+        #: 서버의 **보호된** 잡 로그로 간 바이트. 원문(경로·git stderr·argv[0])이 여기 있어야
+        #: 사람이 고칠 수 있다 — 공개 요약에서 뺀 것을 버린 것이 아니라 옮긴 것이다(F2b).
+        self.logged: list[bytes] = []
 
     def download_tree(self, job_id: int, dest: Path) -> int:
         self.calls.append("download_tree")
@@ -259,6 +262,7 @@ class FakeWorkerClient:
 
     def log(self, job_id: int, data: bytes) -> dict[str, Any]:
         self.calls.append("log")
+        self.logged.append(bytes(data))
         return {}
 
     def upload_bundle(self, job_id: int, tar_path: Path) -> dict[str, Any]:

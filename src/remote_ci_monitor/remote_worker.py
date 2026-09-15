@@ -449,9 +449,8 @@ class RemoteWorker:
         if job.source.mode == MODE_GIT_REF:
             repo = self.config.repo(job.source.repo)
             if repo is None:
-                raise MaterializeError(
-                    f"repo '{job.source.repo or '?'}' is not configured on this worker"
-                )
+                # 서버에는 있고 이 워커에는 없다 — 고칠 설정이 **워커 쪽**이라 `where` 로 말한다.
+                raise MaterializeError("repo_missing", repo=job.source.repo or "", where="worker")
             spec.workspace.parent.mkdir(parents=True, exist_ok=True)
             spec.log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -476,7 +475,10 @@ class RemoteWorker:
         try:
             self.client.download_tree(job.id, tar_path)
         except ClientError as e:
-            raise MaterializeError(f"cannot download snapshot: {e.message}") from e
+            # `e.message` 에는 서버가 돌려준 문구와 경로가 섞인다 — 상태 코드만 공개로 남긴다.
+            raise MaterializeError(
+                "snapshot_download_failed", status=e.status, log=f"download failed: {e.message}"
+            ) from e
         try:
             extract_tree(tar_path, spec.workspace)
         finally:
@@ -494,7 +496,10 @@ class RemoteWorker:
         summary: str | None = None
         try:
             if not spec.argv:
-                raise RunnerError("preset has no argv (server sent no preset)")
+                # 잡이 큐에 있는 사이 서버 설정에서 프리셋이 사라졌다 — claim payload 의 `preset`
+                # 이 `null` 로 온다. 로컬 레인이 같은 입력에 남기는 코드와 **같은 코드**여야
+                # 한다: 원격에서만 다른 코드가 나오면 「어느 레인이 집었나」가 요약을 바꾼다.
+                raise RunnerError("preset_missing", preset=spec.preset_name)
             self.report(lambda: self.client.phase(job.id, PHASE_MATERIALIZING), f"#{job.id} phase")
             result = run_job(
                 spec,
@@ -533,11 +538,39 @@ class RemoteWorker:
             self._cleanup(spec, failed=True)
             return
         except (MaterializeError, RunnerError) as e:
+            # 원문(경로·git stderr·`argv[0]`)은 **서버의 잡 로그**로 — 거긴 토큰이 있어야 읽는다.
+            # 로컬 레인은 `_append_log` 로 같은 일을 한다. 이게 없으면 공개 요약만 남아서, 코드는
+            # 「명령을 못 찾았다」고 말하는데 어느 명령인지 아무 데도 안 남는다(F2b · 검토 7).
+            if e.log:
+                observer.output(f"[rcm] {e.log}\n".encode())
             observer.final_flush()
-            summary = str(e)[:200]
             # 실행이 시작되지 못했다 — 조용히 비우지 않고 그 사실을 처분으로 남긴다(§5)
             skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
-            self._finish(job.id, FAILED, None, summary, observer, artifacts=_disposition(skipped))
+            if observer.should_stop() or observer.should_cancel():
+                # 준비 중에 종료·취소가 왔다 — 그게 이긴다(M5l S4). 프로세스는 없었고, 취소가
+                # 준비를 끊지 못했다는 이유로 사용자가 멈춘 잡이 실패로 남으면 안 된다.
+                outcome = LOST if observer.should_stop() else CANCELLED
+                summary = STOP_SUMMARY if outcome == LOST else None
+                self._finish(
+                    job.id, outcome, None, summary, observer, artifacts=_disposition(skipped)
+                )
+                self.log(f"lane {lane}: #{job.id} {outcome} before start")
+                self._cleanup(spec, failed=True)
+                return
+            # 예외가 **코드**를 들고 온다(`PREFLIGHT_CODES`) — 로컬 레인이 같은 입력에 남기는
+            # 행과 같은 코드·같은 인자여야 화면이 「어느 레인이 집었나」에 흔들리지 않는다.
+            # 원문은 위에서 **보호된 잡 로그**로 보냈다: 공개 요약에는 절대 싣지 않는다(F2b).
+            summary, code, args = outcome_summary(e.code, **e.args_public)
+            self._finish(
+                job.id,
+                FAILED,
+                None,
+                summary,
+                observer,
+                artifacts=_disposition(skipped),
+                summary_code=code,
+                summary_args=args,
+            )
             self.log(f"lane {lane}: #{job.id} failed — {summary}")
             self._cleanup(spec, failed=True)
             return

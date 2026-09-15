@@ -10,7 +10,7 @@ printf · cat 만). 띄운 프로세스는 세션 그룹째 죽인다(`reap` 픽
 잠근 선택(명세가 안 정한 것 — 구현이 달리 정하면 여기부터 고친다):
 - `materialize(spec)` 가 `MaterializeError` 를 내면 `run_job` 이 **그대로 올린다**(결과 객체 없음).
   호출자가 failed 로 보고한다. 관찰자는 `executing` 을 보지 못한다.
-- argv[0] 을 못 띄우면 `RunnerError` 이고 문구는 `cannot start 'nope'` 로 시작한다(오늘의 워커
+- argv[0] 을 못 띄우면 `RunnerError` 이고 코드는 `launch_executable_missing` 이다(오늘의 워커
   문구). 종료 코드가 0 이 아닌 것은 예외가 아니다 — `rc` 로 돌려준다.
 - 러너가 `spec.log_path` 에 **직접**(append) 쓰고, **같은 바이트**를 `observer.output` 으로도 준다.
   마커 줄도 raw 로 넘어간다 — 러너는 마커를 파싱하지 않는다.
@@ -432,18 +432,35 @@ def test_materialize_error_propagates_and_executing_is_never_reported(tmp_path):
     assert not spec.workspace.exists()
 
 
-def test_cannot_start_raises_runner_error_with_the_worker_wording(tmp_path):
-    """잠근 선택: argv[0] 을 못 띄우면 `RunnerError` — 문구는 `cannot start 'nope'` 로 시작하고
-    트레이스백·절대 경로가 없다. 자재화는 이미 끝났고 output 은 없다."""
+def test_cannot_start_raises_runner_error_with_a_code_and_keeps_argv_out_of_it(tmp_path):
+    """잠근 선택: argv[0] 을 못 띄우면 `RunnerError` 이고, 예외가 드는 것은 **코드**다(F2b).
+    `argv[0]` 은 공개 요약으로 가는 `args_public` 이 아니라 보호된 잡 로그로 가는 `log` 에만
+    있다 — 프리셋의 명령은 비공개 SDK 경로이거나 토큰이 박힌 이름일 수 있다."""
     obs = RecordingObserver()
     spec = make_spec(tmp_path, ("nope", "--flag"))
     mat = FileMaterializer(observer=obs)
     with pytest.raises(RunnerError) as e:
         run(spec, obs, materialize=mat)
-    text = str(e.value)
-    assert text.startswith("cannot start 'nope'"), text
-    assert "Traceback" not in text and str(tmp_path) not in text
+    err = e.value
+    assert err.code == "launch_executable_missing"
+    assert err.args_public == {}  # 공개로 갈 인자가 아예 없다
+    assert str(err) == "the preset's command was not found"
+    assert "nope" in err.log and "Traceback" not in err.log
+    assert "nope" not in str(err) and str(tmp_path) not in str(err)
     assert mat.specs == [spec] and obs.out == b""
+
+
+def test_a_command_that_is_not_executable_says_so_instead_of_not_found(tmp_path):
+    """권한과 「없음」은 고칠 곳이 다르다 — 파일 모드냐 프리셋의 `argv` 냐. 한 코드로 묶으면
+    사람이 있는 파일을 찾아 헤맨다."""
+    obs = RecordingObserver()
+    blocked = tmp_path / "not-executable.sh"
+    blocked.write_text("#!/bin/sh\necho hi\n")
+    blocked.chmod(0o644)
+    with pytest.raises(RunnerError) as e:
+        run(make_spec(tmp_path, (str(blocked),)), obs, materialize=FileMaterializer(observer=obs))
+    assert e.value.code == "launch_permission_denied"
+    assert str(tmp_path) not in str(e.value)
 
 
 def test_nonzero_exit_is_a_result_not_an_exception(tmp_path):

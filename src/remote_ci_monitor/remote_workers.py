@@ -21,7 +21,6 @@ HTTP 핸들러는 얇게 여기를 부른다.
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
 import sqlite3
 import tarfile
@@ -48,6 +47,7 @@ from remote_ci_monitor.core.model import (
     MODE_GIT_REF,
     PHASE_EXECUTING,
     PHASE_MATERIALIZING,
+    RUNNING,
     SUCCEEDED,
     TIMED_OUT,
     TOKEN_WORKER,
@@ -117,17 +117,29 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
 
 
 #: 워커가 finish 에 실어 보낼 수 있는 구조화된 요약 코드 — 프로세스가 뜨기 **전**의 실패뿐이다
-#: (M5j G4). 나머지 코드는 서버가 마커·종료 코드로 스스로 만든다.
-WORKER_PREFLIGHT_CODES = ("tool_missing",)
-MAX_TOOL_NAME = 120
+#: (M5j G4 · F2b). 나머지 코드는 서버가 마커·종료 코드로 스스로 만든다. 목록은 `core/outcome` 이
+#: 정본이다: 워커와 서버가 각자 목록을 들면 원격 잡의 요약만 조용히 달라진다.
+#:
+#: fail-closed 다 — 모르는 코드는 400 이지 「그냥 저장」이 아니다(검증 G4.15). **이 코드가 강제하는
+#: 것은 여기까지다**: 등록 뒤의 요청은 워커 버전을 다시 보지 않으므로(`_registered` 는 행의 존재만
+#: 본다), 서버만 새 버전으로 재기동하면 구 워커가 그대로 heartbeat·claim·finish 를 계속한다.
+#: 그러니 이 목록에서 코드를 **빼는** 변경은 그 자리에서 배포 사고다: 구 워커의 finish 가 400 을
+#: 받고 잡이 안 닫혀 heartbeat 시한으로 `lost` 가 된다. 더하는 것은 안전하다(구 워커는 안 보낸다).
+WORKER_PREFLIGHT_CODES: tuple[str, ...] = outcome.PREFLIGHT_CODES
 
 
 def _preflight_summary(
     body: dict[str, Any], reported: Any, rc: Any
 ) -> tuple[str, str, dict[str, Any]] | None:
     """finish 의 `summary_code`/`summary_args` 를 검증해 `(문장, 코드, 인자)` 로. 키가 없으면
-    None(옛 워커). 아는 코드만, `failed` + `exit_code null` 일 때만 받고, 인자는 **도구 이름
-    하나**로 줄인다 — 워커가 PATH 를 실어 보내도 공개 상태에 남지 않는다(PLAN 「보안」)."""
+    None(옛 워커). 아는 코드만, `failed` + `exit_code null` 일 때만 받고, 인자는 **코드마다 정한
+    키와 모양**만 지난다(`outcome.PREFLIGHT_ARGS`) — 워커가 PATH·경로·자유 문구를 실어 보내도
+    공개 상태에 남지 않는다(PLAN 「보안」).
+
+    워커는 토큰이 있을 뿐 신뢰 경계 안이 아니다: 잡 요약을 짜낼 권한까지 준 적은 없다. 그래서
+    `tool` 은 워커가 이미 basename 을 떴어도 서버가 **다시** 뜨고, 멤버 이름도 다시 이름만 남긴다.
+    문장은 워커가 보낸 것이 아니라 이 자리에서 코드로 그린 것이다.
+    """
     code = body.get("summary_code")
     if code is None:
         return None
@@ -138,15 +150,17 @@ def _preflight_summary(
     args = body.get("summary_args")
     if not isinstance(args, dict):
         raise _api_error(400, "summary_args must be an object")
-    tool = args.get("tool")
-    if not isinstance(tool, str) or len(tool) > MAX_TOOL_NAME:
-        raise _api_error(400, "summary_args.tool must be a short tool name")
-    # 절대경로로 선언한 도구는 로컬 워커처럼 **이름(basename)만** 남긴다 — 워커가 경로를 실어
-    # 보내도 `/api/status.recent` 로 새지 않는다(검증 G4.15 · PLAN 「보안」).
-    tool = os.path.basename(tool.strip())
-    if not tool:
-        raise _api_error(400, "summary_args.tool must be a short tool name")
-    return outcome.summary(code, tool=tool)
+    try:
+        clean = outcome.clean_args(code, args, strict=True)
+        need = outcome.PREFLIGHT_REQUIRED.get(code)
+        if need is not None and need not in clean:
+            raise outcome.OutcomeError(f"{code} needs a {need}")
+    except outcome.OutcomeError as e:
+        # 조용히 버리지 않고 400 을 준다: 워커가 인자를 잘못 보냈다는 것은 그 자체로 버그이고,
+        # 반쪽짜리 요약을 저장하면 로컬 레인이 남기는 행과 달라진다(어느 레인이 집었나가 요약을
+        # 바꾼다). 워커는 이 400 을 보고 잡을 자기 문장으로 닫는다.
+        raise _api_error(400, f"summary_args: {e}") from e
+    return outcome.summary(code, **clean)
 
 
 def _stream_to_file(stream: Any, dest: Path, length: int) -> str:
@@ -723,56 +737,76 @@ class RemoteWorkersMixin:
         lost_text, lost_code, lost_args = outcome.summary("worker_stopped_while_running")
         if given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
             lost_text, lost_code, lost_args = given[:200], None, {}
-        # 프로세스가 뜨기 전의 실패(`tool_missing`)가 사용자의 취소를 덮어서는 안 된다 — 워커가
-        # 취소를 아직 못 들었어도 잡이 `cancelling` 이면 `cancelled` 로 닫는다(M5l S4).
+
+        def _fields(now_job: Job, reported: str, preflight: Any) -> tuple[str, dict[str, Any]]:
+            """이 보고를 `store.finish` 인자로. 취소가 끼어들면 같은 함수를 다시 부른다."""
+            oc = outcome_for(
+                now_job,
+                markers,
+                started=now_job.started_at or ended,
+                finished=ended,
+                rc=rc,
+                cancelled=reported == CANCELLED,
+                timed_out=reported == TIMED_OUT,
+                lost=reported == LOST,
+                lost_summary=lost_text,
+                lost_code=lost_code,
+                lost_args=lost_args,
+            )
+            state, summary, failed_step = oc.state, oc.summary, oc.failed_step
+            code, args = oc.code, oc.args
+            if preflight is not None:
+                # 프로세스가 뜨기 전의 실패 — 서버가 만든 코드이지 스크립트의 선언이 아니다.
+                # 라벨도 대장 행도 없이 로컬 워커와 같은 모양으로 닫는다(M5h 불변식 · 결정 85).
+                summary, code, args = preflight
+                oc = replace(
+                    oc, failed_step=None, last_step=None, fail_names=(), fail_truncated=False
+                )
+                failed_step = None
+            elif state in (FAILED, SUCCEEDED) and not summary:
+                if given:
+                    summary, code, args = given[:200], None, {}
+                elif state == FAILED:
+                    summary, code, args = outcome.summary("worker_failed")
+            return state, {
+                "state": state,
+                "exit_code": rc,
+                "summary": summary,
+                "summary_code": code,
+                "summary_args": args,
+                "failed_step": failed_step,
+                "last_step": oc.last_step,
+                "fail_names": oc.fail_names,
+                "fail_truncated": oc.fail_truncated,
+            }
+
+        # 프로세스가 뜨기 전의 실패가 사용자의 취소를 덮어서는 안 된다 — 워커가 취소를 아직 못
+        # 들었어도 잡이 `cancelling` 이면 `cancelled` 로 닫는다(M5l S4). 코드가 늘어도 같다:
+        # 자재화 실패든 시작 실패든 프로세스는 뜨지 않았고 사용자는 취소했다(F2b).
         if preflight is not None and job.state == CANCELLING:
             preflight = None
             reported = CANCELLED
-        oc = outcome_for(
-            job,
-            markers,
-            started=job.started_at or ended,
-            finished=ended,
-            rc=rc,
-            cancelled=reported == CANCELLED,
-            timed_out=reported == TIMED_OUT,
-            lost=reported == LOST,
-            lost_summary=lost_text,
-            lost_code=lost_code,
-            lost_args=lost_args,
-        )
-        state, summary, failed_step = oc.state, oc.summary, oc.failed_step
-        code, args = oc.code, oc.args
-        if preflight is not None:
-            # 프로세스가 뜨기 전의 실패 — 서버가 만든 코드이지 스크립트의 선언이 아니다. 라벨도
-            # 대장 행도 없이 로컬 워커와 같은 모양으로 닫는다(M5h 불변식 · 결정 85).
-            summary, code, args = preflight
-            oc = replace(oc, failed_step=None, last_step=None, fail_names=(), fail_truncated=False)
-            failed_step = None
-        elif state in (FAILED, SUCCEEDED) and not summary:
-            if given:
-                summary, code, args = given[:200], None, {}
-            elif state == FAILED:
-                summary, code, args = outcome.summary("worker_failed")
         self._drop_log_partial([job.id])
         if disposition is not None:
             self._record_disposition(job.id, disposition, now)
-        if not self.store.finish(
-            job.id,
-            state,
-            now=ended,
-            exit_code=rc,
-            summary=summary,
-            summary_code=code,
-            summary_args=args,
-            failed_step=failed_step,
-            last_step=oc.last_step,
-            fail_names=oc.fail_names,
-            fail_truncated=oc.fail_truncated,
-        ):
+        state, fields = _fields(job, reported, preflight)
+        # 위의 `job` 은 트랜잭션 **밖에서** 읽은 스냅샷이다. 그것만 보면 취소가 이 두 줄 사이에
+        # 착륙했을 때 `cancelling` 을 `failed` 로 덮는다 — 사용자가 멈춘 잡이 실패로 남는다.
+        # 로컬 레인은 `only_from=(RUNNING,)` 으로 이 틈을 닫았다(M5l S4); 원격도 같아야 한다.
+        # 시작 전 실패일 때만 건다: 실행까지 간 잡의 보고는 `cancelling` 에서도 그대로 받는다.
+        only_from = (RUNNING,) if preflight is not None else None
+        if not self.store.finish(job.id, now=ended, only_from=only_from, **fields):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"
-            raise _api_error(409, f"job #{job.id} is {st}", state=st)
+            if preflight is None or current is None or st != CANCELLING:
+                raise _api_error(409, f"job #{job.id} is {st}", state=st)
+            # 취소가 이겼다 — 프로세스는 없었으니 여느 취소처럼 요청자 이름으로 닫는다. 이
+            # 대체 경로가 없으면 잡은 종료 상태에 못 가고 heartbeat 시한까지 `running` 이다.
+            state, fields = _fields(current, CANCELLED, None)
+            if not self.store.finish(job.id, now=ended, only_from=(CANCELLING,), **fields):
+                current = self.store.get_job(job.id)
+                st = current.state if current else "unknown"
+                raise _api_error(409, f"job #{job.id} is {st}", state=st)
         self._publish_job(None, job.id)
         self._publish_server()
         self.wake.set()

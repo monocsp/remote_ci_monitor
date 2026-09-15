@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 import time
@@ -179,14 +180,20 @@ def test_phase_is_materializing_while_fetching_then_executing(env) -> None:
 # ── 실패 — exit_code null · summary 에 경로 없음 ─────────────────────────────
 
 
-def test_repo_removed_from_config_fails_the_job(env) -> None:
+def test_repo_removed_from_config_fails_the_job(env, tmp_path: Path) -> None:
+    """T6: 레포 소멸은 `preset_missing` 이 아니라 `repo_missing` 이다 — 고칠 곳이 프리셋이 아니라
+    `[[repos]]` 다. 인자는 잡 문서에 이미 있는 레포 **이름 하나**뿐이라 새로 새는 것이 없다."""
     store, cfg, remote = env
     jid = enqueue_ref(store, "main", remote.main)
     cfg.repos = ()
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code is None
+    assert j.summary_code == "repo_missing"
+    assert j.summary_args == {"repo": "app"}
     assert j.summary == "repo 'app' is no longer configured"
+    blob = json.dumps({"summary": j.summary, "args": j.summary_args})
+    assert str(tmp_path) not in blob and remote.url not in blob
     assert not (cfg.data_dir / "workspaces" / str(jid)).exists()
 
 
@@ -196,8 +203,9 @@ def test_sha_missing_in_remote_fails_without_paths(env, tmp_path: Path) -> None:
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code is None
+    assert j.summary_code == "commit_missing"
     assert "not found after fetch" in j.summary
-    assert NEVER[:7] in j.summary
+    assert j.summary_args == {"sha": NEVER[:7]}  # sha7 은 해시지 경로가 아니다 — 단서로 남긴다
     assert str(tmp_path) not in j.summary and remote.url not in j.summary
     assert "[rcm] fetching main from app" in log_of(cfg, jid)
     assert not (cfg.data_dir / "workspaces" / str(jid)).exists()
@@ -214,7 +222,9 @@ def test_unreachable_url_fails_with_git_fetch_failed(tmp_path: Path, monkeypatch
         run_one(store, cfg, jid)
         j = store.get_job(jid)
         assert j.state == FAILED and j.exit_code is None
-        assert j.summary.startswith("git fetch failed")
+        assert j.summary_code == "git_failed"
+        assert j.summary.startswith("git fetch failed (exit ")
+        assert j.summary_args["kind"] == "exit" and j.summary_args["op"] == "git fetch"
         assert url not in j.summary and str(tmp_path) not in j.summary
         assert "gone.git" not in j.summary
         log = log_of(cfg, jid)
@@ -225,6 +235,7 @@ def test_unreachable_url_fails_with_git_fetch_failed(tmp_path: Path, monkeypatch
 
 
 def test_fetch_timeout_fails_with_git_fetch_timed_out(env, tmp_path: Path, monkeypatch) -> None:
+    """T5: 시간 초과도 자재화 실패다 — 취소와 겹치면 취소가 이긴다(test_requires_m5l 의 T9)."""
     store, cfg, remote = env
     cfg.server.git_fetch_timeout_seconds = 1
     install_hanging_git(tmp_path, monkeypatch, hang_on="fetch")
@@ -234,5 +245,7 @@ def test_fetch_timeout_fails_with_git_fetch_timed_out(env, tmp_path: Path, monke
     assert time.monotonic() - t0 < 10
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code is None
+    assert j.summary_code == "git_failed"
+    assert j.summary_args == {"kind": "timeout", "op": "git fetch", "seconds": 1}
     assert j.summary == "git fetch timed out after 1s"
     assert not (cfg.data_dir / "workspaces" / str(jid)).exists()

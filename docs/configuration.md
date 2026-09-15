@@ -263,6 +263,35 @@ no `failed_step`, no `last_step` and no `failed: …` line: the tool was missing
 could say anything. A job cancelled while its workspace was still being prepared ends `cancelled`,
 not `tool_missing` — the check runs only for a job nobody has stopped.
 
+**When a job never starts.** `tool_missing` is one of a family of failures that happen before the
+process exists, and the code says which one — because the thing to fix is different each time.
+The workspace could not be built: `snapshot_missing` (the server has no snapshot for this job),
+`snapshot_rejected` (the archive was refused; the argument names the reason and the member),
+`blob_missing` (retention had already deleted a file the snapshot needs), `repo_missing` (the
+repository left `[[repos]]` — `where: "worker"` means it is the worker's config, not the
+server's), `commit_missing` (the ref moved or was force-pushed), `git_failed` (a fetch or
+checkout timed out or exited non-zero) and `snapshot_download_failed` (a remote worker could not
+download it). The process could not be launched: `launch_executable_missing`,
+`launch_permission_denied`, `launch_failed` and `log_unavailable`. The config changed while the
+job waited: `preset_missing`. And `requires` was not satisfied: `tool_missing`. Anything else
+that stopped the workspace from being built — a manifest the server could not read, a disk that
+filled — is `workspace_failed`, with the exception class as its argument. All of them end
+`failed` with `exit_code: null`, no `failed_step`, no `last_step` and no `failed: …` line, and
+all of them lose to a cancel that arrives while the workspace is being prepared — on a remote
+worker as well as a local lane. A remote worker reports from the same table; a worker still
+running an older build than the server is the exception, because the version is compared when it
+registers and not on every report, so its jobs keep arriving with a sentence and no code until it
+is restarted.
+
+These summaries carry **no free text**. `summary_args` holds only what the code declares — an
+exception class name, a git operation and exit code, a hex sha, a repository or preset name that
+is already in the job document — because `/api/status` is readable without a token in the default
+configuration. The original text (`argv[0]`, the git stderr, the exception) is written to the job
+log, which always needs a token; a remote worker sends it to the same place. The one exception is
+`log_unavailable`: the log file is what could not be opened, so there is nowhere to write it, and
+the code itself is the diagnosis. A rejected archive member keeps its **name** (`escape.txt` from
+`../escape.txt`) — it came from the snapshot you sent and it is what you need to fix it.
+
 **The launchd trap.** A service started by `launchd` (or `systemd`) has a short `PATH` —
 `/usr/bin:/bin:/usr/sbin:/sbin` — so `fvm` and `gitleaks` from Homebrew are found in your shell and
 not in the job, and `requires` is what makes that visible. The fix is a `PATH` the job owns:

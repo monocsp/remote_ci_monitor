@@ -196,6 +196,18 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    빨개진다. 5 는 **전달** 실패고 `--fetch-artifacts` 에서만 나온다 — 작업 자체의 결과는
    `wait_exit_code` 에 그대로 있고, 못 온 것은 파일이다([파일을 돌려받기](#8-파일을-돌려받기)).
 
+5. **시작조차 못 한 작업은 그렇다고 말한다.** 스크립트가 돌기 전에 끝나는 실패들이 있고, 요약이
+   그중 어느 것인지 말한다. 워크스페이스를 못 만들었다(`snapshot_missing` ·
+   `snapshot_rejected` · `blob_missing` · `repo_missing` · `commit_missing` · `git_failed` ·
+   `snapshot_download_failed`), 프로세스를 못 띄웠다(`launch_executable_missing` ·
+   `launch_permission_denied` · `launch_failed` · `log_unavailable`), 큐에 있는 사이 프리셋이
+   설정에서 사라졌다(`preset_missing`), `requires` 의 도구가 없다(`tool_missing`). 전부
+   `summary_code` 를 달고 `exit_code` 는 `null` 이다 — 그래서 스크립트가 문장을 읽지 않고도
+   「내 테스트가 깨졌다」와 「작업이 아예 안 돌았다」를 구분한다. 이 요약에는 자유 문구가 **하나도**
+   실리지 않는다: 인자는 코드이거나, 작업에 이미 있는 이름이거나, 숫자다. 원문은 — 못 띄운 명령까지
+   — 토큰이 있어야 보는 작업 로그에만 남는다. 거기에도 아무것도 없는 경우는 하나뿐이다:
+   `log_unavailable` 은 그 로그 파일을 못 연 것이라 적을 곳이 없다.
+
 취소한 작업에는 실패 단계도 마지막 단계도 없다. 사람이 세운 것이지 깨진 것이 아니다.
 
 ## 7. 같은 트리를 두 세션이 낼 때

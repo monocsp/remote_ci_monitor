@@ -262,20 +262,22 @@ def test_env_passes_inputs_and_rcm_vars_and_runs_in_the_workspace(env):
     assert "hello\n" in log
 
 
-def test_missing_binary_fails_with_null_exit_code_and_the_cannot_start_summary(env):
-    """`RunnerError`(시작 실패)는 워커가 failed 로 닫는다 — exit_code None · summary 는
-    `cannot start '/nonexistent/binary-xyz'` 로 시작 · 워크스페이스는 실패라 남는다."""
+def test_missing_binary_fails_with_null_exit_code_and_the_launch_code(env):
+    """`RunnerError`(시작 실패)는 워커가 `launch_executable_missing` 으로 닫는다 — exit_code
+    None · `argv[0]` 은 공개 요약에 아예 안 실린다 · 워크스페이스는 실패라 남는다."""
     store, cfg = env
     jid = enqueue(store, cfg, "missing-bin")
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code is None and j.phase is None
-    assert j.summary.startswith("cannot start '/nonexistent/binary-xyz'")
+    assert j.summary_code == "launch_executable_missing"
+    assert j.summary == "the preset's command was not found"
+    assert "/nonexistent" not in j.summary
     assert workspace_of(cfg, jid).exists()
 
 
 def test_missing_snapshot_fails_without_executing(env):
-    """`MaterializeError` 는 워커가 failed 로 보고한다 — summary 는 문구 그대로 · exit_code None ·
+    """`MaterializeError` 는 워커가 `snapshot_missing` 으로 보고한다 — exit_code None ·
     `executing` 에 간 적 없다(전이는 queued→running→failed 뿐, 로그에 출력 없음)."""
     store, cfg = env
     jid = enqueue(store, cfg, "ok")
@@ -283,6 +285,7 @@ def test_missing_snapshot_fails_without_executing(env):
     run_one(store, cfg, jid)
     j = store.get_job(jid)
     assert j.state == FAILED and j.exit_code is None
+    assert j.summary_code == "snapshot_missing"
     assert j.summary == "snapshot file is missing"
     assert [t.state for t in j.transitions] == ["queued", "running", "failed"]
     assert not log_of(cfg, jid).exists() or log_of(cfg, jid).read_bytes() == b""

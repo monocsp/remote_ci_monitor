@@ -79,6 +79,50 @@ of a key bumps that number and is listed here.
   makes it a cheap "would this apply cleanly?" check. Its summary line also stopped contradicting
   the table printed directly above it: it said `wrote 0, unchanged 0, conflicted 0` no matter what
   the plan held, and now reads `would write N, unchanged N, conflicted N`.
+- **A job that never started now says so.** A job whose workspace could not be built — a snapshot
+  the server could not unpack, a blob retention had already deleted, a `git fetch` that timed out,
+  a repository no longer in `[[repos]]` — ended `failed` with a sentence and no code, which is
+  exactly what a job whose tests failed looks like. Only one of these failures carried a code.
+  Every one of them has its own now, and the code says which thing to fix: `snapshot_missing`,
+  `snapshot_rejected`, `blob_missing`, `repo_missing`, `commit_missing`, `git_failed` and
+  `snapshot_download_failed` for a workspace that could not be built; `launch_executable_missing`,
+  `launch_permission_denied`, `launch_failed` and `log_unavailable` for a process that could not
+  be started; `preset_missing` for a preset that left the config while the job waited;
+  `tool_missing` as before. All of them have `exit_code: null`, so a script can tell "my tests
+  failed" from "the job never ran" without reading the sentence. `summary_args` carries the
+  arguments, so the web page says it in Korean or English instead of repeating the server's
+  English — and `tool_missing`, which had never been added to either locale, is in both now.
+  Remote workers report from the same table, so the code on a row does not depend on which lane
+  picked the job up — including a preset deleted while the job waited, which the remote worker
+  used to report as a launch failure. A worker still running an older build is the exception: the
+  version is only checked when it registers, so until it is restarted it keeps reporting the
+  sentence it used to and the server stores that with no code. Jobs that ended before this release
+  keep their stored sentence and `summary_code: null`; nothing is invented for them.
+- **Cancelling a job while its workspace is being prepared now wins.** A cancel accepted during a
+  long `git fetch` was overwritten by whatever the fetch failed with, so a job you stopped was
+  recorded as a failure. It ends `cancelled`, named after whoever cancelled it, the way a job
+  stopped before a missing tool already did. This holds on a remote worker too: the server used
+  to decide with a copy of the job state it had read before the cancel landed, and then write the
+  failure unconditionally.
+- **A snapshot member whose name is not valid UTF-8 no longer takes the lane down.** The rejection
+  message carried the raw name into the database, the write raised, and the worker thread died
+  `down` instead of failing that one job.
+
+### Security
+- **The job document no longer carries free text from a failure before the job starts.** A preset
+  whose `argv[0]` could not be launched put that absolute path into the job summary, and
+  `/api/status` is readable without a token in the default configuration — the same exposure that
+  was closed for `requires` entries in 0.2.6. Scrubbing the text was not enough: a relative path,
+  `~/…`, `$HOME/…`, a Windows or UNC path, a host name or a token-shaped string passes any path
+  pattern. So these summaries no longer carry text at all. They carry a code from a closed list
+  and arguments of a declared shape — an exception class name, a git operation, an exit code, a
+  hex sha, a repository or preset name already in the job document. The original text — `argv[0]`,
+  the git stderr, the exception — goes to the job log, which always needs a token, from a remote
+  worker as well as a local lane. The name of a rejected archive member is kept, because it came
+  from the snapshot you sent and it is what you need to fix it, but only its last segment, with
+  `\` read as a separator and invisible and direction-changing characters removed. A remote
+  worker's report is checked against the same table on the server: the worker is authenticated,
+  not trusted.
 
 ## [0.2.9] - 2026-09-15
 

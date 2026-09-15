@@ -25,6 +25,71 @@
   var LANGS = ["ko", "en"];
   var DEFAULT_LANG = "ko"; // 결정 38 — 브라우저가 영어여도 기본은 한국어
 
+  /* 서버가 보내는 **닫힌** 인자 값 → 그 언어의 낱말(core/outcome.py 의 REJECT_KINDS · git kind).
+     서버가 문장을 만들어 보내면 화면이 다시 쓸 수 없어서, 코드도 인자도 열쇠로만 온다. 모르는
+     열쇠는 그대로 찍는다 — 새 서버 + 옛 화면에서 빈칸이 되는 것보다 낫다. */
+  var REJECT = {
+    en: {
+      absolute_path: "absolute path in archive",
+      escapes_workspace: "member escapes the workspace",
+      link_outside: "link points outside the workspace",
+      absolute_link: "absolute link target in archive",
+      special_file: "device or special file in archive",
+      not_a_tarball: "not a valid tar.gz",
+      unsupported_compression: "unsupported compression",
+      truncated: "truncated archive",
+      unreadable: "unreadable archive"
+    },
+    ko: {
+      absolute_path: "아카이브에 절대 경로",
+      escapes_workspace: "작업 공간 밖을 가리키는 항목",
+      link_outside: "작업 공간 밖을 가리키는 링크",
+      absolute_link: "아카이브에 절대 경로 링크",
+      special_file: "아카이브에 장치·특수 파일",
+      not_a_tarball: "tar.gz 가 아님",
+      unsupported_compression: "지원하지 않는 압축",
+      truncated: "잘린 아카이브",
+      unreadable: "읽을 수 없는 아카이브"
+    }
+  };
+
+  function rejected(lang, a) {
+    var kind = REJECT[lang][a.kind] || a.kind;
+    return a.member ? kind + ": " + a.member : kind;
+  }
+
+  /* 초 → `1s`·`5m`·`1h`. 서버의 `core/outcome._dur` 와 **글자까지 같아야** 한다: 서버가 저장한
+     문장과 화면이 코드로 다시 그린 문장이 다르면 결정 37 의 불변식이 깨진다(CLI 와 브라우저가
+     같은 잡을 다르게 말한다). 서버는 인자를 **원시 값**으로 보낸다 — 여기서 꼴을 만든다. */
+  function dur(n) {
+    var v = parseInt(n, 10);
+    if (isNaN(v)) return "?";
+    if (v >= 3600 && v % 3600 === 0) return (v / 3600) + "h";
+    if (v >= 60 && v % 60 === 0) return (v / 60) + "m";
+    return v + "s";
+  }
+
+  function gitFailed(lang, a) {
+    var op = a.op || "git";
+    if (a.kind === "no_git") {
+      return lang === "ko" ? "빌드 머신에 git 이 없음" : "git is not installed on the build machine";
+    }
+    if (a.kind === "timeout") {
+      return lang === "ko"
+        ? op + " 가 " + dur(a.seconds) + " 만에 시간 초과"
+        : op + " timed out after " + dur(a.seconds);
+    }
+    if (a.kind === "spawn") {
+      return lang === "ko" ? op + " 를 띄우지 못함: " + a.error : op + " could not start git: " + a.error;
+    }
+    if (a.kind === "exit") {
+      return lang === "ko"
+        ? op + " 실패(종료 코드 " + a.code + ") — 잡 로그를 보라"
+        : op + " failed (exit " + a.code + "), see the job log";
+    }
+    return lang === "ko" ? op + " 실패 — 작업 로그를 보라" : op + " failed, see the job log";
+  }
+
   // ── 조사 ────────────────────────────────────────────────────────────────────
   // 「이(가)」 같은 괄호 표기를 화면에서 없앤다. 뒤에서부터 **판정할 수 있는 글자**를 찾아
   // 받침 유무를 정하고, 그 한 글자를 이름 뒤에 붙인다.
@@ -469,13 +534,42 @@
     "outcome.snapshot_too_big": function (a) {
       return "snapshot " + a.bytes + " exceeds " + a.limit;
     },
-    "outcome.snapshot_rejected": function (a) { return "snapshot rejected: " + a.kind; },
+    "outcome.snapshot_rejected": function (a) { return "snapshot rejected: " + rejected("en", a); },
     "outcome.snapshot_blobs_missing": function (a) {
       return "snapshot rejected: " + a.count + " blob(s) missing in upload";
     },
-    "outcome.workspace_failed": function (a) { return "workspace failed: " + a.detail; },
     "outcome.exit_code": function (a) { return "exit " + a.code; },
     "outcome.timed_out": function (a) { return a.limit; },
+    // ── 프로세스가 뜨기 전에 끝난 잡 (core/outcome.PREFLIGHT_CODES) ─────────
+    "outcome.preset_missing": function (a) {
+      return "preset '" + a.preset + "' is no longer configured";
+    },
+    "outcome.tool_missing": function (a) { return "required tool " + a.tool + " is missing"; },
+    "outcome.snapshot_missing": "snapshot file is missing",
+    "outcome.blob_missing": function (a) { return "snapshot blob missing " + a.sha; },
+    "outcome.repo_missing": function (a) {
+      return a.where === "worker"
+        ? "repo '" + a.repo + "' is not configured on this worker"
+        : "repo '" + a.repo + "' is no longer configured";
+    },
+    "outcome.commit_missing": function (a) {
+      return "commit " + a.sha + " not found after fetch (ref moved or was force-pushed?)";
+    },
+    "outcome.git_failed": function (a) { return gitFailed("en", a); },
+    "outcome.snapshot_download_failed": function (a) {
+      return "cannot download the snapshot from the server" + (a.status ? " (HTTP " + a.status + ")" : "");
+    },
+    "outcome.launch_executable_missing": "the preset's command was not found",
+    "outcome.launch_permission_denied": "the preset's command is not executable",
+    "outcome.launch_failed": function (a) {
+      return "the preset's command could not be started (" + a.error + ")";
+    },
+    "outcome.log_unavailable": function (a) {
+      return "the job log file could not be opened (" + a.error + ")";
+    },
+    "outcome.workspace_failed": function (a) {
+      return "the workspace could not be prepared" + (a.error ? " (" + a.error + ")" : "");
+    },
     "outcome.worker_error": function (a) { return "worker error: " + a.detail; },
     "outcome.worker_failed": "failed on the worker",
     "outcome.worker_stopped_while_running": "worker stopped while running",
@@ -866,13 +960,41 @@
     "outcome.snapshot_too_big": function (a) {
       return "스냅샷 " + a.bytes + " 가 상한 " + a.limit + " 을 넘음";
     },
-    "outcome.snapshot_rejected": function (a) { return "스냅샷 거부: " + a.kind; },
+    "outcome.snapshot_rejected": function (a) { return "스냅샷 거부: " + rejected("ko", a); },
     "outcome.snapshot_blobs_missing": function (a) {
       return "스냅샷 거부: 업로드에 파일 " + a.count + "개가 빠짐";
     },
-    "outcome.workspace_failed": function (a) { return "작업 공간 실패: " + a.detail; },
     "outcome.exit_code": function (a) { return "종료 코드 " + a.code; },
     "outcome.timed_out": function (a) { return a.limit; },
+    "outcome.preset_missing": function (a) {
+      return "프리셋 '" + a.preset + "'" + josa(a.preset, "이/가") + " 설정에 없음";
+    },
+    "outcome.tool_missing": function (a) { return "필요한 도구 " + a.tool + " 없음"; },
+    "outcome.snapshot_missing": "스냅샷 파일이 없음",
+    "outcome.blob_missing": function (a) { return "스냅샷 파일 " + withJosa(a.sha, "이/가") + " 없음"; },
+    "outcome.repo_missing": function (a) {
+      return a.where === "worker"
+        ? "이 워커에 레포 '" + a.repo + "' 설정이 없음"
+        : "레포 '" + a.repo + "'" + josa(a.repo, "이/가") + " 설정에 없음";
+    },
+    "outcome.commit_missing": function (a) {
+      return "fetch 뒤에도 커밋 " + a.sha + " 없음(ref 가 옮겨갔거나 강제 push?)";
+    },
+    "outcome.git_failed": function (a) { return gitFailed("ko", a); },
+    "outcome.snapshot_download_failed": function (a) {
+      return "서버에서 스냅샷을 받지 못함" + (a.status ? " (HTTP " + a.status + ")" : "");
+    },
+    "outcome.launch_executable_missing": "프리셋의 명령을 찾지 못함",
+    "outcome.launch_permission_denied": "프리셋의 명령을 실행할 수 없음(권한)",
+    "outcome.launch_failed": function (a) {
+      return "프리셋의 명령을 띄우지 못함 (" + a.error + ")";
+    },
+    "outcome.log_unavailable": function (a) {
+      return "작업 로그 파일을 열지 못함 (" + a.error + ")";
+    },
+    "outcome.workspace_failed": function (a) {
+      return "작업 공간을 준비하지 못함" + (a.error ? " (" + a.error + ")" : "");
+    },
     "outcome.worker_error": function (a) { return "워커 오류: " + a.detail; },
     "outcome.worker_failed": "워커에서 실패",
     "outcome.worker_stopped_while_running": "실행 중 워커가 멈춤",
