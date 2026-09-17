@@ -1990,9 +1990,10 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             assert "5/9 stages done · 56% overall" in tip and "now S5 scenario QA" in tip, tip
             assert "elapsed 3" in tip and "9 declared stages" in tip, tip  # 스텁은 38분 전 시작
             assert c.eval(_q(rbar, ".getAttribute('title')")) == tip
-            assert c.eval(_q(rbar + " [data-rbar-tip]", ".offsetParent")) is None, (
-                "hidden until hover"
-            )
+            # 마우스가 있으면 hover 전까지 숨고, (hover: none) 환경은 그냥 보인다
+            hidden = c.eval(_q(rbar + " [data-rbar-tip]", ".offsetParent")) is None
+            no_hover = c.eval("matchMedia('(hover: none)').matches")
+            assert hidden != no_hover, f"tip hidden={hidden} but hover:none={no_hover}"
 
             # 글꼴 위계 — 화면 제목은 title(18px), 행 제목은 subtitle(14px), 보조는 caption(12px)
             def fs(sel: str) -> str:
