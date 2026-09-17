@@ -87,7 +87,7 @@ describe("module contract", () => {
   test("rcm.store exposes the review-panel pure functions", () => {
     ["verdictTone", "bannerDecision", "reviewPlanVerdict", "nMatches", "platformParam", "submitDecision", "reviewBody",
       "resultIsCurrent", "panelPill", "panelOpen", "fieldCounter", "listingFields", "screenshotGroups", "reviewInfoModel",
-      "versionStrip", "resultModel", "refusalText", "storeRowModel", "rowsById", "basisText", "buildLayers", "buildRowModel"]
+      "versionStrip", "resultModel", "refusalText", "storeRowModel", "rowsById", "basisText", "buildLayers", "buildRowModel", "planVersionGuess"]
       .forEach((k) => assert.equal(typeof S[k], "function", k));
   });
   test("the new api calls hit the contract's paths and never a release/publish route", async () => {
@@ -294,6 +294,11 @@ describe("panelPill · panelOpen — why the panel is closed, or the result (ite
     assert.equal(S.panelOpen(p, "closed"), false);
     assert.equal(S.panelOpen({ code: "submitted", tone: "ok" }, "open"), true);
   });
+  test("a review error opens the panel whatever the memory says — a refusal must not hide in a folded body", () => {
+    assert.equal(S.panelOpen({ code: "submitted", tone: "ok" }, "closed", true), true);
+    assert.equal(S.panelOpen({ code: "plan_required", tone: "na" }, undefined, true), true);
+    assert.equal(S.panelOpen({ code: "submitted", tone: "ok" }, "closed", false), false);
+  });
   test("every pill code has words in both languages", () => {
     ["not_submitted", "waiting_upload", "plan_blocked", "source_not_ready", "secrets_expired", "submitted", "partial", "noop", "failed", "unsafe_release_type", "not_available"]
       .forEach((k) => assert.ok(I18N.has("review.pill." + k), k));
@@ -471,6 +476,54 @@ describe("storeRowModel — plan.json summary, colour from blockers/stale (items
     assert.equal(na.state, "na");
     assert.equal(na.head[0], "Store status is not available in this build");
     assert.equal(S.storeRowModel(release(), 200, { presets: {} }, "en", TZ, NOW).head[0], "not configured — presets.plan is empty");
+  });
+  test("a plan error turns the row red and puts the text in the head — even the folded «no plan yet» row (first use)", () => {
+    const m = S.storeRowModel(release({ plan: null }), 200, PROFILE, "en", TZ, NOW, "build_name is required");
+    assert.equal(m.state, "bad");
+    assert.equal(m.error, "plan failed: build_name is required");
+    assert.deepEqual(m.head, ["no plan yet — press Refresh", "plan failed: build_name is required"]);
+    assert.equal(m.body, null);
+    const g = S.storeRowModel(release(), 200, PROFILE, "en", TZ, NOW, "server said plan_stale");
+    assert.equal(g.state, "bad");
+    assert.equal(g.head[g.head.length - 1], "plan failed: server said plan_stale");
+    assert.ok(g.body, "the body stays");
+    const ko = S.storeRowModel(release({ plan: null }), 200, PROFILE, "ko", TZ, NOW, "x");
+    assert.equal(ko.error, "플랜 실패: x");
+    // 오류가 없으면 `error` 키가 없고 모양이 그대로다
+    assert.equal("error" in S.storeRowModel(release(), 200, PROFILE, "en", TZ, NOW, null), false);
+    assert.equal("error" in S.storeRowModel(release(), 200, PROFILE, "en", TZ, NOW, ""), false);
+  });
+});
+
+describe("planVersionGuess — what the «which version?» dialog is prefilled with (first use)", () => {
+  test("the newest prod/<version>-<build> tag on the GitHub card wins: version part only", () => {
+    const gh = { tags: [{ name: "prod/1.0.0-179", at: iso(9 * 86400) }, { name: "prod/1.0.0-180", at: iso(2 * 86400) }] };
+    assert.equal(S.planVersionGuess(null, gh), "1.0.0");
+    assert.equal(S.planVersionGuess(release({ plan: null }), gh), "1.0.0");
+    // 날짜가 가장 늦은 태그 — 순서가 아니라
+    const newer = { tags: [{ name: "prod/1.0.0-180", at: iso(20 * 86400) }, { name: "prod/1.1.0-190", at: iso(60) }] };
+    assert.equal(S.planVersionGuess(null, newer), "1.1.0");
+    // 날짜가 없으면 첫 것
+    assert.equal(S.planVersionGuess(null, { tags: [{ name: "prod/2.0.0-1" }, { name: "prod/1.9.0-1" }] }), "2.0.0");
+    // 태그보다 지난 플랜이 앞서지 않는다 — 태그가 있으면 태그다
+    assert.equal(S.planVersionGuess(release(), gh), "1.0.0");
+  });
+  test("no usable tag → the last plan's build_name (entry, then plan.json)", () => {
+    assert.equal(S.planVersionGuess(release(), null), "1.0.1");
+    assert.equal(S.planVersionGuess(release(), { tags: [] }), "1.0.1");
+    assert.equal(S.planVersionGuess(release(), { tags: [{ name: "v-next", at: iso(1) }] }), "1.0.1");
+    const docOnly = release(); docOnly.plan.build_name = null; docOnly.plan.doc = planDoc({ build_name: "1.0.2" });
+    assert.equal(S.planVersionGuess(docOnly, null), "1.0.2");
+  });
+  test("nothing known → empty string, never a made-up version", () => {
+    assert.equal(S.planVersionGuess(null, null), "");
+    assert.equal(S.planVersionGuess(release({ plan: null }), { tags: [] }), "");
+    assert.equal(S.planVersionGuess({}, { tags: [null, {}] }), "");
+    assert.equal(S.planVersionGuess(release({ plan: { job_id: 1, state: "failed", doc: null } }), undefined), "");
+  });
+  test("the dialog's rule is major.minor.patch — «1.0» and «v1.0.1» stay closed", () => {
+    ["1.0.1", "0.0.0", "12.34.56"].forEach((v) => assert.ok(S.PLAN_VERSION_RE.test(v), v));
+    ["", "1.0", "1.0.1.2", "v1.0.1", "1.0.1 ", "a.b.c", "1.0.1-180"].forEach((v) => assert.ok(!S.PLAN_VERSION_RE.test(v), JSON.stringify(v)));
   });
 });
 

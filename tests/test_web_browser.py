@@ -1603,6 +1603,21 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
             rows = c.eval(STORE_ROWS_JS)
             by = {r["row"]: r for r in rows}
             assert [r["row"] for r in rows] == ["setup", "source", "build", "store"], rows
+            # 버전을 아는 회차: Refresh 는 한 번에 가고, «…for another version» 이 대화상자를 연다
+            # (지난 플랜의 1.0.1 이 채워져 있다 — 이 스텁의 GitHub 카드에는 태그가 없다)
+            other = '#store details.srow[data-row="store"] [data-plan-other]'
+            assert c.eval(_q(other, ".textContent")) == "…for another version"
+            c.eval(_q(other, ".click()"))
+            _wait(c, "document.getElementById('plan-dialog').open === true")
+            assert c.eval(_q("#plan-version", ".value")) == "1.0.1"
+            c.eval(_q("#plan-dialog [data-plan-cancel]", ".click()"))
+            _wait(c, "document.getElementById('plan-dialog').open === false")
+            assert c.eval("window.rcmStoreCalls.filter(x => x[0] === 'plan').length") == 0
+            c.eval(_q('#store details.srow[data-row="store"] [data-plan-refresh]', ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'plan')")
+            first_plan = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "plan"]
+            assert first_plan == [["plan", {"build_name": "1.0.1", "ref": "main"}]], first_plan
+            assert c.eval("document.getElementById('plan-dialog').open") is False
             # Build·upload 행(항목 5): upload.json 의 결과 — 초록 접힘, 버전 (N) · 올림 · 태그
             build = by["build"]
             assert build["state"] == "ok" and build["open"] is False, build
@@ -1947,6 +1962,125 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             assert "시나리오 QA" in ko and "결과 모름" in ko, ko[:600]
             assert "예행 (업로드 없음)" in ko, ko[:600]
             assert "undefined" not in ko and "NaN" not in ko
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 첫 사용 — 플랜이 없으면 «Refresh (release-plan)» 는 버전을 묻는다 ─────────────
+#
+# 실제 서버에서 사람이 본 버그: 플랜이 없을 때 build_name "" 으로 보내면 400
+# `build_name is required` 가 오고, 그 오류는 접힌 회색 Store 행의 본문에 있어 아무 반응이
+# 없어 보였다.
+FIRST_USE_STUB_JS = r"""
+(() => {
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  window.rcmPlanRefuse = false;
+  Object.assign(window.rcmStoreApi, {
+    release: () => ok({
+      setup: { required: 3, present: 3, verified: 3, complete: true, missing: [] },
+      plan: null, review: { plan: null, result: null }, upload: null, jobs: [] }),
+    github: () => ok({ log: [], prs: null,
+      tags: [{ name: "prod/1.0.0-179", at: ago(9 * 86400) },
+             { name: "prod/1.0.0-180", at: ago(2 * 86400) }] }),
+    plan: (name, body) => {
+      window.rcmStoreCalls.push(["plan", body]);
+      if (window.rcmPlanRefuse) return Promise.resolve({ ok: false, status: 400,
+        body: { error: "build_name is required" } });
+      return ok({ job_id: 642 }, 202);
+    },
+  });
+})();
+"""
+
+PLAN_GO = "#plan-dialog [data-plan-go]"
+
+
+def _type_plan_version(c: Chrome, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.getElementById('plan-version'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def test_store_first_use_refresh_asks_for_the_version_and_shows_a_refusal_in_the_row_head(
+    tmp_path,
+):
+    """첫 사용: 플랜이 없으면 «Refresh (release-plan)» 는 바로 보내지 않고 «Store snapshot for
+    which version?» 대화상자를 연다 — GitHub 카드의 최신 `prod/1.0.0-180` 태그에서 `1.0.0` 이
+    채워져 있고, `1.0` 은 Go 가 닫힌 채, `1.0.1` 이 열며, 보낸 본문은 `{build_name, ref}` 그대로다.
+    서버가 400 으로 거절하면 그 글자가 접힌 회색 행 속이 아니라 Store 행 **머리** 에 빨갛게 오고
+    행은 열린다. 버전을 모르는 동안 «…for another version» 은 없다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        store_row = '#store details.srow[data-row="store"]'
+        refresh = store_row + " [data-plan-refresh]"
+        with Chrome(tmp_path / "chrome-first-use", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": FIRST_USE_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js="((" + _q(refresh) + ") || {}).disabled === false",
+            )
+            row = [r for r in c.eval(STORE_ROWS_JS) if r["row"] == "store"][0]
+            assert row["state"] == "na" and row["open"] is False, row
+            assert "no plan yet" in row["head"], row
+            assert c.eval(_q(store_row + " [data-plan-other]")) is None, "no version known yet"
+            # Refresh → 대화상자, 태그에서 온 1.0.0 이 채워져 있고 Go 는 열려 있다
+            c.eval(_q(refresh, ".click()"))
+            _wait(c, "document.getElementById('plan-dialog').open === true")
+            assert c.eval("window.rcmStoreCalls.filter(x => x[0] === 'plan').length") == 0
+            assert c.eval(_q("#plan-version", ".value")) == "1.0.0"
+            assert c.eval("document.activeElement.id") == "plan-version"
+            title = c.eval("document.getElementById('plan-title').textContent")
+            assert title == "Store snapshot for which version?", title
+            disabled = _q(PLAN_GO, ".disabled")
+            assert c.eval(disabled) is False
+            _type_plan_version(c, "1.0")
+            assert c.eval(disabled) is True, "major.minor is not a version"
+            hint = c.eval(_q("#plan-dialog [data-plan-version-state]", ".textContent"))
+            assert "1.0.1" in hint, hint
+            _type_plan_version(c, "")
+            assert c.eval(disabled) is True
+            _type_plan_version(c, "1.0.1")
+            assert c.eval(disabled) is False
+            assert c.eval(_q("#plan-dialog [data-plan-version-state]", ".textContent")) == ""
+            c.eval(_q(PLAN_GO, ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'plan')")
+            calls = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "plan"]
+            assert calls == [["plan", {"build_name": "1.0.1", "ref": "main"}]], calls
+            _wait(c, "document.getElementById('plan-dialog').open === false")
+            _wait(c, "document.getElementById('toast').hidden === false")
+            assert "642" in c.eval("document.getElementById('toast').textContent")
+            assert c.eval(_q(store_row + " [data-plan-error]")) is None
+            # 서버가 400 으로 거절하면 — 머리에 빨갛게, 행은 열린다
+            c.eval("window.rcmPlanRefuse = true")
+            _wait(c, "((" + _q(refresh) + ") || {}).disabled === false")
+            c.eval(_q(refresh, ".click()"))
+            _wait(c, "document.getElementById('plan-dialog').open === true")
+            assert c.eval(_q("#plan-version", ".value")) == "1.0.0"
+            c.eval(_q(PLAN_GO, ".click()"))
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'plan').length === 2")
+            _wait(c, _q(store_row + " > summary [data-plan-error]") + " !== null")
+            row = [r for r in c.eval(STORE_ROWS_JS) if r["row"] == "store"][0]
+            assert row["state"] == "bad" and row["open"] is True, row
+            assert "plan failed: build_name is required" in row["head"], row
+            err = c.eval(_q(store_row + " > summary [data-plan-error]", ".className"))
+            assert err == "bad", err
+            assert c.eval("document.getElementById('plan-dialog').open") is False
+            # 한국어로도 머리에 있다
+            c.eval("document.getElementById('lang-btn').click()")
+            head = c.eval(_q(store_row + " > summary", ".textContent"))
+            assert "플랜 실패: build_name is required" in head, head
+            assert c.eval("document.getElementById('plan-title').textContent") == (
+                "어느 버전의 스토어 상태를 볼까요?"
+            )
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             assert c.page_errors() == []
     finally:
         srv.close()

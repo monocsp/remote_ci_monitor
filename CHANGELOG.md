@@ -7,6 +7,20 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-17
+
+### Fixed
+- **Store tab, first use: «Refresh (release-plan)» asks for the version instead of failing
+  silently.** With no plan yet the page sent `build_name: ""`; the server answered 400
+  `build_name is required` and the message sat in the body of the folded grey Store row, so the
+  click looked like nothing happened. Now, when no build name is known, the button opens a
+  «Store snapshot for which version?» dialog (`major.minor.patch`, prefilled from the newest
+  `prod/<version>-<build>` tag on the GitHub card, else the last plan's build name) and sends
+  `{build_name, ref}` on Go; when the version is known the one-click refresh stays and a small
+  «…for another version» button opens the same dialog. A refused plan call is now written in red
+  in the Store row **head** and opens the row for that render, and a refused review call opens the
+  review panel and repeats the code in its head.
+
 ## [0.3.0] - 2026-09-17
 
 ### Added
@@ -1082,7 +1096,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...v0.2.8
