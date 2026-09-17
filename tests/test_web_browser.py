@@ -1851,7 +1851,8 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             # S2 — 대화상자가 저절로 뜬다
             c.open(
                 base + "&admin=1&driver=s2#/store/app",
-                ready_js="document.getElementById('confirm-n-dialog').open === true",
+                # 문서가 바뀌는 순간엔 요소가 아직 없다 — null 이면 예외가 아니라 «아직» 이어야 한다
+                ready_js="(document.getElementById('confirm-n-dialog') || {}).open === true",
             )
             steps = c.eval(STEPPER_JS)
             assert [s[0] for s in steps] == [f"S{i}" for i in range(9)], steps
