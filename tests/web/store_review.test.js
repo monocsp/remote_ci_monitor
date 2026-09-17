@@ -39,7 +39,7 @@ function withReviewPlan(patch, entryPatch) {
   return r;
 }
 const PROFILE = { default_branch: "main", plan_max_age_minutes: 30, presets: { plan: "release-plan", upload: "release-upload", review: "release-review" } };
-const OK_CTX = () => ({ release: release(), typedN: "181", platforms: { ios: true, android: true }, managed: true, admin: true, token: "t", busy: null });
+const OK_CTX = () => ({ release: release(), typedN: "181", nMode: "typed", platforms: { ios: true, android: true }, managed: true, admin: true, token: "t", busy: null });
 
 describe("storeValueText — plan.json 의 값이 객체여도 정직하게", () => {
   test("숫자·글자는 그대로, 없으면 —", () => {
@@ -215,8 +215,29 @@ describe("submitDecision — (plan ok ∧ fresh) ∧ (typed N = plan.n) ∧ (no 
   test("no release plan at all → no_plan + plan_required + n_mismatch, all listed", () => {
     const d = S.submitDecision(Object.assign(OK_CTX(), { release: { plan: null, review: { plan: null } } }));
     assert.equal(d.enabled, false);
-    assert.deepEqual(d.reasons, ["no_plan", "plan_required", "n_mismatch"]);
+    assert.deepEqual(d.reasons, ["no_plan", "plan_required", "n_unknown"]);
     assert.equal(S.submitDecision({}).enabled, false);
+  });
+  test("«자동» — typed N 은 무시되고 플랜의 n 만 있으면 열린다; n 이 없으면 n_unknown", () => {
+    assert.deepEqual(S.submitDecision(Object.assign(OK_CTX(), { nMode: "auto", typedN: "" })), { enabled: true, reasons: [] });
+    assert.deepEqual(S.submitDecision(Object.assign(OK_CTX(), { nMode: "auto", typedN: "180" })), { enabled: true, reasons: [] });
+    assert.deepEqual(S.submitDecision(Object.assign(OK_CTX(), { nMode: null, profile: { build_number_policy: "auto" }, typedN: "" })).reasons, [], "profile default");
+    assert.deepEqual(S.submitDecision(Object.assign(OK_CTX(), { nMode: null, profile: { build_number_policy: "manual" }, typedN: "" })).reasons, ["n_mismatch"]);
+    const r = release(); r.plan.doc.n = null;
+    assert.deepEqual(S.submitDecision(Object.assign(OK_CTX(), { nMode: "auto", release: r })).reasons, ["n_unknown"]);
+  });
+  test("nModeDefault · nModeOf · nReason · nSendValue", () => {
+    assert.equal(S.nModeDefault({}), "auto");
+    assert.equal(S.nModeDefault({ build_number_policy: "manual" }), "typed");
+    assert.equal(S.nModeOf("typed", {}), "typed");
+    assert.equal(S.nModeOf("bogus", { build_number_policy: "manual" }), "typed");
+    assert.equal(S.nReason("auto", "", 181), null);
+    assert.equal(S.nReason("auto", "", null), "n_unknown");
+    assert.equal(S.nReason("typed", "181", 181), null);
+    assert.equal(S.nReason("typed", "0181", 181), "n_mismatch");
+    assert.equal(S.nSendValue("auto", "180"), "auto");
+    assert.equal(S.nSendValue("typed", "181"), "181");
+    assert.equal(S.nSendValue("typed", null), "");
   });
   test("every reason is a catalogue key in both languages", () => {
     ["unsafe", "no_token", "admin", "no_platform", "no_plan", "plan_required", "plan_stale", "plan_blocked", "n_mismatch", "managed_unconfirmed", "busy"]
@@ -237,6 +258,10 @@ describe("reviewBody — the contract's inputs, confirmed-on only for a submit t
     assert.equal(b.play_managed_publishing, "confirmed-on");
     assert.equal(b.listing, "full");
     assert.equal(b.phased, "0");
+  });
+  test("submit in «auto» sends confirm_build_number \"auto\" — the server fills the plan's n", () => {
+    assert.equal(S.reviewBody("submit", Object.assign(OK_CTX(), { nMode: "auto", typedN: "" })).confirm_build_number, "auto");
+    assert.equal(S.reviewBody("plan", Object.assign(OK_CTX(), { nMode: "auto" })).confirm_build_number, "");
   });
   test("iOS only → not-checked even if the box was ticked; unticked → not-checked", () => {
     assert.equal(S.reviewBody("submit", Object.assign(OK_CTX(), { platforms: { ios: true, android: false } })).play_managed_publishing, "not-checked");

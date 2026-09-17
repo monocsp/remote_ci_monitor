@@ -214,6 +214,19 @@ def plan_number(entry: dict[str, Any] | None) -> int | None:
     return None
 
 
+AUTO_BUILD_NUMBER = "auto"
+
+
+def resolve_build_number(typed: Any, n: int | None) -> int | None:
+    """보낸 값 → 실제로 쓸 번호. `"auto"` 는 계획의 `n` 그대로(«빌드 번호 자동» 토글), 숫자는 계획의
+    `n` 과 같을 때만. 둘 다 아니거나 계획에 번호가 없으면 None — 서버는 번호를 지어내지 않는다."""
+    if n is None:
+        return None
+    if isinstance(typed, str) and typed.strip().lower() == AUTO_BUILD_NUMBER:
+        return n
+    return n if numbers_match(typed, n) else None
+
+
 def numbers_match(typed: Any, n: int | None) -> bool:
     """사람이 친 번호와 계획의 `n` — 정수로서 같은가. 비어 있거나 숫자가 아니면 거짓."""
     if n is None or not isinstance(typed, str | int) or isinstance(typed, bool):
@@ -223,6 +236,7 @@ def numbers_match(typed: Any, n: int | None) -> bool:
 
 
 __all__ = [
+    "AUTO_BUILD_NUMBER",
     "JOBS_LIMIT",
     "LISTED_ROLES",
     "MAX_DOC_BYTES",
@@ -233,6 +247,7 @@ __all__ = [
     "parse_doc",
     "parse_iso",
     "plan_number",
+    "resolve_build_number",
     "read_bundle_member",
     "release_view",
     "role_entry",

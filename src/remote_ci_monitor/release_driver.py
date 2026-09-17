@@ -159,6 +159,9 @@ class DriverRunner:
         self.environ = environ
         self._lock = threading.Lock()
         self._procs: dict[int, subprocess.Popen[bytes]] = {}
+        # 실행이 끝난 뒤(대장에 종료가 적힌 뒤) 부르는 훅 — 서버가 «빌드 번호 자동» 이어 달리기에
+        # 쓴다. 감시 스레드에서 불리고, 예외는 삼켜 로그에만 남긴다.
+        self.on_exit: Callable[[dict[str, Any]], None] | None = None
 
     # ── 경로 ─────────────────────────────────────────────────────────────
 
@@ -199,6 +202,7 @@ class DriverRunner:
         android_track: str | None = None,
         dry_run: bool = False,
         confirm_n: int | None = None,
+        auto_n: bool = False,
     ) -> dict[str, Any]:
         """대장에 행을 열고 내부 토큰을 발급해 드라이버를 띄운다. 돌려주는 행에는 pid 가 있다.
         띄우지 못하면 행을 닫고(exit_code None) 토큰을 폐기한 뒤 `OSError` 를 올린다."""
@@ -219,6 +223,7 @@ class DriverRunner:
             confirmed_by=started_by if kind == KIND_CONFIRM else None,
             android_track=android_track,
             dry_run=dry_run,
+            auto_n=auto_n,
         )
         name = token_name(repo, release_id)
         secret = self.store.add_token(name, admin=False, now=now, kind="client")
@@ -275,6 +280,7 @@ class DriverRunner:
         try:
             rc = proc.wait()
             self._finish(release_id, rc, name)
+            self._after_exit(release_id)
         finally:
             with self._lock:
                 self._procs.pop(release_id, None)
@@ -291,6 +297,18 @@ class DriverRunner:
             return
         tail = f" ({why})" if why else ""
         self.log(f"driver: #{release_id} exit {exit_code}{tail}")
+
+    def _after_exit(self, release_id: int) -> None:
+        hook = self.on_exit
+        if hook is None:
+            return
+        row = self.store.get_release(release_id)
+        if row is None:
+            return
+        try:
+            hook(row)
+        except Exception as e:  # noqa: BLE001 — 훅의 실패가 감시 스레드를 죽이면 안 된다
+            self.log(f"driver: #{release_id} on_exit failed: {type(e).__name__}: {e}")
 
     def wait(self, release_id: int, timeout: float) -> bool:
         """테스트 · 종료 절차용 — 프로세스 안에서 띄운 실행이 끝날 때까지. 모르는 실행이면 True."""

@@ -143,6 +143,7 @@ from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
 from remote_ci_monitor.release_driver import (
     KIND_CONFIRM,
+    KIND_RETRY,
     KIND_START,
     DriverRunner,
     base_env,
@@ -152,10 +153,11 @@ from remote_ci_monitor.release_driver import (
 )
 from remote_ci_monitor.release_secrets import SecretError, SecretStore, masker, store_for
 from remote_ci_monitor.release_state import (
-    numbers_match,
+    AUTO_BUILD_NUMBER,
     plan_number,
     read_bundle_member,
     release_view,
+    resolve_build_number,
 )
 from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
@@ -422,6 +424,7 @@ class App(RemoteWorkersMixin):
         self._wheel_lock = threading.Lock()
         # 릴리스 드라이버(계약 v2) — 실행 대장은 DB, 프로세스는 이 객체가 안다.
         self.driver = DriverRunner(store, now_fn=now_fn, log=self.log)
+        self.driver.on_exit = self._driver_exited
         self._checkout_locks: dict[str, threading.Lock] = {}
         self._checkout_guard = threading.Lock()
         self._remote_init()
@@ -1163,7 +1166,7 @@ class App(RemoteWorkersMixin):
 
     def _check_plan(
         self, view: dict[str, Any], build_name: str, typed: Any, *, prefix: str = "plan"
-    ) -> None:
+    ) -> int:
         """되돌릴 수 없는 모드의 문 — 같은 build_name 의 성공한 계획이 있고, 오래되지 않았고,
         사람이 친 번호가 그 계획의 `n` 과 같아야 한다. 번호는 절대 대신 채우지 않는다."""
         plan = view.get("plan")
@@ -1190,13 +1193,16 @@ class App(RemoteWorkersMixin):
                 error_code=f"{prefix}_stale",
                 age_seconds=plan.get("age_seconds"),
             )
-        if not numbers_match(typed, plan_number(plan)):
+        resolved = resolve_build_number(typed, plan_number(plan))
+        if resolved is None:
             raise ApiError(
                 409,
-                "confirm_build_number does not match the plan — type the number the plan shows",
+                "confirm_build_number does not match the plan — type the number the plan shows, "
+                'or send "auto" to take the plan\'s number',
                 code="build_number_mismatch",
                 error_code="build_number_mismatch",
             )
+        return resolved
 
     def release_plan(
         self, name: str, body: Any, token: TokenInfo, host: str | None
@@ -1289,8 +1295,7 @@ class App(RemoteWorkersMixin):
                     code="managed_publishing_unconfirmed",
                     error_code="managed_publishing_unconfirmed",
                 )
-            self._check_plan(view, build_name, typed)
-            inputs["confirm_build_number"] = typed.strip()
+            inputs["confirm_build_number"] = str(self._check_plan(view, build_name, typed))
         else:
             inputs["confirm_build_number"] = ""
         return self._release_submit(repo, preset, inputs, ref, token, host)
@@ -1326,8 +1331,9 @@ class App(RemoteWorkersMixin):
                     code="build_number_mismatch",
                     error_code="build_number_mismatch",
                 )
-            self._check_plan(self._release_view(repo), build_name, typed)
-            inputs["confirm_build_number"] = typed.strip()
+            inputs["confirm_build_number"] = str(
+                self._check_plan(self._release_view(repo), build_name, typed)
+            )
         else:
             inputs["confirm_build_number"] = typed.strip()
         return self._release_submit(repo, preset, inputs, ref, token, host)
@@ -1635,7 +1641,59 @@ class App(RemoteWorkersMixin):
             kind=KIND_START,
             android_track=track,
             dry_run=dry_run,
+            auto_n=self._auto_n(body),
         )
+
+    @staticmethod
+    def _auto_n(body: dict[str, Any]) -> bool:
+        """`build_number: "auto"` — «빌드 번호 자동»: 드라이버가 exit 2 로 번호를 물으면 서버가
+        로그의 `plan: N` 을 그대로 확인해 이어 달린다. 그 밖의 값은 400 — 시작 때는 번호를 받지
+        않는다."""
+        mode = body.get("build_number")
+        if mode is None:
+            return False
+        if isinstance(mode, str) and mode.strip().lower() == AUTO_BUILD_NUMBER:
+            return True
+        raise ApiError(400, 'build_number at start must be "auto" or absent')
+
+    def _driver_exited(self, row: dict[str, Any]) -> None:
+        """드라이버 실행이 끝난 뒤(감시 스레드). «자동» 으로 시작한 start · retry 가 exit 2 로
+        번호를 물었으면 로그의 마지막 `plan: N` 을 `--confirm-build-number` 로 이어 준다. 번호가
+        없으면 사람 차례 그대로 둔다. confirm 이 또 2 로 끝나면 잇지 않는다(무한 되풀이 방지)."""
+        if row.get("exit_code") != 2 or not row.get("auto_n"):
+            return
+        if row.get("kind") not in (KIND_START, KIND_RETRY):
+            return
+        n = plan_n(Path(row["log_path"]))
+        if n is None:
+            self.log(f"driver: #{row['id']} auto build number — no plan: N line, a person's turn")
+            return
+        repo = self.config.repo(row["repo"])
+        profile = repo.release if repo is not None else None
+        if repo is None or profile is None or not profile.driver:
+            return
+        store = store_for(self.config, repo.name)
+        if store is None:
+            return
+        token = TokenInfo(f"{row['started_by']} (auto)", True, self.now_fn())
+        try:
+            res = self._spawn_driver(
+                repo,
+                store,
+                profile.driver,
+                token,
+                None,
+                build_name=row["build_name"],
+                kind=KIND_CONFIRM,
+                android_track=row["android_track"],
+                dry_run=bool(row["dry_run"]),
+                confirm_n=n,
+                auto_n=True,
+            )
+        except ApiError as e:
+            self.log(f"driver: #{row['id']} auto build number {n} not confirmed: {e.message}")
+            return
+        self.log(f"driver: #{row['id']} auto build number {n} → confirm #{res['release_id']}")
 
     def release_confirm(
         self, name: str, body: Any, token: TokenInfo, host: str | None
@@ -1656,10 +1714,12 @@ class App(RemoteWorkersMixin):
                 error_code="release_required",
             )
         shown = plan_n(Path(last["log_path"]))
-        if not numbers_match(typed, shown):
+        resolved = resolve_build_number(typed, shown)
+        if resolved is None:
             raise ApiError(
                 409,
-                "build_number does not match the driver's plan: N line",
+                "build_number does not match the driver's plan: N line "
+                '(a number the log shows, or "auto")',
                 code="build_number_mismatch",
                 error_code="build_number_mismatch",
             )
@@ -1673,7 +1733,8 @@ class App(RemoteWorkersMixin):
             kind=KIND_CONFIRM,
             android_track=last["android_track"],
             dry_run=last["dry_run"],
-            confirm_n=int(str(typed).strip()),
+            confirm_n=resolved,
+            auto_n=bool(last.get("auto_n")),
         )
 
     def release_abort_or_retry(
@@ -1705,6 +1766,7 @@ class App(RemoteWorkersMixin):
             kind=kind,
             android_track=prev["android_track"] if prev else None,
             dry_run=bool(prev["dry_run"]) if prev else False,
+            auto_n=bool(prev.get("auto_n")) if prev else False,
         )
 
     def release_driver_view(self, name: str) -> dict[str, Any]:
@@ -1729,6 +1791,7 @@ class App(RemoteWorkersMixin):
             "pid": None,
             "exit_code": None,
             "confirmed_n": None,
+            "auto_n": False,
             "log_tail": [],
             "plan_n": None,
             "status": None,
@@ -1747,6 +1810,7 @@ class App(RemoteWorkersMixin):
                     "pid": row["pid"],
                     "exit_code": row["exit_code"],
                     "confirmed_n": row["confirmed_n"],
+                    "auto_n": bool(row.get("auto_n")),
                     "log_tail": log_tail(log_file, mask),
                     "plan_n": plan_n(log_file),
                 }

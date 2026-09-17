@@ -1262,7 +1262,7 @@ STORE_STUB_JS = r"""
   const doc = {
     name: "app", url: "git@example.invalid:app.git",
     profile: { default_branch: "main", tag: "prod/{version}-{build}",
-      build_number_policy: "auto", plan_max_age_minutes: 30, driver: null, listing: null,
+      build_number_policy: "manual", plan_max_age_minutes: 30, driver: null, listing: null,
       secrets_dir_env: "APP_SECRETS",
       presets: { plan: "release-plan", upload: "release-upload", review: "release-review",
         gate: null, qa: null, dev: null } },
@@ -1394,7 +1394,7 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             assert [r["row"] for r in rows] == ["setup", "source", "build", "store"], rows
             assert by["setup"]["state"] == "ok" and by["setup"]["open"] is False, by["setup"]
             assert "3/3 secrets present" in by["setup"]["head"], by["setup"]
-            assert "build number auto" in by["setup"]["head"], by["setup"]
+            assert "build number manual" in by["setup"]["head"], by["setup"]
             assert by["source"]["state"] == "ok" and by["source"]["open"] is False, by["source"]
             src_head = by["source"]["head"]
             assert "main 9e1c4d2 · main in dev · fetched 3m ago" in src_head, src_head
@@ -1444,7 +1444,7 @@ RELEASE_STUB_JS = r"""
   const doc = {
     name: "app", url: "git@example.invalid:app.git",
     profile: { default_branch: "main", tag: "prod/{version}-{build}",
-      build_number_policy: "auto", plan_max_age_minutes: 30, driver: null,
+      build_number_policy: "manual", plan_max_age_minutes: 30, driver: null,
       listing: { preview: ["x"], diff: ["y"], validate: ["z"] }, secrets_dir_env: "APP_SECRETS",
       presets },
     setup,
@@ -1755,6 +1755,31 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             assert c.page_errors() == []
 
+            # «빌드 번호: 자동» — 입력 칸이 사라지고 플랜의 N 이 보이며, 체크만으로 열린다.
+            # 본문은 "auto".
+            c.eval("window.rcmRefuse = null")
+            c.eval(_q('#review-panel [data-n-mode="auto"]', ".click()"))
+            _wait(c, _q("#review-panel [data-n-auto]") + " !== null")
+            assert c.eval("document.getElementById('review-n')") is None
+            auto_box = c.eval(_q("#review-panel [data-n-auto]", ".textContent"))
+            assert "181" in auto_box and "App Store and Google Play" in auto_box, auto_box
+            pressed = _q('#review-panel [data-n-mode="auto"]', ".getAttribute('aria-pressed')")
+            assert c.eval(pressed) == "true"
+            assert "type the build number" not in _submit_reason(c)
+            if not c.eval(_q(MANAGED, ".checked")):  # 409 뒤에도 체크는 남아 있을 수 있다
+                c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is False, "auto: no typing needed — " + _submit_reason(c)
+            c.eval(_q(SUBMIT, ".click()"))
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'review').length >= 2")
+            last = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "review"][-1][1]
+            assert last["confirm_build_number"] == "auto" and last["mode"] == "submit", last
+            # 다시 «직접 입력» 으로 — 칸이 돌아오고 닫힌다
+            c.eval(_q('#review-panel [data-n-mode="typed"]', ".click()"))
+            _wait(c, "document.getElementById('review-n') !== null")
+            assert c.eval(disabled) is True
+            assert c.page_errors() == []
+
             # 폰 폭(항목 41): 두 절이 세로로 쌓이고 옆으로 새지 않는다
             c.viewport(390, mobile=True)
             assert c.eval("document.documentElement.scrollWidth") <= 390
@@ -1898,6 +1923,24 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             assert c.eval("document.getElementById('confirm-n-dialog').open") is True
             assert c.eval(disabled) is True, "the typed N is spent after a confirm"
             c.eval(_q("#confirm-n-dialog [data-confirm-n-cancel]", ".click()"))
+            # «빌드 번호: 자동» — 대화상자에 입력 칸이 없고 바로 열린다, 본문은 "auto"
+            c.eval(_q(build_row + ' [data-n-mode="auto"]', ".click()"))
+            auto_btn = _q(build_row + ' [data-n-mode="auto"]', ".getAttribute('aria-pressed')")
+            _wait(c, auto_btn + " === 'true'")
+            hint = c.eval(_q(build_row + " [data-driver-n-hint]", ".textContent"))
+            assert "no dialog" in hint, hint
+            c.eval(_q(build_row + " [data-driver-confirm-open]", ".click()"))
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is True
+            assert c.eval("document.querySelector('#confirm-n-dialog .nbox').hidden") is True
+            dlg = c.eval("document.getElementById('confirm-n-dialog').innerText")
+            assert "used as is" in dlg and "181" in dlg, dlg
+            assert c.eval(disabled) is False, "auto: Confirm opens without typing"
+            c.eval(_q(CONFIRM_GO, ".click()"))
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'confirm').length >= 2")
+            calls = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "confirm"]
+            assert calls[-1][1] == {"build_name": "1.0.1", "build_number": "auto"}, calls
+            _wait(c, "document.getElementById('confirm-n-dialog').open === false")
+            c.eval(_q(build_row + ' [data-n-mode="typed"]', ".click()"))
             # GitHub 카드(항목 25)
             gh = c.eval(_q('#store details.srow[data-row="source"] [data-github]', ".textContent"))
             assert "main · last 5" in gh and "9e1c4d2" in gh and "feat(x): change 5" in gh, gh

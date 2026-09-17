@@ -548,6 +548,16 @@ pre.notes { margin: 4px 0; padding: 6px 8px; border: 1px solid var(--line-2); bo
 .nbox input { width: 8em; font: 14px var(--mono); font-variant-numeric: tabular-nums; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); grid-column: 1; }
 .nbox .nstate { font: 600 12px var(--mono); }
 .nbox .nstate.ok { color: var(--ok); }
+.nbox.auto { grid-template-columns: max-content max-content; }
+.nbox.auto .lab { font: 600 12px var(--sans); }
+.nbox.auto .nval { font: 600 16px var(--mono); font-variant-numeric: tabular-nums; color: var(--accent); }
+/* 「자동 · 직접 입력」 분할 버튼 — 심사 패널과 릴리스 시작 폼이 같은 상태를 보인다 */
+.seg { display: inline-flex; align-items: center; gap: 0; margin: 8px 0 2px; }
+.seg .seg-l { font: 600 12px var(--sans); margin-right: 8px; color: var(--muted); }
+.seg .seg-b { border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 3px 10px; font: 500 12px var(--sans); cursor: pointer; }
+.seg .seg-b:first-of-type { border-radius: 6px 0 0 6px; }
+.seg .seg-b:last-of-type { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.seg .seg-b.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); position: relative; }
 .nbox .nstate.bad { color: var(--bad); }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 4px; }
 .actions .bad { font: 600 12px var(--sans); }
