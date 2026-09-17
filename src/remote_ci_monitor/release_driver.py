@@ -282,10 +282,13 @@ class DriverRunner:
 
     def _finish(self, release_id: int, exit_code: int | None, name: str | None, *, why=""):
         now = self.now_fn()
-        if not self.store.finish_release(release_id, exit_code, now):
-            return
+        # 토큰을 **먼저** 거둔다 — `finished_at` 이 적히는 순간 `wait()` 가 돌아오므로, 그 뒤에
+        # 거두면 「끝났는데 토큰은 아직 산」 창이 생긴다(CI ubuntu 3.11 에서 실측된 경합).
+        # 이미 끝난 실행(중복 호출)이면 revoke 는 멱등이라 두 번 해도 해가 없다.
         if name:
             self.store.revoke_token(name, now)
+        if not self.store.finish_release(release_id, exit_code, now):
+            return
         tail = f" ({why})" if why else ""
         self.log(f"driver: #{release_id} exit {exit_code}{tail}")
 
