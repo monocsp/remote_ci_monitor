@@ -8,6 +8,15 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **The connect skills ship in the package.** `rcm skills list` now names five skills and
+  `rcm skills install --into <project>` copies them: `rcm-connect` (one entry point: project ·
+  repo name · platforms · optional tiers), `rcm-store-connect` (required tier: profile block,
+  secrets list, `plan`/`upload`/`review` presets and script skeletons with `--selftest`, a
+  candidate-config checker), `rcm-gate-connect`, `rcm-qa-connect`, `rcm-release-driver`. Skills
+  write only into the project, adopt existing real implementations, verify with `rcm check` on a
+  candidate copy of `server.toml`, and never run upload or submit. The contract they produce is
+  `docs/release-contract.md`; the Store tab wireframe is `docs/wireframes/web-store.html`;
+  README gained a «Store tab» section.
 - **Release profiles and the connect skills.** `[repos.<name>.release]` in `server.toml` says
   which presets play the `plan` / `upload` / `review` roles (plus optional `gate`, `qa`, `dev`),
   which secrets the Settings screen will ask for, and how the store copy is previewed — the
