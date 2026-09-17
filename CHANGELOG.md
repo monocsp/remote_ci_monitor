@@ -7,6 +7,20 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Release profiles and the connect skills.** `[repos.<name>.release]` in `server.toml` says
+  which presets play the `plan` / `upload` / `review` roles (plus optional `gate`, `qa`, `dev`),
+  which secrets the Settings screen will ask for, and how the store copy is previewed — the
+  contract the Store tab reads (`docs/release-contract.md`). `rcm check --config` prints one
+  `release <repo>` row per profile: FAIL when a required role is empty or names a missing preset,
+  when a preset lacks an input rcm sends, when the irreversible `mode` (`upload` / `submit`) is a
+  preset's default, or when secrets are listed without `secrets_dir_env`; warn when an optional
+  role is unset or the secrets folder does not exist yet. `rcm skills list` and
+  `rcm skills install --into <project>` copy the packaged `rcm-*-connect` skills into
+  `<project>/.claude/skills/`, keeping identical files, refusing to overwrite changed ones
+  without `--force`. `docs/configuration.md` gained a "Release profile" section and
+  `examples/server.toml` a commented profile block.
+
 ### Fixed
 - **A snapshot blob the server only *thinks* it has no longer kills the job.** The `blobs` table and the
   files on disk can drift apart — on one server every blob file written before 2026-09-13 was gone while

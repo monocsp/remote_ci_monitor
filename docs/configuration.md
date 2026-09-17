@@ -135,6 +135,89 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 - A preset with `source_modes = ["git_ref"]` rejects tree uploads (400), and `--ref` on a tree
   preset is a usage error.
 
+## Release profile
+
+A repository can carry a **release profile**: which presets play which release role, which
+secrets the Settings screen asks for, and how the store copy is previewed. It is the contract the
+Store tab reads (`docs/release-contract.md`); rcm itself computes no build number and releases
+nothing. A repository without a profile has no Store tab and everything else works as before.
+
+The profile is a sub-table right after its `[[repos]]` entry (TOML puts `[repos.app.release]`
+inside the **last** `[[repos]]` element, so keep the two together):
+
+```toml
+[[repos]]
+name = "app"
+url  = "git@github.com:org/app.git"
+
+[repos.app.release]
+default_branch       = "main"                    # default "main"
+tag                  = "prod/{version}-{build}"  # default; must contain {version} and {build}
+build_number_policy  = "auto"                    # "auto" (default) | "manual"
+plan_max_age_minutes = 30                        # default 30; integer > 0
+driver               = "scripts/release/product_release.sh"   # optional; relative to the repository
+secrets_dir_env      = "APP_SECRETS"             # required when secrets are listed; ^[A-Z][A-Z0-9_]*$
+
+[repos.app.release.presets]                      # values are [[presets]] names
+plan   = "release-plan"                          # required
+upload = "release-upload"                        # required
+review = "release-review"                        # required
+gate   = "gate-smoke"                            # optional
+qa     = "scenario-qa"                           # optional
+dev    = "deploy-dev"                            # optional
+
+[[repos.app.release.secrets]]                    # zero or more — names and shapes, never values
+name     = "AuthKey.p8"                          # file name or env name; unique in the profile
+kind     = "file"                                # "value" (default) | "file" | "dir"
+optional = false                                 # default false
+verify   = "asc"                                 # "asc" | "play" | "github" | "keystore" | "none" (default)
+max_kb   = 64                                    # kind = "file" only; default 512
+
+[[repos.app.release.secrets]]
+name  = "review_information"
+kind  = "dir"
+files = ["demo_user.txt", "demo_password.txt"]   # kind = "dir" only: file names that must exist inside
+
+[repos.app.release.listing]                      # optional
+preview       = ["python3", "scripts/release/store_listing.py", "preview"]
+diff          = ["python3", "scripts/release/store_listing.py", "diff", "--live"]
+validate      = ["python3", "scripts/release/store_listing.py", "validate", "--build-name", "{version}", "--version-code", "{build}"]
+screenshots   = ["store/screenshots/**/*.png"]
+release_notes = "store/release_notes/{version}/*.txt"
+```
+
+Loading the file checks **shape**: unknown keys anywhere under `release` are an error, `tag`
+must contain both placeholders, `build_number_policy`, `kind` and `verify` take only the values
+above, `files` is only valid for `kind = "dir"` and `max_kb` only for `kind = "file"`, `driver`
+is a relative path, and every error names the section and key
+(`[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review, gate, qa,
+dev)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
+degrades the Store tab without stopping the server.
+
+`rcm check --config server.toml` prints one row per profile, `release <repo>`:
+
+| verdict | when |
+|---|---|
+| `FAIL` | a required role (`plan`, `upload`, `review`) is empty or names a preset that is not in `[[presets]]` |
+| `FAIL` | the `plan` preset lacks the `build_name` input; `upload` lacks `build_name confirm_build_number mode platform`; `review` lacks `build_name confirm_build_number mode platform play_managed_publishing listing phased` |
+| `FAIL` | the `upload` preset's `mode` input defaults to `upload`, or the `review` preset's `mode` defaults to `submit` — the irreversible mode is never the default |
+| `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
+| `warn` | an optional role (`gate`, `qa`, `dev`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+
+The detail lists each role with its preset, the driver when one is set, and the number of secrets:
+`ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke
+· driver=scripts/release/product_release.sh · 2 secret(s)`. The row does not open the repository,
+so it cannot say whether `driver` exists there.
+
+Writing all of this by hand is not the intended path. The package ships **connect skills** —
+`rcm-store-connect` (required tier), `rcm-gate-connect`, `rcm-qa-connect`, `rcm-release-driver`
+and the `rcm-connect` orchestrator — that ask a few questions inside the project and write the
+profile block, the presets and script skeletons. `rcm skills list` prints one line per skill;
+`rcm skills install --into <project>` copies every skill into `<project>/.claude/skills/<name>/`
+and prints one line per file: `written`, `kept` (identical already) or `skipped` (the project's
+copy differs — the command exits 1 and leaves it alone; `--force` overwrites). Nothing outside
+`.claude/skills/` is touched.
+
 ## Getting files back out of a job
 
 A job that regenerates files — Flutter goldens are the reason this exists — leaves them in the

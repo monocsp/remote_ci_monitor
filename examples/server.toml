@@ -83,6 +83,42 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 # name = "app"
 # url = "git@github.com:org/app.git"
 
+# ── Release profile (Store tab) ────────────────────────────────────────────
+# Optional, one per repository, right after its [[repos]] entry: which presets play which release
+# role and which secrets the Settings screen asks for. Every role names a [[presets]] entry;
+# `rcm check --config` prints one `release <repo>` row (docs/configuration.md, "Release profile").
+# `rcm skills install --into <project>` copies the rcm-*-connect skills that write all of this.
+# [repos.app.release]
+# default_branch = "main"                        # where releases are cut from
+# tag = "prod/{version}-{build}"                 # must contain {version} and {build}
+# build_number_policy = "auto"                   # "auto" | "manual"
+# plan_max_age_minutes = 30                      # older plans get a stale badge
+# driver = "scripts/release/product_release.sh"  # optional; relative path inside the repository
+# secrets_dir_env = "APP_SECRETS"                # required when secrets are listed; ^[A-Z][A-Z0-9_]*$
+# [repos.app.release.presets]                    # values are [[presets]] names
+# plan = "release-plan"                          # required — store snapshot → plan.json
+# upload = "release-upload"                      # required — mode must default to "rehearsal"
+# review = "release-review"                      # required — mode must default to "plan"
+# gate = "gate-smoke"                            # optional
+# qa = "scenario-qa"                             # optional
+# dev = "deploy-dev"                             # optional
+# [[repos.app.release.secrets]]                  # zero or more; only names and shapes, never values
+# name = "AuthKey.p8"                            # file name or env name; unique in the profile
+# kind = "file"                                  # "value" | "file" | "dir"
+# optional = false
+# verify = "asc"                                 # "asc" | "play" | "github" | "keystore" | "none"
+# max_kb = 64                                    # kind = "file" only; default 512
+# [[repos.app.release.secrets]]
+# name = "review_information"
+# kind = "dir"
+# files = ["demo_user.txt", "demo_password.txt"] # kind = "dir" only: required file names inside
+# [repos.app.release.listing]                    # optional: store copy preview on a checkout
+# preview = ["python3", "scripts/release/store_listing.py", "preview"]
+# diff = ["python3", "scripts/release/store_listing.py", "diff", "--live"]
+# validate = ["python3", "scripts/release/store_listing.py", "validate", "--build-name", "{version}", "--version-code", "{build}"]
+# screenshots = ["store/screenshots/**/*.png"]
+# release_notes = "store/release_notes/{version}/*.txt"
+
 # ── Presets ────────────────────────────────────────────────────────────────
 # argv runs from the uploaded workspace root. No shell interpolation: inputs arrive as
 # RCM_INPUT_<NAME> environment variables. Scripts may print step markers, e.g.
