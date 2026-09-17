@@ -91,7 +91,10 @@ kind = "dir"
 files = ["first_name.txt", "last_name.txt", "phone_number.txt", "email_address.txt",
          "demo_user.txt", "demo_password.txt", "notes.txt"]
 
-# Optional: commands the Listing preview runs on a checkout of default_branch (seconds, not a job).
+# Optional: commands the Listing preview runs on a checkout of listing.ref (default_branch) — seconds, not a job.
+# `preview` lines are read as fields when they look like `key: value` (`ios.key`, `[play] key` name the
+# store) or, under a section header such as `iOS (ko)` / `Android (ko-KR)`, `key   12자   value`
+# (two or more spaces, an optional character count). Everything else is shown as-is.
 [repos.app.release.listing]
 preview       = ["python3", "scripts/release/store_listing.py", "preview"]
 diff          = ["python3", "scripts/release/store_listing.py", "diff", "--live"]

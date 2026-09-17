@@ -1363,7 +1363,7 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             ], rows
             body = c.eval("document.body.innerText")
             assert "Only an admin token can set up app" in body, body[:600]
-            assert re.search(r"verified \d\d:\d\d", body), body[:600]
+            assert re.search(r"verified (?:[A-Z][a-z]{2} \d{1,2} · )?\d\d:\d\d", body), body[:600]
             assert "undefined" not in body and "NaN" not in body
             # 비활성 + 이유 — 감추지 않는다(항목 35)
             assert c.eval(_q('#store [data-set-value="GH_TOKEN"]', ".disabled")) is True
