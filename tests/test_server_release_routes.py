@@ -846,6 +846,10 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
     body = srv.req("GET", "/api/repos/app/release/driver")[1]
     assert body["status"] == ["driver --status", "server=none token=", "stage: S1 planned"]
     assert body["status_error"] is None and body["running"] is False
+    # 버전을 아는 회차가 있으면 --status 에 --build-name 이 붙는다(없이 부르면 드라이버가 되묻는다)
+    srv.plan_job()
+    body = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert body["status"][0] == "driver --status --build-name 1.0.1", body["status"]
 
 
 def test_start_runs_the_driver_detached_with_an_internal_token_that_is_revoked_after(

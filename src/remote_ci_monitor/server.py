@@ -1825,7 +1825,13 @@ class App(RemoteWorkersMixin):
         except ApiError as e:
             doc["status_error"] = e.message
             return doc
-        lines, err = self.driver.status(path, workspace, self._repo_env(store))
+        build_name = row["build_name"] if row is not None else None
+        if not build_name:
+            plan = self._release_view(repo)["plan"]
+            build_name = plan.get("build_name") if plan else None
+        lines, err = self.driver.status(
+            path, workspace, self._repo_env(store), build_name=build_name or None
+        )
         doc["status"] = lines
         doc["status_error"] = err
         return doc

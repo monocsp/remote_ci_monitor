@@ -423,13 +423,18 @@ describe("releaseBarModel — 최상단 릴리스 막대", () => {
     assert.equal(S.releaseBarModel(model({ exit_code: 1 }), { current: null }, release, CTX).tone, "bad");
     assert.equal(S.releaseBarModel(model({ exit_code: 4 }), { current: null }, release, CTX).tone, "warn");
   });
-  test("드라이버 없이 릴리스 잡만 돌면 그 잡의 막대 — 버전은 플랜에서, 근거는 잡의 것", () => {
+  test("드라이버 없이 릴리스 잡만 돌면 그 잡의 막대 — 버전은 플랜에서, 근거는 잡의 것, 단계 이야기는 없다", () => {
     const none = S.stepperModel({ configured: false }, CTX);
-    const m = S.releaseBarModel(none, layersWith(40), release, CTX);
+    const m = S.releaseBarModel(none, layersWith(40, { bar: Object.assign(layersWith(40).bar, { startedAt: iso(600) }) }), release, CTX);
     assert.equal(m.pct, 40);
     assert.equal(m.head, "1.0.1 (181)");
     assert.equal(m.stage, "#643 scenario-qa");
     assert.equal(m.basis, "basis: declared chunks");
     assert.equal(m.live, false);
+    assert.doesNotMatch(m.detail, /stages/);
+    assert.match(m.detail, /^#643 scenario-qa · Now: #643 scenario-qa · 40% · 17\/30 · chunks · elapsed 10m/);
+    const noStart = S.releaseBarModel(none, layersWith(null, { bar: Object.assign(layersWith(40).bar, { progress: null, head: "progress —", startedAt: null }) }), release, CTX);
+    assert.equal(noStart.elapsed, null, "no started_at → no «elapsed 0s»");
+    assert.equal(noStart.pct, null);
   });
 });

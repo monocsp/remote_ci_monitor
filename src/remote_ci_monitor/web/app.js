@@ -1439,6 +1439,10 @@
     var last = k.split(/[./]/).pop();
     return FIELD_ALIAS[last] || last;
   }
+  function isKnownField(key) {
+    var k = normField(key);
+    return !!(FIELD_LIMITS[k] || PLAY_ONLY[k] || IOS_ONLY[k] || k === "whats_new" || k === "privacy_url");
+  }
   function platformOfKey(key, bracket) {
     var s = String(bracket || key || "").toLowerCase();
     if (/(^|[\[./_-])(android|play)([\]./_-]|$)/.test(s)) return "android";
@@ -1454,16 +1458,24 @@
   function listingFields(listing) {
     var out = { ios: {}, android: {}, other: [], changed: {}, screenshotsChanged: false };
     var lines = listing && Array.isArray(listing.preview) ? listing.preview : [];
-    var last = null;
+    var last = null, section = null;   // section: 「iOS (ko)」·「Android (ko-KR)」 같은 절 머리가 정한 플랫폼
     lines.forEach(function (raw) {
       var line = String(raw == null ? "" : raw);
+      var head = /^\s*(iOS|Android|App Store|Google Play|Play)\b/i.exec(line);
+      if (head && !/[:=]/.test(line)) { section = platformOfKey(head[1].replace(/\s+/g, "_")); last = null; return; }
       var m = /^\s*(?:\[([A-Za-z]+)\]\s*)?([A-Za-z][A-Za-z0-9_.\/-]*)\s*[:=]\s?(.*)$/.exec(line);
+      if (!m) {
+        // 「key   12자   value」 · 「key   value」 — 두 칸 이상 띄운 표 꼴. 아는 필드 이름일 때만.
+        var t = /^\s*([A-Za-z][A-Za-z0-9_.\/-]*)\s{2,}(?:\d+\s*(?:자|chars?)\s+)?(.*)$/.exec(line);
+        if (t && isKnownField(t[1])) m = [t[0], null, t[1], t[2].replace(/^\((?:비어 있음|empty|none)\)$/i, "")];
+        else if (t) { out.other.push(line.trim()); last = null; return; }   // 표의 다른 행 — 앞 필드의 이어짐이 아니다
+      }
       if (!m) {
         if (last && /^\s+\S/.test(line)) { last.target.forEach(function (t) { out[t][last.key] += "\n" + line.trim(); }); return; }
         if (line.trim()) out.other.push(line.trim());
         return;
       }
-      var key = normField(m[2]), plat = platformOfKey(m[2], m[1]);
+      var key = normField(m[2]), plat = platformOfKey(m[2], m[1]) || section;
       var targets = plat ? [plat] : PLAY_ONLY[key] ? ["android"] : IOS_ONLY[key] ? ["ios"] : ["ios", "android"];
       targets.forEach(function (t) { out[t][key] = m[3]; });
       last = { key: key, target: targets };
@@ -1658,6 +1670,7 @@
     if (cur) {
       var est = row && row.estimate ? row.estimate : {};
       bar = { jobId: cur.id, role: cur.role || null, preset: cur.preset || DASH, progress: p, head: barHeadText(p, lang), basis: basisText(p, lang),
+        startedAt: (row && row.started_at) || cur.started_at || null,
         finishes: est.finish_at && !est.overdue && !est.stuck ? T(lang, "build.finishes", { clock: fmtClock(est.finish_at, tzName, nowMs) }) : null };
     }
     var nowLine = null;
@@ -1678,7 +1691,10 @@
       if (dur) parts.push(dur);
       return { id: j.id, preset: j.preset || DASH, role: j.role || null, state: j.state, mark: mk.mark, tone: mk.tone, text: parts.join(" · "), row: r, running: mk.tone === "running" };
     });
-    return { bar: bar, now: nowLine, items: items, current: cur };
+    // 이번 회차 = 마지막 플랜 잡부터. 그 앞은 「이전 작업」으로 접는다(50개가 다 펼쳐지면 소음이다).
+    var cut = 0;
+    items.forEach(function (it, i) { if (it.role === "plan") cut = i; });
+    return { bar: bar, now: nowLine, items: items.slice(cut), older: items.slice(0, cut), current: cur };
   }
   /** Build·upload 행(항목 5 · 26 · 38 · 49) — 색 · 머리 조각 · 세 층. */
   function buildRowModel(release, releaseStatus, profile, rows, lang, tzName, nowMs) {
@@ -1862,14 +1878,17 @@
     var stage = live ? (stageLabel ? T(lang, "rbar.stage", { stage: stageLabel, done: done, total: total }) : T(lang, "rbar.stages_only", { done: done, total: total }))
       : T(lang, "rbar.job", { id: cur.id, preset: cur.preset || DASH });
     var nowLine = layers.now || (live && !dm.running ? dm.headParts.slice(1).join(" · ") : null) || null;
-    var started = parseIso(dm.startedAt || (cur && cur.started_at) || null);
-    var elapsed = started != null && isNum(nowMs) ? T(lang, "rbar.elapsed", { dur: fmtDuration(Math.max(0, (nowMs - started) / 1000)) }) : null;
+    var started = parseIso(live ? dm.startedAt : (bar && bar.startedAt) || null);
+    var elapsed = isNum(started) && isNum(nowMs) ? T(lang, "rbar.elapsed", { dur: fmtDuration(Math.max(0, (nowMs - started) / 1000)) }) : null;
     var finishes = bar && bar.finishes ? bar.finishes : null;
     var head = n != null ? T(lang, "build.head.version", { version: version, build: n }) : version;
-    var detail = [T(lang, "rbar.detail.stages", { done: done, total: total, percent: pct != null ? pct : DASH })];
-    if (live && stageLabel) detail.push(T(lang, "rbar.detail.stage", { stage: stageLabel }));
+    var detail = [];
+    if (live) {
+      detail.push(T(lang, "rbar.detail.stages", { done: done, total: total, percent: pct != null ? pct : DASH }));
+      if (stageLabel) detail.push(T(lang, "rbar.detail.stage", { stage: stageLabel }));
+    } else detail.push(stage);   // 드라이버 없이 잡만 — 단계 이야기는 하지 않는다
     if (nowLine) detail.push(nowLine);
-    if (jobP && isNum(jobP.pct)) detail.push(bar.head);
+    if (bar && bar.head && (jobP && isNum(jobP.pct) || !live)) detail.push(bar.head);
     if (elapsed) detail.push(elapsed);
     if (finishes) detail.push(finishes);
     detail.push(basis);
@@ -3603,7 +3622,13 @@
     layers.items.forEach(function (it) {
       h += '<li class="ci ' + esc(it.tone) + '" data-job="' + it.id + '"><span class="g" aria-hidden="true">' + esc(it.mark) + "</span><span>" + esc(it.text) + "</span>" + (it.running ? jobCardHtml(it) : "") + "</li>";
     });
-    h += "</ol></details>";
+    h += "</ol>";
+    if (layers.older && layers.older.length) {
+      h += '<details class="older"><summary class="sub">' + esc(tr("build.older", { n: layers.older.length })) + '</summary><ol class="steps-list">';
+      layers.older.forEach(function (it) { h += '<li class="ci ' + esc(it.tone) + '" data-job="' + it.id + '"><span class="g" aria-hidden="true">' + esc(it.mark) + "</span><span>" + esc(it.text) + "</span></li>"; });
+      h += "</ol></details>";
+    }
+    h += "</details>";
     return h;
   }
   /** 최상단 릴리스 막대 — 회차가 돌 때만. title 과 :hover 의 .rbar-tip 이 같은 detail 을 보인다. */
@@ -3615,7 +3640,7 @@
     var pct = isNum(m.pct) ? m.pct : null;
     return '<section class="rbar ' + esc(m.tone) + '" data-release-bar data-tone="' + esc(m.tone) + '" role="group" aria-label="' + esc(tr("rbar.aria")) + '" title="' + esc(m.detail) + '">'
       + '<div class="rbar-top"><span class="rbar-ver" data-rbar-head>' + esc(m.head) + '</span><span class="rbar-stage" data-rbar-stage>' + esc(m.stage) + '</span><span class="spacer"></span><span class="rbar-pct" data-rbar-pct>' + (pct != null ? pct + "%" : DASH) + "</span></div>"
-      + '<div class="pbar big" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (pct != null ? ' aria-valuenow="' + pct + '"' : "") + ' aria-valuetext="' + esc(m.detail) + '"' + (pct == null ? ' data-basis="none"' : "") + '><i style="width:' + (pct != null ? pct : 0) + '%"></i></div>'
+      + '<div class="pbar big" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (pct != null ? ' aria-valuenow="' + pct + '"' : "") + ' aria-valuetext="' + esc(m.detail) + '"' + (pct == null ? ' data-basis="none"' : "") + '><i data-fill="' + (pct != null ? pct : 0) + '"></i></div>'
       + '<div class="rbar-foot"><span class="sub">' + (m.now ? '<span class="g" aria-hidden="true">▶</span> ' + esc(m.now) : esc(m.basis)) + '</span><span class="spacer"></span><span class="sub">' + esc([m.elapsed, m.finishes].filter(Boolean).join(" · ")) + "</span></div>"
       + '<div class="rbar-tip" data-rbar-tip role="tooltip">' + esc(m.detail) + "</div></section>";
   }

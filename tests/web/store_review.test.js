@@ -373,6 +373,32 @@ describe("listingFields — key: value lines from the project's preview, nothing
     assert.equal(f.screenshotsChanged, true);
     assert.deepEqual(S.listingFields({ preview: [], diff: [] }).changed, {});
   });
+  test("table format from a project's preview: section header sets the platform, «key   12자   value», (비어 있음) is empty", () => {
+    const f = S.listingFields({ preview: [
+      "[preview] 심사에 올라가는 것 — store/ (버전 미지정)",
+      "  iOS (ko)",
+      "    name                 30자  돌로무드 : 감정일기",
+      "    subtitle             23자  일상이 차곡차곡",
+      "    promotional_text      0자  (비어 있음)",
+      "    keywords             86자  감정해석,감정분석",
+      "    support_url          20자  http://dolomood.com/",
+      "    screenshots               8장 1242×2688 ×8",
+      "  Android (ko-KR)",
+      "    title                18자  돌로무드",
+      "    short_description    40자  감정일기 앱",
+      "    full_description    900자  두더지 두담이는…",
+    ] });
+    assert.equal(f.ios.title, "돌로무드 : 감정일기", "name → title, under the iOS header");
+    assert.equal(f.ios.subtitle, "일상이 차곡차곡");
+    assert.equal(f.ios.promotional_text, "");
+    assert.equal(f.ios.keywords, "감정해석,감정분석");
+    assert.equal(f.ios.support_url, "http://dolomood.com/");
+    assert.equal(f.android.title, "돌로무드", "the Android header wins over the shared key");
+    assert.equal(f.android.short_description, "감정일기 앱");
+    assert.equal(f.android.full_description, "두더지 두담이는…");
+    assert.equal(f.android.subtitle, undefined);
+    assert.deepEqual(f.other, ["[preview] 심사에 올라가는 것 — store/ (버전 미지정)", "screenshots               8장 1242×2688 ×8"]);
+  });
   test("aliases: camelCase and known synonyms; garbage is tolerated", () => {
     const f = S.listingFields({ preview: ["promotionalText: x", "ios.supportUrl: https://e", "android.app_name: N", "release_notes: r"] });
     assert.equal(f.ios.promotional_text, "x");
@@ -609,7 +635,18 @@ describe("rowsById · basisText · buildLayers — three layers from jobs + queu
     assert.equal(L.bar, null);
     assert.equal(L.now, null);
     assert.deepEqual(L.items.map((i) => [i.mark, i.tone]), [["✗", "bad"], ["?", "bad"], ["□", "na"]]);
-    assert.deepEqual(S.buildLayers(null, null, "en", TZ, NOW), { bar: null, now: null, items: [], current: null });
+    assert.deepEqual(S.buildLayers(null, null, "en", TZ, NOW), { bar: null, now: null, items: [], older: [], current: null });
+  });
+  test("this round = from the latest plan job; everything before it is «older» (collapsed)", () => {
+    const many = [{ id: 1, preset: "release-plan", role: "plan", state: "succeeded" }, { id: 2, preset: "gate-smoke", role: "gate", state: "failed" },
+      { id: 3, preset: "release-plan", role: "plan", state: "succeeded" }, { id: 4, preset: "gate-smoke", role: "gate", state: "running" }];
+    const L = S.buildLayers(many, {}, "en", TZ, NOW);
+    assert.deepEqual(L.items.map((i) => i.id), [3, 4]);
+    assert.deepEqual(L.older.map((i) => i.id), [1, 2]);
+    assert.equal(L.bar.startedAt, null, "no queue row and no started_at → null, never «0s»");
+    const noPlan = S.buildLayers([{ id: 9, preset: "gate-smoke", role: "gate", state: "running", started_at: "2026-09-17T12:00:00Z" }], {}, "en", TZ, NOW);
+    assert.deepEqual(noPlan.items.map((i) => i.id), [9]);
+    assert.equal(noPlan.bar.startedAt, "2026-09-17T12:00:00Z");
   });
 });
 
