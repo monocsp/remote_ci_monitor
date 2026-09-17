@@ -74,7 +74,8 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     unit: "chunk/android",  // `::rcm::progress::` — 스텝 안의 단위
     // 스토어 탭 심사 패널 · Store 행 · Build·upload 행
     build: 181, targets: "App Store + Google Play", who: "alice", path: "store/notes/ko.txt",
-    names: "ios + android", reason: "managed_publishing_unconfirmed", tag: "prod/1.0.1-181", role: "plan", track: "production", value: "MANUAL"
+    names: "ios + android", reason: "managed_publishing_unconfirmed", tag: "prod/1.0.1-181", role: "plan", track: "production", value: "MANUAL",
+    stage: "S5 scenario QA"  // 릴리스 드라이버 스테퍼
   };
   LANGS.forEach((lang) => {
     Object.keys(I18N.MESSAGES[lang]).forEach((k) => {

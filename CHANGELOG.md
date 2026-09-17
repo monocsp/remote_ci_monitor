@@ -71,6 +71,25 @@ of a key bumps that number and is listed here.
   `partial` · `noop` · `failed`) with the observed store state replaces the panel body. There is no
   Release, Publish or Rollout button in any state. A server without the release routes shows the two
   rows and the panel as «not available in this build».
+- **Web UI: the release-driver stepper, the GitHub card and the upload rehearsal.** With `GET
+  /api/repos/<name>/release/driver` the Build · upload row shows the round as nine steps S0–S8 above
+  the job cards, read from the driver's own `--status` lines and log tail (`stage S<n>` /
+  `다음 단계 S<n>`; exit 0 is DONE, exit 2 is S2): done steps green ✓, the current one blue ▶, the rest
+  grey ·. S2 is the human step — when the driver stopped with exit 2 and a `plan: N = <n>`, a dialog
+  asks for the build number typed again and **Confirm N** opens only on an exact match, sending
+  `POST …/release/confirm {build_name, build_number}`. With no round the row offers a Start form
+  (version `X.Y.Z` · Android track · dry-run → `POST …/release/start`); while it runs the header names
+  the stage and **Abort** is live; exit 1 is red with **Retry same version**, exit 3 is purple «result
+  unknown — do not resubmit» with no retry, exit 4 is amber store drift, a closed PR is amber
+  blocked; a `409` (`release_running`, `build_number_mismatch`, …) shows the server's code. The Source
+  row gains a GitHub card from `GET …/release/github`: the mirror's last five commits (sha7 · subject ·
+  author · time), its tags with `latest`, and «PR list: next (needs the GH token)». A **Rehearsal (no
+  upload)** button posts `{mode: "rehearsal", build_name, confirm_build_number: <plan.n>}` to
+  `…/release/upload`; there is deliberately no `mode=upload` button — the driver's S7 is the upload
+  path. The Store row renders object values from `plan.json` (a Play track as `{name, status,
+  codes}`) as their codes or name, never `[object Object]`, and the Setup head's «verified» time is the
+  newest `verified_at` of any secret kind, with «n not checked» when a count is reported. Servers
+  without the routes say «not available in this build».
 
 - **A step can report its own progress.** `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]`
   at the start of a stdout line says how far the **current step** is — a chunk loop, a parallel set,

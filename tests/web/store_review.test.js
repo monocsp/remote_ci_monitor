@@ -41,6 +41,48 @@ function withReviewPlan(patch, entryPatch) {
 const PROFILE = { default_branch: "main", plan_max_age_minutes: 30, presets: { plan: "release-plan", upload: "release-upload", review: "release-review" } };
 const OK_CTX = () => ({ release: release(), typedN: "181", platforms: { ios: true, android: true }, managed: true, admin: true, token: "t", busy: null });
 
+describe("storeValueText — plan.json 의 값이 객체여도 정직하게", () => {
+  test("숫자·글자는 그대로, 없으면 —", () => {
+    assert.equal(S.storeValueText(180), "180");
+    assert.equal(S.storeValueText("1.0.1"), "1.0.1");
+    assert.equal(S.storeValueText(null), DASH);
+    assert.equal(S.storeValueText(""), DASH);
+  });
+  test("객체는 codes → name/status → 짧은 JSON 순이고 [object Object] 는 절대 없다", () => {
+    assert.equal(S.storeValueText({ name: "production", status: "completed", codes: [180, 181] }), "180, 181");
+    assert.equal(S.storeValueText({ name: "production", status: "inProgress" }), "production · inProgress");
+    assert.equal(S.storeValueText({ status: "draft" }), "draft");
+    assert.equal(S.storeValueText({ foo: 1 }), '{"foo":1}');
+    assert.equal(S.storeValueText({ nested: { a: 1 } }), '{"nested":{"a":1}}');
+    assert.equal(S.storeValueText([1, { name: "x" }]), "1, x");
+    assert.equal(S.storeValueText([]), DASH);
+    const long = S.storeValueText({ k: "v".repeat(100) });
+    assert.equal(long.length, 60);
+    assert.ok(!/\[object/.test(long));
+  });
+  test("Store 행 — Play 트랙과 App Store 값이 객체인 plan.json 을 그대로 그린다", () => {
+    const r = release();
+    r.plan.doc = planDoc({ store: { asc_live: { version: "1.0.0" }, asc_live_build: { build: 180 }, asc_editing: { version: "1.0.1", status: "PREPARE_FOR_SUBMISSION" },
+      play: { production: { name: "production", status: "completed", codes: [180] }, internal: { status: "draft" } } } });
+    const m = S.storeRowModel(r, 200, { presets: { plan: "release-plan" } }, "en", TZ, NOW);
+    const text = m.head.join(" · ") + " " + m.body.builds.join(" ") + " " + m.body.tracks.join(" ");
+    assert.ok(!/\[object/.test(text), text);
+    assert.ok(m.head.includes("App Store live 1.0.0 (180)"), m.head);
+    assert.ok(m.head.includes("editing 1.0.1 · PREPARE_FOR_SUBMISSION"), m.head);
+    assert.ok(m.head.includes("Play production 180"), m.head);
+    assert.deepEqual(m.body.tracks, ["Play production 180", "Play internal draft"]);
+    assert.deepEqual(m.body.builds, ["App Store live 1.0.0 (180)", "App Store editing 1.0.1 · PREPARE_FOR_SUBMISSION"]);
+  });
+  test("Store 행 — play 가 배열이거나 값이 비면 — 로, 지어내지 않는다", () => {
+    const r = release();
+    r.plan.doc = planDoc({ store: { asc_live: null, play: [1, 2] } });
+    const m = S.storeRowModel(r, 200, { presets: { plan: "release-plan" } }, "en", TZ, NOW);
+    assert.ok(m.head.includes(`App Store live ${DASH} (${DASH})`), m.head);
+    assert.ok(m.head.includes(`Play ${DASH} ${DASH}`), m.head);
+    assert.deepEqual(m.body.tracks, []);
+  });
+});
+
 describe("module contract", () => {
   test("rcm.store exposes the review-panel pure functions", () => {
     ["verdictTone", "bannerDecision", "reviewPlanVerdict", "nMatches", "platformParam", "submitDecision", "reviewBody",

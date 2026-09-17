@@ -247,7 +247,12 @@ Build · upload, Store — 괜찮으면 초록으로 접히고, 손봐야 하면
 `현재/상한` 을 세는 문구 · 릴리스 노트 · 빌드/릴리스 · 심사 정보, 그 스토어에 없는 필드는 `—`)로
 나란히 놓고, **Submit for review** 는 초록 심사 플랜 · 다시 타이핑한 빌드 번호 · Google Play 를
 골랐으면 이번 제출의 관리형 게시 체크가 있어야 열린다 — 어떤 상태에도 Release · Publish · Rollout
-버튼은 없고, `unsafe_release_type` 판정은 닫을 수 없는 빨간 띠가 된다.
+버튼은 없고, `unsafe_release_type` 판정은 닫을 수 없는 빨간 띠가 된다. 프로파일에 드라이버가 있으면
+Build · upload 행에 회차의 스테퍼 S0~S8 이 드라이버의 상태 줄에서 읽혀 붙는다(도는 것이 없으면 버전 ·
+Android 트랙 · dry-run 의 Start 폼, 도는 중엔 **Abort**, exit 1 뒤엔 **Retry same version**, exit 3 은
+«결과 모름 — 다시 올리지 않음», exit 4 는 스토어 드리프트). S2 대화상자는 빌드 번호를 다시 타이핑해야
+`confirm` 을 보내고, **Rehearsal (no upload)** 버튼은 업로드 프리셋을 예행으로만 돌린다 — 진짜 업로드는
+드라이버의 S7 이고 업로드 버튼은 없다. Source 행에는 미러의 최근 커밋 다섯 · 태그 · «PR list: next» 가 있다.
 
 ### 스토어 탭 — 프로젝트의 릴리스 흐름 연결
 
