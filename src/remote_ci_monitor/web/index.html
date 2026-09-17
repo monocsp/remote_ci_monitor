@@ -118,6 +118,20 @@
   </form>
 </dialog>
 
+<!-- 심사 제출 확인 (스토어 목업 항목 23 · 28). N 은 본체 안에서 이미 타이핑했다 — 여기는 «되돌릴 수 없다» 와 플랫폼 이름뿐.
+     Release · Publish · Rollout 버튼은 어디에도 없다. -->
+<dialog id="submit-dialog" aria-labelledby="submit-title">
+  <form method="dialog" class="dlg">
+    <h2 id="submit-title" data-submit-title data-i18n="review.title">심사 제출</h2>
+    <p data-submit-body></p>
+    <p class="sub" data-i18n="store.policy">승인은 출시가 아닙니다. 이 화면에는 release · publish · rollout 버튼이 없습니다.</p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-submit-cancel autofocus data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-submit-go data-i18n="review.dialog_go">심사 제출</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- 로그 서랍 (항목 13) — 토큰 필요 -->
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">

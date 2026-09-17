@@ -243,7 +243,11 @@ password 칸에 한 번 입력), **Verify all**, 비활성 **Enter Store** — �
 않는다. `present` · 지문 · 검증 시각뿐이다. 다 갖춰지면 스토어 화면이 접히는 행 넷을 보인다 —
 Setup, Source(미러 나이, `main` / `dev`, `main` 이 `dev` 에 있는지, **Fetch remote**),
 Build · upload, Store — 괜찮으면 초록으로 접히고, 손봐야 하면 빨강으로 펼쳐지고, 이 빌드에 말할
-것이 없으면 회색이다.
+것이 없으면 회색이다. 그 아래 심사 패널은 App Store 절과 Google Play 절을 같은 그룹 순서(스크린샷 ·
+`현재/상한` 을 세는 문구 · 릴리스 노트 · 빌드/릴리스 · 심사 정보, 그 스토어에 없는 필드는 `—`)로
+나란히 놓고, **Submit for review** 는 초록 심사 플랜 · 다시 타이핑한 빌드 번호 · Google Play 를
+골랐으면 이번 제출의 관리형 게시 체크가 있어야 열린다 — 어떤 상태에도 Release · Publish · Rollout
+버튼은 없고, `unsafe_release_type` 판정은 닫을 수 없는 빨간 띠가 된다.
 
 ### 스토어 탭 — 프로젝트의 릴리스 흐름 연결
 

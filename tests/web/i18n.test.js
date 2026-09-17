@@ -71,7 +71,10 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     countdown: "in 8s", cores: 10, delta: "+2s", head: "pool linux",
     disk: "26%", free: "340 GB", percent: 62, done: 4,
     window: 8, seen: 3,  // M5h — 이름별 실패 이력의 창과 본 횟수
-    unit: "chunk/android"  // `::rcm::progress::` — 스텝 안의 단위
+    unit: "chunk/android",  // `::rcm::progress::` — 스텝 안의 단위
+    // 스토어 탭 심사 패널 · Store 행 · Build·upload 행
+    build: 181, targets: "App Store + Google Play", who: "alice", path: "store/notes/ko.txt",
+    names: "ios + android", reason: "managed_publishing_unconfirmed", tag: "prod/1.0.1-181", role: "plan", track: "production", value: "MANUAL"
   };
   LANGS.forEach((lang) => {
     Object.keys(I18N.MESSAGES[lang]).forEach((k) => {

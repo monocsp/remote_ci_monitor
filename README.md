@@ -260,7 +260,12 @@ a disabled **Enter Store** — and the browser never sees a value, only `present
 the verification time. Once complete, the Store shows four collapsible rows — Setup, Source (mirror
 age, `main` / `dev`, whether `main` is in `dev`, **Fetch remote**), Build · upload and Store — green
 when fine and collapsed, red and open when something needs a hand, grey when this build has nothing
-to say.
+to say. Below them the review panel lays out the App Store and Google Play sections in the same group
+order (screenshots · copy with `current/limit` counters · release notes · build/release · review
+information, `—` where a store has no such field), and **Submit for review** opens only after a
+green review plan, the build number typed again, and — when Google Play is selected — the
+managed-publishing box ticked for this submission; there is no Release, Publish or Rollout button in
+any state, and an `unsafe_release_type` verdict raises a red banner that cannot be dismissed.
 
 ### Store tab — connecting a project's release flow
 
