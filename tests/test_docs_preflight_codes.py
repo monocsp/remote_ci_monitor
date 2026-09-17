@@ -35,13 +35,11 @@ def block(path: Path, head: str, tail: str) -> str:
 
 
 def unreleased_entry(head: str) -> str:
-    """`[Unreleased]` **안의** 항목 하나. 릴리스된 절에 같은 낱말이 있어도 통과하지 않는다."""
-    text = CHANGELOG.read_text(encoding="utf-8")
-    m = re.search(r"^## \[Unreleased\][^\n]*$", text, re.M)
-    assert m, "no `## [Unreleased]`"
-    rest = text[m.end() :]
-    nxt = re.search(r"^## \[", rest, re.M)
-    section = rest[: nxt.start()] if nxt else rest
+    """항목 하나 — 릴리스 뒤에는 `[Unreleased]` 가 아니라 그 버전의 절(0.3.0)에 있으므로, 다른
+    문서 잠금(tests/test_docs_m5.py `unreleased()`)처럼 「0.1.0 이후 전부」에서 찾는다."""
+    from test_docs_m5 import unreleased as since_first_release
+
+    section = since_first_release(CHANGELOG.read_text(encoding="utf-8"))
     start = section.find(head)
     assert start >= 0, f"CHANGELOG [Unreleased] 에 `{head[:40]}…` 항목이 없다"
     after = section[start + len(head) :]

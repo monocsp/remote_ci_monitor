@@ -118,7 +118,8 @@ def test_a_fail_name_may_contain_the_separator():
 
 def test_the_fail_kind_and_the_cap_are_locked():
     assert KIND_FAIL == "fail"
-    assert MARKER_KINDS == ("steps", "step", "step-end", "summary", KIND_FAIL)
+    # `progress` 는 스텝 안의 세부 진행(`tests/test_progress_sub.py`) — 어휘가 하나 늘었다
+    assert MARKER_KINDS == ("steps", "step", "step-end", "summary", KIND_FAIL, "progress")
     assert MAX_FAIL_NAMES == 100
 
 

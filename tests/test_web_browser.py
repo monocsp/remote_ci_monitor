@@ -1243,3 +1243,710 @@ def test_a_stale_sample_opens_the_host_panel_once_and_nothing_closes_it_again(tm
     assert fresh["open"] is False, fresh  # 멀쩡할 때는 접혀 있다
     assert stale["open"] is True, stale  # 이상이면 한 번 펼친다
     assert again["open"] is True, again  # 그리고 저절로 닫지 않는다
+
+
+# ── 스토어 탭 (docs/wireframes/web-store.html · 항목 1 · 29~35) ─────────────────
+#
+# 이 빌드의 서버에는 `/api/repos` 가 없다(프로파일 PR 이 따로다). 그래서 서버 호출 층
+# (`window.rcmStoreApi` — app.js `storeApi()`)을 페이지 스크립트보다 먼저 심어 STORE-TAB-API 모양의
+# 문서를 준다. `?complete=1` 이면 관문이 열린 저장소, 아니면 비밀 둘이 빠진 저장소다.
+STORE_STUB_JS = r"""
+(() => {
+  const complete = /[?&]complete=1(&|$)/.test(location.search);
+  const setup = complete
+    ? { required: 3, present: 3, verified: 3, complete: true, missing: [] }
+    : { required: 3, present: 1, verified: 1, complete: false,
+        missing: ["GH_TOKEN", "review_information/demo_password.txt"] };
+  const sha = (p) => p + "0".repeat(40 - p.length);
+  const at = "2026-09-17T12:03:00Z";
+  const doc = {
+    name: "app", url: "git@example.invalid:app.git",
+    profile: { default_branch: "main", tag: "prod/{version}-{build}",
+      build_number_policy: "auto", plan_max_age_minutes: 30, driver: null, listing: null,
+      secrets_dir_env: "APP_SECRETS",
+      presets: { plan: "release-plan", upload: "release-upload", review: "release-review",
+        gate: null, qa: null, dev: null } },
+    setup,
+    mirror: { path: "/srv/rcm/mirrors/app", age_seconds: 200,
+      fetched_at: new Date(Date.now() - 200000).toISOString() },
+    branches: { main: sha("9e1c4d2f"), dev: sha("7a03b9f0"), main_in_dev: true },
+  };
+  const secrets = { dir_env: "APP_SECRETS", items: [
+    { name: "AuthKey.p8", kind: "file", optional: false, verify: "asc", present: true,
+      size: 2112, fingerprint: "9f1c2a3b", verified_at: at, verify_error: null, max_kb: 64 },
+    { name: "GH_TOKEN", kind: "value", optional: false, verify: "github", present: complete,
+      size: null, fingerprint: complete ? "ghp_…" : null, verified_at: complete ? at : null,
+      verify_error: null },
+    { name: "review_information", kind: "dir", optional: false, verify: "none",
+      present: complete, fingerprint: complete ? "2/2 files" : "1/2 files",
+      verified_at: null, verify_error: null,
+      files: [{ name: "demo_user.txt", present: true, size: 12, fingerprint: "aabbccdd" },
+              { name: "demo_password.txt", present: complete, size: complete ? 9 : null,
+                fingerprint: complete ? "eeff0011" : null }] },
+  ] };
+  const ok = (body) => Promise.resolve({ ok: true, status: 200, body });
+  const notFound = { ok: false, status: 404, body: { error: "unknown repo", code: "not_found" } };
+  window.rcmStoreCalls = [];
+  window.rcmStoreApi = {
+    repos: () => ok({ repos: [{ name: "app", release: true, setup },
+                               { name: "lib", release: false }] }),
+    repo: (name) => name === "app" ? ok(doc) : Promise.resolve(notFound),
+    secrets: () => ok(secrets),
+    putSecret: (...a) => { window.rcmStoreCalls.push(["put", a[0], a[1], a[4] || null]);
+                           return ok(secrets.items[1]); },
+    verify: () => { window.rcmStoreCalls.push(["verify"]); return ok(secrets); },
+    fetchRemote: () => { window.rcmStoreCalls.push(["fetch"]);
+                         return ok({ mirror: doc.mirror, branches: doc.branches }); },
+  };
+})();
+"""
+
+STORE_ROWS_JS = """
+(() => [...document.querySelectorAll('#store details.srow[data-row]:not(.review)')].map((d) => ({
+  row: d.getAttribute('data-row'), state: d.getAttribute('data-state'), open: d.open,
+  head: d.querySelector('summary').textContent.replace(/\\s+/g, ' ').trim(),
+})))()
+"""
+
+SECRET_ROWS_JS = """
+[...document.querySelectorAll('#store table.sec tr[data-secret]')].map((r) => [
+  r.getAttribute('data-secret'), r.getAttribute('data-file'),
+  r.querySelector('.pill').textContent.trim(), r.querySelector('.fp').textContent.trim()])
+"""
+
+
+def _q(selector: str, prop: str = "") -> str:
+    return f"document.querySelector({json.dumps(selector)}){prop}"
+
+
+def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
+    """항목 1 · 29 · 31 · 34 · 35 — `/api/repos` 가 `release: true` 를 주면 머리에 `Queue | Store`
+    가 생기고, `#/store/app` 은 관문(설정 화면)이다: 빨간 띠 «1 of 3 secrets set · 1 verified»,
+    비활성 «Enter Store», 프로파일이 선언한 비밀마다 한 행(폴더는 파일마다 한 줄). 토큰이 없으면
+    표는 읽기 전용이고 이유가 한 줄 있다. 값은 어디에도 없고, 큐의 폴링은 그대로 산다.
+    관문이 열리면(`?complete=1`) 행 넷 + 접힌 본체 머리다 — Setup·Source 초록 접힘, 나머지 회색."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-store", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": STORE_STUB_JS})
+            # 큐 화면 — 탭은 있고 스토어 절은 숨겨져 있다
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            assert c.eval("document.getElementById('view-nav').hidden") is False
+            assert c.eval("document.getElementById('store').hidden") is True
+            assert c.eval("document.getElementById('queue').hidden") is False
+            nav_text = c.eval("document.getElementById('view-nav').textContent")
+            assert "Queue" in nav_text and "Store" in nav_text and "app" in nav_text, nav_text
+            assert "lib" not in nav_text, "a repo without a profile must not be offered"
+
+            # 관문 — 설정 화면
+            gate_ready = _q('#store [data-secret="GH_TOKEN"]') + " !== null"
+            c.open(base + "#/store/app", ready_js=gate_ready)
+            assert c.eval("document.getElementById('store').hidden") is False
+            assert c.eval("document.getElementById('queue').hidden") is True
+            assert c.eval("document.getElementById('summary').hidden") is True
+            gate_cls = c.eval(_q("#store [data-gate]", ".className"))
+            gate_text = c.eval(_q("#store [data-gate]", ".textContent"))
+            assert "bad" in gate_cls.split() and "ok" not in gate_cls.split(), gate_cls
+            assert "1 of 3 secrets set · 1 verified" in gate_text, gate_text
+            assert "Set up app before entering Store" in gate_text, gate_text
+            assert c.eval(_q("#store [data-enter-store]", ".disabled")) is True
+            n_rows = c.eval("document.querySelectorAll('#store details.srow').length")
+            assert n_rows == 0, "no store rows behind the gate"
+            rows = c.eval(SECRET_ROWS_JS)
+            assert rows == [
+                ["AuthKey.p8", None, "✓present", "9f1c2a3b · 2 KB"],
+                ["GH_TOKEN", None, "✗missing", "—"],
+                ["review_information", None, "✗missing", "1 of 2 files"],
+                ["review_information", "demo_user.txt", "✓present", "aabbccdd · 12 B"],
+                ["review_information", "demo_password.txt", "✗missing", "—"],
+            ], rows
+            body = c.eval("document.body.innerText")
+            assert "Only an admin token can set up app" in body, body[:600]
+            assert re.search(r"verified \d\d:\d\d", body), body[:600]
+            assert "undefined" not in body and "NaN" not in body
+            # 비활성 + 이유 — 감추지 않는다(항목 35)
+            assert c.eval(_q('#store [data-set-value="GH_TOKEN"]', ".disabled")) is True
+            assert c.eval(_q("#store [data-verify-all]", ".disabled")) is True
+            drops = c.eval(
+                "[...document.querySelectorAll('#store label.drop')]"
+                ".map(l => l.classList.contains('disabled'))"
+            )
+            assert drops == [True, True, True], "one dropzone per file secret and per folder file"
+            assert c.eval("window.rcmStoreCalls.length") == 0, "nothing was sent without a token"
+            # 큐의 갱신은 이 화면에서도 산다 — `?poll=1` 이라 폴링 타이머가 곧 SSE 자리다
+            assert c.eval("document.getElementById('live-btn').className").startswith("livebtn")
+            assert c.page_errors() == []
+
+            # 폰 폭 — 옆으로 새지 않는다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            c.viewport(1240)
+
+            # 관문이 열린 저장소 — 행 넷 + 본체 머리
+            c.open(
+                base + "&complete=1#/store/app",
+                ready_js="document.querySelectorAll("
+                "'#store details.srow[data-row]:not(.review)').length === 4",
+            )
+            rows = c.eval(STORE_ROWS_JS)
+            by = {r["row"]: r for r in rows}
+            assert [r["row"] for r in rows] == ["setup", "source", "build", "store"], rows
+            assert by["setup"]["state"] == "ok" and by["setup"]["open"] is False, by["setup"]
+            assert "3/3 secrets present" in by["setup"]["head"], by["setup"]
+            assert "build number auto" in by["setup"]["head"], by["setup"]
+            assert by["source"]["state"] == "ok" and by["source"]["open"] is False, by["source"]
+            src_head = by["source"]["head"]
+            assert "main 9e1c4d2 · main in dev · fetched 3m ago" in src_head, src_head
+            assert by["build"]["state"] == "na" and by["store"]["state"] == "na", rows
+            assert "not available in this build" in by["build"]["head"], by["build"]
+            review = c.eval(_q("#review-panel summary", ".textContent"))
+            assert "Submit for review" in review and "not available in this build" in review, review
+            assert c.eval("document.getElementById('review-panel').open") is False
+            fetch_disabled = c.eval(_q("#store [data-fetch-remote]", ".disabled"))
+            assert fetch_disabled is True, "no token → fetch disabled with a reason"
+            assert c.eval(_q("#store [data-gate]")) is None, "no gate banner on the store screen"
+            body = c.eval("document.body.innerText")
+            assert "Approval does not release" in body, body[:800]
+            assert "ghp_" not in body.replace("ghp_…", ""), "a value shows 4 chars + … at most"
+            # 사람이 연 행은 기억된다(큐 화면 규칙) — 렌더가 정한 열림은 기억이 아니다
+            assert c.eval("localStorage.getItem('rcm.store.rows')") is None
+            c.eval(_q('#store details.srow[data-row="setup"] > summary', ".click()"))
+            remembered = c.eval("JSON.parse(localStorage.getItem('rcm.store.rows'))")
+            assert remembered == {"app/setup": "open"}
+            # 한국어로 바꾸면 행 이름이 따라온다
+            c.eval("document.getElementById('lang-btn').click()")
+            heads = c.eval(
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row]:not(.review) > summary .t')]"
+                ".map(e => e.textContent)"
+            )
+            assert heads == ["설정", "소스", "빌드 · 업로드", "스토어"], heads
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 심사 패널 본체 · Store 행 · Build·upload 행 (항목 5~24 · 28 · 36 · 40 · 46~49) ─────────
+#
+# STORE-TAB-API-2 의 `GET …/release` · `GET …/release/listing` · `POST …/release/review` 를 통째로
+# 스텁한다(서버 쪽은 다른 PR). `?unsafe=1` 이면 심사 플랜의 iOS 판정이 `unsafe_release_type` 이고,
+# `window.rcmRefuse = "<code>"` 를 두면 review POST 가 그 코드로 409 를 답한다.
+RELEASE_STUB_JS = r"""
+(() => {
+  const unsafe = /[?&]unsafe=1(&|$)/.test(location.search);
+  const sha = (p) => p + "0".repeat(40 - p.length);
+  const at = "2026-09-17T12:03:00Z";
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const setup = { required: 3, present: 3, verified: 3, complete: true, missing: [] };
+  const presets = { plan: "release-plan", upload: "release-upload", review: "release-review",
+    gate: null, qa: null, dev: null };
+  const doc = {
+    name: "app", url: "git@example.invalid:app.git",
+    profile: { default_branch: "main", tag: "prod/{version}-{build}",
+      build_number_policy: "auto", plan_max_age_minutes: 30, driver: null,
+      listing: { preview: ["x"], diff: ["y"], validate: ["z"] }, secrets_dir_env: "APP_SECRETS",
+      presets },
+    setup,
+    mirror: { path: "/srv/rcm/mirrors/app", age_seconds: 200, fetched_at: ago(200) },
+    branches: { main: sha("9e1c4d2f"), dev: sha("7a03b9f0"), main_in_dev: true },
+  };
+  const secrets = { dir_env: "APP_SECRETS", items: [
+    { name: "AuthKey.p8", kind: "file", optional: false, verify: "asc", present: true,
+      size: 2112, fingerprint: "9f1c2a3b", verified_at: at, verify_error: null, max_kb: 64 },
+    { name: "GH_TOKEN", kind: "value", optional: false, verify: "github", present: true,
+      size: null, fingerprint: "ghp_…", verified_at: at, verify_error: null },
+    { name: "review_information", kind: "dir", optional: false, verify: "none", present: true,
+      fingerprint: "2/2 files", verified_at: null, verify_error: null,
+      files: [{ name: "demo_user.txt", present: true, size: 12, fingerprint: "aabbccdd" },
+              { name: "demo_password.txt", present: true, size: 9, fingerprint: "eeff0011" }] },
+  ] };
+  const planDoc = { schema: 1, build_name: "1.0.1", n: 181, first_release: false,
+    store: { asc_live: "1.0.0", asc_live_build: 180, asc_editing: "1.0.1",
+             play: { production: 180 } },
+    blockers: [], warnings: [{ code: "W-TABLET", text: "no tablet screenshots" }],
+    measured_at: ago(240) };
+  const reviewPlanDoc = { schema: 2, build_name: "1.0.1", n: 181, plan_verdict: "ok",
+    ios: unsafe ? "unsafe_release_type" : "ready", android: "ready",
+    observed: { ios: "PREPARE_FOR_SUBMISSION", android: "completed", auto_release: false },
+    listing: { preview: [], diff: [] }, measured_at: ago(240) };
+  const uploadDoc = { schema: 1, n: 181, status: "success", mode: "upload",
+    platforms: ["ios", "android"], tag: "prod/1.0.1-181" };
+  const job = (id, preset, role) => ({ id, preset, role, state: "succeeded",
+    sha: sha("9e1c4d2f"), ref: "main", started_at: ago(4000 - id), finished_at: ago(3000 - id),
+    artifacts: [] });
+  const release = {
+    setup,
+    plan: { job_id: 641, state: "succeeded", measured_at: ago(240), age_seconds: 240,
+            stale: false, build_name: "1.0.1", doc: planDoc },
+    review: { plan: { job_id: 651, state: "succeeded", age_seconds: 240, stale: false,
+                      doc: reviewPlanDoc },
+              result: null },
+    upload: { job_id: 650, state: "succeeded", finished_at: ago(3000), doc: uploadDoc },
+    jobs: [job(651, "release-review", "review"), job(650, "release-upload", "upload"),
+           job(641, "release-plan", "plan")],
+  };
+  const listing = { sha: sha("9e1c4d2f"),
+    preview: ["ios.promotional_text: Short daily notes",
+              "description: A calm journal for every day.",
+              "ios.keywords: journal,mood,notes",
+              "ios.support_url: https://example.invalid/support",
+              "ios.subtitle: Daily notes", "android.title: Journal",
+              "android.short_description: A calm journal",
+              "android.full_description: A calm journal for every day, with photos.",
+              "generated by store_listing.py"],
+    diff: ["ios/ko/subtitle: «Daily» → «Daily notes»", "screenshots ios +1"],
+    release_notes: { path: "store/release_notes/1.0.1/ko.txt",
+                     text: "• photos in inquiries\n• fixes" },
+    screenshots: [
+      { path: "store/screenshots/ios/ko/01_iphone65_home.png", bytes: 1234,
+        width: 1284, height: 2778 },
+      { path: "store/screenshots/ios/ko/02_iphone65_write.png", bytes: 1200,
+        width: 1284, height: 2778 },
+      { path: "store/screenshots/android/ko-KR/01_phone_home.png", bytes: 999,
+        width: null, height: null }],
+    errors: [] };
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  window.rcmStoreCalls = [];
+  window.rcmRefuse = null;
+  window.rcmStoreApi = {
+    repos: () => ok({ repos: [{ name: "app", release: true, setup }] }),
+    repo: () => ok(doc),
+    secrets: () => ok(secrets),
+    putSecret: () => ok({}),
+    verify: () => ok(secrets),
+    fetchRemote: () => ok({ mirror: doc.mirror, branches: doc.branches }),
+    release: () => ok(release),
+    listing: () => ok(listing),
+    listingFileUrl: (name, path) =>
+      "/api/repos/" + name + "/release/listing/file?path=" + encodeURIComponent(path),
+    plan: (name, body) => { window.rcmStoreCalls.push(["plan", body]);
+                            return ok({ job_id: 642 }, 202); },
+    review: (name, body) => {
+      window.rcmStoreCalls.push(["review", body]);
+      if (window.rcmRefuse) return Promise.resolve({ ok: false, status: 409,
+        body: { error: "refused", code: window.rcmRefuse, error_code: window.rcmRefuse } });
+      return ok({ job_id: 660 }, 202);
+    },
+    validateListing: (name, body) => { window.rcmStoreCalls.push(["validate", body]);
+      return ok({ ok: false, lines: ["ios/ko/keywords: 101 > 100"], exit: 1 }); },
+    upload: () => ok({ job_id: 0 }, 202),
+    github: () => ok({ log: [], tags: [], prs: null }),
+  };
+})();
+"""
+
+GROUPS_JS = """
+(() => {
+  const sec = (p) => document.querySelector('#review-panel .ssec[data-platform="' + p + '"]');
+  const groups = (p) => [...sec(p).querySelectorAll('.grp')].map(g => g.dataset.group);
+  const heads = (p) => [...sec(p).querySelectorAll('.grp h4')].map(h => h.textContent);
+  return { ios: groups('ios'), android: groups('android'),
+           iosHeads: heads('ios'), androidHeads: heads('android') };
+})()
+"""
+
+FORBIDDEN_BUTTONS_JS = """
+[...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
+  .map(b => (b.textContent || b.value || '').trim())
+  .filter(t => /release this version|publish|rollout/i.test(t))
+"""
+
+SUBMIT = "#review-panel [data-submit-review]"
+MANAGED = '#review-panel [data-review-check="managed"]'
+ANDROID = '#review-panel [data-review-check="android"]'
+
+
+def _type_n(c: Chrome, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.getElementById('review-n'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def _wait(c: Chrome, js: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not c.eval(js):
+        time.sleep(0.05)
+    assert c.eval(js), js
+
+
+def _submit_reason(c: Chrome) -> str:
+    return c.eval(_q("#review-panel [data-submit-reason]", ".textContent"))
+
+
+def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
+    """항목 5~24 · 28 · 36 · 46~49 — 릴리스 상태가 있으면 Store 행은 plan.json 의
+    요약(라이브 · 편집 중 · Play 트랙 · next N · 플랜 나이)이고 Build·upload 행은
+    upload.json 의 결과 + 이 회차의 잡 목록이다. 본체는 App Store 절과 Google Play 절을
+    **같은 그룹 순서**로 나란히 그리고, Play 에 없는 필드는 — 와 이유다. Submit 은
+    (심사 플랜 ok · 안 낡음) ∧ (친 N = plan.n) ∧ (Android 를 골랐으면 관리형 게시 체크)
+    일 때만 열린다 — 틀린 N 은 닫힌 채 «≠ 181», 맞는 N + 체크로 열린다. 보낸 본문은
+    서버 계약 그대로고, 409 는 코드가 버튼 옆에 글자로 온다. `unsafe_release_type` 은
+    닫을 수 없는 빨간 띠 + 닫힌 Submit. Release · Publish · Rollout 버튼은 어떤 상태에도
+    없다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = _q(SUBMIT) + " !== null"
+        with Chrome(tmp_path / "chrome-review", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            # 쿼리가 달라야 다시 싣는다 — 해시만 바뀌면 boot() 가 안 돌아 토큰을 안 읽는다
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js=ready + " && document.querySelector('#tok-btn').textContent"
+                ".indexOf('macmini-admin') >= 0",
+            )
+            rows = c.eval(STORE_ROWS_JS)
+            by = {r["row"]: r for r in rows}
+            assert [r["row"] for r in rows] == ["setup", "source", "build", "store"], rows
+            # Build·upload 행(항목 5): upload.json 의 결과 — 초록 접힘, 버전 (N) · 올림 · 태그
+            build = by["build"]
+            assert build["state"] == "ok" and build["open"] is False, build
+            assert "1.0.1 (181)" in build["head"] and "uploaded" in build["head"], build
+            assert "prod/1.0.1-181" in build["head"], build
+            items = c.eval(
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row=\"build\"] .checklist .ci')]"
+                ".map(li => [li.className.replace('ci ', ''), li.textContent.trim().slice(0, 40)])"
+            )
+            assert [i[0] for i in items] == ["ok", "ok", "ok"], items
+            assert items[0][1].startswith("✓#641 release-plan · plan · succeeded"), items
+            # Store 행(항목 6): plan.json 의 요약 + Refresh(= release-plan 잡)
+            store = by["store"]
+            assert store["state"] == "ok" and store["open"] is False, store
+            assert "App Store live 1.0.0 (180)" in store["head"], store
+            assert "editing 1.0.1" in store["head"] and "Play production 180" in store["head"]
+            assert "next N 181" in store["head"] and "1 warnings" in store["head"], store
+            assert re.search(r"plan \d+m ago", store["head"]), store
+            assert c.eval(_q("#store [data-plan-refresh]", ".disabled")) is False
+
+            # 본체(항목 7): 네 행이 초록이라 펼쳐져 있고, 필은 «not submitted»
+            pill = _q("#review-panel [data-panel-pill]", ".getAttribute('data-panel-pill')")
+            assert c.eval("document.getElementById('review-panel').open") is True
+            assert c.eval(pill) == "not_submitted"
+            head = c.eval(_q("#review-panel > summary", ".textContent"))
+            assert "1.0.1 · build 181 · Submit for review · App Store + Google Play" in head, head
+            # 두 절 — 같은 그룹 순서 · 같은 줄 수 (항목 15)
+            groups = c.eval(GROUPS_JS)
+            assert groups["ios"] == [
+                "screenshots",
+                "version_info",
+                "whats_new",
+                "build",
+                "review_info",
+            ], groups
+            assert groups["android"] == [
+                "graphics",
+                "store_listing",
+                "release_notes",
+                "release",
+                "app_content",
+            ], groups
+            assert len(groups["iosHeads"]) == len(groups["androidHeads"]) == 5, groups
+            assert groups["iosHeads"][1] == "Version information", groups
+            assert groups["androidHeads"][1] == "Store listing", groups
+            body = c.eval("document.getElementById('review-panel').innerText")
+            assert "Play has no such field" in body, body[:1500]
+            assert "Promotional text" in body and "Short description" in body, body[:1500]
+            assert "ready" in body and "judged 4m ago" in body, body[:1500]
+            assert "Approval does not release" in body
+            assert "console-only — not touched by rcm" in body
+            assert "unknown to the API" in body, "the managed-publishing pill never turns green"
+            assert "undefined" not in body and "NaN" not in body
+            # 글자 수 세기(항목 11) · changed 칩(항목 21) · 스크린샷 띠(항목 10)
+            counters = c.eval(
+                "[...document.querySelectorAll("
+                "'#review-panel .ssec[data-platform=\"ios\"] .counter')].map(e => e.textContent)"
+            )
+            assert "11/30" in counters, counters  # «Daily notes» / subtitle 30
+            assert c.eval("document.querySelectorAll('#review-panel .chip.changed').length") >= 1
+            shots = c.eval(
+                "[...document.querySelectorAll('#review-panel .ssec img')]"
+                ".map(i => i.getAttribute('src'))"
+            )
+            assert len(shots) == 3, shots
+            assert all("/release/listing/file?path=" in s for s in shots), shots
+            ios_imgs = "document.querySelectorAll('#review-panel .ssec[data-platform=\"ios\"] img')"
+            assert c.eval(ios_imgs + ".length") == 2
+            # 릴리스 노트 — 같은 원문, 상한만 다르다(4000 · 500)
+            assert "/4000" in body and "/500" in body, body[:2000]
+
+            # Submit 활성 규칙(항목 22 · 23 · 28)
+            disabled = _q(SUBMIT, ".disabled")
+            assert c.eval(disabled) is True
+            reason = _submit_reason(c)
+            assert "type the build number" in reason and "managed-publishing" in reason, reason
+            _type_n(c, "180")
+            assert c.eval(disabled) is True, "a wrong N keeps the button closed"
+            assert c.eval(_q("#review-panel [data-n-state]", ".textContent")) == "≠ 181"
+            _type_n(c, "181")
+            assert c.eval(disabled) is True, "the right N alone is not enough with Play selected"
+            assert c.eval(_q("#review-panel [data-n-state]", ".textContent")) == "= 181"
+            assert "managed-publishing" in _submit_reason(c)
+            assert c.eval(_q(MANAGED, ".checked")) is False, "never pre-ticked"
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is False, "right N + managed box → enabled"
+            assert _submit_reason(c) == ""
+            # 관리형 게시 체크는 Play 를 빼면 무의미해지고, 다시 넣어도 기억되지 않는다
+            c.eval(_q(ANDROID, ".click()"))
+            assert c.eval(disabled) is False, "iOS only: no managed box needed"
+            c.eval(_q(ANDROID, ".click()"))
+            assert c.eval(_q(MANAGED, ".checked")) is False
+            assert c.eval(disabled) is True
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is False
+
+            # 출시 버튼은 없다 — 어떤 상태에도 (계약 §6)
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+
+            # Submit → 대화상자(되돌릴 수 없다 · 플랫폼 이름) → 확인 → 계약 그대로의 본문
+            c.eval(_q(SUBMIT, ".click()"))
+            assert c.eval("document.getElementById('submit-dialog').open") is True
+            dlg = c.eval("document.getElementById('submit-dialog').innerText")
+            assert "Submit 1.0.1 (181) for review?" in dlg and "cannot be undone" in dlg, dlg
+            assert "App Store + Google Play" in dlg, dlg
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.length > 0")
+            calls = c.eval("window.rcmStoreCalls")
+            assert calls and calls[-1][0] == "review", calls
+            assert calls[-1][1] == {
+                "build_name": "1.0.1",
+                "ref": "main",
+                "mode": "submit",
+                "platform": "both",
+                "confirm_build_number": "181",
+                "play_managed_publishing": "confirmed-on",
+                "listing": "notes-only",
+                "phased": "1",
+            }, calls[-1]
+            # 보낸 뒤 확인은 지워진다 — 다음 되돌릴 수 없는 일로 넘어가지 않는다
+            _wait(c, "document.getElementById('review-n').value === ''")
+            assert c.eval(_q(MANAGED, ".checked")) is False
+            assert c.eval(disabled) is True
+
+            # 409 — 서버의 코드가 버튼 옆에 그대로, 클라이언트는 돌아가지 않는다
+            c.eval("window.rcmRefuse = 'managed_publishing_unconfirmed'")
+            _type_n(c, "181")
+            c.eval(_q(MANAGED, ".click()"))
+            c.eval(_q(SUBMIT, ".click()"))
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, _q("#review-panel [data-review-error]") + " !== null")
+            err = c.eval(_q("#review-panel [data-review-error]", ".textContent"))
+            assert err == "server refused: managed_publishing_unconfirmed", err
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+
+            # 폰 폭(항목 41): 두 절이 세로로 쌓이고 옆으로 새지 않는다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            cols = c.eval(
+                "getComputedStyle(document.querySelector('#review-panel .stores'))"
+                ".gridTemplateColumns.split(' ').length"
+            )
+            assert cols == 1, cols
+            c.viewport(1240)
+
+            # 항목 36 — unsafe_release_type: 닫을 수 없는 빨간 띠, 필 빨강, Submit 닫힘
+            banner = "[data-unsafe-banner]"
+            c.open(base + "&unsafe=1#/store/app", ready_js=_q(banner) + " !== null")
+            assert c.eval(_q(banner, ".getAttribute('role')")) == "alert"
+            kind = c.eval(_q(banner, ".getAttribute('data-unsafe-banner')"))
+            assert kind == "unsafe_release_type", kind
+            n_buttons = c.eval(f"document.querySelectorAll('{banner} button').length")
+            assert n_buttons == 0, "not dismissable"
+            assert "not set to manual release" in c.eval(_q(banner, ".textContent"))
+            assert c.eval(pill) == "unsafe_release_type"
+            assert c.eval("document.getElementById('review-panel').open") is False
+            _type_n(c, "181")
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is True, "unsafe → closed even with N and the box"
+            assert "fix the release type" in _submit_reason(c)
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 한국어로 바꿔도 스토어·필드 이름은 카탈로그에서 온다 — 판정 낱말은 서버 것 그대로.
+            # 접혀 있어도 textContent 에는 본문이 있다.
+            c.eval("document.getElementById('lang-btn').click()")
+            ko = c.eval("document.getElementById('review-panel').textContent")
+            assert "App Store · iOS" in ko and "버전 정보" in ko, ko[:800]
+            assert "unsafe_release_type" in ko, ko[:800]
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 릴리스 드라이버 스테퍼 · N 대화상자 · GitHub 카드 · 예행 (항목 25 · 26 · 28 · 37~39) ──────
+#
+# RELEASE_STUB_JS 위에 `driver` · `github` 와 드라이버 네 호출을 덧씌운다. `?driver=s2` 는 exit 2 +
+# plan_n 181(사람 단계), `running` 은 S5 진행 중, `exit3` 은 업로드 결과 모름.
+DRIVER_STUB_JS = r"""
+(() => {
+  const mode = (/[?&]driver=(\w+)/.exec(location.search) || [])[1] || "s2";
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const base = { build_name: "1.0.1", started_at: ago(2280), started_by: "pcs", pid: null,
+    exit_code: null, plan_n: 181, log_tail: ["stage S0 branch release/1.0.1 @ 7a03b9f",
+      "stage S1 plan #641", "plan: N = 181"], status: [] };
+  const states = {
+    s2: Object.assign({}, base, { running: false, exit_code: 2,
+      status: ["release 1.0.1: stage S2 waiting for --confirm-build-number"] }),
+    running: Object.assign({}, base, { running: true, pid: 4242,
+      status: ["release 1.0.1: stage S5 scenario QA · job #643"] }),
+    exit3: Object.assign({}, base, { running: false, exit_code: 3,
+      status: ["release 1.0.1: stage S7 upload — result unknown"] }),
+  };
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  const sha = (p) => p + "0".repeat(40 - p.length);
+  const rec = (kind) => (name, body) => {
+    window.rcmStoreCalls.push([kind, body]); return ok({ release_id: 7 }, 202); };
+  Object.assign(window.rcmStoreApi, {
+    driver: () => ok(states[mode]),
+    driverStart: rec("start"), driverConfirm: rec("confirm"), driverAbort: rec("abort"),
+    driverRetry: rec("retry"),
+    upload: (name, body) => {
+      window.rcmStoreCalls.push(["upload", body]); return ok({ job_id: 660 }, 202); },
+    github: () => ok({
+      log: [1, 2, 3, 4, 5].map((i) => ({ sha: sha("9e1c4d2" + i), subject: "feat(x): change " + i,
+        author: "pcs", at: ago(i * 3600) })),
+      tags: [{ name: "prod/1.0.0-179", at: ago(9 * 86400) },
+             { name: "prod/1.0.0-180", at: ago(2 * 86400) }],
+      prs: null }),
+  });
+})();
+"""
+
+STEPPER_JS = """
+[...document.querySelectorAll('#store details.srow[data-row="build"] ol.stepper li.st')]
+  .map(li => [li.getAttribute('data-stage'), li.className.replace('st ', ''),
+              li.querySelector('.g').textContent])
+"""
+CONFIRM_GO = "#confirm-n-dialog [data-confirm-n-go]"
+
+
+def _type_driver_n(c: Chrome, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.getElementById('driver-n'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
+    """항목 25 · 26 · 28 · 37~39 — 드라이버가 exit 2 로 멈추고 plan_n 이 있으면 S2 가 사람 단계고
+    N 대화상자가 뜬다: 틀린 N 은 Confirm 이 닫힌 채 «≠ 181», 맞는 N 이 열고, 보낸 본문은
+    `{build_name, build_number:"181"}` 그대로다. 도는 중이면 S5 가 파랑 ▶, 앞은 ✓, 뒤는 ·,
+    Abort 가 열린다. exit 3 은 보라 «result unknown» 이고 Retry 가 없다. Source 행에는
+    미러의 커밋 다섯 · 태그(latest) · «PR list: next». 예행 버튼은 rehearsal 본문만 보내고
+    mode=upload 버튼은 없다. 한국어로 바꾸면 단계 이름이 카탈로그에서 온다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        build_row = '#store details.srow[data-row="build"]'
+        with Chrome(tmp_path / "chrome-driver", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": DRIVER_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            # S2 — 대화상자가 저절로 뜬다
+            c.open(
+                base + "&admin=1&driver=s2#/store/app",
+                # 문서가 바뀌는 순간엔 요소가 아직 없다 — null 이면 예외가 아니라 «아직» 이어야 한다
+                ready_js="(document.getElementById('confirm-n-dialog') || {}).open === true",
+            )
+            steps = c.eval(STEPPER_JS)
+            assert [s[0] for s in steps] == [f"S{i}" for i in range(9)], steps
+            assert [s[1] for s in steps] == ["done", "done", "human"] + ["todo"] * 6, steps
+            row_state = c.eval(_q(build_row, ".getAttribute('data-state')"))
+            assert row_state == "stale", row_state  # 사람 단계는 황토
+            head = c.eval(_q(build_row + " > summary", ".textContent"))
+            assert "waiting for the typed build number 181" in head, head
+            dlg = c.eval("document.getElementById('confirm-n-dialog').innerText")
+            assert "Confirm build number for 1.0.1" in dlg and "181" in dlg, dlg
+            disabled = _q(CONFIRM_GO, ".disabled")
+            assert c.eval(disabled) is True
+            _type_driver_n(c, "180")
+            assert c.eval(disabled) is True, "a wrong N keeps Confirm closed"
+            assert c.eval(_q("#confirm-n-dialog [data-driver-n-state]", ".textContent")) == "≠ 181"
+            _type_driver_n(c, "181")
+            assert c.eval(disabled) is False
+            assert c.eval(_q(CONFIRM_GO, ".textContent")) == "Confirm 181 and continue"
+            c.eval(_q(CONFIRM_GO, ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'confirm')")
+            calls = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "confirm"]
+            assert calls[-1][1] == {"build_name": "1.0.1", "build_number": "181"}, calls
+            _wait(c, "document.getElementById('confirm-n-dialog').open === false")
+            # 같은 회차에 다시 저절로 뜨지 않는다 — 버튼이 다시 연다
+            c.eval("document.dispatchEvent(new Event('visibilitychange'))")
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is False
+            c.eval(_q(build_row + " [data-driver-confirm-open]", ".click()"))
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is True
+            assert c.eval(disabled) is True, "the typed N is spent after a confirm"
+            c.eval(_q("#confirm-n-dialog [data-confirm-n-cancel]", ".click()"))
+            # GitHub 카드(항목 25)
+            gh = c.eval(_q('#store details.srow[data-row="source"] [data-github]', ".textContent"))
+            assert "main · last 5" in gh and "9e1c4d2" in gh and "feat(x): change 5" in gh, gh
+            assert "prod/1.0.0-180" in gh and "latest" in gh, gh
+            assert "PR list: next (needs the GH token)" in gh, gh
+            n_sha = c.eval("document.querySelectorAll('#store table.gh td.sha').length")
+            assert n_sha == 5, n_sha
+            # 예행 — rehearsal 본문만; mode=upload 버튼은 없다
+            c.eval(_q(build_row + " [data-upload-rehearsal]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'upload')")
+            up = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "upload"]
+            assert up[-1][1] == {
+                "mode": "rehearsal",
+                "build_name": "1.0.1",
+                "confirm_build_number": "181",
+            }, up
+            texts = c.eval(
+                "[...document.querySelectorAll('#store button')].map(b => b.textContent.trim())"
+            )
+            assert not [t for t in texts if re.fullmatch(r"upload", t, re.I)], texts
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+
+            # 도는 중 S5 — 앞 ✓, 지금 ▶ 파랑, 뒤 ·, Abort 열림
+            c.open(
+                base + "&admin=1&driver=running#/store/app",
+                ready_js=_q(build_row + ' [data-driver-stage="S5"]') + " !== null",
+            )
+            steps = c.eval(STEPPER_JS)
+            assert [s[1] for s in steps] == ["done"] * 5 + ["current"] + ["todo"] * 3, steps
+            assert [s[2] for s in steps] == ["✓"] * 5 + ["▶"] + ["·"] * 3, steps
+            assert c.eval(_q(build_row, ".getAttribute('data-state')")) == "running"
+            head = c.eval(_q(build_row + " > summary", ".textContent"))
+            assert "stage S5 scenario QA" in head and "started by pcs" in head, head
+            assert c.eval(_q(build_row + " [data-driver-abort]", ".disabled")) is False
+            assert c.eval(_q(build_row + " [data-driver-retry]")) is None
+            assert c.eval(_q(build_row + " [data-driver-start]")) is None
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is False
+            c.eval(_q(build_row + " [data-driver-abort]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'abort')")
+            ab = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "abort"]
+            assert ab[-1][1] == {"build_name": "1.0.1"}, ab
+
+            # exit 3 — 보라 «result unknown», Retry 없음, Start 도 닫힘
+            c.open(
+                base + "&admin=1&driver=exit3#/store/app",
+                ready_js=_q(build_row + ' [data-driver-exit="3"]') + " !== null",
+            )
+            steps = c.eval(STEPPER_JS)
+            assert steps[7][1] == "unknown" and steps[7][2] == "?", steps
+            head = c.eval(_q(build_row + " > summary", ".textContent"))
+            assert "result unknown — do not resubmit" in head, head
+            assert c.eval(_q(build_row + " [data-driver-retry]")) is None
+            assert c.eval(_q(build_row + " .drv-head", ".className")) == "drv-head lost"
+            assert c.eval(_q(build_row + " [data-driver-start-go]", ".disabled")) is True
+            reason = c.eval(_q(build_row + " [data-driver-reason]", ".textContent"))
+            assert "result unknown" in reason, reason
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 한국어
+            c.eval("document.getElementById('lang-btn').click()")
+            ko = c.eval(_q(build_row, ".textContent"))
+            assert "시나리오 QA" in ko and "결과 모름" in ko, ko[:600]
+            assert "예행 (업로드 없음)" in ko, ko[:600]
+            assert "undefined" not in ko and "NaN" not in ko
+            assert c.page_errors() == []
+    finally:
+        srv.close()

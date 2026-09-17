@@ -57,7 +57,30 @@ Your script can report progress by printing markers at the start of a line:
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::fail::flaky_test    # optional: names something that failed (a step, a test, a file)
+::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
 ```
+
+### Progress inside a step
+
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` reports progress **inside the
+current step** — a 40-minute chunk loop, a parallel set of child processes, a device-lock wait.
+The line is ignored unless it fits the grammar: `done` and `total` are integers with
+`total ≥ 1` and `0 ≤ done ≤ total`, `unit` is the one thing the line is about (`chunk/android`,
+`test`, `lock devices`; up to 120 characters, control characters removed), `state` is one of
+`run · ok · fail · skip · env · review · blocked · wait`, and `note` is optional free text (up to
+200 characters). Print only a denominator the script actually knows — if you do not know it, do
+not print it: the queue falls back to declared steps, then to time, and says so. A new
+`::rcm::step::` clears it; the line before the first step counts too.
+
+In `progress` (queue rows and `GET /jobs/<id>`) the last line is `sub`
+(`{done, total, unit, state, note, at}`, `null` when the step printed none) and `units[]` keeps the
+**last** state per distinct unit in the order they were first seen, so a grid of chunks or
+children draws itself. A step is limited to 500 distinct units: past that `done/total` still
+counts but no cells are added and `units_truncated` is `true`. The web queue prefers `sub` for
+the bar (`60% · 41/68 · inquiry_photo/android`), shows `now: <unit> · <state>[ · <note>]` in the
+progress line, and draws the unit grid under the step list when there are at least two units.
+These are added keys; `schema_version` stays 1. Judges must never parse this marker — it is display
+only.
 
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.
@@ -134,6 +157,196 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
   path. Extra env for the script: `RCM_REF`; `RCM_BASE_SHA` is the pinned commit, `RCM_DIRTY=0`.
 - A preset with `source_modes = ["git_ref"]` rejects tree uploads (400), and `--ref` on a tree
   preset is a usage error.
+
+## Release profile
+
+A repository can carry a **release profile**: which presets play which release role, which
+secrets the Settings screen asks for, and how the store copy is previewed. It is the contract the
+Store tab reads (`docs/release-contract.md`); rcm itself computes no build number and releases
+nothing. A repository without a profile has no Store tab and everything else works as before.
+
+The profile is a sub-table right after its `[[repos]]` entry (TOML puts `[repos.app.release]`
+inside the **last** `[[repos]]` element, so keep the two together):
+
+```toml
+[[repos]]
+name = "app"
+url  = "git@github.com:org/app.git"
+
+[repos.app.release]
+default_branch       = "main"                    # default "main"
+tag                  = "prod/{version}-{build}"  # default; must contain {version} and {build}
+build_number_policy  = "auto"                    # "auto" (default) | "manual"
+plan_max_age_minutes = 30                        # default 30; integer > 0
+driver               = "scripts/release/product_release.sh"   # optional; relative to the repository
+secrets_dir_env      = "APP_SECRETS"             # required when secrets are listed; ^[A-Z][A-Z0-9_]*$
+
+[repos.app.release.presets]                      # values are [[presets]] names
+plan   = "release-plan"                          # required
+upload = "release-upload"                        # required
+review = "release-review"                        # required
+gate   = "gate-smoke"                            # optional
+qa     = "scenario-qa"                           # optional
+dev    = "deploy-dev"                            # optional
+
+[[repos.app.release.secrets]]                    # zero or more — names and shapes, never values
+name     = "AuthKey.p8"                          # file name or env name; unique in the profile
+kind     = "file"                                # "value" (default) | "file" | "dir"
+optional = false                                 # default false
+verify   = "asc"                                 # "asc" | "play" | "github" | "keystore" | "none" (default)
+max_kb   = 64                                    # kind = "file" only; default 512
+
+[[repos.app.release.secrets]]
+name  = "review_information"
+kind  = "dir"
+files = ["demo_user.txt", "demo_password.txt"]   # kind = "dir" only: file names that must exist inside
+
+[repos.app.release.listing]                      # optional
+preview       = ["python3", "scripts/release/store_listing.py", "preview"]
+diff          = ["python3", "scripts/release/store_listing.py", "diff", "--live"]
+validate      = ["python3", "scripts/release/store_listing.py", "validate", "--build-name", "{version}", "--version-code", "{build}"]
+screenshots   = ["store/screenshots/**/*.png"]
+release_notes = "store/release_notes/{version}/*.txt"
+```
+
+Loading the file checks **shape**: unknown keys anywhere under `release` are an error, `tag`
+must contain both placeholders, `build_number_policy`, `kind` and `verify` take only the values
+above, `files` is only valid for `kind = "dir"` and `max_kb` only for `kind = "file"`, `driver`
+is a relative path, and every error names the section and key
+(`[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review, gate, qa,
+dev)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
+degrades the Store tab without stopping the server.
+
+`rcm check --config server.toml` prints one row per profile, `release <repo>`:
+
+| verdict | when |
+|---|---|
+| `FAIL` | a required role (`plan`, `upload`, `review`) is empty or names a preset that is not in `[[presets]]` |
+| `FAIL` | the `plan` preset lacks the `build_name` input; `upload` lacks `build_name confirm_build_number mode platform`; `review` lacks `build_name confirm_build_number mode platform play_managed_publishing listing phased` |
+| `FAIL` | the `upload` preset's `mode` input defaults to `upload`, or the `review` preset's `mode` defaults to `submit` — the irreversible mode is never the default |
+| `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
+| `warn` | an optional role (`gate`, `qa`, `dev`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+
+The detail lists each role with its preset, the driver when one is set, and the number of secrets:
+`ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke
+· driver=scripts/release/product_release.sh · 2 secret(s)`. The row does not open the repository,
+so it cannot say whether `driver` exists there.
+
+Writing all of this by hand is not the intended path. The package ships **connect skills** —
+`rcm-store-connect` (required tier), `rcm-gate-connect`, `rcm-qa-connect`, `rcm-release-driver`
+and the `rcm-connect` orchestrator — that ask a few questions inside the project and write the
+profile block, the presets and script skeletons. `rcm skills list` prints one line per skill;
+`rcm skills install --into <project>` copies every skill into `<project>/.claude/skills/<name>/`
+and prints one line per file: `written`, `kept` (identical already) or `skipped` (the project's
+copy differs — the command exits 1 and leaves it alone; `--force` overwrites). Nothing outside
+`.claude/skills/` is touched.
+
+### Secrets on the server
+
+The values the profile names are entered once, in the Store tab's Settings screen (or with
+`curl`), and live as files under **`<config dir>/secrets/<repo>/`** — the directory next to the
+loaded `server.toml`, mode `0700`, one file per secret, mode `0600`; a `kind = "dir"` secret is a
+sub-folder holding its `files`. Nothing is kept in the database or the browser. Every write goes
+to a temporary file first and is renamed into place, so a half-written secret is never visible,
+and a new value forgets the old value's verification.
+
+What a job gets: when its preset's `repo` has a profile and the folder exists, the worker sets
+`$<secrets_dir_env>` (`APP_SECRETS=/…/secrets/app` above) in the job environment and nothing
+else — the scripts read the folder the way they already read a local one. The job's stdout is
+masked: every `kind = "value"` secret of 8 or more characters is replaced by `****` before the
+log is written, for local lanes and for logs a remote worker uploads alike (a value split across
+two upload batches is not caught; the runner flushes whole lines, so that is rare).
+
+The API never returns a value. Each item is `{name, kind, optional, verify, present, size,
+fingerprint, verified_at, verify_error, verify_detail}` — `fingerprint` is the first four
+characters plus `…` for a value, the first eight hex digits of the file's SHA-256 for a file, and
+`n/m files` for a dir (which also lists `files[]` with `present` per file).
+
+| route | token | what |
+|---|---|---|
+| `GET /api/repos` | read rule | every `[[repos]]` entry with `release: true/false` and, for profiles, `setup: {required, present, verified, complete}` |
+| `GET /api/repos/<repo>` | read rule | the profile without values, `setup` (plus `missing[]`), the mirror (`path`, `fetched_at`, `age_seconds`) and `branches` (`main` = `default_branch`, `dev`, `main_in_dev`) read from the mirror only |
+| `POST /api/repos/<repo>/fetch` | client token | updates the mirror (all heads and tags, pruned, the same lock the lanes use); 502 `fetch_failed` with the last 60 characters of git's stderr, 504 on timeout |
+| `GET /api/repos/<repo>/secrets` | any client token | `{dir_env, items[]}` as above — never a value |
+| `PUT /api/repos/<repo>/secrets/<name>` | admin | the body is the secret: `Content-Type: text/plain` for a value (one non-empty line, trailing newline dropped), `application/octet-stream` for a file (at most `max_kb`), and `…/secrets/<name>/<file>` for a dir's file. 400 wrong kind or file name, 404 a name that is not in the profile, 413 too large |
+| `DELETE /api/repos/<repo>/secrets/<name>` | admin | only for `optional = true` secrets (409 otherwise) — a required one is replaced, never removed |
+| `POST /api/repos/<repo>/verify` | client token | `{"names": [...]}` or `{}` for every secret with `verify != "none"`; runs the read-only check and records `verified_at` / `verify_error` in `<config dir>/secrets/<repo>/.verify.json`; returns the secrets document |
+
+`verify` kinds in this build: `github` (`GET https://api.github.com/user` with the token, 5 s,
+reports `login: <name>`), `keystore` (`keytool -list -keystore <file>`, plus `-storepass` from a
+value secret named `KEYSTORE_PASSWORD` when the profile has one; `keytool missing` when the
+build machine has none), and `none`. `asc` and `play` answer `not implemented in this build` as a *detail*, not an error (a JWT signature this build cannot produce must not lock the gate; the page shows the sentence) —
+the page shows the cross and the text rather than a green mark nobody earned.
+
+**The setup gate.** `setup.complete` is true when every non-optional secret is present and either
+has `verify = "none"` or was verified without error. The release write routes below answer
+`409 setup_incomplete` (with the `setup` counts in the body) until then; the routes above and the
+four read-only release routes never do, so the Settings screen always works. An unknown
+repository, or one without a profile, is 404 on all of them; worker tokens are refused everywhere
+here.
+
+### Release routes and the driver
+
+Everything under `/api/repos/<repo>/release/…` turns the profile into actions. Jobs go through
+the normal `POST /jobs` path (`git_ref` source, same validation, joiners, priority and pools);
+rcm sends exactly the inputs of the contract's §2 table and every other input the preset declares
+keeps its default. Writes take a Bearer token only.
+
+| route | token | what |
+|---|---|---|
+| `GET …/release` | read rule, always | `setup`, then the latest job per role: `plan` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `build_name`, `doc`), `review.plan` (same shape) and `review.result`, `upload` (`job_id`, `state`, `doc`), and `jobs[]` — the role presets' jobs, newest first, at most 50, each with `id preset role state sha ref started_at finished_at artifacts[]`. "Latest per role" is the newest job of that preset whose artifact bundle contains the role's file (`plan.json`, `upload.json`, `review-plan.json` / `review.json`, matched by base name anywhere in the bundle); `doc` is that file parsed (256 KB at most; unreadable or invalid gives `doc: null` plus `doc_error`). `measured_at` is the document's own or, failing that, the job's end; `stale` is `age_seconds > plan_max_age_minutes × 60`. Computed from the database and the artifact store only |
+| `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
+| `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
+| `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
+| `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `default_branch` made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` |
+| `GET …/release/listing/file?path=<rel>` | read rule, always | the bytes of one screenshot — the path must match a `listing.screenshots` glob and be an image type; 5 MB at most (413) |
+| `POST …/release/listing/validate` | client token | `{build_name, build?}` → runs `listing.validate` with `{version}` and `{build}` substituted → `{ok, lines[], exit}` (plus `error` when it failed to run) |
+| `GET …/release/github` | read rule, always | from the mirror only: `log[]` (`sha subject author at` × 5 of `default_branch`), `tags[]` (`name at` × 5 newest whose name starts with the `tag` pattern's literal prefix, e.g. `prod/`), and `prs: null` — next: pull requests via the `GH_TOKEN` secret |
+| `POST …/release/start` | admin | `{build_name, android_track?, dry_run?}` → runs the driver (below) → `202 {release_id, pid, build_name}` |
+| `POST …/release/confirm` | admin | `{build_name, build_number}` → re-runs the driver with `--confirm-build-number N` **only if** the last `plan: N = <n>` line of that build's log equals what was typed |
+| `POST …/release/abort` · `POST …/release/retry` | admin | `{build_name?}` (default: the latest run's) → runs the driver with `--abort` / `--retry` |
+| `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error}`. `{configured: false}` when the profile has no `driver` |
+
+**The 409 codes.** These are the server's own rules, kept whatever the page sends (`code` and
+`error_code` carry the same value):
+
+| code | when |
+|---|---|
+| `setup_incomplete` | any write route while the setup gate is closed; the body carries `setup` |
+| `role_not_configured` | the role's preset is empty or names a preset that is not in `[[presets]]` |
+| `unsafe_preset` | the role's preset declares an input named `automatic_release`, `rollout` or `release_status` — rcm never sends those, and refuses to run a preset that would take them (`inputs[]` names them) |
+| `review_plan_required` | `mode = submit` without a **succeeded** review plan (`review-plan.json`) for the same `build_name` |
+| `review_plan_stale` | that review plan is older than `plan_max_age_minutes` (`age_seconds` in the body) |
+| `review_plan_blocked` | that review plan's `plan_verdict` is not `ok` |
+| `managed_publishing_unconfirmed` | `mode = submit` with `platform` `both` or `android` and `play_managed_publishing` other than `confirmed-on` **in this body** — the value is never remembered |
+| `plan_required` | `mode = upload` / `mode = submit` without a succeeded plan (`plan.json`) for the same `build_name` |
+| `plan_stale` | that plan is older than `plan_max_age_minutes` |
+| `build_number_mismatch` | `confirm_build_number` (review submit, upload) or `build_number` (driver confirm) is empty or does not equal the plan's `n` as an integer — the server compares, it never fills the number in |
+| `mirror_missing` | the driver or listing needs a checkout and the mirror has no `default_branch` yet — `POST …/fetch` first |
+| `no_driver` | a driver route on a profile without `driver` |
+| `driver_missing` | `driver` is not an executable file in the checkout |
+| `release_running` | a driver process for this repository is still alive (`release_id` in the body) |
+| `release_required` | `confirm` / `abort` / `retry` with no earlier run for that build |
+
+`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`).
+
+**The driver.** `POST …/release/start` checks out `default_branch` from the mirror into
+`<data_dir>/driver/<repo>/checkout` and runs `<driver> --build-name X [--android-track T]
+[--dry-run]` there as a **detached** process (its own session, so a server restart does not kill
+it). Its environment is the job environment for that repository — `PATH`, `HOME`, `LANG` and
+`$<secrets_dir_env>` — plus `RCM_SERVER` (this server's URL) and `RCM_TOKEN`, a **client token
+minted for that run** (`store-driver:<repo>:<id>`, not admin) and revoked as soon as the run ends,
+so it never outlives the process; the value goes to the child's environment and nowhere else.
+stdout and stderr append to `<data_dir>/driver/<repo>/<build_name>.log`, so `confirm`, `abort`
+and `retry` continue the same log. Every run is a row in the database's `releases` table
+(`id repo build_name kind started_by started_at pid log_path exit_code finished_at confirmed_n
+confirmed_by android_track dry_run token_name`); `rcm gc` and the retention sweeps leave that
+table alone. The exit code is written by a wrapper to `<data_dir>/driver/<repo>/<id>.exit`, so
+after a restart the next `GET …/release/driver` (or the next start) closes runs whose process is
+gone, records the code (or `null` when it is unknown) and revokes their tokens. `--status` runs
+with the same environment but without a token — it is read-only by contract. Confirm follows the
+contract: the driver prints `plan: N = <n>` and exits 2, the page shows the number, a person
+types it, and the server forwards it only when the two agree.
 
 ## Getting files back out of a job
 

@@ -311,6 +311,54 @@ def _git_words(argv: list[str]) -> list[str]:
     return argv[i:]
 
 
+#: `git branch` 를 이름 짓는 명령이 아니게 만드는 플래그 — 목록·조회·삭제·업스트림 설정.
+#: 이게 하나라도 있으면 위치 인자는 **거를 대상**(ref·패턴·업스트림)이지 새 이름이 아니다.
+BRANCH_NOT_CREATING = frozenset(
+    {
+        "-l", "--list", "-a", "--all", "-r", "--remotes",
+        "-v", "-vv", "--verbose", "--show-current",
+        "--merged", "--no-merged", "--contains", "--no-contains", "--points-at",
+        "--format", "--sort", "--column", "--no-column", "-i", "--ignore-case", "--omit-empty",
+        "-d", "-D", "--delete", "--edit-description",
+        "-u", "--set-upstream-to", "--unset-upstream",
+    }
+)  # fmt: skip
+
+#: 뒤에 값을 하나 먹는 플래그. 그 값은 위치 인자처럼 보이지만 브랜치 이름이 아니다.
+BRANCH_VALUE_FLAGS = frozenset(
+    {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
+)
+
+#: 새 이름이 **마지막** 위치 인자인 플래그(이름 바꾸기·복사).
+BRANCH_RENAME_FLAGS = frozenset({"-m", "-M", "--move", "-c", "-C", "--copy"})
+
+
+def _branch_positionals(words: list[str]) -> list[str]:
+    """`git branch` 의 위치 인자. 값을 먹는 플래그의 값은 뺀다."""
+    out: list[str] = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+            continue
+        if word.startswith("-"):
+            skip = word in BRANCH_VALUE_FLAGS  # `--sort=key` 는 값이 붙어 있어 건너뛸 게 없다
+            continue
+        out.append(word)
+    return out
+
+
+def _branch_subcommand_name(words: list[str]) -> str | None:
+    """`git branch …` 가 만드는 이름. 목록만 보는 형태는 None(오탐 방지)."""
+    flags = {word.split("=", 1)[0] for word in words if word.startswith("-")}
+    positionals = _branch_positionals(words)
+    if flags & BRANCH_RENAME_FLAGS:
+        return positionals[-1] if positionals else None
+    if flags & BRANCH_NOT_CREATING:
+        return None
+    return positionals[0] if positionals else None
+
+
 def _new_branch_name(words: list[str]) -> str | None:
     """브랜치를 **만드는** 명령이면 그 이름. `git branch` 로 목록만 보는 것은 None."""
     if not words:
@@ -323,15 +371,7 @@ def _new_branch_name(words: list[str]) -> str | None:
     if sub == "switch":
         return _option_value(words, ("-c", "-C", "--create", "--force-create"))
     if sub == "branch":
-        rest = [w for w in words[1:] if not w.startswith("-")]
-        flags = [w for w in words[1:] if w.startswith("-")]
-        if any(f in ("-m", "-M", "--move", "-c", "-C", "--copy") for f in flags):
-            return rest[-1] if rest else None
-        if any(
-            f in ("-d", "-D", "--delete", "-l", "--list", "-a", "-r", "-v", "-vv") for f in flags
-        ):
-            return None
-        return rest[0] if rest else None
+        return _branch_subcommand_name(words[1:])
     return None
 
 

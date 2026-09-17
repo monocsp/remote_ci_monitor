@@ -211,7 +211,12 @@ default = "full"
 ::rcm::step::analyze       # 새 단계 시작(앞 단계는 끝난다)
 ::rcm::step-end::ok        # 선택: "ok" 또는 "fail"
 ::rcm::summary::all green  # 선택: 큐에 보이는 한 줄 결과
+::rcm::progress::41/68::inquiry_photo/android::run   # 선택: 지금 단계 안의 세부 진행
 ```
+
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` 는 긴 단계 — 청크 루프 · 병렬
+묶음 · 락 대기 — 를 위한 것이다. 스크립트가 **아는** 분모만 찍는다. 큐는 그 값으로 막대를 그리고
+본 단위들을 격자로 보여 준다. 자세한 건 [설정 문서](docs/configuration.md#progress-inside-a-step)에.
 
 세션은 `--pool` 로 다른 풀에 보낼 수 있지만, 프리셋의 `pools` 에 적힌 풀만 고를 수 있다. 설정으로
 할 수 있는 나머지는 — 푸시된 ref 를 받는 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 원격 워커 · 알림 ·
@@ -229,6 +234,48 @@ default = "full"
 갱신은 이벤트 스트림으로 온다. 끊기면 10초마다 폴링하고, 30초 동안 응답이 없으면 **Lost
 connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하지 않는다. `#/jobs/N` 은 작업 하나로
 바로 간다.
+
+`server.toml` 의 저장소에 `[repos.<name>.release]` 프로파일이 있으면 머리에 **Queue | Store**
+전환이 생기고 `#/store/<name>` 이 스토어 탭을 연다. 프로파일이 없으면 탭도 없다. 스토어 앞에는
+**설정 관문**이 있다: 필수 비밀이 전부 있고 검증되기 전에는 설정 화면이다 — 빨간 띠
+`n of m secrets set · k verified`, 프로파일이 선언한 비밀마다 한 행(파일은 끌어다 놓고, 값은
+password 칸에 한 번 입력), **Verify all**, 비활성 **Enter Store** — 그리고 브라우저는 값을 보지
+않는다. `present` · 지문 · 검증 시각뿐이다. 다 갖춰지면 스토어 화면이 접히는 행 넷을 보인다 —
+Setup, Source(미러 나이, `main` / `dev`, `main` 이 `dev` 에 있는지, **Fetch remote**),
+Build · upload, Store — 괜찮으면 초록으로 접히고, 손봐야 하면 빨강으로 펼쳐지고, 이 빌드에 말할
+것이 없으면 회색이다. 그 아래 심사 패널은 App Store 절과 Google Play 절을 같은 그룹 순서(스크린샷 ·
+`현재/상한` 을 세는 문구 · 릴리스 노트 · 빌드/릴리스 · 심사 정보, 그 스토어에 없는 필드는 `—`)로
+나란히 놓고, **Submit for review** 는 초록 심사 플랜 · 다시 타이핑한 빌드 번호 · Google Play 를
+골랐으면 이번 제출의 관리형 게시 체크가 있어야 열린다 — 어떤 상태에도 Release · Publish · Rollout
+버튼은 없고, `unsafe_release_type` 판정은 닫을 수 없는 빨간 띠가 된다. 프로파일에 드라이버가 있으면
+Build · upload 행에 회차의 스테퍼 S0~S8 이 드라이버의 상태 줄에서 읽혀 붙는다(도는 것이 없으면 버전 ·
+Android 트랙 · dry-run 의 Start 폼, 도는 중엔 **Abort**, exit 1 뒤엔 **Retry same version**, exit 3 은
+«결과 모름 — 다시 올리지 않음», exit 4 는 스토어 드리프트). S2 대화상자는 빌드 번호를 다시 타이핑해야
+`confirm` 을 보내고, **Rehearsal (no upload)** 버튼은 업로드 프리셋을 예행으로만 돌린다 — 진짜 업로드는
+드라이버의 S7 이고 업로드 버튼은 없다. Source 행에는 미러의 최근 커밋 다섯 · 태그 · «PR list: next» 가 있다.
+
+### 스토어 탭 — 프로젝트의 릴리스 흐름 연결
+
+큐 화면 옆에 저장소별 **스토어 탭**이 붙는다: fetch · 스토어 현황 · 게이트 · QA · 업로드 · 심사
+제출 — 전부 프로젝트 *자신의* 릴리스 스크립트 위에 얹힌 버튼이다. rcm 은 그 스크립트가 쓴 JSON 을
+그리고 선언된 프리셋을 돌릴 뿐, 빌드번호를 계산하거나 QA 를 판정하거나 승인 뒤 출시하는 일은 하지
+않는다. 프로젝트가 줘야 하는 것은 [docs/release-contract.md](docs/release-contract.md)에 있고, 가장
+빠른 길은 rcm 이 같이 싣는 Claude Code 스킬이다:
+
+```sh
+rcm skills list                                   # 이 rcm 에 실린 스킬
+rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ 로 복사
+# 그 프로젝트에서, Claude Code 안에서:
+/rcm-connect                                      # 프로젝트 · 저장소 이름 · 플랫폼 · 선택 계층을 묻는다
+```
+
+`/rcm-connect` 는 `rcm-store-connect`(필수: 프로파일 블록 · 비밀 목록 · `plan` / `upload` /
+`review` 프리셋과 스크립트 뼈대, 각각 `--selftest`)를 돌리고, 고르면 선택 계층 `rcm-gate-connect` ·
+`rcm-qa-connect` · `rcm-release-driver` 를 이어 돌린다. 스킬은 프로젝트 안에만 쓴다
+(`scripts/rcm/presets.release.toml` · `scripts/rcm/profile.release.toml` · 스크립트 ·
+`docs/rcm-connect.md` 보고서). 검증은 `server.toml` 의 후보 사본에 `rcm check` 를 돌리는 것이고,
+라이브 서버 파일 · 비밀 · 스토어는 건드리지 않는다. 프로파일 키는
+[Configuration](docs/configuration.md#release-profile)에 있다.
 
 ## Exit codes
 
@@ -265,6 +312,7 @@ connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하�
 | 문서 | 내용 |
 |---|---|
 | [사용법 가이드](docs/usage.ko.md) · [English](docs/usage.md) | 첫 작업까지 한 단계씩, 주석 단 화면과 함께 |
+| [Release contract](docs/release-contract.md) | 스토어 탭을 위해 프로젝트가 주는 것: 프로파일 · 역할별 프리셋 · 산출물 파일 · 마커 · 비밀 · 드라이버 · 그것을 만들어 주는 스킬 |
 | [Configuration](docs/configuration.md) | 프리셋 · 입력 · 마커 · 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 풀과 원격 워커 · 알림 · 클라이언트와 워커 파일 |
 | [Operating the build machine](docs/operating.md) | 서비스로 돌리기 · Docker · 업그레이드 · 보안 · 숫자가 틀릴 수 있는 이유 · 실제 머신에서의 수동 점검 |
 | [CHANGELOG.md](CHANGELOG.md) | 사용자에게 보이는 모든 변경, 최신순 |

@@ -6,6 +6,12 @@
     ::rcm::step-end::<ok|fail> 스텝 끝을 명시(선택)
     ::rcm::summary::<한 줄>    결과 요약(선택, 마지막 것)
     ::rcm::fail::<이름>        무엇이 실패했는지 이름으로 지목(선택, M5h)
+    ::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]
+                               현재 스텝 **안**의 세부 진행(선택, `docs/release-contract.md` §3)
+
+`progress` 는 스텝 안의 이야기다 — 새 `::rcm::step::` 이 오면 지워진다. 마지막 마커가 `sub`,
+단위별 마지막 상태가 `units[]`(처음 본 순서, MAX_PROGRESS_UNITS 까지)다. 스크립트는 **아는**
+분모만 찍는다(모르면 안 찍는다). `done > total`·`total < 1`·모르는 state 는 마커가 아니다.
 
 **실패 스텝은 선언된 것만이다**(결정 63). `step-end::fail` 이나 `fail` 마커로 밝힌 스텝만
 `failed_step` 이고, 없으면 `None` 이다 — 종료 코드로 스텝을 고르지 않는다. 되재생·병렬
@@ -27,7 +33,9 @@ from remote_ci_monitor.core.model import (
     WAITING_STATES,
     Job,
     Progress,
+    ProgressUnit,
     Step,
+    SubProgress,
 )
 
 MARKER_PREFIX = "::rcm::"
@@ -36,9 +44,14 @@ KIND_STEP = "step"
 KIND_STEP_END = "step-end"
 KIND_SUMMARY = "summary"
 KIND_FAIL = "fail"
-MARKER_KINDS = (KIND_STEPS, KIND_STEP, KIND_STEP_END, KIND_SUMMARY, KIND_FAIL)
+KIND_PROGRESS = "progress"
+MARKER_KINDS = (KIND_STEPS, KIND_STEP, KIND_STEP_END, KIND_SUMMARY, KIND_FAIL, KIND_PROGRESS)
 MAX_STEP_NAME = 120
 MAX_SUMMARY = 200
+#: `::rcm::progress::` 의 state 어휘. 프로젝트 이름은 없다 — 청크·자식·락 어느 쪽에도 맞는 말만.
+PROGRESS_STATES = ("run", "ok", "fail", "skip", "env", "review", "blocked", "wait")
+#: 한 스텝 안에서 격자에 올리는 **서로 다른** 단위 수. 넘어도 `done/total` 은 계속 센다.
+MAX_PROGRESS_UNITS = 500
 #: 한 잡이 남길 수 있는 **서로 다른** 실패 이름 수. 11,000줄짜리 테스트 출력이 DB 를 채우면 안 된다.
 MAX_FAIL_NAMES = 100
 
@@ -60,6 +73,54 @@ class Marker:
     at: datetime
     kind: str
     value: str
+
+
+@dataclass(frozen=True)
+class ProgressMark:
+    """`::rcm::progress::` 한 줄의 값 — 저장 문자열(`value`)과 서로 오간다."""
+
+    done: int
+    total: int
+    unit: str
+    state: str
+    note: str | None
+
+    @property
+    def value(self) -> str:
+        """저장·발행용 정규형. `parse_progress_value` 가 그대로 되읽는다."""
+        head = f"{self.done}/{self.total}::{self.unit}::{self.state}"
+        return head if self.note is None else f"{head}::{self.note}"
+
+
+def _ascii_int(text: str) -> bool:
+    text = text.strip()
+    return bool(text) and text.isascii() and text.isdigit()
+
+
+def parse_progress_value(value: str) -> ProgressMark | None:
+    """`<done>/<total>::<unit>::<state>[::<note>]` 를 읽는다. 문법이 어긋나면 None(마커가 아니다).
+
+    분모는 스크립트가 아는 것만 온다는 약속이라 검증이 엄하다 — `total ≥ 1`, `0 ≤ done ≤ total`,
+    정수만. 단위 이름은 스텝 이름과 같은 규칙(제어문자 제거 · 120자), note 는 요약과 같은 규칙.
+    """
+    parts = value.split("::", 3)
+    if len(parts) < 3:
+        return None
+    ratio, unit, state = parts[0].strip(), parts[1], parts[2].strip()
+    note = parts[3] if len(parts) == 4 else None
+    done_s, slash, total_s = ratio.partition("/")
+    # ASCII 숫자만 — `str.isdigit()` 은 `²` 같은 유니코드 숫자도 참인데 `int()` 는 그걸 못 읽는다
+    if not slash or not _ascii_int(done_s) or not _ascii_int(total_s):
+        return None
+    done, total = int(done_s), int(total_s)
+    if total < 1 or done > total:
+        return None
+    unit = clean_name(unit)[:MAX_STEP_NAME]
+    if not unit or state not in PROGRESS_STATES:
+        return None
+    if note is not None:
+        note = clean_name(note)[:MAX_SUMMARY] or None
+    return ProgressMark(done=done, total=total, unit=unit, state=state, note=note)
 
 
 def parse_marker(line: str) -> tuple[str, str] | None:
@@ -85,6 +146,12 @@ def parse_marker(line: str) -> tuple[str, str] | None:
     elif kind == KIND_STEP_END:
         if value not in ("ok", "fail"):
             return None
+    elif kind == KIND_PROGRESS:
+        # 정규형으로 저장한다 — 공백·제어문자·길이를 여기서 한 번 정리하면 되읽기는 늘 성공한다
+        mark = parse_progress_value(value)
+        if mark is None:
+            return None
+        value = mark.value
     else:
         value = value[:MAX_SUMMARY]
     return kind, value
@@ -119,6 +186,12 @@ def progress_from_markers(
     fail_names: list[str] = []  # 잡이 찍은 순서 그대로 — 서로 다른 이름만
     fail_seen: set[str] = set()
     fail_truncated = False
+    # 현재 스텝 안의 세부 진행. 새 스텝이 열리면 통째로 비운다 — 스텝 안의 이야기라서다.
+    # 첫 스텝 마커 전에 온 progress 도 그대로 센다(스텝 없는 스크립트도 세부 진행은 찍을 수 있다).
+    sub: SubProgress | None = None
+    units: list[ProgressUnit] = []
+    unit_pos: dict[str, int] = {}
+    units_truncated = False
     for m in markers:
         if m.kind == KIND_STEPS:
             try:
@@ -131,6 +204,7 @@ def progress_from_markers(
                 if steps[-1].ok is None:
                     steps[-1].ok = True
             steps.append(_Open(index=len(steps) + 1, name=m.value, started=m.at))
+            sub, units, unit_pos, units_truncated = None, [], {}, False
         elif m.kind == KIND_STEP_END:
             if steps and steps[-1].ended is None:
                 steps[-1].ended = m.at
@@ -147,6 +221,27 @@ def progress_from_markers(
                 continue
             fail_seen.add(m.value)
             fail_names.append(m.value)
+        elif m.kind == KIND_PROGRESS:
+            mark = parse_progress_value(m.value)
+            if mark is None:  # 저장소에 정규형으로만 들어가지만, 깨진 행이 진행을 막지는 않는다
+                continue
+            sub = SubProgress(
+                done=mark.done,
+                total=mark.total,
+                unit=mark.unit,
+                state=mark.state,
+                note=mark.note,
+                at=m.at,
+            )
+            cell = ProgressUnit(unit=mark.unit, state=mark.state, note=mark.note, at=m.at)
+            pos = unit_pos.get(mark.unit)
+            if pos is not None:
+                units[pos] = cell  # 자리는 처음 본 순서, 값은 마지막 상태
+            elif len(units) >= MAX_PROGRESS_UNITS:
+                units_truncated = True  # 격자에는 못 올려도 `sub` 의 done/total 은 위에서 갱신됐다
+            else:
+                unit_pos[mark.unit] = len(units)
+                units.append(cell)
     current: _Open | None = None
     if steps and steps[-1].ended is None:
         if finished_at is not None:
@@ -216,6 +311,9 @@ def progress_from_markers(
         summary=summary,
         last_output_at=last_output_at,
         started_at=started_at,
+        sub=sub,
+        units=tuple(units),
+        units_truncated=units_truncated,
     )
 
 

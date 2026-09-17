@@ -17,16 +17,20 @@ M0 에서 `/api/status` 는 요청 때마다 DB 에서 다시 만든다(이벤�
 from __future__ import annotations
 
 import base64
+import contextlib
+import fnmatch
 import hashlib
 import hmac
 import importlib.resources
 import json
+import mimetypes
 import re
 import shutil
 import signal
 import socket
 import socketserver
 import sqlite3
+import subprocess
 import sys
 import tarfile
 import threading
@@ -49,6 +53,8 @@ from remote_ci_monitor.clientwheel import (
 )
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
+    RELEASE_ROLES,
+    RepoConfig,
     ServerConfig,
     admission_warnings,
     advertise_enabled,
@@ -117,12 +123,41 @@ from remote_ci_monitor.events import (
     KIND_SERVER,
     EventBus,
 )
-from remote_ci_monitor.gitops import STDERR_TAIL_LINES, GitError, GitTimeout, resolve_ref
+from remote_ci_monitor.gitops import (
+    STDERR_TAIL_LINES,
+    GitError,
+    GitTimeout,
+    branch_log,
+    checkout,
+    ensure_mirror,
+    fetch_all,
+    is_ancestor,
+    ref_sha,
+    resolve_ref,
+    tags_matching,
+)
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
 from remote_ci_monitor.materialize import blob_path, stale_blob_keys
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
+from remote_ci_monitor.release_driver import (
+    KIND_CONFIRM,
+    KIND_START,
+    DriverRunner,
+    base_env,
+    log_tail,
+    pid_alive,
+    plan_n,
+)
+from remote_ci_monitor.release_secrets import SecretError, SecretStore, masker, store_for
+from remote_ci_monitor.release_state import (
+    numbers_match,
+    plan_number,
+    read_bundle_member,
+    release_view,
+)
+from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
 from remote_ci_monitor.store import (
     DB_VERSION,
@@ -154,6 +189,31 @@ _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
 _ID_IN_PATH = re.compile(r"/(\d+)")
+#: 스토어 탭(릴리스 프로파일) — `/api/repos/<repo>[/fetch|/secrets[/<secret>[/<file>]]|/verify]`.
+#: 이름 조각은 `/` 없는 아무 글자 — 맞는지는 설정의 이름과 **글자 그대로** 비교해 정한다.
+_REPO_RE = re.compile(r"^/api/repos/([^/]+)(?:/(fetch|verify|secrets)(?:/([^/]+)(?:/([^/]+))?)?)?$")
+#: `PUT …/secrets/<name>` 본문 상한 — 프로파일의 `max_kb` 는 그 안에서 다시 잰다
+MAX_SECRET_BODY = 4 * 1024 * 1024
+#: 스토어 탭 API 계약 v2 — `/api/repos/<repo>/release[/<action>[/validate|/file]]`.
+_RELEASE_RE = re.compile(
+    r"^/api/repos/([^/]+)/release"
+    r"(?:/(plan|review|upload|listing|github|driver|start|confirm|abort|retry)(?:/(validate|file))?)?$"
+)
+#: 계약 §2 — 역할별로 rcm 이 보내는 입력. 프리셋이 그 밖에 선언한 입력은 기본값 그대로다.
+RELEASE_MODES = {"upload": ("rehearsal", "upload"), "review": ("plan", "submit")}
+RELEASE_PLATFORMS = ("both", "ios", "android")
+MANAGED_PUBLISHING_VALUES = ("not-checked", "confirmed-on")
+MANAGED_PUBLISHING_CONFIRMED = "confirmed-on"
+LISTING_VALUES = ("notes-only", "full")
+PHASED_VALUES = ("1", "0")
+#: 서버가 **절대** 보내지 않는 입력 이름 — 프리셋이 선언만 해도 거절한다(409 `unsafe_preset`).
+UNSAFE_INPUT_NAMES = frozenset({"automatic_release", "rollout", "release_status"})
+_BUILD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+_TRACK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+LISTING_TIMEOUT = 20.0
+LISTING_MAX_BYTES = 64 * 1024
+LISTING_FILE_MAX_BYTES = 5 * 1024 * 1024
+LISTING_MAX_SCREENSHOTS = 200
 
 
 def log_line(msg: str) -> None:
@@ -239,6 +299,15 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
     """`store.finish` 에 바로 넣을 요약 세 값. 결정 37 — 문장은 outcome 표가 만든다."""
     text, code, clean = outcome.summary(code, **args)
     return {"summary": text, "summary_code": code, "summary_args": clean}
+
+
+def _redact_url(url: str) -> str:
+    """`https://user:token@host/…` 의 userinfo 를 지운다 — 저장소 URL 은 응답에 실리므로."""
+    scheme, sep, rest = url.partition("://")
+    if not sep or "@" not in rest.split("/", 1)[0]:
+        return url
+    host_part, slash, path = rest.partition("/")
+    return f"{scheme}://***@{host_part.rsplit('@', 1)[1]}{slash}{path}"
 
 
 def _mb(n: int) -> str:
@@ -351,6 +420,10 @@ class App(RemoteWorkersMixin):
         self._wheel_error: str | None = None
         self._wheel_done = False
         self._wheel_lock = threading.Lock()
+        # 릴리스 드라이버(계약 v2) — 실행 대장은 DB, 프로세스는 이 객체가 안다.
+        self.driver = DriverRunner(store, now_fn=now_fn, log=self.log)
+        self._checkout_locks: dict[str, threading.Lock] = {}
+        self._checkout_guard = threading.Lock()
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
@@ -776,6 +849,925 @@ class App(RemoteWorkersMixin):
         if not t.admin:
             raise ApiError(403, "admin token required")
         return t
+
+    # ── 스토어 탭 — 저장소 · 비밀 · 설정 게이트 (API 계약 v1) ─────────────────
+
+    def _release_repo(self, name: str) -> tuple[RepoConfig, SecretStore]:
+        """이름이 **글자 그대로** 맞는 `[[repos]]` 이고 프로파일이 있어야 한다. 아니면 404 —
+        프로파일 없는 저장소는 스토어 탭에 없는 저장소다."""
+        repo = self.config.repo(name)
+        if repo is None or repo.release is None:
+            raise ApiError(404, "no such repository with a release profile")
+        store = store_for(self.config, repo.name)
+        assert store is not None
+        store.now_fn = self.now_fn
+        return repo, store
+
+    def _mirror(self, repo: RepoConfig) -> Path:
+        return self.config.data_dir / "mirrors" / repo.name
+
+    def repos_list(self) -> dict[str, Any]:
+        """`GET /api/repos` — 프로파일 유무와 설정 게이트의 셈만. 비밀 이름도 없다."""
+        out = []
+        for repo in self.config.repos:
+            row: dict[str, Any] = {"name": repo.name, "release": repo.release is not None}
+            if repo.release is not None:
+                store = store_for(self.config, repo.name)
+                assert store is not None
+                row["setup"] = store.setup(with_missing=False)
+            out.append(row)
+        return {"repos": out}
+
+    def repo_view(self, name: str) -> dict[str, Any]:
+        """`GET /api/repos/<name>` — 프로파일(값 없이) · 게이트 · 미러 · 브랜치. 원격을 부르지
+        않는다: 미러가 없으면 `null` 이지 오류가 아니다."""
+        repo, store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        listing = None
+        if profile.listing is not None:
+            listing = {
+                "preview": list(profile.listing.preview),
+                "diff": list(profile.listing.diff),
+                "validate": list(profile.listing.validate),
+                "screenshots": list(profile.listing.screenshots),
+                "release_notes": profile.listing.release_notes,
+            }
+        return {
+            "name": repo.name,
+            "url": _redact_url(repo.url),
+            "profile": {
+                "default_branch": profile.default_branch,
+                "tag": profile.tag,
+                "build_number_policy": profile.build_number_policy,
+                "plan_max_age_minutes": profile.plan_max_age_minutes,
+                "driver": profile.driver,
+                "presets": {role: profile.preset_for(role) for role in RELEASE_ROLES},
+                "listing": listing,
+                "secrets_dir_env": profile.secrets_dir_env,
+            },
+            "setup": store.setup(),
+            **self._mirror_doc(repo),
+        }
+
+    def _mirror_doc(self, repo: RepoConfig) -> dict[str, Any]:
+        """`mirror` + `branches` — 미러만 읽는다. `fetched_at` 은 마지막 fetch 가 쓴
+        `FETCH_HEAD` 의 mtime 이다."""
+        profile = repo.release
+        assert profile is not None
+        mirror = self._mirror(repo)
+        fetched_at: str | None = None
+        age: int | None = None
+        try:
+            mtime = (mirror / "FETCH_HEAD").stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None:
+            at = datetime.fromtimestamp(mtime, UTC)
+            fetched_at = at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            age = max(0, int((self.now_fn() - at).total_seconds()))
+        main = ref_sha(mirror, profile.default_branch)
+        dev = ref_sha(mirror, "dev")
+        return {
+            "mirror": {"path": str(mirror), "fetched_at": fetched_at, "age_seconds": age},
+            "branches": {
+                "default_branch": profile.default_branch,
+                "main": main,
+                "dev": dev,
+                "main_in_dev": is_ancestor(mirror, main, dev) if main and dev else None,
+            },
+        }
+
+    def repo_fetch(self, name: str) -> dict[str, Any]:
+        """`POST /api/repos/<name>/fetch` — 미러를 만들고(없으면) 전체 fetch. 잡의 fetch 와 같은
+        락. git 의 stderr 는 서버 로그에, 응답에는 마지막 60자만."""
+        repo, _store = self._release_repo(name)
+        mirror = self._mirror(repo)
+        timeout = self.config.server.git_fetch_timeout_seconds
+        try:
+            ensure_mirror(mirror, repo.url, timeout=timeout)
+            fetch_all(mirror, repo.url, timeout=timeout)
+        except GitTimeout as e:
+            raise ApiError(
+                504,
+                f"fetch of repo '{repo.name}' timed out after {timeout}s",
+                error_code="fetch_timeout",
+                code="fetch_timeout",
+            ) from e
+        except GitError as e:
+            tail = _safe((e.stderr or "").strip())[-60:]
+            for line in (e.stderr or "").strip().splitlines()[-STDERR_TAIL_LINES:]:
+                self.log(f"fetch repo '{repo.name}': [git] {line}")
+            raise ApiError(
+                502, f"fetch failed: {tail or e}", error_code="fetch_failed", code="fetch_failed"
+            ) from e
+        return self._mirror_doc(repo)
+
+    def secrets_view(self, name: str) -> dict[str, Any]:
+        _repo, store = self._release_repo(name)
+        return store.view()
+
+    def secret_put(
+        self, name: str, secret: str, file_name: str | None, data: bytes, content_type: str
+    ) -> dict[str, Any]:
+        _repo, store = self._release_repo(name)
+        try:
+            return store.put(secret, data, content_type=content_type, file_name=file_name)
+        except SecretError as e:
+            raise ApiError(e.status, e.message) from None
+
+    def secret_delete(self, name: str, secret: str) -> dict[str, Any]:
+        _repo, store = self._release_repo(name)
+        try:
+            return store.delete(secret)
+        except SecretError as e:
+            raise ApiError(e.status, e.message) from None
+
+    def secrets_verify(self, name: str, body: Any) -> dict[str, Any]:
+        """`POST /api/repos/<name>/verify` — `{"names": [...]}` 또는 빈 본문(verify != none 전부).
+        없는 비밀은 건드리지 않고 `verify_error` 로 말한다. 결과는 `.verify.json` 에 남는다."""
+        _repo, store = self._release_repo(name)
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        names = body.get("names")
+        if names is None:
+            wanted = [s for s in store.profile.secrets if s.verify != "none"]
+        else:
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                raise ApiError(400, "names must be a list of strings")
+            wanted = []
+            for n in names:
+                try:
+                    wanted.append(store.secret(n))
+                except SecretError as e:
+                    raise ApiError(e.status, e.message) from None
+
+        def sibling(secret_name: str) -> str | None:
+            try:
+                sec = store.secret(secret_name)
+            except SecretError:
+                return None
+            if sec.kind != "value":
+                return None
+            path = store.value_path(sec.name)
+            if path is None:
+                return None
+            try:
+                return path.read_text(encoding="utf-8").strip() or None
+            except (OSError, UnicodeDecodeError):
+                return None
+
+        for sec in wanted:
+            if sec.verify == "none":
+                continue
+            path = store.value_path(sec.name)
+            try:
+                if path is None:
+                    store.record_verify(sec.name, "not present")
+                    continue
+                result = run_verify(sec, path, sibling_value=sibling)
+                store.record_verify(sec.name, result.error, detail=result.detail)
+            except SecretError as e:
+                raise ApiError(e.status, e.message) from None
+        return store.view()
+
+    # ── 스토어 탭 — 릴리스 라우트 (API 계약 v2) ──────────────────────────────
+
+    def _release_gate(self, name: str) -> tuple[RepoConfig, SecretStore]:
+        """쓰기 라우트의 설정 게이트 — 필수 비밀이 전부 있고 검증됐을 때만
+        (409 `setup_incomplete`)."""
+        repo, store = self._release_repo(name)
+        setup = store.setup()
+        if not setup["complete"]:
+            raise ApiError(
+                409,
+                "setup incomplete — enter and verify the required secrets first",
+                code="setup_incomplete",
+                error_code="setup_incomplete",
+                setup=setup,
+            )
+        return repo, store
+
+    def _role_preset(self, repo: RepoConfig, role: str) -> Preset:
+        """역할의 프리셋. 비어 있거나 설정에 없으면 409 — 페이지는 흐려질 뿐 서버는 산다."""
+        profile = repo.release
+        assert profile is not None
+        name = profile.preset_for(role)
+        preset = self.config.preset(name) if name else None
+        if preset is None:
+            raise ApiError(
+                409,
+                f"profile.presets.{role} is empty or names a preset that does not exist",
+                code="role_not_configured",
+                error_code="role_not_configured",
+                role=role,
+            )
+        unsafe = sorted(UNSAFE_INPUT_NAMES & {spec.name for spec in preset.inputs})
+        if unsafe:
+            raise ApiError(
+                409,
+                f"preset '{preset.name}' declares input(s) rcm never sends: {', '.join(unsafe)}",
+                code="unsafe_preset",
+                error_code="unsafe_preset",
+                inputs=unsafe,
+            )
+        return preset
+
+    def _repo_env(self, store: SecretStore) -> dict[str, str]:
+        """저장소의 잡이 받는 env — `{<secrets_dir_env>: <폴더>}`(폴더가 있을 때만)."""
+        env: dict[str, str] = {}
+        if store.profile.secrets_dir_env and store.root is not None and store.root.is_dir():
+            env[store.profile.secrets_dir_env] = str(store.root)
+        return env
+
+    @staticmethod
+    def _body_str(body: dict[str, Any], key: str, *, default: str | None = None) -> str | None:
+        value = body.get(key, default)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, str | int):
+            raise ApiError(400, f"{key} must be a string")
+        return str(value)
+
+    @staticmethod
+    def _choice(body: dict[str, Any], key: str, allowed: tuple[str, ...], default: str) -> str:
+        value = body.get(key, default)
+        if not isinstance(value, str) or value not in allowed:
+            raise ApiError(400, f"{key} must be one of: {', '.join(allowed)}")
+        return value
+
+    def _build_name(self, body: dict[str, Any]) -> str:
+        name = self._body_str(body, "build_name")
+        if not name or not _BUILD_NAME_RE.match(name):
+            raise ApiError(400, "build_name is required: letters, digits, . _ + - (64 max)")
+        return name
+
+    def _release_ref(self, body: dict[str, Any], repo: RepoConfig) -> str:
+        profile = repo.release
+        assert profile is not None
+        ref = self._body_str(body, "ref", default=profile.default_branch)
+        return ref or profile.default_branch
+
+    def _read_artifact(self, job_id: int, member: str) -> bytes:
+        return read_bundle_member(self.artifacts_dir(job_id) / "bundle.tar", member)
+
+    def _release_view(self, repo: RepoConfig) -> dict[str, Any]:
+        profile = repo.release
+        assert profile is not None
+        presets = {role: profile.preset_for(role) for role in RELEASE_ROLES}
+        jobs = self.store.list_jobs_by_preset([n for n in presets.values() if n], 500)
+
+        def names_of(job_id: int) -> list[Any]:
+            row = self.store.get_bundle(job_id)
+            if row is None or row["state"] != art.READY:
+                return []
+            return list(row.get("files") or [])
+
+        return release_view(
+            jobs,
+            presets,
+            names_of,
+            self._read_artifact,
+            now=self.now_fn(),
+            max_age_minutes=profile.plan_max_age_minutes,
+        )
+
+    def release_state(self, name: str) -> dict[str, Any]:
+        """`GET …/release` — 게이트와 무관하게 언제나. 저장소에서만 계산한다(네트워크 없음)."""
+        repo, store = self._release_repo(name)
+        return {"setup": store.setup(), **self._release_view(repo)}
+
+    def _release_submit(
+        self,
+        repo: RepoConfig,
+        preset: Preset,
+        inputs: dict[str, Any],
+        ref: str,
+        token: TokenInfo,
+        host: str | None,
+    ) -> tuple[int, dict[str, Any]]:
+        """정규 제출 경로(`submit`)로 — 같은 검증 · 합류 · 우선순위 · 풀. 응답은 202 로 통일."""
+        body = {
+            "preset": preset.name,
+            "inputs": inputs,
+            "source": {"mode": MODE_GIT_REF, "ref": ref},
+            "requester_label": f"store:{token.name}",
+        }
+        _status, doc = self.submit(body, token, host)
+        return 202, {
+            "job_id": doc["job_id"],
+            "joined": doc.get("joined", False),
+            "state": doc.get("state"),
+            "sha": doc.get("sha"),
+        }
+
+    def _check_plan(
+        self, view: dict[str, Any], build_name: str, typed: Any, *, prefix: str = "plan"
+    ) -> None:
+        """되돌릴 수 없는 모드의 문 — 같은 build_name 의 성공한 계획이 있고, 오래되지 않았고,
+        사람이 친 번호가 그 계획의 `n` 과 같아야 한다. 번호는 절대 대신 채우지 않는다."""
+        plan = view.get("plan")
+        doc = plan.get("doc") if plan else None
+        if plan is None or not isinstance(doc, dict) or plan.get("build_name") != build_name:
+            raise ApiError(
+                409,
+                f"no plan for build {build_name} — run the plan first",
+                code=f"{prefix}_required",
+                error_code=f"{prefix}_required",
+            )
+        if plan.get("state") != "succeeded":
+            raise ApiError(
+                409,
+                f"the latest plan (job {plan['job_id']}) is {plan.get('state')}, not succeeded",
+                code=f"{prefix}_required",
+                error_code=f"{prefix}_required",
+            )
+        if plan.get("stale"):
+            raise ApiError(
+                409,
+                f"the plan (job {plan['job_id']}) is older than plan_max_age_minutes — plan again",
+                code=f"{prefix}_stale",
+                error_code=f"{prefix}_stale",
+                age_seconds=plan.get("age_seconds"),
+            )
+        if not numbers_match(typed, plan_number(plan)):
+            raise ApiError(
+                409,
+                "confirm_build_number does not match the plan — type the number the plan shows",
+                code="build_number_mismatch",
+                error_code="build_number_mismatch",
+            )
+
+    def release_plan(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/plan` — `presets.plan` 에 `build_name` 만 보낸다."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        preset = self._role_preset(repo, "plan")
+        build_name = self._build_name(body)
+        ref = self._release_ref(body, repo)
+        return self._release_submit(repo, preset, {"build_name": build_name}, ref, token, host)
+
+    def release_review(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/review` — mode=plan 은 아무 클라이언트 토큰, mode=submit 은 admin 이고
+        같은 build 의 성공한 · 안 오래된 · `plan_verdict == ok` 인 심사 계획, 안드로이드면 관리형
+        게시 확인, 그리고 계획의 `n` 과 같은 번호가 있어야 한다. UI 는 이 문을 우회할 수 없다."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        preset = self._role_preset(repo, "review")
+        build_name = self._build_name(body)
+        ref = self._release_ref(body, repo)
+        mode = self._choice(body, "mode", RELEASE_MODES["review"], "plan")
+        inputs: dict[str, Any] = {"build_name": build_name, "mode": mode}
+        for key, allowed in (
+            ("platform", RELEASE_PLATFORMS),
+            ("listing", LISTING_VALUES),
+            ("phased", PHASED_VALUES),
+        ):
+            if key in body:
+                inputs[key] = self._choice(body, key, allowed, allowed[0])
+        managed = self._choice(
+            body, "play_managed_publishing", MANAGED_PUBLISHING_VALUES, "not-checked"
+        )
+        inputs["play_managed_publishing"] = managed  # 이번 제출에서 친 값만 — 기억하지 않는다
+        typed = self._body_str(body, "confirm_build_number", default="") or ""
+        if mode == "submit":
+            if not token.admin:
+                raise ApiError(
+                    403, "submitting for review needs an admin token", code="admin_required"
+                )
+            if not typed.strip():
+                raise ApiError(
+                    409,
+                    "confirm_build_number is required to submit",
+                    code="build_number_mismatch",
+                    error_code="build_number_mismatch",
+                )
+            view = self._release_view(repo)
+            rplan = view["review"]["plan"]
+            doc = rplan.get("doc") if rplan else None
+            if rplan is None or not isinstance(doc, dict) or rplan.get("build_name") != build_name:
+                raise ApiError(
+                    409,
+                    f"no review plan for build {build_name} — run review in plan mode first",
+                    code="review_plan_required",
+                    error_code="review_plan_required",
+                )
+            if rplan.get("state") != "succeeded":
+                raise ApiError(
+                    409,
+                    f"the review plan (job {rplan['job_id']}) is {rplan.get('state')}",
+                    code="review_plan_required",
+                    error_code="review_plan_required",
+                )
+            if rplan.get("stale"):
+                raise ApiError(
+                    409,
+                    "the review plan is older than plan_max_age_minutes — plan again",
+                    code="review_plan_stale",
+                    error_code="review_plan_stale",
+                    age_seconds=rplan.get("age_seconds"),
+                )
+            if doc.get("plan_verdict") != "ok":
+                raise ApiError(
+                    409,
+                    f"the review plan says {doc.get('plan_verdict')!r}, not ok",
+                    code="review_plan_blocked",
+                    error_code="review_plan_blocked",
+                )
+            platform = inputs.get("platform", "both")
+            if platform in ("both", "android") and managed != MANAGED_PUBLISHING_CONFIRMED:
+                raise ApiError(
+                    409,
+                    "android review needs play_managed_publishing = confirmed-on, ticked by a "
+                    "person for this submission",
+                    code="managed_publishing_unconfirmed",
+                    error_code="managed_publishing_unconfirmed",
+                )
+            self._check_plan(view, build_name, typed)
+            inputs["confirm_build_number"] = typed.strip()
+        else:
+            inputs["confirm_build_number"] = ""
+        return self._release_submit(repo, preset, inputs, ref, token, host)
+
+    def release_upload(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/upload` — mode=rehearsal 은 클라이언트 토큰, mode=upload 는 admin 이고
+        계획의 `n` 과 같은 번호(409 `plan_required` · `plan_stale` · `build_number_mismatch`)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        preset = self._role_preset(repo, "upload")
+        build_name = self._build_name(body)
+        ref = self._release_ref(body, repo)
+        mode = self._choice(body, "mode", RELEASE_MODES["upload"], "rehearsal")
+        inputs: dict[str, Any] = {"build_name": build_name, "mode": mode}
+        if "platform" in body:
+            inputs["platform"] = self._choice(body, "platform", RELEASE_PLATFORMS, "both")
+        track = self._body_str(body, "android_track")
+        if track is not None:
+            if not _TRACK_RE.match(track):
+                raise ApiError(400, "android_track must be a plain track name")
+            inputs["android_track"] = track
+        typed = self._body_str(body, "confirm_build_number", default="") or ""
+        if mode == "upload":
+            if not token.admin:
+                raise ApiError(403, "uploading needs an admin token", code="admin_required")
+            if not typed.strip():
+                raise ApiError(
+                    409,
+                    "confirm_build_number is required to upload",
+                    code="build_number_mismatch",
+                    error_code="build_number_mismatch",
+                )
+            self._check_plan(self._release_view(repo), build_name, typed)
+            inputs["confirm_build_number"] = typed.strip()
+        else:
+            inputs["confirm_build_number"] = typed.strip()
+        return self._release_submit(repo, preset, inputs, ref, token, host)
+
+    # ── 문안 미리보기 · GitHub · 드라이버 — default_branch 체크아웃 위에서 ──
+
+    def _checkout_lock(self, key: str) -> threading.Lock:
+        with self._checkout_guard:
+            return self._checkout_locks.setdefault(key, threading.Lock())
+
+    def _branch_checkout(self, repo: RepoConfig, area: str) -> tuple[Path, str]:
+        """`<data_dir>/<area>/<repo>/checkout` — 미러의 default_branch 를 detached 로. 브랜치 sha 가
+        바뀌었을 때만 다시 만든다. 미러가 없거나 브랜치가 없으면 409 `mirror_missing`."""
+        profile = repo.release
+        assert profile is not None
+        mirror = self._mirror(repo)
+        sha = ref_sha(mirror, profile.default_branch)
+        if sha is None:
+            raise ApiError(
+                409,
+                f"the mirror has no branch '{profile.default_branch}' — fetch the repository first",
+                code="mirror_missing",
+                error_code="mirror_missing",
+            )
+        root = self.config.data_dir / area / repo.name
+        workspace = root / "checkout"
+        stamp = root / "checkout.sha"
+        with self._checkout_lock(f"{area}/{repo.name}"):
+            try:
+                current = stamp.read_text(encoding="ascii").strip()
+            except OSError:
+                current = ""
+            if current == sha and (workspace / ".git").exists():
+                return workspace, sha
+            shutil.rmtree(workspace, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                stamp.unlink()
+            try:
+                checkout(
+                    mirror, workspace, sha, timeout=self.config.server.git_fetch_timeout_seconds
+                )
+            except GitError as e:
+                shutil.rmtree(workspace, ignore_errors=True)
+                raise ApiError(
+                    502,
+                    f"checkout of {profile.default_branch} failed: {_safe(str(e))[-60:]}",
+                    code="checkout_failed",
+                    error_code="checkout_failed",
+                ) from e
+            root.mkdir(parents=True, exist_ok=True)
+            stamp.write_text(sha, encoding="ascii")
+        return workspace, sha
+
+    def _run_listing(
+        self, argv: tuple[str, ...] | list[str], cwd: Path, env: dict[str, str]
+    ) -> tuple[list[str], int | None, str | None]:
+        """문안 명령 하나 — 20초 · stdout 64 KB. (줄들, 종료 코드, 오류)."""
+        if not argv:
+            return [], None, None
+        try:
+            proc = subprocess.run(
+                list(argv),
+                cwd=str(cwd),
+                env={**base_env(), **env},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=LISTING_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return [], None, f"{argv[0]} did not finish within {LISTING_TIMEOUT:g}s"
+        except OSError as e:
+            return [], None, f"{argv[0]} could not start: {type(e).__name__}"
+        out = proc.stdout[:LISTING_MAX_BYTES].decode("utf-8", errors="replace").splitlines()
+        error = None
+        if proc.returncode != 0:
+            tail = proc.stderr[-2048:].decode("utf-8", errors="replace").strip().splitlines()
+            error = f"{argv[0]} exited {proc.returncode}" + (f": {tail[-1]}" if tail else "")
+        return out, proc.returncode, error
+
+    def _screenshots(self, workspace: Path, globs: tuple[str, ...]) -> list[Path]:
+        found: list[Path] = []
+        for pattern in globs:
+            if pattern.startswith("/") or ".." in Path(pattern).parts:
+                continue
+            for p in sorted(workspace.glob(pattern)):
+                if p.is_file() and p not in found and ".git" not in p.relative_to(workspace).parts:
+                    found.append(p)
+                if len(found) >= LISTING_MAX_SCREENSHOTS:
+                    return found
+        return found
+
+    def release_listing(self, name: str, build_name: str | None = None) -> dict[str, Any]:
+        """`GET …/release/listing` — 프로파일의 preview · diff 를 체크아웃에서 돌리고 문안 파일과
+        스크린샷을 센다. 설정에 listing 이 없으면 `{"configured": false}`."""
+        repo, store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        listing = profile.listing
+        if listing is None:
+            return {"configured": False}
+        errors: list[str] = []
+        try:
+            workspace, sha = self._branch_checkout(repo, "listing")
+        except ApiError as e:
+            return {
+                "configured": True,
+                "sha": None,
+                "preview": [],
+                "diff": [],
+                "release_notes": None,
+                "screenshots": [],
+                "errors": [e.message],
+            }
+        env = self._repo_env(store)
+        preview, _rc, err = self._run_listing(listing.preview, workspace, env)
+        if err:
+            errors.append(err)
+        diff, _rc, err = self._run_listing(listing.diff, workspace, env)
+        if err:
+            errors.append(err)
+        notes = None
+        if listing.release_notes:
+            pattern = listing.release_notes.replace("{version}", build_name or "*")
+            candidates = [p for p in sorted(workspace.glob(pattern)) if p.is_file()]
+            if candidates:
+                rel = candidates[0].relative_to(workspace).as_posix()
+                try:
+                    text = (
+                        candidates[0]
+                        .read_bytes()[:LISTING_MAX_BYTES]
+                        .decode("utf-8", errors="replace")
+                    )
+                    notes = {"path": rel, "text": text}
+                except OSError as e:
+                    errors.append(f"release notes {rel}: {type(e).__name__}")
+        shots = [
+            {
+                "path": p.relative_to(workspace).as_posix(),
+                "bytes": p.stat().st_size,
+                "width": None,
+                "height": None,
+            }
+            for p in self._screenshots(workspace, listing.screenshots)
+        ]
+        return {
+            "configured": True,
+            "sha": sha,
+            "preview": preview,
+            "diff": diff,
+            "release_notes": notes,
+            "screenshots": shots,
+            "errors": errors,
+        }
+
+    def release_listing_file(self, name: str, rel: str | None) -> tuple[bytes, str]:
+        """`GET …/release/listing/file?path=` — 스크린샷 글롭에 맞는 파일만, 이미지 타입만,
+        5 MB 까지."""
+        repo, _store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        if profile.listing is None or not profile.listing.screenshots:
+            raise ApiError(404, "no screenshots in the listing profile")
+        if not rel or rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
+            raise ApiError(400, "path must be a relative path inside the checkout")
+        workspace, _sha = self._branch_checkout(repo, "listing")
+        if not any(fnmatch.fnmatchcase(rel, g) for g in profile.listing.screenshots):
+            raise ApiError(404, "path does not match a screenshots glob")
+        path = workspace / rel
+        ctype, _enc = mimetypes.guess_type(rel)
+        if not ctype or not ctype.startswith("image/"):
+            raise ApiError(404, "not an image")
+        try:
+            size = path.stat().st_size
+            if not path.is_file():
+                raise ApiError(404, "no such file")
+            if size > LISTING_FILE_MAX_BYTES:
+                raise ApiError(413, f"file larger than {LISTING_FILE_MAX_BYTES} bytes")
+            return path.read_bytes(), ctype
+        except OSError:
+            raise ApiError(404, "no such file") from None
+
+    def release_listing_validate(self, name: str, body: Any) -> dict[str, Any]:
+        """`POST …/release/listing/validate` — `{version}` · `{build}` 를 본문 값으로 바꿔
+        돌린다."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, store = self._release_gate(name)
+        profile = repo.release
+        assert profile is not None
+        if profile.listing is None or not profile.listing.validate:
+            raise ApiError(409, "no listing.validate command in the profile", code="not_configured")
+        build_name = self._build_name(body)
+        build = self._body_str(body, "build", default="") or ""
+        if build and not build.strip().isdigit():
+            raise ApiError(400, "build must be a build number")
+        workspace, _sha = self._branch_checkout(repo, "listing")
+        argv = [
+            a.replace("{version}", build_name).replace("{build}", build.strip())
+            for a in profile.listing.validate
+        ]
+        lines, rc, err = self._run_listing(argv, workspace, self._repo_env(store))
+        out: dict[str, Any] = {"ok": rc == 0, "lines": lines, "exit": rc}
+        if err:
+            out["error"] = err
+        return out
+
+    def release_github(self, name: str) -> dict[str, Any]:
+        """`GET …/release/github` — 미러에서만: default_branch 의 최근 5 커밋과 태그 접두사의
+        최근 5 태그. `prs` 는 이 빌드에서 null(다음: GH_TOKEN 비밀로)."""
+        repo, _store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        mirror = self._mirror(repo)
+        prefix = profile.tag.split("{", 1)[0]
+        return {
+            "log": branch_log(mirror, profile.default_branch, 5),
+            "tags": tags_matching(mirror, prefix, 5),
+            "prs": None,
+        }
+
+    # ── 드라이버 (계약 「Driver」) ────────────────────────────────────────────
+
+    def _driver_repo(self, name: str) -> tuple[RepoConfig, SecretStore, str]:
+        repo, store = self._release_gate(name)
+        profile = repo.release
+        assert profile is not None
+        if not profile.driver:
+            raise ApiError(
+                409, "no driver in the release profile", code="no_driver", error_code="no_driver"
+            )
+        return repo, store, profile.driver
+
+    def _driver_checkout(self, repo: RepoConfig, driver: str) -> tuple[Path, Path]:
+        workspace, _sha = self._branch_checkout(repo, "driver")
+        path = workspace / driver
+        if not path.is_file() or not path.stat().st_mode & 0o111:
+            raise ApiError(
+                409,
+                f"driver '{driver}' is not an executable file in the checkout",
+                code="driver_missing",
+                error_code="driver_missing",
+            )
+        return workspace, path
+
+    def _no_running_release(self, repo: RepoConfig) -> None:
+        row = self.driver.running(repo.name)
+        if row is not None:
+            raise ApiError(
+                409,
+                f"a release is already running (#{row['id']} {row['build_name']}, "
+                f"pid {row['pid']})",
+                code="release_running",
+                error_code="release_running",
+                release_id=row["id"],
+            )
+
+    def _spawn_driver(
+        self,
+        repo: RepoConfig,
+        store: SecretStore,
+        driver: str,
+        token: TokenInfo,
+        host: str | None,
+        **kw: Any,
+    ) -> dict[str, Any]:
+        self._no_running_release(repo)
+        workspace, path = self._driver_checkout(repo, driver)
+        try:
+            row = self.driver.spawn(
+                data_dir=self.config.data_dir,
+                repo=repo.name,
+                driver=path,
+                checkout=workspace,
+                started_by=token.name,
+                env=self._repo_env(store),
+                server_url=self.base_url(host),
+                **kw,
+            )
+        except OSError as e:
+            raise ApiError(
+                502, f"driver could not start: {type(e).__name__}", code="driver_failed"
+            ) from e
+        return {"release_id": row["id"], "pid": row["pid"], "build_name": row["build_name"]}
+
+    def release_start(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, store, driver = self._driver_repo(name)
+        build_name = self._build_name(body)
+        track = self._body_str(body, "android_track")
+        if track is not None and not _TRACK_RE.match(track):
+            raise ApiError(400, "android_track must be a plain track name")
+        dry_run = body.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            raise ApiError(400, "dry_run must be true or false")
+        return self._spawn_driver(
+            repo,
+            store,
+            driver,
+            token,
+            host,
+            build_name=build_name,
+            kind=KIND_START,
+            android_track=track,
+            dry_run=dry_run,
+        )
+
+    def release_confirm(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> dict[str, Any]:
+        """`POST …/release/confirm` — 로그의 마지막 `plan: N = <n>` 과 사람이 친 번호가 같을 때만
+        `--confirm-build-number N` 으로 다시 돌린다. 서버는 번호를 전달만 한다."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, store, driver = self._driver_repo(name)
+        build_name = self._build_name(body)
+        typed = self._body_str(body, "build_number", default="") or ""
+        last = self.store.latest_release(repo.name, build_name)
+        if last is None:
+            raise ApiError(
+                409,
+                f"no driver run for build {build_name} — start it first",
+                code="release_required",
+                error_code="release_required",
+            )
+        shown = plan_n(Path(last["log_path"]))
+        if not numbers_match(typed, shown):
+            raise ApiError(
+                409,
+                "build_number does not match the driver's plan: N line",
+                code="build_number_mismatch",
+                error_code="build_number_mismatch",
+            )
+        return self._spawn_driver(
+            repo,
+            store,
+            driver,
+            token,
+            host,
+            build_name=build_name,
+            kind=KIND_CONFIRM,
+            android_track=last["android_track"],
+            dry_run=last["dry_run"],
+            confirm_n=int(str(typed).strip()),
+        )
+
+    def release_abort_or_retry(
+        self, name: str, body: Any, token: TokenInfo, host: str | None, *, kind: str
+    ) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, store, driver = self._driver_repo(name)
+        if "build_name" in body:
+            build_name = self._build_name(body)
+        else:
+            last = self.store.latest_release(repo.name)
+            if last is None:
+                raise ApiError(
+                    409,
+                    "no driver run to act on — start one first",
+                    code="release_required",
+                    error_code="release_required",
+                )
+            build_name = last["build_name"]
+        prev = self.store.latest_release(repo.name, build_name)
+        return self._spawn_driver(
+            repo,
+            store,
+            driver,
+            token,
+            host,
+            build_name=build_name,
+            kind=kind,
+            android_track=prev["android_track"] if prev else None,
+            dry_run=bool(prev["dry_run"]) if prev else False,
+        )
+
+    def release_driver_view(self, name: str) -> dict[str, Any]:
+        """`GET …/release/driver` — 대장의 최근 실행 · 로그 끝 · `plan: N` · `--status`
+        (10초 동기)."""
+        repo, store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        if not profile.driver:
+            return {"configured": False}
+        self.driver.reconcile(repo.name, data_dir=self.config.data_dir)
+        row = self.store.latest_release(repo.name)
+        mask = masker(store.mask_values())
+        doc: dict[str, Any] = {
+            "configured": True,
+            "running": False,
+            "release_id": None,
+            "kind": None,
+            "build_name": None,
+            "started_at": None,
+            "started_by": None,
+            "pid": None,
+            "exit_code": None,
+            "confirmed_n": None,
+            "log_tail": [],
+            "plan_n": None,
+            "status": None,
+            "status_error": None,
+        }
+        if row is not None:
+            log_file = Path(row["log_path"])
+            doc.update(
+                {
+                    "running": row["finished_at"] is None and pid_alive(row["pid"]),
+                    "release_id": row["id"],
+                    "kind": row["kind"],
+                    "build_name": row["build_name"],
+                    "started_at": iso(row["started_at"]),
+                    "started_by": row["started_by"],
+                    "pid": row["pid"],
+                    "exit_code": row["exit_code"],
+                    "confirmed_n": row["confirmed_n"],
+                    "log_tail": log_tail(log_file, mask),
+                    "plan_n": plan_n(log_file),
+                }
+            )
+        try:
+            workspace, path = self._driver_checkout(repo, profile.driver)
+        except ApiError as e:
+            doc["status_error"] = e.message
+            return doc
+        lines, err = self.driver.status(path, workspace, self._repo_env(store))
+        doc["status"] = lines
+        doc["status_error"] = err
+        return doc
+
+    def mask_for_preset(self, preset_name: str) -> tuple[bytes, ...]:
+        """원격 워커가 올리는 로그도 같은 규칙으로 지운다 — 값은 서버의 비밀 폴더에 있다."""
+        preset = self.config.preset(preset_name)
+        if preset is None or not preset.repo:
+            return ()
+        store = store_for(self.config, preset.repo)
+        return store.mask_values() if store is not None else ()
 
     # ── 잡 산출물 (M5e) ─────────────────────────────────────────────────────
 
@@ -2480,6 +3472,20 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/worker/"):
             self._worker_route(method, path)
             return
+        if path == "/api/repos":
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._no_worker_token()
+            self._send_json(200, self.app.repos_list())
+            return
+        m = _RELEASE_RE.match(path)
+        if m:
+            self._release_route(method, m.group(1), m.group(2), m.group(3), query)
+            return
+        m = _REPO_RE.match(path)
+        if m:
+            self._repo_route(method, m.group(1), m.group(2), m.group(3), m.group(4))
+            return
         if path == "/gc":
             self._only(method, "POST")
             self.app.require_admin(self._token())
@@ -2584,6 +3590,115 @@ class Handler(BaseHTTPRequestHandler):
             self._client_wheel(raw_path.removeprefix("/client").removeprefix("/"))
             return
         raise ApiError(404, "not found", hint=not_found_hint(path))
+
+    def _repo_route(
+        self, method: str, name: str, sub: str | None, secret: str | None, file_name: str | None
+    ) -> None:
+        """`/api/repos/<name>/…` — 읽기는 읽기 규칙(비밀 목록은 토큰 필수), fetch·verify 는
+        클라이언트 토큰, 비밀 쓰기·삭제는 admin(Bearer 만 — CSRF)."""
+        if sub is None:
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._no_worker_token()
+            self._send_json(200, self.app.repo_view(name))
+            return
+        if sub == "fetch":
+            if secret is not None:
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self._only(method, "POST")
+            self.app.require_client_token(self._token())
+            self._json_body()  # 본문은 없다 — 읽어서 연결을 깨끗이 둔다
+            self._send_json(200, self.app.repo_fetch(name))
+            return
+        if sub == "verify":
+            if secret is not None:
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self._only(method, "POST")
+            self.app.require_client_token(self._token())
+            self._send_json(200, self.app.secrets_verify(name, self._json_body()))
+            return
+        # secrets
+        if secret is None:
+            self._only(method, "GET")
+            # 비밀의 **이름과 지문**도 공개 읽기가 아니다 — 아무 토큰이나, 그러나 토큰은 있어야
+            self.app.require_client_token(self._require_read_token())
+            self._send_json(200, self.app.secrets_view(name))
+            return
+        if method == "PUT":
+            self.app.require_admin(self._token())
+            length = self._content_length()
+            if length > MAX_SECRET_BODY:
+                raise ApiError(413, f"secret larger than {MAX_SECRET_BODY} bytes")
+            data = self.rfile.read(length) if length else b""
+            ctype = self.headers.get("Content-Type") or ""
+            self._send_json(200, self.app.secret_put(name, secret, file_name, data, ctype))
+            return
+        if method == "DELETE":
+            if file_name is not None:
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self.app.require_admin(self._token())
+            self._send_json(200, self.app.secret_delete(name, secret))
+            return
+        raise ApiError(405, "method not allowed", headers={"Allow": "PUT, DELETE"})
+
+    def _release_route(
+        self, method: str, name: str, action: str | None, sub: str | None, query: dict[str, Any]
+    ) -> None:
+        """`/api/repos/<name>/release/…`(계약 v2) — GET 은 읽기 규칙(워커 토큰 거부), plan ·
+        review · upload · listing/validate 는 클라이언트 토큰(되돌릴 수 없는 모드는 App 이 admin
+        을 본다), 드라이버의 start · confirm · abort · retry 는 admin. 쓰기는 Bearer 만(CSRF)."""
+        host = self.headers.get("Host")
+        is_get = action is None or action in ("github", "driver")
+        if is_get or (action == "listing" and sub != "validate"):
+            if sub is not None and not (action == "listing" and sub == "file"):
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._no_worker_token()
+            if action is None:
+                self._send_json(200, self.app.release_state(name))
+            elif action == "github":
+                self._send_json(200, self.app.release_github(name))
+            elif action == "driver":
+                self._send_json(200, self.app.release_driver_view(name))
+            elif sub == "file":
+                data, ctype = self.app.release_listing_file(name, (query.get("path") or [None])[0])
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(data)
+            else:
+                build = (query.get("build_name") or [None])[0]
+                self._send_json(200, self.app.release_listing(name, build))
+            return
+        if sub is not None and not (action == "listing" and sub == "validate"):
+            raise ApiError(404, "not found", hint=not_found_hint(self.path))
+        self._only(method, "POST")
+        if action == "listing":
+            self.app.require_client_token(self._token())
+            self._send_json(200, self.app.release_listing_validate(name, self._json_body()))
+            return
+        if action in ("plan", "review", "upload"):
+            t = self.app.require_client_token(self._token())
+            fn = {
+                "plan": self.app.release_plan,
+                "review": self.app.release_review,
+                "upload": self.app.release_upload,
+            }[action]
+            status, body = fn(name, self._json_body(), t, host)
+            self._send_json(status, body)
+            return
+        t = self.app.require_admin(self._token())
+        body = self._json_body()
+        if action == "start":
+            self._send_json(202, self.app.release_start(name, body, t, host))
+        elif action == "confirm":
+            self._send_json(202, self.app.release_confirm(name, body, t, host))
+        else:
+            self._send_json(202, self.app.release_abort_or_retry(name, body, t, host, kind=action))
 
     def _artifact_archive(self, job_id: int) -> None:
         """묶음을 흘려보낸다. 전송 슬롯은 **기다리지 않는다** — 일반 슬롯을 쥔 채 기다리면

@@ -273,6 +273,101 @@ def fetch_ref(
         _fetch(mirror, url, _FULL_REFSPECS, prune=True, timeout=timeout, log=log)
 
 
+def fetch_all(mirror: Path, url: str, *, timeout: float, log: LogFn | None = None) -> None:
+    """미러 전체(heads · tags)를 원격에 맞춘다(`--prune`). 스토어 탭의 「fetch」 버튼이 쓴다 —
+    잡의 `fetch_ref` 와 같은 락 아래라 레인과 겹쳐도 ref 락 충돌이 없다."""
+    with _mirror_lock(mirror):
+        _fetch(mirror, url, _FULL_REFSPECS, prune=True, timeout=timeout, log=log)
+
+
+def _git_query(mirror: Path, argv: list[str], *, timeout: float = 30) -> str | None:
+    """미러 안 읽기 전용 질의. 실패(없는 ref · 미러 없음 · git 없음)는 None — 문구는 안 만든다."""
+    if not (mirror / "HEAD").is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "--git-dir", str(mirror), *argv],
+            env=git_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def ref_sha(mirror: Path, branch: str) -> str | None:
+    """미러의 `refs/heads/<branch>` 가 가리키는 커밋. 없으면 None. 원격을 부르지 않는다."""
+    if not branch or branch.startswith("-"):
+        return None
+    out = _git_query(mirror, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}"])
+    return out.lower() if out and is_full_sha(out) else None
+
+
+def is_ancestor(mirror: Path, ancestor: str, descendant: str) -> bool | None:
+    """`git merge-base --is-ancestor <a> <b>` — 둘 다 40 hex 여야 한다. 답을 못 내면 None."""
+    if not (is_full_sha(ancestor) and is_full_sha(descendant)):
+        return None
+    if not (mirror / "HEAD").is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "--git-dir", str(mirror), "merge-base", "--is-ancestor", ancestor, descendant],
+            env=git_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode == 0:
+        return True
+    return False if proc.returncode == 1 else None
+
+
+def branch_log(mirror: Path, branch: str, limit: int = 5) -> list[dict[str, Any]]:
+    """미러의 `refs/heads/<branch>` 최근 커밋 `limit` 개 — `{sha, subject, author, at}`. 미러가
+    없거나 브랜치가 없으면 빈 목록. 원격을 부르지 않는다."""
+    if not branch or branch.startswith("-") or limit <= 0:
+        return []
+    out = _git_query(
+        mirror,
+        ["log", f"-{int(limit)}", "--format=%H%x1f%s%x1f%an%x1f%cI", f"refs/heads/{branch}", "--"],
+    )
+    rows: list[dict[str, Any]] = []
+    for line in (out or "").splitlines():
+        parts = line.split("\x1f")
+        if len(parts) == 4 and is_full_sha(parts[0]):
+            rows.append(
+                {"sha": parts[0].lower(), "subject": parts[1], "author": parts[2], "at": parts[3]}
+            )
+    return rows
+
+
+def tags_matching(mirror: Path, prefix: str, limit: int = 5) -> list[dict[str, Any]]:
+    """미러의 태그 중 이름이 `prefix` 로 시작하는 것, 새것부터 `limit` 개 — `{name, at}`."""
+    if limit <= 0 or prefix.startswith("-"):
+        return []
+    out = _git_query(
+        mirror,
+        [
+            "for-each-ref",
+            "--sort=-creatordate",
+            f"--count={int(limit)}",
+            "--format=%(refname:short)%1f%(creatordate:iso-strict)",
+            f"refs/tags/{prefix}*" if prefix else "refs/tags/",
+        ],
+    )
+    rows: list[dict[str, Any]] = []
+    for line in (out or "").splitlines():
+        name, _, at = line.partition("\x1f")
+        if name:
+            rows.append({"name": name, "at": at or None})
+    return rows
+
+
 def has_commit(mirror: Path, sha: str) -> bool:
     """미러에 그 커밋이 있는가. sha 는 40 hex 여야 한다."""
     if not is_full_sha(sha) or not (mirror / "HEAD").is_file():

@@ -225,7 +225,12 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::step::analyze       # a new step starts (the previous one ends)
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
+::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
 ```
+
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
+parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
+it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
@@ -245,6 +250,53 @@ has merely gone quiet is not listed as needing a look; see
 Updates arrive over the event stream; if it drops, the page polls every 10 s, and after 30 s
 without a successful response a **Lost connection** banner appears while the ages keep counting.
 The page never pretends to be current. `#/jobs/N` deep-links to a job.
+
+When a repository in `server.toml` has a `[repos.<name>.release]` profile, the header gains a
+**Queue | Store** switch and `#/store/<name>` opens the Store tab; without a profile there is no
+tab. The Store is behind a **settings gate**: until every required secret is present and verified
+you land on the Settings screen — a red banner with `n of m secrets set · k verified`, one row per
+secret from the profile (drop a file, or type a value once in a password box), **Verify all**, and
+a disabled **Enter Store** — and the browser never sees a value, only `present`, a fingerprint and
+the verification time. Once complete, the Store shows four collapsible rows — Setup, Source (mirror
+age, `main` / `dev`, whether `main` is in `dev`, **Fetch remote**), Build · upload and Store — green
+when fine and collapsed, red and open when something needs a hand, grey when this build has nothing
+to say. Below them the review panel lays out the App Store and Google Play sections in the same group
+order (screenshots · copy with `current/limit` counters · release notes · build/release · review
+information, `—` where a store has no such field), and **Submit for review** opens only after a
+green review plan, the build number typed again, and — when Google Play is selected — the
+managed-publishing box ticked for this submission; there is no Release, Publish or Rollout button in
+any state, and an `unsafe_release_type` verdict raises a red banner that cannot be dismissed. When the
+profile names a driver, the Build · upload row carries the round's stepper S0–S8 read from the
+driver's own status lines (a Start form with version · Android track · dry-run when nothing runs,
+**Abort** while it runs, **Retry same version** after exit 1, «result unknown — do not resubmit»
+after exit 3, store drift after exit 4), the S2 dialog asks for the build number typed again before
+`confirm` goes out, a **Rehearsal (no upload)** button runs the upload preset in rehearsal mode —
+the real upload is the driver's S7 and there is no upload button — and the Source row shows the
+mirror's last five commits, its tags and «PR list: next».
+
+### Store tab — connecting a project's release flow
+
+Beyond the queue, a repository can get a **Store tab**: fetch, store snapshot, gate, QA, upload,
+submit for review, each a button over the project's *own* release scripts. rcm draws the JSON
+those scripts write and runs the presets they declare; it never computes a build number, judges
+QA, or releases anything after store approval. What a project must provide is written down in
+[docs/release-contract.md](docs/release-contract.md); the fastest way to provide it is the skills
+rcm ships for a Claude Code session in that project:
+
+```sh
+rcm skills list                                   # the skills packaged with this rcm
+rcm skills install --into ~/src/app               # copies them to ~/src/app/.claude/skills/
+# in that project, in Claude Code:
+/rcm-connect                                      # asks project · repo name · platforms · optional tiers
+```
+
+`/rcm-connect` runs `rcm-store-connect` (required: profile block, secrets list, `plan` / `upload`
+/ `review` presets and script skeletons, each with a `--selftest`) and, if chosen, the optional
+`rcm-gate-connect`, `rcm-qa-connect` and `rcm-release-driver`. Skills write only into the
+project (`scripts/rcm/presets.release.toml`, `scripts/rcm/profile.release.toml`, scripts, a report
+in `docs/rcm-connect.md`) and verify with `rcm check` on a candidate copy of `server.toml`; the
+live server file, secrets and the stores are never touched. The profile keys are in
+[Configuration](docs/configuration.md#release-profile).
 
 ## Exit codes
 
@@ -282,6 +334,7 @@ The full list, including what the web UI keeps in `localStorage`, is in
 | document | what is in it |
 |---|---|
 | [Usage guide](docs/usage.md) · [한국어](docs/usage.ko.md) | a first job, step by step, with annotated screenshots |
+| [Release contract](docs/release-contract.md) | what a project provides for the Store tab: profile, presets by role, artifact files, markers, secrets, the driver, and the skills that generate them |
 | [Configuration](docs/configuration.md) | presets, inputs, markers, deploy presets, priority, snapshot cache, pools and remote workers, notifications, the client and worker files |
 | [Operating the build machine](docs/operating.md) | running it as a service, Docker, upgrades, security, why a number can be wrong, the manual check on a real machine |
 | [CHANGELOG.md](CHANGELOG.md) | every user-visible change, newest first |

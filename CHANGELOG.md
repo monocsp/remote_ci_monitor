@@ -7,6 +7,140 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-17
+
+### Added
+- **Store tab server API, part 2: the release routes and the driver.** Under
+  `/api/repos/<repo>/release/…` the server now turns the profile into actions. `GET …/release`
+  is the state of the release view — the latest job per role (`plan`, `review.plan`,
+  `review.result`, `upload`) with the artifact document (`plan.json`, `review-plan.json`,
+  `review.json`, `upload.json`) read from the job's bundle, its age and whether it is stale, plus
+  the role presets' jobs newest first. `POST …/release/plan`, `…/review` and `…/upload` submit the
+  role presets through the normal job path with exactly the contract's inputs; the irreversible
+  modes (`review mode=submit`, `upload mode=upload`) need an admin token and the server itself
+  refuses them without a fresh succeeded plan, a typed build number equal to the plan's `n`, a
+  succeeded and unblocked review plan, and — for Android — `play_managed_publishing =
+  confirmed-on` in that very request (409 `review_plan_required` / `review_plan_stale` /
+  `review_plan_blocked` / `managed_publishing_unconfirmed` / `plan_required` / `plan_stale` /
+  `build_number_mismatch`; a preset that declares `automatic_release`, `rollout` or
+  `release_status` is refused with `unsafe_preset`). `GET …/release/listing` runs the profile's
+  preview and diff commands in a checkout of `default_branch` from the mirror and lists release
+  notes and screenshots (`…/listing/file?path=` serves one; `POST …/listing/validate` runs the
+  validate command); `GET …/release/github` reads the last commits and release tags from the
+  mirror (pull requests are `null` for now). When the profile names a `driver`, `POST
+  …/release/start` runs it detached in its own checkout with the job environment, `RCM_SERVER`
+  and a client token minted for that run and revoked when it ends; `…/confirm` forwards the build
+  number a person typed only when it equals the log's last `plan: N = <n>`, `…/abort` and
+  `…/retry` pass the flags, and `GET …/release/driver` shows the run, the log tail, `plan_n` and
+  `--status`. Runs are recorded in a new `releases` table — database schema **v18** (a `v17`
+  backup is written first, and older builds refuse the file); `rcm gc` leaves that table alone.
+  All write routes answer 409 `setup_incomplete` until the secrets gate is open. Documented in
+  `docs/configuration.md` («Release routes and the driver»). `schema_version` of `/api/status`
+  is unchanged.
+- **Web UI: the Store tab and its settings gate.** When `GET /api/repos` lists a repository
+  with a release profile the header shows a **Queue | Store** switch (a select when there are
+  several) and `#/store/<name>` opens the Store; a server without a profile has no tab and the
+  queue keeps updating over the event stream either way. Until every required secret is present
+  and verified, the Store route lands on the Settings screen: a banner with `n of m secrets set ·
+  k verified` (red, then green) and a disabled **Enter Store**, one row per secret from the
+  profile — kind, present, fingerprint, verified time or error — with a password dialog for
+  values, a dropzone (drag-and-drop or file picker) for files and per-file dropzones for folders,
+  plus **Verify all**. The page never keeps or shows a value; a non-admin token sees the table
+  read-only with the reason in one line. Once complete, the Store screen shows four collapsible
+  rows: Setup (the same table), Source (mirror age, `main` / `dev` SHAs, whether `main` is in
+  `dev`, **Fetch remote**), and Build · upload and Store as grey "not available in this build"
+  rows; green rows are collapsed, red and stale rows open, and a row a person opens or closes is
+  remembered in the browser.
+- **Web UI: the review panel and the Store / Build · upload rows.** With `GET
+  /api/repos/<name>/release` the Store row summarises `plan.json` (App Store live and editing
+  versions, the Play track, `next N`, blockers and warnings, the plan's age — red on blockers, amber
+  when stale) with a **Refresh** that submits the plan preset, and the Build · upload row shows
+  `upload.json` (version, build number, platforms, upload time, tag; a lost upload says so and offers
+  no resubmit) or, while a release job runs, three layers: one long bar that names its basis
+  (progress marker · declared steps · measured time · none), a «Now» line with the job's current
+  step and marker, and a checklist of the round's jobs with the running job's bar and unit grid. The
+  review panel below is laid out like an App Store Connect version page with the Google Play
+  section beside it in the same group order — screenshots from the listing preview, copy fields
+  with `current/limit` counters and `changed` chips from the diff, release notes counted against
+  both limits, build/release with «fixed by the repo» and a managed-publishing pill that never turns
+  green, review information as present/absent only — then the diff, five checkboxes, a build-number
+  box and **Validate listing** · **Plan review** · **Submit for review…**. Submit is enabled only
+  when the review plan is green and fresh, the typed number equals the plan's `n`, and, when Google
+  Play is selected, the managed-publishing box is ticked in this submission (it resets with every new
+  plan and after a submit); the confirmation dialog names the stores and says it cannot be undone.
+  A `409` from the server shows its code next to the button; `unsafe_release_type` or an observed
+  `auto_release: true` raises a red banner that cannot be dismissed; the result (`submitted` ·
+  `partial` · `noop` · `failed`) with the observed store state replaces the panel body. There is no
+  Release, Publish or Rollout button in any state. A server without the release routes shows the two
+  rows and the panel as «not available in this build».
+- **Web UI: the release-driver stepper, the GitHub card and the upload rehearsal.** With `GET
+  /api/repos/<name>/release/driver` the Build · upload row shows the round as nine steps S0–S8 above
+  the job cards, read from the driver's own `--status` lines and log tail (`stage S<n>` /
+  `다음 단계 S<n>`; exit 0 is DONE, exit 2 is S2): done steps green ✓, the current one blue ▶, the rest
+  grey ·. S2 is the human step — when the driver stopped with exit 2 and a `plan: N = <n>`, a dialog
+  asks for the build number typed again and **Confirm N** opens only on an exact match, sending
+  `POST …/release/confirm {build_name, build_number}`. With no round the row offers a Start form
+  (version `X.Y.Z` · Android track · dry-run → `POST …/release/start`); while it runs the header names
+  the stage and **Abort** is live; exit 1 is red with **Retry same version**, exit 3 is purple «result
+  unknown — do not resubmit» with no retry, exit 4 is amber store drift, a closed PR is amber
+  blocked; a `409` (`release_running`, `build_number_mismatch`, …) shows the server's code. The Source
+  row gains a GitHub card from `GET …/release/github`: the mirror's last five commits (sha7 · subject ·
+  author · time), its tags with `latest`, and «PR list: next (needs the GH token)». A **Rehearsal (no
+  upload)** button posts `{mode: "rehearsal", build_name, confirm_build_number: <plan.n>}` to
+  `…/release/upload`; there is deliberately no `mode=upload` button — the driver's S7 is the upload
+  path. The Store row renders object values from `plan.json` (a Play track as `{name, status,
+  codes}`) as their codes or name, never `[object Object]`, and the Setup head's «verified» time is the
+  newest `verified_at` of any secret kind, with «n not checked» when a count is reported. Servers
+  without the routes say «not available in this build».
+
+- **A step can report its own progress.** `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]`
+  at the start of a stdout line says how far the **current step** is — a chunk loop, a parallel set,
+  a lock wait — with a denominator the script actually knows (`state` is one of `run · ok · fail ·
+  skip · env · review · blocked · wait`). `progress` in queue rows and `GET /jobs/<id>` gains `sub`
+  (the last line, or `null`), `units[]` (the last state per unit, first-seen order, 500 per step) and
+  `units_truncated`. The web queue draws the bar from `sub` before declared steps and time
+  (`60% · 41/68 · inquiry_photo/android`), adds `now: <unit> · <state>` to the progress line and,
+  with two or more units, a grid of unit cells under the step list. A new `::rcm::step::` clears it;
+  malformed lines are plain log lines; markers are stored as before, so there is no migration, and
+  `schema_version` stays 1 because keys were only added.
+- **The connect skills ship in the package.** `rcm skills list` now names five skills and
+  `rcm skills install --into <project>` copies them: `rcm-connect` (one entry point: project ·
+  repo name · platforms · optional tiers), `rcm-store-connect` (required tier: profile block,
+  secrets list, `plan`/`upload`/`review` presets and script skeletons with `--selftest`, a
+  candidate-config checker), `rcm-gate-connect`, `rcm-qa-connect`, `rcm-release-driver`. Skills
+  write only into the project, adopt existing real implementations, verify with `rcm check` on a
+  candidate copy of `server.toml`, and never run upload or submit. The contract they produce is
+  `docs/release-contract.md`; the Store tab wireframe is `docs/wireframes/web-store.html`;
+  README gained a «Store tab» section.
+- **Release profiles and the connect skills.** `[repos.<name>.release]` in `server.toml` says
+  which presets play the `plan` / `upload` / `review` roles (plus optional `gate`, `qa`, `dev`),
+  which secrets the Settings screen will ask for, and how the store copy is previewed — the
+  contract the Store tab reads (`docs/release-contract.md`). `rcm check --config` prints one
+  `release <repo>` row per profile: FAIL when a required role is empty or names a missing preset,
+  when a preset lacks an input rcm sends, when the irreversible `mode` (`upload` / `submit`) is a
+  preset's default, or when secrets are listed without `secrets_dir_env`; warn when an optional
+  role is unset or the secrets folder does not exist yet. `rcm skills list` and
+  `rcm skills install --into <project>` copy the packaged `rcm-*-connect` skills into
+  `<project>/.claude/skills/`, keeping identical files, refusing to overwrite changed ones
+  without `--force`. `docs/configuration.md` gained a "Release profile" section and
+  `examples/server.toml` a commented profile block.
+- **The Store tab's server side: repositories, secrets and the setup gate.** `GET /api/repos`
+  lists every repository with whether it has a release profile and how far its setup is;
+  `GET /api/repos/<repo>` returns the profile (never a value), the mirror's age and the `main` /
+  `dev` heads with `main_in_dev`, all read from the mirror; `POST /api/repos/<repo>/fetch` updates
+  the mirror under the lanes' lock. Secrets live as files under `<config dir>/secrets/<repo>/`
+  (folder `0700`, files `0600`, written atomically): `GET …/secrets` shows name, kind, presence,
+  size and a fingerprint (first four characters of a value, eight hex digits of a file's SHA-256,
+  `n/m files` for a folder) and never the value; admins `PUT` a value (`text/plain`), a file
+  (`application/octet-stream`, at most `max_kb`) or a folder's file, and may `DELETE` only optional
+  ones; `POST …/verify` runs the read-only checks — `github` and `keystore` are real, `asc` and
+  `play` honestly answer `not implemented in this build` — and records the result. Jobs of a
+  preset whose `repo` has a profile get the folder as `$<secrets_dir_env>` (when it exists) and
+  their stdout masked: every value secret of 8+ characters becomes `****` in the log, for local
+  lanes and remote workers alike. `setup.complete` (all required secrets present and verified)
+  is the gate the release routes of the next change will enforce; none of these routes 409.
+  Adding routes changes no status key, so `schema_version` stays 1.
+
 ### Fixed
 - **A snapshot blob the server only *thinks* it has no longer kills the job.** The `blobs` table and the
   files on disk can drift apart — on one server every blob file written before 2026-09-13 was gone while
@@ -948,7 +1082,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...v0.2.7

@@ -20,6 +20,8 @@
   <header id="hdr" class="s-top">
     <span class="wordmark">rcm</span>
     <span class="host" data-host-name>—</span>
+    <!-- 큐 | 스토어 (스토어 목업 항목 1) — 릴리스 프로파일이 있는 저장소가 있을 때만 `renderNav` 가 채운다 -->
+    <nav id="view-nav" class="viewnav" aria-label="화면" data-i18n-attr="aria-label:nav.store" hidden></nav>
     <span class="sub" data-lanes-text></span>
     <span class="workers" data-workers></span>
     <span class="errchip" data-errchip hidden></span>
@@ -62,6 +64,13 @@
     <details class="est" id="estimates"><summary data-est-summary data-i18n="est.title">예상 시간 계산 근거</summary><div class="row" data-est-body></div></details>
   </section>
 
+  <!-- 스토어 탭 (docs/wireframes/web-store.html) — `#/store/<repo>`. 관문(설정) 또는 행 넷 + 본체 머리.
+       큐 절들은 이때 `hidden` 이고 SSE 는 계속 돈다. 본문은 `renderStore` 가 채운다. -->
+  <section id="store" class="s-section last" aria-label="스토어" data-i18n-attr="aria-label:nav.store" hidden>
+    <div class="s-h"><span class="t" data-store-title>—</span></div>
+    <div data-store-body></div>
+  </section>
+
   <footer class="foot sub">
     <span data-foot-server></span>
     <a href="/api/status" data-foot-status>/api/status</a>
@@ -91,6 +100,53 @@
     <div class="dlg-actions">
       <button type="button" class="btn" data-cancel-keep autofocus data-i18n="cancel.keep">그대로 두기</button>
       <button type="submit" class="btn danger" data-cancel-go data-i18n="cancel.go">취소하기</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 값 비밀 넣기 (스토어 목업 항목 30). 입력칸은 password, 보내면 비운다. 저장소·URL·localStorage 에 안 남는다 -->
+<dialog id="secret-dialog" aria-labelledby="secret-title">
+  <form method="dialog" class="dlg">
+    <h2 id="secret-title" data-secret-title data-i18n="secrets.field">값</h2>
+    <p class="sub" data-i18n="secrets.dialog_help">한 번 입력하면 빌드 머신으로 보내고 다시 보여 주지 않습니다.</p>
+    <input id="secret-input" type="password" autocomplete="off" spellcheck="false" placeholder="값" aria-label="값" data-i18n-attr="placeholder:secrets.field,aria-label:secrets.field">
+    <p class="dlg-status sub" data-secret-status></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-secret-cancel data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-secret-save data-i18n="dialog.save">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 심사 제출 확인 (스토어 목업 항목 23 · 28). N 은 본체 안에서 이미 타이핑했다 — 여기는 «되돌릴 수 없다» 와 플랫폼 이름뿐.
+     Release · Publish · Rollout 버튼은 어디에도 없다. -->
+<dialog id="submit-dialog" aria-labelledby="submit-title">
+  <form method="dialog" class="dlg">
+    <h2 id="submit-title" data-submit-title data-i18n="review.title">심사 제출</h2>
+    <p data-submit-body></p>
+    <p class="sub" data-i18n="store.policy">승인은 출시가 아닙니다. 이 화면에는 release · publish · rollout 버튼이 없습니다.</p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-submit-cancel autofocus data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-submit-go data-i18n="review.dialog_go">심사 제출</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 드라이버 S2 — 빌드 번호 재입력 (스토어 목업 항목 26 · 28). 체크박스가 아니라 숫자를 다시 타이핑한다;
+     plan_n 과 글자 그대로 같을 때만 «Confirm N» 이 열리고 `POST …/release/confirm` 이 나간다. -->
+<dialog id="confirm-n-dialog" aria-labelledby="confirm-n-title">
+  <form method="dialog" class="dlg">
+    <h2 id="confirm-n-title" data-confirm-n-title data-i18n="driver.stage.S2">N 확인</h2>
+    <p class="sub" data-confirm-n-body></p>
+    <div class="nbox">
+      <label for="driver-n" data-i18n="review.n_label">빌드 번호를 입력해야 계속합니다</label>
+      <input id="driver-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-describedby="driver-n-state">
+      <span id="driver-n-state" class="nstate" data-driver-n-state></span>
+    </div>
+    <p class="dlg-status sub" data-confirm-n-status></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-confirm-n-cancel data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-confirm-n-go disabled data-i18n="driver.confirm.go_empty">확인</button>
     </div>
   </form>
 </dialog>

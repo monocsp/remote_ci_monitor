@@ -671,10 +671,34 @@
   function failedStepCount(prog) {
     return Array.isArray(prog && prog.steps) ? prog.steps.filter(function (s) { return s.ok === false; }).length : 0;
   }
+  /**
+   * 현재 스텝 안의 세부 진행(`::rcm::progress::` · `progress.sub`). 서버가 검증해 보내지만 화면도
+   * 분모를 다시 본다 — `total ≥ 1`, `0 ≤ done ≤ total` 이 아니면 **없는 것**이다(분모를 지어내지
+   * 않는다). 없으면 null.
+   */
+  function subProgress(prog) {
+    var s = prog && prog.sub;
+    if (!s || typeof s !== "object") return null;
+    if (!isNum(s.done) || !isNum(s.total) || s.total < 1 || s.done < 0 || s.done > s.total) return null;
+    if (typeof s.unit !== "string" || !s.unit) return null;
+    return s;
+  }
+  /** 머리줄 꼬리 「now: <unit> · <state>[ · <note>]」 — 마지막 progress 마커 그대로. 없으면 null. */
+  function subNowText(prog, lang) {
+    var s = subProgress(prog);
+    if (!s) return null;
+    var t = T(lang, "progress.sub_now", { unit: s.unit, state: String(s.state || "") });
+    if (typeof s.note === "string" && s.note) t += " · " + s.note;
+    return t;
+  }
   function progressHead(prog, lang) {
     if (!prog || prog.phase === "materializing") return null;
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
-    if (!steps.length) return T(lang, "progress.no_markers", { dur: fmtDuration(prog.job_seconds) });
+    var now = subNowText(prog, lang);
+    if (!steps.length) {
+      var none = T(lang, "progress.no_markers", { dur: fmtDuration(prog.job_seconds) });
+      return now ? none + " · " + now : none;
+    }
     var cur = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     var t = T(lang, "progress.step", { cur: cur, total: total, soFar: !!prog.steps_total_partial });
@@ -682,6 +706,7 @@
     t += " · " + T(lang, "progress.job", { dur: fmtDuration(prog.job_seconds) });
     var f = failedStepCount(prog);
     if (f) t += " · " + T(lang, "progress.steps_failed", { n: f });
+    if (now) t += " · " + now;
     return t;
   }
   /** 도는 스텝(끝나지 않은 마지막 스텝). 없으면 null — 끝난 잡의 초는 올라가면 안 된다. */
@@ -712,8 +737,11 @@
     var jobSpan = function (key) {
       return esc(T(lang, key, { dur: JOB })).replace(JOB, span(live && prog.job_started_at, fmtDuration(prog.job_seconds)));
     };
+    // 스텝 안의 세부 진행은 마커가 올 때만 바뀐다 — 틱 없이 글자 그대로
+    var now = subNowText(prog, lang);
+    var nowHtml = now ? '<span class="sub-now">' + esc(now) + "</span>" : "";
     // 마커가 없는 잡은 머리줄에 잡 초 하나뿐이다 — 그것마저 얼면 도는 잡이 통째로 멈춰 보인다
-    if (!steps.length) return jobSpan("progress.no_markers");
+    if (!steps.length) return jobSpan("progress.no_markers") + (now ? " · " + nowHtml : "");
     var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     var h = esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
@@ -723,6 +751,31 @@
     h += " · " + jobSpan("progress.job");
     var f = failedStepCount(prog);
     if (f) h += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
+    if (now) h += " · " + nowHtml;
+    return h;
+  }
+  /** 격자 칸의 글자 — 색만으로 말하지 않는다(§4.2). 모르는 state 는 빈 칸. */
+  var UNIT_GLYPH = { ok: "✓", fail: "✗", run: "▶", skip: "—", wait: "…", blocked: "!", env: "!", review: "?" };
+  var UNIT_STATES = ["run", "ok", "fail", "skip", "env", "review", "blocked", "wait"];
+  /**
+   * 현재 스텝 안의 단위 격자(`progress.units[]`) — 단위 하나가 칸 하나, 마지막 상태가 색·글자.
+   * 단위가 둘 미만이면 격자가 아니라 빈 문자열이다(하나는 머리줄의 `now:` 가 이미 말했다).
+   * 이름은 `title` 과 `aria-label` 에 있다 — 칸은 12px 라 글자를 못 담는다.
+   */
+  function unitsGridHtml(prog, lang) {
+    var units = Array.isArray(prog && prog.units) ? prog.units.filter(function (u) {
+      return u && typeof u.unit === "string" && u.unit;
+    }) : [];
+    if (units.length < 2) return "";
+    var h = '<div class="ugrid" role="list" aria-label="' + esc(T(lang, "progress.units_aria", { n: units.length })) + '">';
+    units.forEach(function (u) {
+      var st = UNIT_STATES.indexOf(u.state) >= 0 ? u.state : "unknown";
+      var label = u.unit + " · " + (st === "unknown" ? String(u.state || "?") : st) + (typeof u.note === "string" && u.note ? " · " + u.note : "");
+      h += '<span class="u ' + st + '" role="listitem" title="' + esc(label) + '" aria-label="' + esc(label) + '">'
+        + '<i aria-hidden="true">' + (UNIT_GLYPH[st] || "") + "</i></span>";
+    });
+    h += "</div>";
+    if (prog.units_truncated) h += '<div class="sub ugrid-more">' + esc(T(lang, "progress.units_more")) + "</div>";
     return h;
   }
   function stepMark(step) {
@@ -769,6 +822,17 @@
     // 경보를 먹는 쪽(quiet 이 이기는 것)은 fail-open 이라 금지다.
     var quiet = !!est.quiet && !stuck;
     if (prog && prog.phase === "materializing") { out.condition = "preparing"; return out; }
+    // 스텝 안의 세부 진행이 있으면 그것이 눈금이다 — 스크립트가 **아는** 분모라 선언 스텝보다 곱다.
+    // `done == total` 이어도 잡은 아직 돈다(그 스텝의 단위가 다 끝난 것뿐) — 99% 상한이 여기도
+    // 적용된다. 100% 는 「끝났다」의 자리다.
+    var sub = subProgress(prog);
+    if (sub) {
+      out.basis = "sub"; out.total = sub.total; out.done = sub.done; out.unit = sub.unit;
+      out.pct = Math.min(99, pctOf(sub.done, sub.total));
+      if (stuck) out.condition = "stuck";
+      else if (quiet) out.condition = "quiet";
+      return out;
+    }
     var total = prog && isNum(prog.steps_total) ? prog.steps_total : null;
     var done = prog && isNum(prog.steps_done) ? prog.steps_done : null;
     if (isNum(total) && total > 0 && isNum(done) && !(prog && prog.steps_total_partial)) {
@@ -808,7 +872,9 @@
     var p = overallProgress(row);
     if (!p) return "";
     var head = null;
-    if (p.basis === "steps") {
+    if (p.basis === "sub") {
+      head = T(lang, "pbar.sub", { percent: p.pct, done: p.done, total: p.total, unit: p.unit });
+    } else if (p.basis === "steps") {
       head = isNum(p.pct)
         ? T(lang, "pbar.steps", { percent: p.pct, done: p.done, total: p.total })
         : T(lang, "pbar.steps_all", { done: p.done, total: p.total });
@@ -1021,6 +1087,862 @@
     return s;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 스토어 탭 — 순수 함수 (docs/wireframes/web-store.html 항목 1~6 · 25 · 29~35 · 42, 7절).
+  // 서버 계약은 STORE-TAB-API(`/api/repos` · `/api/repos/<name>` · `…/secrets` · `…/verify` ·
+  // `…/fetch`). 값(비밀)은 어디에도 오지 않는다 — 여기 오는 것은 present · fingerprint · verified_at 뿐.
+  // ═══════════════════════════════════════════════════════════════════════════
+  var ROW_GLYPH = { ok: "✓", bad: "✗", running: "▶", stale: "⏱", na: "·" };
+  var STORE_STALE_SECONDS = 30 * 60;   // 미러 나이 30분 — 목업 항목 4·42 (황토, 빨강이 아니다)
+  var VALUE_FP_CHARS = 4;              // 값 비밀의 지문은 앞 4자 + … 를 넘지 않는다(항목 31)
+
+  /** 해시 → 화면. `#/store/<repo>` 만 스토어, 나머지(`#/` · `#/jobs/N` · 빈 값)는 큐다. */
+  function parseRoute(hash) {
+    var m = /^#\/store\/([^\/?#]+)\/?$/.exec(hash || "");
+    if (!m) return { view: "queue", repo: null };
+    var repo;
+    try { repo = decodeURIComponent(m[1]); } catch (e) { repo = m[1]; }
+    return { view: "store", repo: repo };
+  }
+  /** `GET /api/repos` 문서에서 릴리스 프로파일이 있는 저장소만. 문서가 이상하면 빈 배열(탭 없음). */
+  function releaseRepos(doc) {
+    var list = doc && Array.isArray(doc.repos) ? doc.repos : [];
+    return list.filter(function (r) { return r && r.release === true && typeof r.name === "string" && r.name; });
+  }
+  /** 관문 띠(항목 29). `setup` 이 없으면 완료가 아니고 숫자는 — 다(모르는 값을 0 으로 안 그린다). */
+  function setupSummary(setup, lang) {
+    var s = setup || {};
+    var complete = s.complete === true;
+    var n = isNum(s.present) ? s.present : DASH, total = isNum(s.required) ? s.required : DASH, done = isNum(s.verified) ? s.verified : DASH;
+    return { complete: complete, tone: complete ? "ok" : "bad", text: T(lang, "store.gate.counts", { n: n, total: total, done: done }) };
+  }
+  /** 지문 표시 규칙(항목 30·31): 없으면 —. 값은 앞 4자 + …(서버가 더 보내도 더 안 보인다).
+      파일은 sha256 앞 8자 + 크기. 폴더는 「n of m files」. */
+  function fingerprintText(item, lang) {
+    if (!item) return DASH;
+    // 폴더의 「n of m files」는 값이 아니라 개수다 — 다 안 찼어도(present=false) 어디까지 찼는지 보인다
+    if (item.kind === "dir") {
+      var c = dirFileCounts(item);
+      return c.total > 0 ? T(lang, "secrets.files_count", { n: c.present, total: c.total }) : DASH;
+    }
+    if (item.present !== true) return DASH;
+    var fp = typeof item.fingerprint === "string" ? item.fingerprint.replace(/…$/, "") : "";
+    if (!fp) return DASH;
+    if (item.kind === "value") return fp.slice(0, VALUE_FP_CHARS) + "…";
+    var text = fp.slice(0, 8);
+    if (isNum(item.size)) text += " · " + fmtBytes(item.size);
+    return text;
+  }
+  /** 폴더 비밀의 파일 목록. 서버는 `files: [{name, present, size?, fingerprint?}]` 를 준다 — 문자열
+      배열이 오면 이름만 알고 있음/없음은 모르는 것이라 present=false 로 둔다(fail-open 금지). */
+  function dirFiles(item) {
+    var list = item && Array.isArray(item.files) ? item.files : [];
+    return list.map(function (f) {
+      if (typeof f === "string") return { name: f, present: false, size: null, fingerprint: null };
+      return { name: String(f && f.name || ""), present: !!(f && f.present === true), size: isNum(f && f.size) ? f.size : null, fingerprint: f && typeof f.fingerprint === "string" ? f.fingerprint : null };
+    }).filter(function (f) { return f.name; });
+  }
+  function dirFileCounts(item) {
+    var files = dirFiles(item);
+    return { present: files.filter(function (f) { return f.present; }).length, total: files.length };
+  }
+  /** 검증 칸(항목 32): 검증 없음 / 아직 / ✓ 시각 / ✗ 이유. 없는 비밀은 검증할 것도 없다(—). */
+  function verifiedCell(item, lang, tzName, nowMs) {
+    if (!item || item.present !== true) return { tone: "none", text: DASH };
+    if (item.verify === "none" || item.verify == null) return { tone: "none", text: T(lang, "secrets.no_verify") };
+    if (item.verify_error) return { tone: "bad", text: T(lang, "secrets.verify_error", { detail: String(item.verify_error) }) };
+    if (item.verified_at) return { tone: "ok", text: T(lang, "secrets.verified_at", { clock: fmtClock(item.verified_at, tzName, nowMs) }) };
+    return { tone: "pending", text: T(lang, "secrets.not_verified") };
+  }
+  /** 비밀 표 한 행(항목 31). 값은 절대 안 들어온다 — 들어와도 여기서 흘리지 않는다. */
+  function secretRowModel(item, lang, tzName, nowMs) {
+    var kind = item && ["value", "file", "dir"].indexOf(item.kind) >= 0 ? item.kind : "value";
+    var present = !!(item && item.present === true);
+    var files = kind === "dir" ? dirFiles(item).map(function (f) {
+      var sub = { kind: "file", present: f.present, fingerprint: f.fingerprint, size: f.size };
+      return { name: f.name, present: f.present, fingerprint: fingerprintText(sub, lang) };
+    }) : [];
+    return {
+      name: String(item && item.name || ""), kind: kind, kindWord: T(lang, "secrets.kind." + kind),
+      optional: !!(item && item.optional === true), present: present,
+      presentWord: T(lang, present ? "secrets.present" : "secrets.missing"), presentGlyph: present ? "✓" : "✗",
+      fingerprint: fingerprintText(item, lang), verified: verifiedCell(item, lang, tzName, nowMs),
+      // 값은 대화상자, 파일은 드롭존, 폴더는 파일마다 드롭존(자기 행에는 입력이 없다)
+      input: kind, action: present ? "replace" : "add", files: files
+    };
+  }
+  /** 드롭존 수용 규칙(항목 30): 하나만 · 비어 있지 않게 · `max_kb` 안. 이름은 자리가 정하므로 안 본다. */
+  function dropAccept(item, files, isAdmin) {
+    var list = files ? Array.prototype.slice.call(files) : [];
+    if (isAdmin === false) return { ok: false, reason: "secrets.reject.admin", args: {} };
+    if (list.length === 0) return { ok: false, reason: "secrets.reject.none", args: {} };
+    if (list.length > 1) return { ok: false, reason: "secrets.reject.many", args: {} };
+    var f = list[0];
+    if (!isNum(f.size) || f.size <= 0) return { ok: false, reason: "secrets.reject.empty", args: {} };
+    var maxKb = item && isNum(item.max_kb) ? item.max_kb : null;
+    if (maxKb != null && f.size > maxKb * 1024) return { ok: false, reason: "secrets.reject.big", args: { limit: fmtBytes(maxKb * 1024) } };
+    return { ok: true, reason: null, args: {} };
+  }
+  /** 미러 나이(초). `fetched_at` 이 있으면 지금 시각으로 세고, 없으면 서버의 `age_seconds`, 둘 다 없으면 null. */
+  function mirrorAge(mirror, nowMs) {
+    var m = mirror || {};
+    var t = parseIso(m.fetched_at);
+    if (t != null && isNum(nowMs)) return Math.max(0, (nowMs - t) / 1000);
+    if (isNum(m.age_seconds)) return m.age_seconds;
+    return null;
+  }
+  /** 행 색(7절): ok 초록 접힘 · bad 빨강 펼침 · running 파랑 펼침 · stale 황토 펼침 · na 회색 접힘.
+      Source(항목 4·25·42): fetch 실패 > main ⊄ dev > 안 가져옴 > 30분 넘음 > 브랜치 모름 > ok.
+      Build·Store 행은 이 빌드에 자료가 없어 늘 na 다(다음 PR). */
+  function rowState(kind, ctx) {
+    ctx = ctx || {};
+    if (kind === "setup") return ctx.setup && ctx.setup.complete === true ? "ok" : "bad";
+    if (kind === "source") {
+      var doc = ctx.doc || {}, br = doc.branches || {};
+      if (ctx.fetchError) return "bad";
+      if (br.main_in_dev === false) return "bad";
+      var age = mirrorAge(doc.mirror, ctx.nowMs);
+      if (age == null) return "stale";
+      if (age > STORE_STALE_SECONDS) return "stale";
+      if (br.main_in_dev !== true) return "na";
+      return "ok";
+    }
+    return "na";
+  }
+  /** 펼침: 사람이 여닫은 기억(`"open"`/`"closed"`)이 이기고, 없으면 색이 정한다. */
+  function rowOpen(state, remembered) {
+    if (remembered === "open") return true;
+    if (remembered === "closed") return false;
+    return state === "bad" || state === "running" || state === "stale";
+  }
+  /** Setup 행 머리(항목 3): n/m 있음 · 마지막 검증 시각 · 빌드번호 정책. */
+  /** 검증 시각 — ISO 글자나 epoch 숫자(초·밀리초) 어느 쪽이든. 모르는 꼴은 null. */
+  function verifiedMs(v) {
+    if (isNum(v)) return v > 1e12 ? v : v * 1000;
+    return parseIso(v);
+  }
+  /** 마지막 검증 시각 — 종류(value · file · dir)를 가리지 않고, 폴더는 파일마다의 시각도 본다. */
+  function latestVerified(items) {
+    var latest = null;
+    var see = function (v) { var t = verifiedMs(v); if (t != null && (latest == null || t > latest)) latest = t; };
+    (items || []).forEach(function (it) {
+      if (!it) return;
+      see(it.verified_at);
+      if (it.verify_detail && typeof it.verify_detail === "object") see(it.verify_detail.verified_at);
+      (Array.isArray(it.files) ? it.files : []).forEach(function (f) { if (f && typeof f === "object") see(f.verified_at); });
+    });
+    return latest;
+  }
+  /** «검사 안 함» 개수 — setup.not_checked 나 항목의 verify_detail.not_checked(숫자) 를 더한다. 없으면 0. */
+  function notCheckedCount(setup, items) {
+    var n = 0;
+    if (setup && isNum(setup.not_checked)) n += setup.not_checked;
+    (items || []).forEach(function (it) {
+      var d = it && it.verify_detail;
+      if (d && typeof d === "object" && isNum(d.not_checked)) n += d.not_checked;
+    });
+    return n;
+  }
+  function setupHead(setup, items, profile, lang, tzName, nowMs) {
+    var s = setup || {};
+    var latest = latestVerified(items);
+    var head = T(lang, "row.setup_head", {
+      n: isNum(s.present) ? s.present : DASH, total: isNum(s.required) ? s.required : DASH,
+      clock: latest != null ? fmtClock(new Date(latest).toISOString(), tzName, nowMs) : DASH,
+      kind: profile && profile.build_number_policy ? String(profile.build_number_policy) : DASH
+    });
+    var nc = notCheckedCount(setup, items);
+    return nc > 0 ? head + " · " + T(lang, "row.setup_not_checked", { n: nc }) : head;
+  }
+  /** Source 행 머리(항목 4·25): main sha7 · main ⊂ dev · 미러 나이(· fetch 실패). 조각 배열로 준다. */
+  function sourceHead(doc, ctx, lang) {
+    ctx = ctx || {};
+    var d = doc || {}, br = d.branches || {};
+    var parts = [];
+    parts.push("main " + (typeof br.main === "string" && br.main ? br.main.slice(0, 7) : DASH));
+    if (br.main_in_dev === true) parts.push(T(lang, "source.main_in_dev"));
+    else if (br.main_in_dev === false) parts.push(T(lang, "source.main_not_in_dev"));
+    else parts.push(T(lang, "source.branches_unknown"));
+    var age = mirrorAge(d.mirror, ctx.nowMs);
+    if (age == null) parts.push(T(lang, "source.never_fetched"));
+    else if (age > STORE_STALE_SECONDS) parts.push(T(lang, "source.stale", { age: fmtAgo(age, lang) }));
+    else parts.push(T(lang, "source.fetched", { age: fmtAgo(age, lang) }));
+    if (ctx.fetchError) parts.push(T(lang, "source.fetch_failed", { detail: String(ctx.fetchError).slice(0, 60) }));
+    return parts;
+  }
+  /** Build·Store 행 머리: 프로파일에 역할 프리셋이 비었으면 「not configured — …」, 아니면 이 빌드에 없음. */
+  function naRowText(kind, profile, lang) {
+    var presets = profile && profile.presets ? profile.presets : {};
+    var role = kind === "build" ? "upload" : "plan";
+    if (!presets[role]) return T(lang, "row.not_configured", { name: "presets." + role });
+    return T(lang, kind === "build" ? "row.na.build" : "row.na.store");
+  }
+  // ── 심사 패널 본체 · Store 행 · Build·upload 행 (항목 5~24 · 28 · 36 · 40 · 42 · 46~49) ──
+  // 서버 계약은 STORE-TAB-API-2(`GET …/release` · `POST …/release/plan|review|upload` ·
+  // `GET …/release/listing` · `POST …/release/listing/validate`). 웹은 판정하지 않는다 — N · 판정 ·
+  // 위반은 소비 레포 스크립트의 JSON 그대로다. rcm 코드에 특정 앱의 이름·경로·필드는 없다.
+  var RELEASE_STATUS_TONE = { submitted: "ok", partial: "stale", noop: "na", failed: "bad" };
+  var IOS_FIELDS = ["promotional_text", "description", "keywords", "support_url", "marketing_url", "subtitle"];
+  var PLAY_FIELDS = ["title", "short_description", "full_description", "keywords", "support_url", "marketing_url", "subtitle"];
+  // 스토어가 정한 글자 상한 — 프로젝트가 아니라 App Store Connect · Play Console 의 것이다
+  var FIELD_LIMITS = { promotional_text: 170, description: 4000, keywords: 100, support_url: 255, marketing_url: 255,
+    subtitle: 30, title: 30, short_description: 80, full_description: 4000 };
+  var NOTES_LIMIT = { ios: 4000, android: 500 };
+  var PLAY_ONLY = { title: 1, short_description: 1, full_description: 1 };
+  var IOS_ONLY = { promotional_text: 1, keywords: 1, support_url: 1, marketing_url: 1, subtitle: 1 };
+  var FIELD_ALIAS = { promotionaltext: "promotional_text", promo: "promotional_text", supporturl: "support_url", marketingurl: "marketing_url",
+    name: "title", app_name: "title", appname: "title", shortdescription: "short_description", short: "short_description",
+    fulldescription: "full_description", full: "full_description", whatsnew: "whats_new", whats_new: "whats_new",
+    release_notes: "whats_new", releasenotes: "whats_new", changelog: "whats_new" };
+
+  /** 판정 낱말 → 색(계약 §2). rcm 이 아는 몇 개만 색이고 나머지는 빨강 — 낱말은 그대로 보인다. */
+  function verdictTone(word) {
+    if (word == null || word === "") return "none";
+    var w = String(word);
+    if (w === "ready") return "ok";
+    if (w === "already_submitted") return "na";
+    if (w === "processing") return "running";
+    if (/_unreadable$/.test(w)) return "stale";
+    return "bad";
+  }
+  function planEntryDoc(entry) { return entry && entry.doc && typeof entry.doc === "object" ? entry.doc : null; }
+  /** 닫을 수 없는 빨간 띠(항목 36): 어느 판정이든 `unsafe_release_type`, 또는 관측 `auto_release === true`. */
+  function bannerDecision(release) {
+    var r = release || {}, rv = r.review || {};
+    var docs = [planEntryDoc(rv.plan), planEntryDoc(rv.result)];
+    var version = r.plan && r.plan.build_name ? String(r.plan.build_name) : null;
+    for (var i = 0; i < docs.length; i++) {
+      var d = docs[i];
+      if (!d) continue;
+      if (d.build_name && !version) version = String(d.build_name);
+      if (d.ios === "unsafe_release_type" || d.android === "unsafe_release_type") return { show: true, reason: "unsafe_release_type", version: version || DASH };
+      if ((d.observed && d.observed.auto_release === true) || d.auto_release === true) return { show: true, reason: "auto_release", version: version || DASH };
+    }
+    return { show: false, reason: null, version: version || DASH };
+  }
+  /** 심사 플랜 항목의 형편: `ok`(성공 · 안 낡음 · plan_verdict ok) 아니면 이유 키. */
+  function reviewPlanVerdict(entry, buildName) {
+    var d = planEntryDoc(entry);
+    if (!entry || entry.state !== "succeeded" || !d) return "plan_required";
+    if (buildName != null && d.build_name != null && String(d.build_name) !== String(buildName)) return "plan_required";
+    if (entry.stale === true) return "plan_stale";
+    if (d.plan_verdict !== "ok") return "plan_blocked";
+    return "ok";
+  }
+  /** 사람이 친 N 과 플랜의 N. 숫자 그대로의 글자여야 한다 — `"0181"` 도 `" 181"` 도 아니다(항목 28). */
+  function nMatches(typed, n) {
+    if (!isNum(n) || Math.floor(n) !== n) return false;
+    return typeof typed === "string" && typed === String(n);
+  }
+  function platformParam(platforms) {
+    var p = platforms || {};
+    if (p.ios && p.android) return "both";
+    if (p.ios) return "ios";
+    if (p.android) return "android";
+    return null;
+  }
+  /**
+   * Submit 활성 조건(항목 22·23·28 · 계약 §6). 이유는 전부 모아 준다(비활성 버튼은 이유를 쓴다).
+   * ctx: {release, typedN, platforms:{ios,android}, managed, admin, token, busy}
+   * 관리형 게시 체크는 이 렌더의 것만 본다 — 저장하지 않는다(결정 3).
+   */
+  function submitDecision(ctx) {
+    ctx = ctx || {};
+    var r = ctx.release || {}, reasons = [];
+    if (bannerDecision(r).show) reasons.push("unsafe");
+    if (!ctx.token) reasons.push("no_token");
+    else if (!ctx.admin) reasons.push("admin");
+    if (!platformParam(ctx.platforms)) reasons.push("no_platform");
+    var plan = r.plan || null, planDoc = planEntryDoc(plan);
+    if (!planDoc) reasons.push("no_plan");
+    var pv = reviewPlanVerdict(r.review && r.review.plan, plan && plan.build_name);
+    if (pv !== "ok") reasons.push(pv);
+    if (!planDoc || !nMatches(ctx.typedN, planDoc.n)) reasons.push("n_mismatch");
+    if (ctx.platforms && ctx.platforms.android && ctx.managed !== true) reasons.push("managed_unconfirmed");
+    if (ctx.busy) reasons.push("busy");
+    return { enabled: reasons.length === 0, reasons: reasons };
+  }
+  /** `POST …/release/review` 본문. `confirmed-on` 은 이번 제출에서 체크했고 Play 가 들어갈 때만이다. */
+  function reviewBody(mode, ctx) {
+    ctx = ctx || {};
+    var r = ctx.release || {}, plan = r.plan || {}, doc = planEntryDoc(plan) || {}, profile = ctx.profile || {};
+    var submit = mode === "submit";
+    var platform = platformParam(ctx.platforms) || "both";
+    var managed = submit && ctx.managed === true && (platform === "both" || platform === "android");
+    return {
+      build_name: plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : ""),
+      ref: profile.default_branch || "main",
+      mode: submit ? "submit" : "plan",
+      platform: platform,
+      confirm_build_number: submit && typeof ctx.typedN === "string" ? ctx.typedN : "",
+      play_managed_publishing: managed ? "confirmed-on" : "not-checked",
+      listing: ctx.listingFull ? "full" : "notes-only",
+      phased: ctx.phased === false ? "0" : "1"
+    };
+  }
+  /** 제출 결과(항목 40)가 지금 회차의 것인가 — 문서에 build_name 이 있으면 그것으로, 없으면 잡 순서로. */
+  function resultIsCurrent(release) {
+    var r = release || {}, rv = r.review || {}, res = rv.result, d = planEntryDoc(res);
+    if (!res || !d) return false;
+    var plan = r.plan || null;
+    if (d.build_name != null && plan && plan.build_name != null) return String(d.build_name) === String(plan.build_name);
+    if (plan && isNum(plan.job_id) && isNum(res.job_id)) return res.job_id > plan.job_id;
+    return true;
+  }
+  /** 본체 머리의 필(항목 7·27·40): 왜 못 여는지, 또는 결과. `rows` 는 {setup, source, store, build} 의 색. */
+  function panelPill(release, rows, releaseStatus) {
+    rows = rows || {};
+    if (releaseStatus === 404) return { code: "not_available", tone: "na" };
+    if (bannerDecision(release).show) return { code: "unsafe_release_type", tone: "bad" };
+    var r = release || {};
+    if (resultIsCurrent(r)) {
+      var st = String(planEntryDoc(r.review.result).overall_status || "");
+      if (RELEASE_STATUS_TONE[st]) return { code: st, tone: RELEASE_STATUS_TONE[st] };
+      return { code: "failed", tone: "bad" };
+    }
+    if (rows.setup === "bad") return { code: "secrets_expired", tone: "bad" };
+    if (rows.source === "bad") return { code: "source_not_ready", tone: "bad" };
+    if (rows.store === "bad") return { code: "plan_blocked", tone: "bad" };
+    var up = planEntryDoc(r.upload);
+    if (!up || up.status !== "success") return { code: "waiting_upload", tone: "na" };
+    return { code: "not_submitted", tone: "none" };
+  }
+  /** 본체 펼침: 기억이 이기고, 아니면 네 행이 초록이고 결과가 없을 때만 펼친다(항목 7). */
+  function panelOpen(pill, remembered) {
+    if (remembered === "open") return true;
+    if (remembered === "closed") return false;
+    return !!pill && pill.code === "not_submitted";
+  }
+  /** 현재/상한 세기(항목 11): 90% 넘으면 황토, 넘치면 빨강. 글자 수는 코드포인트로 센다. */
+  function fieldCounter(text, limit) {
+    var n = typeof text === "string" ? Array.from(text).length : 0;
+    if (!isNum(limit) || limit <= 0) return { n: n, limit: null, tone: "none", text: String(n) };
+    var tone = n > limit ? "bad" : n >= limit * 0.9 ? "warn" : "ok";
+    return { n: n, limit: limit, tone: tone, text: n + "/" + limit };
+  }
+  function normField(key) {
+    var k = String(key || "").toLowerCase().replace(/-/g, "_");
+    var last = k.split(/[./]/).pop();
+    return FIELD_ALIAS[last] || last;
+  }
+  function platformOfKey(key, bracket) {
+    var s = String(bracket || key || "").toLowerCase();
+    if (/(^|[\[./_-])(android|play)([\]./_-]|$)/.test(s)) return "android";
+    if (/(^|[\[./_-])(ios|asc|apple|iphone|ipad)([\]./_-]|$)/.test(s)) return "ios";
+    return null;
+  }
+  /**
+   * 소개 자료 미리보기(항목 10·11·16·17·21) — `listing.preview` 는 프로젝트 스크립트의 줄이다.
+   * `key: value` 꼴만 필드로 읽고(키의 마지막 조각이 이름, `ios.`·`android.`·`[play]` 가 플랫폼),
+   * 플랫폼 없는 키는 그 스토어에만 있는 필드면 그쪽으로, 아니면 양쪽으로. 나머지 줄은 `other` 다.
+   * diff 줄에 필드 이름이 보이면 `changed`. 아무것도 지어내지 않는다 — 없는 필드는 —.
+   */
+  function listingFields(listing) {
+    var out = { ios: {}, android: {}, other: [], changed: {}, screenshotsChanged: false };
+    var lines = listing && Array.isArray(listing.preview) ? listing.preview : [];
+    var last = null;
+    lines.forEach(function (raw) {
+      var line = String(raw == null ? "" : raw);
+      var m = /^\s*(?:\[([A-Za-z]+)\]\s*)?([A-Za-z][A-Za-z0-9_.\/-]*)\s*[:=]\s?(.*)$/.exec(line);
+      if (!m) {
+        if (last && /^\s+\S/.test(line)) { last.target.forEach(function (t) { out[t][last.key] += "\n" + line.trim(); }); return; }
+        if (line.trim()) out.other.push(line.trim());
+        return;
+      }
+      var key = normField(m[2]), plat = platformOfKey(m[2], m[1]);
+      var targets = plat ? [plat] : PLAY_ONLY[key] ? ["android"] : IOS_ONLY[key] ? ["ios"] : ["ios", "android"];
+      targets.forEach(function (t) { out[t][key] = m[3]; });
+      last = { key: key, target: targets };
+    });
+    var diff = listing && Array.isArray(listing.diff) ? listing.diff : [];
+    diff.forEach(function (raw) {
+      var line = String(raw == null ? "" : raw).toLowerCase();
+      Object.keys(FIELD_LIMITS).forEach(function (k) {
+        // 낱말 단위다 — `subtitle` 이 `title` 을 바꾼 것으로 읽히면 안 된다
+        var re = new RegExp("(^|[^a-z0-9])(" + k + "|" + k.replace(/_/g, "") + ")([^a-z0-9]|$)");
+        if (re.test(line)) out.changed[k] = true;
+      });
+      if (/screenshot|image|graphic/.test(line)) out.screenshotsChanged = true;
+    });
+    return out;
+  }
+  /** 스크린샷을 경로로 가른다 — 못 가리면 `other`(양쪽 절이 «n files not sorted» 로 말한다). */
+  function screenshotGroups(listing) {
+    var out = { ios: [], android: [], other: [] };
+    var list = listing && Array.isArray(listing.screenshots) ? listing.screenshots : [];
+    list.forEach(function (s) {
+      if (!s || typeof s.path !== "string" || !s.path) return;
+      var p = platformOfKey(s.path);
+      out[p || "other"].push(s);
+    });
+    return out;
+  }
+  /** 리뷰 정보 폴더(항목 14): 프로파일이 `kind: dir` 로 선언한 비밀의 파일마다 있음/없음. 값은 없다. */
+  function reviewInfoModel(items) {
+    var dirs = (items || []).filter(function (it) { return it && it.kind === "dir"; });
+    if (!dirs.length) return null;
+    var files = [];
+    dirs.forEach(function (d) { dirFiles(d).forEach(function (f) { files.push({ name: f.name, present: f.present }); }); });
+    var missing = files.filter(function (f) { return !f.present; }).length;
+    return { name: dirs.map(function (d) { return d.name; }).join(" · "), files: files, complete: files.length > 0 && missing === 0, missing: missing };
+  }
+  /** 버전 띠(항목 8). 값은 마지막 plan.json · upload.json · listing 에서만 온다. */
+  function versionStrip(release, listing, profile, lang, tzName, nowMs) {
+    var r = release || {}, plan = r.plan || null, doc = planEntryDoc(plan) || {}, up = planEntryDoc(r.upload);
+    var version = plan && plan.build_name != null ? String(plan.build_name) : doc.build_name != null ? String(doc.build_name) : DASH;
+    var n = isNum(doc.n) ? doc.n : DASH;
+    var notes = listing && listing.release_notes && typeof listing.release_notes === "object" ? listing.release_notes : null;
+    var notesText = notes && typeof notes.text === "string" ? notes.text : null;
+    return {
+      version: version, build: n,
+      buildNote: up && isNum(up.n) ? T(lang, "review.build.by_job", { id: isNum(r.upload.job_id) ? r.upload.job_id : DASH }) : T(lang, "review.build.not_uploaded"),
+      listing: T(lang, "review.strip.listing_from", { ref: (profile && profile.default_branch) || "main", sha: listing && typeof listing.sha === "string" && listing.sha ? listing.sha.slice(0, 7) : DASH }),
+      notesPath: notes && notes.path ? String(notes.path) : null,
+      notesCounter: notesText != null ? fieldCounter(notesText, NOTES_LIMIT.android) : null,
+      notesText: notesText,
+      tag: up && up.tag ? String(up.tag) : null
+    };
+  }
+  /** 심사 결과(항목 40) — 색 + 낱말 + 플랫폼별 status/reason + observed. 모르는 status 는 빨강. */
+  function resultModel(entry, lang) {
+    var d = planEntryDoc(entry);
+    if (!d) return null;
+    var status = String(d.overall_status || DASH);
+    var plats = d.platforms && typeof d.platforms === "object" ? d.platforms : {};
+    var observed = d.observed && typeof d.observed === "object" ? d.observed : {};
+    var lines = Object.keys(plats).map(function (name) {
+      var p = plats[name] && typeof plats[name] === "object" ? plats[name] : { status: String(plats[name]) };
+      var text = T(lang, "review.result.platform", { name: name, status: String(p.status || DASH) });
+      if (p.reason) text += " · " + T(lang, "review.result.reason", { reason: String(p.reason) });
+      if (observed[name] != null) text += " · " + T(lang, "review.observed", { value: String(observed[name]) });
+      return { name: name, status: String(p.status || DASH), text: text };
+    });
+    var extras = [];
+    if (d.phased_release === true) extras.push(T(lang, "review.result.phased"));
+    if (d.play_managed_publishing === "confirmed-on" || d.managed_publishing_confirmed === true) extras.push(T(lang, "review.result.managed_confirmed"));
+    return { status: status, tone: RELEASE_STATUS_TONE[status] || "bad", platforms: lines, extras: extras, autoRelease: observed.auto_release === true || d.auto_release === true };
+  }
+  /** 409 등 서버의 거부 — 코드를 그대로 버튼 옆에 쓴다. 클라이언트가 돌아가지 않는다. */
+  function refusalText(res, lang) {
+    var b = res && res.body && typeof res.body === "object" ? res.body : {};
+    var code = b.code || b.error_code;
+    if (code) return T(lang, "review.server_code", { code: String(code) });
+    if (b.error) return String(b.error);
+    return "http " + (res ? res.status : "?");
+  }
+  /**
+   * plan.json 의 스토어 값을 글자로 — 숫자·글자는 그대로, 객체(`{name, status, codes:[…]}` 같은 Play 트랙)는
+   * `codes` 를 잇고, 없으면 name/status, 그것도 없으면 짧은 JSON. 절대 `[object Object]` 가 아니다. 없으면 —.
+   */
+  function storeValueText(v) {
+    if (v == null || v === "") return DASH;
+    if (typeof v !== "object") return String(v);
+    if (Array.isArray(v)) return v.length ? v.map(storeValueText).join(", ") : DASH;
+    if (Array.isArray(v.codes) && v.codes.length) return v.codes.map(storeValueText).join(", ");
+    var bits = [v.version, v.name, v.build, v.status].filter(function (x) { return x != null && x !== "" && typeof x !== "object"; }).map(String);
+    if (bits.length) return bits.join(" · ");
+    var json;
+    try { json = JSON.stringify(v); } catch (e) { json = "{…}"; }
+    return json.length > 60 ? json.slice(0, 59) + "…" : json;
+  }
+  /** Store 행(항목 6·42) — 색과 머리 조각과 본문. plan.json 은 서버가 읽어 `plan.doc` 으로 준다. */
+  function storeRowModel(release, releaseStatus, profile, lang, tzName, nowMs) {
+    var presets = profile && profile.presets ? profile.presets : {};
+    if (!presets.plan) return { state: "na", head: [naRowText("store", profile, lang)], body: null };
+    if (releaseStatus === 404 || !release) return { state: "na", head: [T(lang, "row.na.store")], body: null };
+    var plan = release.plan;
+    if (!plan) return { state: "na", head: [T(lang, "store.no_plan")], body: null };
+    var head = [], st = plan.state;
+    if (st === "running" || st === "queued" || st === "uploading" || st === "cancelling") return { state: "running", head: [T(lang, "store.head.plan_job", { id: plan.job_id, state: stateWord(st, lang) })], body: null };
+    var doc = planEntryDoc(plan);
+    if (!doc) {
+      var why = plan.doc_error ? T(lang, "store.head.plan_unreadable", { id: plan.job_id }) : T(lang, "store.head.plan_job", { id: plan.job_id, state: stateWord(st, lang) });
+      return { state: "bad", head: [why], body: null };
+    }
+    var store = doc.store && typeof doc.store === "object" ? doc.store : {};
+    var sv = storeValueText;
+    head.push(T(lang, "store.head.live", { version: sv(store.asc_live), build: sv(store.asc_live_build) }));
+    if (store.asc_editing != null) head.push(T(lang, "store.head.editing", { version: sv(store.asc_editing) }));
+    var play = store.play && typeof store.play === "object" && !Array.isArray(store.play) ? store.play : {};
+    var tracks = Object.keys(play);
+    head.push(tracks.length ? T(lang, "store.head.play", { track: tracks[0], build: sv(play[tracks[0]]) }) : T(lang, "store.head.play", { track: DASH, build: DASH }));
+    head.push(T(lang, "store.head.next", { n: isNum(doc.n) ? doc.n : DASH }));
+    var blockers = Array.isArray(doc.blockers) ? doc.blockers : [], warnings = Array.isArray(doc.warnings) ? doc.warnings : [];
+    var age = isNum(plan.age_seconds) ? plan.age_seconds : (parseIso(plan.measured_at) != null && isNum(nowMs) ? Math.max(0, (nowMs - parseIso(plan.measured_at)) / 1000) : null);
+    var state = "ok";
+    if (st !== "succeeded" && st !== "failed") state = "bad";
+    if (blockers.length) state = "bad";
+    else if (plan.stale === true) state = "stale";
+    if (doc.first_release === true) { head.push(T(lang, "store.head.first_release")); if (state === "ok") state = "stale"; }
+    if (blockers.length) head.push(T(lang, "store.head.blockers", { n: blockers.length }));
+    if (warnings.length) head.push(T(lang, "store.head.warnings", { n: warnings.length }));
+    head.push(plan.stale === true ? T(lang, "store.stale_badge", { age: fmtAgo(age, lang) }) : T(lang, "store.head.plan_age", { age: fmtAgo(age, lang) }));
+    var item = function (x) { return x && typeof x === "object" ? [x.code, x.text].filter(Boolean).join(" · ") : String(x); };
+    return {
+      state: state, head: head,
+      body: {
+        builds: [store.asc_live != null ? "App Store live " + sv(store.asc_live) + " (" + sv(store.asc_live_build) + ")" : null,
+          store.asc_editing != null ? "App Store editing " + sv(store.asc_editing) : null].filter(Boolean),
+        tracks: tracks.map(function (t) { return "Play " + t + " " + sv(play[t]); }),
+        next: isNum(doc.n) ? String(doc.n) : DASH,
+        measured: doc.measured_at ? fmtClock(String(doc.measured_at), tzName, nowMs) : DASH,
+        blockers: blockers.map(item), warnings: warnings.map(item), firstRelease: doc.first_release === true, jobId: plan.job_id
+      }
+    };
+  }
+  /** 큐·최근 행을 id 로 — `/api/status` 의 모든 풀에서. 진행·추정은 여기서만 온다. */
+  function rowsById(status) {
+    var map = {};
+    var pools = status && Array.isArray(status.pools) ? status.pools : [];
+    pools.forEach(function (p) {
+      ["queue", "recent"].forEach(function (k) { (Array.isArray(p[k]) ? p[k] : []).forEach(function (r) { if (r && isNum(r.id)) map[r.id] = r; }); });
+    });
+    return map;
+  }
+  /** 막대의 근거를 글자로(항목 46 · 계약 §6): 선언 단위 · 선언 스텝 · 시간(중앙값) · 없음. */
+  function basisText(p, lang) {
+    if (!p || p.basis === "none") return T(lang, "build.basis.none");
+    if (p.basis === "sub") return T(lang, "build.basis.sub", { unit: p.unit });
+    if (p.basis === "steps") return T(lang, "build.basis.steps");
+    return T(lang, p.source === "preset" ? "build.basis.time_preset" : "build.basis.time", { dur: fmtDuration(p.expected) });
+  }
+  function barHeadText(p, lang) {
+    if (!p || p.basis === "none" || !isNum(p.pct)) return T(lang, "pbar.none");
+    if (p.basis === "sub") return T(lang, "pbar.sub", { percent: p.pct, done: p.done, total: p.total, unit: p.unit });
+    if (p.basis === "steps") return T(lang, "pbar.steps", { percent: p.pct, done: p.done, total: p.total });
+    return T(lang, timeKey(p.source), { percent: p.pct });
+  }
+  var JOB_MARK = { succeeded: { mark: "✓", tone: "ok" }, running: { mark: "▶", tone: "running" }, cancelling: { mark: "▶", tone: "running" },
+    queued: { mark: "○", tone: "wait" }, uploading: { mark: "○", tone: "wait" }, failed: { mark: "✗", tone: "bad" }, timed_out: { mark: "✗", tone: "bad" },
+    lost: { mark: "?", tone: "bad" }, cancelled: { mark: "□", tone: "na" } };
+  /**
+   * Build·upload 행의 세 층(항목 46~48): 긴 막대(근거 글자와 예상 완료) → «지금 하는 일» 한 줄 →
+   * 항목 목록(✓ 초록 · ▶ 파랑 · 회색 waiting) + 도는 잡의 카드. 분모는 도는 잡의 것을 그대로
+   * 쓴다(progress.sub → steps → 시간 → 빗금). `rows` 는 `rowsById(status)`.
+   */
+  function buildLayers(jobs, rows, lang, tzName, nowMs) {
+    rows = rows || {};
+    var list = (Array.isArray(jobs) ? jobs : []).filter(function (j) { return j && isNum(j.id); }).slice().sort(function (a, b) { return a.id - b.id; });
+    var running = list.filter(function (j) { return j.state === "running" || j.state === "cancelling"; });
+    var cur = running.length ? running[running.length - 1] : null;
+    var row = cur ? rows[cur.id] || null : null;
+    var p = row ? overallProgress(row) : null;
+    var bar = null;
+    if (cur) {
+      var est = row && row.estimate ? row.estimate : {};
+      bar = { jobId: cur.id, role: cur.role || null, preset: cur.preset || DASH, progress: p, head: barHeadText(p, lang), basis: basisText(p, lang),
+        finishes: est.finish_at && !est.overdue && !est.stuck ? T(lang, "build.finishes", { clock: fmtClock(est.finish_at, tzName, nowMs) }) : null };
+    }
+    var nowLine = null;
+    if (cur) {
+      var ph = row ? progressHead(row.progress, lang) : null;
+      nowLine = T(lang, "build.now", { id: cur.id, preset: cur.preset || DASH }) + (ph ? " · " + ph : "");
+    }
+    var items = list.map(function (j) {
+      var mk = JOB_MARK[j.state] || { mark: "·", tone: "na" };
+      var r = rows[j.id] || null;
+      var dur = null;
+      var s = parseIso(j.started_at), e = parseIso(j.finished_at);
+      if (s != null && e != null) dur = fmtDuration((e - s) / 1000);
+      else if (s != null && (j.state === "running" || j.state === "cancelling") && isNum(nowMs)) dur = fmtDuration(Math.max(0, (nowMs - s) / 1000));
+      var parts = ["#" + j.id + " " + (j.preset || DASH)];
+      if (j.role && I18N.has("review.role." + j.role)) parts.push(T(lang, "review.role." + j.role));
+      parts.push(mk.tone === "wait" ? T(lang, "build.item.waiting") : stateWord(j.state, lang));
+      if (dur) parts.push(dur);
+      return { id: j.id, preset: j.preset || DASH, role: j.role || null, state: j.state, mark: mk.mark, tone: mk.tone, text: parts.join(" · "), row: r, running: mk.tone === "running" };
+    });
+    return { bar: bar, now: nowLine, items: items, current: cur };
+  }
+  /** Build·upload 행(항목 5 · 26 · 38 · 49) — 색 · 머리 조각 · 세 층. */
+  function buildRowModel(release, releaseStatus, profile, rows, lang, tzName, nowMs) {
+    var presets = profile && profile.presets ? profile.presets : {};
+    if (!presets.upload) return { state: "na", head: [naRowText("build", profile, lang)], layers: null, note: null };
+    if (releaseStatus === 404 || !release) return { state: "na", head: [T(lang, "row.na.build")], layers: null, note: null };
+    var plan = release.plan || null, doc = planEntryDoc(plan) || {};
+    var version = plan && plan.build_name != null ? String(plan.build_name) : DASH;
+    var n = isNum(doc.n) ? doc.n : DASH;
+    var layers = buildLayers(release.jobs, rows, lang, tzName, nowMs);
+    var head = [];
+    if (layers.current) {
+      head.push(T(lang, "build.head.version", { version: version, build: n }));
+      head.push(T(lang, "build.head.stage", { role: layers.current.role && I18N.has("review.role." + layers.current.role) ? T(lang, "review.role." + layers.current.role) : layers.current.preset || DASH, id: layers.current.id }));
+      if (layers.bar && layers.bar.progress && isNum(layers.bar.progress.pct)) {
+        var pr = layers.bar.progress;
+        head.push(isNum(pr.done) && isNum(pr.total) ? pr.done + "/" + pr.total : pr.pct + "%");
+      }
+      if (layers.bar && layers.bar.finishes) head.push(layers.bar.finishes);
+      return { state: "running", head: head, layers: layers, note: null };
+    }
+    var up = release.upload || null, upDoc = planEntryDoc(up);
+    if (up && (up.state === "lost")) return { state: "bad", head: [T(lang, "build.status.lost", { id: up.job_id, n: upDoc && isNum(upDoc.n) ? upDoc.n : n })], layers: layers, note: "lost" };
+    if (up && (up.state === "failed" || up.state === "timed_out" || up.state === "cancelled")) return { state: "bad", head: [T(lang, "build.status.failed", { id: up.job_id, state: stateWord(up.state, lang) })], layers: layers, note: null };
+    if (upDoc) {
+      var upN = isNum(upDoc.n) ? upDoc.n : n;
+      head.push(T(lang, "build.head.version", { version: version, build: upN }));
+      var status = String(upDoc.status || "");
+      head.push(I18N.has("build.status." + status) ? T(lang, "build.status." + status) : status || DASH);
+      if (Array.isArray(upDoc.platforms) && upDoc.platforms.length) head.push(T(lang, "build.item.platforms", { names: upDoc.platforms.join(" + ") }));
+      var fin = parseIso(up.finished_at);
+      if (fin != null) head.push(T(lang, "build.head.uploaded", { clock: fmtClock(up.finished_at, tzName, nowMs) }));
+      head.push("#" + up.job_id);
+      if (upDoc.tag) head.push(String(upDoc.tag));
+      var st = status === "success" ? "ok" : status === "partial" ? "bad" : "na";
+      return { state: st, head: head, layers: layers, note: null };
+    }
+    head.push(T(lang, "build.head.none"));
+    if (upDoc && upDoc.tag) head.push(T(lang, "build.head.last", { tag: upDoc.tag }));
+    return { state: "na", head: head, layers: layers, note: null };
+  }
+  // ── 릴리스 드라이버 스테퍼 · GitHub 카드 (항목 25 · 26 · 28 · 37~39, STORE-TAB-API-2 「Driver」) ──
+  //
+  // 웹은 판정하지 않는다(규칙 4): 단계는 드라이버가 찍은 줄에서 읽고, 종료 코드는 드라이버의 것 그대로다.
+  // S2 는 사람 단계 — 서버가 `plan_n` 을 주고 종료 코드가 2 면 사람이 그 숫자를 다시 타이핑해야
+  // `POST …/release/confirm` 이 나간다(항목 28). `mode=upload` 버튼은 이 PR 에 **일부러 없다** —
+  // 드라이버의 S7 이 업로드 길이고, 따로 두는 업로드 버튼은 자기 N 대화상자가 필요한 별개 결정이다.
+  var DRIVER_STAGES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"];
+  var STAGE_LINE = /stage\s+(S\d|DONE|BLOCKED_PR_CLOSED)\b/;
+  var NEXT_STAGE_LINE = /다음 단계 (S\d)\b/;
+  var PLAN_N_LINE = /plan:\s*N\s*=\s*(\d+)/;
+  var VERSION_RE = /^\d+\.\d+\.\d+$/;
+  /**
+   * 드라이버가 지금 어느 단계인가. 규칙: 종료 코드 0 → DONE · 2 → S2(사람 단계) · 그 밖에는
+   * `--status` 줄에서 `stage S<n>|DONE|BLOCKED_PR_CLOSED` 또는 `다음 단계 S<n>` 에 맞는 **마지막** 줄,
+   * 없으면 로그 꼬리에서 같은 규칙. `last` 는 마지막으로 보인 S 단계(BLOCKED 가 어디서 막혔는지).
+   */
+  function driverStage(status, exit, log) {
+    function scan(lines) {
+      var found = null, lastS = null;
+      (Array.isArray(lines) ? lines : []).forEach(function (raw) {
+        var line = String(raw == null ? "" : raw);
+        var m = STAGE_LINE.exec(line) || NEXT_STAGE_LINE.exec(line);
+        if (!m) return;
+        found = m[1];
+        if (/^S\d$/.test(m[1])) lastS = m[1];
+      });
+      return { stage: found, last: lastS };
+    }
+    var s = scan(status), l = scan(log);
+    var last = s.last || l.last;
+    if (exit === 0) return { stage: "DONE", last: last, source: "exit" };
+    if (exit === 2) return { stage: "S2", last: last, source: "exit" };
+    if (s.stage) return { stage: s.stage, last: last, source: "status" };
+    if (l.stage) return { stage: l.stage, last: last, source: "log" };
+    return { stage: null, last: last, source: null };
+  }
+  var EXIT_TONE = { 1: "bad", 2: "human", 3: "lost", 4: "warn" };
+  /**
+   * 스테퍼 아홉 칸(항목 26). `driver` 는 `GET …/release/driver` 본문(404 면 ctx.status), ctx 는
+   * `{status, lang, tzName, nowMs}`. 앞 단계 ✓ 초록 · 지금 ▶ 파랑 · 뒤 · 회색; 사람 단계는 황토 점선,
+   * 실패는 ✗ 빨강, exit 3 은 ? 보라(재시도 없음), exit 4 는 ! 황토, PR 닫힘은 ! 황토.
+   */
+  function stepperModel(driver, ctx) {
+    ctx = ctx || {};
+    var lang = ctx.lang, nowMs = ctx.nowMs;
+    var base = { available: true, configured: false, running: false, exit: null, stage: null, planN: null, version: DASH, items: [], head: "", headParts: [], tone: "na", dialog: false, log: [], idle: true, done: false, blocked: false, statusError: null };
+    if (ctx.status === 404) return Object.assign(base, { available: false, head: T(lang, "driver.na") });
+    if (!driver || typeof driver !== "object") return Object.assign(base, { loading: true, head: T(lang, "driver.loading") });
+    if (driver.configured === false) return Object.assign(base, { head: T(lang, "driver.not_configured") });
+    var running = driver.running === true;
+    var exit = !running && isNum(driver.exit_code) ? driver.exit_code : null;
+    var log = (Array.isArray(driver.log_tail) ? driver.log_tail : []).map(function (l) { return String(l == null ? "" : l); });
+    var planN = isNum(driver.plan_n) && Math.floor(driver.plan_n) === driver.plan_n ? driver.plan_n : null;
+    if (planN == null) log.forEach(function (l) { var m = PLAN_N_LINE.exec(l); if (m) planN = parseInt(m[1], 10); });
+    var parsed = driverStage(driver.status, exit, log);
+    var stage = parsed.stage;
+    if (!stage && running) stage = "S0";
+    var version = driver.build_name != null && driver.build_name !== "" ? String(driver.build_name) : DASH;
+    var idle = !running && exit == null;
+    var done = stage === "DONE", blocked = stage === "BLOCKED_PR_CLOSED";
+    var cur = DRIVER_STAGES.indexOf(blocked ? parsed.last : stage);
+    var tone = running ? "running" : idle ? "na" : done ? "ok" : blocked ? "warn" : EXIT_TONE[exit] || "bad";
+    var items = DRIVER_STAGES.map(function (id, i) {
+      var label = T(lang, "driver.stage." + id), st, glyph, note = [];
+      if (idle) { st = "todo"; glyph = "·"; }
+      else if (done || (cur >= 0 && i < cur)) { st = "done"; glyph = "✓"; }
+      else if (cur === i) {
+        if (running) { st = "current"; glyph = "▶"; note.push(T(lang, "driver.item.current")); }
+        else if (blocked) { st = "blocked"; glyph = "!"; note.push(T(lang, "driver.item.blocked")); }
+        else if (exit === 2) { st = "human"; glyph = "▶"; note.push(T(lang, "driver.item.human")); }
+        else if (exit === 3) { st = "unknown"; glyph = "?"; note.push(T(lang, "driver.item.unknown")); }
+        else if (exit === 4) { st = "drift"; glyph = "!"; note.push(T(lang, "driver.item.drift")); }
+        else { st = "failed"; glyph = "✗"; note.push(T(lang, "driver.item.failed")); }
+      } else { st = "todo"; glyph = "·"; note.push(T(lang, "driver.item.waiting")); }
+      if (id === "S1" && planN != null && st !== "todo") note.push(T(lang, "driver.item.n", { n: planN }));
+      if (id === "S2" && st === "done" && planN != null) note.push(T(lang, "driver.item.n_confirmed", { n: planN }));
+      if (id === "S2" && st === "todo") note.push(T(lang, "driver.item.human_ahead"));
+      if ((id === "S6" || id === "S7") && st === "todo") note.push(T(lang, "driver.item.irreversible"));
+      return { id: id, label: label, state: st, glyph: glyph, text: note.join(" · ") };
+    });
+    var stageLabel = cur >= 0 ? DRIVER_STAGES[cur] + " " + T(lang, "driver.stage." + DRIVER_STAGES[cur]) : null;
+    var parts = [];
+    if (idle) parts.push(T(lang, "driver.head.none"));
+    else if (running) {
+      parts.push(version);
+      parts.push(T(lang, "driver.head.stage", { stage: stageLabel || DASH }));
+      var started = parseIso(driver.started_at);
+      if (started != null && isNum(nowMs)) parts.push(fmtDuration(Math.max(0, (nowMs - started) / 1000)));
+      if (driver.started_by) parts.push(T(lang, "driver.head.by", { name: String(driver.started_by) }));
+    } else if (done) parts.push(T(lang, "driver.head.done", { version: version }));
+    else if (blocked) { parts.push(version); parts.push(T(lang, "driver.blocked")); }
+    else if (exit === 1) { parts.push(version); parts.push(stageLabel ? T(lang, "driver.exit.1", { stage: stageLabel }) : T(lang, "driver.exit.1_nostage")); }
+    else if (exit === 2) { parts.push(version); parts.push(planN != null ? T(lang, "driver.exit.2", { n: planN }) : T(lang, "driver.exit.2_unknown_n")); }
+    else if (exit === 3) { parts.push(version); parts.push(T(lang, "driver.exit.3")); }
+    else if (exit === 4) { parts.push(version); parts.push(T(lang, "driver.exit.4")); }
+    else { parts.push(version); parts.push(T(lang, "driver.exit.other", { code: exit })); }
+    var confirmed = driver.confirmed_n != null;
+    return {
+      available: true, configured: true, loading: false, running: running, exit: exit, stage: stage, stageSource: parsed.source, planN: planN, version: version,
+      items: items, head: parts.join(" · "), headParts: parts, tone: tone, idle: idle, done: done, blocked: blocked, log: log,
+      // S2 의 N 대화상자(항목 28): 종료 코드 2 · plan_n 있음 · 아직 확인한 N 없음
+      dialog: !running && exit === 2 && planN != null && !confirmed,
+      statusError: driver.status_error ? String(driver.status_error) : null,
+      startedBy: driver.started_by ? String(driver.started_by) : null, startedAt: driver.started_at || null
+    };
+  }
+  /** Build·upload 행의 색과 머리를 드라이버가 가져가는가 — 도는 중이거나 실패·대기·모름·드리프트일 때만. 끝난 회차(exit 0)는 upload.json 이 말한다. */
+  function driverRow(model) {
+    if (!model || !model.available || !model.configured || model.idle || model.done) return null;
+    var state = model.running ? "running" : model.exit === 2 || model.exit === 4 || model.blocked ? "stale" : "bad";
+    return { state: state, head: model.headParts.slice() };
+  }
+  /**
+   * 어느 버튼이 열리는가(항목 35 · 계약 「Driver」) — 이유는 전부 모아 준다. Start · Confirm · Abort ·
+   * Retry 는 admin, Rehearsal 은 클라이언트 토큰. ctx: {token, admin, busy, version, typedN, release,
+   * releaseStatus, uploadPreset}. Retry 는 exit 1 뿐이다 — exit 3 은 결과를 모르니 다시 올리지 않는다.
+   */
+  function driverActions(model, ctx) {
+    model = model || {}; ctx = ctx || {};
+    var live = model.available === true && model.configured === true;
+    function gate(admin) {
+      var r = [];
+      if (!ctx.token) r.push("no_token"); else if (admin && !ctx.admin) r.push("admin");
+      if (ctx.busy) r.push("busy");
+      return r;
+    }
+    var r = gate(true);
+    if (!model.available) r.push("na"); else if (!model.configured) r.push("not_configured");
+    else if (model.running) r.push("running");
+    else if (model.exit === 2) r.push("awaiting_n");
+    else if (model.exit === 3) r.push("result_unknown");
+    if (!VERSION_RE.test(String(ctx.version == null ? "" : ctx.version))) r.push("version_pattern");
+    var start = { enabled: !r.length, reasons: r, show: live && !model.running && model.exit !== 2 };
+    r = gate(true);
+    if (!model.dialog) r.push("no_dialog"); else if (!nMatches(ctx.typedN, model.planN)) r.push("n_mismatch");
+    var confirm = { enabled: !r.length, reasons: r, show: model.dialog === true };
+    r = gate(true);
+    if (!model.running) r.push("not_running");
+    var abort = { enabled: !r.length, reasons: r, show: live && model.running === true };
+    r = gate(true);
+    if (model.running) r.push("running"); else if (model.exit === 3) r.push("result_unknown"); else if (model.exit !== 1) r.push("not_failed");
+    var retry = { enabled: !r.length, reasons: r, show: live && !model.running && model.exit === 1 };
+    // 예행(업로드 없음) — 플랜의 N 이 confirm_build_number 로 간다. mode=upload 버튼은 없다.
+    r = gate(false);
+    var doc = planEntryDoc(ctx.release && ctx.release.plan);
+    if (!doc || !isNum(doc.n)) r.push("no_plan");
+    if (model.running) r.push("running");
+    var rehearsal = { enabled: !r.length, reasons: r, show: !!ctx.uploadPreset && ctx.releaseStatus !== 404 && !!ctx.release };
+    return { start: start, confirm: confirm, abort: abort, retry: retry, rehearsal: rehearsal };
+  }
+  /** `POST …/release/upload` 예행 본문 — 플랜의 build_name 과 N 그대로. */
+  function rehearsalBody(release) {
+    var plan = release && release.plan ? release.plan : {}, doc = planEntryDoc(plan) || {};
+    return { mode: "rehearsal", build_name: plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : ""),
+      confirm_build_number: isNum(doc.n) ? String(doc.n) : "" };
+  }
+  /** 친 N 과 드라이버의 plan_n — 글자 그대로 같아야 한다(nMatches). state: empty · ok · mismatch · unknown. */
+  function confirmNDecision(typed, planN) {
+    if (!isNum(planN) || Math.floor(planN) !== planN) return { enabled: false, state: "unknown" };
+    if (typeof typed !== "string" || typed === "") return { enabled: false, state: "empty" };
+    return nMatches(typed, planN) ? { enabled: true, state: "ok" } : { enabled: false, state: "mismatch" };
+  }
+  /** Source 행의 GitHub 카드(항목 25): 미러의 최근 다섯 커밋 · 태그(최신 표시) · PR 은 null 이면 «다음». */
+  function githubCardModel(gh, status, ref, lang, tzName, nowMs) {
+    if (status === 404) return { state: "na", text: T(lang, "github.na"), log: [], tags: [], prs: null };
+    if (!gh || typeof gh !== "object") return { state: "loading", text: T(lang, "github.loading"), log: [], tags: [], prs: null };
+    var log = (Array.isArray(gh.log) ? gh.log : []).filter(function (c) { return c && typeof c === "object"; }).slice(0, 5).map(function (c) {
+      return { sha: String(c.sha || "").slice(0, 7), subject: String(c.subject || ""), author: String(c.author || ""), at: c.at ? fmtClock(String(c.at), tzName, nowMs) : DASH };
+    });
+    var tags = (Array.isArray(gh.tags) ? gh.tags : []).filter(function (t) { return t && typeof t === "object" && t.name; }).map(function (t) {
+      return { name: String(t.name), at: t.at ? fmtClock(String(t.at), tzName, nowMs) : DASH, ms: parseIso(t.at), latest: false };
+    });
+    var best = -1;
+    tags.forEach(function (t, i) { if (t.ms != null && (best < 0 || t.ms > tags[best].ms)) best = i; });
+    if (best < 0 && tags.length) best = 0;
+    tags.forEach(function (t, i) { t.latest = i === best; delete t.ms; });
+    var prs = gh.prs == null ? null : (Array.isArray(gh.prs) ? gh.prs : []).filter(function (p) { return p && typeof p === "object"; }).map(function (p) {
+      return { number: p.number != null ? p.number : DASH, title: String(p.title || ""), state: String(p.state || "") };
+    });
+    return { state: "ok", ref: ref || "main", log: log, tags: tags, prs: prs,
+      prsText: prs == null ? T(lang, "github.prs_next") : prs.length ? null : T(lang, "github.none") };
+  }
+  /**
+   * 서버 호출 한 곳. `fetchFn` 은 window.fetch 모양, `tokenFn` 은 지금 토큰(없으면 null)을 준다.
+   * 모든 메서드가 `{ok, status, body}` 로 풀린다 — 404 도 던지지 않는다(프로파일 PR 이 없는 서버는
+   * `/api/repos` 가 404 고, 그러면 탭이 없을 뿐이다). node 테스트는 fetchFn 을 스텁으로 준다.
+   */
+  function makeStoreApi(fetchFn, tokenFn) {
+    function call(method, path, body, contentType) {
+      var headers = {};
+      var tok = tokenFn ? tokenFn() : null;
+      if (tok) headers.Authorization = "Bearer " + tok;
+      if (contentType) headers["Content-Type"] = contentType;
+      return fetchFn(path, { method: method, headers: headers, body: body, cache: "no-store" }).then(function (r) {
+        return r.text().then(function (text) {
+          var parsed = null;
+          try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = { error: text }; }
+          return { ok: !!r.ok, status: r.status, body: parsed };
+        });
+      });
+    }
+    var enc = encodeURIComponent;
+    function base(repo) { return "/api/repos/" + enc(repo); }
+    return {
+      repos: function () { return call("GET", "/api/repos"); },
+      repo: function (name) { return call("GET", base(name)); },
+      secrets: function (name) { return call("GET", base(name) + "/secrets"); },
+      // 값은 text/plain, 파일은 octet-stream, 폴더 안 파일은 `/secrets/<secret>/<file>`
+      putSecret: function (name, secret, body, contentType, fileName) {
+        var path = base(name) + "/secrets/" + enc(secret) + (fileName ? "/" + enc(fileName) : "");
+        return call("PUT", path, body, contentType || "application/octet-stream");
+      },
+      verify: function (name, names) {
+        return call("POST", base(name) + "/verify", JSON.stringify(names && names.length ? { names: names } : {}), "application/json");
+      },
+      fetchRemote: function (name) { return call("POST", base(name) + "/fetch", "{}", "application/json"); },
+      // ── STORE-TAB-API-2 — 릴리스 상태 · 플랜 · 심사 · 업로드 · 소개 자료 · 드라이버 ──
+      release: function (name) { return call("GET", base(name) + "/release"); },
+      plan: function (name, body) { return call("POST", base(name) + "/release/plan", JSON.stringify(body || {}), "application/json"); },
+      review: function (name, body) { return call("POST", base(name) + "/release/review", JSON.stringify(body || {}), "application/json"); },
+      upload: function (name, body) { return call("POST", base(name) + "/release/upload", JSON.stringify(body || {}), "application/json"); },
+      listing: function (name) { return call("GET", base(name) + "/release/listing"); },
+      listingFileUrl: function (name, path) { return base(name) + "/release/listing/file?path=" + enc(path); },
+      validateListing: function (name, body) { return call("POST", base(name) + "/release/listing/validate", JSON.stringify(body || {}), "application/json"); },
+      github: function (name) { return call("GET", base(name) + "/release/github"); },
+      driver: function (name) { return call("GET", base(name) + "/release/driver"); },
+      driverStart: function (name, body) { return call("POST", base(name) + "/release/start", JSON.stringify(body || {}), "application/json"); },
+      driverConfirm: function (name, body) { return call("POST", base(name) + "/release/confirm", JSON.stringify(body || {}), "application/json"); },
+      driverAbort: function (name, body) { return call("POST", base(name) + "/release/abort", JSON.stringify(body || {}), "application/json"); },
+      driverRetry: function (name, body) { return call("POST", base(name) + "/release/retry", JSON.stringify(body || {}), "application/json"); }
+    };
+  }
+  var storePure = {
+    parseRoute: parseRoute, releaseRepos: releaseRepos, setupSummary: setupSummary, fingerprintText: fingerprintText,
+    dirFiles: dirFiles, verifiedCell: verifiedCell, secretRowModel: secretRowModel, dropAccept: dropAccept,
+    mirrorAge: mirrorAge, rowState: rowState, rowOpen: rowOpen, setupHead: setupHead, sourceHead: sourceHead,
+    naRowText: naRowText, makeStoreApi: makeStoreApi, ROW_GLYPH: ROW_GLYPH, STORE_STALE_SECONDS: STORE_STALE_SECONDS,
+    // 심사 패널 본체 · Store 행 · Build·upload 행
+    verdictTone: verdictTone, bannerDecision: bannerDecision, reviewPlanVerdict: reviewPlanVerdict, nMatches: nMatches,
+    platformParam: platformParam, submitDecision: submitDecision, reviewBody: reviewBody, resultIsCurrent: resultIsCurrent,
+    panelPill: panelPill, panelOpen: panelOpen, fieldCounter: fieldCounter, listingFields: listingFields,
+    screenshotGroups: screenshotGroups, reviewInfoModel: reviewInfoModel, versionStrip: versionStrip, resultModel: resultModel,
+    refusalText: refusalText, storeRowModel: storeRowModel, rowsById: rowsById, basisText: basisText, buildLayers: buildLayers,
+    buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS,
+    // 릴리스 드라이버 스테퍼 · GitHub 카드
+    driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
+    confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
+    storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
+  };
+
   var rcm = {
     DASH: DASH, esc: esc, fmtDuration: fmtDuration, fmtClock: fmtClock, fmtClockSeconds: fmtClockSeconds, fmtAgo: fmtAgo,
     fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtDisk: fmtDisk, fmtMb: fmtMb, fmtPct: fmtPct,
@@ -1029,11 +1951,12 @@
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
-    LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
+    LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS,
+    store: storePure
   };
   if (typeof module !== "undefined" && module.exports) module.exports = rcm;
   if (typeof globalThis !== "undefined") globalThis.rcm = rcm;
@@ -1055,7 +1978,18 @@
     // 호스트 이름 → 직전 압력 판정. 「바쁨」에 이력을 주는 기억이고 이 페이지에만 산다.
     hostVerdicts: {},
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
-    drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null
+    drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null,
+    // 스토어 탭. `repos` 는 릴리스 프로파일이 있는 저장소(null = 아직 안 물어봄). 비밀 값은 여기 없다.
+    view: "queue", store: { api: null, repos: null, reposStatus: null, repo: null, doc: null, secrets: null, screen: null,
+      error: null, fetchError: null, fetching: false, verifying: false, loadedAt: null, timer: null, seq: 0, dialogSecret: null,
+      // 릴리스 상태(`GET …/release`) · 소개 자료(`GET …/release/listing`) · 사람의 선택. 선택은 이 페이지에만 산다 —
+      // 관리형 게시 체크와 친 N 은 새 플랜이 오면 지워지고 localStorage 에 가지 않는다(결정 3 · 항목 28).
+      release: null, releaseStatus: null, listing: null, listingStatus: null, busy: null, reviewError: null, planError: null, validate: null,
+      review: { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null },
+      // 릴리스 드라이버(`GET …/release/driver`) · GitHub 카드(`GET …/release/github`). Start 폼의 값과 S2 의 친 N 도
+      // 이 페이지에만 산다 — 회차(build_name · plan_n)가 바뀌면 지워진다. `driverDialogKey` 는 S2 대화상자를 회차마다 한 번만 저절로 연다.
+      driver: null, driverStatus: null, github: null, githubStatus: null, driverError: null, driverN: "", driverDialogKey: null,
+      driverForm: { version: null, track: "", dryRun: false } }
   };
   function now() { return state.skewUnknown ? NaN : Date.now() + state.skewMs; }
   function tz() { return state.tz || undefined; }
@@ -1105,6 +2039,7 @@
     applyStatic();
     render();
     renderTokenButton();
+    renderNav(); renderStore();
     if (state.cancelTarget) openCancel(state.cancelTarget);
     if (state.drawer.jobId != null) {
       var d = $("[data-drawer-title]");
@@ -1197,7 +2132,7 @@
   // ── 토큰 (항목 4 · 29) ──
   function tokenRejected() {
     state.tokenBad = true; state.me = null; state.admin = false; state.token = null; lsSet("rcm.token", null);
-    renderTokenButton(); render();
+    renderTokenButton(); render(); if (state.view === "store") renderStore();
   }
   function verifyToken(tok, silent) {
     var status = $("[data-tok-status]");
@@ -1217,7 +2152,7 @@
       state.token = tok; state.tokenBad = false;
       if (status) status.textContent = tr("token.kept");
       return null;
-    }).then(function (ok) { renderTokenButton(); if (ok !== false) fetchStatus(); return ok; });
+    }).then(function (ok) { renderTokenButton(); if (ok !== false) fetchStatus(); storeAuthChanged(); return ok; });
   }
   function renderTokenButton() {
     var b = $("#tok-btn");
@@ -1242,7 +2177,7 @@
     });
     $("[data-tok-cancel]").addEventListener("click", function () { dlg.close(); });
     $("[data-tok-forget]").addEventListener("click", function () {
-      state.token = null; state.me = null; state.admin = false; state.tokenBad = false; lsSet("rcm.token", null); renderTokenButton(); render(); dlg.close();
+      state.token = null; state.me = null; state.admin = false; state.tokenBad = false; lsSet("rcm.token", null); renderTokenButton(); render(); storeAuthChanged(); dlg.close();
     });
     dlg.querySelector("form").addEventListener("submit", function (ev) {
       ev.preventDefault();
@@ -1251,7 +2186,7 @@
       verifyToken(tok).then(function (ok) { if (ok) dlg.close(); });
     });
     window.addEventListener("storage", function (ev) {
-      if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; state.admin = false; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); } }
+      if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; state.admin = false; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); storeAuthChanged(); } }
       if (ev.key === "rcm.expanded") { state.expanded = {}; loadExpanded(); renderQueue(); }
       // 다른 탭에서 언어를 바꾸면 이 탭도 따라온다
       if (ev.key === "rcm.lang") { state.lang = I18N.normalize(ev.newValue); applyLang(); }
@@ -1685,6 +2620,8 @@
       for (var j = 0; j < pending; j++) h += '<div class="step pend"><span class="g" aria-hidden="true">·</span><span>…</span><span class="s">' + DASH + "</span></div>";
       h += "</div>";
     }
+    // 스텝 안의 단위 격자(`::rcm::progress::`) — 스텝 목록 아래, 둘 이상일 때만
+    h += unitsGridHtml(prog, L());
     return h;
   }
   function tailHtml(row) {
@@ -1958,6 +2895,7 @@
       // 1초마다 다시 쓰는 자리 — 렌더 시점이 아니라 **지금** 언어를 읽는다
       else if (kind === "waiting") el.textContent = tr("elapsed.waiting", { dur: fmtDuration(s) });
       else if (kind === "age") el.textContent = tr("host.sampled", { age: fmtAgo(s, L()) });
+      else if (kind === "updated") el.textContent = tr("store.updated", { age: fmtAgo(s, L()) });
     });
     renderHeaderConn();
   }
@@ -2206,7 +3144,982 @@
       else { state.hiddenSince = null; if (state.conn.mode === "paused" && state.conn.before) resumeUpdates("visible"); }
     });
   }
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 스토어 탭 — DOM (docs/wireframes/web-store.html). 큐의 SSE·폴링은 이 화면에서도 그대로 산다:
+  // 큐 절은 `hidden` 일 뿐 `render()` 는 계속 그린다. 스토어 자료는 SSE 가 없어 들어올 때 받고,
+  // 행동(넣기·검증·가져오기) 뒤에 다시 받고, 화면이 보이는 동안 30초마다 받는다.
+  // 비밀 값은 대화상자 입력칸에만 잠깐 있고, 보내면 비운다 — localStorage 에도 state 에도 없다.
+  // ═══════════════════════════════════════════════════════════════════════════
+  var STORE_REFRESH_MS = 30000;
+  var STORE_ROWS_KEY = "rcm.store.rows";  // 사람이 여닫은 행 — `<repo>/<row>` → open|closed (큐 화면 규칙)
+  // 시험은 `window.rcmStoreApi` 로 서버 호출을 통째로 바꿔 끼운다(tests/test_web_browser.py) —
+  // 그것 말고는 진짜 fetch 다. 게으르게 고르는 이유: 시험의 스텁은 페이지 스크립트보다 먼저 심긴다.
+  function storeApi() {
+    if (root && root.rcmStoreApi) return root.rcmStoreApi;
+    if (!state.store.api) state.store.api = makeStoreApi(function (p, o) { return fetch(p, o); }, function () { return state.token; });
+    return state.store.api;
+  }
+  function storeErrorDetail(res) {
+    var b = res && res.body;
+    if (b && typeof b === "object" && b.error) return errorText(String(b.error), b.code);
+    return "http " + (res ? res.status : "?");
+  }
+  function loadRowMemory() { try { return JSON.parse(lsGet(STORE_ROWS_KEY) || "{}") || {}; } catch (e) { return {}; } }
+  function rememberRow(row, open) {
+    var mem = loadRowMemory();
+    mem[state.store.repo + "/" + row] = open ? "open" : "closed";
+    lsSet(STORE_ROWS_KEY, JSON.stringify(mem));
+  }
+
+  // ── 화면 전환 (항목 1) ──
+  function showView(view) {
+    state.view = view;
+    ["#summary", "#queue", "#host", "#recent"].forEach(function (sel) { var el = $(sel); if (el) el.hidden = view !== "queue"; });
+    var st = $("#store");
+    if (st) st.hidden = view !== "store";
+    renderNav();
+    if (view !== "store") { clearInterval(state.store.timer); state.store.timer = null; }
+  }
+  /** 머리의 `Queue | Store` — 릴리스 프로파일이 있는 저장소가 있을 때만 있다. 여럿이면 고르는 칸. */
+  function renderNav() {
+    var nav = $("#view-nav");
+    if (!nav) return;
+    var repos = state.store.repos || [];
+    if (!repos.length) { nav.hidden = true; return; }
+    nav.hidden = false;
+    var current = state.store.repo && repos.some(function (r) { return r.name === state.store.repo; }) ? state.store.repo : repos[0].name;
+    var h = '<a href="#/" data-nav="queue"' + (state.view !== "store" ? ' aria-current="page"' : "") + ">" + esc(tr("nav.queue")) + "</a>"
+      + '<a href="#/store/' + encodeURIComponent(current) + '" data-nav="store"' + (state.view === "store" ? ' aria-current="page"' : "") + ">" + esc(tr("nav.store")) + "</a>";
+    if (repos.length > 1) {
+      h += '<select data-repo-select aria-label="' + esc(tr("nav.repo")) + '">' + repos.map(function (r) {
+        return '<option value="' + esc(r.name) + '"' + (r.name === current ? " selected" : "") + ">" + esc(r.name) + "</option>";
+      }).join("") + "</select>";
+    } else h += '<span class="mono sub">' + esc(current) + "</span>";
+    nav.innerHTML = h;
+  }
+  /** `GET /api/repos` — 404(프로파일 PR 이 없는 서버)·오류면 탭이 없을 뿐이다. */
+  function loadRepos() {
+    return storeApi().repos().then(function (res) {
+      state.store.repos = res.ok ? releaseRepos(res.body) : [];
+      state.store.reposStatus = res.status;
+      renderNav();
+    }).catch(function () { state.store.repos = state.store.repos || []; renderNav(); });
+  }
+
+  // ── 들어오기 · 받기 ──
+  function enterStore(repo) {
+    if (state.store.repo !== repo) {
+      state.store.repo = repo; state.store.doc = null; state.store.secrets = null; state.store.screen = null;
+      state.store.fetchError = null; state.store.error = null; state.store.loadedAt = null;
+      state.store.release = null; state.store.releaseStatus = null; state.store.listing = null; state.store.listingStatus = null;
+      state.store.busy = null; state.store.reviewError = null; state.store.planError = null; state.store.validate = null;
+      state.store.review = { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null };
+      state.store.driver = null; state.store.driverStatus = null; state.store.github = null; state.store.githubStatus = null;
+      state.store.driverError = null; state.store.driverN = ""; state.store.driverDialogKey = null;
+      state.store.driverForm = { version: null, track: "", dryRun: false };
+    }
+    showView("store");
+    renderStore();
+    loadStore();
+    clearInterval(state.store.timer);
+    state.store.timer = setInterval(function () {
+      if (state.view === "store" && state.conn.mode !== "paused" && !document.hidden) loadStore();
+    }, STORE_REFRESH_MS);
+  }
+  function loadStore(opts) {
+    var repo = state.store.repo;
+    if (!repo) return Promise.resolve();
+    var api = storeApi();
+    var seq = (state.store.seq = (state.store.seq || 0) + 1);
+    // 소개 자료는 서버에서 명령을 돌리는 것이라 30초 타이머로는 안 받는다 — 처음과 새로고침·검사 뒤에만
+    var wantListing = (opts && opts.listing) || state.store.listing == null && state.store.listingStatus == null;
+    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(), wantListing ? loadListing() : null, loadDriver(), loadGithub()]).then(function (rs) {
+      if (seq !== state.store.seq || state.store.repo !== repo) return;  // 그 사이 다른 저장소로 갔다
+      state.store.repos = rs[0].ok ? releaseRepos(rs[0].body) : [];
+      state.store.reposStatus = rs[0].status;
+      if (rs[1].ok && rs[1].body && typeof rs[1].body === "object") { state.store.doc = rs[1].body; state.store.error = null; }
+      else { state.store.doc = null; state.store.error = rs[1]; }
+      state.store.secrets = rs[2].ok && rs[2].body && Array.isArray(rs[2].body.items) ? rs[2].body : null;
+      state.store.loadedAt = now();
+      // 관문(항목 29·34): 완료가 아니면 설정 화면이다 — 사람이 스토어를 골랐어도 도로 관문이다
+      var complete = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
+      if (!complete) state.store.screen = "settings";
+      else if (!state.store.screen) state.store.screen = "store";
+      renderNav(); renderStore();
+    }).catch(function () {
+      if (seq !== state.store.seq) return;
+      state.store.error = { status: 0, body: null }; renderStore();
+    });
+  }
+  function storeAuthChanged() { if (state.store.repo && state.view === "store") loadStore(); }
+
+  // ── 렌더 ──
+  function renderStore() {
+    var body = $("[data-store-body]");
+    if (!body || state.view !== "store") return;
+    var repo = state.store.repo;
+    var head = $("[data-store-title]");
+    if (head) head.textContent = tr("store.heading", { repo: repo || DASH });
+    if (state.store.repos && !state.store.repos.length) { body.innerHTML = '<p class="empty">' + esc(tr("store.none")) + "</p>"; return; }
+    if (state.store.error) {
+      var msg = state.store.error.status === 404 ? tr("store.unknown_repo", { repo: repo }) : tr("store.load_failed", { repo: repo, detail: storeErrorDetail(state.store.error) });
+      body.innerHTML = '<p class="empty">' + esc(msg) + "</p>"; return;
+    }
+    if (!state.store.doc) { body.innerHTML = '<p class="empty">' + esc(tr("store.loading")) + "</p>"; return; }
+    withFocus(function () {
+      body.innerHTML = state.store.screen === "store" ? storeScreenHtml() : settingsHtml();
+      // 렌더가 정한 열림은 기억이 아니다 — 사람이 바꾼 것만 `toggle` 에서 남긴다(호스트 절과 같은 규칙)
+      $$("details.srow", body).forEach(function (d) { d.dataset.renderedOpen = d.open ? "1" : "0"; });
+      if (state.store.screen === "store") afterStoreRender();
+    });
+  }
+  function secretsItems() { return state.store.secrets ? state.store.secrets.items : []; }
+  /** 관문 띠 + 저장된 비밀 표 (항목 29~33). */
+  function settingsHtml() {
+    var doc = state.store.doc, repo = state.store.repo;
+    var sum = setupSummary(doc.setup, L());
+    var h = '<div class="banner gate ' + sum.tone + '" role="status" data-gate>'
+      + '<span class="g" aria-hidden="true">' + ROW_GLYPH[sum.tone] + "</span>"
+      + "<b>" + esc(tr(sum.complete ? "store.gate.complete" : "store.gate.incomplete", { repo: repo })) + "</b>"
+      + '<span data-gate-counts>' + esc(sum.text) + "</span>"
+      + '<span class="spacer"></span>'
+      + '<button type="button" class="btn primary" data-enter-store' + (sum.complete ? "" : ' disabled title="' + esc(tr("store.gate.enter_hint")) + '"') + ">" + esc(tr("store.gate.enter")) + "</button>"
+      + '<span class="sub gate-help">' + esc(tr("store.gate.help")) + "</span>"
+      + "</div>";
+    h += secretsTableHtml();
+    return h;
+  }
+  function secretsTableHtml() {
+    var doc = state.store.doc, repo = state.store.repo, items = secretsItems();
+    var canVerify = !!state.token;
+    var h = '<section class="secrets" aria-label="' + esc(tr("secrets.title", { repo: repo })) + '">'
+      + '<div class="s-h"><span class="t">' + esc(tr("secrets.title", { repo: repo })) + "</span>"
+      + '<span class="n">' + esc(tr("secrets.profile_line", { repo: repo, name: (state.store.secrets && state.store.secrets.dir_env) || (doc.profile && doc.profile.secrets_dir_env) || DASH })) + "</span>"
+      + '<span class="spacer"></span>'
+      + '<button type="button" class="btn" data-verify-all' + (canVerify && !state.store.verifying ? "" : " disabled") + (canVerify ? "" : ' title="' + esc(tr("store.gate.no_token")) + '"') + ">" + esc(tr(state.store.verifying ? "secrets.verifying" : "secrets.verify_all")) + "</button></div>";
+    if (!state.admin) h += '<p class="sub readonly" data-readonly-reason>' + esc(tr("store.gate.admin_only", { repo: repo })) + "</p>";
+    if (!state.store.secrets) h += '<p class="empty">' + esc(tr("store.load_failed", { repo: repo, detail: "secrets" })) + "</p>";
+    else {
+      h += '<div class="secwrap"><table class="sec"><thead><tr><th>' + esc(tr("secrets.col.secret")) + "</th><th>" + esc(tr("secrets.col.kind")) + "</th><th>" + esc(tr("secrets.col.state")) + "</th><th>" + esc(tr("secrets.col.fingerprint")) + "</th><th>" + esc(tr("secrets.col.verified")) + "</th><th></th></tr></thead><tbody>";
+      items.forEach(function (it) { h += secretRowHtml(it); });
+      h += "</tbody></table></div>";
+    }
+    h += '<p class="sub">' + esc(tr("secrets.never_shown")) + "</p></section>";
+    return h;
+  }
+  function presentPill(present, word) {
+    return '<span class="pill ' + (present ? "present" : "missing") + '"><span class="g" aria-hidden="true">' + (present ? "✓" : "✗") + "</span>" + esc(word) + "</span>";
+  }
+  /** 드롭존(항목 30). 파일 선택도 같은 자리. 「빌드 머신의 경로」 입력은 이 PR 에 없다 —
+      서버 계약(STORE-TAB-API)에 경로를 받는 길이 없어서다. 드롭 파일은 메모리에서 바로 PUT. */
+  function dropzoneHtml(secret, fileName, present) {
+    var disabled = !state.admin;
+    var text = tr(present ? "secrets.drop_replace" : "secrets.drop");
+    return '<label class="drop' + (disabled ? " disabled" : "") + '" data-drop="' + esc(secret) + '"' + (fileName ? ' data-drop-file="' + esc(fileName) + '"' : "")
+      + (disabled ? ' title="' + esc(tr("secrets.reject.admin")) + '"' : "") + '>'
+      + '<input type="file" hidden' + (disabled ? " disabled" : "") + ' aria-label="' + esc(text) + '">'
+      + '<span class="g" aria-hidden="true">⤓</span><span>' + esc(text) + "</span></label>";
+  }
+  function secretRowHtml(it) {
+    var m = secretRowModel(it, L(), tz(), now());
+    var action = "";
+    if (m.input === "value") action = '<button type="button" class="btn" data-set-value="' + esc(m.name) + '"' + (state.admin ? "" : ' disabled title="' + esc(tr("secrets.reject.admin")) + '"') + ">" + esc(tr(m.action === "replace" ? "secrets.replace" : "secrets.add")) + "</button>";
+    else if (m.input === "file") action = dropzoneHtml(m.name, null, m.present);
+    var h = '<tr data-secret="' + esc(m.name) + '" class="' + (m.present ? "" : "missing") + '">'
+      + '<td class="name"><span class="key">' + esc(m.name) + "</span>" + (m.optional ? ' <span class="chip">' + esc(tr("secrets.optional")) + "</span>" : "") + "</td>"
+      + '<td class="kind">' + esc(m.kindWord) + "</td>"
+      + '<td class="state">' + presentPill(m.present, m.presentWord) + "</td>"
+      + '<td class="fp mono">' + esc(m.fingerprint) + "</td>"
+      + '<td class="ver ' + m.verified.tone + '">' + esc(m.verified.text) + "</td>"
+      + '<td class="act">' + action + "</td></tr>";
+    m.files.forEach(function (f) {
+      h += '<tr class="subfile' + (f.present ? "" : " missing") + '" data-secret="' + esc(m.name) + '" data-file="' + esc(f.name) + '">'
+        + '<td class="name"><span class="key">' + esc(f.name) + "</span></td><td class=\"kind\">" + esc(tr("secrets.kind.file")) + "</td>"
+        + '<td class="state">' + presentPill(f.present, tr(f.present ? "secrets.present" : "secrets.missing")) + "</td>"
+        + '<td class="fp mono">' + esc(f.fingerprint) + '</td><td class="ver"></td>'
+        + '<td class="act">' + dropzoneHtml(m.name, f.name, f.present) + "</td></tr>";
+    });
+    return h;
+  }
+  /** 접히는 행 하나 (7절). 색 = 상태, 글리프 + 글자로 한 번 더. 머리의 버튼은 여닫지 않는다. */
+  function srowHtml(key, st, head, extra, bodyHtml) {
+    var open = rowOpen(st, loadRowMemory()[state.store.repo + "/" + key]);
+    return '<details class="srow" data-row="' + key + '" data-state="' + st + '"' + (open ? " open" : "") + ">"
+      + '<summary><span class="g" aria-hidden="true">' + ROW_GLYPH[st] + '</span><span class="t">' + esc(tr("row." + key)) + "</span>"
+      + '<span class="sr-state">' + esc(tr("row.state." + st)) + "</span>"
+      + '<span class="n">' + head + "</span>" + (extra ? '<span class="spacer"></span>' + extra : "") + "</summary>"
+      + '<div class="srow-body">' + bodyHtml + "</div></details>";
+  }
+  /** 스토어 화면 (항목 1~6 · 27): 행 넷 + 접힌 본체 머리 + 고정 문장. */
+  function storeScreenHtml() {
+    var doc = state.store.doc, repo = state.store.repo, items = secretsItems(), profile = doc.profile || {};
+    var n = now();
+    var h = '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
+      + '<span class="spacer"></span><button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+    // Setup — 프로파일이 선언한 비밀 표(읽기 전용 + Replace · Verify all)
+    var setupState = rowState("setup", { setup: doc.setup });
+    h += srowHtml("setup", setupState, esc(setupHead(doc.setup, items, profile, L(), tz(), n)),
+      '<button type="button" class="btn" data-goto-settings>' + esc(tr("row.settings")) + "</button>", secretsTableHtml());
+    // Source — 미러 · main/dev · main ⊂ dev · Fetch remote (항목 4 · 25 · 42)
+    var srcCtx = { nowMs: n, fetchError: state.store.fetchError };
+    var srcState = rowState("source", { doc: doc, nowMs: n, fetchError: state.store.fetchError });
+    var br = doc.branches || {}, mirror = doc.mirror || {};
+    var canFetch = !!state.token && !state.store.fetching;
+    var fetchBtn = '<button type="button" class="btn" data-fetch-remote' + (canFetch ? "" : " disabled") + (state.token ? "" : ' title="' + esc(tr("source.no_fetch_token")) + '"') + ">" + esc(tr(state.store.fetching ? "source.fetching" : "source.fetch")) + "</button>";
+    var srcBody = '<dl class="kv">'
+      + "<dt>main</dt><dd class=\"mono\">" + esc(br.main || DASH) + "</dd>"
+      + "<dt>dev</dt><dd class=\"mono\">" + esc(br.dev || DASH) + "</dd>"
+      + "<dt>" + esc(tr("row.source")) + "</dt><dd>" + esc(br.main_in_dev === true ? tr("source.main_in_dev") : br.main_in_dev === false ? tr("source.main_not_in_dev") : tr("source.branches_unknown")) + "</dd>"
+      + "<dt>mirror</dt><dd>" + esc(mirror.fetched_at ? tr("source.mirror_at", { clock: fmtClock(mirror.fetched_at, tz(), n) }) : tr("source.never_fetched")) + (mirror.path ? ' <span class="mono sub">' + esc(mirror.path) + "</span>" : "") + "</dd>"
+      + "<dt>profile</dt><dd>" + esc(tr("source.profile_line", { ref: profile.default_branch || DASH, text: profile.tag || DASH })) + "</dd>"
+      + (state.store.fetchError ? '<dt class="bad">fetch</dt><dd class="bad">' + esc(tr("source.fetch_failed", { detail: String(state.store.fetchError).slice(0, 60) })) + "</dd>" : "")
+      + "</dl>";
+    // GitHub 카드(항목 25): 미러의 최근 다섯 커밋 · 태그 · PR 은 «다음»
+    srcBody += githubCardHtml(githubCardModel(state.store.github, state.store.githubStatus, profile.default_branch || "main", L(), tz(), n));
+    h += srowHtml("source", srcState, esc(sourceHead(doc, srcCtx, L()).join(" · ")), fetchBtn, srcBody);
+    // Build·upload(항목 5 · 46~49) · Store(항목 6 · 42) — `GET …/release` 가 404 면 «not available in this build»
+    var release = releaseDoc(), rstatus = state.store.releaseStatus;
+    var buildModel = buildRowModel(release, rstatus, profile, rowsById(state.status), L(), tz(), n);
+    var storeModel = storeRowModel(release, rstatus, profile, L(), tz(), n);
+    h += buildRowHtml(buildModel);
+    h += storeRowHtml(storeModel);
+    // 본체(항목 7~24) — 필이 왜 못 여는지 말하고, 네 행이 초록이면 펼쳐진다
+    var pill = panelPill(release, { setup: setupState, source: srcState, build: buildModel.state, store: storeModel.state }, rstatus);
+    h += reviewPanelHtml(pill, { setup: setupState, source: srcState, build: buildModel.state, store: storeModel.state });
+    h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    return unsafeBannerHtml() + h;
+  }
+  /** 렌더 뒤 Submit 상태를 채운다 — 버튼은 HTML 에서 늘 비활성으로 나오고 여기서만 열린다. */
+  function afterStoreRender() { renderSubmitState(); renderDriverState(); applyBarFills($("[data-store-body]")); maybeOpenConfirmN(); }
+  // ── 릴리스 상태 · 소개 자료 (STORE-TAB-API-2) ──
+  function releaseDoc() { return state.store.release; }
+  function currentProfile() { return (state.store.doc && state.store.doc.profile) || {}; }
+  /** 새 심사 플랜이 오면 사람의 확인(관리형 게시 체크 · 친 N)은 지워진다 — 기억하지 않는다(결정 3 · 항목 28). */
+  function syncReviewChoices() {
+    var r = state.store.release, rv = state.store.review;
+    var planId = r && r.review && r.review.plan ? r.review.plan.job_id : null;
+    var buildName = r && r.plan ? r.plan.build_name : null;
+    if (rv.planId !== planId || rv.buildName !== buildName) { rv.planId = planId; rv.buildName = buildName; rv.managed = false; rv.typedN = ""; }
+  }
+  function loadRelease() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.release !== "function") { state.store.release = null; state.store.releaseStatus = 404; return Promise.resolve(); }
+    return api.release(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      state.store.releaseStatus = res.status;
+      state.store.release = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+      syncReviewChoices();
+    }).catch(function () { state.store.release = null; state.store.releaseStatus = 0; });
+  }
+  function loadListing() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.listing !== "function") { state.store.listing = null; state.store.listingStatus = 404; return Promise.resolve(); }
+    return api.listing(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      state.store.listingStatus = res.status;
+      state.store.listing = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+    }).catch(function () { state.store.listing = null; state.store.listingStatus = 0; });
+  }
+
+  /** 드라이버 상태. 404 = 이 빌드에 없음. 회차(build_name · plan_n)가 바뀌면 친 N 과 Start 폼은 지워진다. */
+  function loadDriver() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.driver !== "function") { state.store.driver = null; state.store.driverStatus = 404; return Promise.resolve(); }
+    return api.driver(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      var prev = state.store.driver;
+      state.store.driverStatus = res.status;
+      state.store.driver = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+      var cur = state.store.driver;
+      if (!prev || !cur || prev.build_name !== cur.build_name || prev.plan_n !== cur.plan_n || prev.running !== cur.running) state.store.driverN = "";
+    }).catch(function () { state.store.driver = null; state.store.driverStatus = 0; });
+  }
+  function loadGithub() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.github !== "function") { state.store.github = null; state.store.githubStatus = 404; return Promise.resolve(); }
+    return api.github(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      state.store.githubStatus = res.status;
+      state.store.github = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+    }).catch(function () { state.store.github = null; state.store.githubStatus = 0; });
+  }
+
+  // ── Store 행 (항목 6 · 42) ──
+  function storeRowHtml(model) {
+    var canPlan = !!state.token && !state.store.busy;
+    var presets = currentProfile().presets || {};
+    // 이 빌드에 `…/release` 가 없거나(404) plan 프리셋이 없으면 누를 것도 없다
+    var btn = state.store.releaseStatus === 404 || !presets.plan ? "" : '<button type="button" class="btn" data-plan-refresh' + (canPlan ? "" : " disabled") + (state.token ? "" : ' title="' + esc(tr("store.gate.no_token")) + '"') + ">" + esc(tr(state.store.busy === "plan" ? "store.refreshing_plan" : "store.refresh_plan")) + "</button>";
+    var b = model.body, body;
+    if (!b) body = '<p class="sub">' + esc(model.head.join(" · ")) + "</p>";
+    else {
+      var list = function (items) { return items.length ? "<ul class=\"plain\">" + items.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>" : esc(tr("store.body.none")); };
+      body = '<dl class="kv">'
+        + "<dt>" + esc(tr("store.body.builds")) + "</dt><dd>" + list(b.builds) + "</dd>"
+        + "<dt>" + esc(tr("store.body.tracks")) + "</dt><dd>" + list(b.tracks) + "</dd>"
+        + "<dt>" + esc(tr("store.body.next")) + "</dt><dd class=\"mono\">" + esc(b.next) + (b.firstRelease ? ' <span class="chip">' + esc(tr("store.head.first_release")) + "</span>" : "") + "</dd>"
+        + "<dt>" + esc(tr("store.body.measured")) + "</dt><dd>" + esc(b.measured) + (isNum(b.jobId) ? ' <span class="mono sub">#' + b.jobId + "</span>" : "") + "</dd>"
+        + '<dt class="' + (b.blockers.length ? "bad" : "") + '">' + esc(tr("store.body.blockers")) + '</dt><dd class="' + (b.blockers.length ? "bad" : "") + '">' + list(b.blockers) + "</dd>"
+        + "<dt>" + esc(tr("store.body.warnings")) + "</dt><dd>" + list(b.warnings) + "</dd>"
+        + "</dl>";
+    }
+    if (state.store.planError) body += '<p class="sub bad" data-plan-error>' + esc(state.store.planError) + "</p>";
+    return srowHtml("store", model.state, esc(model.head.join(" · ")), btn, body);
+  }
+  // ── Build·upload 행 (항목 5 · 46~49) ──
+  function jobCardHtml(item) {
+    var row = item.row;
+    if (!row) return "";
+    var live = !state.skewUnknown && (row.state === "running" || row.state === "cancelling");
+    var h = "";
+    if (row.state === "running" || row.state === "cancelling") h += progressBarHtml(row, L(), live);
+    var prog = row.progress;
+    if (prog) {
+      var ph = progressHeadHtml(prog, L(), live);
+      if (ph) h += '<div class="sub step-now">' + ph + "</div>";
+      h += unitsGridHtml(prog, L());
+    }
+    return h ? '<div class="jobcard">' + h + "</div>" : "";
+  }
+  function buildLayersHtml(layers) {
+    if (!layers || !layers.items.length) return "";
+    var h = "";
+    if (layers.bar) {
+      var p = layers.bar.progress, pct = p && isNum(p.pct) ? p.pct : null;
+      var basis = p ? p.basis : "none", cond = p ? p.condition : "normal";
+      h += '<div class="longbar" role="group" aria-label="' + esc(tr("build.layers_aria")) + '">'
+        + '<div class="lb-head"><b>' + esc(layers.bar.preset) + "</b> · " + esc(layers.bar.head) + '<span class="spacer"></span><span class="sub">' + esc(layers.bar.basis) + (layers.bar.finishes ? " · " + esc(layers.bar.finishes) : "") + "</span></div>"
+        + '<div class="pbar wide" data-basis="' + esc(basis) + '" data-cond="' + esc(cond) + '" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (pct != null ? ' aria-valuenow="' + pct + '"' : "") + ' aria-valuetext="' + esc(layers.bar.head + " · " + layers.bar.basis) + '"><i data-fill="' + (pct != null ? pct : 0) + '" style="width:' + (pct != null ? pct : 0) + '%"></i></div>'
+        + "</div>";
+    }
+    if (layers.now) h += '<p class="now-line"><span class="g" aria-hidden="true">▶</span>' + esc(layers.now) + "</p>";
+    h += '<details class="checklist" open><summary class="sub">' + esc(tr("build.checklist", { n: layers.items.length })) + "</summary><ol class=\"steps-list\">";
+    layers.items.forEach(function (it) {
+      h += '<li class="ci ' + esc(it.tone) + '" data-job="' + it.id + '"><span class="g" aria-hidden="true">' + esc(it.mark) + "</span><span>" + esc(it.text) + "</span>" + (it.running ? jobCardHtml(it) : "") + "</li>";
+    });
+    h += "</ol></details>";
+    return h;
+  }
+  function buildRowHtml(model) {
+    var dm = driverModel(), acts = driverActions(dm, driverCtx());
+    var over = driverRow(dm);   // 도는 중 · 실패 · N 대기 · 모름 · 드리프트면 행의 색과 머리는 드라이버의 것
+    var st = over ? over.state : model.state, head = over ? over.head : model.head;
+    var busy = state.store.busy, reasonOf = function (a) { return a.reasons.map(function (k) { return tr("driver.reason." + k); }).join(" · "); };
+    var extra = "";
+    if (acts.abort.show) extra += '<button type="button" class="btn danger" data-driver-abort' + (acts.abort.enabled ? "" : ' disabled title="' + esc(reasonOf(acts.abort)) + '"') + ">" + esc(tr(busy === "abort" ? "driver.aborting" : "driver.abort")) + "</button>";
+    if (acts.retry.show) extra += '<button type="button" class="btn" data-driver-retry' + (acts.retry.enabled ? "" : ' disabled title="' + esc(reasonOf(acts.retry)) + '"') + ">" + esc(tr(busy === "retry" ? "driver.retrying" : "driver.retry")) + "</button>";
+    var body = "";
+    // 스테퍼는 잡 카드 위에(항목 26). 릴리스 상태도 드라이버도 없는 빌드면 행의 «not available» 한 줄뿐이다.
+    if (state.store.driverStatus !== 404 || (state.store.releaseStatus !== 404 && releaseDoc())) body += driverHtml(dm, acts);
+    if (model.layers && model.layers.items.length) body += buildLayersHtml(model.layers);
+    else if (!over) body += '<p class="sub">' + esc(model.head.join(" · ")) + "</p>";
+    if (model.note === "lost") body = '<p class="bad">' + esc(model.head.join(" · ")) + "</p>" + body;
+    return srowHtml("build", st, esc(head.join(" · ")), extra, body);
+  }
+  // ── 릴리스 드라이버 (항목 26 · 28 · 37~39) ──
+  function driverModel() { return stepperModel(state.store.driver, { status: state.store.driverStatus, lang: L(), nowMs: now(), tzName: tz() }); }
+  function driverFormVersion() {
+    var f = state.store.driverForm;
+    if (f.version != null) return f.version;
+    var plan = (releaseDoc() || {}).plan;   // 아직 안 쳤으면 플랜의 버전이 기본값
+    return plan && plan.build_name != null ? String(plan.build_name) : "";
+  }
+  function driverCtx() {
+    return { token: state.token, admin: state.admin, busy: state.store.busy, version: driverFormVersion(), typedN: state.store.driverN,
+      release: releaseDoc(), releaseStatus: state.store.releaseStatus, uploadPreset: !!(currentProfile().presets || {}).upload };
+  }
+  function driverReasons(a) { return a.reasons.map(function (k) { return tr("driver.reason." + k); }).join(" · "); }
+  var DRIVER_HEAD_GLYPH = { running: "▶", ok: "✓", bad: "✗", human: "▶", lost: "?", warn: "!", na: "·" };
+  function driverHtml(m, acts) {
+    var busy = state.store.busy;
+    var h = '<div class="driver" data-driver data-driver-stage="' + esc(m.stage || "") + '" data-driver-exit="' + (m.exit == null ? "" : m.exit) + '" role="group" aria-label="' + esc(tr("driver.aria")) + '">';
+    h += '<p class="drv-head ' + esc(m.tone) + '" data-driver-head><span class="g" aria-hidden="true">' + (DRIVER_HEAD_GLYPH[m.tone] || "·") + "</span><span>" + esc(m.head) + "</span></p>";
+    if (m.statusError) h += '<p class="sub bad">' + esc(tr("driver.status_error", { detail: m.statusError.slice(0, 80) })) + "</p>";
+    if (!m.available || !m.configured) return h + "</div>";
+    if (!m.idle) {
+      h += '<ol class="stepper">';
+      m.items.forEach(function (it) {
+        h += '<li class="st ' + esc(it.state) + '" data-stage="' + it.id + '"><span class="g" aria-hidden="true">' + esc(it.glyph) + "</span><span><b>" + it.id + "</b> " + esc(it.label) + '</span><span class="sub">' + esc(it.text) + "</span></li>";
+      });
+      h += "</ol>";
+    }
+    // S2(항목 28): 대화상자는 회차마다 한 번 저절로 뜨고, 이 버튼이 다시 연다
+    if (acts.confirm.show) h += '<div class="actions"><button type="button" class="btn primary" data-driver-confirm-open>' + esc(tr("driver.confirm")) + "</button></div>";
+    if (acts.start.show) {
+      var f = state.store.driverForm;
+      h += '<form class="drv-start" data-driver-start>'
+        + '<label>' + esc(tr("driver.version")) + '<input type="text" data-driver-version autocomplete="off" spellcheck="false" placeholder="' + esc(tr("driver.version_hint")) + '" value="' + esc(driverFormVersion()) + '"></label>'
+        + '<label>' + esc(tr("driver.track")) + '<input type="text" data-driver-track autocomplete="off" spellcheck="false" list="driver-tracks" placeholder="' + esc(tr("driver.track_default")) + '" value="' + esc(f.track) + '"></label>'
+        + '<datalist id="driver-tracks"><option value="internal"></option><option value="alpha"></option><option value="beta"></option><option value="production"></option></datalist>'
+        + '<label class="ck"><input type="checkbox" data-driver-dry' + (f.dryRun ? " checked" : "") + "> " + esc(tr("driver.dry_run")) + "</label>"
+        + '<button type="submit" class="btn primary" data-driver-start-go disabled>' + esc(tr(busy === "start" ? "driver.starting" : "driver.start")) + "</button>"
+        + '<span class="sub" data-driver-reason></span></form>';
+    }
+    // 예행(업로드 없음). mode=upload 버튼은 일부러 없다 — 드라이버의 S7 이 업로드 길이다.
+    if (acts.rehearsal.show) {
+      h += '<div class="actions"><button type="button" class="btn" data-upload-rehearsal' + (acts.rehearsal.enabled ? "" : ' disabled title="' + esc(driverReasons(acts.rehearsal)) + '"') + ">" + esc(tr(busy === "rehearsal" ? "driver.rehearsing" : "driver.rehearsal")) + "</button>"
+        + '<span class="sub">' + esc(acts.rehearsal.enabled ? tr("driver.rehearsal_hint") : driverReasons(acts.rehearsal)) + "</span></div>";
+    }
+    if (state.store.driverError) h += '<p class="bad" data-driver-error>' + esc(state.store.driverError) + "</p>";
+    if (m.log.length) h += '<details class="drv-log"><summary class="sub">' + esc(tr("driver.log", { n: m.log.length })) + '</summary><pre class="notes">' + esc(m.log.join("\n")) + "</pre></details>";
+    return h + "</div>";
+  }
+  /** Start 버튼과 이유만 제자리에서 — 타이핑마다 본체를 다시 그리지 않는다. */
+  function renderDriverState() {
+    var go = $("#store [data-driver-start-go]");
+    if (!go) return;
+    var a = driverActions(driverModel(), driverCtx()).start;
+    go.disabled = !a.enabled;
+    go.title = a.enabled ? "" : driverReasons(a);
+    var reason = $("#store [data-driver-reason]");
+    if (reason) reason.textContent = a.enabled ? "" : driverReasons(a);
+  }
+  function githubCardHtml(g) {
+    if (g.state !== "ok") return '<p class="sub ghcard" data-github="' + esc(g.state) + '">' + esc(g.text) + "</p>";
+    var h = '<div class="ghcard" data-github="ok"><div class="two"><div><div class="mini-h">' + esc(tr("github.log", { ref: g.ref, n: g.log.length })) + "</div>";
+    h += g.log.length ? '<table class="gh"><tbody>' + g.log.map(function (c) {
+      return '<tr><td class="sha">' + esc(c.sha) + "</td><td>" + esc(c.subject) + '</td><td class="sub">' + esc(c.author + " · " + c.at) + "</td></tr>";
+    }).join("") + "</tbody></table>" : '<span class="sub">' + esc(tr("github.none")) + "</span>";
+    h += '</div><div><div class="mini-h">' + esc(tr("github.tags")) + "</div>";
+    h += g.tags.length ? '<ul class="plain mono">' + g.tags.map(function (t) {
+      return "<li>" + esc(t.name) + (t.latest ? ' <span class="chip latest">' + esc(tr("github.latest")) + "</span>" : "") + ' <span class="sub">' + esc(t.at) + "</span></li>";
+    }).join("") + "</ul>" : '<span class="sub">' + esc(tr("github.none")) + "</span>";
+    h += '<div class="mini-h">' + esc(tr("github.prs")) + "</div>";
+    h += g.prsText ? '<span class="sub" data-github-prs>' + esc(g.prsText) + "</span>" : '<ul class="plain">' + g.prs.map(function (p) { return "<li>#" + esc(String(p.number)) + " " + esc(p.title) + (p.state ? ' <span class="sub">' + esc(p.state) + "</span>" : "") + "</li>"; }).join("") + "</ul>";
+    return h + "</div></div></div>";
+  }
+
+  // ── 심사 패널 본체 (항목 7~24 · 28 · 36 · 40) ──
+  function counterHtml(c) {
+    if (!c) return "";
+    return '<span class="counter ' + c.tone + '" title="' + esc(c.text) + '">' + esc(c.text) + "</span>";
+  }
+  function fieldRowHtml(label, value, counter, changed, extra) {
+    var v = value == null ? '<span class="dash">' + DASH + (extra ? " " + esc(extra) : "") + "</span>" : '<span class="val">' + esc(value) + "</span>";
+    return '<div class="fld"><span class="fl">' + esc(label) + (changed ? ' <span class="chip changed">' + esc(tr("review.changed")) + "</span>" : "") + "</span>" + v + counterHtml(counter) + "</div>";
+  }
+  function screenshotsHtml(list, groupsOther) {
+    var repo = state.store.repo, api = storeApi();
+    var h = '<div class="shots">';
+    if (!list.length) h += '<span class="sub">' + esc(tr("review.screenshots.none")) + "</span>";
+    list.forEach(function (s) {
+      var src = typeof api.listingFileUrl === "function" ? api.listingFileUrl(repo, s.path) : "";
+      var dim = isNum(s.width) && isNum(s.height) ? s.width + "×" + s.height : (isNum(s.bytes) ? fmtBytes(s.bytes) : "");
+      h += '<figure class="shot"><img loading="lazy" alt="' + esc(s.path) + '" src="' + esc(src) + '"><figcaption class="sub">' + esc(s.path.split("/").pop()) + (dim ? " · " + esc(dim) : "") + "</figcaption></figure>";
+    });
+    h += "</div>";
+    if (groupsOther && groupsOther.length) h += '<p class="sub">' + esc(tr("review.screenshots.unsorted", { n: groupsOther.length })) + "</p>";
+    return h;
+  }
+  function verdictPillHtml(word, judgedAge) {
+    var tone = verdictTone(word);
+    var text = tone === "none" ? tr("review.verdict.not_judged") : String(word);
+    var glyph = { ok: "✓", na: "·", running: "▶", stale: "⏱", bad: "✗", none: "·" }[tone];
+    return '<span class="pill v-' + tone + '" data-verdict="' + esc(tone === "none" ? "" : String(word)) + '"><span class="g" aria-hidden="true">' + glyph + "</span>" + esc(text) + "</span>"
+      + (tone !== "none" && judgedAge != null ? ' <span class="sub">' + esc(tr("review.judged", { age: fmtAgo(judgedAge, L()) })) + "</span>" : "");
+  }
+  /** 두 절이 같은 그룹 순서·같은 줄 위치(항목 15): 그래픽 → 문구 → 릴리스 노트 → 빌드/릴리스 → 심사 정보/정책. */
+  function storeSectionHtml(platform, ctx) {
+    var ios = platform === "ios", lang = L();
+    var fields = ctx.fields, f = fields[platform], shots = ctx.shots;
+    var listingState = ctx.listingState;
+    var h = '<section class="ssec" data-platform="' + platform + '" aria-label="' + esc(tr(ios ? "review.section.ios" : "review.section.android")) + '">'
+      + '<h3><span>' + esc(tr(ios ? "review.section.ios" : "review.section.android")) + "</span>" + verdictPillHtml(ctx.verdicts[platform], ctx.judgedAge) + "</h3>";
+    var group = function (key, inner) { return '<div class="grp" data-group="' + key + '"><h4>' + esc(tr("review.group." + key)) + "</h4>" + inner + "</div>"; };
+    // 1 그래픽
+    var shotList = shots[platform];
+    var shotsInner = listingState ? '<p class="sub">' + esc(listingState) + "</p>"
+      : '<p class="sub">' + esc(tr("review.screenshots.count", { n: shotList.length })) + (fields.screenshotsChanged ? ' <span class="chip changed">' + esc(tr("review.changed")) + "</span>" : "") + "</p>" + screenshotsHtml(shotList, shots.other);
+    h += group(ios ? "screenshots" : "graphics", shotsInner);
+    // 2 문구 — 같은 줄 수. Play 에 없는 필드는 — 와 이유(항목 15)
+    var rows = ios ? IOS_FIELDS : PLAY_FIELDS;
+    var inner = "";
+    rows.forEach(function (key) {
+      var absent = ios ? !!PLAY_ONLY[key] : !!IOS_ONLY[key];
+      if (absent) inner += fieldRowHtml(tr("review.field." + key), null, null, false, tr(ios ? "review.no_field.ios" : "review.no_field.play"));
+      else {
+        var v = Object.prototype.hasOwnProperty.call(f, key) ? f[key] : null;
+        inner += fieldRowHtml(tr("review.field." + key), v, v != null ? fieldCounter(v, FIELD_LIMITS[key]) : null, !!fields.changed[key]);
+      }
+    });
+    if (listingState) inner += '<p class="sub">' + esc(listingState) + "</p>";
+    h += group(ios ? "version_info" : "store_listing", inner);
+    // 3 릴리스 노트 — 같은 원문, 상한만 다르다(항목 12·18)
+    var strip = ctx.strip, notes = strip.notesText;
+    var notesInner;
+    if (notes == null) notesInner = '<p class="bad">' + esc(tr("review.notes.missing")) + "</p>";
+    else {
+      var nc = fieldCounter(notes, NOTES_LIMIT[platform]);
+      notesInner = '<pre class="notes">' + esc(notes) + "</pre><p class=\"sub\">" + (strip.notesPath ? esc(tr("review.notes.from", { path: strip.notesPath })) + " · " : "") + counterHtml(nc) + " · " + esc(tr("review.notes.same")) + "</p>";
+    }
+    h += group(ios ? "whats_new" : "release_notes", notesInner);
+    // 4 빌드 / 릴리스 — 고른 UI 는 없다(항목 13·19)
+    var observed = ctx.observed[platform];
+    var buildInner = '<div class="fld"><span class="fl">' + esc(tr(ios ? "review.group.build" : "review.group.release")) + '</span><span class="val">'
+      + esc(ios ? tr("review.build.line", { version: strip.version, build: strip.build, state: observed != null ? String(observed) : DASH }) : tr("review.release_line", { build: strip.build, version: strip.version }) + (observed != null ? " · " + tr("review.observed", { value: String(observed) }) : ""))
+      + " · " + esc(strip.buildNote) + "</span></div>";
+    if (ios) {
+      buildInner += '<div class="fld"><span class="fl">' + esc(tr("review.version_release")) + '</span><span class="val">' + esc(tr("review.manual_release")) + ' <span class="chip">' + esc(tr("review.fixed_by_repo")) + "</span>"
+        + (ctx.autoRelease != null ? ' <span class="' + (ctx.autoRelease ? "bad" : "sub") + '">' + esc(tr("review.observed", { value: "automatic_release: " + ctx.autoRelease })) + "</span>" : "") + "</span></div>"
+        + '<div class="fld"><span class="fl">' + esc(tr("review.phased")) + '</span><span class="val">' + esc(tr(state.store.review.phased ? "review.on" : "review.off")) + "</span></div>";
+    } else {
+      buildInner += '<div class="fld"><span class="fl">' + esc(tr("review.rollout")) + '</span><span class="val"><span class="chip">' + esc(tr("review.rollout_fixed")) + "</span></span></div>"
+        + '<div class="fld"><span class="fl">' + esc(tr("review.managed")) + '</span><span class="val"><span class="pill na" data-managed-pill><span class="g" aria-hidden="true">?</span>' + esc(tr("review.managed_unknown")) + "</span> " + esc(tr("review.managed_hint")) + "</span></div>"
+        + '<div class="fld"><span class="fl">' + esc(tr("review.group.review_info")) + '</span><span class="val">' + esc(tr("review.send_for_review")) + "</span></div>";
+    }
+    h += group(ios ? "build" : "release", buildInner);
+    // 5 심사 정보 / 정책 — 있음/없음만, 값은 없다(항목 14·20)
+    var infoInner;
+    if (ios) {
+      var ri = ctx.reviewInfo;
+      if (!ri) infoInner = '<p class="sub">' + DASH + "</p>";
+      else {
+        infoInner = ri.files.map(function (f) {
+          return '<div class="fld"><span class="fl">' + esc(f.name) + "</span>" + presentPill(f.present, tr(f.present ? "secrets.present" : "secrets.missing")) + "</div>";
+        }).join("") + '<p class="sub">' + esc(tr("review.values_never_shown")) + "</p>";
+        if (!ri.complete) infoInner += '<p class="bad">' + esc(tr("review.review_info_missing")) + ' <button type="button" class="btn" data-goto-settings>' + esc(tr("row.settings")) + "</button></p>";
+      }
+    } else {
+      infoInner = fieldRowHtml(tr("review.data_safety"), null, null, false, tr("review.console_only"))
+        + fieldRowHtml(tr("review.content_rating"), null, null, false, tr("review.console_only"))
+        + fieldRowHtml(tr("review.notes_label"), null, null, false, "");
+    }
+    h += group(ios ? "review_info" : "app_content", infoInner);
+    return h + "</section>";
+  }
+  function reviewChoicesCtx() {
+    var rv = state.store.review;
+    return { release: releaseDoc(), profile: currentProfile(), typedN: rv.typedN, platforms: rv.platforms, managed: rv.managed,
+      listingFull: rv.listingFull, phased: rv.phased, admin: state.admin, token: state.token, busy: state.store.busy };
+  }
+  function targetsText(platforms) {
+    var p = platformParam(platforms);
+    return tr("review.targets." + (p || "both"));
+  }
+  function reviewPanelHtml(pill, rowsState) {
+    var r = releaseDoc(), lang = L(), n = now(), profile = currentProfile();
+    var rv = state.store.review;
+    var remembered = loadRowMemory()[state.store.repo + "/review"];
+    var open = panelOpen(pill, remembered);
+    var strip = versionStrip(r, state.store.listing, profile, lang, tz(), n);
+    var head = tr("review.head", { version: strip.version, build: strip.build, targets: tr("review.targets.both") });
+    var pillHtml = '<span class="pill p-' + pill.tone + '" data-panel-pill="' + esc(pill.code) + '"><span class="g" aria-hidden="true">' + ({ ok: "✓", bad: "✗", stale: "⏱", na: "·", none: "○" }[pill.tone] || "·") + "</span>" + esc(tr("review.pill." + pill.code)) + "</span>";
+    var h = '<details class="srow review" id="review-panel" data-row="review" data-state="' + esc(pill.tone === "none" ? "ok" : pill.tone) + '"' + (open ? " open" : "") + ">"
+      + '<summary><span class="t">' + esc(tr("review.title")) + '</span><span class="n">' + esc(head) + "</span>" + pillHtml + "</summary><div class=\"srow-body\">";
+    if (state.store.releaseStatus === 404 || !r) {
+      h += '<p class="sub">' + esc(tr("review.na_body")) + "</p>";
+      return h + '<p class="sub policy">' + esc(tr("review.policy")) + "</p></div></details>";
+    }
+    // 결과(항목 40) — 이번 회차의 것이면 맨 위에
+    if (resultIsCurrent(r)) {
+      var rm = resultModel(r.review.result, lang);
+      h += '<div class="result ' + rm.tone + '" data-result="' + esc(rm.status) + '"><b>' + esc(tr("review.result.title", { version: strip.version, build: strip.build, status: rm.status })) + "</b>"
+        + "<ul class=\"plain\">" + rm.platforms.map(function (p) { return "<li>" + esc(p.text) + "</li>"; }).join("") + "</ul>"
+        + (rm.extras.length ? '<p class="sub">' + esc(rm.extras.join(" · ")) + "</p>" : "") + "</div>";
+    }
+    // 버전 띠(항목 8)
+    h += '<dl class="kv strip">'
+      + "<dt>" + esc(tr("review.strip.version")) + "</dt><dd class=\"mono\">" + esc(strip.version) + "</dd>"
+      + "<dt>" + esc(tr("review.strip.build")) + "</dt><dd class=\"mono\">" + esc(String(strip.build)) + ' <span class="sub">' + esc(strip.buildNote) + "</span></dd>"
+      + "<dt>" + esc(tr("review.strip.listing")) + "</dt><dd>" + esc(strip.listing) + "</dd>"
+      + "<dt>" + esc(tr("review.strip.notes")) + "</dt><dd>" + (strip.notesPath ? '<span class="mono">' + esc(strip.notesPath) + "</span> " + counterHtml(strip.notesCounter) : '<span class="bad">' + esc(tr("review.notes.missing")) + "</span>") + "</dd>"
+      + "<dt>" + esc(tr("review.strip.payload")) + "</dt><dd>" + esc(tr(rv.listingFull ? "review.payload.full" : "review.payload.notes_only")) + "</dd>"
+      + "</dl>";
+    // 두 스토어 절 — 같은 그룹 순서
+    var listing = state.store.listing, listingState = null;
+    if (state.store.listingStatus === 404) listingState = tr("review.listing.na");
+    else if (listing && listing.configured === false) listingState = tr("review.listing.not_configured");
+    else if (!listing) listingState = tr("review.listing.loading");
+    var rp = r.review && r.review.plan, rpDoc = planEntryDoc(rp) || {};
+    var ctx = {
+      fields: listingFields(listing), shots: screenshotGroups(listing), listingState: listingState, strip: strip,
+      verdicts: { ios: rpDoc.ios != null ? rpDoc.ios : null, android: rpDoc.android != null ? rpDoc.android : null },
+      judgedAge: rp && isNum(rp.age_seconds) ? rp.age_seconds : null,
+      observed: rpDoc.observed && typeof rpDoc.observed === "object" ? rpDoc.observed : {},
+      autoRelease: rpDoc.observed && typeof rpDoc.observed.auto_release === "boolean" ? rpDoc.observed.auto_release : null,
+      reviewInfo: reviewInfoModel(secretsItems())
+    };
+    h += '<div class="stores">' + storeSectionHtml("ios", ctx) + storeSectionHtml("android", ctx) + "</div>";
+    if (listing && Array.isArray(listing.errors) && listing.errors.length) h += '<p class="sub bad">' + esc(tr("review.listing.errors", { n: listing.errors.length })) + ": " + esc(listing.errors.join(" · ").slice(0, 200)) + "</p>";
+    if (ctx.fields.other.length) h += '<details class="other-lines"><summary class="sub">' + esc(tr("review.listing.other")) + "</summary><pre class=\"notes\">" + esc(ctx.fields.other.join("\n")) + "</pre></details>";
+    // 스토어와 달라진 것(항목 21) + validate 결과
+    var diff = listing && Array.isArray(listing.diff) ? listing.diff : [];
+    h += '<div class="changes"><b>' + esc(tr("review.changes")) + "</b> " + (diff.length ? '<pre class="notes">' + esc(diff.join("\n")) + "</pre>" : '<span class="sub">' + esc(tr("review.changes_none")) + "</span>") + "</div>";
+    if (state.store.validate) {
+      var v = state.store.validate;
+      h += '<div class="validate ' + (v.ok ? "ok" : "bad") + '" data-validate><b>' + esc(v.ok ? tr("review.validate_ok") : tr("review.validate_failed", { code: isNum(v.exit) ? v.exit : DASH })) + "</b>"
+        + (v.lines && v.lines.length ? '<pre class="notes">' + esc(v.lines.join("\n")) + "</pre>" : "") + "</div>";
+    }
+    // 체크박스 다섯(항목 22) — 관리형 게시는 이 렌더의 상태만, 저장 없음
+    var cb = function (name, key, checked, cls) {
+      return '<label class="ck' + (cls ? " " + cls : "") + '"><input type="checkbox" data-review-check="' + name + '"' + (checked ? " checked" : "") + "> " + esc(tr(key)) + "</label>";
+    };
+    h += '<div class="checks">'
+      + cb("ios", "review.check.ios", rv.platforms.ios) + cb("android", "review.check.android", rv.platforms.android)
+      + cb("managed", "review.check.managed", rv.managed === true, "managed" + (rv.platforms.android ? "" : " off"))
+      + cb("full", "review.check.full", rv.listingFull) + cb("phased", "review.check.phased", rv.phased)
+      + "</div>";
+    // N 입력(항목 28) + 행동 셋(항목 23)
+    var planDoc = planEntryDoc(r.plan) || {};
+    var planN = isNum(planDoc.n) ? planDoc.n : null;
+    h += '<div class="nbox"><label for="review-n">' + esc(tr("review.n_label")) + '</label><span class="sub">' + esc(planN != null ? tr("review.n_hint", { n: planN }) : tr("review.n_unknown")) + "</span>"
+      + '<input id="review-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + esc(rv.typedN) + '" aria-describedby="review-n-state"><span id="review-n-state" class="nstate" data-n-state></span></div>';
+    var busy = state.store.busy;
+    var canJob = !!state.token && !busy;
+    h += '<div class="actions">'
+      + '<button type="button" class="btn" data-validate-listing' + (canJob && listing && listing.configured !== false && state.store.listingStatus !== 404 ? "" : " disabled") + ">" + esc(tr(busy === "validate" ? "review.validating" : "review.validate")) + "</button>"
+      + '<button type="button" class="btn" data-plan-review' + (canJob ? "" : " disabled") + ">" + esc(tr(busy === "review-plan" ? "review.planning" : "review.plan")) + "</button>"
+      + '<button type="button" class="btn primary" data-submit-review disabled>' + esc(tr(busy === "submit" ? "review.submitting" : "review.submit")) + "</button>"
+      + '<span class="sub" data-submit-reason></span>'
+      + (state.store.reviewError ? '<span class="bad" data-review-error>' + esc(state.store.reviewError) + "</span>" : "")
+      + "</div>"
+      + '<p class="sub">' + esc(tr("review.submit_hint", { n: isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30 })) + "</p>"
+      + (rp ? '<p class="sub" data-review-plan-line>' + esc(tr("review.plan_running", { id: rp.job_id, state: stateWord(rp.state, lang) })) + "</p>" : "");
+    h += '<p class="sub policy">' + esc(tr("review.policy")) + "</p></div></details>";
+    return h;
+  }
+  /** Submit 버튼 · 이유 · N 상태만 제자리에서 갱신 — 타이핑마다 본체를 다시 그리지 않는다. */
+  function renderSubmitState() {
+    var btn = $("#review-panel [data-submit-review]"), reason = $("#review-panel [data-submit-reason]"), nState = $("#review-panel [data-n-state]");
+    if (!btn) return;
+    var d = submitDecision(reviewChoicesCtx());
+    btn.disabled = !d.enabled;
+    btn.title = d.enabled ? "" : d.reasons.map(function (k) { return tr("review.reason." + k); }).join(" · ");
+    if (reason) reason.textContent = d.enabled ? "" : d.reasons.map(function (k) { return tr("review.reason." + k); }).join(" · ");
+    var planDoc = planEntryDoc((releaseDoc() || {}).plan) || {};
+    if (nState) {
+      var typed = state.store.review.typedN;
+      if (!typed) { nState.textContent = ""; nState.className = "nstate"; }
+      else if (nMatches(typed, planDoc.n)) { nState.textContent = tr("review.n_ok", { n: planDoc.n }); nState.className = "nstate ok"; }
+      else { nState.textContent = isNum(planDoc.n) ? tr("review.n_mismatch", { n: planDoc.n }) : tr("review.n_unknown"); nState.className = "nstate bad"; }
+    }
+    var managed = $('#review-panel label.ck.managed');
+    if (managed) managed.classList.toggle("off", !state.store.review.platforms.android);
+  }
+  function unsafeBannerHtml() {
+    var b = bannerDecision(releaseDoc());
+    if (!b.show) return "";
+    return '<div class="banner bad unsafe" role="alert" data-unsafe-banner="' + esc(b.reason) + '"><span class="g" aria-hidden="true">✗</span><b>' + esc(tr(b.reason === "auto_release" ? "review.banner.auto_release" : "review.banner.unsafe", { version: b.version })) + "</b></div>";
+  }
+
+
+  // ── 행동 ──
+  function verifyAll() {
+    if (!state.token || state.store.verifying) return;
+    var repo = state.store.repo;
+    state.store.verifying = true; renderStore();
+    storeApi().verify(repo, []).then(function (res) {
+      state.store.verifying = false;
+      if (res.ok) toast(tr("secrets.verify_done"));
+      else { toast(tr("secrets.verify_call_failed", { detail: storeErrorDetail(res) })); if (res.status === 401 || res.status === 403) tokenRejected(); }
+      return loadStore();
+    }).catch(function () { state.store.verifying = false; toast(tr("secrets.verify_call_failed", { detail: "network" })); renderStore(); });
+  }
+  function fetchRemote() {
+    if (!state.token || state.store.fetching) return;
+    var repo = state.store.repo;
+    state.store.fetching = true; renderStore();
+    storeApi().fetchRemote(repo).then(function (res) {
+      state.store.fetching = false;
+      if (res.ok) {
+        state.store.fetchError = null;
+        if (res.body && state.store.doc) { if (res.body.mirror) state.store.doc.mirror = res.body.mirror; if (res.body.branches) state.store.doc.branches = res.body.branches; }
+        toast(tr("source.fetch_done"));
+      } else {
+        state.store.fetchError = storeErrorDetail(res);
+        if (res.status === 401 || res.status === 403) tokenRejected();
+      }
+      return loadStore();
+    }).catch(function () { state.store.fetching = false; state.store.fetchError = "network"; renderStore(); });
+  }
+  function putSecretFile(secret, fileName, files) {
+    var item = secretsItems().filter(function (it) { return it.name === secret; })[0];
+    var verdict = dropAccept(item, files, state.admin);
+    if (!verdict.ok) { toast(tr(verdict.reason, verdict.args)); return; }
+    var file = files[0], repo = state.store.repo, label = fileName ? secret + "/" + fileName : secret;
+    toast(tr("secrets.saving"));
+    file.arrayBuffer().then(function (buf) {
+      return storeApi().putSecret(repo, secret, buf, "application/octet-stream", fileName);
+    }).then(function (res) {
+      if (res.ok) toast(tr("secrets.saved", { name: label }));
+      else { toast(tr("secrets.save_failed", { name: label, detail: storeErrorDetail(res) })); if (res.status === 401 || res.status === 403) tokenRejected(); }
+      return loadStore();
+    }).catch(function () { toast(tr("secrets.save_failed", { name: label, detail: "network" })); });
+  }
+  // 값 비밀 대화상자(항목 30). 입력칸은 닫힐 때마다 비운다 — 값은 보내는 순간 말고는 어디에도 없다.
+  function openSecretDialog(name) {
+    if (!state.admin) { toast(tr("secrets.reject.admin")); return; }
+    var dlg = $("#secret-dialog"), input = $("#secret-input");
+    if (!dlg) return;
+    state.store.dialogSecret = name;
+    $("[data-secret-title]").textContent = tr("secrets.dialog_title", { name: name });
+    $("[data-secret-status]").textContent = "";
+    input.value = "";
+    if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "");
+    input.focus();
+  }
+  function submitSecretDialog() {
+    var dlg = $("#secret-dialog"), input = $("#secret-input"), status = $("[data-secret-status]");
+    var name = state.store.dialogSecret, value = input.value;
+    if (!value || !value.trim()) { status.textContent = tr("secrets.empty_value"); return; }
+    status.textContent = tr("secrets.saving");
+    storeApi().putSecret(state.store.repo, name, value, "text/plain; charset=utf-8").then(function (res) {
+      input.value = "";
+      if (res.ok) { dlg.close(); toast(tr("secrets.saved", { name: name })); }
+      else { status.textContent = tr("secrets.save_failed", { name: name, detail: storeErrorDetail(res) }); if (res.status === 401 || res.status === 403) tokenRejected(); }
+      return loadStore();
+    }).catch(function () { input.value = ""; status.textContent = tr("secrets.save_failed", { name: name, detail: "network" }); });
+  }
+  // ── 행동: plan · validate · review plan · submit (항목 23 · 28) ──
+  function jobCall(kind, run, after) {
+    if (!state.token || state.store.busy) return;
+    var repo = state.store.repo;
+    state.store.busy = kind; state.store.reviewError = null; renderStore();
+    run(storeApi(), repo).then(function (res) {
+      state.store.busy = null;
+      if (res.ok) { after(res); }
+      else {
+        // 409 는 서버의 규칙이다 — 코드를 그대로 버튼 옆에 쓰고, 돌아가지 않는다
+        if (kind === "plan") state.store.planError = refusalText(res, L()); else state.store.reviewError = refusalText(res, L());
+        if (res.status === 401 || res.status === 403) tokenRejected();
+      }
+      return loadStore({ listing: kind === "validate" });
+    }).catch(function () { state.store.busy = null; state.store.reviewError = "network"; renderStore(); });
+  }
+  function refreshPlan() {
+    var r = releaseDoc(), plan = r && r.plan, doc = planEntryDoc(plan) || {};
+    var buildName = plan && plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : "");
+    jobCall("plan", function (api, repo) { return api.plan(repo, { build_name: buildName, ref: currentProfile().default_branch || "main" }); }, function (res) {
+      state.store.planError = null; toast(tr("review.job_started", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
+  function validateListing() {
+    var r = releaseDoc(), plan = r && r.plan, doc = planEntryDoc(plan) || {};
+    var body = { build_name: plan && plan.build_name != null ? String(plan.build_name) : "", build: isNum(doc.n) ? String(doc.n) : "" };
+    jobCall("validate", function (api, repo) { return api.validateListing(repo, body); }, function (res) {
+      var b = res.body && typeof res.body === "object" ? res.body : {};
+      state.store.validate = { ok: b.ok === true, lines: Array.isArray(b.lines) ? b.lines : [], exit: isNum(b.exit) ? b.exit : null };
+    });
+  }
+  function planReview() {
+    var body = reviewBody("plan", reviewChoicesCtx());
+    jobCall("review-plan", function (api, repo) { return api.review(repo, body); }, function (res) {
+      toast(tr("review.job_started", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
+  function openSubmitDialog() {
+    if (!submitDecision(reviewChoicesCtx()).enabled) return;
+    var dlg = $("#submit-dialog");
+    if (!dlg) return;
+    var strip = versionStrip(releaseDoc(), state.store.listing, currentProfile(), L(), tz(), now());
+    $("[data-submit-title]").textContent = tr("review.dialog_title", { version: strip.version, build: strip.build });
+    $("[data-submit-body]").textContent = tr("review.dialog_body", { targets: targetsText(state.store.review.platforms) });
+    if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "");
+  }
+  function submitReview() {
+    var dlg = $("#submit-dialog");
+    if (dlg) dlg.close();
+    if (!submitDecision(reviewChoicesCtx()).enabled) return;   // 대화상자가 열린 사이 조건이 바뀌었을 수 있다
+    var body = reviewBody("submit", reviewChoicesCtx());
+    jobCall("submit", function (api, repo) { return api.review(repo, body); }, function (res) {
+      // 보낸 뒤 확인은 지운다 — 한 확인이 다음 되돌릴 수 없는 일까지 넘어가지 않는다(항목 28)
+      state.store.review.managed = false; state.store.review.typedN = "";
+      toast(tr("review.submitted_toast", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
+  // ── 행동: 드라이버 Start · Confirm N · Abort · Retry · 예행 (항목 26 · 28 · 35) ──
+  function driverCall(kind, run, after, onFail) {
+    if (!state.token || state.store.busy) return;
+    var repo = state.store.repo;
+    state.store.busy = kind; state.store.driverError = null; renderStore(); renderConfirmNState();
+    run(storeApi(), repo).then(function (res) {
+      state.store.busy = null;
+      if (res.ok) after(res);
+      else {
+        // 409 는 서버의 규칙이다 — 코드를 그대로 쓰고, 돌아가지 않는다
+        state.store.driverError = refusalText(res, L());
+        if (onFail) onFail(res);
+        if (res.status === 401 || res.status === 403) tokenRejected();
+      }
+      return loadStore();
+    }).catch(function () { state.store.busy = null; state.store.driverError = "network"; renderStore(); renderConfirmNState(); });
+  }
+  function startDriver() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).start.enabled) return;
+    var f = state.store.driverForm, body = { build_name: driverFormVersion() };
+    if (f.track) body.android_track = f.track;
+    if (f.dryRun) body.dry_run = true;
+    driverCall("start", function (api, repo) { return api.driverStart(repo, body); }, function (res) {
+      state.store.driverForm = { version: null, track: "", dryRun: false }; state.store.driverDialogKey = null;
+      toast(tr("driver.started_toast", { id: res.body && res.body.release_id != null ? res.body.release_id : DASH }));
+    });
+  }
+  function abortDriver() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).abort.enabled) return;
+    driverCall("abort", function (api, repo) { return api.driverAbort(repo, { build_name: m.version }); }, function () { toast(tr("driver.aborted_toast")); });
+  }
+  function retryDriver() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).retry.enabled) return;
+    driverCall("retry", function (api, repo) { return api.driverRetry(repo, { build_name: m.version }); }, function () { toast(tr("driver.retried_toast")); });
+  }
+  function rehearseUpload() {
+    if (!driverActions(driverModel(), driverCtx()).rehearsal.enabled) return;
+    var body = rehearsalBody(releaseDoc());
+    driverCall("rehearsal", function (api, repo) { return api.upload(repo, body); }, function (res) {
+      toast(tr("driver.rehearsal_toast", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
+  /** S2 의 N 대화상자(항목 28) — 회차마다 한 번 저절로, 그 뒤엔 «Confirm build number…» 가 다시 연다. */
+  function maybeOpenConfirmN() {
+    var m = driverModel();
+    if (!m.dialog) return;
+    var key = state.store.repo + "/" + m.version + "/" + m.planN;
+    if (state.store.driverDialogKey === key) return;
+    state.store.driverDialogKey = key;
+    openConfirmN();
+  }
+  function openConfirmN() {
+    var m = driverModel(), dlg = $("#confirm-n-dialog"), input = $("#driver-n");
+    if (!m.dialog || !dlg) return;
+    $("[data-confirm-n-title]").textContent = tr("driver.confirm.title", { version: m.version });
+    $("[data-confirm-n-body]").textContent = tr("driver.confirm.body", { n: m.planN });
+    $("[data-confirm-n-status]").textContent = "";
+    input.value = state.store.driverN || "";
+    renderConfirmNState();
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+    input.focus();
+  }
+  /** Confirm 버튼 · N 상태만 제자리에서 갱신. 맞는 N 만 연다 — 글자 그대로. */
+  function renderConfirmNState() {
+    var go = $("#confirm-n-dialog [data-confirm-n-go]"), st = $("#confirm-n-dialog [data-driver-n-state]");
+    if (!go) return;
+    var m = driverModel(), d = confirmNDecision(state.store.driverN, m.planN), a = driverActions(m, driverCtx()).confirm;
+    go.disabled = !a.enabled;
+    go.title = a.enabled ? "" : driverReasons(a);
+    go.textContent = state.store.busy === "confirm" ? tr("driver.confirming") : m.planN != null ? tr("driver.confirm.go", { n: m.planN }) : tr("driver.confirm.go_empty");
+    if (st) {
+      st.textContent = d.state === "empty" ? "" : d.state === "ok" ? tr("review.n_ok", { n: m.planN }) : d.state === "mismatch" ? tr("review.n_mismatch", { n: m.planN }) : tr("review.n_unknown");
+      st.className = "nstate" + (d.state === "ok" ? " ok" : d.state === "empty" ? "" : " bad");
+    }
+  }
+  function confirmDriverN() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).confirm.enabled) return;   // 대화상자가 열린 사이 회차가 바뀌었을 수 있다
+    var typed = state.store.driverN, dlg = $("#confirm-n-dialog");
+    driverCall("confirm", function (api, repo) { return api.driverConfirm(repo, { build_name: m.version, build_number: typed }); }, function () {
+      state.store.driverN = "";   // 한 확인은 한 번만 쓴다(항목 28)
+      if (dlg && dlg.open) dlg.close();
+      toast(tr("driver.confirmed_toast", { n: typed }));
+    }, function (res) { var st = $("[data-confirm-n-status]"); if (st) st.textContent = refusalText(res, L()); });
+  }
+  function wireStore() {
+    var st = $("#store");
+    if (!st) return;
+    st.addEventListener("click", function (ev) {
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal]");
+      if (!t) return;
+      if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
+      if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
+      if (t.hasAttribute("data-goto-settings")) { state.store.screen = "settings"; renderStore(); return; }
+      if (t.hasAttribute("data-verify-all")) { verifyAll(); return; }
+      if (t.hasAttribute("data-fetch-remote")) { fetchRemote(); return; }
+      if (t.hasAttribute("data-store-refresh")) { loadStore({ listing: true }); return; }
+      if (t.hasAttribute("data-plan-refresh")) { refreshPlan(); return; }
+      if (t.hasAttribute("data-validate-listing")) { validateListing(); return; }
+      if (t.hasAttribute("data-plan-review")) { planReview(); return; }
+      if (t.hasAttribute("data-submit-review")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
+      if (t.hasAttribute("data-driver-abort")) { if (!t.disabled) abortDriver(); return; }
+      if (t.hasAttribute("data-driver-retry")) { if (!t.disabled) retryDriver(); return; }
+      if (t.hasAttribute("data-driver-confirm-open")) { state.lastTrigger = t; openConfirmN(); return; }
+      if (t.hasAttribute("data-upload-rehearsal")) { if (!t.disabled) rehearseUpload(); return; }
+      if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
+    });
+    st.addEventListener("input", function (ev) {
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-version")) { state.store.driverForm.version = ev.target.value; renderDriverState(); return; }
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-track")) { state.store.driverForm.track = ev.target.value; return; }
+      if (ev.target.id !== "review-n") return;
+      state.store.review.typedN = ev.target.value;   // 기억하지 않는다 — state 에만, 새 플랜이 오면 지워진다
+      renderSubmitState();
+    });
+    st.addEventListener("submit", function (ev) {
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-start")) { ev.preventDefault(); startDriver(); }
+    });
+    st.addEventListener("change", function (ev) {
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-dry")) { state.store.driverForm.dryRun = !!ev.target.checked; return; }
+      var check = ev.target.getAttribute && ev.target.getAttribute("data-review-check");
+      if (check) {
+        var rv = state.store.review, on = !!ev.target.checked;
+        if (check === "ios") rv.platforms.ios = on;
+        else if (check === "android") { rv.platforms.android = on; if (!on) rv.managed = false; }
+        else if (check === "managed") rv.managed = on;
+        else if (check === "full") rv.listingFull = on;
+        else if (check === "phased") rv.phased = on;
+        if (check === "android" && !on) { var m = $('#review-panel [data-review-check="managed"]'); if (m) m.checked = false; }
+        renderSubmitState();
+        return;
+      }
+      var zone = ev.target.closest("[data-drop]");
+      if (!zone || ev.target.type !== "file") return;
+      var files = ev.target.files;
+      putSecretFile(zone.getAttribute("data-drop"), zone.getAttribute("data-drop-file"), files);
+      ev.target.value = "";
+    });
+    ["dragenter", "dragover"].forEach(function (kind) {
+      st.addEventListener(kind, function (ev) {
+        var zone = ev.target.closest("[data-drop]");
+        if (!zone) return;
+        ev.preventDefault();
+        if (!zone.classList.contains("disabled")) zone.classList.add("over");
+      });
+    });
+    st.addEventListener("dragleave", function (ev) { var zone = ev.target.closest("[data-drop]"); if (zone) zone.classList.remove("over"); });
+    st.addEventListener("drop", function (ev) {
+      var zone = ev.target.closest("[data-drop]");
+      if (!zone) return;
+      ev.preventDefault(); zone.classList.remove("over");
+      if (zone.classList.contains("disabled")) { toast(tr("secrets.reject.admin")); return; }
+      putSecretFile(zone.getAttribute("data-drop"), zone.getAttribute("data-drop-file"), ev.dataTransfer ? ev.dataTransfer.files : null);
+    });
+    st.addEventListener("toggle", function (ev) {
+      var d = ev.target;
+      if (!d || !d.classList || !d.classList.contains("srow") || !d.hasAttribute("data-row")) return;
+      var rendered = d.dataset.renderedOpen === "1";
+      if (d.open === rendered) return;  // 렌더가 정한 상태 — 사람의 선택이 아니다
+      d.dataset.renderedOpen = d.open ? "1" : "0";
+      rememberRow(d.getAttribute("data-row"), d.open);
+    }, true);
+    var nav = $("#view-nav");
+    if (nav) nav.addEventListener("change", function (ev) {
+      if (ev.target.hasAttribute("data-repo-select")) location.hash = "#/store/" + encodeURIComponent(ev.target.value);
+    });
+    var sdlg = $("#submit-dialog");
+    if (sdlg) {
+      sdlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitReview(); });
+      $("[data-submit-cancel]").addEventListener("click", function () { sdlg.close(); });
+      sdlg.addEventListener("close", restoreTrigger);
+    }
+    var ndlg = $("#confirm-n-dialog");
+    if (ndlg) {
+      ndlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); confirmDriverN(); });
+      ndlg.addEventListener("input", function (ev) { if (ev.target.id === "driver-n") { state.store.driverN = ev.target.value; renderConfirmNState(); } });
+      $("[data-confirm-n-cancel]").addEventListener("click", function () { ndlg.close(); });
+      ndlg.addEventListener("close", restoreTrigger);
+    }
+    var dlg = $("#secret-dialog");
+    if (dlg) {
+      dlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitSecretDialog(); });
+      $("[data-secret-cancel]").addEventListener("click", function () { dlg.close(); });
+      dlg.addEventListener("close", function () { $("#secret-input").value = ""; state.store.dialogSecret = null; restoreTrigger(); });
+    }
+  }
+
   function applyHash() {
+    var route = parseRoute(location.hash);
+    if (route.view === "store") { closeDrawer(true); enterStore(route.repo); return; }
+    if (state.view !== "queue") showView("queue");
     var m = /^#\/jobs\/(\d+)(\/log)?$/.exec(location.hash);
     if (!m) { closeDrawer(true); return; }
     var id = parseInt(m[1], 10);
@@ -2225,11 +4138,13 @@
     loadExpanded();
     lsSet("rcm.collapsed", null);   // 뜻이 뒤집힌 옛 키 — 남겨 두면 영영 남는다
     state.token = lsGet("rcm.token");
-    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); renderTokenButton();
+    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireStore(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });
     first.then(function () {
       state.tz = state.status && state.status.display_timezone ? state.status.display_timezone : null;
-      render(); startPolling(); applyHash();
+      render(); startPolling();
+      // 탭은 `/api/repos` 가 릴리스 프로파일을 하나라도 주는 서버에만 있다 — 404 면 큐 화면 그대로
+      loadRepos().then(applyHash);
       // SSE 는 load 뒤에 연다 — 열린 스트림이 load 를 붙들면 headless 렌더·인쇄가 끝나지 않는다
       afterLoad(function () { setTimeout(openSse, 0); });
     });

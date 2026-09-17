@@ -170,10 +170,81 @@ class DisplaySection:
     timezone: str = ""
 
 
+# ── 릴리스 프로파일(스토어 탭) — docs/release-contract.md §1 ─────────────────
+
+RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev")
+RELEASE_REQUIRED_ROLES = ("plan", "upload", "review")
+RELEASE_SECRET_KINDS = ("value", "file", "dir")
+RELEASE_VERIFY_KINDS = ("asc", "play", "github", "keystore", "none")
+RELEASE_BUILD_NUMBER_POLICIES = ("auto", "manual")
+_SECRETS_DIR_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_RELEASE_KEYS = {
+    "default_branch",
+    "tag",
+    "build_number_policy",
+    "plan_max_age_minutes",
+    "driver",
+    "secrets_dir_env",
+    "presets",
+    "secrets",
+    "listing",
+}
+_RELEASE_SECRET_KEYS = {"name", "kind", "optional", "verify", "files", "max_kb"}
+_RELEASE_LISTING_KEYS = {"preview", "diff", "validate", "screenshots", "release_notes"}
+
+
+@dataclass(frozen=True)
+class ReleaseSecret:
+    """`[[repos.<name>.release.secrets]]` 하나 — 값이 아니라 **이름과 모양**만. 값은 설정에 없다."""
+
+    name: str
+    kind: str = "value"  # "value" | "file" | "dir"
+    optional: bool = False
+    verify: str = "none"  # "asc" | "play" | "github" | "keystore" | "none"
+    files: tuple[str, ...] = ()  # kind = "dir" 일 때 안에 있어야 하는 파일 이름
+    max_kb: int = 512  # kind = "file" 일 때 상한
+
+
+@dataclass(frozen=True)
+class ReleaseListing:
+    """`[repos.<name>.release.listing]` — 스토어 문안을 미리 보는 명령과 글롭. 전부 선택."""
+
+    preview: tuple[str, ...] = ()
+    diff: tuple[str, ...] = ()
+    validate: tuple[str, ...] = ()
+    screenshots: tuple[str, ...] = ()
+    release_notes: str = ""
+
+
+@dataclass(frozen=True)
+class ReleaseProfile:
+    """`[repos.<name>.release]` — 어느 프리셋이 어느 역할인지, 어떤 비밀이 있는지.
+
+    여기서는 **모양**(타입 · 허용값 · 모르는 키)만 본다. 프리셋이 실제로 있는지, 되돌릴 수 없는
+    모드가 기본값은 아닌지 같은 교차 검사는 `rcm check` 의 `release <repo>` 행이 한다 — 빠진
+    역할은 페이지를 흐리게 할 뿐 서버를 못 뜨게 하지 않는다(계약 「Anything missing degrades
+    the page, never the server」).
+    """
+
+    presets: dict[str, str] = field(default_factory=dict)  # 역할 → 프리셋 이름
+    default_branch: str = "main"
+    tag: str = "prod/{version}-{build}"
+    build_number_policy: str = "auto"  # "auto" | "manual"
+    plan_max_age_minutes: int = 30
+    driver: str | None = None  # 저장소 안 상대경로
+    secrets_dir_env: str | None = None
+    secrets: tuple[ReleaseSecret, ...] = ()
+    listing: ReleaseListing | None = None
+
+    def preset_for(self, role: str) -> str | None:
+        return self.presets.get(role) or None
+
+
 @dataclass
 class RepoConfig:
     name: str
     url: str
+    release: ReleaseProfile | None = None  # 스토어 탭 프로파일. None = 이 저장소엔 탭이 없다
 
 
 @dataclass
@@ -887,17 +958,7 @@ def load_server_config(
             if not isinstance(values, dict):
                 raise ConfigError(f"{found}: [{name}] must be a table")
             _apply_section(getattr(cfg, name), name, values, str(found))
-        repos = raw.get("repos", [])
-        if not isinstance(repos, list):
-            raise ConfigError(f"{found}: [[repos]] must be an array of tables")
-        parsed_repos: list[RepoConfig] = []
-        for r in repos:
-            if not isinstance(r, dict) or set(r) != {"name", "url"}:
-                raise ConfigError(f"{found}: each [[repos]] needs exactly 'name' and 'url'")
-            if not isinstance(r["name"], str) or not isinstance(r["url"], str):
-                raise ConfigError(f"{found}: [[repos]] name and url must be strings")
-            parsed_repos.append(RepoConfig(name=r["name"], url=r["url"]))
-        cfg.repos = tuple(parsed_repos)
+        cfg.repos = _parse_repos(raw.get("repos", []), str(found))
         presets = raw.get("presets", [])
         if not isinstance(presets, list):
             raise ConfigError(f"{found}: [[presets]] must be an array of tables")
@@ -1016,16 +1077,190 @@ _WORKER_KEYS = {
 _WORKER_OVERRIDE_KEYS = {"server", "pool", "lanes", "name", "data_dir"}
 
 
+def _parse_release_secret(where: str, raw: Any) -> ReleaseSecret:
+    """`[[repos.<name>.release.secrets]]` 하나. 이름은 파일 이름이 되므로 경로 조각은 거부한다."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: each secret must be a table")
+    name = raw.get("name")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or "/" in name
+        or "\\" in name
+        or name in (".", "..")
+    ):
+        raise ConfigError(f"{where}: secret 'name' must be a file or env name, got {name!r}")
+    where = f"{where} '{name}'"
+    unknown = sorted(set(raw) - _RELEASE_SECRET_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
+    kind = raw.get("kind", "value")
+    if kind not in RELEASE_SECRET_KINDS:
+        raise ConfigError(
+            f"{where}: kind must be one of {', '.join(RELEASE_SECRET_KINDS)}, got {kind!r}"
+        )
+    optional = raw.get("optional", False)
+    if not isinstance(optional, bool):
+        raise ConfigError(f"{where}: optional must be true or false")
+    verify = raw.get("verify", "none")
+    if verify not in RELEASE_VERIFY_KINDS:
+        raise ConfigError(
+            f"{where}: verify must be one of {', '.join(RELEASE_VERIFY_KINDS)}, got {verify!r}"
+        )
+    files: tuple[str, ...] = ()
+    if "files" in raw:
+        if kind != "dir":
+            raise ConfigError(f"{where}: 'files' is only valid for kind = \"dir\"")
+        files = _str_list(f"{where} files", raw["files"], allow_empty=False)
+        if any(not f.strip() or "/" in f for f in files):
+            raise ConfigError(f"{where}: files entries must be plain file names")
+    max_kb = raw.get("max_kb", 512)
+    if "max_kb" in raw and kind != "file":
+        raise ConfigError(f"{where}: 'max_kb' is only valid for kind = \"file\"")
+    if isinstance(max_kb, bool) or not isinstance(max_kb, int) or max_kb < 1:
+        raise ConfigError(f"{where}: max_kb must be a positive integer")
+    return ReleaseSecret(
+        name=name, kind=kind, optional=optional, verify=verify, files=files, max_kb=max_kb
+    )
+
+
+def _parse_release_listing(where: str, raw: Any) -> ReleaseListing:
+    """`[repos.<name>.release.listing]` — 명령은 빈 argv 를 받지 않는다."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: must be a table")
+    unknown = sorted(set(raw) - _RELEASE_LISTING_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
+    argvs: dict[str, tuple[str, ...]] = {}
+    for key in ("preview", "diff", "validate"):
+        argvs[key] = _str_list(f"{where} {key}", raw[key], allow_empty=False) if key in raw else ()
+    screenshots = (
+        _str_list(f"{where} screenshots", raw["screenshots"], allow_empty=False)
+        if "screenshots" in raw
+        else ()
+    )
+    notes = raw.get("release_notes", "")
+    if not isinstance(notes, str):
+        raise ConfigError(f"{where}: release_notes must be a string")
+    return ReleaseListing(
+        preview=argvs["preview"],
+        diff=argvs["diff"],
+        validate=argvs["validate"],
+        screenshots=screenshots,
+        release_notes=notes,
+    )
+
+
+def parse_release_profile(repo_name: str, raw: Any) -> ReleaseProfile:
+    """`[repos.<name>.release]` 를 검증해 ReleaseProfile 로. 오류에 섹션과 키 이름을 넣는다."""
+    where = f"[repos.{repo_name}.release]"
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: must be a table")
+    unknown = sorted(set(raw) - _RELEASE_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
+    defaults = ReleaseProfile()
+    branch = raw.get("default_branch", defaults.default_branch)
+    if not isinstance(branch, str) or not branch.strip():
+        raise ConfigError(f"{where}: default_branch must be a non-empty string")
+    tag = raw.get("tag", defaults.tag)
+    if not isinstance(tag, str) or "{version}" not in tag or "{build}" not in tag:
+        raise ConfigError(f"{where}: tag must be a string containing {{version}} and {{build}}")
+    policy = raw.get("build_number_policy", defaults.build_number_policy)
+    if policy not in RELEASE_BUILD_NUMBER_POLICIES:
+        raise ConfigError(
+            f'{where}: build_number_policy must be "auto" or "manual", got {policy!r}'
+        )
+    max_age = raw.get("plan_max_age_minutes", defaults.plan_max_age_minutes)
+    if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age < 1:
+        raise ConfigError(f"{where}: plan_max_age_minutes must be a positive integer")
+    driver = raw.get("driver")
+    if driver is not None:
+        if (
+            not isinstance(driver, str)
+            or not driver.strip()
+            or driver.startswith("/")
+            or ".." in Path(driver).parts
+        ):
+            raise ConfigError(
+                f"{where}: driver must be a relative path inside the repository, got {driver!r}"
+            )
+    env_name = raw.get("secrets_dir_env")
+    if env_name is not None and (
+        not isinstance(env_name, str) or not _SECRETS_DIR_ENV_RE.match(env_name)
+    ):
+        raise ConfigError(
+            f"{where}: secrets_dir_env must match ^[A-Z][A-Z0-9_]*$, got {env_name!r}"
+        )
+    presets_raw = raw.get("presets", {})
+    presets_where = f"[repos.{repo_name}.release.presets]"
+    if not isinstance(presets_raw, dict):
+        raise ConfigError(f"{presets_where}: must be a table")
+    unknown = sorted(set(presets_raw) - set(RELEASE_ROLES))
+    if unknown:
+        raise ConfigError(
+            f"{presets_where}: unknown key(s): {', '.join(unknown)} "
+            f"(roles are {', '.join(RELEASE_ROLES)})"
+        )
+    presets: dict[str, str] = {}
+    for role in RELEASE_ROLES:
+        if role not in presets_raw:
+            continue
+        value = presets_raw[role]
+        if not isinstance(value, str) or not _NAME_RE.match(value):
+            raise ConfigError(f"{presets_where}: {role} must be a preset name, got {value!r}")
+        presets[role] = value
+    secrets_raw = raw.get("secrets", [])
+    secrets_where = f"[[repos.{repo_name}.release.secrets]]"
+    if not isinstance(secrets_raw, list):
+        raise ConfigError(f"{secrets_where}: must be an array of tables")
+    secrets = tuple(_parse_release_secret(secrets_where, s) for s in secrets_raw)
+    listing = None
+    if "listing" in raw:
+        listing = _parse_release_listing(f"[repos.{repo_name}.release.listing]", raw["listing"])
+    return ReleaseProfile(
+        presets=presets,
+        default_branch=branch,
+        tag=tag,
+        build_number_policy=policy,
+        plan_max_age_minutes=max_age,
+        driver=driver,
+        secrets_dir_env=env_name,
+        secrets=secrets,
+        listing=listing,
+    )
+
+
 def _parse_repos(raw: Any, where: str) -> tuple[RepoConfig, ...]:
+    """`[[repos]]` — `name`·`url` 만, 거기에 선택으로 릴리스 프로파일 하나.
+
+    TOML 에서 `[repos.app.release]` 는 **마지막** `[[repos]]` 원소 안의 `app.release` 다 — 그래서
+    원소에 자기 이름과 같은 키가 하나 더 생기고 그 안에 `release` 만 있어야 한다. `[repos.release]`
+    라고 써서 `release` 키가 바로 오는 꼴도 같은 뜻으로 받는다.
+    """
     if not isinstance(raw, list):
         raise ConfigError(f"{where}: [[repos]] must be an array of tables")
     out: list[RepoConfig] = []
     for r in raw:
-        if not isinstance(r, dict) or set(r) != {"name", "url"}:
+        if not isinstance(r, dict) or not {"name", "url"} <= set(r):
             raise ConfigError(f"{where}: each [[repos]] needs exactly 'name' and 'url'")
         if not isinstance(r["name"], str) or not isinstance(r["url"], str):
             raise ConfigError(f"{where}: [[repos]] name and url must be strings")
-        out.append(RepoConfig(name=r["name"], url=r["url"]))
+        name = r["name"]
+        extra = set(r) - {"name", "url"}
+        release_raw: Any = None
+        if extra == {"release"}:
+            release_raw = r["release"]
+        elif extra == {name} and isinstance(r[name], dict) and set(r[name]) == {"release"}:
+            release_raw = r[name]["release"]
+        elif extra:
+            raise ConfigError(
+                f"{where}: each [[repos]] needs exactly 'name' and 'url' "
+                f"(plus an optional [repos.{name}.release] table), got extra key(s): "
+                f"{', '.join(sorted(extra))}"
+            )
+        release = None if release_raw is None else parse_release_profile(name, release_raw)
+        out.append(RepoConfig(name=name, url=r["url"], release=release))
     return tuple(out)
 
 
