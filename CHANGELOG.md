@@ -7,6 +7,18 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **Store tab, first use: «Refresh (release-plan)» asks for the version instead of failing
+  silently.** With no plan yet the page sent `build_name: ""`; the server answered 400
+  `build_name is required` and the message sat in the body of the folded grey Store row, so the
+  click looked like nothing happened. Now, when no build name is known, the button opens a
+  «Store snapshot for which version?» dialog (`major.minor.patch`, prefilled from the newest
+  `prod/<version>-<build>` tag on the GitHub card, else the last plan's build name) and sends
+  `{build_name, ref}` on Go; when the version is known the one-click refresh stays and a small
+  «…for another version» button opens the same dialog. A refused plan call is now written in red
+  in the Store row **head** and opens the row for that render, and a refused review call opens the
+  review panel and repeats the code in its head.
+
 ## [0.3.0] - 2026-09-17
 
 ### Added
