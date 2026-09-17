@@ -8,6 +8,33 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **Store tab server API, part 2: the release routes and the driver.** Under
+  `/api/repos/<repo>/release/…` the server now turns the profile into actions. `GET …/release`
+  is the state of the release view — the latest job per role (`plan`, `review.plan`,
+  `review.result`, `upload`) with the artifact document (`plan.json`, `review-plan.json`,
+  `review.json`, `upload.json`) read from the job's bundle, its age and whether it is stale, plus
+  the role presets' jobs newest first. `POST …/release/plan`, `…/review` and `…/upload` submit the
+  role presets through the normal job path with exactly the contract's inputs; the irreversible
+  modes (`review mode=submit`, `upload mode=upload`) need an admin token and the server itself
+  refuses them without a fresh succeeded plan, a typed build number equal to the plan's `n`, a
+  succeeded and unblocked review plan, and — for Android — `play_managed_publishing =
+  confirmed-on` in that very request (409 `review_plan_required` / `review_plan_stale` /
+  `review_plan_blocked` / `managed_publishing_unconfirmed` / `plan_required` / `plan_stale` /
+  `build_number_mismatch`; a preset that declares `automatic_release`, `rollout` or
+  `release_status` is refused with `unsafe_preset`). `GET …/release/listing` runs the profile's
+  preview and diff commands in a checkout of `default_branch` from the mirror and lists release
+  notes and screenshots (`…/listing/file?path=` serves one; `POST …/listing/validate` runs the
+  validate command); `GET …/release/github` reads the last commits and release tags from the
+  mirror (pull requests are `null` for now). When the profile names a `driver`, `POST
+  …/release/start` runs it detached in its own checkout with the job environment, `RCM_SERVER`
+  and a client token minted for that run and revoked when it ends; `…/confirm` forwards the build
+  number a person typed only when it equals the log's last `plan: N = <n>`, `…/abort` and
+  `…/retry` pass the flags, and `GET …/release/driver` shows the run, the log tail, `plan_n` and
+  `--status`. Runs are recorded in a new `releases` table — database schema **v18** (a `v17`
+  backup is written first, and older builds refuse the file); `rcm gc` leaves that table alone.
+  All write routes answer 409 `setup_incomplete` until the secrets gate is open. Documented in
+  `docs/configuration.md` («Release routes and the driver»). `schema_version` of `/api/status`
+  is unchanged.
 - **Web UI: the Store tab and its settings gate.** When `GET /api/repos` lists a repository
   with a release profile the header shows a **Queue | Store** switch (a select when there are
   several) and `#/store/<name>` opens the Store; a server without a profile has no tab and the

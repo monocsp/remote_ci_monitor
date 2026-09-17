@@ -331,7 +331,8 @@ def test_verify_runs_every_verifying_secret_records_the_result_and_opens_the_gat
     assert by_name["GH_TOKEN"]["verified_at"] and by_name["GH_TOKEN"]["verify_error"] is None
     assert by_name["GH_TOKEN"]["verify_detail"] == "login: octocat"
     assert by_name["upload-keystore.jks"]["verify_error"] is None
-    assert by_name["AuthKey.p8"]["verify_error"] == "not implemented in this build"
+    assert by_name["AuthKey.p8"]["verify_error"] is None
+    assert by_name["AuthKey.p8"]["verify_detail"] == "not implemented in this build"
     assert by_name["AuthKey.p8"]["verified_at"] is not None
     assert by_name["review_information"]["verified_at"] is None  # verify none — 안 부른다
     no_secret_values(body)
@@ -342,8 +343,8 @@ def test_verify_runs_every_verifying_secret_records_the_result_and_opens_the_gat
     assert setup == {
         "required": 4,
         "present": 4,
-        "verified": 3,
-        "complete": False,
+        "verified": 4,
+        "complete": True,
         "missing": [],
     }
     # asc 가 이 빌드에 없으니 게이트는 닫힌 채다 — 그걸 통과로 꾸미지 않는다. 검증기를 바꾸면 열린다

@@ -68,7 +68,7 @@ from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 17
+DB_VERSION = 18
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -220,6 +220,24 @@ CREATE TABLE IF NOT EXISTS workers (
   registered_at REAL NOT NULL,
   last_seen_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS releases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  build_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  started_by TEXT NOT NULL,
+  started_at REAL NOT NULL,
+  pid INTEGER,
+  log_path TEXT NOT NULL,
+  exit_code INTEGER,
+  finished_at REAL,
+  confirmed_n INTEGER,
+  confirmed_by TEXT,
+  android_track TEXT,
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  token_name TEXT
+);
+CREATE INDEX IF NOT EXISTS releases_repo ON releases(repo, id DESC);
 """
 
 _BLOBS_SQL = (
@@ -357,6 +375,20 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         " job_id INTEGER NOT NULL, submission_id TEXT PRIMARY KEY, role TEXT NOT NULL,"
         " capability_hash TEXT NOT NULL, created_at REAL NOT NULL, participant TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS submissions_job ON submissions(job_id)",
+    ),
+    # v17 → v18(스토어 탭 API 계약 v2): 릴리스 드라이버 실행 대장. 행 하나 = 드라이버 프로세스
+    # 하나(`kind` = start · confirm · abort · retry). 잡 표와 무관하고 보존 정리(`rcm gc` ·
+    # 청소기)는 이 표를 **건드리지 않는다** — 릴리스 이력은 사람이 지운다. `token_name` 은
+    # 그 실행에 발급한 내부 클라이언트 토큰의 이름(끝나면 폐기). v17 백업은 `migrate()` 의 경계에서
+    # 이 DDL 보다 먼저 만들어진다(결정 74).
+    18: (
+        "CREATE TABLE IF NOT EXISTS releases ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, build_name TEXT NOT NULL,"
+        " kind TEXT NOT NULL, started_by TEXT NOT NULL, started_at REAL NOT NULL, pid INTEGER,"
+        " log_path TEXT NOT NULL, exit_code INTEGER, finished_at REAL, confirmed_n INTEGER,"
+        " confirmed_by TEXT, android_track TEXT, dry_run INTEGER NOT NULL DEFAULT 0,"
+        " token_name TEXT)",
+        "CREATE INDEX IF NOT EXISTS releases_repo ON releases(repo, id DESC)",
     ),
 }
 
@@ -886,6 +918,17 @@ class Store:
             )
         }
         return [found[i] for i in ids if i in found]  # 고른 순서를 지킨다
+
+    def list_jobs_by_preset(self, presets: Iterable[str], limit: int) -> list[Job]:
+        """프리셋 이름들의 잡을 새것부터 `limit` 개(스토어 탭의 역할 행 — 계약 v2 `jobs[]`)."""
+        names = sorted(set(presets))
+        if not names or limit <= 0:
+            return []
+        marks = ",".join("?" * len(names))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE preset IN ({marks}) ORDER BY id DESC LIMIT ?",
+            (*names, int(limit)),
+        )
 
     def active_worker_lanes(self) -> dict[tuple[str, int], tuple[int, datetime | None]]:
         """`(워커, 레인) → (잡 id, 시작 시각)` — 원격 레인의 busy 판정에 필요한 전부.
@@ -2370,6 +2413,119 @@ class Store:
             "UPDATE tokens SET revoked_at=? WHERE name=? AND revoked_at IS NULL", (_ts(now), name)
         )
         return cur.rowcount == 1
+
+    # ── 릴리스 드라이버 실행 대장 (스토어 탭 API 계약 v2) ──────────────────
+
+    @staticmethod
+    def _row_to_release(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "repo": row["repo"],
+            "build_name": row["build_name"],
+            "kind": row["kind"],
+            "started_by": row["started_by"],
+            "started_at": _dt(row["started_at"]),
+            "pid": row["pid"],
+            "log_path": row["log_path"],
+            "exit_code": row["exit_code"],
+            "finished_at": _dt(row["finished_at"]),
+            "confirmed_n": row["confirmed_n"],
+            "confirmed_by": row["confirmed_by"],
+            "android_track": row["android_track"],
+            "dry_run": bool(row["dry_run"]),
+            "token_name": row["token_name"],
+        }
+
+    def create_release(
+        self,
+        *,
+        repo: str,
+        build_name: str,
+        kind: str,
+        started_by: str,
+        now: datetime,
+        log_path: str,
+        confirmed_n: int | None = None,
+        confirmed_by: str | None = None,
+        android_track: str | None = None,
+        dry_run: bool = False,
+    ) -> int:
+        """실행 행 하나를 연다(pid · 토큰 이름은 프로세스를 띄운 뒤 `set_release_started` 로)."""
+        cur = self._conn().execute(
+            "INSERT INTO releases (repo, build_name, kind, started_by, started_at, log_path, "
+            "confirmed_n, confirmed_by, android_track, dry_run) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                repo,
+                build_name,
+                kind,
+                started_by,
+                _ts(now),
+                log_path,
+                confirmed_n,
+                confirmed_by,
+                android_track,
+                1 if dry_run else 0,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+    def set_release_started(self, release_id: int, *, pid: int, token_name: str) -> None:
+        self._conn().execute(
+            "UPDATE releases SET pid=?, token_name=? WHERE id=?", (int(pid), token_name, release_id)
+        )
+
+    def finish_release(self, release_id: int, exit_code: int | None, now: datetime) -> bool:
+        """끝났다고 적는다 — 한 번만(이미 끝난 행은 False). exit_code None = 모른다."""
+        cur = self._conn().execute(
+            "UPDATE releases SET exit_code=?, finished_at=? WHERE id=? AND finished_at IS NULL",
+            (exit_code, _ts(now), release_id),
+        )
+        return cur.rowcount == 1
+
+    def get_release(self, release_id: int) -> dict[str, Any] | None:
+        row = self._conn().execute("SELECT * FROM releases WHERE id=?", (release_id,)).fetchone()
+        return self._row_to_release(row) if row else None
+
+    def latest_release(self, repo: str, build_name: str | None = None) -> dict[str, Any] | None:
+        """저장소(그리고 build_name)의 가장 최근 실행 행."""
+        if build_name is None:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM releases WHERE repo=? ORDER BY id DESC LIMIT 1", (repo,))
+                .fetchone()
+            )
+        else:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT * FROM releases WHERE repo=? AND build_name=? ORDER BY id DESC LIMIT 1",
+                    (repo, build_name),
+                )
+                .fetchone()
+            )
+        return self._row_to_release(row) if row else None
+
+    def list_open_releases(self, repo: str | None = None) -> list[dict[str, Any]]:
+        """아직 끝났다고 적히지 않은 실행들(pid 생존 확인은 호출자가)."""
+        if repo is None:
+            rows = (
+                self._conn()
+                .execute("SELECT * FROM releases WHERE finished_at IS NULL ORDER BY id")
+                .fetchall()
+            )
+        else:
+            rows = (
+                self._conn()
+                .execute(
+                    "SELECT * FROM releases WHERE repo=? AND finished_at IS NULL ORDER BY id",
+                    (repo,),
+                )
+                .fetchall()
+            )
+        return [self._row_to_release(r) for r in rows]
+
+    def count_releases(self) -> int:
+        return int(self._conn().execute("SELECT COUNT(*) FROM releases").fetchone()[0])
 
     # ── 원격 워커 (M5b-2) ───────────────────────────────────────────────────
 
