@@ -1334,6 +1334,18 @@
     if (!isNum(n) || Math.floor(n) !== n) return false;
     return typeof typed === "string" && typed === String(n);
   }
+  /** 빌드 번호 모드 — «자동»(플랜이 스토어에서 읽은 다음 번호를 그대로) 또는 «직접 입력». 기본은
+   * 프로파일의 build_number_policy (manual → typed, 그 밖은 auto); 사람이 토글로 이번 화면만 바꾼다. */
+  function nModeDefault(profile) { return profile && profile.build_number_policy === "manual" ? "typed" : "auto"; }
+  function nModeOf(mode, profile) { return mode === "auto" || mode === "typed" ? mode : nModeDefault(profile); }
+  /** 자동이면 플랜의 n 이 있을 때 통과, 직접이면 친 값이 n 과 글자 그대로 같아야 한다. 이유: n_unknown · n_mismatch. */
+  function nReason(mode, typed, n) {
+    if (!isNum(n) || Math.floor(n) !== n) return "n_unknown";
+    if (mode === "auto") return null;
+    return nMatches(typed, n) ? null : "n_mismatch";
+  }
+  /** 서버로 보내는 확인 값 — 자동은 "auto"(서버가 플랜의 n 을 채운다), 직접은 친 그대로. */
+  function nSendValue(mode, typed) { return mode === "auto" ? "auto" : (typeof typed === "string" ? typed : ""); }
   function platformParam(platforms) {
     var p = platforms || {};
     if (p.ios && p.android) return "both";
@@ -1357,7 +1369,8 @@
     if (!planDoc) reasons.push("no_plan");
     var pv = reviewPlanVerdict(r.review && r.review.plan, plan && plan.build_name);
     if (pv !== "ok") reasons.push(pv);
-    if (!planDoc || !nMatches(ctx.typedN, planDoc.n)) reasons.push("n_mismatch");
+    var nr = nReason(nModeOf(ctx.nMode, ctx.profile), ctx.typedN, planDoc ? planDoc.n : null);
+    if (nr) reasons.push(nr);
     if (ctx.platforms && ctx.platforms.android && ctx.managed !== true) reasons.push("managed_unconfirmed");
     if (ctx.busy) reasons.push("busy");
     return { enabled: reasons.length === 0, reasons: reasons };
@@ -1374,7 +1387,7 @@
       ref: profile.default_branch || "main",
       mode: submit ? "submit" : "plan",
       platform: platform,
-      confirm_build_number: submit && typeof ctx.typedN === "string" ? ctx.typedN : "",
+      confirm_build_number: submit ? nSendValue(nModeOf(ctx.nMode, profile), ctx.typedN) : "",
       play_managed_publishing: managed ? "confirmed-on" : "not-checked",
       listing: ctx.listingFull ? "full" : "notes-only",
       phased: ctx.phased === false ? "0" : "1"
@@ -1497,7 +1510,7 @@
     return {
       version: version, build: n,
       buildNote: up && isNum(up.n) ? T(lang, "review.build.by_job", { id: isNum(r.upload.job_id) ? r.upload.job_id : DASH }) : T(lang, "review.build.not_uploaded"),
-      listing: T(lang, "review.strip.listing_from", { ref: (profile && profile.default_branch) || "main", sha: listing && typeof listing.sha === "string" && listing.sha ? listing.sha.slice(0, 7) : DASH }),
+      listing: T(lang, "review.strip.listing_from", { ref: (profile && profile.listing && profile.listing.ref) || (profile && profile.default_branch) || "main", sha: listing && typeof listing.sha === "string" && listing.sha ? listing.sha.slice(0, 7) : DASH }),
       notesPath: notes && notes.path ? String(notes.path) : null,
       notesCounter: notesText != null ? fieldCounter(notesText, NOTES_LIMIT.android) : null,
       notesText: notesText,
@@ -1804,14 +1817,63 @@
     else if (exit === 4) { parts.push(version); parts.push(T(lang, "driver.exit.4")); }
     else { parts.push(version); parts.push(T(lang, "driver.exit.other", { code: exit })); }
     var confirmed = driver.confirmed_n != null;
+    var autoN = driver.auto_n === true;
+    if (exit === 2 && autoN && planN != null) { parts.length = 0; parts.push(version); parts.push(T(lang, "driver.exit.2_auto", { n: planN })); }
     return {
+      autoN: autoN,
       available: true, configured: true, loading: false, running: running, exit: exit, stage: stage, stageSource: parsed.source, planN: planN, version: version,
       items: items, head: parts.join(" · "), headParts: parts, tone: tone, idle: idle, done: done, blocked: blocked, log: log,
       // S2 의 N 대화상자(항목 28): 종료 코드 2 · plan_n 있음 · 아직 확인한 N 없음
-      dialog: !running && exit === 2 && planN != null && !confirmed,
+      // «자동» 회차는 서버가 스스로 confirm 을 띄우므로 대화상자를 열지 않는다
+      dialog: !running && exit === 2 && planN != null && !confirmed && !autoN,
       statusError: driver.status_error ? String(driver.status_error) : null,
       startedBy: driver.started_by ? String(driver.started_by) : null, startedAt: driver.started_at || null
     };
+  }
+  /**
+   * 최상단 릴리스 막대(소유자 요구 2026-09-17): 회차가 돌면 스토어 화면 맨 위에 버전 · 빌드 번호 ·
+   * 전체 진행(단계 9 중 끝난 수 + 지금 단계 안의 잡 진행) · 지금 하는 일 · 경과 · 예상 완료. 마우스를
+   * 올리면 detail 이 전부 보인다. 드라이버 없이 릴리스 역할 잡만 돌면 그 잡의 막대가 된다.
+   * 근거는 항상 글자로 말한다(선언 단계 · 도는 잡의 분모). 끝난 회차(exit 0) · 아무것도 없으면 null.
+   */
+  function releaseBarModel(dm, layers, release, ctx) {
+    ctx = ctx || {}; dm = dm || {}; layers = layers || {};
+    var lang = ctx.lang, nowMs = ctx.nowMs;
+    var cur = layers.current || null, bar = layers.bar || null, jobP = bar && bar.progress ? bar.progress : null;
+    var live = dm.configured === true && !dm.idle && !dm.done && (dm.running || dm.exit != null || dm.blocked);
+    if (!live && !cur) return null;
+    var plan = release && release.plan ? release.plan : null, doc = planEntryDoc(plan) || {};
+    var version = dm.version && dm.version !== DASH ? dm.version : plan && plan.build_name != null ? String(plan.build_name) : DASH;
+    var n = isNum(dm.planN) ? dm.planN : isNum(doc.n) ? doc.n : null;
+    var total = DRIVER_STAGES.length, done = 0, stageIdx = -1;
+    if (live) (dm.items || []).forEach(function (it, i) { if (it.state === "done") done++; else if (it.state !== "todo" && stageIdx < 0) stageIdx = i; });
+    var stageId = stageIdx >= 0 ? DRIVER_STAGES[stageIdx] : null;
+    var stageLabel = stageId ? stageId + " " + T(lang, "driver.stage." + stageId) : null;
+    var frac = jobP && isNum(jobP.pct) ? jobP.pct / 100 : 0;
+    var pct, basis;
+    if (live) {
+      pct = Math.min(99, Math.round((done + (stageIdx >= 0 ? frac : 0)) / total * 100));
+      basis = T(lang, jobP && isNum(jobP.pct) ? "rbar.basis.stages_job" : "rbar.basis.stages", { total: total });
+    } else {
+      pct = jobP && isNum(jobP.pct) ? jobP.pct : null;
+      basis = bar ? bar.basis : T(lang, "build.basis.none");
+    }
+    var tone = !live ? "running" : dm.running ? "running" : dm.exit === 2 ? (dm.autoN ? "running" : "human") : dm.blocked || dm.exit === 4 ? "warn" : dm.exit === 3 ? "lost" : "bad";
+    var stage = live ? (stageLabel ? T(lang, "rbar.stage", { stage: stageLabel, done: done, total: total }) : T(lang, "rbar.stages_only", { done: done, total: total }))
+      : T(lang, "rbar.job", { id: cur.id, preset: cur.preset || DASH });
+    var nowLine = layers.now || (live && !dm.running ? dm.headParts.slice(1).join(" · ") : null) || null;
+    var started = parseIso(dm.startedAt || (cur && cur.started_at) || null);
+    var elapsed = started != null && isNum(nowMs) ? T(lang, "rbar.elapsed", { dur: fmtDuration(Math.max(0, (nowMs - started) / 1000)) }) : null;
+    var finishes = bar && bar.finishes ? bar.finishes : null;
+    var head = n != null ? T(lang, "build.head.version", { version: version, build: n }) : version;
+    var detail = [T(lang, "rbar.detail.stages", { done: done, total: total, percent: pct != null ? pct : DASH })];
+    if (live && stageLabel) detail.push(T(lang, "rbar.detail.stage", { stage: stageLabel }));
+    if (nowLine) detail.push(nowLine);
+    if (jobP && isNum(jobP.pct)) detail.push(bar.head);
+    if (elapsed) detail.push(elapsed);
+    if (finishes) detail.push(finishes);
+    detail.push(basis);
+    return { tone: tone, pct: pct, head: head, version: version, n: n, stage: stage, now: nowLine, elapsed: elapsed, finishes: finishes, basis: basis, detail: detail.join(" · "), done: done, total: total, live: live };
   }
   /** Build·upload 행의 색과 머리를 드라이버가 가져가는가 — 도는 중이거나 실패·대기·모름·드리프트일 때만. 끝난 회차(exit 0)는 upload.json 이 말한다. */
   function driverRow(model) {
@@ -1841,7 +1903,8 @@
     if (!VERSION_RE.test(String(ctx.version == null ? "" : ctx.version))) r.push("version_pattern");
     var start = { enabled: !r.length, reasons: r, show: live && !model.running && model.exit !== 2 };
     r = gate(true);
-    if (!model.dialog) r.push("no_dialog"); else if (!nMatches(ctx.typedN, model.planN)) r.push("n_mismatch");
+    if (!model.dialog) r.push("no_dialog");
+    else { var nr = nReason(nModeOf(ctx.nMode, ctx.profile), ctx.typedN, model.planN); if (nr) r.push(nr); }
     var confirm = { enabled: !r.length, reasons: r, show: model.dialog === true };
     r = gate(true);
     if (!model.running) r.push("not_running");
@@ -1864,8 +1927,9 @@
       confirm_build_number: isNum(doc.n) ? String(doc.n) : "" };
   }
   /** 친 N 과 드라이버의 plan_n — 글자 그대로 같아야 한다(nMatches). state: empty · ok · mismatch · unknown. */
-  function confirmNDecision(typed, planN) {
+  function confirmNDecision(typed, planN, mode) {
     if (!isNum(planN) || Math.floor(planN) !== planN) return { enabled: false, state: "unknown" };
+    if (mode === "auto") return { enabled: true, state: "auto" };
     if (typeof typed !== "string" || typed === "") return { enabled: false, state: "empty" };
     return nMatches(typed, planN) ? { enabled: true, state: "ok" } : { enabled: false, state: "mismatch" };
   }
@@ -1970,6 +2034,7 @@
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
     confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
+    nModeDefault: nModeDefault, nModeOf: nModeOf, nReason: nReason, nSendValue: nSendValue, releaseBarModel: releaseBarModel,
     planVersionGuess: planVersionGuess, PLAN_VERSION_RE: PLAN_VERSION_RE,
     storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
   };
@@ -2020,6 +2085,7 @@
       // 릴리스 드라이버(`GET …/release/driver`) · GitHub 카드(`GET …/release/github`). Start 폼의 값과 S2 의 친 N 도
       // 이 페이지에만 산다 — 회차(build_name · plan_n)가 바뀌면 지워진다. `driverDialogKey` 는 S2 대화상자를 회차마다 한 번만 저절로 연다.
       driver: null, driverStatus: null, github: null, githubStatus: null, driverError: null, driverN: "", driverDialogKey: null,
+      nMode: null,   // 빌드 번호 모드 — null 이면 프로파일 기본값(nModeDefault)
       driverForm: { version: null, track: "", dryRun: false } }
   };
   function now() { return state.skewUnknown ? NaN : Date.now() + state.skewMs; }
@@ -3247,7 +3313,7 @@
       state.store.review = { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null };
       state.store.driver = null; state.store.driverStatus = null; state.store.github = null; state.store.githubStatus = null;
       state.store.driverError = null; state.store.driverN = ""; state.store.driverDialogKey = null;
-      state.store.driverForm = { version: null, track: "", dryRun: false };
+      state.store.driverForm = { version: null, track: "", dryRun: false }; state.store.nMode = null;
     }
     showView("store");
     renderStore();
@@ -3387,6 +3453,7 @@
     var n = now();
     var h = '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
       + '<span class="spacer"></span><button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+    h += releaseBarHtml();
     // Setup — 프로파일이 선언한 비밀 표(읽기 전용 + Replace · Verify all)
     var setupState = rowState("setup", { setup: doc.setup });
     h += srowHtml("setup", setupState, esc(setupHead(doc.setup, items, profile, L(), tz(), n)),
@@ -3539,6 +3606,19 @@
     h += "</ol></details>";
     return h;
   }
+  /** 최상단 릴리스 막대 — 회차가 돌 때만. title 과 :hover 의 .rbar-tip 이 같은 detail 을 보인다. */
+  function releaseBarHtml() {
+    var r = releaseDoc();
+    var layers = state.store.releaseStatus !== 404 && r ? buildLayers(r.jobs, rowsById(state.status), L(), tz(), now()) : null;
+    var m = releaseBarModel(driverModel(), layers, r, { lang: L(), nowMs: now() });
+    if (!m) return "";
+    var pct = isNum(m.pct) ? m.pct : null;
+    return '<section class="rbar ' + esc(m.tone) + '" data-release-bar data-tone="' + esc(m.tone) + '" role="group" aria-label="' + esc(tr("rbar.aria")) + '" title="' + esc(m.detail) + '">'
+      + '<div class="rbar-top"><span class="rbar-ver" data-rbar-head>' + esc(m.head) + '</span><span class="rbar-stage" data-rbar-stage>' + esc(m.stage) + '</span><span class="spacer"></span><span class="rbar-pct" data-rbar-pct>' + (pct != null ? pct + "%" : DASH) + "</span></div>"
+      + '<div class="pbar big" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (pct != null ? ' aria-valuenow="' + pct + '"' : "") + ' aria-valuetext="' + esc(m.detail) + '"' + (pct == null ? ' data-basis="none"' : "") + '><i style="width:' + (pct != null ? pct : 0) + '%"></i></div>'
+      + '<div class="rbar-foot"><span class="sub">' + (m.now ? '<span class="g" aria-hidden="true">▶</span> ' + esc(m.now) : esc(m.basis)) + '</span><span class="spacer"></span><span class="sub">' + esc([m.elapsed, m.finishes].filter(Boolean).join(" · ")) + "</span></div>"
+      + '<div class="rbar-tip" data-rbar-tip role="tooltip">' + esc(m.detail) + "</div></section>";
+  }
   function buildRowHtml(model) {
     var dm = driverModel(), acts = driverActions(dm, driverCtx());
     var over = driverRow(dm);   // 도는 중 · 실패 · N 대기 · 모름 · 드리프트면 행의 색과 머리는 드라이버의 것
@@ -3563,8 +3643,17 @@
     var plan = (releaseDoc() || {}).plan;   // 아직 안 쳤으면 플랜의 버전이 기본값
     return plan && plan.build_name != null ? String(plan.build_name) : "";
   }
+  function nMode() { return nModeOf(state.store.nMode, currentProfile()); }
+  /** «자동 · 직접 입력» 토글 — 심사 패널과 릴리스 시작 폼이 같은 상태를 보여 준다. */
+  function nModeToggleHtml() {
+    var m = nMode();
+    return '<div class="seg" role="group" aria-label="' + esc(tr("n.mode.label")) + '" data-n-mode-toggle>'
+      + '<span class="seg-l">' + esc(tr("n.mode.label")) + "</span>"
+      + '<button type="button" class="seg-b' + (m === "auto" ? " on" : "") + '" data-n-mode="auto" aria-pressed="' + (m === "auto") + '">' + esc(tr("n.mode.auto")) + "</button>"
+      + '<button type="button" class="seg-b' + (m === "typed" ? " on" : "") + '" data-n-mode="typed" aria-pressed="' + (m === "typed") + '">' + esc(tr("n.mode.typed")) + "</button></div>";
+  }
   function driverCtx() {
-    return { token: state.token, admin: state.admin, busy: state.store.busy, version: driverFormVersion(), typedN: state.store.driverN,
+    return { token: state.token, admin: state.admin, busy: state.store.busy, version: driverFormVersion(), typedN: state.store.driverN, nMode: state.store.nMode, profile: currentProfile(),
       release: releaseDoc(), releaseStatus: state.store.releaseStatus, uploadPreset: !!(currentProfile().presets || {}).upload };
   }
   function driverReasons(a) { return a.reasons.map(function (k) { return tr("driver.reason." + k); }).join(" · "); }
@@ -3583,7 +3672,8 @@
       h += "</ol>";
     }
     // S2(항목 28): 대화상자는 회차마다 한 번 저절로 뜨고, 이 버튼이 다시 연다
-    if (acts.confirm.show) h += '<div class="actions"><button type="button" class="btn primary" data-driver-confirm-open>' + esc(tr("driver.confirm")) + "</button></div>";
+    if (acts.confirm.show) h += '<div class="actions"><button type="button" class="btn primary" data-driver-confirm-open>' + esc(tr("driver.confirm")) + "</button>"
+      + nModeToggleHtml() + '<span class="sub" data-driver-n-hint>' + esc(tr(nMode() === "auto" ? "driver.n_auto_hint" : "driver.n_typed_hint")) + "</span></div>";
     if (acts.start.show) {
       var f = state.store.driverForm;
       h += '<form class="drv-start" data-driver-start>'
@@ -3591,6 +3681,7 @@
         + '<label>' + esc(tr("driver.track")) + '<input type="text" data-driver-track autocomplete="off" spellcheck="false" list="driver-tracks" placeholder="' + esc(tr("driver.track_default")) + '" value="' + esc(f.track) + '"></label>'
         + '<datalist id="driver-tracks"><option value="internal"></option><option value="alpha"></option><option value="beta"></option><option value="production"></option></datalist>'
         + '<label class="ck"><input type="checkbox" data-driver-dry' + (f.dryRun ? " checked" : "") + "> " + esc(tr("driver.dry_run")) + "</label>"
+        + nModeToggleHtml() + '<span class="sub" data-driver-n-hint>' + esc(tr(nMode() === "auto" ? "driver.n_auto_hint" : "driver.n_typed_hint")) + "</span>"
         + '<button type="submit" class="btn primary" data-driver-start-go disabled>' + esc(tr(busy === "start" ? "driver.starting" : "driver.start")) + "</button>"
         + '<span class="sub" data-driver-reason></span></form>';
     }
@@ -3728,7 +3819,7 @@
   }
   function reviewChoicesCtx() {
     var rv = state.store.review;
-    return { release: releaseDoc(), profile: currentProfile(), typedN: rv.typedN, platforms: rv.platforms, managed: rv.managed,
+    return { release: releaseDoc(), profile: currentProfile(), typedN: rv.typedN, nMode: state.store.nMode, platforms: rv.platforms, managed: rv.managed,
       listingFull: rv.listingFull, phased: rv.phased, admin: state.admin, token: state.token, busy: state.store.busy };
   }
   function targetsText(platforms) {
@@ -3802,8 +3893,14 @@
     // N 입력(항목 28) + 행동 셋(항목 23)
     var planDoc = planEntryDoc(r.plan) || {};
     var planN = isNum(planDoc.n) ? planDoc.n : null;
-    h += '<div class="nbox"><label for="review-n">' + esc(tr("review.n_label")) + '</label><span class="sub">' + esc(planN != null ? tr("review.n_hint", { n: planN }) : tr("review.n_unknown")) + "</span>"
-      + '<input id="review-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + esc(rv.typedN) + '" aria-describedby="review-n-state"><span id="review-n-state" class="nstate" data-n-state></span></div>';
+    h += nModeToggleHtml();
+    if (nMode() === "auto") {
+      h += '<div class="nbox auto" data-n-auto><span class="lab">' + esc(tr("n.mode.label")) + '</span><span class="nval mono">' + esc(planN != null ? String(planN) : DASH) + "</span>"
+        + '<span class="sub" style="grid-column: 1 / -1">' + esc(planN != null ? tr("review.n_auto", { n: planN }) : tr("review.n_auto_unknown")) + "</span></div>";
+    } else {
+      h += '<div class="nbox"><label for="review-n">' + esc(tr("review.n_label")) + '</label><span class="sub">' + esc(planN != null ? tr("review.n_hint", { n: planN }) : tr("review.n_unknown")) + "</span>"
+        + '<input id="review-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + esc(rv.typedN) + '" aria-describedby="review-n-state"><span id="review-n-state" class="nstate" data-n-state></span></div>';
+    }
     var busy = state.store.busy;
     var canJob = !!state.token && !busy;
     h += '<div class="actions">'
@@ -4026,6 +4123,7 @@
     var f = state.store.driverForm, body = { build_name: driverFormVersion() };
     if (f.track) body.android_track = f.track;
     if (f.dryRun) body.dry_run = true;
+    if (nMode() === "auto") body.build_number = "auto";   // S2 를 서버가 플랜의 N 으로 이어 준다
     driverCall("start", function (api, repo) { return api.driverStart(repo, body); }, function (res) {
       state.store.driverForm = { version: null, track: "", dryRun: false }; state.store.driverDialogKey = null;
       toast(tr("driver.started_toast", { id: res.body && res.body.release_id != null ? res.body.release_id : DASH }));
@@ -4060,9 +4158,11 @@
   function openConfirmN() {
     var m = driverModel(), dlg = $("#confirm-n-dialog"), input = $("#driver-n");
     if (!m.dialog || !dlg) return;
+    var auto = nMode() === "auto";
     $("[data-confirm-n-title]").textContent = tr("driver.confirm.title", { version: m.version });
-    $("[data-confirm-n-body]").textContent = tr("driver.confirm.body", { n: m.planN });
+    $("[data-confirm-n-body]").textContent = tr(auto ? "driver.confirm.body_auto" : "driver.confirm.body", { n: m.planN });
     $("[data-confirm-n-status]").textContent = "";
+    var box = dlg.querySelector(".nbox"); if (box) box.hidden = auto;
     input.value = state.store.driverN || "";
     renderConfirmNState();
     if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
@@ -4072,30 +4172,30 @@
   function renderConfirmNState() {
     var go = $("#confirm-n-dialog [data-confirm-n-go]"), st = $("#confirm-n-dialog [data-driver-n-state]");
     if (!go) return;
-    var m = driverModel(), d = confirmNDecision(state.store.driverN, m.planN), a = driverActions(m, driverCtx()).confirm;
+    var m = driverModel(), d = confirmNDecision(state.store.driverN, m.planN, nMode()), a = driverActions(m, driverCtx()).confirm;
     go.disabled = !a.enabled;
     go.title = a.enabled ? "" : driverReasons(a);
     go.textContent = state.store.busy === "confirm" ? tr("driver.confirming") : m.planN != null ? tr("driver.confirm.go", { n: m.planN }) : tr("driver.confirm.go_empty");
     if (st) {
-      st.textContent = d.state === "empty" ? "" : d.state === "ok" ? tr("review.n_ok", { n: m.planN }) : d.state === "mismatch" ? tr("review.n_mismatch", { n: m.planN }) : tr("review.n_unknown");
-      st.className = "nstate" + (d.state === "ok" ? " ok" : d.state === "empty" ? "" : " bad");
+      st.textContent = d.state === "empty" || d.state === "auto" ? "" : d.state === "ok" ? tr("review.n_ok", { n: m.planN }) : d.state === "mismatch" ? tr("review.n_mismatch", { n: m.planN }) : tr("review.n_unknown");
+      st.className = "nstate" + (d.state === "ok" ? " ok" : d.state === "empty" || d.state === "auto" ? "" : " bad");
     }
   }
   function confirmDriverN() {
     var m = driverModel();
     if (!driverActions(m, driverCtx()).confirm.enabled) return;   // 대화상자가 열린 사이 회차가 바뀌었을 수 있다
-    var typed = state.store.driverN, dlg = $("#confirm-n-dialog");
-    driverCall("confirm", function (api, repo) { return api.driverConfirm(repo, { build_name: m.version, build_number: typed }); }, function () {
+    var typed = state.store.driverN, dlg = $("#confirm-n-dialog"), send = nSendValue(nMode(), typed), shown = send === "auto" ? m.planN : typed;
+    driverCall("confirm", function (api, repo) { return api.driverConfirm(repo, { build_name: m.version, build_number: send }); }, function () {
       state.store.driverN = "";   // 한 확인은 한 번만 쓴다(항목 28)
       if (dlg && dlg.open) dlg.close();
-      toast(tr("driver.confirmed_toast", { n: typed }));
+      toast(tr("driver.confirmed_toast", { n: shown }));
     }, function (res) { var st = $("[data-confirm-n-status]"); if (st) st.textContent = refusalText(res, L()); });
   }
   function wireStore() {
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal]");
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
       if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
@@ -4111,6 +4211,7 @@
       if (t.hasAttribute("data-driver-abort")) { if (!t.disabled) abortDriver(); return; }
       if (t.hasAttribute("data-driver-retry")) { if (!t.disabled) retryDriver(); return; }
       if (t.hasAttribute("data-driver-confirm-open")) { state.lastTrigger = t; openConfirmN(); return; }
+      if (t.hasAttribute("data-n-mode")) { state.store.nMode = t.getAttribute("data-n-mode"); state.store.review.typedN = ""; state.store.driverN = ""; renderStore(); return; }
       if (t.hasAttribute("data-upload-rehearsal")) { if (!t.disabled) rehearseUpload(); return; }
       if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
     });

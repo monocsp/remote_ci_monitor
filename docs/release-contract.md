@@ -96,6 +96,7 @@ files = ["first_name.txt", "last_name.txt", "phone_number.txt", "email_address.t
 preview       = ["python3", "scripts/release/store_listing.py", "preview"]
 diff          = ["python3", "scripts/release/store_listing.py", "diff", "--live"]
 validate      = ["python3", "scripts/release/store_listing.py", "validate", "--build-name", "{version}", "--version-code", "{build}"]
+ref           = "dev"      # optional — read the copy from this branch (a dev → main project ships what dev has)
 screenshots   = ["store/screenshots/**/*.png"]
 release_notes = "store/release_notes/{version}/*.txt"
 ```
@@ -240,10 +241,13 @@ non-interactively, the way a session machine would, and reads the stage back fro
 Expectations on the driver:
 
 - exit `2` and print `plan: N = <n>` when it needs the build number — rcm shows the dialog, the
-  human **types** the number, rcm re-runs with `--confirm-build-number`;
+  human **types** the number, rcm re-runs with `--confirm-build-number`; with the page's
+  **Build number: Auto** toggle (default when `build_number_policy = "auto"`) rcm re-runs with
+  that same `<n>` by itself, so the line is the only source of the number either way;
 - `--status` is read-only and never creates branches or touches the store;
-- every irreversible step (merge, upload, submit) is preceded by a typed confirmation, never a flag
-  rcm could set on its own; rcm passes only what a human typed in this session;
+- every irreversible step (merge, upload, submit) is preceded by a confirmation of the plan's
+  number — typed by a human, or (Auto) the plan's own `n` — never a number rcm computed; rcm
+  passes only what the plan said or what a human typed in this session;
 - stage is derivable from remote facts (PR for this sha, commit statuses, jobs for this sha, the
   exact tag) so a restarted server can pick the round up.
 

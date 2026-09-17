@@ -176,7 +176,7 @@ url  = "git@github.com:org/app.git"
 [repos.app.release]
 default_branch       = "main"                    # default "main"
 tag                  = "prod/{version}-{build}"  # default; must contain {version} and {build}
-build_number_policy  = "auto"                    # "auto" (default) | "manual"
+build_number_policy  = "auto"                    # "auto" (default) | "manual" — the Store tab's «Build number» toggle default
 plan_max_age_minutes = 30                        # default 30; integer > 0
 driver               = "scripts/release/product_release.sh"   # optional; relative to the repository
 secrets_dir_env      = "APP_SECRETS"             # required when secrets are listed; ^[A-Z][A-Z0-9_]*$
@@ -207,6 +207,7 @@ diff          = ["python3", "scripts/release/store_listing.py", "diff", "--live"
 validate      = ["python3", "scripts/release/store_listing.py", "validate", "--build-name", "{version}", "--version-code", "{build}"]
 screenshots   = ["store/screenshots/**/*.png"]
 release_notes = "store/release_notes/{version}/*.txt"
+ref           = "dev"                            # optional; the branch the copy is read from (default: default_branch)
 ```
 
 Loading the file checks **shape**: unknown keys anywhere under `release` are an error, `tag`
@@ -298,7 +299,7 @@ keeps its default. Writes take a Bearer token only.
 | `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
 | `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
 | `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
-| `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `default_branch` made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` |
+| `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `listing.ref` (default `default_branch`) made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` |
 | `GET …/release/listing/file?path=<rel>` | read rule, always | the bytes of one screenshot — the path must match a `listing.screenshots` glob and be an image type; 5 MB at most (413) |
 | `POST …/release/listing/validate` | client token | `{build_name, build?}` → runs `listing.validate` with `{version}` and `{build}` substituted → `{ok, lines[], exit}` (plus `error` when it failed to run) |
 | `GET …/release/github` | read rule, always | from the mirror only: `log[]` (`sha subject author at` × 5 of `default_branch`), `tags[]` (`name at` × 5 newest whose name starts with the `tag` pattern's literal prefix, e.g. `prod/`), and `prs: null` — next: pull requests via the `GH_TOKEN` secret |

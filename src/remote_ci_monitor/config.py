@@ -190,7 +190,7 @@ _RELEASE_KEYS = {
     "listing",
 }
 _RELEASE_SECRET_KEYS = {"name", "kind", "optional", "verify", "files", "max_kb"}
-_RELEASE_LISTING_KEYS = {"preview", "diff", "validate", "screenshots", "release_notes"}
+_RELEASE_LISTING_KEYS = {"preview", "diff", "validate", "screenshots", "release_notes", "ref"}
 
 
 @dataclass(frozen=True)
@@ -214,6 +214,9 @@ class ReleaseListing:
     validate: tuple[str, ...] = ()
     screenshots: tuple[str, ...] = ()
     release_notes: str = ""
+    # 소개 자료를 읽을 브랜치 — 없으면 default_branch. dev → main 으로 머지해 내보내는 프로젝트는
+    # 릴리스에 실릴 문안이 dev 에 있으므로 "dev" 로 둔다.
+    ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1142,7 +1145,11 @@ def _parse_release_listing(where: str, raw: Any) -> ReleaseListing:
     notes = raw.get("release_notes", "")
     if not isinstance(notes, str):
         raise ConfigError(f"{where}: release_notes must be a string")
+    ref = raw.get("ref")
+    if ref is not None and (not isinstance(ref, str) or not ref.strip() or " " in ref):
+        raise ConfigError(f"{where}: ref must be a branch name")
     return ReleaseListing(
+        ref=ref,
         preview=argvs["preview"],
         diff=argvs["diff"],
         validate=argvs["validate"],

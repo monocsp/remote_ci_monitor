@@ -35,6 +35,7 @@ COLUMNS = [
     "android_track",
     "dry_run",
     "token_name",
+    "auto_n",
 ]
 
 
@@ -70,14 +71,14 @@ def add_release(store: Store, build: str = "1.0.1", *, started: datetime = NOW) 
 
 
 def test_a_fresh_database_is_version_18_with_the_releases_table():
-    assert DB_VERSION == 18
+    assert DB_VERSION == 19
 
 
 def test_a_fresh_database_has_the_releases_table_and_index(tmp_path):
     path = tmp_path / "data" / "rcm.sqlite3"
     s = Store(path)
     try:
-        assert s.user_version() == 18
+        assert s.user_version() == 19
         assert columns(path, "releases") == COLUMNS
         names = {
             r[0]
@@ -108,7 +109,7 @@ def test_a_v17_database_gets_the_table_a_backup_and_version_18(tmp_path):
     }
     s = Store(path)
     try:
-        assert s.user_version() == 18
+        assert s.user_version() == 19
         assert columns(path, "releases") == COLUMNS
         assert s.get_job(1) is not None
         rid = add_release(s)
@@ -167,3 +168,35 @@ def test_release_rows_survive_retention_and_a_full_gc(tmp_path):
         assert [r["build_name"] for r in store.list_open_releases()] == []
     finally:
         store.close()
+
+
+def test_a_v18_database_gets_the_auto_n_column_and_version_19(tmp_path):
+    """v18 DB(`auto_n` 열이 없다)를 이 빌드로 열면 열을 더하고 19 가 된다. 옛 행은 auto_n False."""
+    path = tmp_path / "data" / "rcm.sqlite3"
+    s = Store(path)
+    rid = add_release(s)
+    s.close()
+    c = sqlite3.connect(path)
+    c.execute("ALTER TABLE releases DROP COLUMN auto_n")
+    c.execute("PRAGMA user_version=18")
+    c.commit()
+    c.close()
+    assert "auto_n" not in columns(path, "releases")
+    s = Store(path)
+    try:
+        assert s.user_version() == 19
+        assert columns(path, "releases") == COLUMNS
+        assert s.get_release(rid)["auto_n"] is False
+        auto = s.create_release(
+            repo="app",
+            build_name="1.0.2",
+            kind="start",
+            started_by="admin",
+            now=NOW,
+            log_path="/tmp/y.log",
+            auto_n=True,
+        )
+        assert s.get_release(auto)["auto_n"] is True
+    finally:
+        s.close()
+    assert (path.parent / "backup" / "rcm.sqlite3.v18.bak").exists()

@@ -18,7 +18,7 @@ function driver(patch) {
   return Object.assign({ running: false, build_name: "1.0.1", started_at: iso(2280), started_by: "pcs", pid: null, exit_code: null,
     log_tail: [], plan_n: null, status: [] }, patch);
 }
-const ADMIN = { token: "t", admin: true, busy: null, version: "1.0.1", typedN: "" };
+const ADMIN = { token: "t", admin: true, busy: null, version: "1.0.1", typedN: "", nMode: "typed" };
 const release = { plan: { job_id: 641, state: "succeeded", build_name: "1.0.1", doc: { n: 181, build_name: "1.0.1" } } };
 const states = (m) => m.items.map((i) => i.state).join(" ");
 
@@ -226,6 +226,23 @@ describe("driverActions — 어느 버튼이 열리는가", () => {
     assert.equal(a.start.show, false, "a round waiting for N is a round");
     assert.ok(a.start.reasons.includes("awaiting_n"));
   });
+  test("exit 2 + «자동» — Confirm 은 친 N 없이 열린다; 플랜에 n 이 없으면 n_unknown", () => {
+    const m = model({ exit_code: 2, plan_n: 181 });
+    assert.equal(S.driverActions(m, ctx({ nMode: "auto", typedN: "" })).confirm.enabled, true);
+    assert.equal(S.driverActions(m, ctx({ nMode: "auto", typedN: "180" })).confirm.enabled, true, "typed value is ignored in auto");
+    assert.equal(S.driverActions(m, ctx({ nMode: null, profile: { build_number_policy: "auto" } })).confirm.enabled, true, "profile default auto");
+    assert.deepEqual(S.driverActions(m, ctx({ nMode: null, profile: { build_number_policy: "manual" } })).confirm.reasons, ["n_mismatch"], "profile manual → typed");
+    const none = S.stepperModel(driver({ exit_code: 2, plan_n: null, log_tail: [] }), CTX);
+    assert.equal(none.dialog, false);
+  });
+  test("«자동» 회차(auto_n)는 exit 2 에서 대화상자를 열지 않고 머리에 «자동 확인 중» 을 쓴다", () => {
+    const m = S.stepperModel(driver({ exit_code: 2, plan_n: 181, auto_n: true }), CTX);
+    assert.equal(m.autoN, true);
+    assert.equal(m.dialog, false);
+    assert.match(m.head, /automatically|자동/);
+    const typed = S.stepperModel(driver({ exit_code: 2, plan_n: 181, auto_n: false }), CTX);
+    assert.equal(typed.dialog, true);
+  });
   test("대화상자가 없으면 Confirm 은 «no_dialog»", () => {
     assert.deepEqual(S.driverActions(model(), ctx({ typedN: "181" })).confirm.reasons, ["no_dialog"]);
   });
@@ -358,5 +375,61 @@ describe("makeStoreApi — 드라이버 · GitHub 경로와 본문", () => {
     const { calls, api: a } = api();
     await a.upload("app", S.rehearsalBody(release));
     assert.deepEqual(JSON.parse(calls[0][2]), { mode: "rehearsal", build_name: "1.0.1", confirm_build_number: "181" });
+  });
+});
+
+describe("releaseBarModel — 최상단 릴리스 막대", () => {
+  const model = (patch) => S.stepperModel(driver(patch), CTX);
+  const running = () => model({ running: true, pid: 4242, status: ["release 1.0.1: stage S5 scenario QA · job #643"] });
+  const layersWith = (pct, extra) => Object.assign({ bar: { jobId: 643, preset: "scenario-qa", progress: { pct: pct, basis: "sub", done: 17, total: 30 }, head: pct + "% · 17/30 · chunks", basis: "basis: declared chunks", finishes: "finishes 21:40" },
+    now: "Now: #643 scenario-qa", items: [], current: { id: 643, preset: "scenario-qa", state: "running", started_at: iso(600) } }, extra);
+  test("회차 없음 · 도는 잡 없음 → null; 끝난 회차(exit 0)도 null", () => {
+    assert.equal(S.releaseBarModel(model(), { bar: null, now: null, items: [], current: null }, release, CTX), null);
+    assert.equal(S.releaseBarModel(model({ exit_code: 0, status: ["release 1.0.1: done"] }), { current: null }, release, CTX), null);
+  });
+  test("S5 진행 중 + 잡 57% → 5 단계 끝 + 0.57 → 62%, 파랑, 버전 (N), 지금 줄, 근거", () => {
+    const m = S.releaseBarModel(running(), layersWith(57), release, CTX);
+    assert.equal(m.tone, "running");
+    assert.equal(m.pct, Math.round((5 + 0.57) / 9 * 100));
+    assert.equal(m.head, "1.0.1 (181)");
+    assert.match(m.stage, /S5 scenario QA · stage 6 of 9/);
+    assert.equal(m.now, "Now: #643 scenario-qa");
+    assert.match(m.detail, /5\/9 stages done · 62% overall/);
+    assert.match(m.detail, /now S5 scenario QA/);
+    assert.match(m.detail, /57% · 17\/30 · chunks/);
+    assert.match(m.detail, /elapsed 38m/);
+    assert.match(m.detail, /finishes 21:40/);
+    assert.match(m.basis, /declared stages \+ the running job/);
+  });
+  test("잡 진행이 없으면 단계만으로 — 5/9 = 56%, 근거는 «선언 단계»", () => {
+    const m = S.releaseBarModel(running(), { bar: null, now: null, items: [], current: null }, release, CTX);
+    assert.equal(m.pct, 56);
+    assert.match(m.basis, /9 declared stages, each worth the same/);
+    assert.equal(m.now, null);
+  });
+  test("99% 상한 — 8 단계 끝 + 잡 99% 여도 99", () => {
+    const m8 = model({ running: true, pid: 1, status: ["release 1.0.1: stage S8 tag"] });
+    assert.equal(S.releaseBarModel(m8, layersWith(99), release, CTX).pct, 99);
+  });
+  test("exit 2 사람 차례 → 황토, 머리 문구가 지금 줄; auto_n 회차는 파랑", () => {
+    const m = S.releaseBarModel(model({ exit_code: 2, plan_n: 181 }), { current: null }, release, CTX);
+    assert.equal(m.tone, "human");
+    assert.match(m.now, /waiting for the typed build number 181/);
+    const a = S.releaseBarModel(model({ exit_code: 2, plan_n: 181, auto_n: true }), { current: null }, release, CTX);
+    assert.equal(a.tone, "running");
+  });
+  test("exit 3 보라 · exit 1 빨강 · exit 4 황토", () => {
+    assert.equal(S.releaseBarModel(model({ exit_code: 3 }), { current: null }, release, CTX).tone, "lost");
+    assert.equal(S.releaseBarModel(model({ exit_code: 1 }), { current: null }, release, CTX).tone, "bad");
+    assert.equal(S.releaseBarModel(model({ exit_code: 4 }), { current: null }, release, CTX).tone, "warn");
+  });
+  test("드라이버 없이 릴리스 잡만 돌면 그 잡의 막대 — 버전은 플랜에서, 근거는 잡의 것", () => {
+    const none = S.stepperModel({ configured: false }, CTX);
+    const m = S.releaseBarModel(none, layersWith(40), release, CTX);
+    assert.equal(m.pct, 40);
+    assert.equal(m.head, "1.0.1 (181)");
+    assert.equal(m.stage, "#643 scenario-qa");
+    assert.equal(m.basis, "basis: declared chunks");
+    assert.equal(m.live, false);
   });
 });

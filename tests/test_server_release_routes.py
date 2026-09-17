@@ -22,6 +22,7 @@ import io
 import json
 import stat
 import tarfile
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -546,6 +547,24 @@ def test_submit_needs_a_typed_build_number(open_srv):
     assert code_of(srv.post("review", body, token="admin")) == (409, "build_number_mismatch")
 
 
+def test_submit_with_auto_takes_the_plans_number_and_still_needs_a_fresh_green_plan(open_srv):
+    """«빌드 번호 자동» — `confirm_build_number: "auto"` 는 플랜의 `n` 을 그대로 쓴다. 플랜이 없거나
+    낡았으면 자동이어도 같은 409 — 서버는 번호를 지어내지 않는다."""
+    srv = open_srv
+    body = {**SUBMIT, "confirm_build_number": "auto"}
+    assert code_of(srv.post("review", body, token="admin")) == (409, "review_plan_required")
+    srv.plan_job()
+    srv.review_plan_job()
+    status, resp = srv.post("review", body, token="admin")
+    assert status == 202, resp
+    job = srv.store.get_job(resp["job_id"])
+    assert job.inputs["confirm_build_number"] == "181"
+    loud = {**body, "confirm_build_number": "AUTO "}
+    assert srv.post("review", loud, token="admin")[0] == 202
+    srv.plan_job({**PLAN_DOC, "n": None})
+    assert code_of(srv.post("review", body, token="admin")) == (409, "build_number_mismatch")
+
+
 def test_submit_needs_a_succeeded_review_plan_for_the_same_build(open_srv):
     srv = open_srv
     srv.plan_job()
@@ -647,6 +666,9 @@ def test_rehearsal_takes_a_client_token_and_upload_takes_admin_plus_the_plan(ope
     assert status == 202, body
     job = srv.store.get_job(body["job_id"])
     assert job.inputs["mode"] == "upload" and job.inputs["confirm_build_number"] == "181"
+    status, resp = srv.post("upload", {**up, "confirm_build_number": "auto"}, token="admin")
+    assert status == 202, resp
+    assert srv.store.get_job(resp["job_id"]).inputs["confirm_build_number"] == "181"
     assert job.inputs["android_track"] == "beta"
     assert srv.post("upload", {**up, "android_track": "a b"}, token="admin")[0] == 400
     assert srv.post("upload", {"build_name": "1.0.1", "mode": "publish"})[0] == 400
@@ -691,6 +713,26 @@ def test_listing_needs_the_mirror_and_then_runs_the_profile_commands_in_a_checko
     body = srv.req("GET", "/api/repos/app/release/listing")[1]
     assert body["sha"] == new and (checkout / "more.txt").exists()
     assert body["release_notes"]["path"] == "store/release_notes/1.0.1/en.txt"  # `*` 로 찾는다
+
+
+def test_listing_ref_reads_the_copy_from_that_branch(srv, remote):
+    """`listing.ref = "dev"` — dev → main 으로 내보내는 프로젝트는 릴리스에 실릴 문안이 dev 에 있다.
+    체크아웃은 그 브랜치의 sha 로 만들고, 프로파일 JSON 의 listing.ref 는 그 이름이다."""
+    srv.cfg.repos[0].release = parse_release_profile(
+        "app", {**PROFILE, "listing": {**PROFILE["listing"], "ref": "dev"}}
+    )
+    srv.fetch()
+    body = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert body["sha"] == remote.dev and body["release_notes"] is None, body  # dev 엔 문안이 없다
+    dev = remote.push_branch("dev", "store/release_notes/1.0.1/en.txt", "From dev.\n", "dev notes")
+    srv.fetch()
+    body = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert body["sha"] == dev and body["release_notes"]["text"] == "From dev.\n"
+    assert (srv.cfg.data_dir / "listing" / "app" / "checkout.sha").read_text() == dev
+    profile = srv.req("GET", "/api/repos/app")[1]["profile"]
+    assert profile["listing"]["ref"] == "dev"
+    srv.cfg.repos[0].release = parse_release_profile("app", PROFILE)
+    assert srv.req("GET", "/api/repos/app")[1]["profile"]["listing"]["ref"] == "main"
 
 
 def test_listing_without_a_profile_section_is_configured_false(srv):
@@ -790,6 +832,7 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
         "pid": None,
         "exit_code": None,
         "confirmed_n": None,
+        "auto_n": False,
         "log_tail": [],
         "plan_n": None,
         "status": None,
@@ -890,6 +933,55 @@ def test_confirm_forwards_only_the_number_the_log_showed_and_the_human_typed(ope
     assert all(t.revoked_at for t in srv.store.list_tokens() if t.name.startswith("store-driver"))
 
 
+def test_confirm_with_auto_forwards_the_number_the_log_showed(open_srv):
+    srv = open_srv
+    srv.fetch()
+    srv.post("start", {"build_name": "1.0.1", "dry_run": True}, token="admin")
+    wait_run(srv, 1)
+    auto = {"build_name": "1.0.1", "build_number": "auto"}
+    status, resp = srv.post("confirm", auto, token="admin")
+    assert status == 202, resp
+    row = wait_run(srv, 2)
+    assert row["kind"] == "confirm" and row["confirmed_n"] == 181 and row["auto_n"] is False
+    assert "--confirm-build-number 181" in Path(row["log_path"]).read_text()
+
+
+def test_a_round_started_with_build_number_auto_continues_by_itself_after_exit_2(open_srv):
+    """«빌드 번호 자동» 으로 시작한 회차: 드라이버가 `plan: N = 181` 을 찍고 exit 2 로 물으면
+    서버가 사람 없이 `--confirm-build-number 181` 로 이어 달린다. 대장에는 두 행(start ·
+    confirm), confirm 의 started_by 는 「<시작한 사람> (auto)」. 자동이 아닌 회차는 그대로 사람
+    차례(exit 2 에서 멈춤)."""
+    srv = open_srv
+    srv.fetch()
+    typed = {"build_name": "1.0.1", "build_number": "181"}
+    assert srv.post("start", typed, token="admin")[0] == 400
+    status, resp = srv.post(
+        "start", {"build_name": "1.0.1", "dry_run": True, "build_number": "auto"}, token="admin"
+    )
+    assert status == 202, resp
+    first = wait_run(srv, 1)
+    assert first["exit_code"] == 2 and first["auto_n"] is True
+    deadline = time.monotonic() + 15
+    while srv.store.count_releases() < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert srv.store.count_releases() == 2
+    second = wait_run(srv, 2)
+    assert second["kind"] == "confirm" and second["confirmed_n"] == 181
+    assert second["started_by"] == "macmini-admin (auto)" and second["exit_code"] == 0
+    assert second["dry_run"] is True and second["auto_n"] is True
+    assert (
+        "confirmed --build-name 1.0.1 --dry-run --confirm-build-number 181"
+        in Path(second["log_path"]).read_text()
+    )
+    view = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert view["kind"] == "confirm" and view["auto_n"] is True and view["running"] is False
+    # 자동이 아니면 exit 2 에서 멈춘다
+    assert srv.post("start", {"build_name": "1.0.2", "dry_run": True}, token="admin")[0] == 202
+    wait_run(srv, 3)
+    time.sleep(0.3)
+    assert srv.store.count_releases() == 3
+
+
 def test_abort_and_retry_rerun_the_driver_with_the_flag(open_srv):
     srv = open_srv
     srv.fetch()
@@ -948,5 +1040,7 @@ def test_the_driver_view_closes_an_orphan_run_after_a_restart(open_srv):
     (srv.cfg.data_dir / "driver" / "app" / f"{rid}.exit").write_text("4")
     view = srv.req("GET", "/api/repos/app/release/driver")[1]
     assert view["running"] is False and view["exit_code"] == 4 and view["log_tail"] == []
-    assert srv.store.list_tokens()[-1].revoked_at is not None
+    # 이름으로 찾는다 — 순서는 created_at 이라 NOW(고정) 와 실제 시각의 앞뒤에 따라 달라진다
+    orphan = [t for t in srv.store.list_tokens() if t.name == "store-driver:app:1"]
+    assert orphan and orphan[0].revoked_at is not None
     assert srv.post("start", {"build_name": "1.0.1"}, token="admin")[0] == 202
