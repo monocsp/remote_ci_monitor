@@ -211,7 +211,12 @@ default = "full"
 ::rcm::step::analyze       # 새 단계 시작(앞 단계는 끝난다)
 ::rcm::step-end::ok        # 선택: "ok" 또는 "fail"
 ::rcm::summary::all green  # 선택: 큐에 보이는 한 줄 결과
+::rcm::progress::41/68::inquiry_photo/android::run   # 선택: 지금 단계 안의 세부 진행
 ```
+
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` 는 긴 단계 — 청크 루프 · 병렬
+묶음 · 락 대기 — 를 위한 것이다. 스크립트가 **아는** 분모만 찍는다. 큐는 그 값으로 막대를 그리고
+본 단위들을 격자로 보여 준다. 자세한 건 [설정 문서](docs/configuration.md#progress-inside-a-step)에.
 
 세션은 `--pool` 로 다른 풀에 보낼 수 있지만, 프리셋의 `pools` 에 적힌 풀만 고를 수 있다. 설정으로
 할 수 있는 나머지는 — 푸시된 ref 를 받는 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 원격 워커 · 알림 ·

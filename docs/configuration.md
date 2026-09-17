@@ -57,7 +57,30 @@ Your script can report progress by printing markers at the start of a line:
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::fail::flaky_test    # optional: names something that failed (a step, a test, a file)
+::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
 ```
+
+### Progress inside a step
+
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` reports progress **inside the
+current step** — a 40-minute chunk loop, a parallel set of child processes, a device-lock wait.
+The line is ignored unless it fits the grammar: `done` and `total` are integers with
+`total ≥ 1` and `0 ≤ done ≤ total`, `unit` is the one thing the line is about (`chunk/android`,
+`test`, `lock devices`; up to 120 characters, control characters removed), `state` is one of
+`run · ok · fail · skip · env · review · blocked · wait`, and `note` is optional free text (up to
+200 characters). Print only a denominator the script actually knows — if you do not know it, do
+not print it: the queue falls back to declared steps, then to time, and says so. A new
+`::rcm::step::` clears it; the line before the first step counts too.
+
+In `progress` (queue rows and `GET /jobs/<id>`) the last line is `sub`
+(`{done, total, unit, state, note, at}`, `null` when the step printed none) and `units[]` keeps the
+**last** state per distinct unit in the order they were first seen, so a grid of chunks or
+children draws itself. A step is limited to 500 distinct units: past that `done/total` still
+counts but no cells are added and `units_truncated` is `true`. The web queue prefers `sub` for
+the bar (`60% · 41/68 · inquiry_photo/android`), shows `now: <unit> · <state>[ · <note>]` in the
+progress line, and draws the unit grid under the step list when there are at least two units.
+These are added keys; `schema_version` stays 1. Judges must never parse this marker — it is display
+only.
 
 Child processes buffer stdout, so markers may arrive late. Use `PYTHONUNBUFFERED=1`, `stdbuf -oL`,
 or `flutter --no-color` style flags in your scripts when timing matters. Job elapsed time is always exact.

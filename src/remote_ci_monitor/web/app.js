@@ -671,10 +671,34 @@
   function failedStepCount(prog) {
     return Array.isArray(prog && prog.steps) ? prog.steps.filter(function (s) { return s.ok === false; }).length : 0;
   }
+  /**
+   * 현재 스텝 안의 세부 진행(`::rcm::progress::` · `progress.sub`). 서버가 검증해 보내지만 화면도
+   * 분모를 다시 본다 — `total ≥ 1`, `0 ≤ done ≤ total` 이 아니면 **없는 것**이다(분모를 지어내지
+   * 않는다). 없으면 null.
+   */
+  function subProgress(prog) {
+    var s = prog && prog.sub;
+    if (!s || typeof s !== "object") return null;
+    if (!isNum(s.done) || !isNum(s.total) || s.total < 1 || s.done < 0 || s.done > s.total) return null;
+    if (typeof s.unit !== "string" || !s.unit) return null;
+    return s;
+  }
+  /** 머리줄 꼬리 「now: <unit> · <state>[ · <note>]」 — 마지막 progress 마커 그대로. 없으면 null. */
+  function subNowText(prog, lang) {
+    var s = subProgress(prog);
+    if (!s) return null;
+    var t = T(lang, "progress.sub_now", { unit: s.unit, state: String(s.state || "") });
+    if (typeof s.note === "string" && s.note) t += " · " + s.note;
+    return t;
+  }
   function progressHead(prog, lang) {
     if (!prog || prog.phase === "materializing") return null;
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
-    if (!steps.length) return T(lang, "progress.no_markers", { dur: fmtDuration(prog.job_seconds) });
+    var now = subNowText(prog, lang);
+    if (!steps.length) {
+      var none = T(lang, "progress.no_markers", { dur: fmtDuration(prog.job_seconds) });
+      return now ? none + " · " + now : none;
+    }
     var cur = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     var t = T(lang, "progress.step", { cur: cur, total: total, soFar: !!prog.steps_total_partial });
@@ -682,6 +706,7 @@
     t += " · " + T(lang, "progress.job", { dur: fmtDuration(prog.job_seconds) });
     var f = failedStepCount(prog);
     if (f) t += " · " + T(lang, "progress.steps_failed", { n: f });
+    if (now) t += " · " + now;
     return t;
   }
   /** 도는 스텝(끝나지 않은 마지막 스텝). 없으면 null — 끝난 잡의 초는 올라가면 안 된다. */
@@ -712,8 +737,11 @@
     var jobSpan = function (key) {
       return esc(T(lang, key, { dur: JOB })).replace(JOB, span(live && prog.job_started_at, fmtDuration(prog.job_seconds)));
     };
+    // 스텝 안의 세부 진행은 마커가 올 때만 바뀐다 — 틱 없이 글자 그대로
+    var now = subNowText(prog, lang);
+    var nowHtml = now ? '<span class="sub-now">' + esc(now) + "</span>" : "";
     // 마커가 없는 잡은 머리줄에 잡 초 하나뿐이다 — 그것마저 얼면 도는 잡이 통째로 멈춰 보인다
-    if (!steps.length) return jobSpan("progress.no_markers");
+    if (!steps.length) return jobSpan("progress.no_markers") + (now ? " · " + nowHtml : "");
     var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     var h = esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
@@ -723,6 +751,31 @@
     h += " · " + jobSpan("progress.job");
     var f = failedStepCount(prog);
     if (f) h += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
+    if (now) h += " · " + nowHtml;
+    return h;
+  }
+  /** 격자 칸의 글자 — 색만으로 말하지 않는다(§4.2). 모르는 state 는 빈 칸. */
+  var UNIT_GLYPH = { ok: "✓", fail: "✗", run: "▶", skip: "—", wait: "…", blocked: "!", env: "!", review: "?" };
+  var UNIT_STATES = ["run", "ok", "fail", "skip", "env", "review", "blocked", "wait"];
+  /**
+   * 현재 스텝 안의 단위 격자(`progress.units[]`) — 단위 하나가 칸 하나, 마지막 상태가 색·글자.
+   * 단위가 둘 미만이면 격자가 아니라 빈 문자열이다(하나는 머리줄의 `now:` 가 이미 말했다).
+   * 이름은 `title` 과 `aria-label` 에 있다 — 칸은 12px 라 글자를 못 담는다.
+   */
+  function unitsGridHtml(prog, lang) {
+    var units = Array.isArray(prog && prog.units) ? prog.units.filter(function (u) {
+      return u && typeof u.unit === "string" && u.unit;
+    }) : [];
+    if (units.length < 2) return "";
+    var h = '<div class="ugrid" role="list" aria-label="' + esc(T(lang, "progress.units_aria", { n: units.length })) + '">';
+    units.forEach(function (u) {
+      var st = UNIT_STATES.indexOf(u.state) >= 0 ? u.state : "unknown";
+      var label = u.unit + " · " + (st === "unknown" ? String(u.state || "?") : st) + (typeof u.note === "string" && u.note ? " · " + u.note : "");
+      h += '<span class="u ' + st + '" role="listitem" title="' + esc(label) + '" aria-label="' + esc(label) + '">'
+        + '<i aria-hidden="true">' + (UNIT_GLYPH[st] || "") + "</i></span>";
+    });
+    h += "</div>";
+    if (prog.units_truncated) h += '<div class="sub ugrid-more">' + esc(T(lang, "progress.units_more")) + "</div>";
     return h;
   }
   function stepMark(step) {
@@ -769,6 +822,17 @@
     // 경보를 먹는 쪽(quiet 이 이기는 것)은 fail-open 이라 금지다.
     var quiet = !!est.quiet && !stuck;
     if (prog && prog.phase === "materializing") { out.condition = "preparing"; return out; }
+    // 스텝 안의 세부 진행이 있으면 그것이 눈금이다 — 스크립트가 **아는** 분모라 선언 스텝보다 곱다.
+    // `done == total` 이어도 잡은 아직 돈다(그 스텝의 단위가 다 끝난 것뿐) — 99% 상한이 여기도
+    // 적용된다. 100% 는 「끝났다」의 자리다.
+    var sub = subProgress(prog);
+    if (sub) {
+      out.basis = "sub"; out.total = sub.total; out.done = sub.done; out.unit = sub.unit;
+      out.pct = Math.min(99, pctOf(sub.done, sub.total));
+      if (stuck) out.condition = "stuck";
+      else if (quiet) out.condition = "quiet";
+      return out;
+    }
     var total = prog && isNum(prog.steps_total) ? prog.steps_total : null;
     var done = prog && isNum(prog.steps_done) ? prog.steps_done : null;
     if (isNum(total) && total > 0 && isNum(done) && !(prog && prog.steps_total_partial)) {
@@ -808,7 +872,9 @@
     var p = overallProgress(row);
     if (!p) return "";
     var head = null;
-    if (p.basis === "steps") {
+    if (p.basis === "sub") {
+      head = T(lang, "pbar.sub", { percent: p.pct, done: p.done, total: p.total, unit: p.unit });
+    } else if (p.basis === "steps") {
       head = isNum(p.pct)
         ? T(lang, "pbar.steps", { percent: p.pct, done: p.done, total: p.total })
         : T(lang, "pbar.steps_all", { done: p.done, total: p.total });
@@ -1029,7 +1095,7 @@
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
@@ -1685,6 +1751,8 @@
       for (var j = 0; j < pending; j++) h += '<div class="step pend"><span class="g" aria-hidden="true">·</span><span>…</span><span class="s">' + DASH + "</span></div>";
       h += "</div>";
     }
+    // 스텝 안의 단위 격자(`::rcm::progress::`) — 스텝 목록 아래, 둘 이상일 때만
+    h += unitsGridHtml(prog, L());
     return h;
   }
   function tailHtml(row) {

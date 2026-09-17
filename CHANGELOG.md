@@ -8,6 +8,16 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **A step can report its own progress.** `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]`
+  at the start of a stdout line says how far the **current step** is — a chunk loop, a parallel set,
+  a lock wait — with a denominator the script actually knows (`state` is one of `run · ok · fail ·
+  skip · env · review · blocked · wait`). `progress` in queue rows and `GET /jobs/<id>` gains `sub`
+  (the last line, or `null`), `units[]` (the last state per unit, first-seen order, 500 per step) and
+  `units_truncated`. The web queue draws the bar from `sub` before declared steps and time
+  (`60% · 41/68 · inquiry_photo/android`), adds `now: <unit> · <state>` to the progress line and,
+  with two or more units, a grid of unit cells under the step list. A new `::rcm::step::` clears it;
+  malformed lines are plain log lines; markers are stored as before, so there is no migration, and
+  `schema_version` stays 1 because keys were only added.
 - **The connect skills ship in the package.** `rcm skills list` now names five skills and
   `rcm skills install --into <project>` copies them: `rcm-connect` (one entry point: project ·
   repo name · platforms · optional tiers), `rcm-store-connect` (required tier: profile block,

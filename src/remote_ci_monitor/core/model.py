@@ -284,6 +284,33 @@ class Step:
 
 
 @dataclass(frozen=True)
+class SubProgress:
+    """현재 스텝 **안**의 세부 진행 — 마지막 `::rcm::progress::` 마커 하나(release-contract §3).
+
+    `done/total` 은 스크립트가 **아는** 분모만 찍는다(모르면 안 찍는다 — 추정은 화면의 몫).
+    `unit` 은 「지금 말하는 것 하나」(청크/플랫폼 · 자식 프로세스 · 락), `state` 는
+    `PROGRESS_STATES` 중 하나, `note` 는 자유 문장. `at` 은 서버 수신 시각이다.
+    """
+
+    done: int
+    total: int
+    unit: str
+    state: str
+    note: str | None
+    at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ProgressUnit:
+    """현재 스텝 안에서 본 단위 하나의 **마지막** 상태 — 격자용. 처음 본 순서로 쌓인다."""
+
+    unit: str
+    state: str
+    note: str | None = None
+    at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Progress:
     """스텝 마커로 만든 진행 상태. `timing` 은 항상 `as_received`."""
 
@@ -308,6 +335,12 @@ class Progress:
     timing: str = "as_received"
     #: 잡이 시작한 시각. 화면이 「도는 잡의 초」를 스스로 세는 기준점이다(M5d-2 §4.6-다).
     started_at: datetime | None = None
+    #: 현재 스텝 안의 세부 진행 — 마지막 `::rcm::progress::` 마커. 새 스텝이 시작하면 비운다
+    sub: SubProgress | None = None
+    #: 현재 스텝 안에서 본 단위들의 마지막 상태(처음 본 순서). MAX_PROGRESS_UNITS 까지만
+    units: tuple[ProgressUnit, ...] = ()
+    #: 단위 상한을 넘겨 격자에 못 올린 단위가 있다 — `done/total` 은 그래도 계속 센다
+    units_truncated: bool = False
 
 
 @dataclass(frozen=True)

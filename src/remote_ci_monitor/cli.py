@@ -154,6 +154,10 @@ def describe(job: dict[str, Any], *, head: str | None = None) -> str:
         if prog.get("current_name"):
             step += f" {prog['current_name']}"
         parts.append(step)
+        sub = prog.get("sub")
+        if isinstance(sub, dict) and isinstance(sub.get("done"), int) and sub.get("total"):
+            # 스텝 안의 세부 진행 — 스크립트가 찍은 분모 그대로, 단위와 상태를 붙인다
+            parts.append(f"{sub['done']}/{sub['total']} {sub.get('unit')} {sub.get('state')}")
     elif prog and prog.get("phase") == "materializing":
         parts.append("preparing workspace")
     if est.get("elapsed_seconds") is not None:
