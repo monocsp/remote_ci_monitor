@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rcm 스토어 탭</title>
+<meta name="description" content="remote_ci_monitor 웹 UI 의 스토어 릴리스 탭 목업 — 설정 관문 · 접히는 상태 행 · App Store Connect 식 심사 제출 본체 · 도는 중인 잡의 세 층 진행 · 다른 저장소를 붙이는 범용 계약.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* ── 토큰: 라이트가 기본, 다크는 토큰만 바꾼다 ── */
+:root {
+  --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
+  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1E8A4C; --ok-soft: #E1F3E8; --warn: #B26A00; --warn-soft: #FBEFD9;
+  --bad: #C23B32; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #6B7A8B; --queued-soft: #ECF0F4;
+  --callout: #C0287A; --callout-ink: #FFFFFF; --callout-soft: #FBE4F0;
+  --sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+    --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+    --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+    --callout: #F26DB5; --callout-ink: #1A0B14; --callout-soft: #3B1A2C;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+  --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+  --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+  --callout: #F26DB5; --callout-ink: #1A0B14; --callout-soft: #3B1A2C;
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.55; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+table { font: inherit; }
+button:focus-visible, [tabindex]:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.page { max-width: 1220px; margin: 0 auto; padding: 32px 24px 80px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: 30px; font-weight: 600; margin: 6px 0 10px; letter-spacing: -0.01em; text-wrap: balance; }
+h2 { font-size: 20px; font-weight: 600; margin: 48px 0 12px; }
+h3 { font-size: 16px; font-weight: 600; margin: 0; }
+.lede { max-width: 68ch; color: var(--muted); margin: 0 0 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend .b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); }
+.legend .ln { display: inline-block; width: 34px; border-top: 1.5px dashed var(--callout); vertical-align: middle; }
+.rev { font-size: 13px; color: var(--muted); max-width: 78ch; margin-top: 8px; }
+
+/* ── 주석 컨테이너 ── */
+.annot-wrap { overflow-x: auto; padding-bottom: 6px; }
+.annot { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 76px; min-width: 1140px; }
+.annot svg.lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.annot .gutter { position: relative; }
+.badge { position: absolute; left: 22px; transform: translateY(-50%); width: 26px; height: 26px; border-radius: 50%; background: var(--callout); color: var(--callout-ink);
+  font: 600 12px var(--mono); display: grid; place-items: center; cursor: pointer; border: 0; padding: 0; box-shadow: 0 0 0 3px var(--bg); }
+.badge.on { transform: translateY(-50%) scale(1.15); }
+[data-c] { position: relative; }
+[data-c].hl { outline: 2px solid var(--callout); outline-offset: 3px; border-radius: 3px; }
+.lines .lead { fill: none; stroke: var(--callout); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: 0.7; }
+.lines .lead.on { stroke-width: 2; stroke-dasharray: none; opacity: 1; }
+.lines .dot { fill: var(--callout); }
+
+/* ── 목업 화면 ── */
+.screen { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); overflow: hidden; font-size: 13.5px; }
+.s-top { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.wordmark { font: 600 15px var(--mono); letter-spacing: 0.02em; }
+.s-top .host { font-family: var(--mono); }
+.workers { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.wk i { width: 8px; height: 8px; border-radius: 50%; background: var(--queued); }
+.wk.busy i { background: var(--accent); }
+.wk.down { border-color: var(--bad); color: var(--bad); }
+.wk.down i { background: var(--bad); border-radius: 1px; }
+.wk.paused { border-color: var(--warn); color: var(--warn); }
+.wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
+.spacer { flex: 1; }
+.livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--mono); background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.livebtn .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.livebtn.paused .live { background: var(--queued); box-shadow: none; }
+.tokbtn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--surface); font: 12px var(--mono); color: var(--ink); cursor: pointer; }
+.tokbtn.bad { border-color: var(--bad); color: var(--bad); }
+.errchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 11.5px var(--mono); }
+
+.s-section { padding: 12px 16px 14px; border-bottom: 1px solid var(--line-2); }
+.s-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.s-h .t { font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; font-size: 12px; color: var(--muted); }
+.s-h .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.s-h .n b { color: var(--ink); font-weight: 500; }
+
+.summary { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line-2); background: var(--surface-2); }
+.sum { display: grid; gap: 3px; font-size: 13px; align-content: start; }
+.sum .lab { font: 500 11px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.sum .v { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+.sum .v b { font-weight: 500; }
+.sum .v .ok { color: var(--ok); }
+.sum .v .warn { color: var(--warn); }
+.sum .v .muted { color: var(--muted); }
+
+table.q { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.q th { text-align: left; font-weight: 500; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.q th .tzh { text-transform: none; letter-spacing: 0; color: var(--muted); font-family: var(--mono); }
+table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+.num, .pill, .eta, .blocked, .chip, .sha, .conf, .pos, .stuck { white-space: nowrap; }
+.reason { white-space: normal; }
+table.q tr.exp td { border-bottom: 0; }
+table.q td.num { font-family: var(--mono); }
+table.q td.num .id { font-weight: 500; }
+.pos { display: block; font: 11.5px var(--mono); color: var(--muted); margin-top: 2px; }
+table.q tr.mine td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.q tr.overdue td:first-child { box-shadow: inset 4px 0 0 var(--warn); }
+table.q tr.mine.overdue td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 7px 0 0 var(--warn); }
+.you { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 500 10.5px var(--mono); vertical-align: 1px; }
+.joiners { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font: 500 10.5px var(--mono); vertical-align: 1px; }
+
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font: 500 11.5px var(--mono); }
+.pill.running { background: var(--accent-soft); color: var(--accent); }
+.pill.queued { background: var(--queued-soft); color: var(--queued); }
+.pill.uploading { background: var(--surface); color: var(--queued); border: 1px dashed var(--queued); }
+.pill.uploading .ub { display: inline-block; width: 34px; height: 5px; border-radius: 3px; background: var(--line-2); overflow: hidden; }
+.pill.uploading .ub i { display: block; height: 100%; width: 62%; background: var(--queued); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.timedout { background: var(--bad-soft); color: var(--bad); border: 1px dashed var(--bad); }
+.pill.cancelled { background: var(--queued-soft); color: var(--queued); }
+.pill.lost { background: var(--lost-soft); color: var(--lost); }
+.pill.cancelling { background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn); }
+.key { font-family: var(--mono); font-weight: 500; }
+.chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font: 11.5px var(--mono); color: var(--muted); margin-left: 4px; }
+.sha { font-family: var(--mono); }
+.uncommitted { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--warn); color: var(--warn); font: 500 11px var(--mono); }
+.uncommitted::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--warn); }
+.sub { color: var(--muted); font-size: 12px; }
+.eta { font-family: var(--mono); }
+.eta .in { color: var(--muted); }
+.conf { display: inline-block; margin-top: 2px; padding: 0 6px; border-radius: 4px; font: 500 10.5px var(--mono); }
+.conf.high { background: var(--ok-soft); color: var(--ok); }
+.conf.med { background: var(--queued-soft); color: var(--queued); }
+.conf.low { background: var(--surface); color: var(--muted); border: 1px dashed var(--line); font-style: italic; }
+.conf.over { background: var(--warn-soft); color: var(--warn); }
+.reason { font-family: var(--mono); font-size: 12px; color: var(--muted); line-height: 1.5; }
+.reason.act { color: var(--ink); }
+.reason b { font-weight: 500; }
+.blocked { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; border: 1.5px dashed var(--warn); color: var(--warn); font: 500 11.5px var(--mono); background: transparent; }
+.over { color: var(--warn); font-weight: 500; }
+.stalled { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 500 11.5px var(--mono); }
+.stuck { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 11.5px var(--mono); }
+.rerun { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font: 11px var(--mono); color: var(--ink); cursor: pointer; }
+
+.prog { padding: 4px 8px 12px 46px; }
+.prog .head { display: flex; gap: 14px; align-items: baseline; font-family: var(--mono); font-size: 12.5px; margin-bottom: 6px; flex-wrap: wrap; }
+.prog .head b { font-weight: 500; }
+.prog .note { color: var(--muted); }
+/* 전체 진행 막대 — 도는 행 아래 한 줄. 접혀 있어도 「어디까지 왔나」가 보인다 */
+.pwrap { display: flex; align-items: center; gap: 10px; max-width: 720px; padding: 0 0 4px 46px; }
+.pbar { flex: 1 1 auto; height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+/* 근거·형편은 **data 속성**으로 고른다 — `steps`·`stuck`·`over` 를 class 로 쓰면 스텝 목록 격자와
+   이유 칸 칩의 규칙이 막대에 걸려 길이가 숫자와 달라진다(실측으로 50% 막대가 24% 로 그려졌다). */
+.pbar i { display: block; height: 100%; background: var(--accent); }
+.pbar[data-cond="over"] i { background: repeating-linear-gradient(135deg, var(--warn) 0 5px, var(--warn-soft) 5px 10px); }
+.pbar[data-cond="finalizing"] i { background: repeating-linear-gradient(135deg, var(--accent) 0 5px, var(--accent-soft) 5px 10px); }
+.pbar[data-cond="stuck"] i { background: repeating-linear-gradient(135deg, var(--bad) 0 5px, var(--bad-soft) 5px 10px); }
+.pbar[data-basis="none"] { background: repeating-linear-gradient(135deg, var(--line-2) 0 5px, var(--surface) 5px 10px); }
+.plab { font: 600 12px var(--sans); color: var(--muted); white-space: nowrap; }
+.minibar { display: flex; gap: 2px; height: 4px; max-width: 520px; margin: 0 0 8px; }
+.minibar i { display: block; height: 100%; border-radius: 2px; background: var(--ok); }
+.minibar i.run { background: var(--accent); }
+.minibar i.pend { background: var(--line); }
+.steps { display: grid; grid-template-columns: repeat(2, minmax(0, 280px)); gap: 1px 24px; font: 12px var(--mono); }
+.step { display: grid; grid-template-columns: 16px 1fr auto; gap: 6px; padding: 1px 0; }
+.step .g { color: var(--ok); }
+.step.run { color: var(--accent); }
+.step.run .g { color: var(--accent); }
+.step.pend { color: var(--muted); }
+.step .s { color: var(--muted); }
+.tail { margin-top: 10px; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--muted); white-space: pre; overflow-x: auto; max-width: 640px; }
+.actions { display: inline-flex; gap: 6px; margin-top: 8px; align-items: center; }
+.btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 3px 10px; font: 500 12px var(--sans); cursor: pointer; }
+.btn.danger { color: var(--bad); }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.hostcard { display: grid; grid-template-columns: 170px repeat(3, 1fr); gap: 12px 22px; align-items: start; }
+.hostcard .hn { font-family: var(--mono); }
+.hostcard .hn .age { color: var(--muted); font-size: 12px; display: block; }
+.meter { display: grid; gap: 4px; }
+.meter .lab { display: flex; justify-content: space-between; font: 12px var(--mono); }
+.meter .lab span:last-child { color: var(--muted); }
+.meter .bar { height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; display: flex; }
+.meter .bar i { display: block; height: 100%; background: var(--accent); }
+.meter .bar i.b { background: var(--lost); }
+.meter.warn .bar i { background: var(--warn); }
+.meter .spark { display: flex; align-items: center; gap: 8px; font: 11px var(--mono); color: var(--muted); }
+.meter .spark svg { width: 90px; height: 18px; }
+.meter .spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.2; }
+.meter .spark .gap { stroke-dasharray: 2 2; opacity: 0.5; }
+.top { grid-column: 1 / -1; font: 12px var(--mono); color: var(--muted); }
+.top b { color: var(--ink); font-weight: 500; }
+
+.recent { display: grid; gap: 0; }
+.rrow { display: grid; grid-template-columns: 54px 150px 118px 130px 66px 52px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; align-items: center; }
+.rrow .id { font-family: var(--mono); font-weight: 500; color: var(--muted); }
+.rrow .k { font-family: var(--mono); font-weight: 500; }
+.rrow .d, .rrow .t { font-family: var(--mono); color: var(--muted); }
+.rrow .s { color: var(--muted); }
+.rrow .s b { color: var(--ink); font-weight: 500; }
+.more { display: inline-block; margin-top: 8px; font: 12px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+details.est { margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
+details.est summary { cursor: pointer; }
+details.est b { color: var(--ink); font-weight: 500; }
+details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+
+/* ── 변형 패널 ── */
+.variants { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; min-width: 0; }
+.variant { min-width: 0; overflow-wrap: anywhere; }
+.variant { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13px; }
+.variant .vt { font: 500 11.5px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+.banner { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px; background: var(--warn-soft); color: var(--warn); border-radius: 6px; font-weight: 500; line-height: 1.4; }
+.banner .live { width: 9px; height: 9px; border-radius: 50%; background: var(--queued); }
+.banner.bad { background: var(--bad-soft); color: var(--bad); }
+.banner.info { background: var(--accent-soft); color: var(--accent); }
+.empty { padding: 18px 12px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }
+.empty code { color: var(--ink); }
+.stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 500 11.5px var(--mono); }
+.dim { opacity: 0.55; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-width: 340px; font-variant-numeric: tabular-nums; }
+.card .r1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card .r2 { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+.mini-s { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.skew { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 11px var(--mono); }
+
+/* ── 기획 항목 ── */
+.specs { display: grid; gap: 14px; }
+.spec { display: grid; grid-template-columns: 34px 1fr; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.spec.on { border-color: var(--callout); box-shadow: 0 0 0 2px var(--callout-soft); }
+.spec .num { width: 26px; height: 26px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); display: grid; place-items: center; }
+.spec .area { font: 11.5px var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.spec dl { display: grid; grid-template-columns: 78px 1fr; gap: 6px 12px; margin: 10px 0 0; max-width: 78ch; }
+.spec dt { color: var(--muted); font-size: 12.5px; padding-top: 2px; }
+.spec dd { margin: 0; }
+.spec dd code { background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
+.group { margin: 26px 0 8px; font: 500 12px var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.qa { max-width: 78ch; }
+.qa li { margin-bottom: 8px; }
+.note { max-width: 78ch; color: var(--muted); font-size: 13.5px; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--callout-soft); color: var(--callout); font: 500 11px var(--mono); vertical-align: 1px; }
+.src { display: inline-block; padding: 0 5px; border-radius: 3px; background: var(--surface-2); color: var(--muted); font: 10.5px var(--mono); vertical-align: 1px; }
+
+@media (max-width: 720px) {
+  .page { padding: 20px 14px 60px; }
+  .variants { grid-template-columns: 1fr; }
+  .spec dl { grid-template-columns: 1fr; }
+  .spec dt { padding-top: 6px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .badge, .spec { transition: transform 120ms ease, box-shadow 120ms ease; }
+}
+
+/* ── 스토어 탭 전용 ── */
+.tabs { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.tab { padding: 3px 10px; border-radius: 6px; font: 500 12.5px var(--sans); color: var(--muted); text-decoration: none; border: 1px solid transparent; }
+.tab.on { background: var(--surface); color: var(--ink); border-color: var(--line); }
+.tab-repo { margin-left: 8px; font-size: 12.5px; }
+.summary.sum4 { grid-template-columns: 1.4fr 1.4fr 1.1fr 1.1fr; }
+.sum .v.muted { color: var(--muted); }
+.two { display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px 24px; }
+.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.mini-h { font: 500 11px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+table.q.compact td { padding: 4px 8px; }
+.prrow { padding: 3px 0; }
+.kard { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); min-width: 0; }
+.kard .kh { font-weight: 600; margin-bottom: 6px; }
+.kard .kv { display: grid; grid-template-columns: 84px 1fr; gap: 8px; font-size: 12.5px; padding: 2px 0; }
+.kard .kv > span:first-child { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.kard label { display: block; font-size: 12.5px; padding: 2px 0; }
+.big { font: 600 26px var(--mono); margin: 2px 0 4px; }
+.stepper { list-style: none; margin: 0 0 8px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 18px; font-size: 12.5px; }
+.stepper li { display: grid; grid-template-columns: 16px auto 1fr; gap: 6px; align-items: baseline; padding: 3px 6px; border-radius: 5px; border: 1px solid transparent; }
+.stepper li b { font-family: var(--mono); font-weight: 500; }
+.stepper li .g { font-family: var(--mono); }
+.stepper li.done .g { color: var(--ok); }
+.stepper li.run { color: var(--accent); background: var(--accent-soft); }
+.stepper li.run .sub { color: var(--accent); }
+.stepper li.pend { color: var(--muted); }
+.stepper li.bad { color: var(--bad); background: var(--bad-soft); }
+.stepper li.human { border-color: var(--warn); }
+.fld { display: grid; grid-template-columns: 120px 1fr 72px; gap: 8px; align-items: center; font-size: 12px; padding: 2px 0; }
+.fld > span:first-child { font-family: var(--mono); color: var(--muted); }
+.fb { height: 6px; border-radius: 3px; background: var(--line-2); overflow: hidden; }
+.fb i { display: block; height: 100%; background: var(--accent); }
+.fb.warn i { background: var(--warn); }
+.thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
+.thumbs i { width: 34px; height: 60px; border-radius: 4px; background: var(--line-2); border: 1px solid var(--line); display: grid; place-items: center; font: 10px var(--mono); color: var(--ok); font-style: normal; }
+.thumbs i.new { border-color: var(--ok); }
+.chk label { display: block; font-size: 13px; padding: 3px 0; }
+.chk label.ind { margin-left: 22px; padding: 4px 8px; border: 1.5px dashed var(--warn); border-radius: 6px; }
+.chk input { vertical-align: -1px; margin-right: 6px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary[disabled] { background: var(--accent-soft); color: var(--accent); }
+.fixed { margin: 10px 0 0; padding: 8px 12px; border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--warn); font-size: 12.5px; }
+.dlg { padding: 18px 20px; }
+.dlg h3 { margin-bottom: 8px; }
+.fld-in { display: grid; grid-template-columns: 110px 140px auto; gap: 10px; align-items: center; margin: 10px 0; font-size: 13px; }
+.fld-in input, .path input, .kvform input { font: 13px var(--mono); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); width: 100%; }
+.dlg-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.drops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.drop { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; min-width: 0; }
+.drop.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.drop.wide { grid-column: 1 / -1; }
+.drop .dt { font: 500 12.5px var(--mono); }
+.dz { border: 1.5px dashed var(--line); border-radius: 6px; padding: 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
+.drop.on .dz { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.dz.ok { border-style: solid; border-color: var(--ok); color: var(--ok); background: var(--ok-soft); text-align: left; font-family: var(--mono); font-size: 12px; }
+.path { display: grid; grid-template-columns: 52px 1fr; gap: 6px; align-items: center; }
+.kvform { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; }
+.kvform label { display: grid; gap: 3px; font: 11.5px var(--mono); color: var(--muted); }
+.kvform label.wide { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+  .summary.sum4, .two, .three, .stepper, .drops, .kvform { grid-template-columns: 1fr; }
+}
+
+/* ── v0.2: 접히는 행 · 본체 · ASC 식 필드 ── */
+.rowtag { display: inline-block; padding: 0 6px; border-radius: 4px; font: 500 12px var(--mono); }
+.rowtag.ok { background: var(--ok-soft); color: var(--ok); }
+.rowtag.bad { background: var(--bad-soft); color: var(--bad); }
+.rows { display: grid; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--line-2); }
+.row { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.row > summary { display: flex; align-items: center; gap: 10px; padding: 7px 12px; cursor: pointer; list-style: none; font-size: 12.5px; }
+.row > summary::-webkit-details-marker { display: none; }
+.row .g { font-family: var(--mono); width: 14px; text-align: center; }
+.row .rt { font: 500 11px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); min-width: 92px; }
+.row > summary .sub, .row > summary .btn { white-space: nowrap; }
+.row .rv { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.row.ok { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.row.ok .g { color: var(--ok); }
+.row.bad { background: var(--bad-soft); border-color: var(--bad); }
+.row.bad .g, .row.bad .rt { color: var(--bad); }
+.row.run { background: var(--accent-soft); border-color: var(--accent); }
+.row.run .g, .row.run .rt { color: var(--accent); }
+.row.warn { background: var(--warn-soft); border-color: var(--warn); }
+.row .rb { padding: 8px 12px 12px 36px; background: var(--surface); border-top: 1px solid var(--line-2); }
+.bad-t { color: var(--bad); }
+.panel { margin: 10px 16px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.panel > summary { display: flex; align-items: center; gap: 14px; padding: 10px 14px; cursor: pointer; list-style: none; border-bottom: 1px solid transparent; }
+.panel[open] > summary { border-bottom-color: var(--line-2); background: var(--surface-2); border-radius: 10px 10px 0 0; }
+.panel > summary::-webkit-details-marker { display: none; }
+.panel .pv { font-size: 16px; }
+.panel .pv .mono { font-size: 13px; color: var(--muted); margin-left: 4px; }
+.panel .pt { font-size: 13px; }
+.panel.locked { background: var(--surface-2); }
+.pstrip { display: flex; flex-wrap: wrap; gap: 6px 26px; padding: 10px 14px; border-bottom: 1px solid var(--line-2); font-size: 12.5px; }
+.pstrip .lab { display: block; font: 500 10.5px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.plat2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.plat { padding: 12px 14px; min-width: 0; }
+.plat + .plat { border-left: 1px solid var(--line-2); }
+.ph { display: flex; align-items: center; gap: 8px; font-size: 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.pn { width: 12px; height: 12px; border-radius: 3px; background: var(--ink); }
+.pn.play { background: linear-gradient(135deg, #00C3FF, #00E676 50%, #FFC400 51%, #FF3D00); }
+.grp { margin-bottom: 14px; }
+.gh { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.shots { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.shots i { flex: 0 0 auto; width: 56px; height: 112px; border-radius: 6px; background: var(--line-2); border: 1px solid var(--line); display: grid; place-items: center; font: 10.5px var(--mono); color: var(--muted); font-style: normal; text-align: center; padding: 2px; }
+.shots i.new { border-color: var(--ok); color: var(--ok); }
+.shots i.fg { width: 112px; height: 56px; align-self: center; }
+.shots i.ic { width: 56px; height: 56px; align-self: center; border-radius: 12px; }
+.af { display: grid; grid-template-columns: 116px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line-2); font-size: 12.5px; align-items: baseline; }
+.af label { color: var(--muted); font-size: 12px; }
+.av { min-width: 0; overflow-wrap: anywhere; }
+.av.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.cnt { float: right; margin-left: 8px; font: 11px var(--mono); color: var(--muted); }
+.cnt.warn { color: var(--warn); }
+.chg { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--ok); color: var(--ok); font: 500 10.5px var(--mono); vertical-align: 1px; }
+.fixedtag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 4px; background: var(--queued-soft); color: var(--queued); font: 500 10.5px var(--mono); vertical-align: 1px; }
+.notes { padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; }
+.diffline { padding: 8px 14px; border-top: 1px solid var(--line-2); font-size: 12.5px; }
+.submitbar { padding: 10px 14px 12px; border-top: 1px solid var(--line-2); }
+@media (max-width: 720px) {
+  .plat2 { grid-template-columns: 1fr; }
+  .plat + .plat { border-left: 0; border-top: 1px solid var(--line-2); }
+  .af { grid-template-columns: 1fr; }
+}
+
+/* ── v0.3: 도는 중인 잡 카드 ── */
+.jobs2 { display: grid; gap: 10px; margin-top: 10px; }
+.jcard { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
+.jcard.live { border-color: var(--accent); }
+.jh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; font-size: 12.5px; }
+.jl { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12.5px; margin: 6px 0 4px; }
+.jrun { margin-top: 6px; }
+.jcard .pbar { max-width: none; }
+.lanes { display: grid; gap: 6px; margin: 8px 0; }
+.lane { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; }
+.ln-h { font: 12px var(--mono); display: flex; gap: 6px; align-items: center; }
+.cells { display: flex; gap: 3px; flex-wrap: wrap; }
+.cells i { width: 14px; height: 14px; border-radius: 3px; background: var(--line-2); border: 1px solid var(--line); }
+.cells i.ok { background: var(--ok); border-color: var(--ok); }
+.cells i.bad { background: var(--bad); border-color: var(--bad); }
+.cells i.run { background: var(--accent); border-color: var(--accent); }
+.cells i.skip { background: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 6px); }
+.film { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.film i { width: 40px; height: 72px; border-radius: 4px; background: var(--line-2); border: 1px solid var(--line); font: 9.5px var(--mono); color: var(--muted); font-style: normal; display: grid; place-items: center; text-align: center; padding: 2px; }
+.film i.run { border-color: var(--accent); color: var(--accent); }
+.film i.pend { background: transparent; border-style: dashed; }
+
+/* ── v0.4: 도는 행 세 층 · 범용 절 ── */
+.bigbar { margin: 2px 0 8px; }
+.bb-h { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 13px; margin-bottom: 5px; }
+.pbar.tall { height: 14px; border-radius: 7px; }
+.nowline { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 8px 10px; border-radius: 6px; background: var(--accent-soft); color: var(--ink); font-size: 13px; margin-bottom: 8px; }
+.nowline .g { color: var(--accent); font-family: var(--mono); }
+.sublist > summary { cursor: pointer; font-weight: 600; font-size: 12.5px; padding: 4px 0; list-style: none; }
+.sublist > summary::-webkit-details-marker { display: none; }
+.sublist > summary::before { content: "▾ "; color: var(--muted); }
+.sublist:not([open]) > summary::before { content: "▸ "; }
+.checklist { list-style: none; margin: 4px 0 10px; padding: 0; display: grid; gap: 2px; }
+.checklist li { display: grid; grid-template-columns: 16px 200px 1fr; gap: 8px; align-items: baseline; padding: 4px 8px; border-radius: 5px; border: 1px solid transparent; font-size: 12.5px; }
+.checklist li b { font-family: var(--mono); font-weight: 500; }
+.checklist li .g { font-family: var(--mono); }
+.checklist li.done .g { color: var(--ok); }
+.checklist li.done { color: var(--ink); }
+.checklist li.run { color: var(--accent); background: var(--accent-soft); }
+.checklist li.run .sub { color: var(--accent); }
+.checklist li.pend { color: var(--muted); }
+.checklist li.human { border-color: var(--warn); }
+.subprog { font-size: 12.5px; margin: 6px 0; }
+.mini { display: inline-block; width: 90px; height: 7px; border-radius: 4px; background: var(--line-2); vertical-align: middle; overflow: hidden; margin: 0 4px; }
+.mini i { display: block; height: 100%; background: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow">remote_ci_monitor · docs/wireframes · 2026-09-17 · 스토어 릴리스 탭 (Downloads/rcm-store-release-tab-prompt.md) · v0.4</div>
+  <h1>웹 스토어 탭 — 심사까지만, 출시는 사람</h1>
+  <p class="lede">큐 화면 옆의 두 번째 탭. 소비 저장소(dolomood-app-renew)의 <code>scripts/release/*</code> 와 rcm 프리셋(<code>release-plan · gate-smoke · scenario-qa · release-upload · release-review</code>)이 <b>이미 하는 일을 버튼으로 옮긴다</b>. 판정은 전부 소비 레포 스크립트가 하고 웹은 그 JSON 을 그린다. 값은 2026-09-15 첫 실측(1.0.0-180)의 다음 회차를 가정했다. 번호는 기획 항목, 마우스를 올리면 서로 강조된다.</p>
+  <div class="legend"><span><span class="b">1</span> 기획 항목 번호</span><span><span class="ln"></span> 요소를 가리키는 선</span><span>UI 문자열은 영어(제품 규칙 · ko 는 i18n.js), 설명은 한국어</span><span>값은 예시 저장소(dolomood)의 실측 — rcm 은 저장소를 모른다(9절)</span></div>
+  <p class="rev"><b>v0.4</b> (2026-09-17) — 도는 중인 Build·upload 행을 세 층으로(46~48): 가로로 긴 막대 → «지금 하는 일» 한 줄 → 펼치면 항목 목록(끝남 초록 · 도는 중 파랑 화살표 · 기다림 회색). 행 머리와 접힌 상태도 옅은 파랑(49). 진행 마커 문법을 <code>::rcm::progress::done/total::단위::상태</code> 로 확정하고(소비 레포 쪽은 <code>feat/rcm-progress-markers</code> 브랜치에 실제로 찍어 두었다), 9절에 «다른 저장소를 붙이는 법» 을 두어 rcm 이 범용임을 문장으로 잠갔다. <b>v0.3</b> (2026-09-17) — 도는 중인 Build·upload 행에 잡 카드 둘(43~45): 스모크는 시간 근거 막대 + 스텝, 시나리오 QA 는 청크 격자 + 2단계 캡처 필름. <b>v0.2</b> (2026-09-17 오너 피드백) — 화면의 뼈대를 바꿨다. <b>위쪽은 접히는 가로행 넷</b>(설정 · 소스 · 빌드/업로드 · 스토어): 다 되어 있으면 <span class="rowtag ok">옅은 초록으로 접힘</span>, 안 되어 있으면 <span class="rowtag bad">옅은 빨강으로 펼쳐짐</span>. 접힌 머리에는 필수값만, 펼치면 상세. <b>아래 본체는 「이번 버전이 스토어에 어떻게 올라가나」</b> — App Store Connect 의 버전 제출 화면을 본떠 소개 이미지 · 버전 · 빌드 · 릴리스 노트 · 심사 정보를 한 페이지에, <b>Google Play 도 같은 배치로 나란히</b>(보기만). 다 설정돼 있으면 이 본체가 펼쳐져 있고, 접으면 머리에 버전 · 빌드번호 · 「App Store + Google Play 로 올린다」 만 남는다. 9절의 질문 여섯은 오너가 추천대로 결정했다.</p>
+  <p class="rev"><b>네 가지 절대 규칙.</b> ① 비밀은 서버 로컬 파일에만 — 화면은 <code>present · ab12… · verified 21:03</code> 만 안다. ② 승인 뒤 자동 출시 없음 — «Release / Publish / Rollout» 버튼이 없고 그 사실이 문장으로 고정돼 있다. ③ 설정 화면이 스토어 화면 <b>앞의 관문</b>이다 — 토큰·키 파일·지문은 거기서 드롭/경로로 다 넣은 뒤에야 탭이 열린다. ④ 되돌릴 수 없는 일(main 머지 · 업로드 · 심사 제출) 앞에는 사람이 <b>빌드번호를 다시 타이핑</b>한다. Android 심사는 «Play Console 관리형 게시 켜짐을 지금 봤다» 체크 없이는 버튼이 비활성이다.</p>
+
+  <h2>1. 기본 화면 — 다 준비됨: 1.0.1 (181) 업로드 끝, 심사 올릴 내용을 확인하는 중 (admin 토큰)</h2>
+  <div class="annot-wrap"><div class="annot" id="main">
+    <div class="screen">
+      <div class="s-top">
+        <span class="workers"><span class="wordmark">rcm</span><span class="host">macmini</span><span class="wk"><i></i>idle</span></span>
+        <nav class="tabs" data-c="1" aria-label="Views"><a class="tab" href="#/">Queue</a><a class="tab on" href="#/store/dolomood" aria-current="page">Store</a><span class="tab-repo"><span class="sub">repo</span> <b class="mono">dolomood</b> ▾</span></nav>
+        <span class="spacer"></span>
+        <button class="livebtn" type="button"><span class="live"></span>live · updated 3s ago</button>
+        <button class="tokbtn" type="button">🔑 pcs@macbook · admin</button>
+        <button class="tokbtn" type="button" data-c="2">⚙ Settings</button>
+      </div>
+
+      <!-- 접히는 가로행 넷 -->
+      <div class="rows">
+        <details class="row ok" data-c="3"><summary><span class="g">✓</span><span class="rt">Setup</span><span class="rv">6/6 secrets present · verified 21:03 · build number <b>auto</b> · reviewer info ✓</span><span class="spacer"></span><span class="sub">Settings ›</span></summary>
+          <div class="rb sub">Expanded: the saved-secrets table from the Settings screen (4절) read-only, with Replace / Verify all.</div></details>
+        <details class="row ok" data-c="4"><summary><span class="g">✓</span><span class="rt">Source</span><span class="rv">main <span class="sha">9e1c4d2</span> chore(release): build number 181 · main ⊂ dev ✓ · fetched 3m ago · PR #412 merged · tag <span class="mono">prod/1.0.1-181</span></span><span class="spacer"></span><span class="sub">Fetch ›</span></summary>
+          <div class="rb sub">Expanded: main last 5 · open PRs with the three statuses · prod/* tags · Fetch remote button.</div></details>
+        <details class="row ok" data-c="5"><summary><span class="g">✓</span><span class="rt">Build · upload</span><span class="rv"><b>1.0.1 (181)</b> · TestFlight 181 VALID · Play production draft 181 · uploaded 16:41 · smoke ✓ 21m · scenario ✓ 58m</span><span class="spacer"></span><span class="sub">S8 done ›</span></summary>
+          <div class="rb sub">Expanded: S0~S8 스테퍼 + 잡·산출물 표 + Start / Retry / Abort (2절).</div></details>
+        <details class="row ok" data-c="6"><summary><span class="g">✓</span><span class="rt">Store</span><span class="rv">App Store live <b>1.0.0 (180)</b> · editing <b>1.0.1</b> PREPARE_FOR_SUBMISSION · release <b>MANUAL</b> · Play production <b>180</b> completed · plan 4m ago</span><span class="spacer"></span><span class="sub">Refresh ›</span></summary>
+          <div class="rb sub">Expanded: plan.json 전체(builds · tracks · blockers · warnings · next N 근거).</div></details>
+      </div>
+
+      <!-- 본체: 심사 올릴 내용 -->
+      <details class="panel" open data-c="7">
+        <summary><span class="pv"><b>1.0.1</b> <span class="mono">build 181</span></span><span class="pt">Submit for review → <b>App Store</b> + <b>Google Play</b></span><span class="pill queued">not submitted</span><span class="spacer"></span><span class="sub">collapse ▴</span></summary>
+
+        <div class="pstrip" data-c="8">
+          <span><span class="lab">Version</span><b>1.0.1</b></span>
+          <span><span class="lab">Build</span><b>181</b> <span class="sub">confirmed by pcs 09:14</span></span>
+          <span><span class="lab">Listing from</span><span class="mono">origin/main</span> <span class="sub">store/ @ 9e1c4d2</span></span>
+          <span><span class="lab">Release notes</span><span class="mono">release_notes/1.0.1/ko.txt</span> <span class="sub">212/500</span></span>
+          <span><span class="lab">Payload</span>release notes + uploaded build <span class="sub">(full listing off)</span></span>
+        </div>
+
+        <div class="plat2">
+          <!-- App Store -->
+          <section class="plat" aria-label="App Store">
+            <div class="ph" data-c="9"><span class="pn"></span><b>App Store</b> · iOS · ko <span class="spacer"></span><span class="pill ok">ready</span><span class="sub">judged 4m ago</span></div>
+
+            <div class="grp"><div class="gh">App previews and screenshots <span class="sub">· iPhone 6.5" · 8 of 10</span></div>
+              <div class="shots" data-c="10"><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i class="new">6 · new</i><i>7</i><i>8</i></div>
+              <div class="sub">iPhone 6.9" — none (falls back to 6.5") · sizes 1284×2778 ✓</div></div>
+
+            <div class="grp" data-c="11"><div class="gh">Version information</div>
+              <div class="af"><label>Promotional text</label><div class="av">매일의 마음을 짧게 기록하고 돌아보세요.<span class="cnt">45/170</span></div></div>
+              <div class="af"><label>Description</label><div class="av clamp">돌로무드는 하루의 기분과 생각을 가볍게 남기는 마음 기록 앱입니다. 문의에 사진을 첨부할 수 있고, 주간 돌아보기로 …<span class="cnt">1 640/4000</span></div></div>
+              <div class="af"><label>Keywords</label><div class="av">마음,기록,일기,감정,기분,멘탈,상담,돌봄<span class="cnt warn">97/100</span></div></div>
+              <div class="af"><label>Support URL</label><div class="av mono">https://dolomood.com/support</div></div>
+              <div class="af"><label>Marketing URL</label><div class="av mono">https://dolomood.com</div></div>
+              <div class="af"><label>Subtitle</label><div class="av">마음 기록, 매일 <span class="chg">changed</span><span class="cnt">22/30</span></div></div></div>
+
+            <div class="grp" data-c="12"><div class="gh">What's New in This Version</div>
+              <div class="notes">• 문의에 사진을 첨부할 수 있어요
+• 공지 팝업의 줄바꿈이 제대로 보여요
+• 자잘한 안정성 개선</div>
+              <div class="sub">from store/release_notes/1.0.1/ko.txt · 212/4000 (iOS) · same text goes to Play</div></div>
+
+            <div class="grp" data-c="13"><div class="gh">Build</div>
+              <div class="af"><label>Build</label><div class="av"><b>1.0.1 (181)</b> · VALID · processed 16:52 · uploaded by rcm #650</div></div>
+              <div class="af"><label>Version release</label><div class="av"><b>Manually release this version</b> <span class="fixedtag">fixed by the repo · automatic_release: false</span></div></div>
+              <div class="af"><label>Phased release</label><div class="av">On · 7 days <span class="sub">(uncheck below to turn off)</span></div></div>
+              <div class="af"><label>Export compliance</label><div class="av">from store/ios_submission.json ✓</div></div></div>
+
+            <div class="grp" data-c="14"><div class="gh">App Review information</div>
+              <div class="af"><label>Contact</label><div class="av">first_name · last_name · phone · email <span class="pill ok">present</span></div></div>
+              <div class="af"><label>Sign-in required</label><div class="av">demo_user · demo_password <span class="pill ok">present</span> <span class="sub">values never shown</span></div></div>
+              <div class="af"><label>Notes</label><div class="av clamp">심사용 계정으로 로그인하면 샘플 기록이 …</div></div></div>
+          </section>
+
+          <!-- Google Play — same layout -->
+          <section class="plat" aria-label="Google Play">
+            <div class="ph" data-c="15"><span class="pn play"></span><b>Google Play</b> · Android · ko-KR <span class="spacer"></span><span class="pill ok">ready</span><span class="sub">judged 4m ago</span></div>
+
+            <div class="grp"><div class="gh">Graphics <span class="sub">· phone screenshots 6 of 8 · feature graphic · icon</span></div>
+              <div class="shots" data-c="16"><i class="fg">feature 1024×500</i><i class="ic">icon</i><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i></div>
+              <div class="sub">7" / 10" tablet — none (optional) · sizes within 320–3840 ✓</div></div>
+
+            <div class="grp" data-c="17"><div class="gh">Store listing</div>
+              <div class="af"><label>App name</label><div class="av">돌로무드<span class="cnt">4/30</span></div></div>
+              <div class="af"><label>Short description</label><div class="av">매일의 마음을 짧게 기록하고 돌아보는 마음 기록 앱<span class="cnt">28/80</span></div></div>
+              <div class="af"><label>Full description</label><div class="av clamp">돌로무드는 하루의 기분과 생각을 가볍게 남기는 마음 기록 앱입니다. 문의에 사진을 첨부할 수 있고 …<span class="cnt">1 598/4000</span></div></div>
+              <div class="af"><label>Keywords</label><div class="av sub">— (Play has no keyword field)</div></div>
+              <div class="af"><label>Support URL</label><div class="av sub">— (console-only field)</div></div>
+              <div class="af"><label>Marketing URL</label><div class="av sub">—</div></div>
+              <div class="af"><label>Subtitle</label><div class="av sub">—</div></div></div>
+
+            <div class="grp" data-c="18"><div class="gh">Release notes · ko-KR</div>
+              <div class="notes">• 문의에 사진을 첨부할 수 있어요
+• 공지 팝업의 줄바꿈이 제대로 보여요
+• 자잘한 안정성 개선</div>
+              <div class="sub">rendered to metadata/android/ko-KR/changelogs/181.txt · 212/500</div></div>
+
+            <div class="grp" data-c="19"><div class="gh">Release</div>
+              <div class="af"><label>Release</label><div class="av"><b>181 (1.0.1)</b> · track <b>production</b> · draft · uploaded by rcm #650</div></div>
+              <div class="af"><label>Rollout</label><div class="av">100% <span class="fixedtag">fixed by the repo</span></div></div>
+              <div class="af"><label>Managed publishing</label><div class="av"><span class="pill queued">unknown to the API</span> <span class="sub">you confirm it below, every time</span></div></div>
+              <div class="af"><label>Review</label><div class="av">send for review on submit · <b>publish stays in the console</b></div></div></div>
+
+            <div class="grp" data-c="20"><div class="gh">App content · policy</div>
+              <div class="af"><label>Data safety</label><div class="av sub">console-only — not touched by rcm</div></div>
+              <div class="af"><label>Content rating</label><div class="av sub">console-only</div></div>
+              <div class="af"><label>Notes</label><div class="av sub">—</div></div></div>
+          </section>
+        </div>
+
+        <div class="diffline" data-c="21"><b>Changes vs the store</b> (from the last plan): ios/ko/subtitle «마음 기록» → «마음 기록, 매일» · screenshots iOS +1 · release notes new · everything else unchanged. <a href="#">store_listing.py diff</a></div>
+
+        <div class="submitbar" data-c="22">
+          <div class="chk">
+            <label><input type="checkbox" checked> App Store</label>
+            <label><input type="checkbox" checked> Google Play</label>
+            <label class="ind"><input type="checkbox"> I have just seen <b>Managed publishing: ON</b> in Play Console → Publishing overview <span class="sub">· no API can check this. If it is off, approval publishes immediately.</span></label>
+            <label><input type="checkbox"> Upload full listing (copy + screenshots) <span class="sub">· default is release notes + the uploaded build only</span></label>
+            <label><input type="checkbox" checked> iOS phased release</label>
+          </div>
+          <div class="actions" data-c="23"><button class="btn" type="button">Validate listing</button><button class="btn" type="button">Plan review</button><button class="btn primary" type="button" disabled>Submit for review…</button><span class="sub">Submit opens after a green plan (≤ 30m), the typed build number, and the Play check when Google Play is selected.</span></div>
+          <p class="fixed" data-c="24">Approval does <b>not</b> release. iOS: press <b>Release this version</b> in App Store Connect. Android: press <b>Publish</b> in Play Console (managed publishing). This page has no button for either.</p>
+        </div>
+      </details>
+    </div>
+    <svg class="lines" aria-hidden="true"></svg><div class="gutter"></div>
+  </div></div>
+
+  <h2>2. 같은 화면, 준비가 안 됐을 때 — 빨간 행은 펼쳐지고 본체는 접힌다</h2>
+  <div class="annot-wrap"><div class="annot" id="notready">
+    <div class="screen">
+      <div class="rows">
+        <details class="row ok"><summary><span class="g">✓</span><span class="rt">Setup</span><span class="rv">6/6 secrets present · verified 21:03</span></summary></details>
+        <details class="row bad" open data-c="25"><summary><span class="g">✗</span><span class="rt">Source</span><span class="rv">origin/main <b>not</b> in origin/dev · mirror fetched <b>41m ago</b> · PR #412 draft · no tag for 1.0.1</span><span class="spacer"></span><button class="btn" type="button">⟳ Fetch remote</button></summary>
+          <div class="rb"><div class="two"><div><div class="mini-h">main · last 5</div><table class="q compact"><tbody><tr><td class="sha">9e1c4d2</td><td>chore(release): build number 180 [skip-pipeline]</td><td class="sub">bot · Sep 15</td></tr><tr><td class="sha">7a03b9f</td><td>feat(inquiry): 사진 첨부 안내 문구</td><td class="sub">pcs · Sep 15</td></tr><tr><td class="sha">c51e77a</td><td>fix(notice): 팝업 안의 &lt;br&gt; 렌더</td><td class="sub">pcs · Sep 14</td></tr></tbody></table><div class="sub bad-t" style="margin-top:6px">✗ origin/main has 1 commit dev lacks (hotfix 3f0a1c9) — back-merge main → dev before starting a release.</div></div>
+            <div><div class="mini-h">Open PRs</div><div class="prrow"><span class="pill running">draft</span> <b>#412</b> release/1.0.1 → main <span class="sub">· smoke ✓ · scenario ● · release —</span></div><div class="mini-h" style="margin-top:8px">Tags prod/*</div><div class="sub mono">prod/1.0.0-180 · latest</div></div></div></div></details>
+        <details class="row run" open data-c="26"><summary><span class="g">▶</span><span class="rt">Build · upload</span><span class="rv"><b>1.0.1</b> · N 181 confirmed · stage <b>S5</b> scenario QA 38m / ~60m · not uploaded yet</span><span class="spacer"></span><button class="btn" type="button">Skip scenario…</button><button class="btn danger" type="button">Abort</button></summary>
+          <div class="rb">
+            <div class="bigbar" data-c="46"><div class="bb-h"><span><b>S5 · scenario QA</b> · chunks <b>41 / 68</b> · 60%</span><span class="sub">basis: declared chunks × platforms · finishes ~10:35 (median)</span></div><div class="pbar tall" data-basis="steps"><i style="width:60%"></i></div></div>
+            <div class="nowline" data-c="47"><span class="g">▶</span> Now: <b>#643 scenario-qa</b> · pass <b>default</b> · chunk <b>emotion_drive_basic / android</b> · 1m 40s <span class="sub">(median 4m 10s)</span> · ios 34/34 ✓ · android 7/34</div>
+            <details class="sublist" open data-c="48"><summary>What this run does · 9 stages · 4 jobs <span class="sub">· done ✓ green · running ▶ blue · waiting · grey</span></summary>
+            <ol class="checklist">
+              <li class="done"><span class="g">✓</span><span><b>S0</b> branch</span><span class="sub">release/1.0.1 @ 7a03b9f · 4s</span></li>
+              <li class="done"><span class="g">✓</span><span><b>S1</b> plan</span><span class="sub">#641 · 1m 12s · N=181</span></li>
+              <li class="done human"><span class="g">✓</span><span><b>S2</b> confirm N</span><span class="sub">typed 181 · 09:14 · pcs</span></li>
+              <li class="done"><span class="g">✓</span><span><b>S3</b> draft PR</span><span class="sub">#412</span></li>
+              <li class="done"><span class="g">✓</span><span><b>S4</b> gate-smoke</span><span class="sub">#642 · 21m 05s ✓ · 54 steps</span></li>
+              <li class="run"><span class="g">▶</span><span><b>S5</b> scenario QA</span><span class="sub">#643 · 38m · step 3/7 · chunks 41/68</span></li>
+              <li class="pend"><span class="g">·</span><span><b>S6</b> ff-merge → main</span><span class="sub">waiting · irreversible</span></li>
+              <li class="pend"><span class="g">·</span><span><b>S7</b> upload</span><span class="sub">waiting · TestFlight + Play draft · irreversible</span></li>
+              <li class="pend"><span class="g">·</span><span><b>S8</b> tag + back-merge PR</span><span class="sub">waiting · prod/1.0.1-181</span></li>
+            </ol>
+            <div class="jobs2">
+              <div class="jcard" data-c="43"><div class="jh"><b>#642</b> <span class="key">gate-smoke</span> <span class="pill ok">✓ succeeded</span> <span class="sub">21m 05s · 54 steps · local-ci/smoke ✓</span></div>
+                <div class="sub">Finished. While it ran this card showed: current step · time in step · a <b>time-based</b> bar (the job declares no step total) · inside the heavy set the three children and the live test counter · the device-lock wait as «waiting · rank N».</div>
+                <div class="jrun dim"><div class="jl"><span>step 50 of ~54 · <b>heavy set</b> · 7m 40s in step</span><span class="sub">bar by time · median 21m · n=7</span></div><div class="pbar" data-basis="time"><i style="width:68%"></i></div>
+                <div class="subprog"><span class="pill running">▶ test</span> <span class="mono">+1 284 ~2 -0</span> · <span class="pill ok">✓ gitleaks</span> · <span class="pill running">▶ build web</span> <span class="sub">· 1/3 children done · from <code>::rcm::progress::1/3::gitleaks::ok</code></span></div>
+                <div class="sub mono">… · 49 heavy-section lock ✓ <span class="warn">waited 2m 10s (rank 2)</span> · 50 heavy set ▶ · 51 test · 52 secret-scan · 53 build web · 54 smoke (integration_test)</div></div></div>
+              <div class="jcard live" data-c="44"><div class="jh"><b>#643</b> <span class="key">scenario-qa</span> <span class="pill running">▶ running</span> <span class="sub">38m · step 3/7 <b>scenarios (default · 29개)</b> · ~60m median</span></div>
+                <div class="jl"><span>chunks <b>41 / 68</b> · ios 34/34 ✓ · android 7/34</span><span class="sub">2 passes × 34 chunks × 2 platforms · declared before the build</span></div>
+                <div class="pbar" data-basis="steps"><i style="width:60%"></i></div>
+                <div class="lanes">
+                  <div class="lane"><span class="ln-h">ios <span class="pill ok">PASS</span></span><div class="cells"><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="skip"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i></div></div>
+                  <div class="lane"><span class="ln-h">android <span class="pill running">running</span></span><div class="cells"><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="bad" title="inquiry_photo_picker_denied · rc 1"></i><i class="ok"></i><i class="ok"></i><i class="ok"></i><i class="run"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+                </div>
+                <div class="jl"><span>now <b>emotion_drive_basic / android</b> · 1m 40s <span class="sub">(median 4m 10s)</span></span><span class="sub">1 failed: inquiry_photo_picker_denied · rc 1 · <a href="#">log</a></span></div>
+                <div class="film" data-c="45"><span class="sub">step captures · 6/11</span><i>01 launch</i><i>02 wait</i><i>03 tap</i><i>04 enter</i><i>05 tap</i><i class="run">06 drive…</i><i class="pend"></i><i class="pend"></i><i class="pend"></i><i class="pend"></i><i class="pend"></i><span class="tag">phase 2</span></div>
+              </div>
+            </div>
+            </details>
+          </div></details>
+        <details class="row ok"><summary><span class="g">✓</span><span class="rt">Store</span><span class="rv">App Store live 1.0.0 (180) · editing 1.0.1 · Play production 180 · plan 12m ago</span></summary></details>
+      </div>
+      <details class="panel locked" data-c="27">
+        <summary><span class="pv"><b>1.0.1</b> <span class="mono">build 181</span></span><span class="pt">Submit for review → <b>App Store</b> + <b>Google Play</b></span><span class="pill queued">waiting for upload (S7)</span><span class="spacer"></span><span class="sub">expand ▾</span></summary>
+      </details>
+    </div>
+    <svg class="lines" aria-hidden="true"></svg><div class="gutter"></div>
+  </div></div>
+
+  <h2>3. N 확인 대화상자 — S2 · S7 · 심사 제출 앞에서 같은 모양</h2>
+  <div class="annot-wrap"><div class="annot" id="dlg">
+    <div class="screen" style="max-width:560px">
+      <div class="dlg" data-c="28">
+        <h3>Confirm build number for 1.0.1</h3>
+        <p class="sub">The store says the next build number is <b class="mono">181</b> (App Store max 180 · Play max 180 · pubspec 180). Type it to continue. This step cannot be undone after S6.</p>
+        <div class="fld-in"><label>Build number</label><input type="text" inputmode="numeric" value="18" aria-label="Build number"><span class="sub mono">≠ 181</span></div>
+        <p class="sub">Previous releases of 1.0.1: none · tag prod/1.0.1-181: does not exist ✓</p>
+        <div class="dlg-actions"><button class="btn" type="button">Cancel</button><button class="btn primary" type="button" disabled>Confirm 181 and continue</button></div>
+      </div>
+    </div>
+    <svg class="lines" aria-hidden="true"></svg><div class="gutter"></div>
+  </div></div>
+
+  <h2>4. 설정 화면 — 스토어 탭 앞의 관문. 비밀이 다 차고 검증되기 전엔 스토어 화면이 열리지 않는다 (admin 토큰)</h2>
+  <div class="annot-wrap"><div class="annot" id="settings">
+    <div class="screen">
+      <div class="banner bad" style="border-radius:0" data-c="29"><b>Set up dolomood before entering Store</b> · 4 of 6 secrets set · 3 verified · <span class="sub">Store opens when every required secret is present and verified. Nothing you drop here leaves this machine.</span><span class="spacer"></span><button class="btn primary" type="button" disabled>Enter Store</button></div>
+      <div class="s-section" data-c="30">
+        <div class="s-h"><span class="t">Add secrets</span><span class="n">drop files · pick files · or type a path on the build machine (the file is <b>copied</b> into the secrets folder, never linked)</span></div>
+        <div class="drops">
+          <div class="drop on"><div class="dt">AuthKey.p8</div><div class="sub">App Store Connect API key · drop the .p8 here</div><div class="dz">⤓ Drop file or <u>choose</u></div><div class="path"><span class="sub">or path</span><input type="text" value="~/dolomood-secrets/AuthKey.p8" aria-label="Path to AuthKey.p8"></div></div>
+          <div class="drop"><div class="dt">play-service-account.json</div><div class="sub">Google Play service account</div><div class="dz ok">✓ received · 2.3 KB · sha256 9f1c…</div><div class="path"><span class="sub">or path</span><input type="text" placeholder="/path/on/macmini" aria-label="Path"></div></div>
+          <div class="drop"><div class="dt">upload-keystore.jks</div><div class="sub">Android upload keystore</div><div class="dz ok">✓ received · SHA-1 A4:9C:…</div><div class="path"><span class="sub">or path</span><input type="text" placeholder="/path/on/macmini" aria-label="Path"></div></div>
+          <div class="drop wide"><div class="dt">Import a whole secrets folder</div><div class="sub">Drop a folder (or zip) that already follows <code>secrets.env + files</code>, or type the folder path — e.g. today's <code>~/dolomood-secrets</code>. Known names are matched to the rows below; unknown files are listed and skipped.</div><div class="dz">⤓ Drop folder / zip or <u>choose</u> · <span class="mono">~/dolomood-secrets</span></div></div>
+        </div>
+        <div class="kvform">
+          <label><span>ASC_KEY_ID</span><input type="password" value="••••••••" aria-label="ASC_KEY_ID"></label>
+          <label><span>ASC_ISSUER_ID</span><input type="password" value="••••••••••••" aria-label="ASC_ISSUER_ID"></label>
+          <label><span>Keystore store password</span><input type="password" placeholder="type once" aria-label="store password"></label>
+          <label><span>Key alias</span><input type="text" placeholder="upload" aria-label="key alias"></label>
+          <label><span>Key password</span><input type="password" placeholder="type once" aria-label="key password"></label>
+          <label><span>GH_TOKEN</span><input type="password" placeholder="ghp_…" aria-label="GH_TOKEN"></label>
+          <label class="wide"><span>Reviewer demo account (7 fields)</span><input type="text" placeholder="first_name · last_name · phone · email · demo_user · demo_password · notes" aria-label="review information"></label>
+        </div>
+        <div class="actions"><button class="btn primary" type="button">Save (write to ~/.config/rcm/secrets/dolomood/, 0600)</button><span class="sub">Saving clears the fields. Values are never shown again.</span></div>
+      </div>
+      <div class="s-section">
+        <div class="s-h" data-c="31"><span class="t">Saved secrets · dolomood</span><span class="n">profile from <code>server.toml [repos.dolomood.release]</code> · secrets in <code>~/.config/rcm/secrets/dolomood/</code> (0700) · passed to jobs as <code>DOLOMOOD_SECRETS</code></span><span class="spacer"></span><button class="btn" type="button" data-c="32">Verify all (read-only)</button></div>
+        <table class="q compact">
+          <thead><tr><th>Secret</th><th>Kind</th><th>State</th><th>Verified</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="key">ASC_KEY_ID · ASC_ISSUER_ID · AuthKey.p8</td><td class="sub">App Store Connect API</td><td><span class="pill ok">present</span> <span class="mono sub">7K3Q… · 2.1 KB</span></td><td class="sub">✓ 21:03 · app com.dolomood readable</td><td><button class="btn" type="button">Replace…</button></td></tr>
+            <tr><td class="key">play-service-account.json</td><td class="sub">Google Play</td><td><span class="pill ok">present</span> <span class="mono sub">dolo-…@…iam</span></td><td class="sub">✓ 21:03 · tracks readable</td><td><button class="btn" type="button">Replace…</button></td></tr>
+            <tr><td class="key">upload-keystore.jks · passwords · alias</td><td class="sub">Android signing</td><td><span class="pill ok">present</span> <span class="mono sub">SHA-1 A4:9C:…</span></td><td class="sub">✓ 21:03 · matches Play upload key</td><td><button class="btn" type="button">Replace…</button></td></tr>
+            <tr><td class="key">GH_TOKEN</td><td class="sub">GitHub · repo write, PR, statuses</td><td><span class="pill ok">present</span> <span class="mono sub">ghp_…c2f1</span></td><td class="sub">✓ 21:03 · login pcs-fmmc</td><td><button class="btn" type="button">Replace…</button></td></tr>
+            <tr><td class="key">store_review_information/*</td><td class="sub">Reviewer contact + demo account (7 fields)</td><td><span class="pill bad">missing: demo_password</span></td><td class="sub">✗ iOS review is blocked without it</td><td><button class="btn" type="button">Add…</button></td></tr>
+            <tr><td class="key">TEAMS_WEBHOOK</td><td class="sub">optional</td><td><span class="pill ok">present</span> <span class="mono sub">https://…/ab12</span></td><td class="sub">✓ 21:03 · test card sent</td><td><button class="btn" type="button">Replace…</button></td></tr>
+          </tbody>
+        </table>
+        <p class="sub">Values are written once and never shown again. The API answers only <code>present · fingerprint · verified_at</code>. Nothing is stored in the DB, the log or this browser.</p>
+      </div>
+      <div class="s-section">
+        <div class="s-h" data-c="33"><span class="t">Policies</span></div>
+        <div class="three">
+          <div class="kard"><div class="kh">Build number</div><label><input type="radio" name="bn" checked> auto — store max + 1 (resolver in the consumer repo)</label><label><input type="radio" name="bn"> manual — type it every time</label><div class="sub">Either way you re-type N before S6/S7 and before review.</div></div>
+          <div class="kard"><div class="kh">Branches</div><div class="kv"><span>default</span><span><b>main</b></span></div><div class="kv"><span>release</span><span class="mono">release/X.Y.Z</span></div><div class="kv"><span>tag</span><span class="mono">prod/X.Y.Z-N</span></div></div>
+          <div class="kard"><div class="kh">Fixed by the consumer repo (read-only)</div><div class="sub">iOS <code>automatic_release: false</code> pinned in the submit lane · Android send-for-review only with managed publishing confirmed · Android track production (draft) · rollout 100% · phased release on.</div></div>
+        </div>
+      </div>
+    </div>
+    <svg class="lines" aria-hidden="true"></svg><div class="gutter"></div>
+  </div></div>
+
+  <h2>5. 변형 상태</h2>
+  <div class="variants">
+    <div class="variant" data-c="34"><div class="vt">34 · 설정 전 — 스토어 화면은 아예 안 열린다</div>
+      <div class="banner bad">dolomood is not set up · <b>2 of 6</b> secrets missing → you are on <b>Settings</b>.</div>
+      <div class="sub" style="margin-top:8px"><code>#/store/dolomood</code> 로 들어오면 설정 화면(4절)으로 보내진다. 스토어 화면은 그리지 않는다. admin 이 아니면 «Ask an admin to set up dolomood» 한 줄뿐.</div></div>
+    <div class="variant" data-c="35"><div class="vt">35 · 토큰 없음 / 일반 토큰</div>
+      <div class="sub">보기는 누구나. <b>Fetch · Refresh · Plan · Validate</b> 는 일반 토큰(잡 제출), <b>Start · Submit · Abort · Settings</b> 는 admin 만. 없는 권한의 버튼은 감추지 않고 비활성 + 이유.</div></div>
+    <div class="variant" data-c="36"><div class="vt">36 · unsafe_release_type</div>
+      <div class="banner bad">iOS 1.0.1 in review is <b>not</b> set to manual release. Fix it in App Store Connect now — approval would release immediately.</div>
+      <div class="sub" style="margin-top:6px">본체 머리의 필이 빨강 <code>unsafe_release_type</code>, 화면 맨 위에 닫을 수 없는 띠. 다음 plan 이 <code>ready</code> 를 줄 때까지.</div></div>
+    <div class="variant" data-c="37"><div class="vt">37 · 게이트·QA 빨강 → PR 닫힘</div>
+      <div class="sub">Build·upload 행이 빨강으로 펼쳐지고 S5 ✗ <code>FAIL · 2 chunks · android inquiry_photo</code> · PR #412 <span class="pill bad">closed · release-blocked</span> · report.md 링크 · step-captures.html · <button class="btn" type="button">Retry same version</button>. «main untouched» 문장. BLOCKED(exit 2·10)는 빨강이 아니라 황토 «environment».</div></div>
+    <div class="variant" data-c="38"><div class="vt">38 · 결과 모름 (exit 3 · job lost / timed_out)</div>
+      <div class="banner">Upload job #650 was <b>lost</b>. The store may or may not have 181. <b>Do not resubmit.</b> Run <code>store_release.sh reconcile --version 181</code> on the Mac mini, then Refresh.</div>
+      <div class="sub" style="margin-top:6px">게이트·QA 가 lost 면 «Re-run joins the job». 업로드가 lost 면 버튼 없음.</div></div>
+    <div class="variant" data-c="39"><div class="vt">39 · 스토어 드리프트 (exit 4) · 첫 출시</div>
+      <div class="banner">Before uploading, the store already had build 181. main has the code, the store is untouched. Next round uses 182.</div>
+      <div class="banner info" style="margin-top:6px"><b>first_release = true</b> — the web flow stops here. Use <code>/release</code> on the Mac mini.</div></div>
+    <div class="variant" data-c="40"><div class="vt">40 · 심사 결과</div>
+      <div class="kard" style="max-width:none"><div class="kh">1.0.1 (181) · <span class="pill ok">submitted</span> · 10:52 by pcs</div>
+        <div class="kv"><span>iOS</span><span><b>submitted</b> · observed WAITING_FOR_REVIEW · releaseType MANUAL ✓ · phased ✓</span></div>
+        <div class="kv"><span>Android</span><span><b>submitted</b> · observed production 181 completed · managed publishing confirmed 10:51</span></div></div>
+      <div class="sub" style="margin-top:6px">본체 머리의 필이 <code>submitted</code> 초록으로 바뀌고 본체는 접힌다(다음 회차까지 볼 일이 없다). <code>partial</code> 황토 · <code>noop</code> 회색 · <code>failed</code> 빨강 + reason.</div></div>
+    <div class="variant" data-c="41"><div class="vt">41 · 모바일</div>
+      <div class="sub">행은 그대로 한 열. 본체는 App Store 절 → Google Play 절 세로. 스크린샷 띠는 가로 스크롤. N 대화상자는 숫자 키패드. 관리형 게시 체크는 폰으로 Play Console 을 보며 하는 게 오히려 자연스럽다.</div></div>
+    <div class="variant" data-c="49"><div class="vt">49 · 도는 중 · 접힘 — 머리만으로 «어디까지»</div>
+      <details class="row run"><summary><span class="g">▶</span><span class="rt">Build · upload</span><span class="rv"><b>1.0.1</b> (181) · S5 scenario QA · <span class="mini"><i style="width:60%"></i></span> 41/68 · ~10:35</span><span class="spacer"></span><span class="sub">expand ▾</span></summary></details>
+      <div class="sub" style="margin-top:8px">옅은 파랑은 접혀도 그대로. 머리의 필수값 = 버전 (N) · 지금 단계 · 작은 막대 + 숫자 · 예상 완료. 펼치면 46→47→48 순서.</div></div>
+    <div class="variant" data-c="42"><div class="vt">42 · plan 낡음 · fetch 실패</div>
+      <div class="sub">Store 행: 30분 넘으면 <span class="stale-badge">stale · 47m</span> 배지와 함께 <b>황토로 펼쳐진다</b>(빨강은 실패). Source 행: fetch 실패는 빨강 펼침 + 오류 앞 60자, 미러 나이는 유지.</div></div>
+  </div>
+
+  <h2>6. 기획 항목</h2>
+  <p class="note">각 항목은 「보여주는 것 · 데이터 · 상태 · 상호작용 · 규칙」 순이다. JSON 이름은 소비 레포 스크립트가 쓰는 그대로다.</p>
+
+  <div class="group">머리 · 접히는 행</div>
+  <div class="specs">
+    <article class="spec" id="c1" data-for="1"><div class="num">1</div><div><div class="area">header</div><h3>탭과 저장소 선택</h3>
+      <dl><dt>보여주는 것</dt><dd><code>Queue | Store</code>. Store 는 저장소별(<code>#/store/&lt;repo&gt;</code>) — 릴리스 프로파일이 있는 <code>[[repos]]</code> 만. 하나면 이름만.</dd><dt>규칙</dt><dd>프로파일이 없으면 탭도 없다(오픈소스 기본 설치는 큐 화면 그대로). 큐의 SSE 는 여기서도 산다.</dd></dl></div></article>
+    <article class="spec" id="c2" data-for="2"><div class="num">2</div><div><div class="area">header · auth</div><h3>Settings 버튼</h3><dl><dt>상태</dt><dd>admin 만 활성. 비밀이 하나라도 missing 이면 빨간 점. 설정은 4절이고 스토어 화면 앞의 관문이다(29).</dd></dl></div></article>
+    <article class="spec" id="c3" data-for="3"><div class="num">3</div><div><div class="area">row</div><h3>Setup 행</h3>
+      <dl><dt>머리(접힘)</dt><dd><code>n/m secrets present · verified HH:MM · build number auto|manual · reviewer info ✓</code>.</dd><dt>펼침</dt><dd>저장된 비밀 표(31) 읽기 전용 + Replace · Verify all.</dd><dt>색</dt><dd>전부 present+verified → 초록 접힘. 아니면 빨강 펼침 — 그런데 이 상태는 관문(29)이 막으므로 스토어 화면에서는 «검증 만료·교체 필요» 때만 보인다.</dd></dl></div></article>
+    <article class="spec" id="c4" data-for="4"><div class="num">4</div><div><div class="area">row</div><h3>Source 행</h3>
+      <dl><dt>머리</dt><dd>main sha7 + 제목 · <code>main ⊂ dev</code> · 미러 나이 · 이 버전의 PR 상태 · 태그.</dd><dt>펼침</dt><dd>main 마지막 5 · release/백머지 PR 과 세 status(<code>local-ci/smoke · scenario · release</code>) · prod 태그 · Fetch 버튼(25).</dd><dt>빨강 조건</dt><dd><code>main ⊄ dev</code> · fetch 실패 · 미러 30분 넘음(황토) · 이 버전의 PR 이 closed(<code>BLOCKED_PR_CLOSED</code>).</dd><dt>데이터</dt><dd><code>POST /api/repos/&lt;name&gt;/fetch</code> → <code>{fetched_at, main, dev, main_in_dev}</code> · <code>GET github</code>(log5 · PR · tags, GH 토큰은 프로파일 비밀).</dd></dl></div></article>
+    <article class="spec" id="c5" data-for="5"><div class="num">5</div><div><div class="area">row</div><h3>Build · upload 행</h3>
+      <dl><dt>머리</dt><dd>버전 (N) · TestFlight 상태 · Play 트랙/상태 · 업로드 시각 · smoke/scenario 결과. 회차가 도는 중이면 스테이지와 진행(26).</dd><dt>펼침</dt><dd>Start 폼(버전 · Android track · dry-run) 또는 S0~S8 스테퍼 + 진행 막대 + 잡·산출물 표 + Skip scenario / Retry / Abort. 드라이버는 서버가 <code>product_release.sh</code> 를 분리 프로세스로 부른다(결정 1). 스테이지는 캐시가 아니라 <code>product_release_check.py stage</code> 로 매 갱신 계산.</dd><dt>색</dt><dd>업로드 끝(S8 done, <code>upload.json.status=success</code>) → 초록 접힘. 도는 중 → 파랑 펼침. 실패·lost·drift → 빨강 펼침(37·38·39). 회차 없음 → 회색 접힘 «No release running · last 1.0.0-180».</dd></dl></div></article>
+    <article class="spec" id="c6" data-for="6"><div class="num">6</div><div><div class="area">row</div><h3>Store 행</h3>
+      <dl><dt>머리</dt><dd>App Store live/editing/releaseType · Play production · plan 나이.</dd><dt>펼침</dt><dd><code>plan.json</code> 전체: builds · tracks · next N 근거 · blockers/warnings(<code>B-* · W-* · FIRST</code>) + Refresh(= <code>release-plan</code> 잡).</dd><dt>색</dt><dd>plan 30분 안 + blockers 없음 → 초록 접힘. blockers → 빨강 펼침. 낡음 → 황토 펼침(42).</dd></dl></div></article>
+  </div>
+
+  <div class="group">본체 — 심사 올릴 내용 (App Store Connect 버전 페이지 본뜸)</div>
+  <div class="specs">
+    <article class="spec" id="c7" data-for="7"><div class="num">7</div><div><div class="area">panel</div><h3>본체 머리 · 접힘/펼침</h3>
+      <dl><dt>머리(접힘)</dt><dd><b>버전 · 빌드번호 · «Submit for review → App Store + Google Play» · 상태 필</b>(not submitted / waiting for upload / submitted / partial / failed / unsafe_release_type). 그 이상은 없다.</dd>
+      <dt>기본 상태</dt><dd>위 네 행이 전부 초록이면 <b>펼쳐져 있다</b>(이 화면의 목적이 그것이다). 하나라도 빨강이면 접히고 필이 이유를 말한다(27). 제출이 끝나도 접힌다(40). 사람이 여닫은 것은 localStorage 로 기억(큐 화면 규칙).</dd></dl></div></article>
+    <article class="spec" id="c8" data-for="8"><div class="num">8</div><div><div class="area">panel · strip</div><h3>버전 띠</h3>
+      <dl><dt>보여주는 것</dt><dd>Version · Build(누가 언제 확인) · 소개 자료 출처(<code>origin/main</code> sha) · 릴리스 노트 파일과 길이 · payload(notes-only / full).</dd><dt>규칙</dt><dd>본체의 모든 값은 이 sha 의 <code>store/</code> 와 마지막 plan 에서 온다. 여기서 편집하지 않는다 — 각 필드 옆 «edit» 은 파일 경로 복사(정본은 git · PR).</dd></dl></div></article>
+    <article class="spec" id="c9" data-for="9"><div class="num">9</div><div><div class="area">panel · app store</div><h3>App Store 절 머리 · 판정</h3>
+      <dl><dt>데이터</dt><dd><code>review-plan.json.ios</code> ∈ ready · already_submitted · processing · unusable · missing_build · version_conflict · version_in_review_conflict · <b>unsafe_release_type</b> · store_unreadable. plan 이 없으면 회색 «not judged yet».</dd></dl></div></article>
+    <article class="spec" id="c10" data-for="10"><div class="num">10</div><div><div class="area">panel · app store</div><h3>App previews and screenshots</h3>
+      <dl><dt>보여주는 것</dt><dd>ASC 와 같은 자리, 같은 순서: 기기별 스크린샷 띠(6.9" → 6.5" 폴백) · 개수/상한 · 치수 검사. 새로 추가된 것은 초록 테두리 <code>new</code>, 바뀐 것은 <code>changed</code>, 빠진 것은 점선 자리.</dd><dt>데이터</dt><dd><code>store/screenshots/ios/ko/*.png</code>(<code>&lt;order&gt;_&lt;device&gt;_&lt;name&gt;</code>) · <code>store_listing.py preview / diff</code>.</dd><dt>상호작용</dt><dd>썸네일 클릭 → 원본 크기 라이트박스.</dd></dl></div></article>
+    <article class="spec" id="c11" data-for="11"><div class="num">11</div><div><div class="area">panel · app store</div><h3>Version information</h3>
+      <dl><dt>보여주는 것</dt><dd>ASC 순서 그대로: Promotional text · Description · Keywords · Support URL · Marketing URL · Subtitle. 값 + <code>현재/상한</code>(30 · 170 · 100 · 4000 · 255). 90% 넘으면 황토, 넘치면 빨강(validate 위반 줄과 같은 것).</dd><dt>규칙</dt><dd>긴 글은 3줄로 접고 클릭하면 전부. 라이브 diff 에서 바뀐 필드는 <code>changed</code> 칩(21).</dd></dl></div></article>
+    <article class="spec" id="c12" data-for="12"><div class="num">12</div><div><div class="area">panel · app store</div><h3>What's New (릴리스 노트)</h3>
+      <dl><dt>데이터</dt><dd><code>store/release_notes/X.Y.Z/ko.txt</code> 하나 → iOS release_notes 와 Play changelogs/N.txt 둘 다(<code>render-notes</code>). 없으면 빨강 «release_notes/1.0.1/ko.txt missing — review is blocked» 이고 본체 필이 빨강.</dd></dl></div></article>
+    <article class="spec" id="c13" data-for="13"><div class="num">13</div><div><div class="area">panel · app store</div><h3>Build · Version release · Phased</h3>
+      <dl><dt>보여주는 것</dt><dd>빌드 <code>X.Y.Z (N)</code> 와 처리 상태(VALID/PROCESSING) · 올린 잡 · <b>Manually release this version</b> 은 «fixed by the repo» 태그로 잠금 · phased 는 아래 체크박스와 연동 · export compliance 출처.</dd><dt>규칙</dt><dd>release type 을 고르는 UI 는 없다. 관측이 MANUAL 이 아니면 36.</dd></dl></div></article>
+    <article class="spec" id="c14" data-for="14"><div class="num">14</div><div><div class="area">panel · app store</div><h3>App Review information</h3>
+      <dl><dt>보여주는 것</dt><dd>연락처 4필드 · 데모 계정 2필드 · notes — <b>있음/없음만</b>(값은 절대 안 보임 · notes 만 본문). 없으면 빨강 + Settings 링크.</dd></dl></div></article>
+    <article class="spec" id="c15" data-for="15"><div class="num">15</div><div><div class="area">panel · google play</div><h3>Google Play 절 — 같은 배치</h3>
+      <dl><dt>규칙</dt><dd>Play Console 은 소개 · 그래픽 · 릴리스가 다른 페이지에 흩어져 있다. 여기서는 <b>App Store 절과 같은 그룹 순서·같은 줄 위치</b>로 나란히 그린다: 그래픽 → 소개 → 릴리스 노트 → 릴리스 → 정책. Play 에 없는 필드(Keywords · URL · Subtitle)는 자리를 비워 두고 <code>—</code> 로 이유를 쓴다 — 두 열의 줄이 맞아야 한 페이지에서 비교가 된다.</dd><dt>데이터</dt><dd><code>review-plan.json.android</code> ∈ ready · already_submitted · missing_release · store_unreadable.</dd></dl></div></article>
+    <article class="spec" id="c16" data-for="16"><div class="num">16</div><div><div class="area">panel · google play</div><h3>Graphics</h3><dl><dt>데이터</dt><dd><code>metadata/android/ko-KR/images/</code>: featureGraphic 1024×500 · icon · phoneScreenshots 2~8(320~3840 px) · 태블릿(선택). 규격 밖은 빨간 테두리 + 치수.</dd></dl></div></article>
+    <article class="spec" id="c17" data-for="17"><div class="num">17</div><div><div class="area">panel · google play</div><h3>Store listing</h3><dl><dt>데이터</dt><dd>title 30 · short_description 80 · full_description 4000(<code>ko-KR</code> — <code>ko</code> 폴더는 Play 가 무시한다는 경고를 validate 가 낸다).</dd></dl></div></article>
+    <article class="spec" id="c18" data-for="18"><div class="num">18</div><div><div class="area">panel · google play</div><h3>Release notes · ko-KR</h3><dl><dt>규칙</dt><dd>12 와 같은 원문. 500자 상한(Play changelog)이 둘의 공통 상한이라 여기서 센다.</dd></dl></div></article>
+    <article class="spec" id="c19" data-for="19"><div class="num">19</div><div><div class="area">panel · google play</div><h3>Release · Rollout · Managed publishing</h3>
+      <dl><dt>보여주는 것</dt><dd>릴리스 <code>N (X.Y.Z)</code> · track production draft · rollout 100% «fixed by the repo» · <b>Managed publishing: unknown to the API</b>(회색 필 — 절대 초록이 되지 않는다) · «publish stays in the console».</dd><dt>규칙</dt><dd>L1: 관리형 게시는 API 로 읽을 수도 켤 수도 없다. 화면은 그 사실을 숨기지 않는다.</dd></dl></div></article>
+    <article class="spec" id="c20" data-for="20"><div class="num">20</div><div><div class="area">panel · google play</div><h3>App content · policy</h3><dl><dt>규칙</dt><dd>Data safety · Content rating 은 콘솔 전용 — «console-only, not touched by rcm». 줄 수를 App Review information 과 맞추기 위한 자리다.</dd></dl></div></article>
+    <article class="spec" id="c21" data-for="21"><div class="num">21</div><div><div class="area">panel</div><h3>Changes vs the store (라이브 diff 요약)</h3><dl><dt>데이터</dt><dd><code>store_listing.py diff --live</code>(마지막 pull 스냅샷): 문구 old→new · 이미지 +/−/변경. 바뀐 필드는 위 절에서 <code>changed</code> 칩. 스냅샷 없으면 «pull first».</dd></dl></div></article>
+    <article class="spec" id="c22" data-for="22"><div class="num">22</div><div><div class="area">panel · human</div><h3>체크박스 다섯</h3>
+      <dl><dt>보여주는 것</dt><dd>App Store · Google Play · <b>관리형 게시 켜짐을 지금 봤다</b>(Play 아래 들여쓰기, 황토 점선) · 소개 자료 전체 업로드 · iOS phased.</dd><dt>규칙</dt><dd>Play 를 켜면 관리형 게시 체크 필수 — 없으면 Submit 비활성. 제출마다 새로 체크, 저장 안 함(결정 3). 매핑 <code>platform · play_managed_publishing=confirmed-on · listing=full|notes-only · phased=1|0</code>. 기본은 notes-only(결정 6).</dd></dl></div></article>
+    <article class="spec" id="c23" data-for="23"><div class="num">23</div><div><div class="area">panel · action</div><h3>Validate → Plan review → Submit</h3>
+      <dl><dt>상호작용</dt><dd><b>Validate listing</b> = <code>store_listing.py validate --build-name --version-code</code>(서버 체크아웃, 몇 초) → 위반은 해당 필드 옆에 빨간 줄로. <b>Plan review</b> = <code>release-review mode=plan</code> → 두 절의 판정 필과 diff 가 채워진다. <b>Submit</b> 은 plan ok(≤ 30m) + N 재입력(28, 태그의 최신 N 과 같아야) + Play 체크 → <code>mode=submit</code>. 대화상자에 «cannot be undone» 과 플랫폼 이름.</dd><dt>데이터</dt><dd><code>POST /api/repos/&lt;name&gt;/release/review {mode, platform, confirm_build_number, play_managed_publishing, listing, phased}</code> → 잡 · <code>review-plan.json</code> / <code>review.json</code>.</dd></dl></div></article>
+    <article class="spec" id="c24" data-for="24"><div class="num">24</div><div><div class="area">panel · policy</div><h3>고정 문장</h3><dl><dt>규칙</dt><dd>«Approval does not release …» 는 본체 바닥에 항상. 결과(40)에도. <code>auto_release</code> 관측 true → 36.</dd></dl></div></article>
+  </div>
+
+  <div class="group">준비 안 됨 · 대화상자 · 설정</div>
+  <div class="specs">
+    <article class="spec" id="c25" data-for="25"><div class="num">25</div><div><div class="area">row · bad</div><h3>빨간 Source 행</h3><dl><dt>보여주는 것</dt><dd>머리에 <b>왜</b> 빨간지 한 줄(<code>main not in dev</code> · 나이 · PR · 태그 없음). 펼친 안에 히스토리·PR·태그 + 고치는 길(«back-merge main → dev»). Fetch 는 머리에서 바로.</dd></dl></div></article>
+    <article class="spec" id="c26" data-for="26"><div class="num">26</div><div><div class="area">row · running</div><h3>도는 중인 Build · upload 행</h3><dl><dt>상태</dt><dd>파랑 펼침(빨강 아님 — 실패가 아니다). 스테퍼 · 진행 막대 · 잡 표. S2 는 사람 단계(황토 테두리) — N 대화상자(28)는 여기서 뜬다. S6·S7 은 <code>irreversible</code> 미리 표기.</dd></dl></div></article>
+    <article class="spec" id="c27" data-for="27"><div class="num">27</div><div><div class="area">panel · locked</div><h3>접힌 본체</h3><dl><dt>보여주는 것</dt><dd>버전 · 빌드 · 대상 두 스토어 · 필 «waiting for upload (S7)» — 필이 <b>왜 못 여는지</b>를 말한다(waiting for upload · plan blocked · source not ready · secrets expired). 펼칠 수는 있다(읽기 전용, 버튼 전부 비활성).</dd></dl></div></article>
+    <article class="spec" id="c28" data-for="28"><div class="num">28</div><div><div class="area">dialog · human</div><h3>N 확인 대화상자</h3>
+      <dl><dt>규칙</dt><dd>체크박스가 아니라 <b>숫자를 다시 타이핑</b>(doc 35 §2 B). 다르면 버튼이 안 열리고 <code>≠ 181</code>. S2 · S7 직전 · 심사 제출 직전 각각 한 번 — 한 확인이 다음 되돌릴 수 없는 일까지 넘어가지 않는다. 확인한 사람·시각을 남긴다.</dd></dl></div></article>
+    <article class="spec" id="c29" data-for="29"><div class="num">29</div><div><div class="area">settings · gate</div><h3>관문 띠 · Enter Store</h3>
+      <dl><dt>보여주는 것</dt><dd>«n of m secrets set · k verified» 와 <b>Enter Store</b>. 필수 비밀 전부 present+verified 일 때만 열린다(Teams·Firebase 는 선택). 안 됐으면 띠가 빨강, 다 됐으면 초록.</dd><dt>데이터</dt><dd><code>GET /api/repos/&lt;name&gt;</code> 의 <code>setup: {required, present, verified, complete}</code>. <code>complete=false</code> 면 스토어 라우트가 설정으로(클라이언트 + 서버 <code>409 setup incomplete</code>).</dd><dt>규칙</dt><dd>토큰 · 서명 키 · 지문 같은 민감 값은 CD 화면에 들어가기 <b>전에</b> 다 넣는다. 스토어 화면 안에는 비밀을 묻는 대화상자가 없다.</dd></dl></div></article>
+    <article class="spec" id="c30" data-for="30"><div class="num">30</div><div><div class="area">settings · input</div><h3>드롭존 · 파일 선택 · 경로 입력</h3>
+      <dl><dt>상호작용</dt><dd>파일 비밀마다 드롭존: 드래그앤드롭 · «choose» · <b>빌드 머신의 경로</b>(서버가 secrets 폴더로 <b>복사</b>, 링크 아님). 폴더째 가져오기: <code>secrets.env + files</code> 규약을 따르는 폴더/zip(오늘의 <code>~/dolomood-secrets</code>)을 떨어뜨리면 이름을 맞춰 한 번에. 값 비밀은 password 칸에 한 번 타이핑.</dd><dt>규칙</dt><dd>받자마자 크기·MIME·이름 검사(p8 은 PEM · json 파싱 · jks 는 keytool SHA-1). 화면은 <code>✓ received · 크기 · 지문</code> 만. 저장하면 칸이 비워진다. 경로는 서버 홈 밑으로 제한, admin 만. 드롭 파일은 메모리에서 바로 multipart — 브라우저 저장소를 거치지 않는다.</dd></dl></div></article>
+    <article class="spec" id="c31" data-for="31"><div class="num">31</div><div><div class="area">settings · secrets</div><h3>저장된 비밀 표</h3>
+      <dl><dt>데이터</dt><dd><code>GET /api/repos/&lt;name&gt;/secrets</code> → <code>[{name, kind, present, fingerprint, size, verified_at, verify_error}]</code>. 값은 절대 안 돌아온다. <code>PUT</code> 은 admin · multipart · 이름 강제 · 상한 · 0600. 잡 stdout 의 비밀 값(≥ 8자)은 서버가 마스킹.</dd><dt>규칙</dt><dd>표의 행은 프로파일(<code>[repos.&lt;name&gt;.release].secrets</code>)이 선언한 이름만 — rcm 코드는 dolomood 를 모른다. GH 토큰도 이 폴더로 통일(결정 2).</dd></dl></div></article>
+    <article class="spec" id="c32" data-for="32"><div class="num">32</div><div><div class="area">settings · action</div><h3>Verify all</h3><dl><dt>상호작용</dt><dd>읽기 전용 확인만: ASC 앱 조회 · Play 트랙 읽기 · GH 레포 읽기 + 로그인 · keystore SHA-1 대조 · Teams 테스트 카드. 항목별 ✓/✗ 와 시각.</dd></dl></div></article>
+    <article class="spec" id="c33" data-for="33"><div class="num">33</div><div><div class="area">settings · policy</div><h3>정책 셋</h3><dl><dt>규칙</dt><dd>빌드번호 auto|manual · 브랜치/태그 규칙 · 소비 레포가 고정한 것은 읽기 전용 문장. <code>automatic_release · rollout · release_status</code> 를 고르는 UI 는 없다.</dd></dl></div></article>
+    <article class="spec" id="c34" data-for="34"><div class="num">34</div><div><div class="area">variant</div><h3>설정 전</h3><p>관문이 막는다. 스토어 카드는 그리지 않는다.</p></div></article>
+    <article class="spec" id="c35" data-for="35"><div class="num">35</div><div><div class="area">variant · auth</div><h3>권한 세 단계</h3><p>보기 → 잡 제출(일반) → admin. 비활성 버튼은 이유를 쓴다.</p></div></article>
+    <article class="spec" id="c36" data-for="36"><div class="num">36</div><div><div class="area">variant · policy</div><h3>unsafe_release_type</h3><p>닫을 수 없는 빨간 띠 + 본체 필 빨강. «Fix it in ASC now».</p></div></article>
+    <article class="spec" id="c37" data-for="37"><div class="num">37</div><div><div class="area">variant</div><h3>게이트·QA 빨강 (REP)</h3><p>Build·upload 행 빨강 펼침 · PR 닫힘 · report/step-captures 링크 · Retry · «main untouched». BLOCKED 는 황토.</p></div></article>
+    <article class="spec" id="c38" data-for="38"><div class="num">38</div><div><div class="area">variant</div><h3>결과 모름</h3><p>업로드가 lost 면 재제출 버튼 없음, reconcile 안내만.</p></div></article>
+    <article class="spec" id="c39" data-for="39"><div class="num">39</div><div><div class="area">variant</div><h3>드리프트 · 첫 출시</h3><p>exit 4 안내 · <code>first_release</code> 는 범위 밖(프리셋 없음). 승격·복구도 «있다» 와 명령만.</p></div></article>
+    <article class="spec" id="c40" data-for="40"><div class="num">40</div><div><div class="area">variant</div><h3>심사 결과 네 가지</h3><p>submitted 초록 · partial 황토 · noop 회색 · failed 빨강 + reason. observed(제출 뒤 다시 읽은 상태)를 같이. 결과가 오면 본체는 접힌다.</p></div></article>
+    <article class="spec" id="c41" data-for="41"><div class="num">41</div><div><div class="area">variant</div><h3>모바일</h3><p>행 한 열 · 두 스토어 절 세로 · 스크린샷 띠 가로 스크롤 · 숫자 키패드.</p></div></article>
+    <article class="spec" id="c43" data-for="43"><div class="num">43</div><div><div class="area">row · job card · gate</div><h3>도는 중인 gate-smoke 카드</h3>
+      <dl><dt>보여주는 것</dt><dd>현재 스텝 이름 + 스텝 안 경과 · 막대 · 스텝 목록(접힘). 막대의 근거는 <b>시간</b>(측정 중앙값 21m, n) — 총 스텝 수를 잡이 선언하지 않기 때문이다(문서 36: 손으로 쓴 숫자는 어긋난다). 서수(51/54)는 rcm 이 <b>이 키의 지난 잡들이 찍은 스텝 수의 중앙값</b>으로 «of ~54» 라고만 말한다.</dd>
+      <dt>데이터</dt><dd>기존 <code>progress.steps[] · current_name · current_seconds · steps_done</code> + 스텝 중앙값. <b>소비 레포 변경 0</b>.</dd>
+      <dt>규칙</dt><dd>조용한 구간을 이름으로 말한다: 무거운 셋(test·gitleaks·build web) 6~20분은 «quiet — nothing wrong»(큐 화면의 <code>quiet</code> 규칙). 기기 락 대기는 잡이 <code>::rcm::step::waiting for devices (rank 2)</code> 를 찍게 해서(ci_lock 한 줄) 스텝으로 보이게 — F49 의 40분이 화면에 보였을 것이다.</dd></dl></div></article>
+    <article class="spec" id="c44" data-for="44"><div class="num">44</div><div><div class="area">row · job card · scenario</div><h3>도는 중인 scenario-qa 카드 — 청크 격자</h3>
+      <dl><dt>보여주는 것</dt><dd>청크 <code>done/total</code> 막대(근거 steps · 정확) · 플랫폼별 레인에 청크 한 칸씩(초록 ✓ · 빨강 ✗ · 파랑 ▶ · 회색 미실행 · 빗금 skip) · 지금 도는 청크와 경과/중앙값 · 실패 목록.</dd>
+      <dt>데이터</dt><dd>rcm 마커 하나를 새로 둔다: <code>::rcm::progress::&lt;done&gt;/&lt;total&gt;::&lt;unit&gt;::&lt;state&gt;[::&lt;note&gt;]</code> — <b>현재 스텝 안의</b> 세부 진행. 문법에 프로젝트 이름은 없다: <code>unit</code> 은 «지금 말하는 것 하나»(청크/플랫폼 · 자식 프로세스 · 락), <code>state ∈ run · ok · fail · skip · env · review · blocked · wait</code>. 스키마 <code>progress.sub {done, total, unit, state, note, at}</code> + <code>units[]</code>(격자용, unit 별 마지막 state). 소비 레포는 이미 아는 분모만 찍는다(모르면 안 찍는다 — 추정은 웹의 몫). 예시 저장소는 <code>run_scenarios.sh</code> 가 청크마다, <code>local_ci.sh</code> 가 무거운 셋 자식마다, <code>ci_lock.py</code> 가 락 대기 하트비트마다 찍는다(브랜치 <code>feat/rcm-progress-markers</code>).</dd>
+      <dt>규칙</dt><dd><code>scenario_qa.sh</code> 는 <code>::rcm::steps::N</code> 을 <b>런타임에 계산해</b>(2 + 2×passes, <code>chunk_select --passes --json</code>) 찍는다 — 손으로 쓴 숫자가 아니라 문서 36 의 조건을 만족한다. 스텝 막대(3/7)와 청크 막대(41/68)는 다른 것이고 둘 다 보인다.</dd></dl></div></article>
+    <article class="spec" id="c46" data-for="46"><div class="num">46</div><div><div class="area">row · running · layer 1</div><h3>가로로 긴 막대</h3>
+      <dl><dt>보여주는 것</dt><dd>행 폭 전체의 막대 하나. 왼쪽에 «지금 단계 · done/total · %», 오른쪽에 <b>근거</b>와 예상 완료. 근거는 셋 중 하나를 글자로 쓴다: <code>declared steps</code> · <code>declared chunks × platforms</code>(progress 마커) · <code>by time · median 21m</code>.</dd>
+      <dt>데이터</dt><dd>회차 전체의 분모는 스테이지 9개가 아니라 <b>시간</b>이다(S4·S5 가 대부분) — 회차 막대는 도는 잡의 막대를 그대로 쓴다: 잡이 <code>progress.sub</code> 를 찍으면 그것, 아니면 <code>steps_total</code>, 아니면 시간.</dd>
+      <dt>규칙</dt><dd>분모를 모르면 빗금(큐 화면의 <code>basis=none</code>)이고 % 를 쓰지 않는다.</dd></dl></div></article>
+    <article class="spec" id="c47" data-for="47"><div class="num">47</div><div><div class="area">row · running · layer 2</div><h3>«지금 하는 일» 한 줄</h3>
+      <dl><dt>보여주는 것</dt><dd>잡 id · 프리셋 · 지금 단위(청크 / 자식 / 락) · 그 단위의 경과와 중앙값 · 플랫폼별 카운트. 마지막 <code>progress</code> 마커의 <code>unit · state · note</code> 그대로.</dd></dl></div></article>
+    <article class="spec" id="c48" data-for="48"><div class="num">48</div><div><div class="area">row · running · layer 3</div><h3>펼치면 항목 목록</h3>
+      <dl><dt>보여주는 것</dt><dd>세로 체크리스트: 끝난 것 ✓ 초록 · 도는 것 ▶ 파랑(배경도) · 기다리는 것 · 회색 «waiting». 사람 단계(S2)는 황토 테두리. 그 아래 이 회차의 잡 카드(43·44) — 게이트는 스텝·자식·락 대기, 시나리오는 청크 격자.</dd>
+      <dt>규칙</dt><dd>기본 펼침. 사람이 접으면 기억. 항목의 «waiting» 은 «아직» 이지 «막힘» 이 아니다 — 막힘은 빨강 + 이유(38·39).</dd></dl></div></article>
+    <article class="spec" id="c49" data-for="49"><div class="num">49</div><div><div class="area">row · running · collapsed</div><h3>도는 중 · 접힌 머리</h3>
+      <dl><dt>보여주는 것</dt><dd>옅은 파랑 그대로 + 버전 (N) · 지금 단계 · 작은 막대와 <code>41/68</code> · 예상 완료. 그 이상은 없다.</dd></dl></div></article>
+    <article class="spec" id="c45" data-for="45"><div class="num">45</div><div><div class="area">row · job card · phase 2</div><h3>청크 안의 스텝 캡처 필름</h3>
+      <dl><dt>보여주는 것</dt><dd>지금 도는 청크의 <code>step&lt;NN&gt;_&lt;action&gt;.png</code> 썸네일 띠와 <code>done/total</code>(총수는 청크 yaml 의 스텝 수). 청크가 끝나면 그 청크의 필름은 접히고 다음 청크로.</dd>
+      <dt>데이터</dt><dd>stdout 에 안 나온다 — 디스크에만 쌓인다. rcm 에 «라이브 산출물» 이 필요하다: 프로파일/프리셋의 <code>live_artifacts = ["docs/qa-reports/runs/**/step*.png"]</code>, <code>GET /jobs/{id}/live?path=</code>(토큰). 워크스페이스 파일 읽기 전용 · 크기 상한 · 잡 끝나면 기존 24h 산출물로 승격.</dd>
+      <dt>규칙</dt><dd>2단계. 1단계(43·44)만으로 «어느 청크가 어디까지» 는 보인다.</dd></dl></div></article>
+    <article class="spec" id="c42" data-for="42"><div class="num">42</div><div><div class="area">variant</div><h3>plan 낡음 · fetch 실패</h3><p>낡음은 황토 펼침(빨강은 실패에만). 실패는 빨강 펼침 + 오류 앞 60자.</p></div></article>
+  </div>
+
+  <h2>7. 이 화면이 정한 규칙</h2>
+  <ul class="qa">
+    <li><b>행의 색이 곧 상태다.</b> 접히는 행 넷은 «다 됨 → 옅은 초록 · 접힘», «안 됨 → 옅은 빨강 · 펼침», «도는 중 → 파랑 · 펼침», «낡음 → 황토 · 펼침», «해당 없음 → 회색 · 접힘». 접힌 머리에는 필수값만(버전 · N · 상태 · 나이), 펼치면 상세. 사람이 여닫은 것은 기억한다.</li>
+    <li><b>본체는 「스토어에 어떻게 올라가나」 한 페이지.</b> App Store Connect 의 버전 페이지 순서(스크린샷 → 버전 정보 → What's New → 빌드 → 심사 정보)를 그대로 쓰고, Google Play 를 같은 그룹 순서·같은 줄 위치로 옆에 둔다. 없는 필드는 비워 두고 이유를 쓴다. 전부 읽기 전용 — 정본은 git.</li>
+    <li><b>본체의 기본은 펼침.</b> 네 행이 초록이면 펼쳐져 있고, 하나라도 빨강이면 접히며 필이 이유를 말한다. 접힌 머리 = 버전 · 빌드번호 · «App Store + Google Play».</li>
+    <li><b>웹은 판정하지 않는다.</b> N · 스테이지 · 심사 판정 · 위반은 소비 레포 스크립트의 JSON·종료코드 그대로. rcm 코드에 dolomood 이름은 없다 — 전부 프로파일.</li>
+    <li><b>세 번의 타이핑.</b> S2 · S7 직전 · 심사 제출 직전에 N 을 새로 타이핑한다.</li>
+    <li><b>출시 버튼 없음.</b> «Release · Publish · Rollout» 은 어떤 상태에서도 없다. 고정 문장은 본체 바닥과 결과에. 관리형 게시 필은 절대 초록이 되지 않는다.</li>
+    <li><b>관문이 먼저.</b> 민감 값은 설정 화면에서 드롭/경로로 다 넣은 뒤에야 스토어 화면이 열린다. 안에서는 비밀을 묻지 않는다. API 는 <code>present · fingerprint · verified_at</code> 만.</li>
+    <li><b>권한.</b> 보기 → 잡 제출 → admin. 비활성 버튼은 이유를 쓴다.</li>
+    <li><b>실패 ≠ 빈 값 ≠ 모름 ≠ 낡음.</b> 각각 다른 색·모양. 업로드가 «모름» 이면 재제출 버튼이 없다.</li>
+    <li><b>도는 행은 세 층.</b> 긴 막대(근거 글자와 함께) → «지금 하는 일» 한 줄 → 펼치면 항목 목록(✓ 초록 · ▶ 파랑 · 회색 waiting). 행 머리와 접힌 상태는 옅은 파랑.</li>
+    <li><b>진행은 근거를 말한다.</b> 막대의 근거는 셋 중 하나 — 선언된 스텝 수 · 세부 진행 마커(<code>::rcm::progress::</code>) · 측정 시간. 근거를 화면에 쓴다(«by time · median 21m»). 숫자를 지어내지 않는다: 잡이 총수를 선언하지 않으면 «of ~54» 처럼 추정임을 표시한다.</li>
+    <li><b>큐 화면 규칙을 물려받는다.</b> 시각·소요 표기, 색 + 글리프 + 테두리, 키보드·보조기기, SSE, i18n.</li>
+  </ul>
+
+  <h2>8. 다른 저장소를 붙이는 법 — rcm 은 저장소를 모른다</h2>
+  <p class="note">이 목업의 값은 전부 예시 저장소(dolomood)의 실측이지만, rcm 코드·스키마·문구 어디에도 그 이름은 없다. 어떤 프로젝트든 아래 넷을 주면 같은 탭이 뜬다. 하나가 없으면 그 카드가 «not configured — profile.presets.qa is empty» 로 비고, 나머지는 그대로 돈다.</p>
+  <ul class="qa">
+    <li><b>① 프로파일</b> — <code>server.toml</code> 의 <code>[repos.&lt;name&gt;.release]</code>: 어떤 비밀이 필요한지(<code>secrets · secret_files</code>), 그 폴더를 잡에 무슨 이름으로 넘길지(<code>secrets_dir_env</code>), 역할별 프리셋 이름(<code>presets = {plan, gate, qa, upload, review}</code>), 회차 드라이버(<code>driver</code>), 브랜치·태그 규칙, 빌드번호 정책. 설정 화면(4절)의 행과 관문의 «n of m» 은 여기서만 나온다.</li>
+    <li><b>② 프리셋 역할과 산출물 계약</b> — rcm 은 판정하지 않고 <b>파일을 그린다</b>. 역할마다 rcm 이 읽는 최소 필드를 rcm 문서(<code>docs/release-contract.md</code>)가 정한다: <code>plan.json {n, first_release, store, blockers[], warnings[], measured_at}</code> · <code>report.json {verdict, platforms}</code> · <code>upload.json {status, n, platforms}</code> · <code>review-plan.json {ios, android, plan_verdict, listing{preview,diff}}</code> · <code>review.json {overall_status, platforms, observed}</code>. 없는 필드는 <code>—</code>. 판정 어휘는 프로젝트의 것을 그대로 필에 쓴다 — rcm 은 <code>ready · already_submitted · *_unreadable</code> 몇 개만 색으로 안다(나머지는 빨강).</li>
+    <li><b>③ 마커</b> — 스텝(<code>::rcm::step::</code>) · 스텝 총수(<code>::rcm::steps::N</code>, 아는 경우만) · 스텝 안 진행(<code>::rcm::progress::done/total::unit::state</code>). 이것만으로 46~48 의 세 층이 선다. 찍지 않으면 시간 근거 막대와 로그 tail.</li>
+    <li><b>④ 소개 자료 규약</b> — <code>store/</code> 비슷한 폴더가 있으면 프로파일 <code>listing = {preview_cmd, diff_cmd, validate_cmd, screenshots_glob}</code> 로 명령을 가리킨다. 없으면 본체의 두 스토어 절은 «no listing command in profile» 로 접힌다.</li>
+    <li><b>하지 않는 것</b> — rcm 에 특정 앱의 스크립트 경로·키 이름·심사 데모 계정 필드 이름을 박지 않는다. 예시는 <code>examples/server.toml</code> 의 한 프로파일과 README 한 절뿐이다. 이 목업의 «dolomood» 는 그 예시 프로파일의 이름이다.</li>
+  </ul>
+
+  <h2>9. 오너 결정 (2026-09-17) 과 구현 반영</h2>
+  <ul class="qa">
+    <li><b>결정 1</b> 드라이버 실행은 (a) — 서버가 <code>product_release.sh</code> 를 세션 머신처럼 부른다. 서버에 소비 레포 미러 워킹트리와 gh 가 필요하다.</li>
+    <li><b>결정 2</b> GH 토큰은 <code>~/.config/rcm/secrets/&lt;repo&gt;/</code> 로 통일. 프리셋의 <code>GH_TOKEN_FILE</code> 도 거기를 가리키게(소비 레포 PR 하나).</li>
+    <li><b>결정 3</b> 관리형 게시 체크는 제출마다 새로. 기억하지 않는다.</li>
+    <li><b>결정 4</b> dev 배포(Firebase)는 2단계. 첫 PR 은 스토어 경로만.</li>
+    <li><b>결정 5</b> 회차 시작은 웹과 CLI(<code>rcm release start</code>) 둘 다, 같은 API. 맥북 세션이 스킬로 시작한 회차도 웹에 보인다(원격 진실 기준).</li>
+    <li><b>결정 6</b> 소개 자료 전체 업로드 기본값은 꺼짐(notes-only).</li>
+    <li><b>진행 표시 (2026-09-17 추가 요청)</b> — 세 단계. ⓐ 소비 레포 변경 없이: 스텝 이름·스텝 경과·시간 근거 막대·조용한 구간 이름(43). ⓑ rcm 마커 하나 + 소비 레포 두 스크립트 몇 줄: <code>::rcm::progress::done/total::label</code>(rcm 범용) · <code>run_scenarios.sh</code> 가 청크마다 찍음 · <code>scenario_qa.sh</code> 가 <code>::rcm::steps::N</code> 런타임 계산 · <code>ci_lock.py wait</code> 가 <code>::rcm::step::waiting for devices</code> 찍음(44). ⓒ 라이브 산출물(<code>live_artifacts</code> glob + <code>GET /jobs/{id}/live</code>)로 청크 안 스텝 캡처 필름(45). ⓑ 의 소비 레포 쪽은 <b>2026-09-17 브랜치 <code>feat/rcm-progress-markers</code> 에 실제로 찍어 두었다</b>(run_scenarios · scenario_qa · local_ci 무거운 셋 + test 카운터 · ci_lock 대기, doc 33 «진행 마커»). rcm 쪽 ⓐⓑ(마커 파서 · <code>progress.sub</code> · 카드 46~48)는 스토어 탭 PR 순서 ② 에 넣는다.</li>
+    <li><b>설정</b>: <code>[repos.&lt;name&gt;.release]</code> 프로파일 — <code>secrets · secret_files · secrets_dir_env · driver · presets{plan,gate,qa,upload,review} · default_branch · build_number_policy · plan_max_age_minutes</code>. <code>_parse_repos</code> 가 <code>release</code> 서브테이블을 받아야 한다. <code>rcm check</code> 에 프로파일 검증 줄.</li>
+    <li><b>API</b>(<code>/api/repos/&lt;name&gt;/…</code>): <code>GET .</code>(setup · 미러 나이 · main⊂dev) · <code>POST fetch</code> · <code>GET github</code> · <code>GET secrets</code> / <code>PUT secrets/&lt;key&gt;</code>(admin) · <code>POST verify</code> · <code>GET plan</code> · <code>POST release/plan|review|start|abort|retry|skip-scenario</code> · <code>GET release</code>(스테이지 · 잡 · 산출물) · <code>GET listing</code>(preview · diff · 썸네일) · <code>POST listing/validate</code>. 잡 생성은 기존 제출 경로 재사용.</li>
+    <li><b>회차 객체</b>: DB 표 <code>releases(repo, build_name, started_by, started_at, driver_pid, log_path, confirmed_n, confirmed_by)</code> · <code>DB_VERSION</code> +1.</li>
+    <li><b>웹</b>: 해시 라우터(<code>#/</code> · <code>#/store/&lt;repo&gt;</code>) · <code>&lt;details&gt;</code> 행 넷 + 본체 · i18n ko/en · <code>tests/web</code> 에 순수 함수(행 색 결정 · 본체 펼침 결정 · 스테이지→스테퍼 · 판정→필 · Submit 활성 조건 · N 비교).</li>
+    <li><b>PR 순서</b>: ① 프로파일 + 관문 설정 + 검증(이 단계만으로 <code>release-plan</code> 이 웹에서 돈다) → ② 행 넷(Source · Store · Build) → ③ 본체(두 스토어 절 · validate · diff) + 심사 제출 → ④ 릴리스 실행(드라이버) → ⑤ 마스킹 · 권한 · 문서 마감. submit · upload 는 오너가 보는 앞에서만 실측.</li>
+  </ul>
+</div>
+<script>
+(function () {
+  var GUTTER_BADGE_X = 22;
+  function q(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function layout(container) {
+    var svg = container.querySelector('svg.lines');
+    var gutter = container.querySelector('.gutter');
+    var crect = container.getBoundingClientRect();
+    var W = container.clientWidth, H = container.clientHeight;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.setAttribute('width', W); svg.setAttribute('height', H);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    gutter.innerHTML = '';
+    var gx = W - 76 + GUTTER_BADGE_X + 13;
+    var items = q('[data-c]', container).map(function (el) {
+      var r = el.getBoundingClientRect();
+      return { el: el, n: el.getAttribute('data-c'), ax: r.right - crect.left, ay: r.top - crect.top + 3 };
+    });
+    items.sort(function (a, b) { return a.ay - b.ay || a.ax - b.ax; });
+    var last = -1e9;
+    items.forEach(function (it) { it.by = Math.max(it.ay, last + 30); last = it.by; });
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.className = 'badge'; b.type = 'button'; b.textContent = it.n; b.style.top = it.by + 'px';
+      b.setAttribute('aria-label', '기획 항목 ' + it.n); b.dataset.n = it.n;
+      gutter.appendChild(b);
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      p.setAttribute('points', (it.ax + 3) + ',' + it.ay + ' ' + (gx - 26) + ',' + it.ay + ' ' + (gx - 13) + ',' + it.by);
+      p.setAttribute('class', 'lead'); p.dataset.n = it.n;
+      svg.appendChild(p);
+      var d = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      d.setAttribute('cx', it.ax + 3); d.setAttribute('cy', it.ay); d.setAttribute('r', 3); d.setAttribute('class', 'dot');
+      svg.appendChild(d);
+    });
+  }
+  function setOn(n, on) {
+    q('[data-c="' + n + '"]').forEach(function (el) { el.classList.toggle('hl', on); });
+    q('.badge').forEach(function (b) { if (b.dataset.n === n) b.classList.toggle('on', on); });
+    q('.lead').forEach(function (l) { if (l.dataset.n === n) l.classList.toggle('on', on); });
+    q('.spec[data-for="' + n + '"]').forEach(function (s) { s.classList.toggle('on', on); });
+  }
+  function wire() {
+    document.addEventListener('mouseover', function (e) {
+      var t = e.target.closest('.badge, .spec, [data-c]'); if (!t) return;
+      var n = t.dataset.n || t.dataset.for || t.getAttribute('data-c'); if (n) setOn(n, true);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var t = e.target.closest('.badge, .spec, [data-c]'); if (!t) return;
+      var n = t.dataset.n || t.dataset.for || t.getAttribute('data-c'); if (n) setOn(n, false);
+    });
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('.badge'); if (!b) return;
+      var s = document.getElementById('c' + b.dataset.n); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    document.addEventListener('toggle', function () { all(); }, true);
+  }
+  function all() { q('.annot').forEach(layout); }
+  wire(); all();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(all);
+  window.addEventListener('load', all);
+  var t; window.addEventListener('resize', function () { clearTimeout(t); t = setTimeout(all, 80); });
+})();
+</script>
+</body>
+</html>

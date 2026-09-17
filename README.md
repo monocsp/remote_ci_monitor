@@ -246,6 +246,30 @@ Updates arrive over the event stream; if it drops, the page polls every 10 s, an
 without a successful response a **Lost connection** banner appears while the ages keep counting.
 The page never pretends to be current. `#/jobs/N` deep-links to a job.
 
+### Store tab — connecting a project's release flow
+
+Beyond the queue, a repository can get a **Store tab**: fetch, store snapshot, gate, QA, upload,
+submit for review, each a button over the project's *own* release scripts. rcm draws the JSON
+those scripts write and runs the presets they declare; it never computes a build number, judges
+QA, or releases anything after store approval. What a project must provide is written down in
+[docs/release-contract.md](docs/release-contract.md); the fastest way to provide it is the skills
+rcm ships for a Claude Code session in that project:
+
+```sh
+rcm skills list                                   # the skills packaged with this rcm
+rcm skills install --into ~/src/app               # copies them to ~/src/app/.claude/skills/
+# in that project, in Claude Code:
+/rcm-connect                                      # asks project · repo name · platforms · optional tiers
+```
+
+`/rcm-connect` runs `rcm-store-connect` (required: profile block, secrets list, `plan` / `upload`
+/ `review` presets and script skeletons, each with a `--selftest`) and, if chosen, the optional
+`rcm-gate-connect`, `rcm-qa-connect` and `rcm-release-driver`. Skills write only into the
+project (`scripts/rcm/presets.release.toml`, `scripts/rcm/profile.release.toml`, scripts, a report
+in `docs/rcm-connect.md`) and verify with `rcm check` on a candidate copy of `server.toml`; the
+live server file, secrets and the stores are never touched. The profile keys are in
+[Configuration](docs/configuration.md#release-profile).
+
 ## Exit codes
 
 | `rcm wait` exit | meaning |
@@ -282,6 +306,7 @@ The full list, including what the web UI keeps in `localStorage`, is in
 | document | what is in it |
 |---|---|
 | [Usage guide](docs/usage.md) · [한국어](docs/usage.ko.md) | a first job, step by step, with annotated screenshots |
+| [Release contract](docs/release-contract.md) | what a project provides for the Store tab: profile, presets by role, artifact files, markers, secrets, the driver, and the skills that generate them |
 | [Configuration](docs/configuration.md) | presets, inputs, markers, deploy presets, priority, snapshot cache, pools and remote workers, notifications, the client and worker files |
 | [Operating the build machine](docs/operating.md) | running it as a service, Docker, upgrades, security, why a number can be wrong, the manual check on a real machine |
 | [CHANGELOG.md](CHANGELOG.md) | every user-visible change, newest first |
