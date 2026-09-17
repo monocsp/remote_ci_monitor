@@ -275,7 +275,7 @@ characters plus `…` for a value, the first eight hex digits of the file's SHA-
 `verify` kinds in this build: `github` (`GET https://api.github.com/user` with the token, 5 s,
 reports `login: <name>`), `keystore` (`keytool -list -keystore <file>`, plus `-storepass` from a
 value secret named `KEYSTORE_PASSWORD` when the profile has one; `keytool missing` when the
-build machine has none), and `none`. `asc` and `play` answer `not implemented in this build` —
+build machine has none), and `none`. `asc` and `play` answer `not implemented in this build` as a *detail*, not an error (a JWT signature this build cannot produce must not lock the gate; the page shows the sentence) —
 the page shows the cross and the text rather than a green mark nobody earned.
 
 **The setup gate.** `setup.complete` is true when every non-optional secret is present and either

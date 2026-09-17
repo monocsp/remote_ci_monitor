@@ -3,7 +3,7 @@
 여기서 지키는 것:
 - `github` 는 `GET /user` 하나(헤더로만 토큰), 200 이면 `login: <이름>`, 아니면 `HTTP <코드>`.
 - `keystore` 는 keytool 이 없으면 `keytool missing`(present 는 그대로), 있으면 `-list` 의 종료 코드.
-- `asc` · `play` 는 「not implemented in this build」 — 정직하게 ✗.
+- `asc` · `play` 는 「not implemented in this build」 — 오류가 아니라 detail 이다(관문을 막지 않는다).
 - 결과 문구에 토큰 · 경로 · 예외 원문이 없다. 네트워크는 부르지 않는다(전부 스텁).
 """
 
@@ -160,7 +160,7 @@ def test_asc_and_play_say_they_are_not_implemented(tmp_path, kind):
     f = tmp_path / "x"
     f.write_bytes(b"x")
     sec = ReleaseSecret(name="x", kind="file", verify=kind)
-    assert run_verify(sec, f) == VerifyResult(NOT_IMPLEMENTED)
+    assert run_verify(sec, f) == VerifyResult(None, NOT_IMPLEMENTED)
 
 
 def test_every_declared_verify_kind_but_none_has_a_verifier():

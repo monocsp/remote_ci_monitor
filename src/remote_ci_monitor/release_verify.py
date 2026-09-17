@@ -110,8 +110,11 @@ def verify_keystore(ctx: VerifyContext) -> VerifyResult:
         return VerifyResult("keytool missing")
     argv = [keytool, "-list", "-keystore", str(ctx.path)]
     password = ctx.sibling_value(KEYSTORE_PASSWORD_SECRET)
-    if password:
-        argv += ["-storepass", password]
+    if not password:
+        # 비밀번호가 프로파일의 value 비밀로 없으면(env 파일 안에 있는 프로젝트가 흔하다) keytool 은
+        # 물어보다 stdin 에서 죽는다. 그건 파일의 잘못이 아니다 — 있음만 세고 검사 안 함을 남긴다.
+        return VerifyResult(None, f"not checked (no {KEYSTORE_PASSWORD_SECRET} secret)")
+    argv += ["-storepass", password]
     try:
         proc = ctx.run(
             argv,
@@ -131,7 +134,10 @@ def verify_keystore(ctx: VerifyContext) -> VerifyResult:
 
 
 def verify_not_implemented(ctx: VerifyContext) -> VerifyResult:
-    return VerifyResult(NOT_IMPLEMENTED)
+    """이 빌드가 못 하는 검사(ASC · Play 는 ES256/RS256 JWT 서명이 필요해 표준 라이브러리로는
+    안 된다)는 **오류가 아니다** — 오류로 세면 설정 관문이 영원히 안 열린다. 있음만 확인하고
+    「검사 안 함」 을 detail 로 남긴다. 화면은 그 문구를 그대로 보여 준다."""
+    return VerifyResult(None, NOT_IMPLEMENTED)
 
 
 VERIFIERS: dict[str, Verifier] = {
