@@ -176,6 +176,46 @@ def test_commands_that_do_not_create_a_branch_pass(command):
     assert bash(command) is None, command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # 거르는 인자는 **ref** 다. 새 이름으로 읽으면 `origin/main` 을 이름 규칙으로 재게 된다.
+        "git branch --merged origin/main",
+        "git branch --no-merged origin/dev",
+        "git branch --contains HEAD",
+        "git branch --no-contains v0.2.9",
+        "git branch --points-at HEAD",
+        # 정렬·형식은 값을 먹는다. 그 값도 이름이 아니다.
+        "git branch --sort=-committerdate",
+        "git branch --sort committerdate",
+        "git branch --format '%(refname:short)'",
+        # 나머지 조회·설정 형태.
+        "git branch --all",
+        "git branch --remotes",
+        "git branch --show-current",
+        "git branch -u origin/main",
+        "git branch --set-upstream-to origin/main",
+        "git branch --unset-upstream",
+        "git -C ../remote_ci_monitor-dev branch --merged origin/main",
+    ],
+)
+def test_listing_branches_is_not_naming_one(command):
+    """실기 오탐(2026-09-17): `git branch --merged origin/main` 이 이름 규칙에 막혔다."""
+    assert bash(command) is None, command
+
+
+def test_renaming_still_checks_the_new_name():
+    assert bash("git branch -m docs/m5i-workplan feat/web-deploy-tab") is None
+    v = bash("git branch -m docs/m5i-workplan cleanup")
+    assert v is not None and v.decision == "deny"
+
+
+def test_creating_with_a_start_point_still_checks_the_new_name():
+    assert bash("git branch feat/web-deploy-tab origin/dev") is None
+    v = bash("git branch cleanup origin/dev")
+    assert v is not None and v.decision == "deny"
+
+
 def test_commit_subject_from_dash_m():
     assert bash('git commit -m "fix(web): 호스트 카드" -m "본문"') is None
     v = bash('git commit -m "호스트 카드 고침"')
