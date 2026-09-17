@@ -127,6 +127,21 @@ def progress_json(p: Progress | None) -> dict[str, Any] | None:
             }
             for s in p.steps
         ],
+        # 현재 스텝 안의 세부 진행(`::rcm::progress::`). 키만 더했다 — schema_version 은 그대로.
+        "sub": None
+        if p.sub is None
+        else {
+            "done": p.sub.done,
+            "total": p.sub.total,
+            "unit": p.sub.unit,
+            "state": p.sub.state,
+            "note": p.sub.note,
+            "at": iso(p.sub.at),
+        },
+        "units": [
+            {"unit": u.unit, "state": u.state, "note": u.note, "at": iso(u.at)} for u in p.units
+        ],
+        "units_truncated": p.units_truncated,
     }
 
 
