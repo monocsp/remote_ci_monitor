@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-18
+
 ### Added
 - **Store tab: a big release bar at the top of the page while a round runs.** Version and build
   number in the title size, the current stage (`S5 scenario QA · stage 6 of 9`), the overall
@@ -1132,6 +1134,7 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
 [Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...HEAD
+[0.3.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...v0.2.9
