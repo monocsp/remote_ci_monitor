@@ -18,6 +18,27 @@ of a key bumps that number and is listed here.
   with two or more units, a grid of unit cells under the step list. A new `::rcm::step::` clears it;
   malformed lines are plain log lines; markers are stored as before, so there is no migration, and
   `schema_version` stays 1 because keys were only added.
+- **The connect skills ship in the package.** `rcm skills list` now names five skills and
+  `rcm skills install --into <project>` copies them: `rcm-connect` (one entry point: project ·
+  repo name · platforms · optional tiers), `rcm-store-connect` (required tier: profile block,
+  secrets list, `plan`/`upload`/`review` presets and script skeletons with `--selftest`, a
+  candidate-config checker), `rcm-gate-connect`, `rcm-qa-connect`, `rcm-release-driver`. Skills
+  write only into the project, adopt existing real implementations, verify with `rcm check` on a
+  candidate copy of `server.toml`, and never run upload or submit. The contract they produce is
+  `docs/release-contract.md`; the Store tab wireframe is `docs/wireframes/web-store.html`;
+  README gained a «Store tab» section.
+- **Release profiles and the connect skills.** `[repos.<name>.release]` in `server.toml` says
+  which presets play the `plan` / `upload` / `review` roles (plus optional `gate`, `qa`, `dev`),
+  which secrets the Settings screen will ask for, and how the store copy is previewed — the
+  contract the Store tab reads (`docs/release-contract.md`). `rcm check --config` prints one
+  `release <repo>` row per profile: FAIL when a required role is empty or names a missing preset,
+  when a preset lacks an input rcm sends, when the irreversible `mode` (`upload` / `submit`) is a
+  preset's default, or when secrets are listed without `secrets_dir_env`; warn when an optional
+  role is unset or the secrets folder does not exist yet. `rcm skills list` and
+  `rcm skills install --into <project>` copy the packaged `rcm-*-connect` skills into
+  `<project>/.claude/skills/`, keeping identical files, refusing to overwrite changed ones
+  without `--force`. `docs/configuration.md` gained a "Release profile" section and
+  `examples/server.toml` a commented profile block.
 
 ### Fixed
 - **A snapshot blob the server only *thinks* it has no longer kills the job.** The `blobs` table and the

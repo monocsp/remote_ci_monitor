@@ -235,6 +235,29 @@ default = "full"
 connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하지 않는다. `#/jobs/N` 은 작업 하나로
 바로 간다.
 
+### 스토어 탭 — 프로젝트의 릴리스 흐름 연결
+
+큐 화면 옆에 저장소별 **스토어 탭**이 붙는다: fetch · 스토어 현황 · 게이트 · QA · 업로드 · 심사
+제출 — 전부 프로젝트 *자신의* 릴리스 스크립트 위에 얹힌 버튼이다. rcm 은 그 스크립트가 쓴 JSON 을
+그리고 선언된 프리셋을 돌릴 뿐, 빌드번호를 계산하거나 QA 를 판정하거나 승인 뒤 출시하는 일은 하지
+않는다. 프로젝트가 줘야 하는 것은 [docs/release-contract.md](docs/release-contract.md)에 있고, 가장
+빠른 길은 rcm 이 같이 싣는 Claude Code 스킬이다:
+
+```sh
+rcm skills list                                   # 이 rcm 에 실린 스킬
+rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ 로 복사
+# 그 프로젝트에서, Claude Code 안에서:
+/rcm-connect                                      # 프로젝트 · 저장소 이름 · 플랫폼 · 선택 계층을 묻는다
+```
+
+`/rcm-connect` 는 `rcm-store-connect`(필수: 프로파일 블록 · 비밀 목록 · `plan` / `upload` /
+`review` 프리셋과 스크립트 뼈대, 각각 `--selftest`)를 돌리고, 고르면 선택 계층 `rcm-gate-connect` ·
+`rcm-qa-connect` · `rcm-release-driver` 를 이어 돌린다. 스킬은 프로젝트 안에만 쓴다
+(`scripts/rcm/presets.release.toml` · `scripts/rcm/profile.release.toml` · 스크립트 ·
+`docs/rcm-connect.md` 보고서). 검증은 `server.toml` 의 후보 사본에 `rcm check` 를 돌리는 것이고,
+라이브 서버 파일 · 비밀 · 스토어는 건드리지 않는다. 프로파일 키는
+[Configuration](docs/configuration.md#release-profile)에 있다.
+
 ## Exit codes
 
 | `rcm wait` 종료 코드 | 뜻 |
@@ -270,6 +293,7 @@ connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하�
 | 문서 | 내용 |
 |---|---|
 | [사용법 가이드](docs/usage.ko.md) · [English](docs/usage.md) | 첫 작업까지 한 단계씩, 주석 단 화면과 함께 |
+| [Release contract](docs/release-contract.md) | 스토어 탭을 위해 프로젝트가 주는 것: 프로파일 · 역할별 프리셋 · 산출물 파일 · 마커 · 비밀 · 드라이버 · 그것을 만들어 주는 스킬 |
 | [Configuration](docs/configuration.md) | 프리셋 · 입력 · 마커 · 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 풀과 원격 워커 · 알림 · 클라이언트와 워커 파일 |
 | [Operating the build machine](docs/operating.md) | 서비스로 돌리기 · Docker · 업그레이드 · 보안 · 숫자가 틀릴 수 있는 이유 · 실제 머신에서의 수동 점검 |
 | [CHANGELOG.md](CHANGELOG.md) | 사용자에게 보이는 모든 변경, 최신순 |

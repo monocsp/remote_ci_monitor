@@ -38,7 +38,10 @@ from remote_ci_monitor.client import (
     wait_for_job,
 )
 from remote_ci_monitor.config import (
+    RELEASE_REQUIRED_ROLES,
+    RELEASE_ROLES,
     ConfigError,
+    ReleaseProfile,
     ServerConfig,
     load_client_config,
     load_server_config,
@@ -1551,6 +1554,86 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     return ("local preset tools", all_ok, detail)
 
 
+#: 역할마다 rcm 이 보내는 입력(docs/release-contract.md §2). 프리셋이 안 받으면 제출이 400 이다.
+RELEASE_ROLE_INPUTS: dict[str, tuple[str, ...]] = {
+    "plan": ("build_name",),
+    "upload": ("build_name", "confirm_build_number", "mode", "platform"),
+    "review": (
+        "build_name",
+        "confirm_build_number",
+        "mode",
+        "platform",
+        "play_managed_publishing",
+        "listing",
+        "phased",
+    ),
+}
+#: 역할별 **되돌릴 수 없는** `mode` 값 — 프리셋의 기본값이면 안 된다(계약 §2 의 첫 불변식).
+RELEASE_IRREVERSIBLE_MODE = {"upload": "upload", "review": "submit"}
+
+
+def release_secrets_dir(config_path: Path, repo: str) -> Path:
+    """비밀 폴더 `<config_dir>/secrets/<repo>/` — 설정 파일 옆이다(계약 §4)."""
+    return config_path.parent / "secrets" / repo
+
+
+def _release_row(
+    cfg: ServerConfig, repo: str, profile: ReleaseProfile
+) -> tuple[str, bool | None, str]:
+    """`release <repo>` 행 — 프로파일이 가리키는 프리셋이 있고 계약대로 생겼는가.
+
+    FAIL: 필수 역할이 비었거나 없는 프리셋을 가리킨다 · upload/review/plan 프리셋이 rcm 이 보내는
+    입력을 안 받는다 · 되돌릴 수 없는 mode 가 기본값이다 · 비밀이 있는데 `secrets_dir_env` 가 없다 ·
+    비밀 이름이 겹친다. warn: 선택 역할이 비었다 · 비밀 폴더가 아직 없다(Settings 화면이 만든다).
+    """
+    problems: list[str] = []
+    warnings: list[str] = []
+    for role in RELEASE_ROLES:
+        name = profile.preset_for(role)
+        if name is None:
+            if role in RELEASE_REQUIRED_ROLES:
+                problems.append(f"presets.{role} is empty")
+            else:
+                warnings.append(f"{role} not configured")
+            continue
+        preset = cfg.preset(name)
+        if preset is None:
+            problems.append(f"presets.{role} = {name!r} is not in [[presets]]")
+            continue
+        declared = {spec.name for spec in preset.inputs}
+        missing = [i for i in RELEASE_ROLE_INPUTS.get(role, ()) if i not in declared]
+        if missing:
+            problems.append(f"preset {name!r} lacks inputs rcm sends: {', '.join(missing)}")
+        irreversible = RELEASE_IRREVERSIBLE_MODE.get(role)
+        mode = preset.input_spec("mode") if irreversible else None
+        if mode is not None and mode.default == irreversible:
+            problems.append(
+                f"preset {name!r} input 'mode' defaults to {irreversible!r} — "
+                "the irreversible mode must not be the default"
+            )
+    names = [sec.name for sec in profile.secrets]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        problems.append(f"duplicate secret name(s): {', '.join(dupes)}")
+    if profile.secrets and not profile.secrets_dir_env:
+        problems.append("secrets_dir_env is required when secrets are listed")
+    if profile.secrets and cfg.path is not None:
+        d = release_secrets_dir(cfg.path, repo)
+        if not d.is_dir():
+            warnings.append(f"secrets dir {d} does not exist yet (Settings creates it)")
+    if problems:
+        return (f"release {repo}", False, " · ".join(problems))
+    roles = " ".join(f"{r}={profile.presets[r]}" for r in RELEASE_ROLES if r in profile.presets)
+    detail = roles
+    if profile.driver:
+        detail += f" · driver={profile.driver}"
+    if profile.secrets:
+        detail += f" · {len(profile.secrets)} secret(s)"
+    if warnings:
+        return (f"release {repo}", None, detail + " · " + " · ".join(warnings))
+    return (f"release {repo}", True, detail)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
     rows: list[tuple[str, bool | None, str]] = [python_row()]
@@ -1632,6 +1715,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             if cfg.repos:
                 git = shutil.which("git")
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+            for repo in cfg.repos:
+                if repo.release is not None:
+                    rows.append(_release_row(cfg, repo.name, repo.release))
     except ConfigError as e:
         rows.append(("server config", False, str(e)))
     ok_all = all(ok is not False for _, ok, _ in rows)
@@ -1991,6 +2077,104 @@ def cmd_artifacts(args: argparse.Namespace) -> int:
     return 0 if out.get("ok") else EXIT_DELIVERY
 
 
+# ── rcm skills — 패키지에 든 연결 스킬을 프로젝트에 복사한다 ─────────────────
+
+
+def skills_root() -> Any | None:
+    """패키지 안 `skills/` — 없으면 None(스킬 없이 빌드된 배포). 테스트가 갈아 끼운다."""
+    root = importlib.resources.files("remote_ci_monitor") / "skills"
+    return root if root.is_dir() else None
+
+
+def _skill_dirs(root: Any) -> list[Any]:
+    """`skills/<name>/` 폴더들 — 이름순. 숨김 폴더와 `__pycache__` 는 스킬이 아니다."""
+    return sorted(
+        (d for d in root.iterdir() if d.is_dir() and not d.name.startswith((".", "_"))),
+        key=lambda d: d.name,
+    )
+
+
+def _skill_files(folder: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    """폴더 안 파일들을 (상대경로, 파일) 로 — 하위 폴더까지, 숨김 파일은 뺀다."""
+    out: list[tuple[str, Any]] = []
+    for entry in sorted(folder.iterdir(), key=lambda e: e.name):
+        if entry.name.startswith((".", "__pycache__")):
+            continue
+        rel = f"{prefix}{entry.name}"
+        if entry.is_dir():
+            out.extend(_skill_files(entry, rel + "/"))
+        else:
+            out.append((rel, entry))
+    return out
+
+
+def _skill_description(folder: Any) -> str:
+    """SKILL.md 머리말의 `description:` 한 줄. 없으면 빈 문자열."""
+    try:
+        text = (folder / "SKILL.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    m = re.search(r"^description:\s*(.+?)\s*$", text, re.M)
+    if not m:
+        return ""
+    desc = m.group(1).strip("\"'")
+    # 한 문단짜리 설명은 목록에 너무 길다 — 첫 문장까지만
+    return re.split(r"(?<=[.!?])\s+", desc, maxsplit=1)[0]
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    """`rcm skills list` · `rcm skills install --into DIR [--force]`.
+
+    install 은 `skills/<name>/` 마다 `DIR/.claude/skills/<name>/` 로 파일을 복사한다. 이미 있는
+    파일은 같으면 `kept`, 다르면 `--force` 없이는 `skipped` 로 두고 끝에 1 로 나간다 — 프로젝트가
+    손본 스킬을 조용히 되돌리지 않는다.
+    """
+    root = skills_root()
+    skills = _skill_dirs(root) if root is not None else []
+    if args.skills_command == "list":
+        if not skills:
+            _err("no skills are packaged in this build of rcm")
+            return 1
+        for folder in skills:
+            desc = _skill_description(folder)
+            print(f"{folder.name:<24} {desc}".rstrip(), flush=True)
+        return 0
+    into = Path(args.into).expanduser()
+    if not into.is_dir():
+        return _usage(f"--into must be an existing project directory, got {into}")
+    if not skills:
+        _err("no skills are packaged in this build of rcm")
+        return 1
+    refused: list[str] = []
+    for folder in skills:
+        for rel, entry in _skill_files(folder):
+            target = into / ".claude" / "skills" / folder.name / rel
+            shown = target.relative_to(into).as_posix()
+            data = entry.read_bytes()
+            if target.exists():
+                try:
+                    same = target.read_bytes() == data
+                except OSError:
+                    same = False
+                if same:
+                    print(f"kept     {shown}", flush=True)
+                    continue
+                if not args.force:
+                    print(f"skipped  {shown} (differs; use --force to overwrite)", flush=True)
+                    refused.append(shown)
+                    continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            except OSError as e:
+                return _usage(f"cannot write {target}: {e.strerror or e}")
+            print(f"written  {shown}", flush=True)
+    if refused:
+        _err(f"skills: {len(refused)} file(s) differ from the packaged copy — rerun with --force")
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rcm",
@@ -2231,6 +2415,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--path", help="write here instead of the default location")
         sp.add_argument("--force", action="store_true", help="overwrite an existing file")
         sp.set_defaults(func=cmd_init)
+
+    skills = sub.add_parser("skills", help="list or install the packaged rcm-*-connect skills")
+    ssub = skills.add_subparsers(dest="skills_command", required=True)
+    ssub.add_parser("list", help="one line per packaged skill")
+    sinstall = ssub.add_parser("install", help="copy every skill into DIR/.claude/skills/<name>/")
+    sinstall.add_argument("--into", required=True, metavar="DIR", help="the project directory")
+    sinstall.add_argument(
+        "--force", action="store_true", help="overwrite files whose content differs"
+    )
+    skills.set_defaults(func=cmd_skills)
 
     version = sub.add_parser("version", help="print the version (and Python/OS with --json)")
     version.add_argument("--json", action="store_true")
