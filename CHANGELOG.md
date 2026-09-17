@@ -23,6 +23,26 @@ of a key bumps that number and is listed here.
   rows; green rows are collapsed, red and stale rows open, and a row a person opens or closes is
   remembered in the browser. The review panel is only a collapsed header with a
   `not available yet` pill.
+
+- **A step can report its own progress.** `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]`
+  at the start of a stdout line says how far the **current step** is — a chunk loop, a parallel set,
+  a lock wait — with a denominator the script actually knows (`state` is one of `run · ok · fail ·
+  skip · env · review · blocked · wait`). `progress` in queue rows and `GET /jobs/<id>` gains `sub`
+  (the last line, or `null`), `units[]` (the last state per unit, first-seen order, 500 per step) and
+  `units_truncated`. The web queue draws the bar from `sub` before declared steps and time
+  (`60% · 41/68 · inquiry_photo/android`), adds `now: <unit> · <state>` to the progress line and,
+  with two or more units, a grid of unit cells under the step list. A new `::rcm::step::` clears it;
+  malformed lines are plain log lines; markers are stored as before, so there is no migration, and
+  `schema_version` stays 1 because keys were only added.
+- **The connect skills ship in the package.** `rcm skills list` now names five skills and
+  `rcm skills install --into <project>` copies them: `rcm-connect` (one entry point: project ·
+  repo name · platforms · optional tiers), `rcm-store-connect` (required tier: profile block,
+  secrets list, `plan`/`upload`/`review` presets and script skeletons with `--selftest`, a
+  candidate-config checker), `rcm-gate-connect`, `rcm-qa-connect`, `rcm-release-driver`. Skills
+  write only into the project, adopt existing real implementations, verify with `rcm check` on a
+  candidate copy of `server.toml`, and never run upload or submit. The contract they produce is
+  `docs/release-contract.md`; the Store tab wireframe is `docs/wireframes/web-store.html`;
+  README gained a «Store tab» section.
 - **Release profiles and the connect skills.** `[repos.<name>.release]` in `server.toml` says
   which presets play the `plan` / `upload` / `review` roles (plus optional `gate`, `qa`, `dev`),
   which secrets the Settings screen will ask for, and how the store copy is previewed — the

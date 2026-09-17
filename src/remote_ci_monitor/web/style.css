@@ -270,6 +270,20 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .step.fail { color: var(--bad); }
 .step.fail .g { color: var(--bad); }
 .step .s { color: var(--muted); }
+/* 스텝 안의 단위 격자(`::rcm::progress::`) — 칸 하나가 단위 하나, 마지막 상태가 색과 글자.
+   색만으로 말하지 않는다(§4.2): 글자는 ✓ ✗ ▶ … 이고 이름·상태는 title 과 aria-label 에.
+   상태 글자는 자기 -soft 배경 위 — 위의 대비 표(4.5:1)와 같은 조합이다. */
+.ugrid { display: flex; flex-wrap: wrap; gap: 3px; max-width: 520px; margin-top: 8px; }
+.ugrid .u { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 3px; background: var(--queued-soft); color: var(--queued); border: 1px solid transparent; }
+.ugrid .u i { font: 600 9px/1 var(--sans); font-style: normal; }
+.ugrid .u.ok { background: var(--ok-soft); color: var(--ok); }
+.ugrid .u.fail { background: var(--bad-soft); color: var(--bad); }
+.ugrid .u.run { background: var(--accent-soft); color: var(--accent); }
+.ugrid .u.skip { background: repeating-linear-gradient(135deg, var(--line-2) 0 3px, var(--surface) 3px 6px); color: var(--muted); }
+.ugrid .u.wait, .ugrid .u.blocked, .ugrid .u.env { background: var(--warn-soft); color: var(--warn); }
+.ugrid .u.review { background: var(--surface); color: var(--accent); border-color: var(--accent); border-style: dashed; }
+.ugrid-more { margin-top: 4px; }
+.sub-now { font-weight: 500; }
 .tail { margin-top: 10px; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--muted); white-space: pre; overflow-x: auto; max-width: 640px; }
 .actions { display: inline-flex; gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
 .btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 3px 10px; font: 500 12px var(--sans); cursor: pointer; }

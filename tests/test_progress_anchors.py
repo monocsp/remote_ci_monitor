@@ -46,7 +46,10 @@ BASE_STEP = frozenset({"index", "name", "state", "ok", "seconds"})
 #: §4.6 (다) 가 더해도 되는 키. 이 밖의 키가 늘면 스키마 v1 약속을 넘은 것이다.
 #: `failed_step_guessed` 는 2026-09-08 운영 사고의 후속 — 무죄인 스텝을 지목한 것이 추측임을
 #: 밝히는 키다(`tests/test_failed_step_guess.py`).
-NEW_PROGRESS = frozenset({"job_started_at", "failed_step_guessed"})
+#: `sub`·`units`·`units_truncated` 는 `::rcm::progress::`(스텝 안의 세부 진행) — 키만 더한다.
+NEW_PROGRESS = frozenset(
+    {"job_started_at", "failed_step_guessed", "sub", "units", "units_truncated"}
+)
 NEW_STEP = frozenset({"started_at", "ended_at"})
 
 JOB_START = ago(seconds=40)
