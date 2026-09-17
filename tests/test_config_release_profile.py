@@ -112,6 +112,14 @@ def test_full_profile_round_trips_every_key(tmp_path):
     )
 
 
+def test_listing_ref_names_the_branch_the_copy_is_read_from():
+    prof = parse_release_profile(
+        "app", {"presets": {"plan": "p", "upload": "u", "review": "r"}, "listing": {"ref": "dev"}}
+    )
+    assert prof.listing is not None and prof.listing.ref == "dev"
+    assert parse_release_profile("app", {"listing": {}}).listing.ref is None
+
+
 def test_defaults_when_only_the_presets_are_given():
     prof = parse_release_profile("app", {"presets": {"plan": "p", "upload": "u", "review": "r"}})
     assert prof.default_branch == "main"
@@ -220,6 +228,9 @@ def test_other_extra_keys_on_a_repo_are_still_refused(tmp_path, text, needle):
         ({"listing": {"diff": "cmd"}}, "[repos.app.release.listing] diff: expected a list"),
         ({"listing": {"screenshots": [1]}}, "[repos.app.release.listing] screenshots"),
         ({"listing": {"release_notes": 1}}, "release_notes must be a string"),
+        ({"listing": {"ref": ""}}, "[repos.app.release.listing]: ref must be a branch name"),
+        ({"listing": {"ref": "a b"}}, "ref must be a branch name"),
+        ({"listing": {"ref": 3}}, "ref must be a branch name"),
     ],
 )
 def test_each_bad_key_names_the_section_and_the_key(raw, needle):

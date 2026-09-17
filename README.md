@@ -266,7 +266,10 @@ information, `—` where a store has no such field), and **Submit for review** o
 green review plan, the build number (typed again, or taken from the plan when the **Build number:
 Auto** toggle is on — the number the plan read from the stores), and — when Google Play is selected — the
 managed-publishing box ticked for this submission; there is no Release, Publish or Rollout button in
-any state, and an `unsafe_release_type` verdict raises a red banner that cannot be dismissed. When the
+any state, and an `unsafe_release_type` verdict raises a red banner that cannot be dismissed. While a
+round runs, a big bar at the top of the page shows the version and build number, the current stage
+(`S5 scenario QA · stage 6 of 9`), the overall percentage and the expected finish, and hovering it
+shows the whole detail with its basis. When the
 profile names a driver, the Build · upload row carries the round's stepper S0–S8 read from the
 driver's own status lines (a Start form with version · Android track · dry-run when nothing runs,
 **Abort** while it runs, **Retry same version** after exit 1, «result unknown — do not resubmit»

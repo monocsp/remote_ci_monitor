@@ -1897,6 +1897,10 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             steps = c.eval(STEPPER_JS)
             assert [s[0] for s in steps] == [f"S{i}" for i in range(9)], steps
             assert [s[1] for s in steps] == ["done", "done", "human"] + ["todo"] * 6, steps
+            assert c.eval(_q("#store [data-release-bar]", ".getAttribute('data-tone')")) == "human"
+            assert "S2 confirm N" in c.eval(
+                _q("#store [data-release-bar] [data-rbar-stage]", ".textContent")
+            )
             row_state = c.eval(_q(build_row, ".getAttribute('data-state')"))
             assert row_state == "stale", row_state  # 사람 단계는 황토
             head = c.eval(_q(build_row + " > summary", ".textContent"))
@@ -1972,6 +1976,35 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             steps = c.eval(STEPPER_JS)
             assert [s[1] for s in steps] == ["done"] * 5 + ["current"] + ["todo"] * 3, steps
             assert [s[2] for s in steps] == ["✓"] * 5 + ["▶"] + ["·"] * 3, steps
+            # 최상단 릴리스 막대 — 버전 (N) · 지금 단계 · 전체 % · 마우스 올리면 상세
+            rbar = "#store [data-release-bar]"
+            assert c.eval(_q(rbar, ".getAttribute('data-tone')")) == "running"
+            assert c.eval(_q(rbar + " [data-rbar-head]", ".textContent")) == "1.0.1 (181)"
+            assert "S5 scenario QA · stage 6 of 9" in c.eval(
+                _q(rbar + " [data-rbar-stage]", ".textContent")
+            )
+            pct = int(c.eval(_q(rbar + " [role=progressbar]", ".getAttribute('aria-valuenow')")))
+            assert pct == 56, pct  # 5/9 끝남, 도는 잡의 진행은 스텁에 없다
+            assert c.eval(_q(rbar + " [data-rbar-pct]", ".textContent")) == "56%"
+            tip = c.eval(_q(rbar + " [data-rbar-tip]", ".textContent"))
+            assert "5/9 stages done · 56% overall" in tip and "now S5 scenario QA" in tip, tip
+            assert "elapsed 3" in tip and "9 declared stages" in tip, tip  # 스텁은 38분 전 시작
+            assert c.eval(_q(rbar, ".getAttribute('title')")) == tip
+            assert c.eval(_q(rbar + " [data-rbar-tip]", ".offsetParent")) is None, (
+                "hidden until hover"
+            )
+
+            # 글꼴 위계 — 화면 제목은 title(18px), 행 제목은 subtitle(14px), 보조는 caption(12px)
+            def fs(sel: str) -> str:
+                return c.eval(
+                    "getComputedStyle(document.querySelector(" + json.dumps(sel) + ")).fontSize"
+                )
+
+            assert fs("#store > .s-h .t") == "18px"
+            assert fs(rbar + " [data-rbar-head]") == "18px"
+            assert fs(build_row + " > summary .t") == "14px"
+            assert fs(rbar + " .rbar-foot .sub") == "12px"
+            assert fs("body") == "13px"
             assert c.eval(_q(build_row, ".getAttribute('data-state')")) == "running"
             head = c.eval(_q(build_row + " > summary", ".textContent"))
             assert "stage S5 scenario QA" in head and "started by pcs" in head, head
@@ -1991,6 +2024,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             )
             steps = c.eval(STEPPER_JS)
             assert steps[7][1] == "unknown" and steps[7][2] == "?", steps
+            assert c.eval(_q("#store [data-release-bar]", ".getAttribute('data-tone')")) == "lost"
             head = c.eval(_q(build_row + " > summary", ".textContent"))
             assert "result unknown — do not resubmit" in head, head
             assert c.eval(_q(build_row + " [data-driver-retry]")) is None
