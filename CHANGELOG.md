@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-18
+
 ### Fixed
 - **Store tab: the top release bar was always full.** Its fill width was an inline `style`
   attribute, which the page's Content-Security-Policy (`style-src 'self'`) drops; the fill now
@@ -1152,6 +1154,7 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
 [Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...HEAD
+[0.3.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...v0.3.0
