@@ -895,6 +895,7 @@ class App(RemoteWorkersMixin):
                 "validate": list(profile.listing.validate),
                 "screenshots": list(profile.listing.screenshots),
                 "release_notes": profile.listing.release_notes,
+                "ref": profile.listing.ref or profile.default_branch,
             }
         return {
             "name": repo.name,
@@ -1344,17 +1345,21 @@ class App(RemoteWorkersMixin):
         with self._checkout_guard:
             return self._checkout_locks.setdefault(key, threading.Lock())
 
-    def _branch_checkout(self, repo: RepoConfig, area: str) -> tuple[Path, str]:
-        """`<data_dir>/<area>/<repo>/checkout` — 미러의 default_branch 를 detached 로. 브랜치 sha 가
-        바뀌었을 때만 다시 만든다. 미러가 없거나 브랜치가 없으면 409 `mirror_missing`."""
+    def _branch_checkout(
+        self, repo: RepoConfig, area: str, ref: str | None = None
+    ) -> tuple[Path, str]:
+        """`<data_dir>/<area>/<repo>/checkout` — 미러의 `ref`(없으면 default_branch)를 detached
+        로. 브랜치 sha 가 바뀌었을 때만 다시 만든다. 미러가 없거나 브랜치가 없으면 409
+        `mirror_missing`."""
         profile = repo.release
         assert profile is not None
+        branch = ref or profile.default_branch
         mirror = self._mirror(repo)
-        sha = ref_sha(mirror, profile.default_branch)
+        sha = ref_sha(mirror, branch)
         if sha is None:
             raise ApiError(
                 409,
-                f"the mirror has no branch '{profile.default_branch}' — fetch the repository first",
+                f"the mirror has no branch '{branch}' — fetch the repository first",
                 code="mirror_missing",
                 error_code="mirror_missing",
             )
@@ -1379,7 +1384,7 @@ class App(RemoteWorkersMixin):
                 shutil.rmtree(workspace, ignore_errors=True)
                 raise ApiError(
                     502,
-                    f"checkout of {profile.default_branch} failed: {_safe(str(e))[-60:]}",
+                    f"checkout of {branch} failed: {_safe(str(e))[-60:]}",
                     code="checkout_failed",
                     error_code="checkout_failed",
                 ) from e
@@ -1436,7 +1441,7 @@ class App(RemoteWorkersMixin):
             return {"configured": False}
         errors: list[str] = []
         try:
-            workspace, sha = self._branch_checkout(repo, "listing")
+            workspace, sha = self._branch_checkout(repo, "listing", listing.ref)
         except ApiError as e:
             return {
                 "configured": True,
@@ -1498,7 +1503,7 @@ class App(RemoteWorkersMixin):
             raise ApiError(404, "no screenshots in the listing profile")
         if not rel or rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
             raise ApiError(400, "path must be a relative path inside the checkout")
-        workspace, _sha = self._branch_checkout(repo, "listing")
+        workspace, _sha = self._branch_checkout(repo, "listing", profile.listing.ref)
         if not any(fnmatch.fnmatchcase(rel, g) for g in profile.listing.screenshots):
             raise ApiError(404, "path does not match a screenshots glob")
         path = workspace / rel
@@ -1529,7 +1534,7 @@ class App(RemoteWorkersMixin):
         build = self._body_str(body, "build", default="") or ""
         if build and not build.strip().isdigit():
             raise ApiError(400, "build must be a build number")
-        workspace, _sha = self._branch_checkout(repo, "listing")
+        workspace, _sha = self._branch_checkout(repo, "listing", profile.listing.ref)
         argv = [
             a.replace("{version}", build_name).replace("{build}", build.strip())
             for a in profile.listing.validate

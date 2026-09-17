@@ -1510,7 +1510,7 @@
     return {
       version: version, build: n,
       buildNote: up && isNum(up.n) ? T(lang, "review.build.by_job", { id: isNum(r.upload.job_id) ? r.upload.job_id : DASH }) : T(lang, "review.build.not_uploaded"),
-      listing: T(lang, "review.strip.listing_from", { ref: (profile && profile.default_branch) || "main", sha: listing && typeof listing.sha === "string" && listing.sha ? listing.sha.slice(0, 7) : DASH }),
+      listing: T(lang, "review.strip.listing_from", { ref: (profile && profile.listing && profile.listing.ref) || (profile && profile.default_branch) || "main", sha: listing && typeof listing.sha === "string" && listing.sha ? listing.sha.slice(0, 7) : DASH }),
       notesPath: notes && notes.path ? String(notes.path) : null,
       notesCounter: notesText != null ? fieldCounter(notesText, NOTES_LIMIT.android) : null,
       notesText: notesText,
@@ -1830,6 +1830,51 @@
       startedBy: driver.started_by ? String(driver.started_by) : null, startedAt: driver.started_at || null
     };
   }
+  /**
+   * 최상단 릴리스 막대(소유자 요구 2026-09-17): 회차가 돌면 스토어 화면 맨 위에 버전 · 빌드 번호 ·
+   * 전체 진행(단계 9 중 끝난 수 + 지금 단계 안의 잡 진행) · 지금 하는 일 · 경과 · 예상 완료. 마우스를
+   * 올리면 detail 이 전부 보인다. 드라이버 없이 릴리스 역할 잡만 돌면 그 잡의 막대가 된다.
+   * 근거는 항상 글자로 말한다(선언 단계 · 도는 잡의 분모). 끝난 회차(exit 0) · 아무것도 없으면 null.
+   */
+  function releaseBarModel(dm, layers, release, ctx) {
+    ctx = ctx || {}; dm = dm || {}; layers = layers || {};
+    var lang = ctx.lang, nowMs = ctx.nowMs;
+    var cur = layers.current || null, bar = layers.bar || null, jobP = bar && bar.progress ? bar.progress : null;
+    var live = dm.configured === true && !dm.idle && !dm.done && (dm.running || dm.exit != null || dm.blocked);
+    if (!live && !cur) return null;
+    var plan = release && release.plan ? release.plan : null, doc = planEntryDoc(plan) || {};
+    var version = dm.version && dm.version !== DASH ? dm.version : plan && plan.build_name != null ? String(plan.build_name) : DASH;
+    var n = isNum(dm.planN) ? dm.planN : isNum(doc.n) ? doc.n : null;
+    var total = DRIVER_STAGES.length, done = 0, stageIdx = -1;
+    if (live) (dm.items || []).forEach(function (it, i) { if (it.state === "done") done++; else if (it.state !== "todo" && stageIdx < 0) stageIdx = i; });
+    var stageId = stageIdx >= 0 ? DRIVER_STAGES[stageIdx] : null;
+    var stageLabel = stageId ? stageId + " " + T(lang, "driver.stage." + stageId) : null;
+    var frac = jobP && isNum(jobP.pct) ? jobP.pct / 100 : 0;
+    var pct, basis;
+    if (live) {
+      pct = Math.min(99, Math.round((done + (stageIdx >= 0 ? frac : 0)) / total * 100));
+      basis = T(lang, jobP && isNum(jobP.pct) ? "rbar.basis.stages_job" : "rbar.basis.stages", { total: total });
+    } else {
+      pct = jobP && isNum(jobP.pct) ? jobP.pct : null;
+      basis = bar ? bar.basis : T(lang, "build.basis.none");
+    }
+    var tone = !live ? "running" : dm.running ? "running" : dm.exit === 2 ? (dm.autoN ? "running" : "human") : dm.blocked || dm.exit === 4 ? "warn" : dm.exit === 3 ? "lost" : "bad";
+    var stage = live ? (stageLabel ? T(lang, "rbar.stage", { stage: stageLabel, done: done, total: total }) : T(lang, "rbar.stages_only", { done: done, total: total }))
+      : T(lang, "rbar.job", { id: cur.id, preset: cur.preset || DASH });
+    var nowLine = layers.now || (live && !dm.running ? dm.headParts.slice(1).join(" · ") : null) || null;
+    var started = parseIso(dm.startedAt || (cur && cur.started_at) || null);
+    var elapsed = started != null && isNum(nowMs) ? T(lang, "rbar.elapsed", { dur: fmtDuration(Math.max(0, (nowMs - started) / 1000)) }) : null;
+    var finishes = bar && bar.finishes ? bar.finishes : null;
+    var head = n != null ? T(lang, "build.head.version", { version: version, build: n }) : version;
+    var detail = [T(lang, "rbar.detail.stages", { done: done, total: total, percent: pct != null ? pct : DASH })];
+    if (live && stageLabel) detail.push(T(lang, "rbar.detail.stage", { stage: stageLabel }));
+    if (nowLine) detail.push(nowLine);
+    if (jobP && isNum(jobP.pct)) detail.push(bar.head);
+    if (elapsed) detail.push(elapsed);
+    if (finishes) detail.push(finishes);
+    detail.push(basis);
+    return { tone: tone, pct: pct, head: head, version: version, n: n, stage: stage, now: nowLine, elapsed: elapsed, finishes: finishes, basis: basis, detail: detail.join(" · "), done: done, total: total, live: live };
+  }
   /** Build·upload 행의 색과 머리를 드라이버가 가져가는가 — 도는 중이거나 실패·대기·모름·드리프트일 때만. 끝난 회차(exit 0)는 upload.json 이 말한다. */
   function driverRow(model) {
     if (!model || !model.available || !model.configured || model.idle || model.done) return null;
@@ -1989,7 +2034,7 @@
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
     confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
-    nModeDefault: nModeDefault, nModeOf: nModeOf, nReason: nReason, nSendValue: nSendValue,
+    nModeDefault: nModeDefault, nModeOf: nModeOf, nReason: nReason, nSendValue: nSendValue, releaseBarModel: releaseBarModel,
     planVersionGuess: planVersionGuess, PLAN_VERSION_RE: PLAN_VERSION_RE,
     storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
   };
@@ -3408,6 +3453,7 @@
     var n = now();
     var h = '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
       + '<span class="spacer"></span><button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+    h += releaseBarHtml();
     // Setup — 프로파일이 선언한 비밀 표(읽기 전용 + Replace · Verify all)
     var setupState = rowState("setup", { setup: doc.setup });
     h += srowHtml("setup", setupState, esc(setupHead(doc.setup, items, profile, L(), tz(), n)),
@@ -3559,6 +3605,19 @@
     });
     h += "</ol></details>";
     return h;
+  }
+  /** 최상단 릴리스 막대 — 회차가 돌 때만. title 과 :hover 의 .rbar-tip 이 같은 detail 을 보인다. */
+  function releaseBarHtml() {
+    var r = releaseDoc();
+    var layers = state.store.releaseStatus !== 404 && r ? buildLayers(r.jobs, rowsById(state.status), L(), tz(), now()) : null;
+    var m = releaseBarModel(driverModel(), layers, r, { lang: L(), nowMs: now() });
+    if (!m) return "";
+    var pct = isNum(m.pct) ? m.pct : null;
+    return '<section class="rbar ' + esc(m.tone) + '" data-release-bar data-tone="' + esc(m.tone) + '" role="group" aria-label="' + esc(tr("rbar.aria")) + '" title="' + esc(m.detail) + '">'
+      + '<div class="rbar-top"><span class="rbar-ver" data-rbar-head>' + esc(m.head) + '</span><span class="rbar-stage" data-rbar-stage>' + esc(m.stage) + '</span><span class="spacer"></span><span class="rbar-pct" data-rbar-pct>' + (pct != null ? pct + "%" : DASH) + "</span></div>"
+      + '<div class="pbar big" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (pct != null ? ' aria-valuenow="' + pct + '"' : "") + ' aria-valuetext="' + esc(m.detail) + '"' + (pct == null ? ' data-basis="none"' : "") + '><i style="width:' + (pct != null ? pct : 0) + '%"></i></div>'
+      + '<div class="rbar-foot"><span class="sub">' + (m.now ? '<span class="g" aria-hidden="true">▶</span> ' + esc(m.now) : esc(m.basis)) + '</span><span class="spacer"></span><span class="sub">' + esc([m.elapsed, m.finishes].filter(Boolean).join(" · ")) + "</span></div>"
+      + '<div class="rbar-tip" data-rbar-tip role="tooltip">' + esc(m.detail) + "</div></section>";
   }
   function buildRowHtml(model) {
     var dm = driverModel(), acts = driverActions(dm, driverCtx());

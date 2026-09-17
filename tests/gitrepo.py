@@ -83,6 +83,15 @@ class RemoteRepo:
         git("push", "-q", *flags, "origin", "main", cwd=self.work)
         return sha
 
+    def push_branch(self, branch: str, name: str, content: str, message: str) -> str:
+        """work 의 `branch`(없으면 main 에서 새로)에 커밋 하나를 더해 원격으로 push 한다. 새 sha."""
+        git("checkout", "-q", "-B", branch, cwd=self.work)
+        (self.work / name).parent.mkdir(parents=True, exist_ok=True)
+        sha = commit(self.work, name, content, message)
+        git("push", "-q", "-f", "origin", branch, cwd=self.work)
+        git("checkout", "-q", "main", cwd=self.work)
+        return sha
+
     def rewind_main(self, n: int = 1) -> None:
         """work 의 main 을 n 커밋 되돌린다(강제 push 준비)."""
         git("reset", "-q", "--hard", f"HEAD~{n}", cwd=self.work)

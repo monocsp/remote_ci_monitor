@@ -96,6 +96,7 @@ files = ["first_name.txt", "last_name.txt", "phone_number.txt", "email_address.t
 preview       = ["python3", "scripts/release/store_listing.py", "preview"]
 diff          = ["python3", "scripts/release/store_listing.py", "diff", "--live"]
 validate      = ["python3", "scripts/release/store_listing.py", "validate", "--build-name", "{version}", "--version-code", "{build}"]
+ref           = "dev"      # optional — read the copy from this branch (a dev → main project ships what dev has)
 screenshots   = ["store/screenshots/**/*.png"]
 release_notes = "store/release_notes/{version}/*.txt"
 ```

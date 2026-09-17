@@ -8,6 +8,26 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **Store tab: a big release bar at the top of the page while a round runs.** Version and build
+  number in the title size, the current stage (`S5 scenario QA · stage 6 of 9`), the overall
+  percentage (9 declared stages of equal weight, plus the running job's own progress inside its
+  stage; capped at 99 until the round is done), the «Now:» line, elapsed time and the expected
+  finish. Hovering the bar (or focusing it) shows the whole detail — stages done, current stage,
+  the job's own counter, elapsed, finish, and the basis — and the same text is the bar's `title`
+  and `aria-valuetext`. Colours follow the rows: blue running, ochre when a person's turn or store
+  drift, purple when the result is unknown, red when failed. With no driver in the profile the bar
+  belongs to the running release job alone. ([#153](https://github.com/monocsp/remote_ci_monitor/pull/153))
+- **`[repos.<name>.release.listing] ref`** — the branch the store copy (preview, diff, release
+  notes, screenshots, validate) is read from; default `default_branch`. A project that ships
+  `dev → main` keeps the copy it is about to ship on `dev`, so it sets `ref = "dev"` and the
+  review panel says «from dev @ sha». ([#153](https://github.com/monocsp/remote_ci_monitor/pull/153))
+
+### Changed
+- **Web: one type scale.** Five text styles — title 18/600 (page heading, the release bar's
+  version), subtitle 14/600 (row, section and dialog headings), body 13/400, caption 12/400
+  (`.sub`, footers, basis lines) and label 11.5/600 (column heads, `dt`, small headings) — as
+  `--t-*` tokens on `:root`; the body went from 14 to 13 px and every heading and label now uses a
+  token instead of its own size. ([#153](https://github.com/monocsp/remote_ci_monitor/pull/153))
 - **Store tab: a «Build number: Auto (from the stores) · Type it myself» toggle.** The review
   panel and the Start form share it; the default comes from the profile's `build_number_policy`
   (`auto` → Auto, `manual` → Type it myself) and a click changes it for this page only. In Auto

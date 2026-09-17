@@ -715,6 +715,26 @@ def test_listing_needs_the_mirror_and_then_runs_the_profile_commands_in_a_checko
     assert body["release_notes"]["path"] == "store/release_notes/1.0.1/en.txt"  # `*` 로 찾는다
 
 
+def test_listing_ref_reads_the_copy_from_that_branch(srv, remote):
+    """`listing.ref = "dev"` — dev → main 으로 내보내는 프로젝트는 릴리스에 실릴 문안이 dev 에 있다.
+    체크아웃은 그 브랜치의 sha 로 만들고, 프로파일 JSON 의 listing.ref 는 그 이름이다."""
+    srv.cfg.repos[0].release = parse_release_profile(
+        "app", {**PROFILE, "listing": {**PROFILE["listing"], "ref": "dev"}}
+    )
+    srv.fetch()
+    body = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert body["sha"] == remote.dev and body["release_notes"] is None, body  # dev 엔 문안이 없다
+    dev = remote.push_branch("dev", "store/release_notes/1.0.1/en.txt", "From dev.\n", "dev notes")
+    srv.fetch()
+    body = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert body["sha"] == dev and body["release_notes"]["text"] == "From dev.\n"
+    assert (srv.cfg.data_dir / "listing" / "app" / "checkout.sha").read_text() == dev
+    profile = srv.req("GET", "/api/repos/app")[1]["profile"]
+    assert profile["listing"]["ref"] == "dev"
+    srv.cfg.repos[0].release = parse_release_profile("app", PROFILE)
+    assert srv.req("GET", "/api/repos/app")[1]["profile"]["listing"]["ref"] == "main"
+
+
 def test_listing_without_a_profile_section_is_configured_false(srv):
     srv.cfg.repos[0].release = parse_release_profile(
         "app", {k: v for k, v in PROFILE.items() if k != "listing"}
