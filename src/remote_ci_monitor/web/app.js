@@ -1087,6 +1087,211 @@
     return s;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 스토어 탭 — 순수 함수 (docs/wireframes/web-store.html 항목 1~6 · 25 · 29~35 · 42, 7절).
+  // 서버 계약은 STORE-TAB-API(`/api/repos` · `/api/repos/<name>` · `…/secrets` · `…/verify` ·
+  // `…/fetch`). 값(비밀)은 어디에도 오지 않는다 — 여기 오는 것은 present · fingerprint · verified_at 뿐.
+  // ═══════════════════════════════════════════════════════════════════════════
+  var ROW_GLYPH = { ok: "✓", bad: "✗", running: "▶", stale: "⏱", na: "·" };
+  var STORE_STALE_SECONDS = 30 * 60;   // 미러 나이 30분 — 목업 항목 4·42 (황토, 빨강이 아니다)
+  var VALUE_FP_CHARS = 4;              // 값 비밀의 지문은 앞 4자 + … 를 넘지 않는다(항목 31)
+
+  /** 해시 → 화면. `#/store/<repo>` 만 스토어, 나머지(`#/` · `#/jobs/N` · 빈 값)는 큐다. */
+  function parseRoute(hash) {
+    var m = /^#\/store\/([^\/?#]+)\/?$/.exec(hash || "");
+    if (!m) return { view: "queue", repo: null };
+    var repo;
+    try { repo = decodeURIComponent(m[1]); } catch (e) { repo = m[1]; }
+    return { view: "store", repo: repo };
+  }
+  /** `GET /api/repos` 문서에서 릴리스 프로파일이 있는 저장소만. 문서가 이상하면 빈 배열(탭 없음). */
+  function releaseRepos(doc) {
+    var list = doc && Array.isArray(doc.repos) ? doc.repos : [];
+    return list.filter(function (r) { return r && r.release === true && typeof r.name === "string" && r.name; });
+  }
+  /** 관문 띠(항목 29). `setup` 이 없으면 완료가 아니고 숫자는 — 다(모르는 값을 0 으로 안 그린다). */
+  function setupSummary(setup, lang) {
+    var s = setup || {};
+    var complete = s.complete === true;
+    var n = isNum(s.present) ? s.present : DASH, total = isNum(s.required) ? s.required : DASH, done = isNum(s.verified) ? s.verified : DASH;
+    return { complete: complete, tone: complete ? "ok" : "bad", text: T(lang, "store.gate.counts", { n: n, total: total, done: done }) };
+  }
+  /** 지문 표시 규칙(항목 30·31): 없으면 —. 값은 앞 4자 + …(서버가 더 보내도 더 안 보인다).
+      파일은 sha256 앞 8자 + 크기. 폴더는 「n of m files」. */
+  function fingerprintText(item, lang) {
+    if (!item) return DASH;
+    // 폴더의 「n of m files」는 값이 아니라 개수다 — 다 안 찼어도(present=false) 어디까지 찼는지 보인다
+    if (item.kind === "dir") {
+      var c = dirFileCounts(item);
+      return c.total > 0 ? T(lang, "secrets.files_count", { n: c.present, total: c.total }) : DASH;
+    }
+    if (item.present !== true) return DASH;
+    var fp = typeof item.fingerprint === "string" ? item.fingerprint.replace(/…$/, "") : "";
+    if (!fp) return DASH;
+    if (item.kind === "value") return fp.slice(0, VALUE_FP_CHARS) + "…";
+    var text = fp.slice(0, 8);
+    if (isNum(item.size)) text += " · " + fmtBytes(item.size);
+    return text;
+  }
+  /** 폴더 비밀의 파일 목록. 서버는 `files: [{name, present, size?, fingerprint?}]` 를 준다 — 문자열
+      배열이 오면 이름만 알고 있음/없음은 모르는 것이라 present=false 로 둔다(fail-open 금지). */
+  function dirFiles(item) {
+    var list = item && Array.isArray(item.files) ? item.files : [];
+    return list.map(function (f) {
+      if (typeof f === "string") return { name: f, present: false, size: null, fingerprint: null };
+      return { name: String(f && f.name || ""), present: !!(f && f.present === true), size: isNum(f && f.size) ? f.size : null, fingerprint: f && typeof f.fingerprint === "string" ? f.fingerprint : null };
+    }).filter(function (f) { return f.name; });
+  }
+  function dirFileCounts(item) {
+    var files = dirFiles(item);
+    return { present: files.filter(function (f) { return f.present; }).length, total: files.length };
+  }
+  /** 검증 칸(항목 32): 검증 없음 / 아직 / ✓ 시각 / ✗ 이유. 없는 비밀은 검증할 것도 없다(—). */
+  function verifiedCell(item, lang, tzName, nowMs) {
+    if (!item || item.present !== true) return { tone: "none", text: DASH };
+    if (item.verify === "none" || item.verify == null) return { tone: "none", text: T(lang, "secrets.no_verify") };
+    if (item.verify_error) return { tone: "bad", text: T(lang, "secrets.verify_error", { detail: String(item.verify_error) }) };
+    if (item.verified_at) return { tone: "ok", text: T(lang, "secrets.verified_at", { clock: fmtClock(item.verified_at, tzName, nowMs) }) };
+    return { tone: "pending", text: T(lang, "secrets.not_verified") };
+  }
+  /** 비밀 표 한 행(항목 31). 값은 절대 안 들어온다 — 들어와도 여기서 흘리지 않는다. */
+  function secretRowModel(item, lang, tzName, nowMs) {
+    var kind = item && ["value", "file", "dir"].indexOf(item.kind) >= 0 ? item.kind : "value";
+    var present = !!(item && item.present === true);
+    var files = kind === "dir" ? dirFiles(item).map(function (f) {
+      var sub = { kind: "file", present: f.present, fingerprint: f.fingerprint, size: f.size };
+      return { name: f.name, present: f.present, fingerprint: fingerprintText(sub, lang) };
+    }) : [];
+    return {
+      name: String(item && item.name || ""), kind: kind, kindWord: T(lang, "secrets.kind." + kind),
+      optional: !!(item && item.optional === true), present: present,
+      presentWord: T(lang, present ? "secrets.present" : "secrets.missing"), presentGlyph: present ? "✓" : "✗",
+      fingerprint: fingerprintText(item, lang), verified: verifiedCell(item, lang, tzName, nowMs),
+      // 값은 대화상자, 파일은 드롭존, 폴더는 파일마다 드롭존(자기 행에는 입력이 없다)
+      input: kind, action: present ? "replace" : "add", files: files
+    };
+  }
+  /** 드롭존 수용 규칙(항목 30): 하나만 · 비어 있지 않게 · `max_kb` 안. 이름은 자리가 정하므로 안 본다. */
+  function dropAccept(item, files, isAdmin) {
+    var list = files ? Array.prototype.slice.call(files) : [];
+    if (isAdmin === false) return { ok: false, reason: "secrets.reject.admin", args: {} };
+    if (list.length === 0) return { ok: false, reason: "secrets.reject.none", args: {} };
+    if (list.length > 1) return { ok: false, reason: "secrets.reject.many", args: {} };
+    var f = list[0];
+    if (!isNum(f.size) || f.size <= 0) return { ok: false, reason: "secrets.reject.empty", args: {} };
+    var maxKb = item && isNum(item.max_kb) ? item.max_kb : null;
+    if (maxKb != null && f.size > maxKb * 1024) return { ok: false, reason: "secrets.reject.big", args: { limit: fmtBytes(maxKb * 1024) } };
+    return { ok: true, reason: null, args: {} };
+  }
+  /** 미러 나이(초). `fetched_at` 이 있으면 지금 시각으로 세고, 없으면 서버의 `age_seconds`, 둘 다 없으면 null. */
+  function mirrorAge(mirror, nowMs) {
+    var m = mirror || {};
+    var t = parseIso(m.fetched_at);
+    if (t != null && isNum(nowMs)) return Math.max(0, (nowMs - t) / 1000);
+    if (isNum(m.age_seconds)) return m.age_seconds;
+    return null;
+  }
+  /** 행 색(7절): ok 초록 접힘 · bad 빨강 펼침 · running 파랑 펼침 · stale 황토 펼침 · na 회색 접힘.
+      Source(항목 4·25·42): fetch 실패 > main ⊄ dev > 안 가져옴 > 30분 넘음 > 브랜치 모름 > ok.
+      Build·Store 행은 이 빌드에 자료가 없어 늘 na 다(다음 PR). */
+  function rowState(kind, ctx) {
+    ctx = ctx || {};
+    if (kind === "setup") return ctx.setup && ctx.setup.complete === true ? "ok" : "bad";
+    if (kind === "source") {
+      var doc = ctx.doc || {}, br = doc.branches || {};
+      if (ctx.fetchError) return "bad";
+      if (br.main_in_dev === false) return "bad";
+      var age = mirrorAge(doc.mirror, ctx.nowMs);
+      if (age == null) return "stale";
+      if (age > STORE_STALE_SECONDS) return "stale";
+      if (br.main_in_dev !== true) return "na";
+      return "ok";
+    }
+    return "na";
+  }
+  /** 펼침: 사람이 여닫은 기억(`"open"`/`"closed"`)이 이기고, 없으면 색이 정한다. */
+  function rowOpen(state, remembered) {
+    if (remembered === "open") return true;
+    if (remembered === "closed") return false;
+    return state === "bad" || state === "running" || state === "stale";
+  }
+  /** Setup 행 머리(항목 3): n/m 있음 · 마지막 검증 시각 · 빌드번호 정책. */
+  function setupHead(setup, items, profile, lang, tzName, nowMs) {
+    var s = setup || {};
+    var latest = null;
+    (items || []).forEach(function (it) { var t = parseIso(it && it.verified_at); if (t != null && (latest == null || t > latest)) latest = t; });
+    return T(lang, "row.setup_head", {
+      n: isNum(s.present) ? s.present : DASH, total: isNum(s.required) ? s.required : DASH,
+      clock: latest != null ? fmtClock(new Date(latest).toISOString(), tzName, nowMs) : DASH,
+      kind: profile && profile.build_number_policy ? String(profile.build_number_policy) : DASH
+    });
+  }
+  /** Source 행 머리(항목 4·25): main sha7 · main ⊂ dev · 미러 나이(· fetch 실패). 조각 배열로 준다. */
+  function sourceHead(doc, ctx, lang) {
+    ctx = ctx || {};
+    var d = doc || {}, br = d.branches || {};
+    var parts = [];
+    parts.push("main " + (typeof br.main === "string" && br.main ? br.main.slice(0, 7) : DASH));
+    if (br.main_in_dev === true) parts.push(T(lang, "source.main_in_dev"));
+    else if (br.main_in_dev === false) parts.push(T(lang, "source.main_not_in_dev"));
+    else parts.push(T(lang, "source.branches_unknown"));
+    var age = mirrorAge(d.mirror, ctx.nowMs);
+    if (age == null) parts.push(T(lang, "source.never_fetched"));
+    else if (age > STORE_STALE_SECONDS) parts.push(T(lang, "source.stale", { age: fmtAgo(age, lang) }));
+    else parts.push(T(lang, "source.fetched", { age: fmtAgo(age, lang) }));
+    if (ctx.fetchError) parts.push(T(lang, "source.fetch_failed", { detail: String(ctx.fetchError).slice(0, 60) }));
+    return parts;
+  }
+  /** Build·Store 행 머리: 프로파일에 역할 프리셋이 비었으면 「not configured — …」, 아니면 이 빌드에 없음. */
+  function naRowText(kind, profile, lang) {
+    var presets = profile && profile.presets ? profile.presets : {};
+    var role = kind === "build" ? "upload" : "plan";
+    if (!presets[role]) return T(lang, "row.not_configured", { name: "presets." + role });
+    return T(lang, kind === "build" ? "row.na.build" : "row.na.store");
+  }
+  /**
+   * 서버 호출 한 곳. `fetchFn` 은 window.fetch 모양, `tokenFn` 은 지금 토큰(없으면 null)을 준다.
+   * 모든 메서드가 `{ok, status, body}` 로 풀린다 — 404 도 던지지 않는다(프로파일 PR 이 없는 서버는
+   * `/api/repos` 가 404 고, 그러면 탭이 없을 뿐이다). node 테스트는 fetchFn 을 스텁으로 준다.
+   */
+  function makeStoreApi(fetchFn, tokenFn) {
+    function call(method, path, body, contentType) {
+      var headers = {};
+      var tok = tokenFn ? tokenFn() : null;
+      if (tok) headers.Authorization = "Bearer " + tok;
+      if (contentType) headers["Content-Type"] = contentType;
+      return fetchFn(path, { method: method, headers: headers, body: body, cache: "no-store" }).then(function (r) {
+        return r.text().then(function (text) {
+          var parsed = null;
+          try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = { error: text }; }
+          return { ok: !!r.ok, status: r.status, body: parsed };
+        });
+      });
+    }
+    var enc = encodeURIComponent;
+    function base(repo) { return "/api/repos/" + enc(repo); }
+    return {
+      repos: function () { return call("GET", "/api/repos"); },
+      repo: function (name) { return call("GET", base(name)); },
+      secrets: function (name) { return call("GET", base(name) + "/secrets"); },
+      // 값은 text/plain, 파일은 octet-stream, 폴더 안 파일은 `/secrets/<secret>/<file>`
+      putSecret: function (name, secret, body, contentType, fileName) {
+        var path = base(name) + "/secrets/" + enc(secret) + (fileName ? "/" + enc(fileName) : "");
+        return call("PUT", path, body, contentType || "application/octet-stream");
+      },
+      verify: function (name, names) {
+        return call("POST", base(name) + "/verify", JSON.stringify(names && names.length ? { names: names } : {}), "application/json");
+      },
+      fetchRemote: function (name) { return call("POST", base(name) + "/fetch", "{}", "application/json"); }
+    };
+  }
+  var storePure = {
+    parseRoute: parseRoute, releaseRepos: releaseRepos, setupSummary: setupSummary, fingerprintText: fingerprintText,
+    dirFiles: dirFiles, verifiedCell: verifiedCell, secretRowModel: secretRowModel, dropAccept: dropAccept,
+    mirrorAge: mirrorAge, rowState: rowState, rowOpen: rowOpen, setupHead: setupHead, sourceHead: sourceHead,
+    naRowText: naRowText, makeStoreApi: makeStoreApi, ROW_GLYPH: ROW_GLYPH, STORE_STALE_SECONDS: STORE_STALE_SECONDS
+  };
+
   var rcm = {
     DASH: DASH, esc: esc, fmtDuration: fmtDuration, fmtClock: fmtClock, fmtClockSeconds: fmtClockSeconds, fmtAgo: fmtAgo,
     fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtDisk: fmtDisk, fmtMb: fmtMb, fmtPct: fmtPct,
@@ -1099,7 +1304,8 @@
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
-    LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS
+    LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS,
+    store: storePure
   };
   if (typeof module !== "undefined" && module.exports) module.exports = rcm;
   if (typeof globalThis !== "undefined") globalThis.rcm = rcm;
@@ -1121,7 +1327,10 @@
     // 호스트 이름 → 직전 압력 판정. 「바쁨」에 이력을 주는 기억이고 이 페이지에만 산다.
     hostVerdicts: {},
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
-    drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null
+    drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null,
+    // 스토어 탭. `repos` 는 릴리스 프로파일이 있는 저장소(null = 아직 안 물어봄). 비밀 값은 여기 없다.
+    view: "queue", store: { api: null, repos: null, reposStatus: null, repo: null, doc: null, secrets: null, screen: null,
+      error: null, fetchError: null, fetching: false, verifying: false, loadedAt: null, timer: null, seq: 0, dialogSecret: null }
   };
   function now() { return state.skewUnknown ? NaN : Date.now() + state.skewMs; }
   function tz() { return state.tz || undefined; }
@@ -1171,6 +1380,7 @@
     applyStatic();
     render();
     renderTokenButton();
+    renderNav(); renderStore();
     if (state.cancelTarget) openCancel(state.cancelTarget);
     if (state.drawer.jobId != null) {
       var d = $("[data-drawer-title]");
@@ -1263,7 +1473,7 @@
   // ── 토큰 (항목 4 · 29) ──
   function tokenRejected() {
     state.tokenBad = true; state.me = null; state.admin = false; state.token = null; lsSet("rcm.token", null);
-    renderTokenButton(); render();
+    renderTokenButton(); render(); if (state.view === "store") renderStore();
   }
   function verifyToken(tok, silent) {
     var status = $("[data-tok-status]");
@@ -1283,7 +1493,7 @@
       state.token = tok; state.tokenBad = false;
       if (status) status.textContent = tr("token.kept");
       return null;
-    }).then(function (ok) { renderTokenButton(); if (ok !== false) fetchStatus(); return ok; });
+    }).then(function (ok) { renderTokenButton(); if (ok !== false) fetchStatus(); storeAuthChanged(); return ok; });
   }
   function renderTokenButton() {
     var b = $("#tok-btn");
@@ -1308,7 +1518,7 @@
     });
     $("[data-tok-cancel]").addEventListener("click", function () { dlg.close(); });
     $("[data-tok-forget]").addEventListener("click", function () {
-      state.token = null; state.me = null; state.admin = false; state.tokenBad = false; lsSet("rcm.token", null); renderTokenButton(); render(); dlg.close();
+      state.token = null; state.me = null; state.admin = false; state.tokenBad = false; lsSet("rcm.token", null); renderTokenButton(); render(); storeAuthChanged(); dlg.close();
     });
     dlg.querySelector("form").addEventListener("submit", function (ev) {
       ev.preventDefault();
@@ -1317,7 +1527,7 @@
       verifyToken(tok).then(function (ok) { if (ok) dlg.close(); });
     });
     window.addEventListener("storage", function (ev) {
-      if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; state.admin = false; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); } }
+      if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; state.admin = false; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); storeAuthChanged(); } }
       if (ev.key === "rcm.expanded") { state.expanded = {}; loadExpanded(); renderQueue(); }
       // 다른 탭에서 언어를 바꾸면 이 탭도 따라온다
       if (ev.key === "rcm.lang") { state.lang = I18N.normalize(ev.newValue); applyLang(); }
@@ -2026,6 +2236,7 @@
       // 1초마다 다시 쓰는 자리 — 렌더 시점이 아니라 **지금** 언어를 읽는다
       else if (kind === "waiting") el.textContent = tr("elapsed.waiting", { dur: fmtDuration(s) });
       else if (kind === "age") el.textContent = tr("host.sampled", { age: fmtAgo(s, L()) });
+      else if (kind === "updated") el.textContent = tr("store.updated", { age: fmtAgo(s, L()) });
     });
     renderHeaderConn();
   }
@@ -2274,7 +2485,366 @@
       else { state.hiddenSince = null; if (state.conn.mode === "paused" && state.conn.before) resumeUpdates("visible"); }
     });
   }
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 스토어 탭 — DOM (docs/wireframes/web-store.html). 큐의 SSE·폴링은 이 화면에서도 그대로 산다:
+  // 큐 절은 `hidden` 일 뿐 `render()` 는 계속 그린다. 스토어 자료는 SSE 가 없어 들어올 때 받고,
+  // 행동(넣기·검증·가져오기) 뒤에 다시 받고, 화면이 보이는 동안 30초마다 받는다.
+  // 비밀 값은 대화상자 입력칸에만 잠깐 있고, 보내면 비운다 — localStorage 에도 state 에도 없다.
+  // ═══════════════════════════════════════════════════════════════════════════
+  var STORE_REFRESH_MS = 30000;
+  var STORE_ROWS_KEY = "rcm.store.rows";  // 사람이 여닫은 행 — `<repo>/<row>` → open|closed (큐 화면 규칙)
+  // 시험은 `window.rcmStoreApi` 로 서버 호출을 통째로 바꿔 끼운다(tests/test_web_browser.py) —
+  // 그것 말고는 진짜 fetch 다. 게으르게 고르는 이유: 시험의 스텁은 페이지 스크립트보다 먼저 심긴다.
+  function storeApi() {
+    if (root && root.rcmStoreApi) return root.rcmStoreApi;
+    if (!state.store.api) state.store.api = makeStoreApi(function (p, o) { return fetch(p, o); }, function () { return state.token; });
+    return state.store.api;
+  }
+  function storeErrorDetail(res) {
+    var b = res && res.body;
+    if (b && typeof b === "object" && b.error) return errorText(String(b.error), b.code);
+    return "http " + (res ? res.status : "?");
+  }
+  function loadRowMemory() { try { return JSON.parse(lsGet(STORE_ROWS_KEY) || "{}") || {}; } catch (e) { return {}; } }
+  function rememberRow(row, open) {
+    var mem = loadRowMemory();
+    mem[state.store.repo + "/" + row] = open ? "open" : "closed";
+    lsSet(STORE_ROWS_KEY, JSON.stringify(mem));
+  }
+
+  // ── 화면 전환 (항목 1) ──
+  function showView(view) {
+    state.view = view;
+    ["#summary", "#queue", "#host", "#recent"].forEach(function (sel) { var el = $(sel); if (el) el.hidden = view !== "queue"; });
+    var st = $("#store");
+    if (st) st.hidden = view !== "store";
+    renderNav();
+    if (view !== "store") { clearInterval(state.store.timer); state.store.timer = null; }
+  }
+  /** 머리의 `Queue | Store` — 릴리스 프로파일이 있는 저장소가 있을 때만 있다. 여럿이면 고르는 칸. */
+  function renderNav() {
+    var nav = $("#view-nav");
+    if (!nav) return;
+    var repos = state.store.repos || [];
+    if (!repos.length) { nav.hidden = true; return; }
+    nav.hidden = false;
+    var current = state.store.repo && repos.some(function (r) { return r.name === state.store.repo; }) ? state.store.repo : repos[0].name;
+    var h = '<a href="#/" data-nav="queue"' + (state.view !== "store" ? ' aria-current="page"' : "") + ">" + esc(tr("nav.queue")) + "</a>"
+      + '<a href="#/store/' + encodeURIComponent(current) + '" data-nav="store"' + (state.view === "store" ? ' aria-current="page"' : "") + ">" + esc(tr("nav.store")) + "</a>";
+    if (repos.length > 1) {
+      h += '<select data-repo-select aria-label="' + esc(tr("nav.repo")) + '">' + repos.map(function (r) {
+        return '<option value="' + esc(r.name) + '"' + (r.name === current ? " selected" : "") + ">" + esc(r.name) + "</option>";
+      }).join("") + "</select>";
+    } else h += '<span class="mono sub">' + esc(current) + "</span>";
+    nav.innerHTML = h;
+  }
+  /** `GET /api/repos` — 404(프로파일 PR 이 없는 서버)·오류면 탭이 없을 뿐이다. */
+  function loadRepos() {
+    return storeApi().repos().then(function (res) {
+      state.store.repos = res.ok ? releaseRepos(res.body) : [];
+      state.store.reposStatus = res.status;
+      renderNav();
+    }).catch(function () { state.store.repos = state.store.repos || []; renderNav(); });
+  }
+
+  // ── 들어오기 · 받기 ──
+  function enterStore(repo) {
+    if (state.store.repo !== repo) {
+      state.store.repo = repo; state.store.doc = null; state.store.secrets = null; state.store.screen = null;
+      state.store.fetchError = null; state.store.error = null; state.store.loadedAt = null;
+    }
+    showView("store");
+    renderStore();
+    loadStore();
+    clearInterval(state.store.timer);
+    state.store.timer = setInterval(function () {
+      if (state.view === "store" && state.conn.mode !== "paused" && !document.hidden) loadStore();
+    }, STORE_REFRESH_MS);
+  }
+  function loadStore() {
+    var repo = state.store.repo;
+    if (!repo) return Promise.resolve();
+    var api = storeApi();
+    var seq = (state.store.seq = (state.store.seq || 0) + 1);
+    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo)]).then(function (rs) {
+      if (seq !== state.store.seq || state.store.repo !== repo) return;  // 그 사이 다른 저장소로 갔다
+      state.store.repos = rs[0].ok ? releaseRepos(rs[0].body) : [];
+      state.store.reposStatus = rs[0].status;
+      if (rs[1].ok && rs[1].body && typeof rs[1].body === "object") { state.store.doc = rs[1].body; state.store.error = null; }
+      else { state.store.doc = null; state.store.error = rs[1]; }
+      state.store.secrets = rs[2].ok && rs[2].body && Array.isArray(rs[2].body.items) ? rs[2].body : null;
+      state.store.loadedAt = now();
+      // 관문(항목 29·34): 완료가 아니면 설정 화면이다 — 사람이 스토어를 골랐어도 도로 관문이다
+      var complete = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
+      if (!complete) state.store.screen = "settings";
+      else if (!state.store.screen) state.store.screen = "store";
+      renderNav(); renderStore();
+    }).catch(function () {
+      if (seq !== state.store.seq) return;
+      state.store.error = { status: 0, body: null }; renderStore();
+    });
+  }
+  function storeAuthChanged() { if (state.store.repo && state.view === "store") loadStore(); }
+
+  // ── 렌더 ──
+  function renderStore() {
+    var body = $("[data-store-body]");
+    if (!body || state.view !== "store") return;
+    var repo = state.store.repo;
+    var head = $("[data-store-title]");
+    if (head) head.textContent = tr("store.heading", { repo: repo || DASH });
+    if (state.store.repos && !state.store.repos.length) { body.innerHTML = '<p class="empty">' + esc(tr("store.none")) + "</p>"; return; }
+    if (state.store.error) {
+      var msg = state.store.error.status === 404 ? tr("store.unknown_repo", { repo: repo }) : tr("store.load_failed", { repo: repo, detail: storeErrorDetail(state.store.error) });
+      body.innerHTML = '<p class="empty">' + esc(msg) + "</p>"; return;
+    }
+    if (!state.store.doc) { body.innerHTML = '<p class="empty">' + esc(tr("store.loading")) + "</p>"; return; }
+    withFocus(function () {
+      body.innerHTML = state.store.screen === "store" ? storeScreenHtml() : settingsHtml();
+      // 렌더가 정한 열림은 기억이 아니다 — 사람이 바꾼 것만 `toggle` 에서 남긴다(호스트 절과 같은 규칙)
+      $$("details.srow", body).forEach(function (d) { d.dataset.renderedOpen = d.open ? "1" : "0"; });
+    });
+  }
+  function secretsItems() { return state.store.secrets ? state.store.secrets.items : []; }
+  /** 관문 띠 + 저장된 비밀 표 (항목 29~33). */
+  function settingsHtml() {
+    var doc = state.store.doc, repo = state.store.repo;
+    var sum = setupSummary(doc.setup, L());
+    var h = '<div class="banner gate ' + sum.tone + '" role="status" data-gate>'
+      + '<span class="g" aria-hidden="true">' + ROW_GLYPH[sum.tone] + "</span>"
+      + "<b>" + esc(tr(sum.complete ? "store.gate.complete" : "store.gate.incomplete", { repo: repo })) + "</b>"
+      + '<span data-gate-counts>' + esc(sum.text) + "</span>"
+      + '<span class="spacer"></span>'
+      + '<button type="button" class="btn primary" data-enter-store' + (sum.complete ? "" : ' disabled title="' + esc(tr("store.gate.enter_hint")) + '"') + ">" + esc(tr("store.gate.enter")) + "</button>"
+      + '<span class="sub gate-help">' + esc(tr("store.gate.help")) + "</span>"
+      + "</div>";
+    h += secretsTableHtml();
+    return h;
+  }
+  function secretsTableHtml() {
+    var doc = state.store.doc, repo = state.store.repo, items = secretsItems();
+    var canVerify = !!state.token;
+    var h = '<section class="secrets" aria-label="' + esc(tr("secrets.title", { repo: repo })) + '">'
+      + '<div class="s-h"><span class="t">' + esc(tr("secrets.title", { repo: repo })) + "</span>"
+      + '<span class="n">' + esc(tr("secrets.profile_line", { repo: repo, name: (state.store.secrets && state.store.secrets.dir_env) || (doc.profile && doc.profile.secrets_dir_env) || DASH })) + "</span>"
+      + '<span class="spacer"></span>'
+      + '<button type="button" class="btn" data-verify-all' + (canVerify && !state.store.verifying ? "" : " disabled") + (canVerify ? "" : ' title="' + esc(tr("store.gate.no_token")) + '"') + ">" + esc(tr(state.store.verifying ? "secrets.verifying" : "secrets.verify_all")) + "</button></div>";
+    if (!state.admin) h += '<p class="sub readonly" data-readonly-reason>' + esc(tr("store.gate.admin_only", { repo: repo })) + "</p>";
+    if (!state.store.secrets) h += '<p class="empty">' + esc(tr("store.load_failed", { repo: repo, detail: "secrets" })) + "</p>";
+    else {
+      h += '<div class="secwrap"><table class="sec"><thead><tr><th>' + esc(tr("secrets.col.secret")) + "</th><th>" + esc(tr("secrets.col.kind")) + "</th><th>" + esc(tr("secrets.col.state")) + "</th><th>" + esc(tr("secrets.col.fingerprint")) + "</th><th>" + esc(tr("secrets.col.verified")) + "</th><th></th></tr></thead><tbody>";
+      items.forEach(function (it) { h += secretRowHtml(it); });
+      h += "</tbody></table></div>";
+    }
+    h += '<p class="sub">' + esc(tr("secrets.never_shown")) + "</p></section>";
+    return h;
+  }
+  function presentPill(present, word) {
+    return '<span class="pill ' + (present ? "present" : "missing") + '"><span class="g" aria-hidden="true">' + (present ? "✓" : "✗") + "</span>" + esc(word) + "</span>";
+  }
+  /** 드롭존(항목 30). 파일 선택도 같은 자리. 「빌드 머신의 경로」 입력은 이 PR 에 없다 —
+      서버 계약(STORE-TAB-API)에 경로를 받는 길이 없어서다. 드롭 파일은 메모리에서 바로 PUT. */
+  function dropzoneHtml(secret, fileName, present) {
+    var disabled = !state.admin;
+    var text = tr(present ? "secrets.drop_replace" : "secrets.drop");
+    return '<label class="drop' + (disabled ? " disabled" : "") + '" data-drop="' + esc(secret) + '"' + (fileName ? ' data-drop-file="' + esc(fileName) + '"' : "")
+      + (disabled ? ' title="' + esc(tr("secrets.reject.admin")) + '"' : "") + '>'
+      + '<input type="file" hidden' + (disabled ? " disabled" : "") + ' aria-label="' + esc(text) + '">'
+      + '<span class="g" aria-hidden="true">⤓</span><span>' + esc(text) + "</span></label>";
+  }
+  function secretRowHtml(it) {
+    var m = secretRowModel(it, L(), tz(), now());
+    var action = "";
+    if (m.input === "value") action = '<button type="button" class="btn" data-set-value="' + esc(m.name) + '"' + (state.admin ? "" : ' disabled title="' + esc(tr("secrets.reject.admin")) + '"') + ">" + esc(tr(m.action === "replace" ? "secrets.replace" : "secrets.add")) + "</button>";
+    else if (m.input === "file") action = dropzoneHtml(m.name, null, m.present);
+    var h = '<tr data-secret="' + esc(m.name) + '" class="' + (m.present ? "" : "missing") + '">'
+      + '<td class="name"><span class="key">' + esc(m.name) + "</span>" + (m.optional ? ' <span class="chip">' + esc(tr("secrets.optional")) + "</span>" : "") + "</td>"
+      + '<td class="kind">' + esc(m.kindWord) + "</td>"
+      + '<td class="state">' + presentPill(m.present, m.presentWord) + "</td>"
+      + '<td class="fp mono">' + esc(m.fingerprint) + "</td>"
+      + '<td class="ver ' + m.verified.tone + '">' + esc(m.verified.text) + "</td>"
+      + '<td class="act">' + action + "</td></tr>";
+    m.files.forEach(function (f) {
+      h += '<tr class="subfile' + (f.present ? "" : " missing") + '" data-secret="' + esc(m.name) + '" data-file="' + esc(f.name) + '">'
+        + '<td class="name"><span class="key">' + esc(f.name) + "</span></td><td class=\"kind\">" + esc(tr("secrets.kind.file")) + "</td>"
+        + '<td class="state">' + presentPill(f.present, tr(f.present ? "secrets.present" : "secrets.missing")) + "</td>"
+        + '<td class="fp mono">' + esc(f.fingerprint) + '</td><td class="ver"></td>'
+        + '<td class="act">' + dropzoneHtml(m.name, f.name, f.present) + "</td></tr>";
+    });
+    return h;
+  }
+  /** 접히는 행 하나 (7절). 색 = 상태, 글리프 + 글자로 한 번 더. 머리의 버튼은 여닫지 않는다. */
+  function srowHtml(key, st, head, extra, bodyHtml) {
+    var open = rowOpen(st, loadRowMemory()[state.store.repo + "/" + key]);
+    return '<details class="srow" data-row="' + key + '" data-state="' + st + '"' + (open ? " open" : "") + ">"
+      + '<summary><span class="g" aria-hidden="true">' + ROW_GLYPH[st] + '</span><span class="t">' + esc(tr("row." + key)) + "</span>"
+      + '<span class="sr-state">' + esc(tr("row.state." + st)) + "</span>"
+      + '<span class="n">' + head + "</span>" + (extra ? '<span class="spacer"></span>' + extra : "") + "</summary>"
+      + '<div class="srow-body">' + bodyHtml + "</div></details>";
+  }
+  /** 스토어 화면 (항목 1~6 · 27): 행 넷 + 접힌 본체 머리 + 고정 문장. */
+  function storeScreenHtml() {
+    var doc = state.store.doc, repo = state.store.repo, items = secretsItems(), profile = doc.profile || {};
+    var n = now();
+    var h = '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
+      + '<span class="spacer"></span><button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+    // Setup — 프로파일이 선언한 비밀 표(읽기 전용 + Replace · Verify all)
+    var setupState = rowState("setup", { setup: doc.setup });
+    h += srowHtml("setup", setupState, esc(setupHead(doc.setup, items, profile, L(), tz(), n)),
+      '<button type="button" class="btn" data-goto-settings>' + esc(tr("row.settings")) + "</button>", secretsTableHtml());
+    // Source — 미러 · main/dev · main ⊂ dev · Fetch remote (항목 4 · 25 · 42)
+    var srcCtx = { nowMs: n, fetchError: state.store.fetchError };
+    var srcState = rowState("source", { doc: doc, nowMs: n, fetchError: state.store.fetchError });
+    var br = doc.branches || {}, mirror = doc.mirror || {};
+    var canFetch = !!state.token && !state.store.fetching;
+    var fetchBtn = '<button type="button" class="btn" data-fetch-remote' + (canFetch ? "" : " disabled") + (state.token ? "" : ' title="' + esc(tr("source.no_fetch_token")) + '"') + ">" + esc(tr(state.store.fetching ? "source.fetching" : "source.fetch")) + "</button>";
+    var srcBody = '<dl class="kv">'
+      + "<dt>main</dt><dd class=\"mono\">" + esc(br.main || DASH) + "</dd>"
+      + "<dt>dev</dt><dd class=\"mono\">" + esc(br.dev || DASH) + "</dd>"
+      + "<dt>" + esc(tr("row.source")) + "</dt><dd>" + esc(br.main_in_dev === true ? tr("source.main_in_dev") : br.main_in_dev === false ? tr("source.main_not_in_dev") : tr("source.branches_unknown")) + "</dd>"
+      + "<dt>mirror</dt><dd>" + esc(mirror.fetched_at ? tr("source.mirror_at", { clock: fmtClock(mirror.fetched_at, tz(), n) }) : tr("source.never_fetched")) + (mirror.path ? ' <span class="mono sub">' + esc(mirror.path) + "</span>" : "") + "</dd>"
+      + "<dt>profile</dt><dd>" + esc(tr("source.profile_line", { ref: profile.default_branch || DASH, text: profile.tag || DASH })) + "</dd>"
+      + (state.store.fetchError ? '<dt class="bad">fetch</dt><dd class="bad">' + esc(tr("source.fetch_failed", { detail: String(state.store.fetchError).slice(0, 60) })) + "</dd>" : "")
+      + "</dl>";
+    h += srowHtml("source", srcState, esc(sourceHead(doc, srcCtx, L()).join(" · ")), fetchBtn, srcBody);
+    // Build·upload · Store — 이 빌드에는 자료가 없다(다음 PR). 회색 접힘, 이유를 글자로.
+    h += srowHtml("build", "na", esc(naRowText("build", profile, L())), "", '<p class="sub">' + esc(naRowText("build", profile, L())) + "</p>");
+    h += srowHtml("store", "na", esc(naRowText("store", profile, L())), "", '<p class="sub">' + esc(naRowText("store", profile, L())) + "</p>");
+    // 본체 머리(항목 7 · 27) — 다음 PR. 접힌 머리와 「아직 없음」 필뿐이다.
+    h += '<details class="srow review" id="review-panel" data-state="na"><summary><span class="t">' + esc(tr("review.title")) + '</span><span class="pill na"><span class="g" aria-hidden="true">·</span>' + esc(tr("review.na")) + "</span></summary>"
+      + '<div class="srow-body"><p class="sub">' + esc(tr("review.na_body")) + "</p></div></details>";
+    h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    return h;
+  }
+
+  // ── 행동 ──
+  function verifyAll() {
+    if (!state.token || state.store.verifying) return;
+    var repo = state.store.repo;
+    state.store.verifying = true; renderStore();
+    storeApi().verify(repo, []).then(function (res) {
+      state.store.verifying = false;
+      if (res.ok) toast(tr("secrets.verify_done"));
+      else { toast(tr("secrets.verify_call_failed", { detail: storeErrorDetail(res) })); if (res.status === 401 || res.status === 403) tokenRejected(); }
+      return loadStore();
+    }).catch(function () { state.store.verifying = false; toast(tr("secrets.verify_call_failed", { detail: "network" })); renderStore(); });
+  }
+  function fetchRemote() {
+    if (!state.token || state.store.fetching) return;
+    var repo = state.store.repo;
+    state.store.fetching = true; renderStore();
+    storeApi().fetchRemote(repo).then(function (res) {
+      state.store.fetching = false;
+      if (res.ok) {
+        state.store.fetchError = null;
+        if (res.body && state.store.doc) { if (res.body.mirror) state.store.doc.mirror = res.body.mirror; if (res.body.branches) state.store.doc.branches = res.body.branches; }
+        toast(tr("source.fetch_done"));
+      } else {
+        state.store.fetchError = storeErrorDetail(res);
+        if (res.status === 401 || res.status === 403) tokenRejected();
+      }
+      return loadStore();
+    }).catch(function () { state.store.fetching = false; state.store.fetchError = "network"; renderStore(); });
+  }
+  function putSecretFile(secret, fileName, files) {
+    var item = secretsItems().filter(function (it) { return it.name === secret; })[0];
+    var verdict = dropAccept(item, files, state.admin);
+    if (!verdict.ok) { toast(tr(verdict.reason, verdict.args)); return; }
+    var file = files[0], repo = state.store.repo, label = fileName ? secret + "/" + fileName : secret;
+    toast(tr("secrets.saving"));
+    file.arrayBuffer().then(function (buf) {
+      return storeApi().putSecret(repo, secret, buf, "application/octet-stream", fileName);
+    }).then(function (res) {
+      if (res.ok) toast(tr("secrets.saved", { name: label }));
+      else { toast(tr("secrets.save_failed", { name: label, detail: storeErrorDetail(res) })); if (res.status === 401 || res.status === 403) tokenRejected(); }
+      return loadStore();
+    }).catch(function () { toast(tr("secrets.save_failed", { name: label, detail: "network" })); });
+  }
+  // 값 비밀 대화상자(항목 30). 입력칸은 닫힐 때마다 비운다 — 값은 보내는 순간 말고는 어디에도 없다.
+  function openSecretDialog(name) {
+    if (!state.admin) { toast(tr("secrets.reject.admin")); return; }
+    var dlg = $("#secret-dialog"), input = $("#secret-input");
+    if (!dlg) return;
+    state.store.dialogSecret = name;
+    $("[data-secret-title]").textContent = tr("secrets.dialog_title", { name: name });
+    $("[data-secret-status]").textContent = "";
+    input.value = "";
+    if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "");
+    input.focus();
+  }
+  function submitSecretDialog() {
+    var dlg = $("#secret-dialog"), input = $("#secret-input"), status = $("[data-secret-status]");
+    var name = state.store.dialogSecret, value = input.value;
+    if (!value || !value.trim()) { status.textContent = tr("secrets.empty_value"); return; }
+    status.textContent = tr("secrets.saving");
+    storeApi().putSecret(state.store.repo, name, value, "text/plain; charset=utf-8").then(function (res) {
+      input.value = "";
+      if (res.ok) { dlg.close(); toast(tr("secrets.saved", { name: name })); }
+      else { status.textContent = tr("secrets.save_failed", { name: name, detail: storeErrorDetail(res) }); if (res.status === 401 || res.status === 403) tokenRejected(); }
+      return loadStore();
+    }).catch(function () { input.value = ""; status.textContent = tr("secrets.save_failed", { name: name, detail: "network" }); });
+  }
+  function wireStore() {
+    var st = $("#store");
+    if (!st) return;
+    st.addEventListener("click", function (ev) {
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh]");
+      if (!t) return;
+      if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
+      if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
+      if (t.hasAttribute("data-goto-settings")) { state.store.screen = "settings"; renderStore(); return; }
+      if (t.hasAttribute("data-verify-all")) { verifyAll(); return; }
+      if (t.hasAttribute("data-fetch-remote")) { fetchRemote(); return; }
+      if (t.hasAttribute("data-store-refresh")) { loadStore(); return; }
+      if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
+    });
+    st.addEventListener("change", function (ev) {
+      var zone = ev.target.closest("[data-drop]");
+      if (!zone || ev.target.type !== "file") return;
+      var files = ev.target.files;
+      putSecretFile(zone.getAttribute("data-drop"), zone.getAttribute("data-drop-file"), files);
+      ev.target.value = "";
+    });
+    ["dragenter", "dragover"].forEach(function (kind) {
+      st.addEventListener(kind, function (ev) {
+        var zone = ev.target.closest("[data-drop]");
+        if (!zone) return;
+        ev.preventDefault();
+        if (!zone.classList.contains("disabled")) zone.classList.add("over");
+      });
+    });
+    st.addEventListener("dragleave", function (ev) { var zone = ev.target.closest("[data-drop]"); if (zone) zone.classList.remove("over"); });
+    st.addEventListener("drop", function (ev) {
+      var zone = ev.target.closest("[data-drop]");
+      if (!zone) return;
+      ev.preventDefault(); zone.classList.remove("over");
+      if (zone.classList.contains("disabled")) { toast(tr("secrets.reject.admin")); return; }
+      putSecretFile(zone.getAttribute("data-drop"), zone.getAttribute("data-drop-file"), ev.dataTransfer ? ev.dataTransfer.files : null);
+    });
+    st.addEventListener("toggle", function (ev) {
+      var d = ev.target;
+      if (!d || !d.classList || !d.classList.contains("srow") || !d.hasAttribute("data-row")) return;
+      var rendered = d.dataset.renderedOpen === "1";
+      if (d.open === rendered) return;  // 렌더가 정한 상태 — 사람의 선택이 아니다
+      d.dataset.renderedOpen = d.open ? "1" : "0";
+      rememberRow(d.getAttribute("data-row"), d.open);
+    }, true);
+    var nav = $("#view-nav");
+    if (nav) nav.addEventListener("change", function (ev) {
+      if (ev.target.hasAttribute("data-repo-select")) location.hash = "#/store/" + encodeURIComponent(ev.target.value);
+    });
+    var dlg = $("#secret-dialog");
+    if (dlg) {
+      dlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitSecretDialog(); });
+      $("[data-secret-cancel]").addEventListener("click", function () { dlg.close(); });
+      dlg.addEventListener("close", function () { $("#secret-input").value = ""; state.store.dialogSecret = null; restoreTrigger(); });
+    }
+  }
+
   function applyHash() {
+    var route = parseRoute(location.hash);
+    if (route.view === "store") { closeDrawer(true); enterStore(route.repo); return; }
+    if (state.view !== "queue") showView("queue");
     var m = /^#\/jobs\/(\d+)(\/log)?$/.exec(location.hash);
     if (!m) { closeDrawer(true); return; }
     var id = parseInt(m[1], 10);
@@ -2293,11 +2863,13 @@
     loadExpanded();
     lsSet("rcm.collapsed", null);   // 뜻이 뒤집힌 옛 키 — 남겨 두면 영영 남는다
     state.token = lsGet("rcm.token");
-    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); renderTokenButton();
+    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireStore(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });
     first.then(function () {
       state.tz = state.status && state.status.display_timezone ? state.status.display_timezone : null;
-      render(); startPolling(); applyHash();
+      render(); startPolling();
+      // 탭은 `/api/repos` 가 릴리스 프로파일을 하나라도 주는 서버에만 있다 — 404 면 큐 화면 그대로
+      loadRepos().then(applyHash);
       // SSE 는 load 뒤에 연다 — 열린 스트림이 load 를 붙들면 headless 렌더·인쇄가 끝나지 않는다
       afterLoad(function () { setTimeout(openSse, 0); });
     });
