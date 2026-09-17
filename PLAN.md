@@ -250,6 +250,11 @@ default = "full"
 | `GET /events` | `read_auth` | SSE: `hello` → `job_changed`·`job_finished`·`marker`·`host_sample`·`server`(+ `reset`·`lag` = 전체 재조회). `Last-Event-ID` 재생, 15초 keep-alive. 동시 연결 `sse_max_connections`(16) 초과는 503 + `Retry-After` + `{fallback: "poll", poll_seconds: 10}` — 웹은 백오프로 재시도하며 10초 폴링, CLI `wait` 는 2초 폴링 |
 | `POST /api/eta` | `read_auth` | `{preset, inputs}` → 가상 잡의 큐 행(`id` null, `position` = 대기 수 + 1) + `ahead`. `rcm eta` 용 |
 | `GET /api/health` | 없음 | 워커 스레드 살아 있고 DB 열리면 200, 아니면 503 + 사유 |
+| `GET /api/repos` · `GET /api/repos/{repo}` | `read_auth` | 스토어 탭(릴리스 프로파일). 목록은 `release` 유무와 `setup` 셈, 보기는 프로파일(값 없이) · `setup{required,present,verified,complete,missing[]}` · 미러(`path`·`fetched_at`·`age_seconds`) · `branches{main,dev,main_in_dev}` — 미러만 읽는다. 프로파일 없는 저장소는 404 |
+| `POST /api/repos/{repo}/fetch` | 토큰 | 미러 갱신(heads·tags 전체 · prune · 레인과 같은 락) → `mirror` + `branches`. 502 `fetch_failed`(stderr 끝 60자) · 504 타임아웃 |
+| `GET /api/repos/{repo}/secrets` | 토큰 | `{dir_env, items[]{name,kind,optional,verify,present,size,fingerprint,verified_at,verify_error,verify_detail}}` — 값은 절대 없다. 파일은 `<config_dir>/secrets/<repo>/`(0700 · 0600) |
+| `PUT` · `DELETE /api/repos/{repo}/secrets/{name}[/{file}]` | admin | 본문이 비밀(`text/plain` 값 · `application/octet-stream` 파일 · dir 은 `/{file}`). 이름은 프로파일과 글자 그대로(404) · 400 종류 불일치 · 413 크기. DELETE 는 `optional` 만(409). 원자적 쓰기 |
+| `POST /api/repos/{repo}/verify` | 토큰 | `{names}` 또는 전부. 읽기 전용 검증(`github` · `keystore` 구현, `asc`·`play` 는 「not implemented in this build」) → `.verify.json` 기록 → secrets 문서. `setup.complete` = 필수 전부 있고 (verify none 이거나) 오류 없이 검증됨 — `/release/*`(다음 PR)가 아니면 409 `setup_incomplete` 는 없다 |
 | `GET /` · `/static/*` | `read_auth` | 정적 UI |
 
 - `http.server.ThreadingHTTPServer`(표준 라이브러리). SSE 는 응답을 열어 두고 줄을 흘리는 스레드라 keep-alive 문제가 없다(요청당 스레드). **hardening**: 소켓 타임아웃(일반 10초, SSE·업로드는 별도) · `Content-Length` 필수(없거나 chunked 면 411) · 동시 요청 `max_concurrent_requests`(32) 초과 503 · SSE 동시 연결 상한(16) · 정적 경로 정규화(`http.server` 가 앞의 `//` 는 `/` 로 합치고, 안쪽 `//`·`..` 는 400) · 모르는 메서드도 JSON 405/404(표준 라이브러리의 HTML 501 이 아니다) · 405/400/413/401/403 명확히 · 예외는 500 한 줄.

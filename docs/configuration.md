@@ -241,6 +241,49 @@ and prints one line per file: `written`, `kept` (identical already) or `skipped`
 copy differs — the command exits 1 and leaves it alone; `--force` overwrites). Nothing outside
 `.claude/skills/` is touched.
 
+### Secrets on the server
+
+The values the profile names are entered once, in the Store tab's Settings screen (or with
+`curl`), and live as files under **`<config dir>/secrets/<repo>/`** — the directory next to the
+loaded `server.toml`, mode `0700`, one file per secret, mode `0600`; a `kind = "dir"` secret is a
+sub-folder holding its `files`. Nothing is kept in the database or the browser. Every write goes
+to a temporary file first and is renamed into place, so a half-written secret is never visible,
+and a new value forgets the old value's verification.
+
+What a job gets: when its preset's `repo` has a profile and the folder exists, the worker sets
+`$<secrets_dir_env>` (`APP_SECRETS=/…/secrets/app` above) in the job environment and nothing
+else — the scripts read the folder the way they already read a local one. The job's stdout is
+masked: every `kind = "value"` secret of 8 or more characters is replaced by `****` before the
+log is written, for local lanes and for logs a remote worker uploads alike (a value split across
+two upload batches is not caught; the runner flushes whole lines, so that is rare).
+
+The API never returns a value. Each item is `{name, kind, optional, verify, present, size,
+fingerprint, verified_at, verify_error, verify_detail}` — `fingerprint` is the first four
+characters plus `…` for a value, the first eight hex digits of the file's SHA-256 for a file, and
+`n/m files` for a dir (which also lists `files[]` with `present` per file).
+
+| route | token | what |
+|---|---|---|
+| `GET /api/repos` | read rule | every `[[repos]]` entry with `release: true/false` and, for profiles, `setup: {required, present, verified, complete}` |
+| `GET /api/repos/<repo>` | read rule | the profile without values, `setup` (plus `missing[]`), the mirror (`path`, `fetched_at`, `age_seconds`) and `branches` (`main` = `default_branch`, `dev`, `main_in_dev`) read from the mirror only |
+| `POST /api/repos/<repo>/fetch` | client token | updates the mirror (all heads and tags, pruned, the same lock the lanes use); 502 `fetch_failed` with the last 60 characters of git's stderr, 504 on timeout |
+| `GET /api/repos/<repo>/secrets` | any client token | `{dir_env, items[]}` as above — never a value |
+| `PUT /api/repos/<repo>/secrets/<name>` | admin | the body is the secret: `Content-Type: text/plain` for a value (one non-empty line, trailing newline dropped), `application/octet-stream` for a file (at most `max_kb`), and `…/secrets/<name>/<file>` for a dir's file. 400 wrong kind or file name, 404 a name that is not in the profile, 413 too large |
+| `DELETE /api/repos/<repo>/secrets/<name>` | admin | only for `optional = true` secrets (409 otherwise) — a required one is replaced, never removed |
+| `POST /api/repos/<repo>/verify` | client token | `{"names": [...]}` or `{}` for every secret with `verify != "none"`; runs the read-only check and records `verified_at` / `verify_error` in `<config dir>/secrets/<repo>/.verify.json`; returns the secrets document |
+
+`verify` kinds in this build: `github` (`GET https://api.github.com/user` with the token, 5 s,
+reports `login: <name>`), `keystore` (`keytool -list -keystore <file>`, plus `-storepass` from a
+value secret named `KEYSTORE_PASSWORD` when the profile has one; `keytool missing` when the
+build machine has none), and `none`. `asc` and `play` answer `not implemented in this build` —
+the page shows the cross and the text rather than a green mark nobody earned.
+
+**The setup gate.** `setup.complete` is true when every non-optional secret is present and either
+has `verify = "none"` or was verified without error. The release routes (`/api/repos/<repo>/release/…`,
+a later change) answer `409 setup_incomplete` until then; the routes above never do, so the
+Settings screen always works. An unknown repository, or one without a profile, is 404 on all of
+them; worker tokens are refused everywhere here.
+
 ## Getting files back out of a job
 
 A job that regenerates files — Flutter goldens are the reason this exists — leaves them in the

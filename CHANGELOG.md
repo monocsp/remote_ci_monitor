@@ -55,6 +55,22 @@ of a key bumps that number and is listed here.
   `<project>/.claude/skills/`, keeping identical files, refusing to overwrite changed ones
   without `--force`. `docs/configuration.md` gained a "Release profile" section and
   `examples/server.toml` a commented profile block.
+- **The Store tab's server side: repositories, secrets and the setup gate.** `GET /api/repos`
+  lists every repository with whether it has a release profile and how far its setup is;
+  `GET /api/repos/<repo>` returns the profile (never a value), the mirror's age and the `main` /
+  `dev` heads with `main_in_dev`, all read from the mirror; `POST /api/repos/<repo>/fetch` updates
+  the mirror under the lanes' lock. Secrets live as files under `<config dir>/secrets/<repo>/`
+  (folder `0700`, files `0600`, written atomically): `GET …/secrets` shows name, kind, presence,
+  size and a fingerprint (first four characters of a value, eight hex digits of a file's SHA-256,
+  `n/m files` for a folder) and never the value; admins `PUT` a value (`text/plain`), a file
+  (`application/octet-stream`, at most `max_kb`) or a folder's file, and may `DELETE` only optional
+  ones; `POST …/verify` runs the read-only checks — `github` and `keystore` are real, `asc` and
+  `play` honestly answer `not implemented in this build` — and records the result. Jobs of a
+  preset whose `repo` has a profile get the folder as `$<secrets_dir_env>` (when it exists) and
+  their stdout masked: every value secret of 8+ characters becomes `****` in the log, for local
+  lanes and remote workers alike. `setup.complete` (all required secrets present and verified)
+  is the gate the release routes of the next change will enforce; none of these routes 409.
+  Adding routes changes no status key, so `schema_version` stays 1.
 
 ### Fixed
 - **A snapshot blob the server only *thinks* it has no longer kills the job.** The `blobs` table and the

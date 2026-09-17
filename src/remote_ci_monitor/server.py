@@ -49,6 +49,8 @@ from remote_ci_monitor.clientwheel import (
 )
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
+    RELEASE_ROLES,
+    RepoConfig,
     ServerConfig,
     admission_warnings,
     advertise_enabled,
@@ -117,12 +119,23 @@ from remote_ci_monitor.events import (
     KIND_SERVER,
     EventBus,
 )
-from remote_ci_monitor.gitops import STDERR_TAIL_LINES, GitError, GitTimeout, resolve_ref
+from remote_ci_monitor.gitops import (
+    STDERR_TAIL_LINES,
+    GitError,
+    GitTimeout,
+    ensure_mirror,
+    fetch_all,
+    is_ancestor,
+    ref_sha,
+    resolve_ref,
+)
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
 from remote_ci_monitor.materialize import blob_path, stale_blob_keys
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
+from remote_ci_monitor.release_secrets import SecretError, SecretStore, store_for
+from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
 from remote_ci_monitor.store import (
     DB_VERSION,
@@ -154,6 +167,11 @@ _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
 _ID_IN_PATH = re.compile(r"/(\d+)")
+#: 스토어 탭(릴리스 프로파일) — `/api/repos/<repo>[/fetch|/secrets[/<secret>[/<file>]]|/verify]`.
+#: 이름 조각은 `/` 없는 아무 글자 — 맞는지는 설정의 이름과 **글자 그대로** 비교해 정한다.
+_REPO_RE = re.compile(r"^/api/repos/([^/]+)(?:/(fetch|verify|secrets)(?:/([^/]+)(?:/([^/]+))?)?)?$")
+#: `PUT …/secrets/<name>` 본문 상한 — 프로파일의 `max_kb` 는 그 안에서 다시 잰다
+MAX_SECRET_BODY = 4 * 1024 * 1024
 
 
 def log_line(msg: str) -> None:
@@ -239,6 +257,15 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
     """`store.finish` 에 바로 넣을 요약 세 값. 결정 37 — 문장은 outcome 표가 만든다."""
     text, code, clean = outcome.summary(code, **args)
     return {"summary": text, "summary_code": code, "summary_args": clean}
+
+
+def _redact_url(url: str) -> str:
+    """`https://user:token@host/…` 의 userinfo 를 지운다 — 저장소 URL 은 응답에 실리므로."""
+    scheme, sep, rest = url.partition("://")
+    if not sep or "@" not in rest.split("/", 1)[0]:
+        return url
+    host_part, slash, path = rest.partition("/")
+    return f"{scheme}://***@{host_part.rsplit('@', 1)[1]}{slash}{path}"
 
 
 def _mb(n: int) -> str:
@@ -776,6 +803,195 @@ class App(RemoteWorkersMixin):
         if not t.admin:
             raise ApiError(403, "admin token required")
         return t
+
+    # ── 스토어 탭 — 저장소 · 비밀 · 설정 게이트 (API 계약 v1) ─────────────────
+
+    def _release_repo(self, name: str) -> tuple[RepoConfig, SecretStore]:
+        """이름이 **글자 그대로** 맞는 `[[repos]]` 이고 프로파일이 있어야 한다. 아니면 404 —
+        프로파일 없는 저장소는 스토어 탭에 없는 저장소다."""
+        repo = self.config.repo(name)
+        if repo is None or repo.release is None:
+            raise ApiError(404, "no such repository with a release profile")
+        store = store_for(self.config, repo.name)
+        assert store is not None
+        store.now_fn = self.now_fn
+        return repo, store
+
+    def _mirror(self, repo: RepoConfig) -> Path:
+        return self.config.data_dir / "mirrors" / repo.name
+
+    def repos_list(self) -> dict[str, Any]:
+        """`GET /api/repos` — 프로파일 유무와 설정 게이트의 셈만. 비밀 이름도 없다."""
+        out = []
+        for repo in self.config.repos:
+            row: dict[str, Any] = {"name": repo.name, "release": repo.release is not None}
+            if repo.release is not None:
+                store = store_for(self.config, repo.name)
+                assert store is not None
+                row["setup"] = store.setup(with_missing=False)
+            out.append(row)
+        return {"repos": out}
+
+    def repo_view(self, name: str) -> dict[str, Any]:
+        """`GET /api/repos/<name>` — 프로파일(값 없이) · 게이트 · 미러 · 브랜치. 원격을 부르지
+        않는다: 미러가 없으면 `null` 이지 오류가 아니다."""
+        repo, store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        listing = None
+        if profile.listing is not None:
+            listing = {
+                "preview": list(profile.listing.preview),
+                "diff": list(profile.listing.diff),
+                "validate": list(profile.listing.validate),
+                "screenshots": list(profile.listing.screenshots),
+                "release_notes": profile.listing.release_notes,
+            }
+        return {
+            "name": repo.name,
+            "url": _redact_url(repo.url),
+            "profile": {
+                "default_branch": profile.default_branch,
+                "tag": profile.tag,
+                "build_number_policy": profile.build_number_policy,
+                "plan_max_age_minutes": profile.plan_max_age_minutes,
+                "driver": profile.driver,
+                "presets": {role: profile.preset_for(role) for role in RELEASE_ROLES},
+                "listing": listing,
+                "secrets_dir_env": profile.secrets_dir_env,
+            },
+            "setup": store.setup(),
+            **self._mirror_doc(repo),
+        }
+
+    def _mirror_doc(self, repo: RepoConfig) -> dict[str, Any]:
+        """`mirror` + `branches` — 미러만 읽는다. `fetched_at` 은 마지막 fetch 가 쓴
+        `FETCH_HEAD` 의 mtime 이다."""
+        profile = repo.release
+        assert profile is not None
+        mirror = self._mirror(repo)
+        fetched_at: str | None = None
+        age: int | None = None
+        try:
+            mtime = (mirror / "FETCH_HEAD").stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None:
+            at = datetime.fromtimestamp(mtime, UTC)
+            fetched_at = at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            age = max(0, int((self.now_fn() - at).total_seconds()))
+        main = ref_sha(mirror, profile.default_branch)
+        dev = ref_sha(mirror, "dev")
+        return {
+            "mirror": {"path": str(mirror), "fetched_at": fetched_at, "age_seconds": age},
+            "branches": {
+                "default_branch": profile.default_branch,
+                "main": main,
+                "dev": dev,
+                "main_in_dev": is_ancestor(mirror, main, dev) if main and dev else None,
+            },
+        }
+
+    def repo_fetch(self, name: str) -> dict[str, Any]:
+        """`POST /api/repos/<name>/fetch` — 미러를 만들고(없으면) 전체 fetch. 잡의 fetch 와 같은
+        락. git 의 stderr 는 서버 로그에, 응답에는 마지막 60자만."""
+        repo, _store = self._release_repo(name)
+        mirror = self._mirror(repo)
+        timeout = self.config.server.git_fetch_timeout_seconds
+        try:
+            ensure_mirror(mirror, repo.url, timeout=timeout)
+            fetch_all(mirror, repo.url, timeout=timeout)
+        except GitTimeout as e:
+            raise ApiError(
+                504,
+                f"fetch of repo '{repo.name}' timed out after {timeout}s",
+                error_code="fetch_timeout",
+                code="fetch_timeout",
+            ) from e
+        except GitError as e:
+            tail = _safe((e.stderr or "").strip())[-60:]
+            for line in (e.stderr or "").strip().splitlines()[-STDERR_TAIL_LINES:]:
+                self.log(f"fetch repo '{repo.name}': [git] {line}")
+            raise ApiError(
+                502, f"fetch failed: {tail or e}", error_code="fetch_failed", code="fetch_failed"
+            ) from e
+        return self._mirror_doc(repo)
+
+    def secrets_view(self, name: str) -> dict[str, Any]:
+        _repo, store = self._release_repo(name)
+        return store.view()
+
+    def secret_put(
+        self, name: str, secret: str, file_name: str | None, data: bytes, content_type: str
+    ) -> dict[str, Any]:
+        _repo, store = self._release_repo(name)
+        try:
+            return store.put(secret, data, content_type=content_type, file_name=file_name)
+        except SecretError as e:
+            raise ApiError(e.status, e.message) from None
+
+    def secret_delete(self, name: str, secret: str) -> dict[str, Any]:
+        _repo, store = self._release_repo(name)
+        try:
+            return store.delete(secret)
+        except SecretError as e:
+            raise ApiError(e.status, e.message) from None
+
+    def secrets_verify(self, name: str, body: Any) -> dict[str, Any]:
+        """`POST /api/repos/<name>/verify` — `{"names": [...]}` 또는 빈 본문(verify != none 전부).
+        없는 비밀은 건드리지 않고 `verify_error` 로 말한다. 결과는 `.verify.json` 에 남는다."""
+        _repo, store = self._release_repo(name)
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        names = body.get("names")
+        if names is None:
+            wanted = [s for s in store.profile.secrets if s.verify != "none"]
+        else:
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                raise ApiError(400, "names must be a list of strings")
+            wanted = []
+            for n in names:
+                try:
+                    wanted.append(store.secret(n))
+                except SecretError as e:
+                    raise ApiError(e.status, e.message) from None
+
+        def sibling(secret_name: str) -> str | None:
+            try:
+                sec = store.secret(secret_name)
+            except SecretError:
+                return None
+            if sec.kind != "value":
+                return None
+            path = store.value_path(sec.name)
+            if path is None:
+                return None
+            try:
+                return path.read_text(encoding="utf-8").strip() or None
+            except (OSError, UnicodeDecodeError):
+                return None
+
+        for sec in wanted:
+            if sec.verify == "none":
+                continue
+            path = store.value_path(sec.name)
+            try:
+                if path is None:
+                    store.record_verify(sec.name, "not present")
+                    continue
+                result = run_verify(sec, path, sibling_value=sibling)
+                store.record_verify(sec.name, result.error, detail=result.detail)
+            except SecretError as e:
+                raise ApiError(e.status, e.message) from None
+        return store.view()
+
+    def mask_for_preset(self, preset_name: str) -> tuple[bytes, ...]:
+        """원격 워커가 올리는 로그도 같은 규칙으로 지운다 — 값은 서버의 비밀 폴더에 있다."""
+        preset = self.config.preset(preset_name)
+        if preset is None or not preset.repo:
+            return ()
+        store = store_for(self.config, preset.repo)
+        return store.mask_values() if store is not None else ()
 
     # ── 잡 산출물 (M5e) ─────────────────────────────────────────────────────
 
@@ -2480,6 +2696,16 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/worker/"):
             self._worker_route(method, path)
             return
+        if path == "/api/repos":
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._no_worker_token()
+            self._send_json(200, self.app.repos_list())
+            return
+        m = _REPO_RE.match(path)
+        if m:
+            self._repo_route(method, m.group(1), m.group(2), m.group(3), m.group(4))
+            return
         if path == "/gc":
             self._only(method, "POST")
             self.app.require_admin(self._token())
@@ -2584,6 +2810,56 @@ class Handler(BaseHTTPRequestHandler):
             self._client_wheel(raw_path.removeprefix("/client").removeprefix("/"))
             return
         raise ApiError(404, "not found", hint=not_found_hint(path))
+
+    def _repo_route(
+        self, method: str, name: str, sub: str | None, secret: str | None, file_name: str | None
+    ) -> None:
+        """`/api/repos/<name>/…` — 읽기는 읽기 규칙(비밀 목록은 토큰 필수), fetch·verify 는
+        클라이언트 토큰, 비밀 쓰기·삭제는 admin(Bearer 만 — CSRF)."""
+        if sub is None:
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._no_worker_token()
+            self._send_json(200, self.app.repo_view(name))
+            return
+        if sub == "fetch":
+            if secret is not None:
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self._only(method, "POST")
+            self.app.require_client_token(self._token())
+            self._json_body()  # 본문은 없다 — 읽어서 연결을 깨끗이 둔다
+            self._send_json(200, self.app.repo_fetch(name))
+            return
+        if sub == "verify":
+            if secret is not None:
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self._only(method, "POST")
+            self.app.require_client_token(self._token())
+            self._send_json(200, self.app.secrets_verify(name, self._json_body()))
+            return
+        # secrets
+        if secret is None:
+            self._only(method, "GET")
+            # 비밀의 **이름과 지문**도 공개 읽기가 아니다 — 아무 토큰이나, 그러나 토큰은 있어야
+            self.app.require_client_token(self._require_read_token())
+            self._send_json(200, self.app.secrets_view(name))
+            return
+        if method == "PUT":
+            self.app.require_admin(self._token())
+            length = self._content_length()
+            if length > MAX_SECRET_BODY:
+                raise ApiError(413, f"secret larger than {MAX_SECRET_BODY} bytes")
+            data = self.rfile.read(length) if length else b""
+            ctype = self.headers.get("Content-Type") or ""
+            self._send_json(200, self.app.secret_put(name, secret, file_name, data, ctype))
+            return
+        if method == "DELETE":
+            if file_name is not None:
+                raise ApiError(404, "not found", hint=not_found_hint(self.path))
+            self.app.require_admin(self._token())
+            self._send_json(200, self.app.secret_delete(name, secret))
+            return
+        raise ApiError(405, "method not allowed", headers={"Allow": "PUT, DELETE"})
 
     def _artifact_archive(self, job_id: int) -> None:
         """묶음을 흘려보낸다. 전송 슬롯은 **기다리지 않는다** — 일반 슬롯을 쥔 채 기다리면

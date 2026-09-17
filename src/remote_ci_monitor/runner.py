@@ -121,6 +121,9 @@ class RunSpec:
     grace_seconds: int = 10
     #: 시작 전에 최종 환경에서 찾아야 하는 도구(이름 또는 절대경로). 비어 있으면 검사 없음.
     requires: tuple[str, ...] = ()
+    #: stdout 을 로그 파일과 관찰자에게 주기 **전에** 거치는 마스킹(릴리스 비밀 → `****`).
+    #: None 이면 그대로. 줄 단위 배치에 적용되므로 한 값이 줄을 넘지 않는 한 조각이 안 남는다.
+    mask: Callable[[bytes], bytes] | None = None
 
 
 def missing_tools(
@@ -319,6 +322,8 @@ def _pump(
                 buf = b""
             if lines:
                 batch = b"".join(raw + b"\n" for raw in lines)
+                if spec.mask is not None:
+                    batch = spec.mask(batch)  # 파일에도 관찰자에게도 마스킹된 바이트만 간다
                 log.write(batch)
                 log.flush()
                 observer.output(batch)
@@ -345,9 +350,12 @@ def _pump(
         if not eof and result.kill_sent and proc.poll() is not None:
             break  # 손자가 파이프를 잡고 있어도 더 기다리지 않는다
     if buf:
-        log.write(buf + b"\n")
+        tail = buf + b"\n"
+        if spec.mask is not None:
+            tail = spec.mask(tail)
+        log.write(tail)
         log.flush()
-        observer.output(buf + b"\n")
+        observer.output(tail)
     try:
         proc.wait(timeout=spec.grace_seconds + 5)
     except subprocess.TimeoutExpired:
