@@ -1302,7 +1302,7 @@ STORE_STUB_JS = r"""
 """
 
 STORE_ROWS_JS = """
-(() => [...document.querySelectorAll('#store details.srow[data-row]')].map((d) => ({
+(() => [...document.querySelectorAll('#store details.srow[data-row]:not(.review)')].map((d) => ({
   row: d.getAttribute('data-row'), state: d.getAttribute('data-state'), open: d.open,
   head: d.querySelector('summary').textContent.replace(/\\s+/g, ' ').trim(),
 })))()
@@ -1386,7 +1386,8 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             # 관문이 열린 저장소 — 행 넷 + 본체 머리
             c.open(
                 base + "&complete=1#/store/app",
-                ready_js="document.querySelectorAll('#store details.srow[data-row]').length === 4",
+                ready_js="document.querySelectorAll("
+                "'#store details.srow[data-row]:not(.review)').length === 4",
             )
             rows = c.eval(STORE_ROWS_JS)
             by = {r["row"]: r for r in rows}
@@ -1400,7 +1401,7 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             assert by["build"]["state"] == "na" and by["store"]["state"] == "na", rows
             assert "not available in this build" in by["build"]["head"], by["build"]
             review = c.eval(_q("#review-panel summary", ".textContent"))
-            assert "Submit for review" in review and "not available yet" in review, review
+            assert "Submit for review" in review and "not available in this build" in review, review
             assert c.eval("document.getElementById('review-panel').open") is False
             fetch_disabled = c.eval(_q("#store [data-fetch-remote]", ".disabled"))
             assert fetch_disabled is True, "no token → fetch disabled with a reason"
@@ -1416,10 +1417,361 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             # 한국어로 바꾸면 행 이름이 따라온다
             c.eval("document.getElementById('lang-btn').click()")
             heads = c.eval(
-                "[...document.querySelectorAll('#store details.srow[data-row] > summary .t')]"
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row]:not(.review) > summary .t')]"
                 ".map(e => e.textContent)"
             )
             assert heads == ["설정", "소스", "빌드 · 업로드", "스토어"], heads
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 심사 패널 본체 · Store 행 · Build·upload 행 (항목 5~24 · 28 · 36 · 40 · 46~49) ─────────
+#
+# STORE-TAB-API-2 의 `GET …/release` · `GET …/release/listing` · `POST …/release/review` 를 통째로
+# 스텁한다(서버 쪽은 다른 PR). `?unsafe=1` 이면 심사 플랜의 iOS 판정이 `unsafe_release_type` 이고,
+# `window.rcmRefuse = "<code>"` 를 두면 review POST 가 그 코드로 409 를 답한다.
+RELEASE_STUB_JS = r"""
+(() => {
+  const unsafe = /[?&]unsafe=1(&|$)/.test(location.search);
+  const sha = (p) => p + "0".repeat(40 - p.length);
+  const at = "2026-09-17T12:03:00Z";
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const setup = { required: 3, present: 3, verified: 3, complete: true, missing: [] };
+  const presets = { plan: "release-plan", upload: "release-upload", review: "release-review",
+    gate: null, qa: null, dev: null };
+  const doc = {
+    name: "app", url: "git@example.invalid:app.git",
+    profile: { default_branch: "main", tag: "prod/{version}-{build}",
+      build_number_policy: "auto", plan_max_age_minutes: 30, driver: null,
+      listing: { preview: ["x"], diff: ["y"], validate: ["z"] }, secrets_dir_env: "APP_SECRETS",
+      presets },
+    setup,
+    mirror: { path: "/srv/rcm/mirrors/app", age_seconds: 200, fetched_at: ago(200) },
+    branches: { main: sha("9e1c4d2f"), dev: sha("7a03b9f0"), main_in_dev: true },
+  };
+  const secrets = { dir_env: "APP_SECRETS", items: [
+    { name: "AuthKey.p8", kind: "file", optional: false, verify: "asc", present: true,
+      size: 2112, fingerprint: "9f1c2a3b", verified_at: at, verify_error: null, max_kb: 64 },
+    { name: "GH_TOKEN", kind: "value", optional: false, verify: "github", present: true,
+      size: null, fingerprint: "ghp_…", verified_at: at, verify_error: null },
+    { name: "review_information", kind: "dir", optional: false, verify: "none", present: true,
+      fingerprint: "2/2 files", verified_at: null, verify_error: null,
+      files: [{ name: "demo_user.txt", present: true, size: 12, fingerprint: "aabbccdd" },
+              { name: "demo_password.txt", present: true, size: 9, fingerprint: "eeff0011" }] },
+  ] };
+  const planDoc = { schema: 1, build_name: "1.0.1", n: 181, first_release: false,
+    store: { asc_live: "1.0.0", asc_live_build: 180, asc_editing: "1.0.1",
+             play: { production: 180 } },
+    blockers: [], warnings: [{ code: "W-TABLET", text: "no tablet screenshots" }],
+    measured_at: ago(240) };
+  const reviewPlanDoc = { schema: 2, build_name: "1.0.1", n: 181, plan_verdict: "ok",
+    ios: unsafe ? "unsafe_release_type" : "ready", android: "ready",
+    observed: { ios: "PREPARE_FOR_SUBMISSION", android: "completed", auto_release: false },
+    listing: { preview: [], diff: [] }, measured_at: ago(240) };
+  const uploadDoc = { schema: 1, n: 181, status: "success", mode: "upload",
+    platforms: ["ios", "android"], tag: "prod/1.0.1-181" };
+  const job = (id, preset, role) => ({ id, preset, role, state: "succeeded",
+    sha: sha("9e1c4d2f"), ref: "main", started_at: ago(4000 - id), finished_at: ago(3000 - id),
+    artifacts: [] });
+  const release = {
+    setup,
+    plan: { job_id: 641, state: "succeeded", measured_at: ago(240), age_seconds: 240,
+            stale: false, build_name: "1.0.1", doc: planDoc },
+    review: { plan: { job_id: 651, state: "succeeded", age_seconds: 240, stale: false,
+                      doc: reviewPlanDoc },
+              result: null },
+    upload: { job_id: 650, state: "succeeded", finished_at: ago(3000), doc: uploadDoc },
+    jobs: [job(651, "release-review", "review"), job(650, "release-upload", "upload"),
+           job(641, "release-plan", "plan")],
+  };
+  const listing = { sha: sha("9e1c4d2f"),
+    preview: ["ios.promotional_text: Short daily notes",
+              "description: A calm journal for every day.",
+              "ios.keywords: journal,mood,notes",
+              "ios.support_url: https://example.invalid/support",
+              "ios.subtitle: Daily notes", "android.title: Journal",
+              "android.short_description: A calm journal",
+              "android.full_description: A calm journal for every day, with photos.",
+              "generated by store_listing.py"],
+    diff: ["ios/ko/subtitle: «Daily» → «Daily notes»", "screenshots ios +1"],
+    release_notes: { path: "store/release_notes/1.0.1/ko.txt",
+                     text: "• photos in inquiries\n• fixes" },
+    screenshots: [
+      { path: "store/screenshots/ios/ko/01_iphone65_home.png", bytes: 1234,
+        width: 1284, height: 2778 },
+      { path: "store/screenshots/ios/ko/02_iphone65_write.png", bytes: 1200,
+        width: 1284, height: 2778 },
+      { path: "store/screenshots/android/ko-KR/01_phone_home.png", bytes: 999,
+        width: null, height: null }],
+    errors: [] };
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  window.rcmStoreCalls = [];
+  window.rcmRefuse = null;
+  window.rcmStoreApi = {
+    repos: () => ok({ repos: [{ name: "app", release: true, setup }] }),
+    repo: () => ok(doc),
+    secrets: () => ok(secrets),
+    putSecret: () => ok({}),
+    verify: () => ok(secrets),
+    fetchRemote: () => ok({ mirror: doc.mirror, branches: doc.branches }),
+    release: () => ok(release),
+    listing: () => ok(listing),
+    listingFileUrl: (name, path) =>
+      "/api/repos/" + name + "/release/listing/file?path=" + encodeURIComponent(path),
+    plan: (name, body) => { window.rcmStoreCalls.push(["plan", body]);
+                            return ok({ job_id: 642 }, 202); },
+    review: (name, body) => {
+      window.rcmStoreCalls.push(["review", body]);
+      if (window.rcmRefuse) return Promise.resolve({ ok: false, status: 409,
+        body: { error: "refused", code: window.rcmRefuse, error_code: window.rcmRefuse } });
+      return ok({ job_id: 660 }, 202);
+    },
+    validateListing: (name, body) => { window.rcmStoreCalls.push(["validate", body]);
+      return ok({ ok: false, lines: ["ios/ko/keywords: 101 > 100"], exit: 1 }); },
+    upload: () => ok({ job_id: 0 }, 202),
+    github: () => ok({ log: [], tags: [], prs: null }),
+  };
+})();
+"""
+
+GROUPS_JS = """
+(() => {
+  const sec = (p) => document.querySelector('#review-panel .ssec[data-platform="' + p + '"]');
+  const groups = (p) => [...sec(p).querySelectorAll('.grp')].map(g => g.dataset.group);
+  const heads = (p) => [...sec(p).querySelectorAll('.grp h4')].map(h => h.textContent);
+  return { ios: groups('ios'), android: groups('android'),
+           iosHeads: heads('ios'), androidHeads: heads('android') };
+})()
+"""
+
+FORBIDDEN_BUTTONS_JS = """
+[...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
+  .map(b => (b.textContent || b.value || '').trim())
+  .filter(t => /release this version|publish|rollout/i.test(t))
+"""
+
+SUBMIT = "#review-panel [data-submit-review]"
+MANAGED = '#review-panel [data-review-check="managed"]'
+ANDROID = '#review-panel [data-review-check="android"]'
+
+
+def _type_n(c: Chrome, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.getElementById('review-n'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def _wait(c: Chrome, js: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not c.eval(js):
+        time.sleep(0.05)
+    assert c.eval(js), js
+
+
+def _submit_reason(c: Chrome) -> str:
+    return c.eval(_q("#review-panel [data-submit-reason]", ".textContent"))
+
+
+def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
+    """항목 5~24 · 28 · 36 · 46~49 — 릴리스 상태가 있으면 Store 행은 plan.json 의
+    요약(라이브 · 편집 중 · Play 트랙 · next N · 플랜 나이)이고 Build·upload 행은
+    upload.json 의 결과 + 이 회차의 잡 목록이다. 본체는 App Store 절과 Google Play 절을
+    **같은 그룹 순서**로 나란히 그리고, Play 에 없는 필드는 — 와 이유다. Submit 은
+    (심사 플랜 ok · 안 낡음) ∧ (친 N = plan.n) ∧ (Android 를 골랐으면 관리형 게시 체크)
+    일 때만 열린다 — 틀린 N 은 닫힌 채 «≠ 181», 맞는 N + 체크로 열린다. 보낸 본문은
+    서버 계약 그대로고, 409 는 코드가 버튼 옆에 글자로 온다. `unsafe_release_type` 은
+    닫을 수 없는 빨간 띠 + 닫힌 Submit. Release · Publish · Rollout 버튼은 어떤 상태에도
+    없다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = _q(SUBMIT) + " !== null"
+        with Chrome(tmp_path / "chrome-review", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            # 쿼리가 달라야 다시 싣는다 — 해시만 바뀌면 boot() 가 안 돌아 토큰을 안 읽는다
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js=ready + " && document.querySelector('#tok-btn').textContent"
+                ".indexOf('macmini-admin') >= 0",
+            )
+            rows = c.eval(STORE_ROWS_JS)
+            by = {r["row"]: r for r in rows}
+            assert [r["row"] for r in rows] == ["setup", "source", "build", "store"], rows
+            # Build·upload 행(항목 5): upload.json 의 결과 — 초록 접힘, 버전 (N) · 올림 · 태그
+            build = by["build"]
+            assert build["state"] == "ok" and build["open"] is False, build
+            assert "1.0.1 (181)" in build["head"] and "uploaded" in build["head"], build
+            assert "prod/1.0.1-181" in build["head"], build
+            items = c.eval(
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row=\"build\"] .checklist .ci')]"
+                ".map(li => [li.className.replace('ci ', ''), li.textContent.trim().slice(0, 40)])"
+            )
+            assert [i[0] for i in items] == ["ok", "ok", "ok"], items
+            assert items[0][1].startswith("✓#641 release-plan · plan · succeeded"), items
+            # Store 행(항목 6): plan.json 의 요약 + Refresh(= release-plan 잡)
+            store = by["store"]
+            assert store["state"] == "ok" and store["open"] is False, store
+            assert "App Store live 1.0.0 (180)" in store["head"], store
+            assert "editing 1.0.1" in store["head"] and "Play production 180" in store["head"]
+            assert "next N 181" in store["head"] and "1 warnings" in store["head"], store
+            assert re.search(r"plan \d+m ago", store["head"]), store
+            assert c.eval(_q("#store [data-plan-refresh]", ".disabled")) is False
+
+            # 본체(항목 7): 네 행이 초록이라 펼쳐져 있고, 필은 «not submitted»
+            pill = _q("#review-panel [data-panel-pill]", ".getAttribute('data-panel-pill')")
+            assert c.eval("document.getElementById('review-panel').open") is True
+            assert c.eval(pill) == "not_submitted"
+            head = c.eval(_q("#review-panel > summary", ".textContent"))
+            assert "1.0.1 · build 181 · Submit for review · App Store + Google Play" in head, head
+            # 두 절 — 같은 그룹 순서 · 같은 줄 수 (항목 15)
+            groups = c.eval(GROUPS_JS)
+            assert groups["ios"] == [
+                "screenshots",
+                "version_info",
+                "whats_new",
+                "build",
+                "review_info",
+            ], groups
+            assert groups["android"] == [
+                "graphics",
+                "store_listing",
+                "release_notes",
+                "release",
+                "app_content",
+            ], groups
+            assert len(groups["iosHeads"]) == len(groups["androidHeads"]) == 5, groups
+            assert groups["iosHeads"][1] == "Version information", groups
+            assert groups["androidHeads"][1] == "Store listing", groups
+            body = c.eval("document.getElementById('review-panel').innerText")
+            assert "Play has no such field" in body, body[:1500]
+            assert "Promotional text" in body and "Short description" in body, body[:1500]
+            assert "ready" in body and "judged 4m ago" in body, body[:1500]
+            assert "Approval does not release" in body
+            assert "console-only — not touched by rcm" in body
+            assert "unknown to the API" in body, "the managed-publishing pill never turns green"
+            assert "undefined" not in body and "NaN" not in body
+            # 글자 수 세기(항목 11) · changed 칩(항목 21) · 스크린샷 띠(항목 10)
+            counters = c.eval(
+                "[...document.querySelectorAll("
+                "'#review-panel .ssec[data-platform=\"ios\"] .counter')].map(e => e.textContent)"
+            )
+            assert "11/30" in counters, counters  # «Daily notes» / subtitle 30
+            assert c.eval("document.querySelectorAll('#review-panel .chip.changed').length") >= 1
+            shots = c.eval(
+                "[...document.querySelectorAll('#review-panel .ssec img')]"
+                ".map(i => i.getAttribute('src'))"
+            )
+            assert len(shots) == 3, shots
+            assert all("/release/listing/file?path=" in s for s in shots), shots
+            ios_imgs = "document.querySelectorAll('#review-panel .ssec[data-platform=\"ios\"] img')"
+            assert c.eval(ios_imgs + ".length") == 2
+            # 릴리스 노트 — 같은 원문, 상한만 다르다(4000 · 500)
+            assert "/4000" in body and "/500" in body, body[:2000]
+
+            # Submit 활성 규칙(항목 22 · 23 · 28)
+            disabled = _q(SUBMIT, ".disabled")
+            assert c.eval(disabled) is True
+            reason = _submit_reason(c)
+            assert "type the build number" in reason and "managed-publishing" in reason, reason
+            _type_n(c, "180")
+            assert c.eval(disabled) is True, "a wrong N keeps the button closed"
+            assert c.eval(_q("#review-panel [data-n-state]", ".textContent")) == "≠ 181"
+            _type_n(c, "181")
+            assert c.eval(disabled) is True, "the right N alone is not enough with Play selected"
+            assert c.eval(_q("#review-panel [data-n-state]", ".textContent")) == "= 181"
+            assert "managed-publishing" in _submit_reason(c)
+            assert c.eval(_q(MANAGED, ".checked")) is False, "never pre-ticked"
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is False, "right N + managed box → enabled"
+            assert _submit_reason(c) == ""
+            # 관리형 게시 체크는 Play 를 빼면 무의미해지고, 다시 넣어도 기억되지 않는다
+            c.eval(_q(ANDROID, ".click()"))
+            assert c.eval(disabled) is False, "iOS only: no managed box needed"
+            c.eval(_q(ANDROID, ".click()"))
+            assert c.eval(_q(MANAGED, ".checked")) is False
+            assert c.eval(disabled) is True
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is False
+
+            # 출시 버튼은 없다 — 어떤 상태에도 (계약 §6)
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+
+            # Submit → 대화상자(되돌릴 수 없다 · 플랫폼 이름) → 확인 → 계약 그대로의 본문
+            c.eval(_q(SUBMIT, ".click()"))
+            assert c.eval("document.getElementById('submit-dialog').open") is True
+            dlg = c.eval("document.getElementById('submit-dialog').innerText")
+            assert "Submit 1.0.1 (181) for review?" in dlg and "cannot be undone" in dlg, dlg
+            assert "App Store + Google Play" in dlg, dlg
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.length > 0")
+            calls = c.eval("window.rcmStoreCalls")
+            assert calls and calls[-1][0] == "review", calls
+            assert calls[-1][1] == {
+                "build_name": "1.0.1",
+                "ref": "main",
+                "mode": "submit",
+                "platform": "both",
+                "confirm_build_number": "181",
+                "play_managed_publishing": "confirmed-on",
+                "listing": "notes-only",
+                "phased": "1",
+            }, calls[-1]
+            # 보낸 뒤 확인은 지워진다 — 다음 되돌릴 수 없는 일로 넘어가지 않는다
+            _wait(c, "document.getElementById('review-n').value === ''")
+            assert c.eval(_q(MANAGED, ".checked")) is False
+            assert c.eval(disabled) is True
+
+            # 409 — 서버의 코드가 버튼 옆에 그대로, 클라이언트는 돌아가지 않는다
+            c.eval("window.rcmRefuse = 'managed_publishing_unconfirmed'")
+            _type_n(c, "181")
+            c.eval(_q(MANAGED, ".click()"))
+            c.eval(_q(SUBMIT, ".click()"))
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, _q("#review-panel [data-review-error]") + " !== null")
+            err = c.eval(_q("#review-panel [data-review-error]", ".textContent"))
+            assert err == "server refused: managed_publishing_unconfirmed", err
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+
+            # 폰 폭(항목 41): 두 절이 세로로 쌓이고 옆으로 새지 않는다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            cols = c.eval(
+                "getComputedStyle(document.querySelector('#review-panel .stores'))"
+                ".gridTemplateColumns.split(' ').length"
+            )
+            assert cols == 1, cols
+            c.viewport(1240)
+
+            # 항목 36 — unsafe_release_type: 닫을 수 없는 빨간 띠, 필 빨강, Submit 닫힘
+            banner = "[data-unsafe-banner]"
+            c.open(base + "&unsafe=1#/store/app", ready_js=_q(banner) + " !== null")
+            assert c.eval(_q(banner, ".getAttribute('role')")) == "alert"
+            kind = c.eval(_q(banner, ".getAttribute('data-unsafe-banner')"))
+            assert kind == "unsafe_release_type", kind
+            n_buttons = c.eval(f"document.querySelectorAll('{banner} button').length")
+            assert n_buttons == 0, "not dismissable"
+            assert "not set to manual release" in c.eval(_q(banner, ".textContent"))
+            assert c.eval(pill) == "unsafe_release_type"
+            assert c.eval("document.getElementById('review-panel').open") is False
+            _type_n(c, "181")
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is True, "unsafe → closed even with N and the box"
+            assert "fix the release type" in _submit_reason(c)
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 한국어로 바꿔도 스토어·필드 이름은 카탈로그에서 온다 — 판정 낱말은 서버 것 그대로.
+            # 접혀 있어도 textContent 에는 본문이 있다.
+            c.eval("document.getElementById('lang-btn').click()")
+            ko = c.eval("document.getElementById('review-panel').textContent")
+            assert "App Store · iOS" in ko and "버전 정보" in ko, ko[:800]
+            assert "unsafe_release_type" in ko, ko[:800]
             assert c.page_errors() == []
     finally:
         srv.close()
