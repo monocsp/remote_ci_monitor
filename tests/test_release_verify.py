@@ -3,7 +3,7 @@
 여기서 지키는 것:
 - `github` 는 `GET /user` 하나(헤더로만 토큰), 200 이면 `login: <이름>`, 아니면 `HTTP <코드>`.
 - `keystore` 는 keytool 이 없으면 `keytool missing`(present 는 그대로), 있으면 `-list` 의 종료 코드.
-- `asc` · `play` 는 「not implemented in this build」 — 오류가 아니라 detail 이다(관문을 막지 않는다).
+- `asc` · `play` 는 「not implemented in this build」 — 오류가 아니라 detail 이다.
 - 결과 문구에 토큰 · 경로 · 예외 원문이 없다. 네트워크는 부르지 않는다(전부 스텁).
 """
 
@@ -127,10 +127,10 @@ def test_keystore_runs_keytool_list_with_the_sibling_password_when_there_is_one(
     (argv, kw), *_ = seen
     assert argv == ["/usr/bin/keytool", "-list", "-keystore", str(ks), "-storepass", "s3cret-pw"]
     assert kw["stdin"] is subprocess.DEVNULL and kw["capture_output"] is True
-    # 비밀번호 없이도 돈다 — 그때는 -storepass 가 없다
+    # 비밀번호 비밀이 없으면 keytool 을 부르지 않는다 — stdin 에서 죽는 대신 «검사 안 함» 을 남긴다
     seen.clear()
-    run_verify(keystore_secret(), ks, which=lambda _n: "keytool", run=fake_run)
-    assert seen[0][0] == ["keytool", "-list", "-keystore", str(ks)]
+    quiet = run_verify(keystore_secret(), ks, which=lambda _n: "keytool", run=fake_run)
+    assert seen == [] and quiet.error is None and "not checked" in (quiet.detail or "")
 
 
 def test_keystore_failure_reports_the_exit_code_only(tmp_path):
@@ -140,16 +140,23 @@ def test_keystore_failure_reports_the_exit_code_only(tmp_path):
     def fake_run(argv, **kw):
         return subprocess.CompletedProcess(argv, 1, "", f"keytool error: {ks} is not a keystore")
 
-    result = run_verify(keystore_secret(), ks, which=lambda _n: "keytool", run=fake_run)
+    pw = {"KEYSTORE_PASSWORD": "pw"}.get
+    result = run_verify(
+        keystore_secret(), ks, which=lambda _n: "keytool", run=fake_run, sibling_value=pw
+    )
     assert result == VerifyResult("keytool exit 1")
     assert str(ks) not in repr(result)
 
     def hang(argv, **kw):
         raise subprocess.TimeoutExpired(argv, kw["timeout"])
 
-    assert run_verify(keystore_secret(), ks, which=lambda _n: "keytool", run=hang).error == (
-        "keytool timed out"
-    )
+    assert run_verify(
+        keystore_secret(), ks, which=lambda _n: "keytool", run=hang, sibling_value=pw
+    ).error == ("keytool timed out")
+
+    # 비밀번호 비밀이 없으면 keytool 을 부르지 않고 «검사 안 함» 을 남긴다 — 관문을 막지 않는다.
+    untouched = run_verify(keystore_secret(), ks, which=lambda _n: "keytool", run=hang)
+    assert untouched.error is None and "not checked" in (untouched.detail or "")
 
 
 # ── asc · play · unknown · 검증기 예외 ───────────────────────────────────────
