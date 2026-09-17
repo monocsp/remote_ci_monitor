@@ -442,8 +442,13 @@
     },
     "progress.timing_note": "step times are server receive times (as_received)",
     "progress.now": function (a) { return "step " + a.cur + "/" + a.total + " " + a.step; },
+    // `::rcm::progress::` — unit 과 state 는 스크립트의 말이라 번역하지 않는다
+    "progress.sub_now": function (a) { return "now: " + a.unit + " · " + a.state; },
+    "progress.units_aria": function (a) { return a.n + " units in this step"; },
+    "progress.units_more": "more units than the grid shows (500 per step)",
     // 전체 진행 막대 — 퍼센트 옆에 **무엇으로 셌는지**를 늘 붙인다. 시간 눈금은 그 추정이
     // 어디서 왔는지까지 밝힌다(측정인가 프리셋인가) — 막대는 길이로만 말하기 때문이다.
+    "pbar.sub": function (a) { return a.percent + "% · " + a.done + "/" + a.total + " · " + a.unit; },
     "pbar.steps": function (a) { return a.percent + "% · " + a.done + "/" + a.total + " steps"; },
     "pbar.steps_all": function (a) { return a.done + "/" + a.total + " steps"; },
     "pbar.time": function (a) { return a.percent + "% · by expected time"; },
@@ -873,6 +878,10 @@
     "progress.steps_failed": function (a) { return "단계 " + a.n + "개 실패"; },
     "progress.timing_note": "단계 시각은 서버가 받은 시각입니다 (as_received)",
     "progress.now": function (a) { return "단계 " + a.cur + "/" + a.total + " " + a.step; },
+    "progress.sub_now": function (a) { return "지금: " + a.unit + " · " + a.state; },
+    "progress.units_aria": function (a) { return "이 단계의 단위 " + a.n + "개"; },
+    "progress.units_more": "격자에 못 올린 단위가 더 있습니다 (단계당 500개)",
+    "pbar.sub": function (a) { return a.percent + "% · " + a.done + "/" + a.total + " · " + a.unit; },
     "pbar.steps": function (a) { return a.percent + "% · 단계 " + a.done + "/" + a.total; },
     "pbar.steps_all": function (a) { return "단계 " + a.done + "/" + a.total; },
     "pbar.time": function (a) { return a.percent + "% · 예상 시간 기준"; },

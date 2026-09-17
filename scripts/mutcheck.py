@@ -69,6 +69,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      쓰지 않는다 (`core/queue.py`, 2026-09-15 사고 — 정상으로 도는 `gate` 가 매 실행 빨개졌다)
   ㉜ web-quiet-is-actionable — 「조용함」을 「확인이 필요한 작업」 패널에 올림: 빨간 소음이
      이름만 바꿔 그대로 남는다 (`web/app.js`, node --test)
+  ㉝ web-progress-sub-full-bar — 스텝 안의 세부 진행(`::rcm::progress::`)이 `done == total` 에서
+     막대를 100% 로 채움: 아직 도는 잡이 「끝났다」로 읽힌다 (`web/app.js`, node --test)
+  ㉞ progress-sub-not-reset-by-step — 새 `::rcm::step::` 이 앞 스텝의 세부 진행을 안 비움: 다음
+     스텝이 지난 스텝의 41/68 을 달고 돈다 (`core/progress.py`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -522,6 +526,21 @@ MUTANTS = (
         new='"blocked_by_group", "overdue", "paused", "quiet"];',
         tests=("tests/web/summary.test.js",),
         runner="node",
+    ),
+    Mutant(
+        name="web-progress-sub-full-bar",
+        path="src/remote_ci_monitor/web/app.js",
+        old="out.pct = Math.min(99, pctOf(sub.done, sub.total));",
+        new="out.pct = pctOf(sub.done, sub.total);",
+        tests=("tests/web/progress_sub.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        name="progress-sub-not-reset-by-step",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="            sub, units, unit_pos, units_truncated = None, [], {}, False\n",
+        new="",
+        tests=("tests/test_progress_sub.py",),
     ),
 )
 

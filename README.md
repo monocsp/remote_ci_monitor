@@ -225,7 +225,12 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::step::analyze       # a new step starts (the previous one ends)
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
+::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
 ```
+
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
+parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
+it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
