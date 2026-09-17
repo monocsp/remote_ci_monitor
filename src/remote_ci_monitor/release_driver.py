@@ -353,12 +353,18 @@ class DriverRunner:
         checkout: Path,
         env: Mapping[str, str],
         *,
+        build_name: str | None = None,
         timeout: float = STATUS_TIMEOUT,
     ) -> tuple[list[str] | None, str | None]:
-        """`<driver> --status` 의 stdout 줄들(≤ 64 KB). 못 돌리면 (None, 이유)."""
+        """`<driver> --status [--build-name X]` 의 stdout 줄들(≤ 64 KB). 못 돌리면 (None, 이유).
+        버전을 아는 회차(대장의 마지막 실행 · 마지막 플랜)가 있으면 같이 준다 — 없이 부르면
+        드라이버가 exit 2 로 «어느 버전?» 을 되묻는다(2026-09-17 실배치)."""
+        argv = [str(driver), "--status"]
+        if build_name:
+            argv += ["--build-name", build_name]
         try:
             proc = subprocess.run(
-                [str(driver), "--status"],
+                argv,
                 cwd=str(checkout),
                 env={**base_env(self.environ), **dict(env)},
                 stdin=subprocess.DEVNULL,

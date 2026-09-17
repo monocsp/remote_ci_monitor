@@ -7,6 +7,24 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **Store tab: the top release bar was always full.** Its fill width was an inline `style`
+  attribute, which the page's Content-Security-Policy (`style-src 'self'`) drops; the fill now
+  goes through the same `data-fill` pass as every other bar. While only a release job runs (no
+  driver round) the bar's detail no longer talks about «0 of 9 stages» and no longer says
+  «elapsed 0s» — it names the job, its own counter and the elapsed time from the queue row.
+  ([#156](https://github.com/monocsp/remote_ci_monitor/pull/156))
+- **Store tab: listing preview in table form is read.** Besides `key: value`, a preview line
+  shaped `key   12자   value` (two or more spaces, an optional character count) under a section
+  header such as `iOS (ko)` / `Android (ko-KR)` is a field; `name` is the title, `(비어 있음)`
+  is empty. Lines that are not a known field stay under «other preview lines».
+  ([#156](https://github.com/monocsp/remote_ci_monitor/pull/156))
+- **Store tab: the Build · upload checklist shows this round only.** Jobs before the latest
+  plan job fold into «earlier jobs · n». ([#156](https://github.com/monocsp/remote_ci_monitor/pull/156))
+- **Store tab: `--status` gets `--build-name`.** The driver view passes the build name of the
+  latest run or plan, so a driver that asks «which version?» (exit 2) answers instead.
+  ([#156](https://github.com/monocsp/remote_ci_monitor/pull/156))
+
 ## [0.3.2] - 2026-09-18
 
 ### Added
