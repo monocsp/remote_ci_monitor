@@ -263,14 +263,16 @@ when fine and collapsed, red and open when something needs a hand, grey when thi
 to say. Below them the review panel lays out the App Store and Google Play sections in the same group
 order (screenshots · copy with `current/limit` counters · release notes · build/release · review
 information, `—` where a store has no such field), and **Submit for review** opens only after a
-green review plan, the build number typed again, and — when Google Play is selected — the
+green review plan, the build number (typed again, or taken from the plan when the **Build number:
+Auto** toggle is on — the number the plan read from the stores), and — when Google Play is selected — the
 managed-publishing box ticked for this submission; there is no Release, Publish or Rollout button in
 any state, and an `unsafe_release_type` verdict raises a red banner that cannot be dismissed. When the
 profile names a driver, the Build · upload row carries the round's stepper S0–S8 read from the
 driver's own status lines (a Start form with version · Android track · dry-run when nothing runs,
 **Abort** while it runs, **Retry same version** after exit 1, «result unknown — do not resubmit»
 after exit 3, store drift after exit 4), the S2 dialog asks for the build number typed again before
-`confirm` goes out, a **Rehearsal (no upload)** button runs the upload preset in rehearsal mode —
+`confirm` goes out — or, with **Build number: Auto**, the server confirms the plan's number by
+itself and the round does not stop — a **Rehearsal (no upload)** button runs the upload preset in rehearsal mode —
 the real upload is the driver's S7 and there is no upload button — and the Source row shows the
 mirror's last five commits, its tags and «PR list: next».
 

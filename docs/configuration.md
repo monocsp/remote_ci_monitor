@@ -176,7 +176,7 @@ url  = "git@github.com:org/app.git"
 [repos.app.release]
 default_branch       = "main"                    # default "main"
 tag                  = "prod/{version}-{build}"  # default; must contain {version} and {build}
-build_number_policy  = "auto"                    # "auto" (default) | "manual"
+build_number_policy  = "auto"                    # "auto" (default) | "manual" — the Store tab's «Build number» toggle default
 plan_max_age_minutes = 30                        # default 30; integer > 0
 driver               = "scripts/release/product_release.sh"   # optional; relative to the repository
 secrets_dir_env      = "APP_SECRETS"             # required when secrets are listed; ^[A-Z][A-Z0-9_]*$

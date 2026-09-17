@@ -18,7 +18,7 @@ function driver(patch) {
   return Object.assign({ running: false, build_name: "1.0.1", started_at: iso(2280), started_by: "pcs", pid: null, exit_code: null,
     log_tail: [], plan_n: null, status: [] }, patch);
 }
-const ADMIN = { token: "t", admin: true, busy: null, version: "1.0.1", typedN: "" };
+const ADMIN = { token: "t", admin: true, busy: null, version: "1.0.1", typedN: "", nMode: "typed" };
 const release = { plan: { job_id: 641, state: "succeeded", build_name: "1.0.1", doc: { n: 181, build_name: "1.0.1" } } };
 const states = (m) => m.items.map((i) => i.state).join(" ");
 
@@ -225,6 +225,23 @@ describe("driverActions — 어느 버튼이 열리는가", () => {
     const a = S.driverActions(m, ctx({ typedN: "181" }));
     assert.equal(a.start.show, false, "a round waiting for N is a round");
     assert.ok(a.start.reasons.includes("awaiting_n"));
+  });
+  test("exit 2 + «자동» — Confirm 은 친 N 없이 열린다; 플랜에 n 이 없으면 n_unknown", () => {
+    const m = model({ exit_code: 2, plan_n: 181 });
+    assert.equal(S.driverActions(m, ctx({ nMode: "auto", typedN: "" })).confirm.enabled, true);
+    assert.equal(S.driverActions(m, ctx({ nMode: "auto", typedN: "180" })).confirm.enabled, true, "typed value is ignored in auto");
+    assert.equal(S.driverActions(m, ctx({ nMode: null, profile: { build_number_policy: "auto" } })).confirm.enabled, true, "profile default auto");
+    assert.deepEqual(S.driverActions(m, ctx({ nMode: null, profile: { build_number_policy: "manual" } })).confirm.reasons, ["n_mismatch"], "profile manual → typed");
+    const none = S.stepperModel(driver({ exit_code: 2, plan_n: null, log_tail: [] }), CTX);
+    assert.equal(none.dialog, false);
+  });
+  test("«자동» 회차(auto_n)는 exit 2 에서 대화상자를 열지 않고 머리에 «자동 확인 중» 을 쓴다", () => {
+    const m = S.stepperModel(driver({ exit_code: 2, plan_n: 181, auto_n: true }), CTX);
+    assert.equal(m.autoN, true);
+    assert.equal(m.dialog, false);
+    assert.match(m.head, /automatically|자동/);
+    const typed = S.stepperModel(driver({ exit_code: 2, plan_n: 181, auto_n: false }), CTX);
+    assert.equal(typed.dialog, true);
   });
   test("대화상자가 없으면 Confirm 은 «no_dialog»", () => {
     assert.deepEqual(S.driverActions(model(), ctx({ typedN: "181" })).confirm.reasons, ["no_dialog"]);

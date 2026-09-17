@@ -7,6 +7,21 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Store tab: a «Build number: Auto (from the stores) · Type it myself» toggle.** The review
+  panel and the Start form share it; the default comes from the profile's `build_number_policy`
+  (`auto` → Auto, `manual` → Type it myself) and a click changes it for this page only. In Auto
+  the page shows the plan's next build number (the number the plan read from App Store Connect
+  and Google Play) instead of an input, **Submit for review** and the S2 **Confirm** open without
+  typing, and the request carries `confirm_build_number: "auto"` (review, upload) or
+  `build_number: "auto"` (driver confirm); the server fills in the plan's `n` itself. A round
+  started with `build_number: "auto"` continues by itself when the driver stops at S2 with a
+  `plan: N` line — the server re-runs it with `--confirm-build-number N` and the ledger row says
+  `started_by: "<who> (auto)"`. Auto never invents a number: no plan, a stale plan, a blocked
+  plan or a plan without `n` refuse exactly as before (409 `plan_required` / `plan_stale` /
+  `build_number_mismatch`). Type it myself is unchanged. Database schema **v19** adds
+  `releases.auto_n` (a v18 file is backed up and migrated on start). ([#152](https://github.com/monocsp/remote_ci_monitor/pull/152))
+
 ## [0.3.1] - 2026-09-17
 
 ### Fixed

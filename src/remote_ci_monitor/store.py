@@ -68,7 +68,7 @@ from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 18
+DB_VERSION = 19
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -235,7 +235,8 @@ CREATE TABLE IF NOT EXISTS releases (
   confirmed_by TEXT,
   android_track TEXT,
   dry_run INTEGER NOT NULL DEFAULT 0,
-  token_name TEXT
+  token_name TEXT,
+  auto_n INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS releases_repo ON releases(repo, id DESC);
 """
@@ -390,6 +391,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         " token_name TEXT)",
         "CREATE INDEX IF NOT EXISTS releases_repo ON releases(repo, id DESC)",
     ),
+    # v19: `auto_n` — 이 실행이 «빌드 번호 자동» 으로 시작됐는가. 1 이면 드라이버가 exit 2 로
+    # 번호를 물을 때 서버가 로그의 `plan: N` 을 그대로 `--confirm-build-number` 로 이어 준다.
+    19: ("ALTER TABLE releases ADD COLUMN auto_n INTEGER NOT NULL DEFAULT 0",),
 }
 
 
@@ -2434,6 +2438,7 @@ class Store:
             "android_track": row["android_track"],
             "dry_run": bool(row["dry_run"]),
             "token_name": row["token_name"],
+            "auto_n": bool(row["auto_n"]),
         }
 
     def create_release(
@@ -2449,11 +2454,13 @@ class Store:
         confirmed_by: str | None = None,
         android_track: str | None = None,
         dry_run: bool = False,
+        auto_n: bool = False,
     ) -> int:
         """실행 행 하나를 연다(pid · 토큰 이름은 프로세스를 띄운 뒤 `set_release_started` 로)."""
         cur = self._conn().execute(
             "INSERT INTO releases (repo, build_name, kind, started_by, started_at, log_path, "
-            "confirmed_n, confirmed_by, android_track, dry_run) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "confirmed_n, confirmed_by, android_track, dry_run, auto_n) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 repo,
                 build_name,
@@ -2465,6 +2472,7 @@ class Store:
                 confirmed_by,
                 android_track,
                 1 if dry_run else 0,
+                1 if auto_n else 0,
             ),
         )
         return int(cur.lastrowid or 0)
