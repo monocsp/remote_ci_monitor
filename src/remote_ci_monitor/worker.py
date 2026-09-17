@@ -529,6 +529,14 @@ class Worker(threading.Thread):
                 shutil.rmtree(workspace, ignore_errors=True)
             return
         except (MaterializeError, RunnerError) as e:
+            if isinstance(e, MaterializeError) and e.code == "blob_missing" and e.key:
+                # 표엔 있는데 파일이 없다 — 행을 지워야 다음 제출에서 세션이 그 파일을 올린다(자가
+                # 치유).
+                self.store.delete_blobs([e.key])
+                self._append_log(
+                    log_path,
+                    f"[rcm] blob row dropped (no file) — resubmit uploads it: {e.key[-7:]}",
+                )
             # 워크스페이스를 못 만들었거나 프로세스를 못 띄웠다 — 잡의 테스트가 깨진 것이 아니고,
             # 둘은 고칠 곳이 다르다(스냅샷·레포 vs 프리셋의 `argv`). 예외가 **코드**를 들고 오므로
             # 여기서 문구를 만들지 않는다: 문구를 만들던 시절 `argv[0]` 의 절대 경로와 git stderr

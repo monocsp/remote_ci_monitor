@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shutil
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +31,13 @@ class MaterializeError(Exception):
     뒤로 옮긴다 — 너무 씻어서 고칠 수 없게 만드는 것도 실패다.
     """
 
-    def __init__(self, code: str, /, *, log: str = "", **args: Any) -> None:
+    def __init__(self, code: str, /, *, log: str = "", key: str = "", **args: Any) -> None:
         self.code = code
         self.args_public = args
         self.log = log
+        #: `blob_missing` 의 전체 blob 키 — 공개 요약엔 안 실리고(짧은 sha 만) 워커가 그 행을 지우는
+        #: 데 쓴다.
+        self.key = key
         super().__init__(outcome.render(code, args) or code)
 
 
@@ -91,6 +94,17 @@ def blob_path(blobs_dir: Path, key: str) -> Path:
     return base / sha[:2] / sha
 
 
+def stale_blob_keys(blobs_dir: Path, keys: Iterable[str]) -> list[str]:
+    """표에는 있는데 **파일이 없는** blob 키. 입력 순서를 지킨다.
+
+    표와 디스크는 갈라질 수 있다 — 2026-09-13~14 사이 blob 파일이 통째로 사라졌는데 `blobs` 행
+    6,579개가 남아, 협상(`have_blobs`)이 «있다» 고 답하는 바람에 세션이 그 파일을 안 올렸고
+    자재화가 `blob_missing` 으로 죽었다(gate-fast 7회 연속). 그래서 «있다» 는 표가 아니라 파일로
+    확인한다.
+    """
+    return [k for k in keys if not blob_path(blobs_dir, k).is_file()]
+
+
 def _copy_blob(src: Path, dst: Path) -> None:
     """blob → 워크스페이스 파일. 복사다(하드링크 금지 — 잡이 파일을 고치면 blob 이 깨진다)."""
     shutil.copyfile(src, dst)
@@ -123,9 +137,10 @@ def assemble_from_manifest(manifest_path: Path, blobs_dir: Path, workspace: Path
             if op.kind == "mkdir":
                 target.mkdir(exist_ok=True)
             elif op.kind == "copy":
-                src = blob_path(blobs_dir, prefix + (op.sha256 or ""))
+                key = prefix + (op.sha256 or "")
+                src = blob_path(blobs_dir, key)
                 if not src.is_file():
-                    raise MaterializeError("blob_missing", sha=short_sha(op.sha256))
+                    raise MaterializeError("blob_missing", sha=short_sha(op.sha256), key=key)
                 _copy_blob(src, target)
                 target.chmod(op.mode or 0o644)
             elif op.kind == "symlink":
@@ -164,9 +179,10 @@ def assemble_tar_from_manifest(manifest_path: Path, blobs_dir: Path, out_path: P
         with tarfile.open(part, "w:gz") as tar:
             for op in assemble_plan(manifest):
                 if op.kind == "copy":
-                    src = blob_path(blobs_dir, prefix + (op.sha256 or ""))
+                    key = prefix + (op.sha256 or "")
+                    src = blob_path(blobs_dir, key)
                     if not src.is_file():
-                        raise MaterializeError("blob_missing", sha=short_sha(op.sha256))
+                        raise MaterializeError("blob_missing", sha=short_sha(op.sha256), key=key)
                     info = tar.gettarinfo(str(src), arcname=op.path)
                     info.mode = op.mode or 0o644
                     info.uid = info.gid = 0
