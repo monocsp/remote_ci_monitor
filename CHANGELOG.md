@@ -21,8 +21,29 @@ of a key bumps that number and is listed here.
   rows: Setup (the same table), Source (mirror age, `main` / `dev` SHAs, whether `main` is in
   `dev`, **Fetch remote**), and Build · upload and Store as grey "not available in this build"
   rows; green rows are collapsed, red and stale rows open, and a row a person opens or closes is
-  remembered in the browser. The review panel is only a collapsed header with a
-  `not available yet` pill.
+  remembered in the browser.
+- **Web UI: the review panel and the Store / Build · upload rows.** With `GET
+  /api/repos/<name>/release` the Store row summarises `plan.json` (App Store live and editing
+  versions, the Play track, `next N`, blockers and warnings, the plan's age — red on blockers, amber
+  when stale) with a **Refresh** that submits the plan preset, and the Build · upload row shows
+  `upload.json` (version, build number, platforms, upload time, tag; a lost upload says so and offers
+  no resubmit) or, while a release job runs, three layers: one long bar that names its basis
+  (progress marker · declared steps · measured time · none), a «Now» line with the job's current
+  step and marker, and a checklist of the round's jobs with the running job's bar and unit grid. The
+  review panel below is laid out like an App Store Connect version page with the Google Play
+  section beside it in the same group order — screenshots from the listing preview, copy fields
+  with `current/limit` counters and `changed` chips from the diff, release notes counted against
+  both limits, build/release with «fixed by the repo» and a managed-publishing pill that never turns
+  green, review information as present/absent only — then the diff, five checkboxes, a build-number
+  box and **Validate listing** · **Plan review** · **Submit for review…**. Submit is enabled only
+  when the review plan is green and fresh, the typed number equals the plan's `n`, and, when Google
+  Play is selected, the managed-publishing box is ticked in this submission (it resets with every new
+  plan and after a submit); the confirmation dialog names the stores and says it cannot be undone.
+  A `409` from the server shows its code next to the button; `unsafe_release_type` or an observed
+  `auto_release: true` raises a red banner that cannot be dismissed; the result (`submitted` ·
+  `partial` · `noop` · `failed`) with the observed store state replaces the panel body. There is no
+  Release, Publish or Rollout button in any state. A server without the release routes shows the two
+  rows and the panel as «not available in this build».
 
 - **A step can report its own progress.** `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]`
   at the start of a stdout line says how far the **current step** is — a chunk loop, a parallel set,
