@@ -151,6 +151,25 @@
   </form>
 </dialog>
 
+<!-- 플랜 버전 (첫 사용). 플랜이 없으면 build_name 을 모른다 — 서버는 빈 값을 400 으로 거절하므로 «Refresh (release-plan)» 가
+     먼저 버전을 묻는다. 초깃값은 GitHub 카드의 최신 prod 태그 → 지난 플랜 → 빈칸. `major.minor.patch` 꼴일 때만 Go 가 열린다. -->
+<dialog id="plan-dialog" aria-labelledby="plan-title">
+  <form method="dialog" class="dlg">
+    <h2 id="plan-title" data-i18n="store.plan_dialog.title">어느 버전의 스토어 상태를 볼까요?</h2>
+    <p class="sub" data-i18n="store.plan_dialog.help">버전은 major.minor.patch 꼴입니다. 플랜은 이 버전으로 두 스토어를 읽고 다음 빌드 번호를 정합니다.</p>
+    <div class="nbox">
+      <label for="plan-version" data-i18n="store.plan_dialog.label">버전</label>
+      <input id="plan-version" type="text" inputmode="decimal" pattern="^\d+\.\d+\.\d+$" placeholder="1.0.1" autocomplete="off" spellcheck="false" aria-describedby="plan-version-state">
+      <span id="plan-version-state" class="nstate" data-plan-version-state></span>
+    </div>
+    <p class="dlg-status sub" data-plan-status></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-plan-cancel data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-plan-go disabled data-i18n="store.plan_dialog.go">플랜 만들기</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- 로그 서랍 (항목 13) — 토큰 필요 -->
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">

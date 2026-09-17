@@ -1408,7 +1408,8 @@
     return { code: "not_submitted", tone: "none" };
   }
   /** 본체 펼침: 기억이 이기고, 아니면 네 행이 초록이고 결과가 없을 때만 펼친다(항목 7). */
-  function panelOpen(pill, remembered) {
+  function panelOpen(pill, remembered, hasError) {
+    if (hasError) return true;   // 심사 호출이 거절되면 접힌 본체 안에 숨지 않는다 — 그 렌더는 연다
     if (remembered === "open") return true;
     if (remembered === "closed") return false;
     return !!pill && pill.code === "not_submitted";
@@ -1545,8 +1546,21 @@
     try { json = JSON.stringify(v); } catch (e) { json = "{…}"; }
     return json.length > 60 ? json.slice(0, 59) + "…" : json;
   }
-  /** Store 행(항목 6·42) — 색과 머리 조각과 본문. plan.json 은 서버가 읽어 `plan.doc` 으로 준다. */
-  function storeRowModel(release, releaseStatus, profile, lang, tzName, nowMs) {
+  /**
+   * Store 행(항목 6·42) — 색과 머리 조각과 본문. plan.json 은 서버가 읽어 `plan.doc` 으로 준다.
+   * `planError`(«Refresh (release-plan)» 가 거절된 글자)가 있으면 그 렌더는 `bad` 고 머리의 마지막
+   * 조각이 그 오류다(`error` 에도 따로 준다) — 행이 접혀 있어도(플랜이 없으면 회색으로 접힌다) 보인다.
+   */
+  function storeRowModel(release, releaseStatus, profile, lang, tzName, nowMs, planError) {
+    var m = storeRowBase(release, releaseStatus, profile, lang, tzName, nowMs);
+    if (planError != null && planError !== "") {
+      m.error = T(lang, "store.plan_failed", { detail: String(planError) });
+      m.head = m.head.concat([m.error]);
+      m.state = "bad";
+    }
+    return m;
+  }
+  function storeRowBase(release, releaseStatus, profile, lang, tzName, nowMs) {
     var presets = profile && profile.presets ? profile.presets : {};
     if (!presets.plan) return { state: "na", head: [naRowText("store", profile, lang)], body: null };
     if (releaseStatus === 404 || !release) return { state: "na", head: [T(lang, "row.na.store")], body: null };
@@ -1855,6 +1869,22 @@
     if (typeof typed !== "string" || typed === "") return { enabled: false, state: "empty" };
     return nMatches(typed, planN) ? { enabled: true, state: "ok" } : { enabled: false, state: "mismatch" };
   }
+  /**
+   * 플랜 대화상자의 버전 초깃값 — 첫 사용엔 플랜이 없어 build_name 을 물어야 한다(서버는 빈 build_name 을
+   * 400 으로 거절한다). 순서: GitHub 카드의 최신 릴리스 태그(`prod/1.0.0-180` → `1.0.0`; 날짜가 가장 늦은
+   * 것, 날짜가 없으면 첫 것) → 지난 플랜의 build_name(항목 그대로, 없으면 문서의 것) → "". 지어내지 않는다.
+   */
+  function planVersionGuess(release, github) {
+    var tags = github && Array.isArray(github.tags) ? github.tags.filter(function (t) { return t && typeof t === "object" && t.name; }) : [];
+    var best = null;
+    tags.forEach(function (t) { var ms = parseIso(t.at); if (!best || (ms != null && (best.ms == null || ms > best.ms))) best = { name: String(t.name), ms: ms }; });
+    if (best) { var m = /(\d+\.\d+\.\d+)/.exec(best.name); if (m) return m[1]; }
+    var plan = release && release.plan ? release.plan : null, doc = planEntryDoc(plan);
+    if (plan && plan.build_name != null && plan.build_name !== "") return String(plan.build_name);
+    if (doc && doc.build_name != null && doc.build_name !== "") return String(doc.build_name);
+    return "";
+  }
+  var PLAN_VERSION_RE = /^\d+\.\d+\.\d+$/;
   /** Source 행의 GitHub 카드(항목 25): 미러의 최근 다섯 커밋 · 태그(최신 표시) · PR 은 null 이면 «다음». */
   function githubCardModel(gh, status, ref, lang, tzName, nowMs) {
     if (status === 404) return { state: "na", text: T(lang, "github.na"), log: [], tags: [], prs: null };
@@ -1940,6 +1970,7 @@
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
     confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
+    planVersionGuess: planVersionGuess, PLAN_VERSION_RE: PLAN_VERSION_RE,
     storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
   };
 
@@ -3342,8 +3373,8 @@
     return h;
   }
   /** 접히는 행 하나 (7절). 색 = 상태, 글리프 + 글자로 한 번 더. 머리의 버튼은 여닫지 않는다. */
-  function srowHtml(key, st, head, extra, bodyHtml) {
-    var open = rowOpen(st, loadRowMemory()[state.store.repo + "/" + key]);
+  function srowHtml(key, st, head, extra, bodyHtml, forceOpen) {
+    var open = forceOpen || rowOpen(st, loadRowMemory()[state.store.repo + "/" + key]);
     return '<details class="srow" data-row="' + key + '" data-state="' + st + '"' + (open ? " open" : "") + ">"
       + '<summary><span class="g" aria-hidden="true">' + ROW_GLYPH[st] + '</span><span class="t">' + esc(tr("row." + key)) + "</span>"
       + '<span class="sr-state">' + esc(tr("row.state." + st)) + "</span>"
@@ -3380,7 +3411,7 @@
     // Build·upload(항목 5 · 46~49) · Store(항목 6 · 42) — `GET …/release` 가 404 면 «not available in this build»
     var release = releaseDoc(), rstatus = state.store.releaseStatus;
     var buildModel = buildRowModel(release, rstatus, profile, rowsById(state.status), L(), tz(), n);
-    var storeModel = storeRowModel(release, rstatus, profile, L(), tz(), n);
+    var storeModel = storeRowModel(release, rstatus, profile, L(), tz(), n, state.store.planError);
     h += buildRowHtml(buildModel);
     h += storeRowHtml(storeModel);
     // 본체(항목 7~24) — 필이 왜 못 여는지 말하고, 네 행이 초록이면 펼쳐진다
@@ -3449,7 +3480,13 @@
     var canPlan = !!state.token && !state.store.busy;
     var presets = currentProfile().presets || {};
     // 이 빌드에 `…/release` 가 없거나(404) plan 프리셋이 없으면 누를 것도 없다
-    var btn = state.store.releaseStatus === 404 || !presets.plan ? "" : '<button type="button" class="btn" data-plan-refresh' + (canPlan ? "" : " disabled") + (state.token ? "" : ' title="' + esc(tr("store.gate.no_token")) + '"') + ">" + esc(tr(state.store.busy === "plan" ? "store.refreshing_plan" : "store.refresh_plan")) + "</button>";
+    var btn = "";
+    if (state.store.releaseStatus !== 404 && presets.plan) {
+      var dis = (canPlan ? "" : " disabled") + (state.token ? "" : ' title="' + esc(tr("store.gate.no_token")) + '"');
+      btn = '<button type="button" class="btn" data-plan-refresh' + dis + ">" + esc(tr(state.store.busy === "plan" ? "store.refreshing_plan" : "store.refresh_plan")) + "</button>";
+      // 버전을 아는 회차에는 한 번에 가고, 다른 버전은 대화상자로 — 모르면 Refresh 자체가 대화상자다
+      if (knownPlanVersion()) btn += '<button type="button" class="btn link" data-plan-other' + dis + ">" + esc(tr("store.plan_other")) + "</button>";
+    }
     var b = model.body, body;
     if (!b) body = '<p class="sub">' + esc(model.head.join(" · ")) + "</p>";
     else {
@@ -3463,8 +3500,10 @@
         + "<dt>" + esc(tr("store.body.warnings")) + "</dt><dd>" + list(b.warnings) + "</dd>"
         + "</dl>";
     }
-    if (state.store.planError) body += '<p class="sub bad" data-plan-error>' + esc(state.store.planError) + "</p>";
-    return srowHtml("store", model.state, esc(model.head.join(" · ")), btn, body);
+    // 거절(400 `build_name is required` · 409 …)은 머리에 빨갛게 — 접힌 행의 본문에 숨으면 아무 반응이 없는 것처럼 보인다
+    var heads = model.error ? model.head.slice(0, -1) : model.head;
+    var head = esc(heads.join(" · ")) + (model.error ? (heads.length ? " · " : "") + '<span class="bad" data-plan-error>' + esc(model.error) + "</span>" : "");
+    return srowHtml("store", model.state, head, btn, body, !!model.error);
   }
   // ── Build·upload 행 (항목 5 · 46~49) ──
   function jobCardHtml(item) {
@@ -3700,12 +3739,13 @@
     var r = releaseDoc(), lang = L(), n = now(), profile = currentProfile();
     var rv = state.store.review;
     var remembered = loadRowMemory()[state.store.repo + "/review"];
-    var open = panelOpen(pill, remembered);
+    var open = panelOpen(pill, remembered, !!state.store.reviewError);
     var strip = versionStrip(r, state.store.listing, profile, lang, tz(), n);
     var head = tr("review.head", { version: strip.version, build: strip.build, targets: tr("review.targets.both") });
     var pillHtml = '<span class="pill p-' + pill.tone + '" data-panel-pill="' + esc(pill.code) + '"><span class="g" aria-hidden="true">' + ({ ok: "✓", bad: "✗", stale: "⏱", na: "·", none: "○" }[pill.tone] || "·") + "</span>" + esc(tr("review.pill." + pill.code)) + "</span>";
     var h = '<details class="srow review" id="review-panel" data-row="review" data-state="' + esc(pill.tone === "none" ? "ok" : pill.tone) + '"' + (open ? " open" : "") + ">"
-      + '<summary><span class="t">' + esc(tr("review.title")) + '</span><span class="n">' + esc(head) + "</span>" + pillHtml + "</summary><div class=\"srow-body\">";
+      + '<summary><span class="t">' + esc(tr("review.title")) + '</span><span class="n">' + esc(head)
+      + (state.store.reviewError ? ' · <span class="bad" data-review-error-head>' + esc(state.store.reviewError) + "</span>" : "") + "</span>" + pillHtml + "</summary><div class=\"srow-body\">";
     if (state.store.releaseStatus === 404 || !r) {
       h += '<p class="sub">' + esc(tr("review.na_body")) + "</p>";
       return h + '<p class="sub policy">' + esc(tr("review.policy")) + "</p></div></details>";
@@ -3886,12 +3926,48 @@
       return loadStore({ listing: kind === "validate" });
     }).catch(function () { state.store.busy = null; state.store.reviewError = "network"; renderStore(); });
   }
-  function refreshPlan() {
+  /** 이 회차의 build_name — 플랜 항목, 없으면 plan.json 의 것. 첫 사용(플랜 없음)엔 "". */
+  function knownPlanVersion() {
     var r = releaseDoc(), plan = r && r.plan, doc = planEntryDoc(plan) || {};
-    var buildName = plan && plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : "");
-    jobCall("plan", function (api, repo) { return api.plan(repo, { build_name: buildName, ref: currentProfile().default_branch || "main" }); }, function (res) {
+    return plan && plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : "");
+  }
+  /**
+   * «Refresh (release-plan)». 버전을 알면 한 번에 보내고, 모르면(첫 사용) 버전을 묻는 대화상자다 —
+   * 서버는 빈 build_name 을 400 으로 거절하고, 그 오류는 접힌 회색 행 속에 숨어 아무 반응이 없어 보였다.
+   */
+  function refreshPlan(buildName) {
+    var version = buildName != null ? buildName : knownPlanVersion();
+    if (!version) { openPlanDialog(); return; }
+    jobCall("plan", function (api, repo) { return api.plan(repo, { build_name: version, ref: currentProfile().default_branch || "main" }); }, function (res) {
       state.store.planError = null; toast(tr("review.job_started", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
     });
+  }
+  // ── 플랜 버전 대화상자 — «Store snapshot for which version?» ──
+  function openPlanDialog() {
+    var dlg = $("#plan-dialog"), input = $("#plan-version");
+    if (!dlg || !input) return;
+    input.value = planVersionGuess(releaseDoc(), state.store.github);
+    $("[data-plan-status]").textContent = "";
+    renderPlanDialogState();
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+    input.focus(); input.select();
+  }
+  /** Go 는 `major.minor.patch` 꼴일 때만 열린다 — 빈 값도, `1.0` 도 아니다. */
+  function renderPlanDialogState() {
+    var go = $("#plan-dialog [data-plan-go]"), input = $("#plan-version"), st = $("#plan-dialog [data-plan-version-state]");
+    if (!go || !input) return;
+    var v = input.value.trim(), ok = PLAN_VERSION_RE.test(v);
+    go.disabled = !ok || !state.token || !!state.store.busy;
+    go.textContent = state.store.busy === "plan" ? tr("store.refreshing_plan") : tr("store.plan_dialog.go");
+    if (st) { st.textContent = v && !ok ? tr("store.plan_dialog.bad") : ""; st.className = "nstate" + (v && !ok ? " bad" : ""); }
+  }
+  function submitPlanDialog() {
+    var dlg = $("#plan-dialog"), input = $("#plan-version");
+    if (!dlg || !input) return;
+    var v = input.value.trim();
+    if (!PLAN_VERSION_RE.test(v) || !state.token || state.store.busy) return;
+    dlg.close();   // 거절은 Store 행 머리에 빨갛게 온다
+    refreshPlan(v);
   }
   function validateListing() {
     var r = releaseDoc(), plan = r && r.plan, doc = planEntryDoc(plan) || {};
@@ -4019,7 +4095,7 @@
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal]");
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
       if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
@@ -4027,7 +4103,8 @@
       if (t.hasAttribute("data-verify-all")) { verifyAll(); return; }
       if (t.hasAttribute("data-fetch-remote")) { fetchRemote(); return; }
       if (t.hasAttribute("data-store-refresh")) { loadStore({ listing: true }); return; }
-      if (t.hasAttribute("data-plan-refresh")) { refreshPlan(); return; }
+      if (t.hasAttribute("data-plan-refresh")) { if (!t.disabled) { state.lastTrigger = t; refreshPlan(); } return; }
+      if (t.hasAttribute("data-plan-other")) { if (!t.disabled) { state.lastTrigger = t; openPlanDialog(); } return; }
       if (t.hasAttribute("data-validate-listing")) { validateListing(); return; }
       if (t.hasAttribute("data-plan-review")) { planReview(); return; }
       if (t.hasAttribute("data-submit-review")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
@@ -4100,6 +4177,13 @@
       sdlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitReview(); });
       $("[data-submit-cancel]").addEventListener("click", function () { sdlg.close(); });
       sdlg.addEventListener("close", restoreTrigger);
+    }
+    var pdlg = $("#plan-dialog");
+    if (pdlg) {
+      pdlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitPlanDialog(); });
+      pdlg.addEventListener("input", function (ev) { if (ev.target.id === "plan-version") renderPlanDialogState(); });
+      $("[data-plan-cancel]").addEventListener("click", function () { pdlg.close(); });
+      pdlg.addEventListener("close", restoreTrigger);
     }
     var ndlg = $("#confirm-n-dialog");
     if (ndlg) {
