@@ -37,7 +37,7 @@ from remote_ci_monitor.core.retention import (
     workspaces_to_purge,
 )
 from remote_ci_monitor.core.status import iso
-from remote_ci_monitor.materialize import blob_path
+from remote_ci_monitor.materialize import blob_path, stale_blob_keys
 from remote_ci_monitor.store import Store
 
 #: 이만큼 안 보인 워커는 잊는다(활성 잡이 없을 때만).
@@ -311,8 +311,17 @@ class Janitor:
     def sweep_blobs(self, now: datetime) -> int:
         """안 쓰인 지 오래된 blob 과 상한 초과분을 지운다(파일 → 행). 참조된 것은 절대 안 지운다."""
         referenced = self._referenced_blob_keys()
+        blobs = self.store.list_blobs()
+        # 파일 없는 행(유령)은 보존 규칙과 무관하게 지운다 — 협상이 «있다» 고 답해 세션이 안 올리는
+        # 원인이다.
+        ghosts = stale_blob_keys(self.config.data_dir / "blobs", (b.sha256 for b in blobs))
+        if ghosts:
+            self.store.delete_blobs(ghosts)
+            self.log(f"retention: dropped {len(ghosts)} blob rows without files")
+            gone_set = set(ghosts)
+            blobs = [b for b in blobs if b.sha256 not in gone_set]
         victims = blobs_to_purge(
-            self.store.list_blobs(),
+            blobs,
             referenced,
             now,
             days=self.config.server.snapshot_cache_days,

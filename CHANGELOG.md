@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A snapshot blob the server only *thinks* it has no longer kills the job.** The `blobs` table and the
+  files on disk can drift apart — on one server every blob file written before 2026-09-13 was gone while
+  6,579 rows stayed. The manifest negotiation answered "have it" from the table, the session skipped the
+  upload, and materialization failed with `snapshot blob missing` on seven consecutive `gate-fast` runs
+  while the same file kept failing. Now the negotiation checks the file, not the row, and drops rows
+  without files; the retention sweep drops them too; and a worker that still hits `blob_missing` deletes
+  that row so the next submission uploads the file. No migration.
+
 ### Changed
 - **A job that has gone quiet is no longer called stuck.** A running job was marked
   `likely stuck` — the loudest red on the page — as soon as it went `no_output_seconds`

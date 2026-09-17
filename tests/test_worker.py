@@ -401,7 +401,8 @@ def test_every_raise_site_uses_a_code_the_table_knows(env):
             for kw in node.keywords:
                 assert (
                     kw.arg is None
-                    or kw.arg == "log"
+                    or kw.arg
+                    in ("log", "key")  # 둘 다 비공개 — 잡 로그·워커 전용, 공개 요약엔 안 실린다
                     or kw.arg in outcome.PREFLIGHT_ARGS[first.value]
                 ), f"{where}: {kw.arg!r} 는 {first.value} 의 인자가 아니다"
     assert seen >= 8, f"raise 자리를 {seen}개만 봤다 — 찾는 방법이 깨졌다"
