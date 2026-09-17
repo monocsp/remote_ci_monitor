@@ -62,6 +62,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.progress import parse_marker
 from remote_ci_monitor.core.status import iso, source_json
 from remote_ci_monitor.materialize import MaterializeError, assemble_tar_from_manifest
+from remote_ci_monitor.release_secrets import mask_bytes
 from remote_ci_monitor.store import LaneBusy, TokenInfo, WorkerRow
 
 if TYPE_CHECKING:
@@ -249,6 +250,7 @@ class RemoteWorkersMixin:
     def _publish_server(self) -> None: ...
     def _mark_dirty(self) -> None: ...
     def _on_marker(self, job_id: int, kind: str, value: str) -> None: ...
+    def mask_for_preset(self, preset_name: str) -> tuple[bytes, ...]: ...  # type: ignore[empty-body]
 
     def _remote_init(self) -> None:
         self._claim_slots = threading.BoundedSemaphore(CLAIM_WAIT_SLOTS)
@@ -596,6 +598,9 @@ class RemoteWorkersMixin:
         요청과 이어 붙인다."""
         job = self._owned_active(token, job_id)
         now = self.now_fn()
+        # 릴리스 비밀은 서버에 있다 — 원격 워커의 stdout 도 같은 규칙으로 지운다. 요청 하나가
+        # 한 배치라, 두 요청에 걸쳐 잘린 값은 못 지운다(러너가 줄 단위로 flush 하므로 드물다).
+        data = mask_bytes(data, self.mask_for_preset(job.preset))
         path = self.log_path(job.id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("ab") as fh:

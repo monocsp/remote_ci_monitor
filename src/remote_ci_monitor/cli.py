@@ -64,6 +64,7 @@ from remote_ci_monitor.core.render_text import (
 )
 from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
+from remote_ci_monitor.release_secrets import secrets_dir
 
 USAGE_EXIT = 2
 #: 전달 실패 전용 종료 코드 — 실행 결과(`wait_exit_code`)는 건드리지 않는다(M5e §12).
@@ -1569,8 +1570,11 @@ RELEASE_IRREVERSIBLE_MODE = {"upload": "upload", "review": "submit"}
 
 
 def release_secrets_dir(config_path: Path, repo: str) -> Path:
-    """비밀 폴더 `<config_dir>/secrets/<repo>/` — 설정 파일 옆이다(계약 §4)."""
-    return config_path.parent / "secrets" / repo
+    """비밀 폴더 `<config_dir>/secrets/<repo>/` — 설정 파일 옆이다(계약 §4). 정본은
+    `release_secrets.secrets_dir`(서버 · 워커가 같은 규칙을 쓴다)."""
+    d = secrets_dir(config_path, repo)
+    assert d is not None
+    return d
 
 
 def _release_row(

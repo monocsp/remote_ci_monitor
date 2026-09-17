@@ -323,6 +323,7 @@ def test_runspec_and_runresult_have_the_fields_of_the_spec():
         "log_path",
         "grace_seconds",
         "requires",  # M5j G4 — 시작 전에 찾을 도구. 끝에 더했다(키 추가만)
+        "mask",  # 스토어 탭 — 릴리스 비밀을 로그 · 관찰자에게 주기 전에 지운다(키 추가만)
     ]
     assert {f.name for f in dataclasses.fields(RunResult)} >= {
         "rc",

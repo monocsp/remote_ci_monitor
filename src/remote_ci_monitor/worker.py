@@ -51,6 +51,7 @@ from remote_ci_monitor.materialize import (
     extract_tree,
     prepare_git_ref,
 )
+from remote_ci_monitor.release_secrets import job_secrets
 from remote_ci_monitor.runner import (
     MAX_LINE_BYTES,
     POLL_SECONDS,
@@ -496,11 +497,15 @@ class Worker(threading.Thread):
             # 방금 한 편집 때문」임을 세어서 말할 수 있다. 문장은 예전과 글자까지 같다.
             self._fail_before_start(job, "preset_missing", preset=job.preset)
             return
+        # 릴리스 프로파일이 있는 저장소의 프리셋: 비밀 폴더를 `<secrets_dir_env>` 로 넘기고(폴더가
+        # 있을 때만) value 비밀은 stdout 에서 지운다(계약 §4 「Job stdout is masked」).
+        extra_env, mask = job_secrets(self.config, preset)
         spec = RunSpec(
             job_id=job.id,
             preset_name=preset.name,
             argv=tuple(preset.argv),
-            env=preset.env,
+            env={**preset.env, **extra_env},
+            mask=mask,
             env_passthrough=tuple(preset.env_passthrough),
             requires=tuple(preset.requires),
             timeout_seconds=job.timeout_seconds,
