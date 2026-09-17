@@ -1243,3 +1243,183 @@ def test_a_stale_sample_opens_the_host_panel_once_and_nothing_closes_it_again(tm
     assert fresh["open"] is False, fresh  # 멀쩡할 때는 접혀 있다
     assert stale["open"] is True, stale  # 이상이면 한 번 펼친다
     assert again["open"] is True, again  # 그리고 저절로 닫지 않는다
+
+
+# ── 스토어 탭 (docs/wireframes/web-store.html · 항목 1 · 29~35) ─────────────────
+#
+# 이 빌드의 서버에는 `/api/repos` 가 없다(프로파일 PR 이 따로다). 그래서 서버 호출 층
+# (`window.rcmStoreApi` — app.js `storeApi()`)을 페이지 스크립트보다 먼저 심어 STORE-TAB-API 모양의
+# 문서를 준다. `?complete=1` 이면 관문이 열린 저장소, 아니면 비밀 둘이 빠진 저장소다.
+STORE_STUB_JS = r"""
+(() => {
+  const complete = /[?&]complete=1(&|$)/.test(location.search);
+  const setup = complete
+    ? { required: 3, present: 3, verified: 3, complete: true, missing: [] }
+    : { required: 3, present: 1, verified: 1, complete: false,
+        missing: ["GH_TOKEN", "review_information/demo_password.txt"] };
+  const sha = (p) => p + "0".repeat(40 - p.length);
+  const at = "2026-09-17T12:03:00Z";
+  const doc = {
+    name: "app", url: "git@example.invalid:app.git",
+    profile: { default_branch: "main", tag: "prod/{version}-{build}",
+      build_number_policy: "auto", plan_max_age_minutes: 30, driver: null, listing: null,
+      secrets_dir_env: "APP_SECRETS",
+      presets: { plan: "release-plan", upload: "release-upload", review: "release-review",
+        gate: null, qa: null, dev: null } },
+    setup,
+    mirror: { path: "/srv/rcm/mirrors/app", age_seconds: 200,
+      fetched_at: new Date(Date.now() - 200000).toISOString() },
+    branches: { main: sha("9e1c4d2f"), dev: sha("7a03b9f0"), main_in_dev: true },
+  };
+  const secrets = { dir_env: "APP_SECRETS", items: [
+    { name: "AuthKey.p8", kind: "file", optional: false, verify: "asc", present: true,
+      size: 2112, fingerprint: "9f1c2a3b", verified_at: at, verify_error: null, max_kb: 64 },
+    { name: "GH_TOKEN", kind: "value", optional: false, verify: "github", present: complete,
+      size: null, fingerprint: complete ? "ghp_…" : null, verified_at: complete ? at : null,
+      verify_error: null },
+    { name: "review_information", kind: "dir", optional: false, verify: "none",
+      present: complete, fingerprint: complete ? "2/2 files" : "1/2 files",
+      verified_at: null, verify_error: null,
+      files: [{ name: "demo_user.txt", present: true, size: 12, fingerprint: "aabbccdd" },
+              { name: "demo_password.txt", present: complete, size: complete ? 9 : null,
+                fingerprint: complete ? "eeff0011" : null }] },
+  ] };
+  const ok = (body) => Promise.resolve({ ok: true, status: 200, body });
+  const notFound = { ok: false, status: 404, body: { error: "unknown repo", code: "not_found" } };
+  window.rcmStoreCalls = [];
+  window.rcmStoreApi = {
+    repos: () => ok({ repos: [{ name: "app", release: true, setup },
+                               { name: "lib", release: false }] }),
+    repo: (name) => name === "app" ? ok(doc) : Promise.resolve(notFound),
+    secrets: () => ok(secrets),
+    putSecret: (...a) => { window.rcmStoreCalls.push(["put", a[0], a[1], a[4] || null]);
+                           return ok(secrets.items[1]); },
+    verify: () => { window.rcmStoreCalls.push(["verify"]); return ok(secrets); },
+    fetchRemote: () => { window.rcmStoreCalls.push(["fetch"]);
+                         return ok({ mirror: doc.mirror, branches: doc.branches }); },
+  };
+})();
+"""
+
+STORE_ROWS_JS = """
+(() => [...document.querySelectorAll('#store details.srow[data-row]')].map((d) => ({
+  row: d.getAttribute('data-row'), state: d.getAttribute('data-state'), open: d.open,
+  head: d.querySelector('summary').textContent.replace(/\\s+/g, ' ').trim(),
+})))()
+"""
+
+SECRET_ROWS_JS = """
+[...document.querySelectorAll('#store table.sec tr[data-secret]')].map((r) => [
+  r.getAttribute('data-secret'), r.getAttribute('data-file'),
+  r.querySelector('.pill').textContent.trim(), r.querySelector('.fp').textContent.trim()])
+"""
+
+
+def _q(selector: str, prop: str = "") -> str:
+    return f"document.querySelector({json.dumps(selector)}){prop}"
+
+
+def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
+    """항목 1 · 29 · 31 · 34 · 35 — `/api/repos` 가 `release: true` 를 주면 머리에 `Queue | Store`
+    가 생기고, `#/store/app` 은 관문(설정 화면)이다: 빨간 띠 «1 of 3 secrets set · 1 verified»,
+    비활성 «Enter Store», 프로파일이 선언한 비밀마다 한 행(폴더는 파일마다 한 줄). 토큰이 없으면
+    표는 읽기 전용이고 이유가 한 줄 있다. 값은 어디에도 없고, 큐의 폴링은 그대로 산다.
+    관문이 열리면(`?complete=1`) 행 넷 + 접힌 본체 머리다 — Setup·Source 초록 접힘, 나머지 회색."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-store", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": STORE_STUB_JS})
+            # 큐 화면 — 탭은 있고 스토어 절은 숨겨져 있다
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            assert c.eval("document.getElementById('view-nav').hidden") is False
+            assert c.eval("document.getElementById('store').hidden") is True
+            assert c.eval("document.getElementById('queue').hidden") is False
+            nav_text = c.eval("document.getElementById('view-nav').textContent")
+            assert "Queue" in nav_text and "Store" in nav_text and "app" in nav_text, nav_text
+            assert "lib" not in nav_text, "a repo without a profile must not be offered"
+
+            # 관문 — 설정 화면
+            gate_ready = _q('#store [data-secret="GH_TOKEN"]') + " !== null"
+            c.open(base + "#/store/app", ready_js=gate_ready)
+            assert c.eval("document.getElementById('store').hidden") is False
+            assert c.eval("document.getElementById('queue').hidden") is True
+            assert c.eval("document.getElementById('summary').hidden") is True
+            gate_cls = c.eval(_q("#store [data-gate]", ".className"))
+            gate_text = c.eval(_q("#store [data-gate]", ".textContent"))
+            assert "bad" in gate_cls.split() and "ok" not in gate_cls.split(), gate_cls
+            assert "1 of 3 secrets set · 1 verified" in gate_text, gate_text
+            assert "Set up app before entering Store" in gate_text, gate_text
+            assert c.eval(_q("#store [data-enter-store]", ".disabled")) is True
+            n_rows = c.eval("document.querySelectorAll('#store details.srow').length")
+            assert n_rows == 0, "no store rows behind the gate"
+            rows = c.eval(SECRET_ROWS_JS)
+            assert rows == [
+                ["AuthKey.p8", None, "✓present", "9f1c2a3b · 2 KB"],
+                ["GH_TOKEN", None, "✗missing", "—"],
+                ["review_information", None, "✗missing", "1 of 2 files"],
+                ["review_information", "demo_user.txt", "✓present", "aabbccdd · 12 B"],
+                ["review_information", "demo_password.txt", "✗missing", "—"],
+            ], rows
+            body = c.eval("document.body.innerText")
+            assert "Only an admin token can set up app" in body, body[:600]
+            assert re.search(r"verified \d\d:\d\d", body), body[:600]
+            assert "undefined" not in body and "NaN" not in body
+            # 비활성 + 이유 — 감추지 않는다(항목 35)
+            assert c.eval(_q('#store [data-set-value="GH_TOKEN"]', ".disabled")) is True
+            assert c.eval(_q("#store [data-verify-all]", ".disabled")) is True
+            drops = c.eval(
+                "[...document.querySelectorAll('#store label.drop')]"
+                ".map(l => l.classList.contains('disabled'))"
+            )
+            assert drops == [True, True, True], "one dropzone per file secret and per folder file"
+            assert c.eval("window.rcmStoreCalls.length") == 0, "nothing was sent without a token"
+            # 큐의 갱신은 이 화면에서도 산다 — `?poll=1` 이라 폴링 타이머가 곧 SSE 자리다
+            assert c.eval("document.getElementById('live-btn').className").startswith("livebtn")
+            assert c.page_errors() == []
+
+            # 폰 폭 — 옆으로 새지 않는다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            c.viewport(1240)
+
+            # 관문이 열린 저장소 — 행 넷 + 본체 머리
+            c.open(
+                base + "&complete=1#/store/app",
+                ready_js="document.querySelectorAll('#store details.srow[data-row]').length === 4",
+            )
+            rows = c.eval(STORE_ROWS_JS)
+            by = {r["row"]: r for r in rows}
+            assert [r["row"] for r in rows] == ["setup", "source", "build", "store"], rows
+            assert by["setup"]["state"] == "ok" and by["setup"]["open"] is False, by["setup"]
+            assert "3/3 secrets present" in by["setup"]["head"], by["setup"]
+            assert "build number auto" in by["setup"]["head"], by["setup"]
+            assert by["source"]["state"] == "ok" and by["source"]["open"] is False, by["source"]
+            src_head = by["source"]["head"]
+            assert "main 9e1c4d2 · main in dev · fetched 3m ago" in src_head, src_head
+            assert by["build"]["state"] == "na" and by["store"]["state"] == "na", rows
+            assert "not available in this build" in by["build"]["head"], by["build"]
+            review = c.eval(_q("#review-panel summary", ".textContent"))
+            assert "Submit for review" in review and "not available yet" in review, review
+            assert c.eval("document.getElementById('review-panel').open") is False
+            fetch_disabled = c.eval(_q("#store [data-fetch-remote]", ".disabled"))
+            assert fetch_disabled is True, "no token → fetch disabled with a reason"
+            assert c.eval(_q("#store [data-gate]")) is None, "no gate banner on the store screen"
+            body = c.eval("document.body.innerText")
+            assert "Approval does not release" in body, body[:800]
+            assert "ghp_" not in body.replace("ghp_…", ""), "a value shows 4 chars + … at most"
+            # 사람이 연 행은 기억된다(큐 화면 규칙) — 렌더가 정한 열림은 기억이 아니다
+            assert c.eval("localStorage.getItem('rcm.store.rows')") is None
+            c.eval(_q('#store details.srow[data-row="setup"] > summary', ".click()"))
+            remembered = c.eval("JSON.parse(localStorage.getItem('rcm.store.rows'))")
+            assert remembered == {"app/setup": "open"}
+            # 한국어로 바꾸면 행 이름이 따라온다
+            c.eval("document.getElementById('lang-btn').click()")
+            heads = c.eval(
+                "[...document.querySelectorAll('#store details.srow[data-row] > summary .t')]"
+                ".map(e => e.textContent)"
+            )
+            assert heads == ["설정", "소스", "빌드 · 업로드", "스토어"], heads
+            assert c.page_errors() == []
+    finally:
+        srv.close()

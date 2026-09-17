@@ -8,6 +8,21 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **Web UI: the Store tab and its settings gate.** When `GET /api/repos` lists a repository
+  with a release profile the header shows a **Queue | Store** switch (a select when there are
+  several) and `#/store/<name>` opens the Store; a server without a profile has no tab and the
+  queue keeps updating over the event stream either way. Until every required secret is present
+  and verified, the Store route lands on the Settings screen: a banner with `n of m secrets set ·
+  k verified` (red, then green) and a disabled **Enter Store**, one row per secret from the
+  profile — kind, present, fingerprint, verified time or error — with a password dialog for
+  values, a dropzone (drag-and-drop or file picker) for files and per-file dropzones for folders,
+  plus **Verify all**. The page never keeps or shows a value; a non-admin token sees the table
+  read-only with the reason in one line. Once complete, the Store screen shows four collapsible
+  rows: Setup (the same table), Source (mirror age, `main` / `dev` SHAs, whether `main` is in
+  `dev`, **Fetch remote**), and Build · upload and Store as grey "not available in this build"
+  rows; green rows are collapsed, red and stale rows open, and a row a person opens or closes is
+  remembered in the browser. The review panel is only a collapsed header with a
+  `not available yet` pill.
 - **Release profiles and the connect skills.** `[repos.<name>.release]` in `server.toml` says
   which presets play the `plan` / `upload` / `review` roles (plus optional `gate`, `qa`, `dev`),
   which secrets the Settings screen will ask for, and how the store copy is previewed — the

@@ -230,6 +230,16 @@ default = "full"
 connection** 띠가 뜨고 나이만 계속 센다. 화면은 최신인 척하지 않는다. `#/jobs/N` 은 작업 하나로
 바로 간다.
 
+`server.toml` 의 저장소에 `[repos.<name>.release]` 프로파일이 있으면 머리에 **Queue | Store**
+전환이 생기고 `#/store/<name>` 이 스토어 탭을 연다. 프로파일이 없으면 탭도 없다. 스토어 앞에는
+**설정 관문**이 있다: 필수 비밀이 전부 있고 검증되기 전에는 설정 화면이다 — 빨간 띠
+`n of m secrets set · k verified`, 프로파일이 선언한 비밀마다 한 행(파일은 끌어다 놓고, 값은
+password 칸에 한 번 입력), **Verify all**, 비활성 **Enter Store** — 그리고 브라우저는 값을 보지
+않는다. `present` · 지문 · 검증 시각뿐이다. 다 갖춰지면 스토어 화면이 접히는 행 넷을 보인다 —
+Setup, Source(미러 나이, `main` / `dev`, `main` 이 `dev` 에 있는지, **Fetch remote**),
+Build · upload, Store — 괜찮으면 초록으로 접히고, 손봐야 하면 빨강으로 펼쳐지고, 이 빌드에 말할
+것이 없으면 회색이다.
+
 ## Exit codes
 
 | `rcm wait` 종료 코드 | 뜻 |

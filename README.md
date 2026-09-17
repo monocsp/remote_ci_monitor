@@ -246,6 +246,17 @@ Updates arrive over the event stream; if it drops, the page polls every 10 s, an
 without a successful response a **Lost connection** banner appears while the ages keep counting.
 The page never pretends to be current. `#/jobs/N` deep-links to a job.
 
+When a repository in `server.toml` has a `[repos.<name>.release]` profile, the header gains a
+**Queue | Store** switch and `#/store/<name>` opens the Store tab; without a profile there is no
+tab. The Store is behind a **settings gate**: until every required secret is present and verified
+you land on the Settings screen — a red banner with `n of m secrets set · k verified`, one row per
+secret from the profile (drop a file, or type a value once in a password box), **Verify all**, and
+a disabled **Enter Store** — and the browser never sees a value, only `present`, a fingerprint and
+the verification time. Once complete, the Store shows four collapsible rows — Setup, Source (mirror
+age, `main` / `dev`, whether `main` is in `dev`, **Fetch remote**), Build · upload and Store — green
+when fine and collapsed, red and open when something needs a hand, grey when this build has nothing
+to say.
+
 ## Exit codes
 
 | `rcm wait` exit | meaning |
