@@ -167,7 +167,7 @@ def last_json(out: str) -> dict:
 def test_a_fresh_database_is_v17_with_a_submissions_table_and_its_job_index(tmp_path):
     path = tmp_path / "rcm.sqlite3"
     s = Store(path)
-    assert s.user_version() == DB_VERSION == 17
+    assert s.user_version() == DB_VERSION >= 17  # v17 이 submissions 를 더했다
     s.close()
     assert {"submissions", "submissions_job"} <= names(path)
     cols = {r[1] for r in raw(path, "PRAGMA table_info(submissions)")}
@@ -201,7 +201,7 @@ def test_v16_to_v17_takes_the_boundary_backup_first_and_a_failed_backup_adds_no_
 
     monkeypatch.undo()
     s = Store(path)
-    assert s.user_version() == 17
+    assert s.user_version() == DB_VERSION >= 17  # v17 을 지나 이 빌드의 버전까지 올라간다
     s.close()
     assert "submissions" in names(path)
     assert bak.is_file()

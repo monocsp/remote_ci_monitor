@@ -327,6 +327,47 @@ def is_ancestor(mirror: Path, ancestor: str, descendant: str) -> bool | None:
     return False if proc.returncode == 1 else None
 
 
+def branch_log(mirror: Path, branch: str, limit: int = 5) -> list[dict[str, Any]]:
+    """미러의 `refs/heads/<branch>` 최근 커밋 `limit` 개 — `{sha, subject, author, at}`. 미러가
+    없거나 브랜치가 없으면 빈 목록. 원격을 부르지 않는다."""
+    if not branch or branch.startswith("-") or limit <= 0:
+        return []
+    out = _git_query(
+        mirror,
+        ["log", f"-{int(limit)}", "--format=%H%x1f%s%x1f%an%x1f%cI", f"refs/heads/{branch}", "--"],
+    )
+    rows: list[dict[str, Any]] = []
+    for line in (out or "").splitlines():
+        parts = line.split("\x1f")
+        if len(parts) == 4 and is_full_sha(parts[0]):
+            rows.append(
+                {"sha": parts[0].lower(), "subject": parts[1], "author": parts[2], "at": parts[3]}
+            )
+    return rows
+
+
+def tags_matching(mirror: Path, prefix: str, limit: int = 5) -> list[dict[str, Any]]:
+    """미러의 태그 중 이름이 `prefix` 로 시작하는 것, 새것부터 `limit` 개 — `{name, at}`."""
+    if limit <= 0 or prefix.startswith("-"):
+        return []
+    out = _git_query(
+        mirror,
+        [
+            "for-each-ref",
+            "--sort=-creatordate",
+            f"--count={int(limit)}",
+            "--format=%(refname:short)%1f%(creatordate:iso-strict)",
+            f"refs/tags/{prefix}*" if prefix else "refs/tags/",
+        ],
+    )
+    rows: list[dict[str, Any]] = []
+    for line in (out or "").splitlines():
+        name, _, at = line.partition("\x1f")
+        if name:
+            rows.append({"name": name, "at": at or None})
+    return rows
+
+
 def has_commit(mirror: Path, sha: str) -> bool:
     """미러에 그 커밋이 있는가. sha 는 40 hex 여야 한다."""
     if not is_full_sha(sha) or not (mirror / "HEAD").is_file():

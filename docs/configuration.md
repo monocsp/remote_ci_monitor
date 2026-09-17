@@ -275,14 +275,78 @@ characters plus `…` for a value, the first eight hex digits of the file's SHA-
 `verify` kinds in this build: `github` (`GET https://api.github.com/user` with the token, 5 s,
 reports `login: <name>`), `keystore` (`keytool -list -keystore <file>`, plus `-storepass` from a
 value secret named `KEYSTORE_PASSWORD` when the profile has one; `keytool missing` when the
-build machine has none), and `none`. `asc` and `play` answer `not implemented in this build` —
+build machine has none), and `none`. `asc` and `play` answer `not implemented in this build` as a *detail*, not an error (a JWT signature this build cannot produce must not lock the gate; the page shows the sentence) —
 the page shows the cross and the text rather than a green mark nobody earned.
 
 **The setup gate.** `setup.complete` is true when every non-optional secret is present and either
-has `verify = "none"` or was verified without error. The release routes (`/api/repos/<repo>/release/…`,
-a later change) answer `409 setup_incomplete` until then; the routes above never do, so the
-Settings screen always works. An unknown repository, or one without a profile, is 404 on all of
-them; worker tokens are refused everywhere here.
+has `verify = "none"` or was verified without error. The release write routes below answer
+`409 setup_incomplete` (with the `setup` counts in the body) until then; the routes above and the
+four read-only release routes never do, so the Settings screen always works. An unknown
+repository, or one without a profile, is 404 on all of them; worker tokens are refused everywhere
+here.
+
+### Release routes and the driver
+
+Everything under `/api/repos/<repo>/release/…` turns the profile into actions. Jobs go through
+the normal `POST /jobs` path (`git_ref` source, same validation, joiners, priority and pools);
+rcm sends exactly the inputs of the contract's §2 table and every other input the preset declares
+keeps its default. Writes take a Bearer token only.
+
+| route | token | what |
+|---|---|---|
+| `GET …/release` | read rule, always | `setup`, then the latest job per role: `plan` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `build_name`, `doc`), `review.plan` (same shape) and `review.result`, `upload` (`job_id`, `state`, `doc`), and `jobs[]` — the role presets' jobs, newest first, at most 50, each with `id preset role state sha ref started_at finished_at artifacts[]`. "Latest per role" is the newest job of that preset whose artifact bundle contains the role's file (`plan.json`, `upload.json`, `review-plan.json` / `review.json`, matched by base name anywhere in the bundle); `doc` is that file parsed (256 KB at most; unreadable or invalid gives `doc: null` plus `doc_error`). `measured_at` is the document's own or, failing that, the job's end; `stale` is `age_seconds > plan_max_age_minutes × 60`. Computed from the database and the artifact store only |
+| `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
+| `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
+| `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
+| `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `default_branch` made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` |
+| `GET …/release/listing/file?path=<rel>` | read rule, always | the bytes of one screenshot — the path must match a `listing.screenshots` glob and be an image type; 5 MB at most (413) |
+| `POST …/release/listing/validate` | client token | `{build_name, build?}` → runs `listing.validate` with `{version}` and `{build}` substituted → `{ok, lines[], exit}` (plus `error` when it failed to run) |
+| `GET …/release/github` | read rule, always | from the mirror only: `log[]` (`sha subject author at` × 5 of `default_branch`), `tags[]` (`name at` × 5 newest whose name starts with the `tag` pattern's literal prefix, e.g. `prod/`), and `prs: null` — next: pull requests via the `GH_TOKEN` secret |
+| `POST …/release/start` | admin | `{build_name, android_track?, dry_run?}` → runs the driver (below) → `202 {release_id, pid, build_name}` |
+| `POST …/release/confirm` | admin | `{build_name, build_number}` → re-runs the driver with `--confirm-build-number N` **only if** the last `plan: N = <n>` line of that build's log equals what was typed |
+| `POST …/release/abort` · `POST …/release/retry` | admin | `{build_name?}` (default: the latest run's) → runs the driver with `--abort` / `--retry` |
+| `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error}`. `{configured: false}` when the profile has no `driver` |
+
+**The 409 codes.** These are the server's own rules, kept whatever the page sends (`code` and
+`error_code` carry the same value):
+
+| code | when |
+|---|---|
+| `setup_incomplete` | any write route while the setup gate is closed; the body carries `setup` |
+| `role_not_configured` | the role's preset is empty or names a preset that is not in `[[presets]]` |
+| `unsafe_preset` | the role's preset declares an input named `automatic_release`, `rollout` or `release_status` — rcm never sends those, and refuses to run a preset that would take them (`inputs[]` names them) |
+| `review_plan_required` | `mode = submit` without a **succeeded** review plan (`review-plan.json`) for the same `build_name` |
+| `review_plan_stale` | that review plan is older than `plan_max_age_minutes` (`age_seconds` in the body) |
+| `review_plan_blocked` | that review plan's `plan_verdict` is not `ok` |
+| `managed_publishing_unconfirmed` | `mode = submit` with `platform` `both` or `android` and `play_managed_publishing` other than `confirmed-on` **in this body** — the value is never remembered |
+| `plan_required` | `mode = upload` / `mode = submit` without a succeeded plan (`plan.json`) for the same `build_name` |
+| `plan_stale` | that plan is older than `plan_max_age_minutes` |
+| `build_number_mismatch` | `confirm_build_number` (review submit, upload) or `build_number` (driver confirm) is empty or does not equal the plan's `n` as an integer — the server compares, it never fills the number in |
+| `mirror_missing` | the driver or listing needs a checkout and the mirror has no `default_branch` yet — `POST …/fetch` first |
+| `no_driver` | a driver route on a profile without `driver` |
+| `driver_missing` | `driver` is not an executable file in the checkout |
+| `release_running` | a driver process for this repository is still alive (`release_id` in the body) |
+| `release_required` | `confirm` / `abort` / `retry` with no earlier run for that build |
+
+`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`).
+
+**The driver.** `POST …/release/start` checks out `default_branch` from the mirror into
+`<data_dir>/driver/<repo>/checkout` and runs `<driver> --build-name X [--android-track T]
+[--dry-run]` there as a **detached** process (its own session, so a server restart does not kill
+it). Its environment is the job environment for that repository — `PATH`, `HOME`, `LANG` and
+`$<secrets_dir_env>` — plus `RCM_SERVER` (this server's URL) and `RCM_TOKEN`, a **client token
+minted for that run** (`store-driver:<repo>:<id>`, not admin) and revoked as soon as the run ends,
+so it never outlives the process; the value goes to the child's environment and nowhere else.
+stdout and stderr append to `<data_dir>/driver/<repo>/<build_name>.log`, so `confirm`, `abort`
+and `retry` continue the same log. Every run is a row in the database's `releases` table
+(`id repo build_name kind started_by started_at pid log_path exit_code finished_at confirmed_n
+confirmed_by android_track dry_run token_name`); `rcm gc` and the retention sweeps leave that
+table alone. The exit code is written by a wrapper to `<data_dir>/driver/<repo>/<id>.exit`, so
+after a restart the next `GET …/release/driver` (or the next start) closes runs whose process is
+gone, records the code (or `null` when it is unknown) and revokes their tokens. `--status` runs
+with the same environment but without a token — it is read-only by contract. Confirm follows the
+contract: the driver prints `plan: N = <n>` and exits 2, the page shows the number, a person
+types it, and the server forwards it only when the two agree.
 
 ## Getting files back out of a job
 
