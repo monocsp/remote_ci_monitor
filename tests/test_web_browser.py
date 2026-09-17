@@ -1775,3 +1775,177 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
             assert c.page_errors() == []
     finally:
         srv.close()
+
+
+# ── 릴리스 드라이버 스테퍼 · N 대화상자 · GitHub 카드 · 예행 (항목 25 · 26 · 28 · 37~39) ──────
+#
+# RELEASE_STUB_JS 위에 `driver` · `github` 와 드라이버 네 호출을 덧씌운다. `?driver=s2` 는 exit 2 +
+# plan_n 181(사람 단계), `running` 은 S5 진행 중, `exit3` 은 업로드 결과 모름.
+DRIVER_STUB_JS = r"""
+(() => {
+  const mode = (/[?&]driver=(\w+)/.exec(location.search) || [])[1] || "s2";
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const base = { build_name: "1.0.1", started_at: ago(2280), started_by: "pcs", pid: null,
+    exit_code: null, plan_n: 181, log_tail: ["stage S0 branch release/1.0.1 @ 7a03b9f",
+      "stage S1 plan #641", "plan: N = 181"], status: [] };
+  const states = {
+    s2: Object.assign({}, base, { running: false, exit_code: 2,
+      status: ["release 1.0.1: stage S2 waiting for --confirm-build-number"] }),
+    running: Object.assign({}, base, { running: true, pid: 4242,
+      status: ["release 1.0.1: stage S5 scenario QA · job #643"] }),
+    exit3: Object.assign({}, base, { running: false, exit_code: 3,
+      status: ["release 1.0.1: stage S7 upload — result unknown"] }),
+  };
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  const sha = (p) => p + "0".repeat(40 - p.length);
+  const rec = (kind) => (name, body) => {
+    window.rcmStoreCalls.push([kind, body]); return ok({ release_id: 7 }, 202); };
+  Object.assign(window.rcmStoreApi, {
+    driver: () => ok(states[mode]),
+    driverStart: rec("start"), driverConfirm: rec("confirm"), driverAbort: rec("abort"),
+    driverRetry: rec("retry"),
+    upload: (name, body) => {
+      window.rcmStoreCalls.push(["upload", body]); return ok({ job_id: 660 }, 202); },
+    github: () => ok({
+      log: [1, 2, 3, 4, 5].map((i) => ({ sha: sha("9e1c4d2" + i), subject: "feat(x): change " + i,
+        author: "pcs", at: ago(i * 3600) })),
+      tags: [{ name: "prod/1.0.0-179", at: ago(9 * 86400) },
+             { name: "prod/1.0.0-180", at: ago(2 * 86400) }],
+      prs: null }),
+  });
+})();
+"""
+
+STEPPER_JS = """
+[...document.querySelectorAll('#store details.srow[data-row="build"] ol.stepper li.st')]
+  .map(li => [li.getAttribute('data-stage'), li.className.replace('st ', ''),
+              li.querySelector('.g').textContent])
+"""
+CONFIRM_GO = "#confirm-n-dialog [data-confirm-n-go]"
+
+
+def _type_driver_n(c: Chrome, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.getElementById('driver-n'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
+    """항목 25 · 26 · 28 · 37~39 — 드라이버가 exit 2 로 멈추고 plan_n 이 있으면 S2 가 사람 단계고
+    N 대화상자가 뜬다: 틀린 N 은 Confirm 이 닫힌 채 «≠ 181», 맞는 N 이 열고, 보낸 본문은
+    `{build_name, build_number:"181"}` 그대로다. 도는 중이면 S5 가 파랑 ▶, 앞은 ✓, 뒤는 ·,
+    Abort 가 열린다. exit 3 은 보라 «result unknown» 이고 Retry 가 없다. Source 행에는
+    미러의 커밋 다섯 · 태그(latest) · «PR list: next». 예행 버튼은 rehearsal 본문만 보내고
+    mode=upload 버튼은 없다. 한국어로 바꾸면 단계 이름이 카탈로그에서 온다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        build_row = '#store details.srow[data-row="build"]'
+        with Chrome(tmp_path / "chrome-driver", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": DRIVER_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            # S2 — 대화상자가 저절로 뜬다
+            c.open(
+                base + "&admin=1&driver=s2#/store/app",
+                ready_js="document.getElementById('confirm-n-dialog').open === true",
+            )
+            steps = c.eval(STEPPER_JS)
+            assert [s[0] for s in steps] == [f"S{i}" for i in range(9)], steps
+            assert [s[1] for s in steps] == ["done", "done", "human"] + ["todo"] * 6, steps
+            row_state = c.eval(_q(build_row, ".getAttribute('data-state')"))
+            assert row_state == "stale", row_state  # 사람 단계는 황토
+            head = c.eval(_q(build_row + " > summary", ".textContent"))
+            assert "waiting for the typed build number 181" in head, head
+            dlg = c.eval("document.getElementById('confirm-n-dialog').innerText")
+            assert "Confirm build number for 1.0.1" in dlg and "181" in dlg, dlg
+            disabled = _q(CONFIRM_GO, ".disabled")
+            assert c.eval(disabled) is True
+            _type_driver_n(c, "180")
+            assert c.eval(disabled) is True, "a wrong N keeps Confirm closed"
+            assert c.eval(_q("#confirm-n-dialog [data-driver-n-state]", ".textContent")) == "≠ 181"
+            _type_driver_n(c, "181")
+            assert c.eval(disabled) is False
+            assert c.eval(_q(CONFIRM_GO, ".textContent")) == "Confirm 181 and continue"
+            c.eval(_q(CONFIRM_GO, ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'confirm')")
+            calls = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "confirm"]
+            assert calls[-1][1] == {"build_name": "1.0.1", "build_number": "181"}, calls
+            _wait(c, "document.getElementById('confirm-n-dialog').open === false")
+            # 같은 회차에 다시 저절로 뜨지 않는다 — 버튼이 다시 연다
+            c.eval("document.dispatchEvent(new Event('visibilitychange'))")
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is False
+            c.eval(_q(build_row + " [data-driver-confirm-open]", ".click()"))
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is True
+            assert c.eval(disabled) is True, "the typed N is spent after a confirm"
+            c.eval(_q("#confirm-n-dialog [data-confirm-n-cancel]", ".click()"))
+            # GitHub 카드(항목 25)
+            gh = c.eval(_q('#store details.srow[data-row="source"] [data-github]', ".textContent"))
+            assert "main · last 5" in gh and "9e1c4d2" in gh and "feat(x): change 5" in gh, gh
+            assert "prod/1.0.0-180" in gh and "latest" in gh, gh
+            assert "PR list: next (needs the GH token)" in gh, gh
+            n_sha = c.eval("document.querySelectorAll('#store table.gh td.sha').length")
+            assert n_sha == 5, n_sha
+            # 예행 — rehearsal 본문만; mode=upload 버튼은 없다
+            c.eval(_q(build_row + " [data-upload-rehearsal]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'upload')")
+            up = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "upload"]
+            assert up[-1][1] == {
+                "mode": "rehearsal",
+                "build_name": "1.0.1",
+                "confirm_build_number": "181",
+            }, up
+            texts = c.eval(
+                "[...document.querySelectorAll('#store button')].map(b => b.textContent.trim())"
+            )
+            assert not [t for t in texts if re.fullmatch(r"upload", t, re.I)], texts
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+
+            # 도는 중 S5 — 앞 ✓, 지금 ▶ 파랑, 뒤 ·, Abort 열림
+            c.open(
+                base + "&admin=1&driver=running#/store/app",
+                ready_js=_q(build_row + ' [data-driver-stage="S5"]') + " !== null",
+            )
+            steps = c.eval(STEPPER_JS)
+            assert [s[1] for s in steps] == ["done"] * 5 + ["current"] + ["todo"] * 3, steps
+            assert [s[2] for s in steps] == ["✓"] * 5 + ["▶"] + ["·"] * 3, steps
+            assert c.eval(_q(build_row, ".getAttribute('data-state')")) == "running"
+            head = c.eval(_q(build_row + " > summary", ".textContent"))
+            assert "stage S5 scenario QA" in head and "started by pcs" in head, head
+            assert c.eval(_q(build_row + " [data-driver-abort]", ".disabled")) is False
+            assert c.eval(_q(build_row + " [data-driver-retry]")) is None
+            assert c.eval(_q(build_row + " [data-driver-start]")) is None
+            assert c.eval("document.getElementById('confirm-n-dialog').open") is False
+            c.eval(_q(build_row + " [data-driver-abort]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'abort')")
+            ab = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "abort"]
+            assert ab[-1][1] == {"build_name": "1.0.1"}, ab
+
+            # exit 3 — 보라 «result unknown», Retry 없음, Start 도 닫힘
+            c.open(
+                base + "&admin=1&driver=exit3#/store/app",
+                ready_js=_q(build_row + ' [data-driver-exit="3"]') + " !== null",
+            )
+            steps = c.eval(STEPPER_JS)
+            assert steps[7][1] == "unknown" and steps[7][2] == "?", steps
+            head = c.eval(_q(build_row + " > summary", ".textContent"))
+            assert "result unknown — do not resubmit" in head, head
+            assert c.eval(_q(build_row + " [data-driver-retry]")) is None
+            assert c.eval(_q(build_row + " .drv-head", ".className")) == "drv-head lost"
+            assert c.eval(_q(build_row + " [data-driver-start-go]", ".disabled")) is True
+            reason = c.eval(_q(build_row + " [data-driver-reason]", ".textContent"))
+            assert "result unknown" in reason, reason
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 한국어
+            c.eval("document.getElementById('lang-btn').click()")
+            ko = c.eval(_q(build_row, ".textContent"))
+            assert "시나리오 QA" in ko and "결과 모름" in ko, ko[:600]
+            assert "예행 (업로드 없음)" in ko, ko[:600]
+            assert "undefined" not in ko and "NaN" not in ko
+            assert c.page_errors() == []
+    finally:
+        srv.close()

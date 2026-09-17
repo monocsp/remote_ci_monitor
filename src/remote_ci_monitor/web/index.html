@@ -132,6 +132,25 @@
   </form>
 </dialog>
 
+<!-- 드라이버 S2 — 빌드 번호 재입력 (스토어 목업 항목 26 · 28). 체크박스가 아니라 숫자를 다시 타이핑한다;
+     plan_n 과 글자 그대로 같을 때만 «Confirm N» 이 열리고 `POST …/release/confirm` 이 나간다. -->
+<dialog id="confirm-n-dialog" aria-labelledby="confirm-n-title">
+  <form method="dialog" class="dlg">
+    <h2 id="confirm-n-title" data-confirm-n-title data-i18n="driver.stage.S2">N 확인</h2>
+    <p class="sub" data-confirm-n-body></p>
+    <div class="nbox">
+      <label for="driver-n" data-i18n="review.n_label">빌드 번호를 입력해야 계속합니다</label>
+      <input id="driver-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-describedby="driver-n-state">
+      <span id="driver-n-state" class="nstate" data-driver-n-state></span>
+    </div>
+    <p class="dlg-status sub" data-confirm-n-status></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-confirm-n-cancel data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-confirm-n-go disabled data-i18n="driver.confirm.go_empty">확인</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- 로그 서랍 (항목 13) — 토큰 필요 -->
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">

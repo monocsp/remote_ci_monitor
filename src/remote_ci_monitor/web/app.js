@@ -1216,15 +1216,43 @@
     return state === "bad" || state === "running" || state === "stale";
   }
   /** Setup 행 머리(항목 3): n/m 있음 · 마지막 검증 시각 · 빌드번호 정책. */
+  /** 검증 시각 — ISO 글자나 epoch 숫자(초·밀리초) 어느 쪽이든. 모르는 꼴은 null. */
+  function verifiedMs(v) {
+    if (isNum(v)) return v > 1e12 ? v : v * 1000;
+    return parseIso(v);
+  }
+  /** 마지막 검증 시각 — 종류(value · file · dir)를 가리지 않고, 폴더는 파일마다의 시각도 본다. */
+  function latestVerified(items) {
+    var latest = null;
+    var see = function (v) { var t = verifiedMs(v); if (t != null && (latest == null || t > latest)) latest = t; };
+    (items || []).forEach(function (it) {
+      if (!it) return;
+      see(it.verified_at);
+      if (it.verify_detail && typeof it.verify_detail === "object") see(it.verify_detail.verified_at);
+      (Array.isArray(it.files) ? it.files : []).forEach(function (f) { if (f && typeof f === "object") see(f.verified_at); });
+    });
+    return latest;
+  }
+  /** «검사 안 함» 개수 — setup.not_checked 나 항목의 verify_detail.not_checked(숫자) 를 더한다. 없으면 0. */
+  function notCheckedCount(setup, items) {
+    var n = 0;
+    if (setup && isNum(setup.not_checked)) n += setup.not_checked;
+    (items || []).forEach(function (it) {
+      var d = it && it.verify_detail;
+      if (d && typeof d === "object" && isNum(d.not_checked)) n += d.not_checked;
+    });
+    return n;
+  }
   function setupHead(setup, items, profile, lang, tzName, nowMs) {
     var s = setup || {};
-    var latest = null;
-    (items || []).forEach(function (it) { var t = parseIso(it && it.verified_at); if (t != null && (latest == null || t > latest)) latest = t; });
-    return T(lang, "row.setup_head", {
+    var latest = latestVerified(items);
+    var head = T(lang, "row.setup_head", {
       n: isNum(s.present) ? s.present : DASH, total: isNum(s.required) ? s.required : DASH,
       clock: latest != null ? fmtClock(new Date(latest).toISOString(), tzName, nowMs) : DASH,
       kind: profile && profile.build_number_policy ? String(profile.build_number_policy) : DASH
     });
+    var nc = notCheckedCount(setup, items);
+    return nc > 0 ? head + " · " + T(lang, "row.setup_not_checked", { n: nc }) : head;
   }
   /** Source 행 머리(항목 4·25): main sha7 · main ⊂ dev · 미러 나이(· fetch 실패). 조각 배열로 준다. */
   function sourceHead(doc, ctx, lang) {
@@ -1502,6 +1530,21 @@
     if (b.error) return String(b.error);
     return "http " + (res ? res.status : "?");
   }
+  /**
+   * plan.json 의 스토어 값을 글자로 — 숫자·글자는 그대로, 객체(`{name, status, codes:[…]}` 같은 Play 트랙)는
+   * `codes` 를 잇고, 없으면 name/status, 그것도 없으면 짧은 JSON. 절대 `[object Object]` 가 아니다. 없으면 —.
+   */
+  function storeValueText(v) {
+    if (v == null || v === "") return DASH;
+    if (typeof v !== "object") return String(v);
+    if (Array.isArray(v)) return v.length ? v.map(storeValueText).join(", ") : DASH;
+    if (Array.isArray(v.codes) && v.codes.length) return v.codes.map(storeValueText).join(", ");
+    var bits = [v.version, v.name, v.build, v.status].filter(function (x) { return x != null && x !== "" && typeof x !== "object"; }).map(String);
+    if (bits.length) return bits.join(" · ");
+    var json;
+    try { json = JSON.stringify(v); } catch (e) { json = "{…}"; }
+    return json.length > 60 ? json.slice(0, 59) + "…" : json;
+  }
   /** Store 행(항목 6·42) — 색과 머리 조각과 본문. plan.json 은 서버가 읽어 `plan.doc` 으로 준다. */
   function storeRowModel(release, releaseStatus, profile, lang, tzName, nowMs) {
     var presets = profile && profile.presets ? profile.presets : {};
@@ -1517,11 +1560,12 @@
       return { state: "bad", head: [why], body: null };
     }
     var store = doc.store && typeof doc.store === "object" ? doc.store : {};
-    head.push(T(lang, "store.head.live", { version: store.asc_live != null ? store.asc_live : DASH, build: store.asc_live_build != null ? store.asc_live_build : DASH }));
-    if (store.asc_editing != null) head.push(T(lang, "store.head.editing", { version: store.asc_editing }));
-    var play = store.play && typeof store.play === "object" ? store.play : {};
+    var sv = storeValueText;
+    head.push(T(lang, "store.head.live", { version: sv(store.asc_live), build: sv(store.asc_live_build) }));
+    if (store.asc_editing != null) head.push(T(lang, "store.head.editing", { version: sv(store.asc_editing) }));
+    var play = store.play && typeof store.play === "object" && !Array.isArray(store.play) ? store.play : {};
     var tracks = Object.keys(play);
-    head.push(tracks.length ? T(lang, "store.head.play", { track: tracks[0], build: play[tracks[0]] != null ? play[tracks[0]] : DASH }) : T(lang, "store.head.play", { track: DASH, build: DASH }));
+    head.push(tracks.length ? T(lang, "store.head.play", { track: tracks[0], build: sv(play[tracks[0]]) }) : T(lang, "store.head.play", { track: DASH, build: DASH }));
     head.push(T(lang, "store.head.next", { n: isNum(doc.n) ? doc.n : DASH }));
     var blockers = Array.isArray(doc.blockers) ? doc.blockers : [], warnings = Array.isArray(doc.warnings) ? doc.warnings : [];
     var age = isNum(plan.age_seconds) ? plan.age_seconds : (parseIso(plan.measured_at) != null && isNum(nowMs) ? Math.max(0, (nowMs - parseIso(plan.measured_at)) / 1000) : null);
@@ -1537,9 +1581,9 @@
     return {
       state: state, head: head,
       body: {
-        builds: [store.asc_live != null ? "App Store live " + store.asc_live + " (" + (store.asc_live_build != null ? store.asc_live_build : DASH) + ")" : null,
-          store.asc_editing != null ? "App Store editing " + store.asc_editing : null].filter(Boolean),
-        tracks: tracks.map(function (t) { return "Play " + t + " " + (play[t] != null ? play[t] : DASH); }),
+        builds: [store.asc_live != null ? "App Store live " + sv(store.asc_live) + " (" + sv(store.asc_live_build) + ")" : null,
+          store.asc_editing != null ? "App Store editing " + sv(store.asc_editing) : null].filter(Boolean),
+        tracks: tracks.map(function (t) { return "Play " + t + " " + sv(play[t]); }),
         next: isNum(doc.n) ? String(doc.n) : DASH,
         measured: doc.measured_at ? fmtClock(String(doc.measured_at), tzName, nowMs) : DASH,
         blockers: blockers.map(item), warnings: warnings.map(item), firstRelease: doc.first_release === true, jobId: plan.job_id
@@ -1649,6 +1693,188 @@
     if (upDoc && upDoc.tag) head.push(T(lang, "build.head.last", { tag: upDoc.tag }));
     return { state: "na", head: head, layers: layers, note: null };
   }
+  // ── 릴리스 드라이버 스테퍼 · GitHub 카드 (항목 25 · 26 · 28 · 37~39, STORE-TAB-API-2 「Driver」) ──
+  //
+  // 웹은 판정하지 않는다(규칙 4): 단계는 드라이버가 찍은 줄에서 읽고, 종료 코드는 드라이버의 것 그대로다.
+  // S2 는 사람 단계 — 서버가 `plan_n` 을 주고 종료 코드가 2 면 사람이 그 숫자를 다시 타이핑해야
+  // `POST …/release/confirm` 이 나간다(항목 28). `mode=upload` 버튼은 이 PR 에 **일부러 없다** —
+  // 드라이버의 S7 이 업로드 길이고, 따로 두는 업로드 버튼은 자기 N 대화상자가 필요한 별개 결정이다.
+  var DRIVER_STAGES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"];
+  var STAGE_LINE = /stage\s+(S\d|DONE|BLOCKED_PR_CLOSED)\b/;
+  var NEXT_STAGE_LINE = /다음 단계 (S\d)\b/;
+  var PLAN_N_LINE = /plan:\s*N\s*=\s*(\d+)/;
+  var VERSION_RE = /^\d+\.\d+\.\d+$/;
+  /**
+   * 드라이버가 지금 어느 단계인가. 규칙: 종료 코드 0 → DONE · 2 → S2(사람 단계) · 그 밖에는
+   * `--status` 줄에서 `stage S<n>|DONE|BLOCKED_PR_CLOSED` 또는 `다음 단계 S<n>` 에 맞는 **마지막** 줄,
+   * 없으면 로그 꼬리에서 같은 규칙. `last` 는 마지막으로 보인 S 단계(BLOCKED 가 어디서 막혔는지).
+   */
+  function driverStage(status, exit, log) {
+    function scan(lines) {
+      var found = null, lastS = null;
+      (Array.isArray(lines) ? lines : []).forEach(function (raw) {
+        var line = String(raw == null ? "" : raw);
+        var m = STAGE_LINE.exec(line) || NEXT_STAGE_LINE.exec(line);
+        if (!m) return;
+        found = m[1];
+        if (/^S\d$/.test(m[1])) lastS = m[1];
+      });
+      return { stage: found, last: lastS };
+    }
+    var s = scan(status), l = scan(log);
+    var last = s.last || l.last;
+    if (exit === 0) return { stage: "DONE", last: last, source: "exit" };
+    if (exit === 2) return { stage: "S2", last: last, source: "exit" };
+    if (s.stage) return { stage: s.stage, last: last, source: "status" };
+    if (l.stage) return { stage: l.stage, last: last, source: "log" };
+    return { stage: null, last: last, source: null };
+  }
+  var EXIT_TONE = { 1: "bad", 2: "human", 3: "lost", 4: "warn" };
+  /**
+   * 스테퍼 아홉 칸(항목 26). `driver` 는 `GET …/release/driver` 본문(404 면 ctx.status), ctx 는
+   * `{status, lang, tzName, nowMs}`. 앞 단계 ✓ 초록 · 지금 ▶ 파랑 · 뒤 · 회색; 사람 단계는 황토 점선,
+   * 실패는 ✗ 빨강, exit 3 은 ? 보라(재시도 없음), exit 4 는 ! 황토, PR 닫힘은 ! 황토.
+   */
+  function stepperModel(driver, ctx) {
+    ctx = ctx || {};
+    var lang = ctx.lang, nowMs = ctx.nowMs;
+    var base = { available: true, configured: false, running: false, exit: null, stage: null, planN: null, version: DASH, items: [], head: "", headParts: [], tone: "na", dialog: false, log: [], idle: true, done: false, blocked: false, statusError: null };
+    if (ctx.status === 404) return Object.assign(base, { available: false, head: T(lang, "driver.na") });
+    if (!driver || typeof driver !== "object") return Object.assign(base, { loading: true, head: T(lang, "driver.loading") });
+    if (driver.configured === false) return Object.assign(base, { head: T(lang, "driver.not_configured") });
+    var running = driver.running === true;
+    var exit = !running && isNum(driver.exit_code) ? driver.exit_code : null;
+    var log = (Array.isArray(driver.log_tail) ? driver.log_tail : []).map(function (l) { return String(l == null ? "" : l); });
+    var planN = isNum(driver.plan_n) && Math.floor(driver.plan_n) === driver.plan_n ? driver.plan_n : null;
+    if (planN == null) log.forEach(function (l) { var m = PLAN_N_LINE.exec(l); if (m) planN = parseInt(m[1], 10); });
+    var parsed = driverStage(driver.status, exit, log);
+    var stage = parsed.stage;
+    if (!stage && running) stage = "S0";
+    var version = driver.build_name != null && driver.build_name !== "" ? String(driver.build_name) : DASH;
+    var idle = !running && exit == null;
+    var done = stage === "DONE", blocked = stage === "BLOCKED_PR_CLOSED";
+    var cur = DRIVER_STAGES.indexOf(blocked ? parsed.last : stage);
+    var tone = running ? "running" : idle ? "na" : done ? "ok" : blocked ? "warn" : EXIT_TONE[exit] || "bad";
+    var items = DRIVER_STAGES.map(function (id, i) {
+      var label = T(lang, "driver.stage." + id), st, glyph, note = [];
+      if (idle) { st = "todo"; glyph = "·"; }
+      else if (done || (cur >= 0 && i < cur)) { st = "done"; glyph = "✓"; }
+      else if (cur === i) {
+        if (running) { st = "current"; glyph = "▶"; note.push(T(lang, "driver.item.current")); }
+        else if (blocked) { st = "blocked"; glyph = "!"; note.push(T(lang, "driver.item.blocked")); }
+        else if (exit === 2) { st = "human"; glyph = "▶"; note.push(T(lang, "driver.item.human")); }
+        else if (exit === 3) { st = "unknown"; glyph = "?"; note.push(T(lang, "driver.item.unknown")); }
+        else if (exit === 4) { st = "drift"; glyph = "!"; note.push(T(lang, "driver.item.drift")); }
+        else { st = "failed"; glyph = "✗"; note.push(T(lang, "driver.item.failed")); }
+      } else { st = "todo"; glyph = "·"; note.push(T(lang, "driver.item.waiting")); }
+      if (id === "S1" && planN != null && st !== "todo") note.push(T(lang, "driver.item.n", { n: planN }));
+      if (id === "S2" && st === "done" && planN != null) note.push(T(lang, "driver.item.n_confirmed", { n: planN }));
+      if (id === "S2" && st === "todo") note.push(T(lang, "driver.item.human_ahead"));
+      if ((id === "S6" || id === "S7") && st === "todo") note.push(T(lang, "driver.item.irreversible"));
+      return { id: id, label: label, state: st, glyph: glyph, text: note.join(" · ") };
+    });
+    var stageLabel = cur >= 0 ? DRIVER_STAGES[cur] + " " + T(lang, "driver.stage." + DRIVER_STAGES[cur]) : null;
+    var parts = [];
+    if (idle) parts.push(T(lang, "driver.head.none"));
+    else if (running) {
+      parts.push(version);
+      parts.push(T(lang, "driver.head.stage", { stage: stageLabel || DASH }));
+      var started = parseIso(driver.started_at);
+      if (started != null && isNum(nowMs)) parts.push(fmtDuration(Math.max(0, (nowMs - started) / 1000)));
+      if (driver.started_by) parts.push(T(lang, "driver.head.by", { name: String(driver.started_by) }));
+    } else if (done) parts.push(T(lang, "driver.head.done", { version: version }));
+    else if (blocked) { parts.push(version); parts.push(T(lang, "driver.blocked")); }
+    else if (exit === 1) { parts.push(version); parts.push(stageLabel ? T(lang, "driver.exit.1", { stage: stageLabel }) : T(lang, "driver.exit.1_nostage")); }
+    else if (exit === 2) { parts.push(version); parts.push(planN != null ? T(lang, "driver.exit.2", { n: planN }) : T(lang, "driver.exit.2_unknown_n")); }
+    else if (exit === 3) { parts.push(version); parts.push(T(lang, "driver.exit.3")); }
+    else if (exit === 4) { parts.push(version); parts.push(T(lang, "driver.exit.4")); }
+    else { parts.push(version); parts.push(T(lang, "driver.exit.other", { code: exit })); }
+    var confirmed = driver.confirmed_n != null;
+    return {
+      available: true, configured: true, loading: false, running: running, exit: exit, stage: stage, stageSource: parsed.source, planN: planN, version: version,
+      items: items, head: parts.join(" · "), headParts: parts, tone: tone, idle: idle, done: done, blocked: blocked, log: log,
+      // S2 의 N 대화상자(항목 28): 종료 코드 2 · plan_n 있음 · 아직 확인한 N 없음
+      dialog: !running && exit === 2 && planN != null && !confirmed,
+      statusError: driver.status_error ? String(driver.status_error) : null,
+      startedBy: driver.started_by ? String(driver.started_by) : null, startedAt: driver.started_at || null
+    };
+  }
+  /** Build·upload 행의 색과 머리를 드라이버가 가져가는가 — 도는 중이거나 실패·대기·모름·드리프트일 때만. 끝난 회차(exit 0)는 upload.json 이 말한다. */
+  function driverRow(model) {
+    if (!model || !model.available || !model.configured || model.idle || model.done) return null;
+    var state = model.running ? "running" : model.exit === 2 || model.exit === 4 || model.blocked ? "stale" : "bad";
+    return { state: state, head: model.headParts.slice() };
+  }
+  /**
+   * 어느 버튼이 열리는가(항목 35 · 계약 「Driver」) — 이유는 전부 모아 준다. Start · Confirm · Abort ·
+   * Retry 는 admin, Rehearsal 은 클라이언트 토큰. ctx: {token, admin, busy, version, typedN, release,
+   * releaseStatus, uploadPreset}. Retry 는 exit 1 뿐이다 — exit 3 은 결과를 모르니 다시 올리지 않는다.
+   */
+  function driverActions(model, ctx) {
+    model = model || {}; ctx = ctx || {};
+    var live = model.available === true && model.configured === true;
+    function gate(admin) {
+      var r = [];
+      if (!ctx.token) r.push("no_token"); else if (admin && !ctx.admin) r.push("admin");
+      if (ctx.busy) r.push("busy");
+      return r;
+    }
+    var r = gate(true);
+    if (!model.available) r.push("na"); else if (!model.configured) r.push("not_configured");
+    else if (model.running) r.push("running");
+    else if (model.exit === 2) r.push("awaiting_n");
+    else if (model.exit === 3) r.push("result_unknown");
+    if (!VERSION_RE.test(String(ctx.version == null ? "" : ctx.version))) r.push("version_pattern");
+    var start = { enabled: !r.length, reasons: r, show: live && !model.running && model.exit !== 2 };
+    r = gate(true);
+    if (!model.dialog) r.push("no_dialog"); else if (!nMatches(ctx.typedN, model.planN)) r.push("n_mismatch");
+    var confirm = { enabled: !r.length, reasons: r, show: model.dialog === true };
+    r = gate(true);
+    if (!model.running) r.push("not_running");
+    var abort = { enabled: !r.length, reasons: r, show: live && model.running === true };
+    r = gate(true);
+    if (model.running) r.push("running"); else if (model.exit === 3) r.push("result_unknown"); else if (model.exit !== 1) r.push("not_failed");
+    var retry = { enabled: !r.length, reasons: r, show: live && !model.running && model.exit === 1 };
+    // 예행(업로드 없음) — 플랜의 N 이 confirm_build_number 로 간다. mode=upload 버튼은 없다.
+    r = gate(false);
+    var doc = planEntryDoc(ctx.release && ctx.release.plan);
+    if (!doc || !isNum(doc.n)) r.push("no_plan");
+    if (model.running) r.push("running");
+    var rehearsal = { enabled: !r.length, reasons: r, show: !!ctx.uploadPreset && ctx.releaseStatus !== 404 && !!ctx.release };
+    return { start: start, confirm: confirm, abort: abort, retry: retry, rehearsal: rehearsal };
+  }
+  /** `POST …/release/upload` 예행 본문 — 플랜의 build_name 과 N 그대로. */
+  function rehearsalBody(release) {
+    var plan = release && release.plan ? release.plan : {}, doc = planEntryDoc(plan) || {};
+    return { mode: "rehearsal", build_name: plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : ""),
+      confirm_build_number: isNum(doc.n) ? String(doc.n) : "" };
+  }
+  /** 친 N 과 드라이버의 plan_n — 글자 그대로 같아야 한다(nMatches). state: empty · ok · mismatch · unknown. */
+  function confirmNDecision(typed, planN) {
+    if (!isNum(planN) || Math.floor(planN) !== planN) return { enabled: false, state: "unknown" };
+    if (typeof typed !== "string" || typed === "") return { enabled: false, state: "empty" };
+    return nMatches(typed, planN) ? { enabled: true, state: "ok" } : { enabled: false, state: "mismatch" };
+  }
+  /** Source 행의 GitHub 카드(항목 25): 미러의 최근 다섯 커밋 · 태그(최신 표시) · PR 은 null 이면 «다음». */
+  function githubCardModel(gh, status, ref, lang, tzName, nowMs) {
+    if (status === 404) return { state: "na", text: T(lang, "github.na"), log: [], tags: [], prs: null };
+    if (!gh || typeof gh !== "object") return { state: "loading", text: T(lang, "github.loading"), log: [], tags: [], prs: null };
+    var log = (Array.isArray(gh.log) ? gh.log : []).filter(function (c) { return c && typeof c === "object"; }).slice(0, 5).map(function (c) {
+      return { sha: String(c.sha || "").slice(0, 7), subject: String(c.subject || ""), author: String(c.author || ""), at: c.at ? fmtClock(String(c.at), tzName, nowMs) : DASH };
+    });
+    var tags = (Array.isArray(gh.tags) ? gh.tags : []).filter(function (t) { return t && typeof t === "object" && t.name; }).map(function (t) {
+      return { name: String(t.name), at: t.at ? fmtClock(String(t.at), tzName, nowMs) : DASH, ms: parseIso(t.at), latest: false };
+    });
+    var best = -1;
+    tags.forEach(function (t, i) { if (t.ms != null && (best < 0 || t.ms > tags[best].ms)) best = i; });
+    if (best < 0 && tags.length) best = 0;
+    tags.forEach(function (t, i) { t.latest = i === best; delete t.ms; });
+    var prs = gh.prs == null ? null : (Array.isArray(gh.prs) ? gh.prs : []).filter(function (p) { return p && typeof p === "object"; }).map(function (p) {
+      return { number: p.number != null ? p.number : DASH, title: String(p.title || ""), state: String(p.state || "") };
+    });
+    return { state: "ok", ref: ref || "main", log: log, tags: tags, prs: prs,
+      prsText: prs == null ? T(lang, "github.prs_next") : prs.length ? null : T(lang, "github.none") };
+  }
   /**
    * 서버 호출 한 곳. `fetchFn` 은 window.fetch 모양, `tokenFn` 은 지금 토큰(없으면 null)을 준다.
    * 모든 메서드가 `{ok, status, body}` 로 풀린다 — 404 도 던지지 않는다(프로파일 PR 이 없는 서버는
@@ -1695,8 +1921,8 @@
       driver: function (name) { return call("GET", base(name) + "/release/driver"); },
       driverStart: function (name, body) { return call("POST", base(name) + "/release/start", JSON.stringify(body || {}), "application/json"); },
       driverConfirm: function (name, body) { return call("POST", base(name) + "/release/confirm", JSON.stringify(body || {}), "application/json"); },
-      driverAbort: function (name) { return call("POST", base(name) + "/release/abort", "{}", "application/json"); },
-      driverRetry: function (name) { return call("POST", base(name) + "/release/retry", "{}", "application/json"); }
+      driverAbort: function (name, body) { return call("POST", base(name) + "/release/abort", JSON.stringify(body || {}), "application/json"); },
+      driverRetry: function (name, body) { return call("POST", base(name) + "/release/retry", JSON.stringify(body || {}), "application/json"); }
     };
   }
   var storePure = {
@@ -1710,7 +1936,11 @@
     panelPill: panelPill, panelOpen: panelOpen, fieldCounter: fieldCounter, listingFields: listingFields,
     screenshotGroups: screenshotGroups, reviewInfoModel: reviewInfoModel, versionStrip: versionStrip, resultModel: resultModel,
     refusalText: refusalText, storeRowModel: storeRowModel, rowsById: rowsById, basisText: basisText, buildLayers: buildLayers,
-    buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS
+    buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS,
+    // 릴리스 드라이버 스테퍼 · GitHub 카드
+    driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
+    confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
+    storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
   };
 
   var rcm = {
@@ -1755,7 +1985,11 @@
       // 릴리스 상태(`GET …/release`) · 소개 자료(`GET …/release/listing`) · 사람의 선택. 선택은 이 페이지에만 산다 —
       // 관리형 게시 체크와 친 N 은 새 플랜이 오면 지워지고 localStorage 에 가지 않는다(결정 3 · 항목 28).
       release: null, releaseStatus: null, listing: null, listingStatus: null, busy: null, reviewError: null, planError: null, validate: null,
-      review: { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null } }
+      review: { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null },
+      // 릴리스 드라이버(`GET …/release/driver`) · GitHub 카드(`GET …/release/github`). Start 폼의 값과 S2 의 친 N 도
+      // 이 페이지에만 산다 — 회차(build_name · plan_n)가 바뀌면 지워진다. `driverDialogKey` 는 S2 대화상자를 회차마다 한 번만 저절로 연다.
+      driver: null, driverStatus: null, github: null, githubStatus: null, driverError: null, driverN: "", driverDialogKey: null,
+      driverForm: { version: null, track: "", dryRun: false } }
   };
   function now() { return state.skewUnknown ? NaN : Date.now() + state.skewMs; }
   function tz() { return state.tz || undefined; }
@@ -2980,6 +3214,9 @@
       state.store.release = null; state.store.releaseStatus = null; state.store.listing = null; state.store.listingStatus = null;
       state.store.busy = null; state.store.reviewError = null; state.store.planError = null; state.store.validate = null;
       state.store.review = { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null };
+      state.store.driver = null; state.store.driverStatus = null; state.store.github = null; state.store.githubStatus = null;
+      state.store.driverError = null; state.store.driverN = ""; state.store.driverDialogKey = null;
+      state.store.driverForm = { version: null, track: "", dryRun: false };
     }
     showView("store");
     renderStore();
@@ -2996,7 +3233,7 @@
     var seq = (state.store.seq = (state.store.seq || 0) + 1);
     // 소개 자료는 서버에서 명령을 돌리는 것이라 30초 타이머로는 안 받는다 — 처음과 새로고침·검사 뒤에만
     var wantListing = (opts && opts.listing) || state.store.listing == null && state.store.listingStatus == null;
-    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(), wantListing ? loadListing() : null]).then(function (rs) {
+    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(), wantListing ? loadListing() : null, loadDriver(), loadGithub()]).then(function (rs) {
       if (seq !== state.store.seq || state.store.repo !== repo) return;  // 그 사이 다른 저장소로 갔다
       state.store.repos = rs[0].ok ? releaseRepos(rs[0].body) : [];
       state.store.reposStatus = rs[0].status;
@@ -3137,6 +3374,8 @@
       + "<dt>profile</dt><dd>" + esc(tr("source.profile_line", { ref: profile.default_branch || DASH, text: profile.tag || DASH })) + "</dd>"
       + (state.store.fetchError ? '<dt class="bad">fetch</dt><dd class="bad">' + esc(tr("source.fetch_failed", { detail: String(state.store.fetchError).slice(0, 60) })) + "</dd>" : "")
       + "</dl>";
+    // GitHub 카드(항목 25): 미러의 최근 다섯 커밋 · 태그 · PR 은 «다음»
+    srcBody += githubCardHtml(githubCardModel(state.store.github, state.store.githubStatus, profile.default_branch || "main", L(), tz(), n));
     h += srowHtml("source", srcState, esc(sourceHead(doc, srcCtx, L()).join(" · ")), fetchBtn, srcBody);
     // Build·upload(항목 5 · 46~49) · Store(항목 6 · 42) — `GET …/release` 가 404 면 «not available in this build»
     var release = releaseDoc(), rstatus = state.store.releaseStatus;
@@ -3151,7 +3390,7 @@
     return unsafeBannerHtml() + h;
   }
   /** 렌더 뒤 Submit 상태를 채운다 — 버튼은 HTML 에서 늘 비활성으로 나오고 여기서만 열린다. */
-  function afterStoreRender() { renderSubmitState(); applyBarFills($("[data-store-body]")); }
+  function afterStoreRender() { renderSubmitState(); renderDriverState(); applyBarFills($("[data-store-body]")); maybeOpenConfirmN(); }
   // ── 릴리스 상태 · 소개 자료 (STORE-TAB-API-2) ──
   function releaseDoc() { return state.store.release; }
   function currentProfile() { return (state.store.doc && state.store.doc.profile) || {}; }
@@ -3180,6 +3419,29 @@
       state.store.listingStatus = res.status;
       state.store.listing = res.ok && res.body && typeof res.body === "object" ? res.body : null;
     }).catch(function () { state.store.listing = null; state.store.listingStatus = 0; });
+  }
+
+  /** 드라이버 상태. 404 = 이 빌드에 없음. 회차(build_name · plan_n)가 바뀌면 친 N 과 Start 폼은 지워진다. */
+  function loadDriver() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.driver !== "function") { state.store.driver = null; state.store.driverStatus = 404; return Promise.resolve(); }
+    return api.driver(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      var prev = state.store.driver;
+      state.store.driverStatus = res.status;
+      state.store.driver = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+      var cur = state.store.driver;
+      if (!prev || !cur || prev.build_name !== cur.build_name || prev.plan_n !== cur.plan_n || prev.running !== cur.running) state.store.driverN = "";
+    }).catch(function () { state.store.driver = null; state.store.driverStatus = 0; });
+  }
+  function loadGithub() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.github !== "function") { state.store.github = null; state.store.githubStatus = 404; return Promise.resolve(); }
+    return api.github(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      state.store.githubStatus = res.status;
+      state.store.github = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+    }).catch(function () { state.store.github = null; state.store.githubStatus = 0; });
   }
 
   // ── Store 행 (항목 6 · 42) ──
@@ -3239,9 +3501,92 @@
     return h;
   }
   function buildRowHtml(model) {
-    var body = model.layers && model.layers.items.length ? buildLayersHtml(model.layers) : '<p class="sub">' + esc(model.head.join(" · ")) + "</p>";
+    var dm = driverModel(), acts = driverActions(dm, driverCtx());
+    var over = driverRow(dm);   // 도는 중 · 실패 · N 대기 · 모름 · 드리프트면 행의 색과 머리는 드라이버의 것
+    var st = over ? over.state : model.state, head = over ? over.head : model.head;
+    var busy = state.store.busy, reasonOf = function (a) { return a.reasons.map(function (k) { return tr("driver.reason." + k); }).join(" · "); };
+    var extra = "";
+    if (acts.abort.show) extra += '<button type="button" class="btn danger" data-driver-abort' + (acts.abort.enabled ? "" : ' disabled title="' + esc(reasonOf(acts.abort)) + '"') + ">" + esc(tr(busy === "abort" ? "driver.aborting" : "driver.abort")) + "</button>";
+    if (acts.retry.show) extra += '<button type="button" class="btn" data-driver-retry' + (acts.retry.enabled ? "" : ' disabled title="' + esc(reasonOf(acts.retry)) + '"') + ">" + esc(tr(busy === "retry" ? "driver.retrying" : "driver.retry")) + "</button>";
+    var body = "";
+    // 스테퍼는 잡 카드 위에(항목 26). 릴리스 상태도 드라이버도 없는 빌드면 행의 «not available» 한 줄뿐이다.
+    if (state.store.driverStatus !== 404 || (state.store.releaseStatus !== 404 && releaseDoc())) body += driverHtml(dm, acts);
+    if (model.layers && model.layers.items.length) body += buildLayersHtml(model.layers);
+    else if (!over) body += '<p class="sub">' + esc(model.head.join(" · ")) + "</p>";
     if (model.note === "lost") body = '<p class="bad">' + esc(model.head.join(" · ")) + "</p>" + body;
-    return srowHtml("build", model.state, esc(model.head.join(" · ")), "", body);
+    return srowHtml("build", st, esc(head.join(" · ")), extra, body);
+  }
+  // ── 릴리스 드라이버 (항목 26 · 28 · 37~39) ──
+  function driverModel() { return stepperModel(state.store.driver, { status: state.store.driverStatus, lang: L(), nowMs: now(), tzName: tz() }); }
+  function driverFormVersion() {
+    var f = state.store.driverForm;
+    if (f.version != null) return f.version;
+    var plan = (releaseDoc() || {}).plan;   // 아직 안 쳤으면 플랜의 버전이 기본값
+    return plan && plan.build_name != null ? String(plan.build_name) : "";
+  }
+  function driverCtx() {
+    return { token: state.token, admin: state.admin, busy: state.store.busy, version: driverFormVersion(), typedN: state.store.driverN,
+      release: releaseDoc(), releaseStatus: state.store.releaseStatus, uploadPreset: !!(currentProfile().presets || {}).upload };
+  }
+  function driverReasons(a) { return a.reasons.map(function (k) { return tr("driver.reason." + k); }).join(" · "); }
+  var DRIVER_HEAD_GLYPH = { running: "▶", ok: "✓", bad: "✗", human: "▶", lost: "?", warn: "!", na: "·" };
+  function driverHtml(m, acts) {
+    var busy = state.store.busy;
+    var h = '<div class="driver" data-driver data-driver-stage="' + esc(m.stage || "") + '" data-driver-exit="' + (m.exit == null ? "" : m.exit) + '" role="group" aria-label="' + esc(tr("driver.aria")) + '">';
+    h += '<p class="drv-head ' + esc(m.tone) + '" data-driver-head><span class="g" aria-hidden="true">' + (DRIVER_HEAD_GLYPH[m.tone] || "·") + "</span><span>" + esc(m.head) + "</span></p>";
+    if (m.statusError) h += '<p class="sub bad">' + esc(tr("driver.status_error", { detail: m.statusError.slice(0, 80) })) + "</p>";
+    if (!m.available || !m.configured) return h + "</div>";
+    if (!m.idle) {
+      h += '<ol class="stepper">';
+      m.items.forEach(function (it) {
+        h += '<li class="st ' + esc(it.state) + '" data-stage="' + it.id + '"><span class="g" aria-hidden="true">' + esc(it.glyph) + "</span><span><b>" + it.id + "</b> " + esc(it.label) + '</span><span class="sub">' + esc(it.text) + "</span></li>";
+      });
+      h += "</ol>";
+    }
+    // S2(항목 28): 대화상자는 회차마다 한 번 저절로 뜨고, 이 버튼이 다시 연다
+    if (acts.confirm.show) h += '<div class="actions"><button type="button" class="btn primary" data-driver-confirm-open>' + esc(tr("driver.confirm")) + "</button></div>";
+    if (acts.start.show) {
+      var f = state.store.driverForm;
+      h += '<form class="drv-start" data-driver-start>'
+        + '<label>' + esc(tr("driver.version")) + '<input type="text" data-driver-version autocomplete="off" spellcheck="false" placeholder="' + esc(tr("driver.version_hint")) + '" value="' + esc(driverFormVersion()) + '"></label>'
+        + '<label>' + esc(tr("driver.track")) + '<input type="text" data-driver-track autocomplete="off" spellcheck="false" list="driver-tracks" placeholder="' + esc(tr("driver.track_default")) + '" value="' + esc(f.track) + '"></label>'
+        + '<datalist id="driver-tracks"><option value="internal"></option><option value="alpha"></option><option value="beta"></option><option value="production"></option></datalist>'
+        + '<label class="ck"><input type="checkbox" data-driver-dry' + (f.dryRun ? " checked" : "") + "> " + esc(tr("driver.dry_run")) + "</label>"
+        + '<button type="submit" class="btn primary" data-driver-start-go disabled>' + esc(tr(busy === "start" ? "driver.starting" : "driver.start")) + "</button>"
+        + '<span class="sub" data-driver-reason></span></form>';
+    }
+    // 예행(업로드 없음). mode=upload 버튼은 일부러 없다 — 드라이버의 S7 이 업로드 길이다.
+    if (acts.rehearsal.show) {
+      h += '<div class="actions"><button type="button" class="btn" data-upload-rehearsal' + (acts.rehearsal.enabled ? "" : ' disabled title="' + esc(driverReasons(acts.rehearsal)) + '"') + ">" + esc(tr(busy === "rehearsal" ? "driver.rehearsing" : "driver.rehearsal")) + "</button>"
+        + '<span class="sub">' + esc(acts.rehearsal.enabled ? tr("driver.rehearsal_hint") : driverReasons(acts.rehearsal)) + "</span></div>";
+    }
+    if (state.store.driverError) h += '<p class="bad" data-driver-error>' + esc(state.store.driverError) + "</p>";
+    if (m.log.length) h += '<details class="drv-log"><summary class="sub">' + esc(tr("driver.log", { n: m.log.length })) + '</summary><pre class="notes">' + esc(m.log.join("\n")) + "</pre></details>";
+    return h + "</div>";
+  }
+  /** Start 버튼과 이유만 제자리에서 — 타이핑마다 본체를 다시 그리지 않는다. */
+  function renderDriverState() {
+    var go = $("#store [data-driver-start-go]");
+    if (!go) return;
+    var a = driverActions(driverModel(), driverCtx()).start;
+    go.disabled = !a.enabled;
+    go.title = a.enabled ? "" : driverReasons(a);
+    var reason = $("#store [data-driver-reason]");
+    if (reason) reason.textContent = a.enabled ? "" : driverReasons(a);
+  }
+  function githubCardHtml(g) {
+    if (g.state !== "ok") return '<p class="sub ghcard" data-github="' + esc(g.state) + '">' + esc(g.text) + "</p>";
+    var h = '<div class="ghcard" data-github="ok"><div class="two"><div><div class="mini-h">' + esc(tr("github.log", { ref: g.ref, n: g.log.length })) + "</div>";
+    h += g.log.length ? '<table class="gh"><tbody>' + g.log.map(function (c) {
+      return '<tr><td class="sha">' + esc(c.sha) + "</td><td>" + esc(c.subject) + '</td><td class="sub">' + esc(c.author + " · " + c.at) + "</td></tr>";
+    }).join("") + "</tbody></table>" : '<span class="sub">' + esc(tr("github.none")) + "</span>";
+    h += '</div><div><div class="mini-h">' + esc(tr("github.tags")) + "</div>";
+    h += g.tags.length ? '<ul class="plain mono">' + g.tags.map(function (t) {
+      return "<li>" + esc(t.name) + (t.latest ? ' <span class="chip latest">' + esc(tr("github.latest")) + "</span>" : "") + ' <span class="sub">' + esc(t.at) + "</span></li>";
+    }).join("") + "</ul>" : '<span class="sub">' + esc(tr("github.none")) + "</span>";
+    h += '<div class="mini-h">' + esc(tr("github.prs")) + "</div>";
+    h += g.prsText ? '<span class="sub" data-github-prs>' + esc(g.prsText) + "</span>" : '<ul class="plain">' + g.prs.map(function (p) { return "<li>#" + esc(String(p.number)) + " " + esc(p.title) + (p.state ? ' <span class="sub">' + esc(p.state) + "</span>" : "") + "</li>"; }).join("") + "</ul>";
+    return h + "</div></div></div>";
   }
 
   // ── 심사 패널 본체 (항목 7~24 · 28 · 36 · 40) ──
@@ -3582,11 +3927,99 @@
       toast(tr("review.submitted_toast", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
     });
   }
+  // ── 행동: 드라이버 Start · Confirm N · Abort · Retry · 예행 (항목 26 · 28 · 35) ──
+  function driverCall(kind, run, after, onFail) {
+    if (!state.token || state.store.busy) return;
+    var repo = state.store.repo;
+    state.store.busy = kind; state.store.driverError = null; renderStore(); renderConfirmNState();
+    run(storeApi(), repo).then(function (res) {
+      state.store.busy = null;
+      if (res.ok) after(res);
+      else {
+        // 409 는 서버의 규칙이다 — 코드를 그대로 쓰고, 돌아가지 않는다
+        state.store.driverError = refusalText(res, L());
+        if (onFail) onFail(res);
+        if (res.status === 401 || res.status === 403) tokenRejected();
+      }
+      return loadStore();
+    }).catch(function () { state.store.busy = null; state.store.driverError = "network"; renderStore(); renderConfirmNState(); });
+  }
+  function startDriver() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).start.enabled) return;
+    var f = state.store.driverForm, body = { build_name: driverFormVersion() };
+    if (f.track) body.android_track = f.track;
+    if (f.dryRun) body.dry_run = true;
+    driverCall("start", function (api, repo) { return api.driverStart(repo, body); }, function (res) {
+      state.store.driverForm = { version: null, track: "", dryRun: false }; state.store.driverDialogKey = null;
+      toast(tr("driver.started_toast", { id: res.body && res.body.release_id != null ? res.body.release_id : DASH }));
+    });
+  }
+  function abortDriver() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).abort.enabled) return;
+    driverCall("abort", function (api, repo) { return api.driverAbort(repo, { build_name: m.version }); }, function () { toast(tr("driver.aborted_toast")); });
+  }
+  function retryDriver() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).retry.enabled) return;
+    driverCall("retry", function (api, repo) { return api.driverRetry(repo, { build_name: m.version }); }, function () { toast(tr("driver.retried_toast")); });
+  }
+  function rehearseUpload() {
+    if (!driverActions(driverModel(), driverCtx()).rehearsal.enabled) return;
+    var body = rehearsalBody(releaseDoc());
+    driverCall("rehearsal", function (api, repo) { return api.upload(repo, body); }, function (res) {
+      toast(tr("driver.rehearsal_toast", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
+  /** S2 의 N 대화상자(항목 28) — 회차마다 한 번 저절로, 그 뒤엔 «Confirm build number…» 가 다시 연다. */
+  function maybeOpenConfirmN() {
+    var m = driverModel();
+    if (!m.dialog) return;
+    var key = state.store.repo + "/" + m.version + "/" + m.planN;
+    if (state.store.driverDialogKey === key) return;
+    state.store.driverDialogKey = key;
+    openConfirmN();
+  }
+  function openConfirmN() {
+    var m = driverModel(), dlg = $("#confirm-n-dialog"), input = $("#driver-n");
+    if (!m.dialog || !dlg) return;
+    $("[data-confirm-n-title]").textContent = tr("driver.confirm.title", { version: m.version });
+    $("[data-confirm-n-body]").textContent = tr("driver.confirm.body", { n: m.planN });
+    $("[data-confirm-n-status]").textContent = "";
+    input.value = state.store.driverN || "";
+    renderConfirmNState();
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+    input.focus();
+  }
+  /** Confirm 버튼 · N 상태만 제자리에서 갱신. 맞는 N 만 연다 — 글자 그대로. */
+  function renderConfirmNState() {
+    var go = $("#confirm-n-dialog [data-confirm-n-go]"), st = $("#confirm-n-dialog [data-driver-n-state]");
+    if (!go) return;
+    var m = driverModel(), d = confirmNDecision(state.store.driverN, m.planN), a = driverActions(m, driverCtx()).confirm;
+    go.disabled = !a.enabled;
+    go.title = a.enabled ? "" : driverReasons(a);
+    go.textContent = state.store.busy === "confirm" ? tr("driver.confirming") : m.planN != null ? tr("driver.confirm.go", { n: m.planN }) : tr("driver.confirm.go_empty");
+    if (st) {
+      st.textContent = d.state === "empty" ? "" : d.state === "ok" ? tr("review.n_ok", { n: m.planN }) : d.state === "mismatch" ? tr("review.n_mismatch", { n: m.planN }) : tr("review.n_unknown");
+      st.className = "nstate" + (d.state === "ok" ? " ok" : d.state === "empty" ? "" : " bad");
+    }
+  }
+  function confirmDriverN() {
+    var m = driverModel();
+    if (!driverActions(m, driverCtx()).confirm.enabled) return;   // 대화상자가 열린 사이 회차가 바뀌었을 수 있다
+    var typed = state.store.driverN, dlg = $("#confirm-n-dialog");
+    driverCall("confirm", function (api, repo) { return api.driverConfirm(repo, { build_name: m.version, build_number: typed }); }, function () {
+      state.store.driverN = "";   // 한 확인은 한 번만 쓴다(항목 28)
+      if (dlg && dlg.open) dlg.close();
+      toast(tr("driver.confirmed_toast", { n: typed }));
+    }, function (res) { var st = $("[data-confirm-n-status]"); if (st) st.textContent = refusalText(res, L()); });
+  }
   function wireStore() {
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-validate-listing],[data-plan-review],[data-submit-review]");
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
       if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
@@ -3598,14 +4031,24 @@
       if (t.hasAttribute("data-validate-listing")) { validateListing(); return; }
       if (t.hasAttribute("data-plan-review")) { planReview(); return; }
       if (t.hasAttribute("data-submit-review")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
+      if (t.hasAttribute("data-driver-abort")) { if (!t.disabled) abortDriver(); return; }
+      if (t.hasAttribute("data-driver-retry")) { if (!t.disabled) retryDriver(); return; }
+      if (t.hasAttribute("data-driver-confirm-open")) { state.lastTrigger = t; openConfirmN(); return; }
+      if (t.hasAttribute("data-upload-rehearsal")) { if (!t.disabled) rehearseUpload(); return; }
       if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
     });
     st.addEventListener("input", function (ev) {
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-version")) { state.store.driverForm.version = ev.target.value; renderDriverState(); return; }
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-track")) { state.store.driverForm.track = ev.target.value; return; }
       if (ev.target.id !== "review-n") return;
       state.store.review.typedN = ev.target.value;   // 기억하지 않는다 — state 에만, 새 플랜이 오면 지워진다
       renderSubmitState();
     });
+    st.addEventListener("submit", function (ev) {
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-start")) { ev.preventDefault(); startDriver(); }
+    });
     st.addEventListener("change", function (ev) {
+      if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-dry")) { state.store.driverForm.dryRun = !!ev.target.checked; return; }
       var check = ev.target.getAttribute && ev.target.getAttribute("data-review-check");
       if (check) {
         var rv = state.store.review, on = !!ev.target.checked;
@@ -3657,6 +4100,13 @@
       sdlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitReview(); });
       $("[data-submit-cancel]").addEventListener("click", function () { sdlg.close(); });
       sdlg.addEventListener("close", restoreTrigger);
+    }
+    var ndlg = $("#confirm-n-dialog");
+    if (ndlg) {
+      ndlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); confirmDriverN(); });
+      ndlg.addEventListener("input", function (ev) { if (ev.target.id === "driver-n") { state.store.driverN = ev.target.value; renderConfirmNState(); } });
+      $("[data-confirm-n-cancel]").addEventListener("click", function () { ndlg.close(); });
+      ndlg.addEventListener("close", restoreTrigger);
     }
     var dlg = $("#secret-dialog");
     if (dlg) {

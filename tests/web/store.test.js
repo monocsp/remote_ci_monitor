@@ -253,6 +253,27 @@ describe("row heads", () => {
     const none = S.setupHead(null, [], null, "en", "Asia/Seoul", NOW);
     assert.equal(none, `${DASH}/${DASH} secrets present · verified ${DASH} · build number ${DASH}`);
   });
+  test("setupHead: the newest verified_at of any kind counts — value · file · dir · a dir's files · epoch numbers", () => {
+    const t = (sec) => new Date(NOW - sec * 1000).toISOString();
+    const items = [
+      Object.assign(item({ verified_at: t(3600) }), { kind: "value" }),
+      fileItem({ verified_at: null }),
+      { name: "review_information", kind: "dir", present: true, verified_at: t(600), files: [{ name: "a", present: true, verified_at: t(60) }] },
+    ];
+    assert.match(S.setupHead(doc().setup, items, doc().profile, "en", "Asia/Seoul", NOW), /verified 09:51 ·/);
+    assert.equal(S.latestVerified(items), NOW - 60 * 1000);
+    assert.equal(S.latestVerified([{ verified_at: Math.floor(NOW / 1000) }]), Math.floor(NOW / 1000) * 1000, "epoch seconds");
+    assert.equal(S.latestVerified([{ verified_at: NOW }]), NOW, "epoch milliseconds");
+    assert.equal(S.latestVerified([{ verified_at: "soon" }, null, {}]), null);
+    assert.equal(S.latestVerified([{ verify_detail: { verified_at: t(5) } }]), NOW - 5000);
+  });
+  test("setupHead: «n not checked» only when a count is present", () => {
+    const items = [item({ verify_detail: { not_checked: 2 } }), fileItem({ verify_detail: "ok" })];
+    assert.match(S.setupHead(doc().setup, items, doc().profile, "en", "Asia/Seoul", NOW), / · 2 not checked$/);
+    assert.match(S.setupHead(Object.assign({}, doc().setup, { not_checked: 1 }), items, doc().profile, "ko", "Asia/Seoul", NOW), /검사 안 함 3$/);
+    assert.equal(S.notCheckedCount(doc().setup, [item()]), 0);
+    assert.doesNotMatch(S.setupHead(doc().setup, [item()], doc().profile, "en", "Asia/Seoul", NOW), /not checked/);
+  });
   test("sourceHead: sha7 · main in dev · fetched age", () => {
     assert.deepEqual(S.sourceHead(doc(), { nowMs: NOW }, "en"), ["main 9e1c4d2", "main in dev", "fetched 3m ago"]);
     const bad = S.sourceHead(doc({ branches: { main: null, dev: "x", main_in_dev: false } }), { nowMs: NOW, fetchError: "a".repeat(100) }, "en");

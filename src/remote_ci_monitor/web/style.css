@@ -564,8 +564,43 @@ pre.notes { margin: 4px 0; padding: 6px 8px; border: 1px solid var(--line-2); bo
 .checklist .ci.bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
 .checklist .ci .jobcard { grid-column: 2; color: var(--ink); display: grid; gap: 4px; }
 .checklist .ci .jobcard .pwrap { display: flex; gap: 8px; align-items: center; }
+/* 릴리스 드라이버 스테퍼 (스토어 목업 항목 26 · 28 · 37~39) — 색 + 글리프 + 테두리, 토큰만 */
+.driver { margin: 2px 0 10px; }
+.drv-head { display: flex; gap: 8px; align-items: baseline; margin: 0 0 8px; padding: 6px 10px; border-radius: 6px; border-left: 4px solid var(--line); background: var(--surface-2); color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.drv-head .g { font-weight: 700; }
+.drv-head.running { border-left-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.drv-head.ok { border-left-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+.drv-head.bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+.drv-head.human, .drv-head.warn { border-left-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+.drv-head.lost { border-left-color: var(--lost); background: var(--lost-soft); color: var(--lost); }
+ol.stepper { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; }
+.stepper .st { display: grid; grid-template-columns: 1.2em max-content 1fr; gap: 4px 8px; align-items: baseline; padding: 4px 8px; border-radius: 6px; border-left: 3px solid var(--line); font-size: 12.5px; color: var(--muted); }
+.stepper .st .g { font-weight: 700; text-align: center; }
+.stepper .st .sub { color: var(--muted); }
+.stepper .st.done { border-left-color: var(--ok); color: var(--ok); }
+.stepper .st.current { border-left-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.stepper .st.human { border-left-color: var(--warn); border-left-style: dashed; background: var(--warn-soft); color: var(--warn); }
+.stepper .st.failed { border-left-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+.stepper .st.unknown { border-left-color: var(--lost); background: var(--lost-soft); color: var(--lost); }
+.stepper .st.drift, .stepper .st.blocked { border-left-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+.drv-start { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 8px 0; }
+.drv-start label { display: grid; gap: 2px; font: 600 12px var(--sans); color: var(--muted); }
+.drv-start label.ck { display: flex; align-items: center; gap: 4px; align-self: center; }
+.drv-start input[type="text"] { font: 13px var(--mono); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); width: 9em; }
+.drv-log pre.notes { max-height: 14em; font-family: var(--mono); }
+/* Source 행의 GitHub 카드 (항목 25) */
+.ghcard { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line-2); font-size: 12.5px; }
+.ghcard .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mini-h { font: 600 12px var(--sans); color: var(--muted); margin: 6px 0 4px; }
+table.gh { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.gh td { padding: 2px 6px 2px 0; vertical-align: top; overflow-wrap: anywhere; }
+table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
+.chip.latest { border-color: var(--ok); color: var(--ok); cursor: default; }
 @media (max-width: 720px) {
   .stores { grid-template-columns: 1fr; }
+  .ghcard .two { grid-template-columns: 1fr; }
+  .stepper .st { grid-template-columns: 1.2em 1fr; }
+  .stepper .st .sub { grid-column: 2; }
   .fld { grid-template-columns: 1fr; }
   .nbox { grid-template-columns: 1fr; }
   .nbox input { width: 100%; box-sizing: border-box; }
