@@ -120,7 +120,7 @@ from remote_ci_monitor.events import (
 from remote_ci_monitor.gitops import STDERR_TAIL_LINES, GitError, GitTimeout, resolve_ref
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor
-from remote_ci_monitor.materialize import blob_path
+from remote_ci_monitor.materialize import blob_path, stale_blob_keys
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
@@ -1648,6 +1648,15 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, f"manifest rejected: {e}") from e
         prefix = self._blob_prefix(token)
         have_keys = self.store.have_blobs(prefix + h for h in manifest.unique_hashes)
+        # 표에 있어도 파일이 없으면 «없다» 다 — 그 행은 여기서 지운다(다음 협상부터 세션이 올린다).
+        # 표만 믿었을 때
+        # 세션은 안 올리고 자재화는 죽는 드리프트가 있었다(2026-09-17 · gate-fast 7회 · blobs 행
+        # 6,579개 유령).
+        stale = stale_blob_keys(self.config.data_dir / "blobs", sorted(have_keys))
+        if stale:
+            self.store.delete_blobs(stale)
+            have_keys.difference_update(stale)
+            self.log(f"snapshot: dropped {len(stale)} blob rows without files (job {job_id})")
         have = {k[len(prefix) :] for k in have_keys}
         missing = missing_hashes(manifest, have)
         now = self.now_fn()
