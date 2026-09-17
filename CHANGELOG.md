@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-17
+
 ### Added
 - **Store tab server API, part 2: the release routes and the driver.** Under
   `/api/repos/<repo>/release/…` the server now turns the profile into actions. `GET …/release`
@@ -1080,7 +1082,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/monocsp/remote_ci_monitor/compare/v0.2.6...v0.2.7
