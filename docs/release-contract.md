@@ -40,6 +40,7 @@ default_branch       = "main"             # where releases are cut from (default
 tag                  = "prod/{version}-{build}"   # "release exists" is this tag, exactly (default)
 build_number_policy  = "auto"             # "auto" (store max + 1, computed by YOUR script) | "manual"
 plan_max_age_minutes = 30                 # older plans get a stale badge; Submit stays closed
+version_ttl_hours    = 24                 # a new-version draft nobody edited is discarded after this (integer ≥ 1)
 driver               = "scripts/release/product_release.sh"   # optional: the S0–S8 round (§5)
 secrets_dir_env      = "APP_SECRETS"      # jobs get the secrets folder path in this variable
 
@@ -49,6 +50,7 @@ upload = "release-upload"                 # required — store upload → upload
 review = "release-review"                 # required — submit for review → review-plan.json / review.json
 gate   = "gate-smoke"                     # optional — your CI gate on the release ref
 qa     = "scenario-qa"                    # optional — device / scenario QA → report.json
+version = "release-version"               # optional — «new version» from the web: prefill / create / delete
 # dev  = "deploy-dev"                     # optional — dev distribution card (phase 2)
 
 # Secrets the Settings screen asks for. rcm keeps them under <config_dir>/secrets/<repo>/
@@ -106,9 +108,11 @@ release_notes = "store/release_notes/{version}/*.txt"
 
 `rcm check --config server.toml` adds one row per profile, `release <repo>`. It is FAIL when a
 required role is missing or names a preset that does not exist, when the `upload` preset's `mode`
-defaults to `upload` or the `review` preset's `mode` defaults to `submit`, when those presets lack
-the inputs rcm sends (§2), when secrets exist without `secrets_dir_env`, or when a secret name
-repeats. It warns (not FAIL) when the secrets folder does not exist yet or an optional role is unset.
+defaults to `upload` or the `review` preset's `mode` defaults to `submit`, when a `version` preset's
+`mode` does not default to `prefill`, when those presets lack the inputs rcm sends (§2), when
+secrets exist without `secrets_dir_env`, or when a secret name repeats. It warns (not FAIL) when the
+secrets folder does not exist yet, an optional role is unset, or the `review` / `upload` preset has
+no `listing_json` input (the copy edited in the web UI cannot reach the script then).
 
 **What the profile must not contain**: secret values, store credentials, or anything the page
 would show back. Secrets are entered once in the Settings screen and never displayed; the API
@@ -124,19 +128,33 @@ artifact retention). It sets these inputs; declare them on the preset or the sub
 | Role | Tier | Inputs rcm sends | Artifact rcm reads | Exit codes rcm distinguishes | Skill that adds it |
 |---|---|---|---|---|---|
 | `plan` | **required** | `build_name` | `plan.json` | 0 ok · 1 blocked (plan.json still written) · 2 environment | `rcm-store-connect` |
-| `upload` | **required** | `build_name`, `confirm_build_number`, `mode = rehearsal\|upload`, `platform`, `android_track` | `upload.json` | 0 · 1 · 2 env · 3 confirmation mismatch · 4 store drift | `rcm-store-connect` |
-| `review` | **required** | `build_name`, `confirm_build_number` (empty for plan), `mode = plan\|submit`, `platform`, `play_managed_publishing = not-checked\|confirmed-on`, `listing = notes-only\|full`, `phased = 1\|0` | `review-plan.json` / `review.json` | 0 · 1 failed · 2 blocked · 3/4 confirmation mismatch · 5 noop · 6 partial | `rcm-store-connect` |
+| `upload` | **required** | `build_name`, `confirm_build_number`, `mode = rehearsal\|upload`, `platform`, `android_track`, `listing_json` | `upload.json` | 0 · 1 · 2 env · 3 confirmation mismatch · 4 store drift | `rcm-store-connect` |
+| `review` | **required** | `build_name`, `confirm_build_number` (empty for plan), `mode = plan\|submit`, `platform`, `play_managed_publishing = not-checked\|confirmed-on`, `listing = notes-only\|full`, `phased = 1\|0`, `listing_json` | `review-plan.json` / `review.json` | 0 · 1 failed · 2 blocked · 3/4 confirmation mismatch · 5 noop · 6 partial | `rcm-store-connect` |
+| `version` | optional | `mode = prefill\|create\|delete` (default **prefill**), `ios_version`, `android_version` (empty = that store is not touched), `asc_version_id` (for delete) | `version.json` (create · delete) / `prefill.json` (prefill · create) | 0 · 1 failed · 2 environment · 3 already exists (an editable App Store version of that name) · 4 not deletable (the version was submitted) | `rcm-store-connect` |
 | `gate` | optional | *(none — ref only)* | commit status is yours; rcm shows steps/log | 0 · non-zero | `rcm-gate-connect` |
 | `qa` | optional | project-defined (`order`, `android_mode`, …); rcm passes the profile defaults | `report.json` (+ optional `step-captures.html`) | 0 PASS · 1 FAIL · 2 / 10 BLOCKED (environment, shown amber not red) | `rcm-qa-connect` |
 | `driver` | optional | `--build-name`, `--confirm-build-number` (§5) | stage from remote truth | 0 · 1 · 2 · 3 · 4 | `rcm-release-driver` |
 
 **Required** means the Store tab opens only when these exist and the secrets they need are present
 and verified. **Optional** roles that are unset show a grey row saying which skill adds them; the
-review flow works without them.
+review flow works without them. Without a `version` preset, «new version» in the web UI creates
+the draft in rcm only (state `editing` at once) and the listing starts from the repository's
+`store/` files instead of a prefill.
 
-Two invariants rcm checks on the preset definitions, because they are the last line of safety:
+**`listing_json`** (`review` · `upload`; string, default `""`) is the listing copy a human edited on
+the version page, as one JSON object `{"ios": {…}, "android": {…}}` whose keys are the
+`prefill.json` field names below. rcm sends it only when the edit differs from the prefill; an
+empty value means «the `store/` files are the copy». A non-empty value **wins over `store/`** for
+everything the script pushes, and `mode=plan` echoes its fields back in
+`review-plan.json.listing.preview` («this is what goes up»). Writing the edited copy back into
+`store/` and committing it is the project's choice — allowed, never required, and never done by
+rcm. A preset without the input still works; `rcm check` warns and the edited copy stays in rcm.
+
+Three invariants rcm checks on the preset definitions, because they are the last line of safety:
 
 - the irreversible mode is never the default (`mode` defaults to `rehearsal` / `plan`);
+- the `version` preset's `mode` defaults to `prefill` — `create` makes a store draft and
+  `delete` cannot be undone, so both are choices;
 - `play_managed_publishing` has exactly one confirming value, and rcm sends it only when the
   human ticked the box **in this submission**.
 
@@ -148,9 +166,28 @@ Extra fields are kept and shown raw where the page has room. Missing fields rend
 // plan.json — written however the run ends; n == null requires a non-empty blockers[]
 { "schema": 1, "build_name": "1.0.1", "n": 181, "first_release": false,
   "store": { "asc_live": "1.0.0", "asc_live_build": 180, "asc_editing": "1.0.1",
-             "play": { "production": 180, "internal": 178 } },
+             "play": { "production": 180, "internal": 178, "production_name": "1.0.0" } },
+  "next_version_hint": { "ios": "1.0.1", "android": "1.0.1" },   // optional, see below
   "blockers": [ { "code": "B-PLAYBUSY", "text": "…" } ], "warnings": [ … ],
   "measured_at": "2026-09-17T00:41:00Z" }
+// Optional: store.play.production_name (the live Android version name) and next_version_hint {ios, android}.
+// Without a hint rcm suggests the last number of asc_live / production_name + 1 (1.1.0 → 1.1.1); a name it
+// cannot parse (1.0.0-rc1) gives no hint. The hint prefills the «new version» dialog; a human confirms it.
+
+// version.json — after mode=create · delete, however the run ends. ios/android are null when that store was not
+// touched; both null is accepted only with a non-empty error (why nothing happened: exit 3 already exists, …).
+{ "schema": 1, "mode": "create",
+  "ios": { "version": "1.1.1", "asc_version_id": "abc123", "state": "PREPARE_FOR_SUBMISSION" } | null,
+  "android": { "version": "1.0.1" } | null,            // Play has no version object: the name only
+  "error": null, "measured_at": "2026-09-18T02:00:00Z" }
+
+// prefill.json — the live version's listing copy the new version starts from. Field keys are the ones the
+// version page edits and sends back as listing_json; one locale (Q7), recorded in `locale`, not in the keys.
+// `source` says where it came from ("asc_live:1.1.0 · play_listing", or "file:store/" for the repository fallback).
+{ "schema": 1, "source": "asc_live:1.1.0 · play_listing", "locale": "ko",
+  "ios": { "subtitle": "…", "promotional_text": "", "description": "…", "keywords": "…", "support_url": "…",
+           "marketing_url": "…", "whats_new": "…", "screenshots": [ { "path": "store/screenshots/ios/ko/0.png" } ] } | null,
+  "android": { "title": "…", "short_description": "…", "full_description": "…", "whats_new": "…", "graphics": [] } | null }
 
 // report.json — QA verdict; verdict == FAIL requires failures[] to be non-empty
 { "schema": 1, "verdict": "PASS|FAIL|BLOCKED",
@@ -238,11 +275,18 @@ For a normal release round the page does not orchestrate presets itself; it runs
 non-interactively, the way a session machine would, and reads the stage back from remote truth:
 
 ```
-<driver> --build-name 1.0.1 [--confirm-build-number 181] [--dry-run] [--retry] [--abort] [--status]
+<driver> --build-name 1.0.1 [--version-id 7] [--confirm-build-number 181] [--dry-run] [--retry] [--abort] [--status]
 ```
 
 Expectations on the driver:
 
+- `--version-id <id>` (optional, sent when the round starts from a version page): stage **`V`**
+  reads the version row `GET /api/repos/<repo>/release/versions/<id>` with the `RCM_SERVER` /
+  `RCM_TOKEN` the job receives and uses its `ios_version` (else `android_version`) as the build
+  name — the name comes from the row, never from the driver; a `--build-name` given as well must
+  be the same. `--status` prints `stage V …` while the row is not readable and lists the stages as
+  `V S0 … S8`. A driver that does not know the flag is called the old way (`--build-name` only)
+  and the page says the driver has no `V` stage — re-run `/rcm-release-driver`;
 - exit `2` and print `plan: N = <n>` when it needs the build number — rcm shows the dialog, the
   human **types** the number, rcm re-runs with `--confirm-build-number`; with the page's
   **Build number: Auto** toggle (default when `build_number_policy = "auto"`) rcm re-runs with
@@ -297,7 +341,7 @@ unless `--force`). In that project a session then runs:
 | skill | tier | produces |
 |---|---|---|
 | `/rcm-connect` | entry point | asks project · repo name · platforms · which optional tiers; runs the rest in order; writes `docs/rcm-connect.md` |
-| `/rcm-store-connect` | required | profile block, secrets list, presets `plan`/`upload`/`review`, three script skeletons + a JSON helper, each with `--selftest` |
+| `/rcm-store-connect` | required | profile block, secrets list, presets `plan`/`upload`/`review` (+ the optional `version`), four script skeletons (`release_version.sh` for prefill / create / delete) + a JSON helper, each with `--selftest`; `listing_json` on review / upload |
 | `/rcm-gate-connect` | optional | `gate` preset, step markers in the existing CI script, progress markers in its silent stretches |
 | `/rcm-qa-connect` | optional | `qa` preset, `report.json` writer, per-unit progress markers, optional capture table |
 | `/rcm-release-driver` | optional | S0–S8 driver skeleton with typed-N gates, `--status`, retry/abort, and its judge with `--selftest` |

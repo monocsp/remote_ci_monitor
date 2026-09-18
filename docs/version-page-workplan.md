@@ -1,0 +1,296 @@
+# 버전 페이지와 바텀시트 — 상세 구현 계획서 (v1.0 · 2026-09-18)
+
+> 출처: 기획 초안 «버전 페이지와 바텀시트» (아티팩트 7MHJnGXkq3Z6yqYhss1H8n, R1~R12 · Q1~Q8). 이 문서는 그 단계 계획
+> (A~F)을 **파일 · 함수 · 입력 · 테스트 · 완료 조건** 수준으로 내린 것이고, 마지막 세 절(§7 완료 체크리스트 · §8
+> 엣지케이스 · §9 격리 검증 프로토콜)은 개발이 끝난 뒤 **격리 에이전트가 그대로 실행**하는 대본이다.
+>
+> 바꾸지 않는 것: 런타임 의존성 0 · rcm 은 특정 프로젝트를 모른다(스토어에 쓰는 것은 프로젝트 스크립트) · 출시 버튼 없음 ·
+> 관리형 게시는 제출마다 사람이 · 빌드 번호는 플랜의 `n` 만 · 비밀은 서버에만 · 옛 빌드가 새 DB 를 거절하는 것.
+
+## 0. 가정한 결정 (Q1~Q8 — 소유자 답이 오면 여기만 고친다)
+
+| Q | 가정 | 근거 |
+|---|---|---|
+| Q1 TTL | 24시간, 프로파일 키 `version_ttl_hours`(정수 ≥ 1) | «아무것도 안 하면 삭제» — 하루가 자연스럽다 |
+| Q2 편집한 드래프트 | 자동 삭제하지 않는다. 만료가 지나면 `expired_warning` 만 켠다. 사람이 «버리기»로만 지운다 | ASC draft 삭제는 되돌릴 수 없다 |
+| Q3 Android 버전 | rcm 안의 드래프트. 스토어에는 업로드·제출 때 스크립트가 반영 | Play 에 버전 객체가 없다 |
+| Q4 편집본 저장 | rcm 이 review/upload 잡에 `listing_json` 입력으로 넘기고 스크립트가 스토어에 쓴다. `store/` 되쓰기·커밋은 프로젝트 몫(계약에 «해도 된다»로만) | rcm 이 저장소에 커밋하지 않는다는 규칙 |
+| Q5 행 넷 | 목록·버전 페이지 머리의 «상태 띠» 한 줄로 접고, `#/store/<repo>/status` 에서 지금의 네 행 그대로 | 정보는 버리지 않는다 |
+| Q6 맨 위 막대 | 제거. 바텀시트 머리가 그 자리 | R8 |
+| Q7 언어 | `ko` 하나. 필드 키에 언어를 붙이지 않는다(`prefill.json` 의 `locale` 만 기록) | dolomood 가 ko 만 |
+| Q8 스크린샷 | 보기 + 바뀜 표시까지. 웹 업로드는 범위 밖 | 다음 판 |
+
+## 1. A — 계약과 스킬 (rcm 저장소 · 1 PR)
+
+### 1.1 `docs/release-contract.md`
+
+- §2 표에 역할 **`version`**(선택) 추가:
+  - 입력: `mode = prefill|create|delete`(기본 **prefill** — create/delete 가 기본이면 `rcm check` FAIL) · `ios_version` · `android_version`(빈 값 = 그 스토어는 만들지 않음) · `asc_version_id`(delete 때).
+  - 산출물: `version.json`(create · delete) · `prefill.json`(prefill · create).
+  - 종료 코드: 0 · 1 실패 · 2 환경 · 3 이미 있음(같은 이름의 편집 중 ASC 버전) · 4 삭제 불가(제출된 버전).
+- review · upload 입력에 **`listing_json`**(문자열, 기본 `""`) 추가: rcm 이 편집본을 JSON 문자열로 넘긴다. 스크립트는 비어 있지 않으면 `store/` 값보다 우선한다. `mode=plan` 도 받아서 `review-plan.json.listing.preview` 에 «이 값으로 올라간다»를 되돌려 준다.
+- `plan.json` 선택 필드: `store.play.production_name`(문자열) · `next_version_hint: {ios, android}`. 없으면 rcm 이 `asc_live` · `production_name` 의 마지막 숫자 +1 로 계산한다(§3.1).
+- 드라이버(§5): `--version-id <n>` 선택 인자, 상태 줄 `stage V …`, 단계 목록 `V S0 … S8`.
+- 산출물 최소 필드:
+
+```jsonc
+// version.json — mode=create · delete 뒤 (어떻게 끝나든 쓴다)
+{ "schema": 1, "mode": "create", "ios": { "version": "1.1.1", "asc_version_id": "abc123", "state": "PREPARE_FOR_SUBMISSION" } | null,
+  "android": { "version": "1.0.1" } | null, "measured_at": "2026-09-18T02:00:00Z" }
+// prefill.json — 이전 버전(라이브)의 문안. 키는 review 계약의 listing 필드 이름과 같다
+{ "schema": 1, "source": "asc_live:1.1.0 · play_listing", "locale": "ko",
+  "ios": { "subtitle": "…", "promotional_text": "", "description": "…", "keywords": "…", "support_url": "…", "marketing_url": "…",
+           "whats_new": "…", "screenshots": [ { "path": "store/screenshots/ios/ko/0.png" } ] },
+  "android": { "title": "…", "short_description": "…", "full_description": "…", "whats_new": "…", "graphics": [] } }
+```
+
+### 1.2 `src/remote_ci_monitor/config.py` · `release_state.py` · `cli.py`
+
+- `RELEASE_ROLES` · `LISTED_ROLES` 에 `"version"`; `ROLE_FILES["version"] = ("version.json", "prefill.json")`.
+- 프로파일 키 `version_ttl_hours`(기본 24, 정수 ≥ 1, `_RELEASE_KEYS` 에 추가, `ReleaseProfile.version_ttl_hours`).
+- `rcm check` `release <repo>` 행: `version` 프리셋이 있으면 입력 넷을 요구하고 `mode` 기본이 `prefill` 이어야 한다(아니면 FAIL); review/upload 프리셋에 `listing_json` 이 없으면 **warn** «listing_json 없음 — 웹에서 편집한 문안이 전달되지 않는다».
+- 테스트: `tests/test_config_release_profile.py`(키 · 기본값 · 오류 문구) · `tests/test_cli_check_release.py`(있는 파일에 추가: version 프리셋 FAIL/OK · listing_json warn).
+
+### 1.3 스킬 템플릿 (`src/remote_ci_monitor/skills/…`)
+
+| 파일 | 변경 |
+|---|---|
+| `rcm-store-connect/templates/release_version.sh` (신규) | 역할 `version`. 훅 `store_version_create IOS ANDROID` · `store_version_delete ASC_ID` · `store_prefill` (각각 `TODO(project)` 블록 + 셀프테스트 shim). 기본 `mode=prefill`. `--selftest`: prefill 이 store/ 파일에서 채워지는지 · create 가 shim 을 부르고 `version.json` 을 쓰는지 · delete 가 제출된 버전(shim `submitted`)에서 4 로 끝나는지 · 잘못된 이름 → 2 |
+| `rcm-store-connect/templates/rcm_contract.py` | `KINDS` 에 `version` · `prefill`; 검증 규칙(§1.1 최소 필드); `write_version` · `write_prefill` |
+| `rcm-store-connect/templates/release_review.sh` · `release_upload.sh` | `RCM_INPUT_LISTING_JSON` 을 읽어 비어 있지 않으면 `$WORK/listing.json` 에 쓰고 훅에 경로를 넘긴다(`store_submit … LISTING_FILE`). `listing_lines preview` 는 파일이 있으면 그 값을 `key: value` 줄로 낸다 |
+| `rcm-store-connect/templates/presets.release.toml` | `release-version` 프리셋(입력 넷, `mode` 기본 prefill, `source_modes = ["git_ref"]`) · review/upload 에 `listing_json` 입력 |
+| `rcm-store-connect/templates/profile.toml` | `presets.version = "release-version"` · `version_ttl_hours = 24` |
+| `rcm-store-connect/SKILL.md` | 파일 표 · 검증 단계에 위 셋 · «이미 있는 review/upload 스크립트에는 `listing_json` 처리만 덧붙인다(adopt-existing 규칙)» |
+| `rcm-release-driver/templates/release_driver.sh` · `release_check.py` | `--version-id` 인자(있으면 `V` 단계: rcm API `GET …/release/versions/<id>` 로 버전 이름을 받아 `BUILD_NAME` 로 씀 · 없으면 지금처럼) · `stage V` 출력 · `STAGES = ["V","S0",…]` |
+| `rcm-connect/SKILL.md` | tiers 에 `version`(선택) · 「새 버전 만들기를 쓰려면 version 역할」 · 헤더 `version:` 줄 |
+
+- 템플릿 셀프테스트는 저장소 루트에서 `bash <template> --selftest` 로 돌아야 한다(`SELF=` 규칙).
+- `tests/test_skills_templates.py`(있으면 추가): `release_version.sh --selftest` 0 · `rcm_contract.py validate version --file` 거절 사례.
+
+### 1.4 완료 조건 → §7 AC-A1~A8
+
+## 2. B — 서버 (rcm 저장소 · 2 PR: B1 저장소+라우트 · B2 전달+청소기+CLI)
+
+### 2.1 저장소 (`store.py`) — DB **v20**
+
+```sql
+CREATE TABLE versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL,
+  ios_version TEXT, android_version TEXT,                 -- 둘 중 하나는 NOT NULL (앱 레벨 검사)
+  state TEXT NOT NULL,                                    -- creating | editing | running | submitted | discarded | failed
+  created_by TEXT NOT NULL, created_at REAL NOT NULL, last_edit_at REAL, expires_at REAL NOT NULL,
+  asc_version_id TEXT, prefill_json TEXT, edited_json TEXT, error TEXT,
+  create_job_id INTEGER, delete_job_id INTEGER, release_id INTEGER, review_job_id INTEGER, expiry_warned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX versions_repo ON versions(repo, id DESC);
+```
+
+- 마이그레이션 20: `CREATE TABLE IF NOT EXISTS …` + 인덱스. v19 파일은 백업 뒤 올린다(기존 규칙).
+- 메서드: `create_version(...) -> id` · `get_version(id)` · `list_versions(repo, include_closed=True)` · `update_version(id, **fields)`(허용 열만) · `open_versions_expired(now)`(state editing · last_edit_at NULL · expires_at < now) · `versions_to_warn(now)`(편집 있음 · expires_at < now · expiry_warned 0) · `count_versions()`.
+- 청소기(`rcm gc` · 보존 정리)는 이 표를 **건드리지 않는다**(releases 와 같다).
+- 테스트: `tests/test_store_versions.py`(새 DB v20 열 집합 · v19→v20 백업+마이그레이션 · 옛 빌드 거절 · CRUD · 만료 조회 · `update_version` 이 모르는 열을 거절).
+
+### 2.2 라우트 (`server.py` — `_route` 표와 핸들러)
+
+| 라우트 | 권한 | 동작 |
+|---|---|---|
+| `GET /api/repos/<r>/release/versions` | 읽기 | `{ live: {ios, android, from_plan_job}, hints: {ios, android}, drafts: [row…], history: [ {ios, android, submitted_at, review_job_id} … ≤ 20 ] }`. `live`·`hints` 는 최신 성공 플랜의 `plan.json` 에서(§3.1 규칙을 서버도 같은 함수로 — `release_state.next_version_hint(plan_doc)`) |
+| `POST …/release/versions` | admin · 관문 통과 | 본문 `{ios_version?, android_version?}`. 검증: 둘 중 하나 이상 · `major.minor.patch` · 라이브보다 큼(라이브를 알 때만) · 같은 이름의 열린 드래프트 없음(409 `version_exists`). 행 생성(state `creating`, `expires_at = now + ttl`). `version` 프리셋이 있으면 `mode=create` 잡 제출 → 202 `{id, job_id}`; 없으면 state `editing`, `prefill_json = null` → 201 `{id, job_id: null}` |
+| `GET …/release/versions/<id>` | 읽기 | 행 + `prefill` + `edited` + `release`(지금의 `/release` 보기, `build_name` 은 이 버전의 iOS 이름 → 없으면 Android) + `driver` 보기 + `listing`(파일 미리보기, 폴백용) → 바텀시트·버전 페이지가 이것 하나로 그린다 |
+| `PUT …/release/versions/<id>/listing` | admin | 본문 `{ios: {...}, android: {...}}` — 허용 키만(§1.1 prefill 키 집합), 문자열만, 각 값 ≤ 16 KB. `edited_json` 저장 · `last_edit_at = now`. 상한 초과는 저장하고 카운터가 말한다(스토어가 최종 판정). state 가 `submitted`·`discarded` 면 409 `version_closed` |
+| `GET …/release/versions/<id>/diff` | 읽기 | `{fields: [ {platform, key, old, new} … ], screenshots: {ios: "same"|"n/a", android: …}}` — `release_state.listing_diff(prefill, edited)` |
+| `DELETE …/release/versions/<id>` | admin | «버리기». state `submitted` → 409. `asc_version_id` 가 있고 `version` 프리셋이 있으면 `mode=delete` 잡 → 202 `{job_id}`, 잡이 0 으로 끝나면 `discarded`; 아니면 즉시 `discarded` 200 |
+| `POST …/release/plan` · `review` · `upload` · `start` | 기존 | 본문 `version_id` 선택. 있으면 (a) `build_name` 을 행에서 채운다(본문의 것이 있으면 같아야 함, 아니면 400) (b) review/upload: `edited_json` 이 있고 prefill 과 다르면 `inputs["listing_json"]` — 프리셋에 그 입력이 없으면 409 `listing_json_unsupported` (c) start: `--version-id` 전달, `release_id` 링크 (d) 행 `state = running`(잡·회차가 끝나면 다시 `editing`, review submit 이 `submitted` 로 끝나면 `submitted`) |
+
+- 잡 완료 훅: 서버는 이미 `KIND_JOB_FINISHED` 이벤트를 낸다. `_version_job_finished(job)` 이 `create_job_id`·`delete_job_id`·`review_job_id` 와 맞는 잡을 찾아 산출물(`version.json` · `prefill.json` · `review.json`)을 읽고 행을 갱신한다. 실패(exit≠0 · 산출물 없음)는 `state=failed`·`error`(create 때) 또는 `editing` 으로 되돌림 + `error`(delete 때).
+- 릴리스 뷰의 `jobs[]` 에 역할 `version` 도 보인다(LISTED_ROLES).
+- 테스트: `tests/test_server_release_versions.py` — 위 표의 행마다 최소 1 케이스, §8 의 서버 엣지케이스 전부.
+
+### 2.3 청소기 · 시작 복구 · CLI
+
+- `Janitor` 에 `sweep_versions(now)`: `open_versions_expired` → 각 행을 DELETE 와 같은 경로로(잡 제출 또는 즉시 discarded), `versions_to_warn` → `expiry_warned=1` + 서버 로그 한 줄. 주기 1시간(기존 sweep 주기에 얹는다). 서버 기동 때 한 번.
+- 서버 재시작 복구: `creating` 인데 잡이 이미 끝났으면 완료 훅을 다시 적용; `running` 인데 잡·회차가 없으면 `editing` 으로.
+- CLI `rcm release`(`cli.py`): `new [--repo R] [--ios X] [--android Y] [--yes]`(인자가 없으면 힌트를 기본값으로 **버전만** 묻는다 — «새 버전을 만듭니다» 문장 뒤 `iOS [1.1.1]: ` · `Android [1.0.1]: `, 엔터 = 힌트, `-` = 만들지 않음) · `list [--repo R]` · `delete <id>` · `open <id>`(웹 주소 출력). 서버 API 만 부른다.
+- 테스트: `tests/test_janitor_versions.py` · `tests/test_cli_release.py`(입력 프롬프트는 `input` 을 몽키패치).
+
+### 2.4 완료 조건 → §7 AC-B1~B12
+
+## 3. C — 웹: 버전 목록 · 새 버전 대화상자 · 버전 페이지 (2 PR)
+
+### 3.1 순수 함수 (`app.js` 앞부분, `module.exports`)
+
+| 함수 | 규칙 |
+|---|---|
+| `parseRoute(hash)` | `#/store/<repo>` → `{view:"store", repo, sub:"versions"}` · `#/store/<repo>/v/<id>` → `sub:"version", id` · `#/store/<repo>/status` → `sub:"status"` |
+| `nextVersionHint(planDoc)` | `next_version_hint` 가 있으면 그대로. 없으면 `asc_live` · `play.production_name` 의 마지막 정수 +1(`1.1.0 → 1.1.1`, `2.0 → 2.1`, `1.0.0-rc1 → null`). 없으면 `null` |
+| `versionNameCheck(name, live)` | `major.minor.patch` 꼴 · 정수 세 개 · live 가 있으면 semver 비교로 커야 함 → `{ok, reason: pattern|not_greater|empty}` |
+| `listingDiff(prefill, edited)` | 플랫폼별 키 비교. 문자열 정규화(양끝 공백 · CRLF → LF). `changed[]` · `unchanged` 수 · 스크린샷은 `same|n/a` |
+| `fieldCounter` | 기존 것. 상한 표 `FIELD_LIMITS` + `whats_new` 4000/500 |
+| `versionListModel(doc, lang)` | 목록 행 셋(드래프트 · 라이브 · 지난 것)의 머리 문구 · 필 · 버튼 |
+| `versionPageModel(vdoc, lang)` | 필드 값 = `edited[k] ?? prefill[k] ?? listingFields[k] ?? ""` · 출처 표시(prefill · file · edited) · `changed` 칩 |
+
+### 3.2 화면
+
+- **W1 버전 목록**: 머리에 «상태 띠»(설정 n/m · 소스 main ⊂ dev · 미러 나이 · 빨간 것이 있으면 빨강 + 자동 펼침 안내 «상태 자세히 →`#/store/<r>/status`»). «+ 새 버전 만들기»(admin · 관문 통과 · 드래프트 `creating` 중이면 비활성). 드래프트 행: 이름 · 필 · 만든 지 · 바뀐 필드 수 · 빌드 유무 · «열기» «버리기». 라이브 행 · 지난 행(≤ 20).
+- **W2 대화상자** `#version-dialog`: 알림 문장 · iOS 체크+칸(힌트 프리필) · Android 체크+칸 · 규칙 문장 · «만들기»(둘 다 꺼짐 · 꼴 틀림 · 라이브보다 작음이면 비활성 + 이유). 만들기 → POST → 202 면 `#/store/<r>/v/<id>` 로 이동, 페이지는 `creating` 동안 «만드는 중 · 잡 #n» 을 보이고 5초 폴링.
+- **W3 버전 페이지 본문**: 두 절(App Store · Google Play) 같은 배치, **모든 문안 칸이 `<textarea>`/`<input>`**. 값은 `versionPageModel`. 입력 800 ms 디바운스 → `PUT …/listing`(admin 아니면 읽기 전용 + 안내). 저장 상태 «자동 저장 · 12s 전» / «저장 실패: …». «되돌리기»(칸별, prefill 값으로). 스크린샷은 보기만(+ «이전 버전과 같음» 칩). 빌드·출시 설정 · 심사 정보 · 앱 콘텐츠는 지금 문구 그대로(읽기 전용).
+- **`#/store/<r>/status`**: 지금의 네 행 그대로(코드 재사용, 심사 패널 없이).
+- i18n: 모든 새 문구 EN/KO 둘 다, 「잡」 금지(작업).
+
+### 3.3 완료 조건 → §7 AC-C1~C10
+
+## 4. D — 웹: 바텀시트 (2 PR)
+
+### 4.1 순수 함수 `sheetModel(ctx)`
+
+입력: `{version, release, driver(stepperModel), layers(buildLayers), profile, choices:{platforms, managed, listingFull, phased, nMode, typedN}, token, admin, busy, lang, nowMs}`.
+출력: `{ tone: new|running|human|ok|bad|lost|warn|done|expired, head: {ver, statusLine, remainingCount, firstRemaining}, pct, basis, stages:[{id,label,state}], now, elapsed, finishes, remaining:[{code, text, fix:{route|anchor}}], diff, canSubmit, reasons[], submitBody }`.
+
+- `remaining` 판정 순서(첫 항목이 머리에 나온다): `build_missing`(업로드 없음/회차 없음) → `round_running` → `plan_missing|plan_stale|plan_blocked` → `n_unknown|n_mismatch` → `managed_unconfirmed` → `listing_bad`(카운터 bad · Play featureGraphic 없음은 **경고**로만) → `unsafe`. 각 항목은 고치는 곳(`anchor: "#sheet-build"`, `"#f-android-graphics"` …).
+- `canSubmit` = `remaining` 에 «bad» 급이 없음 ∧ 기존 `submitDecision` 이 참. 근거 문구는 `submitDecision.reasons` 를 그대로 붙인다.
+- `stages`: 드라이버가 있으면 `V S0…S8`(V 는 버전 행이 `editing` 이상이면 done), 없으면 잡 목록 기반(`buildLayers.items`).
+- `pct`: 0.3.3 의 `releaseBarModel` 규칙 그대로(10 단계로 분모만 바뀜).
+- 회차가 끝나 `upload.json` 이 있으면 `tone ok`, 제출되면 `done`.
+
+### 4.2 화면
+
+- `<section class="sheet" data-sheet>`: `position: sticky; bottom: 0` (본문 끝에 둠 — 스크롤해도 보이도록 `#store` 의 마지막 자식). 머리: 손잡이 · 버전 · 상태 한 줄 · «심사 제출…»(canSubmit 때만 활성) · «펼치기/접기»(상태는 `localStorage rcm.sheet.<repo>` 에 기억). 펼침: 막대 · 단계 칩 · 근거 줄 · 두 열(남은 것 / 이전 버전과 달라진 것) · 제출 조건(체크박스 넷 · 관리형 게시 · 빌드 번호 토글 · 직접 입력 칸) · «보내는 것» · 고정 문장 · 결과(제출 뒤).
+- 사람 차례(S2 직접 입력)·N 대화상자는 시트 안 «빌드 번호» 칸으로 흡수(대화상자는 유지하되 시트에서도 입력 가능).
+- 삭제: `releaseBarHtml` · `.rbar` CSS · 심사 패널의 버튼/체크박스/nbox(패널은 «절 둘 + 버전 띠» 읽기 전용으로 남고 버전 페이지에서는 편집 칸으로 대체된다 → 결국 `reviewPanelHtml` 은 `#/status` 에서만 쓰인다).
+- 모바일(≤ 640px): 머리 두 줄, 펼침은 전체 높이 · 한 열.
+- i18n EN/KO.
+
+### 4.3 완료 조건 → §7 AC-D1~D10
+
+## 5. E — dolomood 적용 (dolomood 저장소 · 워크트리 `dolomood-app-renew-rcmconnect` · 1~2 PR)
+
+1. `/rcm-store-connect` 재실행(FORCE_FILES 없이 — 골격만 추가, 기존 스크립트는 «adopt-existing»으로 `listing_json` 처리 덧붙임).
+2. `scripts/release/release_version.sh` 의 TODO: `store_version_create` = ASC `POST /v1/appStoreVersions`(platform IOS, versionString) — 기존 `store_review.sh` 의 JWT 도우미 재사용; `store_version_delete` = `DELETE /v1/appStoreVersions/{id}`(상태가 PREPARE_FOR_SUBMISSION 일 때만, 아니면 exit 4); `store_prefill` = 라이브 버전의 `appStoreVersionLocalizations`(ko) + Play `edits/listings`(ko-KR) → `prefill.json`. 실패하면 `store/` 파일로 폴백하고 `source` 에 `file:` 접두.
+3. `store_listing.py`: `--listing-json <file>` 옵션 — 있으면 그 값이 `store/` 보다 우선(preview · validate · submit 경로 전부).
+4. `release_plan.sh`: `store.play.production_name` · `next_version_hint`.
+5. `product_release.sh`: `--version-id` 와 `V` 단계(`release_check.py stage` 에 V).
+6. `scripts/rcm/profile.release.toml` 에 `presets.version` · `version_ttl_hours`; `rcm_candidate.py --check` 초록.
+7. 검증(§9 E): 셀프테스트 · `rcm check` · **실배치 dry-run** — prefill 은 실제 라이브 문안을 읽는다(읽기 전용, OK). ASC 버전 **create 는 실제 스토어에 드래프트를 만든다** → 소유자 확인 뒤에만(«prod 앱에 1.1.1 draft 를 만들어도 되는가»), 그 전까지는 shim 으로.
+
+## 6. F — 문서 · 설명서 (1 PR + 아티팩트)
+
+- README + README.ko «Store tab» 절: 버전 목록 → 새 버전 → 편집 → 바텀시트 흐름으로 다시 씀. `docs/configuration.md`: `presets.version` · `version_ttl_hours` · `listing_json` 경고. `docs/release-contract.md` §2·§5(1.1 에서). `docs/wireframes/web-store.html` 에 W1~W5 절과 항목 50~62. CHANGELOG. 사용 설명서 아티팩트 v3(캡처는 §9 의 실기 서버에서).
+
+## 7. 완료 체크리스트 (격리 에이전트가 하나씩 확인 · 증거를 남긴다)
+
+형식: `AC-<단계><번호>` — **확인 방법** — 기대. 증거 = 테스트 이름/출력 · curl 응답 · 캡처 경로.
+
+### A 계약·스킬
+- AC-A1 — `pytest tests/test_config_release_profile.py` — `version` 역할 · `version_ttl_hours` 기본 24 · 잘못된 값 오류 문구.
+- AC-A2 — `rcm check --config <fixture>` — version 프리셋 `mode` 기본 create → FAIL 문구에 «prefill»; prefill → ok; review 에 `listing_json` 없음 → warn 한 줄.
+- AC-A3 — `bash src/…/rcm-store-connect/templates/release_version.sh --selftest`(루트에서) — 0 · 4 케이스 통과 출력.
+- AC-A4 — `python rcm_contract.py validate version --file bad.json` — `ios`·`android` 둘 다 null 이면 거절.
+- AC-A5 — `release_review.sh --selftest` — `RCM_INPUT_LISTING_JSON='{"ios":{"subtitle":"X"}}'` 로 돌리면 `listing.json` 이 생기고 preview 줄에 `subtitle: X`.
+- AC-A6 — `release_driver.sh --selftest` — `--version-id 7` 이 `stage V` 를 찍고 이름을 API(shim)에서 받는다; 없으면 예전 경로.
+- AC-A7 — `rcm skills install --into /tmp/x` 뒤 `ls` — `release_version.sh` 가 있다; SKILL.md 표에 있다.
+- AC-A8 — `docs/release-contract.md` — §2 표에 `version` 행 · `listing_json` · `next_version_hint` · §5 `--version-id`(grep).
+
+### B 서버
+- AC-B1 — `pytest tests/test_store_versions.py` — 새 DB `user_version == 20` · 열 집합 · v19→v20 백업 파일 `rcm.sqlite3.v19.bak`.
+- AC-B2 — `POST …/versions` (admin, 관문 통과, version 프리셋 있음) — 202 `{id, job_id}` · 행 `creating` · 잡 입력 `mode=create ios_version=… android_version=…`.
+- AC-B3 — 같은 요청, version 프리셋 없음 — 201 `job_id null` · 행 `editing`.
+- AC-B4 — 이름 검증 — `1.0` 400 · 라이브 `1.1.0` 에 `1.0.9` 400 `not_greater` · 둘 다 빈 값 400 · 같은 이름 열린 드래프트 409 `version_exists` · 클라이언트 토큰 403 · 관문 미통과 409 `setup_incomplete`.
+- AC-B5 — 완료 훅 — create 잡이 `version.json`+`prefill.json` 을 쓰고 0 으로 끝나면 행 `editing` · `asc_version_id` · `prefill_json`; 1 로 끝나면 `failed` + `error`.
+- AC-B6 — `PUT …/listing` — 허용 키만 저장 · 모르는 키 400 · 16 KB 초과 400 · `submitted` 행 409 `version_closed` · `last_edit_at` 갱신.
+- AC-B7 — `GET …/diff` — 바뀐 필드만 `fields[]`, CRLF/공백 차이는 «같음».
+- AC-B8 — `POST …/review` with `version_id` — 편집이 있으면 잡 입력 `listing_json` 에 JSON(edited ⊕ prefill); 프리셋에 입력 없으면 409 `listing_json_unsupported`; 편집이 없으면 입력을 보내지 않는다; `build_name` 불일치 400.
+- AC-B9 — `DELETE …/versions/<id>` — asc id 있음 → delete 잡 202 → 0 이면 `discarded`; 없음 → 즉시 200 discarded; `submitted` → 409.
+- AC-B10 — 청소기 — `expires_at` 지난 미편집 드래프트가 sweep 뒤 `discarded`(잡 있으면 잡 제출); 편집 있음 → `expiry_warned=1`, 상태 그대로.
+- AC-B11 — 재시작 복구 — `creating` + 끝난 잡 → 훅 재적용; `running` + 회차 없음 → `editing`.
+- AC-B12 — `rcm release new --repo app --yes`(힌트 그대로) → 202 출력 · `rcm release list` 표 · `delete` · `open` 주소.
+
+### C 웹 — 목록 · 대화상자 · 버전 페이지
+- AC-C1 — node — `parseRoute` 셋 · `nextVersionHint` 6 케이스 · `versionNameCheck` 5 · `listingDiff` 정규화.
+- AC-C2 — CDP — `#/store/app` 이 버전 목록: 라이브 행 · 드래프트 행 · «+ 새 버전 만들기» · 상태 띠(초록) · 네 행은 `#/store/app/status` 에.
+- AC-C3 — CDP — 대화상자: 힌트 `1.1.1` · `1.0.1` 프리필, Android 체크 끄면 본문에 `android_version` 없음, 꼴 틀리면 «만들기» 비활성 + 이유.
+- AC-C4 — CDP — 만들기 → 202 → `#/store/app/v/<id>` 로 이동 · «만드는 중» → (스텁이 editing 을 주면) 필드가 살아난다.
+- AC-C5 — CDP — 필드 값이 prefill 로 채워지고 카운터가 맞다(`23/30`); prefill 없고 파일만 있으면 파일 값 + «파일에서».
+- AC-C6 — CDP — 칸을 고치면 800 ms 뒤 `PUT …/listing` 본문에 그 키만 · «자동 저장 · n s 전» · 칩 «바뀜» · «되돌리기» 로 prefill 값.
+- AC-C7 — CDP — admin 아님 → 칸 읽기 전용 + 안내.
+- AC-C8 — CDP — 드래프트 «버리기» → 확인 대화상자 → DELETE → 목록으로.
+- AC-C9 — 폰 폭 390 — 가로 스크롤 없음 · 두 절 세로.
+- AC-C10 — i18n 테스트 — 새 키 EN/KO 둘 다 · «잡» 없음.
+
+### D 웹 — 바텀시트
+- AC-D1 — node — `sheetModel`: 빌드 없음 → `remaining[0].code == build_missing` · 제출 닫힘; 도는 중 → tone running · pct 규칙(0.3.3 과 같은 수식, 분모 10); 제출 가능 → `canSubmit true` · `remaining` 빈 배열; 제출됨 → done.
+- AC-D2 — CDP — 버전 페이지 맨 아래 sticky 시트, 접힘 머리에 버전 · 상태 한 줄(«남은 것 3 · 빌드 없음») · 제출 버튼 비활성 · 펼치기.
+- AC-D3 — CDP — 펼치면 막대 · 단계 칩 10개(V 포함) · 남은 것 목록 · diff 두 줄(스텁) · 체크박스 · 관리형 게시 · 빌드 번호 토글.
+- AC-D4 — CDP — 도는 중 스텁(S5 · 잡 57%) → 머리 «S5 … · 10단계 중 7번째 · 62%» · 예상 완료.
+- AC-D5 — CDP — 제출 가능 스텁 → 관리형 게시 체크 전 닫힘, 체크 후 열림 → 클릭 → 확인 대화상자 → `review` 본문에 `version_id` · `confirm_build_number: "auto"`.
+- AC-D6 — CDP — 맨 위 `.rbar` 가 없다 · 심사 패널에 버튼/체크박스가 없다(`#/status` 에도).
+- AC-D7 — CDP — 접힘/펼침 상태가 새로고침 뒤 유지(localStorage).
+- AC-D8 — CDP — 폰 폭 390 — 시트 머리 두 줄, 본문 스크롤 가능, 가로 스크롤 없음.
+- AC-D9 — CDP — 남은 것 항목 클릭 → 해당 칸으로 스크롤 + 포커스.
+- AC-D10 — 금지 버튼 검사(`FORBIDDEN_BUTTONS_JS`) == [] 모든 상태.
+
+### E dolomood
+- AC-E1 — 셀프테스트 셋 0 · `rcm_candidate.py --check` 초록 · `rcm check` 의 `release dolomood` 행 ok(version 포함).
+- AC-E2 — 실기(dry-run) — `mode=prefill` 잡이 실제 라이브 문안으로 `prefill.json` 을 쓴다(값은 화면에서 확인, 로그에 비밀 없음).
+- AC-E3 — 실기 — `listing_json` 을 준 `review mode=plan` 이 `review-plan.json.listing.preview` 에 편집값을 되돌려 준다.
+- AC-E4 — (소유자 확인 뒤) create 가 ASC 에 draft 를 만들고 delete 가 지운다; 그 전에는 shim 으로 통과.
+
+### F 문서
+- AC-F1 — 문서 잠금 테스트 넷 초록 · README/README.ko 미러 동일 절 · CHANGELOG 항목 링크 · 와이어프레임 항목 50~62.
+- AC-F2 — 사용 설명서 아티팩트 v3 에 W1~W5 실기 캡처 5장 이상.
+
+## 8. 엣지케이스 시나리오 (각각 테스트 또는 실기로 잠근다 · 번호는 §7 증거에 인용)
+
+| # | 시나리오 | 기대 | 어디서 |
+|---|---|---|---|
+| E1 | 라이브를 모른다(플랜 없음) | 힌트 없음 · 이름 검증은 꼴만 · «플랜을 먼저 만들면 힌트가 나옵니다» | B4 · C3 |
+| E2 | iOS 만 있는 프로젝트(`platforms=ios`) | 대화상자에 Android 칸 없음 · 본문 `android_version` 생략 | C3 |
+| E3 | 같은 이름의 드래프트가 이미 있음 | 409 `version_exists` · 대화상자가 «열기» 링크를 보인다 | B4 · C3 |
+| E4 | ASC 에 같은 이름의 편집 중 버전이 이미 있음(스토어 쪽) | create 잡 exit 3 → 행 `failed` + error «already exists» · 페이지가 «스토어에 이미 있음 — 그 버전을 쓰려면 …» | B5 |
+| E5 | create 잡이 lost/timed_out | 행 `failed` · 재시도 버튼(새 잡) · asc id 없음 | B5 |
+| E6 | 서버 재시작 중 create 잡이 끝남 | 기동 복구가 훅을 다시 적용 | B11 |
+| E7 | 편집 중 토큰이 사라짐(401) | 저장 실패 배지 · 값은 화면에 남고 재시도 버튼 | C6 |
+| E8 | 두 브라우저가 같은 드래프트를 편집 | 마지막 저장이 이김 · 5초 폴링이 다른 쪽 값을 «다른 곳에서 바뀜» 으로 표시(강제 덮어쓰기 없음) | C6 |
+| E9 | 칸 값이 상한 초과(설명 4001자) | 저장은 되고 카운터 빨강 · 남은 것에 `listing_bad` · 제출 닫힘 | B6 · D1 |
+| E10 | 편집을 전부 되돌려 prefill 과 같아짐 | diff 비어 있음 · review 에 `listing_json` 을 보내지 않음 | B8 · C6 |
+| E11 | 프리셋에 `listing_json` 입력이 없는데 편집이 있음 | 409 `listing_json_unsupported` · 시트 남은 것에 «스킬을 다시 돌려 listing_json 을 추가» | B8 · D1 |
+| E12 | TTL 지남 · 미편집 · asc id 있음 · version 프리셋 있음 | delete 잡 → discarded; 잡 실패 → 행은 editing 유지 + error | B10 |
+| E13 | TTL 지남 · 편집 있음 | 경고만 · 목록 행에 «만료 · 사람이 정리» | B10 · C2 |
+| E14 | 제출된 버전 삭제 시도(웹·CLI·청소기) | 409 · 버튼 없음 · 청소기 건너뜀 | B9 |
+| E15 | 회차 도는 중 «버리기» | 409 `version_running` | B9 |
+| E16 | 드라이버가 `--version-id` 를 모른다(옛 스크립트) | start 는 옛 인자로 폴백하고 시트가 «드라이버가 V 단계를 모른다 — 스킬 재실행» 경고 | B · D |
+| E17 | 시트가 열린 채 플랜이 낡음(30분) | 남은 것에 `plan_stale` · 제출 닫힘 · «플랜 새로고침» 링크 | D1 |
+| E18 | Google Play 를 끔 | 관리형 게시 항목이 남은 것에서 사라짐 | D1 |
+| E19 | `unsafe_release_type` | 시트 tone bad · 빨간 띠 유지 · 제출 닫힘 | D1 · D10 |
+| E20 | 업로드 lost | 시트 tone lost · «재제출 금지» · 제출 닫힘 | D1 |
+| E21 | 빌드 번호 직접 입력 + 틀린 값 | 시트 안 «≠ 181» · 닫힘 | D5 |
+| E22 | 관문 미통과 상태에서 `#/store/<r>/v/<id>` 직접 진입 | 설정 화면으로 보내고 돌아올 주소 기억 | C2 |
+| E23 | 폰 폭에서 시트를 펼침 | 본문이 시트 뒤에 가려지지 않음(패딩) · 접기 버튼 보임 | D8 |
+| E24 | 드래프트 40개 | 목록은 열린 것 전부 + 지난 것 20 · 느리지 않음(한 요청) | C2 |
+| E25 | `version` 프리셋 없음 + Android 만 | 만들기 즉시 editing · prefill 은 파일에서 · 시트 단계는 잡 기반 | B3 · C5 · D1 |
+
+## 9. 격리 검증 프로토콜 (개발이 끝난 뒤 · 단계마다 에이전트 하나)
+
+공통 준비(각 에이전트가 스스로):
+1. `git fetch origin && git worktree add ../remote_ci_monitor-verify-<단계> origin/dev`(또는 검증 대상 브랜치) + `.venv` + `pip install -e '.[dev]'`.
+2. `ruff check . && ruff format --check . && pytest -q -p no:cacheprovider && node --test tests/web/*.test.js` — 전부 초록이 아니면 **여기서 멈추고** 실패를 그대로 보고.
+3. 실기 서버: 포트 `879<n>`(n = 단계 번호, 다른 세션이 8788·8790 을 쓴다) · `data_dir ~/.local/share/rcm-devtest-vp-<n>`(절대 `/tmp` 아래가 아님) · `advertise = false` · `bind 127.0.0.1` · 알림 훅 없음 · 시험 저장소는 `tests/gitrepo.py build_remote` 로 만든 bare 레포 + `tests/test_server_release_routes.py` 의 프로파일/드라이버 스텁을 그대로 쓴 `server.toml`.
+4. 웹은 `tests/test_web_browser.py` 의 `Chrome` 클래스(CDP)로 연다. 캡처는 `scratchpad/verify-<단계>/` 에.
+5. 보고: `AC-…` 하나마다 `PASS|FAIL|BLOCKED` + 증거(명령 · 응답 앞 3줄 · 캡처 경로) · §8 의 해당 E 번호. FAIL 은 **고치지 말고** 재현 명령과 함께 보고(수정은 조립하는 쪽이 한다). 보고 끝에 «규칙 위반 의심»(출시 버튼 · 비밀 노출 · 번호 지어냄) 절을 따로.
+6. 끝나면 서버 종료 · 워크트리 제거.
+
+단계별 대본: A → §7 AC-A1~A8 + E4·E16 의 계약 부분. B → AC-B1~B12 + E1·E3~E6·E9~E15·E25. C → AC-C1~C10 + E1~E3·E7·E8·E10·E13·E22·E24. D → AC-D1~D10 + E11·E17~E21·E23. E → AC-E1~E4(E4 는 소유자 확인 전까지 BLOCKED 가 정답). F → AC-F1~F2.
+
+## 10. 순서와 PR
+
+| 순서 | 브랜치 | 내용 | 뒤따르는 검증 |
+|---|---|---|---|
+| 1 | `feat/store-version-role-contract` | §1 전부 | 에이전트 A |
+| 2 | `feat/store-versions-table-routes` | §2.1 · §2.2 | 에이전트 B(1/2) |
+| 3 | `feat/store-versions-listing-janitor-cli` | §2.2 전달 · §2.3 | 에이전트 B(2/2) |
+| 4 | `feat/web-version-list-dialog` | §3 W1 · W2 · 라우팅 · 상태 화면 | 에이전트 C(1/2) |
+| 5 | `feat/web-version-page-editor` | §3 W3 · 자동 저장 · diff | 에이전트 C(2/2) |
+| 6 | `feat/web-bottom-sheet` | §4 시트 · 막대 이동 · 제출 이동 | 에이전트 D |
+| 7 | dolomood `feat/rcm-version-role` | §5 | 에이전트 E |
+| 8 | `docs/store-version-page` + 릴리스 v0.4.0 | §6 · CHANGELOG · 배포 · 설명서 v3 | 에이전트 F |
+
+1·2 는 병렬(계약 이름이 이 문서에 고정돼 있다). 3 은 2 뒤, 4·5·6 은 순서대로(같은 파일). 7 은 1·3 뒤. 각 PR 은 집안 규칙(`/branch` `/commit` `/pr`, REST 머지, 워크트리 하나)대로.

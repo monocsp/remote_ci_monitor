@@ -1,0 +1,365 @@
+"""스킬 템플릿(`src/remote_ci_monitor/skills/…/templates/`)이 저장소 루트에서 그대로 돈다 —
+버전 역할 계약(docs/version-page-workplan.md §1.3 · §7 AC-A3~A8).
+
+템플릿은 프로젝트에 복사돼 `scripts/release/` 에서 돌지만, 셀프테스트는 어디서든(`SELF=` 규칙)
+돌아야 한다. 여기서는 rcm 저장소 루트에서 부른다. 잠그는 것: 각 셀프테스트의 종료 코드와 PASS 줄 ·
+`rcm_contract.py validate version` 의 거절 · `listing_json` → `listing.json` + 미리보기 줄 ·
+드라이버의 `--version-id` · `rcm skills install` 뒤 파일 존재 · 채운 프리셋·프로파일 템플릿이
+`rcm check` 의 `release <repo>` 행을 FAIL 로 만들지 않음 · 계약 문서의 문면.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from remote_ci_monitor import cli
+from remote_ci_monitor.cli import _release_row
+from remote_ci_monitor.config import load_server_config
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILLS = ROOT / "src" / "remote_ci_monitor" / "skills"
+STORE = SKILLS / "rcm-store-connect" / "templates"
+DRIVER = SKILLS / "rcm-release-driver" / "templates"
+CONTRACT_DOC = ROOT / "docs" / "release-contract.md"
+PASS_LINE = re.compile(r"selftest[: ]+(PASS|ok|all green)")
+
+
+def sh(*argv: str, env: dict[str, str] | None = None, cwd: Path = ROOT):
+    """템플릿을 저장소 루트에서 부른다. (rc, stdout+stderr)"""
+    full = {**os.environ, **(env or {})}
+    full.pop("PYTHONPATH", None)
+    res = subprocess.run(
+        list(argv), cwd=cwd, env=full, capture_output=True, text=True, timeout=300, check=False
+    )
+    return res.returncode, res.stdout + res.stderr
+
+
+# ── 셀프테스트 (AC-A3 · AC-A6) ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("bash", str(STORE / "release_version.sh"), "--selftest"),
+        ("bash", str(STORE / "release_review.sh"), "--selftest"),
+        ("bash", str(STORE / "release_upload.sh"), "--selftest"),
+        ("bash", str(STORE / "release_plan.sh"), "--selftest"),
+        (sys.executable, str(STORE / "rcm_contract.py"), "--selftest"),
+        ("bash", str(DRIVER / "release_driver.sh"), "--selftest"),
+        (sys.executable, str(DRIVER / "release_check.py"), "--selftest"),
+    ],
+    ids=lambda a: Path(a[1]).name,
+)
+def test_each_template_selftest_passes_from_the_repo_root(argv):
+    """AC-A3 · AC-A6: exit 0 이고 마지막 줄이 PASS 줄이다(0 으로만 끝나는 스텁은 통과 못 한다)."""
+    rc, out = sh(*argv)
+    assert rc == 0, out
+    assert PASS_LINE.search(out.strip().splitlines()[-1]), out.strip().splitlines()[-3:]
+
+
+def test_version_selftest_names_its_four_cases():
+    """AC-A3: 계획서의 네 경우 — store/ 파일 prefill · create 가 훅을 부르고 version.json ·
+    제출된 버전 delete → 4 · 잘못된 이름 → 2 — 가 각각 ok 줄로 나온다."""
+    rc, out = sh("bash", str(STORE / "release_version.sh"), "--selftest")
+    assert rc == 0
+    for needle in (
+        "prefill from store/ files",
+        "create both -> version.json + prefill.json",
+        "delete a submitted version -> exit 4",
+        "bad name -> usage exit 2",
+    ):
+        assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
+
+
+# ── rcm_contract.py validate version (AC-A4) ─────────────────────────────────
+
+
+def validate(kind: str, path: Path):
+    return sh(sys.executable, str(STORE / "rcm_contract.py"), "validate", kind, "--file", str(path))
+
+
+def version_name(path: Path):
+    return sh(sys.executable, str(DRIVER / "release_check.py"), "version-name", "--json", str(path))
+
+
+def test_contract_rejects_a_version_document_with_both_stores_null(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "mode": "create",
+                "ios": None,
+                "android": None,
+                "error": None,
+                "measured_at": "2026-09-18T00:00:00Z",
+            }
+        )
+    )
+    rc, out = validate("version", bad)
+    assert rc == 1, out
+    assert "both null" in out, out
+    # 같은 문서에 이유가 붙으면(실패한 create) 받는다 — 어떻게 끝나든 파일은 남긴다
+    ok = tmp_path / "failed.json"
+    ok.write_text(bad.read_text().replace('"error": null', '"error": "already exists (exit 3)"'))
+    rc, out = validate("version", ok)
+    assert rc == 0, out
+
+
+@pytest.mark.parametrize(
+    "kind, patch, needle",
+    [
+        ("version", {"mode": "prefill"}, "mode"),
+        ("version", {"ios": {"version": "1.1.1"}}, "asc_version_id"),
+        ("prefill", {"ios": None, "android": None}, "both null"),
+        ("prefill", {"android": {"title": ["x"]}}, "android.title"),
+    ],
+)
+def test_contract_names_the_bad_field_of_version_and_prefill(tmp_path, kind, patch, needle):
+    good = {
+        "version": {
+            "schema": 1,
+            "mode": "create",
+            "ios": {"version": "1.1.1", "asc_version_id": "a", "state": "PREPARE_FOR_SUBMISSION"},
+            "android": {"version": "1.0.1"},
+            "error": None,
+            "measured_at": "2026-09-18T00:00:00Z",
+        },
+        "prefill": {"schema": 1, "source": "file:store/", "locale": "ko", "ios": {}, "android": {}},
+    }[kind]
+    doc = {**good, **patch}
+    f = tmp_path / f"{kind}.json"
+    f.write_text(json.dumps(doc))
+    rc, out = validate(kind, f)
+    assert rc == 1 and needle in out, out
+
+
+# ── listing_json → listing.json (AC-A5) ──────────────────────────────────────
+
+
+def test_review_plan_with_listing_json_writes_the_file_and_previews_its_fields(tmp_path):
+    """AC-A5: `RCM_INPUT_LISTING_JSON='{"ios":{"subtitle":"X"}}'` 로 돌리면 `listing.json` 이 생기고
+    review-plan.json 의 preview 줄에 `subtitle: X` 가 있다."""
+    work = tmp_path / "work"
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    rc, out = sh(
+        "bash",
+        str(STORE / "release_review.sh"),
+        env={
+            "RELEASE_SHIM": "ok",
+            "RELEASE_WORK": str(work),
+            "{{secrets_env}}": str(secrets),
+            "RCM_INPUT_BUILD_NAME": "1.0.1",
+            "RCM_INPUT_LISTING_JSON": '{"ios":{"subtitle":"X"}}',
+        },
+    )
+    assert rc == 0, out
+    assert json.loads((work / "listing.json").read_text()) == {"ios": {"subtitle": "X"}}
+    plan = json.loads((work / "review-plan.json").read_text())
+    assert any("subtitle: X" in line for line in plan["listing"]["preview"]), plan["listing"]
+    assert "::rcm::summary::" in out and "nothing submitted" in out
+
+
+def test_review_plan_without_listing_json_writes_no_listing_file(tmp_path):
+    work = tmp_path / "work"
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    rc, out = sh(
+        "bash",
+        str(STORE / "release_review.sh"),
+        env={
+            "RELEASE_SHIM": "ok",
+            "RELEASE_WORK": str(work),
+            "{{secrets_env}}": str(secrets),
+            "RCM_INPUT_BUILD_NAME": "1.0.1",
+        },
+    )
+    assert rc == 0, out
+    assert not (work / "listing.json").exists()
+
+
+# ── 드라이버 --version-id (AC-A6 · E16) ──────────────────────────────────────
+
+
+def test_driver_status_without_a_readable_version_row_prints_stage_v(tmp_path):
+    """`--version-id` 만 있고 rcm 을 못 읽는 `--status` 는 `stage V` 를 찍고 끝난다(읽기 전용)."""
+    profile = tmp_path / "profile.toml"
+    profile.write_text(
+        '[repos.app.release]\ndefault_branch = "main"\ntag = "prod/{version}-{build}"\n'
+        '[repos.app.release.presets]\nplan = "release-plan"\nupload = "release-upload"\n'
+        'review = "release-review"\n'
+    )
+    presets = tmp_path / "presets.toml"
+    presets.write_text(
+        "".join(
+            f'[[presets]]\nname = "{n}"\nargv = ["bash", "x.sh"]\nrepo = "app"\n'
+            for n in ("release-plan", "release-upload", "release-review")
+        )
+    )
+    api = tmp_path / "api.sh"
+    api.write_text("#!/usr/bin/env bash\nexit 7\n")
+    api.chmod(0o755)
+    rc, out = sh(
+        "bash",
+        str(DRIVER / "release_driver.sh"),
+        "--version-id",
+        "7",
+        "--status",
+        env={
+            "RELEASE_PROFILE_FILE": str(profile),
+            "RELEASE_PRESETS_FILE": str(presets),
+            "RELEASE_VERSION_API": str(api),
+            "RELEASE_GH_REPO": "org/app",
+        },
+    )
+    assert rc == 0, out
+    assert "stage V" in out and "build ? · version #7 · stage V" in out, out
+    assert "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8" in out, out
+
+
+def test_driver_refuses_a_version_id_that_is_not_a_number():
+    rc, out = sh("bash", str(DRIVER / "release_driver.sh"), "--version-id", "seven", "--status")
+    assert rc == 2 and "--version-id must be an integer" in out, out
+
+
+def test_release_check_version_name_prefers_ios_and_never_invents(tmp_path):
+    row = tmp_path / "row.json"
+    row.write_text(json.dumps({"id": 7, "ios_version": "1.1.1", "android_version": "1.0.1"}))
+    rc, out = version_name(row)
+    assert (rc, out.strip()) == (0, "1.1.1")
+    row.write_text(json.dumps({"id": 7, "ios_version": None, "android_version": "1.0.1"}))
+    rc, out = version_name(row)
+    assert (rc, out.strip()) == (0, "1.0.1")
+    row.write_text(json.dumps({"id": 7, "ios_version": None, "android_version": None}))
+    rc, out = version_name(row)
+    assert rc == 1 and "neither" in out
+
+
+# ── rcm skills install (AC-A7) ───────────────────────────────────────────────
+
+
+def test_skills_install_ships_release_version_and_the_skill_docs_name_it(tmp_path, capsys):
+    root = cli.skills_root()
+    if root is None or not cli._skill_dirs(root):
+        pytest.skip("this build packages no skills")
+    project = tmp_path / "x"
+    project.mkdir()
+    try:
+        code = cli.main(["skills", "install", "--into", str(project)])
+    except SystemExit as e:  # pragma: no cover - argparse 경로
+        code = e.code
+    capsys.readouterr()
+    assert code == 0
+    installed = project / ".claude" / "skills" / "rcm-store-connect" / "templates"
+    assert (installed / "release_version.sh").is_file()
+    assert (installed / "release_version.sh").read_text().startswith("#!/usr/bin/env bash")
+    store_md = (SKILLS / "rcm-store-connect" / "SKILL.md").read_text()
+    assert "| `scripts/release/release_version.sh` |" in store_md
+    assert "listing_json" in store_md and "adopt" in store_md.lower()
+    connect_md = (SKILLS / "rcm-connect" / "SKILL.md").read_text()
+    assert "| optional | `version`" in connect_md and "version: <yes|no>" in connect_md
+    driver_md = (SKILLS / "rcm-release-driver" / "SKILL.md").read_text()
+    assert "--version-id <id>" in driver_md and "| V |" in driver_md
+
+
+# ── 채운 템플릿이 rcm check 를 통과한다 ─────────────────────────────────────
+
+
+def fill(text: str) -> str:
+    return (
+        text.replace("{{repo}}", "app")
+        .replace("{{secrets_env}}", "APP_SECRETS")
+        .replace("{{scripts_dir}}", "scripts/release")
+        .replace("{{platform_default}}", "both")
+    )
+
+
+def test_filled_presets_and_profile_templates_pass_the_release_check_row(tmp_path):
+    """템플릿을 채워 server.toml 로 만들면 `release app` 행이 FAIL 이 아니고 listing_json 경고도
+    없다."""
+    toml = (
+        f'[server]\ndata_dir = "{tmp_path / "data"}"\n\n[[repos]]\nname = "app"\n'
+        'url = "git@example.com:org/app.git"\n\n'
+        + fill((STORE / "profile.toml").read_text())
+        + "\n"
+        + fill((STORE / "presets.release.toml").read_text())
+    )
+    cfg_path = tmp_path / "server.toml"
+    cfg_path.write_text(toml)
+    cfg = load_server_config(cfg_path, environ={}, check_tools=False)
+    profile = cfg.repos[0].release
+    assert profile is not None
+    assert profile.version_ttl_hours == 24
+    assert profile.preset_for("version") == "release-version"
+    version = cfg.preset("release-version")
+    assert version is not None
+    assert [i.name for i in version.inputs] == [
+        "mode",
+        "ios_version",
+        "android_version",
+        "asc_version_id",
+    ]
+    assert version.input_spec("mode").default == "prefill"
+    for name in ("release-upload", "release-review"):
+        assert cfg.preset(name).input_spec("listing_json") is not None, name
+    row, ok, detail = _release_row(cfg, "app", profile)
+    assert row == "release app"
+    assert ok is not False, detail
+    assert "listing_json" not in detail, detail
+    assert "version=release-version" in detail, detail
+
+
+# ── 계약 문서 (AC-A8) ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"^\| `version` \| optional \| `mode = prefill\\\|create\\\|delete`",
+        r"`ios_version`, `android_version`",
+        r"`asc_version_id`",
+        r"`version\.json` \(create · delete\) / `prefill\.json` \(prefill · create\)",
+        r"3 already exists",
+        r"4 not deletable",
+        r"^\*\*`listing_json`\*\*",
+        r"next_version_hint",
+        r"store\.play\.production_name",
+        r"--version-id",
+        r"stage \*\*`V`\*\*",
+        r"^version_ttl_hours\s+= 24",
+        r"^version = \"release-version\"",
+        r"`mode` defaults to `prefill`",
+    ],
+)
+def test_contract_doc_states_the_version_role(pattern):
+    text = CONTRACT_DOC.read_text()
+    assert re.search(pattern, text, re.M), f"docs/release-contract.md lacks /{pattern}/"
+
+
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("docs/configuration.md", r"^version_ttl_hours\s+= 24"),
+        ("docs/configuration.md", r'^version = "release-version"'),
+        ("docs/configuration.md", r"does not default to `prefill`"),
+        ("docs/configuration.md", r"no `listing_json` input"),
+        ("docs/configuration.md", r"gate, qa,\ndev, version\)"),
+        ("examples/server.toml", r"^# version_ttl_hours = 24"),
+        ("examples/server.toml", r'^# version = "release-version"'),
+        ("CHANGELOG.md", r"`version` role"),
+        ("CHANGELOG.md", r"`version_ttl_hours`"),
+        ("CHANGELOG.md", r"`listing_json`"),
+        ("CHANGELOG.md", r"`--version-id <id>`"),
+    ],
+)
+def test_configuration_docs_and_changelog_mention_the_new_keys(path, pattern):
+    text = (ROOT / path).read_text()
+    assert re.search(pattern, text, re.M), f"{path} lacks /{pattern}/"

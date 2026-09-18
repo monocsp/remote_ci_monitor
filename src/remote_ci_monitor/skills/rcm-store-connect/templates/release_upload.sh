@@ -7,6 +7,9 @@
 #     RCM_INPUT_MODE=rehearsal|upload       default rehearsal — the preset default is rehearsal and must stay so
 #     RCM_INPUT_PLATFORM=both|ios|android   default both
 #     RCM_INPUT_ANDROID_TRACK=production|internal   default production
+#     RCM_INPUT_LISTING_JSON='{"ios":{…},"android":{…}}'  default "" — the copy edited in the web UI (version page).
+#                                           Not empty: written to build/.rcm-release/listing.json and handed to
+#                                           store_upload() as LISTING_FILE; it wins over the store/ files
 #   Secrets: the folder rcm hands over in ${{secrets_env}}. Never printed.
 #
 #   Writes  build/.rcm-release/upload.json  (RELEASE_WORK overrides) HOWEVER THE RUN ENDS.
@@ -35,10 +38,12 @@ SHIM="${RELEASE_SHIM:-}"                                 # selftest only: ok | p
 SHIM_CALLS="${RELEASE_SHIM_CALLS:-/dev/null}"
 SHIM_MAX="${RELEASE_SHIM_MAX:-180}"
 WRITTEN=0
+LISTING_FILE=""                                          # $WORK/listing.json when RCM_INPUT_LISTING_JSON is not empty
 
 usage() {
   echo "usage: RCM_INPUT_BUILD_NAME=X.Y.Z [RCM_INPUT_MODE=rehearsal|upload] [RCM_INPUT_CONFIRM_BUILD_NUMBER=N]" >&2
-  echo "       [RCM_INPUT_PLATFORM=both|ios|android] [RCM_INPUT_ANDROID_TRACK=production|internal] release_upload.sh | release_upload.sh --selftest" >&2
+  echo "       [RCM_INPUT_PLATFORM=both|ios|android] [RCM_INPUT_ANDROID_TRACK=production|internal] [RCM_INPUT_LISTING_JSON='{…}']" >&2
+  echo "       release_upload.sh | release_upload.sh --selftest" >&2
   exit 2
 }
 
@@ -52,12 +57,14 @@ store_max_build() {
   echo "store_max_build() is not implemented — fill the TODO(project) block in scripts/release/release_upload.sh" >&2
   return 1
 }
-# store_upload PLATFORM N BUILD_NAME TRACK: build (if needed) and upload ONE platform. Exit 0 = the binary is on
-#   the store with build number N. Must NOT release, promote, roll out or submit anything. Runs only in mode=upload.
+# store_upload PLATFORM N BUILD_NAME TRACK LISTING_FILE: build (if needed) and upload ONE platform. Exit 0 = the
+#   binary is on the store with build number N. Must NOT release, promote, roll out or submit anything. Runs only in
+#   mode=upload. LISTING_FILE ('' or a JSON file) is the copy edited in the web UI — when given it wins over store/.
 store_upload() {
   if [ -n "$SHIM" ]; then shim_store_upload "$@"; return $?; fi
   # TODO(project): e.g. an existing fastlane lane / gradle publish task / store CLI, with credentials read from
-  #   "$SECRETS_DIR". Use $1 (ios|android), $2 (build number), $3 (version name), $4 (android track).
+  #   "$SECRETS_DIR". Use $1 (ios|android), $2 (build number), $3 (version name), $4 (android track), and $5 —
+  #   when not empty, the JSON file whose fields replace the store/ copy (writing it back into store/ is allowed).
   echo "store_upload() is not implemented — fill the TODO(project) block in scripts/release/release_upload.sh" >&2
   return 1
 }
@@ -68,7 +75,7 @@ shim_store_max_build() {
   case "$SHIM" in poison) echo "18l";; *) echo "$SHIM_MAX";; esac
 }
 shim_store_upload() {
-  echo "store_upload $1 $2 $3 $4" >>"$SHIM_CALLS"
+  echo "store_upload $1 $2 $3 $4 ${5:-}" >>"$SHIM_CALLS"
   case "$SHIM" in
     partial) [ "$1" = ios ];;      # ios succeeds, android fails
     fail)    return 1;;
@@ -80,6 +87,34 @@ shim_store_upload() {
 step()     { echo "::rcm::step::$1"; }
 step_end() { echo "::rcm::step-end::$1"; }
 finish()   { echo "::rcm::summary::$1"; exit "$2"; }
+# listing_file_lines FILE: the fields of the edited copy (listing_json), one `<platform>.<key>: <value>` line each
+#   (logged so the job says what went up with the binary).
+listing_file_lines() {
+  python3 - "$1" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for plat in ("ios", "android"):
+    fields = d.get(plat) or {}
+    if not isinstance(fields, dict):
+        continue
+    for key, value in fields.items():
+        if isinstance(value, str):
+            print(f"{plat}.{key}: {' '.join(value.split())}")
+        elif isinstance(value, list):
+            print(f"{plat}.{key}: {len(value)} file(s)")
+PYEOF
+}
+# read_listing_json: RCM_INPUT_LISTING_JSON (the copy edited in the web UI) -> $WORK/listing.json + LISTING_FILE.
+#   Empty = nothing edited, the store/ files are the copy. Not a JSON object = usage error (exit 2).
+read_listing_json() {
+  LISTING_FILE=""
+  [ -n "${RCM_INPUT_LISTING_JSON:-}" ] || return 0
+  if ! printf '%s' "$RCM_INPUT_LISTING_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, dict)' 2>/dev/null; then
+    echo "RCM_INPUT_LISTING_JSON must be a JSON object ({\"ios\": {...}, \"android\": {...}})" >&2; usage
+  fi
+  printf '%s\n' "$RCM_INPUT_LISTING_JSON" >"$WORK/listing.json"; LISTING_FILE="$WORK/listing.json"
+  echo "  listing_json given — $WORK/listing.json overrides the store/ copy"
+}
 write_upload() {  # $1 n(int|null) · $2 status · $3 mode · $4 tag(or '') · rest: uploaded platforms
   local n="$1" status="$2" mode="$3" tag="$4"; shift 4
   local args=(write upload --out "$OUT" --n "$n" --status "$status" --mode "$mode" --extra-json "{\"exit_code\": ${EXIT_CODE:-null}}")
@@ -111,6 +146,8 @@ main() {
   fi
   [ -f "$CONTRACT" ] || { echo "missing $CONTRACT — reinstall with /rcm-store-connect" >&2; exit 2; }
   mkdir -p "$WORK"
+  read_listing_json
+  [ -z "$LISTING_FILE" ] || listing_file_lines "$LISTING_FILE" | sed 's/^/  listing: /'
   echo "::rcm::steps::$((2 + $(echo "$plats" | wc -w) + 1))"
 
   step "preflight"
@@ -156,7 +193,7 @@ main() {
 
   for p in $plats; do
     step "upload $p"
-    if store_upload "$p" "$expected" "$bn" "$track"; then uploaded+=("$p"); step_end ok; else failed+=("$p"); step_end fail; fi
+    if store_upload "$p" "$expected" "$bn" "$track" "$LISTING_FILE"; then uploaded+=("$p"); step_end ok; else failed+=("$p"); step_end fail; fi
   done
   step "upload.json"
   if [ "${#failed[@]}" = 0 ]; then status=success; rc=0
@@ -212,8 +249,19 @@ selftest() {
   run ok "" RCM_INPUT_ANDROID_TRACK=beta;      check "unknown track -> usage exit 2" 2 "$rc" "d['status']=='rehearsal'" 0
   run ok "" "$SECRETS_ENV=$t/none";            check "no secrets dir -> exit 2, store untouched" 2 "$rc" "d['status']=='rehearsal' and d['n'] is None" 0
   [ ! -e "$t/calls" ] || { echo "FAIL store read without secrets"; fails=$((fails+1)); }
+  # listing_json — the copy edited in the web UI: a file for the hook, its fields in the log
+  run ok "" RCM_INPUT_LISTING_JSON='{"ios": {"subtitle": "X"}}'
+                                               check "listing_json in rehearsal -> listing.json written, no upload call" 0 "$rc" "d['status']=='rehearsal'" 0
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['ios']['subtitle']=='X'" "$t/work/listing.json" || { echo "FAIL listing.json missing or wrong"; fails=$((fails+1)); }
+  grep -q '^  listing: ios.subtitle: X$' "$t/out" || { echo "FAIL listing fields not logged"; fails=$((fails+1)); }
+  run ok "" RCM_INPUT_LISTING_JSON='{"ios": {"subtitle": "X"}}' RCM_INPUT_MODE=upload RCM_INPUT_CONFIRM_BUILD_NUMBER=181 RCM_INPUT_PLATFORM=ios
+                                               check "listing_json in upload -> path handed to store_upload" 0 "$rc" "d['status']=='success'" 1
+  grep -q "^store_upload ios 181 1.0.1 production $t/work/listing.json\$" "$t/calls" || { echo "FAIL listing.json path not passed to store_upload"; cat "$t/calls"; fails=$((fails+1)); }
+  run ok "" RCM_INPUT_LISTING_JSON='"text"';   check "listing_json not an object -> usage exit 2" 2 "$rc" "d['status']=='rehearsal'" 0
+  run ok "";                                   check "no listing_json -> no listing.json" 0 "$rc" "d['status']=='rehearsal'" 0
+  [ ! -e "$t/work/listing.json" ] || { echo "FAIL listing.json written without listing_json"; fails=$((fails+1)); }
   rm -rf "$t"
-  [ "$fails" = 0 ] && { echo "[release_upload] selftest PASS — rehearsal by default, typed N enforced, poison goes red"; return 0; }
+  [ "$fails" = 0 ] && { echo "[release_upload] selftest PASS — rehearsal by default, typed N enforced, listing_json reaches the hook, poison goes red"; return 0; }
   echo "[release_upload] selftest FAIL ($fails)"; return 1
 }
 

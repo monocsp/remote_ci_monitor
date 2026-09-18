@@ -10,6 +10,10 @@
 #                                                      when the human ticked the box in THIS submission
 #     RCM_INPUT_LISTING=notes-only|full                default notes-only
 #     RCM_INPUT_PHASED=1|0                             default 1 (phased release on)
+#     RCM_INPUT_LISTING_JSON='{"ios":{…},"android":{…}}'  default "" — the copy edited in the web UI (version page).
+#                                                      Not empty: written to build/.rcm-release/listing.json, handed to
+#                                                      store_submit() as LISTING_FILE, and it wins over the store/ files;
+#                                                      mode=plan echoes its fields in review-plan.json listing.preview
 #   Secrets: the folder rcm hands over in ${{secrets_env}}. Never printed.
 #
 #   Writes  build/.rcm-release/review-plan.json (mode=plan) or review.json (mode=submit), HOWEVER THE RUN ENDS.
@@ -38,10 +42,12 @@ SHIM="${RELEASE_SHIM:-}"                                 # selftest only: ok | a
 SHIM_CALLS="${RELEASE_SHIM_CALLS:-/dev/null}"
 WRITTEN=0
 MODE="${RCM_INPUT_MODE:-plan}"
+LISTING_FILE=""                                          # $WORK/listing.json when RCM_INPUT_LISTING_JSON is not empty
 
 usage() {
   echo "usage: RCM_INPUT_BUILD_NAME=X.Y.Z [RCM_INPUT_MODE=plan|submit] [RCM_INPUT_CONFIRM_BUILD_NUMBER=N] [RCM_INPUT_PLATFORM=both|ios|android]" >&2
-  echo "       [RCM_INPUT_PLAY_MANAGED_PUBLISHING=not-checked|confirmed-on] [RCM_INPUT_LISTING=notes-only|full] [RCM_INPUT_PHASED=1|0] release_review.sh | release_review.sh --selftest" >&2
+  echo "       [RCM_INPUT_PLAY_MANAGED_PUBLISHING=not-checked|confirmed-on] [RCM_INPUT_LISTING=notes-only|full] [RCM_INPUT_PHASED=1|0]" >&2
+  echo "       [RCM_INPUT_LISTING_JSON='{…}'] release_review.sh | release_review.sh --selftest" >&2
   exit 2
 }
 
@@ -61,17 +67,22 @@ store_review_observe() {
   echo '{"n": null, "ios": {"verdict": "not_implemented", "state": null}, "android": {"verdict": "not_implemented", "state": null}, "auto_release": false}'
 }
 # listing_lines KIND: print the lines the page shows under listing.preview (KIND=preview) / listing.diff (KIND=diff).
+#   When LISTING_FILE is set (the web-edited copy), the preview starts with its fields — that is what goes up.
 listing_lines() {
+  if [ "$1" = preview ] && [ -n "$LISTING_FILE" ]; then listing_file_lines "$LISTING_FILE"; fi
   if [ -n "$SHIM" ]; then echo "listing_lines $1" >>"$SHIM_CALLS"; echo "(shim) $1 line"; return 0; fi
   # TODO(project): print your store copy preview / diff vs live, one line each (release notes, what's new). Optional.
+  #   With LISTING_FILE set, read the copy from that file instead of store/ (e.g. store_listing.py --listing-json).
   :
 }
-# store_submit PLATFORM N BUILD_NAME LISTING PHASED: submit ONE platform for review. Exit 0 = submitted.
+# store_submit PLATFORM N BUILD_NAME LISTING PHASED LISTING_FILE: submit ONE platform for review. Exit 0 = submitted.
 #   Must NOT release, publish, roll out or change the release type. Runs only in mode=submit after the typed N matched.
+#   LISTING_FILE ('' or a JSON file) is the copy edited in the web UI — when given it wins over the store/ files.
 store_submit() {
   if [ -n "$SHIM" ]; then shim_store_submit "$@"; return $?; fi
   # TODO(project): e.g. an existing fastlane lane that submits, with phased release = $5 and manual release ALWAYS
-  #   (never automatic). $4 (notes-only|full) says whether to push the full listing or just release notes.
+  #   (never automatic). $4 (notes-only|full) says whether to push the full listing or just release notes; $6, when
+  #   not empty, is the JSON file whose fields replace the store/ copy (writing it back into store/ is allowed).
   echo "store_submit() is not implemented — fill the TODO(project) block in scripts/release/release_review.sh" >&2
   return 1
 }
@@ -87,12 +98,40 @@ shim_store_review_observe() {
     *) echo "unknown RELEASE_SHIM=$SHIM" >&2; return 9;;
   esac
 }
-shim_store_submit() { echo "store_submit $1 $2 $3 $4 $5" >>"$SHIM_CALLS"; [ "$SHIM" != fail ]; }
+shim_store_submit() { echo "store_submit $1 $2 $3 $4 $5 ${6:-}" >>"$SHIM_CALLS"; [ "$SHIM" != fail ]; }
 
 # ── contract plumbing ────────────────────────────────────────────────────────────────────────────────
 step()     { echo "::rcm::step::$1"; }
 step_end() { echo "::rcm::step-end::$1"; }
 finish()   { echo "::rcm::summary::$1"; exit "$2"; }
+# listing_file_lines FILE: the fields of the edited copy (listing_json) as `<platform>.<key>: <value>` lines —
+#   what the page shows as «this is what goes up». One line per string field; images are counted.
+listing_file_lines() {
+  python3 - "$1" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for plat in ("ios", "android"):
+    fields = d.get(plat) or {}
+    if not isinstance(fields, dict):
+        continue
+    for key, value in fields.items():
+        if isinstance(value, str):
+            print(f"{plat}.{key}: {' '.join(value.split())}")
+        elif isinstance(value, list):
+            print(f"{plat}.{key}: {len(value)} file(s)")
+PYEOF
+}
+# read_listing_json: RCM_INPUT_LISTING_JSON (the copy edited in the web UI) -> $WORK/listing.json + LISTING_FILE.
+#   Empty = nothing edited, the store/ files are the copy. Not a JSON object = usage error (exit 2).
+read_listing_json() {
+  LISTING_FILE=""
+  [ -n "${RCM_INPUT_LISTING_JSON:-}" ] || return 0
+  if ! printf '%s' "$RCM_INPUT_LISTING_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, dict)' 2>/dev/null; then
+    echo "RCM_INPUT_LISTING_JSON must be a JSON object ({\"ios\": {...}, \"android\": {...}})" >&2; usage
+  fi
+  printf '%s\n' "$RCM_INPUT_LISTING_JSON" >"$WORK/listing.json"; LISTING_FILE="$WORK/listing.json"
+  echo "  listing_json given — $WORK/listing.json overrides the store/ copy"
+}
 write_review_plan() {  # $1 n · $2 plan_verdict · $3 ios word · $4 android word · $5 observed json · rest ignored
   python3 "$CONTRACT" write review-plan --out "$WORK/review-plan.json" --build-name "${RCM_INPUT_BUILD_NAME:-?}" \
     --n "$1" --plan-verdict "$2" --ios "$3" --android "$4" --observed-json "$5" \
@@ -134,6 +173,7 @@ main() {
   fi
   [ -f "$CONTRACT" ] || { echo "missing $CONTRACT — reinstall with /rcm-store-connect" >&2; exit 2; }
   mkdir -p "$WORK"
+  read_listing_json
   echo "::rcm::steps::3"
 
   step "preflight"
@@ -230,7 +270,7 @@ except Exception: print("{}")' "$obs")"
       # 사람이 이 제출에서 «콘솔의 관리형 게시가 켜져 있다» 고 말하지 않았다 — API 로는 확인할 수 없으므로 건너뛴다.
       skipped+=("android=skipped:managed_publishing_unconfirmed"); continue
     fi
-    if store_submit "$p" "$n" "$bn" "$listing" "$phased"; then submitted+=("$p=submitted"); else failed+=("$p=failed:store_submit_failed"); fi
+    if store_submit "$p" "$n" "$bn" "$listing" "$phased" "$LISTING_FILE"; then submitted+=("$p=submitted"); else failed+=("$p=failed:store_submit_failed"); fi
   done
   if [ "${#submitted[@]}" = 0 ] && [ "${#failed[@]}" = 0 ]; then overall=noop; rc=5
   elif [ "${#skipped[@]}" = 0 ] && [ "${#failed[@]}" = 0 ]; then overall=submitted; rc=0
@@ -292,8 +332,18 @@ selftest() {
                                    check "auto_release observed in submit -> blocked, no submit call" 2 "$rc" review.json "d['platforms']['ios']['reason']=='unsafe_release_type'" 0
   run ok "" "$SECRETS_ENV=$t/none"; check "no secrets dir -> exit 2, store untouched" 2 "$rc" review-plan.json "d['ios']=='secrets_unreadable'" 0
   [ ! -e "$t/calls" ] || { echo "FAIL store read without secrets"; fails=$((fails+1)); }
+  # listing_json — the copy edited in the web UI (version page): a file for the hooks, its fields in the preview
+  run ok "" RCM_INPUT_LISTING_JSON='{"ios": {"subtitle": "X", "whats_new": "a\nb"}, "android": {"title": "T", "graphics": [{"path": "g.png"}]}}'
+                                   check "listing_json in plan -> listing.json written, fields echoed in preview" 0 "$rc" review-plan.json "d['listing']['preview'][:4]==['ios.subtitle: X', 'ios.whats_new: a b', 'android.title: T', 'android.graphics: 1 file(s)'] and d['listing']['diff']==['(shim) diff line']" 0
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['ios']['subtitle']=='X'" "$t/work/listing.json" || { echo "FAIL listing.json missing or wrong"; fails=$((fails+1)); }
+  run ok "" RCM_INPUT_LISTING_JSON='{"ios": {"subtitle": "X"}}' RCM_INPUT_MODE=submit RCM_INPUT_CONFIRM_BUILD_NUMBER=181 RCM_INPUT_PLATFORM=ios
+                                   check "listing_json in submit -> path handed to store_submit" 0 "$rc" review.json "d['overall_status']=='submitted'" 1
+  grep -q "^store_submit ios 181 1.0.1 notes-only 1 $t/work/listing.json\$" "$t/calls" || { echo "FAIL listing.json path not passed to store_submit"; cat "$t/calls"; fails=$((fails+1)); }
+  run ok "" RCM_INPUT_LISTING_JSON='[1, 2]'; check "listing_json not an object -> usage exit 2" 2 "$rc" review-plan.json "d['plan_verdict']=='blocked'" 0
+  run ok "";                       check "no listing_json -> no listing.json, preview from the hook only" 0 "$rc" review-plan.json "d['listing']['preview']==['(shim) preview line']" 0
+  [ ! -e "$t/work/listing.json" ] || { echo "FAIL listing.json written without listing_json"; fails=$((fails+1)); }
   rm -rf "$t"
-  [ "$fails" = 0 ] && { echo "[release_review] selftest PASS — plan by default, typed N enforced, Android needs the human statement, poison goes red"; return 0; }
+  [ "$fails" = 0 ] && { echo "[release_review] selftest PASS — plan by default, typed N enforced, Android needs the human statement, listing_json reaches the hook, poison goes red"; return 0; }
   echo "[release_review] selftest FAIL ($fails)"; return 1
 }
 

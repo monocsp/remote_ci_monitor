@@ -178,6 +178,7 @@ default_branch       = "main"                    # default "main"
 tag                  = "prod/{version}-{build}"  # default; must contain {version} and {build}
 build_number_policy  = "auto"                    # "auto" (default) | "manual" — the Store tab's «Build number» toggle default
 plan_max_age_minutes = 30                        # default 30; integer > 0
+version_ttl_hours    = 24                        # default 24; integer > 0 — an unedited new-version draft is discarded after this
 driver               = "scripts/release/product_release.sh"   # optional; relative to the repository
 secrets_dir_env      = "APP_SECRETS"             # required when secrets are listed; ^[A-Z][A-Z0-9_]*$
 
@@ -188,6 +189,7 @@ review = "release-review"                        # required
 gate   = "gate-smoke"                            # optional
 qa     = "scenario-qa"                           # optional
 dev    = "deploy-dev"                            # optional
+version = "release-version"                      # optional — «new version» from the web (prefill / create / delete)
 
 [[repos.app.release.secrets]]                    # zero or more — names and shapes, never values
 name     = "AuthKey.p8"                          # file name or env name; unique in the profile
@@ -215,7 +217,7 @@ must contain both placeholders, `build_number_policy`, `kind` and `verify` take 
 above, `files` is only valid for `kind = "dir"` and `max_kb` only for `kind = "file"`, `driver`
 is a relative path, and every error names the section and key
 (`[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review, gate, qa,
-dev)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
+dev, version)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
 degrades the Store tab without stopping the server.
 
 `rcm check --config server.toml` prints one row per profile, `release <repo>`:
@@ -225,8 +227,10 @@ degrades the Store tab without stopping the server.
 | `FAIL` | a required role (`plan`, `upload`, `review`) is empty or names a preset that is not in `[[presets]]` |
 | `FAIL` | the `plan` preset lacks the `build_name` input; `upload` lacks `build_name confirm_build_number mode platform`; `review` lacks `build_name confirm_build_number mode platform play_managed_publishing listing phased` |
 | `FAIL` | the `upload` preset's `mode` input defaults to `upload`, or the `review` preset's `mode` defaults to `submit` — the irreversible mode is never the default |
+| `FAIL` | a `version` preset lacks `mode ios_version android_version asc_version_id`, or its `mode` does not default to `prefill` (`create` makes a store draft, `delete` is irreversible) |
 | `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
-| `warn` | an optional role (`gate`, `qa`, `dev`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | an optional role (`gate`, `qa`, `dev`, `version`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | the `review` or `upload` preset has no `listing_json` input — the listing copy edited in the web UI cannot reach the script (re-run `/rcm-store-connect`, which adds the input) |
 
 The detail lists each role with its preset, the driver when one is set, and the number of secrets:
 `ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke

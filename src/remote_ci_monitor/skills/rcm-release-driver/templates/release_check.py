@@ -13,6 +13,9 @@ bash 는 명령을 부르고, 판단은 여기서 한다.
                                                 → "id state" 또는 빈 줄
     confirm   --typed N --plan FILE             → 사람이 친 N 이 plan.json 의 n 과 같을 때만 0
     get       --file F --key K                  → 상태 캐시의 값(없으면 빈 줄)
+    version-name --json F                       → rcm 의 버전 행(GET …/release/versions/<id>)에서
+                                                  빌드 이름 한 줄: ios_version, 없으면
+                                                  android_version. 둘 다 없으면 exit 1(짓지 않는다)
     profile   --file scripts/rcm/profile.release.toml [--repo NAME] [--presets FILE]
                                                 → 드라이버가 읽는 KEY=value 줄들(조각에서)
     --selftest                                  → 오염 입력이 실제로 빨개지는지
@@ -30,7 +33,9 @@ import sys
 from typing import Any
 
 EXIT_DONE, EXIT_RED, EXIT_PREREQ, EXIT_UNKNOWN, EXIT_DRIFT = 0, 1, 2, 3, 4
-STAGES = ("S1", "S3", "S4", "S5", "S6", "S7", "S8", "DONE", "BLOCKED_PR_CLOSED")
+#: V 는 «버전 행에서 이름을 받는» 단계 — `--version-id` 가 있을 때만 있고 S0 앞이다
+#: (버전 페이지 계획 §1.1).
+STAGES = ("V", "S0", "S1", "S3", "S4", "S5", "S6", "S7", "S8", "DONE", "BLOCKED_PR_CLOSED")
 BUILD_NAME_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -163,6 +168,18 @@ def decide_stage(
     if gate_ok:
         return "S5"
     return "S4"
+
+
+def version_name(doc: Any) -> str | None:
+    """rcm 의 버전 행 → 드라이버가 쓸 빌드 이름. iOS 이름이 우선, 없으면 Android. 둘 다 없거나
+    X.Y.Z 꼴이 아니면 None — 이름은 행에서만 오고 여기서 만들지 않는다."""
+    if not isinstance(doc, dict):
+        return None
+    for key in ("ios_version", "android_version"):
+        v = doc.get(key)
+        if isinstance(v, str) and BUILD_NAME_RE.match(v):
+            return v
+    return None
 
 
 # ── 산출물 계약 ───────────────────────────────────────────────────────────────
@@ -381,6 +398,18 @@ def cmd_profile(a: argparse.Namespace) -> int:
         return EXIT_PREREQ
     for k, v in out.items():
         print(f"{k}={v}")
+    return EXIT_DONE
+
+
+def cmd_version_name(a: argparse.Namespace) -> int:
+    name = version_name(_load(a.json, None))
+    if name is None:
+        print(
+            "version row has neither ios_version nor android_version in X.Y.Z form",
+            file=sys.stderr,
+        )
+        return EXIT_RED
+    print(name)
     return EXIT_DONE
 
 
@@ -636,6 +665,18 @@ def selftest() -> int:
     print("tag pattern")
     check("render", render_tag(pat, "1.0.1", 181), "prod/1.0.1-181")
 
+    print("version row → build name (stage V)")
+    check("V comes first in STAGES", STAGES[:2], ("V", "S0"))
+    check("ios first", version_name({"ios_version": "1.1.1", "android_version": "1.0.1"}), "1.1.1")
+    check(
+        "android when ios is null",
+        version_name({"ios_version": None, "android_version": "1.0.1"}),
+        "1.0.1",
+    )
+    check("neither → None", version_name({"ios_version": None, "android_version": None}), None)
+    check("not X.Y.Z → None", version_name({"ios_version": "1.1"}), None)
+    check("not an object → None", version_name(["1.1.1"]), None)
+
     print(f"\nselftest: {'FAIL ' + str(len(fails)) if fails else 'all green'}")
     return EXIT_RED if fails else EXIT_DONE
 
@@ -703,6 +744,10 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--file", required=True)
     g.add_argument("--key", required=True)
     g.set_defaults(fn=cmd_get)
+
+    vn = sub.add_parser("version-name")
+    vn.add_argument("--json", required=True)
+    vn.set_defaults(fn=cmd_version_name)
 
     a = p.parse_args(argv)
     return a.fn(a)

@@ -14,6 +14,7 @@ default_branch       = "main"                      # where releases are cut from
 tag                  = "prod/{version}-{build}"    # "release exists" == this tag exists; keep {version} and {build}
 build_number_policy  = "auto"                      # "auto": N = store max + 1, computed by scripts/release/release_plan.sh
 plan_max_age_minutes = 30                          # older plans get a stale badge and keep the irreversible buttons closed
+version_ttl_hours    = 24                          # a new-version draft nobody edits is discarded after this (integer ≥ 1)
 # driver             = "scripts/release/product_release.sh"   # optional S0–S8 driver — /rcm-release-driver adds it
 secrets_dir_env      = "{{secrets_env}}"           # the job sees the secrets folder as ${{secrets_env}}
 
@@ -21,6 +22,7 @@ secrets_dir_env      = "{{secrets_env}}"           # the job sees the secrets fo
 plan   = "release-plan"                            # read-only store snapshot -> plan.json
 upload = "release-upload"                          # store upload -> upload.json (rehearsal by default)
 review = "release-review"                          # review plan / submit -> review-plan.json / review.json
+version = "release-version"                        # optional — «new version» from the web: prefill / create / delete
 # gate = "gate-<basename>"                         # optional — /rcm-gate-connect names it after the CI script
 # qa   = "qa-<harness>"                            # optional — /rcm-qa-connect names it after the QA harness
 
