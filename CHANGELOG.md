@@ -7,6 +7,35 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Release contract: the `version` role.** A project may name a `version` preset
+  (`[repos.<name>.release.presets] version = …`) that rcm runs with `mode = prefill|create|delete`,
+  `ios_version`, `android_version` and `asc_version_id`; it writes `version.json` (create ·
+  delete) and `prefill.json` (prefill · create), exit `3` = already exists, `4` = not deletable.
+  `rcm check` fails when the preset lacks those inputs or its `mode` does not default to
+  `prefill`, and warns when the `review` / `upload` preset has no `listing_json` input. New
+  profile key `version_ttl_hours` (default 24, integer ≥ 1). `plan.json` may carry
+  `store.play.production_name` and `next_version_hint`; the driver takes `--version-id <id>`
+  (stage `V`). ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
+- **Skills: `release_version.sh` and `listing_json`.** `rcm-store-connect` ships a fourth
+  skeleton (prefill from the live listing or the `store/` files, create / delete an App Store
+  version, `--selftest`), the `release-version` preset, the `version` profile line, and
+  `rcm_contract.py` kinds `version` / `prefill`. `release_review.sh` / `release_upload.sh` read
+  `RCM_INPUT_LISTING_JSON`, write `listing.json`, hand its path to the store hooks and echo its
+  fields in the review-plan preview; an adopted script gets only that handling added.
+  `rcm-release-driver` resolves the build name from rcm's version row with `--version-id`.
+  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
+- **Release contract: two store version names.** One round may ship a different version name to
+  each store (App Store 1.1.1 · Google Play 1.0.1), because the live names have drifted apart. rcm
+  sends `build_name` as the representative name and adds the new optional input
+  `build_name_android` to the `review` / `upload` presets only when the two differ; `rcm check`
+  warns when a preset does not declare it, and a round with two names is refused (409
+  `split_version_unsupported`) rather than built under one. `{version}` in `tag` is the shared
+  name, or the two joined with `+` (`prod/1.1.1+1.0.1-181`); in `listing.release_notes` it is the
+  iOS name, falling back to the Android one. `release_upload.sh` / `release_review.sh` read
+  `RCM_INPUT_BUILD_NAME_ANDROID` and hand each store its own name through `platform_build_name`.
+  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed

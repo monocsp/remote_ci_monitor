@@ -156,7 +156,7 @@ def test_the_repo_document_has_the_profile_without_values_and_a_null_mirror(srv,
                 "gate": None,
                 "qa": None,
                 "dev": None,
-                "version": None,
+                "version": None,  # 선택 역할 — 새 버전 만들기(버전 페이지 계획 §1)
             },
             "listing": None,
             "secrets_dir_env": "APP_SECRETS",

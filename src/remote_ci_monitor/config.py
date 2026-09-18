@@ -183,12 +183,12 @@ _RELEASE_KEYS = {
     "tag",
     "build_number_policy",
     "plan_max_age_minutes",
+    "version_ttl_hours",
     "driver",
     "secrets_dir_env",
     "presets",
     "secrets",
     "listing",
-    "version_ttl_hours",
 }
 _RELEASE_SECRET_KEYS = {"name", "kind", "optional", "verify", "files", "max_kb"}
 _RELEASE_LISTING_KEYS = {"preview", "diff", "validate", "screenshots", "release_notes", "ref"}
@@ -235,12 +235,12 @@ class ReleaseProfile:
     tag: str = "prod/{version}-{build}"
     build_number_policy: str = "auto"  # "auto" | "manual"
     plan_max_age_minutes: int = 30
+    # 새 버전 드래프트가 편집 없이 살아 있는 시간 — 지나면 청소기가 버린다(버전 페이지 계획 Q1).
+    version_ttl_hours: int = 24
     driver: str | None = None  # 저장소 안 상대경로
     secrets_dir_env: str | None = None
     secrets: tuple[ReleaseSecret, ...] = ()
     listing: ReleaseListing | None = None
-    # 편집한 적 없는 버전 드래프트를 몇 시간 뒤 버리나(버전 페이지 Q1). 편집한 것은 경고만.
-    version_ttl_hours: int = 24
 
     def preset_for(self, role: str) -> str | None:
         return self.presets.get(role) or None
@@ -1237,11 +1237,11 @@ def parse_release_profile(repo_name: str, raw: Any) -> ReleaseProfile:
         tag=tag,
         build_number_policy=policy,
         plan_max_age_minutes=max_age,
+        version_ttl_hours=ttl,
         driver=driver,
         secrets_dir_env=env_name,
         secrets=secrets,
         listing=listing,
-        version_ttl_hours=ttl,
     )
 
 

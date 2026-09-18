@@ -26,15 +26,15 @@ from remote_ci_monitor.core.model import Job
 from remote_ci_monitor.core.status import iso
 
 #: 역할 → 묶음에서 찾는 파일. review 는 모드에 따라 둘
-#: (plan → review-plan.json · submit → review.json).
+#: (plan → review-plan.json · submit → review.json), version 도 둘
+#: (create · delete → version.json · prefill · create → prefill.json).
 ROLE_FILES: dict[str, tuple[str, ...]] = {
     "plan": ("plan.json",),
     "upload": ("upload.json",),
     "review": ("review-plan.json", "review.json"),
     "version": ("version.json", "prefill.json"),
 }
-#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 셋에 더해 gate · qa · dev · version 도 행으로는
-#: 보인다.
+#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 넷에 더해 gate · qa · dev 도 행으로는 보인다.
 LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
 #: `prefill.json` · 편집본의 플랫폼별 문안 키(계약 §2 review 의 listing 필드 이름과 같다).
 #: 스크린샷은 보기만이라 편집본에 없다.
