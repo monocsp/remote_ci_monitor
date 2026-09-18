@@ -289,6 +289,7 @@ def choice(name: str, choices: list[str], default: str) -> str:
 PLAN_INPUTS = 'inputs = [{ name = "build_name", pattern = "^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$" }]\n'
 PHASED = choice("phased", ["1", "0"], "1")
 LISTING_JSON = '  { name = "listing_json", default = "" },\n'
+BUILD_NAME_ANDROID = '  { name = "build_name_android", default = "" },\n'
 
 
 def preset_block(name: str, script: str, inputs: str = "") -> str:
@@ -315,12 +316,15 @@ def presets(
     review_mode: str = "plan",
     listing_json: bool = True,
     version_mode: str | None = "prefill",
+    build_name_android: bool = True,
 ) -> str:
     listing = LISTING_JSON if listing_json else ""
+    android = BUILD_NAME_ANDROID if build_name_android else ""
     upload = (
         "inputs = [\n"
         '  { name = "build_name" },\n'
-        '  { name = "confirm_build_number", type = "int" },\n'
+        + android
+        + '  { name = "confirm_build_number", type = "int" },\n'
         + choice("mode", ["rehearsal", "upload"], upload_mode)
         + choice("platform", ["both", "ios", "android"], "both")
         + listing
@@ -329,7 +333,8 @@ def presets(
     review = (
         "inputs = [\n"
         '  { name = "build_name" },\n'
-        '  { name = "confirm_build_number", default = "" },\n'
+        + android
+        + '  { name = "confirm_build_number", default = "" },\n'
         + choice("mode", ["plan", "submit"], review_mode)
         + choice("platform", ["both", "ios", "android"], "both")
         + choice("play_managed_publishing", ["not-checked", "confirmed-on"], "not-checked")
@@ -571,6 +576,49 @@ def test_check_row_warns_once_per_preset_without_listing_json(srv, env, tmp_path
     status, detail = release_row(out)
     assert status == "warn" and "preset 'release-upload' has no listing_json" not in detail
     assert "preset 'release-review' has no listing_json" in detail, detail
+
+
+def test_check_row_warns_once_per_preset_without_build_name_android(srv, env, tmp_path, capsys):
+    """워크플랜 §11: 한 회차가 두 스토어에 **서로 다른** 버전 이름으로 나갈 수 있으려면
+    review/upload 프리셋이 `build_name_android` 를 받아야 한다. 없으면 warn 한 줄 — FAIL 은
+    아니다(두 이름을 늘 같게 쓰는 프로젝트는 그대로 두면 된다)."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(build_name_android=False))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "warn"
+    for name in ("release-review", "release-upload"):
+        assert (
+            f"preset '{name}' has no build_name_android input — the two stores must then "
+            "share one version name (re-run /rcm-store-connect)"
+        ) in detail, detail
+    assert detail.count("build_name_android") == 2, detail
+    # 프리셋 하나만 고치면 그 경고만 사라진다
+    half = presets(build_name_android=False).replace(
+        '  { name = "build_name" },\n',
+        '  { name = "build_name" },\n' + BUILD_NAME_ANDROID,
+        1,
+    )
+    cfg = write_config(tmp_path, GOOD_PROFILE, half)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    status, detail = release_row(out)
+    assert status == "warn" and "preset 'release-upload' has no build_name_android" not in detail
+    assert "preset 'release-review' has no build_name_android" in detail, detail
+
+
+def test_check_row_says_nothing_when_both_presets_declare_build_name_android(
+    srv, env, tmp_path, capsys
+):
+    """입력이 있으면 행은 조용하다 — 경고가 나는 쪽만 말한다."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets())
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "ok" and "build_name_android" not in detail, detail
 
 
 def test_check_prints_no_release_row_for_a_repo_without_a_profile(srv, env, tmp_path, capsys):

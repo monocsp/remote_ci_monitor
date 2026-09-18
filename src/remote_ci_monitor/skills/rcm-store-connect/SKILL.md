@@ -49,10 +49,10 @@ store credentials are never inputs of this skill.
 |---|---|
 | `scripts/release/rcm_contract.py` | stdlib-only helper: `write <kind>` builds + validates + atomically writes each artifact; `validate <kind> --file` exits 1 on a missing / ill-typed field; `--selftest` proves poisoned documents are rejected |
 | `scripts/release/release_plan.sh` | role `plan`: read-only store snapshot → `plan.json` (n = store max + 1, or null with blockers) |
-| `scripts/release/release_upload.sh` | role `upload`: rehearsal by default; real upload only with the N a human typed |
-| `scripts/release/release_review.sh` | role `review`: review plan by default; submit only with the typed N; Android only with the per-submission managed-publishing statement; `RCM_INPUT_LISTING_JSON` (the copy edited in the web UI) → `listing.json`, handed to the hook, echoed in the preview |
+| `scripts/release/release_upload.sh` | role `upload`: rehearsal by default; real upload only with the N a human typed; `platform_build_name` gives each store its own version name when `RCM_INPUT_BUILD_NAME_ANDROID` differs |
+| `scripts/release/release_review.sh` | role `review`: review plan by default; submit only with the typed N; Android only with the per-submission managed-publishing statement; `RCM_INPUT_LISTING_JSON` (the copy edited in the web UI) → `listing.json`, handed to the hook, echoed in the preview; `platform_build_name` gives each store its own version name |
 | `scripts/release/release_version.sh` | role `version` (optional, «new version» from the web): `mode=prefill` by default reads the live listing into `prefill.json` (falls back to the `store/` files); `create` makes the App Store version and records the Android name → `version.json`; `delete` drops an editable version (submitted → exit 4) |
-| `scripts/rcm/presets.release.toml` | the presets `release-plan`, `release-upload`, `release-review`, `release-version` with exactly the inputs rcm sends (`listing_json` on upload / review), `source_modes = ["git_ref"]`, `repo`, `artifacts`, `artifacts_on = "always"` |
+| `scripts/rcm/presets.release.toml` | the presets `release-plan`, `release-upload`, `release-review`, `release-version` with exactly the inputs rcm sends (`listing_json` and `build_name_android` on upload / review), `source_modes = ["git_ref"]`, `repo`, `artifacts`, `artifacts_on = "always"` |
 | `scripts/rcm/profile.release.toml` | the `[repos.<repo>.release]` block: roles → presets (`version` included), `version_ttl_hours`, `secrets_dir_env`, the secrets list (names and kinds only) |
 | `scripts/rcm/rcm_candidate.py` | stdlib-only merger: writes a candidate `server.toml` (profile block after the right `[[repos]]` entry, presets appended, same-name presets replaced) and, with `--check`, runs `rcm check` on it; reads its defaults from the `docs/rcm-connect.md` header; `--selftest` |
 | `docs/rcm-connect.md` (created or section appended) | the answers in its header and, per skill, what was created / still to fill in / verified — `/rcm-connect` and the other skills read it |
@@ -161,6 +161,11 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    are the reference). Nothing else in the adopted script changes; without the handling the
    preset's `listing_json` input is still declared (so `rcm check` is quiet) but the edited copy
    never reaches the store — say so in the report.
+   **Adopt-existing rule for `build_name_android`**: the same, for the two store version names —
+   read `RCM_INPUT_BUILD_NAME_ANDROID` (default empty, refuse anything but `X.Y.Z` or empty) and
+   give the Android store call that name instead of `RCM_INPUT_BUILD_NAME` when it is not empty
+   (the template's `platform_build_name` is the reference). Without the handling, a round with two
+   different names would go up under one — say so in the report.
    Run every python snippet in this skill with `python3 -B` so no `__pycache__` is left behind.
    ```sh
    case "$PLATFORMS" in ios,android) PLATFORM_DEFAULT=both;; ios|android) PLATFORM_DEFAULT=$PLATFORMS;; esac
@@ -218,9 +223,9 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
      of that name exists; when one exists and **passes the invariants below** (the inputs rcm
      sends are declared, the irreversible `mode` is not the default, no release-after-approval
      input) it is the project's real preset — record `kept — real implementation` and continue.
-     A kept `release-review` / `release-upload` preset that lacks the `listing_json` input gets
-     that one `[[presets.inputs]]` entry appended (string, default `""`) — `rcm check` warns
-     until it is there;
+     A kept `release-review` / `release-upload` preset that lacks the `listing_json` or the
+     `build_name_android` input gets that `[[presets.inputs]]` entry appended (string, default
+     `""`) — `rcm check` warns until it is there;
      when one exists, differs and fails an invariant, print `differs   <name> in $presets_file`
      with the old block and **stop** unless `--force` / `FORCE_FILES` names the file — then back
      the file up to `.bak` and replace the group with the merger's semantics:
@@ -249,7 +254,9 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
                assert i["default"] in i["choices"], f"{p['name']}.{i['name']}: default {i['default']!r} not in {i['choices']}"
        if p["name"] == "release-upload": assert inputs["mode"]["default"] == "rehearsal", inputs["mode"]
        if p["name"] == "release-review": assert inputs["mode"]["default"] == "plan", inputs["mode"]
-       if p["name"] in ("release-upload", "release-review"): assert "listing_json" in inputs, f"{p['name']} lacks listing_json"
+       if p["name"] in ("release-upload", "release-review"):
+           for want in ("listing_json", "build_name_android"):
+               assert want in inputs, f"{p['name']} lacks {want}"
        if p["name"] == "release-version":
            assert inputs["mode"]["default"] == "prefill", inputs["mode"]
            assert {"ios_version", "android_version", "asc_version_id"} <= set(inputs), inputs.keys()
@@ -258,8 +265,8 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    grep -nEi 'automatic_release|rollout|auto_release|promote' "$presets_file" && echo "FAIL: release-after-approval input" || echo ok
    ```
    The first prints `presets ok` (every `platform` default is inside its choices, irreversible
-   modes are not defaults, `listing_json` is declared, `release-version` defaults to `prefill`);
-   the second prints `ok`.
+   modes are not defaults, `listing_json` and `build_name_android` are declared, `release-version`
+   defaults to `prefill`); the second prints `ok`.
 6. **Write the profile** from `$SKILL_DIR/templates/profile.toml` through `fill` into
    `scripts/rcm/profile.release.toml` (`install_file`). Then edit the secrets list: delete the iOS
    group when `PLATFORMS = android`, the Android group when `PLATFORMS = ios`; rename entries to
@@ -316,8 +323,8 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    is `FAIL` **or no `release <repo>` row appears**. Check: exit 0 and the `release <repo>` row is
    `ok` or `warn` with every warning one of `secrets dir … does not exist yet` / `<role> not
    configured` — the secrets-dir warning always fires on a candidate, because the folder lives next
-   to the real config. A `has no listing_json input` warning means Step 5 left an adopted preset
-   without the input — add it. A `FAIL` names the rule broken (duplicate preset, default outside
+   to the real config. A `has no listing_json input` or `has no build_name_android input` warning
+   means Step 5 left an adopted preset without that input — add it. A `FAIL` names the rule broken (duplicate preset, default outside
    choices, missing input, irreversible default, a `version` preset whose `mode` does not default
    to `prefill`) — fix the file it names and repeat. When
    `SERVER_TOML = skip`, record "not verified — server.toml not reachable from here" instead and

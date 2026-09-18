@@ -8,7 +8,8 @@
 # releases, publishes or rolls out anything: rcm must never be able to release after store approval.
 # The irreversible values (mode = upload / submit / create / delete) are choices, never defaults — `rcm check`
 # fails otherwise. `listing_json` on upload / review carries the copy edited in the web UI (version page);
-# without it `rcm check` warns and the edited copy never reaches the scripts.
+# without it `rcm check` warns and the edited copy never reaches the scripts. `build_name_android` carries the
+# Android version name when the two stores ship different names; without it they must share one name.
 
 [[presets]]
 name = "release-plan"
@@ -45,6 +46,12 @@ name = "build_name"
 type = "string"
 pattern = "^\\d+\\.\\d+\\.\\d+$"
 description = "Version name X.Y.Z"
+[[presets.inputs]]
+name = "build_name_android"
+type = "string"
+pattern = "^(\\d+\\.\\d+\\.\\d+)?$"       # the empty default must match too — hence the optional group
+default = ""                              # rcm sends it only when the two stores get different names
+description = "Android version name when it differs from build_name (X.Y.Z); empty = both stores get build_name"
 [[presets.inputs]]
 name = "confirm_build_number"
 type = "int"
@@ -88,6 +95,12 @@ name = "build_name"
 type = "string"
 pattern = "^\\d+\\.\\d+\\.\\d+$"
 description = "Version name X.Y.Z"
+[[presets.inputs]]
+name = "build_name_android"
+type = "string"
+pattern = "^(\\d+\\.\\d+\\.\\d+)?$"       # the empty default must match too — hence the optional group
+default = ""                              # rcm sends it only when the two stores get different names
+description = "Android version name when it differs from build_name (X.Y.Z); empty = both stores get build_name"
 [[presets.inputs]]
 name = "confirm_build_number"
 type = "string"

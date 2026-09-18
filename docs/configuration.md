@@ -220,6 +220,11 @@ is a relative path, and every error names the section and key
 dev, version)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
 degrades the Store tab without stopping the server.
 
+`{version}` in `tag` (and in `listing.validate` and `listing.release_notes`) is the round's version
+name: the one name when both stores get the same one, and the iOS name, a `+` and the Android name
+when they differ — `prod/1.1.1-181` or `prod/1.1.1+1.0.1-181`
+([release contract](release-contract.md) §2 «Two store version names»).
+
 `rcm check --config server.toml` prints one row per profile, `release <repo>`:
 
 | verdict | when |
@@ -231,6 +236,7 @@ degrades the Store tab without stopping the server.
 | `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
 | `warn` | an optional role (`gate`, `qa`, `dev`, `version`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
 | `warn` | the `review` or `upload` preset has no `listing_json` input — the listing copy edited in the web UI cannot reach the script (re-run `/rcm-store-connect`, which adds the input) |
+| `warn` | the `review` or `upload` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
 
 The detail lists each role with its preset, the driver when one is set, and the number of secrets:
 `ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke

@@ -22,6 +22,7 @@ import pytest
 from remote_ci_monitor import cli
 from remote_ci_monitor.cli import _release_row
 from remote_ci_monitor.config import load_server_config
+from remote_ci_monitor.core.inputs import InputError, validate_inputs
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "src" / "remote_ci_monitor" / "skills"
@@ -310,11 +311,87 @@ def test_filled_presets_and_profile_templates_pass_the_release_check_row(tmp_pat
     assert version.input_spec("mode").default == "prefill"
     for name in ("release-upload", "release-review"):
         assert cfg.preset(name).input_spec("listing_json") is not None, name
+        assert cfg.preset(name).input_spec("build_name_android") is not None, name
     row, ok, detail = _release_row(cfg, "app", profile)
     assert row == "release app"
     assert ok is not False, detail
     assert "listing_json" not in detail, detail
+    assert "build_name_android" not in detail, detail
     assert "version=release-version" in detail, detail
+
+
+def test_the_build_name_android_input_accepts_its_own_empty_default(tmp_path):
+    """워크플랜 §11: `build_name_android` 는 기본값이 `""` 다. `pattern` 은 **기본값에도** 걸리므로
+    (`core/inputs.validate_inputs` 가 기본값까지 `_coerce` 한다) 빈 값을 허용해야 한다 — 아니면
+    이 입력을 안 보내는 회차마다 제출이 400 으로 튄다."""
+    cfg_path = tmp_path / "server.toml"
+    cfg_path.write_text(
+        f'[server]\ndata_dir = "{tmp_path / "data"}"\n\n[[repos]]\nname = "app"\n'
+        'url = "git@example.com:org/app.git"\n\n'
+        + fill((STORE / "presets.release.toml").read_text())
+    )
+    cfg = load_server_config(cfg_path, environ={}, check_tools=False)
+    for name in ("release-upload", "release-review"):
+        preset = cfg.preset(name)
+        # 기본값이 없는 입력(= rcm 이 늘 보내는 것)만 채운다 — 나머지는 프리셋 기본값으로 검증된다
+        base: dict[str, object] = {
+            spec.name: 181 if spec.type == "int" else "1.1.1"
+            for spec in preset.inputs
+            if spec.default is None
+        }
+        assert preset.input_spec("build_name_android").default == "", name
+        assert validate_inputs(preset, base)["build_name_android"] == "", name
+        assert (
+            validate_inputs(preset, {**base, "build_name_android": "1.0.1"})["build_name_android"]
+            == "1.0.1"
+        ), name
+        with pytest.raises(InputError, match="build_name_android"):
+            validate_inputs(preset, {**base, "build_name_android": "1.0"})
+
+
+@pytest.mark.parametrize("script", ["release_upload.sh", "release_review.sh"])
+def test_each_store_gets_its_own_version_name(tmp_path, script):
+    """워크플랜 §11: iOS 1.1.1 · Android 1.0.1 인 회차에서 훅은 플랫폼마다 그 스토어의 이름을
+    받는다. 셀프테스트가 이미 잠그지만, 여기서도 진짜 스크립트를 돌려 호출 기록을 읽는다."""
+    work = tmp_path / "work"
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    calls = tmp_path / "calls"
+    common = {
+        "RELEASE_SHIM": "ok",
+        "RELEASE_SHIM_CALLS": str(calls),
+        "RELEASE_WORK": str(work),
+        "{{secrets_env}}": str(secrets),
+        "RCM_INPUT_BUILD_NAME": "1.1.1",
+        "RCM_INPUT_BUILD_NAME_ANDROID": "1.0.1",
+        "RCM_INPUT_CONFIRM_BUILD_NUMBER": "181",
+    }
+    extra = (
+        {"RCM_INPUT_MODE": "upload"}
+        if script == "release_upload.sh"
+        else {"RCM_INPUT_MODE": "submit", "RCM_INPUT_PLAY_MANAGED_PUBLISHING": "confirmed-on"}
+    )
+    rc, out = sh("bash", str(STORE / script), env={**common, **extra})
+    assert rc == 0, out
+    hook = "store_upload" if script == "release_upload.sh" else "store_submit"
+    logged = calls.read_text().splitlines()
+    assert [line.split()[:4] for line in logged if line.startswith(hook)] == [
+        [hook, "ios", "181", "1.1.1"],
+        [hook, "android", "181", "1.0.1"],
+    ], logged
+    # 안드로이드 이름이 비면 둘 다 대표 이름이다
+    calls.unlink()
+    rc, out = sh(
+        "bash",
+        str(STORE / script),
+        env={**common, **extra, "RCM_INPUT_BUILD_NAME_ANDROID": ""},
+    )
+    assert rc == 0, out
+    logged = calls.read_text().splitlines()
+    assert [line.split()[:4] for line in logged if line.startswith(hook)] == [
+        [hook, "ios", "181", "1.1.1"],
+        [hook, "android", "181", "1.1.1"],
+    ], logged
 
 
 # ── 계약 문서 (AC-A8) ────────────────────────────────────────────────────────
@@ -337,6 +414,15 @@ def test_filled_presets_and_profile_templates_pass_the_release_check_row(tmp_pat
         r"^version_ttl_hours\s+= 24",
         r"^version = \"release-version\"",
         r"`mode` defaults to `prefill`",
+        # 두 스토어 버전 이름 (워크플랜 §11)
+        r"^### Two store version names",
+        r"\*\*`build_name_android`\*\* \(`review` · `upload`; string, default `\"\"`\)",
+        r"`build_name`, `build_name_android`, `confirm_build_number`",
+        r"platform_build_name ios\|android",
+        r"409 `split_version_unsupported`",
+        r"`prod/1\.1\.1\+1\.0\.1-181`",
+        r"`\+` is legal in a git tag name",
+        r"tries the iOS name first and falls back to the Android name",
     ],
 )
 def test_contract_doc_states_the_version_role(pattern):
@@ -351,6 +437,9 @@ def test_contract_doc_states_the_version_role(pattern):
         ("docs/configuration.md", r'^version = "release-version"'),
         ("docs/configuration.md", r"does not default to `prefill`"),
         ("docs/configuration.md", r"no `listing_json` input"),
+        ("docs/configuration.md", r"no `build_name_android` input"),
+        ("docs/configuration.md", r"`prod/1\.1\.1-181` or `prod/1\.1\.1\+1\.0\.1-181`"),
+        ("CHANGELOG.md", r"`build_name_android`"),
         ("docs/configuration.md", r"gate, qa,\ndev, version\)"),
         ("examples/server.toml", r"^# version_ttl_hours = 24"),
         ("examples/server.toml", r'^# version = "release-version"'),

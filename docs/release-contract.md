@@ -106,13 +106,18 @@ screenshots   = ["store/screenshots/**/*.png"]
 release_notes = "store/release_notes/{version}/*.txt"
 ```
 
+`{version}` in `tag`, `listing.validate` and `listing.release_notes` is the round's version name.
+The two stores may get different names (§2 «Two store version names»): the tag joins them with a
+`+` then (`prod/1.1.1+1.0.1-181`), and `release_notes` tries the iOS name first, then the Android one.
+
 `rcm check --config server.toml` adds one row per profile, `release <repo>`. It is FAIL when a
 required role is missing or names a preset that does not exist, when the `upload` preset's `mode`
 defaults to `upload` or the `review` preset's `mode` defaults to `submit`, when a `version` preset's
 `mode` does not default to `prefill`, when those presets lack the inputs rcm sends (§2), when
 secrets exist without `secrets_dir_env`, or when a secret name repeats. It warns (not FAIL) when the
 secrets folder does not exist yet, an optional role is unset, or the `review` / `upload` preset has
-no `listing_json` input (the copy edited in the web UI cannot reach the script then).
+no `listing_json` input (the copy edited in the web UI cannot reach the script then) or no
+`build_name_android` input (the two stores must then share one version name).
 
 **What the profile must not contain**: secret values, store credentials, or anything the page
 would show back. Secrets are entered once in the Settings screen and never displayed; the API
@@ -128,8 +133,8 @@ artifact retention). It sets these inputs; declare them on the preset or the sub
 | Role | Tier | Inputs rcm sends | Artifact rcm reads | Exit codes rcm distinguishes | Skill that adds it |
 |---|---|---|---|---|---|
 | `plan` | **required** | `build_name` | `plan.json` | 0 ok · 1 blocked (plan.json still written) · 2 environment | `rcm-store-connect` |
-| `upload` | **required** | `build_name`, `confirm_build_number`, `mode = rehearsal\|upload`, `platform`, `android_track`, `listing_json` | `upload.json` | 0 · 1 · 2 env · 3 confirmation mismatch · 4 store drift | `rcm-store-connect` |
-| `review` | **required** | `build_name`, `confirm_build_number` (empty for plan), `mode = plan\|submit`, `platform`, `play_managed_publishing = not-checked\|confirmed-on`, `listing = notes-only\|full`, `phased = 1\|0`, `listing_json` | `review-plan.json` / `review.json` | 0 · 1 failed · 2 blocked · 3/4 confirmation mismatch · 5 noop · 6 partial | `rcm-store-connect` |
+| `upload` | **required** | `build_name`, `build_name_android`, `confirm_build_number`, `mode = rehearsal\|upload`, `platform`, `android_track`, `listing_json` | `upload.json` | 0 · 1 · 2 env · 3 confirmation mismatch · 4 store drift | `rcm-store-connect` |
+| `review` | **required** | `build_name`, `build_name_android`, `confirm_build_number` (empty for plan), `mode = plan\|submit`, `platform`, `play_managed_publishing = not-checked\|confirmed-on`, `listing = notes-only\|full`, `phased = 1\|0`, `listing_json` | `review-plan.json` / `review.json` | 0 · 1 failed · 2 blocked · 3/4 confirmation mismatch · 5 noop · 6 partial | `rcm-store-connect` |
 | `version` | optional | `mode = prefill\|create\|delete` (default **prefill**), `ios_version`, `android_version` (empty = that store is not touched), `asc_version_id` (for delete) | `version.json` (create · delete) / `prefill.json` (prefill · create) | 0 · 1 failed · 2 environment · 3 already exists (an editable App Store version of that name) · 4 not deletable (the version was submitted) | `rcm-store-connect` |
 | `gate` | optional | *(none — ref only)* | commit status is yours; rcm shows steps/log | 0 · non-zero | `rcm-gate-connect` |
 | `qa` | optional | project-defined (`order`, `android_mode`, …); rcm passes the profile defaults | `report.json` (+ optional `step-captures.html`) | 0 PASS · 1 FAIL · 2 / 10 BLOCKED (environment, shown amber not red) | `rcm-qa-connect` |
@@ -157,6 +162,41 @@ Three invariants rcm checks on the preset definitions, because they are the last
   `delete` cannot be undone, so both are choices;
 - `play_managed_publishing` has exactly one confirming value, and rcm sends it only when the
   human ticked the box **in this submission**.
+
+### Two store version names
+
+One round may ship a **different version name to each store**, because the live names have drifted
+apart (App Store 1.1.0 · Play 1.0.0 → 1.1.1 and 1.0.1). The build number is the one thing both
+stores share, so it is what identifies the round; the version names are for humans to read.
+
+rcm sends `build_name` as the **representative** name — the iOS name when there is one, the Android
+name otherwise — and adds **`build_name_android`** (`review` · `upload`; string, default `""`) only
+when the two differ. Equal names are exactly what rcm has always sent: `build_name` alone, with
+`build_name_android` empty. The `plan` role never gets it; it reads the stores, and one name is
+enough for that.
+
+A script keeps its hook signatures and passes the **per-platform** name: the skeletons ask
+`platform_build_name ios|android` and hand the answer to `store_upload` / `store_submit`, so Android
+is uploaded as `1.0.1` in the same run that puts `1.1.1` on the App Store.
+
+When the two names differ and the preset does not declare `build_name_android`, rcm refuses the
+submission with **409 `split_version_unsupported`** instead of quietly building one name for both
+stores. `rcm check` says it first, as a warning, so a project that always ships one name can leave
+the input out and never meet the refusal. *(The refusal ships with the version routes; this
+paragraph is the contract it implements.)*
+
+**The tag.** `tag = "prod/{version}-{build}"` does not change — `{version}` resolves per round:
+
+| The round | `{version}` | Tag |
+|---|---|---|
+| both stores get one name | `1.1.1` | `prod/1.1.1-181` |
+| the names differ | `1.1.1+1.0.1` (iOS `+` Android) | `prod/1.1.1+1.0.1-181` |
+
+`+` is legal in a git tag name. A round that touches one store only uses that store's name alone.
+rcm never creates the tag — the project's driver does (§5); rcm only reads whether it exists.
+
+`listing.release_notes` resolves `{version}` into a path to one file, so it cannot join the two:
+with different names it tries the iOS name first and falls back to the Android name.
 
 ### Artifact files (minimum fields)
 
