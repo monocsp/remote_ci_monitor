@@ -33,6 +33,9 @@ WORK="${RELEASE_WORK:-$ROOT/build/.rcm-release}"
 STORE_DIR="${RELEASE_STORE_DIR:-$ROOT/store}"           # listing copy in the repository — the prefill fallback
 LOCALE="${RELEASE_LOCALE:-ko}"                            # one locale (the page keys fields without a language)
 SECRETS_ENV="{{secrets_env}}"
+# 안 채워진 템플릿(`{{secrets_env}}` 그대로)도 셀프테스트로 돌아야 한다 — bash 5 는 이름이
+# 아닌 것의 간접 확장을 거부한다. 이름이 아니면 셀프테스트용 이름을 쓴다(채운 사본은 그대로).
+case "$SECRETS_ENV" in ""|[0-9]*|*[!A-Za-z0-9_]*) SECRETS_ENV=RCM_TEMPLATE_SECRETS_DIR;; esac
 SECRETS_DIR="${!SECRETS_ENV:-}"
 SHIM="${RELEASE_SHIM:-}"                                 # selftest only: ok | files | exists | submitted | fail
 SHIM_CALLS="${RELEASE_SHIM_CALLS:-/dev/null}"

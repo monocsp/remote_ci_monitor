@@ -30,6 +30,9 @@ STORE = SKILLS / "rcm-store-connect" / "templates"
 DRIVER = SKILLS / "rcm-release-driver" / "templates"
 CONTRACT_DOC = ROOT / "docs" / "release-contract.md"
 PASS_LINE = re.compile(r"selftest[: ]+(PASS|ok|all green)")
+#: 아직 안 채워진 템플릿은 `{{secrets_env}}` 가 셸 이름이 아니라서 그 이름으로 비밀 폴더를 읽는다
+#: (템플릿 맨 위의 case 문 — bash 5 는 이름이 아닌 것의 간접 확장을 거부한다).
+SELFTEST_SECRETS_ENV = "RCM_TEMPLATE_SECRETS_DIR"
 
 
 def sh(*argv: str, env: dict[str, str] | None = None, cwd: Path = ROOT):
@@ -63,6 +66,24 @@ def test_each_template_selftest_passes_from_the_repo_root(argv):
     rc, out = sh(*argv)
     assert rc == 0, out
     assert PASS_LINE.search(out.strip().splitlines()[-1]), out.strip().splitlines()[-3:]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["release_plan.sh", "release_upload.sh", "release_review.sh", "release_version.sh"],
+)
+def test_an_unfilled_template_never_indirects_through_an_invalid_name(name):
+    """안 채워진 템플릿(`{{secrets_env}}` 그대로)도 저장소 루트에서 셀프테스트로 돌아야 한다.
+    bash 5(리눅스 CI)는 이름이 아닌 것의 `${!VAR}` 를 «invalid variable name» 으로 거부하고
+    `set -e` 가 그 자리에서 죽인다 — macOS 의 bash 3.2 는 조용히 빈 값을 준다. 그래서 간접
+    확장 앞에 이름을 검사하는 case 문이 있어야 한다."""
+    text = (STORE / name).read_text()
+    guard = (
+        'case "$SECRETS_ENV" in ""|[0-9]*|*[!A-Za-z0-9_]*) '
+        f"SECRETS_ENV={SELFTEST_SECRETS_ENV};; esac"
+    )
+    assert guard in text, name
+    assert text.index(guard) < text.index('SECRETS_DIR="${!SECRETS_ENV:-}"'), name
 
 
 def test_version_selftest_names_its_four_cases():
@@ -157,7 +178,7 @@ def test_review_plan_with_listing_json_writes_the_file_and_previews_its_fields(t
         env={
             "RELEASE_SHIM": "ok",
             "RELEASE_WORK": str(work),
-            "{{secrets_env}}": str(secrets),
+            SELFTEST_SECRETS_ENV: str(secrets),
             "RCM_INPUT_BUILD_NAME": "1.0.1",
             "RCM_INPUT_LISTING_JSON": '{"ios":{"subtitle":"X"}}',
         },
@@ -179,7 +200,7 @@ def test_review_plan_without_listing_json_writes_no_listing_file(tmp_path):
         env={
             "RELEASE_SHIM": "ok",
             "RELEASE_WORK": str(work),
-            "{{secrets_env}}": str(secrets),
+            SELFTEST_SECRETS_ENV: str(secrets),
             "RCM_INPUT_BUILD_NAME": "1.0.1",
         },
     )
@@ -361,7 +382,7 @@ def test_each_store_gets_its_own_version_name(tmp_path, script):
         "RELEASE_SHIM": "ok",
         "RELEASE_SHIM_CALLS": str(calls),
         "RELEASE_WORK": str(work),
-        "{{secrets_env}}": str(secrets),
+        SELFTEST_SECRETS_ENV: str(secrets),
         "RCM_INPUT_BUILD_NAME": "1.1.1",
         "RCM_INPUT_BUILD_NAME_ANDROID": "1.0.1",
         "RCM_INPUT_CONFIRM_BUILD_NUMBER": "181",
