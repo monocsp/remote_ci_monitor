@@ -1568,9 +1568,18 @@ RELEASE_ROLE_INPUTS: dict[str, tuple[str, ...]] = {
         "listing",
         "phased",
     ),
+    "version": ("mode", "ios_version", "android_version", "asc_version_id"),
 }
 #: 역할별 **되돌릴 수 없는** `mode` 값 — 프리셋의 기본값이면 안 된다(계약 §2 의 첫 불변식).
 RELEASE_IRREVERSIBLE_MODE = {"upload": "upload", "review": "submit"}
+#: 역할별로 `mode` 의 기본값이어야 **하는** 값 — version 은 읽기 전용 prefill 이 기본이다
+#: (create 는 스토어에 드래프트를 만들고 delete 는 되돌릴 수 없다).
+RELEASE_REQUIRED_MODE_DEFAULT = {"version": "prefill"}
+#: 이 역할들은 `listing_json` 입력을 받아야 웹에서 편집한 문안이 스크립트에 닿는다 — 없으면 warn.
+RELEASE_LISTING_JSON_ROLES = ("review", "upload")
+#: 이 역할들은 `build_name_android` 입력을 받아야 두 스토어에 **서로 다른** 버전 이름을 보낼 수
+#: 있다(계약 §2 「Two store version names」). 없으면 warn — 늘 같은 이름을 쓰는 프로젝트는 그대로다.
+RELEASE_BUILD_NAME_ANDROID_ROLES = ("review", "upload")
 
 
 def release_secrets_dir(config_path: Path, repo: str) -> Path:
@@ -1586,9 +1595,12 @@ def _release_row(
 ) -> tuple[str, bool | None, str]:
     """`release <repo>` 행 — 프로파일이 가리키는 프리셋이 있고 계약대로 생겼는가.
 
-    FAIL: 필수 역할이 비었거나 없는 프리셋을 가리킨다 · upload/review/plan 프리셋이 rcm 이 보내는
-    입력을 안 받는다 · 되돌릴 수 없는 mode 가 기본값이다 · 비밀이 있는데 `secrets_dir_env` 가 없다 ·
-    비밀 이름이 겹친다. warn: 선택 역할이 비었다 · 비밀 폴더가 아직 없다(Settings 화면이 만든다).
+    FAIL: 필수 역할이 비었거나 없는 프리셋을 가리킨다 · plan/upload/review/version 프리셋이
+    rcm 이 보내는 입력을 안 받는다 · 되돌릴 수 없는 mode 가 기본값이다 · version 의 mode 기본값이
+    prefill 이 아니다 · 비밀이 있는데 `secrets_dir_env` 가 없다 · 비밀 이름이 겹친다.
+    warn: 선택 역할이 비었다 · review/upload 프리셋에 `listing_json` 이 없다(웹에서 편집한
+    문안이 전달되지 않는다) · 같은 프리셋에 `build_name_android` 가 없다(두 스토어가 한 버전
+    이름을 같이 써야 한다) · 비밀 폴더가 아직 없다(Settings 화면이 만든다).
     """
     problems: list[str] = []
     warnings: list[str] = []
@@ -1614,6 +1626,23 @@ def _release_row(
             problems.append(
                 f"preset {name!r} input 'mode' defaults to {irreversible!r} — "
                 "the irreversible mode must not be the default"
+            )
+        required_default = RELEASE_REQUIRED_MODE_DEFAULT.get(role)
+        mode = preset.input_spec("mode") if required_default else None
+        if mode is not None and mode.default != required_default:
+            problems.append(
+                f"preset {name!r} input 'mode' defaults to {mode.default!r} — "
+                f"it must default to {required_default!r} (the read-only mode)"
+            )
+        if role in RELEASE_LISTING_JSON_ROLES and "listing_json" not in declared:
+            warnings.append(
+                f"preset {name!r} has no listing_json input — copy edited in the web UI "
+                "will not reach it (re-run /rcm-store-connect)"
+            )
+        if role in RELEASE_BUILD_NAME_ANDROID_ROLES and "build_name_android" not in declared:
+            warnings.append(
+                f"preset {name!r} has no build_name_android input — the two stores must then "
+                "share one version name (re-run /rcm-store-connect)"
             )
     names = [sec.name for sec in profile.secrets]
     dupes = sorted({n for n in names if names.count(n) > 1})

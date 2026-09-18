@@ -35,6 +35,7 @@ default_branch = "release"
 tag = "store/{version}+{build}"
 build_number_policy = "manual"
 plan_max_age_minutes = 5
+version_ttl_hours = 48
 driver = "scripts/release/product_release.sh"
 secrets_dir_env = "APP_SECRETS"
 
@@ -43,6 +44,7 @@ plan = "release-plan"
 upload = "release-upload"
 review = "release-review"
 gate = "gate-smoke"
+version = "release-version"
 
 [[repos.app.release.secrets]]
 name = "AuthKey.p8"
@@ -89,6 +91,7 @@ def test_full_profile_round_trips_every_key(tmp_path):
     assert prof.tag == "store/{version}+{build}"
     assert prof.build_number_policy == "manual"
     assert prof.plan_max_age_minutes == 5
+    assert prof.version_ttl_hours == 48
     assert prof.driver == "scripts/release/product_release.sh"
     assert prof.secrets_dir_env == "APP_SECRETS"
     assert prof.presets == {
@@ -96,8 +99,10 @@ def test_full_profile_round_trips_every_key(tmp_path):
         "upload": "release-upload",
         "review": "release-review",
         "gate": "gate-smoke",
+        "version": "release-version",
     }
     assert prof.preset_for("qa") is None and prof.preset_for("plan") == "release-plan"
+    assert prof.preset_for("version") == "release-version"
     assert prof.secrets == (
         ReleaseSecret(name="AuthKey.p8", kind="file", verify="asc", max_kb=16),
         ReleaseSecret(name="TEAMS_WEBHOOK", optional=True),
@@ -126,6 +131,7 @@ def test_defaults_when_only_the_presets_are_given():
     assert prof.tag == "prod/{version}-{build}"
     assert prof.build_number_policy == "auto"
     assert prof.plan_max_age_minutes == 30
+    assert prof.version_ttl_hours == 24  # 버전 페이지 계획 Q1: 하루
     assert prof.driver is None and prof.secrets_dir_env is None
     assert prof.secrets == () and prof.listing is None
     sec = parse_release_profile("app", {"secrets": [{"name": "X"}]}).secrets[0]
@@ -181,6 +187,13 @@ def test_other_extra_keys_on_a_repo_are_still_refused(tmp_path, text, needle):
         ({"plan_max_age_minutes": 0}, "plan_max_age_minutes must be a positive integer"),
         ({"plan_max_age_minutes": True}, "plan_max_age_minutes must be a positive integer"),
         ({"plan_max_age_minutes": "30"}, "plan_max_age_minutes must be a positive integer"),
+        (
+            {"version_ttl_hours": 0},
+            "[repos.app.release]: version_ttl_hours must be a positive integer",
+        ),
+        ({"version_ttl_hours": True}, "version_ttl_hours must be a positive integer"),
+        ({"version_ttl_hours": "24"}, "version_ttl_hours must be a positive integer"),
+        ({"version_ttl_hours": 1.5}, "version_ttl_hours must be a positive integer"),
         ({"driver": "/usr/bin/release"}, "driver must be a relative path inside the repository"),
         ({"driver": "../release.sh"}, "driver must be a relative path"),
         ({"driver": ""}, "driver must be a relative path"),
@@ -189,7 +202,8 @@ def test_other_extra_keys_on_a_repo_are_still_refused(tmp_path, text, needle):
         ({"presets": ["plan"]}, "[repos.app.release.presets]: must be a table"),
         (
             {"presets": {"deploy": "x"}},
-            "[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review",
+            "[repos.app.release.presets]: unknown key(s): deploy "
+            "(roles are plan, upload, review, gate, qa, dev, version)",
         ),
         ({"presets": {"plan": ""}}, "[repos.app.release.presets]: plan must be a preset name"),
         ({"presets": {"upload": 3}}, "[repos.app.release.presets]: upload must be a preset name"),
@@ -274,6 +288,8 @@ def choice(name: str, choices: list[str], default: str) -> str:
 
 PLAN_INPUTS = 'inputs = [{ name = "build_name", pattern = "^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$" }]\n'
 PHASED = choice("phased", ["1", "0"], "1")
+LISTING_JSON = '  { name = "listing_json", default = "" },\n'
+BUILD_NAME_ANDROID = '  { name = "build_name_android", default = "" },\n'
 
 
 def preset_block(name: str, script: str, inputs: str = "") -> str:
@@ -283,31 +299,61 @@ def preset_block(name: str, script: str, inputs: str = "") -> str:
     )
 
 
-def presets(upload_mode: str = "rehearsal", review_mode: str = "plan") -> str:
+def version_inputs(mode_default: str = "prefill") -> str:
+    """`version` 프리셋의 입력 넷 — rcm 이 보내는 이름 그대로(계약 §2)."""
+    return (
+        "inputs = [\n"
+        + choice("mode", ["prefill", "create", "delete"], mode_default)
+        + '  { name = "ios_version", default = "" },\n'
+        + '  { name = "android_version", default = "" },\n'
+        + '  { name = "asc_version_id", default = "" },\n'
+        + "]\n"
+    )
+
+
+def presets(
+    upload_mode: str = "rehearsal",
+    review_mode: str = "plan",
+    listing_json: bool = True,
+    version_mode: str | None = "prefill",
+    build_name_android: bool = True,
+) -> str:
+    listing = LISTING_JSON if listing_json else ""
+    android = BUILD_NAME_ANDROID if build_name_android else ""
     upload = (
         "inputs = [\n"
         '  { name = "build_name" },\n'
-        '  { name = "confirm_build_number", type = "int" },\n'
+        + android
+        + '  { name = "confirm_build_number", type = "int" },\n'
         + choice("mode", ["rehearsal", "upload"], upload_mode)
         + choice("platform", ["both", "ios", "android"], "both")
+        + listing
         + "]\n"
     )
     review = (
         "inputs = [\n"
         '  { name = "build_name" },\n'
-        '  { name = "confirm_build_number", default = "" },\n'
+        + android
+        + '  { name = "confirm_build_number", default = "" },\n'
         + choice("mode", ["plan", "submit"], review_mode)
         + choice("platform", ["both", "ios", "android"], "both")
         + choice("play_managed_publishing", ["not-checked", "confirmed-on"], "not-checked")
         + choice("listing", ["notes-only", "full"], "notes-only")
         + PHASED
+        + listing
         + "]\n"
+    )
+    version = (
+        ""
+        if version_mode is None
+        else preset_block("release-version", "release/version.sh", version_inputs(version_mode))
     )
     return (
         preset_block("release-plan", "release/plan.sh", PLAN_INPUTS)
         + preset_block("release-upload", "release/upload.sh", upload)
         + preset_block("release-review", "release/review.sh", review)
         + preset_block("gate-smoke", "gate.sh")
+        + version
     )
 
 
@@ -337,6 +383,7 @@ review = "release-review"
 gate = "gate-smoke"
 qa = "scenario-qa"
 dev = "deploy-dev"
+version = "release-version"
 [[repos.app.release.secrets]]
 name = "AuthKey.p8"
 kind = "file"
@@ -366,7 +413,8 @@ def test_check_row_is_ok_when_every_role_and_secret_is_in_place(srv, env, tmp_pa
     assert status == "ok"
     assert detail.startswith(
         "plan=release-plan upload=release-upload review=release-review gate=gate-smoke "
-        "qa=scenario-qa dev=deploy-dev · driver=scripts/release/product_release.sh · 1 secret(s)"
+        "qa=scenario-qa dev=deploy-dev version=release-version "
+        "· driver=scripts/release/product_release.sh · 1 secret(s)"
     ), detail
 
 
@@ -391,6 +439,7 @@ def test_check_row_warns_about_unset_optional_roles_and_a_missing_secrets_dir(
         "plan=release-plan upload=release-upload review=release-review · 1 secret(s)"
     )
     assert "dev not configured" in detail
+    assert "version not configured" in detail  # 선택 역할 — 없으면 새 버전 만들기가 즉시 editing
     assert f"secrets dir {tmp_path / 'secrets' / 'app'} does not exist yet" in detail, detail
 
 
@@ -463,6 +512,113 @@ def test_check_row_fails_on_secrets_without_env_and_on_duplicate_names(srv, env,
     assert status == "FAIL"
     assert "duplicate secret name(s): K" in detail, detail
     assert "secrets_dir_env is required when secrets are listed" in detail, detail
+
+
+@pytest.mark.parametrize("bad_default", ["create", "delete"])
+def test_check_row_fails_when_the_version_preset_does_not_default_to_prefill(
+    srv, env, tmp_path, capsys, bad_default
+):
+    """AC-A2: create 는 스토어에 드래프트를 만들고 delete 는 되돌릴 수 없다 — 기본은 읽기 전용
+    prefill 이어야 하고, FAIL 문구가 «prefill» 을 말한다."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(version_mode=bad_default))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 1, out + err
+    status, detail = release_row(out)
+    assert status == "FAIL"
+    assert (
+        f"preset 'release-version' input 'mode' defaults to {bad_default!r} — "
+        "it must default to 'prefill' (the read-only mode)"
+    ) in detail, detail
+
+
+def test_check_row_fails_when_the_version_preset_lacks_the_four_inputs(srv, env, tmp_path, capsys):
+    """서버 단계는 이 이름 넷을 그대로 보낸다 — 하나라도 없으면 제출이 튕긴다."""
+    env(srv)
+    bare = presets().replace(version_inputs(), "")
+    cfg = write_config(tmp_path, GOOD_PROFILE, bare)
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 1, out + err
+    status, detail = release_row(out)
+    assert status == "FAIL"
+    assert (
+        "preset 'release-version' lacks inputs rcm sends: "
+        "mode, ios_version, android_version, asc_version_id"
+    ) in detail, detail
+
+
+def test_check_row_warns_once_per_preset_without_listing_json(srv, env, tmp_path, capsys):
+    """AC-A2: review/upload 에 `listing_json` 이 없으면 warn — 웹에서 편집한 문안이 스크립트에
+    닿지 않는다. FAIL 은 아니다(옛 프로젝트도 스토어 탭은 열린다)."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(listing_json=False))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "warn"
+    for name in ("release-review", "release-upload"):
+        assert (
+            f"preset '{name}' has no listing_json input — copy edited in the web UI "
+            "will not reach it (re-run /rcm-store-connect)"
+        ) in detail, detail
+    assert detail.count("listing_json") == 2, detail
+    # 프리셋 하나만 고치면 그 경고만 사라진다
+    half = presets(listing_json=False).replace(
+        choice("platform", ["both", "ios", "android"], "both") + "]\n",
+        choice("platform", ["both", "ios", "android"], "both") + LISTING_JSON + "]\n",
+        1,
+    )
+    cfg = write_config(tmp_path, GOOD_PROFILE, half)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    status, detail = release_row(out)
+    assert status == "warn" and "preset 'release-upload' has no listing_json" not in detail
+    assert "preset 'release-review' has no listing_json" in detail, detail
+
+
+def test_check_row_warns_once_per_preset_without_build_name_android(srv, env, tmp_path, capsys):
+    """워크플랜 §11: 한 회차가 두 스토어에 **서로 다른** 버전 이름으로 나갈 수 있으려면
+    review/upload 프리셋이 `build_name_android` 를 받아야 한다. 없으면 warn 한 줄 — FAIL 은
+    아니다(두 이름을 늘 같게 쓰는 프로젝트는 그대로 두면 된다)."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(build_name_android=False))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "warn"
+    for name in ("release-review", "release-upload"):
+        assert (
+            f"preset '{name}' has no build_name_android input — the two stores must then "
+            "share one version name (re-run /rcm-store-connect)"
+        ) in detail, detail
+    assert detail.count("build_name_android") == 2, detail
+    # 프리셋 하나만 고치면 그 경고만 사라진다
+    half = presets(build_name_android=False).replace(
+        '  { name = "build_name" },\n',
+        '  { name = "build_name" },\n' + BUILD_NAME_ANDROID,
+        1,
+    )
+    cfg = write_config(tmp_path, GOOD_PROFILE, half)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    status, detail = release_row(out)
+    assert status == "warn" and "preset 'release-upload' has no build_name_android" not in detail
+    assert "preset 'release-review' has no build_name_android" in detail, detail
+
+
+def test_check_row_says_nothing_when_both_presets_declare_build_name_android(
+    srv, env, tmp_path, capsys
+):
+    """입력이 있으면 행은 조용하다 — 경고가 나는 쪽만 말한다."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets())
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "ok" and "build_name_android" not in detail, detail
 
 
 def test_check_prints_no_release_row_for_a_repo_without_a_profile(srv, env, tmp_path, capsys):
