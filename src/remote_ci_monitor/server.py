@@ -76,6 +76,7 @@ from remote_ci_monitor.core.model import (
     MODE_GIT_REF,
     MODE_TREE,
     QUEUED,
+    SUCCEEDED,
     TIMED_OUT,
     TOKEN_WORKER,
     UPLOADING,
@@ -154,10 +155,19 @@ from remote_ci_monitor.release_driver import (
 from remote_ci_monitor.release_secrets import SecretError, SecretStore, masker, store_for
 from remote_ci_monitor.release_state import (
     AUTO_BUILD_NUMBER,
+    PLATFORMS,
+    PREFILL_KEYS,
+    artifact_member,
+    listing_diff,
+    live_versions,
+    merged_listing,
+    next_version_hint,
+    parse_doc,
     plan_number,
     read_bundle_member,
     release_view,
     resolve_build_number,
+    version_name_check,
 )
 from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
@@ -165,6 +175,13 @@ from remote_ci_monitor.store import (
     DB_VERSION,
     ROLE_CANCEL_JOB,
     ROLE_LEAVE_SUBMISSION,
+    VERSION_CLOSED_STATES,
+    VERSION_CREATING,
+    VERSION_DISCARDED,
+    VERSION_EDITING,
+    VERSION_FAILED,
+    VERSION_RUNNING,
+    VERSION_SUBMITTED,
     Store,
     TokenInfo,
 )
@@ -201,6 +218,14 @@ _RELEASE_RE = re.compile(
     r"^/api/repos/([^/]+)/release"
     r"(?:/(plan|review|upload|listing|github|driver|start|confirm|abort|retry)(?:/(validate|file))?)?$"
 )
+#: 버전 페이지(docs/version-page-workplan.md §2.2) —
+#: `/api/repos/<repo>/release/versions[/<id>[/listing|/diff]]`.
+_VERSIONS_RE = re.compile(r"^/api/repos/([^/]+)/release/versions(?:/(\d+)(?:/(listing|diff))?)?$")
+#: `PUT …/versions/<id>/listing` — 값 하나의 상한(바이트)과 본문 상한. 문안 필드는 여럿이라
+#: 기본 JSON 본문 상한(64 KB)으로는 모자란다.
+LISTING_VALUE_MAX_BYTES = 16 * 1024
+LISTING_BODY_MAX_BYTES = 256 * 1024
+VERSION_HISTORY_LIMIT = 20
 #: 계약 §2 — 역할별로 rcm 이 보내는 입력. 프리셋이 그 밖에 선언한 입력은 기본값 그대로다.
 RELEASE_MODES = {"upload": ("rehearsal", "upload"), "review": ("plan", "submit")}
 RELEASE_PLATFORMS = ("both", "ios", "android")
@@ -216,6 +241,8 @@ LISTING_TIMEOUT = 20.0
 LISTING_MAX_BYTES = 64 * 1024
 LISTING_FILE_MAX_BYTES = 5 * 1024 * 1024
 LISTING_MAX_SCREENSHOTS = 200
+#: 묶음이 아직 오는 중 — 버전 훅이 기다렸다가 `artifacts_changed` 때 다시 본다
+ART_IN_TRANSIT = frozenset({art.PENDING, art.COLLECTING, art.UPLOADING})
 
 
 def log_line(msg: str) -> None:
@@ -451,6 +478,7 @@ class App(RemoteWorkersMixin):
             if (lost or cancelled)
             else "nothing to recover",
         )
+        self.recover_versions_on_start()
         self.workers = start_workers(
             self.store,
             self.config,
@@ -734,6 +762,7 @@ class App(RemoteWorkersMixin):
                 KIND_JOB_FINISHED,
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
             )
+            self._version_job_finished(job)
         else:
             self.publish(KIND_JOB_CHANGED, {"job_id": job.id, "state": job.state})
 
@@ -1213,7 +1242,8 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, "body must be a JSON object")
         repo, _store = self._release_gate(name)
         preset = self._role_preset(repo, "plan")
-        build_name = self._build_name(body)
+        row = self._version_for_body(repo, body)
+        build_name = self._version_build_name(body, row)
         ref = self._release_ref(body, repo)
         return self._release_submit(repo, preset, {"build_name": build_name}, ref, token, host)
 
@@ -1227,7 +1257,8 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, "body must be a JSON object")
         repo, _store = self._release_gate(name)
         preset = self._role_preset(repo, "review")
-        build_name = self._build_name(body)
+        row = self._version_for_body(repo, body)
+        build_name = self._version_build_name(body, row)
         ref = self._release_ref(body, repo)
         mode = self._choice(body, "mode", RELEASE_MODES["review"], "plan")
         inputs: dict[str, Any] = {"build_name": build_name, "mode": mode}
@@ -1299,7 +1330,11 @@ class App(RemoteWorkersMixin):
             inputs["confirm_build_number"] = str(self._check_plan(view, build_name, typed))
         else:
             inputs["confirm_build_number"] = ""
-        return self._release_submit(repo, preset, inputs, ref, token, host)
+        self._version_inputs(preset, row, inputs)
+        status, doc = self._release_submit(repo, preset, inputs, ref, token, host)
+        if row is not None:
+            self._version_link_review(row, doc["job_id"])
+        return status, doc
 
     def release_upload(
         self, name: str, body: Any, token: TokenInfo, host: str | None
@@ -1310,7 +1345,8 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, "body must be a JSON object")
         repo, _store = self._release_gate(name)
         preset = self._role_preset(repo, "upload")
-        build_name = self._build_name(body)
+        row = self._version_for_body(repo, body)
+        build_name = self._version_build_name(body, row)
         ref = self._release_ref(body, repo)
         mode = self._choice(body, "mode", RELEASE_MODES["upload"], "rehearsal")
         inputs: dict[str, Any] = {"build_name": build_name, "mode": mode}
@@ -1337,7 +1373,663 @@ class App(RemoteWorkersMixin):
             )
         else:
             inputs["confirm_build_number"] = typed.strip()
+        self._version_inputs(preset, row, inputs)
         return self._release_submit(repo, preset, inputs, ref, token, host)
+
+    # ── 버전 드래프트 (버전 페이지 · docs/version-page-workplan.md §2.2) ──────
+
+    @staticmethod
+    def _need_admin(token: TokenInfo, what: str) -> None:
+        if not token.admin:
+            raise ApiError(403, f"{what} needs an admin token", code="admin_required")
+
+    def _version_row(self, repo: RepoConfig, version_id: Any) -> dict[str, Any]:
+        """이 저장소의 행 하나 — 다른 저장소의 번호도 404 다(존재를 말하지 않는다)."""
+        row = None
+        if isinstance(version_id, int) and not isinstance(version_id, bool):
+            row = self.store.get_version(version_id)
+        if row is None or row["repo"] != repo.name:
+            raise ApiError(
+                404,
+                f"no version #{version_id} for repo '{repo.name}'",
+                code="version_not_found",
+                error_code="version_not_found",
+            )
+        return row
+
+    @staticmethod
+    def _version_doc(row: dict[str, Any], key: str) -> dict[str, Any] | None:
+        raw = row.get(key)
+        if not raw:
+            return None
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    @staticmethod
+    def version_build_name(row: dict[str, Any]) -> str:
+        """이 버전의 build_name — iOS 이름, 없으면 Android 이름."""
+        return str(row["ios_version"] or row["android_version"])
+
+    def _version_json(self, row: dict[str, Any], now: datetime) -> dict[str, Any]:
+        """목록 행 · 페이지 머리에 쓰는 공개 모양. 문안 본문은 넣지 않는다(`prefill` · `edited` 는
+        `GET …/versions/<id>` 가)."""
+        prefill = self._version_doc(row, "prefill_json")
+        edited = self._version_doc(row, "edited_json")
+        expires = row["expires_at"]
+        return {
+            "id": row["id"],
+            "repo": row["repo"],
+            "ios_version": row["ios_version"],
+            "android_version": row["android_version"],
+            "build_name": self.version_build_name(row),
+            "state": row["state"],
+            "created_by": row["created_by"],
+            "created_at": iso(row["created_at"]),
+            "last_edit_at": iso(row["last_edit_at"]),
+            "expires_at": iso(expires),
+            "expired": bool(expires is not None and now >= expires),
+            "expiry_warned": row["expiry_warned"],
+            "asc_version_id": row["asc_version_id"],
+            "error": row["error"],
+            "create_job_id": row["create_job_id"],
+            "delete_job_id": row["delete_job_id"],
+            "release_id": row["release_id"],
+            "review_job_id": row["review_job_id"],
+            "has_prefill": prefill is not None,
+            "has_edits": edited is not None,
+            "changed": len(listing_diff(prefill, edited)["fields"]),
+        }
+
+    def _plan_doc(self, repo: RepoConfig) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """최신 계획 항목과 그 문서(객체일 때만)."""
+        plan = self._release_view(repo)["plan"]
+        doc = plan.get("doc") if plan else None
+        return plan, (doc if isinstance(doc, dict) else None)
+
+    def _version_submitted_at(self, row: dict[str, Any]) -> datetime | None:
+        if row["review_job_id"] is not None:
+            job = self.store.get_job(row["review_job_id"])
+            if job is not None and job.finished_at is not None:
+                return job.finished_at
+        if row["release_id"] is not None:
+            rel = self.store.get_release(row["release_id"])
+            if rel is not None and rel["finished_at"] is not None:
+                return rel["finished_at"]
+        return row["last_edit_at"]
+
+    def release_versions(self, name: str) -> dict[str, Any]:
+        """`GET …/release/versions` — 라이브 · 힌트(최신 성공 계획의 문서에서, 웹과 같은 규칙) ·
+        열린 드래프트 전부 · 제출된 것 ≤ 20. 게이트와 무관하고 네트워크를 부르지 않는다."""
+        repo, _store = self._release_repo(name)
+        profile = repo.release
+        assert profile is not None
+        now = self.now_fn()
+        plan, doc = self._plan_doc(repo)
+        rows = self.store.list_versions(repo.name)
+        drafts = [
+            self._version_json(r, now) for r in rows if r["state"] not in VERSION_CLOSED_STATES
+        ]
+        history: list[dict[str, Any]] = []
+        for r in rows:
+            if r["state"] != VERSION_SUBMITTED:
+                continue
+            if len(history) >= VERSION_HISTORY_LIMIT:
+                break
+            history.append(
+                {
+                    "id": r["id"],
+                    "ios": r["ios_version"],
+                    "android": r["android_version"],
+                    "submitted_at": iso(self._version_submitted_at(r)),
+                    "review_job_id": r["review_job_id"],
+                }
+            )
+        return {
+            "live": {
+                **live_versions(doc),
+                "from_plan_job": plan["job_id"] if plan is not None and doc is not None else None,
+            },
+            "hints": next_version_hint(doc),
+            "ttl_hours": profile.version_ttl_hours,
+            "drafts": drafts,
+            "history": history,
+        }
+
+    def release_version_create(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/versions` — admin · 관문 통과. 이름은 하나 이상 · `major.minor.patch` ·
+        라이브보다 큼(라이브를 알 때만) · 같은 이름의 열린 드래프트 없음(409 `version_exists`).
+        `presets.version` 이 있으면 `mode=create` 잡을 내고 202, 없으면 바로 `editing` 으로 201."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        self._need_admin(token, "creating a version")
+        profile = repo.release
+        assert profile is not None
+        names: dict[str, str | None] = {}
+        for platform in PLATFORMS:
+            value = self._body_str(body, f"{platform}_version", default="") or ""
+            names[platform] = value.strip() or None
+        if not any(names.values()):
+            raise ApiError(
+                400,
+                "ios_version or android_version is required",
+                code="empty",
+                error_code="empty",
+            )
+        _plan, doc = self._plan_doc(repo)
+        live = live_versions(doc)
+        for platform in PLATFORMS:
+            candidate = names[platform]
+            if candidate is None:
+                continue
+            ok, reason = version_name_check(candidate, live[platform])
+            if not ok:
+                why = (
+                    f"must be greater than the live version {live[platform]}"
+                    if reason == "not_greater"
+                    else "must look like major.minor.patch"
+                )
+                raise ApiError(
+                    400,
+                    f"{platform}_version {candidate!r} {why}",
+                    code=reason,
+                    error_code=reason,
+                    platform=platform,
+                    live=live[platform],
+                )
+        for row in self.store.list_versions(repo.name, include_closed=False):
+            same = [p for p in PLATFORMS if names[p] and names[p] == row[f"{p}_version"]]
+            if same:
+                raise ApiError(
+                    409,
+                    f"draft #{row['id']} ({self.version_build_name(row)}) already has that "
+                    f"{' and '.join(same)} version and is {row['state']}",
+                    code="version_exists",
+                    error_code="version_exists",
+                    id=row["id"],
+                    state=row["state"],
+                )
+        now = self.now_fn()
+        expires = now + timedelta(hours=profile.version_ttl_hours)
+        kwargs = {
+            "repo": repo.name,
+            "ios_version": names["ios"],
+            "android_version": names["android"],
+            "created_by": token.name,
+            "now": now,
+            "expires_at": expires,
+        }
+        build_name = names["ios"] or names["android"]
+        if profile.preset_for("version"):
+            preset = self._role_preset(repo, "version")
+            inputs = {
+                "mode": "create",
+                "ios_version": names["ios"] or "",
+                "android_version": names["android"] or "",
+            }
+            _status, sub = self._release_submit(
+                repo, preset, inputs, self._release_ref(body, repo), token, host
+            )
+            vid = self.store.create_version(
+                state=VERSION_CREATING, create_job_id=sub["job_id"], **kwargs
+            )
+            self.log(f"version: #{vid} {build_name} creating (job #{sub['job_id']})")
+            return 202, {
+                "id": vid,
+                "job_id": sub["job_id"],
+                "state": VERSION_CREATING,
+                "build_name": build_name,
+            }
+        vid = self.store.create_version(state=VERSION_EDITING, **kwargs)
+        self.log(f"version: #{vid} {build_name} editing (no version preset)")
+        return 201, {"id": vid, "job_id": None, "state": VERSION_EDITING, "build_name": build_name}
+
+    def release_version_view(self, name: str, version_id: int) -> dict[str, Any]:
+        """`GET …/release/versions/<id>` — 행 + `prefill` + `edited` + `diff` + `release`(지금의
+        `/release` 보기에 이 버전의 build_name) + `driver` 보기 + `listing`(파일 미리보기, 폴백용).
+        바텀시트 · 버전 페이지가 이것 하나로 그린다."""
+        repo, _store = self._release_repo(name)
+        row = self._version_row(repo, version_id)
+        now = self.now_fn()
+        prefill = self._version_doc(row, "prefill_json")
+        edited = self._version_doc(row, "edited_json")
+        build_name = self.version_build_name(row)
+        doc = self._version_json(row, now)
+        doc["prefill"] = prefill
+        doc["edited"] = edited
+        doc["diff"] = listing_diff(prefill, edited)
+        doc["release"] = {"build_name": build_name, **self._release_view(repo)}
+        doc["driver"] = self.release_driver_view(name)
+        doc["listing"] = self.release_listing(name, build_name)
+        return doc
+
+    def _version_open(self, row: dict[str, Any]) -> None:
+        if row["state"] in VERSION_CLOSED_STATES:
+            raise ApiError(
+                409,
+                f"version #{row['id']} is {row['state']}",
+                code="version_closed",
+                error_code="version_closed",
+                state=row["state"],
+            )
+
+    def release_version_put_listing(
+        self, name: str, version_id: int, body: Any, token: TokenInfo
+    ) -> dict[str, Any]:
+        """`PUT …/release/versions/<id>/listing` — `{ios: {...}, android: {...}}`. 보낸 키만
+        편집본에 겹친다(칸 하나씩 자동 저장); 값 `null` 은 그 키를 뺀다. 허용 키만, 문자열만, 값
+        하나 ≤ 16 KB. 글자 수 상한(4000자 같은)은 저장하고 카운터가 말한다 — 스토어가 최종
+        판정이다."""
+        repo, _store = self._release_repo(name)
+        self._need_admin(token, "editing the listing")
+        row = self._version_row(repo, version_id)
+        self._version_open(row)
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        unknown = sorted(set(body) - set(PLATFORMS))
+        if unknown:
+            raise ApiError(
+                400,
+                f"unknown platform(s): {', '.join(unknown)} (ios, android)",
+                code="listing_key",
+                error_code="listing_key",
+            )
+        edited = self._version_doc(row, "edited_json") or {}
+        for platform in PLATFORMS:
+            if platform not in body:
+                continue
+            part = body[platform]
+            if part is None:
+                edited.pop(platform, None)
+                continue
+            if not isinstance(part, dict):
+                raise ApiError(400, f"{platform} must be an object of fields")
+            bad = sorted(set(part) - set(PREFILL_KEYS[platform]))
+            if bad:
+                raise ApiError(
+                    400,
+                    f"{platform}: unknown field(s): {', '.join(bad)}",
+                    code="listing_key",
+                    error_code="listing_key",
+                    platform=platform,
+                    allowed=list(PREFILL_KEYS[platform]),
+                )
+            current = dict(edited.get(platform) or {})
+            for key, value in part.items():
+                if value is None:
+                    current.pop(key, None)
+                    continue
+                if not isinstance(value, str):
+                    raise ApiError(400, f"{platform}.{key} must be a string")
+                if len(value.encode("utf-8")) > LISTING_VALUE_MAX_BYTES:
+                    raise ApiError(
+                        400,
+                        f"{platform}.{key} is larger than {LISTING_VALUE_MAX_BYTES // 1024} KB",
+                        code="listing_too_large",
+                        error_code="listing_too_large",
+                        platform=platform,
+                        key=key,
+                    )
+                current[key] = value
+            if current:
+                edited[platform] = current
+            else:
+                edited.pop(platform, None)
+        now = self.now_fn()
+        self.store.update_version(
+            row["id"],
+            edited_json=json.dumps(edited, ensure_ascii=False) if edited else None,
+            last_edit_at=now,
+        )
+        prefill = self._version_doc(row, "prefill_json")
+        return {
+            "id": row["id"],
+            "state": row["state"],
+            "edited": edited or None,
+            "last_edit_at": iso(now),
+            "diff": listing_diff(prefill, edited),
+        }
+
+    def release_version_diff(self, name: str, version_id: int) -> dict[str, Any]:
+        """`GET …/release/versions/<id>/diff` — 편집본과 이전 문안의 차이(바뀐 필드만)."""
+        repo, _store = self._release_repo(name)
+        row = self._version_row(repo, version_id)
+        return listing_diff(
+            self._version_doc(row, "prefill_json"), self._version_doc(row, "edited_json")
+        )
+
+    def release_version_discard(
+        self, name: str, version_id: int, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`DELETE …/release/versions/<id>` — «버리기». submitted 는 409 `version_closed`, 회차나
+        심사 잡이 도는 중이면 409 `version_running`. ASC 버전이 있고 `presets.version` 이 있으면
+        `mode=delete` 잡을 내고 202(잡이 0 으로 끝나면 `discarded`), 아니면 즉시 `discarded` 200.
+        이미 버린 행은 200 그대로."""
+        repo, _store = self._release_repo(name)
+        self._need_admin(token, "discarding a version")
+        row = self._version_row(repo, version_id)
+        return self.discard_version(repo, row, token, host)
+
+    def discard_version(
+        self, repo: RepoConfig, row: dict[str, Any], token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """«버리기» 의 본체 — 라우트와 청소기가 같은 길을 쓴다(권한은 호출자가 봤다)."""
+        profile = repo.release
+        assert profile is not None
+        if row["state"] == VERSION_SUBMITTED:
+            raise ApiError(
+                409,
+                f"version #{row['id']} was submitted for review — it cannot be discarded",
+                code="version_closed",
+                error_code="version_closed",
+                state=row["state"],
+            )
+        if row["state"] == VERSION_DISCARDED:
+            return 200, {"id": row["id"], "job_id": None, "state": VERSION_DISCARDED}
+        if row["state"] == VERSION_RUNNING:
+            raise ApiError(
+                409,
+                f"version #{row['id']} has a round or review job running — wait for it",
+                code="version_running",
+                error_code="version_running",
+                release_id=row["release_id"],
+                review_job_id=row["review_job_id"],
+            )
+        if row["state"] == VERSION_CREATING and row["create_job_id"] is not None:
+            job = self.store.get_job(row["create_job_id"])
+            if job is not None and not job.is_terminal:
+                raise ApiError(
+                    409,
+                    f"version #{row['id']} is still being created (job #{job.id})",
+                    code="version_running",
+                    error_code="version_running",
+                    job_id=job.id,
+                )
+        if row["delete_job_id"] is not None:
+            job = self.store.get_job(row["delete_job_id"])
+            if job is not None and not job.is_terminal:
+                return 202, {"id": row["id"], "job_id": job.id, "state": row["state"]}
+        if row["asc_version_id"] and profile.preset_for("version"):
+            self._release_gate(repo.name)
+            preset = self._role_preset(repo, "version")
+            inputs = {
+                "mode": "delete",
+                "asc_version_id": row["asc_version_id"],
+                "ios_version": row["ios_version"] or "",
+                "android_version": row["android_version"] or "",
+            }
+            _status, sub = self._release_submit(
+                repo, preset, inputs, profile.default_branch, token, host
+            )
+            self.store.update_version(row["id"], delete_job_id=sub["job_id"], error=None)
+            self.log(
+                f"version: #{row['id']} {self.version_build_name(row)} deleting in the store "
+                f"(job #{sub['job_id']})"
+            )
+            return 202, {"id": row["id"], "job_id": sub["job_id"], "state": row["state"]}
+        self.store.update_version(row["id"], state=VERSION_DISCARDED)
+        self.log(f"version: #{row['id']} {self.version_build_name(row)} discarded")
+        return 200, {"id": row["id"], "job_id": None, "state": VERSION_DISCARDED}
+
+    # ── 버전 ↔ plan · review · upload · start 의 `version_id` ────────────────
+
+    def _version_for_body(self, repo: RepoConfig, body: dict[str, Any]) -> dict[str, Any] | None:
+        """본문의 `version_id`(선택) → 행. 닫힌(submitted · discarded) 버전은 409
+        `version_closed`."""
+        vid = body.get("version_id")
+        if vid is None:
+            return None
+        if isinstance(vid, bool) or not isinstance(vid, int) or vid < 1:
+            raise ApiError(400, "version_id must be a positive integer")
+        row = self._version_row(repo, vid)
+        self._version_open(row)
+        return row
+
+    def _version_build_name(self, body: dict[str, Any], row: dict[str, Any] | None) -> str:
+        """행이 있으면 build_name 은 행의 것 — 본문이 다른 이름을 말하면 400
+        `build_name_mismatch`."""
+        if row is None:
+            return self._build_name(body)
+        name = self.version_build_name(row)
+        typed = self._body_str(body, "build_name")
+        if typed and typed != name:
+            raise ApiError(
+                400,
+                f"build_name {typed!r} does not match version #{row['id']} ({name})",
+                code="build_name_mismatch",
+                error_code="build_name_mismatch",
+                build_name=name,
+            )
+        return name
+
+    def _version_inputs(
+        self, preset: Preset, row: dict[str, Any] | None, inputs: dict[str, Any]
+    ) -> None:
+        """버전 드래프트가 붙은 review · upload 잡에 얹는 입력 둘 — 웹에서 고친 문안과 두 번째
+        스토어의 버전 이름. 얹을 것이 없으면 오늘과 똑같은 입력이다."""
+        listing_json = self._listing_json_input(preset, row)
+        if listing_json is not None:
+            inputs["listing_json"] = listing_json
+        android = self._build_name_android_input(preset, row)
+        if android is not None:
+            inputs["build_name_android"] = android
+
+    @staticmethod
+    def _build_name_android_input(preset: Preset, row: dict[str, Any] | None) -> str | None:
+        """review · upload 의 `build_name_android`(워크플랜 §11 · 계약 §2 「Two store version
+        names」) — 한 회차가 두 스토어에 **서로 다른** 이름으로 나갈 때만 보낸다. 이름이 같거나
+        한 스토어만 만드는 버전이면 오늘과 똑같이 `build_name` 하나다(None). 두 이름이 다른데
+        프리셋이 그 입력을 모르면 409 `split_version_unsupported` — 조용히 한쪽 이름으로
+        빌드하지 않는다."""
+        if row is None:
+            return None
+        ios, android = row["ios_version"], row["android_version"]
+        if not ios or not android or ios == android:
+            return None
+        if preset.input_spec("build_name_android") is None:
+            raise ApiError(
+                409,
+                f"version #{row['id']} has different store version names (iOS {ios} · "
+                f"Android {android}) and preset '{preset.name}' has no build_name_android input; "
+                "re-run the store-connect skill to add it, or give both stores one name",
+                code="split_version_unsupported",
+                error_code="split_version_unsupported",
+                preset=preset.name,
+                ios_version=ios,
+                android_version=android,
+            )
+        return str(android)
+
+    def _listing_json_input(self, preset: Preset, row: dict[str, Any] | None) -> str | None:
+        """review · upload 의 `listing_json` — 편집본이 있고 이전 문안과 다를 때만(edited ⊕
+        prefill). 프리셋에 그 입력이 없으면 409 `listing_json_unsupported` — 편집이 조용히
+        버려지지 않게."""
+        if row is None:
+            return None
+        prefill = self._version_doc(row, "prefill_json")
+        edited = self._version_doc(row, "edited_json")
+        if not edited or not listing_diff(prefill, edited)["fields"]:
+            return None
+        if preset.input_spec("listing_json") is None:
+            raise ApiError(
+                409,
+                f"preset '{preset.name}' has no listing_json input — the edited listing cannot "
+                "be passed on; re-run the store-connect skill to add it",
+                code="listing_json_unsupported",
+                error_code="listing_json_unsupported",
+                preset=preset.name,
+            )
+        return json.dumps(merged_listing(prefill, edited), ensure_ascii=False)
+
+    def _version_link_review(self, row: dict[str, Any], job_id: int) -> None:
+        """심사 잡을 행에 붙인다 — `editing` 이었으면 `running`(잡이 끝나면 훅이 되돌린다)."""
+        fields: dict[str, Any] = {"review_job_id": int(job_id)}
+        if row["state"] == VERSION_EDITING:
+            fields["state"] = VERSION_RUNNING
+        self.store.update_version(row["id"], **fields)
+
+    def _version_link_release(self, version_id: int, release_id: int) -> None:
+        row = self.store.get_version(version_id)
+        if row is None or row["state"] in VERSION_CLOSED_STATES:
+            return
+        fields: dict[str, Any] = {"release_id": int(release_id)}
+        if row["state"] == VERSION_EDITING:
+            fields["state"] = VERSION_RUNNING
+        self.store.update_version(version_id, **fields)
+
+    def _version_of_release(self, repo: RepoConfig, release_id: int | None) -> int | None:
+        """이 회차(대장 행)에 붙은 열린 버전 — confirm · abort · retry 가 같은 버전으로 잇는다."""
+        if release_id is None:
+            return None
+        for row in self.store.list_versions(repo.name, include_closed=False):
+            if row["release_id"] == release_id:
+                return row["id"]
+        return None
+
+    # ── 버전 잡 완료 훅 · 기동 복구 ─────────────────────────────────────────
+
+    def _bundle_doc(
+        self, job_id: int, bundle: dict[str, Any] | None, basename: str
+    ) -> dict[str, Any] | None:
+        """묶음의 `<basename>`(어디에 있든) → JSON 객체. 없거나 못 읽으면 None."""
+        if bundle is None or bundle["state"] != art.READY:
+            return None
+        member = artifact_member(bundle.get("files") or [], basename)
+        if member is None:
+            return None
+        try:
+            doc, _error = parse_doc(self._read_artifact(job_id, member))
+        except (OSError, KeyError, ValueError, tarfile.TarError):
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    @staticmethod
+    def _version_job_error(job: Job, doc: dict[str, Any] | None) -> str:
+        """행의 `error` — 잡 번호 · 상태 · 종료 코드, 계약의 코드 뜻(3 이미 있음 · 4 삭제 불가 · 2
+        환경), 산출물의 `error` 문장."""
+        code = job.exit_code
+        head = f"job #{job.id} {job.state}" + (f" (exit {code})" if code is not None else "")
+        meaning = {
+            2: "environment problem",
+            3: "a version with that name already exists in the store",
+            4: "cannot be deleted — the version was submitted in the store",
+        }.get(code if isinstance(code, int) else -1)
+        text = doc.get("error") if doc else None
+        text = text.strip() if isinstance(text, str) and text.strip() else None
+        return " — ".join(p for p in (head, meaning, text) if p)
+
+    def _version_job_finished(self, job: Job) -> None:
+        """잡 완료 훅 — 이 잡을 만들기 · 지우기 · 심사로 링크한 버전 행을 갱신한다. 묶음이 아직
+        오는 중이면(원격 워커) `artifacts_changed` 때 다시 온다. 잡 경로를 절대 깨지 않는다."""
+        try:
+            row = self.store.version_for_job(job.id)
+            if row is None:
+                return
+            bundle = self.store.get_bundle(job.id)
+            if bundle is not None and bundle["state"] in ART_IN_TRANSIT:
+                return
+            if row["create_job_id"] == job.id and row["state"] == VERSION_CREATING:
+                self._version_create_finished(row, job, bundle)
+            elif (
+                row["delete_job_id"] == job.id
+                and row["state"] not in VERSION_CLOSED_STATES
+                and row["error"] is None
+            ):
+                self._version_delete_finished(row, job, bundle)
+            elif row["review_job_id"] == job.id and row["state"] == VERSION_RUNNING:
+                self._version_review_finished(row, job)
+        except Exception as e:  # noqa: BLE001 — 훅의 사고가 잡 경로를 막으면 안 된다
+            self.log(f"version: hook for job #{job.id} failed: {_safe(_error_text(e))}")
+
+    def _version_create_finished(
+        self, row: dict[str, Any], job: Job, bundle: dict[str, Any] | None
+    ) -> None:
+        version = self._bundle_doc(job.id, bundle, "version.json")
+        prefill = self._bundle_doc(job.id, bundle, "prefill.json")
+        name = self.version_build_name(row)
+        if job.state == SUCCEEDED and job.exit_code == 0 and version is not None:
+            ios = version.get("ios") if isinstance(version.get("ios"), dict) else {}
+            asc = ios.get("asc_version_id")
+            asc = asc.strip() if isinstance(asc, str) and asc.strip() else None
+            self.store.update_version(
+                row["id"],
+                state=VERSION_EDITING,
+                asc_version_id=asc,
+                prefill_json=json.dumps(prefill, ensure_ascii=False) if prefill else None,
+                error=None,
+            )
+            self.log(f"version: #{row['id']} {name} created (job #{job.id}, asc {asc or '—'})")
+            return
+        error = self._version_job_error(job, version)
+        self.store.update_version(row["id"], state=VERSION_FAILED, error=error)
+        self.log(f"version: #{row['id']} {name} failed — {error}")
+
+    def _version_delete_finished(
+        self, row: dict[str, Any], job: Job, bundle: dict[str, Any] | None
+    ) -> None:
+        name = self.version_build_name(row)
+        if job.state == SUCCEEDED and job.exit_code == 0:
+            self.store.update_version(row["id"], state=VERSION_DISCARDED, error=None)
+            self.log(f"version: #{row['id']} {name} discarded (job #{job.id})")
+            return
+        error = self._version_job_error(job, self._bundle_doc(job.id, bundle, "version.json"))
+        fields: dict[str, Any] = {"error": error}
+        if row["state"] == VERSION_CREATING:
+            fields["state"] = VERSION_EDITING
+        self.store.update_version(row["id"], **fields)
+        self.log(f"version: #{row['id']} {name} not deleted — {error}")
+
+    def _version_review_finished(self, row: dict[str, Any], job: Job) -> None:
+        submitted = (
+            job.state == SUCCEEDED and job.exit_code == 0 and job.inputs.get("mode") == "submit"
+        )
+        state = VERSION_SUBMITTED if submitted else VERSION_EDITING
+        self.store.update_version(row["id"], state=state)
+        self.log(f"version: #{row['id']} review job #{job.id} {job.state} → {state}")
+
+    def recover_versions_on_start(self) -> None:
+        """서버 재시작 복구(워크플랜 §2.3) — `creating` 인데 잡이 이미 끝났으면 완료 훅을 다시
+        적용하고, `running` 인데 심사 잡도 회차도 없으면 `editing` 으로."""
+        for row in self.store.list_versions():
+            try:
+                self._recover_version(row)
+            except Exception as e:  # noqa: BLE001 — 한 행의 사고가 기동을 막으면 안 된다
+                self.log(f"version: recovery of #{row['id']} failed: {_safe(_error_text(e))}")
+
+    def _recover_version(self, row: dict[str, Any]) -> None:
+        if row["state"] in VERSION_CLOSED_STATES:
+            return
+        for key in ("create_job_id", "delete_job_id", "review_job_id"):
+            job_id = row[key]
+            if job_id is None:
+                continue
+            job = self.store.get_job(job_id)
+            if job is None:
+                if key == "create_job_id" and row["state"] == VERSION_CREATING:
+                    error = f"create job #{job_id} is gone"
+                    self.store.update_version(row["id"], state=VERSION_FAILED, error=error)
+                    self.log(f"version: #{row['id']} failed on restart — {error}")
+                continue
+            if job.is_terminal:
+                self._version_job_finished(job)
+        row = self.store.get_version(row["id"]) or row
+        if row["state"] != VERSION_RUNNING:
+            return
+        review = self.store.get_job(row["review_job_id"]) if row["review_job_id"] else None
+        if review is not None and not review.is_terminal:
+            return
+        if row["release_id"] is not None:
+            self.driver.reconcile(row["repo"], data_dir=self.config.data_dir)
+            running = self.driver.running(row["repo"])
+            if running is not None and running["id"] == row["release_id"]:
+                return
+        self.store.update_version(row["id"], state=VERSION_EDITING)
+        self.log(f"version: #{row['id']} was running with nothing running → editing")
 
     # ── 문안 미리보기 · GitHub · 드라이버 — default_branch 체크아웃 위에서 ──
 
@@ -1621,6 +2313,9 @@ class App(RemoteWorkersMixin):
             raise ApiError(
                 502, f"driver could not start: {type(e).__name__}", code="driver_failed"
             ) from e
+        version_id = kw.get("version_id")
+        if version_id is not None:
+            self._version_link_release(int(version_id), row["id"])
         return {"release_id": row["id"], "pid": row["pid"], "build_name": row["build_name"]}
 
     def release_start(
@@ -1629,7 +2324,8 @@ class App(RemoteWorkersMixin):
         if not isinstance(body, dict):
             raise ApiError(400, "body must be a JSON object")
         repo, store, driver = self._driver_repo(name)
-        build_name = self._build_name(body)
+        row = self._version_for_body(repo, body)
+        build_name = self._version_build_name(body, row)
         track = self._body_str(body, "android_track")
         if track is not None and not _TRACK_RE.match(track):
             raise ApiError(400, "android_track must be a plain track name")
@@ -1647,6 +2343,7 @@ class App(RemoteWorkersMixin):
             android_track=track,
             dry_run=dry_run,
             auto_n=self._auto_n(body),
+            version_id=row["id"] if row is not None else None,
         )
 
     @staticmethod
@@ -1664,22 +2361,37 @@ class App(RemoteWorkersMixin):
     def _driver_exited(self, row: dict[str, Any]) -> None:
         """드라이버 실행이 끝난 뒤(감시 스레드). «자동» 으로 시작한 start · retry 가 exit 2 로
         번호를 물었으면 로그의 마지막 `plan: N` 을 `--confirm-build-number` 로 이어 준다. 번호가
-        없으면 사람 차례 그대로 둔다. confirm 이 또 2 로 끝나면 잇지 않는다(무한 되풀이 방지)."""
+        없으면 사람 차례 그대로 둔다. confirm 이 또 2 로 끝나면 잇지 않는다(무한 되풀이 방지).
+        이 회차가 버전 드래프트의 것이면 이어진 회차로 옮기거나, 끝났으니 `editing` 으로
+        되돌린다."""
+        linked = self.store.version_for_release(row["id"])
+        version_id = linked["id"] if linked is not None else None
+        continued = self._auto_confirm(row, version_id)
+        if linked is None:
+            return
+        if continued is not None:
+            self.store.update_version(linked["id"], release_id=continued)
+        else:
+            self.store.update_version(linked["id"], state=VERSION_EDITING)
+            self.log(f"version: #{linked['id']} round #{row['id']} ended → editing")
+
+    def _auto_confirm(self, row: dict[str, Any], version_id: int | None) -> int | None:
+        """«빌드 번호 자동» 의 이어 달리기 — 새 confirm 회차의 번호, 잇지 않으면 None."""
         if row.get("exit_code") != 2 or not row.get("auto_n"):
-            return
+            return None
         if row.get("kind") not in (KIND_START, KIND_RETRY):
-            return
+            return None
         n = plan_n(Path(row["log_path"]))
         if n is None:
             self.log(f"driver: #{row['id']} auto build number — no plan: N line, a person's turn")
-            return
+            return None
         repo = self.config.repo(row["repo"])
         profile = repo.release if repo is not None else None
         if repo is None or profile is None or not profile.driver:
-            return
+            return None
         store = store_for(self.config, repo.name)
         if store is None:
-            return
+            return None
         token = TokenInfo(f"{row['started_by']} (auto)", True, self.now_fn())
         try:
             res = self._spawn_driver(
@@ -1694,11 +2406,13 @@ class App(RemoteWorkersMixin):
                 dry_run=bool(row["dry_run"]),
                 confirm_n=n,
                 auto_n=True,
+                version_id=version_id,
             )
         except ApiError as e:
             self.log(f"driver: #{row['id']} auto build number {n} not confirmed: {e.message}")
-            return
+            return None
         self.log(f"driver: #{row['id']} auto build number {n} → confirm #{res['release_id']}")
+        return int(res["release_id"])
 
     def release_confirm(
         self, name: str, body: Any, token: TokenInfo, host: str | None
@@ -1740,6 +2454,7 @@ class App(RemoteWorkersMixin):
             dry_run=last["dry_run"],
             confirm_n=resolved,
             auto_n=bool(last.get("auto_n")),
+            version_id=self._version_of_release(repo, last["id"]),
         )
 
     def release_abort_or_retry(
@@ -1772,6 +2487,7 @@ class App(RemoteWorkersMixin):
             android_track=prev["android_track"] if prev else None,
             dry_run=bool(prev["dry_run"]) if prev else False,
             auto_n=bool(prev.get("auto_n")) if prev else False,
+            version_id=self._version_of_release(repo, prev["id"]) if prev else None,
         )
 
     def release_driver_view(self, name: str) -> dict[str, Any]:
@@ -1984,6 +2700,14 @@ class App(RemoteWorkersMixin):
         """`artifacts_changed` — `_publish_job` 을 쓰면 끝난 잡에 `job_finished` 가 다시 나간다."""
         self._mark_dirty()
         self.publish("artifacts_changed", {"job_id": int(job_id), "state": state})
+        if state not in ART_IN_TRANSIT:
+            # 원격 워커의 잡은 끝난 뒤에 묶음이 온다 — 버전 훅은 그때 산출물을 읽는다
+            try:
+                job = self.store.get_job(int(job_id))
+            except Exception:  # noqa: BLE001
+                job = None
+            if job is not None and job.is_terminal:
+                self._version_job_finished(job)
 
     def ack_artifacts(self, job_id: int, token: TokenInfo, body: Any) -> dict[str, Any]:
         """확인(ack). 자격자가 「다 받아서 트리에 썼다」고 말하는 자리다(§7)."""
@@ -3553,6 +4277,10 @@ class Handler(BaseHTTPRequestHandler):
             self._no_worker_token()
             self._send_json(200, self.app.repos_list())
             return
+        m = _VERSIONS_RE.match(path)
+        if m:
+            self._versions_route(method, m.group(1), m.group(2), m.group(3))
+            return
         m = _RELEASE_RE.match(path)
         if m:
             self._release_route(method, m.group(1), m.group(2), m.group(3), query)
@@ -3774,6 +4502,55 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(202, self.app.release_confirm(name, body, t, host))
         else:
             self._send_json(202, self.app.release_abort_or_retry(name, body, t, host, kind=action))
+
+    def _versions_route(self, method: str, name: str, vid: str | None, sub: str | None) -> None:
+        """`/api/repos/<name>/release/versions[/<id>[/listing|/diff]]`(버전 페이지) — GET 은 읽기
+        규칙(워커 토큰 거부), POST · PUT · DELETE 는 admin(Bearer 만). 403 `admin_required`."""
+        host = self.headers.get("Host")
+        version_id = int(vid) if vid is not None else None
+
+        def read() -> None:
+            self._read_only_ok()
+            self._no_worker_token()
+
+        def write() -> TokenInfo:
+            return self.app.require_client_token(self._token())
+
+        if version_id is None:
+            if method == "GET":
+                read()
+                self._send_json(200, self.app.release_versions(name))
+            elif method == "POST":
+                t = write()
+                status, body = self.app.release_version_create(name, self._json_body(), t, host)
+                self._send_json(status, body)
+            else:
+                raise ApiError(
+                    405, "method not allowed; use GET or POST", headers={"Allow": "GET, POST"}
+                )
+            return
+        if sub is None:
+            if method == "GET":
+                read()
+                self._send_json(200, self.app.release_version_view(name, version_id))
+            elif method == "DELETE":
+                t = write()
+                status, body = self.app.release_version_discard(name, version_id, t, host)
+                self._send_json(status, body)
+            else:
+                raise ApiError(
+                    405, "method not allowed; use GET or DELETE", headers={"Allow": "GET, DELETE"}
+                )
+            return
+        if sub == "listing":
+            self._only(method, "PUT")
+            t = write()
+            body = self._json_body(limit=LISTING_BODY_MAX_BYTES)
+            self._send_json(200, self.app.release_version_put_listing(name, version_id, body, t))
+            return
+        self._only(method, "GET")
+        read()
+        self._send_json(200, self.app.release_version_diff(name, version_id))
 
     def _artifact_archive(self, job_id: int) -> None:
         """묶음을 흘려보낸다. 전송 슬롯은 **기다리지 않는다** — 일반 슬롯을 쥔 채 기다리면

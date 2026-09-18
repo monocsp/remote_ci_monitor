@@ -100,3 +100,24 @@ def test_parse_kv():
     assert parse_kv(["a=1", "b=x=y"]) == {"a": "1", "b": "x=y"}
     with pytest.raises(InputError):
         parse_kv(["novalue"])
+
+
+def test_listing_json_takes_a_long_value_and_other_strings_still_do_not():
+    """`listing_json`(스토어 문안 편집본 · 버전 페이지 Q4)은 JSON 한 덩어리라 64 K 자까지. 이름이
+    다른 문자열 입력은 그대로 256 자 — 상한을 통째로 올리지 않는다."""
+    preset = Preset(
+        name="review",
+        argv=("sh",),
+        inputs=(
+            InputSpec(name="listing_json", type="string", default=""),
+            InputSpec(name="note", type="string", default=""),
+        ),
+    )
+    blob = '{"ios": {"description": "' + "가" * 20_000 + '"}}'
+    assert validate_inputs(preset, {"listing_json": blob})["listing_json"] == blob
+    with pytest.raises(InputError) as e:
+        validate_inputs(preset, {"listing_json": "x" * (64 * 1024 + 1)})
+    assert "longer than 65536" in str(e.value)
+    with pytest.raises(InputError) as e:
+        validate_inputs(preset, {"note": "x" * 257})
+    assert "longer than 256" in str(e.value)

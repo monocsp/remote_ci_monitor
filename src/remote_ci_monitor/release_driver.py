@@ -78,9 +78,13 @@ def driver_argv(
     android_track: str | None = None,
     dry_run: bool = False,
     confirm_n: int | None = None,
+    version_id: int | None = None,
 ) -> list[str]:
-    """계약 §5 의 명령줄. 되돌릴 수 없는 단계의 확인 번호는 사람이 친 것만 들어간다."""
+    """계약 §5 의 명령줄. 되돌릴 수 없는 단계의 확인 번호는 사람이 친 것만 들어간다.
+    `version_id` 는 버전 페이지에서 시작한 회차 — 드라이버가 `V` 단계에서 이름을 서버에 묻는다."""
     argv = [str(driver), "--build-name", build_name]
+    if version_id is not None:
+        argv += ["--version-id", str(int(version_id))]
     if android_track:
         argv += ["--android-track", android_track]
     if dry_run:
@@ -203,6 +207,7 @@ class DriverRunner:
         dry_run: bool = False,
         confirm_n: int | None = None,
         auto_n: bool = False,
+        version_id: int | None = None,
     ) -> dict[str, Any]:
         """대장에 행을 열고 내부 토큰을 발급해 드라이버를 띄운다. 돌려주는 행에는 pid 가 있다.
         띄우지 못하면 행을 닫고(exit_code None) 토큰을 폐기한 뒤 `OSError` 를 올린다."""
@@ -234,6 +239,7 @@ class DriverRunner:
             android_track=android_track,
             dry_run=dry_run,
             confirm_n=confirm_n,
+            version_id=version_id,
         )
         exit_file = self.exit_path(data_dir, repo, release_id)
         with contextlib.suppress(OSError):

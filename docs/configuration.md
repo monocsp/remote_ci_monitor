@@ -309,6 +309,12 @@ keeps its default. Writes take a Bearer token only.
 | `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
 | `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
 | `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
+| `GET …/release/versions` | read rule, always | the store version drafts of this repository: `{live: {ios, android, from_plan_job}, hints: {ios, android}, ttl_hours, drafts[], history[]}`. `live` comes from the latest succeeded plan's `store.asc_live` and `store.play.production_name`; `hints` is that document's `next_version_hint` or, failing that, each live name with its last integer + 1 (unknown stays `null`). `drafts[]` is every open draft, newest first; `history[]` the last 20 submitted ones (`{id, ios, android, submitted_at, review_job_id}`). A draft row is `{id, repo, ios_version, android_version, build_name, state, created_by, created_at, last_edit_at, expires_at, expired, expiry_warned, asc_version_id, error, create_job_id, delete_job_id, release_id, review_job_id, has_prefill, has_edits, changed}` — `state` is `creating`, `editing`, `running`, `submitted`, `discarded` or `failed`; `build_name` is the iOS name, or the Android one when there is no iOS name; `changed` counts the edited listing fields |
+| `POST …/release/versions` | admin | `{ios_version?, android_version?, ref?}` → opens a draft. At least one name, each `major.minor.patch` and greater than that store's live name when the plan knows it. With a `version` preset it submits that preset with `mode = create` → `202 {id, job_id, state: "creating", build_name}`; without one the draft is `editing` at once → `201 {id, job_id: null, state, build_name}`. The job's `version.json` and `prefill.json` then fill `asc_version_id` and the prefilled listing; a failure leaves the row `failed` with an `error` sentence |
+| `GET …/release/versions/<id>` | read rule, always | one draft — the row above plus `prefill`, `edited`, `diff` (the shape of `…/diff`), `release` (the `GET …/release` document with this version's `build_name`), `driver` (the `GET …/release/driver` document) and `listing` (the `GET …/release/listing` document for this `build_name`). One request draws a whole version page |
+| `PUT …/release/versions/<id>/listing` | admin | `{ios?: {…}, android?: {…}}` — only the field names the contract's `prefill.json` uses, strings only, 16 KB each and 256 KB of body. Only the fields in the body change; `null` removes one and a platform set to `null` removes it whole → `{id, state, edited, last_edit_at, diff}`. Character limits are **not** enforced here: the value is saved and the page's counter says so, because the store has the last word |
+| `GET …/release/versions/<id>/diff` | read rule, always | `{fields: [{platform, key, old, new}…], screenshots: {ios, android}}` — only the fields whose value differs from the prefill, ignoring surrounding whitespace and `\r\n` against `\n`. `screenshots` is `same` (the prefill knows that platform) or `n/a`; uploading one is not in this build |
+| `DELETE …/release/versions/<id>` | admin | discards the draft. With an `asc_version_id` and a `version` preset it submits `mode = delete` → `202 {id, job_id, state}`, and the row becomes `discarded` when that job exits 0; otherwise the row is `discarded` at once → `200 {id, job_id: null, state}` |
 | `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `listing.ref` (default `default_branch`) made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` |
 | `GET …/release/listing/file?path=<rel>` | read rule, always | the bytes of one screenshot — the path must match a `listing.screenshots` glob and be an image type; 5 MB at most (413) |
 | `POST …/release/listing/validate` | client token | `{build_name, build?}` → runs `listing.validate` with `{version}` and `{build}` substituted → `{ok, lines[], exit}` (plus `error` when it failed to run) |
@@ -317,6 +323,19 @@ keeps its default. Writes take a Bearer token only.
 | `POST …/release/confirm` | admin | `{build_name, build_number}` → re-runs the driver with `--confirm-build-number N` **only if** the last `plan: N = <n>` line of that build's log equals what was typed |
 | `POST …/release/abort` · `POST …/release/retry` | admin | `{build_name?}` (default: the latest run's) → runs the driver with `--abort` / `--retry` |
 | `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error}`. `{configured: false}` when the profile has no `driver` |
+
+**`version_id`.** `POST …/release/plan`, `review`, `upload` and `start` take an optional
+`version_id` — the number of an open draft — instead of a typed `build_name`. The server then
+fills `build_name` from the row (a `build_name` in the same body that disagrees is 400
+`build_name_mismatch`), and adds two inputs to `review` and `upload` when there is something to
+add: `listing_json`, the edited listing merged over the prefill, whenever the two differ, and
+`build_name_android`, the Android name, whenever the two stores get **different** version names.
+A preset that does not declare the input it needs is refused (409 `listing_json_unsupported` /
+`split_version_unsupported`) rather than run without the edit or under one name for both stores;
+re-run `/rcm-store-connect` to add it. `plan` never gets either input — it reads the stores, and
+one name is enough for that. `start` passes `--version-id` to the driver and links the round to
+the row, so `confirm`, `abort` and `retry` continue on the same version. While a review job or a
+driver round is running for it, the row is `running` and cannot be edited away under it.
 
 **The 409 codes.** These are the server's own rules, kept whatever the page sends (`code` and
 `error_code` carry the same value):
@@ -338,8 +357,18 @@ keeps its default. Writes take a Bearer token only.
 | `driver_missing` | `driver` is not an executable file in the checkout |
 | `release_running` | a driver process for this repository is still alive (`release_id` in the body) |
 | `release_required` | `confirm` / `abort` / `retry` with no earlier run for that build |
+| `version_exists` | a new version name that an open draft already carries (`id` and `state` in the body) |
+| `version_closed` | a submitted or discarded draft — it cannot be edited, submitted or discarded again |
+| `version_running` | discarding a draft whose review job or driver round is still running |
+| `listing_json_unsupported` | the draft has an edited listing but the `review` / `upload` preset has no `listing_json` input |
+| `split_version_unsupported` | the draft's two store version names differ but that preset has no `build_name_android` input |
 
-`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`).
+`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`), as do every
+`POST`, `PUT` and `DELETE` under `…/release/versions`. The version routes also answer 404
+`version_not_found` (no such draft in this repository — another repository's number included) and
+400 `empty` (neither version name), `pattern` (not `major.minor.patch`), `not_greater` (not above
+the live name; `platform` and `live` are in the body), `listing_key` (an unknown platform or
+field) and `listing_too_large` (one value over 16 KB).
 
 **The driver.** `POST …/release/start` checks out `default_branch` from the mirror into
 `<data_dir>/driver/<repo>/checkout` and runs `<driver> --build-name X [--android-track T]
@@ -352,7 +381,7 @@ stdout and stderr append to `<data_dir>/driver/<repo>/<build_name>.log`, so `con
 and `retry` continue the same log. Every run is a row in the database's `releases` table
 (`id repo build_name kind started_by started_at pid log_path exit_code finished_at confirmed_n
 confirmed_by android_track dry_run token_name`); `rcm gc` and the retention sweeps leave that
-table alone. The exit code is written by a wrapper to `<data_dir>/driver/<repo>/<id>.exit`, so
+table, and the `versions` table behind the version routes, alone. The exit code is written by a wrapper to `<data_dir>/driver/<repo>/<id>.exit`, so
 after a restart the next `GET …/release/driver` (or the next start) closes runs whose process is
 gone, records the code (or `null` when it is unknown) and revokes their tokens. `--status` runs
 with the same environment but without a token — it is read-only by contract. Confirm follows the

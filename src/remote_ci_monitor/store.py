@@ -68,12 +68,46 @@ from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 19
+DB_VERSION = 20
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
 #: 마이그레이션 전 자동 백업을 몇 개 남기나(결정 74). 정리는 마이그레이션이 끝난 뒤, 실패는 경고만.
 BACKUPS_KEPT = 3
+#: 스토어 버전 드래프트(v20 `versions`)의 상태. closed 둘은 목록의 «지난 것» 이고 다시 열리지
+#: 않는다; `running` 은 심사 잡이나 드라이버 회차가 이 버전으로 도는 중이다.
+VERSION_CREATING = "creating"
+VERSION_EDITING = "editing"
+VERSION_RUNNING = "running"
+VERSION_SUBMITTED = "submitted"
+VERSION_DISCARDED = "discarded"
+VERSION_FAILED = "failed"
+VERSION_STATES = (
+    VERSION_CREATING,
+    VERSION_EDITING,
+    VERSION_RUNNING,
+    VERSION_SUBMITTED,
+    VERSION_DISCARDED,
+    VERSION_FAILED,
+)
+VERSION_CLOSED_STATES = (VERSION_SUBMITTED, VERSION_DISCARDED)
+#: `update_version` 이 받는 열 — 이름 · 만든 사람 · 만든 시각은 바꾸지 않는다.
+VERSION_UPDATABLE = frozenset(
+    {
+        "state",
+        "last_edit_at",
+        "expires_at",
+        "asc_version_id",
+        "prefill_json",
+        "edited_json",
+        "error",
+        "create_job_id",
+        "delete_job_id",
+        "release_id",
+        "review_job_id",
+        "expiry_warned",
+    }
+)
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 
@@ -239,6 +273,27 @@ CREATE TABLE IF NOT EXISTS releases (
   auto_n INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS releases_repo ON releases(repo, id DESC);
+CREATE TABLE IF NOT EXISTS versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  ios_version TEXT,
+  android_version TEXT,
+  state TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  last_edit_at REAL,
+  expires_at REAL NOT NULL,
+  asc_version_id TEXT,
+  prefill_json TEXT,
+  edited_json TEXT,
+  error TEXT,
+  create_job_id INTEGER,
+  delete_job_id INTEGER,
+  release_id INTEGER,
+  review_job_id INTEGER,
+  expiry_warned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS versions_repo ON versions(repo, id DESC);
 """
 
 _BLOBS_SQL = (
@@ -394,6 +449,21 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # v19: `auto_n` — 이 실행이 «빌드 번호 자동» 으로 시작됐는가. 1 이면 드라이버가 exit 2 로
     # 번호를 물을 때 서버가 로그의 `plan: N` 을 그대로 `--confirm-build-number` 로 이어 준다.
     19: ("ALTER TABLE releases ADD COLUMN auto_n INTEGER NOT NULL DEFAULT 0",),
+    # v19 → v20(버전 페이지 · docs/version-page-workplan.md §2.1): 스토어 버전 드래프트 대장. 행
+    # 하나 = 사람이 «새 버전 만들기» 로 연 버전(iOS · Android 이름 중 하나 이상). `state` 는
+    # creating | editing | running | submitted | discarded | failed. 문안 편집본(`edited_json`)과
+    # 이전 버전의 문안(`prefill_json`)은 JSON 문자열 그대로 둔다. releases 처럼 청소기(`rcm gc` ·
+    # 보존 정리)는 이 표를 **건드리지 않는다** — 드래프트의 만료는 버전 청소기의 몫이다.
+    20: (
+        "CREATE TABLE IF NOT EXISTS versions ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, ios_version TEXT,"
+        " android_version TEXT, state TEXT NOT NULL, created_by TEXT NOT NULL,"
+        " created_at REAL NOT NULL, last_edit_at REAL, expires_at REAL NOT NULL,"
+        " asc_version_id TEXT, prefill_json TEXT, edited_json TEXT, error TEXT,"
+        " create_job_id INTEGER, delete_job_id INTEGER, release_id INTEGER,"
+        " review_job_id INTEGER, expiry_warned INTEGER NOT NULL DEFAULT 0)",
+        "CREATE INDEX IF NOT EXISTS versions_repo ON versions(repo, id DESC)",
+    ),
 }
 
 
@@ -2534,6 +2604,172 @@ class Store:
 
     def count_releases(self) -> int:
         return int(self._conn().execute("SELECT COUNT(*) FROM releases").fetchone()[0])
+
+    # ── 스토어 버전 드래프트 대장 (버전 페이지 · v20) ───────────────────────
+
+    @staticmethod
+    def _row_to_version(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "repo": row["repo"],
+            "ios_version": row["ios_version"],
+            "android_version": row["android_version"],
+            "state": row["state"],
+            "created_by": row["created_by"],
+            "created_at": _dt(row["created_at"]),
+            "last_edit_at": _dt(row["last_edit_at"]),
+            "expires_at": _dt(row["expires_at"]),
+            "asc_version_id": row["asc_version_id"],
+            "prefill_json": row["prefill_json"],
+            "edited_json": row["edited_json"],
+            "error": row["error"],
+            "create_job_id": row["create_job_id"],
+            "delete_job_id": row["delete_job_id"],
+            "release_id": row["release_id"],
+            "review_job_id": row["review_job_id"],
+            "expiry_warned": bool(row["expiry_warned"]),
+        }
+
+    def create_version(
+        self,
+        *,
+        repo: str,
+        ios_version: str | None,
+        android_version: str | None,
+        state: str,
+        created_by: str,
+        now: datetime,
+        expires_at: datetime,
+        create_job_id: int | None = None,
+    ) -> int:
+        """드래프트 행 하나. 이름은 둘 중 하나 이상(앱 레벨 검사 — 여기서는 `ValueError`)."""
+        if not ios_version and not android_version:
+            raise ValueError("a version needs ios_version or android_version")
+        if state not in VERSION_STATES:
+            raise ValueError(f"unknown version state {state!r}")
+        cur = self._conn().execute(
+            "INSERT INTO versions (repo, ios_version, android_version, state, created_by, "
+            "created_at, expires_at, create_job_id) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                repo,
+                ios_version or None,
+                android_version or None,
+                state,
+                created_by,
+                _ts(now),
+                _ts(expires_at),
+                create_job_id,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+    def get_version(self, version_id: int) -> dict[str, Any] | None:
+        row = (
+            self._conn().execute("SELECT * FROM versions WHERE id=?", (int(version_id),)).fetchone()
+        )
+        return self._row_to_version(row) if row else None
+
+    def list_versions(
+        self, repo: str | None = None, *, include_closed: bool = True
+    ) -> list[dict[str, Any]]:
+        """저장소의 드래프트들, 새것부터. `include_closed=False` 면 submitted · discarded 를 뺀다.
+        `repo=None` 은 전부(기동 복구 · 청소기)."""
+        sql = "SELECT * FROM versions"
+        where: list[str] = []
+        params: list[Any] = []
+        if repo is not None:
+            where.append("repo=?")
+            params.append(repo)
+        if not include_closed:
+            marks = ",".join("?" * len(VERSION_CLOSED_STATES))
+            where.append(f"state NOT IN ({marks})")
+            params.extend(VERSION_CLOSED_STATES)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        rows = self._conn().execute(sql + " ORDER BY id DESC", tuple(params)).fetchall()
+        return [self._row_to_version(r) for r in rows]
+
+    def update_version(self, version_id: int, **fields: Any) -> bool:
+        """허용 열만 고친다(`VERSION_UPDATABLE`). 모르는 열은 `ValueError` — 오타가 조용히 무시되지
+        않게. 시각 열은 datetime, `expiry_warned` 는 bool 로 받는다. 행이 없으면 False."""
+        if not fields:
+            return self.get_version(version_id) is not None
+        unknown = sorted(set(fields) - VERSION_UPDATABLE)
+        if unknown:
+            raise ValueError(f"versions: unknown column(s): {', '.join(unknown)}")
+        if "state" in fields and fields["state"] not in VERSION_STATES:
+            raise ValueError(f"unknown version state {fields['state']!r}")
+        sets: list[str] = []
+        params: list[Any] = []
+        for key, value in fields.items():
+            if key in ("last_edit_at", "expires_at"):
+                value = _ts(value)
+            elif key == "expiry_warned":
+                value = 1 if value else 0
+            sets.append(f"{key}=?")
+            params.append(value)
+        params.append(int(version_id))
+        cur = self._conn().execute(
+            f"UPDATE versions SET {', '.join(sets)} WHERE id=?", tuple(params)
+        )
+        return cur.rowcount == 1
+
+    def version_for_job(self, job_id: int) -> dict[str, Any] | None:
+        """이 잡을 만들기 · 지우기 · 심사로 연결한 행(완료 훅). 없으면 None."""
+        row = (
+            self._conn()
+            .execute(
+                "SELECT * FROM versions WHERE create_job_id=? OR delete_job_id=? "
+                "OR review_job_id=? ORDER BY id DESC LIMIT 1",
+                (int(job_id), int(job_id), int(job_id)),
+            )
+            .fetchone()
+        )
+        return self._row_to_version(row) if row else None
+
+    def version_for_release(self, release_id: int) -> dict[str, Any] | None:
+        """드라이버 회차(`releases.id`)가 붙은, 도는 중인 행."""
+        row = (
+            self._conn()
+            .execute(
+                "SELECT * FROM versions WHERE release_id=? AND state=? ORDER BY id DESC LIMIT 1",
+                (int(release_id), VERSION_RUNNING),
+            )
+            .fetchone()
+        )
+        return self._row_to_version(row) if row else None
+
+    def open_versions_expired(self, now: datetime) -> list[dict[str, Any]]:
+        """편집한 적 없는(`last_edit_at` NULL) editing 드래프트 중 만료가 지난 것 — 청소기가
+        «버리기» 경로로 지운다(워크플랜 Q1)."""
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT * FROM versions WHERE state=? AND last_edit_at IS NULL AND expires_at<? "
+                "ORDER BY id",
+                (VERSION_EDITING, _ts(now)),
+            )
+            .fetchall()
+        )
+        return [self._row_to_version(r) for r in rows]
+
+    def versions_to_warn(self, now: datetime) -> list[dict[str, Any]]:
+        """편집이 있는 열린 드래프트 중 만료가 지났는데 아직 경고하지 않은 것(Q2 — 지우지 않고
+        `expiry_warned` 만 켠다)."""
+        marks = ",".join("?" * len(VERSION_CLOSED_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT * FROM versions WHERE last_edit_at IS NOT NULL AND expires_at<? "
+                f"AND expiry_warned=0 AND state NOT IN ({marks}) ORDER BY id",
+                (_ts(now), *VERSION_CLOSED_STATES),
+            )
+            .fetchall()
+        )
+        return [self._row_to_version(r) for r in rows]
+
+    def count_versions(self) -> int:
+        return int(self._conn().execute("SELECT COUNT(*) FROM versions").fetchone()[0])
 
     # ── 원격 워커 (M5b-2) ───────────────────────────────────────────────────
 

@@ -71,14 +71,14 @@ def add_release(store: Store, build: str = "1.0.1", *, started: datetime = NOW) 
 
 
 def test_a_fresh_database_is_version_18_with_the_releases_table():
-    assert DB_VERSION == 19
+    assert DB_VERSION == 20  # v20: versions 표(tests/test_store_versions.py)
 
 
 def test_a_fresh_database_has_the_releases_table_and_index(tmp_path):
     path = tmp_path / "data" / "rcm.sqlite3"
     s = Store(path)
     try:
-        assert s.user_version() == 19
+        assert s.user_version() == DB_VERSION
         assert columns(path, "releases") == COLUMNS
         names = {
             r[0]
@@ -109,7 +109,7 @@ def test_a_v17_database_gets_the_table_a_backup_and_version_18(tmp_path):
     }
     s = Store(path)
     try:
-        assert s.user_version() == 19
+        assert s.user_version() == DB_VERSION
         assert columns(path, "releases") == COLUMNS
         assert s.get_job(1) is not None
         rid = add_release(s)
@@ -184,7 +184,7 @@ def test_a_v18_database_gets_the_auto_n_column_and_version_19(tmp_path):
     assert "auto_n" not in columns(path, "releases")
     s = Store(path)
     try:
-        assert s.user_version() == 19
+        assert s.user_version() == DB_VERSION
         assert columns(path, "releases") == COLUMNS
         assert s.get_release(rid)["auto_n"] is False
         auto = s.create_release(

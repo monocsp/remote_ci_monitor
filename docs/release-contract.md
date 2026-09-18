@@ -182,8 +182,9 @@ is uploaded as `1.0.1` in the same run that puts `1.1.1` on the App Store.
 When the two names differ and the preset does not declare `build_name_android`, rcm refuses the
 submission with **409 `split_version_unsupported`** instead of quietly building one name for both
 stores. `rcm check` says it first, as a warning, so a project that always ships one name can leave
-the input out and never meet the refusal. *(The refusal ships with the version routes; this
-paragraph is the contract it implements.)*
+the input out and never meet the refusal. rcm knows the two names from a version draft, so this
+applies to a `review` / `upload` request that carries a `version_id`; a request that types one
+`build_name` is unchanged.
 
 **The tag.** `tag = "prod/{version}-{build}"` does not change — `{version}` resolves per round:
 
