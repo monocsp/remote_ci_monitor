@@ -7,7 +7,36 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Breaking changes
+- **Database schema v20.** A new `versions` table holds the store version drafts (one row per
+  «new version»: the two store version names, its state, the prefilled and edited listing, and
+  the jobs and driver round it is linked to). A v19 file is backed up (`rcm.sqlite3.v19.bak`) and
+  migrated on start, and an older build refuses a v20 file and points at that backup, so upgrade
+  the server before the workers. `rcm gc` and the retention sweeps leave the new table alone.
+  ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
+
 ### Added
+- **Store version drafts: the server routes.** `GET /api/repos/<repo>/release/versions` answers
+  the live version names and the next-version hints read from the latest plan, the open drafts and
+  the last 20 submitted ones; `POST` opens a draft (202 with a `mode = create` job when the
+  profile has a `version` preset, 201 straight into `editing` when it does not) after checking
+  that a name looks like `major.minor.patch`, is greater than the live one and is not already
+  taken by an open draft (409 `version_exists`). `GET …/versions/<id>` is everything one version
+  page needs in one request — the row, the prefilled and the edited listing, their diff, the
+  release view, the driver view and the listing file preview — `PUT …/versions/<id>/listing`
+  saves one field at a time (allowed keys only, 16 KB each), `GET …/versions/<id>/diff` lists what
+  changed, and `DELETE …/versions/<id>` discards a draft, deleting the App Store version through a
+  `mode = delete` job when there is one. A finished job updates its row by itself, and a server
+  restart re-applies the hook for a job that finished while it was down.
+  ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
+- **`version_id` on plan, review, upload and start.** These take the draft's number instead of a
+  typed `build_name` (a `build_name` that disagrees is 400 `build_name_mismatch`). review and
+  upload carry the edited listing as `listing_json` when it differs from the prefill, and the
+  Android name as `build_name_android` when the two stores get different names; a preset that
+  declares neither input is refused (409 `listing_json_unsupported` / `split_version_unsupported`)
+  instead of quietly dropping the edit or shipping one name to both stores. `start` passes
+  `--version-id` to the driver and links the round to the draft, so `confirm`, `abort` and `retry`
+  stay on the same version. ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
 - **Release contract: the `version` role.** A project may name a `version` preset
   (`[repos.<name>.release.presets] version = …`) that rcm runs with `mode = prefill|create|delete`,
   `ios_version`, `android_version` and `asc_version_id`; it writes `version.json` (create ·

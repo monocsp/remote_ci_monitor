@@ -814,8 +814,18 @@ def test_github_reads_the_mirror_only_and_leaves_prs_for_later(srv, remote):
 
 
 def wait_run(srv: ReleaseServer, release_id: int) -> dict:
-    assert srv.app.driver.wait(release_id, timeout=15)
-    return srv.store.get_release(release_id)
+    """회차가 닫힐 때까지. `driver.wait` 는 **모르는** 실행에 바로 True 를 주는데, 행이 생긴 직후
+    (아직 Popen 전)가 그렇다 — 그래서 대장이 닫히는 것까지 본다. 안 그러면 로그·exit_code 를
+    도는 중에 읽는 경쟁이 남는다."""
+    deadline = time.monotonic() + 20
+    while True:
+        assert srv.app.driver.wait(release_id, timeout=15)
+        row = srv.store.get_release(release_id)
+        assert row is not None, f"no release #{release_id}"
+        if row["finished_at"] is not None or time.monotonic() > deadline:
+            assert row["finished_at"] is not None, f"release #{release_id} did not finish"
+            return row
+        time.sleep(0.02)
 
 
 def test_driver_view_before_any_run_and_without_a_mirror(open_srv):

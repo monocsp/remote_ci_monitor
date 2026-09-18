@@ -1,14 +1,16 @@
 """버전 페이지 서버 라우트 — `/api/repos/<name>/release/versions[/<id>[/listing|/diff]]` 와 plan ·
 review · upload · start 의 `version_id`.
 
-명세: docs/version-page-workplan.md §2.2 · §7 AC-B2~B9 · AC-B11 · §8 E1 · E3~E6 · E9~E11 · E14 ·
-E15 · E25.
+명세: docs/version-page-workplan.md §2.2 · §11 · §7 AC-B2~B9 · AC-B11 · §8 E1 · E3~E6 · E9~E11 ·
+E14 · E15 · E25.
 
 여기서 지키는 것:
 - GET 은 읽기 규칙(워커 토큰 거부) · POST · PUT · DELETE 는 admin(403 `admin_required`).
 - 409 표: `version_exists` · `version_closed` · `version_running` · `setup_incomplete` ·
-  `listing_json_unsupported`; 400 은 `empty` · `pattern` · `not_greater` · `listing_key` ·
-  `listing_too_large` · `build_name_mismatch`.
+  `listing_json_unsupported` · `split_version_unsupported`; 400 은 `empty` · `pattern` ·
+  `not_greater` · `listing_key` · `listing_too_large` · `build_name_mismatch`.
+- 두 스토어 버전 이름(§11): 다를 때만 `build_name_android` 를 함께 보내고, 프리셋이 그 입력을
+  모르면 제출을 거절한다.
 - 잡 완료 훅: create 잡의 `version.json` + `prefill.json` 이 행을 `editing` 으로, 실패는 `failed`
   + `error`; delete 잡 0 → `discarded`; 심사 잡 → `editing`(submit 성공은 `submitted`).
 - 서버 재시작 복구 · 드라이버에 `--version-id`.
@@ -18,7 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -59,10 +63,33 @@ VERSION_PRESET = preset(
         {"name": "asc_version_id", "type": "string", "default": ""},
     ],
 )
+LISTING_JSON_INPUT = {"name": "listing_json", "type": "string", "default": ""}
+#: 워크플랜 §11 — 두 스토어 이름이 다를 때만 오는 입력. 기본값은 빈 문자열이다.
+BUILD_NAME_ANDROID_INPUT = {"name": "build_name_android", "type": "string", "default": ""}
 REVIEW_LISTING_PRESET = preset(
     "release-review-listing",
-    [*REVIEW_INPUTS, {"name": "listing_json", "type": "string", "default": ""}],
+    [*REVIEW_INPUTS, LISTING_JSON_INPUT, BUILD_NAME_ANDROID_INPUT],
 )
+
+
+def upload_preset(*extra: dict) -> dict:
+    """`release-upload-listing` — 기본 입력 셋에 시험이 고른 것만 더한 upload 프리셋."""
+    return preset(
+        "release-upload-listing",
+        [
+            {"name": "build_name", "type": "string"},
+            {"name": "confirm_build_number", "type": "string", "default": ""},
+            {
+                "name": "mode",
+                "type": CHOICE,
+                "choices": ["rehearsal", "upload"],
+                "default": "rehearsal",
+            },
+            *extra,
+        ],
+    )
+
+
 #: 버전 프리셋 + listing_json 을 받는 review 프리셋
 PROFILE_V = {
     **PROFILE,
@@ -613,6 +640,7 @@ def test_review_forwards_the_edited_listing_and_tracks_the_row_state(vsrv):
     job = srv.store.get_job(body["job_id"])
     assert job.preset == "release-review-listing" and job.inputs["build_name"] == "1.1.1"
     assert job.inputs["listing_json"] == ""  # 편집 없음 → 프리셋 기본값
+    assert job.inputs["build_name_android"] == "1.0.1"  # §11 — 두 이름이 다르다
     row = srv.store.get_version(vid)
     assert row["state"] == "running" and row["review_job_id"] == job.id
     assert code_of(srv.discard(vid)) == (409, "version_running")  # E15
@@ -698,30 +726,18 @@ def test_review_forwards_the_edited_listing_and_tracks_the_row_state(vsrv):
 
 
 def test_upload_forwards_the_edited_listing_too(vsrv):
+    """두 스토어가 한 이름(1.1.1)을 쓰는 드래프트 — §11 은 끼어들지 않고 입력은 오늘 그대로다."""
     srv = vsrv
-    vid = editing_draft(srv)
+    vid = editing_draft(srv, ios="1.1.1", android="1.1.1")
     status, body = srv.post("upload", {"version_id": vid, "platform": "android"})
     assert status == 202, body
     job = srv.store.get_job(body["job_id"])
     assert job.inputs["build_name"] == "1.1.1" and "listing_json" not in job.inputs
+    assert "build_name_android" not in job.inputs  # 이름이 같다 → 두 번째 이름은 없다
     srv.put_listing(vid, {"android": {"title": "New name"}})
     status, body = srv.post("upload", {"version_id": vid})
     assert (status, body["code"]) == (409, "listing_json_unsupported")
-    upload_listing = preset(
-        "release-upload-listing",
-        [
-            {"name": "build_name", "type": "string"},
-            {"name": "confirm_build_number", "type": "string", "default": ""},
-            {
-                "name": "mode",
-                "type": CHOICE,
-                "choices": ["rehearsal", "upload"],
-                "default": "rehearsal",
-            },
-            {"name": "listing_json", "type": "string", "default": ""},
-        ],
-    )
-    srv.cfg.presets = (parse_preset(upload_listing), *srv.cfg.presets)
+    srv.cfg.presets = (parse_preset(upload_preset(LISTING_JSON_INPUT)), *srv.cfg.presets)
     srv.set_profile(
         {**PROFILE_V, "presets": {**PROFILE_V["presets"], "upload": "release-upload-listing"}}
     )
@@ -730,6 +746,77 @@ def test_upload_forwards_the_edited_listing_too(vsrv):
     sent = json.loads(srv.store.get_job(body["job_id"]).inputs["listing_json"])
     assert sent["android"]["title"] == "New name" and sent["ios"]["subtitle"] == "Sleep better"
     assert srv.store.get_version(vid)["state"] == "editing"  # upload 는 running 으로 두지 않는다
+
+
+def test_two_different_store_version_names_travel_as_build_name_and_build_name_android(vsrv):
+    """워크플랜 §11 · 계약 §2 「Two store version names」 — 한 회차가 App Store 와 Play 에 서로
+    다른 이름으로 나갈 때 `build_name` 은 대표 이름(iOS)이고 Android 이름은 `build_name_android`
+    로 함께 간다. 받는 역할은 upload · review 뿐이다."""
+    srv = vsrv
+    srv.cfg.presets = (
+        parse_preset(upload_preset(LISTING_JSON_INPUT, BUILD_NAME_ANDROID_INPUT)),
+        *srv.cfg.presets,
+    )
+    srv.set_profile(
+        {**PROFILE_V, "presets": {**PROFILE_V["presets"], "upload": "release-upload-listing"}}
+    )
+    vid = editing_draft(srv, ios="1.1.1", android="1.0.1")
+    for action in ("review", "upload"):
+        status, body = srv.post(action, {"version_id": vid})
+        assert status == 202, body
+        job = srv.store.get_job(body["job_id"])
+        assert (job.inputs["build_name"], job.inputs["build_name_android"]) == ("1.1.1", "1.0.1")
+        srv.finish_job(job.id, None)
+    # plan 은 스토어를 읽을 뿐이라 이름 하나로 충분하다 — 입력도 거절도 없다(§11)
+    status, body = srv.post("plan", {"version_id": vid})
+    assert status == 202 and "build_name_android" not in srv.store.get_job(body["job_id"]).inputs
+    assert srv.store.get_job(body["job_id"]).inputs["build_name"] == "1.1.1"
+
+
+def test_one_name_for_both_stores_sends_exactly_what_it_sends_today(vsrv):
+    """§11 — 두 이름이 같거나 한 스토어만 만드는 버전이면 `build_name` 하나다. 프리셋이 그 입력을
+    선언해 두었어도 rcm 은 값을 보내지 않는다(기본값 빈 문자열 그대로)."""
+    srv = vsrv
+    same = editing_draft(srv, ios="1.1.1", android="1.1.1")
+    status, body = srv.post("review", {"version_id": same})
+    assert status == 202, body
+    inputs = srv.store.get_job(body["job_id"]).inputs
+    assert inputs["build_name"] == "1.1.1" and inputs["build_name_android"] == ""
+    srv.finish_job(body["job_id"], None)
+    only_ios = editing_draft(srv, ios="1.2.0", android=None)
+    status, body = srv.post("review", {"version_id": only_ios})
+    assert status == 202, body
+    inputs = srv.store.get_job(body["job_id"]).inputs
+    assert inputs["build_name"] == "1.2.0" and inputs["build_name_android"] == ""
+    srv.finish_job(body["job_id"], None)
+    only_android = editing_draft(srv, ios=None, android="1.0.1")
+    status, body = srv.post("review", {"version_id": only_android})
+    assert status == 202, body
+    inputs = srv.store.get_job(body["job_id"]).inputs
+    assert inputs["build_name"] == "1.0.1" and inputs["build_name_android"] == ""
+
+
+def test_a_preset_that_does_not_know_build_name_android_refuses_the_split_names(vsrv):
+    """§11 — 두 이름이 다른데 프리셋에 `build_name_android` 가 없으면 409
+    `split_version_unsupported`. 한쪽 이름으로 조용히 빌드하지 않는다."""
+    srv = vsrv
+    vid = editing_draft(srv, ios="1.1.1", android="1.0.1")
+    # review 프리셋을 그 입력이 없는 옛것으로 — listing_json 도 없지만 편집이 없으니 §11 이 먼저다
+    srv.set_profile({**PROFILE_V, "presets": {**PROFILE_V["presets"], "review": "release-review"}})
+    status, body = srv.post("review", {"version_id": vid})
+    assert (status, body["code"]) == (409, "split_version_unsupported")
+    assert body["error_code"] == "split_version_unsupported"
+    assert (body["preset"], body["ios_version"], body["android_version"]) == (
+        "release-review",
+        "1.1.1",
+        "1.0.1",
+    )
+    assert "re-run the store-connect skill" in body["error"]
+    assert srv.store.get_version(vid)["state"] == "editing"  # 잡도 상태 변화도 없다
+    # upload 도 같다(프로파일의 기본 `release-upload` 는 그 입력을 모른다)
+    assert code_of(srv.post("upload", {"version_id": vid})) == (409, "split_version_unsupported")
+    # 버전을 붙이지 않은 제출은 옛길 그대로 — 사람이 친 build_name 하나다
+    assert srv.post("review", {"build_name": "1.1.1"})[0] == 202
 
 
 def test_start_passes_version_id_to_the_driver_and_the_round_marks_the_row_running(vsrv):
@@ -750,10 +837,10 @@ def test_start_passes_version_id_to_the_driver_and_the_round_marks_the_row_runni
     rel = wait_run(srv, body["release_id"])
     log = Path(rel["log_path"]).read_text()
     assert "driver --build-name 1.1.1 --version-id 1 --dry-run" in log
-    deadline = 50
+    deadline = 200
     while srv.store.get_version(vid)["state"] == "running" and deadline:
         deadline -= 1
-        __import__("time").sleep(0.05)
+        time.sleep(0.05)
     assert srv.store.get_version(vid)["state"] == "editing"
     assert any("round #1 ended → editing" in m for m in srv.server_log)
     # 사람 차례의 confirm 은 같은 버전으로 잇는다 — 다시 running, 끝나면 editing
@@ -786,14 +873,20 @@ def test_a_round_started_with_build_number_auto_keeps_the_version_on_the_confirm
     deadline = 100
     while srv.store.count_releases() < 2 and deadline:
         deadline -= 1
-        __import__("time").sleep(0.05)
+        time.sleep(0.05)
     second = wait_run(srv, 2)
     assert second["kind"] == "confirm"
-    assert "--version-id 1" in Path(second["log_path"]).read_text().splitlines()[-3]
-    deadline = 100
+    # 이어 달린 회차의 명령줄. 로그는 detached 프로세스가 쓰므로 나타날 때까지 기다린다.
+    log, wanted = Path(second["log_path"]), "--version-id 1 --dry-run --confirm-build-number 181"
+    deadline = 200
+    while wanted not in log.read_text() and deadline:
+        deadline -= 1
+        time.sleep(0.05)
+    assert wanted in log.read_text()
+    deadline = 200
     while srv.store.get_version(vid)["state"] == "running" and deadline:
         deadline -= 1
-        __import__("time").sleep(0.05)
+        time.sleep(0.05)
     row = srv.store.get_version(vid)
     assert row["state"] == "editing" and row["release_id"] == 2
 
@@ -977,3 +1070,31 @@ def test_the_versions_table_is_read_by_sqlite_as_documented(vsrv):
         assert row == ("editing", "abc123", 0)
     finally:
         c.close()
+
+
+#: 문서가 라우트를 말하지 않으면 여기서 빨개진다(집안 규칙 — 기능은 같은 PR 에서 문서가 된다).
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("docs/configuration.md", r"`GET …/release/versions`"),
+        ("docs/configuration.md", r"`POST …/release/versions`"),
+        ("docs/configuration.md", r"`GET …/release/versions/<id>`"),
+        ("docs/configuration.md", r"`PUT …/release/versions/<id>/listing`"),
+        ("docs/configuration.md", r"`GET …/release/versions/<id>/diff`"),
+        ("docs/configuration.md", r"`DELETE …/release/versions/<id>`"),
+        ("docs/configuration.md", r"^\*\*`version_id`\.\*\*"),
+        ("docs/configuration.md", r"\| `version_exists` \|"),
+        ("docs/configuration.md", r"\| `version_closed` \|"),
+        ("docs/configuration.md", r"\| `version_running` \|"),
+        ("docs/configuration.md", r"\| `listing_json_unsupported` \|"),
+        ("docs/configuration.md", r"\| `split_version_unsupported` \|"),
+        ("docs/configuration.md", r"404\n`version_not_found`"),
+        ("docs/configuration.md", r"the `versions` table behind the version routes, alone"),
+        ("CHANGELOG.md", r"Database schema v20"),
+        ("CHANGELOG.md", r"`GET /api/repos/<repo>/release/versions`"),
+        ("CHANGELOG.md", r"`version_id` on plan, review, upload and start"),
+    ],
+)
+def test_the_routes_are_documented(path, pattern):
+    text = (Path(__file__).resolve().parents[1] / path).read_text()
+    assert re.search(pattern, text, re.M), f"{path} lacks /{pattern}/"

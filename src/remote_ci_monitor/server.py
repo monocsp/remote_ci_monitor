@@ -1330,9 +1330,7 @@ class App(RemoteWorkersMixin):
             inputs["confirm_build_number"] = str(self._check_plan(view, build_name, typed))
         else:
             inputs["confirm_build_number"] = ""
-        listing_json = self._listing_json_input(preset, row)
-        if listing_json is not None:
-            inputs["listing_json"] = listing_json
+        self._version_inputs(preset, row, inputs)
         status, doc = self._release_submit(repo, preset, inputs, ref, token, host)
         if row is not None:
             self._version_link_review(row, doc["job_id"])
@@ -1375,9 +1373,7 @@ class App(RemoteWorkersMixin):
             )
         else:
             inputs["confirm_build_number"] = typed.strip()
-        listing_json = self._listing_json_input(preset, row)
-        if listing_json is not None:
-            inputs["listing_json"] = listing_json
+        self._version_inputs(preset, row, inputs)
         return self._release_submit(repo, preset, inputs, ref, token, host)
 
     # ── 버전 드래프트 (버전 페이지 · docs/version-page-workplan.md §2.2) ──────
@@ -1810,6 +1806,44 @@ class App(RemoteWorkersMixin):
                 build_name=name,
             )
         return name
+
+    def _version_inputs(
+        self, preset: Preset, row: dict[str, Any] | None, inputs: dict[str, Any]
+    ) -> None:
+        """버전 드래프트가 붙은 review · upload 잡에 얹는 입력 둘 — 웹에서 고친 문안과 두 번째
+        스토어의 버전 이름. 얹을 것이 없으면 오늘과 똑같은 입력이다."""
+        listing_json = self._listing_json_input(preset, row)
+        if listing_json is not None:
+            inputs["listing_json"] = listing_json
+        android = self._build_name_android_input(preset, row)
+        if android is not None:
+            inputs["build_name_android"] = android
+
+    @staticmethod
+    def _build_name_android_input(preset: Preset, row: dict[str, Any] | None) -> str | None:
+        """review · upload 의 `build_name_android`(워크플랜 §11 · 계약 §2 「Two store version
+        names」) — 한 회차가 두 스토어에 **서로 다른** 이름으로 나갈 때만 보낸다. 이름이 같거나
+        한 스토어만 만드는 버전이면 오늘과 똑같이 `build_name` 하나다(None). 두 이름이 다른데
+        프리셋이 그 입력을 모르면 409 `split_version_unsupported` — 조용히 한쪽 이름으로
+        빌드하지 않는다."""
+        if row is None:
+            return None
+        ios, android = row["ios_version"], row["android_version"]
+        if not ios or not android or ios == android:
+            return None
+        if preset.input_spec("build_name_android") is None:
+            raise ApiError(
+                409,
+                f"version #{row['id']} has different store version names (iOS {ios} · "
+                f"Android {android}) and preset '{preset.name}' has no build_name_android input; "
+                "re-run the store-connect skill to add it, or give both stores one name",
+                code="split_version_unsupported",
+                error_code="split_version_unsupported",
+                preset=preset.name,
+                ios_version=ios,
+                android_version=android,
+            )
+        return str(android)
 
     def _listing_json_input(self, preset: Preset, row: dict[str, Any] | None) -> str | None:
         """review · upload 의 `listing_json` — 편집본이 있고 이전 문안과 다를 때만(edited ⊕
