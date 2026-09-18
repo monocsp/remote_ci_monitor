@@ -10,7 +10,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from remote_ci_monitor.core.model import MAX_INPUT_LENGTH, InputSpec, Preset
+from remote_ci_monitor.core.model import (
+    LONG_INPUTS,
+    MAX_INPUT_LENGTH,
+    MAX_LONG_INPUT_LENGTH,
+    InputSpec,
+    Preset,
+)
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -47,8 +53,9 @@ def _coerce(preset: str, spec: InputSpec, raw: Any) -> str | bool | int:
     if isinstance(raw, bool) or not isinstance(raw, str | int):
         raise InputError(f"{where}: expected a string, got {type(raw).__name__}")
     value = str(raw)
-    if len(value) > MAX_INPUT_LENGTH:
-        raise InputError(f"{where}: value longer than {MAX_INPUT_LENGTH} characters")
+    limit = MAX_LONG_INPUT_LENGTH if spec.name in LONG_INPUTS else MAX_INPUT_LENGTH
+    if len(value) > limit:
+        raise InputError(f"{where}: value longer than {limit} characters")
     if "\0" in value or "\n" in value:
         raise InputError(f"{where}: value must not contain newlines or NUL")
     if spec.type == "choice":

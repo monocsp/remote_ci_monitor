@@ -1571,6 +1571,9 @@ RELEASE_ROLE_INPUTS: dict[str, tuple[str, ...]] = {
 }
 #: 역할별 **되돌릴 수 없는** `mode` 값 — 프리셋의 기본값이면 안 된다(계약 §2 의 첫 불변식).
 RELEASE_IRREVERSIBLE_MODE = {"upload": "upload", "review": "submit"}
+#: 비어 있어도 warn 을 내지 않는 선택 역할 — `version` 은 버전 페이지를 쓰는 프로젝트만 둔다
+#: (없으면 «새 버전 만들기» 가 바로 editing 으로 간다 · 워크플랜 E25).
+RELEASE_QUIET_ROLES = ("version",)
 
 
 def release_secrets_dir(config_path: Path, repo: str) -> Path:
@@ -1597,7 +1600,7 @@ def _release_row(
         if name is None:
             if role in RELEASE_REQUIRED_ROLES:
                 problems.append(f"presets.{role} is empty")
-            else:
+            elif role not in RELEASE_QUIET_ROLES:
                 warnings.append(f"{role} not configured")
             continue
         preset = cfg.preset(name)

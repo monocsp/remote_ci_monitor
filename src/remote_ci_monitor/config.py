@@ -172,7 +172,7 @@ class DisplaySection:
 
 # ── 릴리스 프로파일(스토어 탭) — docs/release-contract.md §1 ─────────────────
 
-RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev")
+RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
 RELEASE_REQUIRED_ROLES = ("plan", "upload", "review")
 RELEASE_SECRET_KINDS = ("value", "file", "dir")
 RELEASE_VERIFY_KINDS = ("asc", "play", "github", "keystore", "none")
@@ -188,6 +188,7 @@ _RELEASE_KEYS = {
     "presets",
     "secrets",
     "listing",
+    "version_ttl_hours",
 }
 _RELEASE_SECRET_KEYS = {"name", "kind", "optional", "verify", "files", "max_kb"}
 _RELEASE_LISTING_KEYS = {"preview", "diff", "validate", "screenshots", "release_notes", "ref"}
@@ -238,6 +239,8 @@ class ReleaseProfile:
     secrets_dir_env: str | None = None
     secrets: tuple[ReleaseSecret, ...] = ()
     listing: ReleaseListing | None = None
+    # 편집한 적 없는 버전 드래프트를 몇 시간 뒤 버리나(버전 페이지 Q1). 편집한 것은 경고만.
+    version_ttl_hours: int = 24
 
     def preset_for(self, role: str) -> str | None:
         return self.presets.get(role) or None
@@ -1181,6 +1184,9 @@ def parse_release_profile(repo_name: str, raw: Any) -> ReleaseProfile:
     max_age = raw.get("plan_max_age_minutes", defaults.plan_max_age_minutes)
     if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age < 1:
         raise ConfigError(f"{where}: plan_max_age_minutes must be a positive integer")
+    ttl = raw.get("version_ttl_hours", defaults.version_ttl_hours)
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1:
+        raise ConfigError(f"{where}: version_ttl_hours must be a positive integer")
     driver = raw.get("driver")
     if driver is not None:
         if (
@@ -1235,6 +1241,7 @@ def parse_release_profile(repo_name: str, raw: Any) -> ReleaseProfile:
         secrets_dir_env=env_name,
         secrets=secrets,
         listing=listing,
+        version_ttl_hours=ttl,
     )
 
 

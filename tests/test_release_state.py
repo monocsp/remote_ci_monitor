@@ -36,6 +36,7 @@ PRESETS = {
     "gate": None,
     "qa": None,
     "dev": None,
+    "version": None,
 }
 
 
