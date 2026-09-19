@@ -200,11 +200,66 @@ describe("모르는 글자는 받침 없는 쪽 (C-33)", () => {
 });
 
 describe("모르는 쌍은 던진다 (C-34)", () => {
-  ["이가", "", null, undefined, "으로/로", "가/이"].forEach((pair) => {
+  ["이가", "", null, undefined, "로/으로", "가/이"].forEach((pair) => {
     test(JSON.stringify(pair) + " → throw", () => {
       assert.throws(() => josa("mac2", pair), /unknown pair/);
       assert.throws(() => withJosa("mac2", pair), /unknown pair/);
     });
+  });
+});
+
+// 워크플랜 §17-15 — 두 쌍이 더 있다. 「이라/라」는 네 쌍과 같은 판정이고(«제출됨이라» ·
+// «폐기라»), 「으로/로」만 **ㄹ 받침을 받침 없는 쪽으로** 읽는다(«서울로» · «7로»).
+describe("이라/라 · 으로/로 (§17-15)", () => {
+  test("이라/라 는 받침 유무 그대로다", () => {
+    assert.equal(withJosa("제출됨", "이라/라"), "제출됨이라");
+    assert.equal(withJosa("폐기", "이라/라"), "폐기라");
+    assert.equal(withJosa("만료", "이라/라"), "만료라");
+    assert.equal(withJosa(null, "이라/라"), "라");
+  });
+
+  test("으로/로 — ㄹ 받침은 「로」, 다른 받침은 「으로」, 받침 없으면 「로」", () => {
+    assert.equal(withJosa("서울", "으로/로"), "서울로");      // ㄹ 받침
+    assert.equal(withJosa("설정", "으로/로"), "설정으로");    // ㅇ 받침
+    assert.equal(withJosa("화면", "으로/로"), "화면으로");    // ㄴ 받침
+    assert.equal(withJosa("목록", "으로/로"), "목록으로");    // ㄱ 받침
+    assert.equal(withJosa("여기", "으로/로"), "여기로");      // 받침 없음
+  });
+
+  test("숫자와 라틴 글자도 읽는 소리의 ㄹ 을 본다", () => {
+    // 1 일 · 7 칠 · 8 팔 은 ㄹ 로 끝나고, 0 영 · 3 삼 · 6 육 은 아니다
+    ["1", "7", "8"].forEach((d) => assert.equal(withJosa(d, "으로/로"), d + "로", d));
+    ["0", "3", "6"].forEach((d) => assert.equal(withJosa(d, "으로/로"), d + "으로", d));
+    ["2", "4", "5", "9"].forEach((d) => assert.equal(withJosa(d, "으로/로"), d + "로", d));
+    // l 엘 · r 알 은 ㄹ, m 엠 · n 엔 은 아니다
+    assert.equal(withJosa("url", "으로/로"), "url로");
+    assert.equal(withJosa("server", "으로/로"), "server로");
+    assert.equal(withJosa("system", "으로/로"), "system으로");
+    assert.equal(withJosa("main", "으로/로"), "main으로");
+    assert.equal(withJosa("beta", "으로/로"), "beta로");
+  });
+
+  test("다른 쌍에서는 ㄹ 도 여느 받침과 같다", () => {
+    assert.equal(withJosa("서울", "이/가"), "서울이");
+    assert.equal(withJosa("1", "을/를"), "1을");
+  });
+
+  test("finalSound 는 none · rieul · other · null 넷이다", () => {
+    assert.equal(I18N.finalSound("가"), "none");
+    assert.equal(I18N.finalSound("갈"), "rieul");
+    assert.equal(I18N.finalSound("각"), "other");
+    assert.equal(I18N.finalSound("作業"), null);
+    // 옛 이름은 그대로 「받침이 있는가」다 — 네 쌍이 그것만 본다
+    assert.equal(hasFinalConsonant("갈"), true);
+    assert.equal(hasFinalConsonant("가"), false);
+  });
+
+  test("그 두 쌍을 쓰는 화면 문자열이 괄호로 돌아가지 않는다 (§16-5)", () => {
+    const closed = I18N.t("ko", "version.edit.readonly.closed", { state: "제출됨" });
+    assert.match(closed, /제출됨이라/);
+    assert.ok(!/제출됨 라/.test(closed), closed);
+    const back = I18N.t("ko", "store.gate.return", { text: "#/store/app/v/7" });
+    assert.match(back, /#\/store\/app\/v\/7로 돌아갑니다/);
   });
 });
 

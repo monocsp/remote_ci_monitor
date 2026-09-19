@@ -1492,7 +1492,9 @@ RELEASE_STUB_JS = r"""
     review: { plan: { job_id: 651, state: "succeeded", age_seconds: 240, stale: false,
                       doc: reviewPlanDoc },
               result: null },
-    upload: { job_id: 650, state: "succeeded", finished_at: ago(3000), doc: uploadDoc },
+    // 역할 항목에 `finished_at` 은 없다 — 서버 `role_entry` 가 안 보낸다(§17-9). 시각은
+    // `jobs[]` 행에서 온다. 스텁이 서버보다 후하면 그 열쇠를 읽는 버그가 여기서 안 잡힌다.
+    upload: { job_id: 650, state: "succeeded", doc: uploadDoc },
     jobs: [job(651, "release-review", "review"), job(650, "release-upload", "upload"),
            job(641, "release-plan", "plan")],
   };
@@ -1648,14 +1650,19 @@ GROUPS_JS = """
 })()
 """
 
+# 출시 · 게시 · 롤아웃 버튼은 어떤 화면에도 없다(R9 · AC-D6 · AC-D10). 그것을 **글자가 아니라
+# 신원으로** 건다(§17-2): 예전에는 「managed publishing」이 들어간 글을 통째로 면제했는데, 그
+# 문구는 진짜 게시 버튼이 가장 달기 쉬운 말이라 `Publish now (managed publishing)` 같은 것이
+# 그대로 빠져나갔다. 면제되는 것은 **두 가지 신원**뿐이다:
+#   - `[data-sheet-fix]` — 시트의 «남은 것» 한 줄. 스크롤하고 포커스만 준다(아무것도 안 보낸다).
+#   - `[data-inputs]` — 대기열 행의 작업 입력 칩. 계약 입력 **이름**(`play_managed_publishing=…`)
+#     을 글자로 보일 뿐이고, 누르면 그 JSON 을 토스트로 띄운다.
+# 낱말 목록에는 한국어도 있다 — 없으면 한국어로 붙인 버튼은 한 번도 검사받지 않는다.
 FORBIDDEN_BUTTONS_JS = """
 [...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
+  .filter(b => !b.hasAttribute('data-sheet-fix') && !b.hasAttribute('data-inputs'))
   .map(b => (b.textContent || b.value || '').trim())
-  // 「관리형 게시(managed publishing)」는 Play Console 의 **설정 이름**이고, 이 화면의 그 글은
-  // 사람이 콘솔에서 켜짐을 봤다고 확인하는 문장이다 — 누르면 게시되는 버튼이 아니다. 진짜 금지
-  // 버튼(Publish · Publish to production · Start rollout · Release this version)은 그대로 걸린다.
-  .filter(t => !/managed[ -]publishing|관리형 게시/i.test(t))
-  .filter(t => /release this version|publish|rollout/i.test(t))
+  .filter(t => /release this version|publish|rollout|게시|출시|배포|롤아웃/i.test(t))
 """
 
 # 제출 조건은 전부 바텀시트에 있다(워크플랜 §4.2) — 심사 패널은 상태 화면의 읽기 전용 배치다.
@@ -2578,9 +2585,10 @@ def test_version_page_prefills_every_field_and_autosaves_only_the_key_that_chang
             assert c.eval(_q("#store [data-prefill-source]", ".textContent")) == (
                 "prefilled from asc_live:1.0.1 · play_listing"
             )
-            # 스크린샷은 보기만 · 이전 버전과 같음
+            # 스크린샷은 보기만 — 칩은 **잰 것만** 말한다(§17-16): 프리필에 파일 목록이 없어도
+            # 뜨던 «이전 버전과 같음» 은 재지 않고 같다고 말하는 문장이었다
             assert c.eval(_q('#store [data-shots-mark="same"]', ".textContent")) == (
-                "same as the previous version"
+                "rcm does not touch screenshots"
             )
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             # AC-C6 — 한 칸을 고치면 800 ms 뒤 그 키만 나간다
@@ -2596,7 +2604,7 @@ def test_version_page_prefills_every_field_and_autosaves_only_the_key_that_chang
             assert kw["changed"] is True and kw["chips"] == ["changed"], kw
             assert kw["source"] == "edited" and kw["srcText"] == "your edit", kw
             assert _field(c, "ios.subtitle")["changed"] is False, "남의 칸은 그대로다"
-            assert "1 fields differ" in c.eval(_q("#store [data-edit-head]", ".textContent"))
+            assert "1 field differs" in c.eval(_q("#store [data-edit-head]", ".textContent"))
             # E10 — «되돌리기» 는 이전 값으로 돌려놓고 바뀐 것이 없어진다
             c.eval(_q('#store [data-field-revert="ios.keywords"]', ".click()"))
             _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === 2")
@@ -2815,6 +2823,15 @@ SHEET_STAGES_JS = """
 """
 SHEET_SUBMIT = "#release-sheet [data-sheet-submit]"
 SHEET_TOGGLE = "#release-sheet [data-sheet-toggle]"
+# E23 · §17-3 — 페이지 맨 아래까지 스크롤한 뒤에도 시트 **머리**(버전 · 한 줄 · 접기)가 화면
+# 안에 통째로 있는가. sticky 의 담는 상자가 여백만큼 짧으면 여기서 머리가 위로 밀려 나간다.
+SHEET_HEAD_VISIBLE_JS = """
+(() => {
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  const h = document.querySelector('#release-sheet .sh-head').getBoundingClientRect();
+  return h.top >= 0 && h.bottom <= window.innerHeight + 1;
+})()
+"""
 
 
 def _open_sheet(c: Chrome, base: str, srv, *, extra: str = "") -> None:
@@ -3122,13 +3139,123 @@ def test_version_page_sheet_shows_a_running_round_even_when_collapsed(tmp_path):
                 " return s.top >= v.bottom - 1; })()"
             )
             assert lines is True, "390px 에서는 버전과 상태가 서로 다른 줄이다"
+            # 비워 두는 여백은 시트의 **형제**(`.vmain`)가 든다 — 본문에 주면 그것이 곧
+            # sticky 의 담는 상자라 시트가 화면 밖으로 밀린다(§17-3)
             pad = c.eval(
-                "parseInt(getComputedStyle(document.querySelector('[data-store-body]'))"
+                "parseInt(getComputedStyle(document.querySelector('[data-version-main]'))"
                 ".paddingBottom, 10)"
             )
             sheet_h = c.eval("document.getElementById('release-sheet').offsetHeight")
             assert pad >= sheet_h, (pad, sheet_h)
+            assert (
+                c.eval(
+                    "parseInt(getComputedStyle(document.querySelector('[data-store-body]'))"
+                    ".paddingBottom, 10) || 0"
+                )
+                == 0
+            ), "담는 상자에는 여백을 주지 않는다"
+            head_seen = c.eval(SHEET_HEAD_VISIBLE_JS)
+            assert head_seen is True, "폰 폭: 펼친 채 맨 아래에서도 머리가 보인다"
             assert c.eval(_q(SHEET_TOGGLE)) is not None, "접기 버튼이 보인다"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 1280×900 에서도 같다 — 맨 아래로 스크롤해도 머리가 화면 안에 있다
+            c.viewport(1280)
+            _wait(c, _q("#release-sheet [data-sheet-body]", ".hidden") + " === false")
+            assert c.eval(SHEET_HEAD_VISIBLE_JS) is True, "1280 폭: 맨 아래에서도 머리가 보인다"
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 금지 버튼 검사 자신을 검사한다 (워크플랜 §17-2) ──────────────────────────────────
+#
+# AC-D10 의 검사식은 **화면을 지키는 장치**다. 장치가 조용히 새면 아무도 모른다. D 단계 격리
+# 검증이 버튼을 심어 재어 보니 옛 검사식은 「managed publishing」이 들어간 글을 통째로 면제해
+# `Publish now (managed publishing)` 같은 진짜 게시 버튼을 그대로 통과시켰고, 한국어 낱말은
+# 아예 목록에 없었으며, 대기열의 작업 입력 칩(`play_managed_publishing=…`)을 잡아 살아 있는
+# 페이지마다 검사식이 비지 않았다. 그래서 면제를 **글자가 아니라 신원**으로 바꿨다.
+GUARD_PROBE_JS = r"""
+(() => {
+  window.rcmGuardProbe = (rows) => {
+    [...document.querySelectorAll('[data-guard-probe]')].forEach((b) => b.remove());
+    rows.forEach(([text, attrs]) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      b.setAttribute('data-guard-probe', '1');
+      Object.keys(attrs || {}).forEach((k) => b.setAttribute(k, attrs[k]));
+      document.body.appendChild(b);
+    });
+    return true;
+  };
+})()
+"""
+
+# 옛 검사식이 그대로 흘려보내던 것들 + 잡히던 것 둘. 이제 **전부** 걸려야 한다.
+FORBIDDEN_PROBES = [
+    "Publish now (managed publishing)",
+    "Managed publishing: Publish to production",
+    "Start rollout — managed publishing",
+    "관리형 게시로 지금 게시",
+    "Publish",
+    "Publish to production",
+    "Start rollout",
+    "Release this version",
+    "지금 출시",
+    "롤아웃 시작",
+]
+
+
+def test_the_forbidden_button_guard_catches_publish_controls_and_exempts_by_identity(tmp_path):
+    """§17-2 — 금지 버튼 검사는 **신원**으로 면제한다. 시트의 «남은 것» 한 줄
+    (`[data-sheet-fix]` · 스크롤하고 포커스만 준다)과 대기열의 작업 입력 칩(`[data-inputs]` ·
+    계약 입력 이름을 글자로 보인다)만 빠지고, 글자로 빠져나가는 길은 없다. 심어 본 버튼 열은
+    영어·한국어 가릴 것 없이 전부 걸리고, 면제되는 둘은 같은 글자를 달아도 안 걸린다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-guard", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": GUARD_PROBE_JS})
+            _open_sheet(c, base, srv)
+            # 살아 있는 페이지는 비어 있다 — 옛 검사식은 여기서 이미 비지 않았다(AC-D10)
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 면제가 **일하고 있다**: 시트의 관리형 게시 줄은 낱말에 걸릴 글자를 달고 있다
+            fix_texts = c.eval(
+                "[...document.querySelectorAll('#release-sheet [data-sheet-fix]')]"
+                ".map(b => b.textContent.trim())"
+                ".filter(t => /publish|rollout|게시/i.test(t))"
+            )
+            assert fix_texts, "관리형 게시 «남은 것» 줄이 있어야 면제가 시험된다"
+            managed_row = "#release-sheet [data-sheet-fix='managed_unconfirmed']"
+            anchor = c.eval(_q(managed_row, ".getAttribute('data-fix-anchor')"))
+            assert anchor == "#sheet-managed", "그 줄은 보내지 않는다 — 칸으로 갈 뿐이다"
+            # 심은 버튼은 하나하나 걸린다
+            for label in FORBIDDEN_PROBES:
+                c.eval(f"window.rcmGuardProbe([[{json.dumps(label)}, null]])")
+                caught = c.eval(FORBIDDEN_BUTTONS_JS)
+                assert caught == [label], (label, caught)
+            # 열을 한꺼번에 심어도 하나도 새지 않는다
+            c.eval(
+                "window.rcmGuardProbe(" + json.dumps([[t, None] for t in FORBIDDEN_PROBES]) + ")"
+            )
+            assert sorted(c.eval(FORBIDDEN_BUTTONS_JS)) == sorted(FORBIDDEN_PROBES)
+            # 면제되는 둘은 같은 글자를 달아도 안 걸린다 — 신원이 다르다
+            c.eval(
+                "window.rcmGuardProbe("
+                + json.dumps(
+                    [
+                        [
+                            "Google Play managed publishing is on",
+                            {"data-sheet-fix": "managed_unconfirmed"},
+                        ],
+                        ["관리형 게시를 체크합니다", {"data-sheet-fix": "managed_unconfirmed"}],
+                        ["play_managed_publishing=confirmed-on", {"data-inputs": "650"}],
+                    ]
+                )
+                + ")"
+            )
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            c.eval("window.rcmGuardProbe([])")
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             assert c.page_errors() == []
     finally:

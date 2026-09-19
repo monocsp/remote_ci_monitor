@@ -255,6 +255,15 @@ LISTING_CACHE_TTL = 30.0
 #: 설정, 답). sha 가 키에 있으니 다른 sha 의 답은 절대 나가지 않는다.
 _ListingKey = tuple[str, str, str]
 _ListingEntry = tuple[float, ReleaseListing, dict[str, Any]]
+#: `GET …/release/driver` 가 돌리는 대장 `--status` 하나를 이만큼(초) 기억한다(워크플랜 §17-4).
+#: 웹의 타이머는 15초이고 그대로 둔다 — 그보다 조금 길게 잡아야 연이은 두 번이 한 번으로 합쳐지고,
+#: 탭이 여럿이어도 빌드 머신에서 도는 프로세스는 이 간격에 하나가 상한이다. 답의 나머지(행 · 로그
+#: 끝 · plan N)는 캐시하지 않는다 — 그것들은 프로세스를 안 돌린다.
+DRIVER_STATUS_CACHE_TTL = 20.0
+#: 그 기억의 키 — (저장소, 대장 체크아웃 sha, build_name, 회차 id, 도는 중인가, 종료 코드).
+#: 회차가 바뀌거나 끝나면 키가 달라져, **낡은 답이 그것이 말하는 것보다 오래 살아남지 못한다**.
+_DriverStatusKey = tuple[str, str, str, int | None, bool, int | None]
+_DriverStatusEntry = tuple[float, list[str] | None, str | None]
 #: 묶음이 아직 오는 중 — 버전 훅이 기다렸다가 `artifacts_changed` 때 다시 본다
 ART_IN_TRANSIT = frozenset({art.PENDING, art.COLLECTING, art.UPLOADING})
 
@@ -471,6 +480,9 @@ class App(RemoteWorkersMixin):
         # 문안 미리보기의 짧은 기억(§14-1) — 미러가 움직이면 그 저장소의 것은 버린다.
         self._listing_cache: dict[_ListingKey, _ListingEntry] = {}
         self._listing_cache_guard = threading.Lock()
+        # 대장 `--status` 의 짧은 기억(§17-4) — 키에 회차와 그 상태가 들어 있다.
+        self._driver_status_cache: dict[_DriverStatusKey, _DriverStatusEntry] = {}
+        self._driver_status_guard = threading.Lock()
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
@@ -2378,8 +2390,10 @@ class App(RemoteWorkersMixin):
             )
         return repo, store, profile.driver
 
-    def _driver_checkout(self, repo: RepoConfig, driver: str) -> tuple[Path, Path]:
-        workspace, _sha = self._branch_checkout(repo, "driver")
+    def _driver_checkout(self, repo: RepoConfig, driver: str) -> tuple[Path, Path, str]:
+        """대장 스크립트가 있는 체크아웃 — (작업 폴더, 스크립트 경로, 체크아웃 sha).
+        sha 는 `--status` 의 짧은 기억이 키로 쓴다(§17-4)."""
+        workspace, sha = self._branch_checkout(repo, "driver")
         path = workspace / driver
         if not path.is_file() or not path.stat().st_mode & 0o111:
             raise ApiError(
@@ -2388,7 +2402,7 @@ class App(RemoteWorkersMixin):
                 code="driver_missing",
                 error_code="driver_missing",
             )
-        return workspace, path
+        return workspace, path, sha
 
     def _no_running_release(self, repo: RepoConfig) -> None:
         row = self.driver.running(repo.name)
@@ -2431,7 +2445,7 @@ class App(RemoteWorkersMixin):
         **kw: Any,
     ) -> dict[str, Any]:
         self._no_running_release(repo)
-        workspace, path = self._driver_checkout(repo, driver)
+        workspace, path, _sha = self._driver_checkout(repo, driver)
         # 회차는 버전 드래프트에 그대로 붙는다(`version_id`). 드라이버가 `V` 단계를 모르면
         # **명령줄의 `--version-id` 만** 뺀다 — 이름은 이미 행에서 정해 뒀으니 옛길로 잘 돈다.
         version_id = kw.get("version_id")
@@ -2680,7 +2694,7 @@ class App(RemoteWorkersMixin):
                 }
             )
         try:
-            workspace, path = self._driver_checkout(repo, profile.driver)
+            workspace, path, sha = self._driver_checkout(repo, profile.driver)
         except ApiError as e:
             doc["status_error"] = e.message
             return doc
@@ -2688,9 +2702,25 @@ class App(RemoteWorkersMixin):
         if not build_name:
             plan = self._release_view(repo)["plan"]
             build_name = plan.get("build_name") if plan else None
-        lines, err = self.driver.status(
-            path, workspace, self._repo_env(store), build_name=build_name or None
+        # `--status` 하나만 짧게 기억한다(§17-4). 키에 회차 id · 도는 중인가 · 종료 코드가 들어
+        # 있어, 회차가 바뀌거나 끝나는 순간 옛 답은 더 이상 꺼내지지 않는다 — 기억이 그것이
+        # 말하는 것보다 오래 살아남지 못한다. 나머지(행 · 로그 끝 · plan N)는 매번 새로 읽는다.
+        key: _DriverStatusKey = (
+            repo.name,
+            sha,
+            build_name or "",
+            doc["release_id"],
+            bool(doc["running"]),
+            doc["exit_code"],
         )
+        found = self._driver_status_cached(key)
+        if found is None:
+            lines, err = self.driver.status(
+                path, workspace, self._repo_env(store), build_name=build_name or None
+            )
+            self._driver_status_remember(key, lines, err)
+        else:
+            lines, err = found
         doc["status"] = lines
         doc["status_error"] = err
         # 능력 신호(계약 §5): `--status` 의 `stages:` 줄. `V` 가 없으면 이 드라이버는 버전 단계를
@@ -2698,6 +2728,34 @@ class App(RemoteWorkersMixin):
         doc["stages"] = driver_stages(lines)
         doc["knows_version_stage"] = knows_version_stage(lines)
         return doc
+
+    def _driver_status_cached(
+        self, key: _DriverStatusKey
+    ) -> tuple[list[str] | None, str | None] | None:
+        """기억해 둔 `--status`, 없으면 None. 만료된 것과 **같은 저장소의 다른 회차** 는 함께
+        버린다 — 회차가 넘어가면 그 전 답이 남아 있을 자리가 없다."""
+        now = time.monotonic()
+        with self._driver_status_guard:
+            for stale in [
+                k
+                for k, (until, _lines, _err) in self._driver_status_cache.items()
+                if until <= now or (k[0] == key[0] and k[3] != key[3])
+            ]:
+                del self._driver_status_cache[stale]
+            found = self._driver_status_cache.get(key)
+            if found is None:
+                return None
+            return (list(found[1]) if found[1] is not None else None), found[2]
+
+    def _driver_status_remember(
+        self, key: _DriverStatusKey, lines: list[str] | None, err: str | None
+    ) -> None:
+        with self._driver_status_guard:
+            self._driver_status_cache[key] = (
+                time.monotonic() + DRIVER_STATUS_CACHE_TTL,
+                list(lines) if lines is not None else None,
+                err,
+            )
 
     def mask_for_preset(self, preset_name: str) -> tuple[bytes, ...]:
         """원격 워커가 올리는 로그도 같은 규칙으로 지운다 — 값은 서버의 비밀 폴더에 있다."""

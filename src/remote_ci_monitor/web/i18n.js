@@ -109,36 +109,58 @@
   var JOSA_DIGIT = { "0": true, "1": true, "2": false, "3": true, "4": false,
     "5": false, "6": true, "7": true, "8": true, "9": false };
   var JOSA_LATIN = { l: true, m: true, n: true, r: true };
+  //  6. 「으로/로」만 **ㄹ 받침을 받침 없는 쪽으로** 읽는다(「서울로」 · 「7로」 — 칠). 그래서 끝소리
+  //     판정은 «있다/없다» 둘이 아니라 `none · rieul · other` 셋이다. ㄹ 로 끝나는 것은 한글 음절
+  //     `(code - 0xAC00) % 28 === 8`, 숫자 `1 일 · 7 칠 · 8 팔`, 라틴 `l 엘 · r 알` 이다.
+  var JOSA_RIEUL_DIGIT = { "1": true, "7": true, "8": true };
+  var JOSA_RIEUL_LATIN = { l: true, r: true };
   // 각 쌍은 [받침 있는 쪽, 없는 쪽]. 「와/과」만 글자 순서가 뒤집혀 있다(받침 있으면 「과」).
   var JOSA_PAIRS = {
     "이/가": ["이", "가"],
     "을/를": ["을", "를"],
     "은/는": ["은", "는"],
-    "와/과": ["과", "와"]
+    "와/과": ["과", "와"],
+    "이라/라": ["이라", "라"],
+    "으로/로": ["으로", "로"]
   };
+  // 규칙 6 을 쓰는 쌍 — ㄹ 받침을 받침 없는 쪽으로 읽는다.
+  var JOSA_RIEUL_OPEN = { "으로/로": true };
 
-  /** 마지막 글자에 받침이 있는가. 모르면 `null`(호출자가 받침 없는 쪽으로 읽는다). 안 던진다. */
-  function hasFinalConsonant(word) {
+  /** 마지막 글자의 끝소리 — `null`(모름) · `"none"` · `"rieul"` · `"other"`. 안 던진다. */
+  function finalSound(word) {
     if (word === null || word === undefined) return null;
     var s = String(word);
     for (var i = s.length - 1; i >= 0; i--) {
       var ch = s.charAt(i);
       if (JOSA_SKIP.test(ch)) continue;
       var code = s.charCodeAt(i);
-      if (code >= 0xAC00 && code <= 0xD7A3) return (code - 0xAC00) % 28 !== 0;
-      if (ch >= "0" && ch <= "9") return JOSA_DIGIT[ch];
+      if (code >= 0xAC00 && code <= 0xD7A3) {
+        var jong = (code - 0xAC00) % 28;
+        return jong === 0 ? "none" : jong === 8 ? "rieul" : "other";
+      }
+      if (ch >= "0" && ch <= "9") return !JOSA_DIGIT[ch] ? "none" : JOSA_RIEUL_DIGIT[ch] ? "rieul" : "other";
       var low = ch.toLowerCase();
-      if (low >= "a" && low <= "z") return JOSA_LATIN[low] === true;
+      if (low >= "a" && low <= "z") {
+        return JOSA_LATIN[low] !== true ? "none" : JOSA_RIEUL_LATIN[low] ? "rieul" : "other";
+      }
       return null;   // 판정할 수 없는 글자 — 건너뛰지 않고 여기서 멈춘다(규칙 5)
     }
     return null;     // 전부 건너뛰었다
   }
 
-  /** 이름 뒤에 붙일 조사 하나. `pair` 는 "이/가" · "을/를" · "은/는" · "와/과". */
+  /** 마지막 글자에 받침이 있는가. 모르면 `null`(호출자가 받침 없는 쪽으로 읽는다). 안 던진다. */
+  function hasFinalConsonant(word) {
+    var f = finalSound(word);
+    return f === null ? null : f !== "none";
+  }
+
+  /** 이름 뒤에 붙일 조사 하나. `pair` 는 `JOSA_PAIRS` 의 열쇠 여섯 가운데 하나. */
   function josa(word, pair) {
     var p = Object.prototype.hasOwnProperty.call(JOSA_PAIRS, pair) ? JOSA_PAIRS[pair] : null;
     if (!p) throw new Error("josa: unknown pair " + pair);
-    return hasFinalConsonant(word) ? p[0] : p[1];
+    var f = finalSound(word);
+    if (f === "rieul" && JOSA_RIEUL_OPEN[pair]) return p[1];
+    return f !== null && f !== "none" ? p[0] : p[1];
   }
 
   /** 이름 + 조사. 문장 쪽은 이것만 쓴다.
@@ -888,7 +910,7 @@
     "sheet.elapsed": function (a) { return "elapsed " + a.dur; },
     "sheet.basis.stages": function (a) { return "basis: " + a.total + " declared stages, each worth the same"; },
     "sheet.basis.stages_job": function (a) { return "basis: " + a.total + " declared stages + the running job's own progress inside its stage"; },
-    "sheet.basis.uploaded": "basis: the build is up — only the review submission is left",
+    "sheet.basis.uploaded": "no percentage — the build is up and only the review submission is left",
     "sheet.basis.round_done": "basis: the round finished",
     "sheet.basis.submitted": "basis: submitted for review",
     "sheet.expand": "Expand",
@@ -938,12 +960,12 @@
     "sheet.left.split_unsupported": "The preset cannot carry two store version names — re-run the store-connect skill",
     "sheet.left.driver_no_v": "The driver does not know the V stage — re-run the release-driver skill",
     "sheet.left.unsafe": "Fix the release type first — the red banner says why",
-    "sheet.diff.shots_same": function (a) { return a.store + " screenshots: same as the previous version"; },
-    "sheet.diff.shots_unknown": function (a) { return a.store + " screenshots: the previous version's files are unknown"; },
+    "sheet.diff.shots_same": function (a) { return a.store + " screenshots: rcm does not touch them"; },
+    "sheet.diff.shots_unknown": function (a) { return a.store + " screenshots: rcm does not touch them"; },
     "sheet.diff.none": "Nothing differs from the previous version — it goes up as it is",
     "sheet.send.build": function (a) { return "build " + a.n; },
     "sheet.send.build_unknown": "build — (the plan does not know it)",
-    "sheet.send.edits": function (a) { return a.n + " edited fields"; },
+    "sheet.send.edits": function (a) { return a.n + (a.n === 1 ? " edited field" : " edited fields"); },
     "sheet.send.no_edits": "the previous version's copy, unchanged",
     "sheet.send.phased_on": "iOS phased release on",
     "sheet.send.phased_off": "iOS phased release off",
@@ -1117,14 +1139,14 @@
     "version.field.whats_new": "What's New",
     "version.field.release_notes": "Release notes",
     "version.edit.head": "Prefilled with the previous version — only a field you change gets a «changed» chip",
-    "version.edit.head_changed": function (a) { return a.n + " fields differ from the previous version"; },
+    "version.edit.head_changed": function (a) { return a.n + (a.n === 1 ? " field differs" : " fields differ") + " from the previous version"; },
     "version.edit.source.edited": "your edit",
     "version.edit.source.prefill": "same as the previous version",
     "version.edit.source.file": "from the file",
     "version.edit.source.empty": "empty",
     "version.edit.changed": "changed",
     "version.edit.remote": "changed elsewhere",
-    "version.edit.remote_notice": function (a) { return a.n + " fields were changed in another browser — your text is still here, and saving overwrites theirs"; },
+    "version.edit.remote_notice": function (a) { return a.n + (a.n === 1 ? " field was" : " fields were") + " changed in another browser — the fields you have typed in keep your text, the rest took theirs"; },
     "version.edit.revert": "Revert",
     "version.edit.readonly.admin": "Editing the listing needs an admin token — this is a read-only view",
     "version.edit.readonly.closed": function (a) { return "This version is " + a.state + " — the listing cannot be edited any more"; },
@@ -1135,8 +1157,8 @@
     "version.edit.save.failed": function (a) { return "could not save: " + a.detail; },
     "version.edit.save.retry": "Save again",
     "version.edit.save.network": "network",
-    "version.edit.screenshots.same": "same as the previous version",
-    "version.edit.screenshots.unknown": "the previous version's files are unknown",
+    "version.edit.screenshots.same": "rcm does not touch screenshots",
+    "version.edit.screenshots.unknown": "rcm does not touch screenshots",
     "version.edit.screenshots.readonly": "Screenshots are read-only here — uploading them from the web comes later.",
     "version.edit.prefill_from": function (a) { return "prefilled from " + a.source; },
     "version.edit.prefill_unknown": "prefilled from the previous version",
@@ -1865,7 +1887,7 @@
     "sheet.elapsed": function (a) { return "경과 " + a.dur; },
     "sheet.basis.stages": function (a) { return "근거: 선언된 " + a.total + " 단계, 같은 무게"; },
     "sheet.basis.stages_job": function (a) { return "근거: 선언된 " + a.total + " 단계 + 지금 단계 안 도는 작업의 자체 진행"; },
-    "sheet.basis.uploaded": "근거: 빌드가 올라갔고 심사 제출만 남았습니다",
+    "sheet.basis.uploaded": "퍼센트 없음 — 빌드가 올라갔고 심사 제출만 남았습니다",
     "sheet.basis.round_done": "근거: 회차가 끝났습니다",
     "sheet.basis.submitted": "근거: 심사에 제출했습니다",
     "sheet.expand": "펼치기",
@@ -1915,8 +1937,8 @@
     "sheet.left.split_unsupported": "프리셋이 두 스토어 버전 이름을 못 나릅니다 — store-connect 스킬을 다시 돌립니다",
     "sheet.left.driver_no_v": "드라이버가 V 단계를 모릅니다 — release-driver 스킬을 다시 돌립니다",
     "sheet.left.unsafe": "출시 방식을 먼저 고칩니다 — 빨간 띠가 이유를 말합니다",
-    "sheet.diff.shots_same": function (a) { return a.store + " 스크린샷: 이전 버전과 같음"; },
-    "sheet.diff.shots_unknown": function (a) { return a.store + " 스크린샷: 이전 버전의 파일을 모름"; },
+    "sheet.diff.shots_same": function (a) { return a.store + " 스크린샷: rcm 은 건드리지 않습니다"; },
+    "sheet.diff.shots_unknown": function (a) { return a.store + " 스크린샷: rcm 은 건드리지 않습니다"; },
     "sheet.diff.none": "이전 버전과 달라진 것이 없습니다 — 그대로 올라갑니다",
     "sheet.send.build": function (a) { return "빌드 " + a.n; },
     "sheet.send.build_unknown": "빌드 — (플랜이 모릅니다)",
@@ -2101,10 +2123,10 @@
     "version.edit.source.empty": "비어 있음",
     "version.edit.changed": "바뀜",
     "version.edit.remote": "다른 곳에서 바뀜",
-    "version.edit.remote_notice": function (a) { return a.n + "칸이 다른 브라우저에서 바뀌었습니다 — 화면의 글은 그대로이고, 저장하면 그쪽 값을 덮어씁니다"; },
+    "version.edit.remote_notice": function (a) { return a.n + "칸이 다른 브라우저에서 바뀌었습니다 — 직접 친 칸은 화면의 글 그대로이고(저장하면 그쪽 값을 덮어씁니다), 손대지 않은 칸은 그쪽 값을 받았습니다"; },
     "version.edit.revert": "되돌리기",
     "version.edit.readonly.admin": "문안을 고치려면 admin 토큰이 필요합니다 — 지금은 보기만 합니다",
-    "version.edit.readonly.closed": function (a) { return "이 버전은 " + a.state + " 라 문안을 더 고칠 수 없습니다"; },
+    "version.edit.readonly.closed": function (a) { return "이 버전은 " + withJosa(a.state, "이라/라") + " 문안을 더 고칠 수 없습니다"; },
     "version.edit.save.idle": "고치면 저절로 저장됩니다",
     "version.edit.save.saving": "저장하는 중…",
     "version.edit.save.saved": function (a) { return "자동 저장 · " + a.age + " 전"; },
@@ -2112,13 +2134,13 @@
     "version.edit.save.failed": function (a) { return "저장 실패: " + a.detail; },
     "version.edit.save.retry": "다시 저장",
     "version.edit.save.network": "네트워크",
-    "version.edit.screenshots.same": "이전 버전과 같음",
-    "version.edit.screenshots.unknown": "이전 버전 파일을 모름",
+    "version.edit.screenshots.same": "rcm 은 스크린샷을 건드리지 않습니다",
+    "version.edit.screenshots.unknown": "rcm 은 스크린샷을 건드리지 않습니다",
     "version.edit.screenshots.readonly": "스크린샷은 여기서 보기만 합니다 — 웹에서 올리는 것은 다음 작업입니다.",
     "version.edit.prefill_from": function (a) { return "프리필 출처 " + a.source; },
     "version.edit.prefill_unknown": "이전 버전 문안으로 채웠습니다",
     "version.edit.no_prefill": "이전 버전 문안을 아직 못 읽었습니다 — store/ 파일 값으로 채웁니다",
-    "store.gate.return": function (a) { return "설정을 마치면 " + a.text + " 로 돌아갑니다"; }
+    "store.gate.return": function (a) { return "설정을 마치면 " + withJosa(a.text, "으로/로") + " 돌아갑니다"; }
   };
 
   var MESSAGES = { en: EN, ko: KO };
@@ -2152,7 +2174,7 @@
   var api = {
     MESSAGES: MESSAGES, LANGS: LANGS, DEFAULT_LANG: DEFAULT_LANG,
     t: t, has: has, normalize: normalize, ordinalSuffix: ordinalSuffix,
-    hasFinalConsonant: hasFinalConsonant, josa: josa, withJosa: withJosa
+    hasFinalConsonant: hasFinalConsonant, finalSound: finalSound, josa: josa, withJosa: withJosa
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof globalThis !== "undefined") globalThis.rcmI18n = api;

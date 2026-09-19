@@ -713,10 +713,19 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 /* ── 바텀시트 — 진행 · 남은 것 · 심사 제출 (워크플랜 §4.2 · 기획 R8~R12) ──────────────
    본문의 마지막 자식이고 `position: sticky` 로 화면 아래에 붙어 있다. 위 테두리 색이 곧 형편이다
    (파랑 진행 · 황토 사람 차례/확인 · 보라 모름 · 빨강 실패 · 초록 준비됨·제출됨 · 회색 만료).
-   본문이 시트 뒤에 가리지 않도록 렌더 뒤 `[data-store-body]` 에 시트 높이만큼 아래 여백을 준다. */
+   본문이 시트 뒤에 가리지 않도록 렌더 뒤 **`.vmain`** 에 시트 높이만큼 아래 여백을 준다(§17-3):
+   sticky 의 담는 상자는 부모의 content box 라, 그 여백을 `[data-store-body]` 에 주면 시트가
+   그 안으로 내려가지 못하고 페이지 맨 아래에서 화면 위로 밀려 올라간다. `.vmain` 은 시트의
+   형제이고, 시트는 여전히 본문의 마지막 자식이다. */
+.vmain { display: block; }
 .sheet { position: sticky; bottom: 0; z-index: 30; margin: 14px 0 0;
   border: 1px solid var(--line); border-top-width: 3px; border-radius: 12px 12px 0 0;
-  background: var(--surface); box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12); }
+  background: var(--surface); box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
+  /* 화면보다 큰 시트는 `bottom: 0` 으로 붙여도 **머리가 화면 위로 밀려 나간다**(§17-3): sticky 는
+     담는 상자 밖으로 못 나가서, 페이지 맨 아래에서는 시트 아래에 남는 페이지 꼬리(푸터 · 아래
+     패딩)만큼 더 밀린다. 그래서 시트 **전체**를 화면에 맞춰 두고 넘치는 것은 본문이 스크롤한다
+     — 접기 버튼은 어느 폭에서도 보인다(E23). */
+  display: flex; flex-direction: column; max-height: min(74vh, calc(100vh - 160px)); }
 .sheet[data-tone="new"], .sheet[data-tone="running"] { border-top-color: var(--accent); }
 .sheet[data-tone="human"], .sheet[data-tone="warn"] { border-top-color: var(--warn); }
 .sheet[data-tone="lost"] { border-top-color: var(--lost); }
@@ -734,7 +743,8 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 .sheet[data-tone="lost"] .pbar i { background: var(--lost); }
 .sheet[data-tone="bad"] .pbar i { background: var(--bad); }
 .sheet[data-tone="ok"] .pbar i, .sheet[data-tone="done"] .pbar i { background: var(--ok); }
-.sh-body { border-top: 1px solid var(--line-2); padding: 12px 14px; display: grid; gap: 10px; max-height: 70vh; overflow-y: auto; }
+.sh-body { border-top: 1px solid var(--line-2); padding: 12px 14px; display: grid; gap: 10px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .sh-body .lab { font: var(--t-label); color: var(--muted); }
 .sh-body .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 .stages { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -765,7 +775,7 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
   .sh-head { padding: 8px 12px; }
   .sh-head .ver { font: var(--t-subtitle); }
   .sh-head .st { flex-basis: 100%; }
-  .sh-body { max-height: 78vh; padding: 10px 12px; }
+  .sh-body { padding: 10px 12px; }
   .sh-body .two { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {

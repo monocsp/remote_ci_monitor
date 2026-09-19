@@ -228,13 +228,16 @@ describe("versionPageModel — 절 둘과 그룹 차례 (§3.2 W3)", () => {
     assert.equal(fieldOf(some, "ios.keywords").changed, true);
     assert.equal(fieldOf(some, "ios.subtitle").changed, false);
   });
-  test("스크린샷 표시는 서버 diff 가 말한 것뿐이다 — 없으면 «모름»", () => {
+  test("스크린샷 칩은 **재지 않은 것을 말하지 않는다** (§17-16)", () => {
+    // 서버의 `screenshots` 는 «이전 문안이 그 스토어를 아는가» 일 뿐이고 파일을 비교하지
+    // 않는다. 그래서 «이전 버전과 같음» 은 재지 않고 같다고 말하는 문장이었다 — 사실은
+    // 웹 업로드가 범위 밖이라(Q8) rcm 이 스크린샷을 건드리지 않는다는 것뿐이다.
     const m = S.versionPageModel(ctx(), "ko");
     assert.equal(m.sections[0].screenshots.state, "same");
-    assert.equal(m.sections[0].screenshots.text, "이전 버전과 같음");
+    assert.equal(m.sections[0].screenshots.text, "rcm 은 스크린샷을 건드리지 않습니다");
     const na = S.versionPageModel(ctx({ version: vdoc({ diff: { fields: [], screenshots: { ios: "n/a", android: "n/a" } } }) }), "ko");
     assert.equal(na.sections[0].screenshots.state, "unknown");
-    assert.equal(na.sections[0].screenshots.text, "이전 버전 파일을 모름");
+    assert.equal(na.sections[0].screenshots.text, "rcm 은 스크린샷을 건드리지 않습니다");
   });
   test("AC-C7 — admin 이 아니면 읽기 전용이고 이유를 한 문장으로 말한다", () => {
     const m = S.versionPageModel(ctx({ admin: false }), "en");
