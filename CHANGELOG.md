@@ -23,8 +23,12 @@ of a key bumps that number and is listed here.
   `mode = upload` now links its job to the draft and holds the row in `running` until that job
   ends, the way `review` and `start` already did, so «discard» answers 409 `version_running`
   instead of firing a job that deletes the App Store version rcm is uploading to; a
-  `mode = rehearsal` job writes nothing to a store and still leaves the draft open, and a restart
-  hands a row back to `editing` only once its upload has really finished. A draft whose create job
+  `mode = rehearsal` job writes nothing to a store and still leaves the draft open. Three things
+  can hold a draft now — a review job, an `upload` job and a driver round — and whichever finishes
+  first no longer hands the row back: it stays `running` until the last one ends, so a manual job
+  that finishes mid-round can no longer reopen «discard» while the round is still uploading. A
+  round or a job that is simply gone never pins a row: the same check closes dead rounds first,
+  and a restart settles anything left behind. A draft whose create job
   failed no longer counts against `version_exists` — the store has nothing under that name, so the
   same name can be typed again — and the expiry sweep now discards such a draft too, locally and
   never through a store delete job. `GET …/release/versions/<id>` no longer carries `driver` and

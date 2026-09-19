@@ -336,7 +336,11 @@ re-run `/rcm-store-connect` to add it. `plan` never gets either input — it rea
 one name is enough for that. `start` passes `--version-id` to the driver and links the round to
 the row, so `confirm`, `abort` and `retry` continue on the same version. While a review job, an
 `upload` job or a driver round is running for it, the row is `running` and cannot be discarded
-under it; a `rehearsal` writes nothing to a store, so it leaves the row open.
+under it; a `rehearsal` writes nothing to a store, so it leaves the row open. When more than one
+of the three runs at once, the row goes back to `editing` only when the **last** of them ends —
+a manual job finishing in the middle of a round leaves the row held. A round whose process is
+gone is closed before that judgement is made, so nothing keeps a row `running` for ever, and a
+restart makes the same judgement again.
 
 **The 409 codes.** These are the server's own rules, kept whatever the page sends (`code` and
 `error_code` carry the same value):

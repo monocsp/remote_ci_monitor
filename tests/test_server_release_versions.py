@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -861,6 +862,81 @@ def test_restart_recovery_settles_a_row_left_running_by_an_upload(vsrv):
     assert srv.store.get_version(done)["state"] == "editing"
     assert srv.store.get_version(running)["state"] == "running"  # 아직 큐에 있다
     assert code_of(srv.discard(running)) == (409, "version_running")
+
+
+def live_round(srv: VersionServer, build_name: str) -> int:
+    """도는 중인 회차 하나 — 프로세스를 띄우지 않고 이 프로세스의 pid 를 적는다(`pid_alive` 가
+    참이라 `reconcile` 이 닫지 않는다). 드라이버 스텁은 순식간에 끝나 «도는 중» 을 못 만든다."""
+    rid = srv.store.create_release(
+        repo="app",
+        build_name=build_name,
+        kind="start",
+        started_by="macmini-admin",
+        now=NOW,
+        log_path=str(srv.cfg.data_dir / "driver" / "app" / f"{build_name}.log"),
+    )
+    srv.store.set_release_started(rid, pid=os.getpid(), token_name=f"store-driver:app:{rid}")
+    return rid
+
+
+def test_a_job_that_ends_during_a_round_leaves_the_row_running(vsrv):
+    """워크플랜 §14-2 — 행을 붙잡는 것은 셋이다: 심사 잡 · 올리기 잡 · 드라이버 회차. 손으로 낸
+    잡이 회차보다 **먼저** 끝나도 행은 `running` 그대로여야 한다. 그러지 않으면 회차가 아직
+    스토어에 올리는 중인 버전을 버릴 수 있고, 그것이 이 PR 이 닫은 바로 그 문이다. 내려놓는 것은
+    마지막에 끝나는 쪽이고, 잡 훅 · 회차 훅 · 기동 복구가 같은 판정(`_version_busy`)을 쓴다."""
+    srv = vsrv
+    vid = editing_draft(srv, ios="1.1.1", android="1.1.1")
+    srv.plan_job({**PLAN_DOC, "build_name": "1.1.1"})
+    rid = live_round(srv, "1.1.1")
+    srv.app._version_link_release(vid, rid)  # start 가 회차를 행에 붙이는 그 자리
+    assert srv.store.get_version(vid)["state"] == "running"
+    # 올리기 잡이 회차보다 먼저 끝난다
+    up = {"version_id": vid, "mode": "upload", "confirm_build_number": "181"}
+    status, body = srv.post("upload", up, token="admin")
+    assert status == 202, body
+    srv.finish_job(body["job_id"], {"out/upload.json": b'{"schema": 1}'})
+    assert srv.store.get_version(vid)["state"] == "running"
+    assert code_of(srv.discard(vid)) == (409, "version_running")
+    assert any(f"round #{rid} is still running" in m for m in srv.server_log)
+    # 심사 잡도 같다
+    status, body = srv.post("review", {"version_id": vid, "mode": "plan"})
+    assert status == 202, body
+    srv.finish_job(body["job_id"], {"review-plan.json": json.dumps(REVIEW_PLAN_DOC).encode()})
+    assert srv.store.get_version(vid)["state"] == "running"
+    assert code_of(srv.discard(vid)) == (409, "version_running")
+    # 재시작도 회차를 존중한다 — 붙잡은 것이 살아 있으면 그대로다
+    srv.app.recover_versions_on_start()
+    assert srv.store.get_version(vid)["state"] == "running"
+    # 회차가 끝나면 그때 내려온다
+    assert srv.store.finish_release(rid, 0, NOW)
+    srv.app._driver_exited(srv.store.get_release(rid))
+    assert srv.store.get_version(vid)["state"] == "editing"
+    assert any(f"round #{rid} ended → editing" in m for m in srv.server_log)
+    assert srv.discard(vid)[0] == 202
+
+
+def test_a_round_that_ends_first_waits_for_the_job_that_is_still_running(vsrv):
+    """반대 차례 — 회차가 먼저 끝나고 손으로 낸 올리기 잡이 아직 돌 때. 회차 훅도 같은 판정을
+    쓰므로 행은 `running` 이고, 잡이 끝날 때 내려온다. 사라진 회차(프로세스는 죽었는데 대장이
+    열려 있는 것)는 `reconcile` 이 먼저 닫으니 행을 영영 붙잡지 못한다 — 기동 복구로 확인한다."""
+    srv = vsrv
+    vid = editing_draft(srv, ios="1.1.1", android="1.1.1")
+    srv.plan_job({**PLAN_DOC, "build_name": "1.1.1"})
+    rid = live_round(srv, "1.1.1")
+    srv.app._version_link_release(vid, rid)
+    up = {"version_id": vid, "mode": "upload", "confirm_build_number": "181"}
+    status, body = srv.post("upload", up, token="admin")
+    assert status == 202, body
+    assert srv.store.finish_release(rid, 0, NOW)
+    srv.app._driver_exited(srv.store.get_release(rid))
+    row = srv.store.get_version(vid)
+    assert row["state"] == "running" and row["upload_job_id"] == body["job_id"]
+    assert code_of(srv.discard(vid)) == (409, "version_running")
+    assert any(f"job #{body['job_id']} is still running" in m for m in srv.server_log)
+    srv.app.recover_versions_on_start()  # 회차는 갔지만 잡이 남았다
+    assert srv.store.get_version(vid)["state"] == "running"
+    srv.finish_job(body["job_id"], None, state=FAILED, exit_code=1)
+    assert srv.store.get_version(vid)["state"] == "editing"
 
 
 def test_two_different_store_version_names_travel_as_build_name_and_build_name_android(vsrv):

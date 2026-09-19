@@ -2023,19 +2023,57 @@ class App(RemoteWorkersMixin):
         self.log(f"version: #{row['id']} {name} not deleted — {error}")
 
     def _version_review_finished(self, row: dict[str, Any], job: Job) -> None:
+        """심사 잡이 끝났다 — submit 이 성공했으면 `submitted`(닫힌 상태라 더 못 버린다), 아니면
+        내려놓기 판정(`_version_settle`)에 맡긴다."""
         submitted = (
             job.state == SUCCEEDED and job.exit_code == 0 and job.inputs.get("mode") == "submit"
         )
-        state = VERSION_SUBMITTED if submitted else VERSION_EDITING
-        self.store.update_version(row["id"], state=state)
-        self.log(f"version: #{row['id']} review job #{job.id} {job.state} → {state}")
+        if submitted:
+            self.store.update_version(row["id"], state=VERSION_SUBMITTED)
+            self.log(
+                f"version: #{row['id']} review job #{job.id} {job.state} → {VERSION_SUBMITTED}"
+            )
+            return
+        self._version_settle(row, f"review job #{job.id} {job.state}")
 
     def _version_upload_finished(self, row: dict[str, Any], job: Job) -> None:
-        """올리기 잡이 끝났다(§14-2) — 어떻게 끝났든 행은 `editing` 으로 돌아온다. 스토어에 무엇이
-        올라갔는지는 이 잡의 `upload.json` 이 말하고, 행의 상태가 말하는 것은 «지금 이 드래프트로
-        되돌릴 수 없는 일이 도는 중인가» 뿐이다."""
+        """올리기 잡이 끝났다(§14-2) — 어떻게 끝났든 이 잡은 더 이상 행을 붙잡지 않는다. 스토어에
+        무엇이 올라갔는지는 이 잡의 `upload.json` 이 말하고, 행의 상태가 말하는 것은 «지금 이
+        드래프트로 되돌릴 수 없는 일이 도는 중인가» 뿐이다."""
+        self._version_settle(row, f"upload job #{job.id} {job.state}")
+
+    def _version_busy(self, row: dict[str, Any]) -> str | None:
+        """이 버전으로 **지금 도는 것** 하나의 이름 — 심사 잡 · 올리기 잡 · 드라이버 회차. 없으면
+        None. 행이 `running` 인 이유이자 «버리기» 가 409 인 이유다.
+
+        붙잡은 것이 사라졌을 때 행이 영영 `running` 으로 남지 않게: 잡 행이 없어졌으면(보존 정리)
+        붙잡은 것이 아니고, 프로세스가 죽은 회차는 `reconcile` 이 **먼저 닫는다**. 그래서 판정은
+        언제나 «지금 살아 있는 것» 이지 «한때 붙였던 것» 이 아니다."""
+        for key in ("review_job_id", "upload_job_id"):
+            job = self.store.get_job(row[key]) if row[key] else None
+            if job is not None and not job.is_terminal:
+                return f"job #{job.id}"
+        if row["release_id"] is not None:
+            self.driver.reconcile(row["repo"], data_dir=self.config.data_dir)
+            live = self.driver.running(row["repo"])
+            if live is not None and live["id"] == row["release_id"]:
+                return f"round #{row['release_id']}"
+        return None
+
+    def _version_settle(self, row: dict[str, Any], what: str) -> None:
+        """끝난 것 하나(`what`)를 보고 행을 `editing` 으로 내려놓는다 — 이 버전으로 **다른 것이**
+        아직 돌고 있으면 `running` 그대로 둔다. 내려놓는 것은 마지막에 끝나는 쪽이다.
+
+        스토어에 쓰는 일이 하나라도 도는 동안 «버리기» 가 열려서는 안 된다(§14-2). 회차가 도는
+        중에 손으로 낸 올리기 · 심사 잡이 **먼저** 끝나면, 예전에는 그 훅이 행을 곧바로 `editing`
+        으로 내려 회차가 아직 스토어에 올리는 중인 버전을 버릴 수 있었다. 잡 훅도 회차 훅도 이
+        한 자리를 쓴다."""
+        busy = self._version_busy(row)
+        if busy is not None:
+            self.log(f"version: #{row['id']} {what} — {busy} is still running, the row waits")
+            return
         self.store.update_version(row["id"], state=VERSION_EDITING)
-        self.log(f"version: #{row['id']} upload job #{job.id} {job.state} → {VERSION_EDITING}")
+        self.log(f"version: #{row['id']} {what} → {VERSION_EDITING}")
 
     def recover_versions_on_start(self) -> None:
         """서버 재시작 복구(워크플랜 §2.3) — `creating` 인데 잡이 이미 끝났으면 완료 훅을 다시
@@ -2065,15 +2103,8 @@ class App(RemoteWorkersMixin):
         row = self.store.get_version(row["id"]) or row
         if row["state"] != VERSION_RUNNING:
             return
-        for key in ("review_job_id", "upload_job_id"):
-            job = self.store.get_job(row[key]) if row[key] else None
-            if job is not None and not job.is_terminal:
-                return  # 아직 도는 중이다 — 붙잡은 채로 둔다(§14-2)
-        if row["release_id"] is not None:
-            self.driver.reconcile(row["repo"], data_dir=self.config.data_dir)
-            running = self.driver.running(row["repo"])
-            if running is not None and running["id"] == row["release_id"]:
-                return
+        if self._version_busy(row) is not None:
+            return  # 아직 도는 중이다 — 붙잡은 채로 둔다(§14-2)
         self.store.update_version(row["id"], state=VERSION_EDITING)
         self.log(f"version: #{row['id']} was running with nothing running → editing")
 
@@ -2479,8 +2510,9 @@ class App(RemoteWorkersMixin):
         if continued is not None:
             self.store.update_version(linked["id"], release_id=continued)
         else:
-            self.store.update_version(linked["id"], state=VERSION_EDITING)
-            self.log(f"version: #{linked['id']} round #{row['id']} ended → editing")
+            # 회차는 대장에 이미 닫혀 있다(`_finish` → `on_exit`). 그래도 이 버전으로 손으로 낸
+            # 올리기 · 심사 잡이 아직 돌 수 있으니 같은 자리에서 판정한다.
+            self._version_settle(linked, f"round #{row['id']} ended")
 
     def _auto_confirm(self, row: dict[str, Any], version_id: int | None) -> int | None:
         """«빌드 번호 자동» 의 이어 달리기 — 새 confirm 회차의 번호, 잇지 않으면 None."""

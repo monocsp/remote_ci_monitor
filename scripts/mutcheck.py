@@ -73,6 +73,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      막대를 100% 로 채움: 아직 도는 잡이 「끝났다」로 읽힌다 (`web/app.js`, node --test)
   ㉞ progress-sub-not-reset-by-step — 새 `::rcm::step::` 이 앞 스텝의 세부 진행을 안 비움: 다음
      스텝이 지난 스텝의 41/68 을 달고 돈다 (`core/progress.py`)
+  ㉟ version-settle-ignores-what-is-still-running — 버전 행을 내려놓을 때 **무엇이 아직 도는지**
+     안 봄: 회차가 스토어에 올리는 중인데 손으로 낸 잡이 먼저 끝나면 행이 `editing` 이 되어
+     «버리기» 가 열린다 (`server.py`, 워크플랜 §14-2 — 그 버리기는 App Store 버전을 지운다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -541,6 +544,19 @@ MUTANTS = (
         old="            sub, units, unit_pos, units_truncated = None, [], {}, False\n",
         new="",
         tests=("tests/test_progress_sub.py",),
+    ),
+    Mutant(
+        name="version-settle-ignores-what-is-still-running",
+        path="src/remote_ci_monitor/server.py",
+        old="        busy = self._version_busy(row)",
+        new="        busy = None",
+        # 파일 전체가 아니라 이 둘 — 그 파일의 문서 잠금 절은 `docs/` 가 없는 사본에서 빨갛다
+        tests=(
+            "tests/test_server_release_versions.py::"
+            "test_a_job_that_ends_during_a_round_leaves_the_row_running",
+            "tests/test_server_release_versions.py::"
+            "test_a_round_that_ends_first_waits_for_the_job_that_is_still_running",
+        ),
     ),
 )
 
