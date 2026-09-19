@@ -96,7 +96,7 @@ CREATE INDEX versions_repo ON versions(repo, id DESC);
 |---|---|---|
 | `GET /api/repos/<r>/release/versions` | 읽기 | `{ live: {ios, android, from_plan_job}, hints: {ios, android}, drafts: [row…], history: [ {ios, android, submitted_at, review_job_id} … ≤ 20 ] }`. `live`·`hints` 는 최신 성공 플랜의 `plan.json` 에서(§3.1 규칙을 서버도 같은 함수로 — `release_state.next_version_hint(plan_doc)`) |
 | `POST …/release/versions` | admin · 관문 통과 | 본문 `{ios_version?, android_version?}`. 검증: 둘 중 하나 이상 · `major.minor.patch` · 라이브보다 큼(라이브를 알 때만) · 같은 이름의 열린 드래프트 없음(409 `version_exists`). 행 생성(state `creating`, `expires_at = now + ttl`). `version` 프리셋이 있으면 `mode=create` 잡 제출 → 202 `{id, job_id}`; 없으면 state `editing`, `prefill_json = null` → 201 `{id, job_id: null}` |
-| `GET …/release/versions/<id>` | 읽기 | 행 + `prefill` + `edited` + `release`(지금의 `/release` 보기, `build_name` 은 이 버전의 iOS 이름 → 없으면 Android) + `driver` 보기 + `listing`(파일 미리보기, 폴백용) → 바텀시트·버전 페이지가 이것 하나로 그린다 |
+| `GET …/release/versions/<id>` | 읽기 | 행 + `prefill` + `edited` + `diff` + `release`(지금의 `/release` 보기, `build_name` 은 이 버전의 iOS 이름, 없으면 Android). **하위 프로세스를 하나도 돌리지 않는다**(#164) — `driver` 와 `listing` 은 여기 없고 웹이 `GET …/release/driver` · `GET …/release/listing` 을 자기 박자로 부른다. 소개 자료는 (저장소 · sha · build_name) 로 30초 기억한다 |
 | `PUT …/release/versions/<id>/listing` | admin | 본문 `{ios: {...}, android: {...}}` — 허용 키만(§1.1 prefill 키 집합), 문자열만, 각 값 ≤ 16 KB. `edited_json` 저장 · `last_edit_at = now`. 상한 초과는 저장하고 카운터가 말한다(스토어가 최종 판정). state 가 `submitted`·`discarded` 면 409 `version_closed` |
 | `GET …/release/versions/<id>/diff` | 읽기 | `{fields: [ {platform, key, old, new} … ], screenshots: {ios: "same"|"n/a", android: …}}` — `release_state.listing_diff(prefill, edited)` |
 | `DELETE …/release/versions/<id>` | admin | «버리기». state `submitted` → 409. `asc_version_id` 가 있고 `version` 프리셋이 있으면 `mode=delete` 잡 → 202 `{job_id}`, 잡이 0 으로 끝나면 `discarded`; 아니면 즉시 `discarded` 200 |
@@ -366,3 +366,18 @@ AC-B1~B12 와 E1·E3~E6·E9·E11~E15·E25 전부 PASS, 규칙 위반 없음. 검
 | 4 | `version_for_job` 이 행을 하나만 돌려준다 | 합류(join) 가 있는 제출 경로에 «행은 하나» 가정이 박혀 있다. 지금은 `version_exists` 덕에 도달 불가 | 남겨 두고 주석으로 가정을 적는다 |
 | 5 | 만료 경고가 딱 한 번이고 그 뒤로 조용하다 | 편집한 드래프트는 몇 주를 살아도 로그 한 줄뿐이다. 지속 신호는 행의 `expired` · `expiry_warned` 플래그뿐 | C 단계가 목록 행에 그 둘을 반드시 그린다(§12 · E13) |
 | 6 | `plan` 과 `upload` 는 `version_id` 를 받아도 상태를 안 바꾼다 | `plan` 은 읽기 전용이라 타당하다. `upload` 는 2번과 같은 이야기 | 2번에서 함께 |
+
+## 15. B3 이후 확정된 것 (2026-09-20 · PR #164)
+
+C 단계가 이 모양 위에 짓는다.
+
+- **버전 상세**(`GET …/release/versions/<id>`)는 드래프트 행 + `prefill` + `edited` + `diff` + `release` 넷뿐이고
+  하위 프로세스를 돌리지 않는다. 드라이버와 소개 자료는 **따로** 부른다. 5초 폴링은 상세에만 건다.
+  드라이버는 그보다 느리게(예: 10초), 소개 자료는 훨씬 느리게(서버가 30초 기억하므로 그보다 잦을 이유가 없다).
+- **드래프트 행**에 `upload_job_id` 가 생겼다. 화면은 `review_job_id` · `release_id` 와 같이 다뤄야 한다.
+- **버전이 «진행 중» 인 조건은 셋**이다 — 살아 있는 심사 작업 · 살아 있는 업로드 작업 · 이 버전의 드라이버 회차.
+  셋 중 **마지막 하나가 끝날 때** 비로소 «편집 중» 으로 내려온다. 그 전에는 버리기가 409 `version_running` 이다.
+  바텀시트의 «남은 것» 과 목록 행의 필이 이 규칙을 그대로 보여야 한다.
+- **실패한 드래프트**는 이름을 붙잡지 않는다. 같은 이름으로 다시 만들 수 있고, 실패한 행은 목록에 남아 사유를
+  보인다. 화면은 그 행에 «다시 만들기»(같은 이름으로 새로) 와 «버리기» 를 둔다.
+- DB 스키마는 **v21** 이다.
