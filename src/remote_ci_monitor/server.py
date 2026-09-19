@@ -8,7 +8,8 @@
 
 hardening: 소켓 타임아웃(일반 10초, 업로드 60초) · `Content-Length` 필수(chunked 는 411) ·
 JSON 본문 64KB · 동시 요청 `max_concurrent_requests` 초과 503 · 경로 정규화 ·
-405/400/401/403/404/409/411/413 명확히 · 예외는 500 한 줄(스택·토큰·경로 없음).
+405/400/401/403/404/409/411/413 명확히 · 예외는 500 한 줄(스택·토큰·경로 없음) ·
+이른 반환도 선언된 본문을 먹고 나간다(못 먹으면 닫는다 — keep-alive 어긋남 방지).
 요청 로그는 debug 에만.
 
 M0 에서 `/api/status` 는 요청 때마다 DB 에서 다시 만든다(이벤트 갱신 모델과 SSE 는 M1).
@@ -192,6 +193,7 @@ from remote_ci_monitor.worker import Worker, start_workers, tail_lines
 
 MAX_JSON_BODY = 64 * 1024
 MAX_MANIFEST_BODY = 32 * 1024 * 1024  # 팀 트리(수만 파일)의 manifest 는 64 KB 를 훌쩍 넘는다
+MAX_DRAIN_BODY = 1024 * 1024  # 답하기 전에 삼켜 줄 요청 본문의 상한 — 넘으면 연결을 닫는다
 UPLOAD_CHUNK = 64 * 1024
 REQUEST_TIMEOUT = 10
 UPLOAD_TIMEOUT = 60
@@ -4197,12 +4199,63 @@ def _opt_str(v: Any, limit: int) -> str | None:
 # ── HTTP 핸들러 ──────────────────────────────────────────────────────────────
 
 
+class _BodyReader:
+    """요청 본문을 읽는 `rfile` 의 얇은 껍데기 — 얼마나 남았는지·끊겼는지를 핸들러가 안다.
+
+    HTTP/1.1 keep-alive 에서 **안 읽은 본문은 다음 요청의 첫 줄로 파싱된다**. 본문을 읽기
+    전에 답하는 길이 하나라도 있으면 그 연결의 다음 요청이 통째로 어긋난다 — C 단계 격리
+    검증(계획서 §16-1)이 생 소켓으로 잡았다: 401 뒤의 `GET /api/health` 가
+    `501 Unsupported method ('{"ios"…GET')` 로 돌아왔다. 그래서 답을 쓰기 **전에** 남은
+    본문을 먹고(`drain`), 먹을 수 없으면 연결을 닫는다.
+    """
+
+    def __init__(self, raw: Any, remaining: int | None) -> None:
+        self.raw = raw
+        self.remaining = remaining  # None = 길이를 모른다(chunked · 깨진 Content-Length)
+        self.broken = False  # EOF 나 오류로 끊겼다 — 더 기다려도 안 온다
+
+    def read(self, n: int = -1) -> bytes:
+        try:
+            data = self.raw.read(n)
+        except (OSError, ValueError):
+            self.broken = True
+            raise
+        if self.remaining is not None:
+            self.remaining = max(0, self.remaining - len(data))
+        if n >= 0 and len(data) < n:
+            self.broken = True
+        return data
+
+    def drain(self, limit: int = MAX_DRAIN_BODY) -> bool:
+        """남은 본문을 먹는다. 연결을 다음 요청에 그대로 써도 되면 True.
+
+        읽지 **않는** 경우가 셋이다 — 길이를 모르거나(chunked 는 411 이고 끝을 알 수 없다),
+        상한보다 크거나(413 이 끝없는 읽기로 바뀌면 안 된다), 이미 끊겼거나(오지 않을
+        바이트를 기다려 소켓 타임아웃만 쓴다). 셋 다 「닫아라」다.
+        """
+        if self.remaining == 0:
+            return True
+        if self.remaining is None or self.broken or self.remaining > limit:
+            return False
+        while self.remaining:
+            try:
+                if not self.read(min(UPLOAD_CHUNK, self.remaining)):
+                    return False
+            except (OSError, ValueError):
+                return False
+        return True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.raw, name)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"rcm/{__version__}"
     sys_version = ""
     protocol_version = "HTTP/1.1"
     timeout = REQUEST_TIMEOUT
     app: App  # 서버가 채운다
+    body: _BodyReader  # `_dispatch` 가 요청마다 채운다 — 안 읽은 본문의 잔량
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if self.app.debug:
@@ -4226,6 +4279,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_error(self, e: ApiError, *, close: bool = False) -> None:
         obj = {"error": e.message, **e.extra}
+        # 답하기 **전에** 안 읽은 요청 본문을 먹는다. 어느 이른 반환이든(401·403·404·405·
+        # 409·413·415…) keep-alive 연결을 본문 한가운데 두고 나가면 다음 요청이 남은 바이트
+        # 안에서 파싱된다(계획서 §16-1). 못 먹으면 연결을 닫는 것이 유일하게 안전한 답이다 —
+        # 상태 코드와 본문은 그대로 두고 `Connection: close` 만 붙는다.
+        if not self.body.drain():
+            close = True
         if e.status == 401:
             self.send_response(401)
             if e.challenge == "basic":
@@ -4252,9 +4311,19 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self) -> None:
         # 요청마다 스레드가 생기고 스레드마다 DB 연결이 생긴다 — 끝나면 꼭 닫는다
         # (안 닫으면 핸들이 쌓여 'Too many open files' → 모든 요청이 500)
+        raw = self.rfile
+        # 본문을 어떤 길로 읽든(`_json_body` · 업로드 스트리밍) 남은 양이 세어지도록 `rfile`
+        # 자리에 끼운다. 요청 줄·헤더는 이미 파싱된 뒤라 세지 않는다.
+        self.body = _BodyReader(raw, self._declared_length())
+        self.rfile = self.body  # type: ignore[assignment]
         try:
             self._dispatch_inner()
         finally:
+            self.rfile = raw
+            # 200 을 내면서 본문을 안 읽은 라우트도 있다 — 답 뒤에라도 연결은 깨끗이 둔다.
+            # 먹을 수 없으면 닫는다: 안 읽은 바이트를 둔 채 닫으면 RST 가 응답까지 지운다.
+            if not self.body.drain():
+                self.close_connection = True
             try:
                 self.app.store.close()
             except Exception:  # noqa: BLE001
@@ -4278,9 +4347,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._route()
         except ApiError as e:
-            # 본문을 읽기 전에 거절한 응답(411·413·415)은 연결을 닫는다 — HTTP/1.1 keep-alive 에서
-            # 안 읽은 본문이 다음 요청으로 파싱되지 않게
-            self._send_error(e, close=e.status in (413, 411, 415))
+            # 본문을 읽기 전에 거절한 응답도 `_send_error` 가 남은 본문을 먹고 나간다. 못 먹는
+            # 것(chunked 411 · 상한을 넘는 413 · 큰 본문의 415)만 거기서 연결을 닫는다 —
+            # HTTP/1.1 keep-alive 에서 안 읽은 본문이 다음 요청으로 파싱되지 않게
+            self._send_error(e)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as e:  # noqa: BLE001 — 스택은 로그에만, 응답은 한 줄
@@ -4304,6 +4374,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def _token(self) -> TokenInfo | None:
         return self.app.authenticate(self.headers.get("Authorization"))
+
+    def _declared_length(self) -> int | None:
+        """헤더가 말하는 본문 길이. 모르면 None — `_content_length()` 와 달리 거절하지 않는다.
+
+        길이를 모르는 본문(chunked · 깨진 `Content-Length`)은 **먹지 않는다**: 끝을 알 수 없어
+        읽기 시작하면 소켓 타임아웃까지 매달린다. 그런 요청은 답하고 연결을 닫는다. 라우트가
+        부르는 쪽은 `_content_length()` 이고, 411·400 은 거기서 그대로 난다.
+        """
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            return None
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return 0
+        try:
+            n = int(raw)
+        except ValueError:
+            return None
+        return n if n >= 0 else None
 
     def _content_length(self) -> int:
         if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():

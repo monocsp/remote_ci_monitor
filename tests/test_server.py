@@ -517,6 +517,101 @@ def test_job_urls_use_the_request_host_when_public_url_is_empty(tmp_path):
         s.close()
 
 
+# ── keep-alive: 이른 반환도 본문을 먹고 나간다 (C 단계 격리 검증 2026-09-20 · 계획서 §16-1) ──
+
+
+def send_raw(sock, method, path, *, body=b"", token=None, extra=""):
+    """생 HTTP 요청 하나. `Content-Length` 는 **실제로 보내는 만큼** 적는다."""
+    head = f"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+    if token:
+        head += f"Authorization: Bearer {token}\r\n"
+    head += f"Content-Length: {len(body)}\r\n{extra}\r\n"
+    sock.sendall(head.encode() + body)
+
+
+def read_raw(fp):
+    """응답 하나 — 첫 줄 · 헤더 · `Content-Length` 만큼의 본문. 소켓을 공유하므로 직접 읽는다
+    (`http.client` 는 앞질러 읽어 다음 응답의 바이트까지 자기 버퍼에 담는다)."""
+    status = fp.readline().decode("latin-1").rstrip("\r\n")
+    headers = {}
+    while True:
+        line = fp.readline().decode("latin-1").rstrip("\r\n")
+        if not line:
+            break
+        k, _, v = line.partition(":")
+        headers[k.strip().lower()] = v.strip()
+    n = int(headers.get("content-length") or 0)
+    return status, headers, (fp.read(n) if n else b"")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "token", "body", "want"),
+    [
+        # 토큰 없는 쓰기 — `require_client_token` 이 본문을 읽기 전에 401
+        ("POST", "/jobs", None, b'{"preset":"ok"}', "401"),
+        # admin 아닌 토큰 — `require_admin` 이 본문을 읽기 전에 403
+        ("POST", "/pause", "alice", b'{"why":"deploy"}', "403"),
+        # JSON 상한 초과 — `_json_body` 가 한 바이트도 읽기 전에 413
+        ("POST", "/jobs", "alice", b'{"pad":"' + b"x" * (64 * 1024) + b'"}', "413"),
+    ],
+    ids=["401", "403", "413"],
+)
+def test_an_early_refusal_reads_the_body_so_the_next_request_is_whole(
+    srv, method, path, token, body, want
+):
+    """이른 반환이 본문을 남기면 keep-alive 의 **다음 요청**이 그 바이트 안에서 파싱된다.
+
+    C 단계 격리 검증이 살아 있는 서버에 생 소켓으로 잡았다: 본문 있는 `PUT …/listing` 이
+    401 을 받은 뒤, 같은 연결의 `GET /api/health` 가
+    `501 Unsupported method ('{"ios":{"subtitle":"abcde"}}GET')` 로 돌아왔다. 브라우저에서는
+    토큰이 중간에 죽고 «다시 저장» 을 누르면 두 번째 답이 401 이 아니라 400/501 HTML 이었다.
+    401 하나만 고치면 다음 이른 반환이 같은 구멍을 다시 낸다 — 401·403·413 을 한 소켓에서
+    함께 잠근다.
+    """
+    sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    fp = sock.makefile("rb")
+    try:
+        send_raw(sock, method, path, body=body, token=srv.tokens.get(token))
+        status, headers, _ = read_raw(fp)
+        assert status.split()[1] == want, status
+        assert headers.get("connection") != "close", status  # 연결은 살아 있어야 한다
+        send_raw(sock, "GET", "/api/health")
+        status, _headers, payload = read_raw(fp)
+        assert status.split()[1] == "200", status  # 501/400 이면 앞 본문이 남았다는 뜻
+        assert json.loads(payload)["ok"] is True
+    finally:
+        fp.close()
+        sock.close()
+
+
+def test_a_body_it_cannot_swallow_is_refused_without_reading_it(srv):
+    """먹을 수 없는 본문은 **읽지 않고** 답하고 연결을 닫는다.
+
+    선언만 50 MB 인 요청은 413 이어야지, 삼키겠다고 50 MB 를 기다리면 안 된다. chunked 는
+    끝을 알 수 없으니 411 이고 역시 안 읽는다. 둘 다 본문을 한 바이트도 안 보내고 부른다 —
+    서버가 기다리면 소켓 타임아웃(5초)으로 이 시험이 깨진다.
+    """
+    for extra, want in (
+        ("Content-Length: 50000000\r\n", "413"),
+        ("Transfer-Encoding: chunked\r\n", "411"),
+    ):
+        sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+        fp = sock.makefile("rb")
+        try:
+            head = (
+                "POST /jobs HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                f"Authorization: Bearer {srv.tokens['alice']}\r\n{extra}\r\n"
+            )
+            sock.sendall(head.encode())
+            status, headers, _ = read_raw(fp)
+            assert status.split()[1] == want, status
+            assert headers.get("connection") == "close", (status, headers)
+            assert fp.read(1) == b""  # 서버가 닫았다 — 이 소켓으로 다음 요청은 없다
+        finally:
+            fp.close()
+            sock.close()
+
+
 # ── 요청 스레드의 DB 연결 누수 (실배치: 252개 핸들 → 'Too many open files' → 전부 500) ────────
 
 

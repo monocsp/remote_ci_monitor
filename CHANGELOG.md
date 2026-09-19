@@ -36,6 +36,18 @@ of a key bumps that number and is listed here.
   Those two documents keep their own routes, `GET …/release/driver` and `GET …/release/listing`,
   and the listing route now remembers its answer for 30 seconds per repository, checkout SHA and
   `build_name`. ([#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
+- **A request refused before its body was read no longer derails the next request on the same
+  connection.** A body-carrying request answered 401 left the keep-alive connection parked in the
+  middle of that body, so the next request on the socket was parsed starting inside the leftover
+  bytes: a raw-socket check sent `PUT …/release/versions/2/listing` with a 28 byte body, got its
+  401, and the `GET /api/health` that followed on the same connection came back
+  `501 Unsupported method ('{"ios":{"subtitle":"abcde"}}GET')`. In a browser this is a token that
+  dies mid-edit — the save fails with a clean 401, and «다시 저장» answers with a 400 or an HTML
+  error page instead of another 401. The server now consumes a declared request body before it
+  answers, whatever the status, so no early return can leave a connection mid-body; a body it
+  cannot swallow — chunked, or larger than 1 MB — is still refused without reading a byte and
+  closes the connection instead. The 401, 403, 411, 413 and 415 answers are otherwise unchanged.
+  ([#169](https://github.com/monocsp/remote_ci_monitor/pull/169))
 
 ### Added
 - **The version page is where you edit the previous version's copy.** `#/store/<repo>/v/<id>` now
