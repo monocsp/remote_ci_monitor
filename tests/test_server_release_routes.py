@@ -103,11 +103,12 @@ PRESETS = [
     ),
     preset("gate-smoke", []),
 ]
+# 요즘 드라이버 — `--status` 가 `--version-id` 없이도 아는 단계를 말한다(계약 §5).
 DRIVER = """#!/bin/sh
 echo "driver $*"
 echo "server=${RCM_SERVER:-none} token=${RCM_TOKEN:+set}"
 case " $* " in
-  *" --status "*) echo "stage: S1 planned"; exit 0;;
+  *" --status "*) echo "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8"; echo "stage: S1 planned"; exit 0;;
   *" --confirm-build-number "*) echo "confirmed $*"; exit 0;;
   *" --abort "*) echo "aborted"; exit 0;;
   *" --retry "*) echo "retried"; exit 0;;
@@ -116,6 +117,14 @@ while [ -f "$APP_SECRETS/hold" ]; do sleep 0.05; done
 echo "plan: N = 181"
 exit 2
 """
+# V 단계를 모르는 옛 드라이버 — `stages:` 줄이 없고 `--version-id` 를 주면 exit 2 로 죽는다.
+OLD_DRIVER = DRIVER.replace(
+    '*" --status "*) echo "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8"; echo "stage: S1 planned"',
+    '*" --status "*) echo "stage: S1 planned"',
+).replace(
+    'case " $* " in',
+    'case " $* " in\n  *" --version-id "*) echo "unknown argument: --version-id" >&2; exit 2;;',
+)
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 PROFILE = {
     **PROFILE_RAW,
@@ -273,10 +282,11 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RemoteRepo:
     isolate_git_env(tmp_path, monkeypatch)
     r = build_remote(tmp_path)
     work = r.work
-    script = work / "scripts" / "driver.sh"
-    script.parent.mkdir()
-    script.write_text(DRIVER)
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    (work / "scripts").mkdir()
+    for name, text in (("driver.sh", DRIVER), ("old_driver.sh", OLD_DRIVER)):
+        script = work / "scripts" / name
+        script.write_text(text)
+        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     shots = work / "store" / "screenshots"
     shots.mkdir(parents=True)
     (shots / "01-home.png").write_bytes(PNG)
@@ -847,6 +857,8 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
         "plan_n": None,
         "status": None,
         "status_error": "the mirror has no branch 'main' — fetch the repository first",
+        "stages": None,
+        "knows_version_stage": False,
     }
     assert code_of(srv.post("start", {"build_name": "1.0.1"}, token="admin")) == (
         409,
@@ -854,8 +866,16 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
     )
     srv.fetch()
     body = srv.req("GET", "/api/repos/app/release/driver")[1]
-    assert body["status"] == ["driver --status", "server=none token=", "stage: S1 planned"]
+    assert body["status"] == [
+        "driver --status",
+        "server=none token=",
+        "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8",
+        "stage: S1 planned",
+    ]
     assert body["status_error"] is None and body["running"] is False
+    # 능력 신호(계약 §5 · 워크플랜 §13-2) — `stages:` 줄을 그대로 읽는다
+    assert body["stages"] == ["V", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+    assert body["knows_version_stage"] is True
     # 버전을 아는 회차가 있으면 --status 에 --build-name 이 붙는다(없이 부르면 드라이버가 되묻는다)
     srv.plan_job()
     body = srv.req("GET", "/api/repos/app/release/driver")[1]

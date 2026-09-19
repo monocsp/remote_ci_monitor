@@ -891,6 +891,40 @@ def test_a_round_started_with_build_number_auto_keeps_the_version_on_the_confirm
     assert row["state"] == "editing" and row["release_id"] == 2
 
 
+def test_the_driver_view_says_which_stages_the_driver_knows(vsrv):
+    """워크플랜 §13-2 — `--status` 의 `stages:` 줄이 능력 신호다. 요즘 드라이버는 `V` 를 말한다."""
+    srv = vsrv
+    srv.fetch()
+    doc = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert doc["stages"] == ["V", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+    assert doc["knows_version_stage"] is True
+    # 버전 페이지도 같은 문서를 그대로 쓴다(§2.2 `GET …/versions/<id>` 의 `driver`)
+    assert srv.version(editing_draft(srv))["driver"]["knows_version_stage"] is True
+
+
+def test_a_driver_that_does_not_know_the_v_stage_is_called_the_old_way(vsrv):
+    """워크플랜 §13-2 · §8 E16 — `--status` 에 `stages:` 줄이 없으면(옛 드라이버) 서버는
+    `--version-id` 를 **주지 않는다**. 이름은 이미 행에서 정해졌으니 회차는 옛길 그대로 돈다 —
+    설명 없는 exit 2 로 죽지 않는다. 화면이 말할 수 있게 보기에도 그 사실이 남는다."""
+    srv = vsrv
+    srv.set_profile({**PROFILE_V, "driver": "scripts/old_driver.sh"})
+    srv.fetch()
+    vid = editing_draft(srv)
+    doc = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert doc["status"] == ["driver --status", "server=none token=", "stage: S1 planned"]
+    assert doc["stages"] is None and doc["knows_version_stage"] is False
+    status, body = srv.post("start", {"version_id": vid, "dry_run": True}, token="admin")
+    assert status == 202, body
+    assert body["build_name"] == "1.1.1"  # 이름은 그대로 버전 행에서 왔다
+    assert srv.store.get_version(vid)["release_id"] == body["release_id"]
+    rel = wait_run(srv, body["release_id"])
+    log = Path(rel["log_path"]).read_text()
+    assert "driver --build-name 1.1.1 --dry-run" in log and "--version-id" not in log
+    # 옛길을 끝까지 달렸다: «번호가 필요하다» 는 그 exit 2 이지 `unknown argument` 가 아니다
+    assert rel["exit_code"] == 2 and "plan: N = 181" in log and "unknown argument" not in log
+    assert any("does not advertise the V stage" in m for m in srv.server_log)
+
+
 # ── DELETE …/versions/<id> (AC-B9 · E14 · E15) ────────────────────────────────
 
 

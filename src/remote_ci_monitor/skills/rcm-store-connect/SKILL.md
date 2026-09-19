@@ -48,7 +48,7 @@ store credentials are never inputs of this skill.
 | Path (relative to the project) | Why |
 |---|---|
 | `scripts/release/rcm_contract.py` | stdlib-only helper: `write <kind>` builds + validates + atomically writes each artifact; `validate <kind> --file` exits 1 on a missing / ill-typed field; `--selftest` proves poisoned documents are rejected |
-| `scripts/release/release_plan.sh` | role `plan`: read-only store snapshot → `plan.json` (n = store max + 1, or null with blockers) |
+| `scripts/release/release_plan.sh` | role `plan`: read-only store snapshot → `plan.json` (n = store max + 1, or null with blockers) plus the two **live version names** — `store.asc_live` (App Store) and `store.play.production_name` (Play) — and the optional `next_version_hint: {ios, android}` |
 | `scripts/release/release_upload.sh` | role `upload`: rehearsal by default; real upload only with the N a human typed; `platform_build_name` gives each store its own version name when `RCM_INPUT_BUILD_NAME_ANDROID` differs |
 | `scripts/release/release_review.sh` | role `review`: review plan by default; submit only with the typed N; Android only with the per-submission managed-publishing statement; `RCM_INPUT_LISTING_JSON` (the copy edited in the web UI) → `listing.json`, handed to the hook, echoed in the preview; `platform_build_name` gives each store its own version name |
 | `scripts/release/release_version.sh` | role `version` (optional, «new version» from the web): `mode=prefill` by default reads the live listing into `prefill.json` (falls back to the `store/` files); `create` makes the App Store version and records the Android name → `version.json`; `delete` drops an editable version (submitted → exit 4) |
@@ -92,7 +92,13 @@ result (`B-TODO`, `not_implemented`), never a fake number or a fake `ready`:
 
 1. `release_plan.sh` → `store_snapshot()`: print one JSON object `{max_build, first_release, store,
    blockers, warnings}` read from App Store Connect / Google Play with the credentials in
-   `$<secrets_env>`. Read-only.
+   `$<secrets_env>`. Read-only. Put **both live version names** in `store` while you are reading
+   the stores anyway — `asc_live` (the live `appStoreVersion.versionString`) and
+   `play.production_name` (the `versionName` of the release on the production track, not the
+   `versionCode`). rcm has no other source for them: without `play.production_name` it never
+   learns the Android live name, so the «new version» dialog's Android hint and the version
+   list's Play column stay empty. The optional `next_version_hint: {ios, android}` overrides
+   rcm's «bump the last number» guess where the project numbers its releases differently.
 2. `release_upload.sh` → `store_max_build()` (the same number, read-only) and `store_upload PLATFORM
    N BUILD_NAME TRACK` (build + upload one platform; must not release, promote or roll out).
 3. `release_review.sh` → `store_review_observe BUILD_NAME` (`{n, ios{verdict,state},
@@ -344,7 +350,15 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    - through rcm, once the profile is on the server and `store_snapshot()` is filled (this may be
      later — say so): `rcm run release-plan --ref <default_branch> -f build_name=<X.Y.Z> --fetch-artifacts`
      and then `validate plan --file build/.rcm-release/plan.json`. Check: exit 0 with an integer
-     `n`, or exit 1 with blockers that name a real store condition. Never run `release-upload`
+     `n`, or exit 1 with blockers that name a real store condition. Also check the two live
+     version **names** are there, because nothing else fails when they are missing:
+     ```sh
+     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d.get("store") or {}; print("asc_live:", s.get("asc_live"), "· play.production_name:", (s.get("play") or {}).get("production_name"), "· hint:", d.get("next_version_hint"))' build/.rcm-release/plan.json
+     ```
+     Both names must be the version names the stores really show (`1.1.0`, not a build number,
+     not `None`). A missing `play.production_name` is the whole Android side of the version page
+     going blank — go back to Step «What the human still fills in» 1. `next_version_hint` may be
+     `None`: rcm then bumps the last number of each name itself. Never run `release-upload`
      with `mode=upload` or `release-review` with `mode=submit` from this skill.
 10. **Record** in `docs/rcm-connect.md`. If the file is missing, create it with the header shown
     under «What it creates» — all six lines, `tiers: none` — filled from Step 2 and Step 1
@@ -365,7 +379,7 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
     ## rcm-store-connect — <YYYY-MM-DD>
     Created: <one line per file: written / rewritten / kept / differs>
     You must fill in: <the numbered items of «What the human still fills in» that still apply>
-    Verified: <selftests PASS ×6 (×5 with version: no)> · <rcm check release <repo>: ok|warn (<warnings>)|not verified> · <local plan run: exit 1, B-TODO> · <rcm plan run: n=<N> | pending>
+    Verified: <selftests PASS ×6 (×5 with version: no)> · <rcm check release <repo>: ok|warn (<warnings>)|not verified> · <local plan run: exit 1, B-TODO> · <rcm plan run: n=<N>, live names <asc_live>/<play.production_name> | pending>
     ```
     Check: `head -1 docs/rcm-connect.md` is `# rcm connect — <repo>`; the six `repo:` /
     `platforms:` / `server_toml:` / `secrets_env:` / `presets_file:` / `tiers:` lines are present;
