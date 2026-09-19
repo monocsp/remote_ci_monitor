@@ -38,6 +38,39 @@ of a key bumps that number and is listed here.
   `build_name`. ([#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
 
 ### Added
+- **The version page carries a bottom sheet: progress, what is left, and «Submit for review».**
+  `#/store/<repo>/v/<id>` now ends in a sticky sheet — and only that page has one. Collapsed it
+  shows the version, one status line and the submit button, and **while a round, a build or a
+  submission is in flight it also shows the bar and how far along**, in that one line. The line
+  answers the question the state asks: «3 left before review · No build yet» while editing, «S5
+  scenario QA · stage 7 of 10 · 66% · elapsed 38m · finishes 21:40» while running, «ready to
+  submit · review plan 4m ago · build 181» when it is, «submitted 21:52 · waiting for review»
+  after that. Expanded it adds the bar, the stage chips — `V S0…S8` when the profile declares a
+  driver, this round's jobs when it does not — the basis in words, and two columns: «Left before
+  review» and «Different from the previous version». Every line in the first column names the
+  place that fixes it and goes there when clicked: a field that is over the store limit scrolls
+  to and focuses that field, a stale plan goes to the status screen. The order is fixed — build,
+  round running, review plan, build number, managed publishing, listing, skill and driver
+  warnings, release type — so the first line is always the most important one. The submit
+  conditions moved here whole: the store checkboxes, the per-submission managed-publishing check
+  (never remembered, never pre-ticked), the auto/typed build-number toggle and its field, which
+  still only ever accepts the plan's own number. Under them the sheet says what it is about to
+  send, repeats that approval is not a release, and shows the store's answer after a submission.
+  The request carries `version_id` and the draft's own version name. Open or closed is remembered
+  per repository. The sheet reads what the version detail already gives it; the driver view, which
+  runs `--status` on the build machine, is fetched on its own 15-second timer and only when the
+  profile declares a driver.
+
+  What this replaces: the big bar at the top of the Store tab is **gone** (it said the same thing
+  in a worse place), and the review panel keeps only its two read-only store sections plus the
+  «Validate listing» and «Plan review» buttons — no submit button, no checkboxes, no build-number
+  box, on `#/store/<repo>/status` either. A running round is now visible from the version list
+  instead: that draft's row says what holds it, by name — «running · release round #12 · upload
+  job #650» — rather than hiding the reason in a disabled button's tooltip. The same row also says
+  «deleting in the store · job #88» from the moment «Discard» is confirmed for a draft with an App
+  Store version, and settles on its own when that job ends, instead of looking as though nothing
+  happened for half a minute.
+  ([#168](https://github.com/monocsp/remote_ci_monitor/pull/168))
 - **The version page is where you edit the previous version's copy.** `#/store/<repo>/v/<id>` now
   draws the two stores side by side — App Store · iOS and Google Play · Android, in the same group
   order the review panel uses — with every copy field as an editable control filled in from the

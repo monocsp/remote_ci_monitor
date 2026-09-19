@@ -77,7 +77,9 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     names: "ios + android", reason: "managed_publishing_unconfirmed", tag: "prod/1.0.1-181", role: "plan", track: "production", value: "MANUAL",
     stage: "S5 scenario QA",  // 릴리스 드라이버 스테퍼
     // 버전 목록 · 새 버전 대화상자 · 요약 띠 — 두 스토어 이름은 늘 따로 간다(§11)
-    ios: "1.1.0", android: "1.0.0"
+    ios: "1.1.0", android: "1.0.0",
+    // 바텀시트 — 접힌 머리의 첫 항목 · 상한을 넘긴 칸 이름 · 스크린샷을 말하는 스토어(§4)
+    first: "빌드 없음", field: "키워드", store: "App Store", what: "#643 scenario-qa"
   };
   LANGS.forEach((lang) => {
     Object.keys(I18N.MESSAGES[lang]).forEach((k) => {
