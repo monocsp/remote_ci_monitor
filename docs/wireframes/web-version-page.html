@@ -1,0 +1,412 @@
+<title>버전 페이지와 바텀시트</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #F2F4F7; --surface: #FFFFFF; --surface-2: #F7F9FB; --ink: #1B2430; --muted: #5D6B7B; --line: #D8DEE6; --line-2: #E9EDF2;
+  --accent: #2B5FD9; --accent-soft: #E3EBFB; --ok: #1B7C44; --ok-soft: #E1F3E8; --warn: #9E5E00; --warn-soft: #FBEFD9;
+  --bad: #BC3930; --bad-soft: #FAE3E1; --lost: #6E5FA6; --lost-soft: #ECE8F6; --queued: #606E7D; --queued-soft: #ECF0F4;
+  --new: #0E7C86; --new-soft: #DDF3F5;
+  --sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+  --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+  --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+  --new: #5FC9D2; --new-soft: #10353A; } }
+:root[data-theme="dark"] {
+  --bg: #10161E; --surface: #171F29; --surface-2: #1D2632; --ink: #E7ECF2; --muted: #97A5B6; --line: #2C3745; --line-2: #222C38;
+  --accent: #6C9BFF; --accent-soft: #1E2C49; --ok: #4CC27A; --ok-soft: #173424; --warn: #E0A23A; --warn-soft: #3A2C12;
+  --bad: #F06E63; --bad-soft: #3F1F1D; --lost: #A99AD9; --lost-soft: #2A2540; --queued: #97A5B6; --queued-soft: #232D3A;
+  --new: #5FC9D2; --new-soft: #10353A; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 15px/1.6 var(--sans); }
+.page { max-width: 1080px; margin: 0 auto; padding-block: 28px 90px; padding-inline: 16px; }
+h1 { font-size: 28px; font-weight: 600; margin: 4px 0 6px; text-wrap: balance; }
+h2 { font-size: 20px; font-weight: 600; margin: 48px 0 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+h3 { font-size: 16px; font-weight: 600; margin: 22px 0 8px; }
+p, li { max-width: 80ch; }
+.eyebrow { font: 12px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.lede { color: var(--muted); }
+code { font-family: var(--mono); font-size: .92em; background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
+pre { font: 12.5px/1.5 var(--mono); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 10px 0; }
+th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12.5px; letter-spacing: .03em; }
+.wrap { overflow-x: auto; }
+.tag { display: inline-block; padding: 0 7px; border-radius: 999px; font: 500 12px var(--mono); border: 1px solid; white-space: nowrap; }
+.tag.new { color: var(--new); border-color: var(--new); background: var(--new-soft); }
+.tag.chg { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.tag.keep { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.tag.q { color: var(--lost); border-color: var(--lost); background: var(--lost-soft); }
+.rule { padding: 10px 14px; border-left: 3px solid var(--warn); background: var(--warn-soft); border-radius: 6px; margin: 12px 0; max-width: 88ch; }
+.rule.bad { border-color: var(--bad); background: var(--bad-soft); }
+.rule.ok { border-color: var(--ok); background: var(--ok-soft); }
+.rule.new { border-color: var(--new); background: var(--new-soft); }
+blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line); color: var(--muted); font-size: 14px; }
+.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 14px 0 0; padding: 0; list-style: none; font-size: 14px; }
+.toc a { color: var(--accent); text-decoration: none; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+
+/* ── 와이어프레임 목업 ── */
+.mock { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); padding: 12px; margin: 12px 0 4px; font-size: 12.5px; position: relative; overflow: hidden; }
+.mock .cap { position: absolute; top: 8px; right: 10px; font: 11px var(--mono); color: var(--muted); }
+.mk-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px 8px 0 0; }
+.mk-top .wm { font: 600 13px var(--mono); }
+.mk-nav { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.mk-nav span { padding: 1px 9px; }
+.mk-nav .on { background: var(--accent-soft); color: var(--accent); }
+.mk-body { background: var(--surface); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 8px 8px; padding: 12px; display: grid; gap: 10px; }
+.mk-h { font: 600 17px var(--sans); }
+.mk-sub { color: var(--muted); font-size: 12px; }
+.btn { display: inline-block; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 3px 10px; font: 500 12px var(--sans); }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.dis { opacity: .5; }
+.vrow { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; background: var(--surface); }
+.vrow.live { border-left-color: var(--ok); }
+.vrow.draft { border-left-color: var(--new); background: var(--new-soft); }
+.vrow.old { border-left-color: var(--queued); color: var(--muted); }
+.vrow .g { font-weight: 700; text-align: center; }
+.vrow b { font-family: var(--mono); }
+.pill { display: inline-block; padding: 0 7px; border-radius: 999px; font: 600 11px var(--sans); border: 1px solid transparent; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.new { background: var(--new-soft); color: var(--new); border-color: var(--new); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.run { background: var(--accent-soft); color: var(--accent); }
+.dlg { max-width: 460px; margin: 0 auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+.dlg h4 { margin: 0; font-size: 15px; }
+.field { display: grid; gap: 3px; }
+.field label { font: 600 11.5px var(--sans); color: var(--muted); }
+.field .in { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; background: var(--surface-2); font: 13px var(--mono); display: flex; justify-content: space-between; gap: 8px; }
+.field .in .hint { color: var(--muted); font-family: var(--sans); font-size: 11.5px; }
+.field .in.edited { border-color: var(--warn); }
+.ck { display: flex; gap: 6px; align-items: center; font-size: 12.5px; }
+.ck i { width: 12px; height: 12px; border: 1px solid var(--ink); border-radius: 3px; display: inline-block; }
+.ck i.on { background: var(--accent); border-color: var(--accent); }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+.sec { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); display: grid; gap: 8px; }
+.sec h5 { margin: 0; font: 600 13px var(--sans); display: flex; gap: 8px; align-items: center; }
+.sec .lab { font: 600 11.5px var(--sans); color: var(--muted); margin-top: 4px; }
+.shots { display: flex; gap: 6px; overflow-x: auto; }
+.shots i { flex: 0 0 44px; height: 90px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); }
+.cnt { font: 11px var(--mono); color: var(--muted); }
+.cnt.warn { color: var(--warn); } .cnt.bad { color: var(--bad); }
+.chip { display: inline-block; padding: 0 5px; border-radius: 4px; font: 11px var(--mono); border: 1px solid var(--warn); color: var(--warn); margin-left: 4px; }
+/* 바텀시트 */
+.sheet { position: sticky; bottom: 0; margin: 6px -12px -12px; border-top: 2px solid var(--accent); background: var(--surface); border-radius: 12px 12px 0 0; box-shadow: 0 -8px 24px rgba(0,0,0,.12); }
+.sheet.static { position: static; margin: 0; }
+.sh-head { display: grid; grid-template-columns: auto 1fr auto auto; gap: 12px; align-items: center; padding: 10px 14px; }
+.sh-head .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--line); grid-column: 1 / -1; justify-self: center; margin-bottom: -4px; }
+.sh-head .ver { font: 600 16px var(--sans); font-variant-numeric: tabular-nums; }
+.sh-head .st { font-size: 12.5px; color: var(--muted); }
+.sh-head .st b { color: var(--ink); }
+.pb { height: 10px; border-radius: 5px; background: var(--line-2); overflow: hidden; }
+.pb i { display: block; height: 100%; background: var(--accent); }
+.pb.none { background: repeating-linear-gradient(135deg, var(--line-2) 0 5px, var(--surface) 5px 10px); }
+.sh-body { border-top: 1px solid var(--line-2); padding: 12px 14px; display: grid; gap: 12px; }
+.miss { display: grid; gap: 4px; }
+.miss div { display: grid; grid-template-columns: 1.2em 1fr; gap: 6px; padding: 3px 8px; border-radius: 6px; border-left: 3px solid var(--line); }
+.miss .bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+.miss .ok { border-left-color: var(--ok); color: var(--ok); }
+.miss .warn { border-left-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+.diff div { font-family: var(--mono); font-size: 12px; padding: 2px 8px; }
+.diff .add { background: var(--ok-soft); color: var(--ok); } .diff .del { background: var(--bad-soft); color: var(--bad); }
+.stages { display: flex; gap: 4px; flex-wrap: wrap; }
+.stages span { padding: 1px 7px; border-radius: 4px; border: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); }
+.stages .done { color: var(--ok); border-color: var(--ok); } .stages .cur { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.flow { display: grid; gap: 6px; counter-reset: s; }
+.flow div { display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: start; }
+.flow div::before { counter-increment: s; content: counter(s); width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font: 600 12px var(--mono); display: grid; place-items: center; margin-top: 2px; }
+.dec { display: grid; gap: 8px; }
+.dec div { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.dec b { display: block; }
+</style>
+<div class="page">
+  <div class="eyebrow">remote_ci_monitor · 스토어 탭 · 기획 초안 v0.1 · 2026-09-18</div>
+  <h1>버전 페이지와 바텀시트</h1>
+  <p class="lede">App Store Connect 처럼 «새 버전 만들기 → 그 버전 안에서 문안을 다듬고 → 심사 제출»이 되도록 스토어 탭을 다시 짠다. 진행 막대 · 빌드 상태 · 심사 제출 버튼은 화면 아래 <b>바텀시트</b>로 모은다. 이 문서는 요구사항 명세 · 현재와의 차이 분석 · rcm 과 프로젝트(스킬) 사이 계약 변경 · 와이어프레임 · 단계 계획이다. 코드는 아직 없다.</p>
+  <ul class="toc">
+    <li><a href="#r">1. 요구사항 명세</a></li><li><a href="#d">2. 신규 · 변경 · 유지</a></li><li><a href="#m">3. 개념 모델 — «버전(드래프트)»</a></li>
+    <li><a href="#c">4. rcm ↔ 프로젝트 계약 변경(스킬에 전달)</a></li><li><a href="#w">5. 와이어프레임</a></li><li><a href="#f">6. 흐름</a></li>
+    <li><a href="#a">7. 서버 · 데이터</a></li><li><a href="#s">8. 안전 규칙</a></li><li><a href="#q">9. 결정이 필요한 것</a></li><li><a href="#p">10. 단계 계획</a></li>
+  </ul>
+
+  <h2 id="r">1. 요구사항 명세</h2>
+  <p>소유자의 말(2026-09-18)을 항목으로 나누고 번호를 붙였다. 뒤의 모든 절은 이 번호를 가리킨다.</p>
+  <div class="wrap"><table>
+    <tr><th>#</th><th>요구</th><th>출처(소유자의 말)</th><th>받아들인 해석</th></tr>
+    <tr><td><b>R1</b></td><td>«새 버전 만들기»가 흐름의 시작이다</td><td>「앱스토어에서는 새로운버전만들기 하고 거기서 수정을 진행하는데 우리도 그게 맞겠어」</td><td>스토어 탭의 첫 화면은 버전 목록이고, 편집·심사는 «버전 페이지» 안에서만 한다.</td></tr>
+    <tr><td><b>R2</b></td><td>웹 버튼 · rcm CLI · 스킬 호출, 세 입구가 같은 흐름</td><td>「이 웹페이지에서 버전 만들기 하거나 rcm에서 버전을 올린다고 새로운버전으로 release 배포 스킬호출하면」</td><td>웹 «새 버전 만들기», <code>rcm release new</code>, <code>/rcm-release-driver</code> 스킬 모두 같은 서버 API 를 부른다.</td></tr>
+    <tr><td><b>R3</b></td><td>«새 버전이 만들어진다»고 먼저 알리고, 버전만 묻는다</td><td>「새로운 버전이 만들어진다 라고 알리고, 몇버전 만드는지만 묻고」</td><td>대화상자 하나. 다른 입력(트랙 · dry-run · 빌드 번호)은 묻지 않는다.</td></tr>
+    <tr><td><b>R4</b></td><td>iOS · Android 힌트를 따로, 각 스토어의 현재 버전 + patch</td><td>「안드가 1.0.0이고 애플이 1.1.0인 유저가 있을 수 있으므로 따로 1.0.1, 1.1.1 로 힌트」</td><td>플랜이 읽은 App Store 라이브 버전과 Play 프로덕션 버전 이름을 각각 patch+1 해서 미리 채운다. 둘 다 고칠 수 있고, 한쪽만 만들 수도 있다.</td></tr>
+    <tr><td><b>R5</b></td><td>아무것도 안 하면 삭제된다</td><td>「아무것도 안 누르거나 rcm에서 다른말이 없으면 삭제하게 된다」</td><td>만든 뒤 편집도 제출도 없이 시간이 지나면 드래프트를 지운다(스토어 쪽 draft version 포함, 9절 Q2).</td></tr>
+    <tr><td><b>R6</b></td><td>버전 페이지의 필드는 이전 버전 값으로 미리 채워진다</td><td>「텍스트필드들이 이전버전에 있던걸 채워서 보여주도록 해 그러면 유저가 설정하거나 그대로 올리거나」</td><td>지금 «심사 패널»이 읽기 전용으로 보여 주던 자리를 <b>편집 가능한 필드</b>로 바꾸고, 라이브 버전(또는 store/ 파일)의 값으로 채운다. 그대로 두면 그대로 올라간다.</td></tr>
+    <tr><td><b>R7</b></td><td>rcm 은 터미널(프로젝트 스크립트)을 웹으로 그리는 방식을 유지한다</td><td>「rcm도 이런식으로 되게 해야해 어쨋든 터미널에 연결된걸 지금 웹으로 비주얼 그리는형식이니」</td><td>스토어에 쓰는 것은 계속 프로젝트 스크립트다. rcm 은 편집한 값을 파일로 넘기고 결과 JSON 을 그린다.</td></tr>
+    <tr><td><b>R8</b></td><td>전체 진행 막대 · 진행 정도 · «버전 빌드 중» 표시는 바텀시트로</td><td>「전체 프로그레스바나 진행정도 그리고 버전빌드중 등은 바텀시트로 옮기자」</td><td>맨 위 큰 막대(0.3.2)는 없애고 바텀시트 머리로 옮긴다.</td></tr>
+    <tr><td><b>R9</b></td><td>바텀시트에 심사 제출 버튼</td><td>「거기에 심사제출버튼도 만들고」</td><td>제출 버튼은 바텀시트에만 있다. 본문에는 없다.</td></tr>
+    <tr><td><b>R10</b></td><td>바텀시트는 버전 페이지에만 있다</td><td>「바텀시트는 위에 말한 버전생성이 되는 페이지에 바텀시트생기게 하고」</td><td>버전 목록 화면 · 설정 화면에는 없다.</td></tr>
+    <tr><td><b>R11</b></td><td>접힌 머리 = 심사 전에 필요한 것들; 제출 가능하면 제출 버튼</td><td>「원래는 접어져서 헤드에 심사넣기전에 필요한것들 보여주다가 심사넣을 수 있으면 심사제출버튼도 있고」</td><td>머리 한 줄에 «남은 것 n개 · 첫 항목» 또는 «제출 준비됨» + 버튼.</td></tr>
+    <tr><td><b>R12</b></td><td>펼치면 이전 버전과 달라진 점, 못 올리면 누락 목록</td><td>「확대 버튼하면 바텀시트가 커지며 이전버전과 달라진점 보여지고 심사 올리지 못 하면 누락된거 보여주게 해」</td><td>펼침 = 전체 진행 + 단계 + 변경 diff + 누락 체크리스트(각 항목이 고치는 곳으로 가는 링크).</td></tr>
+  </table></div>
+
+  <h2 id="d">2. 신규 · 변경 · 유지</h2>
+  <div class="wrap"><table>
+    <tr><th>영역</th><th>지금(0.3.3)</th><th>바뀐 뒤</th><th>분류</th></tr>
+    <tr><td>스토어 탭 첫 화면</td><td>행 넷(설정 · 소스 · 빌드 · 스토어) + 심사 패널</td><td><b>버전 목록</b>(라이브 · 드래프트 · 지난 버전) + «새 버전 만들기». 행 넷은 «상태 띠» 한 줄로 줄고 펼치면 지금 내용</td><td><span class="tag new">신규</span> <span class="tag chg">변경</span></td></tr>
+    <tr><td>버전 만들기</td><td>없음(플랜 대화상자가 버전만 물음)</td><td>대화상자: 알림 문장 + iOS/Android 두 칸(힌트 patch+1) + 만들기. 생성은 프로젝트 스크립트(역할 <code>version</code>)</td><td><span class="tag new">신규</span></td></tr>
+    <tr><td>문안 필드</td><td>읽기 전용 미리보기(«—» 또는 store/ 값)</td><td>편집 가능. 이전 버전 값 프리필, 글자 수, «바뀜» 칩, 되돌리기</td><td><span class="tag chg">변경</span></td></tr>
+    <tr><td>편집한 문안의 전달</td><td>없음</td><td>rcm 이 <code>listing.json</code> 을 잡 입력 파일로 넘김 → review/upload 스크립트가 적용</td><td><span class="tag new">신규(계약)</span></td></tr>
+    <tr><td>진행 막대</td><td>맨 위 큰 막대(회차 돌 때)</td><td>바텀시트 머리의 막대 + 펼치면 단계 9칸</td><td><span class="tag chg">변경</span></td></tr>
+    <tr><td>심사 제출 버튼 · 체크박스</td><td>심사 패널 아래</td><td>바텀시트(접힘 머리에 버튼, 펼침에 체크박스 · 관리형 게시 · 빌드 번호 토글)</td><td><span class="tag chg">변경</span></td></tr>
+    <tr><td>누락 목록</td><td>버튼 옆 이유 문장</td><td>바텀시트 펼침의 체크리스트(항목 → 고치는 곳 링크)</td><td><span class="tag chg">변경</span></td></tr>
+    <tr><td>이전 버전과의 diff</td><td>«스토어와 달라진 것» 한 줄(스냅샷 필요)</td><td>바텀시트 펼침에 필드별 old → new, 스크린샷 ±</td><td><span class="tag chg">변경</span></td></tr>
+    <tr><td>드래프트 수명</td><td>없음</td><td>rcm DB 의 <code>versions</code> 행 + 만료 청소(스토어 draft 삭제는 스크립트)</td><td><span class="tag new">신규</span></td></tr>
+    <tr><td>CLI · 스킬</td><td><code>rcm</code> 에 릴리스 명령 없음, 드라이버 스킬은 S0 부터</td><td><code>rcm release new|list|delete</code>, 드라이버 S0 앞에 «V 버전 만들기» 단계</td><td><span class="tag new">신규</span></td></tr>
+    <tr><td>설정 관문 · 비밀 · 검증</td><td>그대로</td><td>그대로</td><td><span class="tag keep">유지</span></td></tr>
+    <tr><td>안전 규칙(출시 버튼 없음 · 관리형 게시 매번 · 번호 지어내지 않음)</td><td>그대로</td><td>그대로 + 드래프트 삭제 규칙 추가</td><td><span class="tag keep">유지</span></td></tr>
+    <tr><td>빌드 번호 자동/직접 토글</td><td>심사 패널 · 시작 폼</td><td>바텀시트 펼침 안</td><td><span class="tag chg">위치만</span></td></tr>
+  </table></div>
+
+  <h2 id="m">3. 개념 모델 — «버전(드래프트)»</h2>
+  <p>rcm 에 <b>버전</b>이라는 객체가 처음 생긴다. 지금까지 rcm 은 «잡»과 «드라이버 실행»만 알았고 버전은 플랜의 <code>build_name</code> 문자열이었다.</p>
+  <div class="two">
+    <div class="sec"><h5>iOS (App Store Connect)</h5>
+      <p>ASC 에는 실제로 «버전» 객체가 있다(<code>appStoreVersions</code>, 상태 PREPARE_FOR_SUBMISSION …). 새 버전 만들기 = ASC 에 draft version 생성. 문안(<code>appStoreVersionLocalizations</code>)은 버전에 붙는다. 삭제 API 도 있다.</p>
+      <p><b>따라서</b> R1·R5 가 그대로 대응된다: 만들기 → 편집 → 제출, 방치하면 draft 삭제.</p></div>
+    <div class="sec"><h5>Android (Google Play)</h5>
+      <p>Play 에는 «버전 객체»가 없다. 스토어 등록정보는 앱에 하나(edit 트랜잭션), 릴리스는 트랙에 붙고 이름(<code>versionName</code>)은 업로드한 번들이 정한다.</p>
+      <p><b>따라서</b> Android 의 «버전»은 rcm 안의 드래프트일 뿐이다: 버전 이름 + 편집한 등록정보 + 릴리스 노트를 들고 있다가 업로드·제출 때 스크립트가 edit 로 반영한다. 삭제 = rcm 드래프트만 지우면 된다(스토어에는 아직 아무것도 없다).</p></div>
+  </div>
+  <h3>드래프트의 수명</h3>
+  <div class="flow">
+    <div><span><b>만듦</b> — 대화상자에서 iOS/Android 버전 이름을 정하면 rcm 이 <code>versions</code> 행을 만들고, 역할 <code>version</code> 프리셋을 <code>mode=create</code> 로 돌린다. iOS 는 스크립트가 ASC 에 draft 를 만들고 <code>version.json</code> 에 <code>asc_version_id</code> 를 적는다.</span></div>
+    <div><span><b>프리필</b> — 같은 잡이 이전 버전(라이브)의 문안을 읽어 <code>prefill.json</code> 으로 낸다. rcm 은 그것을 편집 가능한 필드로 그린다. 스크립트가 못 읽으면 store/ 파일(<code>listing.preview</code>)로 대신 채우고 «파일에서» 라고 표시한다.</span></div>
+    <div><span><b>편집</b> — 사람이 웹에서 고친다. rcm 은 <code>versions.edited_json</code> 에 저장하고 «바뀜» 칩을 단다. 저장은 즉시(자동), 스토어에는 아직 아무것도 쓰지 않는다.</span></div>
+    <div><span><b>빌드 · 업로드 · 심사</b> — 기존 흐름 그대로. 다만 review/upload 잡에 <code>listing.json</code>(편집본)을 파일 입력으로 넘긴다. 스크립트가 그것을 ASC 버전 문안 / Play edit 에 쓴다.</span></div>
+    <div><span><b>끝</b> — 심사 제출 성공(<code>review.json overall_status=submitted</code>)이면 드래프트는 «제출됨»으로 닫힌다. 스토어 승인 뒤 출시는 여전히 사람이 콘솔에서.</span></div>
+    <div><span><b>폐기</b> — 편집도 잡도 없이 TTL(기본 24시간, 9절 Q1)이 지나면 청소기가 <code>version</code> 프리셋을 <code>mode=delete</code> 로 돌려 ASC draft 를 지우고 행을 «폐기됨»으로 둔다. 사람이 «버리기»를 눌러도 같다. 편집한 흔적이 있으면 자동 삭제하지 않고 만료 경고만 낸다(Q2).</span></div>
+  </div>
+
+  <h2 id="c">4. rcm ↔ 프로젝트 계약 변경 — 스킬에 전달할 것</h2>
+  <p>rcm 은 특정 프로젝트를 모른다는 규칙은 그대로다. 아래는 <code>docs/release-contract.md</code> 에 더해질 내용이고, 각 항목이 어느 스킬 템플릿을 바꾸는지 적었다.</p>
+  <h3>4.1 새 역할 <code>version</code> (선택이지만 «새 버전 만들기»를 쓰려면 필수)</h3>
+  <div class="wrap"><table>
+    <tr><th>역할</th><th>rcm 이 보내는 입력</th><th>rcm 이 읽는 산출물</th><th>종료 코드</th><th>스킬</th></tr>
+    <tr><td><code>version</code></td><td><code>mode = create|delete|prefill</code> · <code>ios_version</code> · <code>android_version</code>(빈 값이면 그 스토어는 만들지 않음) · <code>asc_version_id</code>(delete 때)</td><td><code>version.json</code> · <code>prefill.json</code></td><td>0 · 1 실패 · 2 환경 · 3 이미 있음(같은 이름의 편집 중 버전) · 4 삭제 불가(제출된 버전)</td><td><code>rcm-store-connect</code> 에 <code>release_version.sh</code> 템플릿 추가</td></tr>
+  </table></div>
+<pre>// version.json — mode=create 뒤
+{ "schema": 1, "ios": { "version": "1.1.1", "asc_version_id": "abc123", "state": "PREPARE_FOR_SUBMISSION" },
+  "android": { "version": "1.0.1", "note": "draft lives in rcm until upload" }, "measured_at": "…" }
+
+// prefill.json — 이전 버전의 문안(라이브) — 필드 이름은 review 계약의 listing 과 같다
+{ "schema": 1, "source": "asc_live:1.1.0 · play_listing",
+  "ios": { "subtitle": "…", "promotional_text": "", "description": "…", "keywords": "…", "support_url": "…", "marketing_url": "…", "whats_new": "…",
+           "screenshots": [ { "path": "store/screenshots/ios/ko/0_APP_IPHONE_65_0.png" } ] },
+  "android": { "title": "…", "short_description": "…", "full_description": "…", "whats_new": "…", "graphics": [ … ] } }</pre>
+  <h3>4.2 <code>plan.json</code> 에 힌트 두 개(R4)</h3>
+<pre>"store": { "asc_live": "1.1.0", "asc_editing": null, "play": { "production": 180, "production_name": "1.0.0" } },
+"next_version_hint": { "ios": "1.1.1", "android": "1.0.1" }      // 없으면 rcm 이 asc_live · production_name 에서 patch+1 로 계산</pre>
+  <p>스크립트가 힌트를 주지 않아도 rcm 이 <code>asc_live</code> 와 <code>play.production_name</code> 에서 계산한다. 계산 규칙은 «마지막 숫자 +1»뿐이고, 사람이 고칠 수 있다.</p>
+  <h3>4.3 review · upload 에 편집본 전달(R6 · R7)</h3>
+  <p>입력 <code>listing_file</code>(경로)을 추가한다. rcm 이 워크스페이스에 <code>listing.json</code> 을 써 두고 그 경로를 넘긴다. 파일이 없거나 <code>listing = notes-only</code> 면 지금처럼 store/ 파일만 쓴다. 스크립트는 <b>파일이 있으면 그 값이 store/ 보다 우선</b>이다. 심사 플랜(<code>mode=plan</code>)도 같은 파일을 받아 «이 값으로 올라간다»를 <code>review-plan.json.listing.preview</code> 로 되돌려 준다 — 바텀시트의 diff 는 이것과 <code>prefill.json</code> 을 비교한 것이다.</p>
+  <h3>4.4 드라이버(선택)에 «V» 단계</h3>
+  <p><code>rcm-release-driver</code> 의 S0 앞에 <code>V 버전 만들기</code>가 붙는다. 드라이버는 <code>--version-id &lt;rcm id&gt;</code> 를 받고, 없으면 지금처럼 <code>--build-name</code> 만으로 돈다(호환). 스킬 호출(R2)은 «새 버전을 만듭니다 — 어느 버전?»만 묻고 나머지는 서버 API 를 부른다.</p>
+  <h3>4.5 스킬 문서 변경 목록</h3>
+  <div class="wrap"><table>
+    <tr><th>스킬</th><th>바뀌는 것</th></tr>
+    <tr><td><code>rcm-store-connect</code></td><td>템플릿 <code>release_version.sh</code>(create/delete/prefill, ASC 는 TODO 블록) · <code>presets.release.toml</code> 에 <code>release-version</code> · <code>profile.toml</code> 에 <code>presets.version</code> · <code>rcm_contract.py</code> 에 <code>version</code> · <code>prefill</code> 종류 · review/upload 템플릿에 <code>listing_file</code> 처리</td></tr>
+    <tr><td><code>rcm-release-driver</code></td><td><code>release_driver.sh</code> 에 V 단계와 <code>--version-id</code> · <code>release_check.py stage</code> 에 V</td></tr>
+    <tr><td><code>rcm-connect</code></td><td>tiers 표에 <code>version</code>(선택) · 「새 버전 만들기를 쓰려면 version 역할」 안내 · <code>docs/rcm-connect.md</code> 헤더에 <code>version:</code></td></tr>
+    <tr><td><code>rcm check</code></td><td><code>version</code> 프리셋이 있으면 입력 넷을 검사, <code>mode</code> 기본이 <code>create</code> 가 아니어야 한다(<code>prefill</code> 기본)</td></tr>
+  </table></div>
+  <div class="rule new">dolomood 쪽에 실제로 필요한 작업: <code>store_review.sh</code> 에 ASC 버전 create/delete 와 localizations 읽기(prefill) · <code>store_listing.py</code> 가 <code>listing.json</code> 을 입력으로 받아 store/ 값보다 우선 적용 · <code>release_plan.sh</code> 에 <code>production_name</code> · <code>next_version_hint</code>. 이 셋은 스킬을 다시 돌리면 골격이 나오고 TODO 블록을 채우면 된다.</div>
+
+  <h2 id="w">5. 와이어프레임</h2>
+  <h3>5.1 버전 목록 — 스토어 탭의 첫 화면</h3>
+  <div class="mock"><span class="cap">W1 · 관문을 지난 뒤</span>
+    <div class="mk-top"><span class="wm">rcm</span><span class="mk-nav"><span>큐</span><span class="on">스토어</span></span><span class="mk-sub">dolomood</span><span style="flex:1"></span><span class="pill ok">설정 4/4 · 소스 main ⊂ dev · 미러 2m</span><span class="btn">상태 자세히</span></div>
+    <div class="mk-body">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span class="mk-h">버전</span><span class="mk-sub">App Store 라이브 1.1.0 (180) · Play production 1.0.0 (180)</span><span style="flex:1"></span><span class="btn primary">+ 새 버전 만들기</span></div>
+      <div class="vrow draft"><span class="g">✎</span><span><b>iOS 1.1.1 · Android 1.0.1</b> <span class="pill new">편집 중</span> · 만든 지 40m · 필드 3개 바뀜 · 빌드 아직 없음</span><span><span class="btn">열기</span> <span class="btn">버리기</span></span></div>
+      <div class="vrow live"><span class="g">✓</span><span><b>iOS 1.1.0 (180) · Android 1.0.0 (180)</b> <span class="pill ok">라이브</span> · 2026-09-10 출시 · 심사 #612</span><span class="btn">보기</span></div>
+      <div class="vrow old"><span class="g">·</span><span><b>iOS 1.0.9 (172) · Android 0.13.1 (175)</b> · 2026-08-21</span><span class="btn">보기</span></div>
+      <p class="mk-sub">드래프트는 편집도 제출도 없이 24시간이 지나면 지워집니다. 승인은 출시가 아닙니다 — 이 화면에는 release · publish · rollout 버튼이 없습니다.</p>
+    </div>
+  </div>
+  <p>행 넷은 «상태 띠» 한 줄(설정 · 소스 · 미러)로 접히고, «상태 자세히»를 누르면 지금의 네 행이 그대로 나온다. 빨간 것이 있으면 띠가 빨갛고 자동으로 펼쳐진다(현 규칙 유지).</p>
+
+  <h3>5.2 새 버전 대화상자 (R3 · R4)</h3>
+  <div class="mock"><span class="cap">W2</span>
+    <div class="dlg">
+      <h4>새 버전을 만듭니다</h4>
+      <p class="mk-sub" style="margin:0">App Store 에는 편집 중인 버전이 생기고, Google Play 는 업로드 전까지 rcm 안에만 있습니다. 편집도 제출도 없이 24시간이 지나면 지워집니다.</p>
+      <div class="field"><label><span class="ck"><i class="on"></i> App Store · iOS</span></label><div class="in"><span>1.1.1</span><span class="hint">라이브 1.1.0 → 다음 patch</span></div></div>
+      <div class="field"><label><span class="ck"><i class="on"></i> Google Play · Android</span></label><div class="in"><span>1.0.1</span><span class="hint">production 1.0.0 → 다음 patch</span></div></div>
+      <p class="mk-sub" style="margin:0">체크를 끄면 그 스토어는 만들지 않습니다. 이름은 major.minor.patch 꼴이어야 하고, 라이브보다 커야 합니다.</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><span class="btn">닫기</span><span class="btn primary">만들기</span></div>
+    </div>
+  </div>
+
+  <h3>5.3 버전 페이지 — 편집 가능한 필드 + 바텀시트(접힘) (R6 · R10 · R11)</h3>
+  <div class="mock"><span class="cap">W3 · 편집 중 · 빌드 없음</span>
+    <div class="mk-top"><span class="wm">rcm</span><span class="mk-nav"><span>큐</span><span class="on">스토어</span></span><span class="mk-sub">dolomood › 버전 › iOS 1.1.1 · Android 1.0.1</span><span style="flex:1"></span><span class="btn">← 목록</span></div>
+    <div class="mk-body">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span class="mk-h">iOS 1.1.1 · Android 1.0.1</span><span class="pill new">편집 중</span><span class="mk-sub">이전 버전 값으로 채워져 있습니다 — 고친 칸에만 «바뀜»이 붙습니다 · 40m 전 자동 저장</span></div>
+      <div class="cols">
+        <div class="sec"><h5>App Store · iOS <span class="pill new">draft · PREPARE_FOR_SUBMISSION</span></h5>
+          <div class="lab">앱 미리보기와 스크린샷 · 8장 <span class="chip">이전 버전과 같음</span></div><div class="shots"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="field"><label>부제 <span class="cnt">23/30</span></label><div class="in">일상이 차곡차곡 쌓이는 감정일기, 돌로무드</div></div>
+          <div class="field"><label>프로모션 텍스트 <span class="cnt">0/170</span></label><div class="in" style="color:var(--muted)">(비어 있음)</div></div>
+          <div class="field"><label>설명 <span class="cnt">940/4000</span></label><div class="in" style="white-space:normal">두더지 두담이는 당신의 이야기에 귀 기울이며… (이전 버전 그대로)</div></div>
+          <div class="field"><label>키워드 <span class="cnt warn">98/100</span> <span class="chip">바뀜</span></label><div class="in edited">감정해석,감정분석,내면분석,마음분석,AI타로,…</div></div>
+          <div class="field"><label>이 버전의 새로운 기능 <span class="cnt">101/4000</span> <span class="chip">바뀜</span></label><div class="in edited" style="white-space:normal">돌로무드가 새 모습으로 돌아왔어요. - 홈·감정 기록·감정 대화 화면을 새로 그렸어요.</div></div>
+          <div class="lab">빌드 · 출시 설정</div><div class="mk-sub">빌드 — 아직 없음 (바텀시트에서 빌드) · 이 버전을 수동으로 출시 <span class="pill ok">저장소가 고정</span> · 단계적 출시 켬</div>
+          <div class="lab">앱 심사 정보</div><div class="mk-sub">7개 파일 있음 · 값은 보이지 않음</div>
+        </div>
+        <div class="sec"><h5>Google Play · Android <span class="pill new">rcm 드래프트</span></h5>
+          <div class="lab">그래픽 · 0개 <span class="cnt bad">featureGraphic 없음</span></div>
+          <div class="field"><label>앱 이름 <span class="cnt">22/30</span></label><div class="in">돌로무드 : 나를 이해하는 AI 감정대화</div></div>
+          <div class="field"><label>간단한 설명 <span class="cnt">13/80</span></label><div class="in">파고들면 보이는 내 마음</div></div>
+          <div class="field"><label>자세한 설명 <span class="cnt">940/4000</span></label><div class="in" style="white-space:normal">두더지 두담이는… (이전 버전 그대로)</div></div>
+          <div class="field"><label>릴리스 노트 <span class="cnt">101/500</span> <span class="chip">바뀜</span></label><div class="in edited" style="white-space:normal">같은 글이 두 스토어에 갑니다 — iOS «새로운 기능»과 한 몸</div></div>
+          <div class="lab">출시 설정</div><div class="mk-sub">트랙 production · 롤아웃 <span class="pill ok">저장소가 고정</span> · 관리형 게시 <span class="pill warn">API 로 알 수 없음</span> — 제출 때 확인</div>
+          <div class="lab">앱 콘텐츠 · 정책</div><div class="mk-sub">콘솔 전용 — rcm 은 건드리지 않음</div>
+        </div>
+      </div>
+      <div class="sheet"><div class="sh-head"><span class="grab"></span>
+        <span class="ver">1.1.1 / 1.0.1</span>
+        <span class="st"><b>심사 전에 남은 것 3</b> · 빌드 없음 → 먼저 «빌드 · 업로드» · 관리형 게시 확인 · Play featureGraphic</span>
+        <span class="btn primary dis">심사 제출</span><span class="btn">⌃ 펼치기</span>
+      </div></div>
+    </div>
+  </div>
+  <p>바텀시트 머리는 항상 화면 아래에 붙어 있다(sticky). 접힌 머리에는 <b>버전 · 남은 것 n개와 첫 항목 · 제출 버튼 · 펼치기</b>만 있다. 남은 것이 0 이면 «제출 준비됨 · 플랜 3m 전 · N 181» 이 되고 버튼이 파랗게 열린다.</p>
+
+  <h3>5.4 바텀시트 — 펼침, 도는 중 (R8 · R12)</h3>
+  <div class="mock"><span class="cap">W4 · 릴리스 회차 S5 진행 중</span>
+    <div class="sheet static"><div class="sh-head"><span class="grab"></span>
+      <span class="ver">1.1.1 / 1.0.1 <span class="pill run">진행 중</span></span>
+      <span class="st"><b>S5 시나리오 QA · 9단계 중 6번째 · 62%</b> · #643 scenario-qa 17/30 청크 · 경과 38m · 예상 21:40</span>
+      <span class="btn primary dis">심사 제출</span><span class="btn">⌄ 접기</span>
+    </div>
+    <div class="sh-body">
+      <div class="pb"><i style="width:62%"></i></div>
+      <div class="stages"><span class="done">V 버전</span><span class="done">S0 브랜치</span><span class="done">S1 플랜 181</span><span class="done">S2 N 자동</span><span class="done">S3 PR</span><span class="done">S4 게이트</span><span class="cur">S5 QA ▶</span><span>S6 머지</span><span>S7 업로드</span><span>S8 태그</span></div>
+      <div class="mk-sub">근거: 선언된 9 단계 + 지금 단계 안 도는 작업의 자체 진행 · 빌드 번호 <b>자동 (스토어 기준)</b> · dry-run 아님 · 시작 pcs 21:02</div>
+      <div class="two">
+        <div><div class="lab">심사 전에 남은 것</div><div class="miss">
+          <div class="warn"><span>▶</span><span>빌드 · 업로드 — 지금 도는 중(S5), S7 에서 올라갑니다</span></div>
+          <div class="bad"><span>✗</span><span>Google Play 관리형 게시 확인 — 제출 직전에 체크(매번)</span></div>
+          <div class="bad"><span>✗</span><span>Play featureGraphic 1024×500 없음 → 그래픽 칸으로</span></div>
+          <div class="ok"><span>✓</span><span>App Store 문안 · 스크린샷 8장 · 릴리스 노트 101/500</span></div>
+          <div class="ok"><span>✓</span><span>심사 담당자 정보 7개 · 비밀 4/4 검증 · main ⊂ dev</span></div>
+        </div></div>
+        <div><div class="lab">이전 버전(1.1.0 / 1.0.0)과 달라진 것</div><div class="diff">
+          <div class="del">− keywords: …,마음챙김,멘탈케어,스트레스</div><div class="add">+ keywords: …,AI타로,감정카드,마음챙김</div>
+          <div class="del">− whats_new: 버그를 고치고 속도를 높였어요.</div><div class="add">+ whats_new: 돌로무드가 새 모습으로 돌아왔어요. - 홈·감정 기록…</div>
+          <div>스크린샷 iOS: 변화 없음 · Android 그래픽: 없음(이전에도 없음)</div>
+        </div></div>
+      </div>
+      <div class="mk-sub">고정: 승인은 출시가 아닙니다. iOS 는 App Store Connect 의 Release this version 을, Android 는 Play Console 의 Publish 를 사람이 누릅니다.</div>
+    </div></div>
+  </div>
+
+  <h3>5.5 바텀시트 — 펼침, 제출 가능 (R9 · R11)</h3>
+  <div class="mock"><span class="cap">W5 · 업로드 끝 · 심사 플랜 초록</span>
+    <div class="sheet static"><div class="sh-head"><span class="grab"></span>
+      <span class="ver">1.1.1 / 1.0.1 <span class="pill ok">제출 준비됨</span></span>
+      <span class="st"><b>빌드 181 올라감 21:41 · 심사 플랜 ok · 3m 전</b> · App Store + Google Play</span>
+      <span class="btn primary">심사 제출…</span><span class="btn">⌄ 접기</span>
+    </div>
+    <div class="sh-body">
+      <div class="pb"><i style="width:99%"></i></div>
+      <div class="stages"><span class="done">V</span><span class="done">S0</span><span class="done">S1</span><span class="done">S2</span><span class="done">S3</span><span class="done">S4</span><span class="done">S5</span><span class="done">S6</span><span class="done">S7 업로드 181</span><span class="done">S8 태그 prod/1.1.1-181</span></div>
+      <div class="two">
+        <div><div class="lab">제출 조건</div><div class="miss">
+          <div class="ok"><span>✓</span><span>심사 플랜 #691 ok · 30분 안</span></div>
+          <div class="ok"><span>✓</span><span>빌드 번호 181 — 자동 (스토어 기준) <span class="btn" style="padding:0 6px">직접 입력</span></span></div>
+          <div class="bad"><span>☐</span><span><b>Play Console 게시 개요에서 관리형 게시 켜짐을 지금 봤습니다</b> — 체크해야 열립니다(매번)</span></div>
+          <div class="ok"><span>☑</span><span>App Store ☑ Google Play ☑ 소개 자료 전체 업로드(바뀐 필드 2개 포함) ☑ iOS 단계적 출시</span></div>
+        </div></div>
+        <div><div class="lab">보내는 것</div><div class="mk-sub">빌드 181 · 편집한 문안(키워드 · 새로운 기능) · 스크린샷 8장 · 심사 담당자 정보 · «이 버전을 수동으로 출시» 고정. 제출 뒤 결과(submitted · partial · noop · failed)와 스토어에서 다시 읽은 상태가 여기 나옵니다.</div></div>
+      </div>
+    </div></div>
+  </div>
+
+  <h3>5.6 변형 상태</h3>
+  <div class="wrap"><table>
+    <tr><th>상태</th><th>접힌 머리</th><th>펼침</th><th>색</th></tr>
+    <tr><td>편집 중 · 빌드 없음</td><td>남은 것 n · 첫 항목 · 제출 닫힘</td><td>누락 목록 + diff · «빌드 · 업로드 시작» 버튼(드라이버 있으면 릴리스 시작, 없으면 예행/업로드 잡)</td><td>청록(new)</td></tr>
+    <tr><td>도는 중</td><td>단계 · % · 경과 · 예상</td><td>막대 · 단계 10칸 · 누락 · diff · 중단</td><td>파랑</td></tr>
+    <tr><td>사람 차례(S2 직접 입력)</td><td>«빌드 번호 입력 대기 181»</td><td>입력 칸이 시트 안에</td><td>황토</td></tr>
+    <tr><td>실패 · 결과 모름 · 드리프트</td><td>원인 한 줄</td><td>지금의 행 규칙 그대로(재시도 · 재제출 금지 · 다음 번호)</td><td>빨강 · 보라 · 황토</td></tr>
+    <tr><td>제출 준비됨</td><td>«제출 준비됨» + 열린 버튼</td><td>제출 조건 · 보내는 것</td><td>초록</td></tr>
+    <tr><td>제출됨</td><td>«제출됨 21:52 · 심사 대기» · 버튼 없음</td><td>결과 넷 + 스토어가 다시 읽힌 상태 · 고정 문장</td><td>초록</td></tr>
+    <tr><td>만료 임박 / 폐기됨</td><td>«편집 없이 22h — 2h 뒤 삭제» · «버리기»</td><td>—</td><td>회색</td></tr>
+    <tr><td>모바일</td><td>머리 두 줄(버전 / 상태), 버튼은 아래로</td><td>시트가 전체 높이, 두 열이 한 열</td><td>—</td></tr>
+  </table></div>
+
+  <h2 id="f">6. 흐름 — 세 입구가 하나로 (R2 · R3)</h2>
+  <div class="two">
+    <div class="sec"><h5>웹</h5><div class="flow">
+      <div><span>버전 목록에서 «새 버전 만들기»</span></div>
+      <div><span>대화상자 — 알림 문장, iOS/Android 힌트, 만들기</span></div>
+      <div><span><code>POST …/release/versions</code> → 잡(<code>version create</code>) → 버전 페이지로 이동(프리필 채워지면 필드가 살아남)</span></div>
+      <div><span>편집(자동 저장) → 바텀시트에서 빌드 · 업로드 → 심사 플랜 → 제출</span></div>
+    </div></div>
+    <div class="sec"><h5>rcm CLI · 스킬</h5><div class="flow">
+      <div><span><code>rcm release new</code> 또는 <code>/rcm-release-driver</code> 호출</span></div>
+      <div><span>터미널이 «새 버전을 만듭니다» 를 알리고 <b>버전만</b> 묻는다: <code>iOS [1.1.1]: </code> · <code>Android [1.0.1]: </code> (엔터 = 힌트)</span></div>
+      <div><span>같은 API → 링크 «웹에서 문안을 다듬으려면 …/#/store/dolomood/v/12»</span></div>
+      <div><span>«다른 말이 없으면» — 24h 뒤 자동 삭제. 스킬은 그 뒤에 이어서 드라이버 V→S8 을 돌릴지 묻는다</span></div>
+    </div></div>
+  </div>
+
+  <h2 id="a">7. 서버 · 데이터</h2>
+  <div class="wrap"><table>
+    <tr><th>무엇</th><th>내용</th></tr>
+    <tr><td>DB v20 <code>versions</code></td><td><code>id · repo · ios_version · android_version · state(draft|editing|running|submitted|discarded) · created_by · created_at · last_edit_at · expires_at · asc_version_id · prefill_json · edited_json · plan_job_id · release_id · review_job_id</code></td></tr>
+    <tr><td><code>GET …/release/versions</code></td><td>목록 — 라이브(플랜에서) · 드래프트(표) · 지난 것(review.json 이력)</td></tr>
+    <tr><td><code>POST …/release/versions</code></td><td>admin · <code>{ios_version?, android_version?}</code> → 행 + <code>version</code> 잡(mode=create) → 202 <code>{id, job_id}</code>. 이름 검증: <code>major.minor.patch</code>, 라이브보다 큼, 같은 이름의 열린 드래프트 없음(409 <code>version_exists</code>)</td></tr>
+    <tr><td><code>GET …/release/versions/&lt;id&gt;</code></td><td>행 + prefill + edited + 지금의 <code>/release</code> 보기(플랜 · 심사 · 업로드 · 잡) + 드라이버 보기 → 바텀시트가 이것 하나로 그려진다</td></tr>
+    <tr><td><code>PUT …/release/versions/&lt;id&gt;/listing</code></td><td>admin · 편집본(필드 이름은 계약의 listing) → <code>edited_json</code> · <code>last_edit_at</code>. 글자 수 상한을 넘으면 400 이 아니라 저장하고 «bad» 카운터(스토어가 최종 판정)</td></tr>
+    <tr><td><code>GET …/release/versions/&lt;id&gt;/diff</code></td><td>prefill vs edited 필드별 old/new · 스크린샷 ±</td></tr>
+    <tr><td><code>DELETE …/release/versions/&lt;id&gt;</code></td><td>admin · «버리기» → <code>version</code> 잡(mode=delete, asc_version_id) → discarded. 제출된 버전은 409</td></tr>
+    <tr><td>청소기</td><td>1시간마다 <code>expires_at</code> 지난 draft(편집 없음)를 DELETE 와 같은 경로로. 편집 있으면 만료 경고 이벤트만(Q2)</td></tr>
+    <tr><td>review · upload 제출</td><td>본문에 <code>version_id</code> 가 오면 rcm 이 <code>edited_json</code> 을 <code>listing.json</code> 으로 써서 <code>listing_file</code> 입력으로 넘긴다. 프리셋에 그 입력이 없으면 409 <code>listing_file_unsupported</code>(스킬을 다시 돌리라는 안내)</td></tr>
+    <tr><td>드라이버</td><td><code>start</code> 본문에 <code>version_id</code> → <code>--version-id</code>; V 단계 상태 줄 <code>stage V …</code></td></tr>
+    <tr><td>CLI</td><td><code>rcm release new|list|delete|open</code>(서버 API 얇은 껍데기)</td></tr>
+  </table></div>
+
+  <h2 id="s">8. 안전 규칙 — 유지되는 것과 새로 생기는 것</h2>
+  <div class="rule ok"><b>유지:</b> release · publish · rollout 버튼 없음 · 관리형 게시는 제출마다 사람이 체크 · 빌드 번호는 플랜의 n 만(자동/직접 토글) · 비밀은 서버에만 · unsafe_release_type 빨간 띠.</div>
+  <div class="rule"><b>새로:</b> 드래프트 자동 삭제는 되돌릴 수 없는 일이다(ASC draft 삭제). 그래서 (1) 편집이 있으면 자동 삭제하지 않는다 (2) 삭제 잡의 로그가 남는다 (3) 제출된 버전은 절대 삭제 대상이 아니다 (4) 이름이 라이브보다 작은 버전은 만들지 않는다.</div>
+  <div class="rule bad"><b>주의:</b> 편집 가능한 필드가 생기면 «웹에서 고친 값이 store/ 파일과 달라지는» 상태가 생긴다. 이 문서의 답은 <b>파일이 원본이 아니라 드래프트가 원본</b>(제출 때 스크립트가 store/ 로 되쓰고 커밋할지는 Q4)이다.</div>
+
+  <h2 id="q">9. 결정이 필요한 것</h2>
+  <div class="dec">
+    <div><b><span class="tag q">Q1</span> 드래프트 TTL</b> 기본 24시간으로 잡았다. 12h · 48h · 프로파일 키(<code>version_ttl_hours</code>)로 조정 가능하게 둘지.</div>
+    <div><b><span class="tag q">Q2</span> 편집한 드래프트도 자동 삭제할지</b> 초안은 «편집이 있으면 경고만, 사람이 버리기». 소유자의 말 «아무것도 안 누르거나»를 넓게 읽으면 편집했더라도 제출 없이 방치하면 삭제. 어느 쪽?</div>
+    <div><b><span class="tag q">Q3</span> Android 의 «버전»</b> Play 에는 객체가 없으므로 rcm 드래프트 + 업로드 때 반영으로 잡았다. 이름 힌트는 production 의 versionName 기준. 괜찮은지.</div>
+    <div><b><span class="tag q">Q4</span> 편집한 문안의 최종 저장소</b> (a) 스토어에만 쓰고 끝, (b) 제출 때 스크립트가 <code>store/</code> 에 되써서 «chore(store): 문안 1.1.1» 커밋을 PR 로, (c) 둘 다. dolomood 의 «store/ 가 단일 원본» 규칙(AGENTS.md)을 지키려면 (b)나 (c).</div>
+    <div><b><span class="tag q">Q5</span> 기존 행 넷의 거취</b> «상태 띠» 한 줄로 접고 자세히에서 펼치는 안. 아예 없애고 바텀시트 누락 목록에 흡수할 수도 있다.</div>
+    <div><b><span class="tag q">Q6</span> 맨 위 큰 막대</b> R8 대로 바텀시트로 옮기면서 없앤다. 버전 목록 화면에서 회차가 돌 때는 드래프트 행의 «진행 중» 필로만 보인다. 괜찮은지.</div>
+    <div><b><span class="tag q">Q7</span> 언어</b> 프리필·편집은 ko 하나로 시작(dolomood 가 ko 만). 다국어는 필드 옆 언어 탭으로 뒤에.</div>
+    <div><b><span class="tag q">Q8</span> 스크린샷 편집</b> 이번 범위는 «파일에 있는 것 보기 + 바뀜 표시»까지. 웹에서 업로드·교체는 다음.</div>
+  </div>
+
+  <h2 id="p">10. 단계 계획</h2>
+  <div class="wrap"><table>
+    <tr><th>단계</th><th>내용</th><th>PR · 검사</th><th>의존</th></tr>
+    <tr><td><b>A 계약 · 스킬</b></td><td><code>release-contract.md</code> §2 에 <code>version</code> 역할 · <code>listing_file</code> · <code>next_version_hint</code>; <code>rcm-store-connect</code> 템플릿(<code>release_version.sh</code> · 프리셋 · 프로파일 · contract py) · <code>rcm-release-driver</code> V 단계 · <code>rcm-connect</code> tiers · <code>rcm check</code> 규칙</td><td>1 PR · 템플릿 selftest · 드라이런 3회(격리 에이전트)</td><td>Q2 · Q4</td></tr>
+    <tr><td><b>B 서버</b></td><td>DB v20 <code>versions</code> · 라우트 6개 · 청소기 · review/upload 의 <code>listing.json</code> 전달 · 드라이버 <code>--version-id</code> · CLI <code>rcm release</code></td><td>2 PR(저장소+라우트 / 전달+CLI) · 서버 테스트 · 마이그레이션 테스트</td><td>A</td></tr>
+    <tr><td><b>C 웹 — 버전 목록 · 대화상자 · 버전 페이지</b></td><td>W1 · W2 · W3 본문(편집 필드 · 프리필 · 카운터 · 바뀜 칩 · 자동 저장)</td><td>2 PR · node(순수 함수: 힌트 계산 · diff · 누락 판정) · CDP(만들기 → 편집 → 저장)</td><td>B</td></tr>
+    <tr><td><b>D 웹 — 바텀시트</b></td><td>W3 머리 · W4 · W5 · 변형 상태 · 맨 위 막대 제거 · 심사 패널의 버튼/체크박스 이동 · 행 넷 → 상태 띠</td><td>2 PR · node · CDP(접힘/펼침 · 제출 조건 · 모바일 폭)</td><td>C</td></tr>
+    <tr><td><b>E dolomood 적용</b></td><td>스킬 재실행으로 골격 → TODO(ASC 버전 create/delete · localizations 읽기 · listing.json 적용 · production_name) → 실배치 dry-run</td><td>dolomood PR 1~2 · rcm 실배치</td><td>A · B</td></tr>
+    <tr><td><b>F 문서 · 설명서</b></td><td>README «Store tab» · configuration(<code>version</code> · TTL) · 와이어프레임 <code>docs/wireframes/web-store.html</code> 갱신 · 사용 설명서 아티팩트 v3</td><td>1 PR + 아티팩트</td><td>D</td></tr>
+  </table></div>
+  <p class="lede">추정: A 1일 · B 1.5일 · C 2일 · D 1.5일 · E 1일(dolomood 쪽 TODO 는 별도) · F 0.5일. Q1~Q8 답이 오면 A 부터 시작한다.</p>
+</div>
