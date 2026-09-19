@@ -1297,6 +1297,10 @@ STORE_STUB_JS = r"""
     verify: () => { window.rcmStoreCalls.push(["verify"]); return ok(secrets); },
     fetchRemote: () => { window.rcmStoreCalls.push(["fetch"]);
                          return ok({ mirror: doc.mirror, branches: doc.branches }); },
+    // 버전 목록 — 관문을 지나면 스토어 탭의 첫 화면이다. 이 스텁에는 플랜도 드래프트도 없다.
+    versions: () => ok({ live: { ios: null, android: null, from_plan_job: null },
+                         hints: { ios: null, android: null }, ttl_hours: 24,
+                         drafts: [], history: [] }),
   };
 })();
 """
@@ -1383,9 +1387,15 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             assert c.eval("document.documentElement.scrollWidth") <= 390
             c.viewport(1240)
 
-            # 관문이 열린 저장소 — 행 넷 + 본체 머리
+            # 관문이 열린 저장소 — 첫 화면은 버전 목록이고, 행 넷은 상태 화면에 있다
             c.open(
                 base + "&complete=1#/store/app",
+                ready_js=_q("#store [data-version-new]") + " !== null",
+            )
+            assert c.eval("document.querySelectorAll('#store details.srow[data-row]').length") == 0
+            assert c.eval(_q("#store .vstrip", ".getAttribute('href')")) == "#/store/app/status"
+            c.open(
+                base + "&complete=1#/store/app/status",
                 ready_js="document.querySelectorAll("
                 "'#store details.srow[data-row]:not(.review)').length === 4",
             )
@@ -1509,6 +1519,23 @@ RELEASE_STUB_JS = r"""
   const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
   window.rcmStoreCalls = [];
   window.rcmRefuse = null;
+  // 버전 드래프트 한 행 — 서버 `_version_json` 의 공개 모양 그대로
+  const draftRow = (id, iosV, androidV, state, patch) => Object.assign({
+    id: id, repo: "app", ios_version: iosV, android_version: androidV,
+    build_name: iosV || androidV, state: state, created_by: "pcs", created_at: ago(2400),
+    last_edit_at: null, expires_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+    expired: false, expiry_warned: 0, asc_version_id: null, error: null,
+    create_job_id: 700, delete_job_id: null, release_id: null, review_job_id: null,
+    upload_job_id: null, has_prefill: false, has_edits: false, changed: 0 }, patch || {});
+  window.rcmDraftRow = draftRow;
+  window.rcmVersionExists = false;
+  window.rcmVersions = {
+    live: { ios: "1.1.0", android: "1.0.0", from_plan_job: 641 },
+    hints: { ios: "1.1.1", android: "1.0.1" }, ttl_hours: 24,
+    drafts: [draftRow(7, "1.0.2", "1.0.2", "editing",
+      { changed: 3, expired: true, expiry_warned: 1, last_edit_at: ago(300) })],
+    history: [{ id: 3, ios: "1.1.0", android: "1.0.0", submitted_at: ago(9 * 86400),
+                review_job_id: 612 }] };
   window.rcmStoreApi = {
     repos: () => ok({ repos: [{ name: "app", release: true, setup }] }),
     repo: () => ok(doc),
@@ -1532,6 +1559,34 @@ RELEASE_STUB_JS = r"""
       return ok({ ok: false, lines: ["ios/ko/keywords: 101 > 100"], exit: 1 }); },
     upload: () => ok({ job_id: 0 }, 202),
     github: () => ok({ log: [], tags: [], prs: null }),
+    // ── 버전 드래프트. `window.rcmVersions` 를 바꾸면 다음 새로고침에 그 목록이 온다 ──
+    versions: () => { window.rcmStoreCalls.push(["versions"]); return ok(window.rcmVersions); },
+    version: (name, id) => {
+      window.rcmStoreCalls.push(["version", id]);
+      const row = (window.rcmVersions.drafts || []).filter((d) => String(d.id) === String(id))[0];
+      if (!row) return Promise.resolve({ ok: false, status: 404,
+        body: { error: "no version", code: "version_not_found" } });
+      return ok(Object.assign({}, row, { prefill: null, edited: null,
+        diff: { fields: [], screenshots: {} }, release: { build_name: row.build_name } }));
+    },
+    versionCreate: (name, body) => {
+      window.rcmStoreCalls.push(["versionCreate", body]);
+      if (window.rcmVersionExists) return Promise.resolve({ ok: false, status: 409,
+        body: { error: "draft #4 already has that ios version and is editing",
+                code: "version_exists", error_code: "version_exists", id: 4, state: "editing" } });
+      const id = 9;
+      window.rcmVersions = Object.assign({}, window.rcmVersions, { drafts:
+        [draftRow(id, body.ios_version || null, body.android_version || null, "creating")]
+          .concat(window.rcmVersions.drafts || []) });
+      return ok({ id: id, job_id: 700, state: "creating",
+                  build_name: body.ios_version || body.android_version }, 202);
+    },
+    versionDiscard: (name, id) => {
+      window.rcmStoreCalls.push(["versionDiscard", id]);
+      window.rcmVersions = Object.assign({}, window.rcmVersions, {
+        drafts: (window.rcmVersions.drafts || []).filter((d) => String(d.id) !== String(id)) });
+      return ok({ id: id, job_id: null, state: "discarded" });
+    },
   };
 })();
 """
@@ -1596,7 +1651,7 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
             c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
             # 쿼리가 달라야 다시 싣는다 — 해시만 바뀌면 boot() 가 안 돌아 토큰을 안 읽는다
             c.open(
-                base + "&admin=1#/store/app",
+                base + "&admin=1#/store/app/status",
                 ready_js=ready + " && document.querySelector('#tok-btn').textContent"
                 ".indexOf('macmini-admin') >= 0",
             )
@@ -1792,7 +1847,7 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
 
             # 항목 36 — unsafe_release_type: 닫을 수 없는 빨간 띠, 필 빨강, Submit 닫힘
             banner = "[data-unsafe-banner]"
-            c.open(base + "&unsafe=1#/store/app", ready_js=_q(banner) + " !== null")
+            c.open(base + "&unsafe=1#/store/app/status", ready_js=_q(banner) + " !== null")
             assert c.eval(_q(banner, ".getAttribute('role')")) == "alert"
             kind = c.eval(_q(banner, ".getAttribute('data-unsafe-banner')"))
             assert kind == "unsafe_release_type", kind
@@ -1890,7 +1945,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
             # S2 — 대화상자가 저절로 뜬다
             c.open(
-                base + "&admin=1&driver=s2#/store/app",
+                base + "&admin=1&driver=s2#/store/app/status",
                 # 문서가 바뀌는 순간엔 요소가 아직 없다 — null 이면 예외가 아니라 «아직» 이어야 한다
                 ready_js="(document.getElementById('confirm-n-dialog') || {}).open === true",
             )
@@ -1970,7 +2025,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
 
             # 도는 중 S5 — 앞 ✓, 지금 ▶ 파랑, 뒤 ·, Abort 열림
             c.open(
-                base + "&admin=1&driver=running#/store/app",
+                base + "&admin=1&driver=running#/store/app/status",
                 ready_js=_q(build_row + ' [data-driver-stage="S5"]') + " !== null",
             )
             steps = c.eval(STEPPER_JS)
@@ -2020,7 +2075,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
 
             # exit 3 — 보라 «result unknown», Retry 없음, Start 도 닫힘
             c.open(
-                base + "&admin=1&driver=exit3#/store/app",
+                base + "&admin=1&driver=exit3#/store/app/status",
                 ready_js=_q(build_row + ' [data-driver-exit="3"]') + " !== null",
             )
             steps = c.eval(STEPPER_JS)
@@ -2102,7 +2157,7 @@ def test_store_first_use_refresh_asks_for_the_version_and_shows_a_refusal_in_the
             c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
             c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
             c.open(
-                base + "&admin=1#/store/app",
+                base + "&admin=1#/store/app/status",
                 ready_js="((" + _q(refresh) + ") || {}).disabled === false",
             )
             row = [r for r in c.eval(STORE_ROWS_JS) if r["row"] == "store"][0]
@@ -2159,6 +2214,305 @@ def test_store_first_use_refresh_asks_for_the_version_and_shows_a_refusal_in_the
                 "어느 버전의 스토어 상태를 볼까요?"
             )
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 버전 목록 · 새 버전 대화상자 · 상태 화면 (docs/version-page-workplan.md §3 · AC-C2~C4) ──
+#
+# RELEASE_STUB_JS 의 `versions` 넷을 그대로 쓴다. `window.rcmVersions` 를 갈아끼우면 다음
+# 새로고침에 그 목록이 오고, `window.rcmVersionExists = true` 면 만들기가 409 로 거절된다.
+
+VERSION_ROWS_JS = """
+(() => [...document.querySelectorAll('#store .vrow')].map((d) => ({
+  row: d.getAttribute('data-vrow'), state: d.getAttribute('data-state') || '',
+  cls: d.className, text: d.textContent.replace(/\\s+/g, ' ').trim(),
+})))()
+"""
+
+STRIP_JS = """
+(() => {
+  const s = document.querySelector('#store .vstrip');
+  if (!s) return null;
+  return { tone: s.getAttribute('data-strip'), href: s.getAttribute('href'),
+           chips: [...s.querySelectorAll('.vchip')].map((c) => [c.getAttribute('data-chip'),
+             c.className.replace('vchip ', ''), c.textContent.replace(/\\s+/g, ' ').trim()]) };
+})()
+"""
+
+VERSION_GO = "#version-dialog [data-version-go]"
+
+
+def _type_version(c: Chrome, platform: str, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.querySelector('#version-dialog [data-version-name="
+        + json.dumps(platform)
+        + "]'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def _check_version(c: Chrome, platform: str, on: bool) -> None:
+    c.eval(
+        "(() => { const i = document.querySelector('#version-dialog [data-version-check="
+        + json.dumps(platform)
+        + "]'); i.checked = "
+        + ("true" if on else "false")
+        + "; i.dispatchEvent(new Event('change', { bubbles: true })); return true; })()"
+    )
+
+
+def test_store_tab_opens_on_the_version_list_and_the_four_rows_are_on_status(tmp_path):
+    """AC-C2 · E13 · E24 — `#/store/app` 은 버전 목록이다: 초록 요약 띠(자격 증명 · 소스 · 스토어,
+    막힘도 경고도 없으면 그 칩은 없다) · «+ 새 버전 만들기» · 드래프트 행 · 라이브 행 · 지난 행.
+    행 넷과 심사 패널은 `#/store/app/status` 에 있고, 목록에는 하나도 없다. 편집한 채 TTL 이 지난
+    드래프트는 «만료 · 사람이 정리» 라고 말하고 «버리기» 는 사람에게 남는다(E13). 드래프트 40개도
+    한 요청이다(E24). 이 화면은 드라이버도 소개 자료도 부르지 않는다 — 서버에서 프로세스가 돈다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-versions", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js=_q("#store [data-version-new]") + " !== null",
+            )
+            strip = c.eval(STRIP_JS)
+            assert strip["tone"] == "ok", strip
+            assert strip["href"] == "#/store/app/status"
+            # 이 스텁의 플랜에는 경고가 하나 있다 — 막힘 칩은 있고, 경고만이면 빨갛지 않다
+            assert [chip[0] for chip in strip["chips"]] == [
+                "credentials",
+                "source",
+                "store",
+                "blockers",
+            ], strip
+            assert strip["chips"][0][1] == "ok" and "secrets 3/3 set" in strip["chips"][0][2]
+            assert "App Store 1.0.0 (180)" in strip["chips"][2][2], strip["chips"][2]
+            assert "next build 181" in strip["chips"][2][2], strip["chips"][2]
+            assert strip["chips"][3] == ["blockers", "ok", "✓blockers 0 · warnings 1"], strip
+            rows = c.eval(VERSION_ROWS_JS)
+            assert [r["row"] for r in rows] == ["7", "live", "3"], rows
+            assert "1.0.2" in rows[0]["text"] and "editing" in rows[0]["text"], rows[0]
+            assert "3 fields changed" in rows[0]["text"], rows[0]
+            assert "no build yet" in rows[0]["text"], rows[0]
+            # E13 — 편집한 채 만료된 드래프트는 경고만, 버리기는 열려 있다
+            assert "expired — a person has to clear it" in rows[0]["text"], rows[0]
+            assert "expired" in rows[0]["cls"], rows[0]
+            assert c.eval(_q('#store [data-version-discard="7"]', ".disabled")) is False
+            assert "iOS 1.1.0 · Android 1.0.0" in rows[1]["text"], rows[1]
+            assert "live" in rows[1]["text"], rows[1]
+            # 행 넷도 심사 패널도 목록에는 없다
+            assert c.eval("document.querySelectorAll('#store details.srow').length") == 0
+            assert c.eval(_q("#review-panel")) is None
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            body = c.eval("document.body.innerText")
+            assert "Approval does not release" in body, body[:400]
+            assert "discarded after 24 hours" in body, body[:400]
+            # 드라이버도 소개 자료도 안 불렀다(그 둘은 서버에서 명령을 돌린다)
+            called = c.eval("window.rcmStoreCalls.map(x => x[0])")
+            assert "versions" in called, called
+            # AC-C8 — «버리기» 는 확인을 한 번 묻고, 지운 뒤 목록에서 사라진다
+            c.eval(_q('#store [data-version-discard="7"]', ".click()"))
+            _wait(c, "document.getElementById('version-discard-dialog').open === true")
+            assert "1.0.2" in c.eval(
+                _q("#version-discard-dialog [data-discard-body]", ".textContent")
+            )
+            assert c.eval("window.rcmStoreCalls.some(x => x[0] === 'versionDiscard')") is False
+            c.eval(_q("#version-discard-dialog [data-discard-go]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'versionDiscard')")
+            _wait(c, "document.getElementById('version-discard-dialog').open === false")
+            _wait(c, "document.querySelectorAll('#store .vrow.draft').length === 0")
+            assert c.eval(_q("#store [data-no-drafts]")) is not None
+            # 폰 폭에서도 가로 스크롤이 없다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            c.viewport(1240)
+            # E24 — 열린 드래프트 40개 + 지난 것 20개가 한 요청으로 그려진다
+            c.eval(
+                "(() => { const rows = []; for (let i = 1; i <= 40; i++) "
+                "rows.push(window.rcmDraftRow(i, '2.0.' + i, null, 'editing')); "
+                "const hist = []; for (let i = 0; i < 20; i++) hist.push({ id: 200 + i, "
+                "ios: '1.0.' + i, android: null, submitted_at: null, review_job_id: null }); "
+                "window.rcmVersions = Object.assign({}, window.rcmVersions, "
+                "{ drafts: rows, history: hist }); return true; })()"
+            )
+            before = c.eval("window.rcmStoreCalls.filter(x => x[0] === 'versions').length")
+            c.eval(_q("#store [data-store-refresh]", ".click()"))
+            _wait(
+                c,
+                "window.rcmStoreCalls.filter(x => x[0] === 'versions').length === "
+                + str(before + 1),
+            )
+            _wait(c, "document.querySelectorAll('#store .vrow.draft').length === 40")
+            assert c.eval("document.querySelectorAll('#store .vrow.old').length") == 20
+            # 상태 화면에는 지금의 행 넷이 그대로 있고, 목록으로 돌아오는 길이 있다
+            c.eval(_q("#store .vstrip", ".click()"))
+            _wait(c, "location.hash === '#/store/app/status'")
+            _wait(c, "document.querySelectorAll('#store details.srow[data-row]').length >= 4")
+            names = c.eval(
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row]:not(.review)')].map(d => d.dataset.row)"
+            )
+            assert names == ["setup", "source", "build", "store"], names
+            assert c.eval(_q("#store [data-version-back]", ".getAttribute('href')")) == (
+                "#/store/app"
+            )
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_new_version_dialog_hints_one_platform_duplicate_and_creating(tmp_path):
+    """AC-C3 · AC-C4 · E2 · E3 — «+ 새 버전 만들기» 는 대화상자 하나다: 힌트 `1.1.1` · `1.0.1` 이
+    채워져 있고, 꼴이 틀리면 «만들기» 가 닫힌 채 이유를 말하고, 라이브보다 작아도 닫힌다.
+    Android 체크를 끄면 본문에 `android_version` 이 없다. 플랜이 한 스토어만 알면 칸도 하나다(E2).
+    같은 이름이 이미 있으면 409 `version_exists` 를 그 드래프트를 여는 링크와 함께 보인다(E3).
+    만들면 202 → `#/store/app/v/<id>` 로 가고 «만드는 중 · 작업 #n» 을 보이다가, 서버가 `editing`
+    을 주면 5초 폴링이 스스로 멈춘다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-newversion", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js=_q("#store [data-version-new]") + " !== null",
+            )
+            c.eval(_q("#store [data-version-new]", ".click()"))
+            _wait(c, "document.getElementById('version-dialog').open === true")
+            # AC-C3 — 두 칸이 힌트로 채워져 있다
+            assert c.eval(_q("#version-dialog [data-version-name='ios']", ".value")) == "1.1.1"
+            assert c.eval(_q("#version-dialog [data-version-name='android']", ".value")) == "1.0.1"
+            assert c.eval(_q(VERSION_GO, ".disabled")) is False
+            fields = c.eval(
+                "[...document.querySelectorAll('#version-dialog [data-version-field]')]"
+                ".map(d => d.dataset.versionField)"
+            )
+            assert fields == ["ios", "android"], fields
+            hint = c.eval(_q("#version-dialog [data-version-field='ios'] .sub", ".textContent"))
+            assert "1.1.0" in hint, hint
+            # 꼴이 틀리면 닫힌 채 이유 · 라이브보다 작아도 닫힌다
+            _type_version(c, "ios", "1.1")
+            _wait(c, _q(VERSION_GO, ".disabled") + " === true")
+            state = _q("#version-dialog [data-version-state='ios']", ".textContent")
+            assert "major.minor.patch" in c.eval(state), c.eval(state)
+            _type_version(c, "ios", "1.0.9")
+            _wait(c, _q(VERSION_GO, ".disabled") + " === true")
+            assert "greater than the live 1.1.0" in c.eval(state), c.eval(state)
+            _type_version(c, "ios", "")
+            assert c.eval(_q(VERSION_GO, ".disabled")) is True
+            _type_version(c, "ios", "1.1.1")
+            _wait(c, _q(VERSION_GO, ".disabled") + " === false")
+            # Android 체크를 끄면 그 스토어는 본문에서 빠진다
+            _check_version(c, "android", False)
+            assert c.eval(_q("#version-dialog [data-version-name='android']", ".disabled")) is True
+            # E3 — 같은 이름이 이미 있으면 409 와 «열기» 링크
+            c.eval("window.rcmVersionExists = true")
+            c.eval(_q(VERSION_GO, ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'versionCreate')")
+            sent = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "versionCreate"]
+            assert sent == [["versionCreate", {"ios_version": "1.1.1"}]], sent
+            _wait(c, _q("#version-dialog [data-version-exists-open]") + " !== null")
+            status = c.eval(_q("#version-dialog [data-version-status]", ".textContent"))
+            assert "draft #4 already has that name" in status, status
+            link = c.eval(_q("#version-dialog [data-version-exists-open]", ".getAttribute('href')"))
+            assert link == "#/store/app/v/4", link
+            assert c.eval("document.getElementById('version-dialog').open") is True
+            # AC-C4 — 통과하면 202 뒤 버전 주소로 가고 «만드는 중» 이 보인다
+            c.eval("window.rcmVersionExists = false")
+            _check_version(c, "android", True)
+            _type_version(c, "android", "1.0.1")
+            _wait(c, _q(VERSION_GO, ".disabled") + " === false")
+            c.eval(_q(VERSION_GO, ".click()"))
+            _wait(c, "location.hash === '#/store/app/v/9'")
+            _wait(c, _q("#store [data-version-creating]") + " !== null")
+            creating = c.eval(_q("#store [data-version-creating]", ".textContent"))
+            assert creating == "creating · job #700", creating
+            body = c.eval("document.body.innerText")
+            assert "iOS 1.1.1 · Android 1.0.1" in body, body[:400]
+            sent = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "versionCreate"]
+            assert sent[-1] == [
+                "versionCreate",
+                {"ios_version": "1.1.1", "android_version": "1.0.1"},
+            ], sent
+            # 5초 폴링은 상세 하나만 부르고, `editing` 이 오면 스스로 멈춘다
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'version').length >= 1")
+            c.eval(
+                "(() => { window.rcmVersions = Object.assign({}, window.rcmVersions, "
+                "{ drafts: [window.rcmDraftRow(9, '1.1.1', '1.0.1', 'editing')] }); "
+                "return true; })()"
+            )
+            _wait(c, _q("#store [data-version-creating]") + " === null", timeout=12.0)
+            polls = c.eval("window.rcmStoreCalls.filter(x => x[0] === 'version').length")
+            assert c.eval("document.body.innerText").find("editing") >= 0
+            time.sleep(6.0)
+            assert c.eval("window.rcmStoreCalls.filter(x => x[0] === 'version').length") == polls, (
+                "만드는 중이 끝나면 폴링은 멈춘다"
+            )
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 목록으로 돌아가는 길
+            c.eval(_q("#store [data-version-back]", ".click()"))
+            _wait(c, "location.hash === '#/store/app'")
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_a_version_url_behind_a_closed_gate_goes_to_settings_and_comes_back(tmp_path):
+    """E22 — 관문을 지나지 않은 저장소의 `#/store/app/v/7` 로 바로 들어오면 설정 화면으로 보내고,
+    가려던 주소를 적어 둔다. 비밀이 다 차서 «Enter Store» 를 누르면 그 주소로 돌아간다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-gate-return", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.eval("true")
+            # 관문이 닫힌 저장소로 스텁을 바꾼다
+            c.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": "(() => { const gate = { required: 3, present: 1, verified: 1, "
+                    "complete: false, missing: ['GH_TOKEN'] }; const ok = (b) => "
+                    "Promise.resolve({ ok: true, status: 200, body: b }); "
+                    "window.rcmGateOpen = false; Object.assign(window.rcmStoreApi, { "
+                    "repos: () => ok({ repos: [{ name: 'app', release: true }] }), "
+                    "repo: () => ok(Object.assign({}, window.rcmRepoDoc, { setup: "
+                    "window.rcmGateOpen ? { required: 3, present: 3, verified: 3, "
+                    "complete: true, missing: [] } : gate })) }); })();"
+                },
+            )
+            c.open(
+                base + "#/store/app/v/7",
+                ready_js=_q("#store [data-gate]") + " !== null",
+            )
+            assert c.eval(_q("#store [data-gate-return]", ".getAttribute('data-gate-return')")) == (
+                "#/store/app/v/7"
+            )
+            assert c.eval("location.hash") == "#/store/app/v/7", "주소는 그대로 둔다"
+            assert c.eval(_q("#store [data-enter-store]", ".disabled")) is True
+            # 비밀이 다 차면(관문이 열리면) 가려던 주소로 돌아간다 —
+            # 토큰을 넣으면 곧바로 다시 싣는다
+            c.eval("window.rcmGateOpen = true")
+            c.eval("document.getElementById('tok-btn').click()")
+            _wait(c, "document.getElementById('tok-dialog').open === true")
+            c.eval(
+                "(() => { const i = document.getElementById('tok-input'); i.value = "
+                + json.dumps(srv.tokens["admin"])
+                + "; i.form.dispatchEvent(new Event('submit', { bubbles: true, "
+                "cancelable: true })); return true; })()"
+            )
+            _wait(c, "document.querySelector('#store [data-gate]') === null", timeout=20.0)
+            assert c.eval("location.hash") == "#/store/app/v/7"
+            _wait(c, _q("#store [data-version-kv]") + " !== null")
+            body = c.eval("document.body.innerText")
+            assert "1.0.2" in body, body[:400]
             assert c.page_errors() == []
     finally:
         srv.close()

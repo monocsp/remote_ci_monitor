@@ -170,6 +170,36 @@
   </form>
 </dialog>
 
+<!-- 새 버전 (버전 페이지 기획 W2 · R3 · R4). 묻는 것은 버전 이름뿐이다 — 트랙 · dry-run · 빌드 번호는 여기 없다.
+     스토어별 칸은 `renderVersionFields` 가 채운다: 플랜이 아는 스토어만 나오고(한쪽만 내는 프로젝트),
+     체크를 끄면 그 스토어는 본문에서 빠진다. 만들고 나면 그 버전 페이지로 간다. -->
+<dialog id="version-dialog" aria-labelledby="version-dialog-title">
+  <form method="dialog" class="dlg">
+    <h2 id="version-dialog-title" data-i18n="version.dialog.title">새 버전을 만듭니다</h2>
+    <p class="sub" data-i18n="version.dialog.notice">App Store 에는 편집 중인 버전이 생기고, Google Play 는 업로드 전까지 rcm 안에만 있습니다.</p>
+    <div data-version-fields></div>
+    <p class="sub" data-i18n="version.dialog.rule">체크를 끄면 그 스토어는 만들지 않습니다. 이름은 major.minor.patch 꼴이어야 하고, 라이브보다 커야 합니다.</p>
+    <p class="dlg-status sub" data-version-status></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-version-cancel data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn primary" data-version-go disabled data-i18n="version.dialog.go">만들기</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 드래프트 버리기 확인. 제출된 버전은 버튼 자체가 없고, 회차·작업이 도는 중이면 서버가 409 로 막는다. -->
+<dialog id="version-discard-dialog" aria-labelledby="version-discard-title">
+  <form method="dialog" class="dlg">
+    <h2 id="version-discard-title" data-i18n="version.discard.title">이 버전을 버릴까요?</h2>
+    <p data-discard-body></p>
+    <p class="dlg-status sub" data-discard-status></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-discard-cancel autofocus data-i18n="dialog.close">닫기</button>
+      <button type="submit" class="btn danger" data-discard-go data-i18n="version.discard.go">버리기</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- 로그 서랍 (항목 13) — 토큰 필요 -->
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">

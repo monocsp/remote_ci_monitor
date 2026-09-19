@@ -47,15 +47,15 @@ describe("module contract", () => {
 describe("parseRoute — #/ is the queue, #/store/<repo> the Store", () => {
   test("queue hashes", () => {
     ["", "#", "#/", "#/jobs/12", "#/jobs/12/log", "#/store", "#/store/", "#/nope/app"].forEach((h) => {
-      assert.deepEqual(S.parseRoute(h), { view: "queue", repo: null }, h);
+      assert.deepEqual(S.parseRoute(h), { view: "queue", repo: null, sub: null, id: null }, h);
     });
   });
   test("store hashes carry the repo, decoded", () => {
-    assert.deepEqual(S.parseRoute("#/store/app"), { view: "store", repo: "app" });
-    assert.deepEqual(S.parseRoute("#/store/app/"), { view: "store", repo: "app" });
-    assert.deepEqual(S.parseRoute("#/store/my%20app"), { view: "store", repo: "my app" });
+    assert.deepEqual(S.parseRoute("#/store/app"), { view: "store", repo: "app", sub: "versions", id: null });
+    assert.deepEqual(S.parseRoute("#/store/app/"), { view: "store", repo: "app", sub: "versions", id: null });
+    assert.deepEqual(S.parseRoute("#/store/my%20app"), { view: "store", repo: "my app", sub: "versions", id: null });
   });
-  test("a repo with a slash is not a store route (one segment)", () => {
+  test("a repo with an unknown second segment is not a store route", () => {
     assert.equal(S.parseRoute("#/store/a/b").view, "queue");
   });
 });
