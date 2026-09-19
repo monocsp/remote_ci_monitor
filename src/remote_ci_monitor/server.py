@@ -499,6 +499,7 @@ class App(RemoteWorkersMixin):
             on_error=self.record_error,
             log=self.log,
             stop=self.stop,
+            versions=self,  # 만료된 버전 드래프트를 라우트와 같은 «버리기» 경로로 (워크플랜 §2.3)
         )
         self.retention.start()
         step("janitor", f"sweep every {self.config.server.retention_sweep_interval_seconds:g}s")

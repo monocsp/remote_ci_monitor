@@ -589,6 +589,10 @@ class Client:
         )
         return json.loads(body) if body else None
 
+    def delete_json(self, path: str, *, timeout: float | None = None) -> Any:
+        _, _, body = self._request("DELETE", path, timeout=timeout)
+        return json.loads(body) if body else None
+
     # ── API ──
 
     def health(self) -> dict[str, Any]:
