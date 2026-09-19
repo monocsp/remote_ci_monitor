@@ -189,10 +189,49 @@ describe("versionListModel — W1 의 행들", () => {
     assert.equal(m.drafts[0].canDiscard, false);
     assert.equal(S.versionListModel(versionsDoc(), "en", NOW).creating, false);
   });
-  test("진행 중(회차 · 심사 · 올리기)이면 버리기가 닫힌다 (§15)", () => {
+  test("진행 중(회차 · 심사 · 올리기)이면 버리기가 닫히고 무엇이 붙잡는지 **글자로** 말한다 (§15)", () => {
     const m = S.versionListModel(versionsDoc({ drafts: [draft({ state: "running", release_id: 12 })] }), "en", NOW);
     assert.equal(m.drafts[0].canDiscard, false);
     assert.equal(m.drafts[0].pill, "running");
+    // 이유가 비활성 버튼의 title 에만 있으면 키보드·스크린 리더 쓰는 사람은 못 본다
+    assert.ok(m.drafts[0].notes.includes("running · release round #12"), m.drafts[0].notes);
+    assert.deepEqual(m.drafts[0].holders, ["release round #12"]);
+    assert.ok(m.drafts[0].discardWhy);
+  });
+  test("붙잡는 것 셋을 각각 이름으로 부른다 — 회차 · 올리는 작업 · 심사 작업 (§15)", () => {
+    const row = (patch) => S.versionRowModel(draft(Object.assign({ state: "running" }, patch)), "en", NOW);
+    assert.ok(row({ upload_job_id: 5 }).notes.includes("running · upload job #5"));
+    assert.ok(row({ review_job_id: 9 }).notes.includes("running · review job #9"));
+    assert.ok(row({ release_id: 2, upload_job_id: 5 }).notes.includes(
+      "running · release round #2 · upload job #5"));
+    assert.ok(row({}).notes.includes("a job of this version is running"), "모르면 지어내지 않는다");
+    const ko = S.versionRowModel(draft({ state: "running", release_id: 2 }), "ko", NOW);
+    assert.ok(ko.notes.includes("진행 중 · 릴리스 회차 #2"), ko.notes);
+  });
+  test("지우는 중 — 잡이 도는 동안 행이 그렇게 말하고 버리기가 닫힌다", () => {
+    // 서버는 `delete_job_id` 만 채우고 상태 열은 `editing` 그대로다 — 잡이 0 으로 끝나야
+    // `discarded` 로 닫힌다. 그 사이 화면이 «편집 중 · 버리기» 면 누른 사람은 아무 일도 안
+    // 일어난 줄 안다(C 단계 격리 검증 2).
+    const m = S.versionRowModel(draft({ delete_job_id: 88 }), "en", NOW);
+    assert.equal(m.deleting, true);
+    assert.equal(m.state, "editing", "상태 열은 서버가 말한 그대로 남는다");
+    assert.equal(m.pill, "deleting");
+    assert.equal(m.tone, "running");
+    assert.equal(m.notes[0], "deleting in the store · job #88");
+    assert.equal(m.canDiscard, false);
+    assert.equal(m.discardWhy, "deleting in the store · job #88");
+    assert.equal(m.deleteJobId, 88);
+  });
+  test("지우기가 끝나면 저절로 풀린다 — 성공은 목록에서 빠지고, 실패는 사유를 말한다", () => {
+    const failed = S.versionRowModel(draft({ delete_job_id: 88, error: "asc refused" }), "en", NOW);
+    assert.equal(failed.deleting, false, "사유가 오면 «지우는 중» 이 아니다");
+    assert.equal(failed.canDiscard, true, "다시 버릴 수 있다");
+    assert.ok(failed.notes.some((t) => t.indexOf("asc refused") >= 0), failed.notes);
+    // 성공한 행은 서버가 닫아 목록에서 빠진다
+    const closed = S.versionListModel(versionsDoc({ drafts: [] }), "en", NOW);
+    assert.deepEqual(closed.drafts, []);
+    const done = S.versionRowModel(draft({ state: "discarded", delete_job_id: 88 }), "en", NOW);
+    assert.equal(done.deleting, false);
   });
   test("TTL 이 지났는데 편집이 있으면 경고만 — 사람이 정리한다 (E13 · §14-5)", () => {
     const m = S.versionListModel(versionsDoc({

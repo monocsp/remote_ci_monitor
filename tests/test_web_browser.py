@@ -1651,17 +1651,24 @@ GROUPS_JS = """
 FORBIDDEN_BUTTONS_JS = """
 [...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
   .map(b => (b.textContent || b.value || '').trim())
+  // 「관리형 게시(managed publishing)」는 Play Console 의 **설정 이름**이고, 이 화면의 그 글은
+  // 사람이 콘솔에서 켜짐을 봤다고 확인하는 문장이다 — 누르면 게시되는 버튼이 아니다. 진짜 금지
+  // 버튼(Publish · Publish to production · Start rollout · Release this version)은 그대로 걸린다.
+  .filter(t => !/managed[ -]publishing|관리형 게시/i.test(t))
   .filter(t => /release this version|publish|rollout/i.test(t))
 """
 
-SUBMIT = "#review-panel [data-submit-review]"
-MANAGED = '#review-panel [data-review-check="managed"]'
-ANDROID = '#review-panel [data-review-check="android"]'
+# 제출 조건은 전부 바텀시트에 있다(워크플랜 §4.2) — 심사 패널은 상태 화면의 읽기 전용 배치다.
+PANEL = "#review-panel"
+SHEET = "#release-sheet"
+SUBMIT = "#release-sheet [data-sheet-submit]"
+MANAGED = '#release-sheet [data-review-check="managed"]'
+ANDROID = '#release-sheet [data-review-check="android"]'
 
 
 def _type_n(c: Chrome, value: str) -> None:
     c.eval(
-        "(() => { const i = document.getElementById('review-n'); i.value = "
+        "(() => { const i = document.getElementById('sheet-n'); i.value = "
         + json.dumps(value)
         + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
     )
@@ -1675,23 +1682,21 @@ def _wait(c: Chrome, js: str, timeout: float = 5.0) -> None:
 
 
 def _submit_reason(c: Chrome) -> str:
-    return c.eval(_q("#review-panel [data-submit-reason]", ".textContent"))
+    return c.eval(_q("#release-sheet [data-sheet-reason]", ".textContent"))
 
 
-def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
-    """항목 5~24 · 28 · 36 · 46~49 — 릴리스 상태가 있으면 Store 행은 plan.json 의
+def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
+    """항목 5~24 · 36 · 46~49 · AC-D6 — 릴리스 상태가 있으면 Store 행은 plan.json 의
     요약(라이브 · 편집 중 · Play 트랙 · next N · 플랜 나이)이고 Build·upload 행은
-    upload.json 의 결과 + 이 회차의 잡 목록이다. 본체는 App Store 절과 Google Play 절을
-    **같은 그룹 순서**로 나란히 그리고, Play 에 없는 필드는 — 와 이유다. Submit 은
-    (심사 플랜 ok · 안 낡음) ∧ (친 N = plan.n) ∧ (Android 를 골랐으면 관리형 게시 체크)
-    일 때만 열린다 — 틀린 N 은 닫힌 채 «≠ 181», 맞는 N + 체크로 열린다. 보낸 본문은
-    서버 계약 그대로고, 409 는 코드가 버튼 옆에 글자로 온다. `unsafe_release_type` 은
-    닫을 수 없는 빨간 띠 + 닫힌 Submit. Release · Publish · Rollout 버튼은 어떤 상태에도
-    없다."""
+    upload.json 의 결과 + 이 회차의 작업 목록이다. 본체는 App Store 절과 Google Play 절을
+    **같은 그룹 순서**로 나란히 그리고, Play 에 없는 필드는 — 와 이유다. 제출 조건(체크박스 ·
+    관리형 게시 · 빌드 번호)과 «심사 제출» 은 **바텀시트로 갔다** — 이 화면에는 하나도
+    없고, 최상단 큰 막대(.rbar)도 없다(결정 Q6). `unsafe_release_type` 은 닫을 수 없는 빨간
+    띠다. Release · Publish · Rollout 버튼은 어떤 상태에도 없다."""
     srv = Server(tmp_path, workers=False)
     try:
         base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
-        ready = _q(SUBMIT) + " !== null"
+        ready = _q(PANEL) + " !== null"
         with Chrome(tmp_path / "chrome-review", window="1240,900") as c:
             c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
             c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
@@ -1792,94 +1797,19 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
             # 릴리스 노트 — 같은 원문, 상한만 다르다(4000 · 500)
             assert "/4000" in body and "/500" in body, body[:2000]
 
-            # Submit 활성 규칙(항목 22 · 23 · 28)
-            disabled = _q(SUBMIT, ".disabled")
-            assert c.eval(disabled) is True
-            reason = _submit_reason(c)
-            assert "type the build number" in reason and "managed-publishing" in reason, reason
-            _type_n(c, "180")
-            assert c.eval(disabled) is True, "a wrong N keeps the button closed"
-            assert c.eval(_q("#review-panel [data-n-state]", ".textContent")) == "≠ 181"
-            _type_n(c, "181")
-            assert c.eval(disabled) is True, "the right N alone is not enough with Play selected"
-            assert c.eval(_q("#review-panel [data-n-state]", ".textContent")) == "= 181"
-            assert "managed-publishing" in _submit_reason(c)
-            assert c.eval(_q(MANAGED, ".checked")) is False, "never pre-ticked"
-            c.eval(_q(MANAGED, ".click()"))
-            assert c.eval(disabled) is False, "right N + managed box → enabled"
-            assert _submit_reason(c) == ""
-            # 관리형 게시 체크는 Play 를 빼면 무의미해지고, 다시 넣어도 기억되지 않는다
-            c.eval(_q(ANDROID, ".click()"))
-            assert c.eval(disabled) is False, "iOS only: no managed box needed"
-            c.eval(_q(ANDROID, ".click()"))
-            assert c.eval(_q(MANAGED, ".checked")) is False
-            assert c.eval(disabled) is True
-            c.eval(_q(MANAGED, ".click()"))
-            assert c.eval(disabled) is False
-
+            # AC-D6 — 제출 조건과 «심사 제출» 은 이 화면에 하나도 없다(시트로 갔다)
+            assert c.eval(_q("#review-panel [data-sheet-submit]")) is None
+            n_checks = "document.querySelectorAll('#review-panel [data-review-check]').length"
+            assert c.eval(n_checks) == 0
+            assert c.eval(_q("#review-panel .nbox")) is None
+            assert c.eval(_q("#review-panel [data-n-mode-toggle]")) is None
+            assert c.eval(_q("#store [data-release-bar]")) is None, "최상단 큰 막대는 없앴다"
+            assert c.eval(_q("#store [data-sheet]")) is None, "시트는 버전 페이지에만 있다(R10)"
+            # 남는 것은 진단용 두 작업뿐이다
+            assert c.eval(_q("#review-panel [data-plan-review]", ".disabled")) is False
+            assert c.eval(_q("#review-panel [data-validate-listing]", ".disabled")) is False
             # 출시 버튼은 없다 — 어떤 상태에도 (계약 §6)
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
-
-            # Submit → 대화상자(되돌릴 수 없다 · 플랫폼 이름) → 확인 → 계약 그대로의 본문
-            c.eval(_q(SUBMIT, ".click()"))
-            assert c.eval("document.getElementById('submit-dialog').open") is True
-            dlg = c.eval("document.getElementById('submit-dialog').innerText")
-            assert "Submit 1.0.1 (181) for review?" in dlg and "cannot be undone" in dlg, dlg
-            assert "App Store + Google Play" in dlg, dlg
-            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
-            _wait(c, "window.rcmStoreCalls.length > 0")
-            calls = c.eval("window.rcmStoreCalls")
-            assert calls and calls[-1][0] == "review", calls
-            assert calls[-1][1] == {
-                "build_name": "1.0.1",
-                "ref": "main",
-                "mode": "submit",
-                "platform": "both",
-                "confirm_build_number": "181",
-                "play_managed_publishing": "confirmed-on",
-                "listing": "notes-only",
-                "phased": "1",
-            }, calls[-1]
-            # 보낸 뒤 확인은 지워진다 — 다음 되돌릴 수 없는 일로 넘어가지 않는다
-            _wait(c, "document.getElementById('review-n').value === ''")
-            assert c.eval(_q(MANAGED, ".checked")) is False
-            assert c.eval(disabled) is True
-
-            # 409 — 서버의 코드가 버튼 옆에 그대로, 클라이언트는 돌아가지 않는다
-            c.eval("window.rcmRefuse = 'managed_publishing_unconfirmed'")
-            _type_n(c, "181")
-            c.eval(_q(MANAGED, ".click()"))
-            c.eval(_q(SUBMIT, ".click()"))
-            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
-            _wait(c, _q("#review-panel [data-review-error]") + " !== null")
-            err = c.eval(_q("#review-panel [data-review-error]", ".textContent"))
-            assert err == "server refused: managed_publishing_unconfirmed", err
-            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
-            assert c.page_errors() == []
-
-            # «빌드 번호: 자동» — 입력 칸이 사라지고 플랜의 N 이 보이며, 체크만으로 열린다.
-            # 본문은 "auto".
-            c.eval("window.rcmRefuse = null")
-            c.eval(_q('#review-panel [data-n-mode="auto"]', ".click()"))
-            _wait(c, _q("#review-panel [data-n-auto]") + " !== null")
-            assert c.eval("document.getElementById('review-n')") is None
-            auto_box = c.eval(_q("#review-panel [data-n-auto]", ".textContent"))
-            assert "181" in auto_box and "App Store and Google Play" in auto_box, auto_box
-            pressed = _q('#review-panel [data-n-mode="auto"]', ".getAttribute('aria-pressed')")
-            assert c.eval(pressed) == "true"
-            assert "type the build number" not in _submit_reason(c)
-            if not c.eval(_q(MANAGED, ".checked")):  # 409 뒤에도 체크는 남아 있을 수 있다
-                c.eval(_q(MANAGED, ".click()"))
-            assert c.eval(disabled) is False, "auto: no typing needed — " + _submit_reason(c)
-            c.eval(_q(SUBMIT, ".click()"))
-            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
-            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'review').length >= 2")
-            last = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "review"][-1][1]
-            assert last["confirm_build_number"] == "auto" and last["mode"] == "submit", last
-            # 다시 «직접 입력» 으로 — 칸이 돌아오고 닫힌다
-            c.eval(_q('#review-panel [data-n-mode="typed"]', ".click()"))
-            _wait(c, "document.getElementById('review-n') !== null")
-            assert c.eval(disabled) is True
             assert c.page_errors() == []
 
             # 폰 폭(항목 41): 두 절이 세로로 쌓이고 옆으로 새지 않는다
@@ -1903,10 +1833,6 @@ def test_store_review_panel_two_stores_typed_n_and_no_release_button(tmp_path):
             assert "not set to manual release" in c.eval(_q(banner, ".textContent"))
             assert c.eval(pill) == "unsafe_release_type"
             assert c.eval("document.getElementById('review-panel').open") is False
-            _type_n(c, "181")
-            c.eval(_q(MANAGED, ".click()"))
-            assert c.eval(disabled) is True, "unsafe → closed even with N and the box"
-            assert "fix the release type" in _submit_reason(c)
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             # 한국어로 바꿔도 스토어·필드 이름은 카탈로그에서 온다 — 판정 낱말은 서버 것 그대로.
             # 접혀 있어도 textContent 에는 본문이 있다.
@@ -1999,10 +1925,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             steps = c.eval(STEPPER_JS)
             assert [s[0] for s in steps] == [f"S{i}" for i in range(9)], steps
             assert [s[1] for s in steps] == ["done", "done", "human"] + ["todo"] * 6, steps
-            assert c.eval(_q("#store [data-release-bar]", ".getAttribute('data-tone')")) == "human"
-            assert "S2 confirm N" in c.eval(
-                _q("#store [data-release-bar] [data-rbar-stage]", ".textContent")
-            )
+            assert c.eval(_q("#store [data-release-bar]")) is None, "최상단 큰 막대는 없앴다"
             row_state = c.eval(_q(build_row, ".getAttribute('data-state')"))
             assert row_state == "stale", row_state  # 사람 단계는 황토
             head = c.eval(_q(build_row + " > summary", ".textContent"))
@@ -2078,24 +2001,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             steps = c.eval(STEPPER_JS)
             assert [s[1] for s in steps] == ["done"] * 5 + ["current"] + ["todo"] * 3, steps
             assert [s[2] for s in steps] == ["✓"] * 5 + ["▶"] + ["·"] * 3, steps
-            # 최상단 릴리스 막대 — 버전 (N) · 지금 단계 · 전체 % · 마우스 올리면 상세
-            rbar = "#store [data-release-bar]"
-            assert c.eval(_q(rbar, ".getAttribute('data-tone')")) == "running"
-            assert c.eval(_q(rbar + " [data-rbar-head]", ".textContent")) == "1.0.1 (181)"
-            assert "S5 scenario QA · stage 6 of 9" in c.eval(
-                _q(rbar + " [data-rbar-stage]", ".textContent")
-            )
-            pct = int(c.eval(_q(rbar + " [role=progressbar]", ".getAttribute('aria-valuenow')")))
-            assert pct == 56, pct  # 5/9 끝남, 도는 잡의 진행은 스텁에 없다
-            assert c.eval(_q(rbar + " [data-rbar-pct]", ".textContent")) == "56%"
-            tip = c.eval(_q(rbar + " [data-rbar-tip]", ".textContent"))
-            assert "5/9 stages done · 56% overall" in tip and "now S5 scenario QA" in tip, tip
-            assert "elapsed 3" in tip and "9 declared stages" in tip, tip  # 스텁은 38분 전 시작
-            assert c.eval(_q(rbar, ".getAttribute('title')")) == tip
-            # 마우스가 있으면 hover 전까지 숨고, (hover: none) 환경은 그냥 보인다
-            hidden = c.eval(_q(rbar + " [data-rbar-tip]", ".offsetParent")) is None
-            no_hover = c.eval("matchMedia('(hover: none)').matches")
-            assert hidden != no_hover, f"tip hidden={hidden} but hover:none={no_hover}"
+            assert c.eval(_q("#store [data-release-bar]")) is None
 
             # 글꼴 위계 — 화면 제목은 title(18px), 행 제목은 subtitle(14px), 보조는 caption(12px)
             def fs(sel: str) -> str:
@@ -2104,9 +2010,7 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
                 )
 
             assert fs("#store > .s-h .t") == "18px"
-            assert fs(rbar + " [data-rbar-head]") == "18px"
             assert fs(build_row + " > summary .t") == "14px"
-            assert fs(rbar + " .rbar-foot .sub") == "12px"
             assert fs("body") == "13px"
             assert c.eval(_q(build_row, ".getAttribute('data-state')")) == "running"
             head = c.eval(_q(build_row + " > summary", ".textContent"))
@@ -2127,7 +2031,6 @@ def test_store_driver_stepper_typed_n_abort_and_no_retry_on_unknown(tmp_path):
             )
             steps = c.eval(STEPPER_JS)
             assert steps[7][1] == "unknown" and steps[7][2] == "?", steps
-            assert c.eval(_q("#store [data-release-bar]", ".getAttribute('data-tone')")) == "lost"
             head = c.eval(_q(build_row + " > summary", ".textContent"))
             assert "result unknown — do not resubmit" in head, head
             assert c.eval(_q(build_row + " [data-driver-retry]")) is None
@@ -2828,6 +2731,479 @@ def test_version_page_keeps_typed_text_when_the_token_goes_and_flags_another_bro
             assert _saves(c)[-1] == {"ios": {"keywords": "journal,mood,tarot"}}, _saves(c)
             _wait(c, _q('#store [data-save-state="saved"]') + " !== null")
             assert _field(c, "ios.keywords")["value"] == "journal,mood,tarot"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 바텀시트 — 진행 · 남은 것 · 심사 제출 (워크플랜 §4 · AC-D1~D10 · R8~R12) ──────────────
+#
+# RELEASE_STUB_JS 위에 덧씌운다: 버전 상세가 실어 주는 `release` 보기(§15) · 드라이버 보기 ·
+# 프로파일의 드라이버 선언. 테스트는 `window.rcmRelease` · `window.rcmDriverDoc` 을 바꿔
+# 형편을 옮긴다 — 다음 5초 폴링이 그 값을 가져온다.
+SHEET_STUB_JS = r"""
+(() => {
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const planDoc = { schema: 1, build_name: "1.0.2", n: 181, store: { asc_live: "1.0.1" },
+                    blockers: [], warnings: [] };
+  const reviewPlanDoc = { schema: 2, build_name: "1.0.2", n: 181, plan_verdict: "ok",
+                          ios: "ready", android: "ready",
+                          observed: { ios: "PREPARE_FOR_SUBMISSION", auto_release: false } };
+  window.rcmRelease = {
+    plan: { job_id: 641, state: "succeeded", build_name: "1.0.2", age_seconds: 240,
+            stale: false, doc: planDoc },
+    review: { plan: { job_id: 651, state: "succeeded", age_seconds: 240, stale: false,
+                      doc: reviewPlanDoc }, result: null },
+    upload: { job_id: 650, state: "succeeded", finished_at: ago(3000),
+              doc: { schema: 1, n: 181, status: "success", platforms: ["ios", "android"],
+                     tag: "prod/1.0.2-181" } },
+    jobs: [{ id: 641, preset: "release-plan", role: "plan", state: "succeeded",
+             started_at: ago(4000), finished_at: ago(3800), artifacts: [] },
+           { id: 650, preset: "release-upload", role: "upload", state: "succeeded",
+             started_at: ago(3400), finished_at: ago(3000), artifacts: [] }] };
+  window.rcmDriverDoc = null;          // null = 프로파일에 드라이버가 없다(하위 프로세스 0)
+  // 깨끗한 드래프트 하나 — 목록 스텁의 만료된 행 대신 쓴다
+  window.rcmVersions = Object.assign({}, window.rcmVersions, {
+    drafts: [window.rcmDraftRow(7, "1.0.2", "1.0.2", "editing",
+      { changed: 0, last_edit_at: ago(300), upload_job_id: 650 })] });
+  const baseRepo = window.rcmStoreApi.repo, baseVersion = window.rcmStoreApi.version;
+  window.rcmStoreApi.repo = (name) => baseRepo(name).then((r) => {
+    const doc = JSON.parse(JSON.stringify(r.body));
+    doc.profile.driver = window.rcmDriverDoc ? ["scripts/release/driver.sh"] : null;
+    // 이 스텁의 프로젝트는 빌드 번호를 스토어에서 받는다 — «직접 입력» 은 E21 에서 켠다
+    doc.profile.build_number_policy = "auto";
+    return { ok: r.ok, status: r.status, body: doc };
+  });
+  window.rcmStoreApi.driver = (name) => {
+    window.rcmStoreCalls.push(["driver"]);
+    return Promise.resolve({ ok: true, status: 200,
+      body: window.rcmDriverDoc || { configured: false } });
+  };
+  window.rcmStoreApi.version = (name, id) => baseVersion(name, id).then((r) => {
+    if (!r.ok) return r;
+    r.body.release = Object.assign({ build_name: r.body.build_name }, window.rcmRelease);
+    return r;
+  });
+})();
+"""
+
+SHEET_HEAD_JS = """
+(() => {
+  const s = document.getElementById('release-sheet');
+  if (!s) return null;
+  const btn = s.querySelector('[data-sheet-submit]');
+  return { tone: s.getAttribute('data-tone'), open: s.getAttribute('data-open'),
+           ver: s.querySelector('[data-sheet-ver]').textContent.replace(/\\s+/g, ' ').trim(),
+           pill: s.querySelector('[data-sheet-pill]').textContent.trim(),
+           status: s.querySelector('[data-sheet-status]').textContent.trim(),
+           mini: s.querySelector('[data-sheet-mini]').hidden === false,
+           pct: s.querySelector('[data-sheet-pct]').textContent.trim(),
+           submit: btn ? btn.disabled : null,
+           bodyHidden: s.querySelector('[data-sheet-body]').hidden };
+})()
+"""
+SHEET_LEFT_JS = """
+[...document.querySelectorAll('#release-sheet [data-sheet-left] .ml')].map((b) => [
+  b.getAttribute('data-sheet-fix'), b.className.replace('ml ', ''),
+  b.textContent.replace(/\\s+/g, ' ').trim(), b.getAttribute('data-fix-anchor'),
+  b.getAttribute('data-fix-route')])
+"""
+SHEET_STAGES_JS = """
+[...document.querySelectorAll('#release-sheet [data-sheet-stages] .chip-st')]
+  .map((c) => [c.getAttribute('data-stage'), c.className.replace('chip-st ', '')])
+"""
+SHEET_SUBMIT = "#release-sheet [data-sheet-submit]"
+SHEET_TOGGLE = "#release-sheet [data-sheet-toggle]"
+
+
+def _open_sheet(c: Chrome, base: str, srv, *, extra: str = "") -> None:
+    c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+    c.call("Page.addScriptToEvaluateOnNewDocument", {"source": SHEET_STUB_JS})
+    c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+    c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+    c.open(base + "&admin=1" + extra + "#/store/app/v/7", ready_js=_q(SHEET) + " !== null")
+
+
+def _sheet(c: Chrome) -> dict[str, Any]:
+    return c.eval(SHEET_HEAD_JS)
+
+
+def test_version_page_sheet_carries_progress_what_is_left_and_the_submit(tmp_path):
+    """AC-D2 · AC-D3 · AC-D6 · AC-D7 · AC-D9 · AC-D10 · E9 — 버전 페이지의 **마지막 자식**이
+    sticky 바텀시트다. 접힘 머리는 버전 · 한 줄 · 제출 버튼 · 펼치기뿐이고, 펼치면 막대 ·
+    단계 칩 · 근거 · 두 열(남은 것 / 이전 버전과 달라진 것) · 제출 조건 · 보내는 것 ·
+    고정 문장이다. 접힘/펼침은 새로고침 뒤에도 남는다(localStorage). 남은 것 한 줄을 누르면
+    그것을 고치는 칸으로 스크롤하고 포커스를 준다. 출시 버튼은 어떤 상태에도 없다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-sheet", window="1240,900") as c:
+            _open_sheet(c, base, srv)
+            # 본문의 마지막 자식이고 화면 아래에 붙어 있다(§4.2)
+            assert (
+                c.eval("document.querySelector('[data-store-body]').lastElementChild.id")
+                == "release-sheet"
+            )
+            assert c.eval(
+                "getComputedStyle(document.getElementById('release-sheet')).position"
+            ) == ("sticky")
+            # §14-1 · §15 — 프로파일에 드라이버가 없으면 그 라우트는 **한 번도** 부르지 않는다
+            # (그 라우트는 빌드 머신에서 `--status` 를 돌린다). 상세 폴링 하나뿐이다.
+            assert [x for x in c.eval("window.rcmStoreCalls") if x[0] == "driver"] == []
+            head = _sheet(c)
+            assert head["tone"] == "ok" and head["pill"] == "ready to submit", head
+            assert "1.0.2" in head["ver"], head
+            assert head["status"].startswith("ready to submit · review plan"), head
+            assert "build 181" in head["status"], head
+            assert head["submit"] is True, "관리형 게시를 체크하기 전에는 닫혀 있다"
+            assert head["mini"] is False, "도는 것이 없으면 접힌 줄에 막대가 없다"
+            # 펼침 — 막대 · 단계 칩 · 근거 · 두 열 · 제출 조건
+            assert head["bodyHidden"] is False, "처음에는 펼쳐져 있다"
+            assert c.eval(_q("#release-sheet .sh-body .pbar.wide")) is not None
+            # 드라이버가 없는 저장소에서는 이번 회차의 작업이 곧 단계다(E25)
+            stages = c.eval(SHEET_STAGES_JS)
+            assert stages == [["#641", "done"], ["#650", "done"]], stages
+            basis = c.eval(_q("#release-sheet [data-sheet-basis]", ".textContent"))
+            assert "the build is up" in basis, basis
+            body = c.eval("document.getElementById('release-sheet').innerText")
+            assert "Left before review" in body and "Different from the previous" in body, body
+            assert "Submit conditions" in body and "What is sent" in body, body
+            assert "Approval does not release" in body, body
+            sending = c.eval(_q("#release-sheet [data-sheet-sending]", ".textContent"))
+            assert "build 181" in sending and "App Store + Google Play" in sending, sending
+            assert "release notes + uploaded build" in sending, sending
+            assert "the previous version's copy, unchanged" in sending, sending
+            assert "undefined" not in body and "NaN" not in body
+            assert c.eval("document.querySelectorAll('#release-sheet .checks .ck').length") == 5
+            assert c.eval(_q("#release-sheet #sheet-n")) is not None
+            # 남은 것 — 관리형 게시 하나
+            left = c.eval(SHEET_LEFT_JS)
+            assert [x[0] for x in left] == ["managed_unconfirmed"], left
+            assert left[0][1] == "todo" and left[0][3] == "#sheet-managed", left
+            # E9 · AC-D9 — 상한을 넘기면 그 칸이 «남은 것» 이고, 누르면 그 칸으로 간다
+            _type_listing(c, "ios.keywords", "k" * 101)
+            _wait(c, "JSON.parse(JSON.stringify(" + SHEET_LEFT_JS + ")).length === 2")
+            left = c.eval(SHEET_LEFT_JS)
+            assert left[1][0] == "listing_bad" and left[1][3] == "#f-ios-keywords", left
+            assert "101/100" in left[1][2], left
+            assert c.eval(_q(SHEET_SUBMIT, ".disabled")) is True
+            c.eval(
+                "document.querySelector('#release-sheet [data-sheet-fix=\"listing_bad\"]').click()"
+            )
+            assert c.eval("document.activeElement.id") == "f-ios-keywords"
+            _type_listing(c, "ios.keywords", "journal,mood")
+            _wait(c, "JSON.parse(JSON.stringify(" + SHEET_LEFT_JS + ")).length === 1")
+            # AC-D7 — 접으면 본문이 사라지고, 새로고침 뒤에도 접혀 있다
+            c.eval(_q(SHEET_TOGGLE, ".click()"))
+            assert _sheet(c)["bodyHidden"] is True
+            assert c.eval(_q(SHEET_TOGGLE, ".textContent")) == "Expand"
+            assert c.eval("localStorage.getItem('rcm.sheet.app')") == "0"
+            c.open(base + "&admin=1&again=1#/store/app/v/7", ready_js=_q(SHEET) + " !== null")
+            assert _sheet(c)["bodyHidden"] is True, "접은 채로 돌아온다"
+            c.eval(_q(SHEET_TOGGLE, ".click()"))
+            assert _sheet(c)["bodyHidden"] is False
+            # AC-D6 — 최상단 큰 막대는 없고, 시트는 버전 페이지에만 있다(R10)
+            assert c.eval(_q("#store [data-release-bar]")) is None
+            c.open(
+                base + "&admin=1#/store/app", ready_js=_q("#store [data-version-new]") + " !== null"
+            )
+            assert c.eval(_q(SHEET)) is None, "목록 화면에는 시트가 없다"
+            c.open(
+                base + "&admin=1#/store/app/status",
+                ready_js=_q("#review-panel") + " !== null",
+            )
+            assert c.eval(_q(SHEET)) is None, "상태 화면에도 없다"
+            assert c.eval(_q("#review-panel [data-sheet-submit]")) is None
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_version_page_sheet_opens_the_submit_only_after_every_condition(tmp_path):
+    """AC-D1 · AC-D5 · AC-D10 · E11 · E17 · E18 · E19 · E20 · E21 — 제출은 관리형 게시를
+    체크한 뒤에만 열리고, 보내는 본문에 `version_id` 와 이 버전의 이름과 `confirm_build_number`
+    가 들어간다. Play 를 끄면 관리형 게시 줄이 사라지고(E18), 직접 입력한 빌드 번호가 틀리면
+    닫힌다(E21). 플랜이 낡으면(E17) · 업로드가 lost 면(E20) · 출시 방식이 unsafe 면(E19)
+    닫힌 채 그 이유가 한 줄로 나온다. 서버가 `listing_json_unsupported` 로 거절하면 그 코드가
+    남은 것에 남아 «스킬을 다시 돌려라» 고 말한다(E11)."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-sheet-submit", window="1240,900") as c:
+            _open_sheet(c, base, srv)
+            disabled = _q(SHEET_SUBMIT, ".disabled")
+            assert c.eval(disabled) is True
+            assert "managed-publishing" in _submit_reason(c), _submit_reason(c)
+            assert c.eval(_q(MANAGED, ".checked")) is False, "never pre-ticked"
+            # E18 — Play 를 끄면 관리형 게시 줄이 사라지고 열린다
+            c.eval(_q(ANDROID, ".click()"))
+            assert [x[0] for x in c.eval(SHEET_LEFT_JS)] == [], "Play 를 빼면 남은 것이 없다"
+            assert c.eval(disabled) is False
+            c.eval(_q(ANDROID, ".click()"))
+            assert c.eval(disabled) is True
+            # E21 — 직접 입력한 빌드 번호가 틀리면 닫힌다
+            c.eval(_q('#release-sheet [data-n-mode="typed"]', ".click()"))
+            _wait(c, "document.getElementById('sheet-n') !== null")
+            _type_n(c, "180")
+            assert c.eval(disabled) is True
+            assert c.eval(_q("#release-sheet [data-n-state]", ".textContent")) == "≠ 181"
+            left = [x[0] for x in c.eval(SHEET_LEFT_JS)]
+            assert "n_mismatch" in left, left
+            _type_n(c, "181")
+            assert c.eval(_q("#release-sheet [data-n-state]", ".textContent")) == "= 181"
+            c.eval(_q('#release-sheet [data-n-mode="auto"]', ".click()"))
+            _wait(c, _q("#release-sheet [data-n-auto]") + " !== null")
+            # AC-D5 — 관리형 게시 체크 → 열림 → 확인 대화상자 → 계약 그대로의 본문
+            c.eval(_q(MANAGED, ".click()"))
+            assert c.eval(disabled) is False, _submit_reason(c)
+            assert _submit_reason(c) == ""
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            c.eval(_q(SHEET_SUBMIT, ".click()"))
+            assert c.eval("document.getElementById('submit-dialog').open") is True
+            dlg = c.eval("document.getElementById('submit-dialog').innerText")
+            assert "cannot be undone" in dlg and "1.0.2" in dlg, dlg
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'review')")
+            sent = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "review"][-1][1]
+            assert sent == {
+                "version_id": 7,
+                "build_name": "1.0.2",
+                "ref": "main",
+                "mode": "submit",
+                "platform": "both",
+                "confirm_build_number": "auto",
+                "play_managed_publishing": "confirmed-on",
+                "listing": "notes-only",
+                "phased": "1",
+            }, sent
+            # 보낸 뒤 확인은 지워진다 — 한 번의 확인이 다음 제출로 넘어가지 않는다
+            _wait(c, _q(MANAGED, ".checked") + " === false")
+            assert c.eval(disabled) is True
+            # E11 — 서버가 프리셋을 탓하면 그 코드가 남은 것에 남는다
+            c.eval("window.rcmRefuse = 'listing_json_unsupported'")
+            c.eval(_q(MANAGED, ".click()"))
+            c.eval(_q(SHEET_SUBMIT, ".click()"))
+            c.eval(_q("#submit-dialog [data-submit-go]", ".click()"))
+            _wait(c, _q("#release-sheet [data-sheet-error]") + " !== null")
+            err = c.eval(_q("#release-sheet [data-sheet-error]", ".textContent"))
+            assert err == "server refused: listing_json_unsupported", err
+            left = c.eval(SHEET_LEFT_JS)
+            assert left[0][0] == "listing_unsupported", left
+            assert "re-run the store-connect skill" in left[0][2], left
+            assert c.eval(disabled) is True
+            c.eval("window.rcmRefuse = null")
+            # E17 — 플랜이 낡으면 닫히고 «플랜을 다시» 가 상태 화면을 가리킨다
+            c.eval("window.rcmRelease.review.plan.stale = true")
+            _wait(
+                c,
+                "JSON.parse(JSON.stringify("
+                + SHEET_LEFT_JS
+                + ")).some(x => x[0] === 'plan_stale')",
+                timeout=12.0,
+            )
+            stale = [x for x in c.eval(SHEET_LEFT_JS) if x[0] == "plan_stale"][0]
+            assert stale[4] == "#/store/app/status" and stale[3] == "[data-plan-review]", stale
+            assert c.eval(disabled) is True
+            c.eval("window.rcmRelease.review.plan.stale = false")
+            # E20 — 업로드가 lost 면 색은 lost 이고 «다시 올리지 말라»
+            c.eval("window.rcmRelease.upload = { job_id: 650, state: 'lost', doc: null }")
+            _wait(c, _q(SHEET, ".getAttribute('data-tone')") + " === 'lost'", timeout=12.0)
+            left = c.eval(SHEET_LEFT_JS)
+            assert left[0][0] == "upload_lost" and "do not resubmit" in left[0][2], left
+            assert c.eval(disabled) is True
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+
+            # E19 — unsafe_release_type: 색 bad, 닫힘, 빨간 띠는 상태 화면에 그대로
+            c.open(
+                base + "&admin=1&unsafe=1#/store/app/v/7",
+                ready_js=_q(SHEET) + " !== null",
+            )
+            c.eval(
+                "(() => { window.rcmRelease.review.plan.doc.ios = 'unsafe_release_type'; "
+                "return true; })()"
+            )
+            _wait(c, _q(SHEET, ".getAttribute('data-tone')") + " === 'bad'", timeout=12.0)
+            left = [x[0] for x in c.eval(SHEET_LEFT_JS)]
+            assert left[-1] == "unsafe", left
+            assert c.eval(disabled) is True
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_version_page_sheet_shows_a_running_round_even_when_collapsed(tmp_path):
+    """AC-D3 · AC-D4 · AC-D8 · E23 — 드라이버가 있는 저장소에서 단계 칩은 `V` 를 포함해 열
+    칸이고, 회차가 도는 동안에는 **접힌 한 줄에도** 막대와 진행 정도가 보인다(R8). 목록으로
+    돌아가면 그 드래프트 행이 «진행 중 · 회차 #7» 이라고 말한다(최상단 막대를 없앤 자리다).
+    폰 폭 390 에서는 머리가 두 줄이 되고 가로 스크롤이 없으며, 펼친 시트 뒤로 본문이 가리지
+    않는다(E23)."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-sheet-run", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": SHEET_STUB_JS})
+            c.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": """
+(() => {
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  window.rcmDriverDoc = { configured: true, running: true, build_name: "1.0.2",
+    started_at: ago(2280), started_by: "pcs", pid: 4242, exit_code: null, plan_n: 181,
+    knows_version_stage: true, confirmed_n: 181, auto_n: false,
+    log_tail: ["stage S0 branch", "plan: N = 181"],
+    status: ["release 1.0.2: stage S5 scenario QA · job #643"] };
+  window.rcmRelease.upload = null;
+  window.rcmVersions = Object.assign({}, window.rcmVersions, {
+    drafts: [window.rcmDraftRow(7, "1.0.2", "1.0.2", "running",
+      { changed: 0, release_id: 7, last_edit_at: ago(300) })] });
+})();
+"""
+                },
+            )
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            c.open(base + "&admin=1#/store/app/v/7", ready_js=_q(SHEET) + " !== null")
+            _wait(c, _q(SHEET, ".getAttribute('data-tone')") + " === 'running'", timeout=20.0)
+            # AC-D3 — 단계 칩 열 개, V 가 먼저고 이미 끝났다
+            # 드라이버를 선언한 저장소에서만 그 라우트를 부르고, 상세(5초)보다 드물게 부른다
+            assert len([x for x in c.eval("window.rcmStoreCalls") if x[0] == "driver"]) >= 1
+            stages = c.eval(SHEET_STAGES_JS)
+            assert [s[0] for s in stages] == [
+                "V",
+                "S0",
+                "S1",
+                "S2",
+                "S3",
+                "S4",
+                "S5",
+                "S6",
+                "S7",
+                "S8",
+            ], stages
+            assert stages[0] == ["V", "done"], stages
+            assert [s[1] for s in stages] == ["done"] * 6 + ["current"] + ["todo"] * 3, stages
+            # AC-D4 · R8 — 접힌 한 줄에도 막대와 진행 정도가 보인다
+            c.eval(_q(SHEET_TOGGLE, ".click()"))
+            head = _sheet(c)
+            assert head["bodyHidden"] is True
+            assert head["tone"] == "running" and head["pill"] == "running", head
+            assert "S5 scenario QA · stage 7 of 10" in head["status"], head
+            assert "elapsed" in head["status"], head
+            assert head["mini"] is True, "도는 동안에는 접힌 줄에도 막대가 있다(R8)"
+            assert head["pct"] == "60%", head
+            assert head["submit"] is True, "도는 중에는 제출이 닫힌다"
+            left = c.eval(SHEET_LEFT_JS)
+            assert left[0][0] == "build_missing" and left[0][1] == "run", left
+            assert "running now (S5)" in left[0][2], left
+            # 최상단 막대를 없앤 자리 — 목록의 드래프트 행이 도는 회차를 말한다
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js=_q("#store [data-version-new]") + " !== null",
+            )
+            row = [r for r in c.eval(VERSION_ROWS_JS) if r["row"] == "7"][0]
+            assert row["state"] == "running", row
+            assert "running" in row["text"] and "release round #7" in row["text"], row
+            # AC-D8 · E23 — 폰 폭: 머리 두 줄 · 가로 스크롤 없음 · 본문이 시트 뒤에 안 가린다
+            c.open(base + "&admin=1#/store/app/v/7", ready_js=_q(SHEET) + " !== null")
+            c.viewport(390, mobile=True)
+            c.eval(_q(SHEET_TOGGLE, ".click()"))  # 펼친다
+            _wait(c, _q("#release-sheet [data-sheet-body]", ".hidden") + " === false")
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            lines = c.eval(
+                "(() => { const h = document.querySelector('#release-sheet .sh-head');"
+                " const v = h.querySelector('.ver').getBoundingClientRect();"
+                " const s = h.querySelector('.st').getBoundingClientRect();"
+                " return s.top >= v.bottom - 1; })()"
+            )
+            assert lines is True, "390px 에서는 버전과 상태가 서로 다른 줄이다"
+            pad = c.eval(
+                "parseInt(getComputedStyle(document.querySelector('[data-store-body]'))"
+                ".paddingBottom, 10)"
+            )
+            sheet_h = c.eval("document.getElementById('release-sheet').offsetHeight")
+            assert pad >= sheet_h, (pad, sheet_h)
+            assert c.eval(_q(SHEET_TOGGLE)) is not None, "접기 버튼이 보인다"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 목록 행이 말하는 것: 무엇이 붙잡고 있는가 · 지금 지우는 중인가 ─────────────────────
+#
+# 둘 다 C 단계 격리 검증이 찾은 것이다. (1) «진행 중» 의 이유가 비활성 버튼의 `title` 에만
+# 있으면 키보드·스크린 리더 쓰는 사람은 아무 이유도 못 본다. (2) ASC 버전이 있는 드래프트를
+# 버리면 서버는 202 와 잡 번호를 주고 행은 `editing` 그대로 둔다 — 화면이 그 사이 «편집 중 ·
+# 열기 · 버리기» 면 누른 사람은 아무 일도 안 일어난 줄 안다.
+HOLD_STUB_JS = r"""
+(() => {
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  window.rcmVersions = Object.assign({}, window.rcmVersions, {
+    drafts: [
+      window.rcmDraftRow(7, "1.0.2", "1.0.2", "running",
+        { release_id: 12, upload_job_id: 650, last_edit_at: ago(300) }),
+      window.rcmDraftRow(8, "1.0.3", "1.0.3", "editing",
+        { asc_version_id: "abc123", last_edit_at: ago(200) })] });
+  // ASC 버전이 있으면 서버는 `mode=delete` 잡을 내고 202 를 준다 — 행은 아직 살아 있다
+  window.rcmStoreApi.versionDiscard = (name, id) => {
+    window.rcmStoreCalls.push(["versionDiscard", id]);
+    window.rcmVersions = Object.assign({}, window.rcmVersions, {
+      drafts: (window.rcmVersions.drafts || []).map((d) =>
+        String(d.id) === String(id) ? Object.assign({}, d, { delete_job_id: 88 }) : d) });
+    return Promise.resolve({ ok: true, status: 202,
+      body: { id: id, job_id: 88, state: "editing" } });
+  };
+  // 잡이 0 으로 끝나면 서버가 행을 `discarded` 로 닫아 목록에서 빠진다
+  window.rcmFinishDelete = (id) => {
+    window.rcmVersions = Object.assign({}, window.rcmVersions, {
+      drafts: (window.rcmVersions.drafts || []).filter((d) => String(d.id) !== String(id)) });
+  };
+})();
+"""
+
+
+def test_version_list_names_what_holds_a_draft_and_says_it_is_being_deleted(tmp_path):
+    """C 단계 격리 검증 1 · 2 — «진행 중» 인 드래프트는 무엇이 붙잡고 있는지(회차 #12 · 올리는
+    작업 #650) 행의 **글자로** 말한다. ASC 버전이 있는 드래프트를 버리면 그 자리에서 «스토어에서
+    지우는 중 · 작업 #88» 이 되고 버리기가 닫히며, 잡이 끝나면 30초 새로고침을 기다리지 않고
+    목록에서 빠진다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-holds", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": HOLD_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            c.open(
+                base + "&admin=1#/store/app",
+                ready_js=_q('#store [data-vrow="8"]') + " !== null",
+            )
+            rows = {r["row"]: r for r in c.eval(VERSION_ROWS_JS)}
+            # (1) 무엇이 붙잡고 있는지 행의 글자에 있다 — title 에만 있지 않다
+            held = rows["7"]
+            assert "running · release round #12 · upload job #650" in held["text"], held
+            assert c.eval(_q('#store [data-version-discard="7"]', ".disabled")) is True
+            # (2) 버리기 → 202 → 그 자리에서 «지우는 중»
+            c.eval(_q('#store [data-version-discard="8"]', ".click()"))
+            _wait(c, "document.getElementById('version-discard-dialog').open === true")
+            c.eval(_q("#version-discard-dialog [data-discard-go]", ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'versionDiscard')")
+            _wait(c, _q('#store [data-vrow="8"][data-deleting="1"]') + " !== null")
+            deleting = [r for r in c.eval(VERSION_ROWS_JS) if r["row"] == "8"][0]
+            assert "deleting in the store · job #88" in deleting["text"], deleting
+            assert "deleting" in deleting["text"], deleting
+            assert c.eval(_q('#store [data-version-discard="8"]', ".disabled")) is True
+            # 잡이 끝나면 30초를 기다리지 않고 목록에서 빠진다(짧은 폴링)
+            c.eval("window.rcmFinishDelete(8)")
+            _wait(c, _q('#store [data-vrow="8"]') + " === null", timeout=15.0)
+            assert c.eval(_q('#store [data-vrow="7"]')) is not None, "다른 행은 그대로다"
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             assert c.page_errors() == []
     finally:
