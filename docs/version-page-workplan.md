@@ -1,6 +1,6 @@
 # 버전 페이지와 바텀시트 — 상세 구현 계획서 (v1.0 · 2026-09-18)
 
-> 출처: 기획 초안 «버전 페이지와 바텀시트» (아티팩트 7MHJnGXkq3Z6yqYhss1H8n, R1~R12 · Q1~Q8). 이 문서는 그 단계 계획
+> 출처: 기획 초안 «버전 페이지와 바텀시트» — `docs/wireframes/web-version-page.html` (R1~R12 요구사항 · W1~W5 와이어프레임 · Q1~Q8). 이 문서는 그 단계 계획
 > (A~F)을 **파일 · 함수 · 입력 · 테스트 · 완료 조건** 수준으로 내린 것이고, 마지막 세 절(§7 완료 체크리스트 · §8
 > 엣지케이스 · §9 격리 검증 프로토콜)은 개발이 끝난 뒤 **격리 에이전트가 그대로 실행**하는 대본이다.
 >
@@ -49,7 +49,7 @@
 - `RELEASE_ROLES` · `LISTED_ROLES` 에 `"version"`; `ROLE_FILES["version"] = ("version.json", "prefill.json")`.
 - 프로파일 키 `version_ttl_hours`(기본 24, 정수 ≥ 1, `_RELEASE_KEYS` 에 추가, `ReleaseProfile.version_ttl_hours`).
 - `rcm check` `release <repo>` 행: `version` 프리셋이 있으면 입력 넷을 요구하고 `mode` 기본이 `prefill` 이어야 한다(아니면 FAIL); review/upload 프리셋에 `listing_json` 이 없으면 **warn** «listing_json 없음 — 웹에서 편집한 문안이 전달되지 않는다».
-- 테스트: `tests/test_config_release_profile.py`(키 · 기본값 · 오류 문구) · `tests/test_cli_check_release.py`(있는 파일에 추가: version 프리셋 FAIL/OK · listing_json warn).
+- 테스트: `tests/test_config_release_profile.py` 하나에 다 넣는다(키 · 기본값 · 오류 문구 · `rcm check` 의 version 프리셋 FAIL/OK · listing_json warn · build_name_android warn). 그 파일에 이미 `rcm check` 절이 있다.
 
 ### 1.3 스킬 템플릿 (`src/remote_ci_monitor/skills/…`)
 
@@ -338,3 +338,31 @@ CREATE INDEX versions_repo ON versions(repo, id DESC);
 막힘과 경고는 프로젝트 스크립트가 플랜에 적어 보낸 것을 그대로 보인다. 업로드를 실제로 막는 것들(Play 가 다른
 편집 중 · App Store 에 이미 편집 중인 버전 · 계약이나 세금 미동의 · 서명 키 불일치)은 프로젝트가 여기에 채우면
 이 칩에 뜬다. rcm 은 목록을 만들지 않는다.
+
+## 13. A 단계 격리 검증이 찾은 것 (2026-09-18) — 후속 PR «A2»
+
+AC-A1~A8 과 E4·E16 은 전부 PASS, 규칙 위반 없음. 체크리스트 밖에서 다섯 가지가 나왔다. 1~3 은 C·D·E 를
+시작하기 전에 고친다. B1 이 머지된 뒤 한 PR 로 묶는다.
+
+| # | 무엇 | 왜 아픈가 | 할 일 |
+|---|---|---|---|
+| 1 | `store.play.production_name` 과 `next_version_hint` 를 어느 스킬도 말하지 않는다 | 계약 §2 에는 있는데 `release_plan.sh` 의 TODO 블록과 `rcm-store-connect/SKILL.md` 가 이 이름을 한 번도 쓰지 않는다. 그래서 스킬로 붙인 프로젝트의 `plan.json` 에는 이 필드가 생기지 않고, **Android 라이브 이름을 모르게 된다**. 그러면 §12 요약 띠의 Play 칸과 새 버전 대화상자의 Android 힌트가 늘 빈다 — 소유자 요구 R4 가 바로 깨진다 | `release_plan.sh` 의 `store_snapshot()` TODO 에 두 필드를 넣고, SKILL.md 의 산출물 설명과 검증 단계에 더한다 |
+| 2 | 드라이버가 `V` 단계를 아는지 서버가 알아낼 방법이 없다 | 새 템플릿의 `--status` 는 `--version-id` 를 함께 줬을 때만 `V` 를 찍는다. 옛 드라이버에 `--version-id` 를 주면 `unknown argument` 와 exit 2 로 죽는데, exit 2 는 이미 «빌드 번호가 필요하다» 와 «환경 막힘» 을 뜻한다. 종료 코드로 구분이 안 된다 | **`--status` 가 `--version-id` 없이도 언제나 `stages:` 줄을 찍게 한다.** 그 줄에 `V` 가 있으면 서버가 `--version-id` 를 쓰고, 없으면 옛 방식으로 부르고 화면이 «드라이버가 V 단계를 모른다»고 말한다. 읽기 전용이라 안전하다 |
+| 3 | `rcm check` 가 `version` 프리셋의 `mode` 선택지를 안 본다 | `choices = ["prefill"]` 인 프리셋이 통과하지만 서버는 `create`·`delete` 를 보낸다. «새 버전 만들기» 가 제출 순간 400 으로만 드러난다 | 경고 한 줄: `mode` 선택지에 `create`·`delete` 가 없으면 warn |
+| 4 | `release_check.py` 의 `STAGES` 는 죽은 상수이고 드라이버의 `--status` 와 어긋난다(`S2` 없음) | 단계 목록이 두 벌이다. D 가 이걸 파싱하기 시작하면 성가시다 | 한쪽을 지우거나 둘을 한 곳에서 만들게 한다 |
+| 5 | 계획서 §1.2 가 없는 테스트 파일을 지목했다 | 문서 오류뿐 | 고쳤다 |
+
+## 14. B 단계 격리 검증이 찾은 것 (2026-09-20) — 후속 PR «B3»
+
+AC-B1~B12 와 E1·E3~E6·E9·E11~E15·E25 전부 PASS, 규칙 위반 없음. 검증이 서버를 실제로 띄워
+잡 28개를 돌리고 코드를 13군데 부숴 테스트가 잡는지까지 확인했다. 그래도 체크리스트 밖에서 여섯이
+나왔고, **1·2·3 은 C 단계를 시작하기 전에** 고친다.
+
+| # | 무엇 | 왜 아픈가 | 할 일 |
+|---|---|---|---|
+| 1 | `GET …/release/versions/<id>` 한 번에 하위 프로세스가 셋 돈다 | 드라이버 `--status` 하나와 소개 자료 명령 둘이 **매 요청** 실행된다. 캐시는 체크아웃 sha 뿐이고 명령 결과는 캐시가 없다. 그런데 §3.2 는 이 화면이 5초마다 폴링한다고 정해 놓았다. 브라우저 하나당 5초마다 맥미니에서 프로세스 셋이 돈다는 뜻이고, dolomood 의 그 명령들은 진짜 스토어를 읽는다 | **`driver` 와 `listing` 을 상세 응답에서 뺀다.** 웹은 이미 있는 `GET …/release/driver` 와 `GET …/release/listing` 을 자기 박자로 부른다. 소개 자료는 (repo, sha, build_name) 로 짧은 TTL 캐시를 둔다. `release` 는 하위 프로세스가 없으니 남기되, 측정해서 비싸면 같이 뺀다 |
+| 2 | **업로드 중에 «버리기» 가 열려 있다** | `review` 와 `start` 는 버전 행을 `running` 으로 두어 버리기가 409 로 막히는데, `upload` 만 행에 붙지 않는다. 그래서 `mode=upload` 가 스토어에 바이너리를 올리는 동안 같은 드래프트를 버릴 수 있고, App Store 버전이 있으면 그것을 지우는 잡까지 나간다. 셋 중 가장 되돌리기 어려운 것만 안 막힌 셈이다. §2.2 (d) 는 원래 upload 도 `running` 이라고 적혀 있다 | `mode=upload` 인 업로드 잡을 버전 행에 붙이고 행을 `running` 으로 둔다(`mode=rehearsal` 은 그대로 둔다 — 스토어에 쓰지 않는다). 잡이 끝나면 `editing` 으로 돌아온다. 버리기가 409 `version_running` 을 내는 것을 테스트로 잠근다 |
+| 3 | `failed` 드래프트가 이름을 영원히 붙잡는다 | create 가 실패한 행은 청소기의 두 조회 어디에도 안 걸려서 자동 삭제도 경고도 없는데, `version_exists` 는 계속 409 를 낸다. 그래서 «같은 이름으로 다시» 가 안 되고 반드시 버리고 다시 만들어야 한다 | `version_exists` 가 `failed` 를 닫힌 것으로 치고, 청소기가 만료된 미편집 `failed` 행도 버린다. 그 행에는 App Store 버전 id 가 없으므로(서버는 성공했을 때만 기록한다) 스토어 삭제 잡은 나가지 않는다 |
+| 4 | `version_for_job` 이 행을 하나만 돌려준다 | 합류(join) 가 있는 제출 경로에 «행은 하나» 가정이 박혀 있다. 지금은 `version_exists` 덕에 도달 불가 | 남겨 두고 주석으로 가정을 적는다 |
+| 5 | 만료 경고가 딱 한 번이고 그 뒤로 조용하다 | 편집한 드래프트는 몇 주를 살아도 로그 한 줄뿐이다. 지속 신호는 행의 `expired` · `expiry_warned` 플래그뿐 | C 단계가 목록 행에 그 둘을 반드시 그린다(§12 · E13) |
+| 6 | `plan` 과 `upload` 는 `version_id` 를 받아도 상태를 안 바꾼다 | `plan` 은 읽기 전용이라 타당하다. `upload` 는 2번과 같은 이야기 | 2번에서 함께 |
