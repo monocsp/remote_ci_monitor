@@ -38,6 +38,26 @@ of a key bumps that number and is listed here.
   `build_name`. ([#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
 
 ### Added
+- **The version page is where you edit the previous version's copy.** `#/store/<repo>/v/<id>` now
+  draws the two stores side by side — App Store · iOS and Google Play · Android, in the same group
+  order the review panel uses — with every copy field as an editable control filled in from the
+  previous version. A field says which value it is showing: «same as the previous version», «your
+  edit», «from the file» when only `store/` knows it, or empty. It carries its character counter
+  against the store's own limit, gets a «changed» chip as soon as it differs from the prefill, and
+  a «Revert» that puts the previous value back. An edit debounces 800 ms and sends
+  `PUT …/release/versions/<id>/listing` with **only the keys that changed**; the page shows
+  «saving…», «autosaved · n s ago», or the server's refusal with a «Save again» that resends the
+  same body — and the text you typed stays on screen either way, including when the token
+  disappears mid-edit. A value over the store's limit is still saved and the counter turns red:
+  the store has the last word, not rcm. Screenshots and graphics are shown, not editable, with a
+  «same as the previous version» marker, and the build, release-settings, review-information and
+  app-content blocks stay read-only — drawn by the same code as the review panel. Without an admin
+  token, or on a submitted or discarded draft, every field is read-only and one sentence says why.
+  The five-second poll on `GET …/release/versions/<id>` — that route only — keeps running while
+  the page is open, and when it brings an edit made in another browser the page marks those fields
+  «changed elsewhere» instead of overwriting what is on screen. The bottom sheet (progress and
+  «Submit for review») comes next.
+  ([#167](https://github.com/monocsp/remote_ci_monitor/pull/167))
 - **The Store tab opens on a version list, and «new version» is one dialog.** `#/store/<repo>` is
   the list of versions now: a one-line status strip (credentials · source · store · blockers, red
   as soon as one of them is, and a link to the detail), «+ New version», every open draft with its
@@ -51,7 +71,7 @@ of a key bumps that number and is listed here.
   out of the request, and answers 409 `version_exists` with a link to the draft that already has
   that name. While a draft is being created the page says «creating · job #n» and polls
   `GET …/release/versions/<id>` every five seconds — that route only, the one that runs no
-  subprocess — and stops the moment the row leaves `creating`. Opening a version address before
+  subprocess — and goes on polling it while the version page is open. Opening a version address before
   the setup gate is complete sends you to the settings screen and brings you back to it once the
   gate opens. The listing editor on the version page and the bottom sheet come next.
   ([#166](https://github.com/monocsp/remote_ci_monitor/pull/166))

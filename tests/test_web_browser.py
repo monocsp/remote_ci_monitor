@@ -1518,7 +1518,36 @@ RELEASE_STUB_JS = r"""
     errors: [] };
   const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
   window.rcmStoreCalls = [];
+  window.rcmListingCalls = 0;
   window.rcmRefuse = null;
+  // ── 버전 상세의 문안(§15): 이전 버전 값 · 편집본 · 그 둘의 diff ──
+  // `prefill` 은 일부러 iOS 의 promotional_text · support_url · marketing_url 을 모른다 —
+  // 그 셋은 화면이 «파일에서»(소개 자료 미리보기) 또는 빈 칸으로 채워야 한다(AC-C5).
+  const NORM = (s) => (typeof s === "string" ? s.replace(/\r\n/g, "\n").trim() : "");
+  const PKEYS = { ios: ["subtitle", "promotional_text", "description", "keywords", "support_url",
+                        "marketing_url", "whats_new"],
+                  android: ["title", "short_description", "full_description", "whats_new"] };
+  const diffOf = (pre, ed) => {
+    const fields = [], shots = {};
+    Object.keys(PKEYS).forEach((p) => {
+      const before = (pre && pre[p]) || {}, after = (ed && ed[p]) || {};
+      PKEYS[p].forEach((k) => {
+        if (!Object.prototype.hasOwnProperty.call(after, k)) return;
+        if (NORM(before[k]) === NORM(after[k])) return;
+        fields.push({ platform: p, key: k,
+                      old: typeof before[k] === "string" ? before[k] : null, new: after[k] });
+      });
+      shots[p] = Object.keys(before).length ? "same" : "n/a";
+    });
+    return { fields: fields, screenshots: shots };
+  };
+  window.rcmPrefill = { schema: 1, source: "asc_live:1.0.1 · play_listing", locale: "ko",
+    ios: { subtitle: "Daily notes", description: "A calm journal for every day.",
+           keywords: "journal,mood,notes", whats_new: "Bug fixes." },
+    android: { title: "Journal", short_description: "A calm journal",
+               full_description: "A calm journal for every day.", whats_new: "Bug fixes." } };
+  window.rcmEdited = null;
+  window.rcmListingRefuse = null;
   // 버전 드래프트 한 행 — 서버 `_version_json` 의 공개 모양 그대로
   const draftRow = (id, iosV, androidV, state, patch) => Object.assign({
     id: id, repo: "app", ios_version: iosV, android_version: androidV,
@@ -1544,7 +1573,7 @@ RELEASE_STUB_JS = r"""
     verify: () => ok(secrets),
     fetchRemote: () => ok({ mirror: doc.mirror, branches: doc.branches }),
     release: () => ok(release),
-    listing: () => ok(listing),
+    listing: () => { window.rcmListingCalls++; return ok(listing); },
     listingFileUrl: (name, path) =>
       "/api/repos/" + name + "/release/listing/file?path=" + encodeURIComponent(path),
     plan: (name, body) => { window.rcmStoreCalls.push(["plan", body]);
@@ -1566,8 +1595,26 @@ RELEASE_STUB_JS = r"""
       const row = (window.rcmVersions.drafts || []).filter((d) => String(d.id) === String(id))[0];
       if (!row) return Promise.resolve({ ok: false, status: 404,
         body: { error: "no version", code: "version_not_found" } });
-      return ok(Object.assign({}, row, { prefill: null, edited: null,
-        diff: { fields: [], screenshots: {} }, release: { build_name: row.build_name } }));
+      const pre = window.rcmPrefill, ed = window.rcmEdited, d = diffOf(pre, ed);
+      return ok(Object.assign({}, row, { prefill: pre, edited: ed, diff: d,
+        has_prefill: pre != null, has_edits: ed != null, changed: d.fields.length,
+        release: { build_name: row.build_name } }));
+    },
+    // 자동 저장 — 보낸 키만 편집본에 겹친다(서버 `release_version_put_listing` 과 같은 규칙).
+    // `window.rcmListingRefuse = 401` 이면 거절한다(E7), `window.rcmEdited` 를 직접 바꾸면
+    // 다른 브라우저가 고친 것이 된다(E8).
+    versionListing: (name, id, body) => {
+      window.rcmStoreCalls.push(["versionListing", body]);
+      if (window.rcmListingRefuse) return Promise.resolve({ ok: false,
+        status: window.rcmListingRefuse,
+        body: { error: "refused", code: "listing_refused", error_code: "listing_refused" } });
+      const next = Object.assign({}, window.rcmEdited || {});
+      Object.keys(body || {}).forEach((p) => {
+        next[p] = Object.assign({}, next[p] || {}, body[p]); });
+      window.rcmEdited = next;
+      return ok({ id: id, state: "editing", edited: next,
+                  last_edit_at: new Date().toISOString(),
+                  diff: diffOf(window.rcmPrefill, next) });
     },
     versionCreate: (name, body) => {
       window.rcmStoreCalls.push(["versionCreate", body]);
@@ -2442,7 +2489,9 @@ def test_new_version_dialog_hints_one_platform_duplicate_and_creating(tmp_path):
                 "versionCreate",
                 {"ios_version": "1.1.1", "android_version": "1.0.1"},
             ], sent
-            # 5초 폴링은 상세 하나만 부르고, `editing` 이 오면 스스로 멈춘다
+            # 5초 폴링은 상세 **하나만** 부른다. «만드는 중» 이 끝나도 계속 돈다 — 회차 상태와
+            # 다른 브라우저의 편집이 이 폴링으로만 오기 때문이다(C2 · E8). 소개 자료는 프리필
+            # 폴백을 위해 들어올 때 한 번뿐이고 폴링하지 않는다(워크플랜 §15).
             _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'version').length >= 1")
             c.eval(
                 "(() => { window.rcmVersions = Object.assign({}, window.rcmVersions, "
@@ -2451,11 +2500,14 @@ def test_new_version_dialog_hints_one_platform_duplicate_and_creating(tmp_path):
             )
             _wait(c, _q("#store [data-version-creating]") + " === null", timeout=12.0)
             polls = c.eval("window.rcmStoreCalls.filter(x => x[0] === 'version').length")
+            listings = c.eval("window.rcmListingCalls")
+            assert listings == 1, "소개 자료는 버전 페이지에서 한 번만 부른다"
             assert c.eval("document.body.innerText").find("editing") >= 0
             time.sleep(6.0)
-            assert c.eval("window.rcmStoreCalls.filter(x => x[0] === 'version').length") == polls, (
-                "만드는 중이 끝나면 폴링은 멈춘다"
+            assert c.eval("window.rcmStoreCalls.filter(x => x[0] === 'version').length") > polls, (
+                "버전 페이지가 열려 있는 동안 상세는 계속 폴링한다"
             )
+            assert c.eval("window.rcmListingCalls") == listings, "소개 자료는 폴링하지 않는다"
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             # 목록으로 돌아가는 길
             c.eval(_q("#store [data-version-back]", ".click()"))
@@ -2513,6 +2565,270 @@ def test_a_version_url_behind_a_closed_gate_goes_to_settings_and_comes_back(tmp_
             _wait(c, _q("#store [data-version-kv]") + " !== null")
             body = c.eval("document.body.innerText")
             assert "1.0.2" in body, body[:400]
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── W3 버전 페이지 본문 — 편집 칸 (워크플랜 §3.2 · AC-C5~C10 · E7~E10) ──────────
+
+FIELD_JS = """
+((name) => {
+  const el = document.querySelector('#store [data-field="' + name + '"]');
+  if (!el) return null;
+  const box = el.querySelector('[data-listing-field]');
+  const cnt = el.querySelector('.counter');
+  return { value: box ? box.value : null, tag: box ? box.tagName : null,
+           readOnly: box ? box.readOnly : null, source: el.getAttribute('data-source'),
+           changed: el.hasAttribute('data-changed'),
+           chips: [...el.querySelectorAll('.fchips .chip')].map((x) => x.textContent),
+           counter: cnt ? cnt.textContent : null, tone: cnt ? cnt.className : null,
+           srcText: el.querySelector('[data-field-source]').textContent,
+           revertOff: el.querySelector('[data-field-revert]').disabled };
+})
+"""
+
+
+def _field(c: Chrome, name: str) -> dict[str, Any]:
+    return c.eval(f"({FIELD_JS})({json.dumps(name)})")
+
+
+def _type_listing(c: Chrome, name: str, value: str) -> None:
+    c.eval(
+        "(() => { const i = document.querySelector('#store [data-listing-field="
+        + json.dumps(name)
+        + "]'); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def _saves(c: Chrome) -> list[Any]:
+    return [x[1] for x in c.eval("window.rcmStoreCalls") if x[0] == "versionListing"]
+
+
+def _badge(c: Chrome) -> str:
+    return c.eval(_q("#store [data-save-state] .txt", ".textContent"))
+
+
+def _open_version_page(c: Chrome, base: str, srv, *, admin: bool = True) -> None:
+    c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+    c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+    tok = json.dumps(srv.tokens["admin" if admin else "alice"])
+    c.eval(f"localStorage.setItem('rcm.token', {tok})")
+    c.open(
+        base + ("&admin=1" if admin else "") + "#/store/app/v/7",
+        ready_js=_q("#store [data-version-edit]") + " !== null",
+    )
+
+
+def test_version_page_prefills_every_field_and_autosaves_only_the_key_that_changed(tmp_path):
+    """AC-C5 · AC-C6 · AC-C9 · E9 · E10 — `#/store/app/v/7` 은 이전 버전 문안이 채워진 편집 칸
+    두 절이다: 절마다 심사 패널과 같은 그룹 차례, 칸마다 값 · 출처 · 글자 수. 프리필이 모르는
+    칸은 «파일에서»(소개 자료) 값이고 아무 데도 없으면 빈 칸이다(AC-C5). 칸을 고치면 800 ms 뒤
+    `PUT …/listing` 이 **그 키만** 싣고(AC-C6) «자동 저장» 배지와 «바뀜» 칩이 뜬다. «되돌리기» 는
+    이전 값으로 돌려놓고, 그러면 바뀐 것이 없다(E10). 상한을 넘겨도 저장은 되고 카운터만
+    빨갛다(E9). 폰 폭 390 에서 두 절이 세로로 쌓이고 가로 스크롤이 없다(AC-C9)."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-vpage", window="1240,900") as c:
+            _open_version_page(c, base, srv)
+            # 절 둘 · 그룹 차례는 심사 패널과 같다(항목 15)
+            groups = c.eval(
+                "(() => { const sec = (p) => document.querySelector("
+                "'#store [data-version-edit] .ssec[data-platform=\"' + p + '\"]'); "
+                "const g = (p) => [...sec(p).querySelectorAll('.grp')].map(x => x.dataset.group); "
+                "return { ios: g('ios'), android: g('android') }; })()"
+            )
+            assert groups["ios"] == [
+                "screenshots",
+                "version_info",
+                "whats_new",
+                "build",
+                "review_info",
+            ], groups
+            assert groups["android"] == [
+                "graphics",
+                "store_listing",
+                "release_notes",
+                "release",
+                "app_content",
+            ], groups
+            # AC-C5 — 값 · 출처 · 카운터
+            sub = _field(c, "ios.subtitle")
+            assert sub["value"] == "Daily notes", sub
+            assert sub["counter"] == "11/30" and "ok" in sub["tone"], sub
+            assert sub["source"] == "prefill" and sub["changed"] is False, sub
+            assert sub["srcText"] == "same as the previous version", sub
+            assert sub["revertOff"] is True, "고친 적 없는 칸은 되돌릴 것도 없다"
+            promo = _field(c, "ios.promotional_text")
+            assert promo["value"] == "Short daily notes", promo
+            assert promo["source"] == "file" and promo["srcText"] == "from the file", promo
+            empty = _field(c, "ios.marketing_url")
+            assert empty["value"] == "" and empty["source"] == "empty", empty
+            assert _field(c, "android.whats_new")["value"] == "Bug fixes.", "두 스토어 다 채운다"
+            assert _field(c, "ios.description")["tag"] == "TEXTAREA", "긴 글은 여러 줄 칸이다"
+            assert _field(c, "ios.subtitle")["tag"] == "INPUT"
+            head = c.eval(_q("#store [data-edit-head]", ".textContent"))
+            assert "Prefilled with the previous version" in head, head
+            assert c.eval(_q("#store [data-prefill-source]", ".textContent")) == (
+                "prefilled from asc_live:1.0.1 · play_listing"
+            )
+            # 스크린샷은 보기만 · 이전 버전과 같음
+            assert c.eval(_q('#store [data-shots-mark="same"]', ".textContent")) == (
+                "same as the previous version"
+            )
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # AC-C6 — 한 칸을 고치면 800 ms 뒤 그 키만 나간다
+            assert _saves(c) == []
+            _type_listing(c, "ios.keywords", "journal,mood,tarot")
+            time.sleep(0.4)
+            assert _saves(c) == [], "디바운스가 끝나기 전에는 안 보낸다"
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === 1")
+            assert _saves(c) == [{"ios": {"keywords": "journal,mood,tarot"}}], _saves(c)
+            _wait(c, _q('#store [data-save-state="saved"]') + " !== null")
+            assert _badge(c).startswith("autosaved"), _badge(c)
+            kw = _field(c, "ios.keywords")
+            assert kw["changed"] is True and kw["chips"] == ["changed"], kw
+            assert kw["source"] == "edited" and kw["srcText"] == "your edit", kw
+            assert _field(c, "ios.subtitle")["changed"] is False, "남의 칸은 그대로다"
+            assert "1 fields differ" in c.eval(_q("#store [data-edit-head]", ".textContent"))
+            # E10 — «되돌리기» 는 이전 값으로 돌려놓고 바뀐 것이 없어진다
+            c.eval(_q('#store [data-field-revert="ios.keywords"]', ".click()"))
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === 2")
+            assert _saves(c)[-1] == {"ios": {"keywords": "journal,mood,notes"}}, _saves(c)
+            _wait(c, _q('#store [data-field="ios.keywords"][data-changed]') + " === null")
+            kw = _field(c, "ios.keywords")
+            assert kw["value"] == "journal,mood,notes" and kw["source"] == "prefill", kw
+            assert kw["chips"] == [] and kw["revertOff"] is True, kw
+            assert c.eval("window.rcmEdited.ios.keywords") == "journal,mood,notes"
+            # E9 — 상한을 넘겨도 저장은 되고 카운터만 빨갛다
+            _type_listing(c, "ios.description", "x" * 4001)
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === 3")
+            desc = _field(c, "ios.description")
+            assert desc["counter"] == "4001/4000" and "bad" in desc["tone"], desc
+            assert len(_saves(c)[-1]["ios"]["description"]) == 4001, "잘라 보내지 않는다"
+            _wait(c, _q('#store [data-save-state="saved"]') + " !== null")
+            # 두 칸을 잇따라 고치면 한 번에 묶여 나간다 — 보낸 것은 그 둘뿐이다
+            before = c.eval("window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length")
+            _type_listing(c, "ios.subtitle", "Daily notes+")
+            _type_listing(c, "android.title", "Journal+")
+            _wait(
+                c,
+                "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === "
+                + str(before + 1),
+            )
+            assert _saves(c)[-1] == {
+                "ios": {"subtitle": "Daily notes+"},
+                "android": {"title": "Journal+"},
+            }, _saves(c)
+            # AC-C9 — 폰 폭에서 두 절이 세로로 쌓이고 가로 스크롤이 없다
+            c.viewport(390, mobile=True)
+            time.sleep(0.2)
+            box = c.eval(
+                "(() => { const r = (p) => document.querySelector("
+                "'#store .ssec[data-platform=\"' + p + '\"]').getBoundingClientRect(); "
+                "return { ios: r('ios').top, android: r('android').top, "
+                "wide: document.documentElement.scrollWidth }; })()"
+            )
+            assert box["wide"] <= 390, box
+            assert box["android"] > box["ios"], box
+            c.viewport(1240)
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_version_page_is_read_only_without_an_admin_token_and_for_a_closed_row(tmp_path):
+    """AC-C7 — admin 토큰이 없으면 칸은 읽기 전용이고 이유가 한 문장 있다. 쳐도 아무것도 안
+    보낸다. 제출된 행(닫힌 행)도 읽기 전용이다 — 서버가 409 `version_closed` 를 낸다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-vpage-ro", window="1240,900") as c:
+            _open_version_page(c, base, srv, admin=False)
+            why = c.eval(_q('#store [data-version-readonly="admin"]', ".textContent"))
+            assert "admin token" in why, why
+            sub = _field(c, "ios.subtitle")
+            assert sub["value"] == "Daily notes" and sub["readOnly"] is True, sub
+            assert sub["revertOff"] is True, sub
+            _type_listing(c, "ios.subtitle", "not allowed")
+            time.sleep(1.2)
+            assert _saves(c) == [], "읽기 전용 화면은 아무것도 보내지 않는다"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 닫힌 행 — admin 이어도 못 고친다. 새로 열리는 문서에 스텁을 한 겹 더 씌운다
+            # (RELEASE_STUB_JS 는 이동할 때마다 다시 도니 `c.eval` 로 바꾼 값은 남지 않는다).
+            c.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": "(() => { window.rcmVersions = Object.assign({}, "
+                    "window.rcmVersions, { drafts: [window.rcmDraftRow(7, '1.0.2', '1.0.2', "
+                    "'submitted')] }); })();"
+                },
+            )
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+            c.open(
+                base + "&admin=1#/store/app/v/7",
+                ready_js=_q("#store [data-version-edit]") + " !== null",
+            )
+            closed = c.eval(_q('#store [data-version-readonly="closed"]', ".textContent"))
+            assert "submitted" in closed, closed
+            assert _field(c, "ios.subtitle")["readOnly"] is True
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_version_page_keeps_typed_text_when_the_token_goes_and_flags_another_browser(tmp_path):
+    """E7 · E8 — 편집 중에 토큰이 사라지면(401) 저장 실패 배지가 뜨고 **친 글은 화면에 남고**
+    «다시 저장» 이 같은 몸통을 다시 보낸다(E7). 다른 브라우저가 같은 드래프트를 고치면 5초
+    폴링이 그것을 «다른 곳에서 바뀜» 으로 표시하고, 내가 치던 글을 조용히 덮지 않는다(E8)."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-vpage-conflict", window="1240,900") as c:
+            _open_version_page(c, base, srv)
+            # E8 — 다른 브라우저가 두 칸을 고쳤다: 내가 치던 칸과 손 안 댄 칸
+            _type_listing(c, "ios.subtitle", "Mine wins")
+            _wait(c, "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === 1")
+            c.eval(
+                "(() => { window.rcmEdited = { ios: { subtitle: 'Theirs', "
+                "description: 'Rewritten elsewhere.' } }; return true; })()"
+            )
+            _wait(
+                c,
+                _q('#store [data-field="ios.subtitle"] [data-field-remote]') + " !== null",
+                timeout=12.0,
+            )
+            mine = _field(c, "ios.subtitle")
+            assert mine["value"] == "Mine wins", "폴링이 내가 친 글을 덮지 않는다"
+            assert mine["chips"] == ["changed", "changed elsewhere"], mine
+            other = _field(c, "ios.description")
+            assert other["value"] == "Rewritten elsewhere.", "손 안 댄 칸은 새 값을 받는다"
+            assert "changed elsewhere" in other["chips"], other
+            warn = c.eval(_q("#store [data-version-remote]", ".textContent"))
+            assert "2 fields were changed in another browser" in warn, warn
+            # E7 — 토큰이 사라진다: 저장은 실패하고 친 글은 남고 다시 보낼 길이 있다
+            c.eval("window.rcmListingRefuse = 401")
+            _type_listing(c, "ios.keywords", "journal,mood,tarot")
+            _wait(c, _q('#store [data-save-state="failed"]') + " !== null")
+            assert _badge(c).startswith("could not save"), _badge(c)
+            assert _field(c, "ios.keywords")["value"] == "journal,mood,tarot", "친 글은 남는다"
+            assert c.eval(_q("#store [data-listing-retry]")) is not None, "다시 보낼 길이 있다"
+            sent = len(_saves(c))
+            c.eval("window.rcmListingRefuse = null")
+            c.eval(_q("#store [data-listing-retry]", ".click()"))
+            _wait(
+                c,
+                "window.rcmStoreCalls.filter(x => x[0] === 'versionListing').length === "
+                + str(sent + 1),
+            )
+            assert _saves(c)[-1] == {"ios": {"keywords": "journal,mood,tarot"}}, _saves(c)
+            _wait(c, _q('#store [data-save-state="saved"]') + " !== null")
+            assert _field(c, "ios.keywords")["value"] == "journal,mood,tarot"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             assert c.page_errors() == []
     finally:
         srv.close()

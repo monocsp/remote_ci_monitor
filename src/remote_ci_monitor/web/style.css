@@ -700,3 +700,38 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
   .vrow .va { justify-content: flex-start; }
   .vstrip { font-size: 12px; }
 }
+
+/* W3 버전 페이지 본문 — 편집 칸 (docs/version-page-workplan.md §3.2 · R6) */
+.vedit-head { margin: 12px 0 8px; align-items: baseline; }
+.savebadge { display: inline-flex; align-items: baseline; gap: 6px; font: 500 12px var(--sans); color: var(--muted); }
+.savebadge.saving .txt { color: var(--accent); }
+.savebadge.saved .txt { color: var(--ok); }
+.savebadge.failed .txt { color: var(--bad); font-weight: 700; }
+.fld.ed { grid-template-columns: minmax(96px, 26%) 1fr max-content; align-items: start; padding: 5px 0; }
+.fld.ed .fl { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; padding-top: 5px; }
+.fld.ed .fchips { display: inline-flex; gap: 4px; }
+.fld.ed .val { display: grid; gap: 2px; min-width: 0; overflow: visible; -webkit-line-clamp: unset; }
+.fld.ed input[type="text"], .fld.ed textarea {
+  width: 100%; box-sizing: border-box; font: 13px/1.5 var(--sans); padding: 4px 7px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink);
+  resize: vertical; min-height: 0; }
+.fld.ed input[type="text"]:focus-visible, .fld.ed textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.fld.ed input[readonly], .fld.ed textarea[readonly] { background: var(--surface-2); color: var(--muted); }
+.fld.ed[data-changed="1"] input[type="text"], .fld.ed[data-changed="1"] textarea { border-color: var(--warn); }
+.fld.ed .src { font: 11px var(--mono); color: var(--muted); }
+.fld.ed[data-source="edited"] .src { color: var(--warn); }
+.fld.ed[data-source="file"] .src { color: var(--accent); }
+.fld.ed .fa { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; padding-top: 5px; }
+.fld.ed .fa .btn.link { padding: 0; font-size: 11.5px; }
+/* 고친 적 없는 칸에는 되돌릴 것이 없다 — 자리는 지키고 글자만 감춘다(줄이 안 튄다) */
+.fld.ed .fa .btn.link[disabled] { visibility: hidden; }
+.chip.remote { border-color: var(--bad); color: var(--bad); cursor: default; }
+.chip.same, .chip.unknown { cursor: default; }
+.chip.same { border-color: var(--ok); color: var(--ok); }
+/* 바텀시트(D 단계)가 들어올 자리 — 지금은 비워만 둔다 */
+.sheet-slot { min-height: 56px; margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--line); }
+@media (max-width: 720px) {
+  .fld.ed { grid-template-columns: 1fr; }
+  .fld.ed .fl, .fld.ed .fa { padding-top: 0; }
+  .fld.ed .fa { flex-direction: row; align-items: baseline; gap: 8px; justify-content: flex-start; }
+}
