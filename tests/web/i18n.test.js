@@ -75,7 +75,9 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     // 스토어 탭 심사 패널 · Store 행 · Build·upload 행
     build: 181, targets: "App Store + Google Play", who: "alice", path: "store/notes/ko.txt",
     names: "ios + android", reason: "managed_publishing_unconfirmed", tag: "prod/1.0.1-181", role: "plan", track: "production", value: "MANUAL",
-    stage: "S5 scenario QA"  // 릴리스 드라이버 스테퍼
+    stage: "S5 scenario QA",  // 릴리스 드라이버 스테퍼
+    // 버전 목록 · 새 버전 대화상자 · 요약 띠 — 두 스토어 이름은 늘 따로 간다(§11)
+    ios: "1.1.0", android: "1.0.0"
   };
   LANGS.forEach((lang) => {
     Object.keys(I18N.MESSAGES[lang]).forEach((k) => {
@@ -280,7 +282,8 @@ const CATALOGUE_ARGS = {
   mem: "56%", gpu: "4%", load: "3.5 / 10", shown: 5, json: "{}", text: "rcm run demo",
   key: "gate", wait: "5m", pct: "12%", user: 7, sys: 7, used: "13 GB", note: "no GPU",
   countdown: "in 8s", cores: 10, delta: "+2s", head: "pool linux",
-  disk: "26%", free: "340 GB", percent: 62, done: 4, window: 8, seen: 3
+  disk: "26%", free: "340 GB", percent: 62, done: 4, window: 8, seen: 3,
+  ios: "1.1.0", android: "1.0.0"
 };
 
 /** 한 언어의 모든 키를 문장으로 펼친다. `[키, 문장]` 쌍의 배열. */

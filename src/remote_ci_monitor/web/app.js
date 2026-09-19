@@ -1096,13 +1096,24 @@
   var STORE_STALE_SECONDS = 30 * 60;   // 미러 나이 30분 — 목업 항목 4·42 (황토, 빨강이 아니다)
   var VALUE_FP_CHARS = 4;              // 값 비밀의 지문은 앞 4자 + … 를 넘지 않는다(항목 31)
 
-  /** 해시 → 화면. `#/store/<repo>` 만 스토어, 나머지(`#/` · `#/jobs/N` · 빈 값)는 큐다. */
+  /** 해시 → 화면. 스토어 탭은 셋으로 갈린다(워크플랜 §3.1):
+      `#/store/<repo>` 버전 목록 · `#/store/<repo>/v/<id>` 버전 하나 · `#/store/<repo>/status` 상태.
+      나머지(`#/` · `#/jobs/N` · 빈 값)는 큐다. `sub` 는 스토어일 때 언제나 있고 `id` 는 버전일 때만. */
   function parseRoute(hash) {
-    var m = /^#\/store\/([^\/?#]+)\/?$/.exec(hash || "");
-    if (!m) return { view: "queue", repo: null };
+    var m = /^#\/store\/([^\/?#]+)(?:\/(?:(status)|v\/(\d+)))?\/?$/.exec(hash || "");
+    if (!m) return { view: "queue", repo: null, sub: null, id: null };
     var repo;
     try { repo = decodeURIComponent(m[1]); } catch (e) { repo = m[1]; }
-    return { view: "store", repo: repo };
+    if (m[2]) return { view: "store", repo: repo, sub: "status", id: null };
+    if (m[3]) return { view: "store", repo: repo, sub: "version", id: parseInt(m[3], 10) };
+    return { view: "store", repo: repo, sub: "versions", id: null };
+  }
+  /** 스토어 화면의 해시를 만드는 유일한 자리 — `parseRoute` 와 짝이다. */
+  function storeHash(repo, sub, id) {
+    var base = "#/store/" + encodeURIComponent(repo);
+    if (sub === "status") return base + "/status";
+    if (sub === "version") return base + "/v/" + encodeURIComponent(String(id));
+    return base;
   }
   /** `GET /api/repos` 문서에서 릴리스 프로파일이 있는 저장소만. 문서가 이상하면 빈 배열(탭 없음). */
   function releaseRepos(doc) {
@@ -1277,6 +1288,177 @@
     if (!presets[role]) return T(lang, "row.not_configured", { name: "presets." + role });
     return T(lang, kind === "build" ? "row.na.build" : "row.na.store");
   }
+  // ── 버전 목록 · 새 버전 · 상태 띠 (docs/version-page-workplan.md §3.1 · §11 · §12 · §15) ──
+  // rcm 은 스토어를 모른다. 라이브 이름도 힌트도 막힘도 **프로젝트 스크립트가 쓴 `plan.json`** 에서
+  // 오고, 여기서는 그 값을 그리기만 한다. 서버의 `release_state.py` 에 같은 규칙이 파이썬으로 한 벌
+  // 더 있다(대화상자가 보내기 전에, 서버가 받고 나서 — 둘 다 같은 답을 내야 한다).
+  var VERSION_POLL_MS = 5000;          // 버전 상세만, «만드는 중» 일 때만 (§15)
+  var VERSION_NAME_RE = /^\d+\.\d+\.\d+$/;
+  //: 행 상태 → 필 색. `new` 는 편집 중(청록), `run` 은 만드는 중·진행 중.
+  var VERSION_TONE = { creating: "running", editing: "new", running: "running",
+    submitted: "ok", discarded: "na", failed: "bad" };
+
+  /** `1.1.0` → `1.1.1` · `2.0` → `2.1`. 끝이 정수가 아니면(`1.0.0-rc1`) null — 지어내지 않는다. */
+  function bumpLastNumber(name) {
+    if (typeof name !== "string") return null;
+    var m = /^((?:\d+\.)*)(\d+)$/.exec(name.trim());
+    return m ? m[1] + (parseInt(m[2], 10) + 1) : null;
+  }
+  /** 계획 문서가 말하는 라이브 이름 — iOS 는 `store.asc_live`, Android 는 `store.play.production_name`. */
+  function liveVersions(planDoc) {
+    var store = planDoc && typeof planDoc.store === "object" && planDoc.store ? planDoc.store : {};
+    var play = store.play && typeof store.play === "object" ? store.play : {};
+    var text = function (v) { return typeof v === "string" && v.trim() ? v : null; };
+    return { ios: text(store.asc_live), android: text(play.production_name) };
+  }
+  /** 다음 버전 이름의 힌트. 서버가 이미 계산해 주지만(`GET …/release/versions` 의 `hints`) 화면도
+      플랜 문서 하나로 같은 답을 낼 수 있어야 한다 — 문서의 `next_version_hint` 가 있으면 그대로,
+      없으면 라이브 이름의 마지막 정수 +1. 모르면 null 이다. */
+  function nextVersionHint(planDoc) {
+    var given = planDoc && typeof planDoc.next_version_hint === "object" && planDoc.next_version_hint ? planDoc.next_version_hint : {};
+    var live = liveVersions(planDoc);
+    var pick = function (p) {
+      var hint = typeof given[p] === "string" && given[p].trim() ? given[p] : null;
+      return hint != null ? hint : bumpLastNumber(live[p]);
+    };
+    return { ios: pick("ios"), android: pick("android") };
+  }
+  /** 새 버전 이름 검사 — `{ok, reason}`. `empty` · `pattern`(major.minor.patch 정수 셋) ·
+      `not_greater`(라이브를 아는 스토어에서만). 라이브가 숫자 꼴이 아니면 크기는 안 본다. */
+  function versionNameCheck(name, live) {
+    if (typeof name !== "string" || !name.trim()) return { ok: false, reason: "empty" };
+    var value = name.trim();
+    if (!VERSION_NAME_RE.test(value)) return { ok: false, reason: "pattern" };
+    var parts = function (v) {
+      var out = String(v).trim().split(".").map(function (p) { return /^\d+$/.test(p) ? parseInt(p, 10) : null; });
+      return out.indexOf(null) >= 0 ? null : out;
+    };
+    var mine = parts(value), theirs = typeof live === "string" && live ? parts(live) : null;
+    if (mine && theirs) {
+      for (var i = 0; i < Math.max(mine.length, theirs.length); i++) {
+        var a = mine[i] || 0, b = theirs[i] || 0;
+        if (a > b) return { ok: true, reason: null };
+        if (a < b) return { ok: false, reason: "not_greater" };
+      }
+      return { ok: false, reason: "not_greater" };
+    }
+    return { ok: true, reason: null };
+  }
+  /** 두 스토어 이름을 한 줄로(§11): 언제나 둘 다, 같으면 하나. 스토어 이름은 식별자라 번역하지 않는다. */
+  function versionTitle(ios, android) {
+    var a = typeof ios === "string" && ios ? ios : null;
+    var b = typeof android === "string" && android ? android : null;
+    if (a && b) return a === b ? a : "iOS " + a + " · Android " + b;
+    if (a) return "iOS " + a;
+    if (b) return "Android " + b;
+    return DASH;
+  }
+  /** 드래프트 행 하나 — 필 · 만든 지 · 바뀐 칸 수 · 빌드 유무 · 만료(§14-5 · E13) · 실패 사유.
+      버튼은 서버가 실제로 받아 주는 것만 연다: 도는 중이면 버리기가 409 `version_running` 이고
+      (`discard_version`), 만들기가 실패한 행은 이름을 안 붙잡으므로 같은 이름으로 다시 만든다(§15). */
+  function versionRowModel(row, lang, nowMs) {
+    var r = row || {};
+    var st = typeof r.state === "string" ? r.state : "editing";
+    var created = secondsSince(r.created_at, nowMs);
+    var changed = isNum(r.changed) ? r.changed : 0;
+    var hasBuild = r.upload_job_id != null || r.release_id != null;
+    var expired = r.expired === true || r.expiry_warned === true || r.expiry_warned === 1;
+    var notes = [];
+    if (st === "creating") notes.push(T(lang, "version.row.creating", { id: r.create_job_id != null ? r.create_job_id : DASH }));
+    if (created != null) notes.push(T(lang, "version.row.created", { age: fmtCoarse(created) }));
+    notes.push(changed > 0 ? T(lang, "version.row.changed", { n: changed }) : T(lang, "version.row.unchanged"));
+    notes.push(T(lang, hasBuild ? "version.row.build" : "version.row.no_build"));
+    if (expired) notes.push(T(lang, "version.row.expired"));
+    if (r.error) notes.push(T(lang, "version.row.error", { detail: String(r.error).slice(0, 120) }));
+    return {
+      id: r.id, state: st, title: versionTitle(r.ios_version, r.android_version),
+      ios: r.ios_version || null, android: r.android_version || null,
+      tone: VERSION_TONE[st] || "na", pill: T(lang, "version.state." + (VERSION_TONE[st] ? st : "editing")),
+      ageSeconds: created, changed: changed, hasBuild: hasBuild, expired: expired,
+      error: r.error || null, createJobId: r.create_job_id != null ? r.create_job_id : null,
+      notes: notes,
+      canDiscard: st !== "submitted" && st !== "discarded" && st !== "running" && st !== "creating",
+      canRetry: st === "failed"
+    };
+  }
+  /** `GET …/release/versions` → W1 의 행들. 드래프트 · 라이브 · 지난 것, 그리고 «+ 새 버전 만들기»
+      를 잠그는 `creating`. 시간은 `nowMs` 를 준 만큼만 말한다(안 주면 나이를 안 그린다). */
+  function versionListModel(doc, lang, nowMs) {
+    var d = doc && typeof doc === "object" ? doc : {};
+    var live = d.live && typeof d.live === "object" ? d.live : {};
+    var hints = d.hints && typeof d.hints === "object" ? d.hints : {};
+    var drafts = (Array.isArray(d.drafts) ? d.drafts : []).map(function (r) { return versionRowModel(r, lang, nowMs); });
+    var history = (Array.isArray(d.history) ? d.history : []).map(function (h) {
+      var e = h || {};
+      return { id: e.id, title: versionTitle(e.ios, e.android), submittedAt: e.submitted_at || null,
+        reviewJobId: e.review_job_id != null ? e.review_job_id : null };
+    });
+    return {
+      ttlHours: isNum(d.ttl_hours) ? d.ttl_hours : null,
+      live: { ios: live.ios || null, android: live.android || null, title: versionTitle(live.ios, live.android),
+        known: !!(live.ios || live.android), fromPlanJob: live.from_plan_job != null ? live.from_plan_job : null },
+      hints: { ios: hints.ios || null, android: hints.android || null },
+      // 대화상자에 칸을 둘 스토어(E2): 플랜이 이름이나 힌트를 아는 스토어만. 둘 다 모르면(E1)
+      // 둘 다 둔다 — rcm 은 프로젝트가 어느 스토어에 내는지 모르고, 플랜만이 말해 준다.
+      platforms: (function () {
+        var known = ["ios", "android"].filter(function (p) { return !!(live[p] || hints[p]); });
+        return known.length ? known : ["ios", "android"];
+      })(),
+      creating: drafts.some(function (r) { return r.state === "creating"; }),
+      drafts: drafts, history: history
+    };
+  }
+  /** 요약 띠(§12) — 칩 넷, 하나라도 빨가면 띠가 빨갛다. 버전을 고르기 전에 «이 앱을 지금 올릴 수
+      있는가»만 답한다. 막힘·경고는 프로젝트가 플랜에 적어 보낸 것 그대로다(rcm 은 목록을 안 만든다).
+      `ctx` = `{doc, items, release, profile, fetchError, nowMs, tzName}`. */
+  function statusStripModel(ctx, lang) {
+    var c = ctx || {}, doc = c.doc || {}, profile = c.profile || {}, setup = doc.setup || {};
+    var chips = [];
+    // 자격 증명 — 비밀이 다 있고 다 검증됐을 때만 초록
+    var latest = latestVerified(c.items);
+    var required = isNum(setup.required) ? setup.required : null, verified = isNum(setup.verified) ? setup.verified : null;
+    chips.push({
+      code: "credentials", label: T(lang, "vstrip.label.credentials"),
+      tone: setup.complete === true && required != null && verified != null && verified >= required && latest != null ? "ok" : "bad",
+      text: T(lang, "vstrip.creds", {
+        n: isNum(setup.present) ? setup.present : DASH, total: required != null ? required : DASH,
+        clock: latest != null ? fmtClock(new Date(latest).toISOString(), c.tzName, c.nowMs) : DASH
+      })
+    });
+    // 소스 — 행 넷의 판정을 그대로 쓴다(ok 가 아니면 빨강: 모르는 것도 초록은 아니다)
+    var srcCtx = { nowMs: c.nowMs, fetchError: c.fetchError };
+    chips.push({
+      code: "source", label: T(lang, "vstrip.label.source"),
+      tone: rowState("source", { doc: doc, nowMs: c.nowMs, fetchError: c.fetchError }) === "ok" ? "ok" : "bad",
+      text: sourceHead(doc, srcCtx, lang).join(" · ")
+    });
+    // 스토어 — 최신 플랜이 읽은 두 스토어와 다음 빌드 번호. 플랜이 없거나 낡으면 빨강
+    var release = c.release || {}, plan = release.plan || null, pdoc = planEntryDoc(plan);
+    var parts = [], storeTone = "bad";
+    if (plan == null || pdoc == null) parts.push(T(lang, "vstrip.store_none"));
+    else {
+      var store = pdoc.store && typeof pdoc.store === "object" ? pdoc.store : {};
+      var play = store.play && typeof store.play === "object" ? store.play : {};
+      parts.push(T(lang, "vstrip.store_ios", { name: store.asc_live || DASH, build: isNum(store.asc_live_build) ? store.asc_live_build : DASH }));
+      parts.push(T(lang, "vstrip.store_play", { name: play.production_name || DASH, build: isNum(play.production) ? play.production : DASH }));
+      if (isNum(pdoc.n)) parts.push(T(lang, "vstrip.store_next", { n: pdoc.n }));
+      var maxAge = isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes * 60 : null;
+      var stale = plan.stale === true || (maxAge != null && isNum(plan.age_seconds) && plan.age_seconds > maxAge);
+      if (stale) parts.push(T(lang, "vstrip.store_stale", { age: fmtAgo(plan.age_seconds, lang) }));
+      else storeTone = "ok";
+    }
+    chips.push({ code: "store", label: T(lang, "vstrip.label.store"), tone: storeTone, text: parts.join(" · ") });
+    // 막힘 — 막힘도 경고도 없으면 칩 자체가 없다
+    var blockers = pdoc && Array.isArray(pdoc.blockers) ? pdoc.blockers.length : 0;
+    var warnings = pdoc && Array.isArray(pdoc.warnings) ? pdoc.warnings.length : 0;
+    if (blockers > 0 || warnings > 0) {
+      chips.push({ code: "blockers", label: "", tone: blockers > 0 ? "bad" : "ok",
+        text: T(lang, "vstrip.blockers", { n: blockers, count: warnings }) });
+    }
+    var bad = chips.filter(function (chip) { return chip.tone === "bad"; }).length;
+    return { tone: bad > 0 ? "bad" : "ok", bad: bad, chips: chips };
+  }
+
   // ── 심사 패널 본체 · Store 행 · Build·upload 행 (항목 5~24 · 28 · 36 · 40 · 42 · 46~49) ──
   // 서버 계약은 STORE-TAB-API-2(`GET …/release` · `POST …/release/plan|review|upload` ·
   // `GET …/release/listing` · `POST …/release/listing/validate`). 웹은 판정하지 않는다 — N · 판정 ·
@@ -2035,7 +2217,12 @@
       driverStart: function (name, body) { return call("POST", base(name) + "/release/start", JSON.stringify(body || {}), "application/json"); },
       driverConfirm: function (name, body) { return call("POST", base(name) + "/release/confirm", JSON.stringify(body || {}), "application/json"); },
       driverAbort: function (name, body) { return call("POST", base(name) + "/release/abort", JSON.stringify(body || {}), "application/json"); },
-      driverRetry: function (name, body) { return call("POST", base(name) + "/release/retry", JSON.stringify(body || {}), "application/json"); }
+      driverRetry: function (name, body) { return call("POST", base(name) + "/release/retry", JSON.stringify(body || {}), "application/json"); },
+      // ── 버전 드래프트 (워크플랜 §2.2). 상세만 5초로 폴링한다 — 하위 프로세스가 없는 넷이다 ──
+      versions: function (name) { return call("GET", base(name) + "/release/versions"); },
+      versionCreate: function (name, body) { return call("POST", base(name) + "/release/versions", JSON.stringify(body || {}), "application/json"); },
+      version: function (name, id) { return call("GET", base(name) + "/release/versions/" + enc(String(id))); },
+      versionDiscard: function (name, id) { return call("DELETE", base(name) + "/release/versions/" + enc(String(id))); }
     };
   }
   var storePure = {
@@ -2055,7 +2242,11 @@
     confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
     nModeDefault: nModeDefault, nModeOf: nModeOf, nReason: nReason, nSendValue: nSendValue, releaseBarModel: releaseBarModel,
     planVersionGuess: planVersionGuess, PLAN_VERSION_RE: PLAN_VERSION_RE,
-    storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
+    storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount,
+    // 버전 목록 · 새 버전 대화상자 · 상태 띠 (워크플랜 §3.1)
+    storeHash: storeHash, bumpLastNumber: bumpLastNumber, liveVersions: liveVersions, nextVersionHint: nextVersionHint,
+    versionNameCheck: versionNameCheck, versionTitle: versionTitle, versionRowModel: versionRowModel,
+    versionListModel: versionListModel, statusStripModel: statusStripModel, VERSION_POLL_MS: VERSION_POLL_MS
   };
 
   var rcm = {
@@ -2105,7 +2296,14 @@
       // 이 페이지에만 산다 — 회차(build_name · plan_n)가 바뀌면 지워진다. `driverDialogKey` 는 S2 대화상자를 회차마다 한 번만 저절로 연다.
       driver: null, driverStatus: null, github: null, githubStatus: null, driverError: null, driverN: "", driverDialogKey: null,
       nMode: null,   // 빌드 번호 모드 — null 이면 프로파일 기본값(nModeDefault)
-      driverForm: { version: null, track: "", dryRun: false } }
+      driverForm: { version: null, track: "", dryRun: false },
+      // 버전 목록 · 새 버전 · 버전 하나(워크플랜 §3). `sub` 는 해시가 정한다(versions · version · status).
+      // `versionTimer` 는 «만드는 중» 일 때만 도는 5초 폴링이고 상세 하나만 부른다 — 드라이버와
+      // 소개 자료는 서버에서 프로세스를 돌리므로 이 화면에서 절대 폴링하지 않는다(§15).
+      sub: "versions", versionId: null, versions: null, versionsStatus: null,
+      version: null, versionStatus: null, versionTimer: null, versionError: null,
+      newVersion: null, createError: null, creating: false, discardTarget: null, discarding: false,
+      gateReturn: null }
   };
   function now() { return state.skewUnknown ? NaN : Date.now() + state.skewMs; }
   function tz() { return state.tz || undefined; }
@@ -3294,7 +3492,10 @@
     var st = $("#store");
     if (st) st.hidden = view !== "store";
     renderNav();
-    if (view !== "store") { clearInterval(state.store.timer); state.store.timer = null; }
+    if (view !== "store") {
+      clearInterval(state.store.timer); state.store.timer = null;
+      stopVersionPoll();
+    }
   }
   /** 머리의 `Queue | Store` — 릴리스 프로파일이 있는 저장소가 있을 때만 있다. 여럿이면 고르는 칸. */
   function renderNav() {
@@ -3323,7 +3524,7 @@
   }
 
   // ── 들어오기 · 받기 ──
-  function enterStore(repo) {
+  function enterStore(repo, route) {
     if (state.store.repo !== repo) {
       state.store.repo = repo; state.store.doc = null; state.store.secrets = null; state.store.screen = null;
       state.store.fetchError = null; state.store.error = null; state.store.loadedAt = null;
@@ -3333,6 +3534,19 @@
       state.store.driver = null; state.store.driverStatus = null; state.store.github = null; state.store.githubStatus = null;
       state.store.driverError = null; state.store.driverN = ""; state.store.driverDialogKey = null;
       state.store.driverForm = { version: null, track: "", dryRun: false }; state.store.nMode = null;
+      state.store.versions = null; state.store.versionsStatus = null; state.store.version = null;
+      state.store.versionStatus = null; state.store.versionError = null; state.store.createError = null;
+      state.store.gateReturn = null;
+    }
+    // 해시가 화면을 정한다 — 버전 목록(기본) · 버전 하나 · 상태. 다른 버전으로 가면 옛 상세를 버린다.
+    var sub = route && route.sub ? route.sub : "versions";
+    var id = route && route.id != null ? route.id : null;
+    if (state.store.sub !== sub || state.store.versionId !== id) {
+      state.store.sub = sub; state.store.versionId = id;
+      state.store.version = null; state.store.versionStatus = null; state.store.versionError = null;
+      // 주소로 화면을 골랐으면 그 화면을 보여 준다 — 관문이 **열려 있을 때만**이다(닫혀 있으면 설정이 맞다)
+      var open = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
+      if (state.store.screen === "settings" && open) state.store.screen = "store";
     }
     showView("store");
     renderStore();
@@ -3347,9 +3561,14 @@
     if (!repo) return Promise.resolve();
     var api = storeApi();
     var seq = (state.store.seq = (state.store.seq || 0) + 1);
-    // 소개 자료는 서버에서 명령을 돌리는 것이라 30초 타이머로는 안 받는다 — 처음과 새로고침·검사 뒤에만
-    var wantListing = (opts && opts.listing) || state.store.listing == null && state.store.listingStatus == null;
-    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(), wantListing ? loadListing() : null, loadDriver(), loadGithub()]).then(function (rs) {
+    // 소개 자료는 서버에서 명령을 돌리는 것이라 30초 타이머로는 안 받는다 — 처음과 새로고침·검사 뒤에만.
+    // 그리고 **상태 화면에서만** 부른다: 드라이버 `--status` 와 소개 자료 명령은 빌드 머신에서 프로세스를
+    // 돌리는 것이라, 버전 목록과 버전 페이지는 둘 다 건드리지 않는다(워크플랜 §15).
+    var onStatus = state.store.sub === "status";
+    var wantListing = onStatus && ((opts && opts.listing) || state.store.listing == null && state.store.listingStatus == null);
+    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(),
+      wantListing ? loadListing() : null, onStatus ? loadDriver() : null, onStatus ? loadGithub() : null,
+      state.store.sub === "version" ? loadVersion() : state.store.sub === "versions" ? loadVersions() : null]).then(function (rs) {
       if (seq !== state.store.seq || state.store.repo !== repo) return;  // 그 사이 다른 저장소로 갔다
       state.store.repos = rs[0].ok ? releaseRepos(rs[0].body) : [];
       state.store.reposStatus = rs[0].status;
@@ -3357,11 +3576,19 @@
       else { state.store.doc = null; state.store.error = rs[1]; }
       state.store.secrets = rs[2].ok && rs[2].body && Array.isArray(rs[2].body.items) ? rs[2].body : null;
       state.store.loadedAt = now();
-      // 관문(항목 29·34): 완료가 아니면 설정 화면이다 — 사람이 스토어를 골랐어도 도로 관문이다
+      // 관문(항목 29·34): 완료가 아니면 설정 화면이다 — 사람이 스토어를 골랐어도 도로 관문이다.
+      // 버전 주소로 바로 들어왔다면 가려던 곳을 적어 두고(E22), 관문이 열리면 거기로 보낸다.
       var complete = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
-      if (!complete) state.store.screen = "settings";
-      else if (!state.store.screen) state.store.screen = "store";
-      renderNav(); renderStore();
+      if (!complete) {
+        state.store.screen = "settings";
+        if (state.store.sub !== "versions" && !state.store.gateReturn) state.store.gateReturn = location.hash;
+      } else {
+        // 관문에 막혀 설정으로 보냈던 사람은 관문이 열리는 순간 가려던 곳으로 간다 — 다시 «Enter
+        // Store» 를 누르게 하지 않는다. 그 밖에는 설정 화면에 그대로 둔다(사람이 고른 화면이다).
+        if (state.store.gateReturn) { state.store.screen = "store"; goBackToGateReturn(); return; }
+        if (!state.store.screen) state.store.screen = "store";
+      }
+      renderNav(); renderStore(); syncVersionPoll();
     }).catch(function () {
       if (seq !== state.store.seq) return;
       state.store.error = { status: 0, body: null }; renderStore();
@@ -3383,10 +3610,10 @@
     }
     if (!state.store.doc) { body.innerHTML = '<p class="empty">' + esc(tr("store.loading")) + "</p>"; return; }
     withFocus(function () {
-      body.innerHTML = state.store.screen === "store" ? storeScreenHtml() : settingsHtml();
+      body.innerHTML = state.store.screen === "store" ? storeBodyHtml() : settingsHtml();
       // 렌더가 정한 열림은 기억이 아니다 — 사람이 바꾼 것만 `toggle` 에서 남긴다(호스트 절과 같은 규칙)
       $$("details.srow", body).forEach(function (d) { d.dataset.renderedOpen = d.open ? "1" : "0"; });
-      if (state.store.screen === "store") afterStoreRender();
+      if (state.store.screen === "store" && state.store.sub === "status") afterStoreRender();
     });
   }
   function secretsItems() { return state.store.secrets ? state.store.secrets.items : []; }
@@ -3398,6 +3625,8 @@
       + '<span class="g" aria-hidden="true">' + ROW_GLYPH[sum.tone] + "</span>"
       + "<b>" + esc(tr(sum.complete ? "store.gate.complete" : "store.gate.incomplete", { repo: repo })) + "</b>"
       + '<span data-gate-counts>' + esc(sum.text) + "</span>"
+      // 버전 주소로 바로 들어왔다가 관문에 막힌 사람에게, 설정을 마치면 어디로 돌아가는지 말한다(E22)
+      + (state.store.gateReturn ? '<span class="sub" data-gate-return="' + esc(state.store.gateReturn) + '">' + esc(tr("store.gate.return", { text: state.store.gateReturn })) + "</span>" : "")
       + '<span class="spacer"></span>'
       + '<button type="button" class="btn primary" data-enter-store' + (sum.complete ? "" : ' disabled title="' + esc(tr("store.gate.enter_hint")) + '"') + ">" + esc(tr("store.gate.enter")) + "</button>"
       + '<span class="sub gate-help">' + esc(tr("store.gate.help")) + "</span>"
@@ -3466,12 +3695,104 @@
       + '<span class="n">' + head + "</span>" + (extra ? '<span class="spacer"></span>' + extra : "") + "</summary>"
       + '<div class="srow-body">' + bodyHtml + "</div></details>";
   }
-  /** 스토어 화면 (항목 1~6 · 27): 행 넷 + 접힌 본체 머리 + 고정 문장. */
+  /** 관문을 지난 뒤의 본문 — 해시가 고른 화면 하나(워크플랜 §3.2). */
+  function storeBodyHtml() {
+    if (state.store.sub === "status") return storeScreenHtml();
+    if (state.store.sub === "version") return versionPageHtml();
+    return versionListHtml();
+  }
+  /** 화면 머리 한 줄 — 언제 받았는지 · 새로고침. `extra` 는 그 화면만의 단추다. */
+  function storeHeadHtml(extra) {
+    return '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
+      + '<span class="spacer"></span>' + (extra || "")
+      + '<button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+  }
+  /** 요약 띠(§12) — 칩 넷, 누르면 상태 화면으로. 빨간 것이 있으면 띠가 빨갛다. */
+  function statusStripHtml() {
+    var m = statusStripModel({
+      doc: state.store.doc, items: secretsItems(), release: releaseDoc(), profile: currentProfile(),
+      fetchError: state.store.fetchError, nowMs: now(), tzName: tz()
+    }, L());
+    var chips = m.chips.map(function (chip) {
+      return '<span class="vchip ' + chip.tone + '" data-chip="' + esc(chip.code) + '">'
+        + '<span class="g" aria-hidden="true">' + ROW_GLYPH[chip.tone] + "</span>"
+        + (chip.label ? "<b>" + esc(chip.label) + "</b> " : "") + esc(chip.text) + "</span>";
+    }).join("");
+    return '<a class="vstrip ' + m.tone + '" href="' + esc(storeHash(state.store.repo, "status")) + '" data-strip="' + esc(m.tone) + '">'
+      + chips + '<span class="spacer"></span><span class="btn" data-strip-detail>' + esc(tr("vstrip.detail")) + "</span></a>";
+  }
+  /** W1 버전 목록 — 스토어 탭의 첫 화면(§3.2). 행 넷은 상태 화면으로 옮겼다. */
+  function versionListHtml() {
+    var lang = L(), n = now();
+    var m = versionListModel(state.store.versions, lang, n);
+    var h = storeHeadHtml("");
+    h += statusStripHtml();
+    var live = m.live.known ? tr("version.list.live_line", { ios: m.live.ios || DASH, android: m.live.android || DASH }) : tr("version.list.live_unknown");
+    var can = state.admin && !m.creating && state.store.versionsStatus !== 404;
+    var why = !state.admin ? tr("version.list.new_hint.admin") : m.creating ? tr("version.list.new_hint.creating") : "";
+    h += '<div class="s-h vhead"><span class="t">' + esc(tr("version.list.title")) + '</span><span class="n">' + esc(live) + "</span>"
+      + '<span class="spacer"></span><button type="button" class="btn primary" data-version-new' + (can ? "" : ' disabled title="' + esc(why) + '"') + ">+ " + esc(tr("version.list.new")) + "</button></div>";
+    if (state.store.versionsStatus === 404) return h + '<p class="empty">' + esc(tr("version.list.na")) + "</p>";
+    if (state.store.versions == null) return h + '<p class="empty">' + esc(tr("store.loading")) + "</p>";
+    h += '<div class="vrows">';
+    m.drafts.forEach(function (row) { h += versionRowHtml(row); });
+    if (!m.drafts.length) h += '<p class="empty" data-no-drafts>' + esc(tr("version.list.none")) + "</p>";
+    if (m.live.known) {
+      h += '<div class="vrow live" data-vrow="live"><span class="g" aria-hidden="true">' + ROW_GLYPH.ok + "</span>"
+        + '<span class="vt"><b>' + esc(m.live.title) + '</b> <span class="pill v-ok">' + esc(tr("version.list.live")) + "</span></span>"
+        + '<span class="vn">' + esc(m.live.fromPlanJob != null ? tr("version.list.from_plan", { id: m.live.fromPlanJob }) : "") + "</span></div>";
+    }
+    m.history.forEach(function (row) {
+      h += '<div class="vrow old" data-vrow="' + esc(String(row.id)) + '"><span class="g" aria-hidden="true">·</span>'
+        + '<span class="vt"><b>' + esc(row.title) + "</b></span>"
+        + '<span class="vn">' + esc([row.submittedAt ? tr("version.row.submitted", { clock: fmtClock(row.submittedAt, tz(), n) }) : "",
+          row.reviewJobId != null ? tr("version.row.review_job", { id: row.reviewJobId }) : ""].filter(Boolean).join(" · ")) + "</span></div>";
+    });
+    h += "</div>";
+    if (m.ttlHours != null) h += '<p class="sub">' + esc(tr("version.list.ttl", { n: m.ttlHours })) + "</p>";
+    h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    return h;
+  }
+  function versionRowHtml(row) {
+    var open = '<a class="btn" href="' + esc(storeHash(state.store.repo, "version", row.id)) + '" data-version-open="' + esc(String(row.id)) + '">' + esc(tr("version.row.open")) + "</a>";
+    var retry = row.canRetry ? '<button type="button" class="btn" data-version-retry="' + esc(String(row.id)) + '"' + (state.admin ? "" : " disabled") + ">" + esc(tr("version.row.retry")) + "</button>" : "";
+    var discard = '<button type="button" class="btn danger" data-version-discard="' + esc(String(row.id)) + '"'
+      + (state.admin && row.canDiscard ? "" : ' disabled title="' + esc(state.admin ? tr("version.row.busy") : tr("version.list.new_hint.admin")) + '"') + ">" + esc(tr("version.row.discard")) + "</button>";
+    return '<div class="vrow draft' + (row.expired ? " expired" : "") + '" data-vrow="' + esc(String(row.id)) + '" data-state="' + esc(row.state) + '">'
+      + '<span class="g" aria-hidden="true">' + (row.state === "failed" ? "✗" : "✎") + "</span>"
+      + '<span class="vt"><b>' + esc(row.title) + '</b> <span class="pill v-' + row.tone + '">' + esc(row.pill) + "</span></span>"
+      + '<span class="vn">' + esc(row.notes.join(" · ")) + "</span>"
+      + '<span class="va">' + open + retry + discard + "</span></div>";
+  }
+  /** 버전 하나 — C1 은 이름 · 상태 · «만드는 중» 까지다. 문안 편집은 C2(§3.2 W3). */
+  function versionPageHtml() {
+    var v = state.store.version, lang = L(), n = now();
+    var back = '<a class="btn" href="' + esc(storeHash(state.store.repo, "versions")) + '" data-version-back>' + esc(tr("version.page.back")) + "</a>";
+    var h = storeHeadHtml(back);
+    if (v == null) {
+      return h + '<p class="empty">' + esc(state.store.versionStatus == null ? tr("store.loading")
+        : tr("version.page.not_found", { id: state.store.versionId, detail: state.store.versionError || DASH })) + "</p>";
+    }
+    var row = versionRowModel(v, lang, n);
+    h += '<div class="s-h vhead"><span class="t">' + esc(row.title) + '</span><span class="pill v-' + row.tone + '">' + esc(row.pill) + "</span>"
+      + '<span class="n" data-version-notes>' + esc(row.notes.join(" · ")) + "</span></div>";
+    if (row.state === "creating") h += '<p class="banner info" data-version-creating>' + esc(tr("version.row.creating", { id: row.createJobId != null ? row.createJobId : DASH })) + "</p>";
+    if (row.error) h += '<p class="banner bad" data-version-error>' + esc(tr("version.row.error", { detail: String(row.error).slice(0, 200) })) + "</p>";
+    h += '<dl class="kv" data-version-kv>'
+      + "<dt>" + esc(tr("version.page.state")) + "</dt><dd>" + esc(row.pill) + "</dd>"
+      + "<dt>" + esc(tr("version.page.by")) + "</dt><dd>" + esc(v.created_by || DASH) + "</dd>"
+      + "<dt>" + esc(tr("version.page.created")) + "</dt><dd>" + esc(v.created_at ? fmtClock(v.created_at, tz(), n) : DASH) + "</dd>"
+      + "<dt>" + esc(tr("version.page.expires")) + "</dt><dd>" + esc(v.expires_at ? fmtClock(v.expires_at, tz(), n) : DASH) + "</dd>"
+      + "</dl>";
+    h += '<p class="sub" data-version-soon>' + esc(tr("version.page.soon")) + "</p>";
+    h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    return h;
+  }
+  /** 상태 화면 `#/store/<repo>/status` (항목 1~6 · 27): 행 넷 + 접힌 본체 머리 + 고정 문장. */
   function storeScreenHtml() {
     var doc = state.store.doc, repo = state.store.repo, items = secretsItems(), profile = doc.profile || {};
     var n = now();
-    var h = '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
-      + '<span class="spacer"></span><button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+    var h = storeHeadHtml('<a class="btn" href="' + esc(storeHash(repo, "versions")) + '" data-version-back>' + esc(tr("version.page.back")) + "</a>");
     h += releaseBarHtml();
     // Setup — 프로파일이 선언한 비밀 표(읽기 전용 + Replace · Verify all)
     var setupState = rowState("setup", { setup: doc.setup });
@@ -3550,6 +3871,48 @@
       var cur = state.store.driver;
       if (!prev || !cur || prev.build_name !== cur.build_name || prev.plan_n !== cur.plan_n || prev.running !== cur.running) state.store.driverN = "";
     }).catch(function () { state.store.driver = null; state.store.driverStatus = 0; });
+  }
+  // ── 버전 목록 · 버전 하나 (워크플랜 §3.2). 네 라우트 가운데 **상세만** 5초로 폴링한다 ──
+  function loadVersions() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.versions !== "function") { state.store.versions = null; state.store.versionsStatus = 404; return Promise.resolve(); }
+    return api.versions(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      state.store.versionsStatus = res.status;
+      state.store.versions = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+    }).catch(function () { state.store.versions = null; state.store.versionsStatus = 0; });
+  }
+  function loadVersion() {
+    var repo = state.store.repo, id = state.store.versionId, api = storeApi();
+    if (!repo || id == null || typeof api.version !== "function") { state.store.version = null; state.store.versionStatus = 404; return Promise.resolve(); }
+    return api.version(repo, id).then(function (res) {
+      if (state.store.repo !== repo || state.store.versionId !== id) return;
+      state.store.versionStatus = res.status;
+      state.store.version = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+      state.store.versionError = res.ok ? null : storeErrorDetail(res);
+    }).catch(function () { state.store.version = null; state.store.versionStatus = 0; });
+  }
+  function stopVersionPoll() {
+    if (state.store.versionTimer) { clearInterval(state.store.versionTimer); state.store.versionTimer = null; }
+  }
+  /** «만드는 중» 동안만 도는 5초 폴링(§3.2). 부르는 것은 `GET …/release/versions/<id>` 하나뿐이고,
+      그 라우트는 하위 프로세스를 돌리지 않는다. 상태가 `creating` 을 벗어나면 스스로 멈춘다. */
+  function syncVersionPoll() {
+    var v = state.store.version;
+    var want = state.view === "store" && state.store.sub === "version" && v != null && v.state === "creating";
+    if (!want) { stopVersionPoll(); return; }
+    if (state.store.versionTimer) return;
+    state.store.versionTimer = setInterval(function () {
+      if (state.view !== "store" || state.store.sub !== "version" || document.hidden || state.conn.mode === "paused") return;
+      loadVersion().then(function () { renderStore(); syncVersionPoll(); });
+    }, VERSION_POLL_MS);
+  }
+  /** 관문에 막혀 설정 화면으로 보냈던 주소로 돌아간다(E22). 한 번 쓰면 잊는다. */
+  function goBackToGateReturn() {
+    var target = state.store.gateReturn;
+    state.store.gateReturn = null;
+    if (!target || location.hash === target) { renderNav(); renderStore(); syncVersionPoll(); return; }
+    location.hash = target;
   }
   function loadGithub() {
     var repo = state.store.repo, api = storeApi();
@@ -4091,6 +4454,156 @@
     dlg.close();   // 거절은 Store 행 머리에 빨갛게 온다
     refreshPlan(v);
   }
+  // ── W2 새 버전 대화상자 (§3.2 · R3 · R4) ─────────────────────────────────────
+  // 묻는 것은 버전 이름뿐이다(R3). 트랙 · dry-run · 빌드 번호는 여기 없다. 체크를 끄면 그 스토어는
+  // 본문에서 빠지고(E2), 이름은 꼴이 맞고 라이브보다 커야 «만들기» 가 열린다.
+  function versionListNow() { return versionListModel(state.store.versions, L(), now()); }
+  function openVersionDialog(prefill) {
+    var dlg = $("#version-dialog");
+    if (!dlg) return;
+    var m = versionListNow();
+    var chosen = {};
+    m.platforms.forEach(function (p) {
+      var value = prefill && prefill[p] != null ? String(prefill[p]) : (m.hints[p] || "");
+      chosen[p] = { on: prefill ? prefill[p] != null : true, name: value };
+    });
+    state.store.newVersion = chosen;
+    state.store.createError = null;
+    renderVersionFields();
+    renderVersionDialogState();
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+    var first = $("#version-dialog input[data-version-name]");
+    if (first) { first.focus(); first.select(); }
+  }
+  /** 칸은 플랜이 아는 스토어만 둔다(E2) — 둘 다 모르면 둘 다. 힌트는 라이브 + patch 다. */
+  function renderVersionFields() {
+    var wrap = $("#version-dialog [data-version-fields]");
+    if (!wrap) return;
+    var m = versionListNow(), nv = state.store.newVersion || {};
+    var label = { ios: "App Store · iOS", android: "Google Play · Android" };
+    wrap.innerHTML = m.platforms.map(function (p) {
+      var f = nv[p] || { on: true, name: "" };
+      var hint = m.live[p] ? tr("version.dialog.hint", { version: m.live[p] }) : tr("version.dialog.no_hint");
+      return '<div class="nbox vfield" data-version-field="' + p + '">'
+        + '<label class="ck"><input type="checkbox" data-version-check="' + p + '"' + (f.on ? " checked" : "") + "> " + esc(label[p]) + "</label>"
+        + '<input id="version-' + p + '" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="1.0.1"'
+        + ' data-version-name="' + p + '" value="' + esc(f.name) + '"' + (f.on ? "" : " disabled") + ' aria-describedby="version-' + p + '-state">'
+        + '<span class="sub">' + esc(hint) + "</span>"
+        + '<span id="version-' + p + '-state" class="nstate" data-version-state="' + p + '"></span></div>';
+    }).join("");
+  }
+  /** «만들기» 가 열리는 조건 — 스토어 하나 이상 · 고른 이름이 전부 꼴에 맞고 라이브보다 큼. */
+  function versionDialogDecision() {
+    var m = versionListNow(), nv = state.store.newVersion || {};
+    var chosen = Object.keys(nv).filter(function (p) { return nv[p].on; });
+    var reasons = {}, ok = chosen.length > 0;
+    chosen.forEach(function (p) {
+      var r = versionNameCheck(nv[p].name, m.live[p]);
+      if (!r.ok) { ok = false; reasons[p] = r.reason; }
+    });
+    return { ok: ok, chosen: chosen, reasons: reasons, live: m.live };
+  }
+  function versionReasonText(platform, reason, live) {
+    if (reason === "not_greater") return tr("version.dialog.reason.not_greater", { version: live[platform] || DASH });
+    return tr("version.dialog.reason." + (reason === "pattern" ? "pattern" : "empty"));
+  }
+  function renderVersionDialogState() {
+    var go = $("#version-dialog [data-version-go]"), st = $("#version-dialog [data-version-status]");
+    if (!go) return;
+    var d = versionDialogDecision();
+    go.disabled = !d.ok || !state.admin || !!state.store.creating;
+    go.textContent = tr(state.store.creating ? "version.dialog.creating" : "version.dialog.go");
+    var first = null;
+    Object.keys(state.store.newVersion || {}).forEach(function (p) {
+      var el = $('#version-dialog [data-version-state="' + p + '"]');
+      if (!el) return;
+      var reason = d.reasons[p];
+      var text = reason ? versionReasonText(p, reason, d.live) : "";
+      el.textContent = text; el.className = "nstate" + (reason ? " bad" : "");
+      if (text && !first) first = text;
+    });
+    if (!st) return;
+    var err = state.store.createError;
+    if (err) {
+      st.className = "dlg-status sub bad";
+      st.innerHTML = esc(err.text) + (err.id != null
+        ? ' <a class="btn" href="' + esc(storeHash(state.store.repo, "version", err.id)) + '" data-version-exists-open="' + esc(String(err.id)) + '">' + esc(tr("version.row.open")) + "</a>" : "");
+      return;
+    }
+    st.className = "dlg-status sub";
+    st.textContent = !state.admin ? tr("version.list.new_hint.admin")
+      : d.ok ? "" : (d.chosen.length ? first || "" : tr("version.dialog.reason.no_store"));
+  }
+  function submitVersionDialog() {
+    var d = versionDialogDecision();
+    if (!d.ok || !state.admin || state.store.creating) return;
+    var nv = state.store.newVersion, body = {}, repo = state.store.repo;
+    d.chosen.forEach(function (p) { body[p + "_version"] = String(nv[p].name).trim(); });
+    state.store.creating = true; state.store.createError = null;
+    renderVersionDialogState();
+    storeApi().versionCreate(repo, body).then(function (res) {
+      state.store.creating = false;
+      if (res.ok) {
+        var dlg = $("#version-dialog");
+        if (dlg && dlg.open) dlg.close();
+        state.store.versions = null;
+        var id = res.body && typeof res.body === "object" ? res.body.id : null;
+        if (id != null) { location.hash = storeHash(repo, "version", id); return; }
+        loadStore();
+        return;
+      }
+      if (res.status === 401 || res.status === 403) tokenRejected();
+      var b = res.body && typeof res.body === "object" ? res.body : {};
+      var code = b.error_code || b.code || null;
+      // 같은 이름의 드래프트가 이미 있으면(E3) 서버가 그 번호를 준다 — 새로 만들지 말고 열게 한다
+      state.store.createError = code === "version_exists" && b.id != null
+        ? { code: code, id: b.id, text: tr("version.dialog.exists", { id: b.id }) }
+        : { code: code, id: null, text: tr("version.dialog.failed", { detail: refusalText(res, L()) }) };
+      renderVersionDialogState();
+    }).catch(function () {
+      state.store.creating = false;
+      state.store.createError = { code: null, id: null, text: tr("version.dialog.failed", { detail: "network" }) };
+      renderVersionDialogState();
+    });
+  }
+  // ── «버리기» 확인 (§3.2 · AC-C8) ────────────────────────────────────────────
+  function openDiscardDialog(id) {
+    var dlg = $("#version-discard-dialog");
+    if (!dlg) return;
+    var m = versionListNow();
+    var row = m.drafts.filter(function (r) { return String(r.id) === String(id); })[0];
+    var v = state.store.version;
+    var title = row ? row.title : v && String(v.id) === String(id) ? versionTitle(v.ios_version, v.android_version) : "#" + id;
+    state.store.discardTarget = id;
+    var body = $("#version-discard-dialog [data-discard-body]");
+    if (body) body.textContent = tr("version.discard.body", { version: title });
+    var st = $("#version-discard-dialog [data-discard-status]");
+    if (st) { st.textContent = ""; st.className = "dlg-status sub"; }
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+  }
+  function submitDiscardDialog() {
+    var id = state.store.discardTarget, repo = state.store.repo;
+    if (id == null || state.store.discarding) return;
+    state.store.discarding = true;
+    storeApi().versionDiscard(repo, id).then(function (res) {
+      state.store.discarding = false;
+      var st = $("#version-discard-dialog [data-discard-status]");
+      if (res.ok) {
+        var dlg = $("#version-discard-dialog");
+        if (dlg && dlg.open) dlg.close();
+        state.store.discardTarget = null; state.store.versions = null;
+        if (state.store.sub === "version" && String(state.store.versionId) === String(id)) { location.hash = storeHash(repo, "versions"); return; }
+        loadStore();
+        return;
+      }
+      if (res.status === 401 || res.status === 403) tokenRejected();
+      if (st) { st.textContent = tr("version.discard.failed", { detail: refusalText(res, L()) }); st.className = "dlg-status sub bad"; }
+    }).catch(function () {
+      state.store.discarding = false;
+      var st2 = $("#version-discard-dialog [data-discard-status]");
+      if (st2) { st2.textContent = tr("version.discard.failed", { detail: "network" }); st2.className = "dlg-status sub bad"; }
+    });
+  }
   function validateListing() {
     var r = releaseDoc(), plan = r && r.plan, doc = planEntryDoc(plan) || {};
     var body = { build_name: plan && plan.build_name != null ? String(plan.build_name) : "", build: isNum(doc.n) ? String(doc.n) : "" };
@@ -4220,10 +4733,20 @@
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode]");
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode],[data-version-new],[data-version-discard],[data-version-retry]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
-      if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
+      if (t.hasAttribute("data-version-new")) { if (!t.disabled) { state.lastTrigger = t; openVersionDialog(null); } return; }
+      if (t.hasAttribute("data-version-discard")) { if (!t.disabled) { state.lastTrigger = t; openDiscardDialog(parseInt(t.getAttribute("data-version-discard"), 10)); } return; }
+      if (t.hasAttribute("data-version-retry")) {
+        // 실패한 드래프트는 이름을 안 붙잡는다(§15) — 같은 이름으로 다시 만들 수 있다
+        if (t.disabled) return;
+        var again = versionListNow().drafts.filter(function (r) { return String(r.id) === t.getAttribute("data-version-retry"); })[0];
+        state.lastTrigger = t;
+        openVersionDialog(again ? { ios: again.ios, android: again.android } : null);
+        return;
+      }
+      if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; if (state.store.gateReturn) { goBackToGateReturn(); return; } renderStore(); } return; }
       if (t.hasAttribute("data-goto-settings")) { state.store.screen = "settings"; renderStore(); return; }
       if (t.hasAttribute("data-verify-all")) { verifyAll(); return; }
       if (t.hasAttribute("data-fetch-remote")) { fetchRemote(); return; }
@@ -4324,11 +4847,42 @@
       $("[data-secret-cancel]").addEventListener("click", function () { dlg.close(); });
       dlg.addEventListener("close", function () { $("#secret-input").value = ""; state.store.dialogSecret = null; restoreTrigger(); });
     }
+    // 새 버전 대화상자 — 체크 하나, 칸 하나. 값은 이 페이지에만 살고 localStorage 에 가지 않는다.
+    var vdlg = $("#version-dialog");
+    if (vdlg) {
+      vdlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitVersionDialog(); });
+      vdlg.addEventListener("input", function (ev) {
+        var p = ev.target.getAttribute && ev.target.getAttribute("data-version-name");
+        if (!p || !state.store.newVersion || !state.store.newVersion[p]) return;
+        state.store.newVersion[p].name = ev.target.value;
+        renderVersionDialogState();
+      });
+      vdlg.addEventListener("change", function (ev) {
+        var p = ev.target.getAttribute && ev.target.getAttribute("data-version-check");
+        if (!p || !state.store.newVersion || !state.store.newVersion[p]) return;
+        state.store.newVersion[p].on = !!ev.target.checked;
+        var box = $('#version-dialog input[data-version-name="' + p + '"]');
+        if (box) box.disabled = !ev.target.checked;
+        renderVersionDialogState();
+      });
+      vdlg.addEventListener("click", function (ev) {
+        var link = ev.target.closest("[data-version-exists-open]");
+        if (link) vdlg.close();   // 이미 있는 드래프트를 열러 간다 — 대화상자는 비켜 준다
+      });
+      $("[data-version-cancel]").addEventListener("click", function () { vdlg.close(); });
+      vdlg.addEventListener("close", function () { state.store.createError = null; restoreTrigger(); });
+    }
+    var ddlg = $("#version-discard-dialog");
+    if (ddlg) {
+      ddlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitDiscardDialog(); });
+      $("[data-discard-cancel]").addEventListener("click", function () { ddlg.close(); });
+      ddlg.addEventListener("close", function () { state.store.discardTarget = null; restoreTrigger(); });
+    }
   }
 
   function applyHash() {
     var route = parseRoute(location.hash);
-    if (route.view === "store") { closeDrawer(true); enterStore(route.repo); return; }
+    if (route.view === "store") { closeDrawer(true); enterStore(route.repo, route); return; }
     if (state.view !== "queue") showView("queue");
     var m = /^#\/jobs\/(\d+)(\/log)?$/.exec(location.hash);
     if (!m) { closeDrawer(true); return; }

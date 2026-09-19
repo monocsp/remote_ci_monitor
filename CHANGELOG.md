@@ -38,6 +38,23 @@ of a key bumps that number and is listed here.
   `build_name`. ([#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
 
 ### Added
+- **The Store tab opens on a version list, and «new version» is one dialog.** `#/store/<repo>` is
+  the list of versions now: a one-line status strip (credentials · source · store · blockers, red
+  as soon as one of them is, and a link to the detail), «+ New version», every open draft with its
+  state, age, edited-field count, whether a build exists and whether it has expired, then the live
+  version and the last 20 submitted ones. The four rows (setup · source · build · store) moved to
+  `#/store/<repo>/status`, which is otherwise the tab as it was, and a single version now has its
+  own address, `#/store/<repo>/v/<id>`. «+ New version» asks only for the version names: it fills
+  in the server's hints (the live name with its last number bumped), shows a checkbox and a field
+  for each store the plan knows about, keeps «Create» closed — with the reason under the field —
+  until a name looks like `major.minor.patch` and beats the live one, leaves an unchecked store
+  out of the request, and answers 409 `version_exists` with a link to the draft that already has
+  that name. While a draft is being created the page says «creating · job #n» and polls
+  `GET …/release/versions/<id>` every five seconds — that route only, the one that runs no
+  subprocess — and stops the moment the row leaves `creating`. Opening a version address before
+  the setup gate is complete sends you to the settings screen and brings you back to it once the
+  gate opens. The listing editor on the version page and the bottom sheet come next.
+  ([#166](https://github.com/monocsp/remote_ci_monitor/pull/166))
 - **Store version drafts expire on their own, and `rcm release` makes one from a terminal.** The
   retention sweep — on its usual cycle and once at server start — now also looks at the version
   drafts. A draft nobody has touched is discarded once `version_ttl_hours` (default 24) have
