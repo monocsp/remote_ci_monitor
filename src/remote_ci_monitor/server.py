@@ -54,6 +54,7 @@ from remote_ci_monitor.clientwheel import (
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
     RELEASE_ROLES,
+    ReleaseListing,
     RepoConfig,
     ServerConfig,
     admission_warnings,
@@ -243,6 +244,15 @@ LISTING_TIMEOUT = 20.0
 LISTING_MAX_BYTES = 64 * 1024
 LISTING_FILE_MAX_BYTES = 5 * 1024 * 1024
 LISTING_MAX_SCREENSHOTS = 200
+#: `GET …/release/listing` 의 답을 이만큼(초) 기억한다(워크플랜 §14-1). 버전 페이지는 5초마다
+#: 물어보는데 그 명령 둘을 진짜 스토어를 읽는 데 쓰는 프로젝트가 있다 — 열어 둔 브라우저 하나가
+#: 빌드 머신에서 5초마다 프로세스를 돌리게 두지 않는다. 짧게 잡는 것은 문안 파일을 고치고 새로
+#: 고친 사람이 오래 기다리지 않게 하려는 것이다.
+LISTING_CACHE_TTL = 30.0
+#: 그 기억의 키 — (저장소, 체크아웃 sha, build_name) — 와 값 — (만료 시각, 그때의 listing
+#: 설정, 답). sha 가 키에 있으니 다른 sha 의 답은 절대 나가지 않는다.
+_ListingKey = tuple[str, str, str]
+_ListingEntry = tuple[float, ReleaseListing, dict[str, Any]]
 #: 묶음이 아직 오는 중 — 버전 훅이 기다렸다가 `artifacts_changed` 때 다시 본다
 ART_IN_TRANSIT = frozenset({art.PENDING, art.COLLECTING, art.UPLOADING})
 
@@ -456,6 +466,9 @@ class App(RemoteWorkersMixin):
         self.driver.on_exit = self._driver_exited
         self._checkout_locks: dict[str, threading.Lock] = {}
         self._checkout_guard = threading.Lock()
+        # 문안 미리보기의 짧은 기억(§14-1) — 미러가 움직이면 그 저장소의 것은 버린다.
+        self._listing_cache: dict[_ListingKey, _ListingEntry] = {}
+        self._listing_cache_guard = threading.Lock()
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
@@ -1336,7 +1349,7 @@ class App(RemoteWorkersMixin):
         self._version_inputs(preset, row, inputs)
         status, doc = self._release_submit(repo, preset, inputs, ref, token, host)
         if row is not None:
-            self._version_link_review(row, doc["job_id"])
+            self._version_link_job(row, doc["job_id"], "review_job_id")
         return status, doc
 
     def release_upload(
@@ -1377,7 +1390,13 @@ class App(RemoteWorkersMixin):
         else:
             inputs["confirm_build_number"] = typed.strip()
         self._version_inputs(preset, row, inputs)
-        return self._release_submit(repo, preset, inputs, ref, token, host)
+        status, doc = self._release_submit(repo, preset, inputs, ref, token, host)
+        # 스토어에 바이너리를 올리는 동안은 행을 붙잡는다(§14-2) — 그 사이 «버리기» 가 통하면
+        # App Store 버전을 지우는 잡이 올리는 중인 버전으로 나간다. `rehearsal` 은 스토어에
+        # 아무것도 쓰지 않으니 오늘 그대로 둔다.
+        if row is not None and mode == "upload":
+            self._version_link_job(row, doc["job_id"], "upload_job_id")
+        return status, doc
 
     # ── 버전 드래프트 (버전 페이지 · docs/version-page-workplan.md §2.2) ──────
 
@@ -1441,6 +1460,7 @@ class App(RemoteWorkersMixin):
             "delete_job_id": row["delete_job_id"],
             "release_id": row["release_id"],
             "review_job_id": row["review_job_id"],
+            "upload_job_id": row["upload_job_id"],
             "has_prefill": prefill is not None,
             "has_edits": edited is not None,
             "changed": len(listing_diff(prefill, edited)["fields"]),
@@ -1546,6 +1566,11 @@ class App(RemoteWorkersMixin):
                     live=live[platform],
                 )
         for row in self.store.list_versions(repo.name, include_closed=False):
+            # 만들기가 실패한 행은 이름을 붙잡지 않는다(§14-3) — 스토어에는 아무것도 없고
+            # (asc id 는 성공했을 때만 적는다) 사람이 고칠 것을 고치고 **같은 이름으로 다시**
+            # 누를 수 있어야 한다. 그 행은 목록에 남고 청소기가 만료되면 치운다.
+            if row["state"] == VERSION_FAILED:
+                continue
             same = [p for p in PLATFORMS if names[p] and names[p] == row[f"{p}_version"]]
             if same:
                 raise ApiError(
@@ -1594,21 +1619,27 @@ class App(RemoteWorkersMixin):
 
     def release_version_view(self, name: str, version_id: int) -> dict[str, Any]:
         """`GET …/release/versions/<id>` — 행 + `prefill` + `edited` + `diff` + `release`(지금의
-        `/release` 보기에 이 버전의 build_name) + `driver` 보기 + `listing`(파일 미리보기, 폴백용).
-        바텀시트 · 버전 페이지가 이것 하나로 그린다."""
+        `/release` 보기에 이 버전의 build_name).
+
+        **하위 프로세스를 하나도 돌리지 않는다**(워크플랜 §14-1). 버전 페이지는 이 라우트를 5초마다
+        부르는데, 예전에는 한 번에 드라이버 `--status` 하나와 문안 명령 둘이 돌았다 — 열어 둔
+        브라우저 하나가 빌드 머신에서 5초마다 프로세스 셋을 돌리는 셈이고, 그 명령들은 프로젝트에
+        따라 진짜 스토어를 읽는다. 그 둘은 원래 있던 `GET …/release/driver` 와
+        `GET …/release/listing` 이 답한다 — 웹이 자기 박자로 부른다.
+
+        `release` 는 남는다: 하위 프로세스도 네트워크도 없고 대장(SQLite)과 묶음 파일 몇 개를 읽을
+        뿐이다(역할 잡 61개에 2.0 ms, 상한인 500개를 채운 401개에 10.8 ms — 측정).
+        """
         repo, _store = self._release_repo(name)
         row = self._version_row(repo, version_id)
         now = self.now_fn()
         prefill = self._version_doc(row, "prefill_json")
         edited = self._version_doc(row, "edited_json")
-        build_name = self.version_build_name(row)
         doc = self._version_json(row, now)
         doc["prefill"] = prefill
         doc["edited"] = edited
         doc["diff"] = listing_diff(prefill, edited)
-        doc["release"] = {"build_name": build_name, **self._release_view(repo)}
-        doc["driver"] = self.release_driver_view(name)
-        doc["listing"] = self.release_listing(name, build_name)
+        doc["release"] = {"build_name": self.version_build_name(row), **self._release_view(repo)}
         return doc
 
     def _version_open(self, row: dict[str, Any]) -> None:
@@ -1737,11 +1768,12 @@ class App(RemoteWorkersMixin):
         if row["state"] == VERSION_RUNNING:
             raise ApiError(
                 409,
-                f"version #{row['id']} has a round or review job running — wait for it",
+                f"version #{row['id']} has a round, review or upload job running — wait for it",
                 code="version_running",
                 error_code="version_running",
                 release_id=row["release_id"],
                 review_job_id=row["review_job_id"],
+                upload_job_id=row["upload_job_id"],
             )
         if row["state"] == VERSION_CREATING and row["create_job_id"] is not None:
             job = self.store.get_job(row["create_job_id"])
@@ -1869,9 +1901,10 @@ class App(RemoteWorkersMixin):
             )
         return json.dumps(merged_listing(prefill, edited), ensure_ascii=False)
 
-    def _version_link_review(self, row: dict[str, Any], job_id: int) -> None:
-        """심사 잡을 행에 붙인다 — `editing` 이었으면 `running`(잡이 끝나면 훅이 되돌린다)."""
-        fields: dict[str, Any] = {"review_job_id": int(job_id)}
+    def _version_link_job(self, row: dict[str, Any], job_id: int, key: str) -> None:
+        """심사 · 올리기 잡을 행에 붙인다 — `editing` 이었으면 `running`(잡이 끝나면 훅이
+        되돌린다). 도는 동안 «버리기» 는 409 `version_running` 이다."""
+        fields: dict[str, Any] = {key: int(job_id)}
         if row["state"] == VERSION_EDITING:
             fields["state"] = VERSION_RUNNING
         self.store.update_version(row["id"], **fields)
@@ -1946,6 +1979,8 @@ class App(RemoteWorkersMixin):
                 self._version_delete_finished(row, job, bundle)
             elif row["review_job_id"] == job.id and row["state"] == VERSION_RUNNING:
                 self._version_review_finished(row, job)
+            elif row["upload_job_id"] == job.id and row["state"] == VERSION_RUNNING:
+                self._version_upload_finished(row, job)
         except Exception as e:  # noqa: BLE001 — 훅의 사고가 잡 경로를 막으면 안 된다
             self.log(f"version: hook for job #{job.id} failed: {_safe(_error_text(e))}")
 
@@ -1988,12 +2023,57 @@ class App(RemoteWorkersMixin):
         self.log(f"version: #{row['id']} {name} not deleted — {error}")
 
     def _version_review_finished(self, row: dict[str, Any], job: Job) -> None:
+        """심사 잡이 끝났다 — submit 이 성공했으면 `submitted`(닫힌 상태라 더 못 버린다), 아니면
+        내려놓기 판정(`_version_settle`)에 맡긴다."""
         submitted = (
             job.state == SUCCEEDED and job.exit_code == 0 and job.inputs.get("mode") == "submit"
         )
-        state = VERSION_SUBMITTED if submitted else VERSION_EDITING
-        self.store.update_version(row["id"], state=state)
-        self.log(f"version: #{row['id']} review job #{job.id} {job.state} → {state}")
+        if submitted:
+            self.store.update_version(row["id"], state=VERSION_SUBMITTED)
+            self.log(
+                f"version: #{row['id']} review job #{job.id} {job.state} → {VERSION_SUBMITTED}"
+            )
+            return
+        self._version_settle(row, f"review job #{job.id} {job.state}")
+
+    def _version_upload_finished(self, row: dict[str, Any], job: Job) -> None:
+        """올리기 잡이 끝났다(§14-2) — 어떻게 끝났든 이 잡은 더 이상 행을 붙잡지 않는다. 스토어에
+        무엇이 올라갔는지는 이 잡의 `upload.json` 이 말하고, 행의 상태가 말하는 것은 «지금 이
+        드래프트로 되돌릴 수 없는 일이 도는 중인가» 뿐이다."""
+        self._version_settle(row, f"upload job #{job.id} {job.state}")
+
+    def _version_busy(self, row: dict[str, Any]) -> str | None:
+        """이 버전으로 **지금 도는 것** 하나의 이름 — 심사 잡 · 올리기 잡 · 드라이버 회차. 없으면
+        None. 행이 `running` 인 이유이자 «버리기» 가 409 인 이유다.
+
+        붙잡은 것이 사라졌을 때 행이 영영 `running` 으로 남지 않게: 잡 행이 없어졌으면(보존 정리)
+        붙잡은 것이 아니고, 프로세스가 죽은 회차는 `reconcile` 이 **먼저 닫는다**. 그래서 판정은
+        언제나 «지금 살아 있는 것» 이지 «한때 붙였던 것» 이 아니다."""
+        for key in ("review_job_id", "upload_job_id"):
+            job = self.store.get_job(row[key]) if row[key] else None
+            if job is not None and not job.is_terminal:
+                return f"job #{job.id}"
+        if row["release_id"] is not None:
+            self.driver.reconcile(row["repo"], data_dir=self.config.data_dir)
+            live = self.driver.running(row["repo"])
+            if live is not None and live["id"] == row["release_id"]:
+                return f"round #{row['release_id']}"
+        return None
+
+    def _version_settle(self, row: dict[str, Any], what: str) -> None:
+        """끝난 것 하나(`what`)를 보고 행을 `editing` 으로 내려놓는다 — 이 버전으로 **다른 것이**
+        아직 돌고 있으면 `running` 그대로 둔다. 내려놓는 것은 마지막에 끝나는 쪽이다.
+
+        스토어에 쓰는 일이 하나라도 도는 동안 «버리기» 가 열려서는 안 된다(§14-2). 회차가 도는
+        중에 손으로 낸 올리기 · 심사 잡이 **먼저** 끝나면, 예전에는 그 훅이 행을 곧바로 `editing`
+        으로 내려 회차가 아직 스토어에 올리는 중인 버전을 버릴 수 있었다. 잡 훅도 회차 훅도 이
+        한 자리를 쓴다."""
+        busy = self._version_busy(row)
+        if busy is not None:
+            self.log(f"version: #{row['id']} {what} — {busy} is still running, the row waits")
+            return
+        self.store.update_version(row["id"], state=VERSION_EDITING)
+        self.log(f"version: #{row['id']} {what} → {VERSION_EDITING}")
 
     def recover_versions_on_start(self) -> None:
         """서버 재시작 복구(워크플랜 §2.3) — `creating` 인데 잡이 이미 끝났으면 완료 훅을 다시
@@ -2007,7 +2087,7 @@ class App(RemoteWorkersMixin):
     def _recover_version(self, row: dict[str, Any]) -> None:
         if row["state"] in VERSION_CLOSED_STATES:
             return
-        for key in ("create_job_id", "delete_job_id", "review_job_id"):
+        for key in ("create_job_id", "delete_job_id", "review_job_id", "upload_job_id"):
             job_id = row[key]
             if job_id is None:
                 continue
@@ -2023,14 +2103,8 @@ class App(RemoteWorkersMixin):
         row = self.store.get_version(row["id"]) or row
         if row["state"] != VERSION_RUNNING:
             return
-        review = self.store.get_job(row["review_job_id"]) if row["review_job_id"] else None
-        if review is not None and not review.is_terminal:
-            return
-        if row["release_id"] is not None:
-            self.driver.reconcile(row["repo"], data_dir=self.config.data_dir)
-            running = self.driver.running(row["repo"])
-            if running is not None and running["id"] == row["release_id"]:
-                return
+        if self._version_busy(row) is not None:
+            return  # 아직 도는 중이다 — 붙잡은 채로 둔다(§14-2)
         self.store.update_version(row["id"], state=VERSION_EDITING)
         self.log(f"version: #{row['id']} was running with nothing running → editing")
 
@@ -2127,7 +2201,13 @@ class App(RemoteWorkersMixin):
 
     def release_listing(self, name: str, build_name: str | None = None) -> dict[str, Any]:
         """`GET …/release/listing` — 프로파일의 preview · diff 를 체크아웃에서 돌리고 문안 파일과
-        스크린샷을 센다. 설정에 listing 이 없으면 `{"configured": false}`."""
+        스크린샷을 센다. 설정에 listing 이 없으면 `{"configured": false}`.
+
+        같은 답을 `LISTING_CACHE_TTL` 초 동안 기억한다(§14-1): 키는 (저장소, 체크아웃 sha,
+        build_name) 이라 **다른 sha 의 답은 절대 나가지 않고**, 미러가 움직이면 그 저장소의 옛
+        기억은 버린다. 명령 둘을 그 사이 다시 돌리지 않는 것뿐이고, 미러를 읽어 sha 를 확인하는
+        일은 요청마다 그대로 한다.
+        """
         repo, store = self._release_repo(name)
         profile = repo.release
         assert profile is not None
@@ -2138,6 +2218,7 @@ class App(RemoteWorkersMixin):
         try:
             workspace, sha = self._branch_checkout(repo, "listing", listing.ref)
         except ApiError as e:
+            # 미러가 없으면 sha 가 없다 — 기억할 것도 없다(다음 fetch 가 답을 바꾼다)
             return {
                 "configured": True,
                 "sha": None,
@@ -2147,6 +2228,10 @@ class App(RemoteWorkersMixin):
                 "screenshots": [],
                 "errors": [e.message],
             }
+        key = (repo.name, sha, build_name or "")
+        cached = self._listing_cached(key, listing)
+        if cached is not None:
+            return cached
         env = self._repo_env(store)
         preview, _rc, err = self._run_listing(listing.preview, workspace, env)
         if err:
@@ -2178,7 +2263,7 @@ class App(RemoteWorkersMixin):
             }
             for p in self._screenshots(workspace, listing.screenshots)
         ]
-        return {
+        doc = {
             "configured": True,
             "sha": sha,
             "preview": preview,
@@ -2187,6 +2272,31 @@ class App(RemoteWorkersMixin):
             "screenshots": shots,
             "errors": errors,
         }
+        self._listing_remember(key, listing, doc)
+        return doc
+
+    def _listing_cached(self, key: _ListingKey, listing: ReleaseListing) -> dict[str, Any] | None:
+        """기억해 둔 답, 없으면 None. 미러가 움직였으면(같은 저장소 · 다른 sha) 그 저장소의 기억을
+        통째로 버린다 — 옛 sha 의 답이 남아 있을 자리가 없다. 프로파일의 listing 절이 바뀌었을
+        때도 버린다: 그 답은 다른 명령이 낸 것이다."""
+        now = time.monotonic()
+        with self._listing_cache_guard:
+            for stale in [
+                k
+                for k, (until, _cfg, _doc) in self._listing_cache.items()
+                if until <= now or (k[0] == key[0] and k[1] != key[1])
+            ]:
+                del self._listing_cache[stale]
+            found = self._listing_cache.get(key)
+            if found is None or found[1] != listing:
+                return None
+            return dict(found[2])
+
+    def _listing_remember(
+        self, key: _ListingKey, listing: ReleaseListing, doc: dict[str, Any]
+    ) -> None:
+        with self._listing_cache_guard:
+            self._listing_cache[key] = (time.monotonic() + LISTING_CACHE_TTL, listing, dict(doc))
 
     def release_listing_file(self, name: str, rel: str | None) -> tuple[bytes, str]:
         """`GET …/release/listing/file?path=` — 스크린샷 글롭에 맞는 파일만, 이미지 타입만,
@@ -2400,8 +2510,9 @@ class App(RemoteWorkersMixin):
         if continued is not None:
             self.store.update_version(linked["id"], release_id=continued)
         else:
-            self.store.update_version(linked["id"], state=VERSION_EDITING)
-            self.log(f"version: #{linked['id']} round #{row['id']} ended → editing")
+            # 회차는 대장에 이미 닫혀 있다(`_finish` → `on_exit`). 그래도 이 버전으로 손으로 낸
+            # 올리기 · 심사 잡이 아직 돌 수 있으니 같은 자리에서 판정한다.
+            self._version_settle(linked, f"round #{row['id']} ended")
 
     def _auto_confirm(self, row: dict[str, Any], version_id: int | None) -> int | None:
         """«빌드 번호 자동» 의 이어 달리기 — 새 confirm 회차의 번호, 잇지 않으면 None."""

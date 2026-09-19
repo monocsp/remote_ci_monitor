@@ -279,15 +279,19 @@ class Janitor:
     def sweep_versions(self, now: datetime) -> int:
         """만료된 스토어 버전 드래프트를 정리한다. **버린** 행 수를 돌려준다.
 
-        - **손도 안 댄** 드래프트(`open_versions_expired` — `editing` · `last_edit_at` NULL ·
-          `expires_at` 지남)만 자동으로 버린다. 길은 라우트의 «버리기» 와 **같다**
-          (`discard_version`): ASC 버전이 있고 `version` 프리셋이 있으면 `mode=delete` 잡이
-          나가고, 아니면 바로 `discarded` 다.
+        - **손도 안 댄** 드래프트(`open_versions_expired` — `editing` 이나 `failed` ·
+          `last_edit_at` NULL · `expires_at` 지남)만 자동으로 버린다. 길은 라우트의 «버리기» 와
+          **같다**(`discard_version`): ASC 버전이 있고 `version` 프리셋이 있으면 `mode=delete`
+          잡이 나가고, 아니면 바로 `discarded` 다.
+        - **만들기가 실패한**(`failed`) 드래프트도 같이 치운다(워크플랜 §14-3). 그 행은 어느
+          조회에도 안 걸리면서 이름만 붙잡고 있었다. 스토어에는 아무것도 없다 —
+          `asc_version_id` 는 만들기가 **성공했을 때만** 적히므로 그 행에서는 스토어 삭제 잡이
+          나가지 않고 그 자리에서 `discarded` 다.
         - **편집한** 드래프트는 만료돼도 지우지 않는다(Q2). `expiry_warned` 만 켜고 로그 한 줄 —
           상태는 그대로다. 지우는 것은 사람이 «버리기» 로만 한다.
         - 제출된 행은 두 조회 어디에도 안 나온다(E14). 회차가 도는 행 · 만드는 중인 행도
-          `open_versions_expired`(state `editing` 만)에 안 나오므로 버려지지 않고, 편집이 있으면
-          경고 표시만 받는다. 그래도 들어오면 `discard_version` 이 409 로 막는다.
+          `open_versions_expired`(state `editing`·`failed` 만)에 안 나오므로 버려지지 않고,
+          편집이 있으면 경고 표시만 받는다. 그래도 들어오면 `discard_version` 이 409 로 막는다.
         - 지우기 잡은 행마다 **한 번만** 낸다 — `delete_job_id` 가 이미 있으면 건너뛴다. 그러면
           스토어가 계속 거절하는 버전에 매 sweep 마다 새 삭제를 던지지 않는다(그 행의 `error` 를
           보고 사람이 정한다).

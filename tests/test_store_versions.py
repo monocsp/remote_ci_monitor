@@ -1,8 +1,8 @@
-"""저장소 v20 — `versions` 표(스토어 버전 드래프트 대장). 새 DB · v19 → v20 마이그레이션(백업
-포함) · 옛 빌드의 거절 · CRUD · 만료 조회 · `update_version` 이 모르는 열을 거절 · 청소기가 이 표를
-건드리지 않는다.
+"""저장소 v20 · v21 — `versions` 표(스토어 버전 드래프트 대장). 새 DB · v19 → 최신 마이그레이션
+(백업 포함) · v20 → v21 의 `upload_job_id` · 옛 빌드의 거절 · CRUD · 만료 조회 · `update_version` 이
+모르는 열을 거절 · 청소기가 이 표를 건드리지 않는다.
 
-명세: docs/version-page-workplan.md §2.1 · AC-B1 · 결정 74(마이그레이션 전 백업).
+명세: docs/version-page-workplan.md §2.1 · §14-2 · §14-3 · AC-B1 · 결정 74(마이그레이션 전 백업).
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ COLUMNS = [
     "release_id",
     "review_job_id",
     "expiry_warned",
+    "upload_job_id",
 ]
 
 
@@ -79,15 +80,15 @@ def add_version(
     )
 
 
-def test_this_build_is_database_version_20():
-    assert DB_VERSION == 20
+def test_this_build_is_database_version_21():
+    assert DB_VERSION == 21
 
 
 def test_a_fresh_database_has_the_versions_table_and_index(tmp_path):
     path = tmp_path / "data" / "rcm.sqlite3"
     s = Store(path)
     try:
-        assert s.user_version() == 20
+        assert s.user_version() == DB_VERSION
         assert columns(path, "versions") == COLUMNS
         names = {
             r[0]
@@ -101,7 +102,7 @@ def test_a_fresh_database_has_the_versions_table_and_index(tmp_path):
         s.close()
 
 
-def test_a_v19_database_gets_the_table_a_backup_and_version_20(tmp_path):
+def test_a_v19_database_gets_the_table_a_backup_and_the_newest_version(tmp_path):
     """v19 DB(표가 없다)를 이 빌드로 열면 `backup/rcm.sqlite3.v19.bak` 을 먼저 남기고 표를 만든다.
     잡 · 릴리스 행은 그대로다."""
     path = tmp_path / "data" / "rcm.sqlite3"
@@ -120,7 +121,7 @@ def test_a_v19_database_gets_the_table_a_backup_and_version_20(tmp_path):
     assert "versions" not in tables(path)
     s = Store(path)
     try:
-        assert s.user_version() == 20
+        assert s.user_version() == DB_VERSION
         assert columns(path, "versions") == COLUMNS
         assert s.get_job(1) is not None and s.get_release(rid)["build_name"] == "1.0.1"
         vid = add_version(s)
@@ -130,6 +131,33 @@ def test_a_v19_database_gets_the_table_a_backup_and_version_20(tmp_path):
     bak = path.parent / "backup" / "rcm.sqlite3.v19.bak"
     assert bak.exists()
     assert "versions" not in tables(bak)
+
+
+def test_a_v20_database_gains_upload_job_id_and_keeps_its_drafts(tmp_path):
+    """v20 → v21(워크플랜 §14-2) — 열 하나를 더할 뿐, 있던 드래프트는 그대로다. `dev` 로 이미 v20
+    까지 올라간 데이터베이스가 여기로 온다."""
+    path = tmp_path / "data" / "rcm.sqlite3"
+    s = Store(path)
+    vid = add_version(s, state="editing")
+    s.close()
+    c = sqlite3.connect(path)
+    c.execute("ALTER TABLE versions DROP COLUMN upload_job_id")
+    c.execute("PRAGMA user_version=20")
+    c.commit()
+    c.close()
+    assert "upload_job_id" not in columns(path, "versions")
+    s = Store(path)
+    try:
+        assert s.user_version() == DB_VERSION
+        assert columns(path, "versions") == COLUMNS
+        row = s.get_version(vid)
+        assert row["state"] == "editing" and row["ios_version"] == "1.1.1"
+        assert row["upload_job_id"] is None
+        assert s.update_version(vid, upload_job_id=9) is True
+        assert s.version_for_job(9)["id"] == vid
+    finally:
+        s.close()
+    assert (path.parent / "backup" / "rcm.sqlite3.v20.bak").exists()
 
 
 def test_an_older_build_refuses_a_newer_database_and_points_at_the_backup(tmp_path):
@@ -173,6 +201,7 @@ def test_create_get_list_and_update(tmp_path):
             "delete_job_id": None,
             "release_id": None,
             "review_job_id": None,
+            "upload_job_id": None,
             "expiry_warned": False,
         }
         # Android 만 · 빈 문자열은 NULL 로
@@ -217,6 +246,7 @@ def test_create_get_list_and_update(tmp_path):
             review_job_id=4,
             release_id=5,
             delete_job_id=6,
+            upload_job_id=8,
             error=None,
         )
         row = s.get_version(vid)
@@ -225,7 +255,7 @@ def test_create_get_list_and_update(tmp_path):
         assert row["last_edit_at"] == NOW + timedelta(minutes=1)
         assert row["expiry_warned"] is True
         assert (row["create_job_id"], row["review_job_id"], row["release_id"]) == (3, 4, 5)
-        assert row["delete_job_id"] == 6
+        assert (row["delete_job_id"], row["upload_job_id"]) == (6, 8)
         assert s.update_version(999, state="editing") is False
         assert s.update_version(vid) is True  # 바꿀 것이 없어도 행은 있다
         with pytest.raises(ValueError, match="unknown column"):
@@ -253,8 +283,9 @@ def test_rows_are_found_by_their_jobs_and_by_a_running_release(tmp_path):
         s.update_version(vid, create_job_id=11)
         assert s.version_for_job(11)["id"] == vid
         assert s.version_for_job(12) is None
-        s.update_version(vid, delete_job_id=12, review_job_id=13)
+        s.update_version(vid, delete_job_id=12, review_job_id=13, upload_job_id=14)
         assert s.version_for_job(12)["id"] == vid and s.version_for_job(13)["id"] == vid
+        assert s.version_for_job(14)["id"] == vid  # §14-2 — 올리기 잡도 행으로 돌아온다
         assert s.version_for_release(5) is None
         s.update_version(vid, release_id=5)
         assert s.version_for_release(5) is None  # 도는 중일 때만
@@ -265,7 +296,8 @@ def test_rows_are_found_by_their_jobs_and_by_a_running_release(tmp_path):
 
 
 def test_expiry_queries(tmp_path):
-    """미편집 editing 은 만료 뒤 `open_versions_expired`, 편집 있음은 `versions_to_warn` 한 번."""
+    """미편집 `editing` · `failed` 는 만료 뒤 `open_versions_expired`(§14-3), 편집 있음은
+    `versions_to_warn` 한 번."""
     s = Store(tmp_path / "data" / "rcm.sqlite3")
     try:
         untouched = add_version(s, "1.1.1", None, state="editing")
@@ -274,10 +306,12 @@ def test_expiry_queries(tmp_path):
         creating = add_version(s, "1.1.3", None, state="creating")
         submitted = add_version(s, "1.1.4", None, state="submitted")
         s.update_version(submitted, edited_json="{}", last_edit_at=NOW)
+        # 만들기가 실패한 행 — 이름만 붙잡고 있다가 같이 치워진다
+        failed = add_version(s, "1.1.5", None, state="failed")
         before = NOW + TTL - timedelta(seconds=1)
         after = NOW + TTL + timedelta(seconds=1)
         assert s.open_versions_expired(before) == []
-        assert [r["id"] for r in s.open_versions_expired(after)] == [untouched]
+        assert [r["id"] for r in s.open_versions_expired(after)] == [untouched, failed]
         assert s.versions_to_warn(before) == []
         assert [r["id"] for r in s.versions_to_warn(after)] == [edited]  # submitted 는 아니다
         s.update_version(edited, expiry_warned=True)

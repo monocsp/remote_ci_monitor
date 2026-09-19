@@ -156,6 +156,48 @@ def _setup_incomplete():
     return ApiError(409, "secrets are missing", code="setup_incomplete", error_code="x")
 
 
+# ── 만들기가 실패한 드래프트 (워크플랜 §14-3) ─────────────────────────────────
+
+
+def test_an_expired_failed_draft_is_discarded_without_ever_touching_the_store(vsrv):
+    """§14-3 — 만들기가 실패한 행은 청소기의 두 조회 어디에도 안 걸려 영원히 남으면서 이름을
+    붙잡고 있었다. 이제 만료되면 손도 안 댄 드래프트와 같은 길로 버려진다.
+
+    **스토어 삭제 잡은 절대 나가지 않는다**: `asc_version_id` 는 만들기가 성공했을 때만 적히므로
+    그 행에는 없다. rcm 이 만들지도 않은 스토어 버전을 지우는 것이 여기서 일어날 수 있는 가장
+    나쁜 일이라 잡 대장 자체를 확인한다."""
+    status, body = vsrv.create({"ios_version": "1.1.1", "android_version": "1.0.1"})
+    assert status == 202, body
+    vid = body["id"]
+    vsrv.finish_job(body["job_id"], None, state=FAILED, exit_code=3)
+    row = vsrv.store.get_version(vid)
+    assert row["state"] == "failed" and row["asc_version_id"] is None
+    before = [j.id for j in vsrv.store.list_jobs_by_preset(["release-version"], 20)]
+    expire(vsrv, vid)
+    rec = Recorder()
+    assert janitor(vsrv, rec).sweep_versions(NOW) == 1
+    row = vsrv.store.get_version(vid)
+    assert row["state"] == "discarded" and row["delete_job_id"] is None
+    jobs = vsrv.store.list_jobs_by_preset(["release-version"], 20)
+    assert [j.id for j in jobs] == before  # 새 잡이 없다
+    assert [j.inputs["mode"] for j in jobs] == ["create"]  # delete 는 한 번도 나가지 않았다
+    assert any("untouched for 24h — discarded" in line and f"#{vid}" in line for line in rec.lines)
+    assert janitor(vsrv).sweep_versions(NOW) == 0
+
+
+def test_a_failed_draft_that_was_edited_is_only_warned(vsrv):
+    """편집이 있으면 `failed` 라도 자동으로 지우지 않는다(Q2) — 사람이 쓴 문안이 거기 있다."""
+    status, body = vsrv.create({"ios_version": "1.1.1"})
+    assert status == 202, body
+    vid = body["id"]
+    vsrv.finish_job(body["job_id"], None, state=FAILED, exit_code=1)
+    assert vsrv.put_listing(vid, {"ios": {"subtitle": "typed by a person"}})[0] == 200
+    expire(vsrv, vid)
+    assert janitor(vsrv).sweep_versions(NOW) == 0
+    row = vsrv.store.get_version(vid)
+    assert row["state"] == "failed" and row["expiry_warned"] is True
+
+
 # ── 편집한 드래프트 (AC-B10 · E13) ────────────────────────────────────────────
 
 
