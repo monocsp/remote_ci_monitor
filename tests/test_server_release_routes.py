@@ -920,6 +920,58 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
     assert body["status"][0] == "driver --status --build-name 1.0.1", body["status"]
 
 
+def test_the_driver_status_is_remembered_briefly_and_never_across_rounds(open_srv, monkeypatch):
+    """워크플랜 §17-4 — 이 라우트는 부를 때마다 빌드 머신에서 대장 `--status` 를 **하나씩** 돌렸다
+    (실측: 96초에 요청 7 · 프로세스 7 = 탭 하나당 분당 넷). 소개 자료와 같은 대접을 해 준다:
+    같은 (저장소 · 대장 체크아웃 sha · build_name · 회차 id · 도는 중인가 · 종료 코드) 이면
+    `DRIVER_STATUS_CACHE_TTL` 초 동안 같은 줄을 돌려준다. 회차가 바뀌면 키가 달라져 **낡은 답이
+    그것이 말하는 것보다 오래 살아남지 못한다**. 답의 나머지(행 · 로그 끝 · plan N)는 매번
+    새로 읽는다."""
+    from remote_ci_monitor import server as server_mod
+
+    srv = open_srv
+    srv.fetch()
+    ran: list[str | None] = []
+    real = srv.app.driver.status
+
+    def counting(driver, checkout, env, *, build_name=None, **kw):
+        ran.append(build_name)
+        return real(driver, checkout, env, build_name=build_name, **kw)
+
+    monkeypatch.setattr(srv.app.driver, "status", counting)
+    first = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert len(ran) == 1 and first["status"][0] == "driver --status"
+    # 이어지는 폴링은 프로세스를 다시 돌리지 않는다 — 답은 글자 그대로 같다
+    again = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert len(ran) == 1, ran
+    assert again["status"] == first["status"] and again["stages"] == first["stages"]
+    # 회차의 이름이 생기면(플랜) 키가 달라져 다시 돈다
+    srv.plan_job()
+    named = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert len(ran) == 2 and ran[1] == "1.0.1"
+    assert named["status"][0] == "driver --status --build-name 1.0.1"
+    assert len(srv.app._driver_status_cache) == 2
+    # 회차가 실제로 돌고 끝나면 그 전 답은 자리에서 사라진다 — 키에 회차 id 가 있다
+    status, body = srv.post(
+        "start", {"build_name": "1.0.1", "confirm_build_number": "181"}, token="admin"
+    )
+    assert status == 202, body
+    wait_run(srv, body["release_id"])
+    after = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert after["release_id"] == body["release_id"]
+    assert list(srv.app._driver_status_cache) == [
+        k for k in srv.app._driver_status_cache if k[3] == body["release_id"]
+    ]
+    assert len(srv.app._driver_status_cache) == 1, srv.app._driver_status_cache
+    # 기억을 붙잡아 두는 것은 TTL 뿐이다 — 0 이면 매번 다시 돈다
+    srv.app._driver_status_cache.clear()
+    monkeypatch.setattr(server_mod, "DRIVER_STATUS_CACHE_TTL", 0.0)
+    before = len(ran)
+    srv.req("GET", "/api/repos/app/release/driver")
+    srv.req("GET", "/api/repos/app/release/driver")
+    assert len(ran) == before + 2, ran
+
+
 def test_start_runs_the_driver_detached_with_an_internal_token_that_is_revoked_after(
     open_srv, monkeypatch
 ):

@@ -46,12 +46,20 @@ function release(patch) {
       },
       result: null,
     },
+    // 역할 항목은 서버 `release_state.role_entry` 가 주는 것 그대로다 — `{job_id, state, doc}`
+    // (+ plan 계열의 나이). **`finished_at` 은 여기에 없다**: 그 시각은 `jobs[]` 행에만 있다.
+    // 스텁이 서버가 안 보내는 열쇠를 지어내면 그 열쇠를 읽는 버그를 테스트가 못 잡는다(§17-9).
     upload: {
-      job_id: 650, state: "succeeded", finished_at: iso(3000),
+      job_id: 650, state: "succeeded",
       doc: { schema: 1, n: 181, status: "success", platforms: ["ios", "android"], tag: "prod/1.1.1-181" },
     },
-    jobs: [],
+    jobs: [jobRow(650, "upload", "succeeded", iso(3000))],
   }, patch || {});
+}
+/** `GET …/release` 의 `jobs[]` 행 하나 — 서버 `release_state.job_row` 와 같은 모양. */
+function jobRow(id, role, state, finishedAt) {
+  return { id: id, preset: "release-" + role, role: role, state: state, sha: "abc1234",
+    ref: "main", started_at: iso(3600), finished_at: finishedAt, artifacts: [] };
 }
 /** 버전 상세 한 행. `release` 는 그 안에 들어 있다 — 시트는 따로 부르지 않는다. */
 function version(patch) {
@@ -260,8 +268,14 @@ describe("§4.3 제출 준비됨 (AC-D1 · AC-D5 · W5)", () => {
     assert.deepEqual(s.remaining, []);
     assert.equal(s.canSubmit, true);
     assert.deepEqual(s.reasons, []);
-    assert.equal(s.pct, 99);
     assert.match(s.head.statusLine, /ready to submit · review plan .* · build 181/);
+  });
+  test("§17-1 — 빌드가 올라가도 숫자를 지어내지 않는다: 분모가 없으면 퍼센트도 없다", () => {
+    // 드라이버가 없으면 단계 목록은 「지금까지 돈 작업」이라 분모가 자라난다 — 그 분모로
+    // 세면 첫 작업 하나가 끝난 순간 100% 가 된다. 그래서 숫자는 없고 문장만 남는다.
+    const s = S.sheetModel(ctx());
+    assert.equal(s.pct, null);
+    assert.match(s.basis, /^no percentage — the build is up/);
   });
   test("관리형 게시를 체크하기 전에는 닫혀 있다 — 제출마다 사람이", () => {
     const s = S.sheetModel(ctx({ choices: { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, nMode: "auto", typedN: "" } }));
@@ -333,8 +347,11 @@ describe("§4.3 제출 준비됨 (AC-D1 · AC-D5 · W5)", () => {
 
 describe("§4.3 제출됨 · 만료", () => {
   test("제출되면 done · 막대는 100 · 제출 조건은 닫힌다", () => {
-    const done = release({ review: { plan: release().review.plan, result: { job_id: 660, state: "succeeded", finished_at: iso(60),
-      doc: { schema: 2, build_name: "1.1.1", overall_status: "submitted", platforms: { ios: { status: "submitted" } } } } } });
+    const done = release({
+      review: { plan: release().review.plan, result: { job_id: 660, state: "succeeded",
+        doc: { schema: 2, build_name: "1.1.1", overall_status: "submitted", platforms: { ios: { status: "submitted" } } } } },
+      jobs: [jobRow(650, "upload", "succeeded", iso(3000)), jobRow(660, "review", "succeeded", iso(60))],
+    });
     const s = S.sheetModel(ctx({ version: version({ state: "submitted", release: done }), release: done }));
     assert.equal(s.tone, "done");
     assert.equal(s.closed, true);
@@ -367,9 +384,11 @@ describe("이전 버전과 달라진 것 (R12)", () => {
     assert.equal(s.diff.fields[0].oldText, "− whats_new: Bug fixes.");
     assert.equal(s.diff.fields[0].newText, "+ whats_new: New home. New chat.");
     assert.equal(s.diff.fields[0].id, "f-ios-whats_new");
+    // §17-16 — 스크린샷 줄은 **재지 않은 것을 같다고 말하지 않는다**. 웹 업로드는 범위 밖이라
+    // (Q8) rcm 이 손대는 것이 아무것도 없다 — 두 상태 모두 그 사실만 말한다.
     assert.deepEqual(s.diff.screenshots, [
-      "App Store · iOS screenshots: same as the previous version",
-      "Google Play · Android screenshots: the previous version's files are unknown",
+      "App Store · iOS screenshots: rcm does not touch them",
+      "Google Play · Android screenshots: rcm does not touch them",
     ]);
   });
   test("서버가 diff 를 안 줬으면 `listingDiff` 로 직접 센다 (두 벌을 만들지 않는다)", () => {
@@ -402,5 +421,105 @@ describe("versionRunning — 진행 중의 세 가지 (§15)", () => {
     assert.equal(S.versionRunning(version({ release_id: 12 }), dm({ running: true }), null), true);
     assert.equal(S.versionRunning(version({ release_id: null }), dm({ running: true }), null), false);
     assert.equal(S.versionRunning(version(), noDriver(), { items: [], current: null }), false);
+  });
+});
+
+// ── D 단계 격리 검증이 찾은 것 (워크플랜 §17) ──────────────────────────────────────
+//
+// 한 화면이 서로를 부정하지 않는다: 막대가 「빌드가 올라갔다」고 말하는 동안 «남은 것» 이
+// 「업로드 실패」라고 말하는 일은 없다. 숫자는 셀 수 있을 때만 나오고, 그 근거가 분모를 댄다.
+describe("§17-1 — 막대는 잡의 상태를 보고, 숫자는 셀 수 있을 때만 낸다", () => {
+  /** `upload.json` 은 성공이라고 쓰여 있는데 그 잡은 이렇게 끝났다. */
+  const withUploadState = (state, extra) => {
+    const rel = release({ upload: {
+      job_id: 650, state: state,
+      doc: { schema: 1, n: 181, status: "success", platforms: ["ios", "android"], tag: "prod/1.1.1-181" },
+    } });
+    return S.sheetModel(ctx(Object.assign({ version: version({ release: rel }), release: rel }, extra || {})));
+  };
+  ["failed", "lost", "timed_out", "cancelled"].forEach((state) => {
+    test(state + " 로 끝난 업로드에는 «빌드가 올라갔다» 가 없다", () => {
+      const s = withUploadState(state);
+      assert.equal(s.pct, null, "지어낸 99 가 없다");
+      assert.ok(!/the build is up/.test(s.basis), s.basis);
+      assert.match(s.basis, /^basis: none/);
+      // 같은 화면의 «남은 것» 은 그 실패를 말하고 있다 — 두 줄이 서로를 부정하지 않는다
+      assert.ok(["upload_failed", "upload_lost"].includes(s.remaining[0].code), codes(s));
+      assert.equal(s.canSubmit, false);
+    });
+  });
+  test("잡이 성공이면 문장은 나오되 분모가 없으면 숫자는 없다", () => {
+    const s = withUploadState("succeeded");
+    assert.equal(s.pct, null);
+    assert.match(s.basis, /^no percentage — the build is up/);
+    assert.deepEqual(codes(s), []);
+  });
+  test("드라이버가 단계를 **선언**하면 숫자는 그 분모로 센다 — 99 가 아니라", () => {
+    // 분모가 미리 정해져 있다(V S0…S8 열 칸). 대장이 아직 한 단계도 안 끝냈으면 끝난 것은
+    // 버전 행 자신(V) 하나뿐이라 1/10 이고, 근거가 그 분모를 댄다. 예전에는 같은 자리에서
+    // `upload.json` 만 보고 99 를 지어냈다.
+    const s = S.sheetModel(ctx({ driver: dm() }));
+    assert.equal(s.stages.length, 10);
+    assert.deepEqual(s.stages.filter((x) => x.state === "done").map((x) => x.id), ["V"]);
+    assert.equal(s.pct, 10);
+    assert.match(s.basis, /^basis: 10 declared stages/);
+  });
+});
+
+describe("§17-6 · §17-7 · §17-8 — 접힌 머리와 색이 무엇을 먼저 말하는가", () => {
+  test("머리는 경고가 아니라 **막는 것**을 댄다", () => {
+    // 그래픽 없음(경고)과 스킬이 모르는 입력(막음)이 함께 있다
+    const s = S.sheetModel(ctx({
+      refusal: "listing_json_unsupported",
+      graphics: { ios: 4, android: 0 },
+    }));
+    assert.deepEqual(codes(s), ["listing_unsupported", "graphics_missing"], "막는 줄이 먼저다");
+    assert.equal(s.head.firstRemaining, s.remaining[0].text);
+    assert.match(s.head.firstRemaining, /re-run the store-connect skill/);
+  });
+  test("막는 것이 없으면 그때 첫 줄(경고 · 사람이 할 것)을 말한다", () => {
+    const s = S.sheetModel(ctx({
+      graphics: { ios: 4, android: 0 },
+      choices: { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, nMode: "auto", typedN: "" },
+    }));
+    assert.deepEqual(codes(s), ["managed_unconfirmed", "graphics_missing"]);
+    assert.equal(s.head.firstRemaining, s.remaining[0].text);
+  });
+  test("실패한 행은 «원인 한 줄» 이다 — 남은 것의 첫 줄이 아니라 (§4.3)", () => {
+    const s = S.sheetModel(ctx({
+      version: version({ state: "failed", error: "exit 3: version 1.1.1 already exists in App Store Connect" }),
+    }));
+    assert.equal(s.tone, "bad");
+    assert.match(s.head.statusLine, /^failed: exit 3: version 1\.1\.1 already exists/);
+  });
+  test("도는 회차가 행 자신의 failed · expired 를 가리지 않는다", () => {
+    const running = { driver: dm({ running: true, pid: 4242 }), layers: layersWith(30) };
+    const failed = S.sheetModel(ctx(Object.assign({ version: version({ state: "failed", release_id: 12, error: "boom" }) }, running)));
+    assert.equal(failed.tone, "bad");
+    const expired = S.sheetModel(ctx(Object.assign({ version: version({ expired: true, expiry_warned: 1, release_id: 12 }) }, running)));
+    assert.equal(expired.tone, "expired");
+    assert.equal(expired.expired, true);
+  });
+});
+
+describe("§17-9 — «제출됨 HH:MM» 은 심사 잡이 끝난 때다", () => {
+  const submitted = (jobs) => {
+    const rel = release({
+      review: { plan: release().review.plan, result: { job_id: 660, state: "succeeded",
+        doc: { schema: 2, build_name: "1.1.1", overall_status: "submitted", platforms: { ios: { status: "submitted" } } } } },
+      jobs: jobs,
+    });
+    return S.sheetModel(ctx({ version: version({ state: "submitted", last_edit_at: iso(30), release: rel }), release: rel }));
+  };
+  test("시각은 `release.jobs[]` 의 그 잡 행에서 온다 — 마지막 편집이 아니라", () => {
+    const s = submitted([jobRow(660, "review", "succeeded", iso(3600))]);
+    assert.match(s.head.statusLine, /^submitted .* · waiting for review$/);
+    // 마지막 편집(30초 전)이 아니라 잡이 끝난 때(1시간 전)를 쓴다 — 둘의 시:분이 다르다
+    const byEdit = S.sheetModel(ctx({ version: version({ state: "submitted" }) })).head.statusLine;
+    assert.notEqual(s.head.statusLine, byEdit);
+  });
+  test("그 행이 없으면 — 를 그린다(지어내지 않는다)", () => {
+    const s = submitted([jobRow(650, "upload", "succeeded", iso(3000))]);
+    assert.match(s.head.statusLine, /^submitted — · waiting for review$/);
   });
 });

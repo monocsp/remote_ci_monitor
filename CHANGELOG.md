@@ -18,6 +18,66 @@ of a key bumps that number and is listed here.
   [#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
 
 ### Fixed
+- **The bottom sheet's bar no longer claims what the same screen denies, and the forbidden-button
+  check is pinned to identity rather than wording.** The bar used to hard-code 99 % with the basis
+  «the build is up — only the review submission is left» as soon as a bundle's `upload.json` said
+  `status: "success"`, **without ever looking at the upload job's own state**: with that job
+  `failed`, «Left before review» read «upload #3 failed — the build did not go up» while the bar
+  right under it insisted the build had. A percentage is now shown only when the denominator was
+  **declared in advance** — the driver's `V S0…S8` — and then the basis names it («10 declared
+  stages»); without a driver the stage list is «the jobs that have run so far», a denominator that
+  grows, so the bar is hatched and carries a sentence instead of an invented number. The sentence
+  about the build being up needs both the document and the job state to agree. The test that
+  guards this product's one hard rule — no release, publish or rollout button on any screen — was
+  itself leaking: it exempted anything whose text matched `managed publishing`, which is the phrase
+  a real publish control is most likely to carry, so injected `Publish now (managed publishing)`,
+  `Managed publishing: Publish to production`, `Start rollout — managed publishing` and
+  «관리형 게시로 지금 게시» all walked through, Korean words were missing from the pattern
+  altogether, and the queue's job-input chip (`play_managed_publishing=confirmed-on`, an input
+  *name* shown as text) made it non-empty on every live page. The exemption is now by identity —
+  the sheet's «Left before review» rows (`data-sheet-fix`, which only scroll and focus) and that
+  queue chip (`data-inputs`) — the pattern carries the Korean words, and a new test injects ten
+  labels and proves every one is caught.
+  ([#170](https://github.com/monocsp/remote_ci_monitor/pull/170))
+- **The sticky sheet stays on screen at the bottom of the page, and its header is always
+  reachable.** The space reserved for the sheet was `padding-bottom` on the sheet's own container,
+  but a sticky element cannot descend into its containing block's padding, so at the bottom of the
+  page the sheet was pushed up out of view (measured `sheetTop` −506 at 1280×900, and entirely
+  off-screen at 390×844) whenever it was expanded. The reservation now sits on a sibling of the
+  sheet, and the sheet as a whole is capped to the viewport so a panel taller than the screen can
+  no longer push its own header — and its «Collapse» button — above the top edge.
+  ([#170](https://github.com/monocsp/remote_ci_monitor/pull/170))
+- **«submitted HH:MM» is the time the review job finished, and «uploaded HH:MM» appears at all.**
+  Both read `finished_at` off the role entry, a key the server has never sent (`role_entry`
+  carries `{job_id, state, doc}`), so the submitted line silently fell back to the draft's last
+  edit — a review that finished at 22:35 was shown as «submitted 01:47» — and the build row's
+  upload clock never rendered. Both now look the job up in `release.jobs[]`, and show «—» when it
+  is not there. The web test stubs supplied that key although the server does not; they now match
+  what the server actually returns.
+  ([#170](https://github.com/monocsp/remote_ci_monitor/pull/170))
+- **Smaller things the sheet and the version page were getting wrong.** «Left before review» put a
+  warning (Google Play has no graphics) ahead of blocking entries, and the collapsed header named
+  it while something blocking was unresolved — warnings now sort after blockers and the header
+  always names the first blocking line. A `failed` draft's header names the failure reason instead
+  of the first remaining item, and a running round no longer hides a row's own `failed` or
+  `expired`. The graphics fix-link takes focus when clicked instead of only scrolling. A refusal
+  whose body is not JSON — an HTML error page — is reported as its status code rather than 500
+  characters of markup in the save badge, and any other message is capped. The «from the file»
+  fallback asks for the draft's own version instead of the plan's, so a 1.2.0 draft no longer
+  shows 1.1.1's release notes. The screenshot chip says what is true — rcm does not touch
+  screenshots — instead of asserting sameness it never measured. «Your text is still here» now
+  says what it actually protects: the fields you have typed in. Korean picks its particle in two
+  more places (`이라/라`, `으로/로`, the latter reading a final ㄹ as open), and English counts to
+  one («1 edited field»).
+  ([#170](https://github.com/monocsp/remote_ci_monitor/pull/170))
+- **`GET …/release/driver` no longer runs the driver once per poll.** Each request spawned
+  `--status` on the build machine one for one — measured 7 requests and 7 process runs over 96
+  seconds, four a minute per open tab, multiplied by tabs and by people. That one subprocess is
+  now remembered for 20 seconds per repository, driver checkout SHA, `build_name`, round id,
+  running flag and exit code, so a remembered answer can never outlive the round it describes;
+  everything else in the response (the row, the log tail, the plan number) is still read fresh,
+  and the page's 15-second timer is unchanged.
+  ([#170](https://github.com/monocsp/remote_ci_monitor/pull/170))
 - **A draft cannot be discarded while its upload is in flight, a failed draft no longer holds its
   name for ever, and the version detail is cheap enough to poll.** `POST …/release/upload` with
   `mode = upload` now links its job to the draft and holds the row in `running` until that job

@@ -1943,13 +1943,30 @@
     if (d.play_managed_publishing === "confirmed-on" || d.managed_publishing_confirmed === true) extras.push(T(lang, "review.result.managed_confirmed"));
     return { status: status, tone: RELEASE_STATUS_TONE[status] || "bad", platforms: lines, extras: extras, autoRelease: observed.auto_release === true || d.auto_release === true };
   }
-  /** 409 등 서버의 거부 — 코드를 그대로 버튼 옆에 쓴다. 클라이언트가 돌아가지 않는다. */
+  // 거부 문구의 상한 — 배지 한 줄에 들어가는 만큼이고, 넘으면 `truncate` 가 … 로 자른다.
+  var REFUSAL_MAX = 120;
+  // JSON 이 아닌 본문(프록시·게이트웨이의 HTML 오류 페이지)을 알아보는 자국. `call` 은 파싱에
+  // 실패한 본문을 `{error: <원문>}` 으로 싸므로, 이 검사가 없으면 페이지 전체가 배지에 깔린다.
+  var HTML_BODY_RE = /^\s*<|<\/?(?:!doctype|html|head|body|title)\b/i;
+  /**
+   * 409 등 서버의 거부 — 코드를 그대로 버튼 옆에 쓴다. 클라이언트가 돌아가지 않는다.
+   *
+   * 본문이 JSON 이 아니면(§16-2 · §17-13: 401 이 keep-alive 를 어긋내면서 돌아온 HTML 오류
+   * 페이지 500자쯤이 그대로 저장 배지에 깔렸다) **상태 코드만** 말한다 — 화면을 밀어내는
+   * 쪽지를 옮기지 않는다. JSON 이어도 `error` 는 한 줄로 접고 `REFUSAL_MAX` 에서 자른다.
+   */
   function refusalText(res, lang) {
     var b = res && res.body && typeof res.body === "object" ? res.body : {};
     var code = b.code || b.error_code;
+    var status = "http " + (res ? res.status : "?");
     if (code) return T(lang, "review.server_code", { code: String(code) });
-    if (b.error) return String(b.error);
-    return "http " + (res ? res.status : "?");
+    if (b.error != null && b.error !== "") {
+      var raw = String(b.error);
+      if (HTML_BODY_RE.test(raw)) return status;
+      var line = raw.replace(/\s+/g, " ").trim();
+      return line ? truncate(line, REFUSAL_MAX) : status;
+    }
+    return status;
   }
   /**
    * plan.json 의 스토어 값을 글자로 — 숫자·글자는 그대로, 객체(`{name, status, codes:[…]}` 같은 Play 트랙)는
@@ -2091,6 +2108,23 @@
     items.forEach(function (it, i) { if (it.role === "plan") cut = i; });
     return { bar: bar, now: nowLine, items: items.slice(cut), older: items.slice(0, cut), current: cur };
   }
+  /**
+   * 역할 항목(`plan` · `review.plan` · `review.result` · `upload`)이 가리키는 잡이 **끝난** 때.
+   *
+   * 그 시각은 `release.jobs[]` 의 행에만 있다 — 서버의 `release_state.role_entry` 는
+   * `{job_id, state, doc}`(+ plan 계열의 나이)만 만들고 `finished_at` 은 넣지 않는다.
+   * 항목에서 바로 읽으면 언제나 undefined 라 그 시각이 화면에서 조용히 사라진다(§17-9).
+   * 모르면 null — 화면이 — 를 그린다.
+   */
+  function roleFinishedAt(release, entry) {
+    var id = entry && entry.job_id != null ? entry.job_id : null;
+    if (id == null) return null;
+    var rows = release && Array.isArray(release.jobs) ? release.jobs : [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].id === id && rows[i].finished_at) return rows[i].finished_at;
+    }
+    return null;
+  }
   /** Build·upload 행(항목 5 · 26 · 38 · 49) — 색 · 머리 조각 · 세 층. */
   function buildRowModel(release, releaseStatus, profile, rows, lang, tzName, nowMs) {
     var presets = profile && profile.presets ? profile.presets : {};
@@ -2120,8 +2154,8 @@
       var status = String(upDoc.status || "");
       head.push(I18N.has("build.status." + status) ? T(lang, "build.status." + status) : status || DASH);
       if (Array.isArray(upDoc.platforms) && upDoc.platforms.length) head.push(T(lang, "build.item.platforms", { names: upDoc.platforms.join(" + ") }));
-      var fin = parseIso(up.finished_at);
-      if (fin != null) head.push(T(lang, "build.head.uploaded", { clock: fmtClock(up.finished_at, tzName, nowMs) }));
+      var fin = roleFinishedAt(release, up);
+      if (fin != null) head.push(T(lang, "build.head.uploaded", { clock: fmtClock(fin, tzName, nowMs) }));
       head.push("#" + up.job_id);
       if (upDoc.tag) head.push(String(upDoc.tag));
       var st = status === "success" ? "ok" : status === "partial" ? "bad" : "na";
@@ -2309,6 +2343,9 @@
   // «남은 것» 한 줄의 무게. `bad` 와 `run` 은 제출을 닫고, `todo` 는 사람이 이번 제출에서 해야
   // 하는 것(관리형 게시)이며, `warn` 은 알리기만 한다(Play 그래픽 없음 · 옛 드라이버).
   var SHEET_BLOCKING = { bad: 1, run: 1 };
+  // 업로드 잡이 이렇게 끝났으면 **빌드는 올라가지 않았다** — 그 잡이 쓴 `upload.json` 이 무슨
+  // 말을 하든. 「남은 것」과 막대가 같은 이 표를 본다(§17-1).
+  var SHEET_UPLOAD_BAD = { lost: 1, failed: 1, timed_out: 1, cancelled: 1 };
   // `submitDecision` 의 이유 열쇠 → 같은 뜻의 «남은 것» 코드. 두 이름이 한 줄을 두 번 쓰지 않게 한다.
   var SHEET_REASON_ALIAS = { no_plan: "plan_missing", plan_required: "plan_missing" };
 
@@ -2320,12 +2357,21 @@
     if (layers && layers.current) return true;
     return !!(dm && dm.running === true && v.release_id != null);
   }
+  /**
+   * 단계 목록이 **미리 선언된 것**인가. 드라이버가 있으면 `V S0…S8` 열 칸이라 분모가 처음부터
+   * 정해져 있다. 없으면 목록은 「지금까지 돈 작업」이라 **분모가 자라난다** — 그런 분모로
+   * 퍼센트를 내면 첫 작업 하나가 끝난 순간 1/1 = 100% 가 된다. 그래서 선언이 없으면 숫자를
+   * 내지 않는다(§17-1 · 「번호를 지어내지 않는다」).
+   */
+  function sheetStagesDeclared(dm) {
+    return !!(dm && dm.available !== false && dm.configured === true);
+  }
   /** 시트가 그리는 단계 칩. 드라이버를 쓰는 저장소는 `V S0…S8` 열 칸(V 는 버전 행이 만들어진
       순간 끝난 것이다 — 행이 곧 그 단계의 산출물이다). 드라이버가 없으면 이번 회차의 잡이
       곧 단계다(`buildLayers.items`) — 없는 단계를 지어내지 않는다. */
   function sheetStages(dm, version, layers, lang) {
     var v = version || {};
-    var driverKnown = dm && dm.available !== false && dm.configured === true;
+    var driverKnown = sheetStagesDeclared(dm);
     if (driverKnown) {
       var vDone = v.state != null && v.state !== "creating";
       var out = [{ id: "V", label: T(lang, "sheet.stage.V"), state: vDone ? "done" : "todo", text: "" }];
@@ -2354,7 +2400,7 @@
     // 1 빌드 — 스토어에 올라간 빌드가 있어야 심사에 보낼 것이 있다
     var up = release.upload || null, upDoc = planEntryDoc(up);
     if (up && up.state === "lost") add("upload_lost", "bad", T(lang, "sheet.left.upload_lost", { id: up.job_id }), toStatus);
-    else if (up && (up.state === "failed" || up.state === "timed_out" || up.state === "cancelled")) {
+    else if (up && SHEET_UPLOAD_BAD[up.state]) {
       add("upload_failed", "bad", T(lang, "sheet.left.upload_failed", { id: up.job_id, state: stateWord(up.state, lang) }), toStatus);
     } else if (!upDoc || upDoc.status !== "success") {
       // 2 도는 중이면 그것이 곧 «빌드가 아직 없는 이유» 다(W4) — 두 줄로 나누지 않는다
@@ -2394,14 +2440,16 @@
         });
       });
     });
-    // 7 Play 그래픽이 하나도 없다 — 경고만이다(스토어가 최종 판정이고 rcm 은 규격을 모른다)
+    // 7 스킬이 모르는 입력 — 서버가 거절한 코드를 그대로 되풀이한다(E11). 막는 것이라 경고보다 앞이다
+    if (ctx.refusal === "listing_json_unsupported") add("listing_unsupported", "bad", T(lang, "sheet.left.listing_unsupported"), null);
+    if (ctx.refusal === "split_version_unsupported") add("split_unsupported", "bad", T(lang, "sheet.left.split_unsupported"), null);
+    // 8 경고 둘 — Play 그래픽이 하나도 없다(스토어가 최종 판정이고 rcm 은 규격을 모른다) · V 단계를
+    //   모르는 드라이버(E16). 막는 줄보다 **뒤**다: 차례가 곧 중요도인데(§4.1) 경고가 막는 줄을
+    //   앞질러 접힌 머리에 나오면, 사람은 경고만 고치고 다시 막힌다(§17-6).
     var graphics = ctx.graphics || {};
     if (platforms.android && graphics.android === 0) {
       add("graphics_missing", "warn", T(lang, "sheet.left.graphics"), { route: null, anchor: '[data-group="graphics"]' });
     }
-    // 8 스킬이 모르는 입력 · V 단계를 모르는 드라이버 — 서버가 거절한 코드를 그대로 되풀이한다(E11 · E16)
-    if (ctx.refusal === "listing_json_unsupported") add("listing_unsupported", "bad", T(lang, "sheet.left.listing_unsupported"), null);
-    if (ctx.refusal === "split_version_unsupported") add("split_unsupported", "bad", T(lang, "sheet.left.split_unsupported"), null);
     if (dm && dm.configured === true && dm.knowsV === false) add("driver_no_v", "warn", T(lang, "sheet.left.driver_no_v"), null);
     // 9 안전 — 빨간 띠는 무엇으로도 못 넘는다(E19)
     if (bannerDecision(release).show) add("unsafe", "bad", T(lang, "sheet.left.unsafe"), toStatus);
@@ -2442,6 +2490,12 @@
     var stageLabel = curStage ? curStage.id + " " + curStage.label : null;
     var frac = jobP && isNum(jobP.pct) ? jobP.pct / 100 : 0;
     var upDoc = planEntryDoc(release.upload);
+    // 빌드가 **정말** 올라갔는가 — `upload.json` 한 장으로는 모자란다. 그 문서는 잡이 끝나기
+    // 전에 쓰였을 수도 있어서, 잡이 실패·유실로 끝나도 `status: "success"` 가 남아 있다(§17-1).
+    // 문서와 잡의 상태가 **둘 다** 그렇다고 할 때만 「올라갔다」 고 말한다.
+    var uploadLanded = !!(upDoc && upDoc.status === "success")
+      && !(release.upload && SHEET_UPLOAD_BAD[release.upload.state]);
+    var declared = sheetStagesDeclared(dm);
     var pct, basis;
     if (live && total) {
       // 0.3.3 의 막대와 같은 수식 — 분모만 9 에서 10(V 포함)으로 늘었다(§4.1)
@@ -2450,8 +2504,12 @@
     } else if (version.state === "submitted") { pct = 100; basis = T(lang, "sheet.basis.submitted"); }
     else if (dm.done === true) { pct = 100; basis = T(lang, "sheet.basis.round_done"); }
     else if (layers.current) { pct = jobP && isNum(jobP.pct) ? jobP.pct : null; basis = bar ? bar.basis : T(lang, "build.basis.none"); }
-    else if (upDoc && upDoc.status === "success") { pct = 99; basis = T(lang, "sheet.basis.uploaded"); }
-    else if (total && done) { pct = Math.min(99, Math.round(done / total * 100)); basis = T(lang, "sheet.basis.stages", { total: total }); }
+    // 셀 수 있는 숫자만 쓴다 — 분모는 **선언된** 단계 수이고, 근거가 그 분모를 댄다
+    else if (declared && total) { pct = Math.round(done / total * 100); basis = T(lang, "sheet.basis.stages", { total: total }); }
+    // 셀 분모가 없으면 숫자도 없다(막대는 빗금) — 문장만 남긴다. 예전에는 여기서 `upload.json`
+    // 한 장만 보고 99 를 지어냈고, 그 사이 «남은 것» 은 «업로드 실패» 라고 말해 한 화면이
+    // 서로를 부정했다(§17-1). 이제 문장도 **잡의 상태**가 허락할 때만 나온다.
+    else if (uploadLanded) { pct = null; basis = T(lang, "sheet.basis.uploaded"); }
     else { pct = null; basis = T(lang, "build.basis.none"); }
     var nowLine = layers.now || (live && !dm.running ? dm.headParts.slice(1).join(" · ") : null) || null;
     var started = parseIso(live ? dm.startedAt : (bar && bar.startedAt) || null);
@@ -2460,24 +2518,32 @@
     // ── 색 ─────────────────────────────────────────────────────────────────
     var expired = version.expired === true || version.expiry_warned === true || version.expiry_warned === 1;
     var result = resultIsCurrent(release) ? resultModel(release.review.result, lang) : null;
+    // 행 **자신의** 끝난 형편이 먼저다 — 실패한 행과 만료된 행은 회차가 돌고 있다고 해서
+    // 숨겨지지 않는다(§17-8). 그 둘이 없을 때에만 회차가 색을 정한다.
     var tone;
     if (version.state === "submitted") tone = "done";
     else if (version.state === "discarded") tone = "expired";
     else if (bannerDecision(release).show) tone = "bad";
+    else if (version.state === "failed") tone = "bad";
     else if (release.upload && release.upload.state === "lost") tone = "lost";
+    else if (expired) tone = "expired";
     else if (live) tone = dm.running ? "running" : dm.exit === 2 ? (dm.autoN ? "running" : "human") : dm.blocked || dm.exit === 4 ? "warn" : dm.exit === 3 ? "lost" : "bad";
     else if (running) tone = "running";
-    else if (version.state === "failed") tone = "bad";
-    else if (expired) tone = "expired";
-    else if (upDoc && upDoc.status === "success" && blocking.length === 0) tone = "ok";
+    else if (uploadLanded && blocking.length === 0) tone = "ok";
     else tone = "new";
     // ── 접힌 머리 한 줄 ────────────────────────────────────────────────────
-    var first = remaining.length ? remaining[0] : null;
+    // 머리는 **막는 것**을 먼저 댄다(§17-6): 경고 한 줄이 막는 줄을 가리면 사람은 경고만 고치고
+    // 다시 막힌다. 막는 것이 없을 때에만 첫 줄(경고 · 사람이 할 것)을 말한다.
+    var first = blocking.length ? blocking[0] : (remaining.length ? remaining[0] : null);
     var submittedAt = _sheetSubmittedAt(release, version);
     var statusLine;
     if (tone === "done") statusLine = T(lang, "sheet.head.done", { clock: submittedAt ? fmtClock(submittedAt, ctx.tzName, nowMs) : DASH });
     else if (tone === "expired") statusLine = T(lang, version.state === "discarded" ? "sheet.head.discarded" : "sheet.head.expired");
-    else if (tone === "running" || tone === "human" || tone === "warn" || tone === "lost" || (tone === "bad" && live)) {
+    else if (version.state === "failed") {
+      // 실패한 행은 «원인 한 줄» 이다(§4.3 · §17-7) — 남은 것의 첫 줄이 아니라 행이 든 사유다
+      statusLine = version.error ? T(lang, "version.row.error", { detail: truncate(_sheetOneLine(version.error), 120) })
+        : first ? first.text : T(lang, "sheet.head.bad");
+    } else if (tone === "running" || tone === "human" || tone === "warn" || tone === "lost" || (tone === "bad" && live)) {
       statusLine = [stageLabel ? T(lang, "sheet.stage_of", { stage: stageLabel, done: done, total: total, percent: pct != null ? pct : DASH }) : null,
         nowLine, elapsed, finishes].filter(Boolean).join(" · ");
       if (!statusLine) statusLine = first ? first.text : T(lang, "sheet.head.running");
@@ -2547,11 +2613,14 @@
   }
   /** diff 한 줄은 한 줄이다 — 「이 버전의 새로운 기능」은 여러 줄이라 그대로 두면 열이 무너진다. */
   function _sheetOneLine(v) { return v == null ? "" : String(v).replace(/\s+/g, " ").trim(); }
-  /** 제출 시각 — 심사 잡이 끝난 때. 모르면 null 이고 화면은 — 를 그린다(지어내지 않는다). */
+  /**
+   * 제출 시각 — 심사 잡이 **끝난** 때. 모르면 null 이고 화면은 — 를 그린다(지어내지 않는다).
+   * §17-9: 예전에는 `release.review.result.finished_at` 을 먼저 봤는데 서버는 그 열쇠를 보내지
+   * 않아(§role_entry) 늘 «마지막 편집» 으로 떨어졌다 — 22:35 에 끝난 심사가 «제출됨 01:47».
+   */
   function _sheetSubmittedAt(release, version) {
     var rv = release && release.review ? release.review : {};
-    if (rv.result && rv.result.finished_at) return rv.result.finished_at;
-    return version && version.last_edit_at ? version.last_edit_at : null;
+    return roleFinishedAt(release, rv.result);
   }
   /** 친 N 과 드라이버의 plan_n — 글자 그대로 같아야 한다(nMatches). state: empty · ok · mismatch · unknown. */
   function confirmNDecision(typed, planN, mode) {
@@ -2635,7 +2704,12 @@
       plan: function (name, body) { return call("POST", base(name) + "/release/plan", JSON.stringify(body || {}), "application/json"); },
       review: function (name, body) { return call("POST", base(name) + "/release/review", JSON.stringify(body || {}), "application/json"); },
       upload: function (name, body) { return call("POST", base(name) + "/release/upload", JSON.stringify(body || {}), "application/json"); },
-      listing: function (name) { return call("GET", base(name) + "/release/listing"); },
+      // `build_name` 은 **이 화면이 보고 있는 버전**의 이름이다 — 안 주면 서버가 플랜의 이름으로
+      // 릴리스 노트를 찾아, 1.2.0 드래프트에 1.1.1 의 노트가 «파일에서» 라는 꼬리표를 달고 뜬다(§17-14).
+      listing: function (name, buildName) {
+        return call("GET", base(name) + "/release/listing"
+          + (buildName ? "?build_name=" + enc(String(buildName)) : ""));
+      },
       listingFileUrl: function (name, path) { return base(name) + "/release/listing/file?path=" + enc(path); },
       validateListing: function (name, body) { return call("POST", base(name) + "/release/listing/validate", JSON.stringify(body || {}), "application/json"); },
       github: function (name) { return call("GET", base(name) + "/release/github"); },
@@ -2666,6 +2740,7 @@
     panelPill: panelPill, panelOpen: panelOpen, fieldCounter: fieldCounter, listingFields: listingFields,
     screenshotGroups: screenshotGroups, reviewInfoModel: reviewInfoModel, versionStrip: versionStrip, resultModel: resultModel,
     refusalText: refusalText, storeRowModel: storeRowModel, rowsById: rowsById, basisText: basisText, buildLayers: buildLayers,
+    roleFinishedAt: roleFinishedAt,
     buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS,
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
@@ -2674,6 +2749,7 @@
     planVersionGuess: planVersionGuess, PLAN_VERSION_RE: PLAN_VERSION_RE,
     // 바텀시트 (§4.1) — 최상단 막대(`releaseBarModel`)가 여기로 들어왔다(결정 Q6)
     sheetModel: sheetModel, sheetStages: sheetStages, sheetRemaining: sheetRemaining,
+    sheetStagesDeclared: sheetStagesDeclared, SHEET_UPLOAD_BAD: SHEET_UPLOAD_BAD,
     versionRunning: versionRunning, SHEET_STAGES: SHEET_STAGES,
     storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount,
     // 버전 목록 · 새 버전 대화상자 · 상태 띠 (워크플랜 §3.1)
@@ -3999,6 +4075,9 @@
     if (state.store.sub !== sub || state.store.versionId !== id) {
       state.store.sub = sub; state.store.versionId = id;
       state.store.version = null; state.store.versionStatus = null; state.store.versionError = null;
+      // 소개 자료는 **버전마다** 다르다(그 버전의 이름으로 릴리스 노트를 찾는다 · §17-14) —
+      // 다른 드래프트로 가면 앞 버전의 파일 값을 물려주지 않는다
+      state.store.listing = null; state.store.listingStatus = null;
       discardVersionEdits();   // 다른 버전(또는 다른 화면)으로 가면 친 값도 저장 상태도 버린다
       // 주소로 화면을 골랐으면 그 화면을 보여 준다 — 관문이 **열려 있을 때만**이다(닫혀 있으면 설정이 맞다)
       var open = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
@@ -4024,9 +4103,15 @@
     var onVersion = state.store.sub === "version";
     var wantListing = (onStatus || onVersion)
       && ((opts && opts.listing) || (state.store.listing == null && state.store.listingStatus == null));
+    var versionLoad = onVersion ? loadVersion() : state.store.sub === "versions" ? loadVersions() : null;
+    // 버전 페이지에서는 상세를 **먼저** 받는다 — 소개 자료를 이 드래프트 자신의 이름으로 물어야
+    // 하기 때문이다(§17-14). 상태 화면은 이름 없이(= 플랜의 이름으로) 그대로 부른다.
+    var listingLoad = !wantListing ? null
+      : onVersion ? Promise.resolve(versionLoad).then(function () { return loadListing(versionBuildName()); })
+        : loadListing();
     return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(),
-      wantListing ? loadListing() : null, onStatus ? loadDriver() : null, onStatus ? loadGithub() : null,
-      state.store.sub === "version" ? loadVersion() : state.store.sub === "versions" ? loadVersions() : null]).then(function (rs) {
+      listingLoad, onStatus ? loadDriver() : null, onStatus ? loadGithub() : null,
+      versionLoad]).then(function (rs) {
       if (seq !== state.store.seq || state.store.repo !== repo) return;  // 그 사이 다른 저장소로 갔다
       state.store.repos = rs[0].ok ? releaseRepos(rs[0].body) : [];
       state.store.reposStatus = rs[0].status;
@@ -4068,7 +4153,9 @@
     }
     if (!state.store.doc) { body.innerHTML = '<p class="empty">' + esc(tr("store.loading")) + "</p>"; return; }
     withFocus(function () {
-      body.style.paddingBottom = "";   // 시트가 있는 화면에서만 아래 여백을 둔다(afterVersionRender)
+      // 아래 여백은 시트가 있는 화면에서 `.vmain` 이 든다(afterVersionRender) — 본문 자체에
+      // 주면 sticky 의 담는 상자가 그만큼 짧아진다(§17-3). 옛 렌더가 남긴 값이 있으면 지운다.
+      body.style.paddingBottom = "";
       body.innerHTML = state.store.screen === "store" ? storeBodyHtml() : settingsHtml();
       // 렌더가 정한 열림은 기억이 아니다 — 사람이 바꾼 것만 `toggle` 에서 남긴다(호스트 절과 같은 규칙)
       $$("details.srow", body).forEach(function (d) { d.dataset.renderedOpen = d.open ? "1" : "0"; });
@@ -4240,6 +4327,10 @@
     }
     var row = versionRowModel(v, lang, n);
     var m = versionPageModel(versionEditCtx(), lang);
+    // 시트가 가리지 않도록 비워 두는 아래 여백은 **이 상자**가 든다(§17-3). 예전에는
+    // `[data-store-body]` 에 패딩을 줬는데, sticky 의 담는 상자는 부모의 **content box** 라
+    // 시트가 그 패딩 안으로 못 내려가고, 페이지 맨 아래에서 화면 밖으로 밀려났다.
+    h += '<div class="vmain" data-version-main>';
     h += '<div class="s-h vhead"><span class="t">' + esc(row.title) + '</span><span class="pill v-' + row.tone + '">' + esc(row.pill) + "</span>"
       + '<span class="n" data-version-notes>' + esc(row.notes.join(" · ")) + "</span></div>";
     if (row.state === "creating") h += '<p class="banner info" data-version-creating>' + esc(tr("version.row.creating", { id: row.createJobId != null ? row.createJobId : DASH })) + "</p>";
@@ -4255,8 +4346,9 @@
       + "<dt>" + esc(tr("version.page.expires")) + "</dt><dd>" + esc(v.expires_at ? fmtClock(v.expires_at, tz(), n) : DASH) + "</dd>"
       + "</dl>";
     h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    h += "</div>";   // /.vmain — 아래 여백은 여기서 끝난다
     // 바텀시트는 본문의 **마지막 자식**이다 — sticky 의 담는 상자가 본문 전체여야 스크롤 내내
-    // 화면 아래에 붙어 있는다(§4.2). 감싸는 div 를 두면 그 div 안에서만 붙는다.
+    // 화면 아래에 붙어 있는다(§4.2). 시트를 감싸는 div 를 두면 그 div 안에서만 붙는다.
     h += sheetHtml(m);
     return h;
   }
@@ -4345,8 +4437,10 @@
       스크린샷 · 그래픽은 보기만이고(Q8) 빌드 · 심사 정보 두 그룹은 같은 코드를 쓴다. */
   function versionSectionHtml(section, m, roCtx) {
     var platform = section.platform, ios = platform === "ios";
+    // `tabindex="-1"` — «남은 것» 의 `graphics_missing` 이 이 상자를 가리킨다. 없으면
+    // `focusAnchor` 가 스크롤만 하고 포커스는 그대로라, 키보드는 그 자리로 따라오지 않는다(§17-10).
     var group = function (key, inner) {
-      return '<div class="grp" data-group="' + key + '"><h4>' + esc(tr("review.group." + key)) + "</h4>" + inner + "</div>";
+      return '<div class="grp" data-group="' + key + '" tabindex="-1"><h4>' + esc(tr("review.group." + key)) + "</h4>" + inner + "</div>";
     };
     var h = '<section class="ssec" data-platform="' + platform + '" aria-label="' + esc(section.label) + '">'
       + '<h3><span>' + esc(section.label) + "</span>"
@@ -4720,10 +4814,12 @@
   function afterVersionRender() {
     renderSheetState();
     applyBarFills($("[data-store-body]"));
-    // 붙어 있는 시트가 본문의 끝을 가리지 않도록 그 높이만큼 아래 여백을 준다(E23). 담는 상자가
-    // 커지므로 마지막 칸까지 시트 위로 스크롤된다.
-    var body = $("[data-store-body]"), sheet = $("#release-sheet");
-    if (body && sheet) body.style.paddingBottom = (sheet.offsetHeight + 16) + "px";
+    // 붙어 있는 시트가 본문의 끝을 가리지 않도록 그 높이만큼 아래 여백을 준다(E23). 그 여백은
+    // 시트의 **형제**인 `.vmain` 이 든다 — `[data-store-body]` 에 주면 그것이 곧 sticky 의 담는
+    // 상자(부모의 content box)라, 시트가 그 패딩 안으로 못 내려가고 페이지 맨 아래에서 화면
+    // 위로 밀려 올라간다(§17-3: 1280×900 에서 `sheetTop` −506, 390 폭에서는 통째로 화면 밖).
+    var main = $("[data-version-main]"), sheet = $("#release-sheet");
+    if (main && sheet) main.style.paddingBottom = (sheet.offsetHeight + 16) + "px";
     // 다른 화면의 «남은 것» 을 눌러 여기로 왔으면 그 칸으로 간다(AC-D9)
     var anchor = state.store.fixAnchor;
     if (anchor) { state.store.fixAnchor = null; focusAnchor(anchor); }
@@ -4748,10 +4844,18 @@
       syncReviewChoices();
     }).catch(function () { state.store.release = null; state.store.releaseStatus = 0; });
   }
-  function loadListing() {
+  /** 지금 보고 있는 드래프트의 대표 이름(§11 — iOS 가 있으면 iOS, 없으면 Android). 상세를
+      아직 못 받았으면 null 이고, 그러면 서버가 플랜의 이름을 쓴다(옛 동작). */
+  function versionBuildName() {
+    var v = state.store.version;
+    if (!v || typeof v !== "object") return null;
+    if (v.build_name != null && v.build_name !== "") return String(v.build_name);
+    return v.ios_version || v.android_version || null;
+  }
+  function loadListing(buildName) {
     var repo = state.store.repo, api = storeApi();
     if (!repo || typeof api.listing !== "function") { state.store.listing = null; state.store.listingStatus = 404; return Promise.resolve(); }
-    return api.listing(repo).then(function (res) {
+    return api.listing(repo, buildName || null).then(function (res) {
       if (state.store.repo !== repo) return;
       state.store.listingStatus = res.status;
       state.store.listing = res.ok && res.body && typeof res.body === "object" ? res.body : null;
