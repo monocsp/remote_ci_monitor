@@ -100,6 +100,31 @@ def test_version_selftest_names_its_four_cases():
         assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
 
 
+def test_plan_selftest_proves_the_live_version_names_travel():
+    """워크플랜 §13-1 — 플랜이 Play 의 라이브 **이름**(`store.play.production_name`)을 실어야
+    Android 힌트와 목록의 Play 칸이 산다. 이름이 없는 스냅샷도 그대로 유효한 문서다."""
+    rc, out = sh("bash", str(STORE / "release_plan.sh"), "--selftest")
+    assert rc == 0, out
+    for needle in (
+        "snapshot without the names -> valid plan.json, no hint invented",
+        "play.production_name lands in plan.json",
+        "next_version_hint lands in plan.json",
+    ):
+        assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
+
+
+def test_the_plan_template_and_its_skill_ask_for_both_live_version_names():
+    """훅 계약 · TODO 블록 · SKILL.md 가 두 필드를 이름으로 부른다 — 어느 스킬도 말하지 않으면
+    스킬로 붙인 프로젝트의 `plan.json` 에 그 필드가 생기지 않는다(§13-1 이 바로 그 사고다)."""
+    text = (STORE / "release_plan.sh").read_text()
+    todo = text[text.index("TODO(project): read App Store Connect") :]
+    for needle in ("production_name", "asc_live", "next_version_hint"):
+        assert needle in todo, (needle, "TODO(project) block")
+    skill = (SKILLS / "rcm-store-connect" / "SKILL.md").read_text()
+    for needle in ("play.production_name", "next_version_hint", "asc_live"):
+        assert needle in skill, needle
+
+
 # ── rcm_contract.py validate version (AC-A4) ─────────────────────────────────
 
 
@@ -250,6 +275,34 @@ def test_driver_status_without_a_readable_version_row_prints_stage_v(tmp_path):
 def test_driver_refuses_a_version_id_that_is_not_a_number():
     rc, out = sh("bash", str(DRIVER / "release_driver.sh"), "--version-id", "seven", "--status")
     assert rc == 2 and "--version-id must be an integer" in out, out
+
+
+STAGES_LINE = "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8"
+
+
+def test_status_always_says_which_stages_the_driver_knows():
+    """워크플랜 §13-2 · 계약 §5 — `--status` 는 `--version-id` 도 `--build-name` 도 없이 불러도
+    `stages:` 한 줄을 찍고 0 으로 끝난다. 서버는 그 줄에 `V` 가 있는지로만 «이 드라이버가 버전
+    단계를 아는가» 를 안다 — exit 2 는 이미 «번호가 필요하다» 와 «환경 막힘» 둘이라 못 쓴다.
+    레포도 프로파일도 없는 곳에서 돌아야 한다(rcm 저장소 루트가 바로 그런 곳이다)."""
+    rc, out = sh("bash", str(DRIVER / "release_driver.sh"), "--status")
+    assert rc == 0, out
+    assert out.strip() == STAGES_LINE, out
+    # 판정기가 내는 목록 그대로다 — 목록은 한 곳(DRIVER_STAGES)에만 적혀 있다
+    rc, listed = sh(sys.executable, str(DRIVER / "release_check.py"), "stages")
+    assert rc == 0 and f"stages: {listed.strip()}" == STAGES_LINE, listed
+
+
+def test_the_stage_list_lives_in_one_place():
+    """워크플랜 §13-4 — 단계 목록이 두 벌이면 어긋난다(옛 `STAGES` 에는 `S2` 가 없었다).
+    셸은 `release_check.py stages` 를 불러 찍을 뿐, 목록을 자기 안에 적어 두지 않는다."""
+    shell = (DRIVER / "release_driver.sh").read_text()
+    assert "${CHECK} stages" in shell
+    body = "\n".join(ln for ln in shell.splitlines() if not ln.lstrip().startswith("#"))
+    assert "S0 S1 S2" not in body, "the driver writes the stage list a second time"
+    check = (DRIVER / "release_check.py").read_text()
+    assert "DRIVER_STAGES = (" in check
+    assert "STAGES = (*DRIVER_STAGES," in check, "STAGES must be derived, not written again"
 
 
 def test_release_check_version_name_prefers_ios_and_never_invents(tmp_path):

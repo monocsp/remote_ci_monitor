@@ -12,6 +12,9 @@
 # 실패 경로: gate/qa 빨강 → PR close + 라벨 release-blocked + 보고 코멘트, 브랜치는 남긴다, exit 1.
 # 재진입: 상태파일은 캐시일 뿐이다 — 매 호출 PR(head==sha) · 커밋 status · rcm jobs(같은 preset+sha) · 정확한 태그에서
 #   단계를 다시 읽고 그 자리에서 잇는다. 업로드 잡은 어느 상태로든 있으면 **재제출하지 않는다**(lost 도 — 2차 업로드가 된다).
+# --status: 읽기 전용이고 **언제나 `stages: V S0 … S8` 한 줄을 먼저 찍는다** — 이름도 버전도 없이 불러도
+#   그렇다(계약 §5). rcm 은 그 줄에 V 가 있는지로 이 드라이버가 버전 단계를 아는지 알아내고, 없으면
+#   `--version-id` 없이 옛 방식으로 부른다. 단계 목록의 정본은 release_check.py 의 DRIVER_STAGES 하나다.
 # 종료코드: 0 완료 · 1 빨강/계약 위반/N 불일치/이미 릴리스됨 · 2 전제 조건/N 없음 · 3 결과 불명 · 4 스토어 드리프트.
 set -euo pipefail
 
@@ -375,13 +378,21 @@ s8_verify() {
 }
 
 # ── --status / --abort / --retry ─────────────────────────────────────────────
+# 이 드라이버가 **아는** 단계 한 줄. 목록은 release_check.py 의 DRIVER_STAGES 에서만 온다 — 여기에 두 벌로
+# 적지 않는다(그래서 판정기를 못 부르면 줄도 없다: 서버는 그것을 «V 를 모르는 옛 드라이버» 로 읽고 옛길로 부른다).
+stages_line() {
+  local s
+  if s="$(${CHECK} stages 2>/dev/null)" && [ -n "${s}" ]; then echo "stages: ${s}"; fi
+  return 0
+}
 do_status() {   # 읽기 전용 — 브랜치도 잡도 만들지 않는다
+  stages_line                        # 언제나 먼저 — 능력 신호는 뒤가 어떻게 되든 나온다(계약 §5)
+  [ -n "${BUILD_NAME}" ] || [ -n "${VERSION_ID}" ] || return 0   # 능력만 물은 호출: 단계 목록이 답이다
   if [ -z "${BUILD_NAME}" ]; then   # --version-id 인데 행을 못 읽었다: V 에 서 있다
-    echo "build ? · version #${VERSION_ID} · stage V"; echo "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8"; return 0
+    echo "build ? · version #${VERSION_ID} · stage V"; return 0
   fi
   local stage; stage="$(current_stage)"
   echo "build ${BUILD_NAME}${VERSION_ID:+ · version #${VERSION_ID}} · branch ${RELEASE_BRANCH} @ ${HEAD_SHA:-none} · N ${CONFIRM_N:-$(state_get confirmed_n)} · pr ${PR_NUM:-$(state_get pr)} · stage ${stage}"
-  echo "stages: ${VERSION_ID:+V }S0 S1 S2 S3 S4 S5 S6 S7 S8"
   echo "jobs: plan #$(state_get plan_job) gate #$(state_get gate_job) qa #$(state_get qa_job) upload #$(state_get upload_job)"
 }
 do_abort() {
@@ -401,6 +412,9 @@ do_retry() {    # 빨강으로 닫힌 PR 뒤 같은 버전명으로 다시: PR �
 
 # ── main ─────────────────────────────────────────────────────────────────────
 main() {
+  # 능력만 묻는 호출(`--status` 하나) — 레포도 프로파일도 건드리지 않고 아는 단계만 말하고 끝난다.
+  # 서버가 «이 드라이버는 V 단계를 아는가» 를 이렇게 묻는다(계약 §5). 옛 드라이버는 여기서 exit 2 다.
+  if [ "${STATUS_ONLY}" = true ] && [ -z "${BUILD_NAME}" ] && [ -z "${VERSION_ID}" ]; then do_status; exit 0; fi
   init; load_profile
   [ -z "${VERSION_ID}" ] || v_version                      # V: 이름은 rcm 의 버전 행에서
   if [ "${STATUS_ONLY}" = true ] && [ -z "${BUILD_NAME}" ]; then do_status; exit 0; fi
@@ -431,12 +445,18 @@ main() {
 selftest() {
   bash -n "${SELF}" || exit 1
   ${CHECK} --selftest || exit 1
-  local fn; for fn in s0_branch s1_plan s2_confirm s3_pr s4_submit s5_submit s6_merge s7_upload s8_verify require_typed_n fail_red do_status do_abort do_retry; do
+  local fn; for fn in s0_branch s1_plan s2_confirm s3_pr s4_submit s5_submit s6_merge s7_upload s8_verify require_typed_n fail_red stages_line do_status do_abort do_retry; do
     declare -F "${fn}" >/dev/null || { echo "missing function ${fn}"; exit 1; }
   done
   for fn in s6_merge s7_upload; do grep -A4 "^${fn}()" "${SELF}" | grep -q require_typed_n || { echo "${fn} lacks require_typed_n"; exit 1; }; done
   # --status 는 preflight_remote 앞에서 끝나야 한다(연결 시점엔 gh 도 서버도 없다)
   [ "$(grep -n -E 'STATUS_ONLY.*do_status|^  preflight_remote$' "${SELF}" | head -1 | grep -c do_status)" = 1 ] || { echo "--status must return before preflight_remote"; exit 1; }
+  # 능력 신호(계약 §5): `--status` 는 이름도 --version-id 도 없이 불러도 `stages:` 를 찍고 0 으로 끝난다.
+  # 서버는 그 줄에 V 가 있는지로 `--version-id` 를 줄지 정한다 — 종료 코드로는 구분할 수 없다(exit 2 는 이미 둘이다).
+  local caps; caps="$(bash "${SELF}" --status)" || { echo "--status alone must exit 0"; exit 1; }
+  [ "$(printf '%s\n' "${caps}" | grep -c '^stages: ')" = 1 ] || { echo "--status alone must print one stages: line, got: ${caps}"; exit 1; }
+  [ "${caps}" = "stages: $(${CHECK} stages)" ] || { echo "the stages: line must be release_check.py's list verbatim, got: ${caps}"; exit 1; }
+  case " ${caps} " in *" V "*) ;; *) echo "the stages: line must name V — the server reads this driver as an old one otherwise"; exit 1;; esac
   # V: --version-id 는 rcm 의 버전 행에서 이름을 받는다(API 는 shim) · 없으면 예전 경로 그대로
   local t; t="$(mktemp -d)"; WORK="${t}"
   shim_version_api() { echo "version_row $1" >>"${t}/calls"; cat "${t}/row.json"; }
@@ -455,6 +475,7 @@ selftest() {
   VERSION_ID=9; BUILD_NAME=""; ( v_version >/dev/null 2>&1 ) && { echo "unreadable API must exit 2, not continue"; exit 1; }
   STATUS_ONLY=true; v_version >"${t}/out" && grep -q 'stage V' "${t}/out" || { echo "--status with an unreadable row should report stage V"; exit 1; }
   ( BUILD_NAME=""; do_status ) | grep -q '^build ? · version #9 · stage V$' || { echo "--status without a name must print stage V"; exit 1; }
+  ( BUILD_NAME=""; do_status ) | grep -q "^stages: $(${CHECK} stages)\$" || { echo "--status must print stages: even without a name"; exit 1; }
   STATUS_ONLY=false; VERSION_ID=""; BUILD_NAME="1.0.1"; bind_build_name; [ "${RELEASE_BRANCH}" = "release/1.0.1" ] || { echo "old path (--build-name only) broke"; exit 1; }
   [ "$(grep -c '^version_row 7$' "${t}/calls")" = 1 ] || { echo "the API must be called exactly once per V run"; exit 1; }
   rm -rf "${t}"; WORK=""

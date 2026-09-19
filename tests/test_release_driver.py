@@ -22,6 +22,8 @@ from remote_ci_monitor.release_driver import (
     LOG_TAIL_LINES,
     DriverRunner,
     driver_argv,
+    driver_stages,
+    knows_version_stage,
     log_tail,
     pid_alive,
     plan_n,
@@ -301,3 +303,22 @@ def test_status_runs_the_driver_synchronously_and_reports_timeouts(runner, tmp_p
     assert runner.status(bad, checkout, {}) == (["partial"], "--status exited 4")
     lines, err = runner.status(tmp_path / "missing.sh", checkout, {})
     assert lines is None and err.startswith("--status could not start")
+
+
+def test_the_stages_line_is_the_only_signal_that_a_driver_knows_the_version_stage():
+    """워크플랜 §13-2 · 계약 §5 — `stages:` 줄에 `V` 가 있을 때만 `--version-id` 를 준다. 줄이
+    없으면 «모른다»(None): 옛 드라이버는 `--version-id` 에 exit 2 로 죽는데 exit 2 는 이미
+    «빌드 번호가 필요하다»·«환경 막힘» 을 뜻해 종료 코드로는 구분할 수 없다."""
+    new = ["driver --status", "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8", "stage: S1 planned"]
+    assert driver_stages(new) == ["V", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+    assert knows_version_stage(new) is True
+    old = ["driver --status", "stage: S1 planned", "jobs: plan #3"]
+    assert driver_stages(old) is None and knows_version_stage(old) is False
+    # V 를 모른다고 말하는 드라이버 — 그 줄을 믿고 `--version-id` 를 뺀다
+    no_v = ["  stages:  S0 S1 S8  "]
+    assert driver_stages(no_v) == ["S0", "S1", "S8"] and knows_version_stage(no_v) is False
+    # 흉내만 낸 줄은 단계 줄이 아니다
+    assert driver_stages(["stages are V S0", "S1 stages: V"]) is None
+    assert driver_stages(["stages:"]) == [] and knows_version_stage(["stages:"]) is False
+    for empty in (None, []):
+        assert driver_stages(empty) is None and knows_version_stage(empty) is False
