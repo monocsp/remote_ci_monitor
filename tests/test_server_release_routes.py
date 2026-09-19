@@ -725,6 +725,44 @@ def test_listing_needs_the_mirror_and_then_runs_the_profile_commands_in_a_checko
     assert body["release_notes"]["path"] == "store/release_notes/1.0.1/en.txt"  # `*` 로 찾는다
 
 
+def test_the_listing_answer_is_remembered_briefly_and_never_across_shas(srv, remote, monkeypatch):
+    """워크플랜 §14-1 — 버전 페이지가 5초마다 부르는 바람에 이 명령 둘이 빌드 머신에서 5초마다
+    돌면 안 된다(진짜 스토어를 읽는 프로젝트가 있다). 같은 (저장소 · 체크아웃 sha · build_name)
+    이면 `LISTING_CACHE_TTL` 초 동안 같은 답을 돌려준다. **다른 sha 의 답은 절대 나가지 않고**,
+    미러가 움직이면 그 저장소의 기억은 통째로 버린다."""
+    from remote_ci_monitor import server as server_mod
+
+    srv.fetch()
+    ran: list[tuple[str, ...]] = []
+    real = srv.app._run_listing
+
+    def counting(argv, cwd, env):
+        ran.append(tuple(argv))
+        return real(argv, cwd, env)
+
+    monkeypatch.setattr(srv.app, "_run_listing", counting)
+    first = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert len(ran) == 2 and first["preview"] == ["Title", "Short description"]
+    assert srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1] == first
+    assert len(ran) == 2  # 기억에서 나갔다 — 명령은 다시 돌지 않았다
+    # build_name 이 다르면 다른 키다(릴리스 노트를 그 이름으로 찾는다)
+    other = srv.req("GET", "/api/repos/app/release/listing")[1]
+    assert len(ran) == 4 and other["sha"] == first["sha"]
+    assert len(srv.app._listing_cache) == 2
+    # 미러가 움직이면 그 저장소의 기억은 버린다 — 옛 sha 의 답이 남아 있을 자리가 없다
+    new = remote.push_commit("more.txt", "x\n", "more")
+    srv.fetch()
+    fresh = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert len(ran) == 6 and fresh["sha"] == new
+    assert list(srv.app._listing_cache) == [("app", new, "1.0.1")]
+    # 기억을 붙잡아 두는 것은 TTL 뿐이다 — 0 이면 매번 다시 돈다
+    monkeypatch.setattr(server_mod, "LISTING_CACHE_TTL", 0.0)
+    assert srv.req("GET", "/api/repos/app/release/listing?build_name=9.9.9")[1]["sha"] == new
+    assert len(ran) == 8
+    assert srv.req("GET", "/api/repos/app/release/listing?build_name=9.9.9")[1]["sha"] == new
+    assert len(ran) == 10
+
+
 def test_listing_ref_reads_the_copy_from_that_branch(srv, remote):
     """`listing.ref = "dev"` — dev → main 으로 내보내는 프로젝트는 릴리스에 실릴 문안이 dev 에 있다.
     체크아웃은 그 브랜치의 sha 로 만들고, 프로파일 JSON 의 listing.ref 는 그 이름이다."""

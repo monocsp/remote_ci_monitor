@@ -328,6 +328,7 @@ def test_live_and_hints_come_from_the_latest_plan_and_creating_submits_the_versi
         "delete_job_id": None,
         "release_id": None,
         "review_job_id": None,
+        "upload_job_id": None,
         "has_prefill": False,
         "has_edits": False,
         "changed": 0,
@@ -350,7 +351,9 @@ def test_without_a_version_preset_the_draft_is_editing_at_once(vsrv):
     assert srv.store.list_jobs_by_preset(["release-version"], 10) == []
     doc = srv.version(1)
     assert doc["prefill"] is None and doc["edited"] is None and doc["has_prefill"] is False
-    assert doc["listing"]["configured"] is True  # 파일 폴백은 listing 에서
+    # 파일 폴백은 `GET …/release/listing` 이 따로 답한다(§14-1) — 상세에는 없다
+    assert "listing" not in doc
+    assert srv.req("GET", "/api/repos/app/release/listing")[1]["configured"] is True
 
 
 def test_name_checks_duplicates_and_permissions(vsrv):
@@ -413,6 +416,27 @@ def test_name_checks_duplicates_and_permissions(vsrv):
     assert srv.req("DELETE", f"{VPATH}/99", token="admin")[0] == 404
 
 
+def test_a_failed_draft_does_not_hold_its_name(vsrv):
+    """워크플랜 §14-3 — 만들기가 실패한 행은 이름을 붙잡지 않는다. 스토어에는 아무것도 없고
+    (`asc_version_id` 는 성공했을 때만 적힌다) 사람이 막힌 것을 고치고 **같은 이름으로 다시**
+    누를 수 있어야 한다. 그 전에는 409 `version_exists` 라서 반드시 버리고 다시 만들어야 했다.
+    실패한 행 자체는 목록에 남는다 — 사라지면 왜 실패했는지 읽을 수가 없다."""
+    srv = vsrv
+    first = srv.create({"ios_version": "1.1.1", "android_version": "1.0.1"})[1]
+    srv.finish_job(first["job_id"], None, state=FAILED, exit_code=3)
+    row = srv.store.get_version(first["id"])
+    assert row["state"] == "failed" and row["asc_version_id"] is None
+    status, again = srv.create({"ios_version": "1.1.1", "android_version": "1.0.1"})
+    assert status == 202, again
+    assert again["id"] != first["id"]
+    # 실패한 행은 여전히 목록에 있고(닫힌 것이 아니다) 편집 · 버리기도 그대로다
+    listed = srv.req("GET", VPATH)[1]["drafts"]
+    assert sorted(d["id"] for d in listed) == [first["id"], again["id"]]
+    assert [d["state"] for d in listed if d["id"] == first["id"]] == ["failed"]
+    # 새 드래프트는 열려 있으므로 세 번째는 다시 막힌다
+    assert code_of(srv.create({"ios_version": "1.1.1"})) == (409, "version_exists")
+
+
 # ── 완료 훅 (AC-B5 · E4 · E5) ─────────────────────────────────────────────────
 
 
@@ -433,8 +457,6 @@ def test_the_create_job_hook_fills_asc_id_and_prefill_or_marks_the_row_failed(vs
     assert doc["diff"] == {"fields": [], "screenshots": {"ios": "same", "android": "same"}}
     assert doc["release"]["build_name"] == "1.1.1" and doc["release"]["plan"] is None
     assert doc["release"]["jobs"][0]["role"] == "version"
-    assert doc["driver"]["configured"] is True and doc["driver"]["status"] is None
-    assert doc["listing"]["configured"] is True and doc["listing"]["sha"] is None
     assert any("version: #1 1.1.1 created (job #1, asc abc123)" in m for m in srv.server_log)
     # exit 1 → failed
     status, body = srv.create({"ios_version": "1.1.2"})
@@ -467,7 +489,8 @@ def test_the_create_job_hook_fills_asc_id_and_prefill_or_marks_the_row_failed(vs
     status, body = srv.create({"ios_version": "1.1.5"})
     srv.finish_job(body["job_id"], {"prefill.json": b"{}"})
     assert srv.store.get_version(body["id"])["state"] == "failed"
-    # failed 행은 목록에 남고(재시도는 새 드래프트) 이름을 다시 쓸 수 없다 — «버리기» 로 치운다
+    # failed 행은 목록에 남는다(왜 실패했는지 읽을 수 있어야 한다). 이름은 붙잡지 않는다 —
+    # 재시도는 같은 이름의 새 드래프트다(§14-3 · test_a_failed_draft_does_not_hold_its_name)
     listed = srv.req("GET", VPATH)[1]
     assert [d["state"] for d in listed["drafts"]] == [
         "failed",
@@ -476,7 +499,7 @@ def test_the_create_job_hook_fills_asc_id_and_prefill_or_marks_the_row_failed(vs
         "failed",
         "editing",
     ]
-    assert code_of(srv.create({"ios_version": "1.1.4"})) == (409, "version_exists")
+    assert srv.create({"ios_version": "1.1.4"})[0] == 202
 
 
 def test_the_hook_waits_for_a_bundle_still_in_transit(vsrv):
@@ -511,6 +534,31 @@ def test_the_hook_waits_for_a_bundle_still_in_transit(vsrv):
     srv.app.publish_artifacts(job_id, art.READY)
     row = srv.store.get_version(vid)
     assert row["state"] == "editing" and row["asc_version_id"] == "abc123"
+
+
+def test_the_version_detail_runs_no_subprocess(vsrv):
+    """워크플랜 §14-1 — 버전 페이지는 이 라우트를 5초마다 부른다. 그러니 한 번에 하위 프로세스가
+    하나도 돌면 안 된다. 드라이버 `--status` 와 문안 명령 둘은 원래 있던 자기 라우트가 답하고,
+    상세에는 `driver` · `listing` 이 없다. `release` 는 남는다 — 대장과 묶음 파일만 읽는다."""
+    srv = vsrv
+    srv.fetch()
+    vid = editing_draft(srv)
+
+    def never(*a, **kw):
+        raise AssertionError(f"the version detail must not run commands: {a!r}")
+
+    srv.app._run_listing = never
+    srv.app.driver.status = never
+    doc = srv.version(vid)
+    assert "driver" not in doc and "listing" not in doc
+    assert doc["release"]["build_name"] == "1.1.1"  # 여기에 필요한 것은 남아 있다
+    assert doc["prefill"] == PREFILL_DOC and doc["diff"]["fields"] == []
+    assert set(doc) == set(srv.req("GET", VPATH)[1]["drafts"][0]) | {
+        "prefill",
+        "edited",
+        "diff",
+        "release",
+    }
 
 
 # ── PUT …/listing · GET …/diff (AC-B6 · B7 · E9) ─────────────────────────────
@@ -745,7 +793,74 @@ def test_upload_forwards_the_edited_listing_too(vsrv):
     assert status == 202, body
     sent = json.loads(srv.store.get_job(body["job_id"]).inputs["listing_json"])
     assert sent["android"]["title"] == "New name" and sent["ios"]["subtitle"] == "Sleep better"
-    assert srv.store.get_version(vid)["state"] == "editing"  # upload 는 running 으로 두지 않는다
+    # rehearsal 은 스토어에 아무것도 쓰지 않는다 — 행은 그대로 열려 있다(§14-2)
+    row = srv.store.get_version(vid)
+    assert row["state"] == "editing" and row["upload_job_id"] is None
+    assert srv.discard(vid)[0] == 202  # 그래서 «버리기» 도 열려 있다
+
+
+def test_an_upload_holds_the_row_until_it_ends_and_a_rehearsal_does_not(vsrv):
+    """워크플랜 §14-2 · §2.2 (d) — `mode=upload` 는 스토어에 바이너리를 올린다. 그 동안 행은
+    `running` 이고 «버리기» 는 409 `version_running` 이다(E15). 예전에는 review · start 만 행을
+    붙잡아서, 셋 중 가장 되돌리기 어려운 것만 열려 있었다 — 올리는 중에 버리면 App Store 버전을
+    지우는 잡까지 나갔다. 잡이 끝나면 어떻게 끝났든 `editing` 으로 돌아온다."""
+    srv = vsrv
+    vid = editing_draft(srv, ios="1.1.1", android="1.1.1")
+    srv.plan_job({**PLAN_DOC, "build_name": "1.1.1"})
+    up = {"version_id": vid, "mode": "upload", "confirm_build_number": "181"}
+    status, body = srv.post("upload", up, token="admin")
+    assert status == 202, body
+    job = srv.store.get_job(body["job_id"])
+    assert job.inputs["mode"] == "upload" and job.inputs["build_name"] == "1.1.1"
+    row = srv.store.get_version(vid)
+    assert row["state"] == "running" and row["upload_job_id"] == job.id
+    status, refused = srv.discard(vid)
+    assert (status, refused["code"]) == (409, "version_running")
+    assert refused["upload_job_id"] == job.id and refused["review_job_id"] is None
+    assert srv.store.list_jobs_by_preset(["release-version"], 20)[0].inputs["mode"] == "create"
+    assert code_of(srv.put_listing(vid, {"ios": {"subtitle": "x"}})) == (200, None)  # 편집은 열려
+    srv.put_listing(vid, {"ios": {"subtitle": None}})  # 되돌린다(이 프리셋은 그 입력을 모른다)
+    srv.finish_job(job.id, {"out/upload.json": b'{"schema": 1, "build": 181}'})
+    assert srv.store.get_version(vid)["state"] == "editing"
+    assert any(f"upload job #{job.id} succeeded → editing" in m for m in srv.server_log)
+    # 실패해도 돌아온다 — 행이 말하는 것은 «되돌릴 수 없는 일이 도는 중인가» 뿐이다
+    status, body = srv.post("upload", up, token="admin")
+    assert status == 202 and srv.store.get_version(vid)["state"] == "running"
+    srv.finish_job(body["job_id"], None, state=FAILED, exit_code=1)
+    assert srv.store.get_version(vid)["state"] == "editing"
+    # lost 도 같다
+    status, body = srv.post("upload", up, token="admin")
+    srv.finish_job(body["job_id"], None, state=LOST, exit_code=None)
+    assert srv.store.get_version(vid)["state"] == "editing"
+    # rehearsal 은 붙잡지 않는다
+    status, body = srv.post("upload", {"version_id": vid, "mode": "rehearsal"})
+    assert status == 202, body
+    row = srv.store.get_version(vid)
+    assert row["state"] == "editing" and row["upload_job_id"] != body["job_id"]
+    assert srv.discard(vid)[0] == 202
+
+
+def test_restart_recovery_settles_a_row_left_running_by_an_upload(vsrv):
+    """AC-B11 · §14-2 — 서버가 꺼진 동안 올리기가 끝났으면 기동 복구가 행을 `editing` 으로
+    되돌린다. 아직 도는 중이면 붙잡은 그대로다 — 재시작이 «버리기» 를 열어 주면 안 된다."""
+    srv = vsrv
+    srv.plan_job({**PLAN_DOC, "build_name": "1.1.1"})
+    up = {"mode": "upload", "confirm_build_number": "181"}
+    done = editing_draft(srv, ios="1.1.1", android="1.1.1")
+    status, body = srv.post("upload", {**up, "version_id": done}, token="admin")
+    assert status == 202, body
+    srv.finish_quietly(body["job_id"], {"out/upload.json": b"{}"})
+    assert srv.store.get_version(done)["state"] == "running"
+    srv.plan_job({**PLAN_DOC, "build_name": "1.2.1"})
+    running = editing_draft(srv, ios="1.2.1", android="1.2.1")
+    status, body = srv.post("upload", {**up, "version_id": running}, token="admin")
+    assert status == 202, body
+
+    srv.app.recover_versions_on_start()
+
+    assert srv.store.get_version(done)["state"] == "editing"
+    assert srv.store.get_version(running)["state"] == "running"  # 아직 큐에 있다
+    assert code_of(srv.discard(running)) == (409, "version_running")
 
 
 def test_two_different_store_version_names_travel_as_build_name_and_build_name_android(vsrv):
@@ -898,8 +1013,8 @@ def test_the_driver_view_says_which_stages_the_driver_knows(vsrv):
     doc = srv.req("GET", "/api/repos/app/release/driver")[1]
     assert doc["stages"] == ["V", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
     assert doc["knows_version_stage"] is True
-    # 버전 페이지도 같은 문서를 그대로 쓴다(§2.2 `GET …/versions/<id>` 의 `driver`)
-    assert srv.version(editing_draft(srv))["driver"]["knows_version_stage"] is True
+    # 버전 페이지는 이 라우트를 자기 박자로 부른다 — 상세에는 `driver` 가 없다(§14-1)
+    assert "driver" not in srv.version(editing_draft(srv))
 
 
 def test_a_driver_that_does_not_know_the_v_stage_is_called_the_old_way(vsrv):
@@ -1124,7 +1239,7 @@ def test_the_versions_table_is_read_by_sqlite_as_documented(vsrv):
         ("docs/configuration.md", r"\| `split_version_unsupported` \|"),
         ("docs/configuration.md", r"404\n`version_not_found`"),
         ("docs/configuration.md", r"the `versions` table behind the version routes, alone"),
-        ("CHANGELOG.md", r"Database schema v20"),
+        ("CHANGELOG.md", r"Database schema v21"),
         ("CHANGELOG.md", r"`GET /api/repos/<repo>/release/versions`"),
         ("CHANGELOG.md", r"`version_id` on plan, review, upload and start"),
     ],

@@ -8,12 +8,30 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Breaking changes
-- **Database schema v20.** A new `versions` table holds the store version drafts (one row per
+- **Database schema v21.** A new `versions` table holds the store version drafts (one row per
   «new version»: the two store version names, its state, the prefilled and edited listing, and
-  the jobs and driver round it is linked to). A v19 file is backed up (`rcm.sqlite3.v19.bak`) and
-  migrated on start, and an older build refuses a v20 file and points at that backup, so upgrade
-  the server before the workers. `rcm gc` and the retention sweeps leave the new table alone.
-  ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
+  the jobs and driver round it is linked to); v21 adds its `upload_job_id` column. A v19 file is
+  backed up (`rcm.sqlite3.v19.bak`) and migrated on start, and an older build refuses a v21 file
+  and points at that backup, so upgrade the server before the workers. `rcm gc` and the retention
+  sweeps leave the new table alone.
+  ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160),
+  [#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
+
+### Fixed
+- **A draft cannot be discarded while its upload is in flight, a failed draft no longer holds its
+  name for ever, and the version detail is cheap enough to poll.** `POST …/release/upload` with
+  `mode = upload` now links its job to the draft and holds the row in `running` until that job
+  ends, the way `review` and `start` already did, so «discard» answers 409 `version_running`
+  instead of firing a job that deletes the App Store version rcm is uploading to; a
+  `mode = rehearsal` job writes nothing to a store and still leaves the draft open, and a restart
+  hands a row back to `editing` only once its upload has really finished. A draft whose create job
+  failed no longer counts against `version_exists` — the store has nothing under that name, so the
+  same name can be typed again — and the expiry sweep now discards such a draft too, locally and
+  never through a store delete job. `GET …/release/versions/<id>` no longer carries `driver` and
+  `listing`: it ran three subprocesses per request while the page polls it every five seconds.
+  Those two documents keep their own routes, `GET …/release/driver` and `GET …/release/listing`,
+  and the listing route now remembers its answer for 30 seconds per repository, checkout SHA and
+  `build_name`. ([#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
 
 ### Added
 - **Store version drafts expire on their own, and `rcm release` makes one from a terminal.** The

@@ -71,7 +71,8 @@ def add_release(store: Store, build: str = "1.0.1", *, started: datetime = NOW) 
 
 
 def test_a_fresh_database_is_version_18_with_the_releases_table():
-    assert DB_VERSION == 20  # v20: versions 표(tests/test_store_versions.py)
+    # v20: versions 표 · v21: 그 표의 upload_job_id (tests/test_store_versions.py)
+    assert DB_VERSION == 21
 
 
 def test_a_fresh_database_has_the_releases_table_and_index(tmp_path):

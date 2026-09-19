@@ -68,7 +68,7 @@ from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 20
+DB_VERSION = 21
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -91,6 +91,9 @@ VERSION_STATES = (
     VERSION_FAILED,
 )
 VERSION_CLOSED_STATES = (VERSION_SUBMITTED, VERSION_DISCARDED)
+#: 손도 안 댄 채 만료되면 청소기가 버리는 상태(워크플랜 Q1 · §14-3). `failed` 는 만들기가 실패한
+#: 행이다 — 스토어에는 아무것도 없고(asc id 없음) 이름만 붙잡고 있으므로 같이 치운다.
+VERSION_SWEEPABLE_STATES = (VERSION_EDITING, VERSION_FAILED)
 #: `update_version` 이 받는 열 — 이름 · 만든 사람 · 만든 시각은 바꾸지 않는다.
 VERSION_UPDATABLE = frozenset(
     {
@@ -105,6 +108,7 @@ VERSION_UPDATABLE = frozenset(
         "delete_job_id",
         "release_id",
         "review_job_id",
+        "upload_job_id",
         "expiry_warned",
     }
 )
@@ -291,7 +295,10 @@ CREATE TABLE IF NOT EXISTS versions (
   delete_job_id INTEGER,
   release_id INTEGER,
   review_job_id INTEGER,
-  expiry_warned INTEGER NOT NULL DEFAULT 0
+  expiry_warned INTEGER NOT NULL DEFAULT 0,
+  -- v21: `mode=upload` 잡 — 올리는 동안 행은 `running` 이다(마이그레이션이 뒤에 붙이므로 여기서도
+  -- 맨 끝이다. 새 DB 와 올라온 DB 의 열 차례가 같아야 한다)
+  upload_job_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS versions_repo ON versions(repo, id DESC);
 """
@@ -464,6 +471,11 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         " review_job_id INTEGER, expiry_warned INTEGER NOT NULL DEFAULT 0)",
         "CREATE INDEX IF NOT EXISTS versions_repo ON versions(repo, id DESC)",
     ),
+    # v20 → v21(워크플랜 §14-2): `upload_job_id` — 스토어에 바이너리를 올리는 `mode=upload` 잡을
+    # 버전 행에 붙인다. review 잡처럼 그 동안 행은 `running` 이고 «버리기» 는 409 다. 올리는 중에
+    # 드래프트를 버리면 App Store 버전을 지우는 잡까지 나가는데, 셋 중 가장 되돌리기 어려운 것이
+    # 그것만 안 막혀 있었다. `mode=rehearsal` 은 스토어에 쓰지 않으니 붙이지 않는다.
+    21: ("ALTER TABLE versions ADD COLUMN upload_job_id INTEGER",),
 }
 
 
@@ -2627,6 +2639,7 @@ class Store:
             "delete_job_id": row["delete_job_id"],
             "release_id": row["release_id"],
             "review_job_id": row["review_job_id"],
+            "upload_job_id": row["upload_job_id"],
             "expiry_warned": bool(row["expiry_warned"]),
         }
 
@@ -2715,13 +2728,13 @@ class Store:
         return cur.rowcount == 1
 
     def version_for_job(self, job_id: int) -> dict[str, Any] | None:
-        """이 잡을 만들기 · 지우기 · 심사로 연결한 행(완료 훅). 없으면 None."""
+        """이 잡을 만들기 · 지우기 · 심사 · 올리기로 연결한 행(완료 훅). 없으면 None."""
         row = (
             self._conn()
             .execute(
                 "SELECT * FROM versions WHERE create_job_id=? OR delete_job_id=? "
-                "OR review_job_id=? ORDER BY id DESC LIMIT 1",
-                (int(job_id), int(job_id), int(job_id)),
+                "OR review_job_id=? OR upload_job_id=? ORDER BY id DESC LIMIT 1",
+                (int(job_id), int(job_id), int(job_id), int(job_id)),
             )
             .fetchone()
         )
@@ -2740,14 +2753,20 @@ class Store:
         return self._row_to_version(row) if row else None
 
     def open_versions_expired(self, now: datetime) -> list[dict[str, Any]]:
-        """편집한 적 없는(`last_edit_at` NULL) editing 드래프트 중 만료가 지난 것 — 청소기가
-        «버리기» 경로로 지운다(워크플랜 Q1)."""
+        """편집한 적 없는(`last_edit_at` NULL) `editing` · `failed` 드래프트 중 만료가 지난 것 —
+        청소기가 «버리기» 경로로 지운다(워크플랜 Q1 · §14-3).
+
+        `failed`(만들기 잡이 실패한 행)가 여기 드는 것은, 그 행이 이름을 붙잡고 있는데 아무 조회에도
+        안 걸려 영원히 남기 때문이다. 그 행에는 App Store 버전 id 가 없다 — 서버는 만들기가
+        **성공했을 때만** 적는다 — 그러니 스토어 삭제 잡은 나가지 않고 그 자리에서 `discarded` 다.
+        """
+        marks = ",".join("?" * len(VERSION_SWEEPABLE_STATES))
         rows = (
             self._conn()
             .execute(
-                "SELECT * FROM versions WHERE state=? AND last_edit_at IS NULL AND expires_at<? "
-                "ORDER BY id",
-                (VERSION_EDITING, _ts(now)),
+                f"SELECT * FROM versions WHERE state IN ({marks}) AND last_edit_at IS NULL "
+                "AND expires_at<? ORDER BY id",
+                (*VERSION_SWEEPABLE_STATES, _ts(now)),
             )
             .fetchall()
         )
