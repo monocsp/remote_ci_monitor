@@ -44,7 +44,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.status import iso
 from remote_ci_monitor.server import App, make_server
 from remote_ci_monitor.store import Store
-from test_server import PRESETS, TAR, TREE_HASH, sh
+from test_server import PRESETS, TAR, TREE_HASH, read_raw, send_raw, sh
 from test_server_m5 import blobs_for, manifest_of
 
 T0 = datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
@@ -1382,21 +1382,58 @@ def test_partial_log_line_is_dropped_when_the_job_is_closed_as_lost(srv):
     assert jid2 not in srv.app._log_partial
 
 
-def test_log_415_closes_the_connection_before_the_unread_body(srv):
-    """415 는 본문을 읽기 전에 낸다 — HTTP/1.1 keep-alive 라 연결을 닫지 않으면 안 읽은 본문이
-    다음 요청으로 파싱된다(411·413 과 같은 규칙)."""
+def test_log_415_eats_the_unread_body_so_the_next_request_is_whole(srv):
+    """415 는 본문을 읽기 전에 낸다 — HTTP/1.1 keep-alive 라 그 본문을 두고 나가면 다음 요청이
+    남은 바이트 안에서 파싱된다(411·413 과 같은 규칙).
+
+    예전에는 연결을 닫아 막았다. 이제는 서버가 **답하기 전에 본문을 먹는다**(C 단계 격리 검증
+    2026-09-20 · `docs/version-page-workplan.md` §16-1) — 워커는 같은 연결로 계속 보고할 수
+    있어야 한다. 끝을 알 수 없는 chunked 본문만 여전히 안 읽고 닫는다.
+    """
     jid = running_job(srv)
-    status, headers, _ = srv.req(
-        "POST",
-        f"/worker/jobs/{jid}/log",
-        token="build-02",
-        body=b"x\n",
-        headers={"Content-Type": "text/plain"},
-        raw=True,
-    )
-    assert status == 415
-    connection = {k.lower(): v for k, v in headers.items()}.get("connection", "")
-    assert connection.lower() == "close", headers
+    sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    fp = sock.makefile("rb")
+    try:
+        send_raw(
+            sock,
+            "POST",
+            f"/worker/jobs/{jid}/log",
+            body=b"x\n",
+            token=srv.tokens["build-02"],
+            extra="Content-Type: text/plain\r\n",
+        )
+        status, headers, _ = read_raw(fp)
+        assert status.split()[1] == "415", status
+        assert headers.get("connection") != "close", status
+        send_raw(sock, "GET", "/api/health")
+        status, _headers, payload = read_raw(fp)
+        assert status.split()[1] == "200", status  # 501 이면 앞 본문이 남았다는 뜻
+        assert json.loads(payload)["ok"] is True
+    finally:
+        fp.close()
+        sock.close()
+    assert not srv.app.log_path(jid).exists()  # 거절한 줄은 파일에 안 닿는다
+
+
+def test_log_415_with_an_endless_body_still_closes_the_connection(srv):
+    """길이를 모르는 chunked 본문은 먹을 수 없다 — 415 를 내고 연결을 닫는 것만이 안전하다."""
+    jid = running_job(srv)
+    sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    fp = sock.makefile("rb")
+    try:
+        head = (
+            f"POST /worker/jobs/{jid}/log HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Authorization: Bearer {srv.tokens['build-02']}\r\n"
+            "Content-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )
+        sock.sendall(head.encode())  # 본문은 한 바이트도 안 보낸다
+        status, headers, _ = read_raw(fp)
+        assert status.split()[1] == "415", status
+        assert headers.get("connection") == "close", (status, headers)
+        assert fp.read(1) == b""
+    finally:
+        fp.close()
+        sock.close()
 
 
 # ── M5f PR 2a-0: 마커 배치 · 바쁜 DB 는 503 ─────────────────────────────────
