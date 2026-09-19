@@ -193,6 +193,7 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 | `rcm discover [--json] [--timeout S]` | rcm servers on this network (mDNS); `rcm check` says `(found on this network)` when it used one |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
+| `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | store version drafts (admin). With no version arguments `new` asks only for the names, offering the server's hints: enter takes the hint, `-` skips that store, `--yes` takes both. `open` prints the address of the version page |
 
 Every estimate carries a `confidence`: `high` (median of ≥ 5 real runs), `med` (fewer), `low`
 (a preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown

@@ -16,6 +16,21 @@ of a key bumps that number and is listed here.
   ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
 
 ### Added
+- **Store version drafts expire on their own, and `rcm release` makes one from a terminal.** The
+  retention sweep — on its usual cycle and once at server start — now also looks at the version
+  drafts. A draft nobody has touched is discarded once `version_ttl_hours` (default 24) have
+  passed, down the very route the «discard» button uses, so the App Store version is deleted
+  through a `mode = delete` job when the profile has a `version` preset and the row is simply
+  closed when it does not. A draft that *was* edited is never deleted automatically: it is only
+  marked as expired, with one line in the server log, and stays until a person discards it.
+  Submitted versions, drafts still being created and drafts whose round is running are left alone,
+  a delete job is submitted at most once per draft, and `rcm gc` still leaves the table untouched.
+  New command `rcm release`: `new` asks only for the version names — enter takes the server's
+  hint, `-` skips that store, `--yes` takes both hints — then prints the new draft, its state and
+  the address of its version page; `list`, `delete <id>` and `open <id>` are the rest. `rcm check`
+  also warns now when the `version` preset's `mode` input cannot take `create` and `delete`, which
+  used to surface only as a 400 at submit time.
+  ([#162](https://github.com/monocsp/remote_ci_monitor/pull/162))
 - **Store version drafts: the server routes.** `GET /api/repos/<repo>/release/versions` answers
   the live version names and the next-version hints read from the latest plan, the open drafts and
   the last 20 submitted ones; `POST` opens a draft (202 with a `mode = create` job when the

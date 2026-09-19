@@ -299,11 +299,14 @@ def preset_block(name: str, script: str, inputs: str = "") -> str:
     )
 
 
-def version_inputs(mode_default: str = "prefill") -> str:
+VERSION_MODES = ["prefill", "create", "delete"]
+
+
+def version_inputs(mode_default: str = "prefill", modes: list[str] | None = None) -> str:
     """`version` 프리셋의 입력 넷 — rcm 이 보내는 이름 그대로(계약 §2)."""
     return (
         "inputs = [\n"
-        + choice("mode", ["prefill", "create", "delete"], mode_default)
+        + choice("mode", modes or VERSION_MODES, mode_default)
         + '  { name = "ios_version", default = "" },\n'
         + '  { name = "android_version", default = "" },\n'
         + '  { name = "asc_version_id", default = "" },\n'
@@ -317,6 +320,7 @@ def presets(
     listing_json: bool = True,
     version_mode: str | None = "prefill",
     build_name_android: bool = True,
+    version_modes: list[str] | None = None,
 ) -> str:
     listing = LISTING_JSON if listing_json else ""
     android = BUILD_NAME_ANDROID if build_name_android else ""
@@ -346,7 +350,9 @@ def presets(
     version = (
         ""
         if version_mode is None
-        else preset_block("release-version", "release/version.sh", version_inputs(version_mode))
+        else preset_block(
+            "release-version", "release/version.sh", version_inputs(version_mode, version_modes)
+        )
     )
     return (
         preset_block("release-plan", "release/plan.sh", PLAN_INPUTS)
@@ -619,6 +625,54 @@ def test_check_row_says_nothing_when_both_presets_declare_build_name_android(
     assert code == 0, out + err
     status, detail = release_row(out)
     assert status == "ok" and "build_name_android" not in detail, detail
+
+
+#: `mode` 가 자유 문자열인 version 프리셋의 입력 — 선택지를 안 걸었으니 어떤 값도 받는다.
+FREE_MODE_INPUTS = (
+    "inputs = [\n"
+    '  { name = "mode", default = "prefill" },\n'
+    '  { name = "ios_version", default = "" },\n'
+    '  { name = "android_version", default = "" },\n'
+    '  { name = "asc_version_id", default = "" },\n'
+    "]\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("modes", "missing"),
+    [(["prefill"], "create, delete"), (["prefill", "create"], "delete")],
+)
+def test_check_row_warns_when_the_version_mode_cannot_take_create_and_delete(
+    srv, env, tmp_path, capsys, modes, missing
+):
+    """워크플랜 §13 3: `choices = ["prefill"]` 인 프리셋도 기본값 검사는 통과한다. 서버는
+    `create`·`delete` 를 보내므로 «새 버전 만들기» 가 제출 순간 400 으로만 드러난다 — warn 한
+    줄로 미리 말한다. FAIL 은 아니다(스토어 탭의 나머지는 그대로 돈다)."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(version_modes=modes))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "warn"
+    assert (
+        f"preset 'release-version' input 'mode' cannot take {missing} — "
+        "rcm sends them and the job will be refused (re-run /rcm-store-connect)"
+    ) in detail, detail
+
+
+@pytest.mark.parametrize("text", [presets(), presets().replace(version_inputs(), FREE_MODE_INPUTS)])
+def test_check_row_says_nothing_when_the_version_mode_can_take_them(
+    srv, env, tmp_path, capsys, text
+):
+    """선택지가 다 있거나 아예 없으면(자유 문자열) 조용하다 — 후자는 어떤 값도 받는다."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, text)
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "ok" and "cannot take" not in detail, detail
 
 
 def test_check_prints_no_release_row_for_a_repo_without_a_profile(srv, env, tmp_path, capsys):

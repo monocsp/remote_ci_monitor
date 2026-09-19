@@ -1,4 +1,4 @@
-"""`rcm` CLI — run · wait · cancel · pause · resume · serve · check · token · version.
+"""`rcm` CLI — run · wait · cancel · pause · resume · release · serve · check · token · version.
 
 stdout 에는 JSON 한 줄(run·wait), stderr 에는 사람용 진행 표시. 종료 코드:
   run/wait: succeeded 0 · failed 1 · cancelled/timed_out 2 · lost/조회 실패/--timeout 3
@@ -1312,6 +1312,169 @@ def cmd_presets(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── release (스토어 버전 드래프트) ───────────────────────────────────────────
+#
+# 서버 API 만 부른다 — 이름을 검증하는 것도, 힌트를 계산하는 것도, 스토어를 부르는 것도 서버다
+# (docs/version-page-workplan.md §2.3). 여기서 하는 일은 묻고 · 보내고 · 찍는 것뿐이다.
+
+
+class ReleaseUsage(Exception):
+    """사용 오류 — 문구 그대로 stderr 로 나가고 exit 2. 서버에 보내기 전에 끝난 것들이다."""
+
+
+#: 「이 스토어는 만들지 않는다」를 뜻하는 대답. 빈 엔터는 힌트를 고르는 것이라 따로 필요하다.
+RELEASE_SKIP = "-"
+RELEASE_PLATFORMS = ("ios", "android")
+RELEASE_PLATFORM_LABEL = {"ios": "iOS", "android": "Android"}
+#: 설정의 저장소 이름 규칙(`config._NAME_RE`)과 같다 — 주소에 그대로 들어가므로 여기서 본다.
+_RELEASE_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _release_repo(client: Client, wanted: str | None) -> str:
+    """`--repo` 가 없으면 릴리스 프로파일이 있는 저장소가 **하나일 때만** 그것으로 고른다.
+    둘 이상이면 고르지 않고 이름들을 보여 준다 — 엉뚱한 앱에 버전을 만들지 않는다."""
+    if wanted:
+        if not _RELEASE_REPO_RE.match(wanted):
+            raise ReleaseUsage(f"--repo {wanted!r} is not a repository name")
+        return wanted
+    doc = client.get_json("/api/repos") or {}
+    names = [r["name"] for r in doc.get("repos") or [] if r.get("release")]
+    if len(names) == 1:
+        return names[0]
+    if not names:
+        raise ReleaseUsage("no repository on this server has a release profile")
+    raise ReleaseUsage(f"--repo is required — this server has {', '.join(names)}")
+
+
+def _release_url(client: Client, repo: str, version_id: int) -> str:
+    """버전 페이지의 웹 주소. 브라우저는 열지 않는다(주소만 찍는다)."""
+    return f"{client.server}/#/store/{repo}/v/{version_id}"
+
+
+def _release_ask(hints: dict[str, Any]) -> dict[str, str | None]:
+    """«새 버전을 만듭니다» — 버전 **이름만** 묻는다. 엔터는 힌트, `-` 는 그 스토어를 건너뛴다.
+    힌트가 없는 스토어는 빈 기본값으로 묻는다(그냥 엔터면 건너뛴 것과 같다).
+
+    묻는 말은 **stderr** 다 — stdout 에는 새 버전의 번호와 주소만 남아야 `rcm release new > f`
+    가 쓸 만하다(프롬프트가 파일로 새어 들어가면 화면에는 아무 말도 안 나온다)."""
+    _info("Creating a new version. Enter keeps the hint, '-' skips that store.")
+    out: dict[str, str | None] = {}
+    for store in RELEASE_PLATFORMS:
+        hint = (hints.get(store) or "").strip()
+        shown = f" [{hint}]" if hint else ""
+        sys.stderr.write(f"{RELEASE_PLATFORM_LABEL[store]}{shown}: ")
+        sys.stderr.flush()
+        try:
+            typed = input().strip()
+        except EOFError as e:
+            sys.stderr.write("\n")  # 답 없이 끝났다 — 오류 문구가 프롬프트 뒤에 붙지 않게
+            raise ReleaseUsage(
+                "nothing to read the answers from — pass --ios/--android or --yes"
+            ) from e
+        out[store] = hint if not typed else (None if typed == RELEASE_SKIP else typed)
+    return out
+
+
+def _release_new(client: Client, repo: str, args: argparse.Namespace) -> int:
+    doc = client.get_json(f"/api/repos/{repo}/release/versions") or {}
+    hints = doc.get("hints") or {}
+    typed = {p: getattr(args, p, None) for p in RELEASE_PLATFORMS}
+    if any(v is not None for v in typed.values()):
+        names = {p: (None if typed[p] in (None, "", RELEASE_SKIP) else typed[p]) for p in typed}
+    elif args.yes:
+        names = {p: (hints.get(p) or None) for p in RELEASE_PLATFORMS}
+    else:
+        names = _release_ask(hints)
+    body = {f"{p}_version": names[p] for p in RELEASE_PLATFORMS if names[p]}
+    if not body:
+        raise ReleaseUsage("no version name to create — give --ios and/or --android")
+    resp = client.post_json(f"/api/repos/{repo}/release/versions", body) or {}
+    if args.json:
+        _print_json(resp)
+        return 0
+    version_id = resp.get("id")
+    job = f" · create job #{resp['job_id']}" if resp.get("job_id") else ""
+    print(f"version #{version_id} {resp.get('build_name') or ''} {resp.get('state')}{job}".strip())
+    print(_release_url(client, repo, version_id))
+    return 0
+
+
+def _release_names(row: dict[str, Any]) -> str:
+    """`1.1.1` · `iOS 1.1.1 · Android 1.0.1` — 두 이름이 같으면 한 번만(워크플랜 §11). 행은
+    드래프트(`ios_version`)일 수도 라이브·힌트·지난 것(`ios`)일 수도 있다."""
+    ios = row.get("ios_version") or row.get("ios")
+    android = row.get("android_version") or row.get("android")
+    if ios and android and ios != android:
+        return f"iOS {ios} · Android {android}"
+    return str(ios or android or "—")
+
+
+def _release_list(client: Client, repo: str, args: argparse.Namespace) -> int:
+    doc = client.get_json(f"/api/repos/{repo}/release/versions") or {}
+    if args.json:
+        _print_json(doc)
+        return 0
+    tz, now = _local_tz(), datetime.now(UTC)  # now 를 줘야 오늘이 아닌 날짜가 날짜로 나온다
+    print(f"live   {_release_names(doc.get('live') or {})}")
+    print(f"next   {_release_names(doc.get('hints') or {})}  (hint)")
+    rows = [("draft", r) for r in doc.get("drafts") or []]
+    rows += [("submitted", r) for r in doc.get("history") or []]
+    if not rows:
+        print("no versions yet")
+        return 0
+    print(f"{'id':<6} {'state':<10} {'version':<30} {'edits':<6} when")
+    for kind, row in rows:
+        if kind == "submitted":
+            print(
+                f"#{row['id']:<5} {'submitted':<10} {_release_names(row):<30} "
+                f"{'—':<6} {fmt_clock(row.get('submitted_at'), tz, now=now)}"
+            )
+            continue
+        edits = str(row.get("changed") or 0) if row.get("has_edits") else "—"
+        when = fmt_clock(row.get("expires_at"), tz, now=now)
+        when = f"expired {when}" if row.get("expired") else f"expires {when}"
+        print(
+            f"#{row['id']:<5} {row.get('state') or '?':<10} {_release_names(row):<30} "
+            f"{edits:<6} {when}"
+        )
+    return 0
+
+
+def _release_delete(client: Client, repo: str, args: argparse.Namespace) -> int:
+    resp = client.delete_json(f"/api/repos/{repo}/release/versions/{args.id}") or {}
+    if args.json:
+        _print_json(resp)
+        return 0
+    job = f" · store delete job #{resp['job_id']}" if resp.get("job_id") else ""
+    print(f"version #{resp.get('id', args.id)} {resp.get('state')}{job}")
+    return 0
+
+
+def cmd_release(args: argparse.Namespace) -> int:
+    client = _client(args)
+    try:
+        repo = _release_repo(client, args.repo)
+        if args.release_command == "open":
+            url = _release_url(client, repo, args.id)
+            if args.json:
+                _print_json({"id": args.id, "url": url})
+            else:
+                print(url)
+            return 0
+        if args.release_command == "new":
+            return _release_new(client, repo, args)
+        if args.release_command == "list":
+            return _release_list(client, repo, args)
+        return _release_delete(client, repo, args)
+    except ReleaseUsage as e:
+        return _usage(str(e))
+    except ClientError as e:
+        return _client_fail(client, f"release {args.release_command} failed", e)
+    except KeyboardInterrupt:
+        _info("")
+        return 130
+
+
 # ── serve · check · token ────────────────────────────────────────────────────
 
 
@@ -1575,6 +1738,10 @@ RELEASE_IRREVERSIBLE_MODE = {"upload": "upload", "review": "submit"}
 #: 역할별로 `mode` 의 기본값이어야 **하는** 값 — version 은 읽기 전용 prefill 이 기본이다
 #: (create 는 스토어에 드래프트를 만들고 delete 는 되돌릴 수 없다).
 RELEASE_REQUIRED_MODE_DEFAULT = {"version": "prefill"}
+#: 역할별로 `mode` 가 **받을 수 있어야** 하는 값. 기본값만 보면 `choices = ["prefill"]` 인 프리셋이
+#: 통과하는데, 서버는 create · delete 를 보낸다 — «새 버전 만들기» 가 제출 순간 400 으로만 드러난다
+#: (워크플랜 §13 3). 선택지를 안 건 프리셋(자유 문자열)은 아무 값이나 받으므로 조용하다.
+RELEASE_REQUIRED_MODE_CHOICES = {"version": ("create", "delete")}
 #: 이 역할들은 `listing_json` 입력을 받아야 웹에서 편집한 문안이 스크립트에 닿는다 — 없으면 warn.
 RELEASE_LISTING_JSON_ROLES = ("review", "upload")
 #: 이 역할들은 `build_name_android` 입력을 받아야 두 스토어에 **서로 다른** 버전 이름을 보낼 수
@@ -1600,7 +1767,8 @@ def _release_row(
     prefill 이 아니다 · 비밀이 있는데 `secrets_dir_env` 가 없다 · 비밀 이름이 겹친다.
     warn: 선택 역할이 비었다 · review/upload 프리셋에 `listing_json` 이 없다(웹에서 편집한
     문안이 전달되지 않는다) · 같은 프리셋에 `build_name_android` 가 없다(두 스토어가 한 버전
-    이름을 같이 써야 한다) · 비밀 폴더가 아직 없다(Settings 화면이 만든다).
+    이름을 같이 써야 한다) · version 프리셋의 `mode` 선택지에 `create`·`delete` 가 없다(서버가
+    보내는 값이라 제출 순간 400 이 된다) · 비밀 폴더가 아직 없다(Settings 화면이 만든다).
     """
     problems: list[str] = []
     warnings: list[str] = []
@@ -1634,6 +1802,15 @@ def _release_row(
                 f"preset {name!r} input 'mode' defaults to {mode.default!r} — "
                 f"it must default to {required_default!r} (the read-only mode)"
             )
+        needed = RELEASE_REQUIRED_MODE_CHOICES.get(role)
+        mode = preset.input_spec("mode") if needed else None
+        if mode is not None and mode.choices:
+            cannot = [v for v in needed or () if v not in mode.choices]
+            if cannot:
+                warnings.append(
+                    f"preset {name!r} input 'mode' cannot take {', '.join(cannot)} — "
+                    "rcm sends them and the job will be refused (re-run /rcm-store-connect)"
+                )
         if role in RELEASE_LISTING_JSON_ROLES and "listing_json" not in declared:
             warnings.append(
                 f"preset {name!r} has no listing_json input — copy edited in the web UI "
@@ -2375,6 +2552,31 @@ def build_parser() -> argparse.ArgumentParser:
     presets.add_argument("--json", action="store_true")
     client_opts(presets)
     presets.set_defaults(func=cmd_presets)
+
+    release = sub.add_parser("release", help="store version drafts: new, list, delete, open")
+    rsub = release.add_subparsers(dest="release_command", required=True)
+
+    def release_opts(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--repo", help="repository name (default: the only one with a profile)")
+        sp.add_argument("--json", action="store_true")
+        client_opts(sp)
+
+    rnew = rsub.add_parser("new", help="create a version draft (admin token)")
+    rnew.add_argument("--ios", metavar="X", help="App Store version name ('-' skips iOS)")
+    rnew.add_argument("--android", metavar="Y", help="Google Play version name ('-' skips Play)")
+    rnew.add_argument(
+        "--yes", "-y", action="store_true", help="take the server's hints without asking"
+    )
+    release_opts(rnew)
+    rlist = rsub.add_parser("list", help="open drafts and recently submitted versions")
+    release_opts(rlist)
+    rdelete = rsub.add_parser("delete", help="discard a draft (admin token)")
+    rdelete.add_argument("id", type=int)
+    release_opts(rdelete)
+    ropen = rsub.add_parser("open", help="print the web address of a version page")
+    ropen.add_argument("id", type=int)
+    release_opts(ropen)
+    release.set_defaults(func=cmd_release)
 
     def server_opts(sp: argparse.ArgumentParser) -> None:
         sp.add_argument(
