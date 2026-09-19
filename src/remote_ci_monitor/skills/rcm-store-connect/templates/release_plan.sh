@@ -36,7 +36,13 @@ usage() { echo "usage: RCM_INPUT_BUILD_NAME=X.Y.Z release_plan.sh | release_plan
 # Contract for store_snapshot(): print ONE JSON object on stdout and exit 0 when the store was read:
 #   { "max_build": <int|null>,   highest build number on any track / any version, both stores together
 #     "first_release": <bool>,   true when nothing is live yet
-#     "store": <object|null>,    shown raw by the page (asc_live, asc_editing, play tracks, …)
+#     "store": <object|null>,    shown raw by the page, which reads TWO LIVE VERSION NAMES out of it:
+#                                  "asc_live": "1.1.0"                       App Store production version name
+#                                  "play": { "production_name": "1.0.0" }    Google Play production version name
+#                                (add whatever else you want shown: asc_live_build, asc_editing, play tracks …)
+#     "next_version_hint": { "ios": "1.1.1", "android": "1.0.1" },   OPTIONAL — omit it and rcm bumps the last
+#                                number of the two names above (1.1.0 → 1.1.1); a name it cannot parse (1.0.0-rc1)
+#                                simply gives no hint. Give it when the project's own rule is not «+1».
 #     "blockers": [ {"code": "B-…", "text": "…"} ],   reasons the release must not proceed (empty = none)
 #     "warnings": [ {"code": "W-…", "text": "…"} ] }
 # Exit non-zero when the store cannot be read (the script turns that into blocker B-STORE, exit 1).
@@ -45,6 +51,12 @@ store_snapshot() {
   # TODO(project): read App Store Connect / Google Play with the credentials in "$SECRETS_DIR" and print the
   #   JSON object described above. Typical sources: an existing fastlane lane that lists builds, a store CLI,
   #   or a python script the project already has. Read-only calls only. Delete the echo below when done.
+  #   Ask the stores for BOTH live version names while you are there — the build numbers alone are not enough:
+  #     "store": { "asc_live": …        App Store Connect: the app's live appStoreVersion versionString
+  #                "play": { "production_name": … }   Google Play: the versionName of the release on the
+  #                                                   production track (not the versionCode) }
+  #   Without play.production_name rcm never learns the Android live name: the «new version» dialog has no
+  #   Android hint and the list screen's Play column stays empty. Add "next_version_hint" too if +1 is wrong here.
   echo '{"max_build": null, "first_release": false, "store": null,'
   echo ' "blockers": [{"code": "B-TODO", "text": "store_snapshot() is not implemented — fill the TODO(project) block in scripts/release/release_plan.sh"}],'
   echo ' "warnings": []}'
@@ -55,6 +67,13 @@ shim_store_snapshot() {
   echo "store_snapshot" >>"$SHIM_CALLS"
   case "$SHIM" in
     ok)         echo '{"max_build": 180, "first_release": false, "store": {"asc_live": "1.0.0"}, "blockers": [], "warnings": []}';;
+    named)      echo '{"max_build": 180, "first_release": false,'
+                echo ' "store": {"asc_live": "1.1.0", "asc_live_build": 180, "play": {"production": 180, "production_name": "1.0.0"}},'
+                echo ' "blockers": [], "warnings": []}';;
+    hinted)     echo '{"max_build": 180, "first_release": false,'
+                echo ' "store": {"asc_live": "1.1.0", "play": {"production_name": "1.0.0"}},'
+                echo ' "next_version_hint": {"ios": "1.2.0", "android": "1.1.0"},'
+                echo ' "blockers": [], "warnings": []}';;
     blocked)    echo '{"max_build": 180, "first_release": false, "store": {}, "blockers": [{"code": "B-PLAYBUSY", "text": "a release is in progress"}], "warnings": []}';;
     poison)     echo '{"max_build": "18l", "first_release": "no", "store": {}, "blockers": [], "warnings": []}';;
     unreadable) return 7;;
@@ -117,6 +136,11 @@ contract, out, bn, n, first_release, snap = sys.argv[1:7]
 d = json.load(open(snap, encoding="utf-8"))
 argv = [sys.executable, contract, "write", "plan", "--out", out, "--build-name", bn, "--n", str(n),
         "--first-release", str(first_release), "--store-json", json.dumps(d.get("store"))]
+# 선택 필드 next_version_hint: 훅이 객체로 주면 그대로 싣고, 없으면 아예 뺀다(계약 §2) — rcm 이
+# store.asc_live · store.play.production_name 의 마지막 숫자 +1 로 알아서 계산한다. 지어내지 않는다.
+hint = d.get("next_version_hint")
+if isinstance(hint, dict):
+    argv += ["--extra-json", json.dumps({"next_version_hint": hint})]
 for b in d.get("blockers") or []:
     argv += ["--blocker", f"{b.get('code')}={b.get('text')}"]
 for w in d.get("warnings") or []:
@@ -160,6 +184,13 @@ selftest() {
   echo "[release_plan] selftest ($SECRETS_ENV)"
   run ok;         check "store max 180 -> n 181, exit 0" 0 "$rc" "d['n']==181 and d['first_release'] is False and d['schema']==1"
   grep -q '::rcm::summary::plan ok' "$t/out" || { echo "FAIL summary marker missing"; fails=$((fails+1)); }
+  # 두 스토어의 라이브 «이름» — 없으면 깨끗이 빠지고, 있으면 그대로 실린다(계약 §2 · 워크플랜 §13-1)
+  check "snapshot without the names -> valid plan.json, no hint invented" 0 "$rc" \
+        "d['store']=={'asc_live': '1.0.0'} and 'next_version_hint' not in d"
+  run named;      check "play.production_name lands in plan.json" 0 "$rc" \
+        "d['store']['play']['production_name']=='1.0.0' and d['store']['asc_live']=='1.1.0' and 'next_version_hint' not in d"
+  run hinted;     check "next_version_hint lands in plan.json" 0 "$rc" \
+        "d['next_version_hint']=={'ios': '1.2.0', 'android': '1.1.0'} and d['store']['play']['production_name']=='1.0.0'"
   run blocked;    check "store blocker -> n null, exit 1" 1 "$rc" "d['n'] is None and d['blockers'][0]['code']=='B-PLAYBUSY'"
   run poison;     check "poisoned snapshot -> red, n null, B-CONTRACT" 1 "$rc" "d['n'] is None and any(b['code']=='B-CONTRACT' for b in d['blockers'])"
   run unreadable; check "store unreadable -> n null, B-STORE" 1 "$rc" "d['n'] is None and d['blockers'][0]['code']=='B-STORE'"

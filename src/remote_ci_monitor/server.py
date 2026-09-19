@@ -148,6 +148,8 @@ from remote_ci_monitor.release_driver import (
     KIND_START,
     DriverRunner,
     base_env,
+    driver_stages,
+    knows_version_stage,
     log_tail,
     pid_alive,
     plan_n,
@@ -2288,6 +2290,25 @@ class App(RemoteWorkersMixin):
                 release_id=row["id"],
             )
 
+    def _driver_knows_version_stage(
+        self, repo: RepoConfig, store: SecretStore, path: Path, workspace: Path
+    ) -> bool:
+        """이 드라이버가 `V` 단계를 아는가 — `--status` 의 `stages:` 줄로만 판단한다(계약 §5).
+
+        모르는 드라이버에 `--version-id` 를 주면 `unknown argument` 와 exit 2 로 죽고, exit 2 는
+        이미 «빌드 번호가 필요하다»·«환경 막힘» 을 뜻해 그 회차가 왜 죽었는지 아무도 모른다.
+        그래서 읽기 전용인 `--status` 를 먼저 물어보고, 모른다고 하면 옛 방식(`--build-name` 만)
+        으로 부른다. 이름은 이미 서버가 버전 행에서 정해 뒀으니 회차는 그대로 돈다.
+        """
+        lines, err = self.driver.status(path, workspace, self._repo_env(store))
+        if knows_version_stage(lines):
+            return True
+        self.log(
+            f"driver: {repo.name} does not advertise the V stage"
+            f"{f' ({err})' if err else ''} — running it without --version-id"
+        )
+        return False
+
     def _spawn_driver(
         self,
         repo: RepoConfig,
@@ -2299,6 +2320,13 @@ class App(RemoteWorkersMixin):
     ) -> dict[str, Any]:
         self._no_running_release(repo)
         workspace, path = self._driver_checkout(repo, driver)
+        # 회차는 버전 드래프트에 그대로 붙는다(`version_id`). 드라이버가 `V` 단계를 모르면
+        # **명령줄의 `--version-id` 만** 뺀다 — 이름은 이미 행에서 정해 뒀으니 옛길로 잘 돈다.
+        version_id = kw.get("version_id")
+        if version_id is not None and not self._driver_knows_version_stage(
+            repo, store, path, workspace
+        ):
+            kw["version_id"] = None
         try:
             row = self.driver.spawn(
                 data_dir=self.config.data_dir,
@@ -2314,7 +2342,6 @@ class App(RemoteWorkersMixin):
             raise ApiError(
                 502, f"driver could not start: {type(e).__name__}", code="driver_failed"
             ) from e
-        version_id = kw.get("version_id")
         if version_id is not None:
             self._version_link_release(int(version_id), row["id"])
         return {"release_id": row["id"], "pid": row["pid"], "build_name": row["build_name"]}
@@ -2518,6 +2545,8 @@ class App(RemoteWorkersMixin):
             "plan_n": None,
             "status": None,
             "status_error": None,
+            "stages": None,
+            "knows_version_stage": False,
         }
         if row is not None:
             log_file = Path(row["log_path"])
@@ -2551,6 +2580,10 @@ class App(RemoteWorkersMixin):
         )
         doc["status"] = lines
         doc["status_error"] = err
+        # 능력 신호(계약 §5): `--status` 의 `stages:` 줄. `V` 가 없으면 이 드라이버는 버전 단계를
+        # 모르고, 서버는 `--version-id` 를 주지 않는다 — 화면은 «스킬을 다시 돌리라» 고 말한다.
+        doc["stages"] = driver_stages(lines)
+        doc["knows_version_stage"] = knows_version_stage(lines)
         return doc
 
     def mask_for_preset(self, preset_name: str) -> tuple[bytes, ...]:

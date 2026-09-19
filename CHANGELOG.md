@@ -80,6 +80,31 @@ of a key bumps that number and is listed here.
   `RCM_INPUT_BUILD_NAME_ANDROID` and hand each store its own name through `platform_build_name`.
   ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
 
+### Fixed
+- **The plan now reports the live Android version name.** `store.play.production_name` and
+  `next_version_hint` were in the contract but in no skill, so a project connected by
+  `/rcm-store-connect` never emitted them and rcm never learned the Play live name — the «new
+  version» dialog's Android hint and the version list's Play column were always empty. The
+  `store_snapshot()` skeleton in `release_plan.sh` now asks for both live version names by name
+  and carries an optional `next_version_hint` into `plan.json` (and omits it cleanly when the
+  hook does not give one); the skill's artifact description and its verification step say why
+  the names matter. ([#161](https://github.com/monocsp/remote_ci_monitor/pull/161))
+- **A driver that does not know the `V` stage is no longer handed `--version-id`.** `--status`
+  now always prints one `stages: V S0 … S8` line — with `--version-id`, with `--build-name`, and
+  with neither — and rcm reads it before it starts a round: a driver whose list has no `V`, or
+  that prints no such line at all, is called the old way with `--build-name` only, under the name
+  rcm already read from the version row. Before this, a `version_id` request killed an older
+  driver with `unknown argument` and exit 2, which already means «needs the build number» and
+  «environment blocked», so nothing could tell the cases apart. `GET …/release/driver` carries
+  the answer as `stages` and `knows_version_stage` for the page to say «this driver does not know
+  the V stage — re-run `/rcm-release-driver`».
+  ([#161](https://github.com/monocsp/remote_ci_monitor/pull/161))
+- **One stage list, not two.** `release_check.py`'s `STAGES` was a dead constant that disagreed
+  with what the driver's `--status` printed (it had no `S2`). The list now lives once, in
+  `DRIVER_STAGES`; `STAGES` is derived from it, the new `release_check.py stages` prints it, and
+  the driver's `stages:` line is that output verbatim.
+  ([#161](https://github.com/monocsp/remote_ci_monitor/pull/161))
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed

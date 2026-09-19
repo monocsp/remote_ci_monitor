@@ -325,9 +325,25 @@ Expectations on the driver:
   reads the version row `GET /api/repos/<repo>/release/versions/<id>` with the `RCM_SERVER` /
   `RCM_TOKEN` the job receives and uses its `ios_version` (else `android_version`) as the build
   name — the name comes from the row, never from the driver; a `--build-name` given as well must
-  be the same. `--status` prints `stage V …` while the row is not readable and lists the stages as
-  `V S0 … S8`. A driver that does not know the flag is called the old way (`--build-name` only)
-  and the page says the driver has no `V` stage — re-run `/rcm-release-driver`;
+  be the same. `--status` prints `stage V …` while the row is not readable. A driver that does not
+  know the flag is called the old way (`--build-name` only) and the page says the driver has no
+  `V` stage — re-run `/rcm-release-driver`;
+- **`--status` always prints one `stages:` line naming the stages that driver knows**, in order,
+  alongside whatever else it prints — with `--version-id`, with `--build-name`, and with neither:
+
+  ```
+  stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8
+  ```
+
+  That line is how rcm learns whether the driver knows the version work, and the only way: handing
+  `--version-id` to a driver that does not know it dies with `unknown argument` and exit `2`, and
+  exit `2` already means «needs the build number» and «environment blocked», so the exit code
+  cannot tell the cases apart. rcm asks first — `--status` is read-only — and a driver whose list
+  has no `V`, or that prints no such line at all (every driver written before this), is called the
+  old way with `--build-name` only. The round still runs: rcm resolved the name from the version
+  row before it started. `GET …/release/driver` carries the answer as `stages` (the parsed list,
+  `null` when there is no line) and `knows_version_stage`, and the page turns a `false` into
+  «this driver does not know the V stage — re-run `/rcm-release-driver`»;
 - exit `2` and print `plan: N = <n>` when it needs the build number — rcm shows the dialog, the
   human **types** the number, rcm re-runs with `--confirm-build-number`; with the page's
   **Build number: Auto** toggle (default when `build_number_policy = "auto"`) rcm re-runs with
