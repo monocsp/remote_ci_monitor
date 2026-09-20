@@ -75,7 +75,11 @@ test("모든 키가 두 언어에서 비어 있지 않은 문자열을 만든다
     // 스토어 탭 심사 패널 · Store 행 · Build·upload 행
     build: 181, targets: "App Store + Google Play", who: "alice", path: "store/notes/ko.txt",
     names: "ios + android", reason: "managed_publishing_unconfirmed", tag: "prod/1.0.1-181", role: "plan", track: "production", value: "MANUAL",
-    stage: "S5 scenario QA"  // 릴리스 드라이버 스테퍼
+    stage: "S5 scenario QA",  // 릴리스 드라이버 스테퍼
+    // 버전 목록 · 새 버전 대화상자 · 요약 띠 — 두 스토어 이름은 늘 따로 간다(§11)
+    ios: "1.1.0", android: "1.0.0",
+    // 바텀시트 — 접힌 머리의 첫 항목 · 상한을 넘긴 칸 이름 · 스크린샷을 말하는 스토어(§4)
+    first: "빌드 없음", field: "키워드", store: "App Store", what: "#643 scenario-qa"
   };
   LANGS.forEach((lang) => {
     Object.keys(I18N.MESSAGES[lang]).forEach((k) => {
@@ -280,12 +284,31 @@ const CATALOGUE_ARGS = {
   mem: "56%", gpu: "4%", load: "3.5 / 10", shown: 5, json: "{}", text: "rcm run demo",
   key: "gate", wait: "5m", pct: "12%", user: 7, sys: 7, used: "13 GB", note: "no GPU",
   countdown: "in 8s", cores: 10, delta: "+2s", head: "pool linux",
-  disk: "26%", free: "340 GB", percent: 62, done: 4, window: 8, seen: 3
+  disk: "26%", free: "340 GB", percent: 62, done: 4, window: 8, seen: 3,
+  ios: "1.1.0", android: "1.0.0"
 };
 
 /** 한 언어의 모든 키를 문장으로 펼친다. `[키, 문장]` 쌍의 배열. */
+// 값에 따라 갈라지는 문구가 있다(`outcome.git_failed` 는 a.kind 로 다섯 갈래, `archive.rejected`
+// 는 REJECT 표로). 인자를 하나만 주면 **고른 갈래 하나만** 검사되고 나머지는 한 번도 안 그려진다
+// — 실제로 그 틈으로 「잡 로그를 보라」가 한 갈래에 숨어 있었다(2026-09-20). 그래서 갈라지는
+// 값마다 한 번씩 그린다. 새 갈래가 생기면 여기 값을 더한다.
+const BRANCH_KINDS = [
+  "TarError", "no_git", "timeout", "spawn", "exit",
+  "absolute_path", "escapes_workspace", "link_outside", "absolute_link", "special_file",
+  "not_a_tarball", "unsupported_compression", "truncated", "unreadable",
+];
+
 function rendered(lang) {
-  return Object.keys(I18N.MESSAGES[lang]).map((k) => [k, I18N.t(lang, k, CATALOGUE_ARGS)]);
+  const out = [];
+  for (const k of Object.keys(I18N.MESSAGES[lang])) {
+    for (const kind of BRANCH_KINDS) {
+      const args = Object.assign({}, CATALOGUE_ARGS, { kind: kind });
+      const text = I18N.t(lang, k, args);
+      out.push([kind === "TarError" ? k : k + " [kind=" + kind + "]", text]);
+    }
+  }
+  return out;
 }
 
 test("한국어 문장에 괄호 조사가 없다 (C-38)", () => {

@@ -46,7 +46,8 @@ constants at the top of the script; change them there.
   Copied from `templates/release_driver.sh`.
 - `<project>/scripts/release/release_check.py` — every decision (stdlib only): `stage` from
   remote truth, `validate plan|upload`, `exitcode --rcm-json`, `find-job`, `confirm --typed N`,
-  `--selftest`. Copied from `templates/release_check.py`.
+  `version-name --json` (the build name from rcm's version row), `--selftest`. Copied from
+  `templates/release_check.py`.
 - `driver = "scripts/release/release_driver.sh"` in the `[repos.<name>.release]` block of
   `<project>/scripts/rcm/profile.release.toml` — the fragment `rcm-store-connect` created; the
   skill never edits the live `server.toml`. The Store tab reads this line to show the S0–S8
@@ -72,12 +73,13 @@ say `--force` to replace the scripts (the owner's `TODO(project)` edits are lost
 ## The driver contract (what the template implements)
 
 ```
-release_driver.sh --build-name X.Y.Z [--confirm-build-number N] [--dry-run] [--skip-qa '<reason>']
-                  [--retry] [--abort] [--status] [--selftest]
+release_driver.sh --build-name X.Y.Z [--version-id <id>] [--confirm-build-number N] [--dry-run]
+                  [--skip-qa '<reason>'] [--retry] [--abort] [--status] [--selftest]
 ```
 
 | Stage | Does | Proof it happened (remote truth) |
 |---|---|---|
+| V | only with `--version-id <id>` (the Store tab sends it when the round starts from a version page): read rcm's version row `GET /api/repos/<repo>/release/versions/<id>` with the `RCM_SERVER` / `RCM_TOKEN` the job has, take `ios_version` (else `android_version`) as the build name; a `--build-name` given too must match. Not readable → exit 2 (`--status` prints `stage V` instead) | the version row in rcm |
 | S0 | push `release/X.Y.Z` from the default branch; assert default ⊂ dev if dev exists | `git ls-remote --heads origin release/X.Y.Z` |
 | S1 | submit the `plan` preset with `build_name`; fetch `plan.json`; validate | job of preset+sha with `build_name` |
 | S2 | the human types N: `--confirm-build-number N`, or a TTY prompt; **non-interactive without N → prints `plan: N = <n>`, exit 2** (the Store tab shows the dialog and re-runs with the flag). Refuses if the exact tag already exists (exit 1) | state cache only (`confirmed_n`, who, when) |
@@ -91,7 +93,10 @@ Failure path: gate or qa red → PR closed, label `release-blocked`, a comment w
 job number, branch kept, default branch untouched, exit 1. `--retry` reopens the PR, drops the
 label, refreshes the release branch from the default branch, clears the cache and resumes.
 `--abort` closes an open PR, cancels the cached jobs, deletes the cache — never touches the
-default branch. `--status` is **read-only**: it never creates a branch, a PR or a job.
+default branch. `--status` is **read-only**: it never creates a branch, a PR or a job; it prints
+`stage <S>` and — always, with `--version-id`, with `--build-name` and with neither — one
+`stages:` line naming the stages this driver knows. rcm reads that line to learn whether it may
+pass `--version-id`.
 `--dry-run` runs S7 as `mode=rehearsal` and skips S6/S8 (nothing merged, nothing tagged).
 
 Exit codes: `0` done · `1` red / contract violation / typed N ≠ plan / already released ·
@@ -158,8 +163,11 @@ round, after the merged server config is installed.
 4. **Selftest** — `scripts/release/release_driver.sh --selftest`: runs `release_check.py
    --selftest` (a PR row whose head sha differs is ignored; DONE only with the exact tag and a
    known N; a rehearsal job is not an upload; qa-only green is not S6; lost/timed_out map to 3;
-   `confirm` refuses a wrong or empty N) plus a check that `s6_merge` and `s7_upload` call
-   `require_typed_n`. Check: "all green", exit 0.
+   `confirm` refuses a wrong or empty N; `version-name` takes iOS first, Android when iOS is
+   null, and never invents one) plus a check that `s6_merge` and `s7_upload` call
+   `require_typed_n`, and that `--version-id 7` runs stage V against an API shim and sets the
+   build name to `1.1.1` while `--build-name` alone takes the old path. Check: "all green",
+   exit 0.
 5. **Read-only run** — `scripts/release/release_driver.sh --build-name X.Y.Z --status` on a
    version that does not exist: prints `stage S0`, creates nothing (verify with
    `git ls-remote --heads origin release/X.Y.Z` → empty). `--status` runs only the local
@@ -179,9 +187,11 @@ round, after the merged server config is installed.
    ```
    The round takes more than an hour (gate ∥ qa); a closed laptop or a killed shell loses
    nothing — re-run the same command and it resumes from remote truth. The Store tab calls the
-   same file as `<driver> --build-name X.Y.Z [--confirm-build-number N] [--dry-run] [--retry]
-   [--abort] [--status]` (contract §5), reads `plan: N = <n>` on exit 2, and passes back only
-   what the human typed in that dialog.
+   same file as `<driver> --build-name X.Y.Z [--version-id <id>] [--confirm-build-number N]
+   [--dry-run] [--retry] [--abort] [--status]` (contract §5), reads `plan: N = <n>` on exit 2,
+   and passes back only what the human typed in that dialog. A round started from a version page
+   carries `--version-id`; a driver from before this skill's V stage is called without it and the
+   page says so — re-run this skill to add it.
 8. **Record** — append to `<project>/docs/rcm-connect.md`:
    ```
    ## rcm-release-driver — YYYY-MM-DD

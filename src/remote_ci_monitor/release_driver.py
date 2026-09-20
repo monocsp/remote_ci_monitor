@@ -9,7 +9,9 @@
 - 끝나면(프로세스 안 감시 스레드 또는 `reconcile()` 의 pid 생존 확인) 대장에 종료를 적고 그 실행에
   발급한 내부 토큰을 **폐기**한다. 토큰 비밀은 자식의 env 로만 나가고 로그·응답·DB 어디에도 없다.
 - `status()`: `<driver> --status` 를 동기(10초)로 돌려 줄들을 돌려준다. 읽기 전용이라 토큰을
-  안 준다.
+  안 준다. 그 줄들의 `stages: V S0 … S8` 은 드라이버가 **아는** 단계 목록이고(`driver_stages()`),
+  거기에 `V` 가 있는지가 «이 드라이버에 `--version-id` 를 줘도 되는가» 의 유일한 신호다
+  (`knows_version_stage()` · 계약 §5). 옛 드라이버는 그 줄을 찍지 않는다.
 - `log_tail()` · `plan_n()`: 로그 끝 60줄과 마지막 `plan: N = <n>` — 사람이 칠 번호는 여기서 **보여
   주기만** 한다. 서버가 대신 채우지 않는다(계약 §6).
 
@@ -41,6 +43,9 @@ KINDS = (KIND_START, KIND_CONFIRM, KIND_ABORT, KIND_RETRY)
 #: 내부 토큰 이름의 앞부분. 토큰 이름은 PK 라 실행마다 다르게 짓는다(`store-driver:<repo>:<id>`).
 TOKEN_PREFIX = "store-driver"
 LOG_TAIL_LINES = 60
+#: 버전 단계의 이름. `--status` 의 `stages:` 줄에 이것이 있으면 그 드라이버는 `--version-id` 를
+#: 안다(계약 §5).
+VERSION_STAGE = "V"
 STATUS_TIMEOUT = 10.0
 MAX_STATUS_BYTES = 64 * 1024
 _PLAN_RE = re.compile(r"^plan:\s*N\s*=\s*(\d+)\s*$")
@@ -78,9 +83,13 @@ def driver_argv(
     android_track: str | None = None,
     dry_run: bool = False,
     confirm_n: int | None = None,
+    version_id: int | None = None,
 ) -> list[str]:
-    """계약 §5 의 명령줄. 되돌릴 수 없는 단계의 확인 번호는 사람이 친 것만 들어간다."""
+    """계약 §5 의 명령줄. 되돌릴 수 없는 단계의 확인 번호는 사람이 친 것만 들어간다.
+    `version_id` 는 버전 페이지에서 시작한 회차 — 드라이버가 `V` 단계에서 이름을 서버에 묻는다."""
     argv = [str(driver), "--build-name", build_name]
+    if version_id is not None:
+        argv += ["--version-id", str(int(version_id))]
     if android_track:
         argv += ["--android-track", android_track]
     if dry_run:
@@ -132,6 +141,28 @@ def plan_n(path: Path) -> int | None:
         if m:
             found = int(m.group(1))
     return found
+
+
+def driver_stages(lines: list[str] | None) -> list[str] | None:
+    """`--status` 가 찍은 `stages: V S0 … S8` → 이 드라이버가 **아는** 단계 목록(계약 §5).
+
+    그런 줄이 없으면 None — «모른다» 다. 옛 드라이버는 그 줄을 찍지 않고, `--version-id` 를 주면
+    `unknown argument` 와 exit 2 로 죽는데 exit 2 는 이미 «빌드 번호가 필요하다» 와 «환경 막힘» 을
+    뜻해 종료 코드로는 구분할 수 없다. 그래서 읽기 전용인 이 줄이 유일한 신호다.
+    """
+    if not lines:
+        return None
+    for line in lines:
+        head, sep, rest = line.strip().partition(":")
+        if sep and head.strip() == "stages":
+            return rest.split()
+    return None
+
+
+def knows_version_stage(lines: list[str] | None) -> bool:
+    """`--status` 의 단계 목록에 `V` 가 있는가. 없으면 서버는 `--version-id` 를 주지 않는다."""
+    stages = driver_stages(lines)
+    return stages is not None and VERSION_STAGE in stages
 
 
 def read_exit_code(path: Path) -> int | None:
@@ -203,6 +234,7 @@ class DriverRunner:
         dry_run: bool = False,
         confirm_n: int | None = None,
         auto_n: bool = False,
+        version_id: int | None = None,
     ) -> dict[str, Any]:
         """대장에 행을 열고 내부 토큰을 발급해 드라이버를 띄운다. 돌려주는 행에는 pid 가 있다.
         띄우지 못하면 행을 닫고(exit_code None) 토큰을 폐기한 뒤 `OSError` 를 올린다."""
@@ -234,6 +266,7 @@ class DriverRunner:
             android_track=android_track,
             dry_run=dry_run,
             confirm_n=confirm_n,
+            version_id=version_id,
         )
         exit_file = self.exit_path(data_dir, repo, release_id)
         with contextlib.suppress(OSError):
@@ -389,8 +422,11 @@ __all__ = [
     "KIND_START",
     "LOG_TAIL_LINES",
     "TOKEN_PREFIX",
+    "VERSION_STAGE",
     "DriverRunner",
     "driver_argv",
+    "driver_stages",
+    "knows_version_stage",
     "log_tail",
     "pid_alive",
     "plan_n",

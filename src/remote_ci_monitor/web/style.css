@@ -476,26 +476,7 @@ table.sec td.act { text-align: right; white-space: nowrap; }
 .drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .drop.disabled { opacity: 0.5; cursor: not-allowed; }
 .store-head { margin: 0 0 8px; }
-/* 최상단 릴리스 막대 — 회차가 돌 때만. 색은 행과 같은 규칙(파랑 진행 · 황토 사람 차례/드리프트 · 보라 모름 · 빨강 실패). */
-.rbar { position: relative; margin: 0 0 12px; padding: 12px 16px 10px; border: 1px solid var(--line); border-left-width: 6px; border-radius: 10px; background: var(--surface); }
-.rbar.running { border-left-color: var(--accent); background: var(--accent-soft); }
-.rbar.human, .rbar.warn { border-left-color: var(--warn); background: var(--warn-soft); }
-.rbar.lost { border-left-color: var(--lost); background: var(--lost-soft); }
-.rbar.bad { border-left-color: var(--bad); background: var(--bad-soft); }
-.rbar-top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
-.rbar-ver { font: var(--t-title); font-variant-numeric: tabular-nums; }
-.rbar-stage { font: var(--t-subtitle); color: var(--muted); }
-.rbar.running .rbar-stage { color: var(--accent); }
-.rbar-pct { font: var(--t-title); font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.pbar.big { width: 100%; flex: 1 1 auto; height: 16px; border-radius: 8px; }
-.rbar.human .pbar.big i, .rbar.warn .pbar.big i { background: var(--warn); }
-.rbar.lost .pbar.big i { background: var(--lost); }
-.rbar.bad .pbar.big i { background: var(--bad); }
-.rbar-foot { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-top: 6px; font-variant-numeric: tabular-nums; }
-.rbar-foot .g { font-weight: 700; }
-.rbar-tip { display: none; position: absolute; left: 16px; right: 16px; top: calc(100% - 4px); z-index: 20; padding: 8px 12px; border-radius: 8px; background: var(--ink); color: var(--bg); font: var(--t-caption); line-height: 1.5; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); }
-.rbar:hover .rbar-tip, .rbar:focus-within .rbar-tip { display: block; }
-@media (hover: none) { .rbar-tip { display: block; position: static; margin-top: 6px; background: transparent; color: var(--muted); padding: 0; box-shadow: none; } }
+/* 최상단 큰 막대(.rbar)는 바텀시트로 옮기면서 없앴다 — 워크플랜 결정 Q6 · §4.2 */
 .srow { border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; margin: 0 0 8px; background: var(--surface); }
 .srow > summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; cursor: pointer; list-style: none; border-radius: 6px; }
 .srow > summary::-webkit-details-marker { display: none; }
@@ -662,3 +643,143 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 
 /* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
 .pool-h { margin: 14px 0 6px; font: 600 12px var(--sans); color: var(--muted); }
+
+/* 버전 목록 · 요약 띠 · 새 버전 대화상자 (docs/version-page-workplan.md §3.2 · §12) */
+.vstrip { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 8px 12px;
+  border: 1px solid var(--line); border-left-width: 6px; border-radius: 10px; background: var(--surface);
+  color: inherit; text-decoration: none; font-size: 12.5px; }
+.vstrip.ok { border-left-color: var(--ok); }
+.vstrip.bad { border-left-color: var(--bad); background: var(--bad-soft); }
+.vstrip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vchip { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 8px; border-radius: 999px;
+  background: var(--surface-2); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+.vchip.ok { background: var(--ok-soft); color: var(--ok); }
+.vchip.bad { background: var(--bad-soft); color: var(--bad); font-weight: 600; }
+.vchip .g { font-weight: 700; }
+.vhead { margin: 10px 0 8px; }
+.vrows { display: grid; gap: 6px; }
+.vrow { display: grid; grid-template-columns: 1.1em minmax(0, auto) minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px;
+  padding: 8px 12px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; background: var(--surface); }
+.vrow .g { font-weight: 700; color: var(--muted); }
+.vrow .vt { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.vrow .vn { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.vrow .va { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.vrow .va .btn { text-decoration: none; }
+.vrow.draft { border-left-color: var(--accent); }
+.vrow.draft[data-state="failed"] { border-left-color: var(--bad); }
+.vrow.draft[data-state="running"], .vrow.draft[data-state="creating"],
+.vrow.draft[data-deleting="1"] { border-left-color: var(--accent); background: var(--accent-soft); }
+.vrow.draft.expired { border-left-color: var(--warn); }
+.vrow.live { border-left-color: var(--ok); }
+.vrow.old { border-left-color: var(--line); }
+.pill.v-new { background: var(--accent-soft); color: var(--accent); }
+.vfield { align-items: baseline; }
+.vfield .ck { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.vfield .nstate { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+  .vrow { grid-template-columns: 1.1em minmax(0, 1fr); }
+  .vrow .vn, .vrow .va { grid-column: 2; }
+  .vrow .va { justify-content: flex-start; }
+  .vstrip { font-size: 12px; }
+}
+
+/* W3 버전 페이지 본문 — 편집 칸 (docs/version-page-workplan.md §3.2 · R6) */
+.vedit-head { margin: 12px 0 8px; align-items: baseline; }
+.savebadge { display: inline-flex; align-items: baseline; gap: 6px; font: 500 12px var(--sans); color: var(--muted); }
+.savebadge.saving .txt { color: var(--accent); }
+.savebadge.saved .txt { color: var(--ok); }
+.savebadge.failed .txt { color: var(--bad); font-weight: 700; }
+.fld.ed { grid-template-columns: minmax(96px, 26%) 1fr max-content; align-items: start; padding: 5px 0; }
+.fld.ed .fl { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; padding-top: 5px; }
+.fld.ed .fchips { display: inline-flex; gap: 4px; }
+.fld.ed .val { display: grid; gap: 2px; min-width: 0; overflow: visible; -webkit-line-clamp: unset; }
+.fld.ed input[type="text"], .fld.ed textarea {
+  width: 100%; box-sizing: border-box; font: 13px/1.5 var(--sans); padding: 4px 7px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink);
+  resize: vertical; min-height: 0; }
+.fld.ed input[type="text"]:focus-visible, .fld.ed textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.fld.ed input[readonly], .fld.ed textarea[readonly] { background: var(--surface-2); color: var(--muted); }
+.fld.ed[data-changed="1"] input[type="text"], .fld.ed[data-changed="1"] textarea { border-color: var(--warn); }
+.fld.ed .src { font: 11px var(--mono); color: var(--muted); }
+.fld.ed[data-source="edited"] .src { color: var(--warn); }
+.fld.ed[data-source="file"] .src { color: var(--accent); }
+.fld.ed .fa { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; padding-top: 5px; }
+.fld.ed .fa .btn.link { padding: 0; font-size: 11.5px; }
+/* 고친 적 없는 칸에는 되돌릴 것이 없다 — 자리는 지키고 글자만 감춘다(줄이 안 튄다) */
+.fld.ed .fa .btn.link[disabled] { visibility: hidden; }
+.chip.remote { border-color: var(--bad); color: var(--bad); cursor: default; }
+.chip.same, .chip.unknown { cursor: default; }
+.chip.same { border-color: var(--ok); color: var(--ok); }
+/* ── 바텀시트 — 진행 · 남은 것 · 심사 제출 (워크플랜 §4.2 · 기획 R8~R12) ──────────────
+   본문의 마지막 자식이고 `position: sticky` 로 화면 아래에 붙어 있다. 위 테두리 색이 곧 형편이다
+   (파랑 진행 · 황토 사람 차례/확인 · 보라 모름 · 빨강 실패 · 초록 준비됨·제출됨 · 회색 만료).
+   본문이 시트 뒤에 가리지 않도록 렌더 뒤 **`.vmain`** 에 시트 높이만큼 아래 여백을 준다(§17-3):
+   sticky 의 담는 상자는 부모의 content box 라, 그 여백을 `[data-store-body]` 에 주면 시트가
+   그 안으로 내려가지 못하고 페이지 맨 아래에서 화면 위로 밀려 올라간다. `.vmain` 은 시트의
+   형제이고, 시트는 여전히 본문의 마지막 자식이다. */
+.vmain { display: block; }
+.sheet { position: sticky; bottom: 0; z-index: 30; margin: 14px 0 0;
+  border: 1px solid var(--line); border-top-width: 3px; border-radius: 12px 12px 0 0;
+  background: var(--surface); box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
+  /* 화면보다 큰 시트는 `bottom: 0` 으로 붙여도 **머리가 화면 위로 밀려 나간다**(§17-3): sticky 는
+     담는 상자 밖으로 못 나가서, 페이지 맨 아래에서는 시트 아래에 남는 페이지 꼬리(푸터 · 아래
+     패딩)만큼 더 밀린다. 그래서 시트 **전체**를 화면에 맞춰 두고 넘치는 것은 본문이 스크롤한다
+     — 접기 버튼은 어느 폭에서도 보인다(E23). */
+  display: flex; flex-direction: column; max-height: min(74vh, calc(100vh - 160px)); }
+.sheet[data-tone="new"], .sheet[data-tone="running"] { border-top-color: var(--accent); }
+.sheet[data-tone="human"], .sheet[data-tone="warn"] { border-top-color: var(--warn); }
+.sheet[data-tone="lost"] { border-top-color: var(--lost); }
+.sheet[data-tone="bad"] { border-top-color: var(--bad); }
+.sheet[data-tone="ok"], .sheet[data-tone="done"] { border-top-color: var(--ok); }
+.sheet[data-tone="expired"] { border-top-color: var(--queued); }
+.sh-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 10px 14px; }
+.sh-head .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--line); flex-basis: 100%; margin: -4px auto 2px; }
+.sh-head .ver { font: var(--t-title); font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 8px; }
+.sh-head .st { flex: 1 1 260px; min-width: 0; color: var(--muted); font: var(--t-caption); overflow-wrap: anywhere; }
+.sh-head .mini { display: inline-flex; align-items: center; gap: 6px; }
+.sh-head .mini .pct { font: var(--t-caption); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.pbar.thin { width: 84px; flex: 0 0 84px; height: 8px; }
+.sheet[data-tone="human"] .pbar i, .sheet[data-tone="warn"] .pbar i { background: var(--warn); }
+.sheet[data-tone="lost"] .pbar i { background: var(--lost); }
+.sheet[data-tone="bad"] .pbar i { background: var(--bad); }
+.sheet[data-tone="ok"] .pbar i, .sheet[data-tone="done"] .pbar i { background: var(--ok); }
+.sh-body { border-top: 1px solid var(--line-2); padding: 12px 14px; display: grid; gap: 10px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.sh-body .lab { font: var(--t-label); color: var(--muted); }
+.sh-body .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.stages { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip-st { padding: 1px 7px; border-radius: 4px; border: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.chip-st.done { color: var(--ok); border-color: var(--ok); }
+.chip-st.current { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.chip-st.human, .chip-st.drift, .chip-st.blocked { color: var(--warn); border-color: var(--warn); }
+.chip-st.unknown { color: var(--lost); border-color: var(--lost); }
+.chip-st.failed { color: var(--bad); border-color: var(--bad); }
+.miss { display: grid; gap: 4px; }
+.miss .ml { display: grid; grid-template-columns: 1.2em 1fr; gap: 6px; text-align: left; width: 100%;
+  padding: 4px 8px; border: 0; border-left: 3px solid var(--line); border-radius: 6px;
+  background: transparent; color: inherit; font: var(--t-body); cursor: pointer; }
+.miss .ml[disabled] { cursor: default; }
+.miss .ml .g { font-weight: 700; }
+.miss .ml.bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+.miss .ml.run { border-left-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.miss .ml.todo { border-left-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+.miss .ml.warn { border-left-color: var(--warn); color: var(--warn); }
+.diffs { display: grid; gap: 2px; }
+.diffs .dl { font: 12px/1.45 var(--mono); padding: 2px 8px; border-radius: 4px; overflow-wrap: anywhere; }
+.diffs .dl.add { background: var(--ok-soft); color: var(--ok); }
+.diffs .dl.del { background: var(--bad-soft); color: var(--bad); }
+.sh-body .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.sh-body .nbox .nfull { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+  /* 폰 폭: 머리는 두 줄(버전 / 상태), 펼침은 화면을 거의 다 쓰고 두 열이 한 열이다 */
+  .sh-head { padding: 8px 12px; }
+  .sh-head .ver { font: var(--t-subtitle); }
+  .sh-head .st { flex-basis: 100%; }
+  .sh-body { padding: 10px 12px; }
+  .sh-body .two { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .fld.ed { grid-template-columns: 1fr; }
+  .fld.ed .fl, .fld.ed .fa { padding-top: 0; }
+  .fld.ed .fa { flex-direction: row; align-items: baseline; gap: 8px; justify-content: flex-start; }
+}

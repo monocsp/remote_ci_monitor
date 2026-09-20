@@ -178,6 +178,7 @@ default_branch       = "main"                    # default "main"
 tag                  = "prod/{version}-{build}"  # default; must contain {version} and {build}
 build_number_policy  = "auto"                    # "auto" (default) | "manual" — the Store tab's «Build number» toggle default
 plan_max_age_minutes = 30                        # default 30; integer > 0
+version_ttl_hours    = 24                        # default 24; integer > 0 — an unedited new-version draft (or one whose create job failed) is discarded after this
 driver               = "scripts/release/product_release.sh"   # optional; relative to the repository
 secrets_dir_env      = "APP_SECRETS"             # required when secrets are listed; ^[A-Z][A-Z0-9_]*$
 
@@ -188,6 +189,7 @@ review = "release-review"                        # required
 gate   = "gate-smoke"                            # optional
 qa     = "scenario-qa"                           # optional
 dev    = "deploy-dev"                            # optional
+version = "release-version"                      # optional — «new version» from the web (prefill / create / delete)
 
 [[repos.app.release.secrets]]                    # zero or more — names and shapes, never values
 name     = "AuthKey.p8"                          # file name or env name; unique in the profile
@@ -215,8 +217,13 @@ must contain both placeholders, `build_number_policy`, `kind` and `verify` take 
 above, `files` is only valid for `kind = "dir"` and `max_kb` only for `kind = "file"`, `driver`
 is a relative path, and every error names the section and key
 (`[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review, gate, qa,
-dev)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
+dev, version)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
 degrades the Store tab without stopping the server.
+
+`{version}` in `tag` (and in `listing.validate` and `listing.release_notes`) is the round's version
+name: the one name when both stores get the same one, and the iOS name, a `+` and the Android name
+when they differ — `prod/1.1.1-181` or `prod/1.1.1+1.0.1-181`
+([release contract](release-contract.md) §2 «Two store version names»).
 
 `rcm check --config server.toml` prints one row per profile, `release <repo>`:
 
@@ -225,8 +232,12 @@ degrades the Store tab without stopping the server.
 | `FAIL` | a required role (`plan`, `upload`, `review`) is empty or names a preset that is not in `[[presets]]` |
 | `FAIL` | the `plan` preset lacks the `build_name` input; `upload` lacks `build_name confirm_build_number mode platform`; `review` lacks `build_name confirm_build_number mode platform play_managed_publishing listing phased` |
 | `FAIL` | the `upload` preset's `mode` input defaults to `upload`, or the `review` preset's `mode` defaults to `submit` — the irreversible mode is never the default |
+| `FAIL` | a `version` preset lacks `mode ios_version android_version asc_version_id`, or its `mode` does not default to `prefill` (`create` makes a store draft, `delete` is irreversible) |
 | `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
-| `warn` | an optional role (`gate`, `qa`, `dev`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | an optional role (`gate`, `qa`, `dev`, `version`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | the `version` preset's `mode` input lists the values it takes and `create` or `delete` is missing — those are the two rcm sends, so «new version» and «discard» would be refused when the job is submitted |
+| `warn` | the `review` or `upload` preset has no `listing_json` input — the listing copy edited in the web UI cannot reach the script (re-run `/rcm-store-connect`, which adds the input) |
+| `warn` | the `review` or `upload` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
 
 The detail lists each role with its preset, the driver when one is set, and the number of secrets:
 `ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke
@@ -299,14 +310,38 @@ keeps its default. Writes take a Bearer token only.
 | `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
 | `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
 | `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
-| `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `listing.ref` (default `default_branch`) made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` |
+| `GET …/release/versions` | read rule, always | the store version drafts of this repository: `{live: {ios, android, from_plan_job}, hints: {ios, android}, ttl_hours, drafts[], history[]}`. `live` comes from the latest succeeded plan's `store.asc_live` and `store.play.production_name`; `hints` is that document's `next_version_hint` or, failing that, each live name with its last integer + 1 (unknown stays `null`). `drafts[]` is every open draft, newest first; `history[]` the last 20 submitted ones (`{id, ios, android, submitted_at, review_job_id}`). A draft row is `{id, repo, ios_version, android_version, build_name, state, created_by, created_at, last_edit_at, expires_at, expired, expiry_warned, asc_version_id, error, create_job_id, delete_job_id, release_id, review_job_id, upload_job_id, has_prefill, has_edits, changed}` — `state` is `creating`, `editing`, `running`, `submitted`, `discarded` or `failed`; `build_name` is the iOS name, or the Android one when there is no iOS name; `changed` counts the edited listing fields |
+| `POST …/release/versions` | admin | `{ios_version?, android_version?, ref?}` → opens a draft. At least one name, each `major.minor.patch` and greater than that store's live name when the plan knows it. With a `version` preset it submits that preset with `mode = create` → `202 {id, job_id, state: "creating", build_name}`; without one the draft is `editing` at once → `201 {id, job_id: null, state, build_name}`. The job's `version.json` and `prefill.json` then fill `asc_version_id` and the prefilled listing; a failure leaves the row `failed` with an `error` sentence |
+| `GET …/release/versions/<id>` | read rule, always | one draft — the row above plus `prefill`, `edited`, `diff` (the shape of `…/diff`) and `release` (the `GET …/release` document with this version's `build_name`). It runs **no** subprocess, because the version page polls it every five seconds: the driver's `--status` and the two listing commands stay behind `GET …/release/driver` and `GET …/release/listing`, which the page calls at its own pace |
+| `PUT …/release/versions/<id>/listing` | admin | `{ios?: {…}, android?: {…}}` — only the field names the contract's `prefill.json` uses, strings only, 16 KB each and 256 KB of body. Only the fields in the body change; `null` removes one and a platform set to `null` removes it whole → `{id, state, edited, last_edit_at, diff}`. Character limits are **not** enforced here: the value is saved and the page's counter says so, because the store has the last word |
+| `GET …/release/versions/<id>/diff` | read rule, always | `{fields: [{platform, key, old, new}…], screenshots: {ios, android}}` — only the fields whose value differs from the prefill, ignoring surrounding whitespace and `\r\n` against `\n`. `screenshots` is `same` (the prefill knows that platform) or `n/a`; uploading one is not in this build |
+| `DELETE …/release/versions/<id>` | admin | discards the draft. With an `asc_version_id` and a `version` preset it submits `mode = delete` → `202 {id, job_id, state}`, and the row becomes `discarded` when that job exits 0; otherwise the row is `discarded` at once → `200 {id, job_id: null, state}` |
+| `GET …/release/listing[?build_name=]` | read rule, always | runs `listing.preview` and `listing.diff` in a checkout of `listing.ref` (default `default_branch`) made from the mirror (`<data_dir>/listing/<repo>/checkout`, rebuilt when the branch SHA changes; 20 s and 64 KB of stdout each) → `{configured, sha, preview[], diff[], release_notes: {path, text} \| null, screenshots[]: {path, bytes, width, height}, errors[]}`. `release_notes` substitutes `{version}` with `build_name`, or `*` without one; `width`/`height` are `null` in this build. No `listing` in the profile → `{configured: false}`; no mirror yet → `sha: null` and one line in `errors[]` (never remembered). The answer is kept for 30 s per repository, checkout SHA and `build_name`, so a page that polls does not re-run the commands; a repository's entries are dropped as soon as its mirror moves, and an answer computed under a different `listing` section is never served |
 | `GET …/release/listing/file?path=<rel>` | read rule, always | the bytes of one screenshot — the path must match a `listing.screenshots` glob and be an image type; 5 MB at most (413) |
 | `POST …/release/listing/validate` | client token | `{build_name, build?}` → runs `listing.validate` with `{version}` and `{build}` substituted → `{ok, lines[], exit}` (plus `error` when it failed to run) |
 | `GET …/release/github` | read rule, always | from the mirror only: `log[]` (`sha subject author at` × 5 of `default_branch`), `tags[]` (`name at` × 5 newest whose name starts with the `tag` pattern's literal prefix, e.g. `prod/`), and `prs: null` — next: pull requests via the `GH_TOKEN` secret |
 | `POST …/release/start` | admin | `{build_name, android_track?, dry_run?}` → runs the driver (below) → `202 {release_id, pid, build_name}` |
 | `POST …/release/confirm` | admin | `{build_name, build_number}` → re-runs the driver with `--confirm-build-number N` **only if** the last `plan: N = <n>` line of that build's log equals what was typed |
 | `POST …/release/abort` · `POST …/release/retry` | admin | `{build_name?}` (default: the latest run's) → runs the driver with `--abort` / `--retry` |
-| `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error}`. `{configured: false}` when the profile has no `driver` |
+| `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error, stages[], knows_version_stage}`. `{configured: false}` when the profile has no `driver`. That subprocess is the only costly part, and its answer is kept for 20 s per repository, driver checkout SHA, `build_name`, round id, running flag and exit code — so a page that polls does not multiply `--status` runs on the build machine, and a remembered answer cannot outlive the round it describes. The ledger row, the log tail and `plan_n` are read fresh every time. `stages` is the driver's own `stages: V S0 … S8` line parsed into a list, `null` when it printed none, and `knows_version_stage` says whether `V` is in it (release contract §5). A driver that does not advertise `V` is started **without** `--version-id` — the round still runs under the name rcm read from the version row — and the page says «this driver does not know the V stage — re-run `/rcm-release-driver`» instead of letting an old driver die on an unknown argument |
+
+**`version_id`.** `POST …/release/plan`, `review`, `upload` and `start` take an optional
+`version_id` — the number of an open draft — instead of a typed `build_name`. The server then
+fills `build_name` from the row (a `build_name` in the same body that disagrees is 400
+`build_name_mismatch`), and adds two inputs to `review` and `upload` when there is something to
+add: `listing_json`, the edited listing merged over the prefill, whenever the two differ, and
+`build_name_android`, the Android name, whenever the two stores get **different** version names.
+A preset that does not declare the input it needs is refused (409 `listing_json_unsupported` /
+`split_version_unsupported`) rather than run without the edit or under one name for both stores;
+re-run `/rcm-store-connect` to add it. `plan` never gets either input — it reads the stores, and
+one name is enough for that. `start` passes `--version-id` to the driver and links the round to
+the row, so `confirm`, `abort` and `retry` continue on the same version. While a review job, an
+`upload` job or a driver round is running for it, the row is `running` and cannot be discarded
+under it; a `rehearsal` writes nothing to a store, so it leaves the row open. When more than one
+of the three runs at once, the row goes back to `editing` only when the **last** of them ends —
+a manual job finishing in the middle of a round leaves the row held. A round whose process is
+gone is closed before that judgement is made, so nothing keeps a row `running` for ever, and a
+restart makes the same judgement again.
 
 **The 409 codes.** These are the server's own rules, kept whatever the page sends (`code` and
 `error_code` carry the same value):
@@ -328,8 +363,18 @@ keeps its default. Writes take a Bearer token only.
 | `driver_missing` | `driver` is not an executable file in the checkout |
 | `release_running` | a driver process for this repository is still alive (`release_id` in the body) |
 | `release_required` | `confirm` / `abort` / `retry` with no earlier run for that build |
+| `version_exists` | a new version name that an open draft already carries (`id` and `state` in the body). A draft whose create job **failed** does not count — nothing was made in the store under that name, so the same name can be typed again |
+| `version_closed` | a submitted or discarded draft — it cannot be edited, submitted or discarded again |
+| `version_running` | discarding a draft whose review job, `mode = upload` job or driver round is still running (`review_job_id`, `upload_job_id` and `release_id` in the body) |
+| `listing_json_unsupported` | the draft has an edited listing but the `review` / `upload` preset has no `listing_json` input |
+| `split_version_unsupported` | the draft's two store version names differ but that preset has no `build_name_android` input |
 
-`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`).
+`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`), as do every
+`POST`, `PUT` and `DELETE` under `…/release/versions`. The version routes also answer 404
+`version_not_found` (no such draft in this repository — another repository's number included) and
+400 `empty` (neither version name), `pattern` (not `major.minor.patch`), `not_greater` (not above
+the live name; `platform` and `live` are in the body), `listing_key` (an unknown platform or
+field) and `listing_too_large` (one value over 16 KB).
 
 **The driver.** `POST …/release/start` checks out `default_branch` from the mirror into
 `<data_dir>/driver/<repo>/checkout` and runs `<driver> --build-name X [--android-track T]
@@ -342,7 +387,7 @@ stdout and stderr append to `<data_dir>/driver/<repo>/<build_name>.log`, so `con
 and `retry` continue the same log. Every run is a row in the database's `releases` table
 (`id repo build_name kind started_by started_at pid log_path exit_code finished_at confirmed_n
 confirmed_by android_track dry_run token_name`); `rcm gc` and the retention sweeps leave that
-table alone. The exit code is written by a wrapper to `<data_dir>/driver/<repo>/<id>.exit`, so
+table, and the `versions` table behind the version routes, alone. The exit code is written by a wrapper to `<data_dir>/driver/<repo>/<id>.exit`, so
 after a restart the next `GET …/release/driver` (or the next start) closes runs whose process is
 gone, records the code (or `null` when it is unknown) and revokes their tokens. `--status` runs
 with the same environment but without a token — it is read-only by contract. Confirm follows the
@@ -641,6 +686,17 @@ server gives up a 720 MB workspace, never a 50 KB log, a job row, an artifact bu
 blob — those keep their own clocks and budgets. And **it does not delete on a guess**: if a size
 cannot be measured, the byte rules are skipped for that sweep and the reason is reported; only the
 day rule, which never needed a size, keeps running.
+
+**Store version drafts ride the same timer, under their own rule.** The sweep also looks at the
+`versions` table on every cycle and once at start-up, but none of the keys above applies to it:
+a draft nobody has edited goes when `version_ttl_hours` (the release profile, default 24) has
+passed since it was opened — through the `version` preset's `mode = delete` job when the profile
+has one, so the App Store version goes with it, and inside rcm alone when it does not, or when
+the draft's create job failed and the store never had anything. A draft that *was* edited is
+**never** deleted for you: it is marked expired, the server logs one line, and it waits for a
+person to discard it. Submitted drafts, drafts still being created and drafts whose review job,
+upload job or driver round is running are left alone, and a store delete job is submitted at most
+once per draft. `rcm gc` does not touch the table at all.
 
 `min_free_bytes` is a target, not a guarantee. Deleting does not always give space back — a macOS
 local snapshot or an open file can hold the blocks — so if a sweep deletes and free space does not

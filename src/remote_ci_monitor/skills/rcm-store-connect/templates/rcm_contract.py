@@ -5,16 +5,18 @@
 Installed by the rcm-store-connect skill next to the release scripts. It does two things:
 
   write <kind> --out FILE [fields…]   build + validate + atomically write plan.json / upload.json /
-                                      review-plan.json / review.json. Exit 1 (nothing written) when
-                                      the document would violate the contract.
+                                      review-plan.json / review.json / version.json / prefill.json.
+                                      Exit 1 (nothing written) when the document would violate
+                                      the contract.
   validate <kind> --file FILE         exit 0 when FILE satisfies the minimum fields of
                                       docs/release-contract.md §2,
                                       exit 1 with one line per violation otherwise.
   --selftest                          proves that a poisoned document is rejected and a good
                                       one accepted.
 
-kind is one of: plan · upload · review-plan · review. Only the minimum fields are checked;
-extra fields are kept as-is. No third-party imports, no network, no project knowledge.
+kind is one of: plan · upload · review-plan · review · version · prefill. Only the minimum
+fields are checked; extra fields are kept as-is. No third-party imports, no network, no project
+knowledge.
 """
 
 # 규약의 정본은 rcm 의 docs/release-contract.md §2 다. 이 파일은 그 최소 필드를 "쓰기 전에 검사한다"
@@ -31,12 +33,27 @@ import sys
 import tempfile
 from typing import Any
 
-KINDS = ("plan", "upload", "review-plan", "review")
+KINDS = ("plan", "upload", "review-plan", "review", "version", "prefill")
 UPLOAD_STATUSES = ("success", "partial", "rehearsal", "failed")
 UPLOAD_MODES = ("rehearsal", "upload")
 REVIEW_STATUSES = ("submitted", "partial", "noop", "failed")
 PLAN_VERDICTS = ("ok", "blocked")
 PLATFORMS = ("ios", "android")
+VERSION_MODES = ("create", "delete")
+#: prefill.json 의 문안 키 — review 계약의 listing 필드 이름과 같다(버전 페이지 계획 §1.1).
+#: 웹의 편집 칸도 이 키로 저장되고 `listing_json` 으로 되돌아온다. 언어는 `locale` 하나(ko).
+IOS_LISTING_KEYS = (
+    "subtitle",
+    "promotional_text",
+    "description",
+    "keywords",
+    "support_url",
+    "marketing_url",
+    "whats_new",
+)
+ANDROID_LISTING_KEYS = ("title", "short_description", "full_description", "whats_new")
+#: 플랫폼별 그림 목록 키 — [{path}] 의 리스트
+LISTING_IMAGE_KEYS = {"ios": "screenshots", "android": "graphics"}
 
 
 def now_iso() -> str:
@@ -162,6 +179,69 @@ def validate(kind: str, doc: Any) -> list[str]:
             e.append("auto_release: must be true or false")
         if not isinstance(doc.get("phased_release"), bool):
             e.append("phased_release: must be true or false")
+
+    elif kind == "version":
+        # 만들거나 지운 결과. 두 스토어 다 null 이면 «아무것도 안 됐다» — error 가 그 이유를
+        # 말할 때만 받는다(어떻게 끝나든 파일은 남기되, 이유 없는 빈 결과는 거절).
+        if doc.get("mode") not in VERSION_MODES:
+            e.append(f"mode: must be one of {'|'.join(VERSION_MODES)}")
+        for plat in PLATFORMS:
+            if plat not in doc:
+                e.append(f"{plat}: missing (use null when that store was not touched)")
+                continue
+            v = doc[plat]
+            if v is None:
+                continue
+            if not isinstance(v, dict):
+                e.append(f"{plat}: must be an object or null")
+                continue
+            if not isinstance(v.get("version"), str) or not v["version"]:
+                e.append(f"{plat}.version: must be a non-empty string")
+            if plat == "ios":
+                for key in ("asc_version_id", "state"):
+                    if key not in v:
+                        e.append(f"ios.{key}: missing (use null when unknown)")
+                    elif v[key] is not None and (not isinstance(v[key], str) or not v[key]):
+                        e.append(f"ios.{key}: must be a non-empty string or null")
+        err = doc.get("error")
+        if err is not None and (not isinstance(err, str) or not err):
+            e.append("error: must be a non-empty string or null")
+        if doc.get("ios") is None and doc.get("android") is None and not err:
+            e.append("ios/android: both null without an error — nothing was created or deleted")
+        if not isinstance(doc.get("measured_at"), str):
+            e.append("measured_at: must be a string")
+
+    elif kind == "prefill":
+        # 이전(라이브) 버전의 문안. 키는 review 의 listing 필드 이름; 값은 문자열, 그림은 [{path}].
+        if not isinstance(doc.get("source"), str) or not doc["source"]:
+            e.append("source: must be a non-empty string (e.g. asc_live:1.1.0 · file:store/)")
+        if not isinstance(doc.get("locale"), str) or not doc["locale"]:
+            e.append("locale: must be a non-empty string (e.g. ko)")
+        objects = 0
+        for plat, keys in (("ios", IOS_LISTING_KEYS), ("android", ANDROID_LISTING_KEYS)):
+            if plat not in doc:
+                e.append(f"{plat}: missing (use null when that store has no listing)")
+                continue
+            v = doc[plat]
+            if v is None:
+                continue
+            if not isinstance(v, dict):
+                e.append(f"{plat}: must be an object or null")
+                continue
+            objects += 1
+            for key in keys:
+                if key in v and not isinstance(v[key], str):
+                    e.append(f"{plat}.{key}: must be a string")
+            images = LISTING_IMAGE_KEYS[plat]
+            if images in v:
+                items = v[images]
+                if not isinstance(items, list) or not all(
+                    isinstance(x, dict) and isinstance(x.get("path"), str) and x["path"]
+                    for x in items
+                ):
+                    e.append(f"{plat}.{images}: must be a list of objects with a 'path' string")
+        if "ios" in doc and "android" in doc and objects == 0:
+            e.append("ios/android: both null — a prefill with no listing is not a prefill")
     return e
 
 
@@ -322,6 +402,49 @@ def write_review(
     return doc
 
 
+def write_version(
+    out: str,
+    mode: str,
+    ios: dict | None,
+    android: dict | None,
+    error: str | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """version.json — create · delete 뒤. 실패도 남긴다: 두 스토어 null + error."""
+    doc = {
+        "schema": 1,
+        "mode": mode,
+        "ios": None if ios is None else dict(ios),
+        "android": None if android is None else dict(android),
+        "error": error or None,
+        "measured_at": now_iso(),
+    }
+    doc.update(extra or {})
+    write_doc("version", doc, out)
+    return doc
+
+
+def write_prefill(
+    out: str,
+    source: str,
+    locale: str,
+    ios: dict | None,
+    android: dict | None,
+    extra: dict | None = None,
+) -> dict:
+    """prefill.json — 이전 버전의 문안. 문자열이 아닌 값은 검증에서 걸린다."""
+    doc = {
+        "schema": 1,
+        "source": source,
+        "locale": locale,
+        "ios": None if ios is None else dict(ios),
+        "android": None if android is None else dict(android),
+    }
+    doc.update(extra or {})
+    write_doc("prefill", doc, out)
+    return doc
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────────────────
 
 
@@ -394,6 +517,28 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--auto-release", type=_bool, default=False)
     d.add_argument("--phased-release", type=_bool, default=True)
     d.add_argument("--extra-json")
+
+    e = ws.add_parser("version")
+    e.add_argument("--out", required=True)
+    e.add_argument("--mode", required=True, help="create | delete")
+    e.add_argument(
+        "--ios-json", help='{"version","asc_version_id","state"}, @file, - or omit for null'
+    )
+    e.add_argument("--android-json", help='{"version"}, @file, - or omit for null')
+    e.add_argument(
+        "--error", default=None, help="why nothing happened (required when both are null)"
+    )
+    e.add_argument("--extra-json")
+
+    f = ws.add_parser("prefill")
+    f.add_argument("--out", required=True)
+    f.add_argument(
+        "--source", required=True, help="e.g. 'asc_live:1.1.0 · play_listing' or 'file:store/'"
+    )
+    f.add_argument("--locale", default="ko")
+    f.add_argument("--ios-json", help="listing fields object, @file, - or omit for null")
+    f.add_argument("--android-json", help="listing fields object, @file, - or omit for null")
+    f.add_argument("--extra-json")
     return p
 
 
@@ -444,7 +589,7 @@ def cmd_write(args: argparse.Namespace) -> int:
                 args.diff,
                 extra,
             )
-        else:
+        elif args.kind == "review":
             doc = write_review(
                 args.out,
                 args.overall_status,
@@ -454,11 +599,31 @@ def cmd_write(args: argparse.Namespace) -> int:
                 args.phased_release,
                 extra,
             )
+        elif args.kind == "version":
+            doc = write_version(
+                args.out,
+                args.mode,
+                _json_arg(args.ios_json, "--ios-json"),
+                _json_arg(args.android_json, "--android-json"),
+                args.error,
+                extra,
+            )
+        else:
+            doc = write_prefill(
+                args.out,
+                args.source,
+                args.locale,
+                _json_arg(args.ios_json, "--ios-json"),
+                _json_arg(args.android_json, "--android-json"),
+                extra,
+            )
     except ValueError as e:
         print(f"contract violation — nothing written to {args.out}\n{e}", file=sys.stderr)
         return 1
     keys = ", ".join(
-        f"{k}={doc[k]!r}" for k in ("n", "status", "plan_verdict", "overall_status") if k in doc
+        f"{k}={doc[k]!r}"
+        for k in ("n", "status", "plan_verdict", "overall_status", "mode", "source", "error")
+        if k in doc and doc[k] is not None
     )
     print(f"  {os.path.basename(args.out)} -> {args.out}  {keys}")
     return 0
@@ -510,6 +675,25 @@ def selftest() -> int:
             "auto_release": False,
             "phased_release": True,
         },
+        "version": {
+            "schema": 1,
+            "mode": "create",
+            "ios": {
+                "version": "1.1.1",
+                "asc_version_id": "abc123",
+                "state": "PREPARE_FOR_SUBMISSION",
+            },
+            "android": {"version": "1.0.1"},
+            "error": None,
+            "measured_at": now_iso(),
+        },
+        "prefill": {
+            "schema": 1,
+            "source": "asc_live:1.1.0 · play_listing",
+            "locale": "ko",
+            "ios": {"subtitle": "Hi", "screenshots": [{"path": "store/screenshots/ios/ko/0.png"}]},
+            "android": {"title": "App", "graphics": []},
+        },
     }
     # (kind, 오염, 거부 메시지에 있어야 하는 필드 이름)
     poison = [
@@ -526,6 +710,17 @@ def selftest() -> int:
         ("review", {"overall_status": "released"}, "overall_status"),
         ("review", {"auto_release": "false"}, "auto_release"),
         ("review", {"platforms": {}}, "platforms"),
+        ("version", {"mode": "prefill"}, "mode"),  # prefill 은 version.json 을 쓰지 않는다
+        ("version", {"ios": None, "android": None}, "both null"),  # 이유 없는 빈 결과
+        ("version", {"ios": {"asc_version_id": "x", "state": None}}, "ios.version"),
+        ("version", {"ios": {"version": "1.1.1"}}, "asc_version_id"),
+        ("version", {"android": {"version": ""}}, "android.version"),
+        ("version", {"error": ""}, "error"),
+        ("prefill", {"source": ""}, "source"),
+        ("prefill", {"ios": None, "android": None}, "both null"),
+        ("prefill", {"ios": {"subtitle": 3}}, "ios.subtitle"),
+        ("prefill", {"android": {"graphics": ["a.png"]}}, "android.graphics"),
+        ("prefill", {"ios": "text"}, "ios"),
     ]
     fails = 0
     for kind, doc in good.items():
@@ -566,6 +761,15 @@ def selftest() -> int:
             _parse_n("18l")
             fails += 1
             print("FAIL _parse_n accepted '18l'")
+        except ValueError:
+            pass
+        # 실패한 create 도 파일을 남긴다 — 둘 다 null 이지만 error 가 이유를 말한다
+        vout = os.path.join(d, "version.json")
+        write_version(vout, "create", None, None, error="already exists: 1.1.1 (exit 3)")
+        try:
+            write_version(vout, "delete", None, None)
+            fails += 1
+            print("FAIL write_version accepted both null without an error")
         except ValueError:
             pass
     if fails:

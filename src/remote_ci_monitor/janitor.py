@@ -21,11 +21,11 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
-from remote_ci_monitor.config import ServerConfig, effective_workspace_retention_days
+from remote_ci_monitor.config import RepoConfig, ServerConfig, effective_workspace_retention_days
 from remote_ci_monitor.core import artifacts
-from remote_ci_monitor.core.model import TERMINAL_STATES, Job
+from remote_ci_monitor.core.model import TERMINAL_STATES, TOKEN_ADMIN, Job
 from remote_ci_monitor.core.retention import (
     PurgePlan,
     RetentionPolicy,
@@ -38,7 +38,7 @@ from remote_ci_monitor.core.retention import (
 )
 from remote_ci_monitor.core.status import iso
 from remote_ci_monitor.materialize import blob_path, stale_blob_keys
-from remote_ci_monitor.store import Store
+from remote_ci_monitor.store import Store, TokenInfo
 
 #: 이만큼 안 보인 워커는 잊는다(활성 잡이 없을 때만).
 WORKER_FORGET_DAYS = 7
@@ -48,6 +48,9 @@ CANDIDATE_LIMIT = 1000
 MEASURE_MAX_AGE = timedelta(days=1)
 #: 지운 바이트의 이만큼도 여유가 안 늘면 「지워도 소용없다」로 본다(무진전 latch, 결정 62).
 PROGRESS_RATIO = 0.5
+#: 만료 청소가 «버리기» 를 낼 때 쓰는 토큰 이름 — 잡의 `requester_label` 이 `store:janitor` 가
+#: 되어 로그에서 사람이 누른 것과 구분된다. DB 에 없는 이름이다(라우트를 거치지 않으므로).
+JANITOR_TOKEN_NAME = "janitor"
 #: 「인자를 안 줬다」와 「None 을 줬다」를 가르는 표식 — 후자는 「여유를 못 쟀다」는 사실이다.
 _UNSET: Any = object()
 
@@ -65,6 +68,32 @@ def _errname(e: BaseException) -> str:
     if isinstance(e, OSError):
         return errno.errorcode.get(e.errno or 0, type(e).__name__)
     return type(e).__name__
+
+
+def _api_code(e: BaseException) -> str:
+    """서버가 거절한 이유의 **코드**(`setup_incomplete` · `version_running` …). `ApiError` 는
+    코드를 `extra` 에 담는데, `server` 를 import 하면 순환이라(server → janitor) 구조적으로
+    읽는다. 코드가 없으면 오류의 종류만 — 문장도 경로도 로그에 싣지 않는다.
+    """
+    extra = getattr(e, "extra", None)
+    if isinstance(extra, dict) and isinstance(extra.get("code"), str):
+        return str(extra["code"])
+    return _errname(e)
+
+
+def _version_name(row: dict[str, Any]) -> str:
+    """행의 대표 이름 — iOS 가 있으면 iOS, 없으면 Android(서버의 `version_build_name` 과 같다)."""
+    return str(row["ios_version"] or row["android_version"] or "?")
+
+
+class VersionHost(Protocol):
+    """만료 청소가 쓰는 서버의 얼굴. `DELETE …/versions/<id>` 핸들러가 부르는 **바로 그**
+    함수라, 청소기만 아는 지름길은 없다(제출된 행 거절 · 도는 중 거절 · 잡 제출이 전부 저기
+    한 곳에 있다). 권한은 호출자가 본 것으로 치므로 청소기가 admin 토큰을 지어 넘긴다."""
+
+    def discard_version(
+        self, repo: RepoConfig, row: dict[str, Any], token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]: ...
 
 
 def _item_json(item: Any) -> dict[str, Any]:
@@ -145,9 +174,13 @@ class Janitor:
         on_error: Callable[[str], None] | None = None,
         log: Callable[[str], None] | None = None,
         stop: threading.Event | None = None,
+        versions: VersionHost | None = None,
     ):
         self.store = store
         self.config = config
+        #: 서버(있을 때만). 없으면 버전 대장은 **건드리지 않는다** — `rcm gc` 처럼 서버 없이
+        #: 도는 청소기가 드래프트를 조용히 버리면 안 된다.
+        self._versions = versions
         self.now_fn = now_fn
         self.on_error = on_error or (lambda msg: None)
         self.log = log or (lambda msg: None)
@@ -241,12 +274,76 @@ class Janitor:
             self.log(f"retention: expired {len(purged)} artifact bundles")
         return len(purged)
 
+    # ── 버전 드래프트의 만료 (워크플랜 §2.3 · 결정 Q1 · Q2) ──────────────────
+
+    def sweep_versions(self, now: datetime) -> int:
+        """만료된 스토어 버전 드래프트를 정리한다. **버린** 행 수를 돌려준다.
+
+        - **손도 안 댄** 드래프트(`open_versions_expired` — `editing` 이나 `failed` ·
+          `last_edit_at` NULL · `expires_at` 지남)만 자동으로 버린다. 길은 라우트의 «버리기» 와
+          **같다**(`discard_version`): ASC 버전이 있고 `version` 프리셋이 있으면 `mode=delete`
+          잡이 나가고, 아니면 바로 `discarded` 다.
+        - **만들기가 실패한**(`failed`) 드래프트도 같이 치운다(워크플랜 §14-3). 그 행은 어느
+          조회에도 안 걸리면서 이름만 붙잡고 있었다. 스토어에는 아무것도 없다 —
+          `asc_version_id` 는 만들기가 **성공했을 때만** 적히므로 그 행에서는 스토어 삭제 잡이
+          나가지 않고 그 자리에서 `discarded` 다.
+        - **편집한** 드래프트는 만료돼도 지우지 않는다(Q2). `expiry_warned` 만 켜고 로그 한 줄 —
+          상태는 그대로다. 지우는 것은 사람이 «버리기» 로만 한다.
+        - 제출된 행은 두 조회 어디에도 안 나온다(E14). 회차가 도는 행 · 만드는 중인 행도
+          `open_versions_expired`(state `editing`·`failed` 만)에 안 나오므로 버려지지 않고,
+          편집이 있으면 경고 표시만 받는다. 그래도 들어오면 `discard_version` 이 409 로 막는다.
+        - 지우기 잡은 행마다 **한 번만** 낸다 — `delete_job_id` 가 이미 있으면 건너뛴다. 그러면
+          스토어가 계속 거절하는 버전에 매 sweep 마다 새 삭제를 던지지 않는다(그 행의 `error` 를
+          보고 사람이 정한다).
+        """
+        host = self._versions
+        if host is None:
+            return 0
+        token = TokenInfo(name=JANITOR_TOKEN_NAME, admin=True, created_at=now, kind=TOKEN_ADMIN)
+        discarded = 0
+        for row in self.store.open_versions_expired(now):
+            if row["delete_job_id"] is not None:
+                continue
+            repo = self.config.repo(row["repo"])
+            if repo is None or repo.release is None:
+                continue  # 설정에서 사라진 저장소 — 대장은 남기고 사람이 본다
+            try:
+                _status, doc = host.discard_version(repo, row, token, None)
+            except Exception as e:  # noqa: BLE001 — 한 행의 거절이 sweep 을 멈추면 안 된다
+                self.on_error(f"versions: draft {row['id']} not discarded: {_api_code(e)}")
+                continue
+            discarded += 1
+            job_id = doc.get("job_id")
+            how = f"store delete job #{job_id}" if job_id else "discarded"
+            hours = repo.release.version_ttl_hours
+            self.log(
+                f"versions: draft #{row['id']} {_version_name(row)} untouched for {hours}h — {how}"
+            )
+        for row in self.store.versions_to_warn(now):
+            try:
+                self.store.update_version(row["id"], expiry_warned=True)
+            except Exception as e:  # noqa: BLE001 — 표시 실패가 sweep 을 멈추면 안 된다
+                self.on_error(f"versions: draft {row['id']} not warned: {_errname(e)}")
+                continue
+            self.log(
+                f"versions: draft #{row['id']} {_version_name(row)} expired with edits — "
+                "kept, discard it by hand when you are done with it"
+            )
+        return discarded
+
     def sweep_once(self, now: datetime | None = None) -> int:
         """기간 지난 잡의 산출물을 지우고 표시한다. 지운 잡 수를 돌려준다.
 
         작업 락을 잡는다 — 손으로 부른 `rcm gc` 와 동시에 돌지 않는다(둘이 같은 잡을 지운다).
         """
         now = now or self.now_fn()
+        # 버전 만료는 작업 락 **밖**이다: 잡 제출(미러 fetch 까지)이 섞여 있어서 그 사이
+        # `rcm gc` 를 붙잡으면 안 된다. 실패는 여기서 삼킨다 — 버전 대장 때문에 보존 정리
+        # 스레드가 죽으면 `/api/health` 가 503 이 되고 산출물이 영원히 안 지워진다.
+        try:
+            self.sweep_versions(now)
+        except Exception as e:  # noqa: BLE001 — 보존 정리는 계속 돈다
+            self.on_error(f"versions: sweep failed: {_errname(e)}")
         with self._operation_lock:
             return self._sweep_locked(now)
 

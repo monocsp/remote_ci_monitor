@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tarfile
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -25,14 +26,33 @@ from remote_ci_monitor.core.model import Job
 from remote_ci_monitor.core.status import iso
 
 #: 역할 → 묶음에서 찾는 파일. review 는 모드에 따라 둘
-#: (plan → review-plan.json · submit → review.json).
+#: (plan → review-plan.json · submit → review.json), version 도 둘
+#: (create · delete → version.json · prefill · create → prefill.json).
 ROLE_FILES: dict[str, tuple[str, ...]] = {
     "plan": ("plan.json",),
     "upload": ("upload.json",),
     "review": ("review-plan.json", "review.json"),
+    "version": ("version.json", "prefill.json"),
 }
-#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 셋에 더해 gate · qa · dev 도 행으로는 보인다.
-LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev")
+#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 넷에 더해 gate · qa · dev 도 행으로는 보인다.
+LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
+#: `prefill.json` · 편집본의 플랫폼별 문안 키(계약 §2 review 의 listing 필드 이름과 같다).
+#: 스크린샷은 보기만이라 편집본에 없다.
+PREFILL_KEYS: dict[str, tuple[str, ...]] = {
+    "ios": (
+        "subtitle",
+        "promotional_text",
+        "description",
+        "keywords",
+        "support_url",
+        "marketing_url",
+        "whats_new",
+    ),
+    "android": ("title", "short_description", "full_description", "whats_new"),
+}
+PLATFORMS = tuple(PREFILL_KEYS)
+_VERSION_NAME_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_TRAILING_INT_RE = re.compile(r"^((?:\d+\.)*)(\d+)$")
 MAX_DOC_BYTES = 256 * 1024
 JOBS_LIMIT = 50
 
@@ -76,6 +96,11 @@ def _find_member(files: Iterable[Any], basename: str) -> str | None:
         if isinstance(path, str) and _basename(path) == basename:
             return path
     return None
+
+
+def artifact_member(files: Iterable[Any], basename: str) -> str | None:
+    """묶음 매니페스트에서 basename 이 맞는 첫 항목의 경로(어디에 있든). 없으면 None."""
+    return _find_member(files, basename)
 
 
 def parse_doc(data: bytes) -> tuple[Any, str | None]:
@@ -235,14 +260,137 @@ def numbers_match(typed: Any, n: int | None) -> bool:
     return text.isdigit() and int(text) == n
 
 
+def _store_of(plan_doc: Any) -> dict[str, Any]:
+    store = plan_doc.get("store") if isinstance(plan_doc, dict) else None
+    return store if isinstance(store, dict) else {}
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def live_versions(plan_doc: Any) -> dict[str, str | None]:
+    """계획 문서가 말하는 라이브 이름 — iOS 는 `store.asc_live`, Android 는
+    `store.play.production_name`. 모르면 None(지어내지 않는다)."""
+    store = _store_of(plan_doc)
+    play = store.get("play") if isinstance(store.get("play"), dict) else {}
+    return {"ios": _text(store.get("asc_live")), "android": _text(play.get("production_name"))}
+
+
+def bump_last_number(name: str | None) -> str | None:
+    """`1.1.0 → 1.1.1` · `2.0 → 2.1`. 끝이 정수가 아니면(`1.0.0-rc1`) None."""
+    if name is None:
+        return None
+    m = _TRAILING_INT_RE.match(name.strip())
+    if m is None:
+        return None
+    return f"{m.group(1)}{int(m.group(2)) + 1}"
+
+
+def next_version_hint(plan_doc: Any) -> dict[str, str | None]:
+    """다음 버전 이름의 힌트(워크플랜 §3.1). 문서의 `next_version_hint` 가 있으면 그대로, 없으면
+    라이브 이름의 마지막 정수 +1. 웹의 `nextVersionHint` 와 같은 규칙이다."""
+    out: dict[str, str | None] = {"ios": None, "android": None}
+    given = plan_doc.get("next_version_hint") if isinstance(plan_doc, dict) else None
+    live = live_versions(plan_doc)
+    for platform in PLATFORMS:
+        hint = _text(given.get(platform)) if isinstance(given, dict) else None
+        out[platform] = hint if hint is not None else bump_last_number(live[platform])
+    return out
+
+
+def _parts(name: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(p) for p in name.strip().split("."))
+    except ValueError:
+        return None
+
+
+def version_name_check(name: Any, live: str | None) -> tuple[bool, str | None]:
+    """새 버전 이름 검사 — `(ok, reason)`. `empty` · `pattern`(major.minor.patch 정수 셋) ·
+    `not_greater`(라이브를 알 때만, 정수 튜플 비교). 라이브가 숫자 꼴이 아니면 크기는 안 본다."""
+    if not isinstance(name, str) or not name.strip():
+        return False, "empty"
+    if not _VERSION_NAME_RE.match(name.strip()):
+        return False, "pattern"
+    if live:
+        mine, theirs = _parts(name), _parts(live)
+        if mine is not None and theirs is not None and mine <= theirs:
+            return False, "not_greater"
+    return True, None
+
+
+def _norm(value: Any) -> str:
+    """비교용 정규화 — 양끝 공백 · CRLF → LF. 문자열이 아니면 빈 값."""
+    if not isinstance(value, str):
+        return ""
+    return value.replace("\r\n", "\n").strip()
+
+
+def _platform_doc(doc: Any, platform: str) -> dict[str, Any]:
+    part = doc.get(platform) if isinstance(doc, dict) else None
+    return part if isinstance(part, dict) else {}
+
+
+def listing_diff(prefill: Any, edited: Any) -> dict[str, Any]:
+    """편집본과 이전 문안의 차이 — `fields[]` 는 바뀐 것만(`{platform, key, old, new}`), 공백 ·
+    줄끝만 다른 것은 같다. `screenshots` 는 플랫폼별 `same`(이전 문안이 그 플랫폼을 안다) 또는
+    `n/a` — 웹 업로드는 범위 밖이라 편집본에 스크린샷이 없다."""
+    fields: list[dict[str, Any]] = []
+    shots: dict[str, str] = {}
+    for platform in PLATFORMS:
+        before = _platform_doc(prefill, platform)
+        after = _platform_doc(edited, platform)
+        for key in PREFILL_KEYS[platform]:
+            if key not in after:
+                continue
+            old = before.get(key)
+            new = after.get(key)
+            if _norm(old) == _norm(new):
+                continue
+            fields.append(
+                {
+                    "platform": platform,
+                    "key": key,
+                    "old": old if isinstance(old, str) else None,
+                    "new": new if isinstance(new, str) else None,
+                }
+            )
+        shots[platform] = "same" if before else "n/a"
+    return {"fields": fields, "screenshots": shots}
+
+
+def merged_listing(prefill: Any, edited: Any) -> dict[str, dict[str, str]]:
+    """review · upload 잡의 `listing_json` 본문 — 플랫폼별 문안 키를 이전 문안 위에 편집본으로
+    덮은 것(edited ⊕ prefill). 문자열 값만, 빈 플랫폼은 뺀다."""
+    out: dict[str, dict[str, str]] = {}
+    for platform in PLATFORMS:
+        merged: dict[str, str] = {}
+        for source in (_platform_doc(prefill, platform), _platform_doc(edited, platform)):
+            for key in PREFILL_KEYS[platform]:
+                if isinstance(source.get(key), str):
+                    merged[key] = source[key]
+        if merged:
+            out[platform] = merged
+    return out
+
+
 __all__ = [
     "AUTO_BUILD_NUMBER",
     "JOBS_LIMIT",
     "LISTED_ROLES",
     "MAX_DOC_BYTES",
+    "PLATFORMS",
+    "PREFILL_KEYS",
     "ROLE_FILES",
+    "artifact_member",
     "artifact_names",
+    "bump_last_number",
     "job_row",
+    "listing_diff",
+    "live_versions",
+    "merged_listing",
+    "next_version_hint",
     "numbers_match",
     "parse_doc",
     "parse_iso",
@@ -251,4 +399,5 @@ __all__ = [
     "read_bundle_member",
     "release_view",
     "role_entry",
+    "version_name_check",
 ]

@@ -1096,13 +1096,24 @@
   var STORE_STALE_SECONDS = 30 * 60;   // 미러 나이 30분 — 목업 항목 4·42 (황토, 빨강이 아니다)
   var VALUE_FP_CHARS = 4;              // 값 비밀의 지문은 앞 4자 + … 를 넘지 않는다(항목 31)
 
-  /** 해시 → 화면. `#/store/<repo>` 만 스토어, 나머지(`#/` · `#/jobs/N` · 빈 값)는 큐다. */
+  /** 해시 → 화면. 스토어 탭은 셋으로 갈린다(워크플랜 §3.1):
+      `#/store/<repo>` 버전 목록 · `#/store/<repo>/v/<id>` 버전 하나 · `#/store/<repo>/status` 상태.
+      나머지(`#/` · `#/jobs/N` · 빈 값)는 큐다. `sub` 는 스토어일 때 언제나 있고 `id` 는 버전일 때만. */
   function parseRoute(hash) {
-    var m = /^#\/store\/([^\/?#]+)\/?$/.exec(hash || "");
-    if (!m) return { view: "queue", repo: null };
+    var m = /^#\/store\/([^\/?#]+)(?:\/(?:(status)|v\/(\d+)))?\/?$/.exec(hash || "");
+    if (!m) return { view: "queue", repo: null, sub: null, id: null };
     var repo;
     try { repo = decodeURIComponent(m[1]); } catch (e) { repo = m[1]; }
-    return { view: "store", repo: repo };
+    if (m[2]) return { view: "store", repo: repo, sub: "status", id: null };
+    if (m[3]) return { view: "store", repo: repo, sub: "version", id: parseInt(m[3], 10) };
+    return { view: "store", repo: repo, sub: "versions", id: null };
+  }
+  /** 스토어 화면의 해시를 만드는 유일한 자리 — `parseRoute` 와 짝이다. */
+  function storeHash(repo, sub, id) {
+    var base = "#/store/" + encodeURIComponent(repo);
+    if (sub === "status") return base + "/status";
+    if (sub === "version") return base + "/v/" + encodeURIComponent(String(id));
+    return base;
   }
   /** `GET /api/repos` 문서에서 릴리스 프로파일이 있는 저장소만. 문서가 이상하면 빈 배열(탭 없음). */
   function releaseRepos(doc) {
@@ -1277,6 +1288,390 @@
     if (!presets[role]) return T(lang, "row.not_configured", { name: "presets." + role });
     return T(lang, kind === "build" ? "row.na.build" : "row.na.store");
   }
+  // ── 버전 목록 · 새 버전 · 상태 띠 (docs/version-page-workplan.md §3.1 · §11 · §12 · §15) ──
+  // rcm 은 스토어를 모른다. 라이브 이름도 힌트도 막힘도 **프로젝트 스크립트가 쓴 `plan.json`** 에서
+  // 오고, 여기서는 그 값을 그리기만 한다. 서버의 `release_state.py` 에 같은 규칙이 파이썬으로 한 벌
+  // 더 있다(대화상자가 보내기 전에, 서버가 받고 나서 — 둘 다 같은 답을 내야 한다).
+  var VERSION_POLL_MS = 5000;          // 버전 상세만, «만드는 중» 일 때만 (§15)
+  var VERSION_NAME_RE = /^\d+\.\d+\.\d+$/;
+  //: 행 상태 → 필 색. `new` 는 편집 중(청록), `run` 은 만드는 중·진행 중.
+  var VERSION_TONE = { creating: "running", editing: "new", running: "running",
+    submitted: "ok", discarded: "na", failed: "bad" };
+
+  /** `1.1.0` → `1.1.1` · `2.0` → `2.1`. 끝이 정수가 아니면(`1.0.0-rc1`) null — 지어내지 않는다. */
+  function bumpLastNumber(name) {
+    if (typeof name !== "string") return null;
+    var m = /^((?:\d+\.)*)(\d+)$/.exec(name.trim());
+    return m ? m[1] + (parseInt(m[2], 10) + 1) : null;
+  }
+  /** 계획 문서가 말하는 라이브 이름 — iOS 는 `store.asc_live`, Android 는 `store.play.production_name`. */
+  function liveVersions(planDoc) {
+    var store = planDoc && typeof planDoc.store === "object" && planDoc.store ? planDoc.store : {};
+    var play = store.play && typeof store.play === "object" ? store.play : {};
+    var text = function (v) { return typeof v === "string" && v.trim() ? v : null; };
+    return { ios: text(store.asc_live), android: text(play.production_name) };
+  }
+  /** 다음 버전 이름의 힌트. 서버가 이미 계산해 주지만(`GET …/release/versions` 의 `hints`) 화면도
+      플랜 문서 하나로 같은 답을 낼 수 있어야 한다 — 문서의 `next_version_hint` 가 있으면 그대로,
+      없으면 라이브 이름의 마지막 정수 +1. 모르면 null 이다. */
+  function nextVersionHint(planDoc) {
+    var given = planDoc && typeof planDoc.next_version_hint === "object" && planDoc.next_version_hint ? planDoc.next_version_hint : {};
+    var live = liveVersions(planDoc);
+    var pick = function (p) {
+      var hint = typeof given[p] === "string" && given[p].trim() ? given[p] : null;
+      return hint != null ? hint : bumpLastNumber(live[p]);
+    };
+    return { ios: pick("ios"), android: pick("android") };
+  }
+  /** 새 버전 이름 검사 — `{ok, reason}`. `empty` · `pattern`(major.minor.patch 정수 셋) ·
+      `not_greater`(라이브를 아는 스토어에서만). 라이브가 숫자 꼴이 아니면 크기는 안 본다. */
+  function versionNameCheck(name, live) {
+    if (typeof name !== "string" || !name.trim()) return { ok: false, reason: "empty" };
+    var value = name.trim();
+    if (!VERSION_NAME_RE.test(value)) return { ok: false, reason: "pattern" };
+    var parts = function (v) {
+      var out = String(v).trim().split(".").map(function (p) { return /^\d+$/.test(p) ? parseInt(p, 10) : null; });
+      return out.indexOf(null) >= 0 ? null : out;
+    };
+    var mine = parts(value), theirs = typeof live === "string" && live ? parts(live) : null;
+    if (mine && theirs) {
+      for (var i = 0; i < Math.max(mine.length, theirs.length); i++) {
+        var a = mine[i] || 0, b = theirs[i] || 0;
+        if (a > b) return { ok: true, reason: null };
+        if (a < b) return { ok: false, reason: "not_greater" };
+      }
+      return { ok: false, reason: "not_greater" };
+    }
+    return { ok: true, reason: null };
+  }
+  /** 두 스토어 이름을 한 줄로(§11): 언제나 둘 다, 같으면 하나. 스토어 이름은 식별자라 번역하지 않는다. */
+  function versionTitle(ios, android) {
+    var a = typeof ios === "string" && ios ? ios : null;
+    var b = typeof android === "string" && android ? android : null;
+    if (a && b) return a === b ? a : "iOS " + a + " · Android " + b;
+    if (a) return "iOS " + a;
+    if (b) return "Android " + b;
+    return DASH;
+  }
+  /** 이 버전을 붙잡고 있는 것들(§15) — 살아 있는 회차 · 올리는 작업 · 심사 작업. 행이 실어 준
+      id 만 말한다: 무엇이 도는지는 **글자로** 보여야 한다(hover 의 title 뿐이면 키보드·스크린
+      리더 쓰는 사람은 이유를 못 본다 — C 단계 격리 검증 1). 없으면 빈 배열이다. */
+  function versionHolders(row, lang) {
+    var r = row || {}, out = [];
+    if (r.release_id != null) out.push(T(lang, "version.hold.round", { id: r.release_id }));
+    if (r.upload_job_id != null) out.push(T(lang, "version.hold.upload", { id: r.upload_job_id }));
+    if (r.review_job_id != null) out.push(T(lang, "version.hold.review", { id: r.review_job_id }));
+    return out;
+  }
+  /** 드래프트 행 하나 — 필 · 만든 지 · 바뀐 칸 수 · 빌드 유무 · 만료(§14-5 · E13) · 실패 사유.
+      버튼은 서버가 실제로 받아 주는 것만 연다: 도는 중이면 버리기가 409 `version_running` 이고
+      (`discard_version`), 만들기가 실패한 행은 이름을 안 붙잡으므로 같은 이름으로 다시 만든다(§15).
+      «지우는 중» 은 상태 열에 없다 — 서버는 `delete_job_id` 만 채우고 잡이 0 으로 끝나야 행을
+      `discarded` 로 닫는다. 그 사이 화면이 «편집 중 · 열기 · 버리기» 로 남아 있으면 누른 사람은
+      아무 일도 안 일어난 줄 안다(C 단계 격리 검증 2). 잡이 끝나면 저절로 풀린다: 성공하면 행이
+      닫혀 목록에서 빠지고, 실패하면 `error` 가 채워져 그 줄이 사유를 말한다. */
+  function versionRowModel(row, lang, nowMs) {
+    var r = row || {};
+    var st = typeof r.state === "string" ? r.state : "editing";
+    var created = secondsSince(r.created_at, nowMs);
+    var changed = isNum(r.changed) ? r.changed : 0;
+    var hasBuild = r.upload_job_id != null || r.release_id != null;
+    var expired = r.expired === true || r.expiry_warned === true || r.expiry_warned === 1;
+    var deleting = r.delete_job_id != null && !r.error && st !== "submitted" && st !== "discarded";
+    var notes = [];
+    if (deleting) notes.push(T(lang, "version.row.deleting", { id: r.delete_job_id }));
+    if (st === "creating") notes.push(T(lang, "version.row.creating", { id: r.create_job_id != null ? r.create_job_id : DASH }));
+    // 최상단 막대가 사라졌으니(결정 Q6) 도는 회차는 **이 행**에서 보여야 한다. 무엇이 붙잡고
+    // 있는지도 말한다 — 회차 · 올리는 작업 · 심사 작업 셋 중 마지막 하나가 끝나야 «편집 중» 이다.
+    if (st === "running") {
+      var holders = versionHolders(r, lang);
+      notes.push(holders.length ? T(lang, "version.row.running", { what: holders.join(" · ") })
+        : T(lang, "version.row.running_plain"));
+    }
+    if (created != null) notes.push(T(lang, "version.row.created", { age: fmtCoarse(created) }));
+    notes.push(changed > 0 ? T(lang, "version.row.changed", { n: changed }) : T(lang, "version.row.unchanged"));
+    notes.push(T(lang, hasBuild ? "version.row.build" : "version.row.no_build"));
+    if (expired) notes.push(T(lang, "version.row.expired"));
+    if (r.error) notes.push(T(lang, "version.row.error", { detail: String(r.error).slice(0, 120) }));
+    return {
+      id: r.id, state: st, deleting: deleting, title: versionTitle(r.ios_version, r.android_version),
+      ios: r.ios_version || null, android: r.android_version || null,
+      tone: deleting ? "running" : VERSION_TONE[st] || "na",
+      pill: deleting ? T(lang, "version.state.deleting") : T(lang, "version.state." + (VERSION_TONE[st] ? st : "editing")),
+      ageSeconds: created, changed: changed, hasBuild: hasBuild, expired: expired,
+      error: r.error || null, createJobId: r.create_job_id != null ? r.create_job_id : null,
+      deleteJobId: r.delete_job_id != null ? r.delete_job_id : null,
+      holders: versionHolders(r, lang), notes: notes,
+      // 왜 못 누르는지는 `notes` 가 이미 글자로 말한다 — 비활성 버튼의 title 에만 두지 않는다
+      canDiscard: !deleting && st !== "submitted" && st !== "discarded" && st !== "running" && st !== "creating",
+      discardWhy: deleting ? T(lang, "version.row.deleting", { id: r.delete_job_id })
+        : st === "running" || st === "creating" ? T(lang, "version.row.busy") : null,
+      canRetry: st === "failed"
+    };
+  }
+  /** `GET …/release/versions` → W1 의 행들. 드래프트 · 라이브 · 지난 것, 그리고 «+ 새 버전 만들기»
+      를 잠그는 `creating`. 시간은 `nowMs` 를 준 만큼만 말한다(안 주면 나이를 안 그린다). */
+  function versionListModel(doc, lang, nowMs) {
+    var d = doc && typeof doc === "object" ? doc : {};
+    var live = d.live && typeof d.live === "object" ? d.live : {};
+    var hints = d.hints && typeof d.hints === "object" ? d.hints : {};
+    var drafts = (Array.isArray(d.drafts) ? d.drafts : []).map(function (r) { return versionRowModel(r, lang, nowMs); });
+    var history = (Array.isArray(d.history) ? d.history : []).map(function (h) {
+      var e = h || {};
+      return { id: e.id, title: versionTitle(e.ios, e.android), submittedAt: e.submitted_at || null,
+        reviewJobId: e.review_job_id != null ? e.review_job_id : null };
+    });
+    return {
+      ttlHours: isNum(d.ttl_hours) ? d.ttl_hours : null,
+      live: { ios: live.ios || null, android: live.android || null, title: versionTitle(live.ios, live.android),
+        known: !!(live.ios || live.android), fromPlanJob: live.from_plan_job != null ? live.from_plan_job : null },
+      hints: { ios: hints.ios || null, android: hints.android || null },
+      // 대화상자에 칸을 둘 스토어(E2): 플랜이 이름이나 힌트를 아는 스토어만. 둘 다 모르면(E1)
+      // 둘 다 둔다 — rcm 은 프로젝트가 어느 스토어에 내는지 모르고, 플랜만이 말해 준다.
+      platforms: (function () {
+        var known = ["ios", "android"].filter(function (p) { return !!(live[p] || hints[p]); });
+        return known.length ? known : ["ios", "android"];
+      })(),
+      creating: drafts.some(function (r) { return r.state === "creating"; }),
+      drafts: drafts, history: history
+    };
+  }
+  /** 요약 띠(§12) — 칩 넷, 하나라도 빨가면 띠가 빨갛다. 버전을 고르기 전에 «이 앱을 지금 올릴 수
+      있는가»만 답한다. 막힘·경고는 프로젝트가 플랜에 적어 보낸 것 그대로다(rcm 은 목록을 안 만든다).
+      `ctx` = `{doc, items, release, profile, fetchError, nowMs, tzName}`. */
+  function statusStripModel(ctx, lang) {
+    var c = ctx || {}, doc = c.doc || {}, profile = c.profile || {}, setup = doc.setup || {};
+    var chips = [];
+    // 자격 증명 — 비밀이 다 있고 다 검증됐을 때만 초록
+    var latest = latestVerified(c.items);
+    var required = isNum(setup.required) ? setup.required : null, verified = isNum(setup.verified) ? setup.verified : null;
+    chips.push({
+      code: "credentials", label: T(lang, "vstrip.label.credentials"),
+      tone: setup.complete === true && required != null && verified != null && verified >= required && latest != null ? "ok" : "bad",
+      text: T(lang, "vstrip.creds", {
+        n: isNum(setup.present) ? setup.present : DASH, total: required != null ? required : DASH,
+        clock: latest != null ? fmtClock(new Date(latest).toISOString(), c.tzName, c.nowMs) : DASH
+      })
+    });
+    // 소스 — 행 넷의 판정을 그대로 쓴다(ok 가 아니면 빨강: 모르는 것도 초록은 아니다)
+    var srcCtx = { nowMs: c.nowMs, fetchError: c.fetchError };
+    chips.push({
+      code: "source", label: T(lang, "vstrip.label.source"),
+      tone: rowState("source", { doc: doc, nowMs: c.nowMs, fetchError: c.fetchError }) === "ok" ? "ok" : "bad",
+      text: sourceHead(doc, srcCtx, lang).join(" · ")
+    });
+    // 스토어 — 최신 플랜이 읽은 두 스토어와 다음 빌드 번호. 플랜이 없거나 낡으면 빨강
+    var release = c.release || {}, plan = release.plan || null, pdoc = planEntryDoc(plan);
+    var parts = [], storeTone = "bad";
+    if (plan == null || pdoc == null) parts.push(T(lang, "vstrip.store_none"));
+    else {
+      var store = pdoc.store && typeof pdoc.store === "object" ? pdoc.store : {};
+      var play = store.play && typeof store.play === "object" ? store.play : {};
+      parts.push(T(lang, "vstrip.store_ios", { name: store.asc_live || DASH, build: isNum(store.asc_live_build) ? store.asc_live_build : DASH }));
+      parts.push(T(lang, "vstrip.store_play", { name: play.production_name || DASH, build: isNum(play.production) ? play.production : DASH }));
+      if (isNum(pdoc.n)) parts.push(T(lang, "vstrip.store_next", { n: pdoc.n }));
+      var maxAge = isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes * 60 : null;
+      var stale = plan.stale === true || (maxAge != null && isNum(plan.age_seconds) && plan.age_seconds > maxAge);
+      if (stale) parts.push(T(lang, "vstrip.store_stale", { age: fmtAgo(plan.age_seconds, lang) }));
+      else storeTone = "ok";
+    }
+    chips.push({ code: "store", label: T(lang, "vstrip.label.store"), tone: storeTone, text: parts.join(" · ") });
+    // 막힘 — 막힘도 경고도 없으면 칩 자체가 없다
+    var blockers = pdoc && Array.isArray(pdoc.blockers) ? pdoc.blockers.length : 0;
+    var warnings = pdoc && Array.isArray(pdoc.warnings) ? pdoc.warnings.length : 0;
+    if (blockers > 0 || warnings > 0) {
+      chips.push({ code: "blockers", label: "", tone: blockers > 0 ? "bad" : "ok",
+        text: T(lang, "vstrip.blockers", { n: blockers, count: warnings }) });
+    }
+    var bad = chips.filter(function (chip) { return chip.tone === "bad"; }).length;
+    return { tone: bad > 0 ? "bad" : "ok", bad: bad, chips: chips };
+  }
+
+  // ── W3 버전 페이지 본문 — 이전 버전 값으로 채워진 편집 칸 (워크플랜 §3.1 · §3.2 · R6) ──
+  // 키와 차례는 서버 `release_state.PREFILL_KEYS` 와 **같아야 한다** — 하나라도 어긋나면 자동
+  // 저장이 400 `listing_key` 를 받는다. 스크린샷·그래픽은 이번 범위에서 보기만이다(결정 Q8).
+  var PREFILL_KEYS = {
+    ios: ["subtitle", "promotional_text", "description", "keywords", "support_url", "marketing_url", "whats_new"],
+    android: ["title", "short_description", "full_description", "whats_new"]
+  };
+  // 절 안의 그룹과 그 차례 — 심사 패널과 같다(항목 15). 읽기 전용 그룹 둘은 같은 코드를 쓴다.
+  var VERSION_GROUPS = {
+    ios: [{ key: "version_info", fields: ["subtitle", "promotional_text", "description", "keywords", "support_url", "marketing_url"] },
+      { key: "whats_new", fields: ["whats_new"] }],
+    android: [{ key: "store_listing", fields: ["title", "short_description", "full_description"] },
+      { key: "release_notes", fields: ["whats_new"] }]
+  };
+  var LONG_FIELDS = { description: 1, full_description: 1, whats_new: 1, promotional_text: 1, keywords: 1 };
+  var VERSION_SAVE_DEBOUNCE_MS = 800;   // 한 칸을 고치고 800 ms 조용하면 그 키만 보낸다(§3.2)
+
+  /** 이 칸의 스토어 상한. `whats_new` 만 스토어마다 다르다(App Store 4000 · Play 500 — §3.1). */
+  function fieldLimit(platform, key) {
+    if (key === "whats_new") return NOTES_LIMIT[platform] || null;
+    return FIELD_LIMITS[key] || null;
+  }
+  /** 비교용 정규화 — 서버 `release_state._norm` 과 **같은 규칙**이다: 양끝 공백 · CRLF → LF.
+      이것이 어긋나면 화면의 «바뀜» 과 서버의 diff 가 갈라진다(줄끝만 달라도 고친 것이 된다). */
+  function listingNorm(text) {
+    return typeof text === "string" ? text.replace(/\r\n/g, "\n").trim() : "";
+  }
+  function listingPart(doc, platform) {
+    var part = doc && typeof doc === "object" ? doc[platform] : null;
+    return part && typeof part === "object" ? part : {};
+  }
+  /** 서버 `release_state.listing_diff` 의 웹 쪽 짝. 편집본에 **있는** 키만 보고, 정규화해서 같으면
+      안 센다 — 그래서 prefill 값으로 되돌리면 diff 가 빈다(E10). `screenshots` 는 이전 문안이 그
+      스토어를 알면 `same`, 모르면 `n/a`(웹 업로드는 범위 밖이라 편집본에 스크린샷이 없다). */
+  function listingDiff(prefill, edited) {
+    var fields = [], shots = {}, unchanged = 0;
+    Object.keys(PREFILL_KEYS).forEach(function (platform) {
+      var before = listingPart(prefill, platform), after = listingPart(edited, platform);
+      PREFILL_KEYS[platform].forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(after, key)) return;
+        var old = typeof before[key] === "string" ? before[key] : null;
+        var fresh = typeof after[key] === "string" ? after[key] : null;
+        if (listingNorm(old) === listingNorm(fresh)) { unchanged++; return; }
+        fields.push({ platform: platform, key: key, old: old, new: fresh });
+      });
+      shots[platform] = Object.keys(before).length ? "same" : "n/a";
+    });
+    return { fields: fields, screenshots: shots, changed: fields.length, unchanged: unchanged };
+  }
+  /** 칸 이름 — 문안 키는 심사 패널과 같은 이름이고, 릴리스 노트만 스토어마다 부르는 말이 다르다. */
+  function fieldLabelKey(platform, key) {
+    if (key === "whats_new") return platform === "ios" ? "version.field.whats_new" : "version.field.release_notes";
+    return "review.field." + key;
+  }
+  /**
+   * 칸 하나의 값과 **출처**(R6). 값은 편집본 → 이전 버전(prefill) → 파일(소개 자료 미리보기) →
+   * 빈 값 차례로 고르고, 화면은 그중 무엇을 보이는지 말한다. `changed` 는 이전 버전 값과
+   * **정규화해서** 다를 때만이다 — 되돌리면 칩도 diff 도 사라진다(E10).
+   * `ctx` = `{prefill, edited, typed, file, remote}` — `typed` 는 이 브라우저가 친 값(저장에
+   * 실패해도 화면에 남는다 · E7), `file` 은 `listingFields(listing)` 의 플랫폼별 값이다.
+   */
+  function versionFieldModel(platform, key, ctx, lang) {
+    var c = ctx || {};
+    var prefill = listingPart(c.prefill, platform), edited = listingPart(c.edited, platform);
+    var typed = listingPart(c.typed, platform), file = listingPart(c.file, platform);
+    var has = function (o, k) { return typeof o[k] === "string"; };
+    var base = has(prefill, key) ? prefill[key] : null;
+    var value, origin;
+    if (has(typed, key)) { value = typed[key]; origin = "edited"; }
+    else if (has(edited, key)) { value = edited[key]; origin = "edited"; }
+    else if (base != null) { value = base; origin = "prefill"; }
+    else if (has(file, key)) { value = file[key]; origin = "file"; }
+    else { value = ""; origin = "empty"; }
+    var changed = origin === "edited" && listingNorm(value) !== listingNorm(base);
+    // 고친 값이 이전 버전과 같아졌으면 그것은 «이전 버전 그대로» 다 — 이름이 사실을 따라간다
+    var source = changed ? "edited"
+      : base != null ? "prefill"
+        : has(file, key) && listingNorm(value) === listingNorm(file[key]) ? "file"
+          : listingNorm(value) ? "edited" : "empty";
+    var limit = fieldLimit(platform, key);
+    return {
+      platform: platform, key: key, id: "f-" + platform + "-" + key,
+      label: T(lang, fieldLabelKey(platform, key)),
+      value: value, prefill: base, source: source, sourceText: T(lang, "version.edit.source." + source),
+      changed: changed, canRevert: changed, remote: !!(c.remote || {})[platform + "." + key],
+      limit: limit, counter: fieldCounter(value, limit), multiline: !!LONG_FIELDS[key]
+    };
+  }
+  /**
+   * W3 본문 하나 — 절 둘(App Store · Google Play, 심사 패널과 같은 그룹 차례) · 칸마다 값과 출처 ·
+   * 바뀐 칸 수 · 읽기 전용 이유. `ctx` = `{version, file, typed, remote, admin}`.
+   * 절은 이 버전이 **이름을 가진 스토어**만 둔다(§11 · E25) — 한쪽만 만든 드래프트에 남의 칸을
+   * 그리지 않는다. 이름을 둘 다 모르면(있을 수 없지만) 둘 다 둔다.
+   */
+  function versionPageModel(ctx, lang) {
+    var c = ctx || {}, v = c.version && typeof c.version === "object" ? c.version : {};
+    var closed = v.state === "submitted" || v.state === "discarded";
+    var fctx = { prefill: v.prefill, edited: v.edited, typed: c.typed, file: c.file, remote: c.remote || {} };
+    var platforms = Object.keys(PREFILL_KEYS).filter(function (p) {
+      return typeof v[p + "_version"] === "string" && v[p + "_version"];
+    });
+    if (!platforms.length) platforms = Object.keys(PREFILL_KEYS);
+    var shots = v.diff && typeof v.diff === "object" && v.diff.screenshots && typeof v.diff.screenshots === "object" ? v.diff.screenshots : {};
+    var changed = 0, remote = 0;
+    var sections = platforms.map(function (platform) {
+      var groups = VERSION_GROUPS[platform].map(function (g) {
+        return {
+          key: g.key, label: T(lang, "review.group." + g.key),
+          fields: g.fields.map(function (key) {
+            var f = versionFieldModel(platform, key, fctx, lang);
+            if (f.changed) changed++;
+            if (f.remote) remote++;
+            return f;
+          })
+        };
+      });
+      var same = shots[platform] === "same";
+      return {
+        platform: platform, label: T(lang, "review.section." + platform),
+        version: v[platform + "_version"] || null, groups: groups,
+        screenshots: { state: same ? "same" : "unknown", text: T(lang, same ? "version.edit.screenshots.same" : "version.edit.screenshots.unknown") }
+      };
+    });
+    var readOnly = c.admin !== true ? "admin" : closed ? "closed" : null;
+    return {
+      platforms: platforms, sections: sections, changed: changed, remote: remote,
+      editable: readOnly == null, readOnly: readOnly,
+      readOnlyText: readOnly == null ? null
+        : readOnly === "admin" ? T(lang, "version.edit.readonly.admin")
+          : T(lang, "version.edit.readonly.closed", { state: T(lang, "version.state." + v.state) }),
+      hasPrefill: !!(v.prefill && typeof v.prefill === "object"),
+      prefillSource: v.prefill && typeof v.prefill === "object" && typeof v.prefill.source === "string" && v.prefill.source ? v.prefill.source : null,
+      headText: T(lang, changed > 0 ? "version.edit.head_changed" : "version.edit.head", { n: changed })
+    };
+  }
+  /** 자동 저장이 보내는 본문 — **바뀐 키만** 싣는다(§3.2 · AC-C6). `dirty` 는 `"<플랫폼>.<키>"`
+      집합이고 값은 이 브라우저가 친 것이다. 보낼 것이 없으면 null 이라 부르지도 않는다. */
+  function listingPutBody(typed, dirty) {
+    var body = {}, any = false;
+    Object.keys(dirty || {}).forEach(function (id) {
+      if (!dirty[id]) return;
+      var at = id.indexOf("."), platform = id.slice(0, at), key = id.slice(at + 1);
+      if (!PREFILL_KEYS[platform] || PREFILL_KEYS[platform].indexOf(key) < 0) return;
+      var value = listingPart(typed, platform)[key];
+      if (typeof value !== "string") return;
+      if (!body[platform]) body[platform] = {};
+      body[platform][key] = value;
+      any = true;
+    });
+    return any ? body : null;
+  }
+  /** 두 브라우저가 같은 드래프트를 고칠 때(E8) — 5초 폴링이 가져온 편집본이 우리가 마지막으로 본
+      것과 다르면 그 칸이 «다른 곳에서 바뀜» 이다. 화면 값을 조용히 덮어쓰지 않기 위한 표시이고,
+      우리가 방금 보낸 값이 그대로 돌아온 것은 남의 편집이 아니다. */
+  function remoteListingEdits(seen, incoming, typed) {
+    var out = {};
+    Object.keys(PREFILL_KEYS).forEach(function (platform) {
+      var was = listingPart(seen, platform), got = listingPart(incoming, platform), mine = listingPart(typed, platform);
+      PREFILL_KEYS[platform].forEach(function (key) {
+        var a = typeof was[key] === "string" ? was[key] : null;
+        var b = typeof got[key] === "string" ? got[key] : null;
+        if (listingNorm(a) === listingNorm(b)) return;
+        if (typeof mine[key] === "string" && listingNorm(mine[key]) === listingNorm(b)) return;
+        out[platform + "." + key] = true;
+      });
+    });
+    return out;
+  }
+  /** 자동 저장 배지 — «저장하는 중» · «자동 저장 · 12s 전» · «저장 실패: …»(+ 다시 저장).
+      시간은 준 만큼만 말한다(`at` 이 없거나 `nowMs` 를 모르면 나이를 안 그린다). */
+  function saveBadge(save, lang, nowMs) {
+    var s = save && typeof save === "object" ? save : {};
+    if (s.state === "failed") {
+      return { state: "failed", tone: "bad", retry: true, at: null,
+        text: T(lang, "version.edit.save.failed", { detail: s.detail || DASH }) };
+    }
+    if (s.state === "saving") return { state: "saving", tone: "run", retry: false, at: null, text: T(lang, "version.edit.save.saving") };
+    if (s.state === "saved") {
+      var age = secondsSince(s.at, nowMs);
+      return { state: "saved", tone: "ok", retry: false, at: s.at || null,
+        text: age == null ? T(lang, "version.edit.save.saved_now") : T(lang, "version.edit.save.saved", { age: fmtCoarse(age) }) };
+    }
+    return { state: "idle", tone: "none", retry: false, at: null, text: T(lang, "version.edit.save.idle") };
+  }
+
   // ── 심사 패널 본체 · Store 행 · Build·upload 행 (항목 5~24 · 28 · 36 · 40 · 42 · 46~49) ──
   // 서버 계약은 STORE-TAB-API-2(`GET …/release` · `POST …/release/plan|review|upload` ·
   // `GET …/release/listing` · `POST …/release/listing/validate`). 웹은 판정하지 않는다 — N · 판정 ·
@@ -1548,13 +1943,30 @@
     if (d.play_managed_publishing === "confirmed-on" || d.managed_publishing_confirmed === true) extras.push(T(lang, "review.result.managed_confirmed"));
     return { status: status, tone: RELEASE_STATUS_TONE[status] || "bad", platforms: lines, extras: extras, autoRelease: observed.auto_release === true || d.auto_release === true };
   }
-  /** 409 등 서버의 거부 — 코드를 그대로 버튼 옆에 쓴다. 클라이언트가 돌아가지 않는다. */
+  // 거부 문구의 상한 — 배지 한 줄에 들어가는 만큼이고, 넘으면 `truncate` 가 … 로 자른다.
+  var REFUSAL_MAX = 120;
+  // JSON 이 아닌 본문(프록시·게이트웨이의 HTML 오류 페이지)을 알아보는 자국. `call` 은 파싱에
+  // 실패한 본문을 `{error: <원문>}` 으로 싸므로, 이 검사가 없으면 페이지 전체가 배지에 깔린다.
+  var HTML_BODY_RE = /^\s*<|<\/?(?:!doctype|html|head|body|title)\b/i;
+  /**
+   * 409 등 서버의 거부 — 코드를 그대로 버튼 옆에 쓴다. 클라이언트가 돌아가지 않는다.
+   *
+   * 본문이 JSON 이 아니면(§16-2 · §17-13: 401 이 keep-alive 를 어긋내면서 돌아온 HTML 오류
+   * 페이지 500자쯤이 그대로 저장 배지에 깔렸다) **상태 코드만** 말한다 — 화면을 밀어내는
+   * 쪽지를 옮기지 않는다. JSON 이어도 `error` 는 한 줄로 접고 `REFUSAL_MAX` 에서 자른다.
+   */
   function refusalText(res, lang) {
     var b = res && res.body && typeof res.body === "object" ? res.body : {};
     var code = b.code || b.error_code;
+    var status = "http " + (res ? res.status : "?");
     if (code) return T(lang, "review.server_code", { code: String(code) });
-    if (b.error) return String(b.error);
-    return "http " + (res ? res.status : "?");
+    if (b.error != null && b.error !== "") {
+      var raw = String(b.error);
+      if (HTML_BODY_RE.test(raw)) return status;
+      var line = raw.replace(/\s+/g, " ").trim();
+      return line ? truncate(line, REFUSAL_MAX) : status;
+    }
+    return status;
   }
   /**
    * plan.json 의 스토어 값을 글자로 — 숫자·글자는 그대로, 객체(`{name, status, codes:[…]}` 같은 Play 트랙)는
@@ -1696,6 +2108,23 @@
     items.forEach(function (it, i) { if (it.role === "plan") cut = i; });
     return { bar: bar, now: nowLine, items: items.slice(cut), older: items.slice(0, cut), current: cur };
   }
+  /**
+   * 역할 항목(`plan` · `review.plan` · `review.result` · `upload`)이 가리키는 잡이 **끝난** 때.
+   *
+   * 그 시각은 `release.jobs[]` 의 행에만 있다 — 서버의 `release_state.role_entry` 는
+   * `{job_id, state, doc}`(+ plan 계열의 나이)만 만들고 `finished_at` 은 넣지 않는다.
+   * 항목에서 바로 읽으면 언제나 undefined 라 그 시각이 화면에서 조용히 사라진다(§17-9).
+   * 모르면 null — 화면이 — 를 그린다.
+   */
+  function roleFinishedAt(release, entry) {
+    var id = entry && entry.job_id != null ? entry.job_id : null;
+    if (id == null) return null;
+    var rows = release && Array.isArray(release.jobs) ? release.jobs : [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].id === id && rows[i].finished_at) return rows[i].finished_at;
+    }
+    return null;
+  }
   /** Build·upload 행(항목 5 · 26 · 38 · 49) — 색 · 머리 조각 · 세 층. */
   function buildRowModel(release, releaseStatus, profile, rows, lang, tzName, nowMs) {
     var presets = profile && profile.presets ? profile.presets : {};
@@ -1725,8 +2154,8 @@
       var status = String(upDoc.status || "");
       head.push(I18N.has("build.status." + status) ? T(lang, "build.status." + status) : status || DASH);
       if (Array.isArray(upDoc.platforms) && upDoc.platforms.length) head.push(T(lang, "build.item.platforms", { names: upDoc.platforms.join(" + ") }));
-      var fin = parseIso(up.finished_at);
-      if (fin != null) head.push(T(lang, "build.head.uploaded", { clock: fmtClock(up.finished_at, tzName, nowMs) }));
+      var fin = roleFinishedAt(release, up);
+      if (fin != null) head.push(T(lang, "build.head.uploaded", { clock: fmtClock(fin, tzName, nowMs) }));
       head.push("#" + up.job_id);
       if (upDoc.tag) head.push(String(upDoc.tag));
       var st = status === "success" ? "ok" : status === "partial" ? "bad" : "na";
@@ -1781,7 +2210,7 @@
   function stepperModel(driver, ctx) {
     ctx = ctx || {};
     var lang = ctx.lang, nowMs = ctx.nowMs;
-    var base = { available: true, configured: false, running: false, exit: null, stage: null, planN: null, version: DASH, items: [], head: "", headParts: [], tone: "na", dialog: false, log: [], idle: true, done: false, blocked: false, statusError: null };
+    var base = { available: true, configured: false, running: false, exit: null, stage: null, planN: null, version: DASH, items: [], head: "", headParts: [], tone: "na", dialog: false, log: [], idle: true, done: false, blocked: false, statusError: null, knowsV: false };
     if (ctx.status === 404) return Object.assign(base, { available: false, head: T(lang, "driver.na") });
     if (!driver || typeof driver !== "object") return Object.assign(base, { loading: true, head: T(lang, "driver.loading") });
     if (driver.configured === false) return Object.assign(base, { head: T(lang, "driver.not_configured") });
@@ -1843,56 +2272,11 @@
       // «자동» 회차는 서버가 스스로 confirm 을 띄우므로 대화상자를 열지 않는다
       dialog: !running && exit === 2 && planN != null && !confirmed && !autoN,
       statusError: driver.status_error ? String(driver.status_error) : null,
+      // 이 드라이버가 `V` 단계를 아는가(계약 §5 · E16). 서버가 `--status` 의 `stages:` 줄로만
+      // 판단해 실어 준다 — 모르면 회차는 옛 인자로 돌고 시트가 «스킬을 다시 돌려라» 고 말한다.
+      knowsV: driver.knows_version_stage === true,
       startedBy: driver.started_by ? String(driver.started_by) : null, startedAt: driver.started_at || null
     };
-  }
-  /**
-   * 최상단 릴리스 막대(소유자 요구 2026-09-17): 회차가 돌면 스토어 화면 맨 위에 버전 · 빌드 번호 ·
-   * 전체 진행(단계 9 중 끝난 수 + 지금 단계 안의 잡 진행) · 지금 하는 일 · 경과 · 예상 완료. 마우스를
-   * 올리면 detail 이 전부 보인다. 드라이버 없이 릴리스 역할 잡만 돌면 그 잡의 막대가 된다.
-   * 근거는 항상 글자로 말한다(선언 단계 · 도는 잡의 분모). 끝난 회차(exit 0) · 아무것도 없으면 null.
-   */
-  function releaseBarModel(dm, layers, release, ctx) {
-    ctx = ctx || {}; dm = dm || {}; layers = layers || {};
-    var lang = ctx.lang, nowMs = ctx.nowMs;
-    var cur = layers.current || null, bar = layers.bar || null, jobP = bar && bar.progress ? bar.progress : null;
-    var live = dm.configured === true && !dm.idle && !dm.done && (dm.running || dm.exit != null || dm.blocked);
-    if (!live && !cur) return null;
-    var plan = release && release.plan ? release.plan : null, doc = planEntryDoc(plan) || {};
-    var version = dm.version && dm.version !== DASH ? dm.version : plan && plan.build_name != null ? String(plan.build_name) : DASH;
-    var n = isNum(dm.planN) ? dm.planN : isNum(doc.n) ? doc.n : null;
-    var total = DRIVER_STAGES.length, done = 0, stageIdx = -1;
-    if (live) (dm.items || []).forEach(function (it, i) { if (it.state === "done") done++; else if (it.state !== "todo" && stageIdx < 0) stageIdx = i; });
-    var stageId = stageIdx >= 0 ? DRIVER_STAGES[stageIdx] : null;
-    var stageLabel = stageId ? stageId + " " + T(lang, "driver.stage." + stageId) : null;
-    var frac = jobP && isNum(jobP.pct) ? jobP.pct / 100 : 0;
-    var pct, basis;
-    if (live) {
-      pct = Math.min(99, Math.round((done + (stageIdx >= 0 ? frac : 0)) / total * 100));
-      basis = T(lang, jobP && isNum(jobP.pct) ? "rbar.basis.stages_job" : "rbar.basis.stages", { total: total });
-    } else {
-      pct = jobP && isNum(jobP.pct) ? jobP.pct : null;
-      basis = bar ? bar.basis : T(lang, "build.basis.none");
-    }
-    var tone = !live ? "running" : dm.running ? "running" : dm.exit === 2 ? (dm.autoN ? "running" : "human") : dm.blocked || dm.exit === 4 ? "warn" : dm.exit === 3 ? "lost" : "bad";
-    var stage = live ? (stageLabel ? T(lang, "rbar.stage", { stage: stageLabel, done: done, total: total }) : T(lang, "rbar.stages_only", { done: done, total: total }))
-      : T(lang, "rbar.job", { id: cur.id, preset: cur.preset || DASH });
-    var nowLine = layers.now || (live && !dm.running ? dm.headParts.slice(1).join(" · ") : null) || null;
-    var started = parseIso(live ? dm.startedAt : (bar && bar.startedAt) || null);
-    var elapsed = isNum(started) && isNum(nowMs) ? T(lang, "rbar.elapsed", { dur: fmtDuration(Math.max(0, (nowMs - started) / 1000)) }) : null;
-    var finishes = bar && bar.finishes ? bar.finishes : null;
-    var head = n != null ? T(lang, "build.head.version", { version: version, build: n }) : version;
-    var detail = [];
-    if (live) {
-      detail.push(T(lang, "rbar.detail.stages", { done: done, total: total, percent: pct != null ? pct : DASH }));
-      if (stageLabel) detail.push(T(lang, "rbar.detail.stage", { stage: stageLabel }));
-    } else detail.push(stage);   // 드라이버 없이 잡만 — 단계 이야기는 하지 않는다
-    if (nowLine) detail.push(nowLine);
-    if (bar && bar.head && (jobP && isNum(jobP.pct) || !live)) detail.push(bar.head);
-    if (elapsed) detail.push(elapsed);
-    if (finishes) detail.push(finishes);
-    detail.push(basis);
-    return { tone: tone, pct: pct, head: head, version: version, n: n, stage: stage, now: nowLine, elapsed: elapsed, finishes: finishes, basis: basis, detail: detail.join(" · "), done: done, total: total, live: live };
   }
   /** Build·upload 행의 색과 머리를 드라이버가 가져가는가 — 도는 중이거나 실패·대기·모름·드리프트일 때만. 끝난 회차(exit 0)는 upload.json 이 말한다. */
   function driverRow(model) {
@@ -1944,6 +2328,299 @@
     var plan = release && release.plan ? release.plan : {}, doc = planEntryDoc(plan) || {};
     return { mode: "rehearsal", build_name: plan.build_name != null ? String(plan.build_name) : (doc.build_name != null ? String(doc.build_name) : ""),
       confirm_build_number: isNum(doc.n) ? String(doc.n) : "" };
+  }
+  // ── 바텀시트 — 진행 · 남은 것 · 심사 제출 (워크플랜 §4 · 기획 R8~R12) ────────────────────
+  //
+  // 0.3.3 의 «최상단 큰 막대» 는 사라지고 그 이야기가 여기로 들어왔다(결정 Q6). 시트는 **버전
+  // 페이지에만** 있고(R10), 접힌 머리 한 줄이 «심사 전에 남은 것» 을 말하며(R11), 회차·빌드·제출이
+  // 도는 동안에는 그 한 줄에도 막대와 진행 정도가 보인다(R8). 펼치면 단계 · 남은 것 · 이전 버전과
+  // 달라진 것 · 제출 조건이다(R12).
+  //
+  // **판정을 새로 만들지 않는다**: 제출 조건은 `submitDecision`, 보내는 본문은 `reviewBody`,
+  // 단계는 `stepperModel`, 잡 층은 `buildLayers`, 문안 차이는 `listingDiff`(또는 서버가 준
+  // `version.diff`) 그대로다. 두 벌이 되면 버튼과 이유가 갈라진다.
+  var SHEET_STAGES = ["V"].concat(DRIVER_STAGES);   // V S0…S8 — 분모 10 (§4.1)
+  // «남은 것» 한 줄의 무게. `bad` 와 `run` 은 제출을 닫고, `todo` 는 사람이 이번 제출에서 해야
+  // 하는 것(관리형 게시)이며, `warn` 은 알리기만 한다(Play 그래픽 없음 · 옛 드라이버).
+  var SHEET_BLOCKING = { bad: 1, run: 1 };
+  // 업로드 잡이 이렇게 끝났으면 **빌드는 올라가지 않았다** — 그 잡이 쓴 `upload.json` 이 무슨
+  // 말을 하든. 「남은 것」과 막대가 같은 이 표를 본다(§17-1).
+  var SHEET_UPLOAD_BAD = { lost: 1, failed: 1, timed_out: 1, cancelled: 1 };
+  // `submitDecision` 의 이유 열쇠 → 같은 뜻의 «남은 것» 코드. 두 이름이 한 줄을 두 번 쓰지 않게 한다.
+  var SHEET_REASON_ALIAS = { no_plan: "plan_missing", plan_required: "plan_missing" };
+
+  /** 이 버전이 «진행 중» 인가(§15) — 살아 있는 심사 작업 · 살아 있는 업로드 작업 · 이 버전의
+      드라이버 회차. 셋 중 마지막 하나가 끝나야 «편집 중» 으로 내려온다. */
+  function versionRunning(version, dm, layers) {
+    var v = version || {};
+    if (v.state === "running" || v.state === "creating") return true;
+    if (layers && layers.current) return true;
+    return !!(dm && dm.running === true && v.release_id != null);
+  }
+  /**
+   * 단계 목록이 **미리 선언된 것**인가. 드라이버가 있으면 `V S0…S8` 열 칸이라 분모가 처음부터
+   * 정해져 있다. 없으면 목록은 「지금까지 돈 작업」이라 **분모가 자라난다** — 그런 분모로
+   * 퍼센트를 내면 첫 작업 하나가 끝난 순간 1/1 = 100% 가 된다. 그래서 선언이 없으면 숫자를
+   * 내지 않는다(§17-1 · 「번호를 지어내지 않는다」).
+   */
+  function sheetStagesDeclared(dm) {
+    return !!(dm && dm.available !== false && dm.configured === true);
+  }
+  /** 시트가 그리는 단계 칩. 드라이버를 쓰는 저장소는 `V S0…S8` 열 칸(V 는 버전 행이 만들어진
+      순간 끝난 것이다 — 행이 곧 그 단계의 산출물이다). 드라이버가 없으면 이번 회차의 잡이
+      곧 단계다(`buildLayers.items`) — 없는 단계를 지어내지 않는다. */
+  function sheetStages(dm, version, layers, lang) {
+    var v = version || {};
+    var driverKnown = sheetStagesDeclared(dm);
+    if (driverKnown) {
+      var vDone = v.state != null && v.state !== "creating";
+      var out = [{ id: "V", label: T(lang, "sheet.stage.V"), state: vDone ? "done" : "todo", text: "" }];
+      (dm.items || []).forEach(function (it) {
+        out.push({ id: it.id, label: it.label, state: it.state, text: it.text || "" });
+      });
+      return out;
+    }
+    return (layers && Array.isArray(layers.items) ? layers.items : []).map(function (it) {
+      var state = it.tone === "ok" ? "done" : it.tone === "running" ? "current" : it.tone === "bad" ? "failed" : "todo";
+      return { id: "#" + it.id, label: it.preset, state: state, text: it.text };
+    });
+  }
+  /**
+   * «심사 전에 남은 것» — 차례가 곧 중요도다(§4.1): 빌드 → 도는 중 → 플랜 → 빌드 번호 →
+   * 관리형 게시 → 문안 → 스킬/드라이버 → 안전. 첫 항목이 접힌 머리에 나온다. 각 항목은
+   * **고치는 곳**을 들고 있다(`fix.anchor` 는 이 페이지의 칸, `fix.route` 는 다른 화면).
+   */
+  function sheetRemaining(ctx, dm, layers, lang) {
+    var version = ctx.version || {}, release = ctx.release || {}, choices = ctx.choices || {};
+    var platforms = choices.platforms || {}, out = [];
+    var toStatus = ctx.repo ? { route: storeHash(ctx.repo, "status"), anchor: null } : null;
+    var planLink = ctx.repo ? { route: storeHash(ctx.repo, "status"), anchor: "[data-plan-review]" } : null;
+    var add = function (code, severity, text, fix) { out.push({ code: code, severity: severity, text: text, fix: fix || null }); };
+    var running = versionRunning(version, dm, layers);
+    // 1 빌드 — 스토어에 올라간 빌드가 있어야 심사에 보낼 것이 있다
+    var up = release.upload || null, upDoc = planEntryDoc(up);
+    if (up && up.state === "lost") add("upload_lost", "bad", T(lang, "sheet.left.upload_lost", { id: up.job_id }), toStatus);
+    else if (up && SHEET_UPLOAD_BAD[up.state]) {
+      add("upload_failed", "bad", T(lang, "sheet.left.upload_failed", { id: up.job_id, state: stateWord(up.state, lang) }), toStatus);
+    } else if (!upDoc || upDoc.status !== "success") {
+      // 2 도는 중이면 그것이 곧 «빌드가 아직 없는 이유» 다(W4) — 두 줄로 나누지 않는다
+      var stage = dm && dm.stage ? dm.stage : null;
+      add("build_missing", running ? "run" : "bad",
+        running ? T(lang, "sheet.left.build_running", { stage: stage || DASH }) : T(lang, "sheet.left.build_missing"),
+        running ? { route: null, anchor: "#sheet-stages" } : toStatus);
+    } else if (running) {
+      // 무엇이 돌고 있는지 이름을 댄다 — 도는 잡을 알면 그 잡, 아니면 행에 붙은 것들(§15)
+      var cur = layers && layers.current ? layers.current : null;
+      var what = cur ? "#" + cur.id + " " + (cur.preset || DASH) : versionHolders(version, lang).join(" · ");
+      add("round_running", "run", what
+        ? T(lang, "sheet.left.round_running", { what: what })
+        : T(lang, "sheet.left.round_running_plain"), { route: null, anchor: "#sheet-stages" });
+    }
+    // 3 심사 플랜 — 있어야 하고, 안 낡았어야 하고, 스스로 ok 라고 해야 한다(E17)
+    var plan = release.plan || null, planDoc = planEntryDoc(plan);
+    var buildName = version.build_name != null ? String(version.build_name) : (plan && plan.build_name != null ? String(plan.build_name) : null);
+    var pv = reviewPlanVerdict(release.review && release.review.plan, buildName);
+    if (!planDoc || pv === "plan_required") add("plan_missing", "bad", T(lang, "sheet.left.plan_missing"), planLink);
+    else if (pv === "plan_stale") add("plan_stale", "bad", T(lang, "sheet.left.plan_stale", { age: fmtAgo(release.review.plan.age_seconds, lang) }), planLink);
+    else if (pv === "plan_blocked") add("plan_blocked", "bad", T(lang, "sheet.left.plan_blocked"), planLink);
+    // 4 빌드 번호 — 플랜의 n 뿐이다. 자동이면 플랜이 알아야 하고, 직접이면 글자 그대로 맞아야 한다(E21)
+    var nr = nReason(nModeOf(choices.nMode, ctx.profile), choices.typedN, planDoc ? planDoc.n : null);
+    if (nr === "n_unknown") add("n_unknown", "bad", T(lang, "sheet.left.n_unknown"), planLink);
+    else if (nr === "n_mismatch") add("n_mismatch", "bad", T(lang, "sheet.left.n_mismatch", { n: planDoc.n }), { route: null, anchor: "#sheet-n" });
+    // 5 관리형 게시 — 제출마다 사람이(E18: Play 를 끄면 이 줄이 사라진다)
+    if (platforms.android && choices.managed !== true) {
+      add("managed_unconfirmed", "todo", T(lang, "sheet.left.managed"), { route: null, anchor: "#sheet-managed" });
+    }
+    // 6 문안 — 상한을 넘긴 칸마다 한 줄, 그 칸으로 간다(E9 · AC-D9)
+    (ctx.page && Array.isArray(ctx.page.sections) ? ctx.page.sections : []).forEach(function (s) {
+      s.groups.forEach(function (g) {
+        g.fields.forEach(function (f) {
+          if (!f.counter || f.counter.tone !== "bad") return;
+          add("listing_bad", "bad", T(lang, "sheet.left.listing_bad", { field: f.label, count: f.counter.text }), { route: null, anchor: "#" + f.id });
+        });
+      });
+    });
+    // 7 스킬이 모르는 입력 — 서버가 거절한 코드를 그대로 되풀이한다(E11). 막는 것이라 경고보다 앞이다
+    if (ctx.refusal === "listing_json_unsupported") add("listing_unsupported", "bad", T(lang, "sheet.left.listing_unsupported"), null);
+    if (ctx.refusal === "split_version_unsupported") add("split_unsupported", "bad", T(lang, "sheet.left.split_unsupported"), null);
+    // 8 경고 둘 — Play 그래픽이 하나도 없다(스토어가 최종 판정이고 rcm 은 규격을 모른다) · V 단계를
+    //   모르는 드라이버(E16). 막는 줄보다 **뒤**다: 차례가 곧 중요도인데(§4.1) 경고가 막는 줄을
+    //   앞질러 접힌 머리에 나오면, 사람은 경고만 고치고 다시 막힌다(§17-6).
+    var graphics = ctx.graphics || {};
+    if (platforms.android && graphics.android === 0) {
+      add("graphics_missing", "warn", T(lang, "sheet.left.graphics"), { route: null, anchor: '[data-group="graphics"]' });
+    }
+    if (dm && dm.configured === true && dm.knowsV === false) add("driver_no_v", "warn", T(lang, "sheet.left.driver_no_v"), null);
+    // 9 안전 — 빨간 띠는 무엇으로도 못 넘는다(E19)
+    if (bannerDecision(release).show) add("unsafe", "bad", T(lang, "sheet.left.unsafe"), toStatus);
+    return out;
+  }
+  /**
+   * 바텀시트 하나(§4.1). ctx:
+   * `{version, release, driver(stepperModel), layers(buildLayers), profile, page(versionPageModel),
+   *   graphics:{ios,android}, choices:{platforms, managed, listingFull, phased, nMode, typedN},
+   *   token, admin, busy, refusal, repo, lang, nowMs, tzName}`.
+   *
+   * 되돌려 주는 것은 접힌 머리 한 줄 · 막대와 그 근거 · 단계 칩 · 남은 것 · 이전 버전과 달라진 것 ·
+   * 제출 가능 여부와 이유 · 보낼 본문이다. 출시·게시·롤아웃은 어떤 상태에서도 없다.
+   */
+  function sheetModel(ctx) {
+    ctx = ctx || {};
+    var lang = ctx.lang, nowMs = ctx.nowMs;
+    var version = ctx.version && typeof ctx.version === "object" ? ctx.version : {};
+    var release = ctx.release && typeof ctx.release === "object" ? ctx.release : {};
+    var dm = ctx.driver || {}, layers = ctx.layers || {}, choices = ctx.choices || {};
+    var bar = layers.bar || null, jobP = bar && bar.progress ? bar.progress : null;
+    var plan = release.plan || null, planDoc = planEntryDoc(plan) || {};
+    var closed = version.state === "submitted" || version.state === "discarded";
+    var running = versionRunning(version, dm, layers);
+    var remaining = sheetRemaining(ctx, dm, layers, lang);
+    var blocking = remaining.filter(function (r) { return SHEET_BLOCKING[r.severity]; });
+    var decision = submitDecision({
+      release: release, profile: ctx.profile, typedN: choices.typedN, nMode: choices.nMode,
+      platforms: choices.platforms, managed: choices.managed, admin: ctx.admin, token: ctx.token, busy: ctx.busy
+    });
+    var canSubmit = !closed && decision.enabled && blocking.length === 0;
+    // ── 단계와 막대 ────────────────────────────────────────────────────────
+    var stages = sheetStages(dm, version, layers, lang);
+    var live = dm.configured === true && !dm.idle && !dm.done && (dm.running || dm.exit != null || dm.blocked);
+    var total = stages.length, done = 0, curIdx = -1;
+    stages.forEach(function (it, i) { if (it.state === "done") done++; else if (it.state !== "todo" && curIdx < 0) curIdx = i; });
+    var curStage = curIdx >= 0 ? stages[curIdx] : null;
+    var stageLabel = curStage ? curStage.id + " " + curStage.label : null;
+    var frac = jobP && isNum(jobP.pct) ? jobP.pct / 100 : 0;
+    var upDoc = planEntryDoc(release.upload);
+    // 빌드가 **정말** 올라갔는가 — `upload.json` 한 장으로는 모자란다. 그 문서는 잡이 끝나기
+    // 전에 쓰였을 수도 있어서, 잡이 실패·유실로 끝나도 `status: "success"` 가 남아 있다(§17-1).
+    // 문서와 잡의 상태가 **둘 다** 그렇다고 할 때만 「올라갔다」 고 말한다.
+    var uploadLanded = !!(upDoc && upDoc.status === "success")
+      && !(release.upload && SHEET_UPLOAD_BAD[release.upload.state]);
+    var declared = sheetStagesDeclared(dm);
+    var pct, basis;
+    if (live && total) {
+      // 0.3.3 의 막대와 같은 수식 — 분모만 9 에서 10(V 포함)으로 늘었다(§4.1)
+      pct = Math.min(99, Math.round((done + (curIdx >= 0 ? frac : 0)) / total * 100));
+      basis = T(lang, jobP && isNum(jobP.pct) ? "sheet.basis.stages_job" : "sheet.basis.stages", { total: total });
+    } else if (version.state === "submitted") { pct = 100; basis = T(lang, "sheet.basis.submitted"); }
+    else if (dm.done === true) { pct = 100; basis = T(lang, "sheet.basis.round_done"); }
+    else if (layers.current) { pct = jobP && isNum(jobP.pct) ? jobP.pct : null; basis = bar ? bar.basis : T(lang, "build.basis.none"); }
+    // 셀 수 있는 숫자만 쓴다 — 분모는 **선언된** 단계 수이고, 근거가 그 분모를 댄다
+    else if (declared && total) { pct = Math.round(done / total * 100); basis = T(lang, "sheet.basis.stages", { total: total }); }
+    // 셀 분모가 없으면 숫자도 없다(막대는 빗금) — 문장만 남긴다. 예전에는 여기서 `upload.json`
+    // 한 장만 보고 99 를 지어냈고, 그 사이 «남은 것» 은 «업로드 실패» 라고 말해 한 화면이
+    // 서로를 부정했다(§17-1). 이제 문장도 **잡의 상태**가 허락할 때만 나온다.
+    else if (uploadLanded) { pct = null; basis = T(lang, "sheet.basis.uploaded"); }
+    else { pct = null; basis = T(lang, "build.basis.none"); }
+    var nowLine = layers.now || (live && !dm.running ? dm.headParts.slice(1).join(" · ") : null) || null;
+    var started = parseIso(live ? dm.startedAt : (bar && bar.startedAt) || null);
+    var elapsed = isNum(started) && isNum(nowMs) ? T(lang, "sheet.elapsed", { dur: fmtDuration(Math.max(0, (nowMs - started) / 1000)) }) : null;
+    var finishes = bar && bar.finishes ? bar.finishes : null;
+    // ── 색 ─────────────────────────────────────────────────────────────────
+    var expired = version.expired === true || version.expiry_warned === true || version.expiry_warned === 1;
+    var result = resultIsCurrent(release) ? resultModel(release.review.result, lang) : null;
+    // 행 **자신의** 끝난 형편이 먼저다 — 실패한 행과 만료된 행은 회차가 돌고 있다고 해서
+    // 숨겨지지 않는다(§17-8). 그 둘이 없을 때에만 회차가 색을 정한다.
+    var tone;
+    if (version.state === "submitted") tone = "done";
+    else if (version.state === "discarded") tone = "expired";
+    else if (bannerDecision(release).show) tone = "bad";
+    else if (version.state === "failed") tone = "bad";
+    else if (release.upload && release.upload.state === "lost") tone = "lost";
+    else if (expired) tone = "expired";
+    else if (live) tone = dm.running ? "running" : dm.exit === 2 ? (dm.autoN ? "running" : "human") : dm.blocked || dm.exit === 4 ? "warn" : dm.exit === 3 ? "lost" : "bad";
+    else if (running) tone = "running";
+    else if (uploadLanded && blocking.length === 0) tone = "ok";
+    else tone = "new";
+    // ── 접힌 머리 한 줄 ────────────────────────────────────────────────────
+    // 머리는 **막는 것**을 먼저 댄다(§17-6): 경고 한 줄이 막는 줄을 가리면 사람은 경고만 고치고
+    // 다시 막힌다. 막는 것이 없을 때에만 첫 줄(경고 · 사람이 할 것)을 말한다.
+    var first = blocking.length ? blocking[0] : (remaining.length ? remaining[0] : null);
+    var submittedAt = _sheetSubmittedAt(release, version);
+    var statusLine;
+    if (tone === "done") statusLine = T(lang, "sheet.head.done", { clock: submittedAt ? fmtClock(submittedAt, ctx.tzName, nowMs) : DASH });
+    else if (tone === "expired") statusLine = T(lang, version.state === "discarded" ? "sheet.head.discarded" : "sheet.head.expired");
+    else if (version.state === "failed") {
+      // 실패한 행은 «원인 한 줄» 이다(§4.3 · §17-7) — 남은 것의 첫 줄이 아니라 행이 든 사유다
+      statusLine = version.error ? T(lang, "version.row.error", { detail: truncate(_sheetOneLine(version.error), 120) })
+        : first ? first.text : T(lang, "sheet.head.bad");
+    } else if (tone === "running" || tone === "human" || tone === "warn" || tone === "lost" || (tone === "bad" && live)) {
+      statusLine = [stageLabel ? T(lang, "sheet.stage_of", { stage: stageLabel, done: done, total: total, percent: pct != null ? pct : DASH }) : null,
+        nowLine, elapsed, finishes].filter(Boolean).join(" · ");
+      if (!statusLine) statusLine = first ? first.text : T(lang, "sheet.head.running");
+    } else if (tone === "bad") statusLine = first ? first.text : T(lang, "sheet.head.bad");
+    else if (tone === "ok") {
+      statusLine = [T(lang, "sheet.head.ready"),
+        release.review && release.review.plan ? T(lang, "sheet.head.plan_age", { age: fmtAgo(release.review.plan.age_seconds, lang) }) : null,
+        isNum(planDoc.n) ? T(lang, "sheet.head.n", { n: planDoc.n }) : null].filter(Boolean).join(" · ");
+    } else statusLine = T(lang, "sheet.head.remaining", { n: remaining.length, first: first ? first.text : DASH });
+    // ── 이전 버전과 달라진 것 ───────────────────────────────────────────────
+    var raw = version.diff && typeof version.diff === "object" && Array.isArray(version.diff.fields)
+      ? version.diff : listingDiff(version.prefill, version.edited);
+    var shots = raw.screenshots && typeof raw.screenshots === "object" ? raw.screenshots : {};
+    var diff = {
+      changed: raw.fields.length,
+      fields: raw.fields.map(function (f) {
+        return { platform: f.platform, key: f.key, label: T(lang, fieldLabelKey(f.platform, f.key)),
+          old: f.old, new: f["new"], id: "f-" + f.platform + "-" + f.key,
+          oldText: "− " + f.key + ": " + truncate(_sheetOneLine(f.old), 70),
+          newText: "+ " + f.key + ": " + truncate(_sheetOneLine(f["new"]), 70) };
+      }),
+      screenshots: Object.keys(shots).map(function (p) {
+        return T(lang, shots[p] === "same" ? "sheet.diff.shots_same" : "sheet.diff.shots_unknown", { store: T(lang, "review.section." + p) });
+      }),
+      noneText: T(lang, "sheet.diff.none")
+    };
+    // ── 보내는 것 ──────────────────────────────────────────────────────────
+    var body = reviewBody("submit", {
+      release: release, profile: ctx.profile, typedN: choices.typedN, nMode: choices.nMode,
+      platforms: choices.platforms, managed: choices.managed, listingFull: choices.listingFull, phased: choices.phased
+    });
+    // 이름은 버전 행의 것이다 — 서버가 행의 이름과 다른 본문을 400 `build_name_mismatch` 로 거절한다
+    if (version.build_name != null) body.build_name = String(version.build_name);
+    var submitBody = Object.assign({ version_id: version.id != null ? version.id : null }, body);
+    var sending = [
+      isNum(planDoc.n) ? T(lang, "sheet.send.build", { n: planDoc.n }) : T(lang, "sheet.send.build_unknown"),
+      T(lang, "review.targets." + (platformParam(choices.platforms) || "both")),
+      T(lang, choices.listingFull ? "review.payload.full" : "review.payload.notes_only"),
+      diff.changed ? T(lang, "sheet.send.edits", { n: diff.changed }) : T(lang, "sheet.send.no_edits"),
+      T(lang, choices.phased === false ? "sheet.send.phased_off" : "sheet.send.phased_on")
+    ];
+    // 닫힌 이유는 **한 번씩만** 말한다. 남은 것에 이미 그 줄이 있으면 그 문장을 쓰고(«고치는
+    // 곳» 까지 말하므로 더 낫다), 없는 것만 `submitDecision` 의 짧은 이유로 채운다.
+    var reasons = [], texts = [], seen = {};
+    blocking.forEach(function (r) { if (seen[r.code]) return; seen[r.code] = 1; reasons.push(r.code); texts.push(r.text); });
+    decision.reasons.forEach(function (k) {
+      var alias = SHEET_REASON_ALIAS[k] || k;
+      if (seen[k] || seen[alias]) return;
+      seen[k] = 1; reasons.push(k); texts.push(T(lang, "review.reason." + k));
+    });
+    return {
+      tone: tone, closed: closed, running: running, expired: expired,
+      head: {
+        ver: versionTitle(version.ios_version, version.android_version),
+        pill: T(lang, "sheet.pill." + tone), statusLine: statusLine,
+        remainingCount: remaining.length, firstRemaining: first ? first.text : null,
+        // 회차·빌드·제출이 도는 동안에는 접힌 한 줄에도 막대가 보인다(R8 · 결정 Q6)
+        live: running || live || tone === "running", pct: pct
+      },
+      pct: pct, basis: basis, stages: stages, now: nowLine, elapsed: elapsed, finishes: finishes,
+      remaining: remaining, diff: diff, sending: sending, result: result,
+      canSubmit: canSubmit, reasons: reasons, reasonText: texts.join(" · "),
+      managedShown: !!choices.platforms && choices.platforms.android === true,
+      planN: isNum(planDoc.n) ? planDoc.n : null, nMode: nModeOf(choices.nMode, ctx.profile),
+      submitBody: submitBody, policy: T(lang, "review.policy")
+    };
+  }
+  /** diff 한 줄은 한 줄이다 — 「이 버전의 새로운 기능」은 여러 줄이라 그대로 두면 열이 무너진다. */
+  function _sheetOneLine(v) { return v == null ? "" : String(v).replace(/\s+/g, " ").trim(); }
+  /**
+   * 제출 시각 — 심사 잡이 **끝난** 때. 모르면 null 이고 화면은 — 를 그린다(지어내지 않는다).
+   * §17-9: 예전에는 `release.review.result.finished_at` 을 먼저 봤는데 서버는 그 열쇠를 보내지
+   * 않아(§role_entry) 늘 «마지막 편집» 으로 떨어졌다 — 22:35 에 끝난 심사가 «제출됨 01:47».
+   */
+  function _sheetSubmittedAt(release, version) {
+    var rv = release && release.review ? release.review : {};
+    return roleFinishedAt(release, rv.result);
   }
   /** 친 N 과 드라이버의 plan_n — 글자 그대로 같아야 한다(nMatches). state: empty · ok · mismatch · unknown. */
   function confirmNDecision(typed, planN, mode) {
@@ -2027,7 +2704,12 @@
       plan: function (name, body) { return call("POST", base(name) + "/release/plan", JSON.stringify(body || {}), "application/json"); },
       review: function (name, body) { return call("POST", base(name) + "/release/review", JSON.stringify(body || {}), "application/json"); },
       upload: function (name, body) { return call("POST", base(name) + "/release/upload", JSON.stringify(body || {}), "application/json"); },
-      listing: function (name) { return call("GET", base(name) + "/release/listing"); },
+      // `build_name` 은 **이 화면이 보고 있는 버전**의 이름이다 — 안 주면 서버가 플랜의 이름으로
+      // 릴리스 노트를 찾아, 1.2.0 드래프트에 1.1.1 의 노트가 «파일에서» 라는 꼬리표를 달고 뜬다(§17-14).
+      listing: function (name, buildName) {
+        return call("GET", base(name) + "/release/listing"
+          + (buildName ? "?build_name=" + enc(String(buildName)) : ""));
+      },
       listingFileUrl: function (name, path) { return base(name) + "/release/listing/file?path=" + enc(path); },
       validateListing: function (name, body) { return call("POST", base(name) + "/release/listing/validate", JSON.stringify(body || {}), "application/json"); },
       github: function (name) { return call("GET", base(name) + "/release/github"); },
@@ -2035,7 +2717,16 @@
       driverStart: function (name, body) { return call("POST", base(name) + "/release/start", JSON.stringify(body || {}), "application/json"); },
       driverConfirm: function (name, body) { return call("POST", base(name) + "/release/confirm", JSON.stringify(body || {}), "application/json"); },
       driverAbort: function (name, body) { return call("POST", base(name) + "/release/abort", JSON.stringify(body || {}), "application/json"); },
-      driverRetry: function (name, body) { return call("POST", base(name) + "/release/retry", JSON.stringify(body || {}), "application/json"); }
+      driverRetry: function (name, body) { return call("POST", base(name) + "/release/retry", JSON.stringify(body || {}), "application/json"); },
+      // ── 버전 드래프트 (워크플랜 §2.2). 상세만 5초로 폴링한다 — 하위 프로세스가 없는 넷이다 ──
+      versions: function (name) { return call("GET", base(name) + "/release/versions"); },
+      versionCreate: function (name, body) { return call("POST", base(name) + "/release/versions", JSON.stringify(body || {}), "application/json"); },
+      version: function (name, id) { return call("GET", base(name) + "/release/versions/" + enc(String(id))); },
+      // 자동 저장 — 고친 키만 싣는다. 응답이 `edited` · `diff` · `last_edit_at` 을 도로 준다.
+      versionListing: function (name, id, body) {
+        return call("PUT", base(name) + "/release/versions/" + enc(String(id)) + "/listing", JSON.stringify(body || {}), "application/json");
+      },
+      versionDiscard: function (name, id) { return call("DELETE", base(name) + "/release/versions/" + enc(String(id))); }
     };
   }
   var storePure = {
@@ -2049,13 +2740,27 @@
     panelPill: panelPill, panelOpen: panelOpen, fieldCounter: fieldCounter, listingFields: listingFields,
     screenshotGroups: screenshotGroups, reviewInfoModel: reviewInfoModel, versionStrip: versionStrip, resultModel: resultModel,
     refusalText: refusalText, storeRowModel: storeRowModel, rowsById: rowsById, basisText: basisText, buildLayers: buildLayers,
+    roleFinishedAt: roleFinishedAt,
     buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS,
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
     confirmNDecision: confirmNDecision, githubCardModel: githubCardModel, DRIVER_STAGES: DRIVER_STAGES,
-    nModeDefault: nModeDefault, nModeOf: nModeOf, nReason: nReason, nSendValue: nSendValue, releaseBarModel: releaseBarModel,
+    nModeDefault: nModeDefault, nModeOf: nModeOf, nReason: nReason, nSendValue: nSendValue,
     planVersionGuess: planVersionGuess, PLAN_VERSION_RE: PLAN_VERSION_RE,
-    storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount
+    // 바텀시트 (§4.1) — 최상단 막대(`releaseBarModel`)가 여기로 들어왔다(결정 Q6)
+    sheetModel: sheetModel, sheetStages: sheetStages, sheetRemaining: sheetRemaining,
+    sheetStagesDeclared: sheetStagesDeclared, SHEET_UPLOAD_BAD: SHEET_UPLOAD_BAD,
+    versionRunning: versionRunning, SHEET_STAGES: SHEET_STAGES,
+    storeValueText: storeValueText, latestVerified: latestVerified, notCheckedCount: notCheckedCount,
+    // 버전 목록 · 새 버전 대화상자 · 상태 띠 (워크플랜 §3.1)
+    storeHash: storeHash, bumpLastNumber: bumpLastNumber, liveVersions: liveVersions, nextVersionHint: nextVersionHint,
+    versionNameCheck: versionNameCheck, versionTitle: versionTitle, versionRowModel: versionRowModel,
+    versionListModel: versionListModel, statusStripModel: statusStripModel, VERSION_POLL_MS: VERSION_POLL_MS,
+    // W3 버전 페이지 본문 — 값·출처 · diff · 자동 저장 본문 · 남의 편집 · 저장 배지 (§3.1)
+    PREFILL_KEYS: PREFILL_KEYS, VERSION_GROUPS: VERSION_GROUPS, VERSION_SAVE_DEBOUNCE_MS: VERSION_SAVE_DEBOUNCE_MS,
+    fieldLimit: fieldLimit, listingNorm: listingNorm, listingDiff: listingDiff, fieldLabelKey: fieldLabelKey,
+    versionFieldModel: versionFieldModel, versionPageModel: versionPageModel, listingPutBody: listingPutBody,
+    remoteListingEdits: remoteListingEdits, saveBadge: saveBadge
   };
 
   var rcm = {
@@ -2099,15 +2804,31 @@
       error: null, fetchError: null, fetching: false, verifying: false, loadedAt: null, timer: null, seq: 0, dialogSecret: null,
       // 릴리스 상태(`GET …/release`) · 소개 자료(`GET …/release/listing`) · 사람의 선택. 선택은 이 페이지에만 산다 —
       // 관리형 게시 체크와 친 N 은 새 플랜이 오면 지워지고 localStorage 에 가지 않는다(결정 3 · 항목 28).
-      release: null, releaseStatus: null, listing: null, listingStatus: null, busy: null, reviewError: null, planError: null, validate: null,
+      release: null, releaseStatus: null, listing: null, listingStatus: null, busy: null, reviewError: null, reviewCode: null, planError: null, validate: null,
       review: { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null },
       // 릴리스 드라이버(`GET …/release/driver`) · GitHub 카드(`GET …/release/github`). Start 폼의 값과 S2 의 친 N 도
       // 이 페이지에만 산다 — 회차(build_name · plan_n)가 바뀌면 지워진다. `driverDialogKey` 는 S2 대화상자를 회차마다 한 번만 저절로 연다.
       driver: null, driverStatus: null, github: null, githubStatus: null, driverError: null, driverN: "", driverDialogKey: null,
       nMode: null,   // 빌드 번호 모드 — null 이면 프로파일 기본값(nModeDefault)
-      driverForm: { version: null, track: "", dryRun: false } }
+      driverForm: { version: null, track: "", dryRun: false },
+      // 버전 목록 · 새 버전 · 버전 하나(워크플랜 §3). `sub` 는 해시가 정한다(versions · version · status).
+      // `versionTimer` 는 «만드는 중» 일 때만 도는 5초 폴링이고 상세 하나만 부른다 — 드라이버와
+      // 소개 자료는 서버에서 프로세스를 돌리므로 이 화면에서 절대 폴링하지 않는다(§15).
+      sub: "versions", versionId: null, versions: null, versionsStatus: null,
+      version: null, versionStatus: null, versionTimer: null, versionError: null,
+      newVersion: null, createError: null, creating: false, discardTarget: null, discarding: false,
+      // W3 문안 편집(§3.2). `typed` 는 이 브라우저가 친 값이라 저장이 실패해도 화면에 남고(E7),
+      // `seen` 은 서버의 편집본을 마지막으로 본 모습이다 — 폴링이 그것과 달라지면 «다른 곳에서
+      // 바뀜»(E8). 값은 state 에만 산다 — localStorage 에 문안을 남기지 않는다.
+      vedit: null,
+      // 바텀시트(§4) — 접힘/펼침은 저장소마다 기억하고(`rcm.sheet.<repo>`), 드라이버는 상세
+      // 폴링(5초)보다 **느리게** 따로 받는다: 그 라우트는 빌드 머신에서 `--status` 를 돌린다.
+      driverTimer: null, draftTimer: null, fixAnchor: null,
+      gateReturn: null }
   };
   function now() { return state.skewUnknown ? NaN : Date.now() + state.skewMs; }
+  /** 지금을 ISO 로 — 시계 차이를 모르면 null(나이를 지어내지 않는다). */
+  function nowIso() { var t = now(); return isNum(t) ? new Date(t).toISOString() : null; }
   function tz() { return state.tz || undefined; }
 
   // ── 저장소 ──
@@ -3012,6 +3733,7 @@
       else if (kind === "waiting") el.textContent = tr("elapsed.waiting", { dur: fmtDuration(s) });
       else if (kind === "age") el.textContent = tr("host.sampled", { age: fmtAgo(s, L()) });
       else if (kind === "updated") el.textContent = tr("store.updated", { age: fmtAgo(s, L()) });
+      else if (kind === "saved") el.textContent = tr("version.edit.save.saved", { age: fmtCoarse(s) });
     });
     renderHeaderConn();
   }
@@ -3053,12 +3775,19 @@
     return null;
   }
   function withFocus(fn) {
-    var key = focusKey(document.activeElement);
+    var was = document.activeElement;
+    var key = focusKey(was);
+    // 글을 치던 칸이면 커서 자리도 지킨다 — 버전 페이지는 5초마다 다시 그려지는데 그때마다
+    // 커서가 끝으로 튀면 문안을 고칠 수가 없다(워크플랜 §3.2 W3).
+    var sel = null;
+    try { if (key && was && typeof was.selectionStart === "number") sel = [was.selectionStart, was.selectionEnd]; } catch (e0) { sel = null; }
     fn();
     if (!key) return;
     var el = null;
     try { el = $(key); } catch (e) { el = null; }
-    if (el && el !== document.activeElement) { try { el.focus({ preventScroll: true }); } catch (e2) { el.focus(); } }
+    if (!el) return;
+    if (el !== document.activeElement) { try { el.focus({ preventScroll: true }); } catch (e2) { el.focus(); } }
+    if (sel) { try { el.setSelectionRange(sel[0], sel[1]); } catch (e3) { /* 선택을 못 받는 칸 */ } }
   }
   function render() {
     if (!state.status) { renderHeaderConn(); return; }
@@ -3294,7 +4023,10 @@
     var st = $("#store");
     if (st) st.hidden = view !== "store";
     renderNav();
-    if (view !== "store") { clearInterval(state.store.timer); state.store.timer = null; }
+    if (view !== "store") {
+      clearInterval(state.store.timer); state.store.timer = null;
+      stopVersionPoll();
+    }
   }
   /** 머리의 `Queue | Store` — 릴리스 프로파일이 있는 저장소가 있을 때만 있다. 여럿이면 고르는 칸. */
   function renderNav() {
@@ -3323,16 +4055,33 @@
   }
 
   // ── 들어오기 · 받기 ──
-  function enterStore(repo) {
+  function enterStore(repo, route) {
     if (state.store.repo !== repo) {
       state.store.repo = repo; state.store.doc = null; state.store.secrets = null; state.store.screen = null;
       state.store.fetchError = null; state.store.error = null; state.store.loadedAt = null;
       state.store.release = null; state.store.releaseStatus = null; state.store.listing = null; state.store.listingStatus = null;
-      state.store.busy = null; state.store.reviewError = null; state.store.planError = null; state.store.validate = null;
+      state.store.busy = null; state.store.reviewError = null; state.store.reviewCode = null; state.store.planError = null; state.store.validate = null;
       state.store.review = { platforms: { ios: true, android: true }, managed: false, listingFull: false, phased: true, typedN: "", planId: null, buildName: null };
       state.store.driver = null; state.store.driverStatus = null; state.store.github = null; state.store.githubStatus = null;
       state.store.driverError = null; state.store.driverN = ""; state.store.driverDialogKey = null;
       state.store.driverForm = { version: null, track: "", dryRun: false }; state.store.nMode = null;
+      state.store.versions = null; state.store.versionsStatus = null; state.store.version = null;
+      state.store.versionStatus = null; state.store.versionError = null; state.store.createError = null;
+      state.store.gateReturn = null; discardVersionEdits();
+    }
+    // 해시가 화면을 정한다 — 버전 목록(기본) · 버전 하나 · 상태. 다른 버전으로 가면 옛 상세를 버린다.
+    var sub = route && route.sub ? route.sub : "versions";
+    var id = route && route.id != null ? route.id : null;
+    if (state.store.sub !== sub || state.store.versionId !== id) {
+      state.store.sub = sub; state.store.versionId = id;
+      state.store.version = null; state.store.versionStatus = null; state.store.versionError = null;
+      // 소개 자료는 **버전마다** 다르다(그 버전의 이름으로 릴리스 노트를 찾는다 · §17-14) —
+      // 다른 드래프트로 가면 앞 버전의 파일 값을 물려주지 않는다
+      state.store.listing = null; state.store.listingStatus = null;
+      discardVersionEdits();   // 다른 버전(또는 다른 화면)으로 가면 친 값도 저장 상태도 버린다
+      // 주소로 화면을 골랐으면 그 화면을 보여 준다 — 관문이 **열려 있을 때만**이다(닫혀 있으면 설정이 맞다)
+      var open = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
+      if (state.store.screen === "settings" && open) state.store.screen = "store";
     }
     showView("store");
     renderStore();
@@ -3347,9 +4096,22 @@
     if (!repo) return Promise.resolve();
     var api = storeApi();
     var seq = (state.store.seq = (state.store.seq || 0) + 1);
-    // 소개 자료는 서버에서 명령을 돌리는 것이라 30초 타이머로는 안 받는다 — 처음과 새로고침·검사 뒤에만
-    var wantListing = (opts && opts.listing) || state.store.listing == null && state.store.listingStatus == null;
-    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(), wantListing ? loadListing() : null, loadDriver(), loadGithub()]).then(function (rs) {
+    // 소개 자료는 서버에서 명령을 돌리는 것이라 30초 타이머로는 안 받는다 — 처음과 새로고침·검사 뒤에만.
+    // 드라이버 `--status` 도 같아서 **상태 화면에서만** 부른다. 버전 페이지는 소개 자료를 한 번만
+    // 받는다(프리필이 없는 칸의 «파일에서» 폴백 · AC-C5): 5초 폴링은 상세 하나뿐이다(워크플랜 §15).
+    var onStatus = state.store.sub === "status";
+    var onVersion = state.store.sub === "version";
+    var wantListing = (onStatus || onVersion)
+      && ((opts && opts.listing) || (state.store.listing == null && state.store.listingStatus == null));
+    var versionLoad = onVersion ? loadVersion() : state.store.sub === "versions" ? loadVersions() : null;
+    // 버전 페이지에서는 상세를 **먼저** 받는다 — 소개 자료를 이 드래프트 자신의 이름으로 물어야
+    // 하기 때문이다(§17-14). 상태 화면은 이름 없이(= 플랜의 이름으로) 그대로 부른다.
+    var listingLoad = !wantListing ? null
+      : onVersion ? Promise.resolve(versionLoad).then(function () { return loadListing(versionBuildName()); })
+        : loadListing();
+    return Promise.all([api.repos(), api.repo(repo), api.secrets(repo), loadRelease(),
+      listingLoad, onStatus ? loadDriver() : null, onStatus ? loadGithub() : null,
+      versionLoad]).then(function (rs) {
       if (seq !== state.store.seq || state.store.repo !== repo) return;  // 그 사이 다른 저장소로 갔다
       state.store.repos = rs[0].ok ? releaseRepos(rs[0].body) : [];
       state.store.reposStatus = rs[0].status;
@@ -3357,11 +4119,19 @@
       else { state.store.doc = null; state.store.error = rs[1]; }
       state.store.secrets = rs[2].ok && rs[2].body && Array.isArray(rs[2].body.items) ? rs[2].body : null;
       state.store.loadedAt = now();
-      // 관문(항목 29·34): 완료가 아니면 설정 화면이다 — 사람이 스토어를 골랐어도 도로 관문이다
+      // 관문(항목 29·34): 완료가 아니면 설정 화면이다 — 사람이 스토어를 골랐어도 도로 관문이다.
+      // 버전 주소로 바로 들어왔다면 가려던 곳을 적어 두고(E22), 관문이 열리면 거기로 보낸다.
       var complete = !!(state.store.doc && state.store.doc.setup && state.store.doc.setup.complete === true);
-      if (!complete) state.store.screen = "settings";
-      else if (!state.store.screen) state.store.screen = "store";
-      renderNav(); renderStore();
+      if (!complete) {
+        state.store.screen = "settings";
+        if (state.store.sub !== "versions" && !state.store.gateReturn) state.store.gateReturn = location.hash;
+      } else {
+        // 관문에 막혀 설정으로 보냈던 사람은 관문이 열리는 순간 가려던 곳으로 간다 — 다시 «Enter
+        // Store» 를 누르게 하지 않는다. 그 밖에는 설정 화면에 그대로 둔다(사람이 고른 화면이다).
+        if (state.store.gateReturn) { state.store.screen = "store"; goBackToGateReturn(); return; }
+        if (!state.store.screen) state.store.screen = "store";
+      }
+      renderNav(); renderStore(); syncVersionPoll();
     }).catch(function () {
       if (seq !== state.store.seq) return;
       state.store.error = { status: 0, body: null }; renderStore();
@@ -3383,10 +4153,14 @@
     }
     if (!state.store.doc) { body.innerHTML = '<p class="empty">' + esc(tr("store.loading")) + "</p>"; return; }
     withFocus(function () {
-      body.innerHTML = state.store.screen === "store" ? storeScreenHtml() : settingsHtml();
+      // 아래 여백은 시트가 있는 화면에서 `.vmain` 이 든다(afterVersionRender) — 본문 자체에
+      // 주면 sticky 의 담는 상자가 그만큼 짧아진다(§17-3). 옛 렌더가 남긴 값이 있으면 지운다.
+      body.style.paddingBottom = "";
+      body.innerHTML = state.store.screen === "store" ? storeBodyHtml() : settingsHtml();
       // 렌더가 정한 열림은 기억이 아니다 — 사람이 바꾼 것만 `toggle` 에서 남긴다(호스트 절과 같은 규칙)
       $$("details.srow", body).forEach(function (d) { d.dataset.renderedOpen = d.open ? "1" : "0"; });
-      if (state.store.screen === "store") afterStoreRender();
+      if (state.store.screen === "store" && state.store.sub === "status") afterStoreRender();
+      if (state.store.screen === "store" && state.store.sub === "version") afterVersionRender();
     });
   }
   function secretsItems() { return state.store.secrets ? state.store.secrets.items : []; }
@@ -3398,6 +4172,8 @@
       + '<span class="g" aria-hidden="true">' + ROW_GLYPH[sum.tone] + "</span>"
       + "<b>" + esc(tr(sum.complete ? "store.gate.complete" : "store.gate.incomplete", { repo: repo })) + "</b>"
       + '<span data-gate-counts>' + esc(sum.text) + "</span>"
+      // 버전 주소로 바로 들어왔다가 관문에 막힌 사람에게, 설정을 마치면 어디로 돌아가는지 말한다(E22)
+      + (state.store.gateReturn ? '<span class="sub" data-gate-return="' + esc(state.store.gateReturn) + '">' + esc(tr("store.gate.return", { text: state.store.gateReturn })) + "</span>" : "")
       + '<span class="spacer"></span>'
       + '<button type="button" class="btn primary" data-enter-store' + (sum.complete ? "" : ' disabled title="' + esc(tr("store.gate.enter_hint")) + '"') + ">" + esc(tr("store.gate.enter")) + "</button>"
       + '<span class="sub gate-help">' + esc(tr("store.gate.help")) + "</span>"
@@ -3466,13 +4242,539 @@
       + '<span class="n">' + head + "</span>" + (extra ? '<span class="spacer"></span>' + extra : "") + "</summary>"
       + '<div class="srow-body">' + bodyHtml + "</div></details>";
   }
-  /** 스토어 화면 (항목 1~6 · 27): 행 넷 + 접힌 본체 머리 + 고정 문장. */
+  /** 관문을 지난 뒤의 본문 — 해시가 고른 화면 하나(워크플랜 §3.2). */
+  function storeBodyHtml() {
+    if (state.store.sub === "status") return storeScreenHtml();
+    if (state.store.sub === "version") return versionPageHtml();
+    return versionListHtml();
+  }
+  /** 화면 머리 한 줄 — 언제 받았는지 · 새로고침. `extra` 는 그 화면만의 단추다. */
+  function storeHeadHtml(extra) {
+    return '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
+      + '<span class="spacer"></span>' + (extra || "")
+      + '<button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
+  }
+  /** 요약 띠(§12) — 칩 넷, 누르면 상태 화면으로. 빨간 것이 있으면 띠가 빨갛다. */
+  function statusStripHtml() {
+    var m = statusStripModel({
+      doc: state.store.doc, items: secretsItems(), release: releaseDoc(), profile: currentProfile(),
+      fetchError: state.store.fetchError, nowMs: now(), tzName: tz()
+    }, L());
+    var chips = m.chips.map(function (chip) {
+      return '<span class="vchip ' + chip.tone + '" data-chip="' + esc(chip.code) + '">'
+        + '<span class="g" aria-hidden="true">' + ROW_GLYPH[chip.tone] + "</span>"
+        + (chip.label ? "<b>" + esc(chip.label) + "</b> " : "") + esc(chip.text) + "</span>";
+    }).join("");
+    return '<a class="vstrip ' + m.tone + '" href="' + esc(storeHash(state.store.repo, "status")) + '" data-strip="' + esc(m.tone) + '">'
+      + chips + '<span class="spacer"></span><span class="btn" data-strip-detail>' + esc(tr("vstrip.detail")) + "</span></a>";
+  }
+  /** W1 버전 목록 — 스토어 탭의 첫 화면(§3.2). 행 넷은 상태 화면으로 옮겼다. */
+  function versionListHtml() {
+    var lang = L(), n = now();
+    var m = versionListModel(state.store.versions, lang, n);
+    var h = storeHeadHtml("");
+    h += statusStripHtml();
+    var live = m.live.known ? tr("version.list.live_line", { ios: m.live.ios || DASH, android: m.live.android || DASH }) : tr("version.list.live_unknown");
+    var can = state.admin && !m.creating && state.store.versionsStatus !== 404;
+    var why = !state.admin ? tr("version.list.new_hint.admin") : m.creating ? tr("version.list.new_hint.creating") : "";
+    h += '<div class="s-h vhead"><span class="t">' + esc(tr("version.list.title")) + '</span><span class="n">' + esc(live) + "</span>"
+      + '<span class="spacer"></span><button type="button" class="btn primary" data-version-new' + (can ? "" : ' disabled title="' + esc(why) + '"') + ">+ " + esc(tr("version.list.new")) + "</button></div>";
+    if (state.store.versionsStatus === 404) return h + '<p class="empty">' + esc(tr("version.list.na")) + "</p>";
+    if (state.store.versions == null) return h + '<p class="empty">' + esc(tr("store.loading")) + "</p>";
+    h += '<div class="vrows">';
+    m.drafts.forEach(function (row) { h += versionRowHtml(row); });
+    if (!m.drafts.length) h += '<p class="empty" data-no-drafts>' + esc(tr("version.list.none")) + "</p>";
+    if (m.live.known) {
+      h += '<div class="vrow live" data-vrow="live"><span class="g" aria-hidden="true">' + ROW_GLYPH.ok + "</span>"
+        + '<span class="vt"><b>' + esc(m.live.title) + '</b> <span class="pill v-ok">' + esc(tr("version.list.live")) + "</span></span>"
+        + '<span class="vn">' + esc(m.live.fromPlanJob != null ? tr("version.list.from_plan", { id: m.live.fromPlanJob }) : "") + "</span></div>";
+    }
+    m.history.forEach(function (row) {
+      h += '<div class="vrow old" data-vrow="' + esc(String(row.id)) + '"><span class="g" aria-hidden="true">·</span>'
+        + '<span class="vt"><b>' + esc(row.title) + "</b></span>"
+        + '<span class="vn">' + esc([row.submittedAt ? tr("version.row.submitted", { clock: fmtClock(row.submittedAt, tz(), n) }) : "",
+          row.reviewJobId != null ? tr("version.row.review_job", { id: row.reviewJobId }) : ""].filter(Boolean).join(" · ")) + "</span></div>";
+    });
+    h += "</div>";
+    if (m.ttlHours != null) h += '<p class="sub">' + esc(tr("version.list.ttl", { n: m.ttlHours })) + "</p>";
+    h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    return h;
+  }
+  function versionRowHtml(row) {
+    var open = '<a class="btn" href="' + esc(storeHash(state.store.repo, "version", row.id)) + '" data-version-open="' + esc(String(row.id)) + '">' + esc(tr("version.row.open")) + "</a>";
+    var retry = row.canRetry ? '<button type="button" class="btn" data-version-retry="' + esc(String(row.id)) + '"' + (state.admin ? "" : " disabled") + ">" + esc(tr("version.row.retry")) + "</button>" : "";
+    // 못 누르는 이유는 `notes` 가 이미 글자로 말한다 — title 은 마우스에게만 있는 설명이라 거기에만
+    // 두면 키보드·스크린 리더 쓰는 사람은 이유를 못 본다(C 단계 격리 검증 1).
+    var why = row.discardWhy || (state.admin ? null : tr("version.list.new_hint.admin"));
+    var discard = '<button type="button" class="btn danger" data-version-discard="' + esc(String(row.id)) + '"'
+      + (state.admin && row.canDiscard ? "" : ' disabled' + (why ? ' title="' + esc(why) + '"' : "")) + ">" + esc(tr("version.row.discard")) + "</button>";
+    return '<div class="vrow draft' + (row.expired ? " expired" : "") + '" data-vrow="' + esc(String(row.id)) + '" data-state="' + esc(row.state) + '"'
+      + (row.deleting ? ' data-deleting="1"' : "") + ">"
+      + '<span class="g" aria-hidden="true">' + (row.deleting ? "⌫" : row.state === "failed" ? "✗" : "✎") + "</span>"
+      + '<span class="vt"><b>' + esc(row.title) + '</b> <span class="pill v-' + row.tone + '">' + esc(row.pill) + "</span></span>"
+      + '<span class="vn">' + esc(row.notes.join(" · ")) + "</span>"
+      + '<span class="va">' + open + retry + discard + "</span></div>";
+  }
+  /** W3 버전 페이지 — 이름 · 상태 · **이전 버전 값으로 채워진 편집 칸** 두 절(§3.2 · R6) ·
+      본문 끝의 바텀시트(§4 · R10). 출시 · 게시 · 롤아웃 버튼은 여기에도 없다. */
+  function versionPageHtml() {
+    var v = state.store.version, lang = L(), n = now();
+    var back = '<a class="btn" href="' + esc(storeHash(state.store.repo, "versions")) + '" data-version-back>' + esc(tr("version.page.back")) + "</a>";
+    var h = storeHeadHtml(back);
+    if (v == null) {
+      return h + '<p class="empty">' + esc(state.store.versionStatus == null ? tr("store.loading")
+        : tr("version.page.not_found", { id: state.store.versionId, detail: state.store.versionError || DASH })) + "</p>";
+    }
+    var row = versionRowModel(v, lang, n);
+    var m = versionPageModel(versionEditCtx(), lang);
+    // 시트가 가리지 않도록 비워 두는 아래 여백은 **이 상자**가 든다(§17-3). 예전에는
+    // `[data-store-body]` 에 패딩을 줬는데, sticky 의 담는 상자는 부모의 **content box** 라
+    // 시트가 그 패딩 안으로 못 내려가고, 페이지 맨 아래에서 화면 밖으로 밀려났다.
+    h += '<div class="vmain" data-version-main>';
+    h += '<div class="s-h vhead"><span class="t">' + esc(row.title) + '</span><span class="pill v-' + row.tone + '">' + esc(row.pill) + "</span>"
+      + '<span class="n" data-version-notes>' + esc(row.notes.join(" · ")) + "</span></div>";
+    if (row.state === "creating") h += '<p class="banner info" data-version-creating>' + esc(tr("version.row.creating", { id: row.createJobId != null ? row.createJobId : DASH })) + "</p>";
+    if (row.error) h += '<p class="banner bad" data-version-error>' + esc(tr("version.row.error", { detail: String(row.error).slice(0, 200) })) + "</p>";
+    h += versionEditHeadHtml(m, n);
+    h += '<div class="stores" data-version-edit>'
+      + m.sections.map(function (s) { return versionSectionHtml(s, m, versionReadOnlyCtx(v, s.platform)); }).join("")
+      + "</div>";
+    h += '<dl class="kv" data-version-kv>'
+      + "<dt>" + esc(tr("version.page.state")) + "</dt><dd>" + esc(row.pill) + "</dd>"
+      + "<dt>" + esc(tr("version.page.by")) + "</dt><dd>" + esc(v.created_by || DASH) + "</dd>"
+      + "<dt>" + esc(tr("version.page.created")) + "</dt><dd>" + esc(v.created_at ? fmtClock(v.created_at, tz(), n) : DASH) + "</dd>"
+      + "<dt>" + esc(tr("version.page.expires")) + "</dt><dd>" + esc(v.expires_at ? fmtClock(v.expires_at, tz(), n) : DASH) + "</dd>"
+      + "</dl>";
+    h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
+    h += "</div>";   // /.vmain — 아래 여백은 여기서 끝난다
+    // 바텀시트는 본문의 **마지막 자식**이다 — sticky 의 담는 상자가 본문 전체여야 스크롤 내내
+    // 화면 아래에 붙어 있는다(§4.2). 시트를 감싸는 div 를 두면 그 div 안에서만 붙는다.
+    h += sheetHtml(m);
+    return h;
+  }
+  /** 파일 폴백 — 프리필이 그 칸을 모를 때 쓰는 `store/` 값(«파일에서» · AC-C5). 릴리스 노트는
+      미리보기 줄이 아니라 파일 하나라, 두 스토어에 같은 원문을 넣는다(항목 12·18). */
+  function versionFileFields() {
+    var listing = state.store.listing, f = listingFields(listing);
+    var notes = listing && listing.release_notes && typeof listing.release_notes === "object" ? listing.release_notes : null;
+    var text = notes && typeof notes.text === "string" ? notes.text : null;
+    if (text != null) {
+      Object.keys(PREFILL_KEYS).forEach(function (p) { if (typeof f[p].whats_new !== "string") f[p].whats_new = text; });
+    }
+    return f;
+  }
+  /** 이 브라우저의 편집 상태 — 버전이 바뀌면 새로 만든다. 문안은 state 에만 산다. */
+  function versionEdits() {
+    var ve = state.store.vedit;
+    if (!ve || ve.id !== state.store.versionId) {
+      ve = state.store.vedit = { id: state.store.versionId, typed: {}, dirty: {}, sending: {},
+        sendingBody: null, remote: {}, save: { state: "idle", at: null, detail: null }, timer: null };
+    }
+    return ve;
+  }
+  function discardVersionEdits() {
+    var ve = state.store.vedit;
+    if (ve && ve.timer) clearTimeout(ve.timer);
+    state.store.vedit = null;
+  }
+  function versionEditCtx() {
+    var ve = versionEdits();
+    return { version: state.store.version, file: versionFileFields(), typed: ve.typed, remote: ve.remote, admin: state.admin };
+  }
+  /** 읽기 전용 두 그룹(빌드·출시 설정 / 심사 정보·앱 콘텐츠)이 쓰는 형편. 값은 이 버전의 행과
+      상세가 실어 준 릴리스 보기에서만 온다 — 이 화면은 빌드 번호를 지어내지 않는다. */
+  function versionReadOnlyCtx(v, platform) {
+    var lang = L(), n = now();
+    var rel = v.release && typeof v.release === "object" ? v.release : {};
+    var rpDoc = planEntryDoc(rel.review && rel.review.plan) || {};
+    var observed = rpDoc.observed && typeof rpDoc.observed === "object" ? rpDoc.observed : {};
+    var strip = versionStrip(rel, state.store.listing, currentProfile(), lang, tz(), n);
+    return {
+      strip: Object.assign({}, strip, { version: v[platform + "_version"] || strip.version }),
+      observed: observed,
+      autoRelease: typeof observed.auto_release === "boolean" ? observed.auto_release : null,
+      reviewInfo: reviewInfoModel(secretsItems())
+    };
+  }
+  /** 머리 한 줄 — «이전 버전 값으로 채워져 있습니다» · 프리필 출처 · 자동 저장 배지 · 읽기 전용
+      이유 · 다른 곳에서 바뀐 칸 알림(E8). */
+  function versionEditHeadHtml(m, nowMs) {
+    var badge = saveBadge(versionEdits().save, L(), nowMs);
+    var h = '<div class="s-h vedit-head"><span class="t" data-edit-head>' + esc(m.headText) + "</span>";
+    h += '<span class="n" data-prefill-source>' + esc(m.prefillSource ? tr("version.edit.prefill_from", { source: m.prefillSource })
+      : m.hasPrefill ? tr("version.edit.prefill_unknown") : tr("version.edit.no_prefill")) + "</span>";
+    h += '<span class="spacer"></span><span data-save-slot>' + versionSaveBadgeHtml(badge) + "</span></div>";
+    if (m.readOnly) h += '<p class="banner info" data-version-readonly="' + esc(m.readOnly) + '">' + esc(m.readOnlyText) + "</p>";
+    h += '<p class="banner warn" data-version-remote' + (m.remote > 0 ? "" : " hidden") + ">"
+      + esc(tr("version.edit.remote_notice", { n: m.remote })) + "</p>";
+    return h;
+  }
+  function versionSaveBadgeHtml(badge) {
+    var tick = badge.at ? ' data-tick="saved" data-from="' + esc(badge.at) + '"' : "";
+    return '<span class="savebadge ' + badge.state + '" data-save-state="' + badge.state + '"><span class="txt"' + tick + ">" + esc(badge.text) + "</span>"
+      + (badge.retry ? ' <button type="button" class="btn" data-listing-retry>' + esc(tr("version.edit.save.retry")) + "</button>" : "") + "</span>";
+  }
+  function versionChipsHtml(f) {
+    return (f.changed ? '<span class="chip changed" data-field-changed>' + esc(tr("version.edit.changed")) + "</span>" : "")
+      + (f.remote ? '<span class="chip remote" data-field-remote>' + esc(tr("version.edit.remote")) + "</span>" : "");
+  }
+  /** 문안 칸 하나 — 이름 · 칩 · 입력칸 · 출처 · 카운터 · 되돌리기. id 는 `f-<플랫폼>-<키>` 라
+      바텀시트의 «남은 것» 이 나중에 그대로 가리킬 수 있다(§4.1). */
+  function versionFieldHtml(f, m) {
+    var ro = !m.editable;
+    var common = ' id="' + esc(f.id) + '" data-listing-field="' + esc(f.platform + "." + f.key) + '" spellcheck="false" autocomplete="off"' + (ro ? " readonly" : "");
+    var input = f.multiline
+      ? "<textarea" + common + ' rows="' + (f.key === "description" || f.key === "full_description" ? 6 : 3) + '">' + esc(f.value) + "</textarea>"
+      : '<input type="text"' + common + ' value="' + esc(f.value) + '">';
+    return '<div class="fld ed" data-field="' + esc(f.platform + "." + f.key) + '" data-source="' + esc(f.source) + '"' + (f.changed ? ' data-changed="1"' : "") + ">"
+      + '<span class="fl"><label for="' + esc(f.id) + '">' + esc(f.label) + '</label><span class="fchips" data-field-chips>' + versionChipsHtml(f) + "</span></span>"
+      + '<span class="val">' + input + '<span class="src" data-field-source>' + esc(f.sourceText) + "</span></span>"
+      + '<span class="fa">' + counterHtml(f.counter)
+      + '<button type="button" class="btn link" data-field-revert="' + esc(f.platform + "." + f.key) + '"' + (ro || !f.canRevert ? " disabled" : "") + ">"
+      + esc(tr("version.edit.revert")) + "</button></span></div>";
+  }
+  /** 스토어 절 하나 — 심사 패널과 **같은 그룹 차례**(항목 15)인데 문안만 편집 칸이다.
+      스크린샷 · 그래픽은 보기만이고(Q8) 빌드 · 심사 정보 두 그룹은 같은 코드를 쓴다. */
+  function versionSectionHtml(section, m, roCtx) {
+    var platform = section.platform, ios = platform === "ios";
+    // `tabindex="-1"` — «남은 것» 의 `graphics_missing` 이 이 상자를 가리킨다. 없으면
+    // `focusAnchor` 가 스크롤만 하고 포커스는 그대로라, 키보드는 그 자리로 따라오지 않는다(§17-10).
+    var group = function (key, inner) {
+      return '<div class="grp" data-group="' + key + '" tabindex="-1"><h4>' + esc(tr("review.group." + key)) + "</h4>" + inner + "</div>";
+    };
+    var h = '<section class="ssec" data-platform="' + platform + '" aria-label="' + esc(section.label) + '">'
+      + '<h3><span>' + esc(section.label) + "</span>"
+      + (section.version ? '<span class="pill v-new" data-section-version>' + esc(section.version) + "</span>" : "") + "</h3>";
+    var shots = screenshotGroups(state.store.listing)[platform];
+    h += group(ios ? "screenshots" : "graphics",
+      '<p class="sub">' + esc(tr("review.screenshots.count", { n: shots.length }))
+      + ' <span class="chip ' + (section.screenshots.state === "same" ? "same" : "unknown") + '" data-shots-mark="' + section.screenshots.state + '">' + esc(section.screenshots.text) + "</span></p>"
+      + screenshotsHtml(shots, []) + '<p class="sub">' + esc(tr("version.edit.screenshots.readonly")) + "</p>");
+    section.groups.forEach(function (g) {
+      h += group(g.key, g.fields.map(function (f) { return versionFieldHtml(f, m); }).join(""));
+    });
+    h += group(ios ? "build" : "release", buildGroupInnerHtml(platform, roCtx));
+    h += group(ios ? "review_info" : "app_content", infoGroupInnerHtml(platform, roCtx));
+    return h + "</section>";
+  }
+  /**
+   * 치는 동안에는 innerHTML 을 갈아 끼우지 않는다 — 칩 · 출처 · 카운터 · 되돌리기 · 저장 배지만
+   * 제자리에서 고친다. 입력칸의 값은 손대지 않는다(커서가 튀지 않는다).
+   */
+  function renderVersionEditState() {
+    var body = $("[data-store-body]");
+    if (!body || state.view !== "store" || state.store.sub !== "version" || state.store.screen !== "store") return;
+    var lang = L(), n = now();
+    var m = versionPageModel(versionEditCtx(), lang);
+    var fields = {};
+    m.sections.forEach(function (s) {
+      s.groups.forEach(function (g) { g.fields.forEach(function (f) { fields[f.platform + "." + f.key] = f; }); });
+    });
+    $$("[data-version-edit] [data-field]", body).forEach(function (el) {
+      var f = fields[el.getAttribute("data-field")];
+      if (!f) return;
+      el.setAttribute("data-source", f.source);
+      if (f.changed) el.setAttribute("data-changed", "1"); else el.removeAttribute("data-changed");
+      var chips = el.querySelector("[data-field-chips]");
+      if (chips) chips.innerHTML = versionChipsHtml(f);
+      var src = el.querySelector("[data-field-source]");
+      if (src) src.textContent = f.sourceText;
+      var cnt = el.querySelector(".counter");
+      if (cnt) { cnt.textContent = f.counter.text; cnt.className = "counter " + f.counter.tone; cnt.title = f.counter.text; }
+      var rev = el.querySelector("[data-field-revert]");
+      if (rev) rev.disabled = !m.editable || !f.canRevert;
+      var box = el.querySelector("[data-listing-field]");
+      if (box) box.readOnly = !m.editable;
+    });
+    var head = body.querySelector("[data-edit-head]");
+    if (head) head.textContent = m.headText;
+    var warn = body.querySelector("[data-version-remote]");
+    if (warn) { warn.hidden = m.remote === 0; warn.textContent = tr("version.edit.remote_notice", { n: m.remote }); }
+    var slot = body.querySelector("[data-save-slot]");
+    if (slot) slot.innerHTML = versionSaveBadgeHtml(saveBadge(versionEdits().save, lang, n));
+    renderSheetState();   // 상한을 넘긴 칸은 시트의 «남은 것» 이기도 하다(E9)
+  }
+  /** 칸 하나를 쳤다 — 값은 state 에 남기고(저장이 실패해도 화면에 남는다 · E7) 800 ms 뒤에 그
+      키만 보낸다. 이어서 다른 칸을 고치면 한 번에 묶여 나간다. */
+  function listingFieldTyped(fieldId, value) {
+    var at = fieldId.indexOf("."), platform = fieldId.slice(0, at), key = fieldId.slice(at + 1);
+    if (!PREFILL_KEYS[platform] || PREFILL_KEYS[platform].indexOf(key) < 0) return;
+    var ve = versionEdits();
+    if (!ve.typed[platform]) ve.typed[platform] = {};
+    ve.typed[platform][key] = value;
+    ve.dirty[fieldId] = true;
+    delete ve.remote[fieldId];   // 내가 이 칸을 고쳤다 — 마지막 저장이 이긴다(E8)
+    renderVersionEditState();
+    scheduleListingSave();
+  }
+  function scheduleListingSave() {
+    var ve = versionEdits();
+    if (ve.timer) clearTimeout(ve.timer);
+    ve.timer = setTimeout(function () { ve.timer = null; flushListingSave(); }, VERSION_SAVE_DEBOUNCE_MS);
+  }
+  /**
+   * 자동 저장 — **바뀐 키만** `PUT …/release/versions/<id>/listing` 으로. 앞의 저장이 아직
+   * 안 끝났으면 기다렸다가 남은 것을 다시 보낸다. 실패하면 그 키들은 «보낼 것» 으로 남아
+   * «다시 저장» 이 같은 몸통을 다시 보내고, 친 글은 화면에 그대로 있다(E7).
+   */
+  function flushListingSave() {
+    var ve = versionEdits(), repo = state.store.repo, id = state.store.versionId;
+    if (ve.sendingBody || repo == null || id == null) return;
+    var body = listingPutBody(ve.typed, ve.dirty);
+    if (body == null) return;
+    ve.sendingBody = body; ve.sending = ve.dirty; ve.dirty = {};
+    ve.save = { state: "saving", at: null, detail: null };
+    renderVersionEditState();
+    storeApi().versionListing(repo, id, body).then(function (res) {
+      if (state.store.versionId !== id || state.store.vedit !== ve) return;
+      ve.sendingBody = null;
+      if (res.ok) {
+        applySavedListing(ve, res.body);
+        ve.sending = {};
+        ve.save = { state: "saved", at: nowIso(), detail: null };
+      } else {
+        Object.keys(ve.sending).forEach(function (k) { ve.dirty[k] = true; });
+        ve.sending = {};
+        ve.save = { state: "failed", at: null, detail: refusalText(res, L()) };
+        if (res.status === 401 || res.status === 403) tokenRejected();
+      }
+      renderVersionEditState();
+      if (Object.keys(ve.dirty).length && res.ok) scheduleListingSave();
+    }).catch(function () {
+      if (state.store.vedit !== ve) return;
+      ve.sendingBody = null;
+      Object.keys(ve.sending).forEach(function (k) { ve.dirty[k] = true; });
+      ve.sending = {};
+      ve.save = { state: "failed", at: null, detail: tr("version.edit.save.network") };
+      renderVersionEditState();
+    });
+  }
+  /** 서버가 되돌려 준 편집본 · diff 로 상세를 갱신한다 — 다음 폴링까지 기다리지 않는다. */
+  function applySavedListing(ve, out) {
+    var v = state.store.version;
+    var doc = out && typeof out === "object" ? out : {};
+    var edited = doc.edited && typeof doc.edited === "object" ? doc.edited : null;
+    ve.seen = edited;
+    Object.keys(ve.remote).forEach(function (k) { delete ve.remote[k]; });
+    if (!v) return;
+    v.edited = edited;
+    v.has_edits = edited != null;
+    if (doc.diff && typeof doc.diff === "object") {
+      v.diff = doc.diff;
+      v.changed = Array.isArray(doc.diff.fields) ? doc.diff.fields.length : 0;
+    }
+    if (doc.last_edit_at !== undefined) v.last_edit_at = doc.last_edit_at;
+    if (typeof doc.state === "string") v.state = doc.state;
+  }
+  /** «되돌리기» — 이전 버전 값(없으면 빈 값)으로 되돌리고 곧바로 저장한다. 저장이 끝나면 그 칸은
+      이전 버전과 같아져 diff 에서 빠진다(E10). */
+  function revertListingField(fieldId) {
+    var at = fieldId.indexOf("."), platform = fieldId.slice(0, at), key = fieldId.slice(at + 1);
+    if (!PREFILL_KEYS[platform] || PREFILL_KEYS[platform].indexOf(key) < 0) return;
+    var ve = versionEdits(), v = state.store.version || {};
+    var base = listingPart(v.prefill, platform)[key];
+    var value = typeof base === "string" ? base : "";
+    if (!ve.typed[platform]) ve.typed[platform] = {};
+    ve.typed[platform][key] = value;
+    ve.dirty[fieldId] = true;
+    delete ve.remote[fieldId];
+    var box = $("#f-" + platform + "-" + key);
+    if (box) box.value = value;
+    if (ve.timer) { clearTimeout(ve.timer); ve.timer = null; }
+    renderVersionEditState();
+    flushListingSave();
+  }
+  // ── 바텀시트 — 진행 · 남은 것 · 심사 제출 (워크플랜 §4.2 · R8~R12) ──────────────────────
+  //
+  // 버전 페이지의 **마지막 자식**이라 스크롤해도 화면 아래에 붙어 있다(`position: sticky`).
+  // 접힘/펼침은 저장소마다 기억한다. 그 밖의 선택(관리형 게시 · 친 N)은 절대 기억하지 않는다 —
+  // 한 번의 확인이 다음 제출까지 넘어가면 안 된다(결정 3 · 항목 28).
+  var SHEET_KEY = "rcm.sheet.";
+  var SHEET_DRIVER_POLL_MS = 15000;   // 상세 5초보다 **느리게** — 이 라우트는 `--status` 를 돌린다
+  var SHEET_LEFT_GLYPH = { bad: "✗", run: "▶", todo: "☐", warn: "!" };
+
+  function sheetOpen() {
+    var v = lsGet(SHEET_KEY + state.store.repo);
+    return v == null ? true : v === "1";   // 처음엔 펼쳐 둔다 — 남은 것을 숨기지 않는다
+  }
+  function setSheetOpen(open) { lsSet(SHEET_KEY + state.store.repo, open ? "1" : "0"); }
+  /** 소개 자료가 말하는 스토어별 그래픽 수. 아직 못 받았으면 null 이고 시트는 말하지 않는다. */
+  function versionGraphics() {
+    var listing = state.store.listing;
+    if (!listing || state.store.listingStatus === 404) return { ios: null, android: null };
+    var g = screenshotGroups(listing);
+    return { ios: g.ios.length, android: g.android.length };
+  }
+  /** 시트가 보는 모든 것. 릴리스 보기는 **버전 상세가 실어 준 것**이다(따로 안 부른다 · §15). */
+  function sheetCtx(page) {
+    var v = state.store.version || {};
+    var release = v.release && typeof v.release === "object" ? v.release : releaseDoc();
+    var rv = state.store.review;
+    return {
+      version: v, release: release, repo: state.store.repo, profile: currentProfile(),
+      driver: driverModel(), layers: release ? buildLayers(release.jobs, rowsById(state.status), L(), tz(), now()) : null,
+      page: page || versionPageModel(versionEditCtx(), L()), graphics: versionGraphics(),
+      choices: { platforms: rv.platforms, managed: rv.managed, listingFull: rv.listingFull, phased: rv.phased, nMode: state.store.nMode, typedN: rv.typedN },
+      token: state.token, admin: state.admin, busy: state.store.busy, refusal: state.store.reviewCode,
+      lang: L(), nowMs: now(), tzName: tz()
+    };
+  }
+  function sheetNow(page) { return sheetModel(sheetCtx(page)); }
+  function sheetBarHtml(m, cls) {
+    var pct = isNum(m.pct) ? m.pct : null;
+    return '<div class="pbar ' + cls + '" role="progressbar" aria-valuemin="0" aria-valuemax="100"'
+      + (pct != null ? ' aria-valuenow="' + pct + '"' : ' data-basis="none"')
+      + ' aria-valuetext="' + esc(m.head.statusLine) + '"><i data-fill="' + (pct != null ? pct : 0) + '"></i></div>';
+  }
+  function sheetLeftHtml(m) {
+    if (!m.remaining.length) return '<p class="sub" data-sheet-none>' + esc(tr("sheet.nothing_left")) + "</p>";
+    return m.remaining.map(function (r) {
+      var fix = r.fix || {};
+      return '<button type="button" class="ml ' + esc(r.severity) + '" data-sheet-fix="' + esc(r.code) + '"'
+        + ' data-fix-anchor="' + esc(fix.anchor || "") + '" data-fix-route="' + esc(fix.route || "") + '"'
+        + (fix.anchor || fix.route ? ' title="' + esc(tr("sheet.fix")) + '"' : " disabled")
+        + '><span class="g" aria-hidden="true">' + (SHEET_LEFT_GLYPH[r.severity] || "·") + "</span><span>" + esc(r.text) + "</span></button>";
+    }).join("");
+  }
+  function sheetDiffHtml(m) {
+    var h = "";
+    if (!m.diff.changed) h += '<p class="sub" data-sheet-diff-none>' + esc(m.diff.noneText) + "</p>";
+    m.diff.fields.forEach(function (f) {
+      h += '<div class="dl del" data-diff-old="' + esc(f.platform + "." + f.key) + '">' + esc(f.oldText) + "</div>"
+        + '<div class="dl add" data-diff-new="' + esc(f.platform + "." + f.key) + '">' + esc(f.newText) + "</div>";
+    });
+    m.diff.screenshots.forEach(function (line) { h += '<div class="dl">' + esc(line) + "</div>"; });
+    return h;
+  }
+  /** 제출 조건 — 체크박스 넷 · 관리형 게시 · 빌드 번호 토글과 칸. 심사 패널에서 옮겨 온 그대로다. */
+  function sheetCondHtml(m) {
+    var rv = state.store.review;
+    var cb = function (name, key, checked, cls) {
+      return '<label class="ck' + (cls ? " " + cls : "") + '"><input type="checkbox" data-review-check="' + name + '"' + (checked ? " checked" : "") + "> " + esc(tr(key)) + "</label>";
+    };
+    var h = '<div class="checks">'
+      + cb("ios", "review.check.ios", rv.platforms.ios) + cb("android", "review.check.android", rv.platforms.android)
+      + cb("full", "review.check.full", rv.listingFull) + cb("phased", "review.check.phased", rv.phased)
+      + '<span id="sheet-managed" tabindex="-1">' + cb("managed", "review.check.managed", rv.managed === true, "managed" + (m.managedShown ? "" : " off")) + "</span>"
+      + "</div>";
+    h += nModeToggleHtml();
+    if (m.nMode === "auto") {
+      h += '<div class="nbox auto" id="sheet-n" tabindex="-1" data-n-auto><span class="lab">' + esc(tr("n.mode.label")) + '</span><span class="nval mono">' + esc(m.planN != null ? String(m.planN) : DASH) + "</span>"
+        + '<span class="sub nfull">' + esc(m.planN != null ? tr("sheet.n_auto", { n: m.planN }) : tr("sheet.n_auto_unknown")) + "</span></div>";
+    } else {
+      h += '<div class="nbox" data-n-typed><label for="sheet-n">' + esc(tr("review.n_label")) + '</label><span class="sub">' + esc(m.planN != null ? tr("review.n_hint", { n: m.planN }) : tr("review.n_unknown")) + "</span>"
+        + '<input id="sheet-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + esc(rv.typedN) + '" aria-describedby="sheet-n-state"><span id="sheet-n-state" class="nstate" data-n-state></span></div>';
+    }
+    return h;
+  }
+  function sheetResultHtml(m) {
+    if (!m.result) return "";
+    return '<div class="result ' + m.result.tone + '" data-sheet-result="' + esc(m.result.status) + '"><b>' + esc(tr("sheet.title.result")) + " · " + esc(m.result.status) + "</b>"
+      + '<ul class="plain">' + m.result.platforms.map(function (p) { return "<li>" + esc(p.text) + "</li>"; }).join("") + "</ul>"
+      + (m.result.extras.length ? '<p class="sub">' + esc(m.result.extras.join(" · ")) + "</p>" : "") + "</div>";
+  }
+  /** 시트 하나(W3 머리 · W4 · W5). 출시 · 게시 · 롤아웃 버튼은 어떤 상태에도 없다. */
+  function sheetHtml(page) {
+    var m = sheetNow(page), open = sheetOpen();
+    var busy = state.store.busy;
+    var h = '<section class="sheet" id="release-sheet" data-sheet data-tone="' + esc(m.tone) + '" data-open="' + (open ? "1" : "0") + '"'
+      + ' role="group" aria-label="' + esc(tr("sheet.aria")) + '">';
+    h += '<div class="sh-head"><span class="grab" aria-hidden="true"></span>'
+      + '<span class="ver" data-sheet-ver>' + esc(m.head.ver) + ' <span class="pill v-' + esc(m.tone) + '" data-sheet-pill>' + esc(m.head.pill) + "</span></span>"
+      + '<span class="st" data-sheet-status>' + esc(m.head.statusLine) + "</span>";
+    // R8 — 도는 동안에는 접힌 한 줄에도 막대와 진행 정도가 보인다(줄여서라도)
+    h += '<span class="mini" data-sheet-mini' + (m.head.live ? "" : " hidden") + ">" + sheetBarHtml(m, "thin")
+      + '<span class="pct" data-sheet-pct>' + esc(isNum(m.pct) ? m.pct + "%" : DASH) + "</span></span>";
+    if (!m.closed) {
+      h += '<button type="button" class="btn primary" data-sheet-submit disabled>' + esc(tr(busy === "submit" ? "sheet.submitting" : "sheet.submit")) + "</button>";
+    }
+    h += '<button type="button" class="btn" data-sheet-toggle aria-expanded="' + (open ? "true" : "false") + '" aria-controls="sheet-body">'
+      + esc(tr(open ? "sheet.collapse" : "sheet.expand")) + "</button></div>";
+    h += '<div class="sh-body" id="sheet-body" data-sheet-body' + (open ? "" : " hidden") + ">";
+    h += sheetBarHtml(m, "wide");
+    h += '<div class="stages" id="sheet-stages" tabindex="-1" data-sheet-stages>'
+      + m.stages.map(function (s) {
+        return '<span class="chip-st ' + esc(s.state) + '" data-stage="' + esc(s.id) + '">' + esc(s.id) + " " + esc(s.label) + "</span>";
+      }).join("") + "</div>";
+    h += '<p class="sub" data-sheet-basis>' + esc([m.basis, m.now, m.elapsed, m.finishes].filter(Boolean).join(" · ")) + "</p>";
+    h += '<div class="two"><div><div class="lab">' + esc(tr("sheet.title.left")) + '</div><div class="miss" data-sheet-left>' + sheetLeftHtml(m) + "</div></div>"
+      + '<div><div class="lab">' + esc(tr("sheet.title.diff")) + '</div><div class="diffs" data-sheet-diff>' + sheetDiffHtml(m) + "</div></div></div>";
+    if (!m.closed) {
+      h += '<div class="lab">' + esc(tr("sheet.title.conditions")) + "</div>" + sheetCondHtml(m)
+        + '<div class="actions"><span class="sub" data-sheet-reason></span>'
+        + (state.store.reviewError ? '<span class="bad" data-sheet-error>' + esc(state.store.reviewError) + "</span>" : "") + "</div>";
+    }
+    h += '<p class="sub" data-sheet-sending><b>' + esc(tr("sheet.title.sending")) + "</b> " + esc(m.sending.join(" · ")) + "</p>";
+    h += sheetResultHtml(m);
+    h += '<p class="sub policy" data-sheet-policy>' + esc(m.policy) + "</p>";
+    return h + "</div></section>";
+  }
+  /** 제출 버튼 · 이유 · N 상태만 제자리에서 — 타이핑마다 시트를 다시 그리지 않는다. */
+  function renderSheetState() {
+    var sheet = $("#release-sheet");
+    if (!sheet) return;
+    var m = sheetNow();
+    var btn = sheet.querySelector("[data-sheet-submit]"), reason = sheet.querySelector("[data-sheet-reason]");
+    if (btn) { btn.disabled = !m.canSubmit; btn.title = m.canSubmit ? "" : m.reasonText; }
+    if (reason) reason.textContent = m.canSubmit ? "" : m.reasonText;
+    var left = sheet.querySelector("[data-sheet-left]");
+    if (left) left.innerHTML = sheetLeftHtml(m);
+    var status = sheet.querySelector("[data-sheet-status]");
+    if (status) status.textContent = m.head.statusLine;
+    var nState = sheet.querySelector("[data-n-state]");
+    if (nState) {
+      var typed = state.store.review.typedN;
+      if (!typed) { nState.textContent = ""; nState.className = "nstate"; }
+      else if (nMatches(typed, m.planN)) { nState.textContent = tr("review.n_ok", { n: m.planN }); nState.className = "nstate ok"; }
+      else { nState.textContent = m.planN != null ? tr("review.n_mismatch", { n: m.planN }) : tr("review.n_unknown"); nState.className = "nstate bad"; }
+    }
+    var managed = sheet.querySelector("label.ck.managed");
+    if (managed) managed.classList.toggle("off", !m.managedShown);
+  }
+  /** 남은 것 한 줄을 눌렀다 — 고치는 칸으로 스크롤하고 포커스를 준다(AC-D9). 다른 화면이면
+      그리로 가고, 그 화면이 그려진 뒤에 같은 일을 한다. */
+  function sheetGoFix(anchor, route) {
+    if (route && location.hash !== route) {
+      state.store.fixAnchor = anchor || null;
+      location.hash = route;
+      return;
+    }
+    focusAnchor(anchor);
+  }
+  function focusAnchor(anchor) {
+    if (!anchor) return;
+    var el;
+    try { el = $(anchor, $("#store")); } catch (e) { el = null; }
+    if (!el) return;
+    if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center" });
+    if (typeof el.focus === "function") el.focus({ preventScroll: true });
+  }
+  /**
+   * 드라이버 상태를 **느리게** 받는다(§15 · 이 PR 의 결정): 상세 폴링은 5초인데 이 라우트는
+   * 빌드 머신에서 `--status` 를 한 번 돌린다. 프로파일이 드라이버를 선언한 저장소에서만, 그리고
+   * 버전 페이지가 열려 있는 동안만 15초에 한 번이다. 선언이 없으면 한 번도 부르지 않는다.
+   */
+  function stopDriverPoll() {
+    if (state.store.driverTimer) { clearInterval(state.store.driverTimer); state.store.driverTimer = null; }
+  }
+  function syncDriverPoll() {
+    var want = state.view === "store" && state.store.screen === "store"
+      && state.store.sub === "version" && !!currentProfile().driver;
+    if (!want) { stopDriverPoll(); return; }
+    if (state.store.driverTimer) return;
+    if (state.store.driver == null && state.store.driverStatus == null) loadDriver().then(renderStore);
+    state.store.driverTimer = setInterval(function () {
+      if (state.view !== "store" || state.store.sub !== "version" || state.store.screen !== "store") return;
+      if (document.hidden || state.conn.mode === "paused") return;
+      loadDriver().then(function () { renderStore(); });
+    }, SHEET_DRIVER_POLL_MS);
+  }
+  /** 상태 화면 `#/store/<repo>/status` (항목 1~6 · 27): 행 넷 + 접힌 본체 머리 + 고정 문장. */
   function storeScreenHtml() {
     var doc = state.store.doc, repo = state.store.repo, items = secretsItems(), profile = doc.profile || {};
     var n = now();
-    var h = '<div class="s-h store-head"><span class="sub" data-tick="updated" data-from="' + esc(state.store.loadedAt != null ? new Date(state.store.loadedAt).toISOString() : "") + '"></span>'
-      + '<span class="spacer"></span><button type="button" class="btn" data-store-refresh>' + esc(tr("store.refresh")) + "</button></div>";
-    h += releaseBarHtml();
+    var h = storeHeadHtml('<a class="btn" href="' + esc(storeHash(repo, "versions")) + '" data-version-back>' + esc(tr("version.page.back")) + "</a>");
+    // 최상단 큰 막대는 없다(결정 Q6) — 진행은 버전 페이지의 바텀시트와 목록 행이 말한다.
     // Setup — 프로파일이 선언한 비밀 표(읽기 전용 + Replace · Verify all)
     var setupState = rowState("setup", { setup: doc.setup });
     h += srowHtml("setup", setupState, esc(setupHead(doc.setup, items, profile, L(), tz(), n)),
@@ -3506,8 +4808,22 @@
     h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
     return unsafeBannerHtml() + h;
   }
-  /** 렌더 뒤 Submit 상태를 채운다 — 버튼은 HTML 에서 늘 비활성으로 나오고 여기서만 열린다. */
-  function afterStoreRender() { renderSubmitState(); renderDriverState(); applyBarFills($("[data-store-body]")); maybeOpenConfirmN(); }
+  /** 렌더 뒤 상태 화면의 드라이버 폼을 채운다. 제출 버튼은 이제 시트에만 있다(§4.2). */
+  function afterStoreRender() { renderDriverState(); applyBarFills($("[data-store-body]")); maybeOpenConfirmN(); }
+  /** 렌더 뒤 시트를 채운다 — 제출 버튼은 HTML 에서 늘 비활성으로 나오고 여기서만 열린다. */
+  function afterVersionRender() {
+    renderSheetState();
+    applyBarFills($("[data-store-body]"));
+    // 붙어 있는 시트가 본문의 끝을 가리지 않도록 그 높이만큼 아래 여백을 준다(E23). 그 여백은
+    // 시트의 **형제**인 `.vmain` 이 든다 — `[data-store-body]` 에 주면 그것이 곧 sticky 의 담는
+    // 상자(부모의 content box)라, 시트가 그 패딩 안으로 못 내려가고 페이지 맨 아래에서 화면
+    // 위로 밀려 올라간다(§17-3: 1280×900 에서 `sheetTop` −506, 390 폭에서는 통째로 화면 밖).
+    var main = $("[data-version-main]"), sheet = $("#release-sheet");
+    if (main && sheet) main.style.paddingBottom = (sheet.offsetHeight + 16) + "px";
+    // 다른 화면의 «남은 것» 을 눌러 여기로 왔으면 그 칸으로 간다(AC-D9)
+    var anchor = state.store.fixAnchor;
+    if (anchor) { state.store.fixAnchor = null; focusAnchor(anchor); }
+  }
   // ── 릴리스 상태 · 소개 자료 (STORE-TAB-API-2) ──
   function releaseDoc() { return state.store.release; }
   function currentProfile() { return (state.store.doc && state.store.doc.profile) || {}; }
@@ -3528,10 +4844,18 @@
       syncReviewChoices();
     }).catch(function () { state.store.release = null; state.store.releaseStatus = 0; });
   }
-  function loadListing() {
+  /** 지금 보고 있는 드래프트의 대표 이름(§11 — iOS 가 있으면 iOS, 없으면 Android). 상세를
+      아직 못 받았으면 null 이고, 그러면 서버가 플랜의 이름을 쓴다(옛 동작). */
+  function versionBuildName() {
+    var v = state.store.version;
+    if (!v || typeof v !== "object") return null;
+    if (v.build_name != null && v.build_name !== "") return String(v.build_name);
+    return v.ios_version || v.android_version || null;
+  }
+  function loadListing(buildName) {
     var repo = state.store.repo, api = storeApi();
     if (!repo || typeof api.listing !== "function") { state.store.listing = null; state.store.listingStatus = 404; return Promise.resolve(); }
-    return api.listing(repo).then(function (res) {
+    return api.listing(repo, buildName || null).then(function (res) {
       if (state.store.repo !== repo) return;
       state.store.listingStatus = res.status;
       state.store.listing = res.ok && res.body && typeof res.body === "object" ? res.body : null;
@@ -3550,6 +4874,96 @@
       var cur = state.store.driver;
       if (!prev || !cur || prev.build_name !== cur.build_name || prev.plan_n !== cur.plan_n || prev.running !== cur.running) state.store.driverN = "";
     }).catch(function () { state.store.driver = null; state.store.driverStatus = 0; });
+  }
+  // ── 버전 목록 · 버전 하나 (워크플랜 §3.2). 네 라우트 가운데 **상세만** 5초로 폴링한다 ──
+  function loadVersions() {
+    var repo = state.store.repo, api = storeApi();
+    if (!repo || typeof api.versions !== "function") { state.store.versions = null; state.store.versionsStatus = 404; return Promise.resolve(); }
+    return api.versions(repo).then(function (res) {
+      if (state.store.repo !== repo) return;
+      state.store.versionsStatus = res.status;
+      state.store.versions = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+    }).catch(function () { state.store.versions = null; state.store.versionsStatus = 0; });
+  }
+  function loadVersion() {
+    var repo = state.store.repo, id = state.store.versionId, api = storeApi();
+    if (!repo || id == null || typeof api.version !== "function") { state.store.version = null; state.store.versionStatus = 404; return Promise.resolve(); }
+    return api.version(repo, id).then(function (res) {
+      if (state.store.repo !== repo || state.store.versionId !== id) return;
+      state.store.versionStatus = res.status;
+      var doc = res.ok && res.body && typeof res.body === "object" ? res.body : null;
+      if (doc) noteRemoteListing(doc);
+      state.store.version = doc;
+      state.store.versionError = res.ok ? null : storeErrorDetail(res);
+    }).catch(function () { state.store.version = null; state.store.versionStatus = 0; });
+  }
+  /** 폴링이 가져온 편집본이 우리가 마지막으로 본 것과 달라졌으면 그 칸을 «다른 곳에서 바뀜» 으로
+      센다(E8). 화면의 값은 그대로 둔다 — 폴링이 사람이 치던 글을 조용히 덮지 않는다. */
+  function noteRemoteListing(doc) {
+    var ve = versionEdits();
+    var incoming = doc.edited && typeof doc.edited === "object" ? doc.edited : null;
+    if (ve.seen !== undefined) {
+      var found = remoteListingEdits(ve.seen, incoming, ve.typed);
+      Object.keys(found).forEach(function (k) { ve.remote[k] = true; });
+    }
+    ve.seen = incoming;
+  }
+  function stopVersionPoll() {
+    if (state.store.versionTimer) { clearInterval(state.store.versionTimer); state.store.versionTimer = null; }
+  }
+  /**
+   * 버전 페이지가 열려 있는 동안 도는 5초 폴링(§3.2 · §15). 부르는 것은
+   * `GET …/release/versions/<id>` **하나뿐**이고 그 라우트는 하위 프로세스를 돌리지 않는다 —
+   * 드라이버와 소개 자료는 이 화면에서 절대 폴링하지 않는다(열어 둔 브라우저 하나가 빌드
+   * 머신에서 5초마다 프로세스 셋을 돌리게 하지 않으려고 서버가 그렇게 나뉘었다).
+   * «만드는 중» 이 끝나도 계속 돈다: 상태(진행 중 · 제출됨)와 **다른 브라우저의 편집**(E8)이
+   * 이 폴링으로만 온다. 화면을 떠나면 멈춘다.
+   */
+  /**
+   * 목록 화면의 짧은 폴링 — «만드는 중» 이나 «지우는 중» 인 드래프트가 있을 때만 5초에 한 번
+   * `GET …/release/versions` 를 다시 받는다. 그 잡들은 보통 2~3초에 끝나는데 30초 새로고침만
+   * 믿으면 누른 사람은 그 사이 «편집 중 · 열기 · 버리기» 를 보고 아무 일도 안 일어난 줄
+   * 안다(C 단계 격리 검증 2). 이 라우트는 하위 프로세스를 돌리지 않는다(§14-1).
+   */
+  function stopDraftPoll() {
+    if (state.store.draftTimer) { clearInterval(state.store.draftTimer); state.store.draftTimer = null; }
+  }
+  function draftsBusy() {
+    var doc = state.store.versions;
+    return (doc && Array.isArray(doc.drafts) ? doc.drafts : []).some(function (r) {
+      return !!r && (r.state === "creating" || versionRowModel(r, L(), now()).deleting);
+    });
+  }
+  function syncDraftPoll() {
+    var want = state.view === "store" && state.store.screen === "store"
+      && state.store.sub === "versions" && draftsBusy();
+    if (!want) { stopDraftPoll(); return; }
+    if (state.store.draftTimer) return;
+    state.store.draftTimer = setInterval(function () {
+      if (state.view !== "store" || state.store.sub !== "versions" || state.store.screen !== "store") return;
+      if (document.hidden || state.conn.mode === "paused") return;
+      loadVersions().then(function () { renderStore(); syncDraftPoll(); });
+    }, VERSION_POLL_MS);
+  }
+  function syncVersionPoll() {
+    syncDriverPoll();   // 시트의 단계와 색은 드라이버가 말한다 — 그것만 15초로 따로 받는다
+    syncDraftPoll();    // 목록에서 만들거나 지우는 중인 드래프트가 있으면 그 화면도 5초로 따라간다
+    var want = state.view === "store" && state.store.screen === "store"
+      && state.store.sub === "version" && state.store.versionId != null;
+    if (!want) { stopVersionPoll(); return; }
+    if (state.store.versionTimer) return;
+    state.store.versionTimer = setInterval(function () {
+      if (state.view !== "store" || state.store.sub !== "version" || state.store.screen !== "store") return;
+      if (document.hidden || state.conn.mode === "paused") return;
+      loadVersion().then(function () { renderStore(); syncVersionPoll(); });
+    }, VERSION_POLL_MS);
+  }
+  /** 관문에 막혀 설정 화면으로 보냈던 주소로 돌아간다(E22). 한 번 쓰면 잊는다. */
+  function goBackToGateReturn() {
+    var target = state.store.gateReturn;
+    state.store.gateReturn = null;
+    if (!target || location.hash === target) { renderNav(); renderStore(); syncVersionPoll(); return; }
+    location.hash = target;
   }
   function loadGithub() {
     var repo = state.store.repo, api = storeApi();
@@ -3630,19 +5044,6 @@
     }
     h += "</details>";
     return h;
-  }
-  /** 최상단 릴리스 막대 — 회차가 돌 때만. title 과 :hover 의 .rbar-tip 이 같은 detail 을 보인다. */
-  function releaseBarHtml() {
-    var r = releaseDoc();
-    var layers = state.store.releaseStatus !== 404 && r ? buildLayers(r.jobs, rowsById(state.status), L(), tz(), now()) : null;
-    var m = releaseBarModel(driverModel(), layers, r, { lang: L(), nowMs: now() });
-    if (!m) return "";
-    var pct = isNum(m.pct) ? m.pct : null;
-    return '<section class="rbar ' + esc(m.tone) + '" data-release-bar data-tone="' + esc(m.tone) + '" role="group" aria-label="' + esc(tr("rbar.aria")) + '" title="' + esc(m.detail) + '">'
-      + '<div class="rbar-top"><span class="rbar-ver" data-rbar-head>' + esc(m.head) + '</span><span class="rbar-stage" data-rbar-stage>' + esc(m.stage) + '</span><span class="spacer"></span><span class="rbar-pct" data-rbar-pct>' + (pct != null ? pct + "%" : DASH) + "</span></div>"
-      + '<div class="pbar big" role="progressbar" aria-valuemin="0" aria-valuemax="100"' + (pct != null ? ' aria-valuenow="' + pct + '"' : "") + ' aria-valuetext="' + esc(m.detail) + '"' + (pct == null ? ' data-basis="none"' : "") + '><i data-fill="' + (pct != null ? pct : 0) + '"></i></div>'
-      + '<div class="rbar-foot"><span class="sub">' + (m.now ? '<span class="g" aria-hidden="true">▶</span> ' + esc(m.now) : esc(m.basis)) + '</span><span class="spacer"></span><span class="sub">' + esc([m.elapsed, m.finishes].filter(Boolean).join(" · ")) + "</span></div>"
-      + '<div class="rbar-tip" data-rbar-tip role="tooltip">' + esc(m.detail) + "</div></section>";
   }
   function buildRowHtml(model) {
     var dm = driverModel(), acts = driverActions(dm, driverCtx());
@@ -3808,39 +5209,42 @@
       notesInner = '<pre class="notes">' + esc(notes) + "</pre><p class=\"sub\">" + (strip.notesPath ? esc(tr("review.notes.from", { path: strip.notesPath })) + " · " : "") + counterHtml(nc) + " · " + esc(tr("review.notes.same")) + "</p>";
     }
     h += group(ios ? "whats_new" : "release_notes", notesInner);
-    // 4 빌드 / 릴리스 — 고른 UI 는 없다(항목 13·19)
-    var observed = ctx.observed[platform];
-    var buildInner = '<div class="fld"><span class="fl">' + esc(tr(ios ? "review.group.build" : "review.group.release")) + '</span><span class="val">'
+    h += group(ios ? "build" : "release", buildGroupInnerHtml(platform, ctx));
+    h += group(ios ? "review_info" : "app_content", infoGroupInnerHtml(platform, ctx));
+    return h + "</section>";
+  }
+  /** 그룹 4 «빌드 · 출시 설정» — 읽기 전용이고 고를 것이 없다(항목 13·19). 심사 패널과 버전
+      페이지가 **같은 코드를 쓴다**(§3.2: 빌드·출시 설정은 버전 페이지에서도 지금 문구 그대로). */
+  function buildGroupInnerHtml(platform, ctx) {
+    var ios = platform === "ios", strip = ctx.strip, observed = (ctx.observed || {})[platform];
+    var inner = '<div class="fld"><span class="fl">' + esc(tr(ios ? "review.group.build" : "review.group.release")) + '</span><span class="val">'
       + esc(ios ? tr("review.build.line", { version: strip.version, build: strip.build, state: observed != null ? String(observed) : DASH }) : tr("review.release_line", { build: strip.build, version: strip.version }) + (observed != null ? " · " + tr("review.observed", { value: String(observed) }) : ""))
       + " · " + esc(strip.buildNote) + "</span></div>";
     if (ios) {
-      buildInner += '<div class="fld"><span class="fl">' + esc(tr("review.version_release")) + '</span><span class="val">' + esc(tr("review.manual_release")) + ' <span class="chip">' + esc(tr("review.fixed_by_repo")) + "</span>"
+      inner += '<div class="fld"><span class="fl">' + esc(tr("review.version_release")) + '</span><span class="val">' + esc(tr("review.manual_release")) + ' <span class="chip">' + esc(tr("review.fixed_by_repo")) + "</span>"
         + (ctx.autoRelease != null ? ' <span class="' + (ctx.autoRelease ? "bad" : "sub") + '">' + esc(tr("review.observed", { value: "automatic_release: " + ctx.autoRelease })) + "</span>" : "") + "</span></div>"
         + '<div class="fld"><span class="fl">' + esc(tr("review.phased")) + '</span><span class="val">' + esc(tr(state.store.review.phased ? "review.on" : "review.off")) + "</span></div>";
     } else {
-      buildInner += '<div class="fld"><span class="fl">' + esc(tr("review.rollout")) + '</span><span class="val"><span class="chip">' + esc(tr("review.rollout_fixed")) + "</span></span></div>"
+      inner += '<div class="fld"><span class="fl">' + esc(tr("review.rollout")) + '</span><span class="val"><span class="chip">' + esc(tr("review.rollout_fixed")) + "</span></span></div>"
         + '<div class="fld"><span class="fl">' + esc(tr("review.managed")) + '</span><span class="val"><span class="pill na" data-managed-pill><span class="g" aria-hidden="true">?</span>' + esc(tr("review.managed_unknown")) + "</span> " + esc(tr("review.managed_hint")) + "</span></div>"
         + '<div class="fld"><span class="fl">' + esc(tr("review.group.review_info")) + '</span><span class="val">' + esc(tr("review.send_for_review")) + "</span></div>";
     }
-    h += group(ios ? "build" : "release", buildInner);
-    // 5 심사 정보 / 정책 — 있음/없음만, 값은 없다(항목 14·20)
-    var infoInner;
-    if (ios) {
-      var ri = ctx.reviewInfo;
-      if (!ri) infoInner = '<p class="sub">' + DASH + "</p>";
-      else {
-        infoInner = ri.files.map(function (f) {
-          return '<div class="fld"><span class="fl">' + esc(f.name) + "</span>" + presentPill(f.present, tr(f.present ? "secrets.present" : "secrets.missing")) + "</div>";
-        }).join("") + '<p class="sub">' + esc(tr("review.values_never_shown")) + "</p>";
-        if (!ri.complete) infoInner += '<p class="bad">' + esc(tr("review.review_info_missing")) + ' <button type="button" class="btn" data-goto-settings>' + esc(tr("row.settings")) + "</button></p>";
-      }
-    } else {
-      infoInner = fieldRowHtml(tr("review.data_safety"), null, null, false, tr("review.console_only"))
+    return inner;
+  }
+  /** 그룹 5 «앱 심사 정보 / 앱 콘텐츠» — 있음/없음만, 값은 없다(항목 14·20). 두 화면이 같이 쓴다. */
+  function infoGroupInnerHtml(platform, ctx) {
+    if (platform !== "ios") {
+      return fieldRowHtml(tr("review.data_safety"), null, null, false, tr("review.console_only"))
         + fieldRowHtml(tr("review.content_rating"), null, null, false, tr("review.console_only"))
         + fieldRowHtml(tr("review.notes_label"), null, null, false, "");
     }
-    h += group(ios ? "review_info" : "app_content", infoInner);
-    return h + "</section>";
+    var ri = ctx.reviewInfo;
+    if (!ri) return '<p class="sub">' + DASH + "</p>";
+    var inner = ri.files.map(function (f) {
+      return '<div class="fld"><span class="fl">' + esc(f.name) + "</span>" + presentPill(f.present, tr(f.present ? "secrets.present" : "secrets.missing")) + "</div>";
+    }).join("") + '<p class="sub">' + esc(tr("review.values_never_shown")) + "</p>";
+    if (!ri.complete) inner += '<p class="bad">' + esc(tr("review.review_info_missing")) + ' <button type="button" class="btn" data-goto-settings>' + esc(tr("row.settings")) + "</button></p>";
+    return inner;
   }
   function reviewChoicesCtx() {
     var rv = state.store.review;
@@ -3906,57 +5310,19 @@
       h += '<div class="validate ' + (v.ok ? "ok" : "bad") + '" data-validate><b>' + esc(v.ok ? tr("review.validate_ok") : tr("review.validate_failed", { code: isNum(v.exit) ? v.exit : DASH })) + "</b>"
         + (v.lines && v.lines.length ? '<pre class="notes">' + esc(v.lines.join("\n")) + "</pre>" : "") + "</div>";
     }
-    // 체크박스 다섯(항목 22) — 관리형 게시는 이 렌더의 상태만, 저장 없음
-    var cb = function (name, key, checked, cls) {
-      return '<label class="ck' + (cls ? " " + cls : "") + '"><input type="checkbox" data-review-check="' + name + '"' + (checked ? " checked" : "") + "> " + esc(tr(key)) + "</label>";
-    };
-    h += '<div class="checks">'
-      + cb("ios", "review.check.ios", rv.platforms.ios) + cb("android", "review.check.android", rv.platforms.android)
-      + cb("managed", "review.check.managed", rv.managed === true, "managed" + (rv.platforms.android ? "" : " off"))
-      + cb("full", "review.check.full", rv.listingFull) + cb("phased", "review.check.phased", rv.phased)
-      + "</div>";
-    // N 입력(항목 28) + 행동 셋(항목 23)
-    var planDoc = planEntryDoc(r.plan) || {};
-    var planN = isNum(planDoc.n) ? planDoc.n : null;
-    h += nModeToggleHtml();
-    if (nMode() === "auto") {
-      h += '<div class="nbox auto" data-n-auto><span class="lab">' + esc(tr("n.mode.label")) + '</span><span class="nval mono">' + esc(planN != null ? String(planN) : DASH) + "</span>"
-        + '<span class="sub" style="grid-column: 1 / -1">' + esc(planN != null ? tr("review.n_auto", { n: planN }) : tr("review.n_auto_unknown")) + "</span></div>";
-    } else {
-      h += '<div class="nbox"><label for="review-n">' + esc(tr("review.n_label")) + '</label><span class="sub">' + esc(planN != null ? tr("review.n_hint", { n: planN }) : tr("review.n_unknown")) + "</span>"
-        + '<input id="review-n" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + esc(rv.typedN) + '" aria-describedby="review-n-state"><span id="review-n-state" class="nstate" data-n-state></span></div>';
-    }
+    // 제출 조건(체크박스 · 관리형 게시 · 빌드 번호)과 «심사 제출» 은 **바텀시트**로 갔다(§4.2 ·
+    // AC-D6). 이 패널은 상태 화면의 읽기 전용 배치로 남는다 — 진단용 두 작업만 여기서 돈다.
     var busy = state.store.busy;
     var canJob = !!state.token && !busy;
     h += '<div class="actions">'
       + '<button type="button" class="btn" data-validate-listing' + (canJob && listing && listing.configured !== false && state.store.listingStatus !== 404 ? "" : " disabled") + ">" + esc(tr(busy === "validate" ? "review.validating" : "review.validate")) + "</button>"
       + '<button type="button" class="btn" data-plan-review' + (canJob ? "" : " disabled") + ">" + esc(tr(busy === "review-plan" ? "review.planning" : "review.plan")) + "</button>"
-      + '<button type="button" class="btn primary" data-submit-review disabled>' + esc(tr(busy === "submit" ? "review.submitting" : "review.submit")) + "</button>"
-      + '<span class="sub" data-submit-reason></span>'
       + (state.store.reviewError ? '<span class="bad" data-review-error>' + esc(state.store.reviewError) + "</span>" : "")
       + "</div>"
       + '<p class="sub">' + esc(tr("review.submit_hint", { n: isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30 })) + "</p>"
       + (rp ? '<p class="sub" data-review-plan-line>' + esc(tr("review.plan_running", { id: rp.job_id, state: stateWord(rp.state, lang) })) + "</p>" : "");
     h += '<p class="sub policy">' + esc(tr("review.policy")) + "</p></div></details>";
     return h;
-  }
-  /** Submit 버튼 · 이유 · N 상태만 제자리에서 갱신 — 타이핑마다 본체를 다시 그리지 않는다. */
-  function renderSubmitState() {
-    var btn = $("#review-panel [data-submit-review]"), reason = $("#review-panel [data-submit-reason]"), nState = $("#review-panel [data-n-state]");
-    if (!btn) return;
-    var d = submitDecision(reviewChoicesCtx());
-    btn.disabled = !d.enabled;
-    btn.title = d.enabled ? "" : d.reasons.map(function (k) { return tr("review.reason." + k); }).join(" · ");
-    if (reason) reason.textContent = d.enabled ? "" : d.reasons.map(function (k) { return tr("review.reason." + k); }).join(" · ");
-    var planDoc = planEntryDoc((releaseDoc() || {}).plan) || {};
-    if (nState) {
-      var typed = state.store.review.typedN;
-      if (!typed) { nState.textContent = ""; nState.className = "nstate"; }
-      else if (nMatches(typed, planDoc.n)) { nState.textContent = tr("review.n_ok", { n: planDoc.n }); nState.className = "nstate ok"; }
-      else { nState.textContent = isNum(planDoc.n) ? tr("review.n_mismatch", { n: planDoc.n }) : tr("review.n_unknown"); nState.className = "nstate bad"; }
-    }
-    var managed = $('#review-panel label.ck.managed');
-    if (managed) managed.classList.toggle("off", !state.store.review.platforms.android);
   }
   function unsafeBannerHtml() {
     var b = bannerDecision(releaseDoc());
@@ -4036,17 +5402,23 @@
   function jobCall(kind, run, after) {
     if (!state.token || state.store.busy) return;
     var repo = state.store.repo;
-    state.store.busy = kind; state.store.reviewError = null; renderStore();
+    state.store.busy = kind; state.store.reviewError = null; state.store.reviewCode = null; renderStore();
     run(storeApi(), repo).then(function (res) {
       state.store.busy = null;
       if (res.ok) { after(res); }
       else {
-        // 409 는 서버의 규칙이다 — 코드를 그대로 버튼 옆에 쓰고, 돌아가지 않는다
-        if (kind === "plan") state.store.planError = refusalText(res, L()); else state.store.reviewError = refusalText(res, L());
+        // 409 는 서버의 규칙이다 — 코드를 그대로 버튼 옆에 쓰고, 돌아가지 않는다. 시트의
+        // «남은 것» 은 그 **코드**를 다시 쓴다(E11 — 프리셋이 listing_json 을 모른다).
+        if (kind === "plan") state.store.planError = refusalText(res, L());
+        else {
+          state.store.reviewError = refusalText(res, L());
+          var b = res.body && typeof res.body === "object" ? res.body : {};
+          state.store.reviewCode = b.code || b.error_code || null;
+        }
         if (res.status === 401 || res.status === 403) tokenRejected();
       }
       return loadStore({ listing: kind === "validate" });
-    }).catch(function () { state.store.busy = null; state.store.reviewError = "network"; renderStore(); });
+    }).catch(function () { state.store.busy = null; state.store.reviewError = "network"; state.store.reviewCode = null; renderStore(); });
   }
   /** 이 회차의 build_name — 플랜 항목, 없으면 plan.json 의 것. 첫 사용(플랜 없음)엔 "". */
   function knownPlanVersion() {
@@ -4091,6 +5463,156 @@
     dlg.close();   // 거절은 Store 행 머리에 빨갛게 온다
     refreshPlan(v);
   }
+  // ── W2 새 버전 대화상자 (§3.2 · R3 · R4) ─────────────────────────────────────
+  // 묻는 것은 버전 이름뿐이다(R3). 트랙 · dry-run · 빌드 번호는 여기 없다. 체크를 끄면 그 스토어는
+  // 본문에서 빠지고(E2), 이름은 꼴이 맞고 라이브보다 커야 «만들기» 가 열린다.
+  function versionListNow() { return versionListModel(state.store.versions, L(), now()); }
+  function openVersionDialog(prefill) {
+    var dlg = $("#version-dialog");
+    if (!dlg) return;
+    var m = versionListNow();
+    var chosen = {};
+    m.platforms.forEach(function (p) {
+      var value = prefill && prefill[p] != null ? String(prefill[p]) : (m.hints[p] || "");
+      chosen[p] = { on: prefill ? prefill[p] != null : true, name: value };
+    });
+    state.store.newVersion = chosen;
+    state.store.createError = null;
+    renderVersionFields();
+    renderVersionDialogState();
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+    var first = $("#version-dialog input[data-version-name]");
+    if (first) { first.focus(); first.select(); }
+  }
+  /** 칸은 플랜이 아는 스토어만 둔다(E2) — 둘 다 모르면 둘 다. 힌트는 라이브 + patch 다. */
+  function renderVersionFields() {
+    var wrap = $("#version-dialog [data-version-fields]");
+    if (!wrap) return;
+    var m = versionListNow(), nv = state.store.newVersion || {};
+    var label = { ios: "App Store · iOS", android: "Google Play · Android" };
+    wrap.innerHTML = m.platforms.map(function (p) {
+      var f = nv[p] || { on: true, name: "" };
+      var hint = m.live[p] ? tr("version.dialog.hint", { version: m.live[p] }) : tr("version.dialog.no_hint");
+      return '<div class="nbox vfield" data-version-field="' + p + '">'
+        + '<label class="ck"><input type="checkbox" data-version-check="' + p + '"' + (f.on ? " checked" : "") + "> " + esc(label[p]) + "</label>"
+        + '<input id="version-' + p + '" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="1.0.1"'
+        + ' data-version-name="' + p + '" value="' + esc(f.name) + '"' + (f.on ? "" : " disabled") + ' aria-describedby="version-' + p + '-state">'
+        + '<span class="sub">' + esc(hint) + "</span>"
+        + '<span id="version-' + p + '-state" class="nstate" data-version-state="' + p + '"></span></div>';
+    }).join("");
+  }
+  /** «만들기» 가 열리는 조건 — 스토어 하나 이상 · 고른 이름이 전부 꼴에 맞고 라이브보다 큼. */
+  function versionDialogDecision() {
+    var m = versionListNow(), nv = state.store.newVersion || {};
+    var chosen = Object.keys(nv).filter(function (p) { return nv[p].on; });
+    var reasons = {}, ok = chosen.length > 0;
+    chosen.forEach(function (p) {
+      var r = versionNameCheck(nv[p].name, m.live[p]);
+      if (!r.ok) { ok = false; reasons[p] = r.reason; }
+    });
+    return { ok: ok, chosen: chosen, reasons: reasons, live: m.live };
+  }
+  function versionReasonText(platform, reason, live) {
+    if (reason === "not_greater") return tr("version.dialog.reason.not_greater", { version: live[platform] || DASH });
+    return tr("version.dialog.reason." + (reason === "pattern" ? "pattern" : "empty"));
+  }
+  function renderVersionDialogState() {
+    var go = $("#version-dialog [data-version-go]"), st = $("#version-dialog [data-version-status]");
+    if (!go) return;
+    var d = versionDialogDecision();
+    go.disabled = !d.ok || !state.admin || !!state.store.creating;
+    go.textContent = tr(state.store.creating ? "version.dialog.creating" : "version.dialog.go");
+    var first = null;
+    Object.keys(state.store.newVersion || {}).forEach(function (p) {
+      var el = $('#version-dialog [data-version-state="' + p + '"]');
+      if (!el) return;
+      var reason = d.reasons[p];
+      var text = reason ? versionReasonText(p, reason, d.live) : "";
+      el.textContent = text; el.className = "nstate" + (reason ? " bad" : "");
+      if (text && !first) first = text;
+    });
+    if (!st) return;
+    var err = state.store.createError;
+    if (err) {
+      st.className = "dlg-status sub bad";
+      st.innerHTML = esc(err.text) + (err.id != null
+        ? ' <a class="btn" href="' + esc(storeHash(state.store.repo, "version", err.id)) + '" data-version-exists-open="' + esc(String(err.id)) + '">' + esc(tr("version.row.open")) + "</a>" : "");
+      return;
+    }
+    st.className = "dlg-status sub";
+    st.textContent = !state.admin ? tr("version.list.new_hint.admin")
+      : d.ok ? "" : (d.chosen.length ? first || "" : tr("version.dialog.reason.no_store"));
+  }
+  function submitVersionDialog() {
+    var d = versionDialogDecision();
+    if (!d.ok || !state.admin || state.store.creating) return;
+    var nv = state.store.newVersion, body = {}, repo = state.store.repo;
+    d.chosen.forEach(function (p) { body[p + "_version"] = String(nv[p].name).trim(); });
+    state.store.creating = true; state.store.createError = null;
+    renderVersionDialogState();
+    storeApi().versionCreate(repo, body).then(function (res) {
+      state.store.creating = false;
+      if (res.ok) {
+        var dlg = $("#version-dialog");
+        if (dlg && dlg.open) dlg.close();
+        state.store.versions = null;
+        var id = res.body && typeof res.body === "object" ? res.body.id : null;
+        if (id != null) { location.hash = storeHash(repo, "version", id); return; }
+        loadStore();
+        return;
+      }
+      if (res.status === 401 || res.status === 403) tokenRejected();
+      var b = res.body && typeof res.body === "object" ? res.body : {};
+      var code = b.error_code || b.code || null;
+      // 같은 이름의 드래프트가 이미 있으면(E3) 서버가 그 번호를 준다 — 새로 만들지 말고 열게 한다
+      state.store.createError = code === "version_exists" && b.id != null
+        ? { code: code, id: b.id, text: tr("version.dialog.exists", { id: b.id }) }
+        : { code: code, id: null, text: tr("version.dialog.failed", { detail: refusalText(res, L()) }) };
+      renderVersionDialogState();
+    }).catch(function () {
+      state.store.creating = false;
+      state.store.createError = { code: null, id: null, text: tr("version.dialog.failed", { detail: "network" }) };
+      renderVersionDialogState();
+    });
+  }
+  // ── «버리기» 확인 (§3.2 · AC-C8) ────────────────────────────────────────────
+  function openDiscardDialog(id) {
+    var dlg = $("#version-discard-dialog");
+    if (!dlg) return;
+    var m = versionListNow();
+    var row = m.drafts.filter(function (r) { return String(r.id) === String(id); })[0];
+    var v = state.store.version;
+    var title = row ? row.title : v && String(v.id) === String(id) ? versionTitle(v.ios_version, v.android_version) : "#" + id;
+    state.store.discardTarget = id;
+    var body = $("#version-discard-dialog [data-discard-body]");
+    if (body) body.textContent = tr("version.discard.body", { version: title });
+    var st = $("#version-discard-dialog [data-discard-status]");
+    if (st) { st.textContent = ""; st.className = "dlg-status sub"; }
+    if (!dlg.open) { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); }
+  }
+  function submitDiscardDialog() {
+    var id = state.store.discardTarget, repo = state.store.repo;
+    if (id == null || state.store.discarding) return;
+    state.store.discarding = true;
+    storeApi().versionDiscard(repo, id).then(function (res) {
+      state.store.discarding = false;
+      var st = $("#version-discard-dialog [data-discard-status]");
+      if (res.ok) {
+        var dlg = $("#version-discard-dialog");
+        if (dlg && dlg.open) dlg.close();
+        state.store.discardTarget = null; state.store.versions = null;
+        if (state.store.sub === "version" && String(state.store.versionId) === String(id)) { location.hash = storeHash(repo, "versions"); return; }
+        loadStore();
+        return;
+      }
+      if (res.status === 401 || res.status === 403) tokenRejected();
+      if (st) { st.textContent = tr("version.discard.failed", { detail: refusalText(res, L()) }); st.className = "dlg-status sub bad"; }
+    }).catch(function () {
+      state.store.discarding = false;
+      var st2 = $("#version-discard-dialog [data-discard-status]");
+      if (st2) { st2.textContent = tr("version.discard.failed", { detail: "network" }); st2.className = "dlg-status sub bad"; }
+    });
+  }
   function validateListing() {
     var r = releaseDoc(), plan = r && r.plan, doc = planEntryDoc(plan) || {};
     var body = { build_name: plan && plan.build_name != null ? String(plan.build_name) : "", build: isNum(doc.n) ? String(doc.n) : "" };
@@ -4105,20 +5627,23 @@
       toast(tr("review.job_started", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
     });
   }
+  /** «심사 제출…» — 시트가 연다. 조건은 `sheetModel.canSubmit` 하나이고, 본문은 그 모델의
+      `submitBody` 그대로다(버전 id 와 이 버전의 build_name 이 들어 있다). */
   function openSubmitDialog() {
-    if (!submitDecision(reviewChoicesCtx()).enabled) return;
+    if (!sheetNow().canSubmit) return;
     var dlg = $("#submit-dialog");
     if (!dlg) return;
-    var strip = versionStrip(releaseDoc(), state.store.listing, currentProfile(), L(), tz(), now());
-    $("[data-submit-title]").textContent = tr("review.dialog_title", { version: strip.version, build: strip.build });
+    var m = sheetNow();
+    $("[data-submit-title]").textContent = tr("review.dialog_title", { version: m.head.ver, build: m.planN != null ? m.planN : DASH });
     $("[data-submit-body]").textContent = tr("review.dialog_body", { targets: targetsText(state.store.review.platforms) });
     if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "");
   }
   function submitReview() {
     var dlg = $("#submit-dialog");
     if (dlg) dlg.close();
-    if (!submitDecision(reviewChoicesCtx()).enabled) return;   // 대화상자가 열린 사이 조건이 바뀌었을 수 있다
-    var body = reviewBody("submit", reviewChoicesCtx());
+    var m = sheetNow();
+    if (!m.canSubmit) return;   // 대화상자가 열린 사이 조건이 바뀌었을 수 있다
+    var body = m.submitBody;
     jobCall("submit", function (api, repo) { return api.review(repo, body); }, function (res) {
       // 보낸 뒤 확인은 지운다 — 한 확인이 다음 되돌릴 수 없는 일까지 넘어가지 않는다(항목 28)
       state.store.review.managed = false; state.store.review.typedN = "";
@@ -4220,10 +5745,26 @@
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-submit-review],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode]");
+      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-sheet-submit],[data-sheet-toggle],[data-sheet-fix],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode],[data-version-new],[data-version-discard],[data-version-retry],[data-field-revert],[data-listing-retry]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
-      if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; renderStore(); } return; }
+      // ── 바텀시트(§4.2) ──
+      if (t.hasAttribute("data-sheet-toggle")) { setSheetOpen(!sheetOpen()); renderStore(); return; }
+      if (t.hasAttribute("data-sheet-submit")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
+      if (t.hasAttribute("data-sheet-fix")) { if (!t.disabled) sheetGoFix(t.getAttribute("data-fix-anchor"), t.getAttribute("data-fix-route")); return; }
+      if (t.hasAttribute("data-field-revert")) { if (!t.disabled) revertListingField(t.getAttribute("data-field-revert")); return; }
+      if (t.hasAttribute("data-listing-retry")) { flushListingSave(); return; }
+      if (t.hasAttribute("data-version-new")) { if (!t.disabled) { state.lastTrigger = t; openVersionDialog(null); } return; }
+      if (t.hasAttribute("data-version-discard")) { if (!t.disabled) { state.lastTrigger = t; openDiscardDialog(parseInt(t.getAttribute("data-version-discard"), 10)); } return; }
+      if (t.hasAttribute("data-version-retry")) {
+        // 실패한 드래프트는 이름을 안 붙잡는다(§15) — 같은 이름으로 다시 만들 수 있다
+        if (t.disabled) return;
+        var again = versionListNow().drafts.filter(function (r) { return String(r.id) === t.getAttribute("data-version-retry"); })[0];
+        state.lastTrigger = t;
+        openVersionDialog(again ? { ios: again.ios, android: again.android } : null);
+        return;
+      }
+      if (t.hasAttribute("data-enter-store")) { if (!t.disabled) { state.store.screen = "store"; if (state.store.gateReturn) { goBackToGateReturn(); return; } renderStore(); } return; }
       if (t.hasAttribute("data-goto-settings")) { state.store.screen = "settings"; renderStore(); return; }
       if (t.hasAttribute("data-verify-all")) { verifyAll(); return; }
       if (t.hasAttribute("data-fetch-remote")) { fetchRemote(); return; }
@@ -4232,7 +5773,6 @@
       if (t.hasAttribute("data-plan-other")) { if (!t.disabled) { state.lastTrigger = t; openPlanDialog(); } return; }
       if (t.hasAttribute("data-validate-listing")) { validateListing(); return; }
       if (t.hasAttribute("data-plan-review")) { planReview(); return; }
-      if (t.hasAttribute("data-submit-review")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
       if (t.hasAttribute("data-driver-abort")) { if (!t.disabled) abortDriver(); return; }
       if (t.hasAttribute("data-driver-retry")) { if (!t.disabled) retryDriver(); return; }
       if (t.hasAttribute("data-driver-confirm-open")) { state.lastTrigger = t; openConfirmN(); return; }
@@ -4241,11 +5781,14 @@
       if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
     });
     st.addEventListener("input", function (ev) {
+      // 문안 칸 — 800 ms 디바운스로 그 키만 보낸다(§3.2 · AC-C6)
+      var fieldId = ev.target.getAttribute && ev.target.getAttribute("data-listing-field");
+      if (fieldId) { if (!ev.target.readOnly) listingFieldTyped(fieldId, ev.target.value); return; }
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-version")) { state.store.driverForm.version = ev.target.value; renderDriverState(); return; }
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-track")) { state.store.driverForm.track = ev.target.value; return; }
-      if (ev.target.id !== "review-n") return;
+      if (ev.target.id !== "sheet-n") return;
       state.store.review.typedN = ev.target.value;   // 기억하지 않는다 — state 에만, 새 플랜이 오면 지워진다
-      renderSubmitState();
+      renderSheetState();
     });
     st.addEventListener("submit", function (ev) {
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-start")) { ev.preventDefault(); startDriver(); }
@@ -4260,8 +5803,8 @@
         else if (check === "managed") rv.managed = on;
         else if (check === "full") rv.listingFull = on;
         else if (check === "phased") rv.phased = on;
-        if (check === "android" && !on) { var m = $('#review-panel [data-review-check="managed"]'); if (m) m.checked = false; }
-        renderSubmitState();
+        if (check === "android" && !on) { var m = $('#release-sheet [data-review-check="managed"]'); if (m) m.checked = false; }
+        renderSheetState();
         return;
       }
       var zone = ev.target.closest("[data-drop]");
@@ -4324,11 +5867,42 @@
       $("[data-secret-cancel]").addEventListener("click", function () { dlg.close(); });
       dlg.addEventListener("close", function () { $("#secret-input").value = ""; state.store.dialogSecret = null; restoreTrigger(); });
     }
+    // 새 버전 대화상자 — 체크 하나, 칸 하나. 값은 이 페이지에만 살고 localStorage 에 가지 않는다.
+    var vdlg = $("#version-dialog");
+    if (vdlg) {
+      vdlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitVersionDialog(); });
+      vdlg.addEventListener("input", function (ev) {
+        var p = ev.target.getAttribute && ev.target.getAttribute("data-version-name");
+        if (!p || !state.store.newVersion || !state.store.newVersion[p]) return;
+        state.store.newVersion[p].name = ev.target.value;
+        renderVersionDialogState();
+      });
+      vdlg.addEventListener("change", function (ev) {
+        var p = ev.target.getAttribute && ev.target.getAttribute("data-version-check");
+        if (!p || !state.store.newVersion || !state.store.newVersion[p]) return;
+        state.store.newVersion[p].on = !!ev.target.checked;
+        var box = $('#version-dialog input[data-version-name="' + p + '"]');
+        if (box) box.disabled = !ev.target.checked;
+        renderVersionDialogState();
+      });
+      vdlg.addEventListener("click", function (ev) {
+        var link = ev.target.closest("[data-version-exists-open]");
+        if (link) vdlg.close();   // 이미 있는 드래프트를 열러 간다 — 대화상자는 비켜 준다
+      });
+      $("[data-version-cancel]").addEventListener("click", function () { vdlg.close(); });
+      vdlg.addEventListener("close", function () { state.store.createError = null; restoreTrigger(); });
+    }
+    var ddlg = $("#version-discard-dialog");
+    if (ddlg) {
+      ddlg.querySelector("form").addEventListener("submit", function (ev) { ev.preventDefault(); submitDiscardDialog(); });
+      $("[data-discard-cancel]").addEventListener("click", function () { ddlg.close(); });
+      ddlg.addEventListener("close", function () { state.store.discardTarget = null; restoreTrigger(); });
+    }
   }
 
   function applyHash() {
     var route = parseRoute(location.hash);
-    if (route.view === "store") { closeDrawer(true); enterStore(route.repo); return; }
+    if (route.view === "store") { closeDrawer(true); enterStore(route.repo, route); return; }
     if (state.view !== "queue") showView("queue");
     var m = /^#\/jobs\/(\d+)(\/log)?$/.exec(location.hash);
     if (!m) { closeDrawer(true); return; }

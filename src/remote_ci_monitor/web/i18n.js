@@ -84,7 +84,7 @@
     }
     if (a.kind === "exit") {
       return lang === "ko"
-        ? op + " 실패(종료 코드 " + a.code + ") — 잡 로그를 보라"
+        ? op + " 실패(종료 코드 " + a.code + ") — 작업 로그를 보라"
         : op + " failed (exit " + a.code + "), see the job log";
     }
     return lang === "ko" ? op + " 실패 — 작업 로그를 보라" : op + " failed, see the job log";
@@ -109,36 +109,58 @@
   var JOSA_DIGIT = { "0": true, "1": true, "2": false, "3": true, "4": false,
     "5": false, "6": true, "7": true, "8": true, "9": false };
   var JOSA_LATIN = { l: true, m: true, n: true, r: true };
+  //  6. 「으로/로」만 **ㄹ 받침을 받침 없는 쪽으로** 읽는다(「서울로」 · 「7로」 — 칠). 그래서 끝소리
+  //     판정은 «있다/없다» 둘이 아니라 `none · rieul · other` 셋이다. ㄹ 로 끝나는 것은 한글 음절
+  //     `(code - 0xAC00) % 28 === 8`, 숫자 `1 일 · 7 칠 · 8 팔`, 라틴 `l 엘 · r 알` 이다.
+  var JOSA_RIEUL_DIGIT = { "1": true, "7": true, "8": true };
+  var JOSA_RIEUL_LATIN = { l: true, r: true };
   // 각 쌍은 [받침 있는 쪽, 없는 쪽]. 「와/과」만 글자 순서가 뒤집혀 있다(받침 있으면 「과」).
   var JOSA_PAIRS = {
     "이/가": ["이", "가"],
     "을/를": ["을", "를"],
     "은/는": ["은", "는"],
-    "와/과": ["과", "와"]
+    "와/과": ["과", "와"],
+    "이라/라": ["이라", "라"],
+    "으로/로": ["으로", "로"]
   };
+  // 규칙 6 을 쓰는 쌍 — ㄹ 받침을 받침 없는 쪽으로 읽는다.
+  var JOSA_RIEUL_OPEN = { "으로/로": true };
 
-  /** 마지막 글자에 받침이 있는가. 모르면 `null`(호출자가 받침 없는 쪽으로 읽는다). 안 던진다. */
-  function hasFinalConsonant(word) {
+  /** 마지막 글자의 끝소리 — `null`(모름) · `"none"` · `"rieul"` · `"other"`. 안 던진다. */
+  function finalSound(word) {
     if (word === null || word === undefined) return null;
     var s = String(word);
     for (var i = s.length - 1; i >= 0; i--) {
       var ch = s.charAt(i);
       if (JOSA_SKIP.test(ch)) continue;
       var code = s.charCodeAt(i);
-      if (code >= 0xAC00 && code <= 0xD7A3) return (code - 0xAC00) % 28 !== 0;
-      if (ch >= "0" && ch <= "9") return JOSA_DIGIT[ch];
+      if (code >= 0xAC00 && code <= 0xD7A3) {
+        var jong = (code - 0xAC00) % 28;
+        return jong === 0 ? "none" : jong === 8 ? "rieul" : "other";
+      }
+      if (ch >= "0" && ch <= "9") return !JOSA_DIGIT[ch] ? "none" : JOSA_RIEUL_DIGIT[ch] ? "rieul" : "other";
       var low = ch.toLowerCase();
-      if (low >= "a" && low <= "z") return JOSA_LATIN[low] === true;
+      if (low >= "a" && low <= "z") {
+        return JOSA_LATIN[low] !== true ? "none" : JOSA_RIEUL_LATIN[low] ? "rieul" : "other";
+      }
       return null;   // 판정할 수 없는 글자 — 건너뛰지 않고 여기서 멈춘다(규칙 5)
     }
     return null;     // 전부 건너뛰었다
   }
 
-  /** 이름 뒤에 붙일 조사 하나. `pair` 는 "이/가" · "을/를" · "은/는" · "와/과". */
+  /** 마지막 글자에 받침이 있는가. 모르면 `null`(호출자가 받침 없는 쪽으로 읽는다). 안 던진다. */
+  function hasFinalConsonant(word) {
+    var f = finalSound(word);
+    return f === null ? null : f !== "none";
+  }
+
+  /** 이름 뒤에 붙일 조사 하나. `pair` 는 `JOSA_PAIRS` 의 열쇠 여섯 가운데 하나. */
   function josa(word, pair) {
     var p = Object.prototype.hasOwnProperty.call(JOSA_PAIRS, pair) ? JOSA_PAIRS[pair] : null;
     if (!p) throw new Error("josa: unknown pair " + pair);
-    return hasFinalConsonant(word) ? p[0] : p[1];
+    var f = finalSound(word);
+    if (f === "rieul" && JOSA_RIEUL_OPEN[pair]) return p[1];
+    return f !== null && f !== "none" ? p[0] : p[1];
   }
 
   /** 이름 + 조사. 문장 쪽은 이것만 쓴다.
@@ -790,7 +812,7 @@
     "review.plan_running": function (a) { return "review plan #" + a.id + " " + a.state; },
     "review.submit": "Submit for review…",
     "review.submitting": "Submitting…",
-    "review.submit_hint": function (a) { return "Submit opens after a green plan (≤ " + a.n + "m), the typed build number, and the Play check when Google Play is selected."; },
+    "review.submit_hint": function (a) { return "Submitting for review lives on the version page, in the sheet at the bottom. It opens there after a green plan (\u2264 " + a.n + "m), the build number and, when Google Play is selected, the managed-publishing check."; },
     "n.mode.label": "Build number",
     "n.mode.auto": "Auto (from the stores)",
     "n.mode.typed": "Type it myself",
@@ -881,15 +903,74 @@
     "build.item.waiting": "waiting",
     "build.item.platforms": function (a) { return "platforms " + a.names; },
     "build.layers_aria": "release progress",
-    "rbar.aria": "release round — overall progress",
-    "rbar.stage": function (a) { return a.stage + " · stage " + (a.done + 1) + " of " + a.total; },
-    "rbar.stages_only": function (a) { return a.done + " of " + a.total + " stages done"; },
-    "rbar.job": function (a) { return "#" + a.id + " " + a.preset; },
-    "rbar.elapsed": function (a) { return "elapsed " + a.dur; },
-    "rbar.detail.stages": function (a) { return a.done + "/" + a.total + " stages done · " + a.percent + "% overall"; },
-    "rbar.detail.stage": function (a) { return "now " + a.stage; },
-    "rbar.basis.stages": function (a) { return "basis: " + a.total + " declared stages, each worth the same"; },
-    "rbar.basis.stages_job": function (a) { return "basis: " + a.total + " declared stages + the running job's own progress inside its stage"; },
+    // 바텀시트(워크플랜 §4 · 기획 R8~R12) — 0.3.3 의 최상단 막대가 여기로 들어왔다(결정 Q6)
+    "sheet.aria": "release progress and submit for review",
+    "sheet.stage.V": "version",
+    "sheet.stage_of": function (a) { return a.stage + " · stage " + (a.done + 1) + " of " + a.total + " · " + a.percent + "%"; },
+    "sheet.elapsed": function (a) { return "elapsed " + a.dur; },
+    "sheet.basis.stages": function (a) { return "basis: " + a.total + " declared stages, each worth the same"; },
+    "sheet.basis.stages_job": function (a) { return "basis: " + a.total + " declared stages + the running job's own progress inside its stage"; },
+    "sheet.basis.uploaded": "no percentage — the build is up and only the review submission is left",
+    "sheet.basis.round_done": "basis: the round finished",
+    "sheet.basis.submitted": "basis: submitted for review",
+    "sheet.expand": "Expand",
+    "sheet.collapse": "Collapse",
+    "sheet.submit": "Submit for review…",
+    "sheet.submitting": "submitting…",
+    "sheet.title.left": "Left before review",
+    "sheet.title.diff": "Different from the previous version",
+    "sheet.title.conditions": "Submit conditions",
+    "sheet.title.sending": "What is sent",
+    "sheet.title.result": "Result",
+    "sheet.nothing_left": "Nothing is left — the submit button is open.",
+    "sheet.fix": "go to the place that fixes it",
+    "sheet.pill.new": "editing",
+    "sheet.pill.running": "running",
+    "sheet.pill.human": "your turn",
+    "sheet.pill.ok": "ready to submit",
+    "sheet.pill.bad": "failed",
+    "sheet.pill.lost": "result unknown",
+    "sheet.pill.warn": "check it",
+    "sheet.pill.done": "submitted",
+    "sheet.pill.expired": "expired",
+    "sheet.head.remaining": function (a) { return a.n + " left before review · " + a.first; },
+    "sheet.head.ready": "ready to submit",
+    "sheet.head.plan_age": function (a) { return "review plan " + a.age; },
+    "sheet.head.n": function (a) { return "build " + a.n; },
+    "sheet.head.done": function (a) { return "submitted " + a.clock + " · waiting for review"; },
+    "sheet.head.expired": "expired — a person clears it with «Discard»",
+    "sheet.head.discarded": "discarded",
+    "sheet.head.running": "running",
+    "sheet.head.bad": "something is in the way",
+    "sheet.left.build_missing": "No build yet — run the round from the status screen first",
+    "sheet.left.build_running": function (a) { return "Build · upload — running now (" + a.stage + "), it goes up at S7"; },
+    "sheet.left.round_running": function (a) { return a.what + " is still running — submit opens when the last one finishes"; },
+    "sheet.left.round_running_plain": "A job of this version is still running — submit opens when the last one finishes",
+    "sheet.left.upload_lost": function (a) { return "Upload #" + a.id + " result unknown — do not resubmit, read the store first"; },
+    "sheet.left.upload_failed": function (a) { return "Upload #" + a.id + " " + a.state + " — the build did not go up"; },
+    "sheet.left.plan_missing": "No review plan for this version — run «Plan review»",
+    "sheet.left.plan_stale": function (a) { return "The review plan is stale (" + a.age + ") — run it again"; },
+    "sheet.left.plan_blocked": "The review plan says it is blocked — read its reasons on the status screen",
+    "sheet.left.n_unknown": "The plan has no build number — refresh the plan",
+    "sheet.left.n_mismatch": function (a) { return "Type the build number " + a.n + " exactly"; },
+    "sheet.left.managed": "Tick the managed-publishing check for Google Play — every submission, no API can check it",
+    "sheet.left.listing_bad": function (a) { return a.field + " is over the store limit (" + a.count + ")"; },
+    "sheet.left.graphics": "Google Play has no graphics in store/ — the store may refuse the submission",
+    "sheet.left.listing_unsupported": "The review preset has no listing_json input — re-run the store-connect skill, or the edits are dropped",
+    "sheet.left.split_unsupported": "The preset cannot carry two store version names — re-run the store-connect skill",
+    "sheet.left.driver_no_v": "The driver does not know the V stage — re-run the release-driver skill",
+    "sheet.left.unsafe": "Fix the release type first — the red banner says why",
+    "sheet.diff.shots_same": function (a) { return a.store + " screenshots: rcm does not touch them"; },
+    "sheet.diff.shots_unknown": function (a) { return a.store + " screenshots: rcm does not touch them"; },
+    "sheet.diff.none": "Nothing differs from the previous version — it goes up as it is",
+    "sheet.send.build": function (a) { return "build " + a.n; },
+    "sheet.send.build_unknown": "build — (the plan does not know it)",
+    "sheet.send.edits": function (a) { return a.n + (a.n === 1 ? " edited field" : " edited fields"); },
+    "sheet.send.no_edits": "the previous version's copy, unchanged",
+    "sheet.send.phased_on": "iOS phased release on",
+    "sheet.send.phased_off": "iOS phased release off",
+    "sheet.n_auto": function (a) { return "build number " + a.n + " — auto (from the stores)"; },
+    "sheet.n_auto_unknown": "build number — the plan does not know it yet",
     // 릴리스 드라이버 스테퍼(항목 26 · 28 · 37~39) · GitHub 카드(항목 25)
     "driver.aria": "release driver",
     "driver.na": "release driver: not available in this build",
@@ -980,7 +1061,109 @@
     "github.prs_next": "PR list: next (needs the GH token)",
     "github.na": "GitHub card: not available in this build",
     "github.none": "none",
-    "github.loading": "loading…"
+    "github.loading": "loading…",
+    // ── 버전 목록 · 새 버전 대화상자 · 상태 띠 (docs/version-page-workplan.md §3 · §12) ──
+    "vstrip.label.credentials": "Credentials",
+    "vstrip.label.source": "Source",
+    "vstrip.label.store": "Store",
+    "vstrip.detail": "Status details",
+    "vstrip.creds": function (a) { return "secrets " + a.n + "/" + a.total + " set · verified " + a.clock; },
+    "vstrip.store_ios": function (a) { return "App Store " + a.name + " (" + a.build + ")"; },
+    "vstrip.store_play": function (a) { return "Play " + a.name + " (" + a.build + ")"; },
+    "vstrip.store_next": function (a) { return "next build " + a.n; },
+    "vstrip.store_none": "no plan yet — the store state is unknown",
+    "vstrip.store_stale": function (a) { return "the plan is stale · " + a.age; },
+    "vstrip.blockers": function (a) { return "blockers " + a.n + " · warnings " + a.count; },
+    "version.list.title": "Versions",
+    "version.list.new": "New version",
+    "version.list.new_hint.admin": "Creating a version needs an admin token",
+    "version.list.new_hint.creating": "Opens once the draft being created is done",
+    "version.list.live": "live",
+    "version.list.live_line": function (a) { return "App Store live " + a.ios + " · Play production " + a.android; },
+    "version.list.live_unknown": "No plan yet — make one and the live versions appear here",
+    "version.list.from_plan": function (a) { return "from plan job #" + a.id; },
+    "version.list.none": "No draft yet — start with «New version»",
+    "version.list.na": "Version drafts are not available in this build.",
+    "version.list.ttl": function (a) { return "A draft with no edit and no submission is discarded after " + a.n + " hours."; },
+    "version.state.creating": "creating",
+    "version.state.editing": "editing",
+    "version.state.running": "running",
+    "version.state.submitted": "submitted",
+    "version.state.discarded": "discarded",
+    "version.state.failed": "failed",
+    "version.state.deleting": "deleting",
+    "version.row.open": "Open",
+    "version.row.discard": "Discard",
+    "version.row.retry": "Create again",
+    "version.row.busy": "a job or a round is running for this version",
+    "version.row.created": function (a) { return "created " + a.age + " ago"; },
+    "version.row.creating": function (a) { return "creating · job #" + a.id; },
+    "version.row.deleting": function (a) { return "deleting in the store · job #" + a.id; },
+    "version.row.running": function (a) { return "running · " + a.what; },
+    "version.row.running_plain": "a job of this version is running",
+    "version.hold.round": function (a) { return "release round #" + a.id; },
+    "version.hold.upload": function (a) { return "upload job #" + a.id; },
+    "version.hold.review": function (a) { return "review job #" + a.id; },
+    "version.row.changed": function (a) { return a.n + " fields changed"; },
+    "version.row.unchanged": "no edits yet",
+    "version.row.build": "build uploaded",
+    "version.row.no_build": "no build yet",
+    "version.row.expired": "expired — a person has to clear it",
+    "version.row.error": function (a) { return "failed: " + a.detail; },
+    "version.row.submitted": function (a) { return "submitted " + a.clock; },
+    "version.row.review_job": function (a) { return "review job #" + a.id; },
+    "version.dialog.title": "A new version is created",
+    "version.dialog.notice": "App Store gets a version you can edit; Google Play stays inside rcm until the upload.",
+    "version.dialog.rule": "Unchecking a store leaves that store out. A name is major.minor.patch and must be greater than the live one.",
+    "version.dialog.hint": function (a) { return "next patch after live " + a.version; },
+    "version.dialog.no_hint": "Make a plan first and the hint appears here",
+    "version.dialog.go": "Create",
+    "version.dialog.creating": "Creating…",
+    "version.dialog.reason.no_store": "choose at least one store",
+    "version.dialog.reason.empty": "type a version name",
+    "version.dialog.reason.pattern": "major.minor.patch, e.g. 1.0.1",
+    "version.dialog.reason.not_greater": function (a) { return "must be greater than the live " + a.version; },
+    "version.dialog.exists": function (a) { return "draft #" + a.id + " already has that name"; },
+    "version.dialog.failed": function (a) { return "could not create it: " + a.detail; },
+    "version.discard.title": "Discard this version?",
+    "version.discard.body": function (a) { return a.version + " is discarded. An App Store version created for it is deleted too."; },
+    "version.discard.go": "Discard",
+    "version.discard.failed": function (a) { return "could not discard it: " + a.detail; },
+    "version.page.back": "Versions",
+    "version.page.state": "State",
+    "version.page.by": "Created by",
+    "version.page.created": "Created",
+    "version.page.expires": "Expires",
+    "version.page.not_found": function (a) { return "version #" + a.id + " is not here: " + a.detail; },
+    // W3 문안 편집 (워크플랜 §3.2 · R6)
+    "version.field.whats_new": "What's New",
+    "version.field.release_notes": "Release notes",
+    "version.edit.head": "Prefilled with the previous version — only a field you change gets a «changed» chip",
+    "version.edit.head_changed": function (a) { return a.n + (a.n === 1 ? " field differs" : " fields differ") + " from the previous version"; },
+    "version.edit.source.edited": "your edit",
+    "version.edit.source.prefill": "same as the previous version",
+    "version.edit.source.file": "from the file",
+    "version.edit.source.empty": "empty",
+    "version.edit.changed": "changed",
+    "version.edit.remote": "changed elsewhere",
+    "version.edit.remote_notice": function (a) { return a.n + (a.n === 1 ? " field was" : " fields were") + " changed in another browser — the fields you have typed in keep your text, the rest took theirs"; },
+    "version.edit.revert": "Revert",
+    "version.edit.readonly.admin": "Editing the listing needs an admin token — this is a read-only view",
+    "version.edit.readonly.closed": function (a) { return "This version is " + a.state + " — the listing cannot be edited any more"; },
+    "version.edit.save.idle": "Edits save themselves",
+    "version.edit.save.saving": "saving…",
+    "version.edit.save.saved": function (a) { return "autosaved · " + a.age + " ago"; },
+    "version.edit.save.saved_now": "autosaved",
+    "version.edit.save.failed": function (a) { return "could not save: " + a.detail; },
+    "version.edit.save.retry": "Save again",
+    "version.edit.save.network": "network",
+    "version.edit.screenshots.same": "rcm does not touch screenshots",
+    "version.edit.screenshots.unknown": "rcm does not touch screenshots",
+    "version.edit.screenshots.readonly": "Screenshots are read-only here — uploading them from the web comes later.",
+    "version.edit.prefill_from": function (a) { return "prefilled from " + a.source; },
+    "version.edit.prefill_unknown": "prefilled from the previous version",
+    "version.edit.no_prefill": "The previous copy was not read — the fields fall back to the files in store/",
+    "store.gate.return": function (a) { return "Once the setup is done you go back to " + a.text; }
   };
 
   var KO = {
@@ -1606,7 +1789,7 @@
     "review.plan_running": function (a) { return "심사 플랜 #" + a.id + " " + a.state; },
     "review.submit": "심사 제출…",
     "review.submitting": "제출 중…",
-    "review.submit_hint": function (a) { return "초록 플랜(" + a.n + "분 이내) · 빌드 번호 입력 · Google Play 를 골랐으면 관리형 게시 확인이 있어야 제출이 열립니다."; },
+    "review.submit_hint": function (a) { return "심사 제출은 버전 페이지 아래 바텀시트에 있습니다. 초록 플랜(" + a.n + "분 이내) · 빌드 번호 · Google Play 를 골랐으면 관리형 게시 확인이 있어야 거기서 열립니다."; },
     "n.mode.label": "빌드 번호",
     "n.mode.auto": "자동 (스토어 기준)",
     "n.mode.typed": "직접 입력",
@@ -1697,15 +1880,74 @@
     "build.item.waiting": "대기",
     "build.item.platforms": function (a) { return "플랫폼 " + a.names; },
     "build.layers_aria": "릴리스 진행",
-    "rbar.aria": "릴리스 회차 — 전체 진행",
-    "rbar.stage": function (a) { return a.stage + " · " + a.total + "단계 중 " + (a.done + 1) + "번째"; },
-    "rbar.stages_only": function (a) { return a.total + " 단계 중 " + a.done + " 끝남"; },
-    "rbar.job": function (a) { return "#" + a.id + " " + a.preset; },
-    "rbar.elapsed": function (a) { return "경과 " + a.dur; },
-    "rbar.detail.stages": function (a) { return a.total + " 단계 중 " + a.done + " 끝남 · 전체 " + a.percent + "%"; },
-    "rbar.detail.stage": function (a) { return "지금 " + a.stage; },
-    "rbar.basis.stages": function (a) { return "근거: 선언된 " + a.total + " 단계, 같은 무게"; },
-    "rbar.basis.stages_job": function (a) { return "근거: 선언된 " + a.total + " 단계 + 지금 단계 안 도는 작업의 자체 진행"; },
+    // 바텀시트(워크플랜 §4 · 기획 R8~R12) — 0.3.3 의 최상단 막대가 여기로 들어왔다(결정 Q6)
+    "sheet.aria": "릴리스 진행과 심사 제출",
+    "sheet.stage.V": "버전",
+    "sheet.stage_of": function (a) { return a.stage + " · " + a.total + "단계 중 " + (a.done + 1) + "번째 · " + a.percent + "%"; },
+    "sheet.elapsed": function (a) { return "경과 " + a.dur; },
+    "sheet.basis.stages": function (a) { return "근거: 선언된 " + a.total + " 단계, 같은 무게"; },
+    "sheet.basis.stages_job": function (a) { return "근거: 선언된 " + a.total + " 단계 + 지금 단계 안 도는 작업의 자체 진행"; },
+    "sheet.basis.uploaded": "퍼센트 없음 — 빌드가 올라갔고 심사 제출만 남았습니다",
+    "sheet.basis.round_done": "근거: 회차가 끝났습니다",
+    "sheet.basis.submitted": "근거: 심사에 제출했습니다",
+    "sheet.expand": "펼치기",
+    "sheet.collapse": "접기",
+    "sheet.submit": "심사 제출…",
+    "sheet.submitting": "제출하는 중…",
+    "sheet.title.left": "심사 전에 남은 것",
+    "sheet.title.diff": "이전 버전과 달라진 것",
+    "sheet.title.conditions": "제출 조건",
+    "sheet.title.sending": "보내는 것",
+    "sheet.title.result": "결과",
+    "sheet.nothing_left": "남은 것이 없습니다 — 제출 버튼이 열려 있습니다.",
+    "sheet.fix": "고치는 곳으로 갑니다",
+    "sheet.pill.new": "편집 중",
+    "sheet.pill.running": "진행 중",
+    "sheet.pill.human": "사람 차례",
+    "sheet.pill.ok": "제출 준비됨",
+    "sheet.pill.bad": "실패",
+    "sheet.pill.lost": "결과 모름",
+    "sheet.pill.warn": "확인 필요",
+    "sheet.pill.done": "제출됨",
+    "sheet.pill.expired": "만료",
+    "sheet.head.remaining": function (a) { return "심사 전에 남은 것 " + a.n + " · " + a.first; },
+    "sheet.head.ready": "제출 준비됨",
+    "sheet.head.plan_age": function (a) { return "심사 플랜 " + a.age; },
+    "sheet.head.n": function (a) { return "빌드 " + a.n; },
+    "sheet.head.done": function (a) { return "제출됨 " + a.clock + " · 심사 대기"; },
+    "sheet.head.expired": "만료 — 사람이 «버리기» 로 정리합니다",
+    "sheet.head.discarded": "폐기됨",
+    "sheet.head.running": "진행 중",
+    "sheet.head.bad": "막고 있는 것이 있습니다",
+    "sheet.left.build_missing": "빌드가 아직 없습니다 — 상태 화면에서 회차를 먼저 돌립니다",
+    "sheet.left.build_running": function (a) { return "빌드 · 업로드 — 지금 도는 중(" + a.stage + "), S7 에서 올라갑니다"; },
+    "sheet.left.round_running": function (a) { return withJosa(a.what, "이/가") + " 아직 돌고 있습니다 — 마지막 하나가 끝나면 제출이 열립니다"; },
+    "sheet.left.round_running_plain": "이 버전의 작업이 아직 돌고 있습니다 — 마지막 하나가 끝나면 제출이 열립니다",
+    "sheet.left.upload_lost": function (a) { return "업로드 #" + a.id + " 결과 모름 — 다시 올리지 말고 스토어를 먼저 확인합니다"; },
+    "sheet.left.upload_failed": function (a) { return "업로드 #" + a.id + " " + a.state + " — 빌드가 올라가지 않았습니다"; },
+    "sheet.left.plan_missing": "이 버전의 심사 플랜이 없습니다 — «심사 플랜» 을 돌립니다",
+    "sheet.left.plan_stale": function (a) { return "심사 플랜이 낡았습니다(" + a.age + ") — 다시 돌립니다"; },
+    "sheet.left.plan_blocked": "심사 플랜이 스스로 막혔다고 합니다 — 상태 화면에서 사유를 읽습니다",
+    "sheet.left.n_unknown": "플랜이 빌드 번호를 모릅니다 — 플랜을 새로 만듭니다",
+    "sheet.left.n_mismatch": function (a) { return "빌드 번호 " + a.n + " 을 글자 그대로 입력합니다"; },
+    "sheet.left.managed": "Google Play 관리형 게시를 체크합니다 — 제출마다, API 로는 확인할 수 없습니다",
+    "sheet.left.listing_bad": function (a) { return withJosa(a.field, "이/가") + " 스토어 상한을 넘었습니다(" + a.count + ")"; },
+    "sheet.left.graphics": "store/ 에 Google Play 그래픽이 하나도 없습니다 — 스토어가 제출을 거절할 수 있습니다",
+    "sheet.left.listing_unsupported": "심사 프리셋에 listing_json 입력이 없습니다 — store-connect 스킬을 다시 돌리지 않으면 편집이 버려집니다",
+    "sheet.left.split_unsupported": "프리셋이 두 스토어 버전 이름을 못 나릅니다 — store-connect 스킬을 다시 돌립니다",
+    "sheet.left.driver_no_v": "드라이버가 V 단계를 모릅니다 — release-driver 스킬을 다시 돌립니다",
+    "sheet.left.unsafe": "출시 방식을 먼저 고칩니다 — 빨간 띠가 이유를 말합니다",
+    "sheet.diff.shots_same": function (a) { return a.store + " 스크린샷: rcm 은 건드리지 않습니다"; },
+    "sheet.diff.shots_unknown": function (a) { return a.store + " 스크린샷: rcm 은 건드리지 않습니다"; },
+    "sheet.diff.none": "이전 버전과 달라진 것이 없습니다 — 그대로 올라갑니다",
+    "sheet.send.build": function (a) { return "빌드 " + a.n; },
+    "sheet.send.build_unknown": "빌드 — (플랜이 모릅니다)",
+    "sheet.send.edits": function (a) { return "고친 칸 " + a.n + "개"; },
+    "sheet.send.no_edits": "이전 버전 문안 그대로",
+    "sheet.send.phased_on": "iOS 단계적 출시 켬",
+    "sheet.send.phased_off": "iOS 단계적 출시 끔",
+    "sheet.n_auto": function (a) { return "빌드 번호 " + a.n + " — 자동 (스토어 기준)"; },
+    "sheet.n_auto_unknown": "빌드 번호 — 플랜이 아직 모릅니다",
     // 릴리스 드라이버 스테퍼(항목 26 · 28 · 37~39) · GitHub 카드(항목 25)
     "driver.aria": "릴리스 드라이버",
     "driver.na": "릴리스 드라이버: 이 빌드에는 없습니다",
@@ -1796,7 +2038,109 @@
     "github.prs_next": "PR 목록: 다음 (GH 토큰 필요)",
     "github.na": "GitHub 카드: 이 빌드에는 없습니다",
     "github.none": "없음",
-    "github.loading": "받는 중…"
+    "github.loading": "받는 중…",
+    // ── 버전 목록 · 새 버전 대화상자 · 상태 띠 (docs/version-page-workplan.md §3 · §12) ──
+    "vstrip.label.credentials": "자격 증명",
+    "vstrip.label.source": "소스",
+    "vstrip.label.store": "스토어",
+    "vstrip.detail": "상태 자세히",
+    "vstrip.creds": function (a) { return "비밀 " + a.n + "/" + a.total + " 있음 · 검증 " + a.clock; },
+    "vstrip.store_ios": function (a) { return "App Store " + a.name + " (" + a.build + ")"; },
+    "vstrip.store_play": function (a) { return "Play " + a.name + " (" + a.build + ")"; },
+    "vstrip.store_next": function (a) { return "다음 빌드 " + a.n; },
+    "vstrip.store_none": "플랜 없음 — 스토어 상태를 모릅니다",
+    "vstrip.store_stale": function (a) { return "플랜이 낡았습니다 · " + a.age; },
+    "vstrip.blockers": function (a) { return "막힘 " + a.n + " · 경고 " + a.count; },
+    "version.list.title": "버전",
+    "version.list.new": "새 버전 만들기",
+    "version.list.new_hint.admin": "버전을 만들려면 admin 토큰이 필요합니다",
+    "version.list.new_hint.creating": "만드는 중인 드래프트가 끝나면 열립니다",
+    "version.list.live": "라이브",
+    "version.list.live_line": function (a) { return "App Store 라이브 " + a.ios + " · Play production " + a.android; },
+    "version.list.live_unknown": "플랜이 없습니다 — 플랜을 만들면 라이브 버전이 여기 보입니다",
+    "version.list.from_plan": function (a) { return "플랜 작업 #" + a.id + " 에서"; },
+    "version.list.none": "드래프트가 없습니다 — «새 버전 만들기» 로 시작합니다",
+    "version.list.na": "이 빌드에는 버전 드래프트가 없습니다.",
+    "version.list.ttl": function (a) { return "드래프트는 편집도 제출도 없이 " + a.n + "시간이 지나면 지워집니다."; },
+    "version.state.creating": "만드는 중",
+    "version.state.editing": "편집 중",
+    "version.state.running": "진행 중",
+    "version.state.submitted": "제출됨",
+    "version.state.discarded": "폐기됨",
+    "version.state.failed": "실패",
+    "version.state.deleting": "지우는 중",
+    "version.row.open": "열기",
+    "version.row.discard": "버리기",
+    "version.row.retry": "다시 만들기",
+    "version.row.busy": "이 버전으로 도는 작업이나 회차가 있음",
+    "version.row.created": function (a) { return "만든 지 " + a.age; },
+    "version.row.creating": function (a) { return "만드는 중 · 작업 #" + a.id; },
+    "version.row.deleting": function (a) { return "스토어에서 지우는 중 · 작업 #" + a.id; },
+    "version.row.running": function (a) { return "진행 중 · " + a.what; },
+    "version.row.running_plain": "이 버전의 작업이 돌고 있습니다",
+    "version.hold.round": function (a) { return "릴리스 회차 #" + a.id; },
+    "version.hold.upload": function (a) { return "올리는 작업 #" + a.id; },
+    "version.hold.review": function (a) { return "심사 작업 #" + a.id; },
+    "version.row.changed": function (a) { return "필드 " + a.n + "개 바뀜"; },
+    "version.row.unchanged": "바뀐 필드 없음",
+    "version.row.build": "빌드 있음",
+    "version.row.no_build": "빌드 아직 없음",
+    "version.row.expired": "만료 · 사람이 정리해야 합니다",
+    "version.row.error": function (a) { return "실패: " + a.detail; },
+    "version.row.submitted": function (a) { return "제출 " + a.clock; },
+    "version.row.review_job": function (a) { return "심사 작업 #" + a.id; },
+    "version.dialog.title": "새 버전을 만듭니다",
+    "version.dialog.notice": "App Store 에는 편집 중인 버전이 생기고, Google Play 는 업로드 전까지 rcm 안에만 있습니다.",
+    "version.dialog.rule": "체크를 끄면 그 스토어는 만들지 않습니다. 이름은 major.minor.patch 꼴이어야 하고, 라이브보다 커야 합니다.",
+    "version.dialog.hint": function (a) { return "라이브 " + a.version + " 의 다음 patch"; },
+    "version.dialog.no_hint": "플랜을 먼저 만들면 힌트가 나옵니다",
+    "version.dialog.go": "만들기",
+    "version.dialog.creating": "만드는 중…",
+    "version.dialog.reason.no_store": "스토어를 하나 이상 골라야 합니다",
+    "version.dialog.reason.empty": "버전 이름을 입력해야 합니다",
+    "version.dialog.reason.pattern": "major.minor.patch 꼴이어야 합니다 — 예: 1.0.1",
+    "version.dialog.reason.not_greater": function (a) { return "라이브 " + a.version + " 보다 커야 합니다"; },
+    "version.dialog.exists": function (a) { return "같은 이름의 드래프트 #" + withJosa(a.id, "이/가") + " 이미 있습니다"; },
+    "version.dialog.failed": function (a) { return "만들지 못했습니다: " + a.detail; },
+    "version.discard.title": "이 버전을 버릴까요?",
+    "version.discard.body": function (a) { return withJosa(a.version, "을/를") + " 버립니다. App Store 에 만들어 둔 버전이 있으면 그것도 지웁니다."; },
+    "version.discard.go": "버리기",
+    "version.discard.failed": function (a) { return "버리지 못했습니다: " + a.detail; },
+    "version.page.back": "버전 목록",
+    "version.page.state": "상태",
+    "version.page.by": "만든 사람",
+    "version.page.created": "만든 때",
+    "version.page.expires": "만료",
+    "version.page.not_found": function (a) { return "버전 #" + withJosa(a.id, "을/를") + " 찾을 수 없습니다: " + a.detail; },
+    // W3 문안 편집 (워크플랜 §3.2 · R6)
+    "version.field.whats_new": "새로운 기능",
+    "version.field.release_notes": "릴리스 노트",
+    "version.edit.head": "이전 버전 값으로 채워져 있습니다 — 고친 칸에만 «바뀜» 이 붙습니다",
+    "version.edit.head_changed": function (a) { return "이전 버전과 " + a.n + "칸 다릅니다"; },
+    "version.edit.source.edited": "내가 고친 것",
+    "version.edit.source.prefill": "이전 버전 그대로",
+    "version.edit.source.file": "파일에서",
+    "version.edit.source.empty": "비어 있음",
+    "version.edit.changed": "바뀜",
+    "version.edit.remote": "다른 곳에서 바뀜",
+    "version.edit.remote_notice": function (a) { return a.n + "칸이 다른 브라우저에서 바뀌었습니다 — 직접 친 칸은 화면의 글 그대로이고(저장하면 그쪽 값을 덮어씁니다), 손대지 않은 칸은 그쪽 값을 받았습니다"; },
+    "version.edit.revert": "되돌리기",
+    "version.edit.readonly.admin": "문안을 고치려면 admin 토큰이 필요합니다 — 지금은 보기만 합니다",
+    "version.edit.readonly.closed": function (a) { return "이 버전은 " + withJosa(a.state, "이라/라") + " 문안을 더 고칠 수 없습니다"; },
+    "version.edit.save.idle": "고치면 저절로 저장됩니다",
+    "version.edit.save.saving": "저장하는 중…",
+    "version.edit.save.saved": function (a) { return "자동 저장 · " + a.age + " 전"; },
+    "version.edit.save.saved_now": "자동 저장됨",
+    "version.edit.save.failed": function (a) { return "저장 실패: " + a.detail; },
+    "version.edit.save.retry": "다시 저장",
+    "version.edit.save.network": "네트워크",
+    "version.edit.screenshots.same": "rcm 은 스크린샷을 건드리지 않습니다",
+    "version.edit.screenshots.unknown": "rcm 은 스크린샷을 건드리지 않습니다",
+    "version.edit.screenshots.readonly": "스크린샷은 여기서 보기만 합니다 — 웹에서 올리는 것은 다음 작업입니다.",
+    "version.edit.prefill_from": function (a) { return "프리필 출처 " + a.source; },
+    "version.edit.prefill_unknown": "이전 버전 문안으로 채웠습니다",
+    "version.edit.no_prefill": "이전 버전 문안을 아직 못 읽었습니다 — store/ 파일 값으로 채웁니다",
+    "store.gate.return": function (a) { return "설정을 마치면 " + withJosa(a.text, "으로/로") + " 돌아갑니다"; }
   };
 
   var MESSAGES = { en: EN, ko: KO };
@@ -1830,7 +2174,7 @@
   var api = {
     MESSAGES: MESSAGES, LANGS: LANGS, DEFAULT_LANG: DEFAULT_LANG,
     t: t, has: has, normalize: normalize, ordinalSuffix: ordinalSuffix,
-    hasFinalConsonant: hasFinalConsonant, josa: josa, withJosa: withJosa
+    hasFinalConsonant: hasFinalConsonant, finalSound: finalSound, josa: josa, withJosa: withJosa
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof globalThis !== "undefined") globalThis.rcmI18n = api;

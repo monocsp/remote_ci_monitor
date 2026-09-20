@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # release_driver.sh — 한 회차의 «정상 릴리스» 를 끝까지 모는 드라이버(rcm Store 탭이 부르고, 노트북 세션도 부른다).
 #
-#   scripts/release/release_driver.sh --build-name X.Y.Z [--confirm-build-number N] [--dry-run]
+#   scripts/release/release_driver.sh --build-name X.Y.Z [--version-id <id>] [--confirm-build-number N] [--dry-run]
 #                                     [--skip-qa '<reason>'] [--retry] [--abort] [--status] [--selftest]
 #
-# 단계: S0 기본 브랜치에서 release/X.Y.Z 자르고 push → S1 plan 프리셋(plan.json) → S2 사람이 N 을 친다 →
+# 단계: V (--version-id 가 있을 때만) rcm 의 버전 행 GET …/release/versions/<id> 에서 이름을 받아 BUILD_NAME 으로
+#   쓴다(iOS 이름 → 없으면 Android; --build-name 도 있으면 같아야 한다) → S0 기본 브랜치에서 release/X.Y.Z 자르고
+#   push → S1 plan 프리셋(plan.json) → S2 사람이 N 을 친다 →
 #   S3 draft PR → S4 gate ∥ S5 qa(같이 제출, 차례로 기다림 · gate 빨강이면 qa 취소) → S6 기본 브랜치로 ff 머지 →
 #   S7 upload 프리셋(mode=upload confirm_build_number=N) → S8 태그 확인 + 백머지 PR.
 # 실패 경로: gate/qa 빨강 → PR close + 라벨 release-blocked + 보고 코멘트, 브랜치는 남긴다, exit 1.
 # 재진입: 상태파일은 캐시일 뿐이다 — 매 호출 PR(head==sha) · 커밋 status · rcm jobs(같은 preset+sha) · 정확한 태그에서
 #   단계를 다시 읽고 그 자리에서 잇는다. 업로드 잡은 어느 상태로든 있으면 **재제출하지 않는다**(lost 도 — 2차 업로드가 된다).
+# --status: 읽기 전용이고 **언제나 `stages: V S0 … S8` 한 줄을 먼저 찍는다** — 이름도 버전도 없이 불러도
+#   그렇다(계약 §5). rcm 은 그 줄에 V 가 있는지로 이 드라이버가 버전 단계를 아는지 알아내고, 없으면
+#   `--version-id` 없이 옛 방식으로 부른다. 단계 목록의 정본은 release_check.py 의 DRIVER_STAGES 하나다.
 # 종료코드: 0 완료 · 1 빨강/계약 위반/N 불일치/이미 릴리스됨 · 2 전제 조건/N 없음 · 3 결과 불명 · 4 스토어 드리프트.
 set -euo pipefail
 
@@ -33,14 +38,17 @@ CTX_GATE="ci/gate"; CTX_QA="ci/qa"                  # 커밋 status context — 
 LABEL_BLOCKED="release-blocked"
 CHECK="${RELEASE_CHECK:-python3 ${SCRIPT_DIR}/release_check.py}"
 RCM="${RELEASE_RCM:-rcm}"
+VERSION_API="${RELEASE_VERSION_API:-}"              # selftest: a command that prints the version row instead of curl
 
 BUILD_NAME=""; CONFIRM_N=""; N_SOURCE=""             # N_SOURCE 는 s2_confirm 만 채운다: flag | tty
+VERSION_ID=""                                       # rcm 버전 행 id — 있으면 V 단계가 BUILD_NAME 을 채운다
 DRY_RUN=false; STATUS_ONLY=false; ABORT=false; RETRY=false; SELFTEST=false; SKIP_QA=""
 
 usage() { sed -n '2,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d'; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --build-name)           BUILD_NAME="${2:-}"; shift ;;
+    --version-id)           VERSION_ID="${2:-}"; shift ;;
     --confirm-build-number) CONFIRM_N="${2:-}"; shift ;;
     --dry-run)              DRY_RUN=true ;;
     --skip-qa)              SKIP_QA="${2:-}"; shift ;;
@@ -64,15 +72,40 @@ cleanup() { if [ -n "${WORK}" ]; then rm -rf "${WORK}"; fi; }   # `[ -n ] &&` �
 trap cleanup EXIT
 
 init() {
-  [ -n "${BUILD_NAME}" ] || die "--build-name X.Y.Z is required"
-  [[ "${BUILD_NAME}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "build name must be X.Y.Z: '${BUILD_NAME}'"
+  [ -n "${BUILD_NAME}" ] || [ -n "${VERSION_ID}" ] || die "--build-name X.Y.Z (or --version-id <id>) is required"
+  [ -z "${VERSION_ID}" ] || [[ "${VERSION_ID}" =~ ^[0-9]+$ ]] || die "--version-id must be an integer: '${VERSION_ID}'"
+  [ -z "${BUILD_NAME}" ] || [[ "${BUILD_NAME}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "build name must be X.Y.Z: '${BUILD_NAME}'"
   if [ -n "${CONFIRM_N}" ] && ! [[ "${CONFIRM_N}" =~ ^[1-9][0-9]*$ ]]; then die "--confirm-build-number must be a positive integer"; fi
+  WORK="$(mktemp -d -t release_driver.XXXXXX)"
+}
+# BUILD_NAME 이 정해진 뒤(플래그, 또는 V 단계) — 브랜치 · 상태 파일 · 산출물 폴더 이름
+bind_build_name() {
+  [ -n "${BUILD_NAME}" ] || die "build name unknown — pass --build-name X.Y.Z or a readable --version-id" 2
   RELEASE_BRANCH="release/${BUILD_NAME}"
   STATE_DIR="$(git rev-parse --git-dir)/release-driver"
   STATE_FILE="${STATE_DIR}/${BUILD_NAME}.json"
   ART_DIR="${STATE_DIR}/artifacts/${BUILD_NAME}"
   # STATE_DIR/ART_DIR 는 첫 쓰기(state_set · rcm_fetch)에서야 만든다 — --status 는 아무것도 남기지 않는다
-  WORK="$(mktemp -d -t release_driver.XXXXXX)"
+}
+
+# ── V: rcm 의 버전 행 → BUILD_NAME (--version-id 가 있을 때만) ────────────────────────────────
+# 서버가 회차를 시작할 때 RCM_SERVER · RCM_TOKEN 을 준다(계약 §5). 이름은 행에서만 온다 — 여기서 짓지 않는다.
+version_row() {   # version_row <id> → JSON on stdout
+  if [ -n "${VERSION_API}" ]; then ${VERSION_API} "$1"; return $?; fi
+  [ -n "${RCM_SERVER:-}" ] || return 2
+  curl -fsS -H "Authorization: Bearer ${RCM_TOKEN:-}" "${RCM_SERVER%/}/api/repos/${REPO_NAME}/release/versions/$1"
+}
+v_version() {
+  say "stage V — version #${VERSION_ID} from rcm"
+  local name
+  if ! version_row "${VERSION_ID}" >"${WORK}/version.json" 2>/dev/null; then
+    if [ "${STATUS_ONLY}" = true ]; then note "version #${VERSION_ID} not readable here (RCM_SERVER/RCM_TOKEN) — stage V"; return 0; fi
+    die "cannot read version #${VERSION_ID} from rcm (RCM_SERVER/RCM_TOKEN) — stage V" 2
+  fi
+  name="$(${CHECK} version-name --json "${WORK}/version.json")" || die "version #${VERSION_ID} has no X.Y.Z name — stage V" 1
+  if [ -n "${BUILD_NAME}" ] && [ "${BUILD_NAME}" != "${name}" ]; then die "--build-name ${BUILD_NAME} is not version #${VERSION_ID} (${name})" 1; fi
+  BUILD_NAME="${name}"
+  note "✅ V version #${VERSION_ID} → ${BUILD_NAME}"
 }
 
 # 캐시 — 원격 진실이 아니다. 잡 번호·N 을 남겨 다음 호출이 대조한다.
@@ -345,9 +378,21 @@ s8_verify() {
 }
 
 # ── --status / --abort / --retry ─────────────────────────────────────────────
+# 이 드라이버가 **아는** 단계 한 줄. 목록은 release_check.py 의 DRIVER_STAGES 에서만 온다 — 여기에 두 벌로
+# 적지 않는다(그래서 판정기를 못 부르면 줄도 없다: 서버는 그것을 «V 를 모르는 옛 드라이버» 로 읽고 옛길로 부른다).
+stages_line() {
+  local s
+  if s="$(${CHECK} stages 2>/dev/null)" && [ -n "${s}" ]; then echo "stages: ${s}"; fi
+  return 0
+}
 do_status() {   # 읽기 전용 — 브랜치도 잡도 만들지 않는다
+  stages_line                        # 언제나 먼저 — 능력 신호는 뒤가 어떻게 되든 나온다(계약 §5)
+  [ -n "${BUILD_NAME}" ] || [ -n "${VERSION_ID}" ] || return 0   # 능력만 물은 호출: 단계 목록이 답이다
+  if [ -z "${BUILD_NAME}" ]; then   # --version-id 인데 행을 못 읽었다: V 에 서 있다
+    echo "build ? · version #${VERSION_ID} · stage V"; return 0
+  fi
   local stage; stage="$(current_stage)"
-  echo "build ${BUILD_NAME} · branch ${RELEASE_BRANCH} @ ${HEAD_SHA:-none} · N ${CONFIRM_N:-$(state_get confirmed_n)} · pr ${PR_NUM:-$(state_get pr)} · stage ${stage}"
+  echo "build ${BUILD_NAME}${VERSION_ID:+ · version #${VERSION_ID}} · branch ${RELEASE_BRANCH} @ ${HEAD_SHA:-none} · N ${CONFIRM_N:-$(state_get confirmed_n)} · pr ${PR_NUM:-$(state_get pr)} · stage ${stage}"
   echo "jobs: plan #$(state_get plan_job) gate #$(state_get gate_job) qa #$(state_get qa_job) upload #$(state_get upload_job)"
 }
 do_abort() {
@@ -367,7 +412,13 @@ do_retry() {    # 빨강으로 닫힌 PR 뒤 같은 버전명으로 다시: PR �
 
 # ── main ─────────────────────────────────────────────────────────────────────
 main() {
-  init; load_profile; preflight_local
+  # 능력만 묻는 호출(`--status` 하나) — 레포도 프로파일도 건드리지 않고 아는 단계만 말하고 끝난다.
+  # 서버가 «이 드라이버는 V 단계를 아는가» 를 이렇게 묻는다(계약 §5). 옛 드라이버는 여기서 exit 2 다.
+  if [ "${STATUS_ONLY}" = true ] && [ -z "${BUILD_NAME}" ] && [ -z "${VERSION_ID}" ]; then do_status; exit 0; fi
+  init; load_profile
+  [ -z "${VERSION_ID}" ] || v_version                      # V: 이름은 rcm 의 버전 행에서
+  if [ "${STATUS_ONLY}" = true ] && [ -z "${BUILD_NAME}" ]; then do_status; exit 0; fi
+  bind_build_name; preflight_local
   if [ "${STATUS_ONLY}" = true ]; then do_status; exit 0; fi   # 읽기 전용 — preflight_remote 를 거치지 않는다
   preflight_remote
   if [ "${ABORT}" = true ]; then do_abort; exit 0; fi
@@ -394,12 +445,41 @@ main() {
 selftest() {
   bash -n "${SELF}" || exit 1
   ${CHECK} --selftest || exit 1
-  local fn; for fn in s0_branch s1_plan s2_confirm s3_pr s4_submit s5_submit s6_merge s7_upload s8_verify require_typed_n fail_red do_status do_abort do_retry; do
+  local fn; for fn in s0_branch s1_plan s2_confirm s3_pr s4_submit s5_submit s6_merge s7_upload s8_verify require_typed_n fail_red stages_line do_status do_abort do_retry; do
     declare -F "${fn}" >/dev/null || { echo "missing function ${fn}"; exit 1; }
   done
   for fn in s6_merge s7_upload; do grep -A4 "^${fn}()" "${SELF}" | grep -q require_typed_n || { echo "${fn} lacks require_typed_n"; exit 1; }; done
   # --status 는 preflight_remote 앞에서 끝나야 한다(연결 시점엔 gh 도 서버도 없다)
   [ "$(grep -n -E 'STATUS_ONLY.*do_status|^  preflight_remote$' "${SELF}" | head -1 | grep -c do_status)" = 1 ] || { echo "--status must return before preflight_remote"; exit 1; }
+  # 능력 신호(계약 §5): `--status` 는 이름도 --version-id 도 없이 불러도 `stages:` 를 찍고 0 으로 끝난다.
+  # 서버는 그 줄에 V 가 있는지로 `--version-id` 를 줄지 정한다 — 종료 코드로는 구분할 수 없다(exit 2 는 이미 둘이다).
+  local caps; caps="$(bash "${SELF}" --status)" || { echo "--status alone must exit 0"; exit 1; }
+  [ "$(printf '%s\n' "${caps}" | grep -c '^stages: ')" = 1 ] || { echo "--status alone must print one stages: line, got: ${caps}"; exit 1; }
+  [ "${caps}" = "stages: $(${CHECK} stages)" ] || { echo "the stages: line must be release_check.py's list verbatim, got: ${caps}"; exit 1; }
+  case " ${caps} " in *" V "*) ;; *) echo "the stages: line must name V — the server reads this driver as an old one otherwise"; exit 1;; esac
+  # V: --version-id 는 rcm 의 버전 행에서 이름을 받는다(API 는 shim) · 없으면 예전 경로 그대로
+  local t; t="$(mktemp -d)"; WORK="${t}"
+  shim_version_api() { echo "version_row $1" >>"${t}/calls"; cat "${t}/row.json"; }
+  VERSION_API=shim_version_api; REPO_NAME=app; CHECK="python3 ${SCRIPT_DIR}/release_check.py"
+  echo '{"id": 7, "ios_version": "1.1.1", "android_version": "1.0.1", "state": "editing"}' >"${t}/row.json"
+  VERSION_ID=7; BUILD_NAME=""; v_version >"${t}/out" || { echo "v_version failed"; cat "${t}/out"; exit 1; }
+  grep -q 'stage V' "${t}/out" && grep -q '^version_row 7$' "${t}/calls" || { echo "stage V line or API call missing"; cat "${t}/out"; exit 1; }
+  [ "${BUILD_NAME}" = "1.1.1" ] || { echo "--version-id 7 should give BUILD_NAME 1.1.1, got '${BUILD_NAME}'"; exit 1; }
+  bind_build_name; [ "${RELEASE_BRANCH}" = "release/1.1.1" ] || { echo "bind_build_name after V: ${RELEASE_BRANCH}"; exit 1; }
+  echo '{"id": 8, "ios_version": null, "android_version": "1.0.1"}' >"${t}/row.json"
+  VERSION_ID=8; BUILD_NAME=""; v_version >/dev/null; [ "${BUILD_NAME}" = "1.0.1" ] || { echo "Android-only row should give 1.0.1"; exit 1; }
+  VERSION_ID=8; BUILD_NAME="9.9.9"; ( v_version >/dev/null 2>&1 ) && { echo "--build-name that is not the row's name must fail"; exit 1; }
+  echo '{"id": 9, "ios_version": null, "android_version": null}' >"${t}/row.json"
+  VERSION_ID=9; BUILD_NAME=""; ( v_version >/dev/null 2>&1 ) && { echo "a row without a name must not invent one"; exit 1; }
+  shim_api_down() { return 7; }; VERSION_API=shim_api_down
+  VERSION_ID=9; BUILD_NAME=""; ( v_version >/dev/null 2>&1 ) && { echo "unreadable API must exit 2, not continue"; exit 1; }
+  STATUS_ONLY=true; v_version >"${t}/out" && grep -q 'stage V' "${t}/out" || { echo "--status with an unreadable row should report stage V"; exit 1; }
+  ( BUILD_NAME=""; do_status ) | grep -q '^build ? · version #9 · stage V$' || { echo "--status without a name must print stage V"; exit 1; }
+  ( BUILD_NAME=""; do_status ) | grep -q "^stages: $(${CHECK} stages)\$" || { echo "--status must print stages: even without a name"; exit 1; }
+  STATUS_ONLY=false; VERSION_ID=""; BUILD_NAME="1.0.1"; bind_build_name; [ "${RELEASE_BRANCH}" = "release/1.0.1" ] || { echo "old path (--build-name only) broke"; exit 1; }
+  [ "$(grep -c '^version_row 7$' "${t}/calls")" = 1 ] || { echo "the API must be called exactly once per V run"; exit 1; }
+  rm -rf "${t}"; WORK=""
+  echo "  ok  --version-id 7 → stage V → 1.1.1 (API shim) · Android-only → 1.0.1 · no name → red · --build-name only unchanged"
   echo "release_driver.sh selftest: all green"   # 공용 정규식 selftest[: ]+(PASS|ok|all green) 에 맞춘 마지막 줄
 }
 

@@ -27,7 +27,9 @@ function release(patch) {
     setup: { required: 3, present: 3, verified: 3, complete: true },
     plan: { job_id: 641, state: "succeeded", measured_at: iso(240), age_seconds: 240, stale: false, build_name: "1.0.1", doc: planDoc() },
     review: { plan: { job_id: 651, state: "succeeded", age_seconds: 200, stale: false, doc: reviewPlanDoc() }, result: null },
-    upload: { job_id: 650, state: "succeeded", finished_at: iso(3000), doc: { schema: 1, n: 181, status: "success", mode: "upload", platforms: ["ios", "android"], tag: "prod/1.0.1-181" } },
+    // 역할 항목에는 `finished_at` 이 **없다** — 서버 `release_state.role_entry` 가 안 보낸다.
+    // 그 시각은 `jobs[]` 의 행에서 온다(§17-9). 스텁이 지어내면 그 열쇠를 읽는 버그를 못 잡는다.
+    upload: { job_id: 650, state: "succeeded", doc: { schema: 1, n: 181, status: "success", mode: "upload", platforms: ["ios", "android"], tag: "prod/1.0.1-181" } },
     jobs: [{ id: 651, preset: "release-review", role: "review", state: "succeeded", started_at: iso(400), finished_at: iso(300) },
       { id: 650, preset: "release-upload", role: "upload", state: "succeeded", started_at: iso(4000), finished_at: iso(3000) },
       { id: 641, preset: "release-plan", role: "plan", state: "succeeded", started_at: iso(5000), finished_at: iso(4900) }]
@@ -489,6 +491,21 @@ describe("refusalText — the server's code, verbatim, next to the button", () =
     assert.equal(S.refusalText({ status: 409, body: { error_code: "build_number_mismatch" } }, "ko"), "서버가 거부함: build_number_mismatch");
     assert.equal(S.refusalText({ status: 500, body: { error: "boom" } }, "en"), "boom");
     assert.equal(S.refusalText({ status: 502, body: null }, "en"), "http 502");
+  });
+  // 워크플랜 §17-13 (§16-2) — JSON 이 아닌 본문은 `call` 이 `{error: <원문>}` 으로 싼다.
+  // HTML 오류 페이지 500자쯤이 그대로 저장 배지에 깔렸다 — 이제 상태 코드만 말한다.
+  test("HTML 본문은 상태 코드만 — 페이지를 배지에 옮기지 않는다", () => {
+    const page = "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>"
+      + "<body><h1>502 Bad Gateway</h1><p>" + "x".repeat(500) + "</p></body></html>";
+    assert.equal(S.refusalText({ status: 502, body: { error: page } }, "en"), "http 502");
+    assert.equal(S.refusalText({ status: 401, body: { error: "  <html>nope</html>" } }, "en"), "http 401");
+  });
+  test("긴 한 줄은 잘리고 여러 줄은 한 줄로 접힌다", () => {
+    const long = S.refusalText({ status: 500, body: { error: "e".repeat(400) } }, "en");
+    assert.equal(long.length, 120, long.length);
+    assert.ok(long.endsWith("…"), long);
+    assert.equal(S.refusalText({ status: 500, body: { error: "a\n  b\tc" } }, "en"), "a b c");
+    assert.equal(S.refusalText({ status: 500, body: { error: "   " } }, "en"), "http 500");
   });
 });
 

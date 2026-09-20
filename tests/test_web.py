@@ -165,6 +165,28 @@ def test_read_auth_basic_requires_token_for_ui_and_assets(tmp_path):
         s.close()
 
 
+# ── 계약 ─────────────────────────────────────────────────────────────────────
+
+
+def test_the_web_listing_keys_match_the_server_contract():
+    """W3 편집 칸의 키는 서버 `release_state.PREFILL_KEYS` 와 **같아야** 한다(워크플랜 §3.1).
+
+    키 목록이 두 벌이라 조용히 갈라질 수 있는 자리다: 하나가 어긋나면 그 칸의 자동 저장이
+    400 `listing_key` 를 받고, 사람은 자기가 고친 적 없는 거절을 본다. 그래서 두 벌을 여기서
+    맞대 본다 — 생산자(서버 상수)를 소비자(app.js 리터럴)에 그대로 대는 검사다.
+    """
+    from remote_ci_monitor.release_state import PREFILL_KEYS
+
+    source = web_file("app.js").decode("utf-8")
+    block = re.search(r"var PREFILL_KEYS = \{(.*?)\n  \};", source, re.S)
+    assert block, "app.js 에 PREFILL_KEYS 리터럴이 없다 — 이름이 바뀌었으면 이 검사도 따라간다"
+    found = {
+        name: re.findall(r'"([a-z_]+)"', body)
+        for name, body in re.findall(r"(\w+): \[([^\]]*)\]", block.group(1))
+    }
+    assert found == {p: list(keys) for p, keys in PREFILL_KEYS.items()}
+
+
 # ── 패키징 ───────────────────────────────────────────────────────────────────
 
 

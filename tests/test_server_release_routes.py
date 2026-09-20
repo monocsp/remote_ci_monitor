@@ -103,11 +103,12 @@ PRESETS = [
     ),
     preset("gate-smoke", []),
 ]
+# 요즘 드라이버 — `--status` 가 `--version-id` 없이도 아는 단계를 말한다(계약 §5).
 DRIVER = """#!/bin/sh
 echo "driver $*"
 echo "server=${RCM_SERVER:-none} token=${RCM_TOKEN:+set}"
 case " $* " in
-  *" --status "*) echo "stage: S1 planned"; exit 0;;
+  *" --status "*) echo "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8"; echo "stage: S1 planned"; exit 0;;
   *" --confirm-build-number "*) echo "confirmed $*"; exit 0;;
   *" --abort "*) echo "aborted"; exit 0;;
   *" --retry "*) echo "retried"; exit 0;;
@@ -116,6 +117,14 @@ while [ -f "$APP_SECRETS/hold" ]; do sleep 0.05; done
 echo "plan: N = 181"
 exit 2
 """
+# V 단계를 모르는 옛 드라이버 — `stages:` 줄이 없고 `--version-id` 를 주면 exit 2 로 죽는다.
+OLD_DRIVER = DRIVER.replace(
+    '*" --status "*) echo "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8"; echo "stage: S1 planned"',
+    '*" --status "*) echo "stage: S1 planned"',
+).replace(
+    'case " $* " in',
+    'case " $* " in\n  *" --version-id "*) echo "unknown argument: --version-id" >&2; exit 2;;',
+)
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 PROFILE = {
     **PROFILE_RAW,
@@ -273,10 +282,11 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RemoteRepo:
     isolate_git_env(tmp_path, monkeypatch)
     r = build_remote(tmp_path)
     work = r.work
-    script = work / "scripts" / "driver.sh"
-    script.parent.mkdir()
-    script.write_text(DRIVER)
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    (work / "scripts").mkdir()
+    for name, text in (("driver.sh", DRIVER), ("old_driver.sh", OLD_DRIVER)):
+        script = work / "scripts" / name
+        script.write_text(text)
+        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     shots = work / "store" / "screenshots"
     shots.mkdir(parents=True)
     (shots / "01-home.png").write_bytes(PNG)
@@ -715,6 +725,44 @@ def test_listing_needs_the_mirror_and_then_runs_the_profile_commands_in_a_checko
     assert body["release_notes"]["path"] == "store/release_notes/1.0.1/en.txt"  # `*` 로 찾는다
 
 
+def test_the_listing_answer_is_remembered_briefly_and_never_across_shas(srv, remote, monkeypatch):
+    """워크플랜 §14-1 — 버전 페이지가 5초마다 부르는 바람에 이 명령 둘이 빌드 머신에서 5초마다
+    돌면 안 된다(진짜 스토어를 읽는 프로젝트가 있다). 같은 (저장소 · 체크아웃 sha · build_name)
+    이면 `LISTING_CACHE_TTL` 초 동안 같은 답을 돌려준다. **다른 sha 의 답은 절대 나가지 않고**,
+    미러가 움직이면 그 저장소의 기억은 통째로 버린다."""
+    from remote_ci_monitor import server as server_mod
+
+    srv.fetch()
+    ran: list[tuple[str, ...]] = []
+    real = srv.app._run_listing
+
+    def counting(argv, cwd, env):
+        ran.append(tuple(argv))
+        return real(argv, cwd, env)
+
+    monkeypatch.setattr(srv.app, "_run_listing", counting)
+    first = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert len(ran) == 2 and first["preview"] == ["Title", "Short description"]
+    assert srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1] == first
+    assert len(ran) == 2  # 기억에서 나갔다 — 명령은 다시 돌지 않았다
+    # build_name 이 다르면 다른 키다(릴리스 노트를 그 이름으로 찾는다)
+    other = srv.req("GET", "/api/repos/app/release/listing")[1]
+    assert len(ran) == 4 and other["sha"] == first["sha"]
+    assert len(srv.app._listing_cache) == 2
+    # 미러가 움직이면 그 저장소의 기억은 버린다 — 옛 sha 의 답이 남아 있을 자리가 없다
+    new = remote.push_commit("more.txt", "x\n", "more")
+    srv.fetch()
+    fresh = srv.req("GET", "/api/repos/app/release/listing?build_name=1.0.1")[1]
+    assert len(ran) == 6 and fresh["sha"] == new
+    assert list(srv.app._listing_cache) == [("app", new, "1.0.1")]
+    # 기억을 붙잡아 두는 것은 TTL 뿐이다 — 0 이면 매번 다시 돈다
+    monkeypatch.setattr(server_mod, "LISTING_CACHE_TTL", 0.0)
+    assert srv.req("GET", "/api/repos/app/release/listing?build_name=9.9.9")[1]["sha"] == new
+    assert len(ran) == 8
+    assert srv.req("GET", "/api/repos/app/release/listing?build_name=9.9.9")[1]["sha"] == new
+    assert len(ran) == 10
+
+
 def test_listing_ref_reads_the_copy_from_that_branch(srv, remote):
     """`listing.ref = "dev"` — dev → main 으로 내보내는 프로젝트는 릴리스에 실릴 문안이 dev 에 있다.
     체크아웃은 그 브랜치의 sha 로 만들고, 프로파일 JSON 의 listing.ref 는 그 이름이다."""
@@ -814,8 +862,18 @@ def test_github_reads_the_mirror_only_and_leaves_prs_for_later(srv, remote):
 
 
 def wait_run(srv: ReleaseServer, release_id: int) -> dict:
-    assert srv.app.driver.wait(release_id, timeout=15)
-    return srv.store.get_release(release_id)
+    """회차가 닫힐 때까지. `driver.wait` 는 **모르는** 실행에 바로 True 를 주는데, 행이 생긴 직후
+    (아직 Popen 전)가 그렇다 — 그래서 대장이 닫히는 것까지 본다. 안 그러면 로그·exit_code 를
+    도는 중에 읽는 경쟁이 남는다."""
+    deadline = time.monotonic() + 20
+    while True:
+        assert srv.app.driver.wait(release_id, timeout=15)
+        row = srv.store.get_release(release_id)
+        assert row is not None, f"no release #{release_id}"
+        if row["finished_at"] is not None or time.monotonic() > deadline:
+            assert row["finished_at"] is not None, f"release #{release_id} did not finish"
+            return row
+        time.sleep(0.02)
 
 
 def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
@@ -837,6 +895,8 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
         "plan_n": None,
         "status": None,
         "status_error": "the mirror has no branch 'main' — fetch the repository first",
+        "stages": None,
+        "knows_version_stage": False,
     }
     assert code_of(srv.post("start", {"build_name": "1.0.1"}, token="admin")) == (
         409,
@@ -844,12 +904,72 @@ def test_driver_view_before_any_run_and_without_a_mirror(open_srv):
     )
     srv.fetch()
     body = srv.req("GET", "/api/repos/app/release/driver")[1]
-    assert body["status"] == ["driver --status", "server=none token=", "stage: S1 planned"]
+    assert body["status"] == [
+        "driver --status",
+        "server=none token=",
+        "stages: V S0 S1 S2 S3 S4 S5 S6 S7 S8",
+        "stage: S1 planned",
+    ]
     assert body["status_error"] is None and body["running"] is False
+    # 능력 신호(계약 §5 · 워크플랜 §13-2) — `stages:` 줄을 그대로 읽는다
+    assert body["stages"] == ["V", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+    assert body["knows_version_stage"] is True
     # 버전을 아는 회차가 있으면 --status 에 --build-name 이 붙는다(없이 부르면 드라이버가 되묻는다)
     srv.plan_job()
     body = srv.req("GET", "/api/repos/app/release/driver")[1]
     assert body["status"][0] == "driver --status --build-name 1.0.1", body["status"]
+
+
+def test_the_driver_status_is_remembered_briefly_and_never_across_rounds(open_srv, monkeypatch):
+    """워크플랜 §17-4 — 이 라우트는 부를 때마다 빌드 머신에서 대장 `--status` 를 **하나씩** 돌렸다
+    (실측: 96초에 요청 7 · 프로세스 7 = 탭 하나당 분당 넷). 소개 자료와 같은 대접을 해 준다:
+    같은 (저장소 · 대장 체크아웃 sha · build_name · 회차 id · 도는 중인가 · 종료 코드) 이면
+    `DRIVER_STATUS_CACHE_TTL` 초 동안 같은 줄을 돌려준다. 회차가 바뀌면 키가 달라져 **낡은 답이
+    그것이 말하는 것보다 오래 살아남지 못한다**. 답의 나머지(행 · 로그 끝 · plan N)는 매번
+    새로 읽는다."""
+    from remote_ci_monitor import server as server_mod
+
+    srv = open_srv
+    srv.fetch()
+    ran: list[str | None] = []
+    real = srv.app.driver.status
+
+    def counting(driver, checkout, env, *, build_name=None, **kw):
+        ran.append(build_name)
+        return real(driver, checkout, env, build_name=build_name, **kw)
+
+    monkeypatch.setattr(srv.app.driver, "status", counting)
+    first = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert len(ran) == 1 and first["status"][0] == "driver --status"
+    # 이어지는 폴링은 프로세스를 다시 돌리지 않는다 — 답은 글자 그대로 같다
+    again = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert len(ran) == 1, ran
+    assert again["status"] == first["status"] and again["stages"] == first["stages"]
+    # 회차의 이름이 생기면(플랜) 키가 달라져 다시 돈다
+    srv.plan_job()
+    named = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert len(ran) == 2 and ran[1] == "1.0.1"
+    assert named["status"][0] == "driver --status --build-name 1.0.1"
+    assert len(srv.app._driver_status_cache) == 2
+    # 회차가 실제로 돌고 끝나면 그 전 답은 자리에서 사라진다 — 키에 회차 id 가 있다
+    status, body = srv.post(
+        "start", {"build_name": "1.0.1", "confirm_build_number": "181"}, token="admin"
+    )
+    assert status == 202, body
+    wait_run(srv, body["release_id"])
+    after = srv.req("GET", "/api/repos/app/release/driver")[1]
+    assert after["release_id"] == body["release_id"]
+    assert list(srv.app._driver_status_cache) == [
+        k for k in srv.app._driver_status_cache if k[3] == body["release_id"]
+    ]
+    assert len(srv.app._driver_status_cache) == 1, srv.app._driver_status_cache
+    # 기억을 붙잡아 두는 것은 TTL 뿐이다 — 0 이면 매번 다시 돈다
+    srv.app._driver_status_cache.clear()
+    monkeypatch.setattr(server_mod, "DRIVER_STATUS_CACHE_TTL", 0.0)
+    before = len(ran)
+    srv.req("GET", "/api/repos/app/release/driver")
+    srv.req("GET", "/api/repos/app/release/driver")
+    assert len(ran) == before + 2, ran
 
 
 def test_start_runs_the_driver_detached_with_an_internal_token_that_is_revoked_after(

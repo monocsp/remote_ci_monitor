@@ -172,7 +172,7 @@ class DisplaySection:
 
 # ── 릴리스 프로파일(스토어 탭) — docs/release-contract.md §1 ─────────────────
 
-RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev")
+RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
 RELEASE_REQUIRED_ROLES = ("plan", "upload", "review")
 RELEASE_SECRET_KINDS = ("value", "file", "dir")
 RELEASE_VERIFY_KINDS = ("asc", "play", "github", "keystore", "none")
@@ -183,6 +183,7 @@ _RELEASE_KEYS = {
     "tag",
     "build_number_policy",
     "plan_max_age_minutes",
+    "version_ttl_hours",
     "driver",
     "secrets_dir_env",
     "presets",
@@ -234,6 +235,8 @@ class ReleaseProfile:
     tag: str = "prod/{version}-{build}"
     build_number_policy: str = "auto"  # "auto" | "manual"
     plan_max_age_minutes: int = 30
+    # 새 버전 드래프트가 편집 없이 살아 있는 시간 — 지나면 청소기가 버린다(버전 페이지 계획 Q1).
+    version_ttl_hours: int = 24
     driver: str | None = None  # 저장소 안 상대경로
     secrets_dir_env: str | None = None
     secrets: tuple[ReleaseSecret, ...] = ()
@@ -1181,6 +1184,9 @@ def parse_release_profile(repo_name: str, raw: Any) -> ReleaseProfile:
     max_age = raw.get("plan_max_age_minutes", defaults.plan_max_age_minutes)
     if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age < 1:
         raise ConfigError(f"{where}: plan_max_age_minutes must be a positive integer")
+    ttl = raw.get("version_ttl_hours", defaults.version_ttl_hours)
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1:
+        raise ConfigError(f"{where}: version_ttl_hours must be a positive integer")
     driver = raw.get("driver")
     if driver is not None:
         if (
@@ -1231,6 +1237,7 @@ def parse_release_profile(repo_name: str, raw: Any) -> ReleaseProfile:
         tag=tag,
         build_number_policy=policy,
         plan_max_age_minutes=max_age,
+        version_ttl_hours=ttl,
         driver=driver,
         secrets_dir_env=env_name,
         secrets=secrets,

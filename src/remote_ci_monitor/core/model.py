@@ -65,6 +65,10 @@ SOURCE_MODES = (MODE_TREE, MODE_GIT_REF)
 # ── 입력 타입 ────────────────────────────────────────────────────────────────
 INPUT_TYPES = ("string", "choice", "bool", "int")
 MAX_INPUT_LENGTH = 256
+#: 긴 값을 받는 입력 — 스토어 문안 편집본(`listing_json`, 버전 페이지 Q4)은 JSON 한 덩어리라
+#: 256자로는 안 된다. 이름으로 고른다: 계약이 그 이름을 고정했고 다른 입력은 그대로 짧다.
+LONG_INPUTS = frozenset({"listing_json"})
+MAX_LONG_INPUT_LENGTH = 64 * 1024
 
 # ── 진행 단계 ────────────────────────────────────────────────────────────────
 PHASE_MATERIALIZING = "materializing"

@@ -18,6 +18,7 @@ Tiers, so expectations are right from the first sentence:
 | optional | `gate` | `rcm-gate-connect` | grey row "gate — not configured" |
 | optional | `qa` | `rcm-qa-connect` | grey row "qa — not configured" |
 | optional | `driver` (S0–S8 round) | `rcm-release-driver` | plan / upload / review stay single buttons, no stepper |
+| optional | `version` («new version» from the web: prefill the listing, create / delete an App Store version) | `rcm-store-connect` (on by default; `version: no` in the header skips it) | «new version» creates the draft in rcm only, the listing starts from the `store/` files, nothing touches the store until upload / submit |
 | optional | `dev` (dev distribution) | none — detected preset, profile line by `rcm-store-connect` | no dev card |
 
 ## When to use
@@ -31,11 +32,14 @@ Tiers, so expectations are right from the first sentence:
 1. **Project path** — default: the current working directory if it is a git repository.
 2. **Repo name** for `[[repos]]` in `server.toml` — default: the directory basename, lowercase.
 3. **Platforms** — `ios,android` (default) · `ios` · `android`.
-4. **Optional tiers to wire now** — multi-select: gate · qa · release driver · dev distribution.
-   Default: none. Say plainly that the Store tab works without them and that they can be added
-   later by name. `dev` has no skill of its own: it is offered only when detection finds a
-   preset whose name matches `deploy-*`/`*-dev` with a safe default mode, and it is wired by the
-   store skill writing `dev = "<preset>"` into the profile.
+4. **Optional tiers to wire now** — multi-select: gate · qa · release driver · dev distribution ·
+   version. Default: version only. Say plainly that the Store tab works without them and that
+   they can be added later by name. `dev` has no skill of its own: it is offered only when
+   detection finds a preset whose name matches `deploy-*`/`*-dev` with a safe default mode, and
+   it is wired by the store skill writing `dev = "<preset>"` into the profile. `version` is
+   needed to use «new version» from the web with a real App Store draft and a prefilled listing;
+   it is wired by the store skill (`release_version.sh`, the `release-version` preset and the
+   `version = …` profile line) and recorded in the header as `version: yes|no`.
 5. **Server config path** — the build machine's `server.toml` used for the candidate check.
    Default: `~/.config/rcm/server.toml` if it exists, else `skip` (the check then runs on a
    minimal candidate).
@@ -63,9 +67,12 @@ web UI after the profile exists (`rcm-store-connect` lists which ones).
   secrets_env: <VAR>
   presets_file: <scripts/rcm/presets.release.toml or the existing presets file the store skill reused>
   tiers: <gate,qa,driver or none>
+  version: <yes|no>
   ```
   `presets_file` is written by `rcm-store-connect` (it decides whether an existing presets file
-  plays that role); leave the line as `presets_file: pending` until then.
+  plays that role); leave the line as `presets_file: pending` until then. `version:` is the
+  answer to input 4 for the version tier (`yes` by default; a header without the line means
+  `yes`) — the store skill reads it to decide whether `release_version.sh` is installed.
 - Everything else is created by the worker skills, each in its own section of that report. Two
   project-side files are shared by all of them and never edited by hand while a skill runs:
   - `scripts/rcm/presets.release.toml` — every preset the project offers rcm, one file;
@@ -111,8 +118,9 @@ web UI after the profile exists (`rcm-store-connect` lists which ones).
    contract file, a gate that prints the markers, a preset that meets the invariants) is
    **adopted**: the worker skill records `kept — real implementation` and never replaces it with
    a skeleton. Show the table `piece · found at · will create / will keep`. Nothing is written yet.
-2. **Ask the input block** (§Inputs). Write `docs/rcm-connect.md` with the header above (all six
-   lines, `presets_file: pending`), then `## Answers` and `## Detection` sections.
+2. **Ask the input block** (§Inputs). Write `docs/rcm-connect.md` with the header above (all seven
+   lines, `presets_file: pending`, `version: yes|no`), then `## Answers` and `## Detection`
+   sections.
 3. **Run `rcm-store-connect`** with the answers. It must end with its section in the report, the two
    fragment files, `scripts/rcm/rcm_candidate.py`, and a `release <repo>` row that is green or only
    warns about the secrets folder (Settings creates it). If it ends red, stop here and show the red

@@ -193,6 +193,7 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 | `rcm discover [--json] [--timeout S]` | rcm servers on this network (mDNS); `rcm check` says `(found on this network)` when it used one |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
+| `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | store version drafts (admin). With no version arguments `new` asks only for the names, offering the server's hints: enter takes the hint, `-` skips that store, `--yes` takes both. `open` prints the address of the version page |
 
 Every estimate carries a `confidence`: `high` (median of ≥ 5 real runs), `med` (fewer), `low`
 (a preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown
@@ -257,27 +258,63 @@ tab. The Store is behind a **settings gate**: until every required secret is pre
 you land on the Settings screen — a red banner with `n of m secrets set · k verified`, one row per
 secret from the profile (drop a file, or type a value once in a password box), **Verify all**, and
 a disabled **Enter Store** — and the browser never sees a value, only `present`, a fingerprint and
-the verification time. Once complete, the Store shows four collapsible rows — Setup, Source (mirror
-age, `main` / `dev`, whether `main` is in `dev`, **Fetch remote**), Build · upload and Store — green
-when fine and collapsed, red and open when something needs a hand, grey when this build has nothing
-to say. Below them the review panel lays out the App Store and Google Play sections in the same group
-order (screenshots · copy with `current/limit` counters · release notes · build/release · review
-information, `—` where a store has no such field), and **Submit for review** opens only after a
-green review plan, the build number (typed again, or taken from the plan when the **Build number:
-Auto** toggle is on — the number the plan read from the stores), and — when Google Play is selected — the
-managed-publishing box ticked for this submission; there is no Release, Publish or Rollout button in
-any state, and an `unsafe_release_type` verdict raises a red banner that cannot be dismissed. While a
-round runs, a big bar at the top of the page shows the version and build number, the current stage
-(`S5 scenario QA · stage 6 of 9`), the overall percentage and the expected finish, and hovering it
-shows the whole detail with its basis. When the
-profile names a driver, the Build · upload row carries the round's stepper S0–S8 read from the
-driver's own status lines (a Start form with version · Android track · dry-run when nothing runs,
-**Abort** while it runs, **Retry same version** after exit 1, «result unknown — do not resubmit»
-after exit 3, store drift after exit 4), the S2 dialog asks for the build number typed again before
-`confirm` goes out — or, with **Build number: Auto**, the server confirms the plan's number by
-itself and the round does not stop — a **Rehearsal (no upload)** button runs the upload preset in rehearsal mode —
-the real upload is the driver's S7 and there is no upload button — and the Source row shows the
-mirror's last five commits, its tags and «PR list: next».
+the verification time.
+
+Past the gate the tab is a **list of versions**. A one-line status strip answers «can this app go
+up at all» — credentials, source, store, blockers — and turns red as soon as one of them is;
+clicking it opens `#/store/<name>/status`, which still carries the four collapsible rows (Setup,
+Source, Build · upload, Store) and the review panel, now read-only apart from **Validate listing**
+and **Plan review**. Under the strip: **+ New version**, then every open draft with its state, its
+age, how many fields you changed, whether a build exists and whether it has expired, then the live
+version and the last 20 submitted ones.
+
+**+ New version** asks for nothing but the names. Each store gets a checkbox and a field prefilled
+with the next name — the plan's `next_version_hint`, or the live name with its last number bumped;
+unticking a store leaves it out of the request, **Create** stays shut with the reason under the
+field until a name looks like `major.minor.patch` and beats the live one, and a name an open draft
+already carries comes back as a link to that draft. The two stores may take **different** names
+(App Store 1.1.1 · Google Play 1.0.1) and rcm carries both to the end.
+
+A draft has its own page, `#/store/<name>/v/<id>`: the two stores side by side, in the review
+panel's group order, with every copy field **editable and prefilled from the previous version**. A
+field says where its value came from — «same as the previous version», «your edit», «from the
+file» — counts characters against the store's limit, gets a «changed» chip and a **Revert** as soon
+as it differs, and saves itself 800 ms after you stop typing, sending only the keys that changed.
+The badge reads «autosaved · 12s ago», or why the save failed with a **Save again** that resends
+it; the text you typed stays on screen either way. A value over the limit is saved anyway and the
+counter turns red — the store has the last word. Screenshots, the build, the release settings and
+the review information are shown, not edited; rcm never touches screenshot files. Without an admin
+token, or on a submitted or discarded draft, the page is read-only and one sentence says why.
+
+That page ends in a **sheet**, the only one in the product, carrying the progress, what is still
+missing, and the only **Submit for review** button there is. Collapsed it is one line: «3 left
+before review · No build yet», «S5 scenario QA · stage 7 of 10 · 66% · elapsed 38m · finishes
+21:40», «ready to submit · review plan 4m ago · build 181», «submitted 21:52 · waiting for review».
+Expanded it adds the bar, the stage chips (`V S0…S8` when the profile names a driver, this round's
+jobs when it does not), the basis in words, and two columns — **Left before review** and
+**Different from the previous version** — where every line in the first names the place that fixes
+it and goes there when clicked. The submit conditions live here too: the store checkboxes, the
+managed-publishing box ticked for this submission and never remembered, and the build number,
+**Auto** (the plan's own) or typed to match it exactly. A percentage appears only against a
+denominator declared in advance; otherwise the bar is hatched and says so. There is no Release,
+Publish or Rollout button in any state, and an `unsafe_release_type` verdict raises a red banner
+that cannot be dismissed.
+
+Drafts neither pile up nor vanish under you. One nobody edited is discarded after
+`version_ttl_hours` (default 24) — through the store when the profile has a `version` preset,
+inside rcm when it does not — while one you *did* edit is marked expired and waits for a person.
+And a draft cannot be discarded while a review job, an upload job or a driver round is alive for
+it; its row says which one holds it.
+
+On the status screen, when the profile names a driver, the Build · upload row carries the round's
+stepper S0–S8 read from the driver's own status lines (a Start form with version · Android track ·
+dry-run when nothing runs, **Abort** while it runs, **Retry same version** after exit 1, «result
+unknown — do not resubmit» after exit 3, store drift after exit 4); the S2 dialog asks for the
+build number typed again before `confirm` goes out — or, with **Build number: Auto**, the server
+confirms the plan's number by itself and the round does not stop — a **Rehearsal (no upload)**
+button runs the upload preset in rehearsal mode (the real upload is the driver's S7, and there is
+no upload button), and the Source row shows the mirror's last five commits, its tags and
+«PR list: next».
 
 ### Store tab — connecting a project's release flow
 
