@@ -7,21 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-20
+
 The Store tab is **version-centred** now. It opens on a list of versions instead of four status
 rows; «New version» asks only for the version names; a version has a page of its own where the
 previous version's copy is filled in and editable; and one bottom sheet on that page carries the
 progress, what is still missing, and the only **Submit for review** button in the product. The
 entries below follow that path from the screen down to the contract a project provides.
-
-### Fixed
-- **The status screen no longer describes a button it does not have, and one Korean message
-  says 「작업」 like the rest.** `#/store/<repo>/status` still printed «Submit opens after a green
-  plan …» under the review panel although submitting moved to the version page's bottom sheet; it
-  now says where submitting lives. A git-failure message rendered 「잡 로그를 보라」 while its
-  sibling one line below said 「작업 로그를 보라」. The Korean-wording check missed it because it
-  rendered every message with one fixed argument set, so a message that branches on its arguments
-  was only ever checked on one branch; it now renders each branch.
-  ([#172](https://github.com/monocsp/remote_ci_monitor/pull/172))
 
 ### Breaking changes
 - **Database schema v21 — the server keeps store version drafts now.** A new `versions` table
@@ -287,6 +279,14 @@ entries below follow that path from the screen down to the contract a project pr
   `DRIVER_STAGES`; `STAGES` is derived from it, the new `release_check.py stages` prints it, and
   the driver's `stages:` line is that output verbatim.
   ([#161](https://github.com/monocsp/remote_ci_monitor/pull/161))
+- **The status screen no longer describes a button it does not have, and one Korean message
+  says 「작업」 like the rest.** `#/store/<repo>/status` still printed «Submit opens after a green
+  plan …» under the review panel although submitting moved to the version page's bottom sheet; it
+  now says where submitting lives. A git-failure message rendered 「잡 로그를 보라」 while its
+  sibling one line below said 「작업 로그를 보라」. The Korean-wording check missed it because it
+  rendered every message with one fixed argument set, so a message that branches on its arguments
+  was only ever checked on one branch; it now renders each branch.
+  ([#172](https://github.com/monocsp/remote_ci_monitor/pull/172))
 
 ## [0.3.3] - 2026-09-18
 
@@ -1435,6 +1435,7 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
 [Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...HEAD
+[0.4.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.0...v0.3.1
