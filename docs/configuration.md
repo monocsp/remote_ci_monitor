@@ -235,6 +235,7 @@ when they differ — `prod/1.1.1-181` or `prod/1.1.1+1.0.1-181`
 | `FAIL` | a `version` preset lacks `mode ios_version android_version asc_version_id`, or its `mode` does not default to `prefill` (`create` makes a store draft, `delete` is irreversible) |
 | `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
 | `warn` | an optional role (`gate`, `qa`, `dev`, `version`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | the `version` preset's `mode` input lists the values it takes and `create` or `delete` is missing — those are the two rcm sends, so «new version» and «discard» would be refused when the job is submitted |
 | `warn` | the `review` or `upload` preset has no `listing_json` input — the listing copy edited in the web UI cannot reach the script (re-run `/rcm-store-connect`, which adds the input) |
 | `warn` | the `review` or `upload` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
 
@@ -322,7 +323,7 @@ keeps its default. Writes take a Bearer token only.
 | `POST …/release/start` | admin | `{build_name, android_track?, dry_run?}` → runs the driver (below) → `202 {release_id, pid, build_name}` |
 | `POST …/release/confirm` | admin | `{build_name, build_number}` → re-runs the driver with `--confirm-build-number N` **only if** the last `plan: N = <n>` line of that build's log equals what was typed |
 | `POST …/release/abort` · `POST …/release/retry` | admin | `{build_name?}` (default: the latest run's) → runs the driver with `--abort` / `--retry` |
-| `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error, stages[], knows_version_stage}`. `{configured: false}` when the profile has no `driver`. `stages` is the driver's own `stages: V S0 … S8` line parsed into a list, `null` when it printed none, and `knows_version_stage` says whether `V` is in it (release contract §5). A driver that does not advertise `V` is started **without** `--version-id` — the round still runs under the name rcm read from the version row — and the page says «this driver does not know the V stage — re-run `/rcm-release-driver`» instead of letting an old driver die on an unknown argument |
+| `GET …/release/driver` | read rule, always | `{configured, running, release_id, kind, build_name, started_at, started_by, pid, exit_code, confirmed_n, log_tail[] (last 60 lines, secret values masked), plan_n, status[] (the output of `<driver> --status`, run synchronously with a 10 s limit), status_error, stages[], knows_version_stage}`. `{configured: false}` when the profile has no `driver`. That subprocess is the only costly part, and its answer is kept for 20 s per repository, driver checkout SHA, `build_name`, round id, running flag and exit code — so a page that polls does not multiply `--status` runs on the build machine, and a remembered answer cannot outlive the round it describes. The ledger row, the log tail and `plan_n` are read fresh every time. `stages` is the driver's own `stages: V S0 … S8` line parsed into a list, `null` when it printed none, and `knows_version_stage` says whether `V` is in it (release contract §5). A driver that does not advertise `V` is started **without** `--version-id` — the round still runs under the name rcm read from the version row — and the page says «this driver does not know the V stage — re-run `/rcm-release-driver`» instead of letting an old driver die on an unknown argument |
 
 **`version_id`.** `POST …/release/plan`, `review`, `upload` and `start` take an optional
 `version_id` — the number of an open draft — instead of a typed `build_name`. The server then
@@ -685,6 +686,17 @@ server gives up a 720 MB workspace, never a 50 KB log, a job row, an artifact bu
 blob — those keep their own clocks and budgets. And **it does not delete on a guess**: if a size
 cannot be measured, the byte rules are skipped for that sweep and the reason is reported; only the
 day rule, which never needed a size, keeps running.
+
+**Store version drafts ride the same timer, under their own rule.** The sweep also looks at the
+`versions` table on every cycle and once at start-up, but none of the keys above applies to it:
+a draft nobody has edited goes when `version_ttl_hours` (the release profile, default 24) has
+passed since it was opened — through the `version` preset's `mode = delete` job when the profile
+has one, so the App Store version goes with it, and inside rcm alone when it does not, or when
+the draft's create job failed and the store never had anything. A draft that *was* edited is
+**never** deleted for you: it is marked expired, the server logs one line, and it waits for a
+person to discard it. Submitted drafts, drafts still being created and drafts whose review job,
+upload job or driver round is running are left alone, and a store delete job is submitted at most
+once per draft. `rcm gc` does not touch the table at all.
 
 `min_free_bytes` is a target, not a guarantee. Deleting does not always give space back — a macOS
 local snapshot or an open file can hold the blocks — so if a sweep deletes and free space does not

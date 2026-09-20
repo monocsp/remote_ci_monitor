@@ -50,6 +50,11 @@ h3 { font-size: 16px; font-weight: 600; margin: 0; }
 .legend .b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--callout); color: var(--callout-ink); font: 600 12px var(--mono); }
 .legend .ln { display: inline-block; width: 34px; border-top: 1.5px dashed var(--callout); vertical-align: middle; }
 .rev { font-size: 13px; color: var(--muted); max-width: 78ch; margin-top: 8px; }
+/* 옮겨 가거나 사라진 것을 가리키는 표시 — v0.5 버전 중심 개편 */
+.super { max-width: 82ch; margin: 14px 0; padding: 10px 14px; border-left: 3px solid var(--callout); background: var(--callout-soft); border-radius: 6px; font-size: 13.5px; }
+.super.gone { border-left-color: var(--bad); background: var(--bad-soft); }
+.moved { display: inline-block; padding: 0 6px; border-radius: 4px; font: 500 11.5px var(--mono); background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn); }
+.moved.gone { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
 
 /* ── 주석 컨테이너 ── */
 .annot-wrap { overflow-x: auto; padding-bottom: 6px; }
@@ -432,14 +437,32 @@ table.q.compact td { padding: 4px 8px; }
 </head>
 <body>
 <div class="page">
-  <div class="eyebrow">remote_ci_monitor · docs/wireframes · 2026-09-17 · 스토어 릴리스 탭 (Downloads/rcm-store-release-tab-prompt.md) · v0.4</div>
+  <div class="eyebrow">remote_ci_monitor · docs/wireframes · 2026-09-20 · 스토어 릴리스 탭 · v0.5</div>
   <h1>웹 스토어 탭 — 심사까지만, 출시는 사람</h1>
   <p class="lede">큐 화면 옆의 두 번째 탭. 소비 저장소(dolomood-app-renew)의 <code>scripts/release/*</code> 와 rcm 프리셋(<code>release-plan · gate-smoke · scenario-qa · release-upload · release-review</code>)이 <b>이미 하는 일을 버튼으로 옮긴다</b>. 판정은 전부 소비 레포 스크립트가 하고 웹은 그 JSON 을 그린다. 값은 2026-09-15 첫 실측(1.0.0-180)의 다음 회차를 가정했다. 번호는 기획 항목, 마우스를 올리면 서로 강조된다.</p>
   <div class="legend"><span><span class="b">1</span> 기획 항목 번호</span><span><span class="ln"></span> 요소를 가리키는 선</span><span>UI 문자열은 영어(제품 규칙 · ko 는 i18n.js), 설명은 한국어</span><span>값은 예시 저장소(dolomood)의 실측 — rcm 은 저장소를 모른다(9절)</span></div>
-  <p class="rev"><b>v0.4</b> (2026-09-17) — 도는 중인 Build·upload 행을 세 층으로(46~48): 가로로 긴 막대 → «지금 하는 일» 한 줄 → 펼치면 항목 목록(끝남 초록 · 도는 중 파랑 화살표 · 기다림 회색). 행 머리와 접힌 상태도 옅은 파랑(49). 진행 마커 문법을 <code>::rcm::progress::done/total::단위::상태</code> 로 확정하고(소비 레포 쪽은 <code>feat/rcm-progress-markers</code> 브랜치에 실제로 찍어 두었다), 9절에 «다른 저장소를 붙이는 법» 을 두어 rcm 이 범용임을 문장으로 잠갔다. <b>v0.3</b> (2026-09-17) — 도는 중인 Build·upload 행에 잡 카드 둘(43~45): 스모크는 시간 근거 막대 + 스텝, 시나리오 QA 는 청크 격자 + 2단계 캡처 필름. <b>v0.2</b> (2026-09-17 오너 피드백) — 화면의 뼈대를 바꿨다. <b>위쪽은 접히는 가로행 넷</b>(설정 · 소스 · 빌드/업로드 · 스토어): 다 되어 있으면 <span class="rowtag ok">옅은 초록으로 접힘</span>, 안 되어 있으면 <span class="rowtag bad">옅은 빨강으로 펼쳐짐</span>. 접힌 머리에는 필수값만, 펼치면 상세. <b>아래 본체는 「이번 버전이 스토어에 어떻게 올라가나」</b> — App Store Connect 의 버전 제출 화면을 본떠 소개 이미지 · 버전 · 빌드 · 릴리스 노트 · 심사 정보를 한 페이지에, <b>Google Play 도 같은 배치로 나란히</b>(보기만). 다 설정돼 있으면 이 본체가 펼쳐져 있고, 접으면 머리에 버전 · 빌드번호 · 「App Store + Google Play 로 올린다」 만 남는다. 9절의 질문 여섯은 오너가 추천대로 결정했다.</p>
-  <p class="rev"><b>네 가지 절대 규칙.</b> ① 비밀은 서버 로컬 파일에만 — 화면은 <code>present · ab12… · verified 21:03</code> 만 안다. ② 승인 뒤 자동 출시 없음 — «Release / Publish / Rollout» 버튼이 없고 그 사실이 문장으로 고정돼 있다. ③ 설정 화면이 스토어 화면 <b>앞의 관문</b>이다 — 토큰·키 파일·지문은 거기서 드롭/경로로 다 넣은 뒤에야 탭이 열린다. ④ 되돌릴 수 없는 일(main 머지 · 업로드 · 심사 제출) 앞에는 사람이 <b>빌드번호를 다시 타이핑</b>한다. Android 심사는 «Play Console 관리형 게시 켜짐을 지금 봤다» 체크 없이는 버튼이 비활성이다.</p>
+  <p class="rev"><b>v0.5</b> (2026-09-20) — 버전 중심 개편이 들어왔다: 10절에 새 화면 셋(버전 목록 · 버전 페이지 · 바텀시트)과 항목 50~62 를 더하고, 1~5절 그림에서 지금은 없는 것에 표시를 달았다. 항목 8 · 22 · 23 · 28 은 옮겨 갔다. <b>v0.4</b> (2026-09-17) — 도는 중인 Build·upload 행을 세 층으로(46~48): 가로로 긴 막대 → «지금 하는 일» 한 줄 → 펼치면 항목 목록(끝남 초록 · 도는 중 파랑 화살표 · 기다림 회색). 행 머리와 접힌 상태도 옅은 파랑(49). 진행 마커 문법을 <code>::rcm::progress::done/total::단위::상태</code> 로 확정하고(소비 레포 쪽은 <code>feat/rcm-progress-markers</code> 브랜치에 실제로 찍어 두었다), 9절에 «다른 저장소를 붙이는 법» 을 두어 rcm 이 범용임을 문장으로 잠갔다. <b>v0.3</b> (2026-09-17) — 도는 중인 Build·upload 행에 잡 카드 둘(43~45): 스모크는 시간 근거 막대 + 스텝, 시나리오 QA 는 청크 격자 + 2단계 캡처 필름. <b>v0.2</b> (2026-09-17 오너 피드백) — 화면의 뼈대를 바꿨다. <b>위쪽은 접히는 가로행 넷</b>(설정 · 소스 · 빌드/업로드 · 스토어): 다 되어 있으면 <span class="rowtag ok">옅은 초록으로 접힘</span>, 안 되어 있으면 <span class="rowtag bad">옅은 빨강으로 펼쳐짐</span>. 접힌 머리에는 필수값만, 펼치면 상세. <b>아래 본체는 「이번 버전이 스토어에 어떻게 올라가나」</b> — App Store Connect 의 버전 제출 화면을 본떠 소개 이미지 · 버전 · 빌드 · 릴리스 노트 · 심사 정보를 한 페이지에, <b>Google Play 도 같은 배치로 나란히</b>(보기만). 다 설정돼 있으면 이 본체가 펼쳐져 있고, 접으면 머리에 버전 · 빌드번호 · 「App Store + Google Play 로 올린다」 만 남는다. 9절의 질문 여섯은 오너가 추천대로 결정했다.</p>
+  <p class="rev"><b>네 가지 절대 규칙.</b> ① 비밀은 서버 로컬 파일에만 — 화면은 <code>present · ab12… · verified 21:03</code> 만 안다. ② 승인 뒤 자동 출시 없음 — «Release / Publish / Rollout» 버튼이 없고 그 사실이 문장으로 고정돼 있다. ③ 설정 화면이 스토어 화면 <b>앞의 관문</b>이다 — 토큰·키 파일·지문은 거기서 드롭/경로로 다 넣은 뒤에야 탭이 열린다. ④ 되돌릴 수 없는 일(main 머지 · 업로드 · 심사 제출) 앞에는 빌드 번호를 <b>다시 확인</b>한다 — 사람이 타이핑하거나, «빌드 번호: 자동» 이면 서버가 플랜의 <code>n</code> 을 대조한다(rcm 은 번호를 만들어 내지 않는다). Android 심사는 «Play Console 관리형 게시 켜짐을 지금 봤다» 체크 없이는 버튼이 비활성이다.</p>
+
+  <div class="super"><b>v0.5 — 이 문서를 읽기 전에.</b> 스토어 탭은 <b>버전 중심</b>으로 바뀌었다.
+    첫 화면은 이제 <b>버전 목록</b>(<code>#/store/&lt;repo&gt;</code>)이고, 아래 1~5절이 그린 화면 —
+    접히는 행 넷과 심사 패널 — 은 <code>#/store/&lt;repo&gt;/status</code> 로 옮겨 갔다. 버전 하나에는
+    자기 주소(<code>#/store/&lt;repo&gt;/v/&lt;id&gt;</code>)와 편집 가능한 문안 칸이 생겼고, <b>심사 제출은
+    그 페이지 맨 아래 바텀시트에만</b> 있다.
+    <br><b>1~5절의 그림에서 지금 없는 것 둘:</b> <span class="moved gone">없어짐</span> 화면 맨 위의 큰
+    릴리스 막대(0.3.2~0.3.3) — 바텀시트의 막대가 대신한다. <span class="moved gone">없어짐</span> 심사
+    패널의 <b>Submit for review</b> 버튼 · 체크박스 다섯 · 빌드 번호 칸 — 패널은
+    <code>#/store/&lt;repo&gt;/status</code> 에서 읽기 전용으로 남고 <b>Validate listing</b> ·
+    <b>Plan review</b> 두 버튼만 누를 수 있다. 그림을 그대로 믿지 말고 항목 50~62(<a href="#v-spec">10절</a>)를 본다.
+    <br>새 화면의 <b>그림</b>은 <code>docs/wireframes/web-version-page.html</code>(2026-09-18 기획안)에
+    W1~W5 로 있다. 그 문서는 <b>만들기 전의 계획</b>이라 몇 군데가 실제와 다르다 — 어긋나면 <b>이 문서의
+    10절이 정본</b>이다.</div>
 
   <h2>1. 기본 화면 — 다 준비됨: 1.0.1 (181) 업로드 끝, 심사 올릴 내용을 확인하는 중 (admin 토큰)</h2>
+  <div class="super gone"><b>이 그림은 v0.4 까지의 화면이다.</b> 지금 이 주소(<code>#/store/&lt;repo&gt;</code>)는
+    버전 목록이고(항목 50~53), 여기 보이는 행 넷과 심사 패널은 <code>#/store/&lt;repo&gt;/status</code> 에 있다.
+    패널 아래의 <b>Submit for review</b> 버튼 · 체크박스 다섯 · 빌드 번호 칸은 <b>어느 화면에도 없다</b> —
+    제출은 버전 페이지의 바텀시트뿐이다(항목 58~60). 나머지(행 넷 · 두 스토어 절 · 잡 카드 · 스테퍼)는 그대로다.</div>
   <div class="annot-wrap"><div class="annot" id="main">
     <div class="screen">
       <div class="s-top">
@@ -565,6 +588,9 @@ table.q.compact td { padding: 4px 8px; }
   </div></div>
 
   <h2>2. 같은 화면, 준비가 안 됐을 때 — 빨간 행은 펼쳐지고 본체는 접힌다</h2>
+  <div class="super gone">같은 단서: 이 배치는 <code>#/store/&lt;repo&gt;/status</code> 의 것이다. 버전 목록에서는
+    같은 판정이 <b>한 줄짜리 상태 띠</b>로 접히고, 하나라도 빨가면 띠가 빨개진다(항목 51). 여기 그려진
+    제출 버튼과 체크박스는 없다.</div>
   <div class="annot-wrap"><div class="annot" id="notready">
     <div class="screen">
       <div class="rows">
@@ -617,6 +643,9 @@ table.q.compact td { padding: 4px 8px; }
   </div></div>
 
   <h2>3. N 확인 대화상자 — S2 · S7 · 심사 제출 앞에서 같은 모양</h2>
+  <div class="super"><b>지금은 두 자리뿐이다.</b> 드라이버의 S2 확인은 이 대화상자 그대로 남아 있고(상태 화면),
+    <b>심사 제출의 빌드 번호는 바텀시트 안의 «빌드 번호» 칸</b>으로 옮겼다(항목 60). 규칙은 같다 —
+    «자동» 이면 플랜의 <code>n</code> 을 서버가 대조하고, «직접 입력» 이면 그 번호와 정확히 같아야 한다.</div>
   <div class="annot-wrap"><div class="annot" id="dlg">
     <div class="screen" style="max-width:560px">
       <div class="dlg" data-c="28">
@@ -681,6 +710,8 @@ table.q.compact td { padding: 4px 8px; }
   </div></div>
 
   <h2>5. 변형 상태</h2>
+  <div class="super">여기 적힌 변형은 상태 화면의 것으로 그대로 남는다. 버전 하나의 변형(편집 중 · 도는 중 ·
+    사람 차례 · 제출 준비됨 · 제출됨 · 실패 · 만료)은 바텀시트가 맡는다 — 항목 58 의 표.</div>
   <div class="variants">
     <div class="variant" data-c="34"><div class="vt">34 · 설정 전 — 스토어 화면은 아예 안 열린다</div>
       <div class="banner bad">dolomood is not set up · <b>2 of 6</b> secrets missing → you are on <b>Settings</b>.</div>
@@ -735,8 +766,8 @@ table.q.compact td { padding: 4px 8px; }
     <article class="spec" id="c7" data-for="7"><div class="num">7</div><div><div class="area">panel</div><h3>본체 머리 · 접힘/펼침</h3>
       <dl><dt>머리(접힘)</dt><dd><b>버전 · 빌드번호 · «Submit for review → App Store + Google Play» · 상태 필</b>(not submitted / waiting for upload / submitted / partial / failed / unsafe_release_type). 그 이상은 없다.</dd>
       <dt>기본 상태</dt><dd>위 네 행이 전부 초록이면 <b>펼쳐져 있다</b>(이 화면의 목적이 그것이다). 하나라도 빨강이면 접히고 필이 이유를 말한다(27). 제출이 끝나도 접힌다(40). 사람이 여닫은 것은 localStorage 로 기억(큐 화면 규칙).</dd></dl></div></article>
-    <article class="spec" id="c8" data-for="8"><div class="num">8</div><div><div class="area">panel · strip</div><h3>버전 띠</h3>
-      <dl><dt>보여주는 것</dt><dd>Version · Build(누가 언제 확인) · 소개 자료 출처(<code>origin/main</code> sha) · 릴리스 노트 파일과 길이 · payload(notes-only / full).</dd><dt>규칙</dt><dd>본체의 모든 값은 이 sha 의 <code>store/</code> 와 마지막 plan 에서 온다. 여기서 편집하지 않는다 — 각 필드 옆 «edit» 은 파일 경로 복사(정본은 git · PR).</dd></dl></div></article>
+    <article class="spec" id="c8" data-for="8"><div class="num">8</div><div><div class="area">panel · strip</div><h3>버전 띠 <span class="moved">→ 항목 55 · 56</span></h3>
+      <dl><dt>보여주는 것</dt><dd>Version · Build(누가 언제 확인) · 소개 자료 출처(<code>origin/main</code> sha) · 릴리스 노트 파일과 길이 · payload(notes-only / full).</dd><dt>규칙</dt><dd>본체의 모든 값은 이 sha 의 <code>store/</code> 와 마지막 plan 에서 온다. 여기서 편집하지 않는다 — 각 필드 옆 «edit» 은 파일 경로 복사(정본은 git · PR).</dd><dt>v0.5</dt><dd>이 띠는 상태 화면의 읽기 전용 패널에 그대로 남는다. <b>편집은 버전 페이지</b>가 맡는다 — 버전 머리(55)와 문안 칸(56). 「여기서 편집하지 않는다」는 이 패널에 한해서만 옳다.</dd></dl></div></article>
     <article class="spec" id="c9" data-for="9"><div class="num">9</div><div><div class="area">panel · app store</div><h3>App Store 절 머리 · 판정</h3>
       <dl><dt>데이터</dt><dd><code>review-plan.json.ios</code> ∈ ready · already_submitted · processing · unusable · missing_build · version_conflict · version_in_review_conflict · <b>unsafe_release_type</b> · store_unreadable. plan 이 없으면 회색 «not judged yet».</dd></dl></div></article>
     <article class="spec" id="c10" data-for="10"><div class="num">10</div><div><div class="area">panel · app store</div><h3>App previews and screenshots</h3>
@@ -758,10 +789,10 @@ table.q.compact td { padding: 4px 8px; }
       <dl><dt>보여주는 것</dt><dd>릴리스 <code>N (X.Y.Z)</code> · track production draft · rollout 100% «fixed by the repo» · <b>Managed publishing: unknown to the API</b>(회색 필 — 절대 초록이 되지 않는다) · «publish stays in the console».</dd><dt>규칙</dt><dd>L1: 관리형 게시는 API 로 읽을 수도 켤 수도 없다. 화면은 그 사실을 숨기지 않는다.</dd></dl></div></article>
     <article class="spec" id="c20" data-for="20"><div class="num">20</div><div><div class="area">panel · google play</div><h3>App content · policy</h3><dl><dt>규칙</dt><dd>Data safety · Content rating 은 콘솔 전용 — «console-only, not touched by rcm». 줄 수를 App Review information 과 맞추기 위한 자리다.</dd></dl></div></article>
     <article class="spec" id="c21" data-for="21"><div class="num">21</div><div><div class="area">panel</div><h3>Changes vs the store (라이브 diff 요약)</h3><dl><dt>데이터</dt><dd><code>store_listing.py diff --live</code>(마지막 pull 스냅샷): 문구 old→new · 이미지 +/−/변경. 바뀐 필드는 위 절에서 <code>changed</code> 칩. 스냅샷 없으면 «pull first».</dd></dl></div></article>
-    <article class="spec" id="c22" data-for="22"><div class="num">22</div><div><div class="area">panel · human</div><h3>체크박스 다섯</h3>
-      <dl><dt>보여주는 것</dt><dd>App Store · Google Play · <b>관리형 게시 켜짐을 지금 봤다</b>(Play 아래 들여쓰기, 황토 점선) · 소개 자료 전체 업로드 · iOS phased.</dd><dt>규칙</dt><dd>Play 를 켜면 관리형 게시 체크 필수 — 없으면 Submit 비활성. 제출마다 새로 체크, 저장 안 함(결정 3). 매핑 <code>platform · play_managed_publishing=confirmed-on · listing=full|notes-only · phased=1|0</code>. 기본은 notes-only(결정 6).</dd></dl></div></article>
-    <article class="spec" id="c23" data-for="23"><div class="num">23</div><div><div class="area">panel · action</div><h3>Validate → Plan review → Submit</h3>
-      <dl><dt>상호작용</dt><dd><b>Validate listing</b> = <code>store_listing.py validate --build-name --version-code</code>(서버 체크아웃, 몇 초) → 위반은 해당 필드 옆에 빨간 줄로. <b>Plan review</b> = <code>release-review mode=plan</code> → 두 절의 판정 필과 diff 가 채워진다. <b>Submit</b> 은 plan ok(≤ 30m) + N 재입력(28, 태그의 최신 N 과 같아야) + Play 체크 → <code>mode=submit</code>. 대화상자에 «cannot be undone» 과 플랫폼 이름.</dd><dt>데이터</dt><dd><code>POST /api/repos/&lt;name&gt;/release/review {mode, platform, confirm_build_number, play_managed_publishing, listing, phased}</code> → 잡 · <code>review-plan.json</code> / <code>review.json</code>.</dd></dl></div></article>
+    <article class="spec" id="c22" data-for="22"><div class="num">22</div><div><div class="area">panel · human</div><h3>체크박스 다섯 <span class="moved">→ 항목 60</span></h3>
+      <dl><dt>보여주는 것</dt><dd>App Store · Google Play · <b>관리형 게시 켜짐을 지금 봤다</b>(Play 아래 들여쓰기, 황토 점선) · 소개 자료 전체 업로드 · iOS phased.</dd><dt>규칙</dt><dd>Play 를 켜면 관리형 게시 체크 필수 — 없으면 Submit 비활성. 제출마다 새로 체크, 저장 안 함(결정 3). 매핑 <code>platform · play_managed_publishing=confirmed-on · listing=full|notes-only · phased=1|0</code>. 기본은 notes-only(결정 6).</dd><dt>v0.5</dt><dd>다섯이 통째로 <b>바텀시트의 «제출 조건»</b> 으로 옮겼다(60). 심사 패널에는 체크박스가 하나도 없다. 규칙과 입력 매핑은 바뀌지 않았다.</dd></dl></div></article>
+    <article class="spec" id="c23" data-for="23"><div class="num">23</div><div><div class="area">panel · action</div><h3>Validate → Plan review <span class="moved gone">Submit 은 → 항목 58 · 60</span></h3>
+      <dl><dt>상호작용</dt><dd><b>Validate listing</b> = <code>store_listing.py validate --build-name --version-code</code>(서버 체크아웃, 몇 초) → 위반은 해당 필드 옆에 빨간 줄로. <b>Plan review</b> = <code>release-review mode=plan</code> → 두 절의 판정 필과 diff 가 채워진다. <b>Submit</b> 은 plan ok(≤ 30m) + N 재입력(28, 태그의 최신 N 과 같아야) + Play 체크 → <code>mode=submit</code>. 대화상자에 «cannot be undone» 과 플랫폼 이름.</dd><dt>데이터</dt><dd><code>POST /api/repos/&lt;name&gt;/release/review {mode, platform, confirm_build_number, play_managed_publishing, listing, phased}</code> → 잡 · <code>review-plan.json</code> / <code>review.json</code>.</dd><dt>v0.5</dt><dd>패널에 남은 버튼은 <b>Validate listing</b> 과 <b>Plan review</b> 둘뿐이다 — 둘 다 읽기 전용이다. <b>Submit</b> 은 버전 페이지 바텀시트의 «심사 제출…» 하나뿐이고(58), 열리는 조건은 같되 요청에 <code>version_id</code> 와 그 드래프트의 버전 이름이 함께 간다.</dd></dl></div></article>
     <article class="spec" id="c24" data-for="24"><div class="num">24</div><div><div class="area">panel · policy</div><h3>고정 문장</h3><dl><dt>규칙</dt><dd>«Approval does not release …» 는 본체 바닥에 항상. 결과(40)에도. <code>auto_release</code> 관측 true → 36.</dd></dl></div></article>
   </div>
 
@@ -770,8 +801,8 @@ table.q.compact td { padding: 4px 8px; }
     <article class="spec" id="c25" data-for="25"><div class="num">25</div><div><div class="area">row · bad</div><h3>빨간 Source 행</h3><dl><dt>보여주는 것</dt><dd>머리에 <b>왜</b> 빨간지 한 줄(<code>main not in dev</code> · 나이 · PR · 태그 없음). 펼친 안에 히스토리·PR·태그 + 고치는 길(«back-merge main → dev»). Fetch 는 머리에서 바로.</dd></dl></div></article>
     <article class="spec" id="c26" data-for="26"><div class="num">26</div><div><div class="area">row · running</div><h3>도는 중인 Build · upload 행</h3><dl><dt>상태</dt><dd>파랑 펼침(빨강 아님 — 실패가 아니다). 스테퍼 · 진행 막대 · 잡 표. S2 는 사람 단계(황토 테두리) — N 대화상자(28)는 여기서 뜬다. S6·S7 은 <code>irreversible</code> 미리 표기.</dd></dl></div></article>
     <article class="spec" id="c27" data-for="27"><div class="num">27</div><div><div class="area">panel · locked</div><h3>접힌 본체</h3><dl><dt>보여주는 것</dt><dd>버전 · 빌드 · 대상 두 스토어 · 필 «waiting for upload (S7)» — 필이 <b>왜 못 여는지</b>를 말한다(waiting for upload · plan blocked · source not ready · secrets expired). 펼칠 수는 있다(읽기 전용, 버튼 전부 비활성).</dd></dl></div></article>
-    <article class="spec" id="c28" data-for="28"><div class="num">28</div><div><div class="area">dialog · human</div><h3>N 확인 대화상자</h3>
-      <dl><dt>규칙</dt><dd>체크박스가 아니라 <b>숫자를 다시 타이핑</b>(doc 35 §2 B). 다르면 버튼이 안 열리고 <code>≠ 181</code>. S2 · S7 직전 · 심사 제출 직전 각각 한 번 — 한 확인이 다음 되돌릴 수 없는 일까지 넘어가지 않는다. 확인한 사람·시각을 남긴다.</dd></dl></div></article>
+    <article class="spec" id="c28" data-for="28"><div class="num">28</div><div><div class="area">dialog · human</div><h3>N 확인 대화상자 <span class="moved">심사 제출분은 → 항목 60</span></h3>
+      <dl><dt>규칙</dt><dd>체크박스가 아니라 <b>숫자를 다시 타이핑</b>(doc 35 §2 B). 다르면 버튼이 안 열리고 <code>≠ 181</code>. S2 · S7 직전 · 심사 제출 직전 각각 한 번 — 한 확인이 다음 되돌릴 수 없는 일까지 넘어가지 않는다. 확인한 사람·시각을 남긴다.</dd><dt>v0.5</dt><dd>드라이버의 S2 확인은 이 대화상자 그대로다. <b>심사 제출의 번호는 시트 안의 칸</b>이고(60), 0.3.2 부터 «빌드 번호: 자동» 이면 사람이 타이핑하는 대신 서버가 플랜의 <code>n</code> 을 대조한다 — 어느 쪽이든 rcm 이 번호를 만들어 내지는 않는다.</dd></dl></div></article>
     <article class="spec" id="c29" data-for="29"><div class="num">29</div><div><div class="area">settings · gate</div><h3>관문 띠 · Enter Store</h3>
       <dl><dt>보여주는 것</dt><dd>«n of m secrets set · k verified» 와 <b>Enter Store</b>. 필수 비밀 전부 present+verified 일 때만 열린다(Teams·Firebase 는 선택). 안 됐으면 띠가 빨강, 다 됐으면 초록.</dd><dt>데이터</dt><dd><code>GET /api/repos/&lt;name&gt;</code> 의 <code>setup: {required, present, verified, complete}</code>. <code>complete=false</code> 면 스토어 라우트가 설정으로(클라이언트 + 서버 <code>409 setup incomplete</code>).</dd><dt>규칙</dt><dd>토큰 · 서명 키 · 지문 같은 민감 값은 CD 화면에 들어가기 <b>전에</b> 다 넣는다. 스토어 화면 안에는 비밀을 묻는 대화상자가 없다.</dd></dl></div></article>
     <article class="spec" id="c30" data-for="30"><div class="num">30</div><div><div class="area">settings · input</div><h3>드롭존 · 파일 선택 · 경로 입력</h3>
@@ -817,16 +848,18 @@ table.q.compact td { padding: 4px 8px; }
   <h2>7. 이 화면이 정한 규칙</h2>
   <ul class="qa">
     <li><b>행의 색이 곧 상태다.</b> 접히는 행 넷은 «다 됨 → 옅은 초록 · 접힘», «안 됨 → 옅은 빨강 · 펼침», «도는 중 → 파랑 · 펼침», «낡음 → 황토 · 펼침», «해당 없음 → 회색 · 접힘». 접힌 머리에는 필수값만(버전 · N · 상태 · 나이), 펼치면 상세. 사람이 여닫은 것은 기억한다.</li>
-    <li><b>본체는 「스토어에 어떻게 올라가나」 한 페이지.</b> App Store Connect 의 버전 페이지 순서(스크린샷 → 버전 정보 → What's New → 빌드 → 심사 정보)를 그대로 쓰고, Google Play 를 같은 그룹 순서·같은 줄 위치로 옆에 둔다. 없는 필드는 비워 두고 이유를 쓴다. 전부 읽기 전용 — 정본은 git.</li>
+    <li><b>본체는 「스토어에 어떻게 올라가나」 한 페이지.</b> App Store Connect 의 버전 페이지 순서(스크린샷 → 버전 정보 → What's New → 빌드 → 심사 정보)를 그대로 쓰고, Google Play 를 같은 그룹 순서·같은 줄 위치로 옆에 둔다. 없는 필드는 비워 두고 이유를 쓴다. <b>v0.5</b>: 이 배치는 두 곳이 같이 쓴다 — 상태 화면의 심사 패널은 <b>읽기 전용</b>이고(정본은 git), 버전 페이지는 같은 배치에 <b>편집 칸</b>을 놓는다(56). 편집본은 git 이 아니라 rcm 의 드래프트에 있다가 <code>listing_json</code> 으로 스크립트에 넘어간다.</li>
     <li><b>본체의 기본은 펼침.</b> 네 행이 초록이면 펼쳐져 있고, 하나라도 빨강이면 접히며 필이 이유를 말한다. 접힌 머리 = 버전 · 빌드번호 · «App Store + Google Play».</li>
     <li><b>웹은 판정하지 않는다.</b> N · 스테이지 · 심사 판정 · 위반은 소비 레포 스크립트의 JSON·종료코드 그대로. rcm 코드에 dolomood 이름은 없다 — 전부 프로파일.</li>
-    <li><b>세 번의 타이핑.</b> S2 · S7 직전 · 심사 제출 직전에 N 을 새로 타이핑한다.</li>
-    <li><b>출시 버튼 없음.</b> «Release · Publish · Rollout» 은 어떤 상태에서도 없다. 고정 문장은 본체 바닥과 결과에. 관리형 게시 필은 절대 초록이 되지 않는다.</li>
+    <li><b>되돌릴 수 없는 일 앞마다 번호를 다시 확인한다.</b> S2 · S7 직전 · 심사 제출 직전 — 사람이 N 을 새로 타이핑하거나, «빌드 번호: 자동» 이면 서버가 플랜의 <code>n</code> 을 대조한다(0.3.2). 한 확인이 다음 일까지 넘어가지 않고, rcm 이 번호를 지어내지 않는다는 규칙은 그대로다.</li>
+    <li><b>출시 버튼 없음.</b> «Release · Publish · Rollout» 은 어떤 상태에서도 없다. 고정 문장은 버전 목록 · 버전 페이지 · 바텀시트 · 심사 패널 넷에 다 있다. 관리형 게시 필은 절대 초록이 되지 않는다. 검사식은 글자가 아니라 <b>신원</b>으로 면제한다 — 시트의 «남은 것» 줄(<code>data-sheet-fix</code>)과 대기열의 입력 칩(<code>data-inputs</code>) 둘뿐이다.</li>
     <li><b>관문이 먼저.</b> 민감 값은 설정 화면에서 드롭/경로로 다 넣은 뒤에야 스토어 화면이 열린다. 안에서는 비밀을 묻지 않는다. API 는 <code>present · fingerprint · verified_at</code> 만.</li>
     <li><b>권한.</b> 보기 → 잡 제출 → admin. 비활성 버튼은 이유를 쓴다.</li>
     <li><b>실패 ≠ 빈 값 ≠ 모름 ≠ 낡음.</b> 각각 다른 색·모양. 업로드가 «모름» 이면 재제출 버튼이 없다.</li>
     <li><b>도는 행은 세 층.</b> 긴 막대(근거 글자와 함께) → «지금 하는 일» 한 줄 → 펼치면 항목 목록(✓ 초록 · ▶ 파랑 · 회색 waiting). 행 머리와 접힌 상태는 옅은 파랑.</li>
     <li><b>진행은 근거를 말한다.</b> 막대의 근거는 셋 중 하나 — 선언된 스텝 수 · 세부 진행 마커(<code>::rcm::progress::</code>) · 측정 시간. 근거를 화면에 쓴다(«by time · median 21m»). 숫자를 지어내지 않는다: 잡이 총수를 선언하지 않으면 «of ~54» 처럼 추정임을 표시한다.</li>
+    <li><b>제출하는 곳은 하나다.</b> 심사 제출 버튼 · 체크박스 · 빌드 번호 칸은 버전 페이지의 바텀시트에만 있다. 같은 일을 두 곳에서 할 수 있으면 어느 쪽이 정본인지 아무도 모른다.</li>
+    <li><b>드래프트는 쌓이지도, 모르는 새 사라지지도 않는다.</b> 손도 안 댄 드래프트는 <code>version_ttl_hours</code>(기본 24) 뒤에 버려지고, <b>고친 적이 있는</b> 드래프트는 «만료» 표시만 하고 사람을 기다린다. 심사 작업 · 업로드 작업 · 드라이버 회차 중 하나라도 살아 있으면 버릴 수 없고, 행이 무엇이 붙잡고 있는지 이름으로 말한다.</li>
     <li><b>큐 화면 규칙을 물려받는다.</b> 시각·소요 표기, 색 + 글리프 + 테두리, 키보드·보조기기, SSE, i18n.</li>
   </ul>
 
@@ -855,6 +888,95 @@ table.q.compact td { padding: 4px 8px; }
     <li><b>웹</b>: 해시 라우터(<code>#/</code> · <code>#/store/&lt;repo&gt;</code>) · <code>&lt;details&gt;</code> 행 넷 + 본체 · i18n ko/en · <code>tests/web</code> 에 순수 함수(행 색 결정 · 본체 펼침 결정 · 스테이지→스테퍼 · 판정→필 · Submit 활성 조건 · N 비교).</li>
     <li><b>PR 순서</b>: ① 프로파일 + 관문 설정 + 검증(이 단계만으로 <code>release-plan</code> 이 웹에서 돈다) → ② 행 넷(Source · Store · Build) → ③ 본체(두 스토어 절 · validate · diff) + 심사 제출 → ④ 릴리스 실행(드라이버) → ⑤ 마스킹 · 권한 · 문서 마감. submit · upload 는 오너가 보는 앞에서만 실측.</li>
   </ul>
+
+  <h2 id="v-spec">10. 버전 중심 개편 (2026-09-20) — 새 화면 셋과 항목 50~62</h2>
+  <p class="note">여기부터가 <b>지금 도는 화면의 정본</b>이다. 1~5절의 그림은 개편 전의 것이고, 새 화면의
+    그림은 <code>docs/wireframes/web-version-page.html</code> 에 W1~W5 로 있다 — 그 문서는 <b>만들기 전의
+    계획</b>이라 몇 군데가 실제와 다르므로(그 문서 머리에 차이를 적어 두었다), 어긋나면 아래 항목이 이긴다.
+    항목 형식은 6절과 같다. 값은 예시 저장소(dolomood)의 것이고 rcm 코드에는 그 이름이 없다(8절).</p>
+
+  <div class="group">주소 · 버전 목록</div>
+  <div class="specs">
+    <article class="spec" id="c50"><div class="num">50</div><div><div class="area">router</div><h3>주소 셋</h3>
+      <dl><dt>규칙</dt><dd><code>#/store/&lt;repo&gt;</code> 버전 목록(탭의 첫 화면) · <code>#/store/&lt;repo&gt;/v/&lt;id&gt;</code> 버전 페이지 + 바텀시트 · <code>#/store/&lt;repo&gt;/status</code> 상태 화면(행 넷 + 심사 패널). 그 밖의 해시는 큐로 떨어진다. 헤더의 <b>Store</b> 링크와 저장소 고르개는 언제나 목록으로 간다.</dd>
+        <dt>상태</dt><dd>관문이 닫혀 있으면 어느 주소로 들어와도 설정 화면이 나오고, <b>들어오려던 주소를 기억했다가</b> 관문이 열리는 순간 그리로 되돌려 보낸다(29 의 관문 규칙은 그대로).</dd></dl></div></article>
+
+    <article class="spec" id="c51"><div class="num">51</div><div><div class="area">list · strip</div><h3>상태 띠 — 행 넷을 한 줄로</h3>
+      <dl><dt>보여주는 것</dt><dd>칩 넷이 한 줄에. <b>자격 증명</b> <code>비밀 4/4 있음 · 검증 21:53</code> · <b>소스</b> <code>main a1b2c3d · main 이 dev 에 있음 · 2분 전 fetch</code> · <b>스토어</b> <code>App Store 1.1.0 (180) · Play 1.0.0 (180) · 다음 빌드 181</code> · <b>막힘</b> <code>막힘 1 · 경고 2</code>(0 이면 칩 자체가 없다).</dd>
+        <dt>상태</dt><dd>칩 하나라도 빨가면 띠 전체가 빨갛다. 자격 증명은 <code>setup.complete</code> 이고 검증 수가 필요 수 이상이어야 초록 — <b>모르면 초록이 아니다</b>. 소스는 fetch 실패 · <code>main ⊄ dev</code> · 미러 30분 초과 · 브랜치 모름이면 빨강. 스토어는 플랜이 없거나(«플랜 없음 — 스토어 상태를 모릅니다») <code>plan_max_age_minutes</code> 를 넘겼으면 빨강.</dd>
+        <dt>상호작용</dt><dd>띠 전체가 <code>#/store/&lt;repo&gt;/status</code> 로 가는 링크다. 오른쪽 끝의 «상태 자세히» 는 그 링크의 꼬리표일 뿐 따로 누를 것이 아니다.</dd>
+        <dt>규칙</dt><dd>띠는 «지금 이 앱을 올릴 수 있는가» 만 답한다. 버전마다 달라지는 것(빌드 번호 확인 · 관리형 게시 · 심사 플랜)은 바텀시트가 맡는다.</dd></dl></div></article>
+
+    <article class="spec" id="c52"><div class="num">52</div><div><div class="area">list · row</div><h3>드래프트 행</h3>
+      <dl><dt>보여주는 것</dt><dd>글리프(<code>✎</code> 편집 중 · <code>✗</code> 실패 · <code>⌫</code> 지우는 중) · 제목 <code>iOS 1.1.1 · Android 1.0.1</code>(두 이름이 같으면 한 번만) · 상태 필 · 그리고 <b>사실을 이름으로</b> 적는 꼬리말: <code>만드는 중 · 작업 #641</code> / <code>진행 중 · 릴리스 회차 #12 · 업로드 작업 #650</code> / <code>스토어에서 지우는 중 · 작업 #88</code> / <code>만든 지 40m</code> / <code>필드 3개 바뀜</code>(없으면 «바뀐 필드 없음») / <code>빌드 있음</code>·<code>빌드 아직 없음</code> / <code>만료 · 사람이 정리해야 합니다</code> / <code>실패: …</code>(120자에서 자름).</dd>
+        <dt>상태</dt><dd>필: 만드는 중 · 편집 중 · 진행 중 · 제출됨 · 폐기됨 · 실패, 그리고 «지우는 중»(삭제 작업이 도는 동안). 행 자신의 끝난 형편(실패 · 만료)이 도는 회차보다 앞선다.</dd>
+        <dt>상호작용</dt><dd><b>열기</b>(항상) · <b>다시 만들기</b>(<code>failed</code> 일 때만 — 실패한 행은 이름을 붙잡지 않으므로 같은 이름으로 다시 대화상자가 열린다) · <b>버리기</b>(확인 대화상자 → <code>DELETE</code>). 버리기는 제출됨 · 폐기됨 · 진행 중 · 만드는 중이면 비활성이고, <b>왜 못 누르는지를 화면에 적는다</b>(툴팁에만 두지 않는다).</dd>
+        <dt>데이터</dt><dd><code>GET …/release/versions</code> 의 <code>drafts[]</code>. 「진행 중」의 근거는 셋뿐이다 — 살아 있는 심사 작업 · 살아 있는 업로드 작업 · 이 버전의 드라이버 회차. <b>마지막 하나가 끝나야</b> 편집 중으로 내려온다.</dd></dl></div></article>
+
+    <article class="spec" id="c53"><div class="num">53</div><div><div class="area">list · row</div><h3>라이브 행 · 지난 행 · 바닥 문장</h3>
+      <dl><dt>보여주는 것</dt><dd>라이브 행(<code>✓</code>, 필 «라이브», <code>플랜 작업 #612 에서</code>) 은 플랜이 이름을 알 때만 나온다. 지난 행은 제출된 것 <b>최대 20</b>(서버가 자른다) — <code>제출됨 21:52 · 심사 작업 #691</code>.</dd>
+        <dt>규칙</dt><dd>바닥에 문장 둘: <code>드래프트는 편집도 제출도 없이 24시간이 지나면 지워집니다.</code>(<code>ttl_hours</code> 를 서버가 알려줄 때만) 와 고정 문장 «승인은 출시가 아닙니다 — 이 화면에는 release · publish · rollout 버튼이 없습니다».</dd>
+        <dt>상태</dt><dd>플랜이 없으면 «플랜이 없습니다 — 플랜을 만들면 라이브 버전이 여기 보입니다». 드래프트가 없으면 «드래프트가 없습니다 — «새 버전 만들기» 로 시작합니다». 이 빌드에 버전 라우트가 없으면(404) 한 줄로 그렇게 말한다.</dd></dl></div></article>
+
+    <article class="spec" id="c54"><div class="num">54</div><div><div class="area">list · dialog</div><h3>«+ 새 버전 만들기» 대화상자</h3>
+      <dl><dt>보여주는 것</dt><dd>알림 문장 «App Store 에는 편집 중인 버전이 생기고, Google Play 는 업로드 전까지 rcm 안에만 있습니다.» · 스토어마다 체크박스 + 칸 + 힌트(<code>라이브 1.1.0 의 다음 patch</code>, 힌트가 없으면 «플랜을 먼저 만들면 힌트가 나옵니다») · 규칙 문장 · <b>만들기</b>.</dd>
+        <dt>데이터</dt><dd>칸의 기본값은 플랜의 <code>next_version_hint</code>, 없으면 라이브 이름의 <b>마지막 정수 +1</b>(<code>1.1.0 → 1.1.1</code>). <code>1.0.0-rc1</code> 처럼 못 읽는 이름은 힌트가 없다. 칸이 그려지는 스토어는 <b>플랜이 라이브 이름이나 힌트를 아는 쪽</b>뿐이라, iOS 만 있는 프로젝트에는 칸도 하나다(둘 다 모르면 둘 다 그린다).</dd>
+        <dt>상태</dt><dd>«만들기» 가 닫히는 경우와 그때 칸 아래에 뜨는 이유: 체크한 스토어가 없음(«스토어를 하나 이상 골라야 합니다») · 빈 이름 · <code>major.minor.patch</code> 꼴이 아님 · 라이브보다 작거나 같음 · admin 토큰 없음 · 이미 만드는 중.</dd>
+        <dt>상호작용</dt><dd>체크를 끄면 그 스토어는 <b>요청 본문에서 빠진다</b>. 성공하면 대화상자가 닫히고 <code>#/store/&lt;repo&gt;/v/&lt;id&gt;</code> 로 간다. 409 <code>version_exists</code> 는 «같은 이름의 드래프트 #12 가 이미 있습니다» + 그 드래프트로 가는 <b>열기</b> 링크로 돌아온다.</dd></dl></div></article>
+  </div>
+
+  <div class="group">버전 페이지</div>
+  <div class="specs">
+    <article class="spec" id="c55"><div class="num">55</div><div><div class="area">version · head</div><h3>버전 페이지 머리</h3>
+      <dl><dt>보여주는 것</dt><dd>«← 버전» 목록 링크 · 제목(행과 같은 제목 · 필 · 꼬리말) · <code>상태 / 만든 사람 / 만든 때 / 만료</code> 네 줄. <code>creating</code> 이면 «만드는 중 · 작업 #n» 안내 띠, <code>error</code> 가 있으면 빨간 띠(200자에서 자름).</dd>
+        <dt>규칙</dt><dd>이 페이지에는 <b>버리기가 없다</b> — 드래프트를 버리는 길은 목록 행 하나뿐이다. 바닥에 고정 문장.</dd>
+        <dt>데이터</dt><dd><code>GET …/release/versions/&lt;id&gt;</code> 를 <b>5초마다</b>. 이 라우트만 그 박자로 부른다 — 하위 프로세스를 돌리지 않기 때문이다. 드라이버(<code>…/release/driver</code>)는 15초, 소개 자료(<code>…/release/listing</code>)는 화면에 들어올 때와 «새로고침» 때만.</dd></dl></div></article>
+
+    <article class="spec" id="c56"><div class="num">56</div><div><div class="area">version · fields</div><h3>편집 가능한 문안 칸</h3>
+      <dl><dt>보여주는 것</dt><dd>드래프트가 이름을 가진 스토어마다 한 절 — App Store · iOS / Google Play · Android — 를 심사 패널과 <b>같은 그룹 순서</b>로. 편집할 수 있는 키는 iOS <code>subtitle · promotional_text · description · keywords · support_url · marketing_url · whats_new</code>, Android <code>title · short_description · full_description · whats_new</code>.</dd>
+        <dt>데이터</dt><dd>값의 우선순위: <b>이 브라우저에서 친 것 → 서버의 <code>edited</code> → <code>prefill</code>(이전 버전) → <code>store/</code> 파일 → 빈 값.</b> 칸 아래에 그 출처를 적는다 — «이전 버전 그대로» · «내가 고친 것» · «파일에서» · «비어 있음». 비교는 양끝 공백과 CRLF 를 무시하므로, 이전 값으로 되돌려 치면 꼬리표도 «이전 버전 그대로» 로 돌아간다.</dd>
+        <dt>상태</dt><dd>글자 수는 <b>코드 포인트</b>로 세고 스토어 상한에 댄다(부제 30 · 앱 이름 30 · 간단한 설명 80 · 설명 4000 · 키워드 100 · 프로모션 170 · URL 255 · 새로운 기능 iOS 4000 · Android 500). 상한의 90% 부터 황토, 넘으면 빨강 — 그리고 <b>넘겨도 저장된다</b>(최종 판정은 스토어). 넘은 칸은 시트의 «남은 것» 에 한 줄이 된다.</dd>
+        <dt>상호작용</dt><dd>프리필과 달라지는 순간 «바뀜» 칩과 <b>되돌리기</b>(그 칸만, 프리필 값으로 — 누르면 바로 저장). 다른 브라우저가 같은 칸을 고쳤으면 «다른 곳에서 바뀜» 칩.</dd>
+        <dt>규칙</dt><dd>스크린샷 · 그래픽은 <b>보기만</b> 한다. 칩은 재지 않은 것을 «같음» 이라 말하지 않는다 — «rcm 은 스크린샷을 건드리지 않습니다». 빌드 · 출시 설정 · 심사 정보 · 앱 콘텐츠도 읽기 전용이고 심사 패널과 같은 코드가 그린다.</dd></dl></div></article>
+
+    <article class="spec" id="c57"><div class="num">57</div><div><div class="area">version · autosave</div><h3>자동 저장 · 저장 실패 · 읽기 전용</h3>
+      <dl><dt>상호작용</dt><dd>마지막 타이핑에서 <b>800 ms</b> 뒤 <code>PUT …/release/versions/&lt;id&gt;/listing</code> 에 <b>바뀐 키만</b> 실어 보낸다. 배지: «고치면 저절로 저장됩니다» → «저장하는 중…» → «자동 저장 · 12s 전» → 실패하면 «저장 실패: …» + <b>다시 저장</b>(같은 본문을 다시).</dd>
+        <dt>상태</dt><dd>거절 본문이 JSON 이 아니면(HTML 오류 쪽지) <b>상태 코드만</b> 적고, 그 밖의 메시지도 120자에서 자른다. 401·403 이면 토큰을 버리므로 다음 그림부터 화면이 읽기 전용이 된다 — <b>그래도 입력한 글은 화면에 남는다</b>(친 값이 우선순위 맨 앞이다).</dd>
+        <dt>규칙</dt><dd>읽기 전용은 둘뿐 — admin 토큰이 없거나(«문안을 고치려면 admin 토큰이 필요합니다 — 지금은 보기만 합니다»), 드래프트가 제출·폐기됨(«이 버전은 제출됨이라 문안을 더 고칠 수 없습니다»). 둘 다면 토큰 쪽을 말한다.</dd>
+        <dt>상태</dt><dd>5초 폴링이 다른 브라우저의 편집을 물어 오면 <b>강제로 덮어쓰지 않는다</b>: 직접 친 칸은 화면의 글 그대로 두고(저장하면 그쪽을 덮어쓴다), 손대지 않은 칸만 그쪽 값을 받으며 둘 다 칩으로 표시한다.</dd></dl></div></article>
+  </div>
+
+  <div class="group">바텀시트</div>
+  <div class="specs">
+    <article class="spec" id="c58"><div class="num">58</div><div><div class="area">sheet · head</div><h3>바텀시트 — 접힌 머리</h3>
+      <dl><dt>보여주는 것</dt><dd>버전 이름 · 상태 필 · <b>상태 한 줄</b> · (도는 중이면 작은 막대와 %) · <b>심사 제출…</b> · 펼치기/접기. 화면 아래에 <code>position: sticky</code> 로 붙어 있고, 시트가 화면보다 크면 시트 전체를 <code>min(74vh, 100vh − 160px)</code> 로 맞춰 <b>머리와 «접기» 가 언제나 보인다</b>.</dd>
+        <dt>상태</dt><dd>한 줄의 모양: 편집 중 «심사 전에 남은 것 3 · 빌드 아직 없음» · 도는 중 «S5 시나리오 QA · 10단계 중 7번째 · 66% · 경과 38m · 예상 21:40» · 준비됨 «제출 준비됨 · 심사 플랜 4m 전 · 빌드 181» · 제출됨 «제출됨 21:52 · 심사 대기» · 실패한 행 «실패: …»(원인 한 줄) · 만료 «만료 — 사람이 «버리기» 로 정리합니다». 머리는 <b>막는 줄을 먼저</b> 댄다(경고는 막는 것이 없을 때만).</dd>
+        <dt>규칙</dt><dd>시트는 <b>버전 페이지에만</b> 있다. 접힘/펼침은 저장소별로 기억하고(<code>localStorage rcm.sheet.&lt;repo&gt;</code>), 기억이 없으면 <b>펼친 상태</b>로 시작한다 — 감추는 쪽이 기본이 되지 않도록.</dd></dl></div></article>
+
+    <article class="spec" id="c59"><div class="num">59</div><div><div class="area">sheet · body</div><h3>펼친 시트 — 막대 · 단계 · 두 열</h3>
+      <dl><dt>보여주는 것</dt><dd>가로 막대 → 단계 칩 → 근거 한 줄 → 두 열(«심사 전에 남은 것» · «이전 버전과 달라진 것»). 폭 720 px 아래에서는 두 열이 한 열이 되고 시트 본문이 스크롤한다.</dd>
+        <dt>데이터</dt><dd>단계 칩은 프로파일에 드라이버가 있으면 <b>V S0…S8</b> 열 칸(V = «버전», 행이 만들어졌으면 done), 없으면 <b>이번 회차의 작업들</b>(<code>#641 release-plan</code> …).</dd>
+        <dt>규칙</dt><dd><b>퍼센트는 분모를 미리 선언했을 때만</b> 나온다 — 드라이버의 <code>stages:</code> 줄. 그때 근거가 «선언된 10 단계» 라고 그 분모를 댄다. 드라이버가 없으면 단계 목록은 「지금까지 돈 작업」이라 분모가 자라므로 <b>숫자를 내지 않고</b> 빗금 막대와 문장만 남긴다. «빌드가 올라갔다» 는 문장은 <code>upload.json</code> 과 <b>업로드 작업의 상태</b> 가 둘 다 허락할 때만 나온다.</dd>
+        <dt>상호작용</dt><dd>«남은 것» 의 각 줄은 <b>고치는 곳으로 가는 버튼</b>이다 — 상한을 넘은 칸이면 그 칸으로 스크롤하고 포커스를 주고, 낡은 플랜이면 상태 화면으로 간다. 차례가 곧 중요도다: 업로드 결과 모름 · 업로드 실패 · 빌드 없음 · 회차 도는 중 · 심사 플랜 없음/낡음/막힘 · 빌드 번호 모름/불일치 · 관리형 게시 · 문안 상한 · <code>listing_json</code> 없음 · 두 이름 못 씀 · (경고) Play 그래픽 없음 · (경고) 드라이버가 V 를 모름 · 릴리스 타입. 남은 것이 없으면 «남은 것이 없습니다 — 제출 버튼이 열려 있습니다.»</dd></dl></div></article>
+
+    <article class="spec" id="c60"><div class="num">60</div><div><div class="area">sheet · human</div><h3>제출 조건 · 보내는 것 · 결과</h3>
+      <dl><dt>보여주는 것</dt><dd>체크박스 넷(App Store · Google Play · 소개 자료 전체 업로드 · iOS 단계적 출시) · <b>관리형 게시</b> 칸(Play 를 껐으면 회색) · <b>빌드 번호</b>(«자동 (스토어 기준)» 이면 플랜의 번호를 읽어 주기만, «직접 입력» 이면 칸과 <code>= 181</code>·<code>≠ 181</code> 판정) · «보내는 것» 다섯 조각 · 고정 문장 · 제출 뒤 «결과».</dd>
+        <dt>규칙</dt><dd>관리형 게시는 <b>제출마다 새로</b> 체크한다 — 기억하지 않고 미리 켜 두지도 않는다. 빌드 번호는 플랜의 <code>n</code> 이거나 그것과 정확히 같게 친 숫자뿐이다. 제출 버튼은 «남은 것» 에 막는 줄이 하나도 없을 때만 열린다.</dd>
+        <dt>데이터</dt><dd><code>POST …/release/review</code> 본문에 <code>version_id</code> 와 <b>그 드래프트 자신의 버전 이름</b>, <code>mode=submit · platform · confirm_build_number(auto|숫자) · play_managed_publishing · listing · phased</code>. 확인 대화상자를 한 번 더 거친다(«되돌릴 수 없습니다 · 승인은 출시가 아닙니다»).</dd></dl></div></article>
+
+    <article class="spec" id="c61"><div class="num">61</div><div><div class="area">status · panel</div><h3>상태 화면에 남은 것과 없어진 것</h3>
+      <dl><dt>남은 것</dt><dd>행 넷(Setup · Source · Build · upload · Store)과 그 안의 모든 것 — 비밀 표 · Verify all · Fetch remote · GitHub 카드 · 드라이버 스테퍼 S0~S8 과 Start/Abort/Retry/Confirm N/Rehearsal · 잡 카드(43~49) · 플랜 값 — 은 그대로다. 심사 패널도 남는다: 결과 · 버전 띠 · 두 스토어 절 · 라이브 diff · <b>Validate listing</b> · <b>Plan review</b>.</dd>
+        <dt>없어진 것</dt><dd><span class="moved gone">없어짐</span> 화면 맨 위의 큰 릴리스 막대 · 심사 패널의 <b>Submit for review</b> · 체크박스 다섯 · 제출용 빌드 번호 칸. 상태 화면에도 없다.</dd>
+        <dt>알려진 거스러미</dt><dd>패널에 «Submit 은 초록 플랜(≤ 30분) · 빌드 번호 · Play 체크가 있어야 열립니다» 라는 안내 문장이 아직 남아 있다 — 그 버튼은 이제 버전 페이지에만 있다. Build 행의 «빌드 번호» 토글은 <b>드라이버의 N</b> 이지 심사 제출의 N 이 아니다.</dd></dl></div></article>
+  </div>
+
+  <div class="group">CLI · 계약</div>
+  <div class="specs">
+    <article class="spec" id="c62"><div class="num">62</div><div><div class="area">cli · contract</div><h3>웹 말고 다른 입구 — <code>rcm release</code> 와 <code>version</code> 역할</h3>
+      <dl><dt>상호작용</dt><dd><code>rcm release new</code> 는 <b>이름만</b> 묻는다(<code>iOS [1.1.1]: </code> — 엔터는 힌트, <code>-</code> 는 그 스토어를 건너뜀, <code>--yes</code> 는 둘 다 힌트). 그러고는 새 드래프트와 상태, 그리고 버전 페이지 주소를 찍는다. <code>list</code> · <code>delete &lt;id&gt;</code> · <code>open &lt;id&gt;</code> 가 나머지다. 전부 서버 API 만 부른다.</dd>
+        <dt>데이터</dt><dd>프로파일에 <code>presets.version</code> 이 있으면 «새 버전» 이 그 프리셋을 <code>mode=create</code> 로 돌려 App Store 에 드래프트를 만들고 <code>version.json</code> · <code>prefill.json</code> 을 받는다. 없으면 드래프트는 rcm 안에만 생기고(바로 «편집 중») 문안은 <code>store/</code> 파일에서 채워진다. 프리셋의 <code>mode</code> <b>기본값은 <code>prefill</code></b> 이어야 한다(<code>rcm check</code> 가 FAIL). rcm 이 보내는 값은 <code>create</code> · <code>delete</code> 둘뿐이다.</dd>
+        <dt>규칙</dt><dd>두 스토어가 서로 다른 이름을 받을 수 있다. 그때만 <code>build_name_android</code> 가 <code>review</code>·<code>upload</code> 입력에 실리고, 프리셋이 그 입력을 모르면 409 <code>split_version_unsupported</code> 로 <b>막는다</b>(조용히 한쪽 이름으로 빌드하지 않는다). 편집한 문안도 같다 — <code>listing_json</code> 입력이 없으면 409 <code>listing_json_unsupported</code>. 자세한 것은 <code>docs/release-contract.md</code> §2 · §5.</dd></dl></div></article>
+  </div>
 </div>
 <script>
 (function () {

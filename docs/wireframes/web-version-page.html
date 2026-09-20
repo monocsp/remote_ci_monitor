@@ -125,8 +125,36 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line
 .dec b { display: block; }
 </style>
 <div class="page">
-  <div class="eyebrow">remote_ci_monitor · 스토어 탭 · 기획 초안 v0.1 · 2026-09-18</div>
+  <div class="eyebrow">remote_ci_monitor · 스토어 탭 · 기획 초안 v0.1 · 2026-09-18 · <b>만들기 전의 계획</b></div>
   <h1>버전 페이지와 바텀시트</h1>
+
+  <div class="rule new"><b>이 문서는 계획이고, 만든 결과가 아니다.</b> 2026-09-18 에 쓴 기획안이다.
+    구현은 2026-09-20 에 <code>dev</code> 로 다 들어갔고, <b>지금 도는 화면의 정본은
+    <code>docs/wireframes/web-store.html</code> 10절(항목 50~62)</b> 이다. 아래 W1~W5 그림은 배치를
+    보기에는 그대로 쓸 수 있지만, 문장과 숫자는 아래 목록만큼 실제와 다르다 — 어긋나면 그쪽이 이긴다.
+    <br>만들면서 달라진 것:
+    <ul>
+      <li>편집본을 스크립트에 넘기는 입력 이름은 <code>listing_file</code>(경로)이 아니라
+        <b><code>listing_json</code></b>(JSON 문자열)이고, 프리셋에 그 입력이 없으면 409
+        <code>listing_json_unsupported</code> 로 <b>막는다</b>(4.3 의 «지금처럼 store/ 만 쓴다» 가 아니다).</li>
+      <li>단계는 <b>열 칸</b>이다 — <code>V S0 … S8</code>. 5.4 · 5.6 의 «9단계» 와 «단계 9칸» 은 옛 수다.
+        드라이버는 <code>--status</code> 로 <b>언제나</b> <code>stages:</code> 줄을 찍고, 그 줄에 <code>V</code> 가
+        없으면 rcm 이 <code>--version-id</code> 를 주지 않는다(4.4 는 «없으면 지금처럼» 까지만 적었다).</li>
+      <li>DB 스키마는 <b>v21</b> 이다(7절의 v20 에 <code>upload_job_id</code> 가 더 붙었다). 버전이
+        «진행 중» 인 조건은 <b>셋</b> — 살아 있는 심사 작업 · 살아 있는 업로드 작업 · 이 버전의 드라이버
+        회차 — 이고 <b>마지막 하나가 끝나야</b> 내려온다.</li>
+      <li>실패한 드래프트는 이름을 붙잡지 않는다. 같은 이름으로 «다시 만들기» 가 되고, 만료된 미편집
+        <code>failed</code> 행은 청소기가 rcm 안에서만 지운다(스토어 삭제 작업은 나가지 않는다).</li>
+      <li>스크린샷 칩은 «이전 버전과 같음» 이 아니라 <b>«rcm 은 스크린샷을 건드리지 않습니다»</b> 다 —
+        5.3 · 5.4 의 그 칩은 아무것도 재지 않았다.</li>
+      <li>퍼센트는 <b>분모를 미리 선언했을 때만</b> 나온다. 드라이버가 없으면 막대는 빗금이고 숫자가 없다
+        (5.4 의 «62%» 는 드라이버가 있는 경우의 그림이다).</li>
+      <li>버전 페이지에는 <b>«버리기» 가 없다</b>(5.6 의 «만료 임박 / 폐기됨» 행이 암시하는 것과 달리,
+        버리는 길은 목록 행 하나뿐이다). 목록 행의 버튼은 «열기» · «다시 만들기» · «버리기» 셋이다.</li>
+      <li><code>rcm release</code> 에는 <code>open &lt;id&gt;</code> 도 있다(6절은 <code>new|list|delete</code> 까지만 적었다).</li>
+    </ul>
+    9절의 결정 Q1~Q8 과 10절의 단계 계획은 그대로 실행됐다. 단계별 검증이 찾은 것과 그 처리는
+    <code>docs/version-page-workplan.md</code> §13~§17 에 있다.</div>
   <p class="lede">App Store Connect 처럼 «새 버전 만들기 → 그 버전 안에서 문안을 다듬고 → 심사 제출»이 되도록 스토어 탭을 다시 짠다. 진행 막대 · 빌드 상태 · 심사 제출 버튼은 화면 아래 <b>바텀시트</b>로 모은다. 이 문서는 요구사항 명세 · 현재와의 차이 분석 · rcm 과 프로젝트(스킬) 사이 계약 변경 · 와이어프레임 · 단계 계획이다. 코드는 아직 없다.</p>
   <ul class="toc">
     <li><a href="#r">1. 요구사항 명세</a></li><li><a href="#d">2. 신규 · 변경 · 유지</a></li><li><a href="#m">3. 개념 모델 — «버전(드래프트)»</a></li>

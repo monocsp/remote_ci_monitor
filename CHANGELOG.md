@@ -7,15 +7,161 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+The Store tab is **version-centred** now. It opens on a list of versions instead of four status
+rows; «New version» asks only for the version names; a version has a page of its own where the
+previous version's copy is filled in and editable; and one bottom sheet on that page carries the
+progress, what is still missing, and the only **Submit for review** button in the product. The
+entries below follow that path from the screen down to the contract a project provides.
+
 ### Breaking changes
-- **Database schema v21.** A new `versions` table holds the store version drafts (one row per
-  «new version»: the two store version names, its state, the prefilled and edited listing, and
-  the jobs and driver round it is linked to); v21 adds its `upload_job_id` column. A v19 file is
-  backed up (`rcm.sqlite3.v19.bak`) and migrated on start, and an older build refuses a v21 file
-  and points at that backup, so upgrade the server before the workers. `rcm gc` and the retention
-  sweeps leave the new table alone.
+- **Database schema v21 — the server keeps store version drafts now.** A new `versions` table
+  holds one row per «new version»: the two store version names, its state, the prefilled and the
+  edited listing, and the jobs and driver round it is linked to (v21 adds that row's
+  `upload_job_id` column). A v19 file is backed up (`rcm.sqlite3.v19.bak`) and migrated on start,
+  and an older build refuses a v21 file and points at that backup — so **upgrade the server before
+  the workers**. `rcm gc` and the retention sweeps never touch the new table; drafts are cleared by
+  their own expiry rule instead (`version_ttl_hours`, below).
   ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160),
   [#164](https://github.com/monocsp/remote_ci_monitor/pull/164))
+
+### Added
+- **The Store tab opens on a version list, and «new version» is one dialog.** `#/store/<repo>` is
+  the list of versions now: a one-line status strip (credentials · source · store · blockers, red
+  as soon as one of them is, and a link to the detail), «+ New version», every open draft with its
+  state, age, edited-field count, whether a build exists and whether it has expired, then the live
+  version and the last 20 submitted ones. The four rows (setup · source · build · store) moved to
+  `#/store/<repo>/status`, which is otherwise the tab as it was, and a single version now has its
+  own address, `#/store/<repo>/v/<id>`. «+ New version» asks only for the version names: it fills
+  in the server's hints (the live name with its last number bumped), shows a checkbox and a field
+  for each store the plan knows about, keeps «Create» closed — with the reason under the field —
+  until a name looks like `major.minor.patch` and beats the live one, leaves an unchecked store
+  out of the request, and answers 409 `version_exists` with a link to the draft that already has
+  that name. A draft's row says what is happening to it by name, not in a tooltip: «creating ·
+  job #n» while its create job runs, «running · release round #12 · upload job #650» while
+  something holds it, «deleting in the store · job #88» from the moment «Discard» is confirmed for
+  a draft with an App Store version, «expired — a person has to clear it», or the failure reason.
+  A failed draft offers «Create again» under the same name. Opening a version address before the
+  setup gate is complete sends you to the settings screen and brings you back to it once the gate
+  opens. ([#166](https://github.com/monocsp/remote_ci_monitor/pull/166);
+  the row naming what holds it and its «deleting in the store» line came with
+  [#168](https://github.com/monocsp/remote_ci_monitor/pull/168), and a failed or expired row
+  keeping its own colour while a round runs with
+  [#170](https://github.com/monocsp/remote_ci_monitor/pull/170))
+- **The version page is where you edit the previous version's copy.** `#/store/<repo>/v/<id>`
+  draws the two stores side by side — App Store · iOS and Google Play · Android, in the same group
+  order the review panel uses — with every copy field as an editable control filled in from the
+  previous version. A field says which value it is showing: «same as the previous version», «your
+  edit», «from the file» when only `store/` knows it, or empty. It carries its character counter
+  against the store's own limit, gets a «changed» chip as soon as it differs from the prefill, and
+  a «Revert» that puts the previous value back. An edit debounces 800 ms and sends
+  `PUT …/release/versions/<id>/listing` with **only the keys that changed**; the page shows
+  «saving…», «autosaved · n s ago», or the server's refusal with a «Save again» that resends the
+  same body — and the text you typed stays on screen either way, including when the token
+  disappears mid-edit. A value over the store's limit is still saved and the counter turns red:
+  the store has the last word, not rcm. Screenshots and graphics are shown, not editable, and say
+  so — rcm does not touch screenshot files — and the build, release-settings, review-information
+  and app-content blocks stay read-only, drawn by the same code as the review panel. Without an
+  admin token, or on a submitted or discarded draft, every field is read-only and one sentence
+  says why. The five-second poll on `GET …/release/versions/<id>` — that route only, the one that
+  runs no subprocess — keeps running while the page is open, and when it brings an edit made in
+  another browser the page marks those fields «changed elsewhere»: a field you have typed in keeps
+  your text, one you have not takes theirs.
+  ([#167](https://github.com/monocsp/remote_ci_monitor/pull/167))
+- **The version page carries a bottom sheet: progress, what is left, and «Submit for review».**
+  `#/store/<repo>/v/<id>` now ends in a sticky sheet — and only that page has one. Collapsed it
+  shows the version, one status line and the submit button, and **while a round, a build or a
+  submission is in flight it also shows the bar and how far along**, in that one line. The line
+  answers the question the state asks: «3 left before review · No build yet» while editing, «S5
+  scenario QA · stage 7 of 10 · 66% · elapsed 38m · finishes 21:40» while running, «ready to
+  submit · review plan 4m ago · build 181» when it is, «submitted 21:52 · waiting for review»
+  after that. Expanded it adds the bar, the stage chips — `V S0…S8` when the profile declares a
+  driver, this round's jobs when it does not — the basis in words, and two columns: «Left before
+  review» and «Different from the previous version». Every line in the first column names the
+  place that fixes it and goes there when clicked: a field that is over the store limit scrolls
+  to and focuses that field, a stale plan goes to the status screen. The order is fixed — build,
+  round running, review plan, build number, managed publishing, listing, skill and driver
+  warnings, release type — so the first line is always the most important one. The submit
+  conditions moved here whole: the store checkboxes, the per-submission managed-publishing check
+  (never remembered, never pre-ticked), the auto/typed build-number toggle and its field, which
+  still only ever accepts the plan's own number. Under them the sheet says what it is about to
+  send, repeats that approval is not a release, and shows the store's answer after a submission.
+  The request carries `version_id` and the draft's own version name. Open or closed is remembered
+  per repository. The sheet reads what the version detail already gives it; the driver view, which
+  runs `--status` on the build machine, is fetched on its own 15-second timer and only when the
+  profile declares a driver.
+  ([#168](https://github.com/monocsp/remote_ci_monitor/pull/168))
+- **Store version drafts expire on their own, and `rcm release` makes one from a terminal.** The
+  retention sweep — on its usual cycle and once at server start — now also looks at the version
+  drafts. A draft nobody has touched is discarded once `version_ttl_hours` (default 24) have
+  passed, down the very route the «discard» button uses, so the App Store version is deleted
+  through a `mode = delete` job when the profile has a `version` preset and the row is simply
+  closed when it does not. A draft that *was* edited is never deleted automatically: it is only
+  marked as expired, with one line in the server log, and stays until a person discards it.
+  Submitted versions, drafts still being created and drafts whose round is running are left alone,
+  and a delete job is submitted at most once per draft.
+  New command `rcm release`: `new` asks only for the version names — enter takes the server's
+  hint, `-` skips that store, `--yes` takes both hints — then prints the new draft, its state and
+  the address of its version page; `list`, `delete <id>` and `open <id>` are the rest. `rcm check`
+  also warns now when the `version` preset's `mode` input cannot take `create` and `delete`, which
+  used to surface only as a 400 at submit time.
+  ([#162](https://github.com/monocsp/remote_ci_monitor/pull/162))
+- **Store version drafts: the server routes.** `GET /api/repos/<repo>/release/versions` answers
+  the live version names and the next-version hints read from the latest plan, the open drafts and
+  the last 20 submitted ones; `POST` opens a draft (202 with a `mode = create` job when the
+  profile has a `version` preset, 201 straight into `editing` when it does not) after checking
+  that a name looks like `major.minor.patch`, is greater than the live one and is not already
+  taken by an open draft (409 `version_exists`). `GET …/versions/<id>` is what one version page
+  needs in one request — the row, the prefilled and the edited listing, their diff and the release
+  view — `PUT …/versions/<id>/listing` saves one field at a time (allowed keys only, 16 KB each),
+  `GET …/versions/<id>/diff` lists what changed, and `DELETE …/versions/<id>` discards a draft,
+  deleting the App Store version through a `mode = delete` job when there is one. A finished job
+  updates its row by itself, and a server restart re-applies the hook for a job that finished
+  while it was down. ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
+- **`version_id` on plan, review, upload and start.** These take the draft's number instead of a
+  typed `build_name` (a `build_name` that disagrees is 400 `build_name_mismatch`). review and
+  upload carry the edited listing as `listing_json` when it differs from the prefill, and the
+  Android name as `build_name_android` when the two stores get different names; a preset that
+  declares neither input is refused (409 `listing_json_unsupported` / `split_version_unsupported`)
+  instead of quietly dropping the edit or shipping one name to both stores. `start` passes
+  `--version-id` to the driver and links the round to the draft, so `confirm`, `abort` and `retry`
+  stay on the same version. ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
+- **Release contract: the `version` role.** A project may name a `version` preset
+  (`[repos.<name>.release.presets] version = …`) whose `mode` input takes `prefill`, `create` and
+  `delete` and **defaults to `prefill`**, the read-only one; rcm itself only ever sends `create`
+  and `delete`, with `ios_version`, `android_version` and `asc_version_id`. It writes
+  `version.json` (create · delete) and `prefill.json` (prefill · create), exit `3` = already
+  exists, `4` = not deletable. `rcm check` fails when the preset lacks those inputs or its `mode`
+  does not default to `prefill`, and warns when the `review` / `upload` preset has no
+  `listing_json` input. New profile key `version_ttl_hours` (default 24, integer ≥ 1). `plan.json`
+  may carry `store.play.production_name` and `next_version_hint`; the driver takes
+  `--version-id <id>` (stage `V`).
+  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
+- **Release contract: two store version names.** One round may ship a different version name to
+  each store (App Store 1.1.1 · Google Play 1.0.1), because the live names have drifted apart. rcm
+  sends `build_name` as the representative name and adds the new optional input
+  `build_name_android` to the `review` / `upload` presets only when the two differ; `rcm check`
+  warns when a preset does not declare it, and a round with two names is refused (409
+  `split_version_unsupported`) rather than built under one. `{version}` in `tag` is the shared
+  name, or the two joined with `+` (`prod/1.1.1+1.0.1-181`); in `listing.release_notes` it is the
+  iOS name, falling back to the Android one. `release_upload.sh` / `release_review.sh` read
+  `RCM_INPUT_BUILD_NAME_ANDROID` and hand each store its own name through `platform_build_name`.
+  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
+- **Skills: `release_version.sh` and `listing_json`.** `rcm-store-connect` ships a fourth
+  skeleton (prefill from the live listing or the `store/` files, create / delete an App Store
+  version, `--selftest`), the `release-version` preset, the `version` profile line, and
+  `rcm_contract.py` kinds `version` / `prefill`. `release_review.sh` / `release_upload.sh` read
+  `RCM_INPUT_LISTING_JSON`, write `listing.json`, hand its path to the store hooks and echo its
+  fields in the review-plan preview; an adopted script gets only that handling added.
+  `rcm-release-driver` resolves the build name from rcm's version row with `--version-id`.
+  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
+
+### Removed
+- **The big release bar at the top of the Store tab, and every submit control outside the bottom
+  sheet.** The bar said the same thing the sheet now says, in a worse place. The review panel keeps
+  only its two read-only store sections plus «Validate listing» and «Plan review» — no submit
+  button, no checkboxes, no build-number box, on `#/store/<repo>/status` either — so there is one
+  place to submit a version and one place that says why it is not open yet.
+  ([#168](https://github.com/monocsp/remote_ci_monitor/pull/168))
 
 ### Fixed
 - **The bottom sheet's bar no longer claims what the same screen denies, and the forbidden-button
@@ -108,143 +254,6 @@ of a key bumps that number and is listed here.
   cannot swallow — chunked, or larger than 1 MB — is still refused without reading a byte and
   closes the connection instead. The 401, 403, 411, 413 and 415 answers are otherwise unchanged.
   ([#169](https://github.com/monocsp/remote_ci_monitor/pull/169))
-
-### Added
-- **The version page carries a bottom sheet: progress, what is left, and «Submit for review».**
-  `#/store/<repo>/v/<id>` now ends in a sticky sheet — and only that page has one. Collapsed it
-  shows the version, one status line and the submit button, and **while a round, a build or a
-  submission is in flight it also shows the bar and how far along**, in that one line. The line
-  answers the question the state asks: «3 left before review · No build yet» while editing, «S5
-  scenario QA · stage 7 of 10 · 66% · elapsed 38m · finishes 21:40» while running, «ready to
-  submit · review plan 4m ago · build 181» when it is, «submitted 21:52 · waiting for review»
-  after that. Expanded it adds the bar, the stage chips — `V S0…S8` when the profile declares a
-  driver, this round's jobs when it does not — the basis in words, and two columns: «Left before
-  review» and «Different from the previous version». Every line in the first column names the
-  place that fixes it and goes there when clicked: a field that is over the store limit scrolls
-  to and focuses that field, a stale plan goes to the status screen. The order is fixed — build,
-  round running, review plan, build number, managed publishing, listing, skill and driver
-  warnings, release type — so the first line is always the most important one. The submit
-  conditions moved here whole: the store checkboxes, the per-submission managed-publishing check
-  (never remembered, never pre-ticked), the auto/typed build-number toggle and its field, which
-  still only ever accepts the plan's own number. Under them the sheet says what it is about to
-  send, repeats that approval is not a release, and shows the store's answer after a submission.
-  The request carries `version_id` and the draft's own version name. Open or closed is remembered
-  per repository. The sheet reads what the version detail already gives it; the driver view, which
-  runs `--status` on the build machine, is fetched on its own 15-second timer and only when the
-  profile declares a driver.
-
-  What this replaces: the big bar at the top of the Store tab is **gone** (it said the same thing
-  in a worse place), and the review panel keeps only its two read-only store sections plus the
-  «Validate listing» and «Plan review» buttons — no submit button, no checkboxes, no build-number
-  box, on `#/store/<repo>/status` either. A running round is now visible from the version list
-  instead: that draft's row says what holds it, by name — «running · release round #12 · upload
-  job #650» — rather than hiding the reason in a disabled button's tooltip. The same row also says
-  «deleting in the store · job #88» from the moment «Discard» is confirmed for a draft with an App
-  Store version, and settles on its own when that job ends, instead of looking as though nothing
-  happened for half a minute.
-  ([#168](https://github.com/monocsp/remote_ci_monitor/pull/168))
-- **The version page is where you edit the previous version's copy.** `#/store/<repo>/v/<id>` now
-  draws the two stores side by side — App Store · iOS and Google Play · Android, in the same group
-  order the review panel uses — with every copy field as an editable control filled in from the
-  previous version. A field says which value it is showing: «same as the previous version», «your
-  edit», «from the file» when only `store/` knows it, or empty. It carries its character counter
-  against the store's own limit, gets a «changed» chip as soon as it differs from the prefill, and
-  a «Revert» that puts the previous value back. An edit debounces 800 ms and sends
-  `PUT …/release/versions/<id>/listing` with **only the keys that changed**; the page shows
-  «saving…», «autosaved · n s ago», or the server's refusal with a «Save again» that resends the
-  same body — and the text you typed stays on screen either way, including when the token
-  disappears mid-edit. A value over the store's limit is still saved and the counter turns red:
-  the store has the last word, not rcm. Screenshots and graphics are shown, not editable, with a
-  «same as the previous version» marker, and the build, release-settings, review-information and
-  app-content blocks stay read-only — drawn by the same code as the review panel. Without an admin
-  token, or on a submitted or discarded draft, every field is read-only and one sentence says why.
-  The five-second poll on `GET …/release/versions/<id>` — that route only — keeps running while
-  the page is open, and when it brings an edit made in another browser the page marks those fields
-  «changed elsewhere» instead of overwriting what is on screen. The bottom sheet (progress and
-  «Submit for review») comes next.
-  ([#167](https://github.com/monocsp/remote_ci_monitor/pull/167))
-- **The Store tab opens on a version list, and «new version» is one dialog.** `#/store/<repo>` is
-  the list of versions now: a one-line status strip (credentials · source · store · blockers, red
-  as soon as one of them is, and a link to the detail), «+ New version», every open draft with its
-  state, age, edited-field count, whether a build exists and whether it has expired, then the live
-  version and the last 20 submitted ones. The four rows (setup · source · build · store) moved to
-  `#/store/<repo>/status`, which is otherwise the tab as it was, and a single version now has its
-  own address, `#/store/<repo>/v/<id>`. «+ New version» asks only for the version names: it fills
-  in the server's hints (the live name with its last number bumped), shows a checkbox and a field
-  for each store the plan knows about, keeps «Create» closed — with the reason under the field —
-  until a name looks like `major.minor.patch` and beats the live one, leaves an unchecked store
-  out of the request, and answers 409 `version_exists` with a link to the draft that already has
-  that name. While a draft is being created the page says «creating · job #n» and polls
-  `GET …/release/versions/<id>` every five seconds — that route only, the one that runs no
-  subprocess — and goes on polling it while the version page is open. Opening a version address before
-  the setup gate is complete sends you to the settings screen and brings you back to it once the
-  gate opens. The listing editor on the version page and the bottom sheet come next.
-  ([#166](https://github.com/monocsp/remote_ci_monitor/pull/166))
-- **Store version drafts expire on their own, and `rcm release` makes one from a terminal.** The
-  retention sweep — on its usual cycle and once at server start — now also looks at the version
-  drafts. A draft nobody has touched is discarded once `version_ttl_hours` (default 24) have
-  passed, down the very route the «discard» button uses, so the App Store version is deleted
-  through a `mode = delete` job when the profile has a `version` preset and the row is simply
-  closed when it does not. A draft that *was* edited is never deleted automatically: it is only
-  marked as expired, with one line in the server log, and stays until a person discards it.
-  Submitted versions, drafts still being created and drafts whose round is running are left alone,
-  a delete job is submitted at most once per draft, and `rcm gc` still leaves the table untouched.
-  New command `rcm release`: `new` asks only for the version names — enter takes the server's
-  hint, `-` skips that store, `--yes` takes both hints — then prints the new draft, its state and
-  the address of its version page; `list`, `delete <id>` and `open <id>` are the rest. `rcm check`
-  also warns now when the `version` preset's `mode` input cannot take `create` and `delete`, which
-  used to surface only as a 400 at submit time.
-  ([#162](https://github.com/monocsp/remote_ci_monitor/pull/162))
-- **Store version drafts: the server routes.** `GET /api/repos/<repo>/release/versions` answers
-  the live version names and the next-version hints read from the latest plan, the open drafts and
-  the last 20 submitted ones; `POST` opens a draft (202 with a `mode = create` job when the
-  profile has a `version` preset, 201 straight into `editing` when it does not) after checking
-  that a name looks like `major.minor.patch`, is greater than the live one and is not already
-  taken by an open draft (409 `version_exists`). `GET …/versions/<id>` is everything one version
-  page needs in one request — the row, the prefilled and the edited listing, their diff, the
-  release view, the driver view and the listing file preview — `PUT …/versions/<id>/listing`
-  saves one field at a time (allowed keys only, 16 KB each), `GET …/versions/<id>/diff` lists what
-  changed, and `DELETE …/versions/<id>` discards a draft, deleting the App Store version through a
-  `mode = delete` job when there is one. A finished job updates its row by itself, and a server
-  restart re-applies the hook for a job that finished while it was down.
-  ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
-- **`version_id` on plan, review, upload and start.** These take the draft's number instead of a
-  typed `build_name` (a `build_name` that disagrees is 400 `build_name_mismatch`). review and
-  upload carry the edited listing as `listing_json` when it differs from the prefill, and the
-  Android name as `build_name_android` when the two stores get different names; a preset that
-  declares neither input is refused (409 `listing_json_unsupported` / `split_version_unsupported`)
-  instead of quietly dropping the edit or shipping one name to both stores. `start` passes
-  `--version-id` to the driver and links the round to the draft, so `confirm`, `abort` and `retry`
-  stay on the same version. ([#160](https://github.com/monocsp/remote_ci_monitor/pull/160))
-- **Release contract: the `version` role.** A project may name a `version` preset
-  (`[repos.<name>.release.presets] version = …`) that rcm runs with `mode = prefill|create|delete`,
-  `ios_version`, `android_version` and `asc_version_id`; it writes `version.json` (create ·
-  delete) and `prefill.json` (prefill · create), exit `3` = already exists, `4` = not deletable.
-  `rcm check` fails when the preset lacks those inputs or its `mode` does not default to
-  `prefill`, and warns when the `review` / `upload` preset has no `listing_json` input. New
-  profile key `version_ttl_hours` (default 24, integer ≥ 1). `plan.json` may carry
-  `store.play.production_name` and `next_version_hint`; the driver takes `--version-id <id>`
-  (stage `V`). ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
-- **Skills: `release_version.sh` and `listing_json`.** `rcm-store-connect` ships a fourth
-  skeleton (prefill from the live listing or the `store/` files, create / delete an App Store
-  version, `--selftest`), the `release-version` preset, the `version` profile line, and
-  `rcm_contract.py` kinds `version` / `prefill`. `release_review.sh` / `release_upload.sh` read
-  `RCM_INPUT_LISTING_JSON`, write `listing.json`, hand its path to the store hooks and echo its
-  fields in the review-plan preview; an adopted script gets only that handling added.
-  `rcm-release-driver` resolves the build name from rcm's version row with `--version-id`.
-  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
-- **Release contract: two store version names.** One round may ship a different version name to
-  each store (App Store 1.1.1 · Google Play 1.0.1), because the live names have drifted apart. rcm
-  sends `build_name` as the representative name and adds the new optional input
-  `build_name_android` to the `review` / `upload` presets only when the two differ; `rcm check`
-  warns when a preset does not declare it, and a round with two names is refused (409
-  `split_version_unsupported`) rather than built under one. `{version}` in `tag` is the shared
-  name, or the two joined with `+` (`prod/1.1.1+1.0.1-181`); in `listing.release_notes` it is the
-  iOS name, falling back to the Android one. `release_upload.sh` / `release_review.sh` read
-  `RCM_INPUT_BUILD_NAME_ANDROID` and hand each store its own name through `platform_build_name`.
-  ([#159](https://github.com/monocsp/remote_ci_monitor/pull/159))
-
-### Fixed
 - **The plan now reports the live Android version name.** `store.play.production_name` and
   `next_version_hint` were in the contract but in no skill, so a project connected by
   `/rcm-store-connect` never emitted them and rcm never learned the Play live name — the «new
