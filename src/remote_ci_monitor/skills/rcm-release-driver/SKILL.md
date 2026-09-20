@@ -94,7 +94,9 @@ job number, branch kept, default branch untouched, exit 1. `--retry` reopens the
 label, refreshes the release branch from the default branch, clears the cache and resumes.
 `--abort` closes an open PR, cancels the cached jobs, deletes the cache — never touches the
 default branch. `--status` is **read-only**: it never creates a branch, a PR or a job; it prints
-`stage <S>` and the stage list (`V S0 … S8` when `--version-id` is given).
+`stage <S>` and — always, with `--version-id`, with `--build-name` and with neither — one
+`stages:` line naming the stages this driver knows. rcm reads that line to learn whether it may
+pass `--version-id`.
 `--dry-run` runs S7 as `mode=rehearsal` and skips S6/S8 (nothing merged, nothing tagged).
 
 Exit codes: `0` done · `1` red / contract violation / typed N ≠ plan / already released ·
