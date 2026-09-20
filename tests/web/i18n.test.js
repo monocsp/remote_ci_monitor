@@ -289,8 +289,26 @@ const CATALOGUE_ARGS = {
 };
 
 /** 한 언어의 모든 키를 문장으로 펼친다. `[키, 문장]` 쌍의 배열. */
+// 값에 따라 갈라지는 문구가 있다(`outcome.git_failed` 는 a.kind 로 다섯 갈래, `archive.rejected`
+// 는 REJECT 표로). 인자를 하나만 주면 **고른 갈래 하나만** 검사되고 나머지는 한 번도 안 그려진다
+// — 실제로 그 틈으로 「잡 로그를 보라」가 한 갈래에 숨어 있었다(2026-09-20). 그래서 갈라지는
+// 값마다 한 번씩 그린다. 새 갈래가 생기면 여기 값을 더한다.
+const BRANCH_KINDS = [
+  "TarError", "no_git", "timeout", "spawn", "exit",
+  "absolute_path", "escapes_workspace", "link_outside", "absolute_link", "special_file",
+  "not_a_tarball", "unsupported_compression", "truncated", "unreadable",
+];
+
 function rendered(lang) {
-  return Object.keys(I18N.MESSAGES[lang]).map((k) => [k, I18N.t(lang, k, CATALOGUE_ARGS)]);
+  const out = [];
+  for (const k of Object.keys(I18N.MESSAGES[lang])) {
+    for (const kind of BRANCH_KINDS) {
+      const args = Object.assign({}, CATALOGUE_ARGS, { kind: kind });
+      const text = I18N.t(lang, k, args);
+      out.push([kind === "TarError" ? k : k + " [kind=" + kind + "]", text]);
+    }
+  }
+  return out;
 }
 
 test("한국어 문장에 괄호 조사가 없다 (C-38)", () => {

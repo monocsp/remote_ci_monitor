@@ -84,7 +84,7 @@
     }
     if (a.kind === "exit") {
       return lang === "ko"
-        ? op + " 실패(종료 코드 " + a.code + ") — 잡 로그를 보라"
+        ? op + " 실패(종료 코드 " + a.code + ") — 작업 로그를 보라"
         : op + " failed (exit " + a.code + "), see the job log";
     }
     return lang === "ko" ? op + " 실패 — 작업 로그를 보라" : op + " failed, see the job log";
@@ -812,7 +812,7 @@
     "review.plan_running": function (a) { return "review plan #" + a.id + " " + a.state; },
     "review.submit": "Submit for review…",
     "review.submitting": "Submitting…",
-    "review.submit_hint": function (a) { return "Submit opens after a green plan (≤ " + a.n + "m), the typed build number, and the Play check when Google Play is selected."; },
+    "review.submit_hint": function (a) { return "Submitting for review lives on the version page, in the sheet at the bottom. It opens there after a green plan (\u2264 " + a.n + "m), the build number and, when Google Play is selected, the managed-publishing check."; },
     "n.mode.label": "Build number",
     "n.mode.auto": "Auto (from the stores)",
     "n.mode.typed": "Type it myself",
@@ -1789,7 +1789,7 @@
     "review.plan_running": function (a) { return "심사 플랜 #" + a.id + " " + a.state; },
     "review.submit": "심사 제출…",
     "review.submitting": "제출 중…",
-    "review.submit_hint": function (a) { return "초록 플랜(" + a.n + "분 이내) · 빌드 번호 입력 · Google Play 를 골랐으면 관리형 게시 확인이 있어야 제출이 열립니다."; },
+    "review.submit_hint": function (a) { return "심사 제출은 버전 페이지 아래 바텀시트에 있습니다. 초록 플랜(" + a.n + "분 이내) · 빌드 번호 · Google Play 를 골랐으면 관리형 게시 확인이 있어야 거기서 열립니다."; },
     "n.mode.label": "빌드 번호",
     "n.mode.auto": "자동 (스토어 기준)",
     "n.mode.typed": "직접 입력",

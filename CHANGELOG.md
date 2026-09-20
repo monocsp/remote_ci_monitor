@@ -13,6 +13,16 @@ previous version's copy is filled in and editable; and one bottom sheet on that 
 progress, what is still missing, and the only **Submit for review** button in the product. The
 entries below follow that path from the screen down to the contract a project provides.
 
+### Fixed
+- **The status screen no longer describes a button it does not have, and one Korean message
+  says 「작업」 like the rest.** `#/store/<repo>/status` still printed «Submit opens after a green
+  plan …» under the review panel although submitting moved to the version page's bottom sheet; it
+  now says where submitting lives. A git-failure message rendered 「잡 로그를 보라」 while its
+  sibling one line below said 「작업 로그를 보라」. The Korean-wording check missed it because it
+  rendered every message with one fixed argument set, so a message that branches on its arguments
+  was only ever checked on one branch; it now renders each branch.
+  ([#172](https://github.com/monocsp/remote_ci_monitor/pull/172))
+
 ### Breaking changes
 - **Database schema v21 — the server keeps store version drafts now.** A new `versions` table
   holds one row per «new version»: the two store version names, its state, the prefilled and the
