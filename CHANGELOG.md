@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-01
+
 ### Fixed
 - **The release driver's self-test no longer fails at random, and the driver no longer calls a
   preset missing when it is there.** Under `set -o pipefail`, `… | grep -q` closes the pipe as
@@ -1448,7 +1450,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.1...v0.3.2
