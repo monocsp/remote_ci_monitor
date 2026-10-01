@@ -153,9 +153,13 @@ preflight_local() {
 preflight_remote() {   # --status 와 --selftest 는 여기 오지 않는다 — 연결 시점엔 서버가 없다
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated"
   ${RCM} check >/dev/null 2>&1 || die "rcm check is red — fix the client/server first"
-  local p
+  local p presets
+  # 한 번 받아 두고 본다. `rcm presets --json | grep -q` 는 grep 이 찾자마자 파이프를 닫아서, 출력이
+  #   파이프 버퍼보다 크면 rcm 이 SIGPIPE 로 죽고 pipefail 이 그걸 「서버에 없다」로 바꾼다(거짓 오류).
+  #   pipefail 아래의 `| grep -q` · `| head` 는 tests/test_shell_pipefail.py 가 막는다.
+  presets="$(${RCM} presets --json 2>/dev/null)" || die "could not list the presets on the server"
   for p in "${PRESET_PLAN}" "${PRESET_UPLOAD}" ${PRESET_GATE:+"${PRESET_GATE}"} ${PRESET_QA:+"${PRESET_QA}"}; do
-    ${RCM} presets --json 2>/dev/null | grep -q "\"${p}\"" || die "preset '${p}' is not on the server"
+    grep -q "\"${p}\"" <<<"${presets}" || die "preset '${p}' is not on the server"
   done
 }
 
@@ -245,7 +249,8 @@ s1_plan() {
   state_set plan_job "${jid}"
   js="$(rcm_wait "${jid}")"; read -r code reason <<<"$(job_exit "${js}")"
   rcm_fetch "${jid}" "${ART_DIR}"
-  local plan; plan="$(find "${ART_DIR}" -name plan.json | head -1)"
+  # `head -1` 이 아니다 — 먼저 끝나서 find 를 SIGPIPE 로 죽이면 set -e 가 드라이버를 말없이 끝낸다.
+  local plan; plan="$(find "${ART_DIR}" -name plan.json | sed -n 1p)"
   [ -n "${plan}" ] || die "plan job #${jid} left no plan.json (${reason})" "$([ "${code}" = 0 ] && echo 1 || echo "${code}")"
   cp "${plan}" "${ART_DIR}/plan.json"
   ${CHECK} validate plan "${ART_DIR}/plan.json" --build-name "${BUILD_NAME}" || die "plan.json breaks the contract" 1
@@ -347,7 +352,7 @@ s7_upload() {
   state_set upload_job "${jid}"
   js="$(rcm_wait "${jid}")"; read -r code reason <<<"$(job_exit "${js}")"
   rcm_fetch "${jid}" "${ART_DIR}/upload"
-  local up; up="$(find "${ART_DIR}/upload" -name upload.json | head -1)"
+  local up; up="$(find "${ART_DIR}/upload" -name upload.json | sed -n 1p)"   # head -1 이 아닌 이유: plan 쪽 주석
   case "${code}" in
     0) [ -n "${up}" ] || die "upload job #${jid} left no upload.json" 1
        ${CHECK} validate upload "${up}" --build-name "${BUILD_NAME}" --build-number "${CONFIRM_N}" --mode "${mode}" --tag-pattern "${TAG_PATTERN}" || die "upload.json breaks the contract" 1 ;;
@@ -474,8 +479,13 @@ selftest() {
   shim_api_down() { return 7; }; VERSION_API=shim_api_down
   VERSION_ID=9; BUILD_NAME=""; ( v_version >/dev/null 2>&1 ) && { echo "unreadable API must exit 2, not continue"; exit 1; }
   STATUS_ONLY=true; v_version >"${t}/out" && grep -q 'stage V' "${t}/out" || { echo "--status with an unreadable row should report stage V"; exit 1; }
-  ( BUILD_NAME=""; do_status ) | grep -q '^build ? · version #9 · stage V$' || { echo "--status without a name must print stage V"; exit 1; }
-  ( BUILD_NAME=""; do_status ) | grep -q "^stages: $(${CHECK} stages)\$" || { echo "--status must print stages: even without a name"; exit 1; }
+  # 출력을 다 받은 뒤 본다. do_status 는 `stages:` 줄과 `build ? …` 줄을 **따로** 쓰는데, 파이프로
+  #   `| grep -q` 하면 grep 이 첫 줄을 찾자마자 파이프를 닫고, 아직 남은 두 번째 쓰기가 SIGPIPE 로 죽어
+  #   pipefail 이 「찾았는데 실패」로 만든다 — 30회 중 8회(2026-10-01). 마지막 줄을 찾던 위 줄은 뒤에
+  #   쓸 것이 없어서 운 좋게 안 깨졌을 뿐이다.
+  local _st; _st="$(BUILD_NAME=""; do_status)" || { echo "--status without a name must not fail"; exit 1; }
+  grep -q '^build ? · version #9 · stage V$' <<<"${_st}" || { echo "--status without a name must print stage V"; exit 1; }
+  grep -q "^stages: $(${CHECK} stages)\$" <<<"${_st}" || { echo "--status must print stages: even without a name"; exit 1; }
   STATUS_ONLY=false; VERSION_ID=""; BUILD_NAME="1.0.1"; bind_build_name; [ "${RELEASE_BRANCH}" = "release/1.0.1" ] || { echo "old path (--build-name only) broke"; exit 1; }
   [ "$(grep -c '^version_row 7$' "${t}/calls")" = 1 ] || { echo "the API must be called exactly once per V run"; exit 1; }
   rm -rf "${t}"; WORK=""
