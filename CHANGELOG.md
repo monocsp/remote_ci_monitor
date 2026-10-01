@@ -7,6 +7,20 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **The release driver's self-test no longer fails at random, and the driver no longer calls a
+  preset missing when it is there.** Under `set -o pipefail`, `… | grep -q` closes the pipe as
+  soon as it finds its line; a command that is still writing then dies of SIGPIPE and the
+  pipeline fails although the line was found. `rcm-release-driver`'s `--selftest` failed this way
+  8 times in 30 runs, 42 in 100 under load (`--status must print stages: even without a name`);
+  now 0. The same shape is gone from the rest of the skill templates and from
+  `scripts/smoke_install.sh`: the driver's `preflight_remote` could answer «preset '…' is not on
+  the server» once the preset list outgrew a pipe buffer — it now reads the list once instead of
+  once per preset, and says «could not list the presets on the server» when it cannot — and
+  `gate_wrapper.sh` could silently drop a step marker. Projects that copied the skills get the fix
+  with `rcm skills install --into . --force` after upgrading rcm.
+  ([#175](https://github.com/monocsp/remote_ci_monitor/pull/175))
+
 ## [0.4.0] - 2026-09-20
 
 The Store tab is **version-centred** now. It opens on a list of versions instead of four status
