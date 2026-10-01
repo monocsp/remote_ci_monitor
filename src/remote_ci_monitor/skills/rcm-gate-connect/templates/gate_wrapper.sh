@@ -87,7 +87,9 @@ run_tail() {
   local line name rc
   "${GATE}" 2>&1 | while IFS= read -r line; do
     line="${line//$'\r'/}"
-    if printf '%s\n' "${line}" | grep -qE "${STEP_PATTERN}"; then
+    # `<<<` 다 — pipefail(main 의 tail 모드) 아래에서 `printf | grep -q` 는 printf 가 SIGPIPE 로 죽으면
+    #   찾았는데도 거짓이 되어 단계 마커가 조용히 빠진다(tests/test_shell_pipefail.py).
+    if grep -qE "${STEP_PATTERN}" <<<"${line}"; then
       name="$(printf '%s\n' "${line}" | sed -E "s/${STEP_PATTERN}//")"
       step "${name}"
     fi
@@ -128,8 +130,8 @@ _selftest() {
     local what="$1" want="$2" must="$3" mustnot="$4"; shift 4
     out="$(env "$@" bash "${self}" 2>/dev/null)"; rc=$?
     if [ "${rc}" != "${want}" ]; then echo "SELFTEST FAIL: ${what} — rc ${rc}, want ${want}"; fails=1; fi
-    if ! printf '%s\n' "${out}" | grep -qE "${must}"; then echo "SELFTEST FAIL: ${what} — missing /${must}/"; fails=1; fi
-    if [ -n "${mustnot}" ] && printf '%s\n' "${out}" | grep -qE "${mustnot}"; then echo "SELFTEST FAIL: ${what} — has /${mustnot}/"; fails=1; fi
+    if ! grep -qE "${must}" <<<"${out}"; then echo "SELFTEST FAIL: ${what} — missing /${must}/"; fails=1; fi
+    if [ -n "${mustnot}" ] && grep -qE "${mustnot}" <<<"${out}"; then echo "SELFTEST FAIL: ${what} — has /${mustnot}/"; fails=1; fi
   }
   _expect "phases green: computed steps + summary" 0 '^::rcm::steps::2$' '::rcm::fail::' RCM_GATE_SELFTEST_GATE="${d}/gate"
   _expect "phases green: last line is all green" 0 '^::rcm::summary::all green$' '' RCM_GATE_SELFTEST_GATE="${d}/gate"
