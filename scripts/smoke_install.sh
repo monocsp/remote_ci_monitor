@@ -110,7 +110,10 @@ if ! start_server; then
   start_server || exit 1
 fi
 SERVER_URL="http://127.0.0.1:$PORT"
-curl -sf "$SERVER_URL/api/health" | grep -q '"ok": *true' || { echo "smoke: health not ok" >&2; exit 1; }
+# 받은 뒤 본다 — pipefail 아래 `curl | grep -q` 는 grep 이 먼저 끝나면 curl 이 쓰기 실패(23)로 죽어
+#   「찾았는데 실패」가 된다. 지금 안 깨지는 건 응답이 한 번에 오거나 찾는 말이 끝에 있어서다(운).
+HEALTH="$(curl -sf "$SERVER_URL/api/health")" || { echo "smoke: health not ok" >&2; exit 1; }
+grep -q '"ok": *true' <<<"$HEALTH" || { echo "smoke: health not ok" >&2; exit 1; }
 
 # ── 3. session machine (README block 2) ──
 step "rcm init client --server"
@@ -130,14 +133,17 @@ set -e
 "$PY" -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["state"]=="succeeded", d; assert d["wait_exit_code"]==0, d' "$OUT"
 
 step "rcm top"
-"$RCM" top | grep -q "ok" || { echo "smoke: rcm top does not show the ok job" >&2; exit 1; }
+TOP="$("$RCM" top)" || { echo "smoke: rcm top failed" >&2; exit 1; }
+grep -q "ok" <<<"$TOP" || { echo "smoke: rcm top does not show the ok job" >&2; exit 1; }
 step "rcm jobs --json"
 "$RCM" jobs --json | "$PY" -c 'import json,sys; rows=json.load(sys.stdin); assert any(r.get("preset")=="ok" for r in rows), rows'
 
 step "web UI"
 # 제목에는 `data-i18n` 속성이 붙는다(M5d-1) — 태그 이름으로만 찾는다
-curl -sf "$SERVER_URL/" | grep -q '<title' || { echo "smoke: web UI missing" >&2; exit 1; }
-curl -sf "$SERVER_URL/static/i18n.js" | grep -q "rcmI18n" || { echo "smoke: i18n.js missing" >&2; exit 1; }
+PAGE="$(curl -sf "$SERVER_URL/")" || { echo "smoke: web UI missing" >&2; exit 1; }
+grep -q '<title' <<<"$PAGE" || { echo "smoke: web UI missing" >&2; exit 1; }
+I18N="$(curl -sf "$SERVER_URL/static/i18n.js")" || { echo "smoke: i18n.js missing" >&2; exit 1; }
+grep -q "rcmI18n" <<<"$I18N" || { echo "smoke: i18n.js missing" >&2; exit 1; }
 
 # ── 4. stop cleanly ──
 step "SIGTERM stops the server"
