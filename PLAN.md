@@ -341,6 +341,9 @@ timezone = ""                       # IANA. 시작 시 zoneinfo 로 검증. 비�
 [[repos]]                           # git_ref 모드용(선택). 프리셋이 repo = "app" 으로 가리킨다
 name = "app"
 url = "git@github.com:org/app.git"  # 어떤 git 호스팅이든. 빌드 머신의 git 자격을 쓴다. https:// ssh:// git:// file:// scp형 · 절대경로만
+# token_file = "~/.config/rcm/tokens/app.token"   # (선택, https 만) 이 저장소만의 토큰 파일. 있으면 이 저장소의 원격 git 호출은
+#                                                 # 머신의 자격 헬퍼를 비우고 이 파일만 쓴다 — 머신에 하나뿐인 gh 활성 계정에서
+#                                                 # 떼어 낸다(2026-10-14 사고). 값은 rcm 이 읽지 않는다(경로만 git 에 넘긴다)
 
 [[presets]]                         # 위 「프리셋」
 ```

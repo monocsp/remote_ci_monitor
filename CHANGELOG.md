@@ -7,6 +7,22 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-14
+
+A repository's git access no longer depends on which `gh` account is active on the build machine.
+
+### Added
+- **A repository can carry its own credential.** `[[repos]]` takes `token_file`, a file holding a
+  token that can read that repository. Every network git call for it — resolving the ref at submit
+  time, fetching into the mirror, the Store tab's fetch — uses that file and nothing else, so it no
+  longer depends on which `gh` account is active on the build machine. That dependency is what
+  broke submissions on 2026-10-14: the active account was switched for another project, the
+  private repository came back as `Repository not found`, and every `git_ref` gate was refused
+  before it reached the queue while the commit statuses — posted with a token file — kept working.
+  The token never passes through rcm; only the path reaches git. `https://` URLs only. A missing
+  file fails that repository's jobs with a plain message instead of a git error, and the server
+  still starts.
+
 ## [0.4.1] - 2026-10-01
 
 ### Fixed
@@ -1450,7 +1466,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.2...v0.3.3

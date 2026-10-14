@@ -82,6 +82,8 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 # [[repos]]
 # name = "app"
 # url = "git@github.com:org/app.git"
+# token_file = "~/.config/rcm/tokens/app.token"  # https:// only: this repo's own token, not the
+#                                                # machine's active gh account (configuration.md)
 
 # ── Release profile (Store tab) ────────────────────────────────────────────
 # Optional, one per repository, right after its [[repos]] entry: which presets play which release
