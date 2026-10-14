@@ -1009,7 +1009,7 @@ class App(RemoteWorkersMixin):
         timeout = self.config.server.git_fetch_timeout_seconds
         try:
             ensure_mirror(mirror, repo.url, timeout=timeout)
-            fetch_all(mirror, repo.url, timeout=timeout)
+            fetch_all(mirror, repo.url, timeout=timeout, credential=repo.credential)
         except GitTimeout as e:
             raise ApiError(
                 504,
@@ -3843,7 +3843,7 @@ class App(RemoteWorkersMixin):
         if not self._resolve_sem.acquire(timeout=timeout):
             raise ApiError(503, "too many ref resolutions in flight — retry shortly")
         try:
-            sha = resolve_ref(repo.url, ref, timeout=timeout)
+            sha = resolve_ref(repo.url, ref, timeout=timeout, credential=repo.credential)
         except GitTimeout as e:
             raise ApiError(504, f"resolving '{ref}' timed out after {timeout}s") from e
         except GitError as e:

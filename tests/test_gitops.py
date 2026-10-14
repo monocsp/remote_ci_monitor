@@ -224,7 +224,9 @@ def test_fetch_ref_does_not_retry_other_refspecs_after_a_timeout(
     ensure_mirror(mirror, remote.url, timeout=TIMEOUT)
     attempts: list[tuple[str, ...]] = []
 
-    def hang(mirror_: Path, url: str, refspecs: tuple[str, ...], *, prune, timeout, log):
+    def hang(
+        mirror_: Path, url: str, refspecs: tuple[str, ...], *, prune, timeout, log, credential=None
+    ):
         attempts.append(refspecs)
         raise GitTimeout(f"git fetch timed out after {int(timeout)}s")
 

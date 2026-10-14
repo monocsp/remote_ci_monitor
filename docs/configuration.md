@@ -158,6 +158,38 @@ rcm run deploy --ref v1.2.3             # branch, tag or full commit sha; nothin
 - A preset with `source_modes = ["git_ref"]` rejects tree uploads (400), and `--ref` on a tree
   preset is a usage error.
 
+### Credentials per repository
+
+By default git authenticates with whatever the build machine's git is set up to use. On a Mac that
+is often `gh auth git-credential`, which hands out the token of the **active** `gh` account — and
+there is one active account per machine. If two repositories need two GitHub accounts, switching
+the active account for one of them silently breaks the other: GitHub answers a private repository
+it cannot see with `Repository not found`, `git ls-remote` exits 128, and every `git_ref`
+submission for that repository is refused before it reaches the queue.
+
+Give that repository its own token instead:
+
+```toml
+[[repos]]
+name = "app"
+url = "https://github.com/org/app.git"
+token_file = "~/.config/rcm/tokens/app.token"   # one line: a token that can read the repository
+```
+
+- Every git call that goes to the network for this repository — resolving the ref at submit time,
+  fetching into the mirror, the Store tab's fetch — takes its credential from that file and from
+  nothing else: the machine's credential helpers are cleared for those calls only. Other
+  repositories keep the machine's credentials.
+- The token never passes through rcm. Only the path goes into git's environment; git reads the
+  file when it asks for a password. Keep the file `chmod 600`.
+- `token_file` needs an `https://` URL (a token is an HTTPS credential; git ignores it for ssh), and
+  `~` is expanded on the machine that reads the config. A remote worker reads its own
+  `worker.toml`, so give it its own `token_file` there — the token is never sent over the wire.
+- If the file is missing or unreadable, that repository's jobs fail with *the credential file for
+  this repository is not readable* instead of a git error. The server still starts, so a token can
+  be replaced while it runs.
+- Needs git 2.31 or later.
+
 ## Release profile
 
 A repository can carry a **release profile**: which presets play which release role, which

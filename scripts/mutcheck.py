@@ -123,6 +123,26 @@ class Mutant:
 
 MUTANTS = (
     Mutant(
+        # 빈 값이 전역 헬퍼(gh 활성 계정)를 비운다. 없으면 git 은 먼저 오는 전역 헬퍼의 토큰을 쓰고
+        # 저장소 토큰 파일은 영영 안 읽힌다 — 2026-10-14 사고가 그대로 남는다
+        name="repo-token-keeps-global-helper",
+        path="src/remote_ci_monitor/gitops.py",
+        old='env["GIT_CONFIG_VALUE_0"] = ""',
+        new='env["GIT_CONFIG_VALUE_0"] = _credential_helper(credential)',
+        tests=("tests/test_gitops_repo_token.py",),
+    ),
+    Mutant(
+        # 제출 경로가 저장소 자격을 안 넘기면 단위 테스트는 다 초록인데 운영은 그대로 깨진다
+        name="repo-token-not-passed-on-fetch",
+        path="src/remote_ci_monitor/gitops.py",
+        old=(
+            'what="git fetch",\n        timeout=timeout,\n        log=log,\n'
+            "        credential=credential,\n"
+        ),
+        new='what="git fetch",\n        timeout=timeout,\n        log=log,\n',
+        tests=("tests/test_gitops_repo_token.py",),
+    ),
+    Mutant(
         name="remaining-floor",
         path="src/remote_ci_monitor/core/queue.py",
         old="return max(expected - elapsed, float(cfg.floor_remaining_seconds))",
