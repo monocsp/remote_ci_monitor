@@ -3,6 +3,10 @@
 - 모든 호출은 argv 배열, 셸 없음, 인자 앞에 `--`(sha 는 40 hex 로 검증돼 예외).
 - `GIT_TERMINAL_PROMPT=0` 으로 자격 프롬프트에 걸려 멈추지 않는다. 자격은 빌드 머신의
   ssh 키·credential helper 가 준다(서버 프로세스의 HOME · SSH_AUTH_SOCK 을 넘긴다).
+- 저장소에 `token_file` 이 있으면 그 저장소의 호출만 **그 파일**로 자격을 받는다. 앞선 헬퍼
+  (전역 `gh auth git-credential` · osxkeychain)를 비우고 파일을 읽는 헬퍼 하나만 남긴다 — 머신
+  전체에 하나뿐인 gh 활성 계정이 바뀌어도 이 저장소는 끊기지 않는다(2026-10-14 사고). 토큰 값은
+  rcm 이 읽지 않는다: env·argv 에는 경로만 실리고 값은 git 이 헬퍼를 부를 때 파일에서 나온다.
 - `GitError` 메시지는 잡 summary 에 실리므로 URL·경로·stderr 를 담지 않는다. 전체 stderr 는
   `log` 콜백(잡 로그 — 토큰이 있어야 본다)으로만 나간다.
 - 같은 미러를 두 레인이 동시에 fetch 하면 ref 락 충돌이 나므로 프로세스 안에서 미러별로 직렬화한다.
@@ -11,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import threading
@@ -82,12 +87,37 @@ def _fmt_seconds(seconds: float) -> str:
     return f"{s}s"
 
 
-def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """git 자식 프로세스 env. 프롬프트 금지 · 영어 메시지 · 자격 관련 변수만 통과."""
+def _credential_helper(token_file: Path) -> str:
+    """토큰 파일을 읽어 git 자격 프로토콜로 내주는 헬퍼. `get` 외(store·erase)엔 아무것도 안 한다.
+
+    `$(cat …)` 이 끝 줄바꿈을 지워 파일이 줄바꿈으로 끝나든 아니든 같다. 경로는 셸 인용한다.
+    """
+    path = shlex.quote(str(token_file))
+    return (
+        '!f() { test "$1" = get || exit 0; echo username=x-access-token; '
+        f'printf "password=%s\\n" "$(cat {path})"; }}; f'
+    )
+
+
+def git_env(
+    base: Mapping[str, str] | None = None, *, credential: Path | None = None
+) -> dict[str, str]:
+    """git 자식 프로세스 env. 프롬프트 금지 · 영어 메시지 · 자격 관련 변수만 통과.
+
+    `credential`(저장소 토큰 파일)이 있으면 명령줄 수준 설정(`GIT_CONFIG_*`, git 2.31+)으로
+    헬퍼 목록을 **비운 뒤** 그 파일을 읽는 헬퍼 하나만 둔다. 명령줄 수준은 시스템·전역 설정보다
+    뒤에 읽혀서, 빈 값이 전역의 `credential.https://github.com.helper` 까지 지운다.
+    """
     src = os.environ if base is None else base
     env = {k: src[k] for k in _PASSTHROUGH_ENV if k in src}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["LC_ALL"] = "C"
+    if credential is not None:
+        env["GIT_CONFIG_COUNT"] = "2"
+        env["GIT_CONFIG_KEY_0"] = "credential.helper"
+        env["GIT_CONFIG_VALUE_0"] = ""
+        env["GIT_CONFIG_KEY_1"] = "credential.helper"
+        env["GIT_CONFIG_VALUE_1"] = _credential_helper(credential)
     return env
 
 
@@ -137,10 +167,21 @@ def _run_git(
     run: RunFn = _run_process,
     cwd: Path | None = None,
     log: LogFn | None = None,
+    credential: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if credential is not None and not os.access(credential, os.R_OK):
+        # 못 읽는 파일로 git 을 부르면 「could not read Username」 만 남는다 — 무엇이 빠졌는지
+        # 먼저 말한다. 문구에 경로는 안 싣는다(잡 요약은 토큰 없이 읽힌다). 경로는 로그로만.
+        if log is not None:
+            log(f"[git] credential file is not readable: {credential}")
+        raise GitError(
+            "the credential file for this repository is not readable",
+            kind="no_credential",
+            op=what,
+        )
     kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
-        "env": git_env(),
+        "env": git_env(credential=credential),
         "stdin": subprocess.DEVNULL,
         "capture_output": True,
         "text": True,
@@ -182,7 +223,14 @@ def _run_git(
     return proc
 
 
-def resolve_ref(url: str, ref: str, *, timeout: float, run: RunFn = subprocess.run) -> str:
+def resolve_ref(
+    url: str,
+    ref: str,
+    *,
+    timeout: float,
+    run: RunFn = subprocess.run,
+    credential: Path | None = None,
+) -> str:
     """원격에서 ref 가 가리키는 커밋 sha. 40 hex 는 원격을 부르지 않고 그대로."""
     if is_full_sha(ref):
         return ref.lower()
@@ -192,6 +240,7 @@ def resolve_ref(url: str, ref: str, *, timeout: float, run: RunFn = subprocess.r
         what="git ls-remote",
         timeout=timeout,
         run=run,
+        credential=credential,
     )
     sha = pick_sha(proc.stdout or "", ref)
     if sha is None:
@@ -225,14 +274,29 @@ def ensure_mirror(mirror: Path, url: str, *, timeout: float, log: LogFn | None =
 _FULL_REFSPECS = ("+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
 
 
-def _fetch(mirror: Path, url: str, refspecs: tuple[str, ...], *, prune: bool, timeout, log):
+def _fetch(
+    mirror: Path,
+    url: str,
+    refspecs: tuple[str, ...],
+    *,
+    prune: bool,
+    timeout,
+    log,
+    credential: Path | None = None,
+):
     # `-q` 없이: 어떤 ref 가 어떻게 움직였는지(forced update 포함)가 잡 로그에 남아야 한다
     argv = ["--git-dir", str(mirror), "fetch", "--no-recurse-submodules"]
     if prune:
         argv.append("--prune")
     else:
         argv.append("--no-tags")
-    _run_git([*argv, "--", url, *refspecs], what="git fetch", timeout=timeout, log=log)
+    _run_git(
+        [*argv, "--", url, *refspecs],
+        what="git fetch",
+        timeout=timeout,
+        log=log,
+        credential=credential,
+    )
 
 
 def _targeted_refspecs(ref: str) -> list[tuple[str, ...]]:
@@ -250,6 +314,7 @@ def fetch_ref(
     timeout: float,
     log: LogFn | None = None,
     want_sha: str | None = None,
+    credential: Path | None = None,
 ) -> None:
     """ref 하나만 먼저 받고, 그것으로 `want_sha` 가 안 오면 미러 전체(heads · tags)를 맞춘다.
 
@@ -261,7 +326,15 @@ def fetch_ref(
             for refspecs in _targeted_refspecs(ref):
                 try:
                     # 후보가 원격에 없을 때의 「couldn't find remote ref」 는 정상 — 로그 생략
-                    _fetch(mirror, url, refspecs, prune=False, timeout=timeout, log=None)
+                    _fetch(
+                        mirror,
+                        url,
+                        refspecs,
+                        prune=False,
+                        timeout=timeout,
+                        log=None,
+                        credential=credential,
+                    )
                 except GitTimeout:
                     raise  # 멈춘 원격을 후보마다 다시 기다리지 않는다
                 except GitError:
@@ -270,14 +343,25 @@ def fetch_ref(
                     log(f"[rcm] fetched {refspecs[0].split(':')[0].lstrip('+')}")
                 if want_sha is None or has_commit(mirror, want_sha):
                     return
-        _fetch(mirror, url, _FULL_REFSPECS, prune=True, timeout=timeout, log=log)
+        _fetch(
+            mirror, url, _FULL_REFSPECS, prune=True, timeout=timeout, log=log, credential=credential
+        )
 
 
-def fetch_all(mirror: Path, url: str, *, timeout: float, log: LogFn | None = None) -> None:
+def fetch_all(
+    mirror: Path,
+    url: str,
+    *,
+    timeout: float,
+    log: LogFn | None = None,
+    credential: Path | None = None,
+) -> None:
     """미러 전체(heads · tags)를 원격에 맞춘다(`--prune`). 스토어 탭의 「fetch」 버튼이 쓴다 —
     잡의 `fetch_ref` 와 같은 락 아래라 레인과 겹쳐도 ref 락 충돌이 없다."""
     with _mirror_lock(mirror):
-        _fetch(mirror, url, _FULL_REFSPECS, prune=True, timeout=timeout, log=log)
+        _fetch(
+            mirror, url, _FULL_REFSPECS, prune=True, timeout=timeout, log=log, credential=credential
+        )
 
 
 def _git_query(mirror: Path, argv: list[str], *, timeout: float = 30) -> str | None:

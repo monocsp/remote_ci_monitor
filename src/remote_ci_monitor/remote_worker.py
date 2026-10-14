@@ -466,6 +466,7 @@ class RemoteWorker:
                 spec.workspace,
                 repo_name=repo.name,
                 repo_url=repo.url,
+                credential=repo.credential,  # 이 워커 머신의 [[repos]] — 토큰은 선을 타지 않는다
                 mirror=self.config.data_path / "mirrors" / repo.name,
                 timeout=self.config.git_fetch_timeout_seconds,
                 log=_log,

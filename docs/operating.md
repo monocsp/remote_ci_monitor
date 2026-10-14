@@ -59,6 +59,12 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
   `~/Desktop` or `~/Downloads` unless the user grants it, and the failure looks like a hang or
   `Operation not permitted`. Keep `data_dir`, presets, `[[repos]]` mirrors and every script a
   notification hook runs under `~/.local/share` or `~/.config`.
+- **One `gh` account is active per machine.** If git's credential helper is `gh auth
+  git-credential`, every github.com fetch uses the active account. Running `gh auth switch` for one
+  project cuts the server off from a private repository only the other account can read — the
+  queue looks healthy while every `git_ref` submission is refused with `Repository not found`.
+  Give such a repository its own `token_file` (configuration.md, "Credentials per repository")
+  so it no longer depends on which account is active.
 - **Hooks have no keychain.** A `[[notify]]` command that calls `gh`, `aws` or similar must read
   its token from a file (mode 600) via an environment variable; the interactive keyring is not
   available and the call blocks until the hook times out.

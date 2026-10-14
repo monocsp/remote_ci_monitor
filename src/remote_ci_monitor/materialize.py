@@ -218,6 +218,7 @@ def prepare_git_ref(
     mirror: Path,
     timeout: float,
     log: Callable[[str], None],
+    credential: Path | None = None,
 ) -> None:
     """미러를 원격과 맞추고 제출 때 확정한 sha 를 워크스페이스에 체크아웃한다.
 
@@ -234,7 +235,15 @@ def prepare_git_ref(
     try:
         ensure_mirror(mirror, repo_url, timeout=timeout, log=log)
         if not (is_full_sha(ref) and has_commit(mirror, sha)):
-            fetch_ref(mirror, repo_url, ref, timeout=timeout, log=log, want_sha=sha)
+            fetch_ref(
+                mirror,
+                repo_url,
+                ref,
+                timeout=timeout,
+                log=log,
+                want_sha=sha,
+                credential=credential,
+            )
         if not has_commit(mirror, sha):
             raise MaterializeError("commit_missing", sha=short_sha(sha))
         checkout(mirror, workspace, sha, timeout=timeout, log=log)

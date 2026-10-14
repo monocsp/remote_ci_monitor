@@ -482,6 +482,7 @@ class Worker(threading.Thread):
             workspace,
             repo_name=repo.name,
             repo_url=repo.url,
+            credential=repo.credential,
             mirror=self.config.data_dir / "mirrors" / repo.name,
             timeout=self.config.server.git_fetch_timeout_seconds,
             log=lambda line: self._append_log(log_path, line),

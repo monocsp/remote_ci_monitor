@@ -251,6 +251,14 @@ class RepoConfig:
     name: str
     url: str
     release: ReleaseProfile | None = None  # 스토어 탭 프로파일. None = 이 저장소엔 탭이 없다
+    # 이 저장소만의 https 자격(토큰 한 줄이 든 파일). 없으면 머신의 git 자격(전역 헬퍼)을 쓴다.
+    # 쓴 대로(`~` 포함) 둔다 — 이 설정을 읽는 머신의 HOME 으로 푼다(원격 워커는 자기 머신 것).
+    token_file: str | None = None
+
+    @property
+    def credential(self) -> Path | None:
+        """git 에 넘길 토큰 파일 경로(`~` 를 푼). `token_file` 이 없으면 None."""
+        return Path(self.token_file).expanduser() if self.token_file else None
 
 
 @dataclass
@@ -1261,7 +1269,8 @@ def _parse_repos(raw: Any, where: str) -> tuple[RepoConfig, ...]:
         if not isinstance(r["name"], str) or not isinstance(r["url"], str):
             raise ConfigError(f"{where}: [[repos]] name and url must be strings")
         name = r["name"]
-        extra = set(r) - {"name", "url"}
+        token_file = _repo_token_file(r, name, where)
+        extra = set(r) - {"name", "url", "token_file"}
         release_raw: Any = None
         if extra == {"release"}:
             release_raw = r["release"]
@@ -1269,13 +1278,35 @@ def _parse_repos(raw: Any, where: str) -> tuple[RepoConfig, ...]:
             release_raw = r[name]["release"]
         elif extra:
             raise ConfigError(
-                f"{where}: each [[repos]] needs exactly 'name' and 'url' "
-                f"(plus an optional [repos.{name}.release] table), got extra key(s): "
+                f"{where}: each [[repos]] needs exactly 'name' and 'url' (plus an optional "
+                f"'token_file' and [repos.{name}.release] table), got extra key(s): "
                 f"{', '.join(sorted(extra))}"
             )
         release = None if release_raw is None else parse_release_profile(name, release_raw)
-        out.append(RepoConfig(name=name, url=r["url"], release=release))
+        out.append(RepoConfig(name=name, url=r["url"], release=release, token_file=token_file))
     return tuple(out)
+
+
+def _repo_token_file(r: dict[str, Any], name: str, where: str) -> str | None:
+    """`[[repos]] token_file` — 비지 않은 문자열이고, 저장소 url 이 https 여야 한다.
+
+    토큰은 https 자격이다. ssh 나 scp 형 url 에 붙이면 git 이 쓰지 않아 「설정했는데 안 먹는」
+    꼴이 되므로 읽을 때 거절한다. 파일이 있는지는 여기서 보지 않는다 — 토큰을 바꿔 끼우는 동안
+    서버가 못 뜨면 안 된다. 못 읽으면 그 저장소의 git 호출이 `no_credential` 로 실패한다.
+    """
+    if "token_file" not in r:
+        return None
+    value = r["token_file"]
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"{where}: [[repos]] {name!r}: token_file must be a path to a file holding a token"
+        )
+    if not r["url"].startswith("https://"):
+        raise ConfigError(
+            f"{where}: [[repos]] {name!r}: token_file needs an https:// url — a token is an "
+            "https credential and git ignores it for ssh"
+        )
+    return value
 
 
 def load_worker_config(
