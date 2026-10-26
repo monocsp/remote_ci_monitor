@@ -140,6 +140,9 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
   /* 식별자 칸은 넘치면 말줄임 — `word-break: keep-all` 은 여기에 안 쓴다(효과가 없다) */
   table.q td.key, table.q td.requester, table.q td.source { max-width: 0; overflow: hidden; text-overflow: ellipsis; }
   table.q td.key .key, table.q td.requester > span { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+  /* 이유 칸은 남는 폭을 받는 칸이다 — 한 줄로 못 박은 긴 단계 이름(아래 `.step-now`)이 자기 글자 폭만큼
+     칸을 넓혀 표를 옆으로 밀지 않게, 칸 폭을 내용이 아니라 표가 정한다. 이유 글 자체는 그대로 접힌다. */
+  table.q td.reason { max-width: 0; }
 }
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }
@@ -168,6 +171,14 @@ table.q tr.qgroup:not(:first-child) th { border-top: 1px solid var(--line); }
 table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8px; }
 /* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
 .step-now { font-family: var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); opacity: 0.85; }
+/* 큐 행의 「지금 단계」 줄은 **한 줄**이다(2026-10-26 오너 보고 — 글이 길어지면 줄이 길어졌다 줄었다 한다).
+   단계 이름은 몇 초마다 바뀌고 긴 것은 70자를 넘는다. 접히게 두면 단계가 바뀔 때마다 그 행만 1~3줄로
+   늘었다 줄어 대기열 전체가 출렁인다. 이름만 말줄임하고(전문은 title) 몇 초째는 그 옆에 늘 남긴다.
+   flex 는 이 줄에만 쓴다 — `.reason` 의 flex 금지(조사가 떨어진다)와는 다른 요소다. 스토어 카드의
+   `.step-now` 는 구조가 달라 큐 표 안으로 가둔다. */
+table.q td.reason .step-now { display: flex; align-items: baseline; gap: 0 0.35em; min-width: 0; }
+table.q td.reason .step-now .sn-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.q td.reason .step-now .sn-t { flex: 0 0 auto; white-space: nowrap; }
 /* 전체 진행 막대(2026-09-09 오너 요청) — 접힌 행에서도 「어디까지 왔나」가 한눈에 보인다.
    2026-09-15: 막대 **행**을 없애고 진행 시간 칸 안으로 넣었다 — 한 작업이 한 줄이다.
    길이는 눈에, 퍼센트와 근거는 글자에 — 색과 길이만으로 말하지 않는다(§4.2).

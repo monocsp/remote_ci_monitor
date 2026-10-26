@@ -3426,7 +3426,10 @@
     var secs = canTick() && cur.started_at
       ? '<span data-tick="elapsed" data-from="' + esc(cur.started_at) + '">' + esc(dur) + "</span>"
       : esc(dur);
-    return esc(tr("progress.now", { cur: i, total: total, step: prog.current_name })) + " " + secs;
+    // 이름과 시간을 두 칸으로 나눈다 — 이름만 한 줄 말줄임(전문은 title), 몇 초째는 늘 보인다.
+    // 한 덩어리 글이면 단계가 바뀔 때마다 1~3줄로 접혔다 펴져 행 높이가 출렁인다(2026-10-26 오너 보고).
+    var label = tr("progress.now", { cur: i, total: total, step: prog.current_name });
+    return '<span class="sn-name" title="' + esc(label) + '">' + esc(label) + '</span> <span class="sn-t">' + secs + "</span>";
   }
 
   function progressHtml(row) {

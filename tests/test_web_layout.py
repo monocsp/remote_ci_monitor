@@ -322,3 +322,73 @@ def test_a_row_never_shows_two_filled_status_chips(scene, tmp_path):  # noqa: F8
     assert "pill" in status[0]["cls"], f"채운 칩 하나는 상태 필이어야 한다: {status[0]}"
     badges = [c for c in m["chips"] if "conf" in c["cls"]]
     assert len(badges) <= 1, f"신뢰도 배지는 행마다 하나뿐이다(유일한 예외): {badges}"
+
+
+# ── (마) 도는 행의 높이는 단계 이름 길이에 따라 출렁이지 않는다 ──────────────
+#
+# 2026-10-26 오너 보고: 대기열에서 글이 길어지면 줄이 엄청 길어졌다 줄었다 한다.
+# 원인은 이유 칸 아래의 「지금 단계」 줄 — 단계 이름이 몇 초마다 바뀌는데(긴 이름은
+# 70자 남짓) 접힘 제한이 없어 1~3줄로 접혔다 펴졌다. 계약: 그 줄은 **한 줄**이다
+# (이름만 말줄임 · 전문은 title), 몇 초째인지는 늘 보이고, 긴 이름이 표를 옆으로
+# 밀지 않는다. 페이지가 다시 그리기 전에 같은 eval 안에서 바꾸고 재고 되돌린다.
+
+LONG_STEP = (
+    "QA 일괄 수정 하네스 자기검증 (qa-batch · qa-defect-loop) — "
+    "다시 실행 · 증거 대조 · 원장 잠금 · "
+    "release harness self-check with a deliberately very long English tail to force wrapping"
+)
+
+STEP_NOW_JS = """
+(() => {
+  const tr = document.querySelector('#queue tr[data-job="%(job)s"]');
+  if (!tr) return {missing: 'row'};
+  const td = tr.querySelector('td.reason');
+  const now = td && td.querySelector('.step-now');
+  if (!now) return {missing: 'step-now', html: td ? td.innerHTML : null};
+  const name = now.querySelector('.sn-name'), t = now.querySelector('.sn-t');
+  if (!name || !t) return {missing: 'parts', html: now.innerHTML};
+  const before = tr.getBoundingClientRect().height;
+  const orig = name.textContent;
+  name.textContent = %(long)s;
+  const after = tr.getBoundingClientRect().height;
+  const nr = name.getBoundingClientRect();
+  const tr2 = t.getBoundingClientRect();
+  const dr = td.getBoundingClientRect();
+  const doc = document.scrollingElement;
+  const out = {before: before, after: after, nameH: nr.height, timeH: tr2.height,
+               timeW: tr2.width, timeRight: tr2.right, tdRight: dr.right,
+               scrollW: doc.scrollWidth, clientW: doc.clientWidth,
+               title: name.getAttribute('title')};
+  name.textContent = orig;
+  return out;
+})()
+"""
+
+
+def test_running_row_height_does_not_follow_the_step_name_length(scene, tmp_path):  # noqa: F811
+    measured: dict[tuple[int, str], dict] = {}
+    js = STEP_NOW_JS % {"job": scene.running, "long": json.dumps(LONG_STEP)}
+    with Chrome(tmp_path / "chrome-step-now", window="1280,900") as c:
+        for width, lang in CASES:
+            c.viewport(width, 900, mobile=width <= PHONE_MAX)
+            c.open(page_url(scene, lang), ready_js=ready_at(scene, lang))
+            time.sleep(0.2)
+            measured[(width, lang)] = c.eval(js)
+    scene.assert_still_running()
+    for (width, lang), m in measured.items():
+        where = f"{lang}@{width}"
+        assert "missing" not in m, (
+            f"{where}: 도는 행의 단계 줄이 이름·시간 두 부분으로 안 나뉜다 — {m}"
+        )
+        assert abs(m["after"] - m["before"]) <= 1, (
+            f"{where}: 단계 이름이 길어지자 행 높이가 {m['before']:.0f}px → "
+            f"{m['after']:.0f}px 로 바뀌었다 — 단계가 바뀔 때마다 대기열이 출렁인다"
+        )
+        assert m["nameH"] <= m["timeH"] * 1.5, f"{where}: 긴 단계 이름이 한 줄을 넘었다 ({m})"
+        assert m["timeW"] > 0 and m["timeRight"] <= m["tdRight"] + 1, (
+            f"{where}: 긴 이름에 밀려 「몇 초째」가 칸 밖으로 나갔거나 사라졌다 ({m})"
+        )
+        assert m["scrollW"] <= m["clientW"] + 1, (
+            f"{where}: 긴 단계 이름이 페이지를 옆으로 밀었다 ({m})"
+        )
+        assert m["title"], f"{where}: 말줄임된 단계 이름의 전문이 title 에 없다"
