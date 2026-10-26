@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A running row in the queue no longer grows and shrinks as its step changes.** The "now" line
+  under the reason (`step 3/86 <name> 1m 02s`) was free text, so a long step name — a project's gate
+  names steps like `QA batch harness self-check (qa-batch · qa-defect-loop)` — wrapped onto two or
+  three lines and the row jumped every time the step changed. The step name now stays on one line
+  and is cut with an ellipsis (the full name is in its tooltip), the elapsed time beside it always
+  stays visible, and a long name can no longer widen the reason column and push the table sideways.
+  `tests/test_web_layout.py` locks it at 390 and 1240 px in both languages.
+
 ## [0.4.2] - 2026-10-14
 
 A repository's git access no longer depends on which `gh` account is active on the build machine.
