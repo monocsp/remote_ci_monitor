@@ -24,6 +24,10 @@ bind = "127.0.0.1"
 port = {port}
 data_dir = "{data_dir}"
 grace_seconds = 1
+# 저장 공간 바닥(기본 10 GiB)은 끈다 — 이 시험은 디스크를 안 잰다. 켜 두면 `rcm check` 가 그 기계의
+# 남은 디스크에 따라 FAIL 이 되어(2026-10-26 GitHub ubuntu 러너 8 GB 남음) 상관없는 PR 이 빨개진다.
+# 바닥 판정 자체는 tests/test_cli_m5g.py 가 잠근다.
+min_free_bytes = 0
 
 [[presets]]
 name = "gate"
