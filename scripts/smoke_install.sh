@@ -92,6 +92,10 @@ TOKEN=$("$RCM" token add laptop)
 # The server must read the same data dir `rcm token add` wrote to — the template default
 # `~/.local/share/rcm` under the isolated HOME. Do not add --data-dir here (that silently split
 # the token store from the server and every `rcm check` failed with "a valid token is required").
+# 저장 공간 바닥(기본 10 GiB)은 이 서버에서만 끈다 — 스모크는 설치 절차를 재지 디스크를 재지 않는다.
+# 켜 두면 러너의 남은 디스크가 바닥보다 적을 때(2026-10-26 GitHub ubuntu 러너 8 GB) `rcm check` 가
+# storage FAIL 로 끝나 설치와 상관없이 빨개진다. 설정 파일은 README 절차 그대로 두고 env 로만 덮는다.
+export RCM_SERVER_MIN_FREE_BYTES=0
 start_server() {
   PORT=$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
   "$RCM" serve --port "$PORT" >"$WORK/server.log" 2>&1 &
