@@ -198,6 +198,18 @@ class Requester:
 
 
 @dataclass(frozen=True)
+class JobLink:
+    """호출자가 잡에 붙인 링크 하나(예: 그 커밋의 PR). rcm 은 무엇을 가리키는지 모른다 — 결정 30.
+
+    `url` 은 검증된 http(s) 절대 주소(`core/joblink.parse_link`), `label` 은 짧은 글이거나 None
+    (None 이면 화면이 주소에서 줄여 보인다). 합류자의 링크는 받지 않는다 — 처음 세운 제출의 것.
+    """
+
+    url: str
+    label: str | None = None
+
+
+@dataclass(frozen=True)
 class Joiner:
     name: str
     label: str
@@ -256,6 +268,7 @@ class Job:
     priority: int = PRIORITY_NORMAL  # -1 low · 0 normal · 1 high (M5)
     pool: str = DEFAULT_POOL  # 어느 풀의 워커가 돌리는가 (M5b)
     worker_name: str | None = None  # 원격 워커가 claim 했으면 그 이름, 로컬 레인은 None (M5b-2)
+    link: JobLink | None = None  # 호출자가 붙인 링크(v22). 옛 잡 · 링크 없이 낸 잡은 None
 
     @property
     def is_waiting(self) -> bool:

@@ -168,7 +168,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 
 | 명령 | 무엇을 보여 주나 |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 작업 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 작업은 대기 대신 상태와 경과 |
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |

@@ -957,6 +957,38 @@ resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`w
 `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
 `examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
 
+## Linking a job to a page
+
+A job can carry one link to the page it is about — usually its pull request. The web UI shows it
+right after the job's name in the queue, in the recent list and in the log drawer's header, as
+`PR #816 ↗`, and opens it in a new tab. rcm does not know what the page is: the caller finds the
+pull request and passes its address, so rcm still needs no GitHub access.
+
+```sh
+rcm run gate -f scope=full --link https://github.com/org/app/pull/816 --link-label "PR #816"
+```
+
+The same thing in the `POST /jobs` body is `"link": {"url": "…", "label": "…"}`.
+
+| field | rule |
+|---|---|
+| `url` | required when `link` is given; starts with `http://` or `https://` and has a host; at most 500 characters; no spaces or control characters |
+| `label` | optional; at most 40 characters; no control characters. Without one the chip shows the address's host and the end of its path (`github.com/…/pull/816`) |
+
+Anything else is refused with 400 and a sentence naming the field (`link.url must start with
+http:// or https://`); `rcm run` checks the same rules first and stops with exit 2 before it
+sends anything, and `--link-label` without `--link` is also exit 2. A submission that joins an
+existing job does not change that job's link — the link belongs to the submission that created
+it. Jobs carry `link` (`{"url", "label"}`, `label` may be `null`; `null` when there is none) in
+`/jobs/<id>`, the queue rows and the recent list of `/api/status`. The web UI checks the address
+again and draws nothing for one that is not `http(s)`. The chip stays on one line and is cut with
+an ellipsis (the full address is its tooltip), so a long label never makes a queue row taller;
+clicking it opens the page and does nothing else to the row.
+
+A wrapper detects support with `rcm run --help | grep -q -- --link-label`. A server from before
+this feature (database v21 or older) ignores the field and queues the job without a link, so
+adding it never makes a submission fail.
+
 ## Who may cancel a job
 
 Every `POST /jobs` — a fresh submission and a join alike — answers with a `submission` object,
