@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-27
+
 ### Breaking changes
 - **Database schema v22 — a job can carry a link.** Two columns, `link_url` and `link_label`, are
   added to `jobs`. A v21 file is backed up (`rcm.sqlite3.v21.bak`) and migrated on start; jobs that
@@ -34,7 +36,7 @@ of a key bumps that number and is listed here.
   three lines and the row jumped every time the step changed. The step name now stays on one line
   and is cut with an ellipsis (the full name is in its tooltip), the elapsed time beside it always
   stays visible, and a long name can no longer widen the reason column and push the table sideways.
-  `tests/test_web_layout.py` locks it at 390 and 1240 px in both languages.
+  `tests/test_web_layout.py` locks it at 390 and 1240 px in both languages. ([#181](https://github.com/monocsp/remote_ci_monitor/pull/181))
 
 ## [0.4.2] - 2026-10-14
 
@@ -1495,7 +1497,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.3...v0.4.0
