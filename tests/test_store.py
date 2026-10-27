@@ -47,6 +47,7 @@ def enqueue(
     tree="9f8e",
     now=NOW,
     req=ALICE,
+    link=None,
 ):
     inputs = inputs if inputs is not None else {"scope": "full"}
     src = Source(
@@ -63,6 +64,7 @@ def enqueue(
         join_key=join_key(key.split(":")[0], inputs, tree),
         now=now,
         state=state,
+        link=link,
     )
 
 

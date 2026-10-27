@@ -51,6 +51,7 @@ from remote_ci_monitor.core import artifacts as art_core
 from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
+from remote_ci_monitor.core.joblink import LinkError, parse_link
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.render_text import (
     MAX_IDENT,
@@ -476,6 +477,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             ref = validate_ref(args.ref)
         except ValueError as e:
             return _usage(f"--ref: {e}")
+    # 잡 링크도 서버와 같은 규칙으로 먼저 거른다 — 큰 트리를 다 싼 뒤에 400 을 보지 않게
+    link = getattr(args, "link", None)
+    link_label = getattr(args, "link_label", None)
+    if link_label is not None and link is None:
+        return _usage("--link-label needs --link URL")
+    if link is not None:
+        try:
+            parse_link({"url": link, "label": link_label})
+        except LinkError as e:
+            return _usage(f"--link: {e}")
     # ① 서버 스키마로 검증 — 실패면 보내지 않는다
     try:
         presets = client.presets()
@@ -531,7 +542,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if e.status == 0:
             return _client_fail(client, "run", e)
     if mode == "git_ref":
-        return _run_git_ref(client, args, preset, inputs, ref or "", label, pool)
+        return _run_git_ref(client, args, preset, inputs, ref or "", label, pool, link, link_label)
     # ② 스냅샷
     root = Path(args.dir or os.getcwd())
     try:
@@ -560,6 +571,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 join=not args.no_join,
                 priority=args.priority,
                 pool=pool,
+                link=link,
+                link_label=link_label,
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -653,6 +666,8 @@ def _run_git_ref(
     ref: str,
     label: str,
     pool: str | None = None,
+    link: str | None = None,
+    link_label: str | None = None,
 ) -> int:
     """git_ref 제출: 스냅샷·업로드 없이 ③ 제출 → ⑤ wait. 서버가 ref 를 sha 로 확정한다."""
     try:
@@ -664,6 +679,8 @@ def _run_git_ref(
             join=not args.no_join,
             priority=args.priority,
             pool=pool,
+            link=link,
+            link_label=link_label,
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -2423,6 +2440,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--pool", metavar="NAME", help="worker pool (must be allowed by the preset)")
     run.add_argument("--by", metavar="LABEL", help="requester label (default: user@host)")
+    run.add_argument(
+        "--link",
+        metavar="URL",
+        help="an http(s) page to show next to the job's name in the web UI, such as its pull "
+        "request (ignored when the submission joins an existing job)",
+    )
+    run.add_argument(
+        "--link-label",
+        metavar="TEXT",
+        help="short text for --link, at most 40 characters (default: the URL, shortened)",
+    )
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
     run.add_argument(

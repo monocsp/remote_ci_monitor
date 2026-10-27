@@ -51,6 +51,7 @@ COLD_START_SECONDS = 60.0
 #: 시간이 줄어든다 — `test_server.PRESETS` 의 20초짜리 `slow` 로는 마감 60초가 헛것이었다(M5l L7.1
 #: 실측). 찬 기동 마감 + `open()` 15초 + 자리잡기 여유보다 길게. teardown 은 취소로 끝낸다.
 SCENE_SLOW_SECONDS = 120
+SCENE_LINK = {"url": "https://example.com/org/app/pull/816", "label": "PR #816"}
 SCENE_PRESETS = [
     p
     if p["name"] != "slow"
@@ -441,7 +442,8 @@ def scene(tmp_path):
     srv.app.sampler = FreshStubSampler()
     jobs: list[tuple[int, str]] = []
     try:
-        running = srv.submit(preset="slow")[1]["job_id"]
+        # 도는 잡은 호출자 링크를 하나 단다(v22) — 행 높이 고정과 칩을 진짜 화면에서 잰다
+        running = srv.submit(preset="slow", link=SCENE_LINK)[1]["job_id"]
         jobs.append((running, "alice"))
         assert srv.upload(running)[0] == 200
         srv.wait_state(running, "running")

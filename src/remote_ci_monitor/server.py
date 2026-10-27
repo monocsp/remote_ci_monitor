@@ -68,6 +68,7 @@ from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.failures import failures_json
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
+from remote_ci_monitor.core.joblink import LinkError, parse_link
 from remote_ci_monitor.core.manifest import ManifestError, missing_hashes, validate_manifest
 from remote_ci_monitor.core.mdns import instance_name
 from remote_ci_monitor.core.model import (
@@ -84,6 +85,7 @@ from remote_ci_monitor.core.model import (
     UPLOADING,
     HostSample,
     Job,
+    JobLink,
     Median,
     Paused,
     Pool,
@@ -3472,11 +3474,17 @@ class App(RemoteWorkersMixin):
         label = body.get("requester_label") or f"{token.name}"
         if not isinstance(label, str) or len(label) > 120:
             raise ApiError(400, "requester_label must be a string of at most 120 characters")
+        # 잡 링크(v22) — 합류할 제출이어도 검사한다(같은 본문이 언제는 되고 언제는 안 되면 안 된다).
+        # 합류하면 버린다: 잡의 링크는 처음 세운 제출의 것이다.
+        try:
+            link = parse_link(body.get("link"))
+        except LinkError as e:
+            raise ApiError(400, str(e)) from e
         priority = self._requested_priority(body, preset, token)
         pool = self._requested_pool(body, preset)
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
-                preset, inputs, src, label, token, body, host, priority, pool
+                preset, inputs, src, label, token, body, host, priority, pool, link
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3531,6 +3539,7 @@ class App(RemoteWorkersMixin):
             state=UPLOADING,
             priority=priority,
             pool=pool,
+            link=link,
         )
         self._publish_job(job, job.id)
         return 201, {
@@ -3827,6 +3836,7 @@ class App(RemoteWorkersMixin):
         host: str | None = None,
         priority: int = 0,
         pool: str = DEFAULT_POOL,
+        link: JobLink | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         repo = self.config.repo(preset.repo)
@@ -3888,6 +3898,7 @@ class App(RemoteWorkersMixin):
             state=QUEUED,
             priority=priority,
             pool=pool,
+            link=link,
         )
         self._publish_job(job, job.id)
         self.wake.set()

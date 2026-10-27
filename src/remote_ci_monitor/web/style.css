@@ -225,6 +225,19 @@ table.q td.reason .step-now .sn-t { flex: 0 0 auto; white-space: nowrap; }
 .pill.lost { background: var(--lost-soft); color: var(--lost); }
 .pill.cancelling { background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn); }
 .key { font-family: var(--mono); font-weight: 500; }
+/* 잡 링크 칩(v22) — 잡 이름 바로 뒤의 `<a class="job-link">`(호출자가 붙인 PR 같은 페이지).
+   **한 줄이다**: 이름과 칩이 한 줄 상자(`.key-line`) 안에서 함께 줄고, 넘치면 둘 다 말줄임한다(전체
+   주소는 title). 접히게 두면 라벨 길이에 따라 행 높이가 바뀌어 #181 이 막은 출렁임이 돌아온다.
+   inline-flex 라 뒤의 입력 칩은 오늘처럼 같은 흐름에 남는다. 화살표는 줄지 않는다.
+   **칩이 먼저 준다**(flex-shrink 1000) — 잡 이름이 주된 정보다. 칩이 3.5em(글 몇 자 + ↗)까지 줄고
+   나서야 이름이 준다. 같은 비율로 줄이면 긴 라벨 옆의 `slow` 가 `s…` 가 됐다(2026-10-27 실기). */
+.key-line { display: inline-flex; align-items: baseline; gap: 0 6px; max-width: 100%; min-width: 0; vertical-align: bottom; white-space: nowrap; }
+.key-line > .key, .key-line > .kn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.job-link { flex: 0 1000 auto; min-width: 3.5em; display: inline-flex; align-items: baseline; max-width: 100%; font: 500 12px var(--mono); color: var(--accent); text-decoration: none; white-space: nowrap; }
+.job-link .jl-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.job-link .jl-a { flex: 0 0 auto; margin-left: 2px; }
+.job-link:hover .jl-t, .job-link:focus-visible .jl-t { text-decoration: underline; }
+.drawer-link { min-width: 0; max-width: 40%; display: inline-flex; }
 .chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font: 11.5px var(--mono); color: var(--muted); margin-left: 4px; background: none; cursor: pointer; }
 .sha { font-family: var(--mono); background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; }
 .uncommitted { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--warn); color: var(--warn); font: 600 12px var(--sans); }

@@ -54,6 +54,7 @@ from remote_ci_monitor.core.model import (
     WAITING_STATES,
     CancelInfo,
     Job,
+    JobLink,
     Joiner,
     Paused,
     Requester,
@@ -68,7 +69,7 @@ from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 21
+DB_VERSION = 22
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -159,7 +160,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- 마지막으로 시작한 스텝. `failed_step` 과 달리 인과를 주장하지 않는다 (M5h)
   last_step TEXT,
   -- 실패 이름이 상한(100)을 넘어 버려진 것이 있다 (M5h)
-  fail_truncated INTEGER NOT NULL DEFAULT 0
+  fail_truncated INTEGER NOT NULL DEFAULT 0,
+  -- v22: 호출자가 붙인 링크(예: PR). 옛 잡은 NULL. 마이그레이션이 뒤에 붙이므로 여기서도 맨 끝이다
+  link_url TEXT,
+  link_label TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -476,6 +480,14 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     # 드래프트를 버리면 App Store 버전을 지우는 잡까지 나가는데, 셋 중 가장 되돌리기 어려운 것이
     # 그것만 안 막혀 있었다. `mode=rehearsal` 은 스토어에 쓰지 않으니 붙이지 않는다.
     21: ("ALTER TABLE versions ADD COLUMN upload_job_id INTEGER",),
+    # v21 → v22: 잡 링크(`POST /jobs` 의 `link` · `rcm run --link`). 호출자가 잡에 붙인 http(s)
+    # 주소 하나와 짧은 라벨 — rcm 은 그것이 PR 인지 모른다(결정 30). 옛 잡은 NULL = 링크 없음이고
+    # 지어내지 않는다. 합류자는 링크를 바꾸지 않는다(처음 세운 제출의 것). v21 백업은
+    # `migrate()` 의 경계에서 이 DDL 보다 먼저 만들어진다(결정 74).
+    22: (
+        "ALTER TABLE jobs ADD COLUMN link_url TEXT",
+        "ALTER TABLE jobs ADD COLUMN link_label TEXT",
+    ),
 }
 
 
@@ -960,6 +972,9 @@ class Store:
             priority=int(row["priority"] or 0),
             pool=row["pool"] or DEFAULT_POOL,
             worker_name=row["worker_name"],
+            link=(
+                JobLink(url=row["link_url"], label=row["link_label"]) if row["link_url"] else None
+            ),
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -1645,6 +1660,7 @@ class Store:
         state: str = UPLOADING,
         priority: int = 0,
         pool: str = DEFAULT_POOL,
+        link: JobLink | None = None,
     ) -> Job:
         """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다."""
         job, _ = self._create_job_tx(
@@ -1661,6 +1677,7 @@ class Store:
             priority=priority,
             pool=pool,
             participant=None,
+            link=link,
         )
         return job
 
@@ -1690,6 +1707,7 @@ class Store:
         state: str = UPLOADING,
         priority: int = 0,
         pool: str = DEFAULT_POOL,
+        link: JobLink | None = None,
     ) -> tuple[Job, tuple[str, str] | None]:
         if state not in (UPLOADING, QUEUED):
             raise StoreError(f"new job cannot start in state {state}")
@@ -1712,8 +1730,8 @@ class Store:
             cur = conn.execute(
                 "INSERT INTO jobs (preset, inputs_json, key, concurrency_group, source_json, "
                 "requester_name, requester_label, state, created_at, queued_at, tree_hash, sha, "
-                "timeout_seconds, join_key, priority, pool) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "timeout_seconds, join_key, priority, pool, link_url, link_label) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset,
                     json.dumps(inputs, sort_keys=True, separators=(",", ":")),
@@ -1731,6 +1749,8 @@ class Store:
                     join_key,
                     int(priority),
                     pool,
+                    link.url if link else None,
+                    link.label if link else None,
                 ),
             )
             job_id = int(cur.lastrowid)

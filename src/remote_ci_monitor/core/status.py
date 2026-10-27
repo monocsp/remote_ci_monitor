@@ -182,6 +182,14 @@ def _requester(job: Job) -> dict[str, str]:
     return {"name": job.requester.name, "label": job.requester.label}
 
 
+def _link(job: Job) -> dict[str, Any] | None:
+    """호출자가 붙인 링크(v22) — `{url, label}` 또는 null. `label` 이 null 이면 화면이
+    주소를 줄인다. 키만 더했다 — schema_version 은 그대로다(키를 빼거나 뜻을 바꿀 때만 올린다)."""
+    if job.link is None:
+        return None
+    return {"url": job.link.url, "label": job.link.label}
+
+
 def _joiners(job: Job) -> list[dict[str, Any]]:
     return [{"name": j.name, "label": j.label, "joined_at": iso(j.joined_at)} for j in job.joiners]
 
@@ -211,6 +219,7 @@ def queue_row_json(
         "concurrency_group": job.concurrency_group,
         "requester": _requester(job),
         "joiners": _joiners(job),
+        "link": _link(job),
         "state": job.state,
         "reason": row.reason,
         "lane": row.lane,
@@ -258,6 +267,7 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "inputs": dict(job.inputs),
         "requester": _requester(job),
         "joiners": _joiners(job),
+        "link": _link(job),
         "state": job.state,
         "exit_code": job.exit_code,
         "job_seconds": _num(job_seconds),

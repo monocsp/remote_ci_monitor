@@ -80,8 +80,9 @@ def add_version(
     )
 
 
-def test_this_build_is_database_version_21():
-    assert DB_VERSION == 21
+def test_this_build_is_database_version_22():
+    # v22: 잡 링크 두 열(tests/test_job_link.py) — versions 표는 v21 그대로다
+    assert DB_VERSION == 22
 
 
 def test_a_fresh_database_has_the_versions_table_and_index(tmp_path):

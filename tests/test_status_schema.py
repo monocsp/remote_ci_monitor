@@ -30,6 +30,7 @@ ROW_KEYS = {
     "concurrency_group",
     "requester",
     "joiners",
+    "link",  # 호출자가 붙인 링크(v22) — 추가 키라 schema_version 은 그대로
     "state",
     "reason",
     "lane",
@@ -73,6 +74,7 @@ RECENT_KEYS = {
     "inputs",
     "requester",
     "joiners",
+    "link",  # 호출자가 붙인 링크(v22) — 추가 키라 schema_version 은 그대로
     "state",
     "exit_code",
     "job_seconds",

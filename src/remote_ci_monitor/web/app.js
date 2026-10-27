@@ -2773,6 +2773,7 @@
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
+    jobLinkHtml: jobLinkHtml, jobLinkLabel: jobLinkLabel, keyWithLinkHtml: keyWithLinkHtml,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS,
@@ -3384,7 +3385,7 @@
     var source = sourceHtml(row, L(), false);
     var h = '<tr class="' + cls.join(" ") + '" data-job="' + row.id + '" id="job-' + row.id + '">' +
       '<td class="job">' + expBtn + '<span class="id">#' + row.id + "</span> " + pill + pos + "</td>" +
-      '<td class="key"><span class="key">' + esc(row.key || row.preset || DASH) + "</span>" + chips + "</td>" +
+      '<td class="key">' + keyWithLinkHtml(row.key || row.preset || DASH, row.link) + chips + "</td>" +
       '<td class="requester">' + requester + "</td>" +
       '<td class="reason">' + reasonCell + "</td>" +
       '<td class="elapsed">' + elapsedCell + "</td>" +
@@ -3412,6 +3413,54 @@
       + (s.dirty ? '<span class="uncommitted">' + esc(T(lang, "row.uncommitted")) + "</span>" : "")
       + (showAll ? '<div class="sub">' + esc(s.repo || "") + "</div>" : "");
   }
+  /* 잡 링크(v22) — 호출자가 잡에 붙인 `link: {url, label}`(예: 그 커밋의 PR). rcm 은 그게 무엇인지
+     모른다(결정 30). 서버가 이미 거르지만(core/joblink.py) 여기서 **다시** 본다 — 이 문자열은 href 로
+     들어간다. `http://`·`https://` 절대 주소가 아니면, 공백·제어문자가 있으면, 500자를 넘으면 링크를
+     안 만든다. 소문자 스킴만 받는 것도 서버와 같다(`JavaScript:` 같은 대소문자 장난이 여기서 끝난다). */
+  // 함수 선언만 둔다 — 이 자리는 `typeof document` 의 return 뒤라 `var` 값은 node 테스트에서 안 선다.
+  function linkLimits() { return { url: 500, label: 40 }; }
+  function linkUrl(link) {
+    var url = link && typeof link === "object" ? link.url : null;
+    if (typeof url !== "string" || !url || url.length > linkLimits().url) return null;
+    if (/[\s\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/.test(url)) return null;
+    if (!/^https?:\/\/[^\/?#]/.test(url)) return null;
+    if (typeof URL === "function") {
+      try {
+        var u = new URL(url);
+        if ((u.protocol !== "http:" && u.protocol !== "https:") || !u.hostname) return null;
+      } catch (e) { return null; }
+    }
+    return url;
+  }
+  /** 칩의 글. 라벨이 없으면 주소의 호스트와 경로 끝 둘(`github.com/…/pull/816`). 링크가 아니면 null. */
+  function jobLinkLabel(link) {
+    var url = linkUrl(link);
+    if (!url) return null;
+    var label = typeof link.label === "string" ? link.label : "";
+    if (!label) {
+      var m = /^https?:\/\/([^\/?#]+)([^?#]*)/.exec(url);
+      var host = m ? m[1].replace(/^[^@]*@/, "") : url;
+      var segs = (m ? m[2] : "").split("/").filter(Boolean);
+      label = host + (segs.length > 2 ? "/…/" : segs.length ? "/" : "") + segs.slice(-2).join("/");
+    }
+    return truncate(label, linkLimits().label);
+  }
+  /** `<a class="job-link">` 한 개 또는 빈 문자열. 새 탭 · opener 없음 · 전체 주소는 title. 글은 한 줄로
+      말줄임된다(style.css `.job-link`) — 대기열 행 높이 고정(#181)을 깨지 않는다. 화살표는 장식이다. */
+  function jobLinkHtml(link) {
+    var label = jobLinkLabel(link);
+    if (label === null) return "";
+    var url = link.url;
+    return '<a class="job-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" title="' + esc(url) + '">'
+      + '<span class="jl-t">' + esc(label) + '</span> <span class="jl-a" aria-hidden="true">↗</span></a>';
+  }
+  /** 잡 이름 + 링크 칩을 한 줄로. 링크가 없으면 오늘의 `<span class="key">` 그대로다. */
+  function keyWithLinkHtml(keyText, link, cls) {
+    var name = '<span class="' + (cls || "key") + '">' + esc(keyText) + "</span>";
+    var chip = jobLinkHtml(link);
+    return chip ? '<span class="key-line">' + name + chip + "</span>" : name;
+  }
+
   /** 시계 차이를 아는가 — 모르면 기준점으로 세지 않는다(조용히 브라우저 시계로 넘어가지 않는다). */
   function canTick() { return !state.skewUnknown; }
 
@@ -3664,7 +3713,7 @@
       html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + esc(job.key || DASH) + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
+        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
         '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
@@ -3844,14 +3893,24 @@
     t._timer = setTimeout(function () { t.hidden = true; }, 4000);
   }
   function findRow(id) { var q = queueOf(state.status) || []; for (var i = 0; i < q.length; i++) if (q[i].id === id) return q[i]; return null; }
+  /** 대기열에 없으면 최근 목록에서 — 로그 서랍의 머리는 끝난 잡의 것도 그린다. */
+  function findAnyJob(id) {
+    var row = findRow(id);
+    if (row) return row;
+    var recent = recentOf(state.status) || [];
+    for (var i = 0; i < recent.length; i++) if (recent[i].id === id) return recent[i];
+    return null;
+  }
 
   // 로그 서랍 (항목 13)
   function openDrawer(id) {
     var d = $("#drawer");
-    var row = findRow(id);
+    var row = findAnyJob(id);
     state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0;
     state.drawer.key = row ? (row.key || "") : "";
     $("[data-drawer-title]").textContent = tr("drawer.job", { id: id, key: state.drawer.key });
+    var linkSlot = $("[data-drawer-link]");
+    if (linkSlot) linkSlot.innerHTML = jobLinkHtml(row && row.link);
     $("[data-drawer-sub]").textContent = "";
     $("[data-drawer-log]").textContent = "";
     d.hidden = false;
@@ -3958,6 +4017,8 @@
 
   function wireClicks() {
     document.addEventListener("click", function (ev) {
+      // 잡 링크는 브라우저가 연다(새 탭) — 그 행의 펼침 · 잡 이동 · 복사 같은 손잡이가 같이 돌면 안 된다
+      if (ev.target.closest && ev.target.closest("a.job-link")) return;
       var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src]");
       if (!t) return;
       if (t.hasAttribute("data-goto")) { gotoJob(parseInt(t.getAttribute("data-goto"), 10)); return; }
