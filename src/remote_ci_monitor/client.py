@@ -626,6 +626,8 @@ class Client:
         join: bool = True,
         priority: str | int | None = None,
         pool: str | None = None,
+        link: str | None = None,
+        link_label: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
         if requester_label:
@@ -634,6 +636,9 @@ class Client:
             body["priority"] = priority
         if pool is not None:
             body["pool"] = pool
+        # 잡 링크(v22). 없으면 키도 없다 — 옛 서버는 모르는 키를 무시하므로 있어도 잡은 선다
+        if link:
+            body["link"] = {"url": link, **({"label": link_label} if link_label else {})}
         resp = self.post_json("/jobs", body)
         # 서버가 캐시를 지원하는지 기억한다 — upload_cached 가 manifest 를 헛되이 보내지 않게
         if isinstance(resp, dict) and "cache" in resp:

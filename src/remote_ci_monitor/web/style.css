@@ -140,6 +140,9 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
   /* 식별자 칸은 넘치면 말줄임 — `word-break: keep-all` 은 여기에 안 쓴다(효과가 없다) */
   table.q td.key, table.q td.requester, table.q td.source { max-width: 0; overflow: hidden; text-overflow: ellipsis; }
   table.q td.key .key, table.q td.requester > span { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+  /* 이유 칸은 남는 폭을 받는 칸이다 — 한 줄로 못 박은 긴 단계 이름(아래 `.step-now`)이 자기 글자 폭만큼
+     칸을 넓혀 표를 옆으로 밀지 않게, 칸 폭을 내용이 아니라 표가 정한다. 이유 글 자체는 그대로 접힌다. */
+  table.q td.reason { max-width: 0; }
 }
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }
@@ -168,6 +171,14 @@ table.q tr.qgroup:not(:first-child) th { border-top: 1px solid var(--line); }
 table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8px; }
 /* 도는 행이 지금 하는 일 — 이유 칸 아래 한 줄 */
 .step-now { font-family: var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); opacity: 0.85; }
+/* 큐 행의 「지금 단계」 줄은 **한 줄**이다(2026-10-26 오너 보고 — 글이 길어지면 줄이 길어졌다 줄었다 한다).
+   단계 이름은 몇 초마다 바뀌고 긴 것은 70자를 넘는다. 접히게 두면 단계가 바뀔 때마다 그 행만 1~3줄로
+   늘었다 줄어 대기열 전체가 출렁인다. 이름만 말줄임하고(전문은 title) 몇 초째는 그 옆에 늘 남긴다.
+   flex 는 이 줄에만 쓴다 — `.reason` 의 flex 금지(조사가 떨어진다)와는 다른 요소다. 스토어 카드의
+   `.step-now` 는 구조가 달라 큐 표 안으로 가둔다. */
+table.q td.reason .step-now { display: flex; align-items: baseline; gap: 0 0.35em; min-width: 0; }
+table.q td.reason .step-now .sn-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.q td.reason .step-now .sn-t { flex: 0 0 auto; white-space: nowrap; }
 /* 전체 진행 막대(2026-09-09 오너 요청) — 접힌 행에서도 「어디까지 왔나」가 한눈에 보인다.
    2026-09-15: 막대 **행**을 없애고 진행 시간 칸 안으로 넣었다 — 한 작업이 한 줄이다.
    길이는 눈에, 퍼센트와 근거는 글자에 — 색과 길이만으로 말하지 않는다(§4.2).
@@ -214,6 +225,19 @@ table.q tr.qgroup-empty td { color: var(--muted); font-size: 12.5px; padding: 8p
 .pill.lost { background: var(--lost-soft); color: var(--lost); }
 .pill.cancelling { background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn); }
 .key { font-family: var(--mono); font-weight: 500; }
+/* 잡 링크 칩(v22) — 잡 이름 바로 뒤의 `<a class="job-link">`(호출자가 붙인 PR 같은 페이지).
+   **한 줄이다**: 이름과 칩이 한 줄 상자(`.key-line`) 안에서 함께 줄고, 넘치면 둘 다 말줄임한다(전체
+   주소는 title). 접히게 두면 라벨 길이에 따라 행 높이가 바뀌어 #181 이 막은 출렁임이 돌아온다.
+   inline-flex 라 뒤의 입력 칩은 오늘처럼 같은 흐름에 남는다. 화살표는 줄지 않는다.
+   **칩이 먼저 준다**(flex-shrink 1000) — 잡 이름이 주된 정보다. 칩이 3.5em(글 몇 자 + ↗)까지 줄고
+   나서야 이름이 준다. 같은 비율로 줄이면 긴 라벨 옆의 `slow` 가 `s…` 가 됐다(2026-10-27 실기). */
+.key-line { display: inline-flex; align-items: baseline; gap: 0 6px; max-width: 100%; min-width: 0; vertical-align: bottom; white-space: nowrap; }
+.key-line > .key, .key-line > .kn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.job-link { flex: 0 1000 auto; min-width: 3.5em; display: inline-flex; align-items: baseline; max-width: 100%; font: 500 12px var(--mono); color: var(--accent); text-decoration: none; white-space: nowrap; }
+.job-link .jl-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.job-link .jl-a { flex: 0 0 auto; margin-left: 2px; }
+.job-link:hover .jl-t, .job-link:focus-visible .jl-t { text-decoration: underline; }
+.drawer-link { min-width: 0; max-width: 40%; display: inline-flex; }
 .chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font: 11.5px var(--mono); color: var(--muted); margin-left: 4px; background: none; cursor: pointer; }
 .sha { font-family: var(--mono); background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; }
 .uncommitted { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--warn); color: var(--warn); font: 600 12px var(--sans); }

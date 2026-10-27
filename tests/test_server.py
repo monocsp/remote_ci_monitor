@@ -107,7 +107,14 @@ class Server:
             return resp.status, payload
 
     def submit(
-        self, token="alice", preset="ok", inputs=None, tree_hash=TREE_HASH, size=None, join=None
+        self,
+        token="alice",
+        preset="ok",
+        inputs=None,
+        tree_hash=TREE_HASH,
+        size=None,
+        join=None,
+        link=None,
     ):
         body = {
             "preset": preset,
@@ -124,6 +131,8 @@ class Server:
         }
         if join is not None:
             body["join"] = join
+        if link is not None:
+            body["link"] = link
         return self.req("POST", "/jobs", token=token, json_body=body)
 
     def upload(self, job_id, token="alice", data=TAR, **kw):

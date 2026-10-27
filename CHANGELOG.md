@@ -7,6 +7,37 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-27
+
+### Breaking changes
+- **Database schema v22 — a job can carry a link.** Two columns, `link_url` and `link_label`, are
+  added to `jobs`. A v21 file is backed up (`rcm.sqlite3.v21.bak`) and migrated on start; jobs that
+  were already there have no link. An older build refuses a v22 file and points at that backup.
+  `/api/status` `schema_version` is unchanged — keys were only added. ([#183](https://github.com/monocsp/remote_ci_monitor/pull/183))
+
+### Added
+- **A job can link to the page it is about, such as its pull request.** `rcm run … --link URL
+  [--link-label TEXT]` (or `link: {"url", "label"}` in the `POST /jobs` body) attaches one
+  `http://` or `https://` address to the job, and the web UI shows it right after the job's name
+  in the queue, in the recent list and in the log drawer's header — `PR #816 ↗`, opening in a new
+  tab. rcm does not know what the page is; the caller does. The label is at most 40 characters
+  (without one the chip shows the address's host and the end of its path), the address at most
+  500, and anything else is refused with 400 (`rcm run` stops with exit 2 before it sends
+  anything). The chip stays on one line and is cut with an ellipsis, so a long label never makes a
+  queue row taller. A submission that joins an existing job keeps that job's link. Jobs carry
+  `link` (`{"url", "label"}` or `null`) in `/jobs/<id>`, the queue rows and the recent list.
+  A wrapper can test for support with `rcm run --help | grep -q -- --link-label`; an older server
+  ignores the field and the job is queued without a link. ([#183](https://github.com/monocsp/remote_ci_monitor/pull/183))
+
+### Fixed
+- **A running row in the queue no longer grows and shrinks as its step changes.** The "now" line
+  under the reason (`step 3/86 <name> 1m 02s`) was free text, so a long step name — a project's gate
+  names steps like `QA batch harness self-check (qa-batch · qa-defect-loop)` — wrapped onto two or
+  three lines and the row jumped every time the step changed. The step name now stays on one line
+  and is cut with an ellipsis (the full name is in its tooltip), the elapsed time beside it always
+  stays visible, and a long name can no longer widen the reason column and push the table sideways.
+  `tests/test_web_layout.py` locks it at 390 and 1240 px in both languages. ([#181](https://github.com/monocsp/remote_ci_monitor/pull/181))
+
 ## [0.4.2] - 2026-10-14
 
 A repository's git access no longer depends on which `gh` account is active on the build machine.
@@ -1466,7 +1497,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.3.3...v0.4.0
