@@ -98,6 +98,52 @@ A container inherits its file-descriptor limit from the Docker daemon rather tha
 so check it (`docker exec rcm sh -c 'ulimit -n'`) and pass `--ulimit nofile=4096` if it is lower —
 the same reason as the service files above.
 
+## Change a preset without a restart
+
+A restart marks every job running in a local lane `lost`. That is the right price for new code;
+it is the wrong price for adding a preset. `rcm reload` (admin) makes the server re-read its
+config file and swap in the new **presets and repos** — nothing is interrupted, and the next job
+to be claimed sees the new definition.
+
+```sh
+rcm reload                 # from any machine with an admin token
+kill -HUP <pid>            # or on the build machine itself
+launchctl kill -HUP gui/$(id -u)/com.remote-ci-monitor.server
+```
+
+It prints what moved, by name:
+
+```
+preset added ipf-verify, ipf-verify-tree · repo added image_place_follower
+config: /Users/build/.config/rcm/server.toml
+```
+
+**Only `[[presets]]` and `[[repos]]` reload.** `[server]`, `[estimate]`, `[host]`, `[display]`
+and `[[notify]]` are read once at start by threads that keep their own copy — the workers, the
+janitor, the notifier, the host sampler — so a live swap would not reach them. Rather than apply
+half the file, rcm refuses the whole reload and names the section:
+
+```
+config unchanged — [server] changed and only takes effect on a restart
+```
+
+A job already running is not touched: it was handed everything it needs when it started. A job
+still **queued** is matched when a lane claims it, so it runs under the edited definition.
+
+A reload also re-measures the job environment, so `rcm check`'s `service preset tools` row
+answers for the presets you just loaded rather than for the ones the server started with.
+
+Removing a preset is the one edit to think about. A queued job whose preset is gone does not
+wait — it fails at claim with `preset_missing`, the same way it does after a restart. Reload the
+removal while jobs are queued against it and you fail them; check `rcm top` first, as you would
+before a restart.
+
+Change one of those and you are doing an upgrade-shaped restart; the section above covers it. The
+same refusal protects you from a broken file: if the config does not parse or a preset is
+invalid, **nothing changes** and the error says why. The running server is never left in a worse
+state than before you typed the command. `nothing changed` means the file rcm read is not the
+file you edited, or what you edited was in a section that does not reload.
+
 ## Upgrade
 
 The order matters. The database migrates one way on the first start of the new build, and an
