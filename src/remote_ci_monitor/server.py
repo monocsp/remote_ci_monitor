@@ -36,7 +36,7 @@ import sys
 import tarfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,7 +63,7 @@ from remote_ci_monitor.config import (
     advertise_warning,
     retention_warning,
 )
-from remote_ci_monitor.core import admission, outcome
+from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.failures import failures_json
 from remote_ci_monitor.core.gitref import validate_ref
@@ -275,8 +275,8 @@ def log_line(msg: str) -> None:
     print(f"[rcm] {msg}", file=sys.stderr, flush=True)
 
 
-#: 기동 단계 수 — port · database · presets(`serve`) + `App.start` 가 켜는 일곱
-STARTUP_STEPS = 10
+#: 기동 단계 수 — port · database · presets(`serve`) + `App.start` 가 켜는 여덟
+STARTUP_STEPS = 11
 #: 프리셋 이름을 다 싣지 않는다 — 전부는 「listening」 배너에 있다
 STARTUP_PRESET_NAMES = 3
 
@@ -485,6 +485,9 @@ class App(RemoteWorkersMixin):
         # 대장 `--status` 의 짧은 기억(§17-4) — 키에 회차와 그 상태가 들어 있다.
         self._driver_status_cache: dict[_DriverStatusKey, _DriverStatusEntry] = {}
         self._driver_status_guard = threading.Lock()
+        # 잡이 보게 될 환경을 **서버의 `os.environ` 으로** 잰 것(core/jobenv.py). 기동 때 한 번
+        # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
+        self.preset_env: dict[str, dict[str, list[str]]] = {}
         self._remote_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
@@ -558,6 +561,8 @@ class App(RemoteWorkersMixin):
         )
         self.sampler.start()
         step("host sampler", f"every {self.config.host.interval_seconds:g}s")
+        self.measure_preset_env()
+        step("preset env", self.preset_env_summary())
         s = self.config.server
         if s.lanes >= 2 and s.admission == "load":
             # 안 그러면 첫 증상이 「두 번째 레인이 갑자기 멈췄다」다
@@ -4184,6 +4189,53 @@ class App(RemoteWorkersMixin):
             )
         return self._wheel
 
+    def measure_preset_env(self, environ: Mapping[str, str] | None = None) -> None:
+        """잡이 보게 될 환경을 **이 프로세스의 환경**으로 잰다 — 기동 때 한 번(M5m).
+
+        `rcm check` 의 `local preset tools` 는 세션의 셸에서 재서, launchd·systemd 서비스의
+        환경과 다르면 초록인데 잡이 깨진다. 재는 쪽이 서버여야 답이 맞는다. 두 가지를 본다 —
+        서비스 환경에 **없는** `env_passthrough` 이름, 그리고 잡의 PATH 에서 못 찾는 `requires`.
+
+        `environ` 인자는 테스트용이다. 실제로는 서버 프로세스의 것을 쓴다.
+        """
+        import os
+
+        from remote_ci_monitor.runner import missing_tools, public_tool_name
+
+        env_source = os.environ if environ is None else environ
+        measured: dict[str, dict[str, list[str]]] = {}
+        for preset in self.config.presets:
+            if not preset.requires and not preset.env_passthrough:
+                continue
+            absent = jobenv.missing_passthrough(preset.env_passthrough, env_source)
+            env = jobenv.job_env(preset.env_passthrough, preset.env, env_source)
+            measured[preset.name] = {
+                "missing_passthrough": list(absent),
+                # basename 으로 — `/api/health` 는 기본 설정에서 토큰 없이 읽힌다. 선언을 그대로
+                # 실으면 `/opt/homebrew/bin/gh` 같은 **경로**가 나간다(M5l S3 와 같은 이유).
+                "missing_tools": [
+                    public_tool_name(name) for name in missing_tools(tuple(preset.requires), env)
+                ],
+            }
+        self.preset_env = measured
+
+    def preset_env_summary(self) -> str:
+        """기동 로그 한 줄. 문제가 없으면 센 개수만, 있으면 **그 프리셋 이름**을 댄다.
+
+        이름을 대는 게 요점이다 — 「문제 1건」만 찍으면 어느 프리셋인지 보려고 다시 물어야 한다.
+        """
+        if not self.preset_env:
+            return "no preset declares requires or env_passthrough"
+        bad: list[str] = []
+        for name, facts in sorted(self.preset_env.items()):
+            notes = [f"missing {tool}" for tool in facts["missing_tools"]]
+            notes += [f"{var} unset" for var in facts["missing_passthrough"]]
+            if notes:
+                bad.append(f"{name} ({', '.join(notes)})")
+        if not bad:
+            return f"{len(self.preset_env)} preset(s) · all tools and passthrough present"
+        return f"{len(self.preset_env)} preset(s) · " + " · ".join(bad)
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -4225,6 +4277,9 @@ class App(RemoteWorkersMixin):
             ),
             # 왜 올랐는지 — 키가 켜져 있을 때만, 꺼져 있으면 null(어느 0.2.x 도 취소할 수 있다)
             "cancel_min_client_version": CANCEL_MIN_CLIENT_VERSION if strict_cancel else None,
+            # 잡이 보게 될 환경을 **서버가 자기 환경으로** 잰 것(M5m, 정보 — 503 조건은 아니다).
+            # `rcm check` 의 셸 검사와 달리 launchd·systemd 의 환경을 본다.
+            "preset_env": self.preset_env,
         }
         if not ok:
             if not db_ok:

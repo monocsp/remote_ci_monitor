@@ -599,6 +599,29 @@ install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` 
 about the job. The check that counts is the one at job start. The row names each entry the way
 the job log does — by its basename, never by the path you declared.
 
+**The row below it does vouch for the service.** `service preset tools` is the same two questions
+asked by the server, in the environment the service actually has, and answered once when the
+server starts:
+
+| question | what a FAIL means |
+|---|---|
+| can the job's `PATH` find every `requires` entry? | the tool is installed for you, not for the service |
+| is every `env_passthrough` name present in the service's environment? | the job gets nothing for that name, however it looks in your shell |
+
+The second question is the one a shell cannot answer. `env_passthrough = ["JAVA_HOME"]` passes a
+variable the service does not have, and nothing says so: the preset is valid, the tool lookup is
+green, and the job silently receives an empty value. The row prints `gate (JAVA_HOME unset)` and
+the server log says the same at start, next to `preset env`. The fix is a value the job owns — add
+it to `[presets.env]`, or put it in the service unit (`EnvironmentVariables` in a launchd plist,
+`Environment=` in a systemd unit) and restart.
+
+A server too old to answer draws no row at all. An empty value counts as present: a unit that
+deliberately sets `JAVA_HOME=""` meant it.
+
+The row carries **names, never values**. `/api/health` is readable without a token in the default
+configuration, so it says `JAVA_HOME` and never what `JAVA_HOME` is, and a tool declared as an
+absolute path is named by its basename — the same rule the job log and `local preset tools` follow.
+
 ### Naming what failed
 
 The `failed: …` lines, `failed_step` and the history above come from one place: the
