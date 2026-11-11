@@ -735,6 +735,9 @@ class Client:
     def resume(self) -> dict[str, Any]:
         return self.post_json("/resume")
 
+    def reload(self) -> dict[str, Any]:
+        return self.post_json("/reload")
+
     def log(self, job_id: int, offset: int = 0) -> tuple[bytes, int, bool]:
         _, headers, body = self._request("GET", f"/jobs/{job_id}/log?offset={offset}")
         return body, int(headers.get("X-RCM-Next-Offset", offset)), headers.get("X-RCM-More") == "1"
