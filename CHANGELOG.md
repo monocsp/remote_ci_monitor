@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`rcm reload` re-reads the config file without a restart.** A restart marks every job running
+  in a local lane `lost`; adding or editing a preset no longer costs that. The server swaps in the
+  new `[[presets]]` and `[[repos]]` and prints what moved by name. `POST /reload` (admin) works
+  from any machine, and `SIGHUP` works on the build machine. Sections that long-lived threads read
+  once at start — `[server]`, `[estimate]`, `[host]`, `[display]`, `[[notify]]` — still need a
+  restart: if one of them changed, the whole reload is refused and names it rather than applying
+  half the file. A config that does not parse changes nothing. ([#PR](https://github.com/monocsp/remote_ci_monitor/pull/PR))
+
 ## [0.4.3] - 2026-10-27
 
 ### Breaking changes

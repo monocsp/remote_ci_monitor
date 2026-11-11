@@ -3,7 +3,7 @@
 라우트(PLAN.md 「서버 API」):
   POST /jobs · PUT /jobs/{id}/tree · GET /jobs/{id}?tail=N · GET /jobs/{id}/log?offset=N ·
   POST /jobs/{id}/cancel · GET /api/status · GET /api/health · GET /api/whoami ·
-  POST /pause · POST /resume · `/worker/*`(원격 워커, `remote_workers.py`) ·
+  POST /pause · POST /resume · POST /reload · `/worker/*`(원격 워커, `remote_workers.py`) ·
   GET /client/remote_ci_monitor-<X>-py3-none-any.whl(자기 클라이언트 wheel, `clientwheel.py`)
 
 hardening: 소켓 타임아웃(일반 10초, 업로드 60초) · `Content-Length` 필수(chunked 는 411) ·
@@ -55,12 +55,14 @@ from remote_ci_monitor.clientwheel import (
 from remote_ci_monitor.config import (
     LOOPBACK_BINDS,
     RELEASE_ROLES,
+    ConfigError,
     ReleaseListing,
     RepoConfig,
     ServerConfig,
     admission_warnings,
     advertise_enabled,
     advertise_warning,
+    load_server_config,
     retention_warning,
 )
 from remote_ci_monitor.core import admission, outcome
@@ -110,6 +112,7 @@ from remote_ci_monitor.core.queue import (
     split_by_pool,
     step_medians_from,
 )
+from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     artifacts_json,
@@ -4077,6 +4080,90 @@ class App(RemoteWorkersMixin):
         self.wake.set()
         return {"job_id": job_id, "state": new_state or job.state}
 
+    #: 다시 읽어도 **적용되지 않는** 구역. 긴 수명 스레드(워커 · Janitor · Notifier ·
+    #: HostSampler)가 기동 때 설정 객체를 붙잡아 가서, `self.config` 만 갈아 끼우면 그쪽은
+    #: 옛 값으로 계속 돈다. 조용히 안 먹는 것보다 **거절하고 이름을 대는 것**이 낫다 —
+    #: `lanes = 3` 이 아무 일도 안 하는 걸 한참 뒤에 알게 되는 게 제일 비싸다.
+    RELOADABLE_NOT: tuple[str, ...] = ("server", "estimate", "host", "display", "notify")
+
+    def reload_config(self) -> dict[str, Any]:
+        """설정 파일을 다시 읽어 **프리셋과 저장소만** 갈아 끼운다(M5m). 재시작이 아니다.
+
+        재시작은 로컬 레인에서 도는 잡을 `lost` 로 만든다. 프리셋 하나를 고치자고 그 값을 치를
+        이유가 없다 — 프리셋은 claim 마다 `self.config.preset(name)` 로 새로 찾으므로, 설정
+        **객체 전체를 한 번에 바꾸면** 그 다음 claim 부터 새 것을 본다.
+
+        갈아 끼우는 방법이 요점이다. **기존 객체를 고치지 않는다** — 파이썬의 속성 대입은
+        원자적이라 claim 은 옛 객체 아니면 새 객체를 보지, 반쯤 쓰인 것을 보지 않는다. 자리에서
+        고치면 프리셋 목록을 읽는 중에 바뀔 수 있다.
+
+        규칙 셋:
+          1. 파일이 깨졌으면 **아무것도 바꾸지 않는다**. 도는 서버가 잘못된 편집 하나로
+             망가져서는 안 된다 — 옛 설정 그대로 두고 왜 안 됐는지 돌려준다.
+          2. `RELOADABLE_NOT` 의 구역이 달라졌으면 **통째로 거절한다**(위 주석의 이유).
+          3. 통과하면 바꾼 것을 **이름으로** 돌려준다. 「다시 읽었습니다」만으로는 뭐가 들어갔는지
+             확인하러 또 물어야 한다.
+        """
+        if self.config.path is None:
+            raise ApiError(409, "this server was started without a config file — nothing to reload")
+        try:
+            fresh = load_server_config(self.config.path)
+        except ConfigError as e:
+            raise ApiError(400, f"config unchanged — {e}") from e
+        except OSError as e:
+            raise ApiError(400, f"config unchanged — cannot read {self.config.path}: {e}") from e
+
+        frozen = [
+            section
+            for section in self.RELOADABLE_NOT
+            if getattr(fresh, section) != getattr(self.config, section)
+        ]
+        if frozen:
+            raise ApiError(
+                409,
+                f"config unchanged — [{'], ['.join(frozen)}] changed and only takes effect on a "
+                "restart (presets and repos reload; everything else does not)",
+            )
+
+        before_presets = {p.name: p for p in self.config.presets}
+        after_presets = {p.name: p for p in fresh.presets}
+        before_repos = {r.name: r for r in self.config.repos}
+        after_repos = {r.name: r for r in fresh.repos}
+        changed = {
+            "presets_added": sorted(after_presets.keys() - before_presets.keys()),
+            "presets_removed": sorted(before_presets.keys() - after_presets.keys()),
+            "presets_changed": sorted(
+                name
+                for name in before_presets.keys() & after_presets.keys()
+                if before_presets[name] != after_presets[name]
+            ),
+            "repos_added": sorted(after_repos.keys() - before_repos.keys()),
+            "repos_removed": sorted(before_repos.keys() - after_repos.keys()),
+            "repos_changed": sorted(
+                name
+                for name in before_repos.keys() & after_repos.keys()
+                if before_repos[name] != after_repos[name]
+            ),
+        }
+        # 한 번의 대입 — 그리고 **설정을 제 손에 들고 있는 긴 수명 객체들**에도 같은 대입을
+        # 해 줘야 한다. 로컬 워커는 claim 할 때 `self.config.preset(job.preset)` 를 제가 들고
+        # 있는 객체에서 찾고(worker.py), Janitor 는 만료된 버전의 저장소를 제 것에서 찾는다.
+        # 여기를 빼먹으면 「다시 읽었다」고 말해 놓고 레인은 옛 프리셋으로 도는, 제일 나쁜 종류의
+        # 거짓말이 된다. 원격 워커 경로는 App 의 `self.config` 를 보므로 이 대입 하나로 끝난다.
+        #
+        # 도는 중에 바꿔도 되는 이유는 **거절 규칙 덕분**이다. `[server]` 가 달라지면 아예
+        # 거절하므로 `data_dir` 도 바이트 상한도 옛 객체와 새 객체가 같다 — 잡 하나가 두 객체에
+        # 걸쳐 읽어도 같은 값을 본다. 다른 구역까지 갈아 끼우려면 이 보장이 먼저 필요하다.
+        self.config = fresh
+        for worker in self.workers:
+            worker.config = fresh
+        if self.retention is not None:
+            self.retention.config = fresh
+        self._mark_dirty()
+        self._publish_server()
+        self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
+        return {"reloaded": True, "config": str(fresh.path), **changed}
+
     def pause(self, token: TokenInfo) -> dict[str, Any]:
         self.store.set_paused(token.name, self.now_fn())
         p = self.store.get_paused()
@@ -4595,6 +4682,12 @@ class Handler(BaseHTTPRequestHandler):
             self._only(method, "POST")
             self.app.require_admin(self._token())
             self._send_json(200, self.app.gc(self._json_body()))
+            return
+        if path == "/reload":
+            self._only(method, "POST")
+            self.app.require_admin(self._token())
+            self._json_body()  # 본문은 무시하되 읽어서 연결을 깨끗이 둔다
+            self._send_json(200, self.app.reload_config())
             return
         if path == "/pause" or path == "/resume":
             self._only(method, "POST")
@@ -5269,8 +5362,24 @@ def serve(config: ServerConfig, *, debug: bool = False) -> int:
         app.log(f"signal {signum}: shutting down")
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
+    def _reload(signum: int, _frame: Any) -> None:
+        """SIGHUP — 같은 머신에서 `kill -HUP` 또는 `launchctl kill -HUP` 으로.
+
+        거절도 사고도 서버를 멈추지 않는다. 신호로 들어온 길에는 돌려줄 상대가 없으니
+        로그가 답이다 — 그래서 거절 사유도 그대로 찍는다.
+        """
+        try:
+            app.log(f"signal {signum}: reloading the config")
+            app.reload_config()
+        except ApiError as e:
+            app.log(f"reload refused: {e.message}")
+        except Exception as e:  # noqa: BLE001 — 다시 읽기 실패가 서버를 내려서는 안 된다
+            app.log(f"reload failed: {_safe(_error_text(e))}")
+
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+    if hasattr(signal, "SIGHUP"):  # 윈도에는 없다
+        signal.signal(signal.SIGHUP, _reload)
     try:
         httpd.serve_forever(poll_interval=0.5)
     finally:

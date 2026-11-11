@@ -53,6 +53,7 @@ from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
+from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     MAX_IDENT,
     failure_lines,
@@ -1068,6 +1069,26 @@ def cmd_pause(args: argparse.Namespace) -> int:
         _err(f"{args.command} failed: {e.message}")
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
     _print_json(resp)
+    return 0
+
+
+def cmd_reload(args: argparse.Namespace) -> int:
+    """`rcm reload` — 서버가 설정 파일을 다시 읽게 한다(M5m). 재시작이 아니다.
+
+    프리셋 하나를 붙이자고 서버를 재시작하면 그때 도는 로컬 잡이 `lost` 가 된다. 그리고 다른
+    머신에서는 SIGHUP 을 보낼 수가 없다 — 그래서 이 길이 있다. 바뀐 것의 **이름**을 찍는다.
+    """
+    client = _client(args)
+    try:
+        resp = client.reload()
+    except ClientError as e:
+        _err(f"reload failed: {e.message}")
+        return USAGE_EXIT if e.status else EXIT_UNKNOWN
+    if getattr(args, "json", False):
+        _print_json(resp)
+        return 0
+    print(reload_summary(resp))
+    print(f"config: {resp.get('config')}")
     return 0
 
 
@@ -2544,6 +2565,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=help_text)
         client_opts(sp)
         sp.set_defaults(func=cmd_pause)
+
+    reload_cmd = sub.add_parser(
+        "reload", help="re-read the server config — presets and repos only (admin)"
+    )
+    reload_cmd.add_argument("--json", action="store_true")
+    client_opts(reload_cmd)
+    reload_cmd.set_defaults(func=cmd_reload)
 
     eta = sub.add_parser("eta", help="estimate wait and finish time for a job or a new submission")
     eta.add_argument("preset", nargs="?")
