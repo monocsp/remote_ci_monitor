@@ -14,7 +14,7 @@ of a key bumps that number and is listed here.
   server in its own environment when it starts, not in your shell. The old `local preset tools`
   row stays and still says it speaks only for this shell. The server logs the same answer at start
   as `preset env`, naming the preset. `/api/health` carries it as `preset_env`; a server too old to
-  send it draws no row. ([#PR](https://github.com/monocsp/remote_ci_monitor/pull/PR))
+  send it draws no row. ([#186](https://github.com/monocsp/remote_ci_monitor/pull/186))
 
 ## [0.4.3] - 2026-10-27
 
