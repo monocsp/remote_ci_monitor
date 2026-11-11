@@ -606,7 +606,11 @@ server starts:
 | question | what a FAIL means |
 |---|---|
 | can the job's `PATH` find every `requires` entry? | the tool is installed for you, not for the service |
-| is every `env_passthrough` name present in the service's environment? | the job gets nothing for that name, however it looks in your shell |
+| will the job get a value for every `env_passthrough` name? | the job gets nothing for that name, however it looks in your shell |
+
+The second question asks what the **job** gets, not what the environment has. A name the preset's
+own `[presets.env]` supplies is not missing — `build_env` writes it after the passthrough, so the
+job receives that value whether or not the service has the variable.
 
 The second question is the one a shell cannot answer. `env_passthrough = ["JAVA_HOME"]` passes a
 variable the service does not have, and nothing says so: the preset is valid, the tool lookup is
