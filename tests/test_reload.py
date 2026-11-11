@@ -212,7 +212,7 @@ def test_the_summary_says_so_when_nothing_moved():
 def srv(tmp_path):
     """`tests/test_server.py` 의 서버 하나를 그대로 쓰되, 설정 **파일**을 주고 그걸 가리키게
     한다 — 다시 읽기는 파일이 있어야 할 일이 있다."""
-    from tests.test_server import Server
+    from test_server import Server
 
     s = Server(tmp_path, workers=False)
     path = tmp_path / "rcm.toml"
