@@ -14,7 +14,7 @@ of a key bumps that number and is listed here.
   from any machine, and `SIGHUP` works on the build machine. Sections that long-lived threads read
   once at start — `[server]`, `[estimate]`, `[host]`, `[display]`, `[[notify]]` — still need a
   restart: if one of them changed, the whole reload is refused and names it rather than applying
-  half the file. A config that does not parse changes nothing. ([#PR](https://github.com/monocsp/remote_ci_monitor/pull/PR))
+  half the file. A config that does not parse changes nothing. ([#187](https://github.com/monocsp/remote_ci_monitor/pull/187))
 
 ## [0.4.3] - 2026-10-27
 
