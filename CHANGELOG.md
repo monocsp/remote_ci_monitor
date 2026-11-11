@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-11
+
 ### Added
 - **`rcm check` now asks the server what the job's environment really looks like.** A new
   `service preset tools` row reports, per preset, the `requires` entries the job's `PATH` cannot
@@ -1515,7 +1517,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.0...v0.4.1
