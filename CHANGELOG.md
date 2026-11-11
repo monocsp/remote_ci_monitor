@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`rcm check` now asks the server what the job's environment really looks like.** A new
+  `service preset tools` row reports, per preset, the `requires` entries the job's `PATH` cannot
+  reach and the `env_passthrough` names the service's environment does not have — measured by the
+  server in its own environment when it starts, not in your shell. The old `local preset tools`
+  row stays and still says it speaks only for this shell. The server logs the same answer at start
+  as `preset env`, naming the preset. `/api/health` carries it as `preset_env`; a server too old to
+  send it draws no row. ([#PR](https://github.com/monocsp/remote_ci_monitor/pull/PR))
+
 ## [0.4.3] - 2026-10-27
 
 ### Breaking changes

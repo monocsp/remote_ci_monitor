@@ -1735,6 +1735,35 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     return ("local preset tools", all_ok, detail)
 
 
+def _service_preset_env_row(health: Any) -> tuple[str, bool, str] | None:
+    """`service preset tools` — **서버가 자기 환경으로 잰 것**을 그대로 읽는다(M5m).
+
+    바로 위 `local preset tools` 와 짝이다. 그 줄은 세션의 셸에서 재고 이 줄은 launchd·systemd
+    서비스의 환경에서 잰다. 둘이 어긋나는 것이 정보다 — 셸에서는 초록인데 잡은 깨지는 경우가
+    그 모양이고(실측 2026-11-11 의 `JAVA_HOME`), 그때 고칠 곳은 **유닛 파일이나 프리셋**이지
+    세션의 셸이 아니다.
+
+    옛 서버는 이 키를 안 보낸다 — 그러면 줄을 아예 그리지 않는다(없는 것을 FAIL 로 그리면
+    업그레이드가 안 된 서버가 고장으로 보인다).
+    """
+    facts = health.get("preset_env") if isinstance(health, dict) else None
+    if not isinstance(facts, dict) or not facts:
+        return None
+    parts: list[str] = []
+    all_ok = True
+    for name, entry in sorted(facts.items()):
+        if not isinstance(entry, dict):
+            continue
+        tools = [str(t) for t in entry.get("missing_tools") or []]
+        unset = [str(v) for v in entry.get("missing_passthrough") or []]
+        all_ok = all_ok and not tools and not unset
+        notes = [f"missing {t}" for t in tools] + [f"{v} unset" for v in unset]
+        parts.append(f"{name} ({', '.join(notes) if notes else 'ok'})")
+    if not parts:
+        return None
+    return ("service preset tools", all_ok, " · ".join(parts) + " — as the service sees it")
+
+
 #: 역할마다 rcm 이 보내는 입력(docs/release-contract.md §2). 프리셋이 안 받으면 제출이 400 이다.
 RELEASE_ROLE_INPUTS: dict[str, tuple[str, ...]] = {
     "plan": ("build_name",),
@@ -1881,10 +1910,14 @@ def cmd_check(args: argparse.Namespace) -> int:
             client = Client(cfg.server, cfg.token or None)
         else:
             rows.append(("server", False, NO_SERVER_HINT))
+    #: 서버가 보낸 health. 아래 `service preset tools` 행이 이걸 읽는다 — 서버에 못 닿았으면
+    #: 빈 채로 남고 그 행은 그려지지 않는다.
+    health_body: dict[str, Any] = {}
     if client is not None and cfg is not None:
         found_tag = " (found on this network)" if getattr(cfg, "discovered", None) else ""
         try:
             h = client.health()  # 503 이어도 본문이 온다 — server 행은 FAIL, client 행은 그대로
+            health_body = h if isinstance(h, dict) else {}
             unwell = "" if h.get("ok") else f" · {h.get('error') or 'not ok'}"
             rows.append(
                 (
@@ -1939,6 +1972,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:
                 rows.append(tools_row)
+            service_row = _service_preset_env_row(health_body)
+            if service_row is not None:
+                rows.append(service_row)
             if cfg.repos:
                 git = shutil.which("git")
                 rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
