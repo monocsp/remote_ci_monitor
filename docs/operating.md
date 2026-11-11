@@ -130,6 +130,9 @@ config unchanged — [server] changed and only takes effect on a restart
 A job already running is not touched: it was handed everything it needs when it started. A job
 still **queued** is matched when a lane claims it, so it runs under the edited definition.
 
+A reload also re-measures the job environment, so `rcm check`'s `service preset tools` row
+answers for the presets you just loaded rather than for the ones the server started with.
+
 Removing a preset is the one edit to think about. A queued job whose preset is gone does not
 wait — it fails at claim with `preset_missing`, the same way it does after a restart. Reload the
 removal while jobs are queued against it and you fail them; check `rcm top` first, as you would

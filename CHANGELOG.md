@@ -8,13 +8,22 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **`rcm check` now asks the server what the job's environment really looks like.** A new
+  `service preset tools` row reports, per preset, the `requires` entries the job's `PATH` cannot
+  reach and the `env_passthrough` names the service's environment does not have — measured by the
+  server in its own environment when it starts, not in your shell. The old `local preset tools`
+  row stays and still says it speaks only for this shell. The server logs the same answer at start
+  as `preset env`, naming the preset. `/api/health` carries it as `preset_env`; a server too old to
+  send it draws no row. ([#186](https://github.com/monocsp/remote_ci_monitor/pull/186))
 - **`rcm reload` re-reads the config file without a restart.** A restart marks every job running
   in a local lane `lost`; adding or editing a preset no longer costs that. The server swaps in the
   new `[[presets]]` and `[[repos]]` and prints what moved by name. `POST /reload` (admin) works
   from any machine, and `SIGHUP` works on the build machine. Sections that long-lived threads read
   once at start — `[server]`, `[estimate]`, `[host]`, `[display]`, `[[notify]]` — still need a
   restart: if one of them changed, the whole reload is refused and names it rather than applying
-  half the file. A config that does not parse changes nothing. ([#187](https://github.com/monocsp/remote_ci_monitor/pull/187))
+  half the file. A config that does not parse changes nothing. A reload also re-measures what the
+  job environment looks like, so the `service preset tools` row answers for the presets you just
+  loaded. ([#187](https://github.com/monocsp/remote_ci_monitor/pull/187))
 
 ## [0.4.3] - 2026-10-27
 

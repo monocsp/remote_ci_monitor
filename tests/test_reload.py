@@ -117,6 +117,18 @@ def test_the_janitor_gets_the_new_config_too(live):
         app.shutdown()
 
 
+def test_reloading_re_measures_the_job_environment(live):
+    """재시작 없이 프리셋을 바꾸는 기능이, 재시작해야만 맞는 검사를 남겨서는 안 된다(#186)."""
+    app, write, _ = live
+    app.measure_preset_env({"PATH": "/bin:/usr/bin"})
+    assert "b" not in app.preset_env
+    write(
+        TWO.replace('name = "b"\nargv = ["true"]', 'name = "b"\nargv = ["true"]\nrequires = ["sh"]')
+    )
+    app.reload_config()
+    assert "b" in app.preset_env  # 새 프리셋이 health 와 `rcm check` 에 바로 보인다
+
+
 # ── 거절 ─────────────────────────────────────────────────────────────────────
 
 
