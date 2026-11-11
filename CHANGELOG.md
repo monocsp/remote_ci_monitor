@@ -7,6 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **`service preset tools` no longer warns about a variable the preset itself supplies.** It asked
+  whether the service's environment had each `env_passthrough` name; the question it should ask is
+  whether the **job** gets a value. Setting the name in `[presets.env]` — the documented fix for
+  the warning — left the warning in place. Seen on the live server right after v0.4.4 shipped.
+  ([#190](https://github.com/monocsp/remote_ci_monitor/pull/190))
+
 ## [0.4.4] - 2026-11-11
 
 ### Added

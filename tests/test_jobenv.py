@@ -49,6 +49,25 @@ def test_job_env_skips_a_passthrough_name_that_is_absent():
     assert "JAVA_HOME" not in env
 
 
+def test_a_name_the_preset_supplies_is_not_missing():
+    """v0.4.4 가 운영에서 낸 거짓 경보(2026-11-11). `JAVA_HOME` 이 없다길래 `[presets.env]`
+    에 넣고 다시 읽혔는데 — 잡은 이제 값을 받는데도 — 그대로 「unset」이라고 했다.
+
+    묻는 것은 「환경에 있는가」가 아니라 **「잡이 값을 받는가」**다."""
+    assert jobenv.missing_passthrough(("JAVA_HOME",), {}, {"JAVA_HOME": "/jdk"}) == ()
+    # 그리고 잡이 정말 그 값을 받는지 — 같은 사실의 다른 쪽
+    assert jobenv.job_env(("JAVA_HOME",), {"JAVA_HOME": "/jdk"}, {})["JAVA_HOME"] == "/jdk"
+
+
+def test_a_name_neither_the_environment_nor_the_preset_gives_is_still_missing():
+    assert jobenv.missing_passthrough(("JAVA_HOME",), {}, {"LANG": "C"}) == ("JAVA_HOME",)
+
+
+def test_the_preset_env_argument_is_optional():
+    """옛 부름 자리를 깨지 않는다."""
+    assert jobenv.missing_passthrough(("A",), {}) == ("A",)
+
+
 def test_the_preset_can_set_a_variable_the_environment_lacks():
     """`env_passthrough` 에 없어도 `[presets.env]` 가 주면 잡은 받는다 — 그건 빠진 게 아니다."""
     env = jobenv.job_env((), {"JAVA_HOME": "/jdk"}, {})
@@ -80,6 +99,24 @@ requires = ["sh"]
 def tmp_dir():
     with tempfile.TemporaryDirectory() as d:
         yield Path(d)
+
+
+def test_the_server_stays_quiet_once_the_preset_supplies_the_name(tmp_dir):
+    """운영 실측 그대로(2026-11-11): `JAVA_HOME` 경보 → `[presets.env]` 에 넣기 → 조용해진다."""
+    app = _app(tmp_dir, PRESET)
+    app.measure_preset_env({"PATH": "/bin:/usr/bin"})
+    assert app.preset_env["gate"]["missing_passthrough"] == ["JAVA_HOME"]
+
+    with_value = PRESET + '\n[presets.env]\nJAVA_HOME = "/jdk"\n'
+    (tmp_dir / "rcm.toml").write_text(
+        f'[server]\ndata_dir = "{tmp_dir}"\n{with_value}', encoding="utf-8"
+    )
+    from remote_ci_monitor import config
+
+    app.config = config.load_server_config(tmp_dir / "rcm.toml")
+    app.measure_preset_env({"PATH": "/bin:/usr/bin"})
+    assert app.preset_env["gate"]["missing_passthrough"] == []
+    assert "all tools and passthrough present" in app.preset_env_summary()
 
 
 def test_the_server_reports_a_passthrough_name_its_environment_lacks(tmp_dir):

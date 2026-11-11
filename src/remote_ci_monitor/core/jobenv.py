@@ -19,14 +19,24 @@ from collections.abc import Mapping, Sequence
 
 
 def missing_passthrough(
-    env_passthrough: Sequence[str], environ: Mapping[str, str]
+    env_passthrough: Sequence[str],
+    environ: Mapping[str, str],
+    preset_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """`env_passthrough` 중 `environ` 에 **없는** 이름 — 선언 순서대로.
+    """**잡이 값을 못 받을** `env_passthrough` 이름 — 선언 순서대로.
 
-    빈 문자열은 「있다」로 본다. 유닛이 일부러 빈 값을 주는 일이 있고, 그건 설정한 사람의
-    뜻이지 빠진 게 아니다. 판정은 **키의 유무**다.
+    묻는 것은 「환경에 그 변수가 있는가」가 아니라 **「잡이 값을 받는가」**다. 둘은 다르고,
+    그 차이로 v0.4.4 가 운영에서 거짓 경보를 냈다(2026-11-11): `JAVA_HOME` 이 없다길래
+    `[presets.env]` 에 값을 넣고 다시 읽혔는데 — 잡은 이제 값을 받는데도 — 그대로 「unset」
+    이라고 했다. 울리지 않아야 할 때 우는 경보는 곧 아무도 안 보는 경보가 된다.
+
+    `[presets.env]` 가 그 이름을 주면 빠진 게 아니다(`build_env` 에서 passthrough **뒤에**
+    덮어쓰므로 서비스 환경에 있든 없든 잡은 그 값을 받는다). 빈 문자열은 「있다」로 본다 —
+    유닛이 일부러 빈 값을 주는 일이 있고, 그건 설정한 사람의 뜻이지 빠진 게 아니다. 어느
+    쪽이든 판정은 **키의 유무**다.
     """
-    return tuple(name for name in env_passthrough if name not in environ)
+    supplied = preset_env or {}
+    return tuple(name for name in env_passthrough if name not in environ and name not in supplied)
 
 
 def job_env(
