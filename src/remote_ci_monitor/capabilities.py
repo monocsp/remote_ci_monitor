@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -53,6 +54,9 @@ PROBE_VALUE_MAX = cap.PROBE_VALUE_MAX
 #: 판정에서 「도구 문제」— pool 잡은 이것으로 막지 않는다(결정 98: 집어서 즉시 tool_missing)
 _TOOL_CODES = frozenset({cap.CODE_TOOL_MISSING, cap.CODE_WORKSPACE_TOOL})
 _CHECK_CODES_PENDING = frozenset({cap.CODE_CHECK_RUNNING, cap.CODE_CHECK_NEEDED})
+#: 원격이 보낸 host_key 가 가질 수 있는 꼴 — 해시(16 hex) 또는 `worker:<이름>`. 그 밖은 버리고
+#: `worker:<이름>` 으로(화면 · 로그 · 잡 행에 실리는 값이다)
+_HOST_KEY_RE = re.compile(r"[A-Za-z0-9:._-]{1,80}")
 
 
 class CapabilityError(Exception):
@@ -94,7 +98,9 @@ def _probe_from_json(name: str, raw: Any) -> ProbeResult:
         raise CapabilityError(
             400, f"fingerprint '{name}': value longer than {PROBE_VALUE_MAX} characters"
         )
-    return ProbeResult(state, value)
+    # 워커가 정규화했어도 서버가 다시 씻는다 — 값은 서버 로그 줄(「environment changed」),
+    # `rcm machines` 의 터미널, 웹에 그대로 나간다. 줄바꿈이면 로그 줄 위조, ESC 면 터미널 조작이다.
+    return ProbeResult(state, cap.strip_control(value) if value is not None else None)
 
 
 def probes_json(probes: Mapping[str, ProbeResult]) -> str:
@@ -128,7 +134,7 @@ def _str_tuple(where: str, raw: Any) -> tuple[str, ...]:
         return ()
     if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
         raise CapabilityError(400, f"{where} must be a list of strings")
-    return tuple(x[:200] for x in raw[:64])
+    return tuple(cap.strip_control(x)[:200] for x in raw[:64])
 
 
 def report_from_json(
@@ -152,7 +158,7 @@ def report_from_json(
             code="generation_mismatch",
         )
     host_key = body.get("host_key")
-    if not isinstance(host_key, str) or not host_key or len(host_key) > 80:
+    if not isinstance(host_key, str) or not _HOST_KEY_RE.fullmatch(host_key):
         host_key = cap.host_key_from(None, worker)
     accept_any = body.get("accept_any", True)
     if not isinstance(accept_any, bool):

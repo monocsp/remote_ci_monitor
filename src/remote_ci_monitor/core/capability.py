@@ -152,6 +152,11 @@ def normalize_probe_output(
     return ProbeResult(PROBE_OK, " · ".join(lines)[:PROBE_VALUE_MAX])
 
 
+def strip_control(text: str) -> str:
+    """제어문자(C0 · DEL · C1)를 지운다 — 원격 워커가 보낸 문자열을 저장 · 표시하기 전에."""
+    return _CONTROL.sub("", text)
+
+
 # ── ② 지문 ───────────────────────────────────────────────────────────────────
 
 
@@ -338,5 +343,6 @@ __all__ = [
     "host_key_from",
     "normalize_probe_output",
     "settle_fingerprint",
+    "strip_control",
     "verdict",
 ]
