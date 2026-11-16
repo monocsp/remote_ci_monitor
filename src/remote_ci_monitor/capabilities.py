@@ -619,6 +619,7 @@ class CapabilitiesMixin:
             return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE)
         if job.placement == PLACEMENT_CAPABLE and preset is not None:
             judged = self._placement_notes(preset, views, now)
+            stalled = self._stalled_checks(judged)
             workers: set[str | None] = set()
             notes: list[PlacementNote] = []
             for view, v in judged:
@@ -632,7 +633,7 @@ class CapabilitiesMixin:
                 notes.append(self._note(view, v, accepts=accepts))
             return Placement(
                 workers=frozenset(workers),
-                reason=None if workers else self._why_none(notes),
+                reason=None if workers else self._why_none(notes, stalled),
                 notes=tuple(notes),
             )
         # pool 배치 — 그 풀의 워커. checks 로 막힌 워커는 빠진다(도구 문제는 막지 않는다)
@@ -640,6 +641,7 @@ class CapabilitiesMixin:
         if preset is None or not preset.checks:
             return Placement(workers=frozenset(key(v) for v in in_pool))
         judged = self._placement_notes(preset, in_pool, now)
+        stalled = self._stalled_checks(judged)
         open_: set[str | None] = set()
         gated_notes: list[PlacementNote] = []
         for view, v in judged:
@@ -650,19 +652,43 @@ class CapabilitiesMixin:
         if open_ or not in_pool:
             return Placement(workers=frozenset(open_), notes=tuple(gated_notes))
         return Placement(
-            workers=frozenset(), reason=self._why_none(gated_notes), notes=tuple(gated_notes)
+            workers=frozenset(),
+            reason=self._why_none(gated_notes, stalled),
+            notes=tuple(gated_notes),
         )
 
+    def _stalled_checks(self, judged: list[tuple[_MachineView, Verdict]]) -> frozenset[str]:
+        """`check_needed` 인데 **아무도 걸지 않을** 워커들 — 자동 점검이 꺼졌거나, 그 지문에 이미
+        한 번 걸었다(실패가 아니라 취소 · 유실로 끝났다, 결정 95). 이것은 「스스로 풀린다」
+        (check_pending)가 아니다 — 사람이 다시 점검해야 풀린다(검증 2026-11-16)."""
+        out: set[str] = set()
+        for view, v in judged:
+            if v.code != cap.CODE_CHECK_NEEDED or not view.alive or view.report is None:
+                continue
+            fp = view.report.fingerprint.hash
+            name = str(v.detail.get("check"))
+            if (
+                not self.config.server.auto_checks
+                or fp is None
+                or self.store.auto_check_done(view.id, name, fp)
+            ):
+                out.add(view.id)
+        return frozenset(out)
+
     @staticmethod
-    def _why_none(notes: list[PlacementNote]) -> str:
+    def _why_none(notes: list[PlacementNote], stalled: frozenset[str] = frozenset()) -> str:
         live = [n for n in notes if n.state != "down"]
+
+        def pending(n: PlacementNote) -> bool:
+            if n.code == cap.CODE_CHECK_NEEDED and n.worker in stalled:
+                return False
+            return n.code in _CHECK_CODES_PENDING
+
         if live and all(n.code == cap.CODE_CHECK_FAILED for n in live):
             return REASON_CHECK_FAILED
-        if any(n.code in _CHECK_CODES_PENDING for n in live) and not any(
-            n.code == cap.CODE_CHECK_FAILED for n in live
-        ):
+        if any(pending(n) for n in live) and not any(n.code == cap.CODE_CHECK_FAILED for n in live):
             return REASON_CHECK_PENDING
-        if live and all(n.code in _CHECK_CODES_PENDING | {cap.CODE_CHECK_FAILED} for n in live):
+        if live and all(pending(n) or n.code == cap.CODE_CHECK_FAILED for n in live):
             return REASON_CHECK_PENDING
         return REASON_NO_CAPABLE_MACHINE
 

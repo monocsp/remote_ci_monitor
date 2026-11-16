@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from test_cli_m5n import fake, run  # noqa: F401 — `fake` 는 픽스처다
-from test_server_m5n import PRESETS, PROBES, M5nServer
+from test_server_m5n import PRESETS, PROBES, M5nServer, expected_hash
 
 ANYWHERE = 'name = "anywhere"\nplacement = "any-capable"\n'
 
@@ -69,3 +69,45 @@ def test_a_capable_job_of_a_removed_preset_is_not_promised_a_time(srv):
     assert row["reason"] == "no_capable_machine"
     assert row["estimate"]["finish_at"] is None
     assert srv.claim("mbp")[0] == 204
+
+
+# ── 3. 다시 오지 않을 점검을 「스스로 풀린다」로 부르지 않는다 ───────────────
+
+
+def _cancelled_auto_check(srv: M5nServer) -> None:
+    fp = expected_hash({"xc": "Xc 1"})
+    check = srv.queued("simcheck", machine="build-02")
+    status, _ = srv.cancel(check)
+    assert status == 200
+    srv.store.record_machine_check("build-02", "simcheck", fp, check, srv.clock(), auto=True)
+    srv.app._mark_dirty()
+
+
+def test_a_cancelled_automatic_check_does_not_leave_the_pool_job_check_pending(srv):
+    """자동 점검은 (워커, 점검, 지문)마다 한 번(결정 95)이라 취소된 점검은 다시 안 온다. 그 잡의
+    이유가 `check_pending`(「확인이 필요한 작업」에 안 올라가는 「스스로 풀린다」)이면 아무도 모르게
+    영원히 기다린다 — 이 마일스톤이 막으려던 「열흘 동안 조용히」 그대로다."""
+    srv.reported("build-02")
+    qa = srv.queued("scenario")
+    _cancelled_auto_check(srv)
+    assert srv.machines()["build-02"]["presets"]["scenario"]["code"] == "check_needed"
+    row = srv.row(qa)
+    assert row["reason"] != "check_pending"
+    assert row["reason"] == "no_capable_machine"
+
+
+def test_check_pending_still_means_a_check_will_come(srv):
+    """같은 상황이라도 스위퍼가 아직 안 걸었으면(한 번 남았으면) 스스로 풀린다 — check_pending."""
+    srv.reported("build-02")
+    qa = srv.queued("scenario")
+    assert srv.row(qa)["reason"] == "check_pending"
+
+
+def test_auto_checks_off_does_not_say_check_pending(tmp_path):
+    s = M5nServer(tmp_path, extra="auto_checks = false")
+    try:
+        s.reported("build-02")
+        qa = s.queued("scenario")
+        assert s.row(qa)["reason"] == "no_capable_machine"
+    finally:
+        s.close()
