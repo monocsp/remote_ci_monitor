@@ -143,15 +143,14 @@ def test_no_file_needs_a_server_from_overrides(tmp_path):
     assert cfg.data_path == Path(DEFAULT_DATA_DIR).expanduser()
 
 
-def test_missing_server_is_a_config_error_naming_the_key(tmp_path):
-    """§2: `server` 가 파일에도 플래그에도 없으면 `ConfigError` 에 'server'(`rcm worker` 가 usage 2
-    로 옮긴다)."""
-    with pytest.raises(ConfigError) as e:
-        load(None)
-    assert "server" in str(e.value)
-    with pytest.raises(ConfigError) as e:
-        load(write(tmp_path, 'pool = "linux"\n'))
-    assert "server" in str(e.value)
+def test_missing_server_means_discovery_not_an_error(tmp_path):
+    """M5n §9 이전엔 `server` 가 없으면 `ConfigError` 였다. 이제 비었거나 `"auto"` 면 `rcm worker`
+    가 같은 망에서 찾는다 — 로더는 막지 않고 `wants_discovery` 로 알린다(찾기 실패는 CLI 의 usage 2,
+    `tests/test_worker_discovery.py`)."""
+    assert load(None).wants_discovery is True
+    assert load(write(tmp_path, 'pool = "linux"\n')).wants_discovery is True
+    assert load(write(tmp_path, 'server = "auto"\n')).wants_discovery is True
+    assert load(write(tmp_path, 'server = "http://macmini:8787"\n')).wants_discovery is False
 
 
 def test_explicit_missing_path_is_a_config_error(tmp_path):

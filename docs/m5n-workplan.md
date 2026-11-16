@@ -454,8 +454,8 @@ CREATE TABLE IF NOT EXISTS machines (
 CREATE TABLE IF NOT EXISTS fingerprints (hash TEXT PRIMARY KEY, json TEXT NOT NULL, first_seen_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS machine_checks (
   worker TEXT NOT NULL, preset TEXT NOT NULL, fingerprint_hash TEXT NOT NULL,
-  job_id INTEGER, submitted_at REAL NOT NULL, auto INTEGER NOT NULL,
-  PRIMARY KEY (worker, preset, fingerprint_hash, submitted_at));
+  job_id INTEGER, submitted_at REAL NOT NULL, auto INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS machine_checks_key ON machine_checks(worker, preset, fingerprint_hash);
 CREATE INDEX IF NOT EXISTS jobs_check ON jobs(worker_name, preset, fingerprint_hash, id);
 ```
 
@@ -754,4 +754,28 @@ PR 하나(`feat/m5n-capable-worker-placement`), 단계 다섯 — 각 단계가 
 
 ## 19. 구현하며 바뀐 것
 
-(구현 중에 채운다.)
+명세와 다르게 간 곳, 명세가 말하지 않아 정한 곳. 시나리오 문서 셋의 「가정」이 나머지를 적는다.
+
+1. **`compute_queue(placement=None)` 의 옛 호출 계약.** 잡의 풀을 단 레인이 하나도 없으면 넘겨받은
+   레인 전부를 그 잡의 레인으로 본다. 레인에 풀 표시가 없던 시절의 호출(기존 테스트 ·
+   `eta_for_new`)이 「풀 하나의 잡 + 그 풀의 레인」을 넘겼기 때문이다. 서버는 언제나 `placement` 를
+   넘기므로 워커 없는 풀이 남의 레인을 빌리는 일은 없다. 동치성 골든 200개는 그대로 초록이다.
+2. **`worker_hosts`** 를 `compute_queue` 에 더했다. 레인이 아예 없는 후보(로컬 레인을 안 띄운 서버 ·
+   down 워커)의 기대 시간도 그 호스트의 표본으로 잰다.
+3. **`machine_checks` 에 기본 키가 없다**(인덱스만). 같은 초에 자동 점검과 사람의 다시 점검이 함께
+   기록될 수 있어야 한다(시험 시계는 멈춰 있다). `auto_submitted` 는 「지금 보이는 그 점검 잡을 rcm
+   이 걸었나」다 — 사람이 다시 걸면 False 가 된다.
+4. **지정 점검 잡은 제출 때 대상의 지문을 미리 박는다.** 그래야 기다리는 동안에도 `check_running`
+   이고, claim 때 실제 지문으로 덮인다.
+5. **재등록은 그 워커의 보고를 지운다**(새 프로세스는 새로 잴 때까지 「보고 없음」 — 결정 91).
+   워커는 등록 직후, 레인을 띄우기 전에 재서 보낸다. 세대를 안 보내는 옛 서버에는 보고하지 않는다.
+6. **`worker.toml` 의 `server` 가 비어도 로더가 막지 않는다.** `rcm worker` 가 같은 망에서 찾고
+   못 찾으면 usage 2 다. 기존 테스트 둘(`test_worker_config` · `test_cli_worker`)을 이 규칙으로
+   옮겼고, 후자는 진짜 LAN 을 훑지 않게 발견을 빈 결과로 바꿨다.
+7. **`rcm eta` 의 any-capable 가상 잡**은 전역 계산 위에서 낸다(`_eta_capable`). `--pool` 을 준 eta 는
+   옛 풀 규칙 그대로다.
+8. 시험 쪽에서 고친 가정 셋: `auto_checks = "yes"` 는 다른 `[server]` 불리언처럼 받는다(`"maybe"` 로
+   바꿨다) · v23 은 `jobs` 의 끝에 일곱 열을 더하므로 v22 의 「링크 열이 맨 끝」 자물쇠를 「v23 열
+   바로 앞」으로 옮겼다 · `rcm worker --check` 의 시험 명세가 `env_passthrough = []` 로 PATH 없이
+   도구를 찾던 것을 `["PATH"]` 로(잡은 넘긴 변수만 받는다 — `runner.build_env`).
+

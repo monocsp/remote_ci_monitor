@@ -396,11 +396,17 @@ def spec(bin_dir: Path) -> dict[str, Any]:
             {"name": "gone", "argv": ["/nonexistent/rcm-m5n-gone"], "timeout_seconds": 10},
         ],
         "presets": [
-            {"name": "have", "requires": ["rcm-m5n-fake-tool"], "env_passthrough": [], "env": {}},
+            # 잡의 PATH 는 env_passthrough 로만 들어온다(runner.build_env) — 넘기지 않으면 없다
+            {
+                "name": "have",
+                "requires": ["rcm-m5n-fake-tool"],
+                "env_passthrough": ["PATH"],
+                "env": {},
+            },
             {
                 "name": "lack",
                 "requires": ["rcm-m5n-missing-tool"],
-                "env_passthrough": [],
+                "env_passthrough": ["PATH"],
                 "env": {},
             },
         ],

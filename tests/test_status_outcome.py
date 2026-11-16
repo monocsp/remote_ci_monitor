@@ -144,13 +144,39 @@ BASE_HOST = frozenset(
 )
 
 #: M5d-0 이 더해도 되는 키. 이 밖의 키가 늘면 스키마 v1 약속을 넘은 것이다.
-NEW_SERVER = frozenset({"last_error_code"})
+# M5n — 능력 보고의 세대 · 머신 요약 · 잡의 배치(키 추가만)
+NEW_SERVER = frozenset({"last_error_code", "generation", "machines"})
 NEW_POOL = frozenset(
     {"queue_error_code", "recent_error_code", "medians_error_code", "hosts_error_code"}
 )
 # `link` — 호출자가 붙인 잡 링크(v22). 더한 키다(없으면 null)
-NEW_RECENT = frozenset({"summary_code", "summary_args", "failed_step_guessed", "link"})
-NEW_ROW = frozenset({"summary", "summary_code", "summary_args", "link"})
+NEW_RECENT = frozenset(
+    {
+        "summary_code",
+        "summary_args",
+        "failed_step_guessed",
+        "link",
+        "placement",
+        "display_pool",
+        "target_worker",
+        "host_key",
+        "worker",
+    }
+)
+NEW_ROW = frozenset(
+    {
+        "summary",
+        "summary_code",
+        "summary_args",
+        "link",
+        "placement",
+        "display_pool",
+        "target_worker",
+        "concurrency_scope",
+        "host_key",
+        "placement_detail",
+    }
+)
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)
 
 

@@ -899,3 +899,38 @@ def test_rows_marked_sample_false_are_not_samples(srv):
     finished_ok(srv, 100, sample=0)
     est = queued_ok_estimate(srv)
     assert est["source"] == "default"
+
+
+# ── 7. rcm eta 의 any-capable 가상 잡 (§7.2 — 구현하며 더함) ─────────────────
+
+
+def test_eta_of_an_any_capable_preset_without_a_capable_machine_has_no_time(srv):
+    """보고가 없으면 맞는 머신이 없다 — 시각을 지어내지 않는다(§12)."""
+    srv.generation()
+    status, body = srv.req("POST", "/api/eta", token="alice", json_body={"preset": "anywhere"})
+    assert status == 200, body
+    job = body["job"]
+    assert job["placement"] == "capable"
+    assert job["reason"] == "no_capable_machine"
+    assert job["estimate"]["finish_at"] is None
+    assert {n["worker"] for n in job["placement_detail"]} >= {"build-02"}
+
+
+def test_eta_of_an_any_capable_preset_lands_on_a_capable_machine(srv):
+    srv.reported("build-02")
+    status, body = srv.req("POST", "/api/eta", token="alice", json_body={"preset": "anywhere"})
+    assert status == 200, body
+    job = body["job"]
+    assert job["reason"] in ("waiting_for_lane", "not_scheduled")
+    assert job["estimate"]["wait_seconds"] == 0
+    assert job["estimate"]["finish_at"] is not None
+    assert body["ahead"] == 0
+
+
+def test_eta_with_an_explicit_pool_keeps_the_pool_rule(srv):
+    srv.reported("build-02")
+    status, body = srv.req(
+        "POST", "/api/eta", token="alice", json_body={"preset": "anywhere", "pool": "default"}
+    )
+    assert status == 200, body
+    assert body["job"]["placement"] == "pool"

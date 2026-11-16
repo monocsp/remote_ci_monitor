@@ -31,6 +31,13 @@ ROW_KEYS = {
     "requester",
     "joiners",
     "link",  # 호출자가 붙인 링크(v22) — 추가 키라 schema_version 은 그대로
+    # M5n — 배치 · 대기 표시 풀 · 판정(키 추가만)
+    "placement",
+    "display_pool",
+    "target_worker",
+    "concurrency_scope",
+    "host_key",
+    "placement_detail",
     "state",
     "reason",
     "lane",
@@ -75,6 +82,12 @@ RECENT_KEYS = {
     "requester",
     "joiners",
     "link",  # 호출자가 붙인 링크(v22) — 추가 키라 schema_version 은 그대로
+    # M5n — 배치 · 돈 곳(키 추가만)
+    "placement",
+    "display_pool",
+    "target_worker",
+    "host_key",
+    "worker",
     "state",
     "exit_code",
     "job_seconds",
@@ -230,6 +243,8 @@ def test_status_is_json_serializable_with_expected_shape():
         "last_error_code",  # M5d-0(결정 37) — 키 추가만
         "sse_connections",
         "workers",
+        "generation",  # M5n — 능력 보고의 세대와 머신 요약(키 추가만)
+        "machines",
     }
     assert set(back["server"]["workers"][0]) == {
         "lane",
@@ -243,6 +258,7 @@ def test_status_is_json_serializable_with_expected_shape():
         "hold_code",  # M5f — 부하 게이트가 막고 있으면 왜 · 얼마나 · 얼마부터
         "hold_detail",
         "held_since",
+        "host_key",  # M5n — 이 레인이 도는 물리 컴퓨터
     }
     assert len(back["pools"]) == 1
     pool = back["pools"][0]
@@ -263,6 +279,10 @@ def test_status_is_json_serializable_with_expected_shape():
         "expected_seconds",
         "timeout_seconds",
         "inputs",
+        "placement",  # M5n — 설정 문자열(`pool` · `any-capable`) · 키 추가만
+        "checks",
+        "concurrency_scope",
+        "sample",
     }
     assert pool["medians"]["gate:full"] == {"seconds": 400, "wait_seconds": 80, "sample_count": 7}
     h = pool["hosts"][0]

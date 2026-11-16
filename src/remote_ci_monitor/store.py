@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor.core import artifacts, outcome
+from remote_ci_monitor.core.capability import CheckRecord
 from remote_ci_monitor.core.failures import FailureRow
 from remote_ci_monitor.core.model import (
     ACTIVE_STATES,
@@ -42,8 +43,13 @@ from remote_ci_monitor.core.model import (
     FAILED,
     LOST,
     PHASE_MATERIALIZING,
+    PLACEMENT_CAPABLE,
+    PLACEMENT_POOL,
     QUEUED,
     RUNNING,
+    SCOPE_GLOBAL,
+    SCOPE_HOST,
+    SCOPE_POOL,
     SUCCEEDED,
     TERMINAL_STATES,
     TIMED_OUT,
@@ -69,7 +75,7 @@ from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 22
+DB_VERSION = 23
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -163,7 +169,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   fail_truncated INTEGER NOT NULL DEFAULT 0,
   -- v22: 호출자가 붙인 링크(예: PR). 옛 잡은 NULL. 마이그레이션이 뒤에 붙이므로 여기서도 맨 끝이다
   link_url TEXT,
-  link_label TEXT
+  link_label TEXT,
+  -- v23(M5n): 어디서 돌 수 있나와 어디서 돌았나. 마이그레이션과 같은 차례로 맨 끝이다
+  placement TEXT NOT NULL DEFAULT 'pool',
+  display_pool TEXT,
+  target_worker TEXT,
+  concurrency_scope TEXT NOT NULL DEFAULT 'pool',
+  host_key TEXT,
+  fingerprint_hash TEXT,
+  sample INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -305,6 +319,34 @@ CREATE TABLE IF NOT EXISTS versions (
   upload_job_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS versions_repo ON versions(repo, id DESC);
+CREATE TABLE IF NOT EXISTS machines (
+  worker TEXT PRIMARY KEY,
+  host_key TEXT,
+  display_name TEXT,
+  accept_any INTEGER NOT NULL DEFAULT 1,
+  fingerprint_hash TEXT,
+  fingerprint_json TEXT,
+  previous_json TEXT,
+  changed_at REAL,
+  measured_at REAL,
+  generation TEXT,
+  report_json TEXT
+);
+CREATE TABLE IF NOT EXISTS fingerprints (
+  hash TEXT PRIMARY KEY,
+  json TEXT NOT NULL,
+  first_seen_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS machine_checks (
+  worker TEXT NOT NULL,
+  preset TEXT NOT NULL,
+  fingerprint_hash TEXT NOT NULL,
+  job_id INTEGER,
+  submitted_at REAL NOT NULL,
+  auto INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS machine_checks_key ON machine_checks(worker, preset, fingerprint_hash);
+CREATE INDEX IF NOT EXISTS jobs_check ON jobs(worker_name, preset, fingerprint_hash, id);
 """
 
 _BLOBS_SQL = (
@@ -315,6 +357,30 @@ _WORKERS_SQL = (
     "CREATE TABLE IF NOT EXISTS workers (name TEXT PRIMARY KEY, pool TEXT NOT NULL, "
     "lanes INTEGER NOT NULL, host_name TEXT, version TEXT, registered_at REAL NOT NULL, "
     "last_seen_at REAL NOT NULL)"
+)
+#: v23(M5n) — 워커마다 마지막 보고와 앞 지문. 보고 자체는 서버 메모리에 있고 여기는 덮어 쓴다.
+_MACHINES_SQL = (
+    "CREATE TABLE IF NOT EXISTS machines (worker TEXT PRIMARY KEY, host_key TEXT, "
+    "display_name TEXT, accept_any INTEGER NOT NULL DEFAULT 1, fingerprint_hash TEXT, "
+    "fingerprint_json TEXT, previous_json TEXT, changed_at REAL, measured_at REAL, "
+    "generation TEXT, report_json TEXT)"
+)
+_FINGERPRINTS_SQL = (
+    "CREATE TABLE IF NOT EXISTS fingerprints (hash TEXT PRIMARY KEY, json TEXT NOT NULL, "
+    "first_seen_at REAL NOT NULL)"
+)
+_MACHINE_CHECKS_SQL = (
+    "CREATE TABLE IF NOT EXISTS machine_checks (worker TEXT NOT NULL, preset TEXT NOT NULL, "
+    "fingerprint_hash TEXT NOT NULL, job_id INTEGER, submitted_at REAL NOT NULL, "
+    "auto INTEGER NOT NULL)"
+)
+#: 자동 점검 한 번 제한을 찾는 자리. 행은 쌓인다 — 사람의 다시 점검은 몇 번이든(같은 초여도)
+_MACHINE_CHECKS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS machine_checks_key ON machine_checks(worker, preset, "
+    "fingerprint_hash)"
+)
+_JOBS_CHECK_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS jobs_check ON jobs(worker_name, preset, fingerprint_hash, id)"
 )
 _NOTIFICATIONS_SQL = (
     "CREATE TABLE IF NOT EXISTS notifications (job_id INTEGER NOT NULL, notify_name TEXT NOT NULL, "
@@ -488,6 +554,25 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE jobs ADD COLUMN link_url TEXT",
         "ALTER TABLE jobs ADD COLUMN link_label TEXT",
     ),
+    # v22 → v23(M5n · docs/m5n-workplan.md §11.1): 머신의 능력과 배치. 잡에는 배치(`placement`)·
+    # 지정 워커·그룹 범위·돈 호스트·그때 지문·표본 여부를 박는다. 옛 잡은 기본값(풀 배치 · 풀 범위
+    # · 표본)이고 `host_key` NULL 은 읽을 때 로컬 / `worker:<이름>` 으로 푼다(§7.1).
+    # `machines` 는 앞 지문을 재시작 너머로 기억한다(「바뀜」을 놓치지 않는다). `fingerprints` 는 잡
+    # 상세의 「이 잡이 돈 환경」, `machine_checks` 는 자동 점검의 한 번 제한(결정 95).
+    23: (
+        "ALTER TABLE jobs ADD COLUMN placement TEXT NOT NULL DEFAULT 'pool'",
+        "ALTER TABLE jobs ADD COLUMN display_pool TEXT",
+        "ALTER TABLE jobs ADD COLUMN target_worker TEXT",
+        "ALTER TABLE jobs ADD COLUMN concurrency_scope TEXT NOT NULL DEFAULT 'pool'",
+        "ALTER TABLE jobs ADD COLUMN host_key TEXT",
+        "ALTER TABLE jobs ADD COLUMN fingerprint_hash TEXT",
+        "ALTER TABLE jobs ADD COLUMN sample INTEGER NOT NULL DEFAULT 1",
+        _MACHINES_SQL,
+        _FINGERPRINTS_SQL,
+        _MACHINE_CHECKS_SQL,
+        _MACHINE_CHECKS_INDEX_SQL,
+        _JOBS_CHECK_INDEX_SQL,
+    ),
 }
 
 
@@ -632,6 +717,51 @@ class SampleRow:
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    #: 돈 호스트(M5n §7.1). 옛 행(NULL)은 `resolve_host_key` 로 푼다
+    host_key: str | None = None
+    worker_name: str | None = None
+    #: 점검 · 예열 잡은 False — `medians_from` 이 건너뛴다(결정 103)
+    sample: bool = True
+
+
+@dataclass(frozen=True)
+class Claimant:
+    """claim 하는 쪽의 신원과 지금 받을 수 있는 것(M5n §5.2).
+
+    로컬 레인은 `worker = LOCAL_WORKER`(`"@local"`) — DB 의 `worker_name` 은 오늘처럼 NULL 이다.
+    `capable` · `gated` 는 서버가 claim 직전에 메모리의 보고로 계산한 이름 목록이다.
+    """
+
+    worker: str
+    pool: str
+    host_key: str | None
+    fingerprint_hash: str | None
+    capable: tuple[str, ...] = ()  # 이 워커가 지금 eligible 인 any-capable 프리셋
+    gated: tuple[str, ...] = ()  # checks 로 막힌 프리셋(pool 잡)
+    accept_any: bool = True
+
+
+@dataclass(frozen=True)
+class MachineRow:
+    """`machines` 표의 한 행 — 워커의 마지막 보고와 앞 지문(M5n §11.1)."""
+
+    worker: str
+    host_key: str | None
+    display_name: str | None
+    accept_any: bool
+    fingerprint_hash: str | None
+    fingerprint_json: str | None
+    previous_json: str | None
+    changed_at: datetime | None
+    measured_at: datetime | None
+    generation: str | None
+    report_json: str | None
+    #: 이번 upsert 가 지문을 바꿨나(앞 지문이 있었고 달랐다). 읽기에서는 False
+    changed: bool = False
+
+
+#: 로컬 레인 묶음의 워커 id(`core.capability.LOCAL_WORKER` 와 같은 값). 원격 이름은 `@` 를 못 쓴다
+LOCAL_WORKER_ID = "@local"
 
 
 class LaneBusy(StoreError):
@@ -975,6 +1105,13 @@ class Store:
             link=(
                 JobLink(url=row["link_url"], label=row["link_label"]) if row["link_url"] else None
             ),
+            placement=row["placement"] or PLACEMENT_POOL,
+            display_pool=row["display_pool"],
+            target_worker=row["target_worker"],
+            concurrency_scope=row["concurrency_scope"] or SCOPE_POOL,
+            host_key=row["host_key"],
+            fingerprint_hash=row["fingerprint_hash"],
+            sample=bool(row["sample"]) if row["sample"] is not None else True,
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -1065,9 +1202,10 @@ class Store:
         rows = (
             self._conn()
             .execute(
-                f"SELECT key, pool, state, created_at, started_at, finished_at FROM jobs "
+                f"SELECT key, pool, state, created_at, started_at, finished_at, host_key, "
+                f"worker_name, sample FROM jobs "
                 f"WHERE state IN ({marks}) AND started_at >= ? AND finished_at IS NOT NULL "
-                "ORDER BY id",
+                "AND sample != 0 ORDER BY id",
                 (*sorted(TERMINAL_STATES), _ts(since)),
             )
             .fetchall()
@@ -1080,11 +1218,22 @@ class Store:
                 created_at=_dt(r["created_at"]),
                 started_at=_dt(r["started_at"]),
                 finished_at=_dt(r["finished_at"]),
+                host_key=r["host_key"],
+                worker_name=r["worker_name"],
+                sample=bool(r["sample"]) if r["sample"] is not None else True,
             )
             for r in rows
         ]
 
-    def list_step_sample_ids(self, key: str, *, since: datetime, limit: int) -> list[int]:
+    def list_step_sample_ids(
+        self,
+        key: str,
+        *,
+        since: datetime,
+        limit: int,
+        host_key: str | None = None,
+        local_host_key: str | None = None,
+    ) -> list[int]:
         """그 key 의 최근 **성공** 잡 id, 늦게 끝난 것부터 `limit` 개.
 
         단계 실측 중앙값의 표본이다. `jobs_key_finished ON jobs(key, finished_at DESC)`(v13)를
@@ -1095,7 +1244,23 @@ class Store:
 
         `sample_policy` 는 **보지 않는다** — 항상 `succeeded` 다. 실패한 잡의 단계 소요는
         「평소 얼마나 걸리나」의 표본이 아니다. 실패는 대개 단계를 일찍 끊는다.
+
+        `host_key` 가 있으면 **그 호스트에서 돈** 잡만(M5n §7.1 — 다른 호스트로 물러나지 않는다).
+        옛 행(`host_key` NULL)은 `local_host_key` 면 로컬 레인 잡(`worker_name` NULL)으로,
+        `worker:<이름>` 이면 그 워커의 잡으로 푼다. `sample = 0`(점검 · 예열)은 언제나 뺀다.
         """
+        host_sql = ""
+        host_params: tuple[Any, ...] = ()
+        if host_key is not None:
+            legacy = "0"
+            legacy_params: tuple[Any, ...] = ()
+            if local_host_key is not None and host_key == local_host_key:
+                legacy = "worker_name IS NULL"
+            elif host_key.startswith("worker:"):
+                legacy = "worker_name = ?"
+                legacy_params = (host_key[len("worker:") :],)
+            host_sql = f" AND (host_key = ? OR (host_key IS NULL AND {legacy}))"
+            host_params = (host_key, *legacy_params)
         rows = (
             self._conn()
             .execute(
@@ -1104,8 +1269,9 @@ class Store:
                 # 바로 그 스캔이다. 여기서는 key 하나의 꼬리만 읽어야 한다.
                 "SELECT id FROM jobs INDEXED BY jobs_key_finished "
                 "WHERE key=? AND state=? AND finished_at IS NOT NULL "
-                "AND finished_at >= ? ORDER BY finished_at DESC, id DESC LIMIT ?",
-                (key, SUCCEEDED, _ts(since), int(limit)),
+                f"AND finished_at >= ? AND sample != 0{host_sql} "
+                "ORDER BY finished_at DESC, id DESC LIMIT ?",
+                (key, SUCCEEDED, _ts(since), *host_params, int(limit)),
             )
             .fetchall()
         )
@@ -1661,6 +1827,12 @@ class Store:
         priority: int = 0,
         pool: str = DEFAULT_POOL,
         link: JobLink | None = None,
+        placement: str = PLACEMENT_POOL,
+        display_pool: str | None = None,
+        target_worker: str | None = None,
+        concurrency_scope: str = SCOPE_POOL,
+        sample: bool = True,
+        fingerprint_hash: str | None = None,
     ) -> Job:
         """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다."""
         job, _ = self._create_job_tx(
@@ -1678,6 +1850,12 @@ class Store:
             pool=pool,
             participant=None,
             link=link,
+            placement=placement,
+            display_pool=display_pool,
+            target_worker=target_worker,
+            concurrency_scope=concurrency_scope,
+            sample=sample,
+            fingerprint_hash=fingerprint_hash,
         )
         return job
 
@@ -1708,6 +1886,12 @@ class Store:
         priority: int = 0,
         pool: str = DEFAULT_POOL,
         link: JobLink | None = None,
+        placement: str = PLACEMENT_POOL,
+        display_pool: str | None = None,
+        target_worker: str | None = None,
+        concurrency_scope: str = SCOPE_POOL,
+        sample: bool = True,
+        fingerprint_hash: str | None = None,
     ) -> tuple[Job, tuple[str, str] | None]:
         if state not in (UPLOADING, QUEUED):
             raise StoreError(f"new job cannot start in state {state}")
@@ -1730,8 +1914,9 @@ class Store:
             cur = conn.execute(
                 "INSERT INTO jobs (preset, inputs_json, key, concurrency_group, source_json, "
                 "requester_name, requester_label, state, created_at, queued_at, tree_hash, sha, "
-                "timeout_seconds, join_key, priority, pool, link_url, link_label) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "timeout_seconds, join_key, priority, pool, link_url, link_label, placement, "
+                "display_pool, target_worker, concurrency_scope, sample, fingerprint_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset,
                     json.dumps(inputs, sort_keys=True, separators=(",", ":")),
@@ -1751,6 +1936,12 @@ class Store:
                     pool,
                     link.url if link else None,
                     link.label if link else None,
+                    placement,
+                    display_pool,
+                    target_worker,
+                    concurrency_scope or SCOPE_POOL,
+                    1 if sample else 0,
+                    fingerprint_hash,
                 ),
             )
             job_id = int(cur.lastrowid)
@@ -2156,56 +2347,80 @@ class Store:
         now: datetime,
         pool: str = DEFAULT_POOL,
         worker_name: str | None = None,
+        *,
+        claimant: Claimant | None = None,
     ) -> Job | None:
-        """그 풀의 queued 잡 하나를 원자적으로 running 으로. 그룹 배제는 **풀 안에서**(M5b).
+        """대기 잡 하나를 원자적으로 running 으로.
+
+        `claimant` 가 없으면 옛 규칙 그대로 — 그 풀의 잡, 그룹 배제는 **풀 안에서**(M5b).
+        있으면 세 갈래(M5n §5.2): 그 워커를 지정한 잡 · 그 풀의 `pool` 잡(`gated` 제외) · 그 워커가
+        eligible 인 `capable` 잡. 순서는 언제나 (우선순위 내림차순, id). 그룹 배제는 **후보 잡의
+        범위**로(§6). `capable` 잡을 집으면 같은 UPDATE 에서 `pool` 을 집은 워커의 풀로 바꾸고
+        대기 표시 풀은 `display_pool` 로 남긴다 — 끝난 잡은 「실제로 돈 곳」으로 기록된다.
 
         `worker_name` 이 있으면(원격 워커) 같은 트랜잭션에서 그 워커의 그 레인에 활성 잡이
         없는지 확인한다 — 있으면 `LaneBusy`(M5b-2, 레인 과할당 금지). 로컬 레인은 None.
         """
+        if claimant is not None:
+            pool = claimant.pool
+            worker_name = None if claimant.worker == LOCAL_WORKER_ID else claimant.worker
         conn = self._conn()
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
             busy = ",".join("?" * len(BUSY_STATES))
+            busy_states = sorted(BUSY_STATES)
             if worker_name is not None:
                 taken = conn.execute(
                     f"SELECT id FROM jobs WHERE worker_name=? AND lane=? AND state IN ({busy}) "
                     "ORDER BY id LIMIT 1",
-                    (worker_name, lane, *sorted(BUSY_STATES)),
+                    (worker_name, lane, *busy_states),
                 ).fetchone()
                 if taken is not None:
                     conn.execute("ROLLBACK")
                     raise LaneBusy(f"lane {lane} already has job #{int(taken['id'])}")
-            row = conn.execute(
-                "SELECT id FROM jobs WHERE state=? AND pool=? AND (concurrency_group IS NULL OR "
-                "concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
-                f"WHERE state IN ({busy}) AND pool=? "
-                "AND concurrency_group IS NOT NULL)) ORDER BY priority DESC, id LIMIT 1",
-                (QUEUED, pool, *sorted(BUSY_STATES), pool),
-            ).fetchone()
+            if claimant is None:
+                row = conn.execute(
+                    "SELECT id FROM jobs WHERE state=? AND pool=? AND (concurrency_group IS NULL "
+                    "OR concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
+                    f"WHERE state IN ({busy}) AND pool=? "
+                    "AND concurrency_group IS NOT NULL)) ORDER BY priority DESC, id LIMIT 1",
+                    (QUEUED, pool, *busy_states, pool),
+                ).fetchone()
+            else:
+                row = self._claimable(conn, claimant, busy, busy_states)
             if row is None:
                 conn.execute("COMMIT")
                 return None
             job_id = int(row["id"])
+            is_capable = claimant is not None and row["placement"] == PLACEMENT_CAPABLE
             # 같은 트랜잭션에서 센다 — 나중에는 알 수 없는 값이다(자기 포함).
             busy_now = conn.execute(
                 f"SELECT count(*) AS n FROM jobs WHERE state IN ({busy}) AND pool=?",
-                (*sorted(BUSY_STATES), pool),
+                (*busy_states, pool),
             ).fetchone()["n"]
+            sets = (
+                "state=?, lane=?, started_at=?, phase=?, last_output_at=?, worker_name=?, "
+                "concurrent_at_start=?"
+            )
+            params: list[Any] = [
+                RUNNING,
+                lane,
+                ts,
+                PHASE_MATERIALIZING,
+                ts,
+                worker_name,
+                int(busy_now) + 1,
+            ]
+            if claimant is not None:
+                sets += ", host_key=?, fingerprint_hash=?"
+                params += [claimant.host_key, claimant.fingerprint_hash]
+            if is_capable:
+                # 대기 중 보이던 풀은 남기고, 잡은 「실제로 돈 풀」로 옮긴다(§5.2 · 뮤테이션 ⑥)
+                sets += ", display_pool=COALESCE(display_pool, pool), pool=?"
+                params.append(pool)
             cur = conn.execute(
-                "UPDATE jobs SET state=?, lane=?, started_at=?, phase=?, last_output_at=?, "
-                "worker_name=?, concurrent_at_start=? WHERE id=? AND state=?",
-                (
-                    RUNNING,
-                    lane,
-                    ts,
-                    PHASE_MATERIALIZING,
-                    ts,
-                    worker_name,
-                    int(busy_now) + 1,
-                    job_id,
-                    QUEUED,
-                ),
+                f"UPDATE jobs SET {sets} WHERE id=? AND state=?", (*params, job_id, QUEUED)
             )
             if cur.rowcount != 1:
                 conn.execute("ROLLBACK")
@@ -2218,6 +2433,47 @@ class Store:
             conn.execute("ROLLBACK")
             raise
         return self.get_job(job_id)
+
+    @staticmethod
+    def _claimable(
+        conn: sqlite3.Connection, c: Claimant, busy: str, busy_states: list[str]
+    ) -> sqlite3.Row | None:
+        """M5n 의 후보 잡 하나 — 세 갈래 · (우선순위, id) · 후보 잡의 범위로 그룹 배제."""
+        clauses = ["(target_worker = ?)"]
+        params: list[Any] = [c.worker]
+        gated = tuple(c.gated)
+        gate_sql = f" AND preset NOT IN ({','.join('?' * len(gated))})" if gated else ""
+        clauses.append(f"(target_worker IS NULL AND placement = ? AND pool = ?{gate_sql})")
+        params += [PLACEMENT_POOL, c.pool, *gated]
+        capable = tuple(c.capable) if c.accept_any else ()
+        if capable:
+            clauses.append(
+                f"(target_worker IS NULL AND placement = ? AND preset IN "
+                f"({','.join('?' * len(capable))}))"
+            )
+            params += [PLACEMENT_CAPABLE, *capable]
+        group_sql = (
+            "(c.concurrency_group IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
+            f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.concurrency_group AND ("
+            "c.concurrency_scope = ? "
+            "OR (c.concurrency_scope = ? AND b.host_key IS NOT NULL AND b.host_key = ?) "
+            "OR (c.concurrency_scope NOT IN (?, ?) AND b.pool = ?))))"
+        )
+        params_group = [
+            *busy_states,
+            SCOPE_GLOBAL,
+            SCOPE_HOST,
+            c.host_key,
+            SCOPE_GLOBAL,
+            SCOPE_HOST,
+            c.pool,
+        ]
+        sql = (
+            "SELECT c.id, c.placement FROM jobs c WHERE c.state = ? AND ("
+            + " OR ".join(clauses)
+            + f") AND {group_sql} ORDER BY c.priority DESC, c.id LIMIT 1"
+        )
+        return conn.execute(sql, (QUEUED, *params, *params_group)).fetchone()
 
     def concurrent_at_start(self, job_id: int) -> int | None:
         """그 잡이 시작할 때 같은 풀에서 돌던 잡 수(자기 포함). **모르면 None** — 0 이 아니다.
@@ -2856,6 +3112,187 @@ class Store:
             self._row_to_worker(r)
             for r in self._conn().execute("SELECT * FROM workers ORDER BY name").fetchall()
         ]
+
+    # ── 머신의 능력 (M5n §4 · §11.1) ─────────────────────────────────────────
+
+    @staticmethod
+    def _machine_row(r: sqlite3.Row, *, changed: bool = False) -> MachineRow:
+        return MachineRow(
+            worker=r["worker"],
+            host_key=r["host_key"],
+            display_name=r["display_name"],
+            accept_any=bool(r["accept_any"]),
+            fingerprint_hash=r["fingerprint_hash"],
+            fingerprint_json=r["fingerprint_json"],
+            previous_json=r["previous_json"],
+            changed_at=_dt(r["changed_at"]),
+            measured_at=_dt(r["measured_at"]),
+            generation=r["generation"],
+            report_json=r["report_json"],
+            changed=changed,
+        )
+
+    def upsert_machine(
+        self,
+        worker: str,
+        *,
+        host_key: str | None,
+        display_name: str | None,
+        accept_any: bool,
+        fingerprint_hash: str | None,
+        fingerprint_json: str | None,
+        measured_at: datetime,
+        generation: str | None,
+        report_json: str | None,
+    ) -> MachineRow:
+        """워커의 마지막 보고를 덮어 쓴다. **앞 지문과 다르면** `previous_json` · `changed_at` 을
+        갱신하고 돌려주는 행의 `changed` 가 True 다.
+
+        앞 지문이 없으면(첫 보고) 바뀐 것이 아니다. 새 지문이 None(모름)이면 비교하지 않고 앞
+        지문을 그대로 둔다 — 「모름」을 「바뀜」으로도 「그대로」로도 꾸미지 않는다(결정 90).
+        """
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            old = conn.execute("SELECT * FROM machines WHERE worker=?", (worker,)).fetchone()
+            changed = (
+                old is not None
+                and old["fingerprint_hash"] is not None
+                and fingerprint_hash is not None
+                and old["fingerprint_hash"] != fingerprint_hash
+            )
+            if old is None:
+                conn.execute(
+                    "INSERT INTO machines (worker, host_key, display_name, accept_any, "
+                    "fingerprint_hash, fingerprint_json, previous_json, changed_at, measured_at, "
+                    "generation, report_json) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)",
+                    (
+                        worker,
+                        host_key,
+                        display_name,
+                        1 if accept_any else 0,
+                        fingerprint_hash,
+                        fingerprint_json,
+                        _ts(measured_at),
+                        generation,
+                        report_json,
+                    ),
+                )
+            else:
+                keep_fp = fingerprint_hash is None and old["fingerprint_hash"] is not None
+                conn.execute(
+                    "UPDATE machines SET host_key=?, display_name=?, accept_any=?, "
+                    "fingerprint_hash=?, fingerprint_json=?, previous_json=?, changed_at=?, "
+                    "measured_at=?, generation=?, report_json=? WHERE worker=?",
+                    (
+                        host_key,
+                        display_name,
+                        1 if accept_any else 0,
+                        old["fingerprint_hash"] if keep_fp else fingerprint_hash,
+                        old["fingerprint_json"] if keep_fp else fingerprint_json,
+                        old["fingerprint_json"] if changed else old["previous_json"],
+                        _ts(measured_at) if changed else old["changed_at"],
+                        _ts(measured_at),
+                        generation,
+                        report_json,
+                        worker,
+                    ),
+                )
+            row = conn.execute("SELECT * FROM machines WHERE worker=?", (worker,)).fetchone()
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return self._machine_row(row, changed=changed)
+
+    def get_machine(self, worker: str) -> MachineRow | None:
+        r = self._conn().execute("SELECT * FROM machines WHERE worker=?", (worker,)).fetchone()
+        return self._machine_row(r) if r else None
+
+    def list_machines(self) -> list[MachineRow]:
+        rows = self._conn().execute("SELECT * FROM machines ORDER BY worker").fetchall()
+        return [self._machine_row(r) for r in rows]
+
+    def record_fingerprint(self, hash: str, json_text: str, now: datetime) -> None:
+        """잡 상세의 「이 잡이 돈 환경」. 같은 해시는 처음 본 시각을 지킨다."""
+        self._conn().execute(
+            "INSERT OR IGNORE INTO fingerprints (hash, json, first_seen_at) VALUES (?, ?, ?)",
+            (hash, json_text, _ts(now)),
+        )
+
+    def get_fingerprint(self, hash: str) -> str | None:
+        r = self._conn().execute("SELECT json FROM fingerprints WHERE hash=?", (hash,)).fetchone()
+        return r["json"] if r else None
+
+    def check_records(self, worker: str, presets: Sequence[str]) -> list[CheckRecord]:
+        """그 워커에서 돌았거나 그 워커를 지정한 점검 프리셋 잡들(§4.4). 로컬은 `worker_name`
+        NULL 인 잡이다. 지정 잡은 제출 때 대상의 지문을 미리 박아 두므로 기다리는 동안에도
+        「점검 중」으로 보인다."""
+        names = tuple(presets)
+        if not names:
+            return []
+        marks = ",".join("?" * len(names))
+        if worker == LOCAL_WORKER_ID:
+            where = "(target_worker = ? OR (target_worker IS NULL AND worker_name IS NULL))"
+        else:
+            where = "(target_worker = ? OR worker_name = ?)"
+        params: tuple[Any, ...] = (worker,) if worker == LOCAL_WORKER_ID else (worker, worker)
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT id, preset, state, fingerprint_hash FROM jobs WHERE preset IN ({marks}) "
+                f"AND {where} AND (state != ? OR target_worker IS NOT NULL) ORDER BY id",
+                (*names, *params, QUEUED),
+            )
+            .fetchall()
+        )
+        return [
+            CheckRecord(
+                preset=r["preset"],
+                job_id=int(r["id"]),
+                job_state=r["state"],
+                fingerprint_hash=r["fingerprint_hash"],
+            )
+            for r in rows
+        ]
+
+    def auto_check_done(self, worker: str, preset: str, fingerprint_hash: str) -> bool:
+        """그 (워커, 점검, 지문)에 rcm 이 스스로 건 적이 있나 — 한 번 제한(결정 95)."""
+        r = (
+            self._conn()
+            .execute(
+                "SELECT 1 FROM machine_checks WHERE worker=? AND preset=? AND fingerprint_hash=? "
+                "AND auto=1 LIMIT 1",
+                (worker, preset, fingerprint_hash),
+            )
+            .fetchone()
+        )
+        return r is not None
+
+    def check_was_automatic(self, job_id: int) -> bool:
+        """그 점검 잡을 rcm 이 스스로 걸었나(사람의 다시 점검 · 직접 제출이면 False)."""
+        r = (
+            self._conn()
+            .execute("SELECT auto FROM machine_checks WHERE job_id=? LIMIT 1", (job_id,))
+            .fetchone()
+        )
+        return bool(r and r["auto"])
+
+    def record_machine_check(
+        self,
+        worker: str,
+        preset: str,
+        fingerprint_hash: str,
+        job_id: int | None,
+        now: datetime,
+        *,
+        auto: bool,
+    ) -> None:
+        self._conn().execute(
+            "INSERT INTO machine_checks (worker, preset, fingerprint_hash, job_id, "
+            "submitted_at, auto) VALUES (?, ?, ?, ?, ?, ?)",
+            (worker, preset, fingerprint_hash, job_id, _ts(now), 1 if auto else 0),
+        )
 
     def forget_workers(self, cutoff: datetime) -> list[str]:
         """`cutoff` 이전에 마지막으로 보인 워커를 잊는다. 지운 이름을 돌려준다.

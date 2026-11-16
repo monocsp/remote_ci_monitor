@@ -6,6 +6,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
+     물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15)
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -122,6 +124,58 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5n — 머신의 능력과 배치(docs/m5n-workplan.md §15) ──
+    Mutant(
+        # 세대가 다른 보고를 믿는다 — reload 로 바뀐 프리셋을 옛 보고로 판정해 집는다(결정 91)
+        name="m5n-stale-generation-trusted",
+        path="src/remote_ci_monitor/core/capability.py",
+        old="    if report.generation != generation:",
+        new="    if False:",
+        tests=("tests/test_capability.py", "tests/test_server_m5n.py"),
+    ),
+    Mutant(
+        # 자동 점검의 한 번 제한이 없다 — 실패한 점검이 스위퍼 주기마다 다시 걸린다(결정 95)
+        name="m5n-auto-check-repeats",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                if self.store.auto_check_done(view.id, name, fp):\n",
+        new="                if False:\n",
+        tests=("tests/test_checks_sweeper.py",),
+    ),
+    Mutant(
+        # 느린 프로브(timeout)가 지문에 들어간다 — 한 번 느렸을 뿐인데 「환경 바뀜」(결정 90)
+        name="m5n-timeout-in-fingerprint",
+        path="src/remote_ci_monitor/core/capability.py",
+        old="for name, p in probes.items() if p.state != PROBE_TIMEOUT",
+        new="for name, p in probes.items() if True",
+        tests=("tests/test_capability.py",),
+    ),
+    Mutant(
+        # `host` 범위를 다른 호스트까지 막는 것으로 — 같은 호스트의 두 워커는 그대로 동시에 돈다
+        name="m5n-host-scope-wrong-host",
+        path="src/remote_ci_monitor/store.py",
+        old="b.host_key IS NOT NULL AND b.host_key = ?",
+        new="b.host_key IS NOT NULL AND b.host_key != ?",
+        tests=("tests/test_store_m5n.py",),
+    ),
+    Mutant(
+        # 단계 중앙값이 다른 호스트로 물러난다 — 느린 호스트에서 「멈춘 듯」을 지어낸다(결정 102)
+        name="m5n-step-median-other-host",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="(host_step_medians.get((host, job.key)) if host is not None else None)",
+        new="next((t for (_h, k), t in host_step_medians.items() if k == job.key), None)",
+        tests=("tests/test_queue_m5n.py",),
+    ),
+    Mutant(
+        # any-capable 잡을 집어도 풀이 안 바뀐다 — 표본 · 알림 · 풀 표시가 집지 않은 풀로 간다
+        name="m5n-capable-claim-keeps-pool",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            'sets += ", display_pool=COALESCE(display_pool, pool), pool=?"\n'
+            "                params.append(pool)"
+        ),
+        new="pass",
+        tests=("tests/test_store_m5n.py", "tests/test_server_m5n.py"),
+    ),
     Mutant(
         # 빈 값이 전역 헬퍼(gh 활성 계정)를 비운다. 없으면 git 은 먼저 오는 전역 헬퍼의 토큰을 쓰고
         # 저장소 토큰 파일은 영영 안 읽힌다 — 2026-10-14 사고가 그대로 남는다

@@ -75,6 +75,70 @@ def _run_command(argv: list[str]) -> str | None:
     return proc.stdout
 
 
+# ── 머신의 신원 · 지문 (M5n §3 · §4.1) ──────────────────────────────────────
+
+MAC_PLATFORM = ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]
+LINUX_MACHINE_ID = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+
+
+def hardware_id() -> str | None:
+    """이 컴퓨터의 하드웨어 신원 원문(macOS `IOPlatformUUID` · Linux `machine-id`). 못 읽으면 None.
+
+    원문은 이 프로세스 밖으로 나가지 않는다 — 호출자가 `capability.host_key_from` 으로 해시한다.
+    """
+    if sys.platform == "darwin":
+        out = _run_command(MAC_PLATFORM)
+        for line in (out or "").splitlines():
+            if '"IOPlatformUUID"' in line and "=" in line:
+                value = line.split("=", 1)[1].strip().strip('"')
+                return value or None
+        return None
+    for path in LINUX_MACHINE_ID:
+        text = _read_file(path)
+        if text and text.strip():
+            return text.strip()
+    return None
+
+
+def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
+    """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 차례로 돌린다 → 이름 → ProbeResult.
+
+    셸은 없다. 실행 파일은 `env` 의 PATH 로 찾는다 — 이 프로세스의 PATH 로 물러나지 않는다.
+    """
+    from remote_ci_monitor.core.capability import normalize_probe_output
+
+    out: dict[str, Any] = {}
+    path = env.get("PATH", "")
+    for probe in probes:
+        argv = list(probe.argv)
+        exe = argv[0]
+        if not os.path.isabs(exe) and shutil.which(exe, path=path) is None:
+            out[probe.name] = normalize_probe_output(None, None, missing=True)
+            continue
+        if os.path.isabs(exe) and not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+            out[probe.name] = normalize_probe_output(None, None, missing=True)
+            continue
+        if not os.path.isabs(exe):
+            argv[0] = shutil.which(exe, path=path) or exe
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                timeout=float(probe.timeout_seconds),
+            )
+        except subprocess.TimeoutExpired:
+            out[probe.name] = normalize_probe_output(None, None, timed_out=True)
+            continue
+        except OSError:
+            out[probe.name] = normalize_probe_output(None, None, missing=True)
+            continue
+        output = proc.stdout if proc.stdout.strip() else proc.stderr
+        out[probe.name] = normalize_probe_output(output, proc.returncode)
+    return out
+
+
 def _read_file(path: str) -> str | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:

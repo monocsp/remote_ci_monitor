@@ -97,6 +97,15 @@ class WorkerClient:
         body = {"pool": pool, "lanes": lanes, "host_name": host_name, "version": version}
         return self._post("/worker/register", body)
 
+    def spec(self) -> dict[str, Any]:
+        """`GET /worker/spec` — 잴 프로브와 프리셋 요구 사항(M5n §4.2)."""
+        status, _, raw = self._inner._request("GET", "/worker/spec")
+        return json.loads(raw) if raw else {}
+
+    def capabilities(self, body: dict[str, Any]) -> dict[str, Any]:
+        """`POST /worker/capabilities` — 이 워커가 잰 지문과 프리셋별 도구(M5n §4.2)."""
+        return self._post("/worker/capabilities", body) or {}
+
     def claim(self, lane: int, wait_seconds: int = 0) -> dict[str, Any] | None:
         """잡이 있으면 claim 응답, 없으면(204) None. long-poll 이라 타임아웃을 넉넉히 둔다."""
         return self._post(
@@ -628,6 +637,7 @@ class Client:
         pool: str | None = None,
         link: str | None = None,
         link_label: str | None = None,
+        machine: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
         if requester_label:
@@ -639,6 +649,9 @@ class Client:
         # 잡 링크(v22). 없으면 키도 없다 — 옛 서버는 모르는 키를 무시하므로 있어도 잡은 선다
         if link:
             body["link"] = {"url": link, **({"label": link_label} if link_label else {})}
+        # 머신을 지정한 잡(M5n §4.5). 없으면 키도 없다
+        if machine is not None:
+            body["machine"] = machine
         resp = self.post_json("/jobs", body)
         # 서버가 캐시를 지원하는지 기억한다 — upload_cached 가 manifest 를 헛되이 보내지 않게
         if isinstance(resp, dict) and "cache" in resp:

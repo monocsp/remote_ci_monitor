@@ -205,8 +205,12 @@ def test_bad_lanes_is_a_usage_error(home, srv, token, capsys):
     assert srv.store.get_worker(WORKER) is None
 
 
-def test_missing_server_is_a_usage_error(home, srv, token, capsys):
-    """§2: `--server` 도 `--config` 의 `server` 도 없으면 usage 2, stderr 가 server 를 말한다."""
+def test_missing_server_is_a_usage_error(home, srv, token, capsys, monkeypatch):
+    """§2: `--server` 도 `--config` 의 `server` 도 없으면 같은 망에서 찾고(M5n §9), 아무것도 못
+    찾으면 usage 2, stderr 가 server 를 말한다. 진짜 LAN 을 훑지 않게 발견을 빈 결과로 바꾼다."""
+    import remote_ci_monitor.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "discover", lambda **_kw: [])
     token(srv)
     code, out, err = run(capsys, ["worker", "--pool", "linux", "--check"])
     assert code == 2, (out, err)

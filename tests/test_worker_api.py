@@ -17,6 +17,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import re
 import socket
 import sqlite3
 import tarfile
@@ -536,6 +537,8 @@ def test_register_new_worker_returns_the_protocol_parameters(srv):
     `pools[]` 에 (잡이 없어도) lanes 와 함께 보인다."""
     status, body = srv.register("build-02", pool="linux", lanes=2, host_name="b02.local")
     assert status == 200, body
+    # M5n — 능력 보고의 세대(`<기동 epoch>:<reload 횟수>`)가 더해졌다(키 추가만)
+    assert re.fullmatch(r"\d+:\d+", body.pop("generation"))
     assert body == {
         "name": "build-02",
         "pool": "linux",
@@ -695,6 +698,7 @@ def test_claim_returns_204_when_empty_and_the_job_with_preset_when_not(srv):
         "hold_code": None,
         "hold_detail": None,
         "held_since": None,
+        "host_key": None,  # M5n — 보고 전이라 모른다
     }
     assert srv.worker_lane(None, 1)["state"] == "idle"  # 로컬 레인은 놀고 있다
     assert srv.claim("build-02")[0] == 409  # 같은 레인은 잡을 하나만
@@ -1162,6 +1166,7 @@ def test_heartbeat_response_lists_only_this_workers_cancelling_jobs(srv):
     assert srv.claimed("build-03", 1) == c
     status, body = srv.heartbeat("build-02", jobs=[a, b])
     assert status == 200, body
+    assert body.pop("generation")  # M5n — 세대(키 추가만)
     assert body == {"cancel": [], "paused": False, "timeout_seconds": TIMEOUT}
     assert srv.cancel(a)[1]["state"] == CANCELLING
     assert srv.cancel(c)[1]["state"] == CANCELLING

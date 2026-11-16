@@ -291,6 +291,8 @@ class RemoteWorkersMixin:
         lanes_busy = self.store.active_worker_lanes() if rows else {}
         for row in rows:
             alive = self.worker_alive(row, now)
+            report = self.report_of(row.name)  # type: ignore[attr-defined]
+            host = report.host_key if report is not None else None
             for lane in range(1, row.lanes + 1):
                 job = lanes_busy.get((row.name, lane)) if alive else None
                 if not alive:
@@ -302,6 +304,7 @@ class RemoteWorkersMixin:
                             since=row.last_seen_at,
                             worker=row.name,
                             pool=row.pool,
+                            host_key=host,
                         )
                     )
                 elif job is not None:
@@ -314,6 +317,7 @@ class RemoteWorkersMixin:
                             since=started_at,
                             worker=row.name,
                             pool=row.pool,
+                            host_key=host,
                         )
                     )
                 else:
@@ -327,6 +331,7 @@ class RemoteWorkersMixin:
                             since=held_since or row.registered_at,
                             worker=row.name,
                             pool=row.pool,
+                            host_key=host,
                             hold_code=hold.code if hold else None,
                             hold_detail=dict(hold.detail) if hold and hold.detail else None,
                             held_since=held_since,
@@ -402,9 +407,13 @@ class RemoteWorkersMixin:
             version=version,
             now=now,
         )
+        # 등록 = 새 프로세스. 옛 프로세스의 능력 보고는 이 프로세스의 것이 아니다 — 새로 잴 때까지
+        # 이 워커는 「보고 없음」이고 any-capable 잡을 안 받는다(M5n 결정 91, fail-closed)
+        self.forget_report(token.name)  # type: ignore[attr-defined]
         self._mark_dirty()
         self._publish_server()
         return {
+            "generation": self.generation,  # type: ignore[attr-defined]
             "name": row.name,
             "pool": row.pool,
             "lanes": row.lanes,
@@ -520,8 +529,12 @@ class RemoteWorkersMixin:
         try:
             if self.store.get_paused() is not None:
                 return None, None
+            claimant = self.claimant_for(name, pool, now)  # type: ignore[attr-defined]
             job, hold = self.admit(
-                lane, name, now, lambda: self.store.claim(lane, now, pool=pool, worker_name=name)
+                lane,
+                name,
+                now,
+                lambda: self.store.claim(lane, now, pool=pool, worker_name=name, claimant=claimant),
             )
         except LaneBusy as e:
             raise _api_error(409, str(e)) from e
@@ -915,6 +928,8 @@ class RemoteWorkersMixin:
             "cancel": cancel,
             "paused": self.store.get_paused() is not None,
             "timeout_seconds": self.config.server.worker_timeout_seconds,
+            # 세대가 바뀌었으면 워커는 `/worker/spec` 을 다시 받고 다시 잰다(M5n §4.2)
+            "generation": self.generation,  # type: ignore[attr-defined]
         }
 
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:
