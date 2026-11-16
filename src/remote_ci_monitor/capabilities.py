@@ -793,11 +793,21 @@ class CapabilitiesMixin:
         try:
             job = self.submit_internal_check(preset, view, fingerprint_hash=fp)
         except Exception as e:  # noqa: BLE001 — 해석 실패 등은 그 회차만 건너뛴다
-            # 원인이 무엇이든 화면이 그릴 코드는 하나다 — git 의 종료 코드(128)를 싣지 않는다
+            # 원인이 무엇이든 화면이 그릴 코드는 하나다 — git 의 종료 코드(128)를 싣지 않는다.
+            # 로그는 처음 한 번만 — 회차(check_sweep_seconds)마다 워커마다 같은 줄이 쌓였다
+            # (실측 2026-11-16: 15초에 20줄). 지금 상태는 `rcm machines` 의 `ref_unresolved`.
+            first = (view.id, name) not in self._check_errors
             self._check_errors[(view.id, name)] = "ref_unresolved"
-            self.log(f"machine check {name} on {view.id}: not submitted ({type(e).__name__})")
+            if first:
+                why = (str(e).strip().splitlines() or [""])[0][:160]
+                self.log(
+                    f"machine check {name} on {view.id}: not submitted "
+                    f"({type(e).__name__}{': ' + why if why else ''}) — retried every sweep, "
+                    "logged once"
+                )
             return None
-        self._check_errors.pop((view.id, name), None)
+        if self._check_errors.pop((view.id, name), None) is not None:
+            self.log(f"machine check {name} on {view.id}: submitted again after ref_unresolved")
         if fp is not None:
             self.store.record_machine_check(view.id, name, fp, job.id, self.now_fn(), auto=auto)
         return job.id
