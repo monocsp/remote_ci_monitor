@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -101,42 +102,77 @@ def hardware_id() -> str | None:
 
 
 def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
-    """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 차례로 돌린다 → 이름 → ProbeResult.
+    """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 돌린다 → 이름 → ProbeResult(설정 순서).
 
     셸은 없다. 실행 파일은 `env` 의 PATH 로 찾는다 — 이 프로세스의 PATH 로 물러나지 않는다.
+
+    **함께 돌린다.** 차례로 돌면 시간이 더해진다 — 64개 × 60초면 한 시간이고, 그동안 서버 기동 ·
+    `rcm reload`(요청 스레드) · SIGHUP(받는 루프) 가 멈춘다. 함께 돌면 가장 긴 시한 하나(≤ 60초)다.
     """
+    probes = list(probes)
+    results: dict[str, Any] = {}
+    threads = [
+        threading.Thread(
+            target=lambda p=probe: results.__setitem__(p.name, _run_probe(p, env)),
+            name=f"rcm-probe-{probe.name}",
+            daemon=True,
+        )
+        for probe in probes
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {p.name: results[p.name] for p in probes}
+
+
+def _run_probe(probe: Any, env: dict[str, str]) -> Any:
     from remote_ci_monitor.core.capability import normalize_probe_output
 
-    out: dict[str, Any] = {}
     path = env.get("PATH", "")
-    for probe in probes:
-        argv = list(probe.argv)
-        exe = argv[0]
-        if not os.path.isabs(exe) and shutil.which(exe, path=path) is None:
-            out[probe.name] = normalize_probe_output(None, None, missing=True)
-            continue
-        if os.path.isabs(exe) and not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
-            out[probe.name] = normalize_probe_output(None, None, missing=True)
-            continue
-        if not os.path.isabs(exe):
-            argv[0] = shutil.which(exe, path=path) or exe
+    argv = list(probe.argv)
+    exe = argv[0]
+    if not os.path.isabs(exe) and shutil.which(exe, path=path) is None:
+        return normalize_probe_output(None, None, missing=True)
+    if os.path.isabs(exe) and not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        return normalize_probe_output(None, None, missing=True)
+    if not os.path.isabs(exe):
+        argv[0] = shutil.which(exe, path=path) or exe
+    try:
+        # 자기 프로세스 그룹 — 시한을 넘기면 손자까지 거둔다(`runner` 의 잡과 같은 규칙). 감싸는
+        # 스크립트(`flutter` · `xcrun` 류)를 죽여도 그 자식은 남아 주기마다 쌓였다.
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return normalize_probe_output(None, None, missing=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=float(probe.timeout_seconds))
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        # 그룹 밖으로 달아난 자식(setsid)이 파이프를 쥐고 있을 수 있다 — 읽지 않고 닫는다
+        proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        return normalize_probe_output(None, None, timed_out=True)
+    output = stdout if stdout.strip() else stderr
+    return normalize_probe_output(output, proc.returncode)
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
         try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                timeout=float(probe.timeout_seconds),
-            )
-        except subprocess.TimeoutExpired:
-            out[probe.name] = normalize_probe_output(None, None, timed_out=True)
-            continue
-        except OSError:
-            out[probe.name] = normalize_probe_output(None, None, missing=True)
-            continue
-        output = proc.stdout if proc.stdout.strip() else proc.stderr
-        out[probe.name] = normalize_probe_output(output, proc.returncode)
-    return out
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _read_file(path: str) -> str | None:

@@ -361,8 +361,13 @@ class RemoteWorker:
         due = time.monotonic() - self._last_measured >= self.probe_interval_seconds
         # 세대를 안 보내는 서버(M5n 이전)에는 보고하지 않는다
         if isinstance(gen, str) and (gen != self.generation or due):
-            # 서버가 설정을 다시 읽었거나(세대) 다시 잴 때가 됐다 — 명세부터 다시 받는다
-            self.measure_and_report()
+            # 서버가 설정을 다시 읽었거나(세대) 다시 잴 때가 됐다 — 명세부터 다시 받는다.
+            # **이 스레드에서 재지 않는다.** 프로브는 하나에 60초까지 걸릴 수 있고, 하트비트가
+            # `worker_timeout_seconds`(기본 60) 를 넘게 끊기면 서버는 이 워커의 도는 잡을 lost 로
+            # 닫는다. 이미 재는 중이면 `measure_and_report` 가 그냥 돌아온다(락).
+            threading.Thread(
+                target=self.measure_and_report, name="rcm-worker-measure", daemon=True
+            ).start()
         return True
 
     def _connection_failed(self) -> None:
