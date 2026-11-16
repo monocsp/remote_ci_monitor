@@ -850,7 +850,10 @@ class CapabilitiesMixin:
                     last_probe = time.monotonic()
                 self.sweep_checks()
             except Exception as e:  # noqa: BLE001 — 스레드가 죽으면 점검이 조용히 멈춘다
-                self.record_error(f"capabilities: {type(e).__name__}: {e}"[:200])
+                # 공개면(`server.last_error`)이다 — 형제 루프처럼 경로를 지우고 한 줄로 접는다
+                from remote_ci_monitor.server import _safe
+
+                self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
 
 
 def _previous_value(

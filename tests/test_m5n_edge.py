@@ -375,3 +375,26 @@ def test_rcm_recheck_does_not_print_a_job_that_does_not_exist(tmp_path, capsys, 
     assert "#None" not in out + err, out
     assert "#3651" in out, out
     assert "simcheck" in err and "not submitted" in err and "check_ref" in err, err
+
+
+# ── 7. 능력 스레드의 오류는 공개면에 원문을 싣지 않는다 ───────────────────────
+
+
+def test_a_capabilities_loop_failure_does_not_publish_paths(tmp_path, monkeypatch):
+    """`server.last_error` 는 read_auth = none 이면 인증 없이 읽힌다. 형제 루프(janitor)처럼
+    `_safe` 로 씻어야 한다 — 경로 · 줄바꿈이 그대로 나갔다."""
+    srv = M5nServer(tmp_path, extra="check_sweep_seconds = 1")
+    try:
+        app = srv.app
+
+        def boom() -> list[int]:
+            app.stop.set()
+            raise OSError("Permission denied: '/Users/someone/secret/thing'\n[rcm] forged")
+
+        monkeypatch.setattr(app, "sweep_checks", boom)
+        app._capabilities_loop()
+        err = app.last_error or ""
+        assert err.startswith("capabilities: OSError"), err
+        assert "/Users/someone" not in err and "\n" not in err, err
+    finally:
+        srv.close()
