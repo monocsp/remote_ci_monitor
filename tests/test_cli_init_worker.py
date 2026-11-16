@@ -382,6 +382,15 @@ def test_token_add_worker_prints_the_worker_side_command_after_the_secret(server
     assert secret not in err, "the secret must be printed once"
 
 
+def test_token_add_worker_names_the_worker_variable_not_rcm_token(server_toml, capsys):
+    """실측(2026-11-16): 머리줄이 「store it as RCM_TOKEN on the worker machine」이라 바로 아래
+    `RCM_WORKER_TOKEN=…` 줄과 어긋났다. 워커는 `RCM_TOKEN` 을 안 읽는다."""
+    code, _out, err = run(capsys, ["token", "--config", str(server_toml), "add", "mbp", "--worker"])
+    assert code == 0, err
+    head = err.splitlines()[0]
+    assert "RCM_WORKER_TOKEN" in head and "RCM_TOKEN " not in head, head
+
+
 def test_token_add_for_a_client_has_no_worker_line(server_toml, capsys):
     code, out, err = run(capsys, ["token", "--config", str(server_toml), "add", "alice"])
     assert code == 0, err

@@ -2827,7 +2827,7 @@ def cmd_token(args: argparse.Namespace) -> int:
                 return _usage("--admin and --worker cannot be combined")
             kind = "worker" if worker else ("admin" if args.admin else "client")
             secret = store.add_token(args.name, kind=kind, now=now)
-            where = "RCM_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
+            where = "RCM_WORKER_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
             _info(f"token '{args.name}' created — shown once, store it as {where}:")
             print(secret, flush=True)
             if worker:
