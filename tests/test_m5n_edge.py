@@ -455,3 +455,31 @@ def test_reload_answers_before_a_slow_probe_finishes(tmp_path):
         assert r is not None and r.generation == srv.app.generation
     finally:
         srv.close()
+
+
+# ── 10. 프리셋이 사라진 any-capable 잡은 큐에 갇히지 않는다 ────────────────────
+
+
+def test_a_capable_job_whose_preset_was_removed_is_claimed_and_fails_fast(tmp_path):
+    """pool 잡은 프리셋이 지워지면 집혀서 `preset_missing` 으로 바로 끝난다. any-capable 잡은
+    어느 claimant 의 `capable` 에도 없어 영원히 대기했다 — 이유는 `not_scheduled`(스케줄러 탓
+    처럼 보인다). 프리셋 이름을 바꾸는 reload 하나면 생긴다."""
+    from test_server_m5n import PRESETS, PROBES
+
+    srv = M5nServer(tmp_path)
+    try:
+        srv.app.measure_capabilities()
+        jid = srv.queued("anywhere")
+        block = (
+            '[[presets]]\nname = "anywhere"\nplacement = "any-capable"\n'
+            'argv = ["sh", "-c", "echo anywhere"]\n'
+        )
+        assert block in PRESETS
+        srv.write(PROBES + PRESETS.replace(block, ""))
+        status, body = srv.req("POST", "/reload", token="admin", json_body={})
+        assert status == 200 and body["presets_removed"] == ["anywhere"], body
+        now = srv.clock()
+        job = srv.store.claim(1, now, claimant=srv.app.local_claimant(now))
+        assert job is not None and job.id == jid, job
+    finally:
+        srv.close()
