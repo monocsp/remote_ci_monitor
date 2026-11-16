@@ -24,6 +24,8 @@ import pytest
 from gitrepo import build_remote
 from remote_ci_monitor.core.model import QUEUED
 from test_server_m5n import (
+    HOST_C,
+    PRESET_NAMES,
     PRESETS,
     M5nServer,
     expected_hash,
@@ -355,3 +357,44 @@ def test_recheck_without_names_reruns_every_check_of_the_config(srv):
     status, body = srv.req("POST", "/machines/build-02/recheck", token="admin", json_body={})
     assert status == 200, body
     assert [j["preset"] for j in body["jobs"]] == ["simcheck"]
+
+
+# ── 받을 수 없는 워커에는 점검을 걸지 않는다 (계약 검증 N1) ──────────────────
+
+
+def test_no_check_on_a_worker_outside_the_pool_of_the_preset_that_needs_it(srv):
+    """`scenario` 는 풀 mac2 의 pool 프리셋이다. 풀 mbp 의 워커는 그 잡을 영영 받지 않으므로
+    거기서 `simcheck` 을 돌릴 이유가 없다 — 운영에서는 같은 Mac 의 둘째 워커가 시뮬레이터를
+    한 번 더 잡는 꼴이 된다(2026-11-16 계약 검증 N1)."""
+    srv.reported("mbp", pool="mbp", host_key=HOST_C)
+    assert sweep(srv) == []
+    srv.reported("build-02")  # 풀 mac2 — 받을 수 있는 워커에는 건다
+    [jid] = sweep(srv)
+    assert srv.store.get_job(jid).target_worker == "build-02"
+
+
+def test_no_check_on_a_worker_that_does_not_take_any_capable_jobs(tmp_path, remote):
+    """checks 가 붙은 any-capable 프리셋 — `accept_any = false` 인 워커는 그 잡을 안 받는다."""
+    presets = PRESETS + (
+        '\n[[presets]]\nname = "capqa"\nplacement = "any-capable"\n'
+        'checks = ["simcheck"]\nargv = ["sh", "-c", "echo qa"]\n'
+    )
+    s = M5nServer(tmp_path, repo_url=remote.url, presets=presets)
+    try:
+        names = [*PRESET_NAMES, "capqa"]
+        facts_all = {
+            n: {"missing_tools": [], "workspace_tools": [], "missing_passthrough": []}
+            for n in names
+        }
+        gen = s.generation("mbp", pool="mbp")
+        body = {
+            "generation": gen,
+            "host_key": HOST_C,
+            "accept_any": False,
+            "fingerprint": {"xc": {"state": "ok", "value": "Xc 1"}},
+            "presets": facts_all,
+        }
+        assert s.req("POST", "/worker/capabilities", token="mbp", json_body=body)[0] == 200
+        assert s.app.sweep_checks() == []
+    finally:
+        s.close()

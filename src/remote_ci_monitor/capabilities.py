@@ -869,7 +869,13 @@ class CapabilitiesMixin:
             if fp is None:
                 continue
             wanted: list[str] = []
-            for v in self.verdicts_for(view.id, now).values():
+            presets = {p.name: p for p in self.config.presets}
+            for preset_name, v in self.verdicts_for(view.id, now).items():
+                preset = presets.get(preset_name)
+                # 그 프리셋의 잡을 **받을 수 있는** 워커에만 건다 — 못 받는 워커에서 점검을 돌리면
+                # 같은 컴퓨터의 둘째 워커가 시뮬레이터를 한 번 더 잡는다(계약 검증 N1)
+                if preset is None or not self._could_receive(view, preset):
+                    continue
                 if v.code == cap.CODE_CHECK_NEEDED:
                     name = str(v.detail.get("check"))
                     if name not in wanted:
@@ -883,6 +889,15 @@ class CapabilitiesMixin:
         if submitted:
             self.log(f"machine checks submitted: {submitted}")
         return submitted
+
+    def _could_receive(self, view: _MachineView, preset: Preset) -> bool:
+        """이 워커가 이 프리셋의 잡을 받을 수 있는 자리인가 — any-capable 이면 any-capable 을 받는
+        워커, pool 이면 그 풀(또는 `--pool` 로 고를 수 있는 풀)의 워커. 판정은 따로다."""
+        if preset.placement == PLACEMENT_CAPABLE:
+            if view.kind == "local":
+                return bool(self.config.server.local_accept_any)
+            return view.report.accept_any if view.report is not None else False
+        return view.pool in (preset.pool, *preset.pools)
 
     def recheck(self, worker: str, names: list[str] | None) -> list[dict[str, Any]]:
         """`POST /machines/{id}/recheck` — 사람이 다시 건다(한 번 제한과 무관). 없는 머신은
