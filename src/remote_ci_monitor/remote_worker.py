@@ -308,8 +308,10 @@ class RemoteWorker:
             self.claim_wait_seconds = int(out.get("claim_wait_seconds") or 20)
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
             self.name = str(out.get("name") or self.name)
-            gen = out.get("generation")
-            self.generation = gen if isinstance(gen, str) else None
+            # 등록은 서버가 이 워커의 보고를 지우는 일이다(M5n §19-5). 등록 응답의 세대를 제 것으로
+            # 삼으면 다음 heartbeat 이 「세대 같음」으로 보여 주기(기본 10분)까지 다시 재지 않는다 —
+            # 그동안 any-capable 잡을 못 받는다. 아직 이 세대로 보고하지 않았다고 둔다
+            self.generation = None
             return out
 
     def _host_sample(self) -> dict[str, Any] | None:
@@ -361,9 +363,20 @@ class RemoteWorker:
         due = time.monotonic() - self._last_measured >= self.probe_interval_seconds
         # 세대를 안 보내는 서버(M5n 이전)에는 보고하지 않는다
         if isinstance(gen, str) and (gen != self.generation or due):
-            # 서버가 설정을 다시 읽었거나(세대) 다시 잴 때가 됐다 — 명세부터 다시 받는다
-            self.measure_and_report()
+            # 서버가 설정을 다시 읽었거나(세대) 다시 잴 때가 됐다 — 명세부터 다시 받는다.
+            # **heartbeat 스레드에서 재지 않는다**: 프로브 묶음(최대 64 × 60초)이
+            # `worker_timeout_seconds` 를 넘으면 서버가 이 워커를 down 으로 보고 도는 잡을
+            # lost 로 만든다. 따로 띄우고, 재는 중이면 `_measure_lock` 이 겹치지 않게 한다
+            threading.Thread(
+                target=self._measure_quietly, name="rcm-worker-measure", daemon=True
+            ).start()
         return True
+
+    def _measure_quietly(self) -> None:
+        try:
+            self.measure_and_report()
+        except Exception as e:  # noqa: BLE001 — 재기가 죽어도 heartbeat 은 산다
+            self.log(f"capabilities: {type(e).__name__}")
 
     def _connection_failed(self) -> None:
         """연결 실패(status 0) 하나. 연속 `REDISCOVER_AFTER_FAILURES` 번마다 서버를 다시 찾는다."""

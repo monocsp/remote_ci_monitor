@@ -6,8 +6,14 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from typing import Any
+
 import pytest
 
+from remote_ci_monitor import remote_worker as rw
+from remote_ci_monitor.config import WorkerConfig
 from test_cli_m5n import fake, run  # noqa: F401 — `fake` 는 픽스처다
 from test_server_m5n import PRESETS, PROBES, M5nServer, expected_hash
 
@@ -111,3 +117,82 @@ def test_auto_checks_off_does_not_say_check_pending(tmp_path):
         assert s.row(qa)["reason"] == "no_capable_machine"
     finally:
         s.close()
+
+
+# ── 4. 원격 워커의 다시 재기는 heartbeat 을 붙잡지 않는다 ─────────────────────
+
+
+class SlowSpecClient:
+    """`WorkerClient` 대역 — heartbeat 은 새 세대를 알리고, `/worker/spec` 은 문이 열릴 때까지
+    걸린다(느린 `xcodebuild -version` · 첫 `flutter --version` 의 대역)."""
+
+    server = "http://127.0.0.1:1"
+
+    def __init__(self, generation: str = "1:0"):
+        self.gate = threading.Event()
+        self.generation = generation
+        self.specs = 0
+        self.reports: list[dict[str, Any]] = []
+        self.registers = 0
+
+    def register(self, **kw) -> dict[str, Any]:
+        self.registers += 1
+        return {"heartbeat_seconds": 5, "name": "mbp", "generation": self.generation}
+
+    def heartbeat(self, jobs, host_sample=None) -> dict[str, Any]:
+        return {"generation": self.generation}
+
+    def spec(self) -> dict[str, Any]:
+        self.specs += 1
+        self.gate.wait(10)
+        return {"generation": self.generation, "probes": [], "presets": []}
+
+    def capabilities(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.reports.append(body)
+        return {"ok": True}
+
+
+def _worker(client: SlowSpecClient) -> rw.RemoteWorker:
+    cfg = WorkerConfig(server=client.server, token="t", pool="mbp", lanes=1)
+    return rw.RemoteWorker(cfg, client=client, log=lambda _m: None, environ={"PATH": "/usr/bin"})
+
+
+def _wait(pred, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def test_a_generation_change_measures_without_holding_the_heartbeat():
+    """세대가 바뀐 heartbeat 이 프로브를 **heartbeat 스레드에서** 돌리면, 프로브 묶음이
+    `worker_timeout_seconds`(기본 60초)를 넘는 순간 서버는 이 워커를 down 으로 보고 도는 잡을
+    lost 로 만든다(프로브 64개 × 최대 60초가 설정상 허용된다). heartbeat 은 곧바로 돌아와야 한다."""
+    client = SlowSpecClient("1:1")
+    w = _worker(client)
+    w.generation = "1:0"
+    started = time.monotonic()
+    try:
+        assert w.heartbeat_once() is True
+        assert time.monotonic() - started < 2.0, "heartbeat waited for the probes"
+    finally:
+        client.gate.set()
+    assert _wait(lambda: client.reports), "the measure still happens, off the heartbeat thread"
+    assert _wait(lambda: w.generation == "1:1")
+
+
+def test_a_re_registration_measures_again_on_the_next_heartbeat():
+    """다시 등록하면 서버는 그 워커의 보고를 지운다(§19-5). 워커가 등록 응답의 세대를 제 것으로
+    삼으면 다음 heartbeat 의 세대가 같아서 `probe_interval_seconds`(기본 10분) 동안 다시 재지
+    않고, 그동안 any-capable 잡을 못 받는다."""
+    client = SlowSpecClient("1:0")
+    client.gate.set()
+    w = _worker(client)
+    w.register()
+    assert w.measure_and_report() is True
+    assert len(client.reports) == 1
+    w.register()  # 레인이 「not registered」 를 받고 다시 등록했다
+    assert w.heartbeat_once() is True
+    assert _wait(lambda: len(client.reports) == 2), "no report after re-registering"
