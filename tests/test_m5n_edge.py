@@ -326,3 +326,52 @@ def test_a_claimant_without_any_report_or_memory_has_no_host(tmp_path):
         assert c.host_key is None
     finally:
         srv.close()
+
+
+# ── 6. 다시 점검이 못 걸렸으면 그렇게 말한다 ─────────────────────────────────
+
+
+def test_a_recheck_that_could_not_be_submitted_names_the_reason(tmp_path):
+    """check_ref 를 못 풀면(저장소가 닿지 않음) 잡이 없다 — 응답이 이유를 싣는다."""
+    srv = M5nServer(tmp_path)  # 저장소 URL 이 없는 경로다
+    try:
+        srv.reported("mbp", pool="mbp", host_key=HOST_B)
+        status, body = srv.req("POST", "/machines/mbp/recheck", token="admin", json_body={})
+        assert status == 200, body
+        assert body["jobs"] == [
+            {"preset": "simcheck", "job_id": None, "error_code": "ref_unresolved"}
+        ], body
+    finally:
+        srv.close()
+
+
+def test_rcm_recheck_does_not_print_a_job_that_does_not_exist(tmp_path, capsys, monkeypatch):
+    """전에는 `#None  simcheck  on mbp` 를 찍고 0 으로 끝났다 — 점검이 도는 줄 안다."""
+    from fake_rcm_http import FakeRcm
+    from test_cli_m5n import run
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "RCM_LABEL", "RCM_CONFIG"):
+        monkeypatch.delenv(var, raising=False)
+    fake = FakeRcm()
+    try:
+        monkeypatch.setenv("RCM_SERVER", fake.url)
+        monkeypatch.setenv("RCM_TOKEN", "t0ken-admin")
+        fake.route(
+            "POST",
+            "/machines/mbp/recheck",
+            {
+                "jobs": [
+                    {"preset": "simcheck", "job_id": None, "error_code": "ref_unresolved"},
+                    {"preset": "lint-check", "job_id": 3651},
+                ]
+            },
+        )
+        code, out, err = run(capsys, ["recheck", "mbp"])
+    finally:
+        fake.close()
+    assert code == 1, (out, err)
+    assert "#None" not in out + err, out
+    assert "#3651" in out, out
+    assert "simcheck" in err and "not submitted" in err and "check_ref" in err, err
