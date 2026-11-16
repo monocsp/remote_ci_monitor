@@ -1579,16 +1579,21 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     if not jobs:
         print(f"nothing to recheck on {args.machine}")
         return 0
-    missed = 0
+    failed = 0
     for j in jobs:
-        if isinstance(j.get("job_id"), int):
-            print(f"#{j.get('job_id')}  {j.get('preset')}  on {args.machine}")
+        if not isinstance(j.get("job_id"), int):
+            # 서버가 잡을 못 세웠다 — `#None` 을 찍으면 점검이 도는 줄 안다. 코드도 함께 싣는다
+            failed += 1
+            code = str(j.get("error_code") or "not_submitted")
+            why = (
+                "could not resolve check_ref (repository unreachable?)"
+                if code == "ref_unresolved"
+                else "not submitted"
+            )
+            _err(f"{j.get('preset')} on {args.machine}: not submitted — {why} [{code}]")
             continue
-        # 서버가 잡을 못 세웠다(ref 를 못 풀었다 등) — 없는 잡 번호를 찍지 않는다
-        missed += 1
-        why = j.get("error_code") or "not submitted"
-        _err(f"recheck: {j.get('preset')} on {args.machine} was not submitted ({why})")
-    return 1 if missed else 0
+        print(f"#{j.get('job_id')}  {j.get('preset')}  on {args.machine}")
+    return 1 if failed else 0
 
 
 def _no_capable_line(preset: str, resp: dict[str, Any]) -> None:

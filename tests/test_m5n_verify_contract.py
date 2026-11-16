@@ -63,18 +63,16 @@ def test_a_capable_job_queued_before_a_reload_to_pool_is_still_claimed(srv):
     assert srv.claimed("build-02") == jid
 
 
-def test_a_capable_job_of_a_removed_preset_is_not_promised_a_time(srv):
-    """reload 로 프리셋이 사라지면 그 `capable` 대기 잡은 아무도 집지 않는다. 그런데 배치가 pool
-    갈래로 떨어져 표시 풀의 레인에 시각을 매겼다."""
+def test_a_capable_job_of_a_removed_preset_is_claimed_and_ends_preset_missing(srv):
+    """reload 로 프리셋이 사라지면 그 `capable` 대기 잡은 영원히 기다리지 않는다 — pool 잡처럼
+    집혀서 `preset_missing` 으로 끝난다(엣지 검증 E9 와 합친 결론). 처음 고친 판(「아무도 안
+    집고 시각도 없다」)은 잡을 큐에 영원히 남겼다."""
     srv.generation("mbp", pool="default")  # 표시 풀(default)에 살아 있는 레인 하나
     jid = srv.queued("anywhere")
     srv.write(PROBES + PRESETS.replace(ANYWHERE, ANYWHERE.replace("anywhere", "gone")))
     status, body = srv.req("POST", "/reload", token="admin", json_body={})
     assert status == 200, body
-    row = srv.row(jid)
-    assert row["reason"] == "no_capable_machine"
-    assert row["estimate"]["finish_at"] is None
-    assert srv.claim("mbp")[0] == 204
+    assert srv.claimed("mbp") == jid
 
 
 # ── 3. 다시 오지 않을 점검을 「스스로 풀린다」로 부르지 않는다 ───────────────

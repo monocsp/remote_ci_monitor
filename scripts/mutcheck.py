@@ -7,7 +7,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
-     물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15)
+     물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15) + 엣지 검증의 둘: 모르는
+     호스트가 host 범위를 지나침 · 점검 기록 읽기의 전체 스캔
   ① remaining-floor  — 잔여 하한 제거 (`core/queue.py`)
   ② join-key-inputs  — 합류 키에서 inputs 제외 (`core/queue.py`)
   ③ restart-lost     — 재시작 정리에서 running → lost 를 succeeded 로 (`store.py`)
@@ -153,9 +154,27 @@ MUTANTS = (
         # `host` 범위를 다른 호스트까지 막는 것으로 — 같은 호스트의 두 워커는 그대로 동시에 돈다
         name="m5n-host-scope-wrong-host",
         path="src/remote_ci_monitor/store.py",
-        old="b.host_key IS NOT NULL AND b.host_key = ?",
-        new="b.host_key IS NOT NULL AND b.host_key != ?",
+        old="(? IS NULL OR b.host_key IS NULL OR b.host_key = ?)",
+        new="(? IS NULL OR b.host_key IS NULL OR b.host_key != ?)",
         tests=("tests/test_store_m5n.py",),
+    ),
+    Mutant(
+        # 호스트를 모르면 `host` 범위를 지나친다 — 보고 없는 워커가 같은 컴퓨터의 시뮬레이터 잡과
+        # 함께 돈다(§12 fail-open 금지 · 엣지 검증). 자리표시자 수는 그대로 둔다
+        name="m5n-host-scope-unknown-passes",
+        path="src/remote_ci_monitor/store.py",
+        old="(? IS NULL OR b.host_key IS NULL OR b.host_key = ?)",
+        new="((0 AND ? IS NULL) OR (b.host_key IS NOT NULL AND b.host_key = ?))",
+        tests=("tests/test_m5n_edge.py",),
+    ),
+    Mutant(
+        # 점검 기록 읽기가 다시 jobs 를 통째로 훑는다 — status · claim 이 보존 잡 수에 끌려간다
+        # (M5f 결정 49 · 엣지 검증 실측 5만 행에서 628 ms)
+        name="m5n-check-records-scan",
+        path="src/remote_ci_monitor/store.py",
+        old='f"{cols} WHERE worker_name = ? AND preset IN ({marks}){fp_sql} AND {shown} "',
+        new='f"{cols} WHERE +worker_name = ? AND preset IN ({marks}){fp_sql} AND {shown} "',
+        tests=("tests/test_m5n_edge.py",),
     ),
     Mutant(
         # 단계 중앙값이 다른 호스트로 물러난다 — 느린 호스트에서 「멈춘 듯」을 지어낸다(결정 102)

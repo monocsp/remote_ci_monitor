@@ -31,7 +31,7 @@ of a key bumps that number and is listed here.
   files never leave the server, so deploy and upload presets stay on their pool. A worker can
   refuse such jobs with `accept_any = false` (the server's own lanes: `local_accept_any`).
 - **Each machine reports an environment fingerprint, and rcm notices when it changes.** `[[probes]]`
-  in `server.toml` lists version commands (`xcodebuild -version`, `fvm flutter --version`) that
+  in `server.toml` lists version commands (`xcodebuild -version`, `fvm flutter --version --machine`) that
   every worker runs in its own service environment, at registration and every
   `probe_interval_seconds` (600). A timeout keeps the previous value instead of counting as a
   change. The values are shown on the read routes, so pick commands that print only a version.

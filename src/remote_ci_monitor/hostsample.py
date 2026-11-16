@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -101,42 +102,119 @@ def hardware_id() -> str | None:
 
 
 def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
-    """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 차례로 돌린다 → 이름 → ProbeResult.
+    """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 돌린다 → 이름 → ProbeResult(설정 순서).
 
     셸은 없다. 실행 파일은 `env` 의 PATH 로 찾는다 — 이 프로세스의 PATH 로 물러나지 않는다.
+
+    **함께 돌린다.** 차례로 돌면 시간이 더해진다 — 64개 × 60초면 한 시간이고, 그동안 서버 기동 ·
+    `rcm reload`(요청 스레드) · SIGHUP(받는 루프) 가 멈춘다. 함께 돌면 가장 긴 시한 하나(≤ 60초)다.
     """
+    probes = list(probes)
+    results: dict[str, Any] = {}
+    threads = [
+        threading.Thread(
+            target=lambda p=probe: results.__setitem__(p.name, _run_probe(p, env)),
+            name=f"rcm-probe-{probe.name}",
+            daemon=True,
+        )
+        for probe in probes
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {p.name: results[p.name] for p in probes}
+
+
+def _run_probe(probe: Any, env: dict[str, str]) -> Any:
     from remote_ci_monitor.core.capability import normalize_probe_output
 
-    out: dict[str, Any] = {}
     path = env.get("PATH", "")
-    for probe in probes:
-        argv = list(probe.argv)
-        exe = argv[0]
-        if not os.path.isabs(exe) and shutil.which(exe, path=path) is None:
-            out[probe.name] = normalize_probe_output(None, None, missing=True)
-            continue
-        if os.path.isabs(exe) and not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
-            out[probe.name] = normalize_probe_output(None, None, missing=True)
-            continue
-        if not os.path.isabs(exe):
-            argv[0] = shutil.which(exe, path=path) or exe
+    argv = list(probe.argv)
+    exe = argv[0]
+    if not os.path.isabs(exe) and shutil.which(exe, path=path) is None:
+        return normalize_probe_output(None, None, missing=True)
+    if os.path.isabs(exe) and not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        return normalize_probe_output(None, None, missing=True)
+    if not os.path.isabs(exe):
+        argv[0] = shutil.which(exe, path=path) or exe
+    try:
+        # 자기 프로세스 그룹 — 시한을 넘기면 손자까지 거둔다(`runner` 의 잡과 같은 규칙). 감싸는
+        # 스크립트(`flutter` · `xcrun` 류)를 죽여도 그 자식은 남아 주기마다 쌓였다.
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return normalize_probe_output(None, None, missing=True)
+    # 출력은 **앞부분만** 지닌다 — 지문에 드는 것은 앞 두 줄 · 120자다. communicate 로 다 담으면
+    # `yes` 같은 프로브 하나가 3초에 10 GB 를 먹는다(엣지 검증 실측). 나머지는 읽어서 버린다 —
+    # 안 읽으면 파이프가 차서 정상 프로브(큰 목록을 찍는 것)가 시한까지 멈춘다.
+    timeout = float(probe.timeout_seconds)
+    deadline = time.monotonic() + timeout
+    kept = (bytearray(), bytearray())
+    readers = [
+        threading.Thread(target=_drain, args=(stream, buf), daemon=True)
+        for stream, buf in zip((proc.stdout, proc.stderr), kept, strict=True)
+    ]
+    for r in readers:
+        r.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        proc.wait()
+        for r in readers:
+            r.join(1.0)
+        return normalize_probe_output(None, None, timed_out=True)
+    # 우두머리는 끝났다 — 그룹의 손자가 파이프를 쥐고 있으면 시한까지 기다린다(communicate 와 같다)
+    for r in readers:
+        r.join(max(0.0, deadline - time.monotonic()))
+    if any(r.is_alive() for r in readers):
+        _kill_group(proc)
+        for r in readers:
+            r.join(1.0)
+        return normalize_probe_output(None, None, timed_out=True)
+    stdout, stderr = bytes(kept[0]), bytes(kept[1])
+    output = stdout if stdout.strip() else stderr
+    return normalize_probe_output(output, proc.returncode)
+
+
+#: 프로브 출력 중 지니는 앞부분(스트림마다). 지문은 앞 두 줄 · 120자만 쓴다.
+PROBE_OUTPUT_KEEP = 64 * 1024
+
+
+def _drain(stream: Any, keep: bytearray) -> None:
+    """EOF 까지 읽되 앞 `PROBE_OUTPUT_KEEP` 바이트만 남긴다."""
+    try:
+        while True:
+            chunk = stream.read1(65536)
+            if not chunk:
+                break
+            room = PROBE_OUTPUT_KEEP - len(keep)
+            if room > 0:
+                keep += chunk[:room]
+    except (OSError, ValueError):
+        pass
+    finally:
         try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                timeout=float(probe.timeout_seconds),
-            )
-        except subprocess.TimeoutExpired:
-            out[probe.name] = normalize_probe_output(None, None, timed_out=True)
-            continue
+            stream.close()
         except OSError:
-            out[probe.name] = normalize_probe_output(None, None, missing=True)
-            continue
-        output = proc.stdout if proc.stdout.strip() else proc.stderr
-        out[probe.name] = normalize_probe_output(output, proc.returncode)
-    return out
+            pass
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _read_file(path: str) -> str | None:

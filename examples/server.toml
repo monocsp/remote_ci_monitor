@@ -228,9 +228,11 @@ default = "default"
 # Every worker runs these probes in its own service environment and reports the output as its
 # fingerprint; `rcm machines` shows it. The values are visible on /api/machines and /api/status,
 # so pick commands that print only a version. Nothing here is built into rcm — adjust freely.
+# The output must not move on its own: plain `flutter --version` prints "(4 months ago)", which
+# changes the fingerprint every month and re-runs the checks; `--machine` prints JSON instead.
 # [[probes]]
 # name = "flutter"
-# argv = ["fvm", "flutter", "--version"]
+# argv = ["fvm", "flutter", "--version", "--machine"]
 # timeout_seconds = 30
 # [[probes]]
 # name = "xcode"

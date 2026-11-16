@@ -3250,6 +3250,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         }
         views = self.machine_views(now)
         workers = self.all_worker_infos(now)
+        memo: dict[Any, Any] = {}  # 판정은 (프리셋, 머신)마다 한 번 — 대기 잡마다가 아니다
         rows = compute_queue(
             snap.jobs,
             workers=workers,
@@ -3259,12 +3260,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             cfg=self.queue_config(),
             now=now,
             progress=progress,
-            placement=lambda job: self.placement_for(job, now, views),
+            placement=lambda job: self.placement_for(job, now, views, memo),
             host_medians=snap.host_medians if snap.medians is not None else {},
             host_step_medians=snap.host_step_medians,
             worker_hosts={
                 None: self.local_host_key(),
-                **{v.id: v.report.host_key for v in views if v.kind == "remote" and v.report},
+                **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
         )
         if pool is None:
@@ -4432,9 +4433,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         # 재시작 없이 바꾸는 기능이 재시작해야만 맞는 검사를 남기는 꼴이다.
         self.measure_preset_env()
         # 프리셋 · 프로브가 바뀌었을 수 있다 — 세대를 올려 옛 보고를 `report_stale` 로 만들고
-        # 로컬은 바로 다시 잰다. 원격 워커는 다음 heartbeat 에서 세대를 보고 다시 잰다(M5n §4.2).
+        # 로컬은 바로 다시 잰다 — **뒤에서**(프로브가 이 요청 · SIGHUP 루프를 붙잡지 않게). 원격
+        # 워커는 다음 heartbeat 에서 세대를 보고 다시 잰다(M5n §4.2).
         self.bump_generation()
-        self.measure_capabilities()
+        self.measure_capabilities_later()
         self._mark_dirty()
         self._publish_server()
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")

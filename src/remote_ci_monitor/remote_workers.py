@@ -291,8 +291,7 @@ class RemoteWorkersMixin:
         lanes_busy = self.store.active_worker_lanes() if rows else {}
         for row in rows:
             alive = self.worker_alive(row, now)
-            report = self.report_of(row.name)  # type: ignore[attr-defined]
-            host = report.host_key if report is not None else None
+            host = self.host_of(row.name)  # type: ignore[attr-defined]
             for lane in range(1, row.lanes + 1):
                 job = lanes_busy.get((row.name, lane)) if alive else None
                 if not alive:

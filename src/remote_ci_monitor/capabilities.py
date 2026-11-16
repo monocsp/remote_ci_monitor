@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -53,6 +54,9 @@ PROBE_VALUE_MAX = cap.PROBE_VALUE_MAX
 #: 판정에서 「도구 문제」— pool 잡은 이것으로 막지 않는다(결정 98: 집어서 즉시 tool_missing)
 _TOOL_CODES = frozenset({cap.CODE_TOOL_MISSING, cap.CODE_WORKSPACE_TOOL})
 _CHECK_CODES_PENDING = frozenset({cap.CODE_CHECK_RUNNING, cap.CODE_CHECK_NEEDED})
+#: 원격이 보낸 host_key 가 가질 수 있는 꼴 — 해시(16 hex) 또는 `worker:<이름>`. 그 밖은 버리고
+#: `worker:<이름>` 으로(화면 · 로그 · 잡 행에 실리는 값이다)
+_HOST_KEY_RE = re.compile(r"[A-Za-z0-9:._-]{1,80}")
 
 
 class CapabilityError(Exception):
@@ -94,7 +98,9 @@ def _probe_from_json(name: str, raw: Any) -> ProbeResult:
         raise CapabilityError(
             400, f"fingerprint '{name}': value longer than {PROBE_VALUE_MAX} characters"
         )
-    return ProbeResult(state, value)
+    # 워커가 정규화했어도 서버가 다시 씻는다 — 값은 서버 로그 줄(「environment changed」),
+    # `rcm machines` 의 터미널, 웹에 그대로 나간다. 줄바꿈이면 로그 줄 위조, ESC 면 터미널 조작이다.
+    return ProbeResult(state, cap.strip_control(value) if value is not None else None)
 
 
 def probes_json(probes: Mapping[str, ProbeResult]) -> str:
@@ -128,7 +134,7 @@ def _str_tuple(where: str, raw: Any) -> tuple[str, ...]:
         return ()
     if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
         raise CapabilityError(400, f"{where} must be a list of strings")
-    return tuple(x[:200] for x in raw[:64])
+    return tuple(cap.strip_control(x)[:200] for x in raw[:64])
 
 
 def report_from_json(
@@ -152,7 +158,7 @@ def report_from_json(
             code="generation_mismatch",
         )
     host_key = body.get("host_key")
-    if not isinstance(host_key, str) or not host_key or len(host_key) > 80:
+    if not isinstance(host_key, str) or not _HOST_KEY_RE.fullmatch(host_key):
         host_key = cap.host_key_from(None, worker)
     accept_any = body.get("accept_any", True)
     if not isinstance(accept_any, bool):
@@ -214,8 +220,13 @@ class CapabilitiesMixin:
         self._reloads = 0
         self._reports: dict[str, CapabilityReport] = {}
         self._local_host_key: str | None = None
+        # 워커 → 마지막으로 보고한 호스트. `machines` 표의 사본이라 재시작 뒤에도 안다(처음 한 번
+        # 읽는다 — 상태 요청마다 워커 수만큼 질의하지 않게)
+        self._known_hosts: dict[str, str] | None = None
         self._check_errors: dict[tuple[str, str], str] = {}
         self._cap_thread: threading.Thread | None = None
+        # 로컬 측정은 한 번에 하나 — 기동 · reload(뒤에서) · 주기가 겹쳐도 앞 지문을 같이 읽지 않게
+        self._measure_lock = threading.Lock()
 
     # ── 세대 ────────────────────────────────────────────────────────────────
 
@@ -257,8 +268,27 @@ class CapabilitiesMixin:
             self._local_host_key = cap.host_key_from(hardware_id(), LOCAL)
         return self._local_host_key
 
+    def measure_capabilities_later(self) -> None:
+        """reload 뒤의 다시 재기 — **뒤에서** 한다. reload 는 요청 스레드(SIGHUP 이면 연결을 받는
+        루프)에서 돌고, 프로브는 60초까지 걸린다. 그동안 로컬의 보고는 옛 세대라 `report_stale`
+        이다 — any-capable 을 안 받을 뿐이다(fail-closed, 결정 91)."""
+
+        def run() -> None:
+            try:
+                self.measure_capabilities()
+            except Exception as e:  # noqa: BLE001 — 스레드가 조용히 죽으면 로컬이 낡은 채로 남는다
+                from remote_ci_monitor.server import _safe
+
+                self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
+
+        threading.Thread(target=run, name="rcm-measure", daemon=True).start()
+
     def measure_capabilities(self, environ: Mapping[str, str] | None = None) -> None:
         """로컬 워커(`@local`)를 **이 프로세스의 환경**으로 잰다 — 기동 · reload · 주기(§4.2)."""
+        with self._measure_lock:
+            self._measure_capabilities(environ)
+
+    def _measure_capabilities(self, environ: Mapping[str, str] | None) -> None:
         from remote_ci_monitor.hostsample import run_probes
         from remote_ci_monitor.runner import measure_tools
 
@@ -328,6 +358,8 @@ class CapabilitiesMixin:
             self.store.record_fingerprint(fp.hash, fp_json, report.measured_at)
         with self._cap_lock:
             self._reports[worker] = report
+            if self._known_hosts is not None:
+                self._known_hosts[worker] = report.host_key
         if saved.changed:
             diff = cap.changed_probes(probes_from_json(saved.previous_json), fp.probes)
             what = " · ".join(f"{n} {old or '—'} → {new or '—'}" for n, (old, new) in diff.items())
@@ -356,10 +388,18 @@ class CapabilitiesMixin:
     def _max_age(self) -> float:
         return 3.0 * float(self.config.server.probe_interval_seconds)
 
+    def _records(self, worker: str, report: CapabilityReport | None) -> list[Any]:
+        """판정에 드는 점검 기록 — **현재 지문의 것만**(`check_state` 가 보는 것이 그것뿐이다).
+        지문을 모르면 읽을 것이 없다(판정은 `fingerprint_unknown` · 점검 칸은 `needed`)."""
+        checks = self.check_preset_names()
+        fp = report.fingerprint.hash if report is not None else None
+        if not checks or fp is None:
+            return []
+        return self.store.check_records(worker, checks, fingerprint_hash=fp)
+
     def verdicts_for(self, worker: str, now: datetime) -> dict[str, Verdict]:
         report = self.report_of(worker)
-        checks = self.check_preset_names()
-        records = self.store.check_records(worker, checks) if checks else []
+        records = self._records(worker, report)
         return {
             p.name: cap.verdict(
                 p,
@@ -386,16 +426,37 @@ class CapabilitiesMixin:
             for name, v in verdicts.items()
             if presets[name].checks and v.state != cap.ELIGIBLE and v.code not in _TOOL_CODES
         )
-        host = report.host_key if report else (self.local_host_key() if worker == LOCAL else None)
         return Claimant(
             worker=worker,
             pool=pool,
-            host_key=host,
+            host_key=self.host_of(worker, report),
             fingerprint_hash=report.fingerprint.hash if report else None,
             capable=capable,
             gated=gated,
             accept_any=report.accept_any if report else False,
+            known=tuple(presets),
         )
+
+    def host_of(self, worker: str, report: CapabilityReport | None = None) -> str | None:
+        """그 워커가 사는 호스트 — 보고 → `machines` 표가 기억하는 것 → (로컬이면) 이 컴퓨터.
+
+        재등록 · 서버 재시작 뒤 첫 보고 전에도 어느 컴퓨터인지는 안다. 보고가 지워졌다고 호스트를
+        모른다고 하면 `host` 범위 그룹이 그 틈에 막는 쪽으로만 돈다(claim 의 fail-closed). 기억도
+        없으면 None — 지어내지 않는다."""
+        report = report if report is not None else self.report_of(worker)
+        if report is not None:
+            return report.host_key
+        if worker == LOCAL:
+            return self.local_host_key()
+        with self._cap_lock:
+            known = self._known_hosts
+        if known is None:
+            known = {r.worker: r.host_key for r in self.store.list_machines() if r.host_key}
+            with self._cap_lock:
+                if self._known_hosts is None:
+                    self._known_hosts = known
+                known = self._known_hosts
+        return known.get(worker)
 
     def local_claimant(self, now: datetime) -> Claimant:
         return self.claimant_for(LOCAL, DEFAULT_POOL, now)
@@ -490,8 +551,7 @@ class CapabilitiesMixin:
                     for name, p in f.probes.items()
                 },
             }
-        checks = self.check_preset_names()
-        records = self.store.check_records(view.id, checks) if checks else []
+        records = self._records(view.id, report)
         verdicts = {
             p.name: cap.verdict(
                 p,
@@ -576,22 +636,36 @@ class CapabilitiesMixin:
     # ── 배치 (상태 화면 · 제출 응답) ────────────────────────────────────────
 
     def _placement_notes(
-        self, preset: Preset, views: list[_MachineView], now: datetime
+        self,
+        preset: Preset,
+        views: list[_MachineView],
+        now: datetime,
+        memo: dict[Any, Any] | None = None,
     ) -> list[tuple[_MachineView, Verdict]]:
+        """(머신, 판정) 들. `memo` 를 주면 한 번의 계산 안에서 머신마다 점검 기록을 **한 번만**
+        읽고 (프리셋, 머신) 판정을 다시 쓴다 — 큐 계산은 대기 잡마다 이걸 부른다(대기 잡 × 머신만큼
+        질의하던 것, 엣지 검증)."""
+        memo = {} if memo is None else memo
         out = []
-        checks = self.check_preset_names()
         for view in views:
-            records = (
-                self.store.check_records(view.id, checks) if (checks and preset.checks) else []
-            )
-            v = cap.verdict(
-                preset,
-                view.report,
-                generation=self.generation,
-                now=now,
-                max_age_seconds=self._max_age(),
-                check_records=records,
-            )
+            vkey = ("verdict", preset.name, view.id)
+            v = memo.get(vkey)
+            if v is None:
+                records: list[Any] = []
+                if preset.checks:
+                    rkey = ("records", view.id)
+                    if rkey not in memo:
+                        memo[rkey] = self._records(view.id, view.report)
+                    records = memo[rkey]
+                v = cap.verdict(
+                    preset,
+                    view.report,
+                    generation=self.generation,
+                    now=now,
+                    max_age_seconds=self._max_age(),
+                    check_records=records,
+                )
+                memo[vkey] = v
             out.append((view, v))
         return out
 
@@ -603,8 +677,16 @@ class CapabilitiesMixin:
             return PlacementNote(view.id, view.display_name, cap.INELIGIBLE, "not_accepting_any")
         return PlacementNote(view.id, view.display_name, v.state, v.code, dict(v.detail))
 
-    def placement_for(self, job: Job, now: datetime, views: list[_MachineView]) -> Placement:
-        """대기 잡 하나가 들어갈 수 있는 워커(§7.2). 로컬은 `None` 이다(WorkerInfo 와 같은 키)."""
+    def placement_for(
+        self,
+        job: Job,
+        now: datetime,
+        views: list[_MachineView],
+        memo: dict[Any, Any] | None = None,
+    ) -> Placement:
+        """대기 잡 하나가 들어갈 수 있는 워커(§7.2). 로컬은 `None` 이다(WorkerInfo 와 같은 키).
+
+        `memo` 는 한 번의 큐 계산이 공유하는 판정 캐시다(`_placement_notes`)."""
 
         def key(view: _MachineView) -> str | None:
             return None if view.id == LOCAL else view.id
@@ -618,8 +700,8 @@ class CapabilitiesMixin:
             # 안 집는다. pool 갈래로 떨어뜨리면 표시 풀의 레인에 시각을 지어낸다(fail-open)
             return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE)
         if job.placement == PLACEMENT_CAPABLE and preset is not None:
-            judged = self._placement_notes(preset, views, now)
-            stalled = self._stalled_checks(judged)
+            judged = self._placement_notes(preset, views, now, memo)
+            stalled = self._stalled_checks(judged, memo)
             workers: set[str | None] = set()
             notes: list[PlacementNote] = []
             for view, v in judged:
@@ -640,8 +722,8 @@ class CapabilitiesMixin:
         in_pool = [v for v in views if v.pool == job.pool]
         if preset is None or not preset.checks:
             return Placement(workers=frozenset(key(v) for v in in_pool))
-        judged = self._placement_notes(preset, in_pool, now)
-        stalled = self._stalled_checks(judged)
+        judged = self._placement_notes(preset, in_pool, now, memo)
+        stalled = self._stalled_checks(judged, memo)
         open_: set[str | None] = set()
         gated_notes: list[PlacementNote] = []
         for view, v in judged:
@@ -657,7 +739,9 @@ class CapabilitiesMixin:
             notes=tuple(gated_notes),
         )
 
-    def _stalled_checks(self, judged: list[tuple[_MachineView, Verdict]]) -> frozenset[str]:
+    def _stalled_checks(
+        self, judged: list[tuple[_MachineView, Verdict]], memo: dict[Any, Any] | None = None
+    ) -> frozenset[str]:
         """`check_needed` 인데 **아무도 걸지 않을** 워커들 — 자동 점검이 꺼졌거나, 그 지문에 이미
         한 번 걸었다(실패가 아니라 취소 · 유실로 끝났다, 결정 95). 이것은 「스스로 풀린다」
         (check_pending)가 아니다 — 사람이 다시 점검해야 풀린다(검증 2026-11-16)."""
@@ -667,11 +751,19 @@ class CapabilitiesMixin:
                 continue
             fp = view.report.fingerprint.hash
             name = str(v.detail.get("check"))
-            if (
-                not self.config.server.auto_checks
-                or fp is None
-                or self.store.auto_check_done(view.id, name, fp)
-            ):
+            if not self.config.server.auto_checks or fp is None:
+                out.add(view.id)
+                continue
+            # 대기 잡마다 부른다 — 한 번의 계산 안에서는 (머신, 점검, 지문)마다 한 번만 읽는다
+            akey = ("auto_done", view.id, name, fp)
+            if memo is None or akey not in memo:
+                done = self.store.auto_check_done(view.id, name, fp)
+                if memo is None:
+                    if done:
+                        out.add(view.id)
+                    continue
+                memo[akey] = done
+            if memo[akey]:
                 out.add(view.id)
         return frozenset(out)
 
@@ -774,7 +866,7 @@ class CapabilitiesMixin:
             job_id = self._submit_check(view, name, fp, auto=False)
             item: dict[str, Any] = {"preset": name, "job_id": job_id}
             if job_id is None:
-                # 못 걸었다 — 왜인지 싣는다(`machines[].checks[].error_code` 와 같은 코드)
+                # 못 걸었다 — 번호 없는 성공처럼 보이지 않게 이유를 싣는다(점검 칸과 같은 코드)
                 item["error_code"] = self._check_errors.get((view.id, name), "not_submitted")
             out.append(item)
         return out
@@ -819,7 +911,10 @@ class CapabilitiesMixin:
                     last_probe = time.monotonic()
                 self.sweep_checks()
             except Exception as e:  # noqa: BLE001 — 스레드가 죽으면 점검이 조용히 멈춘다
-                self.record_error(f"capabilities: {type(e).__name__}: {e}"[:200])
+                # 공개면(`server.last_error`)이다 — 형제 루프처럼 경로를 지우고 한 줄로 접는다
+                from remote_ci_monitor.server import _safe
+
+                self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
 
 
 def _previous_value(

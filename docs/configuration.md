@@ -1065,8 +1065,14 @@ is for. Without any `[[probes]]` the fingerprint is the same every time.
 Probe output is readable by anyone who can read the queue: the values travel on the read routes
 `/api/machines` and `/api/status`, so with `read_auth = "none"` everyone on the same network sees
 them. Pick commands that print only a version (`xcodebuild -version`, `java -version`,
-`flutter --version`), never ones that print paths, user names or host names (`which`, `env`,
-`xcode-select -p`).
+`flutter --version --machine`), never ones that print paths, user names or host names (`which`,
+`env`, `xcode-select -p`).
+
+The output must also stay the same while nothing changes. Only the first two non-empty lines
+count, but a relative time in them moves the fingerprint by itself: plain `flutter --version`
+prints `revision 058e0af2c2 (4 months ago)` on its second line, so the fingerprint changes when
+the month turns and every check runs again. `--machine` prints the same JSON for the same
+version.
 
 A duplicate name, an empty `argv` or more than 64 probes stops the server at start, naming the
 key. `rcm reload` re-reads `[[probes]]`; every worker then fetches the new list and measures again.
