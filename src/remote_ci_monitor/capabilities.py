@@ -225,6 +225,8 @@ class CapabilitiesMixin:
         self._known_hosts: dict[str, str] | None = None
         self._check_errors: dict[tuple[str, str], str] = {}
         self._cap_thread: threading.Thread | None = None
+        # 로컬 측정은 한 번에 하나 — 기동 · reload(뒤에서) · 주기가 겹쳐도 앞 지문을 같이 읽지 않게
+        self._measure_lock = threading.Lock()
 
     # ── 세대 ────────────────────────────────────────────────────────────────
 
@@ -266,8 +268,27 @@ class CapabilitiesMixin:
             self._local_host_key = cap.host_key_from(hardware_id(), LOCAL)
         return self._local_host_key
 
+    def measure_capabilities_later(self) -> None:
+        """reload 뒤의 다시 재기 — **뒤에서** 한다. reload 는 요청 스레드(SIGHUP 이면 연결을 받는
+        루프)에서 돌고, 프로브는 60초까지 걸린다. 그동안 로컬의 보고는 옛 세대라 `report_stale`
+        이다 — any-capable 을 안 받을 뿐이다(fail-closed, 결정 91)."""
+
+        def run() -> None:
+            try:
+                self.measure_capabilities()
+            except Exception as e:  # noqa: BLE001 — 스레드가 조용히 죽으면 로컬이 낡은 채로 남는다
+                from remote_ci_monitor.server import _safe
+
+                self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
+
+        threading.Thread(target=run, name="rcm-measure", daemon=True).start()
+
     def measure_capabilities(self, environ: Mapping[str, str] | None = None) -> None:
         """로컬 워커(`@local`)를 **이 프로세스의 환경**으로 잰다 — 기동 · reload · 주기(§4.2)."""
+        with self._measure_lock:
+            self._measure_capabilities(environ)
+
+    def _measure_capabilities(self, environ: Mapping[str, str] | None) -> None:
         from remote_ci_monitor.hostsample import run_probes
         from remote_ci_monitor.runner import measure_tools
 

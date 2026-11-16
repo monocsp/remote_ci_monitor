@@ -423,3 +423,36 @@ def test_a_probe_that_prints_a_lot_does_not_fill_memory():
     assert out["big"].state == "ok", out
     assert out["big"].value.startswith("Tool 1.2.3 · xxx"), out["big"].value[:40]
     assert peak < 8 * 1024 * 1024, peak
+
+
+# ── 9. reload 는 프로브를 기다리지 않는다 ─────────────────────────────────────
+
+
+def test_reload_answers_before_a_slow_probe_finishes(tmp_path):
+    """reload 는 요청 스레드(또는 SIGHUP 이면 받는 루프)에서 돈다. 프로브가 30초(견본의 flutter
+    시한 — 게이트가 flutter 를 돌리면 startup lock 을 기다린다)면 `rcm reload`(15초 시한)는
+    「실패」를 보고하고 SIGHUP 동안 서버는 연결을 안 받는다. 다시 재기는 뒤에서 한다."""
+    slow = (
+        "\n[[probes]]\nname = \"xc\"\n"
+        f'argv = ["{PY}", "-c", "import time; time.sleep(3); print(\'Xc 1\')"]\n'
+    )
+    srv = M5nServer(tmp_path, probes=slow)
+    try:
+        srv.app.measure_capabilities()
+        before = srv.app.report_of("@local")
+        assert before is not None
+        began = time.monotonic()
+        status, body = srv.req("POST", "/reload", token="admin", json_body={})
+        took = time.monotonic() - began
+        assert status == 200, body
+        assert took < 2.0, took
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            r = srv.app.report_of("@local")
+            if r is not None and r.generation == srv.app.generation:
+                break
+            time.sleep(0.05)
+        r = srv.app.report_of("@local")
+        assert r is not None and r.generation == srv.app.generation
+    finally:
+        srv.close()
