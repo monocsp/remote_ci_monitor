@@ -307,10 +307,9 @@ def test_the_sample_flutter_probe_prints_no_relative_time():
     """`flutter --version` 의 둘째 줄은 「revision 058e0af2c2 (4 months ago)」다 — 달이 바뀌면
     지문이 바뀌고 점검이 다시 돈다. `--machine` 은 같은 판이면 같은 줄을 낸다."""
     root = Path(__file__).resolve().parents[1]
-    for path in (
-        root / "src/remote_ci_monitor/templates/server.toml",
-        root / "examples/server.toml",
-    ):
+    template = root / "src/remote_ci_monitor/templates/server.toml"
+    example = root / "examples/server.toml"  # mutcheck 사본에는 없다(src · tests 만 복사)
+    for path in (template, *([example] if example.exists() else [])):
         text = path.read_text(encoding="utf-8")
         lines = [ln for ln in text.splitlines() if "flutter" in ln and "argv" in ln]
         assert lines, path
