@@ -356,10 +356,18 @@ class CapabilitiesMixin:
     def _max_age(self) -> float:
         return 3.0 * float(self.config.server.probe_interval_seconds)
 
+    def _records(self, worker: str, report: CapabilityReport | None) -> list[Any]:
+        """판정에 드는 점검 기록 — **현재 지문의 것만**(`check_state` 가 보는 것이 그것뿐이다).
+        지문을 모르면 읽을 것이 없다(판정은 `fingerprint_unknown` · 점검 칸은 `needed`)."""
+        checks = self.check_preset_names()
+        fp = report.fingerprint.hash if report is not None else None
+        if not checks or fp is None:
+            return []
+        return self.store.check_records(worker, checks, fingerprint_hash=fp)
+
     def verdicts_for(self, worker: str, now: datetime) -> dict[str, Verdict]:
         report = self.report_of(worker)
-        checks = self.check_preset_names()
-        records = self.store.check_records(worker, checks) if checks else []
+        records = self._records(worker, report)
         return {
             p.name: cap.verdict(
                 p,
@@ -491,8 +499,7 @@ class CapabilitiesMixin:
                     for name, p in f.probes.items()
                 },
             }
-        checks = self.check_preset_names()
-        records = self.store.check_records(view.id, checks) if checks else []
+        records = self._records(view.id, report)
         verdicts = {
             p.name: cap.verdict(
                 p,
@@ -577,22 +584,36 @@ class CapabilitiesMixin:
     # ── 배치 (상태 화면 · 제출 응답) ────────────────────────────────────────
 
     def _placement_notes(
-        self, preset: Preset, views: list[_MachineView], now: datetime
+        self,
+        preset: Preset,
+        views: list[_MachineView],
+        now: datetime,
+        memo: dict[Any, Any] | None = None,
     ) -> list[tuple[_MachineView, Verdict]]:
+        """(머신, 판정) 들. `memo` 를 주면 한 번의 계산 안에서 머신마다 점검 기록을 **한 번만**
+        읽고 (프리셋, 머신) 판정을 다시 쓴다 — 큐 계산은 대기 잡마다 이걸 부른다(대기 잡 × 머신만큼
+        질의하던 것, 엣지 검증)."""
+        memo = {} if memo is None else memo
         out = []
-        checks = self.check_preset_names()
         for view in views:
-            records = (
-                self.store.check_records(view.id, checks) if (checks and preset.checks) else []
-            )
-            v = cap.verdict(
-                preset,
-                view.report,
-                generation=self.generation,
-                now=now,
-                max_age_seconds=self._max_age(),
-                check_records=records,
-            )
+            vkey = ("verdict", preset.name, view.id)
+            v = memo.get(vkey)
+            if v is None:
+                records: list[Any] = []
+                if preset.checks:
+                    rkey = ("records", view.id)
+                    if rkey not in memo:
+                        memo[rkey] = self._records(view.id, view.report)
+                    records = memo[rkey]
+                v = cap.verdict(
+                    preset,
+                    view.report,
+                    generation=self.generation,
+                    now=now,
+                    max_age_seconds=self._max_age(),
+                    check_records=records,
+                )
+                memo[vkey] = v
             out.append((view, v))
         return out
 
@@ -604,8 +625,16 @@ class CapabilitiesMixin:
             return PlacementNote(view.id, view.display_name, cap.INELIGIBLE, "not_accepting_any")
         return PlacementNote(view.id, view.display_name, v.state, v.code, dict(v.detail))
 
-    def placement_for(self, job: Job, now: datetime, views: list[_MachineView]) -> Placement:
-        """대기 잡 하나가 들어갈 수 있는 워커(§7.2). 로컬은 `None` 이다(WorkerInfo 와 같은 키)."""
+    def placement_for(
+        self,
+        job: Job,
+        now: datetime,
+        views: list[_MachineView],
+        memo: dict[Any, Any] | None = None,
+    ) -> Placement:
+        """대기 잡 하나가 들어갈 수 있는 워커(§7.2). 로컬은 `None` 이다(WorkerInfo 와 같은 키).
+
+        `memo` 는 한 번의 큐 계산이 공유하는 판정 캐시다(`_placement_notes`)."""
 
         def key(view: _MachineView) -> str | None:
             return None if view.id == LOCAL else view.id
@@ -615,7 +644,7 @@ class CapabilitiesMixin:
             return Placement(workers=frozenset({target}))
         preset = self.config.preset(job.preset)
         if job.placement == PLACEMENT_CAPABLE and preset is not None:
-            judged = self._placement_notes(preset, views, now)
+            judged = self._placement_notes(preset, views, now, memo)
             workers: set[str | None] = set()
             notes: list[PlacementNote] = []
             for view, v in judged:
@@ -636,7 +665,7 @@ class CapabilitiesMixin:
         in_pool = [v for v in views if v.pool == job.pool]
         if preset is None or not preset.checks:
             return Placement(workers=frozenset(key(v) for v in in_pool))
-        judged = self._placement_notes(preset, in_pool, now)
+        judged = self._placement_notes(preset, in_pool, now, memo)
         open_: set[str | None] = set()
         gated_notes: list[PlacementNote] = []
         for view, v in judged:

@@ -3249,6 +3249,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         }
         views = self.machine_views(now)
         workers = self.all_worker_infos(now)
+        memo: dict[Any, Any] = {}  # 판정은 (프리셋, 머신)마다 한 번 — 대기 잡마다가 아니다
         rows = compute_queue(
             snap.jobs,
             workers=workers,
@@ -3258,7 +3259,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             cfg=self.queue_config(),
             now=now,
             progress=progress,
-            placement=lambda job: self.placement_for(job, now, views),
+            placement=lambda job: self.placement_for(job, now, views, memo),
             host_medians=snap.host_medians if snap.medians is not None else {},
             host_step_medians=snap.host_step_medians,
             worker_hosts={

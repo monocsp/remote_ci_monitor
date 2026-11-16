@@ -3224,28 +3224,51 @@ class Store:
         r = self._conn().execute("SELECT json FROM fingerprints WHERE hash=?", (hash,)).fetchone()
         return r["json"] if r else None
 
-    def check_records(self, worker: str, presets: Sequence[str]) -> list[CheckRecord]:
+    def check_records(
+        self, worker: str, presets: Sequence[str], *, fingerprint_hash: str | None = None
+    ) -> list[CheckRecord]:
         """그 워커에서 돌았거나 그 워커를 지정한 점검 프리셋 잡들(§4.4). 로컬은 `worker_name`
         NULL 인 잡이다. 지정 잡은 제출 때 대상의 지문을 미리 박아 두므로 기다리는 동안에도
-        「점검 중」으로 보인다."""
+        「점검 중」으로 보인다.
+
+        `fingerprint_hash` 를 주면 그 지문의 기록만 — 판정(`check_state`)은 어차피 현재 지문의
+        기록만 본다. **`jobs_check(worker_name, preset, fingerprint_hash, id)` 를 탄다.** 옛 꼴
+        (`target_worker = ? OR worker_name = ?`)은 인덱스를 못 타 `jobs` 를 통째로 훑었고, 이 읽기는
+        `/api/status` · claim 마다 머신 수만큼 돈다 — 보존된 잡 수에 끌려가는 M5f 결정 49 의 함정
+        이다(엣지 검증 실측: 완료 잡 5만에서 status 6.7 ms → 628 ms). 지정 잡은 집히면
+        `worker_name` 이 그 워커가 되므로(로컬은 NULL 그대로) 「아직 안 집힌 지정 잡」만 따로 읽으면
+        같은 집합이다."""
         names = tuple(presets)
         if not names:
             return []
         marks = ",".join("?" * len(names))
+        fp_sql = " AND fingerprint_hash = ?" if fingerprint_hash is not None else ""
+        fp_params: tuple[Any, ...] = (fingerprint_hash,) if fingerprint_hash is not None else ()
+        cols = "SELECT id, preset, state, fingerprint_hash FROM jobs"
+        shown = "(state != ? OR target_worker IS NOT NULL)"
         if worker == LOCAL_WORKER_ID:
-            where = "(target_worker = ? OR (target_worker IS NULL AND worker_name IS NULL))"
-        else:
-            where = "(target_worker = ? OR worker_name = ?)"
-        params: tuple[Any, ...] = (worker,) if worker == LOCAL_WORKER_ID else (worker, worker)
-        rows = (
-            self._conn()
-            .execute(
-                f"SELECT id, preset, state, fingerprint_hash FROM jobs WHERE preset IN ({marks}) "
-                f"AND {where} AND (state != ? OR target_worker IS NOT NULL) ORDER BY id",
-                (*names, *params, QUEUED),
+            sql = (
+                f"{cols} WHERE worker_name IS NULL AND preset IN ({marks}){fp_sql} "
+                f"AND (target_worker IS NULL OR target_worker = ?) AND {shown} ORDER BY id"
             )
-            .fetchall()
-        )
+            params: tuple[Any, ...] = (*names, *fp_params, worker, QUEUED)
+        else:
+            sql = (
+                f"{cols} WHERE worker_name = ? AND preset IN ({marks}){fp_sql} AND {shown} "
+                f"UNION ALL {cols} WHERE worker_name IS NULL AND preset IN ({marks}){fp_sql} "
+                f"AND target_worker = ? AND {shown} ORDER BY id"
+            )
+            params = (
+                worker,
+                *names,
+                *fp_params,
+                QUEUED,
+                *names,
+                *fp_params,
+                worker,
+                QUEUED,
+            )
+        rows = self._conn().execute(sql, params).fetchall()
         return [
             CheckRecord(
                 preset=r["preset"],
