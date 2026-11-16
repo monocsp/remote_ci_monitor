@@ -697,11 +697,15 @@ def record_machine_check(self, worker, preset, fingerprint_hash, job_id, now, *,
 
 ## 16. PR 순서 · 완료 기준
 
-| PR | 브랜치 | 내용 |
-|---|---|---|
-| 1 | `feat/m5n-capable-worker-placement` (이 브랜치) | 이 명세 · 시나리오 문서 셋 · §4~§8 · §11 (A·B·C·D 와 `sample`) · 문서 · CHANGELOG |
-| 2 | `feat/worker-init-and-discovery` | §9 (E) — 1 과 겹치는 파일은 `cli.py` 의 init·token 부분과 `remote_worker.py` 의 등록 앞부분뿐. 1 이 머지된 뒤 리베이스 |
-| 3 | `docs/flutter-placement-examples` | §10 (F) |
+PR 하나(`feat/m5n-capable-worker-placement`), 단계 다섯 — 각 단계가 커밋 하나 이상이다.
+
+| 단계 | 내용 |
+|---|---|
+| 1 | 이 명세 · 시나리오 문서 셋 · 빨간 테스트(test-first) |
+| 2 | 순수 계층: `core/capability.py` · `core/queue.py` 전역 계산 · 설정 · 모델 |
+| 3 | 저장소 · 서버 · 워커: DB v23 · claim · 보고 경로 · 자동 점검 · API |
+| 4 | 사람에게 닿는 것: CLI · 웹 · 워커 붙이기(§9) · 예시와 스킬(§10) · 문서 · CHANGELOG |
+| 5 | 격리 검증 셋(계약 대조 · 실기 · 엣지)과 그 수정, 개발 인스턴스 실기 |
 
 완료 기준:
 
