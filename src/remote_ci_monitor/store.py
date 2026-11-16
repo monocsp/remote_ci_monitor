@@ -2438,7 +2438,11 @@ class Store:
     def _claimable(
         conn: sqlite3.Connection, c: Claimant, busy: str, busy_states: list[str]
     ) -> sqlite3.Row | None:
-        """M5n 의 후보 잡 하나 — 세 갈래 · (우선순위, id) · 후보 잡의 범위로 그룹 배제."""
+        """M5n 의 후보 잡 하나 — 세 갈래 · (우선순위, id) · 후보 잡의 범위로 그룹 배제.
+
+        `host` 범위에서 **호스트를 모르면 같은 호스트로 본다** — claim 하는 쪽(보고도 기억도 없는
+        원격 워커)이든 도는 잡(호스트 없이 집힌 잡 · v23 이전 잡)이든. 모른다고 지나치면 같은
+        컴퓨터의 두 워커가 시뮬레이터를 함께 잡는다(§12 fail-open 금지 · 엣지 검증)."""
         clauses = ["(target_worker = ?)"]
         params: list[Any] = [c.worker]
         gated = tuple(c.gated)
@@ -2456,13 +2460,14 @@ class Store:
             "(c.concurrency_group IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
             f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.concurrency_group AND ("
             "c.concurrency_scope = ? "
-            "OR (c.concurrency_scope = ? AND b.host_key IS NOT NULL AND b.host_key = ?) "
+            "OR (c.concurrency_scope = ? AND (? IS NULL OR b.host_key IS NULL OR b.host_key = ?)) "
             "OR (c.concurrency_scope NOT IN (?, ?) AND b.pool = ?))))"
         )
         params_group = [
             *busy_states,
             SCOPE_GLOBAL,
             SCOPE_HOST,
+            c.host_key,
             c.host_key,
             SCOPE_GLOBAL,
             SCOPE_HOST,

@@ -403,11 +403,13 @@ class _GroupHold:
 
 
 def _scope_matches(scope: str, hold: _GroupHold, pool: str, host: str | None) -> bool:
-    """대기 잡의 범위로 판정한다 — `store.claim` 이 후보 잡의 범위로 배제하는 것과 같다(§6)."""
+    """대기 잡의 범위로 판정한다 — `store.claim` 이 후보 잡의 범위로 배제하는 것과 같다(§6).
+
+    `host` 범위에서 어느 한쪽의 호스트를 모르면 같은 호스트로 본다(claim 과 같은 fail-closed)."""
     if scope == SCOPE_GLOBAL:
         return True
     if scope == SCOPE_HOST:
-        return host is not None and hold.host == host
+        return host is None or hold.host is None or hold.host == host
     return hold.pool == pool
 
 

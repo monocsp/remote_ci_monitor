@@ -214,6 +214,9 @@ class CapabilitiesMixin:
         self._reloads = 0
         self._reports: dict[str, CapabilityReport] = {}
         self._local_host_key: str | None = None
+        # 워커 → 마지막으로 보고한 호스트. `machines` 표의 사본이라 재시작 뒤에도 안다(처음 한 번
+        # 읽는다 — 상태 요청마다 워커 수만큼 질의하지 않게)
+        self._known_hosts: dict[str, str] | None = None
         self._check_errors: dict[tuple[str, str], str] = {}
         self._cap_thread: threading.Thread | None = None
 
@@ -328,6 +331,8 @@ class CapabilitiesMixin:
             self.store.record_fingerprint(fp.hash, fp_json, report.measured_at)
         with self._cap_lock:
             self._reports[worker] = report
+            if self._known_hosts is not None:
+                self._known_hosts[worker] = report.host_key
         if saved.changed:
             diff = cap.changed_probes(probes_from_json(saved.previous_json), fp.probes)
             what = " · ".join(f"{n} {old or '—'} → {new or '—'}" for n, (old, new) in diff.items())
@@ -395,16 +400,36 @@ class CapabilitiesMixin:
             for name, v in verdicts.items()
             if presets[name].checks and v.state != cap.ELIGIBLE and v.code not in _TOOL_CODES
         )
-        host = report.host_key if report else (self.local_host_key() if worker == LOCAL else None)
         return Claimant(
             worker=worker,
             pool=pool,
-            host_key=host,
+            host_key=self.host_of(worker, report),
             fingerprint_hash=report.fingerprint.hash if report else None,
             capable=capable,
             gated=gated,
             accept_any=report.accept_any if report else False,
         )
+
+    def host_of(self, worker: str, report: CapabilityReport | None = None) -> str | None:
+        """그 워커가 사는 호스트 — 보고 → `machines` 표가 기억하는 것 → (로컬이면) 이 컴퓨터.
+
+        재등록 · 서버 재시작 뒤 첫 보고 전에도 어느 컴퓨터인지는 안다. 보고가 지워졌다고 호스트를
+        모른다고 하면 `host` 범위 그룹이 그 틈에 막는 쪽으로만 돈다(claim 의 fail-closed). 기억도
+        없으면 None — 지어내지 않는다."""
+        report = report if report is not None else self.report_of(worker)
+        if report is not None:
+            return report.host_key
+        if worker == LOCAL:
+            return self.local_host_key()
+        with self._cap_lock:
+            known = self._known_hosts
+        if known is None:
+            known = {r.worker: r.host_key for r in self.store.list_machines() if r.host_key}
+            with self._cap_lock:
+                if self._known_hosts is None:
+                    self._known_hosts = known
+                known = self._known_hosts
+        return known.get(worker)
 
     def local_claimant(self, now: datetime) -> Claimant:
         return self.claimant_for(LOCAL, DEFAULT_POOL, now)

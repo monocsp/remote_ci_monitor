@@ -3264,7 +3264,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             host_step_medians=snap.host_step_medians,
             worker_hosts={
                 None: self.local_host_key(),
-                **{v.id: v.report.host_key for v in views if v.kind == "remote" and v.report},
+                **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
         )
         if pool is None:
