@@ -739,6 +739,10 @@ class Claimant:
     capable: tuple[str, ...] = ()  # 이 워커가 지금 eligible 인 any-capable 프리셋
     gated: tuple[str, ...] = ()  # checks 로 막힌 프리셋(pool 잡)
     accept_any: bool = True
+    #: 지금 설정에 있는 프리셋 전부. 주면 **설정에 없는** 프리셋의 any-capable 잡도 집는다 —
+    #: 집은 쪽이 `preset_missing` 으로 바로 끝낸다(pool 잡과 같다). 안 집으면 아무의 `capable`
+    #: 에도 없는 이름이라 영원히 대기한다(reload 로 지우거나 이름을 바꾼 프리셋 · 엣지 검증)
+    known: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2456,6 +2460,13 @@ class Store:
                 f"({','.join('?' * len(capable))}))"
             )
             params += [PLACEMENT_CAPABLE, *capable]
+        known = tuple(c.known)
+        if known:
+            clauses.append(
+                f"(target_worker IS NULL AND placement = ? AND preset NOT IN "
+                f"({','.join('?' * len(known))}))"
+            )
+            params += [PLACEMENT_CAPABLE, *known]
         group_sql = (
             "(c.concurrency_group IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
             f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.concurrency_group AND ("

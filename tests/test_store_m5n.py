@@ -333,9 +333,10 @@ def test_claimant_has_the_spec_fields_and_defaults():
         "capable",
         "gated",
         "accept_any",
+        "known",  # 엣지 검증: 설정에 없는 프리셋의 any-capable 잡을 집어 바로 끝낸다
     ]
     c = Claimant(worker="mbp", pool="mbp", host_key=HOST_B, fingerprint_hash=FP_B)
-    assert (c.capable, c.gated, c.accept_any) == ((), (), True)
+    assert (c.capable, c.gated, c.accept_any, c.known) == ((), (), True, ())
     with pytest.raises(dataclasses.FrozenInstanceError):
         c.pool = "x"  # type: ignore[misc]
 

@@ -435,6 +435,7 @@ class CapabilitiesMixin:
             capable=capable,
             gated=gated,
             accept_any=report.accept_any if report else False,
+            known=tuple(presets),
         )
 
     def host_of(self, worker: str, report: CapabilityReport | None = None) -> str | None:
