@@ -398,3 +398,28 @@ def test_a_capabilities_loop_failure_does_not_publish_paths(tmp_path, monkeypatc
         assert "/Users/someone" not in err and "\n" not in err, err
     finally:
         srv.close()
+
+
+# ── 8. 프로브 출력은 메모리에 다 담지 않는다 ─────────────────────────────────
+
+
+def test_a_probe_that_prints_a_lot_does_not_fill_memory():
+    """`yes` 같은 프로브 하나가 3초에 10 GB 를 먹었다(communicate 가 전부 담는다). 지문에 쓰는
+    것은 앞 두 줄 · 120자뿐이다 — 앞부분만 지니고 나머지는 흘려보낸다."""
+    import tracemalloc
+
+    from remote_ci_monitor.hostsample import run_probes
+
+    code = (
+        "import sys; w = sys.stdout.write; w('Tool 1.2.3\\n');"
+        "[w('x' * 1048575 + '\\n') for _ in range(50)]"
+    )
+    tracemalloc.start()
+    try:
+        out = run_probes([_probe("big", code, timeout=20)], {"PATH": os.environ.get("PATH", "")})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out["big"].state == "ok", out
+    assert out["big"].value.startswith("Tool 1.2.3 · xxx"), out["big"].value[:40]
+    assert peak < 8 * 1024 * 1024, peak
