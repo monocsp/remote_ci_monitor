@@ -52,7 +52,7 @@ from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
-from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
+from remote_ci_monitor.core.model import EXIT_UNKNOWN, PLACEMENT_CAPABLE, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     DASH,
@@ -1142,7 +1142,15 @@ def _fmt_eta_row(row: dict[str, Any], ahead: int | None) -> str:
     else:
         parts.append("eta —")
         reason = row.get("reason")
-        if reason in ("paused", "worker_down", "overdue", "stuck"):
+        if reason in (
+            "paused",
+            "worker_down",
+            "overdue",
+            "stuck",
+            "no_capable_machine",
+            "check_failed",
+            "check_pending",
+        ):
             parts.append(reason.replace("_", " "))
     conf = est.get("confidence")
     source = est.get("source")
@@ -1470,6 +1478,8 @@ def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]
     changed: list[str] = []
     failed: list[str] = []
     n_failed = 0
+    recheck: list[str] = []
+    n_recheck = 0
     for m in machines:
         name = _machine_name(m)
         fp = m.get("fingerprint") if isinstance(m.get("fingerprint"), dict) else {}
@@ -1490,12 +1500,23 @@ def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]
         if bad:
             n_failed += len(bad)
             failed.append(f"{name}: {', '.join(bad)}")
+        # 「점검 필요」인데 스스로 안 걸리는 것(유실 · 취소 뒤, 또는 auto_checks = false)
+        stalled = [
+            f"{c.get('preset')}" + (f" #{c['job_id']}" if c.get("job_id") is not None else "")
+            for c in (m.get("checks") or [])
+            if isinstance(c, dict) and c.get("state") == "needed" and c.get("recheck_needed")
+        ]
+        if stalled:
+            n_recheck += len(stalled)
+            recheck.append(f"{name}: {', '.join(stalled)}")
     parts = [f"{len(machines)} machine{'s' if len(machines) != 1 else ''}"]
     if changed:
         parts.append(f"{len(changed)} environment changed ({'; '.join(changed)})")
     if failed:
         parts.append(f"{n_failed} check failed ({'; '.join(failed)})")
-    return ("machines", not failed, " · ".join(parts))
+    if recheck:
+        parts.append(f"{n_recheck} check needs rcm recheck ({'; '.join(recheck)})")
+    return ("machines", not failed and not recheck, " · ".join(parts))
 
 
 def _machine_check_rows(
@@ -1551,6 +1572,11 @@ def _placement_check_row(
         codes = {v.get("code") for v in verdicts}
         if "check_failed" in codes:
             why = "check failed"
+        elif any(
+            v.get("code") == "check_needed" and (v.get("detail") or {}).get("recheck")
+            for v in verdicts
+        ):
+            why = "check needs rcm recheck"
         elif codes & set(_PENDING_CODES):
             why = "check pending"
         else:
@@ -2265,10 +2291,14 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
         env = {k: os.environ[k] for k in preset.env_passthrough if k in os.environ}
         env.update(preset.env)
         missing = set(missing_tools(tuple(preset.requires), env))
-        all_ok = all_ok and not missing
         verdicts = " · ".join(
             f"{public_tool_name(n)} {'missing' if n in missing else 'ok'}" for n in preset.requires
         )
+        if preset.placement == PLACEMENT_CAPABLE:
+            # 도구가 있는 머신으로 간다 — 여기 없는 것은 정상이다. 판정은 `placement` 행이 한다
+            parts.append(f"{preset.name} ({verdicts} · any machine)")
+            continue
+        all_ok = all_ok and not missing
         parts.append(f"{preset.name} ({verdicts})")
     if not parts:
         return None
@@ -2276,7 +2306,9 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     return ("local preset tools", all_ok, detail)
 
 
-def _service_preset_env_row(health: Any) -> tuple[str, bool, str] | None:
+def _service_preset_env_row(
+    health: Any, capable: frozenset[str] = frozenset()
+) -> tuple[str, bool, str] | None:
     """`service preset tools` — **서버가 자기 환경으로 잰 것**을 그대로 읽는다(M5m).
 
     바로 위 `local preset tools` 와 짝이다. 그 줄은 세션의 셸에서 재고 이 줄은 launchd·systemd
@@ -2297,8 +2329,12 @@ def _service_preset_env_row(health: Any) -> tuple[str, bool, str] | None:
             continue
         tools = [str(t) for t in entry.get("missing_tools") or []]
         unset = [str(v) for v in entry.get("missing_passthrough") or []]
-        all_ok = all_ok and not tools and not unset
         notes = [f"missing {t}" for t in tools] + [f"{v} unset" for v in unset]
+        if name in capable:
+            # any-capable — 도구가 있는 머신으로 간다. 서버에 없는 것은 정상(`placement` 행이 판정)
+            parts.append(f"{name} ({', '.join(notes) if notes else 'ok'} · any machine)")
+            continue
+        all_ok = all_ok and not tools and not unset
         parts.append(f"{name} ({', '.join(notes) if notes else 'ok'})")
     if not parts:
         return None
@@ -2514,7 +2550,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:
                 rows.append(tools_row)
-            service_row = _service_preset_env_row(health_body)
+            service_row = _service_preset_env_row(
+                health_body,
+                frozenset(p.name for p in cfg.presets if p.placement == PLACEMENT_CAPABLE),
+            )
             if service_row is not None:
                 rows.append(service_row)
             if cfg.repos:
@@ -2571,7 +2610,17 @@ def _worker_config(args: argparse.Namespace):
         "name": getattr(args, "name", None),
         "data_dir": getattr(args, "data", None),
     }
-    cfg = load_worker_config(getattr(args, "config", None), overrides=overrides)
+    path = getattr(args, "config", None)
+    if path is None and overrides["server"] is None:
+        # `rcm init worker` 가 쓴 자리. 문서의 순서(init → `rcm worker --check`)가 `--config` 없이
+        # 이 파일을 읽어야 맞는다. `--server` 를 준 긴 꼴은 플래그만 쓴다 — 그 파일의 repos ·
+        # data_dir 이 몰래 섞이지 않게(실측 2026-11-16: 안 읽어서 풀이 default 로, 서버는 같은 망의
+        # 다른 서버로 잡혔다)
+        default = user_config_dir() / "worker.toml"
+        if default.is_file():
+            path = default
+            _info(f"config: {default}")
+    cfg = load_worker_config(path, overrides=overrides)
     if cfg.wants_discovery:
         cfg.server = _pick_worker_server(cfg)
         cfg.discovered_server = True  # type: ignore[attr-defined]
@@ -2798,7 +2847,9 @@ def cmd_token(args: argparse.Namespace) -> int:
                 return _usage("--admin and --worker cannot be combined")
             kind = "worker" if worker else ("admin" if args.admin else "client")
             secret = store.add_token(args.name, kind=kind, now=now)
-            where = "RCM_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
+            where = (
+                "RCM_WORKER_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
+            )
             _info(f"token '{args.name}' created — shown once, store it as {where}:")
             print(secret, flush=True)
             if worker:
@@ -3355,7 +3406,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker.add_argument("--lanes", type=int, help="parallel jobs on this machine (1-64)")
     worker.add_argument("--name", help="display name for the host sample (default: hostname)")
-    worker.add_argument("--config", help="worker.toml path (repos, host sampler, data_dir)")
+    worker.add_argument(
+        "--config",
+        help="worker.toml path (repos, host sampler, data_dir; default without --server: "
+        "~/.config/rcm/worker.toml if it exists)",
+    )
     worker.add_argument("--data", help="worker data dir (workspaces, logs)")
     worker.add_argument(
         "--check", action="store_true", help="verify server, token kind, pool and repos, then exit"

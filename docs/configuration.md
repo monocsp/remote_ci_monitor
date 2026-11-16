@@ -599,6 +599,10 @@ install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` 
 about the job. The check that counts is the one at job start. The row names each entry the way
 the job log does — by its basename, never by the path you declared.
 
+A `placement = "any-capable"` preset is listed in both rows with `any machine` and never fails
+them: it goes to a machine that has its tools, so a tool missing here is expected. Whether some
+machine can run it is the `placement` row's question.
+
 **The row below it does vouch for the service.** `service preset tools` is the same two questions
 asked by the server, in the environment the service actually has, and answered once when the
 server starts:
@@ -987,7 +991,10 @@ writes the token anywhere; carrying it to the worker is still a person's job. A 
 see the `RCM_WORKER_TOKEN` of your shell, so before you start it put `token = "…"` in
 `worker.toml` (the file is mode 600).
 
-The long form still works, with flags instead of a file:
+Without `--config`, `rcm worker` reads the `worker.toml` that `rcm init worker` wrote
+(`~/.config/rcm/worker.toml`, or under `$XDG_CONFIG_HOME`) when it exists, and says which file it
+read. The long form still works, with flags instead of a file — given `--server`, it reads no file
+unless you pass `--config`:
 
 ```sh
 rcm worker --server http://macmini:8787 --pool linux --lanes 1 --check   # server · token kind · pool
@@ -1179,7 +1186,10 @@ that check and `rcm machines` shows `ref_unresolved`. A check job is an ordinary
 queue, keeps its log and fires notifications.
 
 What starts it again is a person — `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the
-web page — or the next change of fingerprint. So when Xcode updates itself overnight, the machine's
+web page — or the next change of fingerprint. A check that will not come back by itself — the
+automatic one was lost or cancelled, or `auto_checks = false` — is not shown as pending: the
+waiting job's reason is `check failed` with `sim-check #3621 did not finish — recheck`, and
+`rcm check` fails its `machines` row (`1 check needs rcm recheck`). So when Xcode updates itself overnight, the machine's
 `scenario-qa` drops to `check_needed`, the sweeper runs `sim-check` there once, and if that goes red
 `rcm check`, `rcm machines` and the web page say
 `scenario-qa: check_failed (sim-check #3620 · xcode 26.5 → 27.2)` the same day. Fix the machine,

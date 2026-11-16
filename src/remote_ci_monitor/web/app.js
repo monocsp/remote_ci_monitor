@@ -695,7 +695,10 @@
       case "workspace_tool": return T(lang, "place.workspace_tool", { tool: tools });
       case "check_failed": return T(lang, "place.check_failed", { preset: check }) + (isNum(d.job_id) ? " #" + d.job_id : "");
       case "check_running": return T(lang, "place.check_running", { preset: check });
-      case "check_needed": return T(lang, "place.check_needed", { preset: check });
+      // 판정 없이 끝나 스스로 다시 안 걸리는 점검(`detail.recheck`) — 사람이 다시 건다
+      case "check_needed": return d.recheck === true
+        ? T(lang, "place.check_recheck", { preset: check }) + (isNum(d.job_id) ? " #" + d.job_id : "")
+        : T(lang, "place.check_needed", { preset: check });
       case "report_missing": return T(lang, "place.report_missing");
       case "report_stale": return T(lang, "place.report_stale");
       case "fingerprint_unknown": return T(lang, "place.fingerprint_unknown");
@@ -766,7 +769,7 @@
       var p = probes[k];
       return p && typeof p === "object" && p.previous != null && p.previous !== p.value;
     }).sort().map(function (k) { return k + ": " + word(probes[k].previous) + " → " + word(probes[k].value); });
-    var red = machineChecks(machine).some(function (c) { return c && c.state === "failed"; });
+    var red = machineChecks(machine).some(function (c) { return c && (c.state === "failed" || (c.state === "needed" && c.recheck_needed === true)); });
     return { text: T(lang, "machine.env_changed"), red: red, lines: lines };
   }
   /** 점검 하나 — `sim-check 실패 #3620` · `sim-check 통과` · `sim-check 점검 중 #3651` · `sim-check 점검 필요`. */
@@ -777,7 +780,9 @@
       case "failed": return T(lang, "place.check_failed", { preset: name }) + id;
       case "passed": return T(lang, "machine.check_passed", { preset: name });
       case "running": return T(lang, "place.check_running", { preset: name }) + id;
-      case "needed": return T(lang, "place.check_needed", { preset: name });
+      case "needed": return c.recheck_needed === true
+        ? T(lang, "place.check_recheck", { preset: name }) + id
+        : T(lang, "place.check_needed", { preset: name });
       default: return name + " " + ((c && c.state) || DASH);
     }
   }

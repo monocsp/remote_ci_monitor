@@ -100,6 +100,7 @@ def test_a_needed_check_is_submitted_once_targeted_at_that_worker(srv, remote):
         "job_id": ids[0],
         "auto_submitted": True,
         "error_code": None,
+        "recheck_needed": False,
     }
 
 
@@ -149,6 +150,41 @@ def test_a_lost_check_is_not_submitted_again_automatically(srv):
     assert jid in srv.app.mark_lost_workers(srv.clock.now)
     assert srv.heartbeat("build-02")[0] == 200  # 다시 살아났다
     assert sweep(srv) == []
+
+
+def test_a_lost_automatic_check_makes_the_waiting_job_ask_for_a_person(srv):
+    """실측(2026-11-16): 자동 점검 도중 워커가 재시작돼 유실 → 결정 95 로 다시 안 건다. 그런데
+    대기 잡의 이유가 `check_pending`(「점검 중 · 스스로 풀림」, 확인 목록에 안 오름)이라 잡이
+    조용히 영원히 기다렸다. 스스로 안 풀리는 점검은 사람이 볼 이유(`check_failed`)여야 한다."""
+    srv.reported("build-02")
+    qa = srv.queued("scenario")
+    assert srv.row(qa)["reason"] == "check_pending"  # 아직 안 걸었다 — 스위퍼가 곧 건다
+    [jid] = sweep(srv)
+    assert srv.row(qa)["reason"] == "check_pending"  # 기다리는 중 — 스스로 풀린다
+    assert srv.claimed("build-02") == jid
+    srv.clock.advance(61)
+    assert jid in srv.app.mark_lost_workers(srv.clock.now)
+    assert srv.heartbeat("build-02")[0] == 200
+    assert sweep(srv) == []
+    row = srv.row(qa)
+    assert row["reason"] == "check_failed", row["reason"]
+    [note] = [n for n in row["placement_detail"] if n["worker"] == "build-02"]
+    assert note["code"] == "check_needed" and note["detail"]["recheck"] is True, note
+    assert checks_of(srv)["simcheck"]["recheck_needed"] is True
+    assert srv.machines()["build-02"]["presets"]["scenario"]["detail"]["recheck"] is True
+
+
+def test_with_auto_checks_off_a_needed_check_asks_for_a_person(tmp_path, remote):
+    s = M5nServer(tmp_path, repo_url=remote.url, extra="auto_checks = false\n")
+    try:
+        s.reported("build-02")
+        qa = s.queued("scenario")
+        assert s.row(qa)["reason"] == "check_failed"
+        assert {c["preset"]: c for c in s.machines()["build-02"]["checks"]}["simcheck"][
+            "recheck_needed"
+        ] is True
+    finally:
+        s.close()
 
 
 def test_a_changed_fingerprint_gets_exactly_one_new_check(srv):
@@ -220,10 +256,27 @@ def test_an_unresolvable_ref_skips_the_round_and_says_ref_unresolved(tmp_path):
             "job_id": None,
             "auto_submitted": False,
             "error_code": "ref_unresolved",
+            "recheck_needed": False,  # 다음 회차가 다시 해 본다
         }
         fp = expected_hash({"xc": "Xc 1"})
         assert s.store.auto_check_done("build-02", "simcheck", fp) is False
         assert check_jobs(s) == []
+    finally:
+        s.close()
+
+
+def test_an_unresolvable_ref_is_logged_once_not_every_sweep(tmp_path, capsys):
+    """실측(2026-11-16, check_sweep_seconds = 5 · 워커 4): 같은 줄이 회차마다 워커마다 찍혀
+    15초에 20줄이었다(시간당 수천 줄). 처음 한 번만 — 상태는 `rcm machines` 의
+    `ref_unresolved` 가 말한다."""
+    s = M5nServer(tmp_path)  # repo url = tmp 안의 없는 경로
+    try:
+        s.reported("build-02")
+        capsys.readouterr()
+        for _ in range(4):
+            assert sweep(s) == []
+        err = capsys.readouterr().err
+        assert err.count("machine check simcheck on build-02") == 1, err
     finally:
         s.close()
 

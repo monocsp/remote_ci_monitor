@@ -778,4 +778,13 @@ PR 하나(`feat/m5n-capable-worker-placement`), 단계 다섯 — 각 단계가 
    바꿨다) · v23 은 `jobs` 의 끝에 일곱 열을 더하므로 v22 의 「링크 열이 맨 끝」 자물쇠를 「v23 열
    바로 앞」으로 옮겼다 · `rcm worker --check` 의 시험 명세가 `env_passthrough = []` 로 PATH 없이
    도구를 찾던 것을 `["PATH"]` 로(잡은 넘긴 변수만 받는다 — `runner.build_env`).
-
+9. **스스로 안 풀리는 `check_needed` 는 `check_pending` 이 아니다**(실프로세스 수용 시험
+   2026-11-16). 자동 점검이 유실 · 취소로 판정 없이 끝나면 결정 95 로 다시 안 걸리는데, §7.3 의
+   분류는 그것을 「점검 중 · 스스로 풀림」으로 불러 잡이 확인 목록에도 안 오르고 영원히 기다렸다.
+   이제 `auto_checks` 가 꺼졌거나 그 (워커, 점검, 지문)에 자동 점검을 이미 썼으면 판정
+   `detail.recheck = true` 를 달고(코드는 `check_needed` 그대로), 대기 이유는 `check_failed`,
+   `machines[].checks[].recheck_needed = true`, `rcm check` 의 `machines` 행은 FAIL 이다.
+   결정 95(다시 안 건다)는 그대로다.
+10. **`rcm worker` 는 `--config` 도 `--server` 도 없으면 `~/.config/rcm/worker.toml` 을 읽는다**
+    (같은 수용 시험). S1 의 순서(`rcm init worker` → `rcm worker --check`)가 그 파일을 안 읽어
+    풀이 `default` 로 나오고 서버를 같은 망에서 찾아 다른 서버에 토큰을 보냈다.

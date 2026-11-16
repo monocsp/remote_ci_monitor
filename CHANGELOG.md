@@ -30,6 +30,8 @@ of a key bumps that number and is listed here.
   `placement = "pool"`, so existing configs behave as before. Meant for gates and tests: secret
   files never leave the server, so deploy and upload presets stay on their pool. A worker can
   refuse such jobs with `accept_any = false` (the server's own lanes: `local_accept_any`).
+  `rcm check`'s `local preset tools` and `service preset tools` rows list such a preset with
+  `any machine` and do not fail on a tool this server lacks.
 - **Each machine reports an environment fingerprint, and rcm notices when it changes.** `[[probes]]`
   in `server.toml` lists version commands (`xcodebuild -version`, `fvm flutter --version --machine`) that
   every worker runs in its own service environment, at registration and every
@@ -42,7 +44,9 @@ of a key bumps that number and is listed here.
   (`auto_checks`), and a red check holds the preset there and says so in `rcm check`,
   `rcm machines` and the web page (`scenario-qa: check_failed (sim-check #3620 · xcode 26.5 →
   27.2)`) instead of letting jobs break silently for days. It never retries a failed check on its
-  own: `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the web page runs it again.
+  own: `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the web page runs it again. A
+  check that ended without a verdict (lost or cancelled) is not retried either, and says so —
+  `check failed` with `did not finish — recheck`, never a silent `check pending`.
 - **`rcm machines [--json] [--machine ID]`** lists every worker with its host, pool, lanes,
   fingerprint and how many presets it can run, with the reasons for the rest; `--machine` shows one
   worker's verdict per preset. `GET /api/machines` is the same document. `rcm check` gains a
@@ -64,7 +68,8 @@ of a key bumps that number and is listed here.
   systemd unit for it (new examples: `examples/launchd/com.remote-ci-monitor.worker.plist`,
   `examples/systemd/rcm-worker.service`). A worker with `server = "auto"` finds the server over
   mDNS (`server_name` picks one when several advertise) and looks again after 5 connection
-  failures in a row. `rcm token add NAME --worker` prints the command to run on the worker, and
+  failures in a row. `rcm worker` without `--config` or `--server` reads the file `rcm init worker`
+  wrote. `rcm token add NAME --worker` prints the command to run on the worker, and
   `rcm worker --check` adds `fingerprint` and `presets` rows.
 - `examples/server.toml` has a commented Flutter block: probes, a `sim-check` check preset, an
   `any-capable` gate with `concurrency_scope = "host"` and a preset with `checks`. The

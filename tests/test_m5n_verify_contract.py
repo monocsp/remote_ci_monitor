@@ -97,7 +97,8 @@ def test_a_cancelled_automatic_check_does_not_leave_the_pool_job_check_pending(s
     assert srv.machines()["build-02"]["presets"]["scenario"]["code"] == "check_needed"
     row = srv.row(qa)
     assert row["reason"] != "check_pending"
-    assert row["reason"] == "no_capable_machine"
+    # 실기 검증(F2)과 합친 결론: 사람이 다시 걸어야 풀리는 점검은 `check_failed` 다
+    assert row["reason"] == "check_failed"
 
 
 def test_check_pending_still_means_a_check_will_come(srv):
@@ -112,7 +113,7 @@ def test_auto_checks_off_does_not_say_check_pending(tmp_path):
     try:
         s.reported("build-02")
         qa = s.queued("scenario")
-        assert s.row(qa)["reason"] == "no_capable_machine"
+        assert s.row(qa)["reason"] == "check_failed"  # 실기 검증 F2 와 같은 결론
     finally:
         s.close()
 
