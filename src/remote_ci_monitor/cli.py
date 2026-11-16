@@ -1142,7 +1142,15 @@ def _fmt_eta_row(row: dict[str, Any], ahead: int | None) -> str:
     else:
         parts.append("eta —")
         reason = row.get("reason")
-        if reason in ("paused", "worker_down", "overdue", "stuck"):
+        if reason in (
+            "paused",
+            "worker_down",
+            "overdue",
+            "stuck",
+            "no_capable_machine",
+            "check_failed",
+            "check_pending",
+        ):
             parts.append(reason.replace("_", " "))
     conf = est.get("confidence")
     source = est.get("source")
