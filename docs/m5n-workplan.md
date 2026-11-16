@@ -788,3 +788,30 @@ PR 하나(`feat/m5n-capable-worker-placement`), 단계 다섯 — 각 단계가 
 10. **`rcm worker` 는 `--config` 도 `--server` 도 없으면 `~/.config/rcm/worker.toml` 을 읽는다**
     (같은 수용 시험). S1 의 순서(`rcm init worker` → `rcm worker --check`)가 그 파일을 안 읽어
     풀이 `default` 로 나오고 서버를 같은 망에서 찾아 다른 서버에 토큰을 보냈다.
+11. **자동 점검은 그 프리셋을 받을 수 있는 워커에서만 건다**(계약 검증 N1). pool 프리셋이면 그
+    풀과 `pools` 의 워커, any-capable 이면 any-capable 을 받는 워커. 그 밖의 워커에서 판정이
+    `check_needed` 여도 점검을 돌리지 않는다 — 같은 Mac 의 둘째 워커가 시뮬레이터를 한 번 더 잡는다.
+12. **reload 로 사라진 프리셋의 capable 대기 잡은 집혀서 `preset_missing` 으로 끝난다**(엣지 E9) —
+    pool 잡과 같다. 아무도 안 집으면 큐에 영원히 남는다.
+13. **호스트를 모르면 `host` 범위는 막는 쪽으로 본다**(엣지 E2). 보고 전 워커 · 호스트 없이 집힌 잡도
+    그 그룹을 쥐고 있다. 워커의 마지막 호스트는 재등록 너머로 기억한다.
+14. **프로브는 병렬로, 자기 프로세스 그룹에서, 출력 64 KB 까지**(엣지 E3 · E4 · E6). 원격 워커는
+    heartbeat 스레드가 아닌 따로 띄운 스레드에서 잰다(계약 F1 · 엣지 E3 — heartbeat 이 60초 넘게
+    끊기면 도는 잡이 lost 가 된다). reload 의 다시 재기는 뒤에서 돈다(엣지 E5).
+15. **상태 질의 수는 대기 잡 수와 무관하다**(엣지 E1). 한 번의 큐 계산 안에서 머신마다 점검 기록을
+    한 번만 읽는다 — 5만 잡에서 `/api/status` 628 ms → 13.8 ms(M5f 결정 49 와 같은 함정).
+
+### 19.1 격리 검증 셋 (2026-11-16)
+
+| 검증 | 보고서 | 고친 것 | 남긴 것 |
+|---|---|---|---|
+| 계약 대조 | `docs/acceptance/reports/2026-11-16-m5n-verify-contract.md` | 6 | 5(N1 은 위 11 로 고쳤다) |
+| 실프로세스 | `docs/acceptance/reports/2026-11-16-m5n-verify-real.md` | 6 | 5 |
+| 엣지 사냥 | `docs/acceptance/reports/2026-11-16-m5n-verify-edge.md` | 11 | 6 |
+
+남긴 것 중 오너가 정할 것: ① 워커 토큰은 자기 `host_key` · 지문을 스스로 말한다 — 악의적인 워커가
+남의 호스트를 사칭하거나 매번 새 지문을 보내 점검을 반복시킬 수 있다(토큰을 믿는 설계 그대로).
+② `rcm recheck` 는 down 머신에도 건다(잡은 `worker_down` 으로 기다린다), `rcm run --machine` 은
+409 다. ③ 사람이 지정한 점검이 유실되면 그 머신의 앞선 통과도 「가장 새 잡」 규칙으로 다시
+`check_needed` 가 된다(§4.4). ④ `rcm machines` 표는 로컬을 호스트 이름으로 보이지만 `--machine` ·
+`recheck` 는 `@local` 만 받는다. 나머지는 보고서에 있다.
