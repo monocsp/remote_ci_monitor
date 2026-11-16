@@ -485,6 +485,7 @@ def test_a_reported_remote_machine_has_the_spec_shape(srv):
             "job_id": None,
             "auto_submitted": False,
             "error_code": None,
+            "recheck_needed": False,  # 스위퍼가 곧 스스로 건다
         }
     ]
 

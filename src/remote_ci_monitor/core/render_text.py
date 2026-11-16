@@ -419,6 +419,11 @@ def verdict_text(code: Any, detail: Any = None, state: Any = None) -> str:
     if code == "check_running":
         return f"{check} running"
     if code == "check_needed":
+        if d.get("recheck"):
+            # 판정 없이 끝났고(유실 · 취소) 스스로 다시 안 걸린다 — 사람이 다시 건다
+            job_id = d.get("job_id")
+            ran = f" #{job_id} did not finish" if job_id is not None else ""
+            return f"{check}{ran} — recheck"
         return f"need {check}"
     if code == "report_missing":
         return "no report"

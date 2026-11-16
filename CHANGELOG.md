@@ -42,7 +42,9 @@ of a key bumps that number and is listed here.
   (`auto_checks`), and a red check holds the preset there and says so in `rcm check`,
   `rcm machines` and the web page (`scenario-qa: check_failed (sim-check #3620 · xcode 26.5 →
   27.2)`) instead of letting jobs break silently for days. It never retries a failed check on its
-  own: `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the web page runs it again.
+  own: `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the web page runs it again. A
+  check that ended without a verdict (lost or cancelled) is not retried either, and says so —
+  `check failed` with `did not finish — recheck`, never a silent `check pending`.
 - **`rcm machines [--json] [--machine ID]`** lists every worker with its host, pool, lanes,
   fingerprint and how many presets it can run, with the reasons for the rest; `--machine` shows one
   worker's verdict per preset. `GET /api/machines` is the same document. `rcm check` gains a

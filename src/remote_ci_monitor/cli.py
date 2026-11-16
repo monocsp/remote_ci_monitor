@@ -1470,6 +1470,8 @@ def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]
     changed: list[str] = []
     failed: list[str] = []
     n_failed = 0
+    recheck: list[str] = []
+    n_recheck = 0
     for m in machines:
         name = _machine_name(m)
         fp = m.get("fingerprint") if isinstance(m.get("fingerprint"), dict) else {}
@@ -1490,12 +1492,23 @@ def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]
         if bad:
             n_failed += len(bad)
             failed.append(f"{name}: {', '.join(bad)}")
+        # 「점검 필요」인데 스스로 안 걸리는 것(유실 · 취소 뒤, 또는 auto_checks = false)
+        stalled = [
+            f"{c.get('preset')}" + (f" #{c['job_id']}" if c.get("job_id") is not None else "")
+            for c in (m.get("checks") or [])
+            if isinstance(c, dict) and c.get("state") == "needed" and c.get("recheck_needed")
+        ]
+        if stalled:
+            n_recheck += len(stalled)
+            recheck.append(f"{name}: {', '.join(stalled)}")
     parts = [f"{len(machines)} machine{'s' if len(machines) != 1 else ''}"]
     if changed:
         parts.append(f"{len(changed)} environment changed ({'; '.join(changed)})")
     if failed:
         parts.append(f"{n_failed} check failed ({'; '.join(failed)})")
-    return ("machines", not failed, " · ".join(parts))
+    if recheck:
+        parts.append(f"{n_recheck} check needs rcm recheck ({'; '.join(recheck)})")
+    return ("machines", not failed and not recheck, " · ".join(parts))
 
 
 def _machine_check_rows(
@@ -1551,6 +1564,11 @@ def _placement_check_row(
         codes = {v.get("code") for v in verdicts}
         if "check_failed" in codes:
             why = "check failed"
+        elif any(
+            v.get("code") == "check_needed" and (v.get("detail") or {}).get("recheck")
+            for v in verdicts
+        ):
+            why = "check needs rcm recheck"
         elif codes & set(_PENDING_CODES):
             why = "check pending"
         else:

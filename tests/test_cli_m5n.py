@@ -518,6 +518,34 @@ def test_check_placement_row_names_each_placed_preset(fake, capsys):
     ), out
 
 
+def test_check_says_when_a_check_that_did_not_finish_needs_rcm_recheck(fake, capsys):
+    """실측(2026-11-16): 자동 점검이 유실되면 다시 안 걸린다(결정 95). 그것을 ok · 「check pending」
+    으로 그리면 잡이 조용히 영원히 기다린다 — machines 는 FAIL, placement 는 그 이유를 말한다."""
+    doc = machines_doc()
+    local = doc["machines"][0]
+    local["fingerprint"]["changed_at"] = None
+    local["checks"][0].update(state="needed", job_id=3621, recheck_needed=True)
+    local["presets"]["scenario-qa"] = verdict(
+        "unknown", "check_needed", check="sim-check", job_id=3621, recheck=True
+    )
+    fake.route("GET", "/api/machines", doc)
+    code, out, _ = run(capsys, ["check"])
+    assert check_row(out, "machines") == (
+        "FAIL",
+        "3 machines · 1 check needs rcm recheck (Mac mini: sim-check #3621)",
+    ), out
+    status, detail = check_row(out, "placement") or ("", "")
+    assert "scenario-qa: pool default (check needs rcm recheck)" in detail, out
+    assert code == 1
+    from remote_ci_monitor.core.render_text import verdict_text
+
+    assert (
+        verdict_text("check_needed", {"check": "sim-check", "job_id": 3621, "recheck": True})
+        == "sim-check #3621 did not finish — recheck"
+    )
+    assert verdict_text("check_needed", {"check": "sim-check"}) == "need sim-check"
+
+
 def test_check_placement_row_is_ok_when_every_placed_preset_has_a_machine(fake, capsys):
     doc = machines_doc()
     doc["machines"][0]["presets"]["scenario-qa"] = ok()

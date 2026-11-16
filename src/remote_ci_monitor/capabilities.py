@@ -456,6 +456,9 @@ class CapabilitiesMixin:
                         record is not None and self.store.check_was_automatic(record.job_id)
                     ),
                     "error_code": self._check_errors.get((view.id, name)),
+                    # 「점검 필요」인데 스스로 안 걸린다 — 사람이 `rcm recheck` 해야 풀린다
+                    "recheck_needed": state == cap.CHECK_NEEDED
+                    and not self.check_comes_by_itself(view, name),
                 }
             )
         return out
@@ -520,7 +523,9 @@ class CapabilitiesMixin:
             "host_key": host_key,
             "accept_any": accept_any,
             "fingerprint": fp,
-            "presets": {name: verdict_json(v) for name, v in verdicts.items()},
+            "presets": {
+                name: verdict_json(self._flag_recheck(view, v)) for name, v in verdicts.items()
+            },
             "checks": self._check_rows(view, records),
         }
 
@@ -576,6 +581,31 @@ class CapabilitiesMixin:
 
     # ── 배치 (상태 화면 · 제출 응답) ────────────────────────────────────────
 
+    def check_comes_by_itself(self, view: _MachineView, check: str) -> bool:
+        """`check_needed` 인 점검을 스위퍼가 스스로 거나 — 자동 점검이 켜져 있고 이 지문에 아직
+        한 번도 스스로 건 적이 없을 때만. down 인 워커도 돌아오면 걸리므로 「스스로」다. 보고가
+        없으면 지문을 모른다 — 보고가 오면 정해지므로 역시 「스스로」다.
+
+        아니면(자동 점검이 꺼졌거나, 스스로 건 점검이 유실 · 취소로 판정 없이 끝났다 — 결정 95 로
+        다시 안 건다) 사람이 다시 걸기 전까지 영영 안 풀린다. 그것을 「점검 중」(스스로 풀림)으로
+        부르면 잡이 조용히 영원히 기다린다(실측 2026-11-16: 점검 도중 워커를 재시작했다).
+        """
+        if not self.config.server.auto_checks:
+            return False
+        fp = view.report.fingerprint.hash if view.report is not None else None
+        if fp is None:
+            return True
+        return not self.store.auto_check_done(view.id, check, fp)
+
+    def _flag_recheck(self, view: _MachineView, v: Verdict) -> Verdict:
+        """스스로 안 풀리는 `check_needed` 판정에 `detail.recheck = True` 를 단다(코드는 그대로)."""
+        if v.code != cap.CODE_CHECK_NEEDED:
+            return v
+        check = v.detail.get("check")
+        if not isinstance(check, str) or self.check_comes_by_itself(view, check):
+            return v
+        return Verdict(v.state, v.code, {**dict(v.detail), "recheck": True})
+
     def _placement_notes(
         self, preset: Preset, views: list[_MachineView], now: datetime
     ) -> list[tuple[_MachineView, Verdict]]:
@@ -593,7 +623,7 @@ class CapabilitiesMixin:
                 max_age_seconds=self._max_age(),
                 check_records=records,
             )
-            out.append((view, v))
+            out.append((view, self._flag_recheck(view, v)))
         return out
 
     @staticmethod
@@ -653,13 +683,21 @@ class CapabilitiesMixin:
     @staticmethod
     def _why_none(notes: list[PlacementNote]) -> str:
         live = [n for n in notes if n.state != "down"]
-        if live and all(n.code == cap.CODE_CHECK_FAILED for n in live):
+
+        # 사람이 손대야 풀리는 점검 — 실패했거나, 판정 없이 끝나 다시 안 걸리는 것(`recheck`)
+        def blocked(n: PlacementNote) -> bool:
+            return n.code == cap.CODE_CHECK_FAILED or (
+                n.code == cap.CODE_CHECK_NEEDED and bool(n.detail.get("recheck"))
+            )
+
+        def pending(n: PlacementNote) -> bool:
+            return n.code in _CHECK_CODES_PENDING and not blocked(n)
+
+        if live and all(blocked(n) for n in live):
             return REASON_CHECK_FAILED
-        if any(n.code in _CHECK_CODES_PENDING for n in live) and not any(
-            n.code == cap.CODE_CHECK_FAILED for n in live
-        ):
+        if any(pending(n) for n in live) and not any(blocked(n) for n in live):
             return REASON_CHECK_PENDING
-        if live and all(n.code in _CHECK_CODES_PENDING | {cap.CODE_CHECK_FAILED} for n in live):
+        if live and all(pending(n) or blocked(n) for n in live):
             return REASON_CHECK_PENDING
         return REASON_NO_CAPABLE_MACHINE
 

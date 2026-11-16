@@ -453,7 +453,9 @@ new, and both are about a machine, not your code:
   the check failed. Fix the machine, then `rcm recheck mbp sim-check` (admin), or press
   **Recheck** in the web page's machines table. A machine is named by its worker token name; the
   build machine's own lanes are `@local`. `check pending` means the check
-  is running right now; wait for it.
+  is running right now, or about to; wait for it. A check that was cut off — the worker
+  restarted in the middle — is not run again by itself: the row says `sim-check #3621 did not
+  finish — recheck` under `check failed`, and `rcm recheck` is the way out.
 
 ## 12. What to do next
 
