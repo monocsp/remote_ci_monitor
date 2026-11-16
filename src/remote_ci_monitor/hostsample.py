@@ -151,18 +151,60 @@ def _run_probe(probe: Any, env: dict[str, str]) -> Any:
         )
     except OSError:
         return normalize_probe_output(None, None, missing=True)
+    # 출력은 **앞부분만** 지닌다 — 지문에 드는 것은 앞 두 줄 · 120자다. communicate 로 다 담으면
+    # `yes` 같은 프로브 하나가 3초에 10 GB 를 먹는다(엣지 검증 실측). 나머지는 읽어서 버린다 —
+    # 안 읽으면 파이프가 차서 정상 프로브(큰 목록을 찍는 것)가 시한까지 멈춘다.
+    timeout = float(probe.timeout_seconds)
+    deadline = time.monotonic() + timeout
+    kept = (bytearray(), bytearray())
+    readers = [
+        threading.Thread(target=_drain, args=(stream, buf), daemon=True)
+        for stream, buf in zip((proc.stdout, proc.stderr), kept, strict=True)
+    ]
+    for r in readers:
+        r.start()
     try:
-        stdout, stderr = proc.communicate(timeout=float(probe.timeout_seconds))
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
-        # 그룹 밖으로 달아난 자식(setsid)이 파이프를 쥐고 있을 수 있다 — 읽지 않고 닫는다
         proc.wait()
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                stream.close()
+        for r in readers:
+            r.join(1.0)
         return normalize_probe_output(None, None, timed_out=True)
+    # 우두머리는 끝났다 — 그룹의 손자가 파이프를 쥐고 있으면 시한까지 기다린다(communicate 와 같다)
+    for r in readers:
+        r.join(max(0.0, deadline - time.monotonic()))
+    if any(r.is_alive() for r in readers):
+        _kill_group(proc)
+        for r in readers:
+            r.join(1.0)
+        return normalize_probe_output(None, None, timed_out=True)
+    stdout, stderr = bytes(kept[0]), bytes(kept[1])
     output = stdout if stdout.strip() else stderr
     return normalize_probe_output(output, proc.returncode)
+
+
+#: 프로브 출력 중 지니는 앞부분(스트림마다). 지문은 앞 두 줄 · 120자만 쓴다.
+PROBE_OUTPUT_KEEP = 64 * 1024
+
+
+def _drain(stream: Any, keep: bytearray) -> None:
+    """EOF 까지 읽되 앞 `PROBE_OUTPUT_KEEP` 바이트만 남긴다."""
+    try:
+        while True:
+            chunk = stream.read1(65536)
+            if not chunk:
+                break
+            room = PROBE_OUTPUT_KEEP - len(keep)
+            if room > 0:
+                keep += chunk[:room]
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def _kill_group(proc: subprocess.Popen[bytes]) -> None:
