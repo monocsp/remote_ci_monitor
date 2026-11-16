@@ -266,8 +266,9 @@ def test_an_unresolvable_ref_skips_the_round_and_says_ref_unresolved(tmp_path):
 
 
 def test_an_unresolvable_ref_is_logged_once_not_every_sweep(tmp_path, capsys):
-    """실측(2026-11-16, check_sweep_seconds = 5 · 워커 4): 같은 줄이 회차마다 워커마다 찍혀 15초에
-    20줄이었다(시간당 수천 줄). 처음 한 번만 — 상태는 `rcm machines` 의 `ref_unresolved` 가 말한다."""
+    """실측(2026-11-16, check_sweep_seconds = 5 · 워커 4): 같은 줄이 회차마다 워커마다 찍혀
+    15초에 20줄이었다(시간당 수천 줄). 처음 한 번만 — 상태는 `rcm machines` 의
+    `ref_unresolved` 가 말한다."""
     s = M5nServer(tmp_path)  # repo url = tmp 안의 없는 경로
     try:
         s.reported("build-02")
