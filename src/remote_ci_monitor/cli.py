@@ -1579,9 +1579,20 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     if not jobs:
         print(f"nothing to recheck on {args.machine}")
         return 0
+    failed = 0
     for j in jobs:
+        if j.get("job_id") is None:
+            # 잡이 없다 — `#None` 을 찍으면 점검이 도는 줄 안다
+            failed += 1
+            why = (
+                "could not resolve check_ref (repository unreachable?)"
+                if j.get("error_code") == "ref_unresolved"
+                else str(j.get("error_code") or "not submitted")
+            )
+            _err(f"{j.get('preset')} on {args.machine}: not submitted — {why}")
+            continue
         print(f"#{j.get('job_id')}  {j.get('preset')}  on {args.machine}")
-    return 0
+    return 1 if failed else 0
 
 
 def _no_capable_line(preset: str, resp: dict[str, Any]) -> None:
