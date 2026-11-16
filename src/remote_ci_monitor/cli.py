@@ -1579,9 +1579,16 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     if not jobs:
         print(f"nothing to recheck on {args.machine}")
         return 0
+    missed = 0
     for j in jobs:
-        print(f"#{j.get('job_id')}  {j.get('preset')}  on {args.machine}")
-    return 0
+        if isinstance(j.get("job_id"), int):
+            print(f"#{j.get('job_id')}  {j.get('preset')}  on {args.machine}")
+            continue
+        # 서버가 잡을 못 세웠다(ref 를 못 풀었다 등) — 없는 잡 번호를 찍지 않는다
+        missed += 1
+        why = j.get("error_code") or "not submitted"
+        _err(f"recheck: {j.get('preset')} on {args.machine} was not submitted ({why})")
+    return 1 if missed else 0
 
 
 def _no_capable_line(preset: str, resp: dict[str, Any]) -> None:

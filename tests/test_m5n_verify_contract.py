@@ -196,3 +196,29 @@ def test_a_re_registration_measures_again_on_the_next_heartbeat():
     w.register()  # 레인이 「not registered」 를 받고 다시 등록했다
     assert w.heartbeat_once() is True
     assert _wait(lambda: len(client.reports) == 2), "no report after re-registering"
+
+
+# ── 5. 다시 점검이 못 건 점검을 「#None」 으로 찍지 않는다 ──────────────────────
+
+
+def test_a_recheck_that_could_not_resolve_the_ref_says_so(srv):
+    """ref 해석이 실패하면(저장소에 닿지 않는다) 잡이 없다. 응답은 그 이유를 싣는다."""
+    srv.app.measure_capabilities()
+    status, body = srv.req("POST", "/machines/@local/recheck", token="admin", json_body={})
+    assert status == 200, body
+    assert body["jobs"] == [{"preset": "simcheck", "job_id": None, "error_code": "ref_unresolved"}]
+
+
+def test_rcm_recheck_does_not_print_a_missing_job_id_for_a_check_it_could_not_submit(
+    fake,  # noqa: F811 — test_cli_m5n 의 픽스처
+    capsys,
+):
+    fake.route(
+        "POST",
+        "/machines/mbp/recheck",
+        {"jobs": [{"preset": "sim-check", "job_id": None, "error_code": "ref_unresolved"}]},
+    )
+    code, out, err = run(capsys, ["recheck", "mbp"])
+    assert "None" not in out + err, (out, err)
+    assert "sim-check" in out + err and "ref_unresolved" in out + err, (out, err)
+    assert code == 1, (out, err)

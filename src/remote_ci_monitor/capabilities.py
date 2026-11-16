@@ -772,7 +772,11 @@ class CapabilitiesMixin:
         out = []
         for name in targets:
             job_id = self._submit_check(view, name, fp, auto=False)
-            out.append({"preset": name, "job_id": job_id})
+            item: dict[str, Any] = {"preset": name, "job_id": job_id}
+            if job_id is None:
+                # 못 걸었다 — 왜인지 싣는다(`machines[].checks[].error_code` 와 같은 코드)
+                item["error_code"] = self._check_errors.get((view.id, name), "not_submitted")
+            out.append(item)
         return out
 
     def _submit_check(

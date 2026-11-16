@@ -3930,8 +3930,11 @@
       }
       var jobs = res.body && Array.isArray(res.body.jobs) ? res.body.jobs : [];
       var m = findMachine(id);
+      // 서버가 못 세운 점검(ref 를 못 풀었다 등)은 job_id 가 없다 — 「넣었습니다」로 부르지 않는다
+      var missed = jobs.filter(function (j) { return !isNum(j.job_id); });
       if (!jobs.length) toast(tr("machines.recheck_none", { name: (m && (m.display_name || m.id)) || id }));
-      else toast(tr("machines.recheck_sent", { names: jobs.map(function (j) { return (isNum(j.job_id) ? "#" + j.job_id + " " : "") + (j.preset || DASH); }).join(", ") }));
+      else if (missed.length) toast(tr("machines.recheck_failed", { detail: missed.map(function (j) { return (j.preset || DASH) + " (" + (j.error_code || "not_submitted") + ")"; }).join(", ") }));
+      else toast(tr("machines.recheck_sent", { names: jobs.map(function (j) { return "#" + j.job_id + " " + (j.preset || DASH); }).join(", ") }));
       state.machinesKey = null;
       fetchMachines(); scheduleRefetch();
     }).catch(function () { toast(tr("machines.recheck_failed", { detail: tr("version.edit.save.network") })); })
