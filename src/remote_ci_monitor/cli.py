@@ -52,7 +52,7 @@ from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
-from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
+from remote_ci_monitor.core.model import EXIT_UNKNOWN, PLACEMENT_CAPABLE, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     DASH,
@@ -2271,10 +2271,14 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
         env = {k: os.environ[k] for k in preset.env_passthrough if k in os.environ}
         env.update(preset.env)
         missing = set(missing_tools(tuple(preset.requires), env))
-        all_ok = all_ok and not missing
         verdicts = " · ".join(
             f"{public_tool_name(n)} {'missing' if n in missing else 'ok'}" for n in preset.requires
         )
+        if preset.placement == PLACEMENT_CAPABLE:
+            # 도구가 있는 머신으로 간다 — 여기 없는 것은 정상이다. 판정은 `placement` 행이 한다
+            parts.append(f"{preset.name} ({verdicts} · any machine)")
+            continue
+        all_ok = all_ok and not missing
         parts.append(f"{preset.name} ({verdicts})")
     if not parts:
         return None
@@ -2282,7 +2286,9 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     return ("local preset tools", all_ok, detail)
 
 
-def _service_preset_env_row(health: Any) -> tuple[str, bool, str] | None:
+def _service_preset_env_row(
+    health: Any, capable: frozenset[str] = frozenset()
+) -> tuple[str, bool, str] | None:
     """`service preset tools` — **서버가 자기 환경으로 잰 것**을 그대로 읽는다(M5m).
 
     바로 위 `local preset tools` 와 짝이다. 그 줄은 세션의 셸에서 재고 이 줄은 launchd·systemd
@@ -2303,8 +2309,12 @@ def _service_preset_env_row(health: Any) -> tuple[str, bool, str] | None:
             continue
         tools = [str(t) for t in entry.get("missing_tools") or []]
         unset = [str(v) for v in entry.get("missing_passthrough") or []]
-        all_ok = all_ok and not tools and not unset
         notes = [f"missing {t}" for t in tools] + [f"{v} unset" for v in unset]
+        if name in capable:
+            # any-capable — 도구가 있는 머신으로 간다. 서버에 없는 것은 정상(`placement` 행이 판정)
+            parts.append(f"{name} ({', '.join(notes) if notes else 'ok'} · any machine)")
+            continue
+        all_ok = all_ok and not tools and not unset
         parts.append(f"{name} ({', '.join(notes) if notes else 'ok'})")
     if not parts:
         return None
@@ -2520,7 +2530,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:
                 rows.append(tools_row)
-            service_row = _service_preset_env_row(health_body)
+            service_row = _service_preset_env_row(
+                health_body,
+                frozenset(p.name for p in cfg.presets if p.placement == PLACEMENT_CAPABLE),
+            )
             if service_row is not None:
                 rows.append(service_row)
             if cfg.repos:

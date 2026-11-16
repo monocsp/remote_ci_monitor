@@ -599,6 +599,10 @@ install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` 
 about the job. The check that counts is the one at job start. The row names each entry the way
 the job log does — by its basename, never by the path you declared.
 
+A `placement = "any-capable"` preset is listed in both rows with `any machine` and never fails
+them: it goes to a machine that has its tools, so a tool missing here is expected. Whether some
+machine can run it is the `placement` row's question.
+
 **The row below it does vouch for the service.** `service preset tools` is the same two questions
 asked by the server, in the environment the service actually has, and answered once when the
 server starts:

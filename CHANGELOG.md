@@ -30,6 +30,8 @@ of a key bumps that number and is listed here.
   `placement = "pool"`, so existing configs behave as before. Meant for gates and tests: secret
   files never leave the server, so deploy and upload presets stay on their pool. A worker can
   refuse such jobs with `accept_any = false` (the server's own lanes: `local_accept_any`).
+  `rcm check`'s `local preset tools` and `service preset tools` rows list such a preset with
+  `any machine` and do not fail on a tool this server lacks.
 - **Each machine reports an environment fingerprint, and rcm notices when it changes.** `[[probes]]`
   in `server.toml` lists version commands (`xcodebuild -version`, `fvm flutter --version`) that
   every worker runs in its own service environment, at registration and every
