@@ -377,11 +377,10 @@ class CapabilitiesMixin:
         report = self.report_of(worker)
         verdicts = self.verdicts_for(worker, now)
         presets = {p.name: p for p in self.config.presets}
-        capable = tuple(
-            name
-            for name, v in verdicts.items()
-            if presets[name].placement == PLACEMENT_CAPABLE and v.state == cap.ELIGIBLE
-        )
+        # 지금 설정의 placement 로 거르지 않는다 — 잡은 제출 때의 placement 를 지니고(SQL 이
+        # `placement = 'capable'` 로 고른다), reload 로 any-capable 을 뗀 프리셋의 대기 잡도 어딘가
+        # 에서는 집혀야 한다. 거르면 그 잡은 어느 갈래에도 안 걸려 영원히 선다(검증 2026-11-16)
+        capable = tuple(name for name, v in verdicts.items() if v.state == cap.ELIGIBLE)
         gated = tuple(
             name
             for name, v in verdicts.items()
@@ -614,6 +613,10 @@ class CapabilitiesMixin:
             target = None if job.target_worker == LOCAL else job.target_worker
             return Placement(workers=frozenset({target}))
         preset = self.config.preset(job.preset)
+        if job.placement == PLACEMENT_CAPABLE and preset is None:
+            # reload 로 프리셋이 사라졌다 — claim 의 capable 목록에 그 이름이 없으니 아무도
+            # 안 집는다. pool 갈래로 떨어뜨리면 표시 풀의 레인에 시각을 지어낸다(fail-open)
+            return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE)
         if job.placement == PLACEMENT_CAPABLE and preset is not None:
             judged = self._placement_notes(preset, views, now)
             workers: set[str | None] = set()
