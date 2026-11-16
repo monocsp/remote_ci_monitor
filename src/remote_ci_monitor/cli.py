@@ -2559,7 +2559,17 @@ def _worker_config(args: argparse.Namespace):
         "name": getattr(args, "name", None),
         "data_dir": getattr(args, "data", None),
     }
-    cfg = load_worker_config(getattr(args, "config", None), overrides=overrides)
+    path = getattr(args, "config", None)
+    if path is None and overrides["server"] is None:
+        # `rcm init worker` 가 쓴 자리. 문서의 순서(init → `rcm worker --check`)가 `--config` 없이
+        # 이 파일을 읽어야 맞는다. `--server` 를 준 긴 꼴은 플래그만 쓴다 — 그 파일의 repos ·
+        # data_dir 이 몰래 섞이지 않게(실측 2026-11-16: 안 읽어서 풀이 default 로, 서버는 같은 망의
+        # 다른 서버로 잡혔다)
+        default = user_config_dir() / "worker.toml"
+        if default.is_file():
+            path = default
+            _info(f"config: {default}")
+    cfg = load_worker_config(path, overrides=overrides)
     if cfg.wants_discovery:
         cfg.server = _pick_worker_server(cfg)
         cfg.discovered_server = True  # type: ignore[attr-defined]
@@ -3343,7 +3353,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker.add_argument("--lanes", type=int, help="parallel jobs on this machine (1-64)")
     worker.add_argument("--name", help="display name for the host sample (default: hostname)")
-    worker.add_argument("--config", help="worker.toml path (repos, host sampler, data_dir)")
+    worker.add_argument(
+        "--config",
+        help="worker.toml path (repos, host sampler, data_dir; default without --server: "
+        "~/.config/rcm/worker.toml if it exists)",
+    )
     worker.add_argument("--data", help="worker data dir (workspaces, logs)")
     worker.add_argument(
         "--check", action="store_true", help="verify server, token kind, pool and repos, then exit"

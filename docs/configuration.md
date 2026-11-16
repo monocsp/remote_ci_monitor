@@ -987,7 +987,10 @@ writes the token anywhere; carrying it to the worker is still a person's job. A 
 see the `RCM_WORKER_TOKEN` of your shell, so before you start it put `token = "…"` in
 `worker.toml` (the file is mode 600).
 
-The long form still works, with flags instead of a file:
+Without `--config`, `rcm worker` reads the `worker.toml` that `rcm init worker` wrote
+(`~/.config/rcm/worker.toml`, or under `$XDG_CONFIG_HOME`) when it exists, and says which file it
+read. The long form still works, with flags instead of a file — given `--server`, it reads no file
+unless you pass `--config`:
 
 ```sh
 rcm worker --server http://macmini:8787 --pool linux --lanes 1 --check   # server · token kind · pool

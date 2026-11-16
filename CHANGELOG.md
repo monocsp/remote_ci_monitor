@@ -64,7 +64,8 @@ of a key bumps that number and is listed here.
   systemd unit for it (new examples: `examples/launchd/com.remote-ci-monitor.worker.plist`,
   `examples/systemd/rcm-worker.service`). A worker with `server = "auto"` finds the server over
   mDNS (`server_name` picks one when several advertise) and looks again after 5 connection
-  failures in a row. `rcm token add NAME --worker` prints the command to run on the worker, and
+  failures in a row. `rcm worker` without `--config` or `--server` reads the file `rcm init worker`
+  wrote. `rcm token add NAME --worker` prints the command to run on the worker, and
   `rcm worker --check` adds `fingerprint` and `presets` rows.
 - `examples/server.toml` has a commented Flutter block: probes, a `sim-check` check preset, an
   `any-capable` gate with `concurrency_scope = "host"` and a preset with `checks`. The
