@@ -8,8 +8,10 @@ The same guide in Korean: [사용법 가이드](usage.ko.md).
 **Contents** — [1. What you need](#1-what-you-need) · [2. The build machine](#2-the-build-machine) ·
 [3. Your machine](#3-your-machine) · [4. Your first job](#4-your-first-job) ·
 [5. Not waiting](#5-not-waiting) · [6. When it fails](#6-when-it-fails) ·
-[7. Two sessions, one tree](#7-two-sessions-one-tree) · [8. The whole queue](#8-the-whole-queue-in-one-screen) ·
-[9. The web page](#9-the-web-page) · [10. What to do next](#10-what-to-do-next)
+[7. Two sessions, one tree](#7-two-sessions-one-tree) ·
+[8. Getting the files back](#8-getting-the-files-back) ·
+[9. The whole queue](#9-the-whole-queue-in-one-screen) · [10. The web page](#10-the-web-page) ·
+[11. A second machine](#11-a-second-machine) · [12. What to do next](#12-what-to-do-next)
 
 ## 1. What you need
 
@@ -409,7 +411,51 @@ yours to do. Open or close it yourself and that choice is remembered.
 1. Workers, 2. the summary, 3. a job as a card, 4. its steps and 5. the buttons — one column, same
    information, no horizontal scrolling.
 
-## 11. What to do next
+## 11. A second machine
+
+One build machine is a queue of one. A second computer — a MacBook in the office, a Linux box —
+joins as a **worker**: it takes jobs from the same queue, and nothing changes for the sessions.
+
+On the build machine, make a worker token. It is printed once, followed by the line to type on the
+new machine:
+
+```sh
+rcm token add mbp --worker
+```
+
+On the new machine, install the same rcm release as the server, then:
+
+```sh
+rcm init worker                  # ~/.config/rcm/worker.toml; server = "auto" finds the server
+export RCM_WORKER_TOKEN=<the token>
+rcm worker --check               # server · token · fingerprint · how many presets it can run
+rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
+```
+
+The last command writes a launchd file (a systemd unit on Linux) and prints the one command that
+starts it. From then on the worker measures its own environment and reports it. Back on any
+session, `rcm machines` shows every machine, the tool versions it found and how many presets it
+can run — and for the rest, why not (`18 fvm missing`).
+
+Which jobs it takes depends on the preset. A preset tied to a pool runs only there; a preset with
+`placement = "any-capable"` runs on any machine that has its tools
+([Which machine runs a job](configuration.md#which-machine-runs-a-job)). Two waiting reasons are
+new, and both are about a machine, not your code:
+
+- **`no capable machine — mbp: fvm missing · mac2-worker: down`** — no machine can run this preset
+  right now; each one says why. `rcm run` printed the same line when you submitted. The job stays
+  queued with no ETA and starts by itself once a machine is fixed: install the tool and the worker
+  reports again within `probe_interval_seconds` (10 minutes), or restart the worker to report at
+  once.
+- **`check failed — mbp: sim-check failed #3620`** — the preset needs a check (a project script
+  that proves the machine works) and it failed on that machine after its environment changed.
+  `rcm machines --machine mbp` shows what changed (`xcode 26.5 → 27.2`) and `rcm logs 3620` why
+  the check failed. Fix the machine, then `rcm recheck mbp sim-check` (admin), or press
+  **Recheck** in the web page's machines table. A machine is named by its worker token name; the
+  build machine's own lanes are `@local`. `check pending` means the check
+  is running right now; wait for it.
+
+## 12. What to do next
 
 - Write the preset your team actually needs: [Configuration](configuration.md).
 - Run two jobs at once. Set `[server] lanes = 2` — lane 2 only picks up work while the machine has

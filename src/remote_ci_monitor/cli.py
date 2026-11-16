@@ -55,14 +55,22 @@ from remote_ci_monitor.core.joblink import LinkError, parse_link
 from remote_ci_monitor.core.model import EXIT_UNKNOWN, TERMINAL_STATES, Preset
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
+    DASH,
     MAX_IDENT,
+    blocked_notes_text,
     failure_lines,
+    fingerprint_summary,
     fmt_clock,
     fmt_duration,
+    placement_reason_text,
+    placement_suffix,
+    presets_summary,
+    probe_token,
     ref_ident,
     render_gc,
     source_ident,
     storage_row,
+    verdict_text,
 )
 from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
@@ -574,11 +582,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 pool=pool,
                 link=link,
                 link_label=link_label,
+                machine=getattr(args, "machine", None),
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
-            return USAGE_EXIT if e.status in (400, 401, 403, 413, 0) else EXIT_UNKNOWN
+            return USAGE_EXIT if e.status in _submit_refused(args) else EXIT_UNKNOWN
         job_id = int(resp["job_id"])
+        _no_capable_line(preset.name, resp)
         joined = bool(resp.get("joined"))
         cancel_token = _keep_submission(client, job_id, resp)
         state = resp.get("state")  # 합류면 그 잡의 상태, 새 잡이면 uploading
@@ -659,6 +669,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
 
+def _submit_refused(args: argparse.Namespace) -> tuple[int, ...]:
+    """잡이 안 생긴 것이 확실한 제출 거절 — usage 2. `--machine` 이면 404(없는 머신)·409(down)도
+    그렇다(가정 C11): 결과를 모르는 3 이 아니다."""
+    base = (400, 401, 403, 413, 0)
+    return (*base, 404, 409) if getattr(args, "machine", None) is not None else base
+
+
 def _run_git_ref(
     client: Client,
     args: argparse.Namespace,
@@ -682,13 +699,15 @@ def _run_git_ref(
             pool=pool,
             link=link,
             link_label=link_label,
+            machine=getattr(args, "machine", None),
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
         # 502 「cannot resolve」 는 ref 가 틀렸다는 확정 거절(잡 없음) — 400 과 같은 usage 2.
         # 504 (해석 타임아웃) · 503 · 연결 오류는 결과를 모르는 것이라 3.
-        return USAGE_EXIT if e.status in (400, 401, 403, 413, 502, 0) else EXIT_UNKNOWN
+        return USAGE_EXIT if e.status in (*_submit_refused(args), 502) else EXIT_UNKNOWN
     job_id = int(resp["job_id"])
+    _no_capable_line(preset.name, resp)
     joined = bool(resp.get("joined"))
     cancel_token = _keep_submission(client, job_id, resp)
     sha = resp.get("sha")
@@ -1286,6 +1305,9 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         pos = f"{_ordinal(r['position'])} in line · " if r.get("position") else ""
         label = (r.get("requester") or {}).get("label") or "?"
         summary = r.get("summary") or ""
+        placed = _jobs_placement_text(r)
+        if placed:
+            summary = f"{summary}  {placed}" if summary else placed
         jid = f"#{r.get('id')}"
         key = str(r.get("key") or "?")
         print(
@@ -1294,6 +1316,290 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             f"{fmt_clock(when, tz)}  {summary}".rstrip()
         )
     return 0
+
+
+# ── 머신 · 배치 (M5n) ─────────────────────────────────────────────────────────
+
+MACHINES_HEADER = ("machine", "host", "pool", "lanes", "fingerprint", "presets")
+#: `rcm check` 의 `machines` 행이 「최근 바뀜」으로 세는 창(§8.2 · 웹 칩과 같다)
+ENV_CHANGED_WINDOW_SECONDS = 24 * 3600
+
+
+def _machines_doc(client: Client) -> dict[str, Any]:
+    """`GET /api/machines` — 모양이 틀리면 빈 목록으로 본다(지어내지 않는다)."""
+    doc = client.get_json("/api/machines")
+    if not isinstance(doc, dict):
+        return {"machines": []}
+    if not isinstance(doc.get("machines"), list):
+        doc = {**doc, "machines": []}
+    return doc
+
+
+def _machine_name(m: dict[str, Any]) -> str:
+    return str(m.get("display_name") or m.get("id") or "?")
+
+
+def _machines_fail(client: Client, e: ClientError) -> int:
+    if e.status == 404:
+        return _usage(
+            f"machines: {client.server} has no /api/machines (older rcm) — upgrade the server"
+        )
+    return _client_fail(client, "machines", e)
+
+
+def _table(rows: list[list[str]]) -> list[str]:
+    """칸 사이를 두 칸 띄운 표(칸 안의 공백은 하나 — 가정 C1)."""
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    return [
+        "  ".join(cell.ljust(w) for cell, w in zip(r, widths, strict=True)).rstrip() for r in rows
+    ]
+
+
+def _machine_detail(m: dict[str, Any]) -> list[str]:
+    """`rcm machines --machine ID` — 판정 전부 · 프로브 값 전부(앞 값과 함께) · 점검."""
+    out = [
+        f"{_machine_name(m)}  ({m.get('id')} · {m.get('kind') or DASH} · pool "
+        f"{m.get('pool') or DASH} · {m.get('host_label') or DASH}"
+        f"{'' if m.get('alive', True) else ' · down'})"
+    ]
+    presets = m.get("presets") if isinstance(m.get("presets"), dict) else {}
+    out.append("presets")
+    rows = [["preset", "state", "code", "detail"]]
+    for name, v in presets.items():
+        v = v if isinstance(v, dict) else {}
+        state = str(v.get("state") or DASH)
+        detail = "" if state == "eligible" else verdict_text(v.get("code"), v.get("detail"), state)
+        rows.append([str(name), state, str(v.get("code") or DASH), detail])
+    out.extend("  " + ln for ln in _table(rows)) if presets else out.append(f"  {DASH}")
+    fp = m.get("fingerprint") if isinstance(m.get("fingerprint"), dict) else {}
+    probes = fp.get("probes") if isinstance(fp.get("probes"), dict) else {}
+    head = "fingerprint"
+    if fp.get("hash"):
+        head += f" {fp['hash']}"
+    if fp.get("stale"):
+        head += " (stale)"
+    if fp.get("changed_at"):
+        head += f" · changed {fp['changed_at']}"
+    out.append(head)
+    if not probes:
+        out.append(f"  {DASH}")
+    for name, p in probes.items():
+        p = p if isinstance(p, dict) else {}
+        value = p.get("value")
+        line = f"  {name}  {p.get('state') or DASH}  {value if value is not None else DASH}"
+        if _probe_changed(p):
+            line += f"  (was {p['previous']})"
+        out.append(line)
+    checks = m.get("checks") if isinstance(m.get("checks"), list) else []
+    out.append("checks")
+    if not checks:
+        out.append(f"  {DASH}")
+    for c in checks:
+        c = c if isinstance(c, dict) else {}
+        line = f"  {c.get('preset') or '?'}  {c.get('state') or DASH}"
+        if c.get("job_id") is not None:
+            line += f"  #{c['job_id']}"
+        if c.get("auto_submitted"):
+            line += "  (automatic)"
+        if c.get("error_code"):
+            line += f"  {c['error_code']}"
+        out.append(line)
+    return out
+
+
+def cmd_machines(args: argparse.Namespace) -> int:
+    """`rcm machines` — 워커마다 호스트 · 풀 · 레인 · 지문 · 프리셋 가능 수(§8.2). 읽기 전용."""
+    client = _client(args, need_token=False)
+    try:
+        doc = _machines_doc(client)
+    except ClientError as e:
+        return _machines_fail(client, e)
+    machines = [m for m in doc["machines"] if isinstance(m, dict)]
+    if args.machine is not None:
+        hit = [m for m in machines if m.get("id") == args.machine]
+        if not hit:
+            ids = ", ".join(str(m.get("id")) for m in machines) or "(none)"
+            return _usage(f"unknown machine '{args.machine}' — server has: {ids}")
+        if args.json:
+            _print_json(hit[0])
+            return 0
+        print("\n".join(_machine_detail(hit[0])))
+        return 0
+    if args.json:
+        _print_json(doc)
+        return 0
+    rows = [list(MACHINES_HEADER)]
+    for m in machines:
+        name = _machine_name(m) + ("" if m.get("alive", True) else " (down)")
+        lanes = m.get("lanes")
+        rows.append(
+            [
+                name,
+                str(m.get("host_label") or DASH),
+                str(m.get("pool") or DASH),
+                str(lanes) if isinstance(lanes, int) else DASH,
+                fingerprint_summary(m.get("fingerprint")),
+                presets_summary(m.get("presets")),
+            ]
+        )
+    print("\n".join(_table(rows)))
+    return 0
+
+
+def _recent(at: Any, now: datetime) -> bool:
+    when = parse_iso(at) if isinstance(at, str) else None
+    return when is not None and 0 <= (now - when).total_seconds() <= ENV_CHANGED_WINDOW_SECONDS
+
+
+def _probe_changed(probe: dict[str, Any]) -> bool:
+    """서버는 모든 프로브에 `previous` 를 싣는다(앞 지문이 없으면 null) — 키가 있다는 것만으로는
+    바뀐 게 아니다. 앞 값이 있고 지금 값과 달라야 바뀐 것이다."""
+    prev = probe.get("previous")
+    return prev is not None and prev != probe.get("value")
+
+
+def _probe_change(name: str, probe: dict[str, Any]) -> str:
+    """`xcode 26.5 → 27.2` — 앞 값의 짧은 꼴 → 지금 값의 짧은 꼴(사라졌으면 `missing`)."""
+    before = probe_token("ok", probe.get("previous"))
+    return f"{name} {before} → {probe_token(probe.get('state'), probe.get('value'))}"
+
+
+def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]:
+    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검."""
+    now = datetime.now(UTC)
+    changed: list[str] = []
+    failed: list[str] = []
+    n_failed = 0
+    for m in machines:
+        name = _machine_name(m)
+        fp = m.get("fingerprint") if isinstance(m.get("fingerprint"), dict) else {}
+        probes = fp.get("probes") if isinstance(fp.get("probes"), dict) else {}
+        if _recent(fp.get("changed_at"), now):
+            moved = [
+                _probe_change(pname, p)
+                for pname, p in probes.items()
+                if isinstance(p, dict) and _probe_changed(p)
+            ]
+            if moved:
+                changed.append(f"{name}: {', '.join(moved)}")
+        bad = [
+            f"{c.get('preset')}" + (f" #{c['job_id']}" if c.get("job_id") is not None else "")
+            for c in (m.get("checks") or [])
+            if isinstance(c, dict) and c.get("state") == "failed"
+        ]
+        if bad:
+            n_failed += len(bad)
+            failed.append(f"{name}: {', '.join(bad)}")
+    parts = [f"{len(machines)} machine{'s' if len(machines) != 1 else ''}"]
+    if changed:
+        parts.append(f"{len(changed)} environment changed ({'; '.join(changed)})")
+    if failed:
+        parts.append(f"{n_failed} check failed ({'; '.join(failed)})")
+    return ("machines", not failed, " · ".join(parts))
+
+
+def _machine_check_rows(
+    client: Client, status: dict[str, Any]
+) -> list[tuple[str, bool | None, str]]:
+    """`rcm check` 의 `machines` · `placement` 두 행. `/api/machines` 가 없는 옛 서버면 행도
+    없다(FAIL 이 아니다)."""
+    try:
+        machines = [m for m in _machines_doc(client)["machines"] if isinstance(m, dict)]
+    except ClientError as e:
+        if e.status == 404:
+            return []
+        return [("machines", None, f"cannot read /api/machines: {e.message}")]
+    rows: list[tuple[str, bool | None, str]] = [_machines_check_row(machines)]
+    placed = _placement_check_row(
+        [p for p in status.get("presets") or [] if isinstance(p, dict)], machines
+    )
+    if placed is not None:
+        rows.append(placed)
+    return rows
+
+
+_PENDING_CODES = ("check_running", "check_needed")
+
+
+def _placement_check_row(
+    presets: list[dict[str, Any]], machines: list[dict[str, Any]]
+) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `placement` 행(가정 C8) — any-capable 이거나 `checks` 가 있는 프리셋만."""
+    parts: list[str] = []
+    short = False
+    alive = [m for m in machines if m.get("alive", True)]
+    for p in presets:
+        name = p.get("name")
+        capable = p.get("placement") == "any-capable"
+        if not capable and not p.get("checks"):
+            continue
+        if capable:
+            where = "any machine"
+            pool_machines = [m for m in alive if m.get("accept_any", True) is not False]
+        else:
+            pool = p.get("pool") or "default"
+            where = f"pool {pool}"
+            pool_machines = [m for m in alive if (m.get("pool") or "default") == pool]
+        verdicts = [
+            v for m in pool_machines if isinstance(v := (m.get("presets") or {}).get(name), dict)
+        ]
+        n = sum(1 for v in verdicts if v.get("state") == "eligible")
+        if n:
+            parts.append(f"{name}: {where} ({n} eligible)")
+            continue
+        short = True
+        codes = {v.get("code") for v in verdicts}
+        if "check_failed" in codes:
+            why = "check failed"
+        elif codes & set(_PENDING_CODES):
+            why = "check pending"
+        else:
+            why = "no capable machine"
+        parts.append(f"{name}: {where} ({why})")
+    if not parts:
+        return None
+    return ("placement", None if short else True, " · ".join(parts))
+
+
+def cmd_recheck(args: argparse.Namespace) -> int:
+    """`rcm recheck MACHINE [CHECK…]` — 그 머신의 점검을 다시 건다(admin, §4.4)."""
+    client = _client(args)
+    from urllib.parse import quote
+
+    body: dict[str, Any] = {"checks": list(args.checks)} if args.checks else {}
+    try:
+        resp = client.post_json(f"/machines/{quote(args.machine, safe='@')}/recheck", body)
+    except ClientError as e:
+        if e.status == 403:
+            return _usage(f"recheck: {e.message} — rcm recheck needs an admin token")
+        if e.status == 404 and not e.message:
+            return _usage(f"recheck: unknown machine '{args.machine}' (or an older server)")
+        return _client_fail(client, "recheck", e)
+    jobs = [j for j in ((resp or {}).get("jobs") or []) if isinstance(j, dict)]
+    if not jobs:
+        print(f"nothing to recheck on {args.machine}")
+        return 0
+    for j in jobs:
+        print(f"#{j.get('job_id')}  {j.get('preset')}  on {args.machine}")
+    return 0
+
+
+def _no_capable_line(preset: str, resp: dict[str, Any]) -> None:
+    """제출 직후 한 줄(§2 S4 · 가정 C9) — 맞는 머신이 지금 하나도 없을 때만. 바쁜 것은 정상이다."""
+    placement = resp.get("placement")
+    if not isinstance(placement, dict) or placement.get("mode") != "any-capable":
+        return
+    if placement.get("eligible_now"):
+        return
+    _err(f"{preset}: no capable machine — {blocked_notes_text(placement.get('blocked'))}")
+
+
+def _jobs_placement_text(row: dict[str, Any]) -> str:
+    """`rcm jobs` 행 끝의 배치 글자 — `rcm top` 의 이유 줄과 같은 글자(가정 C6)."""
+    placed = placement_reason_text(row)
+    if placed is not None:
+        return placed
+    return placement_suffix(row).removeprefix(" · ")
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
@@ -1587,8 +1893,210 @@ def write_private(path: Path, data: bytes, mode: int) -> None:
         raise
 
 
+# ── rcm init worker (M5n §9) ─────────────────────────────────────────────────
+
+#: 워커 서비스의 PATH. venv 의 bin 을 앞에 두지 않는다 — 프리셋의 `python` 이 rcm 의 것으로
+#: 바뀌어 친다(docs/operating.md 의 운영 함정).
+WORKER_SERVICE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+WORKER_SERVICE_LABEL = "com.remote-ci-monitor.worker"
+_WORKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")  # config._NAME_RE 와 같다
+
+
+def _short_hostname() -> str:
+    """이 컴퓨터의 짧은 호스트명(첫 `.` 앞, 대소문자 그대로). 이름 규칙에 안 맞으면 `default`."""
+    import socket
+
+    raw = ""
+    try:
+        raw = socket.gethostname() or ""
+    except OSError:
+        raw = ""
+    raw = raw or platform.node() or ""
+    short = raw.split(".", 1)[0]
+    return short if _WORKER_NAME_RE.match(short) else "default"
+
+
+def _replace_line(text: str, pattern: str, line: str) -> str:
+    """템플릿의 그 줄 하나만 바꾼다(뒤 주석은 남긴다). 정확히 하나가 아니면 템플릿이 바뀐 것이다."""
+    rx = re.compile(pattern, re.M)
+    if len(rx.findall(text)) != 1:
+        raise RuntimeError(f"worker template must have exactly one line matching {pattern!r}")
+    return rx.sub(line.replace("\\", "\\\\"), text, count=1)
+
+
+def worker_template(server: str, pool: str, lanes: int, name: str | None) -> bytes:
+    """패키지 `templates/worker.toml` 에서 `server` · `pool` · `lanes` · `name` 줄만 바꾼다 —
+    줄 수는 그대로다(주석 `# name = …` 줄을 `name = …` 로 바꿔 쓴다)."""
+    text = read_template("worker.toml").decode("utf-8")
+    text = _replace_line(text, r'^server\s*=\s*"[^"]*"', f'server = "{server}"')
+    text = _replace_line(text, r'^pool\s*=\s*"[^"]*"', f'pool = "{pool}"')
+    text = _replace_line(text, r"^lanes\s*=\s*\d+", f"lanes = {lanes}")
+    if name is not None:
+        # `[[repos]]` 예시의 `# name = "app"` 이 아니라 표시 이름 줄 — 뒤 주석으로 가린다
+        pattern = r'^#\s*name\s*=\s*"[^"]*"(?=\s+#\s*display name)'
+        text = _replace_line(text, pattern, f'name = "{name}"')
+    return text.encode("utf-8")
+
+
+def _this_rcm() -> Path | None:
+    """지금 도는 `rcm` 의 절대경로 — 실제로 있는 파일만. 없는 경로를 지어내지 않는다."""
+    argv0 = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    candidates: list[Path] = []
+    if argv0 is not None and argv0.name == "rcm":
+        candidates.append(argv0)
+    candidates.append(Path(sys.executable).parent / "rcm")
+    found = shutil.which("rcm")
+    if found:
+        candidates.append(Path(found))
+    for c in candidates:
+        c = c if c.is_absolute() else Path.cwd() / c
+        if c.is_file():
+            return c
+    return None
+
+
+def worker_plist(rcm: Path, config: Path, home: Path) -> bytes:
+    """launchd plist(macOS) — `rcm worker --config <worker.toml>`. 토큰은 싣지 않는다."""
+    import plistlib
+
+    log = str(home / "Library" / "Logs" / "rcm" / "worker.log")
+    doc = {
+        "Label": WORKER_SERVICE_LABEL,
+        "ProgramArguments": [str(rcm), "worker", "--config", str(config)],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 10,
+        "WorkingDirectory": str(home),
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+        "EnvironmentVariables": {
+            "PATH": WORKER_SERVICE_PATH,
+            "HOME": str(home),
+            "LANG": "en_US.UTF-8",
+            "PYTHONUNBUFFERED": "1",
+        },
+    }
+    return plistlib.dumps(doc)
+
+
+def worker_unit(rcm: Path, config: Path, home: Path) -> bytes:
+    """systemd user unit(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다."""
+    text = f"""# remote_ci_monitor worker — written by `rcm init worker --service-file`.
+# The token is not in this file: put `token = "…"` in {config} (mode 600).
+[Unit]
+Description=remote_ci_monitor worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={home}
+ExecStart={rcm} worker --config {config}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=en_US.UTF-8
+Environment=PATH={WORKER_SERVICE_PATH}
+
+[Install]
+WantedBy=default.target
+"""
+    return text.encode("utf-8")
+
+
+def _init_worker_service(args: argparse.Namespace, config: Path) -> int:
+    """`--service-file PATH` — 서비스 파일**만** 쓴다. worker.toml 은 안 건드린다(이미 있어도 된다).
+    `launchctl` · `systemctl` 은 부르지 않고 다음에 칠 명령을 찍는다."""
+    target = Path(args.service_file).expanduser().absolute()
+    if sys.platform == "darwin":
+        kind = "launchd"
+    elif sys.platform.startswith("linux"):
+        kind = "systemd"
+    else:
+        return _usage(
+            f"--service-file writes a launchd plist (macOS) or a systemd unit (Linux); "
+            f"this platform is {sys.platform}"
+        )
+    if target.exists() and not args.force:
+        return _usage(f"refusing to overwrite {target} (use --force)")
+    rcm = _this_rcm()
+    if rcm is None:
+        return _usage("cannot find the rcm executable this command runs from")
+    home = Path.home()
+    data = worker_plist(rcm, config, home) if kind == "launchd" else worker_unit(rcm, config, home)
+    try:
+        write_private(target, data, 0o644)
+    except OSError as e:
+        return _usage(f"cannot write {target}: {e.strerror or e}")
+    print(target, flush=True)
+    _info(
+        f'the service reads its token from {config} (token = "…", mode 600) — '
+        "your shell's RCM_WORKER_TOKEN does not reach it"
+    )
+    if kind == "launchd":
+        _info(
+            f"next: mkdir -p {home / 'Library' / 'Logs' / 'rcm'} && "
+            f"launchctl bootstrap gui/$(id -u) {target}"
+        )
+    else:
+        _info(
+            f"next: put it in ~/.config/systemd/user/, then "
+            f"systemctl --user enable --now {target.name}"
+        )
+    return 0
+
+
+def cmd_init_worker(args: argparse.Namespace) -> int:
+    """`rcm init worker` — 패키지 템플릿으로 `~/.config/rcm/worker.toml`(600)을 쓴다(§9)."""
+    path = (
+        Path(args.path).expanduser().absolute()
+        if args.path
+        else user_config_dir().absolute() / "worker.toml"
+    )
+    if args.service_file:
+        return _init_worker_service(args, path)
+    server = (args.server or "auto").strip().rstrip("/")
+    if server.lower() == "auto":
+        server = "auto"
+    elif not server.startswith(("http://", "https://")):
+        return _usage("--server must be auto or a URL starting with http:// or https://")
+    # 템플릿의 따옴표 안에 그대로 들어간다 — `init client` 와 같은 규칙
+    if any(c in '"\\' or c.isspace() for c in server):
+        return _usage("--server must not contain quotes, backslashes or whitespace")
+    pool = args.pool if args.pool is not None else _short_hostname()
+    if not _WORKER_NAME_RE.match(pool):
+        return _usage(f"--pool must be letters, digits, '.', '_' or '-' (got {pool!r})")
+    lanes = args.lanes if args.lanes is not None else 1
+    if not 1 <= lanes <= 64:
+        return _usage(f"--lanes must be 1-64 (got {lanes})")
+    name = args.name
+    if name is not None and (
+        not name.strip() or any(c in '"\\' or (c.isspace() and c != " ") for c in name)
+    ):
+        return _usage("--name must not be empty or contain quotes, backslashes or line breaks")
+    if path.exists() and not args.force:
+        return _usage(f"refusing to overwrite {path} (use --force)")
+    try:
+        write_private(path, worker_template(server, pool, lanes, name), 0o600)
+    except OSError as e:
+        return _usage(f"cannot write {path}: {e.strerror or e}")
+    print(path, flush=True)
+    _info(
+        "next: get a token on the server with `rcm token add <name> --worker`, then "
+        f"`RCM_WORKER_TOKEN=<token> rcm worker --check --config {path}`"
+    )
+    _info(f'pool = "{pool}" — presets with that pool, and any-capable presets, can run here')
+    _info("then: `rcm init worker --service-file <path>` writes a service file that runs it")
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     kind = args.init_kind
+    if kind == "worker":
+        return cmd_init_worker(args)
     server = ""
     if kind == "client":
         server = (args.server or "").strip().rstrip("/")
@@ -1975,6 +2483,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
+            rows.extend(_machine_check_rows(client, doc))
             storage = (doc.get("server") or {}).get("job_storage")
             row = storage_row(storage, now=doc.get("generated_at")) if storage else None
             if row is not None:  # 옛 서버엔 키가 없고, 갓 뜬 서버는 아직 잰 게 없다
@@ -2050,7 +2559,49 @@ def _worker_config(args: argparse.Namespace):
         "name": getattr(args, "name", None),
         "data_dir": getattr(args, "data", None),
     }
-    return load_worker_config(getattr(args, "config", None), overrides=overrides)
+    cfg = load_worker_config(getattr(args, "config", None), overrides=overrides)
+    if cfg.wants_discovery:
+        cfg.server = _pick_worker_server(cfg)
+        cfg.discovered_server = True  # type: ignore[attr-defined]
+    return cfg
+
+
+def _pick_worker_server(cfg: Any, *, timeout: float = 1.5) -> str:
+    """같은 망의 rcm 서버를 찾는다(M5n §9). 하나면 그것, 여럿이면 `server_name` 과 이름이 맞는
+    것. 그래도 모호하거나 없으면 `ConfigError`(이름들과 고치는 법을 말한다)."""
+    found = discover(timeout=timeout)
+    want = (cfg.server_name or "").strip()
+    picks = [f for f in found if f.name == want] if want else list(found)
+    if len(picks) == 1:
+        f = picks[0]
+        ip = f.ips[0] if f.ips else f.host.rstrip(".")
+        _info(f"server: found {f.name} ({ip}:{f.port}) on this network")
+        return f.address
+    if not found:
+        raise ConfigError(f"worker needs a server — {DISCOVER_NONE_HINT}")
+    names = ", ".join(f"{f.name} ({f.address})" for f in found)
+    if want:
+        raise ConfigError(
+            f"no rcm server named {want!r} on this network (found: {names}) — "
+            "fix server_name in worker.toml or pass --server"
+        )
+    raise ConfigError(
+        f'several rcm servers on this network: {names} — set server_name = "<name>" in '
+        "worker.toml or pass --server"
+    )
+
+
+def _worker_rediscover(cfg: Any) -> Any:
+    """주소가 바뀌었을 때 다시 찾는 콜백(연속 연결 실패 5번마다 — `remote_worker`). 못 찾으면
+    None 이고 워커는 옛 주소로 계속 시도한다."""
+
+    def again() -> str | None:
+        try:
+            return _pick_worker_server(cfg)
+        except ConfigError:
+            return None
+
+    return again
 
 
 def cmd_worker(args: argparse.Namespace) -> int:
@@ -2070,7 +2621,10 @@ def cmd_worker(args: argparse.Namespace) -> int:
     client = WorkerClient(cfg.server, cfg.token)
     if getattr(args, "check", False):
         return _worker_check(cfg, client)
-    worker = RemoteWorker(cfg, client=client, once=bool(getattr(args, "once", False)))
+    rediscover = _worker_rediscover(cfg) if getattr(cfg, "discovered_server", False) else None
+    worker = RemoteWorker(
+        cfg, client=client, once=bool(getattr(args, "once", False)), rediscover=rediscover
+    )
 
     def _stop(signum: int, _frame: Any) -> None:
         if worker.stopping.is_set():
@@ -2161,10 +2715,53 @@ def _worker_check(cfg: Any, client: Any) -> int:
     d = cfg.data_path
     writable = _dir_writable(d)
     rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
-    ok_all = all(ok for _, ok, _ in rows)
+    rows.extend(_worker_capability_rows(cfg, client))
+    ok_all = all(ok is not False for _, ok, _ in rows)
     for name, ok, detail in rows:
-        print(f"{'ok ' if ok else 'FAIL'}  {name:<13} {detail}")
+        mark = "ok " if ok else ("warn" if ok is None else "FAIL")
+        print(f"{mark}  {name:<13} {detail}")
     return 0 if ok_all else 1
+
+
+def _probe_summary(name: str, state: str, value: str | None) -> str:
+    """지문 한 칸 — `xcode 27.2` · `idb missing` · `java exit 1`. `rcm machines` 와 같다."""
+    return f"{name} {probe_token(state, value)}"
+
+
+def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | None, str]]:
+    """`rcm worker --check` 의 `fingerprint` · `presets` — 서버의 명세를 받아 **여기서** 잰다.
+
+    서버에 보고하지 않는다(등록도 capabilities 도 없다). 못 도는 프리셋은 사실이지 검사 실패가
+    아니다 — 두 행은 FAIL 이 되지 않는다.
+    """
+    from remote_ci_monitor.client import ClientError
+    from remote_ci_monitor.remote_worker import RemoteWorker
+
+    try:
+        spec = client.spec()
+    except ClientError as e:
+        why = "server has no /worker/spec (older rcm)" if e.status == 404 else e.message
+        return [("fingerprint", None, f"— {why}"), ("presets", None, f"— {why}")]
+    body = RemoteWorker(cfg, client=client, log=lambda _m: None).measure(spec)
+    fp = " · ".join(
+        _probe_summary(n, p.get("state", ""), p.get("value"))
+        for n, p in body["fingerprint"].items()
+    )
+    total = len(body["presets"])
+    ok = 0
+    reasons: dict[str, int] = {}
+    for facts in body["presets"].values():
+        if facts["missing_tools"]:
+            key = verdict_text("tool_missing", {"tools": facts["missing_tools"]})
+        elif facts["workspace_tools"]:
+            key = verdict_text("workspace_tool", {"tools": facts["workspace_tools"]})
+        else:
+            ok += 1
+            continue
+        reasons[key] = reasons.get(key, 0) + 1
+    top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+    detail = " · ".join([f"{ok}/{total} ok", *(f"{n} {k}" for k, n in top)])
+    return [("fingerprint", True, fp or "no probes configured"), ("presets", True, detail)]
 
 
 def cmd_token(args: argparse.Namespace) -> int:
@@ -2192,6 +2789,9 @@ def cmd_token(args: argparse.Namespace) -> int:
             where = "RCM_TOKEN on the worker machine" if worker else "RCM_TOKEN on the client"
             _info(f"token '{args.name}' created — shown once, store it as {where}:")
             print(secret, flush=True)
+            if worker:
+                # 다음에 칠 명령 — 비밀은 다시 찍지 않는다(M5n §9)
+                _info("on the worker machine: RCM_WORKER_TOKEN=<token above> rcm worker --check")
             return 0
         if args.token_command == "list":
             print(f"{'name':<24} {'kind':<7} {'created':<11} revoked")
@@ -2508,6 +3108,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         help="short text for --link, at most 40 characters (default: the URL, shortened)",
     )
+    run.add_argument(
+        "--machine",
+        metavar="ID",
+        help="run on this machine only (a worker id from `rcm machines`, `@local` for the build "
+        "machine); check presets need a token, any other preset an admin token",
+    )
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
     run.add_argument(
@@ -2634,6 +3240,20 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(jobs)
     jobs.set_defaults(func=cmd_jobs)
 
+    machines = sub.add_parser(
+        "machines", help="list machines: host, pool, lanes, fingerprint, presets they can run"
+    )
+    machines.add_argument("--machine", metavar="ID", help="every preset verdict of one machine")
+    machines.add_argument("--json", action="store_true", help="the server's document as is")
+    client_opts(machines)
+    machines.set_defaults(func=cmd_machines)
+
+    recheck = sub.add_parser("recheck", help="run a machine's check presets again (admin token)")
+    recheck.add_argument("machine", help="machine id from `rcm machines` (`@local` for the server)")
+    recheck.add_argument("checks", nargs="*", metavar="CHECK", help="check presets (default: all)")
+    client_opts(recheck)
+    recheck.set_defaults(func=cmd_recheck)
+
     logs = sub.add_parser("logs", help="print a job log (token required)")
     logs.add_argument("job", type=int)
     logs.add_argument("--follow", action="store_true", help="keep printing until the job ends")
@@ -2733,12 +3353,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker.set_defaults(func=cmd_worker)
 
-    init = sub.add_parser("init", help="write a starter config file (server or client)")
+    init = sub.add_parser("init", help="write a starter config file (server, client or worker)")
     isub = init.add_subparsers(dest="init_kind", required=True)
     iserver = isub.add_parser("server", help="~/.config/rcm/server.toml from the packaged example")
     iclient = isub.add_parser("client", help="~/.config/rcm/client.toml pointing at your server")
     iclient.add_argument("--server", required=True, metavar="URL", help="http://build-machine:8787")
-    for sp in (iserver, iclient):
+    iworker = isub.add_parser(
+        "worker", help="~/.config/rcm/worker.toml for another computer that runs jobs"
+    )
+    iworker.add_argument(
+        "--server",
+        metavar="URL|auto",
+        help="the rcm server, or auto to find it on this network (default: auto)",
+    )
+    iworker.add_argument("--pool", help="pool this computer serves (default: short host name)")
+    iworker.add_argument(
+        "--lanes", type=int, help="parallel jobs on this computer, 1-64 (default 1)"
+    )
+    iworker.add_argument("--name", help="display name (default: the host name)")
+    iworker.add_argument(
+        "--service-file",
+        metavar="PATH",
+        help="instead: write a launchd plist (macOS) or systemd unit (Linux) that runs "
+        "`rcm worker --config <worker.toml>` — the file only, nothing is started",
+    )
+    for sp in (iserver, iclient, iworker):
         sp.add_argument("--path", help="write here instead of the default location")
         sp.add_argument("--force", action="store_true", help="overwrite an existing file")
         sp.set_defaults(func=cmd_init)

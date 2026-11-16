@@ -76,6 +76,7 @@ class _MachineView:
     alive: bool
     report: CapabilityReport | None
     row: MachineRow | None
+    lanes: int | None = None  # 로컬은 `[server] lanes`, 원격은 등록한 레인 수(`rcm machines` 의 칸)
 
 
 def _probe_from_json(name: str, raw: Any) -> ProbeResult:
@@ -416,6 +417,7 @@ class CapabilitiesMixin:
                 alive=True,
                 report=self.report_of(LOCAL),
                 row=rows.get(LOCAL),
+                lanes=self.config.server.lanes,
             )
         ]
         for w in self._workers():
@@ -428,6 +430,7 @@ class CapabilitiesMixin:
                     alive=self.worker_alive(w, now),
                     report=self.report_of(w.name),
                     row=rows.get(w.name),
+                    lanes=w.lanes,
                 )
             )
         return views
@@ -481,9 +484,9 @@ class CapabilitiesMixin:
                     name: {
                         "state": p.state,
                         "value": p.value,
-                        "previous": (previous or {}).get(name).value  # type: ignore[union-attr]
-                        if previous and name in previous
-                        else None,
+                        # 마지막으로 **바뀐** 프로브만 앞 값을 싣는다(§8.1). 안 바뀐 것까지 실으면
+                        # 화면이 「바뀜」을 지어낸다
+                        "previous": _previous_value(previous, name, p),
                     }
                     for name, p in f.probes.items()
                 },
@@ -511,6 +514,7 @@ class CapabilitiesMixin:
             "display_name": view.display_name,
             "kind": view.kind,
             "pool": view.pool,
+            "lanes": view.lanes,
             "alive": view.alive,
             "host_label": self.host_label(view.display_name, host_key),
             "host_key": host_key,
@@ -783,6 +787,16 @@ class CapabilitiesMixin:
                 self.sweep_checks()
             except Exception as e:  # noqa: BLE001 — 스레드가 죽으면 점검이 조용히 멈춘다
                 self.record_error(f"capabilities: {type(e).__name__}: {e}"[:200])
+
+
+def _previous_value(
+    previous: Mapping[str, ProbeResult] | None, name: str, now: ProbeResult
+) -> str | None:
+    """그 프로브가 앞 지문과 달랐으면 앞 값, 같거나 앞이 없으면 None."""
+    before = (previous or {}).get(name)
+    if before is None or (before.state, before.value) == (now.state, now.value):
+        return None
+    return before.value
 
 
 def _iso(dt: datetime | None) -> str | None:

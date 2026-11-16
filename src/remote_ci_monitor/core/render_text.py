@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime, tzinfo
 from typing import Any
@@ -396,7 +397,137 @@ def _stall_text(row: dict[str, Any], est: dict[str, Any]) -> str:
     return "Not responding"
 
 
+def verdict_text(code: Any, detail: Any = None, state: Any = None) -> str:
+    """(워커, 프리셋) 판정 하나의 짧은 사유(M5n 가정 C3). 모르는 코드는 코드 그대로 — 빈칸보다 낫다.
+
+    `detail` 의 키는 `tools` · `check` · `job_id` 다. down 은 코드가 무엇이든 `down` 이다.
+    """
+    d = detail if isinstance(detail, Mapping) else {}
+    if state == "down" or code == "worker_down":
+        return "down"
+    if state == "eligible" or code == "ok":
+        return "eligible"
+    tools = ", ".join(str(t) for t in (d.get("tools") or []))
+    check = str(d.get("check") or "check")
+    if code == "tool_missing":
+        return f"{tools} missing" if tools else "tool missing"
+    if code == "workspace_tool":
+        return f"{tools} workspace only" if tools else "workspace only"
+    if code == "check_failed":
+        job_id = d.get("job_id")
+        return f"{check} failed #{job_id}" if job_id is not None else f"{check} failed"
+    if code == "check_running":
+        return f"{check} running"
+    if code == "check_needed":
+        return f"need {check}"
+    if code == "report_missing":
+        return "no report"
+    if code == "report_stale":
+        return "stale report"
+    if code == "fingerprint_unknown":
+        return "fingerprint unknown"
+    return str(code) if code else DASH
+
+
+def placement_note_text(note: Mapping[str, Any]) -> str:
+    """배치 메모 하나 → `<이름>: <짧은 사유>`. 이름은 이름표, 없으면 워커 id(가정 C5)."""
+    name = note.get("display_name") or note.get("worker") or "?"
+    return f"{name}: {verdict_text(note.get('code'), note.get('detail'), note.get('state'))}"
+
+
+def blocked_notes_text(notes: Any) -> str:
+    """eligible 이 **아닌** 메모만 ` · ` 로 잇는다. 하나도 없으면 `unknown` — 사유를
+    지어내지 않는다(§12)."""
+    parts = [
+        placement_note_text(n)
+        for n in (notes if isinstance(notes, list) else [])
+        if isinstance(n, Mapping) and n.get("state") != "eligible"
+    ]
+    return " · ".join(parts) if parts else "unknown"
+
+
+_VERSION_RE = re.compile(r"\d+(\.\d+)+")
+
+
+def probe_token(state: Any, value: Any) -> str:
+    """프로브 값 하나의 짧은 꼴(가정 C2): ok 면 첫 버전 번호(없으면 첫 낱말) · error 면 값 그대로
+    (`exit 72`) · missing 이면 `missing`. 값이 없으면 `—` — 지어내지 않는다."""
+    if state == "missing":
+        return "missing"
+    text = str(value).strip() if value is not None else ""
+    if state == "timeout" and not text:
+        return "timeout"
+    if state == "error":
+        return text or "error"
+    if not text:
+        return DASH
+    m = _VERSION_RE.search(text)
+    return m.group(0) if m else text.split()[0]
+
+
+def fingerprint_summary(fingerprint: Any) -> str:
+    """지문 요약 칸 — 프로브마다 `<이름> <값>` 을 ` · ` 로. 프로브가 없으면 `—`."""
+    probes = (fingerprint or {}).get("probes") if isinstance(fingerprint, Mapping) else None
+    if not isinstance(probes, Mapping) or not probes:
+        return DASH
+    return " · ".join(
+        f"{name} {probe_token((p or {}).get('state'), (p or {}).get('value'))}"
+        for name, p in probes.items()
+    )
+
+
+def presets_summary(presets: Any) -> str:
+    """프리셋 칸(가정 C4) — `<eligible>/<전체> ok` 뒤에 사유를 짧은 글자별로 세어 많은 순 →
+    글자 순으로 셋까지."""
+    verdicts = presets if isinstance(presets, Mapping) else {}
+    ok = 0
+    counts: dict[str, int] = {}
+    for v in verdicts.values():
+        v = v if isinstance(v, Mapping) else {}
+        if v.get("state") == "eligible":
+            ok += 1
+            continue
+        text = verdict_text(v.get("code"), v.get("detail"), v.get("state"))
+        counts[text] = counts.get(text, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+    return " · ".join([f"{ok}/{len(verdicts)} ok", *(f"{n} {text}" for text, n in top)])
+
+
+#: 배치가 낸 새 이유(§7.3) → 이유 줄 머리말
+_PLACEMENT_REASON_HEAD = {
+    "no_capable_machine": "no capable machine",
+    "check_failed": "check failed",
+    "check_pending": "check pending",
+}
+
+
+def placement_reason_text(row: Mapping[str, Any]) -> str | None:
+    """배치 이유 줄(가정 C6). 새 이유면 `<머리말> — <메모들>`, 아니면 None."""
+    head = _PLACEMENT_REASON_HEAD.get(str(row.get("reason")))
+    if head is None:
+        return None
+    return f"{head} — {blocked_notes_text(row.get('placement_detail'))}"
+
+
+def placement_suffix(row: Mapping[str, Any]) -> str:
+    """대기 행 이유 뒤에 붙는 꼬리: 지정 잡은 ` · on <워커>`, any-capable 은 ` · any machine`."""
+    if row.get("state") not in (QUEUED, UPLOADING) or row.get("reason") in _PLACEMENT_REASON_HEAD:
+        return ""
+    if row.get("target_worker"):
+        return f" · on {row['target_worker']}"
+    if row.get("placement") == "capable":
+        return " · any machine"
+    return ""
+
+
 def _reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = None) -> str:
+    placed = placement_reason_text(row)
+    if placed is not None:
+        return placed
+    return _plain_reason_text(row, workers) + placement_suffix(row)
+
+
+def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None = None) -> str:
     reason = row.get("reason")
     est = row.get("estimate") or {}
     blocked = row.get("blocked_by")

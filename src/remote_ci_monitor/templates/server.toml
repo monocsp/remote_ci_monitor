@@ -51,6 +51,10 @@ max_concurrent_artifact_transfers = 2       # over this, the server answers 503 
 # cancel_requires_submission_token = false   # true: only the submission's cancel token (rcm run keeps it in
 #                                   # ~/.local/state/rcm/submissions.json) or an admin token cancels a job.
 #                                   # Clients before 0.2.7 then cannot cancel — see docs/configuration.md
+# probe_interval_seconds = 600      # each worker re-runs the [[probes]] this often (at least 60)
+# auto_checks = true                # a changed fingerprint runs that machine's check presets once
+# local_accept_any = true           # this server's own lanes take placement = "any-capable" jobs
+# check_sweep_seconds = 30          # how often the automatic checks are looked for
 
 [estimate]
 sample_days = 45
@@ -136,7 +140,10 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   median) · source_modes (default ["tree"]) · repo · concurrency_group · priority ("low" | "normal" | "high") ·
 #   pool (worker pool, default "default") · pools (extra pools a session may pick with --pool) ·
 #   env_passthrough (default: PATH HOME LANG) · [presets.env] · requires (tools the job must find in
-#   its own environment before it starts — names or absolute paths; missing → failed, tool_missing).
+#   its own environment before it starts — names or absolute paths; missing → failed, tool_missing)
+#   · placement ("pool" | "any-capable") · concurrency_scope ("pool" | "host" | "global") · checks
+#   (check presets that must pass on a machine first) · check_ref · sample (false: not in medians).
+#   Machines and placement: docs/configuration.md, "Which machine runs a job".
 # Input keys: name · type = "choice" | "string" | "int" | "bool" · choices (choice) · pattern (string)
 #   · default · description.
 
@@ -216,3 +223,53 @@ default = "default"
 # repo = "app"
 # timeout_seconds = 1800
 # concurrency_group = "deploy"
+
+# ── Flutter on several machines (any machine that can run it) ──────────────
+# Every worker runs these probes in its own service environment and reports the output as its
+# fingerprint; `rcm machines` shows it. The values are visible on /api/machines and /api/status,
+# so pick commands that print only a version. Nothing here is built into rcm — adjust freely.
+# [[probes]]
+# name = "flutter"
+# argv = ["fvm", "flutter", "--version"]
+# timeout_seconds = 30
+# [[probes]]
+# name = "xcode"
+# argv = ["xcodebuild", "-version"]
+# [[probes]]
+# name = "java"
+# argv = ["java", "-version"]
+# [[probes]]
+# name = "idb"
+# argv = ["idb_companion", "--version"]
+#
+# A check preset: the project's own proof that a machine works (boot a simulator, tap once). It
+# must accept git_ref — rcm submits it by itself, pinned to a machine, whenever that machine's
+# fingerprint changes. Putting pub get / pod install in front of it also warms the caches.
+# [[presets]]
+# name = "sim-check"
+# description = "Simulator boots and takes a tap"
+# argv = ["bash", "scripts/qa/sim_check.sh"]
+# source_modes = ["git_ref"]
+# repo = "app"
+# check_ref = "HEAD"                # the ref rcm runs it from (HEAD = the default branch)
+# requires = ["fvm", "xcrun", "idb_companion"]
+# timeout_seconds = 900
+#
+# The gate on any machine that has the tools — no secrets, so it may leave this machine.
+# [[presets]]
+# name = "flutter-gate"
+# argv = ["bash", "scripts/local_ci.sh"]
+# placement = "any-capable"         # instead of a pool: any machine whose verdict is eligible
+# requires = ["fvm", "gitleaks"]
+# concurrency_group = "flutter-gate"
+# concurrency_scope = "host"        # one at a time per computer, in parallel across computers
+# timeout_seconds = 3600
+#
+# Simulator QA only where sim-check passed with the machine's current fingerprint.
+# [[presets]]
+# name = "scenario-qa"
+# argv = ["bash", "scripts/qa/scenario.sh"]
+# checks = ["sim-check"]
+# concurrency_group = "simulator"
+# concurrency_scope = "host"
+# timeout_seconds = 3600

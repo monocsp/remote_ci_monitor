@@ -86,6 +86,13 @@ macOS 면 방화벽 허용 창에서 Python 을 허용한다. 다른 컴퓨터�
 로그인·재부팅을 넘겨 계속 돌리는 방법은
 [빌드 머신 운영](docs/operating.md#run-as-a-service)의 launchd·systemd 예시에 있다.
 
+**두 번째 컴퓨터**는 워커로 붙인다. 여기서 `rcm token add mbp --worker`, 그 컴퓨터에서
+`rcm init worker` 와 `rcm worker --check`(같은 네트워크면 서버를 스스로 찾는다). 머신마다 무엇을
+돌릴 수 있는지 스스로 보고하고, `rcm machines` 가 그 목록을 보여 준다. 프리셋에
+`placement = "any-capable"` 을 주면 도구를 갖춘 아무 머신이 가져간다 —
+[Second build machine](docs/configuration.md#second-build-machine-remote-worker) ·
+[Which machine runs a job](docs/configuration.md#which-machine-runs-a-job).
+
 ## Session machine (3 commands)
 
 세션에 필요한 건 두 가지다. 서버가 **어디** 있는지, 그리고 **내가 누구**인지. 자동이 되는 건
@@ -168,7 +175,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 
 | 명령 | 무엇을 보여 주나 |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷 |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 작업 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 작업은 대기 대신 상태와 경과 |
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
@@ -177,6 +184,8 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 | `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | 작업이 만든 파일을 보고, 받는다. `rcm run --fetch-artifacts` 는 제출한 트리로 한 번에 가져온다 |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
 | `rcm discover [--json] [--timeout S]` | 이 네트워크의 rcm 서버들(mDNS). 발견으로 정해지면 `rcm check` 가 `(found on this network)` 를 붙인다 |
+| `rcm machines [--json] [--machine ID]` | 잡을 돌리는 머신 전부: 호스트 · 풀 · 레인 · 환경 지문(`xcode 27.2 · flutter 3.47.8`) · 돌릴 수 있는 프리셋 수와 나머지의 사유. `--machine` 은 한 머신의 프리셋별 판정과 점검([머신](docs/configuration.md#which-machine-runs-a-job)) |
+| `rcm recheck MACHINE [CHECK…]` | 머신을 고친 뒤 그 머신의 점검 프리셋을 다시 건다(관리자) |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류만 취소된다) · 큐 일시정지·재개(관리자) |
 | `rcm reload` | 설정 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자) |
 | `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
@@ -352,7 +361,7 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 |---|---|
 | [사용법 가이드](docs/usage.ko.md) · [English](docs/usage.md) | 첫 작업까지 한 단계씩, 주석 단 화면과 함께 |
 | [Release contract](docs/release-contract.md) | 스토어 탭을 위해 프로젝트가 주는 것: 프로파일 · 역할별 프리셋 · 산출물 파일 · 마커 · 비밀 · 드라이버 · 그것을 만들어 주는 스킬 |
-| [Configuration](docs/configuration.md) | 프리셋 · 입력 · 마커 · 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 풀과 원격 워커 · 알림 · 클라이언트와 워커 파일 |
+| [Configuration](docs/configuration.md) | 프리셋 · 입력 · 마커 · 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 풀과 원격 워커 · 잡을 어느 머신이 돌리나(프로브 · 배치 · 점검) · 알림 · 클라이언트와 워커 파일 |
 | [Operating the build machine](docs/operating.md) | 서비스로 돌리기 · Docker · 업그레이드 · 보안 · 숫자가 틀릴 수 있는 이유 · 실제 머신에서의 수동 점검 |
 | [CHANGELOG.md](CHANGELOG.md) | 사용자에게 보이는 모든 변경, 최신순 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 · 규칙 · 브랜치 · 릴리스 |

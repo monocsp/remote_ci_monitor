@@ -441,6 +441,7 @@ MACHINE_KEYS = {
     "display_name",
     "kind",
     "pool",
+    "lanes",  # 역할 C 가정 C1 — `rcm machines` 의 레인 칸
     "alive",
     "host_label",
     "host_key",
@@ -934,3 +935,21 @@ def test_eta_with_an_explicit_pool_keeps_the_pool_rule(srv):
     )
     assert status == 200, body
     assert body["job"]["placement"] == "pool"
+
+
+def test_previous_is_only_on_the_probe_that_changed(tmp_path):
+    """§8.1 — 바뀐 프로브만 앞 값을 싣는다. 안 바뀐 프로브의 `previous` 는 null 이다."""
+    probes = PROBES + f'\n[[probes]]\nname = "idb"\nargv = ["{PY}", "-c", "print(1)"]\n'
+    s = M5nServer(tmp_path, probes=probes)
+    try:
+        gen = s.reported("build-02", probes={"xc": ok_probe("Xc 1"), "idb": ok_probe("idb 1")})
+        s.clock.advance(5)
+        assert (
+            s.report("build-02", gen, probes={"xc": ok_probe("Xc 2"), "idb": ok_probe("idb 1")})[0]
+            == 200
+        )
+        fp = s.machines()["build-02"]["fingerprint"]["probes"]
+        assert fp["xc"]["previous"] == "Xc 1"
+        assert fp["idb"]["previous"] is None
+    finally:
+        s.close()

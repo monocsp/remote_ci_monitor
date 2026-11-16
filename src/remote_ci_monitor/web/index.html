@@ -57,6 +57,15 @@
     </details>
   </section>
 
+  <!-- 머신 (M5n §8.3) — 접힌 채로 시작한다. `/api/machines` 가 없는 옛 서버면 절째 숨는다.
+       행은 `renderMachines` 가 채운다: 머신마다 `tr[data-machine]`, admin 일 때만 `button.recheck`. -->
+  <section id="machines-section" class="s-section" aria-label="머신" data-i18n-attr="aria-label:section.machines" hidden>
+    <details id="machines">
+      <summary><span class="t" data-i18n="section.machines">머신</span><span class="n" data-machines-digest></span></summary>
+      <div data-machines-body></div>
+    </details>
+  </section>
+
   <!-- 최근 완료 (항목 14 · 15 · 32) -->
   <section id="recent" class="s-section last" aria-label="최근" data-i18n-attr="aria-label:section.recent">
     <div class="s-h"><span class="t" data-i18n="section.recent">최근</span><span class="n" data-recent-header></span></div>

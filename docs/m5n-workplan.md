@@ -270,12 +270,12 @@ claim 하는 쪽(로컬 레인 · 원격 레인)이 자기 신원을 넘긴다:
 ```python
 @dataclass(frozen=True)
 class Claimant:
-    worker: str            # "@local" 또는 워커 이름
+    worker: str  # "@local" 또는 워커 이름
     pool: str
     host_key: str
     fingerprint_hash: str | None
-    capable: tuple[str, ...]       # 이 워커가 지금 eligible 인 any-capable 프리셋 이름들
-    gated: tuple[str, ...]         # pool 잡 중 checks 판정으로 막힌 프리셋 이름들
+    capable: tuple[str, ...]  # 이 워커가 지금 eligible 인 any-capable 프리셋 이름들
+    gated: tuple[str, ...]  # pool 잡 중 checks 판정으로 막힌 프리셋 이름들
 ```
 
 후보 잡(대기, 우선순위 내림차순 · id 오름차순 — 오늘과 같은 순서):
