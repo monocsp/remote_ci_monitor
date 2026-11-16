@@ -225,8 +225,9 @@ _JOB_RE = re.compile(
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
-#: `POST /machines/{id}/recheck` — 머신 id 는 워커 이름 또는 `@local`(M5n §8.1)
-_RECHECK_RE = re.compile(r"^/machines/(@local|[A-Za-z0-9][A-Za-z0-9._-]{0,63})/recheck$")
+#: `POST /machines/{id}/recheck` — 머신 id 는 워커 이름 또는 `@local`(M5n §8.1). 웹은
+#: `encodeURIComponent` 로 부르므로 `@` 가 `%40` 으로 온다 — 그 하나만 받아 `@local` 로 푼다
+_RECHECK_RE = re.compile(r"^/machines/((?:@|%40)local|[A-Za-z0-9][A-Za-z0-9._-]{0,63})/recheck$")
 _WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat|capabilities)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
 _ID_IN_PATH = re.compile(r"/(\d+)")
@@ -5000,7 +5001,8 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._only(method, "POST")
             t = self.app.require_admin(self._token())
-            self._send_json(200, self.app.recheck_route(m.group(1), self._json_body(), t))
+            machine = "@local" if m.group(1) == "%40local" else m.group(1)
+            self._send_json(200, self.app.recheck_route(machine, self._json_body(), t))
             return
         if path == "/api/repos":
             self._only(method, "GET")
