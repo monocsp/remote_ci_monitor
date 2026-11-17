@@ -21,7 +21,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from remote_ci_monitor.core import capability as cap
@@ -54,9 +54,21 @@ PROBE_VALUE_MAX = cap.PROBE_VALUE_MAX
 #: 판정에서 「도구 문제」— pool 잡은 이것으로 막지 않는다(결정 98: 집어서 즉시 tool_missing)
 _TOOL_CODES = frozenset({cap.CODE_TOOL_MISSING, cap.CODE_WORKSPACE_TOOL})
 _CHECK_CODES_PENDING = frozenset({cap.CODE_CHECK_RUNNING, cap.CODE_CHECK_NEEDED})
+#: 자동 점검의 하루 상한 — (워커, 점검)마다(결정 105). 워커는 자기 지문을 스스로 말하므로, 지문을
+#: 매번 바꿔 보내는 워커가 점검을 끝없이 돌리게 할 수 없다. 사람의 다시 점검은 세지 않는다
+AUTO_CHECKS_PER_DAY = 3
+AUTO_CHECK_WINDOW = timedelta(days=1)
 #: 원격이 보낸 host_key 가 가질 수 있는 꼴 — 해시(16 hex) 또는 `worker:<이름>`. 그 밖은 버리고
 #: `worker:<이름>` 으로(화면 · 로그 · 잡 행에 실리는 값이다)
 _HOST_KEY_RE = re.compile(r"[A-Za-z0-9:._-]{1,80}")
+
+
+class MachineDown(Exception):
+    """그 머신이 down 이다 — 거기에 점검을 걸어도 기다리기만 한다(결정 106)."""
+
+
+class AmbiguousMachine(ValueError):
+    """표시 이름이 여러 머신에 맞는다 — 워커 id 로 골라야 한다(결정 108)."""
 
 
 class CapabilityError(Exception):
@@ -654,7 +666,10 @@ class CapabilitiesMixin:
         fp = view.report.fingerprint.hash if view.report is not None else None
         if fp is None:
             return True
-        return not self.store.auto_check_done(view.id, check, fp)
+        if self.store.auto_check_done(view.id, check, fp):
+            return False
+        # 하루 상한에 걸렸으면 스위퍼가 안 건다 — 사람이 다시 걸어야 풀린다(결정 105)
+        return not self._auto_check_limited(view.id, check, self.now_fn())
 
     def _flag_recheck(self, view: _MachineView, v: Verdict) -> Verdict:
         """스스로 안 풀리는 `check_needed` 판정에 `detail.recheck = True` 를 단다(코드는 그대로)."""
@@ -883,12 +898,42 @@ class CapabilitiesMixin:
             for name in wanted:
                 if self.store.auto_check_done(view.id, name, fp):
                     continue
+                if self._auto_check_limited(view.id, name, now):
+                    if self._check_errors.get((view.id, name)) != "auto_check_limit":
+                        self.log(
+                            f"machine check {name} on {view.id}: not submitted — "
+                            f"{AUTO_CHECKS_PER_DAY} automatic checks in 24h (fingerprint keeps "
+                            "changing?) — rcm recheck runs it by hand"
+                        )
+                    self._check_errors[(view.id, name)] = "auto_check_limit"
+                    continue
                 job_id = self._submit_check(view, name, fp, auto=True)
                 if job_id is not None:
                     submitted.append(job_id)
         if submitted:
             self.log(f"machine checks submitted: {submitted}")
         return submitted
+
+    def resolve_machine(self, name: str, views: list[_MachineView]) -> _MachineView:
+        """`--machine` · `recheck` 의 이름 → 머신(결정 108). 워커 id(`@local` 포함)가 먼저고,
+        아니면 `rcm machines` 에 보이는 표시 이름. 없으면 `KeyError`, 여럿이면
+        `AmbiguousMachine`(맞는 id 들을 댄다)."""
+        for v in views:
+            if v.id == name:
+                return v
+        hits = [v for v in views if v.display_name == name]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            ids = ", ".join(v.id for v in hits)
+            raise AmbiguousMachine(
+                f"machine name {name!r} matches several machines: {ids} — use the id"
+            )
+        raise KeyError(name)
+
+    def _auto_check_limited(self, worker: str, check: str, now: datetime) -> bool:
+        since = now - AUTO_CHECK_WINDOW
+        return self.store.auto_checks_since(worker, check, since) >= AUTO_CHECKS_PER_DAY
 
     def _could_receive(self, view: _MachineView, preset: Preset) -> bool:
         """이 워커가 이 프리셋의 잡을 받을 수 있는 자리인가 — any-capable 이면 any-capable 을 받는
@@ -903,10 +948,9 @@ class CapabilitiesMixin:
         """`POST /machines/{id}/recheck` — 사람이 다시 건다(한 번 제한과 무관). 없는 머신은
         `KeyError`, 점검 프리셋이 아닌 이름은 `ValueError`."""
         now = self.now_fn()
-        views = {v.id: v for v in self.machine_views(now)}
-        view = views.get(worker)
-        if view is None:
-            raise KeyError(worker)
+        view = self.resolve_machine(worker, self.machine_views(now))  # KeyError · Ambiguous
+        if not view.alive:
+            raise MachineDown(view.id)
         checks = self.check_preset_names()
         targets = list(checks) if names is None else list(names)
         bad = [n for n in targets if n not in checks]

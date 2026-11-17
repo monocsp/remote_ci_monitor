@@ -815,3 +815,12 @@ PR 하나(`feat/m5n-capable-worker-placement`), 단계 다섯 — 각 단계가 
 409 다. ③ 사람이 지정한 점검이 유실되면 그 머신의 앞선 통과도 「가장 새 잡」 규칙으로 다시
 `check_needed` 가 된다(§4.4). ④ `rcm machines` 표는 로컬을 호스트 이름으로 보이지만 `--machine` ·
 `recheck` 는 `@local` 만 받는다. 나머지는 보고서에 있다.
+
+### 19.2 오너 결정 105~108 (2026-11-17)
+
+| # | 결정 | 구현 |
+|---|---|---|
+| 105 | 워커 토큰이 자기 호스트 · 지문을 말하는 설계는 그대로. 자동 점검은 (워커, 점검)마다 **24시간에 3번**까지 — 넘으면 `error_code = "auto_check_limit"`, 사람의 다시 점검은 세지 않는다 | `capabilities.AUTO_CHECKS_PER_DAY` · `store.auto_checks_since` |
+| 106 | `rcm recheck` 도 down 머신은 409(`rcm run --machine` 과 같다) | `MachineDown` |
+| 107 | 판정 없이 끝난 점검(취소 · 유실)은 같은 지문으로 이미 난 판정(통과 · 실패)을 지우지 않는다 | `capability.check_state` |
+| 108 | `--machine` · `recheck` · `rcm machines --machine` 은 워커 id 와 **표시 이름**을 받는다(id 먼저, 여럿이면 400). `rcm machines` 첫 칸은 `Mac mini (@local)` | `resolve_machine` · `_machine_label` |

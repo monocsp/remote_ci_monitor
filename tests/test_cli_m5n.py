@@ -271,7 +271,7 @@ def test_machines_prints_the_s1_table_with_one_row_per_machine(fake, capsys):
     assert rows[0] == HEADER, out
     assert rows[1:] == [
         [
-            "Mac mini",
+            "Mac mini (@local)",  # 결정 108 — 표시 이름이 id 와 다르면 id 를 붙인다
             MACMINI_HOST,
             "default",
             "2",
@@ -295,7 +295,7 @@ def test_two_workers_on_one_host_show_the_same_host_label(fake, capsys):
     code, out, _ = run(capsys, ["machines"])
     assert code == 0
     by_name = {r[0]: r for r in table(out)[1:]}
-    assert by_name["Mac mini"][1] == by_name["mac2-worker"][1] == MACMINI_HOST
+    assert by_name["Mac mini (@local)"][1] == by_name["mac2-worker"][1] == MACMINI_HOST
     assert by_name["mbp"][1] != MACMINI_HOST
 
 

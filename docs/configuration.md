@@ -1181,7 +1181,12 @@ applies to `pool` presets — a check that has not passed makes the job **wait**
 `check_sweep_seconds` (30) submits each needed check **pinned to that worker**: requester
 `rcm:check`, label `rcm (machine check)`, priority `high`. It does so **once** per worker, check
 and fingerprint, so a check that fails, is cancelled or is lost is not submitted again by itself —
-no retry loop. A worker that is down gets none. If `check_ref` cannot be resolved the sweep skips
+no retry loop — and **at most three times a day** per worker and check, however often the
+fingerprint changes (a worker describes its own environment; one that keeps reporting a new
+fingerprint shows `auto_check_limit` instead of running checks all day). A worker that is down gets
+none, and neither does a worker that could never take the preset that needs the check (outside its
+pool, or not accepting any-capable jobs). A check that ends without a verdict (cancelled or lost)
+proves nothing: a pass or failure already recorded for the same fingerprint still stands. If `check_ref` cannot be resolved the sweep skips
 that check and `rcm machines` shows `ref_unresolved`. A check job is an ordinary job: it is in the
 queue, keeps its log and fires notifications.
 
@@ -1240,15 +1245,17 @@ check that also warms caches is not a fair sample); everything else defaults to 
 
 ```
 $ rcm machines
-machine      host            pool     lanes  fingerprint                   presets
-Mac mini     macmini (a1f3)  default  2      xcode 27.2 · flutter 3.47.8   21/24 ok · 3 need sim-check
-mac2-worker  macmini (a1f3)  mac2     1      xcode 27.2 · flutter 3.47.8   21/24 ok
-mbp          mbp (7c20)      mbp      1      xcode 26.5 · flutter missing  4/24 ok · 18 fvm missing
+machine            host            pool     lanes  fingerprint                   presets
+Mac mini (@local)  macmini (a1f3)  default  2      xcode 27.2 · flutter 3.47.8   21/24 ok · 3 need sim-check
+mac2-worker        macmini (a1f3)  mac2     1      xcode 27.2 · flutter 3.47.8   21/24 ok
+mbp                mbp (7c20)      mbp      1      xcode 26.5 · flutter missing  4/24 ok · 18 fvm missing
 ```
 
 `rcm machines [--json] [--machine ID]` — one row per worker; two workers on one host show the same
-host label. A machine's ID is its worker token name, or `@local` for the server's own lanes (the
-first column shows the display name; `--json` has both). `--machine ID` prints that worker's
+host label. A machine's ID is its worker token name, or `@local` for the server's own lanes; the first column
+shows the display name with the ID in brackets when they differ. `--machine`, `rcm run --machine`
+and `rcm recheck` take either — the ID first, then the display name; a name that fits several
+machines is refused with their IDs. `--machine ID` prints that worker's
 verdict for every preset, each probe with its previous value, and its checks. `--json` is the
 `GET /api/machines` document as the server sends it.
 
@@ -1259,8 +1266,9 @@ hours and which check failed — `3 machines · 1 environment changed (Mac mini:
 `gate: any machine (2 eligible) · scenario-qa: pool default (check failed)`; warn when one has none.
 
 `rcm recheck MACHINE [CHECK…]` (admin; `POST /machines/{id}/recheck`) submits that worker's checks
-again — all of them, or the ones named — whatever the automatic once-per-fingerprint rule says, and
-prints each job number. The web page has the same as a **Recheck** button in its machines table,
+again — all of them, or the ones named — whatever the automatic once-per-fingerprint rule and the
+daily limit say, and prints each job number. A machine that is down is refused (409), as with
+`rcm run --machine`: start `rcm worker` there first. The web page has the same as a **Recheck** button in its machines table,
 for admin tokens. `rcm top` and `rcm jobs` mark an `any-capable` waiting job `any machine` and a
 pinned one `on <machine>`.
 

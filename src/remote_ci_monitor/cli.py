@@ -1347,6 +1347,14 @@ def _machine_name(m: dict[str, Any]) -> str:
     return str(m.get("display_name") or m.get("id") or "?")
 
 
+def _machine_label(m: dict[str, Any]) -> str:
+    """표의 첫 칸 — 표시 이름이 id 와 다르면 id 를 붙인다(`Mac mini (@local)`). `--machine` ·
+    `recheck` 는 둘 다 받지만, 무엇을 치면 되는지 표에서 보여야 한다(결정 108)."""
+    name = _machine_name(m)
+    mid = str(m.get("id") or "")
+    return name if not mid or mid == name else f"{name} ({mid})"
+
+
 def _machines_fail(client: Client, e: ClientError) -> int:
     if e.status == 404:
         return _usage(
@@ -1424,7 +1432,10 @@ def cmd_machines(args: argparse.Namespace) -> int:
         return _machines_fail(client, e)
     machines = [m for m in doc["machines"] if isinstance(m, dict)]
     if args.machine is not None:
-        hit = [m for m in machines if m.get("id") == args.machine]
+        # id 가 먼저, 아니면 표시 이름(결정 108 — 서버의 `--machine` · `recheck` 와 같은 규칙)
+        hit = [m for m in machines if m.get("id") == args.machine] or [
+            m for m in machines if m.get("display_name") == args.machine
+        ]
         if not hit:
             ids = ", ".join(str(m.get("id")) for m in machines) or "(none)"
             return _usage(f"unknown machine '{args.machine}' — server has: {ids}")
@@ -1438,7 +1449,7 @@ def cmd_machines(args: argparse.Namespace) -> int:
         return 0
     rows = [list(MACHINES_HEADER)]
     for m in machines:
-        name = _machine_name(m) + ("" if m.get("alive", True) else " (down)")
+        name = _machine_label(m) + ("" if m.get("alive", True) else " (down)")
         lanes = m.get("lanes")
         rows.append(
             [
@@ -3174,8 +3185,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--machine",
         metavar="ID",
-        help="run on this machine only (a worker id from `rcm machines`, `@local` for the build "
-        "machine); check presets need a token, any other preset an admin token",
+        help="run on this machine only (an id or name from `rcm machines`, `@local` for the "
+        "build machine); check presets need a token, any other preset an admin token",
     )
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
@@ -3306,13 +3317,18 @@ def build_parser() -> argparse.ArgumentParser:
     machines = sub.add_parser(
         "machines", help="list machines: host, pool, lanes, fingerprint, presets they can run"
     )
-    machines.add_argument("--machine", metavar="ID", help="every preset verdict of one machine")
+    machines.add_argument(
+        "--machine", metavar="ID", help="every preset verdict of one machine (id or name)"
+    )
     machines.add_argument("--json", action="store_true", help="the server's document as is")
     client_opts(machines)
     machines.set_defaults(func=cmd_machines)
 
     recheck = sub.add_parser("recheck", help="run a machine's check presets again (admin token)")
-    recheck.add_argument("machine", help="machine id from `rcm machines` (`@local` for the server)")
+    recheck.add_argument(
+        "machine",
+        help="machine id or name from `rcm machines` (`@local` or its host name for the server)",
+    )
     recheck.add_argument("checks", nargs="*", metavar="CHECK", help="check presets (default: all)")
     client_opts(recheck)
     recheck.set_defaults(func=cmd_recheck)

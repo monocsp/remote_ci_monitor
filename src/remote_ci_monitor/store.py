@@ -3308,6 +3308,19 @@ class Store:
         )
         return r is not None
 
+    def auto_checks_since(self, worker: str, preset: str, since: datetime) -> int:
+        """그 (워커, 점검)에 rcm 이 `since` 뒤로 스스로 건 횟수 — 하루 상한(결정 105)."""
+        r = (
+            self._conn()
+            .execute(
+                "SELECT count(*) AS n FROM machine_checks WHERE worker=? AND preset=? AND auto=1 "
+                "AND submitted_at > ?",
+                (worker, preset, _ts(since)),
+            )
+            .fetchone()
+        )
+        return int(r["n"])
+
     def check_was_automatic(self, job_id: int) -> bool:
         """그 점검 잡을 rcm 이 스스로 걸었나(사람의 다시 점검 · 직접 제출이면 False)."""
         r = (

@@ -48,8 +48,10 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.capabilities import (
     CHECK_LABEL,
     CHECK_REQUESTER,
+    AmbiguousMachine,
     CapabilitiesMixin,
     CapabilityError,
+    MachineDown,
 )
 from remote_ci_monitor.clientwheel import (
     CANCEL_MIN_CLIENT_VERSION,
@@ -3715,18 +3717,25 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             if not isinstance(machine, str) or not machine:
                 raise ApiError(400, "machine must be a machine id (see rcm machines)")
             now = self.now_fn()
-            view = next((v for v in self.machine_views(now) if v.id == machine), None)
-            if view is None:
-                raise ApiError(400, f"unknown machine {machine!r} — see rcm machines")
+            try:
+                view = self.resolve_machine(machine, self.machine_views(now))
+            except KeyError as e:
+                raise ApiError(400, f"unknown machine {machine!r} — see rcm machines") from e
+            except AmbiguousMachine as e:
+                raise ApiError(400, str(e)) from e
             if not view.alive:
-                raise ApiError(409, f"machine {machine} is down", machine=machine)
+                raise ApiError(
+                    409,
+                    f"machine {view.id} is down — start rcm worker there first",
+                    machine=view.id,
+                )
             if preset.name not in self.check_preset_names() and not token.admin:
                 raise ApiError(
                     403,
                     f"--machine on preset '{preset.name}' needs an admin token "
                     "(any token may target a check preset)",
                 )
-            target = machine
+            target = view.id
             pool = view.pool
             fingerprint = view.report.fingerprint.hash if view.report else None
         capable = (
@@ -3772,6 +3781,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             jobs = self.recheck(machine, names)
         except KeyError as e:
             raise ApiError(404, f"no such machine {machine!r}") from e
+        except MachineDown as e:
+            # `rcm run --machine` 과 같은 규칙(결정 106) — 걸어 봐야 기다리기만 한다
+            raise ApiError(
+                409,
+                f"machine {e} is down — start rcm worker there, then recheck",
+                machine=str(e),
+            ) from e
         except ValueError as e:
             raise ApiError(400, str(e)) from e
         self._publish_server()

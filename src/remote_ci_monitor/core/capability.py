@@ -228,24 +228,31 @@ def changed_probes(
 def check_state(
     records: Sequence[CheckRecord], fingerprint_hash: str | None
 ) -> tuple[str, CheckRecord | None]:
-    """현재 지문으로 돈 가장 최근(가장 큰 job_id) 점검 잡 → CHECK_*.
+    """현재 지문으로 돈 점검 잡들 → CHECK_*.
 
     다른 지문의 기록은 아무것도 증명하지 않는다(Xcode 26.5 의 통과는 27.2 에서 무효).
     지문을 모르면(None) 무엇과도 맞추지 않는다.
+
+    가장 새 잡이 돌고 있으면 「점검 중」. 아니면 **판정(통과 · 실패)이 난 가장 새 잡**이 답이다 —
+    판정 없이 끝난 잡(취소 · 유실)은 아무것도 증명하지 않으므로 앞선 판정을 지우지 않는다(결정
+    107, 2026-11-17). 판정 난 잡이 하나도 없으면 「점검 필요」(그 마지막 잡을 근거로 싣는다).
     """
     if fingerprint_hash is None:
         return CHECK_NEEDED, None
-    mine = [r for r in records if r.fingerprint_hash == fingerprint_hash]
+    mine = sorted(
+        (r for r in records if r.fingerprint_hash == fingerprint_hash), key=lambda r: r.job_id
+    )
     if not mine:
         return CHECK_NEEDED, None
-    latest = max(mine, key=lambda r: r.job_id)
-    if latest.job_state == "succeeded":
-        return CHECK_PASSED, latest
+    latest = mine[-1]
     if latest.job_state in _ACTIVE_JOB_STATES:
         return CHECK_RUNNING, latest
-    if latest.job_state in _FAILED_JOB_STATES:
-        return CHECK_FAILED, latest
-    # cancelled · lost — 아무것도 증명하지 않았다
+    for record in reversed(mine):
+        if record.job_state == "succeeded":
+            return CHECK_PASSED, record
+        if record.job_state in _FAILED_JOB_STATES:
+            return CHECK_FAILED, record
+    # cancelled · lost 뿐 — 아무것도 증명하지 않았다
     return CHECK_NEEDED, latest
 
 
