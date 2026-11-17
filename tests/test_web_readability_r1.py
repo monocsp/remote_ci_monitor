@@ -484,6 +484,35 @@ def test_no_text_is_cut_by_less_than_a_pixel(tmp_path):
     )
 
 
+# 머리줄은 내용 폭만큼만 넓다 — 앞 토막의 최대 폭(칸 − 3em)이 이름 몫 3em 을 비워 두는데, 이름이
+# 3em 보다 짧으면(`build`) 그 몫이 모자라 앞 토막이 `step 2/…` 로 잘렸다(문서 스크린샷 재생성 때 발견).
+HEAD_A_JS = """
+(() => {
+  const a = document.querySelector('#queue tr.expanded .prog .head .ph-a');
+  const n = document.querySelector('#queue tr.expanded .prog .head .ph-name');
+  if (!a) return {missing: true};
+  return {text: a.textContent, name: n && n.textContent, cut: a.scrollWidth > a.clientWidth + 0};
+})()
+"""
+
+
+def test_a_short_step_name_leaves_the_step_counter_whole(tmp_path):
+    served = A.Served("long-text")
+    try:
+        with Chrome(tmp_path / "chrome-r1-short-step", window="1280,900") as c:
+            for width, lang in A.CASES:
+                served.swap(A.long_text_doc())
+                A.open_scene(c, served, width, lang)
+                served.swap(A.updated_doc(served.doc))  # 1234568 의 단계 이름이 「짧음」이 된다
+                A.refetch(c, "document.querySelector('#queue tr.expanded .ph-name') !== null"
+                          " && document.querySelector('#queue tr.expanded .ph-name')"
+                          ".textContent === '짧음'")
+                m = c.eval(HEAD_A_JS)
+                assert not m.get("missing") and not m["cut"], f"{lang}@{width}: {m}"
+    finally:
+        served.close()
+
+
 BANNER_JS = """
 (() => {
   const n = document.getElementById('banner-note');
