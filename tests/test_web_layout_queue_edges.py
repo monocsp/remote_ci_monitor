@@ -815,7 +815,8 @@ RECENT_K_JS = """
     const kn = k.querySelector('.kn');
     out.push({job: row.getAttribute('data-job'), kOver: k.scrollWidth - k.clientWidth,
       chipW: Math.round(cr.width), chipIn: cr.left >= kr.left - 1 && cr.right <= kr.right + 1,
-      knCut: kn.scrollWidth > kn.clientWidth + 1, key: kn.getAttribute('title')});
+      knCut: kn.scrollWidth > kn.clientWidth + 1, key: kn.getAttribute('title'),
+      chipCut: chip.scrollWidth > chip.clientWidth + 1});
   });
   return out;
 })()
@@ -823,7 +824,8 @@ RECENT_K_JS = """
 
 
 def recent_chip_doc() -> dict:
-    """풀 여섯 장면에 다른 풀의 최근 잡 둘 — 짧은 이름 하나, 긴 이름 + 링크 하나."""
+    """풀 여섯 장면에 다른 풀의 최근 잡 셋 — 짧은 이름 하나, 긴 이름 + 링크 하나, 그리고 문서
+    스크린샷의 그 행(`remote-demo` · 풀 `mac2`). 그 행은 1240px 에서 `remote-d… po…` 였다."""
     doc = pools_doc()
     tmpl = base_doc()["pools"][0]["recent"][1]
     short = {**copy.deepcopy(tmpl), "id": 5000001, "key": "mac2-only", "summary": ""}
@@ -836,6 +838,10 @@ def recent_chip_doc() -> dict:
     }
     doc["pools"][1]["recent"] = [short]
     doc["pools"][2]["recent"] = [long_]
+    doc["pools"][3]["name"] = "mac2"
+    doc["pools"][3]["recent"] = [
+        {**copy.deepcopy(tmpl), "id": 5000003, "key": "remote-demo", "summary": ""}
+    ]
     return doc
 
 
@@ -848,10 +854,14 @@ def test_recent_pool_chip_shrinks_inside_the_name_cell(tmp_path, monkeypatch):
         with Chrome(tmp_path / "chrome-recent-chip", window="1280,900") as c:
             for width, lang in CASES:
                 open_scene(c, served, width, lang)
-                _wait(c, "document.querySelectorAll('#recent .rrow .k .chip').length >= 2")
+                _wait(c, "document.querySelectorAll('#recent .rrow .k .chip').length >= 3")
                 rows = c.eval(RECENT_K_JS)
                 bad = [r for r in rows if r["kOver"] > 1 or not r["chipIn"] or r["chipW"] < 24]
                 bad += [r for r in rows if r["key"] == "mac2-only" and r["knCut"]]
+                # 짧은 이름 + 짧은 풀은 둘 다 온전히 읽힌다 — 한 줄에 안 들어가면 칩이 다음 줄로
+                bad += [
+                    r for r in rows if r["key"] == "remote-demo" and (r["knCut"] or r["chipCut"])
+                ]
                 if bad:
                     found[(width, lang)] = bad
     finally:
