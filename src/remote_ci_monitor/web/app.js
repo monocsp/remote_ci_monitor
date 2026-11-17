@@ -3906,20 +3906,24 @@
       digest.className = "n" + (failed ? " warn" : "");
     }
     if (!rows.length) { body.innerHTML = ""; return; }
-    var h = '<div class="mwrap"><table class="mtab"><thead><tr><th>' + esc(tr("machines.col_machine")) + "</th><th>" + esc(tr("machines.col_host"))
-      + "</th><th>" + esc(tr("machines.col_fingerprint")) + "</th><th>" + esc(tr("machines.col_presets")) + "</th><th>" + esc(tr("machines.col_checks"))
-      + "</th><th></th></tr></thead><tbody>";
+    // 칸 폭은 머리줄이 정한다(`table-layout: fixed`) — 끊김 없는 80자 이름 하나가 다른 칸을 4글자
+    // 폭으로 눌러 세로로 흐르게 하지 않는다. 이름 · 호스트는 한 줄 말줄임, 지문 · 점검은 두 · 세 줄에서
+    // 자른다. 잘린 칸은 전문을 title 에 둔다. 다시 점검 칸은 버튼이 하나라도 있을 때만 그린다.
+    var act = rows.some(function (r) { return r.recheck; });
+    var h = '<div class="mwrap"><table class="mtab' + (act ? " act" : "") + '"><thead><tr><th class="mname">' + esc(tr("machines.col_machine")) + '</th><th class="mhost">' + esc(tr("machines.col_host"))
+      + '</th><th class="mfp">' + esc(tr("machines.col_fingerprint")) + '</th><th class="mpre">' + esc(tr("machines.col_presets")) + '</th><th class="mchk">' + esc(tr("machines.col_checks"))
+      + "</th>" + (act ? '<th class="mact"></th>' : "") + "</tr></thead><tbody>";
     rows.forEach(function (r) {
       var m = findMachine(r.id);
       var red = machineChecks(m).some(function (c) { return c && c.state === "failed"; });
       h += '<tr data-machine="' + esc(r.id) + '"' + (r.alive === false ? ' class="down"' : "") + ">"
-        + '<td class="mname"><span class="mono">' + esc(r.name) + "</span>" + (r.alive === false ? ' <span class="mdown">' + esc(tr("machines.down")) + "</span>" : "")
-        + (r.name !== r.id ? ' <span class="sub mono">' + esc(r.id) + "</span>" : "") + "</td>"
-        + '<td class="mhost mono">' + esc(r.host) + "</td>"
-        + '<td class="mfp mono">' + esc(r.fingerprint) + "</td>"
+        + '<td class="mname"><div class="mcell"><span class="mono mn" title="' + esc(r.name) + '">' + esc(r.name) + "</span>" + (r.alive === false ? '<span class="mdown">' + esc(tr("machines.down")) + "</span>" : "")
+        + (r.name !== r.id ? '<span class="sub mono mid" title="' + esc(r.id) + '">' + esc(r.id) + "</span>" : "") + "</div></td>"
+        + '<td class="mhost mono" title="' + esc(r.host) + '">' + esc(r.host) + "</td>"
+        + '<td class="mfp mono"><div class="clamp" title="' + esc(r.fingerprint) + '">' + esc(r.fingerprint) + "</div></td>"
         + '<td class="mpre">' + esc(r.presets) + "</td>"
-        + '<td class="mchk' + (red ? " bad" : "") + '">' + esc(r.checks) + "</td>"
-        + '<td class="mact">' + (r.recheck ? '<button type="button" class="btn recheck" data-recheck="' + esc(r.id) + '">' + esc(tr("machines.recheck")) + "</button>" : "") + "</td></tr>";
+        + '<td class="mchk' + (red ? " bad" : "") + '"><div class="clamp" title="' + esc(r.checks) + '">' + esc(r.checks) + "</div></td>"
+        + (act ? '<td class="mact">' + (r.recheck ? '<button type="button" class="btn recheck" data-recheck="' + esc(r.id) + '">' + esc(tr("machines.recheck")) + "</button>" : "") + "</td>" : "") + "</tr>";
     });
     body.innerHTML = h + "</tbody></table></div>";
   }

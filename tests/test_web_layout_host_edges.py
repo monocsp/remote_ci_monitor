@@ -479,7 +479,7 @@ def test_long_titles_are_truncated_with_the_full_text_in_title(crowd, tmp_path):
       return {
         mname: t('#machines tr[data-machine="@local"] td.mname .mono')[0],
         mhost: t('#machines tr[data-machine="@local"] td.mhost')[0],
-        mfp: t('#machines tr[data-machine="@local"] td.mfp')[0],
+        mfp: t('#machines tr[data-machine="@local"] td.mfp .clamp')[0],
         hn: t('#host .hostcard .hn .hname')[0],
         top: t('#host .hostcard .top b')[0],
         wk: t('#hdr .wk')[2],
@@ -495,6 +495,36 @@ def test_long_titles_are_truncated_with_the_full_text_in_title(crowd, tmp_path):
     assert m["hn"] and LONG_HOST in m["hn"], m
     assert m["top"] == LONG_COMM, m
     assert m["wk"] and LONG_NAME in m["wk"], m
+
+
+MACHINE_ROW_JS = """
+(() => {
+  const tr = document.querySelector('#machines tr[data-machine="@local"]');
+  const other = document.querySelector('#machines tr[data-machine="w1-mac-01"]');
+  const cells = [...tr.children].map((td) => ({cls: td.className,
+    w: Math.round(td.getBoundingClientRect().width)}));
+  const lh = parseFloat(getComputedStyle(tr.querySelector('td.mfp')).lineHeight);
+  return {cells: cells, height: tr.getBoundingClientRect().height, lineHeight: lh,
+          plain: other.getBoundingClientRect().height};
+})()
+"""
+
+
+def test_machine_table_columns_hold_against_one_long_row(crowd, tmp_path):
+    """끊김 없는 이름 · 프로브 64개 · 긴 점검이 한 행에 몰려도 칸은 제 폭이고 행은 몇 줄이다."""
+    got = {}
+    with Chrome(tmp_path / "chrome-b-mtab", window="1280,900") as c:
+        for width, lang in CASES:
+            open_scene(c, crowd, width, lang)
+            got[(width, lang)] = c.eval(MACHINE_ROW_JS)
+    for (width, lang), m in got.items():
+        where = f"{lang}@{width}"
+        if width > PHONE_MAX:
+            narrow = [x for x in m["cells"] if x["w"] < 70]
+            assert not narrow, f"{where}: 눌린 칸 {narrow} (전체 {m['cells']})"
+        # 지문 두 줄 · 점검 세 줄에서 자른다 — 64개 프로브가 행을 수십 줄로 늘리지 않는다
+        limit = 4 if width > PHONE_MAX else 9
+        assert m["height"] <= m["lineHeight"] * limit + 16, f"{where}: 행 높이 {m}"
 
 
 def test_many_workers_keep_the_header_short(crowd, tmp_path):

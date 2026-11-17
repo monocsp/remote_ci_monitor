@@ -449,11 +449,26 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 #machines > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
 #machines > summary .n.warn { color: var(--bad); font-weight: 600; }
 .mwrap { overflow-x: auto; }
-table.mtab { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-table.mtab th { text-align: left; font: var(--t-label); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+/* 칸 폭은 머리줄이 정한다 — 내용이 정하면 끊김 없는 이름 하나가 호스트 칸을 4글자 폭으로 눌러
+   세로로 흐르게 한다(2026-11-17, 84자 이름). 이름 · 호스트는 한 줄 말줄임, 지문은 두 줄 · 점검은
+   세 줄에서 자르고 전문은 title 에. 그래서 머신이 꺼지거나(`꺼짐` 이 붙는다) 점검이 늘어도 행
+   높이가 그대로다. */
+table.mtab { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; table-layout: fixed; }
+table.mtab th { text-align: left; font: var(--t-label); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.mtab th.mname { width: 22%; }
+table.mtab th.mhost { width: 15%; }
+table.mtab th.mpre { width: 7.5em; }
+table.mtab td.mpre { white-space: nowrap; }
+table.mtab th.mchk { width: 24%; }
+table.mtab th.mact { width: 7.5em; }
 table.mtab td { padding: 6px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; line-height: 1.4; overflow-wrap: anywhere; }
-table.mtab td.mname { white-space: nowrap; }
-table.mtab td.mname .sub { margin-left: 4px; }
+table.mtab td.mname .mcell { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+table.mtab .mn, table.mtab .mid, table.mtab td.mhost { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.mtab .mn { flex: 0 1 auto; }
+table.mtab .mid { flex: 0 100 auto; }
+table.mtab .mdown { flex: none; }
+table.mtab .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+table.mtab td.mchk .clamp { -webkit-line-clamp: 3; }
 table.mtab td.mact { text-align: right; white-space: nowrap; }
 table.mtab td.mchk.bad { color: var(--bad); font-weight: 600; }
 table.mtab tr.down td { color: var(--muted); }
