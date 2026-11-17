@@ -936,9 +936,11 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 .vchip .g { font-weight: 700; }
 .vhead { margin: 10px 0 8px; }
 .vrows { display: grid; gap: 6px; }
-.vrow { display: grid; grid-template-columns: 1.1em minmax(0, auto) minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px;
+/* 기호 칸은 1.1em 이 바닥이고 글꼴이 넓게 그리면 그만큼 넓어진다 — 리눅스 대체 글꼴의 ⌫ 는 18px 이라
+   1.1em(14px) 고정 칸 밖으로 샜다(PR #192 ubuntu CI). */
+.vrow { display: grid; grid-template-columns: minmax(1.1em, max-content) minmax(0, auto) minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px;
   padding: 8px 12px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; background: var(--surface); }
-.vrow .g { font-weight: 700; color: var(--muted); }
+.vrow .g { font-weight: 700; color: var(--muted); text-align: center; }
 .vrow .vt { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .vrow .vn { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
 .vrow .va { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
