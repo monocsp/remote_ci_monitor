@@ -427,6 +427,8 @@ details.est { margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
 details.est summary { cursor: pointer; }
 details.est b { color: var(--ink); font-weight: 500; }
 details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+/* 키 하나가 끊김 없이 길어도(밑줄로 이은 프리셋 · 입력) 그 칸 안에서 접힌다 — 페이지를 밀지 않는다 */
+details.est .row > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 
 /* ── 다이얼로그 · 서랍 · 토스트 ── */
 dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 0; max-width: 440px; width: calc(100% - 32px); }
