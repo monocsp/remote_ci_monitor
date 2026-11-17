@@ -590,15 +590,15 @@ table.q td.source .uncommitted { display: flex; width: max-content; max-width: 1
 #queue .empty, #queue .pool-h { overflow-wrap: anywhere; }
 .rrow { grid-template-columns: 72px 150px 118px 130px 66px 52px minmax(0, 1fr); }
 .rrow > * { min-width: 0; }
-/* 이름 칸은 한 줄 flex — 다른 풀의 칩(「실행 그룹 mac2」)이 칸에 안 들어가면 **칩이 먼저** 제 안에서
-   준다. 칸 전체를 말줄임하면 칩이 통째로 「…」가 되어 짧은 이름(`gate …`)이 잘린 것처럼
-   읽혔다(최종 검증 · test_recent_pool_chip_shrinks_inside_the_name_cell). 이름은 줄지 않고 최대
-   폭(칸 − 칩 3em)으로만 묶인다(줄임 몫 규칙). */
-.rrow .k { display: flex; align-items: baseline; overflow: hidden; white-space: nowrap; }
+/* 이름 칸 — 이름 뒤 다른 풀의 칩(「실행 그룹 mac2」)이 같은 줄에 안 들어가면 **다음 줄로** 간다.
+   한 줄에 묶으면 118px 칸에서 이름도 칩도 잘렸다(`remote-d… po…`, 문서 스크린샷). 칸 전체를
+   말줄임하면 칩이 통째로 「…」가 되어 짧은 이름(`gate …`)이 잘린 것처럼 읽혔다(최종 검증 ·
+   test_recent_pool_chip_shrinks_inside_the_name_cell). 줄마다 상자가 하나라 각자 칸 폭에서만
+   말줄임한다(줄임 몫 규칙). 칩은 행마다 정해져 있어 갱신에 줄 수가 바뀌지 않는다. */
+.rrow .k { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 4px; overflow: hidden; white-space: nowrap; }
 .rrow .k .kn, .rrow .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.rrow .k > .kn, .rrow .k > .key-line { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 4px - 3em); }
-.rrow .k > .kn:only-child, .rrow .k > .key-line:only-child { max-width: 100%; }
-.rrow .k > .chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rrow .k > .kn, .rrow .k > .key-line { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.rrow .k > .chip { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rrow .sm .smt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .rrow .sm .rerun { display: block; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rdetail { overflow-wrap: anywhere; }
