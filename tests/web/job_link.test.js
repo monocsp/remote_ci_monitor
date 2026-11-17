@@ -95,19 +95,22 @@ describe("jobLinkHtml", () => {
 });
 
 describe("keyWithLinkHtml — the job-name cell", () => {
-  test("without a link it is today's plain name span (rows without links do not change)", () => {
-    assert.equal(rcm.keyWithLinkHtml("gate:full", null), '<span class="key">gate:full</span>');
-    assert.equal(rcm.keyWithLinkHtml("gate:full", { url: "javascript:x" }), '<span class="key">gate:full</span>');
+  // 이름은 칸 폭에서 한 줄로 말줄임된다 — 전문은 title 로 늘 함께 가고, `data-cut` 이 잘렸을 때
+  // 탭 · 키보드로 여는 손잡이가 된다(Codex 가독성 검토 1번 · tests/test_web_readability_r1.py)
+  test("without a link it is the plain name span, the full name in its title", () => {
+    const plain = '<span class="key" title="gate:full" data-cut="key">gate:full</span>';
+    assert.equal(rcm.keyWithLinkHtml("gate:full", null), plain);
+    assert.equal(rcm.keyWithLinkHtml("gate:full", { url: "javascript:x" }), plain);
   });
 
   test("with a link the name and the chip share one line box, the chip right after the name", () => {
     const h = rcm.keyWithLinkHtml("gate:full", { url: PR, label: "PR #816" });
-    assert.match(h, /^<span class="key-line"><span class="key">gate:full<\/span><a class="job-link" /);
+    assert.match(h, /^<span class="key-line"><span class="key" title="gate:full" data-cut="key">gate:full<\/span><a class="job-link" /);
     assert.ok(h.endsWith("</a></span>"), h);
   });
 
   test("the name is escaped", () => {
     const h = rcm.keyWithLinkHtml("<b>x</b>", { url: PR, label: "PR #816" }, "kn");
-    assert.ok(h.includes('<span class="kn">&lt;b&gt;x&lt;/b&gt;</span>'), h);
+    assert.ok(h.includes('<span class="kn" title="&lt;b&gt;x&lt;/b&gt;" data-cut="kn">&lt;b&gt;x&lt;/b&gt;</span>'), h);
   });
 });

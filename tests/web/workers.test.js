@@ -176,3 +176,30 @@ describe("pool header does not grow a lane count (M5b-1 shape kept)", () => {
     assert.equal(rcm.poolHeader({ name: "linux", lanes: 0, hosts: [], queue: [] }), "pool linux · no workers");
   });
 });
+
+// 영역 B(2026-11-17) — 필 줄은 한 줄이고 원격 이름만 말줄임한다. 그리는 층이 이름과 나머지를
+// 따로 받아야 `busy #511` 은 늘 보이고 이름만 잘린다. 필이 넷을 넘으면 제 줄을 통째로 쓴다.
+describe("remote pill name · rest and the crowded strip", () => {
+  test("a remote pill splits into name + rest that join back to text", () => {
+    const s = fixture("main");
+    const long = "build-farm-mac-studio-m4-ultra-rack3-slot12-" + "x".repeat(40);
+    withRemote(withNullKeys(s.server), { lane: 1, state: "busy", job_id: 511, error: null, since: SINCE, worker: "w0", display_name: long });
+    const p = rcm.workerPills(s.server).find((x) => x.worker === "w0");
+    assert.equal(p.name, long);
+    assert.equal(p.rest, " busy #511");
+    assert.equal(p.name + p.rest, p.text);
+  });
+
+  test("local lanes carry no name — the whole text is the pill", () => {
+    rcm.workerPills(fixture("main").server).forEach((p) => assert.equal(p.name, undefined, p.text));
+  });
+
+  test("crowded only past four worker pills — the paused pill does not count", () => {
+    const pill = (cls) => ({ text: "x", cls: cls });
+    assert.equal(rcm.workersCrowded([pill("busy"), pill("busy"), pill("idle"), pill("down")]), false);
+    assert.equal(rcm.workersCrowded([pill("busy"), pill("busy"), pill("idle"), pill("down"), pill("paused")]), false);
+    assert.equal(rcm.workersCrowded([pill("busy"), pill("busy"), pill("idle"), pill("down"), pill("held")]), true);
+    assert.equal(rcm.workersCrowded(null), false);
+    assert.equal(rcm.workersCrowded([]), false);
+  });
+});

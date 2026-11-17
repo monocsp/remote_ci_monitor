@@ -191,7 +191,7 @@ def test_machines_table_is_collapsed_and_has_no_recheck_without_admin(page, tmp_
     assert is_open is False, "§8.3: 머신 표는 접힌 채로 시작한다"
     assert buttons == 0, "admin 토큰이 없으면 다시 점검 버튼이 없다"
     assert rows == ["@local", "mac2-worker", "mbp"], rows
-    assert "sim-check 실패 #3620" in text, text
+    assert "실패 · sim-check · #3620" in text, text
 
 
 def test_the_env_changed_chip_and_the_no_capable_reason_are_on_the_page(page, tmp_path):
@@ -199,4 +199,4 @@ def test_the_env_changed_chip_and_the_no_capable_reason_are_on_the_page(page, tm
         c.open(url(page, "ko"), ready_js=ready("ko"))
         body = c.eval("document.body.innerText")
     assert "환경 바뀜" in body, body[:1500]
-    assert "맞는 머신 없음 · mbp: fvm 없음 · mac2-worker: 꺼짐" in body, body[:1500]
+    assert "실행 가능한 머신 없음 · mbp: fvm 없음 · mac2-worker: 꺼짐" in body, body[:1500]

@@ -205,9 +205,6 @@
     },
     "header.lanes_left": function (a) { return "waiting jobs use lane " + a.lanes + " only"; },
     "header.nothing_can_start": "nothing can start",
-    "header.worker_unreachable": function (a) {
-      return "Worker " + a.names + " unreachable — no heartbeat · its running jobs are marked lost";
-    },
     "header.not_scheduled": function (a) {
       return "Lane is idle but #" + a.id + " has not started for " + a.dur + " — check the server log";
     },
@@ -219,8 +216,8 @@
     "summary.no_jobs": "No jobs of yours in the queue",
     "summary.and_more": function (a) { return "and " + a.n + " more"; },
     "summary.last_known": "last known: ",
-    "summary.nothing_stuck": "Everything is fine",
-    "summary.nothing_else_stuck": "everything else is fine",
+    "summary.nothing_stuck": "Nothing needs a look",
+    "summary.nothing_else_stuck": "nothing else needs a look",
     "summary.host_unavailable": "host: unavailable",
     "summary.host_no_sample": "host: no sample yet",
     "summary.host_sampled": function (a) { return "Host pressure · sampled " + a.age; },
@@ -426,11 +423,33 @@
     "place.report_missing": "no report",
     "place.report_stale": "stale report",
     "place.fingerprint_unknown": "fingerprint unknown",
+    // 펼친 배치 블록(Codex 가독성 검토 2번) — 판정별 집계 한 토막씩, 그리고 나머지 머신 토글
+    "place.n.down": function (a) { return a.n + " down"; },
+    "place.n.eligible": function (a) { return a.n + " eligible"; },
+    "place.n.tool_missing": function (a) { return a.n + " missing tools"; },
+    "place.n.workspace_tool": function (a) { return a.n + " workspace-only tools"; },
+    "place.n.check_failed": function (a) { return a.n + " check failed"; },
+    "place.n.check_running": function (a) { return a.n + " checking"; },
+    "place.n.check_needed": function (a) { return a.n + " need a check"; },
+    "place.n.check_recheck": function (a) { return a.n + " need a recheck"; },
+    "place.n.report_missing": function (a) { return a.n + " no report"; },
+    "place.n.report_stale": function (a) { return a.n + " stale report"; },
+    "place.n.fingerprint_unknown": function (a) { return a.n + " fingerprint unknown"; },
+    "place.n.other": function (a) { return a.n + " " + a.code; },
+    "place.more": function (a) { return "show " + a.n + " more"; },
+    "place.fewer": "show fewer",
     "placement.any": "any machine",
     "placement.on": function (a) { return "on " + a.name; },
     "probe.missing": "missing",
     "machine.env_changed": "env changed",
     "machine.check_passed": function (a) { return a.preset + " passed"; },
+    // 점검 칸 첫 줄의 결론 낱말(Codex 가독성 검토 9번) — `실패 · <점검> · #<잡>`
+    "machine.check_word.failed": "failed",
+    "machine.check_word.recheck": "recheck needed",
+    "machine.check_word.running": "checking",
+    "machine.check_word.needed": "needed",
+    "machine.check_word.passed": "passed",
+    "machine.check_log": function (a) { return "open the log of #" + a.id; },
     "machine.presets": function (a) { return a.n + "/" + a.total + " ok"; },
     "section.machines": "Machines",
     "machines.count": function (a) { return a.n + " machines"; },
@@ -536,7 +555,7 @@
     "failures.first_seen": function (a) { return "first time in the last " + a.window + " runs"; },
     "failures.unknown": function (a) { return a.seen + " of " + a.window + " runs so far"; },
     "failures.unnamed": function (a) { return a.n + " of those runs failed without naming anything"; },
-    "failures.more": function (a) { return "… and " + a.n + " more (see the log)"; },
+    "failures.more": function (a) { return "+" + a.n + " more (see the log)"; },
     "failures.step_kind": "step",
 
 
@@ -577,6 +596,9 @@
     "recent.count": function (a) { return "last " + a.shown + " of " + a.total; },
     "recent.show_more": function (a) { return "show " + a.n + " more"; },
     "recent.show_fewer": "show fewer",
+    "recent.full": "show all",
+    "recent.less": "show less",
+    "recent.open_log": "open log",
 
     // ── 우선순위 · 캐시 · 전이 ───────────────────────────────────────────────
     "priority.high": "high",
@@ -1198,7 +1220,23 @@
     "version.edit.prefill_from": function (a) { return "prefilled from " + a.source; },
     "version.edit.prefill_unknown": "prefilled from the previous version",
     "version.edit.no_prefill": "The previous copy was not read — the fields fall back to the files in store/",
-    "store.gate.return": function (a) { return "Once the setup is done you go back to " + a.text; }
+    "store.gate.return": function (a) { return "Once the setup is done you go back to " + a.text; },
+    // 가독성 R1(Codex 가독성 검토 1 · 5 · 7 · 8번) — 잘린 글의 전문 · 워커 띠 · 끊긴 워커 요약 · 적게 보기
+    "reveal.label": function (a) { return "Show full text: " + a.text; },
+    "reveal.title": "Full text",
+    "reveal.close": "Close",
+    "reveal.copy": "Copy",
+    "workers.band": function (a) { return a.n + " workers — scroll with the arrow keys"; },
+    "workers.more": function (a) { return "Show " + a.n + " off-screen"; },
+    "workers.hidden_list": function (a) { return a.n + " off-screen:"; },
+    "header.workers_unreachable_one": function (a) {
+      return "Worker " + a.name + " unreachable — the results of its running jobs are lost";
+    },
+    "header.workers_unreachable_many": function (a) {
+      return a.n + " workers unreachable — the results of their running jobs are lost";
+    },
+    "header.workers_names": "Show names",
+    "queue.show_fewer": "show fewer"
   };
 
   var KO = {
@@ -1213,7 +1251,7 @@
     "token.named": function (a) { return a.name; },
     "token.kept": "확인하지 못했습니다 — 그대로 둡니다",
     "conn.live": function (a) { return "실시간 · " + a.age + " 갱신"; },
-    "conn.polling": function (a) { return "주기 확인 · " + a.age + " 갱신"; },
+    "conn.polling": function (a) { return "10초마다 확인 · " + a.age + " 갱신"; },
     "conn.lost": function (a) { return "끊김 · 마지막 갱신 " + a.age; },
     "conn.paused": "멈춤 · 다시 시작",
     "conn.lost_banner": function (a) {
@@ -1234,9 +1272,6 @@
     },
     "header.lanes_left": function (a) { return "대기 중인 작업은 레인 " + a.lanes + " 만 씁니다"; },
     "header.nothing_can_start": "아무것도 시작할 수 없습니다",
-    "header.worker_unreachable": function (a) {
-      return "워커 " + a.names + " 의 신호가 끊겼습니다 — 그 워커에서 진행 중이던 작업은 결과를 잃음으로 표시됩니다";
-    },
     "header.not_scheduled": function (a) {
       return "레인이 비어 있는데 #" + a.id + " 가 " + a.dur + " 동안 시작되지 않았습니다 — 서버 로그를 보세요";
     },
@@ -1248,8 +1283,8 @@
     "summary.no_jobs": "큐에 내 작업이 없습니다",
     "summary.and_more": function (a) { return a.n + "개 더"; },
     "summary.last_known": "마지막으로 알던 값: ",
-    "summary.nothing_stuck": "모두 정상입니다",
-    "summary.nothing_else_stuck": "그 밖에는 모두 정상입니다",
+    "summary.nothing_stuck": "확인이 필요한 작업이 없습니다",
+    "summary.nothing_else_stuck": "그 밖에 확인할 작업은 없습니다",
     "summary.host_unavailable": "호스트: 읽지 못함",
     "summary.host_no_sample": "호스트: 아직 측정값이 없습니다",
     "summary.host_sampled": function (a) { return "호스트 부하 · " + a.age + " 측정"; },
@@ -1261,7 +1296,7 @@
       return "CPU " + a.cpu + " · 메모리 " + a.mem + " · 디스크 " + a.disk + " · GPU " + a.gpu;
     },
     "summary.disk_free": function (a) { return a.free + " 남음"; },
-    "summary.load": function (a) { return "처리 대기 " + a.load; },
+    "summary.load": function (a) { return "시스템 부하 " + a.load; },
     "queue.no_status": "큐를 읽지 못했습니다 — 아직 상태가 없습니다",
     "queue.unavailable": function (a) { return "큐를 읽지 못했습니다 — " + a.error; },
     "queue.empty_other_pools": "이 실행 그룹의 큐는 비었습니다 — 다른 그룹에서 작업이 기다립니다.",
@@ -1284,7 +1319,7 @@
     "queue.pool_jobs": function (a) { return a.head + " · 작업 " + a.n + "개"; },
     "row.group": function (a) { return "그룹 " + a.name; },
     "row.you": "나",
-    "row.you_joined": "같은 작업에 묶임",
+    "row.you_joined": "내가 합류함",
     "row.also_waiting": function (a) { return "함께 기다리는 사람: " + a.labels; },
     "row.token_of": function (a) { return "토큰: " + a.name; },
     "row.stalled_note": "응답이 계속 없으면 서버가 자동으로 취소합니다",
@@ -1293,7 +1328,7 @@
     "row.log": "로그",
     "row.add_token_for_log": "토큰을 넣으면 로그가 보입니다",
     "row.not_your_job": "내 작업이 아닙니다",
-    "row.cancel_locked": "취소에는 제출할 때 받은 cancel token 이 필요합니다 — 제출한 세션에서 rcm cancel 을 쓰거나 관리자 토큰으로",
+    "row.cancel_locked": "취소에는 제출할 때 받은 cancel token 이 필요합니다 — 제출한 세션에서 rcm cancel 을 실행하거나 관리자 토큰을 사용하세요",
     "row.others_waiting": function (a) { return "다른 세션 " + a.n + "개가 이 작업을 기다립니다"; },
     "row.ref": function (a) { return "ref " + a.ref; },
     "row.not_received": "아직 받지 못함",
@@ -1309,7 +1344,7 @@
     "host.digest": function (a) { return a.names + " · " + a.state; },
     "host.window": "5분",
     "host.sampled": function (a) { return a.age + " 측정"; },
-    "host.cores_load": function (a) { return "처리 대기 " + a.load + " · 코어 " + a.cores + "개 기준"; },
+    "host.cores_load": function (a) { return "시스템 부하 " + a.load + " · 코어 " + a.cores + "개"; },
     "host.stale": function (a) { return a.dur + " 지남"; },
     "host.cpu": function (a) { return "CPU " + a.pct; },
     "host.cpu_detail": function (a) { return "user " + a.user + " · sys " + a.sys; },
@@ -1419,7 +1454,7 @@
     "reason.waiting_for_lane": "대기 중",
     "reason.lanes_busy": function (a) { return "동시 실행 " + a.busy + "/" + a.lanes; },
     "reason.behind": function (a) { return "#" + a.id + " 다음"; },
-    "reason.frees_in": function (a) { return a.dur + " 뒤 빔"; },
+    "reason.frees_in": function (a) { return "빈 레인까지 " + a.dur; },
     "reason.blocked_by": function (a) { return withJosa(a.job, "이/가") + " 먼저 끝나야 함 · " + a.group; },
     "reason.uploading": function (a) { return "업로드 중 · " + a.bytes; },
     "reason.upload_stalled": function (a) { return "업로드 멈춤 " + a.since + " · " + a.bytes; },
@@ -1438,30 +1473,50 @@
     "reason.not_scheduled": "시작되지 않음",
     "reason.no_worker": "워커 없음",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
-    "reason.no_capable_machine": "맞는 머신 없음",
-    "reason.check_failed": "점검 실패",
+    "reason.no_capable_machine": "실행 가능한 머신 없음",
+    "reason.check_failed": "머신 점검 실패",
     "reason.check_pending": "점검 중",
     "reason.check_pending_named": function (a) { return "점검 중 (" + a.names + ")"; },
     "place.down": "꺼짐",
     "place.eligible": "가능",
     "place.tool_missing": function (a) { return a.tool + " 없음"; },
-    "place.workspace_tool": function (a) { return a.tool + " 작업 공간에만"; },
+    "place.workspace_tool": function (a) { return withJosa(a.tool, "은/는") + " 작업 공간에만 있음"; },
     "place.check_failed": function (a) { return a.preset + " 실패"; },
     "place.check_running": function (a) { return a.preset + " 점검 중"; },
     "place.check_needed": function (a) { return a.preset + " 점검 필요"; },
-    "place.check_recheck": function (a) { return a.preset + " 안 끝남 — 다시 점검"; },
-    "place.report_missing": "보고 없음",
-    "place.report_stale": "보고 낡음",
+    "place.check_recheck": function (a) { return a.preset + " 점검 미완료 — 다시 점검 필요"; },
+    "place.report_missing": "환경 보고 없음",
+    "place.report_stale": "환경 보고 낡음",
     "place.fingerprint_unknown": "지문 모름",
+    "place.n.down": function (a) { return "꺼짐 " + a.n + "대"; },
+    "place.n.eligible": function (a) { return "가능 " + a.n + "대"; },
+    "place.n.tool_missing": function (a) { return "도구 없음 " + a.n + "대"; },
+    "place.n.workspace_tool": function (a) { return "작업 공간에만 " + a.n + "대"; },
+    "place.n.check_failed": function (a) { return "점검 실패 " + a.n + "대"; },
+    "place.n.check_running": function (a) { return "점검 중 " + a.n + "대"; },
+    "place.n.check_needed": function (a) { return "점검 필요 " + a.n + "대"; },
+    "place.n.check_recheck": function (a) { return "다시 점검 필요 " + a.n + "대"; },
+    "place.n.report_missing": function (a) { return "보고 없음 " + a.n + "대"; },
+    "place.n.report_stale": function (a) { return "보고 낡음 " + a.n + "대"; },
+    "place.n.fingerprint_unknown": function (a) { return "지문 모름 " + a.n + "대"; },
+    "place.n.other": function (a) { return a.code + " " + a.n + "대"; },
+    "place.more": function (a) { return "나머지 " + a.n + "대 보기"; },
+    "place.fewer": "접기",
     "placement.any": "어느 머신이든",
     "placement.on": function (a) { return a.name + " 지정"; },
     "probe.missing": "없음",
     "machine.env_changed": "환경 바뀜",
     "machine.check_passed": function (a) { return a.preset + " 통과"; },
+    "machine.check_word.failed": "실패",
+    "machine.check_word.recheck": "다시 점검 필요",
+    "machine.check_word.running": "점검 중",
+    "machine.check_word.needed": "점검 필요",
+    "machine.check_word.passed": "통과",
+    "machine.check_log": function (a) { return "#" + a.id + " 로그 열기"; },
     "machine.presets": function (a) { return a.n + "/" + a.total + " 가능"; },
     "section.machines": "머신",
     "machines.count": function (a) { return "머신 " + a.n + "대"; },
-    "machines.failed_count": function (a) { return "점검 실패 " + a.n; },
+    "machines.failed_count": function (a) { return "점검 실패 " + a.n + "대"; },
     "machines.col_machine": "머신",
     "machines.col_host": "호스트",
     "machines.col_fingerprint": "지문",
@@ -1487,16 +1542,16 @@
     "elapsed.waited": function (a) { return a.dur + " 기다림"; },
     "elapsed.waiting": function (a) { return a.dur + " 기다리는 중"; },
     "ordinal": function (a) { return a.n + "번째"; },
-    "ordinal.in_line": function (a) { return "대기 " + a.ordinal; },
+    "ordinal.in_line": function (a) { return "대기열 " + a.ordinal; },
 
     "queue.unknown": "알 수 없음",
     "queue.counts": function (a) {
       return "작업 " + a.total + "개 · 진행 중 " + a.running + " · 대기 " + a.waiting;
     },
-    "queue.oldest_waiting": function (a) { return "가장 오래 기다린 " + a.dur; },
+    "queue.oldest_waiting": function (a) { return "최장 대기 " + a.dur; },
     "queue.lanes_busy": function (a) { return "동시 실행 " + a.busy + "/" + a.lanes; },
-    "your.eta": function (a) { return a.state + " · 종료 " + a.clock; },
-    "your.in_line": function (a) { return a.ordinal + " · 종료 " + a.clock; },
+    "your.eta": function (a) { return a.state + " · 완료 예상 " + a.clock; },
+    "your.in_line": function (a) { return a.ordinal + " · 완료 예상 " + a.clock; },
     "your.joined": function (a) { return "함께 기다리는 사람 " + a.n + "명"; },
 
     "worker.state": function (a) { return "워커 " + a.state; },
@@ -1552,7 +1607,7 @@
     "failures.first_seen": function (a) { return "최근 " + a.window + "회 중 처음"; },
     "failures.unknown": function (a) { return "아직 " + a.window + "회 중 " + a.seen + "회"; },
     "failures.unnamed": function (a) { return "그 중 " + a.n + "회는 이름 없이 실패했습니다"; },
-    "failures.more": function (a) { return "… 그리고 " + a.n + "개 더 (로그에서 확인하세요)"; },
+    "failures.more": function (a) { return "+" + a.n + "개 더 (로그에서 확인하세요)"; },
     "failures.step_kind": "단계",
 
 
@@ -1593,6 +1648,9 @@
     "recent.count": function (a) { return a.total + "개 중 " + a.shown + "개"; },
     "recent.show_more": function (a) { return a.n + "개 더 보기"; },
     "recent.show_fewer": "접기",
+    "recent.full": "전체 보기",
+    "recent.less": "접기",
+    "recent.open_log": "로그 열기",
 
     "priority.high": "높음",
     "priority.low": "낮음",
@@ -2210,7 +2268,22 @@
     "version.edit.prefill_from": function (a) { return "프리필 출처 " + a.source; },
     "version.edit.prefill_unknown": "이전 버전 문안으로 채웠습니다",
     "version.edit.no_prefill": "이전 버전 문안을 아직 못 읽었습니다 — store/ 파일 값으로 채웁니다",
-    "store.gate.return": function (a) { return "설정을 마치면 " + withJosa(a.text, "으로/로") + " 돌아갑니다"; }
+    "store.gate.return": function (a) { return "설정을 마치면 " + withJosa(a.text, "으로/로") + " 돌아갑니다"; },
+    "reveal.label": function (a) { return "전문 보기: " + a.text; },
+    "reveal.title": "전문",
+    "reveal.close": "닫기",
+    "reveal.copy": "복사",
+    "workers.band": function (a) { return "워커 " + a.n + "개 — 좌우 화살표로 넘겨 봅니다"; },
+    "workers.more": function (a) { return "화면 밖 " + a.n + "개 보기"; },
+    "workers.hidden_list": function (a) { return "화면 밖 " + a.n + "개:"; },
+    "header.workers_unreachable_one": function (a) {
+      return "워커 " + a.name + " 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+    },
+    "header.workers_unreachable_many": function (a) {
+      return "워커 " + a.n + "대 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+    },
+    "header.workers_names": "이름 보기",
+    "queue.show_fewer": "적게 보기"
   };
 
   var MESSAGES = { en: EN, ko: KO };

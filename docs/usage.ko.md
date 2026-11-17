@@ -320,6 +320,10 @@ rcm artifacts 412 --fetch --output ./out   # 지정한 디렉터리에 쓴다
 8. **다른 풀.** 자기 워커와 자기 큐를 갖는다. **코드 출처** 칸에는 커밋만 남는다 — 저장소 주소는
    행마다 같은 값이 되풀이되므로 펼친 블록에 있다.
 
+칸보다 긴 이름은 가운데를 줄인다(`android-integration-test-s… name-that-goes`) — 앞이 같은 이름들도
+끝에서 갈린다. 잘린 이름을 누르면(키보드로는 Tab 으로 가서 Enter) 전문과 **복사** 단추가 뜬다. 다시
+누르거나 바깥을 누르거나 Escape 면 닫힌다. hover 가 없는 폰에서도 된다.
+
 ### 내 작업
 
 ![토큰을 넣은 뒤 — 버튼에 내 이름, 내 작업 표시, 로그 꼬리, 버튼들](images/ui/web-your-jobs.png)
@@ -413,11 +417,11 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ([Which machine runs a job](configuration.md#which-machine-runs-a-job)). 대기 이유 두 가지가
 새로 생겼다. 둘 다 코드가 아니라 머신 이야기다.
 
-- **`no capable machine — mbp: fvm missing · mac2-worker: down`**(웹: `맞는 머신 없음`) — 지금
+- **`no capable machine — mbp: fvm missing · mac2-worker: down`**(웹: `실행 가능한 머신 없음`) — 지금
   이 프리셋을 돌릴 수 있는 머신이 없다. 머신마다 이유를 단다. 제출할 때 `rcm run` 도 같은 줄을
   찍었다. 작업은 ETA 없이 큐에 남아 있다가 머신이 고쳐지면 스스로 시작한다. 도구를 깔면 워커가
   `probe_interval_seconds`(10분) 안에 다시 보고한다. 바로 보고하게 하려면 워커를 재시작한다.
-- **`check failed — mbp: sim-check failed #3620`**(웹: `점검 실패`) — 이 프리셋에는 점검(머신이
+- **`check failed — mbp: sim-check failed #3620`**(웹: `머신 점검 실패`) — 이 프리셋에는 점검(머신이
   제대로 도는지 증명하는 프로젝트 스크립트)이 필요한데, 그 머신의 환경이 바뀐 뒤 점검이 실패했다.
   `rcm machines --machine mbp` 가 무엇이 바뀌었는지(`xcode 26.5 → 27.2`), `rcm logs 3620` 이
   점검이 왜 실패했는지 보여 준다. 머신을 고친 뒤 `rcm recheck mbp sim-check`(관리자)를 치거나 웹

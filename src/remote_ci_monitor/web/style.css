@@ -67,9 +67,34 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 /* ── 머리 ── */
 .s-top { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px 10px 0 0; background: var(--surface-2); flex-wrap: wrap; }
 .wordmark { font: 600 15px var(--mono); letter-spacing: 0.02em; }
-.s-top .host { font-family: var(--mono); }
-.workers { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); flex-wrap: wrap; }
-.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
+.s-top .host { font-family: var(--mono); min-width: 0; max-width: 32ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 워커 필 줄은 **한 줄**이다 — 넘치면 줄을 바꾸지 않고 그 줄 안에서 옆으로 민다. 줄을 바꿔 쌓으면
+   잡이 시작·끝날 때마다 필 글자(`대기` ↔ `진행 중 #5008`) 폭이 바뀌어 줄 수가 바뀌고, 머리줄
+   아래 화면이 통째로 뛴다(2026-11-17 실측: 워커 12개 · 390px 에서 필이 열 줄 · 머리줄 565px).
+   필이 넷을 넘으면(`crowded`) 머리줄 맨 아래에 제 줄을 통째로 쓴다 — 폰에서는 늘 그렇다. */
+/* 띠(`.wkband`)가 머리줄의 칸이고, 그 안에서 필 줄(`.workers`)이 옆으로 민다. 넘치면 오른쪽(밀었으면
+   왼쪽도)이 흐려지고 고정 폭 `+N` 표지(`.wk-more`)가 화면 밖 필을 센다 — 스크롤바를 숨겼으니 더 있다는
+   단서가 따로 있어야 한다(Codex 가독성 검토 5번). 흐림은 mask 라 상자를 바꾸지 않는다. */
+/* 줄을 나눌 때 띠의 기준 폭은 0 이다 — 필 글자(`#22` ↔ `lane 1 · idle`) 폭이 바뀌어도 머리줄이 줄을
+   바꾸지 않고, 띠는 그 줄의 남는 자리를 채운 뒤 안에서 민다. 기준 폭이 내용이면 레인이 쉴 때마다
+   토큰 단추가 둘째 줄로 내려가 화면이 35px 씩 뛰었다(최종 검증 · 로컬 레인 둘 + 원격 둘 · 1240px).
+   띠가 남는 자리를 채우므로 그 뒤의 `.spacer` 는 접는다. */
+.wkband { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; max-width: 100%; }
+.wkband:not(.crowded) ~ .spacer { flex: 0 0 0; }
+.wkband.crowded { order: 1; flex: 1 1 100%; }
+.workers { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); flex-wrap: nowrap;
+  flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; border-radius: 6px; }
+.workers::-webkit-scrollbar { display: none; }
+.workers > * { flex: none; }
+.workers:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.workers.more-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.workers.more-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); }
+.workers.more-l.more-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
+/* 표지 폭은 숫자와 무관하게 고정이다 — `+9` ↔ `+10` 에 띠가 출렁이지 않게 */
+.wk-more { flex: none; width: 5.5ch; padding: 2px 0; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--muted); font: 600 12px var(--mono); font-variant-numeric: tabular-nums; text-align: center; cursor: pointer; white-space: nowrap; overflow: hidden; }
+.wk-more.warn { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; white-space: nowrap; }
+.wk .wn { display: inline-block; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .wk i { width: 8px; height: 8px; border-radius: 50%; background: var(--queued); }
 .wk.busy i { background: var(--accent); }
 .wk.down { border-color: var(--bad); color: var(--bad); }
@@ -80,6 +105,11 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .wk.paused { border-color: var(--warn); color: var(--warn); }
 .wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
 .livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+/* 상태 글자(live · 멈춤 · 폴링 · 연결 중… 과 매초 바뀌는 「Ns 갱신」)가 바뀌어도 버튼 폭이 그대로다 —
+   안 그러면 폰에서 옆 버튼이 다음 줄로 넘어갔다 돌아온다(390px en 에서 35px, 큐 가장자리 시험).
+   최소 폭으로는 못 막는다(문구가 늘면 다시 흔들린다) — 폭을 고정하고 넘치면 말줄임이다 */
+.livebtn [data-live-text] { display: inline-block; width: 24ch; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 720px) { .livebtn [data-live-text] { width: 16ch; } }
 .livebtn .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
 .livebtn.polling .live { background: var(--warn); box-shadow: none; }
 .livebtn.paused .live, .livebtn.lost .live { background: var(--queued); box-shadow: none; }
@@ -143,6 +173,8 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
   /* 이유 칸은 남는 폭을 받는 칸이다 — 한 줄로 못 박은 긴 단계 이름(아래 `.step-now`)이 자기 글자 폭만큼
      칸을 넓혀 표를 옆으로 밀지 않게, 칸 폭을 내용이 아니라 표가 정한다. 이유 글 자체는 그대로 접힌다. */
   table.q td.reason { max-width: 0; }
+  /* 펼친 행(일곱 칸을 잇는 칸)도 같다 — 한 줄로 못 박은 진행 머리줄이 표를 넓히지 않게(영역 A) */
+  table.q td.prog { max-width: 0; }
 }
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }
@@ -229,11 +261,18 @@ table.q td.reason .step-now .sn-t { flex: 0 0 auto; white-space: nowrap; }
    **한 줄이다**: 이름과 칩이 한 줄 상자(`.key-line`) 안에서 함께 줄고, 넘치면 둘 다 말줄임한다(전체
    주소는 title). 접히게 두면 라벨 길이에 따라 행 높이가 바뀌어 #181 이 막은 출렁임이 돌아온다.
    inline-flex 라 뒤의 입력 칩은 오늘처럼 같은 흐름에 남는다. 화살표는 줄지 않는다.
-   **칩이 먼저 준다**(flex-shrink 1000) — 잡 이름이 주된 정보다. 칩이 3.5em(글 몇 자 + ↗)까지 줄고
-   나서야 이름이 준다. 같은 비율로 줄이면 긴 라벨 옆의 `slow` 가 `s…` 가 됐다(2026-10-27 실기). */
+   **칩이 먼저 준다** — 잡 이름이 주된 정보다. 칩이 3.5em(글 몇 자 + ↗)까지 줄고 나서야 이름이
+   준다. 같은 비율로 줄이면 긴 라벨 옆의 `slow` 가 `s…` 가 됐다(2026-10-27 실기). 줄임 몫(1000:1)
+   으로 나누면 이름에도 늘 몇 분의 1px 가 남아 `slo…` 가 됐다 — 그래서 이름은 줄지 않고 최대 폭
+   (칸 − 간격 − 3.5em)으로만 묶이고, 줄어드는 것은 칩 하나다.
+   **줄임 몫 규칙**(이 파일 전체): 한 줄 flex 의 한 층에서 줄어드는 상자는 하나다. 먼저 남을 쪽은
+   `flex-shrink: 0` + `max-width` 로 묶는다. N:1 로 나누면 남아야 할 쪽도 1px 미만을 떠안아
+   말줄임표를 단다(test_web_readability_r1.test_no_text_is_cut_by_less_than_a_pixel). */
 .key-line { display: inline-flex; align-items: baseline; gap: 0 6px; max-width: 100%; min-width: 0; vertical-align: bottom; white-space: nowrap; }
-.key-line > .key, .key-line > .kn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.job-link { flex: 0 1000 auto; min-width: 3.5em; display: inline-flex; align-items: baseline; max-width: 100%; font: 500 12px var(--mono); color: var(--accent); text-decoration: none; white-space: nowrap; }
+.key-line > .key, .key-line > .kn { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 6px - 3.5em); overflow: hidden; text-overflow: ellipsis; }
+/* 표 · 최근 행의 이름 규칙(`max-width: 100%`)이 더 구체적이라 묶는 폭을 같은 무게로 다시 쓴다 */
+table.q td.key .key-line > .key, .rrow .k .key-line > .kn { max-width: calc(100% - 6px - 3.5em); }
+.job-link { flex: 0 1 auto; min-width: 3.5em; display: inline-flex; align-items: baseline; max-width: 100%; font: 500 12px var(--mono); color: var(--accent); text-decoration: none; white-space: nowrap; }
 .job-link .jl-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .job-link .jl-a { flex: 0 0 auto; margin-left: 2px; }
 .job-link:hover .jl-t, .job-link:focus-visible .jl-t { text-decoration: underline; }
@@ -341,9 +380,12 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 #host-details > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
 #host-details > summary .n.warn { color: var(--warn); font-weight: 600; }
 #host-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* 호스트는 이름 한 칸 + **지표 카드**다. 칸 수를 못 박지 않고 `auto-fit` 에 맡기면 좁은 화면에서
-   3장 · 2장으로 저절로 접힌다 — 미터가 셋일 때와 넷일 때 격자를 따로 안 짜도 된다. */
-.hostcard { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: start; }
+/* 호스트는 이름 줄 + **지표 카드** 격자 + 프로세스 줄이다. 칸 수를 못 박지 않고 `auto-fit` 에 맡기면
+   좁은 화면에서 3장 · 2장으로 저절로 접힌다 — 미터가 셋일 때와 넷일 때 격자를 따로 안 짜도 된다.
+   격자는 미터만의 것(`.meters`)이다 — 이름 줄이 `1 / -1` 로 같은 격자를 쓰면 빈 칸이 접히지 않아
+   1240px 에서도 미터 넷이 일곱 칸 중 넷(150px)에 눌렸다(2026-11-17). */
+.hostcard { display: grid; gap: 12px; }
+.hostcard .meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; align-items: start; }
 .hostcard .meter { background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 8px; padding: 9px 10px; }
 .hostcard .hn { grid-column: 1 / -1; }
 .hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
@@ -367,6 +409,25 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .meter .spark .gap { stroke-dasharray: 2 2; opacity: 0.5; }
 .top { grid-column: 1 / -1; font: 12px var(--mono); color: var(--muted); }
 .top b { color: var(--ink); font-weight: 500; }
+/* 카드 안의 글자 줄은 전부 **한 줄**이다 — 5초 표본마다 숫자 자릿수 · 프로세스 이름이 바뀌는데
+   접힘을 허락하면 그때마다 카드 높이가 바뀌어 그 아래 절이 통째로 뛴다(2026-09-14 의 315px 와
+   같은 병). 넘치면 말줄임하고 전문은 그 줄의 title 에 있다. 격자 칸은 `min-width: 0` 이어야
+   nowrap 글자가 칸을 넓혀 페이지를 밀지 않는다. */
+.hostcard > *, .hostcard .meters > *, .hostcard .meter > * { min-width: 0; }
+.hostcard .hn .hname, .hostcard .hn .age, .hostcard .substat, .hostcard .top {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hostcard .substat { grid-column: 1 / -1; font: 12px var(--sans); color: var(--muted); }
+.hostcard .substat.warn { color: var(--warn); font-weight: 600; }
+.hostcard .top b { display: inline-block; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.hostcard .meter .lab { flex-wrap: nowrap; gap: 8px; }
+.hostcard .meter .lab span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 덧붙인 숫자가 먼저 줄어든다 — 라벨은 줄지 않고 최대 폭으로만 묶인다(줄임 몫 규칙) */
+.hostcard .meter .lab span:first-child { flex: 0 0 auto; max-width: calc(100% - 8px - 3ch); }
+.hostcard .meter .lab span:last-child { flex: 0 1 auto; }
+/* 접힌 줄의 요약(호스트 이름들 · 판정)도 한 줄 — 이름이 길거나 풀이 많아도 접힌 절은 한 줄이다 */
+#host-details > summary .n { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 끊김 없는 `hosts_error` 도 띠 안에서 접힌다 — 페이지를 옆으로 밀지 않는다 */
+#host .banner { overflow-wrap: anywhere; }
 .stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 600 12px var(--sans); }
 
 /* ── 최근 완료 (항목 14 · 15) ── */
@@ -397,6 +458,8 @@ details.est { margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
 details.est summary { cursor: pointer; }
 details.est b { color: var(--ink); font-weight: 500; }
 details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+/* 키 하나가 끊김 없이 길어도(밑줄로 이은 프리셋 · 입력) 그 칸 안에서 접힌다 — 페이지를 밀지 않는다 */
+details.est .row > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 
 /* ── 다이얼로그 · 서랍 · 토스트 ── */
 dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 0; max-width: 440px; width: calc(100% - 32px); }
@@ -415,8 +478,9 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 
 /* ── 머신 (M5n §8.3) ──
    `환경 바뀜` 칩은 워커 필 옆에 산다. 점검이 실패했으면 빨강 — 색만으로 말하지 않게 글자가 늘 붙는다. */
-.envchip { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 8px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); cursor: pointer; max-width: 100%; overflow-wrap: anywhere; }
-.envchip b { font: 600 12px var(--mono); }
+.envchip { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 8px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); cursor: pointer; white-space: nowrap; }
+/* 칩도 필 줄의 한 칸 — 머신 이름은 말줄임, 전문(이름 · 바뀐 프로브)은 칩의 title 에 */
+.envchip b { font: 600 12px var(--mono); max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
 .envchip.red { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
 /* 머신 표는 호스트 절과 같은 모양으로 접힌다 — 평소엔 1순위가 아니다 */
 #machines > summary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; cursor: pointer; list-style: none; }
@@ -428,11 +492,32 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 #machines > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
 #machines > summary .n.warn { color: var(--bad); font-weight: 600; }
 .mwrap { overflow-x: auto; }
-table.mtab { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-table.mtab th { text-align: left; font: var(--t-label); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+/* 칸 폭은 머리줄이 정한다 — 내용이 정하면 끊김 없는 이름 하나가 호스트 칸을 4글자 폭으로 눌러
+   세로로 흐르게 한다(2026-11-17, 84자 이름). 이름 · 호스트는 한 줄 말줄임, 지문은 두 줄 · 점검은
+   세 줄에서 자르고 전문은 title 에. 그래서 머신이 꺼지거나(`꺼짐` 이 붙는다) 점검이 늘어도 행
+   높이가 그대로다. */
+table.mtab { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; table-layout: fixed; }
+table.mtab th { text-align: left; font: var(--t-label); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.mtab th.mname { width: 22%; }
+table.mtab th.mhost { width: 15%; }
+table.mtab th.mpre { width: 7.5em; }
+table.mtab td.mpre { white-space: nowrap; }
+table.mtab th.mchk { width: 24%; }
+table.mtab th.mact { width: 7.5em; }
 table.mtab td { padding: 6px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; line-height: 1.4; overflow-wrap: anywhere; }
-table.mtab td.mname { white-space: nowrap; }
-table.mtab td.mname .sub { margin-left: 4px; }
+table.mtab td.mname .mcell { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+table.mtab .mn, table.mtab .mid, table.mtab td.mhost { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 이름이 먼저 남고 id 가 준다 — 이름은 줄지 않고 최대 폭으로만 묶인다(줄임 몫 규칙: 진짜 dev
+   서버에서 100:1 이 `macmini` 에 0.1px 를 떠넘겨 `macmi…` 가 됐다) */
+table.mtab .mn { flex: 0 0 auto; max-width: calc(100% - 6px - 4ch); }
+table.mtab .mn:only-child { max-width: 100%; }
+/* 꺼진 머신은 이름 옆에 「꺼짐」(줄지 않음, 3em 안쪽)이 붙는다 — 그 자리도 비워 둔다 */
+table.mtab .mcell:has(> .mdown) > .mn { max-width: calc(100% - 12px - 4ch - 3em); }
+table.mtab .mcell:has(> .mdown):not(:has(> .mid)) > .mn { max-width: calc(100% - 6px - 3em); }
+table.mtab .mid { flex: 0 1 auto; }
+table.mtab .mdown { flex: none; }
+table.mtab .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+table.mtab td.mchk .clamp { -webkit-line-clamp: 3; }
 table.mtab td.mact { text-align: right; white-space: nowrap; }
 table.mtab td.mchk.bad { color: var(--bad); font-weight: 600; }
 table.mtab tr.down td { color: var(--muted); }
@@ -442,6 +527,87 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
 .place-list li { overflow-wrap: anywhere; }
 .place-list li.eligible { color: var(--ok); }
 .place-list li.down { color: var(--bad); }
+
+/* ── 큐 화면의 가장자리 입력 (영역 A · tests/test_web_layout_queue_edges.py) ──
+   규칙은 둘이다. (1) **식별자는 한 줄로 말줄임**하고 전문은 title 로 준다 — 잡 이름 · 요청자 ·
+   칩 · 워커 필 · 스텝 이름 · 재실행 명령. 띄어쓰기 없는 130자 키나 두 배 폭 한국어는 끊을 자리가
+   없어 칸을 뚫고 페이지를 옆으로 민다. (2) **문장은 정해 둔 줄 수 안에서 접는다** — 이유는 두 줄,
+   최근 요약은 두 줄, 요약 띠의 잡 줄은 한 줄. 줄 수가 글 길이를 따라가면 1초 틱 · 단계 바뀜 ·
+   이유 바뀜마다 행이 출렁이고 그 아래가 통째로 움직인다(#181 이 단계 줄에서 막은 것과 같은 병).
+   끊을 자리가 없는 글은 `overflow-wrap: anywhere` 로만 끊는다 — `word-break: keep-all` 은 한국어
+   어절을 지키되 그 어절이 칸보다 길면 넘친다. */
+.summary > .sum, .sum > .v { min-width: 0; }
+.sum .v .herr { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.sum-yours .v .sl, .sum-stuck .v .sl { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk { max-width: 100%; min-width: 0; }
+.wk .wk-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workers { max-width: 100%; min-width: 0; }
+
+/* ── 가독성 R1 (Codex 가독성 검토 1 · 6 · 8번 · tests/test_web_readability_r1.py) ──
+   (6) **식별자는 가운데를 줄인다** — `midHtml` 이 이름을 앞(`.mx-h`) · 뒤(`.mx-t`) 둘로 나누고, 앞만
+   준다. 공통 접두사가 긴 이름(`build-farm-mac…closet-22`)이 끝에서 갈린다. 감싼 요소(`.key` · `.mn` …)
+   가 폭을 정하고 `.mx` 는 그 안을 채울 뿐이라 칸이 넓어지지 않는다. 공백을 지키려고 `pre` 다.
+   (1) **잘린 글은 누르면 연다** — 실제로 잘린 `[data-cut]` 은 `data-cut-open` 을 얻는다. 모양은 손가락
+   커서와 포커스 테두리뿐이다(outline 은 상자를 바꾸지 않는다). 전문은 `#reveal` 이 페이지 좌표에
+   띄운다 — 어떤 행도 밀지 않는다. */
+.mx { display: flex; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 앞만 2ch 까지 줄고, 뒤는 칸이 「뒤 + 2ch」보다 좁을 때만 끝에서 준다 — 칸이 뒤 토막보다
+   좁을 때 「g」 한 글자 + 잘린 뒤 토막이 이어져 다른 이름처럼 읽히지 않게. 뒤를 줄임 몫(1000:1)으로
+   나누면 앞이 한참 남아도 뒤가 늘 몇 분의 1px 를 떠안아 끝에 「…」가 붙었다(`name-that-go…`,
+   최종 검증 · test_the_tail_stays_whole_while_the_head_can_still_give). 그래서 뒤는 줄지 않고
+   최대 폭으로만 묶는다. */
+.mx > .mx-h { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.mx > .mx-t { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 2ch); overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+table.mtab td.mhost .mhv { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-cut-open] { cursor: pointer; }
+[data-cut-open]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+.reveal { position: absolute; z-index: 40; box-sizing: border-box; min-width: 160px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--ink); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18); }
+.reveal .rv-text { font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; user-select: text; -webkit-user-select: text; }
+.reveal .rv-act { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.banner .banner-more { font: 500 12px var(--sans); color: inherit; background: none; border: 1px solid currentColor; border-radius: 999px; padding: 0 8px; cursor: pointer; }
+/* (8) 데스크톱에서 표 머리는 화면 맨 위에 붙는다 — 「모두 보기」로 200행을 펴고 내려가도 열 이름이
+   남는다. `.qwrap` 은 넘침을 자르기만 하고(`clip`) 스크롤 상자가 되지 않아야 sticky 가 화면 기준이다. */
+@media (min-width: 721px) {
+  .qwrap { overflow-x: clip; }
+  table.q thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); box-shadow: inset 0 -1px 0 var(--line); }
+}
+table.q td.key .key, table.q td.requester .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+table.q td.key .chip { max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* 이유는 늘 두 줄 자리다 — 짧은 이유도 두 줄을 차지해 이유가 바뀌어도 행 높이가 그대로다 */
+table.q td.reason > .reason { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; min-height: 3em; }
+/* 코드 출처 칸의 「uncommitted」 표지는 해시 아래 한 줄 — 옆에 붙이면 124px 칸에서 영어 글이 잘린다 */
+table.q td.source .uncommitted { display: flex; width: max-content; max-width: 100%; margin: 2px 0 0; }
+.prog .head { flex-wrap: nowrap; min-width: 0; }
+.prog .head > * { flex: 0 0 auto; }
+.prog .head .ph { display: flex; flex: 0 1 auto; min-width: 0; white-space: pre; }
+/* 좁으면 이름이 먼저 줄고, 그다음 앞 토막(「단계 3/3 (지금까지)」), 마지막에 시간 토막이 준다.
+   줄어드는 것은 층마다 하나다 — 바깥에서는 `.ph-l`(앞 + 이름)만, 그 안에서는 이름만 준다. 앞과
+   시간은 줄지 않고 최대 폭(칸 − 3em)으로만 묶인다. 줄임 몫(1000:10:1)으로 나누면 시간 토막이
+   몇 분의 1px 를 떠안아 `작업 6m 2…` 가 됐다(줄임 몫 규칙). */
+.prog .head .ph-l { display: flex; flex: 0 1 auto; min-width: 0; }
+.prog .head .ph-a { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; }
+/* 이름의 바닥 3em 은 앞 토막의 최대 폭이 비워 둔 몫과 같다 — 0 이면 3em 보다 짧은 이름(`build`)
+   옆에서 그 몫이 모자라 앞 토막이 `step 2/…` 로 잘렸다 */
+.prog .head .ph-name { flex: 0 1 auto; min-width: 3em; overflow: hidden; text-overflow: ellipsis; }
+.prog .head .ph-b { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; }
+.step .sn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#queue .empty, #queue .pool-h { overflow-wrap: anywhere; }
+.rrow { grid-template-columns: 72px 150px 118px 130px 66px 52px minmax(0, 1fr); }
+.rrow > * { min-width: 0; }
+/* 이름 칸 — 이름 뒤 다른 풀의 칩(「실행 그룹 mac2」)이 같은 줄에 안 들어가면 **다음 줄로** 간다.
+   한 줄에 묶으면 118px 칸에서 이름도 칩도 잘렸다(`remote-d… po…`, 문서 스크린샷). 칸 전체를
+   말줄임하면 칩이 통째로 「…」가 되어 짧은 이름(`gate …`)이 잘린 것처럼 읽혔다(최종 검증 ·
+   test_recent_pool_chip_shrinks_inside_the_name_cell). 줄마다 상자가 하나라 각자 칸 폭에서만
+   말줄임한다(줄임 몫 규칙). 칩은 행마다 정해져 있어 갱신에 줄 수가 바뀌지 않는다. */
+.rrow .k { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 4px; overflow: hidden; white-space: nowrap; }
+.rrow .k .kn, .rrow .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.rrow .k > .kn, .rrow .k > .key-line { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.rrow .k > .chip { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rrow .sm .smt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.rrow .sm .rerun { display: block; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rdetail { overflow-wrap: anywhere; }
+.drawer-head h2 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 반응형 (항목 21) ── */
 @media (max-width: 960px) {
@@ -458,6 +624,7 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
   .tail { max-width: 100%; }
   .summary { grid-template-columns: 1fr; }
   .s-top .sub, .workers .wk .lane-word { display: none; }
+  .wkband { order: 1; flex: 1 1 100%; }   /* 폰에서는 필 줄이 늘 머리줄 맨 아래 제 줄이다 */
   table.q thead { display: none; }
   table.q tr.qgroup, table.q tr.qgroup th, table.q tr.qgroup-empty td { display: block; width: auto; }
   table.q, table.q tbody, table.q tr, table.q td { display: block; }
@@ -473,7 +640,7 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
   table.q td.eta { white-space: normal; }
   .prog { padding-left: 8px; }
   .steps { grid-template-columns: 1fr; }
-  .hostcard { grid-template-columns: 1fr; }
+  .hostcard .meters { grid-template-columns: 1fr; }
   .rrow { grid-template-columns: 1fr 1fr; }
   .rrow .k, .rrow .s { grid-column: span 2; }
   #drawer { width: 100%; }
@@ -485,6 +652,54 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
   table.mtab td.mname { white-space: normal; font-weight: 600; }
   table.mtab td.mact { text-align: left; }
   table.mtab td.mact:empty { display: none; }
+}
+/* 폰의 큐 · 최근(영역 A) — 칸이 블록이 되어도 위의 두 규칙은 그대로다. 최근 행은 두 칸 격자. */
+@media (max-width: 720px) {
+  .rrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  table.q td.requester .rq { max-width: calc(100% - 6em); }
+}
+
+/* ── 가독성 R2 (Codex 가독성 검토 2 · 3 · 4 · 9번 · tests/test_web_readability_r2.py) ── */
+/* 2번 — 펼친 배치 블록: 판정별 집계 한 줄, 머신은 한 줄씩(말줄임 · 전문은 title), 그 아래 토글 */
+.place-sum { padding: 2px 0 4px; font: 600 12.5px/1.45 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
+.place-list li { line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.place-more { margin: 2px 0 2px 18px; }
+/* 3번 — 펼친 최근 실패: 칸마다 따로. 단계 · 이름은 한 줄, 서버 요약은 네 줄에서 자른다 */
+.rdetail > * { min-width: 0; }
+.rdetail .rd-tr, .rdetail .rd-fh, .rdetail .rd-more, .rdetail .rd-un { line-height: 1.45; }
+.rdetail .rd-step { line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rdetail .rd-fh { margin-top: 2px; color: var(--ink); }
+.rdetail .rd-fail { margin: 0; padding: 0 0 0 14px; list-style: none; }
+/* 이름이 먼저 남고 판정 글이 먼저 준다 — 판정은 7em 아래로는 안 준다 */
+.rdetail .rd-fail li { display: flex; gap: 0 0.5em; line-height: 1.45; white-space: nowrap; min-width: 0; }
+.rdetail .rd-fail .fn { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 0.5em - min(7em, 40%)); overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.rdetail .rd-fail .fv { flex: 0 1 auto; min-width: min(7em, 40%); overflow: hidden; text-overflow: ellipsis; }
+.rdetail .rd-sum { margin-top: 4px; }
+.rdetail .rd-sumt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; line-height: 1.45; color: var(--ink); }
+.rdetail .rd-sumt.full { display: block; -webkit-line-clamp: none; line-clamp: none; }
+.rdetail .rd-act { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.rd-btn { padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font: 11px/1.6 var(--sans); color: var(--accent); cursor: pointer; }
+/* 9번 — 머신 점검 칸 첫 줄: 결론 · 대상 · 잡 번호. 줄어드는 것은 점검 이름뿐이다 */
+table.mtab td.mchk .mck-h { display: flex; align-items: baseline; min-width: 0; overflow: hidden; white-space: nowrap; }
+table.mtab td.mchk .mck-w, table.mtab td.mchk .mck-j { flex: none; }
+table.mtab td.mchk .mck-sep { flex: none; white-space: pre; color: var(--muted); font-weight: 400; }
+table.mtab td.mchk .mck-p { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+table.mtab td.mchk .mck-h.failed .mck-w { color: var(--bad); }
+table.mtab td.mchk .mck-h.recheck .mck-w { color: var(--warn); }
+table.mtab td.mchk .mck-h.passed .mck-w { color: var(--ok); }
+table.mtab td.mchk .mck-j { font: 600 12.5px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+/* 첫 줄 아래의 진단은 두 줄 — 칸 전체는 오늘처럼 세 줄 자리. 결론은 첫 줄이 말했으니 보조 글씨 */
+table.mtab td.mchk .mck-h + .clamp { -webkit-line-clamp: 2; color: var(--muted); font-weight: 400; }
+/* 4번 — 폰의 큐 카드: 머리줄이 사라지므로 헷갈리는 세 칸에만 작은 라벨. 라벨은 늘 같은 글이라
+   카드 높이는 값과 상관없다. 실행한 사람 줄은 라벨이 붙어도 한 줄(이름만 준다). */
+@media (max-width: 720px) {
+  table.q td.requester::before, table.q td.eta::before, table.q td.reason > .reason::before {
+    content: attr(data-label); margin-right: 6px; font: var(--t-label); color: var(--muted);
+  }
+  table.q td.requester { display: flex; align-items: baseline; min-width: 0; white-space: nowrap; }
+  table.q td.requester::before { flex: none; }
+  table.q td.requester .rq { flex: 0 1 auto; min-width: 0; max-width: none; }
+  table.q td.requester .you, table.q td.requester .joiners { flex: none; }
 }
 /* 움직임도 상태 채널이다(§4.2) — **끝나지 않은** 상태만 움직인다. 끝난 잡은 가만히 있어서,
    화면 구석으로 흘긋 봐도 「아직 도는 중」과 「끝났다」가 갈린다.
@@ -704,7 +919,8 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 }
 
 /* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
-.pool-h { margin: 14px 0 6px; font: 600 12px var(--sans); color: var(--muted); }
+/* 풀 이름은 설정에서 온 그대로다 — 끊김 없는 이름도 접는다(자르면 뒤의 잡 수가 사라진다) */
+.pool-h { margin: 14px 0 6px; font: 600 12px var(--sans); color: var(--muted); overflow-wrap: anywhere; }
 
 /* 버전 목록 · 요약 띠 · 새 버전 대화상자 (docs/version-page-workplan.md §3.2 · §12) */
 .vstrip { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 8px 12px;
@@ -720,9 +936,11 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 .vchip .g { font-weight: 700; }
 .vhead { margin: 10px 0 8px; }
 .vrows { display: grid; gap: 6px; }
-.vrow { display: grid; grid-template-columns: 1.1em minmax(0, auto) minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px;
+/* 기호 칸은 1.1em 이 바닥이고 글꼴이 넓게 그리면 그만큼 넓어진다 — 리눅스 대체 글꼴의 ⌫ 는 18px 이라
+   1.1em(14px) 고정 칸 밖으로 샜다(PR #192 ubuntu CI). */
+.vrow { display: grid; grid-template-columns: minmax(1.1em, max-content) minmax(0, auto) minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px;
   padding: 8px 12px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; background: var(--surface); }
-.vrow .g { font-weight: 700; color: var(--muted); }
+.vrow .g { font-weight: 700; color: var(--muted); text-align: center; }
 .vrow .vt { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .vrow .vn { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
 .vrow .va { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -739,7 +957,7 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 .vfield .ck { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .vfield .nstate { grid-column: 1 / -1; }
 @media (max-width: 720px) {
-  .vrow { grid-template-columns: 1.1em minmax(0, 1fr); }
+  .vrow { grid-template-columns: minmax(1.1em, max-content) minmax(0, 1fr); }
   .vrow .vn, .vrow .va { grid-column: 2; }
   .vrow .va { justify-content: flex-start; }
   .vstrip { font-size: 12px; }
@@ -844,4 +1062,61 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
   .fld.ed { grid-template-columns: 1fr; }
   .fld.ed .fl, .fld.ed .fa { padding-top: 0; }
   .fld.ed .fa { flex-direction: row; align-items: baseline; gap: 8px; justify-content: flex-start; }
+}
+
+/* ── 스토어 탭 — 극단값에서도 상자 안에 (tests/test_web_layout_store_edges.py) ─────────────
+   80자 넘는 이름 · 끊김 없는 URL · 300자 커밋 · 긴 검증 오류가 와도 페이지가 옆으로 밀리지 않고,
+   폴링 · 타이핑으로 글이 바뀌는 줄(드라이버 머리 · 시트의 한 줄 · 저장 배지 · 카운터)은 자리를
+   지킨다. 잘린 글의 전문은 title 에 있다(app.js). 선택자는 전부 스토어 탭 안의 것이다. */
+#store p { overflow-wrap: anywhere; }
+/* 비밀 표: 이름은 어디서든 꺾고, 종류 · 상태는 한 줄, 검증 칸은 세 줄에서 자른다 —
+   표가 자기 상자 안에서 옆으로 스크롤해 오른쪽 열(드롭존 · 교체)을 가리지 않는다 */
+table.sec td.name .key { overflow-wrap: anywhere; }
+table.sec td.kind, table.sec td.state { white-space: nowrap; }
+table.sec td.ver .vtx { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+/* Source 행의 커밋은 한 줄 — 제목 · 누가 · 언제 모두 말줄임 */
+table.gh { table-layout: fixed; }
+table.gh td.sha { width: 8ch; }
+table.gh td.meta { width: 12em; }
+table.gh td.subj, table.gh td.meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 요약 띠의 칩은 한 줄 — 이름표(«소스»)는 꺾이지 않고 값만 말줄임 */
+.vchip { max-width: 100%; box-sizing: border-box; white-space: nowrap; overflow-wrap: normal; align-items: center; }
+.vchip .g, .vchip b { flex: none; }
+.vchip .vc-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 드라이버 머리 줄 — 폴링마다 바뀌어도 한 줄. 버전은 반까지만 쓴다(단계가 밀려나지 않게) */
+.drv-head { align-items: center; white-space: nowrap; min-width: 0; }
+.drv-head .g { flex: none; }
+.drv-head .dh-v { flex: 0 1 auto; min-width: 3em; max-width: 50%; overflow: hidden; text-overflow: ellipsis; }
+.drv-head .dh-r { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 바텀시트의 접힌 한 줄 — 300자 상태가 와도 시트가 자라 본문을 덮지 않는다 */
+.sh-head .st { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 저장 배지 — 자리는 글과 상관없이 정해지고(머리가 다시 접히지 않는다), 글은 한 줄 */
+.vedit-head [data-save-slot] { flex: 1 1 0; min-width: 12em; height: 20px; align-self: center; display: flex; align-items: center; justify-content: flex-end; }
+.savebadge { max-width: 100%; min-width: 0; white-space: nowrap; align-items: center; }
+.savebadge .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.savebadge .btn { flex: none; padding-top: 0; padding-bottom: 0; line-height: 16px; }
+/* 절 머리 · 시트 머리의 버전 이름 — 80자 이름은 말줄임(전문은 title), 상태 필은 그대로 */
+.ssec h3 [data-section-version] { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.sh-head .ver { min-width: 0; max-width: 100%; }
+.sh-head .ver .vt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-head .ver .pill { flex: none; }
+/* 글자 수 카운터 — 다섯 자리 + 상한까지 같은 폭이라 치는 동안 입력칸이 줄었다 늘었다 하지 않는다 */
+.fld .counter { min-width: 10ch; text-align: right; }
+.fld .fl { min-width: 0; overflow-wrap: anywhere; }
+.fld > .pill { justify-self: start; }
+/* 못 받은 스크린샷(404 · 옮겨진 파일)은 Chrome 이 alt 글로 그리는데, 인라인이면 width · height 를
+   무시하고 경로 길이만큼(740px) 옆 그림 위로 번진다 — 블록이면 84×150 상자를 지킨다 */
+.shot { overflow: hidden; }
+.shot img { display: block; overflow: hidden; }
+@media (max-width: 720px) {
+  /* iOS 는 16px 밑의 칸에 포커스하면 화면을 확대한다 — 그러면 페이지가 옆으로 밀린다 */
+  #store input[type="text"], #store textarea { font-size: 16px; }
+  /* 대기열의 폰 규칙(`.pill` 을 어디서든 꺾는다)이 스토어 탭에서는 «실패» 를 «실/패» 로 꺾는다 */
+  #store .pill { white-space: nowrap; overflow-wrap: normal; }
+  .fld.ed .counter { text-align: left; }
+  table.gh, table.gh tbody { display: block; }
+  table.gh tr { display: grid; grid-template-columns: 8ch minmax(0, 1fr); column-gap: 6px; padding: 2px 0; }
+  table.gh td { display: block; min-width: 0; padding: 0; }
+  table.gh td.sha, table.gh td.meta { width: auto; }
+  table.gh td.meta { grid-column: 2; }
 }

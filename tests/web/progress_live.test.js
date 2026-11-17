@@ -255,3 +255,34 @@ describe("progressHeadHtml — 기준점이 없는 옛 서버 문서", () => {
     });
   });
 });
+
+// 펼친 행의 머리줄은 한 줄이고 스텝 이름만 말줄임된다(tests/test_web_layout_queue_edges.py) —
+// 그래서 이름은 자기 토막(`.ph-name`)에 따로 산다. 앞 · 이름 · 뒤 세 토막이 순서대로 하나씩이고,
+// 앞 · 이름은 `.ph-l` 한 상자에 든다 — 층마다 줄어드는 상자가 하나라야 시간 토막이 몇 분의 1px 를
+// 떠안아 말줄임되지 않는다(test_web_readability_r1.test_no_text_is_cut_by_less_than_a_pixel).
+describe("progressHeadHtml — 스텝 이름은 자기 토막에 산다", () => {
+  test("앞 · 이름 · 뒤, 이름 토막의 글자는 스텝 이름 그대로", () => {
+    const p = running412();
+    p.current_name = "integration_" + "x".repeat(120);
+    LANGS.forEach((lang) => {
+      LIVE.forEach((live) => {
+        const html = rcm.progressHeadHtml(structuredClone(p), lang, live);
+        const order = [...html.matchAll(/class="(ph-[a-z]+)"/g)].map((m) => m[1]);
+        assert.deepEqual(order, ["ph-l", "ph-a", "ph-name", "ph-b"], `${lang} / live=${live}`);
+        assert.match(html, /^<span class="ph-l"><span class="ph-a">[^<]*<\/span><span class="ph-name">[^<]*<\/span><\/span><span class="ph-b">/);
+        const name = /<span class="ph-name">([^<]*)<\/span>/.exec(html);
+        assert.equal(name && name[1], p.current_name, `${lang} / live=${live}`);
+      });
+    });
+  });
+
+  test("스텝 이름이 없으면 이름 토막도 없다", () => {
+    const p = running412();
+    p.current_name = null;
+    LANGS.forEach((lang) => {
+      const html = rcm.progressHeadHtml(structuredClone(p), lang, true);
+      assert.ok(!/ph-name/.test(html), lang);
+      assert.match(html, /^<span class="ph-l"><span class="ph-a">[^<]*<\/span><\/span>/, lang);
+    });
+  });
+});

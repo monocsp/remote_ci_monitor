@@ -343,6 +343,11 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 8. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
    the repository it came from is in the expanded block, since every row usually repeats it.
 
+A name longer than its column is cut in the middle (`android-integration-test-s… name-that-goes`),
+so names that start the same still differ at the end. Tap or click a cut name — or Tab to it and
+press Enter — to read it in full, with a **Copy** button. Tap again, tap elsewhere or press Escape
+to close it. It needs no hover, so it works on a phone too.
+
 ### Your jobs
 
 ![after pasting a token: the token button shows your name, your jobs are marked, the log tail and buttons appear](images/ui/web-your-jobs.png)
