@@ -520,6 +520,74 @@ def test_a_short_step_name_leaves_the_step_counter_whole(tmp_path):
         served.close()
 
 
+# 진짜 dev 서버(로컬 레인 둘 + 원격 워커 둘)의 1240px 머리줄: 레인이 쉬면 필 글자가 `#22` 에서
+# `lane 1 · idle` 로 넓어져 띠가 줄 안에서 줄지 않고 토큰 단추를 둘째 줄로 밀었다 — 잡이 끝날 때마다
+# 머리줄이 한 줄 늘고 그 아래 화면이 통째로 내려간다. 띠는 제 줄 안에서 줄고 옆으로 민다.
+HDR_JS = """
+(() => {
+  const h = document.getElementById('hdr').getBoundingClientRect();
+  const t = document.getElementById('tok-btn').getBoundingClientRect();
+  const w = document.querySelector('.wordmark').getBoundingClientRect();
+  return {h: Math.round(h.height), tokTop: Math.round(t.top - h.top),
+          sameRow: Math.abs((t.top + t.height / 2) - (w.top + w.height / 2)) < 6,
+          pills: [...document.querySelectorAll('#hdr .wk')].map((e) => e.textContent)};
+})()
+"""
+
+
+def _four_pills(doc: dict, *, busy: bool) -> dict:
+    doc = json.loads(json.dumps(doc))
+    since = doc["server"]["workers"][0]["since"]
+    lanes = [
+        {
+            "lane": n,
+            "state": "busy" if busy else "idle",
+            "job_id": (412 if n == 1 else 409) if busy else None,
+            "error": None,
+            "since": since,
+        }
+        for n in (1, 2)
+    ]
+    remote = [
+        {
+            "lane": 1,
+            "worker": f"w-{name}",
+            "display_name": name,
+            "state": "idle",
+            "job_id": None,
+            "error": None,
+            "since": since,
+        }
+        for name in ("mac2-worker", "mbp-with-a-rather-long-machine-name")
+    ]
+    doc["server"]["workers"] = lanes + remote
+    return doc
+
+
+def test_the_header_keeps_one_row_when_lanes_go_idle(tmp_path):
+    served = A.Served("long-text")
+    found = {}
+    try:
+        with Chrome(tmp_path / "chrome-r1-hdr", window="1280,900") as c:
+            for lang in ("ko", "en"):
+                base = A.long_text_doc()
+                served.swap(_four_pills(base, busy=True))
+                A.open_scene(c, served, 1240, lang)
+                before = c.eval(HDR_JS)
+                served.swap(_four_pills(base, busy=False))
+                A.refetch(
+                    c,
+                    "[...document.querySelectorAll('#hdr .wk')]"
+                    ".some((e) => /idle|대기/.test(e.textContent))",
+                )
+                after = c.eval(HDR_JS)
+                if before["h"] != after["h"] or not after["sameRow"]:
+                    found[lang] = (before, after)
+    finally:
+        served.close()
+    assert not found, f"레인이 쉬자 머리줄이 바뀌었다: {found}"
+
+
 BANNER_JS = """
 (() => {
   const n = document.getElementById('banner-note');
