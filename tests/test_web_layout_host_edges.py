@@ -319,10 +319,12 @@ def ready(lang: str, machines: int = 50) -> str:
     rows = (
         f"document.querySelectorAll('#machines tr[data-machine]').length === {machines}"
         if machines
-        else "document.querySelector('#machines-section').hidden === true"
+        else "document.querySelector('#machines-section')?.hidden === true"
     )
+    # 첫 렌더 전에는 호스트 몸통이 아직 없다 — `?.` 가 없으면 판정식이 TypeError 를 던지고
+    # Chrome.open 은 그걸 「아직」이 아니라 실패로 읽는다(ubuntu CI 에서 가끔 빨갰다).
     return (
-        f"{rows} && document.querySelector('#host [data-host-body]').children.length > 0"
+        f"{rows} && (document.querySelector('#host [data-host-body]')?.children.length ?? 0) > 0"
         f" && document.documentElement.lang === {json.dumps(lang)}"
     )
 
