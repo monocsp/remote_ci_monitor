@@ -89,9 +89,11 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .wk.paused { border-color: var(--warn); color: var(--warn); }
 .wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
 .livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
-/* 상태 글자(live · 멈춤 · 폴링 · 연결 중…)가 바뀌어도 버튼 폭이 그대로다 — 안 그러면 폰에서 옆 버튼이
-   다음 줄로 넘어갔다 돌아온다(390px en 에서 35px, 큐 가장자리 시험) */
-.livebtn [data-live-text] { display: inline-block; min-width: 11ch; text-align: left; }
+/* 상태 글자(live · 멈춤 · 폴링 · 연결 중… 과 매초 바뀌는 「Ns 갱신」)가 바뀌어도 버튼 폭이 그대로다 —
+   안 그러면 폰에서 옆 버튼이 다음 줄로 넘어갔다 돌아온다(390px en 에서 35px, 큐 가장자리 시험).
+   최소 폭으로는 못 막는다(문구가 늘면 다시 흔들린다) — 폭을 고정하고 넘치면 말줄임이다 */
+.livebtn [data-live-text] { display: inline-block; width: 24ch; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 720px) { .livebtn [data-live-text] { width: 16ch; } }
 .livebtn .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
 .livebtn.polling .live { background: var(--warn); box-shadow: none; }
 .livebtn.paused .live, .livebtn.lost .live { background: var(--queued); box-shadow: none; }
