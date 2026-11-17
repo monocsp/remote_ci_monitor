@@ -1078,13 +1078,14 @@
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     // 세 토막(앞 · 스텝 이름 · 뒤)으로 감싼다 — 펼친 행의 머리줄은 한 줄이고 **이름만** 말줄임된다
     // (style.css `.prog .head .ph`). 이름 길이에 따라 머리줄이 1~3줄로 접히면 단계가 바뀔 때마다
-    // 펼친 행이 출렁인다. 태그를 벗긴 글자는 그대로다.
-    var h = '<span class="ph-a">' + esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
+    // 펼친 행이 출렁인다. 태그를 벗긴 글자는 그대로다. 앞 · 이름은 `.ph-l` 한 상자에 든다 — 층마다
+    // 줄어드는 상자가 하나여야 시간 토막이 몇 분의 1px 를 떠안아 말줄임되지 않는다.
+    var h = '<span class="ph-l"><span class="ph-a">' + esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
     var tail = "";
     if (prog.current_name) {
-      h += " · </span>" + '<span class="ph-name">' + esc(prog.current_name) + "</span>";
+      h += " · </span>" + '<span class="ph-name">' + esc(prog.current_name) + "</span></span>";
       tail = " · " + span(cur && cur.started_at, fmtDuration(prog.current_seconds));
-    } else h += "</span>";
+    } else h += "</span></span>";
     tail += " · " + jobSpan("progress.job");
     var f = failedStepCount(prog);
     if (f) tail += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
@@ -4308,7 +4309,7 @@
       html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
+        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip" data-cut="chip" title="' + esc(tr("pool.name", { name: job._pool })) + '">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
         '<span class="s rq" data-cut="rq" title="' + esc((job.requester || {}).label || DASH) + '">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
@@ -4603,7 +4604,7 @@
     r.setAttribute("aria-label", tr("reveal.title"));
     $(".rv-text", r).textContent = text;
     var copy = $("#reveal-copy");
-    copy.textContent = tr("row.copy"); copy.setAttribute("data-copy", text);
+    copy.textContent = tr("reveal.copy"); copy.setAttribute("data-copy", text);
     $("#reveal-close").textContent = tr("reveal.close");
     var vw = document.documentElement.clientWidth, vh = window.innerHeight;
     r.style.left = "0px"; r.style.top = "0px"; r.style.maxWidth = Math.max(160, Math.min(480, vw - 16)) + "px";
