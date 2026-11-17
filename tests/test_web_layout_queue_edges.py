@@ -796,3 +796,66 @@ def test_rows_keep_their_height_through_ticks_and_updates(tmp_path):
     assert not moved, "갱신에 행이 움직였다:\n" + "\n".join(
         f"  {lang} @ {width}px\n    " + "\n    ".join(b) for (width, lang), b in moved.items()
     )
+
+
+# ── 최근 행: 다른 풀의 칩이 이름 칸을 통째로 말줄임하지 않는다 ─────────────────────
+
+# 진짜 dev 서버(2026-11-17 최종 검증)에서 1240px 최근 행이 `gate …` 로 보였다. 이름은 네 글자인데
+# 뒤의 「실행 그룹 mac2」 칩이 칸(150px)에 안 들어가 칸 전체의 말줄임표가 칩을 통째로 지웠다 —
+# 이름이 잘린 것처럼 읽히고, 펼치는 행 안이라 눌러 열 수도 없다. 칸은 자기 상자를 넘치지 않고,
+# 칩이 제 안에서 줄어야 한다.
+
+RECENT_K_JS = """
+(() => {
+  const out = [];
+  document.querySelectorAll('#recent .rrow').forEach((row) => {
+    const k = row.querySelector('.k'), chip = k && k.querySelector('.chip');
+    if (!chip) return;
+    const kr = k.getBoundingClientRect(), cr = chip.getBoundingClientRect();
+    const kn = k.querySelector('.kn');
+    out.push({job: row.getAttribute('data-job'), kOver: k.scrollWidth - k.clientWidth,
+      chipW: Math.round(cr.width), chipIn: cr.left >= kr.left - 1 && cr.right <= kr.right + 1,
+      knCut: kn.scrollWidth > kn.clientWidth + 1, key: kn.getAttribute('title')});
+  });
+  return out;
+})()
+"""
+
+
+def recent_chip_doc() -> dict:
+    """풀 여섯 장면에 다른 풀의 최근 잡 둘 — 짧은 이름 하나, 긴 이름 + 링크 하나."""
+    doc = pools_doc()
+    tmpl = base_doc()["pools"][0]["recent"][1]
+    short = {**copy.deepcopy(tmpl), "id": 5000001, "key": "mac2-only", "summary": ""}
+    long_ = {
+        **copy.deepcopy(tmpl),
+        "id": 5000002,
+        "key": LONG_KEY,
+        "summary": "",
+        "link": {"url": LINK_URL, "label": LINK_LABEL},
+    }
+    doc["pools"][1]["recent"] = [short]
+    doc["pools"][2]["recent"] = [long_]
+    return doc
+
+
+def test_recent_pool_chip_shrinks_inside_the_name_cell(tmp_path, monkeypatch):
+    spec = {"doc": recent_chip_doc, "expanded": [], "rows": 5 + 15}
+    monkeypatch.setitem(SCENES, "recent-chip", spec)
+    served = Served("recent-chip")
+    found: dict[tuple[int, str], list] = {}
+    try:
+        with Chrome(tmp_path / "chrome-recent-chip", window="1280,900") as c:
+            for width, lang in CASES:
+                open_scene(c, served, width, lang)
+                _wait(c, "document.querySelectorAll('#recent .rrow .k .chip').length >= 2")
+                rows = c.eval(RECENT_K_JS)
+                bad = [r for r in rows if r["kOver"] > 1 or not r["chipIn"] or r["chipW"] < 24]
+                bad += [r for r in rows if r["key"] == "mac2-only" and r["knCut"]]
+                if bad:
+                    found[(width, lang)] = bad
+    finally:
+        served.close()
+    assert not found, "최근 행의 이름 칸이 칩 때문에 넘친다:\n" + "\n".join(
+        f"  {lang} @ {width}px {rows}" for (width, lang), rows in found.items()
+    )

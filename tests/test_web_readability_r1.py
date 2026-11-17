@@ -380,6 +380,110 @@ def test_identifiers_keep_their_tail_and_open_in_full(tmp_path):
         scene.srv.close()
 
 
+# 진짜 dev 서버(2026-11-17 최종 검증)의 1240px 큐에서 `androi… name-that-go…` — 앞 토막은 59px 로
+# 아직 줄 여지가 있는데 뒤 토막이 0.1px 모자라 끝에 말줄임표를 달았다. 줄임 몫 1000:1 은 뒤 토막에도
+# 언제나 몇 분의 1px 를 떠넘긴다. 앞이 최소 폭(2ch)보다 넓은 동안 뒤 토막은 제 폭을 다 가져야 한다.
+TAIL_WHOLE_JS = """
+(() => {
+  const bad = [];
+  let n = 0;
+  document.querySelectorAll('.mx').forEach((m) => {
+    const h = m.querySelector('.mx-h'), t = m.querySelector('.mx-t');
+    if (!h || !t || !m.getClientRects().length) return;
+    const hw = h.getBoundingClientRect().width, tw = t.getBoundingClientRect().width;
+    // 제자리에서 뒤 토막만 줄지 않게 하고 잰 폭이 그 글의 온 폭이다(같은 글꼴 · 같은 맥락)
+    const keep = t.getAttribute('style');
+    t.style.flexShrink = '0'; t.style.maxWidth = 'none';
+    const natural = t.getBoundingClientRect().width;
+    if (keep === null) t.removeAttribute('style'); else t.setAttribute('style', keep);
+    const hMin = parseFloat(getComputedStyle(h).minWidth) || 0;
+    n++;
+    if (hw > hMin + 1 && tw < natural - 0.01)
+      bad.push({tail: t.textContent, tw: tw, natural: natural, hw: hw,
+                where: (m.parentElement.className || m.parentElement.tagName)});
+  });
+  return {n: n, bad: bad};
+})()
+"""
+
+
+# 같은 병의 일반형 — 한 줄 flex 안에서 줄임 몫으로 나눠 가지면 「다 들어가야 할」 글이 1px 도 안 되게
+# 모자라 말줄임표를 단다. 진짜 dev 서버의 머신 표에서 `macmini` 가 `macmi…` 였다(48.38px / 48.47px —
+# 옆의 긴 머신 id 가 줄임 몫 100:1 로 거의 다 가져갔지만 이름에도 0.1px 가 남았다). 1px 도 안 되게
+# 잘린 말줄임은 어디서든 버그다 — 그 몇 분의 1px 를 주면 글 전체가 보인다.
+SLIVER_JS = """
+(() => {
+  const bad = [];
+  let n = 0;
+  document.querySelectorAll('body *').forEach((el) => {
+    const cs = getComputedStyle(el);
+    if (cs.textOverflow !== 'ellipsis' || !el.getClientRects().length) return;
+    const up = el.parentElement;
+    if (!up || !/flex/.test(getComputedStyle(up).display)) return;
+    n++;
+    const w = el.getBoundingClientRect().width;
+    const keep = el.getAttribute('style');
+    el.style.flexShrink = '0'; el.style.maxWidth = 'none'; el.style.minWidth = 'max-content';
+    const natural = el.getBoundingClientRect().width;
+    if (keep === null) el.removeAttribute('style'); else el.setAttribute('style', keep);
+    if (w < natural - 0.001 && w > natural - 1)
+      bad.push({text: el.textContent.slice(0, 40), w: w, natural: natural,
+                cls: el.className, up: up.className});
+  });
+  return {n: n, bad: bad};
+})()
+"""
+
+
+def _scenes(c: Chrome):
+    """큐 장면 셋 + 호스트 장면을 네 크기(390 · 1240 × ko · en)로 열며 이름을 내준다."""
+    for scene_name in ("long-text", "crowd", "placement"):
+        served = A.Served(scene_name)
+        try:
+            for width, lang in A.CASES:
+                A.open_scene(c, served, width, lang)
+                yield (scene_name, width, lang)
+        finally:
+            served.close()
+    scene = B.Scene()
+    try:
+        for width, lang in A.CASES:
+            B.open_scene(c, scene, width, lang)
+            yield ("hosts", width, lang)
+    finally:
+        scene.srv.close()
+
+
+def test_the_tail_stays_whole_while_the_head_can_still_give(tmp_path):
+    found = {}
+    with Chrome(tmp_path / "chrome-r1-tail", window="1280,900") as c:
+        for where in _scenes(c):
+            got = c.eval(TAIL_WHOLE_JS)
+            if where[0] == "hosts":
+                assert got["n"] > 0
+            if got["bad"]:
+                found[where] = got["bad"][:4]
+    assert not found, "앞 토막이 줄 수 있는데 뒤 토막이 잘렸다:\n" + "\n".join(
+        f"  {k}: {v}" for k, v in found.items()
+    )
+
+
+def test_no_text_is_cut_by_less_than_a_pixel(tmp_path):
+    found = {}
+    with Chrome(tmp_path / "chrome-r1-sliver", window="1280,900") as c:
+        for where in _scenes(c):
+            c.eval("document.getElementById('machines') && (document.getElementById('machines')"
+                   ".open = true); true")
+            time.sleep(0.2)
+            got = c.eval(SLIVER_JS)
+            assert got["n"] > 0, where
+            if got["bad"]:
+                found[where] = got["bad"][:4]
+    assert not found, "1px 도 안 되게 잘려 말줄임표를 단 글:\n" + "\n".join(
+        f"  {k}: {v}" for k, v in found.items()
+    )
+
+
 BANNER_JS = """
 (() => {
   const n = document.getElementById('banner-note');

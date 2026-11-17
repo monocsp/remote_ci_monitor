@@ -175,3 +175,18 @@ describe("unreachableNote — the worker-unreachable banner is a summary (Codex 
     assert.equal(a, b);
   });
 });
+
+describe("reveal popup buttons read as one pair (final check)", () => {
+  // 진짜 dev 서버에서 영어 팝업이 「copy」 「Close」 — 나란한 두 단추의 대소문자가 달랐다.
+  // 큐 행의 작은 복사 칩(`row.copy`, 소문자)과 팝업의 단추는 다른 글이다.
+  const t = require("path").join(__dirname, "..", "..", "src", "remote_ci_monitor", "web", "i18n.js");
+  const I18N = require(t);
+  test("English: Copy · Close", () => {
+    assert.equal(I18N.t("en", "reveal.copy"), "Copy");
+    assert.equal(I18N.t("en", "reveal.close"), "Close");
+  });
+  test("Korean: 복사 · 닫기", () => {
+    assert.equal(I18N.t("ko", "reveal.copy"), "복사");
+    assert.equal(I18N.t("ko", "reveal.close"), "닫기");
+  });
+});
