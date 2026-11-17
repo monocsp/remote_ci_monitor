@@ -95,19 +95,21 @@ describe("jobLinkHtml", () => {
 });
 
 describe("keyWithLinkHtml — the job-name cell", () => {
-  test("without a link it is today's plain name span (rows without links do not change)", () => {
-    assert.equal(rcm.keyWithLinkHtml("gate:full", null), '<span class="key">gate:full</span>');
-    assert.equal(rcm.keyWithLinkHtml("gate:full", { url: "javascript:x" }), '<span class="key">gate:full</span>');
+  // 이름은 칸 폭에서 한 줄로 말줄임된다 — 전문은 title 로 늘 함께 간다(tests/test_web_layout_queue_edges.py)
+  test("without a link it is the plain name span, the full name in its title", () => {
+    const plain = '<span class="key" title="gate:full">gate:full</span>';
+    assert.equal(rcm.keyWithLinkHtml("gate:full", null), plain);
+    assert.equal(rcm.keyWithLinkHtml("gate:full", { url: "javascript:x" }), plain);
   });
 
   test("with a link the name and the chip share one line box, the chip right after the name", () => {
     const h = rcm.keyWithLinkHtml("gate:full", { url: PR, label: "PR #816" });
-    assert.match(h, /^<span class="key-line"><span class="key">gate:full<\/span><a class="job-link" /);
+    assert.match(h, /^<span class="key-line"><span class="key" title="gate:full">gate:full<\/span><a class="job-link" /);
     assert.ok(h.endsWith("</a></span>"), h);
   });
 
   test("the name is escaped", () => {
     const h = rcm.keyWithLinkHtml("<b>x</b>", { url: PR, label: "PR #816" }, "kn");
-    assert.ok(h.includes('<span class="kn">&lt;b&gt;x&lt;/b&gt;</span>'), h);
+    assert.ok(h.includes('<span class="kn" title="&lt;b&gt;x&lt;/b&gt;">&lt;b&gt;x&lt;/b&gt;</span>'), h);
   });
 });
