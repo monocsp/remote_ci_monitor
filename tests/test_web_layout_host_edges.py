@@ -551,6 +551,39 @@ def test_many_workers_keep_the_header_short(crowd, tmp_path):
 # ── 다른 장면 ────────────────────────────────────────────────────────────────
 
 
+RECHECK_JS = """
+(() => {
+  const tr = document.querySelector('#machines tr[data-machine="@local"]');
+  const b = tr && tr.querySelector('button.recheck');
+  if (!b) return {missing: true, n: document.querySelectorAll('#machines button.recheck').length};
+  const br = b.getBoundingClientRect(), cr = b.closest('td').getBoundingClientRect();
+  return {n: document.querySelectorAll('#machines button.recheck').length,
+          inside: br.left >= cr.left - 1 && br.right <= cr.right + 1, w: Math.round(br.width)};
+})()
+"""
+
+
+def test_admin_recheck_column_fits_beside_the_long_row(crowd, tmp_path):
+    """admin 이면 다시 점검 칸이 생긴다 — 버튼은 제 칸 안에 있고 표는 여전히 옆으로 안 민다."""
+    crowd.srv.route("GET", "/api/whoami", {"name": "owner", "admin": True})
+    got = {}
+    with Chrome(tmp_path / "chrome-b-admin", window="1280,900") as c:
+        c.open(crowd.url("ko"), ready_js=ready("ko"), timeout=20)
+        c.eval("localStorage.setItem('rcm.token', 'admin-token'); true")
+        for width, lang in CASES:
+            open_scene(c, crowd, width, lang)
+            wait_for(c, "document.querySelectorAll('#machines button.recheck').length === 50")
+            got[(width, lang)] = (c.eval(RECHECK_JS), c.eval(SPILL_JS), c.eval(OVERFLOW_JS))
+    for (width, lang), (r, s, m) in got.items():
+        where = f"{lang}@{width}"
+        assert not r.get("missing") and r["n"] == 50, f"{where}: {r}"
+        assert r["inside"], f"{where}: 다시 점검 버튼이 칸 밖으로 나갔다 {r}"
+        assert not s["count"], f"{where}: {s['spill']}"
+        assert m["scrollWidth"] <= m["clientWidth"] + 1 and not m["wide"], describe(m)
+        if width > PHONE_MAX:
+            assert all(b["scrollW"] <= b["clientW"] + 1 for b in s["mwrap"]), s["mwrap"]
+
+
 def test_long_hosts_error_wraps_inside_the_page(crowd, tmp_path):
     crowd.set(hosts_error=LONG_HOSTS_ERROR)
     bad = {}
