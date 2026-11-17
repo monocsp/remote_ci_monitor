@@ -159,7 +159,7 @@ def workers(now: datetime, *, tick: int = 0) -> list[dict[str, Any]]:
     return out
 
 
-POOL_NAMES = ["default", "mac2", "mbp-pool", "linux-gpu", LONG_NAME[:40], "ios-devices"]
+POOL_NAMES = ["default", "mac2", "mbp-pool", "linux-gpu", LONG_NAME[:40], "ios_devices_" * 6]
 
 
 def status_doc(now: datetime, *, tick: int = 0, hosts_error: str | None = None) -> dict:
