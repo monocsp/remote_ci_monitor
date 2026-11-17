@@ -426,8 +426,11 @@ def test_status_schema_v1_shape_and_etag(srv):
             "hold_code": None,  # M5f — 도는 레인은 셋 다 null
             "hold_detail": None,
             "held_since": None,
+            # M5n — 이 레인이 도는 호스트(하드웨어 신원의 해시, 키 추가만)
+            "host_key": doc["server"]["workers"][0]["host_key"],
         }
     ]
+    assert doc["server"]["workers"][0]["host_key"]  # 모르는 값이어도 `worker:@local` 이다
     assert [p["name"] for p in doc["presets"]] == ["ok", "bad", "slow", "gate"]
     assert doc["presets"][3]["inputs"][0]["choices"] == ["full", "fast"]
     etag = headers["ETag"]

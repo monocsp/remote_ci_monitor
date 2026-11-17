@@ -93,6 +93,13 @@ so the job URLs printed by `rcm run` open from other computers.
 Keep it running across logins and reboots with the launchd and systemd examples in
 [Operating the build machine](docs/operating.md#run-as-a-service).
 
+**A second machine** joins as a worker: `rcm token add mbp --worker` here, then `rcm init worker`
+and `rcm worker --check` there (it finds the server on the same network by itself). Each machine
+reports what it can run; `rcm machines` lists them, and a preset with
+`placement = "any-capable"` goes to any machine that has its tools —
+[Second build machine](docs/configuration.md#second-build-machine-remote-worker) and
+[Which machine runs a job](docs/configuration.md#which-machine-runs-a-job).
+
 ## Session machine (3 commands)
 
 A session needs two things: **where** the server is, and **who you are**. Only the first one can
@@ -182,7 +189,7 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--link` shows an http(s) page — its pull request, say — next to the job's name in the web UI ([job links](docs/configuration.md#linking-a-job-to-a-page)); `--no-join` never joins an identical job; `--no-wait` returns as soon as the job is queued and prints its position and ETA; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--link` shows an http(s) page — its pull request, say — next to the job's name in the web UI ([job links](docs/configuration.md#linking-a-job-to-a-page)); `--no-join` never joins an identical job; `--no-wait` returns as soon as the job is queued and prints its position and ETA; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory; `--machine ID` pins the job to one machine (a check preset with any token, anything else admin) |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · disk · GPU · top processes) |
@@ -191,6 +198,8 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 | `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | what the job produced, and fetching it. `rcm run --fetch-artifacts` does it in one step, into the tree you submitted |
 | `rcm presets [--json]` | presets the server offers and their inputs |
 | `rcm discover [--json] [--timeout S]` | rcm servers on this network (mDNS); `rcm check` says `(found on this network)` when it used one |
+| `rcm machines [--json] [--machine ID]` | every machine that runs jobs: host, pool, lanes, its environment fingerprint (`xcode 27.2 · flutter 3.47.8`) and how many presets it can run, with the reasons for the rest. `--machine` shows one machine's verdict per preset and its checks ([machines](docs/configuration.md#which-machine-runs-a-job)) |
+| `rcm recheck MACHINE [CHECK…]` | run a machine's check presets again after you fixed it (admin) |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
 | `rcm reload` | re-read the config file — presets and repos only, no restart (admin) |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
@@ -378,7 +387,7 @@ The full list, including what the web UI keeps in `localStorage`, is in
 |---|---|
 | [Usage guide](docs/usage.md) · [한국어](docs/usage.ko.md) | a first job, step by step, with annotated screenshots |
 | [Release contract](docs/release-contract.md) | what a project provides for the Store tab: profile, presets by role, artifact files, markers, secrets, the driver, and the skills that generate them |
-| [Configuration](docs/configuration.md) | presets, inputs, markers, deploy presets, priority, snapshot cache, pools and remote workers, notifications, the client and worker files |
+| [Configuration](docs/configuration.md) | presets, inputs, markers, deploy presets, priority, snapshot cache, pools and remote workers, which machine runs a job (probes, placement, checks), notifications, the client and worker files |
 | [Operating the build machine](docs/operating.md) | running it as a service, Docker, upgrades, security, why a number can be wrong, the manual check on a real machine |
 | [CHANGELOG.md](CHANGELOG.md) | every user-visible change, newest first |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | development, house rules, branches, releasing |

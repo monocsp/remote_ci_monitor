@@ -13,7 +13,11 @@
   function T(lang, key, args) { return I18N.t(lang || EN, key, args); }
 
   var DASH = "—";
-  var ACTIONABLE = ["worker_down", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
+  // M5n §7.3 — 「맞는 머신 없음」·「점검 실패」는 워커가 죽은 것 바로 다음으로 급하다.
+  // `check_pending` 은 없다 — 점검이 끝나면 저절로 풀린다.
+  var ACTIONABLE = ["worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
+  // `환경 바뀜` 칩이 사는 창(§8.3) — 지문이 이 안에서 바뀐 머신만
+  var ENV_CHANGED_WINDOW_MS = 24 * 3600 * 1000;
   var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1 };
   // 상태마다 모양이 하나씩. 채운 것은 도는 상태, 빈 것은 멈춘 상태다(§4.2) — `취소 중`(채운 사각)과
   // `취소됨`(빈 사각)이 색으로만 갈리면 색을 못 보는 사람에게 같은 것이 된다(WCAG 1.4.1).
@@ -227,7 +231,36 @@
         if (isNum(busy) && isNum(lanes)) parts.push(T(lang, "reason.lanes_busy", { busy: busy, lanes: lanes }));
         if (isNum(row.ahead_job_id)) { parts.push(T(lang, "reason.behind", { id: row.ahead_job_id })); links.push({ jobId: row.ahead_job_id }); }
         if (isNum(est.wait_seconds)) parts.push(T(lang, "reason.frees_in", { dur: fmtDuration(est.wait_seconds) }));
+        // any-capable · 지정 잡이면 어디서 돌지를 끝에 단다(M5n §8.3). pool 행은 오늘 그대로.
+        var where = placementLabel(row, lang);
+        if (where) parts.push(where);
         out.text = parts.join(" · "); break;
+      }
+      case "no_capable_machine": {
+        // 머신마다 왜 안 되는지. 메모가 없으면 사유를 지어내지 않는다(§12) — 「알 수 없음」.
+        var whyNot = placementNotes(row, lang);
+        out.text = T(lang, "reason.no_capable_machine") + " · " + (whyNot.length ? whyNot.join(" · ") : T(lang, "reason.unknown"));
+        out.actionable = true; out.cls = "stuck"; break;
+      }
+      case "check_failed": {
+        var failedNotes = placementNotes(row, lang);
+        out.text = T(lang, "reason.check_failed") + " · " + (failedNotes.length ? failedNotes.join(" · ") : T(lang, "reason.unknown"));
+        // 실패한 점검 잡으로 바로 간다
+        placementList(row).forEach(function (n) {
+          var d = (n && n.detail) || {};
+          if (n && n.code === "check_failed" && isNum(d.job_id)) links.push({ jobId: d.job_id });
+        });
+        out.actionable = true; out.cls = "stuck"; break;
+      }
+      case "check_pending": {
+        // 점검이 끝나면 저절로 풀린다 — actionable 아님. 점검 이름은 처음 나온 차례로, 한 번씩.
+        var checks = [];
+        placementList(row).forEach(function (n) {
+          var d = (n && n.detail) || {};
+          if (n && n.state !== "eligible" && typeof d.check === "string" && d.check && checks.indexOf(d.check) < 0) checks.push(d.check);
+        });
+        out.text = checks.length ? T(lang, "reason.check_pending_named", { names: checks.join(", ") }) : T(lang, "reason.check_pending");
+        break;
       }
       case "held_by_load": {
         // 숫자는 행이 아니라 `server.workers[]` 의 `hold_detail` 에서 온다 — 행 키를 안 늘린다
@@ -645,6 +678,136 @@
     });
     if (server.paused) pills.push({ text: T(lang, "worker.paused"), cls: "paused", jobId: null, lane: null });
     return pills;
+  }
+
+  // ── 머신 배치 (M5n §7.3 · §8.3) ──
+  // 서버가 보낸 이름(머신 · 프리셋 · 도구 · 프로브 값)은 두 언어 모두 그대로다. 사유 낱말만 카탈로그에서.
+
+  /** 판정 하나의 짧은 사유(가정 C3). 모르는 코드는 코드 그대로 — 새 서버 + 옛 화면에서 빈칸보다 낫다. */
+  function placementReason(state, code, detail, lang) {
+    var d = detail && typeof detail === "object" ? detail : {};
+    var tools = Array.isArray(d.tools) && d.tools.length ? d.tools.join(", ") : DASH;
+    var check = typeof d.check === "string" && d.check ? d.check : DASH;
+    if (state === "down" || code === "worker_down") return T(lang, "place.down");
+    if (state === "eligible" || code === "ok") return T(lang, "place.eligible");
+    switch (code) {
+      case "tool_missing": return T(lang, "place.tool_missing", { tool: tools });
+      case "workspace_tool": return T(lang, "place.workspace_tool", { tool: tools });
+      case "check_failed": return T(lang, "place.check_failed", { preset: check }) + (isNum(d.job_id) ? " #" + d.job_id : "");
+      case "check_running": return T(lang, "place.check_running", { preset: check });
+      // 판정 없이 끝나 스스로 다시 안 걸리는 점검(`detail.recheck`) — 사람이 다시 건다
+      case "check_needed": return d.recheck === true
+        ? T(lang, "place.check_recheck", { preset: check }) + (isNum(d.job_id) ? " #" + d.job_id : "")
+        : T(lang, "place.check_needed", { preset: check });
+      case "report_missing": return T(lang, "place.report_missing");
+      case "report_stale": return T(lang, "place.report_stale");
+      case "fingerprint_unknown": return T(lang, "place.fingerprint_unknown");
+      default: return code || state || DASH;
+    }
+  }
+  /** `<이름>: <짧은 사유>`. 이름은 `display_name`, 없으면 워커 id(가정 C5). */
+  function placementNoteText(note, lang) {
+    note = note || {};
+    var name = note.display_name || note.worker || DASH;
+    return name + ": " + placementReason(note.state, note.code, note.detail, lang);
+  }
+  function placementList(row) { return row && Array.isArray(row.placement_detail) ? row.placement_detail : []; }
+  /** 이유 줄에 싣는 메모 — eligible 이 **아닌** 것만(가정 C5). */
+  function placementNotes(row, lang) {
+    return placementList(row).filter(function (n) { return n && n.state !== "eligible"; })
+      .map(function (n) { return placementNoteText(n, lang); });
+  }
+  /** 펼친 행 — 머신마다 한 줄, 서버 차례 그대로(eligible 포함). 없으면 []. */
+  function placementDetailLines(row, lang) {
+    return placementList(row).map(function (n) { return placementNoteText(n, lang); });
+  }
+  /** `어느 머신이든` · `<w> 지정` · "" (pool 이거나 옛 서버의 행). */
+  function placementLabel(row, lang) {
+    if (!row) return "";
+    if (row.placement === "capable") return T(lang, "placement.any");
+    if (typeof row.target_worker === "string" && row.target_worker) return T(lang, "placement.on", { name: row.target_worker });
+    return "";
+  }
+
+  /** 프로브 하나의 짧은 값(가정 C2): ok → 첫 버전 토큰(없으면 첫 낱말) · error → 값 그대로 · missing → 없음. */
+  function probeShort(p, lang) {
+    if (!p || typeof p !== "object") return DASH;
+    var v = typeof p.value === "string" ? p.value : null;
+    if (p.state === "missing") return T(lang, "probe.missing");
+    if (p.state === "ok") {
+      if (!v) return DASH;
+      var m = /\d+(\.\d+)+/.exec(v);
+      return m ? m[0] : (v.trim().split(/\s+/)[0] || DASH);
+    }
+    if (p.state === "error") return v || p.state;
+    return v || p.state || DASH;
+  }
+  /** 지문 요약 — 프로브마다 `<이름> <값>` 을 ` · ` 로, 서버 차례 그대로. 없으면 —. */
+  function probeSummary(fp, lang) {
+    var probes = fp && fp.probes && typeof fp.probes === "object" ? fp.probes : null;
+    if (!probes) return DASH;
+    var names = Object.keys(probes);
+    if (!names.length) return DASH;
+    return names.map(function (k) { return k + " " + probeShort(probes[k], lang); }).join(" · ");
+  }
+  function machineChecks(m) { return m && Array.isArray(m.checks) ? m.checks : []; }
+  /**
+   * `환경 바뀜` 칩 — 지문이 `nowMs` 기준 24시간 안에 바뀐 머신만. 점검이 실패했으면 red.
+   * `lines` 는 바뀐 프로브를 이름 순으로 `<이름>: <앞> → <뒤>`. 칩이 없으면 null.
+   * 서버는 모든 프로브에 `previous` 키를 싣는다(앞 지문이 없거나 같으면 null) — 그래서 「키가
+   * 있다」가 아니라 「앞 값이 있고 지금 값과 다르다」를 바뀐 것으로 센다.
+   */
+  function envChangedChip(machine, nowMs, lang) {
+    var fp = machine && machine.fingerprint;
+    var at = parseIso(fp && fp.changed_at);
+    if (at == null || !isNum(nowMs)) return null;
+    if (nowMs - at > ENV_CHANGED_WINDOW_MS) return null;
+    var probes = fp.probes && typeof fp.probes === "object" ? fp.probes : {};
+    var missing = T(lang, "probe.missing");
+    var word = function (v) { return v == null || v === "" ? missing : String(v); };
+    var lines = Object.keys(probes).filter(function (k) {
+      var p = probes[k];
+      return p && typeof p === "object" && p.previous != null && p.previous !== p.value;
+    }).sort().map(function (k) { return k + ": " + word(probes[k].previous) + " → " + word(probes[k].value); });
+    var red = machineChecks(machine).some(function (c) { return c && (c.state === "failed" || (c.state === "needed" && c.recheck_needed === true)); });
+    return { text: T(lang, "machine.env_changed"), red: red, lines: lines };
+  }
+  /** 점검 하나 — `sim-check 실패 #3620` · `sim-check 통과` · `sim-check 점검 중 #3651` · `sim-check 점검 필요`. */
+  function checkText(c, lang) {
+    var name = (c && c.preset) || DASH;
+    var id = c && isNum(c.job_id) ? " #" + c.job_id : "";
+    switch (c && c.state) {
+      case "failed": return T(lang, "place.check_failed", { preset: name }) + id;
+      case "passed": return T(lang, "machine.check_passed", { preset: name });
+      case "running": return T(lang, "place.check_running", { preset: name }) + id;
+      case "needed": return c.recheck_needed === true
+        ? T(lang, "place.check_recheck", { preset: name }) + id
+        : T(lang, "place.check_needed", { preset: name });
+      default: return name + " " + ((c && c.state) || DASH);
+    }
+  }
+  /**
+   * 머신 표의 행들(§8.3) — 서버 차례 그대로. `admin` 이고 점검이 있는 머신에만 다시 점검.
+   * 망가진 문서는 [] — 화면은 던지지 않는다. 모르는 숫자는 —.
+   */
+  function machineRows(doc, admin, lang) {
+    var list = doc && Array.isArray(doc.machines) ? doc.machines : [];
+    return list.filter(function (m) { return m && typeof m === "object"; }).map(function (m) {
+      var presets = m.presets && typeof m.presets === "object" ? m.presets : {};
+      var names = Object.keys(presets);
+      var ok = names.filter(function (k) { return presets[k] && presets[k].state === "eligible"; }).length;
+      var checks = machineChecks(m);
+      return {
+        id: m.id,
+        name: m.display_name || m.id || DASH,
+        alive: m.alive === true ? true : m.alive === false ? false : null,
+        host: m.host_label || DASH,
+        fingerprint: probeSummary(m.fingerprint, lang),
+        presets: names.length ? T(lang, "machine.presets", { n: ok, total: names.length }) : DASH,
+        checks: checks.length ? checks.map(function (c) { return checkText(c, lang); }).join(" · ") : DASH,
+        recheck: admin === true && checks.length > 0
+      };
+    });
   }
 
   // {kind: "reload"|"restart", text} | null — DOM 은 kind 로 띠 색을 고르고, 공개 headerNote 는 §2 대로 문자열만 준다.
@@ -2776,6 +2939,8 @@
     jobLinkHtml: jobLinkHtml, jobLinkLabel: jobLinkLabel, keyWithLinkHtml: keyWithLinkHtml,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
+    placementNoteText: placementNoteText, placementLabel: placementLabel, placementDetailLines: placementDetailLines,
+    envChangedChip: envChangedChip, probeSummary: probeSummary, machineRows: machineRows,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS,
     store: storePure
   };
@@ -2798,6 +2963,9 @@
     recentFailures: {},
     // 호스트 이름 → 직전 압력 판정. 「바쁨」에 이력을 주는 기억이고 이 페이지에만 산다.
     hostVerdicts: {},
+    // `/api/machines` 문서(M5n). 404 인 옛 서버면 `machinesMissing` — 표와 칩을 그리지 않는다.
+    // `machinesKey` 는 `/api/status` 의 머신 요약이 바뀌었는지 보는 열쇠다(바뀔 때만 다시 받는다).
+    machines: null, machinesMissing: false, machinesKey: null, machinesLoading: false,
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
     drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null,
     // 스토어 탭. `repos` 는 릴리스 프로파일이 있는 저장소(null = 아직 안 물어봄). 비밀 값은 여기 없다.
@@ -2917,6 +3085,7 @@
       if (gen != null) state.skewMs = gen - arrived;
       state.prev = state.status; state.status = doc;
       state.conn = connection(state.conn, "status_ok", now());
+      maybeFetchMachines(doc);
       state.lostShownAt = null;
       render();
     }).catch(function () {
@@ -3074,7 +3243,7 @@
       var tag = p.jobId != null ? "button" : "span";
       return "<" + tag + ' class="wk ' + esc(p.cls) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i>' + esc(p.text) + "</" + tag + ">";
     }).join("");
-    $("[data-workers]").innerHTML = pills;
+    $("[data-workers]").innerHTML = pills + envChipsHtml();
     var err = $("[data-errchip]");
     if (server.last_error) { err.hidden = false; err.textContent = "error · " + truncate(server.last_error, 60); err.title = server.last_error; }
     else err.hidden = true;
@@ -3317,6 +3486,10 @@
     var est = row.estimate || {};
     var busy = row.state === "running" || row.state === "cancelling";
     var expanded = busy && !!state.expanded[row.id];
+    // 기다리는 행은 머신별 판정(`placement_detail`, M5n §8.3)이 있을 때만 펼친다. 도는 행의 펼침과
+    // 갈래가 다르다 — 단계 · 로그 · 취소는 여기 없고, 접힌 행의 취소 버튼도 그대로 남는다.
+    var placeLines = !busy ? placementDetailLines(row, L()) : [];
+    var placeOpen = placeLines.length > 0 && !!state.expanded[row.id];
     // 전체 진행 막대는 접힘과 무관하게 도는 행에 늘 붙는다 — 접기가 「어디까지 왔나」를 감추면
     // 접어 둘 수 없다. 단계 목록·로그 tail·액션만 ▸ 뒤에 있다.
     // 막대는 **진행 시간 칸 안**에 산다(별도의 막대 행이 아니다) — 한 작업이 한 줄이다.
@@ -3330,7 +3503,7 @@
     else if (est.overdue) cls.push("overdue");
     else if (est.quiet) cls.push("quiet");
     else if (busy) cls.push("run");
-    if (expanded) cls.push("exp");
+    if (expanded || placeOpen) cls.push("exp");
     if (state.hl === row.id) cls.push("hl");
     if (row._dim) cls.push("dim");
     var pos = isNum(row.position) ? '<span class="pos">' + esc(tr("ordinal.in_line", { ordinal: ordinal(row.position, L()) })) + "</span>" : "";
@@ -3341,11 +3514,14 @@
       pill = '<span class="pill uploading"><span class="g" aria-hidden="true">↑</span> ' + esc(stateWord("uploading", L())) + ' <span class="ub"><i style="width:' + pct + '%"></i></span></span>';
     } else if (row.state === "cancelling") pill = '<span class="pill cancelling"><span class="g" aria-hidden="true">■</span> ' + esc(stateWord("cancelling", L())) + "</span>";
     else pill = '<span class="pill ' + esc(row.state) + '"><span class="g" aria-hidden="true">' + stateGlyph(row.state) + "</span> " + esc(stateWord(row.state, L())) + "</span>";
-    var expBtn = busy ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-controls="exp-' + row.id + '" aria-label="' + esc(tr(expanded ? "row.collapse_job" : "row.expand_job", { id: row.id })) + '" title="' + esc(tr(expanded ? "row.collapse" : "row.expand")) + '">' + (expanded ? "▾" : "▸") + "</button>" : "";
+    var opened = expanded || placeOpen;
+    var expBtn = busy || placeLines.length ? '<button type="button" class="exp-btn" data-toggle="' + row.id + '" aria-expanded="' + (opened ? "true" : "false") + '" aria-controls="exp-' + row.id + '" aria-label="' + esc(tr(opened ? "row.collapse_job" : "row.expand_job", { id: row.id })) + '" title="' + esc(tr(opened ? "row.collapse" : "row.expand")) + '">' + (opened ? "▾" : "▸") + "</button>" : "";
     var chips = "";
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
     if (row.concurrency_group) chips += '<span class="chip">' + esc(tr("row.group", { name: row.concurrency_group })) + "</span>";
+    // 지정 잡(`rcm run --machine`)은 어느 머신을 기다리는지 칩으로 — any-capable 은 이유 칸이 말한다
+    if (typeof row.target_worker === "string" && row.target_worker) chips += '<span class="chip">' + esc(placementLabel(row, L())) + "</span>";
     chips += priorityChip(row, L());
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners : [];
@@ -3392,6 +3568,8 @@
       '<td class="eta">' + etaCell + "</td>" +
       '<td class="source">' + source + "</td></tr>";
     if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + sourceHtml(row, L(), true) + "</div>" + tailHtml(row) + "</td></tr>";
+    else if (placeOpen) h += '<tr class="expanded place" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '"><ul class="place-list">'
+      + placementList(row).map(function (n, i) { return '<li class="' + esc(n && n.state || "") + '">' + esc(placeLines[i]) + "</li>"; }).join("") + "</ul></td></tr>";
     return h;
   }
   /**
@@ -3648,6 +3826,149 @@
     body.innerHTML = cards.map(function (c) { return hostCardHtml(c.host, c.title); }).join("");
   }
 
+  // ── 머신 (M5n §8.3) ──
+  // `/api/machines` 는 토큰 없이도 읽힌다(read_auth 서버면 읽기 토큰). `/api/status` 의 머신 요약이
+  // 바뀔 때만 다시 받는다 — 매 갱신마다 받지 않는다. 404(옛 서버)는 「표가 없다」이지 오류가 아니다.
+  function machinesKeyOf(doc) {
+    var s = (doc && doc.server) || {};
+    return JSON.stringify([s.generation === undefined ? null : s.generation, s.machines === undefined ? null : s.machines]);
+  }
+  function maybeFetchMachines(doc) {
+    var key = machinesKeyOf(doc);
+    if (key === state.machinesKey) return;
+    state.machinesKey = key;
+    fetchMachines();
+  }
+  function fetchMachines() {
+    if (state.machinesLoading) { state.machinesAgain = true; return Promise.resolve(); }
+    state.machinesLoading = true;
+    return api("/api/machines").then(function (r) {
+      if (r.status === 404) { state.machines = null; state.machinesMissing = true; return null; }
+      if (!r.ok) throw new Error("machines " + r.status);
+      return r.json().then(function (doc) {
+        state.machinesMissing = false;
+        state.machines = doc && typeof doc === "object" ? doc : null;
+      });
+    }).catch(function () {
+      /* 못 받으면 마지막 문서를 그대로 둔다 — 다음 요약 변화나 펼침에서 다시 받는다 */
+      state.machinesKey = null;
+    }).then(function () {
+      state.machinesLoading = false;
+      if (state.machinesAgain) { state.machinesAgain = false; fetchMachines(); return; }
+      if (state.status) withFocus(function () { renderHeader(); renderMachines(); });
+    });
+  }
+  function machineList() {
+    return state.machines && Array.isArray(state.machines.machines) ? state.machines.machines : [];
+  }
+  function findMachine(id) {
+    var list = machineList();
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === id) return list[i];
+    return null;
+  }
+  /** 머리줄 워커 필 옆의 `환경 바뀜` 칩들 — 24시간 안에 지문이 바뀐 머신마다 하나. */
+  function envChipsHtml() {
+    var out = "";
+    machineList().forEach(function (m) {
+      var chip = envChangedChip(m, now(), L());
+      if (!chip) return;
+      var name = (m && (m.display_name || m.id)) || DASH;
+      out += '<button type="button" class="envchip' + (chip.red ? " red" : "") + '" data-envchip="' + esc(m.id) + '"'
+        + ' title="' + esc(chip.lines.join("\n")) + '"><b>' + esc(name) + "</b> " + esc(chip.text) + "</button>";
+    });
+    return out;
+  }
+  /** 칩을 누르면 바뀐 프로브의 앞 → 뒤 값. */
+  function showEnvChange(id) {
+    var m = findMachine(id);
+    var chip = m ? envChangedChip(m, now(), L()) : null;
+    if (!chip) return;
+    var name = m.display_name || m.id || DASH;
+    toast(name + " · " + chip.text + (chip.lines.length ? " — " + chip.lines.join("; ") : ""));
+  }
+  /** `/api/status` 에 함께 오는 머신 요약(`server.machines[]`). 옛 서버면 빈 배열. */
+  function machineSummaries() {
+    var s = state.status && state.status.server;
+    return s && Array.isArray(s.machines) ? s.machines : [];
+  }
+  function renderMachinesVisibility() {
+    var sec = $("#machines-section");
+    if (!sec) return;
+    // 절이 보일지는 **상태 문서의 요약**으로 첫 렌더에서 정한다. `/api/machines` 를 받은 뒤에야
+    // 보이게 하면 첫 그림 뒤에 절 하나(44px)가 끼어들어 그 아래 「최근」이 통째로 밀린다
+    // (CI ubuntu 3.13 에서 잡힌 회귀 — 느린 기계일수록 측정 사이에 끼어든다).
+    sec.hidden = state.view === "store" || state.machinesMissing
+      || !(machineSummaries().length || machineList().length);
+  }
+  function renderMachines() {
+    renderMachinesVisibility();
+    var body = $("[data-machines-body]");
+    if (!body) return;
+    var admin = !!state.token && !state.tokenBad && state.admin === true;
+    var rows = machineRows(state.machines, admin, L());
+    var failed = machineList().filter(function (m) { return machineChecks(m).some(function (c) { return c && c.state === "failed"; }); }).length;
+    var summaries = machineSummaries();
+    // 표 문서가 아직 없으면 요약으로 센다 — 접힌 한 줄이 문서가 올 때 바뀌지 않게
+    var count = rows.length || summaries.length;
+    if (!state.machines && summaries.length) {
+      failed = summaries.filter(function (m) {
+        return (m && Array.isArray(m.problems) ? m.problems : []).some(function (p) { return p && p.code === "check_failed"; });
+      }).length;
+    }
+    var digest = $("[data-machines-digest]");
+    if (digest) {
+      digest.textContent = count ? tr("machines.count", { n: count }) + (failed ? " · " + tr("machines.failed_count", { n: failed }) : "") : "";
+      digest.className = "n" + (failed ? " warn" : "");
+    }
+    if (!rows.length) { body.innerHTML = ""; return; }
+    var h = '<div class="mwrap"><table class="mtab"><thead><tr><th>' + esc(tr("machines.col_machine")) + "</th><th>" + esc(tr("machines.col_host"))
+      + "</th><th>" + esc(tr("machines.col_fingerprint")) + "</th><th>" + esc(tr("machines.col_presets")) + "</th><th>" + esc(tr("machines.col_checks"))
+      + "</th><th></th></tr></thead><tbody>";
+    rows.forEach(function (r) {
+      var m = findMachine(r.id);
+      var red = machineChecks(m).some(function (c) { return c && c.state === "failed"; });
+      h += '<tr data-machine="' + esc(r.id) + '"' + (r.alive === false ? ' class="down"' : "") + ">"
+        + '<td class="mname"><span class="mono">' + esc(r.name) + "</span>" + (r.alive === false ? ' <span class="mdown">' + esc(tr("machines.down")) + "</span>" : "")
+        + (r.name !== r.id ? ' <span class="sub mono">' + esc(r.id) + "</span>" : "") + "</td>"
+        + '<td class="mhost mono">' + esc(r.host) + "</td>"
+        + '<td class="mfp mono">' + esc(r.fingerprint) + "</td>"
+        + '<td class="mpre">' + esc(r.presets) + "</td>"
+        + '<td class="mchk' + (red ? " bad" : "") + '">' + esc(r.checks) + "</td>"
+        + '<td class="mact">' + (r.recheck ? '<button type="button" class="btn recheck" data-recheck="' + esc(r.id) + '">' + esc(tr("machines.recheck")) + "</button>" : "") + "</td></tr>";
+    });
+    body.innerHTML = h + "</tbody></table></div>";
+  }
+  /** 다시 점검(admin) — `POST /machines/{id}/recheck`. 응답의 잡들을 알리고 다시 읽는다. */
+  function recheckMachine(id, btn) {
+    if (!state.admin) return;  // 버튼은 admin 일 때만 그려진다 — 여기는 지운 토큰과 경주하는 자리
+    if (btn) btn.disabled = true;
+    api("/machines/" + encodeURIComponent(id) + "/recheck", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
+    }).then(function (res) {
+      if (!res.ok) {
+        toast(tr("machines.recheck_failed", { detail: (res.body && res.body.error) || res.status }));
+        if (res.status === 401 || res.status === 403) tokenRejected();
+        return;
+      }
+      var jobs = res.body && Array.isArray(res.body.jobs) ? res.body.jobs : [];
+      var m = findMachine(id);
+      // 서버가 못 세운 점검(ref 를 못 풀었다 등)은 job_id 가 없다 — 「넣었습니다」로 부르지 않는다
+      var missed = jobs.filter(function (j) { return !isNum(j.job_id); });
+      if (!jobs.length) toast(tr("machines.recheck_none", { name: (m && (m.display_name || m.id)) || id }));
+      else if (missed.length) toast(tr("machines.recheck_failed", { detail: missed.map(function (j) { return (j.preset || DASH) + " (" + (j.error_code || "not_submitted") + ")"; }).join(", ") }));
+      else toast(tr("machines.recheck_sent", { names: jobs.map(function (j) { return "#" + j.job_id + " " + (j.preset || DASH); }).join(", ") }));
+      state.machinesKey = null;
+      fetchMachines(); scheduleRefetch();
+    }).catch(function () { toast(tr("machines.recheck_failed", { detail: tr("version.edit.save.network") })); })
+      .then(function () { if (btn && document.contains(btn)) btn.disabled = false; });
+  }
+  function wireMachines() {
+    var det = $("#machines");
+    if (!det) return;
+    // 펼칠 때 한 번 새로 받는다 — 접힌 동안 요약이 안 바뀌어도 점검 상태는 바뀌었을 수 있다
+    det.addEventListener("toggle", function () { if (det.open && !state.machinesMissing) fetchMachines(); });
+  }
+
   /** GPU 표본이 없는 이유(결정 37). 코드가 있으면 그 언어로, 없으면 서버가 준 문구. */
   function gpuNote(h) {
     var code = h && h.gpu_note_code;
@@ -3843,7 +4164,7 @@
   }
   function render() {
     if (!state.status) { renderHeaderConn(); return; }
-    withFocus(function () { renderHeader(); renderSummary(); renderQueue(); renderHost(); renderRecent(); });
+    withFocus(function () { renderHeader(); renderSummary(); renderQueue(); renderHost(); renderMachines(); renderRecent(); });
   }
 
   // ── 상호작용 ──
@@ -4019,8 +4340,10 @@
     document.addEventListener("click", function (ev) {
       // 잡 링크는 브라우저가 연다(새 탭) — 그 행의 펼침 · 잡 이동 · 복사 같은 손잡이가 같이 돌면 안 된다
       if (ev.target.closest && ev.target.closest("a.job-link")) return;
-      var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src]");
+      var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src],[data-envchip],[data-recheck]");
       if (!t) return;
+      if (t.hasAttribute("data-envchip")) { showEnvChange(t.getAttribute("data-envchip")); return; }
+      if (t.hasAttribute("data-recheck")) { recheckMachine(t.getAttribute("data-recheck"), t); return; }
       if (t.hasAttribute("data-goto")) { gotoJob(parseInt(t.getAttribute("data-goto"), 10)); return; }
       if (t.hasAttribute("data-toggle")) {
         var id = parseInt(t.getAttribute("data-toggle"), 10);
@@ -4084,6 +4407,7 @@
   function showView(view) {
     state.view = view;
     ["#summary", "#queue", "#host", "#recent"].forEach(function (sel) { var el = $(sel); if (el) el.hidden = view !== "queue"; });
+    renderMachinesVisibility();
     var st = $("#store");
     if (st) st.hidden = view !== "store";
     renderNav();
@@ -5986,7 +6310,7 @@
     loadExpanded();
     lsSet("rcm.collapsed", null);   // 뜻이 뒤집힌 옛 키 — 남겨 두면 영영 남는다
     state.token = lsGet("rcm.token");
-    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireStore(); renderTokenButton();
+    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireMachines(); wireStore(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });
     first.then(function () {
       state.tz = state.status && state.status.display_timezone ? state.status.display_timezone : null;

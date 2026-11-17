@@ -175,6 +175,16 @@ def test_the_check_row_fails_when_the_service_lacks_something():
     assert "JAVA_HOME unset" in detail and "as the service sees it" in detail
 
 
+def test_the_check_row_does_not_fail_on_an_any_capable_preset():
+    """any-capable 프리셋은 도구가 있는 머신으로 간다 — 서버에 없는 것은 정상(M5n 수용 시험)."""
+    row = _cli()._service_preset_env_row(
+        {"preset_env": {"capgate": {"missing_passthrough": [], "missing_tools": ["ftool"]}}},
+        capable=frozenset({"capgate"}),
+    )
+    assert row is not None and row[1] is True, row
+    assert "capgate (missing ftool · any machine)" in row[2], row
+
+
 def test_the_check_row_passes_when_nothing_is_missing():
     row = _cli()._service_preset_env_row(
         {"preset_env": {"gate": {"missing_passthrough": [], "missing_tools": []}}}

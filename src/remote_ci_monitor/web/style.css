@@ -413,6 +413,36 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 .drawer-log .mark { background: var(--bad-soft); color: var(--bad); display: inline-block; width: 100%; }
 .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 8px; font: 12.5px var(--mono); z-index: 30; max-width: calc(100% - 32px); }
 
+/* ── 머신 (M5n §8.3) ──
+   `환경 바뀜` 칩은 워커 필 옆에 산다. 점검이 실패했으면 빨강 — 색만으로 말하지 않게 글자가 늘 붙는다. */
+.envchip { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 8px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); cursor: pointer; max-width: 100%; overflow-wrap: anywhere; }
+.envchip b { font: 600 12px var(--mono); }
+.envchip.red { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+/* 머신 표는 호스트 절과 같은 모양으로 접힌다 — 평소엔 1순위가 아니다 */
+#machines > summary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; cursor: pointer; list-style: none; }
+#machines[open] > summary { margin-bottom: 8px; }
+#machines > summary::-webkit-details-marker { display: none; }
+#machines > summary::before { content: "\25B8"; color: var(--muted); font-size: 11px; }
+#machines[open] > summary::before { content: "\25BE"; }
+#machines > summary .t { font: 600 14px var(--sans); color: var(--ink); }
+#machines > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
+#machines > summary .n.warn { color: var(--bad); font-weight: 600; }
+.mwrap { overflow-x: auto; }
+table.mtab { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+table.mtab th { text-align: left; font: var(--t-label); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.mtab td { padding: 6px 8px; border-bottom: 1px solid var(--line-2); vertical-align: top; line-height: 1.4; overflow-wrap: anywhere; }
+table.mtab td.mname { white-space: nowrap; }
+table.mtab td.mname .sub { margin-left: 4px; }
+table.mtab td.mact { text-align: right; white-space: nowrap; }
+table.mtab td.mchk.bad { color: var(--bad); font-weight: 600; }
+table.mtab tr.down td { color: var(--muted); }
+table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
+/* 기다리는 행의 펼침 — 머신마다 한 줄. 가능한 머신은 흐리게, 못 하는 머신은 그대로 */
+.place-list { margin: 0; padding: 2px 0 4px 18px; font: 12.5px var(--mono); color: var(--ink); }
+.place-list li { overflow-wrap: anywhere; }
+.place-list li.eligible { color: var(--ok); }
+.place-list li.down { color: var(--bad); }
+
 /* ── 반응형 (항목 21) ── */
 @media (max-width: 960px) {
   table.q th.source, table.q td.source { display: none; }
@@ -447,6 +477,14 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
   .rrow { grid-template-columns: 1fr 1fr; }
   .rrow .k, .rrow .s { grid-column: span 2; }
   #drawer { width: 100%; }
+  /* 머신 표도 폰에서는 행마다 블록으로 — 여섯 칸이 390px 에 안 들어간다 */
+  table.mtab thead { display: none; }
+  table.mtab, table.mtab tbody, table.mtab tr, table.mtab td { display: block; }
+  table.mtab tr { border-bottom: 1px solid var(--line-2); padding: 6px 0; }
+  table.mtab td { border: 0; padding: 1px 8px; }
+  table.mtab td.mname { white-space: normal; font-weight: 600; }
+  table.mtab td.mact { text-align: left; }
+  table.mtab td.mact:empty { display: none; }
 }
 /* 움직임도 상태 채널이다(§4.2) — **끝나지 않은** 상태만 움직인다. 끝난 잡은 가만히 있어서,
    화면 구석으로 흘긋 봐도 「아직 도는 중」과 「끝났다」가 갈린다.

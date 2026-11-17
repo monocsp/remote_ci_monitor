@@ -27,7 +27,11 @@ from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
     INPUT_TYPES,
+    PLACEMENT_CAPABLE,
+    PLACEMENT_POOL,
     PRIORITY_NAMES,
+    SCOPE_POOL,
+    SCOPES,
     SOURCE_MODES,
     TERMINAL_STATES,
     InputSpec,
@@ -137,6 +141,20 @@ class ServerSection:
     # 취소에 제출 capability 를 요구한다(M5j G5 · 결정 87). 켜면 `POST /jobs` 가 준 cancel token
     # 또는 admin 토큰만 취소한다 — 0.2.7 전 클라이언트의 `rcm cancel` 은 403 이다. 기본은 off.
     cancel_requires_submission_token: bool = False
+    # M5n — 머신의 능력(§4 · §11.2)
+    probe_interval_seconds: int = 600  # 지문을 다시 재는 주기(하한 60). 보고 신선도는 이 값의 3배
+    auto_checks: bool = True  # 지문이 바뀐 워커에 점검 프리셋을 rcm 이 스스로 한 번 건다
+    local_accept_any: bool = True  # 서버의 로컬 레인이 `any-capable` 잡을 집나
+    check_sweep_seconds: int = 30  # 자동 점검 스위퍼 주기
+
+
+@dataclass(frozen=True)
+class Probe:
+    """`[[probes]]` 하나 — 각 워커가 자기 서비스 환경에서 돌려 지문을 만든다(M5n §4.1)."""
+
+    name: str
+    argv: tuple[str, ...]
+    timeout_seconds: int = 10
 
 
 @dataclass
@@ -270,6 +288,7 @@ class ServerConfig:
     repos: tuple[RepoConfig, ...] = ()
     presets: tuple[Preset, ...] = ()
     notify: tuple[NotifyRule, ...] = ()
+    probes: tuple[Probe, ...] = ()
     path: Path | None = None
 
     @property
@@ -389,9 +408,18 @@ class WorkerConfig:
     grace_seconds: int = 10
     keep_workspace_on_failure: bool = True
     git_fetch_timeout_seconds: int = 600
+    #: 같은 망에서 여러 서버가 보일 때 고를 광고 이름(M5n §9). 비면 하나뿐일 때만 자동으로 고른다
+    server_name: str = ""
+    #: `any-capable` 잡을 받나(M5n §5.1). 장치 실험실처럼 전용으로 둘 머신은 false
+    accept_any: bool = True
     host: HostSection = field(default_factory=HostSection)
     repos: tuple[RepoConfig, ...] = ()
     path: Path | None = None
+
+    @property
+    def wants_discovery(self) -> bool:
+        """서버 주소가 없거나 `"auto"` 면 같은 망에서 찾는다(M5n §9 — 클라이언트의 M5c 와 같다)."""
+        return self.server.strip().lower() in ("", "auto")
 
     @property
     def data_path(self) -> Path:
@@ -518,7 +546,14 @@ _PRESET_KEYS = {
     "inputs",
     "artifacts",
     "artifacts_on",
+    "placement",
+    "concurrency_scope",
+    "checks",
+    "check_ref",
+    "sample",
 }
+#: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
+_PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
 
 
@@ -742,6 +777,26 @@ def parse_preset(raw: Any) -> Preset:
     if collect_on != COLLECT_ALWAYS and not globs:
         # 글롭이 없으면 아무것도 안 모은다 — 조건만 적어 둔 설정은 「모으고 있다」는 오해다
         raise ConfigError(f"{where}: artifacts_on needs artifacts globs to collect")
+    placement_raw = raw.get("placement", "pool")
+    if not isinstance(placement_raw, str) or placement_raw not in _PLACEMENT_VALUES:
+        raise ConfigError(
+            f'{where}: placement must be "pool" or "any-capable", got {placement_raw!r}'
+        )
+    scope = raw.get("concurrency_scope", SCOPE_POOL)
+    if not isinstance(scope, str) or scope not in SCOPES:
+        raise ConfigError(
+            f"{where}: concurrency_scope must be one of {', '.join(SCOPES)}, got {scope!r}"
+        )
+    checks = _str_list(f"{where} checks", raw.get("checks", []), allow_empty=True)
+    if len(checks) != len(set(checks)):
+        dupes = sorted({c for c in checks if checks.count(c) > 1})
+        raise ConfigError(f"{where}: checks has a duplicate entry: {', '.join(dupes)}")
+    check_ref = raw.get("check_ref", "HEAD")
+    if not isinstance(check_ref, str) or not check_ref.strip():
+        raise ConfigError(f"{where}: check_ref must be a non-empty string (a ref or HEAD)")
+    sample = raw.get("sample")
+    if sample is not None and not isinstance(sample, bool):
+        raise ConfigError(f"{where}: sample must be true or false")
     return Preset(
         name=name,
         argv=argv,
@@ -761,13 +816,96 @@ def parse_preset(raw: Any) -> Preset:
         env=dict(env),
         requires=requires,
         inputs=inputs,
+        placement=_PLACEMENT_VALUES[placement_raw],
+        concurrency_scope=scope,
+        checks=checks,
+        check_ref=check_ref,
+        sample=sample,
+    )
+
+
+# ── 프로브 (M5n §4.1) ────────────────────────────────────────────────────────
+
+_PROBE_KEYS = {"name", "argv", "timeout_seconds"}
+_PROBE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+MAX_PROBES = 64
+PROBE_TIMEOUT_MAX = 60
+
+
+def parse_probes(raw: Any, origin: str = "config") -> tuple[Probe, ...]:
+    """`[[probes]]` 배열 → Probe 들. 오류에 프로브 이름과 키 이름을 넣는다."""
+    if not isinstance(raw, list):
+        raise ConfigError(f"{origin}: [[probes]] must be an array of tables")
+    if len(raw) > MAX_PROBES:
+        raise ConfigError(f"[[probes]]: at most {MAX_PROBES} probes, got {len(raw)}")
+    out: list[Probe] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConfigError("[[probes]]: each probe must be a table")
+        name = item.get("name")
+        if not isinstance(name, str) or not _PROBE_NAME_RE.match(name):
+            raise ConfigError(
+                "[[probes]]: 'name' must be lowercase letters, digits, - or _ "
+                f"(32 characters at most), got {name!r}"
+            )
+        where = f"probe '{name}'"
+        unknown = sorted(set(item) - _PROBE_KEYS)
+        if unknown:
+            raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
+        if "argv" not in item:
+            raise ConfigError(f"{where}: 'argv' is required")
+        argv = _str_list(f"{where} argv", item["argv"], allow_empty=False)
+        timeout = item.get("timeout_seconds", 10)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int)
+            or not 1 <= timeout <= PROBE_TIMEOUT_MAX
+        ):
+            raise ConfigError(
+                f"{where}: timeout_seconds must be an integer from 1 to {PROBE_TIMEOUT_MAX}"
+            )
+        out.append(Probe(name=name, argv=argv, timeout_seconds=timeout))
+    names = [p.name for p in out]
+    if len(names) != len(set(names)):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise ConfigError(f"[[probes]]: duplicate probe name(s): {', '.join(dupes)}")
+    return tuple(out)
+
+
+def _validate_checks(presets: tuple[Preset, ...]) -> tuple[Preset, ...]:
+    """`checks` 의 이름이 있고 git_ref 를 받고 순환이 없는지(결정 94). `sample` 기본값을 정한다.
+
+    점검 프리셋 = 다른 프리셋의 `checks` 에 이름이 오른 것(§3). 점검 프리셋은 자기 `checks` 를
+    가질 수 없다 — 점검의 점검은 없다(A→B→A 도 A→B→C 도 막는다).
+    """
+    by_name = {p.name: p for p in presets}
+    check_names: set[str] = set()
+    for p in presets:
+        for c in p.checks:
+            target = by_name.get(c)
+            if target is None:
+                raise ConfigError(f"preset '{p.name}': checks refers to unknown preset '{c}'")
+            if "git_ref" not in target.source_modes:
+                raise ConfigError(
+                    f"preset '{p.name}': checks names '{c}', which must accept git_ref "
+                    "(rcm runs a check by itself from the repository)"
+                )
+            check_names.add(c)
+    for name in sorted(check_names):
+        if by_name[name].checks:
+            raise ConfigError(
+                f"preset '{name}': a check preset cannot have checks of its own "
+                f"(it is named in another preset's checks)"
+            )
+    return tuple(
+        p if p.sample is not None else replace(p, sample=p.name not in check_names) for p in presets
     )
 
 
 # ── 서버 설정 ────────────────────────────────────────────────────────────────
 
 _SECTIONS = ("server", "estimate", "host", "display")
-_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify"}
+_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify", "probes"}
 
 
 def _validate_repos(repos: tuple[RepoConfig, ...]) -> None:
@@ -881,6 +1019,10 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         )
     if not (0 <= s.worker_claim_wait_seconds <= 60):
         raise ConfigError("[server] worker_claim_wait_seconds must be between 0 and 60")
+    if s.probe_interval_seconds < 60:
+        raise ConfigError("[server] probe_interval_seconds must be at least 60")
+    if s.check_sweep_seconds < 1:
+        raise ConfigError("[server] check_sweep_seconds must be >= 1")
     if s.advertise_name and not _NAME_RE.match(s.advertise_name):
         raise ConfigError(
             "[server] advertise_name must be a short identifier (letters, digits, . _ -)"
@@ -937,7 +1079,7 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
             elif cfg.repo(p.repo) is None:
                 raise ConfigError(f"preset '{p.name}': repo '{p.repo}' is not in [[repos]]")
         resolved.append(p)
-    cfg.presets = tuple(resolved)
+    cfg.presets = _validate_checks(tuple(resolved))
     rule_names = [r.name for r in cfg.notify]
     if len(rule_names) != len(set(rule_names)):
         dupes = sorted({n for n in rule_names if rule_names.count(n) > 1})
@@ -981,6 +1123,7 @@ def load_server_config(
         if not isinstance(notify, list):
             raise ConfigError(f"{found}: [[notify]] must be an array of tables")
         cfg.notify = tuple(parse_notify(n) for n in notify)
+        cfg.probes = parse_probes(raw.get("probes", []), str(found))
         cfg.path = found
     saved = None
     if environ is not None:
@@ -1087,6 +1230,8 @@ _WORKER_KEYS = {
     "grace_seconds",
     "keep_workspace_on_failure",
     "git_fetch_timeout_seconds",
+    "server_name",
+    "accept_any",
 }
 _WORKER_OVERRIDE_KEYS = {"server", "pool", "lanes", "name", "data_dir"}
 
@@ -1351,8 +1496,7 @@ def load_worker_config(
             cfg, key, _coerce_scalar(f"--{key.replace('_', '-')}", value, type(getattr(cfg, key)))
         )
     cfg.server = cfg.server.rstrip("/")
-    if not cfg.server:
-        raise ConfigError('worker needs a server: --server URL or `server = "…"` in worker.toml')
+    # 비었거나 "auto" 면 호출자(`rcm worker`)가 같은 망에서 찾는다 — 여기서는 막지 않는다(M5n §9)
     if not _NAME_RE.match(cfg.pool):
         raise ConfigError("worker pool must be a name (letters, digits, . _ -)")
     if not (1 <= cfg.lanes <= 64):

@@ -1,6 +1,6 @@
 ---
 name: rcm-gate-connect
-description: Connect a project's existing CI gate script to rcm so the Store tab and the queue show a step-by-step, evidence-based progress bar. Adds `::rcm::step::` markers to the gate (or wraps it when it must not change), finds silent stretches of five minutes or more and gives them a `::rcm::progress::` line with a real denominator, declares the `gate` preset and the `gate = "<preset>"` profile line, and proves it with a dry run and `rcm check`. Optional tier — use it after `rcm-store-connect`, whenever the gate card says "not configured" or the gate runs as one hatched bar with no steps.
+description: Connect a project's existing CI gate script to rcm so the Store tab and the queue show a step-by-step, evidence-based progress bar. Adds `::rcm::step::` markers to the gate (or wraps it when it must not change), finds silent stretches of five minutes or more and gives them a `::rcm::progress::` line with a real denominator, declares the `gate` preset (asking where it may run — `placement`, `checks`, `concurrency_scope`) and, when the project has a store profile, the `gate = "<preset>"` profile line, and proves it with a dry run and `rcm check`. Works on its own or after `rcm-store-connect` — use it whenever the gate card says "not configured", the gate runs as one hatched bar with no steps, or a project just wants its CI gate on rcm.
 ---
 
 # rcm-gate-connect
@@ -33,6 +33,8 @@ step is one the script *declared*; rcm never guesses one from the exit code.
 
 - `rcm-store-connect` is done and the Store tab's gate card reads `not configured —
   profile.presets.gate is empty`.
+- A project with no store release at all wants its CI gate run by rcm, on the build machine or on
+  whichever machine has the tools (standalone mode, below).
 - The gate already runs under rcm but shows as one bar with no steps, or its bar sits at the
   same place for 20 minutes because one child process writes to a file.
 - The gate's exit code is red but the queue says `failed (no step named)`.
@@ -42,26 +44,40 @@ back when `scripts/*ci*.sh`, a `Makefile` target or a `package.json` script exis
 
 ## Inputs it asks for
 
-`rcm-store-connect` always runs first and leaves what this skill relies on: the profile
-fragment `scripts/rcm/profile.release.toml`, the helper `scripts/rcm/rcm_candidate.py`, a
-presets file (its own `scripts/rcm/presets.release.toml` or an existing presets file it chose to
-reuse), and a header at the top of `docs/rcm-connect.md` (under the `# rcm connect` title) with
-the answers already given — repo name, platforms, `server.toml` path and `presets_file: <path>`.
-**Stop with "run /rcm-store-connect first" when the header, `scripts/rcm/profile.release.toml`
-or `scripts/rcm/rcm_candidate.py` is missing.** Read the answers from the header and do not ask
-again; `presets_file` falls back to `scripts/rcm/presets.release.toml` when the header has no
-such line. Below, `$presets_file` means that path.
+The skill runs in one of two modes, decided by what is already in the project:
+
+- **Profile mode** — `rcm-store-connect` has run and left the profile fragment
+  `scripts/rcm/profile.release.toml`, the helper `scripts/rcm/rcm_candidate.py`, a presets file
+  (its own `scripts/rcm/presets.release.toml` or an existing presets file it chose to reuse), and
+  a header at the top of `docs/rcm-connect.md` (under the `# rcm connect` title) with the answers
+  already given — repo name, platforms, `server.toml` path and `presets_file: <path>`. Read the
+  answers from the header and do not ask again; `presets_file` falls back to
+  `scripts/rcm/presets.release.toml` when the header has no such line.
+- **Standalone mode** — any of the header, `scripts/rcm/profile.release.toml` or
+  `scripts/rcm/rcm_candidate.py` is missing. Do **not** stop and do not create the store files:
+  ask for the repo name and the `server.toml` path (table below), skip every profile step (no
+  `gate =` line, no `release <repo>` row), and write the preset to its own fragment,
+  `scripts/rcm/presets.gate.toml`. Say in the report that the project has no store profile and
+  that `/rcm-store-connect` adds one if the Store tab is wanted later — re-run this skill after it
+  to add the `gate =` line.
+
+Below, `$presets_file` means the profile mode's presets file or, in standalone mode,
+`scripts/rcm/presets.gate.toml`.
 
 | Question | Default | Why it is asked |
 |---|---|---|
 | Project path | current directory | where to look for the script |
 | Repo name (`[[repos]] name`) | from the `docs/rcm-connect.md` header; else the only `[[repos]]` entry | the preset's `repo =` and the profile table name |
-| `server.toml` path | from the header | only for the candidate check in step 7 — never edited |
+| `server.toml` path | from the header; asked in standalone mode (`~/.config/rcm/server.toml` on the build machine) | only for the candidate check in step 7 — never edited |
 | Gate entry script | detected (step 1) — asked only if 0 or 2+ candidates | the file the markers go into |
 | May the script be edited? | yes | no → wrapper mode (step 2b) |
 | Preset name | `gate-<script basename without extension>` for a shell script; `gate-<target>` for a make target or npm script — these two rules win even in wrapper mode (a wrapper over `make ci` is `gate-ci`); `gate-<repo>` only when the entry is neither a script nor a named target | the name the profile's `gate =` line points at |
 | `expected_seconds` / `timeout_seconds` | asked; suggest the last real duration if the owner knows it, else 900 / 3600 | rcm uses `expected_seconds` until it has a median |
 | `concurrency_group` | none | set when the gate needs a device, a simulator or a shared lock |
+| `placement` | `"pool"` | `"any-capable"` lets any machine whose `requires` tools are present take the gate instead of only the build machine's pool. Offer it only when the gate reads **no secrets** — secret files never leave the server — and say that every worker that may take it needs the repo in its own `worker.toml` `[[repos]]` (a `git_ref` gate is fetched by the worker) |
+| `concurrency_scope` | `"pool"` | only with a `concurrency_group`: `"host"` when the lock is a simulator, emulator or device on one computer (so two workers on the same Mac never share it), `"global"` when it is one outside resource; `"pool"` keeps today's behaviour |
+| `checks` | none | names of existing presets that must have passed on a machine before it gets the gate — the project's own proof that a machine works (a simulator boots, a tap lands). Each must accept `git_ref`; offer only presets the presets file or `server.toml` already has, never invent one |
+| `requires` | the tools the gate script calls (`fvm`, `xcodebuild`, `gitleaks`, … — read from the script in step 1) | with `placement = "any-capable"` this list is what decides which machines may take the gate — a machine missing one never sees it |
 
 Nothing else. Everything the page will show is derived from what the script prints.
 
@@ -73,13 +89,15 @@ Nothing else. Everything the page will show is derived from what the script prin
 | `scripts/rcm/progress_snippets.sh` — only when step 4 found a silent stretch | the two polling helpers (copied from this skill's `templates/progress_snippets.sh` next to the wrapper), sourced by the gate or the wrapper; run the snippets in bash, not sh |
 | the gate script itself — **edit mode**, in place | `::rcm::step::` at each stage, `::rcm::fail::` + `::rcm::summary::` at the end, `::rcm::progress::` in the long steps |
 | `$presets_file` — one `[[presets]]` block appended (a same-name block is replaced) | the `gate` preset; the live `server.toml` is never edited by a skill |
-| `scripts/rcm/profile.release.toml` — the line `gate = "<preset>"` under `[repos.<name>.release.presets]` | the `gate` role in the profile fragment |
+| `scripts/rcm/profile.release.toml` — the line `gate = "<preset>"` under `[repos.<name>.release.presets]` — **profile mode only** | the `gate` role in the profile fragment |
+| `scripts/rcm/presets.gate.toml` — **standalone mode only**, created if missing | the fragment that holds the `gate` preset when there is no store presets file |
 | `docs/rcm-connect.md` — a `## rcm-gate-connect — <date>` section | `/rcm-connect` reads it to know this tier is done |
 
 Re-running the skill on a project that already has these files **reports** them (`kept:` per
 path with the reason) and changes nothing; `--force` re-applies the templates and rewrites the
 preset block and the `gate =` line, never the gate's own logic. The fragment files must already
-exist (the store skill creates them) — this skill appends to them and never creates them. Only
+exist in profile mode (the store skill creates them) — this skill appends to them and never
+creates them; the one file it may create is `scripts/rcm/presets.gate.toml` in standalone mode. Only
 bash and TOML are written, so there is no `__pycache__` or build output to ignore.
 
 ## What the human still fills in
@@ -317,8 +335,9 @@ step>` and no `all green`.
 ### 6. The `gate` preset and the profile line
 
 Skills never edit the live `server.toml`. The preset goes into `$presets_file` (from the
-header; default `scripts/rcm/presets.release.toml`) — append it, or replace the block whose
-`name` is the same — and the role line goes into `scripts/rcm/profile.release.toml`. The server owner merges the
+header; default `scripts/rcm/presets.release.toml`; `scripts/rcm/presets.gate.toml` in standalone
+mode) — append it, or replace the block whose `name` is the same — and, in profile mode only, the
+role line goes into `scripts/rcm/profile.release.toml`. The server owner merges the
 fragments; step 7 checks the merged result on a throwaway copy. The block (the skill prints it
 and asks before writing):
 
@@ -330,6 +349,10 @@ argv = ["bash", "<gate_entry>"]              # or ["bash", "scripts/rcm/gate.sh"
 source_modes = ["git_ref"]                   # the Store tab runs a ref, not an uploaded tree
 repo = "<repo name>"
 concurrency_group = "<group>"                # only if the gate needs a device or a shared lock
+concurrency_scope = "host"                   # only with a group: "pool" | "host" | "global"
+placement = "any-capable"                    # only if chosen, and only for a gate with no secrets
+requires = ["fvm", "gitleaks"]               # the tools the gate calls; decides who may take it
+checks = ["<check preset>"]                  # only if the owner named one; it must accept git_ref
 expected_seconds = 900                       # replaced by the median after a few runs
 timeout_seconds = 3600
 env_passthrough = ["PATH", "HOME", "LANG"]
@@ -337,7 +360,9 @@ env_passthrough = ["PATH", "HOME", "LANG"]
 CI = "1"
 ```
 
-and in `scripts/rcm/profile.release.toml`, under the existing table (add the line; do not add a
+Leave out every line whose answer was the default — no `placement = "pool"`, no
+`concurrency_scope = "pool"`, no empty `checks`. In profile mode, also in
+`scripts/rcm/profile.release.toml`, under the existing table (add the line; do not add a
 second `[repos.<name>.release.presets]` header):
 
 ```toml
@@ -353,7 +378,8 @@ for a new block, the project's own name for an adopted gate):
 `gate_name="$(sed -nE 's/^gate *= *"([^"]+)".*/\1/p' scripts/rcm/profile.release.toml)"`;
 `grep -cE "^name *= *\"$gate_name\"" "$presets_file"` is 1 and
 `grep -cE '^gate *=' scripts/rcm/profile.release.toml` is 1 (the profile template aligns keys,
-hence the `*`).
+hence the `*`). In standalone mode there is no `gate *=` line: `gate_name` is the preset name
+you wrote, and only the first `grep` applies.
 
 ### 7. Verify without a build machine
 
@@ -375,32 +401,45 @@ grep -E '^::rcm::(steps|step|step-end|fail|summary|progress)::' /tmp/gate-dry.lo
 # 2. config — merges the two fragments into a temporary candidate and runs `rcm check` on it;
 #    the live server.toml and the running server are not touched (helper installed by rcm-store-connect)
 python3 scripts/rcm/rcm_candidate.py --server <server.toml from the header> --repo <name> --presets "$presets_file" --check
+
+# 2'. standalone mode — the same helper, from where `rcm skills install` put it, with no profile;
+#     there is no `release <repo>` row, so read the `server config` row instead of --check's verdict
+python3 .claude/skills/rcm-store-connect/templates/rcm_candidate.py --server <server.toml> --repo <name> \
+  --presets scripts/rcm/presets.gate.toml --profile - --out /tmp/rcm-gate-candidate.toml
+rcm check --config /tmp/rcm-gate-candidate.toml --server http://127.0.0.1:9 --token none
 ```
 
 Read the grep output as the page would: a `steps::N` (if any) equal to the count of `step::`
-lines; each `progress` unit ending in `ok`/`fail`; a single `summary`. Then the first real run
-goes through the Store tab's gate card on a branch, not through this skill.
+lines; each `progress` unit ending in `ok`/`fail`; a single `summary`. The `server config` row
+must be `ok` — it is where a `checks` name that is not a preset, or a check preset that does not
+accept `git_ref`, is refused. With `placement = "any-capable"`, `rcm machines` on the build
+machine shows how many machines can take the gate once the merged config is live. Then the first
+real run goes through the Store tab's gate card on a branch, not through this skill.
 
-Finally append to `docs/rcm-connect.md`:
+Finally append to `docs/rcm-connect.md` (standalone mode: only if the file exists; otherwise
+print the same block in the report):
 
 ```
 ## rcm-gate-connect — <date>
 Created: <paths from "What it creates" that were actually written — name $presets_file as written>
 You must fill in: <the items from "What the human still fills in" still open>
-Verified: dry run <N> steps · progress units <list or "none needed"> · rcm_candidate --check release <repo>: <ok|warn (<warnings>)|not verified>
+Placement: <pool <name>|any-capable> · scope <pool|host|global|none> · checks <names|none>
+Verified: dry run <N> steps · progress units <list or "none needed"> · rcm_candidate --check release <repo>: <ok|warn (<warnings>)|not verified|standalone: server config <ok|FAIL>>
 ```
 
-Do not commit; tell the owner which files to commit (the gate or wrapper, the snippets, the two
-fragments, `docs/rcm-connect.md`) and that the fragments still have to be merged into the
+Do not commit; tell the owner which files to commit (the gate or wrapper, the snippets, the
+fragments — two in profile mode, `scripts/rcm/presets.gate.toml` in standalone mode —
+`docs/rcm-connect.md`) and that the fragments still have to be merged into the
 server's `server.toml` by whoever operates it.
 
 ## Done means
 
-- `python3 scripts/rcm/rcm_candidate.py --server <server.toml> --repo <name> --presets "$presets_file" --check`: the
-  `release <repo>` row is `ok`, or `warn` only about roles this skill does not own; the live
-  `server.toml` is unchanged (`git diff` on it is empty if it is in a repo).
-- `$presets_file` holds exactly one `gate-…` block and `scripts/rcm/profile.release.toml`
-  exactly one `gate =` line.
+- Profile mode: `python3 scripts/rcm/rcm_candidate.py --server <server.toml> --repo <name> --presets "$presets_file" --check`: the
+  `release <repo>` row is `ok`, or `warn` only about roles this skill does not own. Standalone
+  mode: the candidate's `server config` row is `ok`. Either way the live `server.toml` is
+  unchanged (`git diff` on it is empty if it is in a repo).
+- `$presets_file` holds exactly one `gate-…` block and, in profile mode,
+  `scripts/rcm/profile.release.toml` exactly one `gate =` line.
 - In wrapper mode `bash scripts/rcm/gate.sh --selftest` prints `selftest ok`; in edit mode the
   three runs of step 5 pass.
 - The dry run prints one `::rcm::step::` per stage, `::rcm::fail::` naming the poisoned step and
@@ -418,6 +457,8 @@ server's `server.toml` by whoever operates it.
 - Never name a step as failed on cancel or timeout (SIGTERM/SIGINT), and never let a `set -u`
   death exit 0 — an `EXIT` trap that sees `$?=0` without a "finished" flag must exit 1.
 - Never give the `gate` preset inputs or an irreversible action; it runs a ref read-only.
+- Never set `placement = "any-capable"` on a preset that reads secrets, and never invent a
+  `checks` name — only presets that already exist and accept `git_ref`.
 - Never edit the live `server.toml` or restart the server; write the fragments and check a
   candidate copy.
 - Never write secrets, tokens or store credentials into the gate, the preset, the log or

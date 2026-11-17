@@ -37,7 +37,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +45,14 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from remote_ci_monitor import __version__
+from remote_ci_monitor.capabilities import (
+    CHECK_LABEL,
+    CHECK_REQUESTER,
+    AmbiguousMachine,
+    CapabilitiesMixin,
+    CapabilityError,
+    MachineDown,
+)
 from remote_ci_monitor.clientwheel import (
     CANCEL_MIN_CLIENT_VERSION,
     MIN_CLIENT_VERSION,
@@ -67,6 +75,7 @@ from remote_ci_monitor.config import (
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
+from remote_ci_monitor.core.capability import LOCAL_WORKER
 from remote_ci_monitor.core.failures import failures_json
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, duration_key, validate_inputs
@@ -80,6 +89,9 @@ from remote_ci_monitor.core.model import (
     FAILED,
     MODE_GIT_REF,
     MODE_TREE,
+    PLACEMENT_CAPABLE,
+    PLACEMENT_POOL,
+    PRIORITY_HIGH,
     QUEUED,
     SUCCEEDED,
     TIMED_OUT,
@@ -215,7 +227,10 @@ _JOB_RE = re.compile(
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_EVENTS_RE = re.compile(r"^/jobs/(\d+)/events$")
-_WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat)$")
+#: `POST /machines/{id}/recheck` — 머신 id 는 워커 이름 또는 `@local`(M5n §8.1). 웹은
+#: `encodeURIComponent` 로 부르므로 `@` 가 `%40` 으로 온다 — 그 하나만 받아 `@local` 로 푼다
+_RECHECK_RE = re.compile(r"^/machines/((?:@|%40)local|[A-Za-z0-9][A-Za-z0-9._-]{0,63})/recheck$")
+_WORKER_RE = re.compile(r"^/worker/(register|claim|heartbeat|capabilities)$")
 _WORKER_JOB_RE = re.compile(r"^/worker/jobs/(\d+)/(tree|phase|log|finish|artifacts)$")
 _ID_IN_PATH = re.compile(r"/(\d+)")
 #: 스토어 탭(릴리스 프로파일) — `/api/repos/<repo>[/fetch|/secrets[/<secret>[/<file>]]|/verify]`.
@@ -278,8 +293,8 @@ def log_line(msg: str) -> None:
     print(f"[rcm] {msg}", file=sys.stderr, flush=True)
 
 
-#: 기동 단계 수 — port · database · presets(`serve`) + `App.start` 가 켜는 여덟
-STARTUP_STEPS = 11
+#: 기동 단계 수 — port · database · presets(`serve`) + `App.start` 가 켜는 아홉(M5n 의 machine 포함)
+STARTUP_STEPS = 12
 #: 프리셋 이름을 다 싣지 않는다 — 전부는 「listening」 배너에 있다
 STARTUP_PRESET_NAMES = 3
 
@@ -404,11 +419,22 @@ class _DbSnapshot:
     medians_error_code: str | None = None
     #: 도는 잡의 key → 단계 이름 → 중앙값. 멈춤 판정이 이걸로 돈다 (M5m)
     step_medians: dict[str, dict[str, StepMedian]] = field(default_factory=dict)
+    #: 호스트 → key → 중앙값(M5n §7.1). 기대 시간은 그 호스트에서 잰다
+    host_medians: dict[str, dict[str, Median]] = field(default_factory=dict)
+    #: (호스트, key) → 단계 이름 → 중앙값. 다른 호스트로 물러나지 않는다(결정 102)
+    host_step_medians: dict[tuple[str, str], dict[str, StepMedian]] = field(default_factory=dict)
     step_medians_error: str | None = None
     step_medians_error_code: str | None = None
 
 
-class App(RemoteWorkersMixin):
+def shown_pool(job: Job) -> str:
+    """잡이 **보이는** 풀 — 대기 중인 any-capable 잡은 `display_pool`, 그 밖은 `pool`(M5n §5.2)."""
+    if job.is_waiting and job.display_pool:
+        return job.display_pool
+    return job.pool
+
+
+class App(RemoteWorkersMixin, CapabilitiesMixin):
     """서버의 상태와 동작. HTTP 핸들러는 얇고, 규칙은 여기에 있다(테스트하기 쉽게)."""
 
     def __init__(
@@ -453,6 +479,7 @@ class App(RemoteWorkersMixin):
         ) = None
         self._medians_dirty = True
         self._medians_loaded_at = 0.0
+        self._host_medians: dict[str, dict[str, Median]] = {}
         # 단계 중앙값의 캐시는 **key 별 항목**이다(`_load_step_medians` 의 주석이 이유).
         self._step_medians: dict[str, dict[str, StepMedian]] = {}
         self._step_medians_at: dict[str, float] = {}  # key → 잰 시각(monotonic)
@@ -492,6 +519,7 @@ class App(RemoteWorkersMixin):
         # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
         self.preset_env: dict[str, dict[str, list[str]]] = {}
         self._remote_init()
+        self._capabilities_init()
 
     # ── 수명 ────────────────────────────────────────────────────────────────
 
@@ -516,6 +544,10 @@ class App(RemoteWorkersMixin):
             else "nothing to recover",
         )
         self.recover_versions_on_start()
+        # 레인이 뜨기 **전에** 로컬 머신을 잰다 — 첫 claim 이 「보고 없음」으로 any-capable 잡을
+        # 놓치지 않게(M5n §4.2)
+        self.measure_capabilities()
+        step("machine", self._local_capability_summary())
         self.workers = start_workers(
             self.store,
             self.config,
@@ -525,8 +557,10 @@ class App(RemoteWorkersMixin):
             on_marker=self._on_marker,
             now_fn=self.now_fn,
             admit=self._admit_local,
+            claimant=self.local_claimant,
         )
         step("lanes", f"{self.config.server.lanes}")
+        self.start_capabilities()
         self._janitor = threading.Thread(target=self._janitor_loop, name="rcm-janitor", daemon=True)
         self._janitor.start()
         self.retention = Janitor(
@@ -741,12 +775,13 @@ class App(RemoteWorkersMixin):
         return self.admit(lane, None, now, claim)
 
     def worker_infos(self) -> list[WorkerInfo]:
-        """로컬 레인(같은 프로세스)."""
+        """로컬 레인(같은 프로세스). 호스트는 이 컴퓨터다(M5n §3)."""
+        host = self.local_host_key()
         if self.workers:
-            return [w.info() for w in self.workers]
+            return [replace(w.info(), host_key=host) for w in self.workers]
         # 워커를 띄우지 않은 상태(테스트)에서는 설정된 레인 수만큼 idle 로 본다
         return [
-            WorkerInfo(lane=n, state="idle", since=self.started_at)
+            WorkerInfo(lane=n, state="idle", since=self.started_at, host_key=host)
             for n in range(1, self.config.server.lanes + 1)
         ]
 
@@ -2989,10 +3024,15 @@ class App(RemoteWorkersMixin):
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
-        # 단계 중앙값은 **도는 잡의 key** 에만 필요하다 — 도는 잡이 없으면 질의 0회다.
-        step_medians, step_error, step_error_code = self._load_step_medians(
-            now, cfg, {j.key for j in jobs if j.is_busy}
+        # 단계 중앙값은 **도는 잡의 (호스트, key)** 에만 필요하다 — 도는 잡이 없으면 질의 0회다.
+        # 캐시 키는 문자열이어야 해서 `호스트\x00key` 로 묶는다(M5n §7.1).
+        pairs = {(self.resolve_host(j.host_key, j.worker_name), j.key) for j in jobs if j.is_busy}
+        composite, step_error, step_error_code = self._load_step_medians(
+            now, cfg, {f"{h}\x00{k}" for h, k in pairs}
         )
+        host_step_medians = self._host_step_view(composite)
+        # 캐시의 view 객체 그대로 — 마커 한 줄로 스냅샷이 더러워져도 같은 객체다(M5f 결정 49)
+        step_medians = composite
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
@@ -3022,7 +3062,29 @@ class App(RemoteWorkersMixin):
             step_medians_error=step_error,
             step_medians_error_code=step_error_code,
             paused=paused,
+            host_medians=self._host_medians or {},
+            host_step_medians=host_step_medians,
         )
+
+    def _host_step_view(
+        self, composite: dict[str, dict[str, StepMedian]]
+    ) -> dict[tuple[str, str], dict[str, StepMedian]]:
+        """`호스트\x00key` 캐시 view → (호스트, key) 표. view 가 그대로면 같은 dict 를 돌려준다."""
+        if getattr(self, "_host_step_src", None) is composite:
+            return self._host_step_out
+        out = {tuple(ck.split("\x00", 1)): t for ck, t in composite.items()}  # type: ignore[misc]
+        self._host_step_src = composite
+        self._host_step_out: dict[tuple[str, str], dict[str, StepMedian]] = out  # type: ignore[assignment]
+        return out
+
+    def resolve_host(self, host_key: str | None, worker_name: str | None) -> str:
+        """잡이 돈 호스트. 옛 행(NULL)은 로컬 레인이면 지금의 로컬 호스트, 아니면 `worker:<이름>`
+        (M5n §7.1 · 엣지 13)."""
+        if host_key:
+            return host_key
+        if worker_name is None:
+            return self.local_host_key()
+        return f"worker:{worker_name}"
 
     def _load_medians(
         self, now: datetime, cfg: QueueConfig
@@ -3048,11 +3110,16 @@ class App(RemoteWorkersMixin):
         pool_medians: dict[str, dict[str, Median]] = {}
         try:
             since = now - timedelta(days=cfg.sample_days)
-            samples = split_by_pool(self.store.list_sample_rows(since))
+            rows = self.store.list_sample_rows(since)
+            samples = split_by_pool(rows)
             medians = medians_from(samples.get(DEFAULT_POOL, []), now, cfg)
             for name, sample_rows in samples.items():
                 if name != DEFAULT_POOL:
                     pool_medians[name] = medians_from(sample_rows, now, cfg)
+            by_host: dict[str, list[Any]] = {}
+            for r in rows:
+                by_host.setdefault(self.resolve_host(r.host_key, r.worker_name), []).append(r)
+            self._host_medians = {h: medians_from(rs, now, cfg) for h, rs in by_host.items()}
         except Exception as e:  # noqa: BLE001
             # **실패는 캐시하지 않는다.** 캐시하면 SQLite 가 잠깐 잠긴 것만으로 `medians: null`
             # 이 다음 잡이 끝날 때까지 모든 상태 문서에 박힌다 — 한가한 서버면 몇 시간이다.
@@ -3110,10 +3177,17 @@ class App(RemoteWorkersMixin):
         이벤트 수도 여기 안 들어온다 — 읽는 잡은 key 당 `STEP_SAMPLE_JOBS` 개가 상한이다.
         """
         since = now - timedelta(days=cfg.sample_days)
-        ids_by_key = {
-            key: self.store.list_step_sample_ids(key, since=since, limit=STEP_SAMPLE_JOBS)
-            for key in keys
-        }
+        local = self.local_host_key()
+        ids_by_key: dict[str, list[int]] = {}
+        for key in keys:
+            host, _, real = key.partition("\x00") if "\x00" in key else (None, "", key)
+            ids_by_key[key] = self.store.list_step_sample_ids(
+                real or key,
+                since=since,
+                limit=STEP_SAMPLE_JOBS,
+                host_key=host,
+                local_host_key=local,
+            )
         all_ids = [i for ids in ids_by_key.values() for i in ids]
         markers = self.store.markers_for(all_ids)
         ends = self.store.finished_at_for(all_ids)
@@ -3163,7 +3237,11 @@ class App(RemoteWorkersMixin):
     def _queue_rows(
         self, now: datetime, snap: _DbSnapshot, pool: str | None = None
     ) -> list[QueueRow]:
-        """큐 행. `pool=None` 이면 모든 풀(풀마다 따로 계산해 이어 붙인다 — 그룹·레인은 풀 단위)."""
+        """큐 행 — 모든 잡 · 모든 레인을 **한 번에** 계산한다(M5n §7.2 · 결정 104).
+
+        잡마다 들어갈 수 있는 워커는 `placement_for` 가 정한다(지정 잡 · 풀 · any-capable).
+        `pool` 을 주면 그 풀에 **보이는** 행만 — 도는 잡은 도는 풀, 대기 잡은 `display_pool`.
+        """
         if snap.queue_error is not None:
             raise RuntimeError(snap.queue_error)
         progress = {
@@ -3172,28 +3250,29 @@ class App(RemoteWorkersMixin):
             if j.id in snap.markers
             and (p := progress_for_job(j, snap.markers[j.id], now)) is not None
         }
-        rows: list[QueueRow] = []
-        by_pool = split_by_pool(snap.jobs)
-        names = [pool] if pool is not None else list(by_pool) or [DEFAULT_POOL]
-        for name in names:
-            jobs = by_pool.get(name, [])
-            # 풀의 레인 = 로컬(기본 풀) + 살아 있는 원격 워커. 없거나 다 down 이면 worker_down
-            rows.extend(
-                compute_queue(
-                    jobs,
-                    workers=self.pool_workers(name, now),
-                    paused=snap.paused is not None,
-                    medians=self._pool_medians(snap, name) or {},
-                    presets={p.name: p for p in self.config.presets},
-                    cfg=self.queue_config(),
-                    now=now,
-                    progress=progress,
-                    # 풀별로 나누지 않는다 — 단계 소요는 key 에 붙고, 풀 차이는 `expected`
-                    # 쪽(`_pool_medians`)이 이미 흡수한다.
-                    step_medians=snap.step_medians,
-                )
-            )
-        return rows
+        views = self.machine_views(now)
+        workers = self.all_worker_infos(now)
+        memo: dict[Any, Any] = {}  # 판정은 (프리셋, 머신)마다 한 번 — 대기 잡마다가 아니다
+        rows = compute_queue(
+            snap.jobs,
+            workers=workers,
+            paused=snap.paused is not None,
+            medians=snap.medians or {},
+            presets={p.name: p for p in self.config.presets},
+            cfg=self.queue_config(),
+            now=now,
+            progress=progress,
+            placement=lambda job: self.placement_for(job, now, views, memo),
+            host_medians=snap.host_medians if snap.medians is not None else {},
+            host_step_medians=snap.host_step_medians,
+            worker_hosts={
+                None: self.local_host_key(),
+                **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
+            },
+        )
+        if pool is None:
+            return rows
+        return [r for r in rows if shown_pool(r.job) == pool]
 
     def _pool_medians(self, snap: _DbSnapshot, pool: str) -> dict[str, Median] | None:
         """풀별 중앙값(같은 키라도 머신이 다르면 소요가 다르다). 기본 풀은 스냅샷 값 그대로."""
@@ -3243,6 +3322,8 @@ class App(RemoteWorkersMixin):
             snapshot_cache_blobs=blob_count,
             snapshot_cache_bytes=blob_bytes,
             notify_failures=self.notify_failures,
+            generation=self.generation,
+            machines=tuple(self.machines_summary(now)),
         )
         try:
             pool_names = self.store.list_pools()
@@ -3253,12 +3334,14 @@ class App(RemoteWorkersMixin):
                 pool_names.append(row.pool)
         # list_pools 가 실패해도 큐·최근에 보이는 풀은 떨어뜨리지 않는다(격리 검증 리뷰 노트)
         for job in [*(r.job for r in queue or []), *(snap.recent or [])]:
-            if job.pool not in pool_names:
-                pool_names.append(job.pool)
+            if shown_pool(job) not in pool_names:
+                pool_names.append(shown_pool(job))
         pools: list[Pool] = []
         for name in pool_names:
             local = name == DEFAULT_POOL
-            pool_queue = [r for r in queue if r.job.pool == name] if queue is not None else None
+            pool_queue = (
+                [r for r in queue if shown_pool(r.job) == name] if queue is not None else None
+            )
             recent = [j for j in snap.recent if j.pool == name] if snap.recent is not None else None
             remote_hosts = self.remote_hosts(name, now)
             pool_hosts: tuple[HostSample, ...] | None
@@ -3438,6 +3521,8 @@ class App(RemoteWorkersMixin):
             raise ApiError(503, f"queue unavailable: {snap.queue_error}")
         priority = self._parse_priority(body.get("priority"), preset.priority)
         pool = self._requested_pool(body, preset)
+        if preset.placement == PLACEMENT_CAPABLE and body.get("pool") is None:
+            return self._eta_capable(snap, preset, inputs, priority, pool, now)
         row, ahead = eta_for_new(
             snap.jobs,
             preset=preset,
@@ -3451,6 +3536,52 @@ class App(RemoteWorkersMixin):
             now=now,
             priority=priority,
             pool=pool,
+        )
+        doc = queue_row_json(row, base_url=None)
+        doc["id"] = None
+        doc["url"] = None
+        return {"job": doc, "ahead": ahead, "generated_at": iso(now)}
+
+    def _eta_capable(
+        self,
+        snap: _DbSnapshot,
+        preset: Preset,
+        inputs: dict[str, Any],
+        priority: int,
+        pool: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """any-capable 프리셋의 가상 잡 — 모든 레인 위에서, 맞는 머신 중 가장 일찍 끝날 곳으로
+        (M5n §7.2). 앞선 잡은 그 잡이 들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다."""
+        ghost = Job(
+            id=max((j.id for j in snap.jobs), default=0) + 1,
+            preset=preset.name,
+            inputs=dict(inputs),
+            key=duration_key(preset, inputs),
+            concurrency_group=preset.concurrency_group,
+            source=Source(mode=MODE_TREE),
+            requester=Requester(name="", label=""),
+            state=QUEUED,
+            created_at=now,
+            queued_at=now,
+            priority=priority,
+            pool=pool,
+            placement=PLACEMENT_CAPABLE,
+            display_pool=pool,
+            concurrency_scope=preset.concurrency_scope,
+        )
+        rows = self._queue_rows(now, replace(snap, jobs=[*snap.jobs, ghost]))
+        row = next(r for r in rows if r.job.id == ghost.id)
+        views = self.machine_views(now)
+        mine = self.placement_for(ghost, now, views).workers
+        ahead = sum(
+            1
+            for r in rows
+            if r.job.id != ghost.id
+            and (
+                (r.job.is_busy and r.job.worker_name in mine)
+                or (r.job.is_waiting and r.job.priority >= priority)
+            )
         )
         doc = queue_row_json(row, base_url=None)
         doc["id"] = None
@@ -3490,9 +3621,11 @@ class App(RemoteWorkersMixin):
             raise ApiError(400, str(e)) from e
         priority = self._requested_priority(body, preset, token)
         pool = self._requested_pool(body, preset)
+        placed = self._placement_fields(body, preset, token, pool)
+        pool = placed.pop("pool")
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
-                preset, inputs, src, label, token, body, host, priority, pool, link
+                preset, inputs, src, label, token, body, host, priority, pool, link, placed
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3520,6 +3653,8 @@ class App(RemoteWorkersMixin):
         key = duration_key(preset, inputs)
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
+        # 머신을 지정한 잡은 합류하지 않는다 — 같은 트리여도 「그 머신에서」가 요점이다(M5n §4.5)
+        want_join = want_join and placed["target_worker"] is None
         if want_join:
             joined = self.store.join_or_bump_with_submission(jk, token.name, label, priority, now)
             if joined is not None:
@@ -3532,6 +3667,7 @@ class App(RemoteWorkersMixin):
                     "priority": existing.priority,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                     "submission": {"id": sid, "cancel_token": cancel_token},
+                    "placement": self.submission_placement(preset, existing),
                 }
         job, sid, cancel_token = self.store.create_job_with_submission(
             participant=token.name,
@@ -3548,6 +3684,7 @@ class App(RemoteWorkersMixin):
             priority=priority,
             pool=pool,
             link=link,
+            **placed,
         )
         self._publish_job(job, job.id)
         return 201, {
@@ -3562,7 +3699,144 @@ class App(RemoteWorkersMixin):
             # `POST /jobs` 시도마다 capability 하나(M5j G5 · 결정 87) — 잡 행과 같은 트랜잭션
             # 에서 났다(M5l S8). 비밀은 여기서 한 번 나가고 서버에는 해시만 남는다.
             "submission": {"id": sid, "cancel_token": cancel_token},
+            "placement": self.submission_placement(preset, job),
         }
+
+    def _placement_fields(
+        self, body: dict[str, Any], preset: Preset, token: TokenInfo, pool: str
+    ) -> dict[str, Any]:
+        """제출 본문 → 잡에 박을 배치 열(M5n §4.5 · §5.1). `pool` 도 돌려준다(지정 잡은 그 풀).
+
+        - `machine`: 점검 프리셋이면 토큰만, 그 밖은 admin(결정 96). 모르는 이름 400, down 409.
+        - `--pool` 을 준 `any-capable` 제출은 그 풀에 고정된다(사람이 고른 것이 이긴다, §5.1).
+        """
+        machine = body.get("machine")
+        target: str | None = None
+        fingerprint: str | None = None
+        if machine is not None:
+            if not isinstance(machine, str) or not machine:
+                raise ApiError(400, "machine must be a machine id (see rcm machines)")
+            now = self.now_fn()
+            try:
+                view = self.resolve_machine(machine, self.machine_views(now))
+            except KeyError as e:
+                raise ApiError(400, f"unknown machine {machine!r} — see rcm machines") from e
+            except AmbiguousMachine as e:
+                raise ApiError(400, str(e)) from e
+            if not view.alive:
+                raise ApiError(
+                    409,
+                    f"machine {view.id} is down — start rcm worker there first",
+                    machine=view.id,
+                )
+            if preset.name not in self.check_preset_names() and not token.admin:
+                raise ApiError(
+                    403,
+                    f"--machine on preset '{preset.name}' needs an admin token "
+                    "(any token may target a check preset)",
+                )
+            target = view.id
+            pool = view.pool
+            fingerprint = view.report.fingerprint.hash if view.report else None
+        capable = (
+            preset.placement == PLACEMENT_CAPABLE and target is None and body.get("pool") is None
+        )
+        return {
+            "pool": pool,
+            "placement": PLACEMENT_CAPABLE if capable else PLACEMENT_POOL,
+            "display_pool": pool if capable else None,
+            "target_worker": target,
+            "concurrency_scope": preset.concurrency_scope,
+            "sample": preset.sample is not False,
+            "fingerprint_hash": fingerprint,
+        }
+
+    def worker_spec_for(self, token: TokenInfo) -> dict[str, Any]:
+        """`GET /worker/spec` — 워커 토큰이면 누구나(등록 전에도 잴 수 있다)."""
+        return self.worker_spec()
+
+    def worker_capabilities(self, token: TokenInfo, body: Any) -> dict[str, Any]:
+        """`POST /worker/capabilities` — 등록된 워커의 보고(§4.2). 세대가 다르면 409."""
+        row = self._registered(token)
+        try:
+            self.receive_capabilities(token.name, row.host_name, body)
+        except CapabilityError as e:
+            extra = {"code": e.code} if e.code else {}
+            raise ApiError(e.status, e.message, **extra) from e
+        self._publish_server()
+        return {"ok": True, "generation": self.generation}
+
+    def recheck_route(self, machine: str, body: Any, token: TokenInfo) -> dict[str, Any]:
+        """`POST /machines/{id}/recheck`(admin) — 점검을 다시 건다. 한 번 제한과 무관하다."""
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        names = body.get("checks")
+        if names is not None and (
+            not isinstance(names, list) or not all(isinstance(n, str) for n in names)
+        ):
+            raise ApiError(400, "checks must be a list of check preset names")
+        try:
+            jobs = self.recheck(machine, names)
+        except KeyError as e:
+            raise ApiError(404, f"no such machine {machine!r}") from e
+        except MachineDown as e:
+            # `rcm run --machine` 과 같은 규칙(결정 106) — 걸어 봐야 기다리기만 한다
+            raise ApiError(
+                409,
+                f"machine {e} is down — start rcm worker there, then recheck",
+                machine=str(e),
+            ) from e
+        except ValueError as e:
+            raise ApiError(400, str(e)) from e
+        self._publish_server()
+        return {"jobs": jobs}
+
+    def submit_internal_check(self, preset: Preset, view: Any, *, fingerprint_hash: str | None):
+        """rcm 이 스스로 거는 점검 잡 — 그 워커를 지정한 git_ref 잡(§4.4). 해석 실패는 예외."""
+        repo = self.config.repo(preset.repo)
+        if repo is None:
+            raise GitError(f"preset '{preset.name}' has no repo")
+        ref = validate_ref(preset.check_ref)
+        timeout = self.config.server.git_resolve_timeout_seconds
+        sha = resolve_ref(repo.url, ref, timeout=timeout, credential=repo.credential)
+        inputs = validate_inputs(preset, {})
+        source = Source(
+            mode=MODE_GIT_REF, repo=repo.name, ref=ref, sha=sha, base_sha=sha, dirty=False
+        )
+        job = self.store.create_job(
+            preset=preset.name,
+            inputs=inputs,
+            key=duration_key(preset, inputs),
+            concurrency_group=preset.concurrency_group,
+            source=source,
+            requester=Requester(name=CHECK_REQUESTER, label=CHECK_LABEL),
+            timeout_seconds=preset.timeout_seconds,
+            join_key=None,
+            now=self.now_fn(),
+            state=QUEUED,
+            priority=PRIORITY_HIGH,
+            pool=view.pool,
+            placement=PLACEMENT_POOL,
+            target_worker=view.id,
+            concurrency_scope=preset.concurrency_scope,
+            sample=preset.sample is not False,
+            fingerprint_hash=fingerprint_hash,
+        )
+        self._publish_job(job, job.id)
+        self.wake.set()
+        return job
+
+    def _local_capability_summary(self) -> str:
+        report = self.report_of(LOCAL_WORKER)
+        if report is None:
+            return "not measured"
+        now = self.now_fn()
+        verdicts = self.verdicts_for(LOCAL_WORKER, now)
+        ok = sum(1 for v in verdicts.values() if v.state == "eligible")
+        fp = report.fingerprint.hash or "unknown"
+        return f"fingerprint {fp} · {ok}/{len(verdicts)} presets eligible"
 
     def _parse_priority(self, raw: Any, default: int) -> int:
         """`priority` 값(이름 또는 -1·0·1). 없으면 default(프리셋 기본)."""
@@ -3845,8 +4119,10 @@ class App(RemoteWorkersMixin):
         priority: int = 0,
         pool: str = DEFAULT_POOL,
         link: JobLink | None = None,
+        placed: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
+        placed = dict(placed or {})
         repo = self.config.repo(preset.repo)
         if repo is None:
             raise ApiError(400, f"preset '{preset.name}' has no repo configured")
@@ -3878,6 +4154,7 @@ class App(RemoteWorkersMixin):
         key = duration_key(preset, inputs)
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
+        want_join = want_join and placed.get("target_worker") is None
         if want_join:
             joined = self.store.join_or_bump_with_submission(jk, token.name, label, priority, now)
             if joined is not None:
@@ -3888,6 +4165,7 @@ class App(RemoteWorkersMixin):
                     "joined": True,
                     "state": existing.state,
                     "priority": existing.priority,
+                    "placement": self.submission_placement(preset, existing),
                     "sha": existing.source.sha,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                     "submission": {"id": sid, "cancel_token": cancel_token},
@@ -3907,6 +4185,7 @@ class App(RemoteWorkersMixin):
             priority=priority,
             pool=pool,
             link=link,
+            **placed,
         )
         self._publish_job(job, job.id)
         self.wake.set()
@@ -3916,6 +4195,7 @@ class App(RemoteWorkersMixin):
             "state": job.state,
             "priority": job.priority,
             "pool": job.pool,
+            "placement": self.submission_placement(preset, job),
             "sha": sha,
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
             "submission": {"id": sid, "cancel_token": cancel_token},  # 잡 행과 같은 트랜잭션
@@ -4168,6 +4448,11 @@ class App(RemoteWorkersMixin):
         # 두면 `rcm check` 의 `service preset tools` 가 방금 붙인 프리셋에 대해 옛 답을 말한다 —
         # 재시작 없이 바꾸는 기능이 재시작해야만 맞는 검사를 남기는 꼴이다.
         self.measure_preset_env()
+        # 프리셋 · 프로브가 바뀌었을 수 있다 — 세대를 올려 옛 보고를 `report_stale` 로 만들고
+        # 로컬은 바로 다시 잰다 — **뒤에서**(프로브가 이 요청 · SIGHUP 루프를 붙잡지 않게). 원격
+        # 워커는 다음 heartbeat 에서 세대를 보고 다시 잰다(M5n §4.2).
+        self.bump_generation()
+        self.measure_capabilities_later()
         self._mark_dirty()
         self._publish_server()
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
@@ -4716,8 +5001,26 @@ class Handler(BaseHTTPRequestHandler):
             self._no_worker_token()
             self._send_json(200, self.app.eta(self._json_body()))
             return
+        if path == "/worker/spec":
+            self._only(method, "GET")
+            t = self.app.require_worker_token(self._token())
+            self._send_json(200, self.app.worker_spec_for(t))
+            return
         if path.startswith("/worker/"):
             self._worker_route(method, path)
+            return
+        if path == "/api/machines":
+            self._only(method, "GET")
+            self._read_only_ok()
+            self._no_worker_token()
+            self._send_json(200, self.app.machines_doc())
+            return
+        m = _RECHECK_RE.match(path)
+        if m:
+            self._only(method, "POST")
+            t = self.app.require_admin(self._token())
+            machine = "@local" if m.group(1) == "%40local" else m.group(1)
+            self._send_json(200, self.app.recheck_route(machine, self._json_body(), t))
             return
         if path == "/api/repos":
             self._only(method, "GET")
@@ -5063,6 +5366,8 @@ class Handler(BaseHTTPRequestHandler):
             body = self._json_body()
             if what == "register":
                 self._send_json(200, self.app.worker_register(t, body))
+            elif what == "capabilities":
+                self._send_json(200, self.app.worker_capabilities(t, body))
             elif what == "claim":
                 self.connection.settimeout(UPLOAD_TIMEOUT)  # long-poll 은 일반 타임아웃보다 길다
                 try:

@@ -95,3 +95,35 @@ def test_check_has_no_local_preset_tools_row_without_a_config(srv, env, capsys):
     code, out, err = run(capsys, ["check"])
     assert code == 0, out + err
     assert row_status(out, "local preset tools") is None, out
+
+
+CAPABLE_SERVER_TOML = """\
+[server]
+data_dir = "{data_dir}"
+
+[[presets]]
+name = "capgate"
+argv = ["sh", "-c", "true"]
+placement = "any-capable"
+requires = ["%s"]
+
+[[presets]]
+name = "deploy"
+argv = ["sh", "-c", "true"]
+requires = ["sh"]
+"""
+
+
+def test_an_any_capable_preset_missing_a_tool_here_does_not_fail_the_check(
+    srv, env, server_toml, capsys
+):
+    """실측(M5n 수용 시험 2026-11-16): `placement = "any-capable"` 프리셋은 도구가 있는 머신으로
+    간다 — 이 컴퓨터에 없는 것이 정상이다. 그것으로 `rcm check` 가 매번 FAIL 이면 진짜 고장이
+    묻힌다. 행에는 남기되(정보) 판정에서 빼고, 어디서 보는지(`placement` 행)를 말한다."""
+    env(srv)
+    cfg = server_toml(CAPABLE_SERVER_TOML % MISSING)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert row_status(out, "local preset tools") == "ok", out
+    line = next(ln for ln in out.splitlines() if "local preset tools" in ln)
+    assert f"capgate ({MISSING} missing · any machine)" in line, line
+    assert row_status(out, "service preset tools") in ("ok", None), out

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import random
 import secrets
 import shutil
@@ -60,6 +61,8 @@ LOG_BATCH_BYTES = 256 * 1024
 LOG_KEEP_BYTES = 4 * 1024 * 1024  # 서버에 못 보낸 로그를 메모리에 두는 상한
 WORKSPACE_KEEP_DAYS = 7
 STOP_SUMMARY = "worker stopped"
+#: 연결 실패가 이만큼 **연속**이면 같은 망에서 서버를 다시 찾는다(`server = "auto"` 일 때만, M5n §9)
+REDISCOVER_AFTER_FAILURES = 5
 
 
 def _utcnow() -> datetime:
@@ -222,8 +225,12 @@ class RemoteWorker:
         log: Callable[[str], None] | None = None,
         environ: dict[str, str] | None = None,
         once: bool = False,
+        rediscover: Callable[[], str | None] | None = None,
     ):
         self.config = config
+        # DHCP 로 서버 주소가 바뀐 경우 — auto 일 때만 cmd_worker 가 넘긴다(M5n §9)
+        self.rediscover = rediscover
+        self._conn_failures = 0
         self.client = client or WorkerClient(config.server, config.token)
         self.now_fn = now_fn
         self.rand_fn = rand_fn
@@ -243,6 +250,11 @@ class RemoteWorker:
         self._threads: list[threading.Thread] = []
         self._hb_failures = 0
         self.processed = 0
+        # M5n — 능력 보고. 세대가 바뀌면 명세를 다시 받고 다시 잰다(§4.2)
+        self.generation: str | None = None
+        self.probe_interval_seconds = 600
+        self._last_measured = 0.0
+        self._measure_lock = threading.Lock()
 
     # ── 보고 (재시도) ────────────────────────────────────────────────────────
 
@@ -286,14 +298,20 @@ class RemoteWorker:
                     raise WorkerExit(2, f"{e.message} — set RCM_WORKER_TOKEN") from e
                 if e.status:
                     raise WorkerExit(2, e.message) from e
+                self._connection_failed()
                 self.log(f"register: {e.message} — retrying in {int(REGISTER_RETRY_SECONDS)}s")
                 if self.stopping.wait(REGISTER_RETRY_SECONDS):
                     raise WorkerExit(0, "stopped before registering") from e
                 continue
+            self._conn_failures = 0
             self.heartbeat_seconds = int(out.get("heartbeat_seconds") or 5)
             self.claim_wait_seconds = int(out.get("claim_wait_seconds") or 20)
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
             self.name = str(out.get("name") or self.name)
+            # 등록은 서버가 이 워커의 보고를 지우는 일이다(M5n §19-5). 등록 응답의 세대를 제 것으로
+            # 삼으면 다음 heartbeat 이 「세대 같음」으로 보여 주기(기본 10분)까지 다시 재지 않는다 —
+            # 그동안 any-capable 잡을 못 받는다. 아직 이 세대로 보고하지 않았다고 둔다
+            self.generation = None
             return out
 
     def _host_sample(self) -> dict[str, Any] | None:
@@ -325,6 +343,10 @@ class RemoteWorker:
             out = self.client.heartbeat(jobs, self._host_sample())
         except ClientError as e:
             self._hb_failures += 1
+            if e.status:
+                self._conn_failures = 0
+            else:
+                self._connection_failed()
             if self._hb_failures in (3, 12) or self._hb_failures % 60 == 0:
                 gone = self._hb_failures * self.heartbeat_seconds
                 self.log(f"heartbeat: server unreachable for {gone}s ({e.message})")
@@ -332,11 +354,114 @@ class RemoteWorker:
         if self._hb_failures >= 3:
             self.log("heartbeat: server reachable again")
         self._hb_failures = 0
+        self._conn_failures = 0
         cancel = out.get("cancel") or []
         with self._lock:
             self.cancel_requested = {int(j) for j in cancel if isinstance(j, int)}
             self.paused = bool(out.get("paused"))
+        gen = out.get("generation")
+        due = time.monotonic() - self._last_measured >= self.probe_interval_seconds
+        # 세대를 안 보내는 서버(M5n 이전)에는 보고하지 않는다
+        if isinstance(gen, str) and (gen != self.generation or due):
+            # 서버가 설정을 다시 읽었거나(세대) 다시 잴 때가 됐다 — 명세부터 다시 받는다.
+            # **heartbeat 스레드에서 재지 않는다**: 프로브 묶음(최대 64 × 60초)이
+            # `worker_timeout_seconds` 를 넘으면 서버가 이 워커를 down 으로 보고 도는 잡을
+            # lost 로 만든다. 따로 띄우고, 재는 중이면 `_measure_lock` 이 겹치지 않게 한다
+            threading.Thread(
+                target=self._measure_quietly, name="rcm-worker-measure", daemon=True
+            ).start()
         return True
+
+    def _measure_quietly(self) -> None:
+        try:
+            self.measure_and_report()
+        except Exception as e:  # noqa: BLE001 — 재기가 죽어도 heartbeat 은 산다
+            self.log(f"capabilities: {type(e).__name__}")
+
+    def _connection_failed(self) -> None:
+        """연결 실패(status 0) 하나. 연속 `REDISCOVER_AFTER_FAILURES` 번마다 서버를 다시 찾는다."""
+        self._conn_failures += 1
+        if self.rediscover is None or self._conn_failures % REDISCOVER_AFTER_FAILURES:
+            return
+        url = self.rediscover()
+        if not url or url.rstrip("/") == self.client.server.rstrip("/"):
+            return
+        self.log(f"server moved: {self.client.server} → {url}")
+        self.client = WorkerClient(url, self.config.token)
+
+    # ── 능력 보고 (M5n §4.2) ────────────────────────────────────────────────
+
+    def measure(self, spec: dict[str, Any]) -> dict[str, Any]:
+        """명세대로 **이 프로세스의 환경**에서 잰다 — 보고 본문. 서버에 보내지 않는다."""
+        from remote_ci_monitor.config import Probe
+        from remote_ci_monitor.core import jobenv
+        from remote_ci_monitor.core.capability import host_key_from
+        from remote_ci_monitor.hostsample import hardware_id, run_probes
+        from remote_ci_monitor.runner import measure_tools
+
+        env = dict(self.environ if self.environ is not None else os.environ)
+        probes = [
+            Probe(
+                name=str(p.get("name")),
+                argv=tuple(str(a) for a in p.get("argv") or ()),
+                timeout_seconds=int(p.get("timeout_seconds") or 10),
+            )
+            for p in spec.get("probes") or []
+            if isinstance(p, dict) and p.get("argv")
+        ]
+        fingerprint = {
+            name: {"state": r.state, "value": r.value}
+            for name, r in run_probes(probes, env).items()
+        }
+        presets: dict[str, Any] = {}
+        for p in spec.get("presets") or []:
+            if not isinstance(p, dict) or not isinstance(p.get("name"), str):
+                continue
+            passthrough = tuple(str(x) for x in p.get("env_passthrough") or ())
+            fixed = {str(k): str(v) for k, v in (p.get("env") or {}).items()}
+            job_env = jobenv.job_env(passthrough, fixed, env)
+            missing, workspace = measure_tools(
+                tuple(str(x) for x in p.get("requires") or ()), job_env
+            )
+            presets[p["name"]] = {
+                "missing_tools": missing,
+                "workspace_tools": workspace,
+                "missing_passthrough": list(jobenv.missing_passthrough(passthrough, env)),
+            }
+        return {
+            "generation": spec.get("generation"),
+            "host_key": host_key_from(hardware_id(), self.name),
+            "accept_any": bool(getattr(self.config, "accept_any", True)),
+            "fingerprint": fingerprint,
+            "presets": presets,
+        }
+
+    def measure_and_report(self) -> bool:
+        """명세를 받아 재고 보낸다. 세대가 그 사이 바뀌었으면(409) 한 번 더. 실패는 로그만 —
+        보고가 없는 워커는 any-capable 잡을 안 받을 뿐 pool 잡은 그대로 돈다(fail-closed)."""
+        if not self._measure_lock.acquire(blocking=False):
+            return False  # 이미 재는 중
+        try:
+            for _attempt in range(2):
+                try:
+                    spec = self.client.spec()
+                    self.probe_interval_seconds = int(spec.get("probe_interval_seconds") or 600)
+                    body = self.measure(spec)
+                    self.client.capabilities(body)
+                except ClientError as e:
+                    if e.status == 409 and _attempt == 0:
+                        continue
+                    if e.status == 404:
+                        self.log("capabilities: server does not take reports (older rcm)")
+                    else:
+                        self.log(f"capabilities: {e.message}")
+                    return False
+                self.generation = str(spec.get("generation") or "") or None
+                self._last_measured = time.monotonic()
+                return True
+            return False
+        finally:
+            self._measure_lock.release()
 
     def _heartbeat_loop(self) -> None:
         while not self.stopping.wait(self.heartbeat_seconds):
@@ -708,6 +833,8 @@ class RemoteWorker:
             disk_path=str(self.config.data_path),
         )
         self.sampler.start()
+        # 레인이 뜨기 **전에** 재서 보낸다 — 첫 claim 부터 이 워커가 무엇을 할 수 있는지 서버가 안다
+        self.measure_and_report()
         self.heartbeat_once()
         hb = threading.Thread(target=self._heartbeat_loop, name="rcm-worker-heartbeat", daemon=True)
         hb.start()

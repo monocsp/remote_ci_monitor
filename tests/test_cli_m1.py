@@ -388,6 +388,30 @@ def test_eta_row_for_a_running_job_shows_elapsed_not_wait():
     assert "1st in line · 0 ahead · wait 0s" in _fmt_eta_row(queued, 0)
 
 
+@pytest.mark.parametrize(
+    "reason, words",
+    [
+        ("no_capable_machine", "no capable machine"),
+        ("check_failed", "check failed"),
+        ("check_pending", "check pending"),
+    ],
+)
+def test_eta_row_without_a_time_says_the_m5n_reason(reason, words):
+    """M5n 수용 시험(2026-11-16): `rcm eta nocap` 이 「eta —」만 찍고 왜인지 안 말했다(JSON 에는
+    `no_capable_machine` 이 있었다). 새 이유 셋도 worker_down 처럼 붙인다."""
+    from remote_ci_monitor.cli import _fmt_eta_row
+
+    row = {
+        "id": None,
+        "position": 1,
+        "state": "queued",
+        "reason": reason,
+        "estimate": {"expected_seconds": 600, "wait_seconds": None, "finish_at": None},
+    }
+    line = _fmt_eta_row(row, 0)
+    assert f"eta — · {words}" in line, line
+
+
 def test_check_names_the_configured_token_env(srv, env, capsys, tmp_path):
     """client.toml 이 token_env 를 바꿨는데 안내가 RCM_TOKEN 만 말하면 헤맨다."""
     env(srv, token=None)

@@ -251,6 +251,24 @@ def queue_row_json(
         "progress": progress_json(row.progress),
         "log_tail": log_tail,
         "url": job_url(base_url, job.id),
+        # M5n — 어디서 돌 수 있나(대기)와 어디서 도나(실행). 키만 더한다(스키마 v1)
+        "placement": job.placement,
+        "display_pool": (job.display_pool or job.pool) if job.is_waiting else job.display_pool,
+        "target_worker": job.target_worker,
+        "concurrency_scope": job.concurrency_scope,
+        "host_key": job.host_key,
+        "placement_detail": [placement_note_json(n) for n in row.placement_detail],
+    }
+
+
+def placement_note_json(n: Any) -> dict[str, Any]:
+    """대기 잡 하나에서 본 워커 하나의 판정(M5n §7.3)."""
+    return {
+        "worker": n.worker,
+        "display_name": n.display_name,
+        "state": n.state,
+        "code": n.code,
+        "detail": dict(n.detail),
     }
 
 
@@ -287,6 +305,11 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "source": source_json(job.source),
         "transitions": [{"state": t.state, "at": iso(t.at)} for t in job.transitions],
         "url": job_url(base_url, job.id),
+        "placement": job.placement,
+        "display_pool": job.display_pool,
+        "target_worker": job.target_worker,
+        "host_key": job.host_key,
+        "worker": job.worker_name,
     }
 
 
@@ -302,6 +325,11 @@ def preset_json(p: Preset) -> dict[str, Any]:
         "concurrency_group": p.concurrency_group,
         "expected_seconds": p.expected_seconds,
         "timeout_seconds": p.timeout_seconds,
+        # M5n — 설정 문자열 그대로(`"any-capable"`). 잡 행의 `placement` 는 DB 값(`"capable"`)이다
+        "placement": "any-capable" if p.placement == "capable" else "pool",
+        "checks": list(p.checks),
+        "concurrency_scope": p.concurrency_scope,
+        "sample": p.sample is not False,
         "inputs": [
             {
                 "name": i.name,
@@ -331,6 +359,9 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
             else None
         ),
         "notify_failures": s.notify_failures,
+        # M5n — 능력 보고의 세대와 머신별 요약(전부는 `GET /api/machines`)
+        "generation": s.generation,
+        "machines": list(s.machines),
         "workers": [
             {
                 "lane": w.lane,
@@ -341,6 +372,7 @@ def server_json(s: ServerInfo) -> dict[str, Any]:
                 "worker": w.worker,  # 원격 워커 이름 · 로컬 레인은 null (M5b-2)
                 "display_name": w.display_name,
                 "pool": w.pool,
+                "host_key": w.host_key,
                 # 부하 게이트가 막고 있으면 **왜**와 **언제부터**(M5f). 아니면 셋 다 null.
                 "hold_code": w.hold_code,
                 "hold_detail": dict(w.hold_detail) if w.hold_detail else None,

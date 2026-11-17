@@ -7,6 +7,75 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Breaking changes
+- **Database schema v23 — jobs remember which machine ran them and how they were placed.** `jobs`
+  gains `placement`, `display_pool`, `target_worker`, `concurrency_scope`, `host_key`,
+  `fingerprint_hash` and `sample`, and three tables are added: `machines` (each worker's last
+  fingerprint and the one before it, so a change is not missed across a restart), `fingerprints`
+  and `machine_checks`. A v22 file is backed up (`rcm.sqlite3.v22.bak`) and migrated on start;
+  existing jobs read as `pool` placement on the host that ran them. An older build refuses a v23
+  file and points at that backup. `/api/status` `schema_version` is unchanged — keys were only
+  added (`server.machines[]`, `server.generation`, `placement`, `display_pool`, `target_worker`,
+  `concurrency_scope`, `host_key` and `placement_detail` on queue rows, `placement`, `checks`,
+  `concurrency_scope` and `sample` on presets, the estimate source `measured_other` and the reasons
+  `no_capable_machine`, `check_failed` and `check_pending`).
+
+### Added
+- **A job can go to whichever machine can run it.** A preset with `placement = "any-capable"` is
+  no longer tied to one pool: every worker measures its own environment and reports which
+  `requires` tools each preset finds, and the job goes to a worker that has them — a worker
+  missing a tool never sees it. Busy machines are waited for as usual; when no machine can run it
+  the job still queues, `rcm run` prints one line (`gate: no capable machine — mbp: fvm missing ·
+  mac2-worker: down`), and the queue row says why with an ETA of `—`. The default stays
+  `placement = "pool"`, so existing configs behave as before. Meant for gates and tests: secret
+  files never leave the server, so deploy and upload presets stay on their pool. A worker can
+  refuse such jobs with `accept_any = false` (the server's own lanes: `local_accept_any`).
+  `rcm check`'s `local preset tools` and `service preset tools` rows list such a preset with
+  `any machine` and do not fail on a tool this server lacks.
+- **Each machine reports an environment fingerprint, and rcm notices when it changes.** `[[probes]]`
+  in `server.toml` lists version commands (`xcodebuild -version`, `fvm flutter --version --machine`) that
+  every worker runs in its own service environment, at registration and every
+  `probe_interval_seconds` (600). A timeout keeps the previous value instead of counting as a
+  change. The values are shown on the read routes, so pick commands that print only a version.
+- **`checks` — a machine proves a preset works before it gets it.** A preset with
+  `checks = ["sim-check"]` goes only to workers where that check preset (which must accept
+  `git_ref`; `check_ref` picks the ref) succeeded with the current fingerprint. When a fingerprint
+  changes — Xcode updating itself overnight — rcm runs the check on that machine once by itself
+  (`auto_checks`), and a red check holds the preset there and says so in `rcm check`,
+  `rcm machines` and the web page (`scenario-qa: check_failed (sim-check #3620 · xcode 26.5 →
+  27.2)`) instead of letting jobs break silently for days. It never retries a failed check on its
+  own: `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the web page runs it again. A
+  check that ended without a verdict (lost or cancelled) is not retried either, and says so —
+  `check failed` with `did not finish — recheck`, never a silent `check pending`.
+- **`rcm machines [--json] [--machine ID]`** lists every worker with its host, pool, lanes,
+  fingerprint and how many presets it can run, with the reasons for the rest; `--machine` shows one
+  worker's verdict per preset. `GET /api/machines` is the same document. `rcm check` gains a
+  `machines` row (environment changes in the last day, failed checks) and a `placement` row (how
+  many machines can run each `any-capable` or checked preset now). The web page gets a machines
+  table, an `env changed` chip next to the worker pill and the new reasons in "needs attention".
+- **`rcm run … --machine ID`** pins a job to one worker — any token for a check preset, an admin
+  token for anything else.
+- **`concurrency_scope = "pool" | "host" | "global"`** says where a `concurrency_group` applies.
+  `"host"` keeps two workers on the same computer — `rcm serve`'s lanes and an `rcm worker` beside
+  them — from taking the simulator at once, which the pool-wide default could not. `"pool"`
+  remains the default.
+- **Estimates per machine.** Medians are kept per host; a host with too few runs borrows the other
+  hosts' median at confidence `low` (`measured_other`), and step medians never borrow, so a slower
+  machine is not called stuck. The ETA picks the lane where a job would finish first. `sample =
+  false` keeps a preset out of the medians (the default for check presets).
+- **`rcm init worker`** writes `worker.toml` (`[--server URL|auto] [--pool P] [--lanes N]
+  [--name N] [--force]`), and `rcm init worker --service-file PATH` writes a launchd plist or
+  systemd unit for it (new examples: `examples/launchd/com.remote-ci-monitor.worker.plist`,
+  `examples/systemd/rcm-worker.service`). A worker with `server = "auto"` finds the server over
+  mDNS (`server_name` picks one when several advertise) and looks again after 5 connection
+  failures in a row. `rcm worker` without `--config` or `--server` reads the file `rcm init worker`
+  wrote. `rcm token add NAME --worker` prints the command to run on the worker, and
+  `rcm worker --check` adds `fingerprint` and `presets` rows.
+- `examples/server.toml` has a commented Flutter block: probes, a `sim-check` check preset, an
+  `any-capable` gate with `concurrency_scope = "host"` and a preset with `checks`. The
+  `rcm-gate-connect` skill no longer needs `rcm-store-connect` first and asks about `placement`,
+  `checks` and `concurrency_scope`.
+
 ## [0.4.4] - 2026-11-11
 
 ### Added
