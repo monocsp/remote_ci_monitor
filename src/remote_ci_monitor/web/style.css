@@ -582,7 +582,9 @@ table.q td.source .uncommitted { display: flex; width: max-content; max-width: 1
    몇 분의 1px 를 떠안아 `작업 6m 2…` 가 됐다(줄임 몫 규칙). */
 .prog .head .ph-l { display: flex; flex: 0 1 auto; min-width: 0; }
 .prog .head .ph-a { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; }
-.prog .head .ph-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 이름의 바닥 3em 은 앞 토막의 최대 폭이 비워 둔 몫과 같다 — 0 이면 3em 보다 짧은 이름(`build`)
+   옆에서 그 몫이 모자라 앞 토막이 `step 2/…` 로 잘렸다 */
+.prog .head .ph-name { flex: 0 1 auto; min-width: 3em; overflow: hidden; text-overflow: ellipsis; }
 .prog .head .ph-b { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; }
 .step .sn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #queue .empty, #queue .pool-h { overflow-wrap: anywhere; }
