@@ -67,9 +67,18 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 /* ── 머리 ── */
 .s-top { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px 10px 0 0; background: var(--surface-2); flex-wrap: wrap; }
 .wordmark { font: 600 15px var(--mono); letter-spacing: 0.02em; }
-.s-top .host { font-family: var(--mono); }
-.workers { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); flex-wrap: wrap; }
-.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; }
+.s-top .host { font-family: var(--mono); min-width: 0; max-width: 32ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 워커 필 줄은 **한 줄**이다 — 넘치면 줄을 바꾸지 않고 그 줄 안에서 옆으로 민다. 줄을 바꿔 쌓으면
+   잡이 시작·끝날 때마다 필 글자(`대기` ↔ `진행 중 #5008`) 폭이 바뀌어 줄 수가 바뀌고, 머리줄
+   아래 화면이 통째로 뛴다(2026-11-17 실측: 워커 12개 · 390px 에서 필이 열 줄 · 머리줄 565px).
+   필이 넷을 넘으면(`crowded`) 머리줄 맨 아래에 제 줄을 통째로 쓴다 — 폰에서는 늘 그렇다. */
+.workers { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); flex-wrap: nowrap;
+  flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.workers::-webkit-scrollbar { display: none; }
+.workers > * { flex: none; }
+.workers.crowded { order: 1; flex: 1 1 100%; }
+.wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; white-space: nowrap; }
+.wk .wn { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
 .wk i { width: 8px; height: 8px; border-radius: 50%; background: var(--queued); }
 .wk.busy i { background: var(--accent); }
 .wk.down { border-color: var(--bad); color: var(--bad); }
@@ -436,8 +445,9 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 
 /* ── 머신 (M5n §8.3) ──
    `환경 바뀜` 칩은 워커 필 옆에 산다. 점검이 실패했으면 빨강 — 색만으로 말하지 않게 글자가 늘 붙는다. */
-.envchip { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 8px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); cursor: pointer; max-width: 100%; overflow-wrap: anywhere; }
-.envchip b { font: 600 12px var(--mono); }
+.envchip { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 8px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); cursor: pointer; white-space: nowrap; }
+/* 칩도 필 줄의 한 칸 — 머신 이름은 말줄임, 전문(이름 · 바뀐 프로브)은 칩의 title 에 */
+.envchip b { font: 600 12px var(--mono); max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
 .envchip.red { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
 /* 머신 표는 호스트 절과 같은 모양으로 접힌다 — 평소엔 1순위가 아니다 */
 #machines > summary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; cursor: pointer; list-style: none; }
@@ -494,6 +504,7 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
   .tail { max-width: 100%; }
   .summary { grid-template-columns: 1fr; }
   .s-top .sub, .workers .wk .lane-word { display: none; }
+  .workers { order: 1; flex: 1 1 100%; }   /* 폰에서는 필 줄이 늘 머리줄 맨 아래 제 줄이다 */
   table.q thead { display: none; }
   table.q tr.qgroup, table.q tr.qgroup th, table.q tr.qgroup-empty td { display: block; width: auto; }
   table.q, table.q tbody, table.q tr, table.q td { display: block; }

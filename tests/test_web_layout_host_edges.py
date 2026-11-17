@@ -375,7 +375,9 @@ HEADER_JS = """
 (() => {
   const hdr = document.getElementById('hdr');
   const pills = [...document.querySelectorAll('#hdr .wk, #hdr .envchip')];
-  const tops = new Set(pills.map((p) => Math.round(p.getBoundingClientRect().top)));
+  // 줄은 필의 **세로 가운데**로 센다 — 버튼 필(24px)과 칩(20px)은 같은 줄에서도 top 이 2px 다르다
+  const tops = new Set(pills.map((p) => {
+    const r = p.getBoundingClientRect(); return Math.round((r.top + r.bottom) / 8); }));
   const hs = pills.map((p) => p.getBoundingClientRect().height);
   return {height: hdr.getBoundingClientRect().height, lines: tops.size, pills: pills.length,
           tallest: Math.max(...hs), shortest: Math.min(...hs),
@@ -491,7 +493,8 @@ def test_long_titles_are_truncated_with_the_full_text_in_title(crowd, tmp_path):
         m = c.eval(js)
     assert m["mname"] == LONG_NAME, m
     assert m["mhost"] == LONG_HOST, m
-    assert m["mfp"] and PROBE_VALUE in m["mfp"], m
+    # 지문 칸은 프로브마다 짧은 값이다 — title 은 64개 전부를 싣는다(마지막 것까지)
+    assert m["mfp"] and "probe-63-longlonglong 27.2" in m["mfp"], m
     assert m["hn"] and LONG_HOST in m["hn"], m
     assert m["top"] == LONG_COMM, m
     assert m["wk"] and LONG_NAME in m["wk"], m

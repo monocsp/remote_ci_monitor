@@ -676,10 +676,18 @@
     remote.forEach(function (w) {
       var name = workerName(w);
       var busy = w.state === "busy" && isNum(w.job_id);
-      pills.push({ text: name + " " + workerState(w.state, lang) + (busy ? " #" + w.job_id : ""), cls: w.state || "", jobId: busy ? w.job_id : null, lane: w.lane, worker: w.worker });
+      var rest = " " + workerState(w.state, lang) + (busy ? " #" + w.job_id : "");
+      // `name` · `rest` 는 그리는 층이 이름만 말줄임하게 나눠 둔 것이다 — `text` 가 그 둘을 이은 전문
+      pills.push({ text: name + rest, name: name, rest: rest, cls: w.state || "", jobId: busy ? w.job_id : null, lane: w.lane, worker: w.worker });
     });
     if (server.paused) pills.push({ text: T(lang, "worker.paused"), cls: "paused", jobId: null, lane: null });
     return pills;
+  }
+  /** 필이 머리줄 아래 제 줄을 통째로 써야 하나 — 워커 필(정지 필 제외)이 넷을 넘으면. */
+  var WORKERS_CROWDED = 4;
+  function workersCrowded(pills) {
+    var n = (Array.isArray(pills) ? pills : []).filter(function (p) { return p && p.cls !== "paused"; }).length;
+    return n > WORKERS_CROWDED;
   }
 
   // ── 머신 배치 (M5n §7.3 · §8.3) ──
@@ -2935,7 +2943,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
-    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
+    queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     jobLinkHtml: jobLinkHtml, jobLinkLabel: jobLinkLabel, keyWithLinkHtml: keyWithLinkHtml,
@@ -3238,14 +3246,22 @@
   function renderHeader() {
     var st = state.status || {};
     var server = st.server || {};
-    $("[data-host-name]").textContent = hostName();
+    var hostEl = $("[data-host-name]");
+    hostEl.textContent = hostName(); hostEl.title = hostName();
     var busy = busyCount(st), lanes = laneCount(st);
     $("[data-lanes-text]").textContent = isNum(busy) && isNum(lanes) && lanes > 1 ? tr("header.lanes_busy", { busy: busy, lanes: lanes }) : "";
-    var pills = workerPills(server, L()).map(function (p) {
+    // 필 줄은 **한 줄**이다(넘치면 그 줄 안에서 옆으로 민다). 줄을 바꿔 쌓으면 잡이 시작·끝날 때마다
+    // 필 글자 폭이 바뀌어 줄 수가 바뀌고 그 아래 화면이 통째로 뛴다. 원격 이름은 말줄임 · 전문은 title.
+    var list = workerPills(server, L());
+    var pills = list.map(function (p) {
       var tag = p.jobId != null ? "button" : "span";
-      return "<" + tag + ' class="wk ' + esc(p.cls) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i>' + esc(p.text) + "</" + tag + ">";
+      var body = p.name ? '<span class="wn">' + esc(p.name) + "</span>" + esc(p.rest) : esc(p.text);
+      return "<" + tag + ' class="wk ' + esc(p.cls) + '" title="' + esc(p.text) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i>' + body + "</" + tag + ">";
     }).join("");
-    $("[data-workers]").innerHTML = pills + envChipsHtml();
+    var strip = $("[data-workers]");
+    strip.innerHTML = pills + envChipsHtml();
+    // 필이 많으면 머리줄 아래 제 줄을 통째로 쓴다 — 워커 수로만 정한다(칩이 뜨고 지는 것으로는 안 바뀐다)
+    strip.classList.toggle("crowded", workersCrowded(list));
     var err = $("[data-errchip]");
     if (server.last_error) { err.hidden = false; err.textContent = "error · " + truncate(server.last_error, 60); err.title = server.last_error; }
     else err.hidden = true;
@@ -3876,7 +3892,7 @@
       if (!chip) return;
       var name = (m && (m.display_name || m.id)) || DASH;
       out += '<button type="button" class="envchip' + (chip.red ? " red" : "") + '" data-envchip="' + esc(m.id) + '"'
-        + ' title="' + esc(chip.lines.join("\n")) + '"><b>' + esc(name) + "</b> " + esc(chip.text) + "</button>";
+        + ' title="' + esc([name + " · " + chip.text].concat(chip.lines).join("\n")) + '"><b>' + esc(name) + "</b> " + esc(chip.text) + "</button>";
     });
     return out;
   }
