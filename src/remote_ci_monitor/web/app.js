@@ -4155,7 +4155,7 @@
       else if (kind === "waiting") el.textContent = tr("elapsed.waiting", { dur: fmtDuration(s) });
       else if (kind === "age") el.textContent = tr("host.sampled", { age: fmtAgo(s, L()) });
       else if (kind === "updated") el.textContent = tr("store.updated", { age: fmtAgo(s, L()) });
-      else if (kind === "saved") el.textContent = tr("version.edit.save.saved", { age: fmtCoarse(s) });
+      else if (kind === "saved") { el.textContent = tr("version.edit.save.saved", { age: fmtCoarse(s) }); el.title = el.textContent; }
     });
     renderHeaderConn();
   }
@@ -4660,7 +4660,7 @@
       + '<td class="kind">' + esc(m.kindWord) + "</td>"
       + '<td class="state">' + presentPill(m.present, m.presentWord) + "</td>"
       + '<td class="fp mono">' + esc(m.fingerprint) + "</td>"
-      + '<td class="ver ' + m.verified.tone + '">' + esc(m.verified.text) + "</td>"
+      + '<td class="ver ' + m.verified.tone + '" title="' + esc(m.verified.text) + '"><span class="vtx">' + esc(m.verified.text) + "</span></td>"
       + '<td class="act">' + action + "</td></tr>";
     m.files.forEach(function (f) {
       h += '<tr class="subfile' + (f.present ? "" : " missing") + '" data-secret="' + esc(m.name) + '" data-file="' + esc(f.name) + '">'
@@ -4699,9 +4699,10 @@
       fetchError: state.store.fetchError, nowMs: now(), tzName: tz()
     }, L());
     var chips = m.chips.map(function (chip) {
-      return '<span class="vchip ' + chip.tone + '" data-chip="' + esc(chip.code) + '">'
+      // 칩은 한 줄이다 — 긴 버전 이름은 말줄임하고 전문은 title(폰에서 칩이 여러 줄 덩어리가 되지 않게)
+      return '<span class="vchip ' + chip.tone + '" data-chip="' + esc(chip.code) + '" title="' + esc((chip.label ? chip.label + " " : "") + chip.text) + '">'
         + '<span class="g" aria-hidden="true">' + ROW_GLYPH[chip.tone] + "</span>"
-        + (chip.label ? "<b>" + esc(chip.label) + "</b> " : "") + esc(chip.text) + "</span>";
+        + (chip.label ? "<b>" + esc(chip.label) + "</b> " : "") + '<span class="vc-t">' + esc(chip.text) + "</span></span>";
     }).join("");
     return '<a class="vstrip ' + m.tone + '" href="' + esc(storeHash(state.store.repo, "status")) + '" data-strip="' + esc(m.tone) + '">'
       + chips + '<span class="spacer"></span><span class="btn" data-strip-detail>' + esc(tr("vstrip.detail")) + "</span></a>";
@@ -4849,7 +4850,7 @@
   }
   function versionSaveBadgeHtml(badge) {
     var tick = badge.at ? ' data-tick="saved" data-from="' + esc(badge.at) + '"' : "";
-    return '<span class="savebadge ' + badge.state + '" data-save-state="' + badge.state + '"><span class="txt"' + tick + ">" + esc(badge.text) + "</span>"
+    return '<span class="savebadge ' + badge.state + '" data-save-state="' + badge.state + '"><span class="txt"' + tick + ' title="' + esc(badge.text) + '">' + esc(badge.text) + "</span>"
       + (badge.retry ? ' <button type="button" class="btn" data-listing-retry>' + esc(tr("version.edit.save.retry")) + "</button>" : "") + "</span>";
   }
   function versionChipsHtml(f) {
@@ -4882,7 +4883,7 @@
     };
     var h = '<section class="ssec" data-platform="' + platform + '" aria-label="' + esc(section.label) + '">'
       + '<h3><span>' + esc(section.label) + "</span>"
-      + (section.version ? '<span class="pill v-new" data-section-version>' + esc(section.version) + "</span>" : "") + "</h3>";
+      + (section.version ? '<span class="pill v-new" data-section-version title="' + esc(section.version) + '">' + esc(section.version) + "</span>" : "") + "</h3>";
     var shots = screenshotGroups(state.store.listing)[platform];
     h += group(ios ? "screenshots" : "graphics",
       '<p class="sub">' + esc(tr("review.screenshots.count", { n: shots.length }))
@@ -5118,8 +5119,8 @@
     var h = '<section class="sheet" id="release-sheet" data-sheet data-tone="' + esc(m.tone) + '" data-open="' + (open ? "1" : "0") + '"'
       + ' role="group" aria-label="' + esc(tr("sheet.aria")) + '">';
     h += '<div class="sh-head"><span class="grab" aria-hidden="true"></span>'
-      + '<span class="ver" data-sheet-ver>' + esc(m.head.ver) + ' <span class="pill v-' + esc(m.tone) + '" data-sheet-pill>' + esc(m.head.pill) + "</span></span>"
-      + '<span class="st" data-sheet-status>' + esc(m.head.statusLine) + "</span>";
+      + '<span class="ver" data-sheet-ver><span class="vt" title="' + esc(m.head.ver) + '">' + esc(m.head.ver) + '</span> <span class="pill v-' + esc(m.tone) + '" data-sheet-pill>' + esc(m.head.pill) + "</span></span>"
+      + '<span class="st" data-sheet-status title="' + esc(m.head.statusLine) + '">' + esc(m.head.statusLine) + "</span>";
     // R8 — 도는 동안에는 접힌 한 줄에도 막대와 진행 정도가 보인다(줄여서라도)
     h += '<span class="mini" data-sheet-mini' + (m.head.live ? "" : " hidden") + ">" + sheetBarHtml(m, "thin")
       + '<span class="pct" data-sheet-pct>' + esc(isNum(m.pct) ? m.pct + "%" : DASH) + "</span></span>";
@@ -5158,7 +5159,7 @@
     var left = sheet.querySelector("[data-sheet-left]");
     if (left) left.innerHTML = sheetLeftHtml(m);
     var status = sheet.querySelector("[data-sheet-status]");
-    if (status) status.textContent = m.head.statusLine;
+    if (status) { status.textContent = m.head.statusLine; status.title = m.head.statusLine; }
     var nState = sheet.querySelector("[data-n-state]");
     if (nState) {
       var typed = state.store.review.typedN;
@@ -5247,11 +5248,21 @@
     return unsafeBannerHtml() + h;
   }
   /** 렌더 뒤 상태 화면의 드라이버 폼을 채운다. 제출 버튼은 이제 시트에만 있다(§4.2). */
-  function afterStoreRender() { renderDriverState(); applyBarFills($("[data-store-body]")); maybeOpenConfirmN(); }
+  function afterStoreRender() { renderDriverState(); applyBarFills($("[data-store-body]")); titleClampedValues($("[data-store-body]")); maybeOpenConfirmN(); }
+  /** 심사 패널 · 버전 페이지의 읽기 전용 값(`.fld .val`)은 세 줄에서 잘린다 — 잘린 글의 전문을
+      title 에 둔다. 값마다 HTML 을 짜는 곳이 여럿이라 그린 뒤 한 번에 단다(이미 있는 title 은 둔다). */
+  function titleClampedValues(root) {
+    if (!root) return;
+    $$(".fld:not(.ed) > .val:not([title])", root).forEach(function (el) {
+      var t = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (t) el.title = t;
+    });
+  }
   /** 렌더 뒤 시트를 채운다 — 제출 버튼은 HTML 에서 늘 비활성으로 나오고 여기서만 열린다. */
   function afterVersionRender() {
     renderSheetState();
     applyBarFills($("[data-store-body]"));
+    titleClampedValues($("[data-store-body]"));
     // 붙어 있는 시트가 본문의 끝을 가리지 않도록 그 높이만큼 아래 여백을 준다(E23). 그 여백은
     // 시트의 **형제**인 `.vmain` 이 든다 — `[data-store-body]` 에 주면 그것이 곧 sticky 의 담는
     // 상자(부모의 content box)라, 시트가 그 패딩 안으로 못 내려가고 페이지 맨 아래에서 화면
@@ -5525,7 +5536,12 @@
   function driverHtml(m, acts) {
     var busy = state.store.busy;
     var h = '<div class="driver" data-driver data-driver-stage="' + esc(m.stage || "") + '" data-driver-exit="' + (m.exit == null ? "" : m.exit) + '" role="group" aria-label="' + esc(tr("driver.aria")) + '">';
-    h += '<p class="drv-head ' + esc(m.tone) + '" data-driver-head><span class="g" aria-hidden="true">' + (DRIVER_HEAD_GLYPH[m.tone] || "·") + "</span><span>" + esc(m.head) + "</span></p>";
+    // 폴링마다 경과 · 단계가 바뀌는 줄이라 **한 줄**이다(말줄임 · 전문은 title) — 접혀 펴지면 그
+    // 아래 스테퍼가 통째로 튄다. 긴 버전 이름이 단계를 밀어내지 않게 버전은 반까지만 쓴다.
+    var hp = m.headParts && m.headParts.length > 1 ? m.headParts : null;
+    h += '<p class="drv-head ' + esc(m.tone) + '" data-driver-head title="' + esc(m.head) + '"><span class="g" aria-hidden="true">' + (DRIVER_HEAD_GLYPH[m.tone] || "·") + "</span>"
+      + (hp ? '<span class="dh-v">' + esc(hp[0]) + '</span><span class="dh-r">' + esc("· " + hp.slice(1).join(" · ")) + "</span>"
+        : '<span class="dh-r">' + esc(m.head) + "</span>") + "</p>";
     if (m.statusError) h += '<p class="sub bad">' + esc(tr("driver.status_error", { detail: m.statusError.slice(0, 80) })) + "</p>";
     if (!m.available || !m.configured) return h + "</div>";
     if (!m.idle) {
@@ -5572,7 +5588,9 @@
     if (g.state !== "ok") return '<p class="sub ghcard" data-github="' + esc(g.state) + '">' + esc(g.text) + "</p>";
     var h = '<div class="ghcard" data-github="ok"><div class="two"><div><div class="mini-h">' + esc(tr("github.log", { ref: g.ref, n: g.log.length })) + "</div>";
     h += g.log.length ? '<table class="gh"><tbody>' + g.log.map(function (c) {
-      return '<tr><td class="sha">' + esc(c.sha) + "</td><td>" + esc(c.subject) + '</td><td class="sub">' + esc(c.author + " · " + c.at) + "</td></tr>";
+      // 제목은 한 줄(말줄임 · 전문은 title) — 300자 제목이 행을 열 줄 넘게 늘리지 않는다
+      return '<tr><td class="sha">' + esc(c.sha) + '</td><td class="subj" title="' + esc(c.subject) + '">' + esc(c.subject) + "</td>"
+        + '<td class="sub meta" title="' + esc(c.author + " · " + c.at) + '">' + esc(c.author + " · " + c.at) + "</td></tr>";
     }).join("") + "</tbody></table>" : '<span class="sub">' + esc(tr("github.none")) + "</span>";
     h += '</div><div><div class="mini-h">' + esc(tr("github.tags")) + "</div>";
     h += g.tags.length ? '<ul class="plain mono">' + g.tags.map(function (t) {
@@ -5599,7 +5617,8 @@
     list.forEach(function (s) {
       var src = typeof api.listingFileUrl === "function" ? api.listingFileUrl(repo, s.path) : "";
       var dim = isNum(s.width) && isNum(s.height) ? s.width + "×" + s.height : (isNum(s.bytes) ? fmtBytes(s.bytes) : "");
-      h += '<figure class="shot"><img loading="lazy" alt="' + esc(s.path) + '" src="' + esc(src) + '"><figcaption class="sub">' + esc(s.path.split("/").pop()) + (dim ? " · " + esc(dim) : "") + "</figcaption></figure>";
+      var cap = s.path.split("/").pop() + (dim ? " · " + dim : "");
+      h += '<figure class="shot"><img loading="lazy" alt="' + esc(s.path) + '" src="' + esc(src) + '"><figcaption class="sub" title="' + esc(s.path + (dim ? " · " + dim : "")) + '">' + esc(cap) + "</figcaption></figure>";
     });
     h += "</div>";
     if (groupsOther && groupsOther.length) h += '<p class="sub">' + esc(tr("review.screenshots.unsorted", { n: groupsOther.length })) + "</p>";
