@@ -77,7 +77,17 @@ of a key bumps that number and is listed here.
   `checks` and `concurrency_scope`.
 
 ### Changed
-- **Long lists on the web page stay short.** An expanded waiting row with many machines first
+- **A cut-off name on the web page opens in full when you tap it.** Job names, machine and host
+  names, worker pills and other text cut to fit a column open a small box with the whole text and a
+  **Copy** button on a tap, a click or Enter; tapping again, tapping elsewhere or Escape closes it.
+  This works on a phone, which has no hover. Long names are cut in the middle
+  (`build-farm-mac…closet-22`), so names that share a long prefix still differ at the end.
+- The worker strip in the header stays one line: when it overflows it scrolls sideways (arrow keys
+  too) and a fixed `+N` badge counts the pills out of view — red when one of them is down or held —
+  and lists them on a tap. When remote workers stop answering, the banner says how many
+  (`2 workers unreachable — …`) and the names are behind **Show names**.
+- After **and N more** opens a long queue, **show fewer** folds it back. On a desktop the queue's column
+  headings stay at the top of the screen while you scroll. An expanded waiting row with many machines first
   counts them by verdict (`12 missing tools · 9 check failed · 3 down`), lists five, and hides the
   rest behind **show N more**, which the browser remembers per job. An expanded recent failure
   shows its failed names one per line (eight, then `+N more`), the server's summary in four lines
@@ -90,6 +100,28 @@ of a key bumps that number and is listed here.
   `완료 예상` instead of `종료` for an ETA, `실행 가능한 머신 없음`, `머신 점검 실패`, `대기열 N번째`,
   `빈 레인까지 5m`, `시스템 부하` for the load average and `10초마다 확인` while polling. In English,
   "needs attention" now says `Nothing needs a look` instead of `Everything is fine`.
+
+### Fixed
+- **Long text no longer pushes the web page sideways.** A job name with no spaces, a long requester,
+  a 300-character summary, a long machine, host or pool name, or a long link label stays inside its
+  column on a phone and at desktop width: names are cut to one line with the full text on a tap,
+  sentences are held to a fixed number of lines. Before, a 130-character name widened a phone page
+  to 1064 px and a recent row pushed a desktop page to 2576 px.
+- **Rows no longer jump when the page updates.** A waiting reason always takes two lines, an expanded
+  row's step line is one line whatever the step is called, the worker pills sit in one strip, a host
+  card's lines stay one line each as its five-second samples change, and the live button keeps its
+  width as its seconds tick — so a changing reason, a new step or the clock no longer moves
+  everything below it.
+- A name that fits is no longer cut by a fraction of a pixel: `macmini` showed as `macmi…`, a job's
+  time as `6m 2…`, and the end of a middle-cut name (`name-that-go…`). In the recent list, a job
+  from another pool keeps its pool chip readable: it moves to the line under the name when the two
+  do not fit, instead of turning the whole name cell into `gate …`.
+- The machines table keeps its column widths with a long name, fingerprint or check list, and a host
+  card's name, meters and process line stay inside the card. Disks of 1 TB and more read in TB.
+- **The Store tab holds its boxes** with long secret names, long validation errors, long file names,
+  a missing screenshot, a 300-character commit or an 80-character version name. The save badge and
+  the character counter keep their size as they change, and on a phone its text fields no longer make
+  iOS zoom in and push the page sideways.
 
 ## [0.4.4] - 2026-11-11
 
