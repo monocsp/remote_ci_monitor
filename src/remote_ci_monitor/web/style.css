@@ -753,7 +753,8 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 }
 
 /* 풀 헤더 (M5b) — 기본 풀 밖의 풀은 표 위에 한 줄 */
-.pool-h { margin: 14px 0 6px; font: 600 12px var(--sans); color: var(--muted); }
+/* 풀 이름은 설정에서 온 그대로다 — 끊김 없는 이름도 접는다(자르면 뒤의 잡 수가 사라진다) */
+.pool-h { margin: 14px 0 6px; font: 600 12px var(--sans); color: var(--muted); overflow-wrap: anywhere; }
 
 /* 버전 목록 · 요약 띠 · 새 버전 대화상자 (docs/version-page-workplan.md §3.2 · §12) */
 .vstrip { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 8px 12px;
