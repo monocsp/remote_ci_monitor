@@ -407,10 +407,11 @@ TAIL_WHOLE_JS = """
 """
 
 
-# 같은 병의 일반형 — 한 줄 flex 안에서 줄임 몫으로 나눠 가지면 「다 들어가야 할」 글이 1px 도 안 되게
-# 모자라 말줄임표를 단다. 진짜 dev 서버의 머신 표에서 `macmini` 가 `macmi…` 였다(48.38px / 48.47px —
-# 옆의 긴 머신 id 가 줄임 몫 100:1 로 거의 다 가져갔지만 이름에도 0.1px 가 남았다). 1px 도 안 되게
-# 잘린 말줄임은 어디서든 버그다 — 그 몇 분의 1px 를 주면 글 전체가 보인다.
+# 같은 병의 일반형 — 한 줄 flex 안에서 줄임 몫으로 나눠 가지면 「다 들어가야 할」 글이
+# 1px 도 안 되게 모자라 말줄임표를 단다. 진짜 dev 서버의 머신 표에서 `macmini` 가
+# `macmi…` 였다(48.38px / 48.47px — 옆의 긴 머신 id 가 줄임 몫 100:1 로 거의 다 가져갔지만
+# 이름에도 0.1px 가 남았다). 1px 도 안 되게 잘린 말줄임은 어디서든 버그다 — 그 몇 분의
+# 1px 를 주면 글 전체가 보인다.
 SLIVER_JS = """
 (() => {
   const bad = [];
@@ -472,8 +473,10 @@ def test_no_text_is_cut_by_less_than_a_pixel(tmp_path):
     found = {}
     with Chrome(tmp_path / "chrome-r1-sliver", window="1280,900") as c:
         for where in _scenes(c):
-            c.eval("document.getElementById('machines') && (document.getElementById('machines')"
-                   ".open = true); true")
+            c.eval(
+                "document.getElementById('machines') && (document.getElementById('machines')"
+                ".open = true); true"
+            )
             time.sleep(0.2)
             got = c.eval(SLIVER_JS)
             assert got["n"] > 0, where
@@ -484,8 +487,9 @@ def test_no_text_is_cut_by_less_than_a_pixel(tmp_path):
     )
 
 
-# 머리줄은 내용 폭만큼만 넓다 — 앞 토막의 최대 폭(칸 − 3em)이 이름 몫 3em 을 비워 두는데, 이름이
-# 3em 보다 짧으면(`build`) 그 몫이 모자라 앞 토막이 `step 2/…` 로 잘렸다(문서 스크린샷 재생성 때 발견).
+# 머리줄은 내용 폭만큼만 넓다 — 앞 토막의 최대 폭(칸 − 3em)이 이름 몫 3em 을 비워 두는데,
+# 이름이 3em 보다 짧으면(`build`) 그 몫이 모자라 앞 토막이 `step 2/…` 로 잘렸다(문서
+# 스크린샷 재생성 때 발견).
 HEAD_A_JS = """
 (() => {
   const a = document.querySelector('#queue tr.expanded .prog .head .ph-a');
@@ -504,9 +508,12 @@ def test_a_short_step_name_leaves_the_step_counter_whole(tmp_path):
                 served.swap(A.long_text_doc())
                 A.open_scene(c, served, width, lang)
                 served.swap(A.updated_doc(served.doc))  # 1234568 의 단계 이름이 「짧음」이 된다
-                A.refetch(c, "document.querySelector('#queue tr.expanded .ph-name') !== null"
-                          " && document.querySelector('#queue tr.expanded .ph-name')"
-                          ".textContent === '짧음'")
+                A.refetch(
+                    c,
+                    "document.querySelector('#queue tr.expanded .ph-name') !== null"
+                    " && document.querySelector('#queue tr.expanded .ph-name')"
+                    ".textContent === '짧음'",
+                )
                 m = c.eval(HEAD_A_JS)
                 assert not m.get("missing") and not m["cut"], f"{lang}@{width}: {m}"
     finally:
