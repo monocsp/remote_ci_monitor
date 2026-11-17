@@ -957,7 +957,7 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 .vfield .ck { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .vfield .nstate { grid-column: 1 / -1; }
 @media (max-width: 720px) {
-  .vrow { grid-template-columns: 1.1em minmax(0, 1fr); }
+  .vrow { grid-template-columns: minmax(1.1em, max-content) minmax(0, 1fr); }
   .vrow .vn, .vrow .va { grid-column: 2; }
   .vrow .va { justify-content: flex-start; }
   .vstrip { font-size: 12px; }
