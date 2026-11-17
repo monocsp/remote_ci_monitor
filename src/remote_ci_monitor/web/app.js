@@ -917,15 +917,20 @@
     if (!steps.length) return jobSpan("progress.no_markers") + (now ? " · " + nowHtml : "");
     var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
-    var h = esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
+    // 세 토막(앞 · 스텝 이름 · 뒤)으로 감싼다 — 펼친 행의 머리줄은 한 줄이고 **이름만** 말줄임된다
+    // (style.css `.prog .head .ph`). 이름 길이에 따라 머리줄이 1~3줄로 접히면 단계가 바뀔 때마다
+    // 펼친 행이 출렁인다. 태그를 벗긴 글자는 그대로다.
+    var h = '<span class="ph-a">' + esc(T(lang, "progress.step", { cur: i, total: total, soFar: !!prog.steps_total_partial }));
+    var tail = "";
     if (prog.current_name) {
-      h += " · " + esc(prog.current_name) + " · " + span(cur && cur.started_at, fmtDuration(prog.current_seconds));
-    }
-    h += " · " + jobSpan("progress.job");
+      h += " · </span>" + '<span class="ph-name">' + esc(prog.current_name) + "</span>";
+      tail = " · " + span(cur && cur.started_at, fmtDuration(prog.current_seconds));
+    } else h += "</span>";
+    tail += " · " + jobSpan("progress.job");
     var f = failedStepCount(prog);
-    if (f) h += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
-    if (now) h += " · " + nowHtml;
-    return h;
+    if (f) tail += " · " + esc(T(lang, "progress.steps_failed", { n: f }));
+    if (now) tail += " · " + nowHtml;
+    return h + '<span class="ph-b">' + tail + "</span>";
   }
   /** 격자 칸의 글자 — 색만으로 말하지 않는다(§4.2). 모르는 state 는 빈 칸. */
   var UNIT_GLYPH = { ok: "✓", fail: "✗", run: "▶", skip: "—", wait: "…", blocked: "!", env: "!", review: "?" };
@@ -3059,7 +3064,7 @@
     if (state.cancelTarget) openCancel(state.cancelTarget);
     if (state.drawer.jobId != null) {
       var d = $("[data-drawer-title]");
-      if (d) d.textContent = tr("drawer.job", { id: state.drawer.jobId, key: state.drawer.key || "" });
+      if (d) d.textContent = d.title = tr("drawer.job", { id: state.drawer.jobId, key: state.drawer.key || "" });
     }
   }
 
@@ -3255,8 +3260,9 @@
     var list = workerPills(server, L());
     var pills = list.map(function (p) {
       var tag = p.jobId != null ? "button" : "span";
+      // 원격 머신 이름은 길 수 있다 — 필은 한 줄로 말줄임하고 전문은 title 로(이름 · 나머지는 영역 B)
       var body = p.name ? '<span class="wn">' + esc(p.name) + "</span>" + esc(p.rest) : esc(p.text);
-      return "<" + tag + ' class="wk ' + esc(p.cls) + '" title="' + esc(p.text) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i>' + body + "</" + tag + ">";
+      return "<" + tag + ' class="wk ' + esc(p.cls) + '" title="' + esc(p.text) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i><span class="wk-t">' + body + "</span></" + tag + ">";
     }).join("");
     var strip = $("[data-workers]");
     strip.innerHTML = pills + envChipsHtml();
@@ -3352,7 +3358,8 @@
     if (yj.kind === "no_token") y = '<span class="muted">' + esc(tr("summary.add_token")) + "</span>";
     else if (yj.kind === "unknown") y = '<span class="muted">' + esc(tr("summary.queue_unknown")) + "</span>";
     else if (yj.kind === "none") y = '<span class="muted">' + esc(tr("summary.no_jobs")) + "</span>";
-    else y = yj.lines.map(function (l) { return jl(l.jobId, "#" + l.jobId) + " " + esc(l.text); }).join("<br>") + (yj.more ? '<br><span class="muted">' + esc(tr("summary.and_more", { n: yj.more })) + "</span>" : "");
+    // 잡마다 한 줄(말줄임 · 전문은 title) — 글 길이가 요약 띠의 높이를 바꾸면 그 아래 큐가 통째로 움직인다
+    else y = yj.lines.map(function (l) { return '<span class="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + " " + esc(l.text) + "</span>"; }).join("") + (yj.more ? '<span class="sl muted">' + esc(tr("summary.and_more", { n: yj.more })) + "</span>" : "");
     $("[data-yours]").innerHTML = (lost ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span>" : "") + y;
     // 24
     var nm = notMoving(st, state.me, L());
@@ -3361,7 +3368,7 @@
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
-    else s = nm.lines.slice(0, 3).map(function (l) { return jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span>"; }).join("<br>") + '<br><span class="muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
+    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("") + '<span class="sl muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
@@ -3370,7 +3377,9 @@
     var h;
     if (p && p.hosts === null) {
       h = '<span class="bad">' + esc(tr("summary.host_unavailable")) + "</span>"
-        + (p.hosts_error ? ' <span class="muted">' + esc(truncate(errorText(p.hosts_error, p.hosts_error_code), 60)) + "</span>" : "");
+        // 오류 문구는 띄어쓰기 없이 길 수 있다 — 한 줄로 말줄임하고 전문은 title 로(영역 A·B 합침)
+        + (p.hosts_error ? ' <span class="muted herr" title="' + esc(errorText(p.hosts_error, p.hosts_error_code)) + '">'
+          + esc(truncate(errorText(p.hosts_error, p.hosts_error_code), 60)) + "</span>" : "");
       lab.textContent = tr("summary.host");
     } else if (hp.verdict === "no_sample") { h = '<span class="muted">' + esc(tr("summary.host_no_sample")) + "</span>"; lab.textContent = tr("summary.host"); }
     else {
@@ -3537,13 +3546,13 @@
     var chips = "";
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
-    if (row.concurrency_group) chips += '<span class="chip">' + esc(tr("row.group", { name: row.concurrency_group })) + "</span>";
+    if (row.concurrency_group) chips += '<span class="chip" title="' + esc(tr("row.group", { name: row.concurrency_group })) + '">' + esc(tr("row.group", { name: row.concurrency_group })) + "</span>";
     // 지정 잡(`rcm run --machine`)은 어느 머신을 기다리는지 칩으로 — any-capable 은 이유 칸이 말한다
-    if (typeof row.target_worker === "string" && row.target_worker) chips += '<span class="chip">' + esc(placementLabel(row, L())) + "</span>";
+    if (typeof row.target_worker === "string" && row.target_worker) chips += '<span class="chip" title="' + esc(placementLabel(row, L())) + '">' + esc(placementLabel(row, L())) + "</span>";
     chips += priorityChip(row, L());
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners : [];
-    var requester = '<span title="' + esc(tr("row.token_of", { name: req.name || "" })) + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>"
+    var requester = '<span class="rq" title="' + esc((req.label || req.name || DASH) + " · " + tr("row.token_of", { name: req.name || "" })) + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>"
       + (mine && req.name === state.me ? '<span class="you">' + esc(tr("row.you")) + "</span>" : "")
       + (joiners.length ? '<button type="button" class="joiners" title="' + esc(tr("row.also_waiting", { labels: joiners.map(function (j) { return j.label || j.name; }).join(", ") })) + '">+' + joiners.length + "</button>" : "");
     if (mine && req.name !== state.me) requester += '<span class="you">' + esc(tr("row.you_joined")) + "</span>";
@@ -3552,8 +3561,9 @@
     var reasonHtml = esc(r.text);
     r.links.forEach(function (l) { var id = l.jobId; reasonHtml = reasonHtml.replace("#" + id, '<button type="button" class="jlink" data-goto="' + id + '">#' + id + "</button>"); });
     // 한 갈래다 — 형편은 class 하나로만 말한다(칩 세 갈래를 따로 조립하던 자리).
+    // 이유는 두 줄로 못 박힌다(style.css) — 메모 30개짜리 이유도 행을 늘리지 않게. 전문은 title 로.
     var reasonCell = '<span class="reason' + (r.actionable || busy ? " act" : "") + (r.cls ? " " + r.cls : "")
-      + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
+      + '" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
     // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
     var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
@@ -3652,7 +3662,8 @@
   }
   /** 잡 이름 + 링크 칩을 한 줄로. 링크가 없으면 오늘의 `<span class="key">` 그대로다. */
   function keyWithLinkHtml(keyText, link, cls) {
-    var name = '<span class="' + (cls || "key") + '">' + esc(keyText) + "</span>";
+    // 칸 폭에서 한 줄로 말줄임된다(style.css) — 전문은 title 로
+    var name = '<span class="' + (cls || "key") + '" title="' + esc(keyText) + '">' + esc(keyText) + "</span>";
     var chip = jobLinkHtml(link);
     return chip ? '<span class="key-line">' + name + chip + "</span>" : name;
   }
@@ -3685,7 +3696,7 @@
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
     var total = isNum(prog.steps_total) ? prog.steps_total : steps.length;
     var failed = failedStepCount(prog);
-    var h = '<div class="head"><b>' + (head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
+    var h = '<div class="head"><b class="ph" title="' + esc(progressHead(prog, L()) || "") + '">' + (head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
     if (steps.length) {
       var segs = "";
       var pending = Math.max(0, total - steps.length);
@@ -3700,7 +3711,7 @@
       steps.forEach(function (s) {
         var c = s.state === "running" ? "run" : s.ok === false ? "fail" : "";
         var tick = live && s.state === "running" && s.started_at ? ' data-tick="elapsed" data-from="' + esc(s.started_at) + '"' : "";
-        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + "</span><span>" + esc(s.name) + '</span><span class="s"' + tick + ">" + esc(fmtDuration(s.seconds)) + "</span></div>";
+        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + '</span><span class="sn" title="' + esc(s.name) + '">' + esc(s.name) + '</span><span class="s"' + tick + ">" + esc(fmtDuration(s.seconds)) + "</span></div>";
       });
       for (var j = 0; j < pending; j++) h += '<div class="step pend"><span class="g" aria-hidden="true">·</span><span>…</span><span class="s">' + DASH + "</span></div>";
       h += "</div>";
@@ -4055,11 +4066,12 @@
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
         '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
-        '<span class="s">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
+        '<span class="s rq" title="' + esc((job.requester || {}).label || DASH) + '">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
-        '<span class="s">' + (l.summary ? "<b>" + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") : "") +
-        (l.rerun ? ' · <button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="' + esc(tr("row.copy")) + '">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
+        // 요약은 두 줄로 못 박고(전문은 title), 재실행 명령은 그 아래 한 줄이다(말줄임 · 전문은 title)
+        '<span class="s sm">' + (l.summary ? '<span class="smt" title="' + esc(l.summary) + '"><b>' + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") + "</span>" : "") +
+        (l.rerun ? '<button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="' + esc(tr("row.copy") + " · " + l.rerun) + '">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
       var art = artifactsLine(job, L(), now());
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
         (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
@@ -4250,6 +4262,7 @@
     state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0;
     state.drawer.key = row ? (row.key || "") : "";
     $("[data-drawer-title]").textContent = tr("drawer.job", { id: id, key: state.drawer.key });
+    $("[data-drawer-title]").title = tr("drawer.job", { id: id, key: state.drawer.key });
     var linkSlot = $("[data-drawer-link]");
     if (linkSlot) linkSlot.innerHTML = jobLinkHtml(row && row.link);
     $("[data-drawer-sub]").textContent = "";

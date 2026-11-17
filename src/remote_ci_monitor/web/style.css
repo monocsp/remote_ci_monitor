@@ -89,6 +89,9 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .wk.paused { border-color: var(--warn); color: var(--warn); }
 .wk.paused i { background: var(--warn); border-radius: 1px; width: 6px; box-shadow: 4px 0 0 var(--warn); margin-right: 4px; }
 .livebtn { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+/* 상태 글자(live · 멈춤 · 폴링 · 연결 중…)가 바뀌어도 버튼 폭이 그대로다 — 안 그러면 폰에서 옆 버튼이
+   다음 줄로 넘어갔다 돌아온다(390px en 에서 35px, 큐 가장자리 시험) */
+.livebtn [data-live-text] { display: inline-block; min-width: 11ch; text-align: left; }
 .livebtn .live { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
 .livebtn.polling .live { background: var(--warn); box-shadow: none; }
 .livebtn.paused .live, .livebtn.lost .live { background: var(--queued); box-shadow: none; }
@@ -152,6 +155,8 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
   /* 이유 칸은 남는 폭을 받는 칸이다 — 한 줄로 못 박은 긴 단계 이름(아래 `.step-now`)이 자기 글자 폭만큼
      칸을 넓혀 표를 옆으로 밀지 않게, 칸 폭을 내용이 아니라 표가 정한다. 이유 글 자체는 그대로 접힌다. */
   table.q td.reason { max-width: 0; }
+  /* 펼친 행(일곱 칸을 잇는 칸)도 같다 — 한 줄로 못 박은 진행 머리줄이 표를 넓히지 않게(영역 A) */
+  table.q td.prog { max-width: 0; }
 }
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }
@@ -491,6 +496,44 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
 .place-list li.eligible { color: var(--ok); }
 .place-list li.down { color: var(--bad); }
 
+/* ── 큐 화면의 가장자리 입력 (영역 A · tests/test_web_layout_queue_edges.py) ──
+   규칙은 둘이다. (1) **식별자는 한 줄로 말줄임**하고 전문은 title 로 준다 — 잡 이름 · 요청자 ·
+   칩 · 워커 필 · 스텝 이름 · 재실행 명령. 띄어쓰기 없는 130자 키나 두 배 폭 한국어는 끊을 자리가
+   없어 칸을 뚫고 페이지를 옆으로 민다. (2) **문장은 정해 둔 줄 수 안에서 접는다** — 이유는 두 줄,
+   최근 요약은 두 줄, 요약 띠의 잡 줄은 한 줄. 줄 수가 글 길이를 따라가면 1초 틱 · 단계 바뀜 ·
+   이유 바뀜마다 행이 출렁이고 그 아래가 통째로 움직인다(#181 이 단계 줄에서 막은 것과 같은 병).
+   끊을 자리가 없는 글은 `overflow-wrap: anywhere` 로만 끊는다 — `word-break: keep-all` 은 한국어
+   어절을 지키되 그 어절이 칸보다 길면 넘친다. */
+.summary > .sum, .sum > .v { min-width: 0; }
+.sum .v .herr { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.sum-yours .v .sl, .sum-stuck .v .sl { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk { max-width: 100%; min-width: 0; }
+.wk .wk-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workers { max-width: 100%; min-width: 0; }
+table.q td.key .key, table.q td.requester .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+table.q td.key .chip { max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* 이유는 늘 두 줄 자리다 — 짧은 이유도 두 줄을 차지해 이유가 바뀌어도 행 높이가 그대로다 */
+table.q td.reason > .reason { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; min-height: 3em; }
+/* 코드 출처 칸의 「uncommitted」 표지는 해시 아래 한 줄 — 옆에 붙이면 124px 칸에서 영어 글이 잘린다 */
+table.q td.source .uncommitted { display: flex; width: max-content; max-width: 100%; margin: 2px 0 0; }
+.prog .head { flex-wrap: nowrap; min-width: 0; }
+.prog .head > * { flex: 0 0 auto; }
+.prog .head .ph { display: flex; flex: 0 1 auto; min-width: 0; white-space: pre; }
+/* 좁으면 이름이 먼저 3em 까지 줄고, 그다음 앞 토막(「단계 3/3 (지금까지)」), 마지막에 시간 토막이 준다 */
+.prog .head .ph-a { flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.prog .head .ph-name { flex: 0 1000 auto; min-width: 3em; overflow: hidden; text-overflow: ellipsis; }
+.prog .head .ph-b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.step .sn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#queue .empty, #queue .pool-h { overflow-wrap: anywhere; }
+.rrow { grid-template-columns: 72px 150px 118px 130px 66px 52px minmax(0, 1fr); }
+.rrow > * { min-width: 0; }
+.rrow .k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rrow .k .kn, .rrow .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.rrow .sm .smt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.rrow .sm .rerun { display: block; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rdetail { overflow-wrap: anywhere; }
+.drawer-head h2 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── 반응형 (항목 21) ── */
 @media (max-width: 960px) {
   table.q th.source, table.q td.source { display: none; }
@@ -534,6 +577,11 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
   table.mtab td.mname { white-space: normal; font-weight: 600; }
   table.mtab td.mact { text-align: left; }
   table.mtab td.mact:empty { display: none; }
+}
+/* 폰의 큐 · 최근(영역 A) — 칸이 블록이 되어도 위의 두 규칙은 그대로다. 최근 행은 두 칸 격자. */
+@media (max-width: 720px) {
+  .rrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  table.q td.requester .rq { max-width: calc(100% - 6em); }
 }
 /* 움직임도 상태 채널이다(§4.2) — **끝나지 않은** 상태만 움직인다. 끝난 잡은 가만히 있어서,
    화면 구석으로 흘긋 봐도 「아직 도는 중」과 「끝났다」가 갈린다.
