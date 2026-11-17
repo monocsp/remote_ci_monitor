@@ -162,7 +162,9 @@ def workers(now: datetime, *, tick: int = 0) -> list[dict[str, Any]]:
 POOL_NAMES = ["default", "mac2", "mbp-pool", "linux-gpu", LONG_NAME[:40], "ios_devices_" * 6]
 
 
-def status_doc(now: datetime, *, tick: int = 0, hosts_error: str | None = None) -> dict:
+def status_doc(
+    now: datetime, *, tick: int = 0, hosts_error: str | None = None, machines: int = 50
+) -> dict:
     """`status-main` + 워커 12 · 풀 6 · 모서리 호스트 카드."""
     doc = json.loads((FIXTURES / "status-main.json").read_text())
     # 픽스처의 잡 시각을 지금으로 민다 — 경과가 두 달이 되면 다른 영역이 흔들린다
@@ -189,8 +191,9 @@ def status_doc(now: datetime, *, tick: int = 0, hosts_error: str | None = None) 
         ]
         doc["pools"].append(pool)
     doc["server"]["generation"] = f"1731740000:{3 + tick}"
-    # 요약이 바뀌면 페이지가 /api/machines 를 다시 받는다
-    doc["server"]["machines"] = [{"tick": tick}]
+    # 요약이 바뀌면 페이지가 /api/machines 를 다시 받는다. 머신이 없는 장면이면 요약도 비어야 한다 —
+    # 머신 절이 보일지는 첫 렌더에서 이 요약으로 정한다(c8633bd)
+    doc["server"]["machines"] = [{"tick": tick}] if machines else []
     return doc
 
 
@@ -292,7 +295,11 @@ class Scene:
 
     def set(self, *, tick: int = 0, machines: int = 50, hosts_error: str | None = None) -> None:
         now = self.now + timedelta(seconds=5 * tick)
-        self.srv.route("GET", "/api/status", status_doc(now, tick=tick, hosts_error=hosts_error))
+        self.srv.route(
+            "GET",
+            "/api/status",
+            status_doc(now, tick=tick, hosts_error=hosts_error, machines=machines),
+        )
         self.srv.route("GET", "/api/machines", machines_doc(now, n=machines, tick=tick))
 
     def url(self, lang: str) -> str:
