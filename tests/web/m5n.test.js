@@ -53,15 +53,15 @@ describe("placementNoteText — one machine's short reason", () => {
     [note("mbp", "ineligible", "tool_missing", { tools: ["fvm", "gitleaks"] }),
       "mbp: fvm, gitleaks 없음", "mbp: fvm, gitleaks missing"],
     [note("mbp", "unknown", "workspace_tool", { tools: ["melos"] }),
-      "mbp: melos 작업 공간에만", "mbp: melos workspace only"],
+      "mbp: melos는 작업 공간에만 있음", "mbp: melos workspace only"],
     [note("@local", "ineligible", "check_failed", { check: "sim-check", job_id: 3620 }, "Mac mini"),
       "Mac mini: sim-check 실패 #3620", "Mac mini: sim-check failed #3620"],
     [note("@local", "unknown", "check_running", { check: "sim-check", job_id: 3650 }, "Mac mini"),
       "Mac mini: sim-check 점검 중", "Mac mini: sim-check running"],
     [note("mbp", "unknown", "check_needed", { check: "sim-check" }),
       "mbp: sim-check 점검 필요", "mbp: need sim-check"],
-    [note("mbp", "unknown", "report_missing"), "mbp: 보고 없음", "mbp: no report"],
-    [note("mbp", "unknown", "report_stale"), "mbp: 보고 낡음", "mbp: stale report"],
+    [note("mbp", "unknown", "report_missing"), "mbp: 환경 보고 없음", "mbp: no report"],
+    [note("mbp", "unknown", "report_stale"), "mbp: 환경 보고 낡음", "mbp: stale report"],
     [note("mbp", "unknown", "fingerprint_unknown"), "mbp: 지문 모름", "mbp: fingerprint unknown"],
     [note("mac2-worker", "down", "worker_down"), "mac2-worker: 꺼짐", "mac2-worker: down"],
     [note("mac2-worker", "down", "report_stale"), "mac2-worker: 꺼짐", "mac2-worker: down"],
@@ -89,7 +89,7 @@ describe("reasonText — new reasons", () => {
   test("no_capable_machine lists every machine (S4) and is actionable", () => {
     const { status, row } = queued({ reason: "no_capable_machine", placement: "capable", placement_detail: S4_DETAIL });
     const ko = rcm.reasonText(row, NOW, status, "ko");
-    assert.equal(ko.text, "맞는 머신 없음 · mbp: fvm 없음 · mac2-worker: 꺼짐");
+    assert.equal(ko.text, "실행 가능한 머신 없음 · mbp: fvm 없음 · mac2-worker: 꺼짐");
     assert.equal(ko.actionable, true);
     assert.equal(rcm.reasonText(row, NOW, status, "en").text,
       "no capable machine · mbp: fvm missing · mac2-worker: down");
@@ -98,7 +98,7 @@ describe("reasonText — new reasons", () => {
   test("no_capable_machine without detail says unknown, never invents a reason (§12)", () => {
     for (const detail of [[], undefined]) {
       const { status, row } = queued({ reason: "no_capable_machine", placement: "capable", placement_detail: detail });
-      assert.equal(rcm.reasonText(row, NOW, status, "ko").text, "맞는 머신 없음 · 알 수 없음");
+      assert.equal(rcm.reasonText(row, NOW, status, "ko").text, "실행 가능한 머신 없음 · 알 수 없음");
       assert.equal(rcm.reasonText(row, NOW, status, "en").text, "no capable machine · unknown");
     }
   });
@@ -107,7 +107,7 @@ describe("reasonText — new reasons", () => {
     const detail = [note("@local", "ineligible", "check_failed", { check: "sim-check", job_id: 3620 }, "Mac mini")];
     const { status, row } = queued({ key: "scenario-qa", reason: "check_failed", placement_detail: detail });
     const ko = rcm.reasonText(row, NOW, status, "ko");
-    assert.equal(ko.text, "점검 실패 · Mac mini: sim-check 실패 #3620");
+    assert.equal(ko.text, "머신 점검 실패 · Mac mini: sim-check 실패 #3620");
     assert.equal(ko.actionable, true);
     assert.equal(rcm.reasonText(row, NOW, status, "en").text, "check failed · Mac mini: sim-check failed #3620");
   });
@@ -320,6 +320,6 @@ describe("notMoving — the new actionable reasons", () => {
     const ids = out.lines.map((l) => l.jobId);
     assert.ok(ids.indexOf(422) < ids.indexOf(421), ids);
     assert.equal(ids.indexOf(420), -1);
-    assert.equal(out.lines.find((l) => l.jobId === 421).text, "맞는 머신 없음 · mbp: fvm 없음 · mac2-worker: 꺼짐");
+    assert.equal(out.lines.find((l) => l.jobId === 421).text, "실행 가능한 머신 없음 · mbp: fvm 없음 · mac2-worker: 꺼짐");
   });
 });

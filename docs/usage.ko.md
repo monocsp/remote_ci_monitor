@@ -413,11 +413,11 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ([Which machine runs a job](configuration.md#which-machine-runs-a-job)). 대기 이유 두 가지가
 새로 생겼다. 둘 다 코드가 아니라 머신 이야기다.
 
-- **`no capable machine — mbp: fvm missing · mac2-worker: down`**(웹: `맞는 머신 없음`) — 지금
+- **`no capable machine — mbp: fvm missing · mac2-worker: down`**(웹: `실행 가능한 머신 없음`) — 지금
   이 프리셋을 돌릴 수 있는 머신이 없다. 머신마다 이유를 단다. 제출할 때 `rcm run` 도 같은 줄을
   찍었다. 작업은 ETA 없이 큐에 남아 있다가 머신이 고쳐지면 스스로 시작한다. 도구를 깔면 워커가
   `probe_interval_seconds`(10분) 안에 다시 보고한다. 바로 보고하게 하려면 워커를 재시작한다.
-- **`check failed — mbp: sim-check failed #3620`**(웹: `점검 실패`) — 이 프리셋에는 점검(머신이
+- **`check failed — mbp: sim-check failed #3620`**(웹: `머신 점검 실패`) — 이 프리셋에는 점검(머신이
   제대로 도는지 증명하는 프로젝트 스크립트)이 필요한데, 그 머신의 환경이 바뀐 뒤 점검이 실패했다.
   `rcm machines --machine mbp` 가 무엇이 바뀌었는지(`xcode 26.5 → 27.2`), `rcm logs 3620` 이
   점검이 왜 실패했는지 보여 준다. 머신을 고친 뒤 `rcm recheck mbp sim-check`(관리자)를 치거나 웹
