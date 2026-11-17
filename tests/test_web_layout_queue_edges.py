@@ -151,6 +151,8 @@ def long_text_doc() -> dict:
         key=KO_KEY,
         preset="gate",
         ahead_job_id=9999998,
+        # 그룹은 프리셋의 성질이라 처음부터 있다 — 아래 `updated_doc` 은 이유만 바꾼다
+        concurrency_group=LONG_GROUP,
         placement="capable",
         position=2,
         requester={"name": "kim", "label": "김철수@회의실-맥북-프로-열여섯인치"},
@@ -747,7 +749,6 @@ def updated_doc(doc: dict) -> dict:
     w = q[1234570]
     w.update(
         reason="blocked_by_group",
-        concurrency_group=LONG_GROUP,
         blocked_by={"job_id": 9999999, "group": LONG_GROUP, "remaining_seconds": 359940},
     )
     q[1234569].update(reason="waiting_for_lane", ahead_job_id=9999998, blocked_by=None)
