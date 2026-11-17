@@ -72,13 +72,24 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
    잡이 시작·끝날 때마다 필 글자(`대기` ↔ `진행 중 #5008`) 폭이 바뀌어 줄 수가 바뀌고, 머리줄
    아래 화면이 통째로 뛴다(2026-11-17 실측: 워커 12개 · 390px 에서 필이 열 줄 · 머리줄 565px).
    필이 넷을 넘으면(`crowded`) 머리줄 맨 아래에 제 줄을 통째로 쓴다 — 폰에서는 늘 그렇다. */
+/* 띠(`.wkband`)가 머리줄의 칸이고, 그 안에서 필 줄(`.workers`)이 옆으로 민다. 넘치면 오른쪽(밀었으면
+   왼쪽도)이 흐려지고 고정 폭 `+N` 표지(`.wk-more`)가 화면 밖 필을 센다 — 스크롤바를 숨겼으니 더 있다는
+   단서가 따로 있어야 한다(Codex 가독성 검토 5번). 흐림은 mask 라 상자를 바꾸지 않는다. */
+.wkband { display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.wkband.crowded { order: 1; flex: 1 1 100%; }
 .workers { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); flex-wrap: nowrap;
-  flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; border-radius: 6px; }
 .workers::-webkit-scrollbar { display: none; }
 .workers > * { flex: none; }
-.workers.crowded { order: 1; flex: 1 1 100%; }
+.workers:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.workers.more-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.workers.more-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); }
+.workers.more-l.more-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
+/* 표지 폭은 숫자와 무관하게 고정이다 — `+9` ↔ `+10` 에 띠가 출렁이지 않게 */
+.wk-more { flex: none; width: 5.5ch; padding: 2px 0; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--muted); font: 600 12px var(--mono); font-variant-numeric: tabular-nums; text-align: center; cursor: pointer; white-space: nowrap; overflow: hidden; }
+.wk-more.warn { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
 .wk { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer; white-space: nowrap; }
-.wk .wn { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
+.wk .wn { display: inline-block; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .wk i { width: 8px; height: 8px; border-radius: 50%; background: var(--queued); }
 .wk.busy i { background: var(--accent); }
 .wk.down { border-color: var(--bad); color: var(--bad); }
@@ -512,6 +523,33 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
 .wk { max-width: 100%; min-width: 0; }
 .wk .wk-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workers { max-width: 100%; min-width: 0; }
+
+/* ── 가독성 R1 (Codex 가독성 검토 1 · 6 · 8번 · tests/test_web_readability_r1.py) ──
+   (6) **식별자는 가운데를 줄인다** — `midHtml` 이 이름을 앞(`.mx-h`) · 뒤(`.mx-t`) 둘로 나누고, 앞만
+   준다. 공통 접두사가 긴 이름(`build-farm-mac…closet-22`)이 끝에서 갈린다. 감싼 요소(`.key` · `.mn` …)
+   가 폭을 정하고 `.mx` 는 그 안을 채울 뿐이라 칸이 넓어지지 않는다. 공백을 지키려고 `pre` 다.
+   (1) **잘린 글은 누르면 연다** — 실제로 잘린 `[data-cut]` 은 `data-cut-open` 을 얻는다. 모양은 손가락
+   커서와 포커스 테두리뿐이다(outline 은 상자를 바꾸지 않는다). 전문은 `#reveal` 이 페이지 좌표에
+   띄운다 — 어떤 행도 밀지 않는다. */
+.mx { display: flex; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 앞이 먼저 2ch 까지 줄고(줄임 몫 1000:1), 그래도 모자라면 뒤도 끝에서 준다 — 칸이 뒤 토막보다
+   좁을 때 「g」 한 글자 + 잘린 뒤 토막이 이어져 다른 이름처럼 읽히지 않게 */
+.mx > .mx-h { flex: 0 1000 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.mx > .mx-t { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+table.mtab td.mhost .mhv { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-cut-open] { cursor: pointer; }
+[data-cut-open]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+.reveal { position: absolute; z-index: 40; box-sizing: border-box; min-width: 160px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--ink); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18); }
+.reveal .rv-text { font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; user-select: text; -webkit-user-select: text; }
+.reveal .rv-act { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.banner .banner-more { font: 500 12px var(--sans); color: inherit; background: none; border: 1px solid currentColor; border-radius: 999px; padding: 0 8px; cursor: pointer; }
+/* (8) 데스크톱에서 표 머리는 화면 맨 위에 붙는다 — 「모두 보기」로 200행을 펴고 내려가도 열 이름이
+   남는다. `.qwrap` 은 넘침을 자르기만 하고(`clip`) 스크롤 상자가 되지 않아야 sticky 가 화면 기준이다. */
+@media (min-width: 721px) {
+  .qwrap { overflow-x: clip; }
+  table.q thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); box-shadow: inset 0 -1px 0 var(--line); }
+}
 table.q td.key .key, table.q td.requester .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 table.q td.key .chip { max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* 이유는 늘 두 줄 자리다 — 짧은 이유도 두 줄을 차지해 이유가 바뀌어도 행 높이가 그대로다 */
@@ -551,7 +589,7 @@ table.q td.source .uncommitted { display: flex; width: max-content; max-width: 1
   .tail { max-width: 100%; }
   .summary { grid-template-columns: 1fr; }
   .s-top .sub, .workers .wk .lane-word { display: none; }
-  .workers { order: 1; flex: 1 1 100%; }   /* 폰에서는 필 줄이 늘 머리줄 맨 아래 제 줄이다 */
+  .wkband { order: 1; flex: 1 1 100%; }   /* 폰에서는 필 줄이 늘 머리줄 맨 아래 제 줄이다 */
   table.q thead { display: none; }
   table.q tr.qgroup, table.q tr.qgroup th, table.q tr.qgroup-empty td { display: block; width: auto; }
   table.q, table.q tbody, table.q tr, table.q td { display: block; }

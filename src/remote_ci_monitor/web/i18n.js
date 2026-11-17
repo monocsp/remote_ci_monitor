@@ -205,9 +205,6 @@
     },
     "header.lanes_left": function (a) { return "waiting jobs use lane " + a.lanes + " only"; },
     "header.nothing_can_start": "nothing can start",
-    "header.worker_unreachable": function (a) {
-      return "Worker " + a.names + " unreachable — no heartbeat · its running jobs are marked lost";
-    },
     "header.not_scheduled": function (a) {
       return "Lane is idle but #" + a.id + " has not started for " + a.dur + " — check the server log";
     },
@@ -1223,7 +1220,22 @@
     "version.edit.prefill_from": function (a) { return "prefilled from " + a.source; },
     "version.edit.prefill_unknown": "prefilled from the previous version",
     "version.edit.no_prefill": "The previous copy was not read — the fields fall back to the files in store/",
-    "store.gate.return": function (a) { return "Once the setup is done you go back to " + a.text; }
+    "store.gate.return": function (a) { return "Once the setup is done you go back to " + a.text; },
+    // 가독성 R1(Codex 가독성 검토 1 · 5 · 7 · 8번) — 잘린 글의 전문 · 워커 띠 · 끊긴 워커 요약 · 적게 보기
+    "reveal.label": function (a) { return "Show full text: " + a.text; },
+    "reveal.title": "Full text",
+    "reveal.close": "Close",
+    "workers.band": function (a) { return a.n + " workers — scroll with the arrow keys"; },
+    "workers.more": function (a) { return "Show " + a.n + " off-screen"; },
+    "workers.hidden_list": function (a) { return a.n + " off-screen:"; },
+    "header.workers_unreachable_one": function (a) {
+      return "Worker " + a.name + " unreachable — the results of its running jobs are lost";
+    },
+    "header.workers_unreachable_many": function (a) {
+      return a.n + " workers unreachable — the results of their running jobs are lost";
+    },
+    "header.workers_names": "Show names",
+    "queue.show_fewer": "show fewer"
   };
 
   var KO = {
@@ -1259,9 +1271,6 @@
     },
     "header.lanes_left": function (a) { return "대기 중인 작업은 레인 " + a.lanes + " 만 씁니다"; },
     "header.nothing_can_start": "아무것도 시작할 수 없습니다",
-    "header.worker_unreachable": function (a) {
-      return "워커 " + a.names + " 의 신호가 끊겼습니다 — 그 워커에서 진행 중이던 작업은 결과를 잃음으로 표시됩니다";
-    },
     "header.not_scheduled": function (a) {
       return "레인이 비어 있는데 #" + a.id + " 가 " + a.dur + " 동안 시작되지 않았습니다 — 서버 로그를 보세요";
     },
@@ -2258,7 +2267,21 @@
     "version.edit.prefill_from": function (a) { return "프리필 출처 " + a.source; },
     "version.edit.prefill_unknown": "이전 버전 문안으로 채웠습니다",
     "version.edit.no_prefill": "이전 버전 문안을 아직 못 읽었습니다 — store/ 파일 값으로 채웁니다",
-    "store.gate.return": function (a) { return "설정을 마치면 " + withJosa(a.text, "으로/로") + " 돌아갑니다"; }
+    "store.gate.return": function (a) { return "설정을 마치면 " + withJosa(a.text, "으로/로") + " 돌아갑니다"; },
+    "reveal.label": function (a) { return "전문 보기: " + a.text; },
+    "reveal.title": "전문",
+    "reveal.close": "닫기",
+    "workers.band": function (a) { return "워커 " + a.n + "개 — 좌우 화살표로 넘겨 봅니다"; },
+    "workers.more": function (a) { return "화면 밖 " + a.n + "개 보기"; },
+    "workers.hidden_list": function (a) { return "화면 밖 " + a.n + "개:"; },
+    "header.workers_unreachable_one": function (a) {
+      return "워커 " + a.name + " 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+    },
+    "header.workers_unreachable_many": function (a) {
+      return "워커 " + a.n + "대 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+    },
+    "header.workers_names": "이름 보기",
+    "queue.show_fewer": "적게 보기"
   };
 
   var MESSAGES = { en: EN, ko: KO };
