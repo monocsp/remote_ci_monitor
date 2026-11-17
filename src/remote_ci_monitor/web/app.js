@@ -683,6 +683,80 @@
     if (server.paused) pills.push({ text: T(lang, "worker.paused"), cls: "paused", jobId: null, lane: null });
     return pills;
   }
+  // ── 식별자의 가운데 말줄임 (Codex 가독성 검토 6번) ──
+  // 공통 접두사가 긴 이름(`build-farm-mac-studio-…-07`)은 **끝**이 서로를 가른다 — 끝 말줄임은 그 끝을
+  // 지워 모든 행을 똑같아 보이게 했다. CSS 만으로는 가운데 말줄임이 안 되므로 이름을 앞 · 뒤 둘로
+  // 나눠 그린다: 앞(`.mx-h`)은 줄고 뒤(`.mx-t`)는 그대로다. 나누는 규칙은 폭(한글 · 전각은 2)으로 —
+  // 20 이하면 나누지 않고, 뒤는 구분자 바로 뒤에서 시작하는 가장 긴 6~16 폭 토막, 그런 자리가
+  // 없으면 마지막 10 폭이다. 앞 + 뒤 = 원문(복사 · 선택이 그대로다).
+  var MID_MIN = 20, MID_TAIL_MIN = 6, MID_TAIL_MAX = 16, MID_TAIL_FALLBACK = 10;
+  var MID_SEP = /[-_:\/.@\s·]/;
+  function charWidth(ch) { return ch.codePointAt(0) >= 0x1100 ? 2 : 1; }
+  function textWidth(text) {
+    var w = 0;
+    Array.from(String(text == null ? "" : text)).forEach(function (ch) { w += charWidth(ch); });
+    return w;
+  }
+  function midSplit(text) {
+    var s = text == null ? "" : String(text);
+    var chars = Array.from(s);
+    var widths = chars.map(charWidth);
+    var total = widths.reduce(function (a, b) { return a + b; }, 0);
+    if (total <= MID_MIN) return [s, ""];
+    var tail = 0, at = -1, i;
+    for (i = chars.length - 1; i >= 1; i--) {
+      tail += widths[i];
+      if (tail > MID_TAIL_MAX) break;
+      if (tail >= MID_TAIL_MIN && MID_SEP.test(chars[i - 1])) at = i;
+    }
+    if (at < 0) {
+      tail = 0; at = chars.length;
+      while (at > 1 && tail + widths[at - 1] <= MID_TAIL_FALLBACK) { at--; tail += widths[at]; }
+    }
+    return [chars.slice(0, at).join(""), chars.slice(at).join("")];
+  }
+  /** 이름 하나를 그린다 — 짧으면 글 그대로, 길면 `.mx` 안의 앞 · 뒤 두 토막(사이에 공백 없음). */
+  function midHtml(text) {
+    var parts = midSplit(text);
+    if (!parts[1]) return esc(parts[0]);
+    return '<span class="mx"><span class="mx-h">' + esc(parts[0]) + '</span><span class="mx-t">' + esc(parts[1]) + "</span></span>";
+  }
+
+  /**
+   * 워커 띠에서 화면 밖에 있는 필(Codex 가독성 검토 5번). `items` 는 필마다 `{left, right, warn, label}`
+   * (화면 좌표), `left` · `right` 는 띠가 보여 주는 구간. 조금이라도 잘린 필은 숨은 것으로 센다.
+   * 숨은 필 중 끊김 · 보류(`warn`)가 있으면 표지가 경고색이다 — 「왜 안 움직이나」의 근거가 화면
+   * 밖에 있으면 안 된다.
+   */
+  function bandMore(items, left, right) {
+    var out = { n: 0, warn: false, labels: [] };
+    if (!Array.isArray(items)) return out;
+    items.forEach(function (it) {
+      if (!it || !isNum(it.left) || !isNum(it.right)) return;
+      if (it.left >= left - 1 && it.right <= right + 1) return;
+      out.n++;
+      if (it.warn) out.warn = true;
+      out.labels.push(String(it.label == null ? "" : it.label));
+    });
+    return out;
+  }
+
+  /**
+   * 원격 워커가 끊긴 띠(Codex 가독성 검토 7번) — 요약 한 문장. 이름 목록은 본문에 두지 않는다:
+   * 긴 이름 둘이면 띠가 폰 첫 화면을 다섯 줄 먹었고 「끊겼다」보다 식별자가 먼저 읽혔다. 한 대이고
+   * 이름이 짧을 때만 본문에 쓴다. `list` 는 펼침이 보여 줄 이름들(줄마다 하나).
+   */
+  var UNREACHABLE_INLINE = 20;
+  function unreachableNote(names, lang) {
+    var list = (Array.isArray(names) ? names : []).filter(function (n) { return n != null && n !== ""; }).map(String);
+    var inline = list.length === 1 && textWidth(list[0]) <= UNREACHABLE_INLINE;
+    return {
+      text: inline ? T(lang, "header.workers_unreachable_one", { name: list[0] }) : T(lang, "header.workers_unreachable_many", { n: list.length }),
+      list: list.join("\n"),
+      inline: inline
+    };
+  }
+
   /** 필이 머리줄 아래 제 줄을 통째로 써야 하나 — 워커 필(정지 필 제외)이 넷을 넘으면. */
   var WORKERS_CROWDED = 4;
   function workersCrowded(pills) {
@@ -2956,6 +3030,7 @@
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     placementNoteText: placementNoteText, placementLabel: placementLabel, placementDetailLines: placementDetailLines,
     envChangedChip: envChangedChip, probeSummary: probeSummary, machineRows: machineRows,
+    midSplit: midSplit, midHtml: midHtml, bandMore: bandMore, unreachableNote: unreachableNote,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS,
     store: storePure
   };
@@ -3260,14 +3335,18 @@
     var list = workerPills(server, L());
     var pills = list.map(function (p) {
       var tag = p.jobId != null ? "button" : "span";
-      // 원격 머신 이름은 길 수 있다 — 필은 한 줄로 말줄임하고 전문은 title 로(이름 · 나머지는 영역 B)
-      var body = p.name ? '<span class="wn">' + esc(p.name) + "</span>" + esc(p.rest) : esc(p.text);
-      return "<" + tag + ' class="wk ' + esc(p.cls) + '" title="' + esc(p.text) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : "") + '><i aria-hidden="true"></i><span class="wk-t">' + body + "</span></" + tag + ">";
+      // 원격 머신 이름은 길 수 있다 — 필은 한 줄로 **가운데** 말줄임하고 전문은 title 로(이름 · 나머지는
+      // 영역 B). 버튼이 아닌 필은 잘렸으면 눌러서 전문을 연다(`data-cut`, Codex 가독성 검토 1 · 6번) —
+      // 잡이 있는 필은 누르면 그 잡으로 가므로 가로채지 않는다.
+      var body = p.name ? '<span class="wn">' + midHtml(p.name) + "</span>" + esc(p.rest) : esc(p.text);
+      return "<" + tag + ' class="wk ' + esc(p.cls) + '" title="' + esc(p.text) + '"' + (p.jobId != null ? ' data-goto="' + p.jobId + '" type="button"' : ' data-cut="wk"') + '><i aria-hidden="true"></i><span class="wk-t">' + body + "</span></" + tag + ">";
     }).join("");
     var strip = $("[data-workers]");
     strip.innerHTML = pills + envChipsHtml();
+    strip.setAttribute("aria-label", tr("workers.band", { n: list.length }));
     // 필이 많으면 머리줄 아래 제 줄을 통째로 쓴다 — 워커 수로만 정한다(칩이 뜨고 지는 것으로는 안 바뀐다)
-    strip.classList.toggle("crowded", workersCrowded(list));
+    var band = $("[data-wkband]");
+    if (band) band.classList.toggle("crowded", workersCrowded(list));
     var err = $("[data-errchip]");
     if (server.last_error) { err.hidden = false; err.textContent = "error · " + truncate(server.last_error, 60); err.title = server.last_error; }
     else err.hidden = true;
@@ -3298,9 +3377,12 @@
         }) + (live.length ? tr("header.lanes_left", { lanes: live.join(", ") }) : tr("header.nothing_can_start"));
       } else if (remoteDown.length) {
         // 원격 워커(M5b-2)가 heartbeat 을 멈췄다 — 그 풀의 잡은 서버가 lost 로 남긴다
+        // 띠는 요약 한 문장이고 이름 목록은 「이름 보기」 뒤에 있다(Codex 가독성 검토 7번) — 긴 이름
+        // 둘이 다 실리면 폰 첫 화면을 띠가 먹고 「끊겼다」보다 식별자가 먼저 읽혔다
         var names = []; remoteDown.forEach(function (w) { if (names.indexOf(w.worker) < 0) names.push(w.worker); });
+        var un = unreachableNote(names, L());
         noteEl.hidden = false; noteEl.className = "banner warn";
-        noteEl.textContent = tr("header.worker_unreachable", { names: names.join(", ") });
+        noteEl.innerHTML = '<span>' + esc(un.text) + "</span>" + (un.inline ? "" : '<button type="button" class="banner-more" id="banner-names" data-reveal="' + esc(un.list) + '" title="' + esc(un.list) + '">' + esc(tr("header.workers_names")) + "</button>");
       } else {
         var stalled = notScheduledRow();
         if (stalled) { noteEl.hidden = false; noteEl.className = "banner warn"; noteEl.textContent = tr("header.not_scheduled", { id: stalled.id, dur: fmtDuration(stalled.estimate && stalled.estimate.waited_seconds) }); }
@@ -3359,7 +3441,7 @@
     else if (yj.kind === "unknown") y = '<span class="muted">' + esc(tr("summary.queue_unknown")) + "</span>";
     else if (yj.kind === "none") y = '<span class="muted">' + esc(tr("summary.no_jobs")) + "</span>";
     // 잡마다 한 줄(말줄임 · 전문은 title) — 글 길이가 요약 띠의 높이를 바꾸면 그 아래 큐가 통째로 움직인다
-    else y = yj.lines.map(function (l) { return '<span class="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + " " + esc(l.text) + "</span>"; }).join("") + (yj.more ? '<span class="sl muted">' + esc(tr("summary.and_more", { n: yj.more })) + "</span>" : "");
+    else y = yj.lines.map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + " " + esc(l.text) + "</span>"; }).join("") + (yj.more ? '<span class="sl muted">' + esc(tr("summary.and_more", { n: yj.more })) + "</span>" : "");
     $("[data-yours]").innerHTML = (lost ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span>" : "") + y;
     // 24
     var nm = notMoving(st, state.me, L());
@@ -3368,7 +3450,7 @@
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
-    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("") + '<span class="sl muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
+    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("") + '<span class="sl muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
@@ -3378,7 +3460,7 @@
     if (p && p.hosts === null) {
       h = '<span class="bad">' + esc(tr("summary.host_unavailable")) + "</span>"
         // 오류 문구는 띄어쓰기 없이 길 수 있다 — 한 줄로 말줄임하고 전문은 title 로(영역 A·B 합침)
-        + (p.hosts_error ? ' <span class="muted herr" title="' + esc(errorText(p.hosts_error, p.hosts_error_code)) + '">'
+        + (p.hosts_error ? ' <span class="muted herr" data-cut="herr" title="' + esc(errorText(p.hosts_error, p.hosts_error_code)) + '">'
           + esc(truncate(errorText(p.hosts_error, p.hosts_error_code), 60)) + "</span>" : "");
       lab.textContent = tr("summary.host");
     } else if (hp.verdict === "no_sample") { h = '<span class="muted">' + esc(tr("summary.host_no_sample")) + "</span>"; lab.textContent = tr("summary.host"); }
@@ -3469,7 +3551,8 @@
     nm.lines.forEach(function (l) { stuckIds[l.jobId] = true; });
     var waiting = rows.filter(function (r) { return r.state !== "running" && r.state !== "cancelling"; });
     var hiddenCount = 0;
-    if (!state.showAllQueue && waiting.length > 20) {
+    var foldable = waiting.length > 20;
+    if (!state.showAllQueue && foldable) {
       var keep = {};
       waiting.slice(0, 20).forEach(function (r) { keep[r.id] = true; });
       rows = rows.filter(function (r) { var w = r.state !== "running" && r.state !== "cancelling"; if (!w) return true; if (keep[r.id] || isMine(r, state.me) || stuckIds[r.id] || r.id === state.hl) return true; hiddenCount++; return false; });
@@ -3487,6 +3570,8 @@
     });
     html += "</tbody></table></div>";
     if (hiddenCount) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.more", { n: hiddenCount })) + " " + icon("chevronDown") + "</button>";
+    // 다 편 뒤에도 되돌릴 길이 있다(Codex 가독성 검토 8번) — 200행을 편 뒤 「적게 보기」가 없으면 못 접는다
+    else if (foldable) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.show_fewer")) + " " + icon("chevronUp") + "</button>";
     html += extraPoolsQueueHtml(st);
     setQueueHtml(body, html);
   }
@@ -3546,13 +3631,13 @@
     var chips = "";
     var inputs = row.inputs || {};
     Object.keys(inputs).forEach(function (k) { chips += '<button type="button" class="chip" data-inputs="' + row.id + '" title="' + esc(JSON.stringify(inputs)) + '">' + esc(k + "=" + inputs[k]) + "</button>"; });
-    if (row.concurrency_group) chips += '<span class="chip" title="' + esc(tr("row.group", { name: row.concurrency_group })) + '">' + esc(tr("row.group", { name: row.concurrency_group })) + "</span>";
+    if (row.concurrency_group) chips += '<span class="chip" data-cut="chip" title="' + esc(tr("row.group", { name: row.concurrency_group })) + '">' + esc(tr("row.group", { name: row.concurrency_group })) + "</span>";
     // 지정 잡(`rcm run --machine`)은 어느 머신을 기다리는지 칩으로 — any-capable 은 이유 칸이 말한다
-    if (typeof row.target_worker === "string" && row.target_worker) chips += '<span class="chip" title="' + esc(placementLabel(row, L())) + '">' + esc(placementLabel(row, L())) + "</span>";
+    if (typeof row.target_worker === "string" && row.target_worker) chips += '<span class="chip" data-cut="chip" title="' + esc(placementLabel(row, L())) + '">' + esc(placementLabel(row, L())) + "</span>";
     chips += priorityChip(row, L());
     var req = row.requester || {};
     var joiners = Array.isArray(row.joiners) ? row.joiners : [];
-    var requester = '<span class="rq" title="' + esc((req.label || req.name || DASH) + " · " + tr("row.token_of", { name: req.name || "" })) + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>"
+    var requester = '<span class="rq" data-cut="rq" title="' + esc((req.label || req.name || DASH) + " · " + tr("row.token_of", { name: req.name || "" })) + '">' + esc(truncate(req.label || req.name || DASH, 40)) + "</span>"
       + (mine && req.name === state.me ? '<span class="you">' + esc(tr("row.you")) + "</span>" : "")
       + (joiners.length ? '<button type="button" class="joiners" title="' + esc(tr("row.also_waiting", { labels: joiners.map(function (j) { return j.label || j.name; }).join(", ") })) + '">+' + joiners.length + "</button>" : "");
     if (mine && req.name !== state.me) requester += '<span class="you">' + esc(tr("row.you_joined")) + "</span>";
@@ -3563,7 +3648,7 @@
     // 한 갈래다 — 형편은 class 하나로만 말한다(칩 세 갈래를 따로 조립하던 자리).
     // 이유는 두 줄로 못 박힌다(style.css) — 메모 30개짜리 이유도 행을 늘리지 않게. 전문은 title 로.
     var reasonCell = '<span class="reason' + (r.actionable || busy ? " act" : "") + (r.cls ? " " + r.cls : "")
-      + '" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
+      + '" data-cut="reason" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
     // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
     var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
@@ -3662,8 +3747,10 @@
   }
   /** 잡 이름 + 링크 칩을 한 줄로. 링크가 없으면 오늘의 `<span class="key">` 그대로다. */
   function keyWithLinkHtml(keyText, link, cls) {
-    // 칸 폭에서 한 줄로 말줄임된다(style.css) — 전문은 title 로
-    var name = '<span class="' + (cls || "key") + '" title="' + esc(keyText) + '">' + esc(keyText) + "</span>";
+    // 칸 폭에서 한 줄로 **가운데** 말줄임된다(style.css `.mx`) — 전문은 title 로, 잘렸으면 `data-cut`
+    // 이 탭 · 키보드로 여는 손잡이가 된다(Codex 가독성 검토 1 · 6번)
+    var c = cls || "key";
+    var name = '<span class="' + c + '" title="' + esc(keyText) + '" data-cut="' + c + '">' + midHtml(keyText) + "</span>";
     var chip = jobLinkHtml(link);
     return chip ? '<span class="key-line">' + name + chip + "</span>" : name;
   }
@@ -3685,7 +3772,7 @@
     // 이름과 시간을 두 칸으로 나눈다 — 이름만 한 줄 말줄임(전문은 title), 몇 초째는 늘 보인다.
     // 한 덩어리 글이면 단계가 바뀔 때마다 1~3줄로 접혔다 펴져 행 높이가 출렁인다(2026-10-26 오너 보고).
     var label = tr("progress.now", { cur: i, total: total, step: prog.current_name });
-    return '<span class="sn-name" title="' + esc(label) + '">' + esc(label) + '</span> <span class="sn-t">' + secs + "</span>";
+    return '<span class="sn-name" data-cut="sn" title="' + esc(label) + '">' + esc(label) + '</span> <span class="sn-t">' + secs + "</span>";
   }
 
   function progressHtml(row) {
@@ -3696,7 +3783,7 @@
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
     var total = isNum(prog.steps_total) ? prog.steps_total : steps.length;
     var failed = failedStepCount(prog);
-    var h = '<div class="head"><b class="ph" title="' + esc(progressHead(prog, L()) || "") + '">' + (head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
+    var h = '<div class="head"><b class="ph" data-cut="ph" title="' + esc(progressHead(prog, L()) || "") + '">' + (head || "") + "</b>" + (failed ? ' <span class="fail">' + esc(tr("progress.steps_failed", { n: failed })) + "</span>" : "") + ' <span class="note" title="' + esc(tr("progress.timing_note")) + '">ⓘ</span></div>';
     if (steps.length) {
       var segs = "";
       var pending = Math.max(0, total - steps.length);
@@ -3711,7 +3798,7 @@
       steps.forEach(function (s) {
         var c = s.state === "running" ? "run" : s.ok === false ? "fail" : "";
         var tick = live && s.state === "running" && s.started_at ? ' data-tick="elapsed" data-from="' + esc(s.started_at) + '"' : "";
-        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + '</span><span class="sn" title="' + esc(s.name) + '">' + esc(s.name) + '</span><span class="s"' + tick + ">" + esc(fmtDuration(s.seconds)) + "</span></div>";
+        h += '<div class="step ' + c + '"><span class="g" aria-hidden="true">' + stepMark(s) + '</span><span class="sn" data-cut="step" title="' + esc(s.name) + '">' + esc(s.name) + '</span><span class="s"' + tick + ">" + esc(fmtDuration(s.seconds)) + "</span></div>";
       });
       for (var j = 0; j < pending; j++) h += '<div class="step pend"><span class="g" aria-hidden="true">·</span><span>…</span><span class="s">' + DASH + "</span></div>";
       h += "</div>";
@@ -3961,12 +4048,12 @@
       var m = findMachine(r.id);
       var red = machineChecks(m).some(function (c) { return c && c.state === "failed"; });
       h += '<tr data-machine="' + esc(r.id) + '"' + (r.alive === false ? ' class="down"' : "") + ">"
-        + '<td class="mname"><div class="mcell"><span class="mono mn" title="' + esc(r.name) + '">' + esc(r.name) + "</span>" + (r.alive === false ? '<span class="mdown">' + esc(tr("machines.down")) + "</span>" : "")
-        + (r.name !== r.id ? '<span class="sub mono mid" title="' + esc(r.id) + '">' + esc(r.id) + "</span>" : "") + "</div></td>"
-        + '<td class="mhost mono" title="' + esc(r.host) + '">' + esc(r.host) + "</td>"
-        + '<td class="mfp mono"><div class="clamp" title="' + esc(r.fingerprint) + '">' + esc(r.fingerprint) + "</div></td>"
+        + '<td class="mname"><div class="mcell"><span class="mono mn" data-cut="mn" title="' + esc(r.name) + '">' + midHtml(r.name) + "</span>" + (r.alive === false ? '<span class="mdown">' + esc(tr("machines.down")) + "</span>" : "")
+        + (r.name !== r.id ? '<span class="sub mono mid" data-cut="mid" title="' + esc(r.id) + '">' + midHtml(r.id) + "</span>" : "") + "</div></td>"
+        + '<td class="mhost mono" title="' + esc(r.host) + '"><span class="mhv" data-cut="mhost" title="' + esc(r.host) + '">' + midHtml(r.host) + "</span></td>"
+        + '<td class="mfp mono"><div class="clamp" data-cut="mfp" title="' + esc(r.fingerprint) + '">' + esc(r.fingerprint) + "</div></td>"
         + '<td class="mpre">' + esc(r.presets) + "</td>"
-        + '<td class="mchk' + (red ? " bad" : "") + '"><div class="clamp" title="' + esc(r.checks) + '">' + esc(r.checks) + "</div></td>"
+        + '<td class="mchk' + (red ? " bad" : "") + '"><div class="clamp" data-cut="mchk" title="' + esc(r.checks) + '">' + esc(r.checks) + "</div></td>"
         + (act ? '<td class="mact">' + (r.recheck ? '<button type="button" class="btn recheck" data-recheck="' + esc(r.id) + '">' + esc(tr("machines.recheck")) + "</button>" : "") + "</td>" : "") + "</tr>";
     });
     body.innerHTML = h + "</tbody></table></div>";
@@ -4017,7 +4104,7 @@
     var compPct = isNum(mem.compressed_bytes) && isNum(mem.total_bytes) && mem.total_bytes > 0 ? mem.compressed_bytes / mem.total_bytes * 100 : 0;
     var meter = function (metric, label, right, pct, pct2, warn, spark) {
       var known = isNum(pct);
-      return '<div class="meter' + (warn ? " warn" : "") + (stale ? " stale" : "") + '" data-metric="' + metric + '"><div class="lab" title="' + esc(right ? label + " · " + right : label) + '"><span>' + esc(label) + "</span><span>" + esc(right) + "</span></div>" +
+      return '<div class="meter' + (warn ? " warn" : "") + (stale ? " stale" : "") + '" data-metric="' + metric + '"><div class="lab" data-cut="lab" title="' + esc(right ? label + " · " + right : label) + '"><span>' + esc(label) + "</span><span>" + esc(right) + "</span></div>" +
         '<meter min="0" max="100" value="' + (known ? Math.round(pct) : 0) + '" aria-label="' + esc(label) + '"></meter>' +
         '<div class="bar"><i style="width:' + (known ? Math.max(0, Math.min(100, pct - (pct2 || 0))) : 0) + '%"></i>' + (pct2 ? '<i class="b" style="width:' + Math.min(100, pct2) + '%"></i>' : "") + "</div>" +
         (spark ? '<div class="spark">' + spark + "<span>" + esc(tr("host.window")) + "</span></div>" : "") + "</div>";
@@ -4026,7 +4113,7 @@
     var facts = (h.os || DASH) + " · " + tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH });
     // 이름 · 나이 줄은 **한 줄**이다(말줄임 · 전문은 title) — 처리 대기 숫자의 자릿수가 5초마다 바뀌어도
     // 줄 수가 그대로여야 그 아래 카드가 뛰지 않는다
-    var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn"><span class="hname" title="' + esc(name) + '">' + esc(name) + '</span><span class="age" title="' + esc(facts) + '">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(facts) + "</span></div>";
+    var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn"><span class="hname" data-cut="hname" title="' + esc(name) + '">' + midHtml(name) + '</span><span class="age" data-cut="age" title="' + esc(facts) + '">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(facts) + "</span></div>";
     // 미터는 자기 격자(`.meters`)에 산다 — 이름 줄 · 프로세스 줄이 카드 격자의 `1 / -1` 을 쓰면
     // `auto-fit` 의 빈 칸이 접히지 않아 1240px 에서도 미터가 150px 로 눌렸다(빈 칸 셋이 남는다)
     var sub = "";
@@ -4043,16 +4130,16 @@
       // 데이터 디렉터리가 쥔 부피는 서버의 사실이라 **서버 자신의 카드에만** 그린다 — 로컬 표본은
       // `source: "local"`, 원격 워커의 표본은 `source: "worker"` 다.
       var js = h.source === "local" ? jobStorageLine((state.status && state.status.server || {}).job_storage, state.status && state.status.generated_at, L()) : null;
-      if (js) sub = '<div class="substat' + (js.warn ? " warn" : "") + '" title="' + esc(js.text) + '">' + esc(js.text) + "</div>";
+      if (js) sub = '<div class="substat' + (js.warn ? " warn" : "") + '" data-cut="substat" title="' + esc(js.text) + '">' + esc(js.text) + "</div>";
     }
     if (gpu) html += meter("gpu", tr("host.gpu", { pct: fmtPct(gpu.util_pct) }), isNum(gpu.mem_used_bytes) ? tr("host.gpu_used", { size: fmtMemory(gpu.mem_used_bytes) }) : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
-    else html += '<div class="meter" data-metric="gpu"><div class="lab" title="' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + '"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";
+    else html += '<div class="meter" data-metric="gpu"><div class="lab" data-cut="lab" title="' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + '"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";
     html += "</div>" + sub;
     // 프로세스 줄도 한 줄 — 이름이 표본마다 바뀌므로(200자짜리 경로도 온다) 접히면 카드가 뛴다.
     // 이름마다 말줄임하고 전문은 그 이름의 title 에, 줄 전체는 줄의 title 에.
     if (Array.isArray(h.top) && h.top.length) {
       var procs = h.top.map(function (t) { return { comm: t.comm || DASH, rest: fmtPct(t.cpu) + " " + fmtMb(t.rss_mb) }; });
-      html += '<div class="top" title="' + esc(procs.map(function (t) { return t.comm + " " + t.rest; }).join("\n")) + '">' + esc(tr("host.top"))
+      html += '<div class="top" data-cut="top" title="' + esc(procs.map(function (t) { return t.comm + " " + t.rest; }).join("\n")) + '">' + esc(tr("host.top"))
         + procs.map(function (t) { return '<b title="' + esc(t.comm) + '">' + esc(t.comm) + "</b> " + esc(t.rest); }).join(" · ") + "</div>";
     }
     return html + "</div>";
@@ -4083,11 +4170,11 @@
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
         '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
-        '<span class="s rq" title="' + esc((job.requester || {}).label || DASH) + '">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
+        '<span class="s rq" data-cut="rq" title="' + esc((job.requester || {}).label || DASH) + '">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
         // 요약은 두 줄로 못 박고(전문은 title), 재실행 명령은 그 아래 한 줄이다(말줄임 · 전문은 title)
-        '<span class="s sm">' + (l.summary ? '<span class="smt" title="' + esc(l.summary) + '"><b>' + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") + "</span>" : "") +
+        '<span class="s sm">' + (l.summary ? '<span class="smt" data-cut="smt" title="' + esc(l.summary) + '"><b>' + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") + "</span>" : "") +
         (l.rerun ? '<button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="' + esc(tr("row.copy") + " · " + l.rerun) + '">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
       var art = artifactsLine(job, L(), now());
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
@@ -4199,11 +4286,18 @@
   function withFocus(fn) {
     var was = document.activeElement;
     var key = focusKey(was);
+    // 잘린 글(`data-cut`)은 id 도 손잡이 속성도 없다 — 가장 가까운 행 안의 몇 번째로 찾는다(Codex 1번)
+    var cutRef = !key && was && was.hasAttribute && was.hasAttribute("data-cut") ? cutFocusRef(was) : null;
     // 글을 치던 칸이면 커서 자리도 지킨다 — 버전 페이지는 5초마다 다시 그려지는데 그때마다
     // 커서가 끝으로 튀면 문안을 고칠 수가 없다(워크플랜 §3.2 W3).
     var sel = null;
     try { if (key && was && typeof was.selectionStart === "number") sel = [was.selectionStart, was.selectionEnd]; } catch (e0) { sel = null; }
     fn();
+    if (cutRef) {
+      var ce = $$(cutRef.sel)[cutRef.idx];
+      if (ce && ce !== document.activeElement && ce.getAttribute("tabindex") === "0") { try { ce.focus({ preventScroll: true }); } catch (e4) { ce.focus(); } }
+      return;
+    }
     if (!key) return;
     var el = null;
     try { el = $(key); } catch (e) { el = null; }
@@ -4213,7 +4307,7 @@
   }
   function render() {
     if (!state.status) { renderHeaderConn(); return; }
-    withFocus(function () { renderHeader(); renderSummary(); renderQueue(); renderHost(); renderMachines(); renderRecent(); });
+    withFocus(function () { renderHeader(); renderSummary(); renderQueue(); renderHost(); renderMachines(); renderRecent(); markCut(document); });
   }
 
   // ── 상호작용 ──
@@ -4261,6 +4355,155 @@
     t.textContent = text; t.hidden = false;
     clearTimeout(t._timer);
     t._timer = setTimeout(function () { t.hidden = true; }, 4000);
+  }
+  // ── 잘린 글의 전문 (Codex 가독성 검토 1번) ─────────────────────────────────────
+  // 잘린 글의 전문이 title 에만 있으면 폰(hover 없음)과 키보드(span 은 포커스를 못 받는다)에서는 닿을
+  // 길이 없다. 잘릴 수 있는 요소는 그리는 쪽이 `data-cut` 표지를 달고, 그려진 뒤 `markCut` 이 **실제로
+  // 잘린 것만** 골라 `data-cut-open` 을 준다 — 그것이 탭 · 클릭으로 `#reveal` 을 연다. 안에 손잡이
+  // (잡 링크 버튼)가 없으면 `tabindex=0` · `role=button` · 전문 `aria-label` 도 얻어 키보드로 연다
+  // (손잡이가 든 요소에 role=button 을 주면 그 안의 버튼이 읽히지 않는다). 다 보이는 요소는 탭 순서에
+  // 끼지 않는다. 손잡이 **안**(버튼 · 링크 · 펼쳐지는 최근 행)의 요소는 표지가 있어도 건드리지 않는다 —
+  // 그 행동을 가로채면 안 된다. 쓰기는 속성뿐이라 어떤 상자도 바뀌지 않는다. title 은 보조로 남는다.
+  var CUT_INERT = "button, a, [data-goto], [data-rtoggle], [data-toggle], [role=button]:not([data-cut])";
+  var CUT_ACTION = "button, a, [tabindex]:not([data-cut])";
+  function isCutEl(el) {
+    if (el.scrollWidth > el.clientWidth + 1) return true;
+    if (el.scrollHeight > el.clientHeight + 1 && getComputedStyle(el).webkitLineClamp !== "none") return true;
+    var kids = el.getElementsByTagName("*");
+    for (var i = 0; i < kids.length; i++) if (kids[i].scrollWidth > kids[i].clientWidth + 1) return true;
+    return false;
+  }
+  function markCut(root) {
+    var els = $$("[data-cut]", root || document);
+    // 읽기를 다 하고 나서 쓴다 — 섞으면 요소마다 레이아웃을 다시 잰다
+    var verdict = els.map(function (el) {
+      var up = el.parentElement;
+      if (up && up.closest(CUT_INERT)) return 0;
+      if (!el.getClientRects().length || !isCutEl(el)) return 0;
+      return el.querySelector(CUT_ACTION) ? 1 : 2;   // 1 = 누르기만 · 2 = 키보드도
+    });
+    els.forEach(function (el, i) {
+      var v = verdict[i];
+      if (v) el.setAttribute("data-cut-open", ""); else el.removeAttribute("data-cut-open");
+      if (v === 2) {
+        el.setAttribute("tabindex", "0"); el.setAttribute("role", "button");
+        el.setAttribute("aria-label", tr("reveal.label", { text: el.getAttribute("title") || el.textContent }));
+      } else if (el.hasAttribute("role")) {
+        el.removeAttribute("tabindex"); el.removeAttribute("role"); el.removeAttribute("aria-label");
+      }
+    });
+    updateBand();
+  }
+  var cutFrame = null;
+  function scheduleCut() {
+    if (cutFrame != null || typeof requestAnimationFrame !== "function") return;
+    cutFrame = requestAnimationFrame(function () { cutFrame = null; markCut(document); });
+  }
+  /** 다시 그린 뒤 같은 잘린 요소로 포커스를 되돌리는 열쇠 — 가장 가까운 id · 잡 · 머신 · 워커 띠 안의 몇 번째. */
+  function cutFocusRef(el) {
+    var scope = el.parentElement && el.parentElement.closest("[id],[data-job],[data-machine],[data-workers]");
+    var q = function (v) { return String(v).replace(/["\\]/g, "\\$&"); };
+    var base = !scope ? "" : scope.id ? '[id="' + q(scope.id) + '"]'
+      : scope.hasAttribute("data-job") ? '[data-job="' + q(scope.getAttribute("data-job")) + '"]'
+      : scope.hasAttribute("data-machine") ? '[data-machine="' + q(scope.getAttribute("data-machine")) + '"]' : "[data-workers]";
+    var sel = (base ? base + " " : "") + '[data-cut="' + q(el.getAttribute("data-cut")) + '"]';
+    return { sel: sel, idx: Math.max(0, $$(sel).indexOf(el)) };
+  }
+  function revealKeyOf(el) {
+    if (el.id) return "#" + el.id;
+    if (el.hasAttribute("data-cut")) { var r = cutFocusRef(el); return r.sel + "@" + r.idx; }
+    return "";
+  }
+  /** `trigger` 아래(자리가 없으면 위)에 전문을 띄운다. 같은 것을 다시 누르면 닫힌다. */
+  function openReveal(trigger, text) {
+    var r = $("#reveal");
+    if (!r || !trigger) return;
+    var key = revealKeyOf(trigger) + "|" + text;
+    if (!r.hidden && state.reveal && state.reveal.key === key) { closeReveal(false); return; }
+    state.reveal = { key: key, trigger: trigger, ref: trigger.hasAttribute("data-cut") ? cutFocusRef(trigger) : null };
+    r.setAttribute("aria-label", tr("reveal.title"));
+    $(".rv-text", r).textContent = text;
+    var copy = $("#reveal-copy");
+    copy.textContent = tr("row.copy"); copy.setAttribute("data-copy", text);
+    $("#reveal-close").textContent = tr("reveal.close");
+    var vw = document.documentElement.clientWidth, vh = window.innerHeight;
+    r.style.left = "0px"; r.style.top = "0px"; r.style.maxWidth = Math.max(160, Math.min(480, vw - 16)) + "px";
+    r.hidden = false;
+    var b = trigger.getBoundingClientRect(), w = r.offsetWidth, h = r.offsetHeight;
+    var left = Math.max(8, Math.min(b.left, vw - 8 - w));
+    var top = b.bottom + 4;
+    if (top + h > vh - 8 && b.top - 4 - h >= 8) top = b.top - 4 - h;
+    r.style.left = Math.round(left + window.scrollX) + "px";
+    r.style.top = Math.round(top + window.scrollY) + "px";
+    try { copy.focus({ preventScroll: true }); } catch (e) { copy.focus(); }
+  }
+  /** 닫는다. `restore` 면 연 요소로 포커스를 돌린다(다시 그려졌으면 같은 자리의 새 요소로). */
+  function closeReveal(restore) {
+    var r = $("#reveal");
+    if (!r || r.hidden) return;
+    r.hidden = true;
+    var rv = state.reveal; state.reveal = null;
+    if (!restore || !rv) return;
+    var t = rv.trigger && document.contains(rv.trigger) ? rv.trigger : (rv.ref ? $$(rv.ref.sel)[rv.ref.idx] : null);
+    if (t) { try { t.focus({ preventScroll: true }); } catch (e) { t.focus(); } }
+  }
+  function openCutReveal(el) { openReveal(el, el.getAttribute("title") || el.textContent); }
+
+  // ── 워커 띠의 「더 있음」 (Codex 가독성 검토 5번) ──
+  // 표지는 넘칠 때만 있다. 표지가 띠 폭을 먹으므로 「표지 없이도 넘치나」로 정한다(켜고 끄기가
+  // 서로를 뒤집지 않게). 숫자는 그려진 뒤 · 밀 때마다 잰다 — 필 폭은 글자마다 달라 미리 못 센다.
+  function updateBand() {
+    var strip = $("[data-workers]"), more = $("[data-wkmore]");
+    if (!strip || !more) return;
+    var mw = more.hidden ? 0 : more.getBoundingClientRect().width + 6;
+    var need = strip.scrollWidth > strip.clientWidth + mw + 1;
+    if (need === more.hidden) more.hidden = !need;
+    if (!need) { strip.classList.remove("more-r", "more-l"); return; }
+    var sr = strip.getBoundingClientRect();
+    var items = $$(".wk, .envchip", strip).map(function (el) {
+      var r = el.getBoundingClientRect();
+      return { left: r.left, right: r.right, warn: el.classList.contains("down") || el.classList.contains("held"), label: el.getAttribute("title") || el.textContent };
+    });
+    var m = bandMore(items, sr.left, sr.right);
+    var atStart = strip.scrollLeft <= 1, atEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+    strip.classList.toggle("more-r", !atEnd);
+    strip.classList.toggle("more-l", !atStart);
+    var text = "+" + m.n;
+    if (more.textContent !== text) more.textContent = text;
+    more.classList.toggle("warn", m.warn);
+    var list = tr("workers.hidden_list", { n: m.n }) + (m.labels.length ? "\n" + m.labels.join("\n") : "");
+    more.title = list;
+    more.setAttribute("data-reveal", list);
+    more.setAttribute("aria-label", tr("workers.more", { n: m.n }));
+  }
+  function wireBand() {
+    var strip = $("[data-workers]");
+    if (!strip) return;
+    var frame = null;
+    strip.addEventListener("scroll", function () {
+      if (frame != null) return;
+      frame = requestAnimationFrame(function () { frame = null; updateBand(); });
+    });
+    strip.addEventListener("keydown", function (ev) {
+      if (ev.target !== strip || (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft")) return;
+      ev.preventDefault();
+      strip.scrollBy({ left: (ev.key === "ArrowRight" ? 1 : -1) * Math.max(80, Math.round(strip.clientWidth * 0.6)) });
+    });
+    // 다시 그리기는 여러 갈래다(행 펼침 · 최근 · 머신 문서 도착 · 절 열기) — 어느 쪽이든 끝나면 다시 잰다.
+    // 1초 틱 · 이 장치가 스스로 쓰는 글(표지 · 전문 창 · 토스트)은 보지 않는다.
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(function (list) {
+        for (var i = 0; i < list.length; i++) {
+          var t = list[i].target;
+          var el = t && t.nodeType === 1 ? t : t && t.parentElement;
+          if (el && el.closest && el.closest("[data-tick], [data-wkmore], #reveal, #toast")) continue;
+          scheduleCut(); return;
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+    document.addEventListener("toggle", scheduleCut, true);
+    var rt = null;
+    window.addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(function () { markCut(document); }, 120); });
   }
   function findRow(id) { var q = queueOf(state.status) || []; for (var i = 0; i < q.length; i++) if (q[i].id === id) return q[i]; return null; }
   /** 대기열에 없으면 최근 목록에서 — 로그 서랍의 머리는 끝난 잡의 것도 그린다. */
@@ -4390,6 +4633,16 @@
     document.addEventListener("click", function (ev) {
       // 잡 링크는 브라우저가 연다(새 탭) — 그 행의 펼침 · 잡 이동 · 복사 같은 손잡이가 같이 돌면 안 된다
       if (ev.target.closest && ev.target.closest("a.job-link")) return;
+      // 전문 창 — 닫기 단추, 바깥을 누르면 닫힘, 잘린 글 · `data-reveal` 단추는 연다(다시 누르면 닫힘)
+      var rv = $("#reveal");
+      if (ev.target.closest("[data-reveal-close]")) { closeReveal(true); return; }
+      var act = ev.target.closest("button, a, [data-goto]");
+      var cutEl = ev.target.closest("[data-cut-open]");
+      if (cutEl && act && act !== cutEl && cutEl.contains(act)) cutEl = null;   // 안의 잡 링크가 이긴다
+      var revBtn = ev.target.closest("[data-reveal]");
+      if (rv && !rv.hidden && !rv.contains(ev.target) && !cutEl && !revBtn) closeReveal(false);
+      if (cutEl) { openCutReveal(cutEl); return; }
+      if (revBtn) { openReveal(revBtn, revBtn.getAttribute("data-reveal")); return; }
       var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src],[data-envchip],[data-recheck]");
       if (!t) return;
       if (t.hasAttribute("data-envchip")) { showEnvChange(t.getAttribute("data-envchip")); return; }
@@ -4402,7 +4655,13 @@
       }
       if (t.hasAttribute("data-log")) { state.lastTrigger = t; openDrawer(parseInt(t.getAttribute("data-log"), 10)); return; }
       if (t.hasAttribute("data-cancel")) { state.lastTrigger = t; openCancel(parseInt(t.getAttribute("data-cancel"), 10)); return; }
-      if (t.hasAttribute("data-more-queue")) { state.showAllQueue = true; renderQueue(); return; }
+      if (t.hasAttribute("data-more-queue")) {
+        // 「모두 보기」 ↔ 「적게 보기」(Codex 가독성 검토 8번). 접으면 단추가 화면 밖 아래로 남지 않게 데려온다
+        state.showAllQueue = !state.showAllQueue; withFocus(renderQueue);
+        var mq = $("[data-more-queue]");
+        if (mq && !state.showAllQueue) mq.scrollIntoView({ block: "nearest" });
+        return;
+      }
       if (t.hasAttribute("data-more-recent")) { state.showAllRecent = !state.showAllRecent; renderRecent(); return; }
       if (t.hasAttribute("data-rtoggle")) { var rid = parseInt(t.getAttribute("data-rtoggle"), 10); if (ev.target.closest("[data-copy]")) return; state.expandedRecent[rid] = !state.expandedRecent[rid]; if (state.expandedRecent[rid]) loadRecentFailures(rid); renderRecent(); return; }
       if (t.hasAttribute("data-copy")) { var text = t.getAttribute("data-copy"); if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { toast(tr("toast.copied", { text: text })); }, function () { toast(text); }); else toast(text); return; }
@@ -4410,6 +4669,12 @@
       if (t.hasAttribute("data-src")) { var rs = findRow(parseInt(t.getAttribute("data-src"), 10)); if (rs && rs.source) toast("#" + rs.id + " " + (rs.source.mode === "git_ref" ? (rs.source.sha || DASH) + " · ref " + (rs.source.ref || DASH) : (rs.source.base_sha || DASH) + (rs.source.dirty ? " · tree differs from base sha" : "") + (rs.source.tree_hash ? " · tree " + rs.source.tree_hash : ""))); return; }
     });
     document.addEventListener("keydown", function (ev) {
+      // 전문 창이 열려 있으면 Escape 는 그것만 닫고 연 요소로 포커스를 돌린다
+      var rv = $("#reveal");
+      if (ev.key === "Escape" && rv && !rv.hidden) { ev.preventDefault(); closeReveal(true); return; }
+      if ((ev.key === "Enter" || ev.key === " ") && ev.target.hasAttribute && ev.target.hasAttribute("data-cut-open") && ev.target.getAttribute("role") === "button") {
+        ev.preventDefault(); openCutReveal(ev.target); return;
+      }
       if (ev.key === "Escape") { closeDrawer(false); }
       if ((ev.key === "Enter" || ev.key === " ") && ev.target.hasAttribute && ev.target.hasAttribute("data-rtoggle")) { ev.preventDefault(); ev.target.click(); }
     });
@@ -6360,7 +6625,7 @@
     loadExpanded();
     lsSet("rcm.collapsed", null);   // 뜻이 뒤집힌 옛 키 — 남겨 두면 영영 남는다
     state.token = lsGet("rcm.token");
-    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireMachines(); wireStore(); renderTokenButton();
+    wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireMachines(); wireStore(); wireBand(); renderTokenButton();
     var first = (state.token ? verifyToken(state.token, true) : Promise.resolve()).then(function () { return fetchStatus(); });
     first.then(function () {
       state.tz = state.status && state.status.display_timezone ? state.status.display_timezone : null;

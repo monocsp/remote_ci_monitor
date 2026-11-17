@@ -324,6 +324,7 @@ def test_worker_band_says_there_is_more_and_scrolls_by_keyboard(tmp_path):
 
 
 def B_shoot(c: Chrome, scene: str, width: int, lang: str) -> None:
+    c.eval("window.scrollTo(0, 0); true")
     A.shoot(c, "r1-" + scene, width, lang)
 
 
