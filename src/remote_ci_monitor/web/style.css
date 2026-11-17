@@ -75,7 +75,12 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 /* 띠(`.wkband`)가 머리줄의 칸이고, 그 안에서 필 줄(`.workers`)이 옆으로 민다. 넘치면 오른쪽(밀었으면
    왼쪽도)이 흐려지고 고정 폭 `+N` 표지(`.wk-more`)가 화면 밖 필을 센다 — 스크롤바를 숨겼으니 더 있다는
    단서가 따로 있어야 한다(Codex 가독성 검토 5번). 흐림은 mask 라 상자를 바꾸지 않는다. */
-.wkband { display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+/* 줄을 나눌 때 띠의 기준 폭은 0 이다 — 필 글자(`#22` ↔ `lane 1 · idle`) 폭이 바뀌어도 머리줄이 줄을
+   바꾸지 않고, 띠는 그 줄의 남는 자리를 채운 뒤 안에서 민다. 기준 폭이 내용이면 레인이 쉴 때마다
+   토큰 단추가 둘째 줄로 내려가 화면이 35px 씩 뛰었다(최종 검증 · 로컬 레인 둘 + 원격 둘 · 1240px).
+   띠가 남는 자리를 채우므로 그 뒤의 `.spacer` 는 접는다. */
+.wkband { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; max-width: 100%; }
+.wkband:not(.crowded) ~ .spacer { flex: 0 0 0; }
 .wkband.crowded { order: 1; flex: 1 1 100%; }
 .workers { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); flex-wrap: nowrap;
   flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; border-radius: 6px; }

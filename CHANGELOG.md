@@ -108,10 +108,10 @@ of a key bumps that number and is listed here.
   sentences are held to a fixed number of lines. Before, a 130-character name widened a phone page
   to 1064 px and a recent row pushed a desktop page to 2576 px.
 - **Rows no longer jump when the page updates.** A waiting reason always takes two lines, an expanded
-  row's step line is one line whatever the step is called, the worker pills sit in one strip, a host
-  card's lines stay one line each as its five-second samples change, and the live button keeps its
-  width as its seconds tick — so a changing reason, a new step or the clock no longer moves
-  everything below it.
+  row's step line is one line whatever the step is called, the worker pills sit in one strip that
+  keeps the header on the same rows as lanes go busy and idle, a host card's lines stay one line
+  each as its five-second samples change, and the live button keeps its width as its seconds tick —
+  so a changing reason, a new step, a finished job or the clock no longer moves everything below it.
 - A name that fits is no longer cut by a fraction of a pixel: `macmini` showed as `macmi…`, a job's
   time as `6m 2…`, and the end of a middle-cut name (`name-that-go…`). In the recent list, a job
   from another pool keeps its pool chip readable: it moves to the line under the name when the two
