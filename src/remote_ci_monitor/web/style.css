@@ -845,3 +845,60 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
   .fld.ed .fl, .fld.ed .fa { padding-top: 0; }
   .fld.ed .fa { flex-direction: row; align-items: baseline; gap: 8px; justify-content: flex-start; }
 }
+
+/* ── 스토어 탭 — 극단값에서도 상자 안에 (tests/test_web_layout_store_edges.py) ─────────────
+   80자 넘는 이름 · 끊김 없는 URL · 300자 커밋 · 긴 검증 오류가 와도 페이지가 옆으로 밀리지 않고,
+   폴링 · 타이핑으로 글이 바뀌는 줄(드라이버 머리 · 시트의 한 줄 · 저장 배지 · 카운터)은 자리를
+   지킨다. 잘린 글의 전문은 title 에 있다(app.js). 선택자는 전부 스토어 탭 안의 것이다. */
+#store p { overflow-wrap: anywhere; }
+/* 비밀 표: 이름은 어디서든 꺾고, 종류 · 상태는 한 줄, 검증 칸은 세 줄에서 자른다 —
+   표가 자기 상자 안에서 옆으로 스크롤해 오른쪽 열(드롭존 · 교체)을 가리지 않는다 */
+table.sec td.name .key { overflow-wrap: anywhere; }
+table.sec td.kind, table.sec td.state { white-space: nowrap; }
+table.sec td.ver .vtx { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+/* Source 행의 커밋은 한 줄 — 제목 · 누가 · 언제 모두 말줄임 */
+table.gh { table-layout: fixed; }
+table.gh td.sha { width: 8ch; }
+table.gh td.meta { width: 12em; }
+table.gh td.subj, table.gh td.meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 요약 띠의 칩은 한 줄 — 이름표(«소스»)는 꺾이지 않고 값만 말줄임 */
+.vchip { max-width: 100%; box-sizing: border-box; white-space: nowrap; overflow-wrap: normal; align-items: center; }
+.vchip .g, .vchip b { flex: none; }
+.vchip .vc-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 드라이버 머리 줄 — 폴링마다 바뀌어도 한 줄. 버전은 반까지만 쓴다(단계가 밀려나지 않게) */
+.drv-head { align-items: center; white-space: nowrap; min-width: 0; }
+.drv-head .g { flex: none; }
+.drv-head .dh-v { flex: 0 1 auto; min-width: 3em; max-width: 50%; overflow: hidden; text-overflow: ellipsis; }
+.drv-head .dh-r { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 바텀시트의 접힌 한 줄 — 300자 상태가 와도 시트가 자라 본문을 덮지 않는다 */
+.sh-head .st { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 저장 배지 — 자리는 글과 상관없이 정해지고(머리가 다시 접히지 않는다), 글은 한 줄 */
+.vedit-head [data-save-slot] { flex: 1 1 0; min-width: 12em; height: 20px; align-self: center; display: flex; align-items: center; justify-content: flex-end; }
+.savebadge { max-width: 100%; min-width: 0; white-space: nowrap; align-items: center; }
+.savebadge .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.savebadge .btn { flex: none; padding-top: 0; padding-bottom: 0; line-height: 16px; }
+/* 절 머리 · 시트 머리의 버전 이름 — 80자 이름은 말줄임(전문은 title), 상태 필은 그대로 */
+.ssec h3 [data-section-version] { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.sh-head .ver { min-width: 0; max-width: 100%; }
+.sh-head .ver .vt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-head .ver .pill { flex: none; }
+/* 글자 수 카운터 — 다섯 자리 + 상한까지 같은 폭이라 치는 동안 입력칸이 줄었다 늘었다 하지 않는다 */
+.fld .counter { min-width: 10ch; text-align: right; }
+.fld .fl { min-width: 0; overflow-wrap: anywhere; }
+.fld > .pill { justify-self: start; }
+/* 못 받은 스크린샷(404 · 옮겨진 파일)은 Chrome 이 alt 글로 그리는데, 인라인이면 width · height 를
+   무시하고 경로 길이만큼(740px) 옆 그림 위로 번진다 — 블록이면 84×150 상자를 지킨다 */
+.shot { overflow: hidden; }
+.shot img { display: block; overflow: hidden; }
+@media (max-width: 720px) {
+  /* iOS 는 16px 밑의 칸에 포커스하면 화면을 확대한다 — 그러면 페이지가 옆으로 밀린다 */
+  #store input[type="text"], #store textarea { font-size: 16px; }
+  /* 대기열의 폰 규칙(`.pill` 을 어디서든 꺾는다)이 스토어 탭에서는 «실패» 를 «실/패» 로 꺾는다 */
+  #store .pill { white-space: nowrap; overflow-wrap: normal; }
+  .fld.ed .counter { text-align: left; }
+  table.gh, table.gh tbody { display: block; }
+  table.gh tr { display: grid; grid-template-columns: 8ch minmax(0, 1fr); column-gap: 6px; padding: 2px 0; }
+  table.gh td { display: block; min-width: 0; padding: 0; }
+  table.gh td.sha, table.gh td.meta { width: auto; }
+  table.gh td.meta { grid-column: 2; }
+}
