@@ -212,6 +212,7 @@ class Worker(threading.Thread):
         now_fn: Callable[[], datetime] = _utcnow,
         environ: dict[str, str] | None = None,
         admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
+        claimant: Callable[[datetime], Any] | None = None,
     ):
         super().__init__(name=f"rcm-worker-{lane}", daemon=True)
         self.lane = lane
@@ -224,6 +225,8 @@ class Worker(threading.Thread):
         self.now_fn = now_fn
         # 부하 게이트(M5f). None 이면 게이트 없이 오늘처럼 집는다(테스트·단독 사용).
         self.admit = admit
+        # 이 레인이 claim 할 때 넘길 신원(M5n §5.2). None 이면 옛 규칙(기본 풀의 잡만).
+        self.claimant = claimant
         self.environ = environ if environ is not None else dict(os.environ)
         self._lock = threading.Lock()
         self._state = WORKER_IDLE
@@ -265,7 +268,9 @@ class Worker(threading.Thread):
             self._error = error
 
     def _claim(self, now: datetime) -> Job | None:
-        return self.store.claim(self.lane, now)
+        if self.claimant is None:
+            return self.store.claim(self.lane, now)
+        return self.store.claim(self.lane, now, claimant=self.claimant(now))
 
     def _set_hold(self, hold: Any) -> None:
         """부하로 막혔으면 `held`, 아니면 `idle`. `_set` 이 상태가 바뀔 때만 `_since` 를 되감으므로
@@ -655,6 +660,7 @@ def start_workers(
     on_marker: Callable[[int, str, str], None] | None = None,
     now_fn: Callable[[], datetime] = _utcnow,
     admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
+    claimant: Callable[[datetime], Any] | None = None,
 ) -> list[Worker]:
     workers = [
         Worker(
@@ -667,6 +673,7 @@ def start_workers(
             on_marker=on_marker,
             now_fn=now_fn,
             admit=admit,
+            claimant=claimant,
         )
         for lane in range(1, config.server.lanes + 1)
     ]

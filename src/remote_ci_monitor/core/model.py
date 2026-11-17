@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -104,6 +105,23 @@ REASON_HELD_BY_LOAD = "held_by_load"
 #: **정상 실행마다** 4분 침묵 조건에 걸렸다). 진짜로 죽은 잡은 `stuck` 과 프리셋의
 #: `timeout_seconds` 가 잡는다.
 REASON_QUIET = "quiet"
+#: `any-capable` 잡인데 살아 있는 후보가 전부 ineligible · unknown 이다(M5n §7.3). 행동 가능.
+REASON_NO_CAPABLE_MACHINE = "no_capable_machine"
+#: 후보 워커가 전부 점검 실패로 막혔다(pool 잡 포함). 행동 가능 — 사람이 머신을 고쳐야 한다.
+REASON_CHECK_FAILED = "check_failed"
+#: 후보 중 점검이 돌고 있거나 기다리는 것뿐이다. 스스로 풀린다 — `held_by_load` 와 같은 종류.
+REASON_CHECK_PENDING = "check_pending"
+
+#: M5n 배치 · 그룹 범위 (DB 에 그대로 들어가는 값)
+PLACEMENT_POOL = "pool"
+PLACEMENT_CAPABLE = "capable"
+PLACEMENTS = (PLACEMENT_POOL, PLACEMENT_CAPABLE)
+SCOPE_POOL = "pool"
+SCOPE_HOST = "host"
+SCOPE_GLOBAL = "global"
+SCOPES = (SCOPE_POOL, SCOPE_HOST, SCOPE_GLOBAL)
+#: 기대 시간의 출처 — 그 호스트에는 표본이 모자라 **다른 호스트들**의 중앙값을 썼다(신뢰도 low)
+SOURCE_MEASURED_OTHER = "measured_other"
 
 #: `Estimate.stuck_code` — 「왜 죽었다고 보나」. 화면·CLI 가 근거별로 다른 문장을 그린다.
 STUCK_ELAPSED = "over_elapsed"  # 경과가 예상의 `stuck_multiplier` 배를 넘었다
@@ -113,6 +131,8 @@ STUCK_NO_OUTPUT = "no_output"  # 단계 이야기를 안 하는 잡이 `no_outpu
 #: 「Not moving」 요약에 오르는 행동 가능한 이유. 순서가 우선순위다.
 ACTIONABLE_REASONS = (
     REASON_WORKER_DOWN,
+    REASON_NO_CAPABLE_MACHINE,
+    REASON_CHECK_FAILED,
     REASON_STUCK,
     REASON_UPLOAD_STALLED,
     REASON_NOT_SCHEDULED,
@@ -158,6 +178,17 @@ class Preset:
     inputs: tuple[InputSpec, ...] = ()
     artifacts: tuple[str, ...] = ()  # 잡이 만든 파일 중 돌려줄 것의 글롭 (M5e)
     artifacts_on: str = "always"  # "always"(오늘의 동작) | "failure" — 언제 모으나 (M5g)
+    #: 어디서 도나(M5n 결정 97). `pool`(기본, 오늘 그대로) · `capable`(판정이 eligible 인 워커
+    #: 아무 데나). 설정 문자열은 `"any-capable"` 이고 여기엔 DB 와 같은 값이 들어간다.
+    placement: str = "pool"
+    #: 같은 `concurrency_group` 을 막는 범위(M5n 결정 100) — `pool` · `host` · `global`
+    concurrency_scope: str = "pool"
+    #: 이 워커에서 현재 지문으로 통과해야 하는 점검 프리셋들(M5n §4.4)
+    checks: tuple[str, ...] = ()
+    #: rcm 이 점검을 스스로 걸 때 쓰는 ref(점검 프리셋에만 뜻이 있다). `HEAD` = 기본 브랜치
+    check_ref: str = "HEAD"
+    #: 추정 표본에 넣나(M5n 결정 103). None 이면 설정을 읽을 때 정한다 — 점검 프리셋은 False
+    sample: bool | None = None
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -269,6 +300,14 @@ class Job:
     pool: str = DEFAULT_POOL  # 어느 풀의 워커가 돌리는가 (M5b)
     worker_name: str | None = None  # 원격 워커가 claim 했으면 그 이름, 로컬 레인은 None (M5b-2)
     link: JobLink | None = None  # 호출자가 붙인 링크(v22). 옛 잡 · 링크 없이 낸 잡은 None
+    #: M5n(v23) — 어디서 돌 수 있나와 어디서 돌았나
+    placement: str = "pool"  # "pool" | "capable"
+    display_pool: str | None = None  # capable 잡이 기다리는 동안 보이는 풀(None = pool)
+    target_worker: str | None = None  # 그 워커만 집는다(점검 잡 · --machine)
+    concurrency_scope: str = "pool"  # "pool" | "host" | "global" — 제출 때 박는다
+    host_key: str | None = None  # 집은 워커의 호스트(claim 때 박는다)
+    fingerprint_hash: str | None = None  # 집은 워커의 그때 지문
+    sample: bool = True  # 추정 표본에 넣나(점검 · 예열 잡은 False)
 
     @property
     def is_waiting(self) -> bool:
@@ -403,6 +442,32 @@ class QueueRow:
     blocked_by: BlockedBy | None
     estimate: Estimate
     progress: Progress | None
+    #: 대기 잡이 들어갈 수 있는 머신과 못 들어가는 이유(M5n §7.3) — 최대 8개
+    placement_detail: tuple[PlacementNote, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlacementNote:
+    """대기 잡 하나에서 본 워커 하나의 판정(M5n §7.3 `placement_detail`)."""
+
+    worker: str
+    display_name: str
+    state: str  # eligible · ineligible · unknown · down
+    code: str
+    detail: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Placement:
+    """잡 하나가 들어갈 수 있는 워커들(M5n §7.2). `None` 은 로컬 레인이다.
+
+    `workers` 가 비면 `reason` 이 왜인지 말한다(`no_capable_machine` · `check_failed` ·
+    `check_pending`). 비었는데 `reason` 도 없으면 「돌릴 레인이 없다」(`worker_down`)다.
+    """
+
+    workers: frozenset[str | None]
+    reason: str | None = None
+    notes: tuple[PlacementNote, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -421,6 +486,7 @@ class WorkerInfo:
     since: datetime | None = None
     worker: str | None = None  # 원격 워커 이름. 로컬 레인은 None (M5b-2)
     pool: str = DEFAULT_POOL  # 이 레인이 섬기는 풀 (M5b-4: rcm check 가 워커를 풀에 묶는다)
+    host_key: str | None = None  # 이 레인이 도는 물리 컴퓨터(M5n §3). 모르면 None
     #: `held` 일 때 **왜**(결정 37) — `cpu_busy` · `no_sample` · `cooldown` (M5f).
     hold_code: str | None = None
     #: 화면이 숫자를 그릴 재료. `cpu_busy` 일 때만 `{"cpu_busy": 92.4}`, 아니면 None.
@@ -454,6 +520,9 @@ class ServerInfo:
     snapshot_cache_blobs: int | None = None  # 캐시가 꺼져 있으면 None (M5)
     snapshot_cache_bytes: int | None = None
     notify_failures: int = 0
+    #: 능력 보고의 세대(M5n §4.2)와 머신별 요약(JSON 그대로 — `server.machines[]`)
+    generation: str | None = None
+    machines: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -214,3 +214,16 @@ describe("디스크 문자열", () => {
     });
   });
 });
+
+describe("fmtDisk — 눈금", () => {
+  test("1 TB 아래는 십진 GB 정수, 1 TB 부터는 TB 한 자리", () => {
+    // 미터 한 칸(170px)에 「디스크 7290 GB / 7995 GB」 는 안 들어가 말줄임됐다(영역 B 시험)
+    assert.equal(rcm.fmtDisk(289995948032), "290 GB");
+    assert.equal(rcm.fmtDisk(999000000000), "999 GB");
+    assert.equal(rcm.fmtDisk(1e12), "1.0 TB");
+    assert.equal(rcm.fmtDisk(7289995948032), "7.3 TB");
+    assert.equal(rcm.fmtDisk(7994662584320), "8.0 TB");
+    assert.equal(rcm.fmtDisk(4666636288), "5 GB");
+    assert.equal(rcm.fmtDisk(null), "—");
+  });
+});

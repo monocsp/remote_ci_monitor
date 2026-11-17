@@ -1,13 +1,18 @@
-# rcm worker configuration — a second build machine serving one pool.
-# Run: RCM_WORKER_TOKEN=<token> rcm worker --config worker.toml
+# rcm worker configuration — another computer that runs jobs for the build machine.
+# Write it with `rcm init worker` (it fills in pool with this computer's short host name).
+# Check:  RCM_WORKER_TOKEN=<token> rcm worker --check
+# Run:    RCM_WORKER_TOKEN=<token> rcm worker --config worker.toml
+# Service: rcm init worker --service-file PATH   (launchd plist or systemd unit, file only)
 # Flags (--server, --pool, --lanes, --name, --data) override these values.
 # Create the token on the server: rcm token add build-02 --worker
 
-server = "http://macmini:8787"      # the rcm server (outbound only — works from behind NAT)
+server = "auto"                     # find the rcm server on this network (mDNS), or a URL
+# server_name = "macmini"           # several servers on the network: the advertised name to use
 # token = "…"                       # or export RCM_WORKER_TOKEN (never pass it as a flag)
-pool = "linux"                      # presets with pool = "linux" run here
+pool = "default"                    # presets with pool = "<this name>" run here
 lanes = 1                           # parallel jobs on this machine (1-64)
 # name = "build-02"                 # display name for the host sample (default: hostname)
+# accept_any = true                 # false: never take placement = "any-capable" jobs
 # data_dir = "~/.local/share/rcm-worker"   # workspaces and local log copies
 # grace_seconds = 10                # SIGTERM → SIGKILL on cancel/timeout/stop
 # keep_workspace_on_failure = true  # failed workspaces stay 7 days for debugging

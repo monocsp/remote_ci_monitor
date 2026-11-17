@@ -205,8 +205,12 @@ def test_bad_lanes_is_a_usage_error(home, srv, token, capsys):
     assert srv.store.get_worker(WORKER) is None
 
 
-def test_missing_server_is_a_usage_error(home, srv, token, capsys):
-    """§2: `--server` 도 `--config` 의 `server` 도 없으면 usage 2, stderr 가 server 를 말한다."""
+def test_missing_server_is_a_usage_error(home, srv, token, capsys, monkeypatch):
+    """§2: `--server` 도 `--config` 의 `server` 도 없으면 같은 망에서 찾고(M5n §9), 아무것도 못
+    찾으면 usage 2, stderr 가 server 를 말한다. 진짜 LAN 을 훑지 않게 발견을 빈 결과로 바꾼다."""
+    import remote_ci_monitor.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "discover", lambda **_kw: [])
     token(srv)
     code, out, err = run(capsys, ["worker", "--pool", "linux", "--check"])
     assert code == 2, (out, err)
@@ -229,6 +233,32 @@ def test_missing_token_with_check_is_also_2(home, srv, capsys):
     code, out, err = run(capsys, worker_argv(srv, "--check"))
     assert code == 2, (out, err)
     assert TOKEN_ENV in err, err
+
+
+def test_bare_worker_reads_the_file_rcm_init_worker_wrote(home, srv, token, capsys):
+    """M5n §9 · S1: `rcm init worker` 가 쓴 `~/.config/rcm/worker.toml` 을 `rcm worker --check`
+    가 `--config` 없이 읽는다 — 문서의 순서가 그렇다. 실측(2026-11-16): 안 읽어서 풀이 `default`
+    로 나오고 `server` 를 같은 망에서 찾아 **다른 서버**(운영)에 토큰을 보냈다."""
+    token(srv)
+    default = home / ".config" / "rcm" / "worker.toml"
+    default.parent.mkdir(parents=True)
+    default.write_text(f'server = "{url_of(srv)}"\npool = "mbp"\n')
+    code, out, err = run(capsys, ["worker", "--check"])
+    assert code == 0, out + err
+    assert "mbp" in row_line(out, "pool"), out
+    assert str(default) in err, err  # 어느 파일을 읽었는지 말한다
+
+
+def test_long_form_with_server_does_not_read_the_default_file(home, srv, token, capsys):
+    """`--server` 를 준 긴 꼴(문서 「The long form still works, with flags instead of a file」)은
+    기본 파일을 안 읽는다 — 그 파일의 repos · data_dir 이 몰래 섞이지 않게."""
+    token(srv)
+    default = home / ".config" / "rcm" / "worker.toml"
+    default.parent.mkdir(parents=True)
+    default.write_text('server = "http://127.0.0.1:9"\npool = "from-file"\n')
+    code, out, err = run(capsys, ["worker", "--server", url_of(srv), "--check"])
+    assert code == 0, out + err
+    assert "from-file" not in row_line(out, "pool"), out
 
 
 def test_token_from_config_file(home, srv, tmp_path, capsys):

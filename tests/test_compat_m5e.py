@@ -58,6 +58,8 @@ SERVER_KEYS_V1 = {
     "snapshot_cache",
     "notify_failures",
     "workers",
+    "generation",  # M5n(키 추가만)
+    "machines",
 }
 
 READY = {

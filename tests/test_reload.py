@@ -9,6 +9,7 @@
 """
 
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,11 @@ def live():
         cfg = config.load_server_config(path)
         app = server.App(cfg, store.Store(cfg.data_dir / "db.sqlite3"))
         yield app, write, head
+        # reload 은 능력 다시 재기를 뒤 스레드(`rcm-measure`)로 띄운다(M5n). 그 스레드가 아직 DB 에
+        # 쓰는 중에 임시 폴더를 지우면 `Directory not empty` 로 teardown 이 깨진다 — 끝나길 기다린다
+        for t in threading.enumerate():
+            if t.name == "rcm-measure":
+                t.join(timeout=30)
 
 
 # ── 되는 것 ──────────────────────────────────────────────────────────────────

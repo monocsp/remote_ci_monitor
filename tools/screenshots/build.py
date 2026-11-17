@@ -197,8 +197,14 @@ def main() -> int:
             (5, union(pick(r, "[data-more-recent]"), pick(r, "#estimates")), "l"),
         ],
         # 절 머리(「Recent · last 5 of 6」)부터 추정 근거 줄까지 — 위가 잘려 첫 행이 반만 보이던
-        # 자리를 절 머리에 맞춘다
-        crop=(0, 255, 1280, 655),
+        # 자리를 절 머리에 맞춘다. 고정 좌표(255)는 위 절들의 높이가 바뀌자 머리를 잘랐다 —
+        # 원본의 절 머리 · 추정 근거 줄 좌표에서 잰다
+        crop=(
+            0,
+            int(pick(r, "#recent .s-h")[1]) - 12,
+            1280,
+            int(sum(pick(r, "#estimates")[1::2])) + 10,
+        ),
     )
 
     h = rects("host")

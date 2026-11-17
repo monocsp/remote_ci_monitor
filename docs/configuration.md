@@ -20,7 +20,7 @@ current directory, and creates `rcm.sqlite3` there.
 |---|---|---|
 | `server.toml` | the build machine (`rcm serve`) | `rcm init server` |
 | `client.toml` | every session (`rcm run`, `rcm top`, …) | `rcm init client [--server URL]` |
-| `worker.toml` | a second build machine (`rcm worker`) | copy `examples/worker.toml` |
+| `worker.toml` | a second build machine (`rcm worker`) | `rcm init worker [--server URL\|auto]` |
 
 New to rcm? Read the [usage guide](usage.md) first — it walks through a first job with
 screenshots. This page is the reference.
@@ -599,6 +599,10 @@ install; it cannot vouch for the service, whose `PATH` is not yours — an `ok` 
 about the job. The check that counts is the one at job start. The row names each entry the way
 the job log does — by its basename, never by the path you declared.
 
+A `placement = "any-capable"` preset is listed in both rows with `any machine` and never fails
+them: it goes to a machine that has its tools, so a tool missing here is expected. Whether some
+machine can run it is the `placement` row's question.
+
 **The row below it does vouch for the service.** `service preset tools` is the same two questions
 asked by the server, in the environment the service actually has, and answered once when the
 server starts:
@@ -956,29 +960,330 @@ What the admission gate does and does not do:
 
 ## Second build machine (remote worker)
 
-A preset can run on another machine by naming a pool (`pool = "linux"`). That machine runs
-`rcm worker`, which talks to the server outbound only (it works from behind NAT; the server never
-connects to workers):
+A preset can run on another machine, either by naming that machine's pool (`pool = "linux"`) or
+by letting any machine that can do the job take it (`placement = "any-capable"`, next section).
+That machine runs `rcm worker`, which talks to the server outbound only (it works from behind NAT;
+the server never connects to workers). The short way to add one:
 
 ```sh
 # on the server
-rcm token add build-02 --worker             # printed once; a worker token only speaks /worker/*
-# on the second machine (same rcm release as the server)
+rcm token add mbp --worker        # prints the secret once, then the line to type on the worker:
+                                  #   RCM_WORKER_TOKEN=<token above> rcm worker --check
+# on the new machine (same rcm release as the server)
+rcm init worker                   # ~/.config/rcm/worker.toml (mode 600) with server = "auto"
 export RCM_WORKER_TOKEN=<that token>
+rcm worker --check                # server · token kind · pool · fingerprint · presets
+rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
+```
+
+`rcm init worker [--server URL|auto] [--pool P] [--lanes N] [--name N] [--force]` writes
+`worker.toml` from the packaged template (the same file as `examples/worker.toml`). `server`
+defaults to `"auto"`, `pool` to the machine's short host name and `lanes` to 1; an existing file
+is kept unless you pass `--force`. `--service-file PATH` writes only the service file — a launchd
+plist on macOS, a systemd user unit on Linux, the same shape as
+`examples/launchd/com.remote-ci-monitor.worker.plist` and `examples/systemd/rcm-worker.service`.
+It runs this `rcm` by its absolute path with
+`PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` (never the venv's `bin`
+first — see [operating](operating.md#run-as-a-service)). It starts nothing: it prints the
+`launchctl bootstrap …` or `systemctl --user enable --now …` line to run next. Neither command
+writes the token anywhere; carrying it to the worker is still a person's job. A service does not
+see the `RCM_WORKER_TOKEN` of your shell, so before you start it put `token = "…"` in
+`worker.toml` (the file is mode 600).
+
+Without `--config`, `rcm worker` reads the `worker.toml` that `rcm init worker` wrote
+(`~/.config/rcm/worker.toml`, or under `$XDG_CONFIG_HOME`) when it exists, and says which file it
+read. The long form still works, with flags instead of a file — given `--server`, it reads no file
+unless you pass `--config`:
+
+```sh
 rcm worker --server http://macmini:8787 --pool linux --lanes 1 --check   # server · token kind · pool
 rcm worker --server http://macmini:8787 --pool linux --lanes 1           # Ctrl-C or SIGTERM stops it
 ```
 
-The worker registers, claims one queued job of its pool per lane, downloads the snapshot (or
-fetches the `git_ref` from its own `[[repos]]` — put a `worker.toml` next to it and pass
-`--config`), streams the raw log to the server, which parses the step markers, and reports the
-outcome. `rcm top` and the web header show it as `build-02/1 busy #511`; its host sample appears
-under that pool. If the server hears no heartbeat for `worker_timeout_seconds` (60) the worker
-shows `down`, its running jobs become `lost` (`worker build-02 unreachable for 61s`) and are not
-resumed — resubmit. Stopping the worker reports its running jobs as `lost` (`worker stopped`).
-`worker.toml` keys: `server`, `token` (or the env var), `pool`, `lanes`, `name`, `data_dir`,
-`grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
+**Finding the server.** With `server = "auto"` (or an empty `server`) the worker looks for the
+server on the network over mDNS, as `rcm discover` does. One server found: that one. Several: the
+one whose advertised name equals `server_name` in `worker.toml`. None, or still several, and the
+worker prints the names it saw and stops with exit 2 — set `server_name = "<name>"` or a fixed
+address. After **5 consecutive connection failures** on register or heartbeat an `auto` worker
+looks again, so a server whose address changed (DHCP) is found without restarting the worker. A
+fixed `server = "http://…"` or `--server` is never looked up. `rcm worker --check` follows the same
+rules, and also prints two rows that never fail the check: `fingerprint` (what the
+[probes](#environment-fingerprint-probes) return here) and `presets` (how many presets this
+worker can run, and the top reasons for the rest), both measured on the spot in this process's
+`PATH`.
+
+The worker registers, measures and reports its environment, then claims queued jobs per lane,
+downloads the snapshot (or fetches the `git_ref` from its own `[[repos]]` — keep them in
+`worker.toml` and pass `--config`), streams the raw log to the server, which parses the step
+markers, and reports the outcome. `rcm top` and the web header show it as `build-02/1 busy #511`;
+its host sample appears under that pool. If the server hears no heartbeat for
+`worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
+(`worker build-02 unreachable for 61s`) and are not resumed — resubmit. Stopping the worker
+reports its running jobs as `lost` (`worker stopped`). `worker.toml` keys: `server` (a URL, or
+`"auto"`), `server_name`, `token` (or the env var), `pool`, `lanes`, `name`, `accept_any`,
+`data_dir`, `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
 `examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
+
+## Which machine runs a job
+
+Every worker — the server's own lanes (shown as `@local`) and each `rcm worker` — measures its own
+environment and reports it: for every preset, which `requires` tools its job `PATH` can reach, and
+the output of the `[[probes]]` commands, its **fingerprint**. From that report the server decides,
+per worker and preset, whether the worker can run the preset: `eligible`, `ineligible` or
+`unknown`, with a reason. A worker that has not shown it can do a job is not handed that job on the
+hope that it will work.
+
+A **worker** is a process that claims jobs; a **host** is the physical computer. Two workers on one
+Mac (`rcm serve`'s lanes and an `rcm worker` beside it) share its simulators, disk and CPU, and rcm
+knows they are one host: it keys hosts by a hash of the hardware UUID (`IOPlatformUUID` on macOS,
+`/etc/machine-id` on Linux) and never stores or shows the UUID itself.
+
+### Environment fingerprint: `[[probes]]`
+
+```toml
+[[probes]]
+name = "xcode"                       # lowercase letters, digits, - and _; 32 characters at most
+argv = ["xcodebuild", "-version"]    # no shell
+timeout_seconds = 10                 # default 10, at most 60
+```
+
+Each worker runs every probe in its own service environment — the same `PATH` rules its jobs get —
+right after it registers, after a server start or `rcm reload`, and every
+`probe_interval_seconds` (default 600, at least 60). stdout and stderr together are reduced to the
+first two non-empty lines joined with ` · `, control characters removed, cut at 120 characters.
+Each probe ends in one state:
+
+| state | when | value |
+|---|---|---|
+| `ok` | exit 0 | the reduced output — `Xcode 27.2 · Build version 27B52` |
+| `error` | non-zero exit | `exit N` |
+| `missing` | the program is not found | none |
+| `timeout` | still running after `timeout_seconds` | the previous value, marked stale |
+
+The fingerprint hash covers the `ok`, `error` and `missing` probes. A `timeout` does not change
+it: the previous value carries over, marked stale, so one slow run is not a new environment. A
+timeout on the very first measurement leaves the fingerprint `unknown`. When the fingerprint
+changes rcm keeps the previous values, across restarts too, and shows what moved:
+`xcode 26.5 → 27.2`. It compares values only — there is no version arithmetic like
+`xcode >= 27`; whether a new version still works is what a [check](#proving-a-machine-works-checks)
+is for. Without any `[[probes]]` the fingerprint is the same every time.
+
+Probe output is readable by anyone who can read the queue: the values travel on the read routes
+`/api/machines` and `/api/status`, so with `read_auth = "none"` everyone on the same network sees
+them. Pick commands that print only a version (`xcodebuild -version`, `java -version`,
+`flutter --version --machine`), never ones that print paths, user names or host names (`which`,
+`env`, `xcode-select -p`).
+
+The output must also stay the same while nothing changes. Only the first two non-empty lines
+count, but a relative time in them moves the fingerprint by itself: plain `flutter --version`
+prints `revision 058e0af2c2 (4 months ago)` on its second line, so the fingerprint changes when
+the month turns and every check runs again. `--machine` prints the same JSON for the same
+version.
+
+A duplicate name, an empty `argv` or more than 64 probes stops the server at start, naming the
+key. `rcm reload` re-reads `[[probes]]`; every worker then fetches the new list and measures again.
+
+### Placement: `placement = "any-capable"`
+
+| `placement` | who may take the job |
+|---|---|
+| `"pool"` (default) | the lanes of the preset's `pool` — exactly as before |
+| `"any-capable"` | any worker, in any pool, whose verdict for this preset is `eligible` |
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+placement = "any-capable"        # instead of a pool: any machine that can run it
+requires = ["fvm", "gitleaks"]
+concurrency_group = "gate"
+concurrency_scope = "host"       # one at a time per computer, in parallel across computers
+```
+
+For an `any-capable` preset, `pool` only decides which pool section a *waiting* job is listed
+under. The worker that picks the job up stamps its own pool on it, so the finished job, its
+notifications, `rcm jobs --pool` and the medians all record where it really ran. `rcm run … --pool
+X` pins that one job to pool X — the person's choice wins. A worker missing a `requires` tool never
+sees an `any-capable` job. A `pool` job is unchanged: a worker of that pool still picks it up and
+it fails at once with `tool_missing`, because you tied it to that pool and a quick red beats a
+silent wait.
+
+`any-capable` is for presets that need no secrets. The release profile's secret files live on the
+server under `<config dir>/secrets/<repo>/` and are never shipped to a worker, so a deploy, upload
+or release preset stays `placement = "pool"` on the machine that holds them. Gates, tests and
+checks that read nothing secret are what `any-capable` is for.
+
+A `git_ref` job is fetched by whichever worker takes it, so every worker that may take an
+`any-capable` `git_ref` preset — and every worker that runs checks, which are always `git_ref` —
+needs the same `[[repos]]` entry in its `worker.toml`. A worker without it fails the job with
+`repo_missing`.
+
+A worker can opt out: `accept_any = false` in `worker.toml` (default `true`) keeps it for its own
+pool's jobs and for checks addressed to it — a device lab you keep for one purpose. The server's
+own lanes use `[server] local_accept_any` (default `true`).
+
+The verdict, worker by worker — the first row that applies is the answer:
+
+| code | state | meaning |
+|---|---|---|
+| `report_missing` | unknown | the worker has not reported yet |
+| `report_stale` | unknown | the report predates the last server start or `rcm reload`, or is older than 3 × `probe_interval_seconds` |
+| `tool_missing` | ineligible | a `requires` tool is not found |
+| `workspace_tool` | unknown | the tool could only come from a relative `PATH` entry, which exists once a workspace does |
+| `check_failed` | ineligible | a check preset failed on this worker with its current fingerprint |
+| `check_running` | unknown | that check is queued or running |
+| `check_needed` | unknown | no check has passed on this worker with its current fingerprint |
+| `fingerprint_unknown` | unknown | the preset has `checks` and the fingerprint is unknown |
+| `ok` | eligible | — |
+
+`env_passthrough` names the worker's environment lacks are shown but do not block: an empty value
+can be intended.
+
+**When nothing can run it.** The job is queued anyway — a machine may be fixed later — and
+`rcm run` prints one line on stderr: `gate: no capable machine — mbp: fvm missing ·
+mac2-worker: down`. A busy machine is not a problem: if an eligible worker is merely busy, the job
+waits as usual and nothing is printed. While no worker can take it, the waiting row's reason is
+`no capable machine` with each worker's reason, its ETA is `—`, and the web page lists it under
+the jobs that need attention. The `POST /jobs` answer carries
+`placement: {mode, eligible_now, blocked}` for wrappers.
+
+### Proving a machine works: `checks`
+
+```toml
+[[presets]]
+name = "sim-check"                    # the project's own check: boot a simulator, tap once
+argv = ["bash", "scripts/qa/sim_check.sh"]
+source_modes = ["git_ref"]
+repo = "app"
+# check_ref = "HEAD"                  # the ref rcm runs it from (default: the default branch)
+
+[[presets]]
+name = "scenario-qa"
+argv = ["bash", "scripts/qa/scenario.sh"]
+checks = ["sim-check"]                # a worker takes this only once sim-check passed there
+```
+
+`checks` names *check presets*: before a worker gets the preset, each of them must have succeeded
+**on that worker with its current fingerprint**. Every name in `checks` must be a preset that
+accepts `git_ref` in its `source_modes`, because rcm submits it by itself from the repository —
+`check_ref` on the check preset (default `"HEAD"`, the repository's default branch) is the ref it
+resolves, and the check's inputs take their defaults. A check preset cannot have `checks` of its
+own. Breaking any of these stops the server at start.
+
+The state of a check comes from the job history: the newest job of that check preset that ran on
+that worker with the current fingerprint. Succeeded → passed; queued or running → `check_running`;
+failed or timed out → `check_failed`; none, cancelled or lost → `check_needed`. `checks` also
+applies to `pool` presets — a check that has not passed makes the job **wait** (`check failed` or
+`check pending`), it is not picked up to fail.
+
+**Automatic checks.** With `[server] auto_checks = true` (the default) a sweeper every
+`check_sweep_seconds` (30) submits each needed check **pinned to that worker**: requester
+`rcm:check`, label `rcm (machine check)`, priority `high`. It does so **once** per worker, check
+and fingerprint, so a check that fails, is cancelled or is lost is not submitted again by itself —
+no retry loop — and **at most three times a day** per worker and check, however often the
+fingerprint changes (a worker describes its own environment; one that keeps reporting a new
+fingerprint shows `auto_check_limit` instead of running checks all day). A worker that is down gets
+none, and neither does a worker that could never take the preset that needs the check (outside its
+pool, or not accepting any-capable jobs). A check that ends without a verdict (cancelled or lost)
+proves nothing: a pass or failure already recorded for the same fingerprint still stands. If `check_ref` cannot be resolved the sweep skips
+that check and `rcm machines` shows `ref_unresolved`. A check job is an ordinary job: it is in the
+queue, keeps its log and fires notifications.
+
+What starts it again is a person — `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the
+web page — or the next change of fingerprint. A check that will not come back by itself — the
+automatic one was lost or cancelled, or `auto_checks = false` — is not shown as pending: the
+waiting job's reason is `check failed` with `sim-check #3621 did not finish — recheck`, and
+`rcm check` fails its `machines` row (`1 check needs rcm recheck`). So when Xcode updates itself overnight, the machine's
+`scenario-qa` drops to `check_needed`, the sweeper runs `sim-check` there once, and if that goes red
+`rcm check`, `rcm machines` and the web page say
+`scenario-qa: check_failed (sim-check #3620 · xcode 26.5 → 27.2)` the same day. Fix the machine,
+run `rcm recheck @local sim-check`, and it turns green.
+
+A check preset can also warm the machine: put `pub get`, Gradle or CocoaPods in front of the real
+check, and the first real job after an environment change finds warm caches.
+
+### Running on one machine: `--machine`
+
+`rcm run PRESET --machine ID` pins a job to one worker (`machine` in the `POST /jobs` body); only
+that worker's lanes take it, ignoring pool, placement and verdict, so a check can never block
+itself. A token may pin a check preset; pinning any other preset needs an admin token (403
+otherwise). An unknown machine is 400, a machine that is down 409 — no job is created and
+`rcm run` exits 2. A pinned job whose tool is missing is picked up and fails with `tool_missing`,
+which for a check is the failed check.
+
+### Concurrency groups across machines: `concurrency_scope`
+
+`concurrency_group` keeps two jobs of one group from running at once. `concurrency_scope` says
+where:
+
+| `concurrency_scope` | the group blocks jobs running … | for |
+|---|---|---|
+| `"pool"` (default) | in the same pool — exactly as before | existing configs |
+| `"host"` | on the same physical computer | simulators, emulators, attached devices |
+| `"global"` | anywhere | one shared outside resource: a staging database, a store account |
+
+The scope is stamped on the job when it is submitted, like the group — editing the config does not
+change queued jobs. `"host"` is the one that matters when `rcm serve` and an `rcm worker` share a
+Mac: they are different pools, so `"pool"` cannot stop both from taking the simulator at once;
+`"host"` does.
+
+### Estimates per machine: `sample`
+
+Medians are kept per host. A job's expected duration comes from runs on the host the job is
+expected to run on; when that host has fewer than `min_samples` runs, the median of the other hosts
+is used with confidence `low` (`estimate.source` = `measured_other`); then the preset's
+`expected_seconds`, then the default. Step medians — the "not responding" judgement — never borrow
+another host's numbers: on a host without enough runs only the quiet rule applies, so a slower
+machine is not called stuck. The queue ETA picks, for each waiting job, the open lane where it would
+**finish** first among the workers that may take it.
+
+`sample = false` keeps a preset's jobs out of every median. Check presets default to `false` (a
+check that also warms caches is not a fair sample); everything else defaults to `true`.
+
+### Seeing it: `rcm machines`, `rcm check`, `rcm recheck`
+
+```
+$ rcm machines
+machine            host            pool     lanes  fingerprint                   presets
+Mac mini (@local)  macmini (a1f3)  default  2      xcode 27.2 · flutter 3.47.8   21/24 ok · 3 need sim-check
+mac2-worker        macmini (a1f3)  mac2     1      xcode 27.2 · flutter 3.47.8   21/24 ok
+mbp                mbp (7c20)      mbp      1      xcode 26.5 · flutter missing  4/24 ok · 18 fvm missing
+```
+
+`rcm machines [--json] [--machine ID]` — one row per worker; two workers on one host show the same
+host label. A machine's ID is its worker token name, or `@local` for the server's own lanes; the first column
+shows the display name with the ID in brackets when they differ. `--machine`, `rcm run --machine`
+and `rcm recheck` take either — the ID first, then the display name; a name that fits several
+machines is refused with their IDs. `--machine ID` prints that worker's
+verdict for every preset, each probe with its previous value, and its checks. `--json` is the
+`GET /api/machines` document as the server sends it.
+
+`rcm check` adds two rows. `machines`: how many machines, which changed environment in the last 24
+hours and which check failed — `3 machines · 1 environment changed (Mac mini: xcode 26.5 → 27.2) ·
+1 check failed (Mac mini: sim-check #3620)`; FAIL when a check failed. `placement`: every
+`any-capable` preset and every preset with `checks`, with how many machines can run it now —
+`gate: any machine (2 eligible) · scenario-qa: pool default (check failed)`; warn when one has none.
+
+`rcm recheck MACHINE [CHECK…]` (admin; `POST /machines/{id}/recheck`) submits that worker's checks
+again — all of them, or the ones named — whatever the automatic once-per-fingerprint rule and the
+daily limit say, and prints each job number. A machine that is down is refused (409), as with
+`rcm run --machine`: start `rcm worker` there first. The web page has the same as a **Recheck** button in its machines table,
+for admin tokens. `rcm top` and `rcm jobs` mark an `any-capable` waiting job `any machine` and a
+pinned one `on <machine>`.
+
+### Keys
+
+| where | key | default |
+|---|---|---|
+| `[[probes]]` | `name` · `argv` · `timeout_seconds` | — · — · `10` |
+| `[server]` | `probe_interval_seconds` · `auto_checks` · `local_accept_any` · `check_sweep_seconds` | `600` · `true` · `true` · `30` |
+| `[[presets]]` | `placement` · `concurrency_scope` · `checks` · `check_ref` · `sample` | `"pool"` · `"pool"` · `[]` · `"HEAD"` · `true` (`false` for a check preset) |
+| `worker.toml` | `server = "auto"` · `server_name` · `accept_any` | — · `""` · `true` |
+
+`rcm reload` picks up `[[probes]]` and the preset keys. The `[server]` keys need a restart, like
+the rest of that section: a reload that sees them changed is refused and names them.
+`examples/server.toml` has a commented Flutter block with all of it.
 
 ## Linking a job to a page
 
@@ -1078,6 +1383,9 @@ label = "alice@laptop"                 # who the queue shows as the requester
 `RCM_SERVER`, `RCM_TOKEN` and `RCM_LABEL` override the file; `--server`, `--token` and `--by`
 override both. `RCM_CLIENT_CONFIG` (or `--client-config`) points at another file.
 
-`worker.toml` keys: `server`, `token` (or `RCM_WORKER_TOKEN`), `pool`, `lanes`, `name`,
-`data_dir`, `grace_seconds`, `keep_workspace_on_failure`, `[host]` (the sampler) and `[[repos]]`
-(so the worker can fetch `git_ref` jobs itself). See `examples/worker.toml`.
+`worker.toml` keys: `server` (a URL, or `"auto"` to find it over mDNS), `server_name` (which
+server, when several advertise), `token` (or `RCM_WORKER_TOKEN`), `pool`, `lanes`, `name`,
+`accept_any` (take `any-capable` jobs, default `true`), `data_dir`, `grace_seconds`,
+`keep_workspace_on_failure`, `[host]` (the sampler) and `[[repos]]` (so the worker can fetch
+`git_ref` jobs itself). `rcm init worker` writes one; see `examples/worker.toml` and
+[Second build machine](#second-build-machine-remote-worker).

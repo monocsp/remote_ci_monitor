@@ -1,0 +1,103 @@
+{
+  "generation": "1731740000:3",
+  "machines": [
+    {
+      "id": "@local",
+      "display_name": "Mac mini",
+      "kind": "local",
+      "pool": "default",
+      "lanes": 2,
+      "alive": true,
+      "host_label": "epeuem-…(a1f3)",
+      "host_key": "a1f3c9d2e4b5a6c7",
+      "accept_any": true,
+      "fingerprint": {
+        "hash": "1111aaaa2222bbbb",
+        "measured_at": "2026-09-04T00:50:12Z",
+        "stale": false,
+        "changed_at": "2026-09-03T23:52:12Z",
+        "probes": {
+          "xcode": {
+            "state": "ok",
+            "value": "Xcode 27.2 · Build version 27B52",
+            "previous": "Xcode 26.5 · Build version 26F75"
+          },
+          "flutter": { "state": "ok", "value": "Flutter 3.47.8 • channel stable" }
+        }
+      },
+      "presets": {
+        "gate": { "state": "eligible", "code": "ok", "detail": {} },
+        "scenario-qa": {
+          "state": "ineligible",
+          "code": "check_failed",
+          "detail": { "check": "sim-check", "job_id": 3620 }
+        },
+        "sim-check": { "state": "eligible", "code": "ok", "detail": {} },
+        "lint": { "state": "eligible", "code": "ok", "detail": {} }
+      },
+      "checks": [
+        { "preset": "sim-check", "state": "failed", "job_id": 3620, "auto_submitted": true, "error_code": null }
+      ]
+    },
+    {
+      "id": "mac2-worker",
+      "display_name": "mac2-worker",
+      "kind": "remote",
+      "pool": "mac2",
+      "lanes": 1,
+      "alive": true,
+      "host_label": "epeuem-…(a1f3)",
+      "host_key": "a1f3c9d2e4b5a6c7",
+      "accept_any": true,
+      "fingerprint": {
+        "hash": "1111aaaa2222bbbb",
+        "measured_at": "2026-09-04T00:49:12Z",
+        "stale": false,
+        "changed_at": "2026-08-30T00:52:12Z",
+        "probes": {
+          "xcode": { "state": "ok", "value": "Xcode 27.2 · Build version 27B52" },
+          "flutter": { "state": "ok", "value": "Flutter 3.47.8 • channel stable" }
+        }
+      },
+      "presets": {
+        "gate": { "state": "eligible", "code": "ok", "detail": {} },
+        "scenario-qa": { "state": "unknown", "code": "check_needed", "detail": { "check": "sim-check" } },
+        "sim-check": { "state": "eligible", "code": "ok", "detail": {} },
+        "lint": { "state": "eligible", "code": "ok", "detail": {} }
+      },
+      "checks": [
+        { "preset": "sim-check", "state": "passed", "job_id": 3611, "auto_submitted": true, "error_code": null }
+      ]
+    },
+    {
+      "id": "mbp",
+      "display_name": "mbp",
+      "kind": "remote",
+      "pool": "mbp",
+      "lanes": 1,
+      "alive": true,
+      "host_label": "mbp (7c20)",
+      "host_key": "7c20aa11bb22cc33",
+      "accept_any": true,
+      "fingerprint": {
+        "hash": "3333cccc4444dddd",
+        "measured_at": "2026-09-04T00:51:12Z",
+        "stale": false,
+        "changed_at": null,
+        "probes": {
+          "xcode": { "state": "ok", "value": "Xcode 26.5 · Build version 26F75" },
+          "flutter": { "state": "missing", "value": null }
+        }
+      },
+      "presets": {
+        "gate": { "state": "ineligible", "code": "tool_missing", "detail": { "tools": ["fvm"] } },
+        "scenario-qa": { "state": "ineligible", "code": "tool_missing", "detail": { "tools": ["fvm"] } },
+        "sim-check": { "state": "ineligible", "code": "tool_missing", "detail": { "tools": ["fvm"] } },
+        "lint": { "state": "eligible", "code": "ok", "detail": {} }
+      },
+      "checks": [
+        { "preset": "sim-check", "state": "needed", "job_id": null, "auto_submitted": false, "error_code": null }
+      ]
+    }
+  ]
+}

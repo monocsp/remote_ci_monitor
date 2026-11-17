@@ -7,6 +7,124 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-17
+
+### Breaking changes
+- **Database schema v23 — jobs remember which machine ran them and how they were placed.** `jobs`
+  gains `placement`, `display_pool`, `target_worker`, `concurrency_scope`, `host_key`,
+  `fingerprint_hash` and `sample`, and three tables are added: `machines` (each worker's last
+  fingerprint and the one before it, so a change is not missed across a restart), `fingerprints`
+  and `machine_checks`. A v22 file is backed up (`rcm.sqlite3.v22.bak`) and migrated on start;
+  existing jobs read as `pool` placement on the host that ran them. An older build refuses a v23
+  file and points at that backup. `/api/status` `schema_version` is unchanged — keys were only
+  added (`server.machines[]`, `server.generation`, `placement`, `display_pool`, `target_worker`,
+  `concurrency_scope`, `host_key` and `placement_detail` on queue rows, `placement`, `checks`,
+  `concurrency_scope` and `sample` on presets, the estimate source `measured_other` and the reasons
+  `no_capable_machine`, `check_failed` and `check_pending`). ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+
+### Added
+- **A job can go to whichever machine can run it.** A preset with `placement = "any-capable"` is
+  no longer tied to one pool: every worker measures its own environment and reports which
+  `requires` tools each preset finds, and the job goes to a worker that has them — a worker
+  missing a tool never sees it. Busy machines are waited for as usual; when no machine can run it
+  the job still queues, `rcm run` prints one line (`gate: no capable machine — mbp: fvm missing ·
+  mac2-worker: down`), and the queue row says why with an ETA of `—`. The default stays
+  `placement = "pool"`, so existing configs behave as before. Meant for gates and tests: secret
+  files never leave the server, so deploy and upload presets stay on their pool. A worker can
+  refuse such jobs with `accept_any = false` (the server's own lanes: `local_accept_any`).
+  `rcm check`'s `local preset tools` and `service preset tools` rows list such a preset with
+  `any machine` and do not fail on a tool this server lacks. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **Each machine reports an environment fingerprint, and rcm notices when it changes.** `[[probes]]`
+  in `server.toml` lists version commands (`xcodebuild -version`, `fvm flutter --version --machine`) that
+  every worker runs in its own service environment, at registration and every
+  `probe_interval_seconds` (600). A timeout keeps the previous value instead of counting as a
+  change. The values are shown on the read routes, so pick commands that print only a version. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **`checks` — a machine proves a preset works before it gets it.** A preset with
+  `checks = ["sim-check"]` goes only to workers where that check preset (which must accept
+  `git_ref`; `check_ref` picks the ref) succeeded with the current fingerprint. When a fingerprint
+  changes — Xcode updating itself overnight — rcm runs the check on that machine once by itself
+  (`auto_checks`), and a red check holds the preset there and says so in `rcm check`,
+  `rcm machines` and the web page (`scenario-qa: check_failed (sim-check #3620 · xcode 26.5 →
+  27.2)`) instead of letting jobs break silently for days. It never retries a failed check on its
+  own: `rcm recheck MACHINE [CHECK…]` (admin) or **Recheck** on the web page runs it again. A
+  check that ended without a verdict (lost or cancelled) is not retried either, and says so —
+  `check failed` with `did not finish — recheck`, never a silent `check pending`. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **`rcm machines [--json] [--machine ID]`** lists every worker with its host, pool, lanes,
+  fingerprint and how many presets it can run, with the reasons for the rest; `--machine` shows one
+  worker's verdict per preset. `GET /api/machines` is the same document. `rcm check` gains a
+  `machines` row (environment changes in the last day, failed checks) and a `placement` row (how
+  many machines can run each `any-capable` or checked preset now). The web page gets a machines
+  table, an `env changed` chip next to the worker pill and the new reasons in "needs attention". ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **`rcm run … --machine ID`** pins a job to one worker — any token for a check preset, an admin
+  token for anything else. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **`concurrency_scope = "pool" | "host" | "global"`** says where a `concurrency_group` applies.
+  `"host"` keeps two workers on the same computer — `rcm serve`'s lanes and an `rcm worker` beside
+  them — from taking the simulator at once, which the pool-wide default could not. `"pool"`
+  remains the default. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **Estimates per machine.** Medians are kept per host; a host with too few runs borrows the other
+  hosts' median at confidence `low` (`measured_other`), and step medians never borrow, so a slower
+  machine is not called stuck. The ETA picks the lane where a job would finish first. `sample =
+  false` keeps a preset out of the medians (the default for check presets). ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- **`rcm init worker`** writes `worker.toml` (`[--server URL|auto] [--pool P] [--lanes N]
+  [--name N] [--force]`), and `rcm init worker --service-file PATH` writes a launchd plist or
+  systemd unit for it (new examples: `examples/launchd/com.remote-ci-monitor.worker.plist`,
+  `examples/systemd/rcm-worker.service`). A worker with `server = "auto"` finds the server over
+  mDNS (`server_name` picks one when several advertise) and looks again after 5 connection
+  failures in a row. `rcm worker` without `--config` or `--server` reads the file `rcm init worker`
+  wrote. `rcm token add NAME --worker` prints the command to run on the worker, and
+  `rcm worker --check` adds `fingerprint` and `presets` rows. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+- `examples/server.toml` has a commented Flutter block: probes, a `sim-check` check preset, an
+  `any-capable` gate with `concurrency_scope = "host"` and a preset with `checks`. The
+  `rcm-gate-connect` skill no longer needs `rcm-store-connect` first and asks about `placement`,
+  `checks` and `concurrency_scope`. ([#191](https://github.com/monocsp/remote_ci_monitor/pull/191))
+
+### Changed
+- **A cut-off name on the web page opens in full when you tap it.** Job names, machine and host
+  names, worker pills and other text cut to fit a column open a small box with the whole text and a
+  **Copy** button on a tap, a click or Enter; tapping again, tapping elsewhere or Escape closes it.
+  This works on a phone, which has no hover. Long names are cut in the middle
+  (`build-farm-mac…closet-22`), so names that share a long prefix still differ at the end. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- The worker strip in the header stays one line: when it overflows it scrolls sideways (arrow keys
+  too) and a fixed `+N` badge counts the pills out of view — red when one of them is down or held —
+  and lists them on a tap. When remote workers stop answering, the banner says how many
+  (`2 workers unreachable — …`) and the names are behind **Show names**. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- After **and N more** opens a long queue, **show fewer** folds it back. On a desktop the queue's column
+  headings stay at the top of the screen while you scroll. An expanded waiting row with many machines first
+  counts them by verdict (`12 missing tools · 9 check failed · 3 down`), lists five, and hides the
+  rest behind **show N more**, which the browser remembers per job. An expanded recent failure
+  shows its failed names one per line (eight, then `+N more`), the server's summary in four lines
+  with **show all**, and **open log**; a summary the row already shows in full is not repeated.
+  The machines table's checks cell starts with the verdict, the check and the job
+  (`failed · sim-check · #3620`), and the job number opens that job's log. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- On a phone, queue cards label the three fields that are easy to mix up: status, who requested
+  it and the expected finish. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- Clearer Korean wording on the web page: `확인이 필요한 작업이 없습니다` instead of `모두 정상입니다`,
+  `완료 예상` instead of `종료` for an ETA, `실행 가능한 머신 없음`, `머신 점검 실패`, `대기열 N번째`,
+  `빈 레인까지 5m`, `시스템 부하` for the load average and `10초마다 확인` while polling. In English,
+  "needs attention" now says `Nothing needs a look` instead of `Everything is fine`. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+
+### Fixed
+- **Long text no longer pushes the web page sideways.** A job name with no spaces, a long requester,
+  a 300-character summary, a long machine, host or pool name, or a long link label stays inside its
+  column on a phone and at desktop width: names are cut to one line with the full text on a tap,
+  sentences are held to a fixed number of lines. Before, a 130-character name widened a phone page
+  to 1064 px and a recent row pushed a desktop page to 2576 px. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- **Rows no longer jump when the page updates.** A waiting reason always takes two lines, an expanded
+  row's step line is one line whatever the step is called, the worker pills sit in one strip that
+  keeps the header on the same rows as lanes go busy and idle, a host card's lines stay one line
+  each as its five-second samples change, and the live button keeps its width as its seconds tick —
+  so a changing reason, a new step, a finished job or the clock no longer moves everything below it. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- A name that fits is no longer cut by a fraction of a pixel: `macmini` showed as `macmi…`, a job's
+  time as `6m 2…`, and the end of a middle-cut name (`name-that-go…`). In the recent list, a job
+  from another pool keeps its pool chip readable: it moves to the line under the name when the two
+  do not fit, instead of turning the whole name cell into `gate …`. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- The machines table keeps its column widths with a long name, fingerprint or check list, and a host
+  card's name, meters and process line stay inside the card. Disks of 1 TB and more read in TB. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+- **The Store tab holds its boxes** with long secret names, long validation errors, long file names,
+  a missing screenshot, a 300-character commit or an 80-character version name. The save badge and
+  the character counter keep their size as they change, and on a phone its text fields no longer make
+  iOS zoom in and push the page sideways. ([#192](https://github.com/monocsp/remote_ci_monitor/pull/192))
+
 ## [0.4.4] - 2026-11-11
 
 ### Added
@@ -1517,7 +1635,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.1...v0.4.2

@@ -147,6 +147,33 @@ def missing_tools(
     return [name for name in requires if shutil.which(name, path=path) is None]
 
 
+def measure_tools(requires: tuple[str, ...], env: Mapping[str, str]) -> tuple[list[str], list[str]]:
+    """능력 보고용 측정(M5n §4.3 5번) — (없는 것, 작업 공간에만 있을 수 있는 것), 선언 순서대로.
+
+    잡이 오기 **전에** 잰다. 그래서 PATH 의 **절대 항목**과 절대경로 선언만 본다. 상대
+    항목(`tools`·`.`·빈 항목)은 잡의 워크스페이스 기준이라 지금은 알 수 없다 — 못 찾았는데
+    PATH 에 상대 항목이 있으면 「없다」가 아니라 「작업 공간에 있을지 모른다」(결정 93).
+    측정 프로세스의 cwd 로 풀지 않는다(그건 서버 폴더에만 있는 도구로 통과하는 fail-open 이다).
+    PATH 가 없으면 빈 PATH 다 — 이 프로세스의 PATH 로 물러나지 않는다(`missing_tools` 와 같다).
+    """
+    raw = env.get("PATH", "")
+    entries = raw.split(os.pathsep) if raw else []
+    absolute = [e for e in entries if e and os.path.isabs(e)]
+    has_relative = any(not (e and os.path.isabs(e)) for e in entries)
+    path = os.pathsep.join(absolute)
+    missing: list[str] = []
+    workspace: list[str] = []
+    for name in requires:
+        if os.path.isabs(name):
+            if not (os.path.isfile(name) and os.access(name, os.X_OK)):
+                missing.append(name)
+            continue
+        if shutil.which(name, path=path) is not None:
+            continue
+        (workspace if has_relative else missing).append(name)
+    return missing, workspace
+
+
 def _preflight_lines(requires: tuple[str, ...], missing: list[str]) -> list[str]:
     """잡 로그에 남길 판정 줄 — 공개 이름(basename)과 ok/missing 만. 선언한 절대경로도 PATH 값도
     찍지 않는다(명세 §2 G4 · M5l S3)."""

@@ -424,7 +424,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       </div>
       <div class="variant"><div class="vt">Queue unavailable (≠ empty)</div>
         <div class="banner bad" data-c="22">Queue unavailable — database locked (retrying)</div>
-        <div class="sub" style="margin-top:8px">summary shows <span class="mono">unknown — queue unavailable</span>, never "Nothing is stuck"</div>
+        <div class="sub" style="margin-top:8px">summary shows <span class="mono">unknown — queue unavailable</span>, never "Nothing needs a look"</div>
       </div>
       <div class="variant"><div class="vt">Server just started · no samples yet</div>
         <div data-c="26">
@@ -518,7 +518,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
     <article class="spec" id="c24" data-for="24"><div class="num">24</div><div><div class="area">summary</div><h3>안 움직이는 것 <span class="tag">v1.3</span></h3>
       <dl><dt>보여주는 것</dt><dd>행동할 수 있는 원인만, 「행동 가능」 순으로: 워커 다운 → likely stuck → 업로드 멈춤 → 스케줄 안 됨 → 그룹 대기 → 초과 실행 → 정지 <span class="src">ref</span>. 각 줄에 근거 숫자(<code>frees in 2m 40s</code>, <code>over by 3m 31s</code>).</dd>
       <dt>데이터</dt><dd><code>queue[].reason ∈ {blocked_by_group, upload_stalled, overdue, paused, not_scheduled, worker_down}</code> · <code>estimate.stuck</code> · <code>blocked_by.remaining_seconds</code> · <code>server.workers[].state</code>.</dd>
-      <dt>상태</dt><dd>없으면 초록 <code>Nothing is stuck</code>. 하나라도 있으면 그 아래 회색 <code>nothing else is stuck</code>. <code>queue_error</code> → 회색 <code>unknown — queue unavailable</code>. 연결 끊김(18) → 회색 <code>last known:</code> + dim. <code>reason</code> 필드가 없는 옛 서버 → <code>unknown</code> <span class="src">gap</span>.</dd>
+      <dt>상태</dt><dd>없으면 초록 <code>Nothing needs a look</code>(한국어 <code>확인이 필요한 작업이 없습니다</code>). 하나라도 있으면 그 아래 회색 <code>nothing else needs a look</code>(<code>그 밖에 확인할 작업은 없습니다</code>). <code>queue_error</code> → 회색 <code>unknown — queue unavailable</code>. 연결 끊김(18) → 회색 <code>last known:</code> + dim. <code>reason</code> 필드가 없는 옛 서버 → <code>unknown</code> <span class="src">gap</span>.</dd>
       <dt>규칙</dt><dd>긍정 문구는 조회가 성공했고 값이 전부 있을 때만. 정상 대기(<code>waiting for lane</code>)와 스텝이 실패했지만 계속 도는 잡은 여기 안 올린다.</dd></dl></div></article>
 
     <article class="spec" id="c25" data-for="25"><div class="num">25</div><div><div class="area">summary</div><h3>호스트 압력 한 줄 <span class="tag">v1.3</span></h3>
@@ -653,7 +653,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
     <li><b>정렬·많은 잡</b>: running → cancelling → 대기(순번순). 필터 없음. 대기 20행 넘으면 접고 내 잡·안 움직이는 잡은 항상 표시. 최근 완료는 시간 역순 5건 + 더 보기.</li>
     <li><b>펼침·딥링크</b> <span class="src">gap</span>: 행은 <b>전부 접힌 채로</b> 뜨고(2026-09-09 결정 13 개정), <b>펼침</b>이 잡 id 별 localStorage(<code>rcm.expanded</code>, 큐에 없는 id 는 매 갱신 정리). 접힌 도는 행도 전체 진행 막대와 이유 칸의 <code>step 2/4 build 2s</code> 는 그대로 보인다 — 접기는 자리를 줄이는 것이지 감추는 것이 아니다. 펼침 버튼은 24px(폰 32px) 표적에 <code>#412 상세 펴기</code> 라는 접근 이름을 갖는다. <code>#/jobs/&lt;id&gt;</code> = 그 행 스크롤·강조·펼침(+토큰 있으면 서랍); 큐에 없으면 최근으로, 거기도 없으면 토스트 <code>#409 finished 09:55 · succeeded</code>. 서랍 열림도 해시(뒤로가기 = 닫기).</li>
     <li><b>권한</b>: 보기는 토큰 없이. 내 잡 강조·로그 tail·로그·취소만 토큰. 여러 탭은 <code>storage</code> 이벤트로 토큰 동기화.</li>
-    <li><b>실패 표시</b>: 섹션마다 독립 — 큐(22)·최근(32)·호스트·연결(18)·워커(27)가 따로 실패한다. 실패와 빈 값은 항상 다른 모양. 긍정 문구(<code>Nothing is stuck</code>·<code>fine</code>)는 조회 성공 + 값 완전일 때만. 큐에서 사라지는 잡은 없다 — 전부 종료 상태로 최근에 남는다.</li>
+    <li><b>실패 표시</b>: 섹션마다 독립 — 큐(22)·최근(32)·호스트·연결(18)·워커(27)가 따로 실패한다. 실패와 빈 값은 항상 다른 모양. 긍정 문구(<code>Nothing needs a look</code>·<code>fine</code>)는 조회 성공 + 값 완전일 때만. 큐에서 사라지는 잡은 없다 — 전부 종료 상태로 최근에 남는다.</li>
     <li><b>상태 부호화</b>: 색 + 글리프 + 테두리. 빗금 = 낡음/멈춤, 점선 테두리 = 미확정(uploading·cancelling·timed out·low 신뢰도·blocked), 왼쪽 굵은 황토 바 = 초과 실행, 왼쪽 가는 파란 선 = 내 잡(둘 다면 겹쳐 그린다), 회색 = 대기·취소, 빨강 = 실패·타임아웃·stuck·다운, 보라 = lost. 단색 인쇄에서 읽히는지가 수용 기준.</li>
     <li><b>키보드·보조기기</b> <span class="src">gap</span>: 행 펼침 ▾, 잡 id, 칩, sha, Log, Cancel, show more, Estimates, live 토글은 전부 <code>button</code>/<code>summary</code>. Tab 순서는 읽는 순서, Enter/Space 동작, 포커스 링 파랑 2px. 글리프는 <code>aria-hidden</code>. <code>aria-live="polite"</code> 는 상태 전이(내 잡 시작·종료·lost, 연결 끊김/복구)만, 초당 갱신 요소는 <code>off</code>. 띠(18·22·27·32)는 <code>role="alert"</code>. 진행 막대 <code>role="progressbar"</code>, 호스트 막대 <code>&lt;meter&gt;</code>.</li>
     <li><b>시간</b>: 모든 시각은 UTC 로 받아 3 번 시간대로. 상대 시간은 보정된 브라우저 시계.</li>

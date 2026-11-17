@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  remote_ci_monitor — launchd service for a worker (macOS): another computer that runs jobs for
+  the build machine. `rcm init worker` with its service-file option writes this file for you with
+  the real paths of this computer; this copy shows what it contains. The exact commands are in
+  docs/configuration.md (an XML comment cannot hold a double hyphen).
+
+  1. Install the same release as the server (`pipx install remote-ci-monitor`), then
+     `rcm init worker` (writes ~/.config/rcm/worker.toml, server = "auto").
+  2. Put the worker token in that file (`token = "…"`, the file is mode 600). The service does not
+     see the RCM_WORKER_TOKEN of your shell, and this plist never carries it.
+     Check first with `rcm worker` and its check option, the token in RCM_WORKER_TOKEN.
+  3. Replace every /Users/me below (rcm binary, config, WorkingDirectory, two log paths, HOME),
+     then:
+       mkdir -p ~/Library/Logs/rcm ~/Library/LaunchAgents
+       cp com.remote-ci-monitor.worker.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
+     Stop: launchctl bootout gui/$(id -u)/com.remote-ci-monitor.worker
+  launchd does not expand `~` — every path here is absolute.
+
+  PATH does not start with the directory rcm is installed in: jobs inherit it, and a virtual
+  environment's bin first on PATH silently replaces the `python` your presets call. Add the
+  toolchains your presets need (fvm, Android SDK, …) after /opt/homebrew/bin.
+  macOS asks for Local Network permission the first time the worker looks for the server
+  (server = "auto"); without it, discovery finds nothing.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.remote-ci-monitor.worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/me/.local/bin/rcm</string>
+    <string>worker</string>
+    <string>--config</string>
+    <string>/Users/me/.config/rcm/worker.toml</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>WorkingDirectory</key>
+  <string>/Users/me</string>
+  <key>StandardOutPath</key>
+  <string>/Users/me/Library/Logs/rcm/worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/me/Library/Logs/rcm/worker.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/me</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>

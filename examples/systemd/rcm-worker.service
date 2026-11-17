@@ -1,0 +1,36 @@
+# remote_ci_monitor — systemd user unit for a worker (Linux): another computer that runs jobs for
+# the build machine. `rcm init worker --service-file PATH` writes this file for you with the real
+# paths of this computer; this copy shows what it contains.
+#
+#   pipx install remote-ci-monitor                  # the same release as the server
+#   rcm init worker                                 # ~/.config/rcm/worker.toml, server = "auto"
+#   edit ~/.config/rcm/worker.toml: token = "…"     # the unit never carries the token
+#   RCM_WORKER_TOKEN=<token> rcm worker --check
+#   mkdir -p ~/.config/systemd/user && cp rcm-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now rcm-worker.service
+#   loginctl enable-linger "$USER"                  # keep it running after you log out
+#   journalctl --user -u rcm-worker -f
+#
+# Replace /home/me below. PATH does not start with the directory rcm is installed in: jobs inherit
+# it, and a virtual environment's bin first on PATH replaces the `python` your presets call.
+
+[Unit]
+Description=remote_ci_monitor worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/me
+ExecStart=/home/me/.local/bin/rcm worker --config /home/me/.config/rcm/worker.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=en_US.UTF-8
+Environment=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+[Install]
+WantedBy=default.target

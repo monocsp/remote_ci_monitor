@@ -1,0 +1,11 @@
+# gitleaks 설정 — 기본 규칙 그대로, 호스트 해시 픽스처만 뺀다.
+# `host_key` 는 하드웨어 신원의 sha256 앞 16자리다(M5n §3). 키 이름에 "key" 가 들어 있어
+# `generic-api-key` 규칙이 비밀로 오인한다. 원문 UUID 는 어디에도 저장하지 않는다.
+# CI 의 gitleaks(8.24)도 읽는 옛 단수 `[allowlist]` 형식을 쓴다.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "M5n host_key values: 16-hex hashes of a hardware id, not secrets"
+regexTarget = "match"
+regexes = ['''host_key["']?\s*[:=]\s*["'][0-9a-f]{16}["']''']

@@ -23,7 +23,13 @@
     <!-- 큐 | 스토어 (스토어 목업 항목 1) — 릴리스 프로파일이 있는 저장소가 있을 때만 `renderNav` 가 채운다 -->
     <nav id="view-nav" class="viewnav" aria-label="화면" data-i18n-attr="aria-label:nav.store" hidden></nav>
     <span class="sub" data-lanes-text></span>
-    <span class="workers" data-workers></span>
+    <!-- 워커 띠(Codex 가독성 검토 5번) — 필 줄은 한 줄이고 넘치면 옆으로 민다. 넘치면 오른쪽이
+         흐려지고 `+N` 표지가 화면 밖 필을 센다(끊김 · 보류가 숨었으면 경고색). 띠는 포커스를 받고
+         좌우 화살표로 민다. 표지 · 흐림 · aria-label 은 `updateBand` 가 그려진 뒤에 잰다. -->
+    <span class="wkband" data-wkband>
+      <span class="workers" data-workers tabindex="0" role="group"></span>
+      <button type="button" class="wk-more" id="wk-more" data-wkmore hidden></button>
+    </span>
     <span class="errchip" data-errchip hidden></span>
     <span class="skew" data-skew hidden></span>
     <span class="spacer"></span>
@@ -54,6 +60,15 @@
     <details id="host-details">
       <summary><span class="t" data-i18n="section.host">호스트</span><span class="n" data-host-digest></span></summary>
       <div data-host-body></div>
+    </details>
+  </section>
+
+  <!-- 머신 (M5n §8.3) — 접힌 채로 시작한다. `/api/machines` 가 없는 옛 서버면 절째 숨는다.
+       행은 `renderMachines` 가 채운다: 머신마다 `tr[data-machine]`, admin 일 때만 `button.recheck`. -->
+  <section id="machines-section" class="s-section" aria-label="머신" data-i18n-attr="aria-label:section.machines" hidden>
+    <details id="machines">
+      <summary><span class="t" data-i18n="section.machines">머신</span><span class="n" data-machines-digest></span></summary>
+      <div data-machines-body></div>
     </details>
   </section>
 
@@ -212,6 +227,13 @@
   <pre class="drawer-log" data-drawer-log tabindex="0"></pre>
 </aside>
 
+<!-- 잘린 글의 전문(Codex 가독성 검토 1번) — 잘린 `[data-cut]` 요소 · `[data-reveal]` 단추가 연다.
+     페이지 좌표에 떠 있어 어떤 행도 밀지 않는다. 다시 누르기 · 바깥 누르기 · Escape 로 닫힌다.
+     단추 글자는 열 때 그 언어로 채운다. -->
+<div id="reveal" class="reveal" role="dialog" aria-modal="false" hidden>
+  <div class="rv-text"></div>
+  <div class="rv-act"><button type="button" class="btn" id="reveal-copy" data-copy=""></button><button type="button" class="btn" id="reveal-close" data-reveal-close></button></div>
+</div>
 <div id="toast" class="toast" aria-live="polite" hidden></div>
 
 <script src="/static/i18n.js"></script>

@@ -47,6 +47,11 @@ Keep `rcm serve` alive across logins and reboots with the example units in `exam
   mDNS responder waiting on Local Network permission looked the same as a hang.
 - The `PATH` in the unit is what presets inherit (`env_passthrough`) — add Homebrew and your
   toolchains there. Keep the machine awake (`pmset -a sleep 0` on macOS).
+- **A worker on another machine** — `rcm init worker --service-file PATH` writes the launchd plist
+  or systemd user unit for `rcm worker` (the same shape as
+  `examples/launchd/com.remote-ci-monitor.worker.plist` and `examples/systemd/rcm-worker.service`)
+  and prints the command that starts it; see
+  [Second build machine](configuration.md#second-build-machine-remote-worker).
 
 Three things learned from a real deployment (a Flutter monorepo gate on a Mac mini):
 
@@ -118,7 +123,9 @@ preset added ipf-verify, ipf-verify-tree · repo added image_place_follower
 config: /Users/build/.config/rcm/server.toml
 ```
 
-**Only `[[presets]]` and `[[repos]]` reload.** `[server]`, `[estimate]`, `[host]`, `[display]`
+**Only `[[presets]]`, `[[repos]]` and `[[probes]]` reload.** A reload starts a new generation:
+every worker fetches the new preset and probe list and measures its environment again, and until
+it has, it takes no `any-capable` job. `[server]`, `[estimate]`, `[host]`, `[display]`
 and `[[notify]]` are read once at start by threads that keep their own copy — the workers, the
 janitor, the notifier, the host sampler — so a live swap would not reach them. Rather than apply
 half the file, rcm refuses the whole reload and names the section:

@@ -22,7 +22,7 @@ import pytest
 from remote_ci_monitor import __version__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATES = ("server.toml", "client.toml")
+TEMPLATES = ("server.toml", "client.toml", "worker.toml")
 # `pip wheel .` 은 격리된 빌드 환경에 hatchling 을 내려받는다 — 오프라인이면 실패가 아니라 skip.
 NO_NETWORK_MARKERS = ("Could not", "No matching", "No module named pip")
 

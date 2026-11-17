@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from statistics import median
@@ -42,6 +42,9 @@ from remote_ci_monitor.core.model import (
     REASON_UPLOADING,
     REASON_WAITING_FOR_LANE,
     REASON_WORKER_DOWN,
+    SCOPE_GLOBAL,
+    SCOPE_HOST,
+    SOURCE_MEASURED_OTHER,
     STUCK_ELAPSED,
     STUCK_NO_OUTPUT,
     STUCK_STEP,
@@ -55,6 +58,8 @@ from remote_ci_monitor.core.model import (
     Estimate,
     Job,
     Median,
+    Placement,
+    PlacementNote,  # noqa: F401 — 다시 내보낸다(`queue.PlacementNote`, §11.4)
     Preset,
     Progress,
     QueueRow,
@@ -67,6 +72,8 @@ from remote_ci_monitor.core.model import (
 SOURCE_MEASURED = "measured"
 SOURCE_PRESET = "preset"
 SOURCE_DEFAULT = "default"
+#: 대기 행의 `placement_detail` 상한(§7.3)
+PLACEMENT_DETAIL_MAX = 8
 
 
 @dataclass(frozen=True)
@@ -120,6 +127,8 @@ def medians_from(jobs: Sequence[Job], now: datetime, cfg: QueueConfig) -> dict[s
     waits: dict[str, list[float]] = {}
     for job in jobs:
         if job.state not in allowed or job.started_at is None or job.finished_at is None:
+            continue
+        if not job.sample:  # 점검 · 예열 잡은 「평소」가 아니다(M5n 결정 103)
             continue
         if job.started_at < cutoff:
             continue
@@ -341,6 +350,69 @@ def _busy_reason(job: Job, est: Estimate) -> str:
     return REASON_RUNNING
 
 
+def expected_on(
+    key: str,
+    preset: Preset | None,
+    host_key: str | None,
+    medians: Mapping[str, Median],
+    host_medians: Mapping[str, Mapping[str, Median]] | None,
+    cfg: QueueConfig,
+) -> tuple[float, str, int]:
+    """(expected_seconds, source, sample_count) — **그 호스트에서** 얼마나 걸리나(M5n §7.1).
+
+    그 호스트 실측(n ≥ min_samples) → 다른 호스트들의 실측 중앙값(`measured_other`, 신뢰도
+    low) → 프리셋 → 기본값. 호스트 표가 없으면(`host_medians is None`) 옛 `expected_for` 다.
+    `measured_other` 의 n 은 그 호스트들의 표본 합이고, 프리셋·기본으로 떨어지면 n 은 이
+    호스트의 표본 수다.
+    """
+    if host_medians is None:
+        return expected_for(key, preset, medians, cfg)
+    own = (host_medians.get(host_key) or {}).get(key) if host_key is not None else None
+    n = own.sample_count if own else 0
+    if own is not None and n >= cfg.min_samples:
+        return own.seconds, SOURCE_MEASURED, n
+    others = [
+        table[key]
+        for host, table in host_medians.items()
+        if host != host_key and key in table and table[key].sample_count >= cfg.min_samples
+    ]
+    if others:
+        return (
+            float(median(m.seconds for m in others)),
+            SOURCE_MEASURED_OTHER,
+            sum(m.sample_count for m in others),
+        )
+    if preset is not None and preset.expected_seconds:
+        return float(preset.expected_seconds), SOURCE_PRESET, n
+    return float(cfg.default_seconds), SOURCE_DEFAULT, n
+
+
+_LaneKey = tuple[str | None, int]
+
+
+@dataclass
+class _GroupHold:
+    """그룹을 쥐고 있는 잡 하나 — 도는 잡이거나, 계산 안에서 앞에 배정된 대기 잡."""
+
+    group: str
+    pool: str
+    host: str | None
+    free_at: datetime
+    job: Job | None = None  # 도는 잡이면 그 잡(blocked_by 의 근거). 예측 배정이면 None
+    est: Estimate | None = None
+
+
+def _scope_matches(scope: str, hold: _GroupHold, pool: str, host: str | None) -> bool:
+    """대기 잡의 범위로 판정한다 — `store.claim` 이 후보 잡의 범위로 배제하는 것과 같다(§6).
+
+    `host` 범위에서 어느 한쪽의 호스트를 모르면 같은 호스트로 본다(claim 과 같은 fail-closed)."""
+    if scope == SCOPE_GLOBAL:
+        return True
+    if scope == SCOPE_HOST:
+        return host is None or hold.host is None or hold.host == host
+    return hold.pool == pool
+
+
 def compute_queue(
     jobs: Sequence[Job],
     *,
@@ -352,10 +424,23 @@ def compute_queue(
     now: datetime,
     progress: Mapping[int, Progress] | None = None,
     step_medians: Mapping[str, Mapping[str, StepMedian]] | None = None,
+    placement: Callable[[Job], Placement] | None = None,
+    host_medians: Mapping[str, Mapping[str, Median]] | None = None,
+    host_step_medians: Mapping[tuple[str, str], Mapping[str, StepMedian]] | None = None,
+    worker_hosts: Mapping[str | None, str] | None = None,
 ) -> list[QueueRow]:
-    """활성 잡 → 큐 행. 출력 순서는 running → cancelling → 대기(순번순).
+    """활성 잡 → 큐 행. 출력 순서는 running → cancelling → 대기(claim 순서).
 
-    `step_medians` 는 key → 단계 이름 → 중앙값. 없으면 멈춤 판정은 옛 규칙(침묵)으로 돈다.
+    **모든 잡과 모든 레인을 한 번에** 계산한다(M5n §7.2 · 결정 104). 잡마다 들어갈 수 있는 레인은
+    `placement(job)` 이 정하고, 없으면 옛 규칙 — 잡의 풀과 같은 풀의 레인(`WorkerInfo.pool`).
+    그래서 풀별로 나눠 부르던 옛 호출과 같은 답이 나온다(동치성 골든 `tests/test_queue_m5n.py`).
+
+    - 대기 잡은 들어갈 수 있는 열린 레인 중 **가장 일찍 끝날** 레인으로 간다(빠른 호스트를
+      기다리는 편이 느린 빈 호스트보다 이를 수 있다). 동률은 레인이 비는 시각 · 워커 · 번호.
+    - 순번은 표시 풀(`display_pool or pool`)마다 1부터, 하나의 claim 순서(우선순위·id) 위에서.
+    - 그룹 배제는 **대기 잡의 범위**로(`pool` · `host` · `global`).
+    - `host_medians` 가 있으면 기대 시간은 그 호스트에서(`expected_on`), `host_step_medians` 가
+      있으면 멈춤 판정은 그 호스트의 단계 표로만 — 다른 호스트로 물러나지 않는다.
     """
     progress = progress or {}
     step_medians = step_medians or {}
@@ -368,28 +453,40 @@ def compute_queue(
     # 대기 순서 = (우선순위 높은 것 먼저, 같은 우선순위는 id) — store.claim 의 ORDER BY 와 같은 키
     waiting = sorted((j for j in active if j.is_waiting), key=lambda j: (-j.priority, j.id))
 
+    lane_info: dict[_LaneKey, WorkerInfo] = {(w.worker, w.lane): w for w in workers}
     live = [w for w in workers if w.state != WORKER_DOWN]
     # 레인은 **번호가 아니라 (워커, 번호)** 로 센다. 기본 풀에는 로컬 레인 1..N 과 원격 워커의
-    # 레인 1..M 이 함께 들어오므로(`server.pool_workers`), 번호로 키를 잡으면 로컬 레인 2 와
-    # `build-02/2` 가 뭉개져 4레인 풀이 2레인처럼 계산된다(M5f).
-    live_lanes = [(w.worker, w.lane) for w in live]
-    # 부하로 보류된 레인은 **살아 있지만 지금은 못 집는다**(M5f). 언제 열릴지는 모르는 값이라
-    # 그리디에 넣으면 PLAN 이 금지한 「자신있는 틀린 시각」이 된다 — 빼면 늦게 잡히고, 레인이
-    # 열리면 앞당겨진다.
-    open_lanes = [(w.worker, w.lane) for w in live if w.state != WORKER_HELD]
-    held_lanes = [(w.worker, w.lane) for w in live if w.state == WORKER_HELD]
-    lane_free: dict[tuple[str | None, int], datetime] = {k: now for k in live_lanes}
-    lane_last_job: dict[tuple[str | None, int], int | None] = {k: None for k in live_lanes}
-    idle_since: dict[tuple[str | None, int], datetime] = {}
+    # 레인 1..M 이 함께 들어오므로, 번호로 키를 잡으면 로컬 레인 2 와 `build-02/2` 가 뭉개진다.
+    live_lanes: list[_LaneKey] = [(w.worker, w.lane) for w in live]
+    # 부하로 보류된 레인은 **살아 있지만 지금은 못 집는다**(M5f) — ETA 그리디에서 뺀다.
+    held_lanes: list[_LaneKey] = [(w.worker, w.lane) for w in live if w.state == WORKER_HELD]
+    lane_free: dict[_LaneKey, datetime] = {k: now for k in live_lanes}
+    lane_last_job: dict[_LaneKey, int | None] = {k: None for k in live_lanes}
+    idle_since: dict[_LaneKey, datetime] = {}
     for w in live:
         if w.state == WORKER_IDLE and w.job_id is None:
             idle_since[(w.worker, w.lane)] = w.since or now
-    group_free: dict[str, datetime] = {}
-    group_holder: dict[str, tuple[Job, Estimate]] = {}
+    holds: list[_GroupHold] = []
+
+    def lane_host(key: _LaneKey) -> str | None:
+        info = lane_info.get(key)
+        return info.host_key if info is not None else None
+
+    def lane_pool(key: _LaneKey) -> str:
+        info = lane_info.get(key)
+        return info.pool if info is not None else DEFAULT_POOL
 
     rows: list[QueueRow] = []
     for job in busy:
-        expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
+        holder_lane = (job.worker_name, job.lane) if job.lane is not None else None
+        host = job.host_key or (lane_host(holder_lane) if holder_lane is not None else None)
+        preset = presets.get(job.preset)
+        expected, source, n = expected_on(job.key, preset, host, medians, host_medians, cfg)
+        steps = (
+            (host_step_medians.get((host, job.key)) if host is not None else None)
+            if host_step_medians is not None
+            else step_medians.get(job.key)
+        )
         est = _busy_estimate(
             job,
             expected,
@@ -398,21 +495,19 @@ def compute_queue(
             now,
             cfg,
             progress=progress.get(job.id),
-            step_medians=step_medians.get(job.key),
+            step_medians=steps,
         )
         if busy_per_pool.get(job.pool, 0) > 1:
             est = replace(est, shared=True)
         free_at = now + timedelta(seconds=est.remaining_seconds or 0)
-        holder_lane = (job.worker_name, job.lane) if job.lane is not None else None
         if holder_lane is not None and holder_lane in lane_free:
             lane_free[holder_lane] = max(lane_free[holder_lane], free_at)
             lane_last_job[holder_lane] = job.id
             idle_since.pop(holder_lane, None)
         if job.concurrency_group:
-            group_free[job.concurrency_group] = max(
-                group_free.get(job.concurrency_group, now), free_at
+            holds.append(
+                _GroupHold(job.concurrency_group, job.pool, host, free_at, job=job, est=est)
             )
-            group_holder[job.concurrency_group] = (job, est)
         rows.append(
             QueueRow(
                 job=job,
@@ -428,35 +523,96 @@ def compute_queue(
     # running 먼저, cancelling 그 다음 (각각 id 순)
     rows.sort(key=lambda r: (r.job.state == CANCELLING, r.job.id))
 
-    can_start = not paused and bool(open_lanes)
-    for position, job in enumerate(waiting, start=1):
-        expected, source, n = expected_for(job.key, presets.get(job.preset), medians, cfg)
+    positions: dict[str, int] = {}
+    for job in waiting:
+        place = placement(job) if placement is not None else None
+        if place is None:
+            candidates = {k for k in lane_info if lane_info[k].pool == job.pool}
+            if not candidates:
+                # 옛 호출 계약: 풀 하나의 잡과 「그 풀의 레인」을 넘겼다. 레인에 풀 표시가 없던
+                # 시절의 호출(테스트 · `eta_for_new`)은 넘겨준 레인이 전부 이 잡의 레인이다.
+                # 서버는 언제나 `placement` 를 넘기므로 워커 없는 풀은 거기서 걸러진다.
+                candidates = set(lane_info)
+        else:
+            candidates = {k for k in lane_info if k[0] in place.workers}
+        live_cands = [k for k in live_lanes if k in candidates]
+        open_cands = [k for k in live_cands if lane_info[k].state != WORKER_HELD]
+        group = job.concurrency_group
+        scope = job.concurrency_scope
+
+        def group_free_at(key: _LaneKey, group: str | None = group, scope: str = scope):
+            if not group:
+                return None
+            pool, host = lane_pool(key), lane_host(key)
+            times = [
+                h.free_at
+                for h in holds
+                if h.group == group and _scope_matches(scope, h, pool, host)
+            ]
+            return max(times) if times else None
+
+        def busy_holder(keys: Sequence[_LaneKey], group: str | None = group, scope: str = scope):
+            """대기 잡을 막고 있는 **도는** 잡(가장 큰 id). 레인 후보 중 하나라도 맞으면."""
+            if not group:
+                return None
+            found = None
+            for h in holds:
+                if h.job is None or h.group != group:
+                    continue
+                if any(_scope_matches(scope, h, lane_pool(k), lane_host(k)) for k in keys):
+                    if found is None or h.job.id > found.job.id:  # type: ignore[union-attr]
+                        found = h
+            return found
+
         waited = _seconds(job.created_at, now)
-        holder = group_holder.get(job.concurrency_group) if job.concurrency_group else None
-        blocked = None
-        if holder is not None:
-            hjob, hest = holder
-            blocked = BlockedBy(
-                job_id=hjob.id,
-                group=job.concurrency_group or "",
-                remaining_seconds=hest.remaining_seconds,
-            )
         wait: float | None = None
         finish: datetime | None = None
         ahead: int | None = None
-        if can_start:
-            # None(로컬)과 워커 이름을 같이 정렬하려면 키를 평평하게 만들어야 한다
-            lane = min(open_lanes, key=lambda ln: (lane_free[ln], ln[0] or "", ln[1]))
-            start = lane_free[lane]
-            ahead = lane_last_job[lane]
-            if job.concurrency_group and job.concurrency_group in group_free:
-                start = max(start, group_free[job.concurrency_group])
-            finish = start + timedelta(seconds=expected)
+        chosen: _LaneKey | None = None
+        expected: float | None = None
+        source = SOURCE_DEFAULT
+        n = 0
+        preset = presets.get(job.preset)
+        if not paused and open_cands:
+            best: tuple[Any, ...] | None = None
+            for key in open_cands:
+                start = lane_free[key]
+                gf = group_free_at(key)
+                if gf is not None:
+                    start = max(start, gf)
+                e, src, cnt = expected_on(
+                    job.key, preset, lane_host(key), medians, host_medians, cfg
+                )
+                end = start + timedelta(seconds=e)
+                rank = (end, lane_free[key], key[0] or "", key[1])
+                if best is None or rank < best[0]:
+                    best = (rank, key, start, end, e, src, cnt)
+            assert best is not None
+            _rank, chosen, start, finish, expected, source, n = best
             wait = _seconds(now, start)
-            lane_free[lane] = finish
-            lane_last_job[lane] = job.id
-            if job.concurrency_group:
-                group_free[job.concurrency_group] = finish
+            ahead = lane_last_job[chosen]
+            lane_free[chosen] = finish
+            lane_last_job[chosen] = job.id
+            if group:
+                holds.append(_GroupHold(group, lane_pool(chosen), lane_host(chosen), finish))
+        if expected is None:
+            # 배정할 레인이 없다(정지 · 레인 없음 · 보류) — 후보의 호스트가 하나면 그 호스트로.
+            # 레인이 아예 없으면(로컬 레인을 안 띄운 서버 · 워커 down) `worker_hosts` 로 안다.
+            hosts = {lane_host(k) for k in candidates}
+            if not hosts and place is not None and worker_hosts is not None:
+                hosts = {worker_hosts.get(w) for w in place.workers}
+            host = next(iter(hosts)) if len(hosts) == 1 else None
+            expected, source, n = expected_on(job.key, preset, host, medians, host_medians, cfg)
+        holder = busy_holder([chosen] if chosen is not None else list(candidates))
+        blocked = (
+            BlockedBy(
+                job_id=holder.job.id,  # type: ignore[union-attr]
+                group=group or "",
+                remaining_seconds=holder.est.remaining_seconds,  # type: ignore[union-attr]
+            )
+            if holder is not None
+            else None
+        )
         # reason
         if job.state == UPLOADING:
             last = job.source.last_received_at or job.created_at
@@ -464,25 +620,30 @@ def compute_queue(
             reason = REASON_UPLOAD_STALLED if stalled else REASON_UPLOADING
         elif paused:
             reason = REASON_PAUSED
-        elif not live_lanes:
+        elif place is not None and not place.workers and place.reason:
+            reason = place.reason
+        elif not live_cands:
             reason = REASON_WORKER_DOWN
         elif blocked is not None:
             reason = REASON_BLOCKED_BY_GROUP
         else:
             reason = REASON_WAITING_FOR_LANE
             eligible = job.queued_at or job.created_at
-            for since in list(idle_since.values()):
-                if _seconds(max(since, eligible), now) > cfg.not_scheduled_seconds:
+            mine = [k for k in idle_since if k in candidates]
+            for k in mine:
+                if _seconds(max(idle_since[k], eligible), now) > cfg.not_scheduled_seconds:
                     reason = REASON_NOT_SCHEDULED
                     break
             # 이 잡이 그 idle 레인을 차지한다고 보고 다음 잡은 정상 대기로 센다
-            if idle_since:
-                idle_since.pop(next(iter(idle_since)))
-            elif held_lanes:
+            held_mine = [k for k in held_lanes if k in candidates]
+            if mine:
+                idle_since.pop(mine[0])
+            elif held_mine:
                 # 「너를 집었을 레인이 부하로 막혀 있다」 — idle 통과 held 통은 별개다.
-                # 대기 잡 하나가 보류 레인 하나를 쓰고, 뒤 잡은 정직하게 waiting_for_lane 이다.
                 reason = REASON_HELD_BY_LOAD
-                held_lanes.pop()
+                held_lanes.remove(held_mine[-1])
+        shown = job.display_pool or job.pool
+        positions[shown] = positions.get(shown, 0) + 1
         est = Estimate(
             expected_seconds=expected,
             source=source,
@@ -498,13 +659,14 @@ def compute_queue(
         rows.append(
             QueueRow(
                 job=job,
-                position=position,
+                position=positions[shown],
                 reason=reason,
                 lane=None,
                 ahead_job_id=ahead,
                 blocked_by=blocked,
                 estimate=est,
                 progress=None,
+                placement_detail=tuple(place.notes[:PLACEMENT_DETAIL_MAX]) if place else (),
             )
         )
     return rows

@@ -179,6 +179,7 @@ def test_register_returns_the_protocol_parameters(srv):
     host_name 은 보낸 것."""
     wc = make_client(srv)
     body = wc.register(pool="linux", lanes=2, host_name="b02.local", version=__version__)
+    assert re.fullmatch(r"\d+:\d+", body.pop("generation"))  # M5n — 키 추가만
     assert body == {
         "name": WORKER,
         "pool": "linux",
@@ -439,7 +440,9 @@ def test_heartbeat_returns_cancel_paused_timeout_and_always_sends_the_job_list(s
     register(wc)
     jid = srv.queued_job()
     claimed(srv, wc, jid)
-    assert wc.heartbeat([jid], None) == {"cancel": [], "paused": False, "timeout_seconds": TIMEOUT}
+    hb = wc.heartbeat([jid], None)
+    assert hb.pop("generation")  # M5n — 세대(키 추가만)
+    assert hb == {"cancel": [], "paused": False, "timeout_seconds": TIMEOUT}
     assert srv.cancel(jid)[1]["state"] == CANCELLING
     assert wc.heartbeat([jid], None)["cancel"] == [jid]
     srv.clock.advance(3)
