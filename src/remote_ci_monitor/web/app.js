@@ -150,9 +150,11 @@
     if (gib >= 0.95) return gib.toFixed(1) + " GB";
     return Math.round(n / 1048576) + " MB";
   }
-  // 디스크는 십진 GB 정수 — Finder·`df -H` 와 같은 눈금이고, 소수점을 빼야 미터 한 칸에 들어간다
+  // 디스크는 십진 GB 정수 — Finder·`df -H` 와 같은 눈금이고, 소수점을 빼야 미터 한 칸에 들어간다.
+  // 1 TB 부터는 TB 한 자리 — 「7290 GB / 7995 GB」 보다 「7.3 TB / 8.0 TB」 가 짧고 바로 읽힌다.
   function fmtDisk(n) {
     if (!isNum(n)) return DASH;
+    if (n >= 1e12) return (n / 1e12).toFixed(1) + " TB";
     if (n >= 1e9) return Math.round(n / 1e9) + " GB";
     if (n >= 1e6) return Math.round(n / 1e6) + " MB";
     return Math.round(n / 1e3) + " KB";
@@ -3803,7 +3805,7 @@
   function renderHostDigest() {
     var d = hostDigest();
     var el = $("[data-host-digest]");
-    if (el) { el.textContent = d.text; el.className = "n" + (d.warn ? " warn" : ""); }
+    if (el) { el.textContent = d.text; el.title = d.text; el.className = "n" + (d.warn ? " warn" : ""); }
     var det = $("#host-details");
     if (!det) return;
     // 사람이 직접 여닫은 적이 있으면 그 선택이 이긴다. 없으면 `alert` 일 때 **한 번** 펼치고,
@@ -3819,8 +3821,8 @@
     var p = pool0(state.status);
     var body = $("[data-host-body]");
     renderHostDigest();
-    if (!p) { body.innerHTML = '<div class="empty">host: no sample yet</div>'; return; }
-    if (p.hosts === null || p.hosts === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="hosts">Host unavailable — ' + esc(p.hosts_error || "unknown error") + "</div>"; return; }
+    if (!p) { body.innerHTML = '<div class="empty">' + esc(tr("host.no_sample")) + "</div>"; return; }
+    if (p.hosts === null || p.hosts === undefined) { body.innerHTML = '<div class="banner bad" role="alert" data-error="hosts">' + esc(tr("host.unavailable", { error: errorText(p.hosts_error, p.hosts_error_code) })) + "</div>"; return; }
     var cards = hostCards(state.status, L());
     if (!cards.length) { body.innerHTML = '<div class="empty">' + esc(tr("host.no_sample")) + "</div>"; return; }
     body.innerHTML = cards.map(function (c) { return hostCardHtml(c.host, c.title); }).join("");
@@ -3967,12 +3969,20 @@
     var compPct = isNum(mem.compressed_bytes) && isNum(mem.total_bytes) && mem.total_bytes > 0 ? mem.compressed_bytes / mem.total_bytes * 100 : 0;
     var meter = function (metric, label, right, pct, pct2, warn, spark) {
       var known = isNum(pct);
-      return '<div class="meter' + (warn ? " warn" : "") + (stale ? " stale" : "") + '" data-metric="' + metric + '"><div class="lab"><span>' + esc(label) + "</span><span>" + esc(right) + "</span></div>" +
+      return '<div class="meter' + (warn ? " warn" : "") + (stale ? " stale" : "") + '" data-metric="' + metric + '"><div class="lab" title="' + esc(right ? label + " · " + right : label) + '"><span>' + esc(label) + "</span><span>" + esc(right) + "</span></div>" +
         '<meter min="0" max="100" value="' + (known ? Math.round(pct) : 0) + '" aria-label="' + esc(label) + '"></meter>' +
         '<div class="bar"><i style="width:' + (known ? Math.max(0, Math.min(100, pct - (pct2 || 0))) : 0) + '%"></i>' + (pct2 ? '<i class="b" style="width:' + Math.min(100, pct2) + '%"></i>' : "") + "</div>" +
         (spark ? '<div class="spark">' + spark + "<span>" + esc(tr("host.window")) + "</span></div>" : "") + "</div>";
     };
-    var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn">' + esc(title || h.name || DASH) + '<span class="age">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(h.os || DASH) + " · " + esc(tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })) + "</span></div>";
+    var name = title || h.name || DASH;
+    var facts = (h.os || DASH) + " · " + tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH });
+    // 이름 · 나이 줄은 **한 줄**이다(말줄임 · 전문은 title) — 처리 대기 숫자의 자릿수가 5초마다 바뀌어도
+    // 줄 수가 그대로여야 그 아래 카드가 뛰지 않는다
+    var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn"><span class="hname" title="' + esc(name) + '">' + esc(name) + '</span><span class="age" title="' + esc(facts) + '">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(facts) + "</span></div>";
+    // 미터는 자기 격자(`.meters`)에 산다 — 이름 줄 · 프로세스 줄이 카드 격자의 `1 / -1` 을 쓰면
+    // `auto-fit` 의 빈 칸이 접히지 않아 1240px 에서도 미터가 150px 로 눌렸다(빈 칸 셋이 남는다)
+    var sub = "";
+    html += '<div class="meters">';
     html += meter("cpu", tr("host.cpu", { pct: fmtPct(cpu.busy) }), isNum(cpu.user) && isNum(cpu.sys) ? tr("host.cpu_detail", { user: Math.round(cpu.user), sys: Math.round(cpu.sys) }) : (stale ? tr("host.last_known") : DASH), cpu.busy, isNum(cpu.sys) ? cpu.sys : 0, isNum(cpu.busy) && cpu.busy >= 85, sparkline(h.history, "cpu_busy"));
     html += meter("mem", tr("host.memory", { used: fmtMemory(mem.used_bytes), total: fmtMemory(mem.total_bytes) }), (isNum(memPct) ? fmtPct(memPct) : DASH) + (isNum(mem.compressed_bytes) ? " · " + tr("host.compressed", { size: fmtMemory(mem.compressed_bytes) }) : ""), memPct, compPct, isNum(memPct) && memPct >= 85, sparkline(h.history, "mem_used_bytes"));
     var disk = h.disk || null;
@@ -3985,11 +3995,18 @@
       // 데이터 디렉터리가 쥔 부피는 서버의 사실이라 **서버 자신의 카드에만** 그린다 — 로컬 표본은
       // `source: "local"`, 원격 워커의 표본은 `source: "worker"` 다.
       var js = h.source === "local" ? jobStorageLine((state.status && state.status.server || {}).job_storage, state.status && state.status.generated_at, L()) : null;
-      if (js) html += '<div class="substat' + (js.warn ? " warn" : "") + '">' + esc(js.text) + "</div>";
+      if (js) sub = '<div class="substat' + (js.warn ? " warn" : "") + '" title="' + esc(js.text) + '">' + esc(js.text) + "</div>";
     }
     if (gpu) html += meter("gpu", tr("host.gpu", { pct: fmtPct(gpu.util_pct) }), isNum(gpu.mem_used_bytes) ? tr("host.gpu_used", { size: fmtMemory(gpu.mem_used_bytes) }) : DASH, gpu.util_pct, 0, isNum(gpu.util_pct) && gpu.util_pct >= 85, sparkline(h.history, "gpu_util_pct"));
-    else html += '<div class="meter" data-metric="gpu"><div class="lab"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";
-    if (Array.isArray(h.top) && h.top.length) html += '<div class="top">' + esc(tr("host.top")) + h.top.map(function (t) { return "<b>" + esc(t.comm || DASH) + "</b> " + fmtPct(t.cpu) + " " + fmtMb(t.rss_mb); }).join(" · ") + "</div>";
+    else html += '<div class="meter" data-metric="gpu"><div class="lab" title="' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + '"><span>' + esc(tr("host.gpu_none", { note: gpuNote(h) })) + "</span><span></span></div></div>";
+    html += "</div>" + sub;
+    // 프로세스 줄도 한 줄 — 이름이 표본마다 바뀌므로(200자짜리 경로도 온다) 접히면 카드가 뛴다.
+    // 이름마다 말줄임하고 전문은 그 이름의 title 에, 줄 전체는 줄의 title 에.
+    if (Array.isArray(h.top) && h.top.length) {
+      var procs = h.top.map(function (t) { return { comm: t.comm || DASH, rest: fmtPct(t.cpu) + " " + fmtMb(t.rss_mb) }; });
+      html += '<div class="top" title="' + esc(procs.map(function (t) { return t.comm + " " + t.rest; }).join("\n")) + '">' + esc(tr("host.top"))
+        + procs.map(function (t) { return '<b title="' + esc(t.comm) + '">' + esc(t.comm) + "</b> " + esc(t.rest); }).join(" · ") + "</div>";
+    }
     return html + "</div>";
   }
 

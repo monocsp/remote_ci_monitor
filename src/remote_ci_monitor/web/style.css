@@ -341,9 +341,12 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 #host-details > summary .n { font: 12px var(--sans); color: var(--muted); font-variant-numeric: tabular-nums; }
 #host-details > summary .n.warn { color: var(--warn); font-weight: 600; }
 #host-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* 호스트는 이름 한 칸 + **지표 카드**다. 칸 수를 못 박지 않고 `auto-fit` 에 맡기면 좁은 화면에서
-   3장 · 2장으로 저절로 접힌다 — 미터가 셋일 때와 넷일 때 격자를 따로 안 짜도 된다. */
-.hostcard { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: start; }
+/* 호스트는 이름 줄 + **지표 카드** 격자 + 프로세스 줄이다. 칸 수를 못 박지 않고 `auto-fit` 에 맡기면
+   좁은 화면에서 3장 · 2장으로 저절로 접힌다 — 미터가 셋일 때와 넷일 때 격자를 따로 안 짜도 된다.
+   격자는 미터만의 것(`.meters`)이다 — 이름 줄이 `1 / -1` 로 같은 격자를 쓰면 빈 칸이 접히지 않아
+   1240px 에서도 미터 넷이 일곱 칸 중 넷(150px)에 눌렸다(2026-11-17). */
+.hostcard { display: grid; gap: 12px; }
+.hostcard .meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; align-items: start; }
 .hostcard .meter { background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 8px; padding: 9px 10px; }
 .hostcard .hn { grid-column: 1 / -1; }
 .hostcard + .hostcard { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); } /* 풀마다 카드(M5b-4) — 붙어 보이지 않게 */
@@ -367,6 +370,24 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .meter .spark .gap { stroke-dasharray: 2 2; opacity: 0.5; }
 .top { grid-column: 1 / -1; font: 12px var(--mono); color: var(--muted); }
 .top b { color: var(--ink); font-weight: 500; }
+/* 카드 안의 글자 줄은 전부 **한 줄**이다 — 5초 표본마다 숫자 자릿수 · 프로세스 이름이 바뀌는데
+   접힘을 허락하면 그때마다 카드 높이가 바뀌어 그 아래 절이 통째로 뛴다(2026-09-14 의 315px 와
+   같은 병). 넘치면 말줄임하고 전문은 그 줄의 title 에 있다. 격자 칸은 `min-width: 0` 이어야
+   nowrap 글자가 칸을 넓혀 페이지를 밀지 않는다. */
+.hostcard > *, .hostcard .meters > *, .hostcard .meter > * { min-width: 0; }
+.hostcard .hn .hname, .hostcard .hn .age, .hostcard .substat, .hostcard .top {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hostcard .substat { grid-column: 1 / -1; font: 12px var(--sans); color: var(--muted); }
+.hostcard .substat.warn { color: var(--warn); font-weight: 600; }
+.hostcard .top b { display: inline-block; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.hostcard .meter .lab { flex-wrap: nowrap; gap: 8px; }
+.hostcard .meter .lab span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hostcard .meter .lab span:first-child { flex: 0 1 auto; }
+.hostcard .meter .lab span:last-child { flex: 0 100 auto; }   /* 덧붙인 숫자가 먼저 줄어든다 */
+/* 접힌 줄의 요약(호스트 이름들 · 판정)도 한 줄 — 이름이 길거나 풀이 많아도 접힌 절은 한 줄이다 */
+#host-details > summary .n { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 끊김 없는 `hosts_error` 도 띠 안에서 접힌다 — 페이지를 옆으로 밀지 않는다 */
+#host .banner { overflow-wrap: anywhere; }
 .stale-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--warn-soft) 0 4px, transparent 4px 8px); color: var(--warn); font: 600 12px var(--sans); }
 
 /* ── 최근 완료 (항목 14 · 15) ── */
@@ -473,7 +494,7 @@ table.mtab .mdown { color: var(--bad); font: 600 11.5px var(--sans); }
   table.q td.eta { white-space: normal; }
   .prog { padding-left: 8px; }
   .steps { grid-template-columns: 1fr; }
-  .hostcard { grid-template-columns: 1fr; }
+  .hostcard .meters { grid-template-columns: 1fr; }
   .rrow { grid-template-columns: 1fr 1fr; }
   .rrow .k, .rrow .s { grid-column: span 2; }
   #drawer { width: 100%; }
