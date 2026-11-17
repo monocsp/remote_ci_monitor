@@ -3915,10 +3915,19 @@
     var name = m.display_name || m.id || DASH;
     toast(name + " · " + chip.text + (chip.lines.length ? " — " + chip.lines.join("; ") : ""));
   }
+  /** `/api/status` 에 함께 오는 머신 요약(`server.machines[]`). 옛 서버면 빈 배열. */
+  function machineSummaries() {
+    var s = state.status && state.status.server;
+    return s && Array.isArray(s.machines) ? s.machines : [];
+  }
   function renderMachinesVisibility() {
     var sec = $("#machines-section");
     if (!sec) return;
-    sec.hidden = state.view === "store" || state.machinesMissing || !machineList().length;
+    // 절이 보일지는 **상태 문서의 요약**으로 첫 렌더에서 정한다. `/api/machines` 를 받은 뒤에야
+    // 보이게 하면 첫 그림 뒤에 절 하나(44px)가 끼어들어 그 아래 「최근」이 통째로 밀린다
+    // (CI ubuntu 3.13 에서 잡힌 회귀 — 느린 기계일수록 측정 사이에 끼어든다).
+    sec.hidden = state.view === "store" || state.machinesMissing
+      || !(machineSummaries().length || machineList().length);
   }
   function renderMachines() {
     renderMachinesVisibility();
@@ -3927,9 +3936,17 @@
     var admin = !!state.token && !state.tokenBad && state.admin === true;
     var rows = machineRows(state.machines, admin, L());
     var failed = machineList().filter(function (m) { return machineChecks(m).some(function (c) { return c && c.state === "failed"; }); }).length;
+    var summaries = machineSummaries();
+    // 표 문서가 아직 없으면 요약으로 센다 — 접힌 한 줄이 문서가 올 때 바뀌지 않게
+    var count = rows.length || summaries.length;
+    if (!state.machines && summaries.length) {
+      failed = summaries.filter(function (m) {
+        return (m && Array.isArray(m.problems) ? m.problems : []).some(function (p) { return p && p.code === "check_failed"; });
+      }).length;
+    }
     var digest = $("[data-machines-digest]");
     if (digest) {
-      digest.textContent = rows.length ? tr("machines.count", { n: rows.length }) + (failed ? " · " + tr("machines.failed_count", { n: failed }) : "") : "";
+      digest.textContent = count ? tr("machines.count", { n: count }) + (failed ? " · " + tr("machines.failed_count", { n: failed }) : "") : "";
       digest.className = "n" + (failed ? " warn" : "");
     }
     if (!rows.length) { body.innerHTML = ""; return; }
