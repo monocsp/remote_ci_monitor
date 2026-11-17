@@ -57,7 +57,7 @@ LONG_HOST = "epeuem-mac-studio-m4-ultra-192gb-rack3-slot12.corp.example.internal
 LONG_COMM = "/Applications/Xcode-27.2.app/Contents/Developer/Platforms/" + "Simulator" * 16
 PROBE_VALUE = ("Xcode 27.2 · Build version 27B52 · " + "SDK iphonesimulator27.2 " * 6)[:120]
 LONG_PRESET = "scenario-qa-device-matrix-with-a-deliberately-long-preset-name"
-LONG_MEDIAN = "scenario-qa:" + "device-matrix-" * 6 + "iphone-se-3rd-generation"
+LONG_MEDIAN = "scenario_qa:" + "device_matrix_" * 6 + "iphone_se_3rd_generation"  # 끊김 없음
 LONG_HOSTS_ERROR = "sampler:" + "collector_failed_" * 18 + " (ioreg · vm_stat · df all failed)"
 
 
@@ -321,7 +321,7 @@ def ready(lang: str, machines: int = 50) -> str:
 # 두 절을 펼친다 — 접힌 절의 넘침은 아무것도 증명하지 않는다. 사람의 선택처럼 저장하지는 않는다.
 OPEN_JS = """
 (() => {
-  for (const id of ['host-details', 'machines']) {
+  for (const id of ['host-details', 'machines', 'estimates']) {
     const d = document.getElementById(id);
     if (d && !d.open) { d.dataset.byRender = '1'; d.open = true; }
   }
