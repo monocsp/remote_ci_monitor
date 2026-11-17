@@ -583,6 +583,49 @@ table.q td.source .uncommitted { display: flex; width: max-content; max-width: 1
   .rrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   table.q td.requester .rq { max-width: calc(100% - 6em); }
 }
+
+/* ── 가독성 R2 (Codex 가독성 검토 2 · 3 · 4 · 9번 · tests/test_web_readability_r2.py) ── */
+/* 2번 — 펼친 배치 블록: 판정별 집계 한 줄, 머신은 한 줄씩(말줄임 · 전문은 title), 그 아래 토글 */
+.place-sum { padding: 2px 0 4px; font: 600 12.5px/1.45 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
+.place-list li { line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.place-more { margin: 2px 0 2px 18px; }
+/* 3번 — 펼친 최근 실패: 칸마다 따로. 단계 · 이름은 한 줄, 서버 요약은 네 줄에서 자른다 */
+.rdetail > * { min-width: 0; }
+.rdetail .rd-tr, .rdetail .rd-fh, .rdetail .rd-more, .rdetail .rd-un { line-height: 1.45; }
+.rdetail .rd-step { line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rdetail .rd-fh { margin-top: 2px; color: var(--ink); }
+.rdetail .rd-fail { margin: 0; padding: 0 0 0 14px; list-style: none; }
+/* 이름이 먼저 남고 판정 글이 먼저 준다 — 판정은 7em 아래로는 안 준다 */
+.rdetail .rd-fail li { display: flex; gap: 0 0.5em; line-height: 1.45; white-space: nowrap; min-width: 0; }
+.rdetail .rd-fail .fn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.rdetail .rd-fail .fv { flex: 0 1000 auto; min-width: min(7em, 40%); overflow: hidden; text-overflow: ellipsis; }
+.rdetail .rd-sum { margin-top: 4px; }
+.rdetail .rd-sumt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; line-height: 1.45; color: var(--ink); }
+.rdetail .rd-sumt.full { display: block; -webkit-line-clamp: none; line-clamp: none; }
+.rdetail .rd-act { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.rd-btn { padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font: 11px/1.6 var(--sans); color: var(--accent); cursor: pointer; }
+/* 9번 — 머신 점검 칸 첫 줄: 결론 · 대상 · 잡 번호. 줄어드는 것은 점검 이름뿐이다 */
+table.mtab td.mchk .mck-h { display: flex; align-items: baseline; min-width: 0; overflow: hidden; white-space: nowrap; }
+table.mtab td.mchk .mck-w, table.mtab td.mchk .mck-j { flex: none; }
+table.mtab td.mchk .mck-sep { flex: none; white-space: pre; color: var(--muted); font-weight: 400; }
+table.mtab td.mchk .mck-p { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+table.mtab td.mchk .mck-h.failed .mck-w { color: var(--bad); }
+table.mtab td.mchk .mck-h.recheck .mck-w { color: var(--warn); }
+table.mtab td.mchk .mck-h.passed .mck-w { color: var(--ok); }
+table.mtab td.mchk .mck-j { font: 600 12.5px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+/* 첫 줄 아래의 진단은 두 줄 — 칸 전체는 오늘처럼 세 줄 자리. 결론은 첫 줄이 말했으니 보조 글씨 */
+table.mtab td.mchk .mck-h + .clamp { -webkit-line-clamp: 2; color: var(--muted); font-weight: 400; }
+/* 4번 — 폰의 큐 카드: 머리줄이 사라지므로 헷갈리는 세 칸에만 작은 라벨. 라벨은 늘 같은 글이라
+   카드 높이는 값과 상관없다. 실행한 사람 줄은 라벨이 붙어도 한 줄(이름만 준다). */
+@media (max-width: 720px) {
+  table.q td.requester::before, table.q td.eta::before, table.q td.reason > .reason::before {
+    content: attr(data-label); margin-right: 6px; font: var(--t-label); color: var(--muted);
+  }
+  table.q td.requester { display: flex; align-items: baseline; min-width: 0; white-space: nowrap; }
+  table.q td.requester::before { flex: none; }
+  table.q td.requester .rq { flex: 0 1 auto; min-width: 0; max-width: none; }
+  table.q td.requester .you, table.q td.requester .joiners { flex: none; }
+}
 /* 움직임도 상태 채널이다(§4.2) — **끝나지 않은** 상태만 움직인다. 끝난 잡은 가만히 있어서,
    화면 구석으로 흘긋 봐도 「아직 도는 중」과 「끝났다」가 갈린다.
    전부 `prefers-reduced-motion: no-preference` 뒤에 둔다 — 움직임을 끈 사람에게는 하나도 안 돈다.

@@ -76,6 +76,21 @@ of a key bumps that number and is listed here.
   `rcm-gate-connect` skill no longer needs `rcm-store-connect` first and asks about `placement`,
   `checks` and `concurrency_scope`.
 
+### Changed
+- **Long lists on the web page stay short.** An expanded waiting row with many machines first
+  counts them by verdict (`12 missing tools · 9 check failed · 3 down`), lists five, and hides the
+  rest behind **show N more**, which the browser remembers per job. An expanded recent failure
+  shows its failed names one per line (eight, then `+N more`), the server's summary in four lines
+  with **show all**, and **open log**; a summary the row already shows in full is not repeated.
+  The machines table's checks cell starts with the verdict, the check and the job
+  (`failed · sim-check · #3620`), and the job number opens that job's log.
+- On a phone, queue cards label the three fields that are easy to mix up: status, who requested
+  it and the expected finish.
+- Clearer Korean wording on the web page: `확인이 필요한 작업이 없습니다` instead of `모두 정상입니다`,
+  `완료 예상` instead of `종료` for an ETA, `실행 가능한 머신 없음`, `머신 점검 실패`, `대기열 N번째`,
+  `빈 레인까지 5m`, `시스템 부하` for the load average and `10초마다 확인` while polling. In English,
+  "needs attention" now says `Nothing needs a look` instead of `Everything is fine`.
+
 ## [0.4.4] - 2026-11-11
 
 ### Added

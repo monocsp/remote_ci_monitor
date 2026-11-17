@@ -731,6 +731,57 @@
   function placementDetailLines(row, lang) {
     return placementList(row).map(function (n) { return placementNoteText(n, lang); });
   }
+  //: 펼친 배치 블록이 처음 보이는 머신 수(Codex 가독성 검토 2번). 나머지는 「나머지 N대 보기」 뒤에.
+  var PLACE_SHOWN = 5;
+  var PLACE_GROUPS = ["tool_missing", "workspace_tool", "check_failed", "check_running", "check_needed",
+    "check_recheck", "report_missing", "report_stale", "fingerprint_unknown"];
+  /** 판정 하나의 묶음 열쇠 — 짧은 사유(`placementReason`)와 같은 갈래로 나눈다. */
+  function placementGroupKey(n) {
+    if (n.state === "down" || n.code === "worker_down") return "down";
+    if (n.state === "eligible" || n.code === "ok") return "eligible";
+    if (n.code === "check_needed" && n.detail && n.detail.recheck === true) return "check_recheck";
+    return PLACE_GROUPS.indexOf(n.code) >= 0 ? n.code : "other:" + (n.code || n.state || DASH);
+  }
+  /**
+   * 펼친 배치 블록의 모형(검토 2번). 머신이 많으면 30줄이 큐를 삼킨다 — 판정별 집계를 먼저
+   * (`도구 없음 12대 · 점검 실패 9대 · 꺼짐 3대`, 많은 것부터 · 가능은 맨 끝), 그 아래 문제 머신을
+   * 서버 차례로 `PLACE_SHOWN` 개, 가능한 머신은 그 뒤. `all` 이면 전부.
+   * 머신이 `PLACE_SHOWN` 이하면 줄이 곧 집계라 집계를 비운다.
+   */
+  function placementDetailModel(row, lang, all) {
+    var list = placementList(row).filter(function (n) { return n && typeof n === "object"; });
+    var empty = { summary: "", lines: [], hidden: 0, total: 0 };
+    if (!list.length) return empty;
+    var items = list.map(function (n) {
+      return { cls: n.state || "", text: placementNoteText(n, lang), key: placementGroupKey(n) };
+    });
+    var ordered = items.filter(function (it) { return it.key !== "eligible"; })
+      .concat(items.filter(function (it) { return it.key === "eligible"; }));
+    var total = ordered.length;
+    var summary = "";
+    if (total > PLACE_SHOWN) {
+      var counts = {}, order = [];
+      items.forEach(function (it) {
+        if (!counts[it.key]) { counts[it.key] = 0; order.push(it.key); }
+        counts[it.key]++;
+      });
+      var keys = order.filter(function (k) { return k !== "eligible"; });
+      keys.sort(function (a, b) { return counts[b] - counts[a] || order.indexOf(a) - order.indexOf(b); });
+      if (counts.eligible) keys.push("eligible");
+      summary = keys.map(function (k) {
+        return k.indexOf("other:") === 0
+          ? T(lang, "place.n.other", { n: counts[k], code: k.slice(6) })
+          : T(lang, "place.n." + k, { n: counts[k] });
+      }).join(" · ");
+    }
+    var shown = all ? ordered : ordered.slice(0, PLACE_SHOWN);
+    return {
+      summary: summary,
+      lines: shown.map(function (it) { return { cls: it.cls, text: it.text }; }),
+      hidden: total - shown.length,
+      total: total
+    };
+  }
   /** `어느 머신이든` · `<w> 지정` · "" (pool 이거나 옛 서버의 행). */
   function placementLabel(row, lang) {
     if (!row) return "";
@@ -796,6 +847,37 @@
       default: return name + " " + ((c && c.state) || DASH);
     }
   }
+  /** 점검 하나의 갈래 — 첫 줄에 올릴 차례(실패 > 다시 점검 필요 > 점검 중 > 점검 필요 > 통과). */
+  function checkKind(c) {
+    var st = c && c.state;
+    if (st === "failed") return "failed";
+    if (st === "needed" && c.recheck_needed === true) return "recheck";
+    if (st === "running" || st === "needed" || st === "passed") return st;
+    return null;
+  }
+  var CHECK_RANK = { failed: 0, recheck: 1, running: 2, needed: 3, passed: 4 };
+  /**
+   * 점검 칸을 결론 · 대상 · 진단으로(Codex 가독성 검토 9번). 첫 줄은 가장 급한 점검 하나 —
+   * `실패 · sim-check · #3620`, 잡 번호는 실패 · 다시 점검 · 점검 중에만(통과한 잡을 열 일은 드물다).
+   * 나머지 점검은 같은 차례로 `checkText` 를 ` · ` 로 이은 진단이다. 점검이 없으면 머리는 null.
+   */
+  function checkSummary(checks, lang) {
+    var list = checks.map(function (c, i) {
+      var kind = checkKind(c);
+      return { c: c, i: i, kind: kind, rank: kind ? CHECK_RANK[kind] : 5 };
+    }).sort(function (a, b) { return a.rank - b.rank || a.i - b.i; });
+    if (!list.length) return { head: null, rest: "" };
+    var top = list[0];
+    var c = top.c || {};
+    var word = top.kind ? T(lang, "machine.check_word." + top.kind) : String(c.state || DASH);
+    var preset = c.preset || DASH;
+    var withId = top.kind === "failed" || top.kind === "recheck" || top.kind === "running";
+    var jobId = withId && isNum(c.job_id) ? c.job_id : null;
+    return {
+      head: { text: word + " · " + preset + (jobId !== null ? " · #" + jobId : ""), word: word, preset: preset, jobId: jobId, cls: top.kind || "" },
+      rest: list.slice(1).map(function (x) { return checkText(x.c, lang); }).join(" · ")
+    };
+  }
   /**
    * 머신 표의 행들(§8.3) — 서버 차례 그대로. `admin` 이고 점검이 있는 머신에만 다시 점검.
    * 망가진 문서는 [] — 화면은 던지지 않는다. 모르는 숫자는 —.
@@ -807,6 +889,7 @@
       var names = Object.keys(presets);
       var ok = names.filter(function (k) { return presets[k] && presets[k].state === "eligible"; }).length;
       var checks = machineChecks(m);
+      var sum = checkSummary(checks, lang);
       return {
         id: m.id,
         name: m.display_name || m.id || DASH,
@@ -815,6 +898,8 @@
         fingerprint: probeSummary(m.fingerprint, lang),
         presets: names.length ? T(lang, "machine.presets", { n: ok, total: names.length }) : DASH,
         checks: checks.length ? checks.map(function (c) { return checkText(c, lang); }).join(" · ") : DASH,
+        checkHead: sum.head,
+        checkRest: sum.rest,
         recheck: admin === true && checks.length > 0
       };
     });
@@ -1177,32 +1262,45 @@
   /* 최근 행 상세의 줄들 — 순수(§2.6). 스텝 라벨은 **선언된 것만** 「실패한 스텝」이고,
      아니면 「마지막 스텝」이다(M5h 결정 63). 이름별 최근 이력은 서버가 코드로 준 판정을
      문장으로만 바꾼다(결정 37) — 여기서 다시 계산하지 않는다. */
-  function recentDetail(job, lang) {
+  /**
+   * 펼친 최근 행의 모형(Codex 가독성 검토 3번) — 전이 · 단계 · 이름별 실패 · 서버 요약을 **따로**
+   * 준다. 그리는 층이 이름은 한 줄씩 말줄임하고 요약은 네 줄에서 자른다. 빈 칸은 "" 다.
+   */
+  function recentDetailModel(job, tz, lang) {
     job = job || {};
-    var out = [];
-    if (job.failed_step) out.push(T(lang, "recent.failed_step") + job.failed_step);
-    else if (job.last_step) out.push(T(lang, "recent.last_step_label") + job.last_step);
+    var m = { transitions: transitionsLine(job, tz, lang), step: "", failuresTitle: "", failures: [], more: "", unnamed: "", summary: outcomeText(job, lang) };
+    if (job.failed_step) m.step = T(lang, "recent.failed_step") + job.failed_step;
+    else if (job.last_step) m.step = T(lang, "recent.last_step_label") + job.last_step;
     var items = Array.isArray(job.failures) ? job.failures.filter(function (f) {
       return f && typeof f === "object" && f.name;
     }) : [];
-    if (items.length) {
-      out.push(T(lang, "failures.title"));
-      // 이름은 100개까지 올 수 있다(§4.2) — 상세가 스크롤 한 화면을 먹지 않게 자른다
-      var shown = items.slice(0, RECENT_FAILURES_SHOWN);
-      shown.forEach(function (f) {
-        var key = "failures." + f.verdict;
-        var known = I18N.has(key) && isNum(f.window) && (f.verdict !== "intermittent" || isNum(f.seen));
-        var text = known ? T(lang, key, { seen: f.seen, window: f.window }) : "";
-        // 스텝인지 단위(테스트·파일)인지는 **여기서** 구분한다 — CLI 는 한 모양이다(§2.5)
-        var name = f.step ? f.name + " (" + T(lang, "failures.step_kind") + ")" : f.name;
-        out.push(text ? name + " — " + text : name);
-      });
-      if (items.length > shown.length) out.push(T(lang, "failures.more", { n: items.length - shown.length }));
-      // 분모의 품질은 어느 줄에 실려 와도 읽는다 — 서버는 줄마다 같은 값을 싣는다(결정 68)
-      var unnamed = 0;
-      items.forEach(function (f) { if (isNum(f.window_unnamed) && f.window_unnamed > unnamed) unnamed = f.window_unnamed; });
-      if (unnamed) out.push(T(lang, "failures.unnamed", { n: unnamed }));
-    }
+    if (!items.length) return m;
+    m.failuresTitle = T(lang, "failures.title");
+    // 이름은 100개까지 올 수 있다(§4.2) — 상세가 스크롤 한 화면을 먹지 않게 자른다
+    m.failures = items.slice(0, RECENT_FAILURES_SHOWN).map(function (f) {
+      var key = "failures." + f.verdict;
+      var known = I18N.has(key) && isNum(f.window) && (f.verdict !== "intermittent" || isNum(f.seen));
+      var text = known ? T(lang, key, { seen: f.seen, window: f.window }) : "";
+      // 스텝인지 단위(테스트·파일)인지는 **여기서** 구분한다 — CLI 는 한 모양이다(§2.5)
+      var name = f.step ? f.name + " (" + T(lang, "failures.step_kind") + ")" : f.name;
+      return { name: name, verdict: text, title: text ? name + " — " + text : name };
+    });
+    if (items.length > m.failures.length) m.more = T(lang, "failures.more", { n: items.length - m.failures.length });
+    // 분모의 품질은 어느 줄에 실려 와도 읽는다 — 서버는 줄마다 같은 값을 싣는다(결정 68)
+    var unnamed = 0;
+    items.forEach(function (f) { if (isNum(f.window_unnamed) && f.window_unnamed > unnamed) unnamed = f.window_unnamed; });
+    if (unnamed) m.unnamed = T(lang, "failures.unnamed", { n: unnamed });
+    return m;
+  }
+  /** 상세의 줄들(옛 모양) — `recentDetailModel` 에서 그대로 뽑는다. 두 갈래가 어긋나지 않게. */
+  function recentDetail(job, lang) {
+    var m = recentDetailModel(job, undefined, lang);
+    var out = [];
+    if (m.step) out.push(m.step);
+    if (m.failuresTitle) out.push(m.failuresTitle);
+    m.failures.forEach(function (f) { out.push(f.title); });
+    if (m.more) out.push(m.more);
+    if (m.unnamed) out.push(m.unnamed);
     return out;
   }
 
@@ -2955,6 +3053,7 @@
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
     connection: connection, nextBackoff: nextBackoff, ACTIONABLE: ACTIONABLE, TERMINAL: TERMINAL,
     placementNoteText: placementNoteText, placementLabel: placementLabel, placementDetailLines: placementDetailLines,
+    placementDetailModel: placementDetailModel, PLACE_SHOWN: PLACE_SHOWN, recentDetailModel: recentDetailModel,
     envChangedChip: envChangedChip, probeSummary: probeSummary, machineRows: machineRows,
     LOST_AFTER_MS: LOST_AFTER_MS, POLL_MS: POLL_MS,
     store: storePure
@@ -2974,6 +3073,9 @@
     token: null, me: null, admin: false, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
     lang: I18N.DEFAULT_LANG,
     expanded: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
+    // 펼친 배치 블록에서 「나머지 N대 보기」를 누른 행(검토 2번) — 펼침처럼 그 브라우저에 남는다.
+    // 최근 상세의 「전체 보기」(검토 3번)는 펼친 최근 행처럼 이 페이지에만 산다.
+    placeAll: {}, recentFull: {},
     // 이름별 실패 이력은 `/api/status` 에 없다(결정 67) — 행을 펼칠 때 그 잡만 한 번 받는다
     recentFailures: {},
     // 호스트 이름 → 직전 압력 판정. 「바쁨」에 이력을 주는 기억이고 이 페이지에만 산다.
@@ -3022,6 +3124,8 @@
   // 사람이 편 행만 그 브라우저에 남는다. 옛 키(`rcm.collapsed`)는 읽지 않는다 — 뜻이 뒤집혔다.
   function loadExpanded() { try { (JSON.parse(lsGet("rcm.expanded") || "[]") || []).forEach(function (id) { state.expanded[id] = true; }); } catch (e) { state.expanded = {}; } }
   function saveExpanded() { lsSet("rcm.expanded", JSON.stringify(Object.keys(state.expanded).map(Number))); }
+  function loadPlaceAll() { try { (JSON.parse(lsGet("rcm.place_all") || "[]") || []).forEach(function (id) { state.placeAll[id] = true; }); } catch (e) { state.placeAll = {}; } }
+  function savePlaceAll() { lsSet("rcm.place_all", JSON.stringify(Object.keys(state.placeAll).map(Number))); }
 
   // ── 언어 (결정 36·38) ──
   // 기본은 한국어다. 브라우저 언어를 보지 않는다 — 고르면 그 브라우저에 남는다.
@@ -3210,6 +3314,7 @@
     window.addEventListener("storage", function (ev) {
       if (ev.key === "rcm.token") { state.token = ev.newValue; state.tokenBad = false; state.me = null; state.admin = false; if (state.token) verifyToken(state.token, true); else { renderTokenButton(); render(); storeAuthChanged(); } }
       if (ev.key === "rcm.expanded") { state.expanded = {}; loadExpanded(); renderQueue(); }
+      if (ev.key === "rcm.place_all") { state.placeAll = {}; loadPlaceAll(); renderQueue(); }
       // 다른 탭에서 언어를 바꾸면 이 탭도 따라온다
       if (ev.key === "rcm.lang") { state.lang = I18N.normalize(ev.newValue); applyLang(); }
     });
@@ -3426,6 +3531,9 @@
     var changed = false;
     Object.keys(state.expanded).forEach(function (k) { if (!ids[k]) { delete state.expanded[k]; changed = true; } });
     if (changed) saveExpanded();
+    var placeGone = false;
+    Object.keys(state.placeAll).forEach(function (k) { if (!ids[k]) { delete state.placeAll[k]; placeGone = true; } });
+    if (placeGone) savePlaceAll();
   }
   /** 큐 표의 머리줄. 두 곳(기본 풀·다른 풀)이 같은 것을 쓴다 — 갈라지지 않게 한 함수로. */
   function queueHeadHtml(tzName) {
@@ -3517,6 +3625,8 @@
     // 갈래가 다르다 — 단계 · 로그 · 취소는 여기 없고, 접힌 행의 취소 버튼도 그대로 남는다.
     var placeLines = !busy ? placementDetailLines(row, L()) : [];
     var placeOpen = placeLines.length > 0 && !!state.expanded[row.id];
+    // 펼친 블록은 집계 + 머신 다섯 + 「나머지 N대 보기」(Codex 가독성 검토 2번) — 접힌 행은 그대로다
+    var place = placeOpen ? placementDetailModel(row, L(), !!state.placeAll[row.id]) : null;
     // 전체 진행 막대는 접힘과 무관하게 도는 행에 늘 붙는다 — 접기가 「어디까지 왔나」를 감추면
     // 접어 둘 수 없다. 단계 목록·로그 tail·액션만 ▸ 뒤에 있다.
     // 막대는 **진행 시간 칸 안**에 산다(별도의 막대 행이 아니다) — 한 작업이 한 줄이다.
@@ -3563,7 +3673,7 @@
     // 한 갈래다 — 형편은 class 하나로만 말한다(칩 세 갈래를 따로 조립하던 자리).
     // 이유는 두 줄로 못 박힌다(style.css) — 메모 30개짜리 이유도 행을 늘리지 않게. 전문은 title 로.
     var reasonCell = '<span class="reason' + (r.actionable || busy ? " act" : "") + (r.cls ? " " + r.cls : "")
-      + '" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
+      + '" data-label="' + esc(tr("queue.col_reason")) + '" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
     // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
     var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
@@ -3587,17 +3697,30 @@
     var etaCell = '<span class="eta">' + esc(eta.clock) + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
     if (est.overdue && !est.stuck) etaCell = '<span class="eta">' + DASH + '</span><br><span class="conf over">' + esc(tr("eta.overdue")) + "</span>";
     var source = sourceHtml(row, L(), false);
+    // 칸마다 번역된 라벨(Codex 가독성 검토 4번) — 폰에서 머리줄이 사라지면 긴 값들이 한 덩어리로
+    // 읽힌다. 라벨을 보일지는 style.css 가 정한다(폰에서 상태 · 실행한 사람 · 완료 예상만).
+    var lab = function (key) { return ' data-label="' + esc(tr(key)) + '"'; };
     var h = '<tr class="' + cls.join(" ") + '" data-job="' + row.id + '" id="job-' + row.id + '">' +
-      '<td class="job">' + expBtn + '<span class="id">#' + row.id + "</span> " + pill + pos + "</td>" +
-      '<td class="key">' + keyWithLinkHtml(row.key || row.preset || DASH, row.link) + chips + "</td>" +
-      '<td class="requester">' + requester + "</td>" +
-      '<td class="reason">' + reasonCell + "</td>" +
-      '<td class="elapsed">' + elapsedCell + "</td>" +
-      '<td class="eta">' + etaCell + "</td>" +
-      '<td class="source">' + source + "</td></tr>";
+      '<td class="job"' + lab("queue.col_job") + ">" + expBtn + '<span class="id">#' + row.id + "</span> " + pill + pos + "</td>" +
+      '<td class="key"' + lab("queue.col_key") + ">" + keyWithLinkHtml(row.key || row.preset || DASH, row.link) + chips + "</td>" +
+      '<td class="requester"' + lab("queue.col_requester") + ">" + requester + "</td>" +
+      '<td class="reason"' + lab("queue.col_reason") + ">" + reasonCell + "</td>" +
+      '<td class="elapsed"' + lab("queue.col_elapsed") + ">" + elapsedCell + "</td>" +
+      '<td class="eta"' + lab("queue.col_eta") + ">" + etaCell + "</td>" +
+      '<td class="source"' + lab("queue.col_source") + ">" + source + "</td></tr>";
     if (expanded) h += '<tr class="expanded" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">' + progressHtml(row) + '<div class="src-block sub">' + sourceHtml(row, L(), true) + "</div>" + tailHtml(row) + "</td></tr>";
-    else if (placeOpen) h += '<tr class="expanded place" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '"><ul class="place-list">'
-      + placementList(row).map(function (n, i) { return '<li class="' + esc(n && n.state || "") + '">' + esc(placeLines[i]) + "</li>"; }).join("") + "</ul></td></tr>";
+    else if (placeOpen) {
+      var allPlace = !!state.placeAll[row.id];
+      h += '<tr class="expanded place" data-job="' + row.id + '"><td colspan="7" class="prog" id="exp-' + row.id + '">'
+        + (place.summary ? '<div class="place-sum">' + esc(place.summary) + "</div>" : "")
+        + '<ul class="place-list">'
+        + place.lines.map(function (l) { return '<li class="' + esc(l.cls) + '" title="' + esc(l.text) + '">' + esc(l.text) + "</li>"; }).join("") + "</ul>"
+        + (place.total > PLACE_SHOWN
+          ? '<button type="button" class="more place-more" data-place-more="' + row.id + '" aria-expanded="' + (allPlace ? "true" : "false") + '">'
+            + esc(allPlace ? tr("place.fewer") : tr("place.more", { n: place.hidden })) + " " + icon(allPlace ? "chevronUp" : "chevronDown") + "</button>"
+          : "")
+        + "</td></tr>";
+    }
     return h;
   }
   /**
@@ -3966,10 +4089,26 @@
         + '<td class="mhost mono" title="' + esc(r.host) + '">' + esc(r.host) + "</td>"
         + '<td class="mfp mono"><div class="clamp" title="' + esc(r.fingerprint) + '">' + esc(r.fingerprint) + "</div></td>"
         + '<td class="mpre">' + esc(r.presets) + "</td>"
-        + '<td class="mchk' + (red ? " bad" : "") + '"><div class="clamp" title="' + esc(r.checks) + '">' + esc(r.checks) + "</div></td>"
+        + '<td class="mchk' + (red ? " bad" : "") + '">' + machineCheckHtml(r) + "</td>"
         + (act ? '<td class="mact">' + (r.recheck ? '<button type="button" class="btn recheck" data-recheck="' + esc(r.id) + '">' + esc(tr("machines.recheck")) + "</button>" : "") + "</td>" : "") + "</tr>";
     });
     body.innerHTML = h + "</tbody></table></div>";
+  }
+  /**
+   * 점검 칸(Codex 가독성 검토 9번) — 첫 줄은 결론 · 대상 · 잡 번호(`실패 · sim-check · #3620`, 한 줄
+   * 말줄임은 점검 이름만), 잡 번호는 그 잡의 로그를 여는 버튼. 나머지 점검은 그 아래 두 줄에서
+   * 자른다 — 칸 전체는 오늘처럼 세 줄 자리다. 칸 전체의 전문은 진단 줄의 title 에 남는다.
+   */
+  function machineCheckHtml(r) {
+    var hd = r.checkHead;
+    if (!hd) return '<div class="clamp" title="' + esc(r.checks) + '">' + esc(r.checks) + "</div>";
+    var sep = '<span class="mck-sep"> · </span>';
+    var h = '<div class="mck-h ' + esc(hd.cls) + '" title="' + esc(hd.text) + '"><b class="mck-w">' + esc(hd.word) + "</b>" + sep
+      + '<span class="mck-p">' + esc(hd.preset) + "</span>"
+      + (hd.jobId !== null ? sep + '<button type="button" class="mck-j" data-log="' + hd.jobId + '" aria-label="' + esc(tr("machine.check_log", { id: hd.jobId })) + '">#' + hd.jobId + "</button>" : "")
+      + "</div>";
+    if (r.checkRest) h += '<div class="clamp" title="' + esc(r.checks) + '">' + esc(r.checkRest) + "</div>";
+    return h;
   }
   /** 다시 점검(admin) — `POST /machines/{id}/recheck`. 응답의 잡들을 알리고 다시 읽는다. */
   function recheckMachine(id, btn) {
@@ -4093,12 +4232,9 @@
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
         (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
       if (open) {
-        var detail = [esc(transitionsLine(job, tz(), L()))];
         var extra = state.recentFailures[job.id];
         var full = extra && extra.failures ? Object.assign({}, job, extra) : job;
-        recentDetail(full, L()).forEach(function (line) { detail.push(esc(line)); });
-        if (outcomeText(job, L())) detail.push(esc(outcomeText(job, L())));
-        html += '<div class="rdetail">' + detail.join("<br>") + "</div>";
+        html += recentDetailHtml(job.id, recentDetailModel(full, tz(), L()));
       }
       html += "</div>";
     });
@@ -4109,7 +4245,50 @@
         + " " + icon(state.showAllRecent ? "chevronUp" : "chevronDown") + "</button>";
     }
     body.innerHTML = html;  // 원격 풀의 host 는 Host 절 카드로(M5b-4) — 여기엔 풀 헤더를 두지 않는다
+    fitRecentDetails(body);
     renderEstimates(p);
+  }
+  /**
+   * 펼친 최근 실패의 상세(Codex 가독성 검토 3번). 칸마다 따로 — 전이, 단계(한 줄), 이름별 실패
+   * (이름마다 한 줄 · 말줄임 · 전문은 title, 여덟 개 + 「+N」), 서버 요약(네 줄 + 「전체 보기」),
+   * 「로그 열기」. 요약을 보일지 · 「전체 보기」가 필요한지는 그린 뒤에 잰다(`fitRecentDetails`).
+   */
+  function recentDetailHtml(id, m) {
+    var h = '<div class="rdetail">';
+    if (m.transitions) h += '<div class="rd-tr">' + esc(m.transitions) + "</div>";
+    if (m.step) h += '<div class="rd-step" title="' + esc(m.step) + '">' + esc(m.step) + "</div>";
+    if (m.failures.length) {
+      h += '<div class="rd-fh">' + esc(m.failuresTitle) + '</div><ul class="rd-fail">'
+        + m.failures.map(function (f) {
+          return '<li title="' + esc(f.title) + '"><span class="fn">' + esc(f.name) + "</span>"
+            + (f.verdict ? '<span class="fv">— ' + esc(f.verdict) + "</span>" : "") + "</li>";
+        }).join("") + "</ul>";
+    }
+    if (m.more) h += '<div class="rd-more">' + esc(m.more) + "</div>";
+    if (m.unnamed) h += '<div class="rd-un">' + esc(m.unnamed) + "</div>";
+    var wide = !!state.recentFull[id];
+    if (m.summary) h += '<div class="rd-sum"><div class="rd-sumt' + (wide ? " full" : "") + '" title="' + esc(m.summary) + '">' + esc(m.summary) + "</div></div>";
+    h += '<div class="rd-act">'
+      + (m.summary ? '<button type="button" class="rd-btn" data-rfull="' + id + '" aria-expanded="' + (wide ? "true" : "false") + '">' + esc(tr(wide ? "recent.less" : "recent.full")) + "</button>" : "")
+      + '<button type="button" class="rd-btn" data-log="' + id + '">' + esc(tr("recent.open_log")) + "</button></div>";
+    return h + "</div>";
+  }
+  /**
+   * 그린 뒤에 재는 두 가지. (1) 접힌 행의 요약 칸(`.smt`, 두 줄)에서 결과 문장이 다 보였으면
+   * 상세에 다시 쓰지 않는다 — 같은 문장을 두 번 읽힌다. 잘렸을 때만 상세가 그 전문의 자리다.
+   * (2) 상세의 요약이 네 줄 안에 들어가면 「전체 보기」를 감춘다(펼쳐 놓은 것은 「접기」가 남는다).
+   * innerHTML 을 바꾼 같은 프레임 안에서 끝나므로 화면에는 중간 모습이 안 그려진다.
+   */
+  function fitRecentDetails(root) {
+    $$(".rrow .rdetail", root).forEach(function (d) {
+      var row = d.parentElement;
+      var sum = $(".rd-sum", d), text = $(".rd-sumt", d), btn = $("[data-rfull]", d);
+      if (!sum || !text) return;
+      var smt = $(".sm .smt", row);
+      var cut = !!smt && smt.scrollHeight > smt.clientHeight + 1;
+      if (!cut) { sum.hidden = true; if (btn) btn.hidden = true; return; }
+      if (btn && !text.classList.contains("full") && text.scrollHeight <= text.clientHeight + 1) btn.hidden = true;
+    });
   }
   function renderEstimates(p) {
     var sum = $("[data-est-summary]"), body = $("[data-est-body]"), det = $("#estimates");
@@ -4192,7 +4371,7 @@
   function focusKey(el) {
     if (!el || el === document.body) return null;
     if (el.id) return "#" + el.id;
-    var attrs = ["data-goto", "data-toggle", "data-log", "data-cancel", "data-rtoggle", "data-copy", "data-inputs", "data-src", "data-more-queue", "data-more-recent"];
+    var attrs = ["data-goto", "data-toggle", "data-log", "data-cancel", "data-rtoggle", "data-copy", "data-inputs", "data-src", "data-more-queue", "data-more-recent", "data-place-more", "data-rfull"];
     for (var i = 0; i < attrs.length; i++) if (el.hasAttribute(attrs[i])) return "[" + attrs[i] + '="' + el.getAttribute(attrs[i]).replace(/"/g, '\\"') + '"]';
     return null;
   }
@@ -4390,8 +4569,18 @@
     document.addEventListener("click", function (ev) {
       // 잡 링크는 브라우저가 연다(새 탭) — 그 행의 펼침 · 잡 이동 · 복사 같은 손잡이가 같이 돌면 안 된다
       if (ev.target.closest && ev.target.closest("a.job-link")) return;
-      var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src],[data-envchip],[data-recheck]");
+      var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src],[data-envchip],[data-recheck],[data-place-more],[data-rfull]");
       if (!t) return;
+      if (t.hasAttribute("data-place-more")) {
+        var pid = parseInt(t.getAttribute("data-place-more"), 10);
+        if (state.placeAll[pid]) delete state.placeAll[pid]; else state.placeAll[pid] = true;
+        savePlaceAll(); withFocus(renderQueue); return;
+      }
+      if (t.hasAttribute("data-rfull")) {
+        var fid = parseInt(t.getAttribute("data-rfull"), 10);
+        state.recentFull[fid] = !state.recentFull[fid];
+        withFocus(renderRecent); return;
+      }
       if (t.hasAttribute("data-envchip")) { showEnvChange(t.getAttribute("data-envchip")); return; }
       if (t.hasAttribute("data-recheck")) { recheckMachine(t.getAttribute("data-recheck"), t); return; }
       if (t.hasAttribute("data-goto")) { gotoJob(parseInt(t.getAttribute("data-goto"), 10)); return; }
@@ -4419,6 +4608,15 @@
     $("#cancel-dialog").addEventListener("close", restoreTrigger);
     $("#tok-dialog").addEventListener("close", function () { var b = $("#tok-btn"); if (b) b.focus(); });
     $("#cancel-dialog form").addEventListener("submit", function (ev) { ev.preventDefault(); $("#cancel-dialog").close(); doCancel(); });
+    // 펼친 최근 상세의 요약을 보일지는 접힌 행의 폭으로 잰다(`fitRecentDetails`) — 폭이 바뀌면 다시 잰다
+    var refitTimer = null;
+    window.addEventListener("resize", function () {
+      clearTimeout(refitTimer);
+      refitTimer = setTimeout(function () {
+        var open = Object.keys(state.expandedRecent).some(function (k) { return state.expandedRecent[k]; });
+        if (open && state.status) withFocus(renderRecent);
+      }, 150);
+    });
     window.addEventListener("hashchange", applyHash);
     window.addEventListener("popstate", applyHash);
     document.addEventListener("visibilitychange", function () {
@@ -6358,6 +6556,7 @@
     loadLang();
     applyStatic();
     loadExpanded();
+    loadPlaceAll();
     lsSet("rcm.collapsed", null);   // 뜻이 뒤집힌 옛 키 — 남겨 두면 영영 남는다
     state.token = lsGet("rcm.token");
     wireTokenDialog(); wireClicks(); wireLang(); wireHostDetails(); wireMachines(); wireStore(); renderTokenButton();

@@ -133,7 +133,7 @@ RDETAIL_JS = """
   const full = d.querySelector('[data-rfull]');
   const lh = (el) => parseFloat(getComputedStyle(el).lineHeight);
   return {
-    text: d.textContent,
+    text: d.innerText,
     lis: lis.length,
     tall: lis.filter((li) => li.getBoundingClientRect().height > lh(li) * 1.5).length,
     untitled: lis.filter((li) => !li.getAttribute('title')).length,
@@ -161,24 +161,29 @@ def test_recent_failure_detail_is_structured_and_bounded(tmp_path, width):
             assert m["lis"] == 8 and m["tall"] == 0 and m["untitled"] == 0, m
             assert m["more"] and m["more"].startswith("+56개 더"), m
             assert m["step"] is not None and m["step"] <= 1.5, m
-            # 300자 요약은 접힌 행에서 잘렸다 — 상세에서 네 줄까지, 나머지는 「전체 보기」
+            # 300자 요약은 접힌 행에서 잘렸다 — 상세가 그 전문의 자리다. 네 줄까지, 넘치면
+            # 「전체 보기」(1240px 에서는 두 줄이면 다 들어가 단추가 없다)
             assert m["sum"] is not None, m
             assert m["sum"]["h"] <= m["sum"]["lh"] * 4 + 1, m
             assert m["sum"]["title"] == queue_edges.SUMMARY_300, m
-            assert m["full"] == "전체 보기", m
             assert m["log"], m
-            c.eval(
-                "document.querySelector('.rrow[data-job=\"1234560\"] [data-rfull]').click(); true"
-            )
-            _wait(
-                c,
-                "document.querySelector('.rrow[data-job=\"1234560\"] [data-rfull]')"
-                ".textContent.trim() === '접기'",
-            )
-            opened = c.eval(RDETAIL_JS + "(1234560)")
-            assert opened is not None and opened["sum"]["h"] > m["sum"]["h"], (m, opened)
-            # 상세 안의 단추는 행을 접지 않는다
-            assert opened["lis"] == 8
+            if width > 720:
+                assert m["full"] is None, m
+            else:
+                assert m["full"] == "전체 보기", m
+                c.eval(
+                    "document.querySelector('.rrow[data-job=\"1234560\"] [data-rfull]')"
+                    ".click(); true"
+                )
+                _wait(
+                    c,
+                    "document.querySelector('.rrow[data-job=\"1234560\"] [data-rfull]')"
+                    ".textContent.trim() === '접기'",
+                )
+                opened = c.eval(RDETAIL_JS + "(1234560)")
+                assert opened is not None and opened["sum"]["h"] > m["sum"]["h"], (m, opened)
+                # 상세 안의 단추는 행을 접지 않는다
+                assert opened["lis"] == 8
             # 로그 열기 → 서랍
             c.eval(
                 "document.querySelector('.rrow[data-job=\"1234560\"] .rdetail [data-log]')"
@@ -290,7 +295,8 @@ def test_phone_card_height_does_not_follow_the_requester_length(tmp_path):
             doc = copy.deepcopy(served.doc)
             for r in doc["pools"][0]["queue"]:
                 if r["id"] == 1234569:
-                    r["requester"] = {"name": "z", "label": "z"}
+                    # 이름은 그대로(내 잡이라 취소 단추가 남는다) — 라벨 길이만 바꾼다
+                    r["requester"] = {**r["requester"], "label": "z"}
             served.swap(doc)
             queue_edges.refetch(
                 c,
@@ -321,7 +327,8 @@ MCHK_JS = """
       && btn.getBoundingClientRect().right <= td.getBoundingClientRect().right + 1 : false,
     restLines: rest ? rest.getBoundingClientRect().height / lh : null,
     restTitle: rest ? rest.getAttribute('title') : null,
-    cellLines: td.getBoundingClientRect().height / lh,
+    cellLines: (td.clientHeight - parseFloat(getComputedStyle(td).paddingTop)
+      - parseFloat(getComputedStyle(td).paddingBottom)) / lh,
   };
 })()
 """

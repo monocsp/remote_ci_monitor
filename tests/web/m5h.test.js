@@ -192,7 +192,9 @@ describe("recentDetail — 이름별 이력 (§2.6)", () => {
 describe("상세가 실제로 그려진다 (검증 P2-1 — 호출부가 사라져도 알아야 한다)", () => {
   test("renderRecent 가 recentDetail 을 부른다", () => {
     const src = fs.readFileSync(APP_PATH, "utf8");
-    assert.ok(/recentDetail\(full, L\(\)\)|recentDetail\([a-z]+, L\(\)\)/.test(src),
+    // 가독성 R2(Codex 검토 3번): 상세는 recentDetailModel 로 칸마다 따로 그린다 — 줄 목록
+    // recentDetail 은 같은 모형에서 나온다(tests/web/readability_r2.test.js 가 둘을 맞댄다)
+    assert.ok(/recentDetail(Model)?\(full, (tz\(\), )?L\(\)\)|recentDetail(Model)?\([a-z]+, (tz\(\), )?L\(\)\)/.test(src),
       "renderRecent 이 recentDetail 을 안 부른다");
     // 이력은 /api/status 에 없다(결정 67) — 펼칠 때 그 잡의 문서를 받아 와야 한다
     assert.ok(/loadRecentFailures\(/.test(src), "펼침이 이력을 받아 오지 않는다");
