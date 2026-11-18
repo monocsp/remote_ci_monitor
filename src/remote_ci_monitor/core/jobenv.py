@@ -19,14 +19,20 @@ from collections.abc import Mapping, Sequence
 
 
 def missing_passthrough(
-    env_passthrough: Sequence[str], environ: Mapping[str, str]
+    env_passthrough: Sequence[str], environ: Mapping[str, str], *, preset_env: Mapping[str, str]
 ) -> tuple[str, ...]:
-    """`env_passthrough` 중 `environ` 에 **없는** 이름 — 선언 순서대로.
+    """`env_passthrough` 중 잡이 **끝내 못 받는** 이름 — 선언 순서대로.
+
+    `environ` 에 없어도 프리셋의 `[presets.env]` 가 같은 이름을 주면 잡은 받는다(`job_env` 가
+    그 위에 덮는다). 그건 빠진 게 아니다 — 서비스 환경에 없는 `JAVA_HOME` 을 프리셋이 직접 주는
+    것이 바로 이 줄이 권하던 해결이었는데, 해결한 뒤에도 `unset` 이라 FAIL 로 남았다
+    (운영 ipf-verify, 2026-11-18). `preset_env` 를 키워드로만 받는 것은 부르는 쪽이 빠뜨리면
+    같은 거짓 FAIL 이 다시 나기 때문이다.
 
     빈 문자열은 「있다」로 본다. 유닛이 일부러 빈 값을 주는 일이 있고, 그건 설정한 사람의
     뜻이지 빠진 게 아니다. 판정은 **키의 유무**다.
     """
-    return tuple(name for name in env_passthrough if name not in environ)
+    return tuple(name for name in env_passthrough if name not in environ and name not in preset_env)
 
 
 def job_env(

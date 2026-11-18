@@ -315,7 +315,9 @@ class CapabilitiesMixin:
             facts[p.name] = PresetFacts(
                 missing_tools=tuple(missing),
                 workspace_tools=tuple(workspace),
-                missing_passthrough=jobenv.missing_passthrough(p.env_passthrough, env),
+                missing_passthrough=jobenv.missing_passthrough(
+                    p.env_passthrough, env, preset_env=p.env
+                ),
             )
         self._accept_report(
             LOCAL,

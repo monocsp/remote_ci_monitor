@@ -674,14 +674,16 @@ server starts:
 | question | what a FAIL means |
 |---|---|
 | can the job's `PATH` find every `requires` entry? | the tool is installed for you, not for the service |
-| is every `env_passthrough` name present in the service's environment? | the job gets nothing for that name, however it looks in your shell |
+| is every `env_passthrough` name present in the service's environment, or set by the preset's own `[presets.env]`? | the job gets nothing for that name, however it looks in your shell |
 
 The second question is the one a shell cannot answer. `env_passthrough = ["JAVA_HOME"]` passes a
 variable the service does not have, and nothing says so: the preset is valid, the tool lookup is
 green, and the job silently receives an empty value. The row prints `gate (JAVA_HOME unset)` and
 the server log says the same at start, next to `preset env`. The fix is a value the job owns — add
 it to `[presets.env]`, or put it in the service unit (`EnvironmentVariables` in a launchd plist,
-`Environment=` in a systemd unit) and restart.
+`Environment=` in a systemd unit) and restart. A name the preset sets in `[presets.env]` is
+not missing, even if it is also listed in `env_passthrough` and absent from the service: the job
+receives the preset's value, and the row says `ok`.
 
 A server too old to answer draws no row at all. An empty value counts as present: a unit that
 deliberately sets `JAVA_HOME=""` meant it.

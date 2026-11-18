@@ -175,6 +175,12 @@ table.q td { padding: 7px 8px; border-bottom: 1px solid var(--line-2); vertical-
   table.q td.reason { max-width: 0; }
   /* 펼친 행(일곱 칸을 잇는 칸)도 같다 — 한 줄로 못 박은 진행 머리줄이 표를 넓히지 않게(영역 A) */
   table.q td.prog { max-width: 0; }
+  /* 도착 칸도 폭을 못 박은 칸이다 — 그런데 `.eta` 가 한 줄로 못 박혀 있어, 자정 언저리에 시각이 날짜를
+     달면(「Nov 19 · 00:02 · 12m 24s 뒤」) 칸이 152px 를 넘어 자랐고, 다른 행의 글이 바뀔 때마다 표가 칸 폭을
+     다시 나눠 행이 들썩였다(23:47~24:00 KST 의 CI 에서만 빨갛던 시험). 시각과 상대 시간은 각자 한 줄로
+     두고 그 사이에서만 접는다. */
+  table.q td.eta .eta { white-space: normal; }
+  table.q td.eta .eta .clk, table.q td.eta .eta .in { white-space: nowrap; }
 }
 table.q tr.exp td { border-bottom: 0; }
 table.q td.job { font-family: var(--mono); white-space: nowrap; }

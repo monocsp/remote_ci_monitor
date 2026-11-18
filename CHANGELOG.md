@@ -7,6 +7,29 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-19
+
+### Fixed
+- **Queue rows no longer jump in the last minutes before midnight.** When a waiting job's
+  arrival time fell on the next day, the web queue's arrival column wrote it with the date
+  (`Nov 19 · 00:02 · in 12m 24s`) on one line and grew past its fixed width; every update elsewhere
+  in the table then re-divided the column widths and the rows shifted. The clock and the relative
+  time now wrap onto separate lines inside the column instead.
+  ([#209](https://github.com/monocsp/remote_ci_monitor/pull/209))
+- **The server no longer drops connections that arrive in a burst.** Its listen backlog was the
+  standard library's 5, so a sixth connection arriving before the server accepted the first ones
+  could be reset on macOS (the client saw a broken pipe or a connection reset). Workers, web
+  pages and several `rcm wait` clients can overlap like this. The backlog is now 128; the number
+  of requests handled at once is still `max_concurrent_requests`.
+  ([#207](https://github.com/monocsp/remote_ci_monitor/pull/207))
+- **`rcm check` no longer fails a preset that sets the variable itself.** A preset that lists
+  `JAVA_HOME` in `env_passthrough` and also sets it in `[presets.env]` (the fix this row
+  recommends) was still drawn as `JAVA_HOME unset` in `service preset tools`, and the server's
+  start line said the same, although the job received the preset's value. A name the preset sets
+  now counts as present on the server, and on a remote worker once that worker runs this
+  version (an older worker keeps reporting the name; it is shown, and never blocks placement).
+  ([#208](https://github.com/monocsp/remote_ci_monitor/pull/208))
+
 ## [0.6.0] - 2026-11-18
 
 ### Added
@@ -1714,7 +1737,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.4...v0.5.0
