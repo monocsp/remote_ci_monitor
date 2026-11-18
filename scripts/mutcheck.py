@@ -8,6 +8,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
      `notify-link-zero-address`(링크에 `0.0.0.0`) · `failure-summary-full-path`(요약에 경로 전체)
+  M5o C — `include-*` 둘: 들인 파일의 권한 검사 제거 · 들인 파일의 `[[repos]]` 허용 +
+     `reload-dry-run-assigns`: dry-run 이 대입까지 감 (`docs/m5o-workplan.md` §4)
   M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
      물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15) + 엣지 검증의 둘: 모르는
      호스트가 host 범위를 지나침 · 점검 기록 읽기의 전체 스캔
@@ -158,6 +160,33 @@ MUTANTS = (
         old='    name = parts[-1].strip()[:MAX_FAIL_ARG].strip() if parts else ""',
         new='    name = "/".join(parts)[:MAX_FAIL_ARG].strip() if parts else ""',
         tests=("tests/test_failure_summaries_m5o.py",),
+    ),
+    # ── M5o C — 프리셋을 파일에서 읽는다 · reload --dry-run (docs/m5o-workplan.md §4) ──
+    Mutant(
+        # 권한 검사가 없다 — 그룹 · 남이 쓸 수 있는 파일이 서버가 실행할 argv 를 정한다(결정 122)
+        name="include-permission-check-removed",
+        path="src/remote_ci_monitor/config.py",
+        old="    if stat.S_IMODE(st.st_mode) & 0o022:",
+        new="    if stat.S_IMODE(st.st_mode) & 0o000:",
+        tests=("tests/test_config_include.py",),
+    ),
+    Mutant(
+        # 들인 파일이 `[[repos]]` 를 가질 수 있다 — 토큰 파일 경로가 server.toml 밖으로
+        # 샌다(결정 121)
+        name="include-allows-repos",
+        path="src/remote_ci_monitor/config.py",
+        old='_INCLUDE_KEYS = frozenset({"presets"})',
+        new='_INCLUDE_KEYS = frozenset({"presets", "repos"})',
+        tests=("tests/test_config_include.py",),
+    ),
+    Mutant(
+        # dry-run 이 미리 보기에서 멈추지 않고 대입까지 간다 — 「아무것도 안 바꿈」이
+        # 거짓말이 된다(결정 124)
+        name="reload-dry-run-assigns",
+        path="src/remote_ci_monitor/server.py",
+        old='            return {"dry_run": True, **files, **changed}\n',
+        new="",
+        tests=("tests/test_reload_dry_run.py",),
     ),
     # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
     Mutant(

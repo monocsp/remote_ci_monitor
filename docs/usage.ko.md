@@ -435,7 +435,12 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 
 ## 12. 그다음
 
-- 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md).
+- 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md). 프로젝트의 프리셋은
+  `server.toml` 이 `include` 로 들이는 따로 된 파일에 둘 수 있다
+  ([presets in their own file](configuration.md#presets-in-their-own-file-include)).
+- 재시작 없이 프리셋을 바꾼다: 파일을 고치고 `rcm reload --dry-run` 으로 어느 프리셋의 어느 키가
+  바뀔지 본 다음(이름만, 값은 안 나온다) `rcm reload` 로 적용한다
+  ([change a preset without a restart](operating.md#change-a-preset-without-a-restart)).
 - 작업을 둘씩 돌린다. `[server] lanes = 2` 로 두면 레인 2 는 머신에 CPU 여유가 있을 때만 작업으므로
   올려 봐도 안전하다. 큐가 `부하로 대기` 라고 하면 머신이 꽉 찼다는 뜻이다:
   [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).

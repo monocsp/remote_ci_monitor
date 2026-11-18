@@ -209,6 +209,51 @@ token_file = "~/.config/rcm/tokens/app.token"   # one line: a token that can rea
   be replaced while it runs.
 - Needs git 2.31 or later.
 
+### Presets in their own file: `include`
+
+A project's presets can live in their own file next to `server.toml`, instead of being pasted into
+it. List the files at the very top of `server.toml`, before the first `[section]` (TOML would
+otherwise read `include` as a key of that section, and rcm says so):
+
+```toml
+# ~/.config/rcm/server.toml
+include = ["presets.dolomood.toml"]   # relative to this file's folder; an absolute path or ~ works too
+
+[server]
+...
+```
+
+```toml
+# ~/.config/rcm/presets.dolomood.toml — presets only
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+```
+
+- **An included file may only hold `[[presets]]`.** `[server]`, `[[repos]]`, `[[notify]]`,
+  `[[probes]]` and another `include` are refused with the file's name: repository tokens, secrets
+  and the bind address stay in `server.toml`. Includes are one level deep.
+- **The file must be owned by the user the server runs as, and not writable by group or others**
+  (`chmod go-w presets.dolomood.toml`). A preset is the argv the server runs; a file anyone can
+  write would decide that argv. `server.toml` itself is not held to this rule.
+- Presets keep their order: the ones in `server.toml` first, then each included file in the order
+  `include` lists them. Everything that checks presets — `checks`, a `[[notify]]` rule's
+  `presets`, duplicate names — runs on the merged list, so an included preset can name one in
+  `server.toml` and the other way round.
+- A name defined in two files is refused: `preset 'gate' is defined in both server.toml and
+  presets.dolomood.toml`. Listing `server.toml` itself, or the same file twice, is refused too.
+- A missing or broken included file stops `rcm serve` like a broken `server.toml` does. `rcm
+  reload` re-reads the included files as well; if one is missing or broken, nothing changes.
+- `rcm check --config server.toml` counts the presets per file:
+  `local presets 24 (server.toml 2 · presets.dolomood.toml 22)`.
+
+**rcm does not fetch the file.** There is no git pull and no URL — only a local path. To use the
+file a repository keeps, point `include` at that repository's checkout on the build machine, and
+decide who moves that checkout and when. Be clear about what that means: **whoever can change an
+included file decides the argv the server runs on the next reload.** If the file is in a
+repository's checkout, everyone who can push to that repository and get the checkout updated has
+that power. Preview what a reload would apply with `rcm reload --dry-run` before you run it.
+
 ## Release profile
 
 A repository can carry a **release profile**: which presets play which release role, which
