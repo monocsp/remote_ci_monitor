@@ -426,7 +426,9 @@ class RemoteWorker:
             presets[p["name"]] = {
                 "missing_tools": missing,
                 "workspace_tools": workspace,
-                "missing_passthrough": list(jobenv.missing_passthrough(passthrough, env)),
+                "missing_passthrough": list(
+                    jobenv.missing_passthrough(passthrough, env, preset_env=fixed)
+                ),
             }
         return {
             "generation": spec.get("generation"),

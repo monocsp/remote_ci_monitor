@@ -21,21 +21,36 @@ from remote_ci_monitor.core import jobenv  # noqa: E402
 
 
 def test_missing_passthrough_names_what_the_environment_lacks():
-    assert jobenv.missing_passthrough(("PATH", "JAVA_HOME"), {"PATH": "/bin"}) == ("JAVA_HOME",)
+    assert jobenv.missing_passthrough(("PATH", "JAVA_HOME"), {"PATH": "/bin"}, preset_env={}) == (
+        "JAVA_HOME",
+    )
 
 
 def test_missing_passthrough_keeps_the_declared_order():
-    absent = jobenv.missing_passthrough(("B", "A", "C"), {"A": "1"})
+    absent = jobenv.missing_passthrough(("B", "A", "C"), {"A": "1"}, preset_env={})
     assert absent == ("B", "C")
 
 
 def test_an_empty_value_counts_as_present():
     """유닛이 일부러 빈 값을 주는 일이 있다. 판정은 키의 유무다."""
-    assert jobenv.missing_passthrough(("JAVA_HOME",), {"JAVA_HOME": ""}) == ()
+    assert jobenv.missing_passthrough(("JAVA_HOME",), {"JAVA_HOME": ""}, preset_env={}) == ()
 
 
 def test_nothing_declared_means_nothing_missing():
-    assert jobenv.missing_passthrough((), {"PATH": "/bin"}) == ()
+    assert jobenv.missing_passthrough((), {"PATH": "/bin"}, preset_env={}) == ()
+
+
+def test_a_name_the_preset_env_sets_is_not_missing():
+    """운영 실측(2026-11-18): ipf-verify 가 `JAVA_HOME` 을 `env_passthrough` 에도 적고
+    `[presets.env]` 로도 준다. 서비스 환경엔 없지만 잡은 프리셋 값을 받는다 — `unset` 이 아니다."""
+    absent = jobenv.missing_passthrough(
+        ("HOME", "JAVA_HOME", "ANDROID_HOME"),
+        {"HOME": "/Users/x"},
+        preset_env={"JAVA_HOME": "/jdk"},
+    )
+    assert absent == ("ANDROID_HOME",)
+    env = jobenv.job_env(("HOME", "JAVA_HOME"), {"JAVA_HOME": "/jdk"}, {"HOME": "/Users/x"})
+    assert env["JAVA_HOME"] == "/jdk"  # 판정과 실제 잡 환경이 같은 말을 한다
 
 
 def test_job_env_passes_through_then_the_preset_overrides():
@@ -87,6 +102,15 @@ def test_the_server_reports_a_passthrough_name_its_environment_lacks(tmp_dir):
     app.measure_preset_env({"PATH": "/bin:/usr/bin"})
     assert app.preset_env["gate"]["missing_passthrough"] == ["JAVA_HOME"]
     assert app.preset_env["gate"]["missing_tools"] == []
+
+
+def test_the_server_does_not_report_a_name_the_preset_env_sets(tmp_dir):
+    """운영 ipf-verify 모양 그대로 — 넘기기에도 적고 `[presets.env]` 로도 준다. 시작 줄도
+    `rcm check` 의 `service preset tools` 도 이것을 FAIL 로 그리지 않는다."""
+    app = _app(tmp_dir, PRESET + '[presets.env]\nJAVA_HOME = "/jdk"\n')
+    app.measure_preset_env({"PATH": "/bin:/usr/bin"})
+    assert app.preset_env["gate"]["missing_passthrough"] == []
+    assert "JAVA_HOME" not in app.preset_env_summary()
 
 
 def test_the_server_reports_a_tool_the_job_path_cannot_reach(tmp_dir):
