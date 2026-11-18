@@ -8,6 +8,11 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Fixed
+- **The server no longer drops connections that arrive in a burst.** Its listen backlog was the
+  standard library's 5, so a sixth connection arriving before the server accepted the first ones
+  could be reset on macOS (the client saw a broken pipe or a connection reset). Workers, web
+  pages and several `rcm wait` clients can overlap like this. The backlog is now 128; the number
+  of requests handled at once is still `max_concurrent_requests`.
 - **`rcm check` no longer fails a preset that sets the variable itself.** A preset that lists
   `JAVA_HOME` in `env_passthrough` and also sets it in `[presets.env]` (the fix this row
   recommends) was still drawn as `JAVA_HOME unset` in `service preset tools`, and the server's

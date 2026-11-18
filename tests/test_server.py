@@ -379,6 +379,43 @@ def test_cancel_permissions_and_joiner_leaves(srv):
     assert srv.store.get_job(jid2).cancelled_by == "macmini-admin"
 
 
+def test_listen_backlog_holds_a_burst_of_connections(tmp_path):
+    """연결이 한꺼번에 몰려도 accept 전까지 커널이 붙잡아 둔다 — 기본 백로그 5 는 넘치는 연결을
+    끊었다(macOS: 클라이언트가 BrokenPipe/ConnectionReset). accept 를 멈춘 채 40 개가 요청을
+    보내 두고, 그 다음에 서버를 돌려 40 개 모두 답을 받는지 본다."""
+    cfg = ServerConfig()
+    cfg.server.data_dir = str(tmp_path / "data")
+    cfg.server.max_concurrent_requests = 64  # 동시 처리 상한(32 → 503)이 아니라 백로그만 본다
+    store = Store(cfg.data_dir / "rcm.sqlite3")
+    app = App(cfg, store)
+    httpd = make_server(app, bind="127.0.0.1", port=0)  # 바인드 + listen 만, 아직 accept 안 함
+    socks: list[socket.socket] = []
+    thread = None
+    try:
+        for _ in range(40):
+            s = socket.create_connection(httpd.server_address[:2], timeout=5)
+            s.sendall(b"GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            socks.append(s)
+        thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.daemon = True
+        thread.start()
+        heads = []
+        for s in socks:
+            try:
+                heads.append(s.recv(12))
+            except OSError as e:
+                heads.append(type(e).__name__.encode())
+        assert heads == [b"HTTP/1.1 200"] * 40, heads
+    finally:
+        for s in socks:
+            s.close()
+        if thread is not None:
+            httpd.shutdown()
+        httpd.server_close()
+        app.shutdown()
+        store.close()
+
+
 def test_pause_resume_admin_only_and_visible_in_status(live):
     assert live.req("POST", "/pause", token="alice", json_body={})[0] == 403
     assert live.req("POST", "/pause", json_body={})[0] == 401
@@ -386,11 +423,24 @@ def test_pause_resume_admin_only_and_visible_in_status(live):
     assert status == 200 and body["paused"]["by"] == "macmini-admin"
     assert body["paused"]["at"].endswith("Z")  # 다른 시각과 같은 UTC·초 단위 표기
     jid = live.submit()[1]["job_id"]
-    live.upload(jid)
-    time.sleep(1.0)
-    doc = live.req("GET", "/api/status")[1]
+    up = live.upload(jid)
+    assert up[0] == 200, up
+    # 정지 중이라 워커가 집지 않는다 — 1 초 재우고 한 번 보던 것은 ubuntu 3.11 CI 에서 가끔 빈
+    # 큐를 읽었다(재현 못 함). 행이 보일 때까지 보되, 큐 오류는 시간 문제가 아니라 바로 실패시키고,
+    # 끝내 안 보이면 잡 상태와 함께 실패한다 — 다음에는 원인이 로그에 남는다.
+    deadline = time.monotonic() + 10
+    while True:
+        doc = live.req("GET", "/api/status")[1]
+        pool = doc["pools"][0]
+        assert pool["queue_error"] is None, pool["queue_error"]
+        if pool["queue"] or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
     assert doc["server"]["paused"]["by"] == "macmini-admin"
-    row = doc["pools"][0]["queue"][0]
+    assert pool["queue"], (live.store.get_job(jid).state, pool["recent"])
+    time.sleep(0.5)  # 정지가 정말 집기를 막는지 — 조금 더 기다려도 아직 queued 다
+    assert live.store.get_job(jid).state == "queued"
+    row = pool["queue"][0]
     assert (
         row["state"] == "queued"
         and row["reason"] == "paused"
