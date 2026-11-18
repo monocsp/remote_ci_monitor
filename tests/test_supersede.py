@@ -268,3 +268,48 @@ def test_preset_supersede_rejects_anything_else(value):
         _preset(supersede=value)
     msg = str(e.value)
     assert "supersede" in msg and "off" in msg and "waiting" in msg and "all" in msg
+
+
+# ── 검증 뒤 더한 규칙(§10) ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "o_repo, n_repo", [(None, None), ("", ""), (None, "org/app"), ("org/app", None)]
+)
+def test_empty_repo_on_either_side_takes_nothing(o_repo, n_repo):
+    """`origin` 이 없는 로컬 레포는 repo=None — 무관한 두 레포의 `main` 이 서로를 치우면 안 된다."""
+    o = old(1, source=tree(repo=o_repo, tree_hash="o1"))
+    n = new(source=tree(repo=n_repo, tree_hash="n1"))
+    assert superseded_by(n, [o], "all") == []
+
+
+def test_a_new_job_aimed_at_one_machine_takes_nothing():
+    """규칙 8 을 양쪽에 — `--machine` · 점검 잡으로 낸 새 잡은 다른 질문이다."""
+    assert superseded_by(new(target_worker="build-02"), [old(1)], "all") == []
+
+
+def test_supersede_warnings_only_when_cancel_needs_the_submission_token():
+    from remote_ci_monitor.config import (
+        ServerConfig,
+        supersede_skipped_presets,
+        supersede_warnings,
+    )
+
+    cfg = ServerConfig()
+    cfg.presets = (_preset(supersede="all"), parse_preset({"name": "off", "argv": ["true"]}))
+    assert supersede_skipped_presets(cfg) == [] and supersede_warnings(cfg) == []
+    cfg.server.cancel_requires_submission_token = True
+    assert supersede_skipped_presets(cfg) == ["gate"]
+    (line,) = supersede_warnings(cfg)
+    assert line.startswith("warning:") and "gate" in line
+    assert "cancel_requires_submission_token" in line and "skipped" in line
+
+
+def test_rcm_check_supersede_row_is_a_warning_not_a_failure():
+    from remote_ci_monitor.cli import _supersede_row
+
+    assert _supersede_row({}) is None
+    assert _supersede_row({"supersede_skipped_presets": []}) is None
+    name, ok, text = _supersede_row({"supersede_skipped_presets": ["gate", "test-narrow"]})
+    assert name == "supersede" and ok is None
+    assert "gate, test-narrow" in text and "cancel_requires_submission_token" in text

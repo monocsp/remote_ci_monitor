@@ -83,6 +83,7 @@ def submit(
     *,
     preset: str = "g",
     branch: str | None = "feat/x",
+    repo: str | None = "org/app",
     inputs: dict[str, Any] | None = None,
     tree_hash: str | None = None,
     **extra: Any,
@@ -92,7 +93,7 @@ def submit(
         "inputs": {"scope": "full"} if inputs is None and preset == "g" else (inputs or {}),
         "source": {
             "mode": "tree",
-            "repo": "org/app",
+            "repo": repo,
             "branch": branch,
             "base_sha": "abc123f",
             "dirty": True,
@@ -661,3 +662,96 @@ def test_a22_rcm_run_whose_upload_was_superseded_exits_2(srv, env, capsys, monke
     assert last_json(cap.out)["superseded_by"] == jid + 1
     assert "upload failed" not in cap.err
     assert looked == []
+
+
+# ── 독립 검증에서 나온 것 ────────────────────────────────────────────────────
+
+
+def test_joining_a_job_being_superseded_makes_a_new_job(srv):
+    """alice 의 도는 잡이 그녀의 새 잡에 밀려 취소 중일 때 bob 이 같은 트리를 내면 합류가 아니라
+    새 잡이다 — 합류했다면 bob 의 대기가 alice 의 새 잡을 가리키며 종료 2 로 끝난다(결정 113)."""
+    tree = next(_trees)
+    o = running_remote(srv, tree_hash=tree)
+    queued_tree(srv)  # alice 의 새 push — o 가 cancelling
+    assert state(srv, o) == CANCELLING
+    status, resp = submit(srv, "bob", tree_hash=tree)
+    assert status == 201, resp
+    assert resp["joined"] is False and resp["job_id"] != o
+    assert srv.store.get_job(o).joiners == ()
+
+
+def test_joining_a_job_a_person_is_cancelling_makes_a_new_job(srv):
+    """M5o 전부터의 동작을 고친 것 — 사람이 취소 중인 잡도 결과를 줄 수 없다."""
+    tree = next(_trees)
+    o = running_remote(srv, preset="g-off", tree_hash=tree)
+    srv.cancel(o)
+    assert state(srv, o) == CANCELLING
+    status, resp = submit(srv, "bob", preset="g-off", tree_hash=tree)
+    assert status == 201 and resp["joined"] is False, resp
+
+
+def test_two_repos_without_a_name_do_not_supersede_each_other(srv):
+    o = queued_tree(srv, repo=None)
+    queued_tree(srv, repo=None)
+    assert state(srv, o) == QUEUED
+
+
+def test_a_job_sent_to_one_machine_supersedes_nothing(srv):
+    """같은 요청자(admin) · 같은 브랜치 — 새 잡이 `--machine` 이라는 것 하나만 다르다."""
+    srv.registered("build-02")
+    o = queued_tree(srv, "admin")
+    status, resp = submit(srv, "admin", machine="build-02")
+    assert status == 201, resp
+    status, up = srv.req("PUT", f"/jobs/{resp['job_id']}/tree", token="admin", body=TAR)
+    assert status == 200, up
+    assert state(srv, o) == QUEUED
+    # 대조군: 지정하지 않은 새 잡은 o 를 치운다
+    n = queued_tree(srv, "admin")
+    assert_superseded(srv, o, n)
+
+
+def test_strict_cancel_tokens_turn_supersede_off(tmp_path):
+    srv = WorkerServer(tmp_path, cancel_requires_submission_token=True)
+    srv.cfg.presets = tuple(parse_preset(p) for p in presets("all"))
+    logged: list[str] = []
+    srv.app.log = logged.append  # type: ignore[method-assign]
+    try:
+        o = queued_tree(srv)
+        n = queued_tree(srv)
+        assert state(srv, o) == QUEUED and state(srv, n) == QUEUED
+        assert f"job {n}: supersede skipped: cancel_requires_submission_token" in logged
+        assert logged.count(f"job {n}: supersede skipped: cancel_requires_submission_token") == 1
+        status, h = srv.req("GET", "/api/health")
+        assert sorted(h["supersede_skipped_presets"]) == ["d", "g"]
+    finally:
+        srv.close()
+
+
+def test_health_lists_no_skipped_presets_normally(srv):
+    status, h = srv.req("GET", "/api/health")
+    assert h["supersede_skipped_presets"] == []
+
+
+def test_no_supersede_mark_is_forgotten_when_the_upload_dies(srv):
+    n = new_tree(srv, supersede=False)
+    assert n in srv.app._no_supersede
+    sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    head = (
+        f"PUT /jobs/{n}/tree HTTP/1.1\r\nHost: x\r\n"
+        f"Authorization: Bearer {srv.tokens['alice']}\r\n"
+        f"Content-Length: {len(TAR) + 5000}\r\n\r\n"
+    ).encode()
+    sock.sendall(head + TAR[:100])
+    time.sleep(0.2)
+    sock.close()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and state(srv, n) == UPLOADING:
+        time.sleep(0.05)
+    assert state(srv, n) == CANCELLED
+    assert n not in srv.app._no_supersede
+
+
+def test_no_supersede_mark_is_forgotten_when_the_job_is_cancelled(srv):
+    n = new_tree(srv, supersede=False)
+    srv.cancel(n)
+    assert n not in srv.app._no_supersede

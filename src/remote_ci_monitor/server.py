@@ -72,6 +72,8 @@ from remote_ci_monitor.config import (
     advertise_warning,
     load_server_config,
     retention_warning,
+    supersede_skipped_presets,
+    supersede_warnings,
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -629,6 +631,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             self.log(warning)
         for warning in admission_warnings(s, self.config.host):
             self.log(warning)
+        for warning in supersede_warnings(self.config):
+            self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
             name = self.config.server.advertise_name or host
@@ -850,6 +854,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             self._mark_medians_dirty()
             return
         if job.is_terminal:
+            # 업로드가 끝나지 못하고 닫힌 잡(거절 · 끊김 · 버림 · 취소)의 `"supersede": false`
+            # 표시를 지운다 — 모든 종료가 이 길로 알려진다
+            self._forget_no_supersede(job.id)
             self._mark_medians_dirty()  # 새 표본이 생겼다 — 여기서만
             self.publish(
                 KIND_JOB_FINISHED,
@@ -4272,6 +4279,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             mode = preset.supersede if preset is not None else SUPERSEDE_OFF
             if job is None or mode == SUPERSEDE_OFF:
                 return []
+            if self.config.server.cancel_requires_submission_token:
+                # 남의 잡은 그 잡의 취소 비밀이 있어야 취소된다 — supersede 는 토큰 이름만 보므로
+                # 그 약속을 우회한다. 건너뛴다(§10 · `rcm check` 가 warn 으로 말한다)
+                self.log(f"job {job_id}: supersede skipped: cancel_requires_submission_token")
+                return []
             olds = superseded_by(job, self.store.list_active(), mode)
             if not olds:
                 return []
@@ -4358,6 +4370,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self._publish_job(None, job.id)
         self.wake.set()
         return {"job_id": job.id, "state": QUEUED, "bytes": received}
+
+    def _forget_no_supersede(self, job_id: int) -> None:
+        """`"supersede": false` 표시를 지운다 — 그 잡의 업로드가 끝나지 못하고 닫혔다."""
+        with self._no_supersede_lock:
+            self._no_supersede.discard(job_id)
 
     def _interrupted(self, job: Job, received: int, part: Path) -> None:
         part.unlink(missing_ok=True)
@@ -4550,6 +4567,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self._mark_dirty()
         self._publish_server()
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
+        for warning in supersede_warnings(fresh):
+            self.log(warning)
         return {"reloaded": True, "config": str(fresh.path), **changed}
 
     def pause(self, token: TokenInfo) -> dict[str, Any]:
@@ -4750,6 +4769,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             # 잡이 보게 될 환경을 **서버가 자기 환경으로** 잰 것(M5m, 정보 — 503 조건은 아니다).
             # `rcm check` 의 셸 검사와 달리 launchd·systemd 의 환경을 본다.
             "preset_env": self.preset_env,
+            # supersede 를 켰지만 `cancel_requires_submission_token` 때문에 건너뛰는 프리셋(M5o,
+            # 정보 — `rcm check` 가 warn 으로 그린다). 없으면 빈 목록
+            "supersede_skipped_presets": supersede_skipped_presets(self.config),
         }
         if not ok:
             if not db_ok:

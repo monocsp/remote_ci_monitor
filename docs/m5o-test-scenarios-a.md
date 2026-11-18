@@ -66,3 +66,14 @@
 | A34 | 옛 잡의 id 가 더 크다 | 규칙의 입력에 N 보다 큰 id | 그 잡은 대상이 아니다 |
 | A35 | 웹 요약 | 최근 행 `summary_code = "superseded"` | `#N` 이 `data-goto="N"` 버튼으로 그려지고 나머지 글자는 escape 된다. 시작 전에 치운 잡도 「시작 전 취소 · superseded」가 아니라 이 문장 |
 | A36 | `rcm run --no-supersede` | CLI | 본문에 `"supersede": false`. 플래그가 없으면 키도 없다(옛 서버 호환) |
+
+### 독립 검증 뒤 더한 경우
+
+| # | 경우 | 준비 | 기대 |
+|---|---|---|---|
+| A37 | 취소 중인 잡에 합류 | alice 의 도는 O 가 그녀의 새 잡에 밀려 `cancelling`, 그 사이 bob 이 같은 트리를 냄 | 합류가 아니라 새 잡(`joined: false`). 사람이 취소 중인 잡도 같다(M5o 전 동작을 고친 것) |
+| A38 | 레포 이름이 없다 | O · N 둘 다(또는 한쪽) `source.repo` 가 None — `origin` 없는 로컬 레포 | 둘 다 남는다(빈 브랜치와 같은 규칙) |
+| A39 | `cancel_requires_submission_token = true` | 프리셋 `all` | 아무것도 안 치운다, 잡마다 로그 한 줄 `supersede skipped: cancel_requires_submission_token`, 기동 · reload 경고, `/api/health` `supersede_skipped_presets`, `rcm check` 행 `supersede` warn |
+| A40 | 새 잡이 `--machine` | 같은 요청자 · 브랜치, N 에 `target_worker` | 아무것도 안 치운다(규칙 8 을 양쪽에). 지정 안 한 다음 잡은 치운다 |
+| A41 | 취소 중 행의 이유 칸 | `cancel.by = "superseded"`, `superseded_by = N` | 「SIGTERM sent by superseded」 가 아니라 `superseded by #N · kill …`, `#N` 은 링크 |
+| A42 | `"supersede": false` 표시의 수명 | 그 잡의 업로드가 끊기거나 취소됨 | 서버 메모리의 표시가 지워진다(잡이 끝나면 언제나) |

@@ -349,6 +349,13 @@
       case "cancelling": {
         var c = row.cancel || {};
         var kill = secondsUntil(c.kill_at, nowMs);
+        // 새 작업에 밀려 멈추는 중(M5o) — `superseded` 는 사람 이름이 아니다. 그 작업으로 가는 링크를 단다
+        var succ = row.superseded_by;
+        if (c.by === "superseded" && isNum(succ) && Math.floor(succ) === succ) {
+          out.text = T(lang, "reason.superseded", { id: succ, kill: fmtCountdown(kill, lang) });
+          links.push({ jobId: succ });
+          break;
+        }
         out.text = T(lang, "reason.sigterm", { by: personLabel(row, c.by), kill: fmtCountdown(kill, lang) }); break;
       }
       case "paused": out.text = T(lang, "reason.paused"); out.actionable = true; break;

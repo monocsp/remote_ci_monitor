@@ -463,6 +463,21 @@ def _cancel_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     )
 
 
+def _supersede_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `supersede` 행 — 프리셋이 supersede 를 켰는데 서버가
+    `cancel_requires_submission_token` 때문에 건너뛰면 warn(실패 아님, M5o §10). 아니면 없다."""
+    names = h.get("supersede_skipped_presets")
+    if not isinstance(names, list) or not names:
+        return None
+    shown = ", ".join(str(n) for n in names)
+    return (
+        "supersede",
+        None,
+        f"skipped for {shown} — cancel_requires_submission_token is on "
+        '(set supersede = "off" or turn the token rule off)',
+    )
+
+
 def _warn_if_client_too_old(client: Client) -> None:
     """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
     try:
@@ -2553,6 +2568,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             cancel_row = _cancel_row(h)
             if cancel_row is not None:
                 rows.append(cancel_row)
+            supersede_row = _supersede_row(h)
+            if supersede_row is not None:
+                rows.append(supersede_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다

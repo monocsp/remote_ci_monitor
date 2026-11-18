@@ -909,6 +909,10 @@ def _upsert_bundle(
     )
 
 
+#: 합류할 수 있는 상태 — 활성 상태에서 `cancelling` 을 뺀 것. 취소 중인 잡은 결과를 줄 수 없다
+JOINABLE_STATES = ACTIVE_STATES - {CANCELLING}
+
+
 class Store:
     """SQLite 저장소. 한 프로세스 안에서 여러 스레드가 같이 쓴다."""
 
@@ -1962,10 +1966,10 @@ class Store:
         return job, issued
 
     def find_joinable(self, join_key: str) -> Job | None:
-        marks = ",".join("?" * len(ACTIVE_STATES))
+        marks = ",".join("?" * len(JOINABLE_STATES))
         rows = self._jobs(
             f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) ORDER BY id LIMIT 1",
-            (join_key, *sorted(ACTIVE_STATES)),
+            (join_key, *sorted(JOINABLE_STATES)),
         )
         return rows[0] if rows else None
 
@@ -2002,7 +2006,9 @@ class Store:
         *,
         with_submission: bool,
     ) -> tuple[Job, tuple[str, str] | None] | None:
-        marks = ",".join("?" * len(ACTIVE_STATES))
+        # 취소 중인 잡에는 합류하지 않는다 — 결과를 줄 수 없는 잡이다. 거기 합류하면 합류자의
+        # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반)
+        marks = ",".join("?" * len(JOINABLE_STATES))
         conn = self._conn()
         issued: tuple[str, str] | None = None
         conn.execute("BEGIN IMMEDIATE")
@@ -2010,7 +2016,7 @@ class Store:
             row = conn.execute(
                 f"SELECT id, requester_name, priority FROM jobs WHERE join_key=? "
                 f"AND state IN ({marks}) ORDER BY id LIMIT 1",
-                (join_key, *sorted(ACTIVE_STATES)),
+                (join_key, *sorted(JOINABLE_STATES)),
             ).fetchone()
             if row is None:
                 conn.execute("COMMIT")

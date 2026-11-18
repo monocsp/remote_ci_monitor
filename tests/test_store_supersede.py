@@ -266,3 +266,27 @@ def test_two_new_jobs_racing_never_cancel_each_other(store, tmp_path):
     taken = results[n1.id] + results[n2.id]
     assert taken.count(o.id) == 1
     assert successor_of(store.get_job(n1.id)) == n2.id
+
+
+# ── 취소 중인 잡에는 합류하지 않는다(검증에서 나온 것 · 결정 113) ──────────────
+
+
+def test_a_cancelling_job_is_never_joined(store):
+    o = running(store)
+    assert store.request_cancel(o.id, "alice-laptop", NOW, GRACE) == CANCELLING
+    assert store.find_joinable(_jk(store, o.id)) is None
+    assert store.join_or_bump(_jk(store, o.id), "bob-desk", "bob@desk", 0, NOW) is None
+    assert store.join_or_bump_with_submission(_jk(store, o.id), "bob-desk", "b", 0, NOW) is None
+    assert store.get_job(o.id).joiners == ()
+
+
+def test_queued_and_running_jobs_are_still_joined(store):
+    r = running(store)
+    assert store.join_or_bump(_jk(store, r.id), "bob-desk", "bob@desk", 0, NOW).id == r.id
+    o = enqueue(store)
+    assert store.join_or_bump(_jk(store, o.id), "bob-desk", "bob@desk", 0, NOW).id == o.id
+
+
+def _jk(store, job_id):
+    row = store._conn().execute("SELECT join_key FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return row["join_key"]

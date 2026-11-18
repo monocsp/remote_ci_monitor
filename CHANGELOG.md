@@ -18,7 +18,17 @@ of a key bumps that number and is listed here.
   `#41 superseded by #57 — rcm wait --job 57`. Queue rows and `GET /jobs/<id>` gain
   `superseded_by` (`schema_version` unchanged); the web page links `#N`. `rcm run --no-supersede`
   (API `"supersede": false`) keeps the older job for one submission. The default is `"off"`, so
-  nothing changes until a preset turns it on. ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
+  nothing changes until a preset turns it on. A job with no repository name or aimed at one
+  machine (`--machine`) neither clears nor is cleared, and on a server with
+  `cancel_requires_submission_token = true` supersede is skipped with a warning in the log and in
+  `rcm check` (`/api/health` gains `supersede_skipped_presets`).
+  ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
+
+### Fixed
+- **A submission no longer joins a job that is being cancelled.** The same preset, inputs and
+  tree used to join a job in `cancelling`, so the joiner's `rcm wait` ended with exit 2 for a
+  cancel that was not theirs. Such a submission now creates a new job.
+  ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
 
 ## [0.5.1] - 2026-11-18
 

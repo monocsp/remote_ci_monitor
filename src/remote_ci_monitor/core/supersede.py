@@ -30,13 +30,22 @@ SUPERSEDE_MODES = (SUPERSEDE_OFF, SUPERSEDE_WAITING, SUPERSEDE_ALL)
 SUPERSEDED = "superseded"
 
 
-def branch_of(source: Source) -> str | None:
-    """잡의 브랜치 — tree 는 `source.branch`, git_ref 는 `source.ref`. 비었으면 None(규칙 3)."""
-    raw = source.branch if source.mode != "git_ref" else source.ref
+def _text(raw: object) -> str | None:
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
     return raw or None
+
+
+def branch_of(source: Source) -> str | None:
+    """잡의 브랜치 — tree 는 `source.branch`, git_ref 는 `source.ref`. 비었으면 None(규칙 3)."""
+    return _text(source.branch if source.mode != "git_ref" else source.ref)
+
+
+def repo_of(source: Source) -> str | None:
+    """잡의 레포 이름. 비었으면 None — `origin` 이 없는 로컬 레포는 클라이언트가 None 을 보낸다.
+    None 끼리를 「같은 레포」로 읽으면 서로 무관한 두 레포의 `main` 이 서로를 치운다(규칙 2)."""
+    return _text(source.repo)
 
 
 def _where(job: Job) -> tuple[str, str]:
@@ -56,14 +65,16 @@ def _states(mode: str) -> frozenset[str]:
 
 
 def superseded_by(new: Job, active: Iterable[Job], mode: str) -> list[int]:
-    """N 이 치울 옛 잡의 id(오름차순). 명세 §2.2 의 규칙 1~8 + 풀(§10).
+    """N 이 치울 옛 잡의 id(오름차순). 명세 §2.2 의 규칙 1~8 + 풀 · 빈 레포 · 지정 머신(§10).
 
     `cancelling` 은 언제나 뺀다 — 이미 누가 멈추는 중이다. 다시 요청하면 `kill_at` 이 밀리고
     요약이 사람의 취소를 덮는다(A18).
     """
     states = _states(mode)
     branch = branch_of(new.source)
-    if not states or branch is None:
+    repo = repo_of(new.source)
+    # 머신을 고른 새 잡(`--machine` · 점검 잡)은 다른 질문이다 — 규칙 8 을 양쪽에 건다(§10)
+    if not states or branch is None or repo is None or new.target_worker is not None:
         return []
     owner = new.requester.name
     out: list[int] = []
@@ -72,7 +83,7 @@ def superseded_by(new: Job, active: Iterable[Job], mode: str) -> list[int]:
             continue
         if old.preset != new.preset:  # 규칙 1 — 모드는 N 의 프리셋 것
             continue
-        if old.source.mode != new.source.mode or old.source.repo != new.source.repo:  # 규칙 2
+        if old.source.mode != new.source.mode or repo_of(old.source) != repo:  # 규칙 2
             continue
         if branch_of(old.source) != branch:  # 규칙 3
             continue

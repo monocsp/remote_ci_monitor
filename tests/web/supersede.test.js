@@ -71,3 +71,32 @@ describe("superseded summary", () => {
     assert.equal(l.supersededBy, null);
   });
 });
+
+describe("cancelling row of a superseded job", () => {
+  const NOW_MS = Date.parse("2026-11-18T03:00:00Z");
+  function row(extra) {
+    return Object.assign({
+      id: 41, state: "cancelling", reason: "cancelling", superseded_by: 57,
+      cancel: { by: "superseded", requested_at: "2026-11-18T02:59:58Z", kill_at: "2026-11-18T03:00:08Z" },
+      requester: { name: "alice-laptop", label: "alice@laptop" }, joiners: [], estimate: {}, source: {}
+    }, extra || {});
+  }
+
+  test("says superseded by #N, not 'SIGTERM sent by superseded', and links #N", () => {
+    const r = rcm.reasonText(row(), NOW_MS, null, "en");
+    assert.ok(r.text.startsWith("superseded by #57 · kill "), r.text);
+    assert.ok(!r.text.includes("SIGTERM sent by superseded"), r.text);
+    assert.deepEqual(r.links, [{ jobId: 57 }]);
+  });
+
+  test("Korean too", () => {
+    const r = rcm.reasonText(row(), NOW_MS, null, "ko");
+    assert.ok(r.text.includes("#57"), r.text);
+    assert.ok(!r.text.includes("superseded이"), r.text);
+  });
+
+  test("an ordinary cancel still names the person", () => {
+    const r = rcm.reasonText(row({ superseded_by: null, cancel: { by: "alice-laptop", kill_at: "2026-11-18T03:00:08Z" } }), NOW_MS, null, "en");
+    assert.ok(r.text.startsWith("SIGTERM sent by alice@laptop"), r.text);
+  });
+});
