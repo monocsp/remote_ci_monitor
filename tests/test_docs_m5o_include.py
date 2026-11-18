@@ -68,7 +68,8 @@ def test_example_server_toml_shows_include_commented_out():
 
 
 def test_changelog_unreleased_has_both():
+    # `[Unreleased]` 부터 M5o 이전 릴리스 `[0.5.1]` 앞까지 — 릴리스 뒤에도 읽는다
     text = read("CHANGELOG.md")
-    unreleased = text.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    unreleased = text.split("## [Unreleased]", 1)[1].split("\n## [0.5.1]", 1)[0]
     assert "include = [" in unreleased
     assert "rcm reload --dry-run" in unreleased
