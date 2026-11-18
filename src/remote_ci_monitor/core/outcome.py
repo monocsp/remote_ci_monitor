@@ -323,7 +323,10 @@ _SHA_RE = re.compile(r"[0-9a-f]{4,64}\Z")
 _GIT_OP_RE = re.compile(r"git [a-z-]{1,12}\Z")
 #: 보이지 않거나 글자 방향을 뒤집는 문자. 멤버 이름은 사람이 읽는 자리에 그대로 찍히므로 여기서
 #: 지운다 — bidi 문자 하나면 화면의 파일 이름이 실제와 반대로 보인다.
-_INVISIBLE_RE = re.compile("[\x00-\x1f\x7f؜​-‏ -‮⁠-⁤⁦-⁩﻿]")
+#: C1 제어 문자(U+0080–U+009F)도 지운다 — NEL(U+0085)은 터미널에서 줄을 나눈다(M5o 검증 라운드 1).
+_INVISIBLE_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 class OutcomeError(ValueError):
@@ -385,6 +388,19 @@ def _clean_label(v: Any) -> str:
     if not s:
         raise OutcomeError("label has no usable text")
     return s
+
+
+def label_text(v: Any) -> str | None:
+    """스텝 이름을 요약 인자 `step`/`last_step` 과 **같은 모양**으로 — 비교용. 못 쓰면 None.
+
+    행의 `failed_step` 은 원문(120자)이고 인자는 씻어서 80자로 자른 것이라, 그대로 견주면 긴
+    이름 · 보이지 않는 문자가 든 이름이 「다르다」로 읽혀 같은 스텝이 두 번 찍힌다."""
+    if v is None:
+        return None
+    try:
+        return _clean_label(v)
+    except OutcomeError:
+        return None
 
 
 def _clean_unit(v: Any) -> str:

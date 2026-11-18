@@ -103,3 +103,35 @@ describe("recentLine — 요약이 이미 스텝을 말하면 다시 안 붙인�
     assert.equal(rcm.recentLine(j, TZ, NOW, "en").summary, "limit 1m (in build web) · step test");
   });
 });
+
+describe("recentLine — 꼬리 비교는 씻은 이름끼리 (검증 라운드 1)", () => {
+  // 서버 인자 `step` 은 씻어서 80자로 자른 값이다(core/outcome._clean_label). 행의 failed_step 은
+  // 원문(120자)이라 그대로 견주면 같은 스텝이 두 번 찍힌다.
+  [
+    ["s".repeat(120), "s".repeat(80)],
+    ["te​st", "test"],
+    ["te\u0085st", "test"],
+    ["  pad  ", "pad"]
+  ].forEach(([raw, cleaned]) => {
+    test(JSON.stringify(raw).slice(0, 30), () => {
+      const j = {
+        id: 1, state: "failed", exit_code: 1, key: "gate", failed_step: raw, last_step: raw,
+        summary: cleaned + " failed (exit 1)", summary_code: "exit_code",
+        summary_args: { code: 1, step: cleaned },
+        job_seconds: 1, finished_at: "2026-11-18T00:50:00Z", requester: { name: "m", label: "m" }
+      };
+      assert.equal(rcm.recentLine(j, TZ, NOW, "en").summary, cleaned + " failed (exit 1)");
+    });
+  });
+
+  test("80자 자르기는 코드 포인트 단위다 — 서버(파이썬)와 같다", () => {
+    const raw = "😀".repeat(90);
+    const j = {
+      id: 1, state: "failed", exit_code: 1, key: "gate", failed_step: raw,
+      summary: "x", summary_code: "exit_code",
+      summary_args: { code: 1, step: "😀".repeat(80) },
+      job_seconds: 1, finished_at: "2026-11-18T00:50:00Z", requester: { name: "m", label: "m" }
+    };
+    assert.ok(!rcm.recentLine(j, TZ, NOW, "en").summary.includes("step "));
+  });
+});

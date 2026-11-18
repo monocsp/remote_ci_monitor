@@ -33,6 +33,7 @@
 | B6 | `fail_truncated` | 서로 다른 이름 101개 | `+99+ more` — 정확한 수를 주장하지 않는다, 인자 `more_truncated: true` |
 | B7 | 원격 워커 완료 | B1 과 같은 로그를 워커가 올리고 `finish failed exit 1` | 로컬 레인과 **같은 글자 · 같은 인자** |
 | B8 | 이름에 제어 문자 · bidi | 마커 입구가 지운 뒤에도 남는 U+202E · 대장에 직접 넣은 `\n` | 요약 · 인자 · env 에서 지워진다 |
+| B8b | C1 · 줄 구분자 (검증 라운드 1) | `fail::a<U+0085>b<U+2028>c<U+202E>evil<ESC>[31mred`, 로컬 레인과 원격 finish 둘 다 | 입구(`progress.clean_name`)가 U+0080–U+009F · U+2028 · U+2029 · U+061C 를 지운다. 대장 · `failed_step` · 요약 · `RCM_FAILURES` 어디에도 줄을 나누는 글자가 없고, `splitlines()` 로 센 줄 수가 `RCM_FAILURE_COUNT` 와 같다. `outcome._INVISIBLE_RE` · `notify.failure_lines` 도 같은 글자를 지운다(방어 한 겹 더) |
 | B9 | 타임아웃 + `last_step` | `step::test`, 시간 초과(60초) | `limit 1m (in test)`, 인자 `{"seconds":60,"last_step":"test"}` |
 | B9b | 타임아웃, 스텝 없음 | 마커 없음 | `limit 1m` — 오늘과 같다 |
 | B14 | 성공 잡 | exit 0 + `fail::x` 마커 | 요약에 아무것도 안 붙는다(코드 없음, 성공의 요약은 잡의 문장) |
@@ -79,6 +80,7 @@
 | W2 | 한국어 화면 | `test: x_test.dart 외 1개 (종료 코드 1)` · `analyze 실패 (종료 코드 1)` · `외 99개 이상` |
 | W3 | 타임아웃 | `limit 1m (in test)` — 옛 화면은 `a.limit`(서버가 안 보내는 키)을 찍어 `undefined` 였다 |
 | W4 | 최근 행 | 요약이 이미 스텝을 말하면 ` · step test` 를 다시 붙이지 않는다 |
+| W5 | 최근 행 · 긴 이름 (검증 라운드 1) | 행의 `failed_step`/`last_step` 원문을 인자와 같은 모양(씻고 코드 포인트 80개)으로 만든 뒤 견준다 — 120자 · 보이지 않는 문자가 든 스텝도 두 번 안 찍힌다. `rcm top` 도 같다 |
 
 ## 변이 (`scripts/mutcheck.py`)
 

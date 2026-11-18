@@ -69,10 +69,11 @@ def failure_lines(names: Iterable[str]) -> list[str]:
             ch
             for ch in str(name)
             if ord(ch) >= 0x20
-            and ord(ch) != 0x7F
+            and not 0x7F <= ord(ch) <= 0x9F  # C1 — NEL 은 `splitlines()` 가 줄로 나눈다
+            and ord(ch) != 0x061C
             and not 0xD800 <= ord(ch) <= 0xDFFF
             and not 0x200B <= ord(ch) <= 0x200F
-            and not 0x202A <= ord(ch) <= 0x202E
+            and not 0x2028 <= ord(ch) <= 0x202E  # 줄 · 문단 구분자와 bidi
             and not 0x2060 <= ord(ch) <= 0x2069
             and ord(ch) != 0xFEFF
         ).strip()

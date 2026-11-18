@@ -300,3 +300,97 @@ def test_cli_recent_line_does_not_repeat_the_step_the_summary_names():
         summary_args={"seconds": 60, "last_step": "test"},
     )
     assert tail_of(timed) == "limit 1m (in test)"
+
+
+# ── B8 (검증 라운드 1): C1 제어 문자 · 줄 구분자가 대장 · 요약 · env 로 새지 않는다 ─────────
+
+#: 검증자가 넣은 이름 — NEL(U+0085) · LINE SEPARATOR(U+2028) · RLO(U+202E) · ESC 를 한 줄에
+EVIL = "a\x85b c‮evil\x1b[31mred"
+#: 이 문자들 가운데 하나라도 남으면 터미널이나 `splitlines()` 가 줄을 나눈다
+LINE_BREAKERS = ("\x85", " ", " ", "\x1c", "\x1d", "\x1e", "\x0b", "\x0c", "\r", "\n")
+
+
+def _no_breaks(text: str) -> bool:
+    return not any(ch in text for ch in LINE_BREAKERS) and "\x1b" not in text
+
+
+@pytest.mark.parametrize("ch", ["\x85", "\x9b", " ", " ", "؜"])
+def test_b8_the_marker_entry_drops_c1_and_line_separators(ch):
+    """입구(`progress.clean_name`)에서 지우면 대장 · `failed_step` · env · 요약이 다 덮인다."""
+    from remote_ci_monitor.core.progress import clean_name, parse_marker
+
+    assert clean_name(f"x{ch}y") == "xy"
+    assert parse_marker(f"::rcm::fail::x{ch}y\n") == ("fail", "xy")
+    assert parse_marker(f"::rcm::step::te{ch}st\n") == ("step", "test")
+
+
+def test_b8_outcome_drops_c1_even_if_a_name_skipped_the_entry():
+    """방어 한 겹 더 — 옛 대장 행처럼 입구를 안 지난 이름도 요약 인자에서 지워진다."""
+    _, _, args = outcome.exit_summary(1, "te\x85st", ["a\x85b c_test.dart"], ["te\x85st"])
+    assert args["first"] == "abc_test.dart" and args["step"] == "test"
+
+
+def test_b8_hook_lines_match_the_count_under_splitlines():
+    from remote_ci_monitor.core.notify import notify_env
+
+    env = notify_env({"id": 1}, "hook", failures=["a\x85b c d؜e", "second"])
+    assert env["RCM_FAILURES"] == "abcde\nsecond"
+    assert len(env["RCM_FAILURES"].splitlines()) == int(env["RCM_FAILURE_COUNT"]) == 2
+
+
+def _evil_log(second: str = "second") -> str:
+    return f"::rcm::step::test\n::rcm::fail::{EVIL}\n::rcm::fail::{second}\n::rcm::fail::test\n"
+
+
+def _check_evil(summary: str, args: dict, names: list[str]) -> None:
+    assert summary == "test: abcevil[31mred +1 more (exit 1)", repr(summary)
+    assert args["first"] == "abcevil[31mred"
+    assert all(_no_breaks(n) for n in names), names
+    assert names[0] == "abc‮evil[31mred"  # 대장은 이름을 지킨다 — 줄을 나누는 글자만 뺀다
+    from remote_ci_monitor.core.notify import notify_env
+
+    env = notify_env({"id": 1}, "hook", failures=names)
+    assert len(env["RCM_FAILURES"].splitlines()) == int(env["RCM_FAILURE_COUNT"]) == 3
+
+
+def test_b8_local_lane_keeps_c1_out_of_ledger_summary_and_env(tmp_path):
+    cfg = make_config(tmp_path)
+    log = tmp_path / "evil.log"
+    log.write_text(_evil_log(), encoding="utf-8")
+    cfg.presets = (*cfg.presets, parse_preset(sh("evil", f"cat '{log}'; exit 1")))
+    store = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        jid = enqueue(store, cfg, "evil")
+        run_one(store, cfg, jid)
+        j = store.get_job(jid)
+        _check_evil(j.summary, j.summary_args, store.failure_names(jid))
+        assert j.failed_step == "test"
+    finally:
+        store.close()
+
+
+def test_b8_remote_finish_keeps_c1_out_of_ledger_summary_and_env(tmp_path):
+    srv = WorkerServer(tmp_path)
+    try:
+        jid = srv.queued_job()
+        srv.registered("build-02")
+        assert srv.claimed("build-02") == jid
+        assert srv.log("build-02", jid, _evil_log().encode())[0] == 200
+        assert srv.finish("build-02", jid, "failed", exit_code=1)[0] == 200
+        v = srv.view(jid)
+        _check_evil(v["summary"], v["summary_args"], srv.store.failure_names(jid))
+        assert all(_no_breaks(f["name"]) for f in v["failures"])
+    finally:
+        srv.close()
+
+
+# ── 꼬리 라벨 비교는 씻은 이름끼리 (검증 라운드 1, nice) ───────────────────────
+
+
+@pytest.mark.parametrize("step", ["s" * 120, "te​st", "te\x85st"])
+def test_cli_recent_line_compares_the_cleaned_step(step):
+    from test_render_m5h import recent_row, tail_of
+
+    text, code, args = outcome.exit_summary(1, step, [step], [step])
+    row = recent_row(failed_step=step, summary=text, summary_code=code, summary_args=args)
+    assert tail_of(row) == text  # `(step sss…)` 를 다시 붙이지 않는다

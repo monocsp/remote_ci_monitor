@@ -24,6 +24,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     UPLOADING,
 )
+from remote_ci_monitor.core.outcome import label_text
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
 
@@ -924,9 +925,12 @@ def summary_names_step(r: dict[str, Any]) -> bool:
     args = r.get("summary_args")
     if not isinstance(args, dict) or r.get("summary_code") not in ("exit_code", "timed_out"):
         return False
+    # 인자는 씻어서 80자로 자른 값이다 — 행의 원문도 같은 모양으로 만든 뒤 견준다
     if r.get("failed_step"):
-        return args.get("step") == r["failed_step"]
-    return bool(r.get("last_step")) and args.get("last_step") == r["last_step"]
+        step = label_text(r["failed_step"])
+        return step is not None and args.get("step") == step
+    last = label_text(r.get("last_step"))
+    return last is not None and args.get("last_step") == last
 
 
 def render_pool(
