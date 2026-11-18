@@ -271,6 +271,30 @@ def test_c23_dry_run_must_be_a_boolean(srv):
     assert s.app.config is before
 
 
+@pytest.mark.parametrize(
+    "body",
+    [{"dryrun": True}, {"dry-run": True}, [True], {"dry_run": True, "extra": 1}, "yes", 1],
+    ids=["dryrun", "dry-run", "list", "extra-key", "string", "number"],
+)
+def test_a_reload_body_that_is_not_exactly_dry_run_is_refused(srv, body):
+    """오타 난 dry-run 을 진짜 reload 로 읽으면 미리 보자던 사람의 서버가 바뀐다(PR #201 검증)."""
+    s, _path, inc_path = srv
+    before = s.app.config
+    put(inc_path, preset("gate", "timeout_seconds = 7"))
+    status, out = s.req("POST", "/reload", token="admin", json_body=body)
+    assert status == 400, out
+    assert s.app.config is before
+    assert s.app.config.preset("gate").timeout_seconds != 7
+
+
+def test_post_reload_with_no_body_at_all_still_reloads(srv):
+    """옛 클라이언트처럼 본문이 아예 없으면(`Content-Length: 0`) 오늘처럼 진짜 reload 다."""
+    s, _path, inc_path = srv
+    put(inc_path, preset("gate", "timeout_seconds = 7"))
+    status, out = s.req("POST", "/reload", token="admin", body=b"")
+    assert status == 200 and out["presets_changed"] == ["gate"], out
+
+
 def test_post_reload_without_a_body_still_reloads(srv):
     """옛 클라이언트(`rcm reload` 가 빈 본문)는 오늘처럼 진짜 reload 를 한다."""
     s, _path, inc_path = srv

@@ -66,6 +66,9 @@
 | C28 | `rcm reload --dry-run --json` | 같음 | `dry_run: true`, `presets_changed_keys` |
 | C29 | `rcm check` 에서 들인 파일이 깨짐 | 없는 경로 | `FAIL  server config` 에 그 경로 |
 | C30 | 같은 basename 의 두 파일이 겹침 | `a/p.toml` · `b/p.toml` | 메시지가 basename 이 아니라 경로로 둘을 가른다 |
+| C31 | `/reload` 본문이 `{"dry_run": bool}` 이 아님 (PR #201 검증) | `{"dryrun": true}` · `{"dry-run": true}` · `[true]` · 남는 키 · 문자열 · 숫자 | 400, 아무것도 안 바뀜. 본문이 아예 없거나 `{}` 면 오늘처럼 진짜 reload |
+| C32 | 권한 검사와 읽기 사이에 파일이 바뀜(TOCTOU, PR #201 검증) | 이름 기준 `os.stat` 이 644 라고 거짓말하는데 실제 파일은 664 | 거절 — 한 번 연 fd 의 `fstat` 로 보고 같은 핸들에서 읽는다. FIFO 는 멈추지 않고 「regular file」로 거절 |
+| C33 | 들인 파일 **하나 안의** 이름 겹침 (PR #201 검증) | `presets.dolomood.toml` 에 `gate` 둘 | 메시지에 그 파일 이름 · `'gate'` · `duplicate` |
 
 ## 변이(mutcheck)
 

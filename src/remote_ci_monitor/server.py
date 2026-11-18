@@ -5065,8 +5065,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/reload":
             self._only(method, "POST")
             self.app.require_admin(self._token())
+            # 본문이 없거나 `{}` 면 진짜 reload(옛 클라이언트는 본문을 안 보낸다). 그 밖에는
+            # `{"dry_run": bool}` 만 받는다 — `{"dryrun": true}` 같은 오타를 조용히 진짜 reload
+            # 로 읽으면 미리 보자던 사람의 서버가 바뀐다
             body = self._json_body()
-            dry_run = body.get("dry_run", False) if isinstance(body, dict) else False
+            if not isinstance(body, dict):
+                raise ApiError(400, 'reload body must be a JSON object: {"dry_run": true|false}')
+            unknown = sorted(set(body) - {"dry_run"})
+            if unknown:
+                raise ApiError(
+                    400, f"unknown key(s) in the reload body: {', '.join(unknown)} — only dry_run"
+                )
+            dry_run = body.get("dry_run", False)
             if not isinstance(dry_run, bool):
                 raise ApiError(400, "dry_run must be true or false")
             self._send_json(200, self.app.reload_config(dry_run=dry_run))

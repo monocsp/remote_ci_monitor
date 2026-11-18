@@ -955,16 +955,10 @@ def _include_paths(found: Path, raw: dict[str, Any]) -> tuple[Path, ...]:
     return tuple(out)
 
 
-def _check_include_file(path: Path) -> None:
+def _check_include_stat(path: Path, st: os.stat_result) -> None:
     """들인 파일은 서버를 돌리는 사용자 소유이고 그룹 · 남이 쓸 수 없어야 한다(결정 122).
     프리셋은 서버가 실행할 argv 다 — 아무나 쓸 수 있는 파일이 그것을 정하면 「프리셋만 실행」이라는
     약속이 무너진다. server.toml 자신에게는 이 규칙을 붙이지 않는다(기존 설치를 깨지 않는다)."""
-    try:
-        st = path.stat()
-    except FileNotFoundError:
-        raise ConfigError(f"included file not found: {path}") from None
-    except OSError as e:
-        raise ConfigError(f"{path}: cannot read: {e.strerror}") from e
     if not stat.S_ISREG(st.st_mode):
         raise ConfigError(f"{path}: an included file must be a regular file")
     geteuid = getattr(os, "geteuid", None)
@@ -979,10 +973,30 @@ def _check_include_file(path: Path) -> None:
         )
 
 
+def _load_include_toml(path: Path) -> dict[str, Any]:
+    """들인 파일을 **한 번** 열고, 그 fd 의 `fstat` 로 권한을 본 뒤 **같은 핸들에서** 읽는다.
+    이름으로 `stat` 하고 다시 이름으로 열면 그 사이에 파일이 바뀔 수 있다(TOCTOU) — 검사를 지난
+    파일과 읽은 파일이 같아야 검사가 뜻이 있다. `O_NONBLOCK` 은 FIFO 에서 열기가 멈추지 않게 한다
+    (일반 파일에는 아무 효과가 없고, FIFO 는 아래 regular file 검사가 거절한다)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        raise ConfigError(f"included file not found: {path}") from None
+    except OSError as e:
+        raise ConfigError(f"{path}: cannot read: {e.strerror}") from e
+    with os.fdopen(fd, "rb") as fh:
+        _check_include_stat(path, os.fstat(fh.fileno()))
+        try:
+            return tomllib.load(fh)
+        except tomllib.TOMLDecodeError as e:
+            raise ConfigError(f"{path}: invalid TOML: {e}") from e
+        except OSError as e:
+            raise ConfigError(f"{path}: cannot read: {e.strerror}") from e
+
+
 def _read_include(path: Path, owner: Path) -> tuple[Preset, ...]:
     """들인 파일 하나 → 그 안의 프리셋. 오류마다 그 파일의 경로를 붙인다."""
-    _check_include_file(path)
-    raw = _read_toml(path)
+    raw = _load_include_toml(path)
     other = sorted(set(raw) - _INCLUDE_KEYS)
     if other:
         raise ConfigError(
@@ -1000,8 +1014,9 @@ def _read_include(path: Path, owner: Path) -> tuple[Preset, ...]:
 
 
 def _merge_presets(groups: list[tuple[Path, tuple[Preset, ...]]]) -> dict[str, Path]:
-    """파일별 프리셋을 합치며 이름이 **파일 사이에서** 겹치면 두 파일을 댄다. 한 파일 안의
-    겹침은 `_validate_server` 의 「duplicate preset name」이 말한다. 이름이 같은 두 파일은
+    """파일별 프리셋을 합치며 이름이 **파일 사이에서** 겹치면 두 파일을 댄다. **들인 파일 하나
+    안의** 겹침은 그 파일 이름으로 말한다. server.toml 안의 겹침은 오늘처럼 `_validate_server`
+    의 「duplicate preset name(s)」이 말한다(첫 묶음이 server.toml 이다). 이름이 같은 두 파일은
     경로로 가른다."""
     basenames = [path.name for path, _ in groups]
     label = {
@@ -1014,6 +1029,11 @@ def _merge_presets(groups: list[tuple[Path, tuple[Preset, ...]]]) -> dict[str, P
             if first is not None and first != path:
                 raise ConfigError(
                     f"preset '{p.name}' is defined in both {label[first]} and {label[path]}"
+                )
+            if first is not None and path != groups[0][0]:
+                raise ConfigError(
+                    f"{label[path]}: [[presets]] duplicate preset name '{p.name}' "
+                    "(defined twice in this file)"
                 )
             sources.setdefault(p.name, path)
     return sources

@@ -334,3 +334,41 @@ def test_c21_moving_a_preset_between_files_does_not_change_the_preset(tmp_path):
     after = load(server_toml(tmp_path / "y", '["p.toml"]'))
     assert before.preset("gate") == after.preset("gate")
     assert before.preset_sources["gate"] != after.preset_sources["gate"]
+
+
+# ── 검증 후속(PR #201 리뷰) ───────────────────────────────────────────────────
+
+
+def test_a_duplicate_inside_one_included_file_names_that_file(tmp_path):
+    """한 들인 파일 안의 겹침도 **그 파일 이름**으로 말한다 — 프리셋 24개 중 어디서 겹쳤는지."""
+    write(tmp_path / "presets.dolomood.toml", preset("gate") + preset("gate"))
+    msg = fails(server_toml(tmp_path, '["presets.dolomood.toml"]', preset("local")))
+    assert "presets.dolomood.toml" in msg and "'gate'" in msg and "duplicate" in msg
+
+
+def test_the_permission_check_reads_the_open_file_not_the_name(tmp_path, monkeypatch):
+    """TOCTOU — 이름으로 stat 하고 다시 이름으로 열면 그 사이에 바뀐 파일을 읽는다. 검사는 **연
+    fd** 의 `fstat` 여야 한다. 이름 기준 stat 이 「괜찮다」고 거짓말해도 그룹 쓰기 파일은
+    거절된다."""
+    inc = write(tmp_path / "p.toml", preset("gate"), mode=0o664)
+    real_stat = os.stat
+
+    def lying_stat(p, *a, **kw):
+        st = real_stat(p, *a, **kw)
+        if os.fspath(p) == str(inc):
+            fields = list(st)
+            fields[0] = 0o100644  # st_mode: 이름으로 물으면 644 라고 답한다
+            return os.stat_result(fields)
+        return st
+
+    monkeypatch.setattr(os, "stat", lying_stat)
+    msg = fails(server_toml(tmp_path, '["p.toml"]'))
+    assert "chmod go-w" in msg
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
+def test_a_fifo_is_refused_without_hanging(tmp_path):
+    """FIFO 를 그냥 열면 쓰는 쪽이 올 때까지 멈춘다 — 기동 · reload 가 멈추면 안 된다."""
+    os.mkfifo(tmp_path / "p.toml", 0o600)
+    msg = fails(server_toml(tmp_path, '["p.toml"]'))
+    assert "regular file" in msg
