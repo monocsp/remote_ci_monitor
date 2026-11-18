@@ -7,6 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **The server no longer drops connections that arrive in a burst.** Its listen backlog was the
+  standard library's 5, so a sixth connection arriving before the server accepted the first ones
+  could be reset on macOS (the client saw a broken pipe or a connection reset). Workers, web
+  pages and several `rcm wait` clients can overlap like this. The backlog is now 128; the number
+  of requests handled at once is still `max_concurrent_requests`.
+
 ## [0.6.0] - 2026-11-18
 
 ### Added
