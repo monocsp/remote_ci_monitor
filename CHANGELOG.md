@@ -18,7 +18,7 @@ of a key bumps that number and is listed here.
   `#41 superseded by #57 — rcm wait --job 57`. Queue rows and `GET /jobs/<id>` gain
   `superseded_by` (`schema_version` unchanged); the web page links `#N`. `rcm run --no-supersede`
   (API `"supersede": false`) keeps the older job for one submission. The default is `"off"`, so
-  nothing changes until a preset turns it on.
+  nothing changes until a preset turns it on. ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
 
 ### Fixed
 - **A job a remote worker had just claimed is no longer marked `lost`.** The worker takes its
