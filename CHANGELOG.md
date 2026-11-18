@@ -23,6 +23,8 @@ of a key bumps that number and is listed here.
   and `/api/health` gains `reload_dry_run: true`; the CLI sends a dry run only to a server that
   reports it, since an older server would ignore the body and apply the reload. ([#201](https://github.com/monocsp/remote_ci_monitor/pull/201))
 
+## [0.5.1] - 2026-11-18
+
 ### Fixed
 - **A job a remote worker had just claimed is no longer marked `lost`.** The worker takes its
   job list for a heartbeat before sending it; when a lane's claim landed on the server in that
@@ -30,6 +32,7 @@ of a key bumps that number and is listed here.
   restarted without the job`. A job handed out since that worker's previous heartbeat now gets
   one more heartbeat to show up, so a job a worker really forgot is closed one heartbeat (about
   5 s) later than before. Seen as an intermittent CI failure since 2026-10-01.
+  ([#197](https://github.com/monocsp/remote_ci_monitor/pull/197))
 
 ## [0.5.0] - 2026-11-17
 
@@ -1659,7 +1662,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.2...v0.4.3
