@@ -349,6 +349,13 @@
       case "cancelling": {
         var c = row.cancel || {};
         var kill = secondsUntil(c.kill_at, nowMs);
+        // 새 작업에 밀려 멈추는 중(M5o) — `superseded` 는 사람 이름이 아니다. 그 작업으로 가는 링크를 단다
+        var succ = row.superseded_by;
+        if (c.by === "superseded" && isNum(succ) && Math.floor(succ) === succ) {
+          out.text = T(lang, "reason.superseded", { id: succ, kill: fmtCountdown(kill, lang) });
+          links.push({ jobId: succ });
+          break;
+        }
         out.text = T(lang, "reason.sigterm", { by: personLabel(row, c.by), kill: fmtCountdown(kill, lang) }); break;
       }
       case "paused": out.text = T(lang, "reason.paused"); out.actionable = true; break;
@@ -1301,7 +1308,13 @@
     else if (state === "lost") pill = T(lang, "recent.lost");
     else pill = stateWord(state, lang);
     var summary = job.summary || "";
-    if (state === "cancelled" && !job.started_at) {
+    // 같은 브랜치의 새 잡에 밀려 치워졌다(M5o) — 시작 전이든 도는 중이었든 그 문장이 답이다.
+    // 「시작 전 취소 · superseded 가」로 그리면 사람 이름 자리에 코드가 앉는다
+    var by = job.superseded_by;
+    var supersededBy = (typeof by === "number" && isFinite(by) && Math.floor(by) === by) ? by : null;
+    if (job.summary_code === "superseded") {
+      summary = outcomeText(job, lang) || summary;
+    } else if (state === "cancelled" && !job.started_at) {
       var who = job.cancelled_by ? personLabel(job, job.cancelled_by) : null;
       summary = T(lang, "recent.before_start") + (who ? " · " + T(lang, "recent.by", { who: who }) : "");
     } else if (state === "lost") {
@@ -1319,8 +1332,21 @@
       duration: fmtDuration(job.job_seconds),
       when: fmtClock(job.finished_at, tz, nowMs),
       summary: summary,
+      supersededBy: supersededBy,
       rerun: (state === "failed" || state === "timed_out") ? rerunCommand(job) : null
     };
+  }
+  /** 요약 글에서 `#N`(그 번호 그대로, 뒤에 숫자가 더 붙지 않은 것) 하나를 그 잡으로 가는 버튼으로 —
+      다른 잡 링크와 같은 `jlink` + `data-goto` 라 클릭 처리는 이미 있다. 나머지 글자는 escape. */
+  function supersededHtml(text, by) {
+    var t = String(text == null ? "" : text);
+    if (typeof by !== "number" || !isFinite(by)) return esc(t);
+    var re = new RegExp("#" + by + "(?![0-9])");
+    var m = re.exec(t);
+    if (!m) return esc(t);
+    return esc(t.slice(0, m.index))
+      + '<button type="button" class="jlink" data-goto="' + by + '">#' + by + "</button>"
+      + esc(t.slice(m.index + m[0].length));
   }
   // 셸에 붙여 넣는 값이라 안전한 문자만 그대로, 나머지는 작은따옴표로 감싼다(다른 사용자의 입력값·ref 다)
   function shellQuote(v) {
@@ -3145,7 +3171,7 @@
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     jobLinkHtml: jobLinkHtml, jobLinkLabel: jobLinkLabel, keyWithLinkHtml: keyWithLinkHtml,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
@@ -4337,7 +4363,7 @@
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
         // 요약은 두 줄로 못 박고(전문은 title), 재실행 명령은 그 아래 한 줄이다(말줄임 · 전문은 title)
-        '<span class="s sm">' + (l.summary ? '<span class="smt" data-cut="smt" title="' + esc(l.summary) + '"><b>' + esc(l.summary.split(" · ")[0]) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") + "</span>" : "") +
+        '<span class="s sm">' + (l.summary ? '<span class="smt" data-cut="smt" title="' + esc(l.summary) + '"><b>' + supersededHtml(l.summary.split(" · ")[0], l.supersededBy) + "</b>" + esc(l.summary.indexOf(" · ") > 0 ? l.summary.slice(l.summary.indexOf(" · ")) : "") + "</span>" : "") +
         (l.rerun ? '<button type="button" class="rerun" data-copy="' + esc(l.rerun) + '" title="' + esc(tr("row.copy") + " · " + l.rerun) + '">⧉ ' + esc(l.rerun) + "</button>" : "") + "</span>";
       var art = artifactsLine(job, L(), now());
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +

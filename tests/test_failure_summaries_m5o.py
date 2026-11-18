@@ -52,6 +52,9 @@ class _Job:
     """`outcome_for` 가 읽는 칸만 가진 잡."""
 
     cancel = None
+    cancelled_by = None  # 취소 요약이 밀려난 잡인지 볼 때 읽는다(M5o A `worker.cancel_outcome`)
+    summary_code = None
+    summary_args: dict = {}
     timeout_seconds = 60
 
 

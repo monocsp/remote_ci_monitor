@@ -54,7 +54,14 @@ from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
-from remote_ci_monitor.core.model import EXIT_UNKNOWN, PLACEMENT_CAPABLE, TERMINAL_STATES, Preset
+from remote_ci_monitor.core.model import (
+    CANCELLED,
+    EXIT_CODE_BY_STATE,
+    EXIT_UNKNOWN,
+    PLACEMENT_CAPABLE,
+    TERMINAL_STATES,
+    Preset,
+)
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     DASH,
@@ -458,6 +465,21 @@ def _cancel_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     )
 
 
+def _supersede_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `supersede` 행 — 프리셋이 supersede 를 켰는데 서버가
+    `cancel_requires_submission_token` 때문에 건너뛰면 warn(실패 아님, M5o §10). 아니면 없다."""
+    names = h.get("supersede_skipped_presets")
+    if not isinstance(names, list) or not names:
+        return None
+    shown = ", ".join(str(n) for n in names)
+    return (
+        "supersede",
+        None,
+        f"skipped for {shown} — cancel_requires_submission_token is on "
+        '(set supersede = "off" or turn the token rule off)',
+    )
+
+
 def _warn_if_client_too_old(client: Client) -> None:
     """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
     try:
@@ -585,6 +607,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 link=link,
                 link_label=link_label,
                 machine=getattr(args, "machine", None),
+                supersede=not getattr(args, "no_supersede", False),
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -621,6 +644,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     up = client.upload(job_id, snap.tar_path, progress=progress)
             except ClientError as e:
                 line.done()
+                # 업로드 중에 같은 브랜치의 새 잡에 밀렸으면 그것이 답이다(M5o A22) — 「upload
+                # failed」 로 3 을 내면 세션은 무슨 일인지 모른다. 409 본문이 말해 주므로 다시
+                # 조회하지 않는다(업로드 실패 자리에는 표시용 조회가 없다는 약속).
+                gone = {"state": e.body.get("state"), "superseded_by": e.body.get("superseded_by")}
+                note = superseded_line(gone, job_id) if e.status == 409 else None
+                if note:
+                    _err(note)
+                    _print_json({"job_id": job_id, **gone, "wait_exit_code": 2})
+                    return EXIT_CODE_BY_STATE[CANCELLED]
                 hint = " (retry with --no-cache)" if e.status in (400, 409) else ""
                 _err(f"upload failed: {e.message}{hint}")
                 return EXIT_UNKNOWN
@@ -702,6 +734,7 @@ def _run_git_ref(
             link=link,
             link_label=link_label,
             machine=getattr(args, "machine", None),
+            supersede=not getattr(args, "no_supersede", False),
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -830,6 +863,9 @@ def _wait(
     line.done()
     if reason:
         _err(reason)
+    note = superseded_line(job or {}, job_id)
+    if note:
+        _err(note)
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
     # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
@@ -860,6 +896,18 @@ def _wait(
             code = EXIT_DELIVERY
     _print_json(out)
     return code
+
+
+def superseded_line(job: dict[str, Any], job_id: int) -> str | None:
+    """`#O superseded by #N — rcm wait --job N` — 새 잡에 밀려 취소된 잡의 안내 한 줄(M5o 결정 114).
+
+    따라가지 않는다: 종료 코드는 O 의 것(2)이고, N 을 기다릴지는 부른 쪽이 정한다. 서버 문서의
+    값이 정수가 아니면 아무 말도 안 한다 — 번호를 지어내지 않는다.
+    """
+    by = job.get("superseded_by")
+    if job.get("state") != CANCELLED or not isinstance(by, int) or isinstance(by, bool):
+        return None
+    return f"#{job_id} superseded by #{by} — rcm wait --job {by}"
 
 
 def cmd_wait(args: argparse.Namespace) -> int:
@@ -2600,6 +2648,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             cancel_row = _cancel_row(h)
             if cancel_row is not None:
                 rows.append(cancel_row)
+            supersede_row = _supersede_row(h)
+            if supersede_row is not None:
+                rows.append(supersede_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
@@ -3271,6 +3322,11 @@ def build_parser() -> argparse.ArgumentParser:
         "build machine); check presets need a token, any other preset an admin token",
     )
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
+    run.add_argument(
+        "--no-supersede",
+        action="store_true",
+        help="keep older jobs of this branch even if the preset supersedes them",
+    )
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
     run.add_argument(
         "--exclude", action="append", metavar="PATTERN", help="extra .rcmignore pattern"

@@ -38,6 +38,7 @@ from remote_ci_monitor.core.model import (
     Preset,
 )
 from remote_ci_monitor.core.notify import NotifyRule
+from remote_ci_monitor.core.supersede import SUPERSEDE_MODES, SUPERSEDE_OFF
 
 ENV_PREFIX = "RCM"
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
@@ -407,6 +408,30 @@ def retention_warning(section: ServerSection) -> str | None:
     )
 
 
+def supersede_skipped_presets(cfg: ServerConfig) -> list[str]:
+    """`supersede` 를 켰지만 서버가 건너뛸 프리셋 이름(M5o §10).
+
+    `cancel_requires_submission_token = true` 인 서버에서는 세션이 남의 잡을 그 잡의 취소
+    비밀 없이 못 취소한다. supersede 는 토큰 **이름**만 보고 취소하므로 그 약속을 우회한다 —
+    그래서 그 설정이 켜져 있으면 supersede 는 아무것도 취소하지 않는다. 설정 오류는 아니다
+    (경고): 업그레이드만으로 서버가 안 뜨면 안 된다.
+    """
+    if not cfg.server.cancel_requires_submission_token:
+        return []
+    return [p.name for p in cfg.presets if p.supersede != SUPERSEDE_OFF]
+
+
+def supersede_warnings(cfg: ServerConfig) -> list[str]:
+    names = supersede_skipped_presets(cfg)
+    if not names:
+        return []
+    return [
+        f"warning: preset(s) {', '.join(names)} set supersede but [server] "
+        "cancel_requires_submission_token = true — supersede is skipped (it would cancel "
+        "another session's job without its cancel token)"
+    ]
+
+
 def admission_warnings(server: ServerSection, host: HostSection) -> list[str]:
     """게이트 상수가 서로 안 맞을 때의 **경고**(M5f §4.1). 오류가 아니다.
 
@@ -588,6 +613,7 @@ _PRESET_KEYS = {
     "checks",
     "check_ref",
     "sample",
+    "supersede",
 }
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
@@ -834,6 +860,11 @@ def parse_preset(raw: Any) -> Preset:
     sample = raw.get("sample")
     if sample is not None and not isinstance(sample, bool):
         raise ConfigError(f"{where}: sample must be true or false")
+    supersede = raw.get("supersede", SUPERSEDE_OFF)
+    if not isinstance(supersede, str) or supersede not in SUPERSEDE_MODES:
+        raise ConfigError(
+            f'{where}: supersede must be "off", "waiting" or "all", got {supersede!r}'
+        )
     return Preset(
         name=name,
         argv=argv,
@@ -858,6 +889,7 @@ def parse_preset(raw: Any) -> Preset:
         checks=checks,
         check_ref=check_ref,
         sample=sample,
+        supersede=supersede,
     )
 
 

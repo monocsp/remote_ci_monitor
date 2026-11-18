@@ -443,6 +443,7 @@
     "reason.times_expected": function (a) { return a.n + "× longer than usual"; },
     "reason.no_output_for": function (a) { return "no output for " + a.since; },
     "reason.sigterm": function (a) { return "SIGTERM sent by " + a.by + " · kill " + a.kill; },
+    "reason.superseded": function (a) { return "superseded by #" + a.id + " · kill " + a.kill; },
     "reason.paused": "paused",
     "reason.not_scheduled": "not scheduled",
     "reason.no_worker": "no worker",
@@ -649,6 +650,7 @@
     // ── 서버가 만든 요약(결정 37) ────────────────────────────────────────────
     "outcome.cancelled_before_start": "cancelled before start",
     "outcome.cancelled_by": function (a) { return "cancelled by " + a.by; },
+    "outcome.superseded": function (a) { return "superseded by #" + a.by; },
     "outcome.server_restarted": function (a) { return "server restarted " + a.at; },
     "outcome.server_restarted_during_upload": "server restarted during upload",
     "outcome.server_stopped_while_running": "server stopped while running",
@@ -1508,6 +1510,7 @@
     "reason.times_expected": function (a) { return "지난 실행보다 " + a.n + "배 오래"; },
     "reason.no_output_for": function (a) { return a.since + " 동안 출력 없음"; },
     "reason.sigterm": function (a) { return withJosa(a.by, "이/가") + " 종료를 요청함 · " + a.kill + " 뒤 강제 종료"; },
+    "reason.superseded": function (a) { return "새 작업 #" + a.id + " 에 밀려 종료 중 · " + a.kill + " 뒤 강제 종료"; },
     "reason.paused": "일시정지",
     "reason.not_scheduled": "시작되지 않음",
     "reason.no_worker": "워커 없음",
@@ -1699,6 +1702,7 @@
 
     "outcome.cancelled_before_start": "시작 전에 취소됨",
     "outcome.cancelled_by": function (a) { return withJosa(a.by, "이/가") + " 취소함"; },
+    "outcome.superseded": function (a) { return "새 작업 #" + a.by + " 에 밀려 취소됨"; },
     "outcome.server_restarted": function (a) { return a.at + " 서버 재시작"; },
     "outcome.server_restarted_during_upload": "업로드 중 서버 재시작",
     "outcome.server_stopped_while_running": "실행 중 서버가 멈춤",

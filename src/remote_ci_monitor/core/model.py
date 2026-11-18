@@ -189,6 +189,9 @@ class Preset:
     check_ref: str = "HEAD"
     #: 추정 표본에 넣나(M5n 결정 103). None 이면 설정을 읽을 때 정한다 — 점검 프리셋은 False
     sample: bool | None = None
+    #: 새 잡이 큐에 들어올 때 같은 브랜치의 옛 잡을 치우나(M5o 결정 109·110) —
+    #: `off`(기본, 오늘 그대로) · `waiting`(기다리는 잡만) · `all`(도는 잡도). `core/supersede.py`
+    supersede: str = "off"
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:

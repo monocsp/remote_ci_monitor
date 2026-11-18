@@ -638,8 +638,12 @@ class Client:
         link: str | None = None,
         link_label: str | None = None,
         machine: str | None = None,
+        supersede: bool = True,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
+        # 끌 때만 싣는다(M5o 결정 116) — 켜는 길은 없고, 옛 서버는 모르는 키를 무시한다
+        if not supersede:
+            body["supersede"] = False
         if requester_label:
             body["requester_label"] = requester_label
         if priority is not None:

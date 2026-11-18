@@ -1456,6 +1456,88 @@ never holds a cancel token, so with the key on its **Cancel** button is disabled
 token is an admin token, and the row says why. The token appears nowhere else: not in
 `/api/status`, not in job documents, logs, errors or URLs.
 
+## Superseding older jobs of the same branch
+
+When a session pushes again, the job for its previous commit usually stops mattering — only the
+newest code's gate result is worth a lane. A preset can let the server clear those older jobs
+itself, instead of each session finding, cancelling and resubmitting by hand:
+
+```toml
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+supersede = "all"        # "off" (default) | "waiting" | "all"
+```
+
+| value | when a new job of this preset enters the queue, an older matching job … |
+|---|---|
+| `"off"` (default) | is left alone — the behaviour before this key existed |
+| `"waiting"` | is cancelled if it is still waiting (`queued`, or still uploading); a running one finishes |
+| `"all"` | is cancelled whether it waits or runs. A running one stops the way any cancel does: SIGTERM, then the grace period; a remote worker hears it in its next heartbeat |
+
+The default is `off` on purpose: a deploy, upload or store preset must never lose a job quietly.
+Turn it on for presets where only the newest code matters (a gate, a test run). Use `waiting`
+when a long job's partial result is still worth seeing.
+
+**Which jobs count as "older jobs of the same branch".** At the moment the new job N enters the
+queue — when its upload finishes (tree) or when it is submitted (git_ref) — an older job O is
+cleared only if all of these hold:
+
+1. same preset, and that preset's `supersede` is not `off`;
+2. same source mode and repository (a tree job and a git_ref job never clear each other). **If
+   either side has no repository name** (a tree from a repository without an `origin` remote),
+   nothing is cleared — two unrelated local repositories can both be on `main`;
+3. same branch — `source.branch` for a tree job, `source.ref` for a git_ref job. **If either side
+   has no branch** (a detached tree), nothing is cleared;
+4. the same inputs (`rcm run test-narrow -f target=a` and `-f target=b` ask different questions);
+5. a different tree or commit (the same one joins instead);
+6. the same requester, and every joiner of O is that requester too — your push never cancels a
+   job someone else is waiting for;
+7. O is older (a smaller id) and in a state the value allows; a job already being cancelled is
+   left as it is;
+8. neither job was aimed at one machine (`--machine`, check jobs) — choosing a machine is a
+   different question, whichever side made the choice — and O waits in the same pool:
+   `--pool linux` and the default pool are different questions.
+
+A new job that is still uploading clears nothing, so a failed upload or a server restart in the
+middle leaves the old job queued. A reload that turns the key on applies to the next job that
+enters the queue; jobs already queued are not cleared retroactively.
+
+**What a cleared job leaves behind.** It ends `cancelled`, with `cancelled_by = "superseded"`,
+`summary_code = "superseded"`, `summary_args = {"by": N}` and the summary `superseded by #N`.
+The queue row and `GET /jobs/<id>` carry `superseded_by: N` (`null` for every other job); the
+web page draws `#N` as a link to the new job. Events and notifications are those of any cancel
+(a `[[notify]]` rule with `on = ["cancelled"]` hears it). The new job takes the higher priority
+of the two — if the old job had been bumped to `high`, so is the new one; it never goes down.
+A cleared job is not an estimate sample, like any cancelled job.
+
+`rcm wait --job 41` (and the wait in `rcm run`) ends with exit code **2**, as for any cancel, and
+prints one more line:
+
+```
+#41 superseded by #57 — rcm wait --job 57
+```
+
+`--json` carries `superseded_by: 57`. rcm does not follow the new job for you: the waiting script
+asked for job 41's result, and an exit code that quietly changed meaning would mislead it.
+
+**Servers that require the cancel token.** With `cancel_requires_submission_token = true` (see
+[who may cancel a job](#who-may-cancel-a-job)) a session cannot cancel another session's job
+without that job's cancel token, even under the same token name. Supersede only knows the token
+name, so on such a server it cancels nothing: the new job queues next to the old one, the server
+log says `job 57: supersede skipped: cancel_requires_submission_token`, and the start-up log,
+`rcm reload` and `rcm check` warn (`supersede  warn  skipped for gate — cancel_requires_submission_token
+is on`) without failing. Set the preset back to `supersede = "off"`, or turn the token rule off,
+to make the warning go away.
+
+**Joining a job that is being cancelled.** A submission never joins a job in `cancelling` — a job
+being stopped cannot give the joiner a result. The same preset, inputs and tree make a new job
+instead.
+
+**Opting out for one submission.** `rcm run gate --no-supersede` (API: `"supersede": false` in the
+`POST /jobs` body) clears nothing — for running a flaky test twice side by side. There is no way to
+turn it on from the submitting side: a preset set to `off` stays off.
+
 ## Client and worker files
 
 `client.toml` (mode 600 — a file that holds a token and is readable by anyone else is

@@ -148,6 +148,8 @@ CODES: dict[str, Renderer] = {
     # ── 취소 · 재시작 ──────────────────────────────────────────────────────
     "cancelled_before_start": lambda a: "cancelled before start",
     "cancelled_by": lambda a: f"cancelled by {_s(a, 'by')}",
+    # 같은 브랜치에 새 잡이 들어와 치워졌다(M5o 결정 114) — `by` 는 그 새 잡의 id(정수)
+    "superseded": lambda a: f"superseded by #{_s(a, 'by')}",
     "server_restarted": lambda a: f"server restarted {_s(a, 'at')}",
     "server_restarted_during_upload": lambda a: "server restarted during upload",
     "server_stopped_while_running": lambda a: "server stopped while running",

@@ -950,16 +950,26 @@ class RemoteWorkersMixin:
 
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:
         """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다."""
+        # 순환 import 를 피한다(위 finish 의 `outcome_for` 와 같다)
+        from remote_ci_monitor.worker import cancel_outcome
+
         slack = timedelta(seconds=2 * self.config.server.worker_heartbeat_seconds)
         for job in jobs:
             if job.state != CANCELLING or job.cancel is None or job.cancel.kill_at is None:
                 continue
             if now >= job.cancel.kill_at + slack:
+                # 새 잡에 밀려난 잡은 그 표시를 지킨다(M5o) — N 을 기억하는 자리가 요약뿐이다
+                text, code, args = cancel_outcome(job)
+                closing = (
+                    {"summary": text, "summary_code": code, "summary_args": args}
+                    if code == "superseded"
+                    else _finish_outcome("cancel_unconfirmed")
+                )
                 if self.store.finish(
                     job.id,
                     CANCELLED,
                     now=now,
-                    **_finish_outcome("cancel_unconfirmed"),
+                    **closing,
                     only_from=(CANCELLING,),
                 ):
                     self._drop_log_partial([job.id])

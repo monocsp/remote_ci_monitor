@@ -8,6 +8,21 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **A new push can clear your older job for the same branch.** A preset with
+  `supersede = "waiting"` or `"all"` lets a new job, when it enters the queue, cancel the older
+  jobs that ask the same question: same preset, repository, branch and inputs, a different tree or
+  commit, the same requester and no one else joined. `waiting` clears only jobs that have not
+  started; `all` also stops a running one the usual way (SIGTERM, grace, a remote worker hears it
+  in its heartbeat). The cleared job ends `cancelled` with the summary `superseded by #N`, the
+  new job takes over a higher priority, and `rcm wait` on the old job exits 2 with one more line,
+  `#41 superseded by #57 — rcm wait --job 57`. Queue rows and `GET /jobs/<id>` gain
+  `superseded_by` (`schema_version` unchanged); the web page links `#N`. `rcm run --no-supersede`
+  (API `"supersede": false`) keeps the older job for one submission. The default is `"off"`, so
+  nothing changes until a preset turns it on. A job with no repository name or aimed at one
+  machine (`--machine`) neither clears nor is cleared, and on a server with
+  `cancel_requires_submission_token = true` supersede is skipped with a warning in the log and in
+  `rcm check` (`/api/health` gains `supersede_skipped_presets`).
+  ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
 - **Presets can live in their own files.** `include = ["presets.myproject.toml"]` at the top of
   `server.toml` brings in more `[[presets]]` — relative to the `server.toml` folder, or an absolute
   or `~` path — instead of pasting them in. An included file may hold presets only (`[server]`,
@@ -44,6 +59,10 @@ of a key bumps that number and is listed here.
   that already names it. ([#202](https://github.com/monocsp/remote_ci_monitor/pull/202))
 
 ### Fixed
+- **A submission no longer joins a job that is being cancelled.** The same preset, inputs and
+  tree used to join a job in `cancelling`, so the joiner's `rcm wait` ended with exit 2 for a
+  cancel that was not theirs. Such a submission now creates a new job.
+  ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
 - **Job links no longer point at `0.0.0.0`.** With `public_url` empty and `bind = "0.0.0.0"` (or
   `::`), `RCM_URL` and the webhook's job URL were `http://0.0.0.0:8787/...`, which no other
   computer can open. They now use `http://<host>.local:<port>` when the server advertises itself
