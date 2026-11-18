@@ -125,6 +125,32 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
+    Mutant(
+        # 봐주기가 없다 — claim 직전에 찍힌 heartbeat 목록이 방금 넘긴 잡을 lost 로 닫는다
+        name="heartbeat-spare-removed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="if j.id not in set(known) and j.id not in spared]",
+        new="if j.id not in set(known)]",
+        tests=("tests/test_worker_api.py",),
+    ),
+    Mutant(
+        # claim 커밋이 락 밖이다 — 커밋과 기록 사이에 낀 heartbeat 이 다시 lost 를 만든다
+        name="heartbeat-spare-claim-outside-lock",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="""                with self._fresh_claims_lock:
+                    job = self.store.claim(
+                        lane, now, pool=pool, worker_name=name, claimant=claimant
+                    )
+""",
+        new=(
+            "                job = self.store.claim(\n"
+            "                    lane, now, pool=pool, worker_name=name, claimant=claimant\n"
+            "                )\n"
+            "                with self._fresh_claims_lock:\n"
+        ),
+        tests=("tests/test_worker_api.py",),
+    ),
     # ── M5n — 머신의 능력과 배치(docs/m5n-workplan.md §15) ──
     Mutant(
         # 세대가 다른 보고를 믿는다 — reload 로 바뀐 프리셋을 옛 보고로 판정해 집는다(결정 91)
