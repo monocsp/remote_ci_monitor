@@ -8,6 +8,11 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Fixed
+- **Queue rows no longer jump in the last minutes before midnight.** When a waiting job's
+  arrival time fell on the next day, the web queue's arrival column wrote it with the date
+  (`Nov 19 · 00:02 · in 12m 24s`) on one line and grew past its fixed width; every update elsewhere
+  in the table then re-divided the column widths and the rows shifted. The clock and the relative
+  time now wrap onto separate lines inside the column instead.
 - **The server no longer drops connections that arrive in a burst.** Its listen backlog was the
   standard library's 5, so a sixth connection arriving before the server accepted the first ones
   could be reset on macOS (the client saw a broken pipe or a connection reset). Workers, web

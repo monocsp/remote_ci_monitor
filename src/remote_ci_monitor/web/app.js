@@ -3829,7 +3829,7 @@
     if (bar) elapsedCell += bar;
     var eta = etaText(row, tz(), now(), L());
     var conf = confidenceBadge(est, L());
-    var etaCell = '<span class="eta">' + esc(eta.clock) + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
+    var etaCell = '<span class="eta"><span class="clk">' + esc(eta.clock) + "</span>" + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
     if (est.overdue && !est.stuck) etaCell = '<span class="eta">' + DASH + '</span><br><span class="conf over">' + esc(tr("eta.overdue")) + "</span>";
     var source = sourceHtml(row, L(), false);
     // 칸마다 번역된 라벨(Codex 가독성 검토 4번) — 폰에서 머리줄이 사라지면 긴 값들이 한 덩어리로
