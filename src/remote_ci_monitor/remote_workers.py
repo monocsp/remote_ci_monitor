@@ -257,6 +257,12 @@ class RemoteWorkersMixin:
         self._worker_samples: dict[str, HostSample] = {}
         self._log_partial: dict[int, bytes] = {}
         self._remote_lock = threading.Lock()
+        # 워커마다 「직전 heartbeat 뒤에 넘긴 잡」. heartbeat 의 `jobs` 는 워커가 HTTP 호출 **전에**
+        # 찍은 목록이라 그 사이 커밋된 claim 이 빠져 있을 수 있다 — 이 잡들은 한 번 봐준다.
+        # claim 커밋 + 기록, heartbeat 의 조회 + 꺼내기를 같은 락으로 묶어야 둘 사이에 끼는
+        # heartbeat 이 없다(커밋만 보이고 기록은 안 보이면 다시 lost 다)
+        self._fresh_claims: dict[str, set[int]] = {}
+        self._fresh_claims_lock = threading.Lock()
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 
@@ -389,6 +395,8 @@ class RemoteWorkersMixin:
         now = self.now_fn()
         # 등록 = 새 프로세스. 옛 프로세스가 잡고 있던 잡은 아무도 이어 받지 않는다(재현성)
         text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
+        with self._fresh_claims_lock:
+            self._fresh_claims.pop(token.name, None)  # 옛 프로세스에 넘긴 잡은 아래에서 다 닫힌다
         lost = self.store.mark_lost_for_worker(
             token.name, now, text, summary_code=code, summary_args=args
         )
@@ -529,12 +537,17 @@ class RemoteWorkersMixin:
             if self.store.get_paused() is not None:
                 return None, None
             claimant = self.claimant_for(name, pool, now)  # type: ignore[attr-defined]
-            job, hold = self.admit(
-                lane,
-                name,
-                now,
-                lambda: self.store.claim(lane, now, pool=pool, worker_name=name, claimant=claimant),
-            )
+
+            def claim_and_remember():
+                with self._fresh_claims_lock:
+                    job = self.store.claim(
+                        lane, now, pool=pool, worker_name=name, claimant=claimant
+                    )
+                    if job is not None:
+                        self._fresh_claims.setdefault(name, set()).add(job.id)
+                    return job
+
+            job, hold = self.admit(lane, name, now, claim_and_remember)
         except LaneBusy as e:
             raise _api_error(409, str(e)) from e
         except sqlite3.OperationalError as e:
@@ -894,14 +907,18 @@ class RemoteWorkersMixin:
         self._registered(token)
         now = self.now_fn()
         self.store.touch_worker(token.name, now)
-        active = self.store.jobs_of_worker(token.name)
+        with self._fresh_claims_lock:
+            active = self.store.jobs_of_worker(token.name)
+            # `jobs` 를 안 보내는 heartbeat 도 「직전」으로 센다 — 워커의 heartbeat 은 한 스레드에서
+            # 차례로 돌아서, 다음 목록은 이 응답을 받은 **뒤에** 찍힌다
+            spared = self._fresh_claims.pop(token.name, set())
         known = body.get("jobs")
         if known is not None:
             if not isinstance(known, list) or any(
                 isinstance(x, bool) or not isinstance(x, int) for x in known
             ):
                 raise _api_error(400, "jobs must be a list of job ids")
-            forgotten = [j for j in active if j.id not in set(known)]
+            forgotten = [j for j in active if j.id not in set(known) and j.id not in spared]
             for job in forgotten:
                 text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
                 self.store.finish(

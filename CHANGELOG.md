@@ -7,6 +7,14 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A job a remote worker had just claimed is no longer marked `lost`.** The worker takes its
+  job list for a heartbeat before sending it; when a lane's claim landed on the server in that
+  moment, the heartbeat arrived without the new job and the server closed it as `worker <name>
+  restarted without the job`. A job handed out since that worker's previous heartbeat now gets
+  one more heartbeat to show up, so a job a worker really forgot is closed one heartbeat (about
+  5 s) later than before. Seen as an intermittent CI failure since 2026-10-01.
+
 ## [0.5.0] - 2026-11-17
 
 ### Breaking changes

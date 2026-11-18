@@ -1019,7 +1019,10 @@ downloads the snapshot (or fetches the `git_ref` from its own `[[repos]]` — ke
 markers, and reports the outcome. `rcm top` and the web header show it as `build-02/1 busy #511`;
 its host sample appears under that pool. If the server hears no heartbeat for
 `worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
-(`worker build-02 unreachable for 61s`) and are not resumed — resubmit. Stopping the worker
+(`worker build-02 unreachable for 61s`) and are not resumed — resubmit. Each heartbeat lists
+the jobs the worker is running; a job the server handed it that is missing becomes `lost`
+(`worker build-02 restarted without the job`), except a job handed out since the worker's
+previous heartbeat, which gets one more heartbeat to show up. Stopping the worker
 reports its running jobs as `lost` (`worker stopped`). `worker.toml` keys: `server` (a URL, or
 `"auto"`), `server_name`, `token` (or the env var), `pool`, `lanes`, `name`, `accept_any`,
 `data_dir`, `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
