@@ -220,3 +220,38 @@ def test_the_check_row_passes_when_nothing_is_missing():
 def test_an_older_server_draws_no_row_at_all(health):
     """없는 키를 FAIL 로 그리면 업그레이드 안 된 서버가 고장으로 보인다."""
     assert _cli()._service_preset_env_row(health) is None
+
+
+# ── 같은 판정을 하는 나머지 두 자리 — 로컬 능력 측정 · 원격 워커 측정(M5n) ──────────────
+
+
+def test_the_local_capability_report_does_not_list_a_name_the_preset_env_sets(tmp_dir):
+    from remote_ci_monitor.capabilities import LOCAL
+
+    app = _app(tmp_dir, PRESET + '[presets.env]\nJAVA_HOME = "/jdk"\n')
+    app.measure_capabilities({"PATH": "/bin:/usr/bin"})
+    report = app.report_of(LOCAL)
+    assert report is not None and report.presets["gate"].missing_passthrough == ()
+
+
+def test_a_remote_worker_does_not_list_a_name_the_preset_env_sets():
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.config import WorkerConfig
+
+    cfg = WorkerConfig(server="http://127.0.0.1:1", token="t", pool="mbp", lanes=1)
+    worker = rw.RemoteWorker(cfg, client=object(), log=lambda _m: None, environ={"PATH": "/bin"})
+    body = worker.measure(
+        {
+            "generation": "1:1",
+            "probes": [],
+            "presets": [
+                {
+                    "name": "gate",
+                    "env_passthrough": ["PATH", "JAVA_HOME", "ANDROID_HOME"],
+                    "env": {"JAVA_HOME": "/jdk"},
+                    "requires": [],
+                }
+            ],
+        }
+    )
+    assert body["presets"]["gate"]["missing_passthrough"] == ["ANDROID_HOME"]

@@ -12,7 +12,8 @@ of a key bumps that number and is listed here.
   `JAVA_HOME` in `env_passthrough` and also sets it in `[presets.env]` (the fix this row
   recommends) was still drawn as `JAVA_HOME unset` in `service preset tools`, and the server's
   start line said the same, although the job received the preset's value. A name the preset sets
-  now counts as present, on the server and on remote workers alike.
+  now counts as present on the server, and on a remote worker once that worker runs this
+  version (an older worker keeps reporting the name; it is shown, and never blocks placement).
 
 ## [0.6.0] - 2026-11-18
 
