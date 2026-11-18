@@ -1229,6 +1229,82 @@ def test_heartbeat_without_the_running_job_marks_it_lost(srv):
     assert [r["id"] for r in srv.pools()["default"]["recent"]] == [a, b]  # 최근 종료순
 
 
+def test_heartbeat_spares_a_job_claimed_since_the_last_heartbeat(srv):
+    """경쟁: 워커는 heartbeat 에 실을 잡 목록을 HTTP 호출 **전에** 찍는다. 그 사이 레인의 claim 이
+    서버에서 커밋되면 heartbeat 은 방금 넘긴 잡 없이 도착한다 — 그걸 「잊었다」로 읽으면 멀쩡한 잡이
+    `lost · restarted without the job` 이 된다(CI e2e 가 10-01 · 11-17 에 이걸로 빨갰다).
+
+    규칙: 이 워커의 **직전 heartbeat 뒤에** 넘긴 잡은 이번 heartbeat 에서 빠져 있어도 봐준다.
+    다음 heartbeat 에도 없으면 그때 lost — 진짜로 잊은 잡은 heartbeat 한 번 늦게 닫힌다."""
+    srv.registered("build-02")
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    a = srv.queued_job()
+    assert srv.claimed("build-02", 1) == a
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200  # claim 전에 찍힌 목록
+    assert srv.store.get_job(a).state == RUNNING
+    assert srv.heartbeat("build-02", jobs=[a])[0] == 200  # 이제 안다
+    assert srv.store.get_job(a).state == RUNNING
+    srv.clock.advance(5)
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200  # 직전 heartbeat 전에 넘긴 잡 — 잊었다
+    j = srv.store.get_job(a)
+    assert j.state == LOST and j.summary == "worker build-02 restarted without the job"
+
+
+def test_a_spared_job_still_missing_on_the_next_heartbeat_is_lost(srv):
+    """봐주는 건 한 번뿐이다 — claim 응답이 워커에 끝내 안 닿은 잡은 다음 heartbeat 에 닫힌다.
+    `jobs` 를 안 보내는 heartbeat(옛 워커)도 「직전 heartbeat」로 센다."""
+    srv.registered("build-02")
+    a = srv.queued_job()
+    assert srv.claimed("build-02", 1) == a
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.store.get_job(a).state == RUNNING
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.store.get_job(a).state == LOST
+    b = srv.queued_job()
+    assert srv.claimed("build-02", 1) == b
+    assert srv.heartbeat("build-02")[0] == 200  # jobs 없음 — 조정은 안 하지만 직전으로 센다
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.store.get_job(b).state == LOST
+
+
+def test_a_heartbeat_landing_between_the_claim_commit_and_its_record_waits(srv, monkeypatch):
+    """claim 커밋과 「넘긴 잡」 기록 사이에 heartbeat 이 끼면, 커밋된 잡은 보이고 기록은 안 보여서
+    다시 lost 다. 둘은 같은 락 안에 있어야 한다 — 여기서는 커밋 직후에 heartbeat 을 쏘고, 그게
+    claim 이 끝날 때까지 기다리는지 본다."""
+    srv.registered("build-02")
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    a = srv.queued_job()
+    real_claim = srv.store.claim
+    beat: dict[str, Any] = {}
+
+    def claim_then_heartbeat(*args: Any, **kw: Any):
+        job = real_claim(*args, **kw)
+        t = threading.Thread(
+            target=lambda: beat.update(status=srv.heartbeat("build-02", jobs=[])[0])
+        )
+        t.start()
+        t.join(0.5)  # 락이 있으면 claim 이 끝날 때까지 못 들어온다
+        beat["thread"] = t
+        return job
+
+    monkeypatch.setattr(srv.store, "claim", claim_then_heartbeat)
+    assert srv.claimed("build-02", 1) == a
+    beat["thread"].join(10)
+    assert beat["status"] == 200
+    assert srv.store.get_job(a).state == RUNNING
+
+
+def test_the_spare_is_per_worker(srv):
+    """다른 워커의 heartbeat 은 이 워커의 「직전」이 아니다."""
+    srv.registered("build-02")
+    srv.registered("build-03")
+    a = srv.queued_job()
+    assert srv.claimed("build-02", 1) == a
+    assert srv.heartbeat("build-03", jobs=[])[0] == 200
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.store.get_job(a).state == RUNNING
+
+
 def test_heartbeat_host_sample_becomes_the_pools_hosts_entry(srv):
     """§3·§6 호스트 표본: `host_sample` 은 그 풀의 `hosts[]` 항목 — `name` = 워커 이름,
     `source = "worker"`, `sampled_at` = **서버 시각**(표본의 시각·이름·source 는 덮어쓴다).
