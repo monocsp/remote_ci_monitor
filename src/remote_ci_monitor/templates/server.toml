@@ -2,6 +2,10 @@
 # Copy to ~/.config/rcm/server.toml (or ./rcm.toml) on the build machine and edit.
 # Every command the server can run is a preset below; sessions send a preset name + inputs only.
 
+# Presets can also live in their own files (presets only, owned by you, chmod go-w). Paths are
+# relative to this file's folder. Whoever can change such a file decides what the server runs.
+# include = ["presets.myproject.toml"]
+
 [server]
 bind = "127.0.0.1"          # Set your Tailscale IP or 0.0.0.0 to accept remote sessions.
 port = 8787
@@ -48,6 +52,8 @@ artifact_transfer_timeout_seconds = 300     # one upload or download
 max_concurrent_artifact_transfers = 2       # over this, the server answers 503 instead of waiting
 # advertise = true                  # mDNS/DNS-SD: sessions on the same network find this server without an address
 #                                   # (default: on when bind is not loopback). advertise_name = "macmini" to rename
+# public_url = "http://macmini.tail1234.ts.net:8787"   # start of job links in notifications and rcm run.
+#                                   # Empty: a specific bind, else <host>.local (advertise on), else <hostname>
 # cancel_requires_submission_token = false   # true: only the submission's cancel token (rcm run keeps it in
 #                                   # ~/.local/state/rcm/submissions.json) or an admin token cancels a job.
 #                                   # Clients before 0.2.7 then cannot cancel — see docs/configuration.md
@@ -142,7 +148,9 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   env_passthrough (default: PATH HOME LANG) · [presets.env] · requires (tools the job must find in
 #   its own environment before it starts — names or absolute paths; missing → failed, tool_missing)
 #   · placement ("pool" | "any-capable") · concurrency_scope ("pool" | "host" | "global") · checks
-#   (check presets that must pass on a machine first) · check_ref · sample (false: not in medians).
+#   (check presets that must pass on a machine first) · check_ref · sample (false: not in medians)
+#   · supersede ("off" | "waiting" | "all" — clear older jobs of the same branch when a new one
+#   queues; default "off"). See docs/configuration.md, "Superseding older jobs of the same branch".
 #   Machines and placement: docs/configuration.md, "Which machine runs a job".
 # Input keys: name · type = "choice" | "string" | "int" | "bool" · choices (choice) · pattern (string)
 #   · default · description.
@@ -169,6 +177,8 @@ expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back
 # artifacts_on = "failure"                # "always" (default) | "failure" — when to collect
+# supersede = "all"                       # "off" (default) | "waiting" | "all" — a new job of the same
+#                                         # branch, inputs and requester clears the older one
 # requires = ["fvm", "gitleaks"]          # looked up in the job's PATH right before it starts;
 #                                         # missing → the job fails with tool_missing, nothing runs
 env_passthrough = ["PATH", "HOME", "LANG"]

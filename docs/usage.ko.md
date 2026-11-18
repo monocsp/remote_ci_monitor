@@ -177,6 +177,10 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    rcm 은 짐작하지 않고 `last step <이름>` 만 보여 준다 — 끝났을 때 어디였는지를 말할 뿐 원인을
    주장하지 않는다. 여러 개를 병렬로 돌리고 로그를 나중에 되재생하는 스크립트에서는, 이 규칙이
    없으면 마지막으로 되재생된 머리말이 앞에서 난 실패를 뒤집어쓴다.
+   스크립트가 자기 요약을 찍지 않았으면 요약은 종료 코드만 말하지 않고 스크립트가 밝힌 첫 이름을
+   말한다: `test: x_test.dart +1 more (exit 1)`, 단계만 밝혔으면 `analyze failed (exit 1)`.
+   같은 줄이 큐 · `rcm wait` · 알림 훅으로 간다
+   ([무엇이 실패했는지 말하기](configuration.md#saying-what-failed)).
 2. **다음에 볼 곳.** 0 이 아닌 종료는 항상 `log: rcm logs <N>` 과 작업 URL 을 찍는다. 3(모름)도
    마찬가지다 — 모를수록 로그가 필요하다. 그 아래에는 스크립트가 `::rcm::fail::<이름>` 으로
    찍은 이름마다 한 줄씩, 같은 프리셋의 최근 실행에서 몇 번 빨갰는지가 붙는다. 왔다 갔다 하면
@@ -221,6 +225,21 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
 2. 프리셋 · 입력 · 트리가 같은 두 번째 제출은 그 작업에 **합류**한다. 두 번 돌지 않고, 두 번
    기다리지 않고, 결과는 둘 다 받는다. `--no-join` 으로 끌 수 있고, 합류한 작업을 취소하면 합류만
    빠진다.
+
+### 다시 push 했을 때
+
+프리셋이 `supersede` 를 켜 두었으면([설정](configuration.md#superseding-older-jobs-of-the-same-branch)),
+같은 브랜치 · 프리셋 · 입력의 새 작업이 큐에 들어오는 순간 내 옛 작업을 치운다 — 찾아서 직접
+취소할 필요가 없다. 옛 작업은 `cancelled` 로 끝나고 요약은 `superseded by #57` 이다. 그 작업을
+기다리던 세션은 종료 코드 2 와 함께 다음에 볼 곳을 말하는 한 줄을 받는다.
+
+```
+$ rcm wait --job 41
+#41 superseded by #57 — rcm wait --job 57
+```
+
+치우는 것은 내 작업뿐이고, 다른 사람이 합류해 있으면 치우지 않는다. `rcm run --no-supersede` 는
+이번 제출만 옛 작업을 그대로 둔다(흔들리는 테스트를 두 판 나란히 볼 때).
 
 ## 8. 파일을 돌려받기
 
@@ -431,7 +450,12 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 
 ## 12. 그다음
 
-- 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md).
+- 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md). 프로젝트의 프리셋은
+  `server.toml` 이 `include` 로 들이는 따로 된 파일에 둘 수 있다
+  ([presets in their own file](configuration.md#presets-in-their-own-file-include)).
+- 재시작 없이 프리셋을 바꾼다: 파일을 고치고 `rcm reload --dry-run` 으로 어느 프리셋의 어느 키가
+  바뀔지 본 다음(이름만, 값은 안 나온다) `rcm reload` 로 적용한다
+  ([change a preset without a restart](operating.md#change-a-preset-without-a-restart)).
 - 작업을 둘씩 돌린다. `[server] lanes = 2` 로 두면 레인 2 는 머신에 CPU 여유가 있을 때만 작업으므로
   올려 봐도 안전하다. 큐가 `부하로 대기` 라고 하면 머신이 꽉 찼다는 뜻이다:
   [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).

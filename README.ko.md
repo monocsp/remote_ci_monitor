@@ -175,7 +175,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 
 | 명령 | 무엇을 보여 주나 |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-supersede` 는 프리셋이 치우는 같은 브랜치의 내 옛 작업을 이번엔 남겨 두기([옛 작업 치우기](docs/configuration.md#superseding-older-jobs-of-the-same-branch)), `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 작업 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 작업은 대기 대신 상태와 경과 |
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
@@ -187,7 +187,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 | `rcm machines [--json] [--machine ID]` | 잡을 돌리는 머신 전부: 호스트 · 풀 · 레인 · 환경 지문(`xcode 27.2 · flutter 3.47.8`) · 돌릴 수 있는 프리셋 수와 나머지의 사유. `--machine` 은 한 머신의 프리셋별 판정과 점검([머신](docs/configuration.md#which-machine-runs-a-job)) |
 | `rcm recheck MACHINE [CHECK…]` | 머신을 고친 뒤 그 머신의 점검 프리셋을 다시 건다(관리자) |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류만 취소된다) · 큐 일시정지·재개(관리자) |
-| `rcm reload` | 설정 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자) |
+| `rcm reload [--dry-run]` | 설정 파일과 `include` 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자). `--dry-run` 은 바뀔 것의 이름만 보이고 아무것도 안 바꾼다 |
 | `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | 스토어 버전 드래프트(관리자). 버전 인자가 없으면 `new` 는 **이름만** 묻고 서버의 힌트를 기본값으로 준다 — 엔터는 힌트, `-` 는 그 스토어를 건너뛴다, `--yes` 는 둘 다 힌트로. `open` 은 버전 페이지의 주소를 찍는다 |
 

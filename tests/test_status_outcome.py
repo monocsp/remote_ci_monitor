@@ -161,6 +161,7 @@ NEW_RECENT = frozenset(
         "target_worker",
         "host_key",
         "worker",
+        "superseded_by",  # M5o
     }
 )
 NEW_ROW = frozenset(
@@ -175,6 +176,7 @@ NEW_ROW = frozenset(
         "concurrency_scope",
         "host_key",
         "placement_detail",
+        "superseded_by",  # M5o
     }
 )
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)

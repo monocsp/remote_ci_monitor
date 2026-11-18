@@ -140,6 +140,26 @@ still **queued** is matched when a lane claims it, so it runs under the edited d
 A reload also re-measures the job environment, so `rcm check`'s `service preset tools` row
 answers for the presets you just loaded rather than for the ones the server started with.
 
+A reload re-reads the files `server.toml` brings in with `include` too
+([presets in their own file](configuration.md#presets-in-their-own-file-include)). To see what a
+reload would apply before applying it:
+
+```
+$ rcm reload --dry-run
+would reload /Users/build/.config/rcm/server.toml (+ presets.dolomood.toml)
+  presets changed: gate (argv, timeout_seconds), test-narrow (env)
+  presets added:   game-web-smoke
+  nothing applied (--dry-run)
+```
+
+The server runs the same load and the same refusals as a real reload and stops before swapping
+anything in: no generation is started, no worker re-measures. For a changed preset it names the
+**keys** that differ, never their values — `env` and `argv` may hold things that should not leave
+the machine. `--json` prints the response (`dry_run: true`, `presets_changed_keys: {"gate":
+["argv", "timeout_seconds"]}`, …). An older server would ignore the request body and apply the
+reload, so `rcm reload --dry-run` asks the server first and sends nothing to a server that does
+not know dry runs.
+
 Removing a preset is the one edit to think about. A queued job whose preset is gone does not
 wait — it fails at claim with `preset_missing`, the same way it does after a restart. Reload the
 removal while jobs are queued against it and you fail them; check `rcm top` first, as you would

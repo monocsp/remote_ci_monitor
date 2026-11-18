@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 #: 코드 → 영어 문장을 만드는 함수. 인자는 `summary_args` 의 원시 값이다.
@@ -70,6 +70,33 @@ def _dur(n: Any) -> str:
     return f"{v}s"
 
 
+def _exit(a: dict[str, Any]) -> str:
+    """`exit N` — 실패 이름과 스텝을 알면 그것을 먼저 말한다(M5o 결정 117·118).
+
+    `test: x_test.dart +1 more (exit 1)` · `analyze failed (exit 1)` · `exit 1`. 이름이 잘렸으면
+    (`more_truncated`) 수 뒤에 `+` 를 붙여 정확한 수를 주장하지 않는다.
+    """
+    code = f"exit {_s(a, 'code')}"
+    step, first = a.get("step"), a.get("first")
+    if first:
+        head = f"{step}: {first}" if step else str(first)
+        more = a.get("more")
+        if more or a.get("more_truncated"):
+            plus = "+" if a.get("more_truncated") else ""
+            head += f" +{more or 0}{plus} more"
+        return f"{head} ({code})"
+    if step:
+        return f"{step} failed ({code})"
+    return code
+
+
+def _timed_out(a: dict[str, Any]) -> str:
+    """`limit 40m (in test)` — 끝났을 때 열려 있던 스텝을 **인과 없이** 붙인다(`in`)."""
+    text = _limit(a.get("seconds"))
+    step = a.get("last_step")
+    return f"{text} (in {step})" if step else text
+
+
 def _s(args: dict[str, Any], key: str, default: str = "?") -> str:
     v = args.get(key)
     return default if v is None else str(v)
@@ -121,6 +148,8 @@ CODES: dict[str, Renderer] = {
     # ── 취소 · 재시작 ──────────────────────────────────────────────────────
     "cancelled_before_start": lambda a: "cancelled before start",
     "cancelled_by": lambda a: f"cancelled by {_s(a, 'by')}",
+    # 같은 브랜치에 새 잡이 들어와 치워졌다(M5o 결정 114) — `by` 는 그 새 잡의 id(정수)
+    "superseded": lambda a: f"superseded by #{_s(a, 'by')}",
     "server_restarted": lambda a: f"server restarted {_s(a, 'at')}",
     "server_restarted_during_upload": lambda a: "server restarted during upload",
     "server_stopped_while_running": lambda a: "server stopped while running",
@@ -133,8 +162,8 @@ CODES: dict[str, Renderer] = {
         f"snapshot rejected: {_s(a, 'count')} blob(s) missing in upload"
     ),
     # ── 실행 결과 ──────────────────────────────────────────────────────────
-    "exit_code": lambda a: f"exit {_s(a, 'code')}",
-    "timed_out": lambda a: _limit(a.get("seconds")),
+    "exit_code": _exit,
+    "timed_out": _timed_out,
     # ── 프로세스가 뜨기 전에 끝난 잡(`PREFLIGHT_CODES`) ────────────────────
     # 고칠 곳이 다르면 코드도 다르다. 스냅샷을 고칠 일 · 레포 설정을 되돌릴 일 · 프리셋 argv 를
     # 고칠 일 · 디스크를 볼 일은 서로 다른 사람의 서로 다른 조치다. 한 코드로 묶으면 화면은
@@ -249,6 +278,24 @@ PREFLIGHT_ARGS: dict[str, dict[str, str | tuple[str, ...]]] = {
     "workspace_failed": {"error": "class"},
 }
 
+#: 실행 결과 요약의 인자(M5o 결정 117·118). 표의 뜻은 `PREFLIGHT_ARGS` 와 같다 — 여기 없는 키는
+#: 버리고, 모양이 틀린 값도 버린다. 이 둘은 서버가 마커로 **스스로** 만드는 코드라서 워커가 finish
+#: 로 보낼 수는 없다(`clean_args(strict=True)` 는 여전히 시작 전 실패의 코드만 받는다).
+#:
+#: `label` 은 스텝 이름(제어 · 보이지 않는 문자를 지우고 80자), `unit` 은 실패 이름 — 경로면
+#: **마지막 조각**만 80자. 스텝 이름은 이미 `/api/status` 의 진행 칸에 공개되고, 실패 이름의 전체는
+#: `GET /jobs/<id>` 의 `failures[]` 에 있다. 요약 한 줄이 싣는 것은 그중 사람이 알아볼 만큼뿐이다.
+RESULT_ARGS: dict[str, dict[str, str | tuple[str, ...]]] = {
+    "exit_code": {
+        "code": "int",
+        "step": "label",
+        "first": "unit",
+        "more": "count",
+        "more_truncated": "flag",
+    },
+    "timed_out": {"seconds": "int", "last_step": "label"},
+}
+
 #: 이 인자가 없으면 문장이 `?` 밖에 못 말한다 — 신뢰 경계에서는 400 이다(워커가 코드만 보내고
 #: 인자를 빠뜨리면 로컬 레인이 남기는 행과 달라진다). 표가 맞는지는 시험이 `render(code, {})` 에
 #: `?` 가 남는지로 되짚는다 — 손으로 적은 목록은 생산자를 안 보기 때문이다.
@@ -266,6 +313,8 @@ PREFLIGHT_REQUIRED: dict[str, str] = {
 #: 이름 하나의 최대 길이. 길이는 화면이 아니라 여기서 막는다 — 렌더러는 자를 줄 모른다.
 MAX_ARG = 120
 MAX_MEMBER = 60
+#: 요약에 싣는 스텝 · 실패 이름 하나의 최대 길이(M5o 결정 118). 둘이 다 차도 문장은 200자 안이다.
+MAX_FAIL_ARG = 80
 
 #: 예외 클래스 이름 꼴(`OSError` · `FileNotFoundError`)과 이 모듈이 쓰는 소스 리터럴만.
 #: 밑줄·하이픈·점을 **일부러** 뺐다: 그것까지 허용하면 `internal-runner-ghp_0123…` 같은 값이
@@ -276,7 +325,10 @@ _SHA_RE = re.compile(r"[0-9a-f]{4,64}\Z")
 _GIT_OP_RE = re.compile(r"git [a-z-]{1,12}\Z")
 #: 보이지 않거나 글자 방향을 뒤집는 문자. 멤버 이름은 사람이 읽는 자리에 그대로 찍히므로 여기서
 #: 지운다 — bidi 문자 하나면 화면의 파일 이름이 실제와 반대로 보인다.
-_INVISIBLE_RE = re.compile("[\x00-\x1f\x7f؜​-‏ -‮⁠-⁤⁦-⁩﻿]")
+#: C1 제어 문자(U+0080–U+009F)도 지운다 — NEL(U+0085)은 터미널에서 줄을 나눈다(M5o 검증 라운드 1).
+_INVISIBLE_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 class OutcomeError(ValueError):
@@ -331,6 +383,40 @@ def _clean_int(v: Any) -> int:
     return v
 
 
+def _clean_label(v: Any) -> str:
+    """스텝 이름 → 한 줄. 서로게이트 · 제어 · 보이지 않는 문자를 지우고 80자. 비면 거절."""
+    s = "".join(ch for ch in str(v) if not 0xD800 <= ord(ch) <= 0xDFFF)
+    s = _INVISIBLE_RE.sub("", s).strip()[:MAX_FAIL_ARG].strip()
+    if not s:
+        raise OutcomeError("label has no usable text")
+    return s
+
+
+def label_text(v: Any) -> str | None:
+    """스텝 이름을 요약 인자 `step`/`last_step` 과 **같은 모양**으로 — 비교용. 못 쓰면 None.
+
+    행의 `failed_step` 은 원문(120자)이고 인자는 씻어서 80자로 자른 것이라, 그대로 견주면 긴
+    이름 · 보이지 않는 문자가 든 이름이 「다르다」로 읽혀 같은 스텝이 두 번 찍힌다."""
+    if v is None:
+        return None
+    try:
+        return _clean_label(v)
+    except OutcomeError:
+        return None
+
+
+def _clean_unit(v: Any) -> str:
+    """실패 이름 → 경로면 **마지막 조각**, 80자(`test/feature/home/x_test.dart` → `x_test.dart`).
+
+    `\\` 도 구분자로 본다(`_norm_path`). 끝이 `/` 인 이름은 그 앞 조각이다. 지우고 나서 비면
+    거절."""
+    parts = [p for p in _norm_path(v).split("/") if p.strip() not in ("", ".", "..")]
+    name = parts[-1].strip()[:MAX_FAIL_ARG].strip() if parts else ""
+    if not name:
+        raise OutcomeError("failure name has no usable text")
+    return name
+
+
 def _clean_one(shape: str | tuple[str, ...], v: Any) -> Any:
     if isinstance(shape, tuple):
         if v not in shape:
@@ -338,6 +424,19 @@ def _clean_one(shape: str | tuple[str, ...], v: Any) -> Any:
         return v
     if shape == "int":
         return _clean_int(v)
+    if shape == "count":
+        n = _clean_int(v)
+        if n < 0:
+            raise OutcomeError("count is negative")
+        return n
+    if shape == "flag":
+        if not isinstance(v, bool):
+            raise OutcomeError(f"not a boolean: {v!r}")
+        return v
+    if shape == "label":
+        return _clean_label(v)
+    if shape == "unit":
+        return _clean_unit(v)
     if shape == "member":
         return _clean_member(v)
     if shape == "basename":
@@ -381,6 +480,8 @@ def clean_args(code: str, args: dict[str, Any] | None, *, strict: bool = False) 
     if schema is None:
         if strict:
             raise OutcomeError(f"not a preflight code: {code}")
+        schema = RESULT_ARGS.get(code)
+    if schema is None:
         return dict(args or {})
     out: dict[str, Any] = {}
     for key, value in (args or {}).items():
@@ -423,6 +524,45 @@ def summary(code: str, /, **args: Any) -> tuple[str, str, dict[str, Any]]:
     text = render(code, clean)
     assert text is not None  # CODES 에 있으므로 None 이 나올 수 없다
     return text, code, clean
+
+
+def exit_summary(
+    code: int,
+    failed_step: str | None,
+    failure_names: Iterable[str],
+    steps: Iterable[str],
+    *,
+    truncated: bool = False,
+) -> tuple[str, str, dict[str, Any]]:
+    """종료 코드 요약 `(문장, "exit_code", 인자)` — 로컬 레인과 원격 워커 finish 가 같이 쓴다.
+
+    `failure_names` 는 잡이 찍은 순서(`failures_json` · `job_failures.seq` 와 같은 규칙)이고
+    `steps` 는 그 잡의 스텝 이름이다. 스텝 이름은 **단위가 아니다** — 단위(테스트 · 파일)만 `first`
+    와 `more` 에 들고, 스텝은 `failed_step` 하나만 `step` 으로 간다(결정 118). 이름을 씻고 나서 빈
+    것은 이름이 아니다. 둘 다 없으면 오늘과 같은 `exit N` 과 `{"code": N}` 이다.
+
+    인자는 `summary()` 를 지나 `clean_args` 로 다시 줄어든다 — 생산자가 하나 더 생겨도 같은 경계다.
+    """
+    step_set = set(steps)
+    units: list[str] = []
+    for name in failure_names:
+        if name in step_set:
+            continue
+        try:
+            units.append(_clean_unit(name))
+        except OutcomeError:
+            continue
+    args: dict[str, Any] = {"code": code}
+    if failed_step:
+        args["step"] = failed_step
+    if units:
+        args["first"] = units[0]
+        if len(units) > 1:
+            args["more"] = len(units) - 1
+        if truncated:
+            args["more"] = len(units) - 1
+            args["more_truncated"] = True
+    return summary("exit_code", **args)
 
 
 def dump_args(args: dict[str, Any] | None) -> str | None:

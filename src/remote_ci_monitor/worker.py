@@ -45,6 +45,7 @@ from remote_ci_monitor.core.model import (
     WorkerInfo,
 )
 from remote_ci_monitor.core.progress import Marker, parse_marker, progress_from_markers
+from remote_ci_monitor.core.supersede import successor_of
 from remote_ci_monitor.materialize import (
     MaterializeError,
     assemble_from_manifest,
@@ -124,6 +125,21 @@ class Outcome:
         return iter((self.state, self.summary, self.failed_step))
 
 
+def cancel_outcome(job: Job) -> tuple[str | None, str | None, dict[str, Any]]:
+    """취소로 끝나는 잡의 요약 세 값. 로컬 레인 · 원격 워커 보고 · 서버가 닫는 미확인 취소가
+    같이 쓴다.
+
+    새 잡에 밀려난 잡(M5o)은 `superseded by #N` 을 지킨다 — 취소 요청 때 써 둔 N 이 그 잡을
+    기억하는 유일한 자리라, 여기서 `cancelled by superseded` 로 덮으면 `rcm wait` 가 N 을 잃는다.
+    """
+    successor = successor_of(job)
+    if successor is not None:
+        return outcome.summary("superseded", by=successor)
+    if job.cancel is not None:
+        return outcome.summary("cancelled_by", by=job.cancel.by)
+    return None, None, {}
+
+
 def outcome_for(
     job: Job,
     markers: Sequence[Marker],
@@ -141,8 +157,9 @@ def outcome_for(
     """종료 규칙 — 상태 · 요약 · failed_step, 그리고 서버가 만든 요약이면 코드와 인자(결정 37).
 
     로컬 워커와 원격 워커 보고(`/worker/.../finish`)가 같은 함수를 쓴다(M5b-2). 요약은 마커의
-    `summary`, 없으면 `exit N`; 취소는 요청자 이름. **잡이 찍은 요약에는 코드가 없다** — 팀이 쓴
-    문장이라 번역 대상이 아니다.
+    `summary`, 없으면 `outcome.exit_summary`(실패 이름 · 스텝을 알면 `test: x_test.dart +1
+    more (exit 1)`, 모르면 `exit N` — M5o); 취소는 요청자 이름. **잡이 찍은 요약에는 코드가
+    없다** — 팀이 쓴 문장이라 번역 대상이 아니다.
     """
     forced = cancelled or timed_out or lost
     progress = progress_from_markers(
@@ -159,13 +176,13 @@ def outcome_for(
         state, summary, code, args = LOST, lost_summary, lost_code, dict(lost_args or {})
     elif cancelled:
         state = CANCELLED
-        if job.cancel is not None:
-            summary, code, args = outcome.summary("cancelled_by", by=job.cancel.by)
-        else:
-            summary = None
+        summary, code, args = cancel_outcome(job)
     elif timed_out:
         state = TIMED_OUT
-        summary, code, args = outcome.summary("timed_out", seconds=job.timeout_seconds)
+        # 「어디였나」만 붙인다 — 인과를 주장하지 않는 `in`(M5o §3.1)
+        summary, code, args = outcome.summary(
+            "timed_out", seconds=job.timeout_seconds, last_step=progress.last_step
+        )
     elif rc == 0:
         state, summary = SUCCEEDED, progress.summary  # 잡이 찍은 문장 — 코드 없음
     else:
@@ -173,7 +190,14 @@ def outcome_for(
         if progress.summary:
             summary = progress.summary  # 잡이 찍은 문장 — 코드 없음
         elif rc is not None:
-            summary, code, args = outcome.summary("exit_code", code=rc)
+            # 이름과 스텝을 알면 먼저 말한다(M5o 결정 117·118). 원격 finish 도 이 함수를 지난다
+            summary, code, args = outcome.exit_summary(
+                rc,
+                progress.failed_step,
+                progress.fail_names,
+                [s.name for s in progress.steps],
+                truncated=progress.fail_truncated,
+            )
         else:
             summary = None
     # 스텝 라벨과 실패 이름은 `failed`·`timed_out` 만 갖는다(결정 64). 취소·유실 잡에 스텝
@@ -411,10 +435,7 @@ class Worker(threading.Thread):
         current = self.store.get_job(job.id) or job
         if current.state != CANCELLING:
             return
-        if current.cancel is not None:
-            text, code, args = outcome.summary("cancelled_by", by=current.cancel.by)
-        else:
-            text, code, args = None, None, {}
+        text, code, args = cancel_outcome(current)
         self.store.finish(
             job.id,
             CANCELLED,

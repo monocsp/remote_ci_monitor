@@ -38,6 +38,7 @@ from remote_ci_monitor.core.model import (
     Preset,
 )
 from remote_ci_monitor.core.notify import NotifyRule
+from remote_ci_monitor.core.supersede import SUPERSEDE_MODES, SUPERSEDE_OFF
 
 ENV_PREFIX = "RCM"
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
@@ -290,6 +291,11 @@ class ServerConfig:
     notify: tuple[NotifyRule, ...] = ()
     probes: tuple[Probe, ...] = ()
     path: Path | None = None
+    #: `include = [...]` 로 들인 파일들, 적힌 순서대로(M5o 결정 121). 경로는 펼친 절대 경로
+    includes: tuple[Path, ...] = ()
+    #: 프리셋 이름 → 그것을 정의한 파일. `Preset` 에 넣지 않는 이유: reload 는 프리셋을 `!=` 로
+    #: 비교한다 — 같은 정의를 다른 파일로 옮긴 것이 「바뀜」으로 보이면 안 된다
+    preset_sources: dict[str, Path] = field(default_factory=dict, compare=False)
 
     @property
     def data_dir(self) -> Path:
@@ -341,6 +347,38 @@ def advertise_warning(section: ServerSection) -> str | None:
     return None
 
 
+#: 「아무 주소에나 묶어라」는 bind 값. 듣기에는 맞지만 링크에 넣으면 다른 기기에서 안 열린다.
+ANY_BINDS = ("0.0.0.0", "::", "")
+
+
+def server_base_url(section: ServerSection, *, hostname: str) -> str:
+    """잡 링크의 앞부분 — 알림(`notify.py`)과 서버(`server.py`)가 같이 쓴다(M5o 결정 120).
+
+    1. `public_url` 이 있으면 그것.
+    2. `bind` 가 특정 주소면 `http://<bind>:<port>`(IPv6 는 대괄호).
+    3. `bind` 가 `0.0.0.0` · `::` · 빈 값이고 mDNS 광고가 켜져 있으면
+       `http://<짧은 호스트>.local:<port>` — 서버의 Responder 가 그 이름의 A 레코드에 답한다
+       (`server.py` 의 `f"{host}.local."`).
+    4. 그 밖이면 `http://<hostname>:<port>`.
+
+    `0.0.0.0` · `::` 은 **어느 갈래에서도** 나오지 않는다 — 운영 알림 3,721건이 그 주소를
+    실어 보냈다.
+    호스트 이름을 모르면 `localhost` 다(틀릴 수는 있어도 「아무 주소」보다는 열린다).
+    """
+    if section.public_url:
+        return section.public_url.rstrip("/")
+    bind = (section.bind or "").strip()
+    port = section.port
+    if bind not in ANY_BINDS:
+        host = f"[{bind}]" if ":" in bind and not bind.startswith("[") else bind
+        return f"http://{host}:{port}"
+    name = (hostname or "").strip().rstrip(".")
+    if advertise_enabled(section):
+        short = name.split(".")[0]
+        return f"http://{short}.local:{port}" if short else f"http://localhost:{port}"
+    return f"http://{name or 'localhost'}:{port}"
+
+
 def shorter_log_retention(section: ServerSection) -> tuple[str, int]:
     """부피가 넘을 수 없는 천장 — 두 로그 보존 기간 중 **짧은 쪽**(키 이름과 값)."""
     keys = ("retention_days_success", "retention_days_failure")
@@ -368,6 +406,30 @@ def retention_warning(section: ServerSection) -> str | None:
         f"than {key} ({ceiling}) — a job's whole directory goes at {ceiling}d, so the workspace "
         f"cannot outlive it; using {ceiling}d"
     )
+
+
+def supersede_skipped_presets(cfg: ServerConfig) -> list[str]:
+    """`supersede` 를 켰지만 서버가 건너뛸 프리셋 이름(M5o §10).
+
+    `cancel_requires_submission_token = true` 인 서버에서는 세션이 남의 잡을 그 잡의 취소
+    비밀 없이 못 취소한다. supersede 는 토큰 **이름**만 보고 취소하므로 그 약속을 우회한다 —
+    그래서 그 설정이 켜져 있으면 supersede 는 아무것도 취소하지 않는다. 설정 오류는 아니다
+    (경고): 업그레이드만으로 서버가 안 뜨면 안 된다.
+    """
+    if not cfg.server.cancel_requires_submission_token:
+        return []
+    return [p.name for p in cfg.presets if p.supersede != SUPERSEDE_OFF]
+
+
+def supersede_warnings(cfg: ServerConfig) -> list[str]:
+    names = supersede_skipped_presets(cfg)
+    if not names:
+        return []
+    return [
+        f"warning: preset(s) {', '.join(names)} set supersede but [server] "
+        "cancel_requires_submission_token = true — supersede is skipped (it would cancel "
+        "another session's job without its cancel token)"
+    ]
 
 
 def admission_warnings(server: ServerSection, host: HostSection) -> list[str]:
@@ -551,6 +613,7 @@ _PRESET_KEYS = {
     "checks",
     "check_ref",
     "sample",
+    "supersede",
 }
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
@@ -797,6 +860,11 @@ def parse_preset(raw: Any) -> Preset:
     sample = raw.get("sample")
     if sample is not None and not isinstance(sample, bool):
         raise ConfigError(f"{where}: sample must be true or false")
+    supersede = raw.get("supersede", SUPERSEDE_OFF)
+    if not isinstance(supersede, str) or supersede not in SUPERSEDE_MODES:
+        raise ConfigError(
+            f'{where}: supersede must be "off", "waiting" or "all", got {supersede!r}'
+        )
     return Preset(
         name=name,
         argv=argv,
@@ -821,6 +889,7 @@ def parse_preset(raw: Any) -> Preset:
         checks=checks,
         check_ref=check_ref,
         sample=sample,
+        supersede=supersede,
     )
 
 
@@ -905,7 +974,133 @@ def _validate_checks(presets: tuple[Preset, ...]) -> tuple[Preset, ...]:
 # ── 서버 설정 ────────────────────────────────────────────────────────────────
 
 _SECTIONS = ("server", "estimate", "host", "display")
-_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify", "probes"}
+_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify", "probes", "include"}
+#: 들인 파일이 가질 수 있는 최상위 키(M5o 결정 121). 저장소 토큰 · 비밀 · 바인드 주소는
+#: server.toml 에만 있다 — 들인 파일을 쓸 수 있는 사람이 그것까지 정하면 안 된다
+_INCLUDE_KEYS = frozenset({"presets"})
+
+
+def _include_paths(found: Path, raw: dict[str, Any]) -> tuple[Path, ...]:
+    """server.toml 의 `include = [...]` → 펼친 절대 경로들. 상대 경로는 **server.toml 의 폴더**
+    기준이다(서비스의 cwd 는 아무도 모른다). 자기 자신 · 같은 파일 두 번은 거절한다."""
+    for name, value in raw.items():
+        # TOML 에서 `[server]` 아래에 쓴 `include` 는 `[server] include` 가 된다. 「모르는 키」
+        # 보다 자리를 알려 주는 쪽이 고치는 사람에게 맞는 답이다
+        tables = value if isinstance(value, list) else [value]
+        if name != "include" and any(isinstance(t, dict) and "include" in t for t in tables):
+            raise ConfigError(
+                f"{found}: include must be at the top of the file, before the first [section] "
+                f"(it was read as part of [{name}])"
+            )
+    value = raw.get("include", [])
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"{found}: include must be a list of file paths — include = [{value!r}]"
+            if isinstance(value, str)
+            else f"{found}: include must be a list of file paths"
+        )
+    own = os.path.realpath(found)
+    seen: dict[str, str] = {}
+    out: list[Path] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(f"{found}: include entries must be file paths, got {item!r}")
+        p = Path(item).expanduser()
+        if not p.is_absolute():
+            p = found.parent / p
+        p = Path(os.path.normpath(p))
+        real = os.path.realpath(p)
+        if real == own:
+            raise ConfigError(f"{found}: include lists the config file itself ({item})")
+        if real in seen:
+            raise ConfigError(f"{found}: include lists the same file twice ({seen[real]}, {item})")
+        seen[real] = item
+        out.append(p)
+    return tuple(out)
+
+
+def _check_include_stat(path: Path, st: os.stat_result) -> None:
+    """들인 파일은 서버를 돌리는 사용자 소유이고 그룹 · 남이 쓸 수 없어야 한다(결정 122).
+    프리셋은 서버가 실행할 argv 다 — 아무나 쓸 수 있는 파일이 그것을 정하면 「프리셋만 실행」이라는
+    약속이 무너진다. server.toml 자신에게는 이 규칙을 붙이지 않는다(기존 설치를 깨지 않는다)."""
+    if not stat.S_ISREG(st.st_mode):
+        raise ConfigError(f"{path}: an included file must be a regular file")
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and st.st_uid != geteuid():
+        raise ConfigError(
+            f"{path}: an included file must be owned by the user running rcm "
+            f"(uid {geteuid()}), it is owned by uid {st.st_uid}"
+        )
+    if stat.S_IMODE(st.st_mode) & 0o022:
+        raise ConfigError(
+            f"{path}: an included file must not be writable by group or others — chmod go-w {path}"
+        )
+
+
+def _load_include_toml(path: Path) -> dict[str, Any]:
+    """들인 파일을 **한 번** 열고, 그 fd 의 `fstat` 로 권한을 본 뒤 **같은 핸들에서** 읽는다.
+    이름으로 `stat` 하고 다시 이름으로 열면 그 사이에 파일이 바뀔 수 있다(TOCTOU) — 검사를 지난
+    파일과 읽은 파일이 같아야 검사가 뜻이 있다. `O_NONBLOCK` 은 FIFO 에서 열기가 멈추지 않게 한다
+    (일반 파일에는 아무 효과가 없고, FIFO 는 아래 regular file 검사가 거절한다)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        raise ConfigError(f"included file not found: {path}") from None
+    except OSError as e:
+        raise ConfigError(f"{path}: cannot read: {e.strerror}") from e
+    with os.fdopen(fd, "rb") as fh:
+        _check_include_stat(path, os.fstat(fh.fileno()))
+        try:
+            return tomllib.load(fh)
+        except tomllib.TOMLDecodeError as e:
+            raise ConfigError(f"{path}: invalid TOML: {e}") from e
+        except OSError as e:
+            raise ConfigError(f"{path}: cannot read: {e.strerror}") from e
+
+
+def _read_include(path: Path, owner: Path) -> tuple[Preset, ...]:
+    """들인 파일 하나 → 그 안의 프리셋. 오류마다 그 파일의 경로를 붙인다."""
+    raw = _load_include_toml(path)
+    other = sorted(set(raw) - _INCLUDE_KEYS)
+    if other:
+        raise ConfigError(
+            f"{path}: an included file may only hold [[presets]], found "
+            f"{', '.join(other)} — [server], [[repos]], [[notify]], [[probes]] and include "
+            f"belong in {owner.name}"
+        )
+    presets = raw.get("presets", [])
+    if not isinstance(presets, list):
+        raise ConfigError(f"{path}: [[presets]] must be an array of tables")
+    try:
+        return tuple(parse_preset(p) for p in presets)
+    except ConfigError as e:
+        raise ConfigError(f"{path}: {e}") from e
+
+
+def _merge_presets(groups: list[tuple[Path, tuple[Preset, ...]]]) -> dict[str, Path]:
+    """파일별 프리셋을 합치며 이름이 **파일 사이에서** 겹치면 두 파일을 댄다. **들인 파일 하나
+    안의** 겹침은 그 파일 이름으로 말한다. server.toml 안의 겹침은 오늘처럼 `_validate_server`
+    의 「duplicate preset name(s)」이 말한다(첫 묶음이 server.toml 이다). 이름이 같은 두 파일은
+    경로로 가른다."""
+    basenames = [path.name for path, _ in groups]
+    label = {
+        path: path.name if basenames.count(path.name) == 1 else str(path) for path, _ in groups
+    }
+    sources: dict[str, Path] = {}
+    for path, presets in groups:
+        for p in presets:
+            first = sources.get(p.name)
+            if first is not None and first != path:
+                raise ConfigError(
+                    f"preset '{p.name}' is defined in both {label[first]} and {label[path]}"
+                )
+            if first is not None and path != groups[0][0]:
+                raise ConfigError(
+                    f"{label[path]}: [[presets]] duplicate preset name '{p.name}' "
+                    "(defined twice in this file)"
+                )
+            sources.setdefault(p.name, path)
+    return sources
 
 
 def _validate_repos(repos: tuple[RepoConfig, ...]) -> None:
@@ -1109,6 +1304,7 @@ def load_server_config(
         unknown = sorted(set(raw) - _TOP_KEYS)
         if unknown:
             raise ConfigError(f"{found}: unknown section(s): {', '.join(unknown)}")
+        cfg.includes = _include_paths(found, raw)
         for name in _SECTIONS:
             values = raw.get(name, {})
             if not isinstance(values, dict):
@@ -1118,7 +1314,12 @@ def load_server_config(
         presets = raw.get("presets", [])
         if not isinstance(presets, list):
             raise ConfigError(f"{found}: [[presets]] must be an array of tables")
-        cfg.presets = tuple(parse_preset(p) for p in presets)
+        # server.toml 의 것 먼저, 그다음 include 에 적힌 순서(M5o 결정 121). 검증(`checks` ·
+        # notify 의 presets · 이름 겹침)은 아래 `_validate_server` 가 **합친 목록** 위에서 한다
+        groups = [(found, tuple(parse_preset(p) for p in presets))]
+        groups += [(path, _read_include(path, found)) for path in cfg.includes]
+        cfg.preset_sources = _merge_presets(groups)
+        cfg.presets = tuple(p for _, group in groups for p in group)
         notify = raw.get("notify", [])
         if not isinstance(notify, list):
             raise ConfigError(f"{found}: [[notify]] must be an array of tables")

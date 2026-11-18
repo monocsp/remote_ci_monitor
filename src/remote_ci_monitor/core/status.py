@@ -27,6 +27,7 @@ from remote_ci_monitor.core.model import (
     StatusModel,
 )
 from remote_ci_monitor.core.queue import confidence
+from remote_ci_monitor.core.supersede import successor_of
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -234,6 +235,8 @@ def queue_row_json(
             else None
         ),
         "cancel": _cancel(job),
+        # 새 잡에 밀려 취소 중이면 그 새 잡(M5o). 키만 더한다 — schema_version 그대로
+        "superseded_by": successor_of(job),
         "source": source_json(job.source),
         "created_at": iso(job.created_at),
         "queued_at": iso(job.queued_at),
@@ -301,6 +304,8 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "failed_step": job.failed_step,
         "last_step": job.last_step,
         "cancelled_by": job.cancelled_by,
+        # 같은 브랜치의 새 잡에 밀려 취소됐으면 그 잡의 id(M5o 결정 114). 아니면 null
+        "superseded_by": successor_of(job),
         "timeout_seconds": job.timeout_seconds,
         "source": source_json(job.source),
         "transitions": [{"state": t.state, "at": iso(t.at)} for t in job.transitions],

@@ -15,18 +15,25 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from remote_ci_monitor.config import ServerConfig
+from remote_ci_monitor.config import ServerConfig, server_base_url
 from remote_ci_monitor.core.model import Job
-from remote_ci_monitor.core.notify import NotifyRule, notify_env, rules_for, sanitize_text
+from remote_ci_monitor.core.notify import (
+    NotifyRule,
+    failure_lines,
+    notify_env,
+    rules_for,
+    sanitize_text,
+)
 from remote_ci_monitor.core.status import recent_json
 from remote_ci_monitor.events import KIND_JOB_FINISHED, KIND_LAG, KIND_RESET, EventBus
 from remote_ci_monitor.store import Store
@@ -108,10 +115,8 @@ class Notifier:
         self.log = log or (lambda msg: None)
         self.run = run
         self.opener = opener
-        srv = config.server
-        self.base_url = base_url or (
-            srv.public_url.rstrip("/") if srv.public_url else f"http://{srv.bind}:{srv.port}"
-        )
+        # `0.0.0.0` 은 링크에 넣지 않는다 — 다른 기기에서 안 열린다(M5o 결정 120)
+        self.base_url = base_url or server_base_url(config.server, hostname=socket.gethostname())
         self.stop_event = stop or threading.Event()
         self.failures = 0
         self.delivered = 0
@@ -124,11 +129,19 @@ class Notifier:
 
     # ── 실행 ────────────────────────────────────────────────────────────────
 
-    def _run_rule(self, rule: NotifyRule, row: dict[str, Any]) -> bool:
+    def _run_rule(
+        self,
+        rule: NotifyRule,
+        row: dict[str, Any],
+        failures: Sequence[str] = (),
+        failures_truncated: bool = False,
+    ) -> bool:
         # 프리셋과 같은 통과 변수(PATH · HOME · LANG) 위에 RCM_* — 없으면 `date` 조차 못 찾는
         # 훅 스크립트가 exit 1 로 끝난다(실배치에서 발견). 사용자 문자열은 RCM_* 뿐이다.
         env = {k: os.environ[k] for k in NOTIFY_ENV_PASSTHROUGH if k in os.environ}
-        env.update(notify_env(row, rule.name))
+        env.update(
+            notify_env(row, rule.name, failures=failures, failures_truncated=failures_truncated)
+        )
         tag = f"notify {rule.name} #{row.get('id')}"
         if rule.argv:
             try:
@@ -155,7 +168,16 @@ class Notifier:
                 return False
             return True
         if rule.url:
-            body = json.dumps({"notify": rule.name, "job": row}, separators=(",", ":")).encode()
+            # 실패 이름은 잡 행 **밖**에 둔다 — `GET /jobs/<id>` 의 `failures[]`(판정이 붙은 객체
+            # 목록)와 같은 키로 다른 모양을 싣지 않는다(M5o 결정 119)
+            payload = {
+                "notify": rule.name,
+                "job": row,
+                "failures": failure_lines(failures),
+                "failure_count": len(failures),
+                "failures_truncated": bool(failures_truncated),
+            }
+            body = json.dumps(payload, separators=(",", ":")).encode()
             req = urllib.request.Request(
                 rule.url,
                 data=body,
@@ -185,12 +207,14 @@ class Notifier:
             return 0
         row = recent_json(job, base_url=self.base_url)
         row["summary"] = sanitize_text(row.get("summary"))
+        # 잡이 찍은 순서의 대장(M5o 결정 119). 성공 · 취소 잡은 행이 없다
+        failures = self.store.failure_names(job.id)
         count = 0
         for rule in matched:
             now = self.now_fn()
             if not self.store.claim_notification(job.id, rule.name, now):
                 continue  # 이미 보냈거나 보내는 중 — 이벤트 중복
-            ok = self._run_rule(rule, row)
+            ok = self._run_rule(rule, row, failures, job.fail_truncated)
             self.store.mark_notification(job.id, rule.name, delivered=ok, now=self.now_fn())
             with self._lock:
                 if ok:

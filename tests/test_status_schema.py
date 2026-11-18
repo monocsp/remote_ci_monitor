@@ -38,6 +38,7 @@ ROW_KEYS = {
     "concurrency_scope",
     "host_key",
     "placement_detail",
+    "superseded_by",  # M5o — 새 잡에 밀려 취소 중이면 그 잡(키 추가만)
     "state",
     "reason",
     "lane",
@@ -88,6 +89,7 @@ RECENT_KEYS = {
     "target_worker",
     "host_key",
     "worker",
+    "superseded_by",  # M5o — 새 잡에 밀려 취소됐으면 그 잡(키 추가만)
     "state",
     "exit_code",
     "job_seconds",

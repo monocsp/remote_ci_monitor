@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import tarfile
@@ -45,6 +46,7 @@ from remote_ci_monitor.config import (
     ServerConfig,
     load_client_config,
     load_server_config,
+    server_base_url,
     user_config_dir,
 )
 from remote_ci_monitor.core import artifacts as art_core
@@ -52,7 +54,14 @@ from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
-from remote_ci_monitor.core.model import EXIT_UNKNOWN, PLACEMENT_CAPABLE, TERMINAL_STATES, Preset
+from remote_ci_monitor.core.model import (
+    CANCELLED,
+    EXIT_CODE_BY_STATE,
+    EXIT_UNKNOWN,
+    PLACEMENT_CAPABLE,
+    TERMINAL_STATES,
+    Preset,
+)
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     DASH,
@@ -456,6 +465,21 @@ def _cancel_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     )
 
 
+def _supersede_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `supersede` 행 — 프리셋이 supersede 를 켰는데 서버가
+    `cancel_requires_submission_token` 때문에 건너뛰면 warn(실패 아님, M5o §10). 아니면 없다."""
+    names = h.get("supersede_skipped_presets")
+    if not isinstance(names, list) or not names:
+        return None
+    shown = ", ".join(str(n) for n in names)
+    return (
+        "supersede",
+        None,
+        f"skipped for {shown} — cancel_requires_submission_token is on "
+        '(set supersede = "off" or turn the token rule off)',
+    )
+
+
 def _warn_if_client_too_old(client: Client) -> None:
     """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
     try:
@@ -583,6 +607,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 link=link,
                 link_label=link_label,
                 machine=getattr(args, "machine", None),
+                supersede=not getattr(args, "no_supersede", False),
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -619,6 +644,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     up = client.upload(job_id, snap.tar_path, progress=progress)
             except ClientError as e:
                 line.done()
+                # 업로드 중에 같은 브랜치의 새 잡에 밀렸으면 그것이 답이다(M5o A22) — 「upload
+                # failed」 로 3 을 내면 세션은 무슨 일인지 모른다. 409 본문이 말해 주므로 다시
+                # 조회하지 않는다(업로드 실패 자리에는 표시용 조회가 없다는 약속).
+                gone = {"state": e.body.get("state"), "superseded_by": e.body.get("superseded_by")}
+                note = superseded_line(gone, job_id) if e.status == 409 else None
+                if note:
+                    _err(note)
+                    _print_json({"job_id": job_id, **gone, "wait_exit_code": 2})
+                    return EXIT_CODE_BY_STATE[CANCELLED]
                 hint = " (retry with --no-cache)" if e.status in (400, 409) else ""
                 _err(f"upload failed: {e.message}{hint}")
                 return EXIT_UNKNOWN
@@ -700,6 +734,7 @@ def _run_git_ref(
             link=link,
             link_label=link_label,
             machine=getattr(args, "machine", None),
+            supersede=not getattr(args, "no_supersede", False),
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -828,6 +863,9 @@ def _wait(
     line.done()
     if reason:
         _err(reason)
+    note = superseded_line(job or {}, job_id)
+    if note:
+        _err(note)
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
     # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
@@ -858,6 +896,18 @@ def _wait(
             code = EXIT_DELIVERY
     _print_json(out)
     return code
+
+
+def superseded_line(job: dict[str, Any], job_id: int) -> str | None:
+    """`#O superseded by #N — rcm wait --job N` — 새 잡에 밀려 취소된 잡의 안내 한 줄(M5o 결정 114).
+
+    따라가지 않는다: 종료 코드는 O 의 것(2)이고, N 을 기다릴지는 부른 쪽이 정한다. 서버 문서의
+    값이 정수가 아니면 아무 말도 안 한다 — 번호를 지어내지 않는다.
+    """
+    by = job.get("superseded_by")
+    if job.get("state") != CANCELLED or not isinstance(by, int) or isinstance(by, bool):
+        return None
+    return f"#{job_id} superseded by #{by} — rcm wait --job {by}"
 
 
 def cmd_wait(args: argparse.Namespace) -> int:
@@ -1098,17 +1148,69 @@ def cmd_reload(args: argparse.Namespace) -> int:
     머신에서는 SIGHUP 을 보낼 수가 없다 — 그래서 이 길이 있다. 바뀐 것의 **이름**을 찍는다.
     """
     client = _client(args)
+    dry_run = bool(getattr(args, "dry_run", False))
+    if dry_run:
+        # 옛 서버는 본문을 무시하고 **진짜 reload 를 해 버린다** — 미리 보자던 사람의 설정이
+        # 바뀐다. 서버가 dry-run 을 안다고 말할 때만 보낸다(M5o 결정 124)
+        try:
+            known = bool(client.health().get("reload_dry_run"))
+        except ClientError as e:
+            _err(f"reload --dry-run: cannot reach the server ({e.message}) — nothing was sent")
+            return EXIT_UNKNOWN
+        if not known:
+            _err(
+                "reload --dry-run: this server does not know dry runs and would apply the "
+                "reload — upgrade the server first; nothing was sent"
+            )
+            return USAGE_EXIT
     try:
-        resp = client.reload()
+        resp = client.reload(dry_run=dry_run)
     except ClientError as e:
         _err(f"reload failed: {e.message}")
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
     if getattr(args, "json", False):
         _print_json(resp)
         return 0
+    if dry_run:
+        print("\n".join(render_reload_dry_run(resp)))
+        return 0
     print(reload_summary(resp))
-    print(f"config: {resp.get('config')}")
+    print(f"config: {resp.get('config')}{_includes_suffix(resp)}")
     return 0
+
+
+def _includes_suffix(resp: dict[str, Any]) -> str:
+    """`(+ presets.dolomood.toml)` — 들인 파일의 이름. 없으면 빈 글자(옛 서버도 키가 없다)."""
+    names = [Path(p).name for p in resp.get("includes") or []]
+    return f" (+ {', '.join(names)})" if names else ""
+
+
+#: dry-run 출력의 줄 — (응답 키, 머리말). 머리말은 16칸으로 맞춘다
+_DRY_RUN_ROWS = (
+    ("presets_changed", "presets changed:"),
+    ("presets_added", "presets added:"),
+    ("presets_removed", "presets removed:"),
+    ("repos_changed", "repos changed:"),
+    ("repos_added", "repos added:"),
+    ("repos_removed", "repos removed:"),
+)
+
+
+def render_reload_dry_run(resp: dict[str, Any]) -> list[str]:
+    """`rcm reload --dry-run` 의 글자. 바뀐 프리셋은 `gate (argv, timeout_seconds)` — 키 이름만."""
+    lines = [f"would reload {resp.get('config')}{_includes_suffix(resp)}"]
+    keys = resp.get("presets_changed_keys") or {}
+    for key, label in _DRY_RUN_ROWS:
+        names = list(resp.get(key) or [])
+        if not names:
+            continue
+        if key == "presets_changed":
+            names = [f"{n} ({', '.join(keys[n])})" if keys.get(n) else n for n in names]
+        lines.append(f"  {label:<16} {', '.join(names)}")
+    if len(lines) == 1:
+        lines.append("  nothing would change")
+    lines.append("  nothing applied (--dry-run)")
+    return lines
 
 
 # ── eta · top · jobs · logs · presets (M1) ───────────────────────────────────
@@ -2478,6 +2580,32 @@ def _release_row(
     return (f"release {repo}", True, detail)
 
 
+def _public_url_row(section: Any) -> tuple[str, bool | None, str]:
+    """잡 링크의 앞부분(M5o 결정 120). 비어 있으면 warn — 실패는 아니지만 알림 · `rcm run` 의 링크가
+    서버가 고른 이름으로 나간다는 것을 그 주소와 함께 말한다(`config.server_base_url`)."""
+    url = server_base_url(section, hostname=socket.gethostname())
+    if section.public_url:
+        return ("public url", True, url)
+    return ("public url", None, f"empty — links use {url} (set [server] public_url)")
+
+
+def local_presets_row(cfg: ServerConfig) -> tuple[str, bool | None, str]:
+    """`rcm check` 의 `local presets` 행 — 로컬 설정의 프리셋 수를 파일별로(M5o §4.1).
+
+    `24 (server.toml 2 · presets.dolomood.toml 22)`. 위의 `presets` 행은 **서버가** 지금 들고 있는
+    목록이고 이 행은 **이 파일을** 읽으면 나올 목록이다 — 둘이 다르면 reload 를 안 한 것이다.
+    프리셋이 하나도 없으면 warn(서버는 뜨지만 아무것도 못 돌린다).
+    """
+    files = [p for p in (cfg.path, *cfg.includes) if p is not None]
+    counts = {p: 0 for p in files}
+    for source in cfg.preset_sources.values():
+        counts[source] = counts.get(source, 0) + 1
+    names = [p.name for p in files]
+    parts = [f"{p.name if names.count(p.name) == 1 else p} {counts[p]}" for p in files]
+    total = len(cfg.presets)
+    return ("local presets", True if total else None, f"{total} ({' · '.join(parts)})")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
     rows: list[tuple[str, bool | None, str]] = [python_row()]
@@ -2520,6 +2648,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             cancel_row = _cancel_row(h)
             if cancel_row is not None:
                 rows.append(cancel_row)
+            supersede_row = _supersede_row(h)
+            if supersede_row is not None:
+                rows.append(supersede_row)
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
@@ -2558,6 +2689,8 @@ def cmd_check(args: argparse.Namespace) -> int:
             # `--server` 가 가리키는 서버의 디렉터리가 아니다. 이름과 출처가 그렇게 말한다(M5i I4).
             state = "writable" if writable else "not writable"
             rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
+            rows.append(_public_url_row(cfg.server))
+            rows.append(local_presets_row(cfg))
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:
                 rows.append(tools_row)
@@ -3189,6 +3322,11 @@ def build_parser() -> argparse.ArgumentParser:
         "build machine); check presets need a token, any other preset an admin token",
     )
     run.add_argument("--no-join", action="store_true", help="never join an identical active job")
+    run.add_argument(
+        "--no-supersede",
+        action="store_true",
+        help="keep older jobs of this branch even if the preset supersedes them",
+    )
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
     run.add_argument(
         "--exclude", action="append", metavar="PATTERN", help="extra .rcmignore pattern"
@@ -3284,6 +3422,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     reload_cmd = sub.add_parser(
         "reload", help="re-read the server config — presets and repos only (admin)"
+    )
+    reload_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show which presets and keys would change, apply nothing",
     )
     reload_cmd.add_argument("--json", action="store_true")
     client_opts(reload_cmd)

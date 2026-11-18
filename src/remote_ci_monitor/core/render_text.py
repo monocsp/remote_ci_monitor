@@ -24,6 +24,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     UPLOADING,
 )
+from remote_ci_monitor.core.outcome import label_text
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
 
@@ -913,6 +914,25 @@ def render(
     return "\n".join(out) + "\n"
 
 
+def summary_names_step(r: dict[str, Any]) -> bool:
+    """서버가 코드로 그린 요약이 꼬리 라벨과 **같은 스텝**을 이미 말하는가(M5o §3.1).
+
+    그러면 `(step test)` 를 다시 붙이지 않는다 — `test: x_test.dart +1 more (exit 1) (step test)`
+    는 같은 말을 두 번 한다. 선언된 스텝이 있으면 그것이 꼬리이므로 인자 `step` 과, 없으면
+    「마지막 스텝」이 꼬리이므로 `last_step` 과 견준다. 옛 행(인자에 스텝 없음)은 오늘 그대로다.
+    웹의 `summaryNamesStep`(app.js)과 같은 규칙이다.
+    """
+    args = r.get("summary_args")
+    if not isinstance(args, dict) or r.get("summary_code") not in ("exit_code", "timed_out"):
+        return False
+    # 인자는 씻어서 80자로 자른 값이다 — 행의 원문도 같은 모양으로 만든 뒤 견준다
+    if r.get("failed_step"):
+        step = label_text(r["failed_step"])
+        return step is not None and args.get("step") == step
+    last = label_text(r.get("last_step"))
+    return last is not None and args.get("last_step") == last
+
+
 def render_pool(
     pool: dict[str, Any],
     *,
@@ -969,7 +989,7 @@ def render_pool(
             # 선언된 스텝만 「step」이다. 아니면 「어디였나」만 말한다 — 인과는 주장하지 않는다
             # (M5h · 결정 63). 취소·유실 잡에는 라벨이 없다(결정 64) — **읽는 쪽에서도** 막는다:
             # M5h 이전에 쓰인 행에는 취소된 잡에도 `failed_step` 이 남아 있다(운영 잡 #176).
-            if r.get("state") not in (CANCELLED, LOST):
+            if r.get("state") not in (CANCELLED, LOST) and not summary_names_step(r):
                 if r.get("failed_step"):
                     tail += f" (step {_short_step(r['failed_step'])})"
                 elif r.get("last_step"):

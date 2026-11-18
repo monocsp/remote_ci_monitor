@@ -72,6 +72,9 @@ from remote_ci_monitor.config import (
     advertise_warning,
     load_server_config,
     retention_warning,
+    server_base_url,
+    supersede_skipped_presets,
+    supersede_warnings,
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -124,7 +127,7 @@ from remote_ci_monitor.core.queue import (
     split_by_pool,
     step_medians_from,
 )
-from remote_ci_monitor.core.reload import reload_summary
+from remote_ci_monitor.core.reload import changed_keys, reload_summary
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     artifacts_json,
@@ -134,6 +137,7 @@ from remote_ci_monitor.core.status import (
     status_json,
     step_timeline_json,
 )
+from remote_ci_monitor.core.supersede import SUPERSEDE_OFF, successor_of, superseded_by
 from remote_ci_monitor.events import (
     JOB_KINDS,
     KIND_HOST_SAMPLE,
@@ -218,6 +222,8 @@ DEFAULT_TAIL = 5
 MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-_\[\]:]{1,255}$")  # Host 헤더 — URL 에 넣을 만한 모양만
+#: 「아무 주소」 Host — 링크에 넣으면 다른 기기에서 안 열린다(M5o 결정 120)
+_ANY_HOST_RE = re.compile(r"(0\.0\.0\.0|\[::\]|::)(:\d+)?")
 RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
 MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
 _JOB_RE = re.compile(
@@ -373,6 +379,19 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
     return {"summary": text, "summary_code": code, "summary_args": clean}
 
 
+def _upload_conflict(job: Job | None, state: str | None = None) -> dict[str, Any]:
+    """업로드 409 본문의 덧붙임 — `state`, 그리고 새 잡에 밀려 취소됐으면 `superseded_by`(M5o A22).
+
+    `rcm run` 이 잡을 다시 조회하지 않고도 「밀려났다」를 말할 수 있게 한다 — 업로드가 실패한
+    자리에서는 표시용 조회를 하지 않는다는 약속이 있다(`--no-wait` 회복력 시험).
+    """
+    out: dict[str, Any] = {"state": state if state is not None else (job.state if job else None)}
+    successor = successor_of(job) if job is not None else None
+    if successor is not None:
+        out["superseded_by"] = successor
+    return out
+
+
 def _redact_url(url: str) -> str:
     """`https://user:token@host/…` 의 userinfo 를 지운다 — 저장소 URL 은 응답에 실리므로."""
     scheme, sep, rest = url.partition("://")
@@ -461,6 +480,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self.retention: Janitor | None = None
         self.notifier: Notifier | None = None
         self._resolve_sem = threading.BoundedSemaphore(RESOLVE_CONCURRENCY)
+        #: `"supersede": false` 로 낸 tree 잡 — 업로드가 끝날 때까지 기억한다(M5o 결정 116).
+        #: 프로세스 안에만 둔다: 재시작은 업로드 중인 잡을 어차피 `cancelled` 로 닫는다.
+        self._no_supersede: set[int] = set()
+        self._no_supersede_lock = threading.Lock()
         self.manifest_slots = threading.BoundedSemaphore(MANIFEST_CONCURRENCY)
         self.transfer_slots = threading.BoundedSemaphore(
             max(1, config.server.max_concurrent_artifact_transfers)
@@ -610,6 +633,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if warning:
             self.log(warning)
         for warning in admission_warnings(s, self.config.host):
+            self.log(warning)
+        for warning in supersede_warnings(self.config):
             self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
@@ -832,6 +857,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             self._mark_medians_dirty()
             return
         if job.is_terminal:
+            # 업로드가 끝나지 못하고 닫힌 잡(거절 · 끊김 · 버림 · 취소)의 `"supersede": false`
+            # 표시를 지운다 — 모든 종료가 이 길로 알려진다
+            self._forget_no_supersede(job.id)
             self._mark_medians_dirty()  # 새 표본이 생겼다 — 여기서만
             self.publish(
                 KIND_JOB_FINISHED,
@@ -896,16 +924,18 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         return self.job_dir(job_id) / "log.txt"
 
     def base_url(self, host: str | None = None) -> str:
-        """잡 url 의 앞부분. public_url > 요청의 Host(세션이 실제로 쓴 주소) > bind:port.
+        """잡 url 의 앞부분. public_url > 요청의 Host(세션이 실제로 쓴 주소) > `server_base_url`.
 
         bind 가 0.0.0.0 이면 bind:port 는 다른 컴퓨터에서 열리지 않는다(사용자 검사 U2 발견).
+        요청이 없는 자리(알림)와 같은 규칙을 쓰려고 마지막 갈래는 `config.server_base_url` 이다
+        (M5o 결정 120). Host 헤더가 `0.0.0.0` · `[::]` 이면 그것도 버린다.
         """
         s = self.config.server
         if s.public_url:
             return s.public_url.rstrip("/")
-        if host and _HOST_RE.fullmatch(host):
+        if host and _HOST_RE.fullmatch(host) and not _ANY_HOST_RE.fullmatch(host):
             return f"http://{host}"
-        return f"http://{s.bind}:{s.port}"
+        return server_base_url(s, hostname=socket.gethostname())
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 
@@ -3623,9 +3653,24 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         pool = self._requested_pool(body, preset)
         placed = self._placement_fields(body, preset, token, pool)
         pool = placed.pop("pool")
+        # 이번 제출은 아무것도 치우지 않는다(M5o 결정 116). 켜기는 없다 — 프리셋 주인이 정한다
+        supersede = body.get("supersede", True)
+        if not isinstance(supersede, bool):
+            raise ApiError(400, "supersede must be true or false")
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
-                preset, inputs, src, label, token, body, host, priority, pool, link, placed
+                preset,
+                inputs,
+                src,
+                label,
+                token,
+                body,
+                host,
+                priority,
+                pool,
+                link,
+                placed,
+                supersede=supersede,
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3686,6 +3731,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             link=link,
             **placed,
         )
+        if not supersede:
+            with self._no_supersede_lock:
+                self._no_supersede.add(job.id)
         self._publish_job(job, job.id)
         return 201, {
             "job_id": job.id,
@@ -3909,7 +3957,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if job.source.mode == MODE_GIT_REF:
             raise ApiError(409, "job takes no tree upload (git_ref source)", state=job.state)
         if job.state != UPLOADING:
-            raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
+            raise ApiError(409, f"job is {job.state}, not uploading", **_upload_conflict(job))
         limit = self.config.server.max_snapshot_bytes
         try:
             manifest = validate_manifest(body, max_bytes=limit)
@@ -3976,8 +4024,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             if not self.store.mark_uploaded(job_id, declared, now):
                 current = self.store.get_job(job_id)
                 st = current.state if current else "unknown"
-                raise ApiError(409, f"job was {st} during upload", state=st)
+                raise ApiError(409, f"job was {st} during upload", **_upload_conflict(current, st))
             state = QUEUED
+            self._supersede_after_queue(job_id)
             self.wake.set()
         self._publish_job(None, job_id)
         return {
@@ -4102,7 +4151,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if not self.store.mark_uploaded(job.id, declared, now):
             current = self.store.get_job(job.id)
             state = current.state if current else "unknown"
-            raise ApiError(409, f"job was {state} during upload", state=state)
+            raise ApiError(
+                409, f"job was {state} during upload", **_upload_conflict(current, state)
+            )
+        self._supersede_after_queue(job.id)
         self._publish_job(None, job.id)
         self.wake.set()
         return {"job_id": job.id, "state": QUEUED, "bytes": received, "blobs": len(stored)}
@@ -4120,6 +4172,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         pool: str = DEFAULT_POOL,
         link: JobLink | None = None,
         placed: dict[str, Any] | None = None,
+        *,
+        supersede: bool = True,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         placed = dict(placed or {})
@@ -4187,6 +4241,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             link=link,
             **placed,
         )
+        if supersede:
+            # 제출이 곧 queued 다 — 이 자리가 git_ref 잡의 「큐에 들어온 순간」이다(M5o 결정 111).
+            # 우선순위를 물려받았을 수 있으니 응답은 다시 읽은 잡으로 쓴다.
+            self._supersede_after_queue(job.id)
+            job = self.store.get_job(job.id) or job
         self._publish_job(job, job.id)
         self.wake.set()
         return 201, {
@@ -4201,6 +4260,55 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             "submission": {"id": sid, "cancel_token": cancel_token},  # 잡 행과 같은 트랜잭션
         }
 
+    def _supersede_after_queue(self, job_id: int) -> list[int]:
+        """잡이 `queued` 가 된 **바로 뒤**에 같은 브랜치의 옛 잡을 치운다(M5o §2 · 결정 111).
+
+        부르는 자리는 둘이다 — tree 잡은 업로드가 끝나 `mark_uploaded` 가 참일 때(manifest ·
+        blob · tar 세 길), git_ref 잡은 제출이 커밋된 뒤. 업로드 중인 새 잡은 아직 아무것도
+        치우지 않으므로 업로드가 깨지거나 서버가 다시 떠도 옛 잡만 남는다(A10 · A11).
+
+        모드는 **지금** 설정의 프리셋에서 읽는다 — reload 로 켠 것은 다음에 queued 가 되는 잡부터
+        먹고, 이미 큐에 있는 잡을 소급해 치우지는 않는다(A20). 후보는 트랜잭션 밖의 스냅샷이고
+        `Store.supersede` 가 안에서 다시 판정한다(A17 · A18).
+
+        실패해도 던지지 않는다: 잡은 이미 큐에 있고, 업로드 응답을 500 으로 만들면 세션은 큐에
+        있는 잡을 실패로 읽는다. 치우지 못한 옛 잡은 오늘처럼 남을 뿐이다.
+        """
+        with self._no_supersede_lock:
+            if job_id in self._no_supersede:
+                self._no_supersede.discard(job_id)
+                return []
+        try:
+            job = self.store.get_job(job_id)
+            preset = self.config.preset(job.preset) if job is not None else None
+            mode = preset.supersede if preset is not None else SUPERSEDE_OFF
+            if job is None or mode == SUPERSEDE_OFF:
+                return []
+            if self.config.server.cancel_requires_submission_token:
+                # 남의 잡은 그 잡의 취소 비밀이 있어야 취소된다 — supersede 는 토큰 이름만 보므로
+                # 그 약속을 우회한다. 건너뛴다(§10 · `rcm check` 가 warn 으로 말한다)
+                self.log(f"job {job_id}: supersede skipped: cancel_requires_submission_token")
+                return []
+            olds = superseded_by(job, self.store.list_active(), mode)
+            if not olds:
+                return []
+            taken = self.store.supersede(
+                job_id,
+                olds,
+                self.now_fn(),
+                mode=mode,
+                grace_seconds=self.config.server.grace_seconds,
+            )
+        except Exception as e:  # noqa: BLE001 — 위 docstring: 큐에 든 잡의 응답을 깨지 않는다
+            self.log(f"supersede after job {job_id} failed: {type(e).__name__}: {e}")
+            return []
+        if taken:
+            self.log(f"job {job_id} superseded " + ", ".join(f"#{i}" for i in taken))
+            for old in taken:
+                self._publish_job(None, old)
+            self.wake.set()
+        return taken
+
     # ── 업로드 ──────────────────────────────────────────────────────────────
 
     def begin_upload(self, job_id: int, token: TokenInfo, length: int) -> Job:
@@ -4212,7 +4320,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if job.source.mode == MODE_GIT_REF:
             raise ApiError(409, "job takes no tree upload (git_ref source)", state=job.state)
         if job.state != UPLOADING:
-            raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
+            raise ApiError(409, f"job is {job.state}, not uploading", **_upload_conflict(job))
         limit = self.config.server.max_snapshot_bytes
         if length > limit:
             summary, code, args = outcome.summary("snapshot_too_big", bytes=length, limit=limit)
@@ -4260,10 +4368,18 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             final.unlink(missing_ok=True)
             current = self.store.get_job(job.id)
             state = current.state if current else "unknown"
-            raise ApiError(409, f"job was {state} during upload", state=state)
+            raise ApiError(
+                409, f"job was {state} during upload", **_upload_conflict(current, state)
+            )
+        self._supersede_after_queue(job.id)
         self._publish_job(None, job.id)
         self.wake.set()
         return {"job_id": job.id, "state": QUEUED, "bytes": received}
+
+    def _forget_no_supersede(self, job_id: int) -> None:
+        """`"supersede": false` 표시를 지운다 — 그 잡의 업로드가 끝나지 못하고 닫혔다."""
+        with self._no_supersede_lock:
+            self._no_supersede.discard(job_id)
 
     def _interrupted(self, job: Job, received: int, part: Path) -> None:
         part.unlink(missing_ok=True)
@@ -4371,8 +4487,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
     #: `lanes = 3` 이 아무 일도 안 하는 걸 한참 뒤에 알게 되는 게 제일 비싸다.
     RELOADABLE_NOT: tuple[str, ...] = ("server", "estimate", "host", "display", "notify")
 
-    def reload_config(self) -> dict[str, Any]:
+    def reload_config(self, *, dry_run: bool = False) -> dict[str, Any]:
         """설정 파일을 다시 읽어 **프리셋과 저장소만** 갈아 끼운다(M5m). 재시작이 아니다.
+
+        `dry_run=True`(M5o 결정 124)는 같은 로드 · 같은 거절을 돌리고 **대입만 하지 않는다** —
+        무엇이 바뀔지(바뀐 프리셋마다 키 **이름**)를 돌려주고 끝난다. 세대도 안 올리고 다시 재지도
+        않는다. `include` 로 들인 파일도 같이 다시 읽는다(결정 121).
 
         재시작은 로컬 레인에서 도는 잡을 `lost` 로 만든다. 프리셋 하나를 고치자고 그 값을 치를
         이유가 없다 — 프리셋은 claim 마다 `self.config.preset(name)` 로 새로 찾으므로, 설정
@@ -4422,6 +4542,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                 for name in before_presets.keys() & after_presets.keys()
                 if before_presets[name] != after_presets[name]
             ),
+            # 바뀐 프리셋마다 **어느 키가** — 이름만, 값은 절대 안 싣는다(env · argv)
+            "presets_changed_keys": {
+                name: changed_keys(before_presets[name], after_presets[name])
+                for name in sorted(before_presets.keys() & after_presets.keys())
+                if before_presets[name] != after_presets[name]
+            },
             "repos_added": sorted(after_repos.keys() - before_repos.keys()),
             "repos_removed": sorted(before_repos.keys() - after_repos.keys()),
             "repos_changed": sorted(
@@ -4430,6 +4556,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                 if before_repos[name] != after_repos[name]
             ),
         }
+        files = {"config": str(fresh.path), "includes": [str(p) for p in fresh.includes]}
+        if dry_run:
+            self.log(f"reload dry-run: {reload_summary(changed)} · from {fresh.path}")
+            return {"dry_run": True, **files, **changed}
         # 한 번의 대입 — 그리고 **설정을 제 손에 들고 있는 긴 수명 객체들**에도 같은 대입을
         # 해 줘야 한다. 로컬 워커는 claim 할 때 `self.config.preset(job.preset)` 를 제가 들고
         # 있는 객체에서 찾고(worker.py), Janitor 는 만료된 버전의 저장소를 제 것에서 찾는다.
@@ -4456,7 +4586,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self._mark_dirty()
         self._publish_server()
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
-        return {"reloaded": True, "config": str(fresh.path), **changed}
+        for warning in supersede_warnings(fresh):
+            self.log(warning)
+        return {"reloaded": True, **files, **changed}
 
     def pause(self, token: TokenInfo) -> dict[str, Any]:
         self.store.set_paused(token.name, self.now_fn())
@@ -4656,6 +4788,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             # 잡이 보게 될 환경을 **서버가 자기 환경으로** 잰 것(M5m, 정보 — 503 조건은 아니다).
             # `rcm check` 의 셸 검사와 달리 launchd·systemd 의 환경을 본다.
             "preset_env": self.preset_env,
+            # supersede 를 켰지만 `cancel_requires_submission_token` 때문에 건너뛰는 프리셋(M5o,
+            # 정보 — `rcm check` 가 warn 으로 그린다). 없으면 빈 목록
+            "supersede_skipped_presets": supersede_skipped_presets(self.config),
+            # `POST /reload {"dry_run": true}` 를 안다(M5o 결정 124). 옛 서버는 본문을 무시하고
+            # **진짜 reload 를 해 버린다** — `rcm reload --dry-run` 은 이 키가 있을 때만 보낸다
+            "reload_dry_run": True,
         }
         if not ok:
             if not db_ok:
@@ -5048,8 +5186,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/reload":
             self._only(method, "POST")
             self.app.require_admin(self._token())
-            self._json_body()  # 본문은 무시하되 읽어서 연결을 깨끗이 둔다
-            self._send_json(200, self.app.reload_config())
+            # 본문이 없거나 `{}` 면 진짜 reload(옛 클라이언트는 본문을 안 보낸다). 그 밖에는
+            # `{"dry_run": bool}` 만 받는다 — `{"dryrun": true}` 같은 오타를 조용히 진짜 reload
+            # 로 읽으면 미리 보자던 사람의 서버가 바뀐다
+            body = self._json_body()
+            if not isinstance(body, dict):
+                raise ApiError(400, 'reload body must be a JSON object: {"dry_run": true|false}')
+            unknown = sorted(set(body) - {"dry_run"})
+            if unknown:
+                raise ApiError(
+                    400, f"unknown key(s) in the reload body: {', '.join(unknown)} — only dry_run"
+                )
+            dry_run = body.get("dry_run", False)
+            if not isinstance(dry_run, bool):
+                raise ApiError(400, "dry_run must be true or false")
+            self._send_json(200, self.app.reload_config(dry_run=dry_run))
             return
         if path == "/pause" or path == "/resume":
             self._only(method, "POST")
