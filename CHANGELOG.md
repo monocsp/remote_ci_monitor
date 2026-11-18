@@ -7,6 +7,22 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Presets can live in their own files.** `include = ["presets.myproject.toml"]` at the top of
+  `server.toml` brings in more `[[presets]]` — relative to the `server.toml` folder, or an absolute
+  or `~` path — instead of pasting them in. An included file may hold presets only (`[server]`,
+  `[[repos]]`, `[[notify]]`, `[[probes]]` and a nested `include` are refused with the file's name),
+  must be owned by the user the server runs as and not writable by group or others, and a preset
+  name defined in two files is refused naming both. `rcm reload` re-reads the included files, and
+  `rcm check --config` gains a `local presets` row with the count per file. rcm never fetches
+  these files: whoever can change one decides what the server runs on the next reload.
+- **`rcm reload --dry-run` shows what a reload would apply and applies nothing.** It names each
+  changed preset with the keys that differ — `gate (argv, timeout_seconds)` — never their values,
+  and is refused for the same reasons a reload is (`POST /reload` with `{"dry_run": true}`,
+  `--json` for the response). The reload response gains `includes` and `presets_changed_keys`,
+  and `/api/health` gains `reload_dry_run: true`; the CLI sends a dry run only to a server that
+  reports it, since an older server would ignore the body and apply the reload.
+
 ### Fixed
 - **A job a remote worker had just claimed is no longer marked `lost`.** The worker takes its
   job list for a heartbeat before sending it; when a lane's claim landed on the server in that

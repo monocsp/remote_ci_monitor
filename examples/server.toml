@@ -2,6 +2,10 @@
 # Copy to ~/.config/rcm/server.toml (or ./rcm.toml) on the build machine and edit.
 # Every command the server can run is a preset below; sessions send a preset name + inputs only.
 
+# Presets can also live in their own files (presets only, owned by you, chmod go-w). Paths are
+# relative to this file's folder. Whoever can change such a file decides what the server runs.
+# include = ["presets.myproject.toml"]
+
 [server]
 bind = "127.0.0.1"          # Set your Tailscale IP or 0.0.0.0 to accept remote sessions.
 port = 8787

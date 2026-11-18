@@ -124,7 +124,7 @@ from remote_ci_monitor.core.queue import (
     split_by_pool,
     step_medians_from,
 )
-from remote_ci_monitor.core.reload import reload_summary
+from remote_ci_monitor.core.reload import changed_keys, reload_summary
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     artifacts_json,
@@ -4371,8 +4371,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
     #: `lanes = 3` 이 아무 일도 안 하는 걸 한참 뒤에 알게 되는 게 제일 비싸다.
     RELOADABLE_NOT: tuple[str, ...] = ("server", "estimate", "host", "display", "notify")
 
-    def reload_config(self) -> dict[str, Any]:
+    def reload_config(self, *, dry_run: bool = False) -> dict[str, Any]:
         """설정 파일을 다시 읽어 **프리셋과 저장소만** 갈아 끼운다(M5m). 재시작이 아니다.
+
+        `dry_run=True`(M5o 결정 124)는 같은 로드 · 같은 거절을 돌리고 **대입만 하지 않는다** —
+        무엇이 바뀔지(바뀐 프리셋마다 키 **이름**)를 돌려주고 끝난다. 세대도 안 올리고 다시 재지도
+        않는다. `include` 로 들인 파일도 같이 다시 읽는다(결정 121).
 
         재시작은 로컬 레인에서 도는 잡을 `lost` 로 만든다. 프리셋 하나를 고치자고 그 값을 치를
         이유가 없다 — 프리셋은 claim 마다 `self.config.preset(name)` 로 새로 찾으므로, 설정
@@ -4422,6 +4426,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                 for name in before_presets.keys() & after_presets.keys()
                 if before_presets[name] != after_presets[name]
             ),
+            # 바뀐 프리셋마다 **어느 키가** — 이름만, 값은 절대 안 싣는다(env · argv)
+            "presets_changed_keys": {
+                name: changed_keys(before_presets[name], after_presets[name])
+                for name in sorted(before_presets.keys() & after_presets.keys())
+                if before_presets[name] != after_presets[name]
+            },
             "repos_added": sorted(after_repos.keys() - before_repos.keys()),
             "repos_removed": sorted(before_repos.keys() - after_repos.keys()),
             "repos_changed": sorted(
@@ -4430,6 +4440,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                 if before_repos[name] != after_repos[name]
             ),
         }
+        files = {"config": str(fresh.path), "includes": [str(p) for p in fresh.includes]}
+        if dry_run:
+            self.log(f"reload dry-run: {reload_summary(changed)} · from {fresh.path}")
+            return {"dry_run": True, **files, **changed}
         # 한 번의 대입 — 그리고 **설정을 제 손에 들고 있는 긴 수명 객체들**에도 같은 대입을
         # 해 줘야 한다. 로컬 워커는 claim 할 때 `self.config.preset(job.preset)` 를 제가 들고
         # 있는 객체에서 찾고(worker.py), Janitor 는 만료된 버전의 저장소를 제 것에서 찾는다.
@@ -4456,7 +4470,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self._mark_dirty()
         self._publish_server()
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
-        return {"reloaded": True, "config": str(fresh.path), **changed}
+        return {"reloaded": True, **files, **changed}
 
     def pause(self, token: TokenInfo) -> dict[str, Any]:
         self.store.set_paused(token.name, self.now_fn())
@@ -4656,6 +4670,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             # 잡이 보게 될 환경을 **서버가 자기 환경으로** 잰 것(M5m, 정보 — 503 조건은 아니다).
             # `rcm check` 의 셸 검사와 달리 launchd·systemd 의 환경을 본다.
             "preset_env": self.preset_env,
+            # `POST /reload {"dry_run": true}` 를 안다(M5o 결정 124). 옛 서버는 본문을 무시하고
+            # **진짜 reload 를 해 버린다** — `rcm reload --dry-run` 은 이 키가 있을 때만 보낸다
+            "reload_dry_run": True,
         }
         if not ok:
             if not db_ok:
@@ -5048,8 +5065,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/reload":
             self._only(method, "POST")
             self.app.require_admin(self._token())
-            self._json_body()  # 본문은 무시하되 읽어서 연결을 깨끗이 둔다
-            self._send_json(200, self.app.reload_config())
+            body = self._json_body()
+            dry_run = body.get("dry_run", False) if isinstance(body, dict) else False
+            if not isinstance(dry_run, bool):
+                raise ApiError(400, "dry_run must be true or false")
+            self._send_json(200, self.app.reload_config(dry_run=dry_run))
             return
         if path == "/pause" or path == "/resume":
             self._only(method, "POST")
