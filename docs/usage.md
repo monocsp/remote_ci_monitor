@@ -464,7 +464,12 @@ new, and both are about a machine, not your code:
 
 ## 12. What to do next
 
-- Write the preset your team actually needs: [Configuration](configuration.md).
+- Write the preset your team actually needs: [Configuration](configuration.md). A project's presets
+  can live in their own file that `server.toml` brings in with `include`
+  ([presets in their own file](configuration.md#presets-in-their-own-file-include)).
+- Change a preset without a restart: edit the file, run `rcm reload --dry-run` to see which presets
+  and which keys would change (names only, never values), then `rcm reload` to apply it
+  ([change a preset without a restart](operating.md#change-a-preset-without-a-restart)).
 - Run two jobs at once. Set `[server] lanes = 2` — lane 2 only picks up work while the machine has
   CPU to spare, so it is safe to try. If the queue says `held by load`, that is the machine telling
   you it is full: [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).

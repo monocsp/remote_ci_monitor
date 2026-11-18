@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import fields
+from typing import Any
 
 #: 출력 순서 — 들어온 것, 바뀐 것, 빠진 것. 「없어졌다」가 맨 뒤라 눈에 띈다.
 _ORDER: tuple[tuple[str, str], ...] = (
@@ -31,3 +33,14 @@ def reload_summary(changed: Mapping[str, Sequence[str]]) -> str:
         if (names := list(changed.get(key) or []))
     ]
     return " · ".join(parts) if parts else "nothing changed"
+
+
+def changed_keys(before: Any, after: Any) -> list[str]:
+    """두 프리셋(데이터클래스)에서 값이 다른 **키 이름**만, 이름순으로(M5o 결정 124).
+
+    값은 돌려주지 않는다 — `env` 에 토큰이, `argv` 에 무엇이 있을지 모른다. 응답 · 로그 · 화면에
+    실리는 것은 「`env` 가 바뀌었다」까지다.
+    """
+    return sorted(
+        f.name for f in fields(before) if getattr(before, f.name) != getattr(after, f.name)
+    )

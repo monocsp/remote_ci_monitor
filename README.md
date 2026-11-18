@@ -201,7 +201,7 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 | `rcm machines [--json] [--machine ID]` | every machine that runs jobs: host, pool, lanes, its environment fingerprint (`xcode 27.2 · flutter 3.47.8`) and how many presets it can run, with the reasons for the rest. `--machine` shows one machine's verdict per preset and its checks ([machines](docs/configuration.md#which-machine-runs-a-job)) |
 | `rcm recheck MACHINE [CHECK…]` | run a machine's check presets again after you fixed it (admin) |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
-| `rcm reload` | re-read the config file — presets and repos only, no restart (admin) |
+| `rcm reload [--dry-run]` | re-read the config file and its `include` files — presets and repos only, no restart (admin); `--dry-run` names what would change and applies nothing |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | store version drafts (admin). With no version arguments `new` asks only for the names, offering the server's hints: enter takes the hint, `-` skips that store, `--yes` takes both. `open` prints the address of the version page |
 

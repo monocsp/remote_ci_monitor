@@ -187,7 +187,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 | `rcm machines [--json] [--machine ID]` | 잡을 돌리는 머신 전부: 호스트 · 풀 · 레인 · 환경 지문(`xcode 27.2 · flutter 3.47.8`) · 돌릴 수 있는 프리셋 수와 나머지의 사유. `--machine` 은 한 머신의 프리셋별 판정과 점검([머신](docs/configuration.md#which-machine-runs-a-job)) |
 | `rcm recheck MACHINE [CHECK…]` | 머신을 고친 뒤 그 머신의 점검 프리셋을 다시 건다(관리자) |
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류만 취소된다) · 큐 일시정지·재개(관리자) |
-| `rcm reload` | 설정 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자) |
+| `rcm reload [--dry-run]` | 설정 파일과 `include` 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자). `--dry-run` 은 바뀔 것의 이름만 보이고 아무것도 안 바꾼다 |
 | `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | 스토어 버전 드래프트(관리자). 버전 인자가 없으면 `new` 는 **이름만** 묻고 서버의 힌트를 기본값으로 준다 — 엔터는 힌트, `-` 는 그 스토어를 건너뛴다, `--yes` 는 둘 다 힌트로. `open` 은 버전 페이지의 주소를 찍는다 |
 
