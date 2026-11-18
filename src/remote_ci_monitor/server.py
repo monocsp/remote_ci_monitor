@@ -5793,6 +5793,10 @@ def _int_param(
 class RcmHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # listen 백로그. socketserver 기본은 5 라 연결 6 개가 한꺼번에 오면 macOS 가 남는 것을 끊었다
+    # (클라이언트에는 BrokenPipe/ConnectionReset — 동시 취소 시험이 10 번에 한 번 빨개졌다).
+    # 워커 · 웹 · `rcm wait` 여럿이 겹치는 운영도 같다. 동시 처리 상한은 여전히 `slots` 가 정한다.
+    request_queue_size = 128
 
     def __init__(self, address: tuple[str, int], app: App | None = None):
         # `app` 없이도 만들 수 있다 — `serve()` 는 포트를 **먼저** 잡고 그 다음에 DB 를 연다
