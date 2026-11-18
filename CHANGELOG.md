@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-18
+
 ### Added
 - **A new push can clear your older job for the same branch.** A preset with
   `supersede = "waiting"` or `"all"` lets a new job, when it enters the queue, cancel the older
@@ -1712,7 +1714,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/monocsp/remote_ci_monitor/compare/v0.4.3...v0.4.4
