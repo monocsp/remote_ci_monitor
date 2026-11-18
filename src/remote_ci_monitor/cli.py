@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import tarfile
@@ -45,6 +46,7 @@ from remote_ci_monitor.config import (
     ServerConfig,
     load_client_config,
     load_server_config,
+    server_base_url,
     user_config_dir,
 )
 from remote_ci_monitor.core import artifacts as art_core
@@ -2530,6 +2532,15 @@ def _release_row(
     return (f"release {repo}", True, detail)
 
 
+def _public_url_row(section: Any) -> tuple[str, bool | None, str]:
+    """잡 링크의 앞부분(M5o 결정 120). 비어 있으면 warn — 실패는 아니지만 알림 · `rcm run` 의 링크가
+    서버가 고른 이름으로 나간다는 것을 그 주소와 함께 말한다(`config.server_base_url`)."""
+    url = server_base_url(section, hostname=socket.gethostname())
+    if section.public_url:
+        return ("public url", True, url)
+    return ("public url", None, f"empty — links use {url} (set [server] public_url)")
+
+
 def local_presets_row(cfg: ServerConfig) -> tuple[str, bool | None, str]:
     """`rcm check` 의 `local presets` 행 — 로컬 설정의 프리셋 수를 파일별로(M5o §4.1).
 
@@ -2627,6 +2638,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             # `--server` 가 가리키는 서버의 디렉터리가 아니다. 이름과 출처가 그렇게 말한다(M5i I4).
             state = "writable" if writable else "not writable"
             rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
+            rows.append(_public_url_row(cfg.server))
             rows.append(local_presets_row(cfg))
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:

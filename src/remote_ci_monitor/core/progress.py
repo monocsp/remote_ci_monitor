@@ -56,13 +56,27 @@ MAX_PROGRESS_UNITS = 500
 MAX_FAIL_NAMES = 100
 
 
+#: 이름에서 지우는 글자 중 C0 · DEL 밖의 것: C1 제어 문자(U+0080–U+009F — NEL 은 터미널과
+#: `str.splitlines()` 가 줄을 나눈다), 줄 · 문단 구분자(U+2028 · U+2029), 아랍 글자 표시(U+061C).
+#: 이름은 한 줄이다 — 줄을 나누는 글자가 남으면 `RCM_FAILURES` 를 줄로 읽는 훅이 이름 수를 잘못
+#: 세고, `rcm top` 의 줄이 터미널에서 갈라진다(M5o 검증 라운드 1).
+_NAME_DROP = frozenset({0x2028, 0x2029, 0x061C})
+
+
 def clean_name(text: str) -> str:
     """스텝·실패 이름에서 제어문자와 홀로 남은 서로게이트를 지운다(줄바꿈·탭도 지운다).
 
-    `core/notify.sanitize_text` 와 같은 규칙이되 **한 줄 이름**이라 개행도 안 남긴다.
+    `core/notify.sanitize_text` 와 같은 규칙이되 **한 줄 이름**이라 개행도 안 남긴다. C1 제어
+    문자와 줄 구분자(`_NAME_DROP`)도 지운다 — 대장 · `failed_step` · 알림 env · 요약의 입구가
+    여기다.
     """
     return "".join(
-        ch for ch in text if ord(ch) >= 0x20 and ord(ch) != 0x7F and not 0xD800 <= ord(ch) <= 0xDFFF
+        ch
+        for ch in text
+        if ord(ch) >= 0x20
+        and not 0x7F <= ord(ch) <= 0x9F
+        and ord(ch) not in _NAME_DROP
+        and not 0xD800 <= ord(ch) <= 0xDFFF
     ).strip()
 
 

@@ -187,6 +187,10 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    shows `last step <name>`, which says where the job was when it ended and claims nothing about
    the cause. A script that runs several things in parallel and replays their logs afterwards
    would otherwise have the last replayed heading blamed for a failure that happened earlier.
+   When your script printed no summary of its own, the summary names the first thing it reported
+   instead of a bare exit code: `test: x_test.dart +1 more (exit 1)`, or `analyze failed (exit 1)`
+   when it only declared the step. The same line reaches the queue, `rcm wait` and the
+   notification hooks ([Saying what failed](configuration.md#saying-what-failed)).
 2. **Where to look next.** Every non-zero exit prints `log: rcm logs <N>` and the job URL —
    including exit 3, where you know least. Under it, one line per name your script reported with
    `::rcm::fail::<name>`, saying how often each was red in the recent runs of the same preset:

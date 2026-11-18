@@ -6,6 +6,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
+     `notify-link-zero-address`(링크에 `0.0.0.0`) · `failure-summary-full-path`(요약에 경로 전체)
   M5o C — `include-*` 둘: 들인 파일의 권한 검사 제거 · 들인 파일의 `[[repos]]` 허용 +
      `reload-dry-run-assigns`: dry-run 이 대입까지 감 (`docs/m5o-workplan.md` §4)
   M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
@@ -127,6 +129,38 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5o B — 실패를 이름으로 말한다 · 링크에 0.0.0.0 이 없다 (`docs/m5o-workplan.md` §3) ──
+    Mutant(
+        # 원격 finish 만 옛 요약으로 돌아간다 — 어느 레인이 집었나가 요약 글자를 바꾼다(B7)
+        name="failure-summary-remote-old-text",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            code, args = oc.code, oc.args\n",
+        new=(
+            "            code, args = oc.code, oc.args\n"
+            '            if code == "exit_code":\n'
+            '                summary, code, args = outcome.summary("exit_code", code=rc)\n'
+        ),
+        tests=(
+            "tests/test_failure_summaries_m5o.py::"
+            "test_b7_local_lane_and_remote_worker_write_the_same_summary",
+        ),
+    ),
+    Mutant(
+        # `bind` 를 그대로 링크에 넣는다 — 운영 알림 3,721건의 `http://0.0.0.0:8787/...`
+        name="notify-link-zero-address",
+        path="src/remote_ci_monitor/config.py",
+        old="    if bind not in ANY_BINDS:\n",
+        new="    if True:\n",
+        tests=("tests/test_notify_links_m5o.py",),
+    ),
+    Mutant(
+        # 요약의 첫 이름이 경로 전체다 — 공개 문서에 작업 공간 구조가 실리고 80자가 경로로 찬다
+        name="failure-summary-full-path",
+        path="src/remote_ci_monitor/core/outcome.py",
+        old='    name = parts[-1].strip()[:MAX_FAIL_ARG].strip() if parts else ""',
+        new='    name = "/".join(parts)[:MAX_FAIL_ARG].strip() if parts else ""',
+        tests=("tests/test_failure_summaries_m5o.py",),
+    ),
     # ── M5o C — 프리셋을 파일에서 읽는다 · reload --dry-run (docs/m5o-workplan.md §4) ──
     Mutant(
         # 권한 검사가 없다 — 그룹 · 남이 쓸 수 있는 파일이 서버가 실행할 argv 를 정한다(결정 122)

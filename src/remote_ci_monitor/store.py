@@ -1336,6 +1336,15 @@ class Store:
 
     # ── 실패 이름 대장 (M5h) ────────────────────────────────────────────────
 
+    def failure_names(self, job_id: int) -> list[str]:
+        """그 잡의 실패 이름 대장 — **잡이 찍은 순서**(`seq`). 없으면 빈 목록(M5o 결정 119)."""
+        return [
+            str(r[0])
+            for r in self._conn()
+            .execute("SELECT name FROM job_failures WHERE job_id=? ORDER BY seq", (job_id,))
+            .fetchall()
+        ]
+
     def failure_stats(
         self, job_id: int, key: str, finished_at: datetime | None, *, window: int
     ) -> tuple[list[FailureRow], int, int]:
