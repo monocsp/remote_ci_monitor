@@ -420,10 +420,13 @@ SCENES: dict[str, dict[str, Any]] = {
 class Served:
     """한 장면을 내주는 가짜 rcm. `swap()` 으로 다음 조회의 문서를 바꾼다."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, page_now: datetime | None = None):
+        """`page_now` 를 주면 페이지의 「지금」이 그 시각이다 — 페이지는 `generated_at` 으로
+        시계 차이를 재므로, 문서의 시각을 그만큼 밀면 브라우저 시계를 안 건드리고 시각을 고른다."""
         self.name = name
         self.spec = SCENES[name]
-        self.delta = datetime.now(UTC).replace(microsecond=0) - FIXTURE_NOW
+        at = datetime.now(UTC) if page_now is None else page_now.astimezone(UTC)
+        self.delta = at.replace(microsecond=0) - FIXTURE_NOW
         self.srv = FakeRcm(static_dir=WEB)
         self.doc = self.spec["doc"]()
         self.swap(self.doc)
@@ -755,8 +758,17 @@ def updated_doc(doc: dict) -> dict:
     return new
 
 
-def test_rows_keep_their_height_through_ticks_and_updates(tmp_path):
-    served = Served("long-text")
+# 픽스처의 표시 시간대(Asia/Seoul)로 자정 10분 전 — 대기 행의 도착 시각이 다음 날로 넘어가
+# 날짜를 단다. 고치기 전에는 그 긴 시각이 도착 칸을 152px 너머로 키웠고, 갱신마다 표가 칸 폭을
+# 다시 나눠 행이 움직였다(2026-11-18 23:50 KST 의 CI 세 판이 함께 빨갰다 — 그 시각에만 나는 실패).
+BEFORE_MIDNIGHT_KST = datetime(2026, 11, 18, 14, 50, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "page_now", [None, BEFORE_MIDNIGHT_KST], ids=["now", "before-midnight-kst"]
+)
+def test_rows_keep_their_height_through_ticks_and_updates(tmp_path, page_now):
+    served = Served("long-text", page_now)
     moved: dict[tuple[int, str], list[str]] = {}
     try:
         with Chrome(tmp_path / "chrome-shift", window="1280,900") as c:
