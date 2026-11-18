@@ -13,6 +13,12 @@ of a key bumps that number and is listed here.
   could be reset on macOS (the client saw a broken pipe or a connection reset). Workers, web
   pages and several `rcm wait` clients can overlap like this. The backlog is now 128; the number
   of requests handled at once is still `max_concurrent_requests`.
+- **`rcm check` no longer fails a preset that sets the variable itself.** A preset that lists
+  `JAVA_HOME` in `env_passthrough` and also sets it in `[presets.env]` (the fix this row
+  recommends) was still drawn as `JAVA_HOME unset` in `service preset tools`, and the server's
+  start line said the same, although the job received the preset's value. A name the preset sets
+  now counts as present on the server, and on a remote worker once that worker runs this
+  version (an older worker keeps reporting the name; it is shown, and never blocks placement).
 
 ## [0.6.0] - 2026-11-18
 

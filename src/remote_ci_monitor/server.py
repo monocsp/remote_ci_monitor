@@ -4715,7 +4715,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         for preset in self.config.presets:
             if not preset.requires and not preset.env_passthrough:
                 continue
-            absent = jobenv.missing_passthrough(preset.env_passthrough, env_source)
+            absent = jobenv.missing_passthrough(
+                preset.env_passthrough, env_source, preset_env=preset.env
+            )
             env = jobenv.job_env(preset.env_passthrough, preset.env, env_source)
             measured[preset.name] = {
                 "missing_passthrough": list(absent),
