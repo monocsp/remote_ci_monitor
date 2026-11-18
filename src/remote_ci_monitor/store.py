@@ -70,6 +70,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
+from remote_ci_monitor.core.supersede import SUPERSEDED, superseded_by
 
 #: 실패 대장 창(`failure_stats`)에서 빼는 요약 코드 — 프로세스가 뜨기 **전**에 서버가 닫은 잡
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
@@ -2556,6 +2557,88 @@ class Store:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+
+    def supersede(
+        self,
+        new_id: int,
+        old_ids: Iterable[int],
+        now: datetime,
+        *,
+        mode: str,
+        grace_seconds: float,
+    ) -> list[int]:
+        """새 잡 N 이 옛 잡들을 치운다 — **한 트랜잭션**(M5o §2.3 · §2.5). 처리한 id(오름차순).
+
+        트랜잭션 **안에서** 새 잡과 후보를 다시 읽어 `core.supersede.superseded_by` 로 다시
+        판정한다. 호출자의 후보 목록은 트랜잭션 밖에서 읽은 스냅샷이라 그새 합류자가 붙었거나
+        사람이 취소했거나 다른 새 잡이 먼저 치웠을 수 있다(A17 · A18). `BEGIN IMMEDIATE` 가
+        쓰는 쪽을 줄 세우므로 두 새 잡이 동시에 와도 서로를 치우는 일은 없다 — 규칙 7(id) 이
+        방향을 정하고, 이미 끝난 새 잡은 아무것도 치우지 않는다.
+
+        기다리는 잡은 바로 `cancelled`, 도는 잡은 `request_cancel` 과 같은 `cancelling`(SIGTERM ·
+        유예 · 원격 워커는 heartbeat 응답) — 취소 주체는 `superseded`. 요약 칸은 도는 잡에도 지금
+        써 둔다: N 을 기억할 자리가 거기뿐이고(DB 를 안 바꾼다), 끝날 때 `finish` 가 다시 쓴다.
+        N 의 우선순위는 처리한 잡들과의 max 로만 오른다(결정 115).
+        """
+        wanted = {int(i) for i in old_ids}
+        if not wanted:
+            return []
+        conn = self._conn()
+        ts = _ts(now)
+        text, code, args = outcome.summary(SUPERSEDED, by=int(new_id))
+        taken: list[int] = []
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (new_id,)).fetchone()
+            new = self._row_to_job(conn, row) if row is not None else None
+            if new is None or new.state not in ACTIVE_STATES:
+                conn.execute("ROLLBACK")
+                return []
+            marks = ",".join("?" * len(wanted))
+            olds = [
+                self._row_to_job(conn, r)
+                for r in conn.execute(
+                    f"SELECT * FROM jobs WHERE id IN ({marks}) ORDER BY id", tuple(sorted(wanted))
+                ).fetchall()
+            ]
+            by_id = {j.id: j for j in olds}
+            top = new.priority
+            for job_id in superseded_by(new, olds, mode):
+                old = by_id[job_id]
+                if old.state in WAITING_STATES:
+                    self._set_state(
+                        conn,
+                        job_id,
+                        CANCELLED,
+                        ts,
+                        finished_at=ts,
+                        cancelled_by=SUPERSEDED,
+                        summary=text,
+                        summary_code=code,
+                        summary_args=dump_args(args),
+                    )
+                else:  # RUNNING — `superseded_by` 가 mode 로 이미 걸렀다
+                    self._set_state(
+                        conn,
+                        job_id,
+                        CANCELLING,
+                        ts,
+                        cancel_requested_at=ts,
+                        cancel_by=SUPERSEDED,
+                        cancel_kill_at=ts + grace_seconds,
+                        summary=text,
+                        summary_code=code,
+                        summary_args=dump_args(args),
+                    )
+                top = max(top, old.priority)
+                taken.append(job_id)
+            if top > new.priority:
+                conn.execute("UPDATE jobs SET priority=? WHERE id=?", (int(top), new.id))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return taken
 
     def finish(
         self,

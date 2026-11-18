@@ -142,7 +142,9 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 #   env_passthrough (default: PATH HOME LANG) · [presets.env] · requires (tools the job must find in
 #   its own environment before it starts — names or absolute paths; missing → failed, tool_missing)
 #   · placement ("pool" | "any-capable") · concurrency_scope ("pool" | "host" | "global") · checks
-#   (check presets that must pass on a machine first) · check_ref · sample (false: not in medians).
+#   (check presets that must pass on a machine first) · check_ref · sample (false: not in medians)
+#   · supersede ("off" | "waiting" | "all" — clear older jobs of the same branch when a new one
+#   queues; default "off"). See docs/configuration.md, "Superseding older jobs of the same branch".
 #   Machines and placement: docs/configuration.md, "Which machine runs a job".
 # Input keys: name · type = "choice" | "string" | "int" | "bool" · choices (choice) · pattern (string)
 #   · default · description.
@@ -169,6 +171,8 @@ expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back
 # artifacts_on = "failure"                # "always" (default) | "failure" — when to collect
+# supersede = "all"                       # "off" (default) | "waiting" | "all" — a new job of the same
+#                                         # branch, inputs and requester clears the older one
 # requires = ["fvm", "gitleaks"]          # looked up in the job's PATH right before it starts;
 #                                         # missing → the job fails with tool_missing, nothing runs
 env_passthrough = ["PATH", "HOME", "LANG"]

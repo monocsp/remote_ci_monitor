@@ -236,6 +236,22 @@ Two people testing the same commit should not queue twice.
    run, no second wait, the same result for both. `--no-join` opts out, and cancelling a joined job
    only removes you from the list.
 
+### When you push again
+
+If the preset sets `supersede` ([configuration](configuration.md#superseding-older-jobs-of-the-same-branch)),
+a new job for the same branch, preset and inputs clears your older one when it enters the queue —
+no need to find it and cancel it yourself. The old job ends `cancelled` with the summary
+`superseded by #57`, and a session still waiting on it gets exit code 2 and one line saying where
+to look next:
+
+```
+$ rcm wait --job 41
+#41 superseded by #57 — rcm wait --job 57
+```
+
+Only your own jobs are cleared, and only when nobody else has joined them. `rcm run --no-supersede`
+keeps the older job for this one submission (to run a flaky test twice side by side).
+
 ## 8. Getting the files back
 
 A job that regenerates files leaves them on the build machine. `--fetch-artifacts` brings them

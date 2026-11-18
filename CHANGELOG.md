@@ -7,6 +7,19 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **A new push can clear your older job for the same branch.** A preset with
+  `supersede = "waiting"` or `"all"` lets a new job, when it enters the queue, cancel the older
+  jobs that ask the same question: same preset, repository, branch and inputs, a different tree or
+  commit, the same requester and no one else joined. `waiting` clears only jobs that have not
+  started; `all` also stops a running one the usual way (SIGTERM, grace, a remote worker hears it
+  in its heartbeat). The cleared job ends `cancelled` with the summary `superseded by #N`, the
+  new job takes over a higher priority, and `rcm wait` on the old job exits 2 with one more line,
+  `#41 superseded by #57 — rcm wait --job 57`. Queue rows and `GET /jobs/<id>` gain
+  `superseded_by` (`schema_version` unchanged); the web page links `#N`. `rcm run --no-supersede`
+  (API `"supersede": false`) keeps the older job for one submission. The default is `"off"`, so
+  nothing changes until a preset turns it on.
+
 ### Fixed
 - **A job a remote worker had just claimed is no longer marked `lost`.** The worker takes its
   job list for a heartbeat before sending it; when a lane's claim landed on the server in that

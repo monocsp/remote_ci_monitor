@@ -45,6 +45,7 @@ from remote_ci_monitor.core.model import (
     WorkerInfo,
 )
 from remote_ci_monitor.core.progress import Marker, parse_marker, progress_from_markers
+from remote_ci_monitor.core.supersede import successor_of
 from remote_ci_monitor.materialize import (
     MaterializeError,
     assemble_from_manifest,
@@ -124,6 +125,21 @@ class Outcome:
         return iter((self.state, self.summary, self.failed_step))
 
 
+def cancel_outcome(job: Job) -> tuple[str | None, str | None, dict[str, Any]]:
+    """취소로 끝나는 잡의 요약 세 값. 로컬 레인 · 원격 워커 보고 · 서버가 닫는 미확인 취소가
+    같이 쓴다.
+
+    새 잡에 밀려난 잡(M5o)은 `superseded by #N` 을 지킨다 — 취소 요청 때 써 둔 N 이 그 잡을
+    기억하는 유일한 자리라, 여기서 `cancelled by superseded` 로 덮으면 `rcm wait` 가 N 을 잃는다.
+    """
+    successor = successor_of(job)
+    if successor is not None:
+        return outcome.summary("superseded", by=successor)
+    if job.cancel is not None:
+        return outcome.summary("cancelled_by", by=job.cancel.by)
+    return None, None, {}
+
+
 def outcome_for(
     job: Job,
     markers: Sequence[Marker],
@@ -159,10 +175,7 @@ def outcome_for(
         state, summary, code, args = LOST, lost_summary, lost_code, dict(lost_args or {})
     elif cancelled:
         state = CANCELLED
-        if job.cancel is not None:
-            summary, code, args = outcome.summary("cancelled_by", by=job.cancel.by)
-        else:
-            summary = None
+        summary, code, args = cancel_outcome(job)
     elif timed_out:
         state = TIMED_OUT
         summary, code, args = outcome.summary("timed_out", seconds=job.timeout_seconds)
@@ -411,10 +424,7 @@ class Worker(threading.Thread):
         current = self.store.get_job(job.id) or job
         if current.state != CANCELLING:
             return
-        if current.cancel is not None:
-            text, code, args = outcome.summary("cancelled_by", by=current.cancel.by)
-        else:
-            text, code, args = None, None, {}
+        text, code, args = cancel_outcome(current)
         self.store.finish(
             job.id,
             CANCELLED,

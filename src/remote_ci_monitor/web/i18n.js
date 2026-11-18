@@ -610,6 +610,7 @@
     // ── 서버가 만든 요약(결정 37) ────────────────────────────────────────────
     "outcome.cancelled_before_start": "cancelled before start",
     "outcome.cancelled_by": function (a) { return "cancelled by " + a.by; },
+    "outcome.superseded": function (a) { return "superseded by #" + a.by; },
     "outcome.server_restarted": function (a) { return "server restarted " + a.at; },
     "outcome.server_restarted_during_upload": "server restarted during upload",
     "outcome.server_stopped_while_running": "server stopped while running",
@@ -1660,6 +1661,7 @@
 
     "outcome.cancelled_before_start": "시작 전에 취소됨",
     "outcome.cancelled_by": function (a) { return withJosa(a.by, "이/가") + " 취소함"; },
+    "outcome.superseded": function (a) { return "새 작업 #" + a.by + " 에 밀려 취소됨"; },
     "outcome.server_restarted": function (a) { return a.at + " 서버 재시작"; },
     "outcome.server_restarted_during_upload": "업로드 중 서버 재시작",
     "outcome.server_stopped_while_running": "실행 중 서버가 멈춤",

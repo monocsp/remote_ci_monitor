@@ -38,6 +38,7 @@ from remote_ci_monitor.core.model import (
     Preset,
 )
 from remote_ci_monitor.core.notify import NotifyRule
+from remote_ci_monitor.core.supersede import SUPERSEDE_MODES, SUPERSEDE_OFF
 
 ENV_PREFIX = "RCM"
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
@@ -551,6 +552,7 @@ _PRESET_KEYS = {
     "checks",
     "check_ref",
     "sample",
+    "supersede",
 }
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
@@ -797,6 +799,11 @@ def parse_preset(raw: Any) -> Preset:
     sample = raw.get("sample")
     if sample is not None and not isinstance(sample, bool):
         raise ConfigError(f"{where}: sample must be true or false")
+    supersede = raw.get("supersede", SUPERSEDE_OFF)
+    if not isinstance(supersede, str) or supersede not in SUPERSEDE_MODES:
+        raise ConfigError(
+            f'{where}: supersede must be "off", "waiting" or "all", got {supersede!r}'
+        )
     return Preset(
         name=name,
         argv=argv,
@@ -821,6 +828,7 @@ def parse_preset(raw: Any) -> Preset:
         checks=checks,
         check_ref=check_ref,
         sample=sample,
+        supersede=supersede,
     )
 
 

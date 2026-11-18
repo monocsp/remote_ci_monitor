@@ -222,6 +222,21 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    기다리지 않고, 결과는 둘 다 받는다. `--no-join` 으로 끌 수 있고, 합류한 작업을 취소하면 합류만
    빠진다.
 
+### 다시 push 했을 때
+
+프리셋이 `supersede` 를 켜 두었으면([설정](configuration.md#superseding-older-jobs-of-the-same-branch)),
+같은 브랜치 · 프리셋 · 입력의 새 작업이 큐에 들어오는 순간 내 옛 작업을 치운다 — 찾아서 직접
+취소할 필요가 없다. 옛 작업은 `cancelled` 로 끝나고 요약은 `superseded by #57` 이다. 그 작업을
+기다리던 세션은 종료 코드 2 와 함께 다음에 볼 곳을 말하는 한 줄을 받는다.
+
+```
+$ rcm wait --job 41
+#41 superseded by #57 — rcm wait --job 57
+```
+
+치우는 것은 내 작업뿐이고, 다른 사람이 합류해 있으면 치우지 않는다. `rcm run --no-supersede` 는
+이번 제출만 옛 작업을 그대로 둔다(흔들리는 테스트를 두 판 나란히 볼 때).
+
 ## 8. 파일을 돌려받기
 
 파일을 다시 만드는 작업은 그 결과를 빌드 머신에 남긴다. `--fetch-artifacts` 는 그것을 **제출한 그

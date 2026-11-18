@@ -6,6 +6,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
+     잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
      물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15) + 엣지 검증의 둘: 모르는
      호스트가 host 범위를 지나침 · 점검 기록 읽기의 전체 스캔
@@ -125,6 +127,37 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
+    Mutant(
+        # 합류자 이름 검사 제거 — 다른 사람이 기다리는 잡을 내 push 가 죽인다(결정 113)
+        name="m5o-supersede-ignores-joiners",
+        path="src/remote_ci_monitor/core/supersede.py",
+        old="if old.requester.name != owner or any(j.name != owner for j in old.joiners):",
+        new="if old.requester.name != owner:",
+        tests=("tests/test_supersede.py",),
+    ),
+    Mutant(
+        # 업로드 중에 치움 — 새 잡의 업로드가 깨지거나 서버가 다시 뜨면 옛 잡도 새 잡도 없다
+        # (결정 111 · A10 · A11)
+        name="m5o-supersede-while-uploading",
+        path="src/remote_ci_monitor/server.py",
+        old="                self._no_supersede.add(job.id)\n",
+        new=(
+            "                self._no_supersede.add(job.id)\n"
+            "        else:\n"
+            "            self._supersede_after_queue(job.id)\n"
+        ),
+        tests=("tests/test_server_supersede.py",),
+    ),
+    Mutant(
+        # 취소를 닫는 길이 N 을 잊는다 — 원격 워커가 `cancelled` 를 보고하면 요약이
+        # `cancelled by superseded` 가 되고 `rcm wait` 는 따라갈 번호를 잃는다(결정 114)
+        name="m5o-cancel-forgets-successor",
+        path="src/remote_ci_monitor/worker.py",
+        old="    if successor is not None:\n",
+        new="    if False:\n",
+        tests=("tests/test_server_supersede.py",),
+    ),
     # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
     Mutant(
         # 봐주기가 없다 — claim 직전에 찍힌 heartbeat 목록이 방금 넘긴 잡을 lost 로 닫는다

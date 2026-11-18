@@ -134,6 +134,7 @@ from remote_ci_monitor.core.status import (
     status_json,
     step_timeline_json,
 )
+from remote_ci_monitor.core.supersede import SUPERSEDE_OFF, successor_of, superseded_by
 from remote_ci_monitor.events import (
     JOB_KINDS,
     KIND_HOST_SAMPLE,
@@ -373,6 +374,19 @@ def _finish_outcome(code: str, **args: Any) -> dict[str, Any]:
     return {"summary": text, "summary_code": code, "summary_args": clean}
 
 
+def _upload_conflict(job: Job | None, state: str | None = None) -> dict[str, Any]:
+    """업로드 409 본문의 덧붙임 — `state`, 그리고 새 잡에 밀려 취소됐으면 `superseded_by`(M5o A22).
+
+    `rcm run` 이 잡을 다시 조회하지 않고도 「밀려났다」를 말할 수 있게 한다 — 업로드가 실패한
+    자리에서는 표시용 조회를 하지 않는다는 약속이 있다(`--no-wait` 회복력 시험).
+    """
+    out: dict[str, Any] = {"state": state if state is not None else (job.state if job else None)}
+    successor = successor_of(job) if job is not None else None
+    if successor is not None:
+        out["superseded_by"] = successor
+    return out
+
+
 def _redact_url(url: str) -> str:
     """`https://user:token@host/…` 의 userinfo 를 지운다 — 저장소 URL 은 응답에 실리므로."""
     scheme, sep, rest = url.partition("://")
@@ -461,6 +475,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self.retention: Janitor | None = None
         self.notifier: Notifier | None = None
         self._resolve_sem = threading.BoundedSemaphore(RESOLVE_CONCURRENCY)
+        #: `"supersede": false` 로 낸 tree 잡 — 업로드가 끝날 때까지 기억한다(M5o 결정 116).
+        #: 프로세스 안에만 둔다: 재시작은 업로드 중인 잡을 어차피 `cancelled` 로 닫는다.
+        self._no_supersede: set[int] = set()
+        self._no_supersede_lock = threading.Lock()
         self.manifest_slots = threading.BoundedSemaphore(MANIFEST_CONCURRENCY)
         self.transfer_slots = threading.BoundedSemaphore(
             max(1, config.server.max_concurrent_artifact_transfers)
@@ -3623,9 +3641,24 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         pool = self._requested_pool(body, preset)
         placed = self._placement_fields(body, preset, token, pool)
         pool = placed.pop("pool")
+        # 이번 제출은 아무것도 치우지 않는다(M5o 결정 116). 켜기는 없다 — 프리셋 주인이 정한다
+        supersede = body.get("supersede", True)
+        if not isinstance(supersede, bool):
+            raise ApiError(400, "supersede must be true or false")
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
-                preset, inputs, src, label, token, body, host, priority, pool, link, placed
+                preset,
+                inputs,
+                src,
+                label,
+                token,
+                body,
+                host,
+                priority,
+                pool,
+                link,
+                placed,
+                supersede=supersede,
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3686,6 +3719,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             link=link,
             **placed,
         )
+        if not supersede:
+            with self._no_supersede_lock:
+                self._no_supersede.add(job.id)
         self._publish_job(job, job.id)
         return 201, {
             "job_id": job.id,
@@ -3909,7 +3945,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if job.source.mode == MODE_GIT_REF:
             raise ApiError(409, "job takes no tree upload (git_ref source)", state=job.state)
         if job.state != UPLOADING:
-            raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
+            raise ApiError(409, f"job is {job.state}, not uploading", **_upload_conflict(job))
         limit = self.config.server.max_snapshot_bytes
         try:
             manifest = validate_manifest(body, max_bytes=limit)
@@ -3976,8 +4012,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             if not self.store.mark_uploaded(job_id, declared, now):
                 current = self.store.get_job(job_id)
                 st = current.state if current else "unknown"
-                raise ApiError(409, f"job was {st} during upload", state=st)
+                raise ApiError(409, f"job was {st} during upload", **_upload_conflict(current, st))
             state = QUEUED
+            self._supersede_after_queue(job_id)
             self.wake.set()
         self._publish_job(None, job_id)
         return {
@@ -4102,7 +4139,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if not self.store.mark_uploaded(job.id, declared, now):
             current = self.store.get_job(job.id)
             state = current.state if current else "unknown"
-            raise ApiError(409, f"job was {state} during upload", state=state)
+            raise ApiError(
+                409, f"job was {state} during upload", **_upload_conflict(current, state)
+            )
+        self._supersede_after_queue(job.id)
         self._publish_job(None, job.id)
         self.wake.set()
         return {"job_id": job.id, "state": QUEUED, "bytes": received, "blobs": len(stored)}
@@ -4120,6 +4160,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         pool: str = DEFAULT_POOL,
         link: JobLink | None = None,
         placed: dict[str, Any] | None = None,
+        *,
+        supersede: bool = True,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         placed = dict(placed or {})
@@ -4187,6 +4229,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             link=link,
             **placed,
         )
+        if supersede:
+            # 제출이 곧 queued 다 — 이 자리가 git_ref 잡의 「큐에 들어온 순간」이다(M5o 결정 111).
+            # 우선순위를 물려받았을 수 있으니 응답은 다시 읽은 잡으로 쓴다.
+            self._supersede_after_queue(job.id)
+            job = self.store.get_job(job.id) or job
         self._publish_job(job, job.id)
         self.wake.set()
         return 201, {
@@ -4201,6 +4248,50 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             "submission": {"id": sid, "cancel_token": cancel_token},  # 잡 행과 같은 트랜잭션
         }
 
+    def _supersede_after_queue(self, job_id: int) -> list[int]:
+        """잡이 `queued` 가 된 **바로 뒤**에 같은 브랜치의 옛 잡을 치운다(M5o §2 · 결정 111).
+
+        부르는 자리는 둘이다 — tree 잡은 업로드가 끝나 `mark_uploaded` 가 참일 때(manifest ·
+        blob · tar 세 길), git_ref 잡은 제출이 커밋된 뒤. 업로드 중인 새 잡은 아직 아무것도
+        치우지 않으므로 업로드가 깨지거나 서버가 다시 떠도 옛 잡만 남는다(A10 · A11).
+
+        모드는 **지금** 설정의 프리셋에서 읽는다 — reload 로 켠 것은 다음에 queued 가 되는 잡부터
+        먹고, 이미 큐에 있는 잡을 소급해 치우지는 않는다(A20). 후보는 트랜잭션 밖의 스냅샷이고
+        `Store.supersede` 가 안에서 다시 판정한다(A17 · A18).
+
+        실패해도 던지지 않는다: 잡은 이미 큐에 있고, 업로드 응답을 500 으로 만들면 세션은 큐에
+        있는 잡을 실패로 읽는다. 치우지 못한 옛 잡은 오늘처럼 남을 뿐이다.
+        """
+        with self._no_supersede_lock:
+            if job_id in self._no_supersede:
+                self._no_supersede.discard(job_id)
+                return []
+        try:
+            job = self.store.get_job(job_id)
+            preset = self.config.preset(job.preset) if job is not None else None
+            mode = preset.supersede if preset is not None else SUPERSEDE_OFF
+            if job is None or mode == SUPERSEDE_OFF:
+                return []
+            olds = superseded_by(job, self.store.list_active(), mode)
+            if not olds:
+                return []
+            taken = self.store.supersede(
+                job_id,
+                olds,
+                self.now_fn(),
+                mode=mode,
+                grace_seconds=self.config.server.grace_seconds,
+            )
+        except Exception as e:  # noqa: BLE001 — 위 docstring: 큐에 든 잡의 응답을 깨지 않는다
+            self.log(f"supersede after job {job_id} failed: {type(e).__name__}: {e}")
+            return []
+        if taken:
+            self.log(f"job {job_id} superseded " + ", ".join(f"#{i}" for i in taken))
+            for old in taken:
+                self._publish_job(None, old)
+            self.wake.set()
+        return taken
+
     # ── 업로드 ──────────────────────────────────────────────────────────────
 
     def begin_upload(self, job_id: int, token: TokenInfo, length: int) -> Job:
@@ -4212,7 +4303,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if job.source.mode == MODE_GIT_REF:
             raise ApiError(409, "job takes no tree upload (git_ref source)", state=job.state)
         if job.state != UPLOADING:
-            raise ApiError(409, f"job is {job.state}, not uploading", state=job.state)
+            raise ApiError(409, f"job is {job.state}, not uploading", **_upload_conflict(job))
         limit = self.config.server.max_snapshot_bytes
         if length > limit:
             summary, code, args = outcome.summary("snapshot_too_big", bytes=length, limit=limit)
@@ -4260,7 +4351,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             final.unlink(missing_ok=True)
             current = self.store.get_job(job.id)
             state = current.state if current else "unknown"
-            raise ApiError(409, f"job was {state} during upload", state=state)
+            raise ApiError(
+                409, f"job was {state} during upload", **_upload_conflict(current, state)
+            )
+        self._supersede_after_queue(job.id)
         self._publish_job(None, job.id)
         self.wake.set()
         return {"job_id": job.id, "state": QUEUED, "bytes": received}

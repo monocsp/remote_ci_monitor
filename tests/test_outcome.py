@@ -48,6 +48,7 @@ from remote_ci_monitor.worker import format_limit
 PLAUSIBLE: dict[str, dict[str, Any]] = {
     "cancelled_before_start": {},
     "cancelled_by": {"by": "alice@laptop"},
+    "superseded": {"by": 57},
     "server_restarted": {"at": "2026-09-08 01:02:03Z"},
     "server_restarted_during_upload": {},
     "server_stopped_while_running": {},
@@ -84,6 +85,7 @@ PLAUSIBLE: dict[str, dict[str, Any]] = {
 PINNED: list[tuple[str, dict[str, Any], str]] = [
     ("cancelled_before_start", {}, "cancelled before start"),
     ("cancelled_by", {"by": "alice@laptop"}, "cancelled by alice@laptop"),
+    ("superseded", {"by": 57}, "superseded by #57"),
     (
         "server_restarted",
         {"at": "2026-09-08 01:02:03Z"},
