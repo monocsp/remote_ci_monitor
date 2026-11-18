@@ -349,4 +349,72 @@ dolomood 의 `check_presets.py` 가 하던 「레포 명세 ↔ 운영」 비교
 
 ## 10. 구현하며 바뀐 것
 
-(구현 중에 채운다)
+역할마다 격리 에이전트가 구현(#203 A · #202 B · #201 C)했고, 다른 격리 에이전트가 diff 와 이 문서만 보고
+§5 의 표를 시험 서버에서 다시 돌렸다. 아래는 그 둘을 거치며 이 문서와 달라진 것이다.
+
+### 10.1 A — supersede (#203)
+
+1. **같은 풀이어야 한다.** any-capable 잡은 기다린 풀 기준. `--pool linux` 로 낸 잡이 기본 풀의 같은
+   브랜치 잡을 치우면 다른 머신에서 묻는 다른 질문을 지운다.
+2. **안내 줄은 `rcm wait --job N`.** `rcm wait` 는 `--job` 을 요구한다 — `rcm wait N` 은 붙여 넣으면 사용법 오류다.
+3. **`Store.supersede` 는 `mode` · `grace_seconds` 도 받는다.** 트랜잭션 안의 재판정과 도는 잡의 kill 시각에 필요하다.
+4. **원격 워커가 취소를 확인하지 않은 밀려난 잡**은 `cancel_unconfirmed` 대신 `superseded by #N` 을 남긴다 —
+   새 잡 번호가 그 요약에만 있다.
+5. **업로드 중에 밀려난 잡**이 업로드를 마저 보내면 409 와 `{state, superseded_by}` 를 받고, `rcm run` 은
+   그 본문으로 종료 2 · 안내 줄을 낸다.
+6. **tree 잡의 `"supersede": false`** 는 업로드가 끝날 때까지 서버 메모리에 둔다(DB 변경 없음). 업로드가
+   끊기거나 거절되거나 잡이 끝나면 지운다.
+7. **repo 가 빈 잡은 대상이 아니다**(격리 검증). origin 이 없는 서로 다른 로컬 레포 둘이 `main` 에서 서로를
+   치웠다 — 브랜치가 빈 잡과 같은 규칙.
+8. **취소 중인 잡에는 합류하지 않는다**(격리 검증, M5o 이전 동작도 바뀜). alice 의 잡이 밀려나 `cancelling`
+   인 유예 안에 bob 이 같은 트리를 내면 합류해서 bob 의 기다림이 alice 의 새 잡을 가리켰다(결정 113 위반).
+   이제 새 잡을 만든다. CHANGELOG ### Fixed.
+9. **`cancel_requires_submission_token = true` 인 서버에서는 supersede 를 하지 않는다**(리드 결정). 그
+   설정은 남의 잡을 취소 토큰 없이 못 지우게 하는데 supersede 는 토큰 이름만 본다. 잡마다 로그 한 줄,
+   기동 · reload 경고, `/api/health` `supersede_skipped_presets`, `rcm check` warn 행.
+10. **규칙 8 은 양쪽이다**(리드 결정). `--machine` 으로 낸 새 잡 · 점검 잡도 아무것도 치우지 않는다.
+11. 밀려나 취소 중인 큐 행은 `superseded by #N · kill …` 로 그린다(「SIGTERM sent by superseded」 가 아니라).
+
+### 10.2 B — 실패 이름 요약 · 링크 (#202)
+
+1. **타임아웃 문장은 `limit 40m (in test)`**, 인자 이름은 `last_step`. 오늘 문장이 `limit 40m` 이고 운영
+   데이터 · 고정 시험이 그것을 쓴다. `step` 은 「선언한 실패 스텝」이라 이름을 갈랐다.
+2. **인자 `more_truncated: bool`** 을 더했다 — `+19+ more` 를 원시값에서 다시 그리려면 필요하다.
+3. **스텝 없이 단위 이름만 있으면** `x_test.dart +1 more (exit 1)`.
+4. **`RCM_FAILURE_COUNT` 가 잘렸으면 `<저장된 수>+`**(예: `100+`). 대장은 이름을 100개까지 둔다.
+5. **`RCM_FAILURES` 는 실패 스텝 이름도 담는다** — `failures[]` 와 같은 순서. 4 KB 를 넘으면 줄 단위로 버린다.
+6. **웹훅의 `failures` · `failure_count` · `failures_truncated` 는 본문 맨 위**(`job` 옆)에 둔다.
+7. **`exit_summary` 는 `worker.outcome_for` 안에서 한 번** 부른다 — 로컬 · 원격 완료가 이미 그 함수를 같이 쓴다.
+8. **웹 · `rcm top` 도 바꿨다.** 웹은 코드 + 인자로 문장을 다시 그리므로 안 바꾸면 계속 `exit 1` 이었다.
+   타임아웃 요약이 웹에서 `undefined` 로 보이던 옛 버그도 고쳤다.
+9. **`rcm check` 는 `public_url` 이 비면 루프백 bind 에서도 warn.** IPv6 bind 는 대괄호, 빈 hostname 은
+   `localhost`, 요청 Host 가 `0.0.0.0` · `[::]` 면 버린다.
+10. **실패 이름의 C1 제어 문자 · 줄 구분자**(U+0080–U+009F · U+2028 · U+2029 · U+061C)를 마커 입구
+    `progress.clean_name` 에서 지운다(격리 검증, B8). 이 PR 이 한 줄 요약과 줄바꿈으로 묶는 env 라는 새 출구를
+    열었기 때문이다. 양방향 표시 문자(U+202A–U+202E 등)는 저장된 이름 · `failures[]` 에는 남고 요약 · env 에서만 지운다.
+
+### 10.3 C — include · reload --dry-run (#201)
+
+1. **엔드포인트는 `POST /reload`**(admin 토큰) — `/admin/reload` 는 없다.
+2. **`presets_changed` 는 두 응답 모두 이름 목록**으로 두고, 키 이름은 새 키 `presets_changed_keys` 에 담는다.
+   같은 엔드포인트의 같은 키가 응답마다 모양이 다르면 소비자가 깨진다.
+3. **옛 서버 보호.** 옛 서버는 본문을 무시하고 진짜 reload 를 하므로, `/api/health` 에 `reload_dry_run` 이
+   있을 때만 CLI 가 dry-run 을 보낸다. 없으면 종료 2, 아무것도 안 보낸다.
+4. **`rcm check` 행 이름은 `local presets`.** 기존 `presets` 행은 서버가 지금 들고 있는 목록이다.
+5. dry-run 도 서버 로그에 키 이름만의 한 줄을 남긴다.
+6. **`/reload` 본문은 `{}` 또는 `{"dry_run": bool}` 만**(격리 검증). `{"dryrun": true}` · `[true]` 가 진짜
+   reload 를 했다 — 모르는 키 · 객체 아닌 본문은 400. 본문 없음은 지금처럼 진짜 reload.
+7. **들인 파일은 한 번 열어 그 fd 로 검사하고 읽는다**(`os.fstat` · `O_NONBLOCK`, 격리 검증) — 검사와 읽기
+   사이에 파일을 바꿔치기할 틈을 없앴다. FIFO 는 매달리지 않고 거절된다.
+8. 한 들인 파일 **안에서** 겹친 프리셋 이름도 그 파일 이름으로 말한다.
+9. `tools/guard_production.py` 는 그대로다 — 들인 파일에는 `[server]` 가 없고, 레포 체크아웃 안의 들인 파일을
+   보호 대상으로 넣으면 그 레포 세션이 자기 파일을 못 고친다.
+10. **남은 일:** rcm-store-connect 스킬의 `rcm_candidate.py` 는 후보 server.toml 을 임시 폴더에 써서 상대 경로
+    include 가 풀리지 않고, 붙여 넣기 병합이 「defined in both」에 걸린다. 조용히 지나가지 않고 FAIL 로
+    드러난다 — 붙여 넣기 모델을 include 모델로 바꾸는 일이라 §8 의 dolomood 세션 일이다.
+
+### 10.4 공통
+
+- 세 PR 이 CHANGELOG [Unreleased] 와 「N known mutations」(55 → 64)에서 겹쳐 머지 때 리드가 맞췄다.
+- 흔들리는 시험 둘을 다시 봤다(이 마일스톤과 무관): `test_cancel_capability_m5l::test_s6…`(부하에서
+  ConnectionReset/BrokenPipe), `test_server::test_pause_resume…`(ubuntu 3.11 에서 업로드 1초 뒤 큐가 빔).
