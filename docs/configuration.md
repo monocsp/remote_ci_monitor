@@ -123,6 +123,25 @@ start — and nothing is judged until there are `failure_min_jobs` (3) of them. 
 without naming anything stay in the denominator and are reported separately, so the count can
 understate a flaky test but never overstate it.
 
+The names also go into the job's one-line summary — the line `rcm run`, `rcm wait`, the queue and
+the notification hooks show. Instead of `exit 1` it says what failed:
+
+| what the job declared | summary |
+|---|---|
+| a failed step and unit names (`::rcm::fail::test/feature/home/x_test.dart`, …) | `test: x_test.dart +1 more (exit 1)` |
+| only a failed step | `analyze failed (exit 1)` |
+| unit names but no step | `x_test.dart (exit 1)` |
+| nothing | `exit 1` (as before) |
+| more names than the ledger keeps | `test: u0_test.dart +99+ more (exit 1)` — the `+` says the count is a floor |
+| a timeout, with a step open when it ended | `limit 40m (in test)` — where it was, not a claim about the cause |
+
+The first name is shortened to its last path segment and 80 characters; the full list is in
+`failures[]`. Step names never count as units — a declared failed step is the `step` part. A line
+your script printed with `::rcm::summary::` still wins: it is your team's sentence. The summary code
+stays `exit_code` (`timed_out` for a timeout), so a script that filters on `summary_code` keeps
+working; `summary_args` gains `step`, `first`, `more` and `more_truncated` (`last_step` for a
+timeout). A job a remote worker ran gets the same sentence as one a local lane ran.
+
 ### Deploy presets: run a remote ref instead of an upload
 
 Gates run the session's working tree. Deploys and releases should run a **committed, pushed** ref,
@@ -189,6 +208,51 @@ token_file = "~/.config/rcm/tokens/app.token"   # one line: a token that can rea
   this repository is not readable* instead of a git error. The server still starts, so a token can
   be replaced while it runs.
 - Needs git 2.31 or later.
+
+### Presets in their own file: `include`
+
+A project's presets can live in their own file next to `server.toml`, instead of being pasted into
+it. List the files at the very top of `server.toml`, before the first `[section]` (TOML would
+otherwise read `include` as a key of that section, and rcm says so):
+
+```toml
+# ~/.config/rcm/server.toml
+include = ["presets.dolomood.toml"]   # relative to this file's folder; an absolute path or ~ works too
+
+[server]
+...
+```
+
+```toml
+# ~/.config/rcm/presets.dolomood.toml — presets only
+[[presets]]
+name = "gate"
+argv = ["bash", "scripts/gate.sh"]
+```
+
+- **An included file may only hold `[[presets]]`.** `[server]`, `[[repos]]`, `[[notify]]`,
+  `[[probes]]` and another `include` are refused with the file's name: repository tokens, secrets
+  and the bind address stay in `server.toml`. Includes are one level deep.
+- **The file must be owned by the user the server runs as, and not writable by group or others**
+  (`chmod go-w presets.dolomood.toml`). A preset is the argv the server runs; a file anyone can
+  write would decide that argv. `server.toml` itself is not held to this rule.
+- Presets keep their order: the ones in `server.toml` first, then each included file in the order
+  `include` lists them. Everything that checks presets — `checks`, a `[[notify]]` rule's
+  `presets`, duplicate names — runs on the merged list, so an included preset can name one in
+  `server.toml` and the other way round.
+- A name defined in two files is refused: `preset 'gate' is defined in both server.toml and
+  presets.dolomood.toml`. Listing `server.toml` itself, or the same file twice, is refused too.
+- A missing or broken included file stops `rcm serve` like a broken `server.toml` does. `rcm
+  reload` re-reads the included files as well; if one is missing or broken, nothing changes.
+- `rcm check --config server.toml` counts the presets per file:
+  `local presets 24 (server.toml 2 · presets.dolomood.toml 22)`.
+
+**rcm does not fetch the file.** There is no git pull and no URL — only a local path. To use the
+file a repository keeps, point `include` at that repository's checkout on the build machine, and
+decide who moves that checkout and when. Be clear about what that means: **whoever can change an
+included file decides the argv the server runs on the next reload.** If the file is in a
+repository's checkout, everyone who can push to that repository and get the checkout updated has
+that power. Preview what a reload would apply with `rcm reload --dry-run` before you run it.
 
 ## Release profile
 
@@ -857,11 +921,31 @@ Git mirrors are never pruned.
   `RCM_FAILED_STEP` (declared failures only) and `RCM_LAST_STEP`, `RCM_EXIT_CODE`,
   `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
   source (`RCM_SOURCE_MODE`, `RCM_SOURCE_REF`, `RCM_SOURCE_SHA`, `RCM_SOURCE_BASE_SHA`,
-  `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status) and `RCM_INPUTS` (JSON);
+  `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status), `RCM_INPUTS` (JSON),
+  `RCM_FAILURES` (the names the job reported with `::rcm::fail::` and failed steps, in the order it
+  printed them, one per line, at most 20) and `RCM_FAILURE_COUNT` (how many there are in all —
+  `100+` when the job reported more than the ledger keeps; both empty when nothing was named);
   the hook also inherits `PATH`, `HOME` and `LANG`;
-  user strings are sanitised and capped at 4 KB. Each (job, rule) fires exactly once, including
-  jobs that finished while the server was down. Failures are logged and counted
+  user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
+  rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
+  "failures_truncated": false}` with the same 20-name cap. Each (job, rule) fires exactly once,
+  including jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
+- **Job links** — `RCM_URL`, the `url` in the webhook body and the job URL `rcm run` prints start
+  with `[server] public_url` when it is set. Without it the server picks an address another
+  computer can open, never `0.0.0.0`:
+
+  | `bind` | link |
+  |---|---|
+  | a specific address (`100.64.0.5`, `127.0.0.1`) | `http://100.64.0.5:8787` |
+  | `0.0.0.0`, `::` or empty, `advertise` on (the default off loopback) | `http://<host>.local:8787` — the name the server answers for over mDNS |
+  | `0.0.0.0`, `::` or empty, `advertise = false` | `http://<hostname>:8787` |
+
+  A request that reached the server under another name (`rcm run` against a Tailscale name) still
+  gets that name back. `rcm check` shows the link it will use and warns while `public_url` is
+  empty: `warn  public url    empty — links use http://macmini.local:8787 (set [server]
+  public_url)`. Set `public_url` when other computers reach the server under a name of its own
+  (a Tailscale name, a reverse proxy).
 
 ## Parallel lanes without overloading the machine
 

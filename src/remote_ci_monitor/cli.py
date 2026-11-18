@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import tarfile
@@ -45,6 +46,7 @@ from remote_ci_monitor.config import (
     ServerConfig,
     load_client_config,
     load_server_config,
+    server_base_url,
     user_config_dir,
 )
 from remote_ci_monitor.core import artifacts as art_core
@@ -1146,17 +1148,69 @@ def cmd_reload(args: argparse.Namespace) -> int:
     머신에서는 SIGHUP 을 보낼 수가 없다 — 그래서 이 길이 있다. 바뀐 것의 **이름**을 찍는다.
     """
     client = _client(args)
+    dry_run = bool(getattr(args, "dry_run", False))
+    if dry_run:
+        # 옛 서버는 본문을 무시하고 **진짜 reload 를 해 버린다** — 미리 보자던 사람의 설정이
+        # 바뀐다. 서버가 dry-run 을 안다고 말할 때만 보낸다(M5o 결정 124)
+        try:
+            known = bool(client.health().get("reload_dry_run"))
+        except ClientError as e:
+            _err(f"reload --dry-run: cannot reach the server ({e.message}) — nothing was sent")
+            return EXIT_UNKNOWN
+        if not known:
+            _err(
+                "reload --dry-run: this server does not know dry runs and would apply the "
+                "reload — upgrade the server first; nothing was sent"
+            )
+            return USAGE_EXIT
     try:
-        resp = client.reload()
+        resp = client.reload(dry_run=dry_run)
     except ClientError as e:
         _err(f"reload failed: {e.message}")
         return USAGE_EXIT if e.status else EXIT_UNKNOWN
     if getattr(args, "json", False):
         _print_json(resp)
         return 0
+    if dry_run:
+        print("\n".join(render_reload_dry_run(resp)))
+        return 0
     print(reload_summary(resp))
-    print(f"config: {resp.get('config')}")
+    print(f"config: {resp.get('config')}{_includes_suffix(resp)}")
     return 0
+
+
+def _includes_suffix(resp: dict[str, Any]) -> str:
+    """`(+ presets.dolomood.toml)` — 들인 파일의 이름. 없으면 빈 글자(옛 서버도 키가 없다)."""
+    names = [Path(p).name for p in resp.get("includes") or []]
+    return f" (+ {', '.join(names)})" if names else ""
+
+
+#: dry-run 출력의 줄 — (응답 키, 머리말). 머리말은 16칸으로 맞춘다
+_DRY_RUN_ROWS = (
+    ("presets_changed", "presets changed:"),
+    ("presets_added", "presets added:"),
+    ("presets_removed", "presets removed:"),
+    ("repos_changed", "repos changed:"),
+    ("repos_added", "repos added:"),
+    ("repos_removed", "repos removed:"),
+)
+
+
+def render_reload_dry_run(resp: dict[str, Any]) -> list[str]:
+    """`rcm reload --dry-run` 의 글자. 바뀐 프리셋은 `gate (argv, timeout_seconds)` — 키 이름만."""
+    lines = [f"would reload {resp.get('config')}{_includes_suffix(resp)}"]
+    keys = resp.get("presets_changed_keys") or {}
+    for key, label in _DRY_RUN_ROWS:
+        names = list(resp.get(key) or [])
+        if not names:
+            continue
+        if key == "presets_changed":
+            names = [f"{n} ({', '.join(keys[n])})" if keys.get(n) else n for n in names]
+        lines.append(f"  {label:<16} {', '.join(names)}")
+    if len(lines) == 1:
+        lines.append("  nothing would change")
+    lines.append("  nothing applied (--dry-run)")
+    return lines
 
 
 # ── eta · top · jobs · logs · presets (M1) ───────────────────────────────────
@@ -2526,6 +2580,32 @@ def _release_row(
     return (f"release {repo}", True, detail)
 
 
+def _public_url_row(section: Any) -> tuple[str, bool | None, str]:
+    """잡 링크의 앞부분(M5o 결정 120). 비어 있으면 warn — 실패는 아니지만 알림 · `rcm run` 의 링크가
+    서버가 고른 이름으로 나간다는 것을 그 주소와 함께 말한다(`config.server_base_url`)."""
+    url = server_base_url(section, hostname=socket.gethostname())
+    if section.public_url:
+        return ("public url", True, url)
+    return ("public url", None, f"empty — links use {url} (set [server] public_url)")
+
+
+def local_presets_row(cfg: ServerConfig) -> tuple[str, bool | None, str]:
+    """`rcm check` 의 `local presets` 행 — 로컬 설정의 프리셋 수를 파일별로(M5o §4.1).
+
+    `24 (server.toml 2 · presets.dolomood.toml 22)`. 위의 `presets` 행은 **서버가** 지금 들고 있는
+    목록이고 이 행은 **이 파일을** 읽으면 나올 목록이다 — 둘이 다르면 reload 를 안 한 것이다.
+    프리셋이 하나도 없으면 warn(서버는 뜨지만 아무것도 못 돌린다).
+    """
+    files = [p for p in (cfg.path, *cfg.includes) if p is not None]
+    counts = {p: 0 for p in files}
+    for source in cfg.preset_sources.values():
+        counts[source] = counts.get(source, 0) + 1
+    names = [p.name for p in files]
+    parts = [f"{p.name if names.count(p.name) == 1 else p} {counts[p]}" for p in files]
+    total = len(cfg.presets)
+    return ("local presets", True if total else None, f"{total} ({' · '.join(parts)})")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
     rows: list[tuple[str, bool | None, str]] = [python_row()]
@@ -2609,6 +2689,8 @@ def cmd_check(args: argparse.Namespace) -> int:
             # `--server` 가 가리키는 서버의 디렉터리가 아니다. 이름과 출처가 그렇게 말한다(M5i I4).
             state = "writable" if writable else "not writable"
             rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
+            rows.append(_public_url_row(cfg.server))
+            rows.append(local_presets_row(cfg))
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:
                 rows.append(tools_row)
@@ -3340,6 +3422,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     reload_cmd = sub.add_parser(
         "reload", help="re-read the server config — presets and repos only (admin)"
+    )
+    reload_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show which presets and keys would change, apply nothing",
     )
     reload_cmd.add_argument("--json", action="store_true")
     client_opts(reload_cmd)

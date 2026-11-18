@@ -110,6 +110,19 @@ PINNED: list[tuple[str, dict[str, Any], str]] = [
     ("snapshot_rejected", {"kind": "not_a_tarball"}, "snapshot rejected: not a valid tar.gz"),
     ("snapshot_blobs_missing", {"count": 3}, "snapshot rejected: 3 blob(s) missing in upload"),
     ("exit_code", {"code": 1}, "exit 1"),
+    # M5o 결정 117·118 — 이름과 스텝을 알면 먼저 말한다. 인자가 없으면 위 줄 그대로다
+    ("exit_code", {"code": 1, "step": "analyze"}, "analyze failed (exit 1)"),
+    (
+        "exit_code",
+        {"code": 1, "step": "test", "first": "x_test.dart", "more": 1},
+        "test: x_test.dart +1 more (exit 1)",
+    ),
+    (
+        "exit_code",
+        {"code": 1, "step": "test", "first": "u0.dart", "more": 99, "more_truncated": True},
+        "test: u0.dart +99+ more (exit 1)",
+    ),
+    ("exit_code", {"code": 1, "first": "x_test.dart"}, "x_test.dart (exit 1)"),
     # ── 시작 전에 끝난 잡(F2b) ────────────────────────────────────────────────
     # 여기 문장은 코드가 생기기 **전** 워커가 쓰던 문장과 글자까지 같은 것이 많다 — 사용자에게
     # 보이는 글자를 바꾸지 않고 기계가 읽을 사실만 더한 것이 이 작업이다.
@@ -169,6 +182,7 @@ PINNED: list[tuple[str, dict[str, Any], str]] = [
     ("timed_out", {"seconds": 1200}, "limit 20m"),
     ("timed_out", {"seconds": 3600}, "limit 1h"),
     ("timed_out", {"seconds": 90}, "limit 90s"),
+    ("timed_out", {"seconds": 2400, "last_step": "test"}, "limit 40m (in test)"),
     ("worker_error", {"detail": "boom"}, "worker error: boom"),
     ("worker_failed", {}, "failed on the worker"),
     ("worker_stopped_while_running", {}, "worker stopped while running"),

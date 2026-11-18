@@ -1056,7 +1056,8 @@ def test_finish_failed_uses_exit_code_and_the_declared_step(srv):
     srv.log("build-02", b, b"::rcm::step::build\n::rcm::step-end::fail\n::rcm::step::test\n")
     assert srv.finish("build-02", b, "failed", exit_code=1)[0] == 200
     v = srv.view(b)
-    assert v["summary"] == "exit 1" and v["failed_step"] == "build"  # step-end::fail 은 선언이다
+    # step-end::fail 은 선언이다 — 요약도 그 스텝을 말한다(M5o 결정 118)
+    assert v["summary"] == "build failed (exit 1)" and v["failed_step"] == "build"
 
 
 def test_finish_failed_with_a_summary_and_no_exit_code_keeps_the_summary(srv):
@@ -1081,7 +1082,9 @@ def test_finish_timed_out_uses_the_limit_summary(srv):
     assert srv.finish("build-02", jid, "timed_out", exit_code=-9)[0] == 200
     v = srv.view(jid)
     assert v["state"] == TIMED_OUT and v["exit_code"] == -9
-    assert v["summary"] == "limit 1m" and v["failed_step"] is None and v["last_step"] == "build"
+    # 「어디였나」를 인과 없이 붙인다(M5o §3.1 — `in`)
+    assert v["summary"] == "limit 1m (in build)"
+    assert v["failed_step"] is None and v["last_step"] == "build"
     assert v["timeout_seconds"] == 60
 
 

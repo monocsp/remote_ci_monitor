@@ -157,8 +157,9 @@ def outcome_for(
     """종료 규칙 — 상태 · 요약 · failed_step, 그리고 서버가 만든 요약이면 코드와 인자(결정 37).
 
     로컬 워커와 원격 워커 보고(`/worker/.../finish`)가 같은 함수를 쓴다(M5b-2). 요약은 마커의
-    `summary`, 없으면 `exit N`; 취소는 요청자 이름. **잡이 찍은 요약에는 코드가 없다** — 팀이 쓴
-    문장이라 번역 대상이 아니다.
+    `summary`, 없으면 `outcome.exit_summary`(실패 이름 · 스텝을 알면 `test: x_test.dart +1
+    more (exit 1)`, 모르면 `exit N` — M5o); 취소는 요청자 이름. **잡이 찍은 요약에는 코드가
+    없다** — 팀이 쓴 문장이라 번역 대상이 아니다.
     """
     forced = cancelled or timed_out or lost
     progress = progress_from_markers(
@@ -178,7 +179,10 @@ def outcome_for(
         summary, code, args = cancel_outcome(job)
     elif timed_out:
         state = TIMED_OUT
-        summary, code, args = outcome.summary("timed_out", seconds=job.timeout_seconds)
+        # 「어디였나」만 붙인다 — 인과를 주장하지 않는 `in`(M5o §3.1)
+        summary, code, args = outcome.summary(
+            "timed_out", seconds=job.timeout_seconds, last_step=progress.last_step
+        )
     elif rc == 0:
         state, summary = SUCCEEDED, progress.summary  # 잡이 찍은 문장 — 코드 없음
     else:
@@ -186,7 +190,14 @@ def outcome_for(
         if progress.summary:
             summary = progress.summary  # 잡이 찍은 문장 — 코드 없음
         elif rc is not None:
-            summary, code, args = outcome.summary("exit_code", code=rc)
+            # 이름과 스텝을 알면 먼저 말한다(M5o 결정 117·118). 원격 finish 도 이 함수를 지난다
+            summary, code, args = outcome.exit_summary(
+                rc,
+                progress.failed_step,
+                progress.fail_names,
+                [s.name for s in progress.steps],
+                truncated=progress.fail_truncated,
+            )
         else:
             summary = None
     # 스텝 라벨과 실패 이름은 `failed`·`timed_out` 만 갖는다(결정 64). 취소·유실 잡에 스텝

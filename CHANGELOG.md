@@ -23,12 +23,55 @@ of a key bumps that number and is listed here.
   `cancel_requires_submission_token = true` supersede is skipped with a warning in the log and in
   `rcm check` (`/api/health` gains `supersede_skipped_presets`).
   ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
+- **Presets can live in their own files.** `include = ["presets.myproject.toml"]` at the top of
+  `server.toml` brings in more `[[presets]]` — relative to the `server.toml` folder, or an absolute
+  or `~` path — instead of pasting them in. An included file may hold presets only (`[server]`,
+  `[[repos]]`, `[[notify]]`, `[[probes]]` and a nested `include` are refused with the file's name),
+  must be owned by the user the server runs as and not writable by group or others, and a preset
+  name defined in two files is refused naming both. `rcm reload` re-reads the included files, and
+  `rcm check --config` gains a `local presets` row with the count per file. rcm never fetches
+  these files: whoever can change one decides what the server runs on the next reload. ([#201](https://github.com/monocsp/remote_ci_monitor/pull/201))
+- **`rcm reload --dry-run` shows what a reload would apply and applies nothing.** It names each
+  changed preset with the keys that differ — `gate (argv, timeout_seconds)` — never their values,
+  and is refused for the same reasons a reload is (`POST /reload` with `{"dry_run": true}`,
+  `--json` for the response). The reload response gains `includes` and `presets_changed_keys`,
+  and `/api/health` gains `reload_dry_run: true`; the CLI sends a dry run only to a server that
+  reports it, since an older server would ignore the body and apply the reload. ([#201](https://github.com/monocsp/remote_ci_monitor/pull/201))
+
+- **Notification hooks get the names of what failed.** A command hook now receives
+  `RCM_FAILURES` — the names the job reported with `::rcm::fail::` and its failed steps, in the
+  order it printed them, one per line, at most 20 — and `RCM_FAILURE_COUNT` (all of them, `100+`
+  when the job reported more than rcm keeps). A `url` hook's JSON body gains `failures`,
+  `failure_count` and `failures_truncated` next to `job`. ([#202](https://github.com/monocsp/remote_ci_monitor/pull/202))
+- **`rcm check` shows where job links point.** A `public url` row prints the link prefix
+  notifications and `rcm run` will use, and warns (without failing) while `[server] public_url`
+  is empty. ([#202](https://github.com/monocsp/remote_ci_monitor/pull/202))
+
+### Changed
+- **A failed job's summary names what failed instead of saying only `exit 1`.** When the script
+  declared a failed step or reported names with `::rcm::fail::`, the summary reads
+  `test: x_test.dart +1 more (exit 1)` (first name as its last path segment, cut at 80
+  characters) or `analyze failed (exit 1)`; with nothing declared it is still `exit 1`. A timeout
+  adds where the job was: `limit 40m (in test)`. A job's own `::rcm::summary::` line still wins.
+  `summary_code` stays `exit_code` / `timed_out` — only `summary_args` gains keys (`step`,
+  `first`, `more`, `more_truncated`; `last_step`) — and a remote worker's job gets the same
+  sentence as a local lane's. The web page and `rcm top` no longer repeat the step after a summary
+  that already names it. ([#202](https://github.com/monocsp/remote_ci_monitor/pull/202))
 
 ### Fixed
 - **A submission no longer joins a job that is being cancelled.** The same preset, inputs and
   tree used to join a job in `cancelling`, so the joiner's `rcm wait` ended with exit 2 for a
   cancel that was not theirs. Such a submission now creates a new job.
   ([#203](https://github.com/monocsp/remote_ci_monitor/pull/203))
+- **Job links no longer point at `0.0.0.0`.** With `public_url` empty and `bind = "0.0.0.0"` (or
+  `::`), `RCM_URL` and the webhook's job URL were `http://0.0.0.0:8787/...`, which no other
+  computer can open. They now use `http://<host>.local:<port>` when the server advertises itself
+  over mDNS and `http://<hostname>:<port>` when it does not; a specific `bind` and `public_url`
+  work as before, and so does the name a request reached the server under.
+  ([#202](https://github.com/monocsp/remote_ci_monitor/pull/202))
+- **The web page showed `undefined` as a timed-out job's summary.** It read an argument the server
+  never sends; it now draws `limit 40m` from the job's limit like the CLI does.
+  ([#202](https://github.com/monocsp/remote_ci_monitor/pull/202))
 
 ## [0.5.1] - 2026-11-18
 

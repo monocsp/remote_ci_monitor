@@ -187,6 +187,10 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    shows `last step <name>`, which says where the job was when it ended and claims nothing about
    the cause. A script that runs several things in parallel and replays their logs afterwards
    would otherwise have the last replayed heading blamed for a failure that happened earlier.
+   When your script printed no summary of its own, the summary names the first thing it reported
+   instead of a bare exit code: `test: x_test.dart +1 more (exit 1)`, or `analyze failed (exit 1)`
+   when it only declared the step. The same line reaches the queue, `rcm wait` and the
+   notification hooks ([Saying what failed](configuration.md#saying-what-failed)).
 2. **Where to look next.** Every non-zero exit prints `log: rcm logs <N>` and the job URL —
    including exit 3, where you know least. Under it, one line per name your script reported with
    `::rcm::fail::<name>`, saying how often each was red in the recent runs of the same preset:
@@ -480,7 +484,12 @@ new, and both are about a machine, not your code:
 
 ## 12. What to do next
 
-- Write the preset your team actually needs: [Configuration](configuration.md).
+- Write the preset your team actually needs: [Configuration](configuration.md). A project's presets
+  can live in their own file that `server.toml` brings in with `include`
+  ([presets in their own file](configuration.md#presets-in-their-own-file-include)).
+- Change a preset without a restart: edit the file, run `rcm reload --dry-run` to see which presets
+  and which keys would change (names only, never values), then `rcm reload` to apply it
+  ([change a preset without a restart](operating.md#change-a-preset-without-a-restart)).
 - Run two jobs at once. Set `[server] lanes = 2` — lane 2 only picks up work while the machine has
   CPU to spare, so it is safe to try. If the queue says `held by load`, that is the machine telling
   you it is full: [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).

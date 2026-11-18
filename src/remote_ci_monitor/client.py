@@ -752,8 +752,12 @@ class Client:
     def resume(self) -> dict[str, Any]:
         return self.post_json("/resume")
 
-    def reload(self) -> dict[str, Any]:
-        return self.post_json("/reload")
+    def reload(self, *, dry_run: bool = False) -> dict[str, Any]:
+        """`POST /reload`(admin). `dry_run` 은 옛 서버가 **무시하고 진짜 reload 를 하는** 본문이다 —
+        부르는 쪽이 먼저 `health()["reload_dry_run"]` 을 확인한다(`cli.cmd_reload`)."""
+        return (
+            self.post_json("/reload", {"dry_run": True}) if dry_run else self.post_json("/reload")
+        )
 
     def log(self, job_id: int, offset: int = 0) -> tuple[bytes, int, bool]:
         _, headers, body = self._request("GET", f"/jobs/{job_id}/log?offset={offset}")

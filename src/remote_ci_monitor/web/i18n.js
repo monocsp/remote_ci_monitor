@@ -69,6 +69,45 @@
     return v + "s";
   }
 
+  /* 시간 초과 문구. 서버의 `core/outcome._limit`(= `worker.format_limit`)과 **글자까지 같다** —
+     `dur` 와 다른 점은 0 · 1시간 미만의 경계뿐이지만, 저장된 문장과 다르면 결정 37 이 깨진다. */
+  function limit(seconds) {
+    if (seconds === null || seconds === undefined) return "limit";
+    var v = parseInt(seconds, 10);
+    if (isNaN(v)) return "limit";
+    if (v % 3600 === 0) return "limit " + (v / 3600) + "h";
+    if (v % 60 === 0) return "limit " + (v / 60) + "m";
+    return "limit " + v + "s";
+  }
+
+  /* 종료 코드 요약(M5o 결정 117·118) — 실패 이름과 스텝을 알면 먼저 말한다. 영어는 서버의
+     `core/outcome._exit` 와 글자까지 같고, 한국어는 같은 인자로 자기 말을 한다. 이름(파일 · 스텝)은
+     어느 언어에서도 번역하지 않는다. 옛 잡은 인자가 `{code}` 뿐이라 오늘과 같은 글자다. */
+  function exitText(lang, a) {
+    var code = lang === "ko" ? "종료 코드 " + a.code : "exit " + a.code;
+    if (a.first) {
+      var head = a.step ? a.step + ": " + a.first : String(a.first);
+      if (a.more || a.more_truncated) {
+        var n = a.more || 0;
+        if (lang === "ko") head += " 외 " + n + "개" + (a.more_truncated ? " 이상" : "");
+        else head += " +" + n + (a.more_truncated ? "+" : "") + " more";
+      }
+      return head + " (" + code + ")";
+    }
+    if (a.step) return lang === "ko" ? a.step + " 실패 (" + code + ")" : a.step + " failed (" + code + ")";
+    return code;
+  }
+
+  /* 시간 초과 — `last_step` 은 「어디였나」라서 인과 없는 말로 붙인다(영어 `in`). */
+  function timedOutText(lang, a) {
+    var lim = limit(a.seconds);
+    if (lang === "ko") {
+      lim = lim === "limit" ? "제한 시간" : "제한 " + lim.slice("limit ".length);
+      return a.last_step ? lim + " (" + a.last_step + " 단계에서)" : lim;
+    }
+    return a.last_step ? lim + " (in " + a.last_step + ")" : lim;
+  }
+
   function gitFailed(lang, a) {
     var op = a.op || "git";
     if (a.kind === "no_git") {
@@ -624,8 +663,8 @@
     "outcome.snapshot_blobs_missing": function (a) {
       return "snapshot rejected: " + a.count + " blob(s) missing in upload";
     },
-    "outcome.exit_code": function (a) { return "exit " + a.code; },
-    "outcome.timed_out": function (a) { return a.limit; },
+    "outcome.exit_code": function (a) { return exitText("en", a); },
+    "outcome.timed_out": function (a) { return timedOutText("en", a); },
     // ── 프로세스가 뜨기 전에 끝난 잡 (core/outcome.PREFLIGHT_CODES) ─────────
     "outcome.preset_missing": function (a) {
       return "preset '" + a.preset + "' is no longer configured";
@@ -1676,8 +1715,8 @@
     "outcome.snapshot_blobs_missing": function (a) {
       return "스냅샷 거부: 업로드에 파일 " + a.count + "개가 빠짐";
     },
-    "outcome.exit_code": function (a) { return "종료 코드 " + a.code; },
-    "outcome.timed_out": function (a) { return a.limit; },
+    "outcome.exit_code": function (a) { return exitText("ko", a); },
+    "outcome.timed_out": function (a) { return timedOutText("ko", a); },
     "outcome.preset_missing": function (a) {
       return "프리셋 '" + a.preset + "'" + josa(a.preset, "이/가") + " 설정에 없음";
     },

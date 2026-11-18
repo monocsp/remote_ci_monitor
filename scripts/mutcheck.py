@@ -8,6 +8,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
+  M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
+     `notify-link-zero-address`(링크에 `0.0.0.0`) · `failure-summary-full-path`(요약에 경로 전체)
+  M5o C — `include-*` 둘: 들인 파일의 권한 검사 제거 · 들인 파일의 `[[repos]]` 허용 +
+     `reload-dry-run-assigns`: dry-run 이 대입까지 감 (`docs/m5o-workplan.md` §4)
   M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
      물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15) + 엣지 검증의 둘: 모르는
      호스트가 host 범위를 지나침 · 점검 기록 읽기의 전체 스캔
@@ -157,6 +161,65 @@ MUTANTS = (
         old="    if successor is not None:\n",
         new="    if False:\n",
         tests=("tests/test_server_supersede.py",),
+    ),
+    # ── M5o B — 실패를 이름으로 말한다 · 링크에 0.0.0.0 이 없다 (`docs/m5o-workplan.md` §3) ──
+    Mutant(
+        # 원격 finish 만 옛 요약으로 돌아간다 — 어느 레인이 집었나가 요약 글자를 바꾼다(B7)
+        name="failure-summary-remote-old-text",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            code, args = oc.code, oc.args\n",
+        new=(
+            "            code, args = oc.code, oc.args\n"
+            '            if code == "exit_code":\n'
+            '                summary, code, args = outcome.summary("exit_code", code=rc)\n'
+        ),
+        tests=(
+            "tests/test_failure_summaries_m5o.py::"
+            "test_b7_local_lane_and_remote_worker_write_the_same_summary",
+        ),
+    ),
+    Mutant(
+        # `bind` 를 그대로 링크에 넣는다 — 운영 알림 3,721건의 `http://0.0.0.0:8787/...`
+        name="notify-link-zero-address",
+        path="src/remote_ci_monitor/config.py",
+        old="    if bind not in ANY_BINDS:\n",
+        new="    if True:\n",
+        tests=("tests/test_notify_links_m5o.py",),
+    ),
+    Mutant(
+        # 요약의 첫 이름이 경로 전체다 — 공개 문서에 작업 공간 구조가 실리고 80자가 경로로 찬다
+        name="failure-summary-full-path",
+        path="src/remote_ci_monitor/core/outcome.py",
+        old='    name = parts[-1].strip()[:MAX_FAIL_ARG].strip() if parts else ""',
+        new='    name = "/".join(parts)[:MAX_FAIL_ARG].strip() if parts else ""',
+        tests=("tests/test_failure_summaries_m5o.py",),
+    ),
+    # ── M5o C — 프리셋을 파일에서 읽는다 · reload --dry-run (docs/m5o-workplan.md §4) ──
+    Mutant(
+        # 권한 검사가 없다 — 그룹 · 남이 쓸 수 있는 파일이 서버가 실행할 argv 를 정한다(결정 122)
+        name="include-permission-check-removed",
+        path="src/remote_ci_monitor/config.py",
+        old="    if stat.S_IMODE(st.st_mode) & 0o022:",
+        new="    if stat.S_IMODE(st.st_mode) & 0o000:",
+        tests=("tests/test_config_include.py",),
+    ),
+    Mutant(
+        # 들인 파일이 `[[repos]]` 를 가질 수 있다 — 토큰 파일 경로가 server.toml 밖으로
+        # 샌다(결정 121)
+        name="include-allows-repos",
+        path="src/remote_ci_monitor/config.py",
+        old='_INCLUDE_KEYS = frozenset({"presets"})',
+        new='_INCLUDE_KEYS = frozenset({"presets", "repos"})',
+        tests=("tests/test_config_include.py",),
+    ),
+    Mutant(
+        # dry-run 이 미리 보기에서 멈추지 않고 대입까지 간다 — 「아무것도 안 바꿈」이
+        # 거짓말이 된다(결정 124)
+        name="reload-dry-run-assigns",
+        path="src/remote_ci_monitor/server.py",
+        old='            return {"dry_run": True, **files, **changed}\n',
+        new="",
+        tests=("tests/test_reload_dry_run.py",),
     ),
     # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
     Mutant(

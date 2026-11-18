@@ -177,6 +177,10 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    rcm 은 짐작하지 않고 `last step <이름>` 만 보여 준다 — 끝났을 때 어디였는지를 말할 뿐 원인을
    주장하지 않는다. 여러 개를 병렬로 돌리고 로그를 나중에 되재생하는 스크립트에서는, 이 규칙이
    없으면 마지막으로 되재생된 머리말이 앞에서 난 실패를 뒤집어쓴다.
+   스크립트가 자기 요약을 찍지 않았으면 요약은 종료 코드만 말하지 않고 스크립트가 밝힌 첫 이름을
+   말한다: `test: x_test.dart +1 more (exit 1)`, 단계만 밝혔으면 `analyze failed (exit 1)`.
+   같은 줄이 큐 · `rcm wait` · 알림 훅으로 간다
+   ([무엇이 실패했는지 말하기](configuration.md#saying-what-failed)).
 2. **다음에 볼 곳.** 0 이 아닌 종료는 항상 `log: rcm logs <N>` 과 작업 URL 을 찍는다. 3(모름)도
    마찬가지다 — 모를수록 로그가 필요하다. 그 아래에는 스크립트가 `::rcm::fail::<이름>` 으로
    찍은 이름마다 한 줄씩, 같은 프리셋의 최근 실행에서 몇 번 빨갰는지가 붙는다. 왔다 갔다 하면
@@ -446,7 +450,12 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 
 ## 12. 그다음
 
-- 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md).
+- 팀에 진짜 필요한 프리셋을 쓴다: [Configuration](configuration.md). 프로젝트의 프리셋은
+  `server.toml` 이 `include` 로 들이는 따로 된 파일에 둘 수 있다
+  ([presets in their own file](configuration.md#presets-in-their-own-file-include)).
+- 재시작 없이 프리셋을 바꾼다: 파일을 고치고 `rcm reload --dry-run` 으로 어느 프리셋의 어느 키가
+  바뀔지 본 다음(이름만, 값은 안 나온다) `rcm reload` 로 적용한다
+  ([change a preset without a restart](operating.md#change-a-preset-without-a-restart)).
 - 작업을 둘씩 돌린다. `[server] lanes = 2` 로 두면 레인 2 는 머신에 CPU 여유가 있을 때만 작업으므로
   올려 봐도 안전하다. 큐가 `부하로 대기` 라고 하면 머신이 꽉 찼다는 뜻이다:
   [Parallel lanes](configuration.md#parallel-lanes-without-overloading-the-machine).

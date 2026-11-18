@@ -1274,6 +1274,29 @@
     };
   }
 
+  /** 서버가 코드로 그린 요약이 꼬리 라벨과 **같은 스텝**을 이미 말하는가(M5o §3.1). 그러면
+      ` · step test` 를 다시 붙이지 않는다. 선언된 스텝이 있으면 그것이 꼬리이므로 `step` 과,
+      없으면 「마지막 스텝」이 꼬리이므로 `last_step` 과 견준다 — 둘이 다르면 둘 다 보여 준다. */
+  function summaryNamesStep(job) {
+    var a = job.summary_args || {};
+    if (!job.summary_code || !I18N.has("outcome." + job.summary_code)) return false;
+    if (job.failed_step) return a.step === labelText(job.failed_step);
+    var last = labelText(job.last_step);
+    return last !== null && a.last_step === last;
+  }
+
+  /* 서버 `core/outcome._clean_label` 과 같은 모양 — 제어 · C1 · 보이지 않는 문자를 지우고 다듬어
+     **코드 포인트** 80개에서 자른다. 인자는 그렇게 씻은 값이라, 행의 원문을 그대로 견주면 긴 이름 ·
+     보이지 않는 문자가 든 이름이 「다르다」로 읽혀 같은 스텝이 두 번 찍힌다. 못 쓰면 null. */
+  var LABEL_DROP = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+  function labelText(v) {
+    if (v === null || v === undefined) return null;
+    var s = String(v).replace(/[\ud800-\udbff](?![\udc00-\udfff])|(^|[^\ud800-\udbff])[\udc00-\udfff]/g, "$1");
+    s = s.replace(LABEL_DROP, "").trim();
+    s = Array.from(s).slice(0, 80).join("").trim();
+    return s ? s : null;
+  }
+
   function recentLine(job, tz, nowMs, lang) {
     job = job || {};
     var state = job.state;
@@ -1296,7 +1319,7 @@
       summary = T(lang, "recent.before_start") + (who ? " · " + T(lang, "recent.by", { who: who }) : "");
     } else if (state === "lost") {
       summary = outcomeText(job, lang) || T(lang, "state.lost");
-    } else if (job.failed_step || job.last_step) {
+    } else if ((job.failed_step || job.last_step) && !summaryNamesStep(job)) {
       // 선언된 스텝만 「스텝」이다. 아니면 「마지막 스텝」 — 인과를 주장하지 않는다(M5h 결정 63).
       var stepKey = job.failed_step ? "recent.step" : "recent.last_step";
       var stepName = job.failed_step || job.last_step;
