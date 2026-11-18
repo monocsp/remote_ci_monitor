@@ -252,9 +252,9 @@ def test_the_three_tuple_unpacking_is_unchanged():
     state, summary, failed_step = outcome_for(
         running_job(), ms, started=STARTED, finished=FINISHED, rc=1
     )
-    # summary 는 M5h 가 안 건드린다 — 마커 요약이 없는 실패 잡은 예나 지금이나 `exit N` 이다
-    # (`core/outcome.py` 의 `exit_code`). 여기서 잠그는 것은 **3-튜플로 풀린다**는 것뿐이다.
-    assert (state, summary, failed_step) == (FAILED, "exit 1", "test")
+    # 요약의 글자는 M5o 가 바꿨다 — 선언된 스텝을 먼저 말한다(`core/outcome.exit_summary`,
+    # 결정 118). 여기서 잠그는 것은 **3-튜플로 풀린다**는 것뿐이다.
+    assert (state, summary, failed_step) == (FAILED, "test failed (exit 1)", "test")
 
 
 def test_a_failed_job_that_named_too_many_things_is_truncated():

@@ -7,13 +7,15 @@ requester)은 NUL·제어문자를 지우고 4 KB 로 자른다 — 알림 스�
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from remote_ci_monitor.core.model import TERMINAL_STATES
 
 ENV_TEXT_LIMIT = 4096
+#: 훅에 넘기는 실패 이름의 최대 개수(M5o 결정 119). 전체는 `GET /jobs/<id>` 의 `failures[]` 에 있다.
+MAX_NOTIFY_FAILURES = 20
 _KEEP = {"\n", "\t"}
 
 
@@ -58,8 +60,54 @@ def sanitize_text(value: Any, limit: int = ENV_TEXT_LIMIT) -> str:
     return data[:limit].decode("utf-8", errors="ignore")
 
 
-def notify_env(job_row: dict[str, Any], rule_name: str) -> dict[str, str]:
-    """알림 argv 에 줄 env. 값은 전부 문자열, 없는 값은 빈 문자열."""
+def failure_lines(names: Iterable[str]) -> list[str]:
+    """실패 이름 → 훅에 줄 줄 목록. 한 줄 이름이라 개행까지 지우고(`progress.clean_name` 과 같은
+    규칙에 bidi · 보이지 않는 문자를 더한다), 빈 것은 빼고, 앞에서부터 `MAX_NOTIFY_FAILURES` 개."""
+    out: list[str] = []
+    for name in names:
+        line = "".join(
+            ch
+            for ch in str(name)
+            if ord(ch) >= 0x20
+            and ord(ch) != 0x7F
+            and not 0xD800 <= ord(ch) <= 0xDFFF
+            and not 0x200B <= ord(ch) <= 0x200F
+            and not 0x202A <= ord(ch) <= 0x202E
+            and not 0x2060 <= ord(ch) <= 0x2069
+            and ord(ch) != 0xFEFF
+        ).strip()
+        if line:
+            out.append(line)
+        if len(out) >= MAX_NOTIFY_FAILURES:
+            break
+    return out
+
+
+def failure_count(names: Sequence[str], truncated: bool) -> str:
+    """`RCM_FAILURE_COUNT` — 대장 행의 수. 잘렸으면 `N+`(정확한 수를 주장하지 않는다). 없으면 ""."""
+    if not names:
+        return ""
+    return f"{len(names)}+" if truncated else str(len(names))
+
+
+def _joined_lines(lines: list[str], limit: int = ENV_TEXT_LIMIT) -> str:
+    """줄을 개행으로 묶되 `limit` 바이트를 넘으면 **줄 단위로** 뒤에서 버린다 — 반쪽 이름은 없다."""
+    kept = list(lines)
+    while kept and len("\n".join(kept).encode("utf-8")) > limit:
+        kept.pop()
+    return "\n".join(kept)
+
+
+def notify_env(
+    job_row: dict[str, Any],
+    rule_name: str,
+    *,
+    failures: Sequence[str] = (),
+    failures_truncated: bool = False,
+) -> dict[str, str]:
+    """알림 argv 에 줄 env. 값은 전부 문자열, 없는 값은 빈 문자열.
+
+    `failures` 는 그 잡의 실패 이름 대장(`job_failures`, 잡이 찍은 순서 — M5o 결정 119)."""
     requester = job_row.get("requester") or {}
     if isinstance(requester, dict):
         requester_label = requester.get("label") or requester.get("name") or ""
@@ -93,4 +141,7 @@ def notify_env(job_row: dict[str, Any], rule_name: str) -> dict[str, str]:
         else ("1" if source.get("dirty") else "0"),
         "RCM_SOURCE_REPO": sanitize_text(source.get("repo")),
         "RCM_INPUTS": sanitize_text(json.dumps(job_row.get("inputs") or {}, sort_keys=True)),
+        # 실패 이름(M5o 결정 119): 줄바꿈으로 묶어 최대 20개, 수는 전부(잘렸으면 `N+`)
+        "RCM_FAILURES": _joined_lines(failure_lines(failures)),
+        "RCM_FAILURE_COUNT": failure_count(failures, failures_truncated),
     }

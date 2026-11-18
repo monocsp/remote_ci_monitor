@@ -341,6 +341,38 @@ def advertise_warning(section: ServerSection) -> str | None:
     return None
 
 
+#: 「아무 주소에나 묶어라」는 bind 값. 듣기에는 맞지만 링크에 넣으면 다른 기기에서 안 열린다.
+ANY_BINDS = ("0.0.0.0", "::", "")
+
+
+def server_base_url(section: ServerSection, *, hostname: str) -> str:
+    """잡 링크의 앞부분 — 알림(`notify.py`)과 서버(`server.py`)가 같이 쓴다(M5o 결정 120).
+
+    1. `public_url` 이 있으면 그것.
+    2. `bind` 가 특정 주소면 `http://<bind>:<port>`(IPv6 는 대괄호).
+    3. `bind` 가 `0.0.0.0` · `::` · 빈 값이고 mDNS 광고가 켜져 있으면
+       `http://<짧은 호스트>.local:<port>` — 서버의 Responder 가 그 이름의 A 레코드에 답한다
+       (`server.py` 의 `f"{host}.local."`).
+    4. 그 밖이면 `http://<hostname>:<port>`.
+
+    `0.0.0.0` · `::` 은 **어느 갈래에서도** 나오지 않는다 — 운영 알림 3,721건이 그 주소를
+    실어 보냈다.
+    호스트 이름을 모르면 `localhost` 다(틀릴 수는 있어도 「아무 주소」보다는 열린다).
+    """
+    if section.public_url:
+        return section.public_url.rstrip("/")
+    bind = (section.bind or "").strip()
+    port = section.port
+    if bind not in ANY_BINDS:
+        host = f"[{bind}]" if ":" in bind and not bind.startswith("[") else bind
+        return f"http://{host}:{port}"
+    name = (hostname or "").strip().rstrip(".")
+    if advertise_enabled(section):
+        short = name.split(".")[0]
+        return f"http://{short}.local:{port}" if short else f"http://localhost:{port}"
+    return f"http://{name or 'localhost'}:{port}"
+
+
 def shorter_log_retention(section: ServerSection) -> tuple[str, int]:
     """부피가 넘을 수 없는 천장 — 두 로그 보존 기간 중 **짧은 쪽**(키 이름과 값)."""
     keys = ("retention_days_success", "retention_days_failure")

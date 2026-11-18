@@ -1267,6 +1267,16 @@
     };
   }
 
+  /** 서버가 코드로 그린 요약이 꼬리 라벨과 **같은 스텝**을 이미 말하는가(M5o §3.1). 그러면
+      ` · step test` 를 다시 붙이지 않는다. 선언된 스텝이 있으면 그것이 꼬리이므로 `step` 과,
+      없으면 「마지막 스텝」이 꼬리이므로 `last_step` 과 견준다 — 둘이 다르면 둘 다 보여 준다. */
+  function summaryNamesStep(job) {
+    var a = job.summary_args || {};
+    if (!job.summary_code || !I18N.has("outcome." + job.summary_code)) return false;
+    if (job.failed_step) return a.step === job.failed_step;
+    return !!job.last_step && a.last_step === job.last_step;
+  }
+
   function recentLine(job, tz, nowMs, lang) {
     job = job || {};
     var state = job.state;
@@ -1283,7 +1293,7 @@
       summary = T(lang, "recent.before_start") + (who ? " · " + T(lang, "recent.by", { who: who }) : "");
     } else if (state === "lost") {
       summary = outcomeText(job, lang) || T(lang, "state.lost");
-    } else if (job.failed_step || job.last_step) {
+    } else if ((job.failed_step || job.last_step) && !summaryNamesStep(job)) {
       // 선언된 스텝만 「스텝」이다. 아니면 「마지막 스텝」 — 인과를 주장하지 않는다(M5h 결정 63).
       var stepKey = job.failed_step ? "recent.step" : "recent.last_step";
       var stepName = job.failed_step || job.last_step;

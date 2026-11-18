@@ -6,6 +6,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
+     `notify-link-zero-address`(링크에 `0.0.0.0`) · `failure-summary-full-path`(요약에 경로 전체)
   M5n — `m5n-*` 여섯: 낡은 세대 · 자동 점검 반복 · timeout 지문 · host 범위 · 단계 중앙값
      물러남 · capable claim 의 풀 (`docs/m5n-workplan.md` §15) + 엣지 검증의 둘: 모르는
      호스트가 host 범위를 지나침 · 점검 기록 읽기의 전체 스캔
@@ -125,6 +127,38 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5o B — 실패를 이름으로 말한다 · 링크에 0.0.0.0 이 없다 (`docs/m5o-workplan.md` §3) ──
+    Mutant(
+        # 원격 finish 만 옛 요약으로 돌아간다 — 어느 레인이 집었나가 요약 글자를 바꾼다(B7)
+        name="failure-summary-remote-old-text",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            code, args = oc.code, oc.args\n",
+        new=(
+            "            code, args = oc.code, oc.args\n"
+            '            if code == "exit_code":\n'
+            '                summary, code, args = outcome.summary("exit_code", code=rc)\n'
+        ),
+        tests=(
+            "tests/test_failure_summaries_m5o.py::"
+            "test_b7_local_lane_and_remote_worker_write_the_same_summary",
+        ),
+    ),
+    Mutant(
+        # `bind` 를 그대로 링크에 넣는다 — 운영 알림 3,721건의 `http://0.0.0.0:8787/...`
+        name="notify-link-zero-address",
+        path="src/remote_ci_monitor/config.py",
+        old="    if bind not in ANY_BINDS:\n",
+        new="    if True:\n",
+        tests=("tests/test_notify_links_m5o.py",),
+    ),
+    Mutant(
+        # 요약의 첫 이름이 경로 전체다 — 공개 문서에 작업 공간 구조가 실리고 80자가 경로로 찬다
+        name="failure-summary-full-path",
+        path="src/remote_ci_monitor/core/outcome.py",
+        old='    name = parts[-1].strip()[:MAX_FAIL_ARG].strip() if parts else ""',
+        new='    name = "/".join(parts)[:MAX_FAIL_ARG].strip() if parts else ""',
+        tests=("tests/test_failure_summaries_m5o.py",),
+    ),
     # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
     Mutant(
         # 봐주기가 없다 — claim 직전에 찍힌 heartbeat 목록이 방금 넘긴 잡을 lost 로 닫는다

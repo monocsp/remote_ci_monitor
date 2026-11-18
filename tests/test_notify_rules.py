@@ -77,6 +77,9 @@ ENV_KEYS = {
     "RCM_SOURCE_DIRTY",
     "RCM_SOURCE_REPO",
     "RCM_INPUTS",
+    # M5o 결정 119 — 실패 이름(줄바꿈 · 20개)과 그 총수
+    "RCM_FAILURES",
+    "RCM_FAILURE_COUNT",
 }
 
 

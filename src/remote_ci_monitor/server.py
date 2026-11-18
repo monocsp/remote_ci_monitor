@@ -72,6 +72,7 @@ from remote_ci_monitor.config import (
     advertise_warning,
     load_server_config,
     retention_warning,
+    server_base_url,
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -218,6 +219,8 @@ DEFAULT_TAIL = 5
 MAX_TAIL = 50
 JANITOR_SECONDS = 5.0
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-_\[\]:]{1,255}$")  # Host 헤더 — URL 에 넣을 만한 모양만
+#: 「아무 주소」 Host — 링크에 넣으면 다른 기기에서 안 열린다(M5o 결정 120)
+_ANY_HOST_RE = re.compile(r"(0\.0\.0\.0|\[::\]|::)(:\d+)?")
 RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸들러 32개가 묶이지 않게
 MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
 _JOB_RE = re.compile(
@@ -896,16 +899,18 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         return self.job_dir(job_id) / "log.txt"
 
     def base_url(self, host: str | None = None) -> str:
-        """잡 url 의 앞부분. public_url > 요청의 Host(세션이 실제로 쓴 주소) > bind:port.
+        """잡 url 의 앞부분. public_url > 요청의 Host(세션이 실제로 쓴 주소) > `server_base_url`.
 
         bind 가 0.0.0.0 이면 bind:port 는 다른 컴퓨터에서 열리지 않는다(사용자 검사 U2 발견).
+        요청이 없는 자리(알림)와 같은 규칙을 쓰려고 마지막 갈래는 `config.server_base_url` 이다
+        (M5o 결정 120). Host 헤더가 `0.0.0.0` · `[::]` 이면 그것도 버린다.
         """
         s = self.config.server
         if s.public_url:
             return s.public_url.rstrip("/")
-        if host and _HOST_RE.fullmatch(host):
+        if host and _HOST_RE.fullmatch(host) and not _ANY_HOST_RE.fullmatch(host):
             return f"http://{host}"
-        return f"http://{s.bind}:{s.port}"
+        return server_base_url(s, hostname=socket.gethostname())
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 
