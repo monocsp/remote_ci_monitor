@@ -17,6 +17,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      대기 0초) · `web-shelf-link-absolute`(SPA 보관함 링크가 행의 절대 URL 을 씀) ·
      `shelf-get-skips-sha256`(`rcm shelf get` 이 해시를 안 봄, §16)
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
+  M5p 뒤 — `shelf-expand-keeps-apple-double`: 펼침이 macOS 메타데이터 멤버(`._*`)를 거르지 않음
+     (`shelf_copier.py`, 2026-11-20 운영 잡 #3821 — 깨진 그림 23개)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -309,6 +311,18 @@ MUTANTS = (
         ),
         new="            if not isinstance(want, str):\n",
         tests=("tests/test_cli_m5p_get.py",),
+    ),
+    Mutant(
+        # 펼침이 macOS tar 의 AppleDouble 멤버를 그대로 만든다 — `._intro.png` 가 깨진 그림으로
+        # 항목 페이지에 뜬다(2026-11-20 운영 잡 #3821)
+        name="shelf-expand-keeps-apple-double",
+        path="src/remote_ci_monitor/shelf_copier.py",
+        old=(
+            "            if reason is None and shelf_rules.apple_double_member(name):\n"
+            "                reason = shelf_rules.SKIP_APPLE_DOUBLE\n"
+        ),
+        new="",
+        tests=("tests/test_shelf_apple_double.py",),
     ),
     # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
     Mutant(

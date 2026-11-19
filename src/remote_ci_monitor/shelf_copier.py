@@ -10,6 +10,8 @@
 3. 펼치기: 묶음의 `*.tar` · `*.tar.gz` · `*.tgz` 를 한 단계 `<이름>.d/` 로. 상한은 항목 전체 합
    (`max_artifact_bytes` · `max_artifact_files`)이고 헤더의 크기로 미리 거절하며 쓴 바이트도 센다.
    넘으면 그 tar 의 펼침만 버리고 `expand_skipped[]` 에 이유를 적는다. 망가진 tar 도 같다.
+   macOS 가 끼운 메타데이터 멤버(`._*` · `.DS_Store` · `__MACOSX/`)는 펼치지 않고 `skipped[]` 에
+   `apple_double` 로 적는다. 바깥 묶음에서는 거르지 않는다 — 잡이 선언해서 고른 파일이다.
 4. 이름 충돌(대소문자 · NFC · 파일과 디렉터리 접두)은 묶음과 펼침을 **합친 집합**에서 본다. 있으면
    항목 전체가 `failed(name_collision)` — APFS 에서 하나가 다른 것을 덮은 채 manifest 가 거짓이 되는
    것을 막는다. 쓰기는 `O_EXCL` 이라 덮어쓰기 자체도 일어나지 않는다.
@@ -215,6 +217,10 @@ def _expand_one(
                 raise _SkipExpand("too_many_files")
             full = f"{base}/{name}"
             reason = _unsafe(m, name) or (None if shelf_rules.safe_member(full) else "unsafe_name")
+            # macOS tar 가 끼운 `._*` · `.DS_Store` · `__MACOSX/` 는 잡의 파일이 아니다.
+            # 펼침은 rcm 이 만든 것이라 여기서 거른다. 바깥 묶음은 잡이 고른 파일이라 두었다(#3821)
+            if reason is None and shelf_rules.apple_double_member(name):
+                reason = shelf_rules.SKIP_APPLE_DOUBLE
             if reason is not None:
                 skipped.append(
                     {"path": _printable(full), "reason": reason, "expanded_from": tar_rel}
