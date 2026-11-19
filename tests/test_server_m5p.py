@@ -30,6 +30,7 @@ import pytest
 from remote_ci_monitor.config import parse_preset
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import CANCELLED, FAILED, SUCCEEDED
+from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.store import Store
 from shelfkit import (
     DAY,
@@ -974,20 +975,28 @@ def test_g34_head_on_a_zip_holds_nothing(srv, gold):
     assert srv.req("DELETE", f"/shelf/{gold}", token="admin")[0] == 200
 
 
-def test_e58_files_are_409_while_copying(srv, monkeypatch):
-    gate = Gate(monkeypatch)
-    jid = finished_linux_job(srv)
-    gate.target = jid
-    publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
-    srv.app._on_job_change(jid)
-    assert gate.entered.wait(10)
-    assert srv.store.shelf_item(jid).state == "pending"
-    status, _h, html = page(srv, f"/shelf/{jid}/")
+def test_e58_files_are_409_while_copying(idle):
+    # copier 를 띄우지 않은 서버로 본다 — 문(Gate)으로 copier 를 붙잡으면 문을 달기 전에 시작된
+    # claim 이 막 생긴 행을 집어 가는 경주가 남는다(v0.7.0 릴리스 CI 에서 세 판이 그렇게 빨갰다).
+    jid = finished_linux_job(idle)
+    publish_payload(idle, jid, tar_bytes([("out/a.txt", b"a")]))
+    assert idle.store.shelf_item(jid).state == "pending"
+    status, _h, html = page(idle, f"/shelf/{jid}/")
     assert status == 200 and "보관하는 중".encode() in html
-    assert page(srv, f"/shelf/{jid}/f/out/a.txt")[0] == 409
-    assert page(srv, f"/shelf/{jid}.zip")[0] == 409
-    gate.release.set()
-    wait_shelf(srv, jid)
+    assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 409
+    assert page(idle, f"/shelf/{jid}.zip")[0] == 409
+    # 서버가 띄우는 것과 같은 copier 를 한 번 돌리면 보관이 끝나고 파일이 열린다
+    app = idle.app
+    ShelfCopier(
+        app.store,
+        app.config,
+        now_fn=app.now_fn,
+        log=app.log,
+        on_change=app._on_shelf_change,
+        on_purged=app._shelf_purged,
+    ).drain()
+    assert idle.store.shelf_item(jid).state == "active"
+    assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 200
 
 
 def test_e58_files_are_409_in_the_copying_state(srv, monkeypatch):
