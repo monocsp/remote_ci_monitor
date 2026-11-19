@@ -650,7 +650,10 @@ def test_retouched_without_a_date_leaves_the_date_out(srv, capsys):
 
 
 def test_cg15_retried_says_the_last_copy_failed(srv, capsys):
-    keep_route(srv, "retried", 202, shelf=shelf_obj(srv, "pending", "shelf_full"))
+    # 이전 실패 이유는 서버가 지우기 전 값(`previous_reason_code`)으로 온다(격리 검증 개선 3)
+    keep_route(
+        srv, "retried", 202, shelf=shelf_obj(srv, "pending"), previous_reason_code="shelf_full"
+    )
     code, out, err = run(capsys, ["keep", str(JOB)])
     assert code == 0, err
     assert out.strip() == f"#412: the last copy failed (shelf_full); trying again · {srv.shelf_url}"
@@ -690,12 +693,12 @@ def test_ce10_gone_exits_1_and_points_at_keep_from_the_start(srv, capsys):
     ), err
 
 
-@pytest.mark.parametrize("status", [409, 503])
-def test_keep_disabled_exits_1(srv, capsys, status):
-    keep_route(srv, "disabled", status, shelf=None, error="the shelf is off")
+def test_keep_disabled_exits_1(srv, capsys):
+    """꺼진 보관함(409)은 1. 폴더가 unavailable(503)인 경우는 3 이다(격리 검증 개선 5)."""
+    keep_route(srv, "disabled", 409, shelf=None, error="the shelf is off")
     code, _out, err = run(capsys, ["keep", str(JOB)])
     assert code == 1, err
-    assert "rcm: keep: the shelf is off or unavailable on this server" in err, err
+    assert "rcm: keep: the shelf is off on this server (shelf_max_bytes = 0)" in err, err
 
 
 def test_ce11_someone_elses_job_is_a_usage_error(srv, capsys):

@@ -113,24 +113,24 @@ def shelf_url(
     keep: bool,
     item_state: str | None,
     bundle_state: str | None,
-    collected: bool = True,
 ) -> str:
     """알림에 싣는 보관함 링크(M5p 결정 142 · 144). 없으면 빈 문자열.
 
     keep 인 잡이면 보관이 아직 안 끝났어도 정해진 URL(`<base>/shelf/<id>/`)을 싣는다 — 링크는 잡
     번호로 정해지고, 훅이 도는 동안 보관이 끝난다. 다만 알림 시점에 이미 **확정적으로 없는** 경우는
-    빈 값이다(§15.6): 보관 행이 `failed` · `deleted`, 또는 행이 없는데 묶음이 종결이면서 ready 가
-    아니거나(`none`), 정책상 모으지 않은 잡(`collected=False` — `artifacts_on = "failure"` 인 성공).
+    빈 값이다(§15.6): 보관 행이 `failed` · `deleted`, 또는 보관 행이 없는데 묶음 행도 없거나(시작
+    전에 취소 · 정책상 안 모음) 묶음이 종결이면서 ready 가 아닌(`none`) 경우다.
     앞부분은 잡 링크(`RCM_URL`)와 같은 `base_url` 이다(결정 120 · 142).
     """
     if not keep or item_state in _SHELF_SETTLED_EMPTY:
         return ""
     if item_state is None:
-        if bundle_state is None and not collected:
+        # 끝난 잡에 보관 행도 묶음 행도 없으면 확정적으로 없다 — 시작 전에 취소됐거나(P3 격리
+        # 검증 D1) 정책상 안 모았다. 원격 잡은 끝날 때 묶음 행이 `uploading` 으로 이미 있다
+        if bundle_state is None:
             return ""
-        if bundle_state is not None and bundle_state != art.READY:
-            if bundle_state not in _BUNDLE_ON_THE_WAY:
-                return ""
+        if bundle_state != art.READY and bundle_state not in _BUNDLE_ON_THE_WAY:
+            return ""
     return f"{base_url.rstrip('/')}/shelf/{int(job_id)}/"
 
 

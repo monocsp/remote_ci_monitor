@@ -343,7 +343,7 @@ def test_a_redirect_is_not_followed(fake, tmp_path, capsys):
 
 def test_a_sha256_mismatch_writes_nothing_and_exits_3(fake, tmp_path, capsys):
     bad = dict(FILES)
-    bad["build/app_map/run.log"] = b"tampered\n"
+    bad["build/app_map/run.log"] = b"no\n"  # 같은 크기 — 해시만 다르다
     fake.route("GET", f"/shelf/{JOB}.zip", RawReply(zip_of(bad)))
     out = tmp_path / "o"
     code, _o, err = run(capsys, ["shelf", "get", "412", "--output", str(out)])

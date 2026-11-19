@@ -1128,6 +1128,14 @@ def _shelf_after_wait(
     shelf = _await_shelf(client, job_id, doc.get("shelf"))
     if shelf is not None:
         out["shelf"] = shelf
+    if (
+        isinstance(shelf, dict)
+        and shelf.get("state") == "none"
+        and "started_at" in doc
+        and doc.get("started_at") is None
+    ):
+        # 시작 전에 취소된 잡 — 묶음 상태(`unknown`)보다 「돌지 않았다」가 맞는 말이다(격리 검증 D1)
+        return f"shelf: nothing to keep — {shelf_none_text('never_ran')}"
     return shelf_line(shelf)
 
 
@@ -1224,24 +1232,39 @@ def _keep_url(client: Client, job_id: int, body: dict[str, Any]) -> str:
 
 
 def _keep_reason(body: dict[str, Any]) -> Any:
+    """거절의 이유 — 서버가 본문 맨 위에 준 것이 먼저, 없으면 `shelf` 의 것."""
     shelf = body.get("shelf") if isinstance(body.get("shelf"), dict) else {}
-    return shelf.get("reason_code") or body.get("reason_code")
+    return body.get("reason_code") or shelf.get("reason_code")
+
+
+def _bundle_state_of(client: Client, job: int) -> str | None:
+    """잡의 묶음 상태(`purged` · `expired` …). `gone` 의 이유를 서버가 안 줄 때 쓴다(표시용)."""
+    try:
+        doc = client.job(job, timeout=NO_WAIT_VIEW_TIMEOUT)
+    except (ClientError, ValueError, OSError):
+        return None
+    art = doc.get("artifacts") if isinstance(doc, dict) else None
+    state = art.get("state") if isinstance(art, dict) else None
+    return str(state) if state else None
 
 
 def cmd_keep(args: argparse.Namespace) -> int:
     """`rcm keep N [--json]` — 끝난 잡(묶음이 살아 있을 때)이나 도는 잡을 보관함에 넣는다.
 
     종료 코드(§15.1): 넣었거나 넣을 예정이면 0, 보관할 수 없으면(묶음 없음 · 이미 지움 · 꺼짐)
-    1, 없는 잡 1, 옛 서버 · 권한 · 토큰 2, 서버에 못 닿으면 3.
+    1, 없는 잡 1, 옛 서버 · 권한 · 토큰 2, 서버에 못 닿거나 보관함 폴더가 unavailable(503)이면 3
+    — 서버 쪽 일시 문제다(P3 격리 검증 개선 5).
     """
     client = _client(args)
     code, _h = _shelf_health(client, "keep", "rcm keep")
     if code is not None:
         return code
     job = args.job
+    status = 200
     try:
         body = client.post_json(f"/jobs/{job}/keep", {}) or {}
     except ClientError as e:
+        status = e.status
         if e.status == 404:
             _err(f"keep: no job #{job}")
             return 1
@@ -1250,6 +1273,9 @@ def cmd_keep(args: argparse.Namespace) -> int:
             return USAGE_EXIT
         if e.status in (409, 410, 503) and e.body.get("result") in _KEEP_REFUSED:
             body = e.body
+        elif e.status == 503:
+            _err(f"keep: {client.server} answered 503: {e.message} — try again later")
+            return EXIT_UNKNOWN
         else:
             return _client_fail(client, "keep", e)
     if not isinstance(body, dict):
@@ -1261,13 +1287,19 @@ def cmd_keep(args: argparse.Namespace) -> int:
         if result == "no_bundle":
             _err(f"keep: #{job} has nothing to keep — {shelf_none_text(_keep_reason(body))}")
         elif result == "gone":
-            why = _keep_reason(body) or "gone"
+            why = _keep_reason(body) or _bundle_state_of(client, job) or "gone"
             _err(
                 f"keep: #{job} cannot be kept — its artifacts are gone ({why}); "
                 "next time use rcm run --keep"
             )
+        elif status == 503:
+            _err(
+                "keep: the shelf folder is unavailable on this server (is its disk mounted?) "
+                "— try again later"
+            )
+            return EXIT_UNKNOWN
         else:
-            _err("keep: the shelf is off or unavailable on this server")
+            _err("keep: the shelf is off on this server (shelf_max_bytes = 0)")
         return 1
     if getattr(args, "json", False):
         return 0
@@ -1291,7 +1323,9 @@ def cmd_keep(args: argparse.Namespace) -> int:
             when = f" (cleanup pending from {day})" if day != DASH else ""
         print(f"#{job} is on the shelf; its clock starts again{when} · {url}", flush=True)
     elif result == "retried":
-        why = _keep_reason(body)
+        # 서버가 지우기 전의 실패 이유(`previous_reason_code`). 없으면 이유를 빼고 말한다 —
+        # 새 요청의 `reason_code` 는 이전 실패가 아니다
+        why = body.get("previous_reason_code")
         failed = f" ({why})" if why else ""
         print(f"#{job}: the last copy failed{failed}; trying again · {url}", flush=True)
     else:  # 이 클라이언트가 모르는 새 결과 — 서버의 말을 그대로
@@ -1353,6 +1387,9 @@ def cmd_shelf(args: argparse.Namespace) -> int:
     try:
         body = client.get_json(path)
     except ClientError as e:
+        if e.status == 503:
+            _err(f"shelf: {client.server} answered 503: {e.message} — try again later")
+            return EXIT_UNKNOWN
         return _client_fail(client, "shelf", e)
     if getattr(args, "json", False):
         _print_json(body)
@@ -1417,6 +1454,9 @@ def cmd_shelf_rm(args: argparse.Namespace) -> int:
         if e.status == 403:
             _err("shelf rm: needs an admin token")
             return USAGE_EXIT
+        if e.status == 503:
+            _err(f"shelf rm: {client.server} answered 503: {e.message} — try again later")
+            return EXIT_UNKNOWN
         return _client_fail(client, "shelf rm", e)
     print(f"removed #{job} from the shelf", flush=True)
     return 0
@@ -1523,9 +1563,12 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _unzip_shelf(archive: Path, dest: Path) -> set[str]:
+def _unzip_shelf(archive: Path, dest: Path, sizes: dict[str, Any]) -> set[str]:
     """보관함 zip 을 `dest` 아래에 푼다. 멤버마다 경로를 다시 검사한다(서버의 zip 을 믿지 않는다):
-    절대 경로 · `..` · `.git` · 제어문자 · 심볼릭 링크 · 같은 이름 두 번은 전부 거절."""
+    절대 경로 · `..` · `.git` · 제어문자 · 심볼릭 링크 · 같은 이름 두 번은 전부 거절.
+
+    `sizes` 는 `/api/shelf/N` 이 나열한 {경로: 크기}다. 목록에 없는 멤버는 풀지 않고 멈추고, 푸는
+    바이트가 목록의 크기를 넘는 순간 멈춘다 — zip 의 선언 크기는 거짓말할 수 있다(압축 폭탄)."""
     names: set[str] = set()
     root = dest.resolve()
     try:
@@ -1546,18 +1589,56 @@ def _unzip_shelf(archive: Path, dest: Path) -> set[str]:
                     )
                 if info.is_dir():
                     continue
+                if name not in sizes:
+                    raise _ShelfGetError(
+                        EXIT_UNKNOWN,
+                        f"the zip has {name}, which the shelf does not list — nothing was written",
+                    )
+                limit = sizes[name]
                 target = dest / name
                 if root not in target.resolve().parents:
                     raise _ShelfGetError(
                         EXIT_UNKNOWN, f"unsafe path in the zip: {raw!r} — nothing was written"
                     )
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(info) as src, target.open("wb") as fh:
-                    shutil.copyfileobj(src, fh, 1 << 16)
+                _copy_capped(z, info, target, limit, name)
                 names.add(name)
     except zipfile.BadZipFile as e:
         raise _ShelfGetError(EXIT_UNKNOWN, f"the zip is broken ({e}) — nothing was written") from e
     return names
+
+
+def _copy_capped(z: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path, limit: Any, name: str):
+    """멤버 하나를 풀되 목록의 크기(`limit`)를 넘으면 멈춘다. 크기를 모르면 상한 없이 푼다 —
+    그 뒤의 sha256 대조가 막는다."""
+    too_big = _ShelfGetError(
+        EXIT_UNKNOWN, f"{name} is bigger than the shelf lists — nothing was written"
+    )
+    cap = limit if isinstance(limit, int) and not isinstance(limit, bool) else None
+    if cap is not None and info.file_size > cap:
+        raise too_big
+    written = 0
+    with z.open(info) as src, target.open("wb") as fh:
+        while True:
+            chunk = src.read(1 << 16)
+            if not chunk:
+                break
+            written += len(chunk)
+            if cap is not None and written > cap:
+                raise too_big
+            fh.write(chunk)
+
+
+def _zip_cap(entries: dict[str, dict[str, Any]]) -> int | None:
+    """zip 응답의 바이트 상한 — 목록의 크기 합 + 멤버마다 머리말 몫 + 여유 64 KiB. 크기를 모르는
+    파일이 하나라도 있으면 None(상한 없음, sha256 대조가 막는다)."""
+    total = 0
+    for path, entry in entries.items():
+        size = entry.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            return None
+        total += size + 200 + 2 * len(path.encode("utf-8"))
+    return total + 64 * 1024
 
 
 def _shelf_file_path(client: Client, job: int, entry: dict[str, Any]) -> str:
@@ -1622,19 +1703,39 @@ def cmd_shelf_get(args: argparse.Namespace) -> int:
         _err(f"shelf get: #{job} is {state or 'not on the shelf'}")
         return 1
     out_root = Path(args.output)
+    # 실패하면 이 명령이 새로 만든 폴더만 지운다 — 이미 있던 폴더는 그대로 둔다(격리 검증 개선 6)
+    created = out_root
+    while not created.parent.exists() and created.parent != created:
+        created = created.parent
+    created = None if out_root.exists() else created
     try:
         written = _shelf_get_into(client, job, doc, out_root, getattr(args, "file", None))
-    except _ShelfGetError as e:
-        _err(f"shelf get: {e.message}")
-        return e.code
-    except ClientError as e:
-        return _shelf_get_fail(client, e, missing=f"#{job} is not on the shelf", job=job)
-    except OSError as e:
+    except (_ShelfGetError, ClientError, OSError) as e:
+        if created is not None:
+            shutil.rmtree(created, ignore_errors=True)
+        if isinstance(e, _ShelfGetError):
+            _err(f"shelf get: {e.message}")
+            return e.code
+        if isinstance(e, ClientError):
+            return _shelf_get_fail(client, e, missing=f"#{job} is not on the shelf", job=job)
         _err(f"shelf get: cannot write into {out_root}: {e.strerror or e}")
         return EXIT_UNKNOWN
     noun = "file" if written == 1 else "files"
     print(f"wrote {written} {noun} to {out_root} from {client.server}/shelf/{job}/", flush=True)
     return 0
+
+
+def _capped_download(client: Client, path: str, dest: Path, cap: int | None) -> None:
+    try:
+        client.download(path, dest, max_bytes=cap)
+    except ClientError as e:
+        if e.body.get("too_big"):
+            raise _ShelfGetError(
+                EXIT_UNKNOWN,
+                f"the download is bigger than the files the shelf lists ({cap} bytes) — "
+                "nothing was written",
+            ) from e
+        raise
 
 
 def _shelf_get_into(
@@ -1654,19 +1755,15 @@ def _shelf_get_into(
             wanted = {only: entries[only]}
             target = files / only
             target.parent.mkdir(parents=True, exist_ok=True)
-            client.download(_shelf_file_path(client, job, entries[only]), target)
+            size = entries[only].get("size")
+            cap = size if isinstance(size, int) and not isinstance(size, bool) else None
+            _capped_download(client, _shelf_file_path(client, job, entries[only]), target, cap)
             got = {only}
         else:
             wanted = entries
             archive = staging / "item.zip"
-            client.download(f"/shelf/{job}.zip", archive)
-            got = _unzip_shelf(archive, files)
-            extra = sorted(got - set(wanted))
-            if extra:
-                raise _ShelfGetError(
-                    EXIT_UNKNOWN,
-                    f"the zip has {extra[0]}, which the shelf does not list — nothing was written",
-                )
+            _capped_download(client, f"/shelf/{job}.zip", archive, _zip_cap(entries))
+            got = _unzip_shelf(archive, files, {p: e.get("size") for p, e in entries.items()})
         for path, entry in sorted(wanted.items()):
             if path not in got:
                 raise _ShelfGetError(

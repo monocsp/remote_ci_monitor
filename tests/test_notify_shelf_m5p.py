@@ -15,6 +15,7 @@ import itertools
 import json
 import socket
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -130,8 +131,8 @@ def test_notify_env_always_has_the_key_and_takes_the_value():
         ({"keep": True, "item_state": None, "bundle_state": "empty"}, ""),
         ({"keep": True, "item_state": None, "bundle_state": "dropped"}, ""),
         ({"keep": True, "item_state": None, "bundle_state": "failed"}, ""),
-        # 정책상 안 모은 잡(artifacts_on = "failure" 인 성공) — none
-        ({"keep": True, "item_state": None, "bundle_state": None, "collected": False}, ""),
+        # 보관 행도 묶음 행도 없는 끝난 잡 — 시작 전에 취소 · 정책상 안 모음(P3 격리 검증 D1)
+        ({"keep": True, "item_state": None, "bundle_state": None}, ""),
     ],
 )
 def test_shelf_url_table(kw, want):
@@ -157,10 +158,26 @@ def test_cb12_a_keep_job_gets_the_link_with_the_same_base_as_rcm_url(env):
     assert e["RCM_URL"].startswith("http://build.example:8787/")
 
 
+def uploading(store: Store, job_id: int) -> None:
+    """원격 잡처럼 묶음 행을 `uploading` 으로 둔다 — 보관 행은 묶음이 ready 가 될 때 선다."""
+    policy = SimpleNamespace(
+        globs=("out/*",), max_bytes=1, max_files=1, timeout_seconds=1, cancel_timeout_seconds=1
+    )
+    store.start_collect(job_id, policy, at(1))
+    store.set_bundle_state(job_id, "uploading")
+
+
 def test_cb12b_no_row_yet_still_gets_the_link(env):
     store, cfg = env
     job = keep_job(store, keep=True)
+    uploading(store, job.id)
     assert env_of(store, cfg, job)["RCM_SHELF_URL"].endswith(f"/shelf/{job.id}/")
+
+
+def test_no_shelf_row_and_no_bundle_row_gives_no_link(env):
+    store, cfg = env
+    job = keep_job(store, keep=True)
+    assert env_of(store, cfg, job)["RCM_SHELF_URL"] == ""
 
 
 def test_cb13_the_webhook_carries_shelf_url_at_the_top(env):
@@ -196,6 +213,7 @@ def test_a_green_job_that_only_collects_on_failure_gives_no_link(env):
 def test_a_red_job_that_collects_on_failure_gets_the_link(env):
     store, cfg = env
     job = keep_job(store, keep=True, preset="onfail", state=FAILED)
+    put_item(store, job.id, "pending")  # 실패한 잡은 모았다 — 보관 행이 선다
     assert env_of(store, cfg, job)["RCM_SHELF_URL"].endswith(f"/shelf/{job.id}/")
 
 
@@ -208,6 +226,7 @@ def test_cg26_no_any_address_in_the_link(tmp_path, monkeypatch):
     store = Store(cfg.data_dir / "rcm.sqlite3")
     try:
         job = keep_job(store, keep=True)
+        put_item(store, job.id, "pending")
         e = env_of(store, cfg, job)
         assert e["RCM_SHELF_URL"] == f"http://macmini:8787/shelf/{job.id}/"
         assert "0.0.0.0" not in e["RCM_SHELF_URL"]
@@ -223,6 +242,7 @@ def test_cg27_public_url_with_a_trailing_slash(tmp_path):
     store = Store(cfg.data_dir / "rcm.sqlite3")
     try:
         job = keep_job(store, keep=True)
+        put_item(store, job.id, "pending")
         assert env_of(store, cfg, job)["RCM_SHELF_URL"] == f"http://mac.local:8787/shelf/{job.id}/"
     finally:
         store.close()
@@ -231,6 +251,7 @@ def test_cg27_public_url_with_a_trailing_slash(tmp_path):
 def test_cg28_the_startup_scan_carries_the_same_link(env):
     store, cfg = env
     job = keep_job(store, keep=True)
+    put_item(store, job.id, "pending")
     cfg.notify = (rule("hook", argv=("true",)),)
     run = FakeRun()
     n, _ = notifier_for(store, cfg, EventBus(), run=run, now=NOW + timedelta(minutes=5))

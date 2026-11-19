@@ -292,7 +292,7 @@ rcm run golden-update --keep
 ```
 
 ```
-#412 succeeded in 9m12s
+#412 succeeded · 12 goldens updated
 shelf: http://macmini.local:8787/shelf/412/
 ```
 
@@ -316,16 +316,18 @@ shelf: http://macmini.local:8787/shelf/412/
 그 파일을 다시 받는다.
 
 ```sh
-rcm run app-map-shots --ref dev --keep --no-wait
+rcm run app-map-shots --keep --no-wait
 # submitted job #412 queued · …
+# fetch its artifacts later with `rcm artifacts 412 --fetch --output DIR`
 # shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)
 rcm wait --job 412
-rcm shelf get http://macmini.local:8787/shelf/412/ --output build/app_map
-rcm shelf get --latest app-map-shots --branch dev --output build/app_map
-curl http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev   # 같은 내용을 JSON 으로
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .
+rcm shelf get --latest app-map-shots --branch dev --output .
+curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # 같은 내용을 JSON 으로
 ```
 
-`rcm shelf get` 은 파일마다 sha256 을 대조하고, 하나라도 다르면 아무것도 쓰지 않는다. 프리셋에
+경로는 보관할 때 그대로 붙는다. 그래서 프로젝트 폴더에서 `--output .` 을 주면 작업이 만든 자리에
+그대로 풀린다. `rcm shelf get` 은 파일마다 sha256 을 대조하고, 하나라도 다르면 아무것도 쓰지 않는다. 프리셋에
 `keep = true` 를 넣는 일은 서버가 v0.7.0 으로 오른 뒤에만 한다. 옛 서버는 그 키를 거절한다
 ([스크립트에서 쓰기](configuration.md#using-the-shelf-from-a-script)).
 

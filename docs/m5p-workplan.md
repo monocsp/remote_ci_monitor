@@ -53,9 +53,9 @@
 
 ```console
 $ rcm run golden-update -f paths=test/feature/home/ --keep
-#412 queued · golden-update · ~10m
+submitted job #412 · http://macmini.local:8787/#/jobs/412
 ...
-#412 succeeded in 9m12s
+#412 succeeded · 12 goldens updated
 shelf: http://macmini.local:8787/shelf/412/
 ```
 
@@ -748,11 +748,11 @@ SPA 링크와 지우기 버튼, `RCM_SHELF_URL`, 웹훅 `shelf_url`, 문서 전�
 dolomood 의 흐름은 이렇다.
 
 ```sh
-rcm run app-map-shots --ref "$BRANCH" --keep --no-wait   # 출력에서 잡 번호와 보관 URL 을 읽는다
+rcm run app-map-shots --keep --no-wait                   # 출력에서 잡 번호와 보관 URL 을 읽는다
 rcm wait --job "$N"
 rcm artifacts "$N" --fetch --output build/app_map        # 지금 세션은 묶음으로 받는다
 # 나중에 다른 컴퓨터에서
-rcm shelf get http://macmini.local:8787/shelf/412/ --output build/app_map
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .   # 경로가 보관한 그대로 붙는다
 ```
 
 ### 16.1 P3 에 더한 것

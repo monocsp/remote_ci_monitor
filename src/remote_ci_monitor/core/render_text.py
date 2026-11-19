@@ -416,6 +416,9 @@ _SHELF_NONE = {
     "no_artifacts": "the preset declares no artifacts",
     "empty": "the globs matched no files",
     "forgotten": "its shelf record is gone",
+    "interrupted": "the job ended while its artifacts were still uploading",
+    "job_lost": "the job was lost before its artifacts were collected",
+    "never_ran": "the job never ran",
 }
 
 

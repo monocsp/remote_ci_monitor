@@ -192,9 +192,9 @@ def test_workplan_has_the_app_map_shots_section():
 def test_configuration_has_the_script_subsection():
     text = flat(section(read("docs/configuration.md"), HEAD))
     assert "### Using the shelf from a script" in read("docs/configuration.md")
-    assert "rcm run app-map-shots --ref dev --keep --no-wait" in text
+    assert "rcm run app-map-shots --keep --no-wait" in text
     assert "rcm shelf get" in text and "--latest app-map-shots" in text
-    assert "curl http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev" in text
+    assert 'curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"' in text
     assert "only after the server runs v0.7.0" in text
     assert "check_presets.py" in text
 
@@ -211,3 +211,41 @@ def test_usage_guides_show_the_script_path_in_both_languages():
 def test_readme_names_shelf_get():
     for rel in ("README.md", "README.ko.md"):
         assert "`rcm shelf get N\\|URL --output DIR`" in read(rel), rel
+
+
+# ── P3 격리 검증의 개선(문서) ────────────────────────────────────────────────
+
+
+def test_script_example_shows_the_real_stderr_order():
+    raw = section(read("docs/configuration.md"), HEAD)
+    i_sub = raw.index("submitted job #412")
+    i_fetch = raw.index("fetch its artifacts later with `rcm artifacts 412 --fetch --output DIR`")
+    i_shelf = raw.index("shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)")
+    assert i_sub < i_fetch < i_shelf
+
+
+def test_curl_examples_quote_the_url():
+    for rel in ("docs/configuration.md", "docs/usage.md", "docs/usage.ko.md"):
+        text = read(rel)
+        assert 'curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"' in text
+        assert not re.search(r"curl http://\S*\?", text), rel
+
+
+def test_the_finished_line_looks_like_the_real_output():
+    for rel in ("docs/usage.md", "docs/usage.ko.md", "docs/m5p-workplan.md"):
+        text = read(rel)
+        assert "#412 succeeded in 9m12s" not in text, rel
+    assert "#412 succeeded · " in read("docs/usage.md")
+
+
+def test_shelf_get_says_paths_are_kept():
+    text = flat(section(read("docs/configuration.md"), HEAD))
+    assert "--output ." in text
+    assert "the paths stay as they were kept" in text.lower()
+    for rel in ("docs/usage.md", "docs/usage.ko.md"):
+        assert "rcm shelf get" in read(rel) and "--output ." in read(rel), rel
+
+
+def test_a_pending_link_may_still_fail():
+    text = flat(section(read("docs/configuration.md"), HEAD))
+    assert "can still fail afterwards (`shelf_full`, say)" in text

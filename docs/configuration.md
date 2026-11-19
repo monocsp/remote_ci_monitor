@@ -638,7 +638,9 @@ else from reading kept files through DNS rebinding. A request with a valid token
 
 **Notifications.** A notification for a kept job carries the link: `RCM_SHELF_URL` for an `argv`
 rule and `shelf_url` at the top of a webhook's JSON, starting with the same address as `RCM_URL`.
-It is there as soon as the job finishes, before the copy is done. A job that is not kept gets an
+It is there as soon as the job finishes, before the copy is done, so a link sent while the copy is
+still pending can still fail afterwards (`shelf_full`, say); `rcm keep N` or the job's page says
+what happened. A job that is not kept gets an
 empty `RCM_SHELF_URL` and no `shelf_url` key, and so does a kept job whose copy already failed or
 that had nothing to keep.
 
@@ -651,38 +653,47 @@ server stops before it sends anything (`server does not support --keep (rcm ≥ 
 ### Using the shelf from a script
 
 A script that wants a link to leave in a pull request comment submits with `--keep --no-wait` and
-reads two lines. Their wording is fixed:
+reads two lines on stderr, the job number and the shelf link. Their wording is fixed. A tree
+submission prints, in this order:
 
 ```console
-$ rcm run app-map-shots --ref dev --keep --no-wait
+$ rcm run app-map-shots --keep --no-wait
+snapshot: 1834 files
+…
 submitted job #412 queued · 1st in line · http://macmini.local:8787/#/jobs/412
+fetch its artifacts later with `rcm artifacts 412 --fetch --output DIR`
 shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)
 {"job_id":412,"joined":false,"state":"queued",…,"shelf_url":"http://macmini.local:8787/shelf/412/",…}
 ```
 
-The last line on stdout is JSON with `job_id` and `shelf_url`. `rcm wait --job 412` follows it to
-the end. Later, from any computer that reaches the server, `rcm shelf get` downloads the kept files
-again, without a token:
+A `git_ref` preset (`--ref dev`) has no `fetch its artifacts later` line. The last line on
+stdout is JSON with `job_id` and `shelf_url`. `rcm wait --job 412` follows the job to the end.
+
+Later, from any computer that reaches the server, `rcm shelf get` downloads the kept files again,
+without a token. The paths stay as they were kept: a file kept as `build/app_map/shots.tar.gz`
+lands at `<DIR>/build/app_map/shots.tar.gz`. Use `--output .` in the project folder to put the
+files back where the job made them:
 
 ```sh
-rcm shelf get http://macmini.local:8787/shelf/412/ --output build/app_map
-rcm shelf get 412 --output build/app_map --file build/app_map/manifest.json
-rcm shelf get --latest app-map-shots --branch dev --output build/app_map
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .
+rcm shelf get 412 --output . --file build/app_map/manifest.json
+rcm shelf get --latest app-map-shots --branch dev --output .
 ```
 
-It checks every file against the sha256 the shelf lists and writes nothing unless all of them
-match, so a half-finished download never lands in `DIR`. A link to another server is fine; your
-token goes only to the server you configured, and a redirect is not followed. It ends with
-`wrote 3 files to build/app_map from http://macmini.local:8787/shelf/412/`. Exit 0 means you have
-the files, 1 means the item is not there (never kept, removed, or its copy failed), 2 a usage
-error or an older server, 3 that the server could not be reached, the copy is still running, or
-what arrived did not match.
+It checks every file against the size and sha256 the shelf lists and writes nothing unless all of
+them match, so a half-finished or tampered download never lands in `DIR`. If it made `DIR`
+itself, it removes it again on failure. A link to another server is fine; your token goes only to
+the server you configured, and a redirect is not followed. It ends with
+`wrote 4 files to . from http://macmini.local:8787/shelf/412/`. Exit 0 means you have the files,
+1 means the item is not there (never kept, removed, or its copy failed), 2 a usage error or an
+older server, 3 that the server could not be reached or answered 503, the copy is still running,
+or what arrived did not match.
 
-Without rcm, the same information is JSON:
+Without rcm, the same information is JSON (quote the URL — `?` is a pattern in zsh):
 
 ```sh
-curl http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev   # the newest item and its files
-curl http://macmini.local:8787/api/shelf/412                               # one item
+curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # the newest item and its files
+curl "http://macmini.local:8787/api/shelf/412"                               # one item
 ```
 
 Each file in it has `path`, `url`, `sha256`, `size`, `type` and, for a file unpacked from a

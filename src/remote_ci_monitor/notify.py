@@ -26,8 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from remote_ci_monitor.config import ServerConfig, server_base_url
-from remote_ci_monitor.core import artifacts as art
-from remote_ci_monitor.core.model import SUCCEEDED, Job
+from remote_ci_monitor.core.model import Job
 from remote_ci_monitor.core.notify import (
     NotifyRule,
     failure_lines,
@@ -238,8 +237,8 @@ class Notifier:
         return count
 
     def _shelf_link(self, job: Job) -> str:
-        """keep 인 잡의 보관함 링크(M5p 결정 144). 보관 행 · 묶음 행 · 프리셋 정책으로 「확정적으로
-        없다」만 가린다(`core.notify.shelf_url`). 읽다 깨지면 정해진 링크를 그대로 싣는다 — 알림은
+        """keep 인 잡의 보관함 링크(M5p 결정 144). 보관 행과 묶음 행으로 「확정적으로 없다」만
+        가린다(`core.notify.shelf_url`). 읽다 깨지면 정해진 링크를 그대로 싣는다 — 알림은
         보관 상태 때문에 멈추지 않는다."""
         if not getattr(job, "keep", False):
             return ""
@@ -251,21 +250,12 @@ class Notifier:
             bundle_state = bundle.get("state") if bundle is not None else None
         except Exception as e:  # noqa: BLE001 — 보관 상태를 못 읽어도 알림은 간다
             self.log(f"notify: shelf state of #{job.id}: {type(e).__name__}")
-        preset = self.config.preset(job.preset)
-        collected = not (
-            preset is not None
-            and (
-                not preset.artifacts
-                or (job.state == SUCCEEDED and preset.artifacts_on == art.COLLECT_FAILURE)
-            )
-        )
         return shelf_url(
             self.base_url,
             job.id,
             keep=True,
             item_state=item_state,
             bundle_state=bundle_state,
-            collected=collected,
         )
 
     def scan(self) -> int:

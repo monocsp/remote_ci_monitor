@@ -614,12 +614,15 @@ class Client:
         part.replace(dest)
         return received
 
-    def download(self, path: str, dest: Path, *, timeout: float | None = None) -> int:
+    def download(
+        self, path: str, dest: Path, *, timeout: float | None = None, max_bytes: int | None = None
+    ) -> int:
         """`GET <path>` 의 바이트를 `dest` 에 흘려 받는다(보관함 파일 · zip, M5p §16).
         받은 바이트 수를 돌려준다.
 
         토큰은 있을 때만 싣는다(보관함은 읽기 규칙이다). `Content-Length` 와 다르면 `ClientError`
-        — 잘린 파일을 쓰지 않는다. 리다이렉트는 이 클라이언트의 규칙을 따른다."""
+        — 잘린 파일을 쓰지 않는다. 리다이렉트는 이 클라이언트의 규칙을 따른다. `max_bytes` 를
+        넘으면(선언이든 실제든) 그 자리에서 멈추고 본문 `{"too_big": true}` 의 `ClientError`."""
         headers = {"User-Agent": f"rcm/{__version__}"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -629,13 +632,21 @@ class Client:
             with self._open(req, timeout=timeout or max(self.timeout, 60.0)) as resp:
                 raw = resp.headers.get("Content-Length")
                 expected = int(raw) if raw else None
+                if max_bytes is not None and expected is not None and expected > max_bytes:
+                    raise ClientError(
+                        0, f"download bigger than {max_bytes} bytes", {"too_big": True}
+                    )
                 with dest.open("wb") as fh:
                     while True:
                         chunk = resp.read(65536)
                         if not chunk:
                             break
-                        fh.write(chunk)
                         received += len(chunk)
+                        if max_bytes is not None and received > max_bytes:
+                            raise ClientError(
+                                0, f"download bigger than {max_bytes} bytes", {"too_big": True}
+                            )
+                        fh.write(chunk)
         except urllib.error.HTTPError as e:
             payload = e.read()
             try:

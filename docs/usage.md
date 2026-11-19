@@ -309,7 +309,7 @@ rcm run golden-update --keep
 ```
 
 ```
-#412 succeeded in 9m12s
+#412 succeeded · 12 goldens updated
 shelf: http://macmini.local:8787/shelf/412/
 ```
 
@@ -334,16 +334,18 @@ From a script, submit with `--keep --no-wait` and read the link from the output,
 files again on any computer, without a token:
 
 ```sh
-rcm run app-map-shots --ref dev --keep --no-wait
+rcm run app-map-shots --keep --no-wait
 # submitted job #412 queued · …
+# fetch its artifacts later with `rcm artifacts 412 --fetch --output DIR`
 # shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)
 rcm wait --job 412
-rcm shelf get http://macmini.local:8787/shelf/412/ --output build/app_map
-rcm shelf get --latest app-map-shots --branch dev --output build/app_map
-curl http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev   # the same, as JSON
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .
+rcm shelf get --latest app-map-shots --branch dev --output .
+curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # the same, as JSON
 ```
 
-`rcm shelf get` checks every file's sha256 and writes nothing unless they all match. Add
+The paths stay as they were kept, so `--output .` in the project folder puts the files back
+where the job made them. `rcm shelf get` checks every file's sha256 and writes nothing unless they all match. Add
 `keep = true` to a preset only once the server runs v0.7.0; an older server refuses the key
 ([scripts](configuration.md#using-the-shelf-from-a-script)).
 
