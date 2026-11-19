@@ -1,0 +1,40 @@
+# ~/.config/rcm/server.toml — the owner's file; comments and order must survive
+
+[server]
+port = 8787
+data_dir = "/var/empty/rcm-candidate-fixture"
+
+# [[repos]]
+# name = "commented"
+
+[[repos]]
+name = "other"
+url = "git@example.invalid:o/other.git"
+
+[[repos]]
+name = "app"   # the one
+url = "git@example.invalid:o/app.git"
+
+[repos.app.release]
+default_branch = "old"
+
+[[repos.app.release.secrets]]
+name = "OLD"
+kind = "value"
+
+[[repos]]
+name = "third"
+url = "git@example.invalid:o/third.git"
+
+[[presets]]
+name = "release-plan"
+argv = ["old"]
+[[presets.inputs]]
+name = "build_name"
+type = "string"
+
+[[presets]]
+name = "gate"   # kept
+argv = ["bash", "scripts/gate.sh"]
+[presets.env]
+CI = "1"

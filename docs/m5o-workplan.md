@@ -412,6 +412,9 @@ dolomood 의 `check_presets.py` 가 하던 「레포 명세 ↔ 운영」 비교
 10. **남은 일:** rcm-store-connect 스킬의 `rcm_candidate.py` 는 후보 server.toml 을 임시 폴더에 써서 상대 경로
     include 가 풀리지 않고, 붙여 넣기 병합이 「defined in both」에 걸린다. 조용히 지나가지 않고 FAIL 로
     드러난다 — 붙여 넣기 모델을 include 모델로 바꾸는 일이라 §8 의 dolomood 세션 일이다.
+    → #213 이 템플릿 쪽을 끝냈다: 프리셋 파일과 이름이 같은 들인 파일(또는 `--into`)에 합치고,
+    후보를 폴더(server.toml + 그 파일)로 쓰며 다른 include 는 절대 경로로 바꾼다. dolomood 의
+    사본은 `rcm skills install --into . --force` 로 받는다.
 
 ### 10.4 공통
 
