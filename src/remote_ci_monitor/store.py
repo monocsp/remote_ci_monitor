@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor.core import artifacts, outcome
+from remote_ci_monitor.core import shelf as shelf_rules
 from remote_ci_monitor.core.capability import CheckRecord
 from remote_ci_monitor.core.failures import FailureRow
 from remote_ci_monitor.core.model import (
@@ -64,19 +65,20 @@ from remote_ci_monitor.core.model import (
     Joiner,
     Paused,
     Requester,
+    ShelfItem,
     Source,
     Transition,
 )
 from remote_ci_monitor.core.outcome import dump_args, load_args
 from remote_ci_monitor.core.progress import Marker
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
-from remote_ci_monitor.core.supersede import SUPERSEDED, superseded_by
+from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, superseded_by
 
 #: 실패 대장 창(`failure_stats`)에서 빼는 요약 코드 — 프로세스가 뜨기 **전**에 서버가 닫은 잡
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 23
+DB_VERSION = 24
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -122,6 +124,49 @@ VERSION_UPDATABLE = frozenset(
 )
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
+
+#: v24(M5p · docs/m5p-workplan.md §5.1 · §15.3) — 보관함 항목. 잡 행보다 오래 살아서 외래 키를
+#: 걸지 않고 페이지에 필요한 잡의 열을 복사해 든다. 새 DB(`_SCHEMA_V1`)와 마이그레이션이 같은
+#: 문장을 쓴다 — `sqlite_master` 의 글자까지 같아야 두 DB 가 같다. `IF NOT EXISTS` 인 이유: 옛
+#: 버전으로 깎는 시험 도우미들(과 번호가 밀린 옛 빌드)은 표를 남긴 채 버전만 내린다.
+_SHELF_ITEMS_SQL = (
+    "CREATE TABLE IF NOT EXISTS shelf_items (job_id INTEGER PRIMARY KEY, state TEXT NOT NULL, "
+    "preset TEXT NOT NULL, inputs_json TEXT, repo TEXT, branch TEXT, sha TEXT, source_mode TEXT, "
+    "requester TEXT, job_state TEXT, job_finished_at REAL, requested_at REAL NOT NULL, "
+    "shelved_at REAL, last_used_at REAL, stale_since REAL, deleted_at REAL, file_count INTEGER, "
+    "total_bytes INTEGER, reason_code TEXT, reason_args TEXT, error_code TEXT, failed_at REAL)"
+)
+_SHELF_STATE_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS shelf_items_state ON shelf_items(state, last_used_at)"
+)
+_SHELF_LATEST_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS shelf_items_latest ON shelf_items(preset, branch, shelved_at)"
+)
+#: `shelf_items` 의 열, 표의 차례 그대로 — `ShelfItem` 필드와 같다.
+SHELF_COLUMNS: tuple[str, ...] = (
+    "job_id",
+    "state",
+    "preset",
+    "inputs_json",
+    "repo",
+    "branch",
+    "sha",
+    "source_mode",
+    "requester",
+    "job_state",
+    "job_finished_at",
+    "requested_at",
+    "shelved_at",
+    "last_used_at",
+    "stale_since",
+    "deleted_at",
+    "file_count",
+    "total_bytes",
+    "reason_code",
+    "reason_args",
+    "error_code",
+    "failed_at",
+)
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -178,7 +223,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   concurrency_scope TEXT NOT NULL DEFAULT 'pool',
   host_key TEXT,
   fingerprint_hash TEXT,
-  sample INTEGER NOT NULL DEFAULT 1
+  sample INTEGER NOT NULL DEFAULT 1,
+  -- v24(M5p): 끝나면 보관함에 넣나. 제출 때 얼린다. 마이그레이션이 뒤에 붙이므로 여기서도 맨 끝이다
+  keep INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -349,6 +396,7 @@ CREATE TABLE IF NOT EXISTS machine_checks (
 CREATE INDEX IF NOT EXISTS machine_checks_key ON machine_checks(worker, preset, fingerprint_hash);
 CREATE INDEX IF NOT EXISTS jobs_check ON jobs(worker_name, preset, fingerprint_hash, id);
 """
+_SCHEMA_V1 += f"{_SHELF_ITEMS_SQL};\n{_SHELF_STATE_INDEX_SQL};\n{_SHELF_LATEST_INDEX_SQL};\n"
 
 _BLOBS_SQL = (
     "CREATE TABLE IF NOT EXISTS blobs (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, "
@@ -573,6 +621,15 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _MACHINE_CHECKS_SQL,
         _MACHINE_CHECKS_INDEX_SQL,
         _JOBS_CHECK_INDEX_SQL,
+    ),
+    # v23 → v24(M5p · docs/m5p-workplan.md §5.1): 보관함. 잡의 `keep` 은 제출 때 얼린 값이고 옛 잡은
+    # 0(보관하지 않는다)이다. 항목은 잡 행보다 오래 사는 표에 둔다. v23 백업은 `migrate()` 경계에서
+    # 이 DDL 보다 먼저 만들어진다(결정 74).
+    24: (
+        "ALTER TABLE jobs ADD COLUMN keep INTEGER NOT NULL DEFAULT 0",
+        _SHELF_ITEMS_SQL,
+        _SHELF_STATE_INDEX_SQL,
+        _SHELF_LATEST_INDEX_SQL,
     ),
 }
 
@@ -861,11 +918,17 @@ def _upsert_bundle(
     now: datetime,
     ttl_hours: int = 24,
     expires_at: datetime | None = None,
+    shelf_enabled: bool = False,
+    shelf_available: bool = True,
 ) -> None:
     """묶음 행 하나를 쓴다(열려 있는 트랜잭션 안에서). 이미 발행된 묶음은 **불변**이다.
 
     만료는 `ready` 일 때만 박는다 — 버리거나 깨진 묶음은 지울 파일이 없다. 발행된 묶음은 만료가
     반드시 있다(만료 없는 행을 만들면 sweep 이 영영 못 가져간다, §9 ⑤).
+
+    묶음을 `ready` 로 쓰는 곳은 이 함수 하나다(로컬 `finish(bundle=…)` · 원격 `publish_bundle`).
+    그래서 보관 요청 행도 **여기서** 세운다(M5p 결정 129) — 잡이 keep 이면 ready 를 쓴 직후 같은
+    트랜잭션에서. 불변 조기 반환보다 뒤라 같은 묶음을 두 번 내도 행은 그대로다.
     """
     row = conn.execute(
         "SELECT state, bundle_sha256 FROM job_artifacts WHERE job_id=?", (job_id,)
@@ -907,6 +970,99 @@ def _upsert_bundle(
             json.dumps(result.detail, separators=(",", ":")) if result.detail else None,
         ),
     )
+    if ready and _job_keeps(conn, job_id):
+        _request_shelf_tx(conn, job_id, now, shelf_enabled, shelf_available)
+
+
+#: `rcm keep` 이 `requested` 를 주려면 묶음 만료까지 이만큼은 남아야 한다(§15.1) — copier 가 집기
+#: 전에 TTL 청소가 가져가는 일을 줄인다(그래도 오면 `mark_bundles_purged` 가 조건부라 막는다).
+KEEP_EXPIRY_MARGIN_SECONDS = 60.0
+#: `mark_shelf` 가 받는 열 — 키와 상태는 따로 받는다.
+_SHELF_FIELDS = frozenset(SHELF_COLUMNS) - {"job_id", "state"}
+#: `job_artifacts` 를 거르는 조건 — 그 잡의 보관 요청이 진행 중이 아니다(M5p 결정 130).
+_NOT_SHELVING = (
+    "job_id NOT IN (SELECT job_id FROM shelf_items WHERE state IN ('pending','copying'))"
+)
+
+
+def _job_keeps(conn: sqlite3.Connection, job_id: int) -> bool:
+    row = conn.execute("SELECT keep FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return row is not None and bool(row["keep"])
+
+
+def _request_shelf_tx(
+    conn: sqlite3.Connection,
+    job_id: int,
+    now: datetime,
+    enabled: bool,
+    available: bool = True,
+) -> bool:
+    """보관 요청 행을 세운다(열려 있는 트랜잭션 안에서). 이미 행이 있으면 그대로 둔다.
+
+    잡의 열을 **복사한다** — 항목은 잡 행보다 오래 산다(§4.5). 원격 잡은 이 시점에 아직
+    `running` 이라 잡 상태 · 끝난 시각은 잡이 끝났을 때만 채운다(나머지는 `Store.finish` 가 같은
+    트랜잭션에서 고친다, §15.1). 보관함이 꺼졌거나 쓸 수 없으면 `pending` 을 거치지 않고 곧장
+    `failed` 로 세운다 — 묶음을 붙잡지 않는다.
+    """
+    job = conn.execute(
+        "SELECT preset, inputs_json, source_json, sha, tree_hash, requester_label, state, "
+        "finished_at FROM jobs WHERE id=?",
+        (int(job_id),),
+    ).fetchone()
+    if job is None:
+        return False
+    src = json.loads(job["source_json"])
+    source = Source(
+        mode=src.get("mode", "tree"),
+        repo=src.get("repo"),
+        branch=src.get("branch"),
+        ref=src.get("ref"),
+    )
+    sha = job["sha"] if source.mode == "git_ref" else (job["tree_hash"] or src.get("tree_hash"))
+    terminal = job["state"] in TERMINAL_STATES
+    ts = _ts(now)
+    state, reason = shelf_rules.STATE_PENDING, None
+    if not available:
+        state, reason = shelf_rules.STATE_FAILED, "unavailable"
+    elif not enabled:
+        state, reason = shelf_rules.STATE_FAILED, "disabled"
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO shelf_items (job_id, state, preset, inputs_json, repo, branch, sha, "
+        "source_mode, requester, job_state, job_finished_at, requested_at, reason_code, failed_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            int(job_id),
+            state,
+            job["preset"],
+            job["inputs_json"],
+            repo_of(source),
+            branch_of(source),
+            sha,
+            source.mode,
+            job["requester_label"],
+            job["state"] if terminal else None,
+            job["finished_at"] if terminal else None,
+            ts,
+            reason,
+            ts if reason is not None else None,
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def _ready_bundle(conn: sqlite3.Connection, job_id: int) -> bool:
+    """그 잡의 묶음이 지금 `ready` 이고 아직 안 지워졌나."""
+    row = conn.execute(
+        "SELECT state, purged_at FROM job_artifacts WHERE job_id=?", (int(job_id),)
+    ).fetchone()
+    return row is not None and row["state"] == artifacts.READY and row["purged_at"] is None
+
+
+def _shelf_item(row: sqlite3.Row) -> ShelfItem:
+    values = {c: row[c] for c in SHELF_COLUMNS}
+    raw_args = values["reason_args"]
+    values["reason_args"] = json.loads(raw_args) if raw_args else None
+    return ShelfItem(**values)
 
 
 #: 합류할 수 있는 상태 — 활성 상태에서 `cancelling` 을 뺀 것. 취소 중인 잡은 결과를 줄 수 없다
@@ -922,6 +1078,12 @@ class Store:
         self._lock = threading.Lock()
         self.open_connections = 0  # 지금 열린 연결 수(스레드마다 하나) — 누수 감시
         self._holds: dict[int, int] = {}  # 지금 내려보내는 중인 묶음(M5e) — 프로세스 안에서만
+        #: 보관함(M5p §15.1). 새 보관을 받나 — App 이 설정(`shelf_max_bytes > 0`)을 읽고 넣는다.
+        #: 기본이 False 인 이유: 설정을 모르는 곳(`rcm gc` 사본 · 시험)이 보관 행을 `pending` 으로
+        #: 세워 묶음을 붙잡으면 안 된다. 꺼져 있으면 keep 잡의 행은 곧장 `failed(disabled)` 다.
+        self.shelf_enabled = False
+        #: 보관함 폴더를 쓸 수 있나 — 기동 화해(`reconcile_shelf_on_start`)가 정한다(§5.3).
+        self.shelf_available = True
         # 경고 한 줄을 어디에 쓰나(백업 정리 실패 같은, 멈출 일은 아닌 것). 기본은 stderr.
         self._log = log or (lambda msg: print(msg, file=sys.stderr))
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1121,6 +1283,7 @@ class Store:
             host_key=row["host_key"],
             fingerprint_hash=row["fingerprint_hash"],
             sample=bool(row["sample"]) if row["sample"] is not None else True,
+            keep=bool(row["keep"]),
         )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -1613,7 +1776,15 @@ class Store:
         conn = self._conn()
         conn.execute("BEGIN IMMEDIATE")
         try:
-            _upsert_bundle(conn, int(job_id), result, now=now, expires_at=expires_at)
+            _upsert_bundle(
+                conn,
+                int(job_id),
+                result,
+                now=now,
+                expires_at=expires_at,
+                shelf_enabled=self.shelf_enabled,
+                shelf_available=self.shelf_available,
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -1675,6 +1846,14 @@ class Store:
                 decision = artifacts.AckDecision(
                     decision.status, False, False, decision.reason_code
                 )
+            if decision.purge and self._shelving(conn, job_id):
+                # 보관함이 아직 이 묶음을 푸는 중이다(M5p 결정 130) — 지금 지우면 보관이 빈손이다.
+                # `acked_at` 은 적고 지우기만 미룬다. 보관이 끝나면 copier 가
+                # `release_deferred_bundle` 로 그때 지운다. 같은 트랜잭션이라 판정과 보관 요청이
+                # 엇갈리지 않는다.
+                decision = artifacts.AckDecision(
+                    decision.status, False, decision.record, "shelving", deferred=True
+                )
             if decision.record:
                 conn.execute(
                     "UPDATE job_artifacts SET acked_at=? WHERE job_id=? AND acked_at IS NULL",
@@ -1685,6 +1864,14 @@ class Store:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+
+    @staticmethod
+    def _shelving(conn: sqlite3.Connection, job_id: int) -> bool:
+        """그 잡의 보관 요청이 아직 끝나지 않았나(`pending` · `copying`)."""
+        row = conn.execute(
+            "SELECT state FROM shelf_items WHERE job_id=?", (int(job_id),)
+        ).fetchone()
+        return row is not None and row["state"] in shelf_rules.IN_FLIGHT_STATES
 
     @staticmethod
     def _join_count(conn: sqlite3.Connection, job_id: int) -> int:
@@ -1698,14 +1885,18 @@ class Store:
         )
 
     def bundles_due(self, now: datetime, limit: int = 1000) -> list[Any]:
-        """TTL 이 지난 묶음. 만료 없는 행과 이미 사라진 것은 절대 대상이 아니다(§8)."""
+        """TTL 이 지난 묶음. 만료 없는 행과 이미 사라진 것은 절대 대상이 아니다(§8).
+
+        보관함이 아직 푸는 중(`pending` · `copying`)인 묶음도 뺀다(M5p 결정 130). 그 보관이 영원히
+        안 끝나면 청소기의 안전판(`time_out_shelf_requests`)이 그 행을 접어 여기로 돌려보낸다.
+        """
         marks = ",".join("?" * len(artifacts.GONE_STATES))
         rows = (
             self._conn()
             .execute(
                 f"SELECT job_id, state, expires_at, bundle_bytes FROM job_artifacts "
                 f"WHERE expires_at IS NOT NULL AND expires_at <= ? AND state NOT IN ({marks}) "
-                "ORDER BY job_id LIMIT ?",
+                f"AND {_NOT_SHELVING} ORDER BY job_id LIMIT ?",
                 (_ts(now), *sorted(artifacts.GONE_STATES), int(limit)),
             )
             .fetchall()
@@ -1721,7 +1912,12 @@ class Store:
         ]
 
     def mark_bundles_purged(self, job_ids: Iterable[int], state: str, now: datetime) -> int:
-        """지웠다고 표시하고 예약을 반납한다. 이미 표시된 것은 다시 세지 않는다."""
+        """지웠다고 표시하고 예약을 반납한다. 이미 표시된 것은 다시 세지 않는다.
+
+        보관함이 푸는 중인 묶음은 표시하지 않는다(M5p §15.2) — `bundles_due` 를 읽은 뒤 그 사이
+        `rcm keep` 이 보관을 요청했으면 행은 `ready` 로 남고, copier 가 파일이 없는 것을 보고
+        보관을 접은 뒤 다음 회차가 표시한다. 「pending 행만 남고 묶음은 purged」는 없다.
+        """
         ids = [int(i) for i in job_ids]
         if not ids:
             return 0
@@ -1731,7 +1927,7 @@ class Store:
         try:
             cur = conn.execute(
                 f"UPDATE job_artifacts SET state=?, purged_at=?, reserved_bytes=0 "
-                f"WHERE job_id IN ({id_marks}) AND purged_at IS NULL",
+                f"WHERE job_id IN ({id_marks}) AND purged_at IS NULL AND {_NOT_SHELVING}",
                 (state, _ts(now), *ids),
             )
             conn.execute("COMMIT")
@@ -1798,6 +1994,423 @@ class Store:
                     shutil.rmtree(entry, ignore_errors=True)
         return interrupted, gone
 
+    # ── 보관함 (M5p) ─────────────────────────────────────────────────────────
+
+    def _turn_keep_on(self, conn: sqlite3.Connection, job_id: int, now: datetime) -> None:
+        """잡의 keep 을 켠다(열려 있는 트랜잭션 안에서). 묶음이 이미 ready 면 보관 행도 세운다.
+
+        keep 을 켜는 모든 길(합류 · supersede · `set_job_keep`)이 같은 트랜잭션에서 묶음을 본다
+        (§15.1). 원격 잡은 묶음 ready 와 finish 가 다른 트랜잭션이라, 그 사이에 켠 keep 은
+        `_upsert_bundle` 을 이미 지나쳤다 — 여기서 세우지 않으면 행이 영영 안 선다.
+        """
+        conn.execute("UPDATE jobs SET keep=1 WHERE id=? AND keep=0", (int(job_id),))
+        if _ready_bundle(conn, job_id):
+            _request_shelf_tx(conn, job_id, now, self.shelf_enabled, self.shelf_available)
+
+    def _bundle_verdict(self, conn: sqlite3.Connection, job_id: int, now: datetime) -> str:
+        """`set_job_keep` 이 보는 묶음 — `ready` · `moving`(아직 오는 중) · `gone` · `absent` ·
+        `none`(종결인데 ready 가 아니다)."""
+        b = conn.execute(
+            "SELECT state, expires_at, acked_at, purged_at FROM job_artifacts WHERE job_id=?",
+            (int(job_id),),
+        ).fetchone()
+        if b is None:
+            return "absent"
+        state = b["state"]
+        if state in artifacts.PROGRESS_STATES:
+            return "moving"
+        if state in artifacts.GONE_STATES or state == artifacts.UNAVAILABLE:
+            return "gone"
+        if state != artifacts.READY:
+            return "none"
+        if b["purged_at"] is not None:
+            return "gone"
+        expiry = b["expires_at"]
+        if expiry is None or float(expiry) - float(_ts(now)) < KEEP_EXPIRY_MARGIN_SECONDS:
+            return "gone"  # copier 가 집기 전에 TTL 청소가 가져간다
+        if b["acked_at"] is not None and self._join_count(conn, job_id) == 0:
+            return "gone"  # 소유자가 받고 확인했다 — 그 요청 안에서 지워졌거나 지워질 참이다
+        return "ready"
+
+    def set_job_keep(self, job_id: int, now: datetime, *, enabled: bool | None = None) -> str:
+        """`rcm keep N` — 한 `BEGIN IMMEDIATE` 안에서 판정하고 쓴다(§4.1 · §15.1).
+
+        결과는 `armed` · `requested` · `already_requested` · `retouched` · `retried` · `no_bundle`
+        · `gone` · `disabled` 중 하나다. 판정과 잡 종료 · ack 가 같은 쓰기 잠금 아래에 있어서
+        「keep 1 · 묶음 ready · 보관 행 없음」과 「requested 인데 묶음은 지워짐」이 생기지 않는다.
+
+        `enabled` 를 안 주면 `self.shelf_enabled` 다. 꺼져 있으면 **새로 보관할** 결과(armed ·
+        requested · retried)만 `disabled` 가 되고, 이미 있는 항목의 되살리기는 된다(§3.1).
+        보관함 폴더가 `unavailable` 이면 무엇이든 `disabled` 다. 없는 잡은 `StoreError`.
+        프리셋에 `artifacts` 가 없는 도는 잡은 서버가 이 함수 **전에** 거른다(설정은 store 밖이다).
+        """
+        enabled = self.shelf_enabled if enabled is None else bool(enabled)
+        conn = self._conn()
+        ts = _ts(now)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            job = conn.execute("SELECT state FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+            if job is None:
+                conn.execute("ROLLBACK")
+                raise StoreError(f"job {job_id} not found")
+            row = conn.execute(
+                "SELECT state FROM shelf_items WHERE job_id=?", (int(job_id),)
+            ).fetchone()
+            current = row["state"] if row is not None else None
+            if not self.shelf_available:
+                result = "disabled"
+            elif current in shelf_rules.IN_FLIGHT_STATES:
+                result = "already_requested"
+            elif current in shelf_rules.SHELVED_STATES:
+                result = "retouched"
+            else:
+                bundle = self._bundle_verdict(conn, job_id, now)
+                if bundle == "ready":
+                    result = "retried" if current == shelf_rules.STATE_FAILED else "requested"
+                elif bundle == "gone":
+                    result = "gone"
+                elif bundle == "moving" or (
+                    bundle == "absent" and job["state"] not in TERMINAL_STATES
+                ):
+                    result = "armed"
+                else:
+                    result = "no_bundle"
+                if result in ("armed", "requested", "retried") and not enabled:
+                    result = "disabled"
+            if result in ("armed", "requested", "retried", "already_requested", "retouched"):
+                conn.execute("UPDATE jobs SET keep=1 WHERE id=? AND keep=0", (int(job_id),))
+            if result == "requested":
+                if current is not None:  # 묘비(손으로 지운 직후) — 새 요청으로 갈아 끼운다
+                    conn.execute("DELETE FROM shelf_items WHERE job_id=?", (int(job_id),))
+                _request_shelf_tx(conn, job_id, now, True, True)
+            elif result == "retried":
+                conn.execute(
+                    "UPDATE shelf_items SET state=?, requested_at=?, reason_code=NULL, "
+                    "reason_args=NULL, error_code=NULL, failed_at=NULL WHERE job_id=?",
+                    (shelf_rules.STATE_PENDING, ts, int(job_id)),
+                )
+            elif result == "retouched":
+                # 되살리기 — 1시간 규칙 없이 시계를 돌린다(§15.1)
+                conn.execute(
+                    "UPDATE shelf_items SET state=?, last_used_at=?, stale_since=NULL "
+                    "WHERE job_id=?",
+                    (shelf_rules.STATE_ACTIVE, ts, int(job_id)),
+                )
+            conn.execute("COMMIT")
+            return result
+        except StoreError:
+            raise
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def release_deferred_bundle(self, job_id: int, now: datetime | None = None) -> Path | None:
+        """미뤄 둔 ack 삭제를 이제 할 수 있으면 묶음을 `purged` 로 표시하고 그 폴더를 돌려준다.
+
+        copier 가 `finish_shelf_item` 뒤에 부른다(§15.2). 한 트랜잭션에서 「ack 됨 · 합류자 0 ·
+        진행 중인 보관 행 없음 · 아직 안 지움」을 본다 — 그새 합류가 끼었으면 TTL 까지 둔다.
+        파일은 부르는 쪽(서버)이 지운다. 할 일이 없으면 None.
+        """
+        when = now if now is not None else datetime.now(UTC)
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            b = conn.execute(
+                "SELECT state, acked_at, purged_at FROM job_artifacts WHERE job_id=?",
+                (int(job_id),),
+            ).fetchone()
+            if (
+                b is None
+                or b["state"] != artifacts.READY
+                or b["acked_at"] is None
+                or b["purged_at"] is not None
+                or self._join_count(conn, job_id) != 0
+                or self._shelving(conn, job_id)
+            ):
+                conn.execute("ROLLBACK")
+                return None
+            conn.execute(
+                "UPDATE job_artifacts SET state=?, purged_at=?, reserved_bytes=0 WHERE job_id=?",
+                (artifacts.PURGED, _ts(when), int(job_id)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return self._artifacts_root() / str(int(job_id))
+
+    def claim_shelf_item(self, now: datetime) -> ShelfItem | None:
+        """`pending` 가운데 가장 오래 기다린 것(같으면 작은 잡 번호)을 `copying` 으로 집는다.
+
+        잡이 아직 안 끝났어도 집는다(원격 잡은 묶음이 먼저 ready 가 된다, §15.1). copier 가 둘이어도
+        `BEGIN IMMEDIATE` 와 조건부 UPDATE 로 한 번만 집힌다.
+        """
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT job_id FROM shelf_items WHERE state=? "
+                "ORDER BY requested_at, job_id LIMIT 1",
+                (shelf_rules.STATE_PENDING,),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return None
+            conn.execute(
+                "UPDATE shelf_items SET state=? WHERE job_id=? AND state=?",
+                (shelf_rules.STATE_COPYING, int(row["job_id"]), shelf_rules.STATE_PENDING),
+            )
+            got = conn.execute(
+                "SELECT * FROM shelf_items WHERE job_id=?", (int(row["job_id"]),)
+            ).fetchone()
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return _shelf_item(got)
+
+    def finish_shelf_item(
+        self,
+        job_id: int,
+        *,
+        ok: bool,
+        file_count: int | None,
+        total_bytes: int | None,
+        reason_code: str | None,
+        now: datetime,
+        reason_args: dict[str, Any] | None = None,
+    ) -> bool:
+        """보관 한 건을 닫는다 — `copying` 일 때만(조건부, §15.2). 바뀌었으면 True.
+
+        성공이면 `active` 이고 `shelved_at = last_used_at = now`. 잡이 이미 끝났으면 잡 상태와
+        끝난 시각을 다시 복사한다(아직이면 나중에 `finish` 가 채운다). 잡 행이 이미 지워졌으면
+        요청 때 복사한 값을 그대로 둔다. 실패면 `failed` + 이유 + `failed_at`. 잡과 묶음은 건드리지
+        않는다 — 보관 실패가 잡을 실패로 만들지 않는다.
+        """
+        conn = self._conn()
+        ts = _ts(now)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if ok:
+                cur = conn.execute(
+                    "UPDATE shelf_items SET state=?, shelved_at=?, last_used_at=?, "
+                    "stale_since=NULL, file_count=?, total_bytes=?, reason_code=NULL, "
+                    "reason_args=NULL, error_code=NULL WHERE job_id=? AND state=?",
+                    (
+                        shelf_rules.STATE_ACTIVE,
+                        ts,
+                        ts,
+                        file_count,
+                        total_bytes,
+                        int(job_id),
+                        shelf_rules.STATE_COPYING,
+                    ),
+                )
+                job = conn.execute(
+                    "SELECT state, finished_at FROM jobs WHERE id=?", (int(job_id),)
+                ).fetchone()
+                if cur.rowcount == 1 and job is not None and job["state"] in TERMINAL_STATES:
+                    conn.execute(
+                        "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
+                        (job["state"], job["finished_at"], int(job_id)),
+                    )
+            else:
+                cur = conn.execute(
+                    "UPDATE shelf_items SET state=?, reason_code=?, reason_args=?, failed_at=? "
+                    "WHERE job_id=? AND state=?",
+                    (
+                        shelf_rules.STATE_FAILED,
+                        reason_code,
+                        outcome.dump_args(reason_args),
+                        ts,
+                        int(job_id),
+                        shelf_rules.STATE_COPYING,
+                    ),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return cur.rowcount == 1
+
+    def touch_shelf_item(self, job_id: int, now: datetime) -> bool:
+        """항목을 「썼다」. `should_touch` 가 그렇다고 할 때만 쓴다 — 썼으면 True(§4.3).
+
+        보관 중은 1시간에 한 번, 정리 대기는 첫 쓰기에 바로 `active` 로 돌아간다. 동시에 둘이
+        와도 쓰기 잠금 안에서 판정하므로 한 번만 쓴다.
+        """
+        conn = self._conn()
+        ts = _ts(now)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT state, last_used_at FROM shelf_items WHERE job_id=?", (int(job_id),)
+            ).fetchone()
+            if row is None or not shelf_rules.should_touch(row["last_used_at"], row["state"], ts):
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute(
+                "UPDATE shelf_items SET state=?, last_used_at=?, stale_since=NULL WHERE job_id=?",
+                (shelf_rules.STATE_ACTIVE, ts, int(job_id)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return True
+
+    def shelf_items(
+        self,
+        state: str | Iterable[str] | None = None,
+        preset: str | None = None,
+        limit: int | None = 200,
+    ) -> list[ShelfItem]:
+        """보관 항목들, 잡 번호가 큰 것부터. `state` 는 하나 또는 여럿, `limit=None` 은 전부."""
+        where: list[str] = []
+        params: list[Any] = []
+        if state is not None:
+            states = (state,) if isinstance(state, str) else tuple(state)
+            where.append(f"state IN ({','.join('?' * len(states))})")
+            params.extend(states)
+        if preset is not None:
+            where.append("preset=?")
+            params.append(preset)
+        sql = "SELECT * FROM shelf_items"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY job_id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [_shelf_item(r) for r in self._conn().execute(sql, tuple(params)).fetchall()]
+
+    def shelf_item(self, job_id: int) -> ShelfItem | None:
+        row = (
+            self._conn()
+            .execute("SELECT * FROM shelf_items WHERE job_id=?", (int(job_id),))
+            .fetchone()
+        )
+        return None if row is None else _shelf_item(row)
+
+    def latest_shelf_item(self, preset: str, branch: str | None) -> ShelfItem | None:
+        """`/shelf/latest/<preset>?branch=` 의 대상 — 보관 중 · 정리 대기 가운데 잡 번호가 가장 큰
+        것(§15.5). `branch` 가 None 이면 모든 브랜치에서."""
+        params: list[Any] = [preset, *shelf_rules.SHELVED_STATES]
+        sql = "SELECT * FROM shelf_items WHERE preset=? AND state IN (?,?)"
+        if branch is not None:
+            sql += " AND branch=?"
+            params.append(branch)
+        row = self._conn().execute(sql + " ORDER BY job_id DESC LIMIT 1", params).fetchone()
+        return None if row is None else _shelf_item(row)
+
+    def mark_shelf(
+        self,
+        job_id: int,
+        state: str,
+        now: datetime,
+        *,
+        only_from: Iterable[str] | None = None,
+        **fields: Any,
+    ) -> bool:
+        """행의 상태와 열을 바꾼다. 바뀌었으면 True. `only_from` 을 주면 그 상태에서만 바꾼다.
+
+        필드 이름은 표의 열만 받는다(SQL 로 새지 않는다). 상태를 정하는 시각(`stale_since` ·
+        `deleted_at` · `failed_at`)을 안 주면 `now` 로 채운다.
+        """
+        if state not in shelf_rules.SHELF_STATES:
+            raise StoreError(f"unknown shelf state {state!r}")
+        unknown = sorted(set(fields) - _SHELF_FIELDS)
+        if unknown:
+            raise StoreError(f"unknown shelf field(s): {', '.join(unknown)}")
+        auto = {
+            shelf_rules.STATE_STALE: "stale_since",
+            shelf_rules.STATE_DELETED: "deleted_at",
+            shelf_rules.STATE_FAILED: "failed_at",
+        }.get(state)
+        if auto is not None and auto not in fields:
+            fields[auto] = _ts(now)
+        if isinstance(fields.get("reason_args"), dict):
+            fields["reason_args"] = outcome.dump_args(fields["reason_args"])
+        sets = ["state=?", *(f"{k}=?" for k in fields)]
+        params: list[Any] = [state, *fields.values(), int(job_id)]
+        sql = f"UPDATE shelf_items SET {', '.join(sets)} WHERE job_id=?"
+        if only_from is not None:
+            allowed = tuple(only_from)
+            sql += f" AND state IN ({','.join('?' * len(allowed))})"
+            params.extend(allowed)
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(sql, tuple(params))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return cur.rowcount == 1
+
+    def forget_shelf(self, job_id: int) -> bool:
+        """행을 지운다(30일 지난 묘비 · 실패 행). 폴더는 건드리지 않는다."""
+        cur = self._conn().execute("DELETE FROM shelf_items WHERE job_id=?", (int(job_id),))
+        return cur.rowcount == 1
+
+    def shelf_totals(self) -> dict[str, Any]:
+        """`{stored_bytes, items: {active, stale, pending, failed}}` — DB 열로 센다.
+
+        `stored_bytes` 는 보관 중 · 정리 대기의 합이고, `pending` 은 `copying` 을 포함한다(§15.3).
+        화면은 청소 회차 사이의 어긋남을 없애려고 `stage()` 로 다시 셀 수 있다(§15.5 — 서버 몫).
+        """
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT state, COUNT(*) AS n, COALESCE(SUM(total_bytes), 0) AS b "
+                "FROM shelf_items GROUP BY state"
+            )
+            .fetchall()
+        )
+        by = {r["state"]: (int(r["n"]), int(r["b"] or 0)) for r in rows}
+        count = {k: v[0] for k, v in by.items()}
+        return {
+            "stored_bytes": sum(by.get(s, (0, 0))[1] for s in shelf_rules.SHELVED_STATES),
+            "items": {
+                "active": count.get(shelf_rules.STATE_ACTIVE, 0),
+                "stale": count.get(shelf_rules.STATE_STALE, 0),
+                "pending": sum(count.get(s, 0) for s in shelf_rules.IN_FLIGHT_STATES),
+                "failed": count.get(shelf_rules.STATE_FAILED, 0),
+            },
+        }
+
+    def time_out_shelf_requests(self, now: datetime, *, grace_hours: float = 24) -> list[int]:
+        """안전판(§15.2) — `pending` 인데 묶음의 만료 + `grace_hours` 가 지났으면 `failed(timeout)`.
+
+        보관이 영원히 안 끝나도 묶음이 영원히 붙잡히지 않게 한다. 만료는 `ready_at +
+        artifact_retention_hours` 다. `copying` 은 건드리지 않는다 — 지금 푸는 중이다.
+        """
+        cutoff = _ts(now) - float(grace_hours) * 3600
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            ids = [
+                int(r["job_id"])
+                for r in conn.execute(
+                    "SELECT s.job_id FROM shelf_items s JOIN job_artifacts a "
+                    "ON a.job_id = s.job_id WHERE s.state=? AND a.expires_at IS NOT NULL "
+                    "AND a.expires_at <= ? ORDER BY s.job_id",
+                    (shelf_rules.STATE_PENDING, cutoff),
+                ).fetchall()
+            ]
+            if ids:
+                marks = ",".join("?" * len(ids))
+                conn.execute(
+                    f"UPDATE shelf_items SET state=?, reason_code='timeout', failed_at=? "
+                    f"WHERE job_id IN ({marks}) AND state=?",
+                    (shelf_rules.STATE_FAILED, _ts(now), *ids, shelf_rules.STATE_PENDING),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return ids
+
     def list_pools(self) -> list[str]:
         """활성 + 종료 잡이 있는 풀 이름. 기본 풀은 잡이 없어도 맨 앞."""
         conn = self._conn()
@@ -1851,8 +2464,11 @@ class Store:
         concurrency_scope: str = SCOPE_POOL,
         sample: bool = True,
         fingerprint_hash: str | None = None,
+        keep: bool = False,
     ) -> Job:
-        """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다."""
+        """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다.
+
+        `keep` 은 제출 때 얼린 값이다(프리셋 keep OR 제출 keep, M5p 결정 127)."""
         job, _ = self._create_job_tx(
             preset=preset,
             inputs=inputs,
@@ -1874,6 +2490,7 @@ class Store:
             concurrency_scope=concurrency_scope,
             sample=sample,
             fingerprint_hash=fingerprint_hash,
+            keep=keep,
         )
         return job
 
@@ -1910,6 +2527,7 @@ class Store:
         concurrency_scope: str = SCOPE_POOL,
         sample: bool = True,
         fingerprint_hash: str | None = None,
+        keep: bool = False,
     ) -> tuple[Job, tuple[str, str] | None]:
         if state not in (UPLOADING, QUEUED):
             raise StoreError(f"new job cannot start in state {state}")
@@ -1933,8 +2551,8 @@ class Store:
                 "INSERT INTO jobs (preset, inputs_json, key, concurrency_group, source_json, "
                 "requester_name, requester_label, state, created_at, queued_at, tree_hash, sha, "
                 "timeout_seconds, join_key, priority, pool, link_url, link_label, placement, "
-                "display_pool, target_worker, concurrency_scope, sample, fingerprint_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "display_pool, target_worker, concurrency_scope, sample, fingerprint_hash, keep) "
+                f"VALUES ({', '.join('?' * 25)})",
                 (
                     preset,
                     json.dumps(inputs, sort_keys=True, separators=(",", ":")),
@@ -1960,6 +2578,7 @@ class Store:
                     concurrency_scope or SCOPE_POOL,
                     1 if sample else 0,
                     fingerprint_hash,
+                    1 if keep else 0,
                 ),
             )
             job_id = int(cur.lastrowid)
@@ -1983,22 +2602,35 @@ class Store:
         return rows[0] if rows else None
 
     def join_or_bump(
-        self, join_key: str, name: str, label: str, priority: int, now: datetime
+        self,
+        join_key: str,
+        name: str,
+        label: str,
+        priority: int,
+        now: datetime,
+        keep: bool = False,
     ) -> Job | None:
         """합류 판정 + 합류자 기록 + 우선순위 상향을 **한 트랜잭션**으로(M5).
 
-        요청자 본인이면 합류자를 안 넣는다. 우선순위는 `max(기존, 요청)` 로만 올라간다.
+        요청자 본인이면 합류자를 안 넣는다. 우선순위는 `max(기존, 요청)` 로만 올라간다. `keep` 도
+        같다 — 켤 수만 있고 끄지 않는다(M5p 결정 128).
         """
-        got = self._join_tx(join_key, name, label, priority, now, with_submission=False)
+        got = self._join_tx(join_key, name, label, priority, now, with_submission=False, keep=keep)
         return None if got is None else got[0]
 
     def join_or_bump_with_submission(
-        self, join_key: str, name: str, label: str, priority: int, now: datetime
+        self,
+        join_key: str,
+        name: str,
+        label: str,
+        priority: int,
+        now: datetime,
+        keep: bool = False,
     ) -> tuple[Job, str, str] | None:
         """`join_or_bump` + 그 참여자의 `leave_submission` capability 를 같은 트랜잭션에(M5l S8)
         — `(job, submission_id, cancel_token)`, 합류할 잡이 없으면 None. 삽입이 실패하면
         joiner 행도 `join_count` 도 그대로다."""
-        got = self._join_tx(join_key, name, label, priority, now, with_submission=True)
+        got = self._join_tx(join_key, name, label, priority, now, with_submission=True, keep=keep)
         if got is None:
             return None
         job, issued = got
@@ -2014,6 +2646,7 @@ class Store:
         now: datetime,
         *,
         with_submission: bool,
+        keep: bool = False,
     ) -> tuple[Job, tuple[str, str] | None] | None:
         # 취소 중인 잡에는 합류하지 않는다 — 결과를 줄 수 없는 잡이다. 거기 합류하면 합류자의
         # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반)
@@ -2023,7 +2656,7 @@ class Store:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                f"SELECT id, requester_name, priority FROM jobs WHERE join_key=? "
+                f"SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
                 f"AND state IN ({marks}) ORDER BY id LIMIT 1",
                 (join_key, *sorted(JOINABLE_STATES)),
             ).fetchone()
@@ -2042,6 +2675,8 @@ class Store:
             conn.execute("UPDATE jobs SET join_count=join_count+1 WHERE id=?", (job_id,))
             if int(priority) > int(row["priority"] or 0):
                 conn.execute("UPDATE jobs SET priority=? WHERE id=?", (int(priority), job_id))
+            if keep and not row["keep"]:
+                self._turn_keep_on(conn, job_id, now)
             if with_submission:
                 issued = self._insert_submission(conn, job_id, ROLE_LEAVE_SUBMISSION, name, now)
             conn.execute("COMMIT")
@@ -2618,6 +3253,7 @@ class Store:
             ]
             by_id = {j.id: j for j in olds}
             top = new.priority
+            keep = new.keep
             for job_id in superseded_by(new, olds, mode):
                 old = by_id[job_id]
                 if old.state in WAITING_STATES:
@@ -2646,9 +3282,13 @@ class Store:
                         summary_args=dump_args(args),
                     )
                 top = max(top, old.priority)
+                keep = keep or old.keep
                 taken.append(job_id)
             if top > new.priority:
                 conn.execute("UPDATE jobs SET priority=? WHERE id=?", (int(top), new.id))
+            if keep and not new.keep:
+                # 치운 잡이 보관하려던 것을 새 잡이 이어받는다 — 우선순위를 넘기듯(결정 128)
+                self._turn_keep_on(conn, new.id, now)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -2716,8 +3356,22 @@ class Store:
                     "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
                     (job_id, name, seq),
                 )
+            # 원격 잡의 보관 행은 묶음이 ready 일 때(잡이 아직 running 일 때) 섰다 — 잡 상태와 끝난
+            # 시각은 여기서 같은 트랜잭션으로 채운다(M5p §15.1). copier 와의 순서와 상관없이 맞다.
+            conn.execute(
+                "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
+                (state, ts, job_id),
+            )
             if bundle is not None:
-                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+                _upsert_bundle(
+                    conn,
+                    job_id,
+                    bundle,
+                    now=now,
+                    ttl_hours=ttl_hours,
+                    shelf_enabled=self.shelf_enabled,
+                    shelf_available=self.shelf_available,
+                )
             conn.execute("COMMIT")
             return True
         except Exception:
