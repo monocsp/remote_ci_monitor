@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
@@ -187,6 +188,20 @@ def health_doc(version: str, wheel: bytes | None, **over: Any) -> dict[str, Any]
     return doc
 
 
+class _NoLookupHTTPServer(ThreadingHTTPServer):
+    """`HTTPServer.server_bind` 의 `socket.getfqdn()` 역방향 조회를 건너뛴다.
+
+    macOS CI 러너에서는 프로세스의 첫 조회가 30초 넘게 멈춘다. 뮤테이션 확인은 변이마다 pytest 를
+    새로 띄우므로 m5q 변이 하나가 대조군과 변이판에서 이 값을 두 번 치렀다. 이름은 쓰지 않는다.
+    서버 쪽 `RcmHTTPServer.server_bind` 와 같은 처리다."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
+
 @dataclass
 class Seen:
     method: str
@@ -242,7 +257,7 @@ class FakeServer:
             def do_GET(self):
                 outer._handle(self)
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd = _NoLookupHTTPServer(("127.0.0.1", 0), H)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
