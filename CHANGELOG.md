@@ -7,6 +7,18 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
+  `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file
+  with extended attributes; the shelf unpacked them into `<name>.d/` and, ending in `.png`, they
+  showed as broken images in the item's grid (23 of 48 files of one app-map-shots job). Unpacking
+  now leaves out `._*`, `.DS_Store` and anything under `__MACOSX/` and lists them under the
+  item's skipped members with the reason `apple_double`. Files the job declared itself are kept as
+  they are, whatever their name. Items already on the shelf do not change.
+  ([#229](https://github.com/monocsp/remote_ci_monitor/pull/229))
+
+## [0.7.0] - 2026-11-19
+
 ### Breaking changes
 - **Database schema v24 — the shelf.** `jobs` gains `keep` (frozen when a job is submitted) and a
   `shelf_items` table holds what is kept, with its own copy of the job's preset, inputs, branch
@@ -1823,7 +1835,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...v0.5.1

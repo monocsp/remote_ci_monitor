@@ -587,7 +587,10 @@ the copy is done.
 usage on top (`12.3 GB / 53.7 GB`). `/shelf/412/` shows the job (preset, inputs, branch, commit,
 when it finished, who asked), a grid of its images, a file table and *Download as zip*. A `.tar`,
 `.tar.gz` or `.tgz` among the artifacts is also unpacked once into `<name>.d/` next to it, so
-goldens shipped as a tarball show up as pictures. `/shelf/latest/golden-update?branch=dev` goes to
+goldens shipped as a tarball show up as pictures. The metadata macOS `tar` slips into a tarball
+(`._intro.png`, `._.`, `.DS_Store`, anything under `__MACOSX/`) is left out of `<name>.d/` and
+counted as skipped (`apple_double`); a file the job itself declared is kept whatever its name.
+`/shelf/latest/golden-update?branch=dev` goes to
 the newest kept job of that preset and branch — bookmark it. The pages are Korean by default and
 English with `?lang=en`. In the web UI a kept job's recent row shows `shelf ↗`, and the header
 links to the shelf.
