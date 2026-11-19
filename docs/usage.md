@@ -502,7 +502,8 @@ new machine:
 rcm token add mbp --worker
 ```
 
-On the new machine, install the same rcm release as the server, then:
+On the new machine, install rcm (0.8.0 or newer follows the server's version by itself, as a
+session does; an older one must be the same release as the server), then:
 
 ```sh
 rcm init worker                  # ~/.config/rcm/worker.toml; server = "auto" finds the server
@@ -512,7 +513,13 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ```
 
 The last command writes a launchd file (a systemd unit on Linux) and prints the one command that
-starts it. From then on the worker measures its own environment and reports it. Back on any
+starts it. From then on the worker measures its own environment and reports it. When the server
+is upgraded, the worker picks up the new version the next time it starts: it asks the server
+first and, if the versions differ, starts the server's version in the same process. If the server
+refuses its registration for the version, it follows then too, or stops with exit 2 and says why,
+and the service starts it again. `RCM_CLIENT_VERSION=installed` (or `rcm worker --no-follow`)
+keeps the installed version
+([remote workers](operating.md#remote-workers)). Back on any
 session, `rcm machines` shows every machine, the tool versions it found and how many presets it
 can run — and for the rest, why not (`18 fvm missing`).
 

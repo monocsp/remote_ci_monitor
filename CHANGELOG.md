@@ -31,6 +31,18 @@ of a key bumps that number and is listed here.
   accepted submission. Following runs the server's code as the session user — read
   [the security note](docs/operating.md#keeping-clients-on-the-servers-version) before you rely on
   it on an untrusted network. ([#226](https://github.com/monocsp/remote_ci_monitor/pull/226))
+- **A remote worker follows the server's version when it starts.** `rcm worker` from a wheel
+  install asks the server's version before it registers (always afresh, never from the 10-minute
+  record) and, when it differs, fetches the server's wheel and starts that version in the same
+  process — the PID stays, so launchd and systemd do not count a restart. When the server refuses
+  its registration for the version, the 409 now carries `server_version` and the worker follows it
+  (`[rcm worker] register: server runs v0.8.1 — following`); when it cannot, it stops with exit 2
+  and says why after the server's sentence (`· not following: sha256 mismatch`,
+  `· pinned by RCM_CLIENT_VERSION`, `· not following (editable install)`). It reads the same
+  `RCM_CLIENT_VERSION` and `client-version` file as a session, and `rcm worker --no-follow` keeps
+  the installed version. `--once` follows only when it starts; `--check` never follows. A worker
+  that is already registered keeps its version until it restarts.
+  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
 - **A job's files can stay on the server and open in any browser: the shelf.** `rcm run --keep`
   (or `keep = true` on a preset, or `rcm keep N` while the job's bundle still exists) copies the
   job's artifacts into a folder on the build machine and prints a link,
@@ -80,6 +92,12 @@ of a key bumps that number and is listed here.
   ([#213](https://github.com/monocsp/remote_ci_monitor/pull/213))
 
 ### Fixed
+- **A worker whose lane could not register again now exits 2, not 0.** When the server forgot a
+  worker and refused its new registration (a different version), `rcm worker` stopped its lanes
+  and exited 0, so a service with `SuccessfulExit = false` or `Restart=on-failure` never started
+  it again and the machine silently left the pool. It now exits 2 and is started again.
+  `rcm worker --check` also strips control characters from the server's version in its `server`
+  row and cuts it at 64 characters. ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
 - **The client wheel the server hands out now carries the packaged skills.** It shipped only the
   `.py` files under `skills/`, so a client installed from `/client/…whl` printed three of the five
   skills without a description in `rcm skills list`, and `rcm skills install` wrote no `SKILL.md`

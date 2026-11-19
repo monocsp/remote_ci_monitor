@@ -110,6 +110,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      서버의 클라이언트 버전 줄을 인증 전에 씀 · 쌍을 안 기억함 · User-Agent 형식을 안 봄 ·
      `rcm version` 둘째 줄을 늘 씀 · `rcm check` 의 꼬리를 버림 (`docs/m5q-workplan.md` §6 ·
      `docs/m5q-test-scenarios-c.md` 「변이」)
+  M5q B1 — `m5q-worker-*` 다섯: 버전 409 전에 도는 잡을 닫음 · 409 본문에 `server_version`
+     을 안 실음 · 기동 ① 이 10분 기록을 씀 · 레인 재등록이 막혀도 종료 0 · `WorkerFollow` 가
+     `WorkerExit` 가 아님 (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -1107,6 +1110,58 @@ MUTANTS = (
         old="    tail, hint_ok = _follow_tail(state)\n",
         new="    tail, hint_ok = _follow_tail(None)\n",
         tests=("tests/test_cli_m5q_display.py",),
+    ),
+    # ── M5q PR B1 — 원격 워커가 기동과 기동 등록 409 에서 따라간다 (docs/m5q-workplan.md §6) ──
+    Mutant(
+        # 등록이 버전을 보기 **전에** 그 워커의 도는 잡을 lost 로 닫는다 — 따라가기 전의 409 가
+        # 잡을 잃게 한다(시나리오 b B17)
+        name="m5q-worker-409-after-lost",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        if version != self.version:\n            # 이 검사는",
+        new=(
+            '        self.store.mark_lost_for_worker(token.name, self.now_fn(), "lost")\n'
+            "        if version != self.version:\n            # 이 검사는"
+        ),
+        tests=("tests/test_server_m5q_worker.py",),
+    ),
+    Mutant(
+        # 409 본문에 `server_version` 을 싣지 않는다 — 워커가 ② 에서 따라갈 버전을 모른다(§5.3)
+        name="m5q-worker-409-no-server-version",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                server_version=self.version,\n",
+        new="",
+        tests=("tests/test_server_m5q_worker.py", "tests/test_cli_worker_m5q.py"),
+    ),
+    Mutant(
+        # 기동 ① 이 10분 기록을 쓴다 — 서버가 올라간 뒤 재시작한 워커가 옛 기록을 믿는다(§13 P2-7)
+        name="m5q-worker-start-uses-the-record",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "        fresh=True,\n        environ=os.environ,\n"
+            "        execve=args.follow_execve,\n        kind=kind,\n"
+        ),
+        new=(
+            "        fresh=False,\n        environ=os.environ,\n"
+            "        execve=args.follow_execve,\n        kind=kind,\n"
+        ),
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    Mutant(
+        # 레인 재등록이 막혀도 종료 0 — 감독자가 다시 띄우지 않아 워커가 조용히 멈춘다(§14 B질문1)
+        name="m5q-worker-lane-exit-zero",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                            self.exit_code = x.code\n",
+        new="                            pass\n",
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    Mutant(
+        # `WorkerFollow` 가 `WorkerExit` 가 아니다 — B2 이전 빌드에서 레인 재등록 409 가 레인
+        # 스레드를 예외로 죽인다(§14 B질문2)
+        name="m5q-worker-follow-not-a-worker-exit",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="class WorkerFollow(WorkerExit):\n",
+        new="class WorkerFollow(Exception):\n",
+        tests=("tests/test_cli_worker_m5q.py",),
     ),
 )
 

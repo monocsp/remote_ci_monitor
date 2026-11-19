@@ -471,7 +471,8 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
 rcm token add mbp --worker
 ```
 
-새 컴퓨터에 서버와 같은 rcm 릴리스를 깔고:
+새 컴퓨터에 rcm 을 깐다. 0.8.0 이상은 세션처럼 서버 버전을 스스로 따라간다. 그보다 옛 버전이면
+서버와 같은 릴리스여야 한다. 그다음에 이렇게 친다.
 
 ```sh
 rcm init worker                  # ~/.config/rcm/worker.toml — server = "auto" 면 스스로 찾는다
@@ -481,7 +482,11 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ```
 
 마지막 명령은 launchd 파일(Linux 면 systemd 유닛)을 쓰고, 그것을 띄울 명령 한 줄을 찍는다. 그때부터
-워커는 자기 환경을 재서 보고한다. 아무 세션에서 `rcm machines` 를 치면 머신마다 찾은 도구 버전과
+워커는 자기 환경을 재서 보고한다. 서버를 올리면 워커는 다음에 뜰 때 새 버전으로 간다. 먼저 서버에
+버전을 묻고, 다르면 같은 프로세스에서 서버 버전으로 다시 시작한다. 서버가 버전이 달라 등록을
+거절할 때도 그때 따라간다. 따라가지 못하면 이유를 말하고 종료 2 로 끝나고, 서비스가 다시 띄운다.
+설치한 버전을 그대로 쓰려면 `RCM_CLIENT_VERSION=installed` 를 두거나 `rcm worker --no-follow` 로
+띄운다([remote workers](operating.md#remote-workers)). 아무 세션에서 `rcm machines` 를 치면 머신마다 찾은 도구 버전과
 돌릴 수 있는 프리셋 수, 나머지는 왜 안 되는지(`18 fvm missing`)가 나온다.
 
 어떤 작업을 가져가는지는 프리셋이 정한다. 풀에 묶인 프리셋은 그 풀에서만 돌고,
