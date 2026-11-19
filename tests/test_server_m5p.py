@@ -98,8 +98,8 @@ def gold(srv):
 class Gate:
     """copier 를 붙잡는다 — §6 에 고정된 이름(`claim_shelf_item` · `finish_shelf_item`)을 감싼다.
 
-    `target` 을 정하면 **그 잡의 보관 행이 생긴 뒤**의 호출에만 걸린다(기동 직후의 빈 claim 을
-    붙잡지 않는다). 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
+    `claim_shelf_item` 은 언제나 붙잡고, `finish_shelf_item` 은 `target` 을 정하면 그 잡의
+    호출에만 걸린다. 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
     """
 
     def __init__(self, monkeypatch: Any, name: str = "claim_shelf_item"):
@@ -110,11 +110,12 @@ class Gate:
         gate = self
 
         def wanted(store: Store, args: tuple[Any, ...]) -> bool:
-            if gate.target is None:
+            # claim 은 언제나 붙잡는다. 「대상 행이 pending 인가」를 트랜잭션 밖에서 보면, 행이
+            # 생기기 직전에 시작된 claim 이 그 검사를 지나친 뒤 트랜잭션 안에서 막 생긴 행을 집어
+            # 버려 문이 영영 안 열린다(v0.7.0 릴리스 CI 에서 E58 이 그렇게 빨갰다). 기동 직후의
+            # 빈 claim 을 붙잡아도 괜찮다 — 풀어 주면 그 claim 이 대상 행을 집는다.
+            if gate.target is None or name == "claim_shelf_item":
                 return True
-            if name == "claim_shelf_item":
-                item = store.shelf_item(gate.target)
-                return item is not None and item.state == "pending"
             return bool(args) and args[0] == gate.target
 
         def gated(store: Store, *args: Any, **kwargs: Any) -> Any:
