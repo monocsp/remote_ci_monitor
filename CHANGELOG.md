@@ -21,7 +21,7 @@ of a key bumps that number and is listed here.
   next steps it prints are the two copies and `rcm reload --dry-run` → `rcm reload`. A
   `server.toml` without `include` gets byte-for-byte the same candidate as before. Projects get
   it with `rcm skills install --into . --force` after upgrading rcm.
-  ([#212](https://github.com/monocsp/remote_ci_monitor/pull/212))
+  ([#213](https://github.com/monocsp/remote_ci_monitor/pull/213))
 
 ## [0.6.1] - 2026-11-19
 
