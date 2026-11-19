@@ -147,6 +147,7 @@ from remote_ci_monitor.events import (
     KIND_SERVER,
     EventBus,
 )
+from remote_ci_monitor.follow import valid_version
 from remote_ci_monitor.gitops import (
     STDERR_TAIL_LINES,
     GitError,
@@ -294,6 +295,11 @@ _DriverStatusKey = tuple[str, str, str, int | None, bool, int | None]
 _DriverStatusEntry = tuple[float, list[str] | None, str | None]
 #: 묶음이 아직 오는 중 — 버전 훅이 기다렸다가 `artifacts_changed` 때 다시 본다
 ART_IN_TRANSIT = frozenset({art.PENDING, art.COLLECTING, art.UPLOADING})
+
+
+#: 서버 로그의 「client <토큰 이름> runs v<X>」 를 기억하는 (토큰 이름, 버전) 쌍의 상한(M5q §14.10).
+CLIENT_VERSION_PAIRS_MAX = 256
+_CLIENT_AGENT_RE = re.compile(r"rcm/(.+)")
 
 
 def log_line(msg: str) -> None:
@@ -529,6 +535,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self._wheel_error: str | None = None
         self._wheel_done = False
         self._wheel_lock = threading.Lock()
+        # 클라이언트 버전 한 줄(M5q 결정 168) — 프로세스가 처음 본 (토큰 이름, 버전) 쌍만 쓴다
+        self._client_pairs: set[tuple[str, str]] = set()
+        self._client_pairs_full = False
+        self._client_pairs_lock = threading.Lock()
         # 릴리스 드라이버(계약 v2) — 실행 대장은 DB, 프로세스는 이 객체가 안다.
         self.driver = DriverRunner(store, now_fn=now_fn, log=self.log)
         self.driver.on_exit = self._driver_exited
@@ -4755,6 +4765,36 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 return
             self._wheel = (data, hashlib.sha256(data).hexdigest())
 
+    def note_client(self, name: str, agent: str | None) -> None:
+        """받아들인 제출의 `User-Agent: rcm/<X>` 를 로그 한 줄로 남긴다 — 쌍마다 한 번(결정 168).
+
+        인증한 제출 경로에서만 부른다. 인증하지 않는 경로의 헤더로 로그를 채울 수 없게 한다.
+        헤더 전체가 `rcm/<버전>` 이고 그 버전이 따라가기의 `VERSION_RE` 를 통과할 때만 본다."""
+        if not isinstance(agent, str):
+            return
+        m = _CLIENT_AGENT_RE.fullmatch(agent)
+        if m is None or not valid_version(m.group(1)):
+            return
+        pair = (name, m.group(1))
+        with self._client_pairs_lock:
+            if pair in self._client_pairs:
+                return
+            if len(self._client_pairs) >= CLIENT_VERSION_PAIRS_MAX:
+                if self._client_pairs_full:
+                    return
+                self._client_pairs_full = True
+                full = True
+            else:
+                self._client_pairs.add(pair)
+                full = False
+        if full:
+            self.log(
+                f"client versions: {CLIENT_VERSION_PAIRS_MAX} token/version pairs seen — "
+                "not logging new ones"
+            )
+            return
+        self.log(f"client {pair[0]} runs v{pair[1]}")
+
     def client_wheel(self) -> dict[str, Any] | None:
         """health 의 `client_wheel` — `{path, sha256, bytes}`, 실패면 None(`client_wheel_error`)."""
         self._build_client_wheel()
@@ -5224,6 +5264,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self._only(method, "POST")
             t = self.app.require_client_token(self._token())
             status, body = self.app.submit(self._json_body(), t, host=self.headers.get("Host"))
+            self.app.note_client(t.name, self.headers.get("User-Agent"))
             self._send_json(status, body)
             return
         if path == "/api/eta":

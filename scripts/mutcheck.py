@@ -103,6 +103,12 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      걸린 정지를 놓쳐 정지 중에 잡을 집는다 (`store.py`, 2026-11-19 — 배포의 「정지 → 도는 잡 0
      확인 → 재시작」 직후 잡이 시작돼 lost 가 된다)
 
+  M5q A — `m5q-*` 열하나: 받은 wheel 의 sha256 을 안 봄 · editable 기본값 뒤집기 · 따라간 자식이
+     다시 따라감 · 임시 폴더 없이 대상에 바로 풂 · `serve` 가 따라감 · health 의 wheel 경로를 믿음 ·
+     서버의 클라이언트 버전 줄을 인증 전에 씀 · 쌍을 안 기억함 · User-Agent 형식을 안 봄 ·
+     `rcm version` 둘째 줄을 늘 씀 · `rcm check` 의 꼬리를 버림 (`docs/m5q-workplan.md` §6 ·
+     `docs/m5q-test-scenarios-c.md` 「변이」)
+
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
 
@@ -967,6 +973,105 @@ MUTANTS = (
             "tests/test_server_release_versions.py::"
             "test_a_round_that_ends_first_waits_for_the_job_that_is_still_running",
         ),
+    ),
+    # ── M5q PR A — 클라이언트가 서버 버전을 따라간다 (docs/m5q-workplan.md §6) ──
+    Mutant(
+        # 받은 바이트의 해시를 안 본다 — 깨지거나 바뀐 wheel 이 캐시에 들어가 실행된다(결정 157)
+        name="m5q-follow-sha-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old="    if digest.hexdigest() != info.sha256:\n",
+        new="    if False:\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # 기본값의 설치 종류 판정을 뒤집는다 — 개발 체크아웃이 운영 버전으로 바꿔치인다(결정 156)
+        name="m5q-follow-editable-default-flipped",
+        path="src/remote_ci_monitor/follow.py",
+        old='MODE_FOLLOW if kind == "wheel" else MODE_INSTALLED',
+        new='MODE_FOLLOW if kind != "wheel" else MODE_INSTALLED',
+        tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # 따라간 자식이 다시 따라간다 — 버전이 어긋나면 exec 고리가 된다(결정 161)
+        name="m5q-follow-boot-loop",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if follow.booted() is not None:\n",
+        new="    if False:\n",
+        tests=("tests/test_follow_cli.py",),
+    ),
+    Mutant(
+        # 임시 폴더 없이 대상 폴더에 바로 푼다 — 풀다 실패하면 반쯤 푼 폴더가 남는다(§2.5)
+        name="m5q-follow-unpack-in-place",
+        path="src/remote_ci_monitor/follow.py",
+        old='        tree = tmp / "tree"\n',
+        new="        tree = clients / info.sha256[:16]\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # `rcm serve` 가 따라간다 — 서버가 정본이다(§2.3)
+        name="m5q-follow-serve-follows",
+        path="src/remote_ci_monitor/follow.py",
+        old='    {"serve", "worker", "token", "init", "discover", "version", "skills"}',
+        new='    {"worker", "token", "init", "discover", "version", "skills"}',
+        tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # health 의 wheel 경로를 그대로 믿는다 — 다른 경로 · 다른 버전의 파일을 받는다(R ② · ⑦)
+        name="m5q-follow-health-path-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old='    if path != "/client/" + wheel_filename(version):\n',
+        new="    if False:\n",
+        tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # 클라이언트 버전 한 줄을 인증 전에 쓴다 — 토큰 없는 요청이 서버 로그를 채운다(결정 168)
+        name="m5q-client-log-before-auth",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "            t = self.app.require_client_token(self._token())\n"
+            "            status, body = self.app.submit(self._json_body(), t, "
+            'host=self.headers.get("Host"))\n'
+            '            self.app.note_client(t.name, self.headers.get("User-Agent"))\n'
+        ),
+        new=(
+            '            self.app.note_client("anonymous", self.headers.get("User-Agent"))\n'
+            "            t = self.app.require_client_token(self._token())\n"
+            "            status, body = self.app.submit(self._json_body(), t, "
+            'host=self.headers.get("Host"))\n'
+        ),
+        tests=("tests/test_server_client_version_log.py",),
+    ),
+    Mutant(
+        # 본 쌍을 기억하지 않는다 — 제출마다 한 줄이 남는다
+        name="m5q-client-log-every-submit",
+        path="src/remote_ci_monitor/server.py",
+        old="            if pair in self._client_pairs:\n",
+        new="            if False:\n",
+        tests=("tests/test_server_client_version_log.py",),
+    ),
+    Mutant(
+        # User-Agent 의 버전 형식을 안 본다 — 제어 문자 · 긴 값이 서버 로그에 그대로 찍힌다
+        name="m5q-client-log-unchecked-agent",
+        path="src/remote_ci_monitor/server.py",
+        old="        if m is None or not valid_version(m.group(1)):\n",
+        new="        if m is None:\n",
+        tests=("tests/test_server_client_version_log.py",),
+    ),
+    Mutant(
+        # 정보가 없어도 `rcm version` 둘째 줄을 쓴다 — 한 줄을 읽는 스크립트가 깨진다(결정 166)
+        name="m5q-version-second-line-always",
+        path="src/remote_ci_monitor/cli.py",
+        old='    if setting.source == "default" and not (',
+        new="    if False and not (",
+        tests=("tests/test_cli_m5q_display.py", "tests/test_cli_m4.py"),
+    ),
+    Mutant(
+        # `rcm check` 의 `client` 행이 따라가기 상태를 버린다
+        name="m5q-check-row-drops-follow-tail",
+        path="src/remote_ci_monitor/cli.py",
+        old="    tail, hint_ok = _follow_tail(state)\n",
+        new="    tail, hint_ok = _follow_tail(None)\n",
+        tests=("tests/test_cli_m5q_display.py",),
     ),
 )
 

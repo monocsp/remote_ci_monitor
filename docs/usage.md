@@ -100,10 +100,13 @@ Now prove the whole path before you trust it with real work:
 ![rcm check prints one row per thing it verified: server, client, token, presets, pools, timezone, storage](images/ui/cli-check.png)
 
 1. **server** — the address it used and the version it answered with. A version far from yours is
-   worth fixing; `rcm worker` refuses a mismatch outright. The `client` row below it says whether
-   yours is `same as server`, `older` or `newer`, and when it is older it prints the one command
-   that fixes it: the server hands out its own wheel at
-   `/client/remote_ci_monitor-<version>-py3-none-any.whl`, see
+   worth fixing; `rcm worker` refuses a mismatch outright. Your `rcm` follows the server by
+   itself: when the server runs another version, the next command downloads the server's own
+   wheel (`/client/remote_ci_monitor-<version>-py3-none-any.whl`), prints
+   `rcm: following server v…` once and runs that code. The `client` row below says so
+   (`following (installed v…)`), or says why it did not follow and prints the one command that
+   installs the server's wheel by hand. `RCM_CLIENT_VERSION=installed` (or `--no-follow` for one
+   command) keeps the installed rcm, and `--help` always shows the installed rcm's help. See
    [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 2. **token** — the name your token belongs to, and whether it is an admin token. `FAIL` here means
    the token is wrong or revoked, and nothing else will work.

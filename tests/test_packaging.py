@@ -134,6 +134,15 @@ def test_project_urls_classifiers_and_keywords(pyproject):
     assert project.get("keywords"), "keywords are empty"
 
 
+def test_classifiers_do_not_claim_windows(pyproject):
+    """M5q 결정 172 · 시나리오 A69(F38): 따라가기는 POSIX 전용이고 클라이언트도 이미 그렇다 —
+    분류자가 Windows 를 약속하지 않는다."""
+    classifiers = pyproject["project"]["classifiers"]
+    assert not [c for c in classifiers if c.startswith("Operating System :: Microsoft")], (
+        classifiers
+    )
+
+
 def test_console_scripts_are_unchanged(pyproject):
     scripts = pyproject["project"]["scripts"]
     assert scripts["rcm"] == "remote_ci_monitor.cli:main"

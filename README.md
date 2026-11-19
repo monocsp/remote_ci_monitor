@@ -180,8 +180,11 @@ an agent session.
    the first job and gets the same result; `--no-join` forces a separate run.
 9. **Faster passes.** If the preset defines a lighter scope (`-f scope=fast` · `commit`), use it
    while iterating and keep `full` for the merge; `rcm eta` says what each costs right now.
-10. **Keep the client current.** `rcm check` fails its `client` row when the server requires a
-    newer client; `examples/session/update-client.sh` installs the server's own wheel.
+10. **Keep the client current.** From 0.8.0 the installed `rcm` follows the server: when the
+    server runs another version, the next command downloads the server's own client, checks its
+    sha256 and runs it (`RCM_CLIENT_VERSION=installed` turns that off). Use
+    `examples/session/update-client.sh` for the first install and to upgrade the installed `rcm`
+    itself ([keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)).
 
 The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 

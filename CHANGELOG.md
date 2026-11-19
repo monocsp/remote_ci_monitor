@@ -16,6 +16,21 @@ of a key bumps that number and is listed here.
   the server runs this version. ([#217](https://github.com/monocsp/remote_ci_monitor/pull/217))
 
 ### Added
+- **A session's `rcm` runs the server's version by itself.** Before a command that talks to the
+  server, the installed `rcm` (0.8.0 or newer) asks the server's version; when it differs, it
+  downloads the server's own wheel, checks its sha256, unpacks it under `~/.cache/rcm/clients/`
+  and runs the command with that code in the same process, upward or downward. The first download
+  prints `rcm: following server v0.8.1 (installed v0.8.0) — fetched 707.7 KB`; a failure prints
+  `rcm: not following …: <reason> — running installed v…` and the command goes on with the
+  installed code. `RCM_CLIENT_VERSION` (`follow`, `installed` or a version) or the one-line file
+  `~/.config/rcm/client-version` pins or turns it off, and `--no-follow` skips it for one command.
+  An editable install does not follow unless told to. `rcm version` adds a `follow:` line and
+  `rcm version --json` a `follow` object (`running` is the version a command would run); the
+  `client` row of `rcm check` says `following (installed v…)`, `pinned by …` or why it did not
+  follow. The server logs `client <token name> runs v<version>` once per token and version on an
+  accepted submission. Following runs the server's code as the session user — read
+  [the security note](docs/operating.md#keeping-clients-on-the-servers-version) before you rely on
+  it on an untrusted network. ([#226](https://github.com/monocsp/remote_ci_monitor/pull/226))
 - **A job's files can stay on the server and open in any browser: the shelf.** `rcm run --keep`
   (or `keep = true` on a preset, or `rcm keep N` while the job's bundle still exists) copies the
   job's artifacts into a folder on the build machine and prints a link,

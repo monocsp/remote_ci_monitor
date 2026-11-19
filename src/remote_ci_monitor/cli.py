@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import importlib.resources
 import json
+import math
 import os
 import platform
 import re
@@ -33,7 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor import SCHEMA_VERSION, __version__, submissions
+from remote_ci_monitor import SCHEMA_VERSION, __version__, follow, submissions
 from remote_ci_monitor import apply as apply_mod
 from remote_ci_monitor.client import (
     Client,
@@ -93,6 +94,7 @@ from remote_ci_monitor.core.render_text import (
     verdict_text,
 )
 from remote_ci_monitor.core.render_text import _bytes as _fmt_bytes
+from remote_ci_monitor.core.render_text import _coarse as _fmt_age
 from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
 from remote_ci_monitor.release_secrets import secrets_dir
@@ -347,18 +349,35 @@ DISCOVER_NONE_HINT = (
 )
 
 
+#: 한 프로세스 안의 발견 결과(M5q §14 A질문12). 따라가기가 먼저 찾았으면 명령이 1.5초 발견을
+#: 다시 하지 않고 `server: found` 줄도 한 번만 쓴다. 찾은 서버가 없다는 결과도 기억한다.
+#: `_main` 이 부를 때마다 비운다.
+_DISCOVERY: list[Any] | None = None
+_FOUND_SAID = False
+
+
+def _discover_once(timeout: float) -> list[Any]:
+    global _DISCOVERY
+    if _DISCOVERY is None:
+        _DISCOVERY = list(discover(timeout=timeout))
+    return _DISCOVERY
+
+
 def _resolve_server(cfg: Any, *, timeout: float = 1.5) -> Any:
     """서버 주소가 없으면 같은 네트워크에서 찾는다(M5c). 정확히 하나면 그것, 아니면 `ConfigError`.
     찾은 서버는 `cfg.discovered` 에 남는다(`rcm check` 표시용)."""
+    global _FOUND_SAID
     cfg.discovered = None
     if not cfg.wants_discovery:
         return cfg
-    found = discover(timeout=timeout)
+    found = _discover_once(timeout)
     if len(found) == 1:
         cfg.server = found[0].address
         cfg.discovered = found[0]
         ip = found[0].ips[0] if found[0].ips else found[0].host.rstrip(".")
-        _info(f"server: found {found[0].name} ({ip}:{found[0].port}) on this network")
+        if not _FOUND_SAID:
+            _FOUND_SAID = True
+            _info(f"server: found {found[0].name} ({ip}:{found[0].port}) on this network")
         return cfg
     if not found:
         raise ConfigError(f"{NO_SERVER_HINT} — {DISCOVER_NONE_HINT}")
@@ -408,14 +427,39 @@ def _print_json(obj: Any) -> None:
 # ── 클라이언트 버전 (M5i I8-3 · 결정 83) ─────────────────────────────────────
 
 
-def _version_key(text: str) -> tuple[int, ...]:
-    """`0.2.6` → (0, 2, 6). 숫자가 아닌 꼬리(`0.2.6.dev1`)는 거기서 끊는다 — 비교용이다."""
-    out: list[int] = []
-    for part in str(text).split("."):
-        if not part.isdigit():
-            break
-        out.append(int(part))
-    return tuple(out)
+_PEP440_RE = re.compile(
+    r"v?(\d+(?:\.\d+)*)"
+    r"(?:[-_.]?(a|b|c|rc|alpha|beta)[-_.]?(\d*))?"
+    r"(?:[-_.]?(post|rev|r)[-_.]?(\d*))?"
+    r"(?:[-_.]?(dev)[-_.]?(\d*))?",
+    re.IGNORECASE,
+)
+_PRE_PHASE = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2}
+
+
+def _version_key(text: str) -> tuple[Any, ...]:
+    """크기 비교용 키 — PEP 440 의 dev · a · b · rc · post 를 아는 작은 해석(M5q §14 C질문5).
+
+    `0.7.0.dev0 < 0.7.0.dev1 < 0.7.0a1 < 0.7.0rc1 < 0.7.0 < 0.7.0.post1 < 0.7.1`. `+local` 꼬리는
+    빼고 릴리스 끝의 0 은 무시한다(`0.7` 과 `0.7.0` 은 같은 크기). 읽지 못한 꼬리는 오늘처럼 숫자
+    마디만 본다. 「same as server」는 이 키가 아니라 문자열이 같을 때만 쓴다."""
+    s = str(text).strip().split("+", 1)[0]
+    m = _PEP440_RE.match(s)
+    if m is None:
+        return ((), 3, 0, -1, math.inf)
+    release = tuple(int(x) for x in m.group(1).split("."))
+    while release and release[-1] == 0:
+        release = release[:-1]
+    if m.end() != len(s):
+        return (release, 3, 0, -1, math.inf)
+    pre, dev, post = m.group(2), m.group(6), m.group(4)
+    post_n = int(m.group(5) or 0) if post else -1
+    dev_n = int(m.group(7) or 0) if dev else math.inf
+    if pre:
+        return (release, _PRE_PHASE[pre.lower()], int(m.group(3) or 0), post_n, dev_n)
+    # dev 만 붙은 릴리스는 모든 프리릴리스보다 앞이다
+    phase = -1 if dev and not post else 3
+    return (release, phase, 0, post_n, dev_n)
 
 
 def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
@@ -428,35 +472,75 @@ def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
     return f"no client wheel from this server ({reason})"
 
 
-def _client_row(client: Client, h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
+def _setting_where(setting: Any) -> str:
+    """설정이 온 자리 — `RCM_CLIENT_VERSION` 이나 `~` 로 줄인 한 줄 파일 경로."""
+    if setting.source == "file":
+        return follow.tilde(setting.path)
+    return follow.ENV_MODE
+
+
+def _follow_tail(state: Any) -> tuple[str | None, bool]:
+    """`client` 행 꼬리와 `pip install` 힌트를 붙여도 되는지(M5q §14.8 의 표).
+
+    힌트는 고정일 때와 `no_wheel` · `old_server` 일 때 뺀다 — 고정은 사람이 고른 상태이고, 두
+    코드는 오늘의 힌트와 같은 이유를 꼬리가 이미 말한다."""
+    if state is None:
+        return None, True
+    s = state.setting
+    pinned = s.mode == follow.MODE_PIN
+    if state.followed and not pinned:
+        return f"following (installed v{state.installed})", True
+    if state.warn:
+        hint = not pinned and state.warn not in ("no_wheel", "old_server")
+        return f"not following: {state.warn_text}", hint
+    if pinned:
+        return f"pinned by {_setting_where(s)}", False
+    if s.mode == follow.MODE_INSTALLED:
+        if s.source == "flag":
+            return "not following (--no-follow)", True
+        if s.source == "env":
+            return f"not following ({follow.ENV_MODE}=installed)", True
+        if s.source == "file":
+            return f"not following ({follow.tilde(s.path)})", True
+        return f"not following ({state.install} install)", True
+    return None, True
+
+
+def _client_row(
+    client: Client, h: dict[str, Any], state: Any = None
+) -> tuple[str, bool | None, str] | None:
     """`rcm check` 의 `client` 행 — 이 클라이언트와 서버의 버전. 서버가 버전을 안 주면 행도 없다.
 
     FAIL 은 `min_client_version` 아래일 때뿐이고 그것을 **먼저** 본다(M5l S10) — 서버가 취소에
     capability 를 요구하면 같은 버전 번호라도 바닥이 그 위일 수 있다(0.2.6 서버가 0.2.7 을
     요구). 그 위의 「older」·「newer」는 warn(알려는 주되 실패는 아니다) — 실제 거부는 서버의
     400·403 이 한다.
+
+    `state` 는 이 프로세스의 따라가기 결과(M5q §2.9)다. 있으면 관계 뒤에 꼬리를 붙인다. 인자
+    목록으로 부른 `main(argv)` 는 따라가지 않으니 None 이고 오늘과 같은 글자다. 「same as
+    server」는 문자열이 같을 때만이다 — 크기만 같으면(`0.7` 과 `0.7.0`) `different build`.
     """
     server_v = h.get("version")
     if not server_v:
         return None
     mine, theirs = _version_key(__version__), _version_key(server_v)
+    tail, hint_ok = _follow_tail(state)
+    t = f" · {tail}" if tail else ""
+
+    def hint() -> str:
+        return f" — {_upgrade_hint(client.server, h)}" if hint_ok else ""
+
     floor = h.get("min_client_version")
     if floor and mine < _version_key(floor):
         why = "older" if mine < theirs else f"below min client v{floor}"
-        return (
-            "client",
-            False,
-            f"v{__version__} · server v{server_v} · {why} — {_upgrade_hint(client.server, h)}",
-        )
+        return ("client", False, f"v{__version__} · server v{server_v} · {why}{t}{hint()}")
+    if str(server_v) == __version__:
+        return ("client", True, f"v{__version__} · same as server{t}")
     if mine == theirs:
-        return ("client", True, f"v{__version__} · same as server")
+        return ("client", None, f"v{__version__} · server v{server_v} · different build{t}")
     if mine < theirs:
-        return (
-            "client",
-            None,
-            f"v{__version__} · server v{server_v} · older — {_upgrade_hint(client.server, h)}",
-        )
-    return ("client", None, f"v{__version__} · server v{server_v} · newer")
+        return ("client", None, f"v{__version__} · server v{server_v} · older{t}{hint()}")
+    return ("client", None, f"v{__version__} · server v{server_v} · newer{t}")
 
 
 def _cancel_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
@@ -3112,13 +3196,104 @@ def version_info() -> dict[str, Any]:
     }
 
 
+def _iso_z(at: float) -> str:
+    return datetime.fromtimestamp(at, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def follow_summary(*, no_follow: bool = False) -> tuple[dict[str, Any], str | None]:
+    """`rcm version` 의 따라가기 정보 — (`--json` 의 `follow`, 둘째 줄 또는 None).
+
+    서버에 묻지 않는다. 설정 · 기록 파일 · 캐시만 읽는다. 기본 서버가 비었거나 `auto` 면 발견하지
+    않으므로 서버 토막이 없다. 설정이 틀려도 예외를 내지 않는다 — 무엇이 틀렸는지 보려고 치는
+    명령이다(§14 C질문10). 둘째 줄은 사람이 설정을 적었을 때나, 기본으로 따라가는 설치에 기본
+    서버의 기록이 있을 때만 쓴다(§14 A질문3)."""
+    env = os.environ
+    boot = follow.booted()
+    kind = (boot or {}).get(follow.ENV_FOLLOW_FROM) or follow.install_kind()
+    installed = (boot or {}).get(follow.ENV_FOLLOWED_FROM) or __version__
+    root = follow.cache_root(env)
+    entries = follow.scan_cache(root)
+    cached: list[str] = []
+    for e in entries:  # 마지막 사용이 최근인 순, 같은 버전은 한 번
+        if e.version not in cached:
+            cached.append(e.version)
+    doc: dict[str, Any] = {
+        "mode": None,
+        "pin": None,
+        "source": None,
+        "install": kind,
+        "server": None,
+        "server_version": None,
+        "checked_at": None,
+        "cached": cached,
+        "installed": installed,
+        "running": installed,
+    }
+    try:
+        setting, _ = follow.setting_for(no_follow=no_follow, environ=env, kind=kind)
+    except follow.SettingError as e:
+        doc["source"] = "env" if e.where == follow.ENV_MODE else "file"
+        where = follow.ENV_MODE if e.where == follow.ENV_MODE else follow.tilde(e.path or e.where)
+        if e.value is None:
+            return doc, f"follow: invalid {where} ({str(e)[len(e.where) + 2 :]})"
+        shown = follow.shown(e.value)
+        return doc, f"follow: invalid {where} '{shown}' (use follow, installed or a version)"
+    doc.update(mode=setting.mode, pin=setting.pin, source=setting.source)
+    server = None
+    try:
+        cfg = load_client_config(None)
+        if not cfg.wants_discovery:
+            server = follow.normalize_server(cfg.server)
+    except ConfigError:
+        server = None
+    rec = failed_at = None
+    if server is not None:
+        doc["server"] = server
+        rec, failed_at = follow.load_record(root, server)
+    if rec is not None:
+        doc["server_version"] = rec.version
+        doc["checked_at"] = _iso_z(rec.checked_at)
+    if setting.mode == follow.MODE_PIN:
+        if setting.pin == installed or setting.pin in cached:
+            doc["running"] = setting.pin
+    elif setting.mode == follow.MODE_FOLLOW and rec is not None:
+        if rec.version == installed or any(
+            e.version == rec.version and (rec.sha256 is None or e.sha256 == rec.sha256)
+            for e in entries
+        ):
+            doc["running"] = rec.version
+    where = {"default": "default", "flag": "--no-follow", "env": follow.ENV_MODE}.get(
+        setting.source
+    ) or follow.tilde(setting.path)
+    has_record = rec is not None or failed_at is not None
+    if setting.source == "default" and not (setting.mode == follow.MODE_FOLLOW and has_record):
+        return doc, None
+    cached_seg = f" · cached {', '.join(cached)}" if cached else ""
+    if setting.mode == follow.MODE_INSTALLED:
+        return doc, f"follow: off ({where})"
+    if setting.mode == follow.MODE_PIN:
+        return doc, f"follow: pinned {setting.pin} ({where}){cached_seg}"
+    seg = ""
+    now = time.time()
+    if server is not None and failed_at is not None and (rec is None or failed_at > rec.checked_at):
+        seg = f" · server {server} unreachable {_fmt_age(now - failed_at)} ago"
+        if rec is not None:
+            seg += f" (last seen v{rec.version} {_fmt_age(now - rec.checked_at)} ago)"
+    elif server is not None and rec is not None:
+        seg = f" · server {server} v{rec.version} checked {_fmt_age(now - rec.checked_at)} ago"
+    return doc, f"follow: on ({where}){seg}{cached_seg}"
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     info = version_info()
+    doc, line = follow_summary(no_follow=bool(getattr(args, "no_follow", False)))
     if getattr(args, "json", False):
-        _print_json(info)
+        _print_json({**info, "follow": doc})
     else:
         py, plat, mach = info["python"], info["platform"], info["machine"]
         print(f"rcm {info['version']} (Python {py}, {plat} {mach})")
+        if line:
+            print(line)
     return 0
 
 
@@ -3515,7 +3690,13 @@ def cmd_check(args: argparse.Namespace) -> int:
     #: 빈 채로 남고 그 행은 그려지지 않는다.
     health_body: dict[str, Any] = {}
     if client is not None and cfg is not None:
-        found_tag = " (found on this network)" if getattr(cfg, "discovered", None) else ""
+        # 따라간 자식은 찾은 주소를 RCM_SERVER 로 받는다 — BOOT 가 남긴 발견 표시로 꼬리표를 잇는다
+        # (M5q §14 A질문12)
+        found = (
+            getattr(cfg, "discovered", None)
+            or (follow.booted() or {}).get(follow.ENV_FOLLOW_FOUND) == "1"
+        )
+        found_tag = " (found on this network)" if found else ""
         try:
             h = client.health()  # 503 이어도 본문이 온다 — server 행은 FAIL, client 행은 그대로
             health_body = h if isinstance(h, dict) else {}
@@ -3527,7 +3708,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     f"{client.server} · v{h.get('version')}{found_tag}{unwell}",
                 )
             )
-            client_row = _client_row(client, h)
+            client_row = _client_row(client, h, follow.current_state())
             if client_row is not None:
                 rows.append(client_row)
             cancel_row = _cancel_row(h)
@@ -4160,12 +4341,25 @@ def cmd_skills(args: argparse.Namespace) -> int:
     return 0
 
 
+NO_FOLLOW_HELP = (
+    "run this installed rcm instead of the server's version "
+    "(default: follow the server; RCM_CLIENT_VERSION or ~/.config/rcm/client-version pins it)"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rcm",
         description="Local job server for one build machine: submit a preset, wait for the result.",
     )
     p.add_argument("--version", action="version", version=f"rcm {__version__}")
+    p.add_argument(
+        "--no-follow",
+        dest="no_follow",
+        action="store_true",
+        default=False,
+        help=NO_FOLLOW_HELP,
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     def client_opts(sp: argparse.ArgumentParser) -> None:
@@ -4173,6 +4367,14 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--token", help="bearer token (default: RCM_TOKEN or client.toml)")
         sp.add_argument(
             "--client-config", help="client.toml path (default: ~/.config/rcm/client.toml)"
+        )
+        # 하위 파서 쪽은 SUPPRESS — 주지 않았을 때 최상위 값을 덮지 않는다(§2.2)
+        sp.add_argument(
+            "--no-follow",
+            dest="no_follow",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help=NO_FOLLOW_HELP,
         )
 
     run = sub.add_parser("run", help="snapshot the working tree, submit a preset and wait")
@@ -4565,7 +4767,96 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _long_options(parser: argparse.ArgumentParser) -> set[str]:
+    """파서와 그 아래 하위 파서들의 긴 옵션 — 훑기의 줄임 규칙이 견줄 목록(§14 A질문2)."""
+    out: set[str] = set()
+    for action in parser._actions:
+        out.update(o for o in action.option_strings if o.startswith("--"))
+        if isinstance(action, argparse._SubParsersAction):
+            for sp in action.choices.values():
+                out |= _long_options(sp)
+    return out
+
+
+def _parser_options(parser: argparse.ArgumentParser) -> dict[str | None, frozenset[str]]:
+    """설치본 파서의 긴 옵션 — 키 None 은 최상위, 명령 이름은 그 하위 파서(와 그 아래)."""
+    out: dict[str | None, frozenset[str]] = {
+        None: frozenset(o for a in parser._actions for o in a.option_strings if o.startswith("--"))
+    }
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, sp in action.choices.items():
+                out[name] = frozenset(_long_options(sp))
+    return out
+
+
+def _follow_first(execve: Any) -> int | None:
+    """argparse 전에 서버 버전을 따라간다(M5q §2.1). exec 하면 돌아오지 않는다. 종료 코드를
+    돌려주면 명령을 돌리지 않고 끝낸다(틀린 `RCM_CLIENT_VERSION` 의 2). 그 밖의 실패는
+    `maybe_follow` 가 경고 한 줄로 말하고 설치본으로 계속한다."""
+    if follow.booted() is not None:
+        # 따라간 자식(BOOT 를 거쳤다) — 다시 따라가지 않는다(결정 161)
+        follow._set_state(follow.boot_state(os.environ))
+        return None
+    argv = sys.argv[1:]
+    p = follow.prescan(argv, options=_parser_options(build_parser()))
+    if not follow.follows(p):
+        return None
+    kind = follow.install_kind()
+    try:
+        setting, warning = follow.setting_for(no_follow=p.no_follow, environ=os.environ, kind=kind)
+    except ConfigError as e:
+        return _usage(str(e))
+    if warning:
+        _err(warning)
+    if setting.mode == follow.MODE_INSTALLED:
+        follow._set_state(
+            follow.FollowState(
+                setting, kind, __version__, __version__, False, None, None, None, None
+            )
+        )
+        return None
+    try:
+        cfg = load_client_config(p.client_config, server=p.server, token=p.token)
+        wanted = cfg.wants_discovery
+        _resolve_server(cfg)
+    except ConfigError:
+        return None  # 명령이 오늘의 문장으로 말한다(§2.1 의 4)
+    if not cfg.server:
+        return None
+    follow.maybe_follow(
+        argv,
+        setting=setting,
+        server=cfg.server,
+        token=cfg.token or None,
+        discovered=bool(wanted and getattr(cfg, "discovered", None)),
+        fresh=p.command == "check",
+        environ=os.environ,
+        execve=execve,
+        kind=kind,
+        installed=__version__,
+    )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    """콘솔 스크립트의 진입. 인자 목록을 넘겨 부르면(시험 · 다른 프로그램 안) 따라가지 않는다 —
+    남의 프로세스를 exec 로 갈아치우면 안 된다(결정 162)."""
+    return _main(argv, follow_enabled=argv is None, execve=os.execve)
+
+
+def _main(argv: list[str] | None, *, follow_enabled: bool, execve: Any = os.execve) -> int:
+    global _DISCOVERY, _FOUND_SAID
+    _DISCOVERY, _FOUND_SAID = None, False
+    follow._set_state(None)
+    if follow_enabled:
+        try:
+            code = _follow_first(execve)
+        except KeyboardInterrupt:
+            _err("interrupted")
+            return 130
+        if code is not None:
+            return code
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

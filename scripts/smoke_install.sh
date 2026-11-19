@@ -38,6 +38,10 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+# 따라가기(M5q)의 캐시 · 기록을 작업 폴더로 — 사용자의 ~/.cache/rcm 을 읽지도 쓰지도 않는다.
+# 셸에 남은 RCM_CLIENT_VERSION 이 결과를 바꾸지 않게 지운다.
+export XDG_CACHE_HOME="$WORK/cache"
+unset RCM_CLIENT_VERSION
 
 # ── 0. README ↔ script: every `rcm …` command in the README's marked blocks must appear here ──
 step "README commands are covered by this script"
@@ -124,7 +128,12 @@ step "rcm init client --server"
 "$RCM" init client --server "$SERVER_URL" >/dev/null
 export RCM_TOKEN="$TOKEN"
 step "rcm check"
-"$RCM" check
+"$RCM" check 2>"$WORK/check.err" || { cat "$WORK/check.err" >&2; exit 1; }
+# 같은 wheel 의 서버 — 설치본이 서버 버전이라 따라가지 않는다. 기록은 격리된 캐시에 남는다
+if grep -q "following server" "$WORK/check.err"; then
+  echo "smoke: rcm followed a server of its own version" >&2; cat "$WORK/check.err" >&2; exit 1
+fi
+[ -f "$XDG_CACHE_HOME/rcm/follow.json" ] || { echo "smoke: no follow record in the cache" >&2; exit 1; }
 
 step "rcm run ok"
 mkdir -p "$WORK/project" && echo "hello" >"$WORK/project/README.txt"

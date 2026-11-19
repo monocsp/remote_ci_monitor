@@ -1716,6 +1716,15 @@ label = "alice@laptop"                 # who the queue shows as the requester
 `RCM_SERVER`, `RCM_TOKEN` and `RCM_LABEL` override the file; `--server`, `--token` and `--by`
 override both. `RCM_CLIENT_CONFIG` (or `--client-config`) points at another file.
 
+Which code a session runs is not a `client.toml` key, because an older version would refuse the
+key. A session follows the server's version unless `RCM_CLIENT_VERSION` or a one-line file says
+otherwise: `follow`, `installed` (run this install) or a version such as `0.8.0`. The file is
+`$XDG_CONFIG_HOME/rcm/client-version`, else `~/.config/rcm/client-version`; blank lines and text
+after `#` are ignored. `--no-follow` beats `RCM_CLIENT_VERSION`, which beats `client-version`.
+With none of them a wheel install follows and an editable install does not. Downloaded clients
+live in `$XDG_CACHE_HOME/rcm` (`~/.cache/rcm`). See
+[keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
+
 `worker.toml` keys: `server` (a URL, or `"auto"` to find it over mDNS), `server_name` (which
 server, when several advertise), `token` (or `RCM_WORKER_TOKEN`), `pool`, `lanes`, `name`,
 `accept_any` (take `any-capable` jobs, default `true`), `data_dir`, `grace_seconds`,

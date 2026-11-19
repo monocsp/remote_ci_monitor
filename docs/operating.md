@@ -290,6 +290,161 @@ inside `bash -c '…'`, `xargs`, `uv run` or `$(…)`, and does not resolve syml
 
 ## Keeping clients on the server's version
 
+A session machine runs the server's version of `rcm`. Before a command that talks to the server
+(`rcm run`, `wait`, `jobs`, `check`, and commands this `rcm` does not know yet), the installed
+`rcm` asks the server which version it runs. When the two differ, it downloads the wheel the
+server hands out, checks its sha256, unpacks it under `~/.cache/rcm/clients/` and starts itself
+again from there. It is the same Python and the same process (`exec`), so the exit code, signals
+and the JSON on stdout are the command's own. Upgrading the server is enough: each session
+follows on its next command, upward or downward. The first download prints one line on stderr:
+
+```
+rcm: following server v0.8.1 (installed v0.8.0) — fetched 707.7 KB
+```
+
+Later commands run straight from the cache and print nothing. The server's version is asked at
+most every 10 minutes per server address (`rcm check` always asks). A server that did not answer
+is remembered for 60 seconds, so a script that calls `rcm` in a loop does not wait 3 seconds on
+every call.
+
+The installed `rcm` is now the bootstrap: the bootloader that decides which code runs. Each
+session machine needs `0.8.0` or newer installed once, and `examples/session/update-client.sh`
+(below) is the way to put it there. After that, upgrading the server reaches the sessions by
+itself.
+
+Some commands never follow, because they are the server or work without one: `rcm serve`,
+`rcm worker`, `rcm token`, `rcm init`, `rcm discover`, `rcm version`, `rcm skills` and
+`rcm gc --config …`. A call with `--help` or `--version` always shows the installed rcm's help
+and version. The help of a command that only the server's version has appears once the installed
+rcm is upgraded.
+
+An editable install (`pip install -e`) does not follow by default and runs the installed code.
+That is the `.venv` of a development checkout, and the service virtual environment of a build
+machine that runs from a checkout: code under development is never swapped for the production
+version. `RCM_CLIENT_VERSION=follow` makes it follow anyway.
+
+### Pinning a version or turning it off
+
+| setting | where | values |
+|---|---|---|
+| `--no-follow` | after `rcm` or after the command, for one call | runs the installed rcm |
+| `RCM_CLIENT_VERSION` | the environment | `follow`, `installed`, or a version such as `0.8.0` |
+| `client-version` | a one-line file: `$XDG_CONFIG_HOME/rcm/client-version`, else `~/.config/rcm/client-version` | the same three values; `#` starts a comment |
+
+The flag wins over the variable, and the variable over the file. With none of them a wheel install
+follows and an editable install does not. A wrong value (`lates`, `../x`) stops a following
+command with exit 2 and names the variable or the file, so a typo never silently follows or
+silently stops; `rcm version` shows it on its second line. Only the installed rcm reads the file.
+It is not a `client.toml` key, because an older version refuses keys it does not know.
+
+A pinned version `X` runs the installed rcm when that is `X`, else a cached `X`, else the server's
+wheel when the server runs `X` right now. Otherwise the installed rcm runs with a warning. Once
+fetched, a pinned version keeps running from the cache after the server has moved on.
+
+Going down to an older server means that version's parser runs. A flag only a newer version knows,
+such as `rcm run --no-supersede` against a 0.5.0 server, ends in that version's usage error
+(exit 2). The server would not understand it either.
+
+### When it cannot follow
+
+The command goes on with the installed rcm and says why in one line on stderr. Stdout stays the
+command's own, so `rcm run --no-wait` still prints its JSON line:
+
+```
+rcm: not following server v0.8.1: sha256 mismatch — running installed v0.8.0
+rcm: not following http://macmini.local:8787: cannot reach the server — running installed v0.8.0
+```
+
+| reason | when |
+|---|---|
+| `cannot reach the server` | no answer within 3 seconds (5 in all), an error status, or a redirect — redirects are never followed, so a token never travels to another host |
+| `the server's health has a malformed …` | `version`, `client_wheel.path`, `.sha256` or `.bytes` in `/api/health` failed its format check |
+| `the server has no client wheel (…)` | `client_wheel: null`, or `/client/…` answered 404 or 503 |
+| `the server is too old to hand out its client` | a server before 0.2.6 |
+| `the server needs a token to hand out its client` | `read_auth = "basic"` and no token; with a wrong token, `the server refused the token for its client (HTTP 401)` |
+| `sha256 mismatch` | the downloaded bytes do not hash to `client_wheel.sha256`; nothing is kept |
+| `cannot unpack: …` | a full disk, permissions, a broken zip, or an entry outside `remote_ci_monitor/` and its `.dist-info` |
+| `the wheel says v…` | the unpacked `__version__` is not the server's |
+| `needs Python …` | the wheel's `Requires-Python` is above this interpreter, or not a plain `>=X.Y` |
+| `… is writable by others` · `… belongs to another user` | the cache folder is not yours alone |
+| `v0.8.0 is not installed or cached and the server runs v0.8.1` | a pinned version that cannot be found |
+| `the cached client v… did not load before` | that cached copy failed to start once and is not used again |
+| `cannot start the cached client: …` | the `exec` itself failed |
+| `not supported on this platform` | not macOS or Linux |
+
+When the server is down but answered before, the cached copy of the version it reported last
+(with the same sha256) runs without a warning. An `rcm wait` across a server restart keeps the
+server's version, and the command itself reports the lost connection.
+
+### What you see
+
+`rcm version` adds a second line when following is configured, or when the default server has a
+record. `rcm --version` is always one line with the installed version:
+
+```
+$ rcm version
+rcm 0.8.0 (Python 3.12.4, darwin arm64)
+follow: on (default) · server http://macmini.local:8787 v0.8.1 checked 3m ago · cached 0.8.1, 0.8.0
+```
+
+`rcm version --json` carries the same under `follow`: `mode`, `pin`, `source`, `install`,
+`server`, `server_version`, `checked_at`, `cached`, `installed` and `running`. `running` is the
+version a following command would run now, and it is what a script should read instead of
+`rcm --version`. Nothing in it asks the server.
+
+`rcm check` ends its `client` row with what happened to this call:
+
+```
+ok    client        v0.8.1 · same as server · following (installed v0.8.0)
+warn  client        v0.8.0 · server v0.8.1 · older · not following: sha256 mismatch — pip install http://macmini.local:8787/client/remote_ci_monitor-0.8.1-py3-none-any.whl
+warn  client        v0.8.0 · server v0.8.1 · older · pinned by RCM_CLIENT_VERSION
+ok    client        v0.8.1 · same as server · not following (editable install)
+```
+
+`same as server` is `ok`; `older`, `newer` and `different build` are `warn` (a heads-up, exit 0).
+`older` turns `FAIL` only below `min_client_version`, and then `rcm run` prints one warning line
+on stderr before it goes on; the refusal itself, when it comes, is the server's 400. When a
+session follows a server down to a version before 0.8.0, that version prints its own older row.
+
+The server logs one line the first time it sees a token's client version on an accepted
+`POST /jobs`, for example `client macbook runs v0.8.1`. It keeps no record in the database.
+
+### The cache
+
+`$XDG_CACHE_HOME/rcm/` (by default `~/.cache/rcm/`) holds `follow.json`, the last version seen per
+server address, and `clients/<first 16 characters of the sha256>/`: one unpacked wheel per folder,
+completed by a single rename, with `.rcm-client.json` naming its version. Right after a download
+it keeps the three most recently used versions and any that a running `rcm` holds, and removes the
+rest. Both folders must belong to you and be writable by no one else; they are created with mode
+0700, and `rcm` refuses to run code from them otherwise. Deleting the folder is always safe: it is
+filled again from the server.
+
+### Security: the session runs the server's code
+
+Following means a session machine runs the code the server hands out, as the user who typed
+`rcm`. That code reaches everything this user can read: the GitHub token of `gh`, git credential
+helpers, the keys in `~/.ssh`, cloud credentials and every other repository on the disk. This is
+new: before, the server only returned results and artifacts to a session.
+
+Plain HTTP on a LAN lets a man-in-the-middle swap the wheel. The sha256 arrives over the same
+channel (`/api/health`), so it catches a broken download, not a forged one.
+
+A `.local` name is resolved over mDNS even when you write it out, as in
+`server = "http://macmini.local:8787"` instead of `auto`. Anyone on the network who answers that
+name first becomes your server, so leaving discovery off does not make a `.local` address safe.
+
+What rcm does guard against: it never follows a redirect, checks every value of the health answer
+before it becomes a path, unpacks only `remote_ci_monitor/` and its `.dist-info`, and refuses a
+cache folder other users can write to. Those close the paths of a leaked token and a swapped cache,
+not a forged server.
+
+On a network you do not trust, connect over the server's Tailscale address: WireGuard encrypts the
+channel and authenticates the node, which makes both attacks hard. To turn following off, choose
+one of three: `export RCM_CLIENT_VERSION=installed` in your shell profile, a line `installed` in
+`~/.config/rcm/client-version`, or `--no-follow` for a single command.
+
+### Serving the wheel
+
 The server hands out the client for the code it is running. It assembles the wheel once at start,
 from its own installed package (no build tools, no GitHub), and serves it at one exact name:
 
@@ -317,21 +472,21 @@ The wheel follows the read rule, like `/api/status`: open with the default `read
 token or Basic credentials with `read_auth = "basic"`. It is the code of a public repository, so
 it is not treated like job artifacts (which always need a token).
 
-On a session machine, `rcm check` prints a `client` row next to `server`:
+Without following (pinned, `installed`, or a client before 0.8.0), `rcm check` prints the
+same `client` row next to `server` with the command that installs the server's wheel:
 
 ```
 ok    server    http://macmini.local:8787 · v0.2.6
 warn  client    v0.2.4 · server v0.2.6 · older — pip install http://macmini.local:8787/client/remote_ci_monitor-0.2.6-py3-none-any.whl
 ```
 
-`same as server` is `ok`; `older` and `newer` are `warn` (a heads-up, exit 0); `older` turns `FAIL`
-only below `min_client_version`, and then `rcm run` prints one warning line on stderr before it
-goes on — the refusal itself, when it comes, is the server's 400. `rcm version --json` stays
-server-free.
+### Installing or upgrading the bootloader
 
-There is no `rcm self-update`: swapping the package under a running process is different for
-every install (venv, pipx, uv, editable). `examples/session/update-client.sh` is the wrapper the
-tests run — copy it as it is. What it does, and what the inline sketch below keeps:
+Following never touches the installed package, and there is no `rcm self-update`: swapping the
+package under a running process is different for every install (venv, pipx, uv, editable). Use
+`examples/session/update-client.sh` for the first install of the bootloader and when the
+bootloader itself needs a fix. It is the wrapper the tests run — copy it as it is. What it does,
+and what the inline sketch below keeps:
 
 - **One private directory.** Everything — the health document, the wheel, the curl config — lives
   in its own `mktemp -d` (mode 0700) and is deleted on exit, success or failure. There is no shared
@@ -374,6 +529,10 @@ and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
 - The client wheel (`/client/…whl`) is the server's own installed code, served under the read
   rule above. With `read_auth = "none"` on a LAN anyone can download it; it is the code of a
   public repository, so that exposes nothing new — tokens, presets and data never enter it.
+- A session's `rcm` runs the code in that wheel: it follows the server's version and executes
+  what the server hands out, as the user who typed `rcm`. Use a trusted server and, on an
+  untrusted network, its Tailscale address; `RCM_CLIENT_VERSION=installed` turns this off
+  ([keeping clients on the server's version](#keeping-clients-on-the-servers-version)).
 - Discovery answers (`_rcm._tcp`) carry only the server name, port, version, lane count and LAN
   IPs — never tokens, presets or paths. Anyone on the LAN can learn that a build server exists;
   the read API is open on the LAN unless `read_auth = "basic"`.
