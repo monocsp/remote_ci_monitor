@@ -30,13 +30,13 @@ import pytest
 from remote_ci_monitor.config import parse_preset
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import CANCELLED, FAILED, SUCCEEDED
-from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.store import Store
 from shelfkit import (
     DAY,
     MIB,
     PNG_1PX,
     advance_days,
+    drain_copier,
     finished_linux_job,
     fixtures,
     item_dir,
@@ -986,15 +986,7 @@ def test_e58_files_are_409_while_copying(idle):
     assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 409
     assert page(idle, f"/shelf/{jid}.zip")[0] == 409
     # 서버가 띄우는 것과 같은 copier 를 한 번 돌리면 보관이 끝나고 파일이 열린다
-    app = idle.app
-    ShelfCopier(
-        app.store,
-        app.config,
-        now_fn=app.now_fn,
-        log=app.log,
-        on_change=app._on_shelf_change,
-        on_purged=app._shelf_purged,
-    ).drain()
+    drain_copier(idle)
     assert idle.store.shelf_item(jid).state == "active"
     assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 200
 
@@ -1425,20 +1417,25 @@ def test_g45_a_shelf_change_is_an_event(srv):
     )
 
 
-def test_e54_a_failed_shelf_still_lets_the_acked_bundle_go(tmp_path, monkeypatch):
-    s = make_server(tmp_path, shelf_max_bytes=10)
+def test_e54_a_failed_shelf_still_lets_the_acked_bundle_go(tmp_path):
+    # copier 를 띄우지 않은 서버로 본다(E58 과 같은 까닭). copier 스레드를 문(Gate)으로 붙잡으면
+    # 문을 달기 전에 들어간 claim 이 막 생긴 행을 집어 ack 보다 먼저 failed 로 끝낼 수 있다. 그러면
+    # ack 는 미뤄지지 않고 곧장 지운다. macOS CI 에서 `purged is False` 가 그렇게 빨갰다
+    s = make_server(tmp_path, workers=False, shelf_max_bytes=10)
     try:
-        gate = Gate(monkeypatch)
         jid = finished_linux_job(s)
         digest = publish_payload(s, jid, tar_bytes([("out/a.txt", b"a" * 100)]))
+        assert s.store.shelf_item(jid).state == "pending"
         status, body = s.req(
             "POST", f"/jobs/{jid}/artifacts/ack", token="alice", json_body={"bundle_sha256": digest}
         )
         assert status == 200 and body["purged"] is False and body["deferred"] is True
-        gate.release.set()
-        s.app.copier.wake()
-        wait_shelf(s, jid, "failed")
-        wait_until(lambda: s.store.get_bundle(jid)["state"] == art.PURGED, what="purged")
+        assert s.store.get_bundle(jid)["state"] == art.READY
+        drain_copier(s)
+        item = s.store.shelf_item(jid)
+        assert item.state == "failed" and item.reason_code == "shelf_full"
+        assert s.store.get_bundle(jid)["state"] == art.PURGED
+        assert not (s.cfg.data_dir / "artifacts" / str(jid)).exists()
     finally:
         s.close()
 

@@ -25,6 +25,7 @@ from typing import Any
 from remote_ci_monitor.config import parse_preset
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import QUEUED, SUCCEEDED
+from remote_ci_monitor.shelf_copier import ShelfCopier
 from test_server import make_tar, sh
 from test_server_m5e import ARTIFACT_CONFIG
 from test_worker_api import T0, WorkerServer
@@ -225,6 +226,24 @@ def wait_until(pred: Any, timeout: float = 10.0, what: str = "condition") -> Any
             return got
         time.sleep(0.05)
     raise AssertionError(f"{what} never held")
+
+
+def drain_copier(srv: WorkerServer) -> None:
+    """서버가 띄우는 것과 같은 copier 를 이 스레드에서 pending 이 없어질 때까지 돌린다.
+
+    보관 행이 `pending` 에 머문 상태를 보는 시험은 copier 스레드 없이 서버를 띄우고(`workers=False`
+    거나 `ShelfCopier.start` 를 막는다) 이것으로 보관을 끝낸다. copier 스레드를 띄운 채 문(Gate)으로
+    붙잡으면 문을 달기 전에 들어간 claim 이 막 생긴 행을 집어 갈 수 있다.
+    """
+    app = srv.app
+    ShelfCopier(
+        app.store,
+        app.config,
+        now_fn=app.now_fn,
+        log=app.log,
+        on_change=app._on_shelf_change,
+        on_purged=app._shelf_purged,
+    ).drain()
 
 
 # ── 손으로 만든 묶음 (HTTP 만 보는 시험) ─────────────────────────────────────

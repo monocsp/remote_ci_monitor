@@ -19,9 +19,11 @@ import pytest
 
 import remote_ci_monitor.server as server_mod
 from remote_ci_monitor.core import artifacts as art
+from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.store import Store
 from shelfkit import (
     PNG_1PX,
+    drain_copier,
     finished_linux_job,
     item_dir,
     make_server,
@@ -65,7 +67,11 @@ def test_b23_app_start_reconciles_the_shelf_before_lanes_janitor_and_copier(tmp_
         s.close()
 
 
-def test_g15_start_clears_shelf_staging_and_leaves_the_rest(tmp_path):
+def test_g15_start_clears_shelf_staging_and_leaves_the_rest(tmp_path, monkeypatch):
+    # copier 스레드는 띄우지 않는다. `kept` 는 keep 잡이라 기동 직후 copier 가 그것을 보관하면서
+    # `.staging/<잡>.<hex>/` 를 잠깐 만든다. 시험이 그 순간에 `.staging` 을 보면 화해가 못 지운
+    # 것으로 읽혀 macOS CI 에서 빨갰다. 화해를 본 뒤에 시험이 copier 를 직접 한 번 돌린다
+    monkeypatch.setattr(ShelfCopier, "start", lambda self: None)
     s = make_server(tmp_path, workers=False)
     kept = finished_linux_job(s)
     publish_payload(s, kept, tar_bytes([("out/a.txt", b"a")]))
@@ -83,6 +89,11 @@ def test_g15_start_clears_shelf_staging_and_leaves_the_rest(tmp_path):
         assert (arts / str(kept) / "bundle.tar").is_file()
         # M5e 화해는 돌지 않는다(§15.5) — 그 자국은 이번 마일스톤에서 남는다
         assert (arts / ".staging" / "7.abcd.part").exists() and (arts / "123").is_dir()
+        # 기동 뒤의 copier 도 제 작업 폴더를 남기지 않는다
+        assert s.store.shelf_item(kept).state == "pending"
+        drain_copier(s)
+        assert s.store.shelf_item(kept).state == "active"
+        assert list((shelf / ".staging").iterdir()) == [] and (shelf / "77").is_dir()
     finally:
         s.close()
 
