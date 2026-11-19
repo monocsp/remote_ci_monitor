@@ -1063,7 +1063,8 @@ MUTANTS = (
         path="src/remote_ci_monitor/cli.py",
         old='    if setting.source == "default" and not (',
         new="    if False and not (",
-        tests=("tests/test_cli_m5q_display.py", "tests/test_cli_m4.py"),
+        # test_cli_m4 는 사본에 없는 examples/ 를 읽어 대조군이 빨갛다 — 표시 시험만 쓴다
+        tests=("tests/test_cli_m5q_display.py",),
     ),
     Mutant(
         # `rcm check` 의 `client` 행이 따라가기 상태를 버린다
