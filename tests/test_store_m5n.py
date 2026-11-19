@@ -194,8 +194,9 @@ def downgrade_to_v22(path: Path, *, keep_columns: tuple[str, ...] = (), keep_mac
 # ── 1. DB v23 ────────────────────────────────────────────────────────────────
 
 
-def test_this_build_is_database_version_23():
-    assert DB_VERSION == 23
+def test_this_build_is_database_version_24():
+    # v24(M5p)가 `jobs.keep` 을 맨 끝에 붙이고 보관함 표를 더한다(tests/test_store_m5p.py)
+    assert DB_VERSION == 24
 
 
 def test_a_fresh_database_has_the_v23_columns_tables_and_index(tmp_path):
@@ -203,7 +204,8 @@ def test_a_fresh_database_has_the_v23_columns_tables_and_index(tmp_path):
     s = Store(path)
     s.close()
     # 마이그레이션이 뒤에 붙이므로 새 DB 에서도 맨 끝이다 — 두 DB 의 열 차례가 같아야 한다
-    assert columns(path, "jobs")[-7:] == NEW_JOB_COLUMNS
+    # v24 의 `keep` 은 그 뒤 맨 끝이다(A18 · A19 가 잠근다)
+    assert columns(path, "jobs")[-8:-1] == NEW_JOB_COLUMNS
     assert columns(path, "machines") == MACHINE_COLUMNS
     assert columns(path, "fingerprints") == ["hash", "json", "first_seen_at"]
     assert columns(path, "machine_checks") == [
@@ -240,8 +242,9 @@ def test_a_v22_database_migrates_after_a_v22_backup_and_old_rows_get_defaults(tm
 
     s = Store(path)
     try:
-        assert s.user_version() == 23
-        assert columns(path, "jobs")[-7:] == NEW_JOB_COLUMNS
+        assert s.user_version() == DB_VERSION
+        # 깎는 도우미는 v24 의 `keep` 을 남긴다 — 그래서 다시 붙은 일곱 열이 맨 끝이다
+        assert [c for c in columns(path, "jobs") if c != "keep"][-7:] == NEW_JOB_COLUMNS
         assert columns(path, "machines") == MACHINE_COLUMNS
         assert index_columns(path, "jobs_check") == [
             "worker_name",
@@ -286,7 +289,7 @@ def test_the_migration_survives_columns_and_tables_that_are_already_there(tmp_pa
     c.close()
     s = Store(path)
     try:
-        assert s.user_version() == 23
+        assert s.user_version() == DB_VERSION
         assert set(NEW_JOB_COLUMNS) <= set(columns(path, "jobs"))
         assert columns(path, "fingerprints") == ["hash", "json", "first_seen_at"]
     finally:

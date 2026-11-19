@@ -73,7 +73,8 @@ def add_release(store: Store, build: str = "1.0.1", *, started: datetime = NOW) 
 def test_a_fresh_database_is_version_18_with_the_releases_table():
     # v20: versions 표 · v21: 그 표의 upload_job_id (tests/test_store_versions.py)
     # v22: 잡 링크 두 열 (tests/test_job_link.py) · v23: M5n 능력과 배치 (tests/test_store_m5n.py)
-    assert DB_VERSION == 23
+    # v24: M5p 보관함 — `jobs.keep` 과 `shelf_items` (tests/test_store_m5p.py)
+    assert DB_VERSION == 24
 
 
 def test_a_fresh_database_has_the_releases_table_and_index(tmp_path):

@@ -8,7 +8,7 @@ reuse it. It never edits the live server.toml: it writes a merged copy and (with
 
   python3 scripts/rcm/rcm_candidate.py --server <server.toml> --repo <name>
       [--presets scripts/rcm/presets.release.toml] [--profile scripts/rcm/profile.release.toml]
-      [--out <path>] [--url <git url>] [--check]
+      [--out <path>] [--url <git url>] [--into <include entry>] [--check]
   python3 scripts/rcm/rcm_candidate.py --selftest
 
 Defaults come from the header of docs/rcm-connect.md when it exists (`repo:`, `server_toml:`,
@@ -21,6 +21,16 @@ What the merge does, on the TOML text (comments and order are kept):
     `git remote get-url origin`.
   * every `[[presets]]` of the presets file is appended; a preset of the same name already in the
     server file is removed first (with its `[presets.env]` / `[[presets.inputs]]` sub-tables).
+When server.toml starts with `include = [...]` (rcm 0.6.0+, presets in their own file) and the
+presets file has the same file name as one of the included files (or --into names one), the presets
+are merged into a copy of that file instead of server.toml. The candidate is then a folder holding
+`server.toml` (the profile only) and that file: --out names a new or empty folder (a file already
+there is never overwritten), default a fresh temp dir. The other include entries are rewritten as
+absolute paths so `rcm check` reads the same files. A preset name that is also in server.toml or
+another included file is refused, as rcm refuses it. Reading include needs Python 3.11+ (tomllib);
+an older python3 stops with that message rather than pasting into server.toml.
+stdout is the candidate server.toml path in both cases; with include, stderr says which files to
+copy where and to run `rcm reload --dry-run`, then `rcm reload`. Without include nothing changes.
 With --check: `rcm check --config <candidate> --server http://127.0.0.1:9 --token none` runs
 (`rcm` from $RCM or PATH — use the binary the server runs; its path and version are printed).
 Rows that only fail because of the dummy server (`server`, `client`, `token`, and a `presets` row
@@ -37,6 +47,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 import os
 import re
 import shutil
@@ -193,6 +204,351 @@ def _validate(text: str) -> None:
     tomllib.loads(text)
 
 
+# ── include (rcm 0.6.0+) ───────────────────────────────────────────────────────────────────────
+# 프리셋이 server.toml 의 `include = [...]` 로 들인 파일에 있으면 붙여 넣기는 「defined in both」를
+# 만든다. 그때는 프리셋을 그 들인 파일의 사본에 합치고, 후보를 폴더(server.toml + 그 파일)로 쓴다.
+# 규칙은 rcm `config._include_paths` · `_merge_presets` 와 같게 맞춘다 — 후보가 rcm 에서 깨지기
+# 전에 여기서 같은 문장으로 멈춘다. include 가 없으면 이 절은 아무것도 하지 않는다(오늘 그대로).
+
+#: include 를 아는 첫 rcm. 그보다 옛 rcm 은 `include` 를 모르는 최상위 키로 거절한다
+INCLUDE_MIN_VERSION = (0, 6, 0)
+#: 서문의 include 키. TOML 은 따옴표 키(`"include" = [...]`)도 같은 키로 읽는다
+_INCLUDE_KEY = re.compile(r"""^[ \t]*(?:include|"include"|'include')[ \t]*=[ \t]*""", re.M)
+
+
+def include_entries(server_path: str, server_text: str) -> list[tuple[str, str]] | None:
+    """server.toml 의 `include` → [(적힌 그대로, 펼친 절대 경로)]. 상대 경로는 server.toml 폴더
+    기준이다. include 가 없거나 비었거나 파일이 TOML 로 안 읽히면 None — 오늘 경로가 오늘과 같은
+    결과(오류 문장까지)를 낸다."""
+    try:
+        import tomllib
+    except ImportError:
+        # 3.10 이하: include 를 읽을 수 없다. 서문에 include 가 보이면 멈춘다 — 옛 붙여 넣기로
+        # 떨어지면 rcm 이 거절할 후보를 말없이 만든다. 안 보이면 오늘 동작 그대로다
+        if _INCLUDE_KEY.search(split_blocks(server_text)[0][1]):
+            raise SystemExit(
+                f"{server_path} has include, and include needs Python 3.11+ (tomllib) — run "
+                "this script with python3.11 or later"
+            ) from None
+        return None
+    try:
+        raw = tomllib.loads(server_text)
+    except ValueError:
+        return None
+    for name, value in raw.items():
+        # `[server]` 아래에 쓴 include 는 `[server] include` 로 읽힌다 — rcm 과 같은 문장으로 멈춘다
+        tables = value if isinstance(value, list) else [value]
+        if name != "include" and any(isinstance(t, dict) and "include" in t for t in tables):
+            raise SystemExit(
+                f"{server_path}: include must be at the top of the file, before the first "
+                f"[section] (it was read as part of [{name}])"
+            )
+    value = raw.get("include")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise SystemExit(
+            f"{server_path}: include must be a list of file paths — include = [{value!r}]"
+            if isinstance(value, str)
+            else f"{server_path}: include must be a list of file paths"
+        )
+    if not value:
+        return None
+    base = os.path.dirname(os.path.abspath(server_path))
+    own = os.path.realpath(server_path)
+    seen: dict[str, str] = {}
+    out: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise SystemExit(f"{server_path}: include entries must be file paths, got {item!r}")
+        path = os.path.expanduser(item)
+        if not os.path.isabs(path):
+            path = os.path.join(base, path)
+        path = os.path.normpath(path)
+        real = os.path.realpath(path)
+        if real == own:
+            raise SystemExit(f"{server_path}: include lists the config file itself ({item})")
+        if real in seen:
+            raise SystemExit(
+                f"{server_path}: include lists the same file twice ({seen[real]}, {item})"
+            )
+        seen[real] = item
+        out.append((item, path))
+    return out
+
+
+def pick_target(
+    entries: list[tuple[str, str]], server_path: str, presets_path: str | None, into: str | None
+) -> int | None:
+    """프리셋을 받을 들인 파일의 번호. --into 가 이기고, 없으면 --presets 와 파일 이름이 같은 것.
+    아무것도 안 맞으면 None(오늘처럼 server.toml 에 붙인다)."""
+    listed = ", ".join(item for item, _ in entries)
+    if into:
+        want = os.path.normpath(os.path.abspath(os.path.expanduser(into)))
+        hits = [
+            i
+            for i, (item, path) in enumerate(entries)
+            if into in (item, os.path.basename(path)) or want == path
+        ]
+        if not hits:
+            raise SystemExit(f"--into {into} is not listed in include of {server_path} ({listed})")
+    else:
+        if not presets_path or presets_path == "-":
+            return None
+        name = os.path.basename(presets_path)
+        hits = [i for i, (_, path) in enumerate(entries) if os.path.basename(path) == name]
+        if not hits:
+            return None
+    if len(hits) > 1:
+        both = ", ".join(entries[i][0] for i in hits)
+        raise SystemExit(
+            f"more than one include entry matches ({both}) — pass --into <entry> to pick one"
+        )
+    return hits[0]
+
+
+def _array_end(text: str, i: int, strings: list[tuple[int, int]] | None = None) -> int:
+    """text[i] 의 `[` 와 짝인 `]` 다음 자리. 문자열 · 주석 안의 괄호는 세지 않는다.
+    strings 를 주면 바깥 배열 바로 안의 문자열 토큰 자리(시작, 끝)를 차례로 담는다."""
+    depth = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            quote = ch * 3 if text.startswith(ch * 3, i) else ch
+            j = i + len(quote)
+            while not text.startswith(quote, j):
+                if j >= len(text):
+                    raise ValueError("unterminated string in the include line")
+                j += 2 if ch == '"' and text[j] == "\\" else 1
+            if strings is not None and depth == 1:
+                strings.append((i, j + len(quote)))
+            i = j + len(quote)
+            continue
+        if ch == "#":
+            nl = text.find("\n", i)
+            i = len(text) if nl < 0 else nl
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise ValueError("unterminated include array")
+
+
+def rewrite_include(text: str, entries: list[str]) -> str:
+    """서문의 `include = [...]` 에서 값이 바뀐 문자열 토큰만 entries 로 갈아 끼운다. 키 모양 ·
+    배열 안 주석 · 줄바꿈 · 끝 쉼표 · 바뀌지 않은 항목은 적힌 그대로 남는다."""
+    import tomllib
+
+    preamble = split_blocks(text)[0][1]
+    m = _INCLUDE_KEY.search(preamble)
+    if m is None or not preamble.startswith("[", m.end()):
+        raise SystemExit("cannot find the include = [...] line at the top of the server file")
+    spans: list[tuple[int, int]] = []
+    try:
+        _array_end(preamble, m.end(), spans)
+    except ValueError as e:
+        raise SystemExit(f"cannot rewrite the include line: {e}") from None
+    if len(spans) != len(entries):
+        raise SystemExit("cannot rewrite the include line (its entries are not plain strings)")
+    out = text
+    for (a, b), new in reversed(list(zip(spans, entries, strict=True))):
+        if tomllib.loads(f"v = {text[a:b]}")["v"] != new:
+            out = out[:a] + json.dumps(new, ensure_ascii=False) + out[b:]
+    if tomllib.loads(out).get("include") != entries:
+        raise SystemExit("cannot rewrite the include line (it reads back differently)")
+    return out
+
+
+def preset_names(text: str, label: str) -> list[str]:
+    import tomllib
+
+    try:
+        raw = tomllib.loads(text)
+    except ValueError as e:
+        raise SystemExit(f"{label}: invalid TOML: {e}") from None
+    presets = raw.get("presets", [])
+    if not isinstance(presets, list):
+        raise SystemExit(f"{label}: [[presets]] must be an array of tables")
+    return [p.get("name") for p in presets if isinstance(p, dict) and p.get("name")]
+
+
+def check_names(groups: list[tuple[str, list[str]]]) -> None:
+    """파일 사이에서 겹친 이름을 rcm 과 같은 문장으로 거절한다. 첫 묶음이 server.toml 이다
+    (그 안의 겹침은 rcm check 의 `server config` 행이 말한다)."""
+    bases = [os.path.basename(p) for p, _ in groups]
+    label = {
+        p: os.path.basename(p) if bases.count(os.path.basename(p)) == 1 else p for p, _ in groups
+    }
+    first: dict[str, str] = {}
+    for k, (path, names) in enumerate(groups):
+        for n in names:
+            f = first.get(n)
+            if f is not None and f != path:
+                raise SystemExit(f"preset '{n}' is defined in both {label[f]} and {label[path]}")
+            if f is not None and k:
+                raise SystemExit(
+                    f"{label[path]}: [[presets]] duplicate preset name '{n}' "
+                    "(defined twice in this file)"
+                )
+            first.setdefault(n, path)
+
+
+def plan_include(
+    server_path: str,
+    repo: str,
+    server_text: str,
+    profile_text: str | None,
+    presets_text: str | None,
+    entries: list[tuple[str, str]],
+    target: int | None,
+    url: str | None,
+) -> dict:
+    """include 가 있을 때의 후보. 쓰지는 않는다 — 검사를 다 지난 뒤에 main 이 쓴다."""
+    notes: list[str] = []
+    texts: dict[int, str] = {}
+    for i, (_, path) in enumerate(entries):
+        if i == target:
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                texts[i] = f.read()
+        except FileNotFoundError:
+            raise SystemExit(
+                f"included file not found: {path} (include of {server_path})"
+            ) from None
+        except OSError as e:
+            raise SystemExit(f"{path}: cannot read: {e.strerror}") from None
+    live_target = before = None
+    if target is None:
+        server_out = merge(server_text, repo, profile_text, presets_text, url)
+        if presets_text is not None:
+            notes.append(
+                "include: no include entry has the presets file's name — presets appended to "
+                "server.toml (pass --into <entry> to put them in an included file)"
+            )
+    else:
+        server_out = merge(server_text, repo, profile_text, None, url)
+        live_target = entries[target][1]
+        if os.path.basename(live_target) == "server.toml":
+            raise SystemExit(f"the included file {live_target} is named server.toml; rename it")
+        try:
+            with open(live_target, encoding="utf-8") as f:
+                before = f.read()
+        except FileNotFoundError:
+            before = ""
+            notes.append(
+                f"include: {live_target} does not exist yet — the candidate holds the presets "
+                "file as it is"
+            )
+        except OSError as e:
+            raise SystemExit(f"{live_target}: cannot read: {e.strerror}") from None
+        if presets_text is None:
+            texts[target] = before
+        elif not before.strip():
+            texts[target] = presets_text
+        else:
+            texts[target] = merge(before, "-", None, presets_text, None)
+    server_changed = server_out != server_text
+    old = [item for item, _ in entries]
+    new = [
+        os.path.basename(path)
+        if i == target
+        else item
+        if os.path.isabs(os.path.expanduser(item))
+        else path
+        for i, (item, path) in enumerate(entries)
+    ]
+    if new != old:
+        server_out = rewrite_include(server_out, new)
+    _validate(server_out)
+    groups = [(os.path.abspath(server_path), preset_names(server_out, server_path))]
+    groups += [(path, preset_names(texts[i], path)) for i, (_, path) in enumerate(entries)]
+    try:
+        check_names(groups)
+    except SystemExit as e:
+        if target is None and presets_text is not None and "defined in both" in str(e):
+            raise SystemExit(
+                f"{e}\n  no include entry has the presets file's name, so the presets went into "
+                "server.toml — pass --into <entry> to merge them into an included file instead"
+            ) from None
+        raise
+    return {
+        "server": server_out,
+        "server_changed": server_changed,
+        # 대상 항목을 후보 쪽 이름으로 돌렸으면 server.toml 통째 복사는 include 를 망친다
+        "server_whole": target is None or new[target] == old[target],
+        "absolutized": any(new[i] != old[i] for i in range(len(old)) if i != target),
+        "target": live_target,
+        "target_text": texts[target] if target is not None else None,
+        "target_changed": target is not None and texts[target] != before,
+        "notes": notes,
+    }
+
+
+def include_out_dir(out: str | None, target_name: str | None) -> str:
+    """include 모드의 후보 폴더. --out 은 폴더이고, 이 실행이 만들지 않은 파일은 덮지 않는다.
+
+    `--server` 에 사본을, `--out` 에 운영 폴더를 주면 경로만으로는 운영인 줄 모른다. 그래서
+    후보 파일 이름이 이미 있으면(링크면 더더욱) 거절한다 — 후보는 새 폴더나 빈 폴더에 쓴다."""
+    if out is None:
+        return tempfile.mkdtemp(prefix="rcm-candidate-")
+    if out.endswith(".toml") or (os.path.exists(out) and not os.path.isdir(out)):
+        raise SystemExit(
+            f"--out names a folder when the server file has include (got {out}): the candidate "
+            "is server.toml plus the included file"
+        )
+    for name in ["server.toml"] + ([target_name] if target_name else []):
+        dest = os.path.join(out, name)
+        if os.path.islink(dest):
+            raise SystemExit(f"--out {out}: {dest} is a symlink; refusing to write through it")
+        if os.path.exists(dest):
+            raise SystemExit(
+                f"--out {out}: {dest} already exists — give a new or empty folder (a candidate "
+                "never overwrites a file it did not just write)"
+            )
+    os.makedirs(out, exist_ok=True)
+    return out
+
+
+def next_steps(plan: dict, cand: str, cand_target: str | None, server_path: str, repo: str):
+    """사람이 할 다음 단계. 프리셋 · repos 는 `rcm reload` 로 다시 읽힌다 — 재시작이 필요 없다."""
+    lines = []
+    if plan["target"] and plan["target_changed"]:
+        live = plan["target"]
+        lines.append(f"  cp {cand_target} {live} && chmod go-w {live}")
+    if plan["server_changed"]:
+        if plan["server_whole"]:
+            extra = (
+                "   # its include line names the other files by absolute path — the same files"
+                if plan["absolutized"]
+                else ""
+            )
+            lines.append(f"  cp {cand} {server_path}{extra}")
+        else:
+            lines.append(
+                f"  copy the [repos.{repo}.release] block (and a new [[repos]] entry, if any) "
+                f"of {cand} into {server_path} "
+                "(do not copy the whole file: its include line points at the candidate copy)"
+            )
+    if not lines:
+        return ["next: nothing to move — the candidate matches the live files"]
+    return [
+        "next, on the server (no restart — presets and repos reload):",
+        *lines,
+        "  rcm reload --dry-run   # names what would change",
+        "  rcm reload",
+    ]
+
+
+def parse_version(text: str) -> tuple[int, int, int] | None:
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
 HIDDEN_ROWS = ("server", "client", "token")
 
 
@@ -227,14 +583,29 @@ def rcm_binary() -> str:
     return os.environ.get("RCM") or shutil.which("rcm") or "rcm"
 
 
-def run_check(candidate: str, repo: str) -> int:
+def run_check(candidate: str, repo: str, include: bool = False) -> int:
     rcm = rcm_binary()
     try:
         ver = subprocess.run([rcm, "--version"], capture_output=True, text=True, check=False)
-        print(f"rcm binary: {rcm} ({(ver.stdout or ver.stderr).strip() or 'version unknown'})")
+        vtext = (ver.stdout or ver.stderr).strip()
+        print(f"rcm binary: {rcm} ({vtext or 'version unknown'})")
+        got = parse_version(vtext) if include else None
+        if got is not None and got < INCLUDE_MIN_VERSION:
+            sys.stdout.flush()  # 위 stdout 줄이 아래 stderr 줄보다 먼저 보이게
+            # 옛 rcm 은 include 를 「unknown section」으로 거절한다 — 후보 탓처럼 보이지 않게
+            # 먼저 말한다.
+            # 버전을 못 읽으면 막지 않는다(모르는 것을 옛 것으로 지어내지 않는다).
+            need = ".".join(map(str, INCLUDE_MIN_VERSION))
+            print(
+                f"{rcm} is rcm {'.'.join(map(str, got))}, which does not know include (needs "
+                f"{need} or later) — set RCM=<path to the server's rcm>",
+                file=sys.stderr,
+            )
+            return 1
         argv = [rcm, "check", "--config", candidate, "--server", "http://127.0.0.1:9"]
         r = subprocess.run(argv + ["--token", "none"], capture_output=True, text=True, check=False)
     except OSError as e:
+        sys.stdout.flush()
         print(f"cannot run {rcm}: {e} (set RCM=<path to the server's rcm>)", file=sys.stderr)
         return 1
     shown, bad, release_seen = classify_rows(r.stdout + r.stderr, repo)
@@ -246,6 +617,59 @@ def run_check(candidate: str, repo: str) -> int:
 
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────────────
+
+
+def _selftest_include(expect, server: str, presets: str) -> None:
+    """include 절(3.11+). selftest 가 tomllib 가 있을 때만 부른다."""
+    rewritten = rewrite_include('include = [\n  "a.toml",  # c\n]  # t\n[server]\n', ["/x/a.toml"])
+    expect(
+        rewritten == 'include = [\n  "/x/a.toml",  # c\n]  # t\n[server]\n',
+        "only the changed string replaced; comments in and after the array kept",
+    )
+    with tempfile.TemporaryDirectory() as d:
+        live, inc, cand = (os.path.join(d, x) for x in ("live", "in", "cand"))
+        os.makedirs(live)
+        os.makedirs(inc)
+        files = {
+            os.path.join(live, "server.toml"): 'include = ["presets.x.toml", "team.toml"]\n\n'
+            + server.split("[[presets]]")[0],
+            os.path.join(
+                live, "presets.x.toml"
+            ): '# kept\n[[presets]]\nname = "gate"\nargv = ["g"]\n',
+            os.path.join(live, "team.toml"): '[[presets]]\nname = "team"\nargv = ["t"]\n',
+            os.path.join(inc, "presets.x.toml"): presets,
+        }
+        for path, text in files.items():
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        argv = ["--server", os.path.join(live, "server.toml"), "--repo", "app", "--profile", "-"]
+        argv += ["--presets", os.path.join(inc, "presets.x.toml")]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = main([*argv, "--out", cand])
+        got = sorted(os.listdir(cand)) if os.path.isdir(cand) else []
+        expect(rc == 0 and got == ["presets.x.toml", "server.toml"], "include -> two files")
+        if rc == 0 and got:
+            with open(os.path.join(cand, "presets.x.toml"), encoding="utf-8") as f:
+                inc_text = f.read()
+            with open(os.path.join(cand, "server.toml"), encoding="utf-8") as f:
+                srv_text = f.read()
+            expect(
+                inc_text.startswith("# kept\n")
+                and preset_names(inc_text, "x") == ["gate", "release-plan"]
+                and "[[presets]]" not in srv_text
+                and f'"{os.path.join(live, "team.toml")}"' in srv_text,
+                "presets merged into the included copy, other include made absolute",
+            )
+        with open(os.path.join(live, "team.toml"), "w", encoding="utf-8") as f:
+            f.write('[[presets]]\nname = "release-plan"\nargv = ["t"]\n')
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = main([*argv, "--out", os.path.join(d, "cand2")])
+        expect(
+            rc == 1
+            and "'release-plan' is defined in both presets.x.toml and team.toml" in err.getvalue(),
+            "same preset name in two included files refused, names and files given",
+        )
 
 
 def selftest() -> int:
@@ -394,12 +818,32 @@ def selftest() -> int:
             )
         expect(rc == 0 and os.path.exists(out_path), "CLI with '-' (no files) writes a plain copy")
         expect(rc_missing == 2, "missing --presets file -> exit 2, no traceback")
+
+    try:
+        import tomllib  # noqa: F401 — 있는지만 본다
+    except ImportError:
+        # 3.10 이하: include 를 읽지 못하니 include 절은 건너뛰고, 대신 include 가 보이는
+        # server.toml 을 옛 붙여 넣기로 넘기지 않고 멈추는지 본다
+        print("  --  include cases skipped (they need Python 3.11+ for tomllib)")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "server.toml")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('include = ["presets.x.toml"]\n\n' + server)
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = main(["--server", p, "--repo", "app", "--profile", "-", "--presets", "-"])
+        expect(
+            rc == 1 and "include needs Python 3.11+" in err.getvalue(),
+            "include without tomllib stops instead of pasting into server.toml",
+        )
+    else:
+        _selftest_include(expect, server, presets)
     if fails:
         print(f"rcm_candidate selftest FAIL ({fails})")
         return 1
     print(
         "rcm_candidate selftest ok — insertion after the right [[repos]], "
-        "same-name preset replaced, missing entry created"
+        "same-name preset replaced, missing entry created, include (or its Python 3.11+ guard)"
     )
     return 0
 
@@ -447,6 +891,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--out", help="where to write the candidate (default: a fresh temp dir)")
     p.add_argument("--url", help="repo url used only when the server file has no entry for --repo")
+    p.add_argument(
+        "--into",
+        help="the include entry that receives the presets (default: the one with the presets "
+        "file's name; with include, --out names a folder)",
+    )
     p.add_argument("--check", action="store_true", help="run rcm check on the candidate")
     p.add_argument("--selftest", action="store_true")
     a = p.parse_args(argv)
@@ -468,6 +917,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot read {e.filename}: {e.strerror}", file=sys.stderr)
         return 2
     try:
+        entries = include_entries(a.server, server_text)
+        if entries is None and a.into:
+            raise SystemExit(f"--into needs include = [...] at the top of {a.server}")
+    except SystemExit as e:
+        print(f"candidate not written: {e}", file=sys.stderr)
+        return 1
+    if entries is not None:
+        return main_include(a, server_text, profile_text, presets_text, entries)
+    try:
         out_text = merge(server_text, a.repo, profile_text, presets_text, a.url or origin_url())
         _validate(out_text)
     except (SystemExit, ValueError) as e:
@@ -478,6 +936,53 @@ def main(argv: list[str] | None = None) -> int:
         f.write(out_text)
     print(out)
     return run_check(out, a.repo) if a.check else 0
+
+
+def main_include(a, server_text, profile_text, presets_text, entries) -> int:
+    """server.toml 에 include 가 있을 때: 후보 폴더에 server.toml(+ 대상 들인 파일)."""
+    try:
+        target = pick_target(entries, a.server, a.presets, a.into)
+        plan = plan_include(
+            a.server,
+            a.repo,
+            server_text,
+            profile_text,
+            presets_text,
+            entries,
+            target,
+            a.url or origin_url(),
+        )
+        name = os.path.basename(plan["target"]) if plan["target"] else None
+        out_dir = include_out_dir(a.out, name)
+    except (SystemExit, ValueError) as e:
+        print(f"candidate not written: {e}", file=sys.stderr)
+        return 1
+    cand = os.path.join(out_dir, "server.toml")
+    cand_target = os.path.join(out_dir, name) if name else None
+    try:
+        # "x": 이미 있거나 링크면 쓰지 않는다(검사와 쓰기 사이에 생긴 것까지)
+        with open(cand, "x", encoding="utf-8") as f:
+            f.write(plan["server"])
+        if cand_target:
+            with open(cand_target, "x", encoding="utf-8") as f:
+                f.write(plan["target_text"])
+    except FileExistsError as e:
+        print(f"candidate not written: {e.filename} appeared while writing", file=sys.stderr)
+        return 1
+    if cand_target:
+        # rcm 은 그룹 · 남이 쓸 수 있는 들인 파일을 거절한다(umask 002 에서도 후보가 통과하게)
+        os.chmod(cand_target, os.stat(cand_target).st_mode & ~0o022)
+    print(cand, flush=True)
+    for line in plan["notes"]:
+        print(line, file=sys.stderr)
+    if cand_target:
+        print(f"include: presets -> {cand_target} (for {plan['target']})", file=sys.stderr)
+    rc = run_check(cand, a.repo, include=True) if a.check else 0
+    sys.stdout.flush()  # 검사 행(stdout) 뒤에 다음 단계(stderr)가 오게
+    if rc == 0:
+        for line in next_steps(plan, cand, cand_target, os.path.abspath(a.server), a.repo):
+            print(line, file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":

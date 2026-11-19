@@ -147,6 +147,11 @@ class ServerSection:
     auto_checks: bool = True  # 지문이 바뀐 워커에 점검 프리셋을 rcm 이 스스로 한 번 건다
     local_accept_any: bool = True  # 서버의 로컬 레인이 `any-capable` 잡을 집나
     check_sweep_seconds: int = 30  # 자동 점검 스위퍼 주기
+    # M5p — 보관함(§3.1). 재시작해야 바뀐다(`[server]` 는 reload 되지 않는다)
+    shelf_dir: str = ""  # 비면 `<data_dir>/shelf`. 절대 경로 · `~` 를 받고 data_dir 밖이어도 된다
+    shelf_max_bytes: int = 50 * 1024**3  # 보관함 전체 상한(50 GiB). 넘으면 새 보관을 거절. 0 = 꺼짐
+    shelf_stale_days: int = 182  # 마지막으로 쓴 지 이만큼이면 「정리 대기」
+    shelf_delete_days: int = 365  # 마지막으로 쓴 지 이만큼이면 삭제. stale 보다 커야 한다
 
 
 @dataclass(frozen=True)
@@ -300,6 +305,32 @@ class ServerConfig:
     @property
     def data_dir(self) -> Path:
         return Path(self.server.data_dir).expanduser()
+
+    @property
+    def shelf_dir(self) -> Path:
+        """보관함 폴더(M5p §3.1). 비워 두면 `data_dir` 을 따라간다(환경 변수로 바꾼 것까지)."""
+        if self.server.shelf_dir:
+            return Path(self.server.shelf_dir).expanduser()
+        return self.data_dir / "shelf"
+
+    @property
+    def shelf_max_bytes(self) -> int:
+        return self.server.shelf_max_bytes
+
+    @property
+    def shelf_stale_days(self) -> int:
+        return self.server.shelf_stale_days
+
+    @property
+    def shelf_delete_days(self) -> int:
+        return self.server.shelf_delete_days
+
+    @property
+    def shelf_enabled(self) -> bool:
+        """새 보관을 받나. `shelf_max_bytes = 0` 이면 꺼진다.
+
+        꺼져도 기존 항목은 그대로 보이고 받을 수 있으며 시계대로 정리된다(§3.1)."""
+        return self.server.shelf_max_bytes > 0
 
     def preset(self, name: str) -> Preset | None:
         for p in self.presets:
@@ -614,6 +645,7 @@ _PRESET_KEYS = {
     "check_ref",
     "sample",
     "supersede",
+    "keep",
 }
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
@@ -860,6 +892,12 @@ def parse_preset(raw: Any) -> Preset:
     sample = raw.get("sample")
     if sample is not None and not isinstance(sample, bool):
         raise ConfigError(f"{where}: sample must be true or false")
+    keep = raw.get("keep", False)
+    if not isinstance(keep, bool):
+        raise ConfigError(f"{where}: keep must be true or false")
+    if keep and not globs:
+        # 보관할 묶음이 없다 — 「보관하고 있다」는 오해만 남는다(M5p §3.2)
+        raise ConfigError(f"{where}: keep needs artifacts (declare the artifacts globs to keep)")
     supersede = raw.get("supersede", SUPERSEDE_OFF)
     if not isinstance(supersede, str) or supersede not in SUPERSEDE_MODES:
         raise ConfigError(
@@ -890,6 +928,7 @@ def parse_preset(raw: Any) -> Preset:
         check_ref=check_ref,
         sample=sample,
         supersede=supersede,
+        keep=keep,
     )
 
 
@@ -1118,6 +1157,33 @@ def _validate_repos(repos: tuple[RepoConfig, ...]) -> None:
             raise ConfigError(f"[[repos]] '{r.name}': {problem}")
 
 
+#: 이 폴더들의 청소기는 숫자 이름 폴더를 지운다 — 보관함이 그 안에 있으면 남의 것을 지운다(§3.1).
+SHELF_FORBIDDEN_PARENTS = ("artifacts", "jobs", "workspaces", "blobs", "mirrors")
+
+
+def _validate_shelf(cfg: ServerConfig) -> None:
+    """보관함 키 넷(M5p §3.1 · §15.3). 경로는 `resolve()` 뒤에 비교한다 — `..` 와 이미 있는
+    심볼릭 링크로 금지 폴더에 들어가는 길을 막는다(경로가 아직 없어도 된다)."""
+    s = cfg.server
+    if s.shelf_max_bytes < 0:
+        raise ConfigError("[server] shelf_max_bytes must be >= 0 (0 turns the shelf off)")
+    if s.shelf_stale_days < 1:
+        raise ConfigError("[server] shelf_stale_days must be >= 1")
+    if s.shelf_delete_days <= s.shelf_stale_days:
+        raise ConfigError("[server] shelf_delete_days must be greater than shelf_stale_days")
+    shelf = cfg.shelf_dir.resolve()
+    data = cfg.data_dir.resolve()
+    if shelf == data or shelf in data.parents:
+        raise ConfigError("[server] shelf_dir must not be data_dir or a folder that holds it")
+    for name in SHELF_FORBIDDEN_PARENTS:
+        sweeper = (data / name).resolve()
+        if shelf == sweeper or sweeper in shelf.parents:
+            raise ConfigError(
+                f"[server] shelf_dir must not be inside data_dir/{name} "
+                "(that sweeper deletes numbered folders)"
+            )
+
+
 def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
     if s.lanes < 1:
@@ -1212,6 +1278,7 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError(
             "[server] artifact_cancel_timeout_seconds must be < 2 × worker_heartbeat_seconds"
         )
+    _validate_shelf(cfg)
     if not (0 <= s.worker_claim_wait_seconds <= 60):
         raise ConfigError("[server] worker_claim_wait_seconds must be between 0 and 60")
     if s.probe_interval_seconds < 60:

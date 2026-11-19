@@ -90,6 +90,7 @@ REASON_CODES = (
     "expired",
     "hash_mismatch",
     "not_ready",
+    "shelving",  # M5p §15.2 — 보관함이 푸는 중이라 ack 의 삭제를 미뤘다
 )
 
 
@@ -138,7 +139,7 @@ def test_the_states_outside_the_three_subsets_are_the_four_that_carry_a_body_or_
 def test_reasons_holds_the_fourteen_codes() -> None:
     core = artifacts_core()
     assert core.REASONS == frozenset(REASON_CODES)
-    assert len(core.REASONS) == 16
+    assert len(core.REASONS) == 17
     assert isinstance(core.REASONS, frozenset)
 
 

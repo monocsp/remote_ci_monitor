@@ -8,6 +8,10 @@
 - 메타데이터(잡 행 · 이벤트 · 합류자)는 `metadata_retention_days` 가 지나고 산출물이 이미
   지워진 잡만 삭제한다 — DB 가 무한히 자라지 않는다.
 - 스레드가 예외로 죽으면 `dead` 가 되고 `/api/health` 가 503 을 낸다(조용히 멈추지 않는다).
+- 보관함(M5p)은 자기 시계로 정리한다(`_sweep_shelf`) — 정리 대기 표시 · 삭제 · 묘비. 삭제는 보관함
+  폴더를 기준 루트로 받는 `remove_under_root` 를 쓴다(보관함은 data_dir 밖일 수 있다). 기동 화해
+  `reconcile_shelf_on_start` 도 여기 있지만 **서버 기동만** 부른다(dry-run 이 실제 폴더를 고치면
+  안 된다).
 """
 
 from __future__ import annotations
@@ -25,7 +29,8 @@ from typing import Any, NamedTuple, Protocol
 
 from remote_ci_monitor.config import RepoConfig, ServerConfig, effective_workspace_retention_days
 from remote_ci_monitor.core import artifacts
-from remote_ci_monitor.core.model import TERMINAL_STATES, TOKEN_ADMIN, Job
+from remote_ci_monitor.core import shelf as shelf_rules
+from remote_ci_monitor.core.model import TERMINAL_STATES, TOKEN_ADMIN, Job, ShelfItem
 from remote_ci_monitor.core.retention import (
     PurgePlan,
     RetentionPolicy,
@@ -53,6 +58,8 @@ PROGRESS_RATIO = 0.5
 JANITOR_TOKEN_NAME = "janitor"
 #: 「인자를 안 줬다」와 「None 을 줬다」를 가르는 표식 — 후자는 「여유를 못 쟀다」는 사실이다.
 _UNSET: Any = object()
+#: 보관 항목을 지우기 직전에 적어 두는 `error_code` — 지운 뒤 행을 고치기 전에 죽었다는 표시다.
+DELETING = "deleting"
 
 
 def _utcnow() -> datetime:
@@ -162,6 +169,237 @@ def _shared_blocks(st: Any) -> int:
     return 0
 
 
+def remove_under_root(path: Path, root: Path) -> bool:
+    """경로 하나를 지운다. 링크(와 파일)는 그것만 지우고, 디렉터리는 실제 경로가 `root` 안일 때만.
+
+    `root` 는 부르는 쪽이 `resolve()` 한 기준 루트다 — 보관함은 data_dir 밖(다른 디스크)일 수
+    있어서 data_dir 을 기준으로 삼으면 EXDEV 로 거절된다(M5p 검토 P1-5). 밖을 가리키면 손대지
+    않고 `OSError(EXDEV)`. 안의 심볼릭 링크는 `shutil.rmtree` 가 링크만 지운다.
+    **있던 것을 지웠으면 True**, 애초에 없었으면 False.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):  # 링크 · 파일
+        path.unlink()
+        return True
+    real = path.resolve()
+    if root != real and root not in real.parents:
+        raise OSError(errno.EXDEV, "path resolves outside its root")
+    shutil.rmtree(path)
+    return True
+
+
+class ShelfStartup(NamedTuple):
+    """기동 화해의 결과(§5.3). `available` 이 False 면 새 보관도 청소도 하지 않는다."""
+
+    available: bool
+    error_code: str | None
+
+
+def _valid_manifest(folder: Path, job_id: int) -> tuple[int, int] | None:
+    """copying 입양의 「유효한 manifest」(§15.3) — JSON 이 읽히고 `job` 이 맞고, 나열된 파일이 모두
+    `files/` 아래에 있고 크기가 같다(해시는 안 잰다). (파일 수, 바이트) 또는 None.
+
+    바이트는 원본 + 펼침 + manifest 자신이다 — 상한 판정의 실측과 같은 눈금(§4.2-5).
+    """
+    path = folder / "manifest.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("job") != job_id:
+        return None
+    files = doc.get("files")
+    if not isinstance(files, list):
+        return None
+    total = size
+    for f in files:
+        if not isinstance(f, dict):
+            return None
+        rel, want = f.get("path"), f.get("size")
+        if not shelf_rules.safe_member(rel) or not isinstance(want, int):
+            return None
+        try:
+            st = (folder / "files" / rel).lstat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode) or st.st_size != want:
+            return None
+        total += want
+    return len(files), total
+
+
+def _clear_dir(path: Path, root: Path) -> None:
+    """디렉터리 안을 비운다(링크는 링크만). 없으면 할 일이 없다.
+
+    `path` 자체가 링크면 **링크만** 지운다 — 따라가서 그 안을 비우면 보관함 밖의 폴더를 지운다
+    (격리 검증 D2). `root` 는 보관함 폴더를 `resolve()` 한 기준 루트다.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        path.unlink()
+        return
+    for entry in list(path.iterdir()):
+        remove_under_root(entry, root)
+
+
+def reconcile_shelf_on_start(
+    store: Store,
+    config: ServerConfig,
+    *,
+    now: datetime | None = None,
+    log: Callable[[str], None] | None = None,
+) -> ShelfStartup:
+    """서버가 뜰 때 보관함 폴더와 DB 를 맞춘다(§5.3 · §15.3). 레인 · 청소기 · copier 보다 먼저.
+
+    `rcm gc --dry-run`(`_offline_gc`) · `Janitor` 생성자 · `Store` 생성자는 이것을 부르지 않는다 —
+    사본 위의 계획이 실제 보관함 폴더를 고치면 안 된다.
+
+    1. 표식(`.rcm-shelf`)이 없는데 보관 중 · 정리 대기 행이 있으면 `unavailable` — 다른 디스크가 안
+       붙은 채 떴다. 행도 폴더도 건드리지 않는다(빈 마운트 지점 아래 루트 디스크에 쓰지 않는다).
+       그런 행이 없으면 폴더와 표식을 만든다. 못 만들면 `unavailable(shelf_dir_unwritable)`.
+    2. `.staging` 을 비운다.
+    3. `copying` 행 — 폴더의 manifest 가 유효하면 `active` 로 입양(`os.replace` 뒤 커밋 전에 죽은
+       경우). 폴더는 있는데 manifest 가 무효면 그 폴더는 이 행의 것이므로 지운다. 그다음 묶음이
+       살아 있으면 `pending`, 아니면 `failed(bundle_gone)`.
+    4. 보관 중 · 정리 대기인데 폴더가 없으면 `failed(missing)` + 로그 한 줄.
+    5. 행이 없는 폴더는 지우지 않는다 — 모르는 것은 안 지운다.
+    """
+    say = log or (lambda msg: None)
+    when = now or _utcnow()
+    root = config.shelf_dir
+    marker = root / shelf_rules.MARKER_NAME
+    shelved = store.shelf_items(state=shelf_rules.SHELVED_STATES, limit=None)
+    if not marker.is_file():
+        if shelved:
+            store.shelf_available = False
+            say(
+                f"shelf: {root} has no {shelf_rules.MARKER_NAME} marker but "
+                f"{len(shelved)} items are on the shelf — is the disk mounted? "
+                "New items are refused until it is back"
+            )
+            return ShelfStartup(False, "shelf_dir_missing")
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            marker.write_text("rcm shelf — do not remove; rcm checks it at start\n")
+        except OSError as e:
+            store.shelf_available = False
+            say(f"shelf: cannot write {root}: {_errname(e)}")
+            return ShelfStartup(False, "shelf_dir_unwritable")
+    store.shelf_available = True
+    real_root = root.resolve()
+    try:
+        _clear_dir(root / shelf_rules.STAGING_NAME, real_root)
+    except OSError as e:  # 못 비워도 기동은 한다 — 남은 찌꺼기는 다음 기동이 다시 본다
+        say(f"shelf: could not empty {shelf_rules.STAGING_NAME}: {_errname(e)}")
+    for item in store.shelf_items(state=shelf_rules.STATE_COPYING, limit=None):
+        try:
+            _adopt_or_return(store, item, root, real_root, when, say)
+        except Exception as e:  # noqa: BLE001 — 항목 하나 때문에 서버가 안 뜨면 안 된다(I3)
+            _note_reconcile_error(store, item, when, e, say)
+    for item in shelved:
+        try:
+            missing = not (root / str(item.job_id)).is_dir()
+            if missing:
+                store.mark_shelf(
+                    item.job_id,
+                    shelf_rules.STATE_FAILED,
+                    when,
+                    only_from=shelf_rules.SHELVED_STATES,
+                    reason_code="missing",
+                )
+                say(f"shelf: #{item.job_id} is missing from {root} — marked failed (missing)")
+        except Exception as e:  # noqa: BLE001 — 항목 하나 때문에 서버가 안 뜨면 안 된다(I3)
+            _note_reconcile_error(store, item, when, e, say)
+    return ShelfStartup(True, None)
+
+
+def _note_reconcile_error(
+    store: Store, item: ShelfItem, when: datetime, e: BaseException, say: Callable[[str], None]
+) -> None:
+    """화해에서 항목 하나가 실패했다 — 그 행의 상태는 그대로 두고 `error_code` 와 로그만 남긴다.
+
+    다음 기동이 다시 본다. 기록마저 실패하면(DB 가 잠겼다) 로그만 남긴다.
+    """
+    code = f"reconcile_{_errname(e)}"
+    say(f"shelf: #{item.job_id} could not be reconciled at start: {_errname(e)} — left as is")
+    try:
+        store.mark_shelf(
+            item.job_id,
+            item.state,
+            when,
+            only_from=(item.state,),
+            stale_since=item.stale_since,
+            deleted_at=item.deleted_at,
+            failed_at=item.failed_at,
+            error_code=code,
+        )
+    except Exception as again:  # noqa: BLE001 — 로그로 충분하다
+        say(f"shelf: #{item.job_id} error_code not recorded: {_errname(again)}")
+
+
+def _adopt_or_return(
+    store: Store,
+    item: ShelfItem,
+    root: Path,
+    real_root: Path,
+    when: datetime,
+    say: Callable[[str], None],
+) -> None:
+    """`copying` 행 하나 — 유효한 폴더면 입양, 아니면 폴더를 치우고 되돌리거나 접는다(§15.3)."""
+    folder = root / str(item.job_id)
+    found = _valid_manifest(folder, item.job_id)
+    if found is not None:
+        count, total = found
+        store.mark_shelf(
+            item.job_id,
+            shelf_rules.STATE_ACTIVE,
+            when,
+            only_from=(shelf_rules.STATE_COPYING,),
+            shelved_at=when.timestamp(),
+            last_used_at=when.timestamp(),
+            file_count=count,
+            total_bytes=total,
+            **_job_columns(store, item),
+        )
+        say(f"shelf: #{item.job_id} was copied before the restart — kept")
+        return
+    remove_under_root(folder, real_root)
+    bundle = store.get_bundle(item.job_id)
+    alive = (
+        bundle is not None and bundle["state"] == artifacts.READY and bundle["purged_at"] is None
+    )
+    if alive:
+        store.mark_shelf(
+            item.job_id,
+            shelf_rules.STATE_PENDING,
+            when,
+            only_from=(shelf_rules.STATE_COPYING,),
+        )
+    else:
+        store.mark_shelf(
+            item.job_id,
+            shelf_rules.STATE_FAILED,
+            when,
+            only_from=(shelf_rules.STATE_COPYING,),
+            reason_code="bundle_gone",
+        )
+
+
+def _job_columns(store: Store, item: ShelfItem) -> dict[str, Any]:
+    """입양할 때 잡이 끝났으면 잡 상태 · 끝난 시각을 다시 복사한다(잡 행이 없으면 그대로)."""
+    job = store.get_job(item.job_id)
+    if job is None or job.state not in TERMINAL_STATES or job.finished_at is None:
+        return {}
+    return {"job_state": job.state, "job_finished_at": job.finished_at.timestamp()}
+
+
 class Janitor:
     """보존 정리. `sweep_once` 는 동기, `start` 는 주기 스레드."""
 
@@ -175,9 +413,18 @@ class Janitor:
         log: Callable[[str], None] | None = None,
         stop: threading.Event | None = None,
         versions: VersionHost | None = None,
+        shelf_hold: Callable[[int], bool] = lambda _job_id: False,
+        on_shelf_change: Callable[[int], None] | None = None,
     ):
         self.store = store
         self.config = config
+        #: 보관 항목을 지금 내려보내는 중인가(zip 스트리밍) — 그 항목은 이번 회차에 안 지운다(§15.3)
+        self._shelf_hold = shelf_hold
+        #: 보관 항목의 상태가 바뀌었다 — 서버가 그 잡의 SSE 갱신을 낸다(§15.3 「이벤트」)
+        self._on_shelf_change = on_shelf_change or (lambda _job_id: None)
+        #: 마지막 보관함 회차의 시각과 오류 코드(`/api/status.server.shelf_storage`)
+        self.shelf_last_sweep_at: datetime | None = None
+        self.shelf_error_code: str | None = None
         #: 서버(있을 때만). 없으면 버전 대장은 **건드리지 않는다** — `rcm gc` 처럼 서버 없이
         #: 도는 청소기가 드래프트를 조용히 버리면 안 된다.
         self._versions = versions
@@ -234,12 +481,7 @@ class Janitor:
         if not (st.st_mode & 0o170000 == 0o040000):  # S_ISDIR 이 아니면(링크 · 파일)
             path.unlink()
             return True
-        root = self.config.data_dir.resolve()
-        real = path.resolve()
-        if root != real and root not in real.parents:
-            raise OSError(errno.EXDEV, "path resolves outside the data directory")
-        shutil.rmtree(path)
-        return True
+        return remove_under_root(path, self.config.data_dir.resolve())
 
     def _purge_job(self, job: Job) -> bool:
         if job.state not in TERMINAL_STATES:  # 이중 안전
@@ -273,6 +515,147 @@ class Janitor:
             self.store.mark_bundles_purged(purged, artifacts.EXPIRED, now)
             self.log(f"retention: expired {len(purged)} artifact bundles")
         return len(purged)
+
+    # ── 보관함 (M5p §4.5 · §15.2 · §15.3) ───────────────────────────────────
+
+    def _shelf_timeouts(self, now: datetime) -> list[int]:
+        """안전판 — 묶음 만료 + 24시간이 지나도록 못 집은 보관 요청을 `failed(timeout)` 로 접는다.
+
+        보관함이 `unavailable` 이어도 돈다: 그 요청이 묶음을 영원히 붙잡으면 안 된다.
+        """
+        try:
+            ids = self.store.time_out_shelf_requests(now)
+        except Exception as e:  # noqa: BLE001 — 보관함 때문에 보존 정리가 죽으면 안 된다
+            self.on_error(f"shelf: timeouts: {_errname(e)}")
+            return []
+        for job_id in ids:
+            self.log(f"shelf: #{job_id} was never copied — gave up (timeout), the bundle goes")
+            self._on_shelf_change(job_id)
+        return ids
+
+    def plan_shelf(self, now: datetime) -> shelf_rules.SweepPlan:
+        """이번 회차라면 무엇을 정리 대기로 옮기고 무엇을 지울지 — **아무것도 바꾸지 않는다**.
+
+        `rcm gc --dry-run` 의 보관함 한 줄(정리 대기 수 · 삭제 예정 수)이 이것을 쓴다(§5.4).
+        """
+        s = self.config.server
+        items = self.store.shelf_items(limit=None)
+        return shelf_rules.plan_sweep(
+            items, now.timestamp(), s.shelf_stale_days, s.shelf_delete_days
+        )
+
+    def _sweep_shelf(self, now: datetime) -> None:
+        """보관함 한 회차(§4.5). 실패는 삼키고 `on_error` 로 알린다 — 청소기를 죽이지 않는다."""
+        if not self.store.shelf_available:
+            return  # 기동 화해가 막았다 — 다른 디스크가 안 붙었다(§15.3)
+        try:
+            marked = (self.config.shelf_dir / shelf_rules.MARKER_NAME).is_file()
+            shelved = not marked and self.store.shelf_items(shelf_rules.SHELVED_STATES, limit=1)
+        except Exception as e:  # noqa: BLE001 — 보관함 때문에 보존 정리가 죽으면 안 된다
+            self.on_error(f"shelf: sweep failed: {_errname(e)}")
+            return
+        if shelved:
+            # 도는 중에 디스크가 빠졌다. 그대로 돌면 「지울 폴더가 없다」로 색인을 다 잃는다.
+            # 보관된 항목이 하나도 없으면 지울 폴더도 없으니 그대로 돈다(묘비 · 실패 행만 본다)
+            self.shelf_error_code = "shelf_dir_missing"
+            self.on_error("shelf: the shelf folder lost its marker — sweep skipped")
+            return
+        try:
+            self._shelf_round(now)
+        except Exception as e:  # noqa: BLE001 — 보관함 때문에 보존 정리가 죽으면 안 된다
+            self.on_error(f"shelf: sweep failed: {_errname(e)}")
+            return
+        self.shelf_error_code = None
+        with self._lock:
+            self.shelf_last_sweep_at = now
+
+    def _shelf_round(self, now: datetime) -> None:
+        plan = self.plan_shelf(now)
+        for item in plan.to_active:
+            if self.store.mark_shelf(
+                item.job_id,
+                shelf_rules.STATE_ACTIVE,
+                now,
+                only_from=(shelf_rules.STATE_STALE,),
+                stale_since=None,
+            ):
+                self._on_shelf_change(item.job_id)
+        for item in plan.to_stale:
+            if self.store.mark_shelf(
+                item.job_id,
+                shelf_rules.STATE_STALE,
+                now,
+                only_from=(shelf_rules.STATE_ACTIVE,),
+                if_last_used=item.last_used_at,  # 계획 뒤 누가 썼으면 이번엔 건너뛴다(D1)
+                stale_since=now.timestamp(),
+            ):
+                self.log(
+                    f"shelf: #{item.job_id} unused for {self.config.shelf_stale_days}d — stale"
+                )
+                self._on_shelf_change(item.job_id)
+        root = self.config.shelf_dir.resolve()
+        for item in plan.to_delete:
+            self._delete_shelf_item(item, root, now)
+        for item in plan.to_forget:
+            self.store.forget_shelf(item.job_id)
+
+    def _delete_shelf_item(self, item: ShelfItem, root: Path, now: datetime) -> None:
+        """항목 하나를 지운다 — **폴더를 지운 뒤에** 행을 `deleted` 로(결정 134).
+
+        지우기 전에 `error_code = deleting` 을 적어 둔다: 지운 뒤 행을 고치기 전에 죽으면 다음
+        회차가 「폴더 없음 + 지우던 중」을 보고 `deleted` 로 따라잡는다(그냥 폴더가 없으면
+        `failed(missing)` 이다, §15.3). 실패하면 행은 그대로 두고 `error_code` 에 종류만 남긴다.
+        """
+        job_id = item.job_id
+        if self._shelf_hold(job_id):
+            return  # 지금 zip 으로 내려보내는 중이다 — 다음 회차에
+        live = shelf_rules.SHELVED_STATES
+        folder = self.config.shelf_dir / str(job_id)
+        exists = folder.exists() or folder.is_symlink()
+        if not exists and item.error_code != DELETING:
+            if self.store.mark_shelf(
+                job_id,
+                shelf_rules.STATE_FAILED,
+                now,
+                only_from=live,
+                if_last_used=item.last_used_at,
+                reason_code="missing",
+            ):
+                self.log(f"shelf: #{job_id} was already gone from the shelf folder (missing)")
+                self._on_shelf_change(job_id)
+            return
+        # 계획을 읽은 뒤 누가 이 항목을 썼으면(되살리기 · 파일 받기) 그 계획은 낡았다 —
+        # `last_used_at` 이 계획 때 값일 때만 「지우는 중」을 적고, 아니면 이번엔 건너뛴다(D1).
+        # 정리 대기 시각(`stale_since`)은 그대로 둔다 — 안 주면 `mark_shelf` 가 지금으로 덮는다(I2)
+        keep = {"stale_since": item.stale_since}
+        if not self.store.mark_shelf(
+            job_id,
+            item.state,
+            now,
+            only_from=(item.state,),
+            if_last_used=item.last_used_at,
+            error_code=DELETING,
+            **keep,
+        ):
+            return  # 그새 누가 썼거나 지웠다
+        try:
+            remove_under_root(folder, root)
+        except OSError as e:
+            code = f"delete_{_errname(e)}"
+            self.store.mark_shelf(job_id, item.state, now, only_from=live, error_code=code, **keep)
+            self.on_error(f"shelf: delete #{job_id}: {_errname(e)}")
+            return
+        self.store.mark_shelf(
+            job_id,
+            shelf_rules.STATE_DELETED,
+            now,
+            only_from=live,
+            deleted_at=now.timestamp(),
+            total_bytes=0,
+            error_code=None,
+        )
+        self.log(f"shelf: #{job_id} unused for {self.config.shelf_delete_days}d — deleted")
+        self._on_shelf_change(job_id)
 
     # ── 버전 드래프트의 만료 (워크플랜 §2.3 · 결정 Q1 · Q2) ──────────────────
 
@@ -363,7 +746,10 @@ class Janitor:
         if purged:
             self.store.mark_artifacts_purged(purged, now)
             self.log(f"retention: purged {len(purged)} jobs")
+        # 보관함의 안전판은 묶음 청소 **앞**이다 — 접힌 보관의 묶음이 같은 회차에 정상 청소로 간다
+        self._shelf_timeouts(now)
         self._sweep_bundles(now)
+        self._sweep_shelf(now)
         # 은퇴한 워커를 잊는다 — 안 지우면 `server.workers[]` 에 `down` 레인이 영원히 쌓인다.
         # 활성 잡이 있으면 안 지운다(그 잡이 큐에서 사라지면 안 된다).
         try:

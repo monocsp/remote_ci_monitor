@@ -91,6 +91,7 @@ REASONS = frozenset(
         "expired",
         "hash_mismatch",
         "not_ready",
+        "shelving",  # ack 를 받았지만 보관함이 푸는 중이라 지우기를 미뤘다(M5p §15.2)
     }
 )
 
@@ -175,6 +176,9 @@ class AckDecision:
     purge: bool  # 지금 지워도 되는가
     record: bool
     reason_code: str | None
+    #: 원래는 지울 ack 인데 보관함이 아직 푸는 중이라 미뤘다(M5p 결정 130 · §15.2). 응답의
+    #: `reason_code` 는 `shelving` 이다. 보관이 끝나면 copier 가 지운다.
+    deferred: bool = False
 
 
 # ── 글롭 ─────────────────────────────────────────────────────────────────────
