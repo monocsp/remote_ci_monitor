@@ -54,7 +54,7 @@ store credentials are never inputs of this skill.
 | `scripts/release/release_version.sh` | role `version` (optional, «new version» from the web): `mode=prefill` by default reads the live listing into `prefill.json` (falls back to the `store/` files); `create` makes the App Store version and records the Android name → `version.json`; `delete` drops an editable version (submitted → exit 4) |
 | `scripts/rcm/presets.release.toml` | the presets `release-plan`, `release-upload`, `release-review`, `release-version` with exactly the inputs rcm sends (`listing_json` and `build_name_android` on upload / review), `source_modes = ["git_ref"]`, `repo`, `artifacts`, `artifacts_on = "always"` |
 | `scripts/rcm/profile.release.toml` | the `[repos.<repo>.release]` block: roles → presets (`version` included), `version_ttl_hours`, `secrets_dir_env`, the secrets list (names and kinds only) |
-| `scripts/rcm/rcm_candidate.py` | stdlib-only merger: writes a candidate `server.toml` (profile block after the right `[[repos]]` entry, presets appended, same-name presets replaced) and, with `--check`, runs `rcm check` on it; reads its defaults from the `docs/rcm-connect.md` header; `--selftest` |
+| `scripts/rcm/rcm_candidate.py` | stdlib-only merger: writes a candidate `server.toml` (profile block after the right `[[repos]]` entry, presets appended, same-name presets replaced) and, with `--check`, runs `rcm check` on it; when the server's `server.toml` has `include = [...]` and an included file has the presets file's name (or `--into` names one), the presets go into a copy of that file and the candidate is a folder (`server.toml` + that file); reads its defaults from the `docs/rcm-connect.md` header; `--selftest` |
 | `docs/rcm-connect.md` (created or section appended) | the answers in its header and, per skill, what was created / still to fill in / verified — `/rcm-connect` and the other skills read it |
 | `.gitignore` (two lines, if missing) | `build/.rcm-release/` and `__pycache__/` — artifacts, store snapshots and bytecode never enter git |
 
@@ -116,7 +116,10 @@ result (`B-TODO`, `not_implemented`), never a fake number or a fake `ready`:
 6. `server.toml` on the rcm server → put the profile block directly under the project's
    `[[repos]]` entry and the presets among `[[presets]]` (`rcm_candidate.py --out` produces the
    exact file); restart the server; open the Store tab Settings and enter the secrets there (they
-   never go into git or the profile).
+   never go into git or the profile). When `server.toml` brings the presets in with `include`
+   (rcm 0.6.0+), the presets belong in that included file instead: `rcm_candidate.py --out
+   <folder>` writes both files, and copying them into place then `rcm reload --dry-run` →
+   `rcm reload` applies them without a restart.
 7. The `[[repos]]` entry itself, if the server does not have one yet (`name`, `url`).
 
 Where an existing lane or script already does a store read or upload (Step 1 lists them), the
@@ -324,6 +327,15 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    with `url` from `git remote get-url origin` when the server file has none), appends the presets
    (replacing any same-name `[[presets]]`), prints the candidate path, then runs
    `rcm check --config <candidate> --server http://127.0.0.1:9 --token none` and prints the rows.
+   **When `server.toml` starts with `include = [...]`** and one included file has the same file
+   name as `$presets_file` (or `--into <entry>` names one), the presets are merged into a copy of
+   that included file instead (its comments and other presets kept), `server.toml` only gets the
+   profile, and the candidate is a folder holding both (`--out` names the folder; the other
+   include entries become absolute paths so the check reads the same files). A preset name that
+   is also in `server.toml` or in another included file stops it with both file names — move or
+   rename one. stdout is still the candidate `server.toml` path; stderr lists the two `cp` lines
+   and `rcm reload --dry-run` → `rcm reload`. `--check` refuses an `rcm` older than 0.6.0 there,
+   because it does not know `include`.
    Rows that fail only because of the dummy server (`server`, `client`, `token`, a `presets` row
    that cannot reach it) are hidden; `server config` is always shown. Exit is 1 when any shown row
    is `FAIL` **or no `release <repo>` row appears**. Check: exit 0 and the `release <repo>` row is

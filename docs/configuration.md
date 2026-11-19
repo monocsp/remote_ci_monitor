@@ -246,6 +246,11 @@ argv = ["bash", "scripts/gate.sh"]
   reload` re-reads the included files as well; if one is missing or broken, nothing changes.
 - `rcm check --config server.toml` counts the presets per file:
   `local presets 24 (server.toml 2 · presets.dolomood.toml 22)`.
+- The connect skills' candidate helper (`scripts/rcm/rcm_candidate.py`, installed by
+  `rcm-store-connect`) follows `include`: when the project's presets file has the same name as an
+  included file (or `--into <entry>` names one), it merges the presets into a copy of that file
+  instead of `server.toml` and writes both to a candidate folder for `rcm check`. Copy the two
+  files into place, then `rcm reload --dry-run` and `rcm reload`.
 
 **rcm does not fetch the file.** There is no git pull and no URL — only a local path. To use the
 file a repository keeps, point `include` at that repository's checkout on the build machine, and

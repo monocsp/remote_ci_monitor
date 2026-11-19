@@ -7,6 +7,22 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **The store skill's candidate helper follows `include`.** `rcm_candidate.py` (installed by
+  `rcm-store-connect`) pasted a project's presets at the end of `server.toml`. With presets moved
+  to an included file that made a candidate rcm refuses (`preset 'gate' is defined in both`), and
+  the candidate, written to a temporary folder, lost its relative include paths (`included file
+  not found`). When `server.toml` starts with `include = [...]` and the presets file has the
+  same name as an included file (or `--into <entry>` names one), the helper now merges the
+  presets into a copy of that file, keeps `server.toml` for the profile, and writes both to a
+  candidate folder (`--out` names the folder there) with the other include entries as absolute
+  paths, so `--check` reads the same files. A name also defined in `server.toml` or another
+  included file stops it with both file names; `--check` refuses an `rcm` older than 0.6.0; the
+  next steps it prints are the two copies and `rcm reload --dry-run` → `rcm reload`. A
+  `server.toml` without `include` gets byte-for-byte the same candidate as before. Projects get
+  it with `rcm skills install --into . --force` after upgrading rcm.
+  ([#212](https://github.com/monocsp/remote_ci_monitor/pull/212))
+
 ## [0.6.1] - 2026-11-19
 
 ### Fixed

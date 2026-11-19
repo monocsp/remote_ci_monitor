@@ -403,10 +403,12 @@ grep -E '^::rcm::(steps|step|step-end|fail|summary|progress)::' /tmp/gate-dry.lo
 python3 scripts/rcm/rcm_candidate.py --server <server.toml from the header> --repo <name> --presets "$presets_file" --check
 
 # 2'. standalone mode — the same helper, from where `rcm skills install` put it, with no profile;
-#     there is no `release <repo>` row, so read the `server config` row instead of --check's verdict
-python3 .claude/skills/rcm-store-connect/templates/rcm_candidate.py --server <server.toml> --repo <name> \
-  --presets scripts/rcm/presets.gate.toml --profile - --out /tmp/rcm-gate-candidate.toml
-rcm check --config /tmp/rcm-gate-candidate.toml --server http://127.0.0.1:9 --token none
+#     there is no `release <repo>` row, so read the `server config` row instead of --check's verdict.
+#     stdout is the candidate server.toml path (with `include` in server.toml it sits in a folder
+#     next to the included file it needs), so take it from there rather than from --out
+cand="$(python3 .claude/skills/rcm-store-connect/templates/rcm_candidate.py --server <server.toml> --repo <name> \
+  --presets scripts/rcm/presets.gate.toml --profile -)"
+rcm check --config "$cand" --server http://127.0.0.1:9 --token none
 ```
 
 Read the grep output as the page would: a `steps::N` (if any) equal to the count of `step::`
