@@ -96,7 +96,10 @@ class Rig:
         )
         self.url = f"http://127.0.0.1:{self.srv.port}"
         self.logs: list[str] = []
-        self.claims: list[tuple[float, bool]] = []  # (시각, 그때 draining)
+        self.claims: list[tuple[float, bool]] = []  # 서버가 받은 claim (시각, 그때 draining)
+        # 워커가 claim 을 보내기로 한 때(시각, 그때 draining). 서버가 받은 시각은 heartbeat 와
+        # 경주한다 — 드레인 직전에 떠난 claim 은 받아도 된다(G1)
+        self.sent: list[tuple[float, bool]] = []
         self.heartbeats: list[tuple[float, Any]] = []  # (시각, 본문의 jobs)
         self.finishes: list[tuple[float, int, int]] = []  # (시각, 잡, 상태 코드)
         self.forge: Any = None  # heartbeat 응답을 바꾸는 함수
@@ -152,6 +155,13 @@ class Rig:
         self.rw = RemoteWorker(cfg, log=self.logs.append, **kw)
         self.rw.draining = Stamped()
         self.rw.stopping = Stamped()
+        real_claim = self.rw.client.claim
+
+        def claim(*a: Any, **k: Any) -> Any:
+            self.sent.append((time.monotonic(), self.draining()))
+            return real_claim(*a, **k)
+
+        self.rw.client.claim = claim  # type: ignore[method-assign]
         return self.rw
 
     def start(self, **kw: Any) -> RemoteWorker:
@@ -220,7 +230,7 @@ def rig(tmp_path):
 
 
 def test_drain_with_no_running_job_restarts_for_the_new_version(rig):
-    # B7 · W5: heartbeat 의 다른 server_version 을 보고 드레인한다. 드레인 뒤에 시작한 claim 이 없고
+    # B7 · W5: heartbeat 의 다른 server_version 을 보고 드레인한다. 드레인 뒤에 보낸 claim 이 없고
     # `stopping` 은 드레인보다 뒤에 켜진다. `run()` 은 0 이고 `restart_for` 가 서버 버전이다
     rw = rig.start()
     rig.until(lambda: len(rig.claims) >= 2, "both lanes polling")
@@ -231,7 +241,7 @@ def test_drain_with_no_running_job_restarts_for_the_new_version(rig):
     assert rw.draining.set_at is not None and rw.stopping.set_at is not None
     assert rw.draining.set_at < rw.stopping.set_at
     assert rw.stopping.set_at - rw.draining.set_at < 1 + 2 + 1  # claim_wait + 2초 + 여유
-    assert [c for c in rig.claims if c[1]] == []
+    assert [c for c in rig.sent if c[1]] == []
     assert rig.count(drain_line(NEW)) == 1, rig.logs
 
 
@@ -242,6 +252,9 @@ def test_drain_lets_the_running_job_finish_and_report(rig):
     jid = rig.hold()
     rig.bump(NEW)
     rig.until(rig.draining, "draining")
+    # 드레인 직전에 들어간 long-poll 은 잡을 받아도 된다(G1). 그 long-poll 이 끝나 빈 레인이
+    # 기다리는 상태가 된 뒤에 넣은 잡은 집지 않는다
+    rig.until(lambda: rw._idle_lanes, "the idle lane waits")
     queued = rig.srv.queued_job(preset="lin")
     beats_before = len(rig.heartbeats)
     time.sleep(3)
@@ -258,7 +271,7 @@ def test_drain_lets_the_running_job_finish_and_report(rig):
     done = [at for at, j, status in rig.finishes if j == jid and status == 200]
     assert done and done[0] < rw.stopping.set_at
     assert rig.state(queued).state == QUEUED
-    assert [c for c in rig.claims if c[1]] == []
+    assert [c for c in rig.sent if c[1]] == []
     assert rw.restart_for == NEW
 
 
@@ -279,7 +292,7 @@ def test_long_poll_job_arriving_during_the_drain_is_run_then_restarts(tmp_path):
         r.go(jid)
         assert r.join() == 0, r.logs
         assert r.state(jid).state == SUCCEEDED
-        assert [c for c in r.claims if c[1]] == []
+        assert [c for c in r.sent if c[1]] == []
         assert rw.restart_for == NEW
     finally:
         r.close()
