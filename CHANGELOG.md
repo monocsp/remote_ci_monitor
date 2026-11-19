@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
 ### Breaking changes
 - **Database schema v24 — the shelf.** `jobs` gains `keep` (frozen when a job is submitted) and a
   `shelf_items` table holds what is kept, with its own copy of the job's preset, inputs, branch
@@ -1808,7 +1810,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...v0.5.1
