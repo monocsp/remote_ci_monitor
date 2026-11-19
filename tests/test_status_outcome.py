@@ -162,6 +162,8 @@ NEW_RECENT = frozenset(
         "host_key",
         "worker",
         "superseded_by",  # M5o
+        "keep",  # M5p — 제출 때 얼린 keep
+        "shelf",  # M5p — 보관 상태 `{state, url, reason_code}` | null
     }
 )
 NEW_ROW = frozenset(
@@ -177,6 +179,8 @@ NEW_ROW = frozenset(
         "host_key",
         "placement_detail",
         "superseded_by",  # M5o
+        "keep",  # M5p — 제출 때 얼린 keep
+        "shelf",  # M5p — 보관 상태 `{state, url, reason_code}` | null
     }
 )
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)
