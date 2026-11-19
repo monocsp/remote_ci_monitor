@@ -372,7 +372,8 @@ def test_version_json(home, capsys):
     assert code == 0, err
     assert out.count("\n") == 1, out
     doc = json.loads(out)
-    assert set(doc) == {"version", "python", "platform", "machine", "schema_version"}
+    # M5q(§2.9 · 결정 166): 기존 키는 그대로 두고 따라가기 상태 `follow` 를 더한다
+    assert set(doc) == {"version", "python", "platform", "machine", "schema_version", "follow"}
     assert doc["version"] == __version__
     assert doc["python"] == platform.python_version()
     assert doc["platform"] == sys.platform
