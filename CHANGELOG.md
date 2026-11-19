@@ -16,6 +16,14 @@ of a key bumps that number and is listed here.
   `rcm eta` still print `measured n=12`.
   ([#212](https://github.com/monocsp/remote_ci_monitor/pull/212))
 
+### Fixed
+- **The client wheel the server hands out now carries the packaged skills.** It shipped only the
+  `.py` files under `skills/`, so a client installed from `/client/…whl` printed three of the five
+  skills without a description in `rcm skills list`, and `rcm skills install` wrote no `SKILL.md`
+  and no shell or TOML template (15 files). The wheel now holds the same files as the release wheel,
+  with the same executable bits.
+  ([#PR](https://github.com/monocsp/remote_ci_monitor/pull/PR))
+
 ## [0.6.1] - 2026-11-19
 
 ### Fixed

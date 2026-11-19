@@ -82,6 +82,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      막대를 100% 로 채움: 아직 도는 잡이 「끝났다」로 읽힌다 (`web/app.js`, node --test)
   ㉞ progress-sub-not-reset-by-step — 새 `::rcm::step::` 이 앞 스텝의 세부 진행을 안 비움: 다음
      스텝이 지난 스텝의 41/68 을 달고 돈다 (`core/progress.py`)
+  M5q A0 — `client-wheel-drops-skills`: 서버가 조립하는 클라이언트 wheel 의 `ASSET_DIRS` 에서
+     `skills` 를 뺌 — `SKILL.md` · 셸 템플릿 15개가 빠진다 (`clientwheel.py`, 결정 167 ·
+     0.6.1 의 결함)
   ㉟ version-settle-ignores-what-is-still-running — 버전 행을 내려놓을 때 **무엇이 아직 도는지**
      안 봄: 회차가 스토어에 올리는 중인데 손으로 낸 잡이 먼저 끝나면 행이 `editing` 이 되어
      «버리기» 가 열린다 (`server.py`, 워크플랜 §14-2 — 그 버리기는 App Store 버전을 지운다)
@@ -131,6 +134,18 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5q A0 — 서버 wheel 이 릴리스 wheel 과 같은 파일을 싣는다 (`docs/m5q-workplan.md` §6 S1) ──
+    Mutant(
+        # skills 를 다시 뺀다 — 서버 wheel 로 깐 클라이언트의 `rcm skills` 가 SKILL.md 를 못 쓴다
+        name="client-wheel-drops-skills",
+        path="src/remote_ci_monitor/clientwheel.py",
+        old='ASSET_DIRS = ("web", "templates", "skills")',
+        new='ASSET_DIRS = ("web", "templates")',
+        tests=(
+            "tests/test_client_wheel.py::"
+            "test_s1_the_wheel_carries_every_file_of_the_package_folder",
+        ),
+    ),
     # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
     Mutant(
         # 합류자 이름 검사 제거 — 다른 사람이 기다리는 잡을 내 push 가 죽인다(결정 113)

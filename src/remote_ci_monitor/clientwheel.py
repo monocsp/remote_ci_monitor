@@ -5,11 +5,13 @@
 서버가 기동할 때 **설치된 패키지에서 표준 라이브러리만으로** wheel 을 조립해 `/client/<정확한
 파일명>` 으로 준다. 빌드 도구·hatchling 은 들이지 않는다(런타임 의존성 0).
 
-내용: `importlib.resources.files("remote_ci_monitor")` 아래의 `.py` 와 `web/`·`templates/` 전부
-(`__pycache__` 제외) + `remote_ci_monitor-<X>.dist-info/`. `METADATA` 와 `entry_points.txt` 는
-설치된 메타데이터를 그대로 쓰되 **`Version:` 은 도는 `__version__` 으로** 맞춘다 — 운영은 editable
-설치를 `git pull` + 재시작으로 올리므로 디스크의 dist-info 는 설치 당시 버전에 머문다. `WHEEL` 과
-`RECORD` 는 새로 쓴다. 릴리스 wheel 과 바이트가 같지 않고, 같아야 하는 것은 설치 결과다(§9).
+내용: `importlib.resources.files("remote_ci_monitor")` 아래의 `.py` 와 `web/`·`templates/`·`skills/`
+전부(`__pycache__` 제외) + `remote_ci_monitor-<X>.dist-info/`. 권한 비트는 릴리스 빌드(hatchling)와
+같게 소유자 실행 비트가 있으면 755, 아니면 644 다 — pip 는 그것을 보고 설치한 파일에 실행 비트를
+준다. `METADATA` 와 `entry_points.txt` 는 설치된 메타데이터를 그대로 쓰되 **`Version:` 은
+도는 `__version__` 으로** 맞춘다 — 운영은 editable 설치를 `git pull` + 재시작으로 올리므로 디스크의
+dist-info 는 설치 당시 버전에 머문다. `WHEEL` 과 `RECORD` 는 새로 쓴다. 릴리스 wheel 과 바이트가
+같지 않고, 같아야 하는 것은 설치 결과다(§9).
 
 조립 실패(메타데이터·파일 없음)는 `WheelBuildError(code)` — 빈 wheel 이나 옛 wheel 을 만들지
 않는다(fail-open 금지).
@@ -22,6 +24,8 @@ import hashlib
 import importlib.metadata
 import importlib.resources
 import io
+import pathlib
+import stat
 import zipfile
 from collections.abc import Iterable
 
@@ -33,8 +37,10 @@ MIN_CLIENT_VERSION = "0.2.0"
 #: 되는 가장 오래된 클라이언트(M5j G5 · 결정 87). 그 전 버전은 비밀을 보낼 줄 몰라 403 을 받는다.
 #: 제출 계약(`MIN_CLIENT_VERSION`)은 그대로다 — health 는 이 값을 따로 알린다.
 CANCEL_MIN_CLIENT_VERSION = "0.2.7"
-#: 패키지 파일 중 wheel 에 싣는 것 — `.py` 는 어디든, 이 두 디렉터리는 통째로.
-ASSET_DIRS = ("web", "templates")
+#: 패키지 파일 중 wheel 에 싣는 것 — `.py` 는 어디든, 이 디렉터리들은 통째로. 0.6.1 까지는
+#: `skills` 가 빠져 서버 wheel 로 깐 클라이언트의 `rcm skills` 가 `SKILL.md` 와 셸 템플릿을 못
+#: 썼다(M5q A0 · 결정 167). 새 자산 폴더를 두면 여기에 더한다 — 시험이 패키지 폴더와 대조한다.
+ASSET_DIRS = ("web", "templates", "skills")
 #: 이것들이 없으면 wheel 이 아니라 오류다 — release.yml 의 산출물 검사와 같은 셋.
 REQUIRED_FILES = (
     "__init__.py",
@@ -70,13 +76,27 @@ def _record_hash(data: bytes) -> str:
     return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
 
 
-def _package_files() -> list[tuple[str, bytes]]:
-    """설치된 패키지의 파일들 — (패키지 안 상대 경로, 바이트). 이름순."""
+def _file_mode(node: importlib.resources.abc.Traversable) -> int:
+    """릴리스 빌드(hatchling)와 같은 권한 — 소유자 실행 비트가 있으면 0o755, 아니면 0o644.
+
+    디스크 위의 패키지가 아니면(zip import 등) 모드를 알 수 없으니 0o644 다.
+    """
+    if isinstance(node, pathlib.Path):
+        try:
+            if node.stat().st_mode & stat.S_IXUSR:
+                return 0o755
+        except OSError:
+            pass
+    return 0o644
+
+
+def _package_files() -> list[tuple[str, bytes, int]]:
+    """설치된 패키지의 파일들 — (패키지 안 상대 경로, 바이트, 권한). 이름순."""
     try:
         root = importlib.resources.files(PACKAGE)
     except (ModuleNotFoundError, TypeError) as e:
         raise WheelBuildError("package_missing", str(e)) from e
-    out: list[tuple[str, bytes]] = []
+    out: list[tuple[str, bytes, int]] = []
 
     def walk(node: importlib.resources.abc.Traversable, prefix: str) -> None:
         for child in sorted(node.iterdir(), key=lambda c: c.name):
@@ -93,12 +113,12 @@ def _package_files() -> list[tuple[str, bytes]]:
                 continue
             if rel.endswith(".py") or rel.startswith(tuple(d + "/" for d in ASSET_DIRS)):
                 try:
-                    out.append((rel, child.read_bytes()))
+                    out.append((rel, child.read_bytes(), _file_mode(child)))
                 except OSError as e:
                     raise WheelBuildError("file_unreadable", rel) from e
 
     walk(root, "")
-    have = {rel for rel, _ in out}
+    have = {rel for rel, _, _ in out}
     missing = [f for f in REQUIRED_FILES if f not in have]
     if missing:
         raise WheelBuildError("files_missing", ", ".join(missing))
@@ -135,13 +155,17 @@ def _dist_metadata(version: str) -> tuple[str, str, list[tuple[str, bytes]]]:
     return "\n".join(fixed) + "\n", entry_points, licenses
 
 
-def _zip(entries: Iterable[tuple[str, bytes]]) -> bytes:
+def _zip(entries: Iterable[tuple[str, bytes]], modes: dict[str, int]) -> bytes:
+    """결정적 zip. 항목은 정규 파일(`S_IFREG`)로 적는다.
+
+    pip 는 정규 파일일 때만 실행 비트를 본다.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name, data in entries:
             zi = zipfile.ZipInfo(name, date_time=ZIP_DATE_TIME)
             zi.compress_type = zipfile.ZIP_DEFLATED
-            zi.external_attr = 0o644 << 16
+            zi.external_attr = (stat.S_IFREG | modes.get(name, 0o644)) << 16
             zf.writestr(zi, data)
     return buf.getvalue()
 
@@ -151,7 +175,8 @@ def build_wheel(version: str) -> bytes:
     files = _package_files()
     metadata, entry_points, licenses = _dist_metadata(version)
     info = dist_info_name(version)
-    entries: list[tuple[str, bytes]] = [(f"{PACKAGE}/{rel}", data) for rel, data in files]
+    entries: list[tuple[str, bytes]] = [(f"{PACKAGE}/{rel}", data) for rel, data, _ in files]
+    modes = {f"{PACKAGE}/{rel}": mode for rel, _, mode in files}
     entries.append((f"{info}/METADATA", metadata.encode()))
     entries.append((f"{info}/entry_points.txt", entry_points.encode()))
     entries.append(
@@ -170,4 +195,4 @@ def build_wheel(version: str) -> bytes:
     record = "".join(f"{name},{_record_hash(data)},{len(data)}\n" for name, data in entries)
     record += f"{record_name},,\n"
     entries.append((record_name, record.encode()))
-    return _zip(entries)
+    return _zip(entries, modes)
