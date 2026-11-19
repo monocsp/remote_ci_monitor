@@ -511,7 +511,12 @@
     "conf.low": "low",
     "conf.overdue": "overdue",
     "conf.group_wait": "low · group wait",
-    "conf.measured": function (a) { return a.conf + " · measured n=" + a.n; },
+    // 배지는 짧게 — 152px 도착 칸에 한 줄로 들어가야 한다(`· measured n=12` 는 칸을 키웠다).
+    // 원래 뜻은 마우스 올림 툴팁(`conf.measured_title`)이 말한다.
+    "conf.measured": function (a) { return a.conf + " · n=" + a.n; },
+    "conf.measured_no_n": function (a) { return a.conf + " · n=" + a.dash; },
+    "conf.measured_title": function (a) { return a.conf + " confidence: median of " + a.n + " measured run" + (a.n === 1 ? "" : "s"); },
+    "conf.measured_no_n_title": function (a) { return a.conf + " confidence: median of measured runs (count unknown)"; },
     "conf.source": function (a) { return "low · " + a.source; },
     "conf.low_dash": function (a) { return "low · " + a.dash; },
     "eta.after": function (a) { return "after #" + a.id; },
@@ -1576,6 +1581,10 @@
     "conf.overdue": "예상 초과",
     "conf.group_wait": "낮음 · 그룹 대기",
     "conf.measured": function (a) { return a.conf + " · 최근 " + a.n + "회 기준"; },
+    // 개수를 모를 때는 오늘의 문구 그대로 — `measured` 는 `낮음 · measured` 처럼 근거의 이름이다
+    "conf.measured_no_n": function (a) { return a.conf + " · measured"; },
+    "conf.measured_title": function (a) { return "신뢰도 " + a.conf + ": 최근 실측 " + a.n + "회의 중앙값"; },
+    "conf.measured_no_n_title": function (a) { return "신뢰도 " + a.conf + ": 최근 실측의 중앙값 (횟수 모름)"; },
     "conf.source": function (a) { return "낮음 · " + a.source; },
     "conf.low_dash": function (a) { return "낮음 · " + a.dash; },
     "eta.after": function (a) { return "#" + a.id + " 다음"; },
