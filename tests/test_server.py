@@ -450,6 +450,43 @@ def test_pause_resume_admin_only_and_visible_in_status(live):
     assert live.wait_terminal(jid).state == "succeeded"
 
 
+def test_local_lane_that_passed_the_pause_check_does_not_claim_after_a_pause(tmp_path):
+    """레인은 `get_paused` 를 본 뒤 admit(부하 판정)을 거쳐 claim 한다. 그 틈에 정지 · 제출 ·
+    업로드가 끼면 옛 코드는 정지 중에 잡을 집었다(위 시험이 가끔 `succeeded` 를 본 원인). 틈을
+    이벤트로 벌려 결정적으로 재현한다. claim 이 트랜잭션 안에서 정지를 다시 봐야 잡이 queued 로
+    남는다."""
+    s = Server(tmp_path, workers=False)
+    entered, go = threading.Event(), threading.Event()
+    claimed = []
+    real_admit = s.app._admit_local
+
+    def admit_after_the_pause_check(lane, now, claim):
+        entered.set()
+        go.wait(20)
+        job, hold = real_admit(lane, now, claim)
+        claimed.append(job)
+        return job, hold
+
+    s.app._admit_local = admit_after_the_pause_check  # start() 가 레인에 넘기기 전에 바꾼다
+    try:
+        s.app.start()
+        assert entered.wait(10)  # 레인이 「정지 아님」을 읽고 admit 안에 서 있다
+        assert s.req("POST", "/pause", token="admin", json_body={})[0] == 200
+        jid = s.submit()[1]["job_id"]
+        assert s.upload(jid)[0] == 200
+        go.set()
+        deadline = time.monotonic() + 10
+        while not claimed and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert claimed and claimed[0] is None, claimed
+        assert s.store.get_job(jid).state == "queued"
+        assert s.req("POST", "/resume", token="admin", json_body={})[0] == 200
+        assert s.wait_terminal(jid).state == "succeeded"
+    finally:
+        go.set()
+        s.close()
+
+
 def test_status_schema_v1_shape_and_etag(srv):
     status, headers, raw = srv.req("GET", "/api/status", raw=True)
     assert status == 200 and headers["Content-Type"].startswith("application/json")

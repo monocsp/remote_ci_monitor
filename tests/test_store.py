@@ -304,6 +304,24 @@ def test_paused_state(store):
     assert store.get_paused() is None
 
 
+def test_claim_hands_out_nothing_while_paused(store):
+    """정지는 claim 트랜잭션 안에서 다시 본다. 호출자가 앞에서 `get_paused` 를 봤더라도 그 뒤에
+    걸린 정지가 이긴다. 로컬 레인 · 원격 워커(worker_name) · M5n claimant 세 꼴이 다 같다."""
+    from remote_ci_monitor.store import Claimant
+
+    j = enqueue(store)
+    store.set_paused("macmini-admin", at(1))
+    remote = Claimant(worker="build-02", pool="default", host_key=None, fingerprint_hash=None)
+    assert store.claim(1, at(2)) is None
+    assert store.claim(1, at(3), worker_name="build-02") is None
+    assert store.claim(1, at(4), claimant=remote) is None
+    got = store.get_job(j.id)
+    assert got.state == QUEUED and got.lane is None and got.started_at is None
+    assert [t.state for t in got.transitions] == [QUEUED]  # 집다 만 흔적도 없다
+    store.clear_paused()
+    assert store.claim(1, at(5), claimant=remote).id == j.id
+
+
 def test_abandon_stale_uploads_keeps_the_job_as_cancelled(store):
     fresh = enqueue(store, state=UPLOADING, now=at(0))
     store.update_received(fresh.id, 10, at(290))

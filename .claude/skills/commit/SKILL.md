@@ -25,7 +25,9 @@ the seven rules of [cbea.ms/git-commit](https://cbea.ms/git-commit/) and Google'
 
 The body and the summary are Korean (house rule: identifiers, CLI help and docs in English;
 everything written *about* the code in Korean). Identifiers, keys, commands and SHAs stay as they
-are.
+are. Write that Korean with the `korean-writing` skill (`.claude/skills/korean-writing/SKILL.md`):
+load it before you write the summary and the body. It does not change the header shape above or
+what `tools/guard_naming.py` checks; the ` — ` in the summary is a format the skill exempts.
 
 | bad | good |
 |---|---|
@@ -59,23 +61,26 @@ given.
 
 1. `git status` and `git diff --staged`: is this **one** change? Split otherwise (Kubernetes:
    "layers → don't squash; sausage → squash").
-2. Write the header; check it: `python3 tools/guard_naming.py commit "<header>"`.
-3. Commit with a heredoc so the body keeps its lines:
+2. Load the `korean-writing` skill, then write the summary and the body by its rules and run its
+   pre-output check (§6) on them.
+3. Write the header; check it: `python3 tools/guard_naming.py commit "<header>"`.
+4. Commit with a heredoc so the body keeps its lines:
    ```sh
    git commit -m "$(cat <<'EOF'
    fix(web): 호스트 카드가 정의 안 된 local 을 읽던 것
 
-   `hostCardHtml` 이 `local` 을 참조해 render() 마다 ReferenceError 가 났고, 그래서
-   최근 목록이 안 그려지고 30초 뒤 「연결이 끊겼습니다」 띠가 떴다(2026-09-10 실배치
-   재현, docs/m5i-workplan.md §3 B1). 로컬 표본은 source == "local" 이다.
+   `hostCardHtml` 이 `local` 을 참조해 render() 마다 ReferenceError 가 났다.
+   그래서 최근 목록이 안 그려지고 30초 뒤 「연결이 끊겼습니다」 띠가 떴다.
+   2026-09-10 실배치에서 재현했다(docs/m5i-workplan.md §3 B1). 로컬 표본은
+   source == "local" 이다.
 
-   테스트: tests/test_web_browser.py 의 표본에 disk 와 job_storage 를 넣어 카드 문구와
-   콘솔 예외 0건을 단언한다 — 고치기 전에는 빨갛다.
+   테스트: tests/test_web_browser.py 의 표본에 disk 와 job_storage 를 넣어 카드
+   문구와 콘솔 예외 0건을 단언한다. 고치기 전에는 빨갛다.
 
    Refs: #80
    Co-Authored-By: …
    EOF
    )"
    ```
-4. Fixing review feedback: `git commit --fixup <sha>` and squash before merge, or a new
+5. Fixing review feedback: `git commit --fixup <sha>` and squash before merge, or a new
    `fix(...)` commit when it is a separate change. Never rewrite a commit that is already merged.

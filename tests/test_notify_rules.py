@@ -80,6 +80,8 @@ ENV_KEYS = {
     # M5o 결정 119 — 실패 이름(줄바꿈 · 20개)과 그 총수
     "RCM_FAILURES",
     "RCM_FAILURE_COUNT",
+    # M5p 결정 144 — keep 인 잡의 보관함 링크(아니면 빈 값)
+    "RCM_SHELF_URL",
 }
 
 

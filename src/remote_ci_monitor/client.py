@@ -472,10 +472,27 @@ class _Reader:
         return self.total
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """3xx 를 따라가지 않는다 — 응답은 `HTTPError(3xx)` 로 올라온다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_NO_REDIRECT = urllib.request.build_opener(_NoRedirect)
+
+
 class Client:
     cache_supported: bool | None = None  # 마지막 submit 응답의 cache 플래그(모르면 None)
 
-    def __init__(self, server: str, token: str | None = None, *, timeout: float = 15.0):
+    def __init__(
+        self,
+        server: str,
+        token: str | None = None,
+        *,
+        timeout: float = 15.0,
+        follow_redirects: bool = True,
+    ):
         if not server:
             raise ClientError(0, "no server configured (use --server, RCM_SERVER or client.toml)")
         if "://" not in server:
@@ -483,6 +500,15 @@ class Client:
         self.server = server.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # `rcm shelf get` 은 남의 서버 주소도 받는다 — 그 서버가 다른 곳으로 보내도 따라가지
+        # 않는다(M5p §16). 나머지 명령은 오늘 그대로다
+        self.follow_redirects = follow_redirects
+
+    def _open(self, req: urllib.request.Request, *, timeout: float) -> Any:
+        # 부를 때마다 고른다 — 시험이 `urllib.request.urlopen` 을 갈아 끼우는 자리를 지킨다
+        if self.follow_redirects:
+            return urllib.request.urlopen(req, timeout=timeout)
+        return _NO_REDIRECT.open(req, timeout=timeout)
 
     def _request(
         self,
@@ -517,7 +543,7 @@ class Client:
             headers["Content-Length"] = "0"
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+            with self._open(req, timeout=timeout or self.timeout) as resp:
                 return resp.status, dict(resp.headers), resp.read()
         except urllib.error.HTTPError as e:
             payload = e.read()
@@ -588,6 +614,56 @@ class Client:
         part.replace(dest)
         return received
 
+    def download(
+        self, path: str, dest: Path, *, timeout: float | None = None, max_bytes: int | None = None
+    ) -> int:
+        """`GET <path>` 의 바이트를 `dest` 에 흘려 받는다(보관함 파일 · zip, M5p §16).
+        받은 바이트 수를 돌려준다.
+
+        토큰은 있을 때만 싣는다(보관함은 읽기 규칙이다). `Content-Length` 와 다르면 `ClientError`
+        — 잘린 파일을 쓰지 않는다. 리다이렉트는 이 클라이언트의 규칙을 따른다. `max_bytes` 를
+        넘으면(선언이든 실제든) 그 자리에서 멈추고 본문 `{"too_big": true}` 의 `ClientError`."""
+        headers = {"User-Agent": f"rcm/{__version__}"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(self.server + path, method="GET", headers=headers)
+        received = 0
+        try:
+            with self._open(req, timeout=timeout or max(self.timeout, 60.0)) as resp:
+                raw = resp.headers.get("Content-Length")
+                expected = int(raw) if raw else None
+                if max_bytes is not None and expected is not None and expected > max_bytes:
+                    raise ClientError(
+                        0, f"download bigger than {max_bytes} bytes", {"too_big": True}
+                    )
+                with dest.open("wb") as fh:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if max_bytes is not None and received > max_bytes:
+                            raise ClientError(
+                                0, f"download bigger than {max_bytes} bytes", {"too_big": True}
+                            )
+                        fh.write(chunk)
+        except urllib.error.HTTPError as e:
+            payload = e.read()
+            try:
+                parsed = json.loads(payload) if payload else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            msg = parsed.get("error") if isinstance(parsed, dict) else None
+            raise ClientError(
+                e.code, msg or f"HTTP {e.code}", parsed if isinstance(parsed, dict) else {}
+            ) from e
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            reason = getattr(e, "reason", None) or e
+            raise ClientError(0, f"cannot reach {self.server}: {reason}") from e
+        if expected is not None and received != expected:
+            raise ClientError(0, f"download incomplete: {received} of {expected} bytes")
+        return received
+
     def get_json(self, path: str, *, timeout: float | None = None) -> Any:
         _, _, body = self._request("GET", path, timeout=timeout)
         return json.loads(body) if body else None
@@ -621,9 +697,14 @@ class Client:
     def status(self) -> dict[str, Any]:
         return self.get_json("/api/status")
 
-    def presets(self) -> dict[str, Preset]:
+    def preset_docs(self) -> list[dict[str, Any]]:
+        """`/api/status.presets[]` 그대로. `Preset` 으로 옮기면 사라지는 칸(M5p 의 `has_artifacts` ·
+        `keep`)을 `rcm run` 이 제출 전에 읽는다."""
         doc = self.status()
-        return {p["name"]: preset_from_json(p) for p in doc.get("presets", [])}
+        return [p for p in doc.get("presets", []) if isinstance(p, dict)]
+
+    def presets(self) -> dict[str, Preset]:
+        return {p["name"]: preset_from_json(p) for p in self.preset_docs()}
 
     def submit(
         self,
@@ -639,8 +720,13 @@ class Client:
         link_label: str | None = None,
         machine: str | None = None,
         supersede: bool = True,
+        keep: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
+        # 보관함(M5p 결정 126). 켤 때만 싣는다 — 옛 서버는 모르는 키를 **무시**하므로 부르는 쪽이
+        # 먼저 health 의 `shelf` 키로 서버가 안다는 것을 확인한다(`cli.cmd_run`, 결정 143)
+        if keep:
+            body["keep"] = True
         # 끌 때만 싣는다(M5o 결정 116) — 켜는 길은 없고, 옛 서버는 모르는 키를 무시한다
         if not supersede:
             body["supersede"] = False

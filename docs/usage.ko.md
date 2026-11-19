@@ -282,6 +282,55 @@ rcm artifacts 412                          # 무엇이 있나
 rcm artifacts 412 --fetch --output ./out   # 지정한 디렉터리에 쓴다
 ```
 
+### 오래 두기: 보관함
+
+묶음은 길어야 하루 산다. 다음 주에 그 파일을 다시 보거나 폰에서 열고 싶으면 그 작업을 서버의
+보관함에 넣는다.
+
+```sh
+rcm run golden-update --keep
+```
+
+```
+#412 succeeded · 12 goldens updated
+shelf: http://macmini.local:8787/shelf/412/
+```
+
+1. 같은 네트워크(또는 Tailscale)의 아무 브라우저에서 링크를 연다. 작업 정보, 그림, 파일 표가
+   보이고 *zip 으로 받기* 로 전부 받는다. 토큰은 필요 없다.
+2. 프리셋에 `keep = true` 가 있으면 늘 보관한다. `--keep` 은 `artifacts` 를 선언한 프리셋이면
+   그 작업 하나만 보관한다.
+3. `rcm keep 412` 는 이미 끝난 작업을 보관한다. 묶음이 아직 남아 있을 때만 된다.
+   `--fetch-artifacts` 로 받은 작업은 받는 순간 묶음이 지워지므로 처음부터 --keep 을 붙인다(두
+   플래그를 같이 써도 된다).
+4. `/shelf/latest/golden-update?branch=dev` 는 늘 `dev` 의 가장 최근 golden-update 보관 항목을
+   연다. 북마크해 두면 된다.
+5. 손으로 치울 것은 없다. 여섯 달 동안 아무도 열지 않은 항목은 *정리 대기* 로 옮겨 가고, 1년
+   동안 쓰지 않으면 지워진다. 열거나 받거나 *되살리기* 를 누르면 시계가 다시 돈다. `rcm shelf` 는
+   목록을 보이고, `rcm shelf rm 412`(관리자)는 그 자리에서 지운다.
+
+서버에 닿는 사람은 누구나 보관함을 열 수 있다. 그러니 `artifacts` 에 비밀을 넣지 않는다
+([누가 여나](configuration.md#keeping-a-jobs-files-the-shelf)).
+
+스크립트에서는 `--keep --no-wait` 로 내고 출력에서 링크를 읽는다. 나중에 어느 컴퓨터에서든 토큰 없이
+그 파일을 다시 받는다.
+
+```sh
+rcm run app-map-shots --keep --no-wait
+# submitted job #412 queued · …
+# fetch its artifacts later with `rcm artifacts 412 --fetch --output DIR`
+# shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)
+rcm wait --job 412
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .
+rcm shelf get --latest app-map-shots --branch dev --output .
+curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # 같은 내용을 JSON 으로
+```
+
+경로는 보관할 때 그대로 붙는다. 그래서 프로젝트 폴더에서 `--output .` 을 주면 작업이 만든 자리에
+그대로 풀린다. `rcm shelf get` 은 파일마다 sha256 을 대조하고, 하나라도 다르면 아무것도 쓰지 않는다. 프리셋에
+`keep = true` 를 넣는 일은 서버가 v0.7.0 으로 오른 뒤에만 한다. 옛 서버는 그 키를 거절한다
+([스크립트에서 쓰기](configuration.md#using-the-shelf-from-a-script)).
+
 ## 9. 한 화면으로 보는 큐
 
 `rcm top` 은 터미널 하나에 띄워 두는 명령이다.
@@ -334,8 +383,9 @@ rcm artifacts 412 --fetch --output ./out   # 지정한 디렉터리에 쓴다
    오른다. 멈춰 있다가 새로고침 때 한 번에 뛰지 않는다. 로그 꼬리와 **로그** 버튼도 같은 블록에
    있다. **취소**는 여기 숨지 않는다 — 접힌 행에 그대로 있어서 폭주하는 작업을 한 번에 세운다.
 6. **기다리는 작업**과 큐에서의 순번.
-7. **ETA 와 confidence.** `high` 는 실제 5회 이상의 중앙값, `low` 는 프리셋 기반 추측, `—` 는
-   모른다는 뜻이다. 아는 척하지 않는다.
+7. **ETA 와 confidence.** `high` 는 실제 5회 이상의 중앙값이고 `n=12` 가 그 횟수다(배지에
+   마우스를 올리면 문장으로 나온다). `low` 는 프리셋 기반 추측, `—` 는 모른다는 뜻이다. 아는 척하지
+   않는다.
 8. **다른 풀.** 자기 워커와 자기 큐를 갖는다. **코드 출처** 칸에는 커밋만 남는다 — 저장소 주소는
    행마다 같은 값이 되풀이되므로 펼친 블록에 있다.
 

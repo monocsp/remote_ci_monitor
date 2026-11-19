@@ -397,6 +397,14 @@ and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
 - The web UI keeps your client token in the browser's `localStorage` (never in the URL). Do not
   paste it into a shared or public browser; a cross-site-scripting bug would expose it, which is why
   the page ships with a strict Content-Security-Policy and loads nothing from third parties.
+- The shelf (`/shelf/`) is read **without a token**: a kept job's files open in any browser that
+  reaches the server, on the LAN and over Tailscale. Keep secrets out of `artifacts` for any job
+  that may be kept. `read_auth = "basic"` covers the shelf as well. It answers only a `Host` that
+  names this machine (local names, private and Tailscale addresses, `public_url`, the bind
+  address, the hostname) and 421 to anything else, so a page elsewhere cannot read it through DNS
+  rebinding. A job's files are served sandboxed: only images and plain text open inline, and
+  nothing a job wrote can reach the token the web UI keeps. Removing an item takes an admin token
+  ([configuration](configuration.md#keeping-a-jobs-files-the-shelf)).
 
 ### `read_auth = "basic"` — password-protect reads
 
@@ -458,6 +466,15 @@ and nobody else joined that job. Deleting is reported only after the files are a
 failed unlink leaves the bundle counted and tries again on the next sweep, and a download already
 in flight finishes even if the bundle expires mid-transfer.
 
+**The shelf keeps its own clock too.** A kept item stays until nobody has used it for
+`shelf_stale_days` (182, then *cleanup pending*) and `shelf_delete_days` (365, then deleted) —
+the retention days above never touch it, and it outlives the job row. `rcm gc` does not touch the
+shelf; `rcm gc --dry-run` adds one line saying what the next sweep would mark and remove. The first
+start of v0.7.0 migrates the database to v24 and leaves `backup/rcm.sqlite3.v23.bak`; add
+`keep = true` to presets only after that, because an older build refuses the key. Put
+`shelf_dir` on another disk if you do not want kept files to count against the free-space floor
+that clears workspaces ([configuration](configuration.md#keeping-a-jobs-files-the-shelf)).
+
 `/api/status` carries `server.artifact_storage` — `stored_bytes`, `reserved_bytes` and
 `limit_bytes` (`artifact_storage_max_bytes`, 10 GiB). When the server is full it refuses **new**
 bundles rather than evicting bundles somebody is still waiting for; the affected jobs say
@@ -465,7 +482,8 @@ bundles rather than evicting bundles somebody is still waiting for; the affected
 
 ## Why the numbers can be wrong
 
-- ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs.
+- ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs
+  (the web badge says `high · n=7` and spells it out on hover).
 - A job sharing the machine with another job takes longer than a median measured from runs that
   had it alone, so the confidence badge drops one step while that is true. The estimate itself is
   not padded — a guessed slowdown factor would be a number nobody measured.

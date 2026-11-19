@@ -7,6 +7,79 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
+### Breaking changes
+- **Database schema v24 — the shelf.** `jobs` gains `keep` (frozen when a job is submitted) and a
+  `shelf_items` table holds what is kept, with its own copy of the job's preset, inputs, branch
+  and commit so an item outlives the job row. A v23 file is backed up
+  (`backup/rcm.sqlite3.v23.bak`) and migrated on start; an older build refuses a v24 file and
+  points at that backup. Presets refuse unknown keys, so add `keep = true` to a preset only after
+  the server runs this version. ([#217](https://github.com/monocsp/remote_ci_monitor/pull/217))
+
+### Added
+- **A job's files can stay on the server and open in any browser: the shelf.** `rcm run --keep`
+  (or `keep = true` on a preset, or `rcm keep N` while the job's bundle still exists) copies the
+  job's artifacts into a folder on the build machine and prints a link,
+  `shelf: http://macmini.local:8787/shelf/412/`. Anyone on the same network or tailnet opens it
+  without a token: the job's details, its images (a `.tar.gz` of goldens is unpacked next to
+  itself so the pictures show), a file table and a zip of everything. `/shelf/` lists the shelf
+  and `/shelf/latest/<preset>?branch=dev` always opens the newest one. An item nobody used for
+  `shelf_stale_days` (182) moves to cleanup pending, and one unused for `shelf_delete_days` (365)
+  is deleted; opening, downloading or *Restore* starts its clock again. `rcm shelf` lists it from
+  the terminal, `rcm shelf get N|URL --output DIR` (or `--latest PRESET`) downloads a kept job's
+  files again from any computer without a token and checks each sha256, and `rcm shelf rm N`
+  removes an item (admin). `rcm run --keep --no-wait` prints `shelf: <link>` and puts
+  `shelf_url` in its JSON, for scripts. Notifications of a kept job carry
+  `RCM_SHELF_URL` and a webhook's top-level `shelf_url`; `rcm check` has a `shelf` row (usage
+  against `shelf_max_bytes`, warns past 90%, fails when the shelf's disk is missing) and, with
+  `--config`, a `local shelf` row that counts folders the database does not know; `rcm gc
+  --dry-run` says what the next sweep would do to the shelf. The web UI shows `shelf ↗` under a
+  kept job's recent row, a remove button with a token, and a Shelf link in the header. Reading
+  the shelf needs no token, so do not put secrets in artifacts. `rcm run --keep` against an older
+  server stops before it sends anything.
+  ([#220](https://github.com/monocsp/remote_ci_monitor/pull/220),
+  [#221](https://github.com/monocsp/remote_ci_monitor/pull/221))
+
+### Changed
+- **The web queue's English confidence badge is shorter.** `high · measured n=12` became
+  `high · n=12`, and hovering the badge spells it out (`high confidence: median of 12 measured
+  runs`). The long badge made the arrival column wider than its fixed 152 px, and every time the
+  sample count gained a digit the table re-divided its columns and the rows shifted. The Korean
+  badge (`높음 · 최근 12회 기준`) fits and keeps its text; it gets the same tooltip. `rcm top` and
+  `rcm eta` still print `measured n=12`.
+  ([#212](https://github.com/monocsp/remote_ci_monitor/pull/212))
+- **The store skill's candidate helper follows `include`.** `rcm_candidate.py` (installed by
+  `rcm-store-connect`) pasted a project's presets at the end of `server.toml`. With presets moved
+  to an included file that made a candidate rcm refuses (`preset 'gate' is defined in both`), and
+  the candidate, written to a temporary folder, lost its relative include paths (`included file
+  not found`). When `server.toml` starts with `include = [...]` and the presets file has the
+  same name as an included file (or `--into <entry>` names one), the helper now merges the
+  presets into a copy of that file, keeps `server.toml` for the profile, and writes both to a
+  candidate folder (`--out` names a new or empty folder there; it never overwrites a file) with
+  the other include entries as absolute paths, so `--check` reads the same files. Reading
+  `include` needs Python 3.11 or later; an older `python3` stops with that message instead of
+  pasting. A name also defined in `server.toml` or another included file stops it with both file
+  names; `--check` refuses an `rcm` older than 0.6.0; the next steps it prints are the two copies
+  and `rcm reload --dry-run` → `rcm reload`. A `server.toml` without `include` gets
+  byte-for-byte the same candidate as before. Projects get it with
+  `rcm skills install --into . --force` after upgrading rcm.
+  ([#213](https://github.com/monocsp/remote_ci_monitor/pull/213))
+
+### Fixed
+- **The client wheel the server hands out now carries the packaged skills.** It shipped only the
+  `.py` files under `skills/`, so a client installed from `/client/…whl` printed three of the five
+  skills without a description in `rcm skills list`, and `rcm skills install` wrote no `SKILL.md`
+  and no shell or TOML template (15 files). The wheel now holds the same files as the release wheel,
+  with the same executable bits.
+  ([#219](https://github.com/monocsp/remote_ci_monitor/pull/219))
+- **A pause now stops a claim that was already on its way.** A local lane or a remote worker
+  checked the pause, then went through the load gate, then claimed; a pause, submit and upload
+  landing in between started the job while the server was paused, so a deploy that pauses,
+  waits for zero running jobs and restarts could turn that job into `lost`. The claim now reads
+  the pause in the same transaction and takes nothing while it is set.
+  ([#222](https://github.com/monocsp/remote_ci_monitor/pull/222))
+
 ## [0.6.1] - 2026-11-19
 
 ### Fixed
@@ -1737,7 +1810,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.0...v0.5.1

@@ -192,6 +192,8 @@ class Preset:
     #: 새 잡이 큐에 들어올 때 같은 브랜치의 옛 잡을 치우나(M5o 결정 109·110) —
     #: `off`(기본, 오늘 그대로) · `waiting`(기다리는 잡만) · `all`(도는 잡도). `core/supersede.py`
     supersede: str = "off"
+    #: 끝나면 산출물을 보관함에 넣나(M5p 결정 126). 제출 때 잡에 얼린다 — `artifacts` 가 있어야 한다
+    keep: bool = False
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -311,6 +313,9 @@ class Job:
     host_key: str | None = None  # 집은 워커의 호스트(claim 때 박는다)
     fingerprint_hash: str | None = None  # 집은 워커의 그때 지문
     sample: bool = True  # 추정 표본에 넣나(점검 · 예열 잡은 False)
+    #: M5p(v24) — 끝나면 산출물을 보관함에 넣나. 제출 때 얼린다(프리셋 keep OR 제출 keep).
+    #: reload · 재시작에 바뀌지 않고, 합류와 supersede 로 켜질 수만 있다(결정 127 · 128)
+    keep: bool = False
 
     @property
     def is_waiting(self) -> bool:
@@ -329,6 +334,40 @@ class Job:
         if self.requester.name == token_name:
             return True
         return any(j.name == token_name for j in self.joiners)
+
+
+@dataclass(frozen=True)
+class ShelfItem:
+    """보관함 항목 하나 — `shelf_items` 표의 한 행 그대로(M5p §5.1 · §15.3).
+
+    잡 행보다 오래 산다(잡 행은 180일에 지워진다). 그래서 페이지에 필요한 잡의 열을 **복사해
+    들고 있다**. 시각은 전부 epoch 초(float)다 — 순수 규칙(`core/shelf.py`)이 그대로 받는다.
+    `sha` 는 git_ref 면 커밋, tree 면 트리 해시다(`source_mode` 로 가른다). `requester` 는
+    사람이 읽는 이름(`requester_label`)이다.
+    """
+
+    job_id: int
+    state: str  # pending | copying | active | stale | failed | deleted
+    preset: str
+    inputs_json: str | None
+    repo: str | None
+    branch: str | None
+    sha: str | None
+    source_mode: str | None
+    requester: str | None
+    job_state: str | None  # 잡이 끝났을 때만 채운다(원격 잡은 묶음이 끝나기 전에 행이 선다)
+    job_finished_at: float | None
+    requested_at: float
+    shelved_at: float | None
+    last_used_at: float | None  # 시계 — 이 값 하나로 정리 대기와 삭제를 잰다(결정 131)
+    stale_since: float | None
+    deleted_at: float | None
+    file_count: int | None
+    total_bytes: int | None
+    reason_code: str | None
+    reason_args: dict[str, Any] | None
+    error_code: str | None
+    failed_at: float | None  # 실패 행의 30일은 여기서 잰다(§15.3)
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,17 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5p P2 — `shelf-*` 넷: 파일 응답에서 `sandbox` CSP 를 뺌 · 퍼센트 디코딩 뒤의 경로 검사를 뺌 ·
+     보관함 zip 이 M5e 전송 슬롯을 같이 씀 · Host 허용 목록을 건너뜀
+     (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-b.md`)
+  M5p P1 — `shelf-*` 넷: 보관 항목을 지우기 **전에** deleted 로 표시 · 1시간 쓰기 규칙 제거 · 보관
+     중인 묶음의 ack 를 미루지 않음 · keep 을 켤 때 ready 묶음의 보관 행을 안 세움
+     (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-a.md`)
+  M5p P3 — `shelf-health-detection-removed`(옛 서버에 `--keep` 을 그냥 보냄) ·
+     `notify-shelf-url-dropped`(알림 env 에서 `RCM_SHELF_URL` 이 빠짐) · `shelf-wait-skipped`(보관
+     대기 0초) · `web-shelf-link-absolute`(SPA 보관함 링크가 행의 절대 URL 을 씀) ·
+     `shelf-get-skips-sha256`(`rcm shelf get` 이 해시를 안 봄, §16)
+     (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -82,9 +93,15 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      막대를 100% 로 채움: 아직 도는 잡이 「끝났다」로 읽힌다 (`web/app.js`, node --test)
   ㉞ progress-sub-not-reset-by-step — 새 `::rcm::step::` 이 앞 스텝의 세부 진행을 안 비움: 다음
      스텝이 지난 스텝의 41/68 을 달고 돈다 (`core/progress.py`)
+  M5q A0 — `client-wheel-drops-skills`: 서버가 조립하는 클라이언트 wheel 의 `ASSET_DIRS` 에서
+     `skills` 를 뺌 — `SKILL.md` · 셸 템플릿 15개가 빠진다 (`clientwheel.py`, 결정 167 ·
+     0.6.1 의 결함)
   ㉟ version-settle-ignores-what-is-still-running — 버전 행을 내려놓을 때 **무엇이 아직 도는지**
      안 봄: 회차가 스토어에 올리는 중인데 손으로 낸 잡이 먼저 끝나면 행이 `editing` 이 되어
      «버리기» 가 열린다 (`server.py`, 워크플랜 §14-2 — 그 버리기는 App Store 버전을 지운다)
+  ㊱ claim-ignores-pause — claim 트랜잭션 안의 정지 검사를 뺌: `get_paused` 확인 뒤 · claim 전에
+     걸린 정지를 놓쳐 정지 중에 잡을 집는다 (`store.py`, 2026-11-19 — 배포의 「정지 → 도는 잡 0
+     확인 → 재시작」 직후 잡이 시작돼 lost 가 된다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -131,6 +148,157 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5p P2 — 보관함의 서버 · HTTP · 보안 (docs/m5p-workplan.md §10) ──
+    Mutant(
+        # 잡이 만든 파일이 웹 UI 와 같은 출처의 진짜 문서가 된다 — `.html` 하나가 토큰을 읽는다
+        # (결정 139)
+        name="shelf-file-csp-no-sandbox",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old="""FILE_CSP = "sandbox; default-src 'none'; """,
+        new="""FILE_CSP = "default-src 'none'; """,
+        tests=(
+            "tests/test_server_m5p_security.py::test_e15_e16_active_documents_are_downloads",
+            "tests/test_server_m5p.py::test_b3_an_image_is_served_inline_inside_a_sandbox",
+        ),
+    ),
+    Mutant(
+        # 디코딩 뒤 검사 제거 — 라우터의 `..` 검사는 디코딩 전 글자를 보므로 `%2e%2e` 가 지나간다.
+        # manifest 가 마지막 문이지만 「안전하지 않은 경로는 400」이 사라진다(§4.6 · E1)
+        name="shelf-path-check-before-decode",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old=(
+            "        if not shelf_rules.safe_member(rel):\n"
+            '            raise ApiError(400, "bad path")\n'
+        ),
+        new="",
+        tests=(
+            "tests/test_server_m5p_security.py::test_e1_to_e7_unsafe_paths_after_decoding_are_400",
+        ),
+    ),
+    Mutant(
+        # 보관함 zip 이 M5e 전송 슬롯(2)을 같이 쓴다 — 내려받기 둘이 원격 keep 잡의 묶음 업로드를
+        # 503 으로 막고, 워커는 그 503 을 다시 시도하지 않는다(결정 148 · 검토 P0-4)
+        name="shelf-zip-uses-m5e-slots",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old="        self.shelf_slots = threading.BoundedSemaphore(SHELF_TRANSFER_SLOTS)\n",
+        new="        self.shelf_slots = self.transfer_slots  # type: ignore[attr-defined]\n",
+        tests=("tests/test_server_m5p_remote.py::test_b9_shelf_zips_never_take_the_upload_slots",),
+    ),
+    Mutant(
+        # Host 허용 목록을 건너뜀 — DNS 재바인딩으로 외부 웹페이지가 보관 파일을 읽는다(결정 148)
+        name="shelf-host-allowlist-skipped",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old="        if self._token() is None and not app.shelf_host_ok(host):",
+        new="        if False:",
+        tests=(
+            "tests/test_server_m5p_security.py::test_e22_a_foreign_host_gets_421_on_every_shelf_route",
+        ),
+    ),
+    # ── M5q A0 — 서버 wheel 이 릴리스 wheel 과 같은 파일을 싣는다 (`docs/m5q-workplan.md` §6 S1) ──
+    Mutant(
+        # skills 를 다시 뺀다 — 서버 wheel 로 깐 클라이언트의 `rcm skills` 가 SKILL.md 를 못 쓴다
+        name="client-wheel-drops-skills",
+        path="src/remote_ci_monitor/clientwheel.py",
+        old='ASSET_DIRS = ("web", "templates", "skills")',
+        new='ASSET_DIRS = ("web", "templates")',
+        tests=(
+            "tests/test_client_wheel.py::"
+            "test_s1_the_wheel_carries_every_file_of_the_package_folder",
+        ),
+    ),
+    # ── M5p P1 — 보관함의 규칙 · 저장 · 청소 (docs/m5p-workplan.md §10) ──
+    Mutant(
+        # 행을 먼저 deleted 로 — 지우다 실패하면 폴더는 남았는데 색인은 「지웠다」(결정 134)
+        name="shelf-mark-before-delete",
+        path="src/remote_ci_monitor/janitor.py",
+        old="""        try:
+            remove_under_root(folder, root)
+        except OSError as e:
+            code = f"delete_{_errname(e)}"
+""",
+        new="""        self.store.mark_shelf(
+            job_id, shelf_rules.STATE_DELETED, now, only_from=live, total_bytes=0
+        )
+        try:
+            remove_under_root(folder, root)
+        except OSError as e:
+            code = f"delete_{_errname(e)}"
+""",
+        tests=("tests/test_janitor_m5p.py",),
+    ),
+    Mutant(
+        # 1시간 규칙 제거 — 그림 격자 한 장마다 DB 쓰기가 나간다(§4.3 · 결정 132)
+        name="shelf-touch-every-time",
+        path="src/remote_ci_monitor/core/shelf.py",
+        old="    return float(now) - float(prev_last_used) >= TOUCH_INTERVAL_SECONDS\n",
+        new="    return True\n",
+        tests=("tests/test_shelf_rules.py", "tests/test_store_m5p.py"),
+    ),
+    Mutant(
+        # ack 미루기 제거 — 소유자가 받자마자 ack 하면 보관이 빈손이 된다(결정 130)
+        name="shelf-ack-not-deferred",
+        path="src/remote_ci_monitor/store.py",
+        old="            if decision.purge and self._shelving(conn, job_id):\n",
+        new="            if False:\n",
+        tests=("tests/test_store_m5p.py",),
+    ),
+    Mutant(
+        # keep 을 켤 때 ready 묶음을 안 본다 — 원격 잡의 ready 와 finish 사이에 켠 keep 은 행이
+        # 영영 안 선다(§15.1 · A102 · A103)
+        name="shelf-keep-on-skips-ready-bundle",
+        path="src/remote_ci_monitor/store.py",
+        old="        if _ready_bundle(conn, job_id):\n",
+        new="        if False:\n",
+        tests=("tests/test_store_m5p.py",),
+    ),
+    # ── M5p P3 — CLI · 웹 SPA · 알림 (docs/m5p-workplan.md §10) ──
+    Mutant(
+        # 옛 서버는 모르는 `keep` 을 거절하지 않고 무시한다 — 감지를 빼면 세션은 오지 않을 링크를
+        # 기다린다(결정 143 · 검토 P0-3)
+        name="shelf-health-detection-removed",
+        path="src/remote_ci_monitor/cli.py",
+        old='    if not isinstance(h, dict) or "shelf" not in h:\n'
+        '        return f"server does not support --keep ({SHELF_SINCE})"\n',
+        new='    if False:\n        return f"server does not support --keep ({SHELF_SINCE})"\n',
+        tests=("tests/test_cli_m5p.py",),
+    ),
+    Mutant(
+        # 알림 훅이 보관함 링크를 못 받는다(결정 144)
+        name="notify-shelf-url-dropped",
+        path="src/remote_ci_monitor/core/notify.py",
+        old='        "RCM_SHELF_URL": sanitize_text(shelf_url),\n',
+        new="",
+        tests=("tests/test_notify_shelf_m5p.py", "tests/test_notify_rules.py"),
+    ),
+    Mutant(
+        # 보관 대기를 0초로 — 복사가 몇 초 걸리는 평범한 잡이 늘 「still copying」 이 된다(결정 143)
+        name="shelf-wait-skipped",
+        path="src/remote_ci_monitor/cli.py",
+        old="    deadline = time.monotonic() + SHELF_WAIT_SECONDS\n",
+        new="    deadline = time.monotonic()\n",
+        tests=("tests/test_cli_m5p.py",),
+    ),
+    Mutant(
+        # SPA 링크가 public_url 로 만든 절대 주소를 쓴다 — 브라우저가 연 호스트와 다르면 다른
+        # 출처로 간다(CG30 · 결정 148)
+        name="web-shelf-link-absolute",
+        path="src/remote_ci_monitor/web/app.js",
+        old='return { text: text, href: shelfHref("/shelf/" + id + "/", lang), cls: s.state };',
+        new="return { text: text, href: s.url, cls: s.state };",
+        tests=("tests/web/shelf.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # `rcm shelf get` 이 받은 파일의 sha256 을 안 본다 — 잘리거나 바뀐 파일이 그대로 쓰인다(§16)
+        name="shelf-get-skips-sha256",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "            if not isinstance(want, str) or "
+            "_sha256_file(files / path) != want.lower():\n"
+        ),
+        new="            if not isinstance(want, str):\n",
+        tests=("tests/test_cli_m5p_get.py",),
+    ),
     # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
     Mutant(
         # 합류자 이름 검사 제거 — 다른 사람이 기다리는 잡을 내 push 가 죽인다(결정 113)
@@ -246,6 +414,15 @@ MUTANTS = (
             "                with self._fresh_claims_lock:\n"
         ),
         tests=("tests/test_worker_api.py",),
+    ),
+    # ── claim 이 정지를 같은 트랜잭션에서 다시 본다(2026-11-19, 정지 중 집기) ──
+    Mutant(
+        # 정지 검사가 없다 — 호출자의 `get_paused` 뒤에 걸린 정지를 놓치고 잡을 집는다
+        name="claim-ignores-pause",
+        path="src/remote_ci_monitor/store.py",
+        old="            if conn.execute(_PAUSED_SQL).fetchone() is not None:\n",
+        new="            if False:\n",
+        tests=("tests/test_store.py",),
     ),
     # ── M5n — 머신의 능력과 배치(docs/m5n-workplan.md §15) ──
     Mutant(
@@ -583,12 +760,30 @@ MUTANTS = (
                     "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
                     (job_id, name, seq),
                 )
+            # 원격 잡의 보관 행은 묶음이 ready 일 때(잡이 아직 running 일 때) 섰다 — 잡 상태와 끝난
+            # 시각은 위의 `_set_state` 가 같은 트랜잭션에서 채웠다(M5p §15.1).
             if bundle is not None:
-                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+                _upsert_bundle(
+                    conn,
+                    job_id,
+                    bundle,
+                    now=now,
+                    ttl_hours=ttl_hours,
+                    shelf_enabled=self.shelf_enabled,
+                    shelf_available=self.shelf_available,
+                )
             conn.execute("COMMIT")
 """,
         new="""            if bundle is not None:
-                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+                _upsert_bundle(
+                    conn,
+                    job_id,
+                    bundle,
+                    now=now,
+                    ttl_hours=ttl_hours,
+                    shelf_enabled=self.shelf_enabled,
+                    shelf_available=self.shelf_available,
+                )
             conn.execute("COMMIT")
             for seq, name in enumerate(fail_names, start=1):
                 conn.execute(

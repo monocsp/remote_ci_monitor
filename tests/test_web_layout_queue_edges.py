@@ -810,6 +810,104 @@ def test_rows_keep_their_height_through_ticks_and_updates(tmp_path, page_now):
     )
 
 
+# ── 신뢰도 배지: 표본 수의 자릿수가 도착 칸을 키우지 않는다 ───────────────────────────
+
+# 영어 배지 `high · measured n=12`(약 138px, 한 줄로 못 박힘)가 152px 도착 칸을 넘게 키웠고, n 의
+# 자릿수가 바뀔 때마다 표가 칸 폭을 다시 나눠 행이 흔들렸다. 영어 배지는 `high · n=12` 로 줄고,
+# 원래 뜻은 마우스 올림 툴팁(`title`)이 말한다(오너 결정 2026-11-19). 한국어 배지는 그대로다.
+ETA_COL_PX = 152
+
+ETA_JS = """
+(() => {
+  const th = document.querySelector('#queue table.q th:nth-child(6)');
+  const cells = [...document.querySelectorAll('#queue tr[data-job]:not(.expanded) td.eta')];
+  return {
+    th: th ? th.getBoundingClientRect().width : null,
+    cells: cells.map((td) => {
+      const c = td.querySelector('.conf');
+      return {job: td.closest('tr').getAttribute('data-job'),
+        w: td.getBoundingClientRect().width,
+        cls: c ? c.className : '', text: c ? c.textContent : '',
+        title: c ? c.getAttribute('title') : null};
+    }),
+  };
+})()
+"""
+
+
+def sampled_doc(n: int) -> dict:
+    """긴 글 장면의 실측 행마다 표본 수를 `n` 으로 — 서버의 규칙대로 n ≥ 5 면 high."""
+    doc = long_text_doc()
+    for row in doc["pools"][0]["queue"]:
+        est = row.get("estimate") or {}
+        if est.get("source") == "measured" and est.get("confidence") in ("high", "med"):
+            est["sample_count"] = n
+            est["confidence"] = "high" if n >= 5 else "med"
+    return doc
+
+
+def eta_problems(m: dict, n: int, lang: str, width: int) -> list[str]:
+    bad = []
+    if width > PHONE_MAX:
+        if m["th"] is None or m["th"] > ETA_COL_PX + 0.5:
+            bad.append(f"도착 칸 머리가 {m['th']}px — {ETA_COL_PX}px 를 넘었다")
+        bad += [
+            f"#{c['job']} 도착 칸 {c['w']:.1f}px ({c['text']})"
+            for c in m["cells"]
+            if c["w"] > ETA_COL_PX + 0.5
+        ]
+    word = {"en": "median of", "ko": "중앙값"}[lang]
+    rated = [c for c in m["cells"] if " high" in " " + c["cls"] or " med" in " " + c["cls"]]
+    if not rated:
+        bad.append("high · med 배지가 하나도 없다 — 장면이 시험하는 것을 그리지 않는다")
+    for c in rated:
+        if f"{n}" not in c["text"]:
+            bad.append(f"#{c['job']} 배지에 n={n} 이 없다: {c['text']}")
+        if lang == "en" and "measured" in c["text"]:
+            bad.append(f"#{c['job']} 영어 배지가 아직 길다: {c['text']}")
+        if not c["title"] or word not in c["title"] or f"{n}" not in c["title"]:
+            bad.append(f"#{c['job']} 배지 툴팁이 뜻을 말하지 않는다: {c['title']!r}")
+    return bad
+
+
+def test_eta_column_holds_its_width_whatever_the_sample_count(tmp_path):
+    """n=12 → n=1000(자릿수가 바뀐다) → n=1 로 갱신해도 도착 칸은 152px 그대로, 행 높이 · 위치도
+    그대로다. 배지 툴팁은 두 언어 모두 원래 뜻(실측 n회의 중앙값)을 말한다."""
+    served = Served("long-text")
+    found: dict[tuple[int, str], list[str]] = {}
+    try:
+        with Chrome(tmp_path / "chrome-conf", window="1280,900") as c:
+            for width, lang in CASES:
+                served.swap(sampled_doc(12))
+                open_scene(c, served, width, lang)
+                bad = eta_problems(c.eval(ETA_JS), 12, lang, width)
+                before = c.eval(ROWS_JS)
+                for n in (1000, 1):
+                    served.swap(sampled_doc(n))
+                    refetch(
+                        c,
+                        "[...document.querySelectorAll('#queue .conf.high, #queue .conf.med')]"
+                        f".every((e) => /\\b{n}\\b/.test(e.textContent))",
+                    )
+                    bad += [f"n={n}: {p}" for p in eta_problems(c.eval(ETA_JS), n, lang, width)]
+                    after = c.eval(ROWS_JS)
+                    for key, was in before.items():
+                        now = after.get(key)
+                        if now is None:
+                            bad.append(f"n={n}: {key} 행이 사라졌다")
+                        elif abs(now["h"] - was["h"]) > 1 or abs(now["top"] - was["top"]) > 1:
+                            bad.append(f"n={n}: {key} {was} → {now}")
+                shoot(c, "conf-badge", width, lang)
+                assert c.page_errors() == []
+                if bad:
+                    found[(width, lang)] = bad
+    finally:
+        served.close()
+    assert not found, "신뢰도 배지가 도착 칸을 흔든다:\n" + "\n".join(
+        f"  {lang} @ {width}px\n    " + "\n    ".join(b) for (width, lang), b in found.items()
+    )
+
+
 # ── 최근 행: 다른 풀의 칩이 이름 칸을 통째로 말줄임하지 않는다 ─────────────────────
 
 # 진짜 dev 서버(2026-11-17 최종 검증)에서 1240px 최근 행이 `gate …` 로 보였다. 이름은 네 글자인데

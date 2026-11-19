@@ -1,0 +1,6 @@
+{OUT}
+rcm binary: {RCM} (rcm 0.6.1)
+ok   python        3.11
+ok   server config {OUT}
+warn  release app   plan=release-plan · secrets dir does not exist yet
+rcm check exit 1; 0 FAIL row(s) (server/client/token rows hidden)

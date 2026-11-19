@@ -165,7 +165,13 @@ def test_the_server_block_gains_only_the_two_storage_objects(srv):
     server = srv.status()["server"]
     # M5j G5 가 불리언 하나를 더 얹는다(`cancel_requires_submission_token` — 웹 취소 버튼이
     # 읽는다). 키 추가만.
-    added = {"artifact_storage", "job_storage", "cancel_requires_submission_token"}
+    # M5p 가 보관함 회계(`shelf_storage`, 경로 없음)를 하나 더 얹는다. 키 추가만.
+    added = {
+        "artifact_storage",
+        "job_storage",
+        "cancel_requires_submission_token",
+        "shelf_storage",
+    }
     assert set(server) == SERVER_KEYS_V1 | added, sorted(set(server) ^ (SERVER_KEYS_V1 | added))
     storage = server["artifact_storage"]
     assert set(storage) == {

@@ -42,7 +42,10 @@ git worktree remove ../remote_ci_monitor-<topic>   # once it is merged
 committing the `commit` skill, before opening or merging a PR the `pr` skill — they hold the
 shape (`<type>/<scope>-<what-it-does>`, `<type>(<scope>): <summary>`) and the steps.
 `tools/guard_naming.py` (a `PreToolUse` hook) refuses a branch name, commit subject or PR
-title that does not fit; the rule is in `CONTRIBUTING.md` (Names).
+title that does not fit; the rule is in `CONTRIBUTING.md` (Names). The Korean in a commit's
+summary and body and in a PR's title and body is written with the `korean-writing` skill
+(`.claude/skills/korean-writing/SKILL.md`), which the `commit` and `pr` skills load before
+writing; long Korean documents can go to the `korean-writer` agent (`.claude/agents/`).
 
 `main` only takes a pull request from `dev`. The workflow job names `test` (`ci.yml`) and
 `main-from-dev-only` (`pr-policy.yml`) are wired into the ruleset: renaming one means changing the
@@ -72,7 +75,7 @@ install it does nothing. The procedure is in
 ```sh
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for 64 known mutations
+python scripts/mutcheck.py           # the tests must go red for 79 known mutations
 scripts/smoke_install.sh             # the README's own commands on a fresh venv
 ```
 
