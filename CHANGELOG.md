@@ -44,6 +44,7 @@ of a key bumps that number and is listed here.
   landing in between started the job while the server was paused, so a deploy that pauses,
   waits for zero running jobs and restarts could turn that job into `lost`. The claim now reads
   the pause in the same transaction and takes nothing while it is set.
+  ([#222](https://github.com/monocsp/remote_ci_monitor/pull/222))
 
 ## [0.6.1] - 2026-11-19
 
