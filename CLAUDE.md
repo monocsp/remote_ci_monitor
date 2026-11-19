@@ -26,6 +26,8 @@ PLAN.md 가 정본이다. 세션을 시작하면 먼저 끝까지 읽는다.
   머지하기 전에 `pr` 스킬을 부른다(`/branch` `/commit` `/pr`). 브랜치는 `<type>/<scope>-<what-it-does>`
   (`fix/cli-ux` 처럼 어디인지만 말하는 이름은 안 된다), 커밋·PR 제목은 `<type>(<scope>): 한국어 요약`.
   `tools/guard_naming.py` 훅이 안 맞는 이름을 거부한다 — 정본은 `CONTRIBUTING.md` 「Names」.
+- 커밋 요약·본문과 PR 요약·본문의 한국어는 `korean-writing` 스킬(`.claude/skills/korean-writing/SKILL.md`)을
+  로드한 뒤 그 규칙으로 쓴다. commit·pr 스킬이 그 단계를 부른다. 긴 글은 `korean-writer` 에이전트에 맡긴다.
 - 워크플로 잡 이름 `test`(ci.yml)·`main-from-dev-only`(pr-policy.yml)는 룰셋 필수 체크와 묶여 있다. 바꾸면 룰셋도 같이 바꾼다.
 
 ## 운영 설치 — 이 머신이 빌드 머신이면 (AGENTS.md 「The build machine's own install」)
