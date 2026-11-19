@@ -104,6 +104,7 @@ class Rig:
         self.finishes: list[tuple[float, int, int]] = []  # (시각, 잡, 상태 코드)
         self.forge: Any = None  # heartbeat 응답을 바꾸는 함수
         self.finish_fails = 0  # 앞에서부터 이만큼의 finish 를 503 으로
+        self.down = False  # 참이면 heartbeat 와 finish 가 503 — 서버를 갈아 끼우는 몇 초
         self.rw: RemoteWorker | None = None
         self.out: dict[str, Any] = {}
         self.thread: threading.Thread | None = None
@@ -119,6 +120,8 @@ class Rig:
             return claim(token, body)
 
         def worker_heartbeat(token, body):
+            if rig.down:
+                raise ApiError(503, "restarting")
             out = heartbeat(token, body)
             rig.heartbeats.append((time.monotonic(), (body or {}).get("jobs")))
             if rig.forge is not None:
@@ -126,6 +129,9 @@ class Rig:
             return out
 
         def worker_finish(token, job_id, body):
+            if rig.down:
+                rig.finishes.append((time.monotonic(), job_id, 503))
+                raise ApiError(503, "restarting")
             if rig.finish_fails > 0:
                 rig.finish_fails -= 1
                 rig.finishes.append((time.monotonic(), job_id, 503))
@@ -243,6 +249,7 @@ def test_drain_with_no_running_job_restarts_for_the_new_version(rig):
     assert rw.stopping.set_at - rw.draining.set_at < 1 + 2 + 1  # claim_wait + 2초 + 여유
     assert [c for c in rig.sent if c[1]] == []
     assert rig.count(drain_line(NEW)) == 1, rig.logs
+    assert "stopped" not in rig.logs  # #234 격리 검증: 드레인 끝은 멈춤이 아니라 재실행이다
 
 
 def test_drain_lets_the_running_job_finish_and_report(rig):
@@ -704,3 +711,73 @@ def test_heartbeat_409_line_keeps_the_failure_spacing(rig):
     for _ in range(12):
         assert rw.heartbeat_once() is False
     assert rig.logs == ["heartbeat: worker not registered"] * 2
+
+
+# ── 보고하지 못한 잡 (#234 격리 검증) ───────────────────────────────────────
+
+
+def test_a_job_finished_while_the_server_was_away_is_reported_before_the_drain(rig, monkeypatch):
+    # 서버를 갈아 끼우는 몇 초에 잡이 끝나 보고 재시도가 다 실패해도 버리지 않는다. 서버가 새
+    # 버전으로 돌아오면 다음 heartbeat 가 그 잡을 먼저 succeeded 로 보고하고, 그다음에 드레인 ·
+    # 재실행한다
+    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    rw = rig.start(lanes=1)
+    jid = rig.hold()
+    rig.down = True
+    rig.go(jid)
+    rig.until(lambda: sum(1 for _, j, st in rig.finishes if j == jid and st == 503) >= 4, "gave up")
+    time.sleep(0.3)
+    assert rig.state(jid).state != SUCCEEDED
+    assert not rw.draining.is_set()
+    rig.bump(NEW)
+    rig.down = False
+    assert rig.join() == 0, rig.logs
+    job = rig.state(jid)
+    assert job.state == SUCCEEDED and job.exit_code == 0, (job.state, job.summary)
+    done = [at for at, j, st in rig.finishes if j == jid and st == 200]
+    assert done and done[0] < rw.draining.set_at
+    assert rw.restart_for == NEW
+
+
+def test_a_job_not_reported_is_given_up_after_the_limit_without_a_drain(rig, monkeypatch):
+    # 드레인이 아니어도 상한(`DRAIN_REPORT_SECONDS`)까지는 heartbeat 마다 다시 보고하고, 넘으면
+    # 오늘처럼 로그를 쓰고 버린다 — heartbeat 목록에 영영 남지 않는다
+    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(remote_worker, "DRAIN_REPORT_SECONDS", 1.5)
+    rw = rig.start(lanes=1)
+    jid = rig.hold()
+    rig.finish_fails = 10_000
+    rig.go(jid)
+    rig.until(lambda: rig.count(f"job #{jid} still not reported — giving up") == 1, "given up")
+    rig.until(lambda: jid not in rw.running, "dropped from the heartbeat list")
+    assert not rw.draining.is_set()
+
+
+def test_a_job_not_reported_is_tried_again_before_registering_again(rig, monkeypatch):
+    # 재등록은 그 워커의 도는 잡을 lost 로 닫는다. 서버가 워커를 잊어 레인이 다시 등록하기 전에
+    # 보고하지 못한 잡을 먼저 보고한다
+    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    rw = rig.start(lanes=2)
+    jid = rig.hold()
+    rig.down = True
+    rig.go(jid)
+    rig.until(lambda: jid in rw._unreported, "parked")
+    rig.forget()
+    rig.down = False  # heartbeat 는 이제 409(등록 안 됨)라 다시 보고할 기회는 재등록뿐이다
+    rig.until(lambda: rig.srv.store.get_worker(WORKER) is not None, "registered again")
+    job = rig.state(jid)
+    assert job.state == SUCCEEDED, (job.state, job.summary)
+    rw.stop()
+    assert rig.join() == 0
+
+
+def test_no_probe_starts_after_the_probes_were_ended(monkeypatch, tmp_path):
+    # #234 격리 검증: 프로브를 끝낸 뒤(곧 exec 한다)에는 새 프로브를 띄우지 않는다 — 시작과 등록
+    # 사이에 끼인 프로브가 exec 뒤에 남지 않게
+    monkeypatch.setattr(hostsample, "_PROBES_CLOSED", False)
+    hostsample.kill_probes()
+    mark = tmp_path / "ran"
+    probe = Probe(name="late", argv=("sh", "-c", f"touch {mark}"), timeout_seconds=5)
+    out = hostsample.run_probes([probe], dict(os.environ))
+    assert "late" in out
+    assert not mark.exists()

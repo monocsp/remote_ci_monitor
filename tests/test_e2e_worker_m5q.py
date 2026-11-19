@@ -226,6 +226,16 @@ def test_followed_child_restarts_through_the_installed_rcm_on_a_409(stack, tmp_p
     assert "install the same release" not in text and "Traceback" not in text
 
 
+def assert_remove_line_once(err: str, remove: str) -> None:
+    """치우는 안내는 줄 전체로 한 번이고(`rcm: rcm:` 이 아니다) 409 문장보다 앞이다(#234 격리
+    검증)."""
+    lines = err.splitlines()
+    assert lines.count(remove) == 1, err
+    assert "rcm: rcm:" not in err
+    refused = [i for i, ln in enumerate(lines) if "install the same release" in ln]
+    assert refused and lines.index(remove) < refused[-1], err
+
+
 def test_broken_cache_is_not_entered_again(stack, tmp_path):
     # E18 · §14.6 B질문14: 표지는 있고 코드가 깨진 폴더 — 첫 실행은 BOOT 가 `.bad` 를 남기고
     # 설치본으로 돌아가 종료 2, 다음 실행은 그 폴더로 들어가지 않고 이유를 말하며 종료 2.
@@ -244,13 +254,13 @@ def test_broken_cache_is_not_entered_again(stack, tmp_path):
     assert (entry.path / ".bad").exists()
     # B1 격리 검증: 첫 실패(BOOT 가 `.bad` 를 남긴 판)에도 치우는 안내가 한 번 나온다
     remove = f"rcm: remove {entry.path} to fetch it again"
-    assert first.stderr.count(remove) == 1, first.stderr
+    assert_remove_line_once(first.stderr, remove)
     second = stack.run()
     assert second.returncode == 2, second.stdout + second.stderr
     assert FALLBACK not in second.stderr
     assert f"· not following: the cached client v{NEW} did not load before" in second.stderr
     # 안내는 한 번이고, 따라가지 못할 폴더를 두고 「following」이라고 말하지 않는다
-    assert second.stderr.count(remove) == 1, second.stderr
+    assert_remove_line_once(second.stderr, remove)
     assert "— following" not in second.stderr
     for r in (first, second):
         assert "Traceback" not in r.stderr

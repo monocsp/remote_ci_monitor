@@ -318,6 +318,8 @@ def test_mutcheck_lists_the_m5q_worker_mutants(name):
         "not draining: restarted",
         "heartbeat: worker not registered",
         "restart failed: <reason>",
+        "job #<id> still not reported",
+        "before it registers again",
         "server v0.8.1 — not following (editable install)",
         "· not following: the cached client did not load",
         "rcm: remove <folder> to fetch it again",

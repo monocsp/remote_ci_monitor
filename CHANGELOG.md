@@ -16,8 +16,10 @@ of a key bumps that number and is listed here.
   `[rcm worker] server runs v0.8.1 — draining: no new claims, restarting when running jobs finish`
   and `drained — restarting through the installed rcm for v0.8.1`. A lane whose new registration
   is refused for the version drains the same way instead of stopping the worker and losing the
-  other lanes' jobs. The drain is cancelled if the server goes back to the worker's version; a
-  failed final report is retried for up to a minute; within 5 minutes of such a restart
+  other lanes' jobs. The drain is cancelled if the server goes back to the worker's version. A
+  job that finishes while the server is being replaced is reported again once the server answers
+  (and before a restart or a new registration) for up to a minute instead of being given up after
+  three tries. Within 5 minutes of such a restart
   (`RCM_WORKER_RESTARTED_AT`) a heartbeat does not drain again. A worker started from the cache
   whose registration is refused restarts through the installed rcm instead of exiting 2. Pinned,
   `installed` and editable workers do not drain and log one line

@@ -3971,11 +3971,12 @@ def _worker_follow_409(args: argparse.Namespace, cfg: Any, worker: Any, e: Any) 
                 return _worker_exec_installed(args, worker, e.code)
             _err(f"{e.message} · not following: already following v{__version__}")
         else:
-            _err(f"{e.message} · not following: {follow.reason_text('boot_failed')}")
-            # BOOT 가 그 폴더에 `.bad` 를 남겼다 — 사람이 할 일을 첫 실패에도 한 줄로
+            # BOOT 가 그 폴더에 `.bad` 를 남겼다 — 사람이 할 일을 첫 실패에도 한 줄로. 다음 판(①
+            # 의 `cache_broken`)과 같은 순서로 안내를 먼저 쓴다
             path = boot.get(follow.ENV_FOLLOWED_PATH)
             if path:
-                _err(f"rcm: remove {path} to fetch it again")
+                _err(f"remove {path} to fetch it again")
+            _err(f"{e.message} · not following: {follow.reason_text('boot_failed')}")
         return e.code
     if state.warn == "cache_broken" and state.server_version == e.version:
         # ① 이 이미 그 폴더를 말했다(경고와 치우는 안내) — 같은 폴더로 다시 따라가려 하지 않는다

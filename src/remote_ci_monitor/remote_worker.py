@@ -296,7 +296,10 @@ class RemoteWorker:
         self._drain_lock = threading.Lock()
         self._idle_lanes: set[int] = set()
         self._drain_done = False
-        self._unreported: dict[int, Callable[[], Any]] = {}
+        # 보고하지 못한 잡: job_id → (finish 호출, 미룬 시각). 서버를 갈아 끼우는 몇 초에 끝난 잡을
+        # 버리지 않고 다음 heartbeat 성공 · 재등록 전 · 드레인 끝에 다시 보고한다(#234 격리 검증)
+        self._unreported: dict[int, tuple[Callable[[], Any], float]] = {}
+        self._retry_lock = threading.Lock()
         self._tail_said = False
         self._window_said = False
         self._hb_unregistered = 0
@@ -436,6 +439,8 @@ class RemoteWorker:
         self._hb_failures = 0
         self._hb_unregistered = 0
         self._conn_failures = 0
+        # 서버가 돌아왔다 — 못 한 보고를 드레인보다 먼저 한다
+        self._retry_unreported()
         self._heard_server_version(out)
         cancel = out.get("cancel") or []
         with self._lock:
@@ -482,7 +487,6 @@ class RemoteWorker:
                     # 서버가 지금 도는 버전으로 돌아왔다 — 레인은 다시 claim 한다(§14 B질문8)
                     self.draining.clear()
                     self.follow_to = None
-                    self._drop_unreported()
                     self.log(f"server runs v{follow.clean(version)} again — drain cancelled")
                 return
             if self.draining.is_set():
@@ -562,38 +566,63 @@ class RemoteWorker:
             self.restart_for = self.follow_to
         return True
 
-    def _drop_unreported(self) -> None:
-        # 드레인이 취소됐다 — 미뤄 둔 보고는 오늘의 보고 실패와 같게 둔다(heartbeat 목록에서 뺀다)
+    def _park_unreported(self, job_id: int, call: Callable[[], Any]) -> None:
+        # heartbeat 목록에 남겨 둔다 — 서버가 이 잡을 「잊힌 잡」으로 닫지 않게
         with self._lock:
-            for job_id in self._unreported:
-                self.running.pop(job_id, None)
-            self._unreported.clear()
+            self._unreported[job_id] = (call, time.monotonic())
+
+    def _unpark(self, job_id: int) -> None:
+        with self._lock:
+            self._unreported.pop(job_id, None)
+            self.running.pop(job_id, None)
+
+    def _try_report(self, job_id: int, call: Callable[[], Any]) -> bool:
+        """한 번 보고한다. 끝났으면(보고됐거나 서버가 받지 않는 보고) 참, 다시 시도할 만하면
+        거짓."""
+        try:
+            call()
+            return True
+        except ClientError as e:
+            if e.status and e.status != 503:
+                self.log(f"#{job_id} finish: {e.message}")
+                return True
+            return False
+
+    def _retry_unreported(self) -> None:
+        """보고하지 못한 잡을 한 번씩 다시 보고한다(heartbeat 성공 뒤 · 레인 재등록 전). 미룬 지
+        `DRAIN_REPORT_SECONDS` 가 지나면 오늘처럼 로그를 쓰고 버린다. 다른 스레드가 이미 하고
+        있으면 넘어간다."""
+        if not self._unreported or not self._retry_lock.acquire(blocking=False):
+            return
+        try:
+            with self._lock:
+                parked = dict(self._unreported)
+            for job_id, (call, parked_at) in parked.items():
+                if self._try_report(job_id, call):
+                    self._unpark(job_id)
+                elif time.monotonic() - parked_at >= DRAIN_REPORT_SECONDS:
+                    self.log(f"job #{job_id} still not reported — giving up")
+                    self._unpark(job_id)
+        finally:
+            self._retry_lock.release()
 
     def _report_unreported(self) -> None:
-        with self._lock:
-            parked = dict(self._unreported)
-            self._unreported.clear()
-        if not parked:
-            return
-        deadline = time.monotonic() + DRAIN_REPORT_SECONDS
-        for job_id, call in parked.items():
-            self.log(f"drained — job #{job_id} not reported yet, retrying before the restart")
-            while True:
-                try:
-                    call()
-                    break
-                except ClientError as e:
-                    if e.status and e.status != 503:
-                        self.log(f"#{job_id} finish: {e.message}")
-                        break
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    self.log(f"job #{job_id} still not reported — restarting anyway")
-                    break
-                if self.stopping.wait(min(DRAIN_REPORT_RETRY_SECONDS, left)):
-                    break
+        """드레인 끝 — 재실행 전에 보고하지 못한 잡을 미룬 때부터 `DRAIN_REPORT_SECONDS` 까지 다시
+        보고한다. 재실행 뒤의 등록이 그 잡을 lost 로 닫지 않게(§14 B질문11)."""
+        with self._retry_lock:
             with self._lock:
-                self.running.pop(job_id, None)
+                parked = dict(self._unreported)
+            for job_id, (call, parked_at) in parked.items():
+                self.log(f"drained — job #{job_id} not reported yet, retrying before the restart")
+                deadline = parked_at + DRAIN_REPORT_SECONDS
+                while not self._try_report(job_id, call):
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        self.log(f"job #{job_id} still not reported — restarting anyway")
+                        break
+                    if self.stopping.wait(min(DRAIN_REPORT_RETRY_SECONDS, left)):
+                        break
+                self._unpark(job_id)
 
     def release_probes(self) -> None:
         """exec 직전 — 측정이 돌고 있으면 `grace_seconds` 까지 기다리고, 그래도 돌면 그 프로브
@@ -733,6 +762,8 @@ class RemoteWorker:
             except ClientError as e:
                 if e.status == 409 and "not registered" in e.message:
                     self.log(f"lane {lane}: {e.message} — registering again")
+                    # 재등록은 이 워커의 도는 잡을 lost 로 닫는다 — 못 한 보고를 먼저 한다
+                    self._retry_unreported()
                     try:
                         self.register()
                     except WorkerExit as x:
@@ -1034,11 +1065,9 @@ class RemoteWorker:
             call = lambda: self.client.finish(job_id, outcome, rc, summary, **extra)  # noqa: E731
             gave_up: list[bool] = []
             self.report(call, f"#{job_id} finish", on_give_up=lambda: gave_up.append(True))
-            if gave_up and self.draining.is_set() and not self.stopping.is_set():
-                # 드레인 중 — 재실행 전에 다시 보고한다. 그때까지 heartbeat 목록에 남겨 서버가
-                # 이 잡을 「잊힌 잡」으로 닫지 않게 한다(§14 B질문11)
-                with self._lock:
-                    self._unreported[job_id] = call
+            if gave_up and not self.stopping.is_set():
+                # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
+                self._park_unreported(job_id, call)
                 return
         with self._lock:
             self.running.pop(job_id, None)
@@ -1114,7 +1143,8 @@ class RemoteWorker:
             for t in self._threads:
                 t.join(timeout=self.config.grace_seconds + 10)
             hb.join(timeout=2)
-            self.log("stopped")
+            if self.restart_for is None:
+                self.log("stopped")  # 드레인 끝이면 `cmd_worker` 가 재실행 줄을 쓴다
         return self.exit_code
 
 

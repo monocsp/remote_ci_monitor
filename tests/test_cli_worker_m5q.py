@@ -458,8 +458,12 @@ def test_fallen_back_child_says_the_cache_did_not_load(w, monkeypatch):
     assert last_err_line(r) == (
         f"rcm: {sentence(NEW)} · not following: the cached client did not load"
     )
-    # B1 격리 검증: 첫 실패에도 그 폴더를 치우는 안내가 한 번 나온다
-    assert r.err.count("rcm: remove /x to fetch it again") == 1, r.err
+    # B1 격리 검증: 첫 실패에도 그 폴더를 치우는 안내가 한 번 나온다. #234 격리 검증: 줄 전체가
+    # 정확하고(`rcm: rcm:` 이 아니다) 두 번째 판과 같은 순서(안내 → 409 문장)다
+    lines = r.err.splitlines()
+    assert lines.count("rcm: remove /x to fetch it again") == 1, r.err
+    assert "rcm: rcm:" not in r.err
+    assert lines.index("rcm: remove /x to fetch it again") < lines.index(last_err_line(r))
 
 
 def test_pinned_child_says_pinned_on_a_409(w, monkeypatch):
@@ -488,7 +492,10 @@ def test_broken_cache_on_start_says_so_once_and_does_not_claim_to_follow(w):
     assert r.code == 2, r.err
     assert w.execs == [] and w.client == fetched
     remove = f"rcm: remove {entry.path} to fetch it again"
-    assert r.err.count(remove) == 1, r.err
+    lines = r.err.splitlines()
+    assert lines.count(remove) == 1, r.err
+    assert "rcm: rcm:" not in r.err
+    assert lines.index(remove) < lines.index(last_err_line(r))
     assert "— following" not in r.err
     assert last_err_line(r) == (
         f"rcm: {sentence(NEW)} · not following: the cached client v{NEW} did not load before"
@@ -737,6 +744,8 @@ def test_drain_restarts_through_the_installed_bootloader(w):
     )
     restart = lines.index(f"[rcm worker] drained — restarting through the installed rcm for v{NEW}")
     assert drain < restart
+    # #234 격리 검증: 드레인 재실행은 「stopped」가 아니다 — 멈추는 것이 아니라 다시 뜬다
+    assert "[rcm worker] stopped" not in lines
 
 
 def test_restart_exec_failure_exits_1(w):
