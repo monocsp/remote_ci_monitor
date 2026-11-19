@@ -490,3 +490,70 @@ def test_the_dry_run_plan_function_changes_nothing(env):
     assert [i.job_id for i in plan.to_delete] == [101]
     assert [i.job_id for i in plan.to_stale] == [102]
     assert all(row(store, j)["state"] == "active" for j in (101, 102, 103))
+
+
+# ── 격리 검증이 찾은 것 (PR #217 · D1 · I1 · I2) ─────────────────────────────
+
+
+def _touch_after_plan(monkeypatch: Any, store: Store, job_id: int, when: datetime) -> None:
+    """계획을 세운 **뒤** 삭제 전에 누가 그 항목을 쓴다(정리 회차와 되살리기의 경쟁)."""
+    real = Janitor.plan_shelf
+
+    def plan_then_touch(self: Janitor, now: datetime) -> Any:
+        plan = real(self, now)
+        assert store.touch_shelf_item(job_id, when) is True
+        return plan
+
+    monkeypatch.setattr(Janitor, "plan_shelf", plan_then_touch)
+
+
+def test_d1_a_restore_between_plan_and_delete_wins(env, monkeypatch):
+    store, cfg = env
+    d = active(store, cfg, 101, used=NOW - 400 * D, state="stale")
+    _touch_after_plan(monkeypatch, store, 101, NOW)
+    jan, rec = janitor(store, cfg)
+    jan.sweep_once(NOW)
+    r = row(store, 101)
+    assert d.is_dir()
+    assert r["state"] == "active" and r["last_used_at"] == NOW.timestamp()
+    assert r["error_code"] is None and rec.errors == []
+
+
+def test_d1_a_touch_between_plan_and_stale_mark_wins(env, monkeypatch):
+    store, cfg = env
+    active(store, cfg, 101, used=NOW - 182 * D)
+    _touch_after_plan(monkeypatch, store, 101, NOW)
+    jan, _ = janitor(store, cfg)
+    jan.sweep_once(NOW)
+    r = row(store, 101)
+    assert r["state"] == "active" and r["stale_since"] is None
+
+
+def test_i1_a_delete_that_died_before_the_row_was_marked_catches_up(env):
+    """`deleting` 이 적혀 있고 폴더가 없다 — 지운 뒤 행을 고치기 전에 죽었다.
+
+    그래서 `missing` 이 아니라 `deleted` 로 따라잡는다."""
+    store, cfg = env
+    shelf_row(store, 101, "stale", last_used_at=(NOW - 400 * D).timestamp(), error_code="deleting")
+    jan, rec = janitor(store, cfg)
+    jan.sweep_once(NOW)
+    r = row(store, 101)
+    assert r["state"] == "deleted" and r["reason_code"] is None and r["error_code"] is None
+    assert rec.errors == []
+
+
+def test_i2_a_failed_delete_keeps_stale_since(env, monkeypatch):
+    store, cfg = env
+    since = (NOW - 20 * D).timestamp()
+    active(store, cfg, 101, used=NOW - 365 * D, state="stale")
+    with raw(store) as conn:
+        conn.execute("UPDATE shelf_items SET stale_since=? WHERE job_id=101", (since,))
+
+    def boom(path: Any, *a: Any, **kw: Any) -> None:
+        raise PermissionError(errno.EACCES, "denied", str(path))
+
+    monkeypatch.setattr(janitor_mod.shutil, "rmtree", boom)
+    jan, _ = janitor(store, cfg)
+    jan.sweep_once(NOW)
+    r = row(store, 101)
+    assert r["state"] == "stale" and r["stale_since"] == since

@@ -1325,3 +1325,33 @@ def test_time_out_shelf_requests(store):
     r = row(store, a.id)
     assert r["state"] == "failed" and r["reason_code"] == "timeout"
     assert row(store, b.id)["state"] == "copying"
+
+
+# ══ 격리 검증이 찾은 것 (PR #217 · D3) ══════════════════════════════════════
+
+
+def test_d3_a_remote_job_lost_after_shelving_copies_lost_into_the_row(store):
+    j = running_keep(store, worker="mac2")
+    ready_bundle(store, j.id, ready_at=at(50))
+    assert store.claim_shelf_item(at(51)).job_id == j.id
+    assert store.finish_shelf_item(
+        j.id, ok=True, file_count=1, total_bytes=3, reason_code=None, now=at(52)
+    )
+    assert store.mark_lost_for_worker("mac2", at(120), "worker gone") == [j.id]
+    r = row(store, j.id)
+    assert r["state"] == "active"
+    assert r["job_state"] == "lost" and r["job_finished_at"] == at(120).timestamp()
+
+
+def test_d3_every_terminal_transition_copies_the_job_state(store):
+    """`Store.finish` 를 거치지 않는 종료(취소 · 기동 복구 · supersede)도 보관 행을 고친다."""
+    waiting = enqueue_keep(store)
+    shelf_row(store, waiting.id, "active")
+    assert store.request_cancel(waiting.id, "alice-laptop", at(5), grace_seconds=10)
+    r = row(store, waiting.id)
+    assert r["job_state"] == "cancelled" and r["job_finished_at"] == at(5).timestamp()
+    local = running_keep(store)
+    shelf_row(store, local.id, "active")
+    lost, _ = store.recover_on_start(at(9))
+    assert lost == [local.id]
+    assert row(store, local.id)["job_state"] == "lost"

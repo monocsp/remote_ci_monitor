@@ -474,8 +474,10 @@ def host_allowed(
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def _origin_of(value: str, schemes: Sequence[str]) -> tuple[str, int] | None:
-    """`http://host:port[/…]` → (host, port). userinfo · 모르는 scheme · 틀린 포트는 None."""
+def _origin_of(value: str, schemes: Sequence[str]) -> tuple[str, str, int] | None:
+    """`http://host:port[/…]` → (scheme, host, port). 포트가 없으면 그 scheme 의 기본 포트다.
+
+    userinfo · 모르는 scheme · 틀린 포트는 None."""
     try:
         parts = urllib.parse.urlsplit(value.strip())
         port = parts.port
@@ -485,7 +487,7 @@ def _origin_of(value: str, schemes: Sequence[str]) -> tuple[str, int] | None:
     if scheme not in schemes or "@" in parts.netloc or not parts.hostname:
         return None
     name = parts.hostname.lower().rstrip(".")
-    return name, port if port is not None else _DEFAULT_PORTS.get(scheme, 0)
+    return scheme, name, port if port is not None else _DEFAULT_PORTS.get(scheme, 0)
 
 
 def same_origin(
@@ -513,11 +515,13 @@ def same_origin(
     if got is None:
         return False
     name, port = want
-    if got[0] != name:
+    scheme, origin_name, origin_port = got
+    if origin_name != name:
         return False
     if port is None:
-        return got[1] in _DEFAULT_PORTS.values()
-    return got[1] == port
+        # 포트 없는 Host 는 그 scheme 의 기본 포트다 — `http://x:443` 은 다른 출처다(I5)
+        return origin_port == _DEFAULT_PORTS.get(scheme)
+    return origin_port == port
 
 
 __all__ = [
