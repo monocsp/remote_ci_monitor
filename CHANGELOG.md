@@ -54,7 +54,7 @@ of a key bumps that number and is listed here.
   `RCM_CLIENT_VERSION` and `client-version` file as a session, and `rcm worker --no-follow` keeps
   the installed version. `--once` follows only when it starts; `--check` never follows. A worker
   that is already registered keeps its version until it restarts.
-  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+  ([#231](https://github.com/monocsp/remote_ci_monitor/pull/231))
 - **A job's files can stay on the server and open in any browser: the shelf.** `rcm run --keep`
   (or `keep = true` on a preset, or `rcm keep N` while the job's bundle still exists) copies the
   job's artifacts into a folder on the build machine and prints a link,
@@ -109,7 +109,7 @@ of a key bumps that number and is listed here.
   and exited 0, so a service with `SuccessfulExit = false` or `Restart=on-failure` never started
   it again and the machine silently left the pool. It now exits 2 and is started again.
   `rcm worker --check` also strips control characters from the server's version in its `server`
-  row and cuts it at 64 characters. ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+  row and cuts it at 64 characters. ([#231](https://github.com/monocsp/remote_ci_monitor/pull/231))
 - **The client wheel the server hands out now carries the packaged skills.** It shipped only the
   `.py` files under `skills/`, so a client installed from `/client/…whl` printed three of the five
   skills without a description in `rcm skills list`, and `rcm skills install` wrote no `SKILL.md`
