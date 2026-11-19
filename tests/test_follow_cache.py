@@ -497,9 +497,11 @@ def test_bad_entries_are_refused(servers, root, tmp_path, name, data, attr):  # 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # zipfile 의 「Duplicate name」 경고
         w = fake_wheel(NEW, extra=((name, data, attr),))
-    before = set(tmp_path.parent.rglob("*evil*"))
+    # 항목 이름이 가리킬 수 있는 곳은 캐시 뿌리(tmp_path 아래)의 몇 단 위까지다. 세션 임시 폴더
+    # 전체(tmp_path.parent)를 훑으면 앞선 시험이 남긴 폴더 수만큼 느려진다
+    before = set(tmp_path.rglob("*evil*"))
     fetch_fails(servers(NEW, w), root, "unpack")
-    assert set(tmp_path.parent.rglob("*evil*")) == before
+    assert set(tmp_path.rglob("*evil*")) == before
     assert not Path("/tmp/rcm-follow-evil.py").exists()
 
 
@@ -569,7 +571,12 @@ def test_interrupt_while_downloading(servers, root, monkeypatch):  # A53 · R �
     assert entries(root / "clients") == [] and leftovers(root / "clients") == []
 
 
-def test_health_three_second_cap(root):  # A60 · 결정 153
+def test_health_three_second_cap(root, monkeypatch):  # A60 · 결정 153
+    # 소켓 제한(3초)이 health 에 걸린다. 값 자체는 test_follow_rules 가 잠그고 여기서는 줄인 값으로
+    # 「제한만큼 기다리고 전체 제한(5초)보다 먼저 끝난다」를 본다. 소켓 제한을 빼면 전체 제한까지
+    # 기다려 위쪽 경계에 걸린다
+    monkeypatch.setattr(follow, "HEALTH_TIMEOUT_SECONDS", 0.5)
+    assert follow.HEALTH_TOTAL_SECONDS == 5.0
     lis = SilentListener()
     try:
         started = time.monotonic()
@@ -578,16 +585,21 @@ def test_health_three_second_cap(root):  # A60 · 결정 153
     finally:
         lis.close()
     assert got is None
-    assert 2.5 <= took < 5.5, took
+    assert 0.4 <= took < 2.5, took
 
 
-def test_health_total_cap_on_a_dripping_server(servers, root):  # A118 · §14 A질문18
-    srv = servers(NEW, drip=2.0)
+def test_health_total_cap_on_a_dripping_server(servers, root, monkeypatch):  # A118 · §14 A질문18
+    # 바이트 사이 간격(drip)이 소켓 제한보다 짧아 소켓 제한으로는 끊기지 않는 서버를 전체 제한이
+    # 끊는다. 실제 값(2초 간격 · 소켓 3초 · 전체 5초)과 같은 순서로 줄였다. 본문 전체를 흘리는
+    # 시간(수십 초)은 전체 제한보다 훨씬 길다
+    monkeypatch.setattr(follow, "HEALTH_TIMEOUT_SECONDS", 0.6)
+    monkeypatch.setattr(follow, "HEALTH_TOTAL_SECONDS", 0.9)
+    srv = servers(NEW, drip=0.2)
     started = time.monotonic()
     got = follow.server_info(srv.key, None, root=root, now=T, ttl=600)
     took = time.monotonic() - started
     assert got is None
-    assert took < 6.0, took
+    assert took < 2.5, took
 
 
 def test_two_fetches_race_for_one_folder(servers, root, monkeypatch):  # A61 · A88 · F30
@@ -866,11 +878,11 @@ def test_fetch_prunes_after_a_win(servers, root):  # A30 · A88 · 결정 163
 def test_fetch_total_deadline_covers_the_head_and_the_body(servers, root, monkeypatch, drip):
     # §14 A질문18 · D1: 받기 전체 제한은 응답 머리에도 걸린다. 머리 줄이나 본문 바이트를 소켓
     # 제한보다 짧은 간격으로 흘리는 서버가 받기를 붙잡지 못한다(시험에서는 상수를 줄인다)
-    monkeypatch.setattr(follow, "FETCH_TOTAL_SECONDS", 1.5)
-    srv = servers(NEW, **{f"client_{drip}_drip": 0.3})
+    monkeypatch.setattr(follow, "FETCH_TOTAL_SECONDS", 0.6)
+    srv = servers(NEW, **{f"client_{drip}_drip": 0.1})
     started = time.monotonic()
     fetch_fails(srv, root, "unreachable")
-    assert time.monotonic() - started < 4.0
+    assert time.monotonic() - started < 2.5
 
 
 def _planted(root: Path, srv, how: str) -> Path:
