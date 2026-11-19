@@ -3932,7 +3932,7 @@ def _worker_follow_start(args: argparse.Namespace, cfg: Any) -> Any:
     """기동 ①(M5q §3.2) — 등록 **전에** health 를 새로(10분 기록 없이) 읽고 CLI 와 같은 흐름으로
     따라간다. exec 하면 돌아오지 않는다. 실패는 경고 한 줄과 함께 설치본으로 등록을 이어 간다.
     따라간 자식(BOOT 를 거쳤다)은 다시 따라가지 않는다(결정 161)."""
-    if follow.booted() is not None:
+    if follow.booted() is not None:  # 자식 — `_follow_first` 가 남긴 상태를 그대로 쓴다
         return follow.current_state() or follow.boot_state(os.environ)
     setting, kind = _worker_follow_setting(args)
     return follow.maybe_follow(
