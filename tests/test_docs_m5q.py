@@ -293,7 +293,70 @@ def test_changelog_unreleased_has_worker_following():
         "m5q-worker-start-uses-the-record",
         "m5q-worker-lane-exit-zero",
         "m5q-worker-follow-not-a-worker-exit",
+        "m5q-worker-drain-does-not-wait",
+        "m5q-worker-lane-claims-while-draining",
+        "m5q-worker-drain-window-removed",
+        "m5q-worker-restart-keeps-follow-env",
+        "m5q-heartbeat-no-server-version",
     ],
 )
 def test_mutcheck_lists_the_m5q_worker_mutants(name):
     assert f'name="{name}"' in read(MUTCHECK), f"scripts/mutcheck.py: no mutant {name!r}"
+
+
+# ── PR B2: 돌던 워커의 드레인 ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "While it runs.",
+        "server runs v0.8.1 — draining: no new claims, restarting when running jobs finish",
+        "drained — restarting through the installed rcm for v0.8.1",
+        "drain cancelled",
+        "RCM_WORKER_RESTARTED_AT",
+        "not draining: restarted",
+        "heartbeat: worker not registered",
+        "restart failed: <reason>",
+        "server v0.8.1 — not following (editable install)",
+        "· not following: the cached client did not load",
+        "rcm: remove <folder> to fetch it again",
+        "exits 1",
+    ],
+)
+def test_operating_remote_workers_explains_the_drain(follow_section, word):
+    sec = subsection(follow_section, "Remote workers")
+    assert word in flat(sec), f"docs/operating.md (Remote workers): missing {word!r}"
+
+
+def test_operating_no_longer_says_a_running_worker_keeps_its_version(follow_section):
+    sec = flat(subsection(follow_section, "Remote workers"))
+    assert "A worker that is already registered keeps its version until it restarts" not in sec
+
+
+def test_changelog_unreleased_has_the_drain():
+    text = flat(unreleased(read(CHANGELOG)))
+    for word in ("server_version", "draining: no new claims", "RCM_WORKER_RESTARTED_AT", "--once"):
+        assert word in text, f"CHANGELOG.md [Unreleased]: missing {word!r}"
+    assert "keeps its version until it restarts" not in text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ROOT / "examples" / "launchd" / "com.remote-ci-monitor.worker.plist",
+        ROOT / "examples" / "systemd" / "rcm-worker.service",
+    ],
+    ids=lambda p: p.name,
+)
+def test_service_examples_say_the_restart_keeps_the_pid(path):
+    text = flat(read(path))
+    for word in ("finishes its running jobs", "same process", "RCM_CLIENT_VERSION", "exits 2"):
+        assert word in text, f"{path.name}: missing {word!r}"
+
+
+@pytest.mark.parametrize("path", [USAGE, USAGE_KO], ids=lambda p: p.name)
+def test_usage_says_a_running_worker_follows(path):
+    text = flat(read(path))
+    word = "next heartbeat" if path == USAGE else "다음 heartbeat"
+    assert word in text, f"{path.name}: missing {word!r}"

@@ -24,6 +24,13 @@
   toolchains your presets need (fvm, Android SDK, …) after /opt/homebrew/bin.
   macOS asks for Local Network permission the first time the worker looks for the server
   (server = "auto"); without it, discovery finds nothing.
+
+  When the server's version changes, a worker installed from a wheel finishes its running jobs
+  and starts the server's version in the same process (exec): the PID stays, launchd does not
+  count a restart, and the log goes on in worker.log. It exits 2 only when it cannot follow, and
+  KeepAlive with SuccessfulExit false starts it again. RCM_CLIENT_VERSION in
+  EnvironmentVariables pins a version (or "installed" turns following off). See
+  docs/operating.md, Remote workers.
 -->
 <plist version="1.0">
 <dict>

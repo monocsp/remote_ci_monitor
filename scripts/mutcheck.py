@@ -115,6 +115,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   M5q B1 — `m5q-worker-*` 다섯: 버전 409 전에 도는 잡을 닫음 · 409 본문에 `server_version`
      을 안 실음 · 기동 ① 이 10분 기록을 씀 · 레인 재등록이 막혀도 종료 0 · `WorkerFollow` 가
      `WorkerExit` 가 아님 (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
+  M5q B2 — 다섯: 드레인이 도는 잡을 기다리지 않음 · 레인이 드레인 중에 claim 함 · 300초 창을
+     지움 · 설치본 재실행이 따라가기 변수를 남김 · heartbeat 에 `server_version` 을 안 실음
+     (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -1176,6 +1179,53 @@ MUTANTS = (
         old="class WorkerFollow(WorkerExit):\n",
         new="class WorkerFollow(Exception):\n",
         tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
+    Mutant(
+        # 드레인이 도는 잡을 기다리지 않는다 — 레인이 잡을 도는 중에 `stopping` 이 켜져 그 잡이
+        # lost `worker stopped` 가 된다(§6 W6 · 시나리오 b B9)
+        name="m5q-worker-drain-does-not-wait",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if not alive <= self._idle_lanes:\n",
+        new="            if False:\n",
+        tests=("tests/test_worker_m5q_drain.py",),
+    ),
+    Mutant(
+        # 레인 맨 위의 드레인 검사를 지운다 — 드레인 중에도 새 claim 을 한다(시나리오 b B7)
+        name="m5q-worker-lane-claims-while-draining",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if self._lane_waits(lane):\n",
+        new="            if False and self._lane_waits(lane):\n",
+        tests=("tests/test_worker_m5q_drain.py",),
+    ),
+    Mutant(
+        # 300초 창을 지운다 — 버전이 오락가락하면 heartbeat 마다 재실행한다(시나리오 b E7 · G9)
+        name="m5q-worker-drain-window-removed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            ago = self._restarted_ago()\n",
+        new="            ago = None\n",
+        tests=("tests/test_worker_m5q_drain.py",),
+    ),
+    Mutant(
+        # 설치본으로 다시 실행할 때 따라가기 변수를 지우지 않는다 — 옛 캐시 경로가 다음 프로세스로
+        # 샌다(시나리오 b B8)
+        name="m5q-worker-restart-keeps-follow-env",
+        path="src/remote_ci_monitor/follow.py",
+        old=(
+            "    env = {k: v for k, v in environ.items() if k not in BOOT_ENV}\n"
+            "    env[ENV_WORKER_RESTARTED_AT]"
+        ),
+        new="    env = dict(environ)\n    env[ENV_WORKER_RESTARTED_AT]",
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    Mutant(
+        # heartbeat 응답에 `server_version` 을 싣지 않는다 — 돌던 워커가 서버가 바뀐 것을
+        # 모른다(B16)
+        name="m5q-heartbeat-no-server-version",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old='            "server_version": self.version,\n        }\n',
+        new="        }\n",
+        tests=("tests/test_server_m5q_worker.py",),
     ),
 )
 

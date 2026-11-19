@@ -402,17 +402,35 @@ def test_malformed_server_version_is_ignored(w, bad):
         assert "../x" not in r.err
 
 
-def test_followed_child_does_not_follow_again_on_409(w, monkeypatch):
-    # E19 · §14 B질문7: 따라간 자식은 ① 을 하지 않고, ② 를 만나면 종료 2 로 감독자에게 맡긴다
-    boot = {
-        "RCM_FOLLOWED": INSTALLED,
-        "RCM_FOLLOWED_PATH": "/x",
-        "RCM_FOLLOWED_FROM": "0.0.1",
-        "RCM_FOLLOW_FROM": "wheel",
-        "RCM_FOLLOW_FOUND": None,
-        "loaded": True,
-    }
-    monkeypatch.setattr(remote_ci_monitor, "_follow_boot", boot, raising=False)
+LOADED_CHILD = {
+    "RCM_FOLLOWED": INSTALLED,
+    "RCM_FOLLOWED_PATH": "/x",
+    "RCM_FOLLOWED_FROM": "0.0.1",
+    "RCM_FOLLOW_FROM": "wheel",
+    "RCM_FOLLOW_FOUND": None,
+    "loaded": True,
+}
+
+
+def test_followed_child_restarts_through_the_installed_rcm_on_a_409(w, monkeypatch):
+    # E19 · §14 B질문7(B2): 따라간 자식은 ① 을 하지 않고, ② 를 만나면 설치본 부트로더로 바로
+    # 다시 실행한다 — 다음 판정은 설치본이 ① 부터 한다
+    monkeypatch.setattr(remote_ci_monitor, "_follow_boot", dict(LOADED_CHILD), raising=False)
+    w.bump(NEW2)
+    r = w.run(w.argv())
+    assert r.code == "exec", r.err
+    assert w.health == 0 and w.client == 0
+    path, args, env = w.execs[-1]
+    assert args == [sys.executable, "-P", "-c", follow.RESTART, *w.argv()]
+    assert abs(int(env[follow.ENV_WORKER_RESTARTED_AT]) - time.time()) <= 2
+    assert f"[rcm worker] register: server runs v{NEW2} — following" in r.err
+    assert MISMATCH not in r.err
+
+
+def test_followed_child_inside_the_window_hands_the_409_to_the_supervisor(w, monkeypatch):
+    # §14 B질문7: 300초 안에 이미 재실행했으면 종료 2 로 감독자에게 맡긴다(고리 막기)
+    monkeypatch.setattr(remote_ci_monitor, "_follow_boot", dict(LOADED_CHILD), raising=False)
+    monkeypatch.setenv(follow.ENV_WORKER_RESTARTED_AT, str(int(time.time()) - 10))
     w.bump(NEW2)
     r = w.run(w.argv())
     assert r.code == 2, r.err
@@ -439,6 +457,41 @@ def test_fallen_back_child_says_the_cache_did_not_load(w, monkeypatch):
     assert w.health == 0 and w.client == 0 and w.execs == []
     assert last_err_line(r) == (
         f"rcm: {sentence(NEW)} · not following: the cached client did not load"
+    )
+    # B1 격리 검증: 첫 실패에도 그 폴더를 치우는 안내가 한 번 나온다
+    assert r.err.count("rcm: remove /x to fetch it again") == 1, r.err
+
+
+def test_pinned_child_says_pinned_on_a_409(w, monkeypatch):
+    # B1 격리 검증: 캐시에 있는 다른 버전으로 고정해 그 버전으로 도는 자식이 409 를 받으면 원인은
+    # 고정이다 — 「already following」이 아니라 `pinned by …` 로 말하고 다시 실행하지 않는다
+    boot = {**LOADED_CHILD, "RCM_FOLLOWED": INSTALLED, "RCM_FOLLOWED_FROM": "0.0.1"}
+    monkeypatch.setattr(remote_ci_monitor, "_follow_boot", boot, raising=False)
+    w.mp.setenv("RCM_CLIENT_VERSION", INSTALLED)
+    w.bump(NEW)
+    r = w.run(w.argv())
+    assert r.code == 2, r.err
+    assert w.execs == [] and w.health == 0 and w.client == 0
+    assert last_err_line(r) == f"rcm: {sentence(NEW)} · pinned by RCM_CLIENT_VERSION"
+
+
+def test_broken_cache_on_start_says_so_once_and_does_not_claim_to_follow(w):
+    # B1 격리 검증: ① 이 `.bad` 표지가 있는 폴더를 만나면 경고와 치우는 안내를 한 번 쓴다. 이어지는
+    # ② 는 같은 폴더로 따라가려 하지 않는다 — 「following」 줄도, 두 번째 안내도 없다
+    w.bump(NEW)
+    health = w.srv.app.health()[1]
+    info = follow.parse_health(w.key, health, now=time.time())
+    entry = follow.fetch(w.key, None, info, root=w.root)
+    (entry.path / follow.BAD).touch()
+    fetched = w.client
+    r = w.run(w.argv())
+    assert r.code == 2, r.err
+    assert w.execs == [] and w.client == fetched
+    remove = f"rcm: remove {entry.path} to fetch it again"
+    assert r.err.count(remove) == 1, r.err
+    assert "— following" not in r.err
+    assert last_err_line(r) == (
+        f"rcm: {sentence(NEW)} · not following: the cached client v{NEW} did not load before"
     )
 
 
@@ -622,3 +675,165 @@ def test_check_server_row_cleans_the_servers_version(w, monkeypatch):
     line = next(ln for ln in r.out.splitlines() if ln.split()[1:2] == ["server"])
     assert "\x1b" not in r.out and "\x1b" not in r.err
     assert line.endswith(" · v9.9[2J" + "x" * 58), line
+
+
+# ── PR B2: 드레인 뒤 설치본 부트로더로 다시 실행 ───────────────────────────
+
+
+def bump_once_registered(w: WorkerEnv, version: str) -> threading.Thread:
+    """워커가 등록되면 서버 버전을 올린다 — heartbeat 가 그것을 보고 드레인한다(③). 30초 안에
+    워커가 끝나지 않으면 멈춰서 시험이 매달리지 않고 빨개지게 한다."""
+    made: list[RemoteWorker] = []
+    real_init = RemoteWorker.__init__
+
+    def init(self, *a: Any, **k: Any) -> None:
+        real_init(self, *a, **k)
+        made.append(self)
+
+    w.mp.setattr(RemoteWorker, "__init__", init)
+
+    def later() -> None:
+        deadline = time.monotonic() + 20
+        while w.srv.store.get_worker(WORKER) is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        w.bump(version)
+        time.sleep(30)
+        for m in made:
+            m.stop()
+
+    t = threading.Thread(target=later, daemon=True)
+    t.start()
+    return t
+
+
+def test_drain_restarts_through_the_installed_bootloader(w):
+    # B8 · W5 · §3.3 의 5: 드레인이 끝나면 설치본 부트로더로 다시 실행한다. 코드 문자열에 캐시
+    # 경로가 없고 나머지 인자는 원래 인자 그대로다. 따라가기 변수는 지우고 `PYTHONPATH` 는 더하지
+    # 않는다. `RCM_WORKER_RESTARTED_AT` 이 지금이고 다른 변수는 그대로다
+    w.srv.cfg.server.worker_heartbeat_seconds = 1
+    w.mp.setenv("RCM_CLIENT_VERSION", "follow")
+    w.mp.setenv("PYTHONUNBUFFERED", "1")
+    w.mp.setenv("RCM_FOLLOWED_PATH", "/stale/cache")
+    w.mp.delenv("PYTHONPATH", raising=False)
+    bump_once_registered(w, NEW)
+    r = w.run(w.argv("--lanes", "2"))
+    assert r.code == "exec", r.err
+    assert w.registers == [INSTALLED]
+    path, args, env = w.execs[-1]
+    assert path == sys.executable
+    assert args[:3] == [sys.executable, "-P", "-c"]
+    assert args[3] == follow.RESTART and str(w.root) not in args[3]
+    assert args[4:] == w.argv("--lanes", "2")
+    for name in follow.BOOT_ENV:
+        assert name not in env, name
+    assert "PYTHONPATH" not in env
+    assert abs(int(env[follow.ENV_WORKER_RESTARTED_AT]) - time.time()) <= 2
+    assert env[TOKEN_ENV] == w.token
+    assert env["RCM_CLIENT_VERSION"] == "follow" and env["PYTHONUNBUFFERED"] == "1"
+    lines = r.err.splitlines()
+    drain = lines.index(
+        f"[rcm worker] server runs v{NEW} — draining: no new claims, "
+        "restarting when running jobs finish"
+    )
+    restart = lines.index(f"[rcm worker] drained — restarting through the installed rcm for v{NEW}")
+    assert drain < restart
+
+
+def test_restart_exec_failure_exits_1(w):
+    # E10(가) · W9 · §3.4 끝: 재실행 exec 가 OSError 면 이유 한 줄과 종료 1 — 감독자가 다시 띄운다
+    w.srv.cfg.server.worker_heartbeat_seconds = 1
+    calls: list[Any] = []
+
+    def broken(path, args, env):
+        calls.append(args)
+        raise OSError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+    bump_once_registered(w, NEW)
+    r = w.run(w.argv(), execve=broken)
+    assert r.code == 1, r.err
+    assert len(calls) == 1 and calls[0][3] == follow.RESTART
+    assert f"[rcm worker] restart failed: {os.strerror(errno.ENOENT)}" in r.err
+    assert "Traceback" not in r.err
+
+
+def test_signal_after_the_drain_cancels_the_restart(w, monkeypatch):
+    # E13 · §14 B질문18: 드레인이 끝나 `stopping` 이 켜진 뒤의 첫 SIGTERM 은 평범한 멈춤이다 —
+    # 「again」이 아니고 exec 하지 않는다
+    import signal
+
+    w.srv.cfg.server.worker_heartbeat_seconds = 1
+    real_run = RemoteWorker.run
+
+    def run_then_signal(self):
+        code = real_run(self)
+        assert self.restart_for == NEW
+        signal.raise_signal(signal.SIGTERM)
+        return code
+
+    monkeypatch.setattr(RemoteWorker, "run", run_then_signal)
+    saved = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    try:
+        bump_once_registered(w, NEW)
+        r = w.run(w.argv())
+    finally:
+        signal.signal(signal.SIGTERM, saved[0])
+        signal.signal(signal.SIGINT, saved[1])
+    assert r.code == 0, r.err
+    assert w.execs == []
+    assert "signal 15: stopping" in r.err
+    assert "again" not in r.err
+
+
+def test_restart_releases_the_probes_before_exec(w, monkeypatch):
+    # §14 B질문13: exec 직전에 측정 프로브를 정리한다
+    w.srv.cfg.server.worker_heartbeat_seconds = 1
+    order: list[str] = []
+    monkeypatch.setattr(RemoteWorker, "release_probes", lambda self: order.append("probes"))
+
+    def fake(path, args, env):
+        order.append("exec")
+        raise Execed
+
+    bump_once_registered(w, NEW)
+    r = w.run(w.argv(), execve=fake)
+    assert r.code == "exec", r.err
+    assert order == ["probes", "exec"]
+
+
+@pytest.mark.parametrize(
+    ("how", "follows", "tail"),
+    [
+        ("default", True, None),
+        ("editable", False, "not following (editable install)"),
+        ("env-installed", False, "not following (RCM_CLIENT_VERSION=installed)"),
+        ("pinned", False, "pinned by RCM_CLIENT_VERSION"),
+        ("no-follow", False, "not following (--no-follow)"),
+        ("main-argv", False, None),
+        ("once", True, None),
+    ],
+)
+def test_cmd_worker_hands_the_follow_setting_to_the_worker(w, monkeypatch, how, follows, tail):
+    # §3.2 · §14 B질문19: 따라가는 워커만 ③ · ④ 에서 드레인한다. 따라가지 않는 워커는 ③ 의 로그와
+    # ④ 의 종료 문장에 붙일 꼬리를 받는다. 인자 목록으로 부른 `main(argv)` 는 꼬리도 없다
+    made: list[RemoteWorker] = []
+    monkeypatch.setattr(RemoteWorker, "run", lambda self: made.append(self) or 0)
+    argv = w.argv()
+    enabled = True
+    if how == "editable":
+        w.kind("editable")
+    elif how == "env-installed":
+        w.mp.setenv("RCM_CLIENT_VERSION", "installed")
+    elif how == "pinned":
+        w.mp.setenv("RCM_CLIENT_VERSION", INSTALLED)
+    elif how == "no-follow":
+        argv = w.argv("--no-follow")
+    elif how == "main-argv":
+        enabled = False
+    elif how == "once":
+        argv = w.argv("--once")
+    r = w.run(argv, enabled=enabled)
+    assert r.code == 0, r.err
+    assert len(made) == 1
+    assert made[0].follows is follows
+    assert made[0].follow_tail == tail
+    assert made[0].once is (how == "once")

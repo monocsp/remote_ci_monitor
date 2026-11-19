@@ -414,14 +414,16 @@ The server logs one line the first time it sees a token's client version on an a
 
 `rcm worker` reads the same setting: `RCM_CLIENT_VERSION`, the `client-version` file, or
 `rcm worker --no-follow`. A wheel install follows by default and an editable install does not. The
-worker follows at two moments:
+worker follows at three moments:
 
 - **When it starts.** Before it registers, the worker asks the server for its version. It always
   asks afresh and never uses the 10-minute record, because a restart is usually the moment the
   server changed. When the versions differ, it fetches the server's wheel and starts that version
   in the same process, exactly as a command does, with the same `rcm: following …` and
   `rcm: not following …` lines. If following fails, the worker registers with the installed
-  version.
+  version. When the server could not be reached and the worker started the version it last saw
+  from its cache, a server that moved on in the meantime refuses that registration, and the worker
+  restarts through the installed rcm (below) instead of stopping.
 - **When the server refuses its registration for the version.** That refusal (a 409) now carries
   `server_version`. A following worker asks the server again and starts that version, logging
   `[rcm worker] register: server runs v0.8.1 — following`. When it cannot, it stops with exit 2
@@ -433,31 +435,67 @@ rcm: worker version 0.8.0, server 0.8.1 — install the same release · pinned b
 rcm: worker version 0.8.0, server 0.8.1 — install the same release · not following (editable install)
 ```
 
-A worker started from the cache does not follow a second time. If the server moved again between
-its start and its registration, it stops with exit 2
+- **While it runs.** Every heartbeat answer carries the server's `server_version`. When it differs
+  from the version the worker runs, a following worker *drains*: it takes no new jobs, lets the
+  jobs it already has run to the end and reports them, and then starts the installed rcm again in
+  the same process, which follows from the beginning. Nothing is lost: a job that was running
+  ends with its own result, not `lost`. The same happens when a lane finds that the server forgot
+  the worker and refuses its new registration for the version. The log reads:
+
+```
+[rcm worker] server runs v0.8.1 — draining: no new claims, restarting when running jobs finish
+[rcm worker] drained — restarting through the installed rcm for v0.8.1
+rcm: following server v0.8.1 (installed v0.8.0) — fetched 707.7 KB
+```
+
+If the server goes back to the worker's own version before the jobs finish, the drain is cancelled
+(`server runs v0.8.0 again — drain cancelled`) and the lanes take jobs again; if it moves to a
+third version, the worker restarts for that one. A report that fails at the end of a drain is
+tried again for up to a minute before the restart, so the new registration does not close that
+job as lost. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
+it, a server version change seen in a heartbeat does not drain again
+(`server runs v0.8.1 — not draining: restarted 60s ago`), and jobs go on being served. A refused
+registration drains at any time, because that lane cannot take jobs. While the server does not
+know the worker, its heartbeats say `heartbeat: worker not registered`. A stop signal during a
+drain is an ordinary stop: running jobs are reported as `lost` and the worker does not restart. If
+the restart itself fails, the worker logs `restart failed: <reason>` and exits 1, and the service
+manager starts it again.
+
+A worker that does not follow (pinned, `installed`, `--no-follow` or editable) never drains. It
+logs one line the first time a heartbeat shows another version, for example
+`[rcm worker] server v0.8.1 — not following (editable install)`, keeps running, and stops with
+exit 2 only when a lane's registration is refused, with the same reason after the server's
+sentence. A worker older than this release does not read `server_version` and keeps its version
+until it restarts.
+
+A worker started from the cache does not follow by itself a second time. If the server moved again
+between its start and its registration, it restarts through the installed rcm, which follows the
+new version. Within 5 minutes of a drain restart it stops with exit 2 instead
 (`· not following: already following v0.8.1`), and the next start begins again from the installed
-rcm. `rcm worker --once` follows when it starts, but stops with exit 2 when its registration is
-refused. `rcm worker --check` never follows: it runs the installed rcm and shows the server's
-version in its `server` row. With `server = "auto"`, the address found over mDNS is handed to the
-restarted process, which does not look for the server again. The worker's requests for the health
-and the wheel carry the worker token.
+rcm. A worker pinned to a cached version stops with `· pinned by RCM_CLIENT_VERSION`.
+`rcm worker --once` follows when it starts, stops with exit 2 when its registration is refused,
+and ignores a server change while it runs; if a lane's registration is refused, it finishes the
+running jobs and exits 2 without restarting. `rcm worker --check` never follows: it runs the
+installed rcm and shows the server's version in its `server` row. With `server = "auto"`, the
+address found over mDNS is handed to the restarted process, which does not look for the server
+again. The worker's requests for the health and the wheel carry the worker token.
 
-Under launchd or systemd, starting the server's version is an `exec`: the PID stays the same, the
-service manager does not count a restart, and the log goes on in the same file. A worker that
-stops with exit 2 is started again by the service files that `rcm init worker --service-file`
-writes (`SuccessfulExit = false` for launchd, `Restart=on-failure` for systemd), and that start
-follows from the beginning. A cached copy that failed to start once is marked and not entered
-again. A worker whose cached copy is broken therefore ends each start with
-`· not following: the cached client v0.8.1 did not load before` and the line
-`rcm: remove <folder> to fetch it again`, not with a traceback. Delete that folder.
+Under launchd or systemd, starting the server's version and restarting after a drain are an
+`exec`: the PID stays the same, the service manager does not count a restart, and the log goes on
+in the same file. Before the `exec` the lanes have finished, the heartbeat has stopped and any
+capability probe still running is ended. A worker that stops with exit 2 is started again by the
+service files that `rcm init worker --service-file` writes (`SuccessfulExit = false` for launchd,
+`Restart=on-failure` for systemd), and that start follows from the beginning. A cached copy that
+failed to start once is marked and not entered again. The start that finds it broken ends with
+`· not following: the cached client did not load`, each later start with
+`· not following: the cached client v0.8.1 did not load before`, and both print the line
+`rcm: remove <folder> to fetch it again` once, not a traceback. Delete that folder.
 
-A worker that is already registered keeps its version until it restarts. An upgraded server does
-not stop it, and its claims go on being served. If one of its lanes has to register again (the
-server forgot the worker) and the server refuses the version, the worker now stops with exit 2, so
-the service manager starts it again and it follows. Before, it stopped with exit 0 and stayed
-down. A worker that follows a much older server reads its `worker.toml` with that version's code,
-so a key that version does not know (for example `server_name` on a server before 0.5.0) stops it
-with exit 2.
+If one of its lanes has to register again and the server refuses the version, a worker that does
+not follow stops with exit 2, so the service manager starts it again. Before, it stopped with
+exit 0 and stayed down. A worker that follows a much older server reads its `worker.toml` with that
+version's code, so a key that version does not know (for example `server_name` on a server before
+0.5.0) stops it with exit 2.
 
 ### The cache
 

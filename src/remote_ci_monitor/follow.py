@@ -21,6 +21,7 @@ import hashlib
 import http.client
 import importlib.metadata
 import json
+import math
 import os
 import re
 import secrets
@@ -139,6 +140,10 @@ if not loaded:
 remote_ci_monitor._follow_boot = {**info, "loaded": loaded}
 sys.exit(main())
 """
+
+#: 드레인 뒤에 설치본 부트로더로 다시 실행하는 코드(M5q §3.3 · PR B2). 경로를 앞에 넣지 않으니
+#: `-P` 아래에서 site-packages 의 설치본이 import 된다 — 다음 판정은 언제나 설치본이 ① 부터 한다.
+RESTART = "import sys\nfrom remote_ci_monitor.cli import main\nsys.exit(main())\n"
 
 #: 이유 코드 → 문구(§2.6 · §14.5). `{}` 자리에 `detail` 이 들어간다.
 _REASONS = {
@@ -1337,6 +1342,43 @@ def exec_into(
     except OSError as e:
         raise FollowError("exec_failed", e.strerror or str(e)) from e
     raise FollowError("exec_failed", "execve returned")
+
+
+def restart_via_installed(
+    argv: Sequence[str],
+    *,
+    environ: Mapping[str, str],
+    execve: Callable[..., Any] = os.execve,
+    now: float | None = None,
+) -> None:
+    """같은 인터프리터를 `-P -c RESTART` 로 다시 실행한다(M5q §3.3 의 5). 따라가기 변수를 지우고
+    `RCM_WORKER_RESTARTED_AT` 에 지금(epoch 초)을 남긴다. 다음 프로세스가 300초 안의 ③ 을
+    드레인하지 않게 하는 고리 막기다. `OSError` 는 그대로 올린다(부르는 쪽이 종료 1 로 끝낸다).
+    진짜 execve 는 돌아오지 않는다."""
+    env = {k: v for k, v in environ.items() if k not in BOOT_ENV}
+    env[ENV_WORKER_RESTARTED_AT] = str(int(time.time() if now is None else now))
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+    exe = sys.executable
+    execve(exe, [exe, "-P", "-c", RESTART, *argv], env)
+
+
+def restarted_at(environ: Mapping[str, str], now: float) -> float | None:
+    """`RCM_WORKER_RESTARTED_AT` 의 시각. 없으면 None. 숫자가 아니거나 미래면 `now` 로 본다 —
+    창은 읽은 때부터 300초다(§14 B질문9)."""
+    raw = environ.get(ENV_WORKER_RESTARTED_AT)
+    if raw is None:
+        return None
+    try:
+        at = float(raw)
+    except ValueError:
+        return now
+    if not math.isfinite(at) or at > now:
+        return now
+    return at
 
 
 # ── 한 명령의 따라가기 (§2.1) ────────────────────────────────────────────────

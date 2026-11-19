@@ -126,6 +126,20 @@ def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
     return {p.name: results[p.name] for p in probes}
 
 
+#: 지금 도는 프로브 프로세스 — 워커가 exec 로 다시 실행하기 직전에 끝낸다(M5q §14 B질문13)
+_LIVE_PROBES: set[subprocess.Popen[bytes]] = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def kill_probes() -> int:
+    """도는 프로브를 그룹째 끝낸다. 끝낸 수를 돌려준다."""
+    with _LIVE_LOCK:
+        procs = list(_LIVE_PROBES)
+    for proc in procs:
+        _kill_group(proc)
+    return len(procs)
+
+
 def _run_probe(probe: Any, env: dict[str, str]) -> Any:
     from remote_ci_monitor.core.capability import normalize_probe_output
 
@@ -151,6 +165,18 @@ def _run_probe(probe: Any, env: dict[str, str]) -> Any:
         )
     except OSError:
         return normalize_probe_output(None, None, missing=True)
+    with _LIVE_LOCK:
+        _LIVE_PROBES.add(proc)
+    try:
+        return _wait_probe(proc, probe)
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_PROBES.discard(proc)
+
+
+def _wait_probe(proc: subprocess.Popen[bytes], probe: Any) -> Any:
+    from remote_ci_monitor.core.capability import normalize_probe_output
+
     # 출력은 **앞부분만** 지닌다 — 지문에 드는 것은 앞 두 줄 · 120자다. communicate 로 다 담으면
     # `yes` 같은 프로브 하나가 3초에 10 GB 를 먹는다(엣지 검증 실측). 나머지는 읽어서 버린다 —
     # 안 읽으면 파이프가 차서 정상 프로브(큰 목록을 찍는 것)가 시한까지 멈춘다.

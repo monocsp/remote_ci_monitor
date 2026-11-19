@@ -13,6 +13,12 @@
 #
 # Replace /home/me below. PATH does not start with the directory rcm is installed in: jobs inherit
 # it, and a virtual environment's bin first on PATH replaces the `python` your presets call.
+#
+# When the server's version changes, a worker installed from a wheel finishes its running jobs and
+# starts the server's version in the same process (exec): MainPID stays, NRestarts does not grow,
+# and the journal goes on. It exits 2 only when it cannot follow, and Restart=on-failure starts it
+# again. `Environment=RCM_CLIENT_VERSION=0.8.0` pins a version (`installed` turns following off).
+# See docs/operating.md, Remote workers.
 
 [Unit]
 Description=remote_ci_monitor worker

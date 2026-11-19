@@ -2,8 +2,8 @@
 
 따라가기는 `$XDG_CACHE_HOME/rcm` 에 받고 `$XDG_CONFIG_HOME/rcm/client-version` 을 읽는다. 시험이
 사용자의 진짜 캐시와 한 줄 파일을 건드리지 않게 두 변수를 `tmp_path` 아래로 돌리고, 개발자 셸에
-남은 `RCM_CLIENT_VERSION` 과 따라가기 변수를 지운다. 따라간 자식의 표지(`_follow_boot`)와 이
-프로세스의 따라가기 결과도 시험마다 비운다.
+남은 `RCM_CLIENT_VERSION` 과 따라가기 변수, 워커 재실행 시각을 지운다. 따라간 자식의
+표지(`_follow_boot`)와 이 프로세스의 따라가기 결과도 시험마다 비운다.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ FOLLOW_ENV = (
     "RCM_FOLLOWED_FROM",
     "RCM_FOLLOW_FROM",
     "RCM_FOLLOW_FOUND",
+    "RCM_WORKER_RESTARTED_AT",  # 드레인 재실행의 고리 막기(PR B2)
 )
 
 
