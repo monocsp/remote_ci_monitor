@@ -977,6 +977,8 @@ def _upsert_bundle(
 #: `rcm keep` 이 `requested` 를 주려면 묶음 만료까지 이만큼은 남아야 한다(§15.1) — copier 가 집기
 #: 전에 TTL 청소가 가져가는 일을 줄인다(그래도 오면 `mark_bundles_purged` 가 조건부라 막는다).
 KEEP_EXPIRY_MARGIN_SECONDS = 60.0
+#: `mark_shelf(if_last_used=…)` 를 안 줬다는 표식(None 은 「비어 있을 때」라는 뜻이라 따로 둔다).
+_ANY: Any = object()
 #: `mark_shelf` 가 받는 열 — 키와 상태는 따로 받는다.
 _SHELF_FIELDS = frozenset(SHELF_COLUMNS) - {"job_id", "state"}
 #: `job_artifacts` 를 거르는 조건 — 그 잡의 보관 요청이 진행 중이 아니다(M5p 결정 130).
@@ -2110,6 +2112,11 @@ class Store:
         copier 가 `finish_shelf_item` 뒤에 부른다(§15.2). 한 트랜잭션에서 「ack 됨 · 합류자 0 ·
         진행 중인 보관 행 없음 · 아직 안 지움」을 본다 — 그새 합류가 끼었으면 TTL 까지 둔다.
         파일은 부르는 쪽(서버)이 지운다. 할 일이 없으면 None.
+
+        같은 폴더를 두 번 지우는 일이 생길 수 있다(copier 의 이 경로와 ack 의 purge 가 엇갈릴 때,
+        격리 검증 I4). 해는 없다: 이 트랜잭션은 `purged_at IS NULL` 일 때만 표시하므로 회계는 한
+        번만 줄고, 지우는 쪽(`remove_under_root` · `Janitor._remove_tree`)은 이미 없는 폴더에
+        False 를 돌려줄 뿐 예외를 내지 않는다.
         """
         when = now if now is not None else datetime.now(UTC)
         conn = self._conn()
@@ -2310,9 +2317,14 @@ class Store:
         now: datetime,
         *,
         only_from: Iterable[str] | None = None,
+        if_last_used: float | None | object = _ANY,
         **fields: Any,
     ) -> bool:
         """행의 상태와 열을 바꾼다. 바뀌었으면 True. `only_from` 을 주면 그 상태에서만 바꾼다.
+
+        `if_last_used` 를 주면 `last_used_at` 이 그 값일 때만 바꾼다(None 은 「비어 있을 때」).
+        청소기가 계획을 읽은 뒤 누가 항목을 썼으면(되살리기) 그 계획은 낡았다 — 지우거나 정리
+        대기로 옮기지 않는다(격리 검증 D1).
 
         필드 이름은 표의 열만 받는다(SQL 로 새지 않는다). 상태를 정하는 시각(`stale_since` ·
         `deleted_at` · `failed_at`)을 안 주면 `now` 로 채운다.
@@ -2338,6 +2350,11 @@ class Store:
             allowed = tuple(only_from)
             sql += f" AND state IN ({','.join('?' * len(allowed))})"
             params.extend(allowed)
+        if if_last_used is None:
+            sql += " AND last_used_at IS NULL"
+        elif if_last_used is not _ANY:
+            sql += " AND last_used_at=?"
+            params.append(if_last_used)
         conn = self._conn()
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -2435,11 +2452,21 @@ class Store:
     def _set_state(
         self, conn: sqlite3.Connection, job_id: int, state: str, at: float, **cols: Any
     ) -> None:
-        """상태 전이 + 열 갱신 + 전이 이벤트를 한 번에(호출자가 트랜잭션을 연다)."""
+        """상태 전이 + 열 갱신 + 전이 이벤트를 한 번에(호출자가 트랜잭션을 연다).
+
+        종료 상태로 가면 그 잡의 보관 행(M5p)에도 잡 상태와 끝난 시각을 같은 트랜잭션에서 적는다
+        (§15.1). 잡을 끝내는 길은 `finish` 말고도 여럿이다(원격 워커 유실 · 대기 잡 취소 · 기동
+        복구 · supersede). 전부 이 함수를 지나므로 여기 한 곳에 둔다 — 길마다 두면 하나를 빠뜨린다.
+        """
         sets = ["state=?"] + [f"{k}=?" for k in cols]
         conn.execute(
             f"UPDATE jobs SET {', '.join(sets)} WHERE id=?", (state, *cols.values(), job_id)
         )
+        if state in TERMINAL_STATES:
+            conn.execute(
+                "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
+                (state, cols.get("finished_at", at), job_id),
+            )
         self._event(conn, job_id, EVENT_STATE, {"state": state}, at)
 
     def create_job(
@@ -3357,11 +3384,7 @@ class Store:
                     (job_id, name, seq),
                 )
             # 원격 잡의 보관 행은 묶음이 ready 일 때(잡이 아직 running 일 때) 섰다 — 잡 상태와 끝난
-            # 시각은 여기서 같은 트랜잭션으로 채운다(M5p §15.1). copier 와의 순서와 상관없이 맞다.
-            conn.execute(
-                "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
-                (state, ts, job_id),
-            )
+            # 시각은 위의 `_set_state` 가 같은 트랜잭션에서 채웠다(M5p §15.1).
             if bundle is not None:
                 _upsert_bundle(
                     conn,

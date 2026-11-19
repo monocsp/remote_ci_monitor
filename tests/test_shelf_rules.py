@@ -641,3 +641,20 @@ def test_a15_models():
 
     assert job(1).keep is False
     assert [f.name for f in dataclasses.fields(ShelfItem)] == SHELF_COLUMNS
+
+
+# ── 격리 검증이 찾은 것 (PR #217 · I5) ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("origin", "schemes", "expected"),
+    [
+        ("http://macmini.local", ("http",), True),
+        ("http://macmini.local:80", ("http",), True),
+        ("http://macmini.local:443", ("http",), False),  # 포트 없는 Host 는 그 scheme 의 기본 포트
+        ("https://macmini.local", ("http", "https"), True),
+        ("https://macmini.local:80", ("http", "https"), False),
+    ],
+)
+def test_i5_a_host_without_a_port_means_the_schemes_default_port(origin, schemes, expected):
+    assert shelf().same_origin("macmini.local", origin, None, schemes=schemes) is expected
