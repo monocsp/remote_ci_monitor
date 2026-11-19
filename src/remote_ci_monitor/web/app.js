@@ -384,8 +384,15 @@
     // `group wait` 는 서버가 보내는 문구다(core/queue.py) — 화면에서만 자기 말로 바꾼다
     if (c === "group wait") return { cls: "low", text: T(lang, "conf.group_wait") };
     if (c === "high" || c === "med") {
+      // 배지 글은 짧게, 원래 뜻(실측 n회의 중앙값)은 `title` 로 — 영어 `· measured n=12` 가 152px
+      // 도착 칸을 넘겨 n 의 자릿수마다 표가 칸 폭을 다시 나눴다(오너 결정 2026-11-19).
       var word = T(lang, "conf." + c);
-      return { cls: c, text: n != null ? T(lang, "conf.measured", { conf: word, n: n }) : word + " · measured" };
+      if (n == null) {
+        return { cls: c, text: T(lang, "conf.measured_no_n", { conf: word, dash: DASH }),
+          title: T(lang, "conf.measured_no_n_title", { conf: word }) };
+      }
+      return { cls: c, text: T(lang, "conf.measured", { conf: word, n: n }),
+        title: T(lang, "conf.measured_title", { conf: word, n: n }) };
     }
     return { cls: "low", text: T(lang, "conf.source", { source: est.source || DASH }) };
   }
@@ -3829,7 +3836,7 @@
     if (bar) elapsedCell += bar;
     var eta = etaText(row, tz(), now(), L());
     var conf = confidenceBadge(est, L());
-    var etaCell = '<span class="eta"><span class="clk">' + esc(eta.clock) + "</span>" + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '">' + esc(conf.text) + "</span>";
+    var etaCell = '<span class="eta"><span class="clk">' + esc(eta.clock) + "</span>" + (eta.rel ? ' <span class="in">· ' + esc(eta.rel) + "</span>" : "") + '</span><br><span class="conf ' + esc(conf.cls) + '"' + (conf.title ? ' title="' + esc(conf.title) + '"' : "") + ">" + esc(conf.text) + "</span>";
     if (est.overdue && !est.stuck) etaCell = '<span class="eta">' + DASH + '</span><br><span class="conf over">' + esc(tr("eta.overdue")) + "</span>";
     var source = sourceHtml(row, L(), false);
     // 칸마다 번역된 라벨(Codex 가독성 검토 4번) — 폰에서 머리줄이 사라지면 긴 값들이 한 덩어리로

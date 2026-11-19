@@ -8,6 +8,13 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Changed
+- **The web queue's English confidence badge is shorter.** `high · measured n=12` became
+  `high · n=12`, and hovering the badge spells it out (`high confidence: median of 12 measured
+  runs`). The long badge made the arrival column wider than its fixed 152 px, and every time the
+  sample count gained a digit the table re-divided its columns and the rows shifted. The Korean
+  badge (`높음 · 최근 12회 기준`) fits and keeps its text; it gets the same tooltip. `rcm top` and
+  `rcm eta` still print `measured n=12`.
+  ([#212](https://github.com/monocsp/remote_ci_monitor/pull/212))
 - **The store skill's candidate helper follows `include`.** `rcm_candidate.py` (installed by
   `rcm-store-connect`) pasted a project's presets at the end of `server.toml`. With presets moved
   to an included file that made a candidate rcm refuses (`preset 'gate' is defined in both`), and
@@ -18,11 +25,11 @@ of a key bumps that number and is listed here.
   candidate folder (`--out` names a new or empty folder there; it never overwrites a file) with
   the other include entries as absolute paths, so `--check` reads the same files. Reading
   `include` needs Python 3.11 or later; an older `python3` stops with that message instead of
-  pasting. A name also defined in `server.toml` or another
-  included file stops it with both file names; `--check` refuses an `rcm` older than 0.6.0; the
-  next steps it prints are the two copies and `rcm reload --dry-run` → `rcm reload`. A
-  `server.toml` without `include` gets byte-for-byte the same candidate as before. Projects get
-  it with `rcm skills install --into . --force` after upgrading rcm.
+  pasting. A name also defined in `server.toml` or another included file stops it with both file
+  names; `--check` refuses an `rcm` older than 0.6.0; the next steps it prints are the two copies
+  and `rcm reload --dry-run` → `rcm reload`. A `server.toml` without `include` gets
+  byte-for-byte the same candidate as before. Projects get it with
+  `rcm skills install --into . --force` after upgrading rcm.
   ([#213](https://github.com/monocsp/remote_ci_monitor/pull/213))
 
 ## [0.6.1] - 2026-11-19
