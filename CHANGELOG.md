@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **The web queue's English confidence badge is shorter.** `high · measured n=12` became
+  `high · n=12`, and hovering the badge spells it out (`high confidence: median of 12 measured
+  runs`). The long badge made the arrival column wider than its fixed 152 px, and every time the
+  sample count gained a digit the table re-divided its columns and the rows shifted. The Korean
+  badge (`높음 · 최근 12회 기준`) fits and keeps its text; it gets the same tooltip. `rcm top` and
+  `rcm eta` still print `measured n=12`.
+  ([#212](https://github.com/monocsp/remote_ci_monitor/pull/212))
+
 ## [0.6.1] - 2026-11-19
 
 ### Fixed

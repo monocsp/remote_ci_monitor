@@ -465,7 +465,8 @@ bundles rather than evicting bundles somebody is still waiting for; the affected
 
 ## Why the numbers can be wrong
 
-- ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs.
+- ETA source `default`/`preset` means no measurements yet; `measured n=7` is the median of 7 real runs
+  (the web badge says `high · n=7` and spells it out on hover).
 - A job sharing the machine with another job takes longer than a median measured from runs that
   had it alone, so the confidence badge drops one step while that is true. The estimate itself is
   not padded — a guessed slowdown factor would be a number nobody measured.
