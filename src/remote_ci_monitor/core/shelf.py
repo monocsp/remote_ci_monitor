@@ -295,6 +295,25 @@ def normalize_member(name: str) -> str:
     return name.rstrip("/")
 
 
+#: 펼친 tar 의 멤버를 만들지 않은 이유(manifest `skipped[].reason`). 문장은 만들지 않는다 — 페이지는
+#: 수만 보인다. `apple_double` 은 macOS 가 끼워 넣은 메타데이터다(2026-11-20 운영 잡 #3821).
+SKIP_APPLE_DOUBLE = "apple_double"
+MEMBER_SKIP_REASONS = ("bad_encoding", "unsafe_name", "sparse", "not_a_file", SKIP_APPLE_DOUBLE)
+
+
+def apple_double_member(name: str) -> bool:
+    """macOS 가 tar 에 끼워 넣는 메타데이터 멤버인가 — `._*` · `.DS_Store` · `__MACOSX/` 아래.
+
+    bsdtar 는 `COPYFILE_DISABLE` 이 없으면 확장 속성이 있는 파일마다 AppleDouble 멤버 `._<이름>` 을
+    (디렉터리 `.` 에는 `._.` 를) 넣는다. `._x.png` 는 확장자 때문에 그림으로 분류돼 깨져 보인다.
+    `name` 은 `normalize_member` 를 거친 tar 안의 상대 경로다.
+    """
+    parts = name.split("/")
+    if parts[-1].startswith("._") or parts[-1].casefold() == ".ds_store":
+        return True
+    return any(p.casefold() == "__macosx" for p in parts)
+
+
 # ── 펼치기 (§4.4 · 결정 133) ─────────────────────────────────────────────────
 
 _TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz")
@@ -531,13 +550,16 @@ __all__ = [
     "DAY",
     "IN_FLIGHT_STATES",
     "MARKER_NAME",
+    "MEMBER_SKIP_REASONS",
     "PUBLIC_SHELF_STATES",
     "SHELF_ERROR_CODES",
     "SHELF_REASON_CODES",
     "SHELF_STATES",
     "SHELVED_STATES",
+    "SKIP_APPLE_DOUBLE",
     "STAGING_NAME",
     "SweepPlan",
+    "apple_double_member",
     "capacity_verdict",
     "content_disposition",
     "due_dates",

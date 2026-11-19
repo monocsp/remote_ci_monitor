@@ -7,6 +7,16 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
+  `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file
+  with extended attributes; the shelf unpacked them into `<name>.d/` and, ending in `.png`, they
+  showed as broken images in the item's grid (23 of 48 files of one app-map-shots job). Unpacking
+  now leaves out `._*`, `.DS_Store` and anything under `__MACOSX/` and lists them under the
+  item's skipped members with the reason `apple_double`. Files the job declared itself are kept as
+  they are, whatever their name. Items already on the shelf do not change.
+  ([#229](https://github.com/monocsp/remote_ci_monitor/pull/229))
+
 ## [0.7.0] - 2026-11-19
 
 ### Breaking changes
