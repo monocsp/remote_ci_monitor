@@ -2071,9 +2071,9 @@ class Store:
                     result = "retried" if current == shelf_rules.STATE_FAILED else "requested"
                 elif bundle == "gone":
                     result = "gone"
-                elif bundle == "moving" or (
-                    bundle == "absent" and job["state"] not in TERMINAL_STATES
-                ):
+                elif job["state"] not in TERMINAL_STATES and bundle in ("moving", "absent"):
+                    # 끝난 잡의 묶음은 더 오지 않는다 — 아직 오는 중으로 남았으면 끊긴 것이다
+                    # (업로드 도중 유실, P2 격리 검증 D2). 그때는 `no_bundle(interrupted)`
                     result = "armed"
                 else:
                     result = "no_bundle"

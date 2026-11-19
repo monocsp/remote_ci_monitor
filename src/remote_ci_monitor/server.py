@@ -161,7 +161,7 @@ from remote_ci_monitor.gitops import (
     tags_matching,
 )
 from remote_ci_monitor.hostsample import HostSampler
-from remote_ci_monitor.janitor import Janitor
+from remote_ci_monitor.janitor import Janitor, reconcile_shelf_on_start
 from remote_ci_monitor.materialize import blob_path, stale_blob_keys
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
@@ -196,6 +196,8 @@ from remote_ci_monitor.release_state import (
 )
 from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
+from remote_ci_monitor.shelf_copier import ShelfCopier
+from remote_ci_monitor.shelf_server import ShelfAppMixin, ShelfHandlerMixin, is_shelf_path
 from remote_ci_monitor.store import (
     DB_VERSION,
     ROLE_CANCEL_JOB,
@@ -228,7 +230,7 @@ RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸
 MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
 _JOB_RE = re.compile(
     r"^/jobs/(\d+)"
-    r"(/tree/manifest|/tree|/log|/cancel|/priority"
+    r"(/tree/manifest|/tree|/log|/cancel|/priority|/keep"
     r"|/artifacts/archive|/artifacts/ack|/artifacts)?$"
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -453,7 +455,7 @@ def shown_pool(job: Job) -> str:
     return job.pool
 
 
-class App(RemoteWorkersMixin, CapabilitiesMixin):
+class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
     """서버의 상태와 동작. HTTP 핸들러는 얇고, 규칙은 여기에 있다(테스트하기 쉽게)."""
 
     def __init__(
@@ -543,6 +545,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         self.preset_env: dict[str, dict[str, list[str]]] = {}
         self._remote_init()
         self._capabilities_init()
+        self._shelf_init()  # 보관함(M5p) — 전용 전송 슬롯 · zip hold · manifest 캐시
 
     # ── 수명 ────────────────────────────────────────────────────────────────
 
@@ -567,6 +570,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             else "nothing to recover",
         )
         self.recover_versions_on_start()
+        # 보관함(M5p §5.3) — 레인 · 청소기 · copier 보다 **먼저**. 표식이 없는데 보관된 항목이
+        # 있으면 다른 디스크가 안 붙은 것이다: 보관함을 `unavailable` 로 두고 아무것도 안 고친다.
+        # M5e 의 `reconcile_bundles_on_start` 는 여기서 부르지 않는다(§15.5 — 재시작을 넘긴
+        # 원격 잡의 uploading 묶음이 failed 가 된다. 따로 설계한다).
+        self.store.shelf_enabled = self.config.shelf_enabled
+        self.shelf_startup = reconcile_shelf_on_start(
+            self.store, self.config, now=self.now_fn(), log=self.log
+        )
         # 레인이 뜨기 **전에** 로컬 머신을 잰다 — 첫 claim 이 「보고 없음」으로 any-capable 잡을
         # 놓치지 않게(M5n §4.2)
         self.measure_capabilities()
@@ -594,8 +605,20 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             log=self.log,
             stop=self.stop,
             versions=self,  # 만료된 버전 드래프트를 라우트와 같은 «버리기» 경로로 (워크플랜 §2.3)
+            shelf_hold=self.shelf_hold,  # zip 으로 내려보내는 항목은 그 회차에 안 지운다(M5p)
+            on_shelf_change=self._on_shelf_change,
+            on_sweep=self.wake_copier,  # 청소 회차마다 놓친 보관 요청을 줍는다(§4.2)
         )
         self.retention.start()
+        self.copier = ShelfCopier(
+            self.store,
+            self.config,
+            now_fn=self.now_fn,
+            log=self.log,
+            on_change=self._on_shelf_change,
+            on_purged=self._shelf_purged,
+        )
+        self.copier.start()
         step("janitor", f"sweep every {self.config.server.retention_sweep_interval_seconds:g}s")
         self.notifier = Notifier(
             self.store,
@@ -670,6 +693,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             w.join(timeout=self.config.server.grace_seconds + 10)
         if self.retention is not None:
             self.retention.stop()
+        if self.copier is not None:
+            self.copier.stop()
         if self.notifier is not None:
             self.notifier.stop()
 
@@ -861,6 +886,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             # 표시를 지운다 — 모든 종료가 이 길로 알려진다
             self._forget_no_supersede(job.id)
             self._mark_medians_dirty()  # 새 표본이 생겼다 — 여기서만
+            self.wake_copier()  # 보관 요청이 섰을 수 있다 — 깨우는 것은 값싸다(M5p §4.2)
             self.publish(
                 KIND_JOB_FINISHED,
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
@@ -3007,7 +3033,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         purged = decision.purge and self.purge_bundle(job.id, art.PURGED, now)
         if purged:
             self.publish_artifacts(job.id, art.PURGED)
-        return {"job_id": job.id, "purged": bool(purged), "reason_code": decision.reason_code}
+        # `deferred` — 원래 지울 ack 인데 보관함이 푸는 중이라 미뤘다(M5p §15.2, 키 추가만)
+        return {
+            "job_id": job.id,
+            "purged": bool(purged),
+            "reason_code": decision.reason_code,
+            "deferred": bool(getattr(decision, "deferred", False)),
+        }
 
     def finalize_bundle_hold(self, job_id: int) -> None:
         """마지막 독자가 닫았다. 만료로 파일이 이미 간 묶음이면 그때 회계를 돌려준다(§6)."""
@@ -3428,12 +3460,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                 by_id[row.job.id] = row.job
             for job in pool.recent or ():
                 by_id[job.id] = job
+        base = model.base_url or self.base_url()
         for pool in doc.get("pools", []):
             for row in [*pool.get("queue", []), *pool.get("recent", [])]:
                 job = by_id.get(row.get("id"))
                 if job is not None:
                     row["artifacts"] = self.artifacts_public(job)
+                    row["shelf"] = self.shelf_public(job, base)  # M5p — keep 잡만 객체
         doc["server"]["artifact_storage"] = self.artifact_storage()
+        doc["server"]["shelf_storage"] = self.shelf_storage()  # M5p — 경로 없음(§4.8)
         doc["server"]["job_storage"] = self.job_storage()
         # 웹의 취소 버튼이 읽는다(M5j G5) — 페이지는 capability 를 가질 수 없어 admin 만 취소한다
         doc["server"]["cancel_requires_submission_token"] = bool(
@@ -3460,18 +3495,21 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
         return self._with_artifacts(
-            queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job
+            queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job, host
         )
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
         doc = recent_json(job, base_url=self.base_url(host))
-        step_names = self._with_step_timeline(self._with_artifacts(doc, job), job)
+        step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
 
-    def _with_artifacts(self, doc: dict[str, Any], job: Job) -> dict[str, Any]:
-        """잡 행 JSON 에 산출물 처분을 **더한다**. 기존 키는 손대지 않는다(스키마 v1, §10)."""
+    def _with_artifacts(
+        self, doc: dict[str, Any], job: Job, host: str | None = None
+    ) -> dict[str, Any]:
+        """잡 행 JSON 에 산출물 처분과 보관 상태(M5p)를 **더한다**. 기존 키는 손대지 않는다."""
         doc["artifacts"] = self.artifacts_public(job)
+        doc["shelf"] = self.shelf_public(job, self.base_url(host))
         return doc
 
     def _with_step_timeline(self, doc: dict[str, Any], job: Job) -> set[str]:
@@ -3657,6 +3695,18 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         supersede = body.get("supersede", True)
         if not isinstance(supersede, bool):
             raise ApiError(400, "supersede must be true or false")
+        # 보관함(M5p §4.1) — 제출 때 얼린다: 프리셋 keep OR 제출 keep. 묶을 것이 없으면 거절한다
+        asked = body.get("keep", False)
+        if not isinstance(asked, bool):
+            raise ApiError(400, "keep must be true or false")
+        if asked and not preset.artifacts:
+            raise ApiError(
+                400,
+                f"preset '{preset.name}' declares no artifacts — nothing to keep "
+                "(keep_without_artifacts)",
+                reason_code="keep_without_artifacts",
+            )
+        keep = asked or preset.keep
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
                 preset,
@@ -3671,6 +3721,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                 link,
                 placed,
                 supersede=supersede,
+                keep=keep,
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3701,7 +3752,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         # 머신을 지정한 잡은 합류하지 않는다 — 같은 트리여도 「그 머신에서」가 요점이다(M5n §4.5)
         want_join = want_join and placed["target_worker"] is None
         if want_join:
-            joined = self.store.join_or_bump_with_submission(jk, token.name, label, priority, now)
+            joined = self.store.join_or_bump_with_submission(
+                jk, token.name, label, priority, now, keep=keep
+            )
             if joined is not None:
                 existing, sid, cancel_token = joined
                 self._publish_job(None, existing.id)
@@ -3713,6 +3766,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                     "submission": {"id": sid, "cancel_token": cancel_token},
                     "placement": self.submission_placement(preset, existing),
+                    **self._keep_fields(existing, host),
                 }
         job, sid, cancel_token = self.store.create_job_with_submission(
             participant=token.name,
@@ -3729,6 +3783,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             priority=priority,
             pool=pool,
             link=link,
+            keep=keep,
             **placed,
         )
         if not supersede:
@@ -3748,7 +3803,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             # 에서 났다(M5l S8). 비밀은 여기서 한 번 나가고 서버에는 해시만 남는다.
             "submission": {"id": sid, "cancel_token": cancel_token},
             "placement": self.submission_placement(preset, job),
+            **self._keep_fields(job, host),
         }
+
+    def _keep_fields(self, job: Job, host: str | None) -> dict[str, Any]:
+        """제출 응답의 `keep` 과 정해진 보관 URL(M5p §4.1). keep 이 아니면 `shelf_url` 키가 없다."""
+        out: dict[str, Any] = {"keep": bool(job.keep)}
+        if job.keep:
+            out["shelf_url"] = self.shelf_url(job.id, self.base_url(host))
+        return out
 
     def _placement_fields(
         self, body: dict[str, Any], preset: Preset, token: TokenInfo, pool: str
@@ -4174,6 +4237,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         placed: dict[str, Any] | None = None,
         *,
         supersede: bool = True,
+        keep: bool = False,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
         placed = dict(placed or {})
@@ -4210,7 +4274,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         want_join = want_join and placed.get("target_worker") is None
         if want_join:
-            joined = self.store.join_or_bump_with_submission(jk, token.name, label, priority, now)
+            joined = self.store.join_or_bump_with_submission(
+                jk, token.name, label, priority, now, keep=keep
+            )
             if joined is not None:
                 existing, sid, cancel_token = joined
                 self._publish_job(None, existing.id)
@@ -4223,6 +4289,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
                     "sha": existing.source.sha,
                     "url": f"{self.base_url(host)}/#/jobs/{existing.id}",
                     "submission": {"id": sid, "cancel_token": cancel_token},
+                    **self._keep_fields(existing, host),
                 }
         job, sid, cancel_token = self.store.create_job_with_submission(
             participant=token.name,
@@ -4239,6 +4306,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             priority=priority,
             pool=pool,
             link=link,
+            keep=keep,
             **placed,
         )
         if supersede:
@@ -4258,6 +4326,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             "sha": sha,
             "url": f"{self.base_url(host)}/#/jobs/{job.id}",
             "submission": {"id": sid, "cancel_token": cancel_token},  # 잡 행과 같은 트랜잭션
+            **self._keep_fields(job, host),
         }
 
     def _supersede_after_queue(self, job_id: int) -> list[int]:
@@ -4796,6 +4865,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin):
             # `POST /reload {"dry_run": true}` 를 안다(M5o 결정 124). 옛 서버는 본문을 무시하고
             # **진짜 reload 를 해 버린다** — `rcm reload --dry-run` 은 이 키가 있을 때만 보낸다
             "reload_dry_run": True,
+            # 보관함 요약(M5p §4.8, 정보 — 503 조건은 아니다). **이 키가 있다는 것이 「서버가
+            # keep 을 안다」의 신호다** — 옛 서버는 모르는 제출 키를 무시하므로 `rcm run --keep` 이
+            # 이 키를 본다
+            "shelf": self.shelf_storage(),
         }
         if not ok:
             if not db_ok:
@@ -4889,7 +4962,7 @@ class _BodyReader:
         return getattr(self.raw, name)
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
     server_version = f"rcm/{__version__}"
     sys_version = ""
     protocol_version = "HTTP/1.1"
@@ -5098,6 +5171,11 @@ class Handler(BaseHTTPRequestHandler):
         if method == "HEAD":
             method = "GET"
 
+        if is_shelf_path(path):
+            # 보관함(M5p) — Host 허용 목록 · 읽기 규칙 · 경로는 `ShelfHandlerMixin` 이 본다. 파일
+            # 경로는 퍼센트 디코딩 **전** 문자열(`parts.path`)을 넘긴다 — 한 번만 푼다
+            self._shelf_route(path, query)
+            return
         if path == "/api/health":
             self._only(method, "GET")
             status, body = self.app.health()
@@ -5285,6 +5363,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._only(method, "POST")
                 t = self.app.require_client_token(self._token())  # 쓰기다 — Bearer 만(CSRF)
                 self._send_json(200, self.app.ack_artifacts(job_id, t, self._json_body()))
+                return
+            if sub == "/keep":
+                # `rcm keep N`(M5p §4.1) — 그 잡의 로그 자격, Bearer 만(쓰기다)
+                self._only(method, "POST")
+                t = self.app.require_client_token(self._token())
+                self._json_body()  # 본문은 무시하되 읽어서 연결을 깨끗이 둔다
+                status, body = self.app.keep_job(job_id, t, self.headers.get("Host"))
+                self._send_json(status, body)
                 return
             if sub == "/cancel":
                 self._only(method, "POST")

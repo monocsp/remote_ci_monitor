@@ -6,6 +6,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5p P2 — `shelf-*` 넷: 파일 응답에서 `sandbox` CSP 를 뺌 · 퍼센트 디코딩 뒤의 경로 검사를 뺌 ·
+     보관함 zip 이 M5e 전송 슬롯을 같이 씀 · Host 허용 목록을 건너뜀
+     (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-b.md`)
   M5p P1 — `shelf-*` 넷: 보관 항목을 지우기 **전에** deleted 로 표시 · 1시간 쓰기 규칙 제거 · 보관
      중인 묶음의 ack 를 미루지 않음 · keep 을 켤 때 ready 묶음의 보관 행을 안 세움
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-a.md`)
@@ -137,6 +140,52 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5p P2 — 보관함의 서버 · HTTP · 보안 (docs/m5p-workplan.md §10) ──
+    Mutant(
+        # 잡이 만든 파일이 웹 UI 와 같은 출처의 진짜 문서가 된다 — `.html` 하나가 토큰을 읽는다
+        # (결정 139)
+        name="shelf-file-csp-no-sandbox",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old="""FILE_CSP = "sandbox; default-src 'none'; """,
+        new="""FILE_CSP = "default-src 'none'; """,
+        tests=(
+            "tests/test_server_m5p_security.py::test_e15_e16_active_documents_are_downloads",
+            "tests/test_server_m5p.py::test_b3_an_image_is_served_inline_inside_a_sandbox",
+        ),
+    ),
+    Mutant(
+        # 디코딩 뒤 검사 제거 — 라우터의 `..` 검사는 디코딩 전 글자를 보므로 `%2e%2e` 가 지나간다.
+        # manifest 가 마지막 문이지만 「안전하지 않은 경로는 400」이 사라진다(§4.6 · E1)
+        name="shelf-path-check-before-decode",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old=(
+            "        if not shelf_rules.safe_member(rel):\n"
+            '            raise ApiError(400, "bad path")\n'
+        ),
+        new="",
+        tests=(
+            "tests/test_server_m5p_security.py::test_e1_to_e7_unsafe_paths_after_decoding_are_400",
+        ),
+    ),
+    Mutant(
+        # 보관함 zip 이 M5e 전송 슬롯(2)을 같이 쓴다 — 내려받기 둘이 원격 keep 잡의 묶음 업로드를
+        # 503 으로 막고, 워커는 그 503 을 다시 시도하지 않는다(결정 148 · 검토 P0-4)
+        name="shelf-zip-uses-m5e-slots",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old="        self.shelf_slots = threading.BoundedSemaphore(SHELF_TRANSFER_SLOTS)\n",
+        new="        self.shelf_slots = self.transfer_slots  # type: ignore[attr-defined]\n",
+        tests=("tests/test_server_m5p_remote.py::test_b9_shelf_zips_never_take_the_upload_slots",),
+    ),
+    Mutant(
+        # Host 허용 목록을 건너뜀 — DNS 재바인딩으로 외부 웹페이지가 보관 파일을 읽는다(결정 148)
+        name="shelf-host-allowlist-skipped",
+        path="src/remote_ci_monitor/shelf_server.py",
+        old="        if self._token() is None and not app.shelf_host_ok(host):",
+        new="        if False:",
+        tests=(
+            "tests/test_server_m5p_security.py::test_e22_a_foreign_host_gets_421_on_every_shelf_route",
+        ),
+    ),
     # ── M5q A0 — 서버 wheel 이 릴리스 wheel 과 같은 파일을 싣는다 (`docs/m5q-workplan.md` §6 S1) ──
     Mutant(
         # skills 를 다시 뺀다 — 서버 wheel 로 깐 클라이언트의 `rcm skills` 가 SKILL.md 를 못 쓴다

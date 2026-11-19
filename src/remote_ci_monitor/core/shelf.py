@@ -70,6 +70,7 @@ SHELF_REASON_CODES = (
     "timeout",  # 안전판 — 묶음 만료 + 24시간이 지나도록 못 집었다(§15.2)
     "bundle_gone",  # 보관하려던 묶음이 이미 없다
     "missing",  # 보관했는데 폴더가 사라졌다
+    "too_many_files",  # 묶음의 멤버(건너뛸 것까지)가 `max_artifact_files` 를 넘었다
     # none — 보관할 것이 없었다
     "not_collected_on_success",  # artifacts_on = "failure" 인데 성공
     "no_artifacts",  # 프리셋에 글롭이 없다
@@ -81,6 +82,8 @@ SHELF_REASON_CODES = (
     "purged",
     "expired",
     "unknown",
+    "interrupted",  # 잡이 끝났는데 묶음이 아직 오는 중이다(업로드 도중 유실)
+    "job_lost",  # 잡이 묶음 없이 유실됐다(워커가 끊겼다)
 )
 #: 보관함 전체의 `error_code`(`/api/status.server.shelf_storage`). 항목의 이유가 아니다.
 SHELF_ERROR_CODES = (

@@ -83,6 +83,10 @@ def test_reason_codes_cover_every_code_the_store_and_janitor_write():
         "not_collected_on_success",
         "no_artifacts",
         "forgotten",
+        # P2 격리 검증 — 멤버 수 폭탄 · 업로드 도중 유실 · 묶음 없이 유실
+        "too_many_files",
+        "interrupted",
+        "job_lost",
     ):
         assert code in codes, code
 
