@@ -2922,7 +2922,20 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             raise ApiError(503, "retention is not running")
         # `storage_before`·`storage_after` 는 청소기가 같은 락 안에서 낸다 — 계획이 잰 스냅샷과
         # 지운 뒤 다시 잰 값이다. 여기서 먼저 읽으면 **직전** 측정값(기동 직후 0 B)이 된다(B3).
-        return self.retention.gc_report(self.now_fn(), dry_run=dry_run)
+        now = self.now_fn()
+        report = self.retention.gc_report(now, dry_run=dry_run)
+        if dry_run:
+            # 보관함 한 줄(M5p §5.4) — 다음 청소 회차가 할 일의 수. `rcm gc` 는 보관함을 안
+            # 건드린다. 계획을 못 세우면 키를 빼서 CLI 가 0 으로 그리지 않게 한다(P3 격리 검증 D2)
+            try:
+                plan = self.retention.plan_shelf(now)
+                report["shelf"] = {
+                    "to_stale": len(plan.to_stale),
+                    "to_delete": len(plan.to_delete),
+                }
+            except Exception as e:  # noqa: BLE001 — 보관함 계획이 부피 계획을 망치면 안 된다
+                self.log(f"gc: shelf plan failed: {type(e).__name__}")
+        return report
 
     def artifact_storage(self) -> dict[str, Any]:
         """서버 전체 회계(§10). 실패해도 상태 문서를 막지 않는다."""

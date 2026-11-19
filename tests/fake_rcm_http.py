@@ -25,6 +25,14 @@ from typing import Any
 
 
 @dataclass
+class RawReply:
+    """JSON 이 아닌 응답(파일 바이트 · zip · 리다이렉트). 상태 코드는 route 의 것이다."""
+
+    body: bytes = b""
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class Recorded:
     method: str
     path: str
@@ -82,6 +90,15 @@ class FakeRcm:
                 if status == 204:
                     self.send_response(204)
                     self.end_headers()
+                    return
+                if isinstance(payload, RawReply):
+                    self.send_response(status)
+                    headers = {"Content-Type": "application/octet-stream", **payload.headers}
+                    for k, v in headers.items():
+                        self.send_header(k, v)
+                    self.send_header("Content-Length", str(len(payload.body)))
+                    self.end_headers()
+                    self.wfile.write(payload.body)
                     return
                 data = json.dumps(payload, ensure_ascii=False).encode()
                 self.send_response(status)

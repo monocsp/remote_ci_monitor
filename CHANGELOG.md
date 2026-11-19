@@ -7,6 +7,38 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Breaking changes
+- **Database schema v24 — the shelf.** `jobs` gains `keep` (frozen when a job is submitted) and a
+  `shelf_items` table holds what is kept, with its own copy of the job's preset, inputs, branch
+  and commit so an item outlives the job row. A v23 file is backed up
+  (`backup/rcm.sqlite3.v23.bak`) and migrated on start; an older build refuses a v24 file and
+  points at that backup. Presets refuse unknown keys, so add `keep = true` to a preset only after
+  the server runs this version. ([#217](https://github.com/monocsp/remote_ci_monitor/pull/217))
+
+### Added
+- **A job's files can stay on the server and open in any browser: the shelf.** `rcm run --keep`
+  (or `keep = true` on a preset, or `rcm keep N` while the job's bundle still exists) copies the
+  job's artifacts into a folder on the build machine and prints a link,
+  `shelf: http://macmini.local:8787/shelf/412/`. Anyone on the same network or tailnet opens it
+  without a token: the job's details, its images (a `.tar.gz` of goldens is unpacked next to
+  itself so the pictures show), a file table and a zip of everything. `/shelf/` lists the shelf
+  and `/shelf/latest/<preset>?branch=dev` always opens the newest one. An item nobody used for
+  `shelf_stale_days` (182) moves to cleanup pending, and one unused for `shelf_delete_days` (365)
+  is deleted; opening, downloading or *Restore* starts its clock again. `rcm shelf` lists it from
+  the terminal, `rcm shelf get N|URL --output DIR` (or `--latest PRESET`) downloads a kept job's
+  files again from any computer without a token and checks each sha256, and `rcm shelf rm N`
+  removes an item (admin). `rcm run --keep --no-wait` prints `shelf: <link>` and puts
+  `shelf_url` in its JSON, for scripts. Notifications of a kept job carry
+  `RCM_SHELF_URL` and a webhook's top-level `shelf_url`; `rcm check` has a `shelf` row (usage
+  against `shelf_max_bytes`, warns past 90%, fails when the shelf's disk is missing) and, with
+  `--config`, a `local shelf` row that counts folders the database does not know; `rcm gc
+  --dry-run` says what the next sweep would do to the shelf. The web UI shows `shelf ↗` under a
+  kept job's recent row, a remove button with a token, and a Shelf link in the header. Reading
+  the shelf needs no token, so do not put secrets in artifacts. `rcm run --keep` against an older
+  server stops before it sends anything.
+  ([#220](https://github.com/monocsp/remote_ci_monitor/pull/220),
+  [#221](https://github.com/monocsp/remote_ci_monitor/pull/221))
+
 ### Changed
 - **The web queue's English confidence badge is shorter.** `high · measured n=12` became
   `high · n=12`, and hovering the badge spells it out (`high confidence: median of 12 measured

@@ -1281,6 +1281,78 @@
     };
   }
 
+  // ── 보관함(M5p §4.7 · §15.6) ──
+  /** 다시 읽기를 부르는 SSE 종류. `shelf_changed {job_id, state}`(M5p P2)는 보관이 끝나거나 지워질 때 와서
+      최근 행의 보관함 줄을 바로 바꾼다. */
+  var SSE_REFETCH_KINDS = ["job_changed", "job_finished", "marker", "host_sample", "server", "reset", "lag", "shelf_changed"];
+  /** 보관함 페이지의 경로. **경로만** 쓴다 — 행의 `shelf.url` 은 public_url 로 만든 절대 주소라 브라우저가
+      연 호스트와 다를 수 있다(CG30 · 결정 148 의 Host 허용 목록). 서버 페이지는 한국어가 기본이라 영어
+      화면이면 `?lang=en` 을 붙인다. */
+  function shelfHref(path, lang) { return path + (lang === "en" ? "?lang=en" : ""); }
+  var SHELF_SHOWN = { active: 1, stale: 1 };
+  var SHELF_COPYING = { waiting: 1, pending: 1, copying: 1 };
+  function shelfReason(code, lang) {
+    if (!code) return null;
+    return I18N.has("shelf.reason." + code) ? T(lang, "shelf.reason." + code) : String(code);
+  }
+  /** 최근 행의 보관함 줄 — `art` 줄 바로 아래. keep 이 아니거나 옛 서버(키 없음)면 null. */
+  function shelfLine(job, lang) {
+    if (!job || job.keep !== true) return null;
+    var s = job.shelf;
+    if (!s || typeof s !== "object" || !s.state) return null;
+    var id = job.id;
+    if (SHELF_SHOWN[s.state]) {
+      // 화살표는 모양이라 카탈로그가 아니라 여기서 붙인다(C-41 — 카탈로그는 글자만)
+      var text = T(lang, "shelf.link") + " ↗" + (s.state === "stale" ? " · " + T(lang, "shelf.stale") : "");
+      return { text: text, href: shelfHref("/shelf/" + id + "/", lang), cls: s.state };
+    }
+    if (SHELF_COPYING[s.state]) return { text: T(lang, "shelf.copying"), href: null, cls: "pending" };
+    if (s.state === "failed") {
+      return { text: T(lang, "shelf.failed", { reason: shelfReason(s.reason_code, lang) || T(lang, "shelf.reason.unknown") }), href: null, cls: "failed" };
+    }
+    if (s.state === "deleted") return { text: T(lang, "shelf.deleted"), href: null, cls: "deleted" };
+    if (s.state === "none") {
+      var why = shelfReason(s.reason_code, lang);
+      return { text: T(lang, "shelf.none") + (why ? " · " + why : ""), href: null, cls: "none" };
+    }
+    return null;
+  }
+  /** 「보관함에서 지우기」 버튼을 그리나. 토큰이 있고 항목이 보관 중 · 정리 대기일 때(§15.6) — admin 이
+      아니면 서버의 403 을 그대로 알린다. 보관하는 중인 항목은 서버가 409 로 거절하므로 그리지 않는다. */
+  function shelfDeletable(job, ctx) {
+    if (!job || job.keep !== true || !job.shelf || !SHELF_SHOWN[job.shelf.state]) return false;
+    return !!(ctx && ctx.token && !ctx.tokenBad);
+  }
+  /** `DELETE /shelf/N` 의 응답 → {text, reload}. 404 · 410 은 이미 없는 것이라 말없이 다시 읽는다. */
+  function shelfDeleteOutcome(status, id, lang) {
+    if (status >= 200 && status < 300) return { text: T(lang, "shelf.delete.done", { id: id }), reload: true };
+    if (status === 404 || status === 410) return { text: null, reload: true };
+    if (status === 401 || status === 403) return { text: T(lang, "shelf.delete.denied"), reload: false };
+    if (status === 409) return { text: T(lang, "shelf.delete.busy"), reload: false };
+    return { text: T(lang, "shelf.delete.failed", { status: status }), reload: false };
+  }
+  /** 머리 nav 의 모형. 릴리스 저장소가 있으면 Queue · Store(오늘 그대로), 보관함이 켜져 있거나 남은 항목이
+      있으면 「보관함」. 둘 다 없으면 숨는다 — 예전에는 저장소가 없으면 nav 를 통째로 숨겨서 보관함 링크가
+      설 자리가 없었다(§15.6). ctx: {status, repos, view, repo, lang}. */
+  function navModel(ctx) {
+    ctx = ctx || {};
+    var lang = ctx.lang;
+    var repos = Array.isArray(ctx.repos) ? ctx.repos : [];
+    var st = ((ctx.status || {}).server || {}).shelf_storage;
+    var items = (st && st.items) || {};
+    var kept = (isNum(items.active) ? items.active : 0) + (isNum(items.stale) ? items.stale : 0);
+    var shelf = !!st && (st.enabled === true || kept > 0);
+    if (!repos.length && !shelf) return { hidden: true, links: [] };
+    var store = ctx.view === "store";
+    var links = [{ key: "queue", href: "#/", text: T(lang, "nav.queue"), current: !store, external: false }];
+    if (repos.length) {
+      var current = ctx.repo && repos.some(function (r) { return r.name === ctx.repo; }) ? ctx.repo : repos[0].name;
+      links.push({ key: "store", href: "#/store/" + encodeURIComponent(current), text: T(lang, "nav.store"), current: store, external: false, repo: current });
+    }
+    if (shelf) links.push({ key: "shelf", href: shelfHref("/shelf/", lang), text: T(lang, "nav.shelf"), current: false, external: true });
+    return { hidden: false, links: links };
+  }
+
   /** 서버가 코드로 그린 요약이 꼬리 라벨과 **같은 스텝**을 이미 말하는가(M5o §3.1). 그러면
       ` · step test` 를 다시 붙이지 않는다. 선언된 스텝이 있으면 그것이 꼬리이므로 `step` 과,
       없으면 「마지막 스텝」이 꼬리이므로 `last_step` 과 견준다 — 둘이 다르면 둘 다 보여 준다. */
@@ -3178,7 +3250,7 @@
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, shelfLine: shelfLine, shelfDeletable: shelfDeletable, shelfDeleteOutcome: shelfDeleteOutcome, navModel: navModel, SSE_REFETCH_KINDS: SSE_REFETCH_KINDS, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     jobLinkHtml: jobLinkHtml, jobLinkLabel: jobLinkLabel, keyWithLinkHtml: keyWithLinkHtml,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
@@ -3203,6 +3275,7 @@
   var state = {
     status: null, prev: null, skewMs: 0, conn: connection(null, "init", Date.now()),
     token: null, me: null, admin: false, tokenBad: false, readAuth: false, skewUnknown: false, lastTrigger: null,
+    navKey: null,  // renderNav 가 마지막으로 그린 모형 — 같으면 다시 그리지 않는다
     lang: I18N.DEFAULT_LANG,
     expanded: {}, expandedRecent: {}, showAllRecent: false, showAllQueue: false,
     // 펼친 배치 블록에서 「나머지 N대 보기」를 누른 행(검토 2번) — 펼침처럼 그 브라우저에 남는다.
@@ -3352,7 +3425,7 @@
     state.es = es;
     es.onopen = function () { state.conn = connection(state.conn, "sse_open", now()); renderHeaderConn(); stopPolling(); };
     es.onerror = function () { onSseError(); };
-    ["job_changed", "job_finished", "marker", "host_sample", "server", "reset", "lag"].forEach(function (kind) {
+    SSE_REFETCH_KINDS.forEach(function (kind) {
       es.addEventListener(kind, function () { scheduleRefetch(); });
     });
     es.addEventListener("hello", function () { /* 연결 확인 — 상태는 onopen 에서 */ });
@@ -4278,6 +4351,19 @@
     }).catch(function () { toast(tr("machines.recheck_failed", { detail: tr("version.edit.save.network") })); })
       .then(function () { if (btn && document.contains(btn)) btn.disabled = false; });
   }
+  /** 보관함에서 지우기(M5p 결정 146) — `DELETE /shelf/N` 에 Bearer. 버튼은 토큰이 있을 때만 그려진다. */
+  function deleteShelfItem(id, btn) {
+    if (!state.token || !isNum(id)) return;
+    if (typeof confirm === "function" && !confirm(tr("shelf.delete.confirm", { id: id }))) return;
+    if (btn) btn.disabled = true;
+    api("/shelf/" + id, { method: "DELETE" }).then(function (r) {
+      var o = shelfDeleteOutcome(r.status, id, L());
+      if (o.text) toast(o.text);
+      if (r.status === 401) tokenRejected();
+      if (o.reload) scheduleRefetch();
+    }).catch(function () { toast(tr("shelf.delete.failed", { status: "—" })); })
+      .then(function () { if (btn && document.contains(btn)) btn.disabled = false; });
+  }
   function wireMachines() {
     var det = $("#machines");
     if (!det) return;
@@ -4375,6 +4461,12 @@
       var art = artifactsLine(job, L(), now());
       if (art) html += '<div class="art ' + esc(art.cls) + '">' + esc(art.text) +
         (art.command ? ' <button type="button" class="rerun" data-copy="' + esc(art.command) + '" title="' + esc(tr("art.copy")) + '">⧉ ' + esc(art.command) + "</button>" : "") + "</div>";
+      // 보관함 줄(M5p) — 링크는 경로만, 지우기는 토큰이 있을 때(admin 이 아니면 서버의 403 을 알린다)
+      var shl = shelfLine(job, L());
+      if (shl) html += '<div class="shelf ' + esc(shl.cls) + '" data-shelf="' + job.id + '">'
+        + (shl.href ? '<a class="shelf-link" href="' + esc(shl.href) + '" target="_blank" rel="noopener">' + esc(shl.text) + "</a>" : esc(shl.text))
+        + (shelfDeletable(job, { token: state.token, tokenBad: state.tokenBad }) ? ' <button type="button" class="rerun" data-shelf-delete="' + job.id + '">' + esc(tr("shelf.delete")) + "</button>" : "")
+        + "</div>";
       if (open) {
         var extra = state.recentFailures[job.id];
         var full = extra && extra.failures ? Object.assign({}, job, extra) : job;
@@ -4544,6 +4636,7 @@
   function render() {
     if (!state.status) { renderHeaderConn(); return; }
     withFocus(function () { renderHeader(); renderSummary(); renderQueue(); renderHost(); renderMachines(); renderRecent(); markCut(document); });
+    renderNav();  // 보관함 링크는 상태의 `shelf_storage` 를 따른다(M5p)
   }
 
   // ── 상호작용 ──
@@ -4868,7 +4961,7 @@
   function wireClicks() {
     document.addEventListener("click", function (ev) {
       // 잡 링크는 브라우저가 연다(새 탭) — 그 행의 펼침 · 잡 이동 · 복사 같은 손잡이가 같이 돌면 안 된다
-      if (ev.target.closest && ev.target.closest("a.job-link")) return;
+      if (ev.target.closest && ev.target.closest("a.job-link, a.shelf-link")) return;
       // 전문 창 — 닫기 단추, 바깥을 누르면 닫힘, 잘린 글 · `data-reveal` 단추는 연다(다시 누르면 닫힘)
       var rv = $("#reveal");
       if (ev.target.closest("[data-reveal-close]")) { closeReveal(true); return; }
@@ -4879,8 +4972,9 @@
       if (rv && !rv.hidden && !rv.contains(ev.target) && !cutEl && !revBtn) closeReveal(false);
       if (cutEl) { openCutReveal(cutEl); return; }
       if (revBtn) { openReveal(revBtn, revBtn.getAttribute("data-reveal")); return; }
-      var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src],[data-envchip],[data-recheck],[data-place-more],[data-rfull]");
+      var t = ev.target.closest("[data-goto],[data-toggle],[data-log],[data-cancel],[data-more-queue],[data-more-recent],[data-rtoggle],[data-copy],[data-inputs],[data-src],[data-envchip],[data-recheck],[data-place-more],[data-rfull],[data-shelf-delete]");
       if (!t) return;
+      if (t.hasAttribute("data-shelf-delete")) { deleteShelfItem(parseInt(t.getAttribute("data-shelf-delete"), 10), t); return; }
       if (t.hasAttribute("data-place-more")) {
         var pid = parseInt(t.getAttribute("data-place-more"), 10);
         if (state.placeAll[pid]) delete state.placeAll[pid]; else state.placeAll[pid] = true;
@@ -4991,21 +5085,30 @@
       stopVersionPoll();
     }
   }
-  /** 머리의 `Queue | Store` — 릴리스 프로파일이 있는 저장소가 있을 때만 있다. 여럿이면 고르는 칸. */
+  /** 머리의 `Queue | Store | 보관함` — 모양은 `navModel` 이 정한다(저장소 · 보관함 둘 다 없으면 숨는다).
+      저장소가 여럿이면 고르는 칸. 상태가 올 때마다 불리므로 모형이 같으면 다시 그리지 않는다(고르는 칸의
+      포커스를 빼앗지 않게). */
   function renderNav() {
     var nav = $("#view-nav");
     if (!nav) return;
     var repos = state.store.repos || [];
-    if (!repos.length) { nav.hidden = true; return; }
+    var m = navModel({ status: state.status, repos: repos, view: state.view, repo: state.store.repo, lang: L() });
+    var key = JSON.stringify([m, repos.map(function (r) { return r.name; })]);
+    if (key === state.navKey) return;
+    state.navKey = key;
+    if (m.hidden) { nav.hidden = true; nav.innerHTML = ""; return; }
     nav.hidden = false;
-    var current = state.store.repo && repos.some(function (r) { return r.name === state.store.repo; }) ? state.store.repo : repos[0].name;
-    var h = '<a href="#/" data-nav="queue"' + (state.view !== "store" ? ' aria-current="page"' : "") + ">" + esc(tr("nav.queue")) + "</a>"
-      + '<a href="#/store/' + encodeURIComponent(current) + '" data-nav="store"' + (state.view === "store" ? ' aria-current="page"' : "") + ">" + esc(tr("nav.store")) + "</a>";
+    var current = null;
+    var h = m.links.map(function (l) {
+      if (l.key === "store") current = l.repo;
+      return '<a href="' + esc(l.href) + '" data-nav="' + esc(l.key) + '"' + (l.current ? ' aria-current="page"' : "")
+        + (l.external ? ' target="_blank" rel="noopener"' : "") + ">" + esc(l.text) + "</a>";
+    }).join("");
     if (repos.length > 1) {
       h += '<select data-repo-select aria-label="' + esc(tr("nav.repo")) + '">' + repos.map(function (r) {
         return '<option value="' + esc(r.name) + '"' + (r.name === current ? " selected" : "") + ">" + esc(r.name) + "</option>";
       }).join("") + "</select>";
-    } else h += '<span class="mono sub">' + esc(current) + "</span>";
+    } else if (current) h += '<span class="mono sub">' + esc(current) + "</span>";
     nav.innerHTML = h;
   }
   /** `GET /api/repos` — 404(프로파일 PR 이 없는 서버)·오류면 탭이 없을 뿐이다. */

@@ -415,6 +415,7 @@ class ShelfAppMixin:
             raise ApiError(403, "not your job")
         preset = self.config.preset(job.preset)
         reason: str | None = None
+        prev = None
         if (
             (preset is None or not preset.artifacts)
             and not job.is_terminal
@@ -422,6 +423,7 @@ class ShelfAppMixin:
         ):
             result, reason = "no_bundle", "no_artifacts"  # 도는 잡은 store 가 모른다(설정 밖)
         else:
+            prev = self.store.shelf_item(job.id)  # 재시도면 지워지기 전의 실패 이유를 알려 준다
             try:
                 result = self.store.set_job_keep(job.id, self.now_fn())
             except StoreError:
@@ -450,9 +452,25 @@ class ShelfAppMixin:
                     "no_artifacts" if state == art.DISABLED else state
                 )
             body["reason_code"] = reason
+        gone_reason = None
+        if result == "gone":
+            gone_reason = self.artifact_state(fresh, self.store.get_bundle(job.id))  # type: ignore[attr-defined]
+        body.update(self.keep_body_extra(result, prev, gone_reason))
         if result in self.KEEP_ERRORS:
             body["error"] = self.KEEP_ERRORS[result]
         return status, body
+
+    @staticmethod
+    def keep_body_extra(result: str, prev: Any, gone_reason: str | None) -> dict[str, Any]:
+        """`rcm keep` 이 이유를 말하게 하는 칸(P3 격리 검증 개선 3).
+
+        `retried` 는 `set_job_keep` 이 지우기 **전의** 실패 이유(`previous_reason_code`), `gone` 은
+        묶음 상태(`purged` · `expired` …)를 `reason_code` 로 싣는다."""
+        if result == "retried" and prev is not None and getattr(prev, "reason_code", None):
+            return {"previous_reason_code": prev.reason_code}
+        if result == "gone" and gone_reason:
+            return {"reason_code": gone_reason}
+        return {}
 
     # ── `DELETE /shelf/N` (결정 146) ──
 

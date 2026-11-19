@@ -10,19 +10,24 @@ Ctrl-C 는 detach — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID`
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.resources
 import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import socket
 import sqlite3
+import stat
 import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +40,7 @@ from remote_ci_monitor.client import (
     ClientError,
     default_label,
     make_snapshot,
+    preset_from_json,
     upload_cached,
     wait_for_job,
 )
@@ -50,6 +56,7 @@ from remote_ci_monitor.config import (
     user_config_dir,
 )
 from remote_ci_monitor.core import artifacts as art_core
+from remote_ci_monitor.core import shelf as shelf_rules
 from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
 from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
@@ -64,6 +71,7 @@ from remote_ci_monitor.core.model import (
 )
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
+    CAUSE_NOT_FOUND,
     DASH,
     MAX_IDENT,
     blocked_notes_text,
@@ -77,10 +85,14 @@ from remote_ci_monitor.core.render_text import (
     probe_token,
     ref_ident,
     render_gc,
+    shelf_line,
+    shelf_none_text,
+    shelf_row,
     source_ident,
     storage_row,
     verdict_text,
 )
+from remote_ci_monitor.core.render_text import _bytes as _fmt_bytes
 from remote_ci_monitor.core.status import parse_iso
 from remote_ci_monitor.mdns import discover
 from remote_ci_monitor.release_secrets import secrets_dir
@@ -480,11 +492,16 @@ def _supersede_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     )
 
 
-def _warn_if_client_too_old(client: Client) -> None:
-    """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다."""
-    try:
-        h = client.health()
-    except ClientError:
+def _warn_if_client_too_old(client: Client, h: dict[str, Any] | None = None) -> None:
+    """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다.
+
+    `h` 를 주면 그 문서를 쓴다 — `--keep` 의 감지가 이미 읽었으면 health 를 두 번 부르지 않는다."""
+    if h is None:
+        try:
+            h = client.health()
+        except ClientError:
+            return
+    if not isinstance(h, dict):
         return
     floor = h.get("min_client_version")
     if floor and _version_key(__version__) < _version_key(floor):
@@ -492,6 +509,116 @@ def _warn_if_client_too_old(client: Client) -> None:
             f"warning: this client v{__version__} is older than the server accepts "
             f"(min_client_version {floor}) — {_upgrade_hint(client.server, h)}"
         )
+
+
+# ── 보관함 (M5p) ─────────────────────────────────────────────────────────────
+
+#: 잡이 끝난 뒤 보관이 끝나기를 기다리는 상한(결정 143)과 그 사이 다시 보는 간격(초).
+SHELF_WAIT_SECONDS = 60.0
+SHELF_POLL_SECONDS = 1.0
+#: 보관이 아직 안 끝난 공개 상태 — 기다리는 동안 다시 본다(§15.1 · §15.6).
+SHELF_IN_FLIGHT = ("waiting", "pending", "copying")
+#: 보관함을 아는 서버의 첫 판(옛 서버 안내에 쓴다).
+SHELF_SINCE = "rcm ≥ 0.7.0"
+
+
+def _keep_refusal(h: Any) -> str | None:
+    """`--keep` 을 보내면 안 되는 서버인가 — 그렇다면 그 까닭.
+
+    옛 서버는 모르는 본문 키를 거절하지 않고 **무시한다**(검토 P0-3). 그러면 세션은 링크를
+    기다리는데 아무것도 보관되지 않는다. 그래서 health 에 `shelf` **키가 있을 때만** 보낸다(값이
+    null 이어도 키가 있으면 안다 — CG4). 꺼진 보관함(`enabled: false`)도 미리 거절한다(§15.6).
+    """
+    if not isinstance(h, dict) or "shelf" not in h:
+        return f"server does not support --keep ({SHELF_SINCE})"
+    summary = h.get("shelf")
+    if isinstance(summary, dict) and summary.get("enabled") is False:
+        return "shelf is off on this server"
+    return None
+
+
+def _shelf_health(client: Client, what: str, command: str) -> tuple[int | None, dict[str, Any]]:
+    """`rcm keep` · `rcm shelf` 의 앞 단계 — 서버가 보관함을 아는가. (종료 코드 또는 None, health).
+
+    옛 서버에는 경로가 없어 404 가 난다. 그것을 「없는 잡」으로 말하지 않으려고 먼저 묻는다(CG17).
+    """
+    try:
+        h = client.health()
+    except ClientError as e:
+        return _client_fail(client, what, e), {}
+    if not isinstance(h, dict) or "shelf" not in h:
+        return _usage(f"{what}: server does not support {command} ({SHELF_SINCE})"), {}
+    return None, h
+
+
+def _server_tz(client: Client) -> Any:
+    """서버의 `[display] timezone` — 날짜는 페이지와 같은 날로 보인다(§15.6). 못 읽으면 이 머신."""
+    try:
+        name = (client.status() or {}).get("display_timezone")
+    except (ClientError, ValueError, OSError):
+        name = None
+    return _tz_named(name)
+
+
+def _tz_named(name: Any) -> Any:
+    """시간대 이름 → tzinfo. 비었거나 틀리면 이 머신의 시간대(서버가 「로컬」이라고 한 것)."""
+    from zoneinfo import ZoneInfo
+
+    if name:
+        try:
+            return ZoneInfo(str(name))
+        except Exception:  # noqa: BLE001 — 이름이 틀려도 날짜는 그린다(이 머신 시간대로)
+            pass
+    return _local_tz()
+
+
+def _shelf_date(value: Any, tz: Any) -> str:
+    """ISO 문자열이나 epoch 초 → 그 시간대의 `YYYY-MM-DD`. 모르면 대시."""
+    at: datetime | None = None
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            at = datetime.fromtimestamp(float(value), UTC)
+        elif isinstance(value, str):
+            at = parse_iso(value)
+    except (ValueError, OverflowError, OSError):
+        at = None
+    if at is None:
+        return DASH
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return at.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def _await_shelf(client: Client, job_id: int, shelf: Any) -> dict[str, Any] | None:
+    """잡이 끝난 뒤 보관이 끝나기를 `SHELF_WAIT_SECONDS` 까지 기다린다. 마지막으로 본 `shelf`.
+
+    표시용이다 — 조회가 깨지면 다음 차례에 다시 보고, 끝내 못 보면 마지막 값으로 말한다. Ctrl-C 는
+    기다림만 그만둔다(잡은 이미 끝났다 — 종료 코드는 잡의 것, CG3).
+    """
+    current = shelf if isinstance(shelf, dict) else None
+    deadline = time.monotonic() + SHELF_WAIT_SECONDS
+    try:
+        while current is not None and current.get("state") in SHELF_IN_FLIGHT:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(SHELF_POLL_SECONDS, left))
+            try:
+                doc = client.job(job_id, timeout=NO_WAIT_VIEW_TIMEOUT)
+            except (ClientError, ValueError, OSError):
+                continue
+            nxt = doc.get("shelf") if isinstance(doc, dict) else None
+            if isinstance(nxt, dict):
+                current = nxt
+    except KeyboardInterrupt:
+        pass
+    return current
+
+
+def _shelf_url_of(doc: Any) -> str | None:
+    shelf = (doc or {}).get("shelf") if isinstance(doc, dict) else None
+    url = shelf.get("url") if isinstance(shelf, dict) else None
+    return url if isinstance(url, str) and url else None
 
 
 # ── run ──────────────────────────────────────────────────────────────────────
@@ -522,7 +649,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             return _usage(f"--link: {e}")
     # ① 서버 스키마로 검증 — 실패면 보내지 않는다
     try:
-        presets = client.presets()
+        preset_docs = {p.get("name"): p for p in client.preset_docs()}
+        presets = {name: preset_from_json(p) for name, p in preset_docs.items()}
     except ClientError as e:
         return _usage(f"cannot read presets: {e.message}")
     preset = presets.get(args.preset)
@@ -548,6 +676,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         return _usage("--fetch-artifacts cannot be used with --no-wait (you have to wait to fetch)")
     if fetch and mode == "git_ref" and not getattr(args, "output", None):
         return _usage("--fetch-artifacts needs --output DIR for a git_ref preset (no local tree)")
+    keep = bool(getattr(args, "keep", False))
+    # 글롭이 없는 프리셋은 서버가 400 `keep_without_artifacts` 로 거절한다 — 큰 트리를 다 싼 뒤에
+    # 그 말을 듣지 않게 여기서 거른다(§15.6). 키가 없는 서버는 모르는 것이니 서버에 맡긴다
+    if keep and preset_docs.get(preset.name, {}).get("has_artifacts") is False:
+        return _usage(
+            f"run --keep: preset '{preset.name}' has no artifacts to keep — nothing was sent"
+        )
     try:
         inputs = validate_inputs(preset, inputs_raw)
     except InputError as e:
@@ -563,7 +698,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         allowed = ", ".join([preset.pool, *preset.pools])
         return _usage(f"preset '{preset.name}' runs in pools: {allowed} — not '{pool}'")
     # 사용 오류는 여기까지 — 이 아래부터 서버에 더 묻는다(health 는 경고용, 토큰은 제출 전 확인)
-    _warn_if_client_too_old(client)
+    # health 는 **한 번만** 읽는다 — 버전 경고와 `--keep` 의 감지가 같은 문서를 본다(CG6)
+    try:
+        health: dict[str, Any] | None = client.health()
+    except ClientError as e:
+        if keep:
+            _err(f"run --keep: cannot reach the server ({e.message}) — nothing was sent")
+            return EXIT_UNKNOWN
+        health = None
+    if health is not None:
+        _warn_if_client_too_old(client, health)
+    if keep:
+        refusal = _keep_refusal(health)
+        if refusal is not None:
+            return _usage(f"run --keep: {refusal} — nothing was sent")
     # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
     try:
         client.whoami()
@@ -608,6 +756,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 link_label=link_label,
                 machine=getattr(args, "machine", None),
                 supersede=not getattr(args, "no_supersede", False),
+                keep=keep,
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -673,9 +822,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         detail = "same preset, inputs and tree" if joined else ""
         _info(_submitted_line(job_id, view, joined=joined, state=state, url=url, detail=detail))
         _info(f"fetch its artifacts later with `rcm artifacts {job_id} --fetch --output DIR`")
+        shelf_extra = _no_wait_shelf(resp)
         _print_json(
             _no_wait_json(
-                job_id, view, joined=joined, state=state, url=url, submission=resp.get("submission")
+                job_id,
+                view,
+                joined=joined,
+                state=state,
+                url=url,
+                extra=shelf_extra,
+                submission=resp.get("submission"),
             )
         )
         return 0
@@ -700,6 +856,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         use_sse=not args.poll,
         fetch=spec,
         cancel_token=cancel_token,
+        shelf_url=_submitted_shelf_url(resp),
     )
 
 
@@ -735,6 +892,7 @@ def _run_git_ref(
             link_label=link_label,
             machine=getattr(args, "machine", None),
             supersede=not getattr(args, "no_supersede", False),
+            keep=bool(getattr(args, "keep", False)),
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -766,7 +924,7 @@ def _run_git_ref(
                 joined=joined,
                 state=state,
                 url=url,
-                extra={"ref": ref, "sha": sha},
+                extra={"ref": ref, "sha": sha, **_no_wait_shelf(resp)},
                 submission=resp.get("submission"),
             )
         )
@@ -802,7 +960,23 @@ def _run_git_ref(
         use_sse=not args.poll,
         fetch=spec,
         cancel_token=cancel_token,
+        shelf_url=_submitted_shelf_url(resp),
     )
+
+
+def _submitted_shelf_url(resp: dict[str, Any]) -> str | None:
+    """제출 응답의 보관함 링크(keep 인 잡에만 있다). 없으면 None — 링크를 지어내지 않는다."""
+    url = resp.get("shelf_url")
+    return url if isinstance(url, str) and url else None
+
+
+def _no_wait_shelf(resp: dict[str, Any]) -> dict[str, Any]:
+    """`--no-wait` 의 보관 줄과 JSON 칸. keep 이 아닌 잡은 줄도 키도 없다(null 도 아니다, CG13)."""
+    url = _submitted_shelf_url(resp)
+    if url is None:
+        return {}
+    _info(f"shelf: {url} (after the job finishes)")
+    return {"shelf_url": url}
 
 
 @dataclass(frozen=True)
@@ -824,9 +998,14 @@ def _wait(
     use_sse: bool = True,
     fetch: _FetchSpec | None = None,
     cancel_token: str | None = None,
+    shelf_url: str | None = None,
 ) -> int:
     """잡을 따라가다 종료 코드를 낸다. Ctrl-C 는 detach — 요청자는 아무것도 보내지 않고, 합류자는
-    자기 `leave_submission` capability(`cancel_token`)로 합류만 뺀다(PLAN 계약 · M5j G5)."""
+    자기 `leave_submission` capability(`cancel_token`)로 합류만 뺀다(PLAN 계약 · M5j G5).
+
+    keep 인 잡(잡 문서의 `keep`)이면 끝에 보관 줄을 찍는다(M5p 결정 143) — 받기(`--fetch-artifacts`)
+    가 먼저이고 보관 줄이 마지막이다. `shelf_url` 은 제출 응답의 링크로, 잡 문서를 한 번도 못 본 채
+    끝났을 때(detach · 연결 끊김) 쓴다."""
     line = _StatusLine()
     last: dict[str, Any] | None = None
 
@@ -858,6 +1037,9 @@ def _wait(
             f"Resume with `rcm wait --job {job_id}`; stop it with `rcm cancel {job_id}`."
             + (" (left the join list)" if left else "")
         )
+        later = _shelf_later_line(last, shelf_url)
+        if later:
+            _info(later)
         _print_json({**(last or {"job_id": job_id}), "detached": True, "left": left})
         return EXIT_UNKNOWN
     line.done()
@@ -894,8 +1076,67 @@ def _wait(
         # **실행 실패가 전달 실패보다 우선한다** — 테스트가 깨진 것을 먼저 알아야 한다(§12)
         if code == 0 and not delivery.get("ok"):
             code = EXIT_DELIVERY
+    # 보관 줄은 받기 **뒤** 마지막이다(§15.6). 종료 코드는 바꾸지 않는다(보관은 잡의 성패와 무관)
+    shelf_note = _shelf_after_wait(
+        client, job_id, job, out, shelf_url, cause=getattr(reason, "cause", None)
+    )
+    if shelf_note:
+        _info(shelf_note)
     _print_json(out)
     return code
+
+
+def _shelf_later_line(doc: Any, fallback: str | None) -> str | None:
+    """잡이 아직 안 끝났는데 기다림이 끝났다(`--timeout` · detach · 연결 끊김) — 링크와 「끝나면」.
+
+    잡 문서가 keep 이라고 하면 그 링크, 문서를 못 봤으면 제출 응답의 링크. 둘 다 없으면 말하지
+    않는다(§15.6)."""
+    if isinstance(doc, dict) and doc.get("keep") is False:
+        return None
+    url = _shelf_url_of(doc) if isinstance(doc, dict) and doc.get("keep") else None
+    url = url or fallback
+    return f"shelf: {url} (after the job finishes)" if url else None
+
+
+def _shelf_after_wait(
+    client: Client,
+    job_id: int,
+    job: dict[str, Any] | None,
+    out: dict[str, Any],
+    fallback: str | None,
+    *,
+    cause: str | None = None,
+) -> str | None:
+    """`_wait` 끝의 보관 줄. 마지막으로 본 `shelf` 를 `out` 에 싣는다(CG2).
+
+    - 끝난 keep 잡: 보관이 끝나기를 `SHELF_WAIT_SECONDS` 까지 기다리고 상태대로 한 줄.
+    - 새 잡에 밀려 취소된 잡: keep 은 새 잡으로 넘어갔다(결정 128) — `shelf: moved to #N`.
+      옛 잡의 묶음 상태로 「nothing to keep」 을 말하면 틀린 말이다.
+    - 아직 안 끝났다(`--timeout` · 연결 끊김): 기다리지 않고 「끝나면」 한 줄.
+    - 404(없는 잡): 아무 말도 안 한다.
+    """
+    if cause == CAUSE_NOT_FOUND:
+        return None
+    doc = job if isinstance(job, dict) else None
+    if doc is None or doc.get("state") not in TERMINAL_STATES:
+        return _shelf_later_line(doc, fallback)
+    if doc.get("keep") is not True:
+        return None
+    by = doc.get("superseded_by")
+    if doc.get("state") == CANCELLED and isinstance(by, int) and not isinstance(by, bool):
+        return f"shelf: moved to #{by}"
+    shelf = _await_shelf(client, job_id, doc.get("shelf"))
+    if shelf is not None:
+        out["shelf"] = shelf
+    if (
+        isinstance(shelf, dict)
+        and shelf.get("state") == "none"
+        and "started_at" in doc
+        and doc.get("started_at") is None
+    ):
+        # 시작 전에 취소된 잡 — 묶음 상태(`unknown`)보다 「돌지 않았다」가 맞는 말이다(격리 검증 D1)
+        return f"shelf: nothing to keep — {shelf_none_text('never_ran')}"
+    return shelf_line(shelf)
 
 
 def superseded_line(job: dict[str, Any], job_id: int) -> str | None:
@@ -969,6 +1210,578 @@ def cmd_bump(args: argparse.Namespace) -> int:
     _print_json(resp)
     _info(f"job #{args.job} priority is now {resp.get('priority')}")
     return 0
+
+
+# ── keep · shelf (M5p §4.1 · §4.8 · §15.1 · §15.6) ──────────────────────────
+
+#: `rcm keep` 이 성공한 결과의 첫 토막. 링크는 뒤에 ` · <url>` 로 붙는다.
+_KEEP_DONE = {
+    "armed": "#{job} will go on the shelf when it finishes",
+    "requested": "#{job} is being copied to the shelf",
+    "already_requested": "#{job} is already being copied to the shelf",
+}
+#: 보관하지 못한 결과 — 종료 1(§15.1 표). 사용 오류(2)도 「모른다」(3)도 아니다.
+_KEEP_REFUSED = ("no_bundle", "gone", "disabled")
+
+
+def _keep_url(client: Client, job_id: int, body: dict[str, Any]) -> str:
+    """응답의 보관함 링크. 서버가 안 주면 이 클라이언트가 부른 주소의 같은 경로다."""
+    shelf = body.get("shelf") if isinstance(body.get("shelf"), dict) else {}
+    url = shelf.get("url") or body.get("shelf_url")
+    return str(url) if url else f"{client.server}/shelf/{job_id}/"
+
+
+def _keep_reason(body: dict[str, Any]) -> Any:
+    """거절의 이유 — 서버가 본문 맨 위에 준 것이 먼저, 없으면 `shelf` 의 것."""
+    shelf = body.get("shelf") if isinstance(body.get("shelf"), dict) else {}
+    return body.get("reason_code") or shelf.get("reason_code")
+
+
+def _bundle_state_of(client: Client, job: int) -> str | None:
+    """잡의 묶음 상태(`purged` · `expired` …). `gone` 의 이유를 서버가 안 줄 때 쓴다(표시용)."""
+    try:
+        doc = client.job(job, timeout=NO_WAIT_VIEW_TIMEOUT)
+    except (ClientError, ValueError, OSError):
+        return None
+    art = doc.get("artifacts") if isinstance(doc, dict) else None
+    state = art.get("state") if isinstance(art, dict) else None
+    return str(state) if state else None
+
+
+def cmd_keep(args: argparse.Namespace) -> int:
+    """`rcm keep N [--json]` — 끝난 잡(묶음이 살아 있을 때)이나 도는 잡을 보관함에 넣는다.
+
+    종료 코드(§15.1): 넣었거나 넣을 예정이면 0, 보관할 수 없으면(묶음 없음 · 이미 지움 · 꺼짐)
+    1, 없는 잡 1, 옛 서버 · 권한 · 토큰 2, 서버에 못 닿거나 보관함 폴더가 unavailable(503)이면 3
+    — 서버 쪽 일시 문제다(P3 격리 검증 개선 5).
+    """
+    client = _client(args)
+    code, _h = _shelf_health(client, "keep", "rcm keep")
+    if code is not None:
+        return code
+    job = args.job
+    status = 200
+    try:
+        body = client.post_json(f"/jobs/{job}/keep", {}) or {}
+    except ClientError as e:
+        status = e.status
+        if e.status == 404:
+            _err(f"keep: no job #{job}")
+            return 1
+        if e.status == 403:
+            _err(f"keep: #{job} — only its requester, a joiner or an admin token can keep it")
+            return USAGE_EXIT
+        if e.status in (409, 410, 503) and e.body.get("result") in _KEEP_REFUSED:
+            body = e.body
+        elif e.status == 503:
+            _err(f"keep: {client.server} answered 503: {e.message} — try again later")
+            return EXIT_UNKNOWN
+        else:
+            return _client_fail(client, "keep", e)
+    if not isinstance(body, dict):
+        body = {}
+    if getattr(args, "json", False):
+        _print_json(body)
+    result = body.get("result")
+    if result in _KEEP_REFUSED:
+        if result == "no_bundle":
+            _err(f"keep: #{job} has nothing to keep — {shelf_none_text(_keep_reason(body))}")
+        elif result == "gone":
+            why = _keep_reason(body) or _bundle_state_of(client, job) or "gone"
+            _err(
+                f"keep: #{job} cannot be kept — its artifacts are gone ({why}); "
+                "next time use rcm run --keep"
+            )
+        elif status == 503:
+            _err(
+                "keep: the shelf folder is unavailable on this server (is its disk mounted?) "
+                "— try again later"
+            )
+            return EXIT_UNKNOWN
+        else:
+            _err("keep: the shelf is off on this server (shelf_max_bytes = 0)")
+        return 1
+    if getattr(args, "json", False):
+        return 0
+    url = _keep_url(client, job, body)
+    if result in _KEEP_DONE:
+        print(f"{_KEEP_DONE[result].format(job=job)} · {url}", flush=True)
+    elif result == "retouched":
+        # 새 정리 대기 예정일 — 서버의 시간대로(페이지와 같은 날짜가 보이게)
+        shelf = body.get("shelf") if isinstance(body.get("shelf"), dict) else {}
+        stale_at = body.get("stale_at") or shelf.get("stale_at")
+        if stale_at is None:
+            # 응답에 날짜가 없으면 항목 JSON 에서 읽는다(표시용 — 못 읽으면 날짜만 뺀다)
+            try:
+                item = client.get_json(f"/api/shelf/{job}") or {}
+                stale_at = item.get("stale_at") if isinstance(item, dict) else None
+            except (ClientError, ValueError, OSError):
+                stale_at = None
+        when = ""
+        if stale_at is not None:
+            day = _shelf_date(stale_at, _server_tz(client))
+            when = f" (cleanup pending from {day})" if day != DASH else ""
+        print(f"#{job} is on the shelf; its clock starts again{when} · {url}", flush=True)
+    elif result == "retried":
+        # 서버가 지우기 전의 실패 이유(`previous_reason_code`). 없으면 이유를 빼고 말한다 —
+        # 새 요청의 `reason_code` 는 이전 실패가 아니다
+        why = body.get("previous_reason_code")
+        failed = f" ({why})" if why else ""
+        print(f"#{job}: the last copy failed{failed}; trying again · {url}", flush=True)
+    else:  # 이 클라이언트가 모르는 새 결과 — 서버의 말을 그대로
+        print(f"#{job}: {result or 'kept'} · {url}", flush=True)
+    return 0
+
+
+#: `rcm shelf` 의 기본 목록(§15.6) — 보관 중과 정리 대기. `--state all` 은 지운 것만 뺀다.
+SHELF_LIST_DEFAULT = ("active", "stale")
+
+
+def _shelf_table_rows(items: list[dict[str, Any]], tz: Any) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for it in items:
+        state = str(it.get("state") or DASH)
+        shown = state
+        if state == "failed" and it.get("reason_code"):
+            shown = f"failed ({it.get('reason_code')})"
+        n = it.get("file_count")
+        files = DASH if not isinstance(n, int) else f"{n} file" + ("" if n == 1 else "s")
+        size = it.get("total_bytes")
+        used = it.get("last_used_at")
+        due = ""
+        if state == "active":
+            due = f"stale from {_shelf_date(it.get('stale_at'), tz)}"
+        elif state == "stale":
+            due = f"removed on {_shelf_date(it.get('delete_at'), tz)}"
+        rows.append(
+            [
+                f"#{it.get('job_id')}",
+                str(it.get("preset") or DASH),
+                str(it.get("branch") or DASH),
+                shown,
+                files,
+                _fmt_size(size),
+                f"used {_shelf_date(used, tz)}" if used is not None else DASH,
+                due,
+            ]
+        )
+    return rows
+
+
+def _fmt_size(value: Any) -> str:
+    return _fmt_bytes(value if isinstance(value, int) and not isinstance(value, bool) else None)
+
+
+def cmd_shelf(args: argparse.Namespace) -> int:
+    """`rcm shelf [--state …] [--preset P] [--json]` · `rcm shelf rm N`."""
+    if getattr(args, "shelf_command", None) == "rm":
+        return cmd_shelf_rm(args)
+    if getattr(args, "shelf_command", None) == "get":
+        return cmd_shelf_get(args)
+    client = _client(args, need_token=False)
+    code, h = _shelf_health(client, "shelf", "rcm shelf")
+    if code is not None:
+        return code
+    query = {k: v for k, v in (("state", args.state), ("preset", args.preset)) if v}
+    path = "/api/shelf" + (f"?{urllib.parse.urlencode(query)}" if query else "")
+    try:
+        body = client.get_json(path)
+    except ClientError as e:
+        if e.status == 503:
+            _err(f"shelf: {client.server} answered 503: {e.message} — try again later")
+            return EXIT_UNKNOWN
+        return _client_fail(client, "shelf", e)
+    if getattr(args, "json", False):
+        _print_json(body)
+        return 0
+    raw = body.get("items") if isinstance(body, dict) else body
+    items = [i for i in (raw or []) if isinstance(i, dict)]
+    if args.state == "all":
+        items = [i for i in items if i.get("state") != "deleted"]
+    elif args.state:
+        items = [i for i in items if i.get("state") == args.state]
+    else:
+        items = [i for i in items if i.get("state") in SHELF_LIST_DEFAULT]
+    link = f"{client.server}/shelf/"
+    if not items:
+        print(f"the shelf is empty · {link}", flush=True)
+        return 0
+    # 목록이 시간대와 사용량을 같이 싣는다(P2) — 없으면 status · health 에서 읽는다
+    if isinstance(body, dict) and "display_timezone" in body:
+        tz = _tz_named(body.get("display_timezone"))
+    else:
+        tz = _server_tz(client)
+    for line in _table(_shelf_table_rows(items, tz)):
+        print(line, flush=True)
+    storage = body.get("storage") if isinstance(body, dict) else None
+    summary = storage if isinstance(storage, dict) else h.get("shelf")
+    summary = summary if isinstance(summary, dict) else {}
+    count = f"{len(items)} item" + ("" if len(items) == 1 else "s")
+    usage = f"{_fmt_size(summary.get('stored_bytes'))} / {_fmt_size(summary.get('limit_bytes'))}"
+    print(f"{count} · {usage} · {link}", flush=True)
+    return 0
+
+
+def cmd_shelf_rm(args: argparse.Namespace) -> int:
+    """`rcm shelf rm N`(admin) — 보관 항목을 지금 지운다(§4.5 · 결정 146).
+
+    종료 코드(§15.6): 지웠으면 0, 이미 지운 것(410)도 0(같은 결과), 받는 중 · 보관하는 중(409)과
+    없는 항목은 1, 권한 · 옛 서버는 2, 서버에 못 닿으면 3.
+    """
+    client = _client(args)
+    code, _h = _shelf_health(client, "shelf rm", "rcm shelf")
+    if code is not None:
+        return code
+    job = args.job
+    try:
+        client.delete_json(f"/shelf/{job}")
+    except ClientError as e:
+        if e.status == 410:
+            day = _shelf_date(e.body.get("deleted_at"), _server_tz(client))
+            print(f"#{job} was already deleted" + (f" on {day}" if day != DASH else ""), flush=True)
+            return 0
+        if e.status == 409:
+            # 서버는 이유 코드로 가른다: `shelf_item_copying`(보관 중) · `shelf_item_busy`(zip)
+            copying = e.body.get("reason_code") == "shelf_item_copying"
+            if copying or e.body.get("state") in ("pending", "copying"):
+                _err(f"shelf rm: #{job} is still being copied — try again when it is on the shelf")
+            else:
+                _err(f"shelf rm: #{job} is being downloaded right now — try again in a minute")
+            return 1
+        if e.status == 404:
+            _err(f"shelf rm: #{job} is not on the shelf")
+            return 1
+        if e.status == 403:
+            _err("shelf rm: needs an admin token")
+            return USAGE_EXIT
+        if e.status == 503:
+            _err(f"shelf rm: {client.server} answered 503: {e.message} — try again later")
+            return EXIT_UNKNOWN
+        return _client_fail(client, "shelf rm", e)
+    print(f"removed #{job} from the shelf", flush=True)
+    return 0
+
+
+# ── shelf get (M5p §16 — app-map-shots) ─────────────────────────────────────
+
+_SHELF_TARGET_RE = re.compile(r"^(https?://[^/?#\s]+)(?:/api)?/shelf/(\d+)(?:[/?#].*)?$")
+#: 보관이 아직 안 끝난 항목 상태 — 받을 것이 아직 없다(종료 3: 잠시 뒤 다시).
+_SHELF_NOT_YET = ("waiting", "pending", "copying")
+
+
+class _ShelfGetError(Exception):
+    """받는 도중 멈춰야 하는 일 — (종료 코드, 문구). 아무것도 쓰지 않은 상태에서 올라온다."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def parse_shelf_target(text: Any) -> tuple[str | None, int] | None:
+    """`412` → (None, 412), `http://mac.local:8787/shelf/412/` → (그 서버, 412). 아니면 None.
+
+    `/api/shelf/412` 와 항목 페이지 안의 경로(`/shelf/412/f/…`, `?lang=en`)도 받는다 — PR 댓글에
+    남긴 링크를 그대로 붙여도 된다."""
+    t = str(text or "").strip()
+    if t.isdigit():
+        return (None, int(t)) if int(t) > 0 else None
+    m = _SHELF_TARGET_RE.match(t)
+    if not m:
+        return None
+    return m.group(1).rstrip("/"), int(m.group(2))
+
+
+def _shelf_fetch_json(client: Client, path: str) -> Any:
+    return client.get_json(path)
+
+
+def _shelf_get_client(args: argparse.Namespace, server: str | None) -> Client:
+    """`rcm shelf get` 의 클라이언트 — 리다이렉트를 따르지 않는다.
+
+    번호만 주면 설정의 서버(없으면 같은 네트워크에서 찾는다). URL 을 주면 그 서버다. 토큰은
+    **설정의 서버와 같은 곳에만** 싣는다 — 남의 서버 주소에 내 토큰을 보내지 않는다."""
+    try:
+        cfg = _client_config(args)
+        if server is None:
+            cfg = _resolve_server(cfg)
+    except ConfigError as e:
+        raise SystemExit(_usage(str(e))) from e
+    mine = (cfg.server or "").rstrip("/")
+    if mine and "://" not in mine:
+        mine = "http://" + mine
+    if server is None:
+        if not mine:
+            raise SystemExit(_usage(NO_SERVER_HINT))
+        return Client(mine, cfg.token or None, follow_redirects=False)
+    token = cfg.token if mine and mine.lower() == server.lower() else None
+    return Client(server, token or None, follow_redirects=False)
+
+
+def _shelf_get_fail(client: Client, e: ClientError, *, missing: str, job: Any) -> int:
+    """JSON · 파일 요청의 실패를 §16 의 종료 코드로: 없음 · 지움 1, 권한 2, 그 밖 3."""
+    if e.status == 404:
+        _err(f"shelf get: {missing}")
+        return 1
+    if e.status == 410:
+        day = _shelf_date(e.body.get("deleted_at"), _server_tz(client))
+        _err(f"shelf get: #{job} was deleted" + (f" on {day}" if day != DASH else ""))
+        return 1
+    if 300 <= e.status < 400:
+        _err(
+            f"shelf get: {client.server} answered {e.status} (a redirect) — rcm does not follow "
+            "redirects for shelf downloads; use the server's own address"
+        )
+        return EXIT_UNKNOWN
+    if e.status in (401, 403):
+        return _client_fail(client, "shelf get", e)
+    if e.status:
+        _err(f"shelf get: {client.server} answered {e.status}: {e.message} (try again later)")
+        return EXIT_UNKNOWN
+    return _client_fail(client, "shelf get", e)
+
+
+def _shelf_entries(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """`/api/shelf/N` 의 파일 목록 → {경로: 항목}. 안전하지 않은 경로가 하나라도 있으면 멈춘다
+    (서버가 준 목록도 믿지 않는다 — 그 경로대로 디스크에 쓴다)."""
+    out: dict[str, dict[str, Any]] = {}
+    for f in doc.get("files") or []:
+        path = f.get("path") if isinstance(f, dict) else None
+        if not isinstance(path, str) or not shelf_rules.safe_member(path) or path in out:
+            raise _ShelfGetError(
+                EXIT_UNKNOWN, f"the shelf lists an unsafe path {path!r} — nothing was written"
+            )
+        out[path] = f
+    return out
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _unzip_shelf(archive: Path, dest: Path, sizes: dict[str, Any]) -> set[str]:
+    """보관함 zip 을 `dest` 아래에 푼다. 멤버마다 경로를 다시 검사한다(서버의 zip 을 믿지 않는다):
+    절대 경로 · `..` · `.git` · 제어문자 · 심볼릭 링크 · 같은 이름 두 번은 전부 거절.
+
+    `sizes` 는 `/api/shelf/N` 이 나열한 {경로: 크기}다. 목록에 없는 멤버는 풀지 않고 멈추고, 푸는
+    바이트가 목록의 크기를 넘는 순간 멈춘다 — zip 의 선언 크기는 거짓말할 수 있다(압축 폭탄)."""
+    names: set[str] = set()
+    root = dest.resolve()
+    try:
+        with zipfile.ZipFile(archive) as z:
+            for info in z.infolist():
+                raw = info.filename
+                mode = info.external_attr >> 16
+                name = shelf_rules.normalize_member(raw)
+                unsafe = (
+                    raw.startswith("/")
+                    or stat.S_ISLNK(mode)
+                    or not shelf_rules.safe_member(name)
+                    or name in names
+                )
+                if unsafe:
+                    raise _ShelfGetError(
+                        EXIT_UNKNOWN, f"unsafe path in the zip: {raw!r} — nothing was written"
+                    )
+                if info.is_dir():
+                    continue
+                if name not in sizes:
+                    raise _ShelfGetError(
+                        EXIT_UNKNOWN,
+                        f"the zip has {name}, which the shelf does not list — nothing was written",
+                    )
+                limit = sizes[name]
+                target = dest / name
+                if root not in target.resolve().parents:
+                    raise _ShelfGetError(
+                        EXIT_UNKNOWN, f"unsafe path in the zip: {raw!r} — nothing was written"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _copy_capped(z, info, target, limit, name)
+                names.add(name)
+    except zipfile.BadZipFile as e:
+        raise _ShelfGetError(EXIT_UNKNOWN, f"the zip is broken ({e}) — nothing was written") from e
+    return names
+
+
+def _copy_capped(z: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path, limit: Any, name: str):
+    """멤버 하나를 풀되 목록의 크기(`limit`)를 넘으면 멈춘다. 크기를 모르면 상한 없이 푼다 —
+    그 뒤의 sha256 대조가 막는다."""
+    too_big = _ShelfGetError(
+        EXIT_UNKNOWN, f"{name} is bigger than the shelf lists — nothing was written"
+    )
+    cap = limit if isinstance(limit, int) and not isinstance(limit, bool) else None
+    if cap is not None and info.file_size > cap:
+        raise too_big
+    written = 0
+    with z.open(info) as src, target.open("wb") as fh:
+        while True:
+            chunk = src.read(1 << 16)
+            if not chunk:
+                break
+            written += len(chunk)
+            if cap is not None and written > cap:
+                raise too_big
+            fh.write(chunk)
+
+
+def _zip_cap(entries: dict[str, dict[str, Any]]) -> int | None:
+    """zip 응답의 바이트 상한 — 목록의 크기 합 + 멤버마다 머리말 몫 + 여유 64 KiB. 크기를 모르는
+    파일이 하나라도 있으면 None(상한 없음, sha256 대조가 막는다)."""
+    total = 0
+    for path, entry in entries.items():
+        size = entry.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            return None
+        total += size + 200 + 2 * len(path.encode("utf-8"))
+    return total + 64 * 1024
+
+
+def _shelf_file_path(client: Client, job: int, entry: dict[str, Any]) -> str:
+    """파일 하나의 경로. 서버가 준 `url` 이 이 서버의 것이면 그 경로, 아니면 정해진 모양."""
+    url = entry.get("url")
+    if isinstance(url, str):
+        if url.startswith("/") and not url.startswith("//"):
+            return url
+        if url.startswith(client.server + "/"):
+            return url[len(client.server) :]
+    return f"/shelf/{job}/f/{urllib.parse.quote(entry['path'], safe='/')}"
+
+
+def cmd_shelf_get(args: argparse.Namespace) -> int:
+    """`rcm shelf get <N|URL> --output DIR [--file PATH]` · `rcm shelf get --latest P [--branch B]`.
+
+    토큰 없이(보관함의 읽기 규칙) 받는다. 받은 파일은 하나하나 `/api/shelf/N` 의 sha256 과
+    대조하고, 전부 맞을 때만 `DIR` 에 옮긴다 — 어긋나면 아무것도 쓰지 않는다. 종료 코드(§16):
+    0 받음, 1 없음 · 지움 · 보관 못 함, 2 사용 오류 · 옛 서버 · 권한, 3 연결 실패 · 아직 보관하는 중
+    · 받은 것이 목록과 다름.
+    """
+    target, latest, branch = args.target, args.latest, args.branch
+    if (target is None) == (latest is None):
+        return _usage("shelf get: give a job number, a shelf link or --latest PRESET")
+    if branch is not None and latest is None:
+        return _usage("shelf get: --branch goes with --latest")
+    parsed = parse_shelf_target(target) if target is not None else (None, None)
+    if parsed is None:
+        return _usage(
+            f"shelf get: {target!r} is not a job number or a shelf link "
+            "(http://<host>:8787/shelf/412/)"
+        )
+    server, job = parsed
+    client = _shelf_get_client(args, server)
+    code, _h = _shelf_health(client, "shelf get", "rcm shelf")
+    if code is not None:
+        return code
+    if latest is not None:
+        query = f"?{urllib.parse.urlencode({'branch': branch})}" if branch else ""
+        path = f"/api/shelf/latest/{urllib.parse.quote(latest, safe='')}{query}"
+        where = f" on {branch}" if branch else ""
+        missing = f"nothing kept for {latest}{where}"
+    else:
+        path = f"/api/shelf/{job}"
+        missing = f"#{job} is not on the shelf"
+    try:
+        doc = _shelf_fetch_json(client, path)
+    except ClientError as e:
+        return _shelf_get_fail(client, e, missing=missing, job=job)
+    if not isinstance(doc, dict) or not isinstance(doc.get("job_id"), int):
+        _err(f"shelf get: {client.server} sent no shelf item for {path}")
+        return EXIT_UNKNOWN
+    job = doc["job_id"]
+    state = doc.get("state")
+    if state in _SHELF_NOT_YET:
+        _err(f"shelf get: #{job} is still being copied to the shelf — try again in a minute")
+        return EXIT_UNKNOWN
+    if state == "failed":
+        _err(f"shelf get: #{job} was not kept ({doc.get('reason_code') or 'unknown'})")
+        return 1
+    if state not in ("active", "stale"):
+        _err(f"shelf get: #{job} is {state or 'not on the shelf'}")
+        return 1
+    out_root = Path(args.output)
+    # 실패하면 이 명령이 새로 만든 폴더만 지운다 — 이미 있던 폴더는 그대로 둔다(격리 검증 개선 6)
+    created = out_root
+    while not created.parent.exists() and created.parent != created:
+        created = created.parent
+    created = None if out_root.exists() else created
+    try:
+        written = _shelf_get_into(client, job, doc, out_root, getattr(args, "file", None))
+    except (_ShelfGetError, ClientError, OSError) as e:
+        if created is not None:
+            shutil.rmtree(created, ignore_errors=True)
+        if isinstance(e, _ShelfGetError):
+            _err(f"shelf get: {e.message}")
+            return e.code
+        if isinstance(e, ClientError):
+            return _shelf_get_fail(client, e, missing=f"#{job} is not on the shelf", job=job)
+        _err(f"shelf get: cannot write into {out_root}: {e.strerror or e}")
+        return EXIT_UNKNOWN
+    noun = "file" if written == 1 else "files"
+    print(f"wrote {written} {noun} to {out_root} from {client.server}/shelf/{job}/", flush=True)
+    return 0
+
+
+def _capped_download(client: Client, path: str, dest: Path, cap: int | None) -> None:
+    try:
+        client.download(path, dest, max_bytes=cap)
+    except ClientError as e:
+        if e.body.get("too_big"):
+            raise _ShelfGetError(
+                EXIT_UNKNOWN,
+                f"the download is bigger than the files the shelf lists ({cap} bytes) — "
+                "nothing was written",
+            ) from e
+        raise
+
+
+def _shelf_get_into(
+    client: Client, job: int, doc: dict[str, Any], out_root: Path, only: str | None
+) -> int:
+    """받아서 대조하고 옮긴다. 임시 폴더는 `out_root` 안이라 옮기기가 같은 파일 시스템이다."""
+    entries = _shelf_entries(doc)
+    if only is not None and only not in entries:
+        raise _ShelfGetError(1, f"#{job} has no file {only}")
+    out_root.mkdir(parents=True, exist_ok=True)
+    staging = out_root / f".rcm-shelf-get-{secrets.token_hex(4)}"
+    staging.mkdir()
+    try:
+        files = staging / "files"
+        files.mkdir()
+        if only is not None:
+            wanted = {only: entries[only]}
+            target = files / only
+            target.parent.mkdir(parents=True, exist_ok=True)
+            size = entries[only].get("size")
+            cap = size if isinstance(size, int) and not isinstance(size, bool) else None
+            _capped_download(client, _shelf_file_path(client, job, entries[only]), target, cap)
+            got = {only}
+        else:
+            wanted = entries
+            archive = staging / "item.zip"
+            _capped_download(client, f"/shelf/{job}.zip", archive, _zip_cap(entries))
+            got = _unzip_shelf(archive, files, {p: e.get("size") for p, e in entries.items()})
+        for path, entry in sorted(wanted.items()):
+            if path not in got:
+                raise _ShelfGetError(
+                    EXIT_UNKNOWN, f"{path} is missing from the download — nothing was written"
+                )
+            want = entry.get("sha256")
+            if not isinstance(want, str) or _sha256_file(files / path) != want.lower():
+                raise _ShelfGetError(
+                    EXIT_UNKNOWN,
+                    f"sha256 of {path} does not match the shelf's list — nothing was written",
+                )
+        for path in sorted(wanted):
+            dest = out_root / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(files / path, dest)
+        return len(wanted)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _offline_gc(args: argparse.Namespace) -> int:
@@ -1095,6 +1908,7 @@ def _plan_on_copy(
             "freed_bytes": 0,
             "storage_before": jan.storage(now),
             "storage_after": None,
+            "shelf": _shelf_plan(jan, now),
             "offline": {
                 "database": str(db),
                 "schema_version": old,
@@ -1105,6 +1919,17 @@ def _plan_on_copy(
     finally:
         store.close()
     return 0, body
+
+
+def _shelf_plan(jan: Any, now: datetime) -> dict[str, int] | None:
+    """청소기의 다음 회차가 보관함에서 할 일의 수(§5.4). 계획만 — `rcm gc` 는 보관함을 안 건드린다.
+    못 세우면 None(줄이 빠진다 — 0 으로 말하지 않는다)."""
+    try:
+        plan = jan.plan_shelf(now)
+    except Exception as e:  # noqa: BLE001 — 보관함 계획이 부피 계획을 망치면 안 된다
+        _err(f"gc: the shelf plan could not be made ({type(e).__name__}: {e})")
+        return None
+    return {"to_stale": len(plan.to_stale), "to_delete": len(plan.to_delete)}
 
 
 def cmd_gc(args: argparse.Namespace) -> int:
@@ -2606,6 +3431,66 @@ def local_presets_row(cfg: ServerConfig) -> tuple[str, bool | None, str]:
     return ("local presets", True if total else None, f"{total} ({' · '.join(parts)})")
 
 
+def _shelf_rows_ro(db: Path) -> tuple[set[int] | None, str | None]:
+    """DB 의 보관 행 번호들 — **`mode=ro` 로만** 연다(§15.6). `Store` 로 열면 마이그레이션한다
+    (2026-09-10 에 `rcm gc --dry-run --config` 가 운영 DB 를 7→15 로 올린 사고와 같다).
+    표가 없으면(v24 이전) (None, 까닭)."""
+    from remote_ci_monitor.store import _ro_uri
+
+    if not db.is_file():
+        return None, "no database yet"
+    try:
+        conn = sqlite3.connect(_ro_uri(db), uri=True)
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            has = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shelf_items'"
+            ).fetchone()
+            if not has:
+                return None, f"the database is schema v{version}, before the shelf"
+            return {int(r[0]) for r in conn.execute("SELECT job_id FROM shelf_items")}, None
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return None, f"cannot read the database: {e}"
+
+
+def local_shelf_row(cfg: ServerConfig) -> tuple[str, bool | None, str]:
+    """`rcm check --config` 의 `local shelf` 행 — 이 설정의 보관함 폴더와 행 없는 폴더 수(§5.3).
+
+    행이 없는 숫자 폴더는 서버가 지우지 않는다(모르는 것은 안 지운다). 그래서 여기서 센다 —
+    있으면 warn. `.staging` · `.rcm-shelf` 같은 숫자 아닌 이름은 세지 않는다. `keep` 프리셋이
+    `artifacts_on = "failure"` 면 실패한 잡만 보관된다는 것도 이 행이 말한다(§3.2).
+    """
+    shelf = cfg.shelf_dir
+    notes = [
+        f'{p.name} keeps failed jobs only (artifacts_on = "failure")'
+        for p in cfg.presets
+        if p.keep and p.artifacts_on == art_core.COLLECT_FAILURE
+    ]
+    ok: bool | None = True
+    if not shelf.is_dir():
+        head = f"{shelf} (not created yet)"
+    else:
+        try:
+            folders = {int(p.name) for p in shelf.iterdir() if p.name.isdigit() and p.is_dir()}
+        except OSError as e:
+            folders, head = None, f"{shelf} · cannot list it ({e.strerror or e})"
+            ok = None
+        if folders is not None:
+            known, why = _shelf_rows_ro(cfg.data_dir / "rcm.sqlite3")
+            if known is None:
+                head = f"{shelf} · orphans ? ({why})"
+            else:
+                orphans = len(folders - known)
+                head = f"{shelf} · orphans {orphans}"
+                if orphans:
+                    ok = None
+    if not cfg.shelf_enabled:
+        head = f"off (shelf_max_bytes = 0) · {head}"
+    return ("local shelf", ok, " · ".join([head, *notes]))
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
     rows: list[tuple[str, bool | None, str]] = [python_row()]
@@ -2678,6 +3563,14 @@ def cmd_check(args: argparse.Namespace) -> int:
             row = storage_row(storage, now=doc.get("generated_at")) if storage else None
             if row is not None:  # 옛 서버엔 키가 없고, 갓 뜬 서버는 아직 잰 게 없다
                 rows.append(row)
+            # 보관함(M5p §4.8) — status 의 `shelf_storage`, 없으면 health 의 같은 요약. 둘 다
+            # 없으면 옛 서버다(행 없음). 링크는 이 클라이언트가 부른 주소다(§15.6)
+            shelf_doc = (doc.get("server") or {}).get("shelf_storage")
+            if not isinstance(shelf_doc, dict):
+                shelf_doc = health_body.get("shelf")
+            shelf = shelf_row(shelf_doc, url=f"{client.server}/shelf/")
+            if shelf is not None:
+                rows.append(shelf)
         except ClientError as e:
             rows.append(("presets", False, e.message))
     try:
@@ -2691,6 +3584,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             rows.append(("local data dir", writable, f"{d} ({state}) · from {cfg.path}"))
             rows.append(_public_url_row(cfg.server))
             rows.append(local_presets_row(cfg))
+            rows.append(local_shelf_row(cfg))
             tools_row = _local_preset_tools_row(cfg)
             if tools_row is not None:
                 rows.append(tools_row)
@@ -3348,6 +4242,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--output", metavar="DIR", help="with --fetch-artifacts: write here instead of the tree"
     )
+    run.add_argument(
+        "--keep",
+        action="store_true",
+        help="put the job's artifacts on the server's shelf when it finishes and print the link "
+        "(needs a server with the shelf, rcm 0.7.0+)",
+    )
     run.add_argument("--timeout", type=float, help="give up waiting after N seconds (exit 3)")
     run.add_argument(
         "--poll", action="store_true", help="poll every 2s instead of the event stream"
@@ -3370,6 +4270,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     client_opts(artifacts)
     artifacts.set_defaults(func=cmd_artifacts)
+
+    keep = sub.add_parser(
+        "keep", help="put a job's artifacts on the shelf (a finished job whose bundle still exists)"
+    )
+    keep.add_argument("job", type=int)
+    keep.add_argument("--json", action="store_true", help="print the server's answer as JSON")
+    client_opts(keep)
+    keep.set_defaults(func=cmd_keep)
+
+    shelf = sub.add_parser("shelf", help="list the shelf: kept job files with a browser link")
+    shelf.add_argument(
+        "--state",
+        choices=["active", "stale", "all"],
+        default=None,
+        help="active = kept, stale = cleanup pending (default: both); all adds copying and failed",
+    )
+    shelf.add_argument("--preset", metavar="P", help="only this preset")
+    shelf.add_argument("--json", action="store_true", help="print the server's list as JSON")
+    client_opts(shelf)
+    shelf.set_defaults(func=cmd_shelf)
+    shelf_sub = shelf.add_subparsers(dest="shelf_command")
+    shelf_rm = shelf_sub.add_parser("rm", help="remove a job's files from the shelf now (admin)")
+    shelf_rm.add_argument("job", type=int)
+    client_opts(shelf_rm)
+    shelf_rm.set_defaults(func=cmd_shelf)
+    shelf_get = shelf_sub.add_parser(
+        "get", help="download a kept job's files (no token needed; checks every sha256)"
+    )
+    shelf_get.add_argument(
+        "target",
+        nargs="?",
+        help="a job number, or a shelf link such as http://host:8787/shelf/412/",
+    )
+    shelf_get.add_argument("--latest", metavar="PRESET", help="the newest kept job of this preset")
+    shelf_get.add_argument("--branch", metavar="B", help="with --latest: only this branch")
+    shelf_get.add_argument(
+        "--output", metavar="DIR", required=True, help="write the files here (same paths as kept)"
+    )
+    shelf_get.add_argument("--file", metavar="PATH", help="only this file (a path the item lists)")
+    client_opts(shelf_get)
+    shelf_get.set_defaults(func=cmd_shelf)
 
     wait = sub.add_parser("wait", help="wait for a job and exit with 0/1/2/3")
     wait.add_argument("--job", type=int, required=True)

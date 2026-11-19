@@ -53,9 +53,9 @@
 
 ```console
 $ rcm run golden-update -f paths=test/feature/home/ --keep
-#412 queued · golden-update · ~10m
+submitted job #412 · http://macmini.local:8787/#/jobs/412
 ...
-#412 succeeded in 9m12s
+#412 succeeded · 12 goldens updated
 shelf: http://macmini.local:8787/shelf/412/
 ```
 
@@ -737,3 +737,59 @@ SPA 링크와 지우기 버튼, `RCM_SHELF_URL`, 웹훅 `shelf_url`, 문서 전�
   303 에 이어진다. 시나리오 c 의 페이지 문구 시험은 P2 로 옮긴다.
 - 목록의 날짜 칸: 보관 중 칸은 「정리 대기 예정 `stale_at`」, 정리 대기 칸은 「삭제 예정 `delete_at`」.
 - `rcm gc --dry-run` 의 보관함 한 줄: 계획 함수는 P1, 출력은 P3.
+
+## 16. 추가 요구 — app-map-shots (2026-11-19)
+
+같은 날 dolomood 가 보관함의 첫 실제 사용처를 운영에 올렸다. `app-map-shots` 프리셋이다. 이 프리셋은
+`build/app_map/shots.tar.gz` · `manifest.json` · `run.log` 를 내고, dolomood 는 그것으로 앱 구조 지도를
+만들어 PR 고정 댓글에 보관 링크를 남긴다. 지도 페이지는 그림을 data URI 로 넣으므로, 다른 컴퓨터에서
+그 링크로 원본 파일을 **다시 받을** 수 있어야 한다. 보관 기간은 서버 기본(182일 · 365일)을 따른다.
+
+dolomood 의 흐름은 이렇다.
+
+```sh
+rcm run app-map-shots --keep --no-wait                   # 출력에서 잡 번호와 보관 URL 을 읽는다
+rcm wait --job "$N"
+rcm artifacts "$N" --fetch --output build/app_map        # 지금 세션은 묶음으로 받는다
+# 나중에 다른 컴퓨터에서
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .   # 경로가 보관한 그대로 붙는다
+```
+
+### 16.1 P3 에 더한 것
+
+1. **`rcm run --keep --no-wait` 의 출력은 스크립트가 읽는 계약이다.** stderr 에 `submitted job #N …` 와
+   `shelf: <url> (after the job finishes)` 두 줄을 이 글자 그대로 찍고, stdout 의 마지막 JSON 에
+   `job_id` 와 `shelf_url` 을 싣는다(`rcm run` 에는 `--json` 이 없다, §15.6). 문구를 바꾸면 dolomood 의
+   스크립트가 깨진다.
+2. **`rcm shelf get <N|URL> --output DIR [--file PATH]`.** 보관 항목을 토큰 없이(읽기 규칙) 받는다.
+   - 번호를 주면 설정의 서버, URL(`/shelf/412/` · `/api/shelf/412` · 항목 안의 경로)을 주면 그 서버의
+     `/api/shelf/N` 을 쓴다. 다른 서버 주소도 받는다. 토큰은 설정의 서버와 같은 곳에만 싣는다.
+     리다이렉트는 따르지 않는다(3xx 는 종료 3).
+   - 기본은 항목 전체다. `/shelf/N.zip` 을 받아 멤버마다 경로를 다시 검사하며 푼다. 절대 경로 · `..` ·
+     `.git` · 제어문자 · 심볼릭 링크 · 같은 이름 두 번은 거절한다(`core/shelf.safe_member`).
+     `--file PATH` 는 그 파일 하나만 `/shelf/N/f/<path>`(또는 항목의 `url`)로 받는다.
+   - 받은 파일마다 sha256 을 `/api/shelf/N` 의 값과 대조한다. 목록에 없는 파일이 zip 에 있거나, 목록의
+     파일이 빠졌거나, 해시가 다르면 **아무것도 쓰지 않는다**. 임시 폴더는 `DIR` 안에 두고 다 맞을 때만
+     옮긴다.
+   - 끝에 `wrote <n> files to <DIR> from <server>/shelf/<N>/` 한 줄.
+   - 종료 코드: 0 받음, 1 없음 · 지움(404 · 410) · 보관 못 함(`failed`) · 목록에 없는 `--file`,
+     2 사용 오류 · 옛 서버(health 에 `shelf` 없음) · 권한, 3 연결 실패 · 아직 보관하는 중 · 리다이렉트 ·
+     받은 것이 목록과 다름 · 안전하지 않은 경로.
+3. **`rcm shelf get --latest <preset> [--branch B] --output DIR`.** `/api/shelf/latest/<preset>?branch=`
+   JSON 으로 가장 최근 항목을 찾아 같은 방식으로 받는다. 없으면 종료 1(`nothing kept for <preset>`).
+4. **문서.** `docs/configuration.md` 의 보관함 절에 「Using the shelf from a script」 소절(위 출력,
+   `rcm shelf get`, `curl http://<host>.local:8787/api/shelf/latest/app-map-shots?branch=dev`), usage 두
+   언어에도 같은 소절. 그리고 경고: 프리셋에 `keep = true` 를 넣는 일은 **서버가 v0.7.0 으로 오른 뒤에만**
+   한다. 옛 서버와 옛 dolomood `check_presets.py` 가 모르는 키로 거절한다. 그 전에는 `--keep` 플래그를
+   쓴다.
+
+### 16.2 P2 에 더할 것(다른 에이전트)
+
+- `GET /api/shelf/N` 의 파일 항목: `path · url · sha256 · size · type · expanded_from`. `url` 은 그 서버의
+  경로(`/shelf/N/f/<퍼센트 인코딩한 path>`)다.
+- `GET /api/shelf/latest/<preset>?branch=` JSON. 모양은 `/api/shelf/N` 과 같고, 없으면 404. HTML 의
+  `/shelf/latest/…` 303 과 같은 「가장 최근」 규칙(§15.5)을 쓴다.
+- 보관한 `.tar.gz` 원본의 바이트를 그대로 둔다. 펼친 `.d/` 는 옆에 더할 뿐이고 원본을 다시 쓰지 않는다.
+  sha256 대조가 이것에 기댄다.
+- zip(`/shelf/N.zip`)은 `files/` 아래 전부를 `files/` 기준 경로로 싣는다(§15.4). manifest 가 나열한 파일과
+  zip 의 멤버가 같아야 한다.

@@ -299,6 +299,56 @@ rcm artifacts 412                          # what is there
 rcm artifacts 412 --fetch --output ./out   # write it into a directory you name
 ```
 
+### Keeping them: the shelf
+
+A bundle lives a day at most. When you want to look at the files again next week, or open them
+on your phone, keep the job on the server's shelf:
+
+```sh
+rcm run golden-update --keep
+```
+
+```
+#412 succeeded · 12 goldens updated
+shelf: http://macmini.local:8787/shelf/412/
+```
+
+1. Open the link in any browser on the same network (or over Tailscale). The page shows the
+   job, its images and a file table, and *Download as zip* takes everything. No token.
+2. A preset with `keep = true` is always kept; `--keep` keeps one job of any preset that declares
+   `artifacts`.
+3. `rcm keep 412` keeps a job that already finished, as long as its bundle still exists. A job
+   fetched with `--fetch-artifacts` loses its bundle right then, so use --keep from the start
+   (both flags together work).
+4. `/shelf/latest/golden-update?branch=dev` always opens the newest kept golden-update of `dev`.
+   Bookmark it.
+5. Nothing to clean up by hand: an item nobody opened for six months moves to *cleanup pending*,
+   and after a year without use it is deleted. Opening it, downloading from it or pressing
+   *Restore* starts its clock again. `rcm shelf` lists what is there; `rcm shelf rm 412` (admin)
+   removes one now.
+
+Anyone who can reach the server can open the shelf, so do not put secrets in `artifacts`
+([who can open it](configuration.md#keeping-a-jobs-files-the-shelf)).
+
+From a script, submit with `--keep --no-wait` and read the link from the output, then fetch the
+files again on any computer, without a token:
+
+```sh
+rcm run app-map-shots --keep --no-wait
+# submitted job #412 queued · …
+# fetch its artifacts later with `rcm artifacts 412 --fetch --output DIR`
+# shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)
+rcm wait --job 412
+rcm shelf get http://macmini.local:8787/shelf/412/ --output .
+rcm shelf get --latest app-map-shots --branch dev --output .
+curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # the same, as JSON
+```
+
+The paths stay as they were kept, so `--output .` in the project folder puts the files back
+where the job made them. `rcm shelf get` checks every file's sha256 and writes nothing unless they all match. Add
+`keep = true` to a preset only once the server runs v0.7.0; an older server refuses the key
+([scripts](configuration.md#using-the-shelf-from-a-script)).
+
 ## 9. The whole queue in one screen
 
 `rcm top` is the one command to leave open in a terminal.
