@@ -8,6 +8,11 @@
 - 조립 실패는 health `client_wheel: null` + `client_wheel_error`, 엔드포인트 503 — 옛 것·빈 것을
   주지 않는다(fail-open 금지).
 - `min_client_version` · `rcm check` 의 `client` 행 · `rcm run` 의 경고 한 줄.
+- 내용물은 릴리스 wheel 과 같다(M5q A0 · 결정 167 · docs/m5q-workplan.md §2.10 · §6 S1 · S2).
+  패키지 폴더의 파일이 하나도 빠지지 않고, 실제 릴리스 빌드(`python -m build --wheel`)와 파일
+  목록 · 바이트 · 권한 비트가 같고, 깐 클라이언트의 `rcm skills` 가 스킬을 다 쓴다. 0.6.1 까지는
+  `ASSET_DIRS` 가 `web` · `templates` 뿐이라 `skills/` 의 `SKILL.md` · `.sh` · `.toml` 15개가
+  빠졌다.
 문서와 래퍼 예시(examples/session/update-client.sh)는 tests/test_docs_client_wheel.py 가 잠근다 —
 mutcheck 의 복사본에는 docs/·examples/ 가 없어서 이 파일과 나눈다.
 """
@@ -18,7 +23,9 @@ import base64
 import hashlib
 import io
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import zipfile
@@ -26,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+import remote_ci_monitor
 import remote_ci_monitor.cli as cli_module
 import remote_ci_monitor.server as server_module
 from remote_ci_monitor import __version__
@@ -46,6 +54,8 @@ RELEASE_CHECKED = ("web/index.html", "templates/server.toml", "templates/client.
 # `python -m venv` 가 pip 를 못 깔거나(ensurepip 없음) pip 가 없으면 실패가 아니라 skip —
 # tests/test_packaging.py 와 같은 규칙.
 NO_PIP_MARKERS = ("ensurepip", "No module named pip", "Could not", "No matching")
+#: 서버 wheel 을 만든 패키지 폴더 — 시험이 import 한 그 패키지다(mutcheck 사본에서도 사본의 것).
+PACKAGE_DIR = Path(remote_ci_monitor.__file__).resolve().parent
 
 
 @pytest.fixture
@@ -179,19 +189,172 @@ def test_missing_metadata_fails_closed(monkeypatch):
     assert e.value.code == "metadata_missing"
 
 
-def test_the_wheel_installs_into_a_fresh_venv(tmp_path):
-    """조립 wheel 은 릴리스 wheel 과 바이트가 같지 않다 — 같아야 하는 것은 설치 결과다(§9)."""
-    whl = tmp_path / WHEEL_NAME
+@pytest.fixture(scope="module")
+def installed(tmp_path_factory) -> Path:
+    """조립한 wheel 을 새 venv 에 `pip install` 한 그 venv. 한 번만 깔아 여러 시험이 나눠 쓴다."""
+    where = tmp_path_factory.mktemp("installed")
+    whl = where / WHEEL_NAME
     whl.write_bytes(build_wheel(__version__))
-    venv = _fresh_venv(tmp_path / "venv", with_pip=True)
+    venv = _fresh_venv(where / "venv", with_pip=True)
     proc = _pip_install(venv, whl)
     if proc.returncode != 0 and any(m in proc.stderr for m in NO_PIP_MARKERS):
         pytest.skip(f"pip could not install: {proc.stderr[-300:]}")
     assert proc.returncode == 0, proc.stderr
-    rcm = venv / "bin" / "rcm"
+    return venv
+
+
+def test_the_wheel_installs_into_a_fresh_venv(installed):
+    """조립 wheel 은 릴리스 wheel 과 바이트가 같지 않다 — 같아야 하는 것은 설치 결과다(§9)."""
+    rcm = installed / "bin" / "rcm"
     out = subprocess.run([str(rcm), "version"], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0 and out.stdout.startswith(f"rcm {__version__} "), out
     assert subprocess.run([str(rcm), "--help"], capture_output=True, timeout=60).returncode == 0
+
+
+# ── 내용물 = 릴리스 wheel (M5q A0 · 결정 167) ──────────────────────────────────
+
+
+def _package_folder_files() -> dict[str, Path]:
+    """패키지 폴더의 파일 전부 — wheel 이름(`remote_ci_monitor/...`) → 경로.
+
+    빼는 것은 릴리스 빌드도 빼는 것뿐이다: `__pycache__` · `.pyc` · `.pyo` · 점으로 시작하는 이름.
+    서버의 싣는 규칙(`.py` + 자산 폴더)을 따라 쓰지 않는다 — 그래야 새 폴더가 생겼을 때 빨개진다.
+    """
+    out: dict[str, Path] = {}
+    for dirpath, dirnames, filenames in os.walk(PACKAGE_DIR):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__" and not d.startswith(".")]
+        for name in filenames:
+            if name.startswith(".") or name.endswith((".pyc", ".pyo")):
+                continue
+            path = Path(dirpath) / name
+            out[f"remote_ci_monitor/{path.relative_to(PACKAGE_DIR).as_posix()}"] = path
+    return out
+
+
+def _skill_names() -> list[str]:
+    return sorted(
+        d.name
+        for d in (PACKAGE_DIR / "skills").iterdir()
+        if d.is_dir() and not d.name.startswith((".", "_"))
+    )
+
+
+def test_s1_the_wheel_carries_every_file_of_the_package_folder():
+    """S1 — 파일 목록 = 패키지 폴더 파일 목록. `skills/*/SKILL.md` 와 템플릿도 실린다."""
+    zf = zipfile.ZipFile(io.BytesIO(build_wheel(__version__)))
+    shipped = {n for n in zf.namelist() if n.startswith("remote_ci_monitor/")}
+    folder = _package_folder_files()
+    missing = sorted(set(folder) - shipped)
+    assert missing == [], f"{len(missing)} package file(s) left out of the wheel: {missing}"
+    assert sorted(shipped - set(folder)) == []
+    for name, path in folder.items():
+        assert zf.read(name) == path.read_bytes(), name
+    skills = _skill_names()
+    assert len(skills) >= 5, skills
+    for skill in skills:
+        assert f"remote_ci_monitor/skills/{skill}/SKILL.md" in shipped, skill
+
+
+def _release_mode(path: Path) -> int:
+    """릴리스 빌드(hatchling)가 파일에 주는 권한 — 소유자 실행 비트가 있으면 755, 아니면 644."""
+    return 0o755 if path.stat().st_mode & stat.S_IXUSR else 0o644
+
+
+def test_s1_executable_templates_keep_their_executable_bit():
+    """pip 는 zip 항목이 정규 파일(`S_IFREG`)이고 실행 비트가 있을 때만 실행 비트를 준다."""
+    zf = zipfile.ZipFile(io.BytesIO(build_wheel(__version__)))
+    folder = _package_folder_files()
+    executable = sorted(n for n, p in folder.items() if _release_mode(p) == 0o755)
+    assert executable, "no executable file in the package — the check below would prove nothing"
+    for name, path in folder.items():
+        mode = zf.getinfo(name).external_attr >> 16
+        assert stat.S_ISREG(mode), (name, oct(mode))
+        assert stat.S_IMODE(mode) == _release_mode(path), (name, oct(mode))
+
+
+@pytest.fixture(scope="module")
+def release_wheel(tmp_path_factory) -> Path:
+    """실제 릴리스 빌드 — release.yml 과 같은 `python -m build`(wheel 만). 못 하면 skip.
+
+    `build` 는 dev extras 에 있다. 격리 빌드가 hatchling 을 못 받으면(오프라인) 실패가 아니라 skip.
+    """
+    pytest.importorskip("build")
+    # mutcheck 의 사본에는 src/ · tests/ · pyproject.toml 만 있다. pyproject 가 읽는 README.md ·
+    # LICENSE 가 없으면 빌드 자체가 안 되니 skip 이다(그 사본은 S1 이 지킨다).
+    absent = [n for n in ("README.md", "LICENSE") if not (ROOT / n).is_file()]
+    if absent:
+        pytest.skip(f"not a full checkout, the release build needs {', '.join(absent)}")
+    dist = tmp_path_factory.mktemp("release")
+    cmd = [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist), str(ROOT)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        tail = (proc.stdout + proc.stderr)[-600:]
+        if any(m in tail for m in NO_PIP_MARKERS):
+            pytest.skip(f"python -m build could not build (offline?): {tail}")
+        raise AssertionError(tail)
+    wheels = sorted(dist.glob(f"remote_ci_monitor-{__version__}-*.whl"))
+    assert len(wheels) == 1, wheels
+    return wheels[0]
+
+
+def test_the_wheel_matches_the_release_build_file_for_file(release_wheel):
+    """손으로 쓴 목록이 아니라 실제 릴리스 빌드와 대조한다 — 이름 · 바이트 · 권한 비트."""
+    ours = zipfile.ZipFile(io.BytesIO(build_wheel(__version__)))
+    with zipfile.ZipFile(release_wheel) as rel:
+        rel_names = set(rel.namelist())
+        assert sorted(rel_names - set(ours.namelist())) == [], "missing from the server wheel"
+        assert sorted(set(ours.namelist()) - rel_names) == [], "only in the server wheel"
+        for info in rel.infolist():
+            name = info.filename
+            if not name.startswith("remote_ci_monitor/"):
+                continue  # dist-info 는 서버가 새로 쓴다(WHEEL 의 Generator · RECORD)
+            assert ours.read(name) == rel.read(name), name
+            want = stat.S_IMODE(info.external_attr >> 16)
+            got = stat.S_IMODE(ours.getinfo(name).external_attr >> 16)
+            assert got == want, (name, oct(got), oct(want))
+
+
+def test_s2_the_installed_client_lists_and_installs_every_skill(installed, tmp_path):
+    """S2 — 깐 클라이언트의 `rcm skills` 가 다섯 스킬을 설명과 함께 보이고 파일을 다 쓴다."""
+    rcm = str(installed / "bin" / "rcm")
+    skills = _skill_names()
+    out = subprocess.run([rcm, "skills", "list"], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out
+    rows = [ln.split(None, 1) for ln in out.stdout.splitlines() if ln.strip()]
+    assert [r[0] for r in rows] == skills, out.stdout
+    assert all(len(r) == 2 and r[1].strip() for r in rows), out.stdout  # 설명이 빈 줄 없음
+
+    project = tmp_path / "project"
+    project.mkdir()
+    cmd = [rcm, "skills", "install", "--into", str(project)]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out
+    want = {
+        n.removeprefix("remote_ci_monitor/skills/"): p
+        for n, p in _package_folder_files().items()
+        if n.startswith("remote_ci_monitor/skills/")
+    }
+    written = project / ".claude" / "skills"
+    got = sorted(p.relative_to(written).as_posix() for p in written.rglob("*") if p.is_file())
+    assert got == sorted(want), out.stdout
+    for rel, src in want.items():
+        assert (written / rel).read_bytes() == src.read_bytes(), rel
+    for skill in skills:
+        assert (written / skill / "SKILL.md").is_file(), skill
+
+
+def test_s2_installed_templates_keep_the_executable_bit(installed):
+    """설치 결과의 실행 비트가 원본(= 릴리스 wheel)과 같다."""
+    py = str(installed / "bin" / "python")
+    probe = "import os, remote_ci_monitor as m; print(os.path.dirname(m.__file__))"
+    out = subprocess.run([py, "-I", "-c", probe], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out
+    site_pkg = Path(out.stdout.strip())
+    assert site_pkg != PACKAGE_DIR and "site-packages" in site_pkg.parts, site_pkg
+    for name, src in _package_folder_files().items():
+        dest = site_pkg / name.removeprefix("remote_ci_monitor/")
+        is_exec = bool(dest.stat().st_mode & stat.S_IXUSR)
+        assert is_exec == (_release_mode(src) == 0o755), (name, oct(dest.stat().st_mode))
 
 
 # ── 엔드포인트 ──────────────────────────────────────────────────────────────
