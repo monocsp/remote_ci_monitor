@@ -292,3 +292,62 @@ def test_rem_a_restart_between_upload_and_finish_still_shelves(srv, tmp_path):
     assert restarted["before"] == art.UPLOADING
     assert restarted["after"] == art.UPLOADING
     wait_shelf(srv, jid)
+
+
+# ══ 격리 검증 D2 — 업로드 도중 유실된 원격 keep 잡은 영원히 waiting 이 아니다 ══════════════
+
+
+class _Died(BaseException):
+    """워커 프로세스가 죽은 것과 같다 — 레인 스레드의 `except Exception` 이 못 잡는다."""
+
+
+def die_at(srv, tmp_path: Path, monkeypatch, method: str, preset: str = "linkeep") -> int:
+    """진짜 `RemoteWorker` 가 `WorkerClient.<method>` 직전에 죽는다. 시계를 밀어 잡을 lost 로."""
+    status, body = submit(srv, preset)
+    assert status == 201, body
+    jid = int(body["job_id"])
+    upload(srv, jid, fixtures())
+    w, t = remote_worker(srv, tmp_path)
+
+    def die(self: Any, *a: Any, **kw: Any) -> Any:
+        w.stopping.set()  # heartbeat 도 멈춘다
+        raise _Died()
+
+    hook = threading.excepthook
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda args: None if isinstance(args.exc_value, _Died) else hook(args),
+    )
+    monkeypatch.setattr(WorkerClient, method, die)
+    t.start()
+    t.join(timeout=60)
+    wait_until(lambda: not t.is_alive() or w.stopping.is_set(), what="worker died")
+    srv.clock.advance(300)
+    srv.app.mark_lost_workers(srv.clock.now)
+    wait_until(lambda: srv.store.get_job(jid).state == "lost", what="job lost")
+    return jid
+
+
+def test_d2_a_job_lost_mid_upload_is_none_interrupted_not_waiting(srv, tmp_path, monkeypatch):
+    jid = die_at(srv, tmp_path, monkeypatch, "finish")
+    assert srv.store.get_bundle(jid)["state"] == art.UPLOADING  # §15.5 — 묶음 화해는 안 돈다
+    status, view = srv.req("GET", f"/jobs/{jid}")
+    assert view["shelf"] == {
+        "state": "none",
+        "url": f"http://127.0.0.1:{srv.port}/shelf/{jid}/",
+        "reason_code": "interrupted",
+    }
+    status, body = srv.req("POST", f"/jobs/{jid}/keep", token="alice", json_body={})
+    assert status == 409 and body["result"] == "no_bundle", body
+    assert body["reason_code"] == "interrupted"
+
+
+def test_d2_a_job_lost_before_any_bundle_says_job_lost(srv, tmp_path, monkeypatch):
+    jid = die_at(srv, tmp_path, monkeypatch, "upload_bundle")
+    status, view = srv.req("GET", f"/jobs/{jid}")
+    assert view["shelf"]["state"] == "none", view["shelf"]
+    assert view["shelf"]["reason_code"] == "job_lost"  # 묶음 행이 없다 — 업로드 전에 죽었다
+    status, body = srv.req("POST", f"/jobs/{jid}/keep", token="alice", json_body={})
+    assert status == 409 and body["result"] == "no_bundle"
+    assert body["reason_code"] == view["shelf"]["reason_code"]

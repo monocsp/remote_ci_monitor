@@ -65,7 +65,8 @@ WEIRD = {
 @pytest.fixture(scope="module")
 def weird(tmp_path_factory):
     """(서버, 잡 번호) — 이상한 이름을 다 담은 보관 항목 하나."""
-    s = make_server(tmp_path_factory.mktemp("weird"))
+    # 멤버가 열여덟이다 — 건너뛸 것까지 `max_artifact_files` 에 센다(격리 검증 D1)
+    s = make_server(tmp_path_factory.mktemp("weird"), max_artifact_files=32)
     s.cfg.presets = shelf_presets(
         [
             sh(
@@ -531,7 +532,10 @@ def walk_specials(root: Path) -> list[str]:
     return bad
 
 
-def test_e49_bad_members_inside_an_expanded_tar_are_skipped_one_by_one(srv, tmp_path):
+def test_e49_bad_members_inside_an_expanded_tar_are_skipped_one_by_one(tmp_path):
+    # 건너뛸 멤버도 `max_artifact_files` 에 센다(격리 검증 D1) — 나쁜 멤버 여덟에 좋은 하나라 16
+    srv = make_server(tmp_path / "s", max_artifact_files=16)
+    request_close = srv.close
     outside_before = set(os.listdir(tmp_path))
     jid = run_local(srv, "copyfix", fixtures({"fixtures/bad.tar.gz": bad_tar()}))
     wait_shelf(srv, jid)
@@ -543,6 +547,7 @@ def test_e49_bad_members_inside_an_expanded_tar_are_skipped_one_by_one(srv, tmp_
     assert expanded == {"out/bad.tar.gz.d/good.png"}, expanded
     skipped = manifest_of(srv, jid)["skipped"]
     assert len(skipped) == 8 and all(s["expanded_from"] == "out/bad.tar.gz" for s in skipped)
+    request_close()
 
 
 def sparse_tar(declared: int) -> bytes:

@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -40,7 +41,7 @@ from remote_ci_monitor import shelf_pages as pages
 from remote_ci_monitor.config import ANY_BINDS
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core import shelf as shelf_rules
-from remote_ci_monitor.core.model import SUCCEEDED, Job, ShelfItem
+from remote_ci_monitor.core.model import LOST, SUCCEEDED, Job, ShelfItem
 from remote_ci_monitor.core.status import iso, shelf_json, shelf_stage_state
 from remote_ci_monitor.janitor import DELETING, remove_under_root
 from remote_ci_monitor.store import StoreError, TokenInfo
@@ -55,8 +56,10 @@ SHELF_CHUNK = 64 * 1024
 #: `/api/shelf?limit=` 의 범위.
 API_LIMIT_DEFAULT = 200
 API_LIMIT_MAX = 1000
-#: 메모리에 들고 있는 manifest 수 — 넘으면 비운다(펼친 tar 로 수천 줄일 수 있다).
-MANIFEST_CACHE_MAX = 256
+#: 메모리에 들고 있는 manifest 의 바이트 합 상한 — 넘으면 오래된 것부터 내보낸다. 수가 아니라
+#: 바이트로 잰다: 펼친 tar 로 manifest 하나가 수 MB 일 수 있다(격리 검증 D1). 이보다 큰
+#: manifest 하나는 읽기만 하고 담지 않는다.
+MANIFEST_CACHE_BYTES = 64 * 1024 * 1024
 PAGE_CSP = (
     "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; "
     "form-action 'self'; frame-ancestors 'none'"
@@ -100,7 +103,9 @@ class ShelfAppMixin:
         self._shelf_lock = threading.Lock()
         self._shelf_holds: dict[int, int] = {}
         self._shelf_deleting: set[int] = set()
-        self._shelf_manifests: dict[int, tuple[int, dict[str, Any], dict[str, Any]]] = {}
+        #: job → (mtime_ns, 바이트, manifest, 경로 → 줄). 넣은 차례가 곧 내보낼 차례다
+        self._shelf_manifests: dict[int, tuple[int, int, dict[str, Any], dict[str, Any]]] = {}
+        self._shelf_manifest_bytes = 0
         self.copier: Any = None
         self.shelf_startup: Any = None
         # 설정을 모르는 곳(`rcm gc` 사본 · store 시험)의 기본은 False 다 — 서버만 켠다(§15.1)
@@ -150,16 +155,18 @@ class ShelfAppMixin:
                 self._shelf_holds.pop(job_id, None)
 
     def shelf_manifest(self, job_id: int) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """(manifest, 경로 → 줄). (job, mtime) 으로 메모리에 캐시한다(§4.6)."""
+        """(manifest, 경로 → 줄). (job, mtime) 으로 메모리에 캐시한다(§4.6). 캐시는 바이트 합으로
+        묶는다(`MANIFEST_CACHE_BYTES`)."""
         path = self.config.shelf_dir / str(int(job_id)) / "manifest.json"
         try:
-            mtime = path.stat().st_mtime_ns
+            st = path.stat()
         except OSError:
             return None
+        mtime, size = st.st_mtime_ns, st.st_size
         with self._shelf_lock:
             hit = self._shelf_manifests.get(job_id)
             if hit is not None and hit[0] == mtime:
-                return hit[1], hit[2]
+                return hit[2], hit[3]
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -172,10 +179,21 @@ class ShelfAppMixin:
             if isinstance(f, dict) and isinstance(f.get("path"), str)
         }
         with self._shelf_lock:
-            if len(self._shelf_manifests) >= MANIFEST_CACHE_MAX:
-                self._shelf_manifests.clear()
-            self._shelf_manifests[job_id] = (mtime, doc, index)
+            self._shelf_forget_manifest(job_id)
+            if size <= MANIFEST_CACHE_BYTES:
+                while self._shelf_manifests and (
+                    self._shelf_manifest_bytes + size > MANIFEST_CACHE_BYTES
+                ):
+                    self._shelf_forget_manifest(next(iter(self._shelf_manifests)))
+                self._shelf_manifests[job_id] = (mtime, size, doc, index)
+                self._shelf_manifest_bytes += size
         return doc, index
+
+    def _shelf_forget_manifest(self, job_id: int) -> None:
+        """캐시에서 하나를 뺀다(`_shelf_lock` 안에서 부른다)."""
+        gone = self._shelf_manifests.pop(job_id, None)
+        if gone is not None:
+            self._shelf_manifest_bytes -= gone[1]
 
     # ── 상태 · 회계 ──
 
@@ -221,8 +239,12 @@ class ShelfAppMixin:
 
     def _shelf_none_reason(self, job: Job, artifact_state: str) -> str | None:
         """묶음 행이 없는 keep 잡의 이유를 정책으로 계산한다(§15.1)."""
+        if artifact_state in art.PROGRESS_STATES and job.is_terminal:
+            return "interrupted"
         if artifact_state != art.UNKNOWN:
             return None
+        if job.state == LOST:
+            return "job_lost"
         preset = self.config.preset(job.preset)
         if (
             preset is not None
@@ -249,6 +271,7 @@ class ShelfAppMixin:
             artifact_state=state,
             url=self.shelf_url(job.id, base),
             now=self.now_fn().timestamp(),
+            terminal=job.is_terminal,
             stale_days=s.shelf_stale_days,
             delete_days=s.shelf_delete_days,
             none_reason=self._shelf_none_reason(job, state),
@@ -493,7 +516,7 @@ class ShelfAppMixin:
         finally:
             with self._shelf_lock:
                 self._shelf_deleting.discard(job_id)
-                self._shelf_manifests.pop(job_id, None)
+                self._shelf_forget_manifest(job_id)
         if not done:
             raise ApiError(409, "the item changed — try again", reason_code="shelf_item_busy")
         self.log(f"shelf: #{job_id} deleted by hand")  # type: ignore[attr-defined]
@@ -511,8 +534,11 @@ class _ZipSink:
 
     def __init__(self, out: Any) -> None:
         self.out = out
+        self.dead = False
 
     def write(self, data: bytes) -> int:
+        if self.dead:
+            raise OSError("zip stream aborted")
         self.out.write(data)
         return len(data)
 
@@ -858,6 +884,9 @@ class ShelfHandlerMixin:
             if not app._shelf_hold_begin(job_id):
                 raise ApiError(409, "being deleted", reason_code="shelf_item_busy")
             try:
+                # 200 을 보내기 **전에** 모든 멤버가 그 자리에 그 크기로 있는지 본다 — 도중에
+                # 못 열면 받는 쪽은 200 뒤의 반쪽 zip 을 받는다(격리 검증 개선 2)
+                self._zip_preflight(job_id, files)
                 app.shelf_touch(job_id, "zip", self.command, item)
                 self.send_response(200)  # type: ignore[attr-defined]
                 for k, v in headers.items():
@@ -876,14 +905,46 @@ class ShelfHandlerMixin:
         finally:
             app.shelf_slots.release()
 
+    def _zip_preflight(self, job_id: int, files: list[dict[str, Any]]) -> None:
+        """zip 의 모든 멤버가 `files/` 안의 일반 파일이고 크기가 manifest 와 같은가. 아니면 409."""
+        from remote_ci_monitor.server import ApiError
+
+        root = self.app.config.shelf_dir / str(job_id) / "files"
+        try:
+            base = root.resolve()
+        except OSError:
+            base = None
+        for f in files:
+            rel = f["path"]
+            path = root / rel
+            try:
+                st = path.lstat()
+                inside = base is not None and base in path.resolve().parents
+            except OSError:
+                st, inside = None, False
+            if (
+                not shelf_rules.safe_member(rel)
+                or st is None
+                or not inside
+                or not stat.S_ISREG(st.st_mode)
+                or st.st_size != f.get("size")
+            ):
+                raise ApiError(
+                    409,
+                    "the shelf item's files changed on disk — see the server log",
+                    reason_code="shelf_item_damaged",
+                )
+
     def _write_zip(self, job_id: int, files: list[dict[str, Any]], item: ShelfItem) -> None:
+        """zip 을 흘려보낸다. 도중에 멤버를 못 열면 끝 레코드를 **쓰지 않고** 연결을 끊는다 —
+        받는 쪽이 망가진 zip 으로 실패를 안다(정상처럼 닫힌 반쪽 zip 을 주지 않는다)."""
         stamp = datetime.fromtimestamp(item.shelved_at or item.requested_at, UTC)
         when = max(stamp, datetime(1980, 1, 1, tzinfo=UTC)).timetuple()[:6]
-        with zipfile.ZipFile(_ZipSink(self.wfile), "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+        sink = _ZipSink(self.wfile)
+        zf = zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True)
+        try:
             for f in files:
                 rel = f["path"]
-                if not shelf_rules.safe_member(rel):
-                    continue
                 fd, st = self._open_member(job_id, rel)
                 with os.fdopen(fd, "rb") as src:
                     zi = zipfile.ZipInfo(rel, date_time=when)
@@ -897,6 +958,14 @@ class ShelfHandlerMixin:
                             if not chunk:
                                 break
                             dst.write(chunk)
+        except BaseException:
+            sink.dead = True  # 남은 쓰기(데이터 기술자 · 끝 레코드)를 막는다
+            zf._didModify = False  # close 가 끝 레코드를 쓰지 않게
+            zf._writing = False  # 열린 멤버 쓰기가 남아도 close 가 막히지 않게
+            with contextlib.suppress(Exception):
+                zf.close()
+            raise
+        zf.close()
 
     # ── 되살리기 (결정 145) ──
 
@@ -981,6 +1050,7 @@ class ShelfHandlerMixin:
         files: list[Any] = []
         expand_skipped: list[Any] = []
         skipped: list[Any] = []
+        got = None
         if item.state in shelf_rules.SHELVED_STATES:
             got = app.shelf_manifest(job_id)
             if got is not None:
@@ -1001,7 +1071,15 @@ class ShelfHandlerMixin:
                 skipped = got[0].get("skipped") or []
         doc["files"] = files
         doc["expand_skipped"] = expand_skipped
+        doc["expand_skipped_count"] = len(expand_skipped)
         doc["skipped"] = skipped
+        doc["skipped_count"] = len(skipped)
+        if item.state in shelf_rules.SHELVED_STATES and got is not None:
+            # 줄은 200 까지만 적혀 있다 — 수는 manifest 가 센 것(격리 검증 D1)
+            doc["expand_skipped_count"] = int(got[0].get("expand_skipped_count") or 0) or len(
+                expand_skipped
+            )
+            doc["skipped_count"] = int(got[0].get("skipped_count") or 0) or len(skipped)
         return doc
 
 

@@ -96,17 +96,31 @@ def gold(srv):
 
 
 class Gate:
-    """copier 를 붙잡는다 — §6 에 고정된 이름(`claim_shelf_item` · `finish_shelf_item`)을 감싼다."""
+    """copier 를 붙잡는다 — §6 에 고정된 이름(`claim_shelf_item` · `finish_shelf_item`)을 감싼다.
+
+    `target` 을 정하면 **그 잡의 보관 행이 생긴 뒤**의 호출에만 걸린다(기동 직후의 빈 claim 을
+    붙잡지 않는다). 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
+    """
 
     def __init__(self, monkeypatch: Any, name: str = "claim_shelf_item"):
         self.release = threading.Event()
         self.entered = threading.Event()
+        self.target: int | None = None
         orig = getattr(Store, name)
         gate = self
 
+        def wanted(store: Store, args: tuple[Any, ...]) -> bool:
+            if gate.target is None:
+                return True
+            if name == "claim_shelf_item":
+                item = store.shelf_item(gate.target)
+                return item is not None and item.state == "pending"
+            return bool(args) and args[0] == gate.target
+
         def gated(store: Store, *args: Any, **kwargs: Any) -> Any:
-            gate.entered.set()
-            gate.release.wait(30)
+            if wanted(store, args):
+                gate.entered.set()
+                gate.release.wait()
             return orig(store, *args, **kwargs)
 
         monkeypatch.setattr(Store, name, gated)
@@ -962,9 +976,10 @@ def test_g34_head_on_a_zip_holds_nothing(srv, gold):
 def test_e58_files_are_409_while_copying(srv, monkeypatch):
     gate = Gate(monkeypatch)
     jid = finished_linux_job(srv)
+    gate.target = jid
     publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
     srv.app._on_job_change(jid)
-    gate.entered.wait(10)
+    assert gate.entered.wait(10)
     assert srv.store.shelf_item(jid).state == "pending"
     status, _h, html = page(srv, f"/shelf/{jid}/")
     assert status == 200 and "보관하는 중".encode() in html
@@ -977,9 +992,10 @@ def test_e58_files_are_409_while_copying(srv, monkeypatch):
 def test_e58_files_are_409_in_the_copying_state(srv, monkeypatch):
     gate = Gate(monkeypatch, "finish_shelf_item")
     jid = finished_linux_job(srv)
+    gate.target = jid
     publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
     srv.app._on_job_change(jid)
-    gate.entered.wait(10)
+    assert gate.entered.wait(10)
     assert srv.store.shelf_item(jid).state == "copying"
     assert page(srv, f"/shelf/{jid}/")[0] == 200
     assert page(srv, f"/shelf/{jid}/f/out/a.txt")[0] == 409
@@ -1488,3 +1504,105 @@ def test_s16_the_original_tar_gz_downloads_as_an_attachment_byte_for_byte(srv):
     assert headers["Content-Security-Policy"] == FILE_CSP
     want = SHOTS["build/app_map/shots.tar.gz"]
     assert hashlib.sha256(body).hexdigest() == hashlib.sha256(want).hexdigest()
+
+
+# ══ 격리 검증 D1 — 건너뛴 멤버에도 상한이 있다 · manifest 캐시는 바이트로 ═══════════════════
+
+
+def symlinks(n: int, prefix: str = "out/l") -> list[Any]:
+    out = []
+    for i in range(n):
+        info = tarfile.TarInfo(f"{prefix}{i}")
+        info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
+        out.append(info)
+    return out
+
+
+def test_d1_a_member_bomb_in_the_outer_bundle_fails_the_item(srv):
+    """바깥 묶음의 멤버(건너뛸 것까지)가 `max_artifact_files` 를 넘으면 항목이 실패한다."""
+    jid = shelve_bundle(srv, [*symlinks(20), ("out/ok.txt", b"ok")], states=("failed",))
+    assert srv.store.shelf_item(jid).reason_code == "too_many_files"
+    assert not item_dir(srv, jid).exists()
+
+
+def test_d1_a_member_bomb_inside_a_tar_is_folded_as_too_many_files(srv):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for info in symlinks(30, "l"):
+            tf.addfile(info)
+    jid = copyfix(srv, {"fixtures/links.tar.gz": buf.getvalue()})
+    wait_shelf(srv, jid)
+    doc = manifest_of(srv, jid)
+    assert {e["path"]: e["reason"] for e in doc["expand_skipped"]} == {
+        "out/links.tar.gz": "too_many_files"
+    }
+    assert len(doc["skipped"]) <= 8 and doc["skipped_count"] == len(doc["skipped"])
+
+
+def test_d1_skipped_lists_are_capped_with_counts(tmp_path):
+    s = make_server(tmp_path, max_artifact_files=1000)
+    try:
+        broken = [(f"out/b{i}.tar", b"not a tar") for i in range(250)]
+        jid = shelve_bundle(s, [*symlinks(300), ("out/ok.txt", b"ok"), *broken])
+        doc = manifest_of(s, jid)
+        assert len(doc["skipped"]) == 200 and doc["skipped_count"] == 300
+        assert len(doc["expand_skipped"]) == 200 and doc["expand_skipped_count"] == 250
+        api = s.req("GET", f"/api/shelf/{jid}")[1]
+        assert api["skipped_count"] == 300 and api["expand_skipped_count"] == 250
+        assert len(api["skipped"]) == 200
+    finally:
+        s.close()
+
+
+def test_d1_the_manifest_cache_is_bounded_by_bytes(srv, monkeypatch):
+    import remote_ci_monitor.shelf_server as shelf_server
+
+    a = shelve_bundle(srv, {"out/a.txt": b"a"})
+    b = shelve_bundle(srv, {"out/b.txt": b"b"})
+    size = (item_dir(srv, a) / "manifest.json").stat().st_size
+    monkeypatch.setattr(shelf_server, "MANIFEST_CACHE_BYTES", size + size // 2)
+    srv.app._shelf_manifests.clear()
+    srv.app._shelf_manifest_bytes = 0
+    assert srv.app.shelf_manifest(a) is not None
+    assert srv.app.shelf_manifest(b) is not None
+    assert set(srv.app._shelf_manifests) == {b}  # 오래된 것부터 내보낸다
+    assert srv.app._shelf_manifest_bytes <= size + size // 2
+    monkeypatch.setattr(shelf_server, "MANIFEST_CACHE_BYTES", size - 1)
+    srv.app._shelf_manifests.clear()
+    srv.app._shelf_manifest_bytes = 0
+    assert srv.app.shelf_manifest(a) is not None  # 상한보다 큰 manifest 는 읽되 담지 않는다
+    assert srv.app._shelf_manifests == {} and srv.app._shelf_manifest_bytes == 0
+
+
+# ══ 격리 검증 개선 2 — zip 은 시작 전에 멤버를 확인하고, 도중 실패는 끊는다 ═══════════════
+
+
+def test_zip_refuses_before_streaming_when_a_member_is_gone(srv):
+    jid = shelve_bundle(srv, {"out/a.txt": b"a", "out/b.txt": b"b"})
+    (item_dir(srv, jid) / "files/out/b.txt").unlink()
+    status, headers, body = page(srv, f"/shelf/{jid}.zip")
+    assert status == 409 and headers["Content-Type"].startswith("application/json")
+    assert json.loads(body)["reason_code"] == "shelf_item_damaged"
+
+
+def test_zip_cut_mid_stream_is_not_a_valid_zip(srv, monkeypatch):
+    from remote_ci_monitor.shelf_server import ShelfHandlerMixin
+
+    jid = shelve_bundle(srv, {"out/a.txt": b"a" * 1000, "out/b.txt": b"b" * 1000})
+    orig = ShelfHandlerMixin._open_member
+    calls = {"n": 0}
+
+    def flaky(self: Any, job_id: int, rel: str) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("vanished")
+        return orig(self, job_id, rel)
+
+    monkeypatch.setattr(ShelfHandlerMixin, "_open_member", flaky)
+    try:
+        status, _h, body = page(srv, f"/shelf/{jid}.zip")
+    except (http.client.IncompleteRead, ConnectionError):
+        return  # 받는 쪽이 실패를 안다
+    assert status == 200
+    with pytest.raises(zipfile.BadZipFile):
+        zipfile.ZipFile(io.BytesIO(body)).testzip()
