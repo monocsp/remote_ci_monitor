@@ -172,9 +172,10 @@ def test_boot_imports_the_cache_not_the_cwd(bootloader, tmp_path, servers):
 # ── 엣지 ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("n", [2, 10])
-def test_concurrent_fetch_makes_one_folder(bootloader, tmp_path, servers, n):
-    # A61 (F30 · §2.5): 동시에 받아도 대상 폴더 하나, 찌꺼기 없음
+def test_concurrent_fetch_makes_one_folder(bootloader, tmp_path, servers):
+    # A61 (F30 · §2.5): 동시에 받아도 대상 폴더 하나, 찌꺼기 없음. 열 프로세스가 장벽에서 한꺼번에
+    # 받는다. 둘의 경주는 이 경우에 들어 있다. 한 프로세스 안의 경주는 test_follow_cache 가 본다
+    n = 10
     srv = FakeServer(NEW, probe_wheel(), client_barrier=threading.Barrier(n))
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
@@ -236,8 +237,9 @@ def test_prune_keeps_a_locked_entry(bootloader, tmp_path, servers):
         RCM_FOLLOWED_FROM=INSTALLED,
     )
     sleeper = subprocess.Popen(
-        boot_argv(bootloader, "probe", "--sleep", "4"),
+        boot_argv(bootloader, "probe", "--hold"),
         env=env,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -251,7 +253,7 @@ def test_prune_keeps_a_locked_entry(bootloader, tmp_path, servers):
     left = set(entries(locked.parent))
     assert left == {new, copies[3], copies[2], locked}
     assert leftovers(locked.parent) == []
-    sleeper.communicate(timeout=30)
+    sleeper.communicate(timeout=30)  # stdin 이 닫히면 PROBE 가 잠금을 놓고 끝난다
     assert sleeper.returncode == 0
 
 
@@ -396,13 +398,19 @@ def test_check_in_a_fallback_says_so(bootloader, tmp_path, servers):
 def test_sigint_while_waiting_for_health(bootloader, tmp_path):
     # A117: 답하지 않는 서버 앞에서 Ctrl-C 는 130, 기록에 아무것도 남지 않는다
     silent = SilentListener()
+    conn = None
     try:
         env = child_env(tmp_path, bootloader, RCM_SERVER=silent.url)
         proc = popen(bootloader, ["jobs"], env)
-        time.sleep(1.0)
+        # 1초를 재지 않고 자식의 health 연결이 들어온 것을 본 뒤 누른다. 그때 자식은 답을 기다린다
+        silent.sock.settimeout(15)
+        conn, _ = silent.sock.accept()
+        time.sleep(0.1)
         proc.send_signal(signal.SIGINT)
         _, err = proc.communicate(timeout=30)
     finally:
+        if conn is not None:
+            conn.close()
         silent.close()
     assert proc.returncode == 130, err
     record = root_of(tmp_path) / "follow.json"

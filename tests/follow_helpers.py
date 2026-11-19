@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
@@ -72,6 +73,8 @@ def main(argv=None):
     try:
         if "--sleep" in args:
             time.sleep(float(args[args.index("--sleep") + 1]))
+        if "--hold" in args:
+            sys.stdin.read()  # 시험이 stdin 을 닫을 때까지 쥔다. 정해 둔 시간을 기다리지 않는다
     except KeyboardInterrupt:
         return 130
     if "--exit" in args:
@@ -185,6 +188,20 @@ def health_doc(version: str, wheel: bytes | None, **over: Any) -> dict[str, Any]
     return doc
 
 
+class _NoLookupHTTPServer(ThreadingHTTPServer):
+    """`HTTPServer.server_bind` 의 `socket.getfqdn()` 역방향 조회를 건너뛴다.
+
+    macOS CI 러너에서는 프로세스의 첫 조회가 30초 넘게 멈춘다. 뮤테이션 확인은 변이마다 pytest 를
+    새로 띄우므로 m5q 변이 하나가 대조군과 변이판에서 이 값을 두 번 치렀다. 이름은 쓰지 않는다.
+    서버 쪽 `RcmHTTPServer.server_bind` 와 같은 처리다."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
+
 @dataclass
 class Seen:
     method: str
@@ -240,12 +257,16 @@ class FakeServer:
             def do_GET(self):
                 outer._handle(self)
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd = _NoLookupHTTPServer(("127.0.0.1", 0), H)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
         self.key = f"http://127.0.0.1:{self.port}"
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        # 기본 poll 0.5초면 `close()` 의 shutdown 이 서버마다 평균 0.25초, 길게는 0.5초를 기다린다.
+        # 따라가기 시험은 시험마다 서버를 여럿 띄우므로 fake_rcm_http 와 같은 0.02초로 둔다
+        threading.Thread(
+            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        ).start()
 
     # ── 셈 ──
     @property
@@ -422,7 +443,7 @@ class VersionedServer:
         self.url = f"http://127.0.0.1:{self.port}"
         self.key = self.url
         self.thread = threading.Thread(
-            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
+            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
         )
         self.thread.start()
         if workers:
