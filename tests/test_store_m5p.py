@@ -768,15 +768,18 @@ def test_a101_unknown_job(store):
         assert conn.execute("SELECT count(*) FROM shelf_items").fetchone()[0] == 0
 
 
-def test_a148_a_finished_job_whose_bundle_is_still_moving_is_armed(store):
+def test_a148_a_finished_job_whose_bundle_is_still_moving_has_no_bundle(store):
+    """P2 격리 검증 D2 — 끝난 잡의 묶음은 더 오지 않는다(로컬은 종료와 같은 트랜잭션에서 ready,
+    원격은 finish 전에 ready). 그래서 묶음이 아직 collecting · uploading 이면 끊긴 것이다 —
+    `armed` 를 주면 영원히 기다린다. 예전 판은 이것을 `armed` 로 잠갔다."""
     core = artifacts_core()
     j = finished_bare(store)
     store.start_collect(j.id, policy(), at(70))  # collecting
-    assert store.set_job_keep(j.id, at(71), enabled=True) == "armed"
+    assert store.set_job_keep(j.id, at(71), enabled=True) == "no_bundle"
     k = finished_bare(store)
     store.start_collect(k.id, policy(), at(70))
     set_bundle(store, k.id, state=core.UPLOADING)
-    assert store.set_job_keep(k.id, at(71), enabled=True) == "armed"
+    assert store.set_job_keep(k.id, at(71), enabled=True) == "no_bundle"
     u = finished_bare(store)
     store.start_collect(u.id, policy(), at(70))
     set_bundle(store, u.id, state=core.UNKNOWN)

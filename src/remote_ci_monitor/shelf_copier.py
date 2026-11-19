@@ -47,6 +47,9 @@ SHELF_POLL_SECONDS = 5.0
 #: 같은 예외가 이만큼 연달아 나면 `copier_stuck`(§15.5).
 STUCK_AFTER = 5
 CHUNK = 64 * 1024
+#: manifest 의 `skipped[]` · `expand_skipped[]` 에 적는 줄 수의 상한 — 나머지는 수로만 센다(D1).
+#: 링크 멤버 200만 개짜리 tar 하나가 187 MB manifest 를 만들고 API 한 번에 RSS 를 1 GB 올렸다
+SKIPPED_LINES_MAX = 200
 #: 펼치다 깨진 tar 로 보는 예외들 — 그 tar 의 펼침만 버린다(항목은 산다).
 _BROKEN_TAR = (tarfile.TarError, EOFError, zlib.error, OSError, ValueError)
 
@@ -143,15 +146,25 @@ def _entry(path: str, size: int, sha: str, **extra: Any) -> dict[str, Any]:
 
 
 def _unpack_bundle(
-    bundle: Path, files: Path, names: _Names
+    bundle: Path, files: Path, names: _Names, *, max_members: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """바깥 묶음을 푼다. (파일 줄들, 건너뛴 멤버들)."""
+    """바깥 묶음을 푼다. (파일 줄들, 건너뛴 멤버들).
+
+    건너뛸 멤버와 디렉터리까지 **모든 멤버**를 `max_members` 에 센다 — 수집기가 만든 묶음은
+    일반 파일만 담고 그 수가 이미 이 상한 안이다. 넘으면 악의적인 묶음이라 항목을 접는다(D1).
+    """
     entries: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    seen = 0
     with bundle.open("rb") as fh, tarfile.open(fileobj=fh, mode="r|*") as tf:
         for m in tf:
             name = shelf_rules.normalize_member(m.name)
-            if not name or m.isdir():
+            if not name:
+                continue
+            seen += 1
+            if seen > max_members:
+                raise ShelveError("too_many_files")
+            if m.isdir():
                 continue  # 디렉터리는 파일을 쓸 때 만든다 — 빈 디렉터리는 남기지 않는다
             reason = _unsafe(m, name)
             if reason is not None:
@@ -186,11 +199,20 @@ def _expand_one(
     got: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     spent = 0
+    dirs = 0
     with tar_path.open("rb") as fh, tarfile.open(fileobj=fh, mode="r|*") as tf:
         for m in tf:
             name = shelf_rules.normalize_member(m.name)
-            if not name or m.isdir():
+            if not name:
                 continue
+            if m.isdir():
+                dirs += 1  # `tar -C dir .` 의 디렉터리 멤버 — 파일 수만큼은 봐 준다
+                if dirs > max(files_left, 1):
+                    raise _SkipExpand("too_many_files")
+                continue
+            # 건너뛸 멤버도 센다 — 링크 200만 개짜리 tar 가 manifest 를 부풀리지 못하게(D1)
+            if len(got) + len(skipped) + 1 > files_left:
+                raise _SkipExpand("too_many_files")
             full = f"{base}/{name}"
             reason = _unsafe(m, name) or (None if shelf_rules.safe_member(full) else "unsafe_name")
             if reason is not None:
@@ -198,8 +220,6 @@ def _expand_one(
                     {"path": _printable(full), "reason": reason, "expanded_from": tar_rel}
                 )
                 continue
-            if len(got) + 1 > files_left:
-                raise _SkipExpand("too_many_files")
             if spent + int(m.size) > bytes_left:
                 raise _SkipExpand("too_big")  # 헤더가 말하는 크기로 미리 — 쓰기 전에 거절한다
             local.add(name)
@@ -232,7 +252,7 @@ def shelve_bundle(
             raise ShelveError("bundle_gone")
         names = _Names()
         try:
-            entries, skipped = _unpack_bundle(bundle, files, names)
+            entries, skipped = _unpack_bundle(bundle, files, names, max_members=expand_files)
         except (tarfile.TarError, EOFError, zlib.error) as e:
             raise ShelveError("copy_error") from e
         if not entries:
@@ -277,8 +297,10 @@ def shelve_bundle(
         doc = {
             "job": int(job_id),
             "files": rows,
-            "expand_skipped": expand_skipped,
-            "skipped": skipped,
+            "expand_skipped": expand_skipped[:SKIPPED_LINES_MAX],
+            "expand_skipped_count": len(expand_skipped),
+            "skipped": skipped[:SKIPPED_LINES_MAX],
+            "skipped_count": len(skipped),
         }
         raw = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         (work / "manifest.json").write_bytes(raw)

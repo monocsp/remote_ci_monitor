@@ -530,6 +530,7 @@ def shelf_json(
     artifact_state: str,
     url: str | None,
     now: float,
+    terminal: bool = False,
     stale_days: int,
     delete_days: int,
     none_reason: str | None = None,
@@ -556,6 +557,9 @@ def shelf_json(
     if artifact_state == _art.DISABLED:
         return {"state": "none", "url": url, "reason_code": "no_artifacts"}
     if artifact_state in _art.PROGRESS_STATES:
+        if terminal:
+            # 끝난 잡의 묶음은 더 오지 않는다 — 업로드 도중 끊겼다(P2 격리 검증 D2)
+            return {"state": "none", "url": url, "reason_code": "interrupted"}
         return {"state": "waiting", "url": url, "reason_code": None}
     if artifact_state == _art.UNKNOWN:
         return {"state": "none", "url": url, "reason_code": none_reason or _art.UNKNOWN}
