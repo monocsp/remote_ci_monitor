@@ -124,6 +124,8 @@ VERSION_UPDATABLE = frozenset(
 )
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
+#: 정지 행 — `get_paused` 와 claim 트랜잭션이 같은 문장으로 본다
+_PAUSED_SQL = "SELECT value FROM server_state WHERE key='paused'"
 
 #: v24(M5p · docs/m5p-workplan.md §5.1 · §15.3) — 보관함 항목. 잡 행보다 오래 살아서 외래 키를
 #: 걸지 않고 페이지에 필요한 잡의 열을 복사해 든다. 새 DB(`_SCHEMA_V1`)와 마이그레이션이 같은
@@ -3042,6 +3044,11 @@ class Store:
 
         `worker_name` 이 있으면(원격 워커) 같은 트랜잭션에서 그 워커의 그 레인에 활성 잡이
         없는지 확인한다 — 있으면 `LaneBusy`(M5b-2, 레인 과할당 금지). 로컬 레인은 None.
+
+        서버가 정지(`/pause`) 중이면 아무것도 집지 않고 None 이다. 호출자가 앞에서 `get_paused` 를
+        봤더라도 같은 트랜잭션에서 다시 본다. 그 확인과 claim 사이에는 admit(부하 판정)이 끼어
+        시간이 걸릴 수 있다. 그 틈에 걸린 정지를 놓치면 「정지 → 도는 잡 0 확인 → 재시작」 직후에
+        잡이 시작돼 재시작으로 lost 가 된다. 정지 중에 집어야 하는 호출자는 없다.
         """
         if claimant is not None:
             pool = claimant.pool
@@ -3050,6 +3057,9 @@ class Store:
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if conn.execute(_PAUSED_SQL).fetchone() is not None:
+                conn.execute("COMMIT")
+                return None
             busy = ",".join("?" * len(BUSY_STATES))
             busy_states = sorted(BUSY_STATES)
             if worker_name is not None:
@@ -4220,7 +4230,7 @@ class Store:
         self._conn().execute("DELETE FROM server_state WHERE key='paused'")
 
     def get_paused(self) -> Paused | None:
-        row = self._conn().execute("SELECT value FROM server_state WHERE key='paused'").fetchone()
+        row = self._conn().execute(_PAUSED_SQL).fetchone()
         if row is None:
             return None
         v = json.loads(row["value"])

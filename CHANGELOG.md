@@ -39,6 +39,11 @@ of a key bumps that number and is listed here.
   and no shell or TOML template (15 files). The wheel now holds the same files as the release wheel,
   with the same executable bits.
   ([#219](https://github.com/monocsp/remote_ci_monitor/pull/219))
+- **A pause now stops a claim that was already on its way.** A local lane or a remote worker
+  checked the pause, then went through the load gate, then claimed; a pause, submit and upload
+  landing in between started the job while the server was paused, so a deploy that pauses,
+  waits for zero running jobs and restarts could turn that job into `lost`. The claim now reads
+  the pause in the same transaction and takes nothing while it is set.
 
 ## [0.6.1] - 2026-11-19
 
