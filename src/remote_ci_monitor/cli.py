@@ -10,6 +10,7 @@ Ctrl-C 는 detach — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID`
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import importlib.resources
 import json
@@ -3844,9 +3845,21 @@ def _worker_config(args: argparse.Namespace):
             _info(f"config: {default}")
     cfg = load_worker_config(path, overrides=overrides)
     if cfg.wants_discovery:
-        cfg.server = _pick_worker_server(cfg)
+        handed = _found_server_from_boot()
+        cfg.server = handed or _pick_worker_server(cfg)
         cfg.discovered_server = True  # type: ignore[attr-defined]
     return cfg
+
+
+def _found_server_from_boot() -> str | None:
+    """따라간 자식이면 부모가 mDNS 로 찾아 `RCM_SERVER` 로 넘긴 주소(M5q §14 B질문16). 발견 표시가
+    없는 프로세스는 오늘처럼 `RCM_SERVER` 를 읽지 않는다. 읽은 뒤에는 환경에서 지운다 — 워커가
+    띄우는 잡과 다시 실행할 프로세스로 새지 않게. `discovered_server` 는 그대로 켜 두므로 주소가
+    바뀌면 다시 찾는 동작도 남는다."""
+    boot = follow.booted()
+    if not boot or boot.get(follow.ENV_FOLLOW_FOUND) != "1":
+        return None
+    return os.environ.pop("RCM_SERVER", None) or None
 
 
 def _pick_worker_server(cfg: Any, *, timeout: float = 1.5) -> str:
@@ -3887,10 +3900,106 @@ def _worker_rediscover(cfg: Any) -> Any:
     return again
 
 
+class _DropNotFollowing:
+    """stderr 감싸개 — `rcm: not following …` 경고 줄만 버린다. 기동 등록 409(②)에서 따라가지
+    못하면 그 이유가 종료 문장(`<409 문장> · not following: <이유>`)에 붙으므로 「설치본으로
+    계속한다」는 경고는 거짓말이 된다. 받은 줄과 `remove …` 안내는 그대로 쓴다."""
+
+    def __init__(self, inner: Any):
+        self.inner = inner
+
+    def write(self, text: str) -> int:
+        if text.startswith("rcm: not following "):
+            return len(text)
+        return self.inner.write(text)
+
+    def flush(self) -> None:
+        self.inner.flush()
+
+
+def _worker_follow_setting(args: argparse.Namespace) -> tuple[Any, str]:
+    """(설정, 설치 종류). 틀린 `RCM_CLIENT_VERSION` 이나 한 줄 파일은 `ConfigError`(종료 2)."""
+    kind = follow.install_kind()
+    setting, warning = follow.setting_for(
+        no_follow=bool(getattr(args, "no_follow", False)), environ=os.environ, kind=kind
+    )
+    if warning:
+        _err(warning)
+    return setting, kind
+
+
+def _worker_follow_start(args: argparse.Namespace, cfg: Any) -> Any:
+    """기동 ①(M5q §3.2) — 등록 **전에** health 를 새로(10분 기록 없이) 읽고 CLI 와 같은 흐름으로
+    따라간다. exec 하면 돌아오지 않는다. 실패는 경고 한 줄과 함께 설치본으로 등록을 이어 간다.
+    따라간 자식(BOOT 를 거쳤다)은 다시 따라가지 않는다(결정 161)."""
+    if follow.booted() is not None:  # 자식 — `_follow_first` 가 남긴 상태를 그대로 쓴다
+        return follow.current_state() or follow.boot_state(os.environ)
+    setting, kind = _worker_follow_setting(args)
+    return follow.maybe_follow(
+        args.follow_argv,
+        setting=setting,
+        server=cfg.server,
+        token=cfg.token or None,
+        discovered=bool(getattr(cfg, "discovered_server", False)),
+        fresh=True,
+        environ=os.environ,
+        execve=args.follow_execve,
+        kind=kind,
+        installed=__version__,
+    )
+
+
+def _worker_follow_409(args: argparse.Namespace, cfg: Any, worker: Any, e: Any) -> int:
+    """기동 등록 409 ②(M5q §3.2 · §5.5). 따라가면 돌아오지 않는다. 따라가지 않거나 못 하면
+    오늘의 409 문장 뒤에 이유를 붙여 종료 2 — 감독자가 다시 띄우면 ① 부터 다시 한다."""
+    state = follow.current_state()
+    boot = follow.booted()
+    if getattr(args, "once", False) or state is None:
+        _err(e.message)  # `--once` 의 ② 는 오늘처럼 끝난다(§14 B질문4)
+        return e.code
+    if boot is not None:
+        # 따라간 자식은 다시 따라가지 않는다(결정 161) — 설치본으로 다시 시작하는 길은 B2 의 몫이다
+        if boot.get("loaded"):
+            _err(f"{e.message} · not following: already following v{__version__}")
+        else:
+            _err(f"{e.message} · not following: {follow.reason_text('boot_failed')}")
+        return e.code
+    setting = state.setting
+    if setting.mode == follow.MODE_PIN and setting.pin != e.version:
+        _err(f"{e.message} · pinned by {_setting_where(setting)}")
+        return e.code
+    if setting.mode == follow.MODE_INSTALLED:
+        tail, _ = _follow_tail(dataclasses.replace(state, warn=None, warn_text=None))
+        _err(f"{e.message} · {tail}" if tail else e.message)
+        return e.code
+    worker.log(f"register: server runs v{follow.clean(e.version)} — following")
+    again = follow.maybe_follow(
+        args.follow_argv,
+        setting=setting,
+        server=cfg.server,
+        token=cfg.token or None,
+        discovered=bool(getattr(cfg, "discovered_server", False)),
+        fresh=True,
+        environ=os.environ,
+        execve=args.follow_execve,
+        err=_DropNotFollowing(sys.stderr),
+        kind=state.install,
+        installed=__version__,
+    )
+    if again.warn:
+        _err(f"{e.message} · not following: {again.warn_text}")
+    else:
+        _err(e.message)  # health 가 이제 설치본 버전을 말한다 — 감독자가 다시 띄우면 등록된다
+    return e.code
+
+
 def cmd_worker(args: argparse.Namespace) -> int:
-    """`rcm worker` — 원격 워커 프로세스(M5b-3). 토큰은 RCM_WORKER_TOKEN 또는 worker.toml 로만."""
+    """`rcm worker` — 원격 워커 프로세스(M5b-3). 토큰은 RCM_WORKER_TOKEN 또는 worker.toml 로만.
+
+    서버 버전을 따라간다(M5q B1): 기동할 때(①)와 기동 등록이 버전 불일치 409 일 때(②).
+    `--check` 와 인자 목록으로 부른 `main(argv)`(결정 162)는 따라가지 않는다."""
     from remote_ci_monitor.client import WorkerClient
-    from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
+    from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit, WorkerFollow
 
     try:
         cfg = _worker_config(args)
@@ -3904,6 +4013,12 @@ def cmd_worker(args: argparse.Namespace) -> int:
     client = WorkerClient(cfg.server, cfg.token)
     if getattr(args, "check", False):
         return _worker_check(cfg, client)
+    following = bool(getattr(args, "follow_enabled", False))
+    if following:
+        try:
+            _worker_follow_start(args, cfg)
+        except ConfigError as e:
+            return _usage(str(e))
     rediscover = _worker_rediscover(cfg) if getattr(cfg, "discovered_server", False) else None
     worker = RemoteWorker(
         cfg, client=client, once=bool(getattr(args, "once", False)), rediscover=rediscover
@@ -3923,6 +4038,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _stop)
     try:
         return worker.run()
+    except WorkerFollow as e:
+        if not following:
+            _err(e.message)
+            return e.code
+        return _worker_follow_409(args, cfg, worker, e)
     except WorkerExit as e:
         if e.message:
             _err(e.message)
@@ -3965,7 +4085,9 @@ def _worker_check(cfg: Any, client: Any) -> int:
     rows: list[tuple[str, bool, str]] = [python_row()]
     try:
         h = client.health()
-        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{h.get('version')}"))
+        # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
+        server_v = follow.clean(h.get("version"))
+        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{server_v}"))
     except ClientError as e:
         rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
     try:
@@ -4723,6 +4845,14 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument(
         "--once", action="store_true", help="run at most one job, then exit (tests, cron)"
     )
+    # 워커도 서버 버전을 따라간다(M5q B1) — 최상위 값을 덮지 않게 SUPPRESS
+    worker.add_argument(
+        "--no-follow",
+        dest="no_follow",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=NO_FOLLOW_HELP,
+    )
     worker.set_defaults(func=cmd_worker)
 
     init = sub.add_parser("init", help="write a starter config file (server, client or worker)")
@@ -4862,6 +4992,11 @@ def _main(argv: list[str] | None, *, follow_enabled: bool, execve: Any = os.exec
             return code
     parser = build_parser()
     args = parser.parse_args(argv)
+    # `rcm worker` 는 argparse 뒤에 따라간다(M5q B1) — 그때 쓸 것을 넘긴다. 인자 목록으로 부른
+    # `main(argv)` 는 따라가지 않는다(결정 162)
+    args.follow_enabled = follow_enabled
+    args.follow_execve = execve
+    args.follow_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         return int(args.func(args) or 0)
     except SystemExit as e:  # _usage 가 SystemExit(2) 로 나온다

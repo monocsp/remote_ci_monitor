@@ -314,8 +314,8 @@ session machine needs `0.8.0` or newer installed once, and `examples/session/upd
 itself.
 
 Some commands never follow, because they are the server or work without one: `rcm serve`,
-`rcm worker`, `rcm token`, `rcm init`, `rcm discover`, `rcm version`, `rcm skills` and
-`rcm gc --config …`. A call with `--help` or `--version` always shows the installed rcm's help
+`rcm token`, `rcm init`, `rcm discover`, `rcm version`, `rcm skills` and `rcm gc --config …`.
+`rcm worker` follows at its own moments, described in [remote workers](#remote-workers) below. A call with `--help` or `--version` always shows the installed rcm's help
 and version. The help of a command that only the server's version has appears once the installed
 rcm is upgraded.
 
@@ -409,6 +409,55 @@ session follows a server down to a version before 0.8.0, that version prints its
 
 The server logs one line the first time it sees a token's client version on an accepted
 `POST /jobs`, for example `client macbook runs v0.8.1`. It keeps no record in the database.
+
+### Remote workers
+
+`rcm worker` reads the same setting: `RCM_CLIENT_VERSION`, the `client-version` file, or
+`rcm worker --no-follow`. A wheel install follows by default and an editable install does not. The
+worker follows at two moments:
+
+- **When it starts.** Before it registers, the worker asks the server for its version. It always
+  asks afresh and never uses the 10-minute record, because a restart is usually the moment the
+  server changed. When the versions differ, it fetches the server's wheel and starts that version
+  in the same process, exactly as a command does, with the same `rcm: following …` and
+  `rcm: not following …` lines. If following fails, the worker registers with the installed
+  version.
+- **When the server refuses its registration for the version.** That refusal (a 409) now carries
+  `server_version`. A following worker asks the server again and starts that version, logging
+  `[rcm worker] register: server runs v0.8.1 — following`. When it cannot, it stops with exit 2
+  and puts the reason after the server's sentence:
+
+```
+rcm: worker version 0.8.0, server 0.8.1 — install the same release · not following: sha256 mismatch
+rcm: worker version 0.8.0, server 0.8.1 — install the same release · pinned by RCM_CLIENT_VERSION
+rcm: worker version 0.8.0, server 0.8.1 — install the same release · not following (editable install)
+```
+
+A worker started from the cache does not follow a second time. If the server moved again between
+its start and its registration, it stops with exit 2
+(`· not following: already following v0.8.1`), and the next start begins again from the installed
+rcm. `rcm worker --once` follows when it starts, but stops with exit 2 when its registration is
+refused. `rcm worker --check` never follows: it runs the installed rcm and shows the server's
+version in its `server` row. With `server = "auto"`, the address found over mDNS is handed to the
+restarted process, which does not look for the server again. The worker's requests for the health
+and the wheel carry the worker token.
+
+Under launchd or systemd, starting the server's version is an `exec`: the PID stays the same, the
+service manager does not count a restart, and the log goes on in the same file. A worker that
+stops with exit 2 is started again by the service files that `rcm init worker --service-file`
+writes (`SuccessfulExit = false` for launchd, `Restart=on-failure` for systemd), and that start
+follows from the beginning. A cached copy that failed to start once is marked and not entered
+again. A worker whose cached copy is broken therefore ends each start with
+`· not following: the cached client v0.8.1 did not load before` and the line
+`rcm: remove <folder> to fetch it again`, not with a traceback. Delete that folder.
+
+A worker that is already registered keeps its version until it restarts. An upgraded server does
+not stop it, and its claims go on being served. If one of its lanes has to register again (the
+server forgot the worker) and the server refuses the version, the worker now stops with exit 2, so
+the service manager starts it again and it follows. Before, it stopped with exit 0 and stayed
+down. A worker that follows a much older server reads its `worker.toml` with that version's code,
+so a key that version does not know (for example `server_name` on a server before 0.5.0) stops it
+with exit 2.
 
 ### The cache
 

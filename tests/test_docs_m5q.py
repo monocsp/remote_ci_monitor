@@ -229,3 +229,71 @@ def test_changelog_unreleased_has_following():
 )
 def test_mutcheck_lists_the_m5q_mutants(name):
     assert f'name="{name}"' in read(MUTCHECK), f"scripts/mutcheck.py: no mutant {name!r}"
+
+
+# ── PR B1 — 원격 워커가 기동과 기동 등록 409 에서 따라간다 ──
+
+
+def subsection(text: str, heading: str) -> str:
+    """`### <heading>` 부터 다음 `##`/`###` 앞까지."""
+    m = re.search(rf"^###\s+{re.escape(heading)}\s*$", text, re.M)
+    assert m, f"no '### {heading}' heading"
+    rest = text[m.end() :]
+    nxt = re.search(r"^###?\s", rest, re.M)
+    return rest[: nxt.start()] if nxt else rest
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "RCM_CLIENT_VERSION",
+        "rcm worker --no-follow",
+        "server_version",
+        "register: server runs v",
+        "exit 2",
+        "· pinned by RCM_CLIENT_VERSION",
+        "already following",
+        "rcm worker --once",
+        "rcm worker --check",
+        "SuccessfulExit = false",
+        "Restart=on-failure",
+        "PID",
+        "exit 0",
+    ],
+)
+def test_operating_remote_workers_has(follow_section, word):
+    sec = subsection(follow_section, "Remote workers")
+    assert word in flat(sec), f"docs/operating.md (Remote workers): missing {word!r}"
+
+
+def test_configuration_second_machine_links_remote_workers():
+    sec = section(read(CONFIGURATION), "Second build machine (remote worker)")
+    for word in ("rcm worker --no-follow", "operating.md#remote-workers", "exit 2"):
+        assert word in flat(sec), f"docs/configuration.md (Second build machine): missing {word!r}"
+
+
+@pytest.mark.parametrize("path", [USAGE, USAGE_KO], ids=lambda p: p.name)
+def test_usage_second_machine_mentions_the_worker_following(path):
+    text = read(path)
+    for word in ("rcm worker --no-follow", "operating.md#remote-workers"):
+        assert word in text, f"{path.name}: missing {word!r}"
+
+
+def test_changelog_unreleased_has_worker_following():
+    text = flat(unreleased(read(CHANGELOG)))
+    for word in ("rcm worker --no-follow", "server_version", "exits 2"):
+        assert word in text, f"CHANGELOG.md [Unreleased]: missing {word!r}"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "m5q-worker-409-after-lost",
+        "m5q-worker-409-no-server-version",
+        "m5q-worker-start-uses-the-record",
+        "m5q-worker-lane-exit-zero",
+        "m5q-worker-follow-not-a-worker-exit",
+    ],
+)
+def test_mutcheck_lists_the_m5q_worker_mutants(name):
+    assert f'name="{name}"' in read(MUTCHECK), f"scripts/mutcheck.py: no mutant {name!r}"

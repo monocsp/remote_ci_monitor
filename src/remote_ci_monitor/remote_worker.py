@@ -2,6 +2,8 @@
 
 루프:
 - 등록(`/worker/register`; 서버에 못 닿으면 5초마다 재시도, 409 는 그대로 출력하고 종료 2).
+  버전 불일치 409 의 본문이 다른 `server_version` 을 실으면 `WorkerFollow` 를 던진다 —
+  `cmd_worker` 가 그 버전으로 따라간다(M5q ②). 레인의 재등록이 막히면 `run()` 은 종료 2 다.
 - heartbeat 스레드: `heartbeat_seconds` 마다 `{jobs: [도는 잡…], host_sample}`. 응답 `cancel` 은
   레인에 전달, `paused` 면 claim 을 쉰다. 연속 실패는 경고 한 줄 — 잡은 계속 돈다(서버가 timeout
   뒤 lost 로 닫으면 finish 가 409 를 받고 워크스페이스만 정리한다).
@@ -28,7 +30,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from remote_ci_monitor import __version__
+from remote_ci_monitor import __version__, follow
 from remote_ci_monitor.client import ClientError, WorkerClient
 from remote_ci_monitor.collect import CollectResult, collect
 from remote_ci_monitor.config import WorkerConfig
@@ -76,6 +78,18 @@ class WorkerExit(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class WorkerFollow(WorkerExit):
+    """기동 등록이 버전 불일치 409 이고 서버가 다른 `server_version` 을 알려 왔다(M5q ② · §5.4).
+
+    `WorkerExit` 의 하위 클래스라 이것을 모르는 자리(B2 이전 빌드의 레인)도 `WorkerExit` 로 잡아
+    종료 2 로 끝난다 — 레인 스레드가 예외로 죽지 않는다(§14 B질문2). `.version` 은 형식 검사를
+    지난 서버 버전이다."""
+
+    def __init__(self, version: str, message: str):
+        super().__init__(2, message)
+        self.version = version
 
 
 def _fmt_seconds(seconds: float) -> str:
@@ -250,6 +264,9 @@ class RemoteWorker:
         self._threads: list[threading.Thread] = []
         self._hb_failures = 0
         self.processed = 0
+        # 레인이 끝낸 이유의 종료 코드(재등록이 막혔으면 2). 0 이면 평범한 멈춤이다
+        self.exit_code = 0
+        self._malformed_said = False
         # M5n — 능력 보고. 세대가 바뀌면 명세를 다시 받고 다시 잰다(§4.2)
         self.generation: str | None = None
         self.probe_interval_seconds = 600
@@ -296,6 +313,8 @@ class RemoteWorker:
                     ) from e
                 if e.status == 401:
                     raise WorkerExit(2, f"{e.message} — set RCM_WORKER_TOKEN") from e
+                if e.status == 409:
+                    self._raise_for_version(e)
                 if e.status:
                     raise WorkerExit(2, e.message) from e
                 self._connection_failed()
@@ -313,6 +332,21 @@ class RemoteWorker:
             # 그동안 any-capable 잡을 못 받는다. 아직 이 세대로 보고하지 않았다고 둔다
             self.generation = None
             return out
+
+    def _raise_for_version(self, e: ClientError) -> None:
+        """버전 불일치 409 의 `server_version` 이 형식 검사를 지나고 지금 도는 버전과 다르면
+        `WorkerFollow`. 값이 없거나 틀렸으면 아무것도 하지 않는다 — 오늘의 종료 2 로 간다. 틀린 값은
+        프로세스당 한 번 로그를 쓰고 값은 찍지 않는다(§14.1)."""
+        if "server_version" not in e.body or e.body["server_version"] is None:
+            return
+        version = e.body["server_version"]
+        if not follow.valid_version(version):
+            if not self._malformed_said:
+                self._malformed_said = True
+                self.log("ignoring a malformed server_version from the server")
+            return
+        if version != __version__:
+            raise WorkerFollow(version, e.message) from e
 
     def _host_sample(self) -> dict[str, Any] | None:
         if self.sampler is None:
@@ -499,7 +533,13 @@ class RemoteWorker:
                     try:
                         self.register()
                     except WorkerExit as x:
-                        self.log(x.message)
+                        # 등록이 막혀 이 워커는 잡을 받을 수 없다 — 종료 2 로 감독자에게 알린다.
+                        # 종료 0 이면 launchd `SuccessfulExit = false` 와 systemd
+                        # `Restart=on-failure` 가 다시 띄우지 않아 조용히 멈춘다(§14 B질문1).
+                        # 드레인은 PR B2 의 몫이다
+                        self.log(f"lane {lane}: {x.message}")
+                        if x.code:
+                            self.exit_code = x.code
                         self.stopping.set()
                         break
                     continue
@@ -858,7 +898,7 @@ class RemoteWorker:
                 t.join(timeout=self.config.grace_seconds + 10)
             hb.join(timeout=2)
             self.log("stopped")
-        return 0
+        return self.exit_code
 
 
-__all__ = ["RemoteWorker", "WorkerExit", "STOP_SUMMARY"]
+__all__ = ["RemoteWorker", "WorkerExit", "WorkerFollow", "STOP_SUMMARY"]
