@@ -92,7 +92,7 @@ skills 파일이 빠지는 것은 지금도 있는 결함이다. `clientwheel.AS
 | 서버는 자기 버전의 wheel 만 준다. 다른 이름은 404 다 | `server.py` `_client_wheel` | 고정 버전은 서버가 마침 그 버전일 때만 받을 수 있다. 리드 안과 같다 |
 | 워커 등록은 버전이 정확히 같아야 받는다(409 `install the same release`). 등록은 DB 에 남아 서버 재시작을 넘긴다 | `remote_workers.py` `worker_register` | 서버를 올린 뒤에도 이미 등록된 워커는 옛 버전으로 계속 돈다. 그 워커가 재시작하면 등록이 409 로 막혀 종료 2 로 끝난다. PR B1 의 계기가 이 409 다(결정 171) |
 | `rcm version` 은 한 줄이라고 시험이 잠근다 | `tests/test_cli_m4.py` | 따라가기 정보를 늘 붙이면 시험을 약하게 만들어야 한다. 정보가 있을 때만 둘째 줄을 쓴다(결정 166) |
-| `cli.py` 가 맨 위에서 `submissions` 를, 그것이 `fcntl` 을 import 한다 | `submissions.py` | Windows 지원은 지금도 사실상 없다. pyproject classifiers 에도 Windows 가 없다(결정 172) |
+| `cli.py` 가 맨 위에서 `submissions` 를, 그것이 `fcntl` 을 import 한다 | `submissions.py` | Windows 에서는 지금도 클라이언트가 돌지 않는다. pyproject classifiers 에도 Windows 가 없다(결정 172) |
 
 ## 2. 설계: 따라가기 (PR A)
 
@@ -105,8 +105,9 @@ skills 파일이 빠지는 것은 지금도 있는 결함이다. `clientwheel.AS
    `--server` 와 `--server=…`, `--token` 과 `--token=…`, `--client-config` 와 `--client-config=…`, `-h` 와 `--help`.
    값을 받는 세 옵션은 다음 토큰을 값으로 먹는다. `--` 를 만나면 거기서 멈춘다. 해석과 오류 판정은 하지 않는다.
    그것은 실제로 돌 버전의 파서가 한다.
-2. 이 명령이 따라가는 명령인지 본다(§2.3). `-h` · `--help` · `--version` 이 있으면 따라가지 않는다. 그때 보이는 도움말은
-   설치본의 도움말이다.
+2. 이 명령이 따라가는 명령인지 본다(§2.3). `-h` · `--help` · `--version` 이 있으면 따라가지 않는다. 훑기가 이것들을 보면
+   따라가기를 멈추고 설치본의 argparse 가 처리한다. 그래서 `--help` 는 언제나 설치본의 도움말을 보인다. 서버 버전에만
+   있는 명령의 도움말은 설치본을 올려야 보인다. 문서(`docs/usage.md`)에도 이 한 줄을 그대로 적는다.
 3. 설정을 정한다(§2.2). `installed` 면 끝이다.
 4. 서버 주소를 정한다. 플래그, 환경 변수, `client.toml`, mDNS 발견 순서이고 명령이 쓰는 규칙과 같다. 설정 파일이
    깨졌거나 서버가 없으면 따라가기를 건너뛰고 명령이 오늘의 문장으로 실패하게 둔다.
@@ -321,6 +322,9 @@ sys.exit(main())
 - `sys.argv[0]` 은 자식에서 `-c` 가 된다. 파서는 `prog="rcm"` 이라 도움말이 바뀌지 않는다. `_this_rcm()` 은 `argv[0]`
   이 `rcm` 일 때만 그것을 쓰므로 다음 후보(`sys.executable` 옆의 `rcm`)로 넘어간다.
 - 서버를 mDNS 로 찾았으면 찾은 주소를 자식에게 `RCM_SERVER` 로 넘긴다. 자식이 1.5초 발견을 다시 하지 않는다.
+- editable 설치의 import 파인더가 캐시를 이길 위험은 사실상 없다. setuptools 의 editable 파인더는 `sys.meta_path` 에서
+  `PathFinder` 뒤에 붙고 hatchling 은 `.pth` 의 경로 항목을 쓴다. 둘 다 `sys.path` 맨 앞에 넣은 캐시가 먼저 잡힌다. BOOT 의
+  위치 확인은 그래도 남겨 둔다.
 - 프리셋 잡의 환경은 `runner.build_env` 가 `env_passthrough` 에 적힌 이름만 넘긴다. 따라가기 변수는 어차피 잡으로
   새지 않는다.
 
@@ -458,6 +462,8 @@ systemd unit 은 이미 환경 변수를 싣는 자리가 있다. 계기는 넷�
 - 내려간 워커가 M5q 이전 버전이면 ③ 과 ④ 를 모른다. 그 워커는 다음 재시작까지 옛 버전으로 돈다. 등록이 살아 있는 동안은 오늘과 같다.
 - **고정한 워커**: `RCM_CLIENT_VERSION=0.8.0` 인 워커는 ③ 을 무시한다. ② 와 ④ 에서는 따라가지 않고 오늘처럼 끝나며 문장이
   「pinned」라고 말한다.
+- **`installed` 를 명시한 워커**(`RCM_CLIENT_VERSION=installed`, 한 줄 파일, `--no-follow`)는 ③ 을 무시한다. ④ 는 오늘처럼 끝난다.
+- **`rcm worker --once`** 는 잡 하나를 돌고 끝나는 모드라 재실행하지 않는다. ③ 은 무시하고 ④ 는 드레인 뒤 그냥 끝난다.
 - **editable 워커**는 기본 `installed` 다. ③ 에서 로그 한 줄(`server v0.8.1 — not following (editable install)`)만 프로세스당 한 번 쓴다.
 
 ### 3.3 드레인 (PR B2)
@@ -742,24 +748,28 @@ def current_state() -> FollowState | None                                   # �
 | F46 | 표시 | `rcm check` 를 네 상태(따라간 자식 · 실패 · 고정 · editable)에서 | §2.9 의 네 줄. FAIL 은 `min_client_version` 아래일 때뿐 |
 | F47 | 표시 | `rcm check` 는 10분 기록이 있어도 | health 를 새로 읽는다 |
 
-### R: 설계 검토로 더한 것 (PR A, ①~⑧)
+### R: 설계 검토로 더한 것 (①~⑧ 은 검토의 번호)
+
+| # | 준비 | 기대 | PR |
+|---|---|---|---|
+| ① | 설치본이 모르는 명령 `rcm newcmd` 와 모르는 플래그 `rcm run gate --new-flag` · 서버 0.8.1 · 가짜 wheel 이 둘 다 안다 | 설치본 argparse 가 돌기 전에 자식으로 exec 되고 자식이 해석해 실행한다. 서버가 없으면 설치본이 사용법 오류로 종료 2 | A |
+| ② | health 위조값: `version` 이 `../x` · `0.8.1/../../x` · 65자, `client_wheel.path` 가 `/client@evil.example/x.whl` · `//evil/x.whl` · `/static/x.whl`, `sha256` 이 63자 · 65자 · 대문자 | 전부 `bad_health`, `/client/` 요청 0, 기록에 남지 않는다 | A |
+| ③ | `/client/` 가 302 로 다른 호스트를 가리킴(health 가 302 인 경우도) | 따라가지 않는다(`unreachable`). 리다이렉트 대상에 요청 0, 토큰이 새지 않는다 | A |
+| ④ | 받는 중 Ctrl-C(`KeyboardInterrupt` 주입) | 종료 130, `.tmp-*` 없음, 대상 폴더 없음 | A |
+| ⑤ | 실제 exec: BOOT 의 `fcntl.flock` 이 `OSError(ENOLCK)` 를 내게 주입 | 그래도 캐시 코드로 돈다. 경고 없음 | A |
+| ⑥ | 실제 exec: 표지는 있는데 캐시 폴더의 `remote_ci_monitor/cli.py` 가 지워짐(깨진 파이썬으로 바꾼 경우도) | 트레이스백이 아니라 `the cached client did not load` 한 줄과 설치본으로 명령이 끝난다. 다시 따라가지 않는다 | A |
+| ⑦ | health 의 `version` 은 0.8.1 인데 `client_wheel.path` 는 `/client/remote_ci_monitor-0.8.0-py3-none-any.whl` | `bad_health` | A |
+| ⑧ | 워커 셋: 레인 재등록이 버전 불일치 409 / `RCM_CLIENT_VERSION=installed` 워커가 heartbeat 의 다른 `server_version` 을 받음 / `--once` 워커가 ③ 을 받음 | 드레인(W7) / 드레인 없음 / 재실행 없음 | B2 |
+
+검토 번호 밖에서 이 판이 더한 경우다.
 
 | # | 준비 | 기대 |
 |---|---|---|
-| ① | 설치본이 모르는 명령 `rcm newcmd --flag` · 서버 0.8.1 · 가짜 wheel 이 그 명령을 안다 | 설치본 argparse 가 돌기 전에 따라가 자식이 명령을 실행한다. 서버가 없으면 설치본이 `invalid choice` 로 종료 2 |
-| ② | `rcm run --help` · `rcm -h` · `rcm --version` · 서버 0.8.1 | health 0번, 설치본의 도움말과 버전 |
-| ③ | `prescan` 에 `--server=URL` · `--server URL` · `--token=T` · `--client-config P` · `--` 뒤의 `--no-follow` · `-f x=--server` | 앞의 넷은 값을 정확히 집고 `--` 뒤와 다른 옵션의 값은 플래그로 보지 않는다 |
-| ④ | `rcm skills list` 를 서버 설정 있음 / 서버 `auto` / 서버 꺼짐에서 | 따라감 / 발견 없이 설치본 / 설치본(경고 한 줄) |
-| ⑤ | health 의 `version` 이 `../../x` · 65자, `sha256` 이 63자 · 대문자, `path` 가 `/client/other.whl` · `http://evil/x.whl` | 전부 `bad_health`, `/client/` 요청 0, 기록에 남지 않는다 |
-| ⑥ | health 가 302 로 다른 호스트를 가리킴 · `/client/` 가 301 | 둘 다 `unreachable`, 리다이렉트 대상에 요청 0(토큰이 새지 않는다) |
-| ⑦ | 서버 꺼짐 · 기록 없음 · `rcm jobs` 를 60초 안에 세 번 | health 시도 1번, 경고는 매번 한 줄. 61초 뒤에는 다시 시도 |
-| ⑧ | 실제 exec: 캐시 폴더의 `remote_ci_monitor/cli.py` 를 깨진 파이썬으로 바꿈 · 자식이 `git` 을 부르는 명령 | 자식이 설치본으로 돌아가 한 줄을 쓰고 명령이 끝난다. 자식이 띄운 `git` 의 환경에 `RCM_FOLLOWED*` 가 없다 |
-
-그 밖에 검토가 짚은 작은 경우를 F 표에 붙인다.
-
-| # | 준비 | 기대 |
-|---|---|---|
-| F48 | 받는 중 Ctrl-C(`KeyboardInterrupt` 주입) | 종료 130, `.tmp-*` 없음 |
+| R9 | `rcm run --help` · `rcm -h` · `rcm --version` · 서버 0.8.1 | health 0번, 설치본의 도움말과 버전 |
+| R10 | `prescan` 에 `--server=URL` · `--server URL` · `--token=T` · `--client-config P` · `--` 뒤의 `--no-follow` · `-f x=--server` | 앞의 넷은 값을 정확히 집고 `--` 뒤와 다른 옵션의 값은 플래그로 보지 않는다 |
+| R11 | `rcm skills list` 를 서버 설정 있음 / 서버 `auto` / 서버 꺼짐에서 | 따라감 / 발견 없이 설치본 / 설치본(경고 한 줄) |
+| R12 | 서버 꺼짐 · 기록 없음 · `rcm jobs` 를 60초 안에 세 번 | health 시도 1번, 경고는 매번 한 줄. 61초 뒤에는 다시 시도 |
+| R13 | 실제 exec: 자식이 `git` 을 부르는 명령 | 자식이 띄운 `git` 의 환경에 따라가기 변수가 없다(BOOT 가 꺼냈다) |
 | F49 | `exec` 직전 | 대상 폴더 표지의 mtime 이 지금으로 바뀌어 있다 |
 | F50 | `XDG_CACHE_HOME=relative/dir` | 무시하고 `~/.cache/rcm` 을 쓴다 |
 | F51 | `~/.cache/rcm` 이 남 소유 폴더로 가는 심링크 | realpath 로 검사해 `cache_unsafe` |
@@ -794,6 +804,8 @@ def current_state() -> FollowState | None                                   # �
 | W14 | 엣지 | 드레인 시작 직후 long-poll claim 이 잡을 돌려줌 | 그 잡을 끝까지 돌리고 보고한 뒤 재실행 | B2 |
 | W15 | 엣지 | 실제 exec(e2e): 두 프로세스 시험의 워커가 ③ 으로 재실행 | 재실행 전후 `os.getpid()` 가 같고 같은 stderr 파일에 로그가 이어진다 | B2 |
 | W16 | 엣지 | 프리셋 잡의 환경 | 따라가기 변수와 `RCM_WORKER_RESTARTED_AT` 이 없다 | B2 |
+| W17 | 엣지 | `RCM_CLIENT_VERSION=installed` 워커 · ③ | 드레인 없음, 재실행 없음(R ⑧) | B2 |
+| W18 | 엣지 | `--once` 워커 · ③ · ④ | ③ 무시, ④ 는 드레인 뒤 재실행 없이 끝난다(R ⑧) | B2 |
 
 ### mutcheck 에 더할 변이
 
@@ -805,7 +817,7 @@ def current_state() -> FollowState | None                                   # �
 | `_follow_boot` 고리 방지를 지운다 | F31 | A |
 | 임시 폴더 없이 대상 폴더에 바로 푼다 | F22 · F30 | A |
 | `serve` 를 따라가는 명령에 넣는다 | F37 | A |
-| health 의 `path` 검사를 지운다 | ⑤ | A |
+| health 의 `path` 검사를 지운다 | ② · ⑦ | A |
 | 드레인이 도는 잡을 기다리지 않는다 | W6 | B2 |
 
 ## 7. 실기 확인 절차
@@ -947,7 +959,7 @@ dolomood 에 설치된 `rcm-*-connect` 스킬이 rcm 의 플래그를 부르는 
 | 169 | 보안 | §4.2 의 (a) 어디서나 켬. **오너 선택**. 위험(세션 사용자의 GitHub 토큰 · SSH 키까지 닿는 코드 실행, `.local` 위조)을 문서에 그대로 적고 끄는 법 셋을 준다 |
 | 170 | mDNS 로 찾은 서버 | (a) 에 들어 있다. 따라간다. 둘 이상이면 지금처럼 거절 |
 | 171 | 원격 워커 | B1: 기동(fresh health) · 기동 등록 409. B2: heartbeat `server_version` · 레인 재등록 409 에서 `draining`(`stopping` 과 별개). 잡이 끝난 뒤 설치본 부트로더로 재실행, 300초 상한 |
-| 172 | Windows | 따라가기 꺼짐(`os.name != "posix"`). Windows 지원은 지금도 사실상 없다 |
+| 172 | Windows | 따라가기 꺼짐(`os.name != "posix"`). 클라이언트 자체가 이미 POSIX 전용이다 |
 | 173 | 릴리스 | A0 는 M5p 와 함께 v0.7.0 에 실을 수 있다. A 는 M5p P3 뒤 rebase, A · B1 · B2 를 묶어 v0.8.0 |
 | 174 | dolomood | 부트스트랩만 남는다. 그쪽 레포의 변경은 그쪽 세션 |
 
@@ -972,7 +984,7 @@ dolomood 에 설치된 `rcm-*-connect` 스킬이 rcm 의 플래그를 부르는 
 | P1-5 | 레인 재등록 409 는 다루지 않았다 | 버전 불일치면 드레인(④, W7) |
 | P1-6 | 보안 서술이 짧았고 mDNS 발견만 위험으로 봤다 | GitHub 토큰 · SSH 키까지 닿는 실행, `.local` 위조를 적고 선택지 (a)(b)(c) 를 두었다. 오너 선택 (a)(§4) |
 | P1-7 | PR A 하나에 skills 수정을 넣었다. 릴리스는 0.7.0 | A0 를 먼저 내고 M5p 와 v0.7.0 에 실을 수 있다. A 는 M5p P3 뒤 rebase, 릴리스는 v0.8.0 |
-| P1-8 | 위 경우를 잡는 시험이 없었다 | R 표 ①~⑧ 과 F48~F52 · W7 을 더했다 |
+| P1-8 | 위 경우를 잡는 시험이 없었다 | R 표 ①~⑧(검토 번호 그대로), R9~R13 · F49~F52 · W7 · W17 · W18 을 더했다 |
 | P2-1 | 고리 막기가 `RCM_FOLLOWED` 환경 변수였고 자식 프로세스로 샜다 | BOOT 가 꺼내고 `_follow_boot` 로 남긴다 |
 | P2-2 | health 실패를 기억하지 않았다 | 60초 음성 기록 |
 | P2-3 | 받는 중 Ctrl-C 를 정하지 않았다 | 종료 130, `finally` 로 `.tmp` 정리 |
@@ -982,4 +994,5 @@ dolomood 에 설치된 `rcm-*-connect` 스킬이 rcm 의 플래그를 부르는 
 | P2-7 | 워커 ① 이 10분 기록을 쓸 수 있었다 | 기동은 언제나 health 를 새로 읽는다 |
 | P2-9 | 서버 로그 한 줄을 모든 클라이언트 요청에서 남겼다 | 이미 인증하는 제출 경로에서만 |
 | P2-10 | health 에 `requires_python` 키를 더하고 지정자 해석기를 뒀다. 워커 드레인이 B 하나에 들어 있었다 | 키와 해석기를 뺐고 METADATA 의 `>=X.Y` 만 읽는다. ③ 드레인은 PR B2 로 나눴다 |
-| P2-11 | 「Windows 에서는 지금도 클라이언트가 돌지 않는다」 | 「Windows 지원은 지금도 사실상 없다」 |
+| P2-11 | editable 메타 경로 파인더가 캐시를 이길 수 있다고 적었다 | setuptools 파인더는 `PathFinder` 뒤에 붙고 hatchling 은 `.pth` 경로를 쓰므로 앞에 넣은 캐시가 이긴다. 위험은 사실상 없다(§2.5) |
+| P2-12 | `--help` 가 어느 버전의 도움말인지 흐름과 따로 적었다 | §2.1 에 한 줄로 맞췄다. 훑기가 `-h` 를 보면 따라가지 않고 설치본 도움말이 나온다 |
