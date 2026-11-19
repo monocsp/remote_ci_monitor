@@ -796,6 +796,36 @@ def test_claim_hands_out_nothing_while_the_server_is_paused(srv):
     assert srv.claimed("build-02") == jid
 
 
+def test_remote_claim_that_passed_the_pause_check_hands_out_nothing_after_a_pause(srv):
+    """`_try_claim` 은 `get_paused` 를 본 뒤 admit 을 거쳐 claim 한다. 그 틈에 정지 · 제출 ·
+    업로드가 끼면 옛 코드는 정지 중에 잡을 줬다. 틈을 이벤트로 벌려 결정적으로 재현한다 —
+    claim 이 트랜잭션 안에서 정지를 다시 봐야 204 다."""
+    srv.registered("build-02")
+    entered, go = threading.Event(), threading.Event()
+    real_admit = srv.app.admit
+
+    def admit_after_the_pause_check(lane, worker, now, claim):
+        entered.set()
+        go.wait(20)
+        return real_admit(lane, worker, now, claim)
+
+    srv.app.admit = admit_after_the_pause_check
+    out: dict[str, Any] = {}
+    t = threading.Thread(target=lambda: out.update(resp=srv.claim("build-02")))
+    t.start()
+    try:
+        assert entered.wait(10)  # 정지 확인을 지나 admit 안에 서 있다
+        assert srv.req("POST", "/pause", token="admin", json_body={})[0] == 200
+        jid = srv.queued_job()
+    finally:
+        go.set()
+        t.join(20)
+    assert out["resp"][0] == 204, out
+    assert srv.store.get_job(jid).state == QUEUED
+    assert srv.req("POST", "/resume", token="admin", json_body={})[0] == 200
+    assert srv.claimed("build-02") == jid
+
+
 def test_claim_long_polls_and_wakes_when_a_job_is_uploaded(srv):
     """§3: 빈 풀의 claim 은 `wait_seconds` 까지 `wake` 를 기다리다 잡이 오면 **바로** 돌려준다 —
     2초를 주고 0.3초 뒤에 올리면 1.5초 안에 200. (이 파일의 유일한 벽시계 시험)"""

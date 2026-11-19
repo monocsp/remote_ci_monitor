@@ -99,6 +99,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ㉟ version-settle-ignores-what-is-still-running — 버전 행을 내려놓을 때 **무엇이 아직 도는지**
      안 봄: 회차가 스토어에 올리는 중인데 손으로 낸 잡이 먼저 끝나면 행이 `editing` 이 되어
      «버리기» 가 열린다 (`server.py`, 워크플랜 §14-2 — 그 버리기는 App Store 버전을 지운다)
+  ㊱ claim-ignores-pause — claim 트랜잭션 안의 정지 검사를 뺌: `get_paused` 확인 뒤 · claim 전에
+     걸린 정지를 놓쳐 정지 중에 잡을 집는다 (`store.py`, 2026-11-19 — 배포의 「정지 → 도는 잡 0
+     확인 → 재시작」 직후 잡이 시작돼 lost 가 된다)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -411,6 +414,15 @@ MUTANTS = (
             "                with self._fresh_claims_lock:\n"
         ),
         tests=("tests/test_worker_api.py",),
+    ),
+    # ── claim 이 정지를 같은 트랜잭션에서 다시 본다(2026-11-19, 정지 중 집기) ──
+    Mutant(
+        # 정지 검사가 없다 — 호출자의 `get_paused` 뒤에 걸린 정지를 놓치고 잡을 집는다
+        name="claim-ignores-pause",
+        path="src/remote_ci_monitor/store.py",
+        old="            if conn.execute(_PAUSED_SQL).fetchone() is not None:\n",
+        new="            if False:\n",
+        tests=("tests/test_store.py",),
     ),
     # ── M5n — 머신의 능력과 배치(docs/m5n-workplan.md §15) ──
     Mutant(
