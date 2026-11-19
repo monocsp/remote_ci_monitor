@@ -10,6 +10,9 @@
 >
 > 이 판은 격리 설계 검토를 반영한 둘째 판이다. 초안과 달라진 것은 §13 「설계 검토가 바꾼 것」에, 구현 중에 바뀐
 > 것은 §12 「구현하며 바뀐 것」에 남긴다.
+>
+> 테스트 시나리오 세 벌(`docs/m5q-test-scenarios-a.md` · `-b.md` · `-c.md`)이 물은 것의 답은 §14 에 있다. 구현은 §14 가 앞
+> 절보다 이긴다.
 
 ## 0. 한 줄
 
@@ -164,7 +167,7 @@ skills 파일이 빠지는 것은 지금도 있는 결함이다. `clientwheel.AS
 | `worker` | PR A 에서는 안 따라간다 | 원격 워커는 따로 다룬다(§3, PR B1 · B2) |
 | `token` `init` `discover` `version` | 안 따라간다 | 서버 없이 돈다. `token` 은 서버 머신의 DB 를 연다 |
 | `gc` 에 `--config` 가 있을 때 | 안 따라간다 | `gc --config … --dry-run` 은 서버 없이 로컬 DB 사본에서 돈다 |
-| `skills` | 서버가 설정돼 있을 때만 따라간다 | 서버 쪽 스킬을 받는 게 맞지만 서버 없이도 돌아야 한다. 서버가 비었거나 `auto` 면 mDNS 발견을 하지 않고 설치본으로 돈다. 실패하면 설치본이다 |
+| `skills` | 안 따라간다 | 서버 없이 도는 명령이다. A0 이전 서버를 따라가면 스킬 목록이 다섯에서 셋으로 줄어든다(§14 A질문23 · C질문16 이 되돌렸다) |
 | `check` | 따라간다 | 진단도 실제로 돌 코드로 해야 맞다. 대신 10분 기록을 쓰지 않고 health 를 매번 새로 읽는다. `client` 행이 따라가기 상태를 말한다(§2.9) |
 | `-h` · `--help` · `--version` 이 있는 호출 | 안 따라간다 | 설치본의 도움말과 버전이 나온다. 문서에 한 줄로 적는다 |
 | 그 밖(`run` `wait` `jobs` … 와 모르는 명령) | 따라간다 | 서버와 말한다 |
@@ -548,19 +551,27 @@ ENV_MODE = "RCM_CLIENT_VERSION"
 ENV_FOLLOWED = "RCM_FOLLOWED"            # BOOT 에 건네는 값. BOOT 가 꺼낸다
 ENV_FOLLOWED_PATH = "RCM_FOLLOWED_PATH"
 ENV_FOLLOWED_FROM = "RCM_FOLLOWED_FROM"
+ENV_FOLLOW_FROM = "RCM_FOLLOW_FROM"      # 부트로더의 설치 종류. BOOT 가 꺼낸다(§14 A질문14)
+ENV_FOLLOW_FOUND = "RCM_FOLLOW_FOUND"    # "1" 이면 RCM_SERVER 는 mDNS 로 찾은 주소. BOOT 가 꺼낸다
 ENV_WORKER_RESTARTED_AT = "RCM_WORKER_RESTARTED_AT"   # PR B2
-PIN_FILE = "client-version"              # $XDG_CONFIG_HOME/rcm/ 또는 ~/.config/rcm/
+PIN_FILE = "client-version"              # $XDG_CONFIG_HOME/rcm/ 먼저, 없으면 ~/.config/rcm/
 MODE_FOLLOW, MODE_INSTALLED, MODE_PIN = "follow", "installed", "pin"
-VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+)*([.+-][0-9A-Za-z]+)*$")   # 64자 이하와 함께
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+)*([.+-][0-9A-Za-z]+)*")   # fullmatch 로만. 64자 이하와 함께
+SHA256_RE = re.compile(r"[0-9a-f]{64}")                             # fullmatch 로만
 CHECK_TTL_SECONDS = 600
 NEG_TTL_SECONDS = 60
-HEALTH_TIMEOUT_SECONDS = 3.0
+HEALTH_TIMEOUT_SECONDS = 3.0             # 소켓 동작마다
+HEALTH_TOTAL_SECONDS = 5.0               # health 한 번 전체
+FETCH_TOTAL_SECONDS = 60.0               # /client/ 받기 전체
+RESTART_WINDOW_SECONDS = 300             # PR B2
 KEEP_VERSIONS = 3
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_UNPACKED_BYTES = 256 * 1024 * 1024
-NO_FOLLOW_COMMANDS = frozenset({"serve", "worker", "token", "init", "discover", "version"})
-MARKER, LOCK = ".rcm-client.json", ".lock"
+NO_FOLLOW_COMMANDS = frozenset(
+    {"serve", "worker", "token", "init", "discover", "version", "skills"}
+)
+MARKER, LOCK, BAD = ".rcm-client.json", ".lock", ".bad"
+BOOT: str                                # §2.5 · §14.7 의 코드. 시험이 exec 인자와 견준다
 
 class FollowError(Exception):            # .code 는 §2.6 표의 코드
     def __init__(self, code: str, detail: str = ""): ...
@@ -617,8 +628,10 @@ class FollowState:                       # check · version 이 읽는다
     warn: str | None
     warn_text: str | None
 
-def prescan(argv: Sequence[str]) -> Prescan                                 # 해석하지 않고 훑기만
-def follows(p: Prescan, *, server_configured: bool) -> bool                 # §2.3 표
+def prescan(argv: Sequence[str], *,
+            options: Mapping[str | None, frozenset[str]] | None = None) -> Prescan
+    # 해석하지 않고 훑기만. options 는 설치본 파서의 긴 옵션(키 None 은 최상위). 줄임 규칙은 §14 A질문2
+def follows(p: Prescan) -> bool                                             # §2.3 표
 def install_kind() -> str
 def read_pin_file(environ: Mapping[str, str]) -> tuple[str | None, Path | None]
 def resolve_setting(*, no_follow: bool, environ: Mapping[str, str],
@@ -654,7 +667,7 @@ def current_state() -> FollowState | None                                   # �
 | 바꾸는 것 | 모양 |
 |---|---|
 | 진입 | `main(argv=None)` 은 `_main(argv, follow_enabled=argv is None, execve=os.execve)` 를 부른다. 시험은 `_main` 에 가짜 `execve` 를 넣는다 |
-| 위치 | `_main` 맨 앞, **`build_parser().parse_args` 보다 먼저**다. `follow.booted()` 가 있으면 건너뛴다. `follow.prescan(sys.argv[1:])` 로 훑고 따라가는 명령이면 `load_client_config(p.client_config, server=p.server, token=p.token)` 와 `_resolve_server` 로 서버 · 토큰을 구해 `follow.maybe_follow(...)` 에 넘긴다(`skills` 는 발견하지 않는다). 설정 파일이 깨졌거나 서버가 없으면 건너뛴다. `RCM_CLIENT_VERSION` 이나 한 줄 파일의 값이 틀린 `ConfigError` 만 종료 2 다 |
+| 위치 | `_main` 맨 앞, **`build_parser().parse_args` 보다 먼저**다. `follow.booted()` 가 있으면 건너뛴다. `follow.prescan(sys.argv[1:])` 로 훑고 따라가는 명령이면 `load_client_config(p.client_config, server=p.server, token=p.token)` 와 `_resolve_server` 로 서버 · 토큰을 구해 `follow.maybe_follow(...)` 에 넘긴다. 설정 파일이 깨졌거나 서버가 없으면 건너뛴다. `RCM_CLIENT_VERSION` 이나 한 줄 파일의 값이 틀린 `ConfigError` 만 종료 2 다 |
 | 플래그 | 최상위 `--no-follow`(`dest="no_follow"`, `default=False`). `client_opts` 의 `--no-follow` 는 `default=argparse.SUPPRESS`. `worker` 에도 둔다(PR B1) |
 | `_client_row(client, h, state=None)` | §2.9 의 꼬리. `state` 가 None 이면 오늘과 같은 글자 |
 | `cmd_version` | §2.9 의 둘째 줄과 `--json` 의 `follow` |
@@ -684,6 +697,63 @@ def current_state() -> FollowState | None                                   # �
 | `RemoteWorker.restart_for: str \| None` | `cmd_worker` 가 `run()` 뒤에 본다 | B2 |
 
 워커의 health 와 `/client/` 요청은 워커 토큰을 Bearer 로 싣는다. 읽기 규칙(`_read_only_ok`)은 유효한 토큰이면 종류를 가리지 않는다.
+
+### 5.5 로그와 경고 문구
+
+§14 에서 정한 문자열이다. 시험은 이 글자를 그대로 잠근다. `<…>` 는 값이다. 서버가 보낸 문자열은 제어 문자(C0 · DEL · C1)를
+지우고 64자로 자른 뒤에 넣는다.
+
+클라이언트의 stderr 다.
+
+| 때 | 문구 |
+|---|---|
+| 처음 받았다 | `rcm: following server v<Y> (installed v<X>) — fetched <크기>` |
+| 따라가지 못했고 서버 버전을 안다 | `rcm: not following server v<Y>: <이유> — running installed v<X>` |
+| 따라가지 못했고 서버 버전을 모르거나 형식이 틀렸다 | `rcm: not following <서버 주소>: <이유> — running installed v<X>` |
+| BOOT 가 설치본으로 돌아갔다 | `rcm: follow: the cached client did not load — running installed` |
+| `--no-follow` 가 틀린 환경 변수를 이겼다 | `rcm: ignoring invalid RCM_CLIENT_VERSION '<값>' (--no-follow)` |
+| 틀린 환경 변수(`ConfigError`, 종료 2) | `RCM_CLIENT_VERSION '<값>' is not follow, installed or a version` |
+| 틀린 한 줄 파일(`ConfigError`, 종료 2) | `<경로>: '<값>' is not follow, installed or a version` |
+| 읽을 수 없는 한 줄 파일(`ConfigError`, 종료 2) | `<경로>: cannot read: <strerror>` |
+
+`<크기>` 는 `render_text._bytes` 의 눈금(`707.7 KB`)이다. `<이유>` 는 §2.6 표와 §14.5 표의 문구다.
+
+워커 로그다. 앞머리 `[rcm worker] ` 는 `RemoteWorker.log` 가 붙인다.
+
+| 때 | 문구 |
+|---|---|
+| ② 에서 따라간다 | `register: server runs v<Y> — following` |
+| ③ 드레인 시작 | `server runs v<Y> — draining: no new claims, restarting when running jobs finish` |
+| ④ 드레인 시작 | `lane <n>: server runs v<Y> — draining: no new claims, restarting when running jobs finish` |
+| 드레인 중 목표가 바뀌었다 | `server now runs v<Y> — still draining` |
+| 드레인 취소 | `server runs v<X> again — drain cancelled` |
+| 300초 창 안의 ③ | `server runs v<Y> — not draining: restarted <s>s ago` |
+| 보고를 다시 시도한다 | `drained — job #<id> not reported yet, retrying before the restart` |
+| 보고를 포기한다 | `job #<id> still not reported — restarting anyway` |
+| 재실행 | `drained — restarting through the installed rcm for v<Y>` |
+| 재실행 실패(W9, 종료 1) | `restart failed: <strerror>` |
+| 따라가지 않는 워커의 ③(프로세스당 한 번) | `server v<Y> — <꼬리>` |
+| 형식이 틀린 `server_version`(프로세스당 한 번) | `ignoring a malformed server_version from the server` |
+| heartbeat 가 409 를 받았다 | `heartbeat: worker not registered` |
+
+`<꼬리>` 는 §14.8 의 `client` 행 꼬리 표의 문구다. editable 워커면 `not following (editable install)` 이고 고정한 워커면
+`pinned by RCM_CLIENT_VERSION` 이다. ① 의 받기와 실패는 클라이언트와 같은 `rcm: following …` · `rcm: not following …` 줄이다.
+
+워커의 종료 문장이다. 앞머리 `rcm: ` 는 `cmd_worker` 가 붙이고 종료 코드는 2 다. `<409 문장>` 은 오늘의
+`worker version <X>, server <Y> — install the same release` 다.
+
+| 때 | 문구 |
+|---|---|
+| ② 에서 따라가지 않는 워커 | `<409 문장> · <꼬리>` |
+| ② 에서 따라가다 실패했다 | `<409 문장> · not following: <이유>` |
+| 따라간 자식이 ② 를 만났다(B1) | `<409 문장> · not following: already following v<X>` |
+
+서버 로그다. 앞머리 `[rcm] ` 는 서버의 로그 함수가 붙인다.
+
+| 때 | 문구 |
+|---|---|
+| (토큰 이름, 버전) 쌍을 처음 봤다 | `client <토큰 이름> runs v<X>` |
+| 쌍 256개가 찼다(한 번) | `client versions: 256 token/version pairs seen — not logging new ones` |
 
 ## 6. 테스트
 
@@ -747,6 +817,7 @@ def current_state() -> FollowState | None                                   # �
 | F45 | 표시 | 기록 있음 | 둘째 줄 `follow: on (default) · server … v0.8.1 checked …`, `--json` 의 `follow` 키 모양 |
 | F46 | 표시 | `rcm check` 를 네 상태(따라간 자식 · 실패 · 고정 · editable)에서 | §2.9 의 네 줄. FAIL 은 `min_client_version` 아래일 때뿐 |
 | F47 | 표시 | `rcm check` 는 10분 기록이 있어도 | health 를 새로 읽는다 |
+| F48 | 에러 | health 의 `version` 이 `"0.8.1\n"` · `sha256` 끝에 `\n` · `RCM_CLIENT_VERSION` 이 `"0.8.1\n"` | 앞의 둘은 `bad_health`, 셋째는 종료 2. `VERSION_RE` 와 `SHA256_RE` 는 `fullmatch` 로만 쓴다(§14 A질문1). 이 번호는 처음 판에서 빠져 있었다(§14 A질문24) |
 
 ### R: 설계 검토로 더한 것 (①~⑧ 은 검토의 번호)
 
@@ -767,7 +838,7 @@ def current_state() -> FollowState | None                                   # �
 |---|---|---|
 | R9 | `rcm run --help` · `rcm -h` · `rcm --version` · 서버 0.8.1 | health 0번, 설치본의 도움말과 버전 |
 | R10 | `prescan` 에 `--server=URL` · `--server URL` · `--token=T` · `--client-config P` · `--` 뒤의 `--no-follow` · `-f x=--server` | 앞의 넷은 값을 정확히 집고 `--` 뒤와 다른 옵션의 값은 플래그로 보지 않는다 |
-| R11 | `rcm skills list` 를 서버 설정 있음 / 서버 `auto` / 서버 꺼짐에서 | 따라감 / 발견 없이 설치본 / 설치본(경고 한 줄) |
+| R11 | `rcm skills list` 를 서버 설정 있음 / 서버 `auto` / 서버 꺼짐에서 | 셋 다 health 0번, 발견 없음, 설치본, 경고 없음(§14 A질문23) |
 | R12 | 서버 꺼짐 · 기록 없음 · `rcm jobs` 를 60초 안에 세 번 | health 시도 1번, 경고는 매번 한 줄. 61초 뒤에는 다시 시도 |
 | R13 | 실제 exec: 자식이 `git` 을 부르는 명령 | 자식이 띄운 `git` 의 환경에 따라가기 변수가 없다(BOOT 가 꺼냈다) |
 | F49 | `exec` 직전 | 대상 폴더 표지의 mtime 이 지금으로 바뀌어 있다 |
@@ -886,10 +957,10 @@ def current_state() -> FollowState | None                                   # �
 |---|---|---|---|
 | 0 | `docs/m5q-client-follows-server-workplan` | 이 문서 | |
 | A0 | `fix/clientwheel-ships-skill-files` | `clientwheel.py`(`ASSET_DIRS`) · 시험 S1 · S2 · CHANGELOG [Unreleased] ### Fixed | M5p 와 함께 v0.7.0 에 실을 수 있다 |
-| A | `feat/m5q-client-follows-server-version` | `follow.py`(새) · `cli.py`(진입 · 플래그 · version · check) · `server.py`(제출 경로의 로그 한 줄) · `tests/conftest.py`(새) · `tests/follow_helpers.py`(새) · 문서 | v0.8.0 |
+| A | `feat/m5q-client-follows-server-version` | `follow.py`(새) · `cli.py`(진입 · 플래그 · version · check) · `server.py`(제출 경로의 로그 한 줄) · `tests/conftest.py`(새) · `tests/follow_helpers.py`(새) · README 두 언어 · 문서 | v0.8.0 |
 | B1 | `feat/m5q-worker-follows-on-start` | `remote_worker.py`(`WorkerFollow`) · `remote_workers.py`(409 본문) · `cli.py`(`cmd_worker` 기동) · 문서 | v0.8.0 |
 | B2 | `feat/m5q-worker-drains-on-server-version` | `remote_worker.py`(드레인) · `remote_workers.py`(heartbeat) · `cli.py`(`cmd_worker` 재실행) · `follow.py`(`restart_via_installed`) · `examples/launchd` · `examples/systemd` 주석 · 문서 | v0.8.0 |
-| C | `docs/m5q-follow-plan-and-guides` | `PLAN.md` 결정 149~174 행 · 이 문서 §12 · README 의 한 줄 안내 | |
+| C | `docs/m5q-follow-plan-and-guides` | `PLAN.md` 결정 149~174 행 · 이 문서 §12 | |
 
 순서는 A0 가 먼저다. A0 는 따라가기와 상관없는 결함 수정이라 M5p 와 같은 v0.7.0 에 실을 수 있다. A 는 M5p 의 P3 가 dev 에 머지된
 뒤 그 위로 rebase 한다(같은 `cli.py` · `server.py` 를 만진다). B1 은 A 의 `follow.py` 를, B2 는 B1 을 쓴다. A · B1 · B2 를 묶어
@@ -922,7 +993,7 @@ dolomood `scripts/remote_ci.sh`(origin/dev)의 클라이언트 관리가 이렇�
 |---|---|
 | `RCM_WHEEL` = GitHub 릴리스 v0.5.0, `RCM_MIN_VERSION` = 0.5.0. 서버가 오를 때마다 손으로 올렸다 | 부트스트랩 전용이 된다. 한 번 0.8.0 으로 올리면 서버가 오를 때 다시 올릴 필요가 없다. 따라가기 부트로더에 결함이 있을 때만 올린다 |
 | `--update-client` 가 클라이언트 venv 를 서버 wheel 로 다시 깐다 | 설치본(부트로더)을 올리는 길로만 남는다. 평소에는 필요 없다 |
-| `client_drift_hint` 가 「서버보다 낮다」를 한 줄로 알린다 | 따라가면 차이가 없으니 조용해진다. 고정한 경우만 의미가 있다. 남길지는 그쪽 판단이다 |
+| `client_drift_hint` 가 「서버보다 낮다」를 한 줄로 알린다 | 조용해지지 않는다. 그 함수는 `rcm --version` 을 읽고 `--version` 은 언제나 설치본 버전이다. dolomood 는 `rcm version --json` 의 `follow.running`(§14 C질문9)을 읽게 바꿔야 한다. 그쪽 세션의 일이다 |
 | `may_reinstall` · `venv_is_editable` 가 운영 editable venv 를 덮지 않는다 | 그대로 필요하다. rcm 의 기본도 editable 은 따라가지 않으니 두 규칙이 맞물린다 |
 | `~/.local/bin/rcm` 이 Mac mini 에서는 운영 editable venv 를 가리킨다 | 그 rcm 은 editable 이라 따라가지 않는다. 오늘과 같다 |
 | selftest ⑨-b 의 가짜 rcm 버전이 바닥 이상이어야 한다 | 바닥을 올릴 때 한 번 맞춘다 |
@@ -947,7 +1018,7 @@ dolomood 에 설치된 `rcm-*-connect` 스킬이 rcm 의 플래그를 부르는 
 | 157 | 실패 | 설치본으로 계속 + 경고 한 줄(§2.6 의 코드). sha 불일치는 캐시에 아무것도 안 남긴다. Ctrl-C 는 130 이고 임시 폴더를 지운다 |
 | 158 | 고정 `X.Y.Z` | 설치본 → 캐시 → 서버가 X 일 때 받기 → 설치본 + 경고 |
 | 159 | Python 요구 | METADATA 의 `Requires-Python` 에서 `>=X.Y` 한 꼴만 읽는다. 다른 꼴은 안 따라간다 |
-| 160 | 따라가는 명령 | argparse 전에 argv 를 훑는다. 안 따라가는 목록(`serve` `worker` `token` `init` `discover` `version`, `gc --config`, 도움말) 밖은 모르는 명령까지 따라간다. `skills` 는 서버가 설정돼 있을 때만 |
+| 160 | 따라가는 명령 | argparse 전에 argv 를 훑는다. 안 따라가는 목록(`serve` `worker` `token` `init` `discover` `version` `skills`, `gc --config`, 도움말) 밖은 모르는 명령까지 따라간다 |
 | 161 | 고리 막기 | BOOT 가 따라가기 변수를 꺼내 `_follow_boot` 로 남긴다. 푼 `__version__` 이 목표와 같아야 받는다. 캐시가 망가졌으면 설치본으로 돌아간다 |
 | 162 | 프로그램 안 호출 | `main(argv)` 에 목록을 넘기면 아무것도 안 한다 |
 | 163 | 캐시 청소 | 받은 직후에만. 최근 사용 3개 + 잠긴 것 + 지금 목표를 남긴다. exec 직전에 표지 utime |
@@ -996,3 +1067,386 @@ dolomood 에 설치된 `rcm-*-connect` 스킬이 rcm 의 플래그를 부르는 
 | P2-10 | health 에 `requires_python` 키를 더하고 지정자 해석기를 뒀다. 워커 드레인이 B 하나에 들어 있었다 | 키와 해석기를 뺐고 METADATA 의 `>=X.Y` 만 읽는다. ③ 드레인은 PR B2 로 나눴다 |
 | P2-11 | editable 메타 경로 파인더가 캐시를 이길 수 있다고 적었다 | setuptools 파인더는 `PathFinder` 뒤에 붙고 hatchling 은 `.pth` 경로를 쓰므로 앞에 넣은 캐시가 이긴다. 위험은 사실상 없다(§2.5) |
 | P2-12 | `--help` 가 어느 버전의 도움말인지 흐름과 따로 적었다 | §2.1 에 한 줄로 맞췄다. 훑기가 `-h` 를 보면 따라가지 않고 설치본 도움말이 나온다 |
+| 기존 문제(§14 B질문1) | 레인 재등록이 409 면 `_lane_loop` 가 `WorkerExit` 를 잡아 `stopping` 을 켜고 `run()` 은 종료 0 으로 돌아온다. 예시 plist 의 `SuccessfulExit = false` 와 unit 의 `Restart=on-failure` 는 종료 0 이면 워커를 다시 띄우지 않는다. 다른 레인의 잡은 lost 가 되고 워커는 조용히 멈춘다. M5q 이전부터 있던 버그다 | 종료 2 로 바꾼다. 따라가지 않는 워커(고정 · installed)에도 걸리므로 B1 에서 고친다 |
+
+## 14. 시나리오 문서가 물은 것 — 답 (구현은 이 절이 앞 절보다 이긴다)
+
+테스트 시나리오 세 벌(`docs/m5q-test-scenarios-a.md` · `-b.md` · `-c.md`)은 끝에 「명세에 묻는 것」을 남겼다. a 가 25개,
+b 가 19개, c 가 23개이고 이 절은 67개에 모두 답한다. `A질문3` 은 a 문서의 3번 질문을 가리킨다. 겹치는 질문은 한 답에 묶었다.
+
+답은 리드의 결정을 따랐다. 리드가 정하지 않은 것은 이 절을 쓴 사람이 가장 작은 변경, 안전 우선, 명세의 의도 순으로 정했고
+그 답에 「(작성자 판단)」을 붙였다. 앞 절과 어긋나면 이 절이 이긴다. 앞 절을 직접 고친 곳은 §2.3 의 `skills` 행, §5.1 의
+상수와 시그니처, 새로 둔 §5.5 의 문구, §6 의 F48 · R11, §9 의 README 자리, §10 의 `client_drift_hint` 행, §11 의 결정 160,
+§13 의 기존 문제 행이다. 시나리오 문서의 「제안」이 이 절과 다르면 구현 PR 이 그 시나리오를 이 절에 맞춘다.
+
+### 14.1 값의 형식
+
+**A질문1 · B질문10.** `VERSION_RE` 와 `SHA256_RE` 는 `re.fullmatch` 로만 쓴다. 패턴에서 `^` 와 `$` 를 뺐으므로 `match` 나
+`search` 로 잘못 부르면 시험이 바로 빨개진다(§5.1). 줄바꿈 꼬리가 붙은 `"0.8.1\n"` 은 거부된다. 이 검사는
+`RCM_CLIENT_VERSION`, 한 줄 파일의 값, health 의 `version` 과 `client_wheel`, 등록 409 본문과 heartbeat 응답의
+`server_version`, 서버 로그가 읽는 `User-Agent` 에 똑같이 걸린다. 워커가 받은 `server_version` 이 검사에 걸리면 그 값이 없는
+것으로 본다. heartbeat 에서는 아무 일도 하지 않고 등록 409 에서는 오늘처럼 종료 2 로 끝난다. 이때 워커 로그에 프로세스당 한 번
+`ignoring a malformed server_version from the server` 를 쓰고 값은 찍지 않는다(작성자 판단). §6 의 F48 이 줄바꿈 꼬리를 잠근다.
+
+### 14.2 훑기와 따라가는 명령
+
+**A질문2.** 훑기는 argparse 와 같은 「유일한 접두」 규칙으로 전역 플래그를 알아본다. 대상은 `--server` `--token`
+`--client-config` `--no-follow` 넷과 따라가기를 멈추게 하는 `--help` · `--version` 이다. 그래서 `--serv=URL` 과 `--serv URL`
+을 `--server` 로 읽는다. 줄인 이름이 설치본 파서의 다른 긴 옵션과도 맞으면 모호하므로 따라가지 않는다. 그러면 설치본의 argparse
+가 사용법 오류를 낸다. 파서의 `allow_abbrev` 는 바꾸지 않으므로 기존 사용자의 줄임은 그대로 돈다.
+
+견줄 긴 옵션 목록은 `cli.py` 가 설치본 파서에서 뽑아 `prescan(argv, options=…)` 에 넘긴다. 명령 앞의 토큰은 최상위 파서의
+목록과, 명령 뒤의 토큰은 그 하위 파서의 목록과 견준다. 설치본이 모르는 명령이면 위의 여섯 이름만으로 견준다(작성자 판단: 목록을
+넘기는 방법).
+
+**A질문23 · C질문16 · C질문17.** `skills` 는 따라가지 않는다. 서버 없이 도는 명령이고, A0 이전 서버를 따라가면 스킬 목록이
+다섯에서 셋으로 줄어든다. §2.3 의 행을 되돌렸고 `NO_FOLLOW_COMMANDS` 에 `skills` 를 더했다. `skills` 하위 파서에는
+`client_opts` 도 `--no-follow` 도 더하지 않는다. F7 의 「두 자리」는 따라가는 명령에만 해당한다. 명령이 없는 호출(`rcm`,
+`rcm --no-follow`)도 따라가지 않고 설치본이 오늘처럼 사용법을 보인다(작성자 판단).
+
+**B질문3 · B질문4 · B질문5.** 결정 162 는 `cmd_worker` 에도 걸린다. `main(argv)` 로 목록을 넘긴 호출은 ①~④ 의 따라가기와
+재실행을 하나도 하지 않는다. 기존 `test_cli_worker.py` 는 그대로 두고 새 시험은 `_main(..., follow_enabled=True)` 를 쓴다.
+`--once` 는 ① 만 따라간다. ② 는 오늘처럼 종료 2 이고 ③ 은 무시한다. ④ 는 §3.2 대로 드레인한 뒤 재실행 없이 끝나며 종료 코드는
+2 다(작성자 판단: 종료 코드). 등록이 막혀 잡을 받지 못했다는 뜻이므로 B질문1 의 종료 2 와 맞췄다. `rcm worker --check` 는
+따라가지 않는다. 설치본으로 돌며 서버와의 버전 차이를 보인다.
+
+### 14.3 설정 읽기
+
+**A질문9.** `--no-follow` 가 있으면 `RCM_CLIENT_VERSION` 만 본다. 값이 틀렸으면 경고 한 줄(§5.5)을 쓰고 설치본으로 돌며 한 줄
+파일은 읽지 않는다(작성자 판단: 파일을 읽지 않는 것). 환경 변수가 있고 값이 맞으면 한 줄 파일은 읽지 않는다(작성자 판단).
+환경 변수의 값이 틀리면 따라가는 명령은 종료 2 다. 설정을 읽는 것은 따라가는 명령과 `rcm version` 과 `rcm worker` 뿐이다.
+`serve` `token` `init` `discover` `skills` 와 `gc --config` 는 틀린 값이 있어도 설정을 읽지 않으므로 오늘처럼 돈다(작성자
+판단).
+
+**A질문10.** 한 줄 파일은 앞뒤 공백을 지우고 `#` 뒤를 주석으로 버린다. 그래서 `0.6.1  # pinned` 는 `0.6.1` 이다. 남은 값이
+비면 설정이 없는 것과 같아 기본값을 쓴다. wheel 설치라면 `follow` 다. 값은 대소문자를 가리므로 `Follow` 와 `INSTALLED` 는
+`ConfigError` 다. 상대 경로인 `XDG_CONFIG_HOME` 은 캐시 뿌리와 같이 무시한다.
+
+나머지는 작성자 판단이다. 빈 줄과 주석만 있는 줄을 건너뛴 첫 줄만 쓰고 그 뒤 줄은 보지 않는다. 주석만 있는 파일은 빈 값이다.
+빈 `RCM_CLIENT_VERSION=` 은 없는 것으로 보고, 환경 변수의 값은 공백을 지우지 않는다. 파일 첫머리의 BOM 은 지운다. 경로가
+폴더이거나 읽을 수 없거나 UTF-8 이 아니면 경로가 든 `ConfigError` 다. 「없으면」은 파일이 없을 때를 뜻한다. `client.toml` 과
+같이 `$XDG_CONFIG_HOME/rcm/client-version` 을 먼저 보고 그 파일이 없으면 `~/.config/rcm/client-version` 을 본다. 문서는
+`~/.config` 경로를 안내하므로, `XDG_CONFIG_HOME` 을 둔 사람이 그 경로에 적은 `installed` 를 놓치면 사람의 뜻과 반대로
+따라간다.
+
+**C질문10.** `rcm version` 은 설정이 틀려도 종료 0 이다. 첫 줄을 그대로 찍고 둘째 줄에 무엇이 틀렸는지 쓴다(§14.8 의 문구).
+무엇이 잘못됐는지 보려고 치는 명령이 종료 2 로 끝나면 진단할 수 없기 때문이다(작성자 판단). 따라가는 명령은 그대로 종료 2 다.
+
+### 14.4 서버 주소 · 발견 · health
+
+**A질문11.** 기록의 키는 다음 규칙으로 만든다(작성자 판단). 스킴의 기본 포트를 채우므로 `http://h` 와 `http://h:80` 은 같은
+키다. 경로 접두(`http://h/rcm`)는 버리지 않고 끝의 `/` 만 지운다. 클라이언트가 그 경로 아래로 요청을 보내기 때문이다. IPv6
+주소는 대괄호 꼴(`http://[::1]:8790`)에 소문자로 둔다. 스킴이 `http` · `https` 가 아니거나 호스트가 비었거나 공백이 있거나
+`--` 로 시작하는 주소면 따라가기를 경고 없이 건너뛴다. 그 주소의 문제는 명령이 오늘의 문장으로 말한다(§2.1 의 4).
+
+**A질문12.** `server = "auto"` 로 찾은 주소는 자식에게 `RCM_SERVER` 로 넘기므로 자식은 mDNS 발견을 다시 하지 않는다. 부모는
+`RCM_FOLLOW_FOUND=1` 도 함께 넘긴다. BOOT 가 그 값을 꺼내 `_follow_boot` 에 남기고, 자식의 `rcm check` 는 그것을 보고
+`(found on this network)` 를 그대로 쓴다. exec 하지 않을 때는 같은 프로세스 안에서 발견 결과를 기억하므로 명령이 다시 찾지
+않는다. 찾은 서버가 없다는 결과도 기억한다. 그래서 1.5초 발견과 `server: found` 줄은 한 프로세스에 한 번이다(작성자 판단:
+프로세스 안의 기억).
+
+**A질문13.** `rcm check` 가 health 를 두 번 읽는 것은 그대로 둔다(작성자 판단). 루프백에서 2 ms 이고, 하나로 합치면 따라가기
+코드와 진단 코드가 엮인다. `fresh=True` 는 10분 기록과 60초 실패 기억을 둘 다 무시한다(작성자 판단). 진단과 워커 기동은 지금의
+서버를 봐야 한다.
+
+**A질문7.** health 가 200 인데 본문이 JSON 객체가 아니거나 `version` 이 없으면 `bad_health` 다. 이유 문구의 키 자리에는 본문
+전체가 틀렸으면 `body`, `version` 이 없으면 `version` 을 쓴다. `bad_health` 는 60초 실패 기억에 넣지 않는다. 실패 기억은 3초
+제한을 되풀이하지 않으려는 장치인데 형식이 틀린 응답은 빨리 오기 때문이다. `bad_health` 는 옛 기록의 캐시로도 돌지 않고 설치본과
+경고 한 줄로 간다. 서버는 답하는데 값이 틀린 상태를 조용히 넘기면 아무도 알아채지 못한다. 이 단락 전체가 작성자 판단이다.
+500 이고 본문에 `version` 이 없으면 F17 대로 `unreachable` 이다.
+
+**A질문18.** health 는 소켓 동작마다 3초, 한 번 전체에 5초를 넘기지 않는다. `/client/` 받기는 전체 60초다. 전체 제한은 받는
+루프가 시계를 보고 넘으면 끊는다. 제한을 넘긴 health 는 `unreachable` 이다. 제한을 넘긴 받기는 임시 폴더를 지우고 `unreachable`
+이다. §5.1 에 `HEALTH_TOTAL_SECONDS` 와 `FETCH_TOTAL_SECONDS` 를 더했다.
+
+**A질문21.** 기록의 `checked_at` 이나 `failed_at` 이 지금보다 미래면 만료된 것으로 보고 health 를 다시 읽는다(작성자 판단).
+미래 값을 지금으로 보면 시계가 그 값을 지날 때까지 기록이 계속 새것으로 남는다. 새로 쓴 기록이 미래 값을 덮는다.
+
+**A질문22.** 기록 파일이 JSON 으로 읽히지 않거나 모양이 틀리면 빈 기록으로 보고 다음 저장에서 덮는다. 쓸 수 없으면 기록 없이
+계속한다. 둘 다 경고를 쓰지 않는다. 기록은 다시 만들 수 있는 캐시이기 때문이다(작성자 판단). health 가 실패해 `failed_at` 을
+쓸 때 그 서버의 `version` 과 `wheel` 을 남기는 것은 계약이다. F15 와 §7 의 8 이 그 값에 기댄다.
+
+### 14.5 실패 코드와 경고 문장
+
+§2.6 표에 코드 셋을 더하고 `auth` 의 이름을 바꾼다.
+
+| 코드 | 이유 문구 | 언제 |
+|---|---|---|
+| `exec_failed` | `cannot start the cached client: <strerror>` | `execve` 가 `OSError` 를 냈거나 exec 직전에 표지가 사라졌다. 설치본으로 계속한다 |
+| `unauthorized` | 토큰이 없으면 `the server needs a token to hand out its client`, 있으면 `the server refused the token for its client (HTTP <n>)` | `/client/` 가 401 이나 403 이다. §2.6 의 `auth` 를 이 이름으로 바꾼다 |
+| `no_wheel` | `the server has no client wheel (<client_wheel_error>)`, `/client/` 가 404 · 503 이면 `the server has no client wheel (HTTP <n>)` | `client_wheel: null` 이거나, health 와 받기 사이에 서버가 바뀌었거나 조립에 실패했다 |
+| `cache_broken` | `the cached client v<Y> did not load before` | 목표 sha 의 폴더에 `.bad` 표지가 있다(§14.6 B질문14) |
+
+`/client/` 의 나머지 상태 코드와 3xx 는 `unreachable` 이다.
+
+**A질문5 · A질문25.** CLI 의 `execve` 가 `OSError` 를 내면 `exec_failed` 경고를 쓰고 설치본으로 계속한다. exec 직전에 표지의
+`os.utime` 이 `FileNotFoundError` 를 내면 다른 프로세스의 청소가 그 폴더를 옮긴 것이다. 이때도 다시 받지 않고 `exec_failed`
+로 설치본으로 돈다(작성자 판단). 다음 명령이 처음부터 새로 판단한다.
+
+**A질문6.** 404 · 503 은 `no_wheel`, 401 · 403 은 `unauthorized`, 그 밖은 `unreachable` 이다. `unauthorized` 의 문장은 토큰이
+있을 때와 없을 때를 나눈다(작성자 판단: 문장 둘). 토큰이 틀린 사람에게 「needs a token」은 맞지 않는 말이다.
+
+**A질문8 · C질문11.** 고정한 `X` 가 설치본에도 캐시에도 없는데 서버를 볼 수 없으면 `pinned_unavailable` 이다. 사람이 알아야 할
+사실은 고정을 채울 수 없다는 것이기 때문이다. 이때 문장은 `v<X> is not installed or cached and the server cannot be reached`
+다(작성자 판단: 코드와 문장). 경고 줄의 틀은 둘이다. 서버 버전이 형식 검사를 통과했으면 `rcm: not following server v<Y>: …`
+를 쓰고, 모르거나 검사에 걸렸으면(`unreachable` · `bad_health`) `rcm: not following <서버 주소>: …` 를 쓴다(§5.5). 서버가 보낸
+문자열은 어디에 찍든 먼저 제어 문자를 지우고 64자로 자른다. `bad_health` 경고는 어긋난 키 이름만 말하고 값은 찍지 않는다(작성자
+판단). `rcm check` 의 `server v<Y>` 는 형식 검사에 걸린 값이라도 보이되 같은 처리를 거친 뒤에 보인다.
+
+**A질문19.** `client_wheel: null` 이어도 캐시에 같은 버전이 있으면 그것으로 돌고 경고를 쓰지 않는다. 목표 버전으로 돌았으니 알릴
+실패가 없다. `old_server` 도 같다. 둘 다 sha 를 모르므로 같은 버전 가운데 가장 최근에 쓴 폴더를 고르고 `.bad` 폴더는 고르지
+않는다. 이 답은 작성자 판단이다.
+
+**C질문21.** `rcm check` 는 따라가기 실패를 stderr 경고 한 줄과 `client` 행 꼬리 두 곳에 쓴다. 두 곳의 이유 문구는 같다(작성자
+판단).
+
+### 14.6 캐시 폴더 · 풀기 · 청소
+
+**A질문15.** 캐시 폴더 이름에는 버전 문자열을 쓰지 않는다. 폴더는 `clients/<sha256 앞 16자>/` 이고 표지 `.rcm-client.json` 에
+`version` 과 `sha256` 전체를 적는다. §2.5 의 `<버전>-<sha8>` 과 §6 의 `0.8.1-<sha8>` · `0.8.1-aaaa…` 는 이 이름으로 읽는다.
+고정 버전과 기록 대체는 표지를 읽어 `version` 이 문자열로 같고 `sha256` 이 맞는 폴더를 고른다. rename 에 진 쪽은 이긴 폴더의
+표지를 읽어 버전과 sha256 이 자기 목표와 같으면 그 폴더를 쓴다. 표지가 없거나 값이 다르면 설치본으로 돈다. 이때 경고는
+`unpack` 이고 문구는 `cannot unpack: <폴더> holds another client` 다(작성자 판단: 코드와 문구).
+
+**A질문16.** 「최근 3개」는 막 받은 버전을 센다. 쓰는 중인 폴더(잠긴 폴더)와 지금 목표는 그 셋과 별도로 남긴다. F35 의 기대는
+「막 받은 것을 포함한 최근 사용 3개와 잠긴 것」이다. 다음은 작성자 판단이다. 표지가 없는 모르는 폴더와 파일은 남긴다. 한 시간보다
+오래된 `.tmp-*` · `.trash-*` 만 예외로 지운다. 권한 검사는 항목 폴더에도 건다. 내 소유가 아니거나 그룹이나 남이 쓸 수 있는 항목
+폴더는 고르지도 지우지도 않는다. 폴더 안의 파일 하나하나는 보지 않는다.
+
+**A질문17 · C질문15.** 풀기는 다음 항목도 거부한다(작성자 판단). `.` 조각과 빈 조각이 든 이름, 같은 이름이 두 번 나온 항목,
+보통 파일도 폴더도 아닌 항목이 그렇다. 마지막 것은 `external_attr` 의 파일 종류 비트로 보며 FIFO 와 장치 파일이 여기에 든다.
+`remote_ci_monitor/__init__.py` 가 없으면 `unpack` 이다. 파일은 있는데 `__version__` 을 읽을 수 없거나 목표와 다르면
+`version_mismatch` 다. 버전을 읽는 정규식은 큰따옴표와 작은따옴표를 둘 다 받는다. `Requires-Python: >= 3.11` 처럼 연산자
+앞뒤의 공백은 받고, `Requires-Python` 줄이 둘이면 `python` 으로 거부한다.
+
+실행 비트는 설치 결과의 일부다. 결정 81 의 「같아야 하는 것은 설치 결과다」에 파일 모드를 넣는다. 그래서 서버 wheel 은 릴리스
+wheel 과 같은 실행 비트를 `external_attr` 에 싣는다(PR A0). 풀기도 `external_attr` 의 실행 비트를 파일에 옮겨 캐시 폴더가
+`pip install` 의 결과와 같게 한다(작성자 판단: 풀기 쪽). 시나리오 c 의 CG9 가 두 wheel 의 비트를 견준다.
+
+**B질문14.** BOOT 가 캐시 코드의 import 에 실패하면 그 폴더에 `.bad` 표지를 쓰고 설치본으로 돈다. 표지 쓰기가 실패해도 넘어간다.
+`scan_cache` 는 `.bad` 가 있는 폴더를 고르지 않는다. 서버가 같은 sha 를 주는 동안에는 다시 받지 않고 설치본으로 돌며
+`cache_broken` 경고를 쓴다. 서버가 다음 버전을 주면 sha 가 달라 정상으로 받는다. 감독자 아래의 워커가 깨진 폴더를 계속 고르던
+고리가 여기서 끊긴다.
+
+**C질문22.** 동시에 받은 프로세스는 rename 에 졌어도 받은 바이트가 있으면 `fetched` 줄을 쓴다(작성자 판단). 그 프로세스가
+실제로 내려받은 것은 사실이다. 그래서 §7 의 7 에서 그 줄이 여러 번 나오는 것은 정상이다.
+
+### 14.7 BOOT 와 따라간 자식
+
+**A질문4.** `follow.BOOT` 를 §5.1 의 공개 상수로 둔다. 시험은 BOOT 를 직접 띄우고 exec 인자와 견준다. 주입점 둘도 계약으로
+적는다(작성자 판단). `_main` 은 부를 때마다 `sys.argv[1:]` 를 읽으므로 시험은 `sys.argv` 를 바꾼다. `cli.py` 는
+`follow.install_kind()` 를 모듈 속성으로 부르고 `from … import` 로 이름을 묶지 않는다. 그래서 시험은 그 속성을 바꿔 설치
+종류를 넣는다.
+
+**A질문14.** BOOT 가 꺼내는 변수에 둘을 더한다. `RCM_FOLLOW_FROM` 은 부트로더의 설치 종류(`wheel` · `editable` · `source`)이고
+`RCM_FOLLOW_FOUND` 는 A질문12 의 발견 표시다. 이름이 비슷한 `RCM_FOLLOWED_FROM` 은 설치본의 버전이니 섞지 않는다. 따라간
+자식의 `FollowState.install` 은 `RCM_FOLLOW_FROM` 을 쓴다. 자식이 캐시의 dist-info 를 읽으면 언제나 `wheel` 이 나오기 때문이다.
+BOOT 가 설치본으로 돌아간 자식(`loaded` 가 거짓)의 `client` 행 꼬리는 `not following: the cached client did not load` 다(작성자
+판단).
+
+BOOT 의 바뀐 부분은 다음과 같다. 나머지는 §2.5 와 같다.
+
+```python
+info = {
+    k: os.environ.pop(k, None)  # 자식 프로세스(git, 중첩 rcm)로 새지 않게 꺼낸다
+    for k in (
+        "RCM_FOLLOWED",
+        "RCM_FOLLOWED_PATH",
+        "RCM_FOLLOWED_FROM",
+        "RCM_FOLLOW_FROM",
+        "RCM_FOLLOW_FOUND",
+    )
+}
+p = info["RCM_FOLLOWED_PATH"] or ""
+usable = (
+    bool(p)
+    and os.path.isfile(os.path.join(p, ".rcm-client.json"))
+    and not os.path.exists(os.path.join(p, ".bad"))
+)
+# … 경로 넣기 · 잠금 · import 는 §2.5 그대로 …
+if not loaded:  # 캐시가 망가졌다 — 표지를 남겨 다음엔 고르지 않게 하고 설치본으로
+    if usable:
+        try:
+            open(os.path.join(p, ".bad"), "a").close()
+        except OSError:
+            pass
+    # … sys.path · sys.modules 정리와 설치본 import 는 §2.5 그대로 …
+```
+
+### 14.8 보이는 것
+
+**A질문3.** editable 이나 source 설치의 기본값(installed)이면 `rcm version` 은 기록이 있어도 한 줄 그대로다. `test_cli_m4.py`
+의 한 줄 시험은 바꾸지 않고 F10 의 기대가 「한 줄」로 바뀐다. 둘째 줄은 실제로 따라가는 설정일 때만 쓴다. 곧 설정이 `follow`
+나 고정이고 기본 서버의 기록이 있을 때다. 사람이 환경 변수나 한 줄 파일로 설정을 적었을 때도 쓴다(작성자 판단: 이 뒤 조건).
+
+**C질문8 · A질문20.** 둘째 줄의 갈래는 다음과 같다(작성자 판단).
+
+```
+follow: on (default) · server http://macmini.local:8787 v0.8.1 checked 3m ago · cached 0.8.1, 0.8.0
+follow: on (default) · server http://macmini.local:8787 unreachable 30s ago (last seen v0.8.1 2h ago)
+follow: on (RCM_CLIENT_VERSION) · server http://macmini.local:8787 v0.8.1 checked 3m ago
+follow: pinned 0.8.0 (RCM_CLIENT_VERSION) · cached 0.8.0
+follow: pinned 0.8.0 (~/.config/rcm/client-version)
+follow: off (RCM_CLIENT_VERSION)
+follow: off (~/.config/rcm/client-version)
+follow: invalid RCM_CLIENT_VERSION 'lates' (use follow, installed or a version)
+follow: invalid ~/.config/rcm/client-version 'lates' (use follow, installed or a version)
+```
+
+기본 서버가 비었거나 `auto` 면 `rcm version` 은 발견하지 않으므로 서버 토막이 없다. 그때 둘째 줄은 사람이 설정을 적었을 때만
+나온다. `cached` 토막은 마지막 사용이 최근인 순이고 같은 버전은 sha 가 달라도 한 번만 쓴다. 캐시가 비었으면 토막을 뺀다. 경로는
+홈을 `~` 로 줄여 쓴다.
+
+**C질문9.** `rcm version --json` 의 `follow` 는 언제나 있고 모르는 값은 `null` 이다. `cached` 는 둘째 줄과 같은 순서의 버전
+문자열 목록이다. 키 `installed` 와 `running` 을 더한다(작성자 판단). `running` 은 지금 따라가는 명령을 치면 돌 버전이다. 서버에
+묻지 않고 설정과 기록과 캐시로 정한다. 기록의 버전과 sha 가 맞는 캐시가 있거나 설치본이 그 버전이면 그 버전이고, 아니면 설치본
+버전이다. dolomood 가 읽을 값이 이것이다(C질문20). 키 집합을 잠그는 `test_version_json` 은 PR A 가 고친다.
+
+**A질문20 · C질문7.** `rcm check` 의 `client` 행은 `v<도는 버전> · <관계> · <꼬리>` 꼴이고, 필요할 때만 뒤에 ` — <힌트>` 가
+붙는다. 꼬리는 다음과 같다(작성자 판단).
+
+| 상태 | 꼬리 |
+|---|---|
+| 따라간 자식 | `following (installed v<X>)` |
+| `--no-follow` | `not following (--no-follow)` |
+| 환경 변수 `installed` | `not following (RCM_CLIENT_VERSION=installed)` |
+| 한 줄 파일 `installed` | `not following (~/.config/rcm/client-version)` |
+| editable · source 의 기본값 | `not following (editable install)` · `not following (source install)` |
+| 고정 | `pinned by RCM_CLIENT_VERSION` · `pinned by ~/.config/rcm/client-version` |
+| 따라가다 실패 | `not following: <§2.6 · §14.5 의 이유 문구>` |
+| BOOT 가 설치본으로 돌아감 | `not following: the cached client did not load` |
+
+`pip install` 힌트는 고정일 때와 `no_wheel` · `old_server` 일 때 뺀다. 고정은 사람이 고른 상태이고, 두 코드는 오늘의 힌트와
+같은 이유를 꼬리가 이미 말한다. 그 밖의 `older` 에는 힌트를 그대로 둔다.
+
+**C질문6.** 행의 칸 너비는 지금 코드와 기존 시험(`ok   client`, 공백 셋)을 따른다. §2.9 의 예는 칸을 맞추지 않고 적은 것이다.
+
+**C질문5.** `_version_key` 를 PEP 440 의 dev · a · b · rc · post 를 아는 작은 함수로 고친다. `packaging` 은 쓰지 않는다. 순서는
+`0.7.0.dev0 < 0.7.0.dev1 < 0.7.0a1 < 0.7.0rc1 < 0.7.0 < 0.7.0.post1 < 0.7.1` 이다. `rcm check` 의 「same as server」는 문자열이
+같을 때만 쓴다. 크기 비교에만 이 키를 쓴다. 다음은 작성자 판단이다. `+local` 꼬리는 크기 비교에서 뺀다. 읽지 못한 꼬리는 오늘처럼
+숫자 마디만 본다. 문자열은 다른데 크기가 같으면(`0.7` 과 `0.7.0`) `different build` 로 warn 이다. `rcm run` 의 옛 클라이언트
+경고도 같은 함수를 쓰고, 이 변경은 `_client_row` 를 함께 고치는 PR A 에 싣는다.
+
+**C질문12.** 받은 크기는 `render_text._bytes` 의 눈금(`707.7 KB`)으로 쓴다. `follow.py` 는 `render_text` 를 import 하지
+않으므로 같은 계산을 작게 두고, 두 함수의 출력이 같은지 시험이 잠근다(작성자 판단).
+
+### 14.9 원격 워커
+
+**B질문1.** 레인 재등록이 409 일 때 `run()` 이 종료 0 으로 돌아오는 것은 M5q 이전부터 있던 버그다. 예시 plist 의
+`SuccessfulExit = false` 와 unit 의 `Restart=on-failure` 는 종료 0 이면 워커를 다시 띄우지 않는다. 그 워커는 다른 레인의 잡을
+lost 로 만들고 조용히 멈춘다. B1 에서 종료 2 로 바꾼다. 따라가지 않는 워커(고정 · installed)의 ④ 는 그 종료 2 로 끝난다. §13
+에 기존 문제로 남겼다.
+
+**B질문2.** `WorkerFollow` 는 `WorkerExit` 의 하위 클래스다. 그래서 B1 과 B2 사이의 빌드에서도 레인이 `WorkerExit` 로 잡으므로
+레인 스레드가 예외로 죽지 않는다.
+
+**B질문6.** ① 의 exec 이 `OSError` 면 `exec_failed` 이고 워커는 설치본으로 등록을 이어 간다. ① 이 `sha_mismatch` 로 설치본에
+남았는데 등록이 409 면 ② 가 한 번 더 받는다. 그 사이에 서버가 바뀌었을 수 있기 때문이다. 그래서 `/client/` 요청은 두 번이다.
+② 도 실패하면 종료 2 이고 문장에 이유가 붙는다(§5.5). 이 답은 작성자 판단이다.
+
+**B질문7.** 따라간 자식이 기동 등록에서 다른 `server_version` 의 409 를 받으면 B1 에서는 종료 2 로 끝나고 문장에
+`already following v<X>` 가 붙는다. B2 부터는 `restart_via_installed` 로 바로 다시 실행해 ① 부터 한다. 300초 창 안에 이미
+재실행했으면 종료 2 로 감독자에게 맡긴다. 이 답은 작성자 판단이다.
+
+**B질문8.** 드레인 중에 heartbeat 의 `server_version` 이 자기 버전으로 돌아오면 드레인을 취소한다. 세 번째 버전이 오면
+`follow_to` 를 마지막 값으로 바꾼다. 취소가 성립하려면 레인이 드레인 중에 빠져나가면 안 되므로 §3.3 의 2 와 §5.4 의
+`_lane_loop` 를 바꾼다. 드레인 중인 레인은 claim 하지 않고 1초씩 기다린다. 모든 레인이 잡 없이 기다리는 상태가 되면 `run()` 이
+드레인을 마치고 `stopping` 을 켠다. 드레인이 취소되면 레인은 다시 claim 한다(작성자 판단: 레인을 기다리게 하는 방식).
+
+**B질문9.** 300초 창이 끝나면 다시 드레인할 수 있다. `RCM_WORKER_RESTARTED_AT` 은 프로세스가 시작할 때 한 번 읽는다. 값이
+미래이거나 숫자가 아니면 읽은 때를 지금으로 보므로 창은 그때부터 300초다. 창의 길이는 `follow.RESTART_WINDOW_SECONDS` 다.
+다음은 작성자 판단이다. 억제 로그는 창마다 한 번 쓴다. 시험의 시계 주입점은 이미 있는 `RemoteWorker.now_fn` 이다.
+
+**B질문11.** finish 보고가 재시도 끝에도 실패하면 바로 exec 하지 않는다. 최대 60초 동안 보고를 다시 시도한 뒤에 exec 한다. 재실행
+뒤의 등록이 그 잡을 lost 로 닫지 않게 하려는 것이다. 상수 이름은 `remote_worker.DRAIN_REPORT_SECONDS = 60` 이다(작성자 판단:
+이름).
+
+**B질문12.** heartbeat 가 409(워커 행 없음)를 받으면 로그는 `heartbeat: worker not registered` 다. 연결 실패 줄과 같은 간격(3번째,
+12번째, 그 뒤 60번째마다)으로 쓴다(작성자 판단: 간격).
+
+**B질문13.** exec 하기 전에 측정 스레드가 띄운 프로브 하위 프로세스를 끝낸다. `_measure_lock` 을 `grace_seconds` 까지 기다리고,
+그래도 측정 중이면 그 프로브 프로세스를 끝낸 뒤 exec 한다(작성자 판단: 기다리는 시간). W 시험이 「exec 뒤에 부모를 잃은 프로브가
+없다」를 잠근다.
+
+**B질문15.** M5q 는 `worker.toml` 에 키를 더하지 않는다. 그래서 M5q 이후 버전끼리는 내려가도 같은 설정을 읽는다. M5q 이전에 생긴
+키(M5n 의 `server_name` 같은)를 쓰는 설정으로 그 키보다 오래된 서버를 따라가면 내려간 버전이 `ConfigError` 로 끝난다. 이 한계는
+문서에 적고 따로 막지 않는다. 서버가 그만큼 오래된 경우는 드물다(작성자 판단: 막지 않는 것).
+
+**B질문16.** `server = "auto"` 워커도 찾은 주소를 `RCM_SERVER` 로, 찾았다는 표시를 `RCM_FOLLOW_FOUND=1` 로 자식에게 넘긴다.
+워커 설정을 읽는 `cmd_worker` 쪽 로더는 BOOT 가 남긴 발견 표시가 있고 설정의 서버가 비었거나 `auto` 일 때만 `RCM_SERVER` 를
+읽는다. 읽은 뒤에는 환경에서 지운다. 그 워커는 `discovered_server` 를 켜 두므로 주소가 바뀌었을 때 다시 찾는 동작도 남는다.
+argv 에 `--server` 를 붙이는 길은 다시 찾기를 꺼 버리므로 고르지 않았다. 발견 표시가 없는 워커는 오늘처럼 `RCM_SERVER` 를 읽지
+않는다. 이 답은 작성자 판단이다.
+
+**B질문17.** 드레인 시작, 300초 억제, 재실행, ② 의 거절, ① 의 실패 경고를 포함한 문구를 §5.5 에 정확한 문자열로 적었다.
+
+**B질문18.** `draining` 과 `stopping` 을 나눴으므로 드레인 중의 첫 SIGTERM 은 평범한 멈춤이다. 신호 처리기는 `stopping` 대신
+첫 신호에 켜는 `RemoteWorker.signalled` 로 두 번째 신호를 가린다(작성자 판단: 이름). 그래서 드레인 끝에 `run()` 이 켠
+`stopping` 을 두 번째 신호로 보지 않는다. `cmd_worker` 는 `signalled` 가 켜져 있으면 `restart_for` 가 있어도 exec 하지 않고
+끝난다.
+
+**B질문19.** installed 를 명시한 워커와 고정한 워커도 ③ 에서 editable 워커와 같은 꼴의 로그를 프로세스당 한 번 쓴다(작성자 판단).
+② 에서 따라가지 않는 워커의 종료 문장에는 이유를 붙인다. editable 워커라면 오늘의 409 문장 뒤에
+` · not following (editable install)` 이 붙는다. 정확한 글자는 §5.5 에 있다.
+
+**C질문3.** 워커 ① 이 health 를 읽지 못했는데 그 서버의 기록과 sha 가 맞는 캐시가 있으면 워커도 그 캐시로 exec 한다. ① 이 health
+를 못 읽었으므로 ② 를 기다리지 않는다. 기록이 없거나 맞는 캐시가 없으면 설치본으로 등록을 기다리고, 등록이 409 면 ② 가
+따라간다. §7 의 10 의 4 는 §14.11 처럼 나눈다.
+
+### 14.10 서버 쪽
+
+**C질문13.** 로그 한 줄은 제출이 받아들여진 뒤에 쓴다. 400 으로 끝난 제출은 쓰지 않는다. `User-Agent` 는 전체가
+`rcm/<버전>` 이고 그 버전이 `VERSION_RE` 를 `fullmatch` 로 통과할 때만 본다. 아니면 줄을 쓰지 않는다. (토큰 이름, 버전) 쌍은
+프로세스 메모리에 256개까지 기억한다. 다음은 작성자 판단이다. 256개가 차면 새 쌍은 기억하지도 쓰지도 않고 찼다는 줄을 한 번
+쓴다(§5.5). 상수 이름은 `server.CLIENT_VERSION_PAIRS_MAX = 256` 이다.
+
+**C질문14.** 시나리오 c 의 해석이 맞다. `/api/health` 에는 키를 더하지 않는다(§5.3). 키가 늘지 않았는지와 진짜 health 가 진짜
+`parse_health` 를 통과하는지만 보면 된다.
+
+### 14.11 실기 절차 (§7 을 고친다)
+
+**C질문4.** 클라이언트 C 와 워커의 모든 명령은 `HOME` 에 더해 `XDG_*` 와 `RCM_*` 를 `env -u` 로 지운 환경에서 친다. 시나리오 c
+의 L0e 처럼 실행 파일 하나로 둔다.
+
+```sh
+exec env -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME \
+  -u RCM_CONFIG -u RCM_SERVER -u RCM_TOKEN -u RCM_SERVER_DATA_DIR \
+  HOME="$D/home" "$D/venv-c/bin/rcm" "$@"
+```
+
+예외는 `RCM_CLIENT_VERSION` 하나다. 6 단계와 9 단계가 일부러 넘기는 값이라 실행 파일이 지우지 않는다. 대신 0 단계에서 셸에 그
+변수가 없는지 본다(작성자 판단). 워커 실행 파일은 `RCM_WORKER_TOKEN` 을 직접 넣는다.
+
+**C질문1.** 9 단계 앞에 서버 B 로 가는 제출을 더한다. 기본 서버 B 로 `run demo` 를 두 번, `RCM_CLIENT_VERSION=0.6.1` 로 한 번
+낸다. 서버 B 의 로그에 `client <토큰 이름> runs v0.7.0.dev0` 과 `client <토큰 이름> runs v0.6.1` 이 한 줄씩 있어야 한다. 두
+번째 dev0 제출은 줄을 늘리지 않는다.
+
+**C질문2.** 8 단계는 이렇게 본다. 서버 A 를 끄고 기록의 `checked_at` 을 11분 앞으로 돌린 뒤 `wait --timeout 5` 를 친다.
+0.6.1 코드가 연결 실패를 말하고 기록의 `failed_at` 이 채워진다. 60초 안에 한 번 더 치면 `failed_at` 이 그대로다. 3초 제한은
+연결을 받기만 하고 답하지 않는 리스너를 8792 에 두고 잰다. 그 주소는 기록이 없으므로 `unreachable` 경고가 나오고, 첫 호출이 두
+번째 호출보다 약 3초 길다.
+
+**C질문3.** 10 의 4 를 셋으로 나눈다(작성자 판단: 10.4b 에서 기록을 지우는 것과 10.4c).
+
+| 단계 | 하는 일 | 기대 |
+|---|---|---|
+| 10.4a | 서버를 dev0 으로 되돌리고 워커를 재시작한다 | ① 이 health 를 새로 읽어 dev0 으로 따라간다. 등록 409 는 없다 |
+| 10.4b | 워커와 서버를 끄고 `$HOME/.cache/rcm/follow.json` 을 지운 뒤 워커를 띄우고, 그다음 서버 dev0 을 띄운다 | ① 은 health 도 기록도 없어 설치본 dev1 로 등록을 재시도한다. 서버가 뜨면 등록 409 를 한 번 받고 ② 로 dev0 을 따라가 등록한다. 종료 2 는 없다(W2) |
+| 10.4c | 10.4b 와 같되 `follow.json` 을 남긴다 | ① 이 기록과 sha 가 맞는 캐시 dev0 으로 바로 exec 하고, 서버가 뜨면 409 없이 등록한다 |
+
+**C질문23.** 「DB v23 그대로」는 「M5p 가 올린 스키마 그대로」로 읽는다. A 는 M5p P3 위로 rebase 하므로 숫자가 다르다. 같은
+빌드끼리라 마이그레이션이 없다는 뜻은 같다.
+
+### 14.12 시험 · 문서 · 범위
+
+**A질문24.** F48 은 빠뜨린 번호다. 번호를 다시 매기면 시나리오 a 의 F49~F52 참조가 어긋나므로, §6 의 F48 자리에 이 절의 줄바꿈
+꼬리 시험을 넣어 채웠다.
+
+**C질문18.** `scripts/smoke_install.sh` 는 `XDG_CACHE_HOME` 을 작업 폴더로 돌린다. 새 venv 의 `rcm` 을 하위 프로세스로 부르는
+시험은 conftest 가 바꾼 `XDG_CACHE_HOME` 과 `XDG_CONFIG_HOME` 을 물려받아야 한다. `env=` 를 직접 넘기는 시험은 그 두 변수를
+함께 넘긴다(작성자 판단).
+
+**C질문19.** README 두 언어는 집안 규칙대로 PR A 가 함께 고친다. §9 의 표에서 README 를 PR C 에서 PR A 로 옮겼다.
+
+**C질문20.** §10 의 `client_drift_hint` 행을 고쳤다. 그 함수는 언제나 설치본 버전을 내는 `rcm --version` 을 읽으므로 따라가는
+중에도 계속 알린다. dolomood 는 `rcm version --json` 의 `follow.running` 을 읽게 바꿔야 하고, 그것은 그쪽 세션의 일이다.
