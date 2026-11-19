@@ -16,12 +16,28 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import socketserver
 import threading
 import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+
+class _NoLookupHTTPServer(ThreadingHTTPServer):
+    """`HTTPServer.server_bind` 의 `socket.getfqdn()` 역방향 조회를 건너뛴다.
+
+    macOS CI 러너에서는 프로세스의 첫 조회가 30초 넘게 멈춘다. 뮤테이션 확인은 변이마다 pytest 를
+    새로 띄우므로 보관함 변이 셋이 대조군과 변이판에서 이 값을 두 번씩 치렀다(#233 이 같은 것을
+    `follow_helpers` 에서 고쳤다). 이름은 쓰지 않는다.
+    서버 쪽 `RcmHTTPServer.server_bind` 와 같다."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 @dataclass
@@ -119,7 +135,7 @@ class FakeRcm:
             def do_DELETE(self) -> None:  # noqa: N802
                 self._handle("DELETE")
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd = _NoLookupHTTPServer(("127.0.0.1", 0), Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
