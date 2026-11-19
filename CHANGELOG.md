@@ -25,7 +25,7 @@ of a key bumps that number and is listed here.
   a refused lane registration, exits 2 once its jobs are reported. A stop signal during a drain is
   an ordinary stop. A heartbeat refused because the server forgot the worker now says
   `heartbeat: worker not registered` instead of `server unreachable`.
-  ([#B2PR](https://github.com/monocsp/remote_ci_monitor/pull/B2PR))
+  ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
 
 ### Fixed
 - **A worker's messages about a broken or pinned cached copy say it once and say it right.** A
@@ -33,7 +33,7 @@ of a key bumps that number and is listed here.
   `· pinned by RCM_CLIENT_VERSION`, not `· not following: already following v…`. A worker whose
   cached copy is broken prints `rcm: remove <folder> to fetch it again` once, also on the first
   start that finds it broken, and no longer logs `register: server runs v… — following` before
-  saying it cannot. ([#B2PR](https://github.com/monocsp/remote_ci_monitor/pull/B2PR))
+  saying it cannot. ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
 - **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
   `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file
   with extended attributes; the shelf unpacked them into `<name>.d/` and, ending in `.png`, they
