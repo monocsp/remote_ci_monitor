@@ -365,6 +365,7 @@ class Janitor:
         versions: VersionHost | None = None,
         shelf_hold: Callable[[int], bool] = lambda _job_id: False,
         on_shelf_change: Callable[[int], None] | None = None,
+        on_sweep: Callable[[], None] | None = None,
     ):
         self.store = store
         self.config = config
@@ -372,6 +373,8 @@ class Janitor:
         self._shelf_hold = shelf_hold
         #: 보관 항목의 상태가 바뀌었다 — 서버가 그 잡의 SSE 갱신을 낸다(§15.3 「이벤트」)
         self._on_shelf_change = on_shelf_change or (lambda _job_id: None)
+        #: 회차가 끝났다 — 서버가 보관 copier 를 깨운다(놓친 보관 요청 줍기, M5p §4.2)
+        self._on_sweep = on_sweep or (lambda: None)
         #: 마지막 보관함 회차의 시각과 오류 코드(`/api/status.server.shelf_storage`)
         self.shelf_last_sweep_at: datetime | None = None
         self.shelf_error_code: str | None = None
@@ -1175,6 +1178,10 @@ class Janitor:
         try:
             while True:
                 self.sweep_once()
+                try:
+                    self._on_sweep()
+                except Exception as e:  # noqa: BLE001 — 깨우기 실패로 청소기가 죽으면 안 된다
+                    self.on_error(f"shelf: wake after sweep: {_errname(e)}")
                 if self.stop_event.wait(self.interval):
                     return
         except BaseException as e:  # noqa: BLE001 — 스레드 죽음은 숨기지 않는다

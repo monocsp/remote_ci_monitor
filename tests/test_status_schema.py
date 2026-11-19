@@ -53,6 +53,9 @@ ROW_KEYS = {
     "progress",
     "log_tail",
     "url",
+    # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
+    "keep",
+    "shelf",
 }
 ESTIMATE_KEYS = {
     "confidence",
@@ -109,6 +112,9 @@ RECENT_KEYS = {
     "source",
     "transitions",
     "url",
+    # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
+    "keep",
+    "shelf",
 }
 POOL_KEYS = {
     "name",
@@ -285,6 +291,9 @@ def test_status_is_json_serializable_with_expected_shape():
         "checks",
         "concurrency_scope",
         "sample",
+        # M5p — 글롭이 있나(`--keep` 을 걸 수 있나)와 늘 보관하나(키 추가만)
+        "has_artifacts",
+        "keep",
     }
     assert pool["medians"]["gate:full"] == {"seconds": 400, "wait_seconds": 80, "sample_count": 7}
     h = pool["hosts"][0]

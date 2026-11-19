@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from remote_ci_monitor import SCHEMA_VERSION
+from remote_ci_monitor.core import artifacts as _art
+from remote_ci_monitor.core import shelf as _shelf
 from remote_ci_monitor.core.hostparse import stale as _stale
 from remote_ci_monitor.core.model import (
     REASON_BLOCKED_BY_GROUP,
@@ -261,6 +263,10 @@ def queue_row_json(
         "concurrency_scope": job.concurrency_scope,
         "host_key": job.host_key,
         "placement_detail": [placement_note_json(n) for n in row.placement_detail],
+        # M5p — 제출 때 얼린 keep 과 보관 상태. `shelf` 는 서버가 채운다(DB 를 봐야 한다).
+        # 키 추가만 — schema_version 그대로
+        "keep": job.keep,
+        "shelf": None,
     }
 
 
@@ -315,6 +321,9 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "target_worker": job.target_worker,
         "host_key": job.host_key,
         "worker": job.worker_name,
+        # M5p — 제출 때 얼린 keep 과 보관 상태(서버가 채운다). 키 추가만
+        "keep": job.keep,
+        "shelf": None,
     }
 
 
@@ -335,6 +344,9 @@ def preset_json(p: Preset) -> dict[str, Any]:
         "checks": list(p.checks),
         "concurrency_scope": p.concurrency_scope,
         "sample": p.sample is not False,
+        # M5p — `--keep` 을 걸 수 있나(글롭이 있나)와 늘 보관하나(§15.6). CLI 가 제출 전에 거른다
+        "has_artifacts": bool(p.artifacts),
+        "keep": bool(p.keep),
         "inputs": [
             {
                 "name": i.name,
@@ -489,6 +501,67 @@ def artifacts_json(row: Mapping[str, Any] | None, state: str) -> dict[str, Any]:
         "reason_code": row["reason_code"],
         "reason_args": row["reason_args"] or None,
     }
+
+
+def shelf_stage_state(
+    state: str,
+    last_used_at: float | None,
+    requested_at: float,
+    *,
+    now: float,
+    stale_days: int,
+    delete_days: int,
+) -> str:
+    """DB 열 → 화면에 보일 상태. 보관 중 · 정리 대기는 열이 아니라 `stage()` 로 다시 잰다(§15.5).
+
+    청소 회차 사이의 어긋남을 없앤다 — 열은 `active` 인데 182일이 지났으면 `stale` 로 보인다.
+    삭제 단계가 지났는데 아직 안 지운 항목도 `stale` 이다(쓰면 다시 산다).
+    """
+    if state not in _shelf.SHELVED_STATES:
+        return state
+    used = last_used_at if last_used_at is not None else requested_at
+    return "active" if _shelf.stage(used, now, stale_days, delete_days) == "active" else "stale"
+
+
+def shelf_json(
+    *,
+    keep: bool,
+    item: Any | None,
+    artifact_state: str,
+    url: str | None,
+    now: float,
+    stale_days: int,
+    delete_days: int,
+    none_reason: str | None = None,
+) -> dict[str, Any] | None:
+    """잡 행의 `shelf` — `{state, url, reason_code}` 또는 null(keep 이 아닌 잡, §4.8 · §15.1).
+
+    `state` 는 `PUBLIC_SHELF_STATES` 의 하나다. 보관 행이 없으면 묶음으로 정한다 — 아직 오는 중이면
+    `waiting`, 종결인데 ready 가 아니면 `none` 과 그 이유(묶음 상태 이름, 또는 정책으로 계산한
+    `none_reason`). 묶음도 행도 없는 keep 잡은 `none(forgotten)` 이다(묘비까지 지워졌다).
+    """
+    if not keep:
+        return None
+    if item is not None:
+        state = shelf_stage_state(
+            item.state,
+            item.last_used_at,
+            item.requested_at,
+            now=now,
+            stale_days=stale_days,
+            delete_days=delete_days,
+        )
+        reason = item.reason_code if state == _shelf.STATE_FAILED else None
+        return {"state": state, "url": url, "reason_code": reason}
+    if artifact_state == _art.DISABLED:
+        return {"state": "none", "url": url, "reason_code": "no_artifacts"}
+    if artifact_state in _art.PROGRESS_STATES:
+        return {"state": "waiting", "url": url, "reason_code": None}
+    if artifact_state == _art.UNKNOWN:
+        return {"state": "none", "url": url, "reason_code": none_reason or _art.UNKNOWN}
+    if artifact_state in (_art.READY, _art.UNAVAILABLE) or artifact_state in _art.GONE_STATES:
+        return {"state": "none", "url": url, "reason_code": "forgotten"}
+    return {"state": "none", "url": url, "reason_code": artifact_state}
 
 
 def status_json(
