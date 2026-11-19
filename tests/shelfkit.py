@@ -231,9 +231,10 @@ def wait_until(pred: Any, timeout: float = 10.0, what: str = "condition") -> Any
 def drain_copier(srv: WorkerServer) -> None:
     """서버가 띄우는 것과 같은 copier 를 이 스레드에서 pending 이 없어질 때까지 돌린다.
 
-    보관 행이 `pending` 에 머문 상태를 보는 시험은 copier 스레드 없이 서버를 띄우고(`workers=False`
-    거나 `ShelfCopier.start` 를 막는다) 이것으로 보관을 끝낸다. copier 스레드를 띄운 채 문(Gate)으로
-    붙잡으면 문을 달기 전에 들어간 claim 이 막 생긴 행을 집어 갈 수 있다.
+    보관 행이 `pending` 에 머문 상태를 보는 시험은 copier 스레드 없이 서버를 띄우거나
+    (`workers=False` 거나 `ShelfCopier.start` 를 막는다) `stop_copier` 로 멈추고, 이것으로 보관을
+    끝낸다. copier 스레드를 띄운 채 `claim_shelf_item` 을 감싸 붙잡으면 감싸기 전에 들어간 claim 이
+    막 생긴 행을 집어 갈 수 있다.
     """
     app = srv.app
     ShelfCopier(
@@ -244,6 +245,21 @@ def drain_copier(srv: WorkerServer) -> None:
         on_change=app._on_shelf_change,
         on_purged=app._shelf_purged,
     ).drain()
+
+
+def stop_copier(srv: WorkerServer) -> None:
+    """서버의 copier 스레드를 멈추고 끝날 때까지 기다린다. 그 뒤 보관은 `drain_copier` 로만 한다.
+
+    스레드가 끝난 것을 확인하므로, 멈추기 전에 이미 들어가 있던 claim 도 이 함수가 돌아올 때는
+    끝나 있다. 시험이 pending 행을 세우기 전에 부르면 그 claim 은 집을 행이 없다.
+    """
+    copier = srv.app.copier
+    assert copier is not None, "the copier was never started"
+    copier.stop()
+    thread = copier._thread
+    if thread is not None:
+        thread.join(10)
+        assert not thread.is_alive(), "the copier thread did not stop"
 
 
 # ── 손으로 만든 묶음 (HTTP 만 보는 시험) ─────────────────────────────────────
