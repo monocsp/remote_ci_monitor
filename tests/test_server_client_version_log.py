@@ -73,6 +73,11 @@ def lines(text: str) -> list[tuple[str, str]]:
     return LINE_RE.findall(text)
 
 
+#: 줄이 없어야 하는 시험이 지켜보는 시간. 서버는 응답을 보내기 전에 줄을 쓰므로(`POST /jobs`
+#: 처리기) 응답을 받은 뒤에는 짧게 봐도 된다. 응답 뒤에 쓰는 회귀가 생겨도 스레드 하나만큼 늦다
+QUIET = 0.1
+
+
 def settle(capsys, want: int, timeout: float = 3.0) -> str:
     """줄이 `want` 개 모일 때까지(또는 시간이 다 될 때까지) 서버 stderr 를 모은다.
 
@@ -84,7 +89,7 @@ def settle(capsys, want: int, timeout: float = 3.0) -> str:
         if len(lines(seen)) >= want:
             break
         time.sleep(0.02)
-    time.sleep(0.15)
+    time.sleep(0.05)
     return seen + capsys.readouterr().err
 
 
@@ -222,7 +227,7 @@ def test_ce1_other_routes_never_log(srv, capsys):
     srv.req("GET", "/client/" + wheel_filename(__version__), token="alice", headers=ua, raw=True)
     srv.req("GET", f"/jobs/{job}", token="alice", headers=ua)
     srv.req("POST", f"/jobs/{job}/cancel", token="alice", json_body={}, headers=ua)
-    err = settle(capsys, 1, timeout=0.5)
+    err = settle(capsys, 1, timeout=QUIET)
     assert lines(err) == [], err
 
 
@@ -231,7 +236,7 @@ def test_ce2_no_token_or_wrong_token_is_401_and_silent(srv, capsys):
     capsys.readouterr()
     assert submit_as(srv, None, "rcm/0.8.1")[0] == 401
     assert submit_as(srv, "not-a-real-token", "rcm/0.8.1")[0] == 401
-    assert lines(settle(capsys, 1, timeout=0.5)) == []
+    assert lines(settle(capsys, 1, timeout=QUIET)) == []
 
 
 def test_ce3_worker_token_is_403_and_silent(srv, capsys):
@@ -240,7 +245,7 @@ def test_ce3_worker_token_is_403_and_silent(srv, capsys):
     capsys.readouterr()
     status, body = submit_as(srv, wtok, "rcm/0.8.1")
     assert status == 403 and "worker tokens cannot use the client API" in str(body)
-    assert lines(settle(capsys, 1, timeout=0.5)) == []
+    assert lines(settle(capsys, 1, timeout=QUIET)) == []
 
 
 def test_ce4_rejected_submission_is_silent(srv, capsys):
@@ -249,7 +254,7 @@ def test_ce4_rejected_submission_is_silent(srv, capsys):
     body = copy.deepcopy(BODY)
     body["preset"] = "no-such-preset"
     assert submit_as(srv, "alice", "rcm/0.8.1", body=body)[0] == 400
-    assert lines(settle(capsys, 1, timeout=0.5)) == []
+    assert lines(settle(capsys, 1, timeout=QUIET)) == []
 
 
 @pytest.mark.parametrize(
@@ -270,7 +275,7 @@ def test_ce5_odd_user_agents_write_no_line(srv, capsys, ua):
     capsys.readouterr()
     status, body = submit_as(srv, "alice", ua)
     assert status in (200, 201), body
-    err = settle(capsys, 1, timeout=0.4)
+    err = settle(capsys, 1, timeout=QUIET)
     assert lines(err) == [], err
     assert "\x1b" not in err
     assert ("1." * 32 + "1") not in err

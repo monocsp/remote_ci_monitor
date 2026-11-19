@@ -72,6 +72,8 @@ def main(argv=None):
     try:
         if "--sleep" in args:
             time.sleep(float(args[args.index("--sleep") + 1]))
+        if "--hold" in args:
+            sys.stdin.read()  # 시험이 stdin 을 닫을 때까지 쥔다. 정해 둔 시간을 기다리지 않는다
     except KeyboardInterrupt:
         return 130
     if "--exit" in args:
@@ -245,7 +247,11 @@ class FakeServer:
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
         self.key = f"http://127.0.0.1:{self.port}"
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        # 기본 poll 0.5초면 `close()` 의 shutdown 이 서버마다 평균 0.25초, 길게는 0.5초를 기다린다.
+        # 따라가기 시험은 시험마다 서버를 여럿 띄우므로 fake_rcm_http 와 같은 0.02초로 둔다
+        threading.Thread(
+            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        ).start()
 
     # ── 셈 ──
     @property
@@ -422,7 +428,7 @@ class VersionedServer:
         self.url = f"http://127.0.0.1:{self.port}"
         self.key = self.url
         self.thread = threading.Thread(
-            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
+            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
         )
         self.thread.start()
         if workers:
