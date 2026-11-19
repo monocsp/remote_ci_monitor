@@ -36,7 +36,8 @@ of a key bumps that number and is listed here.
   kept job's recent row, a remove button with a token, and a Shelf link in the header. Reading
   the shelf needs no token, so do not put secrets in artifacts. `rcm run --keep` against an older
   server stops before it sends anything.
-  ([#220](https://github.com/monocsp/remote_ci_monitor/pull/220))
+  ([#220](https://github.com/monocsp/remote_ci_monitor/pull/220),
+  [#221](https://github.com/monocsp/remote_ci_monitor/pull/221))
 
 ### Changed
 - **The web queue's English confidence badge is shorter.** `high · measured n=12` became

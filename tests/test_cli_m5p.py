@@ -633,6 +633,15 @@ def test_cb6_retouched_names_the_new_cleanup_date_in_the_server_timezone(srv, ca
     ), out
 
 
+def test_retouched_reads_the_date_from_the_item_when_the_answer_has_none(srv, capsys):
+    """P2 의 keep 응답에는 `stale_at` 이 없다 — 항목 JSON(`/api/shelf/N`)에서 읽는다."""
+    keep_route(srv, "retouched", 200, shelf=shelf_obj(srv, "active"))
+    srv.fake.route("GET", f"/api/shelf/{JOB}", {"job_id": JOB, "stale_at": "2027-05-20T16:30:00Z"})
+    code, out, _err = run(capsys, ["keep", str(JOB)])
+    assert code == 0
+    assert "(cleanup pending from 2027-05-21)" in out, out
+
+
 def test_retouched_without_a_date_leaves_the_date_out(srv, capsys):
     keep_route(srv, "retouched", 200, shelf=shelf_obj(srv, "active"))
     code, out, _err = run(capsys, ["keep", str(JOB)])
@@ -750,7 +759,11 @@ def test_cb8_shelf_lists_rows_in_the_server_timezone_and_a_footer(srv, capsys):
     srv.fake.route(
         "GET",
         "/api/shelf",
-        {"items": [item(412, "active"), item(380, "stale", last_used_at="2026-05-01T00:00:00Z")]},
+        {
+            "items": [item(412, "active"), item(380, "stale", last_used_at="2026-05-01T00:00:00Z")],
+            "storage": dict(SUMMARY, stored_bytes=12_300_000),
+            "display_timezone": "Asia/Seoul",
+        },
     )
     code, out, err = run(capsys, ["shelf"])
     assert code == 0, err
@@ -838,7 +851,7 @@ def test_shelf_reads_without_a_token(srv, monkeypatch, capsys):
 
 
 def test_cb10_shelf_rm_removes(srv, capsys):
-    srv.fake.route("DELETE", f"/shelf/{JOB}", {"deleted": True})
+    srv.fake.route("DELETE", f"/shelf/{JOB}", {"job_id": JOB, "deleted": True})
     code, out, err = run(capsys, ["shelf", "rm", str(JOB)])
     assert code == 0, err
     assert out.strip() == "removed #412 from the shelf"
@@ -860,7 +873,7 @@ def test_ce15_shelf_rm_while_downloading_exits_1(srv, capsys):
     srv.fake.route(
         "DELETE",
         f"/shelf/{JOB}",
-        {"error": "being downloaded", "code": "shelf_item_busy"},
+        {"error": "being downloaded as a zip right now", "reason_code": "shelf_item_busy"},
         status=409,
     )
     code, _out, err = run(capsys, ["shelf", "rm", str(JOB)])
@@ -870,7 +883,10 @@ def test_ce15_shelf_rm_while_downloading_exits_1(srv, capsys):
 
 def test_shelf_rm_while_copying_exits_1(srv, capsys):
     srv.fake.route(
-        "DELETE", f"/shelf/{JOB}", {"error": "still copying", "state": "copying"}, status=409
+        "DELETE",
+        f"/shelf/{JOB}",
+        {"error": "still being copied to the shelf", "reason_code": "shelf_item_copying"},
+        status=409,
     )
     code, _out, err = run(capsys, ["shelf", "rm", str(JOB)])
     assert code == 1, err

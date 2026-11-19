@@ -29,7 +29,7 @@ from test_server import PRESETS, Server
 
 pytestmark = pytest.mark.skipif(
     not hasattr(server_mod, "ShelfCopier"),
-    reason="P2 머지 뒤 — 서버의 보관함(copier · /shelf · POST /jobs/N/keep)이 아직 없다",
+    reason="서버의 보관함(P2: copier · /shelf · POST /jobs/N/keep)이 없는 빌드",
 )
 
 PNG_B64 = (
@@ -190,12 +190,13 @@ def test_cb25_the_notify_hook_gets_the_same_link_as_the_cli(tmp_path, env, tree,
     )
     from remote_ci_monitor.core.notify import NotifyRule
 
-    s = Server(tmp_path / "srv", workers=True, max_snapshot_bytes=200_000)
+    # 알림 스레드는 `App.start` 에서 설정을 읽는다 — 포트를 안 뒤 설정을 넣고 그다음에 띄운다
+    s = Server(tmp_path / "srv", workers=False, max_snapshot_bytes=200_000)
     try:
         s.cfg.server.public_url = f"http://127.0.0.1:{s.port}"
         s.cfg.presets = tuple(parse_preset(p) for p in SHELF_PRESETS)
         s.cfg.notify = (NotifyRule(name="hook", argv=(sys.executable, "-c", code)),)
-        s.app.notifier.start() if getattr(s.app, "notifier", None) else None
+        s.app.start()
         env(s)
         rc, _out, err = run(capsys, ["run", "shelfopt", "--keep", "--dir", str(tree)])
         assert rc == 0, err
@@ -261,3 +262,35 @@ def test_cg42_opening_the_link_restarts_the_clock(live, env, tree, capsys):
     assert status == 200
     item = live.store.shelf_item(job_id)
     assert item is not None and item.last_used_at > old + 3600
+
+
+def test_shelf_get_downloads_the_kept_files_from_the_real_server(
+    live, env, tree, capsys, tmp_path, monkeypatch
+):
+    """§16(app-map-shots): `--keep` 이 준 링크로 다른 폴더에 받는다. 토큰 없이, 해시를 맞춰서."""
+    env(live)
+    code, _out, err = run(capsys, ["run", "shelfopt", "--keep", "--dir", str(tree)])
+    assert code == 0, err
+    url = shelf_link(err)
+    job_id = int(re.search(r"/shelf/(\d+)/", url).group(1))
+    wait_active(live, job_id)
+    monkeypatch.delenv("RCM_TOKEN")  # 다른 컴퓨터처럼 — 토큰 없이
+    whole = tmp_path / "whole"
+    code, out, err = run(capsys, ["shelf", "get", url, "--output", str(whole)])
+    assert code == 0, err
+    assert (whole / "out" / "home.png").read_bytes() == PNG
+    assert (whole / "out" / "goldens.tar.gz.d" / "goldens" / "home.png").read_bytes() == PNG
+    assert (whole / "out" / "run.log").read_text() == "ok\n"
+    assert out.strip().endswith(f"from {url}"), out
+    one = tmp_path / "one"
+    code, out, err = run(
+        capsys, ["shelf", "get", str(job_id), "--output", str(one), "--file", "out/home.png"]
+    )
+    assert code == 0, err
+    assert [p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file()] == [
+        "out/home.png"
+    ]
+    latest = tmp_path / "latest"
+    code, out, err = run(capsys, ["shelf", "get", "--latest", "shelfopt", "--output", str(latest)])
+    assert code == 0, err
+    assert (latest / "out" / "home.png").read_bytes() == PNG

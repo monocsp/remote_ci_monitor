@@ -166,3 +166,10 @@ describe("navModel (CB16 · CG32)", () => {
     assert.equal(plain.links[0].current, true);
   });
 });
+
+describe("SSE (P2 의 shelf_changed)", () => {
+  test("보관 상태가 바뀌면 다시 읽는다 — 보관함 줄이 바로 바뀐다", () => {
+    assert.ok(rcm.SSE_REFETCH_KINDS.includes("shelf_changed"));
+    ["job_changed", "job_finished", "reset", "lag"].forEach((k) => assert.ok(rcm.SSE_REFETCH_KINDS.includes(k), k));
+  });
+});

@@ -1282,6 +1282,9 @@
   }
 
   // ── 보관함(M5p §4.7 · §15.6) ──
+  /** 다시 읽기를 부르는 SSE 종류. `shelf_changed {job_id, state}`(M5p P2)는 보관이 끝나거나 지워질 때 와서
+      최근 행의 보관함 줄을 바로 바꾼다. */
+  var SSE_REFETCH_KINDS = ["job_changed", "job_finished", "marker", "host_sample", "server", "reset", "lag", "shelf_changed"];
   /** 보관함 페이지의 경로. **경로만** 쓴다 — 행의 `shelf.url` 은 public_url 로 만든 절대 주소라 브라우저가
       연 호스트와 다를 수 있다(CG30 · 결정 148 의 Host 허용 목록). 서버 페이지는 한국어가 기본이라 영어
       화면이면 `?lang=en` 을 붙인다. */
@@ -3247,7 +3250,7 @@
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
-    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, shelfLine: shelfLine, shelfDeletable: shelfDeletable, shelfDeleteOutcome: shelfDeleteOutcome, navModel: navModel, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
+    stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, shelfLine: shelfLine, shelfDeletable: shelfDeletable, shelfDeleteOutcome: shelfDeleteOutcome, navModel: navModel, SSE_REFETCH_KINDS: SSE_REFETCH_KINDS, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
     jobLinkHtml: jobLinkHtml, jobLinkLabel: jobLinkLabel, keyWithLinkHtml: keyWithLinkHtml,
     poolHeader: poolHeader, poolSummary: poolSummary, poolsOf: poolsOf, recentOf: recentOf,
@@ -3422,7 +3425,7 @@
     state.es = es;
     es.onopen = function () { state.conn = connection(state.conn, "sse_open", now()); renderHeaderConn(); stopPolling(); };
     es.onerror = function () { onSseError(); };
-    ["job_changed", "job_finished", "marker", "host_sample", "server", "reset", "lag"].forEach(function (kind) {
+    SSE_REFETCH_KINDS.forEach(function (kind) {
       es.addEventListener(kind, function () { scheduleRefetch(); });
     });
     es.addEventListener("hello", function () { /* 연결 확인 — 상태는 onopen 에서 */ });

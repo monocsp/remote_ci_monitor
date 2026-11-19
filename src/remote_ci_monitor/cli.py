@@ -553,12 +553,17 @@ def _shelf_health(client: Client, what: str, command: str) -> tuple[int | None, 
 
 def _server_tz(client: Client) -> Any:
     """서버의 `[display] timezone` — 날짜는 페이지와 같은 날로 보인다(§15.6). 못 읽으면 이 머신."""
-    from zoneinfo import ZoneInfo
-
     try:
         name = (client.status() or {}).get("display_timezone")
     except (ClientError, ValueError, OSError):
         name = None
+    return _tz_named(name)
+
+
+def _tz_named(name: Any) -> Any:
+    """시간대 이름 → tzinfo. 비었거나 틀리면 이 머신의 시간대(서버가 「로컬」이라고 한 것)."""
+    from zoneinfo import ZoneInfo
+
     if name:
         try:
             return ZoneInfo(str(name))
@@ -1273,6 +1278,13 @@ def cmd_keep(args: argparse.Namespace) -> int:
         # 새 정리 대기 예정일 — 서버의 시간대로(페이지와 같은 날짜가 보이게)
         shelf = body.get("shelf") if isinstance(body.get("shelf"), dict) else {}
         stale_at = body.get("stale_at") or shelf.get("stale_at")
+        if stale_at is None:
+            # 응답에 날짜가 없으면 항목 JSON 에서 읽는다(표시용 — 못 읽으면 날짜만 뺀다)
+            try:
+                item = client.get_json(f"/api/shelf/{job}") or {}
+                stale_at = item.get("stale_at") if isinstance(item, dict) else None
+            except (ClientError, ValueError, OSError):
+                stale_at = None
         when = ""
         if stale_at is not None:
             day = _shelf_date(stale_at, _server_tz(client))
@@ -1357,9 +1369,16 @@ def cmd_shelf(args: argparse.Namespace) -> int:
     if not items:
         print(f"the shelf is empty · {link}", flush=True)
         return 0
-    for line in _table(_shelf_table_rows(items, _server_tz(client))):
+    # 목록이 시간대와 사용량을 같이 싣는다(P2) — 없으면 status · health 에서 읽는다
+    if isinstance(body, dict) and "display_timezone" in body:
+        tz = _tz_named(body.get("display_timezone"))
+    else:
+        tz = _server_tz(client)
+    for line in _table(_shelf_table_rows(items, tz)):
         print(line, flush=True)
-    summary = h.get("shelf") if isinstance(h.get("shelf"), dict) else {}
+    storage = body.get("storage") if isinstance(body, dict) else None
+    summary = storage if isinstance(storage, dict) else h.get("shelf")
+    summary = summary if isinstance(summary, dict) else {}
     count = f"{len(items)} item" + ("" if len(items) == 1 else "s")
     usage = f"{_fmt_size(summary.get('stored_bytes'))} / {_fmt_size(summary.get('limit_bytes'))}"
     print(f"{count} · {usage} · {link}", flush=True)
@@ -1385,7 +1404,9 @@ def cmd_shelf_rm(args: argparse.Namespace) -> int:
             print(f"#{job} was already deleted" + (f" on {day}" if day != DASH else ""), flush=True)
             return 0
         if e.status == 409:
-            if e.body.get("state") in ("pending", "copying"):
+            # 서버는 이유 코드로 가른다: `shelf_item_copying`(보관 중) · `shelf_item_busy`(zip)
+            copying = e.body.get("reason_code") == "shelf_item_copying"
+            if copying or e.body.get("state") in ("pending", "copying"):
                 _err(f"shelf rm: #{job} is still being copied — try again when it is on the shelf")
             else:
                 _err(f"shelf rm: #{job} is being downloaded right now — try again in a minute")
