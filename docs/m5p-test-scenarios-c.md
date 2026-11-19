@@ -36,9 +36,7 @@
 테스트를 돌리는 파이썬으로 만든다.
 
 ```python
-PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-)
+PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 MAKE = (
     "import io,tarfile,base64,pathlib;"
     "p=pathlib.Path('out');p.mkdir(exist_ok=True);"
@@ -50,16 +48,20 @@ MAKE = (
     "(p/'run.log').write_text('ok\\n')"
 )
 
+
 def py(name, code, **extra):
     return {"name": name, "argv": [sys.executable, "-c", code], "timeout_seconds": 60, **extra}
 
+
 SHELF_PRESETS = [
     *PRESETS,
-    py("shelfgold", MAKE, artifacts=["out/*"], keep=True),          # 늘 보관
-    py("shelfopt", MAKE, artifacts=["out/*"]),                      # --keep · rcm keep 으로만
+    py("shelfgold", MAKE, artifacts=["out/*"], keep=True),  # 늘 보관
+    py("shelfopt", MAKE, artifacts=["out/*"]),  # --keep · rcm keep 으로만
     py("shelfslow", "import time;time.sleep(20);" + MAKE, artifacts=["out/*"]),
-    py("shelfonfail", MAKE, artifacts=["out/*"], artifacts_on="failure", keep=True),  # 초록이면 안 모음
-    sh("plain", "echo nothing to collect; exit 0"),                 # 글롭 없음
+    py(
+        "shelfonfail", MAKE, artifacts=["out/*"], artifacts_on="failure", keep=True
+    ),  # 초록이면 안 모음
+    sh("plain", "echo nothing to collect; exit 0"),  # 글롭 없음
 ]
 ```
 
