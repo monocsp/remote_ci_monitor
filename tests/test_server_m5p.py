@@ -30,6 +30,7 @@ import pytest
 from remote_ci_monitor.config import parse_preset
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import CANCELLED, FAILED, SUCCEEDED
+from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.store import Store
 from shelfkit import (
     DAY,
@@ -98,8 +99,8 @@ def gold(srv):
 class Gate:
     """copier 를 붙잡는다 — §6 에 고정된 이름(`claim_shelf_item` · `finish_shelf_item`)을 감싼다.
 
-    `target` 을 정하면 **그 잡의 보관 행이 생긴 뒤**의 호출에만 걸린다(기동 직후의 빈 claim 을
-    붙잡지 않는다). 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
+    `claim_shelf_item` 은 언제나 붙잡고, `finish_shelf_item` 은 `target` 을 정하면 그 잡의
+    호출에만 걸린다. 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
     """
 
     def __init__(self, monkeypatch: Any, name: str = "claim_shelf_item"):
@@ -110,11 +111,12 @@ class Gate:
         gate = self
 
         def wanted(store: Store, args: tuple[Any, ...]) -> bool:
-            if gate.target is None:
+            # claim 은 언제나 붙잡는다. 「대상 행이 pending 인가」를 트랜잭션 밖에서 보면, 행이
+            # 생기기 직전에 시작된 claim 이 그 검사를 지나친 뒤 트랜잭션 안에서 막 생긴 행을 집어
+            # 버려 문이 영영 안 열린다(v0.7.0 릴리스 CI 에서 E58 이 그렇게 빨갰다). 기동 직후의
+            # 빈 claim 을 붙잡아도 괜찮다 — 풀어 주면 그 claim 이 대상 행을 집는다.
+            if gate.target is None or name == "claim_shelf_item":
                 return True
-            if name == "claim_shelf_item":
-                item = store.shelf_item(gate.target)
-                return item is not None and item.state == "pending"
             return bool(args) and args[0] == gate.target
 
         def gated(store: Store, *args: Any, **kwargs: Any) -> Any:
@@ -973,20 +975,28 @@ def test_g34_head_on_a_zip_holds_nothing(srv, gold):
     assert srv.req("DELETE", f"/shelf/{gold}", token="admin")[0] == 200
 
 
-def test_e58_files_are_409_while_copying(srv, monkeypatch):
-    gate = Gate(monkeypatch)
-    jid = finished_linux_job(srv)
-    gate.target = jid
-    publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
-    srv.app._on_job_change(jid)
-    assert gate.entered.wait(10)
-    assert srv.store.shelf_item(jid).state == "pending"
-    status, _h, html = page(srv, f"/shelf/{jid}/")
+def test_e58_files_are_409_while_copying(idle):
+    # copier 를 띄우지 않은 서버로 본다 — 문(Gate)으로 copier 를 붙잡으면 문을 달기 전에 시작된
+    # claim 이 막 생긴 행을 집어 가는 경주가 남는다(v0.7.0 릴리스 CI 에서 세 판이 그렇게 빨갰다).
+    jid = finished_linux_job(idle)
+    publish_payload(idle, jid, tar_bytes([("out/a.txt", b"a")]))
+    assert idle.store.shelf_item(jid).state == "pending"
+    status, _h, html = page(idle, f"/shelf/{jid}/")
     assert status == 200 and "보관하는 중".encode() in html
-    assert page(srv, f"/shelf/{jid}/f/out/a.txt")[0] == 409
-    assert page(srv, f"/shelf/{jid}.zip")[0] == 409
-    gate.release.set()
-    wait_shelf(srv, jid)
+    assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 409
+    assert page(idle, f"/shelf/{jid}.zip")[0] == 409
+    # 서버가 띄우는 것과 같은 copier 를 한 번 돌리면 보관이 끝나고 파일이 열린다
+    app = idle.app
+    ShelfCopier(
+        app.store,
+        app.config,
+        now_fn=app.now_fn,
+        log=app.log,
+        on_change=app._on_shelf_change,
+        on_purged=app._shelf_purged,
+    ).drain()
+    assert idle.store.shelf_item(jid).state == "active"
+    assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 200
 
 
 def test_e58_files_are_409_in_the_copying_state(srv, monkeypatch):
