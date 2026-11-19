@@ -663,7 +663,7 @@ _MALFORMED = object()
 _TIMEOUT = object()
 
 
-def _bounded(fn: Callable[[], Any], seconds: float) -> Any:
+def _bounded(fn: Callable[[], Any], seconds: float, name: str = "rcm-follow-health") -> Any:
     """`fn` 을 도우미 스레드에서 돌리고 `seconds` 안에 안 끝나면 `_TIMEOUT`. 조금씩 흘리는 서버도
     전체 제한을 넘기지 못한다. 기다리는 동안의 Ctrl-C 는 그대로 올라간다."""
     box: dict[str, Any] = {}
@@ -674,7 +674,7 @@ def _bounded(fn: Callable[[], Any], seconds: float) -> Any:
         except BaseException as e:  # noqa: BLE001 — 부른 쪽에서 다시 던진다
             box["error"] = e
 
-    t = threading.Thread(target=run, name="rcm-follow-health", daemon=True)
+    t = threading.Thread(target=run, name=name, daemon=True)
     t.start()
     t.join(seconds)
     if t.is_alive():
@@ -855,7 +855,18 @@ def _unsafe(path: Path) -> str | None:
 
 
 def check_cache_safe(root: Path) -> None:
-    """캐시 뿌리와 `clients/` — 없으면 0700 으로 만들고, 있으면 권한을 본다."""
+    """캐시 뿌리와 `clients/` — 없으면 0700 으로 만들고, 있으면 권한을 본다.
+
+    뿌리의 부모도 본다. 남이 쓸 수 있고 sticky 가 아니면 남이 뿌리를 지우고 자기 폴더로 바꿔칠 수
+    있다. 그룹 쓰기는 받는다 — 사용자마다 자기 그룹을 두는 Linux(umask 002)에서 `~/.cache` 가
+    0775 다."""
+    parent = Path(os.path.realpath(root)).parent
+    try:
+        st = os.stat(parent)
+    except OSError:
+        st = None
+    if st is not None and st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX:
+        raise FollowError("cache_unsafe", f"{parent} is writable by others")
     for d in (root, root / "clients"):
         try:
             if not os.path.isdir(d):
@@ -1014,11 +1025,23 @@ def python_ok(requires: str | None, python: Sequence[int]) -> bool:
 
 
 def _download(url: str, token: str | None, dest: Path, info: ServerInfo, opener: Any) -> None:
-    """흘려 받으며 sha256 을 계산한다. 선언한 크기를 넘으면 끊는다. 전체 60초."""
+    """받기 전체(연결 · 응답 머리 · 본문)에 `FETCH_TOTAL_SECONDS` 를 건다. 소켓 제한은 동작마다라
+    머리 줄을 조금씩 흘리는 서버는 그것으로 끊기지 않는다 — 도우미 스레드에서 받고 시간이 넘으면
+    `unreachable` 이다. 남은 스레드는 임시 폴더와 함께 버려진다(#226 격리 검증 D1)."""
+    got = _bounded(
+        lambda: _download_body(url, token, dest, info, opener),
+        FETCH_TOTAL_SECONDS,
+        "rcm-follow-fetch",
+    )
+    if got is _TIMEOUT:
+        raise FollowError("unreachable")
+
+
+def _download_body(url: str, token: str | None, dest: Path, info: ServerInfo, opener: Any) -> None:
+    """흘려 받으며 sha256 을 계산한다. 선언한 크기를 넘으면 끊는다."""
     assert info.bytes is not None and info.sha256 is not None
     req = urllib.request.Request(url, headers=_headers(token, "application/zip"))
     op = opener or no_redirect_opener()
-    deadline = time.monotonic() + FETCH_TOTAL_SECONDS
     try:
         resp = op.open(req, timeout=FETCH_SOCKET_SECONDS)
     except urllib.error.HTTPError as e:
@@ -1040,8 +1063,6 @@ def _download(url: str, token: str | None, dest: Path, info: ServerInfo, opener:
             raise FollowError("unpack", e.strerror or str(e)) from e
         with fh:
             while True:
-                if time.monotonic() > deadline:
-                    raise FollowError("unreachable")
                 try:
                     reader = getattr(resp, "read1", None) or resp.read
                     chunk = reader(65536)
@@ -1201,15 +1222,17 @@ def fetch(
             won = True
         except OSError:
             won = False  # 같은 것을 동시에 받은 다른 프로세스가 먼저 옮겼다
-        mark = _read_marker(target)
-        if mark is None or mark[:2] != (info.version, info.sha256):
+        # 진 쪽도 고를 때와 같은 검사를 거친다 — 그 이름에 남이 둔 링크 · 0777 폴더 · `.bad` 폴더의
+        # 코드를 실행하지 않는다(#226 격리 검증 D2)
+        entry = _entry_at(target, include_bad=False)
+        if entry is None or (entry.version, entry.sha256) != (info.version, info.sha256):
             raise FollowError("unpack", f"{target} holds another client")
         if won:
             try:
                 prune(root, keep=KEEP_VERSIONS, protect=target)
             except OSError:
                 pass
-        return CacheEntry(info.version, info.sha256, target, mark[2])
+        return entry
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1243,8 +1266,9 @@ def plan(
         if hit is not None:
             return Plan("exec_cached", x, hit, None)
         if reachable and info is not None and info.version == x and info.sha256:
-            if any(e.bad and e.sha256 == info.sha256 for e in cached):
-                return Plan("stay", x, None, "cache_broken")
+            broken = next((e for e in cached if e.bad and e.sha256 == info.sha256), None)
+            if broken is not None:
+                return Plan("stay", x, broken, "cache_broken")
             return Plan("fetch", x, None, None)
         return Plan("stay", x, None, "pinned_unavailable")
     if info is None:
@@ -1266,8 +1290,10 @@ def plan(
         return Plan("exec_cached", target, hit, None)
     if not reachable:
         return Plan("stay", target, None, "unreachable")
-    if any(e.bad and e.sha256 == info.sha256 for e in cached):
-        return Plan("stay", target, None, "cache_broken")
+    broken = next((e for e in cached if e.bad and e.sha256 == info.sha256), None)
+    if broken is not None:
+        # 고칠 폴더를 경고 다음 줄에서 알려 줄 수 있게 그 항목을 싣는다
+        return Plan("stay", target, broken, "cache_broken")
     return Plan("fetch", target, None, None)
 
 
@@ -1400,7 +1426,12 @@ def maybe_follow(
                 detail = info.wheel_error or "unknown"
             elif p.warn == "cache_broken":
                 detail = p.target or ""
-            return _warn(state, p.warn, detail, out)
+            _warn(state, p.warn, detail, out)
+            if p.warn == "cache_broken" and p.entry is not None:
+                # 그 폴더를 지우면 다음 명령이 다시 받는다 — 사람이 할 일을 한 줄로
+                out.write(f"rcm: remove {p.entry.path} to fetch it again\n")
+                out.flush()
+            return state
         check_cache_safe(root)
         if p.action == "exec_cached":
             assert p.entry is not None

@@ -466,9 +466,10 @@ def _upgrade_hint(server: str, h: dict[str, Any]) -> str:
     """올리는 방법 한 토막. 서버가 wheel 경로를 주면 그 `pip install`, 아니면 없다고 말한다 —
     있지도 않은 URL 을 지어내지 않는다(옛 서버는 `/client/` 가 없고, 조립 실패면 503 이다)."""
     cw = h.get("client_wheel") or {}
-    if cw.get("path"):
-        return f"pip install {server}{cw['path']}"
-    reason = h.get("client_wheel_error") or "server too old to serve one"
+    if isinstance(cw, dict) and cw.get("path"):
+        # 서버가 보낸 문자열 — 제어 문자를 지운다(M5q §14.5). 경로는 64자로 자르지 않는다
+        return f"pip install {server}{follow.clean(cw['path'], 512)}"
+    reason = follow.clean(h.get("client_wheel_error") or "server too old to serve one")
     return f"no client wheel from this server ({reason})"
 
 
@@ -520,9 +521,11 @@ def _client_row(
     목록으로 부른 `main(argv)` 는 따라가지 않으니 None 이고 오늘과 같은 글자다. 「same as
     server」는 문자열이 같을 때만이다 — 크기만 같으면(`0.7` 과 `0.7.0`) `different build`.
     """
-    server_v = h.get("version")
-    if not server_v:
+    raw = h.get("version")
+    if not raw:
         return None
+    # 서버가 보낸 문자열은 제어 문자를 지우고 64자로 자른 뒤에 보인다(M5q §14.5)
+    server_v = follow.clean(raw)
     mine, theirs = _version_key(__version__), _version_key(server_v)
     tail, hint_ok = _follow_tail(state)
     t = f" · {tail}" if tail else ""
@@ -534,7 +537,7 @@ def _client_row(
     if floor and mine < _version_key(floor):
         why = "older" if mine < theirs else f"below min client v{floor}"
         return ("client", False, f"v{__version__} · server v{server_v} · {why}{t}{hint()}")
-    if str(server_v) == __version__:
+    if str(raw) == __version__:
         return ("client", True, f"v{__version__} · same as server{t}")
     if mine == theirs:
         return ("client", None, f"v{__version__} · server v{server_v} · different build{t}")
@@ -3705,7 +3708,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 (
                     "server",
                     bool(h.get("ok")),
-                    f"{client.server} · v{h.get('version')}{found_tag}{unwell}",
+                    f"{client.server} · v{follow.clean(h.get('version'))}{found_tag}{unwell}",
                 )
             )
             client_row = _client_row(client, h, follow.current_state())

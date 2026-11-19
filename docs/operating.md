@@ -295,7 +295,8 @@ A session machine runs the server's version of `rcm`. Before a command that talk
 `rcm` asks the server which version it runs. When the two differ, it downloads the wheel the
 server hands out, checks its sha256, unpacks it under `~/.cache/rcm/clients/` and starts itself
 again from there. It is the same Python and the same process (`exec`), so the exit code, signals
-and the JSON on stdout are the command's own. Upgrading the server is enough: each session
+and the JSON on stdout are the command's own; `ps` shows the followed process as
+`python -P -c …` followed by your arguments. Upgrading the server is enough: each session
 follows on its next command, upward or downward. The first download prints one line on stderr:
 
 ```
@@ -366,9 +367,9 @@ rcm: not following http://macmini.local:8787: cannot reach the server — runnin
 | `cannot unpack: …` | a full disk, permissions, a broken zip, or an entry outside `remote_ci_monitor/` and its `.dist-info` |
 | `the wheel says v…` | the unpacked `__version__` is not the server's |
 | `needs Python …` | the wheel's `Requires-Python` is above this interpreter, or not a plain `>=X.Y` |
-| `… is writable by others` · `… belongs to another user` | the cache folder is not yours alone |
+| `… is writable by others` · `… belongs to another user` | the cache folder is not yours alone, or its parent is writable by others without the sticky bit |
 | `v0.8.0 is not installed or cached and the server runs v0.8.1` | a pinned version that cannot be found |
-| `the cached client v… did not load before` | that cached copy failed to start once and is not used again |
+| `the cached client v… did not load before` | that cached copy failed to start once and is not used again; the next line, `rcm: remove <folder> to fetch it again`, names the folder to delete |
 | `cannot start the cached client: …` | the `exec` itself failed |
 | `not supported on this platform` | not macOS or Linux |
 
@@ -416,7 +417,8 @@ server address, and `clients/<first 16 characters of the sha256>/`: one unpacked
 completed by a single rename, with `.rcm-client.json` naming its version. Right after a download
 it keeps the three most recently used versions and any that a running `rcm` holds, and removes the
 rest. Both folders must belong to you and be writable by no one else; they are created with mode
-0700, and `rcm` refuses to run code from them otherwise. Deleting the folder is always safe: it is
+0700, and `rcm` refuses to run code from them otherwise. So does each unpacked folder, and the
+parent of the cache folder must not be writable by others unless it has the sticky bit. Deleting the folder is always safe: it is
 filled again from the server.
 
 ### Security: the session runs the server's code

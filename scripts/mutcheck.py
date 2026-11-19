@@ -103,8 +103,10 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      걸린 정지를 놓쳐 정지 중에 잡을 집는다 (`store.py`, 2026-11-19 — 배포의 「정지 → 도는 잡 0
      확인 → 재시작」 직후 잡이 시작돼 lost 가 된다)
 
-  M5q A — `m5q-*` 열하나: 받은 wheel 의 sha256 을 안 봄 · editable 기본값 뒤집기 · 따라간 자식이
-     다시 따라감 · 임시 폴더 없이 대상에 바로 풂 · `serve` 가 따라감 · health 의 wheel 경로를 믿음 ·
+  M5q A — `m5q-*` 열다섯(격리 검증이 더한 넷 — 받기 전체 제한 · rename 에 진 쪽의 검사 · 캐시
+     뿌리의 부모 · `rcm check` 의 version 정리 — 을 포함): 받은 wheel 의 sha256 을 안 봄 ·
+     editable 기본값 뒤집기 · 따라간 자식이 다시 따라감 · 임시 폴더 없이 대상에 바로 풂 ·
+     `serve` 가 따라감 · health 의 wheel 경로를 믿음 ·
      서버의 클라이언트 버전 줄을 인증 전에 씀 · 쌍을 안 기억함 · User-Agent 형식을 안 봄 ·
      `rcm version` 둘째 줄을 늘 씀 · `rcm check` 의 꼬리를 버림 (`docs/m5q-workplan.md` §6 ·
      `docs/m5q-test-scenarios-c.md` 「변이」)
@@ -1022,6 +1024,38 @@ MUTANTS = (
         old='    if path != "/client/" + wheel_filename(version):\n',
         new="    if False:\n",
         tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # 받기 전체 제한을 버린다 — 응답 머리를 조금씩 흘리는 서버가 명령을 붙잡는다(#226 D1)
+        name="m5q-follow-fetch-no-deadline",
+        path="src/remote_ci_monitor/follow.py",
+        old='    if got is _TIMEOUT:\n        raise FollowError("unreachable")\n',
+        new="    if False:\n        pass\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # rename 에 진 쪽이 `.bad` 폴더를 받아들인다 — 남이 둔 폴더의 코드가 돈다(#226 D2)
+        name="m5q-follow-race-loser-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old="        entry = _entry_at(target, include_bad=False)\n",
+        new="        entry = _entry_at(target, include_bad=True)\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # 캐시 뿌리의 부모가 남에게 열려 있어도 쓴다 — 남이 뿌리를 바꿔칠 수 있다
+        name="m5q-follow-cache-parent-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old="    if st is not None and st.st_mode & stat.S_IWOTH and",
+        new="    if False and st is not None and st.st_mode & stat.S_IWOTH and",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # `rcm check` 의 client 행이 서버가 보낸 version 을 그대로 찍는다(#226 D3)
+        name="m5q-check-row-unclean-version",
+        path="src/remote_ci_monitor/cli.py",
+        old="    server_v = follow.clean(raw)\n",
+        new="    server_v = raw\n",
+        tests=("tests/test_follow_cli.py",),
     ),
     Mutant(
         # 클라이언트 버전 한 줄을 인증 전에 쓴다 — 토큰 없는 요청이 서버 로그를 채운다(결정 168)

@@ -1326,3 +1326,31 @@ def test_interrupt_while_following_is_130(fx, monkeypatch):
     r = fx.run(["jobs"])
     assert r.code == 130 and "interrupted" in r.err
     assert fx.execs == []
+
+
+def test_cache_broken_says_how_to_recover(fx):
+    # 개선 4: `.bad` 폴더를 다시 고르지 않는다는 경고 뒤에 그 폴더를 지우는 법을 한 줄로
+    srv = fx.serve(NEW)
+    fx.use(srv)
+    entry = fx.cache(srv)
+    (entry.path / ".bad").touch()
+    r = fx.run(["jobs"])
+    assert fx.execs == []
+    assert r.err_lines[:2] == [
+        not_following(srv, f"the cached client v{NEW} did not load before", NEW),
+        f"rcm: remove {entry.path} to fetch it again",
+    ]
+
+
+def test_check_cleans_the_servers_version_string(fx):
+    # D3 (§14.5): 서버가 보낸 version 은 제어 문자를 지우고 64자로 자른 뒤에 찍는다
+    nasty = "9.9.9\x1b[2J\nfake row" + "x" * 80
+    srv = fx.serve(health={"ok": True, "version": nasty, "min_client_version": "0.2.0"})
+    fx.use(srv)
+    r = fx.run(["check"])
+    assert "\x1b" not in r.out and "x" * 70 not in r.out
+    server_row = r.row("server") or ""
+    client_row = r.row("client") or ""
+    assert "9.9.9[2Jfake row" in server_row, r.out
+    assert "9.9.9[2Jfake row" in client_row, r.out
+    assert not any(ln.startswith("fake row") for ln in r.out.splitlines())

@@ -843,3 +843,13 @@ def test_plan_is_pure(monkeypatch):  # §5.1 — 시계 · 파일 · 네트워�
 def test_python_version_text_uses_the_running_interpreter():  # A46 문구의 꼬리
     py = platform.python_version()
     assert follow.reason_text("python", f">=3.99, this is {py}").endswith(py)
+
+
+def test_plan_names_the_broken_entry():
+    # 개선 4: `cache_broken` 은 고칠 폴더를 알려 줄 수 있게 그 항목을 싣는다
+    info = follow.ServerInfo("http://h:1", NEW, "/client/x", SHA_A, 10, None, T)
+    bad = follow.CacheEntry(NEW, SHA_A, Path("/c/clients/aaaa"), T, bad=True)
+    p = follow.plan(
+        follow.Setting("follow", None, "default"), installed=INSTALLED, info=info, cached=[bad]
+    )
+    assert p.action == "stay" and p.warn == "cache_broken" and p.entry == bad

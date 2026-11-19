@@ -857,3 +857,95 @@ def test_fetch_prunes_after_a_win(servers, root):  # A30 · A88 · 결정 163
     entry = do_fetch(srv, root)
     left = {p.name for p in entries(root / "clients")}
     assert entry.path.name in left and len(left) == 3
+
+
+# ── #226 격리 검증이 찾은 것 ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("drip", ["header", "body"])
+def test_fetch_total_deadline_covers_the_head_and_the_body(servers, root, monkeypatch, drip):
+    # §14 A질문18 · D1: 받기 전체 제한은 응답 머리에도 걸린다. 머리 줄이나 본문 바이트를 소켓
+    # 제한보다 짧은 간격으로 흘리는 서버가 받기를 붙잡지 못한다(시험에서는 상수를 줄인다)
+    monkeypatch.setattr(follow, "FETCH_TOTAL_SECONDS", 1.5)
+    srv = servers(NEW, **{f"client_{drip}_drip": 0.3})
+    started = time.monotonic()
+    fetch_fails(srv, root, "unreachable")
+    assert time.monotonic() - started < 4.0
+
+
+def _planted(root: Path, srv, how: str) -> Path:
+    """그 sha 의 폴더 이름에 남이 둔 것 — 0777 폴더, 다른 곳을 가리키는 링크, `.bad` 폴더."""
+    inf = info_of(srv)
+    follow.check_cache_safe(root)
+    elsewhere = root.parent / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "evil.py").write_text("raise SystemExit('planted')\n")
+    marker = {"version": inf.version, "sha256": inf.sha256, "server": srv.key, "fetched_at": T}
+    (elsewhere / ".rcm-client.json").write_text(json.dumps(marker))
+    target = root / "clients" / inf.sha256[:16]
+    if how == "link":
+        target.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        shutil.copytree(elsewhere, target)
+        if how == "open":
+            target.chmod(0o777)
+        else:
+            (target / ".bad").touch()
+    return target
+
+
+@pytest.mark.parametrize("how", ["open", "link", "bad"])
+def test_a_planted_target_is_never_used(servers, root, how):
+    # D2: rename 에 진 쪽도 대상 폴더를 고를 때와 같은 검사(링크 · 소유자 · 그룹/남 쓰기 · `.bad`)를
+    # 거친다. 통과하지 못하면 `unpack`(holds another client)이고 그 폴더로 exec 하지 않는다
+    srv = servers(NEW)
+    target = _planted(root, srv, how)
+    with pytest.raises(follow.FollowError) as e:
+        follow.fetch(srv.key, None, info_of(srv), root=root)
+    assert e.value.code == "unpack" and "holds another client" in e.value.detail
+    assert leftovers(root / "clients") == []
+    assert os.path.lexists(target)  # 남의 것을 지우지도 않는다
+
+
+def test_a_planted_target_does_not_run_through_maybe_follow(servers, root, tmp_path):
+    # D2: 따라가기 전체에서도 exec 이 없다
+    srv = servers(NEW)
+    _planted(root, srv, "open")
+    calls: list = []
+    err = io.StringIO()
+    env = {"XDG_CACHE_HOME": str(root.parent), "HOME": str(tmp_path)}
+    st = follow.maybe_follow(
+        ["jobs"],
+        setting=follow.Setting("follow", None, "default"),
+        server=srv.url,
+        token=None,
+        discovered=False,
+        fresh=True,
+        environ=env,
+        execve=lambda *a: calls.append(a),
+        err=err,
+        installed=INSTALLED,
+    )
+    assert calls == [] and st.warn == "unpack", err.getvalue()
+    assert "holds another client" in err.getvalue()
+
+
+@pytest.mark.parametrize(
+    "mode,ok", [(0o777, False), (0o757, False), (0o1777, True), (0o775, True), (0o755, True)]
+)
+def test_cache_root_parent_must_not_be_writable_by_others(tmp_path, mode, ok):
+    # 개선 3: 캐시 뿌리의 부모를 남이 쓸 수 있고 sticky 가 아니면 뿌리를 바꿔칠 수 있다. 그룹 쓰기는
+    # 받는다 — 사용자마다 자기 그룹을 두는 Linux 의 umask 002 에서 ~/.cache 가 0775 다
+    parent = tmp_path / "cache"
+    parent.mkdir()
+    parent.chmod(mode)
+    try:
+        if ok:
+            follow.check_cache_safe(parent / "rcm")
+        else:
+            with pytest.raises(follow.FollowError) as e:
+                follow.check_cache_safe(parent / "rcm")
+            assert e.value.code == "cache_unsafe"
+            assert os.path.realpath(parent) in e.value.detail
+    finally:
+        parent.chmod(0o755)

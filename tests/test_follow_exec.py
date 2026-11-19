@@ -34,6 +34,7 @@ from follow_helpers import (
     leftovers,
     make_bootloader,
     probe_out,
+    raw_get,
     run_rcm,
 )
 from remote_ci_monitor import follow
@@ -62,6 +63,19 @@ def clients_of(tmp: Path) -> Path:
 
 def root_of(tmp: Path) -> Path:
     return Path(os.path.realpath(tmp / "cache")) / "rcm"
+
+
+def prime(tmp: Path, srv) -> None:
+    """그 서버의 health 기록을 미리 넣는다. 자식은 10분 기록을 쓰고 health 를 부르지 않는다.
+
+    health 의 3초 제한은 부하가 걸린 러너에서 가끔 넘친다. 그러면 자식이 설치본으로 돌아 이
+    파일의 시험이 엉뚱한 이유로 빨개진다. 제한 자체는 `test_follow_cache` 가 잠근다."""
+    doc = srv.health if isinstance(getattr(srv, "health", None), dict) else None
+    if doc is None:
+        doc = json.loads(raw_get(srv.url + "/api/health")[1])
+    key = follow.normalize_server(srv.url)
+    info = follow.parse_health(key, doc, now=time.time())
+    follow.save_record(root_of(tmp), info, server=key, failed_at=None)
 
 
 def probe_wheel(version: str = NEW) -> bytes:
@@ -104,6 +118,7 @@ def test_real_exec_runs_the_servers_version(bootloader, tmp_path, servers):
     srv = VersionedServer(tmp_path, NEW, fake_wheel(NEW))
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url, RCM_TOKEN=srv.tokens["alice"])
+    prime(tmp_path, srv)
     r = run_rcm(bootloader, ["presets"], env)
     assert r.returncode == 0, r.stderr
     assert "ok" in r.stdout
@@ -121,6 +136,7 @@ def test_real_exec_keeps_the_pid(bootloader, tmp_path, servers):
     srv = FakeServer(NEW, probe_wheel())
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     proc = popen(bootloader, ["probe"], env)
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 0, err
@@ -138,6 +154,7 @@ def test_boot_imports_the_cache_not_the_cwd(bootloader, tmp_path, servers):
     (cwd / "remote_ci_monitor").mkdir(parents=True)
     (cwd / "remote_ci_monitor" / "__init__.py").write_text("raise SystemExit(99)\n")
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     r = run_rcm(bootloader, ["probe", "--spawn"], env, cwd=cwd)
     assert r.returncode == 0, r.stderr
     doc = probe_out(r.stdout)
@@ -161,6 +178,7 @@ def test_concurrent_fetch_makes_one_folder(bootloader, tmp_path, servers, n):
     srv = FakeServer(NEW, probe_wheel(), client_barrier=threading.Barrier(n))
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     procs = [popen(bootloader, ["probe"], env) for _ in range(n)]
     outs = [p.communicate(timeout=90) for p in procs]
     assert [p.returncode for p in procs] == [0] * n, [e for _, e in outs]
@@ -255,6 +273,7 @@ def test_following_down_to_a_pre_m5q_build(bootloader, tmp_path, servers):
     conf.mkdir(parents=True)
     (conf / "client-version").write_text("follow\n")
     (conf / "client.toml").write_text(f'server = "{srv.url}"\n')
+    prime(tmp_path, srv)
     r = run_rcm(bootloader, ["jobs"], env)
     assert r.returncode == 0, r.stderr
     doc = probe_out(r.stdout)
@@ -266,6 +285,7 @@ def test_exit_codes_pass_through(bootloader, tmp_path, servers):
     srv = VersionedServer(tmp_path, NEW, fake_wheel(NEW), workers=True)
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url, RCM_TOKEN=srv.tokens["alice"])
+    prime(tmp_path, srv)
     work = tmp_path / "tree"
     work.mkdir()
     (work / "hello.txt").write_text("hi\n")
@@ -281,6 +301,7 @@ def test_sigint_reaches_the_child(bootloader, tmp_path, servers):
     srv = FakeServer(NEW, probe_wheel())
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     proc = popen(bootloader, ["probe", "--sleep", "30"], env)
     doc = probe_out(proc.stdout.readline())
     assert doc["pid"] == proc.pid
@@ -337,6 +358,7 @@ def test_broken_cache_falls_back_and_is_marked(bootloader, tmp_path, servers, da
     srv = VersionedServer(tmp_path, NEW, fake_wheel(NEW))
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     assert run_rcm(bootloader, ["presets"], env).returncode == 0
     (folder,) = entries(clients_of(tmp_path))
     cli_py = folder / "remote_ci_monitor" / "cli.py"
@@ -362,6 +384,7 @@ def test_check_in_a_fallback_says_so(bootloader, tmp_path, servers):
     srv = VersionedServer(tmp_path, NEW, fake_wheel(NEW))
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     assert run_rcm(bootloader, ["presets"], env).returncode == 0
     (folder,) = entries(clients_of(tmp_path))
     (folder / "remote_ci_monitor" / "cli.py").unlink()
@@ -392,6 +415,7 @@ def test_sigint_while_fetching_leaves_nothing(bootloader, tmp_path, servers):
     srv = FakeServer(NEW, probe_wheel(), client_hold=hold)
     servers.append(srv)
     env = child_env(tmp_path, bootloader, RCM_SERVER=srv.url)
+    prime(tmp_path, srv)
     proc = popen(bootloader, ["probe"], env)
     try:
         assert wait_until(lambda: srv.client_count >= 1)

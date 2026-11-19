@@ -199,7 +199,9 @@ class FakeServer:
     `client_status`, `client_delay`, `redirect`(`(상태, Location)` — health 와 `/client/` 둘 다),
     `client_redirect`(`/client/` 만), `client_barrier`(`threading.Barrier`), `require_token`(토큰
     없으면 `/client/` 401), `extra_bytes`(선언보다 더 보낸다), `health_delay`, `drip`(health 를 한
-    바이트씩 이 간격으로 흘린다), `client_hold`(`threading.Event` — 보내기 전에 기다린다).
+    바이트씩 이 간격으로 흘린다), `client_hold`(`threading.Event` — 보내기 전에 기다린다),
+    `client_header_drip` · `client_body_drip`(`/client/` 의 응답 머리 줄이나 본문 바이트를 이
+    간격으로 하나씩 흘린다 — 소켓 동작마다의 제한에는 걸리지 않는 느린 서버).
     """
 
     def __init__(self, version: str | None = None, wheel: bytes | None = None, **opts: Any):
@@ -222,6 +224,8 @@ class FakeServer:
         self.client_hold = opts.pop("client_hold", None)
         self.require_token = opts.pop("require_token", False)
         self.extra_bytes = opts.pop("extra_bytes", 0)
+        self.client_header_drip = opts.pop("client_header_drip", 0.0)
+        self.client_body_drip = opts.pop("client_body_drip", 0.0)
         assert not opts, opts
         self.requests: list[Seen] = []
         self._lock = threading.Lock()
@@ -317,9 +321,30 @@ class FakeServer:
                 self._send(h, status, b'{"error":"no"}', "application/json")
                 return
             data = (self.client_bytes or b"") + b"\0" * self.extra_bytes
+            if self.client_header_drip or self.client_body_drip:
+                self._drip(h, data)
+                return
             self._send(h, 200, data, "application/zip")
             return
         self._send(h, 404, b'{"error":"not found"}', "application/json")
+
+    def _drip(self, h: BaseHTTPRequestHandler, data: bytes) -> None:
+        """응답 머리 줄이나 본문 바이트를 하나씩 흘린다. 끊기면 조용히 그만둔다."""
+        try:
+            h.wfile.write(b"HTTP/1.0 200 OK\r\nContent-Type: application/zip\r\n")
+            h.wfile.write(f"Content-Length: {len(data)}\r\n".encode())
+            if self.client_header_drip:
+                for i in range(1000):
+                    h.wfile.write(f"X-Drip-{i}: x\r\n".encode())
+                    h.wfile.flush()
+                    time.sleep(self.client_header_drip)
+            h.wfile.write(b"\r\n")
+            for i in range(len(data)):
+                h.wfile.write(data[i : i + 1])
+                h.wfile.flush()
+                time.sleep(self.client_body_drip)
+        except OSError:
+            return
 
     def close(self) -> None:
         self.httpd.shutdown()
