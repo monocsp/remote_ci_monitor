@@ -6,6 +6,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5p P1 — `shelf-*` 넷: 보관 항목을 지우기 **전에** deleted 로 표시 · 1시간 쓰기 규칙 제거 · 보관
+     중인 묶음의 ack 를 미루지 않음 · keep 을 켤 때 ready 묶음의 보관 행을 안 세움
+     (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-a.md`)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -131,6 +134,51 @@ class Mutant:
 
 
 MUTANTS = (
+    # ── M5p P1 — 보관함의 규칙 · 저장 · 청소 (docs/m5p-workplan.md §10) ──
+    Mutant(
+        # 행을 먼저 deleted 로 — 지우다 실패하면 폴더는 남았는데 색인은 「지웠다」(결정 134)
+        name="shelf-mark-before-delete",
+        path="src/remote_ci_monitor/janitor.py",
+        old="""        try:
+            remove_under_root(folder, root)
+        except OSError as e:
+            code = f"delete_{_errname(e)}"
+""",
+        new="""        self.store.mark_shelf(
+            job_id, shelf_rules.STATE_DELETED, now, only_from=live, total_bytes=0
+        )
+        try:
+            remove_under_root(folder, root)
+        except OSError as e:
+            code = f"delete_{_errname(e)}"
+""",
+        tests=("tests/test_janitor_m5p.py",),
+    ),
+    Mutant(
+        # 1시간 규칙 제거 — 그림 격자 한 장마다 DB 쓰기가 나간다(§4.3 · 결정 132)
+        name="shelf-touch-every-time",
+        path="src/remote_ci_monitor/core/shelf.py",
+        old="    return float(now) - float(prev_last_used) >= TOUCH_INTERVAL_SECONDS\n",
+        new="    return True\n",
+        tests=("tests/test_shelf_rules.py", "tests/test_store_m5p.py"),
+    ),
+    Mutant(
+        # ack 미루기 제거 — 소유자가 받자마자 ack 하면 보관이 빈손이 된다(결정 130)
+        name="shelf-ack-not-deferred",
+        path="src/remote_ci_monitor/store.py",
+        old="            if decision.purge and self._shelving(conn, job_id):\n",
+        new="            if False:\n",
+        tests=("tests/test_store_m5p.py",),
+    ),
+    Mutant(
+        # keep 을 켤 때 ready 묶음을 안 본다 — 원격 잡의 ready 와 finish 사이에 켠 keep 은 행이
+        # 영영 안 선다(§15.1 · A102 · A103)
+        name="shelf-keep-on-skips-ready-bundle",
+        path="src/remote_ci_monitor/store.py",
+        old="        if _ready_bundle(conn, job_id):\n",
+        new="        if False:\n",
+        tests=("tests/test_store_m5p.py",),
+    ),
     # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
     Mutant(
         # 합류자 이름 검사 제거 — 다른 사람이 기다리는 잡을 내 push 가 죽인다(결정 113)
@@ -583,12 +631,30 @@ MUTANTS = (
                     "INSERT OR IGNORE INTO job_failures(job_id, name, seq) VALUES (?,?,?)",
                     (job_id, name, seq),
                 )
+            # 원격 잡의 보관 행은 묶음이 ready 일 때(잡이 아직 running 일 때) 섰다 — 잡 상태와 끝난
+            # 시각은 위의 `_set_state` 가 같은 트랜잭션에서 채웠다(M5p §15.1).
             if bundle is not None:
-                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+                _upsert_bundle(
+                    conn,
+                    job_id,
+                    bundle,
+                    now=now,
+                    ttl_hours=ttl_hours,
+                    shelf_enabled=self.shelf_enabled,
+                    shelf_available=self.shelf_available,
+                )
             conn.execute("COMMIT")
 """,
         new="""            if bundle is not None:
-                _upsert_bundle(conn, job_id, bundle, now=now, ttl_hours=ttl_hours)
+                _upsert_bundle(
+                    conn,
+                    job_id,
+                    bundle,
+                    now=now,
+                    ttl_hours=ttl_hours,
+                    shelf_enabled=self.shelf_enabled,
+                    shelf_available=self.shelf_available,
+                )
             conn.execute("COMMIT")
             for seq, name in enumerate(fail_names, start=1):
                 conn.execute(

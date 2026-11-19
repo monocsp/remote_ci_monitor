@@ -233,11 +233,11 @@ M5N_COLUMNS = [
 
 def test_this_build_keeps_the_link_columns_right_before_the_v23_columns(tmp_path):
     """v22 의 두 열 뒤에 v23(M5n)의 일곱 열이 붙는다 — 마이그레이션이 뒤에 붙이므로 새 DB 도 같은
-    차례여야 한다(두 DB 의 열 차례가 같아야 한다)."""
-    assert DB_VERSION == 23
+    차례여야 한다(두 DB 의 열 차례가 같아야 한다). v24(M5p)의 `keep` 은 그 뒤 맨 끝이다."""
+    assert DB_VERSION == 24
     path = tmp_path / "data" / "rcm.sqlite3"
     Store(path).close()
-    assert jobs_columns(path)[-9:] == ["link_url", "link_label", *M5N_COLUMNS]
+    assert jobs_columns(path)[-10:-1] == ["link_url", "link_label", *M5N_COLUMNS]
 
 
 def test_the_link_round_trips_through_the_store(tmp_path):
