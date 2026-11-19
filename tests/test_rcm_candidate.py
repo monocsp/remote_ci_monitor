@@ -440,6 +440,8 @@ def test_pasting_into_server_toml_also_checks_the_included_files(tmp_path):
     )  # fmt: skip
     assert r.returncode == 1
     assert "preset 'release-plan' is defined in both server.toml and team.toml" in r.stderr
+    # 이름 맞는 들인 파일이 없어 server.toml 에 붙였다는 것과 --into 를 마지막 줄로 알린다
+    assert "--into" in r.stderr.strip().splitlines()[-1]
 
 
 def test_include_after_the_first_section_fails_like_rcm(tmp_path):
@@ -482,6 +484,43 @@ def test_two_includes_with_the_presets_basename_need_into(tmp_path):
     assert "--into" in r.stderr
 
 
+def test_out_never_overwrites_a_file_this_run_did_not_make(tmp_path):
+    """--server 는 사본, --out 은 운영 폴더 — 경로로는 운영인 줄 모른다. 이미 있는 파일이면 거절."""
+    live, server, _ = _best(tmp_path)
+    copy = tmp_path / "copy/server.toml"
+    copy.parent.mkdir()
+    copy.write_text(
+        server.read_text()
+        .replace('"sub/other.toml"', f'"{live / "sub/other.toml"}"')
+        .replace('"presets.release.toml"', f'"{live / "presets.release.toml"}"')
+    )
+    before = {p: p.read_bytes() for p in live.rglob("*") if p.is_file()}
+    r = run(
+        "--server", str(copy), "--repo", "app", "--profile", "-",
+        "--presets", str(FIX / "presets.release.toml"), "--out", str(live),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "--out" in r.stderr and "already" in r.stderr
+    assert {p: p.read_bytes() for p in live.rglob("*") if p.is_file()} == before
+
+
+def test_out_refuses_a_symlink_where_a_candidate_file_goes(tmp_path):
+    _, server, _ = _best(tmp_path)
+    out_dir = tmp_path / "cand"
+    out_dir.mkdir()
+    victim = tmp_path / "victim.toml"
+    (out_dir / "presets.release.toml").symlink_to(victim)  # 매달린 링크 — 따라가면 victim 이 생긴다
+    r = run(
+        "--server", str(server), "--repo", "app", "--profile", "-",
+        "--presets", str(FIX / "presets.release.toml"), "--out", str(out_dir),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert "symlink" in r.stderr
+    assert not victim.exists() and not (out_dir / "server.toml").exists()
+
+
 @pytest.mark.parametrize("bad", ["file", "toml", "live"])
 def test_out_with_include_is_a_folder_and_never_the_live_one(tmp_path, bad):
     live, server, _ = _best(tmp_path)
@@ -517,6 +556,18 @@ def test_check_refuses_an_rcm_older_than_0_6_0_when_include_is_used(tmp_path, ve
         cwd=tmp_path, env={"RCM": str(rcm)},
     )  # fmt: skip
     calls = (tmp_path / "calls.txt").read_text().splitlines()
+    merged = subprocess.run(
+        [sys.executable, str(TEMPLATE), "--server", str(server), "--repo", "app",
+         "--profile", str(FIX / "profile.release.toml"),
+         "--presets", str(FIX / "presets.release.toml"), "--check"],
+        cwd=tmp_path, env={**os.environ, "RCM": str(rcm)},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+    ).stdout.splitlines()  # fmt: skip
+    # 한 파이프로 합쳐도 순서가 맞다: 후보 경로 → rcm binary → (검사 행) → stderr 의 안내
+    i_bin = next(i for i, x in enumerate(merged) if x.startswith("rcm binary:"))
+    assert merged[0].endswith("server.toml") and i_bin < len(merged) - 1
+    tail = "does not know include" if gated else "rcm reload"
+    assert next(i for i, x in enumerate(merged) if tail in x) > i_bin
     if gated:
         assert r.returncode == 1
         assert "does not know include" in r.stderr and "0.6.0" in r.stderr
@@ -546,4 +597,154 @@ def test_rewrite_include_keeps_the_rest_of_the_file_and_a_multiline_array(tmp_pa
     )
     out = c.rewrite_include(text, ["/abs/a.toml", "b/c.toml"])
     assert tomllib.loads(out)["include"] == ["/abs/a.toml", "b/c.toml"]
-    assert out.startswith("# head\n") and out.endswith("]  # tail comment\n\n[server]\nport = 1\n")
+    # 배열 안 주석 · 줄바꿈 · 끝 쉼표 · 바뀌지 않은 항목의 따옴표까지 그대로, 바뀐 문자열만 갈린다
+    assert out == (
+        "# head\ninclude = [\n  \"/abs/a.toml\",  # first\n  'b/c.toml',\n]  # tail comment\n\n"
+        "[server]\nport = 1\n"
+    )
+
+
+@pytest.mark.parametrize("key", ['"include"', "'include'"])
+def test_a_quoted_include_key_is_read_and_rewritten(tmp_path, key):
+    write(tmp_path / "live/presets.release.toml", preset("gate"))
+    write(tmp_path / "live/team.toml", preset("team"))
+    server = write(
+        tmp_path / "live/server.toml",
+        f'{key} = ["presets.release.toml", "team.toml"]\n\n[server]\ndata_dir = "{tmp_path}"\n'
+        '\n[[repos]]\nname = "app"\nurl = "git@example.invalid:o/app.git"\n',
+    )
+    out_dir = tmp_path / "cand"
+    r = run(
+        "--server", str(server), "--repo", "app", "--profile", "-",
+        "--presets", str(FIX / "presets.release.toml"), "--out", str(out_dir),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    raw = tomllib.loads((out_dir / "server.toml").read_text())
+    assert raw["include"] == ["presets.release.toml", str(tmp_path / "live/team.toml")]
+    assert (out_dir / "server.toml").read_text().startswith(key)
+    load(out_dir / "server.toml")
+
+
+def test_include_comments_survive_so_the_whole_file_may_be_copied(tmp_path):
+    """주석이 든 여러 줄 include 도 바뀐 항목만 갈리므로 server.toml 통째 복사를 권해도 된다."""
+    write(tmp_path / "live/presets.release.toml", preset("gate"))
+    write(tmp_path / "live/team.toml", preset("team"))
+    server = live_server(
+        tmp_path, '[\n  "presets.release.toml",  # ours\n  "team.toml",  # theirs\n]'
+    )
+    out_dir = tmp_path / "cand"
+    r = run(
+        "--server", str(server), "--repo", "app",
+        "--profile", str(FIX / "profile.release.toml"),
+        "--presets", str(FIX / "presets.release.toml"), "--out", str(out_dir),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    text = (out_dir / "server.toml").read_text()
+    assert "# ours" in text and "# theirs" in text
+    assert f"cp {out_dir / 'server.toml'} {server}" in r.stderr
+
+
+# ── rcm 과 같은 문장 ──────────────────────────────────────────────────────────
+
+
+def test_a_string_include_fails_with_rcms_sentence(tmp_path):
+    server = live_server(tmp_path, '"presets.release.toml"')
+    r = run(
+        "--server", str(server), "--repo", "app", "--profile", "-",
+        "--presets", str(FIX / "presets.release.toml"),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert (
+        f"{server}: include must be a list of file paths — include = ['presets.release.toml']"
+        in r.stderr
+    )
+
+
+def test_a_name_twice_in_one_included_file_fails_with_rcms_sentence(tmp_path):
+    write(tmp_path / "live/presets.release.toml", preset("gate"))
+    write(tmp_path / "live/team.toml", preset("a") + preset("a"))
+    server = live_server(tmp_path, '["presets.release.toml", "team.toml"]')
+    r = run(
+        "--server", str(server), "--repo", "app", "--profile", "-",
+        "--presets", str(FIX / "presets.release.toml"),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert "team.toml: [[presets]] duplicate preset name 'a' (defined twice in this file)" in (
+        r.stderr
+    )
+
+
+# ── Python 3.10 이하(tomllib 없음) ─────────────────────────────────────────────
+
+#: tomllib 를 못 들이게 막고 템플릿을 __main__ 으로 돌린다 — 3.9 의 /usr/bin/python3 흉내
+NO_TOMLLIB = (
+    "import runpy, sys; sys.modules['tomllib'] = None; "
+    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"
+)
+
+
+def run_without_tomllib(*args: str, cwd: Path) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    return subprocess.run(
+        [sys.executable, "-c", NO_TOMLLIB, str(TEMPLATE), *args],
+        cwd=cwd, env=env, capture_output=True, text=True, timeout=120, check=False,
+    )  # fmt: skip
+
+
+def _old_python() -> str | None:
+    """실제 3.10 이하 인터프리터(macOS 기본 /usr/bin/python3 3.9)가 있으면 그 경로."""
+    exe = "/usr/bin/python3"
+    if not os.path.exists(exe):
+        return None
+    r = subprocess.run(
+        [exe, "-c", "import sys; print(sys.version_info < (3, 11))"],
+        capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    return exe if r.stdout.strip() == "True" else None
+
+
+def test_selftest_without_tomllib_skips_the_include_cases(tmp_path):
+    r = run_without_tomllib("--selftest", cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Traceback" not in r.stderr
+    assert "include cases skipped" in r.stdout
+    assert "rcm_candidate selftest ok" in r.stdout
+
+
+@pytest.mark.skipif(_old_python() is None, reason="no Python 3.10 or older at /usr/bin/python3")
+def test_selftest_on_a_real_old_python(tmp_path):
+    r = subprocess.run(
+        [_old_python(), str(TEMPLATE), "--selftest"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "include cases skipped" in r.stdout
+
+
+def test_include_without_tomllib_stops_instead_of_pasting(tmp_path):
+    _, server, _ = _best(tmp_path)
+    out_dir = tmp_path / "cand"
+    r = run_without_tomllib(
+        "--server", str(server), "--repo", "app", "--profile", "-",
+        "--presets", str(FIX / "presets.release.toml"), "--out", str(out_dir),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert "include needs Python 3.11+" in r.stderr
+    assert not out_dir.exists() and r.stdout == ""
+
+
+def test_no_include_without_tomllib_is_still_byte_identical(tmp_path):
+    out = tmp_path / "c.toml"
+    r = run_without_tomllib(
+        "--server", str(FIX / "server.toml"), "--repo", "app",
+        "--profile", str(FIX / "profile.release.toml"),
+        "--presets", str(FIX / "presets.release.toml"), "--out", str(out),
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert out.read_bytes() == (FIX / "golden.full.toml").read_bytes()

@@ -330,12 +330,15 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    **When `server.toml` starts with `include = [...]`** and one included file has the same file
    name as `$presets_file` (or `--into <entry>` names one), the presets are merged into a copy of
    that included file instead (its comments and other presets kept), `server.toml` only gets the
-   profile, and the candidate is a folder holding both (`--out` names the folder; the other
-   include entries become absolute paths so the check reads the same files). A preset name that
+   profile, and the candidate is a folder holding both (`--out` names a new or empty folder — it
+   never overwrites a file; the other include entries become absolute paths so the check reads
+   the same files). Reading `include` needs Python 3.11+; an older `python3` stops and says so. A preset name that
    is also in `server.toml` or in another included file stops it with both file names — move or
    rename one. stdout is still the candidate `server.toml` path; stderr lists the two `cp` lines
    and `rcm reload --dry-run` → `rcm reload`. `--check` refuses an `rcm` older than 0.6.0 there,
-   because it does not know `include`.
+   because it does not know `include`. When no included file has the presets file's name the
+   presets are pasted into `server.toml` as before; if that collides with an included file the
+   error ends with a `--into <entry>` hint.
    Rows that fail only because of the dummy server (`server`, `client`, `token`, a `presets` row
    that cannot reach it) are hidden; `server config` is always shown. Exit is 1 when any shown row
    is `FAIL` **or no `release <repo>` row appears**. Check: exit 0 and the `release <repo>` row is

@@ -15,8 +15,10 @@ of a key bumps that number and is listed here.
   not found`). When `server.toml` starts with `include = [...]` and the presets file has the
   same name as an included file (or `--into <entry>` names one), the helper now merges the
   presets into a copy of that file, keeps `server.toml` for the profile, and writes both to a
-  candidate folder (`--out` names the folder there) with the other include entries as absolute
-  paths, so `--check` reads the same files. A name also defined in `server.toml` or another
+  candidate folder (`--out` names a new or empty folder there; it never overwrites a file) with
+  the other include entries as absolute paths, so `--check` reads the same files. Reading
+  `include` needs Python 3.11 or later; an older `python3` stops with that message instead of
+  pasting. A name also defined in `server.toml` or another
   included file stops it with both file names; `--check` refuses an `rcm` older than 0.6.0; the
   next steps it prints are the two copies and `rcm reload --dry-run` → `rcm reload`. A
   `server.toml` without `include` gets byte-for-byte the same candidate as before. Projects get
