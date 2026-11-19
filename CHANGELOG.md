@@ -22,7 +22,7 @@ of a key bumps that number and is listed here.
   skills without a description in `rcm skills list`, and `rcm skills install` wrote no `SKILL.md`
   and no shell or TOML template (15 files). The wheel now holds the same files as the release wheel,
   with the same executable bits.
-  ([#PR](https://github.com/monocsp/remote_ci_monitor/pull/PR))
+  ([#219](https://github.com/monocsp/remote_ci_monitor/pull/219))
 
 ## [0.6.1] - 2026-11-19
 
