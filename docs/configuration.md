@@ -542,6 +542,151 @@ the TTL so they can fetch it too. Either way it is gone after `artifact_retentio
 Over a limit, **the job still succeeds or fails on its own merits** — only the artifacts are
 dropped, and the reason is on the job (`over_bytes`, `over_files`, `timed_out`, `storage_full`).
 
+## Keeping a job's files: the shelf
+
+A bundle is a pickup point: it is gone 24 hours after it is ready, or the moment its owner fetches
+it. A job you mark is also kept on the server's **shelf**. The server copies the job's artifacts
+into a folder of its own, and anyone on the same network opens them in a browser — a phone, a
+laptop, another Mac — at `http://macmini.local:8787/shelf/412/`. Nothing to install, no token.
+
+```toml
+[[presets]]
+name = "golden-update"
+argv = ["bash", "scripts/golden_update.sh"]
+artifacts = ["build/.golden-update/goldens.tar.gz", "build/.golden-update/manifest.json"]
+keep = true              # always put this preset's jobs on the shelf (default false)
+```
+
+```sh
+rcm run golden-update --keep   # keep this one job (any preset that declares artifacts)
+rcm keep 412                   # keep a job later, while its bundle still exists
+rcm shelf                      # what is on the shelf, with the link
+rcm shelf rm 412               # remove it now (admin token)
+```
+
+`rcm run --keep` ends with the link: `shelf: http://macmini.local:8787/shelf/412/`. It waits up
+to a minute for the copy; if the copy is not done by then the line says `(still copying)` and the
+link works a moment later. The exit code is always the job's own.
+
+**What goes on it.** A preset with `keep = true`, a `--keep` on `rcm run`, or `rcm keep N` later.
+`keep = true` without `artifacts` is a config error (`keep needs artifacts`). With
+`artifacts_on = "failure"` only failed jobs are kept, because a green job collects nothing; that
+is allowed, and `rcm check --config` says so. The keep is frozen when the job is submitted, so a
+reload does not change jobs already in the queue. A submission that joins a running job turns its
+keep on (never off), and a job that supersedes an older one takes over its keep. `rcm run
+--fetch-artifacts` deletes the bundle as soon as the files are written, so a job fetched that way
+cannot be kept afterwards — use `--keep` from the start; with both flags the bundle waits until
+the copy is done.
+
+**What you see.** `/shelf/` lists the shelf in two columns, kept and cleanup pending, with the
+usage on top (`12.3 GB / 53.7 GB`). `/shelf/412/` shows the job (preset, inputs, branch, commit,
+when it finished, who asked), a grid of its images, a file table and *Download as zip*. A `.tar`,
+`.tar.gz` or `.tgz` among the artifacts is also unpacked once into `<name>.d/` next to it, so
+goldens shipped as a tarball show up as pictures. `/shelf/latest/golden-update?branch=dev` goes to
+the newest kept job of that preset and branch — bookmark it. The pages are Korean by default and
+English with `?lang=en`. In the web UI a kept job's recent row shows `shelf ↗`, and the header
+links to the shelf.
+
+**The clock.** Each item has one clock: when it was last used. Opening a kept item's page,
+downloading one of its files or the zip, *Restore*, and `rcm keep N` all count as use. After
+`shelf_stale_days` without use the item moves to **cleanup pending**: the files stay, its page
+shows only the file table, a *Restore* button and the day it will be removed, and opening that
+page does not count as use. After `shelf_delete_days` without use it is deleted. *Restore* or a
+download moves it back and the clock starts again. A deleted item's link answers 410 with the day
+it was removed, for 30 days.
+
+| key | default | meaning |
+|---|---|---|
+| `shelf_dir` | `"<data_dir>/shelf"` | the shelf folder. An absolute path or `~`; it may be on another disk. It may not be `data_dir`, a folder that holds it, or a folder inside `data_dir/artifacts`, `jobs`, `workspaces`, `blobs` or `mirrors` |
+| `shelf_max_bytes` | `53687091200` (50 GiB) | the whole shelf. A keep that would go over it fails with `shelf_full` — nothing already kept is evicted. `0` turns the shelf off: existing items stay readable and follow their clock, new keeps fail with `disabled` |
+| `shelf_stale_days` | `182` | days without use before an item is cleanup pending. At least 1 |
+| `shelf_delete_days` | `365` | days without use before an item is deleted. Must be greater than `shelf_stale_days` |
+
+These four are read when the server starts; change them and restart. Bytes are checked after a
+copy is made, against what it really takes. A keep that would leave less than `min_free_bytes`
+free on the disk fails with `disk_low`. The shelf is not part of `workspace_storage_max_bytes`,
+but when it shares a disk with `data_dir` the floor rule sees the space it uses, so workspaces are
+deleted earlier. Put `shelf_dir` on another disk to keep them apart.
+
+The first time the server makes the folder it writes a `.rcm-shelf` marker in it. If the server
+starts with kept items in its database and no marker in the folder — the other disk is not
+mounted — the shelf goes unavailable instead of writing into the empty mount point: nothing is
+kept or removed, `/shelf/` answers 503 and `rcm check` says `FAIL shelf unavailable
+(shelf_dir_missing)`. A folder in the shelf with no row in the database is never deleted;
+`rcm check --config` counts it as an orphan.
+
+**Who can open it.** Reading the shelf needs no token, on purpose: it holds only the jobs you
+marked, and the point is a link that opens on a phone. Once a job's files are on the shelf,
+anyone on that network, and anyone who reaches this machine over Tailscale, can open them. Do not
+put secrets in artifacts. `read_auth = "basic"` applies to the shelf too: then it asks for the
+same password as the rest of the server. A job's files are served with a sandboxed
+Content-Security-Policy and `nosniff`; only images and plain text open in the browser, everything
+else (`.html`, `.svg` and `.pdf` included) downloads. Removing an item needs an admin token
+(`rcm shelf rm`, or the button in the web UI). *Restore* needs no token, but only from a page of
+the same server.
+
+The shelf answers only when the request's `Host` names this machine: `localhost`, a `.local` or
+`.ts.net` name, a private address (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`100.64.0.0/10` for Tailscale, `127.0.0.0/8`, `fc00::/7`, `::1`), the host of `public_url`, the
+bind address or the server's hostname. Any other `Host` gets 421 — that stops a web page somewhere
+else from reading kept files through DNS rebinding. A request with a valid token skips this check.
+
+**Notifications.** A notification for a kept job carries the link: `RCM_SHELF_URL` for an `argv`
+rule and `shelf_url` at the top of a webhook's JSON, starting with the same address as `RCM_URL`.
+It is there as soon as the job finishes, before the copy is done. A job that is not kept gets an
+empty `RCM_SHELF_URL` and no `shelf_url` key, and so does a kept job whose copy already failed or
+that had nothing to keep.
+
+**Upgrading.** The shelf needs the server at v0.7.0 (database v24). Presets refuse keys they do
+not know, so put `keep = true` in `server.toml` or an `include` file only after the server runs
+v0.7.0 — an older server fails to reload or restart on it. `rcm run --keep` against an older
+server stops before it sends anything (`server does not support --keep (rcm ≥ 0.7.0)`), and
+`rcm keep` and `rcm shelf` say the same.
+
+### Using the shelf from a script
+
+A script that wants a link to leave in a pull request comment submits with `--keep --no-wait` and
+reads two lines. Their wording is fixed:
+
+```console
+$ rcm run app-map-shots --ref dev --keep --no-wait
+submitted job #412 queued · 1st in line · http://macmini.local:8787/#/jobs/412
+shelf: http://macmini.local:8787/shelf/412/ (after the job finishes)
+{"job_id":412,"joined":false,"state":"queued",…,"shelf_url":"http://macmini.local:8787/shelf/412/",…}
+```
+
+The last line on stdout is JSON with `job_id` and `shelf_url`. `rcm wait --job 412` follows it to
+the end. Later, from any computer that reaches the server, `rcm shelf get` downloads the kept files
+again, without a token:
+
+```sh
+rcm shelf get http://macmini.local:8787/shelf/412/ --output build/app_map
+rcm shelf get 412 --output build/app_map --file build/app_map/manifest.json
+rcm shelf get --latest app-map-shots --branch dev --output build/app_map
+```
+
+It checks every file against the sha256 the shelf lists and writes nothing unless all of them
+match, so a half-finished download never lands in `DIR`. A link to another server is fine; your
+token goes only to the server you configured, and a redirect is not followed. It ends with
+`wrote 3 files to build/app_map from http://macmini.local:8787/shelf/412/`. Exit 0 means you have
+the files, 1 means the item is not there (never kept, removed, or its copy failed), 2 a usage
+error or an older server, 3 that the server could not be reached, the copy is still running, or
+what arrived did not match.
+
+Without rcm, the same information is JSON:
+
+```sh
+curl http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev   # the newest item and its files
+curl http://macmini.local:8787/api/shelf/412                               # one item
+```
+
+Each file in it has `path`, `url`, `sha256`, `size`, `type` and, for a file unpacked from a
+tarball, `expanded_from`.
+
+Put `keep = true` on a preset only after the server runs v0.7.0. An older server refuses the key
+on reload and on restart, and so does an older dolomood `check_presets.py`; until then pass
+`--keep` on the command line.
+
 ## Making a failure explain itself
 
 rcm stores everything a job writes to stdout and stderr, uncut. What it cannot do is invent output
@@ -926,11 +1071,12 @@ Git mirrors are never pruned.
   `RCM_SOURCE_DIRTY`, `RCM_SOURCE_REPO` — enough to post a commit status), `RCM_INPUTS` (JSON),
   `RCM_FAILURES` (the names the job reported with `::rcm::fail::` and failed steps, in the order it
   printed them, one per line, at most 20) and `RCM_FAILURE_COUNT` (how many there are in all —
-  `100+` when the job reported more than the ledger keeps; both empty when nothing was named);
+  `100+` when the job reported more than the ledger keeps; both empty when nothing was named),
+  `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
   rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
-  "failures_truncated": false}` with the same 20-name cap. Each (job, rule) fires exactly once,
+  "failures_truncated": false}` with the same 20-name cap, plus `"shelf_url"` for a kept job. Each (job, rule) fires exactly once,
   including jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
 - **Job links** — `RCM_URL`, the `url` in the webhook body and the job URL `rcm run` prints start

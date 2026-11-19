@@ -300,6 +300,7 @@ def render_gc(body: dict[str, Any]) -> str:
         held = before.get("volume_bytes")
         rest = DASH if held is None else _bytes(max(0, held - charged))
         lines.append(f"{line} · {rest} would remain")
+        lines.extend(_gc_shelf_line(body))
         return "\n".join(lines)
     failed = body.get("failed") or []
     deleted = body.get("deleted") or []
@@ -327,7 +328,128 @@ def render_gc(body: dict[str, Any]) -> str:
             codes += f" · {partly} partly deleted"
         line += f" · {len(failed)} failed ({codes})"
     lines.append(line)
+    lines.extend(_gc_shelf_line(body))
     return "\n".join(lines)
+
+
+def _gc_shelf_line(body: dict[str, Any]) -> list[str]:
+    """`rcm gc` 의 보관함 한 줄(M5p §5.4) — 계획만 말한다. `rcm gc` 는 보관함을 건드리지 않는다.
+
+    키가 없으면(옛 서버 · 계획을 못 세운 경우) 줄도 없다 — 0 으로 그리면 「정리할 것이 없다」는
+    거짓말이 된다.
+    """
+    plan = body.get("shelf")
+    if not isinstance(plan, dict):
+        return []
+    stale, gone = plan.get("to_stale"), plan.get("to_delete")
+    if not isinstance(stale, int) or not isinstance(gone, int):
+        return []
+    return [
+        f"shelf: the next sweep would mark {stale} cleanup pending and remove {gone} "
+        "(rcm gc itself does not touch the shelf)"
+    ]
+
+
+# ── 보관함 (M5p §4.8 · §15.6) ────────────────────────────────────────────────
+
+#: `rcm check` 의 보관함 FAIL 문구 — `/api/status.server.shelf_storage.error_code` 마다(§15.6).
+_SHELF_ERRORS = {
+    "shelf_dir_missing": (
+        "unavailable (shelf_dir_missing) — the shelf folder has no .rcm-shelf marker; "
+        "is its disk mounted?"
+    ),
+    "shelf_dir_unwritable": (
+        "cannot write to the shelf folder (shelf_dir_unwritable) — check its owner and permissions"
+    ),
+    "copier_dead": "the copy thread stopped (copier_dead) — restart the server",
+    "copier_stuck": "the copy thread keeps failing (copier_stuck) — see the server log",
+}
+
+
+def _count(items: Mapping[str, Any], key: str) -> int:
+    v = items.get(key)
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
+def shelf_row(doc: Any, *, url: str) -> tuple[str, bool | None, str] | None:
+    """`rcm check` 의 `shelf` 행 — (이름, ok, 설명). 문서가 없으면(옛 서버) 행도 없다.
+
+    FAIL 은 사람이 와야 하는 것(디스크가 안 붙음 · 보관 스레드가 죽음 · 폴더에 못 씀)뿐이다.
+    상한의 90% 를 **넘으면** warn — 상한에 닿으면 새 보관이 거절된다(남의 것은 안 쫓아낸다).
+    꺼진 보관함은 실패가 아니다(`shelf_max_bytes = 0` 은 고른 설정이다). 크기는 `_bytes` 의 십진
+    눈금이라 50 GiB 상한은 `53.7 GB` 로 보인다(§15.6).
+    """
+    if not isinstance(doc, Mapping):
+        return None
+    code = doc.get("error_code")
+    if code:
+        return ("shelf", False, _SHELF_ERRORS.get(str(code), f"the shelf reports {code}"))
+    items = doc.get("items") if isinstance(doc.get("items"), Mapping) else {}
+    active, stale = _count(items, "active"), _count(items, "stale")
+    if doc.get("enabled") is False:
+        kept = active + stale
+        text = "off (shelf_max_bytes = 0)"
+        if kept == 1:
+            text += " · 1 kept item stays until its clock runs out"
+        elif kept:
+            text += f" · {kept} kept items stay until their clock runs out"
+        return ("shelf", True, text)
+    parts = [f"{active} active", f"{stale} stale"]
+    if _count(items, "pending"):
+        parts.append(f"{_count(items, 'pending')} copying")
+    if _count(items, "failed"):
+        parts.append(f"{_count(items, 'failed')} failed")
+    stored, limit = doc.get("stored_bytes"), doc.get("limit_bytes")
+    usage = f"{_bytes(stored)} / {_bytes(limit)}"
+    near = (
+        isinstance(stored, int) and isinstance(limit, int) and limit > 0 and stored * 10 > limit * 9
+    )
+    if near:
+        usage += f" ({stored * 100 // limit}%) · new keeps fail at the limit"
+    parts.extend([usage, url])
+    return ("shelf", None if near else True, " · ".join(parts))
+
+
+#: 보관할 것이 없던(`none`) 이유의 사람 말. 묶음 상태 이름은 `artifacts <상태>` 로 그대로 둔다.
+_SHELF_NONE = {
+    "not_collected_on_success": 'not collected for a green job (artifacts_on = "failure")',
+    "no_artifacts": "the preset declares no artifacts",
+    "empty": "the globs matched no files",
+    "forgotten": "its shelf record is gone",
+}
+
+
+def shelf_none_text(code: Any) -> str:
+    """`shelf: nothing to keep — …` 의 꼬리. 이유가 없으면 그렇다고만 한다(지어내지 않는다)."""
+    if not code:
+        return "no artifacts were kept"
+    return _SHELF_NONE.get(str(code), f"artifacts {code}")
+
+
+def shelf_line(shelf: Any) -> str | None:
+    """`rcm run` · `rcm wait` 의 보관 줄(M5p §4.8 · 결정 143). 보관 객체가 없으면 None.
+
+    보관 중 · 정리 대기는 링크만, 아직 안 끝났으면 링크와 꼬리, 실패는 이유 코드, 보관할 것이
+    없었으면 그 까닭. 종료 코드는 이 줄과 상관없이 잡의 것이다.
+    """
+    if not isinstance(shelf, Mapping):
+        return None
+    state = shelf.get("state")
+    url = shelf.get("url") or DASH
+    reason = shelf.get("reason_code")
+    if state in ("active", "stale"):
+        return f"shelf: {url}"
+    if state in ("pending", "copying"):
+        return f"shelf: {url} (still copying)"
+    if state == "waiting":
+        return f"shelf: {url} (waiting for the artifacts)"
+    if state == "failed":
+        return f"shelf: not kept — {reason or 'unknown'}"
+    if state == "none":
+        return f"shelf: nothing to keep — {shelf_none_text(reason)}"
+    if state == "deleted":
+        return "shelf: removed from the shelf"
+    return None
 
 
 def _load(v: float | None) -> str:

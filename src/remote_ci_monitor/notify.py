@@ -26,13 +26,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from remote_ci_monitor.config import ServerConfig, server_base_url
-from remote_ci_monitor.core.model import Job
+from remote_ci_monitor.core import artifacts as art
+from remote_ci_monitor.core.model import SUCCEEDED, Job
 from remote_ci_monitor.core.notify import (
     NotifyRule,
     failure_lines,
     notify_env,
     rules_for,
     sanitize_text,
+    shelf_url,
 )
 from remote_ci_monitor.core.status import recent_json
 from remote_ci_monitor.events import KIND_JOB_FINISHED, KIND_LAG, KIND_RESET, EventBus
@@ -135,12 +137,19 @@ class Notifier:
         row: dict[str, Any],
         failures: Sequence[str] = (),
         failures_truncated: bool = False,
+        shelf_link: str = "",
     ) -> bool:
         # 프리셋과 같은 통과 변수(PATH · HOME · LANG) 위에 RCM_* — 없으면 `date` 조차 못 찾는
         # 훅 스크립트가 exit 1 로 끝난다(실배치에서 발견). 사용자 문자열은 RCM_* 뿐이다.
         env = {k: os.environ[k] for k in NOTIFY_ENV_PASSTHROUGH if k in os.environ}
         env.update(
-            notify_env(row, rule.name, failures=failures, failures_truncated=failures_truncated)
+            notify_env(
+                row,
+                rule.name,
+                failures=failures,
+                failures_truncated=failures_truncated,
+                shelf_url=shelf_link,
+            )
         )
         tag = f"notify {rule.name} #{row.get('id')}"
         if rule.argv:
@@ -170,13 +179,16 @@ class Notifier:
         if rule.url:
             # 실패 이름은 잡 행 **밖**에 둔다 — `GET /jobs/<id>` 의 `failures[]`(판정이 붙은 객체
             # 목록)와 같은 키로 다른 모양을 싣지 않는다(M5o 결정 119)
-            payload = {
+            payload: dict[str, Any] = {
                 "notify": rule.name,
                 "job": row,
                 "failures": failure_lines(failures),
                 "failure_count": len(failures),
                 "failures_truncated": bool(failures_truncated),
             }
+            # 보관함 링크(M5p 결정 144)는 맨 위 키 — keep 이 아니거나 확정 실패면 키가 없다(§15.6)
+            if shelf_link:
+                payload["shelf_url"] = shelf_link
             body = json.dumps(payload, separators=(",", ":")).encode()
             req = urllib.request.Request(
                 rule.url,
@@ -209,12 +221,13 @@ class Notifier:
         row["summary"] = sanitize_text(row.get("summary"))
         # 잡이 찍은 순서의 대장(M5o 결정 119). 성공 · 취소 잡은 행이 없다
         failures = self.store.failure_names(job.id)
+        link = self._shelf_link(job)
         count = 0
         for rule in matched:
             now = self.now_fn()
             if not self.store.claim_notification(job.id, rule.name, now):
                 continue  # 이미 보냈거나 보내는 중 — 이벤트 중복
-            ok = self._run_rule(rule, row, failures, job.fail_truncated)
+            ok = self._run_rule(rule, row, failures, job.fail_truncated, link)
             self.store.mark_notification(job.id, rule.name, delivered=ok, now=self.now_fn())
             with self._lock:
                 if ok:
@@ -223,6 +236,37 @@ class Notifier:
                     self.failures += 1
             count += 1
         return count
+
+    def _shelf_link(self, job: Job) -> str:
+        """keep 인 잡의 보관함 링크(M5p 결정 144). 보관 행 · 묶음 행 · 프리셋 정책으로 「확정적으로
+        없다」만 가린다(`core.notify.shelf_url`). 읽다 깨지면 정해진 링크를 그대로 싣는다 — 알림은
+        보관 상태 때문에 멈추지 않는다."""
+        if not getattr(job, "keep", False):
+            return ""
+        item_state = bundle_state = None
+        try:
+            item = self.store.shelf_item(job.id)
+            bundle = self.store.get_bundle(job.id)
+            item_state = item.state if item is not None else None
+            bundle_state = bundle.get("state") if bundle is not None else None
+        except Exception as e:  # noqa: BLE001 — 보관 상태를 못 읽어도 알림은 간다
+            self.log(f"notify: shelf state of #{job.id}: {type(e).__name__}")
+        preset = self.config.preset(job.preset)
+        collected = not (
+            preset is not None
+            and (
+                not preset.artifacts
+                or (job.state == SUCCEEDED and preset.artifacts_on == art.COLLECT_FAILURE)
+            )
+        )
+        return shelf_url(
+            self.base_url,
+            job.id,
+            keep=True,
+            item_state=item_state,
+            bundle_state=bundle_state,
+            collected=collected,
+        )
 
     def scan(self) -> int:
         """시작 시: 최근 종료 잡 중 알림 행이 하나도 없는 것을 보낸다."""

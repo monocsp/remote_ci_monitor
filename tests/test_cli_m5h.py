@@ -400,7 +400,15 @@ def held_snapshot(monkeypatch) -> dict[str, Any]:
         return snap
 
     def fake_wait(
-        client, job_id, *, timeout=None, joined=False, use_sse=True, fetch=None, cancel_token=None
+        client,
+        job_id,
+        *,
+        timeout=None,
+        joined=False,
+        use_sse=True,
+        fetch=None,
+        cancel_token=None,
+        shelf_url=None,
     ):
         gc.collect()  # 순환이 없으므로 참조가 하나라도 남아 있으면 살아 있다
         box["alive"] = box["ref"]() is not None

@@ -11,6 +11,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import TERMINAL_STATES
 
 ENV_TEXT_LIMIT = 4096
@@ -99,16 +100,52 @@ def _joined_lines(lines: list[str], limit: int = ENV_TEXT_LIMIT) -> str:
     return "\n".join(kept)
 
 
+#: 묶음이 아직 오는 중인 상태 — 보관 행이 곧 선다(공개 상태 `waiting`, M5p §15.1).
+_BUNDLE_ON_THE_WAY = (art.PENDING, art.COLLECTING, art.UPLOADING)
+#: 보관이 확정 실패인 행 — 링크가 404 · 410 이라 싣지 않는다(§15.6).
+_SHELF_SETTLED_EMPTY = ("failed", "deleted")
+
+
+def shelf_url(
+    base_url: str,
+    job_id: int,
+    *,
+    keep: bool,
+    item_state: str | None,
+    bundle_state: str | None,
+    collected: bool = True,
+) -> str:
+    """알림에 싣는 보관함 링크(M5p 결정 142 · 144). 없으면 빈 문자열.
+
+    keep 인 잡이면 보관이 아직 안 끝났어도 정해진 URL(`<base>/shelf/<id>/`)을 싣는다 — 링크는 잡
+    번호로 정해지고, 훅이 도는 동안 보관이 끝난다. 다만 알림 시점에 이미 **확정적으로 없는** 경우는
+    빈 값이다(§15.6): 보관 행이 `failed` · `deleted`, 또는 행이 없는데 묶음이 종결이면서 ready 가
+    아니거나(`none`), 정책상 모으지 않은 잡(`collected=False` — `artifacts_on = "failure"` 인 성공).
+    앞부분은 잡 링크(`RCM_URL`)와 같은 `base_url` 이다(결정 120 · 142).
+    """
+    if not keep or item_state in _SHELF_SETTLED_EMPTY:
+        return ""
+    if item_state is None:
+        if bundle_state is None and not collected:
+            return ""
+        if bundle_state is not None and bundle_state != art.READY:
+            if bundle_state not in _BUNDLE_ON_THE_WAY:
+                return ""
+    return f"{base_url.rstrip('/')}/shelf/{int(job_id)}/"
+
+
 def notify_env(
     job_row: dict[str, Any],
     rule_name: str,
     *,
     failures: Sequence[str] = (),
     failures_truncated: bool = False,
+    shelf_url: str = "",
 ) -> dict[str, str]:
     """알림 argv 에 줄 env. 값은 전부 문자열, 없는 값은 빈 문자열.
 
-    `failures` 는 그 잡의 실패 이름 대장(`job_failures`, 잡이 찍은 순서 — M5o 결정 119)."""
+    `failures` 는 그 잡의 실패 이름 대장(`job_failures`, 잡이 찍은 순서 — M5o 결정 119).
+    `shelf_url` 은 keep 인 잡의 보관함 링크(`shelf_url()` — 아니면 빈 값, M5p 결정 144)."""
     requester = job_row.get("requester") or {}
     if isinstance(requester, dict):
         requester_label = requester.get("label") or requester.get("name") or ""
@@ -145,4 +182,6 @@ def notify_env(
         # 실패 이름(M5o 결정 119): 줄바꿈으로 묶어 최대 20개, 수는 전부(잘렸으면 `N+`)
         "RCM_FAILURES": _joined_lines(failure_lines(failures)),
         "RCM_FAILURE_COUNT": failure_count(failures, failures_truncated),
+        # 보관함(M5p 결정 144): keep 인 잡의 링크. 키는 늘 있고 keep 이 아니면 빈 값이다
+        "RCM_SHELF_URL": sanitize_text(shelf_url),
     }

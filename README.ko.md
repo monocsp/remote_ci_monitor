@@ -175,13 +175,15 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 
 | 명령 | 무엇을 보여 주나 |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-supersede` 는 프리셋이 치우는 같은 브랜치의 내 옛 작업을 이번엔 남겨 두기([옛 작업 치우기](docs/configuration.md#superseding-older-jobs-of-the-same-branch)), `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-supersede` 는 프리셋이 치우는 같은 브랜치의 내 옛 작업을 이번엔 남겨 두기([옛 작업 치우기](docs/configuration.md#superseding-older-jobs-of-the-same-branch)), `--keep` 은 작업의 결과 파일을 [보관함](docs/configuration.md#keeping-a-jobs-files-the-shelf)에 넣고 같은 네트워크의 브라우저가 여는 링크를 찍기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 작업 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 작업은 대기 대신 상태와 경과 |
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
 | `rcm jobs [--mine] [--state S] [--pool NAME] [--json]` | 대기 · 실행 · 최근 작업. `--mine` 은 토큰이 필요하고 합류한 작업도 포함한다 |
 | `rcm logs N [--follow]` | 작업 로그(내 작업 · 내가 합류한 작업, 관리자 토큰이면 아무 작업) |
 | `rcm artifacts N [--fetch --output DIR] [--force] [--resume]` | 작업이 만든 파일을 보고, 받는다. `rcm run --fetch-artifacts` 는 제출한 트리로 한 번에 가져온다 |
+| `rcm keep N [--json]` | 묶음이 남아 있는 작업을 [보관함](docs/configuration.md#keeping-a-jobs-files-the-shelf)에 넣고 링크를 찍는다(도는 작업은 끝나면 들어간다) |
+| `rcm shelf [--state active\|stale\|all] [--preset P] [--json]` · `rcm shelf get N\|URL --output DIR` · `rcm shelf rm N` | 보관함 목록과 각 항목이 정리 대기로 넘어가는 날. `get` 은 보관한 파일을 어느 컴퓨터에서든 토큰 없이 다시 받는다(`--latest PRESET`, `--file PATH`). `rm` 은 그 자리에서 지운다(관리자) |
 | `rcm presets [--json]` | 서버가 제공하는 프리셋과 입력 |
 | `rcm discover [--json] [--timeout S]` | 이 네트워크의 rcm 서버들(mDNS). 발견으로 정해지면 `rcm check` 가 `(found on this network)` 를 붙인다 |
 | `rcm machines [--json] [--machine ID]` | 잡을 돌리는 머신 전부: 호스트 · 풀 · 레인 · 환경 지문(`xcode 27.2 · flutter 3.47.8`) · 돌릴 수 있는 프리셋 수와 나머지의 사유. `--machine` 은 한 머신의 프리셋별 판정과 점검([머신](docs/configuration.md#which-machine-runs-a-job)) |

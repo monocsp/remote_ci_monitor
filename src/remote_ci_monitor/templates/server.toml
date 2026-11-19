@@ -50,6 +50,12 @@ artifact_timeout_seconds = 60       # how long collecting the files may take
 artifact_cancel_timeout_seconds = 5 # shorter budget after a cancel/timeout (< 2 x worker_heartbeat_seconds)
 artifact_transfer_timeout_seconds = 300     # one upload or download
 max_concurrent_artifact_transfers = 2       # over this, the server answers 503 instead of waiting
+# The shelf keeps marked jobs' files and serves them to any browser on the network (no token).
+# Do not put secrets in artifacts. Read at start: change these and restart.
+# shelf_dir = "~/.local/share/rcm/shelf"   # default <data_dir>/shelf; another disk is fine
+# shelf_max_bytes = 53687091200     # the whole shelf (50 GiB). Full = new keeps fail, none evicted. 0 = off
+# shelf_stale_days = 182            # unused this long: cleanup pending (files stay, Restore brings it back)
+# shelf_delete_days = 365           # unused this long: deleted
 # advertise = true                  # mDNS/DNS-SD: sessions on the same network find this server without an address
 #                                   # (default: on when bind is not loopback). advertise_name = "macmini" to rename
 # public_url = "http://macmini.tail1234.ts.net:8787"   # start of job links in notifications and rcm run.
@@ -177,6 +183,7 @@ expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back
 # artifacts_on = "failure"                # "always" (default) | "failure" — when to collect
+# keep = true                            # also put every job on the shelf (needs artifacts; server 0.7.0+)
 # supersede = "all"                       # "off" (default) | "waiting" | "all" — a new job of the same
 #                                         # branch, inputs and requester clears the older one
 # requires = ["fvm", "gitleaks"]          # looked up in the job's PATH right before it starts;

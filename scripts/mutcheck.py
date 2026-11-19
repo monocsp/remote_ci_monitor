@@ -9,6 +9,11 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   M5p P1 — `shelf-*` 넷: 보관 항목을 지우기 **전에** deleted 로 표시 · 1시간 쓰기 규칙 제거 · 보관
      중인 묶음의 ack 를 미루지 않음 · keep 을 켤 때 ready 묶음의 보관 행을 안 세움
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-a.md`)
+  M5p P3 — `shelf-health-detection-removed`(옛 서버에 `--keep` 을 그냥 보냄) ·
+     `notify-shelf-url-dropped`(알림 env 에서 `RCM_SHELF_URL` 이 빠짐) · `shelf-wait-skipped`(보관
+     대기 0초) · `web-shelf-link-absolute`(SPA 보관함 링크가 행의 절대 URL 을 씀) ·
+     `shelf-get-skips-sha256`(`rcm shelf get` 이 해시를 안 봄, §16)
+     (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -178,6 +183,54 @@ MUTANTS = (
         old="        if _ready_bundle(conn, job_id):\n",
         new="        if False:\n",
         tests=("tests/test_store_m5p.py",),
+    ),
+    # ── M5p P3 — CLI · 웹 SPA · 알림 (docs/m5p-workplan.md §10) ──
+    Mutant(
+        # 옛 서버는 모르는 `keep` 을 거절하지 않고 무시한다 — 감지를 빼면 세션은 오지 않을 링크를
+        # 기다린다(결정 143 · 검토 P0-3)
+        name="shelf-health-detection-removed",
+        path="src/remote_ci_monitor/cli.py",
+        old='    if not isinstance(h, dict) or "shelf" not in h:\n'
+        '        return f"server does not support --keep ({SHELF_SINCE})"\n',
+        new='    if False:\n        return f"server does not support --keep ({SHELF_SINCE})"\n',
+        tests=("tests/test_cli_m5p.py",),
+    ),
+    Mutant(
+        # 알림 훅이 보관함 링크를 못 받는다(결정 144)
+        name="notify-shelf-url-dropped",
+        path="src/remote_ci_monitor/core/notify.py",
+        old='        "RCM_SHELF_URL": sanitize_text(shelf_url),\n',
+        new="",
+        tests=("tests/test_notify_shelf_m5p.py", "tests/test_notify_rules.py"),
+    ),
+    Mutant(
+        # 보관 대기를 0초로 — 복사가 몇 초 걸리는 평범한 잡이 늘 「still copying」 이 된다(결정 143)
+        name="shelf-wait-skipped",
+        path="src/remote_ci_monitor/cli.py",
+        old="    deadline = time.monotonic() + SHELF_WAIT_SECONDS\n",
+        new="    deadline = time.monotonic()\n",
+        tests=("tests/test_cli_m5p.py",),
+    ),
+    Mutant(
+        # SPA 링크가 public_url 로 만든 절대 주소를 쓴다 — 브라우저가 연 호스트와 다르면 다른
+        # 출처로 간다(CG30 · 결정 148)
+        name="web-shelf-link-absolute",
+        path="src/remote_ci_monitor/web/app.js",
+        old='return { text: text, href: shelfHref("/shelf/" + id + "/", lang), cls: s.state };',
+        new="return { text: text, href: s.url, cls: s.state };",
+        tests=("tests/web/shelf.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # `rcm shelf get` 이 받은 파일의 sha256 을 안 본다 — 잘리거나 바뀐 파일이 그대로 쓰인다(§16)
+        name="shelf-get-skips-sha256",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "            if not isinstance(want, str) or "
+            "_sha256_file(files / path) != want.lower():\n"
+        ),
+        new="            if not isinstance(want, str):\n",
+        tests=("tests/test_cli_m5p_get.py",),
     ),
     # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
     Mutant(
