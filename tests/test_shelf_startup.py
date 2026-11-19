@@ -377,3 +377,42 @@ def test_a68_offline_gc_store_and_janitor_do_not_reconcile(tmp_path, monkeypatch
 def test_sqlite_is_new_enough_for_drop_column():
     """도우미 `downgrade_to_v23` 이 `ALTER TABLE … DROP COLUMN` 을 쓴다(3.35+)."""
     assert sqlite3.sqlite_version_info >= (3, 35)
+
+
+# ── 격리 검증이 찾은 것 (PR #217 · D2 · I3) ──────────────────────────────────
+
+
+def test_d2_a_staging_that_is_a_link_is_not_followed(env, tmp_path):
+    store, cfg = env
+    make_shelf(cfg)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("k")
+    (cfg.shelf_dir / ".staging").symlink_to(outside)
+    reconcile(store, cfg)
+    assert (outside / "keep").is_file()
+    assert not (cfg.shelf_dir / ".staging").is_symlink()
+
+
+def test_i3_one_bad_item_does_not_stop_the_start(env, monkeypatch):
+    store, cfg = env
+    make_shelf(cfg)
+    bad = job_with_bundle(store)
+    good = job_with_bundle(store)
+    shelf_row(store, bad, "copying")
+    shelf_row(store, good, "copying")
+    real = janitor_mod._valid_manifest
+
+    def picky(folder: Path, job_id: int) -> Any:
+        if job_id == bad:
+            raise PermissionError(13, "denied")
+        return real(folder, job_id)
+
+    monkeypatch.setattr(janitor_mod, "_valid_manifest", picky)
+    rec = Recorder()
+    got = reconcile(store, cfg, rec)
+    assert got.available is True
+    rb = row(store, bad)
+    assert rb["state"] == "copying" and rb["error_code"] == "reconcile_EACCES"
+    assert row(store, good)["state"] == "pending"
+    assert any(f"#{bad}" in m and "EACCES" in m for m in rec.logs)

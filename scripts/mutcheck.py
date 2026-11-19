@@ -685,11 +685,7 @@ MUTANTS = (
                     (job_id, name, seq),
                 )
             # 원격 잡의 보관 행은 묶음이 ready 일 때(잡이 아직 running 일 때) 섰다 — 잡 상태와 끝난
-            # 시각은 여기서 같은 트랜잭션으로 채운다(M5p §15.1). copier 와의 순서와 상관없이 맞다.
-            conn.execute(
-                "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
-                (state, ts, job_id),
-            )
+            # 시각은 위의 `_set_state` 가 같은 트랜잭션에서 채웠다(M5p §15.1).
             if bundle is not None:
                 _upsert_bundle(
                     conn,
@@ -702,11 +698,7 @@ MUTANTS = (
                 )
             conn.execute("COMMIT")
 """,
-        new="""            conn.execute(
-                "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
-                (state, ts, job_id),
-            )
-            if bundle is not None:
+        new="""            if bundle is not None:
                 _upsert_bundle(
                     conn,
                     job_id,

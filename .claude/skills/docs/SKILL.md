@@ -56,6 +56,9 @@ works where no other rcm server advertises.
 
 ## Style
 
+Korean prose (`README.ko.md`, `docs/usage.ko.md`, Korean plans and reviews) follows the
+`korean-writing` skill (`.claude/skills/korean-writing/SKILL.md`); load it before writing.
+
 Say what a user sees. Short sentences, one idea each. No marketing. State a limit where it exists
 (`rcm wait` exit 3 is *unknown*, never a failure). Prefer a table when the reader is comparing
 things, prose when following an argument.

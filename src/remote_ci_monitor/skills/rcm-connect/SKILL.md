@@ -145,7 +145,9 @@ web UI after the profile exists (`rcm-store-connect` lists which ones).
    (append `scripts/rcm/presets.release.toml` and `scripts/rcm/profile.release.toml` to the
    server's `server.toml` — or run `rcm_candidate.py --out` there and diff · restart `rcm serve` ·
    `rcm check` · open the web UI → Settings → drop the secrets · run the first read-only plan from
-   the Store tab).
+   the Store tab). When that `server.toml` brings presets in with `include`, the first two lines
+   change: `rcm_candidate.py --out <new folder>` writes `server.toml` and the included file, the owner
+   copies both into place, and `rcm reload --dry-run` → `rcm reload` replaces the restart.
    Print the same summary to the owner. Do not open a PR — the owner reviews the generated files.
 
 ## Done means

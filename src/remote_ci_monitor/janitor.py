@@ -232,14 +232,20 @@ def _valid_manifest(folder: Path, job_id: int) -> tuple[int, int] | None:
     return len(files), total
 
 
-def _clear_dir(path: Path) -> None:
-    """디렉터리 안을 비운다(링크는 링크만). 없으면 할 일이 없다."""
+def _clear_dir(path: Path, root: Path) -> None:
+    """디렉터리 안을 비운다(링크는 링크만). 없으면 할 일이 없다.
+
+    `path` 자체가 링크면 **링크만** 지운다 — 따라가서 그 안을 비우면 보관함 밖의 폴더를 지운다
+    (격리 검증 D2). `root` 는 보관함 폴더를 `resolve()` 한 기준 루트다.
+    """
     try:
-        entries = list(path.iterdir())
+        st = path.lstat()
     except FileNotFoundError:
         return
-    root = path.resolve()
-    for entry in entries:
+    if not stat.S_ISDIR(st.st_mode):
+        path.unlink()
+        return
+    for entry in list(path.iterdir()):
         remove_under_root(entry, root)
 
 
@@ -288,58 +294,102 @@ def reconcile_shelf_on_start(
             return ShelfStartup(False, "shelf_dir_unwritable")
     store.shelf_available = True
     real_root = root.resolve()
-    _clear_dir(root / shelf_rules.STAGING_NAME)
+    try:
+        _clear_dir(root / shelf_rules.STAGING_NAME, real_root)
+    except OSError as e:  # 못 비워도 기동은 한다 — 남은 찌꺼기는 다음 기동이 다시 본다
+        say(f"shelf: could not empty {shelf_rules.STAGING_NAME}: {_errname(e)}")
     for item in store.shelf_items(state=shelf_rules.STATE_COPYING, limit=None):
-        folder = root / str(item.job_id)
-        found = _valid_manifest(folder, item.job_id)
-        if found is not None:
-            count, total = found
-            store.mark_shelf(
-                item.job_id,
-                shelf_rules.STATE_ACTIVE,
-                when,
-                only_from=(shelf_rules.STATE_COPYING,),
-                shelved_at=when.timestamp(),
-                last_used_at=when.timestamp(),
-                file_count=count,
-                total_bytes=total,
-                **_job_columns(store, item),
-            )
-            say(f"shelf: #{item.job_id} was copied before the restart — kept")
-            continue
-        remove_under_root(folder, real_root)
-        bundle = store.get_bundle(item.job_id)
-        alive = (
-            bundle is not None
-            and bundle["state"] == artifacts.READY
-            and bundle["purged_at"] is None
-        )
-        if alive:
-            store.mark_shelf(
-                item.job_id,
-                shelf_rules.STATE_PENDING,
-                when,
-                only_from=(shelf_rules.STATE_COPYING,),
-            )
-        else:
-            store.mark_shelf(
-                item.job_id,
-                shelf_rules.STATE_FAILED,
-                when,
-                only_from=(shelf_rules.STATE_COPYING,),
-                reason_code="bundle_gone",
-            )
+        try:
+            _adopt_or_return(store, item, root, real_root, when, say)
+        except Exception as e:  # noqa: BLE001 — 항목 하나 때문에 서버가 안 뜨면 안 된다(I3)
+            _note_reconcile_error(store, item, when, e, say)
     for item in shelved:
-        if not (root / str(item.job_id)).is_dir():
-            store.mark_shelf(
-                item.job_id,
-                shelf_rules.STATE_FAILED,
-                when,
-                only_from=shelf_rules.SHELVED_STATES,
-                reason_code="missing",
-            )
-            say(f"shelf: #{item.job_id} is missing from {root} — marked failed (missing)")
+        try:
+            missing = not (root / str(item.job_id)).is_dir()
+            if missing:
+                store.mark_shelf(
+                    item.job_id,
+                    shelf_rules.STATE_FAILED,
+                    when,
+                    only_from=shelf_rules.SHELVED_STATES,
+                    reason_code="missing",
+                )
+                say(f"shelf: #{item.job_id} is missing from {root} — marked failed (missing)")
+        except Exception as e:  # noqa: BLE001 — 항목 하나 때문에 서버가 안 뜨면 안 된다(I3)
+            _note_reconcile_error(store, item, when, e, say)
     return ShelfStartup(True, None)
+
+
+def _note_reconcile_error(
+    store: Store, item: ShelfItem, when: datetime, e: BaseException, say: Callable[[str], None]
+) -> None:
+    """화해에서 항목 하나가 실패했다 — 그 행의 상태는 그대로 두고 `error_code` 와 로그만 남긴다.
+
+    다음 기동이 다시 본다. 기록마저 실패하면(DB 가 잠겼다) 로그만 남긴다.
+    """
+    code = f"reconcile_{_errname(e)}"
+    say(f"shelf: #{item.job_id} could not be reconciled at start: {_errname(e)} — left as is")
+    try:
+        store.mark_shelf(
+            item.job_id,
+            item.state,
+            when,
+            only_from=(item.state,),
+            stale_since=item.stale_since,
+            deleted_at=item.deleted_at,
+            failed_at=item.failed_at,
+            error_code=code,
+        )
+    except Exception as again:  # noqa: BLE001 — 로그로 충분하다
+        say(f"shelf: #{item.job_id} error_code not recorded: {_errname(again)}")
+
+
+def _adopt_or_return(
+    store: Store,
+    item: ShelfItem,
+    root: Path,
+    real_root: Path,
+    when: datetime,
+    say: Callable[[str], None],
+) -> None:
+    """`copying` 행 하나 — 유효한 폴더면 입양, 아니면 폴더를 치우고 되돌리거나 접는다(§15.3)."""
+    folder = root / str(item.job_id)
+    found = _valid_manifest(folder, item.job_id)
+    if found is not None:
+        count, total = found
+        store.mark_shelf(
+            item.job_id,
+            shelf_rules.STATE_ACTIVE,
+            when,
+            only_from=(shelf_rules.STATE_COPYING,),
+            shelved_at=when.timestamp(),
+            last_used_at=when.timestamp(),
+            file_count=count,
+            total_bytes=total,
+            **_job_columns(store, item),
+        )
+        say(f"shelf: #{item.job_id} was copied before the restart — kept")
+        return
+    remove_under_root(folder, real_root)
+    bundle = store.get_bundle(item.job_id)
+    alive = (
+        bundle is not None and bundle["state"] == artifacts.READY and bundle["purged_at"] is None
+    )
+    if alive:
+        store.mark_shelf(
+            item.job_id,
+            shelf_rules.STATE_PENDING,
+            when,
+            only_from=(shelf_rules.STATE_COPYING,),
+        )
+    else:
+        store.mark_shelf(
+            item.job_id,
+            shelf_rules.STATE_FAILED,
+            when,
+            only_from=(shelf_rules.STATE_COPYING,),
+            reason_code="bundle_gone",
+        )
 
 
 def _job_columns(store: Store, item: ShelfItem) -> dict[str, Any]:
@@ -536,6 +586,7 @@ class Janitor:
                 shelf_rules.STATE_STALE,
                 now,
                 only_from=(shelf_rules.STATE_ACTIVE,),
+                if_last_used=item.last_used_at,  # 계획 뒤 누가 썼으면 이번엔 건너뛴다(D1)
                 stale_since=now.timestamp(),
             ):
                 self.log(
@@ -563,18 +614,35 @@ class Janitor:
         exists = folder.exists() or folder.is_symlink()
         if not exists and item.error_code != DELETING:
             if self.store.mark_shelf(
-                job_id, shelf_rules.STATE_FAILED, now, only_from=live, reason_code="missing"
+                job_id,
+                shelf_rules.STATE_FAILED,
+                now,
+                only_from=live,
+                if_last_used=item.last_used_at,
+                reason_code="missing",
             ):
                 self.log(f"shelf: #{job_id} was already gone from the shelf folder (missing)")
                 self._on_shelf_change(job_id)
             return
-        if not self.store.mark_shelf(job_id, item.state, now, only_from=live, error_code=DELETING):
+        # 계획을 읽은 뒤 누가 이 항목을 썼으면(되살리기 · 파일 받기) 그 계획은 낡았다 —
+        # `last_used_at` 이 계획 때 값일 때만 「지우는 중」을 적고, 아니면 이번엔 건너뛴다(D1).
+        # 정리 대기 시각(`stale_since`)은 그대로 둔다 — 안 주면 `mark_shelf` 가 지금으로 덮는다(I2)
+        keep = {"stale_since": item.stale_since}
+        if not self.store.mark_shelf(
+            job_id,
+            item.state,
+            now,
+            only_from=(item.state,),
+            if_last_used=item.last_used_at,
+            error_code=DELETING,
+            **keep,
+        ):
             return  # 그새 누가 썼거나 지웠다
         try:
             remove_under_root(folder, root)
         except OSError as e:
             code = f"delete_{_errname(e)}"
-            self.store.mark_shelf(job_id, item.state, now, only_from=live, error_code=code)
+            self.store.mark_shelf(job_id, item.state, now, only_from=live, error_code=code, **keep)
             self.on_error(f"shelf: delete #{job_id}: {_errname(e)}")
             return
         self.store.mark_shelf(

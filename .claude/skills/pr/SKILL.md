@@ -42,11 +42,18 @@ Refs: #80
 
 End the body with the attribution block given at session start.
 
+The Korean in the title's summary and in the body is written with the `korean-writing` skill
+(`.claude/skills/korean-writing/SKILL.md`). Load it before you write them. The template's headings,
+the trailers and the attribution line stay as they are; the skill only governs the sentences.
+The body is addressed to people, so it is written in 합니다체 (the skill's §4); commit bodies and
+documents that stay in the repository are written in 평어체.
+
 ## Steps
 
 1. Before opening: `ruff check . && ruff format --check . && pytest`, plus `node --test` and
    `python scripts/mutcheck.py` when the change touches what they cover; the `docs` skill for a
-   user-visible change. Push with the pinned account:
+   user-visible change. Load the `korean-writing` skill and write the title's summary and the body
+   by its rules (its §6 check before you paste them). Push with the pinned account:
    ```sh
    export GH_TOKEN=$(gh auth token --user monocsp)
    git push -u origin <branch>
