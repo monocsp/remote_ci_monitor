@@ -358,8 +358,9 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
    refreshes. The log tail and the **Log** button are in the same block. **Cancel** does not hide
    there: it stays in the row while the row is folded, so stopping a runaway job is one tap.
 6. **A waiting job**, with its position in the queue.
-7. **The ETA and its confidence.** `high` is a median of five or more real runs; `low` is a guess
-   from the preset; `—` means it will not pretend to know.
+7. **The ETA and its confidence.** `high` is a median of five or more real runs, and `n=12` says
+   how many (hover the badge for the whole sentence); `low` is a guess from the preset; `—` means
+   it will not pretend to know.
 8. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
    the repository it came from is in the expanded block, since every row usually repeats it.
 

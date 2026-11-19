@@ -257,12 +257,16 @@ describe("reasonText — unknown and null", () => {
 });
 
 describe("confidenceBadge", () => {
-  test("high · measured n=7", () => {
-    assert.deepEqual(rcm.confidenceBadge(row(412).estimate), { cls: "high", text: "high · measured n=7" });
+  // 영어 배지는 짧게(`high · n=7`), 원래 뜻은 마우스 올림 툴팁(`title`)이 말한다 — 152px 도착 칸을
+  // 넘지 않게(오너 결정 2026-11-19). 한국어 배지 글은 그대로다.
+  test("high · n=7, the full meaning on hover", () => {
+    assert.deepEqual(rcm.confidenceBadge(row(412).estimate), {
+      cls: "high", text: "high · n=7", title: "high confidence: median of 7 measured runs" });
   });
 
-  test("med · measured n=3", () => {
-    assert.deepEqual(rcm.confidenceBadge(row(409).estimate), { cls: "med", text: "med · measured n=3" });
+  test("med · n=3, the full meaning on hover", () => {
+    assert.deepEqual(rcm.confidenceBadge(row(409).estimate), {
+      cls: "med", text: "med · n=3", title: "med confidence: median of 3 measured runs" });
   });
 
   test("low · preset", () => {
@@ -291,6 +295,79 @@ describe("confidenceBadge", () => {
 
   test("estimate null → cls low, text 'low · —'", () => {
     assert.deepEqual(rcm.confidenceBadge(null), { cls: "low", text: `low · ${DASH}` });
+  });
+});
+
+describe("confidenceBadge — short English badge, full sentence on hover", () => {
+  const measured = (n, extra) => Object.assign(
+    { confidence: n != null && n >= 5 ? "high" : "med", source: "measured", sample_count: n }, extra);
+
+  test("high n=12 — en is short, ko keeps its sentence, both say the whole thing on hover", () => {
+    assert.deepEqual(rcm.confidenceBadge(measured(12), "en"), {
+      cls: "high", text: "high · n=12", title: "high confidence: median of 12 measured runs" });
+    assert.deepEqual(rcm.confidenceBadge(measured(12), "ko"), {
+      cls: "high", text: "높음 · 최근 12회 기준", title: "신뢰도 높음: 최근 실측 12회의 중앙값" });
+  });
+
+  test("the badge never says 'measured' again in English — only the tooltip does", () => {
+    [1, 3, 7, 12, 100, 1000].forEach((n) => {
+      const b = rcm.confidenceBadge(measured(n), "en");
+      assert.ok(!/measured/.test(b.text), `${n}: ${b.text}`);
+      assert.match(b.title, /measured/, `${n}: ${b.title}`);
+    });
+  });
+
+  test("one, three and four digits", () => {
+    const en = (n) => rcm.confidenceBadge(measured(n), "en");
+    assert.deepEqual(en(1), { cls: "med", text: "med · n=1", title: "med confidence: median of 1 measured run" });
+    assert.equal(en(100).text, "high · n=100");
+    assert.equal(en(1000).text, "high · n=1000");
+    assert.equal(en(1000).title, "high confidence: median of 1000 measured runs");
+    assert.equal(rcm.confidenceBadge(measured(1000), "ko").text, "높음 · 최근 1000회 기준");
+  });
+
+  test("no sample count — en keeps the same shape with a dash, ko keeps today's text", () => {
+    // 개수를 모르면 지어내지 않는다 — `—`. 한국어는 오늘의 문구 그대로(바꿀 이유가 폭이었다).
+    const est = { confidence: "high", source: "measured" };
+    assert.deepEqual(rcm.confidenceBadge(est, "en"), {
+      cls: "high", text: `high · n=${DASH}`, title: "high confidence: median of measured runs (count unknown)" });
+    assert.deepEqual(rcm.confidenceBadge(est, "ko"), {
+      cls: "high", text: "높음 · measured", title: "신뢰도 높음: 최근 실측의 중앙값 (횟수 모름)" });
+  });
+
+  test("a sample count that is not a number is unknown — never printed into the badge or the tooltip", () => {
+    const est = { confidence: "high", source: "measured", sample_count: '12"><b>x</b>' };
+    const b = rcm.confidenceBadge(est, "en");
+    assert.equal(b.text, `high · n=${DASH}`);
+    assert.ok(!/[<>"]/.test(b.text + b.title), b.title);
+  });
+
+  test("no server confidence — the fallback gives the same short badge (shared drops one step)", () => {
+    assert.deepEqual(rcm.confidenceBadge({ source: "measured", sample_count: 12 }, "en"), {
+      cls: "high", text: "high · n=12", title: "high confidence: median of 12 measured runs" });
+    assert.deepEqual(rcm.confidenceBadge({ source: "measured", sample_count: 12, shared: true }, "en"), {
+      cls: "med", text: "med · n=12", title: "med confidence: median of 12 measured runs" });
+    assert.deepEqual(rcm.confidenceBadge({ source: "measured", sample_count: 12, shared: true }, "ko"), {
+      cls: "med", text: "보통 · 최근 12회 기준", title: "신뢰도 보통: 최근 실측 12회의 중앙값" });
+  });
+
+  test("low · overdue · group wait · nothing are unchanged and carry no tooltip", () => {
+    ["en", "ko"].forEach((lang) => {
+      [
+        { confidence: "low", source: "preset", sample_count: 1 },
+        { confidence: "low", source: "measured", sample_count: 3, shared: true },
+        { confidence: "overdue", source: "measured", sample_count: 12 },
+        { confidence: "group wait", source: "measured", sample_count: 12 },
+        null,
+      ].forEach((est) => {
+        const b = rcm.confidenceBadge(est, lang);
+        assert.deepEqual(Object.keys(b).sort(), ["cls", "text"], `${lang} ${JSON.stringify(est)}`);
+      });
+    });
+    assert.equal(rcm.confidenceBadge({ confidence: "low", source: "measured", sample_count: 3 }, "en").text,
+      "low · measured");
+    assert.equal(rcm.confidenceBadge({ confidence: "overdue" }, "ko").text, "예상 초과");
+    assert.equal(rcm.confidenceBadge({ confidence: "group wait" }, "ko").text, "낮음 · 그룹 대기");
   });
 });
 
