@@ -20,6 +20,7 @@ from shelfkit import (
     make_server,
     publish_payload,
     shelve_bundle,
+    stop_copier,
     tar_bytes,
 )
 
@@ -116,10 +117,8 @@ def test_cg37_usage_is_decimal_like_rcm_check(srv):
     assert "12.3 GB / 53.7 GB" in page
 
 
-def test_cg38_a_pending_item_says_it_is_being_copied(srv, monkeypatch):
-    from remote_ci_monitor.store import Store
-
-    monkeypatch.setattr(Store, "claim_shelf_item", lambda self, now: None)
+def test_cg38_a_pending_item_says_it_is_being_copied(srv):
+    stop_copier(srv)  # 보관 행이 pending 에 머문다
     jid = finished_linux_job(srv)
     publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
     status, page = html(srv, f"/shelf/{jid}/")
