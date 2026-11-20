@@ -8,6 +8,11 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Fixed
+- **Server events reach every subscriber in id order.** Two threads publishing at once could hand
+  a subscriber event 242 before 241, because the id was taken under the bus lock but the event was
+  handed over after it; a reconnecting subscriber could likewise get a new event before the
+  replayed ones. The web UI and `rcm wait` follow this stream (SSE). Both now happen under the
+  same lock. ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
 - **A version no longer stays `running` when its release round ends at once.** The server linked
   a version to a driver round only after the round had started, so a round that exited before
   the link (a driver that fails right away, or the confirm round that "build number: auto" starts)

@@ -250,6 +250,41 @@ def test_unsubscribe_stops_delivery_and_decrements_count():
 # ── 스레드 안전성 ────────────────────────────────────────────────────────────
 
 
+def test_a_publisher_slow_to_hand_over_its_event_does_not_let_a_later_id_overtake_it():
+    """구독자는 id 를 매긴 순서대로 받는다. 예전에는 id 를 잠금 안에서 매기고, 구독자에게 넘기는
+    일은 잠금 밖에서 했다. 241 을 받은 발행자가 넘기기 전에 다른 발행자가 242 를 넘기면 구독자가
+    242 를 먼저 받았다. pytest-xdist 로 CPU 를 나눠 쓴 실행에서 아래 시험이 그렇게 빨갰다. 여기서는
+    첫 발행자의 넘기기를 붙잡아 그 순서를 시험이 쥔다."""
+    bus = EventBus()
+    sub = bus.subscribe(maxsize=10)
+    second_done = threading.Event()
+    real_offer = sub._offer
+
+    def slow_offer(event: Event) -> None:
+        if event.id == 1:
+            # 고치기 전: 둘째 발행이 이 사이에 끝난다. 고친 뒤: 둘째는 버스 잠금에 막혀 못 끝난다
+            second_done.wait(0.5)
+        real_offer(event)
+
+    sub._offer = slow_offer  # type: ignore[method-assign]
+    first = threading.Thread(target=bus.publish, args=("job_changed", {"n": 1}))
+    first.start()
+    deadline = time.monotonic() + 5
+    while bus.last_id < 1 and time.monotonic() < deadline:  # 첫 발행이 id 를 받은 뒤에
+        time.sleep(0.01)
+
+    def second() -> None:
+        bus.publish("job_changed", {"n": 2})
+        second_done.set()
+
+    later = threading.Thread(target=second)
+    later.start()
+    first.join(5)
+    later.join(5)
+    got = [sub.get(1), sub.get(1)]
+    assert [e.id if e else None for e in got] == [1, 2]
+
+
 def test_publisher_threads_and_consumer_thread_see_every_id_in_order():
     bus = EventBus()
     sub = bus.subscribe(maxsize=10_000)

@@ -95,13 +95,15 @@ class EventBus:
             return len(self._subs)
 
     def publish(self, kind: str, data: dict[str, Any], *, at: datetime | None = None) -> Event:
+        # 구독자에게 넘기는 일도 id 를 매긴 잠금 안에서 한다. 밖에서 넘기면 id 를 먼저 받은 발행자가
+        # 넘기기 전에 다른 발행자의 다음 id 가 먼저 닿는다(역순). `_offer` 는 막히지 않고 구독자
+        # 자신의 잠금만 잡는다. 잡는 순서는 늘 버스 잠금 다음 구독자 잠금이라 엇갈리지 않는다.
         with self._lock:
             self._last_id += 1
             event = Event(id=self._last_id, kind=kind, data=dict(data), at=at or datetime.now(UTC))
             self._ring.append(event)
-            subs = list(self._subs)
-        for sub in subs:
-            sub._offer(event)
+            for sub in self._subs:
+                sub._offer(event)
         return event
 
     def subscribe(self, *, last_id: int | None = None, maxsize: int | None = None) -> Subscription:
@@ -117,8 +119,10 @@ class EventBus:
                         Event(id=self._last_id, kind=KIND_RESET, data={}, at=datetime.now(UTC))
                     ]
             self._subs.append(sub)
-        for e in replay:
-            sub._offer(e)
+            # 재생도 잠금 안에서 넘긴다. 밖에서 넘기면 그 사이에 발행된 새 이벤트가 재생보다
+            # 먼저 닿는다
+            for e in replay:
+                sub._offer(e)
         return sub
 
     def unsubscribe(self, sub: Subscription) -> None:
