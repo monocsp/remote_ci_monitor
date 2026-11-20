@@ -17,6 +17,8 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      대기 0초) · `web-shelf-link-absolute`(SPA 보관함 링크가 행의 절대 URL 을 씀) ·
      `shelf-get-skips-sha256`(`rcm shelf get` 이 해시를 안 봄, §16)
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
+  M5p 뒤 — `shelf-expand-keeps-apple-double`: 펼침이 macOS 메타데이터 멤버(`._*`)를 거르지 않음
+     (`shelf_copier.py`, 2026-11-20 운영 잡 #3821 — 깨진 그림 23개)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -102,6 +104,23 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ㊱ claim-ignores-pause — claim 트랜잭션 안의 정지 검사를 뺌: `get_paused` 확인 뒤 · claim 전에
      걸린 정지를 놓쳐 정지 중에 잡을 집는다 (`store.py`, 2026-11-19 — 배포의 「정지 → 도는 잡 0
      확인 → 재시작」 직후 잡이 시작돼 lost 가 된다)
+  ㊲ events-offer-outside-lock · events-replay-outside-lock — 이벤트 버스가 offer 와 replay 를
+     잠금 밖에서 함: 동시 발행의 id 가 큐에서 뒤집혀, 뒤의 id 로 다시 붙은 SSE 클라이언트가 앞의
+     id 를 영영 못 받는다 (`events.py`, 2026-11-20 PR #238 의 CI — 243 · 244)
+
+  M5q A — `m5q-*` 열다섯(격리 검증이 더한 넷 — 받기 전체 제한 · rename 에 진 쪽의 검사 · 캐시
+     뿌리의 부모 · `rcm check` 의 version 정리 — 을 포함): 받은 wheel 의 sha256 을 안 봄 ·
+     editable 기본값 뒤집기 · 따라간 자식이 다시 따라감 · 임시 폴더 없이 대상에 바로 풂 ·
+     `serve` 가 따라감 · health 의 wheel 경로를 믿음 ·
+     서버의 클라이언트 버전 줄을 인증 전에 씀 · 쌍을 안 기억함 · User-Agent 형식을 안 봄 ·
+     `rcm version` 둘째 줄을 늘 씀 · `rcm check` 의 꼬리를 버림 (`docs/m5q-workplan.md` §6 ·
+     `docs/m5q-test-scenarios-c.md` 「변이」)
+  M5q B1 — `m5q-worker-*` 다섯: 버전 409 전에 도는 잡을 닫음 · 409 본문에 `server_version`
+     을 안 실음 · 기동 ① 이 10분 기록을 씀 · 레인 재등록이 막혀도 종료 0 · `WorkerFollow` 가
+     `WorkerExit` 가 아님 (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
+  M5q B2 — 다섯: 드레인이 도는 잡을 기다리지 않음 · 레인이 드레인 중에 claim 함 · 300초 창을
+     지움 · 설치본 재실행이 따라가기 변수를 남김 · heartbeat 에 `server_version` 을 안 실음
+     (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME]
 """
@@ -299,6 +318,18 @@ MUTANTS = (
         new="            if not isinstance(want, str):\n",
         tests=("tests/test_cli_m5p_get.py",),
     ),
+    Mutant(
+        # 펼침이 macOS tar 의 AppleDouble 멤버를 그대로 만든다 — `._intro.png` 가 깨진 그림으로
+        # 항목 페이지에 뜬다(2026-11-20 운영 잡 #3821)
+        name="shelf-expand-keeps-apple-double",
+        path="src/remote_ci_monitor/shelf_copier.py",
+        old=(
+            "            if reason is None and shelf_rules.apple_double_member(name):\n"
+            "                reason = shelf_rules.SKIP_APPLE_DOUBLE\n"
+        ),
+        new="",
+        tests=("tests/test_shelf_apple_double.py",),
+    ),
     # ── M5o A — 같은 브랜치의 옛 잡을 치운다(supersede) ──
     Mutant(
         # 합류자 이름 검사 제거 — 다른 사람이 기다리는 잡을 내 push 가 죽인다(결정 113)
@@ -423,6 +454,43 @@ MUTANTS = (
         old="            if conn.execute(_PAUSED_SQL).fetchone() is not None:\n",
         new="            if False:\n",
         tests=("tests/test_store.py",),
+    ),
+    # ── 이벤트 버스가 id 순서대로 큐에 넣는다(2026-11-20, PR #238 의 CI 에서 뒤집힘) ──
+    Mutant(
+        # offer 를 버스 잠금 밖으로 되돌린다 — 두 발행 스레드의 id 가 큐에서 뒤집히고, 뒤의 id 로
+        # 다시 붙은 SSE 클라이언트는 앞의 id 를 못 받는다
+        name="events-offer-outside-lock",
+        path="src/remote_ci_monitor/events.py",
+        old=(
+            "            for sub in self._subs:\n"
+            "                sub._offer(event)\n"
+            "        return event\n"
+        ),
+        new=(
+            "            subs = list(self._subs)\n"
+            "        for sub in subs:\n"
+            "            sub._offer(event)\n"
+            "        return event\n"
+        ),
+        tests=("tests/test_events.py",),
+    ),
+    Mutant(
+        # replay 를 버스 잠금 밖에서 넣는다 — 그 사이 발행된 새 이벤트가 replay 보다 먼저 온다
+        name="events-replay-outside-lock",
+        path="src/remote_ci_monitor/events.py",
+        old=(
+            "            for e in replay:\n"
+            "                sub._offer(e)\n"
+            "            self._subs.append(sub)\n"
+            "        return sub\n"
+        ),
+        new=(
+            "            self._subs.append(sub)\n"
+            "        for e in replay:\n"
+            "            sub._offer(e)\n"
+            "        return sub\n"
+        ),
+        tests=("tests/test_events.py",),
     ),
     # ── M5n — 머신의 능력과 배치(docs/m5n-workplan.md §15) ──
     Mutant(
@@ -967,6 +1035,237 @@ MUTANTS = (
             "tests/test_server_release_versions.py::"
             "test_a_round_that_ends_first_waits_for_the_job_that_is_still_running",
         ),
+    ),
+    # ── M5q PR A — 클라이언트가 서버 버전을 따라간다 (docs/m5q-workplan.md §6) ──
+    Mutant(
+        # 받은 바이트의 해시를 안 본다 — 깨지거나 바뀐 wheel 이 캐시에 들어가 실행된다(결정 157)
+        name="m5q-follow-sha-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old="    if digest.hexdigest() != info.sha256:\n",
+        new="    if False:\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # 기본값의 설치 종류 판정을 뒤집는다 — 개발 체크아웃이 운영 버전으로 바꿔치인다(결정 156)
+        name="m5q-follow-editable-default-flipped",
+        path="src/remote_ci_monitor/follow.py",
+        old='MODE_FOLLOW if kind == "wheel" else MODE_INSTALLED',
+        new='MODE_FOLLOW if kind != "wheel" else MODE_INSTALLED',
+        tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # 따라간 자식이 다시 따라간다 — 버전이 어긋나면 exec 고리가 된다(결정 161)
+        name="m5q-follow-boot-loop",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if follow.booted() is not None:\n",
+        new="    if False:\n",
+        tests=("tests/test_follow_cli.py",),
+    ),
+    Mutant(
+        # 임시 폴더 없이 대상 폴더에 바로 푼다 — 풀다 실패하면 반쯤 푼 폴더가 남는다(§2.5)
+        name="m5q-follow-unpack-in-place",
+        path="src/remote_ci_monitor/follow.py",
+        old='        tree = tmp / "tree"\n',
+        new="        tree = clients / info.sha256[:16]\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # `rcm serve` 가 따라간다 — 서버가 정본이다(§2.3)
+        name="m5q-follow-serve-follows",
+        path="src/remote_ci_monitor/follow.py",
+        old='    {"serve", "worker", "token", "init", "discover", "version", "skills"}',
+        new='    {"worker", "token", "init", "discover", "version", "skills"}',
+        tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # health 의 wheel 경로를 그대로 믿는다 — 다른 경로 · 다른 버전의 파일을 받는다(R ② · ⑦)
+        name="m5q-follow-health-path-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old='    if path != "/client/" + wheel_filename(version):\n',
+        new="    if False:\n",
+        tests=("tests/test_follow_rules.py",),
+    ),
+    Mutant(
+        # 받기 전체 제한을 버린다 — 응답 머리를 조금씩 흘리는 서버가 명령을 붙잡는다(#226 D1)
+        name="m5q-follow-fetch-no-deadline",
+        path="src/remote_ci_monitor/follow.py",
+        old='    if got is _TIMEOUT:\n        raise FollowError("unreachable")\n',
+        new="    if False:\n        pass\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # rename 에 진 쪽이 `.bad` 폴더를 받아들인다 — 남이 둔 폴더의 코드가 돈다(#226 D2)
+        name="m5q-follow-race-loser-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old="        entry = _entry_at(target, include_bad=False)\n",
+        new="        entry = _entry_at(target, include_bad=True)\n",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # 캐시 뿌리의 부모가 남에게 열려 있어도 쓴다 — 남이 뿌리를 바꿔칠 수 있다
+        name="m5q-follow-cache-parent-unchecked",
+        path="src/remote_ci_monitor/follow.py",
+        old="    if st is not None and st.st_mode & stat.S_IWOTH and",
+        new="    if False and st is not None and st.st_mode & stat.S_IWOTH and",
+        tests=("tests/test_follow_cache.py",),
+    ),
+    Mutant(
+        # `rcm check` 의 client 행이 서버가 보낸 version 을 그대로 찍는다(#226 D3)
+        name="m5q-check-row-unclean-version",
+        path="src/remote_ci_monitor/cli.py",
+        old="    server_v = follow.clean(raw)\n",
+        new="    server_v = raw\n",
+        tests=("tests/test_follow_cli.py",),
+    ),
+    Mutant(
+        # 클라이언트 버전 한 줄을 인증 전에 쓴다 — 토큰 없는 요청이 서버 로그를 채운다(결정 168)
+        name="m5q-client-log-before-auth",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "            t = self.app.require_client_token(self._token())\n"
+            "            status, body = self.app.submit(self._json_body(), t, "
+            'host=self.headers.get("Host"))\n'
+            '            self.app.note_client(t.name, self.headers.get("User-Agent"))\n'
+        ),
+        new=(
+            '            self.app.note_client("anonymous", self.headers.get("User-Agent"))\n'
+            "            t = self.app.require_client_token(self._token())\n"
+            "            status, body = self.app.submit(self._json_body(), t, "
+            'host=self.headers.get("Host"))\n'
+        ),
+        tests=("tests/test_server_client_version_log.py",),
+    ),
+    Mutant(
+        # 본 쌍을 기억하지 않는다 — 제출마다 한 줄이 남는다
+        name="m5q-client-log-every-submit",
+        path="src/remote_ci_monitor/server.py",
+        old="            if pair in self._client_pairs:\n",
+        new="            if False:\n",
+        tests=("tests/test_server_client_version_log.py",),
+    ),
+    Mutant(
+        # User-Agent 의 버전 형식을 안 본다 — 제어 문자 · 긴 값이 서버 로그에 그대로 찍힌다
+        name="m5q-client-log-unchecked-agent",
+        path="src/remote_ci_monitor/server.py",
+        old="        if m is None or not valid_version(m.group(1)):\n",
+        new="        if m is None:\n",
+        tests=("tests/test_server_client_version_log.py",),
+    ),
+    Mutant(
+        # 정보가 없어도 `rcm version` 둘째 줄을 쓴다 — 한 줄을 읽는 스크립트가 깨진다(결정 166)
+        name="m5q-version-second-line-always",
+        path="src/remote_ci_monitor/cli.py",
+        old='    if setting.source == "default" and not (',
+        new="    if False and not (",
+        # test_cli_m4 는 사본에 없는 examples/ 를 읽어 대조군이 빨갛다 — 표시 시험만 쓴다
+        tests=("tests/test_cli_m5q_display.py",),
+    ),
+    Mutant(
+        # `rcm check` 의 `client` 행이 따라가기 상태를 버린다
+        name="m5q-check-row-drops-follow-tail",
+        path="src/remote_ci_monitor/cli.py",
+        old="    tail, hint_ok = _follow_tail(state)\n",
+        new="    tail, hint_ok = _follow_tail(None)\n",
+        tests=("tests/test_cli_m5q_display.py",),
+    ),
+    # ── M5q PR B1 — 원격 워커가 기동과 기동 등록 409 에서 따라간다 (docs/m5q-workplan.md §6) ──
+    Mutant(
+        # 등록이 버전을 보기 **전에** 그 워커의 도는 잡을 lost 로 닫는다 — 따라가기 전의 409 가
+        # 잡을 잃게 한다(시나리오 b B17)
+        name="m5q-worker-409-after-lost",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        if version != self.version:\n            # 이 검사는",
+        new=(
+            '        self.store.mark_lost_for_worker(token.name, self.now_fn(), "lost")\n'
+            "        if version != self.version:\n            # 이 검사는"
+        ),
+        tests=("tests/test_server_m5q_worker.py",),
+    ),
+    Mutant(
+        # 409 본문에 `server_version` 을 싣지 않는다 — 워커가 ② 에서 따라갈 버전을 모른다(§5.3)
+        name="m5q-worker-409-no-server-version",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                server_version=self.version,\n",
+        new="",
+        tests=("tests/test_server_m5q_worker.py", "tests/test_cli_worker_m5q.py"),
+    ),
+    Mutant(
+        # 기동 ① 이 10분 기록을 쓴다 — 서버가 올라간 뒤 재시작한 워커가 옛 기록을 믿는다(§13 P2-7)
+        name="m5q-worker-start-uses-the-record",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "        fresh=True,\n        environ=os.environ,\n"
+            "        execve=args.follow_execve,\n        kind=kind,\n"
+        ),
+        new=(
+            "        fresh=False,\n        environ=os.environ,\n"
+            "        execve=args.follow_execve,\n        kind=kind,\n"
+        ),
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    Mutant(
+        # 레인 재등록이 막혀도 종료 0 — 감독자가 다시 띄우지 않아 워커가 조용히 멈춘다(§14 B질문1)
+        name="m5q-worker-lane-exit-zero",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                            self.exit_code = x.code\n",
+        new="                            pass\n",
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    Mutant(
+        # `WorkerFollow` 가 `WorkerExit` 가 아니다 — B2 이전 빌드에서 레인 재등록 409 가 레인
+        # 스레드를 예외로 죽인다(§14 B질문2)
+        name="m5q-worker-follow-not-a-worker-exit",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="class WorkerFollow(WorkerExit):\n",
+        new="class WorkerFollow(Exception):\n",
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
+    Mutant(
+        # 드레인이 도는 잡을 기다리지 않는다 — 레인이 잡을 도는 중에 `stopping` 이 켜져 그 잡이
+        # lost `worker stopped` 가 된다(§6 W6 · 시나리오 b B9)
+        name="m5q-worker-drain-does-not-wait",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if not alive <= self._idle_lanes:\n",
+        new="            if False:\n",
+        tests=("tests/test_worker_m5q_drain.py",),
+    ),
+    Mutant(
+        # 레인 맨 위의 드레인 검사를 지운다 — 드레인 중에도 새 claim 을 한다(시나리오 b B7)
+        name="m5q-worker-lane-claims-while-draining",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if self._lane_waits(lane):\n",
+        new="            if False and self._lane_waits(lane):\n",
+        tests=("tests/test_worker_m5q_drain.py",),
+    ),
+    Mutant(
+        # 300초 창을 지운다 — 버전이 오락가락하면 heartbeat 마다 재실행한다(시나리오 b E7 · G9)
+        name="m5q-worker-drain-window-removed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            ago = self._restarted_ago()\n",
+        new="            ago = None\n",
+        tests=("tests/test_worker_m5q_drain.py",),
+    ),
+    Mutant(
+        # 설치본으로 다시 실행할 때 따라가기 변수를 지우지 않는다 — 옛 캐시 경로가 다음 프로세스로
+        # 샌다(시나리오 b B8)
+        name="m5q-worker-restart-keeps-follow-env",
+        path="src/remote_ci_monitor/follow.py",
+        old=(
+            "    env = {k: v for k, v in environ.items() if k not in BOOT_ENV}\n"
+            "    env[ENV_WORKER_RESTARTED_AT]"
+        ),
+        new="    env = dict(environ)\n    env[ENV_WORKER_RESTARTED_AT]",
+        tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    Mutant(
+        # heartbeat 응답에 `server_version` 을 싣지 않는다 — 돌던 워커가 서버가 바뀐 것을
+        # 모른다(B16)
+        name="m5q-heartbeat-no-server-version",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old='            "server_version": self.version,\n        }\n',
+        new="        }\n",
+        tests=("tests/test_server_m5q_worker.py",),
     ),
 )
 

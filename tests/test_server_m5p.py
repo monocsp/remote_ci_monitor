@@ -30,13 +30,13 @@ import pytest
 from remote_ci_monitor.config import parse_preset
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import CANCELLED, FAILED, SUCCEEDED
-from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.store import Store
 from shelfkit import (
     DAY,
     MIB,
     PNG_1PX,
     advance_days,
+    drain_copier,
     finished_linux_job,
     fixtures,
     item_dir,
@@ -49,6 +49,7 @@ from shelfkit import (
     shelf_doc,
     shelf_presets,
     shelve_bundle,
+    stop_copier,
     submit,
     tar_bytes,
     targz_bytes,
@@ -97,35 +98,29 @@ def gold(srv):
 
 
 class Gate:
-    """copier 를 붙잡는다 — §6 에 고정된 이름(`claim_shelf_item` · `finish_shelf_item`)을 감싼다.
+    """copier 의 `finish_shelf_item` 을 `target` 잡의 호출에서만 붙잡는다. 그 항목은 `copying` 에
+    선다. 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
 
-    `claim_shelf_item` 은 언제나 붙잡고, `finish_shelf_item` 은 `target` 을 정하면 그 잡의
-    호출에만 걸린다. 시한은 없다 — 시험이 `release` 할 때까지 붙잡는다.
+    `claim_shelf_item` 은 붙잡지 않는다. copier 스레드가 도는 서버에서 claim 을 감싸면, 감싸기 전에
+    이미 들어간 claim 이 문을 거치지 않고 막 생긴 행을 집을 수 있다(E54 · E55 · E58 이 CI 에서
+    그렇게 빨갰다). `pending` 을 보려면 `stop_copier` 로 copier 스레드를 멈추고 `drain_copier` 로
+    시험이 직접 돌린다. finish 는 대상 행이 생기기 전에 문을 달면 그 경주가 없다. 어느 claim 이
+    행을 집든 그 잡의 finish 는 문을 지난다.
     """
 
-    def __init__(self, monkeypatch: Any, name: str = "claim_shelf_item"):
+    def __init__(self, monkeypatch: Any, target: int):
         self.release = threading.Event()
         self.entered = threading.Event()
-        self.target: int | None = None
-        orig = getattr(Store, name)
+        orig = Store.finish_shelf_item
         gate = self
 
-        def wanted(store: Store, args: tuple[Any, ...]) -> bool:
-            # claim 은 언제나 붙잡는다. 「대상 행이 pending 인가」를 트랜잭션 밖에서 보면, 행이
-            # 생기기 직전에 시작된 claim 이 그 검사를 지나친 뒤 트랜잭션 안에서 막 생긴 행을 집어
-            # 버려 문이 영영 안 열린다(v0.7.0 릴리스 CI 에서 E58 이 그렇게 빨갰다). 기동 직후의
-            # 빈 claim 을 붙잡아도 괜찮다 — 풀어 주면 그 claim 이 대상 행을 집는다.
-            if gate.target is None or name == "claim_shelf_item":
-                return True
-            return bool(args) and args[0] == gate.target
-
-        def gated(store: Store, *args: Any, **kwargs: Any) -> Any:
-            if wanted(store, args):
+        def gated(store: Store, job_id: int, *args: Any, **kwargs: Any) -> Any:
+            if job_id == target:
                 gate.entered.set()
                 gate.release.wait()
-            return orig(store, *args, **kwargs)
+            return orig(store, job_id, *args, **kwargs)
 
-        monkeypatch.setattr(Store, name, gated)
+        monkeypatch.setattr(Store, "finish_shelf_item", gated)
 
 
 def page(srv, path: str, **kw: Any):
@@ -242,11 +237,11 @@ def test_b5_if_none_match_gives_304_without_a_body(srv, gold):
     assert status == 304 and body == b"" and h2["ETag"] == headers["ETag"]
 
 
-def test_b7_an_ack_right_after_ready_waits_for_the_shelf(srv, monkeypatch):
+def test_b7_an_ack_right_after_ready_waits_for_the_shelf(srv):
     """B7: 묶음이 ready 가 되자 소유자가 받고 ack — 보관이 끝난 뒤에야 묶음이 지워진다."""
-    gate = Gate(monkeypatch)
+    stop_copier(srv)  # 보관은 ack 뒤에 시험이 직접 돌린다
     jid = run_local(srv, "keepgold")
-    gate.entered.wait(10)
+    assert srv.store.shelf_item(jid).state == "pending"
     bundle = srv.store.get_bundle(jid)
     assert bundle["state"] == art.READY
     events: list[Any] = []
@@ -260,9 +255,9 @@ def test_b7_an_ack_right_after_ready_waits_for_the_shelf(srv, monkeypatch):
     assert status == 200 and body["purged"] is False, body
     assert body["deferred"] is True and body["reason_code"] == "shelving"
     assert (srv.cfg.data_dir / "artifacts" / str(jid) / "bundle.tar").is_file()
-    gate.release.set()
-    wait_shelf(srv, jid)
-    wait_until(lambda: srv.store.get_bundle(jid)["state"] == art.PURGED, what="purged")
+    drain_copier(srv)
+    assert srv.store.shelf_item(jid).state == "active"
+    assert srv.store.get_bundle(jid)["state"] == art.PURGED
     assert not (srv.cfg.data_dir / "artifacts" / str(jid)).exists()
     status, doc = srv.req("GET", f"/jobs/{jid}/artifacts", token="alice")
     assert doc["state"] == art.PURGED
@@ -679,6 +674,8 @@ def test_e45_a_dead_copier_shows_in_status_and_health_but_health_stays_200(srv, 
     def die(self: Any, now: Any) -> Any:
         raise Boom()
 
+    # 도는 copier 의 claim 을 바꿔도 여기서는 괜찮다. 이 시험은 스레드 자신이 죽는 것을 보고
+    # 보관 행을 세우지 않는다. 그래서 바꾸기 전에 들어간 claim 이 집을 행도 없다
     monkeypatch.setattr(Store, "claim_shelf_item", die)
     srv.app.copier.wake()
     wait_until(
@@ -694,6 +691,7 @@ def test_q15_a_repeated_exception_marks_the_copier_stuck(srv, monkeypatch):
     def fail(self: Any, now: Any) -> Any:
         raise RuntimeError("same thing")
 
+    # E45 와 같은 까닭으로 도는 copier 의 claim 을 바꾼다 — 스레드의 셈을 보고 행은 세우지 않는다
     monkeypatch.setattr(Store, "claim_shelf_item", fail)
 
     def stuck() -> bool:
@@ -708,16 +706,33 @@ def test_q15_a_repeated_exception_marks_the_copier_stuck(srv, monkeypatch):
 def test_q15_a_locked_database_is_retried_not_counted(srv, monkeypatch):
     orig = Store.claim_shelf_item
     calls = {"n": 0}
+    locked_now = threading.Event()
+    locked_now.set()
 
     def locked(self: Any, now: Any) -> Any:
         calls["n"] += 1
-        if calls["n"] <= 6:
+        if locked_now.is_set():
             raise sqlite3.OperationalError("database is locked")
         return orig(self, now)
 
     monkeypatch.setattr(Store, "claim_shelf_item", locked)
+    # 행을 세우기 전에 copier 가 바꾼 claim 에 들어온 것을 본다. 바꾸기 전에 이미 들어가 있던 진짜
+    # claim 은 그때 끝났고 집을 행이 없었다. 그래서 보관은 잠김을 다 지난 뒤에만 일어난다
+    srv.app.copier.wake()
+    wait_until(lambda: calls["n"] >= 1, what="the patched claim")
     jid = finished_linux_job(srv)
     publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
+
+    def locked_six_times() -> bool:
+        srv.app.copier.wake()
+        time.sleep(0.02)
+        return calls["n"] >= 6
+
+    wait_until(locked_six_times, what="six locked claims")
+    # 여섯째 claim 에 들어왔으면 다섯째까지의 처리는 끝났다. 잠김을 셌다면 이미 copier_stuck 이다
+    assert srv.status()["server"]["shelf_storage"]["error_code"] is None
+    assert srv.store.shelf_item(jid).state == "pending"
+    locked_now.clear()
 
     def done() -> bool:
         srv.app.copier.wake()
@@ -986,23 +1001,14 @@ def test_e58_files_are_409_while_copying(idle):
     assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 409
     assert page(idle, f"/shelf/{jid}.zip")[0] == 409
     # 서버가 띄우는 것과 같은 copier 를 한 번 돌리면 보관이 끝나고 파일이 열린다
-    app = idle.app
-    ShelfCopier(
-        app.store,
-        app.config,
-        now_fn=app.now_fn,
-        log=app.log,
-        on_change=app._on_shelf_change,
-        on_purged=app._shelf_purged,
-    ).drain()
+    drain_copier(idle)
     assert idle.store.shelf_item(jid).state == "active"
     assert page(idle, f"/shelf/{jid}/f/out/a.txt")[0] == 200
 
 
 def test_e58_files_are_409_in_the_copying_state(srv, monkeypatch):
-    gate = Gate(monkeypatch, "finish_shelf_item")
     jid = finished_linux_job(srv)
-    gate.target = jid
+    gate = Gate(monkeypatch, jid)
     publish_payload(srv, jid, tar_bytes([("out/a.txt", b"a")]))
     srv.app._on_job_change(jid)
     assert gate.entered.wait(10)
@@ -1190,7 +1196,7 @@ def test_g43_the_manifest_is_cached_by_mtime(srv):
 
 
 def test_g18_oldest_request_first_and_one_at_a_time(srv, monkeypatch):
-    gate = Gate(monkeypatch)
+    stop_copier(srv)  # 두 요청이 다 pending 이 된 뒤에 시험이 copier 를 돌린다
     order: list[int] = []
     active = {"n": 0, "max": 0}
     lock = threading.Lock()
@@ -1213,28 +1219,45 @@ def test_g18_oldest_request_first_and_one_at_a_time(srv, monkeypatch):
     publish_payload(srv, early, tar_bytes([("out/a.txt", b"a")]))
     srv.clock.advance(1)
     publish_payload(srv, late, tar_bytes([("out/b.txt", b"b")]))
-    gate.release.set()
-    srv.app.copier.wake()
-    wait_shelf(srv, early)
-    wait_shelf(srv, late)
+    assert {srv.store.shelf_item(j).state for j in (early, late)} == {"pending"}
+    drain_copier(srv)
+    assert {srv.store.shelf_item(j).state for j in (early, late)} == {"active"}
     assert order == [early, late] and early > late
     assert active["max"] == 1
 
 
-def test_g19_the_copier_wakes_on_finish_keep_start_and_sweep(tmp_path):
+#: G19 의 마감. 깨움이 없으면 copier 는 `poll_seconds` 마다 스스로 돈다. 마감이 그보다
+#: 짧아야 「깨웠다」와 「다음 poll 에 주웠다」가 갈린다. 기본 poll(5초)로는 마감을 2.5초에 둘
+#: 수밖에 없었고, CPU 를 나눠 쓰는 병렬 실행(3코어 macOS 러너의 pytest-xdist)에서 청소
+#: 회차(1초)와 복사가 그 안에 못 끝났다. 이 시험의 copier 는 60초마다 돌게 하고 마감을 15초로
+#: 둔다. 깨움 없이는 여전히 못 지난다.
+G19_POLL_SECONDS = 60.0
+G19_TIMEOUT = 15.0
+
+
+def test_g19_the_copier_wakes_on_finish_keep_start_and_sweep(tmp_path, monkeypatch):
+    from remote_ci_monitor import server as server_mod
+    from remote_ci_monitor.shelf_copier import ShelfCopier
+
+    monkeypatch.setattr(
+        server_mod,
+        "ShelfCopier",
+        lambda *a, **kw: ShelfCopier(*a, **{**kw, "poll_seconds": G19_POLL_SECONDS}),
+    )
     s = make_server(tmp_path, retention_sweep_interval_seconds=1)
     try:
+        assert s.app.copier.poll_seconds == G19_POLL_SECONDS
         # 로컬 잡 종료
         jid = run_local(s, "keepgold")
-        wait_shelf(s, jid, timeout=2.5)
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
         # keep 응답 직후
         jid = run_local(s, "plaingold")
         keep(s, jid)
-        wait_shelf(s, jid, timeout=2.5)
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
         # 청소 회차(이벤트 없이 store 로 세운 pending)
         jid = finished_linux_job(s)
         publish_payload(s, jid, tar_bytes([("out/a.txt", b"a")]))
-        wait_shelf(s, jid, timeout=2.5)
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
     finally:
         s.close()
     # 기동 직후(DB 에 pending 행)
@@ -1244,7 +1267,8 @@ def test_g19_the_copier_wakes_on_finish_keep_start_and_sweep(tmp_path):
     assert s.store.shelf_item(jid).state == "pending"
     s.app.start()
     try:
-        wait_shelf(s, jid, timeout=2.5)
+        assert s.app.copier.poll_seconds == G19_POLL_SECONDS
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
     finally:
         s.close()
 
@@ -1294,7 +1318,7 @@ def test_g22_a_cancelled_keep_job_is_still_shelved(srv):
     assert srv.store.shelf_item(jid).job_state == CANCELLED
 
 
-def test_g23_every_public_state_is_the_same_in_status_and_job_view(srv, monkeypatch):
+def test_g23_every_public_state_is_the_same_in_status_and_job_view(srv):
     srv.cfg.server.recent_count = 50
     srv.cfg.presets = shelf_presets([sh("emptykeep", "true", keep=True, artifacts=["out/*"])])
     active = shelve_bundle(srv, {"out/a.txt": b"a"})
@@ -1310,11 +1334,9 @@ def test_g23_every_public_state_is_the_same_in_status_and_job_view(srv, monkeypa
     srv.store.mark_shelf(
         stale, "active", srv.clock.now, last_used_at=stale_item.last_used_at - 183 * DAY
     )
-    gate = Gate(monkeypatch)
+    stop_copier(srv)  # pending 이 그대로 머문다
     pending = finished_linux_job(srv)
     publish_payload(srv, pending, tar_bytes([("out/e.txt", b"e")]))
-    srv.app.copier.wake()
-    gate.entered.wait(5)
     waiting = submit(srv, "keepgold")[1]["job_id"]
     want = {
         active: "active",
@@ -1337,7 +1359,6 @@ def test_g23_every_public_state_is_the_same_in_status_and_job_view(srv, monkeypa
     assert rows[none]["shelf"]["reason_code"] == "empty"
     assert rows[full]["shelf"]["reason_code"] == "shelf_full"
     assert rows[plain]["keep"] is False and rows[plain]["shelf"] is None
-    gate.release.set()
 
 
 def test_g24_the_link_prefix_follows_the_job_link_rules(srv):
@@ -1425,28 +1446,33 @@ def test_g45_a_shelf_change_is_an_event(srv):
     )
 
 
-def test_e54_a_failed_shelf_still_lets_the_acked_bundle_go(tmp_path, monkeypatch):
-    s = make_server(tmp_path, shelf_max_bytes=10)
+def test_e54_a_failed_shelf_still_lets_the_acked_bundle_go(tmp_path):
+    # copier 를 띄우지 않은 서버로 본다(E58 과 같은 까닭). copier 스레드를 문(Gate)으로 붙잡으면
+    # 문을 달기 전에 들어간 claim 이 막 생긴 행을 집어 ack 보다 먼저 failed 로 끝낼 수 있다. 그러면
+    # ack 는 미뤄지지 않고 곧장 지운다. macOS CI 에서 `purged is False` 가 그렇게 빨갰다
+    s = make_server(tmp_path, workers=False, shelf_max_bytes=10)
     try:
-        gate = Gate(monkeypatch)
         jid = finished_linux_job(s)
         digest = publish_payload(s, jid, tar_bytes([("out/a.txt", b"a" * 100)]))
+        assert s.store.shelf_item(jid).state == "pending"
         status, body = s.req(
             "POST", f"/jobs/{jid}/artifacts/ack", token="alice", json_body={"bundle_sha256": digest}
         )
         assert status == 200 and body["purged"] is False and body["deferred"] is True
-        gate.release.set()
-        s.app.copier.wake()
-        wait_shelf(s, jid, "failed")
-        wait_until(lambda: s.store.get_bundle(jid)["state"] == art.PURGED, what="purged")
+        assert s.store.get_bundle(jid)["state"] == art.READY
+        drain_copier(s)
+        item = s.store.shelf_item(jid)
+        assert item.state == "failed" and item.reason_code == "shelf_full"
+        assert s.store.get_bundle(jid)["state"] == art.PURGED
+        assert not (s.cfg.data_dir / "artifacts" / str(jid)).exists()
     finally:
         s.close()
 
 
-def test_e55_the_safety_valve(tmp_path, monkeypatch):
+def test_e55_the_safety_valve(tmp_path):
     s = make_server(tmp_path, retention_sweep_interval_seconds=1)
     try:
-        Gate(monkeypatch)  # 영영 안 풀린다
+        stop_copier(s)  # copier 가 끝내 돌지 않는다 — 청소 회차만 이 행을 본다
         jid = finished_linux_job(s)
         publish_payload(s, jid, tar_bytes([("out/a.txt", b"a")]))
         s.clock.advance(25 * 3600)

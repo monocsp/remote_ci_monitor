@@ -479,6 +479,7 @@ def open_scene(c: Chrome, served: Served, width: int, lang: str) -> None:
             " || {textContent: ''}).textContent.indexOf('notification_settings_golden_00') >= 0",
         )
     time.sleep(0.25)
+    c.frames()  # rAF 로 미룬 잘림 표시 · 띠 표지가 돈 뒤에 잰다(CPU 가 바쁘면 sleep 이 모자란다)
 
 
 def _wait(c: Chrome, js: str, timeout: float = 5.0) -> None:

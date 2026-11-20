@@ -166,8 +166,11 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
    같은 결과를 받는다. `--no-join` 은 따로 돌린다.
 9. **빠른 통과.** 프리셋에 가벼운 scope(`-f scope=fast` · `commit`)가 있으면 반복할 땐 그걸
    쓰고 머지에는 `full` 을 쓴다. 지금 각각 얼마나 걸리는지는 `rcm eta` 가 말해 준다.
-10. **클라이언트를 맞춘다.** 서버가 더 새 클라이언트를 요구하면 `rcm check` 의 `client` 행이
-    실패한다. `examples/session/update-client.sh` 가 서버의 wheel 을 설치한다.
+10. **클라이언트를 맞춘다.** 0.8.0 부터 설치한 `rcm` 은 서버 버전을 따라간다. 서버가 다른 버전을
+    돌리면 다음 명령이 서버의 클라이언트를 받아 sha256 을 확인하고 그 코드로 돈다.
+    `RCM_CLIENT_VERSION=installed` 를 두면 따라가지 않는다. 처음 설치할 때와 설치한 `rcm` 자체를
+    올릴 때는 `examples/session/update-client.sh` 를 쓴다
+    ([keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)).
 
 [사용법 가이드](docs/usage.ko.md)가 이 단계들을 주석 단 화면으로 보여 준다.
 

@@ -587,7 +587,10 @@ the copy is done.
 usage on top (`12.3 GB / 53.7 GB`). `/shelf/412/` shows the job (preset, inputs, branch, commit,
 when it finished, who asked), a grid of its images, a file table and *Download as zip*. A `.tar`,
 `.tar.gz` or `.tgz` among the artifacts is also unpacked once into `<name>.d/` next to it, so
-goldens shipped as a tarball show up as pictures. `/shelf/latest/golden-update?branch=dev` goes to
+goldens shipped as a tarball show up as pictures. The metadata macOS `tar` slips into a tarball
+(`._intro.png`, `._.`, `.DS_Store`, anything under `__MACOSX/`) is left out of `<name>.d/` and
+counted as skipped (`apple_double`); a file the job itself declared is kept whatever its name.
+`/shelf/latest/golden-update?branch=dev` goes to
 the newest kept job of that preset and branch — bookmark it. The pages are Korean by default and
 English with `?lang=en`. In the web UI a kept job's recent row shows `shelf ↗`, and the header
 links to the shelf.
@@ -1217,7 +1220,7 @@ the server never connects to workers). The short way to add one:
 # on the server
 rcm token add mbp --worker        # prints the secret once, then the line to type on the worker:
                                   #   RCM_WORKER_TOKEN=<token above> rcm worker --check
-# on the new machine (same rcm release as the server)
+# on the new machine (rcm 0.8.0 or newer follows the server's version; older: the same release)
 rcm init worker                   # ~/.config/rcm/worker.toml (mode 600) with server = "auto"
 export RCM_WORKER_TOKEN=<that token>
 rcm worker --check                # server · token kind · pool · fingerprint · presets
@@ -1275,6 +1278,16 @@ reports its running jobs as `lost` (`worker stopped`). `worker.toml` keys: `serv
 `"auto"`), `server_name`, `token` (or the env var), `pool`, `lanes`, `name`, `accept_any`,
 `data_dir`, `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
 `examples/worker.toml`. `rcm worker --once` runs at most one job and exits (cron, tests).
+
+**Following the server's version.** A worker installed from a wheel runs the server's version
+of `rcm`, as a session does. When it starts, it asks the server for its version (always afresh)
+and, when they differ, fetches the server's wheel and starts that version in the same process.
+When the server refuses its registration for the version, it does the same once more; when that
+fails it stops with exit 2 and says why. A running worker that sees another version in a
+heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_CLIENT_VERSION`, the `client-version` file and
+`rcm worker --no-follow` pin the version or turn this off, and an editable install does not follow.
+`rcm worker --check` never follows. Details, including what a service manager sees, are in
+[remote workers](operating.md#remote-workers).
 
 ## Which machine runs a job
 
@@ -1715,6 +1728,16 @@ label = "alice@laptop"                 # who the queue shows as the requester
 
 `RCM_SERVER`, `RCM_TOKEN` and `RCM_LABEL` override the file; `--server`, `--token` and `--by`
 override both. `RCM_CLIENT_CONFIG` (or `--client-config`) points at another file.
+
+Which code a session runs is not a `client.toml` key, because an older version would refuse the
+key. A session follows the server's version unless `RCM_CLIENT_VERSION` or a one-line file says
+otherwise: `follow`, `installed` (run this install) or a version such as `0.8.0`. The file is
+`$XDG_CONFIG_HOME/rcm/client-version`, else `~/.config/rcm/client-version`; blank lines and text
+after `#` are ignored. `--no-follow` beats `RCM_CLIENT_VERSION`, which beats `client-version`.
+With none of them a wheel install follows and an editable install does not. `rcm worker` reads
+the same setting (and takes `--no-follow` too). Downloaded clients live in `$XDG_CACHE_HOME/rcm`
+(`~/.cache/rcm`). See
+[keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 
 `worker.toml` keys: `server` (a URL, or `"auto"` to find it over mDNS), `server_name` (which
 server, when several advertise), `token` (or `RCM_WORKER_TOKEN`), `pool`, `lanes`, `name`,

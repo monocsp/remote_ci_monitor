@@ -100,10 +100,13 @@ Now prove the whole path before you trust it with real work:
 ![rcm check prints one row per thing it verified: server, client, token, presets, pools, timezone, storage](images/ui/cli-check.png)
 
 1. **server** — the address it used and the version it answered with. A version far from yours is
-   worth fixing; `rcm worker` refuses a mismatch outright. The `client` row below it says whether
-   yours is `same as server`, `older` or `newer`, and when it is older it prints the one command
-   that fixes it: the server hands out its own wheel at
-   `/client/remote_ci_monitor-<version>-py3-none-any.whl`, see
+   worth fixing; `rcm worker` refuses a mismatch outright. Your `rcm` follows the server by
+   itself: when the server runs another version, the next command downloads the server's own
+   wheel (`/client/remote_ci_monitor-<version>-py3-none-any.whl`), prints
+   `rcm: following server v…` once and runs that code. The `client` row below says so
+   (`following (installed v…)`), or says why it did not follow and prints the one command that
+   installs the server's wheel by hand. `RCM_CLIENT_VERSION=installed` (or `--no-follow` for one
+   command) keeps the installed rcm, and `--help` always shows the installed rcm's help. See
    [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 2. **token** — the name your token belongs to, and whether it is an admin token. `FAIL` here means
    the token is wrong or revoked, and nothing else will work.
@@ -499,7 +502,8 @@ new machine:
 rcm token add mbp --worker
 ```
 
-On the new machine, install the same rcm release as the server, then:
+On the new machine, install rcm (0.8.0 or newer follows the server's version by itself, as a
+session does; an older one must be the same release as the server), then:
 
 ```sh
 rcm init worker                  # ~/.config/rcm/worker.toml; server = "auto" finds the server
@@ -509,7 +513,14 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ```
 
 The last command writes a launchd file (a systemd unit on Linux) and prints the one command that
-starts it. From then on the worker measures its own environment and reports it. Back on any
+starts it. From then on the worker measures its own environment and reports it. When the server
+is upgraded, a running worker sees the new version in its next heartbeat, finishes the jobs it
+has without taking new ones, and starts the server's version in the same process. A worker that
+starts asks the server first and, if the versions differ, starts the server's version the same
+way. If the server refuses its registration for the version, it follows then too, or stops with
+exit 2 and says why, and the service starts it again. `RCM_CLIENT_VERSION=installed` (or `rcm worker --no-follow`)
+keeps the installed version
+([remote workers](operating.md#remote-workers)). Back on any
 session, `rcm machines` shows every machine, the tool versions it found and how many presets it
 can run — and for the rest, why not (`18 fvm missing`).
 

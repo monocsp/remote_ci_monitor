@@ -24,17 +24,18 @@ from remote_ci_monitor.config import WorkerConfig
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import RUNNING, SUCCEEDED
 from remote_ci_monitor.remote_worker import RemoteWorker
-from remote_ci_monitor.store import Store
 from shelfkit import (
     KEEPGOLD,
     MIB,
     PNG_1PX,
+    drain_copier,
     fixtures,
     item_dir,
     make_server,
     manifest_of,
     shelf_presets,
     shelve_bundle,
+    stop_copier,
     submit,
     upload,
     wait_job,
@@ -116,16 +117,12 @@ def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path):
     )  # 워커가 보낸 시각이지 받은 시각이 아니다
 
 
-def test_b8_a_fetch_then_ack_waits_for_the_shelf(srv, tmp_path, monkeypatch):
-    release = threading.Event()
-    orig = Store.claim_shelf_item
-
-    def gated(self: Store, now: Any) -> Any:
-        release.wait(30)
-        return orig(self, now)
-
-    monkeypatch.setattr(Store, "claim_shelf_item", gated)
+def test_b8_a_fetch_then_ack_waits_for_the_shelf(srv, tmp_path):
+    # copier 스레드를 멈추고 보관은 ack 뒤에 시험이 직접 돌린다. 도는 copier 의 claim 을 감싸
+    # 붙잡으면 감싸기 전에 들어간 claim 이 행을 집어 ack 보다 먼저 보관을 끝낼 수 있다
+    stop_copier(srv)
     jid = run_remote(srv, tmp_path)
+    assert srv.store.shelf_item(jid).state == "pending"
     client = Client(f"http://127.0.0.1:{srv.port}", srv.tokens["alice"])
     dest = tmp_path / "fetched.tar"
     client.download_bundle(jid, dest)
@@ -135,9 +132,10 @@ def test_b8_a_fetch_then_ack_waits_for_the_shelf(srv, tmp_path, monkeypatch):
     out = client.ack_artifacts(jid, sha)
     assert out["purged"] is False and out["deferred"] is True
     assert stored.is_file()
-    release.set()
-    wait_shelf(srv, jid)
-    wait_until(lambda: srv.store.get_bundle(jid)["state"] == art.PURGED, what="purged")
+    drain_copier(srv)
+    assert srv.store.shelf_item(jid).state == "active"
+    assert srv.store.get_bundle(jid)["state"] == art.PURGED
+    assert not stored.exists()
 
 
 def stalled_zip(srv, jid: int) -> tuple[http.client.HTTPConnection, Any]:

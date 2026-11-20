@@ -1,12 +1,12 @@
-# CI. 집계 잡 `test` 는 main 룰셋의 필수 체크다. 잡 이름을 바꾸면 룰셋도 같이 바꿔야 한다.
-# ⚠️ matrix 잡의 체크 이름은 `unit (3.11, ubuntu-latest)` 처럼 바뀌므로 룰셋은 `test` 만 본다.
+# GitHub 의 CI. 손으로만 돈다(`workflow_dispatch`).
+# 2026-11-20 오너 결정으로 dev · main 룰셋의 필수 체크는 GitHub 잡이 아니라 커밋 상태 `rcm/ci` 다.
+# 맥미니의 rcm 잡 `rcm-ci` 가 그 상태를 올린다(push 뒤 `rcm run rcm-ci --source git_ref --ref
+# <branch>`). 그래서 PR 과 push 로는 이 워크플로가 돌지 않는다. 맥미니가 고장 났을 때 오너가
+# 지시한 경우에만 Actions 화면에서 손으로 돌린다. 집계 잡 `test` 는 그때 한눈에 보려고 남겨 둔다.
 name: CI
 
 on:
-  pull_request:
-    branches: [main, dev]
-  push:
-    branches: [main, dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,10 +39,13 @@ jobs:
         run: ruff check .
       - name: ruff format --check
         run: ruff format --check .
+      # pytest-xdist 로 러너의 코어 수(ubuntu 4 · macOS 3)만큼 워커를 띄운다. 직렬로는 평균 한 코어도
+      # 다 못 쓰는 대기 위주 시험이라 코어 수만큼 거의 그대로 줄어든다. 로컬 기본(`pytest`)은 여전히
+      # 직렬이고 직렬도 통과해야 한다.
       - name: pytest
         env:
           RCM_CHROME: ${{ matrix.chrome }}
-        run: pytest
+        run: pytest -n auto
       - name: 웹 UI 순수 함수 (node --test)
         if: hashFiles('tests/web/*.test.js') != ''
         run: node --test tests/web/*.test.js

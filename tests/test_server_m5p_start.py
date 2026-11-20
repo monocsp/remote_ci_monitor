@@ -19,9 +19,11 @@ import pytest
 
 import remote_ci_monitor.server as server_mod
 from remote_ci_monitor.core import artifacts as art
+from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.store import Store
 from shelfkit import (
     PNG_1PX,
+    drain_copier,
     finished_linux_job,
     item_dir,
     make_server,
@@ -65,7 +67,11 @@ def test_b23_app_start_reconciles_the_shelf_before_lanes_janitor_and_copier(tmp_
         s.close()
 
 
-def test_g15_start_clears_shelf_staging_and_leaves_the_rest(tmp_path):
+def test_g15_start_clears_shelf_staging_and_leaves_the_rest(tmp_path, monkeypatch):
+    # copier 스레드는 띄우지 않는다. `kept` 는 keep 잡이라 기동 직후 copier 가 그것을 보관하면서
+    # `.staging/<잡>.<hex>/` 를 잠깐 만든다. 시험이 그 순간에 `.staging` 을 보면 화해가 못 지운
+    # 것으로 읽혀 macOS CI 에서 빨갰다. 화해를 본 뒤에 시험이 copier 를 직접 한 번 돌린다
+    monkeypatch.setattr(ShelfCopier, "start", lambda self: None)
     s = make_server(tmp_path, workers=False)
     kept = finished_linux_job(s)
     publish_payload(s, kept, tar_bytes([("out/a.txt", b"a")]))
@@ -83,6 +89,11 @@ def test_g15_start_clears_shelf_staging_and_leaves_the_rest(tmp_path):
         assert (arts / str(kept) / "bundle.tar").is_file()
         # M5e 화해는 돌지 않는다(§15.5) — 그 자국은 이번 마일스톤에서 남는다
         assert (arts / ".staging" / "7.abcd.part").exists() and (arts / "123").is_dir()
+        # 기동 뒤의 copier 도 제 작업 폴더를 남기지 않는다
+        assert s.store.shelf_item(kept).state == "pending"
+        drain_copier(s)
+        assert s.store.shelf_item(kept).state == "active"
+        assert list((shelf / ".staging").iterdir()) == [] and (shelf / "77").is_dir()
     finally:
         s.close()
 
@@ -116,7 +127,7 @@ def test_e59_a_lost_shelf_folder_stops_the_shelf_with_503(tmp_path):
         s.close()
 
 
-def test_g16_copying_rows_are_adopted_reverted_or_failed(tmp_path):
+def test_g16_copying_rows_are_adopted_reverted_or_failed(tmp_path, monkeypatch):
     s = make_server(tmp_path)
     adopted = shelve_bundle(s, {"out/a.png": PNG_1PX})
     manifest = item_dir(s, adopted) / "manifest.json"
@@ -131,15 +142,26 @@ def test_g16_copying_rows_are_adopted_reverted_or_failed(tmp_path):
     publish_payload(s, gone, tar_bytes([("out/c.txt", b"c")]))
     s.store.claim_shelf_item(s.clock.now)
     (s.cfg.data_dir / "artifacts" / str(gone) / "bundle.tar").unlink()
-    s.store.mark_bundles_purged([gone], art.PURGED, s.clock.now)
+    # (다) 묶음도 없다. `mark_bundles_purged` 는 보관 중인 묶음을 표시하지 않으므로(§15.2) 행을
+    # 직접 쓴다. 그것으로 표시하면 묶음이 살아 있는 것으로 남아 화해가 (나) 처럼 되돌리고, 뒤에
+    # copier 가 파일이 없는 것을 보고 접는다 — 시험이 copier 를 기다리지 않아 CI 에서 빨갰다
+    s.store._conn().execute(
+        "UPDATE job_artifacts SET state=?, purged_at=? WHERE job_id=?",
+        (art.PURGED, s.clock.now.timestamp(), gone),
+    )
     assert {s.store.shelf_item(j).state for j in (adopted, revert, gone)} == {"copying"}
+    # copier 스레드는 띄우지 않는다. 화해가 남긴 상태를 본 뒤 시험이 copier 를 직접 돌린다
+    monkeypatch.setattr(ShelfCopier, "start", lambda self: None)
     s.app.start()
     try:
         assert s.store.shelf_item(adopted).state == "active"
         assert manifest.stat().st_ino == ino  # 다시 풀지 않았다
-        wait_shelf(s, revert)
+        assert s.store.shelf_item(revert).state == "pending"
         item = s.store.shelf_item(gone)
         assert item.state == "failed" and item.reason_code == "bundle_gone"
+        drain_copier(s)
+        assert s.store.shelf_item(revert).state == "active"
+        assert s.store.shelf_item(gone).state == "failed"
     finally:
         s.close()
 

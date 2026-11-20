@@ -8,7 +8,7 @@
 >
 > 결정 번호는 **125~148**. 전부 추천값으로 구현하고 오너 확인을 기다린다.
 > 초안은 격리 설계 검토(P0 7건 · P1 16건 · 의견 9건)를 거쳐 이 판이 되었다. 검토가 바꾼 곳은 §14 에 적었다.
-> 테스트 시나리오는 `docs/m5p-test-scenarios-{a,b,c}.md`(역할마다 하나), 구현 중 바뀐 것은 §13 에 남긴다.
+> 테스트 시나리오는 `docs/m5p-test-scenarios-{a,b,c}.md`(역할마다 하나), 구현 중 바뀐 것은 §13 에 남겼다.
 
 ## 0. 한 줄
 
@@ -580,7 +580,148 @@ SPA 링크와 지우기 버튼, `RCM_SHELF_URL`, 웹훅 `shelf_url`, 문서 전�
 
 ## 13. 구현하며 바뀐 것
 
-(구현과 격리 검증 뒤 채운다.)
+역할마다 격리 에이전트가 구현했고(#217 P1 · #221 P2 · #220 P3), 구현하지 않은 다른 격리 에이전트가 이 문서와
+시나리오와 diff 만 보고 표를 실제로 다시 돌렸다. 아래는 그 둘을 거치며 이 문서와 달라진 것이다. 이 절과 §15 가
+다르면 이 절이 지금 코드의 동작이다.
+
+### 13.1 P1 규칙 · 저장 · 청소 (#217)
+
+#217 의 PR 본문은 앞부분이 P3 초안으로 바뀌어 있다. P1 이 한 일은 커밋 `622f322` · `94f5e6d` 의 본문에서 옮겼다.
+
+1. **잡 상태 복사는 `Store._set_state` 가 한다.** §15.1 은 `Store.finish` 가 같은 트랜잭션에서 보관 행의
+   `job_state` 를 고친다고 적었다. 그런데 잡이 끝나는 길은 finish 말고도 워커 유실, 대기 잡 취소, 기동 복구,
+   supersede 가 있다. 격리 검증에서 원격 잡이 `lost` 로 끝나자 보관 행의 잡 상태가 빈 칸으로 남았다(D3).
+   이제 종료 상태로 가는 `_set_state` 가 같은 트랜잭션에서 보관 행을 고치고 finish 에 따로 두었던 UPDATE 는 뺐다.
+2. **정리 회차는 계획 때의 `last_used_at` 이 그대로일 때만 표시한다**(격리 검증 D1). 회차가 계획을 읽은 뒤
+   누가 항목을 되살려도 그 항목을 지웠다. 이제 정리 대기 표시와 「지우는 중」 표시는
+   `mark_shelf(..., if_last_used=)` 로 조건을 걸어 쓰고 값이 바뀌었으면 이번 회차는 그 항목을 건너뛴다.
+3. **기동 화해는 링크인 `.staging` 을 따라가지 않는다**(격리 검증 D2). `.staging` 자체가 밖을 가리키는 링크면
+   화해가 링크 대상 안을 비웠다. 이제 `lstat` 으로 보고 링크면 링크만 지운다. 기준 루트는 `shelf_dir` 을
+   `resolve()` 한 값이다.
+4. 지우다 실패해도 `stale_since` 를 덮어쓰지 않는다(I2).
+5. 기동 화해에서 항목 하나가 예외를 내면 그 행은 그대로 두고 `error_code = reconcile_<종류>` 와 로그 한 줄만
+   남긴 채 다음 항목으로 간다(I3).
+6. 포트 없는 Host 의 같은 출처 판정은 Origin 의 포트를 그 scheme 의 기본 포트와 비교한다(I5, 결정 145).
+7. copier 와 ack 가 같은 묶음 폴더를 두 번 지울 수 있다. 해가 없어서 고치지 않고 주석으로 남겼다(I4).
+8. 이름 충돌 검사(§15.4)는 키 사전으로 찾는다. 5만 경로도 2초 안에 끝난다.
+9. **시험.** 시나리오 a 를 옮긴 다섯 파일에 340건을 두었다. 구현 전에 쓴 339건 가운데 338건이 빨갰고 초록
+   하나는 SQLite 버전 확인이다. 격리 검증 뒤 13건을 더했고 그 가운데 9건이 고치기 전에 빨갰다. 초록 넷은 이미
+   맞던 동작을 잠근다. mutcheck 에는 변이 넷(삭제 뒤 표시 순서 · 1시간 규칙 · ack 미루기 · keep 을 켤 때 행
+   세우기)을 더했다.
+
+### 13.2 P2 서버 · HTTP · 보안 (#221)
+
+1. **M5e 묶음 화해는 `App.start` 에 넣지 않았다**(§15.5). 시나리오 B23 · G14 · G15 는 그 호출을 기대했지만
+   시험은 「부르지 않는다」를 잠근다. 까닭은 §13.4 에 있다.
+2. **유효한 Bearer 는 Host 검사를 건너뛴다**(§15.5). 그래서 시나리오 E22 의 「admin 토큰을 단 DELETE 도 421」은
+   따르지 않았고 421 은 토큰 없는 요청만 받는다. 421 은 페이지 경로에서도 JSON 이다.
+3. **모듈을 나눴다.** §10 표는 copier 와 경로와 HTML 을 `server.py` 에 두었다. 그 파일이 이미 6천 줄이라
+   `shelf_copier.py` · `shelf_server.py`(App · Handler mixin) · `shelf_pages.py` 로 나누고 `server.py` 는 잇기만
+   한다. 청소 회차마다 copier 를 깨우려고 `Janitor` 에 `on_sweep` 인자를 더했다.
+4. **정하지 않았던 이름을 정했다.** SSE 종류는 `shelf_changed {job_id, state}` 다. manifest `skipped[]` 의 이유는
+   `unsafe_name` · `not_a_file` · `sparse` · `bad_encoding` 이고 `expand_skipped[]` 의 이유는 `too_big` ·
+   `too_many_files` · `unreadable` 이다. 손 삭제의 409 는 `shelf_item_busy`(zip 을 보내는 중)와
+   `shelf_item_copying`(보관하는 중)이다.
+5. **실패 갈래.** 펼칠 tar 하나 안에서 이름이 겹쳐도 항목 전체를 `failed(name_collision)` 로 접는다. 바깥 묶음을
+   못 읽거나 단계 중간에 예외가 나면 `copy_error`, 묶음 파일이 없으면 `bundle_gone` 이다.
+6. **`/api/shelf` 는 `{items, storage, display_timezone}` 이다.** 기본은 보관 중과 정리 대기이고 `state=all` 은
+   묘비를 뺀 전부이며 `limit` 은 1~1000 이다. 실패 항목을 `DELETE` 하면 묘비가 남는다.
+7. 글롭이 없는 프리셋의 도는 잡에 `rcm keep` 을 하면 `no_bundle(no_artifacts)` 다. 잡 행이 청소로 지워진 항목에는
+   `rcm keep` 이 404 이고 되살리기 버튼은 그대로 된다.
+8. **§16 의 서버 쪽을 이 PR 에 넣었다.** `GET /api/shelf/latest/<preset>?branch=` 는 `/api/shelf/N` 과 같은
+   JSON 을 주고 없으면 404 JSON 이며 시계를 돌리지 않는다. `/api/shelf/N` 의 파일 줄마다 `url`(호스트 없는
+   경로) · `sha256` · `size` · `type` · `expanded_from` 을 싣는다. 원본 `.tar.gz` 를 받으면 attachment 이고
+   바이트가 원본과 같다는 것을 시험이 잠근다. 이 경로들도 Host 허용 목록과 전송 슬롯 규칙을 따른다.
+9. **건너뛴 멤버에도 상한을 둔다**(격리 검증). 전에는 건너뛸 멤버를 세지 않았다. 심볼릭 링크 멤버 200만 개를
+   담은 12 MB tar.gz 하나가 187 MB manifest 를 만들었다. 그동안 copier 가 53초 동안 묶였고 서버 RSS 는
+   1.2 GB 까지 올랐다. 이제 건너뛸 멤버도 `max_artifact_files` 에 센다. 바깥 묶음이 넘으면 항목이 `failed(too_many_files)`
+   이고 펼칠 tar 가 넘으면 그 tar 의 펼침만 접는다. `skipped[]` 와 `expand_skipped[]` 는 200 줄까지만 적고
+   `skipped_count` · `expand_skipped_count` 로 수를 세며 `/api/shelf/N` 도 두 수를 싣는다. manifest 캐시는
+   개수가 아니라 바이트 합 64 MiB 로 묶는다.
+10. **업로드 도중 유실된 keep 잡이 끝난다**(격리 검증). 업로드를 마치고 finish 를 보내기 전에 죽은 원격 keep
+    잡은 영원히 `waiting` 이었고 `rcm keep` 은 `armed` 를 답했다. 기동 때 묶음 화해를 부르지 않아 묶음이
+    `uploading` 에 남기 때문이다. 끝난 잡의 묶음은 더 오지 않는다. 그래서 이제 잡이 끝났는데 묶음이 아직 오는
+    중이면 공개 상태는 `none(interrupted)` 이고 `rcm keep` 은 `no_bundle(interrupted)` 다. 묶음 없이 유실된 잡의
+    이유는 `unknown` 대신 `job_lost` 다. `SHELF_REASON_CODES` 에 `too_many_files` · `interrupted` · `job_lost` 를
+    더했고 같은 경우를 `armed` 로 잠갔던 P1 시험 A148 을 바꿨다.
+11. **zip 은 보내기 전에 멤버를 확인한다.** 모든 멤버가 그 자리에 그 크기로 있어야 200 이고 아니면 409
+    `shelf_item_damaged` 다. 보내는 도중에 멤버를 못 열면 끝 레코드를 쓰지 않고 연결을 끊는다. 받는 쪽은 망가진
+    zip 으로 실패를 안다.
+12. **시험.** 새 시험은 206건이다(`test_server_m5p` 92 · `test_server_m5p_security` 81 · `test_server_m5p_remote`
+    10 · `test_server_m5p_start` 7 · `test_shelf_pages_text_m5p` 13 · `test_web_browser_shelf` 3). 구현 전에 본
+    범위 195건 가운데 193건이 빨갰다. 원격 시험에서는 같은 프로세스의 진짜 `RemoteWorker` 가 진짜
+    `WorkerClient` 로 claim · 업로드 · finish 를 한다. 되살리기와 교차 출처 form 과 sandbox 문서는 진짜 Chrome
+    으로 본다. 변이 넷은 `shelf-file-csp-no-sandbox` · `shelf-path-check-before-decode` ·
+    `shelf-zip-uses-m5e-slots` · `shelf-host-allowlist-skipped` 다.
+
+### 13.3 P3 CLI · 웹 · 알림 · 문서 (#220)
+
+P3 는 P2 와 병렬로 만들었다. 처음에는 서버 응답을 이 문서의 모양대로 믿고 가짜 서버(`tests/fake_rcm_http.py`)로
+시험했고 P2 가 머지된 뒤 그 위로 올려 실제 응답과 대조하고 끝단 시험을 켰다.
+
+1. `--no-wait` 의 보관 줄도 `--timeout` · detach 와 같은 `(after the job finishes)` 다. 시나리오 CB3 은
+   `(once the job finishes)` 였다.
+2. `waiting` 이 60초 안에 안 끝나면 `(still copying)` 대신 `(waiting for the artifacts)` 를 붙인다. 묶음이 아직
+   오는 중인 것을 복사 중이라고 말하지 않는다.
+3. `rcm shelf rm` 에서 보관함에 없는 번호(404)는 §15.1 의 「없는 잡은 1」에 맞춰 종료 1 이다. 시나리오 CE14 는
+   2 였다.
+4. SPA 지우기 버튼은 §15.6 대로 토큰이 있으면 보인다. 시나리오 CG31 의 「admin 일 때만」은 따르지 않았고 그
+   시나리오가 제안한 변이 `spa-shelf-delete-without-admin` 도 넣지 않았다.
+5. **P2 의 실제 응답과 대조해 셋을 고쳤다.** 손 삭제의 409 는 본문 `state` 가 아니라 `reason_code` 로 가른다.
+   `shelf_item_copying` 은 「보관하는 중」, 그 밖은 「받는 중」이다. `rcm shelf` 는 `/api/shelf` 의
+   `display_timezone` 으로 날짜를, `storage` 로 사용량 줄을 그리고 status 를 따로 읽지 않는다.
+   `DELETE /shelf/N` 의 성공 본문은 `{job_id, deleted: true}` 다.
+6. **`rcm keep` 의 문장.** `retouched` 응답에는 `stale_at` 이 없어서 `rcm keep` 이 `/api/shelf/N` 을 한 번 더
+   읽어 새 정리 대기 예정일을 찍는다. 못 읽으면 날짜만 뺀다. `retried` 는 서버가 지우기 전의 실패 이유
+   (`previous_reason_code`, P3 가 서버 응답에 더했다)로만 말하고 `gone` 은 서버의 `reason_code`(묶음 상태
+   `purged` · `expired`)로 말한다.
+7. **503 은 종료 3 이다.** 보관함 폴더가 unavailable 이면 `rcm keep` · `rcm shelf` · `rcm shelf rm` ·
+   `rcm shelf get` 이 모두 3 으로 끝난다. §15.1 표는 `disabled` 를 「409 / 503 은 1」로 묶었지만 503 은 서버
+   쪽의 일시 문제라 갈랐다. 꺼진 보관함의 409 는 그대로 1 이다.
+8. `rcm shelf get` 은 `DIR` 에 이미 있는 같은 경로의 파일을 덮어쓰고 다른 파일은 지우지 않는다. 실패하면 자기가
+   만든 `DIR` 을 지운다. zip 응답에는 크기 상한(목록 크기 합에 멤버마다 머리말 몫과 64 KiB 를 더한 값)을 두고
+   풀린 멤버의 크기를 목록과 대조해 넘는 순간 멈춘다.
+9. `rcm check --config` 의 `local shelf` 행은 행 없는 폴더가 있으면 warn 이고 고아 수를 모르면(`orphans ?`)
+   ok 다.
+10. 서버 HTML 페이지의 문구 시험은 §15.6 대로 P2 로 갔다.
+11. **시작 전에 취소된 keep 잡의 알림에 404 링크가 실렸다**(격리 검증 D1). 대기 중 손 취소와 대기 중
+    supersede 가 그 경우다. 보관 행도 묶음 행도 없는 끝난 잡은 이제 `RCM_SHELF_URL` 이 빈 값이고 웹훅에
+    `shelf_url` 이 없다. 원격 잡은 끝날 때 묶음 행이 `uploading` 이라 링크가 그대로 산다. 그런 잡의 보관 줄은
+    `shelf: nothing to keep — the job never ran` 이다.
+12. **서버 경로의 `rcm gc --dry-run` 에 보관함 줄이 없었다**(격리 검증 D2). 문서는 있다고 적었다. 이제
+    `POST /gc` 의 dry-run 응답에 `shelf: {to_stale, to_delete}` 를 싣고 CLI 가 오프라인 dry-run 과 같은 줄을
+    찍는다.
+13. **문서.** 스크립트 예시를 실제 stderr 순서(`fetch its artifacts later` 줄 포함)로 고쳤다. 보관이 pending 일 때
+    보낸 링크가 뒤에 `shelf_full` 로 실패할 수 있다는 한 줄을 더했다. §2 의 완료 줄을 실제 출력 꼴로 바꿨다.
+14. **시험.** 끝단 시험 `tests/test_e2e_m5p_shelf.py` 8건(CB22~25 · CE21 · CG41 · CG42 와 §16 의 `rcm shelf get`)이
+    진짜 서버와 진짜 로컬 워커와 진짜 CLI 로 돈다. P2 를 들이기 전에는 7건이 skip 이었다. CB25 는 알림 스레드가
+    `App.start` 에서 설정을 읽기 때문에 포트를 안 뒤 `public_url` 을 넣고 그다음에 서버를 띄우게 고쳤다. 격리
+    검증 뒤 쓴 `tests/test_cli_m5p_verify.py` 는 26건 가운데 15건이 고치기 전에 빨갰다. 살아남은 변이
+    셋(zip 같은 이름 · 남의 서버 리다이렉트 · `local shelf` 의 `mode=ro`)을 잡는 시험도 그 파일에 있다. 변이
+    다섯은 `shelf-health-detection-removed` · `notify-shelf-url-dropped` · `shelf-wait-skipped` ·
+    `web-shelf-link-absolute` · `shelf-get-skips-sha256` 이다.
+
+### 13.4 함께 들어간 것과 남은 것
+
+- **정지 중 집기를 막았다(#222).** 로컬 레인과 원격 claim 은 정지 여부를 먼저 보고 부하 판정을 거친 뒤
+  `Store.claim` 을 불렀다. 두 단계가 한 트랜잭션이 아니어서 그 사이에 정지가 걸려도 잡을 집었다. 배포 절차는
+  정지를 걸고 도는 잡이 0 인지 본 뒤 재시작하므로 이 틈에 집힌 잡은 재시작에 lost 가 된다. 이제 `Store.claim` 이
+  `BEGIN IMMEDIATE` 바로 뒤에 정지를 다시 본다. M5o §10.4 에 적은 흔들리는 시험
+  `test_pause_resume_admin_only_and_visible_in_status` 의 진짜 원인이 이것이었다. 스트레스 실행에서 고치기 전
+  301건이던 실패가 고친 뒤 0건이다. 변이는 `claim-ignores-pause` 다.
+- **서버 wheel 이 skills 파일을 싣는다(#219).** 서버가 `/client/…whl` 로 조립하는 wheel 에 skills 아래 파일
+  (SKILL.md 5개, 셸 템플릿 8개, TOML 템플릿 2개)이 빠져 있었고 실행 비트도 없었다. 릴리스 wheel 과 같게 맞췄다.
+  M5q 가 이 wheel 을 실제로 실행할 코드로 쓰므로 먼저 고쳤다(M5q 결정 167). 변이는 `client-wheel-drops-skills` 다.
+- **기존 문제이고 고치지 않았다: 기동 때 M5e 묶음 화해를 부르지 않는다.** `reconcile_bundles_on_start` 는 M5e
+  부터 있지만 `App.start` 가 부르지 않는다. 이 마일스톤에서 넣으면 재시작을 넘겨 살아 있는 원격 잡의
+  `uploading` 묶음이 실패가 된다. 보관함 쪽 영향은 13.2 의 10번(`none(interrupted)`)이 막는다. 화해를 언제
+  어떻게 부를지는 따로 설계한다.
+- **기존 문제이고 고치지 않았다: M5e 수집기는 이름에 역슬래시가 든 파일 하나 때문에 묶음 전체를
+  `collect_failed` 로 버린다.** 보관함은 그 잡을 `none(failed)` 로 보인다.
+- 변이 수는 P1 넷, P2 넷, P3 다섯, #219 하나, #222 하나를 더해 64개에서 79개가 됐다. 여러 PR 이 같은 수와
+  CHANGELOG [Unreleased] 를 고쳐서 머지 때 맞췄다.
+- 릴리스는 v0.7.0(#223)이고 DB 는 v24 다. 운영 반영과 운영 golden-update 의 `keep = true` 는 §11 대로 그 뒤의
+  일이다.
 
 ## 14. 설계 검토가 바꾼 것 (초안 → 이 판)
 

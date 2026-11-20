@@ -47,9 +47,13 @@ summary and body and in a PR's title and body is written with the `korean-writin
 (`.claude/skills/korean-writing/SKILL.md`), which the `commit` and `pr` skills load before
 writing; long Korean documents can go to the `korean-writer` agent (`.claude/agents/`).
 
-`main` only takes a pull request from `dev`. The workflow job names `test` (`ci.yml`) and
-`main-from-dev-only` (`pr-policy.yml`) are wired into the ruleset: renaming one means changing the
-ruleset too.
+`main` only takes a pull request from `dev`. The required check on `dev` and `main` is the commit
+status `rcm/ci`, which the build machine's rcm job `rcm-ci` posts: after a push, run
+`rcm run rcm-ci --source git_ref --ref <branch> --no-wait`, then `rcm wait --job <N>`, and merge
+only when `rcm/ci` is green. `main` also requires `main-from-dev-only` (`pr-policy.yml`); renaming
+that job means changing the ruleset too. GitHub Actions' `ci.yml` no longer runs on pull requests
+or pushes: it is `workflow_dispatch` only, run by hand when the owner asks because the build
+machine is down.
 
 ## The build machine's own install
 
@@ -75,7 +79,7 @@ install it does nothing. The procedure is in
 ```sh
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for 79 known mutations
+python scripts/mutcheck.py           # the tests must go red for 107 known mutations
 scripts/smoke_install.sh             # the README's own commands on a fresh venv
 ```
 

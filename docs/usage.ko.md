@@ -97,9 +97,12 @@ chmod 600 ~/.config/rcm/client.toml
 ![rcm check 가 확인한 것마다 한 줄씩 찍는다 — server · client · token · presets · pools · timezone · storage](images/ui/cli-check.png)
 
 1. **server** — 어떤 주소를 썼고 서버가 어떤 버전으로 답했는지. 버전이 많이 다르면 맞추는 게
-   좋다(`rcm worker` 는 아예 거부한다). 바로 아래 `client` 행이 내 버전이 `same as server` 인지
-   `older`·`newer` 인지 말하고, 낮으면 고치는 명령 한 줄을 그대로 찍는다 — 서버가 자기 wheel 을
-   `/client/remote_ci_monitor-<version>-py3-none-any.whl` 로 주기 때문이다. 자세한 건
+   좋다(`rcm worker` 는 아예 거부한다). 내 `rcm` 은 서버 버전을 스스로 따라간다. 서버가 다른
+   버전을 돌리면 다음 명령이 서버의 wheel(`/client/remote_ci_monitor-<version>-py3-none-any.whl`)을
+   받아 `rcm: following server v…` 를 한 번 찍고 그 코드로 돈다. 바로 아래 `client` 행이 그것을
+   `following (installed v…)` 로 보여 준다. 따라가지 못했으면 그 이유와 서버 wheel 을 손으로 까는
+   명령 한 줄을 찍는다. 설치한 rcm 을 그대로 쓰려면 `RCM_CLIENT_VERSION=installed` 를 두거나 한
+   번만 `--no-follow` 를 붙인다. `--help` 는 언제나 설치한 rcm 의 도움말을 보인다. 자세한 건
    [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version).
 2. **token** — 이 토큰이 어느 이름의 것인지, 관리자인지. 여기가 `FAIL` 이면 토큰이 틀렸거나
    폐기된 것이고, 나머지는 전부 안 된다.
@@ -468,7 +471,8 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
 rcm token add mbp --worker
 ```
 
-새 컴퓨터에 서버와 같은 rcm 릴리스를 깔고:
+새 컴퓨터에 rcm 을 깐다. 0.8.0 이상은 세션처럼 서버 버전을 스스로 따라간다. 그보다 옛 버전이면
+서버와 같은 릴리스여야 한다. 그다음에 이렇게 친다.
 
 ```sh
 rcm init worker                  # ~/.config/rcm/worker.toml — server = "auto" 면 스스로 찾는다
@@ -478,7 +482,12 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ```
 
 마지막 명령은 launchd 파일(Linux 면 systemd 유닛)을 쓰고, 그것을 띄울 명령 한 줄을 찍는다. 그때부터
-워커는 자기 환경을 재서 보고한다. 아무 세션에서 `rcm machines` 를 치면 머신마다 찾은 도구 버전과
+워커는 자기 환경을 재서 보고한다. 서버를 올리면 돌고 있던 워커는 다음 heartbeat 에서 새 버전을
+알아챈다. 새 작업은 받지 않고 받아 둔 작업을 끝까지 마친 뒤 같은 프로세스에서 서버 버전으로 다시
+시작한다. 새로 뜨는 워커도 먼저 서버에 버전을 묻고, 다르면 같은 방식으로 서버 버전으로 다시 시작한다. 서버가 버전이 달라 등록을
+거절할 때도 그때 따라간다. 따라가지 못하면 이유를 말하고 종료 2 로 끝나고, 서비스가 다시 띄운다.
+설치한 버전을 그대로 쓰려면 `RCM_CLIENT_VERSION=installed` 를 두거나 `rcm worker --no-follow` 로
+띄운다([remote workers](operating.md#remote-workers)). 아무 세션에서 `rcm machines` 를 치면 머신마다 찾은 도구 버전과
 돌릴 수 있는 프리셋 수, 나머지는 왜 안 되는지(`18 fvm missing`)가 나온다.
 
 어떤 작업을 가져가는지는 프리셋이 정한다. 풀에 묶인 프리셋은 그 풀에서만 돌고,

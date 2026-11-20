@@ -1200,6 +1200,7 @@ def test_heartbeat_response_lists_only_this_workers_cancelling_jobs(srv):
     status, body = srv.heartbeat("build-02", jobs=[a, b])
     assert status == 200, body
     assert body.pop("generation")  # M5n — 세대(키 추가만)
+    assert body.pop("server_version") == __version__  # M5q B2 — 서버 버전(키 추가만)
     assert body == {"cancel": [], "paused": False, "timeout_seconds": TIMEOUT}
     assert srv.cancel(a)[1]["state"] == CANCELLING
     assert srv.cancel(c)[1]["state"] == CANCELLING

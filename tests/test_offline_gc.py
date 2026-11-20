@@ -103,6 +103,23 @@ def old_db(tmp_path):
     conn.close()
 
 
+@pytest.fixture(autouse=True)
+def private_tempdir(tmp_path):
+    """dry-run 사본이 떨어지는 `$TMPDIR` 를 시험마다 따로 둔다. `scratch_copies()` 는 그
+    디렉터리의 `rcm-gc-dryrun-*` 를 센다. 시스템 임시 디렉터리를 같이 쓰면 pytest-xdist 의 다른
+    워커가 돌리는 `rcm gc --dry-run`(이 파일 밖에도 열 곳이 넘는다)의 사본이 「남았다」로 세이고,
+    남은 사본을 치우는 시험이 남의 사본까지 지운다. 시험이 `monkeypatch.undo()` 를 불러도 풀리지
+    않게 monkeypatch 를 쓰지 않고 직접 되돌린다."""
+    scratch = tmp_path / "tmpdir"
+    scratch.mkdir()
+    saved = tempfile.tempdir
+    tempfile.tempdir = str(scratch)
+    try:
+        yield
+    finally:
+        tempfile.tempdir = saved
+
+
 def scratch_copies() -> list[str]:
     """임시 디렉터리에 남은 dry-run 사본."""
     return sorted(n for n in os.listdir(tempfile.gettempdir()) if n.startswith("rcm-gc-dryrun-"))
