@@ -430,7 +430,7 @@ class GitHubApi:
                 return Reply(304, None, headers)
             try:
                 raw = e.read()
-            except OSError:
+            except (OSError, http.client.HTTPException):  # 끊긴 본문(IncompleteRead)
                 raw = b""
             msg = _json(raw)
             text = msg.get("message", "") if isinstance(msg, dict) else ""

@@ -317,9 +317,11 @@ class Round:
         if self.dry_run:
             print(f"would post {state} {context} on {sha[:12]}: {description}")
             return True
-        # job_url = true 면 설명의 잡 번호로 rcm 잡 링크를 싣는다. 기본은 비운다(명세 §2.4)
+        # job_url = true 면 설명의 잡 번호로 서버 화면의 잡 링크를 싣는다(서버 job_url() 과 같은
+        # `/#/jobs/<N>` — `/jobs/<N>` 은 JSON 이다). 기본은 비운다(명세 §2.4)
         job = cc.read_word(description)[1]
-        target = f"{self.cfg.server}/jobs/{job}" if self.cfg.job_url and job is not None else None
+        on = self.cfg.job_url and job is not None
+        target = f"{self.cfg.server}/#/jobs/{job}" if on else None
         reply = self.gh("post_status", sha, state, context, description, target_url=target)
         word = description.split(" · ")[0]
         if not reply.ok:
