@@ -482,8 +482,9 @@ rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.work
 ```
 
 마지막 명령은 launchd 파일(Linux 면 systemd 유닛)을 쓰고, 그것을 띄울 명령 한 줄을 찍는다. 그때부터
-워커는 자기 환경을 재서 보고한다. 서버를 올리면 워커는 다음에 뜰 때 새 버전으로 간다. 먼저 서버에
-버전을 묻고, 다르면 같은 프로세스에서 서버 버전으로 다시 시작한다. 서버가 버전이 달라 등록을
+워커는 자기 환경을 재서 보고한다. 서버를 올리면 돌고 있던 워커는 다음 heartbeat 에서 새 버전을
+알아챈다. 새 작업은 받지 않고 받아 둔 작업을 끝까지 마친 뒤 같은 프로세스에서 서버 버전으로 다시
+시작한다. 새로 뜨는 워커도 먼저 서버에 버전을 묻고, 다르면 같은 방식으로 서버 버전으로 다시 시작한다. 서버가 버전이 달라 등록을
 거절할 때도 그때 따라간다. 따라가지 못하면 이유를 말하고 종료 2 로 끝나고, 서비스가 다시 띄운다.
 설치한 버전을 그대로 쓰려면 `RCM_CLIENT_VERSION=installed` 를 두거나 `rcm worker --no-follow` 로
 띄운다([remote workers](operating.md#remote-workers)). 아무 세션에서 `rcm machines` 를 치면 머신마다 찾은 도구 버전과

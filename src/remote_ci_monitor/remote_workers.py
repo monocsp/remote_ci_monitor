@@ -949,6 +949,8 @@ class RemoteWorkersMixin:
             "timeout_seconds": self.config.server.worker_timeout_seconds,
             # 세대가 바뀌었으면 워커는 `/worker/spec` 을 다시 받고 다시 잰다(M5n §4.2)
             "generation": self.generation,  # type: ignore[attr-defined]
+            # 워커가 서버 버전이 바뀐 것을 보고 드레인한다(M5q ③ · PR B2). 옛 워커는 무시한다
+            "server_version": self.version,
         }
 
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:

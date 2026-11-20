@@ -3957,16 +3957,30 @@ def _worker_follow_409(args: argparse.Namespace, cfg: Any, worker: Any, e: Any) 
     if getattr(args, "once", False) or state is None:
         _err(e.message)  # `--once` 의 ② 는 오늘처럼 끝난다(§14 B질문4)
         return e.code
-    if boot is not None:
-        # 따라간 자식은 다시 따라가지 않는다(결정 161) — 설치본으로 다시 시작하는 길은 B2 의 몫이다
-        if boot.get("loaded"):
-            _err(f"{e.message} · not following: already following v{__version__}")
-        else:
-            _err(f"{e.message} · not following: {follow.reason_text('boot_failed')}")
-        return e.code
     setting = state.setting
     if setting.mode == follow.MODE_PIN and setting.pin != e.version:
+        # 고정이 원인이다 — 고정한 버전으로 도는 따라간 자식도 같은 문장이다(B1 격리 검증)
         _err(f"{e.message} · pinned by {_setting_where(setting)}")
+        return e.code
+    if boot is not None:
+        # 따라간 자식은 스스로 다시 따라가지 않는다(결정 161). 설치본 부트로더로 다시 실행해
+        # 설치본이 ① 부터 하게 한다(§14 B질문7). 300초 안에 이미 재실행했으면 감독자에게 맡긴다
+        if boot.get("loaded"):
+            if not worker.restart_window_open():
+                worker.log(f"register: server runs v{follow.clean(e.version)} — following")
+                return _worker_exec_installed(args, worker, e.code)
+            _err(f"{e.message} · not following: already following v{__version__}")
+        else:
+            # BOOT 가 그 폴더에 `.bad` 를 남겼다 — 사람이 할 일을 첫 실패에도 한 줄로. 다음 판(①
+            # 의 `cache_broken`)과 같은 순서로 안내를 먼저 쓴다
+            path = boot.get(follow.ENV_FOLLOWED_PATH)
+            if path:
+                _err(f"remove {path} to fetch it again")
+            _err(f"{e.message} · not following: {follow.reason_text('boot_failed')}")
+        return e.code
+    if state.warn == "cache_broken" and state.server_version == e.version:
+        # ① 이 이미 그 폴더를 말했다(경고와 치우는 안내) — 같은 폴더로 다시 따라가려 하지 않는다
+        _err(f"{e.message} · not following: {state.warn_text}")
         return e.code
     if setting.mode == follow.MODE_INSTALLED:
         tail, _ = _follow_tail(dataclasses.replace(state, warn=None, warn_text=None))
@@ -3997,7 +4011,9 @@ def cmd_worker(args: argparse.Namespace) -> int:
     """`rcm worker` — 원격 워커 프로세스(M5b-3). 토큰은 RCM_WORKER_TOKEN 또는 worker.toml 로만.
 
     서버 버전을 따라간다(M5q B1): 기동할 때(①)와 기동 등록이 버전 불일치 409 일 때(②).
-    `--check` 와 인자 목록으로 부른 `main(argv)`(결정 162)는 따라가지 않는다."""
+    돌다가 서버 버전이 바뀌면(③ heartbeat · ④ 레인 재등록 409) 드레인한 뒤 설치본 부트로더로
+    같은 PID 에서 다시 실행한다(B2). `--check` 와 인자 목록으로 부른 `main(argv)`(결정 162)는
+    따라가지 않는다."""
     from remote_ci_monitor.client import WorkerClient
     from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit, WorkerFollow
 
@@ -4014,30 +4030,40 @@ def cmd_worker(args: argparse.Namespace) -> int:
     if getattr(args, "check", False):
         return _worker_check(cfg, client)
     following = bool(getattr(args, "follow_enabled", False))
+    state = None
     if following:
         try:
-            _worker_follow_start(args, cfg)
+            state = _worker_follow_start(args, cfg)
         except ConfigError as e:
             return _usage(str(e))
+    follows, tail = _worker_follow_policy(state)
     rediscover = _worker_rediscover(cfg) if getattr(cfg, "discovered_server", False) else None
     worker = RemoteWorker(
-        cfg, client=client, once=bool(getattr(args, "once", False)), rediscover=rediscover
+        cfg,
+        client=client,
+        once=bool(getattr(args, "once", False)),
+        rediscover=rediscover,
+        follows=follows,
+        follow_tail=tail,
     )
 
     def _stop(signum: int, _frame: Any) -> None:
-        if worker.stopping.is_set():
+        # `stopping` 이 아니라 `signalled` 로 두 번째 신호를 가린다 — 드레인 끝에 `run()` 이 켠
+        # `stopping` 뒤의 첫 신호는 평범한 멈춤이다(§14 B질문18)
+        if worker.signalled:
             # 두 번째 신호는 즉시 — SystemExit 은 `run()` 의 finally 가 레인 join(grace+10초)으로
             # 붙잡고, 레인 스레드는 daemon 이 아니라 인터프리터 종료도 기다린다
             _info(f"signal {signum} again: exiting now")
             sys.stderr.flush()
             os._exit(1)
+        worker.signalled = True
         _info(f"signal {signum}: stopping — running jobs are reported as lost")
         worker.stop()
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
     try:
-        return worker.run()
+        code = worker.run()
     except WorkerFollow as e:
         if not following:
             _err(e.message)
@@ -4047,6 +4073,40 @@ def cmd_worker(args: argparse.Namespace) -> int:
         if e.message:
             _err(e.message)
         return e.code
+    if worker.restart_for is None or worker.signalled or not following:
+        return code
+    # 드레인이 끝났다 — 잡은 다 보고했다. 측정 프로브를 정리하고 설치본으로 다시 실행한다(§3.3 의 5)
+    worker.release_probes()
+    worker.log(
+        f"drained — restarting through the installed rcm for v{follow.clean(worker.restart_for)}"
+    )
+    return _worker_exec_installed(args, worker, code)
+
+
+def _worker_follow_policy(state: Any) -> tuple[bool, str | None]:
+    """(드레인하나, 따라가지 않는 이유). 설정이 `follow` 면 ③ · ④ 에서 드레인한다. 고정 ·
+    installed · editable 은 드레인하지 않고, ③ 의 로그와 ④ 의 종료 문장에 붙일 꼬리를 받는다
+    (§14 B질문19). 따라가지 않는 호출(`main(argv)`)은 둘 다 없다. 다시 실행은 POSIX 의 exec
+    이므로 다른 OS 는 드레인하지 않는다(결정 172)."""
+    if state is None:
+        return False, None
+    if state.setting.mode == follow.MODE_FOLLOW:
+        return os.name == "posix", None
+    tail, _ = _follow_tail(dataclasses.replace(state, followed=False, warn=None, warn_text=None))
+    return False, tail
+
+
+def _worker_exec_installed(args: argparse.Namespace, worker: Any, code: int) -> int:
+    """설치본 부트로더로 다시 실행한다. 진짜 exec 는 돌아오지 않는다. 실패는 로그 한 줄과 종료 1 —
+    감독자가 다시 띄우면 설치본이 ① 부터 한다(§3.4 · W9)."""
+    try:
+        follow.restart_via_installed(
+            args.follow_argv, environ=os.environ, execve=args.follow_execve
+        )
+    except OSError as e:
+        worker.log(f"restart failed: {e.strerror or e}")
+        return 1
+    return code  # 가짜 execve 가 돌아온 경우(시험)
 
 
 def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
