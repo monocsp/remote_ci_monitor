@@ -210,7 +210,10 @@ differs.
 
 Queued jobs and a paused queue survive; jobs that were running when the service stopped become
 `lost` (exit 3 for waiting sessions). Sessions may run a different patch version — `rcm check`
-shows both versions.
+shows both versions. From 0.8.0 sessions and remote workers follow the new server by themselves:
+the next command fetches the server's client, and a running worker finishes its jobs and starts
+again on the new version. `RCM_CLIENT_VERSION`, `~/.config/rcm/client-version` or `--no-follow`
+keeps one where it is ([keeping clients on the server's version](#keeping-clients-on-the-servers-version)).
 
 A copy you make yourself, with the server running, must use SQLite's own backup — `cp` misses
 the write-ahead log:

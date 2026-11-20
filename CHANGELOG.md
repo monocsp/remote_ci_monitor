@@ -7,28 +7,6 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
-### Added
-- **A running remote worker follows the server when the server changes.** Every heartbeat answer
-  now carries `server_version`. When it differs, a worker that follows drains: it takes no new
-  jobs, lets the running ones finish and reports them with their own result, then starts the
-  installed rcm again in the same process (`exec`, so launchd and systemd see the same PID and no
-  restart), which follows the server from the beginning. The log says
-  `[rcm worker] server runs v0.8.1 — draining: no new claims, restarting when running jobs finish`
-  and `drained — restarting through the installed rcm for v0.8.1`. A lane whose new registration
-  is refused for the version drains the same way instead of stopping the worker and losing the
-  other lanes' jobs. The drain is cancelled if the server goes back to the worker's version. A
-  job that finishes while the server is being replaced is reported again once the server answers
-  (and before a restart or a new registration) for up to a minute instead of being given up after
-  three tries. Within 5 minutes of such a restart
-  (`RCM_WORKER_RESTARTED_AT`) a heartbeat does not drain again. A worker started from the cache
-  whose registration is refused restarts through the installed rcm instead of exiting 2. Pinned,
-  `installed` and editable workers do not drain and log one line
-  (`server v0.8.1 — not following (editable install)`); `--once` ignores the heartbeat and, after
-  a refused lane registration, exits 2 once its jobs are reported. A stop signal during a drain is
-  an ordinary stop. A heartbeat refused because the server forgot the worker now says
-  `heartbeat: worker not registered` instead of `server unreachable`.
-  ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
-
 ### Fixed
 - **A version no longer stays `running` when its release round ends at once.** The server linked
   a version to a driver round only after the round had started, so a round that exited before
@@ -36,30 +14,8 @@ of a key bumps that number and is listed here.
   found no version to return to `editing`, and the version stayed `running` with nothing running
   until the server restarted. Starting a round and linking it now finish before that round's exit
   is handled. ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
-- **A worker's messages about a broken or pinned cached copy say it once and say it right.** A
-  worker pinned to a cached version that the server refuses now ends with
-  `· pinned by RCM_CLIENT_VERSION`, not `· not following: already following v…`. A worker whose
-  cached copy is broken prints `rcm: remove <folder> to fetch it again` once, also on the first
-  start that finds it broken, and no longer logs `register: server runs v… — following` before
-  saying it cannot. ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
-- **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
-  `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file
-  with extended attributes; the shelf unpacked them into `<name>.d/` and, ending in `.png`, they
-  showed as broken images in the item's grid (23 of 48 files of one app-map-shots job). Unpacking
-  now leaves out `._*`, `.DS_Store` and anything under `__MACOSX/` and lists them under the
-  item's skipped members with the reason `apple_double`. Files the job declared itself are kept as
-  they are, whatever their name. Items already on the shelf do not change.
-  ([#229](https://github.com/monocsp/remote_ci_monitor/pull/229))
 
-## [0.7.0] - 2026-11-19
-
-### Breaking changes
-- **Database schema v24 — the shelf.** `jobs` gains `keep` (frozen when a job is submitted) and a
-  `shelf_items` table holds what is kept, with its own copy of the job's preset, inputs, branch
-  and commit so an item outlives the job row. A v23 file is backed up
-  (`backup/rcm.sqlite3.v23.bak`) and migrated on start; an older build refuses a v24 file and
-  points at that backup. Presets refuse unknown keys, so add `keep = true` to a preset only after
-  the server runs this version. ([#217](https://github.com/monocsp/remote_ci_monitor/pull/217))
+## [0.8.0] - 2026-11-20
 
 ### Added
 - **A session's `rcm` runs the server's version by itself.** Before a command that talks to the
@@ -88,6 +44,60 @@ of a key bumps that number and is listed here.
   `RCM_CLIENT_VERSION` and `client-version` file as a session, and `rcm worker --no-follow` keeps
   the installed version. `--once` follows only when it starts; `--check` never follows.
   ([#231](https://github.com/monocsp/remote_ci_monitor/pull/231))
+- **A running remote worker follows the server when the server changes.** Every heartbeat answer
+  now carries `server_version`. When it differs, a worker that follows drains: it takes no new
+  jobs, lets the running ones finish and reports them with their own result, then starts the
+  installed rcm again in the same process (`exec`, so launchd and systemd see the same PID and no
+  restart), which follows the server from the beginning. The log says
+  `[rcm worker] server runs v0.8.1 — draining: no new claims, restarting when running jobs finish`
+  and `drained — restarting through the installed rcm for v0.8.1`. A lane whose new registration
+  is refused for the version drains the same way instead of stopping the worker and losing the
+  other lanes' jobs. The drain is cancelled if the server goes back to the worker's version. A
+  job that finishes while the server is being replaced is reported again once the server answers
+  (and before a restart or a new registration) for up to a minute instead of being given up after
+  three tries. Within 5 minutes of such a restart
+  (`RCM_WORKER_RESTARTED_AT`) a heartbeat does not drain again. A worker started from the cache
+  whose registration is refused restarts through the installed rcm instead of exiting 2. Pinned,
+  `installed` and editable workers do not drain and log one line
+  (`server v0.8.1 — not following (editable install)`); `--once` ignores the heartbeat and, after
+  a refused lane registration, exits 2 once its jobs are reported. A stop signal during a drain is
+  an ordinary stop. A heartbeat refused because the server forgot the worker now says
+  `heartbeat: worker not registered` instead of `server unreachable`.
+  ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
+
+### Fixed
+- **A worker whose lane could not register again now exits 2, not 0.** When the server forgot a
+  worker and refused its new registration (a different version), `rcm worker` stopped its lanes
+  and exited 0, so a service with `SuccessfulExit = false` or `Restart=on-failure` never started
+  it again and the machine silently left the pool. It now exits 2 and is started again.
+  `rcm worker --check` also strips control characters from the server's version in its `server`
+  row and cuts it at 64 characters. ([#231](https://github.com/monocsp/remote_ci_monitor/pull/231))
+- **A worker's messages about a broken or pinned cached copy say it once and say it right.** A
+  worker pinned to a cached version that the server refuses now ends with
+  `· pinned by RCM_CLIENT_VERSION`, not `· not following: already following v…`. A worker whose
+  cached copy is broken prints `rcm: remove <folder> to fetch it again` once, also on the first
+  start that finds it broken, and no longer logs `register: server runs v… — following` before
+  saying it cannot. ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
+- **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
+  `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file
+  with extended attributes; the shelf unpacked them into `<name>.d/` and, ending in `.png`, they
+  showed as broken images in the item's grid (23 of 48 files of one app-map-shots job). Unpacking
+  now leaves out `._*`, `.DS_Store` and anything under `__MACOSX/` and lists them under the
+  item's skipped members with the reason `apple_double`. Files the job declared itself are kept as
+  they are, whatever their name. Items already on the shelf do not change.
+  ([#229](https://github.com/monocsp/remote_ci_monitor/pull/229))
+
+## [0.7.0] - 2026-11-19
+
+### Breaking changes
+- **Database schema v24 — the shelf.** `jobs` gains `keep` (frozen when a job is submitted) and a
+  `shelf_items` table holds what is kept, with its own copy of the job's preset, inputs, branch
+  and commit so an item outlives the job row. A v23 file is backed up
+  (`backup/rcm.sqlite3.v23.bak`) and migrated on start; an older build refuses a v24 file and
+  points at that backup. Presets refuse unknown keys, so add `keep = true` to a preset only after
+  the server runs this version. ([#217](https://github.com/monocsp/remote_ci_monitor/pull/217))
+
+### Added
 - **A job's files can stay on the server and open in any browser: the shelf.** `rcm run --keep`
   (or `keep = true` on a preset, or `rcm keep N` while the job's bundle still exists) copies the
   job's artifacts into a folder on the build machine and prints a link,
@@ -137,12 +147,6 @@ of a key bumps that number and is listed here.
   ([#213](https://github.com/monocsp/remote_ci_monitor/pull/213))
 
 ### Fixed
-- **A worker whose lane could not register again now exits 2, not 0.** When the server forgot a
-  worker and refused its new registration (a different version), `rcm worker` stopped its lanes
-  and exited 0, so a service with `SuccessfulExit = false` or `Restart=on-failure` never started
-  it again and the machine silently left the pool. It now exits 2 and is started again.
-  `rcm worker --check` also strips control characters from the server's version in its `server`
-  row and cuts it at 64 characters. ([#231](https://github.com/monocsp/remote_ci_monitor/pull/231))
 - **The client wheel the server hands out now carries the packaged skills.** It shipped only the
   `.py` files under `skills/`, so a client installed from `/client/…whl` printed three of the five
   skills without a description in `rcm skills list`, and `rcm skills install` wrote no `SKILL.md`
@@ -1886,7 +1890,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.5.1...v0.6.0
