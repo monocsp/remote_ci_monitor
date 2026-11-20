@@ -7,6 +7,35 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`tools/merge_pr.py <N>` is the one way to merge a pull request in this repository.** It pins
+  the PR's head sha and refuses while any check run or status on that sha is pending (`--wait`
+  waits up to `--timeout`, and refuses if the head moves), failed, was cancelled or timed out, or
+  `test` is missing; it needs a `verified: <head sha>` PR comment from the isolated verification
+  (`--no-verify "<reason>"` posts the reason instead) and no conflict, then merges exactly that
+  sha as a merge commit titled `<title> (#N)`. `--dry-run` changes nothing, `--delete-branch`
+  removes the head branch. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer.
+- **A `PreToolUse` hook, `tools/guard_merge.py`, refuses every other way to merge** in a Claude
+  Code session: `gh pr merge`, `gh api … -X PUT …/pulls/<N>/merge` in any option order, the same
+  through `curl`, and a script being written that runs one. A watcher had merged twice by REST
+  with checks still pending.
+- **`tools/guard_production.py` refuses a build that would migrate an older database in place**:
+  `rcm serve`, `rcm worker` or `rcm token` whose effective `data_dir` holds an `rcm.sqlite3`
+  older than the build's `DB_VERSION` (read from the file header, without connecting). Prefix
+  `RCM_ALLOW_MIGRATE=1` when that is the point. This works on machines without a production
+  install too.
+- `python scripts/mutcheck.py --list` prints every mutant with its file, description and count;
+  `AGENTS.md` and `CONTRIBUTING.md` no longer carry a mutation count.
+
+### Changed
+- `tools/guard_naming.py` no longer refuses a title or commit subject the shell fills in
+  (`--title "$T"`, `"${T}"`, backticks, `$(…)` other than a heredoc): it cannot know the value,
+  and the refusal used to stop the whole command, the `git commit` before it included. It now
+  refuses `gh pr create|edit --body-file` with a name every session picks (`pr.md`,
+  `pr_body.md`, `body.md`, …) and asks for `pr-body-<branch>.md`.
+- Tests stub reverse DNS unless marked `allow_reverse_dns`, and a test that takes more than 20
+  seconds fails the run unless marked `slow`.
+
 ### Fixed
 - **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
   `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file

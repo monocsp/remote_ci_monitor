@@ -1288,6 +1288,7 @@ def test_g21_failure_only_keep(srv):
     assert srv.store.shelf_item(bad).job_state == FAILED
 
 
+@pytest.mark.slow
 def test_g22_a_cancelled_keep_job_is_still_shelved(srv):
     jid = run_local(srv, "slowkeep", wait=False)
     wait_until(lambda: srv.store.get_job(jid).state == "running", what="running")

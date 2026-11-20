@@ -405,14 +405,15 @@ def test_readme_section_mentions(prefix: str, pattern: str):
     assert has(section(read(path), prefix), pattern), f"{path.name} '## {prefix}' lacks /{pattern}/"
 
 
-def test_contributing_development_counts_the_mutations_mutcheck_actually_has():
-    """문서의 숫자와 `scripts/mutcheck.py` 의 변이 수가 같아야 한다 — 손으로 센 숫자는 썩는다."""
+def test_contributing_development_points_at_mutcheck_instead_of_a_count():
+    """변이 수는 문서에 적지 않는다 — 병렬 PR 이 저마다 변이를 더해 머지마다 그 숫자가 충돌했다
+    (2026-11-20 사건 5). 문서는 `scripts/mutcheck.py` 를 가리키고, 수는 `--list` 가 센다."""
     n = len(re.findall(r"^        name=", read(MUTCHECK), re.M))
     assert n >= 8
-    text = read(CONTRIBUTING)
-    assert "three known mutations" not in text
-    dev = section(text, "Development")
-    assert has(dev, rf"\b{n}\b[^\n]{{0,40}}mutation|mutation[^\n]{{0,40}}\b{n}\b", re.M | re.I)
+    dev = section(read(CONTRIBUTING), "Development")
+    assert has(dev, r"every mutant in `?scripts/mutcheck\.py`?"), dev
+    assert not has(dev, r"\b\d+\b[^\n]{0,40}mutation|mutation[^\n]{0,40}\b\d+\b", re.I), dev
+    assert "--list" in read(MUTCHECK)
 
 
 # ── CHANGELOG.md (§6) ────────────────────────────────────────────────────────

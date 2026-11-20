@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """뮤테이션 확인 — 테스트가 실제로 빨개지는지 본다(PLAN.md 「테스트·품질」).
 
-`src/` + `tests/` + `pyproject.toml` 을 임시 디렉터리에 복사하고 변이 하나를 넣은 뒤 그 복사본에서
-pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
-그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
+`src/` + `tests/` + `tools/` + `pyproject.toml` 을 임시 디렉터리에 복사하고 변이 하나를 넣은 뒤 그
+복사본에서 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을
+못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5p P2 — `shelf-*` 넷: 파일 응답에서 `sandbox` CSP 를 뺌 · 퍼센트 디코딩 뒤의 경로 검사를 뺌 ·
@@ -116,13 +116,19 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
      을 안 실음 · 기동 ① 이 10분 기록을 씀 · 레인 재등록이 막혀도 종료 0 · `WorkerFollow` 가
      `WorkerExit` 가 아님 (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
 
-사용: python scripts/mutcheck.py [--keep] [--only NAME]
+  작업이 길어진 원인을 막는 장치 — `guard-*` · `merge-pr-*` 다섯: `guard_naming` 이 셸 치환
+     값(`--title "$T"`)을 다시 글자로 잼 · PR 본문 파일 이름 검사 제거 · `guard_merge` 의 REST
+     머지(`gh api -X PUT …/pulls/N/merge`) 패턴 제거 · `merge_pr` 가 pending 체크를 안 봄 ·
+     `guard_production` 의 옛 DB 판 비교 제거 (`tools/`, 2026-11-20 사건 6d · 6e · 6c · 2 · 6f)
+
+사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list]
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1177,6 +1183,50 @@ MUTANTS = (
         new="class WorkerFollow(Exception):\n",
         tests=("tests/test_cli_worker_m5q.py",),
     ),
+    # ── 작업이 길어진 원인을 막는 장치 (2026-11-20 사건 2 · 6c · 6d · 6e · 6f) ──
+    Mutant(
+        # 셸 치환을 「모르는 값」으로 보지 않는다 — `--title "$T"` 를 글자 그대로 재서 같은 명령의
+        # 앞 `git commit` 까지 막는다(사건 6d)
+        name="guard-naming-judges-shell-values",
+        path="tools/guard_naming.py",
+        old="    return SHELL_SUBST_RE.search(text) is not None\n",
+        new="    return False\n",
+        tests=("tests/test_guard_naming.py",),
+    ),
+    Mutant(
+        # PR 본문 파일 이름을 안 본다 — 병렬 세션이 `pr.md` 를 서로 덮는다(사건 6e)
+        name="guard-naming-any-body-file",
+        path="tools/guard_naming.py",
+        old="    if stem in SHARED_BODY_STEMS:\n",
+        new="    if False:\n",
+        tests=("tests/test_guard_naming.py",),
+    ),
+    Mutant(
+        # REST 머지(`gh api -X PUT …/pulls/N/merge` · curl)를 못 알아본다 — 감시 스크립트가 pending
+        # 체크를 두고 머지했다(사건 6c)
+        name="guard-merge-misses-rest-merge",
+        path="tools/guard_merge.py",
+        old="    if rest and PUT_RE.search(flat) and url:\n",
+        new="    if False:\n",
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # 관문이 끝나지 않은 체크를 안 본다 — 「아직 도는데 머지」가 그대로 돌아온다(사건 6c)
+        name="merge-pr-ignores-pending",
+        path="tools/merge_pr.py",
+        old='        if run.get("status") != "completed":\n            pending.append(name)\n',
+        new="        if False:\n            pending.append(name)\n",
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 옛 DB 판과 빌드 판을 비교하지 않는다 — 같은 판 DB 도 막거나(오탐) 비교 없이 지나간다
+        # (사건 6f: 개발 DB v7 → v24)
+        name="guard-production-no-version-compare",
+        path="tools/guard_production.py",
+        old="    if have is None or want is None or have >= want:\n",
+        new="    if have is None or want is None:\n",
+        tests=("tests/test_guard_production_migration.py",),
+    ),
 )
 
 
@@ -1194,13 +1244,37 @@ def _pytest(cmd: list[str], cwd: Path) -> tuple[int, float, str] | None:
     return proc.returncode, took, "\n".join(lines[-6:])
 
 
+def _descriptions() -> dict[str, str]:
+    """변이마다 `Mutant(` 바로 아래 주석 — 이 파일이 정본이라 설명을 따로 적지 않고 읽는다."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    out: dict[str, str] = {}
+    pattern = r"Mutant\(\n((?:[ \t]+#[^\n]*\n)*)[ \t]+name=\"([^\"]+)\""
+    for comment, name in re.findall(pattern, text):
+        lines = [line.strip().lstrip("#").strip() for line in comment.splitlines()]
+        out[name] = " ".join(line for line in lines if line)
+    for m in MUTANTS:  # 주석이 없는 옛 변이는 이 docstring 의 「이름 — 설명」 줄을 쓴다
+        if not out.get(m.name):
+            found = re.search(re.escape(m.name) + r"\s+—\s+([^\n]+)", __doc__ or "")
+            out[m.name] = found.group(1).strip() if found else ""
+    return out
+
+
+def list_mutants() -> int:
+    """`--list` — 이름 · 파일 · 설명, 끝에 수. 문서는 수를 적지 않고 이것을 가리킨다."""
+    about = _descriptions()
+    for m in MUTANTS:
+        print(f"{m.name}\t{m.path}\t{about.get(m.name, '')}")
+    print(f"{len(MUTANTS)} mutants")
+    return 0
+
+
 def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
     """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명)."""
     if m.needs_chrome and not chrome_available():
         return None, "skipped: no Chrome binary found (set RCM_CHROME) — its tests would skip"
     tmp = Path(tempfile.mkdtemp(prefix=f"mutcheck-{m.name}-"))
     try:
-        for name in ("src", "tests", "pyproject.toml"):
+        for name in ("src", "tests", "tools", "pyproject.toml"):
             src = ROOT / name
             if src.is_dir():
                 shutil.copytree(src, tmp / name, ignore=shutil.ignore_patterns("__pycache__"))
@@ -1242,7 +1316,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Check that tests catch known mutations.")
     ap.add_argument("--keep", action="store_true", help="keep the mutated copies")
     ap.add_argument("--only", help="run one mutant by name")
+    ap.add_argument("--list", action="store_true", help="list the mutants and their count")
     args = ap.parse_args(argv)
+    if args.list:
+        return list_mutants()
     mutants = [m for m in MUTANTS if not args.only or m.name == args.only]
     if not mutants:
         print(f"no mutant named {args.only!r}", file=sys.stderr)

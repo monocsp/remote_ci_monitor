@@ -1,6 +1,6 @@
 ---
 name: pr
-description: Open, check, merge and clean up a pull request for remote_ci_monitor — title in the commit-header style, a body with why / what / checks / docs, CI green before a REST merge, branch and worktree removed after. Use it for every `gh pr create` and every merge.
+description: Open, check, merge and clean up a pull request for remote_ci_monitor — title in the commit-header style, a body with why / what / checks / docs, every check green and a `verified:` marker before `tools/merge_pr.py` merges, branch and worktree removed after. Use it for every `gh pr create` and every merge.
 ---
 
 # Pull request
@@ -42,6 +42,12 @@ Refs: #80
 
 End the body with the attribution block given at session start.
 
+Write a body that goes through a file into a file named after the branch,
+`pr-body-<branch with / as ->.md` (`pr-body-feat-guard-merge.md`), never `pr.md`, `pr_body.md` or
+`body.md`: parallel sessions share a scratchpad and overwrote each other's body there (#220 and
+#233 went up with another PR's body). `tools/guard_naming.py` refuses `--body-file` with a shared
+name.
+
 The Korean in the title's summary and in the body is written with the `korean-writing` skill
 (`.claude/skills/korean-writing/SKILL.md`). Load it before you write them. The template's headings,
 the trailers and the attribution line stay as they are; the skill only governs the sentences.
@@ -65,17 +71,36 @@ documents that stay in the repository are written in 평어체.
    ```
 2. Wait for CI (`test` — ubuntu 3.11/3.13, macOS 3.13, smoke, gitleaks), and read a failure
    before touching anything: `gh pr checks <N>` · `gh run view <id> --log-failed`.
-3. Merge only when green, by REST (the `gh pr merge` command is blocked here), with the title as
-   the merge commit's subject and the PR number appended, into `dev` as a merge commit:
+3. Merge with `tools/merge_pr.py`, and only with it. `tools/guard_merge.py` (a `PreToolUse`
+   hook) refuses `gh pr merge`, a REST `PUT …/pulls/<N>/merge` through `gh api` or `curl`, and a
+   script that would run one; a watcher that merged by REST in 2026-11 merged twice with checks
+   still pending, and three PRs merged without re-verification.
    ```sh
-   gh api -X PUT repos/monocsp/remote_ci_monitor/pulls/<N>/merge \
-     -f merge_method=merge -f commit_title="<title> (#<N>)"
+   export GH_TOKEN=$(gh auth token --user monocsp)
+   python3 tools/merge_pr.py <N> --wait --delete-branch
    ```
+   It pins the PR's head sha and then refuses unless, on that sha, every check run and status
+   has finished (`--wait` waits up to `--timeout` seconds, 3600 by default, and refuses if the
+   head moves meanwhile), none failed, was cancelled or timed out, and `test` is among them; a PR
+   comment carries the verification marker for that sha; and GitHub reports no conflict. Then it
+   merges that sha into the base as a merge commit titled `<title> (#<N>)` and reads the PR back.
+   `--dry-run` runs every check and changes nothing; `--delete-branch` never deletes `main` or
+   `dev`. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer (look before
+   retrying).
+
+   **The verification marker.** Whoever ran the isolated verification on the head, and saw it
+   pass, posts one line as a PR comment, the full 40-character head sha after `verified: `:
+   ```sh
+   gh pr comment <N> --body "verified: $(gh pr view <N> --json headRefOid -q .headRefOid)"
+   ```
+   The line stands alone (no quote, no short sha, lowercase). A push after it makes it stale:
+   verify the new head and post a new line. A PR with nothing to verify (documentation only,
+   tests only) merges with `--no-verify "<reason>"`; the reason is posted on the PR.
+
    `main` only takes a PR from `dev` (`gh pr create --base main --head dev`), and the `Releasing`
    section of `CONTRIBUTING.md` says when.
-4. Clean up — the branch is done, the worktree is done:
+4. Clean up — the branch is done (`--delete-branch` deleted it on GitHub), the worktree is done:
    ```sh
-   gh api -X DELETE repos/monocsp/remote_ci_monitor/git/refs/heads/<branch>
    git worktree remove ../remote_ci_monitor-<what-it-does>
    git fetch --prune
    ```

@@ -288,3 +288,140 @@ def test_cli_returns_1_with_a_reason(capsys):
     assert guard._cli(["commit", "fix(web): 카드"]) == 0
     assert guard._cli(["pr", "docs(m5i): 계획서"]) == 0
     assert guard._cli(["nope"]) == 2
+
+
+# ── 셸 치환이 남은 값은 「모르는 값」이다 (2026-11-20 사건 6d) ─────────────────
+#
+# `T=$(gh pr view …); gh pr create --title "$T"` 를 훅이 글자 그대로 `$T` 로 읽어 막았다. 그 바람에
+# 같은 명령의 앞 `git commit` 까지 통째로 안 돌았다. 훅은 셸을 실행하지 않으니 치환된 값을 모른다.
+# 모르는 값은 막지 않는다(파일 docstring 의 약속).
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'T=$(gh pr view 233 --json title -q .title); gh pr create --base dev --title "$T"',
+        'gh pr create --base dev --title "${TITLE}" --body-file pr-body-feat-x.md',
+        'gh pr create --base dev --title "`cat title.txt`" --body b',
+        'gh pr create --base dev -t "$(cat title.txt)" -b b',
+        'gh pr create --base dev --title="$T" --body b',
+        'git commit -m "$MSG"',
+        'git commit -m "${SUBJECT}" -m "본문"',
+        'git commit -m "`cat msg.txt`"',
+        'git commit -m "$(printf %s "$S")"',
+    ],
+)
+def test_a_value_left_to_the_shell_is_unknown_and_passes(command):
+    assert bash(command) is None, command
+
+
+def test_the_commit_before_a_shell_valued_title_is_not_blocked():
+    command = (
+        'git add -A && git commit -m "feat(guard): 셸 치환 제목을 모르는 값으로 본다" '
+        "&& T=$(gh pr view 233 --json title -q .title) "
+        '&& gh pr create --base dev --title "$T" --body-file pr-body-feat-guard.md'
+    )
+    assert bash(command) is None
+
+
+def test_a_bad_literal_still_fails_next_to_a_shell_valued_title():
+    v = bash('git commit -m "호스트 카드 고침" && gh pr create --title "$T"')
+    assert v is not None and v.decision == "deny" and "commit subject" in v.reason
+    v = bash('gh pr create --title "update stuff" && echo "$T"')
+    assert v is not None and v.decision == "deny" and "PR title" in v.reason
+
+
+def test_a_heredoc_subject_is_still_read():
+    """`$(cat <<'EOF' …)` 은 치환이지만 훅이 읽을 수 있다 — 기존처럼 첫 줄을 잰다."""
+    bad = "git commit -m \"$(cat <<'EOF'\n호스트 카드 고침\n\n본문.\nEOF\n)\""
+    v = bash(bad)
+    assert v is not None and v.decision == "deny"
+
+
+# ── PR 본문 파일 이름 (사건 6e) ──────────────────────────────────────────────
+#
+# 병렬 하위 에이전트들이 공유 scratchpad 의 `pr.md` · `pr_body.md` 에 PR 본문을 써서 서로 덮었다.
+# #220 · #233 의 본문이 다른 PR 것으로 올라갔다. 흔한 이름을 막고 브랜치가 든 이름을 안내한다.
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pr.md",
+        "pr_body.md",
+        "body.md",
+        "pr-body.md",
+        "PR_BODY.md",
+        "prbody.md",
+        "pr_body_1.md",
+        "body2.md",
+        "pr-body.txt",
+        "description.md",
+        "/private/tmp/claude-501/x/scratchpad/pr_body.md",
+        "$TMPDIR/body.md",
+    ],
+)
+def test_a_shared_body_file_name_is_denied(name):
+    title = "'feat(guard): 머지 관문'"
+    for command in (
+        f"gh pr create --base dev --title {title} --body-file {name}",
+        f"gh pr create --base dev --title {title} -F {name}",
+        f"gh pr create --base dev --title {title} --body-file={name}",
+        f"gh pr edit 233 --body-file {name}",
+    ):
+        v = bash(command)
+        assert v is not None and v.decision == "deny", command
+        assert "pr-body-" in v.reason and "branch" in v.reason, v.reason
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pr-body-feat-guard-merge-and-hook-fixes.md",
+        "/tmp/x/pr-body-docs-m5r-ci-location-workplan.md",
+        "p3-pr220-body.md",
+        "pr203.md",
+        "-",
+    ],
+)
+def test_a_body_file_named_for_its_branch_passes(name):
+    title = "'feat(guard): 머지 관문'"
+    assert bash(f"gh pr create --base dev --title {title} --body-file {name}") is None
+    assert bash(f"gh pr edit 233 --body-file {name}") is None
+
+
+def test_body_file_names_are_only_judged_for_pr_create_and_edit():
+    assert bash("gh issue create --title x --body-file body.md") is None
+    assert bash("cat pr.md") is None
+    assert bash("gh pr view 233 --json body -q .body > pr.md") is None
+
+
+# ── 진짜 훅: JSON stdin → 종료 코드 · stdout ─────────────────────────────────
+
+
+def _hook(command: str):
+    import json
+    import subprocess
+
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "guard_naming.py")],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_the_real_hook_lets_a_shell_valued_title_through():
+    proc = _hook('git commit -m "feat(guard): 좋은 제목" && gh pr create --title "$T"')
+    assert proc.returncode == 0 and proc.stdout.strip() == "" and proc.stderr == "", proc
+
+
+def test_the_real_hook_denies_a_shared_body_file():
+    import json
+
+    proc = _hook("gh pr create --base dev --title 'feat(guard): 머지 관문' --body-file pr.md")
+    assert proc.returncode == 0 and proc.stderr == "", proc
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny" and "pr-body-" in out["permissionDecisionReason"]

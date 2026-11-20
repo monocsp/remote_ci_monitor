@@ -15,6 +15,12 @@
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/tools/guard_naming.py\"",
             "timeout": 10,
             "statusMessage": "Checking branch, commit and PR names"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/tools/guard_merge.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking that merges go through tools/merge_pr.py"
           }
         ]
       },
@@ -26,6 +32,12 @@
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/tools/guard_production.py\"",
             "timeout": 10,
             "statusMessage": "Checking the production install"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/tools/guard_merge.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking that merges go through tools/merge_pr.py"
           }
         ]
       }

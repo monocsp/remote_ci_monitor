@@ -2326,6 +2326,7 @@ def test_store_tab_opens_on_the_version_list_and_the_four_rows_are_on_status(tmp
         srv.close()
 
 
+@pytest.mark.slow
 def test_new_version_dialog_hints_one_platform_duplicate_and_creating(tmp_path):
     """AC-C3 · AC-C4 · E2 · E3 — «+ 새 버전 만들기» 는 대화상자 하나다: 힌트 `1.1.1` · `1.0.1` 이
     채워져 있고, 꼴이 틀리면 «만들기» 가 닫힌 채 이유를 말하고, 라이브보다 작아도 닫힌다.
@@ -2940,6 +2941,7 @@ def test_version_page_sheet_carries_progress_what_is_left_and_the_submit(tmp_pat
         srv.close()
 
 
+@pytest.mark.slow
 def test_version_page_sheet_opens_the_submit_only_after_every_condition(tmp_path):
     """AC-D1 · AC-D5 · AC-D10 · E11 · E17 · E18 · E19 · E20 · E21 — 제출은 관리형 게시를
     체크한 뒤에만 열리고, 보내는 본문에 `version_id` 와 이 버전의 이름과 `confirm_build_number`
