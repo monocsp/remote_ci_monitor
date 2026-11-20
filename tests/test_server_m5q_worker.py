@@ -5,7 +5,8 @@
 따라가기 전의 409 가 잡을 잃게 하면 안 된다. claim 은 버전을 보지 않는다 — 서버를 올린 뒤에도
 이미 등록된 워커는 다음 재시작까지 잡을 받는다(§3.1).
 
-heartbeat 응답의 `server_version`(시나리오 B16)은 PR B2 의 몫이다.
+heartbeat 응답에도 `server_version` 이 더해진다(시나리오 B16, PR B2). 워커는 그 값을 보고
+드레인한다.
 시험을 먼저 썼다 — 구현 전에는 빨갛다.
 """
 
@@ -78,3 +79,24 @@ def test_claim_does_not_check_the_version(srv):
     srv.app.version = "99.0.1"
     jid = srv.queued_job()
     assert srv.claimed("build-02") == jid
+
+
+def test_heartbeat_carries_the_server_version(srv):
+    # B16 (§5.3 · PR B2): heartbeat 응답에 `server_version` 이 health 의 `version` 과 같게 실린다.
+    # 기존 키는 그대로다. 서버 버전이 바뀌면 다음 응답부터 새 값이다
+    srv.registered("build-02")
+    status, body = srv.heartbeat("build-02", jobs=[])
+    assert status == 200, body
+    assert {"cancel", "paused", "timeout_seconds", "generation"} <= set(body)
+    assert body["server_version"] == __version__
+    assert body["server_version"] == srv.req("GET", "/api/health")[1]["version"]
+    srv.app.version = "99.0.1"
+    status, body = srv.heartbeat("build-02", jobs=[])
+    assert status == 200 and body["server_version"] == "99.0.1", body
+
+
+def test_heartbeat_of_an_unregistered_worker_is_a_409(srv):
+    # E16: 워커 행이 없으면 heartbeat 는 409 다 — 워커는 이것을 「서버에 못 닿음」으로 보지 않는다
+    status, body = srv.heartbeat("build-02", jobs=[])
+    assert status == 409, body
+    assert "not registered" in body["error"]

@@ -36,9 +36,16 @@ def test_gethostbyaddr_refuses_and_names_the_marker():
 
 
 @pytest.mark.allow_reverse_dns
-def test_the_marker_gives_the_real_lookups_back():
-    name, _aliases, addresses = socket.gethostbyaddr("127.0.0.1")
-    assert name and "127.0.0.1" in addresses
+def test_the_marker_gives_the_real_lookups_back(monkeypatch):
+    """마커가 있으면 막힌 자리가 진짜 함수로 넘어간다. 진짜 조회는 하지 않는다 — macOS 러너에서
+    `127.0.0.1` 의 역방향 조회 하나가 35초 걸렸다(이 PR 의 첫 CI)."""
+    stubs = socket.gethostbyaddr.__globals__  # conftest 의 전역 — 막는 함수가 여기서 진짜를 찾는다
+    calls: list[str] = []
+    monkeypatch.setitem(stubs, "_REAL_GETHOSTBYADDR", lambda a: calls.append(a) or ("h", [], [a]))
+    monkeypatch.setitem(stubs, "_REAL_GETFQDN", lambda n="": calls.append(n) or "h.example")
+    assert socket.gethostbyaddr("192.0.2.1") == ("h", [], ["192.0.2.1"])
+    assert socket.getfqdn("192.0.2.1") == "h.example"
+    assert calls == ["192.0.2.1", "192.0.2.1"]
 
 
 # ── 20초 상한 (시험 안의 시험) ───────────────────────────────────────────────

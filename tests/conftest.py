@@ -2,8 +2,8 @@
 
 따라가기는 `$XDG_CACHE_HOME/rcm` 에 받고 `$XDG_CONFIG_HOME/rcm/client-version` 을 읽는다. 시험이
 사용자의 진짜 캐시와 한 줄 파일을 건드리지 않게 두 변수를 `tmp_path` 아래로 돌리고, 개발자 셸에
-남은 `RCM_CLIENT_VERSION` 과 따라가기 변수를 지운다. 따라간 자식의 표지(`_follow_boot`)와 이
-프로세스의 따라가기 결과도 시험마다 비운다.
+남은 `RCM_CLIENT_VERSION` 과 따라가기 변수, 워커 재실행 시각을 지운다. 따라간 자식의
+표지(`_follow_boot`)와 이 프로세스의 따라가기 결과도 시험마다 비운다.
 
 시험 위생 둘(2026-11-20 사건 4 — macOS 의 역방향 DNS 가 변이마다 36초, 진짜 시간 제한을 기다린
 M5q 시험이 CI 를 25분 늘렸다):
@@ -122,6 +122,7 @@ FOLLOW_ENV = (
     "RCM_FOLLOWED_FROM",
     "RCM_FOLLOW_FROM",
     "RCM_FOLLOW_FOUND",
+    "RCM_WORKER_RESTARTED_AT",  # 드레인 재실행의 고리 막기(PR B2)
 )
 
 
@@ -140,4 +141,10 @@ def _follow_isolation(monkeypatch, tmp_path_factory):
         follow = None
     if follow is not None and hasattr(follow, "_STATE"):
         monkeypatch.setattr(follow, "_STATE", None)
+    # 워커가 exec 직전에 프로브를 닫는다(M5q B2). 한 시험이 닫은 것이 다른 시험의 프로브를 막지
+    # 않게 시험마다 되돌린다
+    from remote_ci_monitor import hostsample
+
+    if hasattr(hostsample, "_PROBES_CLOSED"):
+        monkeypatch.setattr(hostsample, "_PROBES_CLOSED", False)
     yield

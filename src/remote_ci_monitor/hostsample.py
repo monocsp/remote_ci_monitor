@@ -126,6 +126,25 @@ def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
     return {p.name: results[p.name] for p in probes}
 
 
+#: 지금 도는 프로브 프로세스 — 워커가 exec 로 다시 실행하기 직전에 끝낸다(M5q §14 B질문13)
+_LIVE_PROBES: set[subprocess.Popen[bytes]] = set()
+_LIVE_LOCK = threading.Lock()
+#: 참이면 새 프로브를 띄우지 않는다 — `kill_probes` 뒤에는 곧 exec 한다
+_PROBES_CLOSED = False
+
+
+def kill_probes() -> int:
+    """도는 프로브를 그룹째 끝내고 그 뒤로는 새 프로브를 띄우지 않는다. 끝낸 수를 돌려준다.
+    시작과 등록은 같은 잠금 안이라 그 사이에 끼인 프로브가 빠지지 않는다."""
+    global _PROBES_CLOSED
+    with _LIVE_LOCK:
+        _PROBES_CLOSED = True
+        procs = list(_LIVE_PROBES)
+    for proc in procs:
+        _kill_group(proc)
+    return len(procs)
+
+
 def _run_probe(probe: Any, env: dict[str, str]) -> Any:
     from remote_ci_monitor.core.capability import normalize_probe_output
 
@@ -138,19 +157,33 @@ def _run_probe(probe: Any, env: dict[str, str]) -> Any:
         return normalize_probe_output(None, None, missing=True)
     if not os.path.isabs(exe):
         argv[0] = shutil.which(exe, path=path) or exe
+    with _LIVE_LOCK:
+        if _PROBES_CLOSED:  # 곧 exec 한다 — 띄우지 않는다
+            return normalize_probe_output(None, None, timed_out=True)
+        try:
+            # 자기 프로세스 그룹 — 시한을 넘기면 손자까지 거둔다(`runner` 의 잡과 같은 규칙).
+            # 감싸는 스크립트(`flutter` · `xcrun` 류)를 죽여도 그 자식은 남아 주기마다 쌓였다.
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+        except OSError:
+            return normalize_probe_output(None, None, missing=True)
+        _LIVE_PROBES.add(proc)
     try:
-        # 자기 프로세스 그룹 — 시한을 넘기면 손자까지 거둔다(`runner` 의 잡과 같은 규칙). 감싸는
-        # 스크립트(`flutter` · `xcrun` 류)를 죽여도 그 자식은 남아 주기마다 쌓였다.
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            env=env,
-            start_new_session=True,
-        )
-    except OSError:
-        return normalize_probe_output(None, None, missing=True)
+        return _wait_probe(proc, probe)
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_PROBES.discard(proc)
+
+
+def _wait_probe(proc: subprocess.Popen[bytes], probe: Any) -> Any:
+    from remote_ci_monitor.core.capability import normalize_probe_output
+
     # 출력은 **앞부분만** 지닌다 — 지문에 드는 것은 앞 두 줄 · 120자다. communicate 로 다 담으면
     # `yes` 같은 프로브 하나가 3초에 10 GB 를 먹는다(엣지 검증 실측). 나머지는 읽어서 버린다 —
     # 안 읽으면 파이프가 차서 정상 프로브(큰 목록을 찍는 것)가 시한까지 멈춘다.
