@@ -12,12 +12,13 @@
 순서:
   1. PR 을 읽어 head sha 를 **고정**한다. 열려 있지 않으면 거부.
   2. base 브랜치 룰셋의 필수 상태 체크(`GET rules/branches/{base}` 의 required_status_checks)를
-     읽는다 — 이름을 박지 않는다(필수 체크가 `test` 에서 `rcm/ci` 로 바뀔 수 있다). 그 sha 의
-     check-runs 와 commit statuses(같은 context 는 최신 것만)를 모은다. 하나라도 failure ·
-     cancelled · timed_out · action_required(· startup_failure · stale · error) 면 거부. 하나라도
-     끝나지 않았거나 필수 context 가 check-run 으로도 status 로도 아직 없으면 `--wait` 는
-     `--timeout` 까지 기다리고(기다리는 동안 head 가 움직이면 거부), 아니면 거부. 룰셋에 필수
-     체크가 없으면 끝난 체크가 하나라도 있어야 한다.
+     읽는다 — 이름을 박지 않는다(2026-11-20 부터 dev 는 `rcm/ci`, main 은 `main-from-dev-only` +
+     `rcm/ci`). 그 sha 에서 **필수 context 만** 본다 — 오너 결정으로 GitHub CI 는 머지 조건이
+     아니라서 필수가 아닌 체크는 pending 이든 실패든 세기만 한다. 필수 context 는 check-run
+     으로든 commit status(같은 context 는 최신 것만)로든 온다. failure · cancelled · timed_out ·
+     action_required(· startup_failure · stale · error) 면 거부. 끝나지 않았거나 아직 보고되지
+     않았으면 `--wait` 는 `--timeout` 까지 기다리고(기다리는 동안 head 가 움직이면 거부), 아니면
+     거부. 룰셋에 필수 체크가 없으면 볼 것이 없으니 거부.
   3. PR 댓글에서 `verified: <40자 head sha>` 줄(격리 검증을 마친 리드가 다는 한 줄 — 형식 고정)을
      찾는다. 없거나 다른 sha 면 거부. `--no-verify "<reason>"` 은 그 이유를 PR 댓글로 남기고
      지나간다(문서만 · 시험만 PR 용).
@@ -118,8 +119,8 @@ class Checks:
     failed: tuple[str, ...]
     #: base 룰셋의 필수 context 가운데 head 에 아직 아무 보고도 없는 것.
     missing: tuple[str, ...]
-    #: head 에 보고된 체크가 하나라도 있나.
-    seen: bool
+    #: 필수가 아니라서 보지 않은 체크 수(pending · 실패여도 머지를 막지 않는다).
+    ignored: int
 
 
 @dataclass(frozen=True)
@@ -165,31 +166,42 @@ def required_contexts(api: Api, repo: str, base: str) -> tuple[str, ...]:
 
 
 def read_checks(api: Api, repo: str, sha: str, required: tuple[str, ...] = ()) -> Checks:
-    """그 sha 의 check-runs(같은 이름은 GitHub 이 최신 것만 준다)와 commit statuses(목록은 최신이
-    앞이라 context 마다 처음 본 것만 센다). 필수 context 는 둘 중 어느 쪽으로 와도 된다."""
-    pending: list[str] = []
-    failed: list[str] = []
-    names: set[str] = set()
+    """그 sha 에서 **필수 context 만** 판정한다(오너 결정 2026-11-20: GitHub CI 는 머지 조건이
+    아니다). 필수 context 는 check-run 이름(같은 이름은 GitHub 이 최신 것만 준다)으로 오든 commit
+    status 의 context(목록은 최신이 앞이라 처음 본 것만 센다)로 오든 된다. 필수가 아닌 체크는
+    세기만 한다."""
+    states: dict[str, str] = {}
+    ignored: set[str] = set()
     for run in _pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
         name = str(run.get("name", "?"))
-        names.add(name)
+        if name not in required:
+            ignored.add(name)
+            continue
         if run.get("status") != "completed":
-            pending.append(name)
+            states[name] = "pending"
         elif run.get("conclusion") in FAILED_CONCLUSIONS:
-            failed.append(f"{name} ({run.get('conclusion')})")
-    latest: set[str] = set()
+            states[name] = f"{name} ({run.get('conclusion')})"
+        else:
+            states.setdefault(name, "ok")
+    seen: set[str] = set()
     for status in _pages(api, f"repos/{repo}/commits/{sha}/statuses"):
         name = str(status.get("context", "?"))
-        if name in latest:
+        if name in seen:
             continue  # 같은 context 의 옛 상태
-        latest.add(name)
-        names.add(name)
+        seen.add(name)
+        if name not in required:
+            ignored.add(name)
+            continue
         if status.get("state") == "pending":
-            pending.append(name)
+            states[name] = "pending"
         elif status.get("state") in FAILED_STATES:
-            failed.append(f"{name} ({status.get('state')})")
-    missing = tuple(context for context in required if context not in names)
-    return Checks(tuple(pending), tuple(failed), missing, bool(names))
+            states[name] = f"{name} ({status.get('state')})"
+        else:
+            states.setdefault(name, "ok")
+    pending = tuple(name for name, state in states.items() if state == "pending")
+    failed = tuple(state for state in states.values() if state not in ("ok", "pending"))
+    missing = tuple(context for context in required if context not in states)
+    return Checks(pending, failed, missing, len(ignored))
 
 
 def _pr(api: Api, opts: Options) -> dict[str, Any]:
@@ -219,7 +231,7 @@ def _wait_for_checks(
     now: Callable[[], float],
     sleep: Callable[[float], None],
 ) -> None:
-    """체크가 전부 끝나고 실패가 없고 필수 context 가 다 보고됐을 때 돌아온다. 아니면 Refused."""
+    """필수 context 가 다 보고되고 끝나 실패가 없을 때 돌아온다. 아니면 Refused."""
     deadline = now() + opts.timeout
     while True:
         checks = read_checks(api, opts.repo, sha, required)
@@ -230,9 +242,10 @@ def _wait_for_checks(
             )
         waiting = list(checks.pending)
         waiting += [f"`{context}` (not reported yet)" for context in checks.missing]
-        if not required and not checks.seen:
-            waiting.append("any check (the base has no required checks and none reported yet)")
         if not waiting:
+            if checks.ignored:
+                plural = "check" if checks.ignored == 1 else "checks"
+                print(f"ignored {checks.ignored} {plural} the base does not require")
             return
         if not opts.wait:
             if checks.pending:
@@ -291,6 +304,11 @@ def gate(
     title = str(pr.get("title") or "")
     base = str((pr.get("base") or {}).get("ref") or "")
     required = required_contexts(api, opts.repo, base)
+    if not required:
+        raise Refused(
+            f"{base or 'the base'} has no required status checks in its rulesets — the gate has "
+            "nothing to judge the head by"
+        )
     print(
         f"#{opts.number} {title}\nhead {sha} (pinned) · required on {base}: "
         f"{', '.join(required) or '(none)'}"
@@ -373,9 +391,9 @@ def _origin_repo() -> str | None:
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="merge_pr.py",
-        description="Merge a pull request only when every check on its pinned head sha is done "
-        "and green, the base branch's required checks (read from its rulesets) passed as a check "
-        "run or a commit status, and the head carries a `verified: <sha>` comment.",
+        description="Merge a pull request only when every check the base branch's rulesets "
+        "require has passed on its pinned head sha (as a check run or a commit status; other "
+        "checks are ignored) and the head carries a `verified: <sha>` comment.",
         epilog="exit codes: 0 merged (or would merge, with --dry-run) · 1 refused · 2 usage · "
         "3 network or unknown. Token: $GH_TOKEN, else gh's active account "
         "(GH_TOKEN=$(gh auth token --user monocsp) in this repository).",

@@ -51,6 +51,7 @@ def run_(name="unit (3.11, ubuntu-latest)", status="completed", conclusion="succ
 
 
 GREEN = [run_(), run_("smoke (macos-latest)"), run_("secrets"), run_("test")]
+RCM_OK = {"context": "rcm/ci", "state": "success"}
 
 
 def verified(sha=SHA):
@@ -200,8 +201,8 @@ def test_a_branch_from_a_fork_is_not_deleted():
     assert api.did("DELETE") == []
 
 
-def test_statuses_count_as_checks_too():
-    api = FakeGitHub(statuses=[{"context": "ci/other", "state": "success"}])
+def test_a_required_context_may_come_as_a_status():
+    api = FakeGitHub(statuses=[{"context": "ci/other", "state": "success"}], required=["ci/other"])
     assert merge(api) == 0
 
 
@@ -211,7 +212,7 @@ def test_neutral_and_skipped_runs_are_not_failures():
 
 
 def test_more_than_one_page_of_checks_is_read():
-    many = [run_(f"shard {i}") for i in range(150)] + [run_("test")]
+    many = [run_(f"shard {i}") for i in range(150)] + [run_("test")]  # test 는 둘째 쪽에 있다
     api = FakeGitHub(runs=[many])
     assert merge(api) == 0
     pages = [c[1] for c in api.did("GET", "/check-runs")]
@@ -222,18 +223,44 @@ def test_more_than_one_page_of_checks_is_read():
 
 
 @pytest.mark.parametrize("status", ["queued", "in_progress", "pending", "waiting", "requested"])
-def test_a_pending_check_refuses_without_wait(status, capsys):
-    runs = [*GREEN[:-1], run_("smoke (ubuntu-latest)", status=status, conclusion=None), GREEN[-1]]
+def test_a_pending_required_check_refuses_without_wait(status, capsys):
+    runs = [*GREEN[:-1], run_("test", status=status, conclusion=None)]
     api = FakeGitHub(runs=[runs])
     assert merge(api) == 1
     assert api.did("PUT") == []
     err = capsys.readouterr().err
-    assert "smoke (ubuntu-latest)" in err and "--wait" in err
+    assert "test" in err and "--wait" in err
 
 
-def test_a_pending_status_refuses_without_wait():
-    api = FakeGitHub(statuses=[{"context": "ci/other", "state": "pending"}])
+def test_a_pending_required_status_refuses_without_wait():
+    api = FakeGitHub(statuses=[{"context": "rcm/ci", "state": "pending"}], required=["rcm/ci"])
     assert merge(api) == 1 and api.did("PUT") == []
+
+
+# ── 필수가 아닌 체크는 보지 않는다 (2026-11-20 오너 결정: GitHub CI 는 머지 조건이 아니다) ──
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress"])
+def test_a_pending_check_the_base_does_not_require_does_not_hold_the_merge(status, capsys):
+    runs = [run_("unit (macos-latest, 3.13)", status=status, conclusion=None), run_("test")]
+    api = FakeGitHub(runs=[runs])
+    assert merge(api) == 0 and len(api.did("PUT")) == 1
+    assert "ignored 1 check the base does not require" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
+def test_a_failed_check_the_base_does_not_require_does_not_block(conclusion, capsys):
+    runs = [run_("unit (ubuntu-latest, 3.11)", conclusion=conclusion), run_("smoke"), run_("test")]
+    statuses = [{"context": "ci/other", "state": "failure"}]
+    api = FakeGitHub(runs=[runs], statuses=statuses)
+    assert merge(api) == 0 and len(api.did("PUT")) == 1
+    assert "ignored 3 checks the base does not require" in capsys.readouterr().out
+
+
+def test_with_rcm_ci_required_github_actions_do_not_matter():
+    runs = [run_("test", "in_progress", None), run_("unit", conclusion="failure")]
+    api = FakeGitHub(runs=[runs], statuses=[RCM_OK], required=["rcm/ci"])
+    assert merge(api) == 0
 
 
 def test_wait_polls_until_every_check_is_done_then_merges():
@@ -275,17 +302,17 @@ def test_a_missing_test_check_counts_as_pending_while_waiting():
 @pytest.mark.parametrize(
     "conclusion", ["failure", "cancelled", "timed_out", "action_required", "startup_failure"]
 )
-def test_a_failed_check_refuses_even_with_wait(conclusion, capsys):
-    runs = [*GREEN[:-1], run_("unit (3.13, macos-latest)", conclusion=conclusion), GREEN[-1]]
+def test_a_failed_required_check_refuses_even_with_wait(conclusion, capsys):
+    runs = [*GREEN[:-1], run_("test", conclusion=conclusion)]
     api = FakeGitHub(runs=[runs])
     assert merge(api, "--wait", clock=Clock()) == 1
     assert api.did("PUT") == []
-    assert "unit (3.13, macos-latest)" in capsys.readouterr().err
+    assert f"test ({conclusion})" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("state", ["failure", "error"])
-def test_a_failed_status_refuses(state):
-    api = FakeGitHub(statuses=[{"context": "ci/other", "state": state}])
+def test_a_failed_required_status_refuses(state):
+    api = FakeGitHub(statuses=[{"context": "rcm/ci", "state": state}], required=["rcm/ci"])
     assert merge(api) == 1 and api.did("PUT") == []
 
 
@@ -293,8 +320,6 @@ def test_a_failed_status_refuses(state):
 #
 # 오너 결정(2026-11-20): dev · main 의 필수 체크가 `test`(GitHub Actions) 에서 `rcm/ci`(맥미니 rcm
 # 잡이 올리는 커밋 상태)로 바뀐다. 관문은 이름을 박지 않고 룰셋 API 에서 읽는다.
-
-RCM_OK = {"context": "rcm/ci", "state": "success"}
 
 
 def test_the_required_context_comes_from_the_base_branch_ruleset():
@@ -373,11 +398,11 @@ def test_a_required_check_run_that_was_skipped_or_neutral_counts_as_passed():
     assert merge(api) == 0
 
 
-def test_a_base_without_required_checks_still_needs_one_finished_check(capsys):
-    assert merge(FakeGitHub(required=None)) == 0
-    api = FakeGitHub(runs=[[]], required=None)
+def test_a_base_without_required_checks_is_refused(capsys):
+    """필수 체크가 없으면 관문이 볼 것이 없다 — 모르면 머지하지 않는다."""
+    api = FakeGitHub(required=None)
     assert merge(api) == 1 and api.did("PUT") == []
-    assert "required" in capsys.readouterr().err
+    assert "no required status checks" in capsys.readouterr().err
 
 
 def test_the_ruleset_api_failing_is_unknown():

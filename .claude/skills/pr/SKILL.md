@@ -1,6 +1,6 @@
 ---
 name: pr
-description: Open, check, merge and clean up a pull request for remote_ci_monitor — title in the commit-header style, a body with why / what / checks / docs, every check green and a `verified:` marker before `tools/merge_pr.py` merges, branch and worktree removed after. Use it for every `gh pr create` and every merge.
+description: Open, check, merge and clean up a pull request for remote_ci_monitor — title in the commit-header style, a body with why / what / checks / docs, the ruleset's required checks green and a `verified:` marker before `tools/merge_pr.py` merges, branch and worktree removed after. Use it for every `gh pr create` and every merge.
 ---
 
 # Pull request
@@ -79,14 +79,15 @@ documents that stay in the repository are written in 평어체.
    export GH_TOKEN=$(gh auth token --user monocsp)
    python3 tools/merge_pr.py <N> --wait --delete-branch
    ```
-   It pins the PR's head sha and then refuses unless, on that sha, every check run and status
-   has finished (`--wait` waits up to `--timeout` seconds, 3600 by default, and refuses if the
-   head moves meanwhile), none failed, was cancelled or timed out, and every check the base branch's ruleset requires
-   (`GET rules/branches/<base>`; `test` today, `rcm/ci` once the owner switches it) passed as a
-   check run or a commit status, the latest status of a context counting; a PR
+   It pins the PR's head sha and then refuses unless every check the base branch's ruleset
+   requires (`GET rules/branches/<base>`: `rcm/ci` on `dev`, `main-from-dev-only` and `rcm/ci` on
+   `main`) has passed on that sha, as a check run or a commit status, the latest status of a
+   context counting (`--wait` waits up to `--timeout` seconds, 3600 by default, and refuses if
+   the head moves meanwhile). Checks the ruleset does not require, GitHub Actions included, are
+   counted and ignored, pending or failed. It also needs a PR
    comment carries the verification marker for that sha; and GitHub reports no conflict. Then it
    merges that sha into the base as a merge commit titled `<title> (#<N>)` and reads the PR back.
-   `--dry-run` runs every check and changes nothing; `--delete-branch` never deletes `main` or
+   `--dry-run` reads everything and changes nothing; `--delete-branch` never deletes `main` or
    `dev`. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer (look before
    retrying).
 

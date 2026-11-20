@@ -533,6 +533,12 @@ def _db_user_version(db: Path) -> int | None:
         return None
     if len(header) < 64 or not header.startswith(SQLITE_MAGIC):
         return None
+    wal = db.with_name(db.name + "-wal")
+    try:
+        if wal.stat().st_size > 0:
+            return None  # 새 user_version 이 아직 -wal 에만 있을 수 있다 — 헤더는 낡았을지 모른다
+    except OSError:
+        pass
     return int.from_bytes(header[60:64], "big")
 
 

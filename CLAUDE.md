@@ -28,9 +28,9 @@ PLAN.md 가 정본이다. 세션을 시작하면 먼저 끝까지 읽는다.
   `tools/guard_naming.py` 훅이 안 맞는 이름을 거부한다 — 정본은 `CONTRIBUTING.md` 「Names」.
 - 커밋 요약·본문과 PR 요약·본문의 한국어는 `korean-writing` 스킬(`.claude/skills/korean-writing/SKILL.md`)을
   로드한 뒤 그 규칙으로 쓴다. commit·pr 스킬이 그 단계를 부른다. 긴 글은 `korean-writer` 에이전트에 맡긴다.
-- **머지는 `python3 tools/merge_pr.py <N>` 로만 한다.** head sha 를 고정하고 그 sha 의 체크가 전부
-  끝나 초록이고(`--wait` 는 기다린다) base 브랜치 룰셋이 요구하는 체크(룰셋 API 에서 읽는다 — `test`
-  든 `rcm/ci` 든)가 통과했고 PR 댓글에 `verified: <head sha>` 표식(격리 검증을 마친 쪽이
+- **머지는 `python3 tools/merge_pr.py <N>` 로만 한다.** head sha 를 고정하고 그 sha 에서 base 브랜치
+  룰셋이 요구하는 체크(룰셋 API 에서 읽는다 — dev 는 `rcm/ci`, main 은 `main-from-dev-only` +
+  `rcm/ci`)가 통과했고(`--wait` 는 기다린다. 필수가 아닌 체크는 보지 않는다) PR 댓글에 `verified: <head sha>` 표식(격리 검증을 마친 쪽이
   단다)이 있어야 머지한다. `gh pr merge` · REST `PUT …/pulls/N/merge` 는 `tools/guard_merge.py` 훅이
   막는다. 문서만 · 시험만 PR 은 `--no-verify "<이유>"`. PR 본문 파일은 `pr-body-<브랜치>.md` 로.
 - 워크플로 잡 이름 `test`(ci.yml)·`main-from-dev-only`(pr-policy.yml)는 룰셋 필수 체크와 묶여 있다. 바꾸면 룰셋도 같이 바꾼다.

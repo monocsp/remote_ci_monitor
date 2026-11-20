@@ -40,9 +40,10 @@ checkout](docs/operating.md#from-a-git-checkout).
 1. Branch from `dev` **into its own worktree** — do not switch an existing one, someone may be
    working in it: `git fetch origin && git worktree add -b <type>/<topic>
    ../remote_ci_monitor-<topic> origin/dev`, then give it its own `.venv`.
-2. Open the pull request against `dev` and let CI (`test`) pass. Merge it with
-   `python3 tools/merge_pr.py <N>`: it refuses while any check on the head is pending or failed
-   and until the head carries a `verified: <sha>` comment. In a Claude Code session
+2. Open the pull request against `dev` and let the required check pass (`rcm/ci`, which the
+   build machine's `rcm-ci` job posts; GitHub Actions still runs but is not a merge condition).
+   Merge it with `python3 tools/merge_pr.py <N>`: it refuses while a check the base branch's
+   ruleset requires is pending or failed on the head and until the head carries a `verified: <sha>` comment. In a Claude Code session
    `tools/guard_merge.py` refuses `gh pr merge` and a REST merge, so this is the only way in.
 3. `main` only ever takes a pull request from `dev`, which additionally runs `main-from-dev-only`.
 
@@ -60,7 +61,7 @@ not fit (it is a `PreToolUse` hook for Claude Code sessions, and a CLI for every
 | branch | `<type>/<scope>-<what-it-does>` | type in `feat fix docs test refactor perf ci build chore`; lowercase, digits, hyphens; 2–7 words; ≤ 48 chars; no hash or session id; not a scope or milestone code alone (`fix/cli-ux` ✗ → `fix/cli-run-no-wait-eta` ✓). `release/vX.Y.Z` is the other shape. The worktree is `../remote_ci_monitor-<what-it-does>` |
 | commit subject | `<type>(<scope>)!: <summary>` | [Conventional Commits](https://www.conventionalcommits.org/) header; type adds `release` and `revert`; scope optional and lowercase; summary in Korean, present tense, no trailing period, first line ≤ 72 chars. `Merge …`, `Revert …`, `fixup!` are git's own and exempt |
 | commit body | blank line, 72 columns | **what** and **why** — the problem, the decision, the trade-off, the plan section or decision number, what the tests lock. Trailers at the end: `Refs: #N`, `Closes #N`, `BREAKING CHANGE:`, and the attribution lines a session is given |
-| pull request | title = commit subject; body = 한 줄 · 왜 · 무엇 · 검사 · 문서 | one concern per PR; `WIP:` + draft until ready; a body file is named after the branch (`pr-body-<branch>.md`), never `pr.md`; merge only through `tools/merge_pr.py <N>` — every check on the pinned head sha finished and green, the base branch's ruleset-required checks among them (as a check run or a commit status), and a `verified: <head sha>` comment (or `--no-verify "<reason>"`) — as a merge commit titled `<title> (#N)`; delete the branch and remove the worktree after |
+| pull request | title = commit subject; body = 한 줄 · 왜 · 무엇 · 검사 · 문서 | one concern per PR; `WIP:` + draft until ready; a body file is named after the branch (`pr-body-<branch>.md`), never `pr.md`; merge only through `tools/merge_pr.py <N>` — every check the base branch's ruleset requires passed on the pinned head sha (as a check run or a commit status; other checks are ignored), and a `verified: <head sha>` comment (or `--no-verify "<reason>"`) — as a merge commit titled `<title> (#N)`; delete the branch and remove the worktree after |
 
 ## Documentation
 

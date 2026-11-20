@@ -114,10 +114,11 @@ def _reason(number: str) -> str:
     return (
         "This merges a pull request outside the merge gate (`gh pr merge`, or a REST "
         f"`PUT …/pulls/{number}/merge`). Merge with `python3 {MERGE_TOOL} {number}` instead: it "
-        "pins the head sha, refuses while any check on that sha is pending or failed (`--wait` "
-        "waits), needs a `verified: <head sha>` comment from the isolated verification (or "
-        '`--no-verify "<reason>"`), and merges that exact sha. In 2026-11 a watcher merged with '
-        f"checks still pending, and three PRs merged without re-verification. See {DOCS}."
+        "pins the head sha, refuses while a check the base branch requires is pending or failed "
+        "on that sha (`--wait` waits), needs a `verified: <head sha>` comment from the isolated "
+        'verification (or `--no-verify "<reason>"`), and merges that exact sha. In 2026-11 a '
+        "watcher merged with checks still pending, and three PRs merged without "
+        f"re-verification. See {DOCS}."
     )
 
 

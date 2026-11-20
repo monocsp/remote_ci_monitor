@@ -215,6 +215,17 @@ def test_a_missing_db_passes(world):
     assert bash("rcm serve", world["worktree"]) is None
 
 
+def test_a_non_empty_wal_makes_the_header_unknown(world):
+    """WAL 모드에서 막 마이그레이션한 DB 는 새 user_version 이 아직 `-wal` 에만 있을 수 있다 —
+    헤더의 판이 낡았을 수 있으니 모르는 것으로 보고 지나간다(이미 올라간 DB 를 막는 오탐)."""
+    wal = world["db"].with_name("rcm.sqlite3-wal")
+    wal.write_bytes(b"\x00" * 32)
+    assert bash("rcm serve", world["worktree"]) is None
+    wal.write_bytes(b"")  # 비어 있는 -wal 은 헤더가 정본이다
+    v = bash("rcm serve", world["worktree"])
+    assert v is not None and v.decision == "deny"
+
+
 def test_a_file_that_is_not_sqlite_passes(world):
     world["db"].write_bytes(b"not a database at all, just text\n" * 10)
     assert bash("rcm serve", world["worktree"]) is None
