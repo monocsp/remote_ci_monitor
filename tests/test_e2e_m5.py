@@ -44,11 +44,13 @@ choices = ["full", "fast", "slow"]
 default = "full"
 """
 
+# slow 는 시간을 재지 않고 시험이 만드는 신호 파일을 기다린다(상한 60초). 4초 sleep 이었을 때는
+# 부하 걸린 CI 에서 rcm CLI 호출 넷이 4초를 넘겨, `rcm top` 을 읽기 전에 뒤 잡들이 끝나 버렸다.
 GATE_SH = """#!/bin/sh
 echo "::rcm::step::run"
 echo "scope=$RCM_INPUT_SCOPE job=$RCM_JOB_ID"
 case "$RCM_INPUT_SCOPE" in
-  slow) sleep 4;;
+  slow) i=0; while [ ! -f "{release}" ] && [ $i -lt 300 ]; do sleep 0.2; i=$((i+1)); done;;
 esac
 test -f assets/blob.bin && wc -c < assets/blob.bin
 echo "::rcm::summary::done $RCM_INPUT_SCOPE"
@@ -72,11 +74,16 @@ def server(tmp_path):
     s.stop()
 
 
+def release_file(tree: Path) -> Path:
+    """slow 잡을 풀어 주는 신호 파일. 트리 밖에 두어 업로드되는 스냅숏에 섞이지 않게 한다."""
+    return tree.parent / "release-slow"
+
+
 @pytest.fixture
 def tree(tmp_path):
     root = tmp_path / "tree"
     (root / "scripts").mkdir(parents=True)
-    (root / "scripts" / "gate.sh").write_text(GATE_SH)
+    (root / "scripts" / "gate.sh").write_text(GATE_SH.format(release=release_file(root)))
     (root / "README.md").write_text("loopback m5\n")
     return root
 
@@ -114,7 +121,7 @@ def test_high_priority_runs_first_and_every_job_notifies_once(server, tree):
     env = server.client_env(token)
     admin_env = server.client_env(admin)
 
-    # 레인 1 을 4초짜리 잡이 잡는다
+    # 레인 1 을 slow 잡이 잡는다. 시험이 신호 파일을 만들 때까지 끝나지 않는다
     first = rcm("run", "gate", "-f", "scope=slow", "--no-wait", env=env, cwd=tree)
     assert first.returncode == 0, first.stderr
     slow_id = last_json(first.stdout)["job_id"]
@@ -133,8 +140,11 @@ def test_high_priority_runs_first_and_every_job_notifies_once(server, tree):
     doc = json.loads(rcm("top", "--json", env=env).stdout)
     rows = {r["id"]: r for r in doc["pools"][0]["queue"]}
     assert rows[high_id]["priority"] == 1 and rows[normal_id]["priority"] == 0
-    if rows[high_id]["state"] == "queued" and rows[normal_id]["state"] == "queued":
-        assert rows[high_id]["position"] == 1 and rows[normal_id]["position"] == 2
+    # slow 가 레인을 쥐고 있으니 둘 다 아직 queued 다
+    assert (rows[high_id]["state"], rows[normal_id]["state"]) == ("queued", "queued"), rows
+    assert rows[high_id]["position"] == 1 and rows[normal_id]["position"] == 2
+    assert job_json(env, slow_id)["state"] == "running"
+    release_file(tree).touch()  # 이제 slow 를 끝낸다
     # 둘 다 끝날 때까지 — high 가 먼저 시작했어야 한다
     high_done = last_json(rcm("wait", "--job", str(high_id), env=env).stdout)
     normal_done = last_json(rcm("wait", "--job", str(normal_id), env=env).stdout)
