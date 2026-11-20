@@ -41,6 +41,8 @@ INSTALLED = remote_ci_monitor.__version__
 NEW = "99.0.1"
 NEW2 = "99.0.2"
 OLD = "0.0.9"
+#: `client_barrier` 가 먼저 온 받기를 붙잡는 최대 초. 받는 쪽 소켓 제한(10초)보다 짧게
+CLIENT_BARRIER_SECONDS = 6.0
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 T = 1_763_532_000.0
@@ -332,8 +334,13 @@ class FakeServer:
                 self._send(h, 401, b'{"error":"read access requires a token"}', "application/json")
                 return
             if self.client_barrier is not None:
+                # 먼저 온 받기를 장벽에 붙잡는 시간은 받는 쪽의 소켓 제한(follow 의
+                # `FETCH_SOCKET_SECONDS`, 10초)보다 짧아야 한다. 길면 마지막 프로세스가 늦게 뜰 때
+                # (CPU 를 나눠 쓰는 pytest-xdist 실행) 먼저 온 쪽이 응답 머리를 기다리다 「cannot
+                # reach the server」로 끝난다. 시간이 넘으면 장벽이 깨지고 그때까지 온 받기가
+                # 한꺼번에 나간다. 경주는 그대로 남는다
                 try:
-                    self.client_barrier.wait(timeout=30)
+                    self.client_barrier.wait(timeout=CLIENT_BARRIER_SECONDS)
                 except threading.BrokenBarrierError:
                     pass
             if self.client_hold is not None:
