@@ -915,6 +915,7 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 | C11 | 보안 | head 레포가 `null` · 연 계정이 `dependabot[bot]` | 둘 다 `github` · `why=fork` |
 | C12 | 표시 | `describe("queued", 12, "x"*300)` · 잡 번호 없음 · 제어문자 | 140자, `queued · #12 · …`, 번호 칸 없음, 제어문자 지움. `read_word` 가 되돌린다 |
 | C13 | 대응 | `terminal_status` 에 §2.7 표의 열 줄 | 표와 같다. 종료 75 는 `unavailable` 이고 설명에 단계가 있다 |
+| C14 | 우선순위 | `RCM_CI_MODE` 가 빈 문자열(저장소 변수가 없을 때 워크플로가 넘기는 값) | 덮어쓰기 없음. 파일의 `mode` · `why=default` |
 
 ### W: 대기 잡 (PR A)
 
@@ -934,7 +935,8 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 | W12 | 엣지 | 모르는 첫 낱말의 pending | queued 로 센다 |
 | W13 | 엣지 | 상태가 바뀌지 않음 | 둘째 요청부터 `If-None-Match` 를 싣는다. 가짜 서버가 304 를 센다 |
 | W14 | 엣지 | `fallback="none"` 에서 W3 | `fail no_pickup` |
-| W15 | 시간 | 경과는 상태의 `created_at` 으로 잰다 | 대기 잡 시계를 2시간 앞당겨도 결과가 같다 |
+| W15 | 시간 | 경과는 상태의 `created_at` 과 GitHub 응답의 `Date` 헤더로 잰다 | 대기 잡 러너의 시계를 2시간 앞당기거나 늦춰도 결과가 같다 |
+| W16 | 엣지 | 첫 요청에서 이미 success(같은 sha 를 다른 실행이 끝냄) | 요청 한 번으로 `pass`. `pickup_seconds` 를 기다리지 않는다 |
 
 ### V: 판정 (PR A)
 
@@ -946,6 +948,7 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 | V2 | `rcm` 이 `fallback`, `late` 가 success 인데 `ran` 이 빔 | 실패 |
 | V3 | `rcm` 이 `fallback`, `late` success · `ran=ubuntu` 인데 최신 상태가 `failure`, `run_attempt=1` | 실패 |
 | V4 | V3 과 같은데 `run_attempt=2` | 통과(탈출구) |
+| V5 | `schedule` · `now` 가 success 인데 `ran=ubuntu`(macOS 갈래가 건너뜀) | 실패. 요약에 빠진 갈래 `macos` |
 
 ### H: 감시 스크립트 (PR A)
 
@@ -971,21 +974,54 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 | H18 | 시간 | 잠금 파일이 11분 전에 잡혔다 | `lock stale` 로그와 함께 빼앗고 돈다. 9분 전이면 0 으로 끝난다 |
 | H19 | 에러 | contents API 가 500 | `unavailable · watcher_config` 를 바로 올린다. 제출 0 |
 | H20 | 엣지 | 저장소 변수 API 가 404 | 덮어쓰기 없음. 파일의 `mode` 대로 낸다 |
+| H21 | 엣지 | 세션이 같은 sha 로 `rcm run rcm-ci` 를 이미 냈다(가짜 `rcm` 이 `joined: true` 와 그 잡 번호) | 상태 `queued · #<그 번호>` 하나. 따라가기도 그 번호로 한다 |
+| H22 | 에러 | GitHub 이 401 을 낸다(토큰 만료) | 제출 0 · 상태 0. 로그에 `github_auth` 한 줄. 다음 바퀴에도 한 줄이고 늘지 않는다. `--check` 의 GitHub 행 FAIL |
+| H23 | 에러 | `rcm run` 이 401(rcm 토큰 폐기) | `unavailable · rcm_auth` |
+| H24 | 엣지 | 같은 브랜치의 head 가 sha1 에서 sha2 로 바뀜 | sha2 를 새로 낸다. sha1 은 다시 내지 않고 기록 그대로 둔다 |
+| H25 | 엣지 | dev head 가 PR head 와 다른 커밋(squash 병합) | dev head 를 따로 낸다. PR head 의 기록은 건드리지 않는다 |
 
 ### N: 알림 훅 (PR A)
 
-§2.7 표의 열 줄을 env 로 넣고 가짜 GitHub 이 받은 상태를 본다. 그리고 GitHub 이 500 을 내면 종료 1, `RCM_SOURCE_SHA`
-가 비면 요청 0, 가장 새 상태가 `taken-over` 면 요청이 목록 조회 하나뿐임을 본다. `RCM_FAILED_STEP` 이 비고
-`RCM_LAST_STEP=test` 면 설명에 `test` 가 들어간다.
+가짜 GitHub 이 받은 상태를 본다. N1~N10 은 §2.7 표의 열 줄을 차례로 env 로 넣는다.
 
-### Y: 워크플로 (PR B)
+| # | 준비 | 기대 |
+|---|---|---|
+| N1 | `RCM_SOURCE_MODE=tree` · 또는 `RCM_SOURCE_SHA` 빔 | 요청 0, 로그 한 줄 |
+| N2 | 가장 새 상태가 `taken-over` | 요청은 목록 조회 하나뿐 |
+| N3 | `succeeded` | `success passed · #N` |
+| N4 | `failed` · 종료 75 · `RCM_FAILED_STEP` 빔 · `RCM_LAST_STEP=venv` | `error unavailable · #N · infra at venv` |
+| N5 | `failed` · 종료 1 · `RCM_FAILED_STEP=test` | `failure failed · #N · test` |
+| N6 | `failed` · 종료 코드 빔(`tool_missing`) | `error unavailable · #N · could not prepare` |
+| N7 | `timed_out` | `error unavailable · #N · timed out` |
+| N8 | `lost` | `error unavailable · #N · lost` |
+| N9 | `cancelled` · 가짜 rcm 의 `GET /jobs/{id}` 가 `cancelled_by=superseded` | `error superseded · #N · by #M` |
+| N10 | `cancelled` · `cancelled_by=owner` | `error unavailable · #N · cancelled` |
+| N11 | GitHub 이 500 | 종료 1 |
+| N12 | GitHub 이 401(토큰 만료) | 종료 1. 로그와 stderr 에 토큰 문자열이 없다 |
+| N13 | `RCM_FAILED_STEP` 빔 · `RCM_LAST_STEP=test` · 종료 1 | 설명에 `test` |
+| N14 | `--job-url` 없음 · 있음 | `target_url` 없음 · `RCM_URL` |
+| N15 | GitHub 이 15초 넘게 응답하지 않음 | 끊고 종료 1 |
 
-`tests/test_release_files.py` 의 `ci.yml` 시험을 고친다. `test` 이름 · `if: always()` · `needs` 에 `route` · `rcm` ·
-`now` · `late` 가 있는지, `late` 가 `always()` 가 아니라 `!cancelled()` 와 §2.5 의 조건을 쓰는지, `now` · `late` 가
-`checks.yml` 을 부르고 `ref` 를 넘기는지, `checks.yml` 에 `legs` · `unit` · `smoke` · `secrets` · `ran` 과 갈래 `if` 가
-있고 `ran` 이 `workflow_call` 출력인지, `route` 가 head sha 를 체크아웃하는지, `schedule` 과 `--schedule-ref dev` 가
-있는지, `rcm` 잡에 `statuses: write` 와 `timeout-minutes` 가 있는지, `concurrency` 가 main push 를 취소하지 않는지를
-본다. `scripts/ci/rcm_ci_config.py` · `rcm_ci_wait.py` 가 템플릿과 바이트까지 같은지도 본다.
+### Y: 워크플로 (PR B · D)
+
+`tests/test_release_files.py` 의 `ci.yml` 시험을 고치고 더한다. `scripts/ci/` 의 사본은 템플릿과 바이트까지 같아야 한다.
+
+| # | 보는 것 |
+|---|---|
+| Y1 | `test` 이름 · `if: always()` · `needs` 에 `route` · `rcm` · `now` · `late` · `needs.*.result` 와 `ran` 을 `verdict` 에 넘김 |
+| Y2 | `late` 가 `always()` 가 아니라 `!cancelled()` 와 §2.5 의 조건을 쓴다. `now` · `late` 가 `checks.yml` 을 부르고 `legs` · `ref` 를 넘긴다 |
+| Y3 | `checks.yml` 이 `workflow_call` 이고 `legs` 잡 · `unit` · `unit-macos` · `smoke` · `smoke-macos` · `secrets` · `ran` 잡과 갈래 `if` 가 있고 `ran` 이 출력이다 |
+| Y4 | `checks.yml` 의 `legs` 잡이 모르는 갈래(`ubunut`)와 빈 값에서 실패한다(그 단계의 셸을 시험이 직접 돌린다) |
+| Y5 | `route` 가 PR head sha 를 체크아웃한다. `schedule` 트리거와 `--schedule-ref dev` 가 있다 |
+| Y6 | `rcm` 잡에 `statuses: write` 와 `timeout-minutes` 가 있다. `concurrency` 가 main push 를 취소하지 않는다 |
+| Y7 | `scripts/ci/rcm_ci_config.py` · `rcm_ci_wait.py` 가 템플릿과 바이트까지 같다 |
+| Y8 | 레포의 `.rcm/ci.toml` 을 실제 파서로 읽어 dev PR · main PR · dev push · main push · schedule 의 `Route` 를 잠근다. PR D 의 첫 커밋에서 이 시험을 rcm 기대값으로 바꾸면 빨강이고 파일을 고치면 초록이다 |
+
+### K: 배포 (PR A)
+
+| # | 보는 것 |
+|---|---|
+| K1 | 조립한 클라이언트 wheel 에 `skills/rcm-ci-connect/` 의 파일 전부가 있다. `rcm skills list` 가 설명과 함께 보이고 `install` 이 템플릿을 쓴다 |
 
 ### J: 잡 스크립트 (PR B)
 
@@ -1108,6 +1144,8 @@ PR 마다 완료 기준은 같다.
    실제로 돌린다.
 3. B 의 draft 실험이 §7 8 의 여섯 가지를 잠그고 그 결과를 §11 에 남긴다.
 
+시나리오 스물두 개와 PR 마다 첫 커밋에 넣을 시험 목록은 `docs/m5r-scenarios.md` 에 있다.
+
 ## 10. 결정 (175~195)
 
 | # | 결정 | 추천 | 오너 확인 |
@@ -1162,7 +1200,7 @@ GitHub 에 대 보았고 틀린 근거는 찾지 못했다. 그래서 전부 받
 | P2-2 `timeout_seconds` 5400 이 `run_seconds` 3600 과 맞지 않는다 | 3300 으로(§3.2) | 받아들임 |
 | P2-3 main push 는 rcm 에서 돌 까닭이 없다 | `push = ["dev"]`(§3.1). 감시의 `branches` 도 dev 만 | 받아들임 |
 | P2-4 큐 정지 때 끝없이 기다린다 | `paused` 300초면 `unavailable`(§2.6, H10, §7 6) | 받아들임 |
-| P2-5 | 반박 요약에 내용이 없다 | 해당 없음 |
+| P2-5 대체 경로의 갈래를 고를 수 있게(`late` 를 ubuntu 만) | 결정 195 로 반영했다. 갈래 값 `rcm-only`(§2.2 · §3.1) | 받아들임 |
 | P2-6 `[[branches]]` 는 쓰는 곳이 없다 | 스키마 · 순서 · 시험에서 뺐다(§2.2 · §2.3 · §8). 남아 있으면 모르는 키(C6) | 받아들임 |
 | P2-7 훅이 실패 스텝만 본다 | 없으면 `RCM_LAST_STEP`(§2.7 · §5.5, N) | 받아들임 |
 | P2-8 `target_url` 이 내부 주소를 공개한다 | 기본으로 비우고 `job_url` 로 켠다(§2.4 · §2.6 · §2.9) | 받아들임 |
