@@ -39,10 +39,13 @@ jobs:
         run: ruff check .
       - name: ruff format --check
         run: ruff format --check .
+      # pytest-xdist 로 러너의 코어 수(ubuntu 4 · macOS 3)만큼 워커를 띄운다. 직렬로는 평균 한 코어도
+      # 다 못 쓰는 대기 위주 시험이라 코어 수만큼 거의 그대로 줄어든다. 로컬 기본(`pytest`)은 여전히
+      # 직렬이고 직렬도 통과해야 한다.
       - name: pytest
         env:
           RCM_CHROME: ${{ matrix.chrome }}
-        run: pytest
+        run: pytest -n auto
       - name: 웹 UI 순수 함수 (node --test)
         if: hashFiles('tests/web/*.test.js') != ''
         run: node --test tests/web/*.test.js
