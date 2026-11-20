@@ -737,6 +737,32 @@ def test_a_job_finished_while_the_server_was_away_is_reported_before_the_drain(r
     done = [at for at, j, st in rig.finishes if j == jid and st == 200]
     assert done and done[0] < rw.draining.set_at
     assert rw.restart_for == NEW
+    # #234 재검증: 포기한다고 쓰지 않는다 — 미뤄 뒀다 다시 보고한다는 줄과 보고했다는 줄이 하나씩
+    later = [ln for ln in rig.logs if ln.startswith(f"#{jid} finish: ")]
+    assert len(later) == 2, rig.logs
+    assert later[0].endswith(" — will retry after the server is back"), later
+    assert later[1] == f"#{jid} finish: reported after retry"
+    assert not any("giving up" in ln for ln in rig.logs), rig.logs
+
+
+def test_registering_again_waits_for_a_retry_already_running(rig, monkeypatch):
+    # #234 재검증: 다른 스레드(heartbeat)가 다시 보고하는 중이면 레인은 그 보고를 건너뛰고
+    # 재등록하지 않는다 — 잠금을 잠깐 기다려 미룬 보고가 재등록보다 먼저 가게 한다
+    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    rw = rig.start(lanes=2)
+    jid = rig.hold()
+    rig.down = True
+    rig.go(jid)
+    rig.until(lambda: jid in rw._unreported, "parked")
+    rw._retry_lock.acquire()  # 다른 스레드가 다시 보고하는 중인 것처럼
+    threading.Timer(1.5, rw._retry_lock.release).start()
+    rig.forget()
+    rig.down = False
+    rig.until(lambda: rig.srv.store.get_worker(WORKER) is not None, "registered again")
+    job = rig.state(jid)
+    assert job.state == SUCCEEDED, (job.state, job.summary)
+    rw.stop()
+    assert rig.join() == 0
 
 
 def test_a_job_not_reported_is_given_up_after_the_limit_without_a_drain(rig, monkeypatch):

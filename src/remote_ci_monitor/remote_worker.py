@@ -73,6 +73,8 @@ REDISCOVER_AFTER_FAILURES = 5
 #: 그 워커의 도는 잡을 lost 로 닫으므로 바로 exec 하지 않는다
 DRAIN_REPORT_SECONDS = 60
 DRAIN_REPORT_RETRY_SECONDS = 2.0
+#: 레인이 재등록하기 전에 다른 스레드의 다시 보고를 기다리는 상한
+REREGISTER_REPORT_WAIT_SECONDS = 10.0
 #: 드레인 중인 레인이 claim 없이 한 번 기다리는 시간(§14 B질문8). 드레인이 취소되면 다시 claim 한다
 DRAIN_WAIT_SECONDS = 1.0
 DRAINING = "draining: no new claims, restarting when running jobs finish"
@@ -312,11 +314,12 @@ class RemoteWorker:
     # ── 보고 (재시도) ────────────────────────────────────────────────────────
 
     def report(
-        self, call: Callable[[], Any], what: str, *, on_give_up: Callable[[], None] | None = None
+        self, call: Callable[[], Any], what: str, *, keep: Callable[[], bool] | None = None
     ) -> Any:
         """서버에 보고. 연결 오류는 1·2·4초 재시도, 409(잡이 이미 닫힘)는 None, 다른 4xx 는 로그.
-        반환: 응답(성공) · None(409) · False(포기). `on_give_up` 은 연결 오류 · 503 으로 포기했을
-        때만 부른다 — 다시 시도해 볼 만한 실패다."""
+        반환: 응답(성공) · None(409) · False(포기). `keep` 은 연결 오류 · 503 으로 재시도가 다
+        실패했을 때만 부른다. 참을 돌려주면 부른 쪽이 미뤄 뒀다 다시 보고한다는 뜻이라 「giving up」
+        대신 그렇게 쓴다."""
         for i, delay in enumerate((*REPORT_RETRIES, None)):
             try:
                 out = call()
@@ -329,9 +332,10 @@ class RemoteWorker:
                     self.log(f"{what}: {e.message}")
                     return False
                 if delay is None or self.stopping.is_set() and i >= 1:
-                    self.log(f"{what}: giving up — {e.message}")
-                    if on_give_up is not None:
-                        on_give_up()
+                    if keep is not None and keep():
+                        self.log(f"{what}: {e.message} — will retry after the server is back")
+                    else:
+                        self.log(f"{what}: giving up — {e.message}")
                     return False
                 time.sleep(delay)
         return False
@@ -581,6 +585,7 @@ class RemoteWorker:
         거짓."""
         try:
             call()
+            self.log(f"#{job_id} finish: reported after retry")
             return True
         except ClientError as e:
             if e.status and e.status != 503:
@@ -588,11 +593,16 @@ class RemoteWorker:
                 return True
             return False
 
-    def _retry_unreported(self) -> None:
+    def _retry_unreported(self, wait: float = 0.0) -> None:
         """보고하지 못한 잡을 한 번씩 다시 보고한다(heartbeat 성공 뒤 · 레인 재등록 전). 미룬 지
         `DRAIN_REPORT_SECONDS` 가 지나면 오늘처럼 로그를 쓰고 버린다. 다른 스레드가 이미 하고
-        있으면 넘어간다."""
-        if not self._unreported or not self._retry_lock.acquire(blocking=False):
+        있으면 `wait` 초까지 기다리고, 그래도 못 잡으면 넘어간다."""
+        if not self._unreported:
+            return
+        got = (
+            self._retry_lock.acquire(timeout=wait) if wait > 0 else self._retry_lock.acquire(False)
+        )
+        if not got:
             return
         try:
             with self._lock:
@@ -762,8 +772,9 @@ class RemoteWorker:
             except ClientError as e:
                 if e.status == 409 and "not registered" in e.message:
                     self.log(f"lane {lane}: {e.message} — registering again")
-                    # 재등록은 이 워커의 도는 잡을 lost 로 닫는다 — 못 한 보고를 먼저 한다
-                    self._retry_unreported()
+                    # 재등록은 이 워커의 도는 잡을 lost 로 닫는다 — 못 한 보고를 먼저 한다. 다른
+                    # 스레드가 보고하는 중이면 끝날 때까지 잠깐 기다린다
+                    self._retry_unreported(wait=REREGISTER_REPORT_WAIT_SECONDS)
                     try:
                         self.register()
                     except WorkerExit as x:
@@ -1064,7 +1075,12 @@ class RemoteWorker:
                 extra["summary_args"] = dict(summary_args or {})
             call = lambda: self.client.finish(job_id, outcome, rc, summary, **extra)  # noqa: E731
             gave_up: list[bool] = []
-            self.report(call, f"#{job_id} finish", on_give_up=lambda: gave_up.append(True))
+
+            def keep() -> bool:
+                gave_up.append(True)
+                return not self.stopping.is_set()
+
+            self.report(call, f"#{job_id} finish", keep=keep)
             if gave_up and not self.stopping.is_set():
                 # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
                 self._park_unreported(job_id, call)

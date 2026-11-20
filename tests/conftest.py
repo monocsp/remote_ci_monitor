@@ -38,4 +38,10 @@ def _follow_isolation(monkeypatch, tmp_path_factory):
         follow = None
     if follow is not None and hasattr(follow, "_STATE"):
         monkeypatch.setattr(follow, "_STATE", None)
+    # 워커가 exec 직전에 프로브를 닫는다(M5q B2). 한 시험이 닫은 것이 다른 시험의 프로브를 막지
+    # 않게 시험마다 되돌린다
+    from remote_ci_monitor import hostsample
+
+    if hasattr(hostsample, "_PROBES_CLOSED"):
+        monkeypatch.setattr(hostsample, "_PROBES_CLOSED", False)
     yield
