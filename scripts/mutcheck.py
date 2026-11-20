@@ -1598,7 +1598,7 @@ def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
         return False, f"control run timed out: {' '.join(cmd)}"
     if control[0] != 0:
         return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
-    target.write_text(text.replace(m.old, m.new), encoding="utf-8")
+    _write_mutant(target, text.replace(m.old, m.new))
     mutated = _pytest(cmd, tmp, env)
     if mutated is None:
         return False, f"mutant run timed out: {' '.join(cmd)}"
@@ -1606,6 +1606,12 @@ def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
     if code == 0:
         return False, f"tests stayed GREEN with mutant applied ({took:.1f}s)\n{tail}"
     return True, f"control green, mutant red (exit {code}, {took:.1f}s)"
+
+
+def _write_mutant(target: Path, text: str) -> None:
+    """변이를 사본에 쓴다. 시험이 이것을 감싸 mtime 을 원본 값으로 되돌린다 — 옛 `.pyc` 가 읽히는
+    조건(같은 초 · 같은 길이)을 시계에 기대지 않고 만든다."""
+    target.write_text(text, encoding="utf-8")
 
 
 def resolve_jobs(jobs: int) -> int:

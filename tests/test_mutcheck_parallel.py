@@ -81,8 +81,7 @@ def run(argv, capsys):
 def test_parallel_and_serial_report_the_same_and_a_timeout_does_not_hold_the_rest(
     tmp_path, monkeypatch, capsys
 ):
-    # mutcheck 안에서 돌 때는 바깥 mutcheck 가 준 값이 남는다 — 이 mutcheck 가 스스로 끄는지 본다
-    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    _no_inherited_bytecode_setting(monkeypatch)
     monkeypatch.setattr(mc, "ROOT", fake_project(tmp_path))
     monkeypatch.setattr(mc, "MUTANTS", FAKE)
     monkeypatch.setattr(mc, "PYTEST_TIMEOUT_SECONDS", 4)
@@ -172,7 +171,35 @@ def test_chrome_mutants_never_run_at_the_same_time(monkeypatch, capsys):
     assert max(peak) == 1, peak
 
 
+def _no_inherited_bytecode_setting(monkeypatch):
+    """mutcheck 안에서 돌 때는 바깥 mutcheck 가 준 값이 환경에 남는다 — 이 mutcheck 가 스스로
+    주는지 보려면 지운다."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+
+
+def test_a_same_size_mutant_written_with_the_old_mtime_is_still_caught(tmp_path, monkeypatch):
+    """`.pyc` 는 원본의 (mtime 초, 크기) 로 낡았는지 본다. 변이를 쓴 뒤 mtime 을 원본 값으로
+    되돌리고 길이도 같게 하면(`VALUE = 1` → `VALUE = 2`) 대조군이 남긴 `.pyc` 가 그대로 맞는다.
+    바이트코드를 쓰면 변이 뒤에도 옛 코드를 읽어 「초록」— 잡혀야 할 변이를 놓친다. 시계에 기대지
+    않으므로 부하와 관계없이 같다(rcm-ci 잡 #3868 은 부하 평균 30 에서 우연히 지나갔다)."""
+    _no_inherited_bytecode_setting(monkeypatch)
+    monkeypatch.setattr(mc, "ROOT", fake_project(tmp_path))
+    real_write = mc._write_mutant
+
+    def write_keeping_mtime(target, text):
+        before = target.stat()
+        real_write(target, text)
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        assert target.stat().st_size == before.st_size  # 같은 길이 — 크기로도 못 가른다
+
+    monkeypatch.setattr(mc, "_write_mutant", write_keeping_mtime)
+    ok, info = mc.run_mutant(FAKE[0], keep=False)
+    assert ok is True, info
+
+
 def test_each_mutant_gets_its_own_tmpdir_and_it_is_removed(tmp_path, monkeypatch):
+    _no_inherited_bytecode_setting(monkeypatch)
     monkeypatch.setattr(mc, "ROOT", fake_project(tmp_path))
     seen = []
 
