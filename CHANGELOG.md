@@ -8,11 +8,12 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Fixed
-- **Server events reach every subscriber in id order.** Two threads publishing at once could hand
-  a subscriber event 242 before 241, because the id was taken under the bus lock but the event was
-  handed over after it; a reconnecting subscriber could likewise get a new event before the
-  replayed ones. The web UI and `rcm wait` follow this stream (SSE). Both now happen under the
-  same lock. ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
+- **The web page no longer misses an event when it reconnects.** Two events published at the same
+  moment could reach a live stream in the wrong order (244 before 243). A page that lost its
+  connection right after 244 asked to resume after 244 and never got 243, so a job could stay
+  shown in an old state until the page was reloaded. Events replayed on reconnect could also
+  arrive after newer ones. Each stream now gets events in id order.
+  ([#242](https://github.com/monocsp/remote_ci_monitor/pull/242))
 - **A version no longer stays `running` when its release round ends at once.** The server linked
   a version to a driver round only after the round had started, so a round that exited before
   the link (a driver that fails right away, or the confirm round that "build number: auto" starts)

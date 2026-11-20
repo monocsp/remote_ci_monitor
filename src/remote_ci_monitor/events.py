@@ -95,13 +95,16 @@ class EventBus:
             return len(self._subs)
 
     def publish(self, kind: str, data: dict[str, Any], *, at: datetime | None = None) -> Event:
-        # 구독자에게 넘기는 일도 id 를 매긴 잠금 안에서 한다. 밖에서 넘기면 id 를 먼저 받은 발행자가
-        # 넘기기 전에 다른 발행자의 다음 id 가 먼저 닿는다(역순). `_offer` 는 막히지 않고 구독자
-        # 자신의 잠금만 잡는다. 잡는 순서는 늘 버스 잠금 다음 구독자 잠금이라 엇갈리지 않는다.
         with self._lock:
             self._last_id += 1
             event = Event(id=self._last_id, kind=kind, data=dict(data), at=at or datetime.now(UTC))
             self._ring.append(event)
+            # offer 도 잠금 안에서 한다. 밖에서 하면 id 243 · 244 를 받은 두 발행 스레드
+            # 가운데 244 가 먼저 큐에 들어갈 수 있고, 244 를 받고 끊긴 SSE 클라이언트는
+            # `Last-Event-ID: 244` 로 다시 붙어 243 을 영영 못 받는다. `_offer` 는 구독자
+            # 자기 잠금만 잡고 put_nowait 라 막히지 않는다(잠금 순서는 버스 → 구독자 한 방향).
+            # 잠금 안에서 하는 일은 구독자 수만큼의 put_nowait 이고, 구독자는 열린 화면과
+            # 알림 몇 개뿐이다.
             for sub in self._subs:
                 sub._offer(event)
         return event
@@ -118,11 +121,11 @@ class EventBus:
                     replay = [
                         Event(id=self._last_id, kind=KIND_RESET, data={}, at=datetime.now(UTC))
                     ]
-            self._subs.append(sub)
-            # 재생도 잠금 안에서 넘긴다. 밖에서 넘기면 그 사이에 발행된 새 이벤트가 재생보다
-            # 먼저 닿는다
+            # replay 도 잠금 안에서 넣는다. 밖에서 넣으면 그 사이 발행된 새 이벤트가 replay 보다
+            # 먼저 큐에 들어간다
             for e in replay:
                 sub._offer(e)
+            self._subs.append(sub)
         return sub
 
     def unsubscribe(self, sub: Subscription) -> None:

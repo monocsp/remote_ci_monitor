@@ -104,6 +104,9 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   ㊱ claim-ignores-pause — claim 트랜잭션 안의 정지 검사를 뺌: `get_paused` 확인 뒤 · claim 전에
      걸린 정지를 놓쳐 정지 중에 잡을 집는다 (`store.py`, 2026-11-19 — 배포의 「정지 → 도는 잡 0
      확인 → 재시작」 직후 잡이 시작돼 lost 가 된다)
+  ㊲ events-offer-outside-lock · events-replay-outside-lock — 이벤트 버스가 offer 와 replay 를
+     잠금 밖에서 함: 동시 발행의 id 가 큐에서 뒤집혀, 뒤의 id 로 다시 붙은 SSE 클라이언트가 앞의
+     id 를 영영 못 받는다 (`events.py`, 2026-11-20 PR #238 의 CI — 243 · 244)
 
   M5q A — `m5q-*` 열다섯(격리 검증이 더한 넷 — 받기 전체 제한 · rename 에 진 쪽의 검사 · 캐시
      뿌리의 부모 · `rcm check` 의 version 정리 — 을 포함): 받은 wheel 의 sha256 을 안 봄 ·
@@ -451,6 +454,43 @@ MUTANTS = (
         old="            if conn.execute(_PAUSED_SQL).fetchone() is not None:\n",
         new="            if False:\n",
         tests=("tests/test_store.py",),
+    ),
+    # ── 이벤트 버스가 id 순서대로 큐에 넣는다(2026-11-20, PR #238 의 CI 에서 뒤집힘) ──
+    Mutant(
+        # offer 를 버스 잠금 밖으로 되돌린다 — 두 발행 스레드의 id 가 큐에서 뒤집히고, 뒤의 id 로
+        # 다시 붙은 SSE 클라이언트는 앞의 id 를 못 받는다
+        name="events-offer-outside-lock",
+        path="src/remote_ci_monitor/events.py",
+        old=(
+            "            for sub in self._subs:\n"
+            "                sub._offer(event)\n"
+            "        return event\n"
+        ),
+        new=(
+            "            subs = list(self._subs)\n"
+            "        for sub in subs:\n"
+            "            sub._offer(event)\n"
+            "        return event\n"
+        ),
+        tests=("tests/test_events.py",),
+    ),
+    Mutant(
+        # replay 를 버스 잠금 밖에서 넣는다 — 그 사이 발행된 새 이벤트가 replay 보다 먼저 온다
+        name="events-replay-outside-lock",
+        path="src/remote_ci_monitor/events.py",
+        old=(
+            "            for e in replay:\n"
+            "                sub._offer(e)\n"
+            "            self._subs.append(sub)\n"
+            "        return sub\n"
+        ),
+        new=(
+            "            self._subs.append(sub)\n"
+            "        for e in replay:\n"
+            "            sub._offer(e)\n"
+            "        return sub\n"
+        ),
+        tests=("tests/test_events.py",),
     ),
     # ── M5n — 머신의 능력과 배치(docs/m5n-workplan.md §15) ──
     Mutant(
