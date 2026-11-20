@@ -313,6 +313,27 @@ def test_a_release_pr_reads_the_ruleset_of_main():
     assert api.did("GET", f"repos/{REPO}/rules/branches/main")
 
 
+@pytest.mark.parametrize(
+    "runs, statuses, code",
+    [
+        # 2026-11-20 룰셋: main 은 `main-from-dev-only`(check-run) + `rcm/ci`(commit status)
+        ([run_("main-from-dev-only")], [RCM_OK], 0),
+        ([run_("main-from-dev-only")], [], 1),  # rcm/ci 가 아직 없다
+        ([], [RCM_OK], 1),  # main-from-dev-only 가 아직 없다
+        ([run_("main-from-dev-only", conclusion="failure")], [RCM_OK], 1),
+    ],
+)
+def test_the_main_ruleset_mixes_a_check_run_and_a_commit_status(runs, statuses, code):
+    api = FakeGitHub(
+        runs=[runs],
+        statuses=statuses,
+        required=["main-from-dev-only", "rcm/ci"],
+        pr={"base": {"ref": "main", "repo": {"full_name": REPO}}},
+    )
+    assert merge(api) == code
+    assert bool(api.did("PUT")) == (code == 0)
+
+
 def test_a_missing_required_status_refuses_and_names_it(capsys):
     api = FakeGitHub(required=["rcm/ci"])  # GitHub Actions 는 초록이지만 rcm/ci 가 없다
     assert merge(api) == 1 and api.did("PUT") == []
