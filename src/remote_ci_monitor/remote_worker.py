@@ -4,6 +4,10 @@
 - 등록(`/worker/register`; 서버에 못 닿으면 5초마다 재시도, 409 는 그대로 출력하고 종료 2).
   버전 불일치 409 의 본문이 다른 `server_version` 을 실으면 `WorkerFollow` 를 던진다 —
   `cmd_worker` 가 그 버전으로 따라간다(M5q ②). 레인의 재등록이 막히면 `run()` 은 종료 2 다.
+- 드레인(M5q ③ · ④ · PR B2): heartbeat 의 `server_version` 이 다르거나 레인의 재등록이 버전
+  불일치 409 면 `draining` 을 켠다. 레인은 새 claim 을 하지 않고 기다리되 받은 잡은 끝까지 돌려
+  보고한다. 모든 레인이 잡 없이 기다리면 `run()` 이 `stopping` 을 켜고 `restart_for` 를 남긴다 —
+  `cmd_worker` 가 설치본 부트로더로 같은 PID 에서 다시 실행한다. 도는 잡은 하나도 잃지 않는다.
 - heartbeat 스레드: `heartbeat_seconds` 마다 `{jobs: [도는 잡…], host_sample}`. 응답 `cancel` 은
   레인에 전달, `paused` 면 claim 을 쉰다. 연속 실패는 경고 한 줄 — 잡은 계속 돈다(서버가 timeout
   뒤 lost 로 닫으면 finish 가 409 를 받고 워크스페이스만 정리한다).
@@ -65,6 +69,15 @@ WORKSPACE_KEEP_DAYS = 7
 STOP_SUMMARY = "worker stopped"
 #: 연결 실패가 이만큼 **연속**이면 같은 망에서 서버를 다시 찾는다(`server = "auto"` 일 때만, M5n §9)
 REDISCOVER_AFTER_FAILURES = 5
+#: 드레인 끝에 보고하지 못한 잡의 finish 를 다시 시도하는 상한(M5q §14 B질문11). 재실행 뒤의 등록은
+#: 그 워커의 도는 잡을 lost 로 닫으므로 바로 exec 하지 않는다
+DRAIN_REPORT_SECONDS = 60
+DRAIN_REPORT_RETRY_SECONDS = 2.0
+#: 레인이 재등록하기 전에 다른 스레드의 다시 보고를 기다리는 상한
+REREGISTER_REPORT_WAIT_SECONDS = 10.0
+#: 드레인 중인 레인이 claim 없이 한 번 기다리는 시간(§14 B질문8). 드레인이 취소되면 다시 claim 한다
+DRAIN_WAIT_SECONDS = 1.0
+DRAINING = "draining: no new claims, restarting when running jobs finish"
 
 
 def _utcnow() -> datetime:
@@ -240,6 +253,8 @@ class RemoteWorker:
         environ: dict[str, str] | None = None,
         once: bool = False,
         rediscover: Callable[[], str | None] | None = None,
+        follows: bool = False,
+        follow_tail: str | None = None,
     ):
         self.config = config
         # DHCP 로 서버 주소가 바뀐 경우 — auto 일 때만 cmd_worker 가 넘긴다(M5n §9)
@@ -272,12 +287,39 @@ class RemoteWorker:
         self.probe_interval_seconds = 600
         self._last_measured = 0.0
         self._measure_lock = threading.Lock()
+        # M5q PR B2 — 서버 버전이 바뀌면 드레인한다(§3.3). `follows` 가 거짓이면 드레인하지 않고
+        # ③ 에서 `follow_tail`(있으면)을 프로세스당 한 번 쓰며 ④ 의 종료 문장 뒤에 붙인다
+        self.follows = follows
+        self.follow_tail = follow_tail
+        self.draining = threading.Event()
+        self.follow_to: str | None = None
+        self.restart_for: str | None = None
+        self.signalled = False  # 첫 신호를 받았다 — `cmd_worker` 의 처리기가 켠다(§14 B질문18)
+        self._drain_lock = threading.Lock()
+        self._idle_lanes: set[int] = set()
+        self._drain_done = False
+        # 보고하지 못한 잡: job_id → (finish 호출, 미룬 시각). 서버를 갈아 끼우는 몇 초에 끝난 잡을
+        # 버리지 않고 다음 heartbeat 성공 · 재등록 전 · 드레인 끝에 다시 보고한다(#234 격리 검증)
+        self._unreported: dict[int, tuple[Callable[[], Any], float]] = {}
+        self._retry_lock = threading.Lock()
+        self._tail_said = False
+        self._window_said = False
+        self._hb_unregistered = 0
+        # 재실행 시각은 프로세스가 시작할 때 한 번 읽는다(§14 B질문9)
+        self.restarted_at = follow.restarted_at(os.environ, self._epoch())
+
+    def _epoch(self) -> float:
+        return self.now_fn().timestamp()
 
     # ── 보고 (재시도) ────────────────────────────────────────────────────────
 
-    def report(self, call: Callable[[], Any], what: str) -> Any:
+    def report(
+        self, call: Callable[[], Any], what: str, *, keep: Callable[[], bool] | None = None
+    ) -> Any:
         """서버에 보고. 연결 오류는 1·2·4초 재시도, 409(잡이 이미 닫힘)는 None, 다른 4xx 는 로그.
-        반환: 응답(성공) · None(409) · False(포기)."""
+        반환: 응답(성공) · None(409) · False(포기). `keep` 은 연결 오류 · 503 으로 재시도가 다
+        실패했을 때만 부른다. 참을 돌려주면 부른 쪽이 미뤄 뒀다 다시 보고한다는 뜻이라 「giving up」
+        대신 그렇게 쓴다."""
         for i, delay in enumerate((*REPORT_RETRIES, None)):
             try:
                 out = call()
@@ -290,7 +332,10 @@ class RemoteWorker:
                     self.log(f"{what}: {e.message}")
                     return False
                 if delay is None or self.stopping.is_set() and i >= 1:
-                    self.log(f"{what}: giving up — {e.message}")
+                    if keep is not None and keep():
+                        self.log(f"{what}: {e.message} — will retry after the server is back")
+                    else:
+                        self.log(f"{what}: giving up — {e.message}")
                     return False
                 time.sleep(delay)
         return False
@@ -376,6 +421,14 @@ class RemoteWorker:
         try:
             out = self.client.heartbeat(jobs, self._host_sample())
         except ClientError as e:
+            if e.status == 409:
+                # 서버에 워커 행이 없다(DB 를 되돌렸거나 잊었다) — 닿고 있으니 「못 닿음」이 아니다.
+                # 연결 실패 줄과 같은 간격으로 쓴다(§14 B질문12)
+                self._hb_unregistered += 1
+                n = self._hb_unregistered
+                if n in (3, 12) or n % 60 == 0:
+                    self.log("heartbeat: worker not registered")
+                return False
             self._hb_failures += 1
             if e.status:
                 self._conn_failures = 0
@@ -388,7 +441,11 @@ class RemoteWorker:
         if self._hb_failures >= 3:
             self.log("heartbeat: server reachable again")
         self._hb_failures = 0
+        self._hb_unregistered = 0
         self._conn_failures = 0
+        # 서버가 돌아왔다 — 못 한 보고를 드레인보다 먼저 한다
+        self._retry_unreported()
+        self._heard_server_version(out)
         cancel = out.get("cancel") or []
         with self._lock:
             self.cancel_requested = {int(j) for j in cancel if isinstance(j, int)}
@@ -405,6 +462,187 @@ class RemoteWorker:
                 target=self._measure_quietly, name="rcm-worker-measure", daemon=True
             ).start()
         return True
+
+    # ── 드레인 (M5q §3.3 · §14.9) ───────────────────────────────────────────
+
+    def _heard_server_version(self, out: dict[str, Any]) -> None:
+        """heartbeat 응답의 `server_version`(③). 키가 없거나 `null` 이면 옛 서버다 — 아무것도 하지
+        않는다. 형식이 틀린 값은 없는 것으로 보고 프로세스당 한 번 로그를 쓴다(§14.1)."""
+        version = out.get("server_version")
+        if version is None:
+            return
+        if not follow.valid_version(version):
+            if not self._malformed_said:
+                self._malformed_said = True
+                self.log("ignoring a malformed server_version from the server")
+            return
+        if self.once:
+            return  # `--once` 는 ③ 을 무시한다(§14 B질문4)
+        if not self.follows:
+            if version != __version__ and self.follow_tail and not self._tail_said:
+                self._tail_said = True
+                self.log(f"server v{follow.clean(version)} — {self.follow_tail}")
+            return
+        with self._drain_lock:
+            if self._drain_done:
+                return
+            if version == __version__:
+                if self.draining.is_set():
+                    # 서버가 지금 도는 버전으로 돌아왔다 — 레인은 다시 claim 한다(§14 B질문8)
+                    self.draining.clear()
+                    self.follow_to = None
+                    self.log(f"server runs v{follow.clean(version)} again — drain cancelled")
+                return
+            if self.draining.is_set():
+                self._retarget(version)
+                return
+            ago = self._restarted_ago()
+            if ago is not None:
+                # 재실행한 지 300초 안이다 — 고리를 막는다. 창이 끝나면 다음 heartbeat 에서
+                # 드레인한다
+                if not self._window_said:
+                    self._window_said = True
+                    self.log(
+                        f"server runs v{follow.clean(version)} — not draining: "
+                        f"restarted {int(ago)}s ago"
+                    )
+                return
+            self._begin_drain(version, None)
+
+    def _drain_from_lane(self, lane: int, version: str) -> None:
+        """레인의 재등록이 버전 불일치 409 다(④). 300초 창과 상관없이 드레인한다 — 등록이 막힌
+        레인은 어차피 일을 못 한다(§3.3)."""
+        with self._drain_lock:
+            if self._drain_done:
+                return
+            if self.draining.is_set():
+                self._retarget(version)
+                return
+            self._begin_drain(version, lane)
+
+    def _begin_drain(self, version: str, lane: int | None) -> None:
+        # `_drain_lock` 안에서 부른다
+        self.follow_to = version
+        self.draining.set()
+        head = f"lane {lane}: " if lane is not None else ""
+        self.log(f"{head}server runs v{follow.clean(version)} — {DRAINING}")
+
+    def _retarget(self, version: str) -> None:
+        # `_drain_lock` 안에서 부른다. 세 번째 버전이면 목표를 마지막 값으로 바꾼다(§14 B질문8)
+        if version != self.follow_to:
+            self.follow_to = version
+            self.log(f"server now runs v{follow.clean(version)} — still draining")
+
+    def _restarted_ago(self) -> float | None:
+        """재실행한 지 `RESTART_WINDOW_SECONDS` 안이면 지난 초, 아니면 None."""
+        if self.restarted_at is None:
+            return None
+        ago = self._epoch() - self.restarted_at
+        if ago < follow.RESTART_WINDOW_SECONDS:
+            return max(0.0, ago)
+        return None
+
+    def restart_window_open(self) -> bool:
+        """이 프로세스가 300초 안에 드레인 재실행으로 시작했나 — 따라간 자식의 ② 가 본다."""
+        return self._restarted_ago() is not None
+
+    def _lane_waits(self, lane: int) -> bool:
+        """드레인 중이면 이 레인을 「잡 없이 기다림」으로 적고 참. 아니면 그 표시를 지운다."""
+        with self._drain_lock:
+            if self.draining.is_set():
+                self._idle_lanes.add(lane)
+                return True
+            self._idle_lanes.discard(lane)
+            return False
+
+    def _drained(self) -> bool:
+        """드레인 중이고 살아 있는 레인이 모두 잡 없이 기다리면 드레인을 마친다(§3.3 의 4). 보고하지
+        못한 잡은 heartbeat 가 도는 동안 다시 보고한다(§14 B질문11)."""
+        with self._drain_lock:
+            if not self.draining.is_set() or self._drain_done or self.stopping.is_set():
+                return False  # 멈춤(신호 · `--once`)이 드레인을 이긴다 — 재실행하지 않는다
+            alive = {i for i, t in enumerate(self._threads, 1) if t.is_alive()}
+            if not alive <= self._idle_lanes:
+                return False
+            self._drain_done = True
+        self._report_unreported()
+        if not self.once:
+            self.restart_for = self.follow_to
+        return True
+
+    def _park_unreported(self, job_id: int, call: Callable[[], Any]) -> None:
+        # heartbeat 목록에 남겨 둔다 — 서버가 이 잡을 「잊힌 잡」으로 닫지 않게
+        with self._lock:
+            self._unreported[job_id] = (call, time.monotonic())
+
+    def _unpark(self, job_id: int) -> None:
+        with self._lock:
+            self._unreported.pop(job_id, None)
+            self.running.pop(job_id, None)
+
+    def _try_report(self, job_id: int, call: Callable[[], Any]) -> bool:
+        """한 번 보고한다. 끝났으면(보고됐거나 서버가 받지 않는 보고) 참, 다시 시도할 만하면
+        거짓."""
+        try:
+            call()
+            self.log(f"#{job_id} finish: reported after retry")
+            return True
+        except ClientError as e:
+            if e.status and e.status != 503:
+                self.log(f"#{job_id} finish: {e.message}")
+                return True
+            return False
+
+    def _retry_unreported(self, wait: float = 0.0) -> None:
+        """보고하지 못한 잡을 한 번씩 다시 보고한다(heartbeat 성공 뒤 · 레인 재등록 전). 미룬 지
+        `DRAIN_REPORT_SECONDS` 가 지나면 오늘처럼 로그를 쓰고 버린다. 다른 스레드가 이미 하고
+        있으면 `wait` 초까지 기다리고, 그래도 못 잡으면 넘어간다."""
+        if not self._unreported:
+            return
+        got = (
+            self._retry_lock.acquire(timeout=wait) if wait > 0 else self._retry_lock.acquire(False)
+        )
+        if not got:
+            return
+        try:
+            with self._lock:
+                parked = dict(self._unreported)
+            for job_id, (call, parked_at) in parked.items():
+                if self._try_report(job_id, call):
+                    self._unpark(job_id)
+                elif time.monotonic() - parked_at >= DRAIN_REPORT_SECONDS:
+                    self.log(f"job #{job_id} still not reported — giving up")
+                    self._unpark(job_id)
+        finally:
+            self._retry_lock.release()
+
+    def _report_unreported(self) -> None:
+        """드레인 끝 — 재실행 전에 보고하지 못한 잡을 미룬 때부터 `DRAIN_REPORT_SECONDS` 까지 다시
+        보고한다. 재실행 뒤의 등록이 그 잡을 lost 로 닫지 않게(§14 B질문11)."""
+        with self._retry_lock:
+            with self._lock:
+                parked = dict(self._unreported)
+            for job_id, (call, parked_at) in parked.items():
+                self.log(f"drained — job #{job_id} not reported yet, retrying before the restart")
+                deadline = parked_at + DRAIN_REPORT_SECONDS
+                while not self._try_report(job_id, call):
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        self.log(f"job #{job_id} still not reported — restarting anyway")
+                        break
+                    if self.stopping.wait(min(DRAIN_REPORT_RETRY_SECONDS, left)):
+                        break
+                self._unpark(job_id)
+
+    def release_probes(self) -> None:
+        """exec 직전 — 측정이 돌고 있으면 `grace_seconds` 까지 기다리고, 그래도 돌면 그 프로브
+        프로세스를 끝낸다. exec 뒤에 부모가 바뀐 프로브가 남지 않게(§14 B질문13)."""
+        from remote_ci_monitor import hostsample
+
+        if self._measure_lock.acquire(timeout=max(0, self.config.grace_seconds)):
+            self._measure_lock.release()
+            return
+        hostsample.kill_probes()
 
     def _measure_quietly(self) -> None:
         try:
@@ -520,6 +758,10 @@ class RemoteWorker:
 
     def _lane_loop(self, lane: int) -> None:
         while not self.stopping.is_set():
+            if self._lane_waits(lane):
+                # 드레인 중 — claim 하지 않고 기다린다. 받은 잡은 이미 끝내고 보고했다(§3.3 의 2)
+                self.stopping.wait(DRAIN_WAIT_SECONDS)
+                continue
             if self.paused:
                 if self.stopping.wait(1.0):
                     break
@@ -530,14 +772,22 @@ class RemoteWorker:
             except ClientError as e:
                 if e.status == 409 and "not registered" in e.message:
                     self.log(f"lane {lane}: {e.message} — registering again")
+                    # 재등록은 이 워커의 도는 잡을 lost 로 닫는다 — 못 한 보고를 먼저 한다. 다른
+                    # 스레드가 보고하는 중이면 끝날 때까지 잠깐 기다린다
+                    self._retry_unreported(wait=REREGISTER_REPORT_WAIT_SECONDS)
                     try:
                         self.register()
                     except WorkerExit as x:
+                        if isinstance(x, WorkerFollow) and self.follows:
+                            # ④ — 다른 레인의 잡을 잃지 않고 드레인한다(§3.2 · §13 P1-5)
+                            self._drain_from_lane(lane, x.version)
+                            continue
                         # 등록이 막혀 이 워커는 잡을 받을 수 없다 — 종료 2 로 감독자에게 알린다.
                         # 종료 0 이면 launchd `SuccessfulExit = false` 와 systemd
                         # `Restart=on-failure` 가 다시 띄우지 않아 조용히 멈춘다(§14 B질문1).
-                        # 드레인은 PR B2 의 몫이다
-                        self.log(f"lane {lane}: {x.message}")
+                        # 따라가지 않는 워커는 문장 뒤에 이유를 붙인다(W12)
+                        tail = self.follow_tail if isinstance(x, WorkerFollow) else None
+                        self.log(f"lane {lane}: {x.message}" + (f" · {tail}" if tail else ""))
                         if x.code:
                             self.exit_code = x.code
                         self.stopping.set()
@@ -823,10 +1073,18 @@ class RemoteWorker:
             if summary_code is not None:
                 extra["summary_code"] = summary_code
                 extra["summary_args"] = dict(summary_args or {})
-            self.report(
-                lambda: self.client.finish(job_id, outcome, rc, summary, **extra),
-                f"#{job_id} finish",
-            )
+            call = lambda: self.client.finish(job_id, outcome, rc, summary, **extra)  # noqa: E731
+            gave_up: list[bool] = []
+
+            def keep() -> bool:
+                gave_up.append(True)
+                return not self.stopping.is_set()
+
+            self.report(call, f"#{job_id} finish", keep=keep)
+            if gave_up and not self.stopping.is_set():
+                # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
+                self._park_unreported(job_id, call)
+                return
         with self._lock:
             self.running.pop(job_id, None)
 
@@ -890,15 +1148,20 @@ class RemoteWorker:
             t.start()
         try:
             while any(t.is_alive() for t in self._threads):
-                for t in self._threads:
-                    t.join(timeout=0.5)
+                if self._drained():
+                    break
+                self.stopping.wait(0.2)
         finally:
+            # 드레인이 끝났으면 여기서 처음 켠다 — 레인은 이미 잡 없이 기다리고 있다(§3.3 의 4)
             self.stopping.set()
+            if self.once and self.draining.is_set():
+                self.exit_code = 2  # `--once` 의 ④ — 등록이 막혀 잡을 받지 못했다(§14 B질문4)
             for t in self._threads:
                 t.join(timeout=self.config.grace_seconds + 10)
             hb.join(timeout=2)
-            self.log("stopped")
+            if self.restart_for is None:
+                self.log("stopped")  # 드레인 끝이면 `cmd_worker` 가 재실행 줄을 쓴다
         return self.exit_code
 
 
-__all__ = ["RemoteWorker", "WorkerExit", "WorkerFollow", "STOP_SUMMARY"]
+__all__ = ["DRAIN_REPORT_SECONDS", "RemoteWorker", "WorkerExit", "WorkerFollow", "STOP_SUMMARY"]

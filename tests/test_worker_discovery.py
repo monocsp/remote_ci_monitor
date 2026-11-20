@@ -177,6 +177,8 @@ class Recorder:
     def __init__(self, cfg, **kw):
         Recorder.made.append((cfg, kw))
         self.stopping = None
+        self.restart_for = None  # M5q B2 — 드레인이 남기는 재실행 목표
+        self.signalled = False
 
     def stop(self) -> None:
         return None

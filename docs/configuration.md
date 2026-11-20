@@ -1294,7 +1294,8 @@ reports its running jobs as `lost` (`worker stopped`). `worker.toml` keys: `serv
 of `rcm`, as a session does. When it starts, it asks the server for its version (always afresh)
 and, when they differ, fetches the server's wheel and starts that version in the same process.
 When the server refuses its registration for the version, it does the same once more; when that
-fails it stops with exit 2 and says why. `RCM_CLIENT_VERSION`, the `client-version` file and
+fails it stops with exit 2 and says why. A running worker that sees another version in a
+heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_CLIENT_VERSION`, the `client-version` file and
 `rcm worker --no-follow` pin the version or turn this off, and an editable install does not follow.
 `rcm worker --check` never follows. Details, including what a service manager sees, are in
 [remote workers](operating.md#remote-workers).
