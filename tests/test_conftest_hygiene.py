@@ -119,3 +119,62 @@ def test_the_limit_also_holds_under_xdist(tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1, out
     assert "test_sample.py::test_dawdles" in out, out
+
+
+# ── 병렬(xdist)에서는 예산이 다르다 ──────────────────────────────────────────
+#
+# rcm-ci 잡 #3849(`pytest -n auto`, 워커 10)에서 직렬 5초짜리 Chrome 시험이 29.6초로 상한에 걸렸다.
+# 직렬 시간을 기준으로 잡은 20초는 병렬 부하에서 맞지 않는다 — 워커가 둘 이상이면 60초.
+
+
+def _conftest():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "rcm_conftest_copy", ROOT / "tests" / "conftest.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "workers, environ, budget",
+    [
+        (0, {}, 20.0),  # 직렬
+        (1, {}, 20.0),
+        (2, {}, 60.0),
+        (10, {}, 60.0),
+        (10, {"RCM_TEST_SLOW_SECONDS": "5"}, 5.0),  # 명시한 값이 이긴다
+        (0, {"RCM_TEST_SLOW_SECONDS": "0.3"}, 0.3),
+        (0, {"RCM_TEST_SLOW_SECONDS": ""}, 20.0),
+    ],
+)
+def test_the_budget_follows_the_worker_count(workers, environ, budget):
+    assert _conftest().slow_budget(workers, environ) == budget
+
+
+class _Option:
+    def __init__(self, numprocesses):
+        self.numprocesses = numprocesses
+
+
+class _Config:
+    def __init__(self, numprocesses):
+        self.option = _Option(numprocesses)
+
+
+@pytest.mark.parametrize(
+    "numprocesses, environ, workers",
+    [
+        (None, {}, 0),  # xdist 가 없거나 -n 을 안 줬다
+        (0, {}, 0),
+        (4, {}, 4),
+        ("4", {}, 4),
+        ("auto", {}, os.cpu_count() or 1),
+        (None, {"PYTEST_XDIST_WORKER_COUNT": "10"}, 10),  # 워커 프로세스 쪽
+    ],
+)
+def test_the_worker_count_is_read_from_the_option_or_the_worker_env(numprocesses, environ, workers):
+    assert _conftest().worker_count(_Config(numprocesses), environ) == workers

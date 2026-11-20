@@ -12,8 +12,10 @@ M5q 시험이 CI 를 25분 늘렸다):
   `socket.gethostbyaddr` 는 `socket.herror` 를 돌려준다. 진짜 조회가 필요한 시험은
   `@pytest.mark.allow_reverse_dns`. 세션 범위 픽스처가 서버를 띄우기 전에 걸려야 해서 픽스처가
   아니라 `pytest_configure` 에서 바꾼다.
-- `@pytest.mark.slow` 없이 setup · call · teardown 합이 20초(`RCM_TEST_SLOW_SECONDS`)를 넘는 시험이
-  있으면 세션 끝에 실패(exit 1)로 만든다. 판정은 `pytest_runtest_logreport` 로 모으므로 xdist
+- `@pytest.mark.slow` 없이 setup · call · teardown 합이 예산을 넘는 시험이 있으면 세션 끝에
+  실패(exit 1)로 만든다. 예산은 직렬 20초, xdist 워커가 둘 이상이면 60초다 — rcm-ci 잡 #3849
+  (`-n auto`, 워커 10)에서 직렬 5초짜리 Chrome 시험이 29.6초가 됐다. `RCM_TEST_SLOW_SECONDS` 가
+  있으면 그 값이 이긴다. 판정은 `pytest_runtest_logreport` 로 모으므로 xdist
   (`-n`)에서도 워커가 아니라 컨트롤러가 한 번 한다.
 """
 
@@ -26,8 +28,38 @@ import pytest
 
 import remote_ci_monitor
 
-#: 표시 없이 넘으면 안 되는 한 시험의 시간(초). CI 의 느린 러너는 env 로 늘릴 수 있다.
-SLOW_SECONDS = float(os.environ.get("RCM_TEST_SLOW_SECONDS") or 20)
+#: 표시 없이 넘으면 안 되는 한 시험의 시간(초) — 직렬과 병렬(xdist 워커 둘 이상).
+SERIAL_SLOW_SECONDS = 20.0
+PARALLEL_SLOW_SECONDS = 60.0
+
+
+def worker_count(config, environ=os.environ) -> int:
+    """xdist 워커 수. 컨트롤러는 `-n` 값(`auto` · `logical` 은 CPU 수)을, 워커 프로세스는
+    `PYTEST_XDIST_WORKER_COUNT` 를 본다. xdist 가 없거나 `-n` 이 없으면 0."""
+    env = environ.get("PYTEST_XDIST_WORKER_COUNT")
+    if env and env.isdigit():
+        return int(env)
+    value = getattr(getattr(config, "option", None), "numprocesses", None)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        if value.isdigit():
+            return int(value)
+        if value in ("auto", "logical"):
+            return os.cpu_count() or 1
+    return 0
+
+
+def slow_budget(workers: int, environ=os.environ) -> float:
+    """한 시험의 예산(초). `RCM_TEST_SLOW_SECONDS` 가 있으면 그 값, 아니면 워커 수로 정한다."""
+    explicit = environ.get("RCM_TEST_SLOW_SECONDS")
+    if explicit:
+        return float(explicit)
+    return PARALLEL_SLOW_SECONDS if workers > 1 else SERIAL_SLOW_SECONDS
+
+
+#: 이번 세션의 예산 — `pytest_configure` 가 정한다.
+SLOW_SECONDS = SERIAL_SLOW_SECONDS
 
 _REAL_GETFQDN = socket.getfqdn
 _REAL_GETHOSTBYADDR = socket.gethostbyaddr
@@ -52,6 +84,8 @@ def _gethostbyaddr(address: str):
 
 
 def pytest_configure(config):
+    global SLOW_SECONDS
+    SLOW_SECONDS = slow_budget(worker_count(config))
     config.addinivalue_line(
         "markers", f"slow: this test may take more than {SLOW_SECONDS:g}s (tests/conftest.py)"
     )
