@@ -30,6 +30,12 @@ of a key bumps that number and is listed here.
   ([#234](https://github.com/monocsp/remote_ci_monitor/pull/234))
 
 ### Fixed
+- **A version no longer stays `running` when its release round ends at once.** The server linked
+  a version to a driver round only after the round had started, so a round that exited before
+  the link (a driver that fails right away, or the confirm round that "build number: auto" starts)
+  found no version to return to `editing`, and the version stayed `running` with nothing running
+  until the server restarted. Starting a round and linking it now finish before that round's exit
+  is handled. ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
 - **A worker's messages about a broken or pinned cached copy say it once and say it right.** A
   worker pinned to a cached version that the server refuses now ends with
   `· pinned by RCM_CLIENT_VERSION`, not `· not following: already following v…`. A worker whose
