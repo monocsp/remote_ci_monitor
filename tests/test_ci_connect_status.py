@@ -213,3 +213,24 @@ def test_n15_a_silent_github_is_cut_off(gh, rcm, token_file, capsys, monkeypatch
     rc, _ = run_hook(gh, rcm, token_file, capsys)
     assert rc == 1
     assert time.monotonic() - started < 3
+
+
+def test_the_job_lookup_carries_the_rcm_token_when_given(gh, rcm, token_file, tmp_path, capsys):
+    rcm_token = tmp_path / "ci-watch.rcm"
+    rcm_token.write_text("rcm-hook-secret-value\n")
+    rcm_token.chmod(0o600)
+    rcm.route(
+        "GET",
+        "/jobs/9",
+        {"id": 9, "state": "cancelled", "cancelled_by": "superseded", "superseded_by": 11},
+    )
+    argv = [
+        "--github", REPO, "--token-file", str(token_file), "--server", rcm.url,
+        "--api-url", gh.url, "--rcm-token-file", str(rcm_token),
+    ]  # fmt: skip
+    rc = statusmod.main(argv, env=hook_env(RCM_STATE="cancelled", RCM_EXIT_CODE=""))
+    out = capsys.readouterr()
+    assert rc == 0
+    seen = [r for r in rcm.requests if r.path == "/jobs/9"]
+    assert seen[0].headers.get("authorization") == "Bearer rcm-hook-secret-value"
+    assert "rcm-hook-secret-value" not in out.out + out.err

@@ -368,3 +368,24 @@ def test_v5_schedule_with_a_skipped_leg_fails_and_names_it(tmp_path, gh):
     rc, summary = verdict(tmp_path, gh, doc)
     assert rc == 1, summary
     assert "macos" in summary
+
+
+# ── 격리 검증(#238)이 찾은 것 ─────────────────────────────────────────────────
+
+
+def test_a_pending_status_without_a_readable_created_at_does_not_wait_forever(tmp_path, gh, clock):
+    gh.add_status(HEAD_SHA, Status("pending", "queued · #12", at=T0, created_raw="yesterday"))
+    rc, out, _ = wait(tmp_path, gh, clock)
+    assert (rc, out["result"], out["reason"]) == (0, "fallback", "no_pickup")
+    assert 300 <= clock.now - T0 < 330
+
+
+def test_route_warnings_cannot_inject_workflow_commands(tmp_path, capsys):
+    cfg = write_cfg(tmp_path)
+    env = actions_env(tmp_path / "gh", mode="x\n::error::boom ::add-mask::y")
+    assert waitmod.main(["route", "--legs", "ubuntu,macos", "--config", str(cfg)], env=env) == 0
+    printed = capsys.readouterr().out
+    lines = [ln for ln in printed.splitlines() if ln.startswith("::")]
+    assert len(lines) == 1 and lines[0].startswith("::warning::")
+    assert "::error::" not in printed and "::add-mask::" not in printed
+    assert printed.count("::") == 2

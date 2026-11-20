@@ -29,7 +29,10 @@ from ci_fakes import (
     pr,
     submitted,
 )
-from fake_rcm_http import FakeRcm
+from fake_rcm_http import FakeRcm, free_port
+from remote_ci_monitor.cli import main as cli_main
+from remote_ci_monitor.core.model import Preset
+from remote_ci_monitor.core.status import preset_json
 
 cfgmod, _wait, watchmod, _status = load_templates()
 GH_TOKEN = "gh-watch-token-value"
@@ -60,20 +63,26 @@ class Rig:
         self.write_config(branches)
         self.printed = ""
 
-    def write_config(self, branches: tuple[str, ...]) -> None:
+    def write_config(
+        self,
+        branches: tuple[str, ...],
+        *,
+        legs: bool = True,
+        job_url: bool = False,
+        repos_before: str = "",
+    ) -> None:
         self.config.write_text(
             f'rcm = "{self.exe.path}"\n'
             f'server = "{self.rcm_http.url}"\n'
             f'rcm_token_file = "{self.rcm_token}"\n'
             f'state_dir = "{self.state_dir}"\n'
             f'log_file = "{self.log_file}"\n'
-            "job_url = false\n"
-            f'github_api = "{self.gh.url}"\n\n'
-            "[[repos]]\n"
+            f"job_url = {'true' if job_url else 'false'}\n"
+            f'github_api = "{self.gh.url}"\n\n' + repos_before + "[[repos]]\n"
             f'github = "{REPO}"\n'
             f'github_token_file = "{self.gh_token}"\n'
             f"branches = {json.dumps(list(branches))}\n"
-            'legs = ["ubuntu", "macos"]\n'
+            + ('legs = ["ubuntu", "macos"]\n' if legs else "")
         )
 
     def add_pr(self, number: int, sha: str, branch: str, *, toml: str = RCM_REPO_CI_TOML, **kw):
@@ -88,8 +97,10 @@ class Rig:
     def job(self, job_id: int, **doc) -> None:
         self.rcm_http.route("GET", f"/jobs/{job_id}", {"id": job_id, **doc})
 
-    def run(self, *extra: str) -> int:
-        rc = watchmod.main(["--config", str(self.config), "--once", *extra], now_fn=self.clock)
+    def run(self, *extra: str, mono_fn=None) -> int:
+        rc = watchmod.main(
+            ["--config", str(self.config), "--once", *extra], now_fn=self.clock, mono_fn=mono_fn
+        )
         cap = self.capsys.readouterr()
         self.printed += cap.out + cap.err
         self.assert_no_secret()
@@ -196,17 +207,48 @@ def test_h5_the_repository_variable_github_stops_submissions(rig):
 # ── H6 · H7 · H23: 제출이 실패한다 ──
 
 
+def real_cli_failure(case: str, monkeypatch, capsys) -> tuple[int, str]:
+    """진짜 `rcm run … --no-wait` 를 돌려 그 종료 코드와 stderr 첫 줄을 얻는다.
+
+    가짜 rcm 에 손으로 쓴 문장을 넣으면 CLI 의 문장이 바뀌어도 시험이 모른다(격리 검증 1:
+    「token rejected …」 가 `submit_failed` 로 갔다). 서버는 `FakeRcm` 이 흉내 낸다."""
+    srv = FakeRcm()
+    try:
+        doc = preset_json(Preset(name="rcm-ci", argv=("true",), source_modes=("git_ref",)))
+        srv.route("GET", "/api/status", {"presets": [doc]})
+        srv.route("GET", "/api/health", {"ok": True, "version": "0.7.0"})
+        srv.route("GET", "/api/whoami", {"name": "ci-watch", "admin": False})
+        url, preset = srv.url, "rcm-ci"
+        if case == "server":
+            url = f"http://127.0.0.1:{free_port()}"
+        elif case == "preset":
+            preset = "gate"
+        elif case == "token":
+            srv.route("GET", "/api/whoami", {"error": "a valid bearer token is required"}, 401)
+        monkeypatch.setenv("RCM_SERVER", url)
+        monkeypatch.setenv("RCM_TOKEN", "revoked-token-value")
+        capsys.readouterr()
+        try:
+            rc = cli_main(["run", preset, "--source", "git_ref", "--ref", "feat/x", "--no-wait"])
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else 2
+        err = capsys.readouterr().err
+    finally:
+        srv.close()
+    return rc, err.strip().splitlines()[0]
+
+
 @pytest.mark.parametrize(
-    ("rc", "stderr", "code"),
-    [
-        (3, "cannot read presets: cannot reach http://127.0.0.1:8787: Connection refused",
-         "server_unreachable"),
-        (2, "unknown preset 'rcm-ci' — server has: gate, deploy-dev", "unknown_preset"),
-        (2, "submit failed: a valid bearer token is required", "rcm_auth"),
-    ],
+    ("case", "code"),
+    [("server", "server_unreachable"), ("preset", "unknown_preset"), ("token", "rcm_auth")],
     ids=["h6_server", "h7_preset", "h23_rcm_token"],
-)  # fmt: skip
-def test_h6_h7_h23_a_failed_submit_posts_unavailable_with_a_code(rig, rc, stderr, code):
+)
+def test_h6_h7_h23_a_failed_submit_posts_unavailable_with_a_code(
+    rig, monkeypatch, capsys, case, code
+):
+    rc, stderr = real_cli_failure(case, monkeypatch, capsys)
+    assert rc == 2 and stderr.startswith("rcm: "), (rc, stderr)
+    assert watchmod.submit_reason(rc, stderr) == code
     rig.add_pr(7, S1, "feat/x")
     rig.exe.set(run={"rc": rc, "stderr": stderr})
     rig.run()
@@ -317,10 +359,11 @@ def test_h13_a_held_lock_makes_the_second_process_exit_0(rig):
 
 
 def test_h13_two_processes_at_once_only_one_runs(rig, monkeypatch):
-    monkeypatch.setattr(cfgmod, "HTTP_TIMEOUT", 1.0)
+    # 진짜 동시성 — 앞 프로세스가 GitHub 요청 하나(0.3초)에 머무는 동안 뒤 프로세스가 뜬다
+    monkeypatch.setattr(cfgmod, "HTTP_TIMEOUT", 0.3)
     rig.add_pr(7, S1, "feat/x")
     rig.exe.set(run={"stdout": submitted(12, S1)})
-    rig.gh.hang.add(f"/repos/{REPO}/actions/")  # 첫 프로세스가 잠금을 쥔 채 1초 머문다
+    rig.gh.hang.add(f"/repos/{REPO}/actions/")  # 첫 프로세스가 잠금을 쥔 채 머문다
     first = threading.Thread(
         target=watchmod.main, args=(["--config", str(rig.config), "--once"],),
         kwargs={"now_fn": rig.clock},
@@ -434,16 +477,24 @@ def test_h17_a_stuck_rcm_is_cut_off(rig, monkeypatch):
     assert "timeout" in rig.log()
 
 
-def test_h17_a_round_stops_at_its_limit(rig, monkeypatch):
-    monkeypatch.setattr(cfgmod, "HTTP_TIMEOUT", 0.4)
-    monkeypatch.setattr(watchmod, "ROUND_SECONDS", 1.0)
+class Mono:
+    """주입 단조 시계 — 읽을 때마다 `step` 초씩 간다(한 바퀴 50초를 진짜로 쓰지 않는다)."""
+
+    def __init__(self, step: float):
+        self.t, self.step = 1000.0, step
+
+    def __call__(self) -> float:
+        self.t += self.step
+        return self.t
+
+
+def test_h17_a_round_stops_at_its_limit(rig):
     for n in range(10):
         rig.add_pr(10 + n, f"{n:x}" * 40, f"feat/{n}")
-    rig.gh.hang.add(f"/repos/{REPO}/contents/")
-    started = time.monotonic()
-    assert rig.run() == 0
-    assert time.monotonic() - started < 2.5
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    assert rig.run(mono_fn=Mono(4.0)) == 0
     assert "round deadline" in rig.log()
+    assert 0 < len(rig.exe.argvs("run")) < 10  # 시한 앞의 일은 했고 뒤의 일은 다음 바퀴로
 
 
 # ── H19 · H20 · H21 ──
@@ -528,3 +579,127 @@ def test_the_state_file_is_private(rig):
     rig.run()
     mode = os.stat(rig.state_dir / "monocsp__remote_ci_monitor.json").st_mode & 0o777
     assert mode & 0o077 == 0
+
+
+# ── 격리 검증(#238)이 찾은 것 ─────────────────────────────────────────────────
+
+
+def test_job_url_true_links_the_rcm_job_and_the_default_does_not(rig):
+    rig.write_config((), job_url=True)
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="running", reason=None)
+    rig.run()
+    posts = rig.posts(S1)
+    assert [p["description"].split(" · ")[0] for p in posts] == ["queued", "running"]
+    assert all(p["target_url"] == f"{rig.rcm_http.url}/jobs/12" for p in posts)
+
+
+def test_a_broken_repository_does_not_stop_the_next_one(rig, tmp_path):
+    empty = tmp_path / "tokens" / "empty.token"
+    empty.write_text("")
+    empty.chmod(0o600)
+    rig.write_config(
+        (),
+        repos_before=(
+            f'[[repos]]\ngithub = "monocsp/other"\ngithub_token_file = "{empty}"\nbranches = []\n\n'
+        ),
+    )
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    assert rig.run() == 0
+    assert len(rig.exe.argvs("run")) == 1
+    assert "monocsp/other" in rig.log() and "ValueError" in rig.log()
+
+
+def test_an_incomplete_read_is_a_network_error(monkeypatch):
+    import http.client
+    import urllib.request
+
+    def boom(*_a, **_k):
+        raise http.client.IncompleteRead(b"par")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    reply = cfgmod.GitHubApi("http://127.0.0.1:9", REPO, "t").statuses(S1)
+    assert reply.status == 0 and not reply.ok
+
+
+def test_cancel_of_a_joined_job_only_leaves_the_join(rig):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(
+        run={"stdout": submitted(5, S1, joined=True, position=None)},
+        cancel={"stdout": {"job_id": 5, "left": True}},
+    )
+    rig.job(5, state="queued", reason=None)
+    rig.run()
+    rig.clock.advance(1800)
+    rig.gh.add_status(
+        S1,
+        Status(
+            "error",
+            "taken-over · GitHub Actions run 1",
+            creator="github-actions[bot]",
+            at=rig.clock.now,
+        ),
+    )
+    rig.run()
+    assert rig.exe.argvs("cancel") == [["cancel", "5"]]
+    assert "left join of #5 (job keeps running)" in rig.log()
+    assert "cancel #5" not in rig.log()
+
+
+def test_without_legs_check_warns_and_the_round_logs_it(rig):
+    rig.write_config((), legs=False)
+    assert rig.run("--check") == 0
+    warns = [ln for ln in rig.printed.splitlines() if ln.startswith("WARN")]
+    assert any("legs" in ln for ln in warns), rig.printed
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.run()
+    assert rig.log().count("legs") == 1
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Retry-After": "120"},
+        {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(T0) + 120)},
+    ],
+    ids=["retry_after", "ratelimit_reset"],
+)
+def test_a_rate_limit_rests_the_repository_until_the_reset(rig, headers):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.gh.fail[f"/repos/{REPO}/actions/"] = [403 if "X-RateLimit-Reset" in headers else 429]
+    rig.gh.fail_headers = headers
+    rig.run()
+    assert "rate_limited" in rig.log() and "github_auth" not in rig.log()
+    rig.gh.requests.clear()
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.gh.requests == []  # 쉬는 동안은 묻지도 않는다
+    rig.clock.advance(61)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 1
+
+
+def test_a_rate_limited_config_read_waits_instead_of_posting_watcher_config(rig):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.gh.fail[f"/repos/{REPO}/contents/"] = [429]
+    rig.gh.fail_headers = {"Retry-After": "30"}
+    rig.run()
+    assert rig.gh.posted() == [] and rig.exe.argvs("run") == []
+    rig.clock.advance(60)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 1
+    assert [p["description"].split(" · ")[0] for p in rig.posts(S1)] == ["queued"]
+
+
+def test_the_job_lookup_carries_the_rcm_token(rig):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="queued", reason=None)
+    rig.run()
+    seen = [r for r in rig.rcm_http.requests if r.path == "/jobs/12"]
+    assert seen and seen[0].headers.get("authorization") == f"Bearer {RCM_TOKEN}"

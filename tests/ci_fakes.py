@@ -51,7 +51,11 @@ def load_templates():
 class FakeClock:
     """주입 시계. `now` 는 epoch 초다. `sleep` 은 기다리지 않고 민다."""
 
+    #: 대기가 이보다 길어지면 끝없이 기다리는 것이다 — 시험이 멈추지 않고 실패한다
+    CEILING = 7 * 86400
+
     def __init__(self, start: float = T0):
+        self.start = start
         self.now = start
         self.slept: list[float] = []
         self._lock = threading.Lock()
@@ -63,6 +67,8 @@ class FakeClock:
         with self._lock:
             self.slept.append(seconds)
             self.now += seconds
+            if self.now - self.start > self.CEILING:
+                raise AssertionError(f"waited more than {self.CEILING} s on the injected clock")
 
     def advance(self, seconds: float) -> None:
         with self._lock:
@@ -81,6 +87,7 @@ class Status:
     creator: str = "monocsp"
     at: float = T0  # 보이기 시작하는 시각 = created_at
     target_url: str | None = None
+    created_raw: str | None = None  # 주면 created_at 을 이 글자로 낸다(못 읽는 값 시험)
 
     def doc(self, sha: str, ident: int) -> dict[str, Any]:
         return {
@@ -90,7 +97,7 @@ class Status:
             "description": self.description,
             "context": self.context,
             "target_url": self.target_url,
-            "created_at": iso(self.at),
+            "created_at": self.created_raw if self.created_raw is not None else iso(self.at),
             "updated_at": iso(self.at),
             "creator": {"login": self.creator},
         }
@@ -165,6 +172,8 @@ class FakeGitHub:
         }
         self.fail: dict[str, list[int]] = {}
         self.fail_always: dict[str, int] = {}
+        #: `fail` · `fail_always` 응답에 붙일 헤더(Retry-After · X-RateLimit-* 흉내)
+        self.fail_headers: dict[str, str] = {}
         self.hang: set[str] = set()
         self.release = threading.Event()
         self.auth_fail = False
@@ -269,10 +278,10 @@ class FakeGitHub:
             return 401, {"message": "Bad credentials"}, {}
         for prefix, codes in self.fail.items():
             if path.startswith(prefix) and codes:
-                return codes.pop(0), {"message": "boom"}, {}
+                return codes.pop(0), {"message": "boom"}, dict(self.fail_headers)
         for prefix, code in self.fail_always.items():
             if path.startswith(prefix):
-                return code, {"message": "boom"}, {}
+                return code, {"message": "boom"}, dict(self.fail_headers)
         base = f"/repos/{self.repo}"
         if not path.startswith(base):
             return 404, {"message": "Not Found"}, {}
