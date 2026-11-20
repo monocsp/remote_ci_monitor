@@ -442,6 +442,7 @@ def open_scene(c: Chrome, scene: Scene, width: int, lang: str, machines: int = 5
     c.open(scene.url(lang), ready_js=ready(lang, machines), timeout=20)
     assert c.eval(OPEN_JS) is True
     time.sleep(0.3)
+    c.frames()  # rAF 로 미룬 잘림 표시 · 띠 표지가 돈 뒤에 잰다(CPU 가 바쁘면 sleep 이 모자란다)
 
 
 # ── 1 · 2: 옆으로 밀리지 않고 칸 밖으로 새지 않는다 ─────────────────────────────

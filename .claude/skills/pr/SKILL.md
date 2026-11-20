@@ -1,6 +1,6 @@
 ---
 name: pr
-description: Open, check, merge and clean up a pull request for remote_ci_monitor — title in the commit-header style, a body with why / what / checks / docs, CI green before a REST merge, branch and worktree removed after. Use it for every `gh pr create` and every merge.
+description: Open, check, merge and clean up a pull request for remote_ci_monitor — title in the commit-header style, a body with why / what / checks / docs, `rcm/ci` green before a REST merge, branch and worktree removed after. Use it for every `gh pr create` and every merge.
 ---
 
 # Pull request
@@ -63,8 +63,15 @@ documents that stay in the repository are written in 평어체.
    EOF
    )"
    ```
-2. Wait for CI (`test` — ubuntu 3.11/3.13, macOS 3.13, smoke, gitleaks), and read a failure
-   before touching anything: `gh pr checks <N>` · `gh run view <id> --log-failed`.
+2. After every push, run the build machine's CI and wait for the commit status `rcm/ci` — the
+   ruleset's required check on `dev` and `main` (`main` also needs `main-from-dev-only`):
+   ```sh
+   cd ~ && rcm run rcm-ci --source git_ref --ref <branch> --no-wait   # prints the job number
+   rcm wait --job <N>
+   ```
+   Read a failure before touching anything: `rcm logs <N>`. GitHub Actions (`ci.yml`) no longer
+   runs on pull requests; it is `workflow_dispatch` only, run by hand when the owner asks because
+   the build machine is down.
 3. Merge only when green, by REST (the `gh pr merge` command is blocked here), with the title as
    the merge commit's subject and the PR number appended, into `dev` as a merge commit:
    ```sh
