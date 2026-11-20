@@ -148,6 +148,7 @@ def last_json(out: str) -> dict:
     return json.loads(lines[-1])
 
 
+@pytest.mark.slow
 def test_rcm_run_exit_codes_0_1_2_3_and_restart_leaves_lost(server, tree, tmp_path):
     token = server.token("laptop")
     admin = server.token("admin", admin=True)

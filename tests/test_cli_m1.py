@@ -257,6 +257,7 @@ def test_logs_follow_returns_after_job_ends(live, env, capsys):
 # ── wait ─────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 def test_wait_uses_sse_and_exits_with_job_code(live, env, capsys, monkeypatch):
     calls = count_events(monkeypatch)
     env(live)

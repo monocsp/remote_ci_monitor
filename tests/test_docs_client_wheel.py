@@ -305,6 +305,7 @@ def test_two_wrappers_against_two_servers_of_the_same_version_install_what_each_
 
 
 @needs_tools
+@pytest.mark.slow
 def test_the_wrapper_keeps_the_token_out_of_every_argv(tmp_path):
     """토큰은 curl 의 인수가 아니라 0600 파일로 — 느린 health 동안 `ps` 에 보이지 않는다
     (리뷰 #90 B P1: `-H "Authorization: Bearer $RCM_TOKEN"` 은 같은 머신의 누구나 읽었다)."""

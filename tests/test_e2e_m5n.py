@@ -370,6 +370,7 @@ def test_an_any_capable_job_runs_only_on_the_worker_that_has_the_tool(stack):
 # ── 2. Xcode 사고의 재연 (edge 1 · 완료 기준 2) ───────────────────────────────
 
 
+@pytest.mark.slow
 def test_a_changed_probe_triggers_one_automatic_check_and_a_failure_sticks(stack):
     stack.start(CAP)
     # 등록 직후: 지문 → scenario 는 check_needed → 스위퍼가 w-cap 을 지정해 simcheck 를 한 번

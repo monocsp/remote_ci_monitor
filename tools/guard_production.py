@@ -16,6 +16,13 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 `$XDG_CONFIG_HOME/rcm/server.toml`)과 PATH 의 실행 파일(`_which`)뿐이다.
 발견 `find_production()` 이 기계를 본다.
 
+운영 설치가 없어도 하나는 본다 — **다른 빌드가 옛 DB 를 그 자리에서 마이그레이션하는 것**(사건 6f,
+2026-11-20: 검증 에이전트가 dev 워크트리 안에서 `--config` 없이 `rcm token add` · `rcm serve` 를
+돌려 그 폴더 `rcm.toml` 의 개발 DB 를 v7 → v24 로 올렸다). `rcm serve|worker|token` 의 유효
+`data_dir` 에 있는 `rcm.sqlite3` 의 헤더(user_version)와 실행 파일의 빌드가 아는 `DB_VERSION` 을
+**파일로만** 읽어(sqlite 로 연결하지 않는다) 낮으면 막는다. 명령 앞의 `RCM_ALLOW_MIGRATE=1` 이
+「그게 목적이다」라는 표시다. 둘 중 하나라도 모르면 막지 않는다.
+
 알려진 한계(실수 방지용이지 적대자 방어가 아니다): `bash -c '…'` · `sh -c` · `xargs` ·
 `uv run` · `$(…)` 안의 명령은 보지 않는다. 심링크 별칭(`/tmp` ↔ `/private/tmp`, 운영 data_dir
 로 가는 링크)은 못 본다 — 경로는 `normpath` 로만 비교한다. `$VAR` 은 훅 프로세스의 환경으로
@@ -76,6 +83,15 @@ DOCS = "docs/operating.md (Upgrade → From a git checkout)"
 #: 운영 데이터 디렉터리 안의 DB 를 **여는** rcm 하위 명령(M5i 결정 75). `token` 은 `list` 도
 #: Store 를 열어 마이그레이션하므로 전부 쓰기다. `gc --dry-run --config` 는 사본 위에서 돌아 허용.
 DB_OPENING = frozenset({"token"})
+#: 열면서 옛 DB 를 마이그레이션하는 하위 명령(사건 6f). `gc` 는 넣지 않는다 — `gc --dry-run
+#: --config` 는 임시 사본 위에서 돌고(결정 73), 나머지 `gc` 는 서버에 HTTP 로 부탁할 뿐 DB 를
+#: 열지 않는다(`cli.cmd_gc`).
+MIGRATING = frozenset({"serve", "worker", "token"})
+#: 명령 앞에 붙이면 마이그레이션이 의도라는 뜻이다.
+ALLOW_MIGRATE = "RCM_ALLOW_MIGRATE"
+DB_FILE = "rcm.sqlite3"
+SQLITE_MAGIC = b"SQLite format 3\x00"
+DB_VERSION_RE = re.compile(r"^DB_VERSION\s*=\s*(\d+)\s*$", re.M)
 DEFAULT_DATA_DIR = "~/.local/share/rcm"
 #: docs/operating.md 「From a git checkout」이 서비스 venv 를 두라고 하는 자리.
 SERVICE_VENV = "~/.local/share/rcm-venv"
@@ -477,8 +493,109 @@ def _segment_verdict(
         verdict = _db_write_verdict(argv, cwd, prod, subcommand, local_config, env)
         if verdict is not None:
             return verdict
+    if subcommand in MIGRATING and not _wants_help(argv):
+        verdict = _migration_verdict(argv, cwd, prod, subcommand, local_config, env)
+        if verdict is not None:
+            return verdict
 
     return None
+
+
+# ── 다른 빌드가 옛 DB 를 올리는 것 (사건 6f) ─────────────────────────────────
+
+
+def _venv_of(argv: list[str], cwd: Path) -> Path | None:
+    """이 조각이 실행하는 파일이 든 venv. venv 의 `bin/python` 은 바탕 인터프리터로 가는
+    심링크라 먼저 풀지 않은 경로를 보고, 그다음 실제 파일(`~/.local/bin/rcm` → venv)을 본다."""
+    token = argv[0]
+    if "/" in token:
+        found: Path | None = _as_path(token, cwd)
+    else:
+        located = _which(token)
+        found = Path(located) if located else None
+    if found is None:
+        return None
+    for candidate in (found, Path(os.path.realpath(found))):
+        venv = _norm(candidate.parent.parent)
+        if (venv / "pyvenv.cfg").exists():
+            return venv
+    return None
+
+
+def _db_user_version(db: Path) -> int | None:
+    """sqlite 헤더의 user_version(오프셋 60, 4바이트 big-endian). 연결하지 않는다 — 연결은 그
+    자체로 `-wal`·`-shm` 을 만들고, 이 훅은 아무것도 바꾸면 안 된다. 없거나 sqlite 가 아니면
+    None."""
+    try:
+        with db.open("rb") as handle:
+            header = handle.read(100)
+    except OSError:
+        return None
+    if len(header) < 64 or not header.startswith(SQLITE_MAGIC):
+        return None
+    wal = db.with_name(db.name + "-wal")
+    try:
+        if wal.stat().st_size > 0:
+            return None  # 새 user_version 이 아직 -wal 에만 있을 수 있다 — 헤더는 낡았을지 모른다
+    except OSError:
+        pass
+    return int.from_bytes(header[60:64], "big")
+
+
+def _build_db_version(venv: Path) -> int | None:
+    """그 venv 의 빌드가 아는 `DB_VERSION` — editable 이면 원본의 `store.py`, 아니면
+    site-packages 의 것. 못 찾거나 숫자가 없으면 None."""
+    stores: list[Path] = []
+    source = _editable_source(venv)
+    if source is not None:
+        stores.append(source / "src" / "remote_ci_monitor" / "store.py")
+    stores.extend(sorted(venv.glob("lib/python*/site-packages/remote_ci_monitor/store.py")))
+    for store in stores:
+        try:
+            text = store.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = DB_VERSION_RE.search(text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _migration_verdict(
+    argv: list[str],
+    cwd: Path,
+    prod: Production,
+    subcommand: str,
+    local_config: bool,
+    env: SegmentEnv,
+) -> Verdict | None:
+    """유효 `data_dir` 의 DB 가 이 빌드보다 옛 판이면 막는다 — 열면 그 자리에서 올라가고, 그 DB 를
+    만든 옛 빌드는 다시 못 연다. 서비스 venv 가 운영 데이터를 여는 것은 배포 뒤의 정상 운영이다."""
+    if env.vars.get(ALLOW_MIGRATE) == "1":
+        return None
+    venv = _venv_of(argv, cwd)
+    if venv is None:
+        return None
+    effective = _effective_data_dir(argv, cwd, prod, local_config, env, subcommand)
+    if effective is None:
+        return None
+    if not effective.is_absolute():
+        effective = _norm(cwd / effective)  # CLI 도 상대 `data_dir` 을 작업 폴더 기준으로 연다
+    if inside(venv, prod.venv) and inside(effective, prod.data_dir):
+        return None
+    db = effective / DB_FILE
+    have = _db_user_version(db)
+    want = _build_db_version(venv)
+    if have is None or want is None or have >= want:
+        return None
+    return Verdict(
+        "deny",
+        f"`rcm {subcommand}` here opens {db} (v{have}) with the build in {venv}, which knows "
+        f"v{want}: it migrates that database from v{have} to v{want} on open, and the build that "
+        "made it will refuse it afterwards (2026-11-20, a dev database went v7 → v24 this way). "
+        "Point `--data-dir` or a config of its own at a new data_dir, or prefix the command with "
+        f"`{ALLOW_MIGRATE}=1` if migrating this database is the point. See {DOCS}.",
+    )
 
 
 def _executable(argv: list[str], cwd: Path) -> Path | None:
@@ -655,16 +772,17 @@ def decide(
     local_config: bool = False,
     environ: Mapping[str, str] | None = None,
 ) -> Verdict | None:
-    """막을 이유가 있으면 Verdict, 없으면 None. 운영 설치를 못 찾았으면 언제나 None.
+    """막을 이유가 있으면 Verdict, 없으면 None. 운영 설치를 못 찾았으면 옛 DB 마이그레이션
+    (`_migration_verdict`) 하나만 본다 — 운영 경로를 묻는 다른 규칙은 그때 할 말이 없다.
 
     `local_config` 는 세션 cwd 에 `./rcm.toml` 이 있다는 뜻이다 — 그러면 `--config` 없는
     `rcm serve` 도 운영 설정을 집지 않는다(`cd` 뒤에는 그 폴더에서 다시 본다). `$RCM_CONFIG` ·
     `$RCM_SERVER_DATA_DIR` · `$XDG_CONFIG_HOME` 은 `environ`(None 이면 프로세스 환경)에서 읽는다.
     """
-    if not prod.known:
-        return None
     session = os.environ if environ is None else environ
     if tool_name in ("Write", "Edit", "NotebookEdit"):
+        if not prod.known:
+            return None
         file_path = tool_input.get("file_path") or tool_input.get("notebook_path")
         return _edit_verdict(str(file_path), cwd, prod) if isinstance(file_path, str) else None
     if tool_name == "Bash":
