@@ -58,6 +58,7 @@ GRACE = 2  # [server] grace_seconds
 WORKER_TIMEOUT = 10  # [server] worker_timeout_seconds (하한)
 HEARTBEAT = 1  # [server] worker_heartbeat_seconds
 CLAIM_WAIT = 2  # [server] worker_claim_wait_seconds
+REPORT_WINDOW = 1 + 2 + 4  # remote_worker.REPORT_RETRIES — finish 보고를 다시 보내는 창
 POLL = 0.05
 TERMINAL = ("succeeded", "failed", "timed_out", "cancelled", "lost")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
@@ -716,11 +717,14 @@ def test_cancel_reaches_the_worker_through_the_heartbeat_within_seconds(stack, t
     t0 = time.monotonic()
     cancel = rcm("cancel", str(jid), env=stack.env)
     assert cancel.returncode == 0 and last_json(cancel.stdout)["state"] == "cancelling", cancel
-    fin = stack.wait_terminal(jid, timeout=5)
+    fin = stack.wait_terminal(jid, timeout=WORKER_TIMEOUT)
     took = time.monotonic() - t0
-    # 워커가 확인한 취소다 — 서버가 대신 닫으면 `worker did not confirm the cancel` 이 된다
+    # 워커가 확인한 취소다 — 서버가 대신 닫으면 `worker did not confirm the cancel` 이 된다. 서버는
+    # `kill_at`(취소 + GRACE) + 2 × HEARTBEAT 에 스스로 닫으므로 이 요약이 「heartbeat 로 몇 초
+    # 안에」를 이미 가른다. 시간 상한은 워커가 끊긴 것으로 치는 WORKER_TIMEOUT 이다 — `took` 에는
+    # `rcm cancel` 프로세스의 기동이 들어 있어 `pytest -n 6` 부하에서 5.23초가 나왔다(rcm-ci #3859)
     assert fin["state"] == "cancelled" and fin["summary"] == f"cancelled by {CLIENT}", fin
-    assert fin["cancelled_by"] == CLIENT and took < 5, (fin, took)
+    assert fin["cancelled_by"] == CLIENT and took < WORKER_TIMEOUT, (fin, took)
     states = [t["state"] for t in fin["transitions"]]
     assert states[-3:] == ["running", "cancelling", "cancelled"], states
     wait_until(lambda: is_dead(pid), 5, f"job process {pid} to die")
@@ -824,7 +828,7 @@ def test_server_restart_keeps_the_remote_job_running_until_the_worker_finishes(s
     stack.server.stop(signal.SIGTERM, timeout=10)
     stack.server.start()
     gap = time.monotonic() - t0
-    assert gap < 5, gap  # 워커의 보고 재시도 창(1·2·4초) 안에 다시 떴다
+    assert gap < REPORT_WINDOW, gap  # 워커의 보고 재시도 창(1·2·4초) 안에 다시 떴다
     # 재시작 직후: 원격 잡은 lost 가 아니라 아직 running(recover_on_start 는 로컬 잡만)
     view = stack.job(jid)
     assert view["state"] == "running", view

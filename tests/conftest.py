@@ -17,12 +17,23 @@ M5q 시험이 CI 를 25분 늘렸다):
   (`-n auto`, 워커 10)에서 직렬 5초짜리 Chrome 시험이 29.6초가 됐다. `RCM_TEST_SLOW_SECONDS` 가
   있으면 그 값이 이긴다. 판정은 `pytest_runtest_logreport` 로 모으므로 xdist
   (`-n`)에서도 워커가 아니라 컨트롤러가 한 번 한다.
+
+Chrome 을 띄우는 시험(`test_web_browser.py` 와 그 `Chrome` 하네스를 들여오는 모듈 전부)은 `-n`
+에서 한 워커로 모은다. 워커 여럿이 동시에 Chrome 을 띄우면 CDP 가 마감을 넘겨 실패했다 — rcm-ci 잡
+#3861(`-n 6`)의 `test_web_layout_queue_edges.py`. `pyproject.toml` 의 `--dist loadgroup` 일 때
+`pytest_xdist_make_scheduler` 가 xdist 의 loadgroup 스케줄러를 고쳐 그 파일들의 시험을 그룹
+`chrome` 으로 묶는다. 시험에도 `xdist_group("chrome")` 을 달지만 그것만으로는 안 묶인다: xdist
+3.8.0 은 그룹 이름을 `item._nodeid` 에 붙이는데 pytest 9 의 nodeid 는 `_id` 를 읽는다. 모듈마다
+표시를 다는 대신 파일을 보고 정하므로 새 Chrome 시험 모듈이 표시를 잊어도 같은 워커로 간다.
 """
 
 from __future__ import annotations
 
+import functools
 import os
+import re
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -94,6 +105,50 @@ def pytest_configure(config):
     )
     socket.getfqdn = _getfqdn
     socket.gethostbyaddr = _gethostbyaddr
+
+
+#: Chrome 하네스를 들여오는 줄 — `from test_web_browser import Chrome, …` 이나 괄호로 여러 줄.
+CHROME_IMPORT_RE = re.compile(r"^from test_web_browser import (?:\([^)]*\)|[^\n]*)", re.M)
+
+
+@functools.cache
+def uses_chrome(path: str) -> bool:
+    """그 시험 파일이 Chrome 을 띄우나 — 하네스 자신이거나 하네스의 `Chrome` 을 들여온다."""
+    file = Path(path)
+    if file.name == "test_web_browser.py":
+        return True
+    try:
+        text = file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(re.search(r"\bChrome\b", m.group(0)) for m in CHROME_IMPORT_RE.finditer(text))
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Chrome 시험에 `xdist_group("chrome")` 을 단다(`-m xdist_group` 으로 고를 수 있다)."""
+    for item in items:
+        if uses_chrome(str(item.path)):
+            item.add_marker(pytest.mark.xdist_group("chrome"))
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_make_scheduler(config, log):
+    """`--dist loadgroup` 의 스케줄러 — Chrome 파일의 시험은 그룹 `chrome`, 나머지는 시험 하나가
+    한 그룹(loadgroup 과 같다). 다른 `--dist` 는 xdist 에 맡긴다."""
+    if config.getvalue("dist") != "loadgroup":
+        return None
+    from xdist.scheduler import LoadGroupScheduling
+
+    root = config.rootpath
+
+    class ChromeOnOneWorker(LoadGroupScheduling):
+        def _split_scope(self, nodeid: str) -> str:
+            if "@" in nodeid:  # xdist 가 그룹 이름을 붙여 보냈다(pytest 9 밖)
+                return super()._split_scope(nodeid)
+            return "chrome" if uses_chrome(str(root / nodeid.split("::", 1)[0])) else nodeid
+
+    return ChromeOnOneWorker(config, log)
 
 
 def pytest_unconfigure(config):
