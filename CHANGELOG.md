@@ -42,6 +42,14 @@ of a key bumps that number and is listed here.
   seconds fails the run unless marked `slow`.
   ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
 
+### Fixed
+- **The web page no longer misses an event when it reconnects.** Two events published at the same
+  moment could reach a live stream in the wrong order (244 before 243). A page that lost its
+  connection right after 244 asked to resume after 244 and never got 243, so a job could stay
+  shown in an old state until the page was reloaded. Events replayed on reconnect could also
+  arrive after newer ones. Each stream now gets events in id order.
+  ([#242](https://github.com/monocsp/remote_ci_monitor/pull/242))
+
 ## [0.8.0] - 2026-11-20
 
 ### Added
