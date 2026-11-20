@@ -814,8 +814,9 @@ def test_plan_pin_table():  # A6 · A33 · A93 · §2.7 · 결정 158
 
 
 def test_plan_ignores_a_dashed_version_for_a_pin():  # A123
-    rc = entry("0.8.0-rc1", SHA_A, T)
-    p = plan(pin("0.8.0"), None, [rc])
+    # 고정 버전은 설치본과 달라야 한다 — 같으면 경고 없이 stay 다(v0.8.0 릴리스 CI 에서 걸렸다)
+    rc = entry(f"{NEW2}-rc1", SHA_A, T)
+    p = plan(pin(NEW2), None, [rc])
     assert (p.action, p.warn) == ("stay", "pinned_unavailable")
 
 
