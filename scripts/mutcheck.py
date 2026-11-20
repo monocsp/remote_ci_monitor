@@ -125,6 +125,7 @@
   작업이 길어진 원인을 막는 장치 — `guard-*` · `merge-pr-*` 다섯: `guard_naming` 이 셸 치환
      값(`--title "$T"`)을 다시 글자로 잼 · PR 본문 파일 이름 검사 제거 · `guard_merge` 의 REST
      머지(`gh api -X PUT …/pulls/N/merge`) 패턴 제거 · `merge_pr` 가 pending 체크를 안 봄 ·
+     `merge_pr` 가 룰셋의 필수 context 를 안 봄 ·
      `guard_production` 의 옛 DB 판 비교 제거 (`tools/`, 2026-11-20 사건 6d · 6e · 6c · 2 · 6f)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list]
@@ -1306,6 +1307,15 @@ MUTANTS = (
         path="tools/merge_pr.py",
         old='        if run.get("status") != "completed":\n            pending.append(name)\n',
         new="        if False:\n            pending.append(name)\n",
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 룰셋의 필수 context 를 안 본다 — GitHub Actions 만 초록이고 `rcm/ci` 가 아직 없는데
+        # 머지한다(2026-11-20 오너 결정: 필수 체크가 `rcm/ci` 로 바뀐다)
+        name="merge-pr-ignores-required-contexts",
+        path="tools/merge_pr.py",
+        old="    missing = tuple(context for context in required if context not in names)\n",
+        new="    missing = ()\n",
         tests=("tests/test_merge_pr.py",),
     ),
     Mutant(

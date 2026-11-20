@@ -1,10 +1,12 @@
 """`tools/merge_pr.py` — 머지 관문 (사건 2 · 6c).
 
 머지는 이 도구로만 한다(`tools/guard_merge.py` 가 다른 길을 막는다). 순서: PR head sha 를 고정 →
-그 sha 의 check-runs · statuses 가 전부 끝났고 실패가 없고 `test` 가 있다 → PR 댓글에 같은 sha 의
-`verified: <sha>` 표식이 있다(`--no-verify "<이유>"` 는 이유를 댓글로 남기고 지나간다) → 충돌이
-없다 → `PUT pulls/N/merge` 에 그 sha · `merge_method=merge` · `commit_title="<제목> (#N)"` →
-머지됐는지 다시 읽는다 → `--delete-branch` 일 때만 원격 브랜치를 지운다.
+그 sha 의 check-runs · statuses 가 전부 끝났고 실패가 없고, base 브랜치 룰셋의 필수 체크
+(`rules/branches/{base}` 의 required_status_checks)가 check-run 이든 commit status 든 성공이다 →
+PR 댓글에 같은 sha 의 `verified: <sha>` 표식이 있다(`--no-verify "<이유>"` 는 이유를 댓글로
+남기고 지나간다) → 충돌이 없다 → `PUT pulls/N/merge` 에 그 sha · `merge_method=merge` ·
+`commit_title="<제목> (#N)"` → 머지됐는지 다시 읽는다 → `--delete-branch` 일 때만 원격
+브랜치를 지운다.
 
 종료 코드: 0 머지(또는 `--dry-run` 이 머지할 수 있다고 본 것) · 1 거부 · 2 사용법 · 3 네트워크/모름.
 
@@ -63,6 +65,7 @@ class FakeGitHub:
         *,
         runs=None,
         statuses=None,
+        required=("test",),
         comments=None,
         pr=None,
         heads=None,
@@ -82,7 +85,8 @@ class FakeGitHub:
         }
         self.pr.update(pr or {})
         self.runs = list(runs if runs is not None else [GREEN])
-        self.statuses = statuses or []
+        self.statuses = statuses or []  # 최신이 앞(GitHub 의 commits/{sha}/statuses 순서)
+        self.required = list(required) if required is not None else None
         self.comments = comments if comments is not None else [verified()]
         self.heads = list(heads or [])
         self.fail = fail or {}
@@ -107,8 +111,24 @@ class FakeGitHub:
             page = int(rest.rsplit("page=", 1)[1])
             chunk = runs[(page - 1) * 100 : page * 100]
             return {"total_count": len(runs), "check_runs": chunk}
-        if method == "GET" and rest.startswith("commits/") and rest.endswith("/status"):
-            return {"state": "success", "statuses": self.statuses}
+        if method == "GET" and rest.startswith("commits/") and "/statuses" in rest:
+            page = int(rest.rsplit("page=", 1)[1])
+            return self.statuses[(page - 1) * 100 : page * 100]
+        if method == "GET" and rest.startswith("rules/branches/"):
+            base = rest.split("rules/branches/", 1)[1].split("?", 1)[0]
+            assert base == self.pr["base"]["ref"], (base, self.pr["base"])
+            if int(rest.rsplit("page=", 1)[1]) > 1 or self.required is None:
+                return []
+            return [
+                {"type": "deletion", "parameters": None},
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": False,
+                        "required_status_checks": [{"context": c} for c in self.required],
+                    },
+                },
+            ]
         if method == "GET" and rest.startswith(f"issues/{N}/comments"):
             page = int(rest.rsplit("page=", 1)[1])
             return self.comments[(page - 1) * 100 : page * 100]
@@ -267,6 +287,81 @@ def test_a_failed_check_refuses_even_with_wait(conclusion, capsys):
 def test_a_failed_status_refuses(state):
     api = FakeGitHub(statuses=[{"context": "ci/other", "state": state}])
     assert merge(api) == 1 and api.did("PUT") == []
+
+
+# ── 필수 체크는 base 브랜치 룰셋이 정한다 ────────────────────────────────────
+#
+# 오너 결정(2026-11-20): dev · main 의 필수 체크가 `test`(GitHub Actions) 에서 `rcm/ci`(맥미니 rcm
+# 잡이 올리는 커밋 상태)로 바뀐다. 관문은 이름을 박지 않고 룰셋 API 에서 읽는다.
+
+RCM_OK = {"context": "rcm/ci", "state": "success"}
+
+
+def test_the_required_context_comes_from_the_base_branch_ruleset():
+    api = FakeGitHub(runs=[[run_("unit")]], statuses=[RCM_OK], required=["rcm/ci"])
+    assert merge(api) == 0
+    assert api.did("GET", f"repos/{REPO}/rules/branches/dev")
+
+
+def test_a_release_pr_reads_the_ruleset_of_main():
+    api = FakeGitHub(
+        statuses=[RCM_OK],
+        required=["test", "rcm/ci"],
+        pr={"base": {"ref": "main", "repo": {"full_name": REPO}}},
+    )
+    assert merge(api) == 0
+    assert api.did("GET", f"repos/{REPO}/rules/branches/main")
+
+
+def test_a_missing_required_status_refuses_and_names_it(capsys):
+    api = FakeGitHub(required=["rcm/ci"])  # GitHub Actions 는 초록이지만 rcm/ci 가 없다
+    assert merge(api) == 1 and api.did("PUT") == []
+    assert "`rcm/ci`" in capsys.readouterr().err
+
+
+def test_a_missing_required_status_is_waited_for():
+    api = FakeGitHub(required=["rcm/ci"])
+    clock = Clock()
+    later = [RCM_OK]
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        api.statuses = later
+
+    assert mp.main([str(N), "--repo", REPO, "--wait"], api=api, now=clock.now, sleep=sleep) == 0
+
+
+@pytest.mark.parametrize(
+    "history, code",
+    [
+        # 같은 context 는 최신 것만 본다(목록은 최신이 앞)
+        ([RCM_OK, {"context": "rcm/ci", "state": "failure"}], 0),
+        ([{"context": "rcm/ci", "state": "failure"}, RCM_OK], 1),
+        ([{"context": "rcm/ci", "state": "pending"}, RCM_OK], 1),
+        ([{"context": "rcm/ci", "state": "error"}], 1),
+    ],
+)
+def test_only_the_latest_status_of_a_context_counts(history, code):
+    api = FakeGitHub(statuses=history, required=["rcm/ci"])
+    assert merge(api) == code
+    assert bool(api.did("PUT")) == (code == 0)
+
+
+def test_a_required_check_run_that_was_skipped_or_neutral_counts_as_passed():
+    api = FakeGitHub(runs=[[run_("rcm/ci", conclusion="neutral")]], required=["rcm/ci"])
+    assert merge(api) == 0
+
+
+def test_a_base_without_required_checks_still_needs_one_finished_check(capsys):
+    assert merge(FakeGitHub(required=None)) == 0
+    api = FakeGitHub(runs=[[]], required=None)
+    assert merge(api) == 1 and api.did("PUT") == []
+    assert "required" in capsys.readouterr().err
+
+
+def test_the_ruleset_api_failing_is_unknown():
+    api = FakeGitHub(fail={("GET", f"repos/{REPO}/rules"): mp.ApiError("HTTP 502", 502)})
+    assert merge(api) == 3 and api.did("PUT") == []
 
 
 def test_no_test_check_refuses(capsys):
@@ -444,8 +539,12 @@ elif "/check-runs" in path:
     runs = [] if "page=2" in path else [{{"name": "test", "status": "completed",
         "conclusion": "success"}}]
     print(json.dumps({{"total_count": 1, "check_runs": runs}}))
-elif path.endswith("/status"):
-    print(json.dumps({{"state": "pending", "statuses": []}}))
+elif "/statuses" in path:
+    print(json.dumps([]))
+elif "/rules/branches/" in path:
+    rules = [{{"type": "required_status_checks", "parameters": {{"required_status_checks":
+        [{{"context": "test"}}]}}}}]
+    print(json.dumps(rules if path.endswith("page=1") else []))
 elif "/comments" in path:
     page = path.rsplit("page=", 1)[1]
     print(json.dumps([{{"body": "verified: " + sha}}] if page == "1" else []))

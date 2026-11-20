@@ -11,7 +11,9 @@ of a key bumps that number and is listed here.
 - **`tools/merge_pr.py <N>` is the one way to merge a pull request in this repository.** It pins
   the PR's head sha and refuses while any check run or status on that sha is pending (`--wait`
   waits up to `--timeout`, and refuses if the head moves), failed, was cancelled or timed out, or
-  `test` is missing; it needs a `verified: <head sha>` PR comment from the isolated verification
+  a check the base branch's ruleset requires (read from the rulesets API, so a switch from
+  `test` to a commit status such as `rcm/ci` needs no change; the latest status of a context
+  counts) has not passed; it needs a `verified: <head sha>` PR comment from the isolated verification
   (`--no-verify "<reason>"` posts the reason instead) and no conflict, then merges exactly that
   sha as a merge commit titled `<title> (#N)`. `--dry-run` changes nothing, `--delete-branch`
   removes the head branch. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer.

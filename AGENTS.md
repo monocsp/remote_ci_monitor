@@ -48,7 +48,9 @@ summary and body and in a PR's title and body is written with the `korean-writin
 writing; long Korean documents can go to the `korean-writer` agent (`.claude/agents/`).
 
 **Merging goes through `tools/merge_pr.py <N>` only.** It pins the head sha, refuses while any
-check on it is pending (`--wait` waits) or failed or `test` is missing, needs a `verified: <head
+check on it is pending (`--wait` waits) or failed or a check the base branch's ruleset requires
+(`test` today, `rcm/ci` soon — read from the ruleset, as a check run or a commit status) is
+missing, needs a `verified: <head
 sha>` PR comment from the isolated verification (`--no-verify "<reason>"` for a docs- or
 tests-only PR), refuses a conflict, and merges that sha. `tools/guard_merge.py` (a `PreToolUse`
 hook) refuses `gh pr merge`, a REST `PUT …/pulls/<N>/merge` and a script that runs one — a

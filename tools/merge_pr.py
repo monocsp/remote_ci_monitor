@@ -11,10 +11,13 @@
 
 순서:
   1. PR 을 읽어 head sha 를 **고정**한다. 열려 있지 않으면 거부.
-  2. 그 sha 의 check-runs 와 statuses 를 모은다. 하나라도 failure · cancelled · timed_out ·
-     action_required(· startup_failure · stale · error) 면 거부. 하나라도 끝나지 않았거나 `test`
-     체크가 아직 없으면 `--wait` 는 `--timeout` 까지 기다리고(기다리는 동안 head 가 움직이면 거부),
-     아니면 거부. 체크가 끝났는데 `test` 가 없으면 거부.
+  2. base 브랜치 룰셋의 필수 상태 체크(`GET rules/branches/{base}` 의 required_status_checks)를
+     읽는다 — 이름을 박지 않는다(필수 체크가 `test` 에서 `rcm/ci` 로 바뀔 수 있다). 그 sha 의
+     check-runs 와 commit statuses(같은 context 는 최신 것만)를 모은다. 하나라도 failure ·
+     cancelled · timed_out · action_required(· startup_failure · stale · error) 면 거부. 하나라도
+     끝나지 않았거나 필수 context 가 check-run 으로도 status 로도 아직 없으면 `--wait` 는
+     `--timeout` 까지 기다리고(기다리는 동안 head 가 움직이면 거부), 아니면 거부. 룰셋에 필수
+     체크가 없으면 끝난 체크가 하나라도 있어야 한다.
   3. PR 댓글에서 `verified: <40자 head sha>` 줄(격리 검증을 마친 리드가 다는 한 줄 — 형식 고정)을
      찾는다. 없거나 다른 sha 면 거부. `--no-verify "<reason>"` 은 그 이유를 PR 댓글로 남기고
      지나간다(문서만 · 시험만 PR 용).
@@ -49,7 +52,6 @@ EXIT_UNKNOWN = 3
 
 #: 격리 검증 표식 — 줄 하나 전체가 이 모양이어야 한다(인용 · 짧은 sha · 대문자는 아니다).
 VERIFIED_RE = re.compile(r"^verified: ([0-9a-f]{40})[ \t]*$", re.M)
-REQUIRED_CHECK = "test"
 FAILED_CONCLUSIONS = frozenset(
     {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 )
@@ -114,7 +116,10 @@ class Checks:
 
     pending: tuple[str, ...]
     failed: tuple[str, ...]
-    has_required: bool
+    #: base 룰셋의 필수 context 가운데 head 에 아직 아무 보고도 없는 것.
+    missing: tuple[str, ...]
+    #: head 에 보고된 체크가 하나라도 있나.
+    seen: bool
 
 
 @dataclass(frozen=True)
@@ -145,8 +150,23 @@ def _pages(api: Api, path: str, key: str | None = None) -> list[Any]:
         page += 1
 
 
-def read_checks(api: Api, repo: str, sha: str) -> Checks:
-    """그 sha 의 check-runs(같은 이름은 GitHub 이 최신 것만 준다)와 statuses(context 마다 최신)."""
+def required_contexts(api: Api, repo: str, base: str) -> tuple[str, ...]:
+    """base 브랜치에 걸린 룰셋들의 필수 상태 체크 context. 이름을 박지 않는다 — 오너가 필수 체크를
+    `test`(GitHub Actions) 에서 `rcm/ci`(맥미니 rcm 잡이 올리는 커밋 상태)로 바꿀 수 있다."""
+    out: list[str] = []
+    for rule in _pages(api, f"repos/{repo}/rules/branches/{base}"):
+        if rule.get("type") != "required_status_checks":
+            continue
+        for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
+            context = str(check.get("context") or "")
+            if context and context not in out:
+                out.append(context)
+    return tuple(out)
+
+
+def read_checks(api: Api, repo: str, sha: str, required: tuple[str, ...] = ()) -> Checks:
+    """그 sha 의 check-runs(같은 이름은 GitHub 이 최신 것만 준다)와 commit statuses(목록은 최신이
+    앞이라 context 마다 처음 본 것만 센다). 필수 context 는 둘 중 어느 쪽으로 와도 된다."""
     pending: list[str] = []
     failed: list[str] = []
     names: set[str] = set()
@@ -157,16 +177,19 @@ def read_checks(api: Api, repo: str, sha: str) -> Checks:
             pending.append(name)
         elif run.get("conclusion") in FAILED_CONCLUSIONS:
             failed.append(f"{name} ({run.get('conclusion')})")
-    combined = api.request("GET", f"repos/{repo}/commits/{sha}/status") or {}
-    # 결합 상태의 `state` 는 statuses 가 하나도 없을 때도 "pending" 이다 — 목록만 본다.
-    for status in combined.get("statuses", []):
+    latest: set[str] = set()
+    for status in _pages(api, f"repos/{repo}/commits/{sha}/statuses"):
         name = str(status.get("context", "?"))
+        if name in latest:
+            continue  # 같은 context 의 옛 상태
+        latest.add(name)
         names.add(name)
         if status.get("state") == "pending":
             pending.append(name)
         elif status.get("state") in FAILED_STATES:
             failed.append(f"{name} ({status.get('state')})")
-    return Checks(tuple(pending), tuple(failed), REQUIRED_CHECK in names)
+    missing = tuple(context for context in required if context not in names)
+    return Checks(tuple(pending), tuple(failed), missing, bool(names))
 
 
 def _pr(api: Api, opts: Options) -> dict[str, Any]:
@@ -189,20 +212,26 @@ def _short(sha: str) -> str:
 
 
 def _wait_for_checks(
-    api: Api, opts: Options, sha: str, now: Callable[[], float], sleep: Callable[[float], None]
+    api: Api,
+    opts: Options,
+    sha: str,
+    required: tuple[str, ...],
+    now: Callable[[], float],
+    sleep: Callable[[float], None],
 ) -> None:
-    """체크가 전부 끝나고 실패가 없고 `test` 가 있을 때 돌아온다. 아니면 Refused."""
+    """체크가 전부 끝나고 실패가 없고 필수 context 가 다 보고됐을 때 돌아온다. 아니면 Refused."""
     deadline = now() + opts.timeout
     while True:
-        checks = read_checks(api, opts.repo, sha)
+        checks = read_checks(api, opts.repo, sha, required)
         if checks.failed:
             raise Refused(
                 f"checks failed on {_short(sha)}: {', '.join(checks.failed)} — fix them and push; "
                 "a rerun that turns green counts"
             )
         waiting = list(checks.pending)
-        if not checks.has_required:
-            waiting.append(f"`{REQUIRED_CHECK}` (not reported yet)")
+        waiting += [f"`{context}` (not reported yet)" for context in checks.missing]
+        if not required and not checks.seen:
+            waiting.append("any check (the base has no required checks and none reported yet)")
         if not waiting:
             return
         if not opts.wait:
@@ -212,8 +241,8 @@ def _wait_for_checks(
                     "to wait for them"
                 )
             raise Refused(
-                f"no `{REQUIRED_CHECK}` check on {_short(sha)} — CI has not run on this head "
-                "(pass --wait if it is starting)"
+                f"required checks not reported on {_short(sha)}: {', '.join(waiting)} — CI has "
+                "not run on this head (pass --wait if it is starting)"
             )
         left = deadline - now()
         if left <= 0:
@@ -260,8 +289,13 @@ def gate(
     pr = _pr(api, opts)
     sha = _open_head(pr, opts.number)
     title = str(pr.get("title") or "")
-    print(f"#{opts.number} {title}\nhead {sha} (pinned)")
-    _wait_for_checks(api, opts, sha, now, sleep)
+    base = str((pr.get("base") or {}).get("ref") or "")
+    required = required_contexts(api, opts.repo, base)
+    print(
+        f"#{opts.number} {title}\nhead {sha} (pinned) · required on {base}: "
+        f"{', '.join(required) or '(none)'}"
+    )
+    _wait_for_checks(api, opts, sha, required, now, sleep)
     _check_verified(api, opts, sha)
     pr = _pr(api, opts)
     head = _open_head(pr, opts.number)
@@ -340,7 +374,8 @@ def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="merge_pr.py",
         description="Merge a pull request only when every check on its pinned head sha is done "
-        "and green and the head carries a `verified: <sha>` comment.",
+        "and green, the base branch's required checks (read from its rulesets) passed as a check "
+        "run or a commit status, and the head carries a `verified: <sha>` comment.",
         epilog="exit codes: 0 merged (or would merge, with --dry-run) · 1 refused · 2 usage · "
         "3 network or unknown. Token: $GH_TOKEN, else gh's active account "
         "(GH_TOKEN=$(gh auth token --user monocsp) in this repository).",

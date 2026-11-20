@@ -81,7 +81,9 @@ documents that stay in the repository are written in 평어체.
    ```
    It pins the PR's head sha and then refuses unless, on that sha, every check run and status
    has finished (`--wait` waits up to `--timeout` seconds, 3600 by default, and refuses if the
-   head moves meanwhile), none failed, was cancelled or timed out, and `test` is among them; a PR
+   head moves meanwhile), none failed, was cancelled or timed out, and every check the base branch's ruleset requires
+   (`GET rules/branches/<base>`; `test` today, `rcm/ci` once the owner switches it) passed as a
+   check run or a commit status, the latest status of a context counting; a PR
    comment carries the verification marker for that sha; and GitHub reports no conflict. Then it
    merges that sha into the base as a merge commit titled `<title> (#<N>)` and reads the PR back.
    `--dry-run` runs every check and changes nothing; `--delete-branch` never deletes `main` or
