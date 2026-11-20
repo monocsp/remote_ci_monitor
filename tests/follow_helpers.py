@@ -69,8 +69,11 @@ def main(argv=None):
     if "--spawn" in args:
         env = subprocess.run(["env"], capture_output=True, text=True).stdout.splitlines()
         out["spawned"] = [ln for ln in env if ln.startswith("RCM_FOLLOW")]
-    print(json.dumps(out), flush=True)
     try:
+        # 첫 줄을 찍는 것도 try 안이다. 시험은 이 줄을 읽자마자 SIGINT 를 보내므로, 찍은 뒤 try 에
+        # 들어가기 전에 신호가 오면 KeyboardInterrupt 가 밖으로 새어 130 이 아니라 신호 종료(-2)가
+        # 된다. CPU 를 나눠 쓰는 실행(pytest-xdist)에서 그 틈이 넓어진다.
+        print(json.dumps(out), flush=True)
         if "--sleep" in args:
             time.sleep(float(args[args.index("--sleep") + 1]))
         if "--hold" in args:
