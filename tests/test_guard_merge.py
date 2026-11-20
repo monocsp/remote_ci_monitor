@@ -78,6 +78,36 @@ def test_a_merge_outside_merge_pr_is_denied(command):
     assert "tools/merge_pr.py" in v.reason, v.reason
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr -R o/r merge 7",
+        "gh pr --repo o/r merge 7",
+        "gh pr --repo=o/r merge 7 --merge",
+        "gh -R o/r pr --repo o/r merge 7",
+        "GH_TOKEN=$(gh auth token --user monocsp) gh pr -R monocsp/remote_ci_monitor merge 7",
+    ],
+)
+def test_a_repo_option_after_pr_does_not_hide_the_merge(command):
+    """#237 격리 검증: `-R` 이 `pr` 뒤에 오면(`gh pr -R o/r merge 7`) 지나갔다 — gh 는 두 자리를
+    다 받는다."""
+    v = bash(command)
+    assert v is not None, command
+    assert "python3 tools/merge_pr.py 7" in v.reason, v.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr -R o/r comment 7 --body 'gh pr merge 7 는 막혔습니다'",
+        "gh pr --repo o/r view 7",
+        "gh pr --repo=o/r edit 7 --body 'gh api -X PUT repos/o/r/pulls/7/merge 를 막는다'",
+    ],
+)
+def test_a_repo_option_after_pr_still_lets_the_text_commands_through(command):
+    assert bash(command) is None, command
+
+
 def test_the_reason_names_the_pr_number_when_it_can():
     v = bash("gh api -X PUT repos/o/r/pulls/233/merge")
     assert v is not None and "python3 tools/merge_pr.py 233" in v.reason

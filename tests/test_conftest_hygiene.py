@@ -76,8 +76,10 @@ def _project(tmp_path: Path, body: str) -> Path:
     return tmp_path
 
 
-def _pytest(project: Path, *args: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ, RCM_TEST_SLOW_SECONDS="0.3")
+def _pytest(project: Path, *args: str, slow: str = "0.3") -> subprocess.CompletedProcess:
+    """안쪽 pytest. 예산은 `slow` 초다 — 위의 예산 시험은 0.3초를 쓰고, 예산을 보지 않는 시험은
+    넉넉히 준다(부하 속 CI 에서 0.2초짜리 가짜 시험이 0.3초를 넘었다, rcm-ci 잡 #3865)."""
+    env = dict(os.environ, RCM_TEST_SLOW_SECONDS=slow)
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PYTEST_XDIST_WORKER", None)
     return subprocess.run(
@@ -178,3 +180,93 @@ class _Config:
 )
 def test_the_worker_count_is_read_from_the_option_or_the_worker_env(numprocesses, environ, workers):
     assert _conftest().worker_count(_Config(numprocesses), environ) == workers
+
+
+# ── Chrome 시험은 한 워커에서 (rcm-ci 잡 #3861) ──────────────────────────────
+
+CHROME_HARNESS = """
+import os
+import time
+from pathlib import Path
+
+
+class Chrome:  # 진짜 하네스 자리 — 이름과 모듈만 같다
+    pass
+
+
+def record(name):
+    time.sleep(0.2)
+    with open(Path(__file__).parent / "seen.txt", "a") as f:
+        f.write(f"{name} {os.environ.get('PYTEST_XDIST_WORKER', '-')}\\n")
+"""
+
+# 줄머리에 두지 않는다 — 이 파일까지 Chrome 파일로 읽힌다
+CHROME_IMPORT = "from test_web_browser import Chrome, record  # noqa: F401\n"
+CHROME_USER = (
+    CHROME_IMPORT
+    + """
+
+def test_{i}_a():
+    record("chrome")
+
+
+def test_{i}_b():
+    record("chrome")
+"""
+)
+
+PLAIN = """
+from test_web_browser import record
+
+
+def test_{i}_a():
+    record("plain")
+
+
+def test_{i}_b():
+    record("plain")
+"""
+
+
+def test_chrome_modules_run_on_one_xdist_worker(tmp_path):
+    """`test_web_browser.Chrome` 을 쓰는 모듈의 시험은 `-n` 에서도 모두 한 워커로 간다 — 여러
+    워커가 동시에 Chrome 을 띄우면 CDP 가 마감을 넘긴다. `--dist loadgroup` 은 `pyproject.toml` 의
+    addopts 에 있다(여기서는 그 줄을 그대로 쓴다)."""
+    import tomllib
+
+    addopts = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"][
+        "addopts"
+    ]
+    assert "--dist loadgroup" in addopts
+    shutil.copy(ROOT / "tests" / "conftest.py", tmp_path / "conftest.py")
+    (tmp_path / "test_web_browser.py").write_text(CHROME_HARNESS + CHROME_USER.format(i="wb"))
+    for i in range(3):
+        (tmp_path / f"test_layout_{i}.py").write_text(CHROME_USER.format(i=i))
+        (tmp_path / f"test_plain_{i}.py").write_text(PLAIN.format(i=i))
+    (tmp_path / "pytest.ini").write_text(f"[pytest]\naddopts = -p no:cacheprovider {addopts}\n")
+    proc = _pytest(tmp_path, "-n", "3", slow="60")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    seen = [line.split() for line in (tmp_path / "seen.txt").read_text().splitlines()]
+    chrome = {worker for kind, worker in seen if kind == "chrome"}
+    plain = {worker for kind, worker in seen if kind == "plain"}
+    assert len([1 for kind, _ in seen if kind == "chrome"]) == 8, seen
+    assert len(chrome) == 1 and chrome != {"-"}, seen
+    assert len(plain | chrome) > 1, seen  # 나머지는 퍼진다 — 묶은 것이 Chrome 뿐이다
+
+
+def test_the_chrome_files_are_the_ones_that_bring_in_the_harness():
+    """진짜 tests/ 에서 Chrome 으로 묶이는 파일 — 하네스와 그 `Chrome` 을 들여오는 모듈 전부. 새
+    Chrome 모듈은 이 목록에 더한다(목록이 틀리면 묶이지 않는 것이 생긴다)."""
+    uses_chrome = _conftest().uses_chrome
+    found = sorted(p.name for p in (ROOT / "tests").glob("test_*.py") if uses_chrome(str(p)))
+    assert found == [
+        "test_web_browser.py",
+        "test_web_browser_shelf.py",
+        "test_web_layout.py",
+        "test_web_layout_host_edges.py",
+        "test_web_layout_m5n.py",
+        "test_web_layout_queue_edges.py",
+        "test_web_layout_store_edges.py",
+        "test_web_readability_r1.py",
+        "test_web_readability_r2.py",
+    ]

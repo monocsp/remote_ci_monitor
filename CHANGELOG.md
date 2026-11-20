@@ -35,6 +35,9 @@ of a key bumps that number and is listed here.
   `RCM_ALLOW_MIGRATE=1` when that is the point. This works on machines without a production
   install too.
   ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- `python scripts/mutcheck.py -j N` runs N mutants at once (default 1; `-j 0` is half the CPUs),
+  each with its own `TMPDIR`, Chrome mutants one at a time, and prints the results in list order
+  with the same verdicts and exit code as a serial run.
 - `python scripts/mutcheck.py --list` prints every mutant with its file, description and count;
   `AGENTS.md` and `CONTRIBUTING.md` no longer carry a mutation count.
   ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))

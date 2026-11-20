@@ -1,14 +1,16 @@
 """`tools/merge_pr.py` — 머지 관문 (사건 2 · 6c).
 
 머지는 이 도구로만 한다(`tools/guard_merge.py` 가 다른 길을 막는다). 순서: PR head sha 를 고정 →
-그 sha 의 check-runs · statuses 가 전부 끝났고 실패가 없고, base 브랜치 룰셋의 필수 체크
-(`rules/branches/{base}` 의 required_status_checks)가 check-run 이든 commit status 든 성공이다 →
+그 sha 에서 base 브랜치 룰셋의 필수 체크만(`rules/branches/{base}` 의 required_status_checks —
+룰셋이 요구하지 않는 check-run · status 는 pending 이든 실패든 세기만 한다) check-run 이든 commit
+status 든 성공이다. 룰셋에 필수 체크가 없으면 볼 것이 없으니 거부한다 →
 PR 댓글에 같은 sha 의 `verified: <sha>` 표식이 있다(`--no-verify "<이유>"` 는 이유를 댓글로
 남기고 지나간다) → 충돌이 없다 → `PUT pulls/N/merge` 에 그 sha · `merge_method=merge` ·
 `commit_title="<제목> (#N)"` → 머지됐는지 다시 읽는다 → `--delete-branch` 일 때만 원격
 브랜치를 지운다.
 
-종료 코드: 0 머지(또는 `--dry-run` 이 머지할 수 있다고 본 것) · 1 거부 · 2 사용법 · 3 네트워크/모름.
+종료 코드: 0 머지(또는 `--dry-run` 이 머지할 수 있다고 본 것) · 1 거부(GitHub 의 4xx 답 — 룰셋
+API 의 403 · 404 포함) · 2 사용법 · 3 GitHub 이 답하지 않음(5xx · 네트워크 · 시간 초과).
 
 GitHub 은 가짜(`FakeGitHub`)다. 마지막 두 시험만 진짜 `gh api` 호출 모양을 PATH 의 가짜 `gh` 로
 본다.
@@ -408,6 +410,35 @@ def test_a_base_without_required_checks_is_refused(capsys):
 def test_the_ruleset_api_failing_is_unknown():
     api = FakeGitHub(fail={("GET", f"repos/{REPO}/rules"): mp.ApiError("HTTP 502", 502)})
     assert merge(api) == 3 and api.did("PUT") == []
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_the_ruleset_api_saying_no_is_a_refusal(status, capsys):
+    """룰셋 API 의 403(권한) · 404(없음)는 GitHub 이 **답한** 것이다 — 모름(3)이 아니라 거부(1)."""
+    error = mp.ApiError(f"HTTP {status}", status)
+    api = FakeGitHub(fail={("GET", f"repos/{REPO}/rules"): error})
+    assert merge(api) == 1 and api.did("PUT") == []
+    assert f"GitHub said {status}" in capsys.readouterr().err
+
+
+def test_the_docs_say_what_the_code_does():
+    """#237 격리 검증: 관문 · 훅 · 이 파일의 설명이 코드와 어긋났다. 체크가 「전부」 끝났는지
+    본다고 적었지만 코드는 룰셋 필수 체크만 보고, 종료 코드 설명은 4xx 와 필수 체크 없는 룰셋을
+    말하지 않았다."""
+
+    def flat(text):
+        return " ".join(text.split())
+
+    guard_doc = (ROOT / "tools" / "guard_merge.py").read_text(encoding="utf-8")
+    guard_doc = flat(guard_doc.split('"""', 2)[1])
+    assert "**전부**" not in guard_doc and "필수 체크만" in guard_doc
+    assert "전부 끝났고" not in flat(__doc__ or "") and "필수 체크만" in flat(__doc__ or "")
+    doc = flat(mp.__doc__ or "")
+    exits = doc[doc.index("종료 코드") :]
+    for words in ("403", "404", "5xx", "필수 체크가 없는 룰셋"):
+        assert words in exits, words
+    epilog = mp._parser().epilog or ""
+    assert "403" in epilog and "5xx" in epilog, epilog
 
 
 def test_no_test_check_refuses(capsys):

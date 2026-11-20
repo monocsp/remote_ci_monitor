@@ -7,8 +7,9 @@ stderr 를 모델에 돌려준다). 볼 것이 없으면 아무것도 찍지 않
 왜 있나(2026-11-20): 백그라운드 감시 스크립트가 30분을 기다린 끝에 아직 pending 인 체크가 남아
 있는데 `gh api -X PUT …/pulls/N/merge` 로 머지를 시도했고, 두 번은 실제로 머지됐다 — 룰셋은 필수
 체크(`test`)만 보장한다(사건 6c). 격리 재검증 없이 머지된 PR 도 셋 있었다(#213 · #216 · dolomood
-#992, 사건 2). `tools/merge_pr.py` 는 head sha 를 고정하고 그 sha 의 체크가 **전부** 끝났는지,
-`verified: <sha>` 표식이 있는지 본 뒤 그 sha 로만 머지한다. 이 훅은 그 길을 돌아가는 명령을 막는다.
+#992, 사건 2). `tools/merge_pr.py` 는 head sha 를 고정하고 그 sha 에서 base 브랜치 룰셋의 필수
+체크만(룰셋이 요구하지 않는 체크는 세지 않는다) 통과했는지, `verified: <sha>` 표식이 있는지 본 뒤
+그 sha 로만 머지한다. 이 훅은 그 길을 돌아가는 명령을 막는다.
 
 막는 것 — 명령 글자 또는 쓰려는 파일 내용에:
   `gh pr merge` · `gh api … PUT … pulls/<N>/merge`(옵션 순서 무관, `-X PUT` · `-XPUT` ·
@@ -34,8 +35,12 @@ import shlex
 import sys
 from dataclasses import dataclass
 
-#: `gh pr merge` — `gh -R o/r pr merge` 처럼 사이에 낀 저장소 옵션도.
-GH_PR_MERGE_RE = re.compile(r"\bgh\s+(?:(?:-R|--repo)[\s=]+\S+\s+)?pr\s+merge\b")
+#: `-R o/r` · `--repo o/r` · `--repo=o/r` — gh 는 이것을 `pr` 앞에도 뒤에도 받는다.
+REPO_OPT = r"(?:(?:-R|--repo)[\s=]+\S+\s+)?"
+#: `gh pr merge` — 사이에 낀 저장소 옵션도(`gh -R o/r pr merge` · `gh pr -R o/r merge`, 뒤쪽은
+#: #237 격리 검증이 찾았다).
+GH_PR_MERGE_RE = re.compile(r"\bgh\s+" + REPO_OPT + r"pr\s+" + REPO_OPT + r"merge\b")
+REPO_FLAGS = ("-R", "--repo")
 GH_API_RE = re.compile(r"\bgh\s+api\b")
 CURL_RE = re.compile(r"\bcurl\b")
 #: `-X PUT` · `-XPUT` · `--method PUT` · `--method=PUT` · `--request PUT`.
@@ -195,12 +200,30 @@ def _writes_a_message(words: list[str]) -> bool:
     if head == "git":
         return True
     if head == "gh":
-        sub = [word for word in words[1:] if not word.startswith("-")]
+        sub = _gh_positionals(words[1:])
         if sub[:1] == ["issue"]:
             return True
         if sub[:1] == ["pr"] and len(sub) > 1 and sub[1] in GH_TEXT:
             return True
     return False
+
+
+def _gh_positionals(words: list[str]) -> list[str]:
+    """`gh` 뒤의 위치 인자. `-R o/r` · `--repo o/r` 의 값은 하위 명령이 아니다. 하위 명령으로
+    읽으면 `gh pr -R o/r comment 7 --body '…'` 가 본문을 싣는 명령으로 안 보여 본문 글자로
+    막힌다."""
+    out: list[str] = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+            continue
+        if word in REPO_FLAGS:
+            skip = True
+            continue
+        if not word.startswith("-"):
+            out.append(word)
+    return out
 
 
 def _into_a_document(line: str) -> bool:
