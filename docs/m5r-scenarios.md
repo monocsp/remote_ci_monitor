@@ -8,10 +8,19 @@
 > rcm 에서만 돌고, 대체는 ubuntu 갈래만이며, 문턱은 30분이다. 「`test`」는 GitHub 의 필수 체크, 「`rcm/ci`」는 커밋
 > 상태, 「잡」은 rcm 의 `rcm-ci` 잡이다. 「로그」는 감시 스크립트의 `~/Library/Logs/rcm/ci-watch.log` 와 서버의 잡
 > 로그를 말한다.
+>
+> 2026-11-20 오너 결정(R15, 명세 §13 결정 196~200)으로 이 레포는 GitHub 대체를 쓰지 않는다. 필수 체크는 커밋
+> 상태 `rcm/ci` 하나이고 `.rcm/ci.toml` 은 `mode = "rcm"`, `fallback = "none"` 이다. 그래서 시나리오마다 이 레포에
+> 해당하는지를 머리에 적었다. 「이 레포 해당 없음」인 시나리오도 대체를 쓰는 다른 레포에는 그대로 해당한다.
 
 ## 1. 베스트
 
 ### B1. dev 로 가는 PR 이 rcm 에서 통과하고 머지된다
+
+> 이 레포에서는 일부만 해당한다. 단계 2 의 `route` · 대기 잡과 단계 5 · 6 의 `test` 는 해당
+> 없다(결정 196). 감시의 제출과 `queued` 는 그대로다. 진행과 결과는 운영 잡 스크립트가 「rcm job
+> N running」 · 「rcm job N passed」로 올리고(결정 198) `tools/merge_pr.py`
+> 가 `rcm/ci` 의 success 를 본다.
 
 1. 세션이 브랜치를 push 하고 dev 로 PR 을 연다.
 2. GitHub 의 `route` 가 head 커밋의 `.rcm/ci.toml` 을 읽어 `mode=rcm` · `late=ubuntu` 로 정한다. `rcm` 대기 잡이 뜬다.
@@ -31,6 +40,9 @@
 
 ### B2. 머지 뒤 dev push 와 릴리스 PR
 
+> 이 레포에서는 dev push 의 제출과 같은 sha 를 다시 내지 않는 것만 해당한다. 대기 잡과 main
+> push 의 GitHub 판정은 해당 없다. main push 에서는 아무것도 돌지 않는다(결정 196).
+
 1. B1 의 PR 이 merge 커밋으로 dev 에 들어간다. push 이벤트가 생긴다.
 2. 감시가 `branches = ["dev"]` 의 head 를 보고, 그 커밋의 설정이 `push = ["dev"]` 이므로 잡을 낸다.
 3. 나중에 dev 에서 main 으로 릴리스 PR 을 연다. PR head 는 dev head 와 같은 sha 다.
@@ -47,6 +59,9 @@
 
 ### B3. 세션이 먼저 `rcm run` 을 낸 커밋
 
+> 이 레포에도 그대로 해당한다. `running` · `passed` 자리에는 잡 스크립트의 문장이 온다(결정
+> 198).
+
 1. 세션이 push 하고 곧바로 `rcm run rcm-ci --ref <브랜치>` 를 친다(트리거 a).
 2. 감시가 같은 sha 를 보고 낸다. 서버가 같은 프리셋 · 입력 · sha 의 잡에 합류시킨다(`joined: true`).
 3. 감시가 그 잡 번호로 `queued` 를 올리고 따라간다.
@@ -60,6 +75,8 @@
 | 시험 | H21 · W1 · N3 |
 
 ### B4. 주 1회 GitHub 전체 실행
+
+> 이 레포 해당 없음. 주 1회 GitHub 실행을 두지 않는다(결정 196).
 
 1. 월요일 03시(KST)에 `schedule` 이 main 의 `ci.yml` 로 실행을 만든다.
 2. `route` 가 `mode=github` · `now=ubuntu,macos` · `ref=dev` 로 정한다. `rcm` 대기 잡은 건너뛴다.
@@ -78,6 +95,9 @@
 
 ### E1. rcm 이 진짜 실패를 낸다
 
+> 이 레포에서는 잡 스크립트가 `failure` 「rcm job N failed at <단계>」를 올린다. 대기 잡과
+> `late` 는 해당 없다(결정 196 · 198).
+
 1. 시험 하나를 깨뜨린 커밋을 push 한다.
 2. 잡의 `test` 단계가 종료 1 로 끝나고 `::rcm::fail::` 로 깨진 시험 이름을 찍는다.
 3. 훅이 `failed` 를 올린다. 대기 잡이 `fail` 을 내고 종료 1 로 끝난다.
@@ -92,6 +112,9 @@
 
 ### E2. 빌드 머신 환경 탓 실패(종료 75)
 
+> 이 레포 해당 없음. 운영 잡 스크립트에는 종료 75 단계가 없어 준비 단계의 실패도 `failure` 로
+> 올라간다. 대신 돌 GitHub 도 없다. 환경을 고친 뒤 손으로 다시 낸다(결정 196).
+
 1. PyPI 에 닿지 못해 `venv` 단계의 `pip install` 이 실패한다(또는 디스크가 찼다).
 2. 잡 스크립트가 종료 75 로 끝난다. 훅이 `unavailable · infra at venv` 를 올린다.
 3. 대기 잡이 `fallback`(`unavailable`)을 내고 `late` 가 ubuntu 갈래를 돌린다.
@@ -105,6 +128,9 @@
 | 시험 | J5 · N4 · C13 · W6 · V(판정 표 `rcm fallback`) |
 
 ### E3. 운영 서버가 멈춰 있다
+
+> 이 레포에서는 감시가 `unavailable · server_unreachable` 을 올리는 데까지만 해당한다.
+> `late` 는 없다. 서버가 돌아온 뒤 사람이 손으로 낸다(결정 197).
 
 1. 서버 프로세스가 죽은 상태에서 push 한다.
 2. 감시의 `rcm run` 이 종료 2 와 `rcm: cannot read presets: cannot reach …` 로 끝난다. 감시가
@@ -121,6 +147,9 @@
 
 ### E4. 감시 스크립트가 죽었다
 
+> 이 레포 해당 없음. `no_pickup` 으로 넘길 대기 잡이 없다. 감시가 죽으면 `rcm/ci` 가 붙지 않아
+> 머지되지 않는다. 사람이 손으로 내고 감시를 살린다(결정 196 · 200).
+
 1. launchd 에이전트가 멈춘 상태에서 push 한다. 아무도 잡을 내지 않는다.
 2. 대기 잡이 300초 동안 상태를 못 보고 `fallback`(`no_pickup`)을 낸다. `taken-over` 는 올리지 않는다.
 
@@ -133,6 +162,9 @@
 | 시험 | W3 · V(판정 표 `rcm fallback`) |
 
 ### E5. 토큰이 만료되거나 폐기되었다
+
+> 이 레포에서는 전용 토큰 대신 gh 키체인 토큰과 오너의 `client.toml` 토큰을 쓴다(결정 199). 1
+> · 2 의 `no_pickup` 은 해당 없다. 상태가 붙지 않고 PR 은 기다린다.
 
 1. GitHub 토큰이 만료된 채 push 한다. 감시의 GitHub 요청이 401 을 받는다. 감시는 제출도 상태도 하지 않는다.
 2. 대기 잡은 300초 뒤 `no_pickup` 으로 넘긴다.
@@ -150,6 +182,9 @@
 
 ### E6. 사람이 「Re-run」 으로 rcm 의 빨강을 넘긴다
 
+> 이 레포 해당 없음. 다시 돌릴 대기 잡이 없다. rcm 의 빨강이 틀렸으면 고친 커밋을 push 하거나 손으로
+> 다시 낸다(결정 196).
+
 1. E1 처럼 `rcm/ci` 가 `failed` 이고 `test` 가 빨강이다.
 2. 사람이 rcm 의 빨강이 틀렸다고 보고 그 실행을 「Re-run」 한다.
 3. `run_attempt=2` 라서 대기 잡이 API 를 부르지 않고 `fallback`(`rerun`)을 낸다. `late` 가 ubuntu 갈래로 판정한다.
@@ -163,6 +198,9 @@
 | 시험 | W7 · V3 · V4 |
 
 ### E7. 30분 넘게 큐에서 기다린다
+
+> 이 레포 해당 없음. 30분 문턱과 `taken-over` 가 없다. `rcm-ci` 는 `mac2` 풀에서 제
+> 차례를 기다린다(결정 196).
 
 1. `rcm-ci` 잡 하나가 도는 동안 다른 브랜치의 커밋이 들어와 `queued` 로 30분을 넘긴다.
 2. 대기 잡이 `taken-over · GitHub Actions run <id>` 를 올리고 `fallback`(`queued_too_long`)한다.
@@ -178,6 +216,10 @@
 
 ### E8. 잡이 너무 오래 돈다
 
+> 이 레포에서는 `timed_out` 이면 잡 스크립트가 결과를 못 올리므로 감시가 120초 뒤
+> `unavailable · #N · timed out` 을 올린다(결정 198 규칙 3). 대기 잡의
+> `run_seconds` 울타리는 해당 없다.
+
 1. 시험이 멈추는 회귀가 들어와 잡이 3300초(프리셋 timeout)를 넘긴다.
 2. rcm 이 `timed_out` 으로 끝내고 훅이 `unavailable · timed out` 을 올린다. 대기 잡이 넘긴다.
 3. 훅이 놓쳤다면 대기 잡의 `run_seconds`(3600초)가 바깥 울타리다.
@@ -191,6 +233,10 @@
 | 시험 | N7 · W5 · W6 |
 
 ### E9. 운영 rcm 이 고장 났다
+
+> 이 레포에서는 1 이 해당 없다. 대체가 없어 감시는 멈춘 잡을 취소하지 않고 기다린다(결정 197). 2 에서
+> 저장소 변수를 걸면 감시가 내지 않고 GitHub 도 대신 돌지 않는다. 오너 지시의
+> `workflow_dispatch` 뿐이다(결정 196).
 
 세 갈래로 나눈다.
 
@@ -212,6 +258,8 @@
 
 ### X1. 같은 sha 가 두 번 들어온다
 
+> 이 레포에도 그대로 해당한다. 둘째 실행의 대기 잡은 없다.
+
 PR 의 head 와 dev push 의 head 가 같거나(B2), 같은 커밋을 두 PR 이 가리킨다. 감시는 sha 로 한 번만 낸다. 둘째
 실행의 대기 잡은 이미 있는 상태를 읽는다.
 
@@ -224,6 +272,9 @@ PR 의 head 와 dev push 의 head 가 같거나(B2), 같은 커밋을 두 PR 이
 | 시험 | H8 · W16 |
 
 ### X2. 새 push 가 앞 잡을 치운다
+
+> 이 레포에서는 sha1 의 `superseded` 를 잡 스크립트가 못 올리므로 감시가 120초 뒤 올린다(결정
+> 198 규칙 3). GitHub 의 `concurrency` 는 해당 없다.
 
 1. sha1 의 잡이 도는 중에 같은 브랜치에 sha2 를 push 한다.
 2. 감시가 sha2 를 낸다. 서버의 `supersede = "all"` 이 sha1 의 잡을 취소한다.
@@ -239,6 +290,9 @@ PR 의 head 와 dev push 의 head 가 같거나(B2), 같은 커밋을 두 PR 이
 
 ### X3. 포크에서 온 PR
 
+> 이 레포 해당 없음. 감시는 그대로 포크 PR 을 내지 않지만 GitHub 판정도 없어서 `rcm/ci` 가 붙지
+> 않는다. 오너가 판단할 때까지 머지되지 않는다(명세 §13.7).
+
 `route` 가 `mode=github` · `why=fork` 로 정하고 모든 갈래(macOS 포함)를 GitHub 에서 돌린다. 감시는 그 PR 을 보지 않는다.
 
 | 기대 | 값 |
@@ -250,6 +304,8 @@ PR 의 head 와 dev push 의 head 가 같거나(B2), 같은 커밋을 두 PR 이
 | 시험 | C3 · H4 |
 
 ### X4. Dependabot 과 지워진 포크
+
+> 이 레포 해당 없음. X3 와 같다.
 
 PR 을 연 계정이 `dependabot[bot]` 이거나 head 레포가 `null` 이다. X3 와 같이 다룬다. 이 PR 의 `GITHUB_TOKEN` 은 읽기
 전용이라 `taken-over` 를 쓰면 403 이 나는데, `github` 모드라 쓸 일이 없다.
@@ -263,6 +319,8 @@ PR 을 연 계정이 `dependabot[bot]` 이거나 head 레포가 `null` 이다. X
 | 시험 | C11 · H4 |
 
 ### X5. 갈래 이름 오타로 아무것도 안 돈다
+
+> 이 레포 해당 없음. 갈래와 `checks.yml` 이 없다(결정 196).
 
 `checks.yml` 의 `if` 에 `ubunut` 처럼 오타가 있거나 `route` 가 모르는 갈래 이름을 넘긴다.
 
@@ -280,6 +338,8 @@ PR 을 연 계정이 `dependabot[bot]` 이거나 head 레포가 `null` 이다. X
 
 ### X6. squash 병합으로 dev head 가 PR head 와 다르다
 
+> 이 레포에도 감시가 sha2 를 따로 내는 것은 해당한다. 대기 잡은 없다.
+
 1. PR head(sha1)가 rcm 에서 `passed` 를 받고 squash 로 머지된다. dev 의 새 head 는 sha2 다.
 2. dev push 이벤트의 대기 잡이 sha2 를 기다린다. 감시가 sha2 를 따로 낸다.
 3. sha2 의 결과는 이미 머지된 뒤라 아무것도 막지 않는다. 깨졌다면 다음 PR 이 그것을 물려받는다.
@@ -294,6 +354,8 @@ PR 을 연 계정이 `dependabot[bot]` 이거나 head 레포가 `null` 이다. X
 
 ### X7. 저장소 변수가 없다
 
+> 이 레포에도 감시 쪽은 그대로 해당한다. 워크플로 쪽은 없다.
+
 `RCM_CI_MODE` 를 한 번도 만들지 않았다. 감시의 변수 API 는 404 를 받고, 워크플로는 빈 문자열을 넘긴다. 둘 다 덮어쓰기가
 없는 것으로 보고 파일의 `mode` 대로 간다.
 
@@ -307,6 +369,8 @@ PR 을 연 계정이 `dependabot[bot]` 이거나 head 레포가 `null` 이다. X
 
 ### X8. 시계가 어긋났다
 
+> 이 레포 해당 없음. 시계를 읽을 대기 잡이 없다.
+
 GitHub 러너의 시계가 몇 분, 혹은 몇 시간 어긋났다. 대기 잡은 경과를 상태의 `created_at` 과 GitHub 응답의 `Date`
 헤더로 재므로 러너 시계를 쓰지 않는다. 감시의 120초 · 300초 판단은 Mac mini 한 시계 안의 차이라 어긋남과 상관없다.
 
@@ -319,6 +383,8 @@ GitHub 러너의 시계가 몇 분, 혹은 몇 시간 어긋났다. 대기 잡�
 | 시험 | W15 |
 
 ### X9. 대체로 머지되는 커밋은 macOS 를 거치지 않는다
+
+> 이 레포 해당 없음. 대체가 없어 GitHub 이 대신 도는 일이 없다(결정 196).
 
 E2 · E3 · E4 · E7 · E8 처럼 GitHub 이 대신 돌면 ubuntu 갈래만 돈다(결정 195). macOS 에서만 깨지는 변경이 그대로 dev 에
 들어갈 수 있다. 다음 dev push 의 rcm 검사나 주 1회 실행(B4)에서 드러난다.

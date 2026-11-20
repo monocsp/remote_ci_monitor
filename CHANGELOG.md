@@ -39,6 +39,18 @@ of a key bumps that number and is listed here.
   `AGENTS.md` and `CONTRIBUTING.md` no longer carry a mutation count.
   ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
 
+- **This repository's CI is submitted on every push.** `.rcm/ci.toml` at the root says
+  `mode = "rcm"`, `fallback = "none"`: the build machine's `rcm-ci-connect` watcher submits the
+  `rcm-ci` preset for each same-repository pull request head and each push to `dev` within a
+  minute, and posts `queued` on `rcm/ci`; the job posts its own progress and result. Nobody has to
+  run `rcm run rcm-ci` by hand after a push any more.
+- **The `rcm-ci-connect` watcher reads its tokens from where they already are**:
+  `rcm_client_config` (the rcm client's `client.toml`, its `token` or `token_env`) instead of
+  `rcm_token_file`, and `github_token_command` (the first stdout line of a command such as
+  `gh auth token --user <login>`, run each round) instead of `github_token_file`. Exactly one of
+  each pair; nothing is copied into a new file, and a failing command skips that repository for
+  the round without printing its output.
+
 ### Changed
 - `tools/guard_naming.py` no longer refuses a title or commit subject the shell fills in
   (`--title "$T"`, `"${T}"`, backticks, `$(…)` other than a heredoc): it cannot know the value,
@@ -51,6 +63,12 @@ of a key bumps that number and is listed here.
   ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
 
 ### Fixed
+- **The `rcm-ci-connect` watcher no longer posts `pending` over a result.** When the job posted
+  `success` or `failure` itself and the server still said `running` for a moment, the watcher put
+  `running` on top and hid the result until it covered it again 120 seconds later. It now stops
+  following once a non-pending status is there, and never replaces a `pending` it did not post.
+  With `fallback = "none"` it also stops cancelling a job held by `worker_down` or `paused` —
+  with nobody to take over, that only turned a paused deploy into failed pull requests.
 - **The web page no longer misses an event when it reconnects.** Two events published at the same
   moment could reach a live stream in the wrong order (244 before 243). A page that lost its
   connection right after 244 asked to resume after 244 and never got 243, so a job could stay

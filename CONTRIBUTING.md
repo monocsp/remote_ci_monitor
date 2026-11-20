@@ -14,8 +14,10 @@ python scripts/mutcheck.py      # proves the tests go red for every mutant in sc
 scripts/smoke_install.sh        # the README setup on a fresh venv (builds the wheel first)
 ```
 
-The required check is the commit status `rcm/ci`, posted by the build machine's rcm job `rcm-ci`:
-after a push, `rcm run rcm-ci --source git_ref --ref <branch>`. GitHub Actions (`ci.yml`: Ubuntu
+The required check is the commit status `rcm/ci`, posted by the build machine's rcm job `rcm-ci`.
+A watcher on the build machine submits that job for every same-repository pull request head and
+every push to `dev` within a minute (`.rcm/ci.toml`); run `rcm run rcm-ci --source git_ref --ref
+<branch>` by hand only when no `rcm/ci` status appears. GitHub Actions (`ci.yml`: Ubuntu
 3.11 and 3.13, macOS 3.13, the install smoke and gitleaks) runs only by hand
 (`workflow_dispatch`), when the owner asks because the build machine is down.
 
@@ -43,8 +45,8 @@ checkout](docs/operating.md#from-a-git-checkout).
 1. Branch from `dev` **into its own worktree** — do not switch an existing one, someone may be
    working in it: `git fetch origin && git worktree add -b <type>/<topic>
    ../remote_ci_monitor-<topic> origin/dev`, then give it its own `.venv`.
-2. Open the pull request against `dev`, run `rcm run rcm-ci --source git_ref --ref <branch>` after
-   each push, and let `rcm/ci` go green.
+2. Open the pull request against `dev` and let `rcm/ci` go green — the build machine's watcher
+   submits `rcm-ci` for each push within a minute.
    Merge it with `python3 tools/merge_pr.py <N>`: it refuses while a check the base branch's
    ruleset requires is pending or failed on the head and until the head carries a
    `verified: <sha>` comment. In a Claude Code session `tools/guard_merge.py` refuses

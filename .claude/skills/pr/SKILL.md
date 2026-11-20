@@ -69,12 +69,16 @@ documents that stay in the repository are written in 평어체.
    EOF
    )"
    ```
-2. After every push, run the build machine's CI and wait for the commit status `rcm/ci` — the
-   ruleset's required check on `dev` and `main` (`main` also needs `main-from-dev-only`):
+2. After every push, wait for the commit status `rcm/ci` — the ruleset's required check on `dev`
+   and `main` (`main` also needs `main-from-dev-only`). The build machine's watcher submits the
+   `rcm-ci` job within a minute and posts `queued · #<N>` on the head; the job posts its result.
    ```sh
-   cd ~ && rcm run rcm-ci --source git_ref --ref <branch> --no-wait   # prints the job number
+   gh api repos/monocsp/remote_ci_monitor/commits/<sha>/status --jq '.statuses[] | [.context, .state, .description]'
    rcm wait --job <N>
    ```
+   No `rcm/ci` after two minutes means the watcher did not see it (its log is
+   `~/Library/Logs/rcm/ci-watch.log`): submit it by hand with
+   `cd ~ && rcm run rcm-ci --source git_ref --ref <branch> --no-wait` and say so in the PR.
    Read a failure before touching anything: `rcm logs <N>`. GitHub Actions (`ci.yml`) no longer
    runs on pull requests; it is `workflow_dispatch` only, run by hand when the owner asks because
    the build machine is down.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -70,18 +71,27 @@ class Rig:
         legs: bool = True,
         job_url: bool = False,
         repos_before: str = "",
+        rcm_token_line: str | None = None,
+        github_token_line: str | None = None,
     ) -> None:
+        # 토큰 줄을 주면 기본 줄(토큰 파일) 대신 그 줄을 쓴다 — 빈 문자열이면 그 키가 없다
+        rcm_line = (
+            f'rcm_token_file = "{self.rcm_token}"\n' if rcm_token_line is None else rcm_token_line
+        )
+        gh_line = (
+            f'github_token_file = "{self.gh_token}"\n'
+            if github_token_line is None
+            else github_token_line
+        )
         self.config.write_text(
             f'rcm = "{self.exe.path}"\n'
-            f'server = "{self.rcm_http.url}"\n'
-            f'rcm_token_file = "{self.rcm_token}"\n'
-            f'state_dir = "{self.state_dir}"\n'
+            f'server = "{self.rcm_http.url}"\n' + rcm_line + f'state_dir = "{self.state_dir}"\n'
             f'log_file = "{self.log_file}"\n'
             f"job_url = {'true' if job_url else 'false'}\n"
             f'github_api = "{self.gh.url}"\n\n' + repos_before + "[[repos]]\n"
             f'github = "{REPO}"\n'
-            f'github_token_file = "{self.gh_token}"\n'
-            f"branches = {json.dumps(list(branches))}\n"
+            + gh_line
+            + f"branches = {json.dumps(list(branches))}\n"
             + ('legs = ["ubuntu", "macos"]\n' if legs else "")
         )
 
@@ -713,3 +723,219 @@ def test_the_job_lookup_carries_the_rcm_token(rig):
     rig.run()
     seen = [r for r in rig.rcm_http.requests if r.path == "/jobs/12"]
     assert seen and seen[0].headers.get("authorization") == f"Bearer {RCM_TOKEN}"
+
+
+# ── R15: 이 레포의 운영 형태 — GitHub 대체 없이 rcm 만 (docs/m5r-workplan.md §13) ──
+#
+# 이 레포는 GitHub 대체를 쓰지 않는다(`fallback = "none"`). 잡 스크립트(운영의 rcm-ci.sh)가
+# 시작에 자기 pending 을, 끝에 결과를 직접 올린다. 감시는 내고 `queued` 를 올리고, 잡이 결과를
+# 못 올린 경우(취소 · 시간 초과 · 유실)만 덮는다. 토큰은 새 파일 없이 기존 자리에서 읽는다.
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def repo_ci_toml() -> str:
+    """레포 루트의 `.rcm/ci.toml` — 감시가 이 레포의 커밋에서 읽을 그 파일."""
+    return (ROOT / ".rcm" / "ci.toml").read_text(encoding="utf-8")
+
+
+def fake_gh(folder: Path, *, token: str = GH_TOKEN, rc: int = 0) -> Path:
+    """`gh auth token --user <login>` 흉내. 인자를 파일에 적고 토큰 한 줄을 찍는다."""
+    folder.mkdir(parents=True, exist_ok=True)
+    exe = folder / "gh"
+    exe.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"open({str(folder / 'gh.argv')!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        f"if {rc}:\n"
+        "    sys.stderr.write('no oauth token found for monocsp\\n')\n"
+        f"    sys.exit({rc})\n"
+        f"print({token!r})\n"
+    )
+    exe.chmod(0o755)
+    return exe
+
+
+def test_r15_the_repository_file_is_rcm_without_a_fallback():
+    cfg = cfgmod.parse(repo_ci_toml(), legs=None)
+    assert (cfg.mode, cfg.fallback) == ("rcm", "none")
+    assert cfg.rcm is not None
+    assert (cfg.rcm.preset, cfg.rcm.context) == ("rcm-ci", "rcm/ci")
+    assert cfg.rcm.push == ("dev",) and cfg.rcm.creators == ("monocsp",)
+    route = cfgmod.resolve(
+        cfg, event="pull_request", base="dev", fork=False, override=None, legs=()
+    )
+    assert route.wait and route.fallback == "none" and route.late == ()
+    dev = cfgmod.resolve(cfg, event="push", base="dev", fork=False, override=None, legs=())
+    main = cfgmod.resolve(cfg, event="push", base="main", fork=False, override=None, legs=())
+    assert dev.wait and not main.wait
+
+
+def test_r15_the_job_scripts_own_pending_is_not_overwritten_with_running(rig):
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="queued", reason=None)
+    rig.run()
+    rig.clock.advance(60)
+    rig.job(12, state="running", reason=None)
+    rig.gh.add_status(S1, Status("pending", "rcm job 12 running", at=rig.clock.now))
+    rig.run()
+    rig.clock.advance(60)
+    rig.run()
+    assert [p["description"].split(" · ")[0] for p in rig.posts(S1)] == ["queued"]
+
+
+@pytest.mark.parametrize(
+    ("state", "text"), [("success", "rcm job 12 passed"), ("failure", "rcm job 12 failed at ruff")]
+)
+def test_r15_a_result_posted_before_the_job_ends_is_never_covered_by_pending(rig, state, text):
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="queued", reason=None)
+    rig.run()
+    rig.clock.advance(600)
+    # 잡 스크립트가 결과를 올렸지만 서버에는 아직 running 이다(스크립트가 끝나기 직전)
+    rig.job(12, state="running", reason=None)
+    rig.gh.add_status(S1, Status(state, text, at=rig.clock.now))
+    rig.run()
+    rig.clock.advance(600)
+    rig.job(
+        12, state="succeeded" if state == "success" else "failed",
+        exit_code=0 if state == "success" else 1, failed_step=None, last_step="secrets",
+        summary="", cancelled_by=None, superseded_by=None, finished_at=iso(rig.clock.now - 500),
+    )  # fmt: skip
+    rig.run()
+    assert [p["description"].split(" · ")[0] for p in rig.posts(S1)] == ["queued"]
+
+
+def test_r15_the_watcher_still_covers_a_job_that_could_not_post_its_end(rig):
+    # 잡이 supersede 로 취소되면 rcm-ci.sh 는 결과를 못 올린다 — 감시가 120초 뒤 덮는다
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="running", reason=None)
+    rig.run()
+    rig.gh.add_status(S1, Status("pending", "rcm job 12 running", at=rig.clock.now))
+    rig.clock.advance(600)
+    rig.job(
+        12, state="cancelled", exit_code=None, failed_step=None, last_step="pytest",
+        summary="", cancelled_by="superseded", superseded_by=13,
+        finished_at=iso(rig.clock.now - 121),
+    )  # fmt: skip
+    rig.run()
+    last = rig.posts(S1)[-1]
+    assert (last["state"], last["description"]) == ("error", "superseded · #12 · by #13")
+
+
+@pytest.mark.parametrize(("reason", "limit"), [("worker_down", 120), ("paused", 300)])
+def test_r15_without_a_fallback_a_stuck_job_is_left_to_wait(rig, reason, limit):
+    # 대신 돌 GitHub 이 없으니 취소하고 error 를 올리면 남는 것이 없다 — 배포 때 큐를 멈춘다
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="queued", reason=reason)
+    rig.run()
+    for _ in range(3):
+        rig.clock.advance(limit)
+        rig.run()
+    assert [p["description"].split(" · ")[0] for p in rig.posts(S1)] == ["queued"]
+    assert rig.exe.argvs("cancel") == []
+    assert rig.log().count(f"{reason} but no fallback") == 1
+
+
+def test_r15_the_github_token_can_come_from_a_command(rig, tmp_path):
+    gh = fake_gh(tmp_path / "ghbin")
+    rig.gh_token.unlink()
+    rig.write_config(
+        (),
+        github_token_line=(
+            f'github_token_command = ["{gh}", "auth", "token", "--user", "monocsp"]\n'
+        ),
+    )
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    assert rig.run() == 0
+    assert len(rig.exe.argvs("run")) == 1
+    assert [p["description"].split(" · ")[0] for p in rig.posts(S1)] == ["queued"]
+    assert (tmp_path / "ghbin" / "gh.argv").read_text().splitlines()[0] == (
+        "auth token --user monocsp"
+    )
+    assert rig.run("--check") == 0, rig.printed
+    assert not [ln for ln in rig.printed.splitlines() if ln.startswith("FAIL")]
+
+
+def test_r15_a_failing_token_command_skips_the_repository_without_posting(rig, tmp_path):
+    gh = fake_gh(tmp_path / "ghbin", rc=1)
+    rig.write_config((), github_token_line=f'github_token_command = ["{gh}", "auth", "token"]\n')
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    assert rig.run() == 0
+    assert rig.exe.argvs("run") == [] and rig.gh.posted() == []
+    assert "github_token_command" in rig.log() and "rc=1" in rig.log()
+    assert rig.run("--check") == 1
+
+
+def write_client_toml(path: Path, mode: int = 0o600) -> Path:
+    path.write_text(
+        '# rcm client\nserver = "http://100.64.0.1:8787"\n'
+        f'token = "{RCM_TOKEN}"\nlabel = "owner@macmini"\n'
+    )
+    path.chmod(mode)
+    return path
+
+
+def test_r15_the_rcm_token_can_come_from_the_client_config(rig, tmp_path):
+    client = write_client_toml(tmp_path / "client.toml")
+    rig.rcm_token.unlink()
+    rig.write_config((), rcm_token_line=f'rcm_client_config = "{client}"\n')
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="queued", reason=None)
+    assert rig.run() == 0
+    call = rig.exe.calls()[0]
+    assert call["has_token"] and call["server"] == rig.rcm_http.url  # 서버는 감시 설정이 정한다
+    seen = [r for r in rig.rcm_http.requests if r.path == "/jobs/12"]
+    assert seen and seen[0].headers.get("authorization") == f"Bearer {RCM_TOKEN}"
+    # 클라이언트 설정의 토큰은 보통 오너(admin) 것이다 — 경고하되 막지 않는다
+    rig.rcm_http.route("GET", "/api/whoami", {"name": "owner", "admin": True})
+    assert rig.run("--check") == 0, rig.printed
+    warns = [ln for ln in rig.printed.splitlines() if ln.startswith("WARN")]
+    assert any("admin true" in ln for ln in warns), rig.printed
+
+
+def test_r15_an_open_client_config_stops_the_run(rig, tmp_path):
+    client = write_client_toml(tmp_path / "client.toml", mode=0o644)
+    rig.write_config((), rcm_token_line=f'rcm_client_config = "{client}"\n')
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    assert watchmod.main(["--config", str(rig.config), "--once"], now_fn=rig.clock) == 2
+    rig.capsys.readouterr()
+    assert "0644" in rig.log()
+    assert rig.exe.argvs("run") == [] and rig.gh.posted() == []
+
+
+@pytest.mark.parametrize("which", ["rcm-both", "rcm-none", "github-both", "github-none"])
+def test_r15_each_token_has_exactly_one_source(rig, tmp_path, which):
+    client = write_client_toml(tmp_path / "client.toml")
+    both_rcm = f'rcm_token_file = "{rig.rcm_token}"\nrcm_client_config = "{client}"\n'
+    both_gh = f'github_token_file = "{rig.gh_token}"\ngithub_token_command = ["gh"]\n'
+    lines = {
+        "rcm-both": {"rcm_token_line": both_rcm},
+        "rcm-none": {"rcm_token_line": ""},
+        "github-both": {"github_token_line": both_gh},
+        "github-none": {"github_token_line": ""},
+    }[which]
+    rig.write_config((), **lines)
+    assert watchmod.main(["--config", str(rig.config), "--once"], now_fn=rig.clock) == 2
+    err = rig.capsys.readouterr().err
+    assert "cannot read" in err and RCM_TOKEN not in err and GH_TOKEN not in err
+
+
+def test_r15_dry_run_prints_the_submission_and_writes_nothing(rig):
+    rig.set_branch("dev", S2, toml=repo_ci_toml())
+    rig.write_config(("dev",))
+    rig.add_pr(7, S1, "feat/x", toml=repo_ci_toml())
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    assert rig.run("--dry-run") == 0
+    assert "would run: rcm run rcm-ci --source git_ref --ref feat/x" in rig.printed
+    assert "would run: rcm run rcm-ci --source git_ref --ref dev" in rig.printed
+    assert rig.exe.argvs("run") == [] and rig.gh.posted() == []
+    assert not (rig.state_dir / "monocsp__remote_ci_monitor.json").exists()
