@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- rcm-ci-connect watcher: one round every 60 s. Scripts live under ~/.config/rcm/scripts/
+     because launchd agents cannot read ~/Documents (TCC). Replace {{home}} with the home folder. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.remote-ci-monitor.ci-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>{{home}}/.config/rcm/scripts/rcm_ci_watch.py</string>
+    <string>--config</string>
+    <string>{{home}}/.config/rcm/ci-watch.toml</string>
+    <string>--once</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{{home}}/Library/Logs/rcm/ci-watch.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{home}}/Library/Logs/rcm/ci-watch.err.log</string>
+</dict>
+</plist>

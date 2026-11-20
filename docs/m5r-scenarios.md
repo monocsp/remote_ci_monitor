@@ -107,7 +107,8 @@
 ### E3. 운영 서버가 멈춰 있다
 
 1. 서버 프로세스가 죽은 상태에서 push 한다.
-2. 감시의 `rcm run` 이 종료 3 으로 끝난다. 감시가 `unavailable · server_unreachable` 을 올린다.
+2. 감시의 `rcm run` 이 종료 2 와 `rcm: cannot read presets: cannot reach …` 로 끝난다. 감시가
+   `unavailable · server_unreachable` 을 올린다.
 3. 대기 잡이 바로 `fallback` 하고 `late` 가 돈다.
 
 | 기대 | 값 |
@@ -115,7 +116,7 @@
 | `test` | ubuntu 갈래 결과대로 |
 | `rcm/ci` | `unavailable · server_unreachable`, 잡 번호 없음 |
 | 잡 | 없다 |
-| 로그 | 감시: `submit failed rc=3 server_unreachable` |
+| 로그 | 감시: `submit failed rc=2 server_unreachable` |
 | 시험 | H6 · W6 |
 
 ### E4. 감시 스크립트가 죽었다

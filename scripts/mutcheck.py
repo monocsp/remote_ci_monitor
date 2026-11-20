@@ -118,6 +118,10 @@
   M5q B1 — `m5q-worker-*` 다섯: 버전 409 전에 도는 잡을 닫음 · 409 본문에 `server_version`
      을 안 실음 · 기동 ① 이 10분 기록을 씀 · 레인 재등록이 막혀도 종료 0 · `WorkerFollow` 가
      `WorkerExit` 가 아님 (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
+  M5r A — `m5r-*` 아홉: 포크 검사 제거 · 틀린 설정을 파일의 mode 로 · rcm-only 갈래를 late 에 ·
+     대기 잡이 failure 를 fallback 으로 · creators 거르기 제거 · verdict 가 ran 을 안 봄 · 훅이
+     taken-over 를 덮음 · 훅이 종료 75 를 failure 로 · 감시가 포크 PR 을 받음
+     (`skills/rcm-ci-connect/templates/`, `docs/m5r-workplan.md` §6 「mutcheck 에 더할 변이」)
   M5q B2 — 다섯: 드레인이 도는 잡을 기다리지 않음 · 레인이 드레인 중에 claim 함 · 300초 창을
      지움 · 설치본 재실행이 따라가기 변수를 남김 · heartbeat 에 `server_version` 을 안 실음
      (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
@@ -191,6 +195,9 @@ class Mutant:
     runner: str = "pytest"  # "pytest" | "node" (tests 는 node --test 에 넘길 경로)
     needs_chrome: bool = False  # True 면 Chrome 이 없을 때 실패가 아니라 SKIP
 
+
+#: M5r 변이가 겨누는 스킬 템플릿 폴더
+T = "src/remote_ci_monitor/skills/rcm-ci-connect/templates/"
 
 MUTANTS = (
     # ── M5p P2 — 보관함의 서버 · HTTP · 보안 (docs/m5p-workplan.md §10) ──
@@ -1245,6 +1252,79 @@ MUTANTS = (
         old="class WorkerFollow(WorkerExit):\n",
         new="class WorkerFollow(Exception):\n",
         tests=("tests/test_cli_worker_m5q.py",),
+    ),
+    # ── M5r PR A — rcm-ci-connect 스킬 템플릿 (docs/m5r-workplan.md §6) ──
+    Mutant(
+        # 포크 PR 을 rcm 모드로 둔다 — 남의 코드가 빌드 머신에서 돈다(결정 186)
+        name="m5r-resolve-trusts-forks",
+        path=T + "rcm_ci_config.py",
+        old="    if fork:\n",
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_config.py",),
+    ),
+    Mutant(
+        # 틀린 설정을 「파일 없음」처럼 지나간다 — bad_file 이 경고 없이 사라진다
+        name="m5r-bad-file-not-github",
+        path=T + "rcm_ci_config.py",
+        old="    if error is not None:\n",
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_config.py",),
+    ),
+    Mutant(
+        # rcm-only 갈래를 대체 갈래에 넣는다 — macOS 러너 부족이 dev 머지를 다시 막는다(결정 195)
+        name="m5r-rcm-only-leg-in-late",
+        path=T + "rcm_ci_config.py",
+        old='if where(leg) == "rcm") if cfg.fallback',
+        new='if where(leg) in ("rcm", "rcm-only")) if cfg.fallback',
+        tests=("tests/test_ci_connect_config.py",),
+    ),
+    Mutant(
+        # 대기 잡이 rcm 의 failure 를 대체로 읽는다 — 빨간 코드가 ubuntu 갈래로 통과한다(결정 180)
+        name="m5r-wait-failure-falls-back",
+        path=T + "rcm_ci_wait.py",
+        old='return Waited("fail", "failed", job)',
+        new='return Waited("fallback", "failed", job)',
+        tests=("tests/test_ci_connect_wait.py",),
+    ),
+    Mutant(
+        # creators 거르기를 지운다 — 아무 계정이 올린 success 로 통과한다(결정 179)
+        name="m5r-creators-not-filtered",
+        path=T + "rcm_ci_config.py",
+        old="        elif creators and login not in creators:\n            continue\n",
+        new="",
+        tests=("tests/test_ci_connect_wait.py",),
+    ),
+    Mutant(
+        # verdict 가 `ran` 을 보지 않는다 — 아무것도 안 돈 대체가 success 로 보인다(검토 P0-2)
+        name="m5r-verdict-ignores-ran",
+        path=T + "rcm_ci_wait.py",
+        old='if job(name).get("result") == "success" and expected and ran == expected:',
+        new='if job(name).get("result") == "success":',
+        tests=("tests/test_ci_connect_wait.py",),
+    ),
+    Mutant(
+        # 훅이 GitHub 이 넘겨받은 커밋을 덮는다(결정 185)
+        name="m5r-hook-overwrites-taken-over",
+        path=T + "rcm_ci_status.py",
+        old='    if top is not None and cc.read_word(top.get("description"))[0] == "taken-over":\n',
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_status.py",),
+    ),
+    Mutant(
+        # 환경 탓 실패(종료 75)를 코드의 실패로 올린다 — 빨강 하나가 dev 머지를 막는다(결정 189)
+        name="m5r-exit-75-is-failure",
+        path=T + "rcm_ci_config.py",
+        old="        if exit_code == EX_TEMPFAIL:\n",
+        new="        if False:\n",
+        tests=("tests/test_ci_connect_config.py", "tests/test_ci_connect_status.py"),
+    ),
+    Mutant(
+        # 감시가 포크 PR 을 받는다 — 남의 코드를 rcm 에 낸다(결정 186)
+        name="m5r-watch-takes-fork-prs",
+        path=T + "rcm_ci_watch.py",
+        old='            if cc.is_fork(self.repo.github, p.get("head_repo"), p.get("author")):\n',
+        new="            if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
     ),
     # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
     Mutant(
