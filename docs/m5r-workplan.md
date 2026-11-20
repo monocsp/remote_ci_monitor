@@ -252,7 +252,8 @@ macos = "rcm-only"          # rcm 에서만 돈다. 대체 때도 GitHub 에서 
 `<낱말> · #<잡 번호> · <짧은 문장>` 이고 140자에서 자른다. 잡 번호가 없으면 가운데 칸을 뺀다.
 
 `target_url` 은 기본으로 비운다. rcm 잡 링크는 공유기 밖에서 열리지 않고, public 레포의 커밋 상태에 내부 호스트 이름과
-포트를 드러낸다. 잡 번호는 설명에 있다. 링크가 필요한 private 레포는 감시 설정 `job_url = true` 로 켠다.
+포트를 드러낸다. 잡 번호는 설명에 있다. 링크가 필요한 private 레포는 감시 설정 `job_url = true` 로 켠다. 켜면 링크는
+서버 화면의 잡 링크 `<server>/#/jobs/<N>` 이다. `/jobs/<N>` 은 JSON 이라 사람이 열 링크가 아니다. 훅이 싣는 `RCM_URL` 도 같은 꼴이다.
 
 | state | 첫 낱말 | 누가 올리나 | 뜻 | 대기 잡의 판단 |
 |---|---|---|---|---|
@@ -959,7 +960,7 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 | H3 | 베스트 | push 브랜치 dev · 그 커밋의 `push = ["dev"]` | 제출한다. `push` 에 없는 `main` 은 제출하지 않는다 |
 | H4 | 보안 | 포크 PR · head 레포 `null` · `dependabot[bot]` 의 PR | 셋 다 제출 0, 상태 0 |
 | H5 | 우선순위 | 저장소 변수 `RCM_CI_MODE=github` | 제출 0 |
-| H6 | 에러 | `rcm run` 이 종료 3(서버 없음) | `unavailable · server_unreachable` |
+| H6 | 에러 | `rcm run` 이 종료 2 와 `cannot read presets: cannot reach …`(서버 없음) | `unavailable · server_unreachable` |
 | H7 | 에러 | `rcm run` 이 종료 2 와 `unknown preset` | `unavailable · unknown_preset` |
 | H8 | 엣지 | 이미 그 context 의 상태가 있음 | 제출 0 |
 | H9 | 엣지 | 서버가 정한 sha 가 본 sha 와 다름 | 상태는 서버의 sha 에만 |
@@ -1175,6 +1176,24 @@ PR 마다 완료 기준은 같다.
 ## 11. 구현하며 바뀐 것
 
 (구현과 격리 검증이 끝난 뒤 PR 마다 채운다.)
+
+### PR A (#238)
+
+| 바뀐 것 | 이유 |
+|---|---|
+| `ci-watch.toml` 에 `github_api` 와 `[[repos]].legs` 를 더했다. `legs` 가 없으면 `--check` 가 경고하고 감시는 `[platforms]` 를 못 검사했다고 로그 한 줄을 남긴다 | 시험이 가짜 GitHub 을 가리키고, 감시가 `route` 와 같은 갈래 목록으로 설정을 검사하게 한다 |
+| `rcm_ci_wait.py` 세 하위 명령에 `--config`, 훅에 `--api-url` 과 `--rcm-token-file` 을 더했다. 감시와 훅은 rcm 토큰이 있으면 `GET /jobs/{id}` 에 싣는다 | `wait` · `verdict` 는 체크아웃한 head 의 설정에서 context · creators · 시한을 읽는다. `read_auth` 를 건 서버에서도 잡을 읽는다 |
+| `verdict` 는 상태를 다시 읽을 때 `taken-over` 를 건너뛴다 | 훅의 `failed` 가 `taken-over` 바로 앞에 올라와도 첫 실행에서 실패로 잡는다 |
+| `route` 는 PR 이면 `ref` 로 head sha 를 낸다. schedule 이면 `sha` 를 비운다 | 검사 위치를 정한 커밋과 검사하는 커밋을 맞춘다. B 의 draft 실험에서 확인한다 |
+| `rcm run` 의 서버 없음은 종료 3 이 아니라 2(`cannot read presets: cannot reach …`)다. 토큰 거부는 `token rejected by …` 다 | 진짜 CLI 의 출력이다. H6 · H7 · H23 은 진짜 `rcm run` 을 가짜 서버에 대고 돌려 얻은 문장을 쓴다(격리 검증 1) |
+| 감시가 합류한 잡을 `rcm cancel` 하면 서버는 `{"left": true}` 로 합류만 떼고 잡은 계속 돈다. 감시는 그 출력을 읽어 `left join of #N (job keeps running)` 으로 적는다 | 세션이 먼저 낸 잡(B3)을 GitHub 이 넘겨받아도 세션의 잡은 지우지 않는다. 그 잡의 레인은 계속 쓰인다 |
+| `job_url = true` 면 상태의 `target_url` 이 `<server>/#/jobs/<N>`(서버 화면의 잡 링크, 훅이 싣는 `RCM_URL` 과 같은 꼴)이다 | 읽기만 하고 쓰지 않던 설정이었다(격리 검증 2) |
+| 한 레포의 예외(빈 토큰 파일, `IncompleteRead` 등)는 로그 한 줄로 넘기고 다음 레포를 돈다. `IncompleteRead` 는 네트워크 오류로 본다 | 격리 검증 3 |
+| 429 와 남은 한도 0 인 403 은 `github_auth` 가 아니라 `rate_limited` 다. `Retry-After` 나 `X-RateLimit-Reset` 까지 그 레포를 묻지 않고, contents 의 429 는 `watcher_config` 로 올리지 않고 다음 바퀴로 미룬다 | 한도는 토큰 문제가 아니다. 한도 때문에 GitHub 이 대신 돌면 안 된다 |
+| `route` 의 `::warning::` 문장은 줄바꿈과 `::` 를 지운다 | 저장소 변수나 설정 오류 문장이 워크플로 명령을 끼우지 못하게 한다 |
+| `created_at` 을 못 읽는 pending 상태는 처음 본 때부터 `pickup_seconds` 를 재고 `no_pickup` 으로 넘긴다 | 그 상태 하나로 대기 잡이 2시간 시한까지 붙잡히지 않게 한다 |
+| 감시는 이미 다룬 sha 의 `skip known` 을 처음 한 번만 남기고, 훅이 놓친 결과의 120초는 잡의 `finished_at` 으로 잰다 | 1분마다 같은 줄이 쌓이지 않게 한다. `finished_at` 은 같은 머신의 시계다 |
+| `rcm skills install` 은 템플릿의 실행 비트를 지운다 | 원래 동작이다. B 에서 다룬다 |
 
 ## 12. 설계 검토가 바꾼 것
 

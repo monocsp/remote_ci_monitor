@@ -354,6 +354,17 @@ and prints one line per file: `written`, `kept` (identical already) or `skipped`
 copy differs — the command exits 1 and leaves it alone; `--force` overwrites). Nothing outside
 `.claude/skills/` is touched.
 
+One more skill is not about releases: **`rcm-ci-connect`** lets a repository choose, in
+`.rcm/ci.toml`, whether its checks run on GitHub Actions, on this build machine, or both. A
+watcher on the build machine (`rcm_ci_watch.py`, run by launchd every minute) submits the head of
+each same-repository pull request with `rcm run <preset> --source git_ref --no-wait` and posts a
+`rcm/ci` commit status; a `[[notify]]` hook (`rcm_ci_status.py`) posts the result when the job
+ends. GitHub's required check waits for that status and runs the checks itself when rcm does not
+answer in time. Pull requests from forks, deleted forks and `dependabot[bot]` always run on
+GitHub. The server is unchanged — the code that talks to GitHub lives in the skill's templates,
+and the two tokens it needs (a fine-grained GitHub token, a non-admin rcm client token) are
+created by the owner. `rcm_ci_watch.py --check` prints a table that must be all `OK`.
+
 ### Secrets on the server
 
 The values the profile names are entered once, in the Store tab's Settings screen (or with

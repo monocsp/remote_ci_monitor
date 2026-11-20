@@ -8,6 +8,12 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **`rcm-ci-connect` skill — run a repository's CI on the build machine, with GitHub as the
+  fallback.** `.rcm/ci.toml` picks `github`, `rcm` or `both`; a build-machine watcher submits
+  same-repository pull request heads and posts the `rcm/ci` commit status, a `[[notify]]` hook
+  posts the result, and the workflow's required check waits for it and runs the checks on GitHub
+  when rcm does not answer in time. Templates only — the server is unchanged.
+  ([#238](https://github.com/monocsp/remote_ci_monitor/pull/238))
 - **`tools/merge_pr.py <N>` is the one way to merge a pull request in this repository.** It pins
   the PR's head sha and refuses until every check the base branch's ruleset requires has passed
   on it, as a check run or a commit status (read from the rulesets API, so the switch from `test`
