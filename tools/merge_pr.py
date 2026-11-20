@@ -27,7 +27,14 @@
      sha 를 주므로 그 사이 head 가 움직였으면 GitHub 이 409 로 거절한다.
   6. PR 을 다시 읽어 merged 인지 확인한다. `--delete-branch` 일 때만 원격 브랜치를 지운다.
 
-종료 코드: 0 머지됨(`--dry-run` 은 머지할 수 있음) · 1 거부 · 2 사용법 · 3 네트워크 · 모름.
+종료 코드:
+  0 머지됨(`--dry-run` 은 머지할 수 있음).
+  1 거부. 관문의 판정(필수 체크 실패 · 대기 · 없음, 표식 없음, 충돌)과 GitHub 이 4xx 로 답한 것
+    (룰셋 API 의 403 · 404, 없는 PR 의 404, 머지 PUT 의 405 · 409)이다. 필수 체크가 없는 룰셋은
+    볼 것이 없으니 늘 거부한다.
+  2 사용법.
+  3 GitHub 이 답하지 않음 — 5xx · 네트워크 · `gh` 시간 초과 · 상태 코드를 못 읽은 실패, 그리고
+    머지를 보냈는데 다시 읽어도 merged 가 아닌 것. 머지됐을 수도 있으니 보고 다시 한다.
 
 GitHub 은 `gh api` 를 subprocess 로 부른다(`GhApi`). 토큰은 환경의 `GH_TOKEN`, 없으면 gh 의 활성
 계정이다 — 이 레포는 `GH_TOKEN=$(gh auth token --user monocsp)` 로 고정한다. 시험은 `main()` 에
@@ -394,8 +401,10 @@ def _parser() -> argparse.ArgumentParser:
         description="Merge a pull request only when every check the base branch's rulesets "
         "require has passed on its pinned head sha (as a check run or a commit status; other "
         "checks are ignored) and the head carries a `verified: <sha>` comment.",
-        epilog="exit codes: 0 merged (or would merge, with --dry-run) · 1 refused · 2 usage · "
-        "3 network or unknown. Token: $GH_TOKEN, else gh's active account "
+        epilog="exit codes: 0 merged (or would merge, with --dry-run) · 1 refused, including a "
+        "4xx answer from GitHub (403 or 404 from the rulesets API) and a base whose rulesets "
+        "require no check · 2 usage · 3 GitHub did not answer (5xx, network, timeout) or the "
+        "merge does not read back as merged. Token: $GH_TOKEN, else gh's active account "
         "(GH_TOKEN=$(gh auth token --user monocsp) in this repository).",
     )
     ap.add_argument("number", help="pull request number")

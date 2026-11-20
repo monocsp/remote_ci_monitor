@@ -75,4 +75,6 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-q"
+# `--dist loadgroup`: `-n` 일 때 `xdist_group` 으로 묶인 시험(Chrome, tests/conftest.py)을 한
+# 워커에서 돌린다. `-n` 이 없으면 아무 일도 안 한다
+addopts = "-q --dist loadgroup"

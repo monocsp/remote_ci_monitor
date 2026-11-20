@@ -325,9 +325,103 @@ def _heredoc_first_line(command: str) -> str | None:
     return None
 
 
+#: 앞에서 떼는 대입 이름(`GH_TOKEN=`)과 감싸기(`env ` · `sudo ` · `nohup `).
+ASSIGNMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+PREFIX_WRAPPER_RE = re.compile(r"(?:sudo|env|nohup)\s+")
+
+
+def _skip_quoted(text: str, i: int) -> int | None:
+    """`text[i]` 의 따옴표가 닫힌 바로 뒤 위치. 큰따옴표 안의 `\\` · `$(…)` 도 짝을 맞춘다. 못
+    닫으면 None."""
+    quote = text[i]
+    i += 1
+    while i < len(text):
+        ch = text[i]
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if quote == '"' and text.startswith("$(", i):
+            end = _skip_substitution(text, i)
+            if end is None:
+                return None
+            i = end
+            continue
+        if ch == quote:
+            return i + 1
+        i += 1
+    return None
+
+
+def _skip_substitution(text: str, i: int) -> int | None:
+    """`text[i:]` 이 `$(` 로 시작할 때 짝이 맞는 `)` 바로 뒤 위치. 못 닫으면 None."""
+    depth = 0
+    i += 1  # `$` 를 지나 `(` 에서 센다
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "'\"`":
+            end = _skip_quoted(text, i)
+            if end is None:
+                return None
+            i = end
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _value_end(text: str, i: int) -> int | None:
+    """대입 값이 끝나는 위치 — 따옴표 · `$(…)` · 백틱 밖의 첫 공백. 못 읽으면 None."""
+    while i < len(text) and not text[i].isspace():
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "'\"`":
+            end = _skip_quoted(text, i)
+        elif text.startswith("$(", i):
+            end = _skip_substitution(text, i)
+        else:
+            i += 1
+            continue
+        if end is None:
+            return None
+        i = end
+    return i
+
+
+def _drop_prefix(segment: str) -> str | None:
+    """앞의 `VAR=값` 대입과 감싸기를 뗀 나머지. 값이 `$(gh auth token --user x)` 여도 괄호 · 따옴표
+    짝을 맞춰 통째로 뗀다 — shlex 는 `GH_TOKEN=$(gh` 만 대입으로 보고 명령 이름을 `auth` 로
+    읽었다(#237 격리 검증). 짝이 안 맞아 못 읽으면 None(막지 않는다)."""
+    text = segment.lstrip()
+    while True:
+        wrapper = PREFIX_WRAPPER_RE.match(text)
+        if wrapper is not None:
+            text = text[wrapper.end() :].lstrip()
+            continue
+        name = ASSIGNMENT_NAME_RE.match(text)
+        if name is None:
+            return text
+        end = _value_end(text, name.end())
+        if end is None:
+            return None
+        text = text[end:].lstrip()
+
+
 def _argv(segment: str) -> list[str]:
+    rest = _drop_prefix(segment)
+    if rest is None:
+        return []
     try:
-        tokens = shlex.split(segment, comments=True)
+        tokens = shlex.split(rest, comments=True)
     except ValueError:
         return []
     while tokens:
