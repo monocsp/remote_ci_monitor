@@ -396,6 +396,40 @@ def test_body_file_names_are_only_judged_for_pr_create_and_edit():
     assert bash("gh pr view 233 --json body -q .body > pr.md") is None
 
 
+# ── 앞의 `VAR=$(…)` 대입 (#237 격리 검증) ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "GH_TOKEN=$(gh auth token --user monocsp) ",
+        'GH_TOKEN="$(gh auth token --user monocsp)" ',
+        'GH_TOKEN=$(gh auth token --user "$(whoami)") ',
+        "A=1 GH_TOKEN=$(gh auth token --user 'mono csp') ",
+        "env GH_TOKEN=$(gh auth token --user monocsp) ",
+        "GH_TOKEN=`gh auth token` ",
+    ],
+)
+def test_an_assignment_from_a_substitution_does_not_hide_the_command(prefix):
+    """`GH_TOKEN=$(gh auth token …) gh pr create …` 를 shlex 로 자르면 `GH_TOKEN=$(gh` 만 대입으로
+    떨어지고 명령 이름이 `auth` 가 되어 제목 · 본문 파일 검사가 꺼졌다."""
+    v = bash(prefix + "gh pr create --base dev --title 'feat(guard): 관문' --body-file pr.md")
+    assert v is not None and "pr-body-" in v.reason, prefix
+    v = bash(prefix + "gh pr create --base dev --title 'added a guard' --body-file pr-body-x-y.md")
+    assert v is not None and "PR title" in v.reason, prefix
+    ok = "gh pr create --base dev --title 'feat(guard): 관문' --body-file pr-body-feat-x.md"
+    assert bash(prefix + ok) is None, prefix
+    v = bash(prefix + "git commit -m 'added a guard'")
+    assert v is not None and v.decision == "deny", prefix
+
+
+def test_an_assignment_alone_or_an_unbalanced_one_is_left_alone():
+    assert bash("GH_TOKEN=$(gh auth token --user monocsp)") is None
+    assert bash("export GH_TOKEN=$(gh auth token --user monocsp)") is None
+    # 괄호가 안 닫힌 것은 읽지 못한다 — 막지 않는다
+    assert bash("GH_TOKEN=$(gh auth token gh pr create --title 'added' --body-file pr.md") is None
+
+
 # ── 진짜 훅: JSON stdin → 종료 코드 · stdout ─────────────────────────────────
 
 
