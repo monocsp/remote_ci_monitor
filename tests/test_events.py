@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from remote_ci_monitor.events import DEFAULT_HISTORY, Event, EventBus
+from remote_ci_monitor.events import DEFAULT_HISTORY, Event, EventBus, Subscription
 
 T0 = datetime(2026, 9, 5, 0, 0, 0, tzinfo=UTC)
 
@@ -286,3 +286,94 @@ def test_publisher_threads_and_consumer_thread_see_every_id_in_order():
         seq = [e.data["n"] for e in got if e.data["src"] == src]
         assert seq == list(range(per_thread))
     bus.unsubscribe(sub)
+
+
+class _SpyLock:
+    """버스 잠금 대역. 다른 스레드가 쥐고 있어 바로 못 잡으면 `contended` 를 세운다.
+
+    고친 버스에서는 두 번째 발행이 이 잠금에서 기다리므로, 그 순간을 신호로 써서
+    첫 번째 offer 를 놓아 준다(시간으로 기다리지 않는다).
+    """
+
+    def __init__(self, contended: threading.Event):
+        self._lock = threading.Lock()
+        self._contended = contended
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self._contended.set()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+        return False
+
+
+def _hold_first_offer(monkeypatch, bus: EventBus):
+    """id 1 의 offer 를 offer 직전에 붙잡고, 두 번째 발행이 끝나거나 버스 잠금에서 막힐 때
+    놓아 준다. 붙잡았다는 신호 `paused` 를 돌려준다.
+
+    잠금 밖에서 offer 하는 버스라면 두 번째 발행이 id 2 를 먼저 큐에 넣고 `go` 를 세운다.
+    잠금 안에서 offer 하는 버스라면 두 번째 발행이 버스 잠금에서 막히며 `go` 를 세운다.
+    어느 쪽이든 시간이 아니라 사건으로 진행하므로 결과는 매번 같다.
+    """
+    paused = threading.Event()
+    go = threading.Event()
+    bus._lock = _SpyLock(go)  # type: ignore[assignment]
+    original = Subscription._offer
+
+    def offer(sub: Subscription, event: Event) -> None:
+        if event.id == 1 and not paused.is_set():
+            paused.set()
+            assert go.wait(5), "second publish neither finished nor waited on the bus lock"
+            original(sub, event)
+        elif event.id == 2:
+            original(sub, event)
+            go.set()
+        else:
+            original(sub, event)
+
+    monkeypatch.setattr(Subscription, "_offer", offer)
+    return paused
+
+
+def _run(target) -> threading.Thread:
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    return t
+
+
+def test_concurrent_publishes_reach_the_queue_in_id_order(monkeypatch):
+    # 2026-11-20 CI(PR #238): 발행 스레드 둘이 id 243 · 244 를 받은 뒤 244 가 먼저 큐에 들어갔다.
+    # SSE 클라이언트가 244 를 받고 끊겼다 `Last-Event-ID: 244` 로 다시 붙으면 243 은 영영 안 온다
+    bus = EventBus()
+    sub = bus.subscribe(maxsize=10)
+    paused = _hold_first_offer(monkeypatch, bus)
+
+    first = _run(lambda: bus.publish("job_changed", {"n": 1}, at=at(1)))
+    assert paused.wait(5)
+    second = _run(lambda: bus.publish("job_changed", {"n": 2}, at=at(2)))
+    first.join(5)
+    second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+
+    assert [e.id for e in drain(sub)] == [1, 2]
+
+
+def test_replay_reaches_the_queue_before_events_published_meanwhile(monkeypatch):
+    # 재연결의 replay 와 그 사이 새 발행이 겹쳐도 replay 가 먼저다. 아니면 클라이언트가 새 id 를
+    # 먼저 받고, 그 id 로 다시 붙을 때 replay 분을 건너뛴다
+    bus = EventBus()
+    publish_n(bus, 1)
+    paused = _hold_first_offer(monkeypatch, bus)
+    subs: list = []
+
+    first = _run(lambda: subs.append(bus.subscribe(last_id=0, maxsize=10)))
+    assert paused.wait(5)
+    second = _run(lambda: bus.publish("job_changed", {"n": 2}, at=at(2)))
+    first.join(5)
+    second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+
+    assert [e.id for e in drain(subs[0])] == [1, 2]
