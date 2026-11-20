@@ -1,0 +1,106 @@
+# rcm-ci-connect workflow template. The required check is the job `test`; keep its name.
+# route  reads .rcm/ci.toml from the head commit and decides where each leg runs
+# rcm    waits for the rcm/ci commit status the build machine posts
+# now    legs that run on GitHub right away (checks.yml)
+# late   legs GitHub runs only when rcm cannot answer (checks.yml)
+# test   judges all of it (rcm_ci_wait.py verdict)
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+  schedule:
+    - cron: "0 18 * * 0"   # weekly, every leg on GitHub; runs from the default branch's copy
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.route.outputs.mode }}
+      wait: ${{ steps.route.outputs.wait }}
+      now: ${{ steps.route.outputs.now }}
+      late: ${{ steps.route.outputs.late }}
+      context: ${{ steps.route.outputs.context }}
+      sha: ${{ steps.route.outputs.sha }}
+      ref: ${{ steps.route.outputs.ref }}
+      why: ${{ steps.route.outputs.why }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: route
+        env:
+          RCM_CI_MODE: ${{ vars.RCM_CI_MODE }}
+        run: python3 scripts/ci/rcm_ci_wait.py route --legs ubuntu,macos --schedule-ref dev
+
+  rcm:
+    needs: route
+    if: needs.route.outputs.wait == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      result: ${{ steps.wait.outputs.result }}
+      reason: ${{ steps.wait.outputs.reason }}
+      job: ${{ steps.wait.outputs.job }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.sha }}
+          sparse-checkout: |
+            .rcm
+            scripts/ci
+      - id: wait
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/ci/rcm_ci_wait.py wait
+
+  now:
+    needs: route
+    if: needs.route.outputs.now != ''
+    uses: ./.github/workflows/checks.yml
+    with:
+      legs: ${{ needs.route.outputs.now }}
+      ref: ${{ needs.route.outputs.ref }}
+
+  late:
+    needs: [route, rcm]
+    if: >-
+      !cancelled() && needs.route.outputs.late != '' &&
+      (needs.rcm.outputs.result == 'fallback' ||
+       (needs.rcm.result != 'success' && needs.rcm.outputs.result == ''))
+    uses: ./.github/workflows/checks.yml
+    with:
+      legs: ${{ needs.route.outputs.late }}
+      ref: ${{ needs.route.outputs.ref }}
+
+  test:
+    name: test
+    needs: [route, rcm, now, late]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.sha || github.sha }}
+          sparse-checkout: |
+            .rcm
+            scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/rcm_ci_wait.py verdict

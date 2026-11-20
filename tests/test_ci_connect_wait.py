@@ -165,9 +165,11 @@ def test_w9_two_errors_then_success_passes(tmp_path, gh, clock):
 
 def test_w10_only_statuses_from_the_listed_creators_count(tmp_path, gh, clock):
     gh.add_status(HEAD_SHA, q("passed", 66, T0 + 10, state="success", creator="mallory"))
-    gh.add_status(HEAD_SHA, q("failed", 12, T0 + 20, state="failure", creator="monocsp"))
+    # 둘째 poll(T0+30)에서는 mallory 의 success 가 가장 새 상태다 — 그것을 믿으면 여기서 통과한다
+    gh.add_status(HEAD_SHA, q("failed", 12, T0 + 50, state="failure", creator="monocsp"))
     rc, out, _ = wait(tmp_path, gh, clock)
     assert (rc, out["result"], out["job"]) == (1, "fail", "12")
+    assert clock.now >= T0 + 50
 
 
 def test_w11_another_context_is_ignored(tmp_path, gh, clock):

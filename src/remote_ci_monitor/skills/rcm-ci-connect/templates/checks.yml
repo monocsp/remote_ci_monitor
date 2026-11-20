@@ -1,0 +1,75 @@
+# rcm-ci-connect reusable workflow template: the heavy jobs, split by leg.
+# The first job checks the legs input; the last job reports which legs really succeeded,
+# because a skipped job looks like success to the caller.
+name: checks
+
+on:
+  workflow_call:
+    inputs:
+      legs:
+        description: comma-separated leg names to run (ubuntu, macos)
+        required: true
+        type: string
+      ref:
+        description: the ref to check out
+        required: true
+        type: string
+    outputs:
+      ran:
+        description: the legs whose jobs all succeeded
+        value: ${{ jobs.ran.outputs.ran }}
+
+permissions:
+  contents: read
+
+jobs:
+  legs:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          LEGS: ${{ inputs.legs }}
+        run: |
+          [ -n "$LEGS" ] || { echo "::error::legs is empty"; exit 1; }
+          for leg in $(echo "$LEGS" | tr ',' ' '); do
+            case "$leg" in
+              ubuntu|macos) ;;
+              *) echo "::error::unknown leg: $leg"; exit 1 ;;
+            esac
+          done
+
+  ubuntu:
+    needs: legs
+    if: contains(format(',{0},', inputs.legs), ',ubuntu,')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - run: echo "TODO(project) the ubuntu leg's checks"
+
+  macos:
+    needs: legs
+    if: contains(format(',{0},', inputs.legs), ',macos,')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - run: echo "TODO(project) the macos leg's checks"
+
+  ran:
+    needs: [legs, ubuntu, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      ran: ${{ steps.ran.outputs.ran }}
+    steps:
+      - id: ran
+        env:
+          UBUNTU: ${{ needs.ubuntu.result }}
+          MACOS: ${{ needs.macos.result }}
+        run: |
+          ran=""
+          [ "$UBUNTU" = success ] && ran="${ran:+$ran,}ubuntu"
+          [ "$MACOS" = success ] && ran="${ran:+$ran,}macos"
+          echo "ran=$ran" >> "$GITHUB_OUTPUT"

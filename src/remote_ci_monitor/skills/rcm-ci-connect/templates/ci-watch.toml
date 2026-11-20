@@ -1,0 +1,14 @@
+# ~/.config/rcm/ci-watch.toml — the build machine's watcher (rcm-ci-connect). Not in the repo.
+rcm = "~/.local/share/rcm-client-venv/bin/rcm"          # the rcm client the watcher calls
+server = "http://127.0.0.1:8787"
+rcm_token_file = "~/.config/rcm/tokens/ci-watch.rcm"    # client token `ci-watch`, not admin, 0600
+state_dir = "~/.local/state/rcm-ci-watch"
+log_file = "~/Library/Logs/rcm/ci-watch.log"
+job_url = false                 # true puts the rcm job link in target_url (private repos only)
+github_api = "https://api.github.com"
+
+[[repos]]
+github = "{{owner}}/{{repo}}"
+github_token_file = "~/.config/rcm/tokens/gh-{{owner}}-ci.token"   # fine-grained, 0600
+branches = ["dev"]              # push heads to watch (the file's [rcm].push decides)
+legs = ["ubuntu", "macos"]      # the workflow's legs, so [platforms] is checked the same way

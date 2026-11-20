@@ -1,0 +1,22 @@
+# .rcm/ci.toml — where this repository's checks run (rcm-ci-connect)
+# The workflow's `route` job and the build machine's watcher read this file from the commit
+# being checked (the PR head, not the merge commit). No file means mode = "github".
+version = 1                 # required; this template knows 1
+mode = "rcm"                # "github" | "rcm" | "both"; default "github"
+fallback = "github"         # "github" | "none"; default "github"
+
+[rcm]                       # required unless mode = "github"
+preset = "{{preset}}"       # the rcm preset the watcher submits
+context = "rcm/ci"          # commit status context; default "rcm/ci"
+priority = "low"            # passed as rcm run --priority; omit for the preset's default
+push = ["dev"]              # pushes to these branches also run on rcm; default [] (GitHub)
+creators = ["{{owner}}"]    # only statuses posted by these accounts count; default [] (anyone)
+pickup_seconds = 300        # no `queued` within this → rcm is not answering, GitHub takes over
+queue_seconds = 1800        # `queued` this long → GitHub takes over
+run_seconds = 3600          # `running` this long → GitHub takes over
+poll_seconds = 30           # how often the waiting job asks
+
+[platforms]                 # per workflow leg when mode = "rcm"; default "rcm" for every leg
+ubuntu = "rcm"              # runs on rcm; GitHub runs this leg when rcm cannot answer
+macos = "rcm-only"          # runs on rcm only; never on GitHub, not even as a fallback
+# "github" runs that leg on GitHub every time

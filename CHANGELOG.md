@@ -7,6 +7,14 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`rcm-ci-connect` skill — run a repository's CI on the build machine, with GitHub as the
+  fallback.** `.rcm/ci.toml` picks `github`, `rcm` or `both`; a build-machine watcher submits
+  same-repository pull request heads and posts the `rcm/ci` commit status, a `[[notify]]` hook
+  posts the result, and the workflow's required check waits for it and runs the checks on GitHub
+  when rcm does not answer in time. Templates only — the server is unchanged.
+  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+
 ### Fixed
 - **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
   `COPYFILE_DISABLE=1`, macOS `tar` adds an AppleDouble file (`._intro.png`, `._.`) for every file
