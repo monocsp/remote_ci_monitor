@@ -176,6 +176,8 @@ class FakeGitHub:
         self.fail_headers: dict[str, str] = {}
         self.hang: set[str] = set()
         self.release = threading.Event()
+        #: 붙잡은(hang) 요청이 하나라도 들어오면 선다 — 시험이 시간 대신 이 사건으로 순서를 정한다
+        self.arrived = threading.Event()
         self.auth_fail = False
         self.requests: list[Seen] = []
         self.not_modified = 0
@@ -217,6 +219,7 @@ class FakeGitHub:
                 path = urllib.parse.urlsplit(self.path).path
                 # 접두어는 쿼리까지 볼 수 있다(`…/contents/.rcm/ci.toml?ref=<sha>`)
                 if any(self.path.startswith(p) or path.startswith(p) for p in outer.hang):
+                    outer.arrived.set()
                     outer.release.wait(30)
                     return
                 status, payload, headers = outer._answer(method, self.path, seen)

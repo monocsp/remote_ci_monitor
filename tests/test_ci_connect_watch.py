@@ -358,25 +358,34 @@ def test_h13_a_held_lock_makes_the_second_process_exit_0(rig):
     assert rig.gh.requests == [] and rig.exe.calls() == []
 
 
-def test_h13_two_processes_at_once_only_one_runs(rig, monkeypatch):
-    # 진짜 동시성 — 앞 프로세스가 GitHub 요청 하나(0.3초)에 머무는 동안 뒤 프로세스가 뜬다
-    monkeypatch.setattr(cfgmod, "HTTP_TIMEOUT", 0.3)
+def test_h13_two_processes_at_once_only_one_runs(rig):
+    """진짜 동시성 — 시간 문턱이 아니라 사건으로 순서를 정한다.
+
+    앞 프로세스(A)는 저장소 변수 요청에서 붙잡힌다. 가짜 GitHub 이 그 요청을 받았다는 것은 A 가
+    이미 잠금을 쥐었다는 뜻이다(잠금 → 상태 파일 → 요청 순서). 그때 뒤 프로세스(B)를 띄우면 B 는
+    GitHub 에도 rcm 에도 아무것도 하지 않고 0 으로 끝나야 한다. 그다음 A 를 풀어 준다."""
     rig.add_pr(7, S1, "feat/x")
     rig.exe.set(run={"stdout": submitted(12, S1)})
-    rig.gh.hang.add(f"/repos/{REPO}/actions/")  # 첫 프로세스가 잠금을 쥔 채 머문다
+    rig.gh.hang.add(f"/repos/{REPO}/actions/")
     first = threading.Thread(
         target=watchmod.main, args=(["--config", str(rig.config), "--once"],),
         kwargs={"now_fn": rig.clock},
     )  # fmt: skip
     first.start()
-    deadline = time.monotonic() + 3
-    while not lock_path(rig).exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    started = time.monotonic()
-    assert watchmod.main(["--config", str(rig.config), "--once"], now_fn=rig.clock) == 0
-    assert time.monotonic() - started < 0.5
-    first.join(10)
+    try:
+        assert rig.gh.arrived.wait(30), "A never reached GitHub"
+        assert lock_path(rig).exists()
+        seen = len(rig.gh.requests)
+        assert watchmod.main(["--config", str(rig.config), "--once"], now_fn=rig.clock) == 0
+        assert len(rig.gh.requests) == seen  # B 는 GitHub 에 묻지 않았다
+        assert rig.exe.calls() == []  # B 는 rcm 을 부르지 않았다
+    finally:
+        rig.gh.hang.clear()
+        rig.gh.release.set()
+        first.join(30)
+    assert not first.is_alive()
     assert len(rig.exe.argvs("run")) == 1
+    assert not lock_path(rig).exists()  # A 가 잠금을 놓았다
 
 
 @pytest.mark.parametrize(("age", "steals"), [(660, True), (540, False)])
