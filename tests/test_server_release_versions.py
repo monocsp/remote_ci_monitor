@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -1050,6 +1051,47 @@ def test_start_passes_version_id_to_the_driver_and_the_round_marks_the_row_runni
         400,
         "build_name_mismatch",
     )
+
+
+def test_a_round_that_ends_before_its_version_is_linked_still_returns_it_to_editing(vsrv):
+    """회차가 서버가 버전을 붙이기 **전에** 끝나도 행은 `editing` 으로 돌아온다.
+
+    `_spawn_driver` 는 드라이버를 띄운 뒤에 버전을 그 회차에 붙인다. 감시 스레드의 종료 훅
+    (`_driver_exited`)이 그 사이에 돌면 이 회차에 붙은 버전을 못 찾고 그냥 돌아가고, 뒤이어
+    붙이기가 행을 `running` 으로 만든다. 그러면 아무도 행을 내려놓지 않는다. CI 의 병렬
+    실행(pytest-xdist)에서 아래 자동 빌드 번호 시험이 이렇게 `running` 에 멈췄다. 여기서는
+    붙이기를 종료 훅이 들어온 뒤로 미뤄 그 순서를 시험이 쥔다. 훅이 붙이기를 기다리면 1초 안에
+    끝나지 않고, 기다리지 않으면 붙이기 전에 끝난다.
+    """
+    srv = vsrv
+    srv.fetch()
+    vid = editing_draft(srv)
+    entered, done = threading.Event(), threading.Event()
+    hook = srv.app.driver.on_exit
+    assert hook is not None
+
+    def watched_hook(row):
+        entered.set()
+        try:
+            hook(row)
+        finally:
+            done.set()
+
+    link = srv.app._version_link_release
+
+    def late_link(version_id, release_id):
+        assert entered.wait(15), "the round never ended"
+        done.wait(1.0)  # 고치기 전: 훅이 이미 끝났다. 고친 뒤: 훅이 붙이기를 기다린다
+        link(version_id, release_id)
+
+    srv.app.driver.on_exit = watched_hook
+    srv.app._version_link_release = late_link
+    status, body = srv.post("start", {"version_id": vid, "dry_run": True}, token="admin")
+    assert status == 202, body
+    wait_run(srv, body["release_id"])
+    assert done.wait(15), "the exit hook never finished"
+    row = srv.store.get_version(vid)
+    assert row["state"] == "editing" and row["release_id"] == body["release_id"], row
 
 
 def test_a_round_started_with_build_number_auto_keeps_the_version_on_the_confirm_run(vsrv):
