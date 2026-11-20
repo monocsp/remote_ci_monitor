@@ -76,8 +76,10 @@ def _project(tmp_path: Path, body: str) -> Path:
     return tmp_path
 
 
-def _pytest(project: Path, *args: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ, RCM_TEST_SLOW_SECONDS="0.3")
+def _pytest(project: Path, *args: str, slow: str = "0.3") -> subprocess.CompletedProcess:
+    """안쪽 pytest. 예산은 `slow` 초다 — 위의 예산 시험은 0.3초를 쓰고, 예산을 보지 않는 시험은
+    넉넉히 준다(부하 속 CI 에서 0.2초짜리 가짜 시험이 0.3초를 넘었다, rcm-ci 잡 #3865)."""
+    env = dict(os.environ, RCM_TEST_SLOW_SECONDS=slow)
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PYTEST_XDIST_WORKER", None)
     return subprocess.run(
@@ -242,7 +244,7 @@ def test_chrome_modules_run_on_one_xdist_worker(tmp_path):
         (tmp_path / f"test_layout_{i}.py").write_text(CHROME_USER.format(i=i))
         (tmp_path / f"test_plain_{i}.py").write_text(PLAIN.format(i=i))
     (tmp_path / "pytest.ini").write_text(f"[pytest]\naddopts = -p no:cacheprovider {addopts}\n")
-    proc = _pytest(tmp_path, "-n", "3")
+    proc = _pytest(tmp_path, "-n", "3", slow="60")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     seen = [line.split() for line in (tmp_path / "seen.txt").read_text().splitlines()]
     chrome = {worker for kind, worker in seen if kind == "chrome"}
