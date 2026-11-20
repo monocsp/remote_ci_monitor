@@ -7,6 +7,43 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`tools/merge_pr.py <N>` is the one way to merge a pull request in this repository.** It pins
+  the PR's head sha and refuses until every check the base branch's ruleset requires has passed
+  on it, as a check run or a commit status (read from the rulesets API, so the switch from `test`
+  to `rcm/ci` needed no change; the latest status of a context counts). `--wait` waits up to
+  `--timeout` and refuses if the head moves. Checks the ruleset does not require are ignored,
+  pending or failed. It needs a `verified: <head sha>` PR comment from the isolated verification
+  (`--no-verify "<reason>"` posts the reason instead) and no conflict, then merges exactly that
+  sha as a merge commit titled `<title> (#N)`. `--dry-run` changes nothing, `--delete-branch`
+  removes the head branch. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- **A `PreToolUse` hook, `tools/guard_merge.py`, refuses every other way to merge** in a Claude
+  Code session: `gh pr merge`, `gh api … -X PUT …/pulls/<N>/merge` in any option order, the same
+  through `curl`, and a script being written that runs one. A watcher had merged twice by REST
+  with checks still pending.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- **`tools/guard_production.py` refuses a build that would migrate an older database in place**:
+  `rcm serve`, `rcm worker` or `rcm token` whose effective `data_dir` holds an `rcm.sqlite3`
+  older than the build's `DB_VERSION` (read from the file header, without connecting). Prefix
+  `RCM_ALLOW_MIGRATE=1` when that is the point. This works on machines without a production
+  install too.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- `python scripts/mutcheck.py --list` prints every mutant with its file, description and count;
+  `AGENTS.md` and `CONTRIBUTING.md` no longer carry a mutation count.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+
+### Changed
+- `tools/guard_naming.py` no longer refuses a title or commit subject the shell fills in
+  (`--title "$T"`, `"${T}"`, backticks, `$(…)` other than a heredoc): it cannot know the value,
+  and the refusal used to stop the whole command, the `git commit` before it included. It now
+  refuses `gh pr create|edit --body-file` with a name every session picks (`pr.md`,
+  `pr_body.md`, `body.md`, …) and asks for `pr-body-<branch>.md`.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- Tests stub reverse DNS unless marked `allow_reverse_dns`, and a test that takes more than 20
+  seconds fails the run unless marked `slow`.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+
 ### Fixed
 - **The web page no longer misses an event when it reconnects.** Two events published at the same
   moment could reach a live stream in the wrong order (244 before 243). A page that lost its

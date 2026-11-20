@@ -47,10 +47,19 @@ summary and body and in a PR's title and body is written with the `korean-writin
 (`.claude/skills/korean-writing/SKILL.md`), which the `commit` and `pr` skills load before
 writing; long Korean documents can go to the `korean-writer` agent (`.claude/agents/`).
 
+**Merging goes through `tools/merge_pr.py <N>` only.** It pins the head sha and refuses until every
+check the base branch's ruleset requires (`rcm/ci` on `dev`, `main-from-dev-only` and `rcm/ci` on
+`main`, read from the ruleset; a check run or a commit status) has passed on it (`--wait` waits);
+checks the ruleset does not require, GitHub Actions included, are ignored. It needs a
+`verified: <head sha>` PR comment from the isolated verification (`--no-verify "<reason>"` for a docs- or
+tests-only PR), refuses a conflict, and merges that sha. `tools/guard_merge.py` (a `PreToolUse`
+hook) refuses `gh pr merge`, a REST `PUT …/pulls/<N>/merge` and a script that runs one — a
+watcher merged twice with checks still pending. The steps are in the `pr` skill.
+
 `main` only takes a pull request from `dev`. The required check on `dev` and `main` is the commit
 status `rcm/ci`, which the build machine's rcm job `rcm-ci` posts: after a push, run
 `rcm run rcm-ci --source git_ref --ref <branch> --no-wait`, then `rcm wait --job <N>`, and merge
-only when `rcm/ci` is green. `main` also requires `main-from-dev-only` (`pr-policy.yml`); renaming
+(with `tools/merge_pr.py`) only when `rcm/ci` is green. `main` also requires `main-from-dev-only` (`pr-policy.yml`); renaming
 that job means changing the ruleset too. GitHub Actions' `ci.yml` no longer runs on pull requests
 or pushes: it is `workflow_dispatch` only, run by hand when the owner asks because the build
 machine is down.
@@ -70,8 +79,13 @@ one whose `direct_url.json` points at the primary checkout, never the `rcm` that
 database with a build other than the service's own (`rcm token …`, `rcm serve`, `rcm worker`
 whose effective `data_dir` is production: the production config, a **copy** of it, or
 `RCM_SERVER_DATA_DIR` — a different build migrates the database on open; `rcm gc --dry-run
---config` is allowed, it plans on a copy), and asks before a deploy. On a machine with no such
-install it does nothing. The procedure is in
+--config` is allowed, it plans on a copy), and asks before a deploy. On any machine, with or
+without such an install, it also refuses `rcm serve`, `rcm worker` and `rcm token` when the
+effective `data_dir` holds an `rcm.sqlite3` older than the build that would open it (it reads the
+header's `user_version` and the build's `DB_VERSION` from files, without connecting): that open
+migrates the database in place, and the build that made it refuses it afterwards — a worktree's
+`rcm.toml` sent a verifier's `rcm token add` to a v7 dev database that came back v24. Use a new
+`data_dir`, or prefix `RCM_ALLOW_MIGRATE=1` when the migration is the point. The procedure is in
 [operating a build machine](docs/operating.md#from-a-git-checkout).
 
 ## Checks before a pull request
@@ -79,7 +93,7 @@ install it does nothing. The procedure is in
 ```sh
 ruff check . && ruff format --check . && pytest
 node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for 107 known mutations
+python scripts/mutcheck.py           # the tests must go red for every mutant in scripts/mutcheck.py (--list)
 scripts/smoke_install.sh             # the README's own commands on a fresh venv
 ```
 
@@ -94,6 +108,10 @@ Every user-visible change updates the docs in the same pull request. The rules a
 - `git switch` inside an existing worktree took a folder another session was working in. A clean
   `git status` does not mean the folder is free — read `git worktree list` and add your own.
 - Korean text is double width: a line under 100 characters can still fail `ruff` E501.
+- A test that takes more than 20 seconds fails the run unless it carries `@pytest.mark.slow`
+  (`tests/conftest.py`), and reverse DNS (`socket.getfqdn`, `gethostbyaddr`) is stubbed in every
+  test unless it carries `@pytest.mark.allow_reverse_dns`: on macOS one lookup took 36 seconds per
+  mutant and M5q's waits on real 3-, 5- and 60-second timeouts slowed CI by 25 minutes.
 - The doc-lock tests (`tests/test_docs_m5*.py`, `tests/test_examples.py`) fail when a feature has
   no documentation. Read the failure — it names the missing wording.
 - `rcm token` takes `--config` **before** the subcommand: `rcm token --config X list`.

@@ -43,10 +43,10 @@
 | `main`·`dev` 에 직접 커밋·push 불가. 강제 push·삭제도 불가 | 룰셋 `main — PR only, from dev, checks required` · `dev — PR only` 의 `pull_request` · `non_fast_forward` · `deletion` |
 | `main` 은 **이 레포의 `dev`** 에서 보낸 PR 로만 머지 | `.github/workflows/pr-policy.yml` 의 `main-from-dev-only` 잡을 main 룰셋 필수 체크로 지정 |
 | `dev` 는 PR 로만 받는다(feature 브랜치 → dev) | dev 룰셋 `pull_request` |
-| `main` 으로 올라가려면 CI 가 전부 통과 | `.github/workflows/ci.yml` 의 `test` 잡을 main 룰셋 필수 체크로 지정. M0 에서 pytest · ruff · 시크릿 스캔으로 채운다 |
+| `dev`·`main` 으로 올라가려면 CI 가 통과 | 맥미니 rcm 잡 `rcm-ci` 가 올리는 커밋 상태 `rcm/ci` 를 dev·main 룰셋 필수 체크로 지정(2026-11-20 오너 결정 — 그 전에는 `ci.yml` 의 `test` 잡이었다) |
 | `dev` → `main` 은 merge commit 만 허용 | main 룰셋 `allowed_merge_methods: ["merge"]` |
 
-- 승인 수는 0 이다(혼자 하는 레포). 필수 체크는 **잡 이름**으로 잡힌다. `test` · `main-from-dev-only` 를 바꾸면 룰셋도 같이 바꿔야 한다.
+- 승인 수는 0 이다(혼자 하는 레포). 필수 체크는 맥미니 rcm 잡 `rcm-ci` 가 올리는 커밋 상태 `rcm/ci` 와 `main-from-dev-only`(main 만)다. 그 context 나 잡 이름을 바꾸면 룰셋도 같이 바꿔야 한다. 머지는 `python3 tools/merge_pr.py <N>` 이 룰셋에서 필수 체크를 읽어 확인한다.
 - ⚠️ **matrix 함정**: `strategy.matrix` 를 걸면 체크 이름이 `test (3.11)` 처럼 바뀐다. matrix 잡은 `unit` 으로 두고 `needs` 로 묶은 **집계 잡 `test`** 가 대표한다(「테스트·품질」).
 - 일상 흐름: 브랜치마다 워크트리를 하나 판다 — `git worktree add -b feat/<topic> ../remote_ci_monitor-<topic> origin/dev` → 작업 · 커밋 → `gh pr create --base dev` → 머지 → `git worktree remove`. 이미 있는 워크트리의 브랜치를 갈아타지 않는다(다른 세션이 쓰고 있을 수 있다). 릴리스는 `gh pr create --base main --head dev`. (이 레포의 개발 자체는 GitHub 에서 한다 — 도구의 런타임이 GitHub 에 의존하지 않는다는 것과 다른 얘기다.)
 

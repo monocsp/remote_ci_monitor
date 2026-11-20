@@ -732,6 +732,7 @@ def test_cancel_reaches_the_worker_through_the_heartbeat_within_seconds(stack, t
 # ── 4. kill -9 — timeout 뒤 lost · down · lanes 0 · 새 워커가 이어받는다 ──────
 
 
+@pytest.mark.slow
 def test_killed_worker_leaves_the_job_lost_after_the_timeout_and_a_new_worker_takes_over(
     stack, tree
 ):
