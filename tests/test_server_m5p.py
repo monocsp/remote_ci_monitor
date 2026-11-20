@@ -1226,20 +1226,38 @@ def test_g18_oldest_request_first_and_one_at_a_time(srv, monkeypatch):
     assert active["max"] == 1
 
 
-def test_g19_the_copier_wakes_on_finish_keep_start_and_sweep(tmp_path):
+#: G19 의 마감. 깨움이 없으면 copier 는 `poll_seconds` 마다 스스로 돈다. 마감이 그보다
+#: 짧아야 「깨웠다」와 「다음 poll 에 주웠다」가 갈린다. 기본 poll(5초)로는 마감을 2.5초에 둘
+#: 수밖에 없었고, CPU 를 나눠 쓰는 병렬 실행(3코어 macOS 러너의 pytest-xdist)에서 청소
+#: 회차(1초)와 복사가 그 안에 못 끝났다. 이 시험의 copier 는 60초마다 돌게 하고 마감을 15초로
+#: 둔다. 깨움 없이는 여전히 못 지난다.
+G19_POLL_SECONDS = 60.0
+G19_TIMEOUT = 15.0
+
+
+def test_g19_the_copier_wakes_on_finish_keep_start_and_sweep(tmp_path, monkeypatch):
+    from remote_ci_monitor import server as server_mod
+    from remote_ci_monitor.shelf_copier import ShelfCopier
+
+    monkeypatch.setattr(
+        server_mod,
+        "ShelfCopier",
+        lambda *a, **kw: ShelfCopier(*a, **{**kw, "poll_seconds": G19_POLL_SECONDS}),
+    )
     s = make_server(tmp_path, retention_sweep_interval_seconds=1)
     try:
+        assert s.app.copier.poll_seconds == G19_POLL_SECONDS
         # 로컬 잡 종료
         jid = run_local(s, "keepgold")
-        wait_shelf(s, jid, timeout=2.5)
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
         # keep 응답 직후
         jid = run_local(s, "plaingold")
         keep(s, jid)
-        wait_shelf(s, jid, timeout=2.5)
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
         # 청소 회차(이벤트 없이 store 로 세운 pending)
         jid = finished_linux_job(s)
         publish_payload(s, jid, tar_bytes([("out/a.txt", b"a")]))
-        wait_shelf(s, jid, timeout=2.5)
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
     finally:
         s.close()
     # 기동 직후(DB 에 pending 행)
@@ -1249,7 +1267,8 @@ def test_g19_the_copier_wakes_on_finish_keep_start_and_sweep(tmp_path):
     assert s.store.shelf_item(jid).state == "pending"
     s.app.start()
     try:
-        wait_shelf(s, jid, timeout=2.5)
+        assert s.app.copier.poll_seconds == G19_POLL_SECONDS
+        wait_shelf(s, jid, timeout=G19_TIMEOUT)
     finally:
         s.close()
 
