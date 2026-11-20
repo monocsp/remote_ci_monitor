@@ -127,8 +127,23 @@
      머지(`gh api -X PUT …/pulls/N/merge`) 패턴 제거 · `merge_pr` 가 pending 체크를 안 봄 ·
      `merge_pr` 가 룰셋의 필수 context 를 안 봄 · `merge_pr` 가 필수가 아닌 체크도 셈 ·
      `guard_production` 의 옛 DB 판 비교 제거 (`tools/`, 2026-11-20 사건 6d · 6e · 6c · 2 · 6f)
+  #237 격리 검증의 지적과 mutcheck 병렬 · CI 부하 — 여섯: `guard_merge` 가 `pr` 뒤의 `-R` 을 못 봄 ·
+     `guard_naming` 이 앞의 `VAR=$(…)` 대입에 명령 이름을 놓침 · `merge_pr` 가 4xx 를 모름으로 셈 ·
+     mutcheck 가 결과를 끝난 순서로 찍음 · 변이 사본에서 바이트코드를 씀 · `-n` 에서 Chrome 파일을
+     한 워커로 안 묶음(`tests/conftest.py`, rcm-ci 잡 #3861)
 
-사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list]
+사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
+
+`-j N` 은 변이 N 개를 동시에 돌린다(기본 1 — 직렬, `0` 이면 CPU 수의 절반). 변이마다 이미 자기
+임시 사본에서 대조군과 변이 pytest 를 돌리므로 사본끼리는 부딪히지 않는다. 같이 쓰는 것은 셋이다.
+  - 임시 폴더: 변이마다 자기 `TMPDIR` 을 준다. pytest 의 `pytest-of-<user>` 번호 폴더 정리와 시스템
+    임시 폴더를 세는 시험(`rcm-gc-dryrun-*`, `tests/test_offline_gc.py`)이 남의 것을 보지 않게.
+  - Chrome: `needs_chrome` 변이는 한 번에 하나만 돈다. 부하 속에 Chrome 을 여럿 띄우면 CDP 가
+    마감을 넘겨 대조군이 빨개진다.
+  - 고정 포트: `tests/test_mdns_loopback.py` 는 15353 을 나눠 듣는다. 그 파일을 쓰는 변이는 두지
+    않는다(`tests/test_mutcheck_parallel.py` 가 지킨다).
+결과는 끝난 순서가 아니라 `MUTANTS` 순서로 찍는다 — 직렬과 같은 출력이고 종료 코드 규칙도 같다.
+부하가 시간 문턱 시험을 밀 수 있으니 `-j` 를 CPU 수보다 크게 주지 않는다.
 """
 
 from __future__ import annotations
@@ -137,10 +152,14 @@ import argparse
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1336,20 +1355,93 @@ MUTANTS = (
         new="    if have is None or want is None:\n",
         tests=("tests/test_guard_production_migration.py",),
     ),
+    # ── #237 격리 검증이 찾은 가드의 구멍과 mutcheck 병렬 (2026-11-20) ──
+    Mutant(
+        # `-R o/r` 를 `pr` 앞에서만 본다 — `gh pr -R o/r merge 7` 이 관문을 돌아간다
+        name="guard-merge-repo-after-pr",
+        path="tools/guard_merge.py",
+        old='r"pr\\s+" + REPO_OPT + r"merge\\b")',
+        new='r"pr\\s+merge\\b")',
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # 앞의 `GH_TOKEN=$(gh auth token …)` 대입을 shlex 에 맡긴다 — 명령 이름이 `auth` 가 되어 PR
+        # 제목 · 본문 파일 검사가 꺼진다
+        name="guard-naming-assignment-hides-command",
+        path="tools/guard_naming.py",
+        old="    rest = _drop_prefix(segment)\n",
+        new="    rest = segment\n",
+        tests=("tests/test_guard_naming.py",),
+    ),
+    Mutant(
+        # GitHub 의 4xx 답(룰셋 API 403 · 404)을 「모름(3)」으로 센다 — 설명과 코드가 어긋난다
+        name="merge-pr-4xx-is-unknown",
+        path="tools/merge_pr.py",
+        old="        return self.status is None or self.status >= 500\n",
+        new="        return self.status is None or self.status >= 400\n",
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 결과를 끝난 순서대로 바로 찍는다 — 병렬 출력이 실행마다 달라지고 직렬과 어긋난다
+        name="mutcheck-reports-in-finish-order",
+        path="scripts/mutcheck.py",
+        old="            results[index] = outcome\n            done.notify_all()\n",
+        new=(
+            "            results[index] = outcome\n"
+            "            report(mutants[index], *outcome)\n"
+            "            done.notify_all()\n"
+        ),
+        tests=("tests/test_mutcheck_parallel.py",),
+    ),
+    Mutant(
+        # 변이 사본에서 바이트코드를 쓴다 — 원본이 변이와 같은 초에 쓰였고 변이가 같은 길이면 옛
+        # `.pyc` 를 읽어 잡혀야 할 변이가 「초록」으로 보인다
+        name="mutcheck-writes-bytecode",
+        path="scripts/mutcheck.py",
+        old=', "PYTHONDONTWRITEBYTECODE": "1"}\n',
+        new="}\n",
+        tests=("tests/test_mutcheck_parallel.py",),
+    ),
+    Mutant(
+        # Chrome 파일을 그룹으로 묶지 않는다 — `-n` 에서 여러 워커가 동시에 Chrome 을 띄워 CDP 가
+        # 마감을 넘긴다(rcm-ci 잡 #3861)
+        name="conftest-chrome-not-grouped",
+        path="tests/conftest.py",
+        old='            return "chrome" if uses_chrome(',
+        new='            return nodeid if True else "chrome" if uses_chrome(',
+        tests=("tests/test_conftest_hygiene.py::test_chrome_modules_run_on_one_xdist_worker",),
+    ),
 )
 
 
-def _pytest(cmd: list[str], cwd: Path) -> tuple[int, float, str] | None:
-    """(exit code, seconds, output tail) — timeout 이면 None."""
+def _pytest(
+    cmd: list[str], cwd: Path, env: dict[str, str] | None = None
+) -> tuple[int, float, str] | None:
+    """(exit code, seconds, output tail) — timeout 이면 None.
+
+    자기 프로세스 그룹에서 돌리고 timeout 이면 그룹째 죽인다 — 시험이 띄운 서버 · 워커가 남아
+    다른 변이의 CPU 를 먹지 않게."""
     started = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=PYTEST_TIMEOUT_SECONDS
-        )
+        out, err = proc.communicate(timeout=PYTEST_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        proc.communicate()
         return None
     took = time.monotonic() - started
-    lines = (proc.stdout + proc.stderr).strip().splitlines()
+    lines = (out + err).strip().splitlines()
     return proc.returncode, took, "\n".join(lines[-6:])
 
 
@@ -1378,47 +1470,112 @@ def list_mutants() -> int:
 
 
 def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
-    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명)."""
+    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명).
+
+    아무것도 직접 찍지 않는다. 병렬로 돌 때 줄이 섞이지 않게 `--keep` 의 사본 경로도 설명에
+    싣는다."""
     if m.needs_chrome and not chrome_available():
         return None, "skipped: no Chrome binary found (set RCM_CHROME) — its tests would skip"
     tmp = Path(tempfile.mkdtemp(prefix=f"mutcheck-{m.name}-"))
+    # 이 변이의 pytest 만 쓰는 임시 폴더 — 짧게 둔다(Chrome 등의 유닉스 소켓 경로 길이 제한)
+    scratch = Path(tempfile.mkdtemp(prefix="mc-"))
     try:
-        for name in ("src", "tests", "tools", "pyproject.toml"):
-            src = ROOT / name
-            if src.is_dir():
-                shutil.copytree(src, tmp / name, ignore=shutil.ignore_patterns("__pycache__"))
-            else:
-                shutil.copy2(src, tmp / name)
-        target = tmp / m.path
-        text = target.read_text(encoding="utf-8")
-        if text.count(m.old) != 1:
-            return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
-        if m.runner == "node":
-            node = shutil.which("node")
-            if node is None:
-                return False, "node is not installed (needed for the web mutant)"
-            cmd = [node, "--test", *m.tests]
-        else:
-            cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *m.tests]
-        # 대조군: 변이 없이 복사본에서 초록이어야 한다(환경 문제로 빨간 것을 감지로 착각하지 않게)
-        control = _pytest(cmd, tmp)
-        if control is None:
-            return False, f"control run timed out: {' '.join(cmd)}"
-        if control[0] != 0:
-            return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
-        target.write_text(text.replace(m.old, m.new), encoding="utf-8")
-        mutated = _pytest(cmd, tmp)
-        if mutated is None:
-            return False, f"mutant run timed out: {' '.join(cmd)}"
-        code, took, tail = mutated
-        if code == 0:
-            return False, f"tests stayed GREEN with mutant applied ({took:.1f}s)\n{tail}"
-        return True, f"control green, mutant red (exit {code}, {took:.1f}s)"
+        # 바이트코드를 쓰지 않는다. `.pyc` 는 원본의 (mtime 초, 크기) 로 낡았는지 본다. 사본은
+        # mtime 을 그대로 가져오므로 원본이 변이를 쓴 그 초에 만들어졌고 변이가 같은 길이면 대조군이
+        # 남긴 `.pyc` 를 그대로 읽어 잡혀야 할 변이가 「초록」으로 보인다(가짜 프로젝트 시험)
+        env = {**os.environ, "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"}
+        ok, info = _run_in_copy(m, tmp, env)
     finally:
-        if keep:
-            print(f"  kept copy: {tmp}")
-        else:
+        if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+    if keep:
+        info += f"\n  kept copy: {tmp}"
+    return ok, info
+
+
+def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
+    for name in ("src", "tests", "tools", "scripts", "pyproject.toml"):
+        src = ROOT / name
+        if src.is_dir():
+            shutil.copytree(src, tmp / name, ignore=shutil.ignore_patterns("__pycache__"))
+        elif src.is_file():
+            shutil.copy2(src, tmp / name)
+    target = tmp / m.path
+    text = target.read_text(encoding="utf-8")
+    if text.count(m.old) != 1:
+        return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
+    if m.runner == "node":
+        node = shutil.which("node")
+        if node is None:
+            return False, "node is not installed (needed for the web mutant)"
+        cmd = [node, "--test", *m.tests]
+    else:
+        cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *m.tests]
+    # 대조군: 변이 없이 복사본에서 초록이어야 한다(환경 문제로 빨간 것을 감지로 착각하지 않게)
+    control = _pytest(cmd, tmp, env)
+    if control is None:
+        return False, f"control run timed out: {' '.join(cmd)}"
+    if control[0] != 0:
+        return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
+    target.write_text(text.replace(m.old, m.new), encoding="utf-8")
+    mutated = _pytest(cmd, tmp, env)
+    if mutated is None:
+        return False, f"mutant run timed out: {' '.join(cmd)}"
+    code, took, tail = mutated
+    if code == 0:
+        return False, f"tests stayed GREEN with mutant applied ({took:.1f}s)\n{tail}"
+    return True, f"control green, mutant red (exit {code}, {took:.1f}s)"
+
+
+def resolve_jobs(jobs: int) -> int:
+    """`-j` 값 → 동시에 돌릴 변이 수. 0 은 CPU 수의 절반(최소 1) — 나머지 절반은 시험이 띄우는
+    서버 · 워커 · Chrome 몫이다."""
+    if jobs > 0:
+        return jobs
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
+#: Chrome 변이는 한 번에 하나 — 부하 속 여러 Chrome 은 CDP 마감을 넘긴다(모듈 docstring).
+_CHROME_LOCK = threading.Lock()
+
+
+def _run_one(m: Mutant, keep: bool) -> tuple[bool | None, str]:
+    if m.needs_chrome:
+        with _CHROME_LOCK:
+            return run_mutant(m, keep)
+    return run_mutant(m, keep)
+
+
+def run_all(
+    mutants: list[Mutant],
+    jobs: int,
+    keep: bool,
+    report: Callable[[Mutant, bool | None, str], None],
+) -> list[bool | None]:
+    """변이를 `jobs` 개씩 동시에 돌리고, 결과는 끝난 순서가 아니라 `mutants` 순서로 `report` 에
+    넘긴다. 앞의 것이 끝나는 대로 이어지는 만큼 바로 넘기므로 직렬(`jobs=1`)은 예전과 같다."""
+    results: list[tuple[bool | None, str] | None] = [None] * len(mutants)
+    done = threading.Condition()
+
+    def work(index: int) -> None:
+        try:
+            outcome = _run_one(mutants[index], keep)
+        except Exception as error:  # 한 변이가 터져도 나머지는 끝난다 — 실패로 센다
+            outcome = (False, f"mutcheck crashed on this mutant: {error!r}")
+        with done:
+            results[index] = outcome
+            done.notify_all()
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        for index in range(len(mutants)):
+            pool.submit(work, index)
+        for index, m in enumerate(mutants):
+            with done:
+                done.wait_for(lambda index=index: results[index] is not None)
+            ok, info = results[index]  # type: ignore[misc]
+            report(m, ok, info)
+    return [r[0] for r in results]  # type: ignore[index]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1426,23 +1583,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", action="store_true", help="keep the mutated copies")
     ap.add_argument("--only", help="run one mutant by name")
     ap.add_argument("--list", action="store_true", help="list the mutants and their count")
+    ap.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="run N mutants at once (default 1; 0 = half the CPUs). Chrome mutants still run "
+        "one at a time",
+    )
     args = ap.parse_args(argv)
     if args.list:
         return list_mutants()
+    if args.jobs < 0:
+        print(f"--jobs must be 0 or more (got {args.jobs})", file=sys.stderr)
+        return 2
     mutants = [m for m in MUTANTS if not args.only or m.name == args.only]
     if not mutants:
         print(f"no mutant named {args.only!r}", file=sys.stderr)
         return 2
-    failures = 0
-    skipped = 0
-    for m in mutants:
-        ok, info = run_mutant(m, args.keep)
+    jobs = min(resolve_jobs(args.jobs), len(mutants))
+    if jobs > 1:
+        print(f"mutcheck: {len(mutants)} mutants, {jobs} at a time", flush=True)
+
+    def report(m: Mutant, ok: bool | None, info: str) -> None:
         mark = "SKIP" if ok is None else "OK " if ok else "FAIL"
-        print(f"[{mark}] {m.name}: {info}")
-        if ok is None:
-            skipped += 1
-        elif not ok:
-            failures += 1
+        print(f"[{mark}] {m.name}: {info}", flush=True)
+
+    outcomes = run_all(mutants, jobs, args.keep, report)
+    failures = sum(1 for ok in outcomes if ok is False)
+    skipped = sum(1 for ok in outcomes if ok is None)
     if failures:
         print(f"mutcheck: {failures} of {len(mutants)} mutants NOT caught", file=sys.stderr)
         return 1
