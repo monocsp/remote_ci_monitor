@@ -123,8 +123,10 @@ def cmd_route(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     override = env.get("RCM_CI_MODE", "") or None
     if override is not None and override not in cc.MODES:
         print(
-            f"::warning::RCM_CI_MODE={cc.clean(override)!r} is not one of "
-            f"{', '.join(cc.MODES)}; ignored"
+            "::warning::"
+            + cc.annotation(
+                f"RCM_CI_MODE={override!r} is not one of {', '.join(cc.MODES)}; ignored"
+            )
         )
         override = None
     cfg, error = None, None
@@ -136,7 +138,8 @@ def cmd_route(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         cfg, event=event, base=base, fork=fork, override=override, legs=legs, error=error
     )
     if r.why == "bad_file":
-        print(f"::warning::{args.config} is not valid, running every leg on GitHub: {r.error}")
+        text = f"{args.config} is not valid, running every leg on GitHub: {r.error}"
+        print("::warning::" + cc.annotation(text))
     ref = args.schedule_ref if event == "schedule" and args.schedule_ref else sha
     _write(
         env,
@@ -176,6 +179,7 @@ def wait_for(
     virt: float | None = None  # GitHub 의 시계로 본 지금
     start: float | None = None
     err_since: float | None = None
+    odd_since: float | None = None  # created_at 을 못 읽는 pending 을 처음 본 시각
     slept = 0.0
     while True:
         reply = api.statuses(sha, etag=etag)
@@ -220,7 +224,13 @@ def wait_for(
             running = word == "running"
             limit = side.run_seconds if running else side.queue_seconds
             since = cc.created_at(st)
-            if since is not None and virt - since >= limit:
+            if since is None:
+                # 언제 올라왔는지 모르는 상태 — 끝없이 기다리지 않고 접수 문턱을 처음 본 때부터 잰다
+                if odd_since is None:
+                    odd_since = virt
+                if virt - odd_since >= side.pickup_seconds:
+                    return Waited("fallback", "no_pickup", job)
+            elif virt - since >= limit:
                 api.post_status(
                     sha,
                     "error",

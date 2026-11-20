@@ -10,6 +10,7 @@ GitHub 러너의 대기 잡(`rcm_ci_wait.py`), 빌드 머신의 감시 스크립
 from __future__ import annotations
 
 import email.utils
+import http.client
 import json
 import re
 import tomllib
@@ -265,6 +266,11 @@ def clean(text: Any) -> str:
     return " ".join(_CONTROL.sub(" ", str(text or "")).split())
 
 
+def annotation(text: Any) -> str:
+    """워크플로 명령(`::warning::` 등)에 실을 문장. 줄바꿈과 `::` 를 없애 명령을 못 끼운다."""
+    return clean(text).replace("::", ": ")
+
+
 def describe(word: str, job: int | None, text: str) -> str:
     """`<낱말> · #<잡> · <문장>` — 잡 번호가 없으면 가운데 칸을 뺀다. 140자에서 자른다."""
     parts = [word]
@@ -429,7 +435,7 @@ class GitHubApi:
             msg = _json(raw)
             text = msg.get("message", "") if isinstance(msg, dict) else ""
             return Reply(e.code, msg, headers, f"HTTP {e.code} {clean(text)[:80]}".strip())
-        except (TimeoutError, urllib.error.URLError, OSError) as e:
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as e:
             reason = getattr(e, "reason", e)
             return Reply(0, None, {}, f"unreachable: {clean(type(reason).__name__)}")
 

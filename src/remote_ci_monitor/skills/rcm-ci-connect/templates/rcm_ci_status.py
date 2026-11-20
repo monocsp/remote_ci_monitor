@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -44,13 +45,16 @@ def _int(raw: str | None) -> int | None:
         return None
 
 
-def job_doc(server: str, job: int) -> dict[str, Any] | None:
-    """`GET /jobs/{id}` — 취소 사유(`cancelled_by` · `superseded_by`)를 본다. 토큰이 필요 없다."""
-    url = f"{server.rstrip('/')}/jobs/{job}"
+def job_doc(server: str, job: int, token: str | None = None) -> dict[str, Any] | None:
+    """`GET /jobs/{id}` — 취소 사유(`cancelled_by` · `superseded_by`)를 본다. 읽기 규칙이
+    열려 있으면 토큰이 필요 없고, 토큰이 있으면 싣는다(`read_auth` 를 건 서버)."""
+    req = urllib.request.Request(f"{server.rstrip('/')}/jobs/{job}")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(url, timeout=cc.HTTP_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=cc.HTTP_TIMEOUT) as resp:
             doc = json.loads(resp.read())
-    except (OSError, ValueError, urllib.error.URLError):
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
         return None
     return doc if isinstance(doc, dict) else None
 
@@ -61,6 +65,7 @@ def main(argv: list[str] | None = None, *, env: Mapping[str, str] | None = None)
     ap.add_argument("--context", default=cc.DEFAULT_CONTEXT)
     ap.add_argument("--token-file", required=True, help="GitHub token file (mode 0600)")
     ap.add_argument("--server", required=True, help="rcm server URL (for GET /jobs/{id})")
+    ap.add_argument("--rcm-token-file", help="rcm client token for GET /jobs/{id} (optional)")
     ap.add_argument("--api-url", default="https://api.github.com")
     ap.add_argument("--job-url", action="store_true", help="put RCM_URL in target_url")
     args = ap.parse_args(argv)
@@ -93,7 +98,13 @@ def main(argv: list[str] | None = None, *, env: Mapping[str, str] | None = None)
 
     cancelled_by = successor = None
     if state == "cancelled":
-        doc = job_doc(args.server, job) or {}
+        rcm_token = None
+        if args.rcm_token_file:
+            try:
+                rcm_token = cc.read_token(args.rcm_token_file)
+            except (OSError, ValueError) as e:
+                say(f"cannot read the rcm token file: {type(e).__name__}")
+        doc = job_doc(args.server, job, rcm_token) or {}
         cancelled_by = doc.get("cancelled_by")
         successor = doc.get("superseded_by") if isinstance(doc.get("superseded_by"), int) else None
     step = env.get("RCM_FAILED_STEP") or env.get("RCM_LAST_STEP") or None

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import socket
@@ -54,6 +55,14 @@ TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost")
 
 class GitHubAuth(Exception):
     """GitHub 토큰이 거절됐다(401 · 403). 그 레포의 바퀴를 멈춘다."""
+
+
+class RateLimited(Exception):
+    """GitHub 이 요청 한도를 말했다(429, 또는 남은 한도 0 인 403). 그 레포는 `until` 까지 쉰다."""
+
+    def __init__(self, until: float, detail: str):
+        super().__init__(detail)
+        self.until = until
 
 
 class RoundOver(Exception):
@@ -210,7 +219,8 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 def submit_reason(rc: int, stderr: str) -> str:
     """`rcm run` 실패의 사유 코드 — 종료 코드와 stderr 첫 줄에서 고른다."""
     low = stderr.lower()
-    if "bearer token" in low or "unauthorized" in low or " 401" in low or "invalid token" in low:
+    auth = ("token rejected", "bearer token", "unauthorized", " 401", "invalid token")
+    if any(word in low for word in auth):
         return "rcm_auth"
     if "unknown preset" in low:
         return "unknown_preset"
@@ -232,11 +242,12 @@ class Round:
     deadline: float
     dry_run: bool
     rcm_token: str
+    mono: Callable[[], float] = time.monotonic
 
     # ── 시간 ──
 
     def left(self) -> float:
-        left = self.deadline - time.monotonic()
+        left = self.deadline - self.mono()
         if left <= 0:
             raise RoundOver
         return left
@@ -244,9 +255,31 @@ class Round:
     def gh(self, method: str, *args: Any, **kw: Any) -> cc.Reply:
         kw["timeout"] = self.left()
         reply = getattr(self.api, method)(*args, **kw)
+        limited = self.rate_limit(reply)
+        if limited is not None:
+            raise RateLimited(limited, reply.error or str(reply.status))
         if reply.status in (401, 403):
             raise GitHubAuth(reply.error or str(reply.status))
         return reply
+
+    def rate_limit(self, reply: cc.Reply) -> float | None:
+        """한도 응답이면 다시 물어도 될 시각(epoch 초). 아니면 None.
+
+        429 는 언제나, 403 은 `X-RateLimit-Remaining: 0` 이나 `Retry-After` 가 있을 때만 한도다.
+        그 밖의 403 은 토큰 권한 문제(`github_auth`)다."""
+        h = reply.headers
+        if reply.status != 429 and not (
+            reply.status == 403 and (h.get("x-ratelimit-remaining") == "0" or h.get("retry-after"))
+        ):
+            return None
+        try:
+            if h.get("retry-after"):
+                return self.now + max(1.0, float(h["retry-after"]))
+            if h.get("x-ratelimit-reset"):
+                return max(self.now + 1.0, float(h["x-ratelimit-reset"]))
+        except ValueError:
+            pass
+        return self.now + 60.0
 
     def rcm(self, *argv: str) -> subprocess.CompletedProcess[str] | None:
         env = {**os.environ, "RCM_SERVER": self.cfg.server, "RCM_TOKEN": self.rcm_token}
@@ -267,12 +300,14 @@ class Round:
             return None
 
     def job(self, job_id: int) -> dict[str, Any] | None:
-        url = f"{self.cfg.server}/jobs/{job_id}"
+        req = urllib.request.Request(f"{self.cfg.server}/jobs/{job_id}")
+        if self.rcm_token:
+            req.add_header("Authorization", f"Bearer {self.rcm_token}")  # read_auth 를 건 서버
         try:
             limit = min(cc.HTTP_TIMEOUT, self.left())
-            with urllib.request.urlopen(url, timeout=max(limit, 0.05)) as resp:
+            with urllib.request.urlopen(req, timeout=max(limit, 0.05)) as resp:
                 doc = json.loads(resp.read())
-        except (OSError, ValueError, urllib.error.URLError):
+        except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
             return None
         return doc if isinstance(doc, dict) else None
 
@@ -282,7 +317,10 @@ class Round:
         if self.dry_run:
             print(f"would post {state} {context} on {sha[:12]}: {description}")
             return True
-        reply = self.gh("post_status", sha, state, context, description, target_url=None)
+        # job_url = true 면 설명의 잡 번호로 rcm 잡 링크를 싣는다. 기본은 비운다(명세 §2.4)
+        job = cc.read_word(description)[1]
+        target = f"{self.cfg.server}/jobs/{job}" if self.cfg.job_url and job is not None else None
+        reply = self.gh("post_status", sha, state, context, description, target_url=target)
         word = description.split(" · ")[0]
         if not reply.ok:
             self.log(self.repo.github, f"post {word} on {sha[:12]} failed: {reply.error}")
@@ -294,8 +332,19 @@ class Round:
         if self.dry_run:
             print(f"would cancel #{job_id} ({why})")
             return
-        self.rcm("cancel", str(job_id))
-        self.log(self.repo.github, f"cancel #{job_id} {why}")
+        proc = self.rcm("cancel", str(job_id))
+        left = False
+        for line in reversed((proc.stdout if proc is not None else "").strip().splitlines()):
+            try:
+                left = bool(json.loads(line).get("left"))
+                break
+            except (ValueError, AttributeError):
+                continue
+        if left:
+            # 세션이 낸 잡에 합류했었다 — 취소는 합류만 떠나고 잡은 계속 돈다
+            self.log(self.repo.github, f"left join of #{job_id} (job keeps running) {why}")
+        else:
+            self.log(self.repo.github, f"cancel #{job_id} {why}")
 
     # ── 한 바퀴 ──
 
@@ -380,6 +429,12 @@ class Round:
             if self.post(sha, "error", context, cc.describe("unavailable", None, "watcher_config")):
                 shas[sha] = self.record(cand, word="unavailable", context=context)
             return
+        if self.repo.legs is None and cfg is not None and cfg.platforms:
+            self.log(
+                self.repo.github,
+                f"{sha[:12]}: ci-watch.toml has no legs for this repository, so [platforms] "
+                "was not checked the way the workflow's route checks it",
+            )
         r = cc.resolve(
             cfg,
             event=cand["event"],
@@ -533,6 +588,10 @@ class Round:
             entry.pop("reason_since", None)
 
     def run(self) -> None:
+        rest = float(self.state.get("rest_until") or 0)
+        if self.now < rest:
+            return  # GitHub 의 한도가 풀릴 때까지 묻지 않는다
+        self.state.pop("rest_until", None)
         override = self.override()
         if override not in (None, *cc.MODES):
             override = None
@@ -548,7 +607,8 @@ class Round:
 
 
 def run_repo(cfg: WatchConfig, repo: Repo, *, now: float, deadline: float, log: Log,
-             dry_run: bool, rcm_token: str) -> None:  # fmt: skip
+             dry_run: bool, rcm_token: str,
+             mono: Callable[[], float] = time.monotonic) -> None:  # fmt: skip
     lock = cfg.state_dir / f"{_slug(repo.github)}.lock"
     if not acquire_lock(lock, now, log, repo.github):
         return  # 다른 프로세스가 돌고 있다 — 조용히 끝난다
@@ -557,9 +617,13 @@ def run_repo(cfg: WatchConfig, repo: Repo, *, now: float, deadline: float, log: 
         state = load_state(path, now, log, repo.github)
         token = cc.read_token(repo.token_file)
         api = cc.GitHubApi(cfg.github_api, repo.github, token)
-        rnd = Round(cfg, repo, api, state, log, now, deadline, dry_run, rcm_token)
+        rnd = Round(cfg, repo, api, state, log, now, deadline, dry_run, rcm_token, mono)
         try:
             rnd.run()
+        except RateLimited as e:
+            state["rest_until"] = e.until
+            until = datetime.fromtimestamp(e.until, UTC).strftime("%H:%M:%SZ")
+            log(repo.github, f"rate_limited: GitHub asked to wait ({e}); resting until {until}")
         except GitHubAuth as e:
             log(repo.github, f"github_auth: GitHub refused the token ({e}); nothing submitted")
         except RoundOver:
@@ -614,6 +678,10 @@ def check(cfg: WatchConfig) -> int:
     except (OSError, ValueError, urllib.error.URLError) as e:
         row(False, "rcm token", f"/api/whoami refused or unreachable: {type(e).__name__}")
     for repo in cfg.repos:
+        if repo.legs is None:
+            row(None, f"legs {repo.github}",
+                "not set: [platforms] cannot be checked against the workflow legs, so the "
+                "watcher and route may disagree on a broken file")  # fmt: skip
         try:
             api = cc.GitHubApi(cfg.github_api, repo.github, cc.read_token(repo.token_file))
         except (OSError, ValueError) as e:
@@ -652,7 +720,12 @@ def check(cfg: WatchConfig) -> int:
     return 1 if any(s == "FAIL" for s, _, _ in rows) else 0
 
 
-def main(argv: list[str] | None = None, *, now_fn: Callable[[], float] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    now_fn: Callable[[], float] | None = None,
+    mono_fn: Callable[[], float] | None = None,
+) -> int:
     ap = argparse.ArgumentParser(description="rcm-ci-connect watcher: submit PR heads to rcm.")
     ap.add_argument("--config", default="~/.config/rcm/ci-watch.toml")
     ap.add_argument("--once", action="store_true", help="one round (launchd runs it every 60 s)")
@@ -678,13 +751,17 @@ def main(argv: list[str] | None = None, *, now_fn: Callable[[], float] | None = 
                 "it must be 0600 — nothing done")  # fmt: skip
         return 2
     rcm_token = cc.read_token(cfg.rcm_token_file)
-    deadline = time.monotonic() + ROUND_SECONDS
+    mono = mono_fn or time.monotonic
+    deadline = mono() + ROUND_SECONDS
     for repo in cfg.repos:
-        if time.monotonic() >= deadline:
+        if mono() >= deadline:
             log(repo.github, "round deadline reached before this repository")
             break
-        run_repo(cfg, repo, now=now_fn(), deadline=deadline, log=log,
-                 dry_run=args.dry_run, rcm_token=rcm_token)  # fmt: skip
+        try:
+            run_repo(cfg, repo, now=now_fn(), deadline=deadline, log=log,
+                     dry_run=args.dry_run, rcm_token=rcm_token, mono=mono)  # fmt: skip
+        except Exception as e:  # noqa: BLE001 — 한 레포의 고장이 다른 레포를 막지 않는다
+            log(repo.github, f"repository skipped this round: {type(e).__name__}: {e}")
     return 0
 
 
