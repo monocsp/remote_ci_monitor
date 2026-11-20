@@ -55,7 +55,7 @@ def hook_env(**kw: str) -> dict[str, str]:
         "RCM_SUMMARY": "",
         "RCM_FAILED_STEP": "",
         "RCM_LAST_STEP": "secrets",
-        "RCM_URL": "http://build.local:8787/jobs/9",
+        "RCM_URL": "http://build.local:8787/#/jobs/9",  # 서버의 job_url() 꼴
     }
     env.update(kw)
     return env
@@ -202,7 +202,7 @@ def test_n14_target_url_only_with_job_url(gh, rcm, token_file, capsys):
     gh.requests.clear()
     gh.statuses.clear()
     run_hook(gh, rcm, token_file, capsys, job_url=True)
-    assert only_post(gh)["target_url"] == "http://build.local:8787/jobs/9"
+    assert only_post(gh)["target_url"] == "http://build.local:8787/#/jobs/9"
 
 
 def test_n15_a_silent_github_is_cut_off(gh, rcm, token_file, capsys, monkeypatch):

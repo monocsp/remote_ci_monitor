@@ -592,7 +592,8 @@ def test_job_url_true_links_the_rcm_job_and_the_default_does_not(rig):
     rig.run()
     posts = rig.posts(S1)
     assert [p["description"].split(" · ")[0] for p in posts] == ["queued", "running"]
-    assert all(p["target_url"] == f"{rig.rcm_http.url}/jobs/12" for p in posts)
+    # 화면 링크다 — `/jobs/12` 는 JSON 이다(서버의 job_url() 과 같은 꼴)
+    assert all(p["target_url"] == f"{rig.rcm_http.url}/#/jobs/12" for p in posts)
 
 
 def test_a_broken_repository_does_not_stop_the_next_one(rig, tmp_path):

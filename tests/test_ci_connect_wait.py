@@ -389,3 +389,40 @@ def test_route_warnings_cannot_inject_workflow_commands(tmp_path, capsys):
     assert len(lines) == 1 and lines[0].startswith("::warning::")
     assert "::error::" not in printed and "::add-mask::" not in printed
     assert printed.count("::") == 2
+
+
+def test_a_cut_off_error_body_does_not_escape(monkeypatch):
+    """500 응답이 Content-Length 999 를 말하고 몇 바이트만 보낸 채 끊긴다. 본문을 읽다 나는
+    `IncompleteRead` 가 새면 대기 잡 · 훅 · 감시가 트레이스백으로 죽는다. 셋 다 이 함수를 쓴다."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def serve():
+        for _ in range(2):
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conn.recv(65536)
+            conn.sendall(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
+                b'Content-Length: 999\r\n\r\n{"mess'
+            )
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        api = _cfg.GitHubApi(f"http://127.0.0.1:{port}", "monocsp/remote_ci_monitor", "t")
+        reply = api.statuses(HEAD_SHA)
+        assert reply.status == 500 and not reply.ok
+        posted = api.post_status(HEAD_SHA, "error", "rcm/ci", "x")
+        assert posted.status == 500 and not posted.ok
+    finally:
+        srv.close()
+    for mod in (waitmod, _status, _watch):
+        assert mod.cc.GitHubApi is _cfg.GitHubApi
