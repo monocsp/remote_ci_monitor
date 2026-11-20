@@ -56,9 +56,13 @@ tests-only PR), refuses a conflict, and merges that sha. `tools/guard_merge.py` 
 hook) refuses `gh pr merge`, a REST `PUT …/pulls/<N>/merge` and a script that runs one — a
 watcher merged twice with checks still pending. The steps are in the `pr` skill.
 
-`main` only takes a pull request from `dev`. The workflow job names `test` (`ci.yml`) and
-`main-from-dev-only` (`pr-policy.yml`) are wired into the ruleset: renaming one means changing the
-ruleset too.
+`main` only takes a pull request from `dev`. The required check on `dev` and `main` is the commit
+status `rcm/ci`, which the build machine's rcm job `rcm-ci` posts: after a push, run
+`rcm run rcm-ci --source git_ref --ref <branch> --no-wait`, then `rcm wait --job <N>`, and merge
+(with `tools/merge_pr.py`) only when `rcm/ci` is green. `main` also requires `main-from-dev-only` (`pr-policy.yml`); renaming
+that job means changing the ruleset too. GitHub Actions' `ci.yml` no longer runs on pull requests
+or pushes: it is `workflow_dispatch` only, run by hand when the owner asks because the build
+machine is down.
 
 ## The build machine's own install
 

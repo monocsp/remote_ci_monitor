@@ -51,6 +51,12 @@ of a key bumps that number and is listed here.
   shown in an old state until the page was reloaded. Events replayed on reconnect could also
   arrive after newer ones. Each stream now gets events in id order.
   ([#242](https://github.com/monocsp/remote_ci_monitor/pull/242))
+- **A version no longer stays `running` when its release round ends at once.** The server linked
+  a version to a driver round only after the round had started, so a round that exited before
+  the link (a driver that fails right away, or the confirm round that "build number: auto" starts)
+  found no version to return to `editing`, and the version stayed `running` with nothing running
+  until the server restarted. Starting a round and linking it now finish before that round's exit
+  is handled. ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
 
 ## [0.8.0] - 2026-11-20
 

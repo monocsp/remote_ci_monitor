@@ -542,6 +542,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 릴리스 드라이버(계약 v2) — 실행 대장은 DB, 프로세스는 이 객체가 안다.
         self.driver = DriverRunner(store, now_fn=now_fn, log=self.log)
         self.driver.on_exit = self._driver_exited
+        # 회차를 띄우고 버전에 붙이는 일과 회차의 종료 훅은 이 잠금 안에서만 돈다. 띄운 직후에 끝난
+        # 회차의 훅이 붙이기보다 먼저 돌면 버전을 못 찾고, 뒤이은 붙이기가 행을 영영 `running` 으로
+        # 남긴다. 자동 빌드 번호는 종료 훅 안에서 다음 회차를 띄우므로 재진입 잠금이다.
+        self._round_link_lock = threading.RLock()
         self._checkout_locks: dict[str, threading.Lock] = {}
         self._checkout_guard = threading.Lock()
         # 문안 미리보기의 짧은 기억(§14-1) — 미러가 움직이면 그 저장소의 것은 버린다.
@@ -2564,23 +2568,25 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             repo, store, path, workspace
         ):
             kw["version_id"] = None
-        try:
-            row = self.driver.spawn(
-                data_dir=self.config.data_dir,
-                repo=repo.name,
-                driver=path,
-                checkout=workspace,
-                started_by=token.name,
-                env=self._repo_env(store),
-                server_url=self.base_url(host),
-                **kw,
-            )
-        except OSError as e:
-            raise ApiError(
-                502, f"driver could not start: {type(e).__name__}", code="driver_failed"
-            ) from e
-        if version_id is not None:
-            self._version_link_release(int(version_id), row["id"])
+        # 띄우기와 붙이기 사이에 이 회차의 종료 훅이 끼어들지 못하게 잠근다(`_round_link_lock`)
+        with self._round_link_lock:
+            try:
+                row = self.driver.spawn(
+                    data_dir=self.config.data_dir,
+                    repo=repo.name,
+                    driver=path,
+                    checkout=workspace,
+                    started_by=token.name,
+                    env=self._repo_env(store),
+                    server_url=self.base_url(host),
+                    **kw,
+                )
+            except OSError as e:
+                raise ApiError(
+                    502, f"driver could not start: {type(e).__name__}", code="driver_failed"
+                ) from e
+            if version_id is not None:
+                self._version_link_release(int(version_id), row["id"])
         return {"release_id": row["id"], "pid": row["pid"], "build_name": row["build_name"]}
 
     def release_start(
@@ -2628,7 +2634,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         번호를 물었으면 로그의 마지막 `plan: N` 을 `--confirm-build-number` 로 이어 준다. 번호가
         없으면 사람 차례 그대로 둔다. confirm 이 또 2 로 끝나면 잇지 않는다(무한 되풀이 방지).
         이 회차가 버전 드래프트의 것이면 이어진 회차로 옮기거나, 끝났으니 `editing` 으로
-        되돌린다."""
+        되돌린다.
+
+        띄운 쪽이 이 회차를 버전에 다 붙인 뒤에 판정한다(`_round_link_lock`). 그 전에 보면 붙은
+        버전이 없다고 읽고 지나가 행이 `running` 에 남는다."""
+        with self._round_link_lock:
+            self._driver_exited_locked(row)
+
+    def _driver_exited_locked(self, row: dict[str, Any]) -> None:
         linked = self.store.version_for_release(row["id"])
         version_id = linked["id"] if linked is not None else None
         continued = self._auto_confirm(row, version_id)

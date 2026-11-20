@@ -263,12 +263,15 @@ class Chrome:
         return self.call("Target.attachToTarget", params, timeout=remaining())["sessionId"]
 
     def _stderr_tail(self) -> str:
+        # 끝난 Chrome 이면 종료 코드도 붙인다 — stderr 가 비어 있을 때(신호로 죽었을 때) 남는 단서다
+        code = self.proc.poll()
+        exited = "" if code is None else f"chrome exit code {code}; "
         try:
             self.stderr.flush()
             data = Path(self.stderr.name).read_bytes()
         except OSError:
-            return "(no stderr)"
-        return "chrome stderr: " + data[-600:].decode("utf-8", "replace")
+            return exited + "(no stderr)"
+        return exited + "chrome stderr: " + data[-600:].decode("utf-8", "replace")
 
     # 페이지 -------------------------------------------------------------------
 
@@ -294,6 +297,27 @@ class Chrome:
         if "exceptionDetails" in r:
             raise AssertionError(f"JS threw in {expression!r}: {r['exceptionDetails'].get('text')}")
         return r["result"].get("value")
+
+    def frames(self, n: int = 2, *, timeout: float = 15.0) -> None:
+        """페이지가 애니메이션 프레임을 n 번 넘길 때까지 기다린다.
+
+        앱은 다시 그린 뒤의 측정(잘린 글 표시 `markCut` · 워커 띠 표지 `updateBand`)을
+        `requestAnimationFrame` 으로 미룬다. 고정 sleep 은 CPU 가 바쁘면(pytest-xdist 워커 여럿이
+        Chrome 을 같이 띄울 때) 그 프레임보다 먼저 끝난다. 프레임을 세면 시간이 아니라 순서로
+        기다린다 — 그 전에 걸린 rAF 콜백은 우리 콜백보다 먼저 돈다.
+        """
+        js = (
+            f"new Promise((done) => {{ let left = {max(1, n)}; "
+            "const step = () => (--left > 0 ? requestAnimationFrame(step) : done(true)); "
+            "requestAnimationFrame(step); })"
+        )
+        r = self.call(
+            "Runtime.evaluate",
+            {"expression": js, "awaitPromise": True, "returnByValue": True},
+            timeout=timeout,
+        )
+        if "exceptionDetails" in r:
+            raise AssertionError(f"rAF wait threw: {r['exceptionDetails'].get('text')}")
 
     def viewport(self, width: int, height: int = 844, *, mobile: bool = False) -> None:
         """뷰포트를 CDP 로 덮어쓴다 — `--window-size` 만으로는 폰 폭이 안 나온다.

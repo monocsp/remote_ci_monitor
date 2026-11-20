@@ -69,8 +69,15 @@ documents that stay in the repository are written in 평어체.
    EOF
    )"
    ```
-2. Wait for CI (`test` — ubuntu 3.11/3.13, macOS 3.13, smoke, gitleaks), and read a failure
-   before touching anything: `gh pr checks <N>` · `gh run view <id> --log-failed`.
+2. After every push, run the build machine's CI and wait for the commit status `rcm/ci` — the
+   ruleset's required check on `dev` and `main` (`main` also needs `main-from-dev-only`):
+   ```sh
+   cd ~ && rcm run rcm-ci --source git_ref --ref <branch> --no-wait   # prints the job number
+   rcm wait --job <N>
+   ```
+   Read a failure before touching anything: `rcm logs <N>`. GitHub Actions (`ci.yml`) no longer
+   runs on pull requests; it is `workflow_dispatch` only, run by hand when the owner asks because
+   the build machine is down.
 3. Merge with `tools/merge_pr.py`, and only with it. `tools/guard_merge.py` (a `PreToolUse`
    hook) refuses `gh pr merge`, a REST `PUT …/pulls/<N>/merge` through `gh api` or `curl`, and a
    script that would run one; a watcher that merged by REST in 2026-11 merged twice with checks
@@ -84,8 +91,8 @@ documents that stay in the repository are written in 평어체.
    `main`) has passed on that sha, as a check run or a commit status, the latest status of a
    context counting (`--wait` waits up to `--timeout` seconds, 3600 by default, and refuses if
    the head moves meanwhile). Checks the ruleset does not require, GitHub Actions included, are
-   counted and ignored, pending or failed. It also needs a PR
-   comment carries the verification marker for that sha; and GitHub reports no conflict. Then it
+   counted and ignored, pending or failed. It also needs a PR comment carrying the verification
+   marker for that sha, and GitHub must report no conflict. Then it
    merges that sha into the base as a merge commit titled `<title> (#<N>)` and reads the PR back.
    `--dry-run` reads everything and changes nothing; `--delete-branch` never deletes `main` or
    `dev`. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer (look before

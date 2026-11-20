@@ -285,6 +285,24 @@ BAND_JS = """
 """
 
 
+def settled_band(c: Chrome, *, scrolled: bool = False, timeout: float = 5.0) -> dict:
+    """띠가 다 잰 뒤의 `BAND_JS`. 앱은 다시 그린 뒤 · 밀 때마다 rAF 에서 표지를 다시 센다
+    (`updateBand`). 고정 sleep 뒤에 한 번 읽으면 CPU 를 나눠 쓰는 실행(pytest-xdist 워커 여럿)에서
+    그 rAF 가 아직 안 돈 표지를 읽는다(`+5` 대 숨은 필 6). 표지가 숨은 필 수와 맞을 때까지 마감
+    안에서 다시 읽는다. `scrolled` 면 밀린 뒤의 측정(`more-l`)까지 기다린다. 끝내 안 맞으면 마지막
+    값을 돌려주고 호출한 쪽의 단언이 빨개진다."""
+    deadline = time.monotonic() + timeout
+    while True:
+        m = c.eval(BAND_JS)
+        marker = m.get("marker")
+        if marker and marker["text"] == f"+{m['hidden']}":
+            if not scrolled or "more-l" in m["cls"]:
+                return m
+        if time.monotonic() >= deadline:
+            return m
+        time.sleep(0.05)
+
+
 def test_worker_band_says_there_is_more_and_scrolls_by_keyboard(tmp_path):
     scene = B.Scene()
     try:
@@ -292,7 +310,7 @@ def test_worker_band_says_there_is_more_and_scrolls_by_keyboard(tmp_path):
             for width, lang in (PHONE, DESK):
                 where = f"{lang}@{width}"
                 B.open_scene(c, scene, width, lang)
-                m = c.eval(BAND_JS)
+                m = settled_band(c)
                 assert m["tabindex"] == "0" and m["label"], f"{where}: 띠에 포커스가 없다 {m}"
                 assert m["overflow"], f"{where}: 장면이 넘치지 않는다 — 시험이 무의미하다 {m}"
                 assert "more-r" in m["cls"], f"{where}: 오른쪽이 흐려지지 않는다 {m}"
@@ -307,8 +325,7 @@ def test_worker_band_says_there_is_more_and_scrolls_by_keyboard(tmp_path):
                 c.eval("document.querySelector('[data-workers]').focus(); true")
                 key_event(c, "document.querySelector('[data-workers]')", "ArrowRight")
                 wait(c, "document.querySelector('[data-workers]').scrollLeft > 0")
-                time.sleep(0.2)
-                after = c.eval(BAND_JS)
+                after = settled_band(c, scrolled=True)
                 assert after["marker"]["text"] == f"+{after['hidden']}", f"{where}: {after}"
                 assert "more-l" in after["cls"], f"{where}: 왼쪽에 숨은 것이 안 보인다 {after}"
                 assert after["hdrH"] == hdr_h, f"{where}: 밀자 머리줄이 {hdr_h}→{after['hdrH']}"

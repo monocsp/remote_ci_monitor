@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import struct
 import time
@@ -40,7 +41,21 @@ from remote_ci_monitor.mdns import Responder, discover
 
 GROUP = "224.0.0.251"
 IFACE = "127.0.0.1"
-PORT = 15353  # mDNS 데몬(5353)과 겹치지 않는 테스트 전용 포트
+
+
+def _test_port() -> int:
+    """mDNS 데몬(5353)과 겹치지 않는 테스트 전용 포트. pytest-xdist 워커마다 하나씩 띄운다.
+
+    응답기 · 질의기 · 감시 소켓은 `SO_REUSEPORT` 로 같은 포트를 나눠 들어서, 워커 둘이 같은 포트를
+    쓰면 한 워커의 응답기 announce 가 다른 워커의 질의기에 들어온다. 「응답기 없음 → 빈 목록」이나
+    「이름이 다른 둘 → 정확히 둘」이 남의 응답기를 세면 빨개진다. 직렬 실행(변수 없음)은 15353 이다.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")  # "gw0", "gw1", ...
+    index = int(worker[2:]) if worker.startswith("gw") and worker[2:].isdigit() else 0
+    return 15353 + index
+
+
+PORT = _test_port()
 IPS = ("192.0.2.10", "192.0.2.11")  # TEST-NET-1 — A 레코드가 그대로 실려 오는지 본다(해석이 아니라)
 INSTANCE = instance_name("macmini")
 

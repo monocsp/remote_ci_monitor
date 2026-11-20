@@ -176,11 +176,22 @@ def test_release_pypi_job_is_gated_by_repository_variable():
 # ── ci.yml (§3) ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("job", ["unit", "secrets", "test"])
-def test_ci_keeps_existing_job_names(job: str):
-    # 룰셋 필수 체크는 잡 이름 `test` 로 잡혀 있다(PLAN 「브랜치 정책」). matrix 잡은 `unit` 그대로.
-    block = job_block(read(CI), job)
-    assert has(job_head(block), rf"^\s*name:\s*{job}\s*$"), f"`name: {job}` gone"
+def top_block(text: str, key: str) -> str:
+    """최상위 `<key>:` 부터 다음 최상위 키 직전까지."""
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(#.*)?$", text, re.M)
+    assert m, f"no top-level `{key}:`"
+    rest = text[m.end() :]
+    nxt = re.search(r"^[A-Za-z_][\w-]*:", rest, re.M)
+    return text[m.start() : m.end() + (nxt.start() if nxt else len(rest))]
+
+
+def test_ci_runs_only_when_started_by_hand():
+    # 2026-11-20 오너 결정: dev · main 룰셋의 필수 체크는 맥미니 rcm 잡 `rcm-ci` 가 올리는 커밋
+    # 상태 `rcm/ci` 다. GitHub CI 는 맥미니가 고장 났을 때 오너 지시로만 손으로 돌린다. PR · push
+    # 트리거가 돌아오면 아무도 보지 않는 잡이 PR 마다 20분 넘게 돈다
+    on = top_block(read(CI), "on")
+    triggers = set(re.findall(r"^[ \t]+([A-Za-z_]+):", on, re.M))
+    assert triggers == {"workflow_dispatch"}, f"ci.yml triggers: {sorted(triggers)}"
 
 
 def test_ci_smoke_job_builds_wheel_and_runs_script_on_both_os():

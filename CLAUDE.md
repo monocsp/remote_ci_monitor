@@ -6,7 +6,8 @@ PLAN.md 가 정본이다. 세션을 시작하면 먼저 끝까지 읽는다.
 
 - `main`·`dev` 에는 직접 커밋·push 할 수 없다. 관리자도 예외 없다. 시도하면 push 가 거부된다.
 - 작업은 `dev` 에서 feature 브랜치를 파서 하고 `dev` 로 PR 을 보낸다.
-- `main` 은 `dev` 에서 보낸 PR 로만 받는다. `test`·`main-from-dev-only` 체크가 통과해야 머지된다.
+- `main` 은 `dev` 에서 보낸 PR 로만 받는다. 필수 체크는 맥미니 rcm 잡 `rcm-ci` 가 올리는 커밋 상태 `rcm/ci`
+  와 `main-from-dev-only`(main 만)다. 둘이 통과해야 머지된다.
 - **브랜치 하나에 워크트리 하나.** 이 레포는 형제 워크트리(`remote_ci_monitor-<topic>`)를 여러 개
   동시에 체크아웃해 두고 쓴다. **이미 있는 워크트리에서 `git switch` 로 브랜치를 갈아타지 마라** —
   다른 세션이 그 폴더에서 작업 중일 수 있고, 그 세션의 발밑을 빼는 짓이다. `remote_ci_monitor-dev`
@@ -33,7 +34,9 @@ PLAN.md 가 정본이다. 세션을 시작하면 먼저 끝까지 읽는다.
   `rcm/ci`)가 통과했고(`--wait` 는 기다린다. 필수가 아닌 체크는 보지 않는다) PR 댓글에 `verified: <head sha>` 표식(격리 검증을 마친 쪽이
   단다)이 있어야 머지한다. `gh pr merge` · REST `PUT …/pulls/N/merge` 는 `tools/guard_merge.py` 훅이
   막는다. 문서만 · 시험만 PR 은 `--no-verify "<이유>"`. PR 본문 파일은 `pr-body-<브랜치>.md` 로.
-- 워크플로 잡 이름 `test`(ci.yml)·`main-from-dev-only`(pr-policy.yml)는 룰셋 필수 체크와 묶여 있다. 바꾸면 룰셋도 같이 바꾼다.
+- 필수 체크는 맥미니 rcm 잡 `rcm-ci` 가 올리는 커밋 상태 `rcm/ci` 와 `main-from-dev-only`(main 만,
+  pr-policy.yml 의 잡 이름)다. 그 context 나 잡 이름을 바꾸면 룰셋도 같이 바꾼다. GitHub Actions 의
+  `ci.yml` 은 머지 조건이 아니다(`workflow_dispatch` 만).
 
 ## 운영 설치 — 이 머신이 빌드 머신이면 (AGENTS.md 「The build machine's own install」)
 
