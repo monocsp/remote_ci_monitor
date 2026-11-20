@@ -13,7 +13,7 @@ of a key bumps that number and is listed here.
   same-repository pull request heads and posts the `rcm/ci` commit status, a `[[notify]]` hook
   posts the result, and the workflow's required check waits for it and runs the checks on GitHub
   when rcm does not answer in time. Templates only — the server is unchanged.
-  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+  ([#238](https://github.com/monocsp/remote_ci_monitor/pull/238))
 
 ### Fixed
 - **A tarball made with macOS `tar` no longer fills a shelf item with broken pictures.** Without
