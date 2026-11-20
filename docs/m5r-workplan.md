@@ -11,7 +11,10 @@
 >
 > 결정 번호는 175 부터다. M5q 가 149~174 를 쓴다(`docs/m5q-workplan.md` §11). 오너가 2026-11-20 에 다섯 결정(175 ·
 > 182 · 186 · 187 · 188)을 확정했다. 대신 도는 문턱은 30분이고, 릴리스 PR 도 rcm 에서만 돌며, `rcm-ci` 는 `mac2`
-> 워커에서 돈다. 나머지는 추천값으로 구현하고 확인을 기다린다. §10 표의 「오너 확인」 열이 어느 쪽인지 말한다.
+> 워커에서 돈다. 같은 날 오너가 결정 194(주 1회 GitHub 전체 실행)와 195(대체는 ubuntu 갈래만)를 더했다. 나머지는
+> 추천값으로 구현하고 확인을 기다린다. §10 표의 「오너 확인」 열이 어느 쪽인지 말한다.
+>
+> 이 판은 격리 설계 반박(P0 5 · P1 7 · P2 12)을 반영한 셋째 판이다. 무엇이 왜 바뀌었는지는 §12 에 있다.
 
 ## 0. 한 줄
 
@@ -62,7 +65,10 @@ Due to capacity constraints, jobs targeting macOS arm64 runners may experience �
 | 룰셋 | 필수 체크 | 비고 |
 |---|---|---|
 | `main — PR only, from dev, checks required`(22239723) | `test` 와 `main-from-dev-only`, 둘 다 `integration_id: 15368`(GitHub Actions 앱) | `strict_required_status_checks_policy: false`, 병합 방식은 merge 만 |
-| `dev — PR only`(22239732) | 없음 | PR 만 요구한다 |
+| `dev — PR only`(22239732) | `test`, `integration_id: 15368` | 병합 방식은 merge · squash · rebase |
+
+첫 판을 쓸 때 dev 룰셋은 PR 만 요구했다. 같은 날 `test` 가 필수로 더해졌다(설계 반박 P0-3 이 찾았고 `gh api` 로 다시
+확인했다). 그래서 rcm 쪽 판정의 잘못이 dev 머지를 바로 막는다(§3.6).
 
 ### 1.2 Mac mini 운영 큐 (DB v24 를 `sqlite3 -readonly` 로, 서버 0.7.0)
 
@@ -141,28 +147,29 @@ Due to capacity constraints, jobs targeting macOS arm64 runners may experience �
 ### 2.1 전체 그림
 
 ```
- 세션 ── git push ──▶ GitHub ── pull_request / push ──▶ ci.yml
+ 세션 ── git push ──▶ GitHub ── pull_request / push / schedule ──▶ ci.yml
                         ▲  ▲                              │
-                        │  │ 상태 rcm/ci                    ├─ route   .rcm/ci.toml 을 읽고 모드를 정한다(수 초)
+                        │  │ 상태 rcm/ci                    ├─ route   head 의 .rcm/ci.toml 을 읽고 모드를 정한다(수 초)
                         │  │                              ├─ rcm     rcm/ci 를 기다린다(가벼운 잡)
                         │  │                              ├─ now     지금 GitHub 에서 돌 갈래(checks.yml)
-                        │  │                              ├─ late    rcm 이 답을 못 내면 돌 갈래(checks.yml)
+                        │  │                              ├─ late    rcm 이 답을 못 내면 돌 갈래(checks.yml, rcm 레포는 ubuntu 만)
                         │  │                              └─ test    셋을 모아 판정한다(필수 체크)
  Mac mini              │  │
   launchd ci-watch ────┘  │  열린 PR 과 push 브랜치의 head 를 1분마다 본다 → rcm run rcm-ci --ref <브랜치> --no-wait
                           │  → queued · running 을 올린다
-  rcm serve ─ 레인 ─ rcm-ci 잡(PR 의 코드로 ruff · pytest · node · mutcheck · smoke · gitleaks)
+  rcm serve ─ mac2 워커 ─ rcm-ci 잡(PR 의 코드로 ruff · pytest · node · mutcheck · smoke · gitleaks)
        └─ [[notify]] rcm_ci_status.py ──┘  끝나면 passed · failed · unavailable 을 올린다
 ```
 
 GitHub 은 공유기 안의 Mac mini 에 닿지 못한다. 그래서 방향이 언제나 「Mac mini 가 GitHub 을 부른다」다. GitHub 쪽은
-상태를 읽기만 하고, 넘겨받을 때 `taken-over` 한 줄만 쓴다.
+상태를 읽기만 하고, 넘겨받을 때 `taken-over` 한 줄만 쓴다. 주 1회 `schedule` 실행은 rcm 과 상관없이 dev 를 GitHub 의
+모든 갈래로 돌린다(결정 194).
 
-### 2.2 설정 파일 `.rcm/ci.toml` (결정 176 · 177)
+### 2.2 설정 파일 `.rcm/ci.toml` (결정 176 · 177 · 195)
 
 레포에 하나만 둔다. GitHub 의 대기 잡과 Mac mini 의 감시 스크립트가 같은 파일을 같은 파서(`rcm_ci_config.py`)로
-읽는다. 대기 잡은 체크아웃한 파일을, 감시 스크립트는 그 커밋의 파일을 contents API 로 읽는다. 그래서 어떤 커밋의
-검사 위치는 그 커밋에 든 파일이 정한다.
+읽는다. 둘 다 검사하는 커밋, 곧 PR 이면 head 커밋의 파일을 읽는다. GitHub 이 체크아웃하는 merge 커밋의 파일이 아니다
+(§2.5). 그래서 어떤 커밋의 검사 위치는 그 커밋에 든 파일이 정한다.
 
 ```toml
 # .rcm/ci.toml — 이 레포의 검사를 어디서 돌리나 (rcm-ci-connect)
@@ -175,23 +182,21 @@ preset = "rcm-ci"           # 필수. 감시 스크립트가 rcm run 할 프리�
 context = "rcm/ci"          # 커밋 상태 이름. 기본 "rcm/ci"
 priority = "low"            # rcm run --priority 로 넘긴다. 없으면 프리셋의 기본
 push = ["dev"]              # 이 브랜치의 push 도 rcm 에서. 기본 [] (push 는 GitHub)
-creators = ["monocsp"]      # 이 계정이 올린 rcm/ci 만 믿는다. 기본 [] (아무나)
+creators = ["monocsp"]      # 이 계정이 올린 rcm/ci 만 믿는다. 기본 [] (아무나). 신뢰 경계는 §2.9
 pickup_seconds = 300        # 이 안에 queued 가 안 오면 rcm 이 응답하지 않는 것이다
 queue_seconds = 1800        # queued 로 이만큼 머물면 GitHub 이 대신한다
 run_seconds = 3600          # running 으로 이만큼 지나면 GitHub 이 대신한다
 poll_seconds = 30           # 대기 잡이 묻는 간격
 
 [platforms]                 # mode = "rcm" 일 때 갈래마다. 기본은 전부 "rcm"
-ubuntu = "rcm"              # "rcm" 이면 대체 때만 GitHub, "github" 이면 언제나 GitHub
-macos = "rcm"
-
-[[branches]]                # 기준 브랜치마다 mode 를 바꾼다(선택). 위에서부터 첫 일치. rcm 레포는 안 쓴다(§3.1)
-base = "main"
-mode = "both"
+ubuntu = "rcm"              # rcm 에서 돌고, rcm 이 답을 못 내면 GitHub 이 이 갈래를 돌린다
+macos = "rcm-only"          # rcm 에서만 돈다. 대체 때도 GitHub 에서 돌지 않는다
+# "github" 이면 언제나 GitHub 에서 돈다
 ```
 
 `[platforms]` 의 키는 갈래 이름이다. 갈래는 GitHub 워크플로가 OS 마다 나눈 검사 묶음이고 rcm 레포에는
 `ubuntu` 와 `macos` 가 있다. 워크플로가 대기 스크립트에 갈래 목록을 넘기고 파서는 그 목록으로 키를 검사한다.
+`rcm-only` 는 오너 결정 (a)(2026-11-20)에서 나왔다. macOS 러너를 못 받는 일이 대체 경로까지 막지 않게 한다(결정 195).
 
 검증 규칙이다.
 
@@ -199,15 +204,17 @@ mode = "both"
 |---|---|---|
 | 모르는 키 | 표마다 허용 목록 | `CiConfigError("unknown key(s) in [rcm]: …")` |
 | `version` | 정수 1 | 오류. 2 이상은 「이 템플릿보다 새 설정」이라고 말한다 |
-| `mode` · `fallback` · `platforms.*` · `branches[].mode` | 위의 값만 | 오류 |
-| `[rcm].preset` | `mode` 나 어느 `branches[].mode` 가 github 가 아니면 필수, rcm 프리셋 이름 규칙(`[A-Za-z0-9][A-Za-z0-9_.-]*`, 64자) | 오류 |
+| `mode` · `fallback` · `platforms.*` | 위의 값만 | 오류 |
+| `[rcm].preset` | `mode` 가 github 가 아니면 필수, rcm 프리셋 이름 규칙(`[A-Za-z0-9][A-Za-z0-9_.-]*`, 64자) | 오류 |
 | `[rcm].context` | `[A-Za-z0-9][A-Za-z0-9_./-]*`, 100자 | 오류 |
 | `[rcm].priority` | `low` · `normal` · `high` | 오류 |
 | 초 값 | 정수. `pickup` 60~3600, `queue` 60~86400, `run` 60~86400, `poll` 10~300 | 오류 |
 | `platforms` 의 키 | 워크플로가 넘긴 갈래 이름(`--legs ubuntu,macos`) 안에 있어야 한다 | 오류. 빠진 갈래는 `"rcm"` |
-| `branches[].base` · `push[]` | git ref 이름 규칙(`core/gitref.py` 와 같은 보수적 부분집합) | 오류 |
+| `mode = "rcm"` 이고 `fallback = "github"` | `"rcm"` 갈래가 하나 이상 있어야 한다 | 오류. 대신 돌 갈래가 없으면 `fallback = "none"` 이라고 적으라고 말한다 |
+| `push[]` | git ref 이름 규칙(`core/gitref.py` 와 같은 보수적 부분집합) | 오류 |
 
-파일이 없으면 `mode = "github"` 다. 오늘과 똑같이 돈다.
+파일이 없으면 `mode = "github"` 다. 오늘과 똑같이 돈다. 앞 판에 있던 기준 브랜치별 덮어쓰기(`[[branches]]`)는 쓰는 곳이
+없어 뺐다(§8).
 
 ### 2.3 모드를 정하는 순서 (결정 178)
 
@@ -215,44 +222,65 @@ mode = "both"
 
 | 순서 | 조건 | 모드 | 이유 |
 |---|---|---|---|
-| 1 | 포크에서 온 PR(head 레포 ≠ base 레포) | `github` | 남의 코드를 빌드 머신에서 돌리지 않는다. 포크 PR 의 `GITHUB_TOKEN` 은 읽기 전용이라 `taken-over` 도 못 쓴다 |
-| 2 | 저장소 변수 `RCM_CI_MODE` 가 `github` · `rcm` · `both` | 그 값 | 커밋 없이 전부를 한 번에 돌린다. 운영 rcm 이 고장 났을 때 쓰는 손잡이다(§3.6) |
-| 3 | 파일이 없다 | `github` | 오늘의 동작 |
-| 4 | 파일이 틀렸다 | `github` + 경고 주석 | 검사를 빼먹는 쪽으로 넘어지지 않는다. 전부 GitHub 에서 돈다 |
-| 5 | push 이벤트이고 브랜치가 `[rcm].push` 에 없다 | `github` | |
-| 6 | `[[branches]]` 에 기준 브랜치가 맞는 항목이 있다 | 그 항목의 `mode` | PR 은 base 브랜치, push 는 그 브랜치가 기준이다 |
-| 7 | 그 밖 | 맨 위 `mode` | |
+| 1 | `schedule` 이벤트 | `github`, 모든 갈래 | 주 1회 GitHub 전체 실행이다(결정 194). 감시는 이 이벤트를 보지 않는다 |
+| 2 | 포크에서 온 PR(head 레포 ≠ base 레포), head 레포가 비어 있음(지워진 포크), PR 을 연 계정이 `dependabot[bot]` | `github` | 남의 코드를 빌드 머신에서 돌리지 않는다. 이 셋은 `GITHUB_TOKEN` 이 읽기 전용이라 `taken-over` 도 못 쓴다(쓰면 403) |
+| 3 | 저장소 변수 `RCM_CI_MODE` 가 `github` · `rcm` · `both` | 그 값 | 커밋 없이 전부를 한 번에 돌린다. 운영 rcm 이 고장 났을 때 쓰는 손잡이다(§3.6) |
+| 4 | 파일이 없다 | `github` | 오늘의 동작 |
+| 5 | 파일이 틀렸다 | `github` + 경고 주석 | 검사를 빼먹는 쪽으로 넘어지지 않는다. 전부 GitHub 에서 돈다 |
+| 6 | push 이벤트이고 브랜치가 `[rcm].push` 에 없다 | `github` | |
+| 7 | 그 밖 | 파일의 `mode` | |
+
+저장소 변수가 없으면(API 404) 덮어쓰기도 없다. 모르는 값이면 무시하고 경고 주석을 남긴다. 이 변수는 오너가
+바꾼다. 급할 때는 세션도 바꾸되, 바꾼 사실과 이유를 그 일의 PR 댓글로 남긴다.
 
 `resolve()` 는 `Route(mode, why, now, late, wait, fallback, context)` 를 돌려준다. `now` 는 지금 GitHub 에서 돌
 갈래, `late` 는 rcm 이 답을 못 낼 때 GitHub 에서 돌 갈래다.
 
 | 모드 | `wait` | `now` | `late` |
 |---|---|---|---|
-| `github` | false | 모든 갈래 | 없음 |
+| `github` | false | 모든 갈래(`rcm-only` 도) | 없음 |
 | `rcm`, fallback `github` | true | `platforms` 가 `github` 인 갈래 | `platforms` 가 `rcm` 인 갈래 |
 | `rcm`, fallback `none` | true | `platforms` 가 `github` 인 갈래 | 없음 |
 | `both` | true | 모든 갈래 | 없음 |
 
+`github` 모드는 `rcm-only` 갈래도 GitHub 에서 돌린다. 그래서 저장소 변수로 `github` 를 걸면 그동안은 macOS 러너를 다시
+기다린다.
+
 ### 2.4 커밋 상태 계약 `rcm/ci` (결정 179 · 180)
 
 상태 이름은 설정의 `context` 다. 기본 `rcm/ci`. 설명(description)의 첫 낱말이 단계를 말한다. 형식은
-`<낱말> · #<잡 번호> · <짧은 문장>` 이고 140자에서 자른다. 잡 번호가 없으면 가운데 칸을 뺀다. `target_url` 은 rcm
-잡 링크다. 공유기 밖에서는 열리지 않지만 숨길 정보가 아니다.
+`<낱말> · #<잡 번호> · <짧은 문장>` 이고 140자에서 자른다. 잡 번호가 없으면 가운데 칸을 뺀다.
+
+`target_url` 은 기본으로 비운다. rcm 잡 링크는 공유기 밖에서 열리지 않고, public 레포의 커밋 상태에 내부 호스트 이름과
+포트를 드러낸다. 잡 번호는 설명에 있다. 링크가 필요한 private 레포는 감시 설정 `job_url = true` 로 켠다.
 
 | state | 첫 낱말 | 누가 올리나 | 뜻 | 대기 잡의 판단 |
 |---|---|---|---|---|
 | `pending` | `queued` | 감시 | rcm 큐에 들어갔다 | `queue_seconds` 까지 기다린다 |
 | `pending` | `running` | 감시 | 레인이 집었다 | `run_seconds` 까지 기다린다 |
 | `success` | `passed` | 훅(훅이 놓치면 감시) | `succeeded` | 통과 |
-| `failure` | `failed` | 훅(훅이 놓치면 감시) | `failed` 이고 종료 코드가 있다 | 실패. 대신 돌리지 않는다 |
-| `error` | `unavailable` | 감시 · 훅 | rcm 이 판정을 못 냈다. 제출 실패, 서버 없음, 워커 다운, `lost`, `timed_out`, 준비 실패(종료 코드 없는 `failed`), 사람이 한 취소 | 바로 대신 돈다 |
+| `failure` | `failed` | 훅(훅이 놓치면 감시) | `failed` 이고 종료 코드가 있으며 75 가 아니다 | 실패. 첫 실행에서는 대신 돌리지 않는다 |
+| `error` | `unavailable` | 감시 · 훅 | rcm 이 판정을 못 냈다. 제출 실패, 서버 없음, 워커 다운, 큐 정지, `lost`, `timed_out`, 준비 실패(종료 코드 없는 `failed`, 도구 없음 포함), 환경 탓 실패(종료 코드 75), 사람이 한 취소 | 바로 대신 돈다 |
 | `error` | `superseded` | 훅 | 같은 브랜치의 새 커밋이 이 잡을 치웠다 | 바로 대신 돈다. 보통은 GitHub 의 `concurrency` 가 이 대기 잡을 먼저 취소한다 |
 | `error` | `taken-over` | 대기 잡 | GitHub 이 넘겨받았다 | 다시 돌린 실행이 이것을 보면 바로 대신 돈다 |
 
-판단의 원칙은 둘이다. 첫째, `failure` 는 코드에 대한 판정이라 대신 돌리지 않는다. 다시 돌려 초록을 얻으려는 길을
-열어 두면 깨진 시험이 운으로 통과한다. 둘째, rcm 이 판정을 못 낸 경우는 전부 `error` 로 모은다. `timed_out` 도
-여기에 넣는다. `rcm wait` 가 시간 초과를 1(실패)이 아니라 2 로 돌려주는 것과 같은 생각이다. 빌드 머신이 바빠서
-늦은 것을 코드의 잘못으로 부르지 않는다.
+판단의 원칙은 셋이다.
+
+첫째, `failure` 는 코드에 대한 판정이라 첫 실행에서는 대신 돌리지 않는다. 대신 GitHub 의 「Re-run」 은 사람의
+탈출구로 남긴다. 다시 돌린 실행은 rcm 의 판정을 보지 않고 GitHub 의 대체 갈래로 판정한다(§2.5 1단계). rcm 레포에서
+그 갈래는 ubuntu 뿐이라서 macOS 에서만 깨지는 변경은 다시 돌리기로 통과할 수 있다. 이것은 사람이 「rcm 의 빨강이 틀렸다」
+고 판단했을 때 쓰라고 둔 길이다. rcm 에서 다시 판정받고 싶으면 새 커밋을 push 한다. 빈 커밋도 된다.
+
+둘째, rcm 이 판정을 못 낸 경우는 전부 `error` 로 모은다. `timed_out` 도 여기에 넣는다. `rcm wait` 가 시간 초과를
+1(실패)이 아니라 2 로 돌려주는 것과 같은 생각이다. 빌드 머신이 바빠서 늦은 것을 코드의 잘못으로 부르지 않는다. 그
+대가도 적는다. 시험이 멈추는 회귀는 `timed_out` 이 되어 GitHub 으로 넘어간다. 그 회귀가 macOS 에서만 멈춘다면 ubuntu
+갈래가 통과시켜 그대로 머지될 수 있다.
+
+셋째, 환경 탓 실패는 실패가 아니다. 디스크가 찼거나, PyPI 에 닿지 못했거나, 도구가 없거나, Chrome 이 뜨지 않거나,
+로컬 네트워크 권한이 없어서 깨진 잡을 `failure` 로 부르면 rcm 의 빨강 하나가 dev 머지를 막는다(§3.6). 잡 스크립트는
+준비 단계(`isolate` · `venv` · 도구 확인)의 실패를 종료 코드 75(`EX_TEMPFAIL`)로 끝내고, 훅은 그것을 `unavailable · infra`
+로 올린다(결정 189). 시험 단계 안에서 환경 때문에 깨진 것은 이 장치로 가려지지 않는다. 그런 빨강이 보이면 §3.6 의
+손잡이를 쓴다.
 
 `queued` 와 `running` 의 경과는 GitHub 이 붙인 상태의 `created_at` 으로 잰다. 대기 잡이 늦게 떠도, 다시 돌려도
 같은 시계다. `creators` 를 정했으면 그 계정이 올린 상태만 본다. `taken-over` 는 예외로 `github-actions[bot]` 이
@@ -265,36 +293,60 @@ mode = "both"
 
 ```yaml
 # ci.yml (틀). 무거운 잡은 checks.yml 로 옮긴다
+on:
+  pull_request: { branches: [main, dev] }
+  push: { branches: [main, dev] }
+  schedule: [{ cron: "0 18 * * 0" }]   # 주 1회(월 03시 KST). 기본 브랜치 main 의 ci.yml 로 돈다
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  route:            # .rcm/ci.toml → outputs: mode · wait · now · late · context · sha · why
+  route:            # head sha 를 체크아웃해 .rcm/ci.toml 을 읽는다(merge 커밋이 아니다)
+                    # schedule 이면 ref = dev(명시), mode = github, now = 모든 갈래
+                    # outputs: mode · wait · now · late · context · sha · ref · why
   rcm:              # needs: route · if: needs.route.outputs.wait == 'true'
                     # permissions: statuses: write · timeout-minutes: 120
-                    # outputs: result(pass|fail|fallback) · reason · job · url
+                    # outputs: result(pass|fail|fallback) · reason · job. result 가 fail 이면 종료 1
   now:              # needs: route · if: needs.route.outputs.now != ''
     uses: ./.github/workflows/checks.yml
-    with: { legs: "${{ needs.route.outputs.now }}" }
+    with: { legs: "${{ needs.route.outputs.now }}", ref: "${{ needs.route.outputs.ref }}" }
   late:             # needs: [route, rcm]
-                    # if: always() && needs.route.outputs.late != '' &&
-                    #     (needs.rcm.outputs.result == 'fallback' || needs.rcm.result == 'failure')
+                    # if: !cancelled() && needs.route.outputs.late != '' &&
+                    #     (needs.rcm.outputs.result == 'fallback' ||
+                    #      (needs.rcm.result != 'success' && needs.rcm.outputs.result == ''))
     uses: ./.github/workflows/checks.yml
-    with: { legs: "${{ needs.route.outputs.late }}" }
+    with: { legs: "${{ needs.route.outputs.late }}", ref: "${{ needs.route.outputs.ref }}" }
   test:             # name: test · needs: [route, rcm, now, late] · if: always()
-                    # 판정은 rcm_ci_wait.py verdict 가 needs 의 결과와 출력으로 한다
+                    # 판정은 rcm_ci_wait.py verdict 가 needs 의 결과 · 출력과 rcm/ci 의 최신 상태로 한다
 ```
 
-`checks.yml` 은 `on: workflow_call` 이고 입력 `legs`(쉼표로 이은 갈래 이름)를 받는다. 안의 잡마다 자기 갈래를
-`if: contains(format(',{0},', inputs.legs), ',ubuntu,')` 처럼 확인한다. `jobs.<id>.if` 는 `inputs` 는 보고 `matrix`
-는 못 보기 때문에 갈래가 다른 matrix 잡은 갈래마다 따로 둔다. 체크 이름은 `now / unit (3.11)` 처럼 호출한 잡
-이름이 앞에 붙는다. 이 표시 방식과 「빈 matrix 는 오류」는 문서에서 찾지 못했다. PR B 의 draft 실험으로 잠근다(§7).
+`late` 의 조건은 둘을 받는다. 대기 잡이 `fallback` 을 냈을 때, 그리고 대기 잡이 출력도 없이 죽었을 때다. 대기 잡이
+`fail` 을 내고 종료 1 로 끝난 경우는 출력이 있어서 `late` 가 돌지 않는다. `late` 는 `always()` 대신 `!cancelled()` 를
+쓴다. 실행 전체가 취소되면 대체도 돌지 않는다. `test` 는 `always()` 그대로다.
+
+`checks.yml` 은 `on: workflow_call` 이고 입력 둘(`legs`: 쉼표로 이은 갈래 이름, `ref`: 체크아웃할 ref)과 출력 하나
+(`ran`)를 갖는다.
+
+- 첫 잡 `legs` 가 입력을 검사한다. 비어 있거나 모르는 갈래 이름이 있으면 실패한다.
+- 안의 잡마다 자기 갈래를 `if: contains(format(',{0},', inputs.legs), ',ubuntu,')` 처럼 확인한다. `jobs.<id>.if` 는
+  `inputs` 는 보고 `matrix` 는 못 보기 때문에 갈래가 다른 matrix 잡은 갈래마다 따로 둔다.
+- 마지막 잡 `ran` 은 `if: always()` 로 모든 잡을 기다린 뒤, 안의 잡이 실제로 success 로 끝난 갈래의 목록을 출력한다.
+  건너뛴 잡은 호출한 쪽에 success 로 보인다(GitHub 문서). 그래서 호출 잡의 결과만 보고는 「돌아서 통과했다」와
+  「아무것도 안 돌았다」를 가르지 못한다. `verdict` 는 `ran` 이 `route` 가 정한 `now` · `late` 와 같은지 본다.
+
+체크 이름은 `now / unit (3.11)` 처럼 호출한 잡 이름이 앞에 붙는다. 이 표시 방식, 빈 matrix 의 동작, 안의 잡이 전부
+건너뛰었을 때 호출 잡의 결과는 문서에서 확인하지 못했다. PR B 의 draft 실험으로 잠근다(§7).
+
+`schedule` 은 기본 브랜치(main)의 `ci.yml` 로 돌고 `GITHUB_SHA` 도 main 의 커밋이다. 그래서 `route` 가 `ref = dev` 를
+명시해 넘기고 `checks.yml` 이 그 ref 를 체크아웃한다. 잡 정의는 main 의 것이고 코드는 dev 의 것이다. 이 실행은 PR 에
+붙지 않아 머지를 막지 않는다. 실패하면 GitHub 이 워크플로 실패 알림을 보내고 요약에 갈래별 결과를 남긴다(결정 194).
+`schedule` 이 든 `ci.yml` 이 main 에 들어간 뒤, 곧 다음 릴리스부터 돈다.
 
 대기 잡 `rcm` 의 순서다.
 
-1. `github.run_attempt > 1` 이면 바로 `fallback`(사유 `rerun`)이다. 다시 돌리기는 GitHub 에서 돈다. rcm 에서 다시
-   돌리려면 세션이 `rcm run rcm-ci --ref <브랜치>` 를 친다.
+1. `github.run_attempt > 1` 이면 API 를 부르지 않고 바로 `fallback`(사유 `rerun`)이다. §2.4 의 첫째 원칙대로 사람의
+   탈출구다.
 2. `poll_seconds` 마다 `GET /repos/{repo}/commits/{sha}/statuses` 를 ETag 와 함께 부른다. 응답은 새것부터다. 그
    context 의 가장 새 상태 하나만 본다. sha 는 PR 이면 `github.event.pull_request.head.sha`, push 면 `github.sha` 다.
 3. 상태가 없으면 `pickup_seconds` 까지 기다린다. 넘으면 `fallback`(`no_pickup`).
@@ -303,22 +355,32 @@ jobs:
    Actions run <id>` 를 올리고 `fallback`(`queued_too_long` · `run_too_long`)이다.
 6. API 오류는 다시 묻는다. 오류가 `pickup_seconds` 동안 이어지면 `fallback`(`api_error`)이다.
 7. `fallback` 이고 설정이 `fallback = "none"` 이면 결과는 `fail` 이고 사유를 그대로 싣는다.
+8. 결과가 `fail` 이면 출력을 쓴 뒤 종료 1 로 끝난다. 그래야 실행 화면에서 이 잡이 빨강으로 보인다.
 
-판정 `test` 의 표다. 표에 없는 조합은 실패다.
+`verdict` 는 마지막에 `rcm/ci` 의 최신 상태를 한 번 더 읽는다. `run_attempt` 가 1 인데 그 상태가 `failure` 면 다른 조건과
+상관없이 실패다. 대기 잡이 시한을 넘겨 `taken-over` 를 올리는 순간과 훅이 `failed` 를 올리는 순간이 겹치는 경우를 막는다.
+
+판정 `test` 의 표다. 「`ran` 일치」는 `checks.yml` 이 낸 `ran` 이 `route` 의 갈래 목록과 같다는 뜻이다. 표에 없는 조합은
+실패다.
 
 | 모드 | `rcm` 결과 | GitHub 잡 | `test` |
 |---|---|---|---|
-| `github` | 건너뜀 | `now` success | 통과 |
-| `rcm` | `pass` | `now` success 또는 건너뜀 | 통과 |
-| `rcm` | `fail` | 무관 | 실패, 「rcm #N failed」와 링크 |
-| `rcm` | `fallback` | `late` success, `now` success 또는 건너뜀 | 통과, 요약에 대체 사유 |
-| `rcm` | 잡 자체가 죽음(`needs.rcm.result == 'failure'`) | `late` success | 통과, 요약에 「waiter crashed」 |
-| `both` | `pass` 또는 `fallback` | `now` success | 통과 |
+| `github`(schedule 포함) | 건너뜀 | `now` success · `ran` 일치 | 통과 |
+| `rcm` | `pass` | `now` 가 없거나 success · `ran` 일치 | 통과 |
+| `rcm` | `fail`(첫 실행) | 무관 | 실패, 「rcm #N failed」 |
+| `rcm` | `fallback` | `late` success · `ran` 일치, `now` 가 없거나 success · `ran` 일치 | 통과, 요약에 대체 사유 |
+| `rcm` | 대기 잡이 출력 없이 죽음 | `late` success · `ran` 일치 | 통과, 요약에 「waiter crashed」 |
+| `rcm` | `fallback` | `late` success 인데 `ran` 이 비어 있음 | 실패 |
+| `both` | `pass` 또는 `fallback` | `now` success · `ran` 일치 | 통과 |
 | `both` | `fail` | 무관 | 실패 |
 | 아무 모드 | `route` 가 success 가 아님 | 무관 | 실패 |
 
-판정 결과와 사유와 rcm 잡 링크는 `GITHUB_STEP_SUMMARY` 에 표로 남는다. 대기 잡이 GitHub 러너 하나를 최대 2시간
+판정 결과와 사유와 rcm 잡 번호는 `GITHUB_STEP_SUMMARY` 에 표로 남는다. 대기 잡이 GitHub 러너 하나를 최대 2시간
 붙잡는다. public 레포라 돈은 들지 않는다. 동시 잡 한도(무료 계정 20개, macOS 5개) 가운데 하나를 쓴다.
+
+대체가 일어나면 `rcm/ci` 는 `error` 로 남아 PR 화면에 빨간 X 가 하나 보이고 `gh pr checks` 는 0 이 아닌 코드로 끝난다.
+필수 체크는 `test` 하나다. 그래서 머지 판단은 `gh pr checks --required` 로 해야 한다. 이 조건은 pr 스킬과 AGENTS.md 에
+적고, 지금 다른 PR 로 만들고 있는 머지 관문(R14, `merge_pr.py`)에 넘긴다(§9 B).
 
 ### 2.6 rcm 쪽: 감시 스크립트가 잡을 낸다 (결정 183 · 184 · 192)
 
@@ -326,17 +388,25 @@ jobs:
 것은 이쪽이다. 세션은 push 하고 PR 을 열기만 하면 된다. (a) 세션이 직접 `rcm run rcm-ci --ref <브랜치>` 를 쳐도
 된다. 같은 프리셋 · 같은 입력 · 같은 sha 라 감시 스크립트의 제출이 그 잡에 합류한다. 두 번 돌지 않는다.
 
-`rcm_ci_watch.py` 는 launchd 가 60초마다 한 번 부르는 짧은 프로세스다. 겹쳐 뜨면 뒤에 뜬 것은 잠금을 못 얻고
-조용히 끝난다. 스크립트와 설정은 `~/.config/rcm/scripts/` 에 둔다. launchd 아래에서는 `~/Documents` 가 막히기
-때문이다.
+`rcm_ci_watch.py` 는 launchd 가 60초마다 한 번 부르는 짧은 프로세스다. 스크립트와 설정은 `~/.config/rcm/scripts/` 에
+둔다. launchd 아래에서는 `~/Documents` 가 막히기 때문이다.
+
+멈추지 않게 하는 장치를 먼저 적는다.
+
+- GitHub HTTP 요청은 15초, `rcm` 하위 프로세스는 60초에서 끊는다. 끊긴 요청은 그 바퀴의 그 일만 건너뛴다.
+- 겹쳐 뜨면 뒤에 뜬 것은 잠금을 못 얻고 조용히 끝난다. 잠금이 10분 넘게 잡혀 있으면 앞 프로세스가 멈춘 것으로 본다.
+  로그에 `lock stale` 을 크게 남기고 잠금을 빼앗는다.
+- 한 바퀴 전체도 50초에서 끊는다. 다음 바퀴가 이어서 한다.
 
 한 바퀴에 하는 일이다.
 
-1. 저장소 변수 `RCM_CI_MODE` 를 읽는다(5분 캐시).
-2. 후보를 모은다. 열린 PR 가운데 head 레포가 base 레포와 같은 것의 head(sha · 브랜치 · base · PR 번호 · 주소)다.
-   그리고 `ci-watch.toml` 의 `branches` 에 적은 브랜치의 head 가운데 그 커밋의 `.rcm/ci.toml` 이 `[rcm].push` 에
-   그 브랜치를 넣은 것이다. 목록 조회는 ETag 를 붙인다.
-3. 이미 다룬 sha 는 건너뛴다. 처음 보는 sha 는 그 커밋의 `.rcm/ci.toml` 을 읽어 `resolve()` 한다(sha 별 캐시).
+1. 저장소 변수 `RCM_CI_MODE` 를 읽는다(5분 캐시). 404 면 덮어쓰기가 없다.
+2. 후보를 모은다. 열린 PR 가운데 head 레포가 base 레포와 같고, head 레포가 비어 있지 않고, 연 계정이
+   `dependabot[bot]` 이 아닌 것의 head(sha · 브랜치 · base · PR 번호)다. 그리고 `ci-watch.toml` 의 `branches` 에 적은
+   브랜치의 head 가운데 그 커밋의 `.rcm/ci.toml` 이 `[rcm].push` 에 그 브랜치를 넣은 것이다. 목록 조회는 ETag 를 붙인다.
+3. 이미 다룬 sha 는 건너뛴다. 처음 보는 sha 는 그 커밋의 `.rcm/ci.toml` 을 contents API 로 읽어 `resolve()` 한다(sha 별
+   캐시). 읽지 못하면(파일 오류가 아니라 API 오류) `error unavailable · watcher_config` 를 바로 올리고 다룬 것으로 적는다.
+   GitHub 이 곧바로 대신 돈다. 파일이 틀린 경우는 `resolve()` 가 `github` 로 정하므로 아무것도 올리지 않는다.
    `wait` 가 아니면 「github 로 다룸」으로 적고 끝낸다.
 4. 그 sha 에 이미 그 context 의 상태가 있으면 다른 누가 이미 다뤘다. 적고 끝낸다.
 5. 낸다. 아래 명령의 JSON 한 줄에서 `job_id` · `sha` · `joined` 를 읽는다.
@@ -352,7 +422,8 @@ jobs:
    사유는 종료 코드와 stderr 첫 줄에서 고른 코드다(`server_unreachable` · `unknown_preset` · `ref_not_found` 등).
 7. 다룬 잡을 따라간다. `GET /jobs/{id}`(토큰이 필요 없다)로 상태를 본다.
    - `running` 이 되면 `pending running · #N` 을 한 번 올린다.
-   - `reason` 이 `worker_down` 으로 120초를 넘기면 `error unavailable · worker_down` 을 올리고 잡을 취소한다.
+   - `reason` 이 `worker_down` 이나 `paused` 로 이어지면 각각 120초 · 300초 뒤 `error unavailable · <reason>` 을 올리고
+     잡을 취소한다. 큐 정지는 사람이 건 것이라 조금 더 기다린다.
    - 종료 상태인데 상태가 120초 넘게 `pending` 이면 훅이 놓쳤다. 같은 대응표(§2.7)로 직접 올린다.
    - 가장 새 상태가 `taken-over` 이고 잡이 아직 안 끝났으면 `rcm cancel N` 한다. 결과가 버려질 잡에 레인을 쓰지
      않는다.
@@ -360,8 +431,9 @@ jobs:
 
 PR 은 head 를 검사한다. GitHub Actions 의 `pull_request` 는 base 와 합친 merge 커밋을 검사하지만 그 sha 는 base 가
 움직일 때마다 바뀌고 커밋 상태는 head sha 에 붙는다. 합친 결과는 dev 에 머지된 뒤의 push 검사가 본다
-(`push = ["dev"]`). 이 차이는 `strict_required_status_checks_policy: false` 인 오늘의 룰셋에서 이미 받아들인 것과
-같다.
+(`push = ["dev"]`). dev 룰셋은 squash 와 rebase 병합도 받으므로 머지 뒤 dev 의 head 는 PR head 와 다른 커밋일 수 있다.
+그 커밋도 dev push 검사가 rcm 에서 본다. 다만 이 결과는 이미 머지된 뒤라 아무것도 막지 않는다. 이 차이는
+`strict_required_status_checks_policy: false` 인 오늘의 룰셋에서 이미 받아들인 것과 같다.
 
 `ci-watch.toml` 은 빌드 머신의 파일이다. 레포에 넣지 않는다.
 
@@ -371,11 +443,12 @@ server = "http://127.0.0.1:8787"
 rcm_token_file = "~/.config/rcm/tokens/ci-watch.rcm"   # rcm 클라이언트 토큰(이름 ci-watch, admin 아님)
 state_dir = "~/.local/state/rcm-ci-watch"
 log_file = "~/Library/Logs/rcm/ci-watch.log"
+job_url = false                               # true 면 rcm 잡 링크를 target_url 에 싣는다(§2.4)
 
 [[repos]]
 github = "monocsp/remote_ci_monitor"
 github_token_file = "~/.config/rcm/tokens/gh-monocsp-ci.token"
-branches = ["dev", "main"]                    # push head 를 볼 브랜치
+branches = ["dev"]                            # push head 를 볼 브랜치
 ```
 
 GitHub API 사용량은 한 바퀴에 목록 두세 번과 새 sha 마다 두 번 정도다. 개인 토큰 한도(시간당 5,000)의 몇 퍼센트다.
@@ -395,22 +468,25 @@ argv = ["/opt/homebrew/bin/python3", "/Users/<user>/.config/rcm/scripts/rcm_ci_s
 timeout_seconds = 60
 ```
 
-대응표는 `rcm_ci_config.terminal_status()` 하나에 있고 감시 스크립트도 같은 함수를 쓴다.
+대응표는 `rcm_ci_config.terminal_status()` 하나에 있고 감시 스크립트도 같은 함수를 쓴다. 설명의 「단계」는
+`RCM_FAILED_STEP` 이 있으면 그것, 없으면 `RCM_LAST_STEP` 이다(두 값 모두 알림 env 에 이미 있다).
 
 | 잡 | 조건 | 올리는 상태 |
 |---|---|---|
 | `RCM_SOURCE_MODE` 가 `git_ref` 가 아니거나 sha 가 빔 | | 아무것도 안 한다. 로그 한 줄 |
 | 가장 새 상태가 `taken-over` | | 아무것도 안 한다. GitHub 이 넘겨받았다 |
 | `succeeded` | | `success passed · #N · <요약>` |
-| `failed` | 종료 코드 있음 | `failure failed · #N · <실패 스텝이나 요약>` |
-| `failed` | 종료 코드 없음(준비 실패) | `error unavailable · #N · could not prepare` |
+| `failed` | 종료 코드 75 | `error unavailable · #N · infra at <단계>` |
+| `failed` | 그 밖의 종료 코드 | `failure failed · #N · <단계나 요약>` |
+| `failed` | 종료 코드 없음(준비 실패, `tool_missing` 포함) | `error unavailable · #N · could not prepare` |
 | `timed_out` | | `error unavailable · #N · timed out` |
 | `lost` | | `error unavailable · #N · lost` |
 | `cancelled` | `GET /jobs/{id}` 의 `cancelled_by` 가 `superseded` | `error superseded · #N · by #M` |
 | `cancelled` | 그 밖 | `error unavailable · #N · cancelled` |
 
 상태를 못 올리면 종료 코드 1 로 끝난다. 그러면 서버의 `notify_failures` 에 잡히고 감시 스크립트가 120초 뒤에 같은
-일을 다시 한다. 토큰은 파일에서 읽어 요청 헤더에만 싣는다. 로그와 오류 문장에는 싣지 않는다.
+일을 다시 한다. GitHub 요청은 15초에서 끊는다. 토큰은 파일에서 읽어 요청 헤더에만 싣는다. 로그와 오류 문장에는 싣지
+않는다. `target_url` 은 감시 설정과 같은 규칙으로 기본은 비운다.
 
 ### 2.8 결정 30 과의 경계: 본체와 스킬 (결정 175)
 
@@ -438,15 +514,20 @@ dolomood 의 `gate-status.sh` 와 `rcm-release-driver` 의 `release_driver.sh` �
 
 | 위험 | 막는 법 |
 |---|---|
-| 포크 PR 의 코드가 빌드 머신에서 돈다 | 감시 스크립트가 같은 레포 브랜치의 PR 만 받는다. `route` 도 포크 PR 은 `github` 로 정한다. 둘 다 시험으로 잠근다(C3 · H4) |
-| GitHub 토큰이 샌다 | 범위를 좁힌 fine-grained 토큰 하나를 빌드 머신 파일(0600)에 둔다. 권한은 그 레포 하나의 Commit statuses 읽기 · 쓰기, Pull requests · Contents · Variables · Metadata 읽기다. 키체인은 launchd 아래에서 못 쓴다. gh 의 활성 계정을 바꾸지 않는다 |
+| 포크 PR 의 코드가 빌드 머신에서 돈다 | 감시 스크립트가 같은 레포 브랜치의 PR 만 받는다. head 레포가 빈 PR(지워진 포크)과 `dependabot[bot]` 의 PR 도 받지 않는다. `route` 도 이 셋을 `github` 로 정한다. 시험으로 잠근다(C3 · C11 · H4) |
+| GitHub 토큰이 샌다 | 범위를 좁힌 fine-grained 토큰 하나를 빌드 머신 파일(0600)에 둔다. 권한은 부록 A.1 이다. 키체인은 launchd 아래에서 못 쓴다. gh 의 활성 계정을 바꾸지 않는다 |
 | rcm 토큰이 샌다 | 감시 전용 클라이언트 토큰 `ci-watch` 를 따로 만든다. admin 이 아니다. GitHub 에는 rcm 토큰을 두지 않는다 |
-| 누가 `rcm/ci` 를 위조한다 | `creators` 를 정하면 그 계정의 상태만 믿는다. 레포에 쓰기 권한이 있는 사람은 어차피 `ci.yml` 을 고칠 수 있으므로 신뢰 경계는 「레포에 push 할 수 있는 사람」 그대로다 |
-| PR 의 코드가 빌드 머신 사용자의 파일을 읽는다 | 막지 못한다. rcm 은 샌드박스가 아니다. 오늘 dolomood 게이트와 세션의 `rcm run` 이 이미 같은 권한으로 돈다. 잡 스크립트는 `HOME` · `XDG_*` · `TMPDIR` 를 워크스페이스로 돌리고 `RCM_*` 환경 변수를 지운다. 이것은 실수를 막는 장치이고 공격을 막는 장치가 아니다 |
+| 누가 `rcm/ci` 를 위조한다 | `creators` 는 「`monocsp` 계정이 올린 상태」만 거른다. 그 계정의 토큰을 쥔 것은 둘이다. 하나는 `gh auth token --user monocsp` 를 쓸 수 있는 모든 세션이다. 다른 하나는 Mac mini 에서 같은 OS 사용자로 도는 모든 프로세스다. 여기에는 rcm 잡 자신, 곧 PR 의 코드가 든다. PR 의 시험 코드가 토큰 파일을 읽어 자기 커밋에 `success` 를 올리는 것을 지금 설계는 막지 못한다. 신뢰 경계는 「이 레포에 push 할 수 있는 사람과 그 사람의 세션」이다. 오늘도 그 사람은 `ci.yml` 을 고쳐 `test` 를 통과시킬 수 있다 |
+| PR 의 코드가 빌드 머신 사용자의 파일을 읽는다 | 막지 못한다. rcm 은 샌드박스가 아니다. 오늘 dolomood 게이트와 세션의 `rcm run` 이 이미 같은 권한으로 돈다. 잡 스크립트는 `HOME` · `XDG_*` · `TMPDIR` 를 돌리고 `RCM_*` 환경 변수를 지운다. 이것은 실수를 막는 장치이고 공격을 막는 장치가 아니다 |
+| 커밋 상태가 내부 주소를 드러낸다 | `target_url` 을 기본으로 비운다(§2.4) |
+
+경계를 좁히는 후속 후보는 셋이다. 이 마일스톤에서는 하지 않는다. 상태 쓰기만 가진 토큰을 훅 전용으로 떼는 것, 토큰
+파일을 훅만 읽게 하는 것(훅을 다른 OS 사용자로 돌린다), `mac2-worker` 를 다른 OS 사용자로 돌려 잡이 토큰 파일에 닿지
+못하게 하는 것이다.
 
 ## 3. rcm 레포에 적용 (첫 사용처)
 
-### 3.1 설정 값 (결정 187)
+### 3.1 설정 값 (결정 187 · 195)
 
 ```toml
 version = 1
@@ -457,7 +538,7 @@ fallback = "github"
 preset = "rcm-ci"
 context = "rcm/ci"
 priority = "low"
-push = ["dev", "main"]
+push = ["dev"]
 creators = ["monocsp"]
 pickup_seconds = 300
 queue_seconds = 1800
@@ -466,16 +547,19 @@ poll_seconds = 30
 
 [platforms]
 ubuntu = "rcm"
-macos = "rcm"
+macos = "rcm-only"
 ```
 
-dev 로 가는 PR, dev push, main 으로 가는 릴리스 PR, main push 가 모두 rcm 에서만 돈다(오너 확정 2026-11-20). 릴리스
-PR 의 head 는 dev 의 head 와 같은 sha 라서 rcm 쪽은 한 번만 돌고 릴리스 PR 의 대기 잡은 이미 올라온 결과를 바로
-옮긴다. GitHub 은 rcm 이 답을 못 낼 때만 돈다.
+dev 로 가는 PR, dev push, main 으로 가는 릴리스 PR 이 모두 rcm 에서만 돈다(오너 확정 2026-11-20). 릴리스 PR 의 head 는
+dev 의 head 와 같은 sha 라서 rcm 쪽은 한 번만 돌고, 릴리스 PR 의 대기 잡은 이미 올라온 결과를 바로 옮긴다. main push 는
+`push` 에 없어서 GitHub 에서 돈다. 릴리스 머지 커밋은 어떤 룰셋도 막지 않으므로 그 결과는 기록일 뿐이다.
 
-앞 판은 릴리스 PR 에 GitHub 을 남기자고 추천했다(`[[branches]] base = "main"`, `mode = "both"`). 오너는 그 추천을
-받지 않았다. 그래서 Mac mini 가 덮지 못하는 Linux 와 Python 3.13 검사가 이 레포에서 사라진다. 이것은 오너가 알고
-고른 위험이고 §3.4 에 적었다.
+rcm 이 답을 못 내면 GitHub 은 ubuntu 갈래(3.11 · 3.13 의 `unit`, `smoke`, `secrets`)만 돌린다(오너 결정 (a)). macOS 갈래는
+`rcm-only` 라서 대체 때 돌지 않는다. macOS 러너를 못 받는 일이 dev 머지를 막지 않게 하려고 이렇게 정했다. 그 대가로 대체된 커밋은
+macOS 를 거치지 않고 머지된다.
+
+앞 판은 릴리스 PR 에 GitHub 을 남기자고 추천했다(`mode = "both"`). 오너는 그 추천을 받지 않았다. 그래서 Mac mini 가
+덮지 못하는 Linux 와 Python 3.13 검사가 평소의 PR 에서 사라진다. 이것은 오너가 알고 고른 위험이고 §3.4 에 적었다.
 
 ### 3.2 프리셋 `rcm-ci` (결정 188)
 
@@ -489,11 +573,12 @@ description = "remote_ci_monitor checks: ruff, pytest, node, mutcheck, smoke, gi
 source_modes = ["git_ref"]
 repo = "rcm"
 pool = "mac2"                         # 오너 확정 2026-11-20
-priority = "low"
+priority = "low"                      # mac2 풀에서는 효과가 없다. 다른 풀로 옮길 때를 위해 둔다
 concurrency_group = "rcm-ci"
 supersede = "all"
 expected_seconds = 1260
-timeout_seconds = 5400
+timeout_seconds = 3300                # run_seconds(3600)보다 짧게. rcm 이 먼저 timed_out 을 낸다
+requires = ["/usr/bin/nice", "git", "node", "gitleaks"]
 argv = ["/usr/bin/nice", "-n", "10", "/bin/bash", "scripts/ci/rcm_ci.sh"]
 [presets.env]
 RCM_CI_PYTHON = "/opt/homebrew/bin/python3.11"
@@ -502,6 +587,14 @@ RCM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 `argv` 는 워크스페이스 안의 스크립트를 부른다. 그래서 검사 단계는 PR 의 코드가 정하고 운영 설정은 프리셋 이름과 풀만
 정한다. `RCM_CHROME` 을 주면 Chrome 시험이 건너뛸 수 없는 필수가 된다(결정 79). 지금 ubuntu 갈래가 하는 일과 같다.
+
+`requires` 에 적은 도구가 워커의 PATH 에 없으면 워커는 잡을 시작하기 전에 `tool_missing` 으로 실패시킨다(종료 코드
+없음). 훅은 그것을 `unavailable · could not prepare` 로 올리고 GitHub 이 대신 돈다. 도구가 없는 것을 코드의 실패로
+부르지 않는다.
+
+`timeout_seconds` 를 대기 잡의 `run_seconds` 보다 짧게 둔 이유가 있다. 앞 판처럼 5400초면 대기 잡이 60분에 넘겨받은 뒤에도
+rcm 이 30분을 더 돈다. 3300초면 rcm 이 먼저 `timed_out` 을 내고 훅이 `unavailable` 을 올려 GitHub 이 곧바로 대신 돈다.
+대기 잡의 `run_seconds` 는 훅이 놓쳤을 때를 위한 바깥 울타리로 남는다.
 
 `pool` 은 오너가 2026-11-20 에 (B) `mac2` 로 확정했다. 두 선택지를 견준 표는 기록으로 남긴다.
 
@@ -513,46 +606,49 @@ RCM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 | 기다림 | dolomood 잡 뒤에 선다 | `rcm-ci` 끼리만 선다 |
 | 필요한 것 | 없음 | `mac2-worker` 가 살아 있어야 한다. 죽으면 `worker_down` 으로 120초 뒤 GitHub 이 대신한다. `worker.toml` 에 `[[repos]] rcm` 이 이미 있다 |
 
-`mac2` 에서도 dolomood 게이트가 조금 느려질 수 있다. 메모리 대역과 디스크는 `nice` 로 양보되지 않는다. 운영 반영 뒤
-1주 동안 `gate` 의 중앙값을 반영 전 1주(9.2분)와 견준다(§7 6).
+`mac2` 에서도 dolomood 게이트가 조금 느려질 수 있다. `nice` 는 CPU 만 양보하고 메모리 대역과 디스크는 양보하지 않는다.
+macOS 의 `taskpolicy -b` 는 디스크와 네트워크까지 낮은 우선순위로 돌린다. 둘 중 무엇을 쓸지는 실기에서 dolomood 게이트의
+시간과 rcm-ci 의 시간을 함께 재고 정한다(§7 10). 반영 뒤 1주 동안 `gate` 의 중앙값을 반영 전 1주(9.2분)와 견준다.
+기본 풀의 둘째 레인이 부하 때문에 보류(`held_by_load`)된 시간도 같이 본다.
 
 ### 3.3 잡 스크립트 `scripts/ci/rcm_ci.sh` (결정 189)
 
 GitHub 의 `unit` · `smoke` · `secrets` 가 하는 일을 한 잡에서 차례로 한다. 단계마다 `::rcm::step::` 를 찍고 실패한
 단계를 `::rcm::fail::` 로 밝힌다. pytest 실패 이름은 `examples/preset/name-failures.sh` 와 같은 방법으로 찍는다(결정 77).
+환경 변수 `RCM_CI_STEPS`(쉼표로 이은 단계 이름)가 있으면 그 단계만 돈다. 시험(J)과 손으로 하는 확인에 쓴다.
 
-| 단계 | 하는 일 | Mac mini 실측(§1.3) |
-|---|---|---|
-| `isolate` | `HOME` · `XDG_CONFIG_HOME` · `XDG_CACHE_HOME` · `XDG_STATE_HOME` · `XDG_DATA_HOME` · `TMPDIR` 를 워크스페이스 아래로. `PIP_CACHE_DIR` 은 원래 자리로 고정한다(설치를 빠르게 둔다). `RCM_CHROME` · `RCM_CI_PYTHON` 밖의 `RCM_*` 를 지운다 | 0초 |
-| `venv` | `$RCM_CI_PYTHON -m venv .venv` · `pip install -e '.[dev]'` | 2.6초 |
-| `lint` | `ruff check .` · `ruff format --check .` | 0.1초 |
-| `test` | `pytest` | 14.0분 |
-| `web` | `node --test tests/web/*.test.js` | 0.6초 |
-| `mutcheck` | `python scripts/mutcheck.py` | 6.7분 |
-| `smoke` | `python -m build --wheel` · `scripts/smoke_install.sh dist/*.whl` | 5.0초 |
-| `secrets` | `gitleaks git --no-banner .` | 0.8초 |
+| 단계 | 하는 일 | 실패하면 | Mac mini 실측(§1.3) |
+|---|---|---|---|
+| `isolate` | `HOME` · `XDG_CONFIG_HOME` · `XDG_CACHE_HOME` · `XDG_STATE_HOME` · `XDG_DATA_HOME` 를 워크스페이스 아래로. `TMPDIR` 는 짧은 경로(`mktemp -d /tmp/rcmci.XXXXXX`, 끝나면 지운다). `PIP_CACHE_DIR` 은 원래 자리로 고정한다. `RCM_CHROME` · `RCM_CI_PYTHON` · `RCM_CI_STEPS` 밖의 `RCM_*` 를 지운다. 도구(`$RCM_CI_PYTHON` · `node` · `gitleaks` · Chrome) 확인 | 종료 75 | 0초 |
+| `venv` | `$RCM_CI_PYTHON -m venv .venv` · `pip install -e '.[dev]'` | 종료 75 | 2.6초 |
+| `lint` | `ruff check .` · `ruff format --check .` | 종료 1 | 0.1초 |
+| `test` | `pytest` | 종료 1 | 14.0분 |
+| `web` | `node --test tests/web/*.test.js` | 종료 1 | 0.6초 |
+| `mutcheck` | `python scripts/mutcheck.py` | 종료 1 | 6.7분 |
+| `smoke` | `python -m build --wheel` · `PYTHON=$RCM_CI_PYTHON scripts/smoke_install.sh dist/*.whl` | 종료 1 | 5.0초 |
+| `secrets` | `gitleaks git --no-banner .` | 종료 1 | 0.8초 |
 
 합계는 20.8분이다. 프리셋의 `expected_seconds` 는 이 값을 넣고 실측 중앙값이 쌓이면 rcm 이 그것을 쓴다.
+
+`smoke_install.sh` 는 `PYTHON` 이 없으면 PATH 의 `python3` 를 쓴다. launchd 아래 워커의 PATH 에서 그것이
+`/usr/bin/python3`(3.9)일 수 있어서 3.11 을 명시한다. `TMPDIR` 를 워크스페이스 아래가 아닌 짧은 경로로 두는 이유는
+macOS 의 유닉스 소켓 경로가 104바이트로 짧기 때문이다. 워크스페이스 경로는 길어서 그 아래에 소켓을 만드는 시험이 깨질
+수 있다. 실기에서 확인한다(§7 3).
 
 `isolate` 가 필요한 이유는 이 시험들이 운영 서버와 같은 사용자, 같은 머신에서 돌기 때문이다. 시험은 이미
 `tests/conftest.py` 가 `XDG_*` 를 임시 폴더로 돌린다(M5q). 그래도 한 시험이라도 실수로 `~/.config/rcm` 이나
 `~/.local/share/rcm` 을 건드리면 운영이 다친다. 스크립트가 한 번 더 막는다. mDNS 로 서버를 찾는 시험이 운영 8787 을
-찾아 말을 걸지 않는지는 실기에서 확인한다(§7 4).
+찾아 말을 걸지 않는지, launchd 아래에서 루프백 멀티캐스트가 되는지는 실기에서 확인한다(§7 3 · 4).
 
-### 3.4 알고 고른 위험: Linux 와 Python 3.13
+### 3.4 알고 고른 위험: Linux 와 Python 3.13 (결정 187 · 194)
 
-rcm 레포의 검사는 이제 평소에 Linux 와 Python 3.13 을 보지 않는다.
-오너가 이 빈틈을 알고 골랐다.
+rcm 레포의 검사는 이제 평소에 Linux 와 Python 3.13 을 보지 않는다. 오너가 이 빈틈을 알고 골랐다.
 
-오너는 2026-11-20 에 dev 로 가는 PR 도, dev 에서 main 으로 가는
-릴리스 PR 도 rcm 에서만 돌리기로 정했다(결정 187). 앞 판은 main 만
-`mode = "both"` 로 두어 GitHub 과 rcm 양쪽에서 돌리자고 추천했다.
-그 추천은 버렸다.
+오너는 2026-11-20 에 dev 로 가는 PR 도, dev 에서 main 으로 가는 릴리스 PR 도 rcm 에서만 돌리기로 정했다(결정 187).
+앞 판은 main 만 `mode = "both"` 로 두어 GitHub 과 rcm 양쪽에서 돌리자고 추천했다. 그 추천은 버렸다.
 
-Mac mini 에는 Python 3.11.15 와 3.14 만 있고 3.13 은 없다. 그래서 잡은
-지원 하한인 3.11 로 돈다. pyproject 의 classifiers 에는 3.11, 3.12, 3.13 이
-적혀 있다. 지금 GitHub 갈래가 하던 일을 Mac mini 에서 할 수 있는지 나누면
-이렇다.
+Mac mini 에는 Python 3.11.15 와 3.14 만 있고 3.13 은 없다. 그래서 잡은 지원 하한인 3.11 로 돈다. pyproject 의
+classifiers 에는 3.11, 3.12, 3.13 이 적혀 있다. 지금 GitHub 갈래가 하던 일을 Mac mini 에서 할 수 있는지 나누면 이렇다.
 
 | GitHub 갈래가 하던 것 | Mac mini 에서 |
 |---|---|
@@ -562,29 +658,30 @@ Mac mini 에는 Python 3.11.15 와 3.14 만 있고 3.13 은 없다. 그래서 �
 | Linux 위의 스모크(Docker 이미지와 같은 OS) | 안 된다 |
 | Python 3.13 | 안 된다 |
 
-그래서 Linux 에서만, 또는 3.13 에서만 깨지는 변경이 dev 를 지나
-릴리스까지 나갈 수 있다. 그런 변경은 Linux 빌드 머신 사용자와 Docker
-이미지 사용자가 먼저 겪을 수 있다.
+그래서 Linux 에서만, 또는 3.13 에서만 깨지는 변경이 dev 를 지나 릴리스 PR 까지 갈 수 있다. 릴리스에서 처음 걸리는 곳은
+`release.yml` 의 스모크다. 이 잡은 태그를 만든 뒤에 ubuntu 와 macOS 에서 Python 3.13 으로 돈다. 그래서 발견이 늦다.
+태그가 이미 서 있고 GitHub Release 가 만들어지지 않은 채로 남는다. 스모크가 잡지 못하는 Linux 쪽 깨짐은 Linux 빌드
+머신 사용자와 Docker 이미지 사용자가 먼저 겪는다. 그리고 README 와 classifiers 가 말하는 「Linux 지원 · 3.11~3.13」,
+`examples/systemd/` 가 전제하는 Linux 서버는 평소의 검사라는 근거를 잃는다.
 
-설계 안에는 이 빈틈을 일부 메우는 장치가 이미 둘 있다. 둘 다 오너가
-따로 확인하지 않아도 생긴다.
+설계 안에는 이 빈틈을 일부 메우는 장치가 셋 있다.
 
-첫째는 대체다. rcm 이 답을 못 내 GitHub 이 대신 돌 때(`late`)는
-ubuntu 3.11 · 3.13 과 macOS 3.13 이 모두 돈다. 30분 문턱으로 돌린
-모의에서는 sha 116개 가운데 5개(약 4%)가 이렇게 넘어갔다. 이 대체로
-Linux 와 3.13 을 보는 것은 보장이 아니라 우연이다.
+첫째는 주 1회 GitHub 전체 실행이다(결정 194, 오너 결정 (b)). 한 주에 한 번 dev 의 head 를 ubuntu 3.11 · 3.13 과 macOS
+3.13 으로 돌린다. 실패하면 알림만 오고 머지는 막지 않는다. 깨진 것을 최대 한 주 늦게 안다.
 
-둘째는 저장소 변수 `RCM_CI_MODE` 다. 사람이 손으로 `both` 를 잠깐 걸어
-두면 그동안의 실행은 GitHub 에서도 돈다.
+둘째는 대체다. rcm 이 답을 못 내 GitHub 이 대신 돌 때(`late`)는 ubuntu 3.11 · 3.13 이 돈다. 30분 문턱으로 돌린 모의에서는
+sha 116개 가운데 5개(약 4%)가 이렇게 넘어갔다. 이 대체로 Linux 와 3.13 을 보는 것은 보장이 아니라 우연이다.
 
-오너 확인 없이 넣지 않은 선택지가 다섯 있다.
+셋째는 저장소 변수 `RCM_CI_MODE` 다. 사람이 손으로 `both` 를 잠깐 걸어 두면 그동안의 실행은 GitHub 에서도 돈다.
+
+오너 확인 없이 넣지 않은 선택지가 다섯 있다. 앞 판의 「주 1회 GitHub 전체 실행」은 오너가 골라 결정 194 가 되었다.
 
 | 선택지 | 메우는 것 | 비용 |
 |---|---|---|
-| 1. 주 1회 GitHub 전체 실행. `ci.yml` 에 `schedule` 트리거를 더하고 `route` 가 schedule 이벤트를 `github` 로 정한다 | dev head 를 한 주에 한 번 Linux · 3.13 · macOS 로 본다 | 한 주에 한 번 러너 약 20~35분. public 레포라 무료다. 깨진 것을 최대 한 주 늦게 안다 |
-| 2. 릴리스 PR 만 GitHub 도. 앞 판의 추천인 `[[branches]] base = "main"`, `mode = "both"` 다 | 릴리스마다 Linux · 3.13 을 본다 | 릴리스 PR 마다 GitHub 실행 하나(최근 200회 중앙값 20.4분). macOS 러너를 못 받으면 그 릴리스가 기다린다 |
-| 3. ubuntu 갈래만 언제나 GitHub. `[platforms] ubuntu = "github"` 다 | 모든 PR 에서 Linux · 3.13 을 본다 | PR 마다 ubuntu 러너 두 개(중앙값 14.5분). ubuntu 러너는 최근 200회 동안 시작까지 p90 0.1분이었고 못 받은 적이 없다 |
-| 4. Mac mini 에 Python 3.13 을 깔고 잡에서 두 버전을 돌린다 | 3.13 만 메운다. Linux 는 메우지 못한다 | 운영 머신의 설치를 바꾼다. 잡 시간이 pytest 한 번(14.0분)만큼 늘어난다 |
+| 1. 릴리스 PR 만 GitHub 도. 앞 판의 추천인 기준 브랜치별 `mode = "both"` 다(`[[branches]]` 를 되살려야 한다) | 릴리스마다 Linux · 3.13 을 본다 | 릴리스 PR 마다 GitHub 실행 하나(최근 200회 중앙값 20.4분). macOS 러너를 못 받으면 그 릴리스가 기다린다 |
+| 2. ubuntu 갈래만 언제나 GitHub. `[platforms] ubuntu = "github"` 다 | 모든 PR 에서 Linux · 3.13 을 본다 | PR 마다 ubuntu 러너 두 개(중앙값 14.5분). ubuntu 러너는 최근 200회 동안 시작까지 p90 0.1분이었고 못 받은 적이 없다 |
+| 3. Mac mini 에 Python 3.13 을 깔고 잡에서 두 버전을 돌린다 | 3.13 만 메운다. Linux 는 메우지 못한다 | 운영 머신의 설치를 바꾼다. 잡 시간이 pytest 한 번(14.0분)만큼 늘어난다 |
+| 4. 이 Mac 에 이미 있는 `python3.14` 로 한 번 더 돌린다 | 3.13 은 메우지 못한다. 다음 버전에서 깨질 것을 미리 본다 | 설치는 바꾸지 않는다. 잡 시간이 14.0분 늘어난다. classifiers 에 3.14 가 없어서 무엇을 약속하는지부터 정해야 한다 |
 | 5. Linux 워커 풀. Linux 기계나 컨테이너에서 `rcm worker` 를 돌린다 | ubuntu 갈래를 rcm 으로 덮는다 | 지금 운영에 Linux 기계가 없다 |
 
 이 가운데 하나를 넣으려면 오너가 고르고 이 문서 §11 에 남긴다.
@@ -593,16 +690,17 @@ Linux 와 3.13 을 보는 것은 보장이 아니라 우연이다.
 
 | 장치 | 효과 |
 |---|---|
-| `priority = "low"` | 같은 풀에서 dolomood 잡(normal · high)이 먼저 집힌다. 기아 보정은 없다(결정 31) |
+| `pool = "mac2"` | dolomood 의 레인 둘을 쓰지 않는다(§3.2 B). 이 표에서 가장 큰 장치다 |
+| `nice -n 10` | 같은 머신의 CPU 를 dolomood 잡에 양보한다. `taskpolicy -b` 는 실기에서 견준다 |
 | `concurrency_group = "rcm-ci"` | `rcm-ci` 는 한 번에 하나만 돈다 |
-| `pool = "mac2"` | dolomood 의 레인 둘을 쓰지 않는다(§3.2 B) |
-| `nice -n 10` | 같은 머신의 CPU 를 dolomood 잡에 양보한다 |
 | `supersede = "all"` | 같은 브랜치에 새 커밋이 오면 옛 잡을 치운다 |
 | `queue_seconds = 1800` | 30분 넘게 기다리면 GitHub 이 넘겨받는다(오너 확정 2026-11-20) |
+| `priority = "low"` | `mac2` 풀에는 `rcm-ci` 만 서므로 지금은 효과가 없다. 기본 풀로 옮기면 dolomood 잡(normal · high)이 먼저 집힌다. 기아 보정은 없다(결정 31) |
 
 지난 GitHub 실행이 들어온 시각을 한 레인 큐에 그대로 흘려 보았다. 같은 sha 는 한 번만 돌고, 같은 브랜치의 옛 잡은
 supersede 로 치우고, 문턱보다 오래 기다린 잡은 GitHub 으로 넘긴다고 두었다. 나흘(실제로는 2.9일) 동안 sha 116개가
-들어왔다. 확정 문턱은 30분이고, 문턱이 15분인 마지막 줄은 앞 판의 값이라 견주려고 남긴다.
+들어왔다. 확정 문턱은 30분이고, 문턱이 15분인 마지막 줄은 앞 판의 값이라 견주려고 남긴다. 이 모의는 앞 판의
+`push = ["dev", "main"]` 과 같은 도착 목록을 썼다. main push 는 몇 번 안 돼서 줄의 숫자가 크게 바뀌지 않는다.
 
 | 문턱 | 한 잡의 시간 | 돈 잡 | 치워진 잡 | GitHub 으로 넘어간 잡 | 기다림 중앙값 · 최대 | 레인이 바쁜 시간 |
 |---|---|---|---|---|---|---|
@@ -618,19 +716,24 @@ dolomood 잡과의 CPU 경쟁은 넣지 않았다. 기다림을 줄이려면 한
 
 ### 3.6 운영 rcm 이 고장 나면 (결정 190)
 
-rcm 레포의 PR 은 운영 rcm 위에서 검사된다. 그런데 운영 rcm 을 고치는 PR 도 rcm 레포의 PR 이다. 경우를 나눈다.
+dev 룰셋에도 필수 체크 `test` 가 걸렸다(§1.1). 그래서 rcm 쪽의 잘못된 빨강이나 대체 경로의 실패는 곧 dev 머지 전면
+정지다. rcm 레포의 PR 은 운영 rcm 위에서 검사되는데, 운영 rcm 을 고치는 PR 도 rcm 레포의 PR 이다. 경우를 나눈다.
 
 | 고장 | 일어나는 일 |
 |---|---|
 | 서버 프로세스가 죽었다 | 감시의 `rcm run` 이 실패한다. `unavailable · server_unreachable` 이 올라가고 GitHub 이 바로 대신 돈다 |
 | Mac mini 가 꺼졌거나 감시가 죽었다 | 상태가 안 온다. 5분 뒤 GitHub 이 대신 돈다 |
 | 서버는 살았는데 `mac2-worker` 가 죽었다 | `worker_down` 이 120초 이어지면 `unavailable` 이고 GitHub 이 대신 돈다 |
-| 서버가 살아서 엉뚱한 초록을 낸다 | 대기 잡은 이것을 못 가린다. 잡은 PR 의 코드와 PR 의 venv 로 돌고 판정은 pytest 의 종료 코드라서 운영 서버의 버그가 끼어들 자리는 종료 코드 전달뿐이다. 릴리스 PR 도 rcm 에서만 돌므로(결정 187) 이 경우를 GitHub 이 다시 보는 장치는 없다. §3.4 의 알고 고른 위험에 들어간다. 알아챈 뒤에는 아래의 저장소 변수로 GitHub 에 돌린다 |
-| PR 이 잡 스크립트를 잘못 고쳐 시험을 건너뛴다 | 잡 스크립트는 PR 안에 있어서 PR 이 자기 검사를 바꿀 수 있다. 오늘의 `ci.yml` 도 PR 안에 있으니 신뢰 경계는 같다. 실수는 J 시험(단계 여덟 개와 순서)이 잡는다. J 시험이 그 실수로 함께 빠지는 경우는 막는 장치가 없다. 릴리스 PR 도 rcm 에서만 돌기 때문이다 |
-| 무엇이든 급하다 | 저장소 변수 `RCM_CI_MODE=github` 하나로 다음 실행부터 전부 GitHub 에서 돈다. 감시도 같은 변수를 읽어 잡을 내지 않는다 |
+| 누가 큐를 정지했다 | `paused` 가 300초 이어지면 `unavailable` 이고 GitHub 이 대신 돈다 |
+| 빌드 머신 환경이 깨졌다(디스크 · 도구 · PyPI) | 준비 단계가 종료 75 로 끝나 `unavailable · infra` 가 되고 GitHub 이 대신 돈다 |
+| rcm 이 엉뚱한 빨강을 낸다(시험 단계 안에서 환경 탓으로 깨짐) | 대기 잡은 이것을 코드의 실패로 받는다. dev 머지가 멈춘다. 저장소 변수 `RCM_CI_MODE=github` 로 GitHub 에 돌리고 원인을 고친다. 그 PR 하나만 통과시키려면 「Re-run」 으로 GitHub 판정을 받는다(§2.4) |
+| rcm 이 엉뚱한 초록을 낸다 | 대기 잡은 이것을 못 가린다. 잡은 PR 의 코드와 PR 의 venv 로 돌고 판정은 pytest 의 종료 코드라서 운영 서버의 버그가 끼어들 자리는 종료 코드 전달뿐이다. 릴리스 PR 도 rcm 에서만 돌므로(결정 187) 이것을 다시 보는 것은 주 1회 GitHub 실행뿐이다(결정 194). 알아챈 뒤에는 저장소 변수로 GitHub 에 돌린다 |
+| PR 이 잡 스크립트를 잘못 고쳐 시험을 건너뛴다 | 잡 스크립트는 PR 안에 있어서 PR 이 자기 검사를 바꿀 수 있다. 오늘의 `ci.yml` 도 PR 안에 있으니 신뢰 경계는 같다. 실수는 J 시험(단계 여덟 개와 순서)이 잡는다. J 시험이 그 실수로 함께 빠지면 주 1회 GitHub 실행이 잡는다 |
+| 대체 경로 자체가 깨졌다(GitHub 러너 장애 · `checks.yml` 오류) | rcm 이 멀쩡하면 영향이 없다. rcm 도 답을 못 내면 dev 머지가 멈춘다. GitHub 장애는 기다리는 수밖에 없다 |
+| 무엇이든 급하다 | 저장소 변수 `RCM_CI_MODE=github` 하나로 다음 실행부터 전부 GitHub 에서 돈다. 감시도 같은 변수를 읽어 잡을 내지 않는다. 오너가 바꾸고, 급할 때는 세션도 바꾸되 PR 댓글로 남긴다 |
 
-운영 rcm 이 위의 처음 세 경우처럼 멈춰 있으면 그것을 고치는 PR 은 대체 경로로 GitHub 에서 검사된다. 그 PR 이 머지돼도 운영은 바로 바뀌지 않는다. 운영은
-릴리스(main)를 거쳐 오너가 반영할 때만 바뀐다.
+운영 rcm 이 위의 처음 다섯 경우처럼 답을 못 내면 그것을 고치는 PR 은 대체 경로로 GitHub 에서 검사된다. 그 PR 이
+머지돼도 운영은 바로 바뀌지 않는다. 운영은 릴리스(main)를 거쳐 오너가 반영할 때만 바뀐다.
 
 ## 4. dolomood 에 미치는 영향 (결정 191)
 
@@ -681,11 +784,13 @@ src/remote_ci_monitor/skills/rcm-ci-connect/
 SCHEMA_VERSION = 1
 MODES = ("github", "rcm", "both")
 FALLBACKS = ("github", "none")
-WHERE = ("github", "rcm")
+WHERE = ("github", "rcm", "rcm-only")
 WORDS = ("queued", "running", "passed", "failed", "unavailable", "superseded", "taken-over")
 DEFAULT_CONTEXT = "rcm/ci"
 DESCRIPTION_LIMIT = 140
 CONFIG_PATH = ".rcm/ci.toml"
+EX_TEMPFAIL = 75                            # 잡 스크립트의 「환경 탓」 종료 코드
+BOT_AUTHORS = ("dependabot[bot]",)
 
 class CiConfigError(Exception): ...         # 문장에 표와 키 이름이 들어간다
 
@@ -702,22 +807,16 @@ class RcmSide:
     poll_seconds: int = 30
 
 @dataclass(frozen=True)
-class BranchRule:
-    base: str
-    mode: str
-
-@dataclass(frozen=True)
 class CiConfig:
     mode: str
     fallback: str
     rcm: RcmSide | None
     platforms: dict[str, str]
-    branches: tuple[BranchRule, ...]
 
 @dataclass(frozen=True)
 class Route:
     mode: str
-    why: str                                # "fork" · "override" · "no_file" · "bad_file" · "push_not_listed" · "branch:<base>" · "default"
+    why: str        # "schedule" · "fork" · "override" · "no_file" · "bad_file" · "push_not_listed" · "default"
     now: tuple[str, ...]
     late: tuple[str, ...]
     wait: bool
@@ -729,36 +828,40 @@ def parse(text: str, *, legs: Sequence[str]) -> CiConfig
 def load(path: Path, *, legs: Sequence[str]) -> CiConfig | None            # 파일 없으면 None
 def resolve(cfg: CiConfig | None, *, event: str, base: str, fork: bool,
             override: str | None, legs: Sequence[str], error: str | None = None) -> Route
+def is_fork(base_repo: str, head_repo: str | None, author: str | None) -> bool   # null head · 봇 포함
 def describe(word: str, job: int | None, text: str) -> str                 # "<word> · #N · text", 140자
 def read_word(description: str | None) -> tuple[str | None, int | None]    # 첫 낱말과 잡 번호
 def terminal_status(state: str, exit_code: int | None, cancelled_by: str | None,
-                    *, job: int, summary: str, failed_step: str | None,
+                    *, job: int, summary: str, step: str | None,
                     successor: int | None) -> tuple[str, str] | None       # (state, description)
 ```
 
-`resolve()` 의 `event` 는 `"pull_request"` 나 `"push"` 다. `base` 는 PR 이면 base 브랜치, push 면 그 브랜치다.
+`resolve()` 의 `event` 는 `"pull_request"` · `"push"` · `"schedule"` 이다. `base` 는 PR 이면 base 브랜치, push 면 그
+브랜치, schedule 이면 무시한다. `terminal_status()` 의 `step` 은 실패 스텝, 없으면 마지막 스텝이다.
 
 ### 5.3 `rcm_ci_wait.py` (GitHub 러너에서, 표준 라이브러리)
 
 ```
-python3 scripts/ci/rcm_ci_wait.py route   --legs ubuntu,macos
+python3 scripts/ci/rcm_ci_wait.py route   --legs ubuntu,macos [--schedule-ref dev]
 python3 scripts/ci/rcm_ci_wait.py wait
 python3 scripts/ci/rcm_ci_wait.py verdict
 ```
 
-입력은 GitHub 이 주는 환경 변수에서 읽는다. `GITHUB_EVENT_NAME` · `GITHUB_EVENT_PATH`(PR 의 base · head 레포 ·
-head sha) · `GITHUB_REPOSITORY` · `GITHUB_SHA` · `GITHUB_REF_NAME` · `GITHUB_RUN_ATTEMPT` · `GITHUB_RUN_ID` ·
+입력은 GitHub 이 주는 환경 변수에서 읽는다. `GITHUB_EVENT_NAME` · `GITHUB_EVENT_PATH`(PR 의 base · head 레포 · head
+sha · 연 계정) · `GITHUB_REPOSITORY` · `GITHUB_SHA` · `GITHUB_REF_NAME` · `GITHUB_RUN_ATTEMPT` · `GITHUB_RUN_ID` ·
 `GITHUB_TOKEN` · `RCM_CI_MODE`(저장소 변수를 워크플로가 넘긴다) · `GITHUB_OUTPUT` · `GITHUB_STEP_SUMMARY` 다. API
-주소는 `GITHUB_API_URL` 을 따른다. 시험은 이 값을 가짜 서버로 돌린다.
+주소는 `GITHUB_API_URL` 을 따른다. 시험은 이 값을 가짜 서버로 돌린다. `route` 를 부르는 단계는 그 전에 head sha 를
+체크아웃한다(PR 이면 `github.event.pull_request.head.sha`).
 
 | 하위 명령 | `GITHUB_OUTPUT` 에 쓰는 것 | 종료 코드 |
 |---|---|---|
-| `route` | `mode` · `wait`(true/false) · `now` · `late`(쉼표로 이은 갈래, 없으면 빈 값) · `context` · `sha` · `why` | 0. 설정 오류도 0 이고 `::warning::` 한 줄 |
-| `wait` | `result`(pass · fail · fallback) · `reason` · `job` · `url` | 0. 판정은 `verdict` 가 한다 |
+| `route` | `mode` · `wait`(true/false) · `now` · `late`(쉼표로 이은 갈래, 없으면 빈 값) · `context` · `sha` · `ref` · `why` | 0. 설정 오류도 0 이고 `::warning::` 한 줄 |
+| `wait` | `result`(pass · fail · fallback) · `reason` · `job` | `fail` 이면 1, 나머지는 0 |
 | `verdict` | 없음. `GITHUB_STEP_SUMMARY` 에 표 | 통과 0, 실패 1 |
 
-`verdict` 는 `NEEDS_JSON`(워크플로가 `toJSON(needs)` 를 넘긴다)을 읽는다. 사유 코드는 `no_pickup` ·
-`queued_too_long` · `run_too_long` · `unavailable` · `superseded` · `taken_over` · `rerun` · `api_error` 다.
+`verdict` 는 `NEEDS_JSON`(워크플로가 `toJSON(needs)` 를 넘긴다)을 읽는다. `now` · `late` 의 `outputs.ran` 도 거기 있다.
+마지막에 `rcm/ci` 의 최신 상태를 한 번 더 읽는다(§2.5). 사유 코드는 `no_pickup` · `queued_too_long` · `run_too_long` ·
+`unavailable` · `superseded` · `taken_over` · `rerun` · `api_error` 다.
 
 ### 5.4 `rcm_ci_watch.py` (빌드 머신, launchd, 표준 라이브러리)
 
@@ -769,57 +872,61 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 `--dry-run` 은 GitHub 과 rcm 에 쓰지 않고 할 일을 줄마다 찍는다. `--check` 는 설정 · 토큰 파일 권한(0600) · rcm 클라이언트 ·
 서버 health · GitHub 토큰 권한을 확인하고 표를 찍는다. 그 표에는 `.rcm/ci.toml` 이 `push` 에 적었는데 `branches` 에
 없는 브랜치가 경고로 나온다. 상태 파일은 `<state_dir>/<owner>__<repo>.json` 이고 sha 마다
-`{job, word, posted_at, first_seen}` 를 둔다. 로그는 한 줄에 한 사건이고 토큰과 토큰 파일 내용은 찍지 않는다.
+`{job, word, posted_at, first_seen}` 를 둔다. 잠금 파일은 같은 폴더의 `<owner>__<repo>.lock` 이고 잡은 시각을 적는다.
+시간 제한은 GitHub 요청 15초, `rcm` 하위 프로세스 60초, 한 바퀴 50초, 잠금 빼앗기 10분이다. 로그는 한 줄에 한 사건이고
+토큰과 토큰 파일 내용은 찍지 않는다.
 
 ### 5.5 `rcm_ci_status.py` (빌드 머신, `[[notify]]`)
 
 인자는 §2.7 의 `argv` 그대로다. 읽는 env 는 `RCM_JOB_ID` · `RCM_STATE` · `RCM_EXIT_CODE` · `RCM_SOURCE_MODE` ·
-`RCM_SOURCE_SHA` · `RCM_SUMMARY` · `RCM_FAILED_STEP` · `RCM_URL` 이다. 종료 코드는 올렸거나 할 일이 없으면 0, 못
-올렸으면 1 이다.
+`RCM_SOURCE_SHA` · `RCM_SUMMARY` · `RCM_FAILED_STEP` · `RCM_LAST_STEP` · `RCM_URL` 이다. `RCM_URL` 은 `--job-url` 을 줄
+때만 `target_url` 에 싣는다. 종료 코드는 올렸거나 할 일이 없으면 0, 못 올렸으면 1 이다.
 
 ### 5.6 워크플로 틀
 
-`ci.yml` 의 잡 이름은 `route` · `rcm` · `now` · `late` · `test` 다. `test` 는 룰셋과 묶여 있어 이름을 바꾸지 않는다.
-`checks.yml` 의 잡은 레포마다 다르다. rcm 레포는 지금의 `unit` · `smoke` · `secrets` 를 옮기되 갈래마다 나눈다
-(`unit` 은 ubuntu 두 버전, `unit-macos` 는 `name: unit` 으로 macOS 하나, `smoke` 와 `smoke-macos`, `secrets`).
-`secrets` 의 gitleaks 는 `ubuntu` 갈래에 속한다.
+`ci.yml` 의 잡 이름은 `route` · `rcm` · `now` · `late` · `test` 다. `test` 는 main · dev 두 룰셋과 묶여 있어 이름을 바꾸지
+않는다. `checks.yml` 의 잡은 레포마다 다르다. 처음과 끝은 같다. 첫 잡 `legs` 가 입력을 검사하고 마지막 잡 `ran` 이
+`if: always()` 로 실제 success 인 갈래 목록을 `workflow_call` 출력 `ran` 으로 낸다. rcm 레포는 지금의 `unit` · `smoke` ·
+`secrets` 를 옮기되 갈래마다 나눈다(`unit` 은 ubuntu 두 버전, `unit-macos` 는 `name: unit` 으로 macOS 하나, `smoke` 와
+`smoke-macos`, `secrets`). `secrets` 의 gitleaks 는 `ubuntu` 갈래에 속한다. 모든 잡은 `inputs.ref` 를 체크아웃한다.
 
 ## 6. 테스트
 
 시험을 먼저 쓴다. GitHub API 는 `tests/ci_fakes.py` 의 작은 `ThreadingHTTPServer` 가 흉내 낸다. 상태 목록 · 상태
-쓰기 · PR 목록 · contents · 저장소 변수 · 브랜치 · ETag 와 304 를 다룬다. rcm 쪽은 실제 서버를 임시 `data_dir` 로
-띄우거나 `rcm` 을 대신하는 가짜 실행 파일을 쓴다. 템플릿은 `tests/test_skills_templates.py` 처럼 저장소 뿌리에서
-부른다.
+쓰기 · PR 목록 · contents · 저장소 변수(404 포함) · 브랜치 · ETag 와 304 를 다룬다. 이 가짜 서버는 `127.0.0.1` 에만 묶고
+요청 로그의 역방향 DNS 조회를 끈다(#235 와 같은 이유). 시계는 주입하고 진짜로 기다리지 않는다. `poll_seconds` 와 시한은
+주입한 시계로 흐른다. rcm 쪽은 실제 서버를 임시 `data_dir` 로 띄우거나 `rcm` 을 대신하는 가짜 실행 파일을 쓴다. 템플릿은
+`tests/test_skills_templates.py` 처럼 저장소 뿌리에서 부른다.
 
 ### C: 설정과 모드 (PR A)
 
 | # | 종류 | 준비 | 기대 |
 |---|---|---|---|
-| C1 | 베스트 | §3.1 의 파일 · dev 로 가는 PR, 그리고 main 으로 가는 PR | 둘 다 `mode=rcm` · `wait=true` · `now` 빔 · `late=ubuntu,macos` · `why=default` |
-| C2 | 베스트 | §2.2 의 예시 파일(`[[branches]] base = "main"`) · main 으로 가는 PR | `mode=both` · `now=ubuntu,macos` · `late` 빔 · `why=branch:main` |
+| C1 | 베스트 | §3.1 의 파일 · dev 로 가는 PR, 그리고 main 으로 가는 PR | 둘 다 `mode=rcm` · `wait=true` · `now` 빔 · `late=ubuntu` · `why=default` |
+| C2 | 베스트 | 같은 파일 · `schedule` 이벤트 · `--schedule-ref dev` | `mode=github` · `now=ubuntu,macos` · `ref=dev` · `why=schedule`. `RCM_CI_MODE=rcm` 이어도 같다 |
 | C3 | 보안 | 같은 파일 · 포크 PR | `mode=github` · `why=fork` |
-| C4 | 우선순위 | `RCM_CI_MODE=github` · 파일은 rcm | `github` · `why=override`. 값이 `lates` 면 무시하고 경고 |
+| C4 | 우선순위 | `RCM_CI_MODE=github` · 파일은 rcm | `github` · `why=override` · `now` 에 `macos` 도 있다. 값이 `lates` 면 무시하고 경고 |
 | C5 | 베스트 | 파일 없음 | `github` · `why=no_file` |
-| C6 | 에러 | 모르는 키 · `version = 2` · `mode = "local"` · `pickup_seconds = 5` · `platforms.windows` | 다섯 다 `github` · `why=bad_file` · `error` 에 표와 키 이름 |
-| C7 | 에러 | `mode = "rcm"` 인데 `[rcm]` 없음 · `[[branches]] mode = "both"` 인데 `[rcm]` 없음 | 둘 다 `bad_file` |
-| C8 | 엣지 | push 이벤트 · 브랜치 `feat/x`(push 목록 밖) | `github` · `why=push_not_listed` |
-| C9 | 엣지 | `platforms.ubuntu = "github"` · dev PR | `now=ubuntu` · `late=macos` |
+| C6 | 에러 | 모르는 키 · `version = 2` · `mode = "local"` · `pickup_seconds = 5` · `platforms.windows` · 남은 `[[branches]]` | 여섯 다 `github` · `why=bad_file` · `error` 에 표와 키 이름 |
+| C7 | 에러 | `mode = "rcm"` 인데 `[rcm]` 없음 · `fallback = "github"` 인데 갈래가 전부 `rcm-only` | 둘 다 `bad_file`. 둘째의 문장에 `fallback = "none"` 이 들어 있다 |
+| C8 | 엣지 | push 이벤트 · 브랜치 `main`(push 목록 밖) | `github` · `why=push_not_listed` |
+| C9 | 엣지 | `platforms.ubuntu = "github"` · `macos = "rcm"` · dev PR | `now=ubuntu` · `late=macos` |
 | C10 | 엣지 | `fallback = "none"` | `late` 빔 |
-| C11 | 엣지 | `[[branches]]` 둘이 같은 base | 첫 항목 |
+| C11 | 보안 | head 레포가 `null` · 연 계정이 `dependabot[bot]` | 둘 다 `github` · `why=fork` |
 | C12 | 표시 | `describe("queued", 12, "x"*300)` · 잡 번호 없음 · 제어문자 | 140자, `queued · #12 · …`, 번호 칸 없음, 제어문자 지움. `read_word` 가 되돌린다 |
-| C13 | 대응 | `terminal_status` 에 §2.7 표의 아홉 줄 | 표와 같다 |
+| C13 | 대응 | `terminal_status` 에 §2.7 표의 열 줄 | 표와 같다. 종료 75 는 `unavailable` 이고 설명에 단계가 있다 |
 
 ### W: 대기 잡 (PR A)
 
 | # | 종류 | 가짜 GitHub 의 상태 순서 | 기대 |
 |---|---|---|---|
-| W1 | 베스트 | 없음 → queued → running → success | `pass` · `job` · `url` |
-| W2 | 베스트 | queued → failure | `fail`, 대신 돌지 않는다 |
+| W1 | 베스트 | 없음 → queued → running → success | `pass` · `job` |
+| W2 | 베스트 | queued → failure | `fail`, 종료 1, 대신 돌지 않는다 |
 | W3 | 대체 | 끝까지 없음 | `pickup_seconds` 뒤 `fallback no_pickup`, `taken-over` 를 올리지 않는다 |
 | W4 | 대체 | queued 가 `queue_seconds` 를 넘김 | `taken-over` 한 번 올리고 `fallback queued_too_long` |
 | W5 | 대체 | running 이 `run_seconds` 를 넘김 | `fallback run_too_long` |
 | W6 | 대체 | error `unavailable` · error `superseded` | 바로 `fallback`, 사유가 첫 낱말 |
-| W7 | 대체 | `GITHUB_RUN_ATTEMPT=2` · 이미 success | API 요청 0, `fallback rerun` |
+| W7 | 탈출구 | `GITHUB_RUN_ATTEMPT=2` · 이미 failure | API 요청 0, `fallback rerun` |
 | W8 | 에러 | 목록이 500 을 계속 냄 | `pickup_seconds` 뒤 `fallback api_error` |
 | W9 | 에러 | 500 두 번 뒤 success | `pass` |
 | W10 | 보안 | `creators=["monocsp"]` · `mallory` 가 올린 success · 뒤에 `monocsp` 의 failure | `fail`(mallory 의 것은 안 본다) |
@@ -831,50 +938,69 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 
 ### V: 판정 (PR A)
 
-§2.5 판정 표의 여덟 줄을 `NEEDS_JSON` 로 넣는다. 그리고 `now` 가 `cancelled` · `late` 가 `skipped` 인데 `rcm` 이
-`fallback` 인 경우(대체해야 하는데 안 돌았다)는 실패다.
+§2.5 판정 표의 아홉 줄을 `NEEDS_JSON` 과 가짜 GitHub 의 최신 상태로 넣는다. 그리고 다음 넷을 더 본다.
+
+| # | 준비 | 기대 |
+|---|---|---|
+| V1 | `rcm` 이 `fallback`, `late` 가 `skipped` | 실패(대체해야 하는데 안 돌았다) |
+| V2 | `rcm` 이 `fallback`, `late` 가 success 인데 `ran` 이 빔 | 실패 |
+| V3 | `rcm` 이 `fallback`, `late` success · `ran=ubuntu` 인데 최신 상태가 `failure`, `run_attempt=1` | 실패 |
+| V4 | V3 과 같은데 `run_attempt=2` | 통과(탈출구) |
 
 ### H: 감시 스크립트 (PR A)
 
 | # | 종류 | 준비 | 기대 |
 |---|---|---|---|
-| H1 | 베스트 | 같은 레포 PR 하나 · 상태 없음 | `rcm run rcm-ci --source git_ref --ref <브랜치> --no-wait --priority low --link … --link-label "PR #7"` 한 번, `queued · #N` 하나 |
+| H1 | 베스트 | 같은 레포 PR 하나 · 상태 없음 | `rcm run rcm-ci --source git_ref --ref <브랜치> --no-wait --priority low --link … --link-label "PR #7"` 한 번, `queued · #N` 하나, `target_url` 없음 |
 | H2 | 베스트 | H1 다음 바퀴, 잡이 running | `running · #N` 한 번. 셋째 바퀴에는 아무것도 안 올린다 |
 | H3 | 베스트 | push 브랜치 dev · 그 커밋의 `push = ["dev"]` | 제출한다. `push` 에 없는 `main` 은 제출하지 않는다 |
-| H4 | 보안 | 포크 PR | 제출 0, 상태 0 |
+| H4 | 보안 | 포크 PR · head 레포 `null` · `dependabot[bot]` 의 PR | 셋 다 제출 0, 상태 0 |
 | H5 | 우선순위 | 저장소 변수 `RCM_CI_MODE=github` | 제출 0 |
 | H6 | 에러 | `rcm run` 이 종료 3(서버 없음) | `unavailable · server_unreachable` |
 | H7 | 에러 | `rcm run` 이 종료 2 와 `unknown preset` | `unavailable · unknown_preset` |
 | H8 | 엣지 | 이미 그 context 의 상태가 있음 | 제출 0 |
 | H9 | 엣지 | 서버가 정한 sha 가 본 sha 와 다름 | 상태는 서버의 sha 에만 |
-| H10 | 엣지 | 잡이 `worker_down` 으로 121초 | `unavailable · worker_down` 과 `rcm cancel N` |
+| H10 | 엣지 | 잡이 `worker_down` 으로 121초 · `paused` 로 301초 | 각각 `unavailable · <reason>` 과 `rcm cancel N` |
 | H11 | 엣지 | 가장 새 상태가 `taken-over` · 잡이 queued | `rcm cancel N` |
 | H12 | 엣지 | 잡이 끝났는데 상태가 121초째 pending(훅 실패) | 대응표로 직접 올린다 |
 | H13 | 엣지 | 두 프로세스가 동시에 뜸 | 하나만 돈다. 다른 하나는 0 으로 끝난다 |
 | H14 | 엣지 | 상태 파일이 깨짐 | 옮겨 두고 새로 시작한다. 이미 상태가 있는 sha 는 H8 이 막는다 |
 | H15 | 보안 | 토큰 파일이 0644 | `--check` FAIL, 평소 실행은 로그 한 줄과 종료 2 |
 | H16 | 로그 | 위의 모든 경우 | 로그와 stderr 에 토큰 문자열이 없다 |
+| H17 | 시간 | 가짜 GitHub 이 응답하지 않음 · 가짜 `rcm` 이 멈춤 | 15초 · 60초에서 끊고 그 일만 건너뛴다. 한 바퀴는 50초 안에 끝난다 |
+| H18 | 시간 | 잠금 파일이 11분 전에 잡혔다 | `lock stale` 로그와 함께 빼앗고 돈다. 9분 전이면 0 으로 끝난다 |
+| H19 | 에러 | contents API 가 500 | `unavailable · watcher_config` 를 바로 올린다. 제출 0 |
+| H20 | 엣지 | 저장소 변수 API 가 404 | 덮어쓰기 없음. 파일의 `mode` 대로 낸다 |
 
 ### N: 알림 훅 (PR A)
 
-§2.7 표의 아홉 줄을 env 로 넣고 가짜 GitHub 이 받은 상태를 본다. 그리고 GitHub 이 500 을 내면 종료 1, `RCM_SOURCE_SHA`
-가 비면 요청 0, 가장 새 상태가 `taken-over` 면 요청이 목록 조회 하나뿐임을 본다.
+§2.7 표의 열 줄을 env 로 넣고 가짜 GitHub 이 받은 상태를 본다. 그리고 GitHub 이 500 을 내면 종료 1, `RCM_SOURCE_SHA`
+가 비면 요청 0, 가장 새 상태가 `taken-over` 면 요청이 목록 조회 하나뿐임을 본다. `RCM_FAILED_STEP` 이 비고
+`RCM_LAST_STEP=test` 면 설명에 `test` 가 들어간다.
 
 ### Y: 워크플로 (PR B)
 
 `tests/test_release_files.py` 의 `ci.yml` 시험을 고친다. `test` 이름 · `if: always()` · `needs` 에 `route` · `rcm` ·
-`now` · `late` 가 있는지, `now` · `late` 가 `checks.yml` 을 부르는지, `checks.yml` 에 `unit` · `smoke` · `secrets` 와
-갈래 `if` 가 있는지, `rcm` 잡에 `statuses: write` 와 `timeout-minutes` 가 있는지, `concurrency` 가 main push 를
-취소하지 않는지를 본다. `scripts/ci/rcm_ci_config.py` · `rcm_ci_wait.py` 가 템플릿과 바이트까지 같은지도 본다.
+`now` · `late` 가 있는지, `late` 가 `always()` 가 아니라 `!cancelled()` 와 §2.5 의 조건을 쓰는지, `now` · `late` 가
+`checks.yml` 을 부르고 `ref` 를 넘기는지, `checks.yml` 에 `legs` · `unit` · `smoke` · `secrets` · `ran` 과 갈래 `if` 가
+있고 `ran` 이 `workflow_call` 출력인지, `route` 가 head sha 를 체크아웃하는지, `schedule` 과 `--schedule-ref dev` 가
+있는지, `rcm` 잡에 `statuses: write` 와 `timeout-minutes` 가 있는지, `concurrency` 가 main push 를 취소하지 않는지를
+본다. `scripts/ci/rcm_ci_config.py` · `rcm_ci_wait.py` 가 템플릿과 바이트까지 같은지도 본다.
 
 ### J: 잡 스크립트 (PR B)
 
+시험은 작은 가짜 프로젝트(임시 폴더의 `pyproject.toml` 과 시험 파일 하나)에서 돈다. 가짜 `pytest` · `ruff` · `gitleaks` ·
+`node` 를 PATH 앞에 두어 받은 인자를 적고 정해 둔 종료 코드를 낸다. `RCM_CI_STEPS` 로 단계를 고른다. 진짜 pytest 를 다시
+돌리지 않는다.
+
 | # | 준비 | 기대 |
 |---|---|---|
-| J1 | `RCM_SERVER` · `RCM_TOKEN` · `RCM_FOLLOWED` 를 준 채 `isolate` 만 돌린다 | 세 변수가 없고 `HOME` 과 `XDG_*` 가 워크스페이스 아래다 |
+| J1 | `RCM_SERVER` · `RCM_TOKEN` · `RCM_FOLLOWED` 를 준 채 `RCM_CI_STEPS=isolate` | 세 변수가 없고 `HOME` 과 `XDG_*` 가 워크스페이스 아래, `TMPDIR` 가 `/tmp/rcmci.` 로 시작하고 끝나면 지워진다 |
 | J2 | `bash -n` · 실행 비트 · `set -euo pipefail` | 통과 |
-| J3 | 일부러 깨진 시험 하나를 둔 임시 사본 | `::rcm::fail::test` 와 그 시험 이름, 종료 1 |
-| J4 | 마커 | `::rcm::steps::8` 과 단계 이름 여덟 개가 위 표의 순서다 |
+| J3 | 가짜 `pytest` 가 실패 이름 하나와 종료 1 | `::rcm::fail::test` 와 그 이름, 종료 1 |
+| J4 | 마커 | `::rcm::steps::8` 과 단계 이름 여덟 개가 §3.3 표의 순서다 |
+| J5 | PATH 에 `gitleaks` 가 없음 · `RCM_CI_PYTHON` 이 없는 경로 · `pip install` 이 실패 | 셋 다 종료 75 와 `::rcm::fail::isolate` 또는 `venv` |
+| J6 | `RCM_CI_STEPS=smoke` | 가짜 `smoke_install.sh` 가 받은 `PYTHON` 이 `$RCM_CI_PYTHON` 이다 |
 
 ### mutcheck 에 더할 변이
 
@@ -882,9 +1008,12 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 |---|---|
 | `resolve` 의 포크 검사를 지운다 | C3 |
 | 설정 오류를 `github` 대신 파일의 `mode` 로 둔다 | C6 |
+| `rcm-only` 갈래를 `late` 에 넣는다 | C1 |
 | 대기 잡이 `failure` 를 `fallback` 으로 읽는다 | W2 |
 | `creators` 거르기를 지운다 | W10 |
+| `verdict` 가 `ran` 을 보지 않는다 | V2 |
 | 훅이 `taken-over` 를 덮는다 | N |
+| 훅이 종료 75 를 `failure` 로 올린다 | C13 · N |
 | 감시 스크립트가 포크 PR 을 받는다 | H4 |
 
 ## 7. 실기 확인 절차
@@ -896,28 +1025,39 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 |---|---|
 | 시험 서버 | PR B 빌드의 venv, 포트 8793, `data_dir = ~/.local/share/rcm-devtest-m5r/data`, `advertise = false`, `lanes = 1`, `[[repos]] rcm`(https), 프리셋 `rcm-ci`(풀 기본), 알림 규칙 `rcm-ci-status` |
 | 감시 | `~/.local/share/rcm-devtest-m5r/ci-watch.toml`(서버 8793, 상태 폴더도 그 아래). launchd 없이 `--once` 로 손으로 돌린다 |
-| GitHub | PR B 의 draft PR. 그 PR 의 커밋에만 `rcm/ci` 가 붙는다. 저장소 변수는 건드리지 않는다 |
+| GitHub | PR B 의 draft PR. 실험 커밋에서만 `.rcm/ci.toml` 을 `mode = "rcm"` · `queue_seconds = 120` 으로 둔다. 마지막 커밋에서 `mode = "github"` 로 되돌린다(§9). 저장소 변수는 건드리지 않는다 |
+| 토큰 | 오너가 부록 A 의 토큰 둘을 B 의 실기 전에 만들어 두면 그것을 쓴다. 아직이면 실기는 세션의 `monocsp` 토큰(`gh auth token --user monocsp`)과 시험 서버에서 만든 클라이언트 토큰을 쓴다고 PR 본문에 밝힌다 |
 
 1. `rcm_ci_watch.py --check` 표가 전부 OK 다.
 2. draft PR 에 push 하고 `--once` 를 돌린다. 시험 서버에 잡이 서고 PR 에 `rcm/ci` queued 가 보인다. 잡이 끝나면 훅이
    passed 를 올리고 `test` 가 초록이다. `now` · `late` 는 건너뜀이다.
-3. 2 의 잡 로그에서 Chrome 시험이 건너뛰지 않고 돌았는지, `node` 와 `gitleaks` 를 PATH 에서 찾았는지 본다. launchd
-   아래에서도 확인하려면 시험 서버를 launchd 에이전트로 한 번 띄워 같은 일을 한다. 운영의 `mac2-worker` 는 launchd
-   아래에서 돌기 때문이다.
+3. 2 의 잡 로그에서 본다. Chrome 시험이 건너뛰지 않고 돌았는가, `node` 와 `gitleaks` 를 PATH 에서 찾았는가, 유닉스
+   소켓을 쓰는 시험이 짧은 `TMPDIR` 에서 통과했는가. launchd 아래에서도 확인하려면 시험 서버를 launchd 에이전트로 한 번
+   띄워 같은 일을 한다. 운영의 `mac2-worker` 는 launchd 아래에서 돌기 때문이다. 루프백 멀티캐스트를 쓰는 mDNS 시험이
+   launchd 아래에서 로컬 네트워크 권한 때문에 깨지지 않는지도 이때 본다.
 4. 2 의 잡이 도는 동안과 끝난 뒤 `find ~/.config/rcm ~/.local/share/rcm -newer <시작 표지>` 가 비어 있다. 운영 서버
    로그(`~/Library/Logs/rcm/server.log`)에 그 시간대의 새 줄이 없다.
-5. 일부러 시험 하나를 깨뜨린 커밋을 push 한다. `rcm/ci` 가 failed 이고 `test` 가 빨강이며 `late` 가 돌지 않는다.
-6. 대체 넷을 차례로 본다.
+5. 일부러 시험 하나를 깨뜨린 커밋을 push 한다. `rcm/ci` 가 failed 이고 `test` 가 빨강이며 `late` 가 돌지 않는다. 그
+   실행을 「Re-run」 하면 대기 잡이 API 를 부르지 않고 `late`(ubuntu)로 간다(탈출구).
+6. 대체를 차례로 본다. `late` 에서 ubuntu 갈래만 돌고 macOS 갈래는 돌지 않는다.
    1. 시험 서버를 멈추고 push 한 뒤 `--once` 를 돌린다. `unavailable · server_unreachable` 이고 `late` 가 돈다.
    2. 감시를 돌리지 않는다. 5분 뒤 `late` 가 돈다.
-   3. 시험 서버를 `rcm pause` 한다. 30분 뒤 `taken-over` 가 올라오고 `late` 가 돈다. 다음 `--once` 가 잡을 취소한다.
-   4. 실패한 실행을 「Re-run」 한다. 대기 잡이 API 를 부르지 않고 바로 `late` 로 간다.
+   3. 시험 서버를 `rcm pause` 한다. 감시를 돌리지 않으면 2분(실험 값 `queue_seconds = 120`) 뒤 `taken-over` 가
+      올라오고 `late` 가 돈다. 다음 `--once` 가 잡을 취소한다. 감시를 돌리면 300초 뒤 `unavailable · paused` 가 먼저 온다.
+   4. 시험 서버의 프리셋 `requires` 에 없는 도구 이름을 하나 넣는다. `unavailable · could not prepare` 이고 `late` 가 돈다.
 7. 같은 브랜치에 커밋 둘을 1분 간격으로 push 한다. 첫 잡이 `superseded` 로 끝나고 첫 실행은 `concurrency` 가 취소한다.
-8. 측정을 남긴다. 2 의 잡 시간(단계별), 대기 잡이 GitHub 러너를 쥔 시간, 감시 한 바퀴의 GitHub 요청 수.
-9. 끝나면 시험 서버를 멈추고 `~/.local/share/rcm-devtest-m5r` 를 통째로 지운다. draft PR 의 상태는 남는다.
+8. 문서에서 확인하지 못한 GitHub 동작을 잠근다. `checks.yml` 의 체크 이름이 어떻게 보이는지, `legs` 가 빈 호출을 건너뛰는지,
+   안의 잡이 전부 건너뛰었을 때 호출 잡의 결과가 무엇인지, `ran` 이 그 경우 비는지, `checks.yml` 의 `secrets` 가
+   `GITHUB_TOKEN` 을 받는지, 대기 잡의 304 응답이 `X-RateLimit-Remaining` 을 줄이지 않는지다.
+9. 측정을 남긴다. 2 의 잡 시간(단계별), 대기 잡이 GitHub 러너를 쥔 시간, 감시 한 바퀴의 GitHub 요청 수.
+10. 시험 서버에서 `rcm-ci` 를 `nice -n 10` 과 `taskpolicy -b` 로 한 번씩 돌리며 같은 시간에 데모 부하 잡을 돌린다. 두 쪽의
+    시간을 남긴다(§3.2).
+11. 끝나면 시험 서버를 멈추고 `~/.local/share/rcm-devtest-m5r` 를 통째로 지운다. draft PR 의 상태는 남는다.
 
-운영 반영(§9 C) 뒤 1주 동안 오너가 볼 것이 하나 더 있다. 반영 전 1주와 뒤 1주의 `gate` 중앙값과 p90, `rcm-ci` 잡 수,
-GitHub 으로 넘어간 수(사유별)다. 운영 DB 는 `sqlite3 -readonly` 로만 읽는다.
+운영 반영(§9 C) 뒤에 오너가 한 번 더 확인한다. 운영에서 `rcm run rcm-ci --ref <B 의 draft 브랜치>` 를 한 번 내서
+`mac2` 워커에서 여덟 단계가 다 돌고 훅이 그 커밋에 passed 를 올리는지 본다(결정 193). 그 뒤 1주 동안 반영 전 1주와 견주어
+`gate` 의 중앙값과 p90, `held_by_load` 시간, `rcm-ci` 잡 수, GitHub 으로 넘어간 수(사유별)를 본다. 운영 DB 는
+`sqlite3 -readonly` 로만 읽는다.
 
 ## 8. 안 만드는 것
 
@@ -938,6 +1078,7 @@ GitHub 으로 넘어간 수(사유별)다. 운영 DB 는 `sqlite3 -readonly` 로
   임시 폴더 · Chrome 공유를 따로 따져야 하는 별도 일이다. 실측이 쌓인 뒤 후속으로 본다.
 - **Linux 워커 풀.** `platforms` 가 받을 수 있게만 두었다. 지금 운영에 Linux 기계가 없다.
 - **PR 코멘트.** 커밋 상태와 링크로 충분하다.
+- **기준 브랜치별 `mode`(`[[branches]]`).** 앞 판에 있었지만 rcm 레포가 쓰지 않아 뺐다. 쓰는 곳이 생기면 되살린다.
 
 ## 9. PR 순서 · 완료 기준
 
@@ -945,14 +1086,19 @@ GitHub 으로 넘어간 수(사유별)다. 운영 DB 는 `sqlite3 -readonly` 로
 |---|---|---|---|
 | 0 | `docs/m5r-ci-location-workplan` | 이 문서 | |
 | A | `feat/m5r-ci-connect-skill` | `skills/rcm-ci-connect/`(§5.1) · `tests/ci_fakes.py` · 시험 C · W · V · H · N · mutcheck 변이 · `docs/configuration.md` 의 스킬 절 · CHANGELOG [Unreleased] ### Added | M5q 의 v0.8.0 다음 릴리스 |
-| B | `ci/m5r-rcm-repo-waits-for-rcm` | `.rcm/ci.toml`(처음에는 `mode = "github"`) · `scripts/ci/`(템플릿 사본 셋과 `rcm_ci.sh`) · `ci.yml` · `checks.yml` · 시험 Y · J · `CONTRIBUTING.md` 의 「Checks」 | 레포 파일이라 릴리스와 무관 |
-| C | 운영(오너) | `presets.rcm-ci.toml` include · `[[notify]] rcm-ci-status` · rcm 토큰 `ci-watch` · GitHub 토큰 파일 · `ci-watch.toml` · launchd 에이전트 | |
+| B | `ci/m5r-rcm-repo-waits-for-rcm` | `.rcm/ci.toml`(마지막 커밋은 `mode = "github"`) · `scripts/ci/`(템플릿 사본 셋과 `rcm_ci.sh`) · `ci.yml`(`schedule` 포함) · `checks.yml` · 시험 Y · J · `CONTRIBUTING.md` 의 「Checks」 · pr 스킬과 AGENTS.md 의 「머지 판단은 `gh pr checks --required`」 | 레포 파일이라 릴리스와 무관 |
+| C | 운영(오너) | 부록 A 의 토큰 둘 · `presets.rcm-ci.toml` include · `[[notify]] rcm-ci-status` · `ci-watch.toml` · launchd 에이전트 · 운영에서 `rcm-ci` 한 번 돌려 보기(§7 끝) | |
 | D | `ci/m5r-rcm-repo-switches-to-rcm` | `.rcm/ci.toml` 의 `mode` 를 `rcm` 으로 | |
 | E | `docs/m5r-plan-and-decisions` | `PLAN.md` 결정 175~ 행 · 이 문서 §11 | |
 
-순서는 A, B, C, D, E 다. B 는 A 의 템플릿을 복사하므로 A 가 dev 에 머지된 뒤다. B 를 `mode = "github"` 로 내는
-이유가 있다. 감시가 아직 없는데 `rcm` 으로 머지하면 모든 PR 이 5분씩 기다린 뒤에 GitHub 으로 넘어간다. B 는 새
-워크플로에서 `route` 와 `now` 가 도는 길만 먼저 검증한다. D 는 C 의 실기가 끝난 뒤 한 줄을 바꾼다.
+순서는 A, B, C, D, E 다. B 는 A 의 템플릿을 복사하므로 A 가 dev 에 머지된 뒤다. B 의 draft 실험 커밋은 `mode = "rcm"` 으로
+§7 을 돌리고, 마지막 커밋에서 `mode = "github"` 로 되돌려 머지한다. 감시가 아직 없는데 `rcm` 으로 머지하면 모든 PR 이
+5분씩 기다린 뒤에 GitHub 으로 넘어가기 때문이다. C 의 끝에 오너가 운영에서 `rcm-ci` 를 한 번 돌려 본다. 그것이 통과해야
+D 로 간다.
+
+`gh pr checks` 는 대체가 일어난 PR 에서 `rcm/ci` 의 error 때문에 0 이 아닌 코드로 끝난다. B 는 pr 스킬과 AGENTS.md 에
+「머지 판단은 `gh pr checks --required` 로 한다(필수는 `test` 하나)」를 적는다. 같은 조건을 지금 다른 PR 로 만들고 있는
+머지 관문(R14, `merge_pr.py`)에 넘긴다. 그쪽이 먼저 머지되면 B 가 그 스크립트의 판단 기준을 맞춘다.
 
 PR 마다 완료 기준은 같다.
 
@@ -960,36 +1106,70 @@ PR 마다 완료 기준은 같다.
    `python scripts/mutcheck.py` · `scripts/smoke_install.sh` 가 통과한다.
 2. **격리 에이전트 검증.** 구현하지 않은 새 에이전트가 이 문서와 diff 만 보고 §6 의 표를 돌리고, B 는 §7 을 draft PR 에서
    실제로 돌린다.
-3. B 의 draft 실험이 §2.5 에서 문서로 못 찾은 둘을 잠근다. 재사용 워크플로의 체크 이름 표시와, 갈래가 하나도 없을 때
-   `now` · `late` 를 건너뛰는 것이다. `checks.yml` 의 `secrets` 가 `GITHUB_TOKEN` 을 받는지도 같이 본다.
+3. B 의 draft 실험이 §7 8 의 여섯 가지를 잠그고 그 결과를 §11 에 남긴다.
 
-## 10. 결정 (175~193)
+## 10. 결정 (175~195)
 
 | # | 결정 | 추천 | 오너 확인 |
 |---|---|---|---|
 | 175 | 본체와 스킬의 경계 | 본체는 바꾸지 않는다. GitHub 과 말하는 코드는 rcm 패키지에 실리는 `rcm-ci-connect` 스킬 템플릿에만 둔다. 결정 30 안에 든다 | 오너 확정 2026-11-20 |
 | 176 | 설정 자리 | `.rcm/ci.toml`, `version = 1`. `rcm.toml` 의 `[ci]` 는 서버 설정 탐색과 겹쳐서 안 쓴다 | |
-| 177 | 모드 | `github` · `rcm` · `both` 와 `fallback` `github` · `none`. 파일이 없으면 `github` | |
-| 178 | 모드 정하는 순서 | 포크 PR → 저장소 변수 `RCM_CI_MODE` → 파일 없음 · 오류는 `github` → push 목록 → `[[branches]]` → `mode`. 대기 잡과 감시가 같은 함수 | |
-| 179 | 상태 계약 | context `rcm/ci`, 설명의 첫 낱말 일곱 개, 140자, 경과는 GitHub 의 `created_at`, `creators` 거르기 | |
-| 180 | 판정 | `failure` 는 대신 돌지 않는다. `timed_out` · 준비 실패 · `lost` · 사람 취소는 `unavailable` 로 대신 돈다 | |
-| 181 | 워크플로 모양 | `route` → `rcm` → `now` · `late`(재사용 워크플로) → `test`. 룰셋 · 잡 이름 `test` 는 그대로. main 밖은 `cancel-in-progress` | |
+| 177 | 모드 | `github` · `rcm` · `both` 와 `fallback` `github` · `none`. 갈래 값 `github` · `rcm` · `rcm-only`. 파일이 없으면 `github`. 기준 브랜치별 덮어쓰기는 뺐다 | |
+| 178 | 모드 정하는 순서 | schedule → 포크 · 빈 head 레포 · `dependabot[bot]` → 저장소 변수 `RCM_CI_MODE`(404 는 없음) → 파일 없음 · 오류는 `github` → push 목록 → `mode`. 대기 잡과 감시가 같은 함수, 둘 다 head 커밋의 파일을 읽는다. 변수는 오너가, 급할 때는 세션도 바꾸되 PR 댓글로 남긴다 | |
+| 179 | 상태 계약 | context `rcm/ci`, 설명의 첫 낱말 일곱 개, 140자, 경과는 GitHub 의 `created_at`, `creators` 거르기, `target_url` 은 기본으로 비움 | |
+| 180 | 판정 | 첫 실행의 `failure` 는 대신 돌지 않는다. `timed_out` · 준비 실패 · 도구 없음 · 종료 75 · `lost` · 정지 · 사람 취소는 `unavailable` 로 대신 돈다. 다시 돌리기는 rcm 판정을 GitHub 판정으로 바꾸는 사람의 탈출구다 | |
+| 181 | 워크플로 모양 | `route`(head 체크아웃) → `rcm`(fail 이면 종료 1) → `now` · `late`(재사용 워크플로, `late` 는 `!cancelled()`) → `test`(`always()`). `checks.yml` 의 `legs` 검사와 `ran` 출력, `verdict` 의 `ran` 대조와 최신 상태 재확인. 룰셋 · 잡 이름 `test` 는 그대로. main 밖은 `cancel-in-progress` | |
 | 182 | 기다릴 시간 | pickup 300초 · queue 1800초(30분) · run 3600초 · poll 30초 · ETag. 다시 돌리기는 바로 GitHub | 오너 확정 2026-11-20 |
 | 183 | 트리거 | (c) 둘 다. 기본은 (b) 감시 스크립트, (a) 세션의 `rcm run` 은 합류한다 | |
-| 184 | 감시 대상 | 같은 레포 브랜치의 열린 PR head 와 `push` 브랜치 head. `--ref <브랜치>` 로 낸다. merge ref 는 안 본다 | |
-| 185 | 알림 훅 | 종료 상태만. `taken-over` 는 덮지 않는다. supersede 는 `GET /jobs/{id}` 로 가린다. 못 올리면 종료 1, 감시가 120초 뒤 다시 | |
-| 186 | 비밀 | GitHub fine-grained 토큰 파일(0600)과 rcm 전용 클라이언트 토큰 `ci-watch`(admin 아님)를 오너가 만든다. 범위와 절차는 부록 A. GitHub 에는 rcm 토큰도 Tailscale 키도 두지 않는다 | 오너 확정 2026-11-20 |
-| 187 | rcm 레포 값 | dev 로 가는 PR 도 릴리스 PR(dev→main)도 rcm 에서만 돈다(ubuntu · macos 모두 rcm, `[[branches]]` 없음). Linux 와 Python 3.13 검사가 사라지는 것은 알고 고른 위험이다(§3.4) | 오너 확정 2026-11-20 |
-| 188 | `rcm-ci` 프리셋 | git_ref · `repo = "rcm"` · low · `concurrency_group = "rcm-ci"` · supersede all · `nice -n 10` · timeout 5400 · `pool = "mac2"`(mac2 워커) | 오너 확정 2026-11-20 |
-| 189 | 잡 스크립트 | 여덟 단계. 환경을 워크스페이스로 돌리고 `RCM_*` 를 지운다. `RCM_CHROME` 으로 Chrome 시험을 필수로 | |
-| 190 | 운영 rcm 고장 | 대체 경로 셋(서버 없음 · 상태 없음 · worker_down) + 저장소 변수 `RCM_CI_MODE`. 엉뚱한 초록은 막는 장치가 없다(§3.6) | |
+| 184 | 감시 대상 | 같은 레포 브랜치의 열린 PR head 와 `push` 브랜치 head. `--ref <브랜치>` 로 낸다. merge ref 는 안 본다. `worker_down` 120초 · `paused` 300초면 넘긴다 | |
+| 185 | 알림 훅 | 종료 상태만. 종료 75 는 `unavailable · infra`. `taken-over` 는 덮지 않는다. supersede 는 `GET /jobs/{id}` 로 가린다. 단계는 실패 스텝, 없으면 마지막 스텝. 못 올리면 종료 1, 감시가 120초 뒤 다시 | |
+| 186 | 비밀 | GitHub fine-grained 토큰 파일(0600)과 rcm 전용 클라이언트 토큰 `ci-watch`(admin 아님)를 오너가 만든다. 범위와 절차는 부록 A. GitHub 에는 rcm 토큰도 Tailscale 키도 두지 않는다. `creators` 의 신뢰 경계는 `monocsp` 토큰을 쥔 세션과 Mac mini 의 같은 사용자 프로세스다(§2.9) | 오너 확정 2026-11-20 |
+| 187 | rcm 레포 값 | dev 로 가는 PR 도 릴리스 PR(dev→main)도 rcm 에서만 돈다. `push = ["dev"]`. Linux 와 Python 3.13 검사가 사라지는 것은 알고 고른 위험이다(§3.4) | 오너 확정 2026-11-20 |
+| 188 | `rcm-ci` 프리셋 | git_ref · `repo = "rcm"` · `pool = "mac2"`(mac2 워커) · `nice -n 10` · `concurrency_group = "rcm-ci"` · supersede all · timeout 3300 · `requires` 넷 · low(지금은 효과 없음) | 오너 확정 2026-11-20 |
+| 189 | 잡 스크립트 | 여덟 단계. 준비 단계와 도구 확인의 실패는 종료 75. 환경을 워크스페이스와 짧은 `TMPDIR` 로 돌리고 `RCM_*` 를 지운다. smoke 에 `PYTHON` 을 준다. `RCM_CHROME` 으로 Chrome 시험을 필수로. `RCM_CI_STEPS` 로 단계 고르기 | |
+| 190 | 운영 rcm 고장 | dev 룰셋의 `test` 때문에 rcm 의 잘못된 빨강은 dev 머지 정지다. 대체 경로 다섯(서버 없음 · 상태 없음 · worker_down · 정지 · 종료 75) + 저장소 변수 + 「Re-run」 탈출구. 엉뚱한 초록은 주 1회 실행만 다시 본다 | |
 | 191 | dolomood | 바꾸지 않는다. 지금의 `local-ci/full` 은 이 기능의 `rcm` · `fallback none` · 트리거 (a) 꼴이다 | |
-| 192 | 감시 실행 자리 | `~/.config/rcm/scripts/`, launchd `StartInterval` 60, 잠금 하나, 상태는 `~/.local/state/rcm-ci-watch/` | |
-| 193 | 순서 | A → B(`mode = "github"`) → C(운영, 오너) → D(`rcm` 으로) → E. 스킬은 v0.8.0 다음 릴리스 | |
+| 192 | 감시 실행 자리 | `~/.config/rcm/scripts/`, launchd `StartInterval` 60, 잠금 하나(10분 넘으면 빼앗기), 시간 제한 15 · 60 · 50초, 상태는 `~/.local/state/rcm-ci-watch/`, 설정을 못 읽으면 `unavailable · watcher_config` | |
+| 193 | 순서 | A → B(실험 커밋만 `rcm`, 마지막은 `github`) → C(운영, 오너, 끝에 운영에서 `rcm-ci` 한 번) → D(`rcm` 으로) → E. 스킬은 v0.8.0 다음 릴리스 | |
+| 194 | 주 1회 GitHub 전체 실행 | `ci.yml` 의 `schedule`(월 03시 KST), `ref: dev` 명시(기본 브랜치가 main 이라서), ubuntu · macOS 모든 갈래. 실패하면 알림만이고 머지를 막지 않는다. main 에 들어간 뒤부터 돈다 | 오너 확정 2026-11-20 |
+| 195 | 대체 갈래 | GitHub 이 대신 돌 때는 ubuntu 갈래(3.11 · 3.13 · smoke · secrets)만. macOS 는 `rcm-only`. macOS 러너 부족이 dev 머지를 막지 않게 한다 | 오너 확정 2026-11-20 |
 
 ## 11. 구현하며 바뀐 것
 
 (구현과 격리 검증이 끝난 뒤 PR 마다 채운다.)
+
+## 12. 설계 검토가 바꾼 것
+
+둘째 판(오너 확정 다섯을 반영한 판)을 격리 설계 반박이 읽었다. P0 다섯 · P1 일곱 · P2 열두 건이 나왔다. 같은 날 오너가
+결정 둘을 더했다. 갈래 대체는 ubuntu 만(결정 195), 주 1회 GitHub 전체 실행(결정 194)이다. 반박의 근거를 코드와
+GitHub 에 대 보았고 틀린 근거는 찾지 못했다. 그래서 전부 받아들였다. P2-1 하나만 일부를 받아들였다.
+
+| 지적 | 이 판에서 바뀐 곳 | 받아들임 |
+|---|---|---|
+| P0-1 「failure 는 대신 안 돈다」와 「다시 돌리면 fallback」이 부딪친다 | 다시 돌리기를 사람의 탈출구로 적었다(§2.4). 「`rcm run` 으로 다시」는 「새 커밋을 push」로 바꿨다. 대기 잡은 `fail` 이면 종료 1, `late` 조건을 고쳤고, `verdict` 가 끝에 `rcm/ci` 를 다시 읽는다(§2.5, V3 · V4) | 받아들임 |
+| P0-2 건너뛴 잡은 호출한 쪽에 success 로 보인다 | `checks.yml` 의 `legs` 검사 잡과 `ran` 출력, `verdict` 의 `ran` 대조(§2.5, V2), draft 실험 목록(§7 8). `late` 만 `!cancelled()` | 받아들임 |
+| P0-3 dev 룰셋에 `test` 가 필수로 걸렸다 | §1.1 표, §3.6 머리와 행들, squash · rebase 병합 뒤 dev head 가 PR head 와 다르다는 것(§2.6). `gh api` 로 다시 확인했다 | 받아들임 |
+| P0-4 환경 탓 실패가 `failure` 로 분류된다 | 준비 단계와 도구 확인의 종료 75(§3.3, 결정 189), 훅의 `unavailable · infra`(§2.7, 결정 185), 프리셋 `requires`(§3.2). 코드를 보니 `requires` 의 도구가 없으면 워커가 `tool_missing` 으로 종료 코드 없이 실패시키므로 그것도 `unavailable` 이다. 멈추는 회귀가 GitHub 으로 넘어가 통과할 수 있다는 것(§2.4), 엉뚱한 빨강의 손잡이(§3.6) | 받아들임 |
+| P0-5 실기 절차가 돌 수 없다 | 실험 커밋에서만 `mode = "rcm"` · `queue_seconds = 120`, 토큰을 누가 어디서(§7 표), C 끝의 운영 한 번 돌려 보기(§7 끝, §9, 결정 193) | 받아들임 |
+| P1-1 `route` 가 merge 커밋의 설정을 읽는다 | head sha 를 체크아웃해 읽는다(§2.2 · §2.5 · §5.3) | 받아들임 |
+| P1-2 감시 스크립트가 멈출 수 있다 | 시간 제한 셋, 잠금 빼앗기, 설정을 못 읽으면 `watcher_config`, 변수 404(§2.6, H17~H20) | 받아들임 |
+| P1-3 대체 때 `rcm/ci` 가 빨간 X 로 보이고 `gh pr checks` 가 0 이 아니다 | §2.5 끝과 §9 B. 판단 기준을 R14 머지 관문에 넘긴다 | 받아들임 |
+| P1-4 J 시험이 진짜 pytest 를 다시 돌린다 | `RCM_CI_STEPS`, 가짜 도구를 PATH 앞에 둔 가짜 프로젝트, `ci_fakes.py` 의 DNS 끄기 · 주입 시계(§6) | 받아들임 |
+| P1-5 `creators` 의 신뢰 경계를 부풀렸다 | `monocsp` 토큰을 쥔 세션과 같은 사용자 프로세스(rcm 잡 자신 포함)라고 고쳤다. 후속 후보 셋(§2.9) | 받아들임 |
+| P1-6 §3.4 가 늦은 발견과 잃는 근거를 빠뜨렸다 | `release.yml` 스모크가 태그 뒤에 돈다는 것, README · classifiers · `examples/systemd/` 의 근거, `python3.14` 선택지, 주 1회 실행(§3.4) | 받아들임 |
+| P1-7 실기 목록이 모자란다 | 루프백 멀티캐스트와 짧은 `TMPDIR`(§3.3 · §7 3) | 받아들임 |
+| P2-1 `priority` 는 `mac2` 풀에서 효과가 없다 | 표와 프리셋 주석에 적었다. `held_by_load` 측정과 `taskpolicy -b` 비교를 실기에 넣었다(§3.2 · §3.5 · §7 10) | 일부. 키는 지우지 않았다. 기본 풀로 옮기면 바로 뜻이 생기고 지금은 해가 없다 |
+| P2-2 `timeout_seconds` 5400 이 `run_seconds` 3600 과 맞지 않는다 | 3300 으로(§3.2) | 받아들임 |
+| P2-3 main push 는 rcm 에서 돌 까닭이 없다 | `push = ["dev"]`(§3.1). 감시의 `branches` 도 dev 만 | 받아들임 |
+| P2-4 큐 정지 때 끝없이 기다린다 | `paused` 300초면 `unavailable`(§2.6, H10, §7 6) | 받아들임 |
+| P2-5 | 반박 요약에 내용이 없다 | 해당 없음 |
+| P2-6 `[[branches]]` 는 쓰는 곳이 없다 | 스키마 · 순서 · 시험에서 뺐다(§2.2 · §2.3 · §8). 남아 있으면 모르는 키(C6) | 받아들임 |
+| P2-7 훅이 실패 스텝만 본다 | 없으면 `RCM_LAST_STEP`(§2.7 · §5.5, N) | 받아들임 |
+| P2-8 `target_url` 이 내부 주소를 공개한다 | 기본으로 비우고 `job_url` 로 켠다(§2.4 · §2.6 · §2.9) | 받아들임 |
+| P2-9 304 가 한도에 안 든다는 것은 문서 말이다 | draft 실험에서 `X-RateLimit-Remaining` 으로 잰다(§7 8) | 받아들임 |
+| P2-10 head 레포가 빈 PR 과 Dependabot | 둘 다 포크처럼 `github`(§2.3, C11 · H4) | 받아들임 |
+| P2-11 smoke 가 PATH 의 `python3` 를 쓴다 | `PYTHON=$RCM_CI_PYTHON`(§3.3, J6) | 받아들임 |
+| P2-12 `RCM_CI_MODE` 를 누가 바꾸나 | 오너가, 급할 때는 세션도 바꾸되 PR 댓글로 남긴다(§2.3 · §3.6) | 받아들임 |
 
 ## 부록 A. 오너가 만들 토큰 둘
 
