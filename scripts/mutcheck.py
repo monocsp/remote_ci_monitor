@@ -1405,6 +1405,15 @@ MUTANTS = (
         tests=("tests/test_ci_connect_watch.py",),
     ),
     Mutant(
+        # 다시 열린 PR 에서 취소한 그 잡의 끝 상태(알림 훅의 `unavailable · #N · cancelled`)를
+        # 남이 다룬 것으로 본다. 다시 내지 않아 PR 이 error 로 막힌다(#246 재검증)
+        name="m5r-watch-reopened-hook-status-blocks",
+        path=T + "rcm_ci_watch.py",
+        old="            mine = same_job or at is None",
+        new="            mine = at is None",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
         # 열린 PR 목록의 첫 쪽만 읽는다. 100개 너머의 PR 은 내지 않고 닫힌 것으로 본다
         name="m5r-watch-reads-one-page-of-pulls",
         path=T + "rcm_ci_watch.py",

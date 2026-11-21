@@ -588,9 +588,11 @@ class Round:
         top = cc.latest(listed.data, context)
         mine = retry is not None and top is not None and RETRYING in (top.get("description") or "")
         if reopened is not None and top is not None:
-            # 취소한 뒤에 올라온 상태가 아니면 감시가 남긴 옛 상태다. 그 뒤의 것은 누가 다룬 것이다
+            # 취소한 그 잡의 상태(감시의 queued, 알림 훅이나 감시가 올린 그 잡의 끝)이거나 취소 전에
+            # 올라온 것이면 감시가 남긴 것이다. 다른 잡의 것이 취소 뒤에 왔으면 누가 다룬 것이다
             at = cc.created_at(top)
-            mine = at is None or at <= float(reopened.get("gone_at", 0))
+            same_job = cc.read_word(top.get("description"))[1] == reopened.get("job")
+            mine = same_job or at is None or at <= float(reopened.get("gone_at", 0))
         if top is not None and not mine:
             shas[sha] = self.record(cand, word="known", context=context)
             self.log(self.repo.github, f"skip {sha[:12]}: {context} already has a status")

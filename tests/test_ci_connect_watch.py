@@ -1130,10 +1130,16 @@ def test_a_submission_the_server_moved_to_a_newer_commit_is_not_cancelled_as_gon
     assert rig.exe.argvs("cancel") == [] and len(rig.exe.argvs("run")) == 1
 
 
-def test_a_reopened_pr_whose_job_was_cancelled_is_submitted_again(rig):
+@pytest.mark.parametrize("hook", [False, True], ids=["no_hook", "hook_posted_cancelled"])
+def test_a_reopened_pr_whose_job_was_cancelled_is_submitted_again(rig, hook):
+    """알림 훅이 있으면 취소 몇 초 뒤 그 잡의 끝(`unavailable · #12 · cancelled`)을 올린다. 취소한
+    그 잡의 결과이니 감시가 남긴 것과 같다 — 다시 연 PR 을 막지 않는다(#246 재검증)."""
     close_pr_after_queued(rig)
     assert rig.exe.argvs("cancel") == [["cancel", "12"]]
     rig.job(12, **ours(state="cancelled", cancelled_by="owner", finished_at=iso(rig.clock.now)))
+    if hook:
+        end = Status("error", "unavailable · #12 · cancelled", at=rig.clock.now + 2)
+        rig.gh.add_status(S1, end)
     rig.exe.set(run={"stdout": submitted(13, S1)})
     rig.add_pr(7, S1, "feat/x")  # 다시 열었다
     rig.clock.advance(60)
