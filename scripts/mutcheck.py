@@ -135,6 +135,10 @@
      `guard_naming` 이 앞의 `VAR=$(…)` 대입에 명령 이름을 놓침 · `merge_pr` 가 4xx 를 모름으로 셈 ·
      mutcheck 가 결과를 끝난 순서로 찍음 · 변이 사본에서 바이트코드를 씀 · `-n` 에서 Chrome 파일을
      한 워커로 안 묶음(`tests/conftest.py`, rcm-ci 잡 #3861)
+  #245 격리 검증이 남긴 후속 — 여섯: 감시가 서버 재시작 순간의 제출을 다시 내지 않음 · `--check` 가
+     서비스 venv 의 rcm 을 못 알아봄 · 닫힌 PR 의 합류한 잡을 취소함 · `guard_merge` 가 붙여 쓴
+     `-Ro/r` 를 못 봄 · `-n` 에서 `--dist` 를 loadgroup 으로 안 정함 · timeout 이 하네스의 새 세션
+     자식을 남김 (`docs/m5r-workplan.md` §13.8)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
@@ -169,6 +173,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PYTEST_TIMEOUT_SECONDS = 300
+#: e2e 하네스가 새 세션으로 띄운 자식의 pid 를 남기는 폴더(tests/test_e2e_worker.py 와 같은 이름)
+SESSION_PIDS_ENV = "RCM_TEST_SESSION_PIDS"
 # tests/test_web_browser.py 의 `find_chrome()` 과 같은 후보(그 모듈을 import 하면 서버 픽스처까지
 # 끌려오므로 여기서 다시 적는다).
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
@@ -1351,6 +1357,33 @@ MUTANTS = (
         new="        if False:\n",
         tests=("tests/test_ci_connect_watch.py",),
     ),
+    # ── #245 격리 검증이 남긴 후속 (docs/m5r-workplan.md §13.8) ──
+    Mutant(
+        # 서버 재시작 순간의 제출 실패를 다시 내지 않고 곧바로 error 로 둔다. 다음 push 까지 머지가
+        # 막힌다
+        name="m5r-watch-no-submit-retry",
+        path=T + "rcm_ci_watch.py",
+        old="            if reason in RETRY_REASONS and tries < SUBMIT_RETRIES:\n",
+        new="            if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # `--check` 가 서비스 venv 의 rcm 을 알아보지 못한다. 배포 중 checkout 이 바뀌는 사이 제출이
+        # 실패할 수 있다
+        name="m5r-watch-check-misses-service-venv",
+        path=T + "rcm_ci_watch.py",
+        old="    if found and os.access(found, os.X_OK) and in_service_venv(found):\n",
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 닫힌 PR 의 잡을 남이 합류했어도 취소한다. 합류한 남의 검사가 같이 죽는다
+        name="m5r-watch-cancels-a-joined-job",
+        path=T + "rcm_ci_watch.py",
+        old='            alone = requester.get("label") == by_label() and not doc.get("joiners")\n',
+        new="            alone = True\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
     # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
     Mutant(
         # 드레인이 도는 잡을 기다리지 않는다 — 레인이 잡을 도는 중에 `stopping` 이 켜져 그 잡이
@@ -1516,6 +1549,33 @@ MUTANTS = (
         new='            return nodeid if True else "chrome" if uses_chrome(',
         tests=("tests/test_conftest_hygiene.py::test_chrome_modules_run_on_one_xdist_worker",),
     ),
+    # ── #245 격리 검증이 남긴 후속 — 가드 · 시험 하네스 ──
+    Mutant(
+        # 옵션과 값을 붙여 쓴 `-Ro/r` 를 못 본다 — `gh pr -Ro/r merge 7` 이 관문을 돌아간다
+        name="guard-merge-glued-repo-option",
+        path="tools/guard_merge.py",
+        old='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)?"\n',
+        new='REPO_OPT = r"(?:(?:-R|--repo)[\\s=]+\\S+\\s+)?"\n',
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # `-n` 에서 `--dist` 를 loadgroup 으로 정하지 않는다 — addopts 에서 뺀 뒤로 Chrome 시험이
+        # 여러 워커에 흩어진다
+        name="conftest-dist-not-defaulted",
+        path="tests/conftest.py",
+        old='        config.option.dist = "loadgroup"\n',
+        new="        pass\n",
+        tests=("tests/test_conftest_hygiene.py::test_chrome_modules_run_on_one_xdist_worker",),
+    ),
+    Mutant(
+        # timeout 때 e2e 하네스가 새 세션으로 띄운 서버 · 워커를 죽이지 않는다 — 다른 변이의 CPU 를
+        # 먹으며 남는다
+        name="mutcheck-timeout-spares-session-children",
+        path="scripts/mutcheck.py",
+        old="        _kill_sessions(env)\n",
+        new="        pass\n",
+        tests=("tests/test_mutcheck_parallel.py",),
+    ),
 )
 
 
@@ -1525,7 +1585,10 @@ def _pytest(
     """(exit code, seconds, output tail) — timeout 이면 None.
 
     자기 프로세스 그룹에서 돌리고 timeout 이면 그룹째 죽인다 — 시험이 띄운 서버 · 워커가 남아
-    다른 변이의 CPU 를 먹지 않게."""
+    다른 변이의 CPU 를 먹지 않게. 그룹이 잡는 것은 pytest 와 그 그룹에 남은 자식뿐이다. e2e
+    하네스가 `start_new_session=True` 로 띄운 서버 · 워커는 제 세션에 있어 그룹 밖이다. 그래서
+    하네스(`tests/test_e2e_worker.py` 의 `SessionProc`)가 `env` 의 `SESSION_PIDS_ENV` 폴더에 남긴
+    pid 의 그룹도 죽인다. 하네스가 거둔 자식의 파일은 지워져 있으니 남은 것만 죽는다."""
     started = time.monotonic()
     proc = subprocess.Popen(
         cmd,
@@ -1543,11 +1606,28 @@ def _pytest(
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             proc.kill()
+        # 파이프를 비우기 전에 죽인다. 파이프를 물려받은 자식이 살아 있으면 communicate 가 안 끝난다
+        _kill_sessions(env)
         proc.communicate()
         return None
     took = time.monotonic() - started
     lines = (out + err).strip().splitlines()
     return proc.returncode, took, "\n".join(lines[-6:])
+
+
+def _kill_sessions(env: dict[str, str] | None) -> None:
+    """하네스가 새 세션으로 띄우고 아직 거두지 않은 자식들의 그룹을 죽인다(`_pytest` 의 설명)."""
+    folder = (env or {}).get(SESSION_PIDS_ENV)
+    if not folder or not Path(folder).is_dir():
+        return
+    for mark in Path(folder).iterdir():
+        if not mark.name.isdigit():
+            continue
+        try:
+            os.killpg(int(mark.name), signal.SIGKILL)
+        except OSError:
+            pass
+        mark.unlink(missing_ok=True)
 
 
 def _descriptions() -> dict[str, str]:
@@ -1589,6 +1669,7 @@ def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
         # mtime 을 그대로 가져오므로 원본이 변이를 쓴 그 초에 만들어졌고 변이가 같은 길이면 대조군이
         # 남긴 `.pyc` 를 그대로 읽어 잡혀야 할 변이가 「초록」으로 보인다(가짜 프로젝트 시험)
         env = {**os.environ, "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"}
+        env[SESSION_PIDS_ENV] = str(scratch / "sessions")  # timeout 때 같이 죽일 자식들
         ok, info = _run_in_copy(m, tmp, env)
     finally:
         if not keep:

@@ -12,9 +12,9 @@ stderr 를 모델에 돌려준다). 볼 것이 없으면 아무것도 찍지 않
 그 sha 로만 머지한다. 이 훅은 그 길을 돌아가는 명령을 막는다.
 
 막는 것 — 명령 글자 또는 쓰려는 파일 내용에:
-  `gh pr merge` · `gh api … PUT … pulls/<N>/merge`(옵션 순서 무관, `-X PUT` · `-XPUT` ·
-  `--method PUT`) · `curl … -X PUT …/pulls/<N>/merge`(`--request PUT` 도) · GraphQL 의
-  `mergePullRequest` · `enablePullRequestAutoMerge`.
+  `gh pr merge`(사이에 낀 `-R o/r` · `-Ro/r` · `--repo` 도) · `gh api … PUT … pulls/<N>/merge`
+  (옵션 순서 무관, `-X PUT` · `-XPUT` · `--method PUT`) · `curl … -X PUT …/pulls/<N>/merge`
+  (`--request PUT` 도) · GraphQL 의 `mergePullRequest` · `enablePullRequestAutoMerge`.
 지나가는 것:
   `tools/merge_pr.py` 를 부르는 조각, `git …`(커밋 메시지는 머지 이야기를 한다), 본문을 싣는
   `gh pr create|edit|comment|review` · `gh issue …`, 읽기 · 검색(`grep` · `rg` · `echo` …),
@@ -35,8 +35,9 @@ import shlex
 import sys
 from dataclasses import dataclass
 
-#: `-R o/r` · `--repo o/r` · `--repo=o/r` — gh 는 이것을 `pr` 앞에도 뒤에도 받는다.
-REPO_OPT = r"(?:(?:-R|--repo)[\s=]+\S+\s+)?"
+#: `-R o/r` · `-Ro/r` · `--repo o/r` · `--repo=o/r` — gh 는 이것을 `pr` 앞에도 뒤에도 받는다.
+#: 짧은 옵션은 값을 붙여 써도(`-Ro/r`) pflag 가 받는다(#245 격리 검증).
+REPO_OPT = r"(?:(?:-R\s*|--repo[\s=]+)\S+\s+)?"
 #: `gh pr merge` — 사이에 낀 저장소 옵션도(`gh -R o/r pr merge` · `gh pr -R o/r merge`, 뒤쪽은
 #: #237 격리 검증이 찾았다).
 GH_PR_MERGE_RE = re.compile(r"\bgh\s+" + REPO_OPT + r"pr\s+" + REPO_OPT + r"merge\b")

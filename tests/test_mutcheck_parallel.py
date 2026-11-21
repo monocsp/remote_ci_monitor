@@ -210,6 +210,8 @@ def test_each_mutant_gets_its_own_tmpdir_and_it_is_removed(tmp_path, monkeypatch
         assert env.get("PYTHONDONTWRITEBYTECODE") == "1"
         seen.append(env["TMPDIR"])
         assert Path(env["TMPDIR"]).is_dir()
+        # 하네스가 새 세션으로 띄운 자식의 pid 를 남기는 폴더도 그 변이의 임시 폴더 안이다
+        assert Path(env[mc.SESSION_PIDS_ENV]).parent == Path(env["TMPDIR"])
         return 1, 0.1, ""  # 대조군이 빨갛다 — 여기서 멈춘다
 
     monkeypatch.setattr(mc, "_pytest", fake_pytest)
@@ -217,6 +219,58 @@ def test_each_mutant_gets_its_own_tmpdir_and_it_is_removed(tmp_path, monkeypatch
     mc.run_mutant(FAKE[0], keep=False)
     assert len(set(seen)) == 2 and seen[0] != os.environ.get("TMPDIR"), seen
     assert not any(Path(p).exists() for p in seen)
+
+
+SPAWNS_A_SESSION = """
+import subprocess, sys, time
+sys.path[:0] = [{tests!r}, {src!r}]
+from test_e2e_worker import SessionProc
+
+# 진짜 하네스처럼 출력은 파이프가 아닌 곳으로 — 물려받은 파이프는 communicate 를 붙잡는다
+child = SessionProc(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+open({pidfile!r}, "w").write(str(child.pid))
+time.sleep(60)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_a_timeout_also_kills_what_the_e2e_harness_started_in_its_own_session(
+    tmp_path, monkeypatch
+):
+    """e2e 하네스는 서버 · 워커를 `start_new_session=True` 로 띄운다. 그 자식은 pytest 의 프로세스
+    그룹을 벗어나 timeout 의 killpg 를 피했다(#245 격리 검증). 하네스가 남긴 pid 로 그것도
+    죽인다."""
+    monkeypatch.setattr(mc, "PYTEST_TIMEOUT_SECONDS", 3)
+    pidfile = tmp_path / "child.pid"
+    script = SPAWNS_A_SESSION.format(
+        tests=str(ROOT / "tests"), src=str(ROOT / "src"), pidfile=str(pidfile)
+    )
+    env = {**os.environ, mc.SESSION_PIDS_ENV: str(tmp_path / "sessions")}
+    try:
+        assert mc._pytest([sys.executable, "-c", script], tmp_path, env) is None
+        pid = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(pid), "the harness's own-session child outlived the timeout"
+    finally:
+        if pidfile.exists():
+            for kill in (os.killpg, os.kill):
+                try:
+                    kill(int(pidfile.read_text()), 9)
+                except OSError:
+                    pass
 
 
 def test_keep_reports_the_copy_in_the_result_not_on_its_own_line(tmp_path, monkeypatch):

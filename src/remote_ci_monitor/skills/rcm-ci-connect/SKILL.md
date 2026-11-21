@@ -71,7 +71,8 @@ copy all of them together.
    write; Contents, Pull requests and Variables read — saved as a `0600` file. Owner, on the build
    machine: an rcm client token `ci-watch` (not admin) from the service's own `rcm token add`,
    saved as a `0600` file.
-5. On the build machine: copy the three scripts, write `ci-watch.toml`, add the preset and the
+5. On the build machine: copy the three scripts, write `ci-watch.toml` (point its `rcm` at a client
+   venv of its own, not at the service venv a deploy changes; `--check` warns), add the preset and the
    `[[notify]]` rule from `presets.ci.toml` to the server config, reload, and load the launchd
    agent (fill `{{home}}`).
 6. Run `python3 ~/.config/rcm/scripts/rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml
@@ -94,6 +95,12 @@ the router and names an internal host).
 | `error` | `unavailable` | watcher · hook | GitHub runs the `late` legs now |
 | `error` | `superseded` | hook | GitHub runs the `late` legs now |
 | `error` | `taken-over` | the waiting job | a re-run goes to GitHub at once |
+
+A submit that fails with `server_unreachable` or a timeout (the server restarting) is retried
+for three rounds, with `pending` `queued · retrying submit (n/3)` meanwhile; the fourth failure
+posts `unavailable`. Setup and token failures post `unavailable` at once. When a pull request is
+closed or merged, the watcher cancels its job if it is still queued, was submitted by the watcher
+alone (no joiners) and its commit is not a watched branch's head; a running job is left to finish.
 
 A re-run of the workflow (`run_attempt > 1`) does not read rcm at all: it is the human's way out
 when an rcm failure is wrong. To be judged by rcm again, push a new commit.

@@ -86,6 +86,10 @@ def test_a_merge_outside_merge_pr_is_denied(command):
         "gh pr --repo=o/r merge 7 --merge",
         "gh -R o/r pr --repo o/r merge 7",
         "GH_TOKEN=$(gh auth token --user monocsp) gh pr -R monocsp/remote_ci_monitor merge 7",
+        # #245 격리 검증: 옵션과 값을 붙여 쓴 꼴도 pflag 가 받는다
+        "gh pr -Ro/r merge 7",
+        "gh -Ro/r pr merge 7",
+        "gh -Ro/r pr -Ro/r merge 7 --squash",
     ],
 )
 def test_a_repo_option_after_pr_does_not_hide_the_merge(command):
@@ -100,6 +104,7 @@ def test_a_repo_option_after_pr_does_not_hide_the_merge(command):
     "command",
     [
         "gh pr -R o/r comment 7 --body 'gh pr merge 7 는 막혔습니다'",
+        "gh pr -Ro/r comment 7 --body '붙여 쓴 -Ro/r 도 막습니다'",
         "gh pr --repo o/r view 7",
         "gh pr --repo=o/r edit 7 --body 'gh api -X PUT repos/o/r/pulls/7/merge 를 막는다'",
     ],

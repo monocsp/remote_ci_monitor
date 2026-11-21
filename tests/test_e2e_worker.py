@@ -222,6 +222,43 @@ def is_dead(pid: int) -> bool:
     return out == "" or out.startswith("Z")
 
 
+#: 새 세션으로 띄운 자식의 pid 를 남길 폴더 — `scripts/mutcheck.py` 가 변이마다 정하고, pytest 가
+#: 시간을 넘기면 그 자식들의 그룹도 죽인다. 비어 있으면 아무것도 남기지 않는다
+SESSION_PIDS_ENV = "RCM_TEST_SESSION_PIDS"
+
+
+class SessionProc(subprocess.Popen):
+    """`start_new_session=True` 로 띄운 자식. 서버 · 워커와 그 잡을 그룹째 죽이려고 새 세션에
+    두는데, 그러면 pytest 의 프로세스 그룹을 벗어나 mutcheck 의 timeout 정리(killpg)를 피한다
+    (#245 격리 검증). 그래서 `SESSION_PIDS_ENV` 폴더에 pid 이름의 빈 파일을 두고 `poll` 이나
+    `wait` 로 거두면 지운다. 남은 파일은 아직 거두지 않은 자식이다."""
+
+    def __init__(self, argv: list[str], **kw: Any):
+        self._mark: Path | None = None
+        super().__init__(argv, start_new_session=True, **kw)
+        folder = os.environ.get(SESSION_PIDS_ENV)
+        if folder:
+            Path(folder).mkdir(parents=True, exist_ok=True)
+            self._mark = Path(folder) / str(self.pid)
+            self._mark.touch()
+
+    def _forget(self) -> None:
+        if self._mark is not None:
+            self._mark.unlink(missing_ok=True)
+            self._mark = None
+
+    def poll(self) -> int | None:
+        code = super().poll()
+        if code is not None:
+            self._forget()
+        return code
+
+    def wait(self, timeout: float | None = None) -> int:
+        code = super().wait(timeout)
+        self._forget()
+        return code
+
+
 def kill_group(pid: int) -> None:
     """잡 프로세스 그룹(없으면 프로세스만) 을 SIGKILL. 이미 없으면 조용히."""
     for kill in (os.killpg, os.kill):
@@ -297,12 +334,11 @@ class E2EServer:
 
     def start(self, timeout: float = 30) -> None:
         self._out = self.log.open("ab")
-        self.proc = subprocess.Popen(
+        self.proc = SessionProc(
             [*RCM, "serve", "--config", str(self.config)],
             env=self.env,
             stdout=self._out,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -399,12 +435,11 @@ class WorkerProc:
 
     def start(self, client_token: str, timeout: float = 20) -> None:
         self._out = self.log.open("ab")
-        self.proc = subprocess.Popen(
+        self.proc = SessionProc(
             self.argv,
             env=self.env,
             stdout=self._out,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
         )
         self.wait_registered(client_token, timeout)
 

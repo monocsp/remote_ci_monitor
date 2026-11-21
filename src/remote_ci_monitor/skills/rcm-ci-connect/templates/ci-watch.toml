@@ -1,5 +1,7 @@
 # ~/.config/rcm/ci-watch.toml — the build machine's watcher (rcm-ci-connect). Not in the repo.
 rcm = "~/.local/share/rcm-client-venv/bin/rcm"          # the rcm client the watcher calls
+#   a client venv of its own, not the service venv (~/.local/share/rcm-venv): a deploy
+#   changes the checkout that one runs from, so a submit can fail meanwhile (--check warns)
 server = "http://127.0.0.1:8787"
 rcm_token_file = "~/.config/rcm/tokens/ci-watch.rcm"    # client token `ci-watch`, not admin, 0600
 # rcm_client_config = "~/.config/rcm/client.toml"      # or: the token the rcm client already uses

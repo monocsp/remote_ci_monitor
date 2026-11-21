@@ -14,6 +14,10 @@ launchd 가 60초마다 한 번 부르는 짧은 프로세스다. 한 바퀴에 
    GitHub 이 넘겨받으면(`taken-over`) 잡을 취소하고, 훅이 놓친 결과를 120초 뒤 대신 올린다.
    `fallback = "none"` 이면 대신 돌 곳이 없으니 멈춘 잡을 취소하지 않고 기다린다. 잡 스크립트가
    자기 pending 이나 결과를 직접 올리면 그것을 덮지 않는다(명세 §13, 결정 197 · 198).
+5. 제출이 `server_unreachable` 이나 시간 초과로 실패하면 세 바퀴까지 다시 내고 그동안 pending
+   `queued · retrying submit (n/3)` 을 올린다. 설정 · 인증 실패는 곧바로 error 다.
+6. 열린 PR 목록에서 사라진 head(닫힘 · 머지)의 잡이 아직 queued 면 취소한다. 감시가 혼자 낸 잡만
+   취소한다. 합류한 잡과 지금 감시하는 브랜치의 head 인 커밋은 둔다(명세 §13.8).
 
 토큰은 파일 대신 기존 자리에서 읽을 수도 있다. rcm 토큰은 `rcm_client_config`(rcm 클라이언트의
 client.toml), GitHub 토큰은 `github_token_command`(예: `gh auth token --user <login>`)다. 값은
@@ -60,6 +64,14 @@ KEEP_SECONDS = 14 * 86400
 TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost")
 #: 감시가 올리는 pending 낱말. 가장 새 pending 이 이것이 아니면 잡 스크립트가 올린 것이다
 OWN_PENDING = ("queued", "running")
+#: 다시 내 볼 만한 제출 실패 — 서버 재시작 순간이다. 설정 · 인증 실패는 다시 내도 같다
+RETRY_REASONS = ("server_unreachable", "rcm_timeout")
+SUBMIT_RETRIES = 3
+RETRYING = "retrying submit"
+#: 운영 서비스의 venv. 배포가 이 venv 가 가리키는 checkout 을 바꾸는 사이 감시의 `rcm` 이 실패할 수
+#: 있다 — 감시는 클라이언트 venv 를 부른다(`--check` 가 경고한다)
+SERVICE_VENV = "~/.local/share/rcm-venv"
+CLIENT_VENV = "~/.local/share/rcm-client-venv"
 
 
 class GitHubAuth(Exception):
@@ -292,6 +304,11 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 # ── rcm 하위 프로세스 ─────────────────────────────────────────────────────────
 
 
+def by_label() -> str:
+    """감시가 낸 잡의 요청자 이름표(`rcm run --by`). 닫힌 PR 의 잡이 감시 것인지 이것으로 본다."""
+    return f"ci-watch@{socket.gethostname()}"
+
+
 def submit_reason(rc: int, stderr: str) -> str:
     """`rcm run` 실패의 사유 코드 — 종료 코드와 stderr 첫 줄에서 고른다."""
     low = stderr.lower()
@@ -319,6 +336,8 @@ class Round:
     dry_run: bool
     rcm_token: str
     mono: Callable[[], float] = time.monotonic
+    #: 이 바퀴에 열린 PR 목록을 읽었나(304 포함). 못 읽은 바퀴에는 닫힌 PR 을 가리지 않는다
+    pulls_read: bool = False
 
     # ── 시간 ──
 
@@ -445,6 +464,7 @@ class Round:
         out: list[dict[str, Any]] = []
         reply = self.gh("request", "GET", "/pulls?state=open&per_page=100",
                         etag=self.state.get("pulls_etag"))  # fmt: skip
+        self.pulls_read = reply.status == 304 or (reply.ok and isinstance(reply.data, list))
         if reply.status == 304:
             pulls = self.state.get("pulls") or []
         elif reply.ok and isinstance(reply.data, list):
@@ -481,7 +501,10 @@ class Round:
 
     def handle_new(self, cand: dict[str, Any], override: str | None) -> None:
         sha, shas = cand["sha"], self.state["shas"]
-        if sha in shas:
+        retry = shas.get(sha) if (shas.get(sha) or {}).get("word") == "retrying" else None
+        if retry is not None and retry.get("tried_at") == self.now:
+            return  # 이 바퀴에 이미 냈다 — dev → main PR 의 head 는 dev 의 head 와 같은 sha 다
+        if sha in shas and retry is None:
             label = f"{cand['event']}:{cand['branch']}"
             seen = shas[sha].setdefault("seen_as", [])
             if label not in seen:
@@ -536,11 +559,13 @@ class Round:
         if not listed.ok:
             self.log(self.repo.github, f"statuses of {sha[:12]} unreadable, retry next round")
             return
-        if cc.latest(listed.data, context) is not None:
+        top = cc.latest(listed.data, context)
+        mine = retry is not None and top is not None and RETRYING in (top.get("description") or "")
+        if top is not None and not mine:
             shas[sha] = self.record(cand, word="known", context=context)
             self.log(self.repo.github, f"skip {sha[:12]}: {context} already has a status")
             return
-        self.submit(cand, side, context, r.fallback)
+        self.submit(cand, side, context, r.fallback, tries=retry.get("tries", 0) if retry else 0)
 
     def record(self, cand: dict[str, Any], **kw: Any) -> dict[str, Any]:
         return {
@@ -552,11 +577,17 @@ class Round:
         }
 
     def submit(
-        self, cand: dict[str, Any], side: cc.RcmSide, context: str, fallback: str = "github"
+        self,
+        cand: dict[str, Any],
+        side: cc.RcmSide,
+        context: str,
+        fallback: str = "github",
+        *,
+        tries: int = 0,
     ) -> None:
         sha, shas = cand["sha"], self.state["shas"]
         argv = ["run", side.preset, "--source", "git_ref", "--ref", cand["branch"], "--no-wait",
-                "--by", f"ci-watch@{socket.gethostname()}"]  # fmt: skip
+                "--by", by_label()]  # fmt: skip
         if side.priority:
             argv += ["--priority", side.priority]
         if cand["event"] == "pull_request" and cand.get("url"):
@@ -565,12 +596,23 @@ class Round:
             print(f"would run: rcm {' '.join(argv)}")
             return
         proc = self.rcm(*argv)
-        if proc is None:
-            return  # 끊겼다 — 다음 바퀴가 다시 낸다(같은 sha 면 서버가 합류시킨다)
-        if proc.returncode != 0:
-            first = (proc.stderr.strip().splitlines() or [""])[0]
-            reason = submit_reason(proc.returncode, first)
-            self.log(self.repo.github, f"submit failed rc={proc.returncode} {reason}")
+        if proc is None or proc.returncode != 0:
+            if proc is None:
+                reason = "rcm_timeout"  # 끊겼다(또는 못 떴다)
+            else:
+                first = (proc.stderr.strip().splitlines() or [""])[0]
+                reason = submit_reason(proc.returncode, first)
+                self.log(self.repo.github, f"submit failed rc={proc.returncode} {reason}")
+            if reason in RETRY_REASONS and tries < SUBMIT_RETRIES:
+                # 서버가 재시작하는 순간이다 — error 를 올리면 다음 push 까지 머지가 막힌다
+                tries += 1
+                text = cc.describe("queued", None, f"{RETRYING} ({tries}/{SUBMIT_RETRIES})")
+                self.log(self.repo.github, f"{sha[:12]} {reason}, retry {tries}/{SUBMIT_RETRIES}")
+                self.post(sha, "pending", context, text)
+                shas[sha] = self.record(
+                    cand, word="retrying", context=context, tries=tries, tried_at=self.now
+                )
+                return
             if self.post(sha, "error", context, cc.describe("unavailable", None, reason)):
                 shas[sha] = self.record(cand, word="unavailable", context=context)
             return
@@ -688,10 +730,39 @@ class Round:
         override = self.override()
         if override not in (None, *cc.MODES):
             override = None
-        for cand in self.candidates():
+        cands = self.candidates()
+        for cand in cands:
             self.handle_new(cand, override)
+        if self.pulls_read:
+            self.cancel_gone({c["sha"] for c in cands})
         for sha, entry in list(self.state["shas"].items()):
             self.follow(sha, entry)
+
+    def cancel_gone(self, heads: set[str]) -> None:
+        """열린 PR 목록에서 사라진 head(닫힘 · 머지 · 새 push)의 잡을 정리한다(명세 §13.8).
+
+        아직 queued 이고 감시가 혼자 낸 잡만 취소한다. 목적은 레인을 비우는 것이고 도는 잡의 결과는
+        그 커밋에만 가니 둔다. 감시의 이름표가 아닌 잡이나 합류자가 있는 잡은 남의 검사가 걸려 있다.
+        지금 감시하는 브랜치의 head 이거나 push 로 본 적 있는 커밋도 둔다. dev push 의 제출이 같은
+        잡에 합류했을 수 있는데, 같은 토큰의 두 번째 제출은 합류자 행을 남기지 않아 잡만 봐서는
+        모른다. 한 커밋에 한 번만 판정한다."""
+        for sha, entry in self.state["shas"].items():
+            if entry.get("event") != "pull_request" or sha in heads or "gone_at" in entry:
+                continue
+            job = entry.get("job")
+            if not isinstance(job, int) or entry.get("word") not in (None, "queued", "running"):
+                continue
+            if any(str(label).startswith("push:") for label in entry.get("seen_as") or ()):
+                continue
+            doc = self.job(job)
+            if doc is None:
+                continue  # 서버가 답하지 않았다 — 다음 바퀴에 다시 본다
+            entry["gone_at"] = self.now
+            requester = doc.get("requester") if isinstance(doc.get("requester"), dict) else {}
+            alone = requester.get("label") == by_label() and not doc.get("joiners")
+            if doc.get("state") == "queued" and alone:
+                self.cancel(job, "pr_gone: no open pull request has this head")
+                entry["word"] = "gone"
 
     def purge(self) -> None:
         shas = self.state["shas"]
@@ -731,6 +802,12 @@ def run_repo(cfg: WatchConfig, repo: Repo, *, now: float, deadline: float, log: 
 # ── --check ──────────────────────────────────────────────────────────────────
 
 
+def in_service_venv(exe: str) -> bool:
+    """그 실행 파일이(심볼릭 링크를 따라가서) 운영 서비스의 venv 안에 있나."""
+    venv = Path(os.path.realpath(_path(SERVICE_VENV)))
+    return Path(os.path.realpath(exe)).is_relative_to(venv)
+
+
 def check(cfg: WatchConfig) -> int:
     rows: list[tuple[str, str, str]] = []
 
@@ -757,7 +834,14 @@ def check(cfg: WatchConfig) -> int:
         import shutil  # noqa: PLC0415
 
         found = shutil.which(exe)
-    row(bool(found and os.access(found, os.X_OK)), "rcm client", found or f"{exe} not found")
+    if found and os.access(found, os.X_OK) and in_service_venv(found):
+        text = (
+            f"{found} is in the service venv {SERVICE_VENV}: a deploy changes the checkout it "
+            f"runs from, so a submit can fail meanwhile; use a client venv ({CLIENT_VENV})"
+        )
+        row(None, "rcm client", text)
+    else:
+        row(bool(found and os.access(found, os.X_OK)), "rcm client", found or f"{exe} not found")
     try:
         with urllib.request.urlopen(f"{cfg.server}/api/health", timeout=cc.HTTP_TIMEOUT) as r:
             health = json.loads(r.read())

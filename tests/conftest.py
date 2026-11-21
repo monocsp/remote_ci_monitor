@@ -20,11 +20,14 @@ M5q 시험이 CI 를 25분 늘렸다):
 
 Chrome 을 띄우는 시험(`test_web_browser.py` 와 그 `Chrome` 하네스를 들여오는 모듈 전부)은 `-n`
 에서 한 워커로 모은다. 워커 여럿이 동시에 Chrome 을 띄우면 CDP 가 마감을 넘겨 실패했다 — rcm-ci 잡
-#3861(`-n 6`)의 `test_web_layout_queue_edges.py`. `pyproject.toml` 의 `--dist loadgroup` 일 때
-`pytest_xdist_make_scheduler` 가 xdist 의 loadgroup 스케줄러를 고쳐 그 파일들의 시험을 그룹
-`chrome` 으로 묶는다. 시험에도 `xdist_group("chrome")` 을 달지만 그것만으로는 안 묶인다: xdist
-3.8.0 은 그룹 이름을 `item._nodeid` 에 붙이는데 pytest 9 의 nodeid 는 `_id` 를 읽는다. 모듈마다
-표시를 다는 대신 파일을 보고 정하므로 새 Chrome 시험 모듈이 표시를 잊어도 같은 워커로 간다.
+#3861(`-n 6`)의 `test_web_layout_queue_edges.py`. `-n` 이 켜져 있고 `--dist` 가 xdist 의 기본값
+(`load`)이면 `pytest_configure` 가 그것을 `loadgroup` 으로 바꾼다. `--dist loadgroup` 을
+`pyproject.toml` 의 addopts 에 두면 xdist 가 없는 환경에서 pytest 가 그 옵션을 몰라 시작하지
+못했다(#245 격리 검증). 그때 `pytest_xdist_make_scheduler` 가 xdist 의 loadgroup 스케줄러를
+고쳐 그 파일들의 시험을 그룹 `chrome` 으로 묶는다. 시험에도 `xdist_group("chrome")` 을 달지만
+그것만으로는 안 묶인다: xdist 3.8.0 은 그룹 이름을 `item._nodeid` 에 붙이는데 pytest 9 의
+nodeid 는 `_id` 를 읽는다. 모듈마다 표시를 다는 대신 파일을 보고 정하므로 새 Chrome 시험 모듈이
+표시를 잊어도 같은 워커로 간다.
 """
 
 from __future__ import annotations
@@ -105,6 +108,20 @@ def pytest_configure(config):
     )
     socket.getfqdn = _getfqdn
     socket.gethostbyaddr = _gethostbyaddr
+    _default_dist_to_loadgroup(config)
+
+
+def _default_dist_to_loadgroup(config) -> None:
+    """`-n` 인데 `--dist` 가 xdist 의 기본값(`load`)이면 `loadgroup` 으로 — Chrome 시험을 한 워커로
+    모은다. 묶음 없는 시험에서 loadgroup 은 load 와 같으므로 `--dist load` 를 직접 줘도 같은 일이다.
+    xdist 가 없으면 `xdist_group` 표시만 알린다(모르는 표시 경고가 나지 않게)."""
+    if not config.pluginmanager.hasplugin("xdist"):
+        config.addinivalue_line("markers", "xdist_group(name): ignored without pytest-xdist")
+        return
+    if hasattr(config, "workerinput"):  # 워커는 컨트롤러가 정한 대로 받는다
+        return
+    if config.getoption("numprocesses", None) and config.getoption("dist", None) == "load":
+        config.option.dist = "loadgroup"
 
 
 #: Chrome 하네스를 들여오는 줄 — `from test_web_browser import Chrome, …` 이나 괄호로 여러 줄.

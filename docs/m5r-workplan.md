@@ -426,6 +426,7 @@ jobs:
    잡은 GitHub 의 `concurrency` 가 취소한다.
 6. `pending queued · #N · <순번과 ETA>` 를 올린다. 제출이 실패하면 `error unavailable · <사유>` 를 본 sha 에 올린다.
    사유는 종료 코드와 stderr 첫 줄에서 고른 코드다(`server_unreachable` · `unknown_preset` · `ref_not_found` 등).
+   사유가 `server_unreachable` 이거나 `rcm` 이 시간을 넘겼으면 error 대신 세 바퀴까지 다시 낸다(§13.8).
 7. 다룬 잡을 따라간다. `GET /jobs/{id}`(토큰이 필요 없다)로 상태를 본다.
    - `running` 이 되면 `pending running · #N` 을 한 번 올린다.
    - `reason` 이 `worker_down` 이나 `paused` 로 이어지면 각각 120초 · 300초 뒤 `error unavailable · <reason>` 을 올리고
@@ -727,7 +728,7 @@ dev 룰셋에도 필수 체크 `test` 가 걸렸다(§1.1). 그래서 rcm 쪽의
 
 | 고장 | 일어나는 일 |
 |---|---|
-| 서버 프로세스가 죽었다 | 감시의 `rcm run` 이 실패한다. `unavailable · server_unreachable` 이 올라가고 GitHub 이 바로 대신 돈다 |
+| 서버 프로세스가 죽었다 | 감시의 `rcm run` 이 실패한다. 감시는 세 바퀴 동안 다시 내고(§13.8) 그래도 안 되면 `unavailable · server_unreachable` 을 올린다. 그때 GitHub 이 대신 돈다 |
 | Mac mini 가 꺼졌거나 감시가 죽었다 | 상태가 안 온다. 5분 뒤 GitHub 이 대신 돈다 |
 | 서버는 살았는데 `mac2-worker` 가 죽었다 | `worker_down` 이 120초 이어지면 `unavailable` 이고 GitHub 이 대신 돈다 |
 | 누가 큐를 정지했다 | `paused` 가 300초 이어지면 `unavailable` 이고 GitHub 이 대신 돈다 |
@@ -965,7 +966,7 @@ python3 rcm_ci_watch.py --config ~/.config/rcm/ci-watch.toml [--once] [--dry-run
 | H3 | 베스트 | push 브랜치 dev · 그 커밋의 `push = ["dev"]` | 제출한다. `push` 에 없는 `main` 은 제출하지 않는다 |
 | H4 | 보안 | 포크 PR · head 레포 `null` · `dependabot[bot]` 의 PR | 셋 다 제출 0, 상태 0 |
 | H5 | 우선순위 | 저장소 변수 `RCM_CI_MODE=github` | 제출 0 |
-| H6 | 에러 | `rcm run` 이 종료 2 와 `cannot read presets: cannot reach …`(서버 없음) | `unavailable · server_unreachable` |
+| H6 | 에러 | `rcm run` 이 종료 2 와 `cannot read presets: cannot reach …`(서버 없음) | 세 바퀴 동안 `pending queued · retrying submit (n/3)`, 넷째 실패에 `unavailable · server_unreachable`(§13.8) |
 | H7 | 에러 | `rcm run` 이 종료 2 와 `unknown preset` | `unavailable · unknown_preset` |
 | H8 | 엣지 | 이미 그 context 의 상태가 있음 | 제출 0 |
 | H9 | 엣지 | 서버가 정한 sha 가 본 sha 와 다름 | 상태는 서버의 sha 에만 |
@@ -1180,7 +1181,7 @@ rcm 레포의 B · C · D 는 R15(결정 196) 뒤에 바뀌었다. 바뀐 표는
 | 194 | 주 1회 GitHub 전체 실행 | `ci.yml` 의 `schedule`(월 03시 KST), `ref: dev` 명시(기본 브랜치가 main 이라서), ubuntu · macOS 모든 갈래. 실패하면 알림만이고 머지를 막지 않는다. main 에 들어간 뒤부터 돈다 | 오너 확정 2026-11-20 |
 | 195 | 대체 갈래 | GitHub 이 대신 돌 때는 ubuntu 갈래(3.11 · 3.13 · smoke · secrets)만. macOS 는 `rcm-only`. macOS 러너 부족이 dev 머지를 막지 않게 한다 | 오너 확정 2026-11-20 |
 | 196 | rcm 레포의 필수 체크 | 커밋 상태 `rcm/ci` 하나(main 은 `main-from-dev-only` 도). `ci.yml` 은 `workflow_dispatch` 만. 대기 잡 · `checks.yml` · schedule · `late` · `taken-over` 를 이 레포는 쓰지 않는다. `.rcm/ci.toml` 은 `mode = "rcm"` · `fallback = "none"`. 맥미니 고장 때는 오너 지시로 `workflow_dispatch`(§13.1) | 오너 확정 2026-11-20(R15) |
-| 197 | 대체 없는 감시 | `fallback = "none"` 이면 `worker_down` · `paused` 가 이어져도 취소하지 않고 기다린다. 제출 실패는 예전대로 `unavailable` 을 올리고 다시 내지 않는다(§13.2) | |
+| 197 | 대체 없는 감시 | `fallback = "none"` 이면 `worker_down` · `paused` 가 이어져도 취소하지 않고 기다린다. 제출 실패는 예전대로 `unavailable` 을 올리고 다시 내지 않는다(§13.2). `server_unreachable` · 시간 초과만 세 바퀴까지 다시 낸다(§13.8) | |
 | 198 | 상태를 쓰는 주체 | 이 레포는 알림 훅 대신 운영 잡 스크립트가 진행과 결과를 올린다. 감시는 `queued` 와 잡 스크립트가 못 올린 끝(120초 뒤)만. pending 이 아닌 상태 위에, 그리고 남이 올린 pending 위에 pending 을 올리지 않는다(§13.3) | |
 | 199 | 토큰 | 전용 토큰 둘 대신 `rcm_client_config`(rcm 클라이언트의 `client.toml`)와 `github_token_command`(`gh auth token --user monocsp`). 값은 새 파일에 쓰지 않는다(§13.4) | 오너 지시 2026-11-20 |
 | 200 | 운영 자리 | `~/.config/rcm/ci-watch/`(스크립트 둘 · 설정), launchd `com.remote-ci-monitor.ci-watch` 60초, 상태 `~/.local/state/rcm-ci-watch/`, 로그 `~/Library/Logs/rcm/ci-watch.log`. 결정 192 의 자리를 바꾼다(§13.5) | 오너 승인 C 단계 |
@@ -1298,8 +1299,9 @@ rcm run rcm-ci --source git_ref --ref <브랜치> --no-wait
 절차는 큐를 멈추고 도는 잡이 0 이 되기를 기다린 뒤 서비스를 재시작한다. 그 사이에 감시가 300초 뒤 대기 중인 `rcm-ci`
 잡을 취소하면 배포 한 번이 PR 들을 실패로 만든다.
 
-제출 실패를 다루는 방식은 바뀌지 않았다. `server_unreachable` · `rcm_auth` · `unknown_preset` 같은 사유로 제출이
-실패하면 감시는 여전히 `error unavailable · <사유>` 를 올리고 그 커밋을 다룬 것으로 적는다. 다시 내지는 않는다.
+이 절을 쓸 때는 제출 실패를 다루는 방식을 바꾸지 않았다. `server_unreachable` · `rcm_auth` · `unknown_preset` 같은
+사유로 제출이 실패하면 감시는 `error unavailable · <사유>` 를 올리고 그 커밋을 다룬 것으로 적었다. 그 뒤 §13.8 에서
+`server_unreachable` 과 시간 초과만 세 바퀴까지 다시 내도록 바꿨다. 설정 · 인증 실패는 지금도 곧바로 error 다.
 
 시험은 `test_r15_without_a_fallback_a_stuck_job_is_left_to_wait` 이고 변이는 `m5r-watch-no-fallback-still-cancels` 다.
 
@@ -1424,13 +1426,52 @@ E 는 바뀌지 않았지만 같이 적는다.
 
 ### 13.7 남은 위험
 
-1. 제출 실패는 다시 내지 않는다(결정 197). 서버가 재시작하는 순간에 온 push 는 error 로 남고 사람이 손으로 낸다.
+1. 설정 · 인증 실패로 끝난 제출은 다시 내지 않는다(결정 197). 서버가 재시작하는 순간의 실패는 §13.8 이후 세 바퀴까지
+   다시 낸다. 서버가 3분 넘게 돌아오지 않으면 그 커밋은 error 로 남고 사람이 손으로 낸다.
 2. 감시는 같은 커밋을 한 번만 본다. 이 PR 이 머지되기 전에 `no_file` 로 넘긴 커밋은 기록에 남아 다시 보지 않는다. 새
    push 는 새 커밋이라 다시 본다.
 3. 오너의 admin rcm 토큰과 권한이 넓은 gh 토큰을 쓴다(결정 199).
 4. Mac mini 가 고장 났을 때 `workflow_dispatch` 의 결과는 `rcm/ci` 를 채우지 않는다(결정 196). 그때 머지하는 방법은
    오너가 정한다.
 5. 포크 PR 은 감시가 내지 않아 `rcm/ci` 를 받지 못한다. 대체가 없으니 그런 PR 은 오너가 판단할 때까지 머지되지 않는다.
+
+### 13.8 격리 검증(#245)이 남긴 후속
+
+#245 의 격리 검증이 감시에서 셋, 가드와 시험 하네스에서 셋을 찾았다. 감시의 셋은 아래와 같다. 가드와 하네스의 셋은
+`tools/guard_merge.py` · `pyproject.toml` · `scripts/mutcheck.py` 의 주석에 적었다.
+
+첫째, 제출이 서버 재시작 순간에 실패하면 다시 낸다. 고치기 전에는 `server_unreachable` 로 실패한 제출에 error 를 한 번
+올리고 그 커밋을 다룬 것으로 적었다. 대체가 없는 이 레포에서는 그 PR 의 머지가 다음 push 까지 막혔다. 이제 사유가
+`server_unreachable` 이거나 `rcm` 이 60초 안에 끝나지 않았으면(`rcm_timeout`, 실행 파일을 못 띄운 때도 같다) 감시는 상태 파일에 횟수를 적고 다음
+바퀴에 다시 낸다. 그 사이에는 `pending queued · retrying submit (n/3)` 을 올린다. 세 번 다시 내도 실패하면 그때
+`error unavailable · <사유>` 를 올린다. 설정 · 인증 실패(`rcm_auth` · `unknown_preset` · `ref_not_found`)는 다시 내도
+결과가 같으니 예전처럼 곧바로 error 다. 다시 내기 전에 그 커밋의 가장 새 상태가 감시의 `retrying submit` 이 아니면
+누군가 손으로 낸 것이다. 그때는 다시 내지 않는다. dev 에서 main 으로 가는 PR 의 head 는 dev 의 head 와 같은 sha 라서
+한 바퀴에 같은 sha 를 두 번 만난다. 한 바퀴에는 한 번만 센다. 대체가 있는 레포에서는 GitHub 이 넘겨받는 때가 세 바퀴만큼
+늦어진다. 그동안 상태는 `queued` 라 대기 잡은 `queue_seconds` 를 잰다.
+
+둘째, `--check` 는 감시가 부르는 `rcm` 이 서비스 venv(`~/.local/share/rcm-venv`) 안에 있으면 WARN 을 적는다. 심볼릭
+링크는 따라가서 판단한다. 배포는 그 venv 가 가리키는 checkout 을 바꾸고 서비스를 재시작한다. 그 사이에 감시가 그 `rcm`
+을 부르면 제출이 실패할 수 있다. 감시는 클라이언트 venv(`~/.local/share/rcm-client-venv`)를 부르는 편이 낫다. 템플릿
+`ci-watch.toml` 의 `rcm` 줄에도 그렇게 적었다. 운영의 `~/.local/bin/rcm` 은 2026-11-21 에 서비스 venv 를 가리키고
+있었다. 운영 설정은 이 PR 이 바꾸지 않는다.
+
+셋째, PR 이 닫히거나 머지되어 열린 PR 목록에서 head 가 사라지면 그 커밋의 잡이 아직 queued 일 때만 감시가 취소한다.
+목적은 레인을 비우는 것이다. 도는 잡은 두어도 결과가 그 커밋에만 간다. 아래 셋 중 하나면 취소하지 않는다.
+
+1. 잡의 요청자 이름표가 감시의 것(`ci-watch@<host>`)이 아니거나 합류자가 있다. 남의 검사가 그 잡에 걸려 있다.
+2. 그 커밋이 지금 감시하는 브랜치의 head 이거나 push 로 본 적이 있다. dev push 의 제출이 같은 잡에 합류했을 수 있다.
+   감시와 세션은 같은 오너 토큰을 쓰고, 같은 토큰의 두 번째 제출은 합류자 행을 남기지 않는다. 그래서 잡만 봐서는 모른다.
+3. 그 바퀴에 열린 PR 목록을 읽지 못했다.
+
+한 커밋은 한 번만 판정한다. 취소한 잡은 더 따라가지 않으므로 닫힌 PR 의 커밋에 `unavailable · cancelled` 를 올리지
+않는다. 같은 PR 에 새 push 가 와서 head 가 바뀐 경우도 옛 head 는 목록에서 사라지므로 같은 규칙으로 다룬다.
+
+| 항목 | 시험 | 변이 |
+|---|---|---|
+| 다시 내기 | `test_h6_an_unreachable_server_is_retried_for_three_rounds_then_error` 외 셋, `test_h7_h23_…` · `test_h17_a_stuck_rcm_is_cut_off` | `m5r-watch-no-submit-retry` |
+| 서비스 venv 경고 | `test_check_warns_when_the_watcher_calls_the_service_venv` | `m5r-watch-check-misses-service-venv` |
+| 닫힌 PR 의 잡 취소 | `test_a_closed_pr_*` 넷, `test_an_unreadable_pull_list_cancels_nothing` | `m5r-watch-cancels-a-joined-job` |
 
 ## 부록 A. 오너가 만들 토큰 둘
 
