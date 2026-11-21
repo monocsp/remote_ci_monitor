@@ -250,12 +250,11 @@ def real_cli_failure(case: str, monkeypatch, capsys) -> tuple[int, str]:
 
 @pytest.mark.parametrize(
     ("case", "code"),
-    [("server", "server_unreachable"), ("preset", "unknown_preset"), ("token", "rcm_auth")],
-    ids=["h6_server", "h7_preset", "h23_rcm_token"],
+    [("preset", "unknown_preset"), ("token", "rcm_auth")],
+    ids=["h7_preset", "h23_rcm_token"],
 )
-def test_h6_h7_h23_a_failed_submit_posts_unavailable_with_a_code(
-    rig, monkeypatch, capsys, case, code
-):
+def test_h7_h23_a_failed_submit_posts_unavailable_with_a_code(rig, monkeypatch, capsys, case, code):
+    """설정 · 인증 실패는 다시 내도 같다 — 곧바로 error 를 올리고 다시 내지 않는다."""
     rc, stderr = real_cli_failure(case, monkeypatch, capsys)
     assert rc == 2 and stderr.startswith("rcm: "), (rc, stderr)
     assert watchmod.submit_reason(rc, stderr) == code
@@ -285,9 +284,11 @@ def test_h8_an_existing_status_means_someone_handled_it(rig):
 def test_h9_the_status_goes_to_the_sha_the_server_resolved(rig):
     rig.add_pr(7, S1, "feat/x")
     rig.exe.set(run={"stdout": submitted(12, S2)})
+    rig.job(12, **ours(state="queued", reason=None))  # 진짜 잡 응답 — 없으면 job() 이 None 이다
     rig.run()
     assert rig.posts(S1) == []
     assert [p["description"].split(" · ")[0] for p in rig.posts(S2)] == ["queued"]
+    assert rig.exe.argvs("cancel") == []
 
 
 # ── H10 · H11 · H12: 따라가기 ──
@@ -492,7 +493,10 @@ def test_h17_a_stuck_rcm_is_cut_off(rig, monkeypatch):
     started = time.monotonic()
     rig.run()
     assert time.monotonic() - started < 3
-    assert rig.gh.posted() == []
+    # 끊긴 제출은 서버 재시작 순간과 같다 — error 가 아니라 다음 바퀴에 다시 낸다
+    assert [(p["state"], p["description"]) for p in rig.posts(S1)] == [
+        ("pending", "queued · retrying submit (1/3)")
+    ]
     assert "timeout" in rig.log()
 
 
@@ -939,3 +943,252 @@ def test_r15_dry_run_prints_the_submission_and_writes_nothing(rig):
     assert "would run: rcm run rcm-ci --source git_ref --ref dev" in rig.printed
     assert rig.exe.argvs("run") == [] and rig.gh.posted() == []
     assert not (rig.state_dir / "monocsp__remote_ci_monitor.json").exists()
+
+
+# ── 격리 검증(#245)이 남긴 후속 (docs/m5r-workplan.md §13.8) ──────────────────
+#
+# 1. 서버 재시작 순간의 제출 실패(`server_unreachable` · 시간 초과)는 세 바퀴까지 다시 낸다.
+# 2. `--check` 는 감시의 `rcm` 이 서비스 venv 를 가리키면 WARN 이다.
+# 3. 닫히거나 머지된 PR 의 queued 잡은 감시가 취소한다. 합류한 잡 · dev 에 있는 커밋은 둔다.
+
+UNREACHABLE = {"rc": 2, "stderr": "rcm: cannot reach http://127.0.0.1:9 (ConnectionRefusedError)"}
+
+
+def test_h6_an_unreachable_server_is_retried_for_three_rounds_then_error(rig, monkeypatch, capsys):
+    """서버가 재시작하는 순간 온 push 가 다음 push 까지 머지를 막았다. 진짜 CLI 의 문장으로 낸다."""
+    rc, stderr = real_cli_failure("server", monkeypatch, capsys)
+    assert rc == 2 and watchmod.submit_reason(rc, stderr) == "server_unreachable"
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"rc": rc, "stderr": stderr})
+    for _ in range(5):
+        rig.run()
+        rig.clock.advance(60)
+    assert len(rig.exe.argvs("run")) == 4  # 처음 한 번과 다시 낸 세 번
+    assert [(p["state"], p["description"]) for p in rig.posts(S1)] == [
+        ("pending", "queued · retrying submit (1/3)"),
+        ("pending", "queued · retrying submit (2/3)"),
+        ("pending", "queued · retrying submit (3/3)"),
+        ("error", "unavailable · server_unreachable"),
+    ]
+
+
+def test_a_submit_that_works_on_retry_is_followed_like_a_first_one(rig):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run=[UNREACHABLE, {"stdout": submitted(12, S1)}])
+    rig.job(12, state="queued", reason=None)
+    rig.run()
+    rig.clock.advance(60)
+    rig.run()
+    rig.job(12, state="running", reason=None)
+    rig.clock.advance(60)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 2
+    descriptions = [p["description"] for p in rig.posts(S1)]
+    assert descriptions[0] == "queued · retrying submit (1/3)"
+    assert descriptions[1].startswith("queued · #12")
+    assert descriptions[2] == "running · #12"
+
+
+def test_a_retry_stops_when_someone_else_posted_a_status(rig):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run=UNREACHABLE)
+    rig.run()
+    rig.clock.advance(30)
+    # 그사이 세션이 손으로 냈고 잡 스크립트가 진행을 올렸다
+    rig.gh.add_status(S1, Status("pending", "rcm job 30 running", at=rig.clock.now))
+    rig.clock.advance(30)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 1
+    assert len(rig.posts(S1)) == 1
+
+
+def test_one_round_counts_one_retry_when_a_sha_is_both_a_pr_and_dev(rig):
+    """dev → main PR 의 head 는 dev 의 head 와 같은 sha 다. 한 바퀴에 그 sha 를 두 번 만난다."""
+    rig.write_config(("dev",))
+    rig.set_branch("dev", S1)
+    rig.add_pr(9, S1, "dev", base="main")
+    rig.exe.set(run=UNREACHABLE)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 1
+    assert [p["description"] for p in rig.posts(S1)] == ["queued · retrying submit (1/3)"]
+
+
+def test_check_warns_when_the_watcher_calls_the_service_venv(rig, tmp_path, monkeypatch):
+    """서비스 venv 의 rcm 은 배포 때 checkout 이 바뀌는 사이 실패할 수 있다. 링크도 따라간다."""
+    venv = tmp_path / "rcm-venv"
+    (venv / "bin").mkdir(parents=True)
+    real = venv / "bin" / "rcm"
+    real.write_bytes(rig.exe.path.read_bytes())
+    real.chmod(0o755)
+    link = tmp_path / "local-bin" / "rcm"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    monkeypatch.setattr(watchmod, "SERVICE_VENV", str(venv))
+    assert rig.run("--check") == 0, rig.printed
+    client = [ln for ln in rig.printed.splitlines() if "rcm client" in ln]
+    assert client and client[0].startswith("OK"), rig.printed
+    rig.printed = ""
+    rig.config.write_text(rig.config.read_text().replace(str(rig.exe.path), str(link)))
+    assert rig.run("--check") == 0, rig.printed  # 경고일 뿐 실패는 아니다
+    client = [ln for ln in rig.printed.splitlines() if "rcm client" in ln]
+    assert client and client[0].startswith("WARN"), rig.printed
+    assert "service venv" in client[0] and "client venv" in client[0], client[0]
+
+
+def ours(**doc) -> dict:
+    """감시가 낸 잡의 조회 결과 — 요청자 이름표가 `ci-watch@<host>` 이고 합류자는 없다."""
+    return {"requester": {"name": "owner", "label": f"ci-watch@{HOST}"}, "joiners": [], **doc}
+
+
+def close_pr_after_queued(rig, **doc) -> None:
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, **ours(state="queued", reason=None))
+    rig.run()
+    if doc:
+        rig.job(12, **ours(**doc))
+    rig.gh.pulls.clear()  # 닫혔거나 머지됐다
+    rig.clock.advance(60)
+    rig.run()
+
+
+def test_a_closed_pr_cancels_its_queued_job_once_and_posts_nothing(rig):
+    close_pr_after_queued(rig)
+    assert rig.exe.argvs("cancel") == [["cancel", "12"]]
+    assert "pr_gone" in rig.log()
+    rig.job(12, **ours(state="cancelled", cancelled_by="owner", finished_at=iso(rig.clock.now)))
+    rig.clock.advance(600)
+    rig.run()
+    assert len(rig.exe.argvs("cancel")) == 1
+    assert [p["description"].split(" · ")[0] for p in rig.posts(S1)] == ["queued"]
+
+
+def test_a_closed_pr_leaves_a_running_job_alone(rig):
+    close_pr_after_queued(rig, state="running", reason=None)
+    assert rig.exe.argvs("cancel") == []
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"joiners": [{"name": "session", "label": "me@mac", "joined_at": iso(T0)}]},
+        {"requester": {"name": "owner", "label": "me@mac"}},
+        {"requester": None},
+    ],
+    ids=["someone_joined", "someone_else_asked", "unknown_requester"],
+)
+def test_a_closed_pr_keeps_a_job_it_does_not_own_alone(rig, doc):
+    """감시가 낸 잡에 남이 합류했거나 감시가 남의 잡에 합류했다. 취소하면 남의 검사가 죽는다."""
+    close_pr_after_queued(rig, **{**ours(state="queued", reason=None), **doc})
+    assert rig.exe.argvs("cancel") == []
+
+
+def test_a_closed_pr_whose_commit_is_the_dev_head_is_not_cancelled(rig):
+    """dev 에 그대로 들어간 커밋이면 dev push 의 제출이 같은 잡에 합류했을 수 있다."""
+    rig.write_config(("dev",))
+    rig.set_branch("dev", S2)
+    rig.exe.set(run=[{"stdout": submitted(12, S1)}, {"stdout": submitted(13, S2)}])
+    rig.add_pr(7, S1, "feat/x")
+    rig.job(12, **ours(state="queued", reason=None))
+    rig.run()
+    rig.gh.pulls.clear()
+    rig.set_branch("dev", S1)  # fast-forward 로 dev 가 그 커밋이 됐다
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.exe.argvs("cancel") == []
+
+
+def test_an_unreadable_pull_list_cancels_nothing(rig):
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, **ours(state="queued", reason=None))
+    rig.run()
+    rig.gh.fail[f"/repos/{REPO}/pulls"] = [500]
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.exe.argvs("cancel") == []
+
+
+# ── #246 격리 검증이 찾은 것 ──────────────────────────────────────────────────
+
+
+def test_a_submission_the_server_moved_to_a_newer_commit_is_not_cancelled_as_gone(rig):
+    """서버가 `--ref` 를 더 새 커밋 S2 로 풀었다. S2 는 아직 열린 PR 목록에 없지만 닫힌 것이 아니다.
+    취소하면 S2 는 이미 본 sha 라 다시 내지 않고 머지가 막힌다."""
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S2)})
+    rig.job(12, **ours(state="queued", reason=None))
+    rig.run()
+    assert rig.exe.argvs("cancel") == []
+    rig.clock.advance(60)
+    rig.run()  # PR 목록이 아직 S1 을 말한다
+    assert rig.exe.argvs("cancel") == []
+    rig.gh.pulls[0]["head"]["sha"] = S2
+    rig.gh.files[(S2, ".rcm/ci.toml")] = RCM_REPO_CI_TOML
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.exe.argvs("cancel") == [] and len(rig.exe.argvs("run")) == 1
+
+
+@pytest.mark.parametrize("hook", [False, True], ids=["no_hook", "hook_posted_cancelled"])
+def test_a_reopened_pr_whose_job_was_cancelled_is_submitted_again(rig, hook):
+    """알림 훅이 있으면 취소 몇 초 뒤 그 잡의 끝(`unavailable · #12 · cancelled`)을 올린다. 취소한
+    그 잡의 결과이니 감시가 남긴 것과 같다 — 다시 연 PR 을 막지 않는다(#246 재검증)."""
+    close_pr_after_queued(rig)
+    assert rig.exe.argvs("cancel") == [["cancel", "12"]]
+    rig.job(12, **ours(state="cancelled", cancelled_by="owner", finished_at=iso(rig.clock.now)))
+    if hook:
+        end = Status("error", "unavailable · #12 · cancelled", at=rig.clock.now + 2)
+        rig.gh.add_status(S1, end)
+    rig.exe.set(run={"stdout": submitted(13, S1)})
+    rig.add_pr(7, S1, "feat/x")  # 다시 열었다
+    rig.clock.advance(60)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 2
+    assert rig.posts(S1)[-1]["description"].startswith("queued · #13")
+
+
+def test_a_reopened_pr_that_someone_already_ran_is_not_submitted_again(rig):
+    close_pr_after_queued(rig)
+    rig.gh.add_status(S1, Status("success", "rcm job 30 passed", at=rig.clock.now + 1))
+    rig.add_pr(7, S1, "feat/x")
+    rig.clock.advance(60)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 1
+
+
+def test_every_page_of_open_pull_requests_is_read(rig, monkeypatch):
+    monkeypatch.setattr(watchmod, "PULLS_PER_PAGE", 2)
+    for n, sha in enumerate((S1, S2, S3)):
+        rig.add_pr(7 + n, sha, f"feat/{n}")
+    rig.exe.set(run=[{"stdout": submitted(12 + n, sha)} for n, sha in enumerate((S1, S2, S3))])
+    rig.run()
+    assert [a[a.index("--ref") + 1] for a in rig.exe.argvs("run")] == ["feat/0", "feat/1", "feat/2"]
+
+
+def test_an_unread_later_page_cancels_nothing(rig, monkeypatch):
+    monkeypatch.setattr(watchmod, "PULLS_PER_PAGE", 2)
+    for n, sha in enumerate((S1, S2, S3)):
+        rig.add_pr(7 + n, sha, f"feat/{n}")
+        rig.job(12 + n, **ours(state="queued", reason=None))
+    rig.exe.set(run=[{"stdout": submitted(12 + n, sha)} for n, sha in enumerate((S1, S2, S3))])
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 3
+    rig.gh.fail[f"/repos/{REPO}/pulls?state=open&per_page=2&page=2"] = [500]
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.exe.argvs("cancel") == []  # S3 는 둘째 쪽에 있다 — 못 읽었으니 닫힌 것이 아니다
+
+
+def test_a_missing_rcm_executable_is_named_rcm_missing(rig):
+    rig.config.write_text(
+        rig.config.read_text().replace(str(rig.exe.path), str(rig.tmp / "gone" / "rcm"))
+    )
+    rig.add_pr(7, S1, "feat/x")
+    for _ in range(4):
+        rig.run()
+        rig.clock.advance(60)
+    assert "could not start" in rig.log()
+    posts = [(p["state"], p["description"]) for p in rig.posts(S1)]
+    assert posts[0] == ("pending", "queued · retrying submit (1/3)")
+    assert posts[-1] == ("error", "unavailable · rcm_missing"), posts

@@ -280,7 +280,8 @@ class FakeGitHub:
         if login is None:
             return 401, {"message": "Bad credentials"}, {}
         for prefix, codes in self.fail.items():
-            if path.startswith(prefix) and codes:
+            # 접두어는 쿼리까지 볼 수 있다(`…/pulls?state=open&per_page=2&page=2`)
+            if (path.startswith(prefix) or raw_path.startswith(prefix)) and codes:
                 return codes.pop(0), {"message": "boom"}, dict(self.fail_headers)
         for prefix, code in self.fail_always.items():
             if path.startswith(prefix):
@@ -310,7 +311,18 @@ class FakeGitHub:
             )
             return 201, {"state": body.get("state")}, {}
         if method == "GET" and rest == "/pulls":
-            return self._etagged(self.pulls, seen)
+            # GitHub 처럼 쪽으로 나눈다(기본 30개). 다음 쪽이 있으면 `Link: …; rel="next"`
+            size = int((query.get("per_page") or ["30"])[0])
+            page = int((query.get("page") or ["1"])[0])
+            status, payload, headers = self._etagged(
+                self.pulls[(page - 1) * size : page * size], seen
+            )
+            if page * size < len(self.pulls):
+                nxt = (
+                    f"{self.url}/repos/{self.repo}/pulls?state=open&per_page={size}&page={page + 1}"
+                )
+                headers["Link"] = f'<{nxt}>; rel="next"'
+            return status, payload, headers
         if method == "GET" and rest.startswith("/branches/"):
             name = urllib.parse.unquote(rest[len("/branches/") :])
             if name not in self.branches:

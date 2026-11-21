@@ -129,20 +129,21 @@
 
 ### E3. 운영 서버가 멈춰 있다
 
-> 이 레포에서는 감시가 `unavailable · server_unreachable` 을 올리는 데까지만 해당한다.
-> `late` 는 없다. 서버가 돌아온 뒤 사람이 손으로 낸다(결정 197).
+> 이 레포에서는 감시가 다시 내는 데까지만 해당한다. `late` 는 없다. 서버가 세 바퀴 안에 돌아오면
+> 그 제출이 그대로 잡이 된다. 그래도 안 돌아오면 서버가 돌아온 뒤 사람이 손으로 낸다(결정 197, 명세 §13.8).
 
 1. 서버 프로세스가 죽은 상태에서 push 한다.
 2. 감시의 `rcm run` 이 종료 2 와 `rcm: cannot read presets: cannot reach …` 로 끝난다. 감시가
+   `pending queued · retrying submit (1/3)` 을 올리고 다음 바퀴에 다시 낸다. 세 번 다시 내도 실패하면
    `unavailable · server_unreachable` 을 올린다.
-3. 대기 잡이 바로 `fallback` 하고 `late` 가 돈다.
+3. 대기 잡은 그 error 를 보고 `fallback` 하고 `late` 가 돈다.
 
 | 기대 | 값 |
 |---|---|
 | `test` | ubuntu 갈래 결과대로 |
 | `rcm/ci` | `unavailable · server_unreachable`, 잡 번호 없음 |
 | 잡 | 없다 |
-| 로그 | 감시: `submit failed rc=2 server_unreachable` |
+| 로그 | 감시: `submit failed rc=2 server_unreachable` 과 `… retry 1/3` · `2/3` · `3/3` |
 | 시험 | H6 · W6 |
 
 ### E4. 감시 스크립트가 죽었다

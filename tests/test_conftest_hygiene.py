@@ -228,16 +228,18 @@ def test_{i}_b():
 """
 
 
-def test_chrome_modules_run_on_one_xdist_worker(tmp_path):
-    """`test_web_browser.Chrome` 을 쓰는 모듈의 시험은 `-n` 에서도 모두 한 워커로 간다 — 여러
-    워커가 동시에 Chrome 을 띄우면 CDP 가 마감을 넘긴다. `--dist loadgroup` 은 `pyproject.toml` 의
-    addopts 에 있다(여기서는 그 줄을 그대로 쓴다)."""
+def _addopts() -> str:
     import tomllib
 
-    addopts = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"][
-        "addopts"
-    ]
-    assert "--dist loadgroup" in addopts
+    ini = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    return ini["addopts"]
+
+
+def test_chrome_modules_run_on_one_xdist_worker(tmp_path):
+    """`test_web_browser.Chrome` 을 쓰는 모듈의 시험은 `-n` 에서도 모두 한 워커로 간다 — 여러
+    워커가 동시에 Chrome 을 띄우면 CDP 가 마감을 넘긴다. `--dist` 를 주지 않아도 conftest 가
+    loadgroup 으로 정한다(여기서는 `pyproject.toml` 의 addopts 를 그대로 쓴다)."""
+    addopts = _addopts()
     shutil.copy(ROOT / "tests" / "conftest.py", tmp_path / "conftest.py")
     (tmp_path / "test_web_browser.py").write_text(CHROME_HARNESS + CHROME_USER.format(i="wb"))
     for i in range(3):
@@ -252,6 +254,23 @@ def test_chrome_modules_run_on_one_xdist_worker(tmp_path):
     assert len([1 for kind, _ in seen if kind == "chrome"]) == 8, seen
     assert len(chrome) == 1 and chrome != {"-"}, seen
     assert len(plain | chrome) > 1, seen  # 나머지는 퍼진다 — 묶은 것이 Chrome 뿐이다
+
+
+def test_pytest_starts_without_xdist(tmp_path):
+    """pytest-xdist 가 없는 환경에서도 레포의 addopts 로 시작한다. addopts 에 `--dist loadgroup` 이
+    있던 때는 `unrecognized arguments: --dist` 로 시험 하나 돌기 전에 끝났다(#245 격리 검증)."""
+    addopts = _addopts()
+    shutil.copy(ROOT / "tests" / "conftest.py", tmp_path / "conftest.py")
+    (tmp_path / "test_web_browser.py").write_text(CHROME_HARNESS + CHROME_USER.format(i="wb"))
+    (tmp_path / "test_plain_0.py").write_text(PLAIN.format(i=0))
+    (tmp_path / "pytest.ini").write_text(f"[pytest]\naddopts = -p no:cacheprovider {addopts}\n")
+    # xdist_group 표시는 xdist 없이도 안다 — 모르는 표시 경고를 실패로 만들어 본다
+    proc = _pytest(
+        tmp_path, "-p", "no:xdist", "-W", "error::pytest.PytestUnknownMarkWarning", slow="60"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    seen = (tmp_path / "seen.txt").read_text().splitlines()
+    assert sorted(seen) == ["chrome -"] * 2 + ["plain -"] * 2, seen
 
 
 def test_the_chrome_files_are_the_ones_that_bring_in_the_harness():

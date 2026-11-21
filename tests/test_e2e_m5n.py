@@ -37,6 +37,7 @@ from test_e2e_worker import (
     RCM,
     TERMINAL,
     E2EServer,
+    SessionProc,
     clean_env,
     free_port,
     kill_group,
@@ -184,12 +185,11 @@ class M5nWorker:
 
     def start(self) -> None:
         self._out = self.log.open("ab")
-        self.proc = subprocess.Popen(
+        self.proc = SessionProc(
             self.argv,
             env=self.env,
             stdout=self._out,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
         )
 
     def log_text(self) -> str:
