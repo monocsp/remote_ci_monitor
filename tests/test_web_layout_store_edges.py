@@ -41,6 +41,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from test_server import Server
 from test_web_browser import (  # noqa: F401  (pytestmark: Chrome 이 없으면 skip)
     DRIVER_STUB_JS,
@@ -593,6 +595,7 @@ def _problems(name: str, width: int, lang: str, m: dict[str, Any]) -> list[str]:
     return out
 
 
+@pytest.mark.slow
 def test_store_screens_hold_extreme_content_at_390_and_1240_in_both_languages(tmp_path):
     """다섯 장면 × 네 경우. 문제는 모아서 한 번에 보인다 — 고치는 사람이 다시 재지 않게."""
     srv = Server(tmp_path, workers=False)
@@ -644,6 +647,7 @@ HEAD_JS = """
 """
 
 
+@pytest.mark.slow
 def test_typing_counting_and_autosave_move_nothing(tmp_path):
     """칸에 1자부터 상한 넘김까지 쳐도 입력칸의 자리 · 폭이 그대로고 카운터는 칸 안에 있다.
     자동 저장 배지가 «고치면 저절로 저장됩니다» → «저장하는 중…» → «자동 저장 · 1s 전» →

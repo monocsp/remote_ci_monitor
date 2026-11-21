@@ -1,0 +1,24 @@
+# ~/.config/rcm/presets.{{preset}}.toml — add it to server.toml's `include` (rcm-ci-connect)
+[[presets]]
+name = "{{preset}}"
+description = "{{repo}} checks on the build machine"
+source_modes = ["git_ref"]
+repo = "{{repo_name}}"                  # the [[repos]] name in server.toml
+# pool = "mac2"                          # keep it off the lanes other projects use
+priority = "low"
+concurrency_group = "{{preset}}"
+supersede = "all"                       # a newer commit on the branch cancels the older job
+expected_seconds = 1260
+timeout_seconds = 3300                  # shorter than run_seconds, so rcm says timed_out first
+requires = ["/usr/bin/nice", "git"]
+argv = ["/usr/bin/nice", "-n", "10", "/bin/bash", "scripts/ci/rcm_ci.sh"]
+
+# The notify rule that posts the result (server.toml):
+# [[notify]]
+# name = "{{preset}}-status"
+# presets = ["{{preset}}"]
+# argv = ["/opt/homebrew/bin/python3", "{{home}}/.config/rcm/scripts/rcm_ci_status.py",
+#         "--github", "{{owner}}/{{repo}}", "--context", "rcm/ci",
+#         "--token-file", "{{home}}/.config/rcm/tokens/gh-{{owner}}-ci.token",
+#         "--server", "http://127.0.0.1:8787"]
+# timeout_seconds = 60

@@ -58,6 +58,7 @@ GRACE = 2  # [server] grace_seconds
 WORKER_TIMEOUT = 10  # [server] worker_timeout_seconds (하한)
 HEARTBEAT = 1  # [server] worker_heartbeat_seconds
 CLAIM_WAIT = 2  # [server] worker_claim_wait_seconds
+REPORT_WINDOW = 1 + 2 + 4  # remote_worker.REPORT_RETRIES — finish 보고를 다시 보내는 창
 POLL = 0.05
 TERMINAL = ("succeeded", "failed", "timed_out", "cancelled", "lost")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
@@ -221,6 +222,43 @@ def is_dead(pid: int) -> bool:
     return out == "" or out.startswith("Z")
 
 
+#: 새 세션으로 띄운 자식의 pid 를 남길 폴더 — `scripts/mutcheck.py` 가 변이마다 정하고, pytest 가
+#: 시간을 넘기면 그 자식들의 그룹도 죽인다. 비어 있으면 아무것도 남기지 않는다
+SESSION_PIDS_ENV = "RCM_TEST_SESSION_PIDS"
+
+
+class SessionProc(subprocess.Popen):
+    """`start_new_session=True` 로 띄운 자식. 서버 · 워커와 그 잡을 그룹째 죽이려고 새 세션에
+    두는데, 그러면 pytest 의 프로세스 그룹을 벗어나 mutcheck 의 timeout 정리(killpg)를 피한다
+    (#245 격리 검증). 그래서 `SESSION_PIDS_ENV` 폴더에 pid 이름의 빈 파일을 두고 `poll` 이나
+    `wait` 로 거두면 지운다. 남은 파일은 아직 거두지 않은 자식이다."""
+
+    def __init__(self, argv: list[str], **kw: Any):
+        self._mark: Path | None = None
+        super().__init__(argv, start_new_session=True, **kw)
+        folder = os.environ.get(SESSION_PIDS_ENV)
+        if folder:
+            Path(folder).mkdir(parents=True, exist_ok=True)
+            self._mark = Path(folder) / str(self.pid)
+            self._mark.touch()
+
+    def _forget(self) -> None:
+        if self._mark is not None:
+            self._mark.unlink(missing_ok=True)
+            self._mark = None
+
+    def poll(self) -> int | None:
+        code = super().poll()
+        if code is not None:
+            self._forget()
+        return code
+
+    def wait(self, timeout: float | None = None) -> int:
+        code = super().wait(timeout)
+        self._forget()
+        return code
+
+
 def kill_group(pid: int) -> None:
     """잡 프로세스 그룹(없으면 프로세스만) 을 SIGKILL. 이미 없으면 조용히."""
     for kill in (os.killpg, os.kill):
@@ -296,12 +334,11 @@ class E2EServer:
 
     def start(self, timeout: float = 30) -> None:
         self._out = self.log.open("ab")
-        self.proc = subprocess.Popen(
+        self.proc = SessionProc(
             [*RCM, "serve", "--config", str(self.config)],
             env=self.env,
             stdout=self._out,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -398,12 +435,11 @@ class WorkerProc:
 
     def start(self, client_token: str, timeout: float = 20) -> None:
         self._out = self.log.open("ab")
-        self.proc = subprocess.Popen(
+        self.proc = SessionProc(
             self.argv,
             env=self.env,
             stdout=self._out,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
         )
         self.wait_registered(client_token, timeout)
 
@@ -716,11 +752,14 @@ def test_cancel_reaches_the_worker_through_the_heartbeat_within_seconds(stack, t
     t0 = time.monotonic()
     cancel = rcm("cancel", str(jid), env=stack.env)
     assert cancel.returncode == 0 and last_json(cancel.stdout)["state"] == "cancelling", cancel
-    fin = stack.wait_terminal(jid, timeout=5)
+    fin = stack.wait_terminal(jid, timeout=WORKER_TIMEOUT)
     took = time.monotonic() - t0
-    # 워커가 확인한 취소다 — 서버가 대신 닫으면 `worker did not confirm the cancel` 이 된다
+    # 워커가 확인한 취소다 — 서버가 대신 닫으면 `worker did not confirm the cancel` 이 된다. 서버는
+    # `kill_at`(취소 + GRACE) + 2 × HEARTBEAT 에 스스로 닫으므로 이 요약이 「heartbeat 로 몇 초
+    # 안에」를 이미 가른다. 시간 상한은 워커가 끊긴 것으로 치는 WORKER_TIMEOUT 이다 — `took` 에는
+    # `rcm cancel` 프로세스의 기동이 들어 있어 `pytest -n 6` 부하에서 5.23초가 나왔다(rcm-ci #3859)
     assert fin["state"] == "cancelled" and fin["summary"] == f"cancelled by {CLIENT}", fin
-    assert fin["cancelled_by"] == CLIENT and took < 5, (fin, took)
+    assert fin["cancelled_by"] == CLIENT and took < WORKER_TIMEOUT, (fin, took)
     states = [t["state"] for t in fin["transitions"]]
     assert states[-3:] == ["running", "cancelling", "cancelled"], states
     wait_until(lambda: is_dead(pid), 5, f"job process {pid} to die")
@@ -732,6 +771,7 @@ def test_cancel_reaches_the_worker_through_the_heartbeat_within_seconds(stack, t
 # ── 4. kill -9 — timeout 뒤 lost · down · lanes 0 · 새 워커가 이어받는다 ──────
 
 
+@pytest.mark.slow
 def test_killed_worker_leaves_the_job_lost_after_the_timeout_and_a_new_worker_takes_over(
     stack, tree
 ):
@@ -823,7 +863,7 @@ def test_server_restart_keeps_the_remote_job_running_until_the_worker_finishes(s
     stack.server.stop(signal.SIGTERM, timeout=10)
     stack.server.start()
     gap = time.monotonic() - t0
-    assert gap < 5, gap  # 워커의 보고 재시도 창(1·2·4초) 안에 다시 떴다
+    assert gap < REPORT_WINDOW, gap  # 워커의 보고 재시도 창(1·2·4초) 안에 다시 떴다
     # 재시작 직후: 원격 잡은 lost 가 아니라 아직 running(recover_on_start 는 로컬 잡만)
     view = stack.job(jid)
     assert view["state"] == "running", view

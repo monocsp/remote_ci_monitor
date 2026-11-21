@@ -7,19 +7,109 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-22
+
+### Added
+- **`rcm-ci-connect` skill — run a repository's CI on the build machine, with GitHub as the
+  fallback.** `.rcm/ci.toml` picks `github`, `rcm` or `both`; a build-machine watcher submits
+  same-repository pull request heads and posts the `rcm/ci` commit status, a `[[notify]]` hook
+  posts the result, and the workflow's required check waits for it and runs the checks on GitHub
+  when rcm does not answer in time. Templates only — the server is unchanged.
+  ([#238](https://github.com/monocsp/remote_ci_monitor/pull/238))
+- **`tools/merge_pr.py <N>` is the one way to merge a pull request in this repository.** It pins
+  the PR's head sha and refuses until every check the base branch's ruleset requires has passed
+  on it, as a check run or a commit status (read from the rulesets API, so the switch from `test`
+  to `rcm/ci` needed no change; the latest status of a context counts). `--wait` waits up to
+  `--timeout` and refuses if the head moves. Checks the ruleset does not require are ignored,
+  pending or failed. It needs a `verified: <head sha>` PR comment from the isolated verification
+  (`--no-verify "<reason>"` posts the reason instead) and no conflict, then merges exactly that
+  sha as a merge commit titled `<title> (#N)`. `--dry-run` changes nothing, `--delete-branch`
+  removes the head branch. Exit codes: 0 merged, 1 refused, 2 usage, 3 GitHub did not answer.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- **A `PreToolUse` hook, `tools/guard_merge.py`, refuses every other way to merge** in a Claude
+  Code session: `gh pr merge`, `gh api … -X PUT …/pulls/<N>/merge` in any option order, the same
+  through `curl`, and a script being written that runs one. A watcher had merged twice by REST
+  with checks still pending.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- **`tools/guard_production.py` refuses a build that would migrate an older database in place**:
+  `rcm serve`, `rcm worker` or `rcm token` whose effective `data_dir` holds an `rcm.sqlite3`
+  older than the build's `DB_VERSION` (read from the file header, without connecting). Prefix
+  `RCM_ALLOW_MIGRATE=1` when that is the point. This works on machines without a production
+  install too.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- `python scripts/mutcheck.py -j N` runs N mutants at once (default 1; `-j 0` is half the CPUs),
+  each with its own `TMPDIR`, Chrome mutants one at a time, and prints the results in list order
+  with the same verdicts and exit code as a serial run.
+  ([#244](https://github.com/monocsp/remote_ci_monitor/pull/244))
+- `python scripts/mutcheck.py --list` prints every mutant with its file, description and count;
+  `AGENTS.md` and `CONTRIBUTING.md` no longer carry a mutation count.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- **This repository's CI is submitted on every push.** `.rcm/ci.toml` at the root says
+  `mode = "rcm"`, `fallback = "none"`: the build machine's `rcm-ci-connect` watcher submits the
+  `rcm-ci` preset for each same-repository pull request head and each push to `dev` within a
+  minute, and posts `queued` on `rcm/ci`; the job posts its own progress and result. Nobody has to
+  run `rcm run rcm-ci` by hand after a push any more.
+  ([#245](https://github.com/monocsp/remote_ci_monitor/pull/245))
+- **The `rcm-ci-connect` watcher reads its tokens from where they already are**:
+  `rcm_client_config` (the rcm client's `client.toml`, its `token` or `token_env`) instead of
+  `rcm_token_file`, and `github_token_command` (the first stdout line of a command such as
+  `gh auth token --user <login>`, run each round) instead of `github_token_file`. Exactly one of
+  each pair; nothing is copied into a new file, and a failing command skips that repository for
+  the round without printing its output.
+  ([#245](https://github.com/monocsp/remote_ci_monitor/pull/245))
+- **The `rcm-ci-connect` watcher cancels the queued job of a closed or merged pull request.** When
+  a head leaves the open pull requests, its job is cancelled if it is still queued, was submitted
+  by the watcher alone (no joiners) and its commit is not the head of a watched branch such as
+  `dev`. A running job is left to finish; its result only goes to that commit. A reopened pull
+  request whose job was cancelled is submitted again. The watcher now reads every page of open
+  pull requests, and cancels nothing in a round where it could not.
+  ([#246](https://github.com/monocsp/remote_ci_monitor/pull/246))
+
+### Changed
+- `tools/guard_naming.py` no longer refuses a title or commit subject the shell fills in
+  (`--title "$T"`, `"${T}"`, backticks, `$(…)` other than a heredoc): it cannot know the value,
+  and the refusal used to stop the whole command, the `git commit` before it included. It now
+  refuses `gh pr create|edit --body-file` with a name every session picks (`pr.md`,
+  `pr_body.md`, `body.md`, …) and asks for `pr-body-<branch>.md`.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+- Tests stub reverse DNS unless marked `allow_reverse_dns`, and a test that takes more than 20
+  seconds fails the run unless marked `slow`.
+  ([#237](https://github.com/monocsp/remote_ci_monitor/pull/237))
+
 ### Fixed
+- **A push that arrives while the rcm server restarts no longer blocks its merge.** The watcher
+  used to post `error` once when `rcm run` could not reach the server (or timed out) and never
+  submit that commit again, so the pull request waited for the next push. It now retries for
+  three rounds, posting `pending` `queued · retrying submit (n/3)` meanwhile, and posts
+  `unavailable` only after the fourth failure (a missing `rcm` executable is `rcm_missing`).
+  Setup and token failures still post it at once.
+  ([#246](https://github.com/monocsp/remote_ci_monitor/pull/246))
+- **`pytest` starts without `pytest-xdist`.** `--dist loadgroup` in `pyproject.toml`'s addopts
+  made pytest stop with `unrecognized arguments: --dist` when xdist was not installed.
+  `tests/conftest.py` now chooses `loadgroup` itself when `-n` is on, so the Chrome tests still
+  run on one worker.
+  ([#246](https://github.com/monocsp/remote_ci_monitor/pull/246))
+- **The `rcm-ci-connect` watcher no longer posts `pending` over a result.** When the job posted
+  `success` or `failure` itself and the server still said `running` for a moment, the watcher put
+  `running` on top and hid the result until it covered it again 120 seconds later. It now stops
+  following once a non-pending status is there, and never replaces a `pending` it did not post.
+  With `fallback = "none"` it also stops cancelling a job held by `worker_down` or `paused` —
+  with nobody to take over, that only turned a paused deploy into failed pull requests.
+  ([#245](https://github.com/monocsp/remote_ci_monitor/pull/245))
 - **The web page no longer misses an event when it reconnects.** Two events published at the same
   moment could reach a live stream in the wrong order (244 before 243). A page that lost its
   connection right after 244 asked to resume after 244 and never got 243, so a job could stay
   shown in an old state until the page was reloaded. Events replayed on reconnect could also
-  arrive after newer ones. Each stream now gets events in id order.
+  arrive after newer ones. Each stream now gets events in id order. Already in the v0.8.0
+  build; its notes missed it.
   ([#242](https://github.com/monocsp/remote_ci_monitor/pull/242))
 - **A version no longer stays `running` when its release round ends at once.** The server linked
   a version to a driver round only after the round had started, so a round that exited before
   the link (a driver that fails right away, or the confirm round that "build number: auto" starts)
   found no version to return to `editing`, and the version stayed `running` with nothing running
   until the server restarted. Starting a round and linking it now finish before that round's exit
-  is handled. ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
+  is handled. Already in the v0.8.0 build; its notes missed it.
+  ([#240](https://github.com/monocsp/remote_ci_monitor/pull/240))
 
 ## [0.8.0] - 2026-11-20
 
@@ -1896,7 +1986,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.0...v0.6.1

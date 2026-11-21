@@ -6,9 +6,15 @@
 이름이 그렇게 생겼다).
 
 훅 입력 JSON 을 stdin 으로 받아 판정 JSON 을 stdout 으로 낸다(`.claude/settings.json` 의 `Bash`
-매처). 보는 것은 셋뿐이다 — 브랜치를 **만드는** git 명령, `git commit -m` 의 제목, `gh pr create`
-의 제목. 그 밖의 명령은 건드리지 않는다. 훅이 못 읽는 모양(파일에서 읽는 `-F`, 알 수 없는 치환)은
-막지 않는다 — 검사기가 파서를 이기면 안 된다.
+매처). 보는 것은 넷뿐이다 — 브랜치를 **만드는** git 명령, `git commit -m` 의 제목, `gh pr create`
+의 제목, `gh pr create|edit --body-file` 의 파일 이름. 그 밖의 명령은 건드리지 않는다. 훅이 못
+읽는 모양(파일에서 읽는 `-F`, `$T` · `${T}` · `` `…` `` · heredoc 이 아닌 `$(…)` 같은 셸 치환)은
+막지 않는다 — 검사기가 파서를 이기면 안 된다. 2026-11-20 에 `--title "$T"` 를 글자 그대로 `$T` 로
+읽어 막았고, 그 바람에 같은 명령의 앞 `git commit` 까지 안 돌았다(사건 6d).
+
+PR 본문 파일은 이름만 본다. `pr.md` · `pr_body.md` · `body.md` 같은 흔한 이름은 병렬 세션이 같은
+자리에 써서 서로 덮는다 — #220 · #233 의 본문이 다른 PR 것으로 올라갔다(사건 6e). 그래서 브랜치가
+든 이름(`pr-body-<branch, / 를 - 로>.md`)을 쓰게 한다.
 
 CLI:
   python3 tools/guard_naming.py branch <name>
@@ -142,6 +148,28 @@ GENERIC_WORDS = frozenset(
 
 DOCS = "CONTRIBUTING.md (Names) · skills: branch, commit, pr"
 
+#: 훅이 값을 모르는 셸 치환 — `$NAME` · `${…}` · `$(…)` · `$1` · 백틱.
+SHELL_SUBST_RE = re.compile(r"\$[A-Za-z_{(0-9@*#?!$-]|`")
+
+#: 여러 세션이 같은 이름을 고르는 PR 본문 파일 — 확장자와 `-`·`_`·`.`, 끝의 한두 자리 번호를 뗀
+#: 줄기로 비교한다.
+SHARED_BODY_STEMS = frozenset(
+    {
+        "pr",
+        "prbody",
+        "body",
+        "prdescription",
+        "description",
+        "desc",
+        "prmessage",
+        "message",
+        "msg",
+        "prtext",
+        "text",
+        "summary",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Verdict:
@@ -217,6 +245,35 @@ def check_subject(subject: str, *, what: str = "commit subject") -> str | None:
     return None
 
 
+def check_body_file(path: str) -> str | None:
+    """PR 본문 파일의 이름이 여러 세션과 겹칠 이름이면 이유 한 줄, 아니면 None."""
+    if path == "-":
+        return None
+    base = path.rsplit("/", 1)[-1]
+    if _has_shell_substitution(base):
+        return None
+    stem = base.lower()
+    while True:
+        head, dot, ext = stem.rpartition(".")
+        if not dot or ext not in ("md", "markdown", "txt"):
+            break
+        stem = head
+    stem = re.sub(r"[-_.]?\d{1,2}$", "", stem)
+    stem = re.sub(r"[-_.]", "", stem)
+    if stem in SHARED_BODY_STEMS:
+        return (
+            f"PR body file '{base}' is a name every session picks — parallel agents overwrite each "
+            "other's body there (#220 and #233 went up with another PR's body). Name it after the "
+            "branch: pr-body-<branch with / as ->.md, e.g. pr-body-feat-guard-merge.md"
+        )
+    return None
+
+
+def _has_shell_substitution(text: str) -> bool:
+    """값에 셸이 펼칠 자리가 남았나. 훅은 셸을 실행하지 않으니 그 값은 모른다."""
+    return SHELL_SUBST_RE.search(text) is not None
+
+
 def _shorten(text: str, n: int = 60) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
@@ -268,9 +325,103 @@ def _heredoc_first_line(command: str) -> str | None:
     return None
 
 
+#: 앞에서 떼는 대입 이름(`GH_TOKEN=`)과 감싸기(`env ` · `sudo ` · `nohup `).
+ASSIGNMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+PREFIX_WRAPPER_RE = re.compile(r"(?:sudo|env|nohup)\s+")
+
+
+def _skip_quoted(text: str, i: int) -> int | None:
+    """`text[i]` 의 따옴표가 닫힌 바로 뒤 위치. 큰따옴표 안의 `\\` · `$(…)` 도 짝을 맞춘다. 못
+    닫으면 None."""
+    quote = text[i]
+    i += 1
+    while i < len(text):
+        ch = text[i]
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if quote == '"' and text.startswith("$(", i):
+            end = _skip_substitution(text, i)
+            if end is None:
+                return None
+            i = end
+            continue
+        if ch == quote:
+            return i + 1
+        i += 1
+    return None
+
+
+def _skip_substitution(text: str, i: int) -> int | None:
+    """`text[i:]` 이 `$(` 로 시작할 때 짝이 맞는 `)` 바로 뒤 위치. 못 닫으면 None."""
+    depth = 0
+    i += 1  # `$` 를 지나 `(` 에서 센다
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "'\"`":
+            end = _skip_quoted(text, i)
+            if end is None:
+                return None
+            i = end
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _value_end(text: str, i: int) -> int | None:
+    """대입 값이 끝나는 위치 — 따옴표 · `$(…)` · 백틱 밖의 첫 공백. 못 읽으면 None."""
+    while i < len(text) and not text[i].isspace():
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "'\"`":
+            end = _skip_quoted(text, i)
+        elif text.startswith("$(", i):
+            end = _skip_substitution(text, i)
+        else:
+            i += 1
+            continue
+        if end is None:
+            return None
+        i = end
+    return i
+
+
+def _drop_prefix(segment: str) -> str | None:
+    """앞의 `VAR=값` 대입과 감싸기를 뗀 나머지. 값이 `$(gh auth token --user x)` 여도 괄호 · 따옴표
+    짝을 맞춰 통째로 뗀다 — shlex 는 `GH_TOKEN=$(gh` 만 대입으로 보고 명령 이름을 `auth` 로
+    읽었다(#237 격리 검증). 짝이 안 맞아 못 읽으면 None(막지 않는다)."""
+    text = segment.lstrip()
+    while True:
+        wrapper = PREFIX_WRAPPER_RE.match(text)
+        if wrapper is not None:
+            text = text[wrapper.end() :].lstrip()
+            continue
+        name = ASSIGNMENT_NAME_RE.match(text)
+        if name is None:
+            return text
+        end = _value_end(text, name.end())
+        if end is None:
+            return None
+        text = text[end:].lstrip()
+
+
 def _argv(segment: str) -> list[str]:
+    rest = _drop_prefix(segment)
+    if rest is None:
+        return []
     try:
-        tokens = shlex.split(segment, comments=True)
+        tokens = shlex.split(rest, comments=True)
     except ValueError:
         return []
     while tokens:
@@ -386,6 +537,8 @@ def _commit_subject(words: list[str], segment: str) -> str | None:
         return None
     if msg.startswith("$("):
         return _heredoc_first_line(segment)
+    if _has_shell_substitution(msg):
+        return None  # `-m "$MSG"` — 셸이 펼칠 값이라 훅은 모른다
     return msg.splitlines()[0] if msg else None
 
 
@@ -397,7 +550,16 @@ def _pr_title(argv: list[str], segment: str) -> str | None:
         return None
     if title.startswith("$("):
         return _heredoc_first_line(segment)
+    if _has_shell_substitution(title):
+        return None  # `--title "$T"` — 셸이 펼칠 값이라 훅은 모른다(사건 6d)
     return title
+
+
+def _pr_body_file(argv: list[str]) -> str | None:
+    """`gh pr create|edit` 의 `--body-file`(`-F`) 값."""
+    if argv[:3] not in (["gh", "pr", "create"], ["gh", "pr", "edit"]):
+        return None
+    return _option_value(argv, ("--body-file", "-F"))
 
 
 def decide(tool_name: str, tool_input: dict) -> Verdict | None:
@@ -430,6 +592,11 @@ def decide(tool_name: str, tool_input: dict) -> Verdict | None:
             title = _pr_title(argv, segment)
             if title is not None:
                 reason = check_subject(title, what="PR title")
+                if reason:
+                    return Verdict("deny", f"{reason}. See {DOCS}.")
+            body_file = _pr_body_file(argv)
+            if body_file is not None:
+                reason = check_body_file(body_file)
                 if reason:
                     return Verdict("deny", f"{reason}. See {DOCS}.")
     return None

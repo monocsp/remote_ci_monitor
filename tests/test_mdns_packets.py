@@ -880,6 +880,7 @@ def test_start_without_a_socket_is_a_logged_no_and_stop_is_quiet() -> None:
     r.stop()
 
 
+@pytest.mark.slow  # 진짜 호스트 이름을 푼다 — macOS CI 러너에서 35초(2026-11-20 #237)
 def test_local_ipv4s_never_lists_loopback() -> None:
     """§1: A 레코드는 LAN IPv4 — 127.x 는 절대 없다(네트워크가 없으면 빈 목록)."""
     from remote_ci_monitor.mdns import local_ipv4s

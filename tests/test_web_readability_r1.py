@@ -486,6 +486,7 @@ def test_the_tail_stays_whole_while_the_head_can_still_give(tmp_path):
     )
 
 
+@pytest.mark.slow
 def test_no_text_is_cut_by_less_than_a_pixel(tmp_path):
     found = {}
     with Chrome(tmp_path / "chrome-r1-sliver", window="1280,900") as c:

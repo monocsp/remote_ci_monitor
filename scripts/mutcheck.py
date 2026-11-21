@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """뮤테이션 확인 — 테스트가 실제로 빨개지는지 본다(PLAN.md 「테스트·품질」).
 
-`src/` + `tests/` + `pyproject.toml` 을 임시 디렉터리에 복사하고 변이 하나를 넣은 뒤 그 복사본에서
-pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을 못 찾으면
-그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
+`src/` + `tests/` + `tools/` + `pyproject.toml` 을 임시 디렉터리에 복사하고 변이 하나를 넣은 뒤 그
+복사본에서 pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리지 않는다. 변이 패턴을
+못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5p P2 — `shelf-*` 넷: 파일 응답에서 `sandbox` CSP 를 뺌 · 퍼센트 디코딩 뒤의 경로 검사를 뺌 ·
@@ -118,27 +118,65 @@ pytest 를 돌린다. **pytest 가 실패해야 통과**다. 원본은 건드리
   M5q B1 — `m5q-worker-*` 다섯: 버전 409 전에 도는 잡을 닫음 · 409 본문에 `server_version`
      을 안 실음 · 기동 ① 이 10분 기록을 씀 · 레인 재등록이 막혀도 종료 0 · `WorkerFollow` 가
      `WorkerExit` 가 아님 (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
+  M5r A — `m5r-*` 아홉: 포크 검사 제거 · 틀린 설정을 파일의 mode 로 · rcm-only 갈래를 late 에 ·
+     대기 잡이 failure 를 fallback 으로 · creators 거르기 제거 · verdict 가 ran 을 안 봄 · 훅이
+     taken-over 를 덮음 · 훅이 종료 75 를 failure 로 · 감시가 포크 PR 을 받음
+     (`skills/rcm-ci-connect/templates/`, `docs/m5r-workplan.md` §6 「mutcheck 에 더할 변이」)
   M5q B2 — 다섯: 드레인이 도는 잡을 기다리지 않음 · 레인이 드레인 중에 claim 함 · 300초 창을
      지움 · 설치본 재실행이 따라가기 변수를 남김 · heartbeat 에 `server_version` 을 안 실음
      (`docs/m5q-workplan.md` §6 · `docs/m5q-test-scenarios-b.md`)
 
-사용: python scripts/mutcheck.py [--keep] [--only NAME]
+  작업이 길어진 원인을 막는 장치 — `guard-*` · `merge-pr-*` 다섯: `guard_naming` 이 셸 치환
+     값(`--title "$T"`)을 다시 글자로 잼 · PR 본문 파일 이름 검사 제거 · `guard_merge` 의 REST
+     머지(`gh api -X PUT …/pulls/N/merge`) 패턴 제거 · `merge_pr` 가 pending 체크를 안 봄 ·
+     `merge_pr` 가 룰셋의 필수 context 를 안 봄 · `merge_pr` 가 필수가 아닌 체크도 셈 ·
+     `guard_production` 의 옛 DB 판 비교 제거 (`tools/`, 2026-11-20 사건 6d · 6e · 6c · 2 · 6f)
+  #237 격리 검증의 지적과 mutcheck 병렬 · CI 부하 — 여섯: `guard_merge` 가 `pr` 뒤의 `-R` 을 못 봄 ·
+     `guard_naming` 이 앞의 `VAR=$(…)` 대입에 명령 이름을 놓침 · `merge_pr` 가 4xx 를 모름으로 셈 ·
+     mutcheck 가 결과를 끝난 순서로 찍음 · 변이 사본에서 바이트코드를 씀 · `-n` 에서 Chrome 파일을
+     한 워커로 안 묶음(`tests/conftest.py`, rcm-ci 잡 #3861)
+  #245 격리 검증이 남긴 후속 — 여섯: 감시가 서버 재시작 순간의 제출을 다시 내지 않음 · `--check` 가
+     서비스 venv 의 rcm 을 못 알아봄 · 닫힌 PR 의 합류한 잡을 취소함 · `guard_merge` 가 붙여 쓴
+     `-Ro/r` 를 못 봄 · `-n` 에서 `--dist` 를 loadgroup 으로 안 정함 · timeout 이 하네스의 새 세션
+     자식을 남김 (`docs/m5r-workplan.md` §13.8)
+  #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
+     목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
+
+사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
+
+`-j N` 은 변이 N 개를 동시에 돌린다(기본 1 — 직렬, `0` 이면 CPU 수의 절반). 변이마다 이미 자기
+임시 사본에서 대조군과 변이 pytest 를 돌리므로 사본끼리는 부딪히지 않는다. 같이 쓰는 것은 셋이다.
+  - 임시 폴더: 변이마다 자기 `TMPDIR` 을 준다. pytest 의 `pytest-of-<user>` 번호 폴더 정리와 시스템
+    임시 폴더를 세는 시험(`rcm-gc-dryrun-*`, `tests/test_offline_gc.py`)이 남의 것을 보지 않게.
+  - Chrome: `needs_chrome` 변이는 한 번에 하나만 돈다. 부하 속에 Chrome 을 여럿 띄우면 CDP 가
+    마감을 넘겨 대조군이 빨개진다.
+  - 고정 포트: `tests/test_mdns_loopback.py` 는 15353 을 나눠 듣는다. 그 파일을 쓰는 변이는 두지
+    않는다(`tests/test_mutcheck_parallel.py` 가 지킨다).
+결과는 끝난 순서가 아니라 `MUTANTS` 순서로 찍는다 — 직렬과 같은 출력이고 종료 코드 규칙도 같다.
+부하가 시간 문턱 시험을 밀 수 있으니 `-j` 를 CPU 수보다 크게 주지 않는다.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PYTEST_TIMEOUT_SECONDS = 300
+#: e2e 하네스가 새 세션으로 띄운 자식의 pid 를 남기는 폴더(tests/test_e2e_worker.py 와 같은 이름)
+SESSION_PIDS_ENV = "RCM_TEST_SESSION_PIDS"
 # tests/test_web_browser.py 의 `find_chrome()` 과 같은 후보(그 모듈을 import 하면 서버 픽스처까지
 # 끌려오므로 여기서 다시 적는다).
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
@@ -165,6 +203,9 @@ class Mutant:
     runner: str = "pytest"  # "pytest" | "node" (tests 는 node --test 에 넘길 경로)
     needs_chrome: bool = False  # True 면 Chrome 이 없을 때 실패가 아니라 SKIP
 
+
+#: M5r 변이가 겨누는 스킬 템플릿 폴더
+T = "src/remote_ci_monitor/skills/rcm-ci-connect/templates/"
 
 MUTANTS = (
     # ── M5p P2 — 보관함의 서버 · HTTP · 보안 (docs/m5p-workplan.md §10) ──
@@ -1220,6 +1261,166 @@ MUTANTS = (
         new="class WorkerFollow(Exception):\n",
         tests=("tests/test_cli_worker_m5q.py",),
     ),
+    # ── M5r PR A — rcm-ci-connect 스킬 템플릿 (docs/m5r-workplan.md §6) ──
+    Mutant(
+        # 포크 PR 을 rcm 모드로 둔다 — 남의 코드가 빌드 머신에서 돈다(결정 186)
+        name="m5r-resolve-trusts-forks",
+        path=T + "rcm_ci_config.py",
+        old="    if fork:\n",
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_config.py",),
+    ),
+    Mutant(
+        # 틀린 설정을 「파일 없음」처럼 지나간다 — bad_file 이 경고 없이 사라진다
+        name="m5r-bad-file-not-github",
+        path=T + "rcm_ci_config.py",
+        old="    if error is not None:\n",
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_config.py",),
+    ),
+    Mutant(
+        # rcm-only 갈래를 대체 갈래에 넣는다 — macOS 러너 부족이 dev 머지를 다시 막는다(결정 195)
+        name="m5r-rcm-only-leg-in-late",
+        path=T + "rcm_ci_config.py",
+        old='if where(leg) == "rcm") if cfg.fallback',
+        new='if where(leg) in ("rcm", "rcm-only")) if cfg.fallback',
+        tests=("tests/test_ci_connect_config.py",),
+    ),
+    Mutant(
+        # 대기 잡이 rcm 의 failure 를 대체로 읽는다 — 빨간 코드가 ubuntu 갈래로 통과한다(결정 180)
+        name="m5r-wait-failure-falls-back",
+        path=T + "rcm_ci_wait.py",
+        old='return Waited("fail", "failed", job)',
+        new='return Waited("fallback", "failed", job)',
+        tests=("tests/test_ci_connect_wait.py",),
+    ),
+    Mutant(
+        # creators 거르기를 지운다 — 아무 계정이 올린 success 로 통과한다(결정 179)
+        name="m5r-creators-not-filtered",
+        path=T + "rcm_ci_config.py",
+        old="        elif creators and login not in creators:\n            continue\n",
+        new="",
+        tests=("tests/test_ci_connect_wait.py",),
+    ),
+    Mutant(
+        # verdict 가 `ran` 을 보지 않는다 — 아무것도 안 돈 대체가 success 로 보인다(검토 P0-2)
+        name="m5r-verdict-ignores-ran",
+        path=T + "rcm_ci_wait.py",
+        old='if job(name).get("result") == "success" and expected and ran == expected:',
+        new='if job(name).get("result") == "success":',
+        tests=("tests/test_ci_connect_wait.py",),
+    ),
+    Mutant(
+        # 훅이 GitHub 이 넘겨받은 커밋을 덮는다(결정 185)
+        name="m5r-hook-overwrites-taken-over",
+        path=T + "rcm_ci_status.py",
+        old='    if top is not None and cc.read_word(top.get("description"))[0] == "taken-over":\n',
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_status.py",),
+    ),
+    Mutant(
+        # 환경 탓 실패(종료 75)를 코드의 실패로 올린다 — 빨강 하나가 dev 머지를 막는다(결정 189)
+        name="m5r-exit-75-is-failure",
+        path=T + "rcm_ci_config.py",
+        old="        if exit_code == EX_TEMPFAIL:\n",
+        new="        if False:\n",
+        tests=("tests/test_ci_connect_config.py", "tests/test_ci_connect_status.py"),
+    ),
+    Mutant(
+        # 감시가 포크 PR 을 받는다 — 남의 코드를 rcm 에 낸다(결정 186)
+        name="m5r-watch-takes-fork-prs",
+        path=T + "rcm_ci_watch.py",
+        old='            if cc.is_fork(self.repo.github, p.get("head_repo"), p.get("author")):\n',
+        new="            if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    # ── M5r R15 — 대체 없이 rcm 만 쓰는 레포 (docs/m5r-workplan.md §13) ──
+    Mutant(
+        # 잡 스크립트가 올린 결과 위에 감시가 running 을 올린다. 결과가 가려진다(결정 198)
+        name="m5r-watch-pending-over-a-result",
+        path=T + "rcm_ci_watch.py",
+        old='        if top is not None and top.get("state") != "pending":\n',
+        new="        if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 잡 스크립트의 pending 을 감시의 running 으로 덮는다(결정 198)
+        name="m5r-watch-overwrites-the-job-pending",
+        path=T + "rcm_ci_watch.py",
+        old="        ours = top is None or word in OWN_PENDING\n",
+        new="        ours = True\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 대체 없는 레포에서도 멈춘 잡을 취소한다. 배포 때 큐를 멈추면 PR 이 error 다(결정 197)
+        name="m5r-watch-no-fallback-still-cancels",
+        path=T + "rcm_ci_watch.py",
+        old='        if reason in STUCK_REASONS and entry.get("fallback") == "none":\n',
+        new="        if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    # ── #245 격리 검증이 남긴 후속 (docs/m5r-workplan.md §13.8) ──
+    Mutant(
+        # 서버 재시작 순간의 제출 실패를 다시 내지 않고 곧바로 error 로 둔다. 다음 push 까지 머지가
+        # 막힌다
+        name="m5r-watch-no-submit-retry",
+        path=T + "rcm_ci_watch.py",
+        old="            if reason in RETRY_REASONS and tries < SUBMIT_RETRIES:\n",
+        new="            if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # `--check` 가 서비스 venv 의 rcm 을 알아보지 못한다. 배포 중 checkout 이 바뀌는 사이 제출이
+        # 실패할 수 있다
+        name="m5r-watch-check-misses-service-venv",
+        path=T + "rcm_ci_watch.py",
+        old="    if found and os.access(found, os.X_OK) and in_service_venv(found):\n",
+        new="    if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 닫힌 PR 의 잡을 남이 합류했어도 취소한다. 합류한 남의 검사가 같이 죽는다
+        name="m5r-watch-cancels-a-joined-job",
+        path=T + "rcm_ci_watch.py",
+        old='            alone = requester.get("label") == by_label() and not doc.get("joiners")\n',
+        new="            alone = True\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    # ── #246 격리 검증이 찾은 것 ──
+    Mutant(
+        # 서버가 더 새 커밋으로 풀어 받은 제출을 닫힌 PR 의 잡으로 보고 취소한다. 그 커밋은 이미 본
+        # sha 라 다시 내지 않아 머지가 막힌다
+        name="m5r-watch-cancels-a-moved-submission",
+        path=T + "rcm_ci_watch.py",
+        old="            heads |= {\n",
+        new="            heads |= set() and {\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 다시 열린 PR 의 head 가 취소한 커밋이면 이미 본 sha 로 건너뛴다. 그 PR 은 끝내 막힌다
+        name="m5r-watch-reopened-pr-stays-gone",
+        path=T + "rcm_ci_watch.py",
+        old='        reopened = shas[sha] if word == "gone" else None\n',
+        new="        reopened = None\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 다시 열린 PR 에서 취소한 그 잡의 끝 상태(알림 훅의 `unavailable · #N · cancelled`)를
+        # 남이 다룬 것으로 본다. 다시 내지 않아 PR 이 error 로 막힌다(#246 재검증)
+        name="m5r-watch-reopened-hook-status-blocks",
+        path=T + "rcm_ci_watch.py",
+        old="            mine = same_job or at is None",
+        new="            mine = at is None",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 열린 PR 목록의 첫 쪽만 읽는다. 100개 너머의 PR 은 내지 않고 닫힌 것으로 본다
+        name="m5r-watch-reads-one-page-of-pulls",
+        path=T + "rcm_ci_watch.py",
+        old="""            while 'rel="next"' in reply.headers.get("link", ""):\n""",
+        new="            while False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
     # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
     Mutant(
         # 드레인이 도는 잡을 기다리지 않는다 — 레인이 잡을 도는 중에 `stopping` 이 켜져 그 잡이
@@ -1267,86 +1468,388 @@ MUTANTS = (
         new="        }\n",
         tests=("tests/test_server_m5q_worker.py",),
     ),
+    # ── 작업이 길어진 원인을 막는 장치 (2026-11-20 사건 2 · 6c · 6d · 6e · 6f) ──
+    Mutant(
+        # 셸 치환을 「모르는 값」으로 보지 않는다 — `--title "$T"` 를 글자 그대로 재서 같은 명령의
+        # 앞 `git commit` 까지 막는다(사건 6d)
+        name="guard-naming-judges-shell-values",
+        path="tools/guard_naming.py",
+        old="    return SHELL_SUBST_RE.search(text) is not None\n",
+        new="    return False\n",
+        tests=("tests/test_guard_naming.py",),
+    ),
+    Mutant(
+        # PR 본문 파일 이름을 안 본다 — 병렬 세션이 `pr.md` 를 서로 덮는다(사건 6e)
+        name="guard-naming-any-body-file",
+        path="tools/guard_naming.py",
+        old="    if stem in SHARED_BODY_STEMS:\n",
+        new="    if False:\n",
+        tests=("tests/test_guard_naming.py",),
+    ),
+    Mutant(
+        # REST 머지(`gh api -X PUT …/pulls/N/merge` · curl)를 못 알아본다 — 감시 스크립트가 pending
+        # 체크를 두고 머지했다(사건 6c)
+        name="guard-merge-misses-rest-merge",
+        path="tools/guard_merge.py",
+        old="    if rest and PUT_RE.search(flat) and url:\n",
+        new="    if False:\n",
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # 관문이 끝나지 않은 체크를 안 본다 — 「아직 도는데 머지」가 그대로 돌아온다(사건 6c)
+        name="merge-pr-ignores-pending",
+        path="tools/merge_pr.py",
+        old='        if run.get("status") != "completed":\n            states[name] = "pending"\n',
+        new='        if False:\n            states[name] = "pending"\n',
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 필수가 아닌 check-run 도 센다 — pending 이거나 실패한 GitHub Actions 잡이 머지를 막는다
+        # (2026-11-20 오너 결정: GitHub CI 는 머지 조건이 아니다)
+        name="merge-pr-counts-unrequired-checks",
+        path="tools/merge_pr.py",
+        old='        name = str(run.get("name", "?"))\n        if name not in required:\n',
+        new='        name = str(run.get("name", "?"))\n        if False:\n',
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 룰셋의 필수 context 를 안 본다 — GitHub Actions 만 초록이고 `rcm/ci` 가 아직 없는데
+        # 머지한다(2026-11-20 오너 결정: 필수 체크가 `rcm/ci` 로 바뀐다)
+        name="merge-pr-ignores-required-contexts",
+        path="tools/merge_pr.py",
+        old="    missing = tuple(context for context in required if context not in states)\n",
+        new="    missing = ()\n",
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 옛 DB 판과 빌드 판을 비교하지 않는다 — 같은 판 DB 도 막거나(오탐) 비교 없이 지나간다
+        # (사건 6f: 개발 DB v7 → v24)
+        name="guard-production-no-version-compare",
+        path="tools/guard_production.py",
+        old="    if have is None or want is None or have >= want:\n",
+        new="    if have is None or want is None:\n",
+        tests=("tests/test_guard_production_migration.py",),
+    ),
+    # ── #237 격리 검증이 찾은 가드의 구멍과 mutcheck 병렬 (2026-11-20) ──
+    Mutant(
+        # `-R o/r` 를 `pr` 앞에서만 본다 — `gh pr -R o/r merge 7` 이 관문을 돌아간다
+        name="guard-merge-repo-after-pr",
+        path="tools/guard_merge.py",
+        old='r"pr\\s+" + REPO_OPT + r"merge\\b")',
+        new='r"pr\\s+merge\\b")',
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # 앞의 `GH_TOKEN=$(gh auth token …)` 대입을 shlex 에 맡긴다 — 명령 이름이 `auth` 가 되어 PR
+        # 제목 · 본문 파일 검사가 꺼진다
+        name="guard-naming-assignment-hides-command",
+        path="tools/guard_naming.py",
+        old="    rest = _drop_prefix(segment)\n",
+        new="    rest = segment\n",
+        tests=("tests/test_guard_naming.py",),
+    ),
+    Mutant(
+        # GitHub 의 4xx 답(룰셋 API 403 · 404)을 「모름(3)」으로 센다 — 설명과 코드가 어긋난다
+        name="merge-pr-4xx-is-unknown",
+        path="tools/merge_pr.py",
+        old="        return self.status is None or self.status >= 500\n",
+        new="        return self.status is None or self.status >= 400\n",
+        tests=("tests/test_merge_pr.py",),
+    ),
+    Mutant(
+        # 결과를 끝난 순서대로 바로 찍는다 — 병렬 출력이 실행마다 달라지고 직렬과 어긋난다
+        name="mutcheck-reports-in-finish-order",
+        path="scripts/mutcheck.py",
+        old="            results[index] = outcome\n            done.notify_all()\n",
+        new=(
+            "            results[index] = outcome\n"
+            "            report(mutants[index], *outcome)\n"
+            "            done.notify_all()\n"
+        ),
+        tests=("tests/test_mutcheck_parallel.py",),
+    ),
+    Mutant(
+        # 변이 사본에서 바이트코드를 쓴다 — 원본이 변이와 같은 초에 쓰였고 변이가 같은 길이면 옛
+        # `.pyc` 를 읽어 잡혀야 할 변이가 「초록」으로 보인다
+        name="mutcheck-writes-bytecode",
+        path="scripts/mutcheck.py",
+        old=', "PYTHONDONTWRITEBYTECODE": "1"}\n',
+        new="}\n",
+        tests=("tests/test_mutcheck_parallel.py",),
+    ),
+    Mutant(
+        # Chrome 파일을 그룹으로 묶지 않는다 — `-n` 에서 여러 워커가 동시에 Chrome 을 띄워 CDP 가
+        # 마감을 넘긴다(rcm-ci 잡 #3861)
+        name="conftest-chrome-not-grouped",
+        path="tests/conftest.py",
+        old='            return "chrome" if uses_chrome(',
+        new='            return nodeid if True else "chrome" if uses_chrome(',
+        tests=("tests/test_conftest_hygiene.py::test_chrome_modules_run_on_one_xdist_worker",),
+    ),
+    # ── #245 격리 검증이 남긴 후속 — 가드 · 시험 하네스 ──
+    Mutant(
+        # 옵션과 값을 붙여 쓴 `-Ro/r` 를 못 본다 — `gh pr -Ro/r merge 7` 이 관문을 돌아간다
+        name="guard-merge-glued-repo-option",
+        path="tools/guard_merge.py",
+        old='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)*"\n',
+        new='REPO_OPT = r"(?:(?:-R|--repo)[\\s=]+\\S+\\s+)*"\n',
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # 저장소 옵션을 한 번만 본다 — `gh -Ro/r -R x/y pr merge 1` 이 관문을 돌아간다(#246)
+        name="guard-merge-one-repo-option",
+        path="tools/guard_merge.py",
+        old='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)*"\n',
+        new='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)?"\n',
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # `-n` 에서 `--dist` 를 loadgroup 으로 정하지 않는다 — addopts 에서 뺀 뒤로 Chrome 시험이
+        # 여러 워커에 흩어진다
+        name="conftest-dist-not-defaulted",
+        path="tests/conftest.py",
+        old='        config.option.dist = "loadgroup"\n',
+        new="        pass\n",
+        tests=("tests/test_conftest_hygiene.py::test_chrome_modules_run_on_one_xdist_worker",),
+    ),
+    Mutant(
+        # timeout 때 e2e 하네스가 새 세션으로 띄운 서버 · 워커를 죽이지 않는다 — 다른 변이의 CPU 를
+        # 먹으며 남는다
+        name="mutcheck-timeout-spares-session-children",
+        path="scripts/mutcheck.py",
+        old="        _kill_sessions(env)\n",
+        new="        pass\n",
+        tests=("tests/test_mutcheck_parallel.py",),
+    ),
 )
 
 
-def _pytest(cmd: list[str], cwd: Path) -> tuple[int, float, str] | None:
-    """(exit code, seconds, output tail) — timeout 이면 None."""
+def _pytest(
+    cmd: list[str], cwd: Path, env: dict[str, str] | None = None
+) -> tuple[int, float, str] | None:
+    """(exit code, seconds, output tail) — timeout 이면 None.
+
+    자기 프로세스 그룹에서 돌리고 timeout 이면 그룹째 죽인다 — 시험이 띄운 서버 · 워커가 남아
+    다른 변이의 CPU 를 먹지 않게. 그룹이 잡는 것은 pytest 와 그 그룹에 남은 자식뿐이다. e2e
+    하네스가 `start_new_session=True` 로 띄운 서버 · 워커는 제 세션에 있어 그룹 밖이다. 그래서
+    하네스(`tests/test_e2e_worker.py` 의 `SessionProc`)가 `env` 의 `SESSION_PIDS_ENV` 폴더에 남긴
+    pid 의 그룹도 죽인다. 하네스가 거둔 자식의 파일은 지워져 있으니 남은 것만 죽는다."""
     started = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=PYTEST_TIMEOUT_SECONDS
-        )
+        out, err = proc.communicate(timeout=PYTEST_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        # 파이프를 비우기 전에 죽인다. 파이프를 물려받은 자식이 살아 있으면 communicate 가 안 끝난다
+        _kill_sessions(env)
+        proc.communicate()
         return None
     took = time.monotonic() - started
-    lines = (proc.stdout + proc.stderr).strip().splitlines()
+    lines = (out + err).strip().splitlines()
     return proc.returncode, took, "\n".join(lines[-6:])
 
 
+def _kill_sessions(env: dict[str, str] | None) -> None:
+    """하네스가 새 세션으로 띄우고 아직 거두지 않은 자식들의 그룹을 죽인다(`_pytest` 의 설명)."""
+    folder = (env or {}).get(SESSION_PIDS_ENV)
+    if not folder or not Path(folder).is_dir():
+        return
+    for mark in Path(folder).iterdir():
+        if not mark.name.isdigit():
+            continue
+        try:
+            os.killpg(int(mark.name), signal.SIGKILL)
+        except OSError:
+            pass
+        mark.unlink(missing_ok=True)
+
+
+def _descriptions() -> dict[str, str]:
+    """변이마다 `Mutant(` 바로 아래 주석 — 이 파일이 정본이라 설명을 따로 적지 않고 읽는다."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    out: dict[str, str] = {}
+    pattern = r"Mutant\(\n((?:[ \t]+#[^\n]*\n)*)[ \t]+name=\"([^\"]+)\""
+    for comment, name in re.findall(pattern, text):
+        lines = [line.strip().lstrip("#").strip() for line in comment.splitlines()]
+        out[name] = " ".join(line for line in lines if line)
+    for m in MUTANTS:  # 주석이 없는 옛 변이는 이 docstring 의 「이름 — 설명」 줄을 쓴다
+        if not out.get(m.name):
+            found = re.search(re.escape(m.name) + r"\s+—\s+([^\n]+)", __doc__ or "")
+            out[m.name] = found.group(1).strip() if found else ""
+    return out
+
+
+def list_mutants() -> int:
+    """`--list` — 이름 · 파일 · 설명, 끝에 수. 문서는 수를 적지 않고 이것을 가리킨다."""
+    about = _descriptions()
+    for m in MUTANTS:
+        print(f"{m.name}\t{m.path}\t{about.get(m.name, '')}")
+    print(f"{len(MUTANTS)} mutants")
+    return 0
+
+
 def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
-    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명)."""
+    """복사본에 변이를 넣고 pytest 를 돌린다. (감지됨? — None 은 SKIP, 설명).
+
+    아무것도 직접 찍지 않는다. 병렬로 돌 때 줄이 섞이지 않게 `--keep` 의 사본 경로도 설명에
+    싣는다."""
     if m.needs_chrome and not chrome_available():
         return None, "skipped: no Chrome binary found (set RCM_CHROME) — its tests would skip"
     tmp = Path(tempfile.mkdtemp(prefix=f"mutcheck-{m.name}-"))
+    # 이 변이의 pytest 만 쓰는 임시 폴더 — 짧게 둔다(Chrome 등의 유닉스 소켓 경로 길이 제한)
+    scratch = Path(tempfile.mkdtemp(prefix="mc-"))
     try:
-        for name in ("src", "tests", "pyproject.toml"):
-            src = ROOT / name
-            if src.is_dir():
-                shutil.copytree(src, tmp / name, ignore=shutil.ignore_patterns("__pycache__"))
-            else:
-                shutil.copy2(src, tmp / name)
-        target = tmp / m.path
-        text = target.read_text(encoding="utf-8")
-        if text.count(m.old) != 1:
-            return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
-        if m.runner == "node":
-            node = shutil.which("node")
-            if node is None:
-                return False, "node is not installed (needed for the web mutant)"
-            cmd = [node, "--test", *m.tests]
-        else:
-            cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *m.tests]
-        # 대조군: 변이 없이 복사본에서 초록이어야 한다(환경 문제로 빨간 것을 감지로 착각하지 않게)
-        control = _pytest(cmd, tmp)
-        if control is None:
-            return False, f"control run timed out: {' '.join(cmd)}"
-        if control[0] != 0:
-            return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
-        target.write_text(text.replace(m.old, m.new), encoding="utf-8")
-        mutated = _pytest(cmd, tmp)
-        if mutated is None:
-            return False, f"mutant run timed out: {' '.join(cmd)}"
-        code, took, tail = mutated
-        if code == 0:
-            return False, f"tests stayed GREEN with mutant applied ({took:.1f}s)\n{tail}"
-        return True, f"control green, mutant red (exit {code}, {took:.1f}s)"
+        # 바이트코드를 쓰지 않는다. `.pyc` 는 원본의 (mtime 초, 크기) 로 낡았는지 본다. 사본은
+        # mtime 을 그대로 가져오므로 원본이 변이를 쓴 그 초에 만들어졌고 변이가 같은 길이면 대조군이
+        # 남긴 `.pyc` 를 그대로 읽어 잡혀야 할 변이가 「초록」으로 보인다(가짜 프로젝트 시험)
+        env = {**os.environ, "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"}
+        env[SESSION_PIDS_ENV] = str(scratch / "sessions")  # timeout 때 같이 죽일 자식들
+        ok, info = _run_in_copy(m, tmp, env)
     finally:
-        if keep:
-            print(f"  kept copy: {tmp}")
-        else:
+        if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+    if keep:
+        info += f"\n  kept copy: {tmp}"
+    return ok, info
+
+
+def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
+    # `.rcm` — 시험이 레포의 `.rcm/ci.toml` 을 읽는다(R15)
+    for name in ("src", "tests", "tools", "scripts", ".rcm", "pyproject.toml"):
+        src = ROOT / name
+        if src.is_dir():
+            shutil.copytree(src, tmp / name, ignore=shutil.ignore_patterns("__pycache__"))
+        elif src.is_file():
+            shutil.copy2(src, tmp / name)
+    target = tmp / m.path
+    text = target.read_text(encoding="utf-8")
+    if text.count(m.old) != 1:
+        return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
+    if m.runner == "node":
+        node = shutil.which("node")
+        if node is None:
+            return False, "node is not installed (needed for the web mutant)"
+        cmd = [node, "--test", *m.tests]
+    else:
+        cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *m.tests]
+    # 대조군: 변이 없이 복사본에서 초록이어야 한다(환경 문제로 빨간 것을 감지로 착각하지 않게)
+    control = _pytest(cmd, tmp, env)
+    if control is None:
+        return False, f"control run timed out: {' '.join(cmd)}"
+    if control[0] != 0:
+        return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
+    _write_mutant(target, text.replace(m.old, m.new))
+    mutated = _pytest(cmd, tmp, env)
+    if mutated is None:
+        return False, f"mutant run timed out: {' '.join(cmd)}"
+    code, took, tail = mutated
+    if code == 0:
+        return False, f"tests stayed GREEN with mutant applied ({took:.1f}s)\n{tail}"
+    return True, f"control green, mutant red (exit {code}, {took:.1f}s)"
+
+
+def _write_mutant(target: Path, text: str) -> None:
+    """변이를 사본에 쓴다. 시험이 이것을 감싸 mtime 을 원본 값으로 되돌린다 — 옛 `.pyc` 가 읽히는
+    조건(같은 초 · 같은 길이)을 시계에 기대지 않고 만든다."""
+    target.write_text(text, encoding="utf-8")
+
+
+def resolve_jobs(jobs: int) -> int:
+    """`-j` 값 → 동시에 돌릴 변이 수. 0 은 CPU 수의 절반(최소 1) — 나머지 절반은 시험이 띄우는
+    서버 · 워커 · Chrome 몫이다."""
+    if jobs > 0:
+        return jobs
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
+#: Chrome 변이는 한 번에 하나 — 부하 속 여러 Chrome 은 CDP 마감을 넘긴다(모듈 docstring).
+_CHROME_LOCK = threading.Lock()
+
+
+def _run_one(m: Mutant, keep: bool) -> tuple[bool | None, str]:
+    if m.needs_chrome:
+        with _CHROME_LOCK:
+            return run_mutant(m, keep)
+    return run_mutant(m, keep)
+
+
+def run_all(
+    mutants: list[Mutant],
+    jobs: int,
+    keep: bool,
+    report: Callable[[Mutant, bool | None, str], None],
+) -> list[bool | None]:
+    """변이를 `jobs` 개씩 동시에 돌리고, 결과는 끝난 순서가 아니라 `mutants` 순서로 `report` 에
+    넘긴다. 앞의 것이 끝나는 대로 이어지는 만큼 바로 넘기므로 직렬(`jobs=1`)은 예전과 같다."""
+    results: list[tuple[bool | None, str] | None] = [None] * len(mutants)
+    done = threading.Condition()
+
+    def work(index: int) -> None:
+        try:
+            outcome = _run_one(mutants[index], keep)
+        except Exception as error:  # 한 변이가 터져도 나머지는 끝난다 — 실패로 센다
+            outcome = (False, f"mutcheck crashed on this mutant: {error!r}")
+        with done:
+            results[index] = outcome
+            done.notify_all()
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        for index in range(len(mutants)):
+            pool.submit(work, index)
+        for index, m in enumerate(mutants):
+            with done:
+                done.wait_for(lambda index=index: results[index] is not None)
+            ok, info = results[index]  # type: ignore[misc]
+            report(m, ok, info)
+    return [r[0] for r in results]  # type: ignore[index]
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Check that tests catch known mutations.")
     ap.add_argument("--keep", action="store_true", help="keep the mutated copies")
     ap.add_argument("--only", help="run one mutant by name")
+    ap.add_argument("--list", action="store_true", help="list the mutants and their count")
+    ap.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="run N mutants at once (default 1; 0 = half the CPUs). Chrome mutants still run "
+        "one at a time",
+    )
     args = ap.parse_args(argv)
+    if args.list:
+        return list_mutants()
+    if args.jobs < 0:
+        print(f"--jobs must be 0 or more (got {args.jobs})", file=sys.stderr)
+        return 2
     mutants = [m for m in MUTANTS if not args.only or m.name == args.only]
     if not mutants:
         print(f"no mutant named {args.only!r}", file=sys.stderr)
         return 2
-    failures = 0
-    skipped = 0
-    for m in mutants:
-        ok, info = run_mutant(m, args.keep)
+    jobs = min(resolve_jobs(args.jobs), len(mutants))
+    if jobs > 1:
+        print(f"mutcheck: {len(mutants)} mutants, {jobs} at a time", flush=True)
+
+    def report(m: Mutant, ok: bool | None, info: str) -> None:
         mark = "SKIP" if ok is None else "OK " if ok else "FAIL"
-        print(f"[{mark}] {m.name}: {info}")
-        if ok is None:
-            skipped += 1
-        elif not ok:
-            failures += 1
+        print(f"[{mark}] {m.name}: {info}", flush=True)
+
+    outcomes = run_all(mutants, jobs, args.keep, report)
+    failures = sum(1 for ok in outcomes if ok is False)
+    skipped = sum(1 for ok in outcomes if ok is None)
     if failures:
         print(f"mutcheck: {failures} of {len(mutants)} mutants NOT caught", file=sys.stderr)
         return 1

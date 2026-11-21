@@ -37,6 +37,7 @@ from test_e2e_worker import (
     RCM,
     TERMINAL,
     E2EServer,
+    SessionProc,
     clean_env,
     free_port,
     kill_group,
@@ -184,12 +185,11 @@ class M5nWorker:
 
     def start(self) -> None:
         self._out = self.log.open("ab")
-        self.proc = subprocess.Popen(
+        self.proc = SessionProc(
             self.argv,
             env=self.env,
             stdout=self._out,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
         )
 
     def log_text(self) -> str:
@@ -370,6 +370,7 @@ def test_an_any_capable_job_runs_only_on_the_worker_that_has_the_tool(stack):
 # ── 2. Xcode 사고의 재연 (edge 1 · 완료 기준 2) ───────────────────────────────
 
 
+@pytest.mark.slow
 def test_a_changed_probe_triggers_one_automatic_check_and_a_failure_sticks(stack):
     stack.start(CAP)
     # 등록 직후: 지문 → scenario 는 check_needed → 스위퍼가 w-cap 을 지정해 simcheck 를 한 번

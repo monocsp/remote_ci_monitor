@@ -50,8 +50,10 @@ def test_changelog_unreleased_mentions_requires_and_tool_missing():
     assert has(sec, r"`requires`") and has(sec, r"tool_missing"), sec
 
 
-def test_mutcheck_count_in_agents_matches_contributing():
-    """두 문서의 변이 수가 같다(`test_release_files` 가 CONTRIBUTING 과 스크립트를 맞춘다)."""
-    a = re.search(r"(\d+) known mutations", read(AGENTS))
-    c = re.search(r"(\d+) known mutations", read(CONTRIBUTING))
-    assert a and c and a.group(1) == c.group(1), (a, c)
+def test_agents_and_contributing_point_at_mutcheck_instead_of_a_count():
+    """두 문서 다 변이 수를 적지 않고 `scripts/mutcheck.py` 를 가리킨다 — 숫자는 머지마다
+    충돌했다(2026-11-20 사건 5). `test_release_files` 가 CONTRIBUTING 의 절을 따로 본다."""
+    for doc in (AGENTS, CONTRIBUTING):
+        text = read(doc)
+        assert not re.search(r"\d+ known mutations", text), doc
+        assert re.search(r"every mutant in `?scripts/mutcheck\.py`?", text), doc

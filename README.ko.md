@@ -330,6 +330,11 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 라이브 서버 파일 · 비밀 · 스토어는 건드리지 않는다. 프로파일 키는
 [Configuration](docs/configuration.md#release-profile)에 있다.
 
+같은 `rcm skills install` 로 **`rcm-ci-connect`** 도 들어온다. 이 스킬은 저장소의 CI 를 빌드
+머신에서 돌린다. 감시 스크립트가 pull request 의 head 마다 잡을 내고 `rcm/ci` 커밋 상태를 올린다.
+원하면 GitHub Actions 를 대체 경로로 둘 수 있다. 동작 방식과 오너가 준비할 것은
+[Configuration](docs/configuration.md#release-profile)의 connect 스킬 설명 바로 뒤 문단에 있다.
+
 ## Exit codes
 
 | `rcm wait` 종료 코드 | 뜻 |

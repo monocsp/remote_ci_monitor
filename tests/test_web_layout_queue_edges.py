@@ -768,6 +768,7 @@ BEFORE_MIDNIGHT_KST = datetime(2026, 11, 18, 14, 50, tzinfo=UTC)
 @pytest.mark.parametrize(
     "page_now", [None, BEFORE_MIDNIGHT_KST], ids=["now", "before-midnight-kst"]
 )
+@pytest.mark.slow
 def test_rows_keep_their_height_through_ticks_and_updates(tmp_path, page_now):
     served = Served("long-text", page_now)
     moved: dict[tuple[int, str], list[str]] = {}

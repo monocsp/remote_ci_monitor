@@ -23,6 +23,8 @@
 import json
 import time
 
+import pytest
+
 from test_web_browser import SCENE_LINK, Chrome, scene  # noqa: F401  (scene 은 이 파일이 쓰는 픽스처다)
 
 # 폰·데스크톱 × 한국어·영어. 인접한 두 경우의 주소가 늘 달라 `Page.navigate` 가 실제로 이동한다.
@@ -290,6 +292,7 @@ FILLED_CHIPS_JS = """
 """
 
 
+@pytest.mark.slow
 def test_a_row_never_shows_two_filled_status_chips(scene, tmp_path):  # noqa: F811
     """행의 **상태**를 말하는 채운 칩은 하나다 — 상태 필.
 

@@ -75,4 +75,6 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# `--dist` 는 여기 두지 않는다 — pytest-xdist 가 없으면 pytest 가 그 옵션을 몰라 시작하지 못한다.
+# `-n` 일 때 Chrome 시험을 한 워커로 모으는 `loadgroup` 은 tests/conftest.py 가 정한다
 addopts = "-q"
