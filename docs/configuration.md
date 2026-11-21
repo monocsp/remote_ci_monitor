@@ -364,6 +364,11 @@ answer in time. Pull requests from forks, deleted forks and `dependabot[bot]` al
 GitHub. The server is unchanged — the code that talks to GitHub lives in the skill's templates,
 and the two tokens it needs (a fine-grained GitHub token, a non-admin rcm client token) are
 created by the owner. `rcm_ci_watch.py --check` prints a table that must be all `OK`.
+With `fallback = "none"` the required check is `rcm/ci` itself and there is no waiting workflow:
+the watcher alone submits, leaves a job held by `worker_down` or `paused` waiting, and never posts
+`pending` over a result the job script posted. Its tokens can then come from where they already
+are — `rcm_client_config` (the rcm client's `client.toml`) and `github_token_command` (for example
+`gh auth token --user <login>`). This repository runs that way: `.rcm/ci.toml` at its root.
 
 ### Secrets on the server
 

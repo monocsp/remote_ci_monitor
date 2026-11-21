@@ -15,6 +15,11 @@
 > 추천값으로 구현하고 확인을 기다린다. §10 표의 「오너 확인」 열이 어느 쪽인지 말한다.
 >
 > 이 판은 격리 설계 반박(P0 5 · P1 7 · P2 12)을 반영한 셋째 판이다. 무엇이 왜 바뀌었는지는 §12 에 있다.
+>
+> 같은 날 오너가 R15 를 정했다. 「rcm ci 를 로컬로 돌리면 github ci 는 왜 해? 하나만 하면 그걸 체크하면 되잖아」.
+> 그래서 rcm 레포는 GitHub 대체를 쓰지 않는다. 필수 체크는 커밋 상태 `rcm/ci` 하나이고 감시 스크립트가 push 마다
+> `rcm-ci` 를 낸다. 이 레포의 운영 형태는 §13(결정 196~200)이 정본이다. §3 · §7 · §9 가운데 대체에 기대는 부분은
+> 이 레포에는 해당하지 않는다. 그 설계는 대체를 고르는 다른 레포를 위해 스킬에 남는다.
 
 ## 0. 한 줄
 
@@ -1147,7 +1152,9 @@ PR 마다 완료 기준은 같다.
 
 시나리오 스물두 개와 PR 마다 첫 커밋에 넣을 시험 목록은 `docs/m5r-scenarios.md` 에 있다.
 
-## 10. 결정 (175~195)
+rcm 레포의 B · C · D 는 R15(결정 196) 뒤에 바뀌었다. 바뀐 표는 §13.6 에 있다.
+
+## 10. 결정 (175~200)
 
 | # | 결정 | 추천 | 오너 확인 |
 |---|---|---|---|
@@ -1172,6 +1179,11 @@ PR 마다 완료 기준은 같다.
 | 193 | 순서 | A → B(실험 커밋만 `rcm`, 마지막은 `github`) → C(운영, 오너, 끝에 운영에서 `rcm-ci` 한 번) → D(`rcm` 으로) → E. 스킬은 v0.8.0 다음 릴리스 | |
 | 194 | 주 1회 GitHub 전체 실행 | `ci.yml` 의 `schedule`(월 03시 KST), `ref: dev` 명시(기본 브랜치가 main 이라서), ubuntu · macOS 모든 갈래. 실패하면 알림만이고 머지를 막지 않는다. main 에 들어간 뒤부터 돈다 | 오너 확정 2026-11-20 |
 | 195 | 대체 갈래 | GitHub 이 대신 돌 때는 ubuntu 갈래(3.11 · 3.13 · smoke · secrets)만. macOS 는 `rcm-only`. macOS 러너 부족이 dev 머지를 막지 않게 한다 | 오너 확정 2026-11-20 |
+| 196 | rcm 레포의 필수 체크 | 커밋 상태 `rcm/ci` 하나(main 은 `main-from-dev-only` 도). `ci.yml` 은 `workflow_dispatch` 만. 대기 잡 · `checks.yml` · schedule · `late` · `taken-over` 를 이 레포는 쓰지 않는다. `.rcm/ci.toml` 은 `mode = "rcm"` · `fallback = "none"`. 맥미니 고장 때는 오너 지시로 `workflow_dispatch`(§13.1) | 오너 확정 2026-11-20(R15) |
+| 197 | 대체 없는 감시 | `fallback = "none"` 이면 `worker_down` · `paused` 가 이어져도 취소하지 않고 기다린다. 제출 실패는 예전대로 `unavailable` 을 올리고 다시 내지 않는다(§13.2) | |
+| 198 | 상태를 쓰는 주체 | 이 레포는 알림 훅 대신 운영 잡 스크립트가 진행과 결과를 올린다. 감시는 `queued` 와 잡 스크립트가 못 올린 끝(120초 뒤)만. pending 이 아닌 상태 위에, 그리고 남이 올린 pending 위에 pending 을 올리지 않는다(§13.3) | |
+| 199 | 토큰 | 전용 토큰 둘 대신 `rcm_client_config`(rcm 클라이언트의 `client.toml`)와 `github_token_command`(`gh auth token --user monocsp`). 값은 새 파일에 쓰지 않는다(§13.4) | 오너 지시 2026-11-20 |
+| 200 | 운영 자리 | `~/.config/rcm/ci-watch/`(스크립트 둘 · 설정), launchd `com.remote-ci-monitor.ci-watch` 60초, 상태 `~/.local/state/rcm-ci-watch/`, 로그 `~/Library/Logs/rcm/ci-watch.log`. 결정 192 의 자리를 바꾼다(§13.5) | 오너 승인 C 단계 |
 
 ## 11. 구현하며 바뀐 것
 
@@ -1227,6 +1239,198 @@ GitHub 에 대 보았고 틀린 근거는 찾지 못했다. 그래서 전부 받
 | P2-10 head 레포가 빈 PR 과 Dependabot | 둘 다 포크처럼 `github`(§2.3, C11 · H4) | 받아들임 |
 | P2-11 smoke 가 PATH 의 `python3` 를 쓴다 | `PYTHON=$RCM_CI_PYTHON`(§3.3, J6) | 받아들임 |
 | P2-12 `RCM_CI_MODE` 를 누가 바꾸나 | 오너가, 급할 때는 세션도 바꾸되 PR 댓글로 남긴다(§2.3 · §3.6) | 받아들임 |
+
+## 13. 이 레포의 운영 형태: GitHub 대체 없이 rcm 만 (결정 196~200)
+
+계획서 셋째 판(§0~§12)은 GitHub 의 필수 체크 `test` 를 가벼운 대기 잡으로 만들고 rcm 이 답하지 않으면 GitHub 러너가
+대신 도는 설계였다. 2026-11-20 오너가 이 레포에서는 그 대체를 쓰지 않기로 정했다(오너 요구 목록의 R15). 오너의 말은
+「rcm ci 를 로컬로 돌리면 github ci 는 왜 해? 하나만 하면 그걸 체크하면 되잖아」, 「폴백으로 쓰거나 아예 쓰지 말라 하면
+시도 안 하면 되잖아」였다. 이제 이 레포의 검사는 rcm 에서만 돈다. push 가 들어오면 감시 스크립트가 잡을 자동으로 낸다.
+
+이 레포에 관해서는 이 절이 앞 절의 여러 곳을 대신한다. 대기 잡과 기다릴 시간(§2.5, 결정 181 · 182), 알림 훅(§2.7),
+잡 스크립트(§3.3), 운영 rcm 이 고장 났을 때의 대체 경로(§3.6, 결정 190), 주 1회 실행과 대체 갈래(결정 194 · 195),
+감시 자리(결정 192), 전용 토큰(부록 A), §9 의 B · C · D 가 그렇다. 앞 절의 설계는 다른 레포가 고를 수 있게
+`rcm-ci-connect` 스킬의 템플릿에 그대로 남는다.
+
+### 13.1 필수 체크는 `rcm/ci` 하나이고 GitHub 대체는 없다 (결정 196)
+
+오너가 2026-11-20 에 확정했다(R15).
+
+이 PR 전에 이미 바뀐 것이 있다. dev 룰셋의 필수 체크는 커밋 상태 `rcm/ci` 하나다. main 룰셋은 `rcm/ci` 와
+`main-from-dev-only` 둘을 요구한다. `.github/workflows/ci.yml` 은 `workflow_dispatch` 만 받는다. 곧 사람이 Actions
+화면에서 손으로 돌릴 때만 돈다. 운영 rcm 서버 설정에는 프리셋 `rcm-ci` 가 있다. 이 프리셋은 `mac2` 풀에서 운영 스크립트
+`~/.config/rcm/scripts/rcm-ci.sh` 를 돌린다. 그 스크립트는 시작할 때 `rcm/ci` 에 pending 을, 끝날 때 success 나
+failure 를 올린다. 이때 쓰는 토큰은 `gh auth token --user monocsp` 로 얻는다. 지금까지는 사람이 push 한 뒤
+`rcm run rcm-ci --ref <브랜치>` 를 손으로 냈다.
+
+이 PR 은 그 제출을 자동으로 바꾼다. 같은 레포 PR 의 head 나 dev 에 push 가 들어올 때마다 감시 스크립트가 `rcm-ci` 를
+낸다. 레포 루트에는 `.rcm/ci.toml` 을 넣었다. 파일에는 `mode = "rcm"` 과 `fallback = "none"` 을 적었다. `[rcm]` 에는
+`preset = "rcm-ci"` · `context = "rcm/ci"` · `push = ["dev"]` · `creators = ["monocsp"]` 를 적었고 `[platforms]` 는
+두지 않았다.
+
+이 레포는 대기 잡, `checks.yml`, 주 1회 schedule, 세 문턱(`pickup_seconds` 300 · `queue_seconds` 1800 ·
+`run_seconds` 3600)을 쓰지 않는다. GitHub 이 대신 돌 때 쓰던 `late` 갈래와 `taken-over` 상태도 쓰지 않는다. 그래서
+결정 181 · 182 · 194 · 195 와 결정 190 의 대체 경로는 이 레포에 해당하지 않는다. 그 템플릿들은 다른 레포가 고를 수
+있게 스킬에 남는다.
+
+Mac mini 가 고장 나면 오너가 지시할 때만 Actions 화면에서 `ci.yml` 을 손으로 돌린다. 이 실행은 `rcm/ci` 를 올리지
+않는다. `ci.yml` 에 그런 단계가 없기 때문이다. 그래서 그 결과만으로는 머지 관문 `tools/merge_pr.py` 가 열리지 않는다.
+그때 어떻게 머지할지는 오너가 정한다. 룰셋을 잠깐 바꾸는 것이 그 예다.
+
+감시가 내지 못한 커밋은 세션이 아래 명령으로 손으로 낸다. 같은 커밋이면 서버가 새 제출을 앞 잡에 합류시키므로 검사가
+두 번 돌지 않는다.
+
+```sh
+rcm run rcm-ci --source git_ref --ref <브랜치> --no-wait
+```
+
+알고 고른 위험(§3.4)은 더 커졌다. Linux 와 Python 3.13 을 평소에 보지 않는 것은 전과 같다. 주 1회 GitHub 실행도
+없으니 그 둘을 다시 보는 길은 오너가 지시한 `workflow_dispatch` 하나뿐이다.
+
+### 13.2 대체가 없는 감시는 멈춘 잡을 기다린다 (결정 197)
+
+감시는 그 커밋의 `.rcm/ci.toml` 이 `fallback = "none"` 이면 그 사실을 잡 기록에 적는다. 그 뒤로는 잡의 사유가
+`worker_down`(워커가 죽음)이나 `paused`(큐 정지)로 이어져도 error 를 올리지 않고 잡을 취소하지도 않는다. 사유가 바뀔
+때 로그에 `#N worker_down but no fallback, waiting` 같은 줄을 하나 남길 뿐이다. 대체가 있는 레포는 예전대로
+`worker_down` 이 120초, `paused` 가 300초 이어지면 `unavailable` 을 올리고 잡을 취소한다.
+
+대신 돌 GitHub 이 없는데 감시가 잡을 취소하면 PR 에는 error 만 남고 사람이 다시 내야 한다. 배포도 걸린다. rcm 배포
+절차는 큐를 멈추고 도는 잡이 0 이 되기를 기다린 뒤 서비스를 재시작한다. 그 사이에 감시가 300초 뒤 대기 중인 `rcm-ci`
+잡을 취소하면 배포 한 번이 PR 들을 실패로 만든다.
+
+제출 실패를 다루는 방식은 바뀌지 않았다. `server_unreachable` · `rcm_auth` · `unknown_preset` 같은 사유로 제출이
+실패하면 감시는 여전히 `error unavailable · <사유>` 를 올리고 그 커밋을 다룬 것으로 적는다. 다시 내지는 않는다.
+
+시험은 `test_r15_without_a_fallback_a_stuck_job_is_left_to_wait` 이고 변이는 `m5r-watch-no-fallback-still-cancels` 다.
+
+### 13.3 진행과 결과는 잡 스크립트가 올리고 감시는 `queued` 와 못 올린 결과만 올린다 (결정 198)
+
+이 레포에는 알림 훅(`rcm_ci_status.py`, 서버 설정의 `[[notify]] rcm-ci-status`)을 달지 않는다. `rcm/ci` 상태는 운영
+잡 스크립트 `rcm-ci.sh` 와 감시가 나누어 올린다. `rcm-ci.sh` 는 레포 밖의 운영 파일이고 이 PR 은 그 파일을 건드리지
+않았다.
+
+| 올리는 쪽 | 때 | state | 설명 |
+|---|---|---|---|
+| 감시 | 잡을 낸 직후 | `pending` | `queued · #N · position P · wait ~M min` |
+| `rcm-ci.sh` | 시작 | `pending` | `rcm job N running` |
+| `rcm-ci.sh` | 끝, 통과 | `success` | `rcm job N passed` |
+| `rcm-ci.sh` | 끝, 실패 | `failure` | `rcm job N failed at <단계>` |
+| 감시 | 잡이 끝났는데 120초 넘게 pending | §2.7 의 대응표대로 | 예: `error` · `superseded · #12 · by #13` |
+
+둘이 겹칠 때 따르는 규칙은 셋이다. 템플릿 공통 규칙이라 대체가 있는 레포에도 같다.
+
+1. `creators` 로 거른 가장 새 `rcm/ci` 상태가 pending 이 아니면 결과가 이미 올라온 것이다. 서버의 잡이 아직 running
+   이어도 감시는 그 커밋을 더 따라가지 않는다. 고치기 전 템플릿은 잡 스크립트가 결과를 올린 뒤 서버에서 잡이 끝나기까지의
+   몇 초 사이에 `running` 을 덮어 올렸다. 그러면 결과가 가려졌다가 120초 뒤 감시가 다시 덮어 썼다. 고치기 전 코드로
+   돌린 시험이 queued · running · passed 세 번의 상태 쓰기로 이 현상을 재현했다.
+2. 가장 새 pending 이 감시가 쓰는 낱말(`queued` · `running`)이 아니면 잡 스크립트가 진행을 올리고 있는 것이다. 이때
+   감시는 `queued` 도 `running` 도 올리지 않는다.
+3. 잡이 끝났는데 상태가 120초 넘게 pending 이면 잡 스크립트가 결과를 못 올린 것이다. 같은 브랜치의 새 잡이 옛 잡을
+   치우는 supersede 로 취소된 잡, 사람이 취소한 잡, `timed_out` 이나 `lost` 로 끝난 잡이 그렇다. 이때는 감시가 §2.7 의
+   대응표대로 올린다. 위 표의 마지막 행이 이 경우다.
+
+잡 스크립트의 설명 문장(「rcm job N …」)은 상태 설명의 첫 낱말 계약(§2.4)을 따르지 않는다. 이 레포에는 그 낱말을 읽는
+대기 잡이 없고 `tools/merge_pr.py` 는 상태의 state 만 본다. 그래서 그대로 둔다.
+
+시험은 `test_r15_the_job_scripts_own_pending_is_not_overwritten_with_running` ·
+`test_r15_a_result_posted_before_the_job_ends_is_never_covered_by_pending` ·
+`test_r15_the_watcher_still_covers_a_job_that_could_not_post_its_end` 셋이다. 변이는
+`m5r-watch-pending-over-a-result` · `m5r-watch-overwrites-the-job-pending` 둘이다.
+
+### 13.4 토큰은 있던 자리에서 읽는다 (결정 199)
+
+부록 A 의 전용 토큰 둘은 만들지 않는다. GitHub fine-grained 토큰 파일과 rcm 클라이언트 토큰 `ci-watch` 가 그 둘이다.
+오너는 Mac mini 의 gh 키체인 토큰을 쓰라고 지시했다. 그래서 `ci-watch.toml` 에 새 키가 둘 생겼다.
+
+| 새 키 | 대신하는 키 | 읽는 법 |
+|---|---|---|
+| `rcm_client_config` | `rcm_token_file` | rcm 클라이언트의 `client.toml` 을 가리킨다. 감시는 rcm 클라이언트와 같은 규칙으로 읽는다. 파일의 `token` 을 쓰고 없으면 `token_env` 가 가리키는 환경 변수(기본 `RCM_TOKEN`)를 쓴다 |
+| `github_token_command` | `github_token_file` | 명령을 적는다. 감시가 바퀴를 돌 때마다 실행해 표준 출력의 첫 줄을 쓴다. 이 레포의 값은 `["/opt/homebrew/bin/gh", "auth", "token", "--user", "monocsp"]` 다 |
+
+새 키와 대신하는 키는 쌍마다 정확히 하나만 적는다. 둘 다 적거나 하나도 없으면 설정 오류로 종료 2 다.
+
+토큰 값은 메모리에만 두고 새 파일에 쓰지 않는다. 명령이 실패하면 감시는 그 바퀴에서 그 레포를 건너뛰고 로그에는 종료
+코드만 남긴다. 명령의 출력은 로그에 싣지 않는다. `client.toml` 은 권한이 0600 이어야 한다. 아니면 감시는 아무것도 하지
+않고 종료 2 로 끝난다.
+
+launchd 아래에서 gh 가 키체인 토큰을 읽는다는 것은 2026-11-20 실기에서 확인했다. 첫 launchd 바퀴가 그 토큰으로
+GitHub 의 PR 목록을 읽었다. 같은 머신의 `mac2` 워커도 launchd 아래에서 돈다. 그 워커에서 도는 `rcm-ci.sh` 는 같은
+방식으로 이미 상태를 올리고 있었다. §2.9 의 「키체인은 launchd 아래에서 못 쓴다」는 이 머신에서는 맞지 않았다.
+
+대가도 있다. `client.toml` 의 토큰은 오너의 admin 토큰이다. `--check` 는 이것을 FAIL 이 아니라 WARN 으로 적는다.
+감시는 자기가 낸 잡 번호만 취소한다. rcm 의 supersede 는 같은 토큰 이름이 낸 잡끼리만 치운다. 감시와 세션의 손 제출은
+같은 오너 토큰을 쓰므로 서로의 옛 잡을 치운다. 같은 브랜치의 옛 잡을 치우는 것은 원하는 동작이다.
+
+GitHub 토큰은 `monocsp` 계정의 gh 토큰이라 상태 쓰기보다 권한이 넓다. 다만 같은 머신의 `rcm-ci.sh` 와 세션들이 이
+토큰을 이미 쓰고 있다. 그래서 §2.9 의 신뢰 경계는 넓어지지 않는다.
+
+### 13.5 운영 자리와 끄는 법 (결정 200)
+
+오너가 승인한 C 단계를 이 PR 과 함께 끝냈다. 스크립트 자리는 결정 192 의 `~/.config/rcm/scripts/` 가 아니라
+`~/.config/rcm/ci-watch/` 다. 오너가 그렇게 지시했다. 놓은 파일은 아래와 같다.
+
+| 파일 | 내용 |
+|---|---|
+| `~/.config/rcm/ci-watch/rcm_ci_watch.py` · `rcm_ci_config.py` | 이 PR 의 템플릿 사본 |
+| `~/.config/rcm/ci-watch/ci-watch.toml` | 권한 0600. 레포 `monocsp/remote_ci_monitor`, rcm 서버 `http://127.0.0.1:8787`, rcm 클라이언트 `~/.local/bin/rcm`, `branches = ["dev"]`. 토큰은 결정 199 대로 읽는다 |
+| `~/Library/LaunchAgents/com.remote-ci-monitor.ci-watch.plist` | `/opt/homebrew/bin/python3.11 -I` 로 `--once` 를 60초마다 돌린다(`StartInterval` 60, `RunAtLoad`). PATH 맨 앞은 `/opt/homebrew/bin` |
+| `~/.local/state/rcm-ci-watch/monocsp__remote_ci_monitor.json` | 감시의 상태 |
+| `~/Library/Logs/rcm/ci-watch.log` | 사건을 한 줄씩 적는 로그 |
+| `~/Library/Logs/rcm/ci-watch.out.log` · `ci-watch.err.log` | launchd 가 받은 표준 출력과 표준 오류 |
+
+운영 `server.toml`, 운영 DB, 서비스 체크아웃, `rcm-ci.sh` 는 건드리지 않았다. 프리셋 `rcm-ci` 는 이미 있었다.
+
+설치는 이 순서로 했다.
+
+1. `--check`. 전부 OK 였고 WARN 이 셋 나왔다. admin 토큰, 갈래 목록 없음, main 에 아직 `.rcm/ci.toml` 없음이다.
+2. `--once --dry-run`
+3. `--once`
+4. `launchctl bootstrap`
+
+드라이런과 첫 바퀴에서 열린 PR 둘과 dev 의 head 는 모두 `skip … why=no_file` 였다. 그 커밋들에 아직 `.rcm/ci.toml` 이
+없기 때문이다.
+
+템플릿이 바뀌면 사본 둘을 다시 복사한다. launchd 는 다음 바퀴에 새 파일을 읽는다.
+
+감시를 끌 때는 아래 세 줄을 친다.
+
+```sh
+launchctl bootout gui/$(id -u)/com.remote-ci-monitor.ci-watch
+rm ~/Library/LaunchAgents/com.remote-ci-monitor.ci-watch.plist
+rm -r ~/.config/rcm/ci-watch ~/.local/state/rcm-ci-watch
+```
+
+잠깐 멈출 때는 첫 줄만 친다. 다시 켤 때는 아래 명령을 친다.
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-ci-monitor.ci-watch.plist
+```
+
+저장소 변수 `RCM_CI_MODE=github` 를 걸어도 감시는 새 커밋을 내지 않는다. 감시는 그 변수를 5분 캐시로 읽는다.
+
+이 PR 이 dev 에 머지되기 전에는 다른 브랜치의 커밋에 `.rcm/ci.toml` 이 없다. 그래서 감시는 그 커밋들을
+`skip … why=no_file` 로 넘긴다. 그동안 그 PR 들은 여전히 손으로 낸다. dev 를 받은 뒤의 push 부터 자동이다.
+
+### 13.6 남은 단계 B · C · D 는 어떻게 바뀌었나
+
+E 는 바뀌지 않았지만 같이 적는다.
+
+| 단계 | §9 의 원래 내용 | 바뀐 것 |
+|---|---|---|
+| B `ci/m5r-rcm-repo-waits-for-rcm` | `.rcm/ci.toml`(마지막 커밋은 `mode = "github"`) · `scripts/ci/` 의 템플릿 사본과 `rcm_ci.sh` · 대기 잡 `ci.yml`(schedule 포함) · `checks.yml` · 시험 Y · J · draft 실험(§7) | 하지 않는다. 대기 잡 · `checks.yml` · schedule 은 결정 196 으로 필요 없다. 잡 스크립트는 레포 밖에 있는 운영의 `rcm-ci.sh` 가 맡았다. 레포에 들어오는 것은 이 PR 의 `.rcm/ci.toml` 하나다. Y · J 시험과 §7 의 대체 실기(5 · 6 · 8 · 10)는 해당 없다 |
+| C 운영 | 부록 A 의 토큰 둘 · `presets.rcm-ci.toml` include · `[[notify]] rcm-ci-status` · `ci-watch.toml` · launchd · 운영에서 `rcm-ci` 한 번 | 이 PR 과 함께 끝냈다. 프리셋은 운영 설정에 이미 있다. 토큰은 결정 199 대로 읽고 알림 훅은 달지 않는다(결정 198). 감시와 launchd 는 결정 200 이다. 운영에서 `rcm-ci` 를 한 번 돌려 보는 일은 이 PR 의 자동 제출이 대신한다 |
+| D `ci/m5r-rcm-repo-switches-to-rcm` | `.rcm/ci.toml` 의 `mode` 를 `rcm` 으로 | 이 PR 에 합쳤다. 파일은 처음부터 `mode = "rcm"`, `fallback = "none"` 이다 |
+| E `docs/m5r-plan-and-decisions` | `PLAN.md` 의 결정 행과 §11 | 그대로 남는다. 결정 196~200 도 옮긴다 |
+
+### 13.7 남은 위험
+
+1. 제출 실패는 다시 내지 않는다(결정 197). 서버가 재시작하는 순간에 온 push 는 error 로 남고 사람이 손으로 낸다.
+2. 감시는 같은 커밋을 한 번만 본다. 이 PR 이 머지되기 전에 `no_file` 로 넘긴 커밋은 기록에 남아 다시 보지 않는다. 새
+   push 는 새 커밋이라 다시 본다.
+3. 오너의 admin rcm 토큰과 권한이 넓은 gh 토큰을 쓴다(결정 199).
+4. Mac mini 가 고장 났을 때 `workflow_dispatch` 의 결과는 `rcm/ci` 를 채우지 않는다(결정 196). 그때 머지하는 방법은
+   오너가 정한다.
+5. 포크 PR 은 감시가 내지 않아 `rcm/ci` 를 받지 못한다. 대체가 없으니 그런 PR 은 오너가 판단할 때까지 머지되지 않는다.
 
 ## 부록 A. 오너가 만들 토큰 둘
 

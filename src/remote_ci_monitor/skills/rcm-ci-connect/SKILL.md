@@ -101,6 +101,21 @@ when an rcm failure is wrong. To be judged by rcm again, push a new commit.
 The repository variable `RCM_CI_MODE` (`github` · `rcm` · `both`) overrides the file for every
 commit at once; the watcher reads it too. Set it to `github` when the build machine is broken.
 
+## Without a GitHub fallback
+
+`fallback = "none"` is for a repository whose required check is the `rcm/ci` status itself, with
+no waiting workflow (remote_ci_monitor's own setup, `docs/m5r-workplan.md` §13). Then:
+
+- Only the watcher is needed on the build machine; the job script may post its own `pending` and
+  result instead of the `[[notify]]` hook. The watcher never posts `pending` over a result that is
+  already there, nor `running` over a `pending` it did not post; it still covers a job that ended
+  without a status (cancelled, superseded, timed out, lost) after 120 seconds.
+- A job held by `worker_down` or `paused` is left to wait — nobody would take it over, and a queue
+  paused for a deploy must not turn pull requests into errors. The log says so once.
+- The tokens can come from where they already are: `rcm_client_config` reads the rcm client's own
+  `client.toml`, and `github_token_command` runs e.g. `gh auth token --user <login>` each round.
+  Nothing is copied into a new file; `--check` warns (not fails) when that rcm token is admin.
+
 ## What the human still fills in
 
 The checks themselves (`run_<step>` in `scripts/ci/rcm_ci.sh`, the leg jobs in `checks.yml`),

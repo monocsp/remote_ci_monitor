@@ -1326,6 +1326,31 @@ MUTANTS = (
         new="            if False:\n",
         tests=("tests/test_ci_connect_watch.py",),
     ),
+    # ── M5r R15 — 대체 없이 rcm 만 쓰는 레포 (docs/m5r-workplan.md §13) ──
+    Mutant(
+        # 잡 스크립트가 올린 결과 위에 감시가 running 을 올린다. 결과가 가려진다(결정 198)
+        name="m5r-watch-pending-over-a-result",
+        path=T + "rcm_ci_watch.py",
+        old='        if top is not None and top.get("state") != "pending":\n',
+        new="        if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 잡 스크립트의 pending 을 감시의 running 으로 덮는다(결정 198)
+        name="m5r-watch-overwrites-the-job-pending",
+        path=T + "rcm_ci_watch.py",
+        old="        ours = top is None or word in OWN_PENDING\n",
+        new="        ours = True\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 대체 없는 레포에서도 멈춘 잡을 취소한다. 배포 때 큐를 멈추면 PR 이 error 다(결정 197)
+        name="m5r-watch-no-fallback-still-cancels",
+        path=T + "rcm_ci_watch.py",
+        old='        if reason in STUCK_REASONS and entry.get("fallback") == "none":\n',
+        new="        if False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
     # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
     Mutant(
         # 드레인이 도는 잡을 기다리지 않는다 — 레인이 잡을 도는 중에 `stopping` 이 켜져 그 잡이
@@ -1575,7 +1600,8 @@ def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
 
 
 def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
-    for name in ("src", "tests", "tools", "scripts", "pyproject.toml"):
+    # `.rcm` — 시험이 레포의 `.rcm/ci.toml` 을 읽는다(R15)
+    for name in ("src", "tests", "tools", "scripts", ".rcm", "pyproject.toml"):
         src = ROOT / name
         if src.is_dir():
             shutil.copytree(src, tmp / name, ignore=shutil.ignore_patterns("__pycache__"))

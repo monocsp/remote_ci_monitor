@@ -1,0 +1,13 @@
+# 이 레포의 검사를 어디서 돌리나 (rcm-ci-connect, docs/m5r-workplan.md §13)
+# 맥미니의 감시 스크립트(~/.config/rcm/ci-watch/)가 PR head 와 dev push 의 커밋에서 이 파일을 읽고
+# 프리셋 rcm-ci 를 낸다. dev · main 룰셋의 필수 체크는 커밋 상태 rcm/ci 하나다(결정 196).
+# GitHub Actions(ci.yml)는 workflow_dispatch 뿐이라 대신 돌지 않는다. 그래서 fallback = "none" 이다.
+version = 1
+mode = "rcm"
+fallback = "none"
+
+[rcm]
+preset = "rcm-ci"
+context = "rcm/ci"
+push = ["dev"]              # dev 에 머지된 커밋도 돈다. main push 는 돌지 않는다
+creators = ["monocsp"]      # 이 계정이 올린 rcm/ci 만 센다(잡 스크립트와 감시가 같은 계정이다)

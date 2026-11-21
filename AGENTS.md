@@ -57,9 +57,12 @@ hook) refuses `gh pr merge`, a REST `PUT …/pulls/<N>/merge` and a script that 
 watcher merged twice with checks still pending. The steps are in the `pr` skill.
 
 `main` only takes a pull request from `dev`. The required check on `dev` and `main` is the commit
-status `rcm/ci`, which the build machine's rcm job `rcm-ci` posts: after a push, run
-`rcm run rcm-ci --source git_ref --ref <branch> --no-wait`, then `rcm wait --job <N>`, and merge
-(with `tools/merge_pr.py`) only when `rcm/ci` is green. `main` also requires `main-from-dev-only` (`pr-policy.yml`); renaming
+status `rcm/ci`, which the build machine's rcm job `rcm-ci` posts. The build machine's watcher
+(`rcm-ci-connect`, `.rcm/ci.toml`) submits that job within a minute of every push to a
+same-repository pull request or to `dev` and posts `queued`; merge (with `tools/merge_pr.py`) only
+when `rcm/ci` is green. If no `rcm/ci` status shows up on the head after two minutes, submit it by
+hand — `rcm run rcm-ci --source git_ref --ref <branch> --no-wait` (a second submission of the same
+commit joins the first) — and say so in the PR. `main` also requires `main-from-dev-only` (`pr-policy.yml`); renaming
 that job means changing the ruleset too. GitHub Actions' `ci.yml` no longer runs on pull requests
 or pushes: it is `workflow_dispatch` only, run by hand when the owner asks because the build
 machine is down.

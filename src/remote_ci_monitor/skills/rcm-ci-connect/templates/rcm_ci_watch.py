@@ -12,6 +12,12 @@ launchd 가 60초마다 한 번 부르는 짧은 프로세스다. 한 바퀴에 
    `rcm run <preset> --source git_ref --ref <브랜치> --no-wait` 로 내고 `queued` 를 올린다.
 4. 낸 잡을 따라가며 `running` 을 올리고, `worker_down`(120초) · `paused`(300초)가 이어지거나
    GitHub 이 넘겨받으면(`taken-over`) 잡을 취소하고, 훅이 놓친 결과를 120초 뒤 대신 올린다.
+   `fallback = "none"` 이면 대신 돌 곳이 없으니 멈춘 잡을 취소하지 않고 기다린다. 잡 스크립트가
+   자기 pending 이나 결과를 직접 올리면 그것을 덮지 않는다(명세 §13, 결정 197 · 198).
+
+토큰은 파일 대신 기존 자리에서 읽을 수도 있다. rcm 토큰은 `rcm_client_config`(rcm 클라이언트의
+client.toml), GitHub 토큰은 `github_token_command`(예: `gh auth token --user <login>`)다. 값은
+메모리에만 두고 새 파일에 쓰지 않는다(결정 199).
 
 멈추지 않게 GitHub 요청은 15초, `rcm` 하위 프로세스는 60초, 한 바퀴는 50초에서 끊는다. 겹쳐 뜨면
 뒤에 뜬 것은 잠금을 못 얻고 조용히 끝나고, 10분 넘은 잠금은 빼앗는다. 토큰은 로그에 찍지 않는다.
@@ -44,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rcm_ci_config as cc  # noqa: E402
 
 RCM_TIMEOUT: float = 60  # rcm 하위 프로세스
+TOKEN_COMMAND_TIMEOUT: float = 15  # github_token_command
 ROUND_SECONDS: float = 50  # 한 바퀴
 LOCK_STALE_SECONDS = 600  # 이보다 오래 잡힌 잠금은 앞 프로세스가 멈춘 것이다
 OVERRIDE_CACHE_SECONDS = 300
@@ -51,6 +58,8 @@ HOOK_GRACE_SECONDS = 120  # 끝난 잡의 상태가 이만큼 pending 이면 훅
 STUCK_REASONS = {"worker_down": 120, "paused": 300}
 KEEP_SECONDS = 14 * 86400
 TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost")
+#: 감시가 올리는 pending 낱말. 가장 새 pending 이 이것이 아니면 잡 스크립트가 올린 것이다
+OWN_PENDING = ("queued", "running")
 
 
 class GitHubAuth(Exception):
@@ -72,25 +81,46 @@ class RoundOver(Exception):
 @dataclass
 class Repo:
     github: str
-    token_file: Path
+    token_file: Path | None
     branches: tuple[str, ...] = ()
     legs: tuple[str, ...] | None = None
+    token_command: tuple[str, ...] | None = None
 
 
 @dataclass
 class WatchConfig:
     rcm: str
     server: str
-    rcm_token_file: Path
+    rcm_token_file: Path | None
     state_dir: Path
     log_file: Path | None
     job_url: bool
     github_api: str
     repos: list[Repo] = field(default_factory=list)
+    rcm_client_config: Path | None = None
+
+    def secret_files(self) -> list[Path]:
+        """권한(0600)을 볼 파일 — 토큰 파일과 rcm 클라이언트 설정."""
+        files = [self.rcm_token_file or self.rcm_client_config]
+        files += [r.token_file for r in self.repos]
+        return [f for f in files if f is not None]
 
 
 def _path(raw: Any) -> Path:
     return Path(str(raw)).expanduser()
+
+
+def _one_of(table: str, raw: dict[str, Any], a: str, b: str) -> None:
+    """토큰은 출처 하나에서만 읽는다 — 둘 다 있거나 둘 다 없으면 설정 오류다."""
+    if (a in raw) == (b in raw):
+        raise ValueError(f"{table}: set exactly one of {a} or {b}")
+
+
+def _command(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw or not all(isinstance(a, str) and a for a in raw):
+        raise ValueError("github_token_command must be a non-empty list of strings")
+    head = str(_path(raw[0])) if "/" in raw[0] else raw[0]  # 이름만이면 PATH 에서 찾는다
+    return (head, *raw[1:])
 
 
 def load_config(path: Path) -> WatchConfig:
@@ -98,19 +128,25 @@ def load_config(path: Path) -> WatchConfig:
     repos = []
     for r in raw.get("repos") or []:
         legs = r.get("legs")
+        _one_of(f"[[repos]] {r.get('github')}", r, "github_token_file", "github_token_command")
+        command = r.get("github_token_command")
         repos.append(
             Repo(
                 github=str(r["github"]),
-                token_file=_path(r["github_token_file"]),
+                token_file=_path(r["github_token_file"]) if "github_token_file" in r else None,
                 branches=tuple(r.get("branches") or ()),
                 legs=tuple(legs) if legs else None,
+                token_command=_command(command) if command is not None else None,
             )
         )
     log = raw.get("log_file")
+    _one_of("the top level", raw, "rcm_token_file", "rcm_client_config")
+    client = raw.get("rcm_client_config")
     return WatchConfig(
         rcm=str(_path(raw.get("rcm", "rcm"))) if "/" in str(raw.get("rcm", "")) else "rcm",
         server=str(raw.get("server", "http://127.0.0.1:8787")).rstrip("/"),
-        rcm_token_file=_path(raw["rcm_token_file"]),
+        rcm_token_file=_path(raw["rcm_token_file"]) if "rcm_token_file" in raw else None,
+        rcm_client_config=_path(client) if client is not None else None,
         state_dir=_path(raw.get("state_dir", "~/.local/state/rcm-ci-watch")),
         log_file=_path(log) if log else None,
         job_url=bool(raw.get("job_url", False)),
@@ -147,6 +183,46 @@ def too_open(path: Path) -> str | None:
     except OSError:
         return "missing"
     return f"{mode:04o}" if mode & 0o077 else None
+
+
+def github_token(repo: Repo) -> str:
+    """그 레포의 GitHub 토큰. 명령이면 실행할 때마다 읽는다(키체인의 토큰이 바뀌어도 따라간다).
+
+    실패 문장에는 종료 코드만 싣는다 — 명령의 출력에는 토큰이 섞일 수 있다."""
+    if repo.token_command is None:
+        assert repo.token_file is not None
+        return cc.read_token(repo.token_file)
+    try:
+        proc = subprocess.run(
+            list(repo.token_command),
+            capture_output=True,
+            text=True,
+            timeout=TOKEN_COMMAND_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            f"github_token_command timed out after {TOKEN_COMMAND_TIMEOUT:g}s"
+        ) from None
+    except OSError as e:
+        raise ValueError(f"github_token_command could not start: {type(e).__name__}") from None
+    lines = proc.stdout.strip().splitlines()
+    if proc.returncode != 0 or not lines or not lines[0].strip():
+        raise ValueError(f"github_token_command failed rc={proc.returncode} (no token printed)")
+    return lines[0].strip()
+
+
+def rcm_token(cfg: WatchConfig) -> str:
+    """rcm 클라이언트 토큰. `rcm_client_config` 면 rcm 클라이언트와 같은 규칙으로 읽는다:
+    파일의 `token`, 없으면 `token_env`(기본 RCM_TOKEN) 환경 변수."""
+    if cfg.rcm_client_config is None:
+        assert cfg.rcm_token_file is not None
+        return cc.read_token(cfg.rcm_token_file)
+    raw = tomllib.loads(cfg.rcm_client_config.read_text(encoding="utf-8"))
+    token = raw.get("token") or os.environ.get(str(raw.get("token_env") or "RCM_TOKEN"), "")
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError(f"{cfg.rcm_client_config} has no token")
+    return token.strip()
 
 
 def _slug(repo: str) -> str:
@@ -464,7 +540,7 @@ class Round:
             shas[sha] = self.record(cand, word="known", context=context)
             self.log(self.repo.github, f"skip {sha[:12]}: {context} already has a status")
             return
-        self.submit(cand, side, context)
+        self.submit(cand, side, context, r.fallback)
 
     def record(self, cand: dict[str, Any], **kw: Any) -> dict[str, Any]:
         return {
@@ -475,7 +551,9 @@ class Round:
             **kw,
         }
 
-    def submit(self, cand: dict[str, Any], side: cc.RcmSide, context: str) -> None:
+    def submit(
+        self, cand: dict[str, Any], side: cc.RcmSide, context: str, fallback: str = "github"
+    ) -> None:
         sha, shas = cand["sha"], self.state["shas"]
         argv = ["run", side.preset, "--source", "git_ref", "--ref", cand["branch"], "--no-wait",
                 "--by", f"ci-watch@{socket.gethostname()}"]  # fmt: skip
@@ -513,7 +591,10 @@ class Round:
             self.repo.github,
             f"submit {'joined ' if joined else ''}#{job} {cand['branch']} {target[:12]}",
         )
-        entry = self.record(cand, word=None, context=context, job=job, creators=list(side.creators))
+        entry = self.record(
+            cand, word=None, context=context, job=job, creators=list(side.creators),
+            fallback=fallback,
+        )  # fmt: skip
         if target != sha:
             # 그사이에 새 커밋이 왔다 — 상태는 서버가 정한 sha 에 올린다
             shas[sha] = self.record(cand, word="moved", context=context, job=job, moved_to=target)
@@ -547,10 +628,12 @@ class Round:
                 self.cancel(job, "taken-over")
             entry["word"] = "taken-over"
             return
+        if top is not None and top.get("state") != "pending":
+            # 결과가 이미 올라왔다(훅이나 잡 스크립트). 서버의 잡이 아직 running 이어도 그 위에
+            # pending 을 올리지 않는다 — 올리면 결과가 가려져 머지가 막힌다(명세 §13, 결정 198)
+            entry["word"] = word
+            return
         if state in TERMINAL:
-            if top is not None and top.get("state") != "pending":
-                entry["word"] = word
-                return
             ended = cc.created_at({"created_at": doc.get("finished_at")})
             if ended is None:
                 ended = entry.setdefault("terminal_seen", self.now)
@@ -570,14 +653,22 @@ class Round:
                 entry["word"] = cc.read_word(mapped[1])[0]
                 self.log(self.repo.github, f"hook missed #{job}, posted it")
             return
-        if entry.get("word") is None:
+        # 가장 새 pending 이 감시의 것이 아니면 잡 스크립트가 제 진행을 올리고 있다 — 덮지 않는다
+        ours = top is None or word in OWN_PENDING
+        if entry.get("word") is None and ours:
             if self.post(sha, "pending", context, cc.describe("queued", job, "")):
                 entry["word"] = "queued"
-        if state == "running" and entry.get("word") != "running":
+        if state == "running" and entry.get("word") != "running" and ours:
             if self.post(sha, "pending", context, cc.describe("running", job, "")):
                 entry["word"] = "running"
         reason = doc.get("reason")
-        if reason in STUCK_REASONS:
+        if reason in STUCK_REASONS and entry.get("fallback") == "none":
+            # 대신 돌 곳이 없다 — 취소하고 error 를 올려도 남는 것이 없다. 배포 때의 큐 정지도
+            # 이 경우다. 사유가 바뀔 때 한 줄만 남기고 기다린다(결정 197)
+            if entry.get("reason") != reason:
+                entry["reason"], entry["reason_since"] = reason, self.now
+                self.log(self.repo.github, f"#{job} {reason} but no fallback, waiting")
+        elif reason in STUCK_REASONS:
             if entry.get("reason") != reason:
                 entry["reason"], entry["reason_since"] = reason, self.now
             elif self.now - float(entry.get("reason_since", self.now)) > STUCK_REASONS[reason]:
@@ -617,7 +708,7 @@ def run_repo(cfg: WatchConfig, repo: Repo, *, now: float, deadline: float, log: 
     try:
         path = cfg.state_dir / f"{_slug(repo.github)}.json"
         state = load_state(path, now, log, repo.github)
-        token = cc.read_token(repo.token_file)
+        token = github_token(repo)
         api = cc.GitHubApi(cfg.github_api, repo.github, token)
         rnd = Round(cfg, repo, api, state, log, now, deadline, dry_run, rcm_token, mono)
         try:
@@ -646,9 +737,13 @@ def check(cfg: WatchConfig) -> int:
     def row(ok: bool | None, name: str, detail: str) -> None:
         rows.append(("OK" if ok else "WARN" if ok is None else "FAIL", name, detail))
 
-    for name, path in [("rcm token", cfg.rcm_token_file)] + [
-        (f"github token {r.github}", r.token_file) for r in cfg.repos
-    ]:
+    files: list[tuple[str, Path | None]] = [
+        ("rcm token", cfg.rcm_token_file or cfg.rcm_client_config)
+    ]
+    files += [(f"github token {r.github}", r.token_file) for r in cfg.repos]
+    for name, path in files:
+        if path is None:
+            continue  # 명령으로 읽는 토큰 — 아래 github 행이 실제로 불러 본다
         bad = too_open(path)
         if bad == "missing":
             row(False, name, f"{path} does not exist")
@@ -671,11 +766,14 @@ def check(cfg: WatchConfig) -> int:
         row(False, "rcm server", f"{cfg.server} unreachable: {type(e).__name__}")
     try:
         req = urllib.request.Request(f"{cfg.server}/api/whoami")
-        req.add_header("Authorization", f"Bearer {cc.read_token(cfg.rcm_token_file)}")
+        req.add_header("Authorization", f"Bearer {rcm_token(cfg)}")
         with urllib.request.urlopen(req, timeout=cc.HTTP_TIMEOUT) as r:
             me = json.loads(r.read())
         admin = bool(me.get("admin"))
-        row(not admin, "rcm token", f"name {me.get('name')}, admin {str(admin).lower()}"
+        # 전용 토큰 파일이 admin 이면 실수다. 클라이언트 설정을 빌려 쓰면 보통 오너 토큰이라
+        # 경고만 한다 — 고른 것이다(결정 199)
+        ok = (None if cfg.rcm_client_config is not None else False) if admin else True
+        row(ok, "rcm token", f"name {me.get('name')}, admin {str(admin).lower()}"
             + (" — use a non-admin client token" if admin else ""))  # fmt: skip
     except (OSError, ValueError, urllib.error.URLError) as e:
         row(False, "rcm token", f"/api/whoami refused or unreachable: {type(e).__name__}")
@@ -685,9 +783,9 @@ def check(cfg: WatchConfig) -> int:
                 "not set: [platforms] cannot be checked against the workflow legs, so the "
                 "watcher and route may disagree on a broken file")  # fmt: skip
         try:
-            api = cc.GitHubApi(cfg.github_api, repo.github, cc.read_token(repo.token_file))
+            api = cc.GitHubApi(cfg.github_api, repo.github, github_token(repo))
         except (OSError, ValueError) as e:
-            row(False, f"github {repo.github}", f"token unreadable: {type(e).__name__}")
+            row(False, f"github {repo.github}", f"token unreadable: {type(e).__name__}: {e}")
             continue
         probes = [
             ("metadata", api.request("GET", "")),
@@ -745,14 +843,18 @@ def main(
     if args.check:
         return check(cfg)
     log = Log(cfg.log_file, now_fn)
-    opened = [(p, too_open(p)) for p in [cfg.rcm_token_file, *(r.token_file for r in cfg.repos)]]
+    opened = [(p, too_open(p)) for p in cfg.secret_files()]
     opened = [(p, m) for p, m in opened if m]
     if opened:
         for p, m in opened:
             log("-", f"token file {p} is {'missing' if m == 'missing' else f'mode {m}'}; "
                 "it must be 0600 — nothing done")  # fmt: skip
         return 2
-    rcm_token = cc.read_token(cfg.rcm_token_file)
+    try:
+        token = rcm_token(cfg)
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as e:
+        log("-", f"rcm token unreadable: {type(e).__name__}: {e} — nothing done")
+        return 2
     mono = mono_fn or time.monotonic
     deadline = mono() + ROUND_SECONDS
     for repo in cfg.repos:
@@ -761,7 +863,7 @@ def main(
             break
         try:
             run_repo(cfg, repo, now=now_fn(), deadline=deadline, log=log,
-                     dry_run=args.dry_run, rcm_token=rcm_token, mono=mono)  # fmt: skip
+                     dry_run=args.dry_run, rcm_token=token, mono=mono)  # fmt: skip
         except Exception as e:  # noqa: BLE001 — 한 레포의 고장이 다른 레포를 막지 않는다
             log(repo.github, f"repository skipped this round: {type(e).__name__}: {e}")
     return 0
