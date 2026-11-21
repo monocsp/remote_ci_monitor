@@ -105,6 +105,9 @@ class Rig:
         self.forge: Any = None  # heartbeat 응답을 바꾸는 함수
         self.finish_fails = 0  # 앞에서부터 이만큼의 finish 를 503 으로
         self.down = False  # 참이면 heartbeat 와 finish 가 503 — 서버를 갈아 끼우는 몇 초
+        # 참이면 heartbeat 만 503 이다. 워커는 heartbeat 가 성공할 때마다 못 한 보고를 다시 하므로
+        # 드레인 끝의 다시 보고만 보려는 시험은 이것으로 heartbeat 쪽 경로를 막는다
+        self.hb_down = False
         self.rw: RemoteWorker | None = None
         self.out: dict[str, Any] = {}
         self.thread: threading.Thread | None = None
@@ -120,7 +123,7 @@ class Rig:
             return claim(token, body)
 
         def worker_heartbeat(token, body):
-            if rig.down:
+            if rig.down or rig.hb_down:
                 raise ApiError(503, "restarting")
             out = heartbeat(token, body)
             rig.heartbeats.append((time.monotonic(), (body or {}).get("jobs")))
@@ -633,28 +636,38 @@ def test_stop_during_the_drain_is_todays_stop(rig):
 
 def test_unreported_job_is_retried_before_the_restart(rig, monkeypatch):
     # E15 · §14 B질문11: finish 보고가 재시도 끝에도 실패하면 바로 재실행하지 않고 보고를 다시
-    # 시도한다 — 재실행 뒤의 등록이 그 잡을 lost 로 닫지 않게
+    # 시도한다 — 재실행 뒤의 등록이 그 잡을 lost 로 닫지 않게.
+    # 미룬 보고는 heartbeat 가 성공할 때도 다시 나간다. 부하로 드레인 끝이 늦으면 heartbeat 가 먼저
+    # 보고해 드레인 끝의 줄이 안 찍혔다(맥미니 잡 #3914). 드레인이 켜진 뒤로는 heartbeat 를 503 으로
+    # 막아 다시 보고할 길을 드레인 끝 하나로 둔다. 그러면 그 경로가 없을 때 잡이 보고되지 않는다
     monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
     rw = rig.start(lanes=1)
     jid = rig.hold()
     rig.bump(NEW)
     rig.until(rig.draining, "draining")
-    rig.finish_fails = 4
+    rig.hb_down = True
+    rig.finish_fails = 4  # 레인의 보고(처음 한 번 + 재시도 세 번)가 모두 실패해 미뤄진다
     rig.go(jid)
     assert rig.join() == 0, rig.logs
-    assert rig.count(f"drained — job #{jid} not reported yet, retrying before the restart") == 1
+    line = f"drained — job #{jid} not reported yet, retrying before the restart"
+    assert rig.count(line) == 1, rig.logs
     assert rig.state(jid).state == SUCCEEDED
+    done = [at for at, j, status in rig.finishes if j == jid and status == 200]
+    assert len(done) == 1 and done[0] < rw.stopping.set_at, rig.finishes
     assert rw.restart_for == NEW
 
 
 def test_unreported_job_is_given_up_after_the_limit(rig, monkeypatch):
-    # §14 B질문11 · §5.5: 상한(`DRAIN_REPORT_SECONDS`)이 지나면 그래도 재실행한다
+    # §14 B질문11 · §5.5: 상한(`DRAIN_REPORT_SECONDS`)이 지나면 그래도 재실행한다.
+    # heartbeat 쪽 다시 보고도 같은 상한에서 잡을 버린다. 부하로 드레인 끝이 1.5초 넘게 늦으면
+    # heartbeat 가 먼저 버려 이 줄이 안 찍힌다. 그래서 앞 시험처럼 heartbeat 를 막는다
     monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
     monkeypatch.setattr(remote_worker, "DRAIN_REPORT_SECONDS", 1.5)
     rw = rig.start(lanes=1)
     jid = rig.hold()
     rig.bump(NEW)
     rig.until(rig.draining, "draining")
+    rig.hb_down = True
     rig.finish_fails = 10_000
     rig.go(jid)
     t0 = time.monotonic()
