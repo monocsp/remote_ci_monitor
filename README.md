@@ -355,6 +355,11 @@ in `docs/rcm-connect.md`) and verify with `rcm check` on a candidate copy of `se
 live server file, secrets and the stores are never touched. The profile keys are in
 [Configuration](docs/configuration.md#release-profile).
 
+The same `rcm skills install` also brings **`rcm-ci-connect`**, which runs a repository's CI on
+the build machine: a watcher submits each pull request head and posts a `rcm/ci` commit status,
+with GitHub Actions as an optional fallback. How it works and what the owner sets up is in
+[Configuration](docs/configuration.md#release-profile) (the paragraph after the connect skills).
+
 ## Exit codes
 
 | `rcm wait` exit | meaning |
