@@ -284,9 +284,11 @@ def test_h8_an_existing_status_means_someone_handled_it(rig):
 def test_h9_the_status_goes_to_the_sha_the_server_resolved(rig):
     rig.add_pr(7, S1, "feat/x")
     rig.exe.set(run={"stdout": submitted(12, S2)})
+    rig.job(12, **ours(state="queued", reason=None))  # 진짜 잡 응답 — 없으면 job() 이 None 이다
     rig.run()
     assert rig.posts(S1) == []
     assert [p["description"].split(" · ")[0] for p in rig.posts(S2)] == ["queued"]
+    assert rig.exe.argvs("cancel") == []
 
 
 # ── H10 · H11 · H12: 따라가기 ──
@@ -1105,3 +1107,82 @@ def test_an_unreadable_pull_list_cancels_nothing(rig):
     rig.clock.advance(60)
     rig.run()
     assert rig.exe.argvs("cancel") == []
+
+
+# ── #246 격리 검증이 찾은 것 ──────────────────────────────────────────────────
+
+
+def test_a_submission_the_server_moved_to_a_newer_commit_is_not_cancelled_as_gone(rig):
+    """서버가 `--ref` 를 더 새 커밋 S2 로 풀었다. S2 는 아직 열린 PR 목록에 없지만 닫힌 것이 아니다.
+    취소하면 S2 는 이미 본 sha 라 다시 내지 않고 머지가 막힌다."""
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S2)})
+    rig.job(12, **ours(state="queued", reason=None))
+    rig.run()
+    assert rig.exe.argvs("cancel") == []
+    rig.clock.advance(60)
+    rig.run()  # PR 목록이 아직 S1 을 말한다
+    assert rig.exe.argvs("cancel") == []
+    rig.gh.pulls[0]["head"]["sha"] = S2
+    rig.gh.files[(S2, ".rcm/ci.toml")] = RCM_REPO_CI_TOML
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.exe.argvs("cancel") == [] and len(rig.exe.argvs("run")) == 1
+
+
+def test_a_reopened_pr_whose_job_was_cancelled_is_submitted_again(rig):
+    close_pr_after_queued(rig)
+    assert rig.exe.argvs("cancel") == [["cancel", "12"]]
+    rig.job(12, **ours(state="cancelled", cancelled_by="owner", finished_at=iso(rig.clock.now)))
+    rig.exe.set(run={"stdout": submitted(13, S1)})
+    rig.add_pr(7, S1, "feat/x")  # 다시 열었다
+    rig.clock.advance(60)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 2
+    assert rig.posts(S1)[-1]["description"].startswith("queued · #13")
+
+
+def test_a_reopened_pr_that_someone_already_ran_is_not_submitted_again(rig):
+    close_pr_after_queued(rig)
+    rig.gh.add_status(S1, Status("success", "rcm job 30 passed", at=rig.clock.now + 1))
+    rig.add_pr(7, S1, "feat/x")
+    rig.clock.advance(60)
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 1
+
+
+def test_every_page_of_open_pull_requests_is_read(rig, monkeypatch):
+    monkeypatch.setattr(watchmod, "PULLS_PER_PAGE", 2)
+    for n, sha in enumerate((S1, S2, S3)):
+        rig.add_pr(7 + n, sha, f"feat/{n}")
+    rig.exe.set(run=[{"stdout": submitted(12 + n, sha)} for n, sha in enumerate((S1, S2, S3))])
+    rig.run()
+    assert [a[a.index("--ref") + 1] for a in rig.exe.argvs("run")] == ["feat/0", "feat/1", "feat/2"]
+
+
+def test_an_unread_later_page_cancels_nothing(rig, monkeypatch):
+    monkeypatch.setattr(watchmod, "PULLS_PER_PAGE", 2)
+    for n, sha in enumerate((S1, S2, S3)):
+        rig.add_pr(7 + n, sha, f"feat/{n}")
+        rig.job(12 + n, **ours(state="queued", reason=None))
+    rig.exe.set(run=[{"stdout": submitted(12 + n, sha)} for n, sha in enumerate((S1, S2, S3))])
+    rig.run()
+    assert len(rig.exe.argvs("run")) == 3
+    rig.gh.fail[f"/repos/{REPO}/pulls?state=open&per_page=2&page=2"] = [500]
+    rig.clock.advance(60)
+    rig.run()
+    assert rig.exe.argvs("cancel") == []  # S3 는 둘째 쪽에 있다 — 못 읽었으니 닫힌 것이 아니다
+
+
+def test_a_missing_rcm_executable_is_named_rcm_missing(rig):
+    rig.config.write_text(
+        rig.config.read_text().replace(str(rig.exe.path), str(rig.tmp / "gone" / "rcm"))
+    )
+    rig.add_pr(7, S1, "feat/x")
+    for _ in range(4):
+        rig.run()
+        rig.clock.advance(60)
+    assert "could not start" in rig.log()
+    posts = [(p["state"], p["description"]) for p in rig.posts(S1)]
+    assert posts[0] == ("pending", "queued · retrying submit (1/3)")
+    assert posts[-1] == ("error", "unavailable · rcm_missing"), posts

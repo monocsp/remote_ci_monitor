@@ -139,6 +139,8 @@
      서비스 venv 의 rcm 을 못 알아봄 · 닫힌 PR 의 합류한 잡을 취소함 · `guard_merge` 가 붙여 쓴
      `-Ro/r` 를 못 봄 · `-n` 에서 `--dist` 를 loadgroup 으로 안 정함 · timeout 이 하네스의 새 세션
      자식을 남김 (`docs/m5r-workplan.md` §13.8)
+  #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
+     목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
@@ -1384,6 +1386,32 @@ MUTANTS = (
         new="            alone = True\n",
         tests=("tests/test_ci_connect_watch.py",),
     ),
+    # ── #246 격리 검증이 찾은 것 ──
+    Mutant(
+        # 서버가 더 새 커밋으로 풀어 받은 제출을 닫힌 PR 의 잡으로 보고 취소한다. 그 커밋은 이미 본
+        # sha 라 다시 내지 않아 머지가 막힌다
+        name="m5r-watch-cancels-a-moved-submission",
+        path=T + "rcm_ci_watch.py",
+        old="            heads |= {\n",
+        new="            heads |= set() and {\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 다시 열린 PR 의 head 가 취소한 커밋이면 이미 본 sha 로 건너뛴다. 그 PR 은 끝내 막힌다
+        name="m5r-watch-reopened-pr-stays-gone",
+        path=T + "rcm_ci_watch.py",
+        old='        reopened = shas[sha] if word == "gone" else None\n',
+        new="        reopened = None\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
+    Mutant(
+        # 열린 PR 목록의 첫 쪽만 읽는다. 100개 너머의 PR 은 내지 않고 닫힌 것으로 본다
+        name="m5r-watch-reads-one-page-of-pulls",
+        path=T + "rcm_ci_watch.py",
+        old="""            while 'rel="next"' in reply.headers.get("link", ""):\n""",
+        new="            while False:\n",
+        tests=("tests/test_ci_connect_watch.py",),
+    ),
     # ── M5q PR B2 — 돌던 워커가 드레인하고 다시 실행한다 (docs/m5q-workplan.md §6) ──
     Mutant(
         # 드레인이 도는 잡을 기다리지 않는다 — 레인이 잡을 도는 중에 `stopping` 이 켜져 그 잡이
@@ -1554,8 +1582,16 @@ MUTANTS = (
         # 옵션과 값을 붙여 쓴 `-Ro/r` 를 못 본다 — `gh pr -Ro/r merge 7` 이 관문을 돌아간다
         name="guard-merge-glued-repo-option",
         path="tools/guard_merge.py",
-        old='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)?"\n',
-        new='REPO_OPT = r"(?:(?:-R|--repo)[\\s=]+\\S+\\s+)?"\n',
+        old='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)*"\n',
+        new='REPO_OPT = r"(?:(?:-R|--repo)[\\s=]+\\S+\\s+)*"\n',
+        tests=("tests/test_guard_merge.py",),
+    ),
+    Mutant(
+        # 저장소 옵션을 한 번만 본다 — `gh -Ro/r -R x/y pr merge 1` 이 관문을 돌아간다(#246)
+        name="guard-merge-one-repo-option",
+        path="tools/guard_merge.py",
+        old='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)*"\n',
+        new='REPO_OPT = r"(?:(?:-R\\s*|--repo[\\s=]+)\\S+\\s+)?"\n',
         tests=("tests/test_guard_merge.py",),
     ),
     Mutant(

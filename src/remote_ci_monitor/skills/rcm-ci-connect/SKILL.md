@@ -101,6 +101,7 @@ for three rounds, with `pending` `queued · retrying submit (n/3)` meanwhile; th
 posts `unavailable`. Setup and token failures post `unavailable` at once. When a pull request is
 closed or merged, the watcher cancels its job if it is still queued, was submitted by the watcher
 alone (no joiners) and its commit is not a watched branch's head; a running job is left to finish.
+A reopened pull request whose job was cancelled is submitted again.
 
 A re-run of the workflow (`run_attempt > 1`) does not read rcm at all: it is the human's way out
 when an rcm failure is wrong. To be judged by rcm again, push a new commit.

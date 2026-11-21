@@ -90,6 +90,9 @@ def test_a_merge_outside_merge_pr_is_denied(command):
         "gh pr -Ro/r merge 7",
         "gh -Ro/r pr merge 7",
         "gh -Ro/r pr -Ro/r merge 7 --squash",
+        # #246 격리 검증: 저장소 옵션을 두 번 써도 gh 는 받는다(뒤의 것이 이긴다)
+        "gh -Ro/r -R x/y pr merge 7",
+        "gh pr -R a/b --repo c/d merge 7",
     ],
 )
 def test_a_repo_option_after_pr_does_not_hide_the_merge(command):

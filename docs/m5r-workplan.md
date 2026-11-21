@@ -1442,7 +1442,7 @@ E 는 바뀌지 않았지만 같이 적는다.
 
 첫째, 제출이 서버 재시작 순간에 실패하면 다시 낸다. 고치기 전에는 `server_unreachable` 로 실패한 제출에 error 를 한 번
 올리고 그 커밋을 다룬 것으로 적었다. 대체가 없는 이 레포에서는 그 PR 의 머지가 다음 push 까지 막혔다. 이제 사유가
-`server_unreachable` 이거나 `rcm` 이 60초 안에 끝나지 않았으면(`rcm_timeout`, 실행 파일을 못 띄운 때도 같다) 감시는 상태 파일에 횟수를 적고 다음
+`server_unreachable` 이거나 `rcm` 이 60초 안에 끝나지 않았거나(`rcm_timeout`) 실행 파일을 못 띄웠으면(`rcm_missing`, 배포가 venv 를 다시 까는 순간일 수 있다) 감시는 상태 파일에 횟수를 적고 다음
 바퀴에 다시 낸다. 그 사이에는 `pending queued · retrying submit (n/3)` 을 올린다. 세 번 다시 내도 실패하면 그때
 `error unavailable · <사유>` 를 올린다. 설정 · 인증 실패(`rcm_auth` · `unknown_preset` · `ref_not_found`)는 다시 내도
 결과가 같으니 예전처럼 곧바로 error 다. 다시 내기 전에 그 커밋의 가장 새 상태가 감시의 `retrying submit` 이 아니면
@@ -1462,16 +1462,22 @@ E 는 바뀌지 않았지만 같이 적는다.
 1. 잡의 요청자 이름표가 감시의 것(`ci-watch@<host>`)이 아니거나 합류자가 있다. 남의 검사가 그 잡에 걸려 있다.
 2. 그 커밋이 지금 감시하는 브랜치의 head 이거나 push 로 본 적이 있다. dev push 의 제출이 같은 잡에 합류했을 수 있다.
    감시와 세션은 같은 오너 토큰을 쓰고, 같은 토큰의 두 번째 제출은 합류자 행을 남기지 않는다. 그래서 잡만 봐서는 모른다.
-3. 그 바퀴에 열린 PR 목록을 읽지 못했다.
+3. 그 바퀴에 열린 PR 목록을 끝까지 읽지 못했다. 목록은 100개씩 쪽으로 나뉘고 감시는 열 쪽까지 읽는다.
+4. 서버가 `--ref` 를 더 새 커밋으로 풀어 받은 제출이다. 그 커밋은 아직 PR 목록에 없을 수 있다. 감시는 목록에 있는 head
+   의 기록이 가리키는 새 커밋(`moved_to`)도 열린 head 로 본다(#246 격리 검증).
 
 한 커밋은 한 번만 판정한다. 취소한 잡은 더 따라가지 않으므로 닫힌 PR 의 커밋에 `unavailable · cancelled` 를 올리지
-않는다. 같은 PR 에 새 push 가 와서 head 가 바뀐 경우도 옛 head 는 목록에서 사라지므로 같은 규칙으로 다룬다.
+않는다. 취소한 커밋이 다시 열린 PR 이나 브랜치의 head 로 나타나면 감시는 그 커밋을 새로 낸다. 다만 취소한 뒤에 다른
+상태가 올라왔으면 누가 다룬 것이니 내지 않는다(#246 격리 검증). 같은 PR 에 새 push 가 와서 head 가 바뀐 경우도 옛 head 는 목록에서 사라지므로 같은 규칙으로 다룬다.
 
 | 항목 | 시험 | 변이 |
 |---|---|---|
 | 다시 내기 | `test_h6_an_unreachable_server_is_retried_for_three_rounds_then_error` 외 셋, `test_h7_h23_…` · `test_h17_a_stuck_rcm_is_cut_off` | `m5r-watch-no-submit-retry` |
 | 서비스 venv 경고 | `test_check_warns_when_the_watcher_calls_the_service_venv` | `m5r-watch-check-misses-service-venv` |
 | 닫힌 PR 의 잡 취소 | `test_a_closed_pr_*` 넷, `test_an_unreadable_pull_list_cancels_nothing` | `m5r-watch-cancels-a-joined-job` |
+| 새 커밋으로 풀린 제출 | `test_a_submission_the_server_moved_to_a_newer_commit_is_not_cancelled_as_gone`, `test_h9_…` | `m5r-watch-cancels-a-moved-submission` |
+| 다시 열린 PR | `test_a_reopened_pr_*` 둘 | `m5r-watch-reopened-pr-stays-gone` |
+| PR 목록의 모든 쪽 | `test_every_page_of_open_pull_requests_is_read`, `test_an_unread_later_page_cancels_nothing` | `m5r-watch-reads-one-page-of-pulls` |
 
 ## 부록 A. 오너가 만들 토큰 둘
 

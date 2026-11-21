@@ -56,7 +56,9 @@ of a key bumps that number and is listed here.
 - **The `rcm-ci-connect` watcher cancels the queued job of a closed or merged pull request.** When
   a head leaves the open pull requests, its job is cancelled if it is still queued, was submitted
   by the watcher alone (no joiners) and its commit is not the head of a watched branch such as
-  `dev`. A running job is left to finish; its result only goes to that commit.
+  `dev`. A running job is left to finish; its result only goes to that commit. A reopened pull
+  request whose job was cancelled is submitted again. The watcher now reads every page of open
+  pull requests, and cancels nothing in a round where it could not.
 
 ### Changed
 - `tools/guard_naming.py` no longer refuses a title or commit subject the shell fills in
@@ -74,7 +76,8 @@ of a key bumps that number and is listed here.
   used to post `error` once when `rcm run` could not reach the server (or timed out) and never
   submit that commit again, so the pull request waited for the next push. It now retries for
   three rounds, posting `pending` `queued · retrying submit (n/3)` meanwhile, and posts
-  `unavailable` only after the fourth failure. Setup and token failures still post it at once.
+  `unavailable` only after the fourth failure (a missing `rcm` executable is `rcm_missing`).
+  Setup and token failures still post it at once.
 - **`pytest` starts without `pytest-xdist`.** `--dist loadgroup` in `pyproject.toml`'s addopts
   made pytest stop with `unrecognized arguments: --dist` when xdist was not installed.
   `tests/conftest.py` now chooses `loadgroup` itself when `-n` is on, so the Chrome tests still

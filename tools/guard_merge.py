@@ -36,8 +36,9 @@ import sys
 from dataclasses import dataclass
 
 #: `-R o/r` · `-Ro/r` · `--repo o/r` · `--repo=o/r` — gh 는 이것을 `pr` 앞에도 뒤에도 받는다.
-#: 짧은 옵션은 값을 붙여 써도(`-Ro/r`) pflag 가 받는다(#245 격리 검증).
-REPO_OPT = r"(?:(?:-R\s*|--repo[\s=]+)\S+\s+)?"
+#: 짧은 옵션은 값을 붙여 써도(`-Ro/r`) pflag 가 받는다(#245 격리 검증). 같은 자리에 두 번 써도
+#: 받는다(`gh -Ro/r -R x/y pr merge 1`, #246 격리 검증) — 몇 번이든 본다.
+REPO_OPT = r"(?:(?:-R\s*|--repo[\s=]+)\S+\s+)*"
 #: `gh pr merge` — 사이에 낀 저장소 옵션도(`gh -R o/r pr merge` · `gh pr -R o/r merge`, 뒤쪽은
 #: #237 격리 검증이 찾았다).
 GH_PR_MERGE_RE = re.compile(r"\bgh\s+" + REPO_OPT + r"pr\s+" + REPO_OPT + r"merge\b")

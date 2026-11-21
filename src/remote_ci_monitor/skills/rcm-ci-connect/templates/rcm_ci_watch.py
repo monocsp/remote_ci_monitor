@@ -65,8 +65,12 @@ TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost")
 #: 감시가 올리는 pending 낱말. 가장 새 pending 이 이것이 아니면 잡 스크립트가 올린 것이다
 OWN_PENDING = ("queued", "running")
 #: 다시 내 볼 만한 제출 실패 — 서버 재시작 순간이다. 설정 · 인증 실패는 다시 내도 같다
-RETRY_REASONS = ("server_unreachable", "rcm_timeout")
+#: 실행 파일이 없는 것(`rcm_missing`)도 넣는다 — 배포가 venv 를 다시 까는 순간일 수 있다
+RETRY_REASONS = ("server_unreachable", "rcm_timeout", "rcm_missing")
 SUBMIT_RETRIES = 3
+#: 열린 PR 목록의 한 쪽 크기와 읽을 쪽 수. 끝까지 못 읽은 바퀴에는 닫힌 PR 을 가리지 않는다
+PULLS_PER_PAGE = 100
+PULLS_PAGES = 10
 RETRYING = "retrying submit"
 #: 운영 서비스의 venv. 배포가 이 venv 가 가리키는 checkout 을 바꾸는 사이 감시의 `rcm` 이 실패할 수
 #: 있다 — 감시는 클라이언트 venv 를 부른다(`--check` 가 경고한다)
@@ -338,6 +342,8 @@ class Round:
     mono: Callable[[], float] = time.monotonic
     #: 이 바퀴에 열린 PR 목록을 읽었나(304 포함). 못 읽은 바퀴에는 닫힌 PR 을 가리지 않는다
     pulls_read: bool = False
+    #: 마지막 `rcm` 이 끝나지 못한 까닭 — `rcm_timeout` · `rcm_missing`
+    rcm_failure: str = ""
 
     # ── 시간 ──
 
@@ -389,9 +395,11 @@ class Round:
             )
         except subprocess.TimeoutExpired:
             self.log(self.repo.github, f"rcm {argv[0]} timeout after {RCM_TIMEOUT:g}s, skipped")
+            self.rcm_failure = "rcm_timeout"
             return None
         except OSError as e:
             self.log(self.repo.github, f"rcm {argv[0]} could not start: {type(e).__name__}")
+            self.rcm_failure = "rcm_missing"
             return None
 
     def job(self, job_id: int) -> dict[str, Any] | None:
@@ -462,12 +470,25 @@ class Round:
 
     def candidates(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        reply = self.gh("request", "GET", "/pulls?state=open&per_page=100",
-                        etag=self.state.get("pulls_etag"))  # fmt: skip
+        query = f"/pulls?state=open&per_page={PULLS_PER_PAGE}"
+        reply = self.gh("request", "GET", query, etag=self.state.get("pulls_etag"))
         self.pulls_read = reply.status == 304 or (reply.ok and isinstance(reply.data, list))
         if reply.status == 304:
             pulls = self.state.get("pulls") or []
         elif reply.ok and isinstance(reply.data, list):
+            items, page, etag = list(reply.data), 1, reply.headers.get("etag")
+            while 'rel="next"' in reply.headers.get("link", ""):
+                page += 1
+                if page > PULLS_PAGES:
+                    reply = cc.Reply(0, error=f"more than {PULLS_PAGES} pages")
+                else:
+                    reply = self.gh("request", "GET", f"{query}&page={page}")
+                if not (reply.ok and isinstance(reply.data, list)):
+                    # 끝까지 못 읽었다 — 읽은 것은 내되 닫힌 PR 은 가리지 않는다
+                    self.log(self.repo.github, f"pull list page {page} unreadable: {reply.error}")
+                    self.pulls_read = False
+                    break
+                items += reply.data
             pulls = [
                 {
                     "number": p.get("number"),
@@ -478,10 +499,12 @@ class Round:
                     "head_repo": ((p.get("head") or {}).get("repo") or {}).get("full_name"),
                     "base": (p.get("base") or {}).get("ref"),
                 }
-                for p in reply.data
+                for p in items
                 if isinstance(p, dict)
             ]
-            self.state["pulls"], self.state["pulls_etag"] = pulls, reply.headers.get("etag")
+            # 첫 쪽의 ETag 는 뒤쪽이 바뀐 것을 모른다 — 한 쪽으로 끝까지 읽었을 때만 둔다
+            whole = page == 1 and self.pulls_read
+            self.state["pulls"], self.state["pulls_etag"] = pulls, etag if whole else None
         else:
             self.log(self.repo.github, f"pull list unreadable: {reply.error}")
             pulls = []
@@ -501,10 +524,13 @@ class Round:
 
     def handle_new(self, cand: dict[str, Any], override: str | None) -> None:
         sha, shas = cand["sha"], self.state["shas"]
-        retry = shas.get(sha) if (shas.get(sha) or {}).get("word") == "retrying" else None
+        word = (shas.get(sha) or {}).get("word")
+        retry = shas[sha] if word == "retrying" else None
+        # 닫혀서 잡을 취소한 커밋이 다시 열린 PR(이나 브랜치)의 head 로 왔다 — 새로 낸다
+        reopened = shas[sha] if word == "gone" else None
         if retry is not None and retry.get("tried_at") == self.now:
             return  # 이 바퀴에 이미 냈다 — dev → main PR 의 head 는 dev 의 head 와 같은 sha 다
-        if sha in shas and retry is None:
+        if sha in shas and retry is None and reopened is None:
             label = f"{cand['event']}:{cand['branch']}"
             seen = shas[sha].setdefault("seen_as", [])
             if label not in seen:
@@ -561,6 +587,10 @@ class Round:
             return
         top = cc.latest(listed.data, context)
         mine = retry is not None and top is not None and RETRYING in (top.get("description") or "")
+        if reopened is not None and top is not None:
+            # 취소한 뒤에 올라온 상태가 아니면 감시가 남긴 옛 상태다. 그 뒤의 것은 누가 다룬 것이다
+            at = cc.created_at(top)
+            mine = at is None or at <= float(reopened.get("gone_at", 0))
         if top is not None and not mine:
             shas[sha] = self.record(cand, word="known", context=context)
             self.log(self.repo.github, f"skip {sha[:12]}: {context} already has a status")
@@ -598,7 +628,7 @@ class Round:
         proc = self.rcm(*argv)
         if proc is None or proc.returncode != 0:
             if proc is None:
-                reason = "rcm_timeout"  # 끊겼다(또는 못 떴다)
+                reason = self.rcm_failure or "rcm_timeout"
             else:
                 first = (proc.stderr.strip().splitlines() or [""])[0]
                 reason = submit_reason(proc.returncode, first)
@@ -734,7 +764,14 @@ class Round:
         for cand in cands:
             self.handle_new(cand, override)
         if self.pulls_read:
-            self.cancel_gone({c["sha"] for c in cands})
+            heads = {c["sha"] for c in cands}
+            # 서버가 `--ref` 를 더 새 커밋으로 풀어 받은 제출(moved)은 그 head 의 것이다 — 그 커밋이
+            # 아직 PR 목록에 없어도 닫힌 것이 아니다
+            shas = self.state["shas"]
+            heads |= {
+                shas[h]["moved_to"] for h in list(heads) if (shas.get(h) or {}).get("moved_to")
+            }
+            self.cancel_gone(heads)
         for sha, entry in list(self.state["shas"].items()):
             self.follow(sha, entry)
 
