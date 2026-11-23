@@ -1749,8 +1749,8 @@ MUTANTS = (
         # 다음 시도, 결정 231)에 붙으면 `interval` 뒤로 밀린다 — 그래서 필터는 `not_before` 다(PR D)
         name="m5s-join-ignores-not-before",
         path="src/remote_ci_monitor/store.py",
-        old='f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",',
-        new='f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
+        old='+ f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",',
+        new='+ f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
         tests=(
             "tests/test_server_schedule_m5s.py::"
             "test_s8_an_immediate_run_does_not_join_a_promoted_schedule",
@@ -1876,11 +1876,20 @@ MUTANTS = (
         # 반복을 잃는다(#256 격리 검증 P2)
         name="m5s-join-ignores-retry-policy",
         path="src/remote_ci_monitor/store.py",
-        old='                "AND retry_on_exit IS ? AND retry_disabled=? "\n',
-        new='                "AND (retry_on_exit IS ? OR 1) AND (retry_disabled=? OR 1) "\n',
+        old=(
+            '    "AND retry_on_exit IS ? AND retry_interval_seconds IS ? '
+            'AND retry_max_attempts IS ? "\n'
+            '    "AND retry_disabled=? "\n'
+        ),
+        new=(
+            '    "AND (retry_on_exit IS ? OR 1) AND (retry_interval_seconds IS ? OR 1) "\n'
+            '    "AND (retry_max_attempts IS ? OR 1) AND (retry_disabled=? OR 1) "\n'
+        ),
         tests=(
             "tests/test_retry_m5s.py::"
             "test_a_retry_wanting_submission_does_not_join_a_retry_false_job",
+            "tests/test_retry_m5s.py::"
+            "test_a_submission_after_a_reload_changed_max_attempts_does_not_join",
         ),
     ),
 )

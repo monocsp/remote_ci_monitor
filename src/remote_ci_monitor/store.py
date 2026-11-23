@@ -1047,11 +1047,28 @@ _NOT_SHELVING = (
 )
 
 
-def _frozen_retry(retry: RetryPolicy | None, disabled: bool) -> tuple[int | None, int]:
-    """제출이 얼릴 반복 정책의 합류 비교값 `(retry_on_exit, retry_disabled)` — 잡 열과 같은 모양."""
+#: 합류가 비교하는 얼린 반복 정책의 열(#256 검증) — 세 칸과 끄기가 모두 같아야 붙는다
+_RETRY_JOIN_SQL = (
+    "AND retry_on_exit IS ? AND retry_interval_seconds IS ? AND retry_max_attempts IS ? "
+    "AND retry_disabled=? "
+)
+
+
+def _frozen_retry(
+    retry: RetryPolicy | None, disabled: bool
+) -> tuple[int | None, int | None, int | None, int]:
+    """제출이 얼릴 반복 정책의 합류 비교값 — `_RETRY_JOIN_SQL` 의 차례, 잡 열과 같은 모양.
+
+    정책이 다른 잡에 붙으면 합류자는 그 잡의 정책을 받는다 — 간격이나 상한만 달라도 사용자가
+    기대한 반복이 아니다(reload 로 `max_attempts` 만 바꾼 뒤의 제출)."""
     if retry is None:
-        return None, 0
-    return int(retry.on_exit), 1 if disabled else 0
+        return None, None, None, 0
+    return (
+        int(retry.on_exit),
+        int(retry.interval_seconds),
+        int(retry.max_attempts),
+        1 if disabled else 0,
+    )
 
 
 def _job_keeps(conn: sqlite3.Connection, job_id: int) -> bool:
@@ -2792,8 +2809,8 @@ class Store:
         marks = ",".join("?" * len(JOINABLE_STATES))
         rows = self._jobs(
             f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) "
-            "AND retry_on_exit IS ? AND retry_disabled=? "
-            "AND not_before IS NULL ORDER BY id LIMIT 1",
+            + _RETRY_JOIN_SQL
+            + "AND not_before IS NULL ORDER BY id LIMIT 1",
             (join_key, *sorted(JOINABLE_STATES), *_frozen_retry(retry, retry_disabled)),
         )
         return rows[0] if rows else None
@@ -2885,9 +2902,9 @@ class Store:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                f"SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
-                "AND retry_on_exit IS ? AND retry_disabled=? "
-                f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",
+                "SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
+                + _RETRY_JOIN_SQL
+                + f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",
                 (join_key, *_frozen_retry(retry, retry_disabled), *sorted(JOINABLE_STATES)),
             ).fetchone()
             if row is None:

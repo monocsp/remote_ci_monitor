@@ -1869,7 +1869,9 @@ configuration error otherwise): every attempt runs the commit the first one reso
 is stored with the job when it is submitted, so `rcm reload` or removing the preset does not change
 a chain already running. A submission can only turn it off for that job: `"retry": false` in the
 `POST /jobs` body; such a job is not a chain (no `chain_id`, no `attempts[]`). A submission
-only joins a job whose frozen policy is the same, so a submission that wants retries never joins a
+only joins a job whose frozen policy is the same (`on_exit`, `interval_seconds`, `max_attempts`
+and whether `retry: false` turned it off), so a submission made after a reload changed the limit
+starts a job of its own, and a submission that wants retries never joins a
 `retry: false` job or one submitted before the preset declared the table, and the other way round.
 
 **Each attempt is a job of its own.** An attempt that exits with `on_exit` ends as `retried` and,

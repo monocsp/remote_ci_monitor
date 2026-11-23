@@ -263,8 +263,9 @@ def test_nothing_joins_a_promoted_retry_attempt(store):
     got = store.get_job(nxt)
     assert got.state == QUEUED and got.not_before is not None and got.start_deadline is None
     key = join_key(got.preset, got.inputs, got.source.identity)
-    assert store.find_joinable(key) is None
-    assert store.join_or_bump(key, "bob-desk", "bob@desk", 0, at(701)) is None
+    # 같은 정책으로 묻는다 — 정책이 다르면 그것만으로 걸러져 이 시험이 아무것도 못 본다
+    assert store.find_joinable(key, retry=POLICY) is None
+    assert store.join_or_bump(key, "bob-desk", "bob@desk", 0, at(701), retry=POLICY) is None
 
 
 def test_recent_and_samples_leave_out_retried_attempts(store):
@@ -749,3 +750,34 @@ def test_a_remote_bundle_of_a_retried_attempt_expires_at_once(store, tmp_path, s
     assert (
         conn.execute("SELECT count(*) FROM shelf_items WHERE job_id=?", (j.id,)).fetchone()[0] == 0
     )
+
+
+def test_a_submission_after_a_reload_changed_max_attempts_does_not_join(tmp_path):
+    """#256 재검증 P3 — 합류는 얼린 정책 세 칸(`on_exit` · `interval_seconds` · `max_attempts`)과
+    `retry_disabled` 가 모두 같을 때만이다. reload 로 상한만 바뀐 뒤의 제출이 옛 잡에 붙으면
+    사용자가 기대한 반복 횟수를 받지 못한다."""
+    srv = supersede_server(tmp_path, supersede="off")
+    try:
+        _, first = submit(srv, preset="d")
+        srv.cfg.presets = tuple(
+            p if p.name != "d" else parse_preset(
+                sh("d", "exit 75", source_modes=["git_ref"], repo="app",
+                   retry={"on_exit": 75, "interval_seconds": 60, "max_attempts": 5})
+            )
+            for p in srv.cfg.presets
+        )  # fmt: skip
+        status, second = submit(srv, token="bob", preset="d")
+        assert status == 201 and second["joined"] is False, second
+        assert srv.store.get_job(second["job_id"]).retry_max_attempts == 5
+        _, third = submit(srv, token="bob", preset="d")
+        assert third["joined"] is True and third["job_id"] == second["job_id"]
+    finally:
+        srv.close()
+
+
+def test_a_join_needs_the_same_interval_too(store):
+    j = make(store)
+    key = join_key(j.preset, j.inputs, j.source.identity)
+    other = RetryPolicy(on_exit=75, interval_seconds=60, max_attempts=3)
+    assert store.join_or_bump(key, "bob-desk", "bob@desk", 0, at(1), retry=other) is None
+    assert store.join_or_bump(key, "bob-desk", "bob@desk", 0, at(1), retry=POLICY).id == j.id
