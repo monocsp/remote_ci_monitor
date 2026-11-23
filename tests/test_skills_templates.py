@@ -623,6 +623,14 @@ def test_filled_templates_carry_the_status_and_golive_roles(tmp_path):
     ]
     assert golive.input_spec("mode").default == "plan"
     assert golive.input_spec("mode").choices == ("plan", "release")
+    # D(#256) — 75 는 승인 뒤 남은 일에만 쓰고(결정 236), 반복은 프리셋이 선언한다(결정 210)
+    assert golive.retry is not None
+    assert (golive.retry.on_exit, golive.retry.interval_seconds, golive.retry.max_attempts) == (
+        75,
+        600,
+        12,
+    )
+    assert status.retry is None  # 읽기만 하는 역할은 반복하지 않는다
     row, ok, detail = _release_row(cfg, "app", profile)
     assert ok is not False, detail
     for role in ("status", "golive"):

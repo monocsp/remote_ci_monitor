@@ -152,6 +152,15 @@ review flow works without them. Without a `version` preset, «new version» in t
 the draft in rcm only (state `editing` at once) and the listing starts from the repository's
 `store/` files instead of a prefill.
 
+**Exit 75 is "not yet" only where the preset says so.** rcm runs a script that exits 75 again
+later only when its preset declares `[presets.retry]` (`on_exit`, `interval_seconds`,
+`max_attempts` — [trying again later](configuration.md#trying-again-later-presetsretry)); every
+attempt is a job of its own, the last one that still exits 75 ends `exhausted`, and the preset
+takes `git_ref` sources only. Without the table 75 is an ordinary failure, as it is for
+`rcm-ci-connect`. A `golive` release script that waits for a login or for the store prints its
+`::rcm::action::` marker, exits 75, and lets the next attempt check again; it must be safe to run
+again.
+
 **The `version` preset's three modes are not three things rcm does.** rcm sends `create` when
 somebody opens a draft — that one run also writes the `prefill.json` the version page fills its
 fields from — and `delete` when a draft with an App Store version is discarded, by hand or by the
@@ -478,7 +487,7 @@ unless `--force`). In that project a session then runs:
 | skill | tier | produces |
 |---|---|---|
 | `/rcm-connect` | entry point | asks project · repo name · platforms · which optional tiers; runs the rest in order; writes `docs/rcm-connect.md` |
-| `/rcm-store-connect` | required | profile block, secrets list, presets `plan`/`upload`/`review` (+ the optional `version`, `status` and `golive`), six script skeletons (`release_version.sh` for prefill / create / delete, `release_status.sh` read-only, `release_golive.sh` plan / release) + a JSON helper, each with `--selftest`; `listing_json` on review / upload; the `golive` preset books with `priority = "high"`, `start_deadline_seconds = 3600` and a browser `concurrency_group` shared with the project's sign-in preset |
+| `/rcm-store-connect` | required | profile block, secrets list, presets `plan`/`upload`/`review` (+ the optional `version`, `status` and `golive`), six script skeletons (`release_version.sh` for prefill / create / delete, `release_status.sh` read-only, `release_golive.sh` plan / release) + a JSON helper, each with `--selftest`; `listing_json` on review / upload; the `golive` preset books with `priority = "high"`, `start_deadline_seconds = 3600`, a browser `concurrency_group` shared with the project's sign-in preset and `[presets.retry]` (exit 75 runs again after 600 s, 12 attempts) |
 | `/rcm-gate-connect` | optional | `gate` preset, step markers in the existing CI script, progress markers in its silent stretches |
 | `/rcm-qa-connect` | optional | `qa` preset, `report.json` writer, per-unit progress markers, optional capture table |
 | `/rcm-release-driver` | optional | `V S0`–`S8` driver skeleton with typed-N gates, `--status` (including its `stages:` line), retry/abort, and its judge with `--selftest` |

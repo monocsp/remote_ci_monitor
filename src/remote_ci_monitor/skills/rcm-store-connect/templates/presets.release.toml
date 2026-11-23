@@ -212,6 +212,13 @@ start_deadline_seconds = 3600             # a booked time may wait an hour for a
 concurrency_group = "store-browser-{{repo}}"   # shared with the project's Play Console sign-in preset: one Chrome per profile
 artifacts = ["build/.rcm-release/golive-plan.json", "build/.rcm-release/golive.json"]
 artifacts_on = "always"
+# Exit 75 = approved, but not live yet (a release still processing, a sign-in to renew, a publish to
+# confirm): rcm runs the job again 10 minutes later, 12 times at most (2 hours), then ends it `exhausted`.
+# Needs source_modes = ["git_ref"]. A build that is not approved exits 2 and is never tried again.
+[presets.retry]
+on_exit = 75
+interval_seconds = 600
+max_attempts = 12
 [[presets.inputs]]
 name = "build_name"
 type = "string"

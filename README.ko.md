@@ -355,10 +355,13 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 | `rcm wait` 종료 코드 | 뜻 |
 |---|---|
 | 0 | 성공 |
-| 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`) |
-| 2 | 취소되었거나 시간 초과 |
+| 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`). [반복](docs/configuration.md#trying-again-later-presetsretry)하는 프리셋이 마지막 시도에서도 「아직」이라고 답한 경우(`exhausted`)도 1 이다 |
+| 2 | 취소되었거나 시간 초과, 또는 예약이 시작하지 못함(`expired`) |
 | 3 | **모름**: 서버 재시작으로 작업을 잃음 · 서버에 못 닿음 · `--timeout` 경과. 절대 실패로 치지 않는다 |
 | 4 | `--return-on-action` 을 줄 때만: 잡이 사람에게 할 일을 알렸다(`::rcm::action::`). 잡은 **계속 돈다**. 다시 기다리려면 `rcm wait --job N` |
+
+`retried` 로 끝난 시도에서는 기다림이 끝나지 않는다. `rcm wait` 은 `retried_as` 가 가리키는 다음
+시도를 따라가고 마지막 시도의 종료 코드로 끝난다([나중에 다시 돌리기](docs/configuration.md#trying-again-later-presetsretry)).
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·

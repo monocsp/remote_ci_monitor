@@ -38,12 +38,14 @@ from typing import Any
 from remote_ci_monitor import SCHEMA_VERSION, __version__, follow, submissions
 from remote_ci_monitor import apply as apply_mod
 from remote_ci_monitor.client import (
+    MAX_CHAIN_STEPS,
     Client,
     ClientError,
     default_label,
     make_snapshot,
     preset_from_json,
     upload_cached,
+    wait_for_chain,
     wait_for_job,
 )
 from remote_ci_monitor.config import (
@@ -69,6 +71,7 @@ from remote_ci_monitor.core.model import (
     EXIT_CODE_BY_STATE,
     EXIT_UNKNOWN,
     PLACEMENT_CAPABLE,
+    RETRIED,
     TERMINAL_STATES,
     Preset,
 )
@@ -347,7 +350,16 @@ def _keep_submission(client: Client, job_id: int, resp: dict[str, Any]) -> str |
         if server.rstrip("/") != mine:
             return None
         try:
-            return client.job(other, timeout=5).get("state") in TERMINAL_STATES
+            # `retried` 는 끝이 아니다(M5s) — 그 비밀이 사슬의 머리를 멈춘다(capability 는 뿌리에).
+            # 뿌리는 끝까지 `retried` 이므로 `retried_as` 를 따라가 머리의 상태로 판정한다
+            doc = client.job(other, timeout=5)
+            for _ in range(MAX_CHAIN_STEPS):
+                nxt = doc.get("retried_as")
+                if doc.get("state") != RETRIED or not isinstance(nxt, int):
+                    break
+                doc = client.job(nxt, timeout=5)
+            state = doc.get("state")
+            return state in TERMINAL_STATES and state != RETRIED
         except ClientError as e:
             return True if e.status == 404 else None  # 지워진 잡의 비밀은 쓸 데가 없다
 
@@ -1257,8 +1269,16 @@ def _wait(
             line.last = ""
         line.update(describe(job))
 
+    def on_retry(job: dict[str, Any]) -> None:
+        # 반복(M5s) — 한 시도가 끝나고 다음 시도를 기다린다. 남는 줄이다(진행 줄을 덮지 않는다)
+        said = retry_line(job)
+        if said:
+            line.done()
+            _info(said)
+            line.last = ""
+
     try:
-        code, job, reason = wait_for_job(
+        code, job, reason, attempts = wait_for_chain(
             client,
             job_id,
             timeout=timeout,
@@ -1266,6 +1286,8 @@ def _wait(
             use_sse=use_sse,
             on_info=line.update,
             stop_when=watch.stop_when,
+            on_retry=on_retry,
+            wait=wait_for_job,  # 이 모듈의 이름으로 — 시험이 바꿔 끼운다
         )
     except KeyboardInterrupt:
         line.done()
@@ -1287,6 +1309,11 @@ def _wait(
         _print_json({**(last or {"job_id": job_id}), "detached": True, "left": left})
         return EXIT_UNKNOWN
     line.done()
+    # 사슬을 따라왔으면 마지막 시도가 이 기다림의 잡이다(M5s 결정 228) — 받기 · 보관 · 로그 길이
+    # 모두 그 시도를 본다. 뿌리 id 는 `chain_id` 로 남는다
+    root_id = job_id
+    if isinstance(job, dict) and isinstance(job.get("id"), int):
+        job_id = int(job["id"])
     if reason:
         _err(reason)
     note = superseded_line(job or {}, job_id)
@@ -1309,6 +1336,10 @@ def _wait(
             _err(text)
     out = dict(job or {"job_id": job_id, "state": None})
     out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
+    if attempts is not None:
+        # 반복 사슬(M5s 결정 211) — `job_id` 는 마지막 시도, `chain_id` 는 뿌리다
+        out["chain_id"] = out.get("chain_id") or root_id
+        out["attempts"] = attempts
     out["wait_exit_code"] = code
     if joined:
         out["joined"] = True
@@ -1389,6 +1420,24 @@ def _shelf_after_wait(
     return shelf_line(shelf)
 
 
+def retry_line(job: dict[str, Any]) -> str | None:
+    """`#57 exit 75 · attempt 1 of 12 · next #58 at 15:10Z` — 반복 사슬을 따라갈 때 한 줄(M5s).
+
+    서버 문서의 값이 정수가 아니면 그 조각을 빼거나 아무 말도 안 한다 — 번호를 지어내지 않는다."""
+    nxt = job.get("retried_as")
+    if not isinstance(nxt, int) or isinstance(nxt, bool):
+        return None
+    head = f"#{job.get('id', '?')}"
+    if isinstance(job.get("exit_code"), int):
+        head += f" exit {job['exit_code']}"
+    parts = [head]
+    attempt, limit = job.get("attempt"), job.get("max_attempts")
+    if isinstance(attempt, int) and isinstance(limit, int):
+        parts.append(f"attempt {attempt} of {limit}")
+    parts.append(f"retrying as #{nxt} — waiting for it")
+    return " · ".join(parts)
+
+
 def superseded_line(job: dict[str, Any], job_id: int) -> str | None:
     """`#O superseded by #N — rcm wait --job N` — 새 잡에 밀려 취소된 잡의 안내 한 줄(M5o 결정 114).
 
@@ -1413,6 +1462,15 @@ def cmd_wait(args: argparse.Namespace) -> int:
     )
 
 
+def _chain_root(client: Client, job_id: int) -> int | None:
+    """잡 문서의 `chain_id`(반복 사슬의 뿌리, M5s). 사슬이 없거나 못 읽으면 None."""
+    try:
+        root = client.job(job_id, timeout=5).get("chain_id")
+    except ClientError:
+        return None
+    return root if isinstance(root, int) and not isinstance(root, bool) else None
+
+
 def cmd_cancel(args: argparse.Namespace) -> int:
     """`rcm cancel N [--cancel-token T | --submission-id S]` — 비밀은 플래그 > 상태 파일 순.
     상태 파일에서는 **이 토큰**으로 낸 그 잡의 가장 최근 제출(`--submission-id` 로 특정)이다
@@ -1430,6 +1488,17 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             submission_id=submission_id,
             token_fingerprint=submissions.fingerprint(client.token),
         )
+        if entry is None:
+            # 반복 사슬(M5s 결정 228) — 비밀은 뿌리 잡으로 받았다. 뒤 시도 id 로 부르면
+            # 뿌리로 찾는다
+            root = _chain_root(client, args.job)
+            if root is not None and root != args.job:
+                entry = submissions.find(
+                    client.server,
+                    root,
+                    submission_id=submission_id,
+                    token_fingerprint=submissions.fingerprint(client.token),
+                )
         cancel_token = (entry or {}).get("cancel_token")
     if not cancel_token:
         which = (

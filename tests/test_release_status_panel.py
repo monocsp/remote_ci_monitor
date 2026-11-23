@@ -114,7 +114,8 @@ def test_release_status_panel_route_submits_the_status_preset_through_the_job_pa
     srv = open_ssrv
     status, body = srv.post("status", {"build_name": "1.2.0"})
     assert status == 202, body
-    submission = body.pop("submission")  # 취소 비밀(M5s §4.5 「제출 전달」, #255) — 값은 매번 다르다
+    # 취소 비밀(M5s §4.5 「제출 전달」, #255) — 값은 매번 다르니 꺼내서 모양만 본다
+    submission = body.pop("submission")
     assert sorted(submission) == ["cancel_token", "id"] and submission["cancel_token"]
     assert body == {"job_id": 1, "joined": False, "state": "queued", "sha": remote.main}
     job = srv.store.get_job(1)

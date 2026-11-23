@@ -155,6 +155,13 @@ CODES: dict[str, Renderer] = {
     "server_stopped_while_running": lambda a: "server stopped while running",
     # 예약 잡이 시작 마감 안에 레인을 못 받았다(M5s 결정 208) — `at` 은 마감 `YYYY-MM-DD HH:MMZ`
     "start_deadline_passed": lambda a: f"did not start by its start deadline {_s(a, 'at')}",
+    # 반복(M5s 결정 211) — 이 시도가 선언한 종료코드로 끝나 다음 시도 `by` 를 `at` 에 걸었다
+    "retrying": lambda a: (
+        f"exit {_s(a, 'code')} on attempt {_s(a, 'attempt')} of {_s(a, 'max')}; "
+        f"retry #{_s(a, 'by')} at {_s(a, 'at')}"
+    ),
+    # 마지막 시도도 그 종료코드였다(M5s 결정 212) — `exhausted`
+    "retries_exhausted": lambda a: f"exit {_s(a, 'code')} on all {_s(a, 'attempts')} attempts",
     # ── 업로드 · 스냅샷 ────────────────────────────────────────────────────
     "upload_abandoned": lambda a: f"upload abandoned after {_secs(a.get('seconds'))}",
     "upload_interrupted": lambda a: f"upload interrupted after {_mb(a.get('bytes'))}",
