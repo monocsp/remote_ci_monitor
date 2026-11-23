@@ -721,8 +721,16 @@ class Client:
         machine: str | None = None,
         supersede: bool = True,
         keep: bool = False,
+        start_at: str | None = None,
+        start_in_seconds: int | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"preset": preset, "inputs": inputs, "source": source, "join": join}
+        # 예약(M5s). 줄 때만 싣는다 — 옛 서버는 모르는 키를 **무시하고 바로 돌린다**. 그래서 부르는
+        # 쪽이 먼저 health 의 `schedule` 키로 서버가 안다는 것을 확인한다(`cli.cmd_run`)
+        if start_at is not None:
+            body["start_at"] = start_at
+        if start_in_seconds is not None:
+            body["start_in_seconds"] = int(start_in_seconds)
         # 보관함(M5p 결정 126). 켤 때만 싣는다 — 옛 서버는 모르는 키를 **무시**하므로 부르는 쪽이
         # 먼저 health 의 `shelf` 키로 서버가 안다는 것을 확인한다(`cli.cmd_run`, 결정 143)
         if keep:
@@ -988,7 +996,7 @@ def upload_cached(
     missing_bytes = sum(sizes.get(h, 0) for h in missing)
     total = snapshot.total_bytes
     if not missing:
-        resp.setdefault("state", "queued")
+        # 상태는 서버가 말한 것만 — 예약 잡은 `scheduled` 로 간다(M5s). 지어내지 않는다
         resp.setdefault("job_id", job_id)
         resp["cached_bytes"] = total
         resp["uploaded_files"] = 0

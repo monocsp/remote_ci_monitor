@@ -1079,7 +1079,7 @@ Git mirrors are never pruned.
   default). `rcm run` sends a manifest first and then only the files the server does not have:
   the second upload of a mostly unchanged tree transfers a few percent of it. Blobs unused for
   `snapshot_cache_days` (30) or beyond `snapshot_cache_max_bytes` (4 GiB) are purged; blobs
-  referenced by active jobs never are. Set `snapshot_cache_scope = "token"` to keep each client's
+  referenced by active or scheduled jobs never are. Set `snapshot_cache_scope = "token"` to keep each client's
   blobs separate (by default identical content is shared between clients, which also means a
   client can learn whether a given file already exists on the server). `--no-cache` sends a full
   tarball; combine it with `--no-join` to force a fresh job for an unchanged tree.
@@ -1098,7 +1098,8 @@ Git mirrors are never pruned.
   remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
   process itself (`rcm worker`) ships in the next release step (M5b-3).
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
-  when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
+  when jobs finish, filtered by state (`on`; without it every final state, `expired` included) and
+  preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
   `RCM_FAILED_STEP` (declared failures only) and `RCM_LAST_STEP`, `RCM_EXIT_CODE`,
   `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
@@ -1730,6 +1731,71 @@ instead.
 **Opting out for one submission.** `rcm run gate --no-supersede` (API: `"supersede": false` in the
 `POST /jobs` body) clears nothing — for running a flaky test twice side by side. There is no way to
 turn it on from the submitting side: a preset set to `off` stays off.
+
+## Running a job later: `--at` and `--in`
+
+`rcm run` can hand the server a time instead of running now. The job waits on the server as
+`scheduled` and enters the queue at that time:
+
+```sh
+rcm run deploy --ref main --at 15:00            # today, 15:00 on the server's clock
+rcm run deploy --ref main --at 2026-11-24T09:30
+rcm run gate --in 90m                           # 90s · 5m · 2h · 1h30m · 1d
+```
+
+The server reads the time, not your machine: `--at` is sent as written and `--in` as a number of
+seconds. A time without an offset is read in `[display] timezone`, or in the server's local zone
+when that is empty. Three shapes are accepted — `HH:MM` (today), `YYYY-MM-DDTHH:MM`, and ISO-8601
+with an offset (`2026-11-24T09:30+09:00`, `…Z`). A time that has passed is refused with 400
+`start_at_past`; it is never moved to tomorrow. So is a time more than `schedule_max_ahead_days`
+(14) ahead (`start_at_too_far`), and a wall-clock time that a daylight saving change skips or
+repeats (`start_at_ambiguous` — give an offset). The submission answer carries the UTC time it
+settled on (`not_before`), the start deadline (`start_deadline`) and the zone it used
+(`timezone`). Over HTTP the same keys are `start_at` (string) or `start_in_seconds` (integer) on
+`POST /jobs`.
+
+An older server ignores body keys it does not know, so it would run the job **now**. `rcm run`
+only sends `--at` or `--in` to a server whose `/api/health` says `schedule: true`; anything else
+ends with `server does not support scheduling — upgrade it` and exit 2, before a snapshot is made.
+
+**The start deadline.** A scheduled job must be picked up by a lane within
+`[server] schedule_start_deadline_seconds` (900) of its time. A preset can set its own
+(`start_deadline_seconds = 3600`, applied on `rcm reload`); a submission may only shorten it
+(`start_deadline_seconds` in the body, 400 `start_deadline_too_long` otherwise). A job that misses
+it — because the lanes were busy, or because the server was down at the time — becomes
+`expired`: it did not run, `rcm wait` exits 2 (the same as `cancelled`), and its summary says
+`did not start by its start deadline 2026-11-24 09:45Z`. On start-up the server closes the
+schedules that passed their deadline while it was down and queues the ones whose time came but
+whose deadline did not, all before a lane starts. The deadline clock keeps running while the queue
+is paused.
+
+| state | means | `rcm wait` |
+|---|---|---|
+| `scheduled` | waiting for its time; no lane, no process | keeps waiting, prints `scheduled for 15:00 · start by 15:15` |
+| `queued` (from a schedule) | its time came; waits for a lane like any job, with its submission's priority | keeps waiting |
+| `expired` | no lane picked it up before the deadline | 2 |
+
+**What a schedule does not do.** It never joins another job, and no job joins it: a schedule
+next to a running job with the same preset, inputs and source is a new job, and `rcm run` of the
+same thing now does not wait for the schedule. A second schedule with the same preset, inputs and
+source (the commit for `git_ref`, the tree for an upload) is refused with 409 `schedule_exists`
+and the first job's `job_id`; cancel it or pick another time. A `git_ref` schedule resolves its
+ref when you submit, as every `git_ref` job does; a tree is uploaded when you submit and kept until
+the job runs — its snapshot blobs are protected from the cache sweep the same way an active job's
+are. [Supersede](#superseding-older-jobs-of-the-same-branch) happens when the schedule enters the
+queue, not when it is made, and never cancels a schedule; `--no-supersede` is stored with the job
+and survives a restart.
+
+**Seeing and changing it.** `rcm jobs --state scheduled` lists them, `/api/status` has them under
+`pools[].scheduled[]` in time order (apart from `queue`, with `scheduled_error` and
+`scheduled_error_code` when they cannot be read), and queue and recent rows carry `not_before`
+and `start_deadline` (`null` for a job that was never scheduled). `rcm cancel N` cancels a
+schedule at once, `rcm bump N` changes its priority, and `rcm eta --job N` answers
+`scheduled for 15:00` without inventing a number. The ETA of a new submission does not count
+schedules about to enter the queue. Schedules live in the database: `rcm reload` and a restart
+keep them; one whose preset was removed fails at claim with `preset_missing`. A `[[notify]]` rule
+without `on` also fires for `expired`, and `on = ["expired"]` picks only those. Finished schedules
+follow the ordinary [retention](#retention-what-is-kept-and-for-how-long).
 
 ## Client and worker files
 

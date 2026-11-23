@@ -21,6 +21,10 @@ FAILED = "failed"
 TIMED_OUT = "timed_out"
 CANCELLED = "cancelled"
 LOST = "lost"
+#: 정한 시각을 기다리는 예약 잡(M5s 결정 206). 프로세스도 레인도 없이 DB 행만 있다.
+SCHEDULED = "scheduled"
+#: 시작 마감 안에 레인이 집지 못한 예약 잡(M5s 결정 208). 돌지 않았다 — `cancelled` 와 같은 줄이다.
+EXPIRED = "expired"
 
 #: 대기 잡 — position 은 이 상태에만 1부터 매긴다.
 WAITING_STATES = frozenset({UPLOADING, QUEUED})
@@ -28,9 +32,16 @@ WAITING_STATES = frozenset({UPLOADING, QUEUED})
 BUSY_STATES = frozenset({RUNNING, CANCELLING})
 #: 큐에 보이는 잡 전부. 합류 판정도 이 집합에서 한다.
 ACTIVE_STATES = WAITING_STATES | BUSY_STATES
+#: 예약 잡(M5s 결정 206). **활성 집합 밖**이다 — 넣으면 같은 입력의 즉시 실행이 예약에 합류하고
+#: (`store.JOINABLE_STATES`), 큐 계산이 대기도 실행도 아닌 행을 말없이 빠뜨린다. 대신 blob 보호 ·
+#: 취소 · 잡 문서 · `rcm wait` · `rcm jobs` · 워커 잊기가 이 집합을 **명시적으로** 본다.
+SCHEDULED_STATES = frozenset({SCHEDULED})
 #: 종료 상태 — 최근 완료에 남는다. 큐에서 조용히 사라지는 잡은 없다.
-TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST})
-ALL_STATES = ACTIVE_STATES | TERMINAL_STATES
+TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST, EXPIRED})
+ALL_STATES = ACTIVE_STATES | SCHEDULED_STATES | TERMINAL_STATES
+#: `[[notify]]` 에 `on` 이 없을 때 울리는 상태(`config.parse_notify` · `core/notify.NotifyRule`
+#: 두 곳이 이것을 쓴다). 지금은 종료 상태 전부다 — 새 종료 상태가 기본에서 빠져야 하면 여기서 뺀다.
+NOTIFY_DEFAULT_STATES = TERMINAL_STATES
 
 #: `rcm wait` 종료 코드. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지).
 EXIT_CODE_BY_STATE = {
@@ -38,6 +49,7 @@ EXIT_CODE_BY_STATE = {
     FAILED: 1,
     CANCELLED: 2,
     TIMED_OUT: 2,
+    EXPIRED: 2,  # M5s 결정 212 — 돌지 않았다
     LOST: 3,
 }
 EXIT_UNKNOWN = 3
@@ -194,6 +206,8 @@ class Preset:
     supersede: str = "off"
     #: 끝나면 산출물을 보관함에 넣나(M5p 결정 126). 제출 때 잡에 얼린다 — `artifacts` 가 있어야 한다
     keep: bool = False
+    #: 예약 잡의 시작 마감(초, M5s 결정 208). None 이면 서버의 `schedule_start_deadline_seconds`
+    start_deadline_seconds: int | None = None
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -316,6 +330,24 @@ class Job:
     #: M5p(v24) — 끝나면 산출물을 보관함에 넣나. 제출 때 얼린다(프리셋 keep OR 제출 keep).
     #: reload · 재시작에 바뀌지 않고, 합류와 supersede 로 켜질 수만 있다(결정 127 · 128)
     keep: bool = False
+    #: M5s(v25) — 예약. `not_before` 는 승격할 시각, `start_deadline` 은 그때까지 레인이 집지 못하면
+    #: `expired` 로 닫는 시각이다. 즉시 실행한 잡은 둘 다 None 이다. 제출 때 정하고 바꾸지 않는다
+    not_before: datetime | None = None
+    start_deadline: datetime | None = None
+    #: 제출의 `"supersede": false` 를 얼린 값(결정 237). 재시작해도 잊지 않는다
+    no_supersede: bool = False
+
+    @property
+    def wait_origin(self) -> datetime:
+        """대기를 재는 기준 시각. 예약 잡은 승격한 시각(`queued_at`)이고 나머지는 만든 시각이다
+        (M5s §3 #3) — 예약까지 기다린 시간은 「큐가 밀렸다」가 아니다."""
+        if self.not_before is not None and self.queued_at is not None:
+            return self.queued_at
+        return self.created_at
+
+    @property
+    def is_scheduled(self) -> bool:
+        return self.state in SCHEDULED_STATES
 
     @property
     def is_waiting(self) -> bool:
@@ -612,6 +644,10 @@ class Pool:
     recent_error_code: str | None = None
     medians_error_code: str | None = None
     hosts_error_code: str | None = None
+    #: 예약 잡(M5s) — 승격 시각 순. 큐 표와 따로 간다. 실패는 None + `scheduled_error*`
+    scheduled: tuple[Job, ...] | None = ()
+    scheduled_error: str | None = None
+    scheduled_error_code: str | None = None
 
 
 @dataclass(frozen=True)

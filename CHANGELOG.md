@@ -7,6 +7,35 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`rcm run --at TIME` and `--in DURATION` run a job later.** The server reads the time
+  (`HH:MM` today, `YYYY-MM-DDTHH:MM`, or ISO-8601 with an offset) in `[display] timezone`, or its
+  own zone when that is empty, and the job waits as the new state `scheduled` until then; a past
+  time is refused (400 `start_at_past`, never moved to tomorrow), as is one more than
+  `[server] schedule_max_ahead_days` (14) ahead or one a daylight saving change skips or repeats.
+  A lane must pick it up within `[server] schedule_start_deadline_seconds` (900) of its time — a
+  preset's `start_deadline_seconds` overrides it, a submission may only shorten it — or it ends in
+  the new final state `expired` (`rcm wait` exit 2). A schedule never joins another job and no
+  job joins it; the same preset, inputs and source scheduled twice is 409 `schedule_exists`.
+  Schedules survive `rcm reload` and a restart; on start-up the server closes the ones whose
+  deadline passed while it was down and queues the ones that are due. HTTP: `start_at` /
+  `start_in_seconds` on `POST /jobs`; `/api/health` says `schedule: true`, and `rcm run` refuses
+  `--at` / `--in` with exit 2 on a server that does not. `rcm jobs --state scheduled`,
+  `rcm cancel`, `rcm bump` and `rcm eta --job` work on them.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- `/api/status` lists schedules under `pools[].scheduled[]` (with `scheduled_error` and
+  `scheduled_error_code`), and queue and recent rows carry `not_before` and `start_deadline`.
+  Keys added only — `schema_version` stays 1.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+
+### Changed
+- **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
+  every final state. Give the rule an `on` list to keep the old set.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- The database moves to version 25 (a backup of v24 is written first). An older build refuses the
+  migrated database; restore the backup to go back.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+
 ## [0.9.0] - 2026-11-22
 
 ### Added

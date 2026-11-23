@@ -56,6 +56,9 @@ ROW_KEYS = {
     # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
     "keep",
     "shelf",
+    # M5s — 예약에서 온 잡의 시각과 시작 마감. 즉시 실행이면 null(키 추가만)
+    "not_before",
+    "start_deadline",
 }
 ESTIMATE_KEYS = {
     "confidence",
@@ -115,6 +118,9 @@ RECENT_KEYS = {
     # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
     "keep",
     "shelf",
+    # M5s — 예약에서 온 잡의 시각과 시작 마감. 즉시 실행이면 null(키 추가만)
+    "not_before",
+    "start_deadline",
 }
 POOL_KEYS = {
     "name",
@@ -133,6 +139,10 @@ POOL_KEYS = {
     "recent_error_code",
     "medians_error_code",
     "hosts_error_code",
+    # M5s — 예약 잡(시각순, 큐 표와 따로)과 그 조회 실패(관례대로 `*_error` · `*_error_code`)
+    "scheduled",
+    "scheduled_error",
+    "scheduled_error_code",
 }
 
 

@@ -150,6 +150,14 @@ chmod 600 ~/.config/rcm/client.toml
    Ctrl-C 로 다시 떼어 놔도 작업은 계속 돈다.
 5. 종료 코드는 처음부터 기다린 것과 똑같이 그 작업의 것이다.
 
+**지금 대신 나중에.** `rcm run deploy --ref main --at 15:00` 은 서버에 시각을 넘긴다. 길이로
+주려면 `--in 90m` 을 쓴다. 작업은 `scheduled` 상태로 기다리다가 그 시각에 큐에 들어간다.
+`rcm jobs` 는 그 작업을 `at 15:00` 으로 보여 주고, `rcm wait --job N` 은
+`scheduled for 15:00 · start by 15:15` 를 찍고 계속 기다린다. 그 시각부터 시작 마감까지 어느
+레인도 그 작업을 집지 않으면 작업은 `expired` 로 끝나고 종료 코드는 2 다. 작업이 돌지 않았다는
+뜻이다. 시작 마감은 프리셋이 따로 정하지 않으면 15분이다. 자세한 규칙은
+[나중에 돌리기](configuration.md#running-a-job-later---at-and---in)에 있다.
+
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
 
