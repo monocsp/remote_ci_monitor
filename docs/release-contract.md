@@ -51,6 +51,8 @@ review = "release-review"                 # required — submit for review → r
 gate   = "gate-smoke"                     # optional — your CI gate on the release ref
 qa     = "scenario-qa"                    # optional — device / scenario QA → report.json
 version = "release-version"               # optional — «new version» from the web: prefill / create / delete
+# status = "release-status"               # optional — both stores' review state → status.json (read-only)
+# golive = "release-golive"               # optional — a release a person asked for → golive-plan.json / golive.json
 # dev  = "deploy-dev"                     # optional — dev distribution card (phase 2)
 
 # Secrets the Settings screen asks for. rcm keeps them under <config_dir>/secrets/<repo>/
@@ -136,6 +138,8 @@ artifact retention). It sets these inputs; declare them on the preset or the sub
 | `upload` | **required** | `build_name`, `build_name_android`, `confirm_build_number`, `mode = rehearsal\|upload`, `platform`, `android_track`, `listing_json` | `upload.json` | 0 · 1 · 2 env · 3 confirmation mismatch · 4 store drift | `rcm-store-connect` |
 | `review` | **required** | `build_name`, `build_name_android`, `confirm_build_number` (empty for plan), `mode = plan\|submit`, `platform`, `play_managed_publishing = not-checked\|confirmed-on`, `listing = notes-only\|full`, `phased = 1\|0`, `listing_json` | `review-plan.json` / `review.json` | 0 · 1 failed · 2 blocked · 3/4 confirmation mismatch · 5 noop · 6 partial | `rcm-store-connect` |
 | `version` | optional | `mode = prefill\|create\|delete` (default **prefill**; rcm itself only ever sends `create` and `delete`), `ios_version`, `android_version` (empty = that store is not touched), `asc_version_id` (delete only) | `version.json` (create · delete) / `prefill.json` (prefill · create) | 0 · 1 failed · 2 environment · 3 already exists (an editable App Store version of that name) · 4 not deletable (the version was submitted) | `rcm-store-connect` |
+| `status` | optional | `build_name` (empty = the newest versions the stores have) | `status.json` | 0 read · 1 a store could not be read (nothing written) · 2 environment | `rcm-store-connect` |
+| `golive` | optional | `build_name`, `build_name_android`, `confirm_build_number` (release only: the number a person typed), `platform = ios\|android\|both`, `mode = plan\|release` (default **plan**) | `golive-plan.json` (plan) / `golive.json` (release) | plan: 0 read (approved or not — that is in the file) · 1 a store could not be read · 2 environment. release: 0 live · 75 not yet, only for work left after approval · 1 failed · 2 blocked (a chosen platform is not approved; never 75) · also environment / usage · 3 build number mismatch | `rcm-store-connect` |
 | `gate` | optional | *(none — ref only)* | commit status is yours; rcm shows steps/log | 0 · non-zero | `rcm-gate-connect` |
 | `qa` | optional | project-defined (`order`, `android_mode`, …); rcm passes the profile defaults | `report.json` (+ optional `step-captures.html`) | 0 PASS · 1 FAIL · 2 / 10 BLOCKED (environment, shown amber not red) | `rcm-qa-connect` |
 | `driver` | optional | `--build-name`, `--version-id`, `--confirm-build-number` (§5) | stage from remote truth | 0 · 1 · 2 · 3 · 4 | `rcm-release-driver` |
@@ -165,7 +169,8 @@ rcm. A preset without the input still works; `rcm check` warns and the edited co
 
 Three invariants rcm checks on the preset definitions, because they are the last line of safety:
 
-- the irreversible mode is never the default (`mode` defaults to `rehearsal` / `plan`);
+- the irreversible mode is never the default (`mode` defaults to `rehearsal` / `plan`, and the
+  `golive` preset's to `plan`);
 - the `version` preset's `mode` defaults to `prefill` — `create` makes a store draft and
   `delete` cannot be undone, so both are choices;
 - `play_managed_publishing` has exactly one confirming value, and rcm sends it only when the
@@ -237,6 +242,26 @@ Extra fields are kept and shown raw where the page has room. Missing fields rend
   "ios": { "subtitle": "…", "promotional_text": "", "description": "…", "keywords": "…", "support_url": "…",
            "marketing_url": "…", "whats_new": "…", "screenshots": [ { "path": "store/screenshots/ios/ko/0.png" } ] } | null,
   "android": { "title": "…", "short_description": "…", "full_description": "…", "whats_new": "…", "graphics": [] } | null }
+
+// status.json — both stores' review state, read-only. `state` is one of eight words the script maps the store's
+// own word onto (kept in raw_state): preparing · waiting_for_review · in_review · approved · rejected · releasing ·
+// released · unknown. rcm draws a word it does not know as unknown. null = that store was not read.
+{ "schema": 1, "checked_at": "2026-11-23T01:00:00Z",
+  "ios": { "version": "1.2.0", "build": 185, "state": "approved", "raw_state": "PENDING_DEVELOPER_RELEASE",
+           "release_type": "MANUAL", "phased": { "state": "ACTIVE", "day": 3 } | null } | null,
+  "android": { "version": "1.2.0", "version_code": 185, "state": "in_review",
+               "raw_state": "RELEASE_LIFECYCLE_STATE_IN_REVIEW", "user_fraction": 0.1 | null } | null }
+
+// golive-plan.json — mode=plan, read-only. Whether a platform is approved lives here, never in the exit code:
+// plan_verdict ok requires every listed platform approved; blocked requires a non-empty reasons[].
+{ "schema": 1, "build_name": "1.2.0", "measured_at": "…", "plan_verdict": "ok|blocked", "reasons": ["android_not_approved"],
+  "platforms": { "ios": { "approved": true, "approved_build": 185, "raw_state": "PENDING_DEVELOPER_RELEASE" },
+                 "android": { "approved": false, "approved_build": null, "raw_state": "…" } } }
+
+// golive.json — mode=release, however the run ends
+{ "schema": 1, "build_name": "1.2.0", "finished_at": "…",
+  "platforms": { "ios": { "result": "requested|released|pending|failed", "raw_state": "…" },
+                 "android": { "result": "published|pending|needs_login|failed", "raw_state": "…" } } }
 
 // report.json — QA verdict; verdict == FAIL requires failures[] to be non-empty
 { "schema": 1, "verdict": "PASS|FAIL|BLOCKED",

@@ -345,6 +345,9 @@ def test_the_release_view_is_empty_but_answers_before_the_gate_opens(srv):
         "plan": None,
         "review": {"plan": None, "result": None},
         "upload": None,
+        # M5s §4.4 · §4.5 — 선택 역할 둘. 산출물이 없으면 null
+        "status": None,
+        "golive": {"plan": None, "result": None},
         "jobs": [],
     }
     assert srv.req("GET", "/api/repos/nope/release")[0] == 404

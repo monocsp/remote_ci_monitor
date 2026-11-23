@@ -27,15 +27,21 @@ from remote_ci_monitor.core.status import iso
 
 #: 역할 → 묶음에서 찾는 파일. review 는 모드에 따라 둘
 #: (plan → review-plan.json · submit → review.json), version 도 둘
-#: (create · delete → version.json · prefill · create → prefill.json).
+#: (create · delete → version.json · prefill · create → prefill.json). golive 도 둘이다
+#: (plan → golive-plan.json · release → golive.json, M5s §4.5).
 ROLE_FILES: dict[str, tuple[str, ...]] = {
     "plan": ("plan.json",),
     "upload": ("upload.json",),
     "review": ("review-plan.json", "review.json"),
     "version": ("version.json", "prefill.json"),
+    "status": ("status.json",),
+    "golive": ("golive-plan.json", "golive.json"),
 }
-#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 넷에 더해 gate · qa · dev 도 행으로는 보인다.
-LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
+#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 역할에 더해 gate · qa · dev 도 행으로는 보인다.
+LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version", "status", "golive")
+#: 문서마다 「잰 시각」을 담은 키. 기본은 `measured_at` 이고 status.json 만 `checked_at` 이다
+#: (M5s §4.4 의 최소 필드).
+MEASURED_KEY: dict[str, str] = {"status.json": "checked_at"}
 #: `prefill.json` · 편집본의 플랫폼별 문안 키(계약 §2 review 의 listing 필드 이름과 같다).
 #: 스크린샷은 보기만이라 편집본에 없다.
 PREFILL_KEYS: dict[str, tuple[str, ...]] = {
@@ -148,9 +154,13 @@ def role_entry(
     *,
     now: datetime | None = None,
     max_age_minutes: int | None = None,
+    measured_key: str = "measured_at",
+    with_build_name: bool = True,
 ) -> dict[str, Any]:
     """역할의 최신 항목. `now` 와 `max_age_minutes` 를 주면 나이와 stale 도 잰다
-    (plan · review plan)."""
+    (plan · review plan · golive plan · status). 잰 시각은 문서의 `measured_key` 에서 읽고 없으면
+    잡이 끝난 시각이다. `with_build_name` 이 거짓이면 `build_name` 칸을 싣지 않는다(status 는
+    한 회차의 문서가 아니다)."""
     doc: Any = None
     error: str | None = None
     try:
@@ -159,18 +169,16 @@ def role_entry(
         error = f"cannot read {_basename(member)}: {type(e).__name__}"
     out: dict[str, Any] = {"job_id": job.id, "state": job.state}
     if now is not None and max_age_minutes is not None:
-        measured = parse_iso(doc.get("measured_at")) if isinstance(doc, dict) else None
+        measured = parse_iso(doc.get(measured_key)) if isinstance(doc, dict) else None
         if measured is None:
             measured = job.finished_at
         age = max(0, int((now - measured).total_seconds())) if measured is not None else None
         out["measured_at"] = iso(measured)
         out["age_seconds"] = age
         out["stale"] = age is None or age > max_age_minutes * 60
-        if isinstance(doc, dict):
-            name = doc.get("build_name")
+        if with_build_name:
+            name = doc.get("build_name") if isinstance(doc, dict) else None
             out["build_name"] = name if isinstance(name, str) else None
-        else:
-            out["build_name"] = None
     out["doc"] = doc
     if error is not None:
         out["doc_error"] = error
@@ -186,8 +194,9 @@ def release_view(
     now: datetime,
     max_age_minutes: int,
 ) -> dict[str, Any]:
-    """`GET …/release` 의 `plan` · `review` · `upload` · `jobs`. `jobs` 는 새것부터 ≤ 50 이고
-    역할 프리셋의 잡만이다. `names_of(job_id)` 는 묶음 매니페스트의 파일 항목들(없으면 빈 목록)."""
+    """`GET …/release` 의 `plan` · `review` · `upload` · `status` · `golive` · `jobs`. `jobs` 는
+    새것부터 ≤ 50 이고 역할 프리셋의 잡만이다. `names_of(job_id)` 는 묶음 매니페스트의 파일
+    항목들(없으면 빈 목록). status 와 golive plan 도 plan 처럼 나이와 stale 을 잰다."""
     role_of = {name: role for role, name in presets.items() if name}
     rows: list[dict[str, Any]] = []
     latest: dict[str, tuple[Job, str]] = {}  # 파일 basename → (잡, 묶음 안 경로)
@@ -205,13 +214,21 @@ def release_view(
             if member is not None:
                 latest[basename] = (job, member)
 
-    def entry(basename: str, *, aged: bool) -> dict[str, Any] | None:
+    def entry(basename: str, *, aged: bool, with_build_name: bool = True) -> dict[str, Any] | None:
         found = latest.get(basename)
         if found is None:
             return None
         job, member = found
         if aged:
-            return role_entry(job, member, read_file, now=now, max_age_minutes=max_age_minutes)
+            return role_entry(
+                job,
+                member,
+                read_file,
+                now=now,
+                max_age_minutes=max_age_minutes,
+                measured_key=MEASURED_KEY.get(basename, "measured_at"),
+                with_build_name=with_build_name,
+            )
         return role_entry(job, member, read_file)
 
     return {
@@ -221,6 +238,11 @@ def release_view(
             "result": entry("review.json", aged=False),
         },
         "upload": entry("upload.json", aged=False),
+        "status": entry("status.json", aged=True, with_build_name=False),
+        "golive": {
+            "plan": entry("golive-plan.json", aged=True),
+            "result": entry("golive.json", aged=False),
+        },
         "jobs": rows,
     }
 
@@ -380,6 +402,7 @@ __all__ = [
     "JOBS_LIMIT",
     "LISTED_ROLES",
     "MAX_DOC_BYTES",
+    "MEASURED_KEY",
     "PLATFORMS",
     "PREFILL_KEYS",
     "ROLE_FILES",

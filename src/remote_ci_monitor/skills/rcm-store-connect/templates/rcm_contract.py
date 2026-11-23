@@ -5,7 +5,8 @@
 Installed by the rcm-store-connect skill next to the release scripts. It does two things:
 
   write <kind> --out FILE [fields…]   build + validate + atomically write plan.json / upload.json /
-                                      review-plan.json / review.json / version.json / prefill.json.
+                                      review-plan.json / review.json / version.json / prefill.json /
+                                      status.json / golive-plan.json / golive.json.
                                       Exit 1 (nothing written) when the document would violate
                                       the contract.
   validate <kind> --file FILE         exit 0 when FILE satisfies the minimum fields of
@@ -14,7 +15,8 @@ Installed by the rcm-store-connect skill next to the release scripts. It does tw
   --selftest                          proves that a poisoned document is rejected and a good
                                       one accepted.
 
-kind is one of: plan · upload · review-plan · review · version · prefill. Only the minimum
+kind is one of: plan · upload · review-plan · review · version · prefill · status · golive-plan ·
+golive. Only the minimum
 fields are checked; extra fields are kept as-is. No third-party imports, no network, no project
 knowledge.
 """
@@ -33,7 +35,17 @@ import sys
 import tempfile
 from typing import Any
 
-KINDS = ("plan", "upload", "review-plan", "review", "version", "prefill")
+KINDS = (
+    "plan",
+    "upload",
+    "review-plan",
+    "review",
+    "version",
+    "prefill",
+    "status",
+    "golive-plan",
+    "golive",
+)
 UPLOAD_STATUSES = ("success", "partial", "rehearsal", "failed")
 UPLOAD_MODES = ("rehearsal", "upload")
 REVIEW_STATUSES = ("submitted", "partial", "noop", "failed")
@@ -54,6 +66,28 @@ IOS_LISTING_KEYS = (
 ANDROID_LISTING_KEYS = ("title", "short_description", "full_description", "whats_new")
 #: 플랫폼별 그림 목록 키 — [{path}] 의 리스트
 LISTING_IMAGE_KEYS = {"ios": "screenshots", "android": "graphics"}
+#: status.json 의 `state` 여덟 값(M5s §4.4). 스토어의 원래 값은 `raw_state` 에 두고 여기에는
+#: 정규화한 값만 쓴다. 정규화는 프로젝트 스크립트의 몫이고 rcm 은 그리기만 한다.
+STATUS_STATES = (
+    "preparing",
+    "waiting_for_review",
+    "in_review",
+    "approved",
+    "rejected",
+    "releasing",
+    "released",
+    "unknown",
+)
+#: status.json 플랫폼 칸의 키 — 모르면 null 이지만 키는 있어야 한다.
+STATUS_KEYS = {
+    "ios": ("version", "build", "state", "raw_state", "release_type", "phased"),
+    "android": ("version", "version_code", "state", "raw_state", "user_fraction"),
+}
+#: golive.json 의 플랫폼별 결과 값(M5s §4.5). iOS 는 API 로 출시를 요청하고 Android 는 게시한다.
+GOLIVE_RESULTS = {
+    "ios": ("requested", "released", "pending", "failed"),
+    "android": ("published", "pending", "needs_login", "failed"),
+}
 
 
 def now_iso() -> str:
@@ -82,6 +116,116 @@ def _code_text_list(doc: dict, key: str, errors: list[str]) -> None:
             errors.append(f"{key}[{i}].code: must be a non-empty string")
         if not isinstance(item.get("text"), str):
             errors.append(f"{key}[{i}].text: must be a string")
+
+
+def _str_or_null(v: Any) -> bool:
+    return v is None or isinstance(v, str)
+
+
+def _int_or_null(v: Any) -> bool:
+    return v is None or _is_int(v)
+
+
+def _validate_status_platform(plat: str, v: dict, e: list[str]) -> None:
+    """status.json 의 ios · android 칸 하나. 키는 모두 있어야 하고 모르면 null 이다."""
+    for key in STATUS_KEYS[plat]:
+        if key not in v:
+            e.append(f"{plat}.{key}: missing (use null when unknown)")
+    if v.get("state") not in STATUS_STATES:
+        e.append(f"{plat}.state: must be one of {'|'.join(STATUS_STATES)}")
+    for key in ("version", "raw_state"):
+        if not _str_or_null(v.get(key)):
+            e.append(f"{plat}.{key}: must be a string or null")
+    if plat == "ios":
+        if not _int_or_null(v.get("build")):
+            e.append("ios.build: must be an integer or null")
+        if not _str_or_null(v.get("release_type")):
+            e.append("ios.release_type: must be a string or null")
+        phased = v.get("phased")
+        if phased is not None and (
+            not isinstance(phased, dict)
+            or not isinstance(phased.get("state"), str)
+            or not _int_or_null(phased.get("day"))
+        ):
+            e.append("ios.phased: must be null or an object with a string 'state' and an int 'day'")
+    else:
+        if not _int_or_null(v.get("version_code")):
+            e.append("android.version_code: must be an integer or null")
+        frac = v.get("user_fraction")
+        if frac is not None and (
+            isinstance(frac, bool) or not isinstance(frac, int | float) or not 0 <= frac <= 1
+        ):
+            e.append("android.user_fraction: must be a number from 0 to 1 or null")
+
+
+def _validate_golive_plan(doc: dict, e: list[str]) -> None:
+    """golive-plan.json — 고른 플랫폼마다 승인 여부. 승인은 종료코드가 아니라 여기에만 적는다."""
+    if not isinstance(doc.get("build_name"), str) or not doc["build_name"]:
+        e.append("build_name: must be a non-empty string")
+    if not isinstance(doc.get("measured_at"), str):
+        e.append("measured_at: must be a string")
+    plats = doc.get("platforms")
+    unapproved: list[str] = []
+    if not isinstance(plats, dict) or not plats:
+        e.append("platforms: must be a non-empty object with ios and/or android")
+    else:
+        for name, v in plats.items():
+            if name not in PLATFORMS:
+                e.append(f"platforms.{name}: unknown platform (expected ios or android)")
+                continue
+            if not isinstance(v, dict):
+                e.append(f"platforms.{name}: must be an object")
+                continue
+            if not isinstance(v.get("approved"), bool):
+                e.append(f"platforms.{name}.approved: must be true or false")
+            elif not v["approved"]:
+                unapproved.append(name)
+            if "approved_build" not in v:
+                e.append(f"platforms.{name}.approved_build: missing (use null when not approved)")
+            elif not _int_or_null(v["approved_build"]):
+                e.append(f"platforms.{name}.approved_build: must be an integer or null")
+            elif v.get("approved") is True and v["approved_build"] is None:
+                e.append(f"platforms.{name}.approved_build: must be the build number when approved")
+            if "raw_state" not in v:
+                e.append(f"platforms.{name}.raw_state: missing (use null when unread)")
+            elif not _str_or_null(v["raw_state"]):
+                e.append(f"platforms.{name}.raw_state: must be a string or null")
+    verdict = doc.get("plan_verdict")
+    if verdict not in PLAN_VERDICTS:
+        e.append(f"plan_verdict: must be one of {'|'.join(PLAN_VERDICTS)}")
+    reasons = doc.get("reasons")
+    if not isinstance(reasons, list) or not all(isinstance(x, str) and x for x in reasons):
+        e.append("reasons: must be a list of non-empty strings")
+    elif verdict == "blocked" and not reasons:
+        e.append("reasons: must be non-empty when plan_verdict is 'blocked'")
+    if verdict == "ok" and unapproved:
+        e.append(f"plan_verdict: 'ok' but {', '.join(unapproved)} is not approved")
+
+
+def _validate_golive(doc: dict, e: list[str]) -> None:
+    """golive.json — mode=release 뒤의 플랫폼별 결과. 어떻게 끝나든 남긴다."""
+    if not isinstance(doc.get("build_name"), str) or not doc["build_name"]:
+        e.append("build_name: must be a non-empty string")
+    if not isinstance(doc.get("finished_at"), str):
+        e.append("finished_at: must be a string")
+    plats = doc.get("platforms")
+    if not isinstance(plats, dict) or not plats:
+        e.append("platforms: must be a non-empty object with ios and/or android")
+        return
+    for name, v in plats.items():
+        if name not in GOLIVE_RESULTS:
+            e.append(f"platforms.{name}: unknown platform (expected ios or android)")
+            continue
+        if not isinstance(v, dict):
+            e.append(f"platforms.{name}: must be an object")
+            continue
+        results = GOLIVE_RESULTS[name]
+        if v.get("result") not in results:
+            e.append(f"platforms.{name}.result: must be one of {'|'.join(results)}")
+        if "raw_state" not in v:
+            e.append(f"platforms.{name}.raw_state: missing (use null when unread)")
+        elif not _str_or_null(v["raw_state"]):
+            e.append(f"platforms.{name}.raw_state: must be a string or null")
 
 
 def validate(kind: str, doc: Any) -> list[str]:
@@ -242,6 +386,32 @@ def validate(kind: str, doc: Any) -> list[str]:
                     e.append(f"{plat}.{images}: must be a list of objects with a 'path' string")
         if "ios" in doc and "android" in doc and objects == 0:
             e.append("ios/android: both null — a prefill with no listing is not a prefill")
+
+    elif kind == "status":
+        # 두 스토어의 심사 상태(읽기만). 읽지 않은 스토어는 null, 둘 다 null 이면 읽은 것이 없다.
+        if not isinstance(doc.get("checked_at"), str) or not doc["checked_at"]:
+            e.append("checked_at: must be a non-empty string")
+        objects = 0
+        for plat in PLATFORMS:
+            if plat not in doc:
+                e.append(f"{plat}: missing (use null when that store was not read)")
+                continue
+            v = doc[plat]
+            if v is None:
+                continue
+            if not isinstance(v, dict):
+                e.append(f"{plat}: must be an object or null")
+                continue
+            objects += 1
+            _validate_status_platform(plat, v, e)
+        if "ios" in doc and "android" in doc and objects == 0:
+            e.append("ios/android: both null — a status with no store read is not a status")
+
+    elif kind == "golive-plan":
+        _validate_golive_plan(doc, e)
+
+    elif kind == "golive":
+        _validate_golive(doc, e)
     return e
 
 
@@ -445,6 +615,64 @@ def write_prefill(
     return doc
 
 
+def write_status(
+    out: str,
+    ios: dict | None,
+    android: dict | None,
+    extra: dict | None = None,
+) -> dict:
+    """status.json — 두 스토어의 심사 상태. `state` 는 여덟 값 가운데 하나로 정규화해 넘긴다."""
+    doc = {
+        "schema": 1,
+        "checked_at": now_iso(),
+        "ios": None if ios is None else dict(ios),
+        "android": None if android is None else dict(android),
+    }
+    doc.update(extra or {})
+    write_doc("status", doc, out)
+    return doc
+
+
+def write_golive_plan(
+    out: str,
+    build_name: str,
+    platforms: dict[str, dict],
+    plan_verdict: str,
+    reasons: list[str] | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """golive-plan.json — 읽기만 한 결과. 승인 여부는 `platforms.<p>.approved` 에 적는다."""
+    doc = {
+        "schema": 1,
+        "build_name": build_name,
+        "measured_at": now_iso(),
+        "platforms": {k: dict(v) for k, v in platforms.items()},
+        "plan_verdict": plan_verdict,
+        "reasons": list(reasons or []),
+    }
+    doc.update(extra or {})
+    write_doc("golive-plan", doc, out)
+    return doc
+
+
+def write_golive(
+    out: str,
+    build_name: str,
+    platforms: dict[str, dict],
+    extra: dict | None = None,
+) -> dict:
+    """golive.json — mode=release 뒤의 플랫폼별 결과."""
+    doc = {
+        "schema": 1,
+        "build_name": build_name,
+        "platforms": {k: dict(v) for k, v in platforms.items()},
+        "finished_at": now_iso(),
+    }
+    doc.update(extra or {})
+    write_doc("golive", doc, out)
+    return doc
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────────────────
 
 
@@ -539,6 +767,38 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--ios-json", help="listing fields object, @file, - or omit for null")
     f.add_argument("--android-json", help="listing fields object, @file, - or omit for null")
     f.add_argument("--extra-json")
+
+    g = ws.add_parser("status")
+    g.add_argument("--out", required=True)
+    g.add_argument(
+        "--ios-json",
+        help='{"version","build","state","raw_state","release_type","phased"}, @file, - or omit',
+    )
+    g.add_argument(
+        "--android-json",
+        help='{"version","version_code","state","raw_state","user_fraction"}, @file, - or omit',
+    )
+    g.add_argument("--extra-json")
+
+    h = ws.add_parser("golive-plan")
+    h.add_argument("--out", required=True)
+    h.add_argument("--build-name", required=True)
+    h.add_argument(
+        "--platforms-json",
+        required=True,
+        help='{"ios": {"approved","approved_build","raw_state"}, "android": {…}}, @file or -',
+    )
+    h.add_argument("--plan-verdict", required=True, help="ok | blocked")
+    h.add_argument("--reason", action="append", metavar="CODE")
+    h.add_argument("--extra-json")
+
+    i = ws.add_parser("golive")
+    i.add_argument("--out", required=True)
+    i.add_argument("--build-name", required=True)
+    i.add_argument(
+        "--platforms-json", required=True, help='{"ios": {"result","raw_state"}, …}, @file or -'
+    )
+    i.add_argument("--extra-json")
     return p
 
 
@@ -608,7 +868,7 @@ def cmd_write(args: argparse.Namespace) -> int:
                 args.error,
                 extra,
             )
-        else:
+        elif args.kind == "prefill":
             doc = write_prefill(
                 args.out,
                 args.source,
@@ -617,12 +877,40 @@ def cmd_write(args: argparse.Namespace) -> int:
                 _json_arg(args.android_json, "--android-json"),
                 extra,
             )
+        elif args.kind == "status":
+            doc = write_status(
+                args.out,
+                _json_arg(args.ios_json, "--ios-json"),
+                _json_arg(args.android_json, "--android-json"),
+                extra,
+            )
+        elif args.kind == "golive-plan":
+            platforms = _json_arg(args.platforms_json, "--platforms-json")
+            if not isinstance(platforms, dict):
+                raise ValueError("--platforms-json: must be a JSON object")
+            doc = write_golive_plan(
+                args.out, args.build_name, platforms, args.plan_verdict, args.reason, extra
+            )
+        else:
+            platforms = _json_arg(args.platforms_json, "--platforms-json")
+            if not isinstance(platforms, dict):
+                raise ValueError("--platforms-json: must be a JSON object")
+            doc = write_golive(args.out, args.build_name, platforms, extra)
     except ValueError as e:
         print(f"contract violation — nothing written to {args.out}\n{e}", file=sys.stderr)
         return 1
     keys = ", ".join(
         f"{k}={doc[k]!r}"
-        for k in ("n", "status", "plan_verdict", "overall_status", "mode", "source", "error")
+        for k in (
+            "n",
+            "status",
+            "plan_verdict",
+            "overall_status",
+            "mode",
+            "source",
+            "error",
+            "build_name",
+        )
         if k in doc and doc[k] is not None
     )
     print(f"  {os.path.basename(args.out)} -> {args.out}  {keys}")
@@ -633,7 +921,7 @@ def cmd_write(args: argparse.Namespace) -> int:
 
 
 def selftest() -> int:
-    """좋은 문서 넷은 통과, 오염된 문서는 각각 거부.
+    """좋은 문서는 모두 통과, 오염된 문서는 각각 거부.
 
     거부 이유가 해당 필드를 이름으로 가리켜야 한다.
     """
@@ -694,6 +982,42 @@ def selftest() -> int:
             "ios": {"subtitle": "Hi", "screenshots": [{"path": "store/screenshots/ios/ko/0.png"}]},
             "android": {"title": "App", "graphics": []},
         },
+        "status": {
+            "schema": 1,
+            "checked_at": now_iso(),
+            "ios": {
+                "version": "1.2.0",
+                "build": 185,
+                "state": "approved",
+                "raw_state": "PENDING_DEVELOPER_RELEASE",
+                "release_type": "MANUAL",
+                "phased": None,
+            },
+            "android": {
+                "version": "1.2.0",
+                "version_code": 185,
+                "state": "in_review",
+                "raw_state": "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+                "user_fraction": None,
+            },
+        },
+        "golive-plan": {
+            "schema": 1,
+            "build_name": "1.2.0",
+            "measured_at": now_iso(),
+            "platforms": {
+                "ios": {"approved": True, "approved_build": 185, "raw_state": "PENDING"},
+                "android": {"approved": False, "approved_build": None, "raw_state": "IN_REVIEW"},
+            },
+            "plan_verdict": "blocked",
+            "reasons": ["android_not_approved"],
+        },
+        "golive": {
+            "schema": 1,
+            "build_name": "1.2.0",
+            "platforms": {"ios": {"result": "requested", "raw_state": "PENDING"}},
+            "finished_at": now_iso(),
+        },
     }
     # (kind, 오염, 거부 메시지에 있어야 하는 필드 이름)
     poison = [
@@ -721,6 +1045,25 @@ def selftest() -> int:
         ("prefill", {"ios": {"subtitle": 3}}, "ios.subtitle"),
         ("prefill", {"android": {"graphics": ["a.png"]}}, "android.graphics"),
         ("prefill", {"ios": "text"}, "ios"),
+        ("status", {"checked_at": None}, "checked_at"),
+        ("status", {"ios": None, "android": None}, "both null"),
+        ("status", {"ios": {"state": "PENDING_DEVELOPER_RELEASE"}}, "ios.state"),  # 정규화 안 함
+        ("status", {"android": {"state": "approved"}}, "android.version_code"),  # 키 누락
+        ("golive-plan", {"plan_verdict": "ok"}, "android"),  # 미승인인데 ok
+        ("golive-plan", {"reasons": []}, "reasons"),  # 이유 없는 blocked
+        (
+            "golive-plan",
+            {"platforms": {"ios": {"approved": True, "raw_state": None}}},
+            "approved_build",
+        ),
+        ("golive-plan", {"platforms": {}}, "platforms"),
+        (
+            "golive",
+            {"platforms": {"android": {"result": "released", "raw_state": None}}},
+            "android",
+        ),
+        ("golive", {"platforms": {"web": {"result": "requested", "raw_state": None}}}, "web"),
+        ("golive", {"finished_at": None}, "finished_at"),
     ]
     fails = 0
     for kind, doc in good.items():
