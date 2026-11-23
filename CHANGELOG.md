@@ -39,6 +39,20 @@ of a key bumps that number and is listed here.
   `release_status.sh` and `release_golive.sh`, whose `--selftest` locks the exit codes: a plan
   that read the stores exits 0 whatever they said, and a release for a build that is not approved
   exits 2, never 75.
+- **A job can say that a person has to act: `::rcm::action::<code>::<note>`.** `code` is
+  `[a-z0-9_-]{1,32}`, `note` up to 200 characters with control, bidirectional and zero-width
+  characters removed — and never personal details, since it is readable without a token. The
+  last one is the job's `action {code, note, at}` on `GET /jobs/<id>`, the `rcm wait` / `rcm run`
+  JSON and the queue and recent rows of `/api/status` (added keys; `schema_version` stays 1), and
+  stays after the job ends. A running job with an action has the new reason `needs_action`, first
+  among the actionable reasons. `rcm wait` prints `#N needs action · <code> · <note>` on stderr;
+  **`rcm wait --return-on-action`** returns with **exit 4** as soon as the job has an action, while
+  the job keeps running (4 never appears without the flag, nor for a job being cancelled). Hooks
+  get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- **`rcm check` warns when notification hooks failed** (`warn  notify  N hook deliveries
+  failed…`). The count is the server's in-memory `notify_failures`, so a restart sets it back to 0.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
 
 - **A preset can run its script again later: `[presets.retry]`.** With `on_exit = 75`,
   `interval_seconds = 600` and `max_attempts = 12` (the defaults), an attempt that exits 75 ends

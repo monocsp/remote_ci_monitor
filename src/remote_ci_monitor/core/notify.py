@@ -13,6 +13,7 @@ from typing import Any
 
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import NOTIFY_DEFAULT_STATES
+from remote_ci_monitor.core.progress import clean_line
 
 ENV_TEXT_LIMIT = 4096
 #: 훅에 넘기는 실패 이름의 최대 개수(M5o 결정 119). 전체는 `GET /jobs/<id>` 의 `failures[]` 에 있다.
@@ -62,22 +63,12 @@ def sanitize_text(value: Any, limit: int = ENV_TEXT_LIMIT) -> str:
 
 
 def failure_lines(names: Iterable[str]) -> list[str]:
-    """실패 이름 → 훅에 줄 줄 목록. 한 줄 이름이라 개행까지 지우고(`progress.clean_name` 과 같은
-    규칙에 bidi · 보이지 않는 문자를 더한다), 빈 것은 빼고, 앞에서부터 `MAX_NOTIFY_FAILURES` 개."""
+    """실패 이름 → 훅에 줄 줄 목록. 한 줄 이름이라 개행까지 지우고(`progress.clean_line` —
+    `clean_name` 의 규칙에 bidi · 보이지 않는 문자를 더한 것으로, 「사람이 할 일」 note 와 같은
+    함수다), 빈 것은 빼고, 앞에서부터 `MAX_NOTIFY_FAILURES` 개."""
     out: list[str] = []
     for name in names:
-        line = "".join(
-            ch
-            for ch in str(name)
-            if ord(ch) >= 0x20
-            and not 0x7F <= ord(ch) <= 0x9F  # C1 — NEL 은 `splitlines()` 가 줄로 나눈다
-            and ord(ch) != 0x061C
-            and not 0xD800 <= ord(ch) <= 0xDFFF
-            and not 0x200B <= ord(ch) <= 0x200F
-            and not 0x2028 <= ord(ch) <= 0x202E  # 줄 · 문단 구분자와 bidi
-            and not 0x2060 <= ord(ch) <= 0x2069
-            and ord(ch) != 0xFEFF
-        ).strip()
+        line = clean_line(str(name))
         if line:
             out.append(line)
         if len(out) >= MAX_NOTIFY_FAILURES:
@@ -154,6 +145,7 @@ def notify_env(
     exit_code = job_row.get("exit_code")
     seconds = job_row.get("job_seconds")
     source = job_row.get("source") if isinstance(job_row.get("source"), dict) else {}
+    action = job_row.get("action") if isinstance(job_row.get("action"), dict) else {}
     return {
         "RCM_JOB_ID": str(job_row.get("id") or ""),
         "RCM_STATE": sanitize_text(job_row.get("state")),
@@ -184,4 +176,7 @@ def notify_env(
         "RCM_FAILURE_COUNT": failure_count(failures, failures_truncated),
         # 보관함(M5p 결정 144): keep 인 잡의 링크. 키는 늘 있고 keep 이 아니면 빈 값이다
         "RCM_SHELF_URL": sanitize_text(shelf_url),
+        # 「사람이 할 일」 표식(M5s 결정 213): 잡이 찍은 마지막 것. 없으면 둘 다 빈 값이다
+        "RCM_ACTION_CODE": sanitize_text(action.get("code")),
+        "RCM_ACTION_NOTE": sanitize_text(action.get("note")),
     }

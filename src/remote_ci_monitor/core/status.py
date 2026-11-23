@@ -17,6 +17,7 @@ from remote_ci_monitor.core import shelf as _shelf
 from remote_ci_monitor.core.hostparse import stale as _stale
 from remote_ci_monitor.core.model import (
     REASON_BLOCKED_BY_GROUP,
+    Action,
     Estimate,
     HostSample,
     Job,
@@ -181,6 +182,13 @@ def step_timeline_json(p: Progress | None) -> dict[str, Any]:
     }
 
 
+def action_json(a: Action | None) -> dict[str, Any] | None:
+    """「사람이 할 일」 표식 `{code, note, at}` 또는 null(M5s 결정 213). 마지막 표식 하나다."""
+    if a is None:
+        return None
+    return {"code": a.code, "note": a.note, "at": iso(a.at)}
+
+
 def _requester(job: Job) -> dict[str, str]:
     return {"name": job.requester.name, "label": job.requester.label}
 
@@ -282,6 +290,8 @@ def queue_row_json(
         # 키 추가만 — schema_version 그대로
         "keep": job.keep,
         "shelf": None,
+        # M5s — 잡이 찍은 마지막 「사람이 할 일」 표식(`::rcm::action::`). 키 추가만
+        "action": action_json(row.action),
         # M5s — 예약에서 온 잡이면 그 시각과 시작 마감. 즉시 실행이면 둘 다 null. 키 추가만
         "not_before": iso(job.not_before),
         "start_deadline": iso(job.start_deadline),
@@ -301,7 +311,10 @@ def placement_note_json(n: Any) -> dict[str, Any]:
     }
 
 
-def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
+def recent_json(
+    job: Job, *, base_url: str | None = None, action: Action | None = None
+) -> dict[str, Any]:
+    """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다."""
     started = job.started_at
     finished = job.finished_at
     job_seconds = (finished - started).total_seconds() if started and finished else None
@@ -344,6 +357,8 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         # M5p — 제출 때 얼린 keep 과 보관 상태(서버가 채운다). 키 추가만
         "keep": job.keep,
         "shelf": None,
+        # M5s — 마지막 「사람이 할 일」 표식. 잡이 끝나도 남는다(이벤트로 저장). 키 추가만
+        "action": action_json(action),
         # M5s — 예약에서 온 잡이면 그 시각과 시작 마감(`expired` 는 언제까지였나). 키 추가만
         "not_before": iso(job.not_before),
         "start_deadline": iso(job.start_deadline),

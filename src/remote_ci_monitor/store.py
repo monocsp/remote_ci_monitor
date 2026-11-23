@@ -64,6 +64,7 @@ from remote_ci_monitor.core.model import (
     TOKEN_KINDS,
     UPLOADING,
     WAITING_STATES,
+    Action,
     CancelInfo,
     Job,
     JobLink,
@@ -76,7 +77,7 @@ from remote_ci_monitor.core.model import (
     Transition,
 )
 from remote_ci_monitor.core.outcome import dump_args, load_args
-from remote_ci_monitor.core.progress import Marker
+from remote_ci_monitor.core.progress import KIND_ACTION, Marker, action_of
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, superseded_by
 
@@ -3916,6 +3917,30 @@ class Store:
         ):
             p = json.loads(e["payload"])
             out[e["job_id"]].append(Marker(at=_dt(e["at"]), kind=p["kind"], value=p["value"]))
+        return out
+
+    def actions_for(self, job_ids: Iterable[int]) -> dict[int, Action]:
+        """잡마다 마지막 「사람이 할 일」 표식(M5s). 표식이 없는 잡은 결과에 없다.
+
+        표식은 마커 이벤트라 잡이 끝나도 남는다 — 끝난 잡의 행(`/api/status` 의 최근 행 ·
+        `GET /jobs/{id}` · 알림)이 이 길로 읽는다. 마커 전부를 읽지 않으려고 payload 머리로
+        거른다. 두 쓰기 길(`_event` · `add_markers`)이 같은 `json.dumps(…, separators)` 를 쓴다.
+        """
+        ids = tuple(job_ids)
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        head = json.dumps({"kind": KIND_ACTION}, separators=(",", ":"))[:-1] + ",%"
+        out: dict[int, Action] = {}
+        for e in self._conn().execute(
+            "SELECT job_id, at, payload FROM events "
+            f"WHERE kind=? AND job_id IN ({marks}) AND payload LIKE ? ORDER BY id",
+            (EVENT_MARKER, *ids, head),
+        ):
+            p = json.loads(e["payload"])
+            found = action_of(Marker(at=_dt(e["at"]), kind=p["kind"], value=p["value"]))
+            if found is not None:
+                out[e["job_id"]] = found
         return out
 
     # ── 토큰 ────────────────────────────────────────────────────────────────

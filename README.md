@@ -242,11 +242,19 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
+::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
 `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
 parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
 it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
+
+`::rcm::action::<code>::<note>` says the job cannot go on without a person — a sign-in expired,
+say. `code` is `[a-z0-9_-]{1,32}`, `note` at most 200 characters and never personal details. The
+last one becomes the job's `action` and the running row's reason `needs_action`; `rcm wait`
+prints it on stderr, `rcm wait --return-on-action` returns with exit 4 while the job keeps running,
+and hooks get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. Details in
+[Configuration](docs/configuration.md#when-a-person-has-to-act).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
@@ -368,6 +376,7 @@ with GitHub Actions as an optional fallback. How it works and what the owner set
 | 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise), or a preset that [retries](docs/configuration.md#trying-again-later-presetsretry) still said "not yet" on its last attempt (`exhausted`) |
 | 2 | cancelled, timed out, or a schedule that never started (`expired`) |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
+| 4 | only with `--return-on-action`: the job asked a person to act (`::rcm::action::`) and **keeps running**. Resume with `rcm wait --job N`. |
 
 A `retried` attempt is not an end: `rcm wait` follows its `retried_as` to the next attempt and
 exits with the last one's code ([trying again later](docs/configuration.md#trying-again-later-presetsretry)).

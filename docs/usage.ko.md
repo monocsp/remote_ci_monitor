@@ -168,6 +168,14 @@ chmod 600 ~/.config/rcm/client.toml
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
 
+**사람이 손대야 할 때.** 로그인이 풀린 것처럼 스크립트 혼자 더 나아갈 수 없으면 스크립트가
+`::rcm::action::<code>::<note>` 를 찍는다. 그러면 `rcm wait` 는 stderr 에
+`#412 needs action · login · Sign in on the build machine` 을 찍고 작업 행의 이유는
+`needs action` 이 된다. `rcm wait --job N --return-on-action` 은 그 순간 `action` 이 든 JSON 을
+찍고 종료 코드 4 로 돌아온다. 작업은 계속 돈다. 그래서 결과를 기다리던 세션이 차례를 돌려받아
+사람에게 물을 수 있다. 사람이 손을 쓴 뒤에는 플래그 **없이** 다시 기다린다. 표식은 작업에 그대로
+남아 있어서 플래그를 주면 곧바로 또 돌아오기 때문이다([자세히](configuration.md#when-a-person-has-to-act)).
+
 `rcm cancel N` 은 제출할 때 함께 받은 cancel token 을 보낸다 — `rcm run` 이
 `~/.local/state/rcm/submissions.json`(`$XDG_STATE_HOME` 이 있으면 그 아래 `rcm/submissions.json`,
 권한 0600)에 남겨 둔 것이다. 그래서 제출한 세션은 취소할 수 있고, 다른 상태 디렉터리의
@@ -218,6 +226,8 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    못 닿았거나 — 이고 절대 실패로 보고되지 않는다. CI 가 3 을 빨강으로 치면 엉뚱한 이유로
    빨개진다. 5 는 **전달** 실패고 `--fetch-artifacts` 에서만 나온다 — 작업 자체의 결과는
    `wait_exit_code` 에 그대로 있고, 못 온 것은 파일이다([파일을 돌려받기](#8-파일을-돌려받기)).
+   4 는 `rcm wait --return-on-action` 에서만 나온다. 작업이 사람에게 할 일을 알렸고 아직 돌고
+   있다는 뜻이다([기다리지 않기](#5-기다리지-않기)).
 
 5. **시작조차 못 한 작업은 그렇다고 말한다.** 스크립트가 돌기 전에 끝나는 실패들이 있고, 요약이
    그중 어느 것인지 말한다. 워크스페이스를 못 만들었다(`snapshot_missing` ·
