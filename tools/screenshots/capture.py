@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -115,6 +116,34 @@ SELECTORS = [
     "[data-drawer-close]",
     ".mark",
     ".foot",
+    # M5s — 예약 절 · 알림 실패 배지 · Store 탭의 심사 상태 · 출시 예약
+    "[data-notify-failures]",
+    "[data-scheduled-section]",
+    "[data-scheduled-section] .pool-h",
+    "[data-scheduled]",
+    "[data-scheduled] .reason",
+    "[data-scheduled] .cancel",
+    "[data-scheduled] .chip",
+    "[data-scheduled] .when",
+    ".sum-stuck .v",
+    "#review-panel",
+    "#review-panel > summary",
+    "[data-store-check]",
+    "[data-store-check-platform]",
+    "[data-store-check-refresh]",
+    ".policy",
+    "[data-golive-sheet]",
+    "[data-golive-sheet] .s-h",
+    "[data-golive-plan]",
+    "[data-golive-platform]",
+    "[data-golive-when]",
+    "[data-golive-at]",
+    "[data-golive-n]",
+    "[data-golive-why]",
+    '[data-golive="go"]',
+    "[data-golive-live]",
+    ".golive-body label",
+    ".golive-go",
 ]
 
 RECT_JS = """
@@ -155,6 +184,19 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def rcm_env(extra: dict | None = None) -> dict:
+    """rcm 하위 프로세스의 환경 — 이 머신 사람의 rcm 파일을 읽지도 쓰지도 않게 HOME 을 작업
+    디렉터리 안으로 돌린다(`client.toml` · `submissions.json` · `client-version` · 발견한 서버).
+    서버를 찾는 길도 막는다: 클라이언트는 늘 `RCM_SERVER` 를 받는다. Chrome 은 이 환경을 쓰지
+    않는다 — macOS 의 headless Chrome 은 다른 HOME 에서 http 페이지를 열지 못한다."""
+    home = WORK / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    e = {k: v for k, v in os.environ.items() if not k.startswith(("XDG_", "RCM_"))}
+    e.update({"HOME": str(home), "RCM_SERVER": "http://127.0.0.1:9"})
+    e.update(extra or {})
+    return e
+
+
 def rcm(
     *args: str,
     env: dict | None = None,
@@ -162,7 +204,7 @@ def rcm(
     check: bool = True,
     timeout: int = 180,
 ) -> subprocess.CompletedProcess:
-    e = {**os.environ, **(env or {})}
+    e = rcm_env(env)
     p = subprocess.run(
         [*RCM_ARGV, *args], env=e, cwd=cwd, capture_output=True, text=True, timeout=timeout
     )
@@ -333,6 +375,7 @@ default = "normal"
     log = open(SRV / "server.log", "ab")
     srv = subprocess.Popen(
         [*RCM_ARGV, "serve", "--config", str(cfg)],
+        env=rcm_env(),
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -352,7 +395,7 @@ default = "normal"
     wlog = open(SRV / "worker.log", "ab")
     wk = subprocess.Popen(
         [*RCM_ARGV, *wargs],
-        env={**os.environ, **wenv},
+        env=rcm_env(wenv),
         stdout=wlog,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -406,11 +449,11 @@ def history() -> None:
 
 
 class Shooter:
-    def __init__(self, st: dict, window: str = "1280,900"):
+    def __init__(self, st: dict, window: str = "1280,900", profile: str = "chrome-profile"):
         from test_web_browser import Chrome
 
         self.st = st
-        self.chrome = Chrome(WORK / "chrome-profile", window=window)
+        self.chrome = Chrome(WORK / profile, window=window)
         # 언어를 못 박는다. M5d-1 이후 화면 기본은 한국어지만, `docs/images/ui/` 의 이미지는 두
         # 사용 설명서가 **함께** 쓰고 `build.py` 의 글자 선택자도 영어다. `RCM_SHOT_LANG=ko` 로
         # 한국어 판을 찍을 수는 있다(그때는 build.py 의 text= 선택자를 같이 바꿔야 한다).
@@ -622,24 +665,322 @@ def down() -> None:
         sh.close()
 
 
+#: Store 탭 사진의 덧칠 — 시험 스텁(`tests/test_web_browser.py`) 위에 얹는다. 문서에는 조용한
+#: 한 장면이 필요하다: iOS 승인 · Android 심사 중, 도는 조회 없음, 지난 출시 결과 없음, 만든
+#: 사람은 캡처의 가짜 사람(alice). 스텁의 다른 값(앱 이름 `app`, `example.invalid`, 버전 1.0.x)은
+#: 원래 가짜다.
+STORE_SHOT_JS = r"""
+(() => {
+  const api = window.rcmStoreApi;
+  if (!api) return;
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const inReview = { state: "in_review", raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW" };
+  if (window.rcmRelease && window.rcmRelease.golive) window.rcmRelease.golive.result = null;
+  ((window.rcmVersions && window.rcmVersions.drafts) || []).forEach((d) => {
+    d.created_by = "alice";
+  });
+  const release = api.release;
+  if (release) {
+    api.release = (name) => release(name).then((r) => {
+      const body = JSON.parse(JSON.stringify(r.body));
+      if (body.status && body.status.doc) {
+        body.status.measured_at = body.status.doc.checked_at = ago(120);
+        Object.assign(body.status.doc.android, inReview);
+      }
+      body.jobs = (body.jobs || []).filter((j) => j.role !== "status");
+      return Object.assign({}, r, { body });
+    });
+  }
+})();
+"""
+
+
+def store() -> None:
+    """Store 탭 두 장면 — 검토 패널의 스토어 심사 상태와 버전 페이지의 「출시 예약」.
+
+    Store 탭은 프로젝트의 릴리스 스크립트 · 비밀 · 스토어가 있어야 차오른다. 문서용 버릴 서버에는
+    그게 없으므로, 화면은 진짜 `app.js` 로 그리되 `/api/repos/…` 응답은 브라우저 시험의 스텁
+    (`window.rcmStoreApi`)으로 채운다. 큐 · 머리 · 토큰 확인은 진짜 서버다.
+    """
+    from test_web_browser import (
+        GOLIVE_STUB_JS,
+        RELEASE_STUB_JS,
+        SHEET_STUB_JS,
+        STORE_CHECK_STUB_JS,
+    )
+
+    st = load()
+    token = json.dumps(st["tokens"]["ops"])  # 출시 예약은 admin 만 연다
+    nav = "document.querySelector('#view-nav a[data-nav=\"store\"]') !== null"
+
+    # 1) 상태 화면 — 검토 패널의 두 스토어 심사 상태 · 「새로 조회」 · 원칙 문장
+    sh = Shooter(st, profile="chrome-store")  # admin 토큰을 다른 장면에 남기지 않는다
+    try:
+        for stub in (RELEASE_STUB_JS, STORE_CHECK_STUB_JS, STORE_SHOT_JS):
+            sh.chrome.call("Page.addScriptToEvaluateOnNewDocument", {"source": stub})
+        sh.open(nav)
+        sh.js(f"localStorage.setItem('rcm.token', {token})")
+        # 해시만 바뀌면 같은 문서라 Chrome.open 이 새 load 를 기다리다 만다 — 쿼리를 하나 더한다
+        sh.url += "&view=status#/store/app/status"
+        sh.open(
+            "document.querySelector('#review-panel [data-store-check-refresh]') !== null"
+            " && document.querySelector('#tok-btn').textContent.indexOf('ops') >= 0"
+        )
+        sh.js("document.getElementById('review-panel').open = true")
+        sh.chrome.call(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 1280, "height": 2600, "deviceScaleFactor": 1, "mobile": False},
+        )
+        sh.js("window.scrollTo(0,0)")
+        time.sleep(0.6)
+        sh.shot("store-status")
+        sh.chrome.call("Emulation.clearDeviceMetricsOverride")
+    finally:
+        sh.close()
+
+    # 2) 버전 페이지 — 「출시 예약」을 열어 plan 을 읽고, iOS · 시각 · 친 빌드 번호까지 채운 모습
+    sh = Shooter(st, profile="chrome-store")
+    try:
+        # 시각 칸(`datetime-local`)은 브라우저 로캘로 그려진다 — 영어 화면에 맞춘다
+        sh.chrome.call("Emulation.setLocaleOverride", {"locale": "en-US"})
+        for stub in (RELEASE_STUB_JS, SHEET_STUB_JS, GOLIVE_STUB_JS, STORE_SHOT_JS):
+            sh.chrome.call("Page.addScriptToEvaluateOnNewDocument", {"source": stub})
+        sh.open(nav)
+        sh.js(f"localStorage.setItem('rcm.token', {token})")
+        sh.url += "&view=version#/store/app/v/7"
+        sh.open(
+            "document.querySelector('[data-golive-sheet] [data-golive=\"open\"]') !== null"
+            " && !document.querySelector('[data-golive-sheet] [data-golive=\"open\"]').disabled"
+        )
+        sh.js("document.querySelector('[data-golive-sheet] [data-golive=\"open\"]').click()")
+        wait_for(
+            lambda: sh.js("document.querySelector('[data-golive-plan=\"ok\"]') !== null"),
+            timeout=10,
+            what="the go-live plan",
+        )
+        # 시각을 정한다 — 오늘 15:00(지난 시각이면 내일). 값은 화면의 칸에만 산다.
+        sh.js("document.getElementById('golive-when-at').click()")
+        sh.js(
+            "(() => { const d = new Date(); d.setHours(15, 0, 0, 0);"
+            " if (d < new Date()) d.setDate(d.getDate() + 1);"
+            " const z = (n) => String(n).padStart(2, '0');"
+            " const i = document.getElementById('golive-at');"
+            " i.value = d.getFullYear() + '-' + z(d.getMonth() + 1) + '-' + z(d.getDate())"
+            " + 'T15:00';"
+            " i.dispatchEvent(new Event('input', { bubbles: true }));"
+            " i.dispatchEvent(new Event('change', { bubbles: true })); return true; })()"
+        )
+        sh.js(
+            "(() => { const i = document.getElementById('golive-n'); i.value = '185';"
+            " i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+        )
+        wait_for(
+            lambda: sh.js("document.querySelector('[data-golive=\"go\"]').disabled === false"),
+            timeout=5,
+            what="the go-live button enabled",
+        )
+        # 페이지 끝의 바텀시트가 펼쳐져 있으면 접는다 — 펼친 시트는 화면 아래를 덮는다
+        sh.js(
+            "(() => { const t = document.querySelector('[data-sheet-toggle]');"
+            " if (t && t.getAttribute('aria-expanded') === 'true') t.click(); return true; })()"
+        )
+        wait_for(
+            lambda: sh.js(
+                "!document.querySelector('[data-sheet-toggle]')"
+                " || document.querySelector('[data-sheet-toggle]')"
+                ".getAttribute('aria-expanded') === 'false'"
+            ),
+            timeout=5,
+            what="the bottom sheet collapsed",
+        )
+        # 영역과 그 아래 원칙 문장이 한 화면에 들게 키를 키운다 — 잘라 내는 건 build.py 다
+        sh.chrome.call(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 1280, "height": 2400, "deviceScaleFactor": 1, "mobile": False},
+        )
+        sh.js("window.scrollTo(0,0)")
+        time.sleep(0.6)
+        sh.shot("store-golive")
+        sh.chrome.call("Emulation.clearDeviceMetricsOverride")
+    finally:
+        sh.close()
+
+
+#: 사람이 할 일을 알리고 「아직」(75)으로 끝나는 시연 스크립트 — 예약 단계가 쓴다
+LOGIN_DEMO = """#!/bin/sh
+# 출시 시연용 — 로그인이 풀린 척: 사람이 할 일을 알리고 75(아직)로 끝난다. 반복이 다시 돌린다.
+echo "::rcm::steps::2"
+echo "::rcm::step::read store state"; sleep 1; echo "approved build 185"; echo "::rcm::step-end::ok"
+echo "::rcm::step::publish"; sleep 1
+echo "::rcm::action::login::Sign in on the build machine"
+echo "::rcm::summary::not signed in - trying again later"
+exit 75
+"""
+
+
+def _start_server(st: dict, cfg: Path) -> int:
+    log = open(SRV / "server.log", "ab")
+    srv = subprocess.Popen(
+        [*RCM_ARGV, "serve", "--config", str(cfg)],
+        env=rcm_env(),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+    def healthy():
+        with urllib.request.urlopen(f"{st['url']}/api/health", timeout=2) as r:
+            return r.status == 200
+
+    wait_for(healthy, timeout=20, what="server health")
+    return srv.pid
+
+
+def _stop(pid: int | None) -> None:
+    if not pid:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    os.kill(pid, signal.SIGKILL)
+
+
+def schedule() -> None:
+    """예약 · 반복 · 사람이 할 일 · 알림 실패(M5s) — 웹 큐 한 장과 `rcm top`.
+
+    원래 설정에는 git 저장소도 반복 프리셋도 없다(그래야 앞 단계의 `rcm check` 사진이 그대로다).
+    여기서 설정을 늘려 서버를 다시 띄운다: 맨 저장소 하나, 75 를 반복하는 `golive`, 그리고
+    `retried` 에 울리다 실패하는 알림 하나. 내린 원격 워커(`down`)도 다시 띄운다.
+    """
+    st = load()
+    cfg = Path(st["cfg"])
+    bare = SRV / "demo-app.git"
+    if not bare.exists():
+        git("clone", "-q", "--bare", st["proj"]["alice"], str(bare), cwd=SRV)
+    script = SRV / "scripts" / "login-demo.sh"
+    script.write_text(LOGIN_DEMO)
+    text = cfg.read_text()
+    if "[[repos]]" not in text:
+        text += f"""
+[[repos]]
+name = "demo-app"
+url = "{bare}"
+
+[[presets]]
+name = "golive"
+description = "goes live once a person has signed in; exits 75 until then"
+argv = ["/bin/sh", "{script}"]
+source_modes = ["git_ref"]
+repo = "demo-app"
+expected_seconds = 5
+timeout_seconds = 120
+[presets.retry]
+interval_seconds = 600
+max_attempts = 12
+
+[[notify]]
+name = "chat"
+on = ["retried"]
+presets = ["golive"]
+argv = ["/bin/sh", "-c", "exit 1"]
+"""
+        cfg.write_text(text)
+    # `down` 이 죽인 워커는 이미 없다 — 단계를 따로 돌렸을 때를 위해 남은 것도 내린다
+    _stop(st.get("worker_pid"))
+    _stop(st.get("server_pid"))
+    st["server_pid"] = _start_server(st, cfg)
+    save(st)
+    wenv = {"RCM_WORKER_TOKEN": st["tokens"]["mac2-worker"]}
+    wargs = ["worker", "--server", st["url"], "--pool", "mac2", "--lanes", "1"]
+    wargs += ["--data", str(SRV / "w")]
+    wlog = open(SRV / "worker.log", "ab")
+    wk = subprocess.Popen(
+        [*RCM_ARGV, *wargs],
+        env=rcm_env(wenv),
+        stdout=wlog,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    st["worker_pid"] = wk.pid
+    save(st)
+    wait_for(
+        lambda: (
+            any(w.get("state") != "down" for w in remote_workers(status(st)))
+            or [w.get("state") for w in remote_workers(status(st))]
+        ),
+        timeout=30,
+        what="worker back",
+    )
+    pa, pb = Path(st["proj"]["alice"]), Path(st["proj"]["bob"])
+    alice, bob = client_env(st, "alice"), client_env(st, "bob")
+    # 출시 사슬: 첫 시도가 사람이 할 일을 알리고 75 → 10분 뒤의 두 번째 시도가 예약으로 기다린다
+    g = job_json(
+        rcm(
+            *("run", "golive", "--source", "git_ref", "--ref", "main", "--no-wait"),
+            *("--by", "alice@laptop"),
+            env=alice,
+            cwd=pa,
+        )
+    )["job_id"]
+
+    def chained():
+        sc = [r for p in status(st).get("pools") or [] for r in p.get("scheduled") or []]
+        nxt = [r for r in sc if r.get("chain_id") == g]
+        return True if nxt and nxt[0].get("reason") == "needs_action" else sc
+
+    wait_for(chained, timeout=60, what="the second golive attempt scheduled with an action")
+    # 사람이 건 예약 둘 — alice 의 것(취소 버튼이 보인다)과 bob 의 것
+    rcm("run", "demo", "--in", "2h", "--no-wait", "--by", "alice@laptop", env=alice, cwd=pa)
+    rcm(
+        *("run", "demo", "-f", "speed=fast", "--in", "5h", "--no-wait"),
+        *("--by", "bob@desk"),
+        env=bob,
+        cwd=pb,
+    )
+    # 지금 도는 잡 하나 — 큐가 비어 보이지 않게
+    a = job_json(rcm("run", "demo", "--no-wait", "--by", "bob@desk", env=bob, cwd=pb))["job_id"]
+
+    def running():
+        row = queue_rows(status(st)).get(a, {})
+        ok = row.get("state") == "running" and (row.get("progress") or {}).get("steps_done", 0) >= 1
+        return True if ok else row.get("state")
+
+    wait_for(running, timeout=40, what="the demo job running with a step done")
+    wait_for(
+        lambda: (status(st).get("server") or {}).get("notify_failures", 0) >= 1,
+        timeout=20,
+        what="the failed notify hook counted",
+    )
+    st.setdefault("jobs", {}).update({"G": g, "S": a})
+    save(st)
+    sh = Shooter(st, window="1280,1000")
+    try:
+        sh.open(rows_ready_js([a]))
+        sh.js(f"localStorage.setItem('rcm.token', {json.dumps(st['tokens']['alice'])})")
+        sh.open(
+            rows_ready_js([a]) + " && document.querySelector('[data-scheduled-section]') !== null"
+            " && !document.querySelector('[data-notify-failures]').hidden"
+            " && document.querySelector('#tok-btn').textContent.indexOf('alice')>=0"
+        )
+        sh.shot("schedule")
+    finally:
+        sh.close()
+    secrets = list(st["tokens"].values())
+    env, _, _, shot = _session(st, secrets)
+    shot("x-top", _block("rcm top", rcm("top", env=env)))
+
+
 def teardown() -> None:
     st = load()
     for key in ("worker_pid", "server_pid"):
-        pid = st.get(key)
-        if not pid:
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-        for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.2)
-        else:
-            os.kill(pid, signal.SIGKILL)
+        _stop(st.get(key))
     print("teardown done")
 
 
@@ -651,6 +992,11 @@ def teardown() -> None:
 #: 상수로 적으면 비밀 검사기(gitleaks)가 오탐하므로 해시에서 만든다.
 FAKE_TOKEN = base64.urlsafe_b64encode(hashlib.sha256(b"rcm docs placeholder").digest()).decode()
 FAKE_TOKEN = FAKE_TOKEN.rstrip("=")
+#: 제출 JSON 의 `cancel_token` 자리표시자 — 버릴 서버의 것이라도 토큰 모양의 값을 사진에 남기지
+#: 않는다. 줄바꿈이 그대로이게 진짜와 같은 길이(43자)다.
+FAKE_CANCEL = base64.urlsafe_b64encode(hashlib.sha256(b"rcm docs cancel").digest()).decode()
+FAKE_CANCEL = FAKE_CANCEL.rstrip("=")
+CANCEL_RE = re.compile(r'("cancel_token":\s*")[^"]*(")')
 #: 문서용 가짜 주소 — 표가 어긋나지 않게 진짜 주소와 **같은 길이**로 고른다.
 FAKE_IPS = {
     8: "10.0.0.5",
@@ -673,6 +1019,7 @@ def _tidy(text: str, st: dict, homes: list[Path], proj: Path, secrets: list[str]
     for secret in secrets:
         if secret:
             text = text.replace(secret, FAKE_TOKEN)
+    text = CANCEL_RE.sub(lambda m: m.group(1) + FAKE_CANCEL + m.group(2), text)
     subs = [(str(proj), "~/src/demo-app")]
     subs += [(str(h), "~") for h in homes]
     subs += [(str(SRV), "~/.config/rcm"), (f":{st['port']}", ":8787")]
@@ -690,34 +1037,46 @@ def _block(cmd: str, p: subprocess.CompletedProcess, *, rc: bool = False) -> str
     return out
 
 
-def terminal() -> None:
-    """가이드에 쓰는 터미널 출력. 토큰만 있는 새 HOME 에서 돌려 `raw/x-*.txt` 로 남긴다.
+def _advertising(st: dict) -> bool:
+    return "advertise = true" in Path(st["cfg"]).read_text()
 
-    `RCM_SHOT_ADVERTISE=1` 이면 광고하는 서버를 따로 띄워 `rcm discover` 까지 진짜로 찍는다 —
-    같은 네트워크에 다른 rcm 서버가 없을 때만 쓸 것(있으면 여러 줄이 나온다).
-    """
-    st = load()
+
+def _session(st: dict, secrets: list[str]):
+    """토큰만 있는 세션 HOME(alice) 과, 출력을 다듬어 `raw/<name>.txt` 로 쓰는 함수."""
     home = SRV / "home-session"
     (home / ".config" / "rcm").mkdir(parents=True, exist_ok=True)
     proj = Path(st["proj"]["alice"])
-    token = st["tokens"]["alice"]
     ct = home / ".config" / "rcm" / "client.toml"
-    advertise = "advertise = true" in Path(st["cfg"]).read_text()
     ct.write_text(
-        ("" if advertise else f'server = "{st["url"]}"\n')
-        + f'token = "{token}"\nlabel = "alice@laptop"\n'
+        ("" if _advertising(st) else f'server = "{st["url"]}"\n')
+        + f'token = "{st["tokens"]["alice"]}"\nlabel = "alice@laptop"\n'
     )
     ct.chmod(0o600)
     env = {"HOME": str(home), "RCM_SERVER": "", "RCM_TOKEN": "", "RCM_CONFIG": ""}
-
     setup_home = SRV / "home-setup"
     (setup_home / ".config" / "rcm").mkdir(parents=True, exist_ok=True)
     homes = [setup_home, home]
-    secrets = list(st["tokens"].values())
 
     def shot(name: str, text: str) -> None:
         (RAW / f"{name}.txt").write_text(_tidy(text, st, homes, proj, secrets))
         print("text", name)
+
+    return env, setup_home, proj, shot
+
+
+def terminal() -> None:
+    """가이드에 쓰는 터미널 출력. 토큰만 있는 새 HOME 에서 돌려 `raw/x-*.txt` 로 남긴다.
+
+    `RCM_SHOT_ADVERTISE=1` 이면 광고하는 서버를 따로 띄워 `rcm discover` 까지 진짜로 찍는다 —
+    같은 네트워크에 다른 rcm 서버가 없을 때만 쓸 것(있으면 여러 줄이 나온다). 광고하지 않으면
+    `rcm discover` 는 이 버릴 서버가 아니라 **이 네트워크의 다른 서버**만 찾는다 — 그 출력은
+    문서에 쓸 수 없으므로 찍지 않는다(`build.py` 는 그때 `cli-discover.png` 를 건너뛴다).
+    `rcm top` 은 예약 줄까지 보이게 `schedule` 단계가 찍는다.
+    """
+    st = load()
+    secrets = list(st["tokens"].values())
+    env, setup_home, proj, shot = _session(st, secrets)
+    (RAW / "x-discover.txt").unlink(missing_ok=True)
 
     # 1) 빌드 머신의 첫 명령 — 설정 파일 · 토큰 발급 · 목록
     senv = {"HOME": str(setup_home), "RCM_CONFIG": ""}
@@ -732,7 +1091,8 @@ def terminal() -> None:
 
     # 2) 세션 머신 — 서버를 찾고 점검한다
     # 발견은 client.toml 과 무관하다 — 같은 네트워크에 서버가 하나면 한 줄이 나온다.
-    shot("x-discover", _block("rcm discover", rcm("discover", env=env, check=False)))
+    if _advertising(st):
+        shot("x-discover", _block("rcm discover", rcm("discover", env=env, check=False)))
     shot("x-check", _block("rcm check", rcm("check", env=env, check=False)))
     shot("x-presets", _block("rcm presets", rcm("presets", env=env)))
 
@@ -758,11 +1118,7 @@ def terminal() -> None:
     p = rcm("run", "demo", "--no-wait", "-f", "speed=fast", env=env, cwd=proj)
     text = _block("rcm run demo --no-wait -f speed=fast", p)
     p = rcm("run", "demo", "--no-wait", "-f", "speed=fast", env=env, cwd=proj)
-    shot(
-        "x-join", text + _block("rcm run demo --no-wait -f speed=fast   # 다른 세션, 같은 트리", p)
-    )
-    shot("x-top", _block("rcm top", rcm("top", env=env)))
-    wait_for(lambda: not queue_rows(status(st)) or True, timeout=1, what="noop")
+    shot("x-join", text + _block("rcm run demo --no-wait -f speed=fast   # another session", p))
 
 
 STAGES = {
@@ -771,7 +1127,9 @@ STAGES = {
     "round1": round1,
     "round2": round2,
     "terminal": terminal,
+    "store": store,
     "down": down,
+    "schedule": schedule,
     "teardown": teardown,
 }
 

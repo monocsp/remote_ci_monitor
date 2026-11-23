@@ -331,6 +331,10 @@ approval by itself: a release runs only when a person asks for it with the versi
 number and a time — the version page's «Schedule go-live», open only once that store says
 approved. An `unsafe_release_type` verdict raises a red banner that cannot be dismissed.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/store-golive.png" alt="The version page's Schedule go-live area: iOS approved and Android in review, the read-only plan, the platform, a time, the approved build number typed by hand, the Book go-live button, and the rule that nothing goes live on approval by itself" width="820">
+</p>
+
 Drafts neither pile up nor vanish under you. One nobody edited is discarded after
 `version_ttl_hours` (default 24) — through the store when the profile has a `version` preset,
 inside rcm when it does not — while one you *did* edit is marked expired and waits for a person.
