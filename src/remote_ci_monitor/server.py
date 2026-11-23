@@ -100,6 +100,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     TOKEN_WORKER,
     UPLOADING,
+    Action,
     HostSample,
     Job,
     JobLink,
@@ -130,6 +131,7 @@ from remote_ci_monitor.core.queue import (
 from remote_ci_monitor.core.reload import changed_keys, reload_summary
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
+    action_json,
     artifacts_json,
     iso,
     queue_row_json,
@@ -452,6 +454,8 @@ class _DbSnapshot:
     host_step_medians: dict[tuple[str, str], dict[str, StepMedian]] = field(default_factory=dict)
     step_medians_error: str | None = None
     step_medians_error_code: str | None = None
+    #: 최근 행의 마지막 「사람이 할 일」 표식(M5s) — 잡 id → Action. 표식 없는 잡은 없다
+    recent_actions: dict[int, Action] = field(default_factory=dict)
 
 
 def shown_pool(job: Job) -> str:
@@ -3134,8 +3138,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
+        recent_actions: dict[int, Action] = {}
         try:
             recent = self.store.list_recent(self.config.server.recent_count)
+            # 표식은 최근 행의 일부다 — 못 읽으면 최근 절 전체가 실패다(`action: null` 은
+            # 「표식이 없다」는 뜻이라 「못 읽었다」를 그렇게 뭉개지 않는다)
+            recent_actions = self.store.actions_for(j.id for j in recent)
         except Exception as e:  # noqa: BLE001
             recent, recent_error = None, _error_text(e)
             recent_error_code = _error_code(e)
@@ -3162,6 +3170,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             paused=paused,
             host_medians=self._host_medians or {},
             host_step_medians=host_step_medians,
+            recent_actions=recent_actions,
         )
 
     def _host_step_view(
@@ -3483,6 +3492,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                         tails[row.job.id] = t
         doc = status_json(model, log_tails=tails)
         self._inject_artifacts(doc, model)
+        for pool in doc.get("pools", []):
+            # 최근 행의 표식(M5s) — 순수 층은 마커를 모른다. 큐 행은 진행(마커)에서 이미 왔다
+            for row in pool.get("recent") or []:
+                row["action"] = action_json(snap.recent_actions.get(row.get("id")))
         return doc
 
     def _inject_artifacts(self, doc: dict[str, Any], model: StatusModel) -> None:
@@ -3536,9 +3549,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
-        doc = recent_json(job, base_url=self.base_url(host))
+        doc = recent_json(job, base_url=self.base_url(host), action=self._last_action(job.id))
         step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
+
+    def _last_action(self, job_id: int) -> Action | None:
+        """끝난 잡의 마지막 「사람이 할 일」 표식(M5s). 표식은 마커 이벤트라 잡이 끝나도 남는다."""
+        return self.store.actions_for((job_id,)).get(job_id)
 
     def _with_artifacts(
         self, doc: dict[str, Any], job: Job, host: str | None = None

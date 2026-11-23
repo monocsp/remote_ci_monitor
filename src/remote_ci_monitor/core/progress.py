@@ -8,6 +8,8 @@
     ::rcm::fail::<이름>        무엇이 실패했는지 이름으로 지목(선택, M5h)
     ::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]
                                현재 스텝 **안**의 세부 진행(선택, `docs/release-contract.md` §3)
+    ::rcm::action::<code>[::<note>]
+                               사람이 할 일(선택, M5s) — 로그인이 풀렸다처럼 사람이 손대야 하는 순간
 
 `progress` 는 스텝 안의 이야기다 — 새 `::rcm::step::` 이 오면 지워진다. 마지막 마커가 `sub`,
 단위별 마지막 상태가 `units[]`(처음 본 순서, MAX_PROGRESS_UNITS 까지)다. 스크립트는 **아는**
@@ -24,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +34,7 @@ from datetime import datetime
 from remote_ci_monitor.core.model import (
     PHASE_EXECUTING,
     WAITING_STATES,
+    Action,
     Job,
     Progress,
     ProgressUnit,
@@ -45,7 +49,16 @@ KIND_STEP_END = "step-end"
 KIND_SUMMARY = "summary"
 KIND_FAIL = "fail"
 KIND_PROGRESS = "progress"
-MARKER_KINDS = (KIND_STEPS, KIND_STEP, KIND_STEP_END, KIND_SUMMARY, KIND_FAIL, KIND_PROGRESS)
+KIND_ACTION = "action"
+MARKER_KINDS = (
+    KIND_STEPS,
+    KIND_STEP,
+    KIND_STEP_END,
+    KIND_SUMMARY,
+    KIND_FAIL,
+    KIND_PROGRESS,
+    KIND_ACTION,
+)
 MAX_STEP_NAME = 120
 MAX_SUMMARY = 200
 #: `::rcm::progress::` 의 state 어휘. 프로젝트 이름은 없다 — 청크·자식·락 어느 쪽에도 맞는 말만.
@@ -54,6 +67,11 @@ PROGRESS_STATES = ("run", "ok", "fail", "skip", "env", "review", "blocked", "wai
 MAX_PROGRESS_UNITS = 500
 #: 한 잡이 남길 수 있는 **서로 다른** 실패 이름 수. 11,000줄짜리 테스트 출력이 DB 를 채우면 안 된다.
 MAX_FAIL_NAMES = 100
+#: `::rcm::action::` 의 code 어휘(M5s 결정 213). 프로젝트 이름이 들어가지 않는 짧은 낱말 —
+#: 스킬이 이 값으로 갈래를 고른다(`login` 이면 A 길과 B 길 중 어느 쪽인지 묻는다).
+ACTION_CODE_RE = re.compile(r"[a-z0-9_-]{1,32}")
+#: 안내 문장의 상한(글자). 토큰 없이 읽히는 `/api/status` · 알림 env · 터미널로 흐른다.
+MAX_ACTION_NOTE = 200
 
 
 #: 이름에서 지우는 글자 중 C0 · DEL 밖의 것: C1 제어 문자(U+0080–U+009F — NEL 은 터미널과
@@ -137,6 +155,45 @@ def parse_progress_value(value: str) -> ProgressMark | None:
     return ProgressMark(done=done, total=total, unit=unit, state=state, note=note)
 
 
+def parse_action_value(value: str) -> tuple[str, str | None] | None:
+    """`<code>[::<note>]` 를 읽는다. code 가 어휘 밖이면 None(마커가 아니다).
+
+    note 는 `clean_name` 으로 제어문자 · 줄 구분자를 지우고 200자에서 자른다 — `\r` 하나로
+    앞 줄을 지우거나 ESC 로 색을 바꾸는 안내가 `rcm wait` 의 stderr 에 닿지 않게 한다. 첫 `::`
+    에서만 자르므로 note 안의 `::` 는 note 의 일부다. 비면 None.
+    """
+    code, sep, note = value.partition("::")
+    code = code.strip()
+    if not ACTION_CODE_RE.fullmatch(code):
+        return None
+    text = clean_name(note)[:MAX_ACTION_NOTE] if sep else ""
+    return code, (text or None)
+
+
+def action_value(code: str, note: str | None) -> str:
+    """저장 · 발행용 정규형. `parse_action_value` 가 그대로 되읽는다."""
+    return code if note is None else f"{code}::{note}"
+
+
+def action_of(marker: Marker) -> Action | None:
+    """`action` 마커 하나 → Action. 다른 종류거나 깨진 값이면 None."""
+    if marker.kind != KIND_ACTION:
+        return None
+    parsed = parse_action_value(marker.value)
+    if parsed is None:
+        return None
+    return Action(code=parsed[0], note=parsed[1], at=marker.at)
+
+
+def last_action(markers: Sequence[Marker]) -> Action | None:
+    """마커 목록의 마지막 「사람이 할 일」 표식. 없으면 None."""
+    for m in reversed(markers):
+        found = action_of(m)
+        if found is not None:
+            return found
+    return None
+
+
 def parse_marker(line: str) -> tuple[str, str] | None:
     """로그 한 줄이 마커면 (kind, value), 아니면 None. 줄 맨 앞이어야 한다."""
     if not line.startswith(MARKER_PREFIX):
@@ -166,6 +223,12 @@ def parse_marker(line: str) -> tuple[str, str] | None:
         if mark is None:
             return None
         value = mark.value
+    elif kind == KIND_ACTION:
+        # 정규형으로 저장한다(`progress` 와 같은 판단) — 되읽기는 늘 성공한다
+        parsed = parse_action_value(value)
+        if parsed is None:
+            return None
+        value = action_value(*parsed)
     else:
         value = value[:MAX_SUMMARY]
     return kind, value
@@ -206,6 +269,7 @@ def progress_from_markers(
     units: list[ProgressUnit] = []
     unit_pos: dict[str, int] = {}
     units_truncated = False
+    action: Action | None = None  # 마지막 표식 하나 — 스텝이 바뀌어도 지우지 않는다
     for m in markers:
         if m.kind == KIND_STEPS:
             try:
@@ -235,6 +299,8 @@ def progress_from_markers(
                 continue
             fail_seen.add(m.value)
             fail_names.append(m.value)
+        elif m.kind == KIND_ACTION:
+            action = action_of(m) or action
         elif m.kind == KIND_PROGRESS:
             mark = parse_progress_value(m.value)
             if mark is None:  # 저장소에 정규형으로만 들어가지만, 깨진 행이 진행을 막지는 않는다
@@ -328,6 +394,7 @@ def progress_from_markers(
         sub=sub,
         units=tuple(units),
         units_truncated=units_truncated,
+        action=action,
     )
 
 

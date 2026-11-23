@@ -154,6 +154,7 @@ def notify_env(
     exit_code = job_row.get("exit_code")
     seconds = job_row.get("job_seconds")
     source = job_row.get("source") if isinstance(job_row.get("source"), dict) else {}
+    action = job_row.get("action") if isinstance(job_row.get("action"), dict) else {}
     return {
         "RCM_JOB_ID": str(job_row.get("id") or ""),
         "RCM_STATE": sanitize_text(job_row.get("state")),
@@ -184,4 +185,7 @@ def notify_env(
         "RCM_FAILURE_COUNT": failure_count(failures, failures_truncated),
         # 보관함(M5p 결정 144): keep 인 잡의 링크. 키는 늘 있고 keep 이 아니면 빈 값이다
         "RCM_SHELF_URL": sanitize_text(shelf_url),
+        # 「사람이 할 일」 표식(M5s 결정 213): 잡이 찍은 마지막 것. 없으면 둘 다 빈 값이다
+        "RCM_ACTION_CODE": sanitize_text(action.get("code")),
+        "RCM_ACTION_NOTE": sanitize_text(action.get("note")),
     }

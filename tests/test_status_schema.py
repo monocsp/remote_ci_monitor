@@ -56,6 +56,8 @@ ROW_KEYS = {
     # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
     "keep",
     "shelf",
+    # M5s — 마지막 「사람이 할 일」 표식 `{code, note, at}` | null(키 추가만)
+    "action",
 }
 ESTIMATE_KEYS = {
     "confidence",
@@ -115,6 +117,8 @@ RECENT_KEYS = {
     # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
     "keep",
     "shelf",
+    # M5s — 마지막 「사람이 할 일」 표식 `{code, note, at}` | null(키 추가만)
+    "action",
 }
 POOL_KEYS = {
     "name",

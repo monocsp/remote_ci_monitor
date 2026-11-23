@@ -676,6 +676,12 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
         return (
             f"over by {fmt_duration(over)} · expected {fmt_duration(est.get('expected_seconds'))}"
         )
+    if reason == "needs_action":
+        # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이다
+        act = row.get("action") if isinstance(row.get("action"), dict) else {}
+        code, note = act.get("code"), act.get("note")
+        head = f"needs action · {code}" if code else "needs action"
+        return f"{head} · {note}" if note else head
     if reason == "stuck":
         return _stall_text(row, est)
     if reason == "quiet":

@@ -1064,10 +1064,13 @@ def wait_for_job(
     clock: Callable[[], float] = time.monotonic,
     use_sse: bool = True,
     on_info: Callable[[str], None] | None = None,
+    stop_when: Callable[[dict[str, Any]], int | None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
     """잡이 끝날 때까지 기다린다. SSE 우선, 안 되면 폴링(명세 0-F). 3 은 「모른다」.
 
     `on_info` 는 잡 JSON 이 아닌 상황 문구(서버 연결 실패 → 재접속 중)를 받는다.
+    `stop_when` 은 끝나지 않은 잡 문서마다 불린다. 종료 코드를 돌려주면 잡이 도는 채로 기다림을
+    끝낸다(`rcm wait --return-on-action` 의 4, M5s 결정 234). 끝난 잡이 늘 먼저다.
 
     반환 (종료 코드, 마지막 잡 JSON, 사유).
     """
@@ -1082,6 +1085,9 @@ def wait_for_job(
             on_update(job)
         if job.get("state") in TERMINAL_STATES:
             return exit_code_for(job), job, None
+        early = stop_when(job) if stop_when is not None else None
+        if early is not None:
+            return early, job, None
         if timeout is not None and clock() - started > timeout:
             return (
                 EXIT_UNKNOWN,
@@ -1141,6 +1147,7 @@ def wait_for_job(
         started=started,
         last=last,
         on_info=on_info,
+        stop_when=stop_when,
     )
 
 
@@ -1156,6 +1163,7 @@ def _poll_for_job(
     started: float,
     last: dict[str, Any] | None,
     on_info: Callable[[str], None] | None = None,
+    stop_when: Callable[[dict[str, Any]], int | None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
     """2초 폴링. 서버 연결 실패(5xx 포함 — 바쁜 SQLite 의 500 도)가 60초 넘게 이어지면 3."""
     unreachable_since: float | None = None
@@ -1206,6 +1214,9 @@ def _poll_for_job(
             on_update(job)
         if job.get("state") in TERMINAL_STATES:
             return exit_code_for(job), job, None
+        early = stop_when(job) if stop_when is not None else None
+        if early is not None:
+            return early, job, None
         if timeout is not None and clock() - started > timeout:
             return (
                 EXIT_UNKNOWN,
