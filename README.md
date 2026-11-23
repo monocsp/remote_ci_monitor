@@ -279,7 +279,10 @@ Past the gate the tab is a **list of versions**. A one-line status strip answers
 up at all» — credentials, source, store, blockers — and turns red as soon as one of them is;
 clicking it opens `#/store/<name>/status`, which still carries the four collapsible rows (Setup,
 Source, Build · upload, Store) and the review panel, now read-only apart from **Validate listing**
-and **Plan review**. Under the strip: **+ New version**, then every open draft with its state, its
+and **Plan review**. With a `status` preset the panel also shows each store's review state — one
+of eight words, `unknown` for anything else, the store's own word beside it, how long ago it was
+checked and whether that is older than `plan_max_age_minutes` — and **Check again** runs the
+preset once more. Under the strip: **+ New version**, then every open draft with its state, its
 age, how many fields you changed, whether a build exists and whether it has expired, then the live
 version and the last 20 submitted ones.
 

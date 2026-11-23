@@ -20,6 +20,16 @@ of a key bumps that number and is listed here.
   `release_status.sh` and `release_golive.sh`, whose `--selftest` locks the exit codes: a plan
   that read the stores exits 0 whatever they said, and a release for a build that is not approved
   exits 2, never 75.
+- **The review panel shows both stores' review state and can check again.** With a `status`
+  preset, the Store tab's review panel draws the App Store and Google Play state from
+  `status.json` — one of eight words, `unknown` for any other, the store's own word beside it, how
+  long ago it was checked and a note when that is older than `plan_max_age_minutes` — and
+  **Check again** submits the preset through the new `POST /api/repos/<repo>/release/status`
+  (any client token; `build_name` is optional). `GET …/release` now reads each role preset
+  through its own window of 500 jobs, so frequent `status` jobs no longer push the last plan or
+  review out of the view, and they take at most 3 rows of their own in `jobs[]`; a running
+  `status` job is not the Build · upload row's current step.
+  ([#254](https://github.com/monocsp/remote_ci_monitor/pull/254))
 
 ## [0.9.0] - 2026-11-22
 
