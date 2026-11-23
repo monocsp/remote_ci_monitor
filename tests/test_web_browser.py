@@ -3514,12 +3514,16 @@ class _FailedNotifier:
 
 # 진짜 서버의 `/api/status` 를 받아서 고친다. `?evil=1` 이면 예약 행과 대기 행에 HTML 이 든 note 의
 # 「사람이 할 일」 표식을 단다(예약 행의 표식은 D 가 채우는 키다). `?schederr=1` 이면 예약 조회가
-# 실패한 문서다 — 오류 문장은 띄어쓰기 없이 길다(폰 폭에서 옆으로 새는지 본다).
+# 실패한 문서다 — 오류 문장은 띄어쓰기 없이 길다(폰 폭에서 옆으로 새는지 본다). `?stuck=1` 이면
+# 대기 행 하나가 `stuck` 이다(Needs a look 에 줄이 있다). `?exhausted=1` 이면 최근 목록 맨 앞에
+# 반복을 다 쓴 잡 #9901 이 있다.
 SCHED_STUB_JS = r"""
 (() => {
   const evil = /[?&]evil=1(&|$)/.test(location.search);
   const broken = /[?&]schederr=1(&|$)/.test(location.search);
-  if (!evil && !broken) return;
+  const stuck = /[?&]stuck=1(&|$)/.test(location.search);
+  const exhausted = /[?&]exhausted=1(&|$)/.test(location.search);
+  if (!evil && !broken && !stuck && !exhausted) return;
   const NOTE = '<img src=x onerror="window.__pwned=1">sign in';
   const real = window.fetch.bind(window);
   window.fetch = (url, opts) => real(url, opts).then((r) => {
@@ -3530,6 +3534,20 @@ SCHED_STUB_JS = r"""
         pool.scheduled = null;
         pool.scheduled_error = 'sqlite3.OperationalError:' + 'database_is_locked_'.repeat(12);
         pool.scheduled_error_code = null;
+      }
+      if (stuck) {
+        const row = (pool.queue || []).find((r) => r.state === 'queued');
+        if (row) {
+          row.reason = 'stuck';
+          row.estimate = Object.assign({}, row.estimate, { stuck: true });
+        }
+      }
+      if (exhausted && Array.isArray(pool.recent)) {
+        pool.recent.unshift({ id: 9901, preset: 'ok', key: 'ok', inputs: {}, state: 'exhausted',
+          exit_code: 75, requester: { name: 'alice-laptop', label: 'alice@host' }, joiners: [],
+          source: { mode: 'git_ref', repo: 'app', ref: 'main', sha: '1'.repeat(40) },
+          created_at: doc.generated_at, started_at: doc.generated_at, finished_at: doc.generated_at,
+          job_seconds: 5, summary: null, link: null, artifacts: null, keep: false, shelf: null });
       }
       if (evil) {
         const act = { code: 'login', note: NOTE, at: doc.generated_at };
@@ -3580,6 +3598,15 @@ EVIL_JS = """
     queue: text('#queue tr[data-job="%(queued)d"] td.reason .reason'),
     stuck: text('[data-stuck]'),
   };
+})()
+"""
+
+EXHAUSTED_ROW_JS = """
+(() => {
+  const r = document.querySelector(%s);
+  const copy = r.querySelector('[data-copy]');
+  return { clickable: r.classList.contains('clickable'), toggle: r.getAttribute('data-rtoggle'),
+           rerun: copy ? copy.getAttribute('data-copy') : null };
 })()
 """
 
@@ -3665,6 +3692,22 @@ def test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_n
             time.sleep(0.3)
             broken_narrow = c.eval(SCHED_JS % ids)
             c.call("Emulation.clearDeviceMetricsOverride")
+            # 예약 조회 실패 + 큐에 확인할 줄 하나 — 그 줄은 그리되 「그 밖에 없다」고 하지 않는다
+            c.open(
+                base + "&schederr=1&stuck=1",
+                ready_js=f"document.querySelector('[data-stuck] [data-goto=\"{queued}\"]')"
+                " !== null",
+            )
+            partial = c.eval("document.querySelector('[data-stuck]').textContent")
+            # 반복을 다 쓴 최근 행 — 실패처럼 펼치고 재실행 명령이 있다
+            c.open(
+                base + "&exhausted=1",
+                ready_js="document.querySelector('#recent [data-job=\"9901\"]') !== null",
+            )
+            ex_row = '#recent .rrow[data-job="9901"]'
+            exhausted = c.eval(EXHAUSTED_ROW_JS % json.dumps(ex_row))
+            c.eval(f"document.querySelector('{ex_row}').click()")
+            _wait(c, f"document.querySelector('{ex_row}').getAttribute('aria-expanded') === 'true'")
             # 내 예약을 취소한다
             c.open(base, ready_js=ready)
             c.eval(f"document.querySelector('[data-scheduled=\"{mine}\"] [data-cancel]').click()")
@@ -3703,6 +3746,14 @@ def test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_n
     assert broken["order"] == [], broken
     assert "Nothing needs a look" not in broken["stuck"], broken["stuck"]
     assert "scheduled jobs unavailable" in broken["stuck"], broken["stuck"]
+    assert "nothing else needs a look" not in broken["stuck"], broken["stuck"]
+    assert f"#{queued}" in partial and "Not responding" in partial, partial
+    assert "nothing else needs a look" not in partial, partial
+    assert "Nothing needs a look" not in partial, partial
+    assert "scheduled jobs unavailable" in partial, partial
+    assert exhausted == {"clickable": True, "toggle": "9901", "rerun": "rcm run ok --ref main"}, (
+        exhausted
+    )
     assert broken_narrow["overflow"] <= 0, (
         f"a long error sentence scrolls the phone sideways by {broken_narrow['overflow']}px"
     )

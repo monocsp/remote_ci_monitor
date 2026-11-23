@@ -1945,6 +1945,15 @@ MUTANTS = (
         tests=("tests/web/store_status.test.js",),
         runner="node",
     ),
+    Mutant(
+        # #257 재검증 P2 — 반복을 다 쓴 조회를 실패로 보지 않는다: 예전 문서를 아무 말 없이 그린다
+        name="m5s-web-store-check-exhausted-not-failed",
+        path="src/remote_ci_monitor/web/app.js",
+        old="lost: 1, exhausted: 1, expired: 1 };",
+        new="lost: 1, expired: 1 };",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
 )
 
 

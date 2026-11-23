@@ -2163,7 +2163,7 @@
     "store_check.stale": function (a) { return "이 상태는 " + a.n + "분보다 오래됐습니다. 판단하기 전에 새로 조회하십시오."; },
     "store_check.doc_error": function (a) { return "status.json 을 읽지 못했습니다: " + a.detail; },
     "store_check.checking": function (a) { return "조회하고 있습니다 · 작업 #" + a.id + " " + a.state; },
-    "store_check.last_failed": function (a) { return "마지막 조회 #" + a.id + " " + a.state + "." + (a.older ? " 아래 상태는 그 전 조회의 것입니다." : ""); },
+    "store_check.last_failed": function (a) { return "마지막 조회 " + withJosa("#" + a.id, "이/가") + " 성공하지 못했습니다(" + a.state + ")." + (a.older ? " 아래 상태는 그 전 조회의 것입니다." : ""); },
     "store_check.refresh": "새로 조회",
     "store_check.refreshing": "조회하는 중…",
     "store.head.live": function (a) { return "App Store 라이브 " + a.version + " (" + a.build + ")"; },

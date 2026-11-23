@@ -87,7 +87,8 @@ of a key bumps that number and is listed here.
   the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
 - The Store tab's status panel no longer drops `Last check #N …` when a scheduled check follows
-  the failed one, and the line now reads `Last check #N did not succeed (lost).`
+  the failed one, counts a check that ended `exhausted` or `expired` as failed, and the line now
+  reads `Last check #N did not succeed (lost).`
   ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
   `not scheduled`, as `rcm top` does. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
