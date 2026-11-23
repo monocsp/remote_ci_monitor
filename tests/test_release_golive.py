@@ -430,3 +430,61 @@ def test_a_plan_measured_in_the_future_is_stale_not_fresh_for_ever(gsrv):
     gsrv.golive_plan_job({**GOLIVE_PLAN, "measured_at": "2026-09-18T12:00:00Z"})
     status, body = gsrv.golive(release_body())
     assert (status, body["code"]) == (409, "golive_plan_stale"), body
+
+
+# ── D(#256)의 반복과 함께 (결정 210 · 232 · 236) ───────────────────────────────
+
+
+def test_a_golive_release_that_exits_75_is_retried_and_the_chain_keeps_the_build_busy(
+    tmp_path, remote, monkeypatch
+):
+    """release 가 75(승인 뒤 남은 일)로 끝나면 `retried` 로 닫히고 같은 입력의 다음 시도가 예약된다.
+    `golive_running` 은 그 사슬의 `scheduled` 시도를 살아 있는 것으로 보고 새 release 를 막는다.
+    「출시 예약」 목록에도 그 다음 시도가 나온다."""
+    from remote_ci_monitor.core.model import RETRIED
+    from remote_ci_monitor.worker import outcome_for
+
+    s = GoliveServer(tmp_path, remote)
+    try:
+        s.open_gate(monkeypatch)
+        retrying = {
+            **preset(GOLIVE, GOLIVE_INPUTS),
+            "retry": {"on_exit": 75, "interval_seconds": 600, "max_attempts": 12},
+        }
+        s.cfg.presets = tuple(
+            parse_preset(retrying) if p.name == GOLIVE else p for p in s.cfg.presets
+        )
+        s.golive_plan_job(BOTH_APPROVED)
+        status, first = s.golive(release_body())
+        assert status == 202, first
+        root = first["job_id"]
+        job = s.store.get_job(root)
+        assert (job.retry_on_exit, job.retry_interval_seconds, job.retry_max_attempts) == (
+            75,
+            600,
+            12,
+        )
+        # 워커가 집어 돌렸고 스크립트가 75 로 끝났다(iOS 출시 처리 중)
+        started = NOW + timedelta(minutes=1)
+        s.store._conn().execute(
+            "UPDATE jobs SET state='running', started_at=?, lane=1 WHERE id=?",
+            (started.timestamp(), root),
+        )
+        ended = started + timedelta(minutes=1)
+        oc = outcome_for(s.store.get_job(root), [], started=started, finished=ended, rc=75)
+        assert oc.state == RETRIED
+        assert s.store.finish(root, RETRIED, now=ended, exit_code=75)
+        nxt_id = s.store.get_job(root).retried_as
+        nxt = s.store.get_job(nxt_id)
+        assert nxt.state == SCHEDULED and nxt.chain_id == root and nxt.attempt == 2
+        assert nxt.not_before == ended + timedelta(seconds=600)
+        assert nxt.inputs == job.inputs  # 같은 build · 같은 플랫폼 · 같은 친 번호
+        # 사슬이 살아 있다 — 지금도, 나중에도, 다른 플랫폼으로도 새 release 는 409
+        for extra in ({}, {"start_in_seconds": 7200}, {"platform": "android"}):
+            status, body = s.golive(release_body(**extra))
+            assert (status, body["code"]) == (409, "golive_running"), body
+            assert body["job_id"] == nxt_id and body["state"] == SCHEDULED
+        live = s.req("GET", "/api/repos/app/release")[1]["golive"]["live"]
+        assert [(r["job_id"], r["state"]) for r in live] == [(nxt_id, SCHEDULED)]
+    finally:
+        s.close()
