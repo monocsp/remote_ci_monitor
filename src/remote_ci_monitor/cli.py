@@ -172,6 +172,8 @@ def describe(job: dict[str, Any], *, head: str | None = None) -> str:
     state = job.get("state", "?")
     est = job.get("estimate") or {}
     parts = [head or f"#{job.get('id')} {state}"]
+    if state == "scheduled":
+        parts.append(_scheduled_for(job))
     if job.get("position"):
         parts.append(f"{_ordinal(job['position'])} in line")
         reason = job.get("reason")
@@ -204,6 +206,40 @@ def describe(job: dict[str, Any], *, head: str | None = None) -> str:
     if job.get("summary") and state in TERMINAL_STATES:
         parts.append(str(job["summary"]))
     return " · ".join(parts)
+
+
+def _scheduled_for(job: dict[str, Any]) -> str:
+    """`scheduled for 15:00 · start by 15:15` — 예약 잡의 시각(M5s). 모르는 값은 —.
+
+    이 머신의 시간대로 그린다. 오늘이 아니면 날짜를 붙인다(`Nov 24 · 15:00`)."""
+    tz = datetime.now().astimezone().tzinfo
+    now = datetime.now(UTC)
+    text = f"scheduled for {fmt_clock(job.get('not_before'), tz, now=now)}"
+    if job.get("start_deadline"):
+        text += f" · start by {fmt_clock(job.get('start_deadline'), tz, now=now)}"
+    return text
+
+
+_DURATION_PART = re.compile(r"(\d+)([smhd])")
+_DURATION_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(text: str) -> int:
+    """`rcm run --in` 의 길이 → 초. `90s` · `5m` · `2h` · `1d` · `1h30m` · 단위 없는 숫자는 초.
+
+    0 과 음수, 소수, 공백은 받지 않는다. 길이일 뿐이라 시간대가 없다 — 서버가 제출을 받은 시각에
+    더한다(M5s 결정 207). 이 머신의 시계로 절대 시각을 만들지 않는다."""
+    raw = text.strip() if isinstance(text, str) else ""
+    if raw.isdigit():
+        total = int(raw)
+    else:
+        parts = _DURATION_PART.findall(raw)
+        if not parts or "".join(n + u for n, u in parts) != raw:
+            raise ValueError(f"{text!r} is not a duration (use 90s, 5m, 2h, 1h30m)")
+        total = sum(int(n) * _DURATION_SECONDS[u] for n, u in parts)
+    if total < 1:
+        raise ValueError(f"{text!r} is not a positive duration")
+    return total
 
 
 #: `--no-wait` 의 표시용 조회 상한(초). 제출은 이미 끝났으니 오래 붙들지 않는다.
@@ -610,6 +646,15 @@ SHELF_IN_FLIGHT = ("waiting", "pending", "copying")
 SHELF_SINCE = "rcm ≥ 0.7.0"
 
 
+def _schedule_refusal(h: Any) -> str | None:
+    """`--at` · `--in` 을 보내면 안 되는 서버인가(M5s 결정 206). 옛 서버는 모르는 `start_at` 을
+    **무시하고 바로 돌린다** — 그래서 health 에 `schedule` 키가 있을 때만 보낸다(`_keep_refusal`
+    과 같은 방식)."""
+    if not isinstance(h, dict) or not h.get("schedule"):
+        return "server does not support scheduling — upgrade it"
+    return None
+
+
 def _keep_refusal(h: Any) -> str | None:
     """`--keep` 을 보내면 안 되는 서버인가 — 그렇다면 그 까닭.
 
@@ -764,6 +809,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         return _usage("--fetch-artifacts cannot be used with --no-wait (you have to wait to fetch)")
     if fetch and mode == "git_ref" and not getattr(args, "output", None):
         return _usage("--fetch-artifacts needs --output DIR for a git_ref preset (no local tree)")
+    # 예약(M5s §4.1). `--at` 은 글자 그대로 서버에 맡기고(서버가 자기 시간대로 읽는다) `--in` 은
+    # 길이라서 여기서 초로 바꾼다 — 어느 쪽도 이 머신의 시계로 절대 시각을 만들지 않는다
+    schedule: dict[str, Any] = {}
+    if getattr(args, "at", None) is not None:
+        schedule["start_at"] = args.at
+    if getattr(args, "start_in", None) is not None:
+        try:
+            schedule["start_in_seconds"] = parse_duration(args.start_in)
+        except ValueError as e:
+            return _usage(f"--in: {e}")
     keep = bool(getattr(args, "keep", False))
     # 글롭이 없는 프리셋은 서버가 400 `keep_without_artifacts` 로 거절한다 — 큰 트리를 다 싼 뒤에
     # 그 말을 듣지 않게 여기서 거른다(§15.6). 키가 없는 서버는 모르는 것이니 서버에 맡긴다
@@ -793,6 +848,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         if keep:
             _err(f"run --keep: cannot reach the server ({e.message}) — nothing was sent")
             return EXIT_UNKNOWN
+        if schedule:
+            _err(f"run --at/--in: cannot reach the server ({e.message}) — nothing was sent")
+            return EXIT_UNKNOWN
         health = None
     if health is not None:
         _warn_if_client_too_old(client, health)
@@ -800,6 +858,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         refusal = _keep_refusal(health)
         if refusal is not None:
             return _usage(f"run --keep: {refusal} — nothing was sent")
+    if schedule:
+        refusal = _schedule_refusal(health)
+        if refusal is not None:
+            return _usage(f"run --at/--in: {refusal} — nothing was sent")
     # 토큰은 스냅샷을 만들기 전에 확인한다 — 큰 트리를 다 싸고 나서 401 을 보면 늦다(실배치 224 MB)
     try:
         client.whoami()
@@ -811,7 +873,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         if e.status == 0:
             return _client_fail(client, "run", e)
     if mode == "git_ref":
-        return _run_git_ref(client, args, preset, inputs, ref or "", label, pool, link, link_label)
+        return _run_git_ref(
+            client, args, preset, inputs, ref or "", label, pool, link, link_label, schedule
+        )
     # ② 스냅샷
     root = Path(args.dir or os.getcwd())
     try:
@@ -845,6 +909,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 machine=getattr(args, "machine", None),
                 supersede=not getattr(args, "no_supersede", False),
                 keep=keep,
+                **schedule,
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
@@ -965,6 +1030,7 @@ def _run_git_ref(
     pool: str | None = None,
     link: str | None = None,
     link_label: str | None = None,
+    schedule: dict[str, Any] | None = None,
 ) -> int:
     """git_ref 제출: 스냅샷·업로드 없이 ③ 제출 → ⑤ wait. 서버가 ref 를 sha 로 확정한다."""
     try:
@@ -981,6 +1047,7 @@ def _run_git_ref(
             machine=getattr(args, "machine", None),
             supersede=not getattr(args, "no_supersede", False),
             keep=bool(getattr(args, "keep", False)),
+            **(schedule or {}),
         )
     except ClientError as e:
         _err(f"submit failed: {e.message}")
@@ -2190,10 +2257,17 @@ def cmd_eta(args: argparse.Namespace) -> int:
             row = next((r for r in queue if r.get("id") == args.job), None)
             if row is None:
                 job = client.job(args.job)
-                _print_json(job) if args.json else print(
-                    f"#{args.job} {job.get('state')} · finished "
-                    f"{fmt_clock(job.get('finished_at'), _local_tz())} · {job.get('summary') or ''}"
-                )
+                if args.json:
+                    _print_json(job)
+                elif job.get("state") == "scheduled":
+                    # 승격 전의 잡에 ETA 숫자를 지어내지 않는다(M5s §4.1) — 언제 오르는지만 말한다
+                    print(f"#{args.job} scheduled · {_scheduled_for(job)}")
+                else:
+                    print(
+                        f"#{args.job} {job.get('state')} · finished "
+                        f"{fmt_clock(job.get('finished_at'), _local_tz())} · "
+                        f"{job.get('summary') or ''}"
+                    )
                 return 0
             busy_others = sum(
                 1 for r in queue if r.get("id") != args.job and r.get("position") is None
@@ -2285,6 +2359,14 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             print(f"queue unavailable: {pool.get('queue_error') or 'unknown'}", file=sys.stderr)
         else:
             rows.extend({**r, "pool": r.get("pool") or pname} for r in pool["queue"])
+        # 예약(M5s) — 옛 서버에는 키가 없다(없는 것은 「예약 없음」이지 실패가 아니다)
+        if "scheduled" in pool and pool.get("scheduled") is None:
+            print(
+                f"scheduled unavailable: {pool.get('scheduled_error') or 'unknown'}",
+                file=sys.stderr,
+            )
+        else:
+            rows.extend({**r, "pool": r.get("pool") or pname} for r in pool.get("scheduled") or [])
         if pool.get("recent") is None:
             print(f"recent unavailable: {pool.get('recent_error') or 'unknown'}", file=sys.stderr)
         else:
@@ -2318,13 +2400,16 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             print(f"pool {current_pool}")
         est = r.get("estimate") or {}
         state = r.get("state", "?")
+        when = est.get("finish_at") or r.get("finished_at")
         if state in ("running", "cancelling"):
             timing = f"elapsed {fmt_duration(est.get('elapsed_seconds'))}"
         elif state in ("queued", "uploading"):
             timing = f"waiting {fmt_duration(est.get('waited_seconds'))}"
+        elif state == "scheduled":
+            timing = f"at {fmt_clock(r.get('not_before'), tz, now=datetime.now(UTC))}"
+            when = r.get("start_deadline")  # 끝 칸은 「언제까지 시작해야 하나」
         else:
             timing = f"took {fmt_duration(r.get('job_seconds'))}"
-        when = est.get("finish_at") or r.get("finished_at")
         pos = f"{_ordinal(r['position'])} in line · " if r.get("position") else ""
         label = (r.get("requester") or {}).get("label") or "?"
         summary = r.get("summary") or ""
@@ -4614,6 +4699,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="keep older jobs of this branch even if the preset supersedes them",
     )
     run.add_argument("--no-wait", action="store_true", help="submit and exit 0 without waiting")
+    when = run.add_mutually_exclusive_group()
+    when.add_argument(
+        "--at",
+        metavar="TIME",
+        help="run at this time instead of now: HH:MM (today), YYYY-MM-DDTHH:MM or ISO-8601 with "
+        "an offset; read in the server's [display] timezone (needs rcm 0.10.0+ on the server)",
+    )
+    when.add_argument(
+        "--in",
+        dest="start_in",
+        metavar="DURATION",
+        help="run after this long instead of now: 90s, 5m, 2h, 1h30m",
+    )
     run.add_argument(
         "--exclude", action="append", metavar="PATTERN", help="extra .rcmignore pattern"
     )
@@ -4704,7 +4802,9 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(shelf_get)
     shelf_get.set_defaults(func=cmd_shelf)
 
-    wait = sub.add_parser("wait", help="wait for a job and exit with 0/1/2/3")
+    wait = sub.add_parser(
+        "wait", help="wait for a job and exit with 0/1/2/3 (a scheduled job is waited for too)"
+    )
     wait.add_argument("--job", type=int, required=True)
     wait.add_argument("--timeout", type=float, help="give up waiting after N seconds (exit 3)")
     wait.add_argument(
@@ -4783,7 +4883,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     jobs = sub.add_parser("jobs", help="list queued, running and recent jobs")
     jobs.add_argument("--mine", action="store_true", help="only jobs you requested or joined")
-    jobs.add_argument("--state", help="filter by state (running, queued, failed, ...)")
+    jobs.add_argument(
+        "--state", help="filter by state (running, queued, scheduled, failed, expired, ...)"
+    )
     jobs.add_argument("--pool", metavar="NAME", help="only jobs of this worker pool")
     jobs.add_argument("--ref", metavar="REF", help="only jobs whose ref or branch contains REF")
     jobs.add_argument("--json", action="store_true")

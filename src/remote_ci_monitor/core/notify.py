@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from remote_ci_monitor.core import artifacts as art
-from remote_ci_monitor.core.model import TERMINAL_STATES
+from remote_ci_monitor.core.model import NOTIFY_DEFAULT_STATES
 
 ENV_TEXT_LIMIT = 4096
 #: 훅에 넘기는 실패 이름의 최대 개수(M5o 결정 119). 전체는 `GET /jobs/<id>` 의 `failures[]` 에 있다.
@@ -25,7 +25,7 @@ class NotifyRule:
     """`[[notify]]` 하나. argv 와 url 중 정확히 하나."""
 
     name: str
-    on: frozenset[str] = frozenset(TERMINAL_STATES)
+    on: frozenset[str] = frozenset(NOTIFY_DEFAULT_STATES)
     presets: frozenset[str] | None = None
     argv: tuple[str, ...] | None = None
     url: str | None = None

@@ -27,6 +27,7 @@ from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
     INPUT_TYPES,
+    NOTIFY_DEFAULT_STATES,
     PLACEMENT_CAPABLE,
     PLACEMENT_POOL,
     PRIORITY_NAMES,
@@ -152,6 +153,9 @@ class ServerSection:
     shelf_max_bytes: int = 50 * 1024**3  # 보관함 전체 상한(50 GiB). 넘으면 새 보관을 거절. 0 = 꺼짐
     shelf_stale_days: int = 182  # 마지막으로 쓴 지 이만큼이면 「정리 대기」
     shelf_delete_days: int = 365  # 마지막으로 쓴 지 이만큼이면 삭제. stale 보다 커야 한다
+    # M5s — 예약 실행(§4.1 · 결정 207 · 208). 재시작해야 바뀐다(`[server]` 는 reload 되지 않는다)
+    schedule_start_deadline_seconds: int = 900  # 정한 시각 + 이만큼 안에 못 집히면 expired
+    schedule_max_ahead_days: int = 14  # 이보다 먼 시각은 400 — 잊힌 예약이 쌓이지 않게
 
 
 @dataclass(frozen=True)
@@ -648,6 +652,7 @@ _PRESET_KEYS = {
     "sample",
     "supersede",
     "keep",
+    "start_deadline_seconds",
 }
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
@@ -759,7 +764,7 @@ def parse_notify(raw: Any) -> NotifyRule:
         raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
     on_raw = raw.get("on")
     if on_raw is None:
-        on = frozenset(TERMINAL_STATES)
+        on = frozenset(NOTIFY_DEFAULT_STATES)
     else:
         on_list = _str_list(f"{where} on", on_raw, allow_empty=False)
         bad = [st for st in on_list if st not in TERMINAL_STATES]
@@ -905,6 +910,13 @@ def parse_preset(raw: Any) -> Preset:
         raise ConfigError(
             f'{where}: supersede must be "off", "waiting" or "all", got {supersede!r}'
         )
+    start_deadline = raw.get("start_deadline_seconds")
+    if start_deadline is not None and (
+        isinstance(start_deadline, bool)
+        or not isinstance(start_deadline, int)
+        or start_deadline < 1
+    ):
+        raise ConfigError(f"{where}: start_deadline_seconds must be a positive integer")
     return Preset(
         name=name,
         argv=argv,
@@ -931,6 +943,7 @@ def parse_preset(raw: Any) -> Preset:
         sample=sample,
         supersede=supersede,
         keep=keep,
+        start_deadline_seconds=start_deadline,
     )
 
 
@@ -1287,6 +1300,10 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[server] probe_interval_seconds must be at least 60")
     if s.check_sweep_seconds < 1:
         raise ConfigError("[server] check_sweep_seconds must be >= 1")
+    if s.schedule_start_deadline_seconds < 1:
+        raise ConfigError("[server] schedule_start_deadline_seconds must be >= 1")
+    if not 1 <= s.schedule_max_ahead_days <= 366:
+        raise ConfigError("[server] schedule_max_ahead_days must be between 1 and 366")
     if s.advertise_name and not _NAME_RE.match(s.advertise_name):
         raise ConfigError(
             "[server] advertise_name must be a short identifier (letters, digits, . _ -)"

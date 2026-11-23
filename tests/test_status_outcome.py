@@ -147,7 +147,16 @@ BASE_HOST = frozenset(
 # M5n — 능력 보고의 세대 · 머신 요약 · 잡의 배치(키 추가만)
 NEW_SERVER = frozenset({"last_error_code", "generation", "machines"})
 NEW_POOL = frozenset(
-    {"queue_error_code", "recent_error_code", "medians_error_code", "hosts_error_code"}
+    {
+        "queue_error_code",
+        "recent_error_code",
+        "medians_error_code",
+        "hosts_error_code",
+        # M5s — 예약 잡과 그 조회 실패(키 추가만)
+        "scheduled",
+        "scheduled_error",
+        "scheduled_error_code",
+    }
 )
 # `link` — 호출자가 붙인 잡 링크(v22). 더한 키다(없으면 null)
 NEW_RECENT = frozenset(
@@ -164,6 +173,8 @@ NEW_RECENT = frozenset(
         "superseded_by",  # M5o
         "keep",  # M5p — 제출 때 얼린 keep
         "shelf",  # M5p — 보관 상태 `{state, url, reason_code}` | null
+        "not_before",  # M5s — 예약 시각 | null
+        "start_deadline",  # M5s — 시작 마감 | null
     }
 )
 NEW_ROW = frozenset(
@@ -181,6 +192,8 @@ NEW_ROW = frozenset(
         "superseded_by",  # M5o
         "keep",  # M5p — 제출 때 얼린 keep
         "shelf",  # M5p — 보관 상태 `{state, url, reason_code}` | null
+        "not_before",  # M5s — 예약 시각 | null
+        "start_deadline",  # M5s — 시작 마감 | null
     }
 )
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)

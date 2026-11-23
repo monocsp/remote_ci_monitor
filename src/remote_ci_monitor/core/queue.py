@@ -136,7 +136,8 @@ def medians_from(jobs: Sequence[Job], now: datetime, cfg: QueueConfig) -> dict[s
         if dur < cfg.min_job_seconds:
             continue
         durations.setdefault(job.key, []).append(dur)
-        waits.setdefault(job.key, []).append(_seconds(job.created_at, job.started_at))
+        # 예약 잡은 승격부터 잰다(M5s S10) — 정한 시각까지 기다린 것은 큐가 밀린 것이 아니다
+        waits.setdefault(job.key, []).append(_seconds(job.wait_origin, job.started_at))
     out: dict[str, Median] = {}
     for key, ds in durations.items():
         out[key] = Median(
@@ -265,7 +266,7 @@ def _busy_estimate(
     """
     started = job.started_at or now
     elapsed = _seconds(started, now)
-    waited = _seconds(job.created_at, started)
+    waited = _seconds(job.wait_origin, started)
     remaining = remaining_seconds(expected, elapsed, cfg)
     overdue = elapsed > expected
     last_output = job.last_output_at or started
@@ -564,7 +565,7 @@ def compute_queue(
                         found = h
             return found
 
-        waited = _seconds(job.created_at, now)
+        waited = _seconds(job.wait_origin, now)
         wait: float | None = None
         finish: datetime | None = None
         ahead: int | None = None

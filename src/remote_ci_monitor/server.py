@@ -96,6 +96,7 @@ from remote_ci_monitor.core.model import (
     PLACEMENT_POOL,
     PRIORITY_HIGH,
     QUEUED,
+    SCHEDULED,
     SUCCEEDED,
     TIMED_OUT,
     TOKEN_WORKER,
@@ -128,12 +129,19 @@ from remote_ci_monitor.core.queue import (
     step_medians_from,
 )
 from remote_ci_monitor.core.reload import changed_keys, reload_summary
+from remote_ci_monitor.core.schedule import (
+    ScheduleError,
+    effective_deadline_seconds,
+    resolve_start,
+    server_zone,
+)
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     artifacts_json,
     iso,
     queue_row_json,
     recent_json,
+    scheduled_json,
     status_json,
     step_timeline_json,
 )
@@ -210,6 +218,7 @@ from remote_ci_monitor.store import (
     VERSION_FAILED,
     VERSION_RUNNING,
     VERSION_SUBMITTED,
+    ScheduleExists,
     Store,
     TokenInfo,
 )
@@ -452,11 +461,16 @@ class _DbSnapshot:
     host_step_medians: dict[tuple[str, str], dict[str, StepMedian]] = field(default_factory=dict)
     step_medians_error: str | None = None
     step_medians_error_code: str | None = None
+    #: 예약 잡(M5s) — 승격 시각 순. 큐 계산에는 들어가지 않는다(결정 206)
+    scheduled: list[Job] | None = field(default_factory=list)
+    scheduled_error: str | None = None
+    scheduled_error_code: str | None = None
 
 
 def shown_pool(job: Job) -> str:
-    """잡이 **보이는** 풀 — 대기 중인 any-capable 잡은 `display_pool`, 그 밖은 `pool`(M5n §5.2)."""
-    if job.is_waiting and job.display_pool:
+    """잡이 **보이는** 풀 — 대기 · 예약 중인 any-capable 잡은 `display_pool`, 그 밖은 `pool`
+    (M5n §5.2)."""
+    if (job.is_waiting or job.is_scheduled) and job.display_pool:
         return job.display_pool
     return job.pool
 
@@ -573,14 +587,23 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         else:
             step("client wheel", "unavailable")
         lost, cancelled = self.store.recover_on_start(self.now_fn())
+        expired, promoted = self.store.schedule_recovered
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
             for job_id in [*lost, *cancelled]:
                 self._publish_job(None, job_id)
+        # 예약(M5s) — 꺼진 동안 마감을 넘긴 것은 이미 닫혔고 시각이 된 것은 이미 올랐다. 레인이
+        # 뜨기 전이다. 알림 스레드는 아직 없지만 종료 잡은 `Notifier` 가 기동 때 DB 로 다시 줍는다
+        self._after_schedule(expired, promoted)
         step(
             "recovery",
             f"lost {len(lost)} · cancelled uploads {len(cancelled)}"
-            if (lost or cancelled)
+            + (
+                f" · expired {len(expired)} · promoted {len(promoted)}"
+                if expired or promoted
+                else ""
+            )
+            if (lost or cancelled or expired or promoted)
             else "nothing to recover",
         )
         self.recover_versions_on_start()
@@ -732,6 +755,34 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 self.mark_lost_workers(self.now_fn())
             except Exception as e:  # noqa: BLE001
                 self.record_error(f"worker janitor: {type(e).__name__}: {_safe(str(e))}")
+            try:
+                self.tick_schedule()
+            except Exception as e:  # noqa: BLE001
+                self.record_error(f"schedule: {type(e).__name__}: {_safe(str(e))}")
+
+    def tick_schedule(self, now: datetime | None = None) -> tuple[list[int], list[int]]:
+        """예약의 주기 판정(M5s §4.1 · §4.7) — 5초 루프가 부른다. `(expired, promoted)`.
+
+        먼저 시작 마감이 지난 예약 · 대기 잡을 `expired` 로 닫고, 그다음 시각이 된 예약을 `queued`
+        로 올린다. 둘 다 조건부 UPDATE 라 두 번 불러도 한 번만 일어난다. 올린 잡은 큐에 「들어온
+        순간」이므로 supersede 를 부르고(결정 111) 레인을 깨운다.
+        """
+        now = now or self.now_fn()
+        expired = self.store.expire_overdue(now)
+        promoted = self.store.promote_due(now)
+        self._after_schedule(expired, promoted)
+        return expired, promoted
+
+    def _after_schedule(self, expired: list[int], promoted: list[int]) -> None:
+        if expired:
+            self.log("expired (start deadline passed): " + ", ".join(f"#{i}" for i in expired))
+        for job_id in expired:
+            self._publish_job(None, job_id)
+        for job_id in promoted:
+            self._supersede_after_queue(job_id)
+            self._publish_job(None, job_id)
+        if promoted:
+            self.wake.set()
 
     def log(self, msg: str) -> None:
         log_line(msg)
@@ -3143,7 +3194,16 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             paused = self.store.get_paused()
         except Exception:  # noqa: BLE001
             paused = None
+        scheduled: list[Job] | None
+        scheduled_error = scheduled_error_code = None
+        try:
+            scheduled = self.store.list_scheduled()
+        except Exception as e:  # noqa: BLE001
+            scheduled, scheduled_error, scheduled_error_code = None, _error_text(e), _error_code(e)
         return _DbSnapshot(
+            scheduled=scheduled,
+            scheduled_error=scheduled_error,
+            scheduled_error_code=scheduled_error_code,
             pool_medians=pool_medians,
             loaded_at=time.monotonic(),
             jobs=jobs,
@@ -3431,7 +3491,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             if row.pool not in pool_names:
                 pool_names.append(row.pool)
         # list_pools 가 실패해도 큐·최근에 보이는 풀은 떨어뜨리지 않는다(격리 검증 리뷰 노트)
-        for job in [*(r.job for r in queue or []), *(snap.recent or [])]:
+        for job in [*(r.job for r in queue or []), *(snap.recent or []), *(snap.scheduled or [])]:
             if shown_pool(job) not in pool_names:
                 pool_names.append(shown_pool(job))
         pools: list[Pool] = []
@@ -3464,6 +3524,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                     hosts=pool_hosts,  # 원격 워커 표본은 heartbeat 에서(M5b-2)
                     hosts_error=hosts_error if local else None,
                     hosts_error_code=("sampler_failed" if hosts_error and local else None),
+                    scheduled=(
+                        tuple(j for j in snap.scheduled if shown_pool(j) == name)
+                        if snap.scheduled is not None
+                        else None
+                    ),
+                    scheduled_error=snap.scheduled_error,
+                    scheduled_error_code=snap.scheduled_error_code,
                 )
             )
         model = StatusModel(
@@ -3520,6 +3587,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         now = self.now_fn()
         if job.is_terminal:
             return self._terminal_view(job, host)
+        if job.is_scheduled:
+            # 예약 잡(M5s)은 큐 행이 아니다 — 「방금 끝났다」로 읽으면 끝난 잡처럼 보인다
+            return scheduled_json(job, base_url=self.base_url(host))
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)
@@ -3743,6 +3813,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 reason_code="keep_without_artifacts",
             )
         keep = asked or preset.keep
+        # 예약(M5s §4.1) — 시각은 여기서 정한다(잡을 만들기 전, 다른 검사와 같은 줄에서 400)
+        schedule = self._schedule_of(body, preset)
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
                 preset,
@@ -3758,6 +3830,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 placed,
                 supersede=supersede,
                 keep=keep,
+                schedule=schedule,
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3787,6 +3860,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         # 머신을 지정한 잡은 합류하지 않는다 — 같은 트리여도 「그 머신에서」가 요점이다(M5n §4.5)
         want_join = want_join and placed["target_worker"] is None
+        # 예약은 합류하지 않는다(M5s 결정 226) — 지금 도는 잡에 붙으면 「그 시각에」가 사라진다
+        want_join = want_join and schedule is None
         if want_join:
             joined = self.store.join_or_bump_with_submission(
                 jk, token.name, label, priority, now, keep=keep
@@ -3804,7 +3879,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                     "placement": self.submission_placement(preset, existing),
                     **self._keep_fields(existing, host),
                 }
-        job, sid, cancel_token = self.store.create_job_with_submission(
+        job, sid, cancel_token = self._create_with_schedule(
+            schedule,
             participant=token.name,
             preset=preset.name,
             inputs=inputs,
@@ -3820,6 +3896,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             pool=pool,
             link=link,
             keep=keep,
+            no_supersede=not supersede,
             **placed,
         )
         if not supersede:
@@ -3827,6 +3904,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 self._no_supersede.add(job.id)
         self._publish_job(job, job.id)
         return 201, {
+            **self._schedule_fields(job, schedule),
             "job_id": job.id,
             "joined": False,
             "state": job.state,
@@ -3840,6 +3918,69 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             "submission": {"id": sid, "cancel_token": cancel_token},
             "placement": self.submission_placement(preset, job),
             **self._keep_fields(job, host),
+        }
+
+    def _schedule_of(
+        self, body: dict[str, Any], preset: Preset
+    ) -> tuple[datetime, datetime, str] | None:
+        """제출 본문의 예약(M5s §4.1 · 결정 207 · 208) → `(승격 시각, 시작 마감, 시간대 이름)`.
+
+        `start_at`·`start_in_seconds` 가 없으면 None(즉시 실행). 오프셋 없는 시각은 `[display]
+        timezone`, 비면 서버 로컬로 읽는다. 잘못된 시각은 400 이고 본문에 거절 코드를 싣는다.
+        """
+        start_at = body.get("start_at")
+        start_in = body.get("start_in_seconds")
+        asked_deadline = body.get("start_deadline_seconds")
+        if start_at is None and start_in is None:
+            if asked_deadline is not None:
+                raise ApiError(400, "start_deadline_seconds needs start_at or start_in_seconds")
+            return None
+        s = self.config.server
+        try:
+            tz, tz_name = server_zone(self.config.display.timezone)
+            not_before = resolve_start(
+                start_at,
+                start_in,
+                now=self.now_fn(),
+                tz=tz,
+                max_ahead_days=s.schedule_max_ahead_days,
+            )
+            seconds = effective_deadline_seconds(
+                s.schedule_start_deadline_seconds, preset.start_deadline_seconds, asked_deadline
+            )
+        except ScheduleError as e:
+            raise ApiError(400, str(e), code=e.code, error_code=e.code) from e
+        assert not_before is not None
+        return not_before, not_before + timedelta(seconds=seconds), tz_name
+
+    def _create_with_schedule(
+        self, schedule: tuple[datetime, datetime, str] | None, **kwargs: Any
+    ) -> tuple[Job, str, str]:
+        """`create_job_with_submission` + 예약 열. 같은 예약이 있으면 409 `schedule_exists`."""
+        if schedule is not None:
+            kwargs["not_before"], kwargs["start_deadline"] = schedule[0], schedule[1]
+        try:
+            return self.store.create_job_with_submission(**kwargs)
+        except ScheduleExists as e:
+            raise ApiError(
+                409,
+                f"{e} — cancel it first (rcm cancel {e.job_id}) or pick another time",
+                code="schedule_exists",
+                error_code="schedule_exists",
+                job_id=e.job_id,
+            ) from e
+
+    @staticmethod
+    def _schedule_fields(
+        job: Job, schedule: tuple[datetime, datetime, str] | None
+    ) -> dict[str, Any]:
+        """제출 응답의 예약 칸 — 정해진 UTC 시각과 해석에 쓴 시간대. 즉시 실행이면 키가 없다."""
+        if schedule is None:
+            return {}
+        return {
+            "not_before": iso(job.not_before),
+            "start_deadline": iso(job.start_deadline),
+            "timezone": schedule[2],
         }
 
     def _keep_fields(self, job: Job, host: str | None) -> dict[str, Any]:
@@ -4124,9 +4265,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 current = self.store.get_job(job_id)
                 st = current.state if current else "unknown"
                 raise ApiError(409, f"job was {st} during upload", **_upload_conflict(current, st))
-            state = QUEUED
-            self._supersede_after_queue(job_id)
-            self.wake.set()
+            state = self._after_upload(job)
         self._publish_job(None, job_id)
         return {
             "missing": missing,
@@ -4253,10 +4392,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             raise ApiError(
                 409, f"job was {state} during upload", **_upload_conflict(current, state)
             )
-        self._supersede_after_queue(job.id)
+        state = self._after_upload(job)
         self._publish_job(None, job.id)
-        self.wake.set()
-        return {"job_id": job.id, "state": QUEUED, "bytes": received, "blobs": len(stored)}
+        return {"job_id": job.id, "state": state, "bytes": received, "blobs": len(stored)}
 
     def _submit_git_ref(
         self,
@@ -4274,8 +4412,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         *,
         supersede: bool = True,
         keep: bool = False,
+        schedule: tuple[datetime, datetime, str] | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued."""
+        """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued.
+
+        예약이면(M5s) sha 는 지금 정하고(제출 규칙 그대로) 잡은 `scheduled` 로 선다. 합류하지 않고
+        supersede 는 승격할 때 부른다."""
         placed = dict(placed or {})
         repo = self.config.repo(preset.repo)
         if repo is None:
@@ -4309,6 +4451,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         jk = join_key(preset.name, inputs, source.identity)
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         want_join = want_join and placed.get("target_worker") is None
+        want_join = want_join and schedule is None  # 예약은 합류 안 함(결정 226)
         if want_join:
             joined = self.store.join_or_bump_with_submission(
                 jk, token.name, label, priority, now, keep=keep
@@ -4327,7 +4470,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                     "submission": {"id": sid, "cancel_token": cancel_token},
                     **self._keep_fields(existing, host),
                 }
-        job, sid, cancel_token = self.store.create_job_with_submission(
+        job, sid, cancel_token = self._create_with_schedule(
+            schedule,
             participant=token.name,
             preset=preset.name,
             inputs=inputs,
@@ -4338,21 +4482,24 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             timeout_seconds=preset.timeout_seconds,
             join_key=jk,
             now=now,
-            state=QUEUED,
+            state=QUEUED if schedule is None else SCHEDULED,
             priority=priority,
             pool=pool,
             link=link,
             keep=keep,
+            no_supersede=not supersede,
             **placed,
         )
-        if supersede:
+        if supersede and schedule is None:
             # 제출이 곧 queued 다 — 이 자리가 git_ref 잡의 「큐에 들어온 순간」이다(M5o 결정 111).
             # 우선순위를 물려받았을 수 있으니 응답은 다시 읽은 잡으로 쓴다.
             self._supersede_after_queue(job.id)
             job = self.store.get_job(job.id) or job
         self._publish_job(job, job.id)
-        self.wake.set()
+        if schedule is None:
+            self.wake.set()
         return 201, {
+            **self._schedule_fields(job, schedule),
             "job_id": job.id,
             "joined": False,
             "state": job.state,
@@ -4385,6 +4532,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 return []
         try:
             job = self.store.get_job(job_id)
+            if job is not None and job.no_supersede:
+                return []  # 제출이 끈 것을 잡 행에 얼렸다(M5s 결정 237) — 재시작해도 잊지 않는다
             preset = self.config.preset(job.preset) if job is not None else None
             mode = preset.supersede if preset is not None else SUPERSEDE_OFF
             if job is None or mode == SUPERSEDE_OFF:
@@ -4476,10 +4625,22 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             raise ApiError(
                 409, f"job was {state} during upload", **_upload_conflict(current, state)
             )
-        self._supersede_after_queue(job.id)
+        state = self._after_upload(job)
         self._publish_job(None, job.id)
+        return {"job_id": job.id, "state": state, "bytes": received}
+
+    def _after_upload(self, job: Job) -> str:
+        """`mark_uploaded` 가 참인 뒤 — 업로드를 마치는 세 길(manifest · blob · tar)이 같이 부른다.
+
+        즉시 실행한 잡은 지금 `queued` 다 — 큐에 들어온 순간이므로 supersede 를 부르고(결정 111)
+        레인을 깨운다. 예약 잡(M5s §4.1)은 `scheduled` 로 갔다: supersede 는 승격할 때 부르고 깨울
+        레인도 없다. 응답의 `state` 는 그 실제 상태다.
+        """
+        if job.not_before is not None:
+            return SCHEDULED
+        self._supersede_after_queue(job.id)
         self.wake.set()
-        return {"job_id": job.id, "state": QUEUED, "bytes": received}
+        return QUEUED
 
     def _forget_no_supersede(self, job_id: int) -> None:
         """`"supersede": false` 표시를 지운다 — 그 잡의 업로드가 끝나지 못하고 닫혔다."""
@@ -4935,6 +5096,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # keep 을 안다」의 신호다** — 옛 서버는 모르는 제출 키를 무시하므로 `rcm run --keep` 이
             # 이 키를 본다
             "shelf": self.shelf_storage(),
+            # 예약 실행을 안다(M5s 결정 206). 옛 서버는 모르는 `start_at` 을 **무시하고 바로
+            # 돌린다** — `rcm run --at` · `--in` 은 이 키가 있을 때만 보낸다
+            "schedule": True,
         }
         if not ok:
             if not db_ok:

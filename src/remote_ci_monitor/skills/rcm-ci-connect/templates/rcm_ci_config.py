@@ -319,6 +319,9 @@ def terminal_status(
         return "error", describe("unavailable", job, "timed out")
     if state == "lost":
         return "error", describe("unavailable", job, "lost")
+    if state == "expired":
+        # rcm 0.10.0 의 예약 잡이 시작 마감 안에 레인을 못 받았다 — 돌지 않았다(결과가 아니다)
+        return "error", describe("unavailable", job, "did not start")
     if state == "cancelled":
         if cancelled_by == "superseded":
             text = f"by #{successor}" if successor is not None else "by a newer commit"

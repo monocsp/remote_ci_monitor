@@ -694,6 +694,9 @@
     "outcome.cancelled_by": function (a) { return "cancelled by " + a.by; },
     "outcome.superseded": function (a) { return "superseded by #" + a.by; },
     "outcome.server_restarted": function (a) { return "server restarted " + a.at; },
+    "outcome.start_deadline_passed": function (a) {
+      return "did not start by its start deadline " + a.at;
+    },
     "outcome.server_restarted_during_upload": "server restarted during upload",
     "outcome.server_stopped_while_running": "server stopped while running",
     "outcome.upload_abandoned": function (a) { return "upload abandoned after " + a.seconds; },
@@ -1788,6 +1791,9 @@
     "outcome.cancelled_by": function (a) { return withJosa(a.by, "이/가") + " 취소함"; },
     "outcome.superseded": function (a) { return "새 작업 #" + a.by + " 에 밀려 취소됨"; },
     "outcome.server_restarted": function (a) { return a.at + " 서버 재시작"; },
+    "outcome.start_deadline_passed": function (a) {
+      return "시작 마감 " + a.at + " 까지 시작하지 못함";
+    },
     "outcome.server_restarted_during_upload": "업로드 중 서버 재시작",
     "outcome.server_stopped_while_running": "실행 중 서버가 멈춤",
     "outcome.upload_abandoned": function (a) { return a.seconds + " 동안 업로드 없음 — 버림"; },

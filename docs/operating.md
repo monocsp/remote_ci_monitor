@@ -193,7 +193,11 @@ differs.
    removed afterwards, the command also exits 3 and names the directory that was left behind.
 3. `rcm pause` (admin token), then confirm nothing is `running`, `cancelling` or `uploading`
    (`rcm top`). Pausing stops the queue, not submissions: stop the service right after the check,
-   or a job that starts uploading in between is cancelled by the stop.
+   or a job that starts uploading in between is cancelled by the stop. Pausing does not stop the
+   clock of a [scheduled job](configuration.md#running-a-job-later---at-and---in): one whose time
+   falls inside the pause, the stop and the start, plus its start deadline (15 minutes by
+   default), ends `expired` instead of running. Look at `rcm jobs --state scheduled` first and
+   pick a window that misses them.
 4. Stop the service (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` ·
    `systemctl stop rcm-server`).
 5. Keep your own copy of the database at this moment (see below), so there is one that predates

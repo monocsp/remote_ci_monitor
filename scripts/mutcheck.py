@@ -19,6 +19,9 @@
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
   M5p 뒤 — `shelf-expand-keeps-apple-double`: 펼침이 macOS 메타데이터 멤버(`._*`)를 거르지 않음
      (`shelf_copier.py`, 2026-11-20 운영 잡 #3821 — 깨진 그림 23개)
+  M5s A — `m5s-*` 다섯: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 즉시 실행이
+     예약에 합류함 · 합류 쿼리가 시작 마감을 무시함 · 시각을 준 제출이 합류함
+     (`docs/m5s-workplan.md` §4.1 · §7)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -476,12 +479,18 @@ MUTANTS = (
         path="src/remote_ci_monitor/remote_workers.py",
         old="""                with self._fresh_claims_lock:
                     job = self.store.claim(
-                        lane, now, pool=pool, worker_name=name, claimant=claimant
+                        lane,
+                        now,
+                        pool=pool,
+                        worker_name=name,
+                        claimant=claimant,
+                        now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
                     )
 """,
         new=(
             "                job = self.store.claim(\n"
-            "                    lane, now, pool=pool, worker_name=name, claimant=claimant\n"
+            "                    lane, now, pool=pool, worker_name=name, claimant=claimant,\n"
+            "                    now_fn=self.now_fn,\n"
             "                )\n"
             "                with self._fresh_claims_lock:\n"
         ),
@@ -1646,6 +1655,67 @@ MUTANTS = (
         old="        _kill_sessions(env)\n",
         new="        pass\n",
         tests=("tests/test_mutcheck_parallel.py",),
+    ),
+    # ── M5s A — 예약 실행 (`docs/m5s-workplan.md` §4.1 · §7) ──
+    Mutant(
+        # 승격이 `not_before` 를 보지 않는다 — 15:00 예약이 건 즉시 돈다
+        name="m5s-promote-ignores-not-before",
+        path="src/remote_ci_monitor/store.py",
+        old='"SELECT id FROM jobs WHERE state=? AND not_before IS NOT NULL AND not_before <= ? "',
+        new='"SELECT id FROM jobs WHERE state=? AND not_before IS NOT NULL AND ? IS NOT NULL "',
+        tests=(
+            "tests/test_schedule_m5s.py::test_s1_promotion_waits_for_not_before_then_sets_queued_at",
+            "tests/test_server_schedule_m5s.py::test_s1_the_tick_promotes_at_the_time_and_not_before",
+        ),
+    ),
+    Mutant(
+        # 만료가 시작 마감을 보지 않는다 — 마감이 있는 예약 · 대기 잡이 다음 주기에 전부 닫힌다
+        name="m5s-expire-ignores-deadline",
+        path="src/remote_ci_monitor/store.py",
+        old='"AND start_deadline IS NOT NULL AND start_deadline < ? ORDER BY id",',
+        new='"AND start_deadline IS NOT NULL AND ? IS NOT NULL ORDER BY id",',
+        tests=(
+            "tests/test_schedule_m5s.py::test_expiry_closes_a_promoted_job_only_after_its_deadline",
+            "tests/test_server_schedule_m5s.py::"
+            "test_s4_a_promoted_job_no_lane_takes_expires_at_the_deadline",
+        ),
+    ),
+    Mutant(
+        # 예약을 합류 대상에 넣는다 — 같은 입력의 즉시 실행이 15:00 예약에 붙어 그때까지 기다린다
+        # (결정 206 · S8)
+        name="m5s-immediate-run-joins-a-schedule",
+        path="src/remote_ci_monitor/store.py",
+        old="JOINABLE_STATES = ACTIVE_STATES - {CANCELLING}\n",
+        new="JOINABLE_STATES = (ACTIVE_STATES | SCHEDULED_STATES) - {CANCELLING}\n",
+        # 시작 마감 필터(아래 변이)만으로는 못 막는다 — 반복 시도는 마감 없는 예약이다(결정 231)
+        tests=(
+            "tests/test_schedule_m5s.py::test_nothing_joins_a_schedule_that_has_no_start_deadline",
+            "tests/test_server_schedule_m5s.py::test_s8_an_immediate_run_does_not_join_a_schedule",
+        ),
+    ),
+    Mutant(
+        # 합류 쿼리가 시작 마감을 보지 않는다 — 즉시 실행이 승격된 예약에 붙어 그 마감을 물려받고
+        # 레인이 늦으면 `expired` 로 끝난다(#253 격리 검증 P1)
+        name="m5s-join-ignores-start-deadline",
+        path="src/remote_ci_monitor/store.py",
+        old='f"AND state IN ({marks}) AND start_deadline IS NULL ORDER BY id LIMIT 1",',
+        new='f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
+        tests=(
+            "tests/test_server_schedule_m5s.py::"
+            "test_s8_an_immediate_run_does_not_join_a_promoted_schedule",
+        ),
+    ),
+    Mutant(
+        # 시각을 준 제출이 합류한다 — 지금 도는 같은 입력의 잡에 붙어 「그 시각에」가 사라진다
+        # (결정 226 · S19)
+        name="m5s-scheduled-submission-joins",
+        path="src/remote_ci_monitor/server.py",
+        old="        want_join = want_join and schedule is None  # 예약은 합류 안 함(결정 226)\n",
+        new="",
+        tests=(
+            "tests/test_server_schedule_m5s.py::"
+            "test_s19_a_schedule_does_not_join_an_active_identical_job",
+        ),
     ),
 )
 
