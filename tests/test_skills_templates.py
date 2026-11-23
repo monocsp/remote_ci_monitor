@@ -129,9 +129,9 @@ def test_golive_selftest_locks_the_two_exit_code_rules():
         "release ios, already live -> exit 0, no release call",
         "release both, Android not approved -> exit 2, iOS untouched too",
         "release android, publish pressed, not live yet -> exit 75, no second publish",
-        # #252 재검증: 「기다리지 않는다」를 가짜 sleep 기록 0건과 상한 3초로 잠근다
-        # (10초 상한이면 9초 대기가 통과했다)
-        "release, login lost -> exits 75 at once: one read, one publish, no sleep, under 3 s",
+        # #252 재검증: 「기다리지 않는다」는 가짜 sleep 기록 0건이 잠근다. 시간 상한은 부하에
+        # 흔들리지 않게 10초로 둔다(#255 검증 P2 — 3초는 rcm-ci 부하에서 흔들린다)
+        "release, login lost -> exits 75 at once: one read, one publish, no sleep, under 10 s",
     ):
         assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
 

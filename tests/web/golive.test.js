@@ -124,3 +124,16 @@ describe("the last result — not_attempted is not a failure", () => {
     assert.equal(model({ status: status("approved", "approved"), golive: { plan: null, result: result, live: [] } }).result, null);
   });
 });
+
+describe("Korean — particles follow the name, sentences end in 합쇼체 (#255 검증 P2)", () => {
+  const I18N = require("../../src/remote_ci_monitor/web/i18n.js");
+  test("the blocked reason picks 가 after iOS and Android, never a fixed 이", () => {
+    assert.equal(I18N.t("ko", "golive.why.blocked", { names: "iOS" }), "iOS가 계획에서 승인 상태가 아닙니다.");
+    assert.equal(I18N.t("ko", "golive.why.blocked", { names: "Android" }), "Android가 계획에서 승인 상태가 아닙니다.");
+  });
+  test("the cancel toast and the requested pill are full sentences", () => {
+    assert.match(I18N.t("ko", "golive.cancelled", { id: 12 }), /니다\.$/);
+    assert.match(I18N.t("ko", "golive.result.requested"), /니다\.?$/);
+  });
+});
+

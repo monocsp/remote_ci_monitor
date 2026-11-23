@@ -1688,11 +1688,13 @@ GROUPS_JS = """
 # 낱말 목록에는 한국어도 있다 — 없으면 한국어로 붙인 버튼은 한 번도 검사받지 않는다.
 # 면제는 신원으로만 한다(§17-2). M5s 결정 218 로 하나가 늘었다 — 「출시 예약」 영역
 # (`[data-golive-sheet]`) **안의** `[data-golive]` 버튼만. 같은 속성을 영역 밖에 붙이면
-# 그대로 걸린다.
+# 그대로 걸린다. 영역은 부모 쪽에서 찾는다 — `closest` 는 자기 자신을 포함하므로 버튼에 영역
+# 표시를 함께 달면 스스로를 면제했다(#255 검증 P2).
 FORBIDDEN_BUTTONS_JS = """
 [...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
   .filter(b => !b.hasAttribute('data-sheet-fix') && !b.hasAttribute('data-inputs'))
-  .filter(b => !(b.hasAttribute('data-golive') && b.closest('[data-golive-sheet]')))
+  .filter(b => !(b.hasAttribute('data-golive') && b.parentElement
+                 && b.parentElement.closest('[data-golive-sheet]')))
   .map(b => (b.textContent || b.value || '').trim())
   .filter(t => /release this version|publish|rollout|게시|출시|배포|롤아웃/i.test(t))
 """
@@ -3482,17 +3484,34 @@ def test_the_golive_exemption_holds_only_inside_the_golive_area(tmp_path):
                         ["출시 예약…", {"data-golive": "open"}, None],
                         ["Publish now", {"data-golive": "go"}, "[data-version-main]"],
                         ["지금 출시", {"data-golive-sheet": ""}, None],
+                        # 버튼 **자신**이 영역 표시를 달아도 영역 안이 아니다(`closest` 는 자기
+                        # 자신을 포함한다 — #255 검증 P2)
+                        ["게시하기", {"data-golive": "go", "data-golive-sheet": ""}, None],
                     ]
                 )
                 + ")"
             )
             assert sorted(c.eval(FORBIDDEN_BUTTONS_JS)) == sorted(
-                ["출시 예약…", "Publish now", "지금 출시"]
+                ["출시 예약…", "Publish now", "지금 출시", "게시하기"]
             )
-            # 영역 밖의 `data-golive` 를 눌러도 아무 호출이 없다
-            c.eval("document.querySelector('[data-guard-probe][data-golive=\"open\"]').click()")
-            time.sleep(0.3)
-            assert c.eval("window.rcmGoliveCalls") == []
+            # 영역 밖의 `data-golive` 를 눌러도 아무 호출이 없다. 클릭 탐침은 `#store` 안
+            # (`[data-version-main]`)에 심는다 — 본문 끝에 심으면 `#store` 의 리스너가 아예 돌지
+            # 않아 이 단언은 아무것도 시험하지 못한다(#255 검증 P2).
+            for attrs in (
+                {"data-golive": "open"},
+                {"data-golive": "open", "data-golive-sheet": ""},
+            ):
+                c.eval(
+                    "window.rcmGuardProbe("
+                    + json.dumps([["출시 예약…", attrs, "[data-version-main]"]])
+                    + ")"
+                )
+                assert c.eval(
+                    "document.querySelector('[data-guard-probe]').closest('#store') !== null"
+                )
+                c.eval("document.querySelector('[data-guard-probe]').click()")
+                time.sleep(0.3)
+                assert c.eval("window.rcmGoliveCalls") == [], attrs
             # 영역 안 — 면제된다
             c.eval(
                 "window.rcmGuardProbe("

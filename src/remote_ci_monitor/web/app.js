@@ -7080,7 +7080,9 @@
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
       // ── 출시 예약(M5s §4.5) — 영역 밖의 `data-golive` 는 아무 일도 하지 않는다 ──
       if (t.hasAttribute("data-golive")) {
-        if (t.disabled || !t.closest("[data-golive-sheet]")) return;
+        // 영역은 부모 쪽에서 찾는다 — `closest` 는 자기 자신을 포함해, 영역 표시를 단 버튼이
+        // 스스로를 영역 안으로 칠 수 있었다(#255 검증 P2)
+        if (t.disabled || !t.parentElement || !t.parentElement.closest("[data-golive-sheet]")) return;
         var act = t.getAttribute("data-golive");
         if (act === "open") goliveOpen();
         else if (act === "close") { var gf = goliveForm(); gf.open = false; gf.typed = ""; gf.at = ""; renderStore(); }

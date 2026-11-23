@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -382,3 +383,50 @@ def test_a_preset_that_is_not_a_golive_role_is_not_refused(gsrv):
         "other-golive", {"build_name": "1.0.1", "mode": "release", "confirm_build_number": "1"}
     )
     assert status == 201, body
+
+
+# ── 격리 검증 P2 (#255) ───────────────────────────────────────────────────────
+
+
+def test_six_simultaneous_releases_of_one_build_make_exactly_one_job(gsrv):
+    """결정 232 — 확인과 제출이 한 락 안에 있다. 같은 release 를 여섯이 동시에 보내도 잡은
+    하나다."""
+
+    gsrv.golive_plan_job()
+    barrier = threading.Barrier(6)
+    results: list[tuple[int, str | None]] = []
+    lock = threading.Lock()
+
+    def send() -> None:
+        barrier.wait()
+        resp = gsrv.golive(release_body())
+        with lock:
+            results.append(code_of(resp))
+
+    threads = [threading.Thread(target=send) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert sorted(results) == [(202, None)] + [(409, "golive_running")] * 5, results
+    releases = [j for j in golive_jobs(gsrv) if j.inputs.get("mode") == "release"]
+    assert len(releases) == 1, releases
+
+
+def test_post_jobs_refuses_a_golive_preset_whose_mode_defaults_to_release(gsrv):
+    """결정 235 — 막는 것은 검증을 지난 입력이다. 본문에 mode 가 없어도 기본값이 release 면
+    일반 경로로는 출시가 되지 않는다(`rcm check` 가 FAIL 로 그리는 프리셋이어도)."""
+    loose = [*GOLIVE_INPUTS[:3], {**GOLIVE_INPUTS[3], "default": "release"}, GOLIVE_INPUTS[4]]
+    gsrv.cfg.presets = tuple(
+        parse_preset(preset(GOLIVE, loose)) if p.name == GOLIVE else p for p in gsrv.cfg.presets
+    )
+    status, body = gsrv.post_jobs(GOLIVE, {"build_name": "1.0.1", "confirm_build_number": "185"})
+    assert (status, body.get("code")) == (409, "release_route_required"), body
+    assert golive_jobs(gsrv) == []
+
+
+def test_a_plan_measured_in_the_future_is_stale_not_fresh_for_ever(gsrv):
+    """plan 의 `measured_at` 이 지금보다 뒤면(시계가 틀린 스크립트) 신선하다고 믿지 않는다."""
+    gsrv.golive_plan_job({**GOLIVE_PLAN, "measured_at": "2026-09-18T12:00:00Z"})
+    status, body = gsrv.golive(release_body())
+    assert (status, body["code"]) == (409, "golive_plan_stale"), body

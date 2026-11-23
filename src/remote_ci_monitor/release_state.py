@@ -201,10 +201,12 @@ def role_entry(
         measured = parse_iso(doc.get(measured_key)) if isinstance(doc, dict) else None
         if measured is None:
             measured = job.finished_at
-        age = max(0, int((now - measured).total_seconds())) if measured is not None else None
+        raw = int((now - measured).total_seconds()) if measured is not None else None
         out["measured_at"] = iso(measured)
-        out["age_seconds"] = age
-        out["stale"] = age is None or age > max_age_minutes * 60
+        out["age_seconds"] = max(0, raw) if raw is not None else None
+        # 지금보다 뒤에 잰 문서(시계가 틀린 스크립트)는 신선하지 않다 — 나이를 0 으로 자르면 그
+        # 계획이 영원히 되돌릴 수 없는 버튼을 열어 둔다(#255 검증 P2). 모르면 낡은 것이다.
+        out["stale"] = raw is None or raw < 0 or raw > max_age_minutes * 60
         if with_build_name:
             name = doc.get("build_name") if isinstance(doc, dict) else None
             out["build_name"] = name if isinstance(name, str) else None

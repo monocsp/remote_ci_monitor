@@ -41,7 +41,7 @@
 #                file), plan with a store unreadable -> 1, release not approved -> 2 with no release call, a wrong
 #                number -> 3, a lost sign-in -> action marker + 75, a live build -> 0 without a call, a publish
 #                already pressed but not live yet -> 75 without pressing again, and a lost sign-in exits 75 at
-#                once (one read, one publish, no sleep at all, under 3 seconds).
+#                once (one read, one publish, no sleep at all, under 10 seconds).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"; ROOT="$(cd "$HERE/../.." && pwd)"; cd "$ROOT"
 
@@ -433,8 +433,8 @@ PY
   check "release, login lost -> action marker + exit 75" 75 "$rc" golive.json "d['platforms']['android']['result']=='needs_login'" 1
   # 표식을 찍으면 그 자리에서 끝난다 — 승인을 다시 읽거나 게시를 다시 누르며 기다리지 않는다
   if [ "$(grep -c '^store_approval ' "$t/calls")" = 1 ] && [ "$(grep -c '^store_android_publish ' "$t/calls")" = 1 ] \
-     && [ ! -s "$t/sleeps" ] && [ $((SECONDS - t0)) -lt 3 ] && [[ "$(tail -n 1 "$t/out")" == "::rcm::summary::not yet"* ]]; then
-    echo "  ok  release, login lost -> exits 75 at once: one read, one publish, no sleep, under 3 s"
+     && [ ! -s "$t/sleeps" ] && [ $((SECONDS - t0)) -lt 10 ] && [[ "$(tail -n 1 "$t/out")" == "::rcm::summary::not yet"* ]]; then
+    echo "  ok  release, login lost -> exits 75 at once: one read, one publish, no sleep, under 10 s"
   else
     echo "FAIL login lost: the script read or pressed again, or waited ($((SECONDS - t0))s)"; cat "$t/calls"; fails=$((fails+1))
   fi

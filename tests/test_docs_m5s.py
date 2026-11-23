@@ -166,7 +166,8 @@ OLD_PRINCIPLE = re.compile(
     r"rcm never releases after approval|must never be able to release after store approval|"
     r"release anything after store approval|releases anything after store approval|"
     r"Release after approval is a human step|publish stays in the console|게시는 콘솔에서|"
-    r"승인 뒤 출시는 여전히 사람이 콘솔에서|releases\s+nothing\.|승인 뒤 출시하는 일은 하지"
+    r"승인 뒤 출시는 여전히 사람이 콘솔에서|releases\s+nothing\.|승인 뒤 출시하는 일은 하지|"
+    r"출시 버튼 없음"
 )
 #: §3 #8 의 자리 — 코드 · 문서 · 템플릿 · 와이어프레임 · 골든 픽스처
 PRINCIPLE_PLACES = (

@@ -340,6 +340,26 @@ def test_stale_is_age_over_plan_max_age_minutes(age_min, max_age, stale):
     assert v["plan"]["stale"] is stale and v["plan"]["age_seconds"] == age_min * 60
 
 
+@pytest.mark.parametrize(
+    ("role", "preset_name", "member"),
+    [
+        ("plan", "release-plan", "plan.json"),
+        ("review", "release-review", "review-plan.json"),
+        ("golive", "release-golive", "golive-plan.json"),
+    ],
+)
+def test_a_measured_at_in_the_future_is_stale_not_fresh_for_ever(role, preset_name, member):
+    """#255 검증 P2 — 문서의 `measured_at` 이 지금보다 뒤면 그 계획은 신선하지 않다. 예전에는
+    나이가 0 으로 잘려 시계가 틀린 계획이 영원히 되돌릴 수 없는 버튼을 열어 두었다. 셋(plan ·
+    review plan · golive plan)이 같은 규칙을 쓴다."""
+    future = (NOW + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    doc = json.dumps({**PLAN, "measured_at": future}).encode()
+    v = view([git_job(1, preset_name)], {1: files(member)}, {(1, member): doc})
+    entry = v[role] if role == "plan" else v[role]["plan"]
+    assert entry["stale"] is True, entry
+    assert entry["age_seconds"] == 0
+
+
 def test_a_bad_measured_at_is_not_a_date_and_the_job_time_is_used():
     doc = json.dumps({**PLAN, "measured_at": "yesterday"}).encode()
     v = view([git_job(1, "release-plan")], {1: files("plan.json")}, {(1, "plan.json"): doc})

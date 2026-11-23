@@ -63,7 +63,7 @@ of a key bumps that number and is listed here.
   `release-status` and `release-golive` (`priority = "high"`, `start_deadline_seconds = 3600`,
   `concurrency_group = "store-browser-<repo>"` shared with the project's Play Console sign-in
   preset) and the two roles to `profile.release.toml`. The go-live selftest now proves the script
-  never sleeps when a sign-in is lost (a recording `sleep` stub, under 3 seconds), and it now runs
+  never sleeps when a sign-in is lost (a recording `sleep` stub), and it now runs
   in under two seconds: the script starts Python a few times per run instead of once per field.
   ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 
