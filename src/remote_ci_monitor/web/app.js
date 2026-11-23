@@ -2611,11 +2611,15 @@
   var STORE_CHECK_TONE = { preparing: "na", waiting_for_review: "running", in_review: "running", approved: "ok", rejected: "bad",
     releasing: "running", released: "ok", unknown: "none" };
   var STORE_CHECK_WAITING = { queued: 1, uploading: 1, running: 1, cancelling: 1 };
+  var STORE_CHECK_FAILED = { failed: 1, timed_out: 1, lost: 1 };
   function storeCheckText(v) { return typeof v === "string" && v ? v : isNum(v) ? String(v) : DASH; }
   /**
    * 검토 패널의 「스토어 심사 상태」 모형. 프로파일에 `presets.status` 가 없으면 null(절이 없다).
    * `stale` 은 서버의 판정이고(`plan_max_age_minutes`), 판정이 없으면 낡은 것으로 본다. 나이는 서버가
    * `checked_at` 으로 잰 `age_seconds` 다. `checking` 은 아직 끝나지 않은 가장 새 status 잡이다.
+   * `lastFailed` 는 가장 새 status 잡이 실패 · 시간 초과 · 유실로 끝났고 그 잡이 지금 그리는 문서보다
+   * 새것일 때다 — 「새로 조회」가 실패해도 화면이 예전 상태를 아무 말 없이 그리지 않게 한다. 문서를
+   * 쓴 잡이 성공하지 않았으면 `jobStateOk` 가 거짓이고 `jobStateText` 가 그 상태 낱말이다.
    */
   function storeCheckModel(release, profile, lang) {
     var presets = profile && profile.presets ? profile.presets : {};
@@ -2629,11 +2633,18 @@
         raw: d && typeof d.raw_state === "string" && d.raw_state ? d.raw_state : null,
         version: storeCheckText(d && d.version), build: storeCheckText(d && (p === "ios" ? d.build : d.version_code)) };
     });
-    var checking = null;
+    var checking = null, newest = null;
     (release && Array.isArray(release.jobs) ? release.jobs : []).forEach(function (j) {
-      if (j && j.role === "status" && isNum(j.id) && STORE_CHECK_WAITING[j.state] && (!checking || j.id > checking.id)) checking = { id: j.id, state: j.state };
+      if (!j || j.role !== "status" || !isNum(j.id)) return;
+      if (!newest || j.id > newest.id) newest = j;
+      if (STORE_CHECK_WAITING[j.state] && (!checking || j.id > checking.id)) checking = { id: j.id, state: j.state };
     });
-    return { present: !!e, jobId: e && isNum(e.job_id) ? e.job_id : null, jobState: e && e.state ? e.state : null,
+    var docJob = e && isNum(e.job_id) ? e.job_id : null;
+    var lastFailed = newest && STORE_CHECK_FAILED[newest.state] && (docJob == null || newest.id > docJob)
+      ? { id: newest.id, state: newest.state, text: stateWord(newest.state, lang) } : null;
+    var jobStateOk = !e || e.state === "succeeded";
+    return { present: !!e, jobId: docJob, jobState: e && e.state ? e.state : null,
+      jobStateOk: jobStateOk, jobStateText: jobStateOk ? null : stateWord(e.state, lang), lastFailed: lastFailed,
       checkedAt: e && e.measured_at ? e.measured_at : null, age: e && isNum(e.age_seconds) ? fmtAgo(e.age_seconds, lang) : DASH,
       stale: !e || e.stale !== false, docError: e && typeof e.doc_error === "string" ? e.doc_error : null,
       platforms: platforms, checking: checking };
@@ -6453,7 +6464,9 @@
     if (!m) return "";
     var maxAge = isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30;
     var h = '<div class="store-check" data-store-check data-stale="' + (m.stale ? "1" : "0") + '"><b>' + esc(tr("store_check.title")) + "</b> ";
-    if (m.present) h += '<span class="sub" data-store-check-age>' + esc(tr("store_check.checked", { age: m.age, id: m.jobId != null ? m.jobId : DASH })) + "</span>";
+    if (m.present) h += '<span class="sub" data-store-check-age>' + esc(tr("store_check.checked", { age: m.age, id: m.jobId != null ? m.jobId : DASH })) + "</span>"
+      + (m.jobStateOk ? "" : ' <span class="bad" data-store-check-job-state="' + esc(m.jobState || "") + '">' + esc(m.jobStateText) + "</span>");
+    if (m.lastFailed) h += '<p class="bad" data-store-check-failed="' + esc(m.lastFailed.state) + '">' + esc(tr("store_check.last_failed", { id: m.lastFailed.id, state: m.lastFailed.text, older: m.present })) + "</p>";
     h += '<ul class="plain">' + m.platforms.map(function (p) {
       var glyph = { ok: "✓", na: "·", running: "▶", bad: "✗", none: "·" }[p.tone] || "·";
       return '<li data-store-check-platform="' + esc(p.platform) + '" data-state="' + esc(p.state) + '"><span>' + esc(tr("review.check." + p.platform)) + "</span> "

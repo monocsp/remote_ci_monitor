@@ -1882,10 +1882,11 @@ def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
 #
 # RELEASE_STUB_JS 위에 status 역할을 덧씌운다: 프로파일에 `presets.status`, 릴리스 보기에 `status`
 # 항목(iOS 승인 · Android 는 목록에 없는 값)과 도는 status 잡 하나, 그리고 `checkStatus` 호출.
-# `?stale=1` 이면 오래된 상태다.
+# `?stale=1` 이면 오래된 상태다. `?checkfail=1` 이면 그 뒤의 조회 #690 이 실패했다.
 STORE_CHECK_STUB_JS = r"""
 (() => {
   const stale = /[?&]stale=1(&|$)/.test(location.search);
+  const checkFailed = /[?&]checkfail=1(&|$)/.test(location.search);
   const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
   const api = window.rcmStoreApi, repo = api.repo, release = api.release;
   const statusDoc = { schema: 1, checked_at: new Date(Date.now() - 120000).toISOString(),
@@ -1902,7 +1903,8 @@ STORE_CHECK_STUB_JS = r"""
     const body = Object.assign({}, r.body, {
       status: { job_id: 680, state: "succeeded", measured_at: statusDoc.checked_at,
                 age_seconds: stale ? 3000 : 120, stale: stale, doc: statusDoc },
-      jobs: [{ id: 690, preset: "release-status", role: "status", state: "running",
+      jobs: [{ id: 690, preset: "release-status", role: "status",
+               state: checkFailed ? "failed" : "running",
                sha: "9e1c4d2f" + "0".repeat(32), ref: "main",
                started_at: new Date(Date.now() - 5000).toISOString(), finished_at: null,
                artifacts: [] }].concat(r.body.jobs) });
@@ -1984,6 +1986,11 @@ def test_store_review_panel_draws_both_stores_state_and_checks_again(tmp_path):
             assert c.eval(_q(CHECK + " [data-store-check-age]", ".textContent")).startswith(
                 "checked 50m ago"
             )
+            # 새로 조회가 실패했다 — 예전 상태를 아무 말 없이 그리지 않는다
+            c.open(base + "&checkfail=1#/store/app/status", ready_js=ready)
+            failed = c.eval(_q(CHECK + " [data-store-check-failed]", ".textContent"))
+            assert failed.startswith("Last check #690 failed."), failed
+            assert c.eval(_q(CHECK + " [data-store-check-running]")) is None
             assert c.page_errors() == []
     finally:
         srv.close()

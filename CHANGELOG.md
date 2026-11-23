@@ -25,7 +25,9 @@ of a key bumps that number and is listed here.
   `status.json` — one of eight words, `unknown` for any other, the store's own word beside it, how
   long ago it was checked and a note when that is older than `plan_max_age_minutes` — and
   **Check again** submits the preset through the new `POST /api/repos/<repo>/release/status`
-  (any client token; `build_name` is optional). `GET …/release` now reads each role preset
+  (any client token; `build_name` is optional). When the newest check failed, timed out or was
+  lost, the panel says so above the older state, and a state written by a job that did not
+  succeed carries that job's state word. `GET …/release` now reads each role preset
   through its own window of 500 jobs, so frequent `status` jobs no longer push the last plan or
   review out of the view, and they take at most 3 rows of their own in `jobs[]`; a running
   `status` job is not the Build · upload row's current step.

@@ -139,9 +139,10 @@
      서비스 venv 의 rcm 을 못 알아봄 · 닫힌 PR 의 합류한 잡을 취소함 · `guard_merge` 가 붙여 쓴
      `-Ro/r` 를 못 봄 · `-n` 에서 `--dist` 를 loadgroup 으로 안 정함 · timeout 이 하네스의 새 세션
      자식을 남김 (`docs/m5r-workplan.md` §13.8)
-  M5s E — `m5s-*` 다섯: 역할 프리셋을 다시 한 창으로 읽음 · status 행이 jobs[] 의 50 자리를 같이
+  M5s E — `m5s-*` 여덟: 역할 프리셋을 다시 한 창으로 읽음 · status 행이 jobs[] 의 50 자리를 같이
      씀 · 필요 없는 묶음 목록까지 읽음 · 도는 status 잡이 「지금 하는 일」이 됨 · 목록에 없는
-     상태 값을 믿음 (`docs/m5s-workplan.md` §4.4 · §3 #11)
+     상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
+     모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -1155,6 +1156,41 @@ MUTANTS = (
         path="src/remote_ci_monitor/web/app.js",
         old='var st = d && STORE_CHECK_STATES.indexOf(d.state) >= 0 ? d.state : "unknown";',
         new='var st = d && d.state ? String(d.state).toLowerCase() : "unknown";',
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 행이 찼으면 문서 찾기까지 건너뛴다 — 묶음 없는 status 잡 셋이나 새 다른 역할 잡 50개
+        # 뒤의 status.json · plan.json 을 잃는다(#254 격리 검증 P1)
+        name="m5s-release-view-skips-documents-when-rows-are-full",
+        path="src/remote_ci_monitor/release_state.py",
+        old="        if not wants_row and not missing:\n",
+        new="        if not wants_row:\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_full_status_rows_still_find_an_older_status_document",
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_full_rows_still_find_an_older_plan_document",
+        ),
+    ),
+    Mutant(
+        # 프리셋마다 읽은 잡을 합친 뒤 새것부터 다시 세우지 않는다 — jobs[] 가 프리셋 순서가 되고
+        # 「역할의 최신」이 옛 잡이 된다(#254 격리 검증 P2)
+        name="m5s-release-view-merged-jobs-unsorted",
+        path="src/remote_ci_monitor/server.py",
+        old="        jobs = [by_id[i] for i in sorted(by_id, reverse=True)]\n",
+        new="        jobs = list(by_id.values())\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_jobs_from_several_presets_are_newest_first",
+        ),
+    ),
+    Mutant(
+        # 실패한 「새로 조회」를 모른 척한다 — 예전 상태가 아무 말 없이 그려진다
+        name="m5s-web-failed-check-silent",
+        path="src/remote_ci_monitor/web/app.js",
+        old="var lastFailed = newest && STORE_CHECK_FAILED[newest.state] &&",
+        new="var lastFailed = false && newest && STORE_CHECK_FAILED[newest.state] &&",
         tests=("tests/web/store_status.test.js",),
         runner="node",
     ),

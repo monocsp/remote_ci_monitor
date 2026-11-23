@@ -250,3 +250,47 @@ def test_release_status_panel_unneeded_status_bundles_are_not_read():
     )
     assert v["status"]["job_id"] == 500
     assert len(seen) <= STATUS_ROWS_LIMIT, seen
+
+
+def test_release_status_panel_full_status_rows_still_find_an_older_status_document():
+    """status 행 3개가 묶음 없는 잡으로 찼어도 더 오래된 잡의 status.json 을 찾는다 — 행이
+    찼다고 문서 찾기까지 건너뛰면 status 가 null 이 된다(#254 격리 검증 P1)."""
+    jobs = [git_job(i, "release-status", FAILED) for i in range(205, 200, -1)]
+    jobs.append(git_job(200, "release-status"))
+    v = _pure_view(
+        jobs, {200: files("status.json")}, {(200, "status.json"): json.dumps(STATUS).encode()}
+    )
+    assert [r["id"] for r in v["jobs"]] == [205, 204, 203]
+    assert v["status"] is not None and v["status"]["job_id"] == 200
+
+
+def test_release_status_panel_full_rows_still_find_an_older_plan_document():
+    """plan 잡보다 새 다른 역할 잡이 50개를 넘어도 plan.json 을 찾는다."""
+    uploads = [git_job(i, "release-upload") for i in range(170, 100, -1)]
+    plan = {"schema": 1, "build_name": "1.0.1", "n": 181, "measured_at": "2026-09-04T00:48:12Z"}
+    v = _pure_view(
+        [*uploads, git_job(100, "release-plan")],
+        {100: files("plan.json")},
+        {(100, "plan.json"): json.dumps(plan).encode()},
+    )
+    assert len(v["jobs"]) == JOBS_LIMIT and 100 not in {r["id"] for r in v["jobs"]}
+    assert v["plan"] is not None and v["plan"]["job_id"] == 100
+
+
+def test_release_status_panel_jobs_from_several_presets_are_newest_first(open_ssrv):
+    """서버는 프리셋마다 따로 읽어 합친다 — 합친 목록이 새것부터여야 `jobs[]` 도, 「역할의
+    최신」도 맞다."""
+    srv = open_ssrv
+    ids = [
+        srv.plan_job(),
+        srv.role_job("release-status", {"status.json": json.dumps(STATUS_DOC).encode()}),
+        srv.role_job("release-upload", None),
+        srv.plan_job(),
+        srv.role_job("release-status", None, state=FAILED),
+        srv.role_job("release-upload", None),
+    ]
+    body = srv.req("GET", "/api/repos/app/release")[1]
+    got = [r["id"] for r in body["jobs"]]
+    assert got == sorted(ids, reverse=True), got
+    assert body["plan"]["job_id"] == ids[3]
+    assert body["status"]["job_id"] == ids[1]

@@ -121,6 +121,44 @@ describe("storeCheckModel — the two stores' review state, read only (§4.4)", 
   });
 });
 
+describe("storeCheckModel — a failed check and a document from a failed job say so (#254 review P2)", () => {
+  const row = (id, state) => ({ id, preset: "release-status", role: "status", state });
+  test("the newest status job failed after the document: last check #N failed", () => {
+    ["failed", "timed_out", "lost"].forEach((st) => {
+      const m = S.storeCheckModel(release(entry(statusDoc()), [row(72, st), row(70, "succeeded")]), PROFILE, "en");
+      assert.deepEqual(m.lastFailed, { id: 72, state: st, text: rcm.stateWord(st, "en") }, st);
+      assert.equal(m.checking, null);
+    });
+  });
+  test("only the newest status job counts, and only when it is newer than the document", () => {
+    const newerOk = S.storeCheckModel(release(entry(statusDoc()), [row(73, "succeeded"), row(72, "failed")]), PROFILE, "en");
+    assert.equal(newerOk.lastFailed, null);
+    const older = S.storeCheckModel(release(entry(statusDoc(), { job_id: 75 }), [row(72, "failed")]), PROFILE, "en");
+    assert.equal(older.lastFailed, null);
+    const running = S.storeCheckModel(release(entry(statusDoc()), [row(74, "running"), row(72, "failed")]), PROFILE, "en");
+    assert.equal(running.lastFailed, null);
+    assert.deepEqual(running.checking, { id: 74, state: "running" });
+  });
+  test("no document yet and the only check was lost: it says so", () => {
+    const m = S.storeCheckModel(release(null, [row(9, "lost")]), PROFILE, "en");
+    assert.deepEqual(m.lastFailed, { id: 9, state: "lost", text: rcm.stateWord("lost", "en") });
+  });
+  test("a document from a job that did not succeed carries the job's state word", () => {
+    const bad = S.storeCheckModel(release(entry(statusDoc(), { state: "failed" })), PROFILE, "ko");
+    assert.equal(bad.jobStateOk, false);
+    assert.equal(bad.jobStateText, rcm.stateWord("failed", "ko"));
+    const good = S.storeCheckModel(release(entry(statusDoc())), PROFILE, "en");
+    assert.equal(good.jobStateOk, true);
+    assert.equal(good.jobStateText, null);
+  });
+  test("the failed-check line has en and ko text", () => {
+    ["en", "ko"].forEach((lang) => {
+      const text = I18N.t(lang, "store_check.last_failed", { id: 72, state: rcm.stateWord("failed", lang) });
+      assert.ok(text.indexOf("#72") >= 0 && text.indexOf(rcm.stateWord("failed", lang)) >= 0, lang + " " + text);
+    });
+  });
+});
+
 describe("buildLayers — a status job is not «what runs now» (§3 #11 carry-over)", () => {
   test("a running status job does not take the bar and is not an item", () => {
     const jobs = [
