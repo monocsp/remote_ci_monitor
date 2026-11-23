@@ -226,7 +226,11 @@ def chain_json(job: Job) -> dict[str, Any]:
         "attempt": job.attempt,
         "retry_of": job.retry_of,
         "retried_as": job.retried_as,
-        "max_attempts": job.retry_max_attempts if job.retry_on_exit is not None else None,
+        "max_attempts": (
+            job.retry_max_attempts
+            if job.retry_on_exit is not None and not job.retry_disabled
+            else None
+        ),
     }
 
 

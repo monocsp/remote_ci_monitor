@@ -188,6 +188,7 @@ def test_the_state_file_keeps_a_secret_whose_root_was_only_retried(fake, monkeyp
     """`retried` 는 끝이 아니다 — 상태 파일 정리가 사슬의 비밀을 「끝난 잡」으로 버리면 머리를
     멈출 비밀이 사라진다. 정리가 묻는 함수(`finished`)가 그 잡을 끝나지 않은 것으로 답한다."""
     fake.route("GET", "/jobs/57", doc(57, "retried", exit_code=75, retried_as=58))
+    fake.route("GET", "/jobs/58", doc(58, "scheduled", attempt=2))
     fake.route("GET", "/jobs/60", doc(60, "succeeded", exit_code=0))
     seen: dict[str, Any] = {}
     monkeypatch.setattr(submissions, "remember", lambda *a, **kw: seen.update(kw))
@@ -197,6 +198,24 @@ def test_the_state_file_keeps_a_secret_whose_root_was_only_retried(fake, monkeyp
     finished = seen["finished"]
     assert finished(fake.url, 57) is False
     assert finished(fake.url, 60) is True
+
+
+def test_the_state_file_drops_a_chain_secret_once_the_chain_head_ended(fake, monkeypatch):
+    """#256 검증 P2 — 뿌리 잡은 끝까지 `retried` 다. 그것만 보면 그 비밀은 상한 정리에서 영영
+    빠진다. `retried_as` 를 따라가 사슬 머리의 상태로 판정한다."""
+    fake.route("GET", "/jobs/57", doc(57, "retried", exit_code=75, retried_as=58))
+    fake.route("GET", "/jobs/58", doc(58, "retried", exit_code=75, retried_as=59))
+    fake.route("GET", "/jobs/59", doc(59, "exhausted", exit_code=75))
+    fake.route("GET", "/jobs/70", doc(70, "retried", exit_code=75, retried_as=71))
+    fake.route("GET", "/jobs/71", doc(71, "scheduled", attempt=2))
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(submissions, "remember", lambda *a, **kw: seen.update(kw))
+    client = Client(fake.url, "alice-token")
+    resp = {"submission": {"id": "s61", "cancel_token": "tok-" + "z" * 20}, "joined": False}
+    cli._keep_submission(client, 61, resp)
+    finished = seen["finished"]
+    assert finished(fake.url, 57) is True  # 사슬이 끝났다 — 버려도 된다
+    assert finished(fake.url, 70) is False  # 머리가 아직 기다린다
 
 
 # ── 스킬 템플릿 ─────────────────────────────────────────────────────────────

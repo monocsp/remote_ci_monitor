@@ -76,6 +76,17 @@ repo = "app"
 interval_seconds = 60
 
 [[presets]]
+name = "kept"
+argv = ["sh", "-c", "echo out > out.txt; exit 75"]
+source_modes = ["git_ref"]
+repo = "app"
+artifacts = ["out.txt"]
+keep = true
+[presets.retry]
+interval_seconds = 60
+max_attempts = 2
+
+[[presets]]
 name = "login"
 argv = ["sh", "-c", "i=0; while [ ! -f {release} ] && [ $i -lt 300 ]; do sleep 0.1; \
 i=$((i+1)); done"]
@@ -277,3 +288,38 @@ def test_s27_a_retry_attempt_held_by_its_group_waits_without_expiring(live):
     live.release.write_text("go")
     assert live.wait_state(login, {SUCCEEDED}) == SUCCEEDED
     assert live.wait_state(second, {RETRIED}) == RETRIED  # 그룹이 풀리면 돈다
+
+
+def test_a_cancel_between_the_verdict_and_the_finish_closes_cancelled(live, monkeypatch):
+    """#256 검증 P2(a) — 로컬 레인이 `retried` 로 판정한 뒤 `store.finish` 전에 취소가 끼면
+    저장소가 `retried` 를 거절한다. 레인은 그 잡을 `cancelled` 로 닫아야 한다(다음 시도 없음).
+    그 대체 경로가 없으면 잡은 `cancelling` 으로 영영 남는다."""
+    real = Store.finish
+
+    def cancel_first(self, job_id, state, **kw):
+        if state == RETRIED:
+            self.request_cancel(job_id, "alice-laptop", kw["now"], 1)
+        return real(self, job_id, state, **kw)
+
+    monkeypatch.setattr(Store, "finish", cancel_first)
+    root = live.git("later")["job_id"]
+    assert live.wait_state(root, {CANCELLED, RETRIED}) == CANCELLED
+    assert live.store.list_scheduled() == []
+    assert [j.id for j in live.store.chain_jobs(root)] == [root]
+
+
+def test_a_local_keep_attempt_that_exits_75_leaves_no_bundle_and_no_shelf_row(live):
+    """#256 검증 P2(b) — 보관은 사슬의 마지막 시도만(결정 228). 로컬 레인은 반복할 시도의 묶음을
+    모으지도 않는다 — 파일도, 묶음 행도, 보관 행도 없다."""
+    root = live.git("kept")["job_id"]
+    second = live.next_of(root)
+    conn = live.store._conn()
+    for table in ("job_artifacts", "shelf_items"):
+        n = conn.execute(f"SELECT count(*) FROM {table} WHERE job_id=?", (root,)).fetchone()[0]
+        assert n == 0, table
+    assert not (live.data / "artifacts" / str(root)).exists()
+    live.promote()
+    assert live.wait_state(second, {EXHAUSTED}) == EXHAUSTED
+    # 마지막 시도는 모은다
+    row = conn.execute("SELECT state FROM job_artifacts WHERE job_id=?", (second,)).fetchone()
+    assert row is not None and row[0] == "ready"

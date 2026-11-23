@@ -61,13 +61,15 @@ of a key bumps that number and is listed here.
   group never turns it `expired`. The last attempt that still exits 75 ends in the new final state
   `exhausted` (`rcm wait` exit 1). Only a preset that declares the table retries, and it must take
   `git_ref` sources only; the policy is frozen on the job at submission, and `"retry": false` in a
-  submission turns it off for that job. `rcm wait` and `rcm run` follow `retried_as` to the end of
-  the chain (`--timeout` covers the chain, `--fetch-artifacts` takes the last attempt's files) and
-  the final JSON carries `chain_id` and `attempts[]`; `rcm cancel` with any id of the chain stops
-  the live attempt, with the first submission's cancel token. A cancel that lands as an attempt
-  exits 75 wins and no next attempt is made. Job rows in `GET /jobs/<id>` and `/api/status` carry
-  `chain_id`, `attempt`, `retry_of`, `retried_as` and `max_attempts`, presets carry `retry`, and
-  `/api/health` carries `retry_min_client_version` (keys added only — `schema_version` stays 1).
+  submission turns it off for that job (a submission joins only a job with the same frozen policy,
+  and a retry attempt supersedes nothing when it enters the queue). `rcm wait` and `rcm run`
+  follow `retried_as` to the end of the chain (`--timeout` covers the chain, `--fetch-artifacts`
+  takes the last attempt's files) and the final JSON carries `chain_id` and `attempts[]`;
+  `rcm cancel` with any id of the chain stops the live attempt, with the first submission's
+  cancel token. A cancel that lands as an attempt exits 75 wins and no next attempt is made. Job rows in
+  `GET /jobs/<id>` and `/api/status` carry `chain_id`, `attempt`, `retry_of`, `retried_as` and
+  `max_attempts`, presets carry `retry`, and `/api/health` carries `retry_min_client_version`
+  (keys added only — `schema_version` stays 1).
   ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
 - **An `::rcm::action::` marker lasts across the attempts of a chain.** The chain shows the last
   marker of its most recent attempt that ran until an attempt runs to its end without one, so the

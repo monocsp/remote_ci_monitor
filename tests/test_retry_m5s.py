@@ -172,6 +172,11 @@ def test_submission_freezes_the_policy_and_the_root_is_its_own_chain(store):
     assert j.retry_disabled is False
     off = make(store, inputs={"build_name": "1.2.1"}, retry_disabled=True)
     assert off.retry_on_exit == 75 and off.retry_disabled is True
+    # 반복을 끈 잡은 사슬이 아니다 — `rcm wait` JSON 에 `attempts[]` 가 붙지 않는다(#256 검증 P2)
+    assert off.chain_id is None
+    from remote_ci_monitor.core.status import chain_json
+
+    assert chain_json(off)["max_attempts"] is None and chain_json(off)["chain_id"] is None
     plain = make(store, inputs={"build_name": "1.2.2"}, retry=None)
     assert plain.chain_id is None and plain.retry_on_exit is None
 
@@ -576,3 +581,171 @@ def test_a_scheduled_row_without_a_chain_mark_has_null_reason_and_action(srv):
     _, doc = srv.req("GET", "/api/status", token="alice")
     row = next(r for p in doc["pools"] for r in p["scheduled"] if r["id"] == second)
     assert row["reason"] is None and row["action"] is None
+
+
+# ── #256 격리 검증이 찾은 것 ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def shas(monkeypatch):
+    """ref 를 풀 때마다 새 sha — 같은 브랜치에 새 커밋이 들어온 모양."""
+    import itertools
+
+    import remote_ci_monitor.server as rcm_server
+
+    counter = itertools.count(1)
+    monkeypatch.setattr(
+        rcm_server,
+        "resolve_ref",
+        lambda url, ref, *, timeout, credential=None: f"{next(counter):040x}",
+    )
+
+
+def supersede_server(tmp_path, *, supersede: str = "waiting") -> WorkerServer:
+    from test_worker_api import WORKER_PRESETS
+
+    s = WorkerServer(tmp_path)
+    s.cfg.presets = (
+        *(parse_preset(p) for p in WORKER_PRESETS),
+        parse_preset(
+            sh(
+                "d",
+                "exit 75",
+                source_modes=["git_ref"],
+                repo="app",
+                supersede=supersede,
+                retry={"on_exit": 75, "interval_seconds": 60, "max_attempts": 3},
+            )
+        ),
+    )
+    return s
+
+
+def branch_submit(srv, token: str = "alice", ref: str = "feat/x", **extra: Any):
+    body = {
+        "preset": "d",
+        "inputs": {},
+        "source": {"mode": "git_ref", "ref": ref},
+        "requester_label": f"{token}@host",
+        **extra,
+    }
+    return srv.req("POST", "/jobs", token=token, json_body=body)
+
+
+def test_a_promoted_retry_attempt_does_not_supersede_a_newer_commit(tmp_path, shas):
+    """P1 — 다음 시도는 옛 sha 를 물려받고 id 는 새로 받는다. 승격할 때 supersede 를 부르면 같은
+    브랜치에 들어온 더 새 커밋의 잡을 「옛 잡」으로 치운다. 다음 시도는 새 제출이 아니다."""
+    srv = supersede_server(tmp_path)
+    try:
+        _, a = branch_submit(srv)
+        srv.registered("build-02")
+        assert srv.claimed("build-02") == a["job_id"]
+        _, b = branch_submit(srv)  # 새 커밋 — waiting 모드라 도는 A 는 그대로
+        assert srv.store.get_job(b["job_id"]).state == QUEUED
+        status, body = srv.finish("build-02", a["job_id"], "failed", exit_code=75)
+        assert status == 200, body
+        c = srv.store.get_job(a["job_id"]).retried_as
+        judged: list[int] = []
+        import remote_ci_monitor.server as rcm_server
+
+        real = rcm_server.superseded_by
+        rcm_server.superseded_by = lambda new, *a, **kw: (
+            judged.append(new.id) or real(new, *a, **kw)
+        )
+        try:
+            srv.clock.advance(61)
+            srv.app.tick_schedule()
+        finally:
+            rcm_server.superseded_by = real
+        assert c not in judged  # 다음 시도는 supersede 판정에도 가지 않는다
+        assert srv.store.get_job(c).state == QUEUED
+        newer = srv.store.get_job(b["job_id"])
+        assert newer.state == QUEUED, (newer.state, newer.summary)
+    finally:
+        srv.close()
+
+
+def test_a_retry_attempt_is_never_the_new_job_of_a_supersede(store):
+    """방어 — `superseded_by` 도 다음 시도를 「새 잡」으로 보지 않는다."""
+    from remote_ci_monitor.core.supersede import SUPERSEDE_ALL, superseded_by
+
+    src = Source(mode="git_ref", repo="app", ref="feat/x", sha="a" * 40, base_sha="a" * 40)
+    j = make(store, source=src)
+    run(store, j.id)
+    newer = make(store, source=Source(mode="git_ref", repo="app", ref="feat/x", sha="b" * 40))
+    nxt = store.get_job(retry_once(store, j.id, at(0)))
+    assert nxt.id > newer.id and newer.state == QUEUED
+    assert superseded_by(nxt, [newer], SUPERSEDE_ALL) == []
+
+
+def test_a_retry_wanting_submission_does_not_join_a_retry_false_job(tmp_path):
+    """P2 — 합류하면 그 잡의 얼린 정책을 받는다. 반복을 원하는 제출이 `retry: false` 잡(또는
+    반복을 선언하기 전의 잡)에 붙으면 반복을 잃는다. 얼린 정책이 같을 때만 합류한다."""
+    srv = supersede_server(tmp_path, supersede="off")
+    try:
+        _, first = submit(srv, preset="d", retry=False)
+        status, second = submit(srv, token="bob", preset="d")
+        assert status == 201 and second["joined"] is False, second
+        assert srv.store.get_job(second["job_id"]).retry_disabled is False
+        status, third = submit(srv, token="bob", preset="d", retry=False)
+        assert third["joined"] is True and third["job_id"] == first["job_id"]
+    finally:
+        srv.close()
+
+
+def test_a_job_from_before_the_declaration_is_not_joined_by_a_retrying_submission(store):
+    plain = make(store, retry=None)
+    key = join_key(plain.preset, plain.inputs, plain.source.identity)
+    assert store.join_or_bump(key, "bob-desk", "bob@desk", 0, at(1), retry=POLICY) is None
+    joined = store.join_or_bump(key, "bob-desk", "bob@desk", 0, at(1))
+    assert joined is not None and joined.id == plain.id
+
+
+def ready_bundle(tmp_path):
+    from remote_ci_monitor.collect import CollectResult
+    from remote_ci_monitor.core import artifacts as art
+    from remote_ci_monitor.core.artifacts import BundleFile
+
+    return CollectResult(
+        state=art.READY,
+        files=(BundleFile(path="out.txt", size=3, sha256="0" * 64, mode=0o644),),
+        total_bytes=3,
+        bundle_bytes=10,
+        bundle_sha256="1" * 64,
+        bundle_path=tmp_path / "bundle.tar",
+    )
+
+
+def test_a_retried_finish_writes_no_bundle_even_when_given_one(store, tmp_path):
+    """P2(b) — 보관과 묶음은 마지막 시도만(결정 228). 저장소가 스스로 막는다."""
+    store.shelf_enabled = True
+    j = make(store, keep=True)
+    run(store, j.id)
+    assert store.finish(j.id, RETRIED, now=at(5), exit_code=75, bundle=ready_bundle(tmp_path))
+    conn = store._conn()
+    assert (
+        conn.execute("SELECT count(*) FROM job_artifacts WHERE job_id=?", (j.id,)).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT count(*) FROM shelf_items WHERE job_id=?", (j.id,)).fetchone()[0] == 0
+    )
+
+
+@pytest.mark.parametrize("shelf_on", [True, False])
+def test_a_remote_bundle_of_a_retried_attempt_expires_at_once(store, tmp_path, shelf_on):
+    """P2(c) — 원격 워커는 끝을 알리기 전에 묶음을 올린다. `retried` 로 닫으면 그 묶음은 그
+    시각에 만료되고, 그 시도의 보관 행(보관함이 꺼져 곧장 `failed` 로 선 것까지)은 접는다."""
+    store.shelf_enabled = shelf_on
+    j = make(store, keep=True)
+    run(store, j.id)
+    store.publish_bundle(j.id, ready_bundle(tmp_path), now=at(3), expires_at=at(3 + 86400))
+    conn = store._conn()
+    shelf = conn.execute("SELECT state FROM shelf_items WHERE job_id=?", (j.id,)).fetchone()
+    assert shelf is not None and shelf[0] == ("pending" if shelf_on else "failed")
+    retry_once(store, j.id, at(9))
+    row = conn.execute("SELECT expires_at FROM job_artifacts WHERE job_id=?", (j.id,)).fetchone()
+    assert row[0] == pytest.approx(at(9).timestamp())
+    assert (
+        conn.execute("SELECT count(*) FROM shelf_items WHERE job_id=?", (j.id,)).fetchone()[0] == 0
+    )

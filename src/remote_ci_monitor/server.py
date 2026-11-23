@@ -3922,11 +3922,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         want_join = want_join and placed["target_worker"] is None
         # 예약은 합류하지 않는다(M5s 결정 226) — 지금 도는 잡에 붙으면 「그 시각에」가 사라진다
         want_join = want_join and schedule is None
-        # 반복을 끈 제출은 반복하는 잡에 붙지 않는다(M5s) — 붙으면 그 잡의 정책을 받는다
-        want_join = want_join and not (preset.retry is not None and retry["retry_disabled"])
         if want_join:
+            # 얼린 반복 정책이 같은 잡에만 붙는다(M5s · #256 검증) — 합류자는 그 잡의 정책을 받는다
             joined = self.store.join_or_bump_with_submission(
-                jk, token.name, label, priority, now, keep=keep
+                jk, token.name, label, priority, now, keep=keep, **retry
             )
             if joined is not None:
                 existing, sid, cancel_token = joined
@@ -4517,11 +4516,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         want_join = want_join and placed.get("target_worker") is None
         want_join = want_join and schedule is None  # 예약은 합류 안 함(결정 226)
         retry = retry or {}
-        # 반복을 끈 제출은 반복하는 잡에 붙지 않는다(M5s) — 붙으면 그 잡의 정책을 받는다
-        want_join = want_join and not (preset.retry is not None and retry.get("retry_disabled"))
         if want_join:
+            # 얼린 반복 정책이 같은 잡에만 붙는다(M5s · #256 검증) — 합류자는 그 잡의 정책을 받는다
             joined = self.store.join_or_bump_with_submission(
-                jk, token.name, label, priority, now, keep=keep
+                jk, token.name, label, priority, now, keep=keep, **retry
             )
             if joined is not None:
                 existing, sid, cancel_token = joined
@@ -4602,6 +4600,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             job = self.store.get_job(job_id)
             if job is not None and job.no_supersede:
                 return []  # 제출이 끈 것을 잡 행에 얼렸다(M5s 결정 237) — 재시작해도 잊지 않는다
+            if job is not None and job.retry_of is not None:
+                # 반복의 다음 시도(M5s)는 새 제출이 아니라 이어서 도는 것이다 — 승격할 때 치울
+                # 옛 잡이 없다. 옛 sha 를 물려받았으므로 판정에 넣으면 더 새 커밋을 치운다(#256 P1)
+                return []
             preset = self.config.preset(job.preset) if job is not None else None
             mode = preset.supersede if preset is not None else SUPERSEDE_OFF
             if job is None or mode == SUPERSEDE_OFF:

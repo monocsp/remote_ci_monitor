@@ -38,6 +38,7 @@ from typing import Any
 from remote_ci_monitor import SCHEMA_VERSION, __version__, follow, submissions
 from remote_ci_monitor import apply as apply_mod
 from remote_ci_monitor.client import (
+    MAX_CHAIN_STEPS,
     Client,
     ClientError,
     default_label,
@@ -349,8 +350,15 @@ def _keep_submission(client: Client, job_id: int, resp: dict[str, Any]) -> str |
         if server.rstrip("/") != mine:
             return None
         try:
-            # `retried` 는 끝이 아니다(M5s) — 그 비밀이 사슬의 머리를 멈춘다(capability 는 뿌리에)
-            state = client.job(other, timeout=5).get("state")
+            # `retried` 는 끝이 아니다(M5s) — 그 비밀이 사슬의 머리를 멈춘다(capability 는 뿌리에).
+            # 뿌리는 끝까지 `retried` 이므로 `retried_as` 를 따라가 머리의 상태로 판정한다
+            doc = client.job(other, timeout=5)
+            for _ in range(MAX_CHAIN_STEPS):
+                nxt = doc.get("retried_as")
+                if doc.get("state") != RETRIED or not isinstance(nxt, int):
+                    break
+                doc = client.job(nxt, timeout=5)
+            state = doc.get("state")
             return state in TERMINAL_STATES and state != RETRIED
         except ClientError as e:
             return True if e.status == 404 else None  # 지워진 잡의 비밀은 쓸 데가 없다

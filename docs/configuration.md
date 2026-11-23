@@ -1868,7 +1868,9 @@ not loop. A preset that retries takes `git_ref` sources only (`source_modes = ["
 configuration error otherwise): every attempt runs the commit the first one resolved. The policy
 is stored with the job when it is submitted, so `rcm reload` or removing the preset does not change
 a chain already running. A submission can only turn it off for that job: `"retry": false` in the
-`POST /jobs` body (a `retry: false` submission does not join a job that retries).
+`POST /jobs` body; such a job is not a chain (no `chain_id`, no `attempts[]`). A submission
+only joins a job whose frozen policy is the same, so a submission that wants retries never joins a
+`retry: false` job or one submitted before the preset declared the table, and the other way round.
 
 **Each attempt is a job of its own.** An attempt that exits with `on_exit` ends as `retried` and,
 in the same database transaction, the next attempt is created as `scheduled` for
@@ -1883,7 +1885,9 @@ exits with `on_exit` ends as `exhausted`: rcm never found out, and a person has 
 
 A retry attempt has **no start deadline**: when the lanes are busy, or a concurrency group is held
 (a login preset sharing the group while a person signs in), it waits as `blocked_by_group` without
-ending `expired`. The chain ends only at `max_attempts`.
+ending `expired`. The chain ends only at `max_attempts`. A retry attempt is not a new
+submission: entering the queue it [supersedes](#superseding-older-jobs-of-the-same-branch)
+nothing — it runs the older commit, and a newer job of the same branch must not be cleared for it.
 
 **The chain.** Every attempt carries `chain_id` (the first job's id), `attempt` (1, 2, …),
 `retry_of`, `retried_as` (on a `retried` attempt) and `max_attempts`, in `GET /jobs/<id>` and in

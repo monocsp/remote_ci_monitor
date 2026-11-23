@@ -1047,6 +1047,13 @@ _NOT_SHELVING = (
 )
 
 
+def _frozen_retry(retry: RetryPolicy | None, disabled: bool) -> tuple[int | None, int]:
+    """제출이 얼릴 반복 정책의 합류 비교값 `(retry_on_exit, retry_disabled)` — 잡 열과 같은 모양."""
+    if retry is None:
+        return None, 0
+    return int(retry.on_exit), 1 if disabled else 0
+
+
 def _job_keeps(conn: sqlite3.Connection, job_id: int) -> bool:
     row = conn.execute("SELECT keep FROM jobs WHERE id=?", (job_id,)).fetchone()
     return row is not None and bool(row["keep"])
@@ -2753,11 +2760,12 @@ class Store:
                 # 반복 정책을 얼린다(M5s 결정 229) — 끝날 때 프리셋을 다시 읽지 않는다. 사슬의
                 # 뿌리는 자기 자신이다(결정 228). 같은 트랜잭션이라 정책 없는 반복 잡은 생기지
                 # 않는다
+                # 반복을 끈 잡(`retry: false`)은 사슬이 아니다 — 정책은 얼리되 뿌리는 없다
                 conn.execute(
                     "UPDATE jobs SET chain_id=?, retry_on_exit=?, retry_interval_seconds=?, "
                     "retry_max_attempts=?, retry_disabled=? WHERE id=?",
                     (
-                        job_id,
+                        None if retry_disabled else job_id,
                         int(retry.on_exit),
                         int(retry.interval_seconds),
                         int(retry.max_attempts),
@@ -2778,12 +2786,15 @@ class Store:
         assert job is not None
         return job, issued
 
-    def find_joinable(self, join_key: str) -> Job | None:
+    def find_joinable(
+        self, join_key: str, *, retry: RetryPolicy | None = None, retry_disabled: bool = False
+    ) -> Job | None:
         marks = ",".join("?" * len(JOINABLE_STATES))
         rows = self._jobs(
             f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) "
+            "AND retry_on_exit IS ? AND retry_disabled=? "
             "AND not_before IS NULL ORDER BY id LIMIT 1",
-            (join_key, *sorted(JOINABLE_STATES)),
+            (join_key, *sorted(JOINABLE_STATES), *_frozen_retry(retry, retry_disabled)),
         )
         return rows[0] if rows else None
 
@@ -2795,13 +2806,25 @@ class Store:
         priority: int,
         now: datetime,
         keep: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> Job | None:
         """합류 판정 + 합류자 기록 + 우선순위 상향을 **한 트랜잭션**으로(M5).
 
         요청자 본인이면 합류자를 안 넣는다. 우선순위는 `max(기존, 요청)` 로만 올라간다. `keep` 도
         같다 — 켤 수만 있고 끄지 않는다(M5p 결정 128).
         """
-        got = self._join_tx(join_key, name, label, priority, now, with_submission=False, keep=keep)
+        got = self._join_tx(
+            join_key,
+            name,
+            label,
+            priority,
+            now,
+            with_submission=False,
+            keep=keep,
+            retry=retry,
+            retry_disabled=retry_disabled,
+        )
         return None if got is None else got[0]
 
     def join_or_bump_with_submission(
@@ -2812,11 +2835,23 @@ class Store:
         priority: int,
         now: datetime,
         keep: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> tuple[Job, str, str] | None:
         """`join_or_bump` + 그 참여자의 `leave_submission` capability 를 같은 트랜잭션에(M5l S8)
         — `(job, submission_id, cancel_token)`, 합류할 잡이 없으면 None. 삽입이 실패하면
         joiner 행도 `join_count` 도 그대로다."""
-        got = self._join_tx(join_key, name, label, priority, now, with_submission=True, keep=keep)
+        got = self._join_tx(
+            join_key,
+            name,
+            label,
+            priority,
+            now,
+            with_submission=True,
+            keep=keep,
+            retry=retry,
+            retry_disabled=retry_disabled,
+        )
         if got is None:
             return None
         job, issued = got
@@ -2833,13 +2868,17 @@ class Store:
         *,
         with_submission: bool,
         keep: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> tuple[Job, tuple[str, str] | None] | None:
         # 취소 중인 잡에는 합류하지 않는다 — 결과를 줄 수 없는 잡이다. 거기 합류하면 합류자의
         # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반).
         # 예약에서 온 잡(`not_before` 가 있다)에도 합류하지 않는다(M5s 결정 226) — 승격한 뒤에도
         # 그렇다. 붙으면 합류자가 그 마감을 물려받아 레인이 늦으면 `expired` 로 끝난다. 시작 마감이
         # 없는 예약도 같다: 반복의 다음 시도(결정 231)에 붙으면 합류자의 즉시 실행이 `interval`
-        # 뒤로 밀리고, 그 사슬이 `exhausted` 로 끝나면 합류자도 1 을 받는다
+        # 뒤로 밀리고, 그 사슬이 `exhausted` 로 끝나면 합류자도 1 을 받는다.
+        # 얼린 반복 정책이 같은 잡에만 합류한다(#256 검증 P2) — 합류자는 그 잡의 정책을 받는다.
+        # 반복을 원하는 제출이 `retry: false` 잡(또는 선언 전의 잡)에 붙으면 반복을 잃는다
         marks = ",".join("?" * len(JOINABLE_STATES))
         conn = self._conn()
         issued: tuple[str, str] | None = None
@@ -2847,8 +2886,9 @@ class Store:
         try:
             row = conn.execute(
                 f"SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
+                "AND retry_on_exit IS ? AND retry_disabled=? "
                 f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",
-                (join_key, *sorted(JOINABLE_STATES)),
+                (join_key, *_frozen_retry(retry, retry_disabled), *sorted(JOINABLE_STATES)),
             ).fetchone()
             if row is None:
                 conn.execute("COMMIT")
@@ -3699,7 +3739,11 @@ class Store:
         conn.execute("UPDATE joiners SET job_id=? WHERE job_id=?", (next_id, job_id))
         # 이 시도의 보관 요청(원격 잡은 묶음이 ready 일 때 섰다)은 접는다 — 보관은 마지막 시도만
         # 한다(결정 228). 이미 복사를 시작했으면 그대로 둔다
-        conn.execute("DELETE FROM shelf_items WHERE job_id=? AND state='pending'", (job_id,))
+        # 보관함이 꺼져 곧장 `failed`(disabled · unavailable)로 선 행도 접는다 — 시도마다 실패
+        # 항목이 쌓인다. 마지막 시도가 자기 행을 세운다
+        conn.execute(
+            "DELETE FROM shelf_items WHERE job_id=? AND state IN ('pending', 'failed')", (job_id,)
+        )
         # 원격 워커는 끝을 알리기 전에 묶음을 올린다(프로토콜은 그대로다, §4.2 「판정 자리」) — 그
         # 묶음은 바로 만료시켜 청소기가 다음 판에 치운다. 로컬 레인은 아예 모으지 않는다
         conn.execute(
