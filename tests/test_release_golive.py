@@ -488,3 +488,42 @@ def test_a_golive_release_that_exits_75_is_retried_and_the_chain_keeps_the_build
         assert [(r["job_id"], r["state"]) for r in live] == [(nxt_id, SCHEDULED)]
     finally:
         s.close()
+
+
+@pytest.mark.parametrize("rc", [1, 2, 3])
+def test_a_golive_release_that_ends_1_2_or_3_is_never_retried(tmp_path, remote, monkeypatch, rc):
+    """`ae3ce59` 의 짝(결정 201 · 236). 같은 반복 정책이어도 2(미승인)는 다시 돌지 않는다.
+    75 로 승인을 기다리면 승인을 감시하는 자동 출시가 되기 때문이다. 1(실패) · 3(번호 불일치)도
+    마찬가지다 — `failed` 로 끝나고 다음 시도가 없으며 build 는 다시 열린다."""
+    from remote_ci_monitor.core.model import FAILED
+    from remote_ci_monitor.worker import outcome_for
+
+    s = GoliveServer(tmp_path, remote)
+    try:
+        s.open_gate(monkeypatch)
+        retrying = {
+            **preset(GOLIVE, GOLIVE_INPUTS),
+            "retry": {"on_exit": 75, "interval_seconds": 600, "max_attempts": 12},
+        }
+        s.cfg.presets = tuple(
+            parse_preset(retrying) if p.name == GOLIVE else p for p in s.cfg.presets
+        )
+        s.golive_plan_job(BOTH_APPROVED)
+        status, first = s.golive(release_body())
+        assert status == 202, first
+        root = first["job_id"]
+        started = NOW + timedelta(minutes=1)
+        s.store._conn().execute(
+            "UPDATE jobs SET state='running', started_at=?, lane=1 WHERE id=?",
+            (started.timestamp(), root),
+        )
+        ended = started + timedelta(minutes=1)
+        oc = outcome_for(s.store.get_job(root), [], started=started, finished=ended, rc=rc)
+        assert oc.state == FAILED, oc
+        assert s.store.finish(root, oc.state, now=ended, exit_code=rc)
+        assert s.store.get_job(root).retried_as is None
+        assert [j.id for j in golive_jobs(s) if j.state == SCHEDULED] == []
+        # 사슬이 끝났다 — 같은 build 의 새 release 를 다시 받는다
+        assert s.golive(release_body())[0] == 202
+    finally:
+        s.close()

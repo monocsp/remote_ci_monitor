@@ -131,9 +131,20 @@ describe("Korean — particles follow the name, sentences end in 합쇼체 (#255
     assert.equal(I18N.t("ko", "golive.why.blocked", { names: "iOS" }), "iOS가 계획에서 승인 상태가 아닙니다.");
     assert.equal(I18N.t("ko", "golive.why.blocked", { names: "Android" }), "Android가 계획에서 승인 상태가 아닙니다.");
   });
-  test("the cancel toast and the requested pill are full sentences", () => {
+  test("the cancel toast is a sentence; the result pills are all short state words", () => {
     assert.match(I18N.t("ko", "golive.cancelled", { id: 12 }), /니다\.$/);
-    assert.match(I18N.t("ko", "golive.result.requested"), /니다\.?$/);
+    assert.equal(I18N.t("ko", "golive.result.requested"), "출시 요청됨");
+    ["requested", "released", "published", "pending", "needs_login", "failed", "not_attempted"].forEach((w) =>
+      assert.ok(!/니다\.?$/.test(I18N.t("ko", "golive.result." + w)), w));
+  });
+  test("#N takes 가 after the number, never a fixed 이 (#255 재검증 P3)", () => {
+    const a = { id: 12, n: 30, state: "failed", detail: "iOS" };
+    assert.match(I18N.t("ko", "golive.plan.no_doc", a), /작업 #12가 /);
+    assert.match(I18N.t("ko", "golive.plan.stale", a), /계획 #12가 /);
+    assert.match(I18N.t("ko", "golive.plan.failed", a), /계획 #12가 /);
+    assert.match(I18N.t("ko", "golive.why.running", a), /#12가 이미/);
+    ["golive.plan.no_doc", "golive.plan.stale", "golive.plan.failed", "golive.why.running"].forEach((k) =>
+      assert.ok(!/#12 이/.test(I18N.t("ko", k, a)), k));
   });
 });
 

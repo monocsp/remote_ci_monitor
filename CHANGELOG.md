@@ -149,6 +149,10 @@ of a key bumps that number and is listed here.
   admin included: 409 `release_route_required` (`rcm run` exits 2). Going live takes the golive
   route, which runs the gate. `review` and `upload` are unchanged.
   ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **A plan whose `measured_at` is later than now is stale** — the plan, the review plan and the
+  golive plan alike. Its age used to be cut to 0, so a script with a wrong clock kept an
+  irreversible button open for ever; `age_seconds` still never goes below 0.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - The release routes' answers (`plan`, `review`, `upload`, `golive`) carry `submission`, the cancel secret `POST /jobs` gives, and a scheduled golive answers 201
   with `not_before`, `start_deadline` and `timezone`; immediate ones stay 202.
   ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))

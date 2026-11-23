@@ -444,3 +444,14 @@ def test_golive_route_409s_and_the_cli_are_documented():
         "Nothing goes live on approval by itself",
     ):
         assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+
+
+def test_golive_route_a_plan_measured_in_the_future_is_documented_as_stale():
+    """#255 재검증 P2 — 미래에 잰 계획은 stale 이다(동작 변경). 라우트 표의 `stale` 정의와
+    CHANGELOG 가 그렇게 말한다. 합치기에서 한 번 사라졌던 문장이다."""
+    config = read("docs/configuration.md")
+    row = next(ln for ln in config.splitlines() if ln.startswith("| `GET …/release` |"))
+    phrase = "or a `measured_at` later than now (a clock that is wrong never makes a plan fresh)"
+    assert phrase in row, "the GET …/release row lost the future-measured_at rule"
+    unreleased = unreleased_only(read("CHANGELOG.md"))
+    assert "`measured_at` is later than now is stale" in unreleased
