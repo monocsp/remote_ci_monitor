@@ -15,16 +15,21 @@
   var DASH = "—";
   // M5n §7.3 — 「맞는 머신 없음」·「점검 실패」는 워커가 죽은 것 바로 다음으로 급하다.
   // `check_pending` 은 없다 — 점검이 끝나면 저절로 풀린다.
-  var ACTIONABLE = ["worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
+  // M5s — `needs_action` 이 맨 앞이다: 잡이 스스로 「사람이 이것을 해 달라」고 말했다. 모델의
+  // `ACTIONABLE_REASONS` 와 같은 목록이다(tests/test_web_schedule_m5s.py 가 잠근다).
+  var ACTIONABLE = ["needs_action", "worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
   // `환경 바뀜` 칩이 사는 창(§8.3) — 지문이 이 안에서 바뀐 머신만
   var ENV_CHANGED_WINDOW_MS = 24 * 3600 * 1000;
-  var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1 };
+  var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1, expired: 1, retried: 1, exhausted: 1 };
   // 상태마다 모양이 하나씩. 채운 것은 도는 상태, 빈 것은 멈춘 상태다(§4.2) — `취소 중`(채운 사각)과
   // `취소됨`(빈 사각)이 색으로만 갈리면 색을 못 보는 사람에게 같은 것이 된다(WCAG 1.4.1).
   // `core/render_text._GLYPH` 와는 **일부러 다르다**: 터미널에는 색이 없어 상태 글자가 곧 채널이고,
   // 거기는 `✅`·`❌` 처럼 원래 다른 모양을 쓴다. 이 표는 색을 쓰는 화면의 것이다.
+  // M5s — 예약(`scheduled` 시계), 시작 마감을 놓침(`expired` 빈 점선 원 — 돌지 않았다),
+  // 다시 시도함(`retried` 도는 화살표), 시도를 다 씀(`exhausted` 막힌 원).
   var GLYPH = { running: "▶", queued: "○", uploading: "↑", cancelling: "■", succeeded: "✓",
-    failed: "✗", timed_out: "⏱", cancelled: "□", lost: "?" };
+    failed: "✗", timed_out: "⏱", cancelled: "□", lost: "?",
+    scheduled: "◷", expired: "◌", retried: "↻", exhausted: "⊘" };
   /** 인라인 SVG 아이콘. 색은 `currentColor`, 크기는 1em — 문장 흐름에 붙어 산다.
       i18n 문자열에는 태그를 넣지 않는다(카탈로그는 글자만 담는다 — `token.help` 가 유일한 예외다).
       **위의 `GLYPH` 와는 다른 것이다**: 글리프는 상태 필의 모양 채널(WCAG 1.4.1)이라 글자로
@@ -358,6 +363,15 @@
         }
         out.text = T(lang, "reason.sigterm", { by: personLabel(row, c.by), kill: fmtCountdown(kill, lang) }); break;
       }
+      case "needs_action": {
+        // 잡이 찍은 「사람이 할 일」(M5s 결정 213). code 와 note 는 잡이 쓴 것이라 번역하지 않는다 —
+        // 서버가 note 의 제어문자를 지웠고, 화면은 그리는 자리에서 escape 한다
+        var act = row.action && typeof row.action === "object" ? row.action : {};
+        parts.push(T(lang, "reason.needs_action"));
+        if (typeof act.code === "string" && act.code) parts.push(act.code);
+        if (typeof act.note === "string" && act.note) parts.push(act.note);
+        out.text = parts.join(" · "); out.actionable = true; out.cls = "action"; break;
+      }
       case "paused": out.text = T(lang, "reason.paused"); out.actionable = true; break;
       case "not_scheduled": out.text = T(lang, "reason.not_scheduled"); out.actionable = true; break;
       case "worker_down": out.text = T(lang, "reason.no_worker"); out.actionable = true; break;
@@ -508,15 +522,90 @@
       var r = reasonText(row, status, Date.parse(status.generated_at), lang);
       lines.push({ jobId: row.id, reason: row.reason, text: r.text, rank: ACTIONABLE.indexOf(row.reason) });
     });
+    // 예약 행(M5s 결정 233) — 반복 사슬이 시도 사이를 기다리는 동안에도 표식이 남는다. 이유가 없는
+    // 예약은 아무것도 아니다(「모른다」가 아니다).
+    var sc = scheduledOf(status);
+    sc.rows.forEach(function (row) {
+      if (!row || ACTIONABLE.indexOf(row.reason) === -1) return;
+      var r = reasonText(row, status, Date.parse(status.generated_at), lang);
+      lines.push({ jobId: row.id, reason: row.reason, text: r.text, rank: ACTIONABLE.indexOf(row.reason) });
+    });
     if (unknown && !lines.length) return { kind: "unknown", lines: [] };
+    // 예약을 못 읽었으면 「확인할 것 없음」이라고 말할 수 없다(fail-open 금지, #257 검증 P1) — 거기
+    // 표식이 있었을 수 있다. 줄이 없으면 「모른다」, 있으면 그 줄만 그리고 「나머지 없음」은 빼게 한다
+    var schedUnknown = sc.kind === "error";
+    if (schedUnknown && !lines.length) return { kind: "unknown", lines: [], why: "scheduled" };
     lines.sort(function (a, b) { return a.rank - b.rank || (a.jobId || 0) - (b.jobId || 0); });
-    return lines.length ? { kind: "list", lines: lines } : { kind: "ok", lines: [] };
+    if (lines.length) return schedUnknown ? { kind: "list", lines: lines, partial: true } : { kind: "list", lines: lines };
+    return { kind: "ok", lines: [] };
   }
 
   function isMine(row, me) {
     if (!me || !row) return false;
     if (row.requester && row.requester.name === me) return true;
     return Array.isArray(row.joiners) && row.joiners.some(function (j) { return j && j.name === me; });
+  }
+
+  // ── 예약 (M5s §4.1 「표시」) ──
+  /**
+   * 모든 풀의 `scheduled[]` 를 시각순으로(같으면 번호순). 큐 표와 따로 간다.
+   * `kind`: `absent`(키가 없는 옛 서버 — 절을 그리지 않는다) · `error`(어느 풀이든 `scheduled` 가
+   * null 이거나 `scheduled_error` 가 왔다 — 빈 목록과 다르다, fail-open 금지) · `empty` · `list`.
+   * `rows` 는 상태 문서의 행 그대로다(취소 표시가 그 행에 붙는다). 기본 풀 밖이면 `pools[id]` 에 풀 이름.
+   */
+  function scheduledOf(status) {
+    var pools = poolsOf(status);
+    var rows = [], names = {}, seen = false;
+    for (var i = 0; i < pools.length; i++) {
+      var pl = pools[i];
+      if (!pl || !("scheduled" in pl)) continue;
+      seen = true;
+      if (!Array.isArray(pl.scheduled) || pl.scheduled_error) {
+        return { kind: "error", rows: [], pools: {}, error: pl.scheduled_error || null, code: pl.scheduled_error_code || null };
+      }
+      for (var j = 0; j < pl.scheduled.length; j++) {
+        var r = pl.scheduled[j];
+        if (!r) continue;
+        rows.push(r);
+        if (i > 0 && pl.name) names[r.id] = pl.name;
+      }
+    }
+    if (!seen) return { kind: "absent", rows: [], pools: {} };
+    var at = function (r) { var t = parseIso(r.not_before); return t == null ? Infinity : t; };
+    rows.sort(function (a, b) { return (at(a) - at(b)) || ((a.id || 0) - (b.id || 0)); });
+    return { kind: rows.length ? "list" : "empty", rows: rows, pools: names };
+  }
+  /** 예약 행 하나의 글. 시각은 표시 시간대로, 모르면 —. **ETA 는 없다** — 승격 전의 잡이 언제
+      끝날지는 지어내지 않는다. 반복 사슬의 다음 시도면 몇 번째인지, 사슬의 표식이 있으면 이유. */
+  function scheduledRowModel(row, tz, nowMs, lang, me) {
+    row = row || {};
+    var inputs = row.inputs && typeof row.inputs === "object" ? row.inputs : {};
+    var req = row.requester || {};
+    var attempt = null;
+    if (isNum(row.attempt) && row.attempt > 1) {
+      attempt = isNum(row.max_attempts)
+        ? T(lang, "sched.attempt_of", { n: row.attempt, total: row.max_attempts })
+        : T(lang, "sched.attempt", { n: row.attempt });
+    }
+    return {
+      id: row.id,
+      preset: row.preset || row.key || DASH,
+      inputs: Object.keys(inputs).map(function (k) { return k + "=" + inputs[k]; }),
+      requester: req.label || req.name || DASH,
+      when: T(lang, "sched.at", { clock: fmtClock(row.not_before, tz, nowMs) }),
+      deadline: T(lang, "sched.start_by", { clock: fmtClock(row.start_deadline, tz, nowMs) }),
+      mine: isMine(row, me),
+      attempt: attempt,
+      reason: row.reason ? reasonText(row, nowMs, null, lang) : null
+    };
+  }
+
+  /** 웹 머리의 알림 실패 배지(M5s §4.7). 서버 메모리의 수라 재시작하면 0 이 된다. 0 · 없음 ·
+      숫자가 아니면 null — 그리지 않는다. */
+  function notifyFailuresBadge(server, lang) {
+    var n = server && server.notify_failures;
+    if (!isNum(n) || n <= 0) return null;
+    return { text: T(lang, "header.notify_failures", { n: n }), title: T(lang, "header.notify_failures_title", { n: n }) };
   }
 
   // 취소 버튼이 잠기는가(M5j G5). 서버가 취소에 제출 capability 를 요구하면(`server.cancel_requires_submission_token`)
@@ -1385,6 +1474,9 @@
     else if (state === "cancelled") pill = T(lang, "recent.cancelled");
     else if (state === "timed_out") pill = T(lang, "recent.timed_out");
     else if (state === "lost") pill = T(lang, "recent.lost");
+    else if (state === "expired") pill = T(lang, "recent.expired");
+    else if (state === "exhausted") pill = T(lang, "recent.exhausted");
+    else if (state === "retried") pill = T(lang, "recent.retried");
     else pill = stateWord(state, lang);
     var summary = job.summary || "";
     // 같은 브랜치의 새 잡에 밀려 치워졌다(M5o) — 시작 전이든 도는 중이었든 그 문장이 답이다.
@@ -1412,7 +1504,7 @@
       when: fmtClock(job.finished_at, tz, nowMs),
       summary: summary,
       supersededBy: supersededBy,
-      rerun: (state === "failed" || state === "timed_out") ? rerunCommand(job) : null
+      rerun: (state === "failed" || state === "timed_out" || state === "exhausted") ? rerunCommand(job) : null
     };
   }
   /** 요약 글에서 `#N`(그 번호 그대로, 뒤에 숫자가 더 붙지 않은 것) 하나를 그 잡으로 가는 버튼으로 —
@@ -2552,7 +2644,8 @@
    */
   function buildLayers(jobs, rows, lang, tzName, nowMs) {
     rows = rows || {};
-    var list = (Array.isArray(jobs) ? jobs : []).filter(function (j) { return j && isNum(j.id); }).slice().sort(function (a, b) { return a.id - b.id; });
+    // status 잡(M5s §4.4)은 스토어를 읽기만 하고 자주 돈다 — 「지금 하는 일」도 작업 목록도 아니다
+    var list = (Array.isArray(jobs) ? jobs : []).filter(function (j) { return j && isNum(j.id) && j.role !== "status"; }).slice().sort(function (a, b) { return a.id - b.id; });
     var running = list.filter(function (j) { return j.state === "running" || j.state === "cancelling"; });
     var cur = running.length ? running[running.length - 1] : null;
     var row = cur ? rows[cur.id] || null : null;
@@ -2603,6 +2696,56 @@
       if (rows[i] && rows[i].id === id && rows[i].finished_at) return rows[i].finished_at;
     }
     return null;
+  }
+  // ── 스토어 심사 상태(M5s §4.4) — status 역할의 `status.json`. rcm 은 그리기만 한다: 8값으로
+  //    맞추는 일은 프로젝트 스크립트가 하고, 목록에 없는 값은 unknown 으로 그린다. ──
+  var STORE_CHECK_STATES = ["preparing", "waiting_for_review", "in_review", "approved", "rejected", "releasing", "released", "unknown"];
+  var STORE_CHECK_TONE = { preparing: "na", waiting_for_review: "running", in_review: "running", approved: "ok", rejected: "bad",
+    releasing: "running", released: "ok", unknown: "none" };
+  var STORE_CHECK_WAITING = { queued: 1, uploading: 1, running: 1, cancelling: 1 };
+  // 결과를 못 낸 조회. `exhausted`(반복을 다 씀)와 `expired`(시작 마감을 놓침)도 그렇다(M5s)
+  var STORE_CHECK_FAILED = { failed: 1, timed_out: 1, lost: 1, exhausted: 1, expired: 1 };
+  // 결과가 아닌 조회 — 모델의 `SCHEDULED_STATES | CHAIN_LINK_STATES` 와 같다(시험이 잠근다)
+  var STORE_CHECK_NOT_A_RESULT = { scheduled: 1, retried: 1 };
+  function storeCheckText(v) { return typeof v === "string" && v ? v : isNum(v) ? String(v) : DASH; }
+  /**
+   * 검토 패널의 「스토어 심사 상태」 모형. 프로파일에 `presets.status` 가 없으면 null(절이 없다).
+   * `stale` 은 서버의 판정이고(`plan_max_age_minutes`), 판정이 없으면 낡은 것으로 본다. 나이는 서버가
+   * `checked_at` 으로 잰 `age_seconds` 다. `checking` 은 아직 끝나지 않은 가장 새 status 잡이다.
+   * `lastFailed` 는 가장 새 status 잡이 실패 · 시간 초과 · 유실 · 반복을 다 씀 · 만료로 끝났고
+   * 그 잡이 지금 그리는 문서보다 새것일 때다 — 「새로 조회」가 실패해도 화면이 예전 상태를 아무 말
+   * 없이 그리지 않게 한다. 문서를 쓴 잡이 성공하지 않았으면 `jobStateOk` 가 거짓이고
+   * `jobStateText` 가 그 상태 낱말이다.
+   */
+  function storeCheckModel(release, profile, lang) {
+    var presets = profile && profile.presets ? profile.presets : {};
+    if (!presets.status) return null;
+    var e = release && release.status && typeof release.status === "object" ? release.status : null;
+    var doc = planEntryDoc(e);
+    var platforms = ["ios", "android"].map(function (p) {
+      var d = doc && doc[p] && typeof doc[p] === "object" ? doc[p] : null;
+      var st = d && STORE_CHECK_STATES.indexOf(d.state) >= 0 ? d.state : "unknown";
+      return { platform: p, state: st, tone: STORE_CHECK_TONE[st], text: T(lang, "store_check.state." + st),
+        raw: d && typeof d.raw_state === "string" && d.raw_state ? d.raw_state : null,
+        version: storeCheckText(d && d.version), build: storeCheckText(d && (p === "ios" ? d.build : d.version_code)) };
+    });
+    var checking = null, newest = null;
+    (release && Array.isArray(release.jobs) ? release.jobs : []).forEach(function (j) {
+      if (!j || j.role !== "status" || !isNum(j.id)) return;
+      // 예약된 조회와 반복 사슬의 중간 시도(M5s)는 결과가 아니다 — 「가장 새 조회」로 치면 앞선
+      // 실패 줄이 사라진다
+      if (!STORE_CHECK_NOT_A_RESULT[j.state] && (!newest || j.id > newest.id)) newest = j;
+      if (STORE_CHECK_WAITING[j.state] && (!checking || j.id > checking.id)) checking = { id: j.id, state: j.state };
+    });
+    var docJob = e && isNum(e.job_id) ? e.job_id : null;
+    var lastFailed = newest && STORE_CHECK_FAILED[newest.state] && (docJob == null || newest.id > docJob)
+      ? { id: newest.id, state: newest.state, text: stateWord(newest.state, lang) } : null;
+    var jobStateOk = !e || e.state === "succeeded";
+    return { present: !!e, jobId: docJob, jobState: e && e.state ? e.state : null,
+      jobStateOk: jobStateOk, jobStateText: jobStateOk ? null : stateWord(e.state, lang), lastFailed: lastFailed,
+      checkedAt: e && e.measured_at ? e.measured_at : null, age: e && isNum(e.age_seconds) ? fmtAgo(e.age_seconds, lang) : DASH,
+      stale: !e || e.stale !== false, docError: e && typeof e.doc_error === "string" ? e.doc_error : null,
+      platforms: platforms, checking: checking };
   }
   /** Build·upload 행(항목 5 · 26 · 38 · 49) — 색 · 머리 조각 · 세 층. */
   function buildRowModel(release, releaseStatus, profile, rows, lang, tzName, nowMs) {
@@ -2941,7 +3084,7 @@
    *   token, admin, busy, refusal, repo, lang, nowMs, tzName}`.
    *
    * 되돌려 주는 것은 접힌 머리 한 줄 · 막대와 그 근거 · 단계 칩 · 남은 것 · 이전 버전과 달라진 것 ·
-   * 제출 가능 여부와 이유 · 보낼 본문이다. 출시·게시·롤아웃은 어떤 상태에서도 없다.
+   * 제출 가능 여부와 이유 · 보낼 본문이다. 심사 제출만 다룬다 — 출시는 「출시 예약」 영역의 일이다.
    */
   function sheetModel(ctx) {
     ctx = ctx || {};
@@ -3183,6 +3326,8 @@
       plan: function (name, body) { return call("POST", base(name) + "/release/plan", JSON.stringify(body || {}), "application/json"); },
       review: function (name, body) { return call("POST", base(name) + "/release/review", JSON.stringify(body || {}), "application/json"); },
       upload: function (name, body) { return call("POST", base(name) + "/release/upload", JSON.stringify(body || {}), "application/json"); },
+      // 스토어 심사 상태 조회(M5s §4.4) — status 역할의 잡 하나. 스토어를 읽기만 한다
+      checkStatus: function (name, body) { return call("POST", base(name) + "/release/status", JSON.stringify(body || {}), "application/json"); },
       // `build_name` 은 **이 화면이 보고 있는 버전**의 이름이다 — 안 주면 서버가 플랜의 이름으로
       // 릴리스 노트를 찾아, 1.2.0 드래프트에 1.1.1 의 노트가 «파일에서» 라는 꼬리표를 달고 뜬다(§17-14).
       listing: function (name, buildName) {
@@ -3205,8 +3350,132 @@
       versionListing: function (name, id, body) {
         return call("PUT", base(name) + "/release/versions/" + enc(String(id)) + "/listing", JSON.stringify(body || {}), "application/json");
       },
-      versionDiscard: function (name, id) { return call("DELETE", base(name) + "/release/versions/" + enc(String(id))); }
+      versionDiscard: function (name, id) { return call("DELETE", base(name) + "/release/versions/" + enc(String(id))); },
+      // ── 출시 예약(M5s §4.5) — 출시로 가는 **유일한** 호출이다. plan 은 읽기만, release 는 admin ·
+      //    사람이 친 번호 · 지금이나 정한 시각. 문은 전부 서버가 지킨다 ──
+      golive: function (name, body) { return call("POST", base(name) + "/release/golive", JSON.stringify(body || {}), "application/json"); },
+      cancelJob: function (id) { return call("POST", "/jobs/" + enc(String(id)) + "/cancel", "{}", "application/json"); }
     };
+  }
+  // ── 출시 예약(M5s §4.5 · 결정 216 · 218) ─────────────────────────────────────
+  // 버전 페이지의 한 영역(`[data-golive-sheet]`)이다. `status.json` 이 그 플랫폼을 `approved` 라고
+  // 말할 때만 열리고, 열면 읽기 전용 plan 을 먼저 돌린다. 출시는 사람이 고른 플랫폼 · 지금이나
+  // 시각 · 친 빌드 번호로만 요청한다 — 번호를 대신 채우지 않는다.
+  var GOLIVE_PLATFORMS = ["ios", "android"];
+  /** golive.json 의 결과 낱말 → 색. 시도하지 않은 플랫폼(`reason: not_attempted`)은 실패가 아니다. */
+  var GOLIVE_RESULT_TONE = { requested: "running", released: "ok", published: "ok", pending: "running", needs_login: "stale", failed: "bad", not_attempted: "na" };
+  function goliveNames(version) {
+    var v = version || {}, out = {};
+    GOLIVE_PLATFORMS.forEach(function (p) { var n = v[p + "_version"]; if (n) out[p] = String(n); });
+    return out;
+  }
+  /** 이 버전의 이름으로 `status.json` 이 그 플랫폼을 승인했다고 말하나. 다른 버전의 상태는 세지
+      않는다(실패 쪽으로 닫힌다 — 이름이 없거나 다르면 승인이 아니다). */
+  function goliveStatusApproved(release, version) {
+    var names = goliveNames(version), entry = release && release.status, doc = planEntryDoc(entry), out = {};
+    Object.keys(names).forEach(function (p) {
+      var part = doc && doc[p] && typeof doc[p] === "object" ? doc[p] : null;
+      out[p] = { state: part && typeof part.state === "string" ? part.state : null,
+        approved: !!part && part.state === "approved" && String(part.version || "") === names[p] };
+    });
+    return out;
+  }
+  function goliveJobState(release, id) {
+    var rows = release && Array.isArray(release.jobs) ? release.jobs : [];
+    for (var i = 0; i < rows.length; i++) if (rows[i] && rows[i].id === id) return rows[i].state;
+    return null;
+  }
+  /**
+   * 출시 예약 영역의 모든 것 — 열 수 있나 · plan 의 형편 · 고를 수 있는 플랫폼 · 보낼 수 있나와 그
+   * 이유 · 보낼 본문 · 예약 목록 · 마지막 결과. `ctx` = `{version, release, profile, form, admin,
+   * token, maxAge}`. `form` = `{open, planJob, platform, when, at, typed}`(이 브라우저의 state).
+   */
+  function goliveModel(ctx, lang) {
+    var c = ctx || {}, v = c.version || {}, rel = c.release || {}, form = c.form || {};
+    var names = goliveNames(v), plats = Object.keys(names);
+    var build = v.build_name || names.ios || names.android || null;
+    var presets = (c.profile && c.profile.presets) || {};
+    var status = goliveStatusApproved(rel, v);
+    var approvedNow = plats.filter(function (p) { return status[p].approved; });
+    var m = { configured: !!presets.golive, build: build, platforms: plats, status: status, canOpen: false, openWhy: null };
+    m.stateText = plats.map(function (p) {
+      return T(lang, "golive.platform." + p) + " " + (status[p].state ? T(lang, I18N.has("golive.status." + status[p].state) ? "golive.status." + status[p].state : "golive.status.unknown") : DASH);
+    }).join(" · ");
+    if (!m.configured) m.openWhy = T(lang, "golive.na.role");
+    else if (!rel.status) m.openWhy = T(lang, "golive.na.status");
+    else if (!approvedNow.length) m.openWhy = T(lang, "golive.na.approved");
+    else if (!c.token) m.openWhy = T(lang, "store.gate.no_token");
+    else if (v.state === "discarded") m.openWhy = T(lang, "golive.na.discarded");
+    m.canOpen = m.openWhy == null;
+    // 고를 수 있는 것 — 승인된 플랫폼 하나씩, 둘 다 승인됐을 때만 both
+    m.choices = plats.map(function (p) { return { value: p, enabled: status[p].approved }; });
+    if (plats.length === 2) m.choices.push({ value: "both", enabled: approvedNow.length === 2 });
+    var firstOk = m.choices.filter(function (x) { return x.enabled; })[0];
+    m.platform = form.platform && m.choices.some(function (x) { return x.value === form.platform && x.enabled; }) ? form.platform : (firstOk ? firstOk.value : null);
+    m.planBody = { version_id: v.id, mode: "plan", platform: plats.length === 2 ? "both" : (plats[0] || "both") };
+    // plan — 이 버전 이름의 가장 최근 golive-plan.json. 보낸 plan 이 아직 문서를 안 남겼으면 «읽는 중»
+    var gl = rel.golive || {}, entry = gl.plan || null, pdoc = planEntryDoc(entry);
+    var mine = entry && entry.build_name === build ? entry : null;
+    var waiting = form.planJob != null && (!entry || entry.job_id < form.planJob);
+    var planJobState = waiting ? goliveJobState(rel, form.planJob) : null;
+    var plan = { state: "none", text: T(lang, "golive.plan.none"), approved: {}, builds: {} };
+    if (waiting && planJobState && TERMINAL[planJobState]) plan = { state: "failed", text: T(lang, "golive.plan.no_doc", { id: form.planJob, state: planJobState }), approved: {}, builds: {} };
+    else if (waiting) plan = { state: "running", text: T(lang, "golive.plan.running", { id: form.planJob }), approved: {}, builds: {} };
+    else if (mine && pdoc) {
+      var parts = pdoc.platforms && typeof pdoc.platforms === "object" ? pdoc.platforms : {};
+      plats.forEach(function (p) {
+        var part = parts[p] && typeof parts[p] === "object" ? parts[p] : null;
+        plan.approved[p] = !!part && part.approved === true;
+        plan.builds[p] = part && typeof part.approved_build === "number" ? part.approved_build : null;
+      });
+      var detail = plats.map(function (p) {
+        return T(lang, "golive.platform." + p) + " " + T(lang, plan.approved[p] ? "golive.plan.approved" : "golive.plan.not_approved")
+          + (plan.builds[p] != null ? " · " + T(lang, "golive.plan.build", { n: plan.builds[p] }) : "");
+      }).join(" · ");
+      if (mine.state !== "succeeded") plan.state = "failed";
+      else plan.state = mine.stale ? "stale" : "ok";
+      plan.text = T(lang, "golive.plan." + plan.state, { id: mine.job_id, detail: detail, n: c.maxAge != null ? c.maxAge : DASH, state: mine.state });
+    }
+    m.plan = plan;
+    // 예약 목록 — 이 버전 이름의 살아 있는 출시 잡(서버의 `golive_running` 과 같은 규칙)
+    m.live = (Array.isArray(gl.live) ? gl.live : []).filter(function (r) { return r && r.build_name === build; });
+    // 마지막 결과 — 이 버전 이름의 golive.json
+    var res = gl.result || null, rdoc = planEntryDoc(res);
+    m.result = null;
+    if (res && rdoc && rdoc.build_name === build) {
+      var rp = rdoc.platforms && typeof rdoc.platforms === "object" ? rdoc.platforms : {};
+      m.result = { jobId: res.job_id, rows: Object.keys(rp).filter(function (p) { return GOLIVE_PLATFORMS.indexOf(p) >= 0; }).map(function (p) {
+        var part = rp[p] && typeof rp[p] === "object" ? rp[p] : {};
+        // 시도하지 않은 플랫폼은 「실패」가 아니라 「시도 안 함」이다(#252 검증 P2)
+        var word = part.reason === "not_attempted" ? "not_attempted" : String(part.result || "");
+        return { platform: p, word: word, tone: GOLIVE_RESULT_TONE[word] || "bad", reason: part.reason || null, raw: part.raw_state || null,
+          text: T(lang, "golive.platform." + p) + " " + (I18N.has("golive.result." + word) ? T(lang, "golive.result." + word) : word || DASH) };
+      }) };
+      m.result.login = m.result.rows.some(function (r) { return r.word === "needs_login"; });
+    }
+    // 보낼 수 있나 — 이유는 하나만, 먼저 막히는 것부터
+    var chosen = m.platform === "both" ? plats.slice() : (m.platform ? [m.platform] : []);
+    var typed = typeof form.typed === "string" ? form.typed.trim() : "";
+    var builds = chosen.map(function (p) { return plan.builds[p]; });
+    var why = null;
+    if (!c.admin) why = T(lang, "golive.why.admin");
+    else if (!m.platform) why = T(lang, "golive.na.approved");
+    else if (m.live.length) why = T(lang, "golive.why.running", { id: m.live[0].job_id });
+    else if (plan.state !== "ok") why = T(lang, plan.state === "stale" ? "golive.why.stale" : "golive.why.plan");
+    else if (chosen.some(function (p) { return !plan.approved[p]; })) why = T(lang, "golive.why.blocked", { names: chosen.filter(function (p) { return !plan.approved[p]; }).map(function (p) { return T(lang, "golive.platform." + p); }).join(", ") });
+    else if (chosen.length > 1 && builds[0] !== builds[1]) why = T(lang, "golive.why.split");
+    else if (!/^[0-9]+$/.test(typed)) why = T(lang, "golive.why.n");
+    else if (builds[0] == null || parseInt(typed, 10) !== builds[0]) why = T(lang, "golive.why.n_mismatch");
+    else if (form.when === "at" && !form.at) why = T(lang, "golive.why.at");
+    m.why = why;
+    m.can = why == null;
+    m.body = null;
+    if (m.can) {
+      m.body = { version_id: v.id, mode: "release", platform: m.platform, confirm_build_number: typed };
+      if (form.when === "at") m.body.start_at = String(form.at);
+    }
+    m.goLabel = T(lang, form.when === "at" ? "golive.go.at" : "golive.go.now");
+    return m;
   }
   var storePure = {
     parseRoute: parseRoute, releaseRepos: releaseRepos, setupSummary: setupSummary, fingerprintText: fingerprintText,
@@ -3220,6 +3489,7 @@
     screenshotGroups: screenshotGroups, reviewInfoModel: reviewInfoModel, versionStrip: versionStrip, resultModel: resultModel,
     refusalText: refusalText, storeRowModel: storeRowModel, rowsById: rowsById, basisText: basisText, buildLayers: buildLayers,
     roleFinishedAt: roleFinishedAt,
+    storeCheckModel: storeCheckModel, STORE_CHECK_STATES: STORE_CHECK_STATES,
     buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS,
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
@@ -3239,7 +3509,9 @@
     PREFILL_KEYS: PREFILL_KEYS, VERSION_GROUPS: VERSION_GROUPS, VERSION_SAVE_DEBOUNCE_MS: VERSION_SAVE_DEBOUNCE_MS,
     fieldLimit: fieldLimit, listingNorm: listingNorm, listingDiff: listingDiff, fieldLabelKey: fieldLabelKey,
     versionFieldModel: versionFieldModel, versionPageModel: versionPageModel, listingPutBody: listingPutBody,
-    remoteListingEdits: remoteListingEdits, saveBadge: saveBadge
+    remoteListingEdits: remoteListingEdits, saveBadge: saveBadge,
+    // 출시 예약(M5s §4.5)
+    goliveModel: goliveModel, goliveStatusApproved: goliveStatusApproved, GOLIVE_RESULT_TONE: GOLIVE_RESULT_TONE
   };
 
   var rcm = {
@@ -3247,7 +3519,8 @@
     fmtCoarse: fmtCoarse, fmtCountdown: fmtCountdown, fmtBytes: fmtBytes, fmtBytesPair: fmtBytesPair, fmtMemory: fmtMemory, fmtDisk: fmtDisk, fmtMb: fmtMb, fmtPct: fmtPct,
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
-    elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine, cancelLocked: cancelLocked, hostPressure: hostPressure,
+    elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
+    scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, shelfLine: shelfLine, shelfDeletable: shelfDeletable, shelfDeleteOutcome: shelfDeleteOutcome, navModel: navModel, SSE_REFETCH_KINDS: SSE_REFETCH_KINDS, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
@@ -3585,6 +3858,11 @@
     var err = $("[data-errchip]");
     if (server.last_error) { err.hidden = false; err.textContent = "error · " + truncate(server.last_error, 60); err.title = server.last_error; }
     else err.hidden = true;
+    // 알림 훅 실패 수(M5s §4.7) — 0 이면 그리지 않는다
+    var nf = $("[data-notify-failures]");
+    var nfb = nf ? notifyFailuresBadge(server, L()) : null;
+    if (nf && nfb) { nf.hidden = false; nf.textContent = nfb.text; nf.title = nfb.title; }
+    else if (nf) nf.hidden = true;
     var skew = $("[data-skew]");
     if (state.skewUnknown) { skew.hidden = false; skew.textContent = "clock unknown"; }
     else if (Math.abs(state.skewMs) > 30000) { skew.hidden = false; skew.textContent = "clock " + (state.skewMs > 0 ? "+" : "-") + fmtDuration(Math.abs(state.skewMs) / 1000); }
@@ -3681,11 +3959,13 @@
     // 24
     var nm = notMoving(st, state.me, L());
     var s;
-    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr("summary.queue_unknown")) + "</span>";
+    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr(nm.why === "scheduled" ? "summary.scheduled_unknown" : "summary.queue_unknown")) + "</span>";
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
-    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("") + '<span class="sl muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
+    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
+      // 예약을 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
+      + '<span class="sl muted">' + esc(tr(nm.partial ? "summary.scheduled_unknown" : "summary.nothing_else_stuck")) + "</span>";
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
@@ -3762,14 +4042,16 @@
     var body = $("[data-queue-body]");
     $("[data-queue-header]").textContent = queueHeader(st, now(), L());
     if (!p) { body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">' + esc(tr("queue.no_status")) + "</div>"; return; }
+    // 예약 절(M5s) — 큐 표와 따로 가서 큐가 비었거나 못 읽어도 그린다
+    var sched = scheduledSectionHtml(st);
     if (p.queue === null || p.queue === undefined) {
-      body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">' + esc(tr("queue.unavailable", { error: errorText(p.queue_error, p.queue_error_code) })) + "</div>";
+      body.innerHTML = '<div class="banner bad" role="alert" data-error="queue">' + esc(tr("queue.unavailable", { error: errorText(p.queue_error, p.queue_error_code) })) + "</div>" + sched;
       return;
     }
     var server = st.server || {};
     var extra = !p.queue.length ? extraPoolsQueueHtml(st) : "";
     if (extra) {
-      setQueueHtml(body, '<div class="empty">' + esc(tr("queue.empty_other_pools")) + "</div>" + extra);
+      setQueueHtml(body, '<div class="empty">' + esc(tr("queue.empty_other_pools")) + "</div>" + extra + sched);
       return;
     }
     if (!p.queue.length) {
@@ -3779,7 +4061,7 @@
       var emptyHtml = server.paused || allDown
         ? esc(tr("queue.empty_paused"))
         : esc(tr("queue.empty")) + "<code>rcm run &lt;preset&gt;</code>" + esc(tr("queue.empty_hint"));
-      body.innerHTML = '<div class="empty">' + emptyHtml + (presets ? '<br><span class="sub">' + esc(tr("queue.presets", { names: presets })) + "</span>" : "") + "</div>";
+      body.innerHTML = '<div class="empty">' + emptyHtml + (presets ? '<br><span class="sub">' + esc(tr("queue.presets", { names: presets })) + "</span>" : "") + "</div>" + sched;
       return;
     }
     expandedGc();
@@ -3811,7 +4093,39 @@
     // 다 편 뒤에도 되돌릴 길이 있다(Codex 가독성 검토 8번) — 200행을 편 뒤 「적게 보기」가 없으면 못 접는다
     else if (foldable) html += '<button type="button" class="more" data-more-queue>' + esc(tr("queue.show_fewer")) + " " + icon("chevronUp") + "</button>";
     html += extraPoolsQueueHtml(st);
-    setQueueHtml(body, html);
+    setQueueHtml(body, html + sched);
+  }
+  /**
+   * 큐 아래의 예약 절(M5s §4.1 「표시」). 시각순 · 행마다 프리셋 · 입력 · 요청자 · 시각 · 시작 마감,
+   * 내 예약이면 취소 버튼. 못 읽었으면 빨간 띠 — 빈 목록(절을 그리지 않는다)과 다르다. ETA 는 없다.
+   */
+  function scheduledSectionHtml(st) {
+    var sc = scheduledOf(st);
+    if (sc.kind === "absent" || sc.kind === "empty") return "";
+    if (sc.kind === "error") {
+      return '<div class="sched" data-scheduled-section><div class="pool-h">' + esc(tr("sched.title", { n: DASH })) + "</div>"
+        + '<div class="banner bad" role="alert" data-error="scheduled">' + esc(tr("sched.unavailable", { error: errorText(sc.error, sc.code) })) + "</div></div>";
+    }
+    var locked = cancelLocked(st && st.server, state.me ? { name: state.me, admin: state.admin } : null);
+    var html = '<div class="sched" data-scheduled-section><div class="pool-h">' + esc(tr("sched.title", { n: sc.rows.length })) + "</div>";
+    sc.rows.forEach(function (row) {
+      var m = scheduledRowModel(row, tz(), now(), L(), state.me);
+      var canAct = !!state.token && !state.tokenBad && (m.mine || state.me === null) && !locked && !row._cancelRequested;
+      var chips = m.inputs.map(function (s) { return '<span class="chip" data-cut="chip" title="' + esc(s) + '">' + esc(s) + "</span>"; }).join("");
+      if (sc.pools[row.id]) chips += '<span class="chip" data-cut="chip">' + esc(tr("pool.name", { name: sc.pools[row.id] })) + "</span>";
+      if (m.attempt) chips += '<span class="chip">' + esc(m.attempt) + "</span>";
+      html += '<div class="schedrow' + (m.mine ? " mine" : "") + (row._dim ? " dim" : "") + (state.hl === row.id ? " hl" : "") + '" data-scheduled="' + row.id + '" id="job-' + row.id + '">'
+        + '<span class="id">#' + row.id + "</span>"
+        + '<span class="pill scheduled"><span class="g" aria-hidden="true">' + stateGlyph("scheduled") + "</span> " + esc(stateWord("scheduled", L())) + "</span>"
+        + '<span class="k"><span class="kn" data-cut="kn" title="' + esc(m.preset) + '">' + esc(m.preset) + "</span>" + chips + "</span>"
+        + '<span class="rq" data-cut="rq" title="' + esc(m.requester) + '">' + esc(truncate(m.requester, 40)) + "</span>"
+        + '<span class="when">' + esc(m.when) + ' <span class="muted">· ' + esc(m.deadline) + "</span></span>"
+        + (m.reason ? '<span class="reason' + (m.reason.actionable ? " act" : "") + (m.reason.cls ? " " + esc(m.reason.cls) : "") + '" data-cut="reason" title="' + esc(m.reason.text) + '">' + esc(m.reason.text) + "</span>" : "")
+        + (row._cancelRequested ? '<span class="sub">' + esc(tr("row.cancel_requested")) + "</span>"
+          : canAct ? '<button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button>" : "")
+        + "</div>";
+    });
+    return html + "</div>";
   }
   // 기본 풀 밖의 풀(M5b): 풀 헤더 + 같은 표. 워커가 없으면 그 대기 행은 서버가 worker_down 으로 준다
   function extraPoolsQueueHtml(st) {
@@ -4446,7 +4760,7 @@
     shown.forEach(function (job) {
       var l = recentLine(job, tz(), now(), L());
       var open = !!state.expandedRecent[job.id];
-      var failedish = job.state === "failed" || job.state === "timed_out";
+      var failedish = job.state === "failed" || job.state === "timed_out" || job.state === "exhausted";
       // 결과마다 왼쪽 3px 레인 — 큐 표와 같은 채널이다(성공 · 실패 · 취소 · 결과를 잃음)
       html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
@@ -4647,10 +4961,10 @@
     if (q && (q.state === "running" || q.state === "cancelling") && !state.expanded[id]) {
       state.expanded[id] = true; saveExpanded();
     }
-    var row = $('tr[data-job="' + id + '"]') || $('.rrow[data-job="' + id + '"]');
+    var row = $('tr[data-job="' + id + '"]') || $('.rrow[data-job="' + id + '"]') || $('[data-scheduled="' + id + '"]');
     if (row) {
       renderQueue(); renderRecent();
-      var el = $('[data-job="' + id + '"]');
+      var el = $('[data-job="' + id + '"]') || $('[data-scheduled="' + id + '"]');
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
       setTimeout(function () { if (state.hl === id) { state.hl = null; renderQueue(); renderRecent(); } }, 2500);
       return;
@@ -4834,7 +5148,14 @@
     var rt = null;
     window.addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(function () { markCut(document); }, 120); });
   }
-  function findRow(id) { var q = queueOf(state.status) || []; for (var i = 0; i < q.length; i++) if (q[i].id === id) return q[i]; return null; }
+  function findRow(id) {
+    var q = queueOf(state.status) || [];
+    for (var i = 0; i < q.length; i++) if (q[i].id === id) return q[i];
+    // 예약 행(M5s) — 취소 대화상자가 같은 길로 찾는다
+    var s = scheduledOf(state.status).rows;
+    for (var j = 0; j < s.length; j++) if (s[j].id === id) return s[j];
+    return null;
+  }
   /** 대기열에 없으면 최근 목록에서 — 로그 서랍의 머리는 끝난 잡의 것도 그린다. */
   function findAnyJob(id) {
     var row = findRow(id);
@@ -4915,6 +5236,7 @@
     var others = joiners ? " " + tr("cancel.others_waiting", { n: joiners }) : "";
     if (isJoiner) body = tr("cancel.joiner_body", { who: req.label || req.name || DASH });
     else if (row.state === "running") body = tr("cancel.running_body") + others + " " + tr("cancel.cannot_undo");
+    else if (row.state === "scheduled") body = tr("cancel.scheduled_body") + others;
     else body = tr("cancel.queued_body") + others;
     $("[data-cancel-body]").textContent = body;
     $("[data-cancel-go]").textContent = isJoiner ? tr("cancel.leave") : tr("cancel.go");
@@ -5383,7 +5705,8 @@
       + '<span class="va">' + open + retry + discard + "</span></div>";
   }
   /** W3 버전 페이지 — 이름 · 상태 · **이전 버전 값으로 채워진 편집 칸** 두 절(§3.2 · R6) ·
-      본문 끝의 바텀시트(§4 · R10). 출시 · 게시 · 롤아웃 버튼은 여기에도 없다. */
+      「출시 예약」 영역(M5s §4.5) · 본문 끝의 바텀시트(§4 · R10). 출시를 요청하는 버튼은 그
+      영역(`[data-golive-sheet]`) 안에만 있다(결정 216 · 218). 롤아웃 버튼은 어디에도 없다. */
   function versionPageHtml() {
     var v = state.store.version, lang = L(), n = now();
     var back = '<a class="btn" href="' + esc(storeHash(state.store.repo, "versions")) + '" data-version-back>' + esc(tr("version.page.back")) + "</a>";
@@ -5412,12 +5735,129 @@
       + "<dt>" + esc(tr("version.page.created")) + "</dt><dd>" + esc(v.created_at ? fmtClock(v.created_at, tz(), n) : DASH) + "</dd>"
       + "<dt>" + esc(tr("version.page.expires")) + "</dt><dd>" + esc(v.expires_at ? fmtClock(v.expires_at, tz(), n) : DASH) + "</dd>"
       + "</dl>";
+    h += goliveSheetHtml(v, n);
     h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
     h += "</div>";   // /.vmain — 아래 여백은 여기서 끝난다
     // 바텀시트는 본문의 **마지막 자식**이다 — sticky 의 담는 상자가 본문 전체여야 스크롤 내내
     // 화면 아래에 붙어 있는다(§4.2). 시트를 감싸는 div 를 두면 그 div 안에서만 붙는다.
     h += sheetHtml(m);
     return h;
+  }
+  // ── 출시 예약 영역(M5s §4.5) ──
+  /** 이 버전의 출시 예약 폼 — 버전이 바뀌면 새로 만든다. 친 번호와 시각은 state 에만 산다. */
+  function goliveForm() {
+    var g = state.store.golive;
+    if (!g || g.versionId !== state.store.versionId) {
+      g = state.store.golive = { versionId: state.store.versionId, open: false, planJob: null,
+        platform: null, when: "now", at: "", typed: "", sending: false };
+    }
+    return g;
+  }
+  function goliveCtx(v) {
+    var profile = currentProfile();
+    return { version: v, release: v && v.release && typeof v.release === "object" ? v.release : {}, profile: profile,
+      form: goliveForm(), admin: state.admin, token: !!state.token, maxAge: profile.plan_max_age_minutes };
+  }
+  /**
+   * 「출시 예약」 영역 — 버전 페이지의 한 절이다(시트를 덮는 대화상자가 아니다). 출시를 요청하는
+   * 버튼은 여기 안에만 있고 모두 `data-golive` 를 단다 — 금지 버튼 가드는 `[data-golive]` 이면서
+   * 이 영역 안에 있을 때만 봐준다(결정 218).
+   */
+  function goliveSheetHtml(v, nowMs) {
+    var m = goliveModel(goliveCtx(v), L()), form = goliveForm();
+    var h = '<section class="golive" data-golive-sheet data-open="' + (form.open ? "1" : "0") + '" aria-label="' + esc(tr("golive.title")) + '">';
+    h += '<div class="s-h"><span class="t">' + esc(tr("golive.title")) + '</span><span class="n" data-golive-state>' + esc(m.stateText) + "</span>"
+      + '<span class="spacer"></span>';
+    if (form.open) h += '<button type="button" class="btn" data-golive="close">' + esc(tr("golive.close")) + "</button>";
+    else h += '<button type="button" class="btn" data-golive="open"' + (m.canOpen ? "" : " disabled") + ">" + esc(tr("golive.open")) + "</button>";
+    h += "</div>";
+    if (!form.open && m.openWhy) h += '<p class="sub" data-golive-why-closed>' + esc(m.openWhy) + "</p>";
+    if (form.open) {
+      h += '<div class="golive-body" data-golive-body>';
+      h += '<p class="sub" data-golive-plan="' + esc(m.plan.state) + '">' + esc(m.plan.text) + "</p>";
+      h += '<fieldset class="golive-f"><legend>' + esc(tr("golive.field.platform")) + "</legend>"
+        + m.choices.map(function (x) {
+          return '<label class="ck"><input type="radio" name="golive-platform" id="golive-platform-' + x.value + '" data-golive-platform="' + x.value + '"'
+            + (m.platform === x.value ? " checked" : "") + (x.enabled ? "" : " disabled") + "> " + esc(tr("golive.platform." + x.value)) + "</label>";
+        }).join("") + "</fieldset>";
+      h += '<fieldset class="golive-f"><legend>' + esc(tr("golive.field.when")) + "</legend>"
+        + ["now", "at"].map(function (w) {
+          return '<label class="ck"><input type="radio" name="golive-when" id="golive-when-' + w + '" data-golive-when="' + w + '"' + (form.when === w ? " checked" : "") + "> " + esc(tr("golive.when." + w)) + "</label>";
+        }).join("")
+        + ' <input type="datetime-local" id="golive-at" data-golive-at value="' + esc(form.at || "") + '"' + (form.when === "at" ? "" : " disabled") + ' aria-label="' + esc(tr("golive.when.at")) + '">'
+        + '<span class="sub">' + esc(tr("golive.at_hint")) + "</span></fieldset>";
+      h += '<div class="golive-f"><label for="golive-n">' + esc(tr("golive.field.n")) + "</label> "
+        + '<input type="text" id="golive-n" data-golive-n inputmode="numeric" autocomplete="off" spellcheck="false" value="' + esc(form.typed || "") + '">'
+        + '<span class="sub">' + esc(tr("golive.n_hint")) + "</span></div>";
+      h += '<div class="golive-go"><button type="button" class="btn primary" data-golive="go"' + (m.can && !form.sending ? "" : " disabled") + ">" + esc(m.goLabel) + "</button>"
+        + '<span class="sub" data-golive-why>' + esc(m.why || "") + "</span></div>";
+      h += "</div>";
+    }
+    // 예약 목록과 마지막 결과는 접혀 있어도 보인다 — 걸어 둔 것은 늘 눈에 띄어야 한다
+    h += '<div class="golive-live" data-golive-live><span class="t">' + esc(tr("golive.live.title")) + "</span>";
+    if (!m.live.length) h += '<p class="sub">' + esc(tr("golive.live.none")) + "</p>";
+    else h += "<ul class=\"plain\">" + m.live.map(function (r) {
+      var when = r.not_before ? fmtClock(r.not_before, tz(), nowMs) : tr("golive.when.now");
+      return '<li data-golive-row="' + esc(String(r.job_id)) + '">' + esc(tr("golive.live.row", { id: r.job_id, state: stateWord(r.state, L()), clock: when,
+          names: tr("golive.platform." + (r.platform || "both")), n: r.confirm_build_number || DASH }))
+        + ' <button type="button" class="btn" data-golive="cancel" data-golive-job="' + esc(String(r.job_id)) + '"' + (state.token ? "" : " disabled") + ">" + esc(tr("golive.live.cancel")) + "</button></li>";
+    }).join("") + "</ul>";
+    h += "</div>";
+    if (m.result) {
+      h += '<div class="golive-result" data-golive-result><span class="t">' + esc(tr("golive.result.title", { id: m.result.jobId })) + "</span> "
+        + m.result.rows.map(function (r) {
+          return '<span class="pill v-' + esc(r.tone) + '" data-golive-result-platform="' + esc(r.platform) + '" data-golive-word="' + esc(r.word) + '"'
+            + (r.raw ? ' title="' + esc(r.raw) + '"' : "") + ">" + esc(r.text) + "</span>";
+        }).join(" ");
+      if (m.result.login) h += '<p class="banner warn" data-golive-login>' + esc(tr("golive.login")) + "</p>";
+      h += "</div>";
+    }
+    return h + "</section>";
+  }
+  /** 영역을 열면 읽기 전용 plan 을 먼저 돌린다(M5s §4.5). 닫으면 친 번호와 시각을 잊는다. */
+  function goliveOpen() {
+    var form = goliveForm(), v = state.store.version, api = storeApi();
+    if (!v || typeof api.golive !== "function") return;
+    var m = goliveModel(goliveCtx(v), L());
+    if (!m.canOpen) return;
+    form.open = true; form.typed = ""; form.at = ""; form.when = "now"; form.planJob = null;
+    renderStore();
+    api.golive(state.store.repo, m.planBody).then(function (res) {
+      if (!res.ok) { toast(storeErrorDetail(res)); return; }
+      form.planJob = res.body && res.body.job_id != null ? res.body.job_id : null;
+      return loadVersion().then(function () { renderStore(); });
+    }).catch(function () { toast(tr("store.load_failed", { repo: state.store.repo, detail: "golive" })); });
+  }
+  function goliveGo() {
+    var form = goliveForm(), v = state.store.version, api = storeApi();
+    var m = goliveModel(goliveCtx(v), L());
+    if (!m.can || form.sending) return;
+    form.sending = true;
+    renderStore();
+    api.golive(state.store.repo, m.body).then(function (res) {
+      form.sending = false;
+      if (!res.ok) { toast(storeErrorDetail(res)); if (res.status === 401 || res.status === 403) tokenRejected(); return loadVersion().then(function () { renderStore(); }); }
+      toast(tr("golive.sent", { id: res.body.job_id, state: stateWord(res.body.state, L()) }));
+      form.typed = ""; form.open = false;
+      return loadVersion().then(function () { renderStore(); });
+    }).catch(function () { form.sending = false; renderStore(); });
+  }
+  /** 치는 동안에는 영역을 다시 그리지 않는다 — 보내기 버튼과 이유 한 줄만 제자리에서 고친다. */
+  function renderGoliveState() {
+    var v = state.store.version, sec = $("[data-golive-sheet]");
+    if (!v || !sec) return;
+    var m = goliveModel(goliveCtx(v), L()), go = sec.querySelector('[data-golive="go"]'), why = sec.querySelector("[data-golive-why]");
+    if (go) { go.disabled = !(m.can && !goliveForm().sending); go.textContent = m.goLabel; }
+    if (why) why.textContent = m.why || "";
+  }
+  function goliveCancel(id) {
+    var api = storeApi();
+    if (typeof api.cancelJob !== "function") return;
+    api.cancelJob(id).then(function (res) {
+      if (!res.ok) { toast(storeErrorDetail(res)); return; }
+      toast(tr("golive.cancelled", { id: id }));
+      return loadVersion().then(function () { renderStore(); });
+    });
   }
   /** 파일 폴백 — 프리필이 그 칸을 모를 때 쓰는 `store/` 값(«파일에서» · AC-C5). 릴리스 노트는
       미리보기 줄이 아니라 파일 하나라, 두 스토어에 같은 원문을 넣는다(항목 12·18). */
@@ -5740,7 +6180,8 @@
       + '<ul class="plain">' + m.result.platforms.map(function (p) { return "<li>" + esc(p.text) + "</li>"; }).join("") + "</ul>"
       + (m.result.extras.length ? '<p class="sub">' + esc(m.result.extras.join(" · ")) + "</p>" : "") + "</div>";
   }
-  /** 시트 하나(W3 머리 · W4 · W5). 출시 · 게시 · 롤아웃 버튼은 어떤 상태에도 없다. */
+  /** 시트 하나(W3 머리 · W4 · W5). 심사 제출만 한다 — 출시는 버전 페이지의 「출시 예약」
+      영역에서 따로 요청하고, 롤아웃 버튼은 어떤 상태에도 없다. */
   function sheetHtml(page) {
     var m = sheetNow(page), open = sheetOpen();
     var busy = state.store.busy;
@@ -6370,6 +6811,7 @@
       + "<dt>" + esc(tr("review.strip.notes")) + "</dt><dd>" + (strip.notesPath ? '<span class="mono">' + esc(strip.notesPath) + "</span> " + counterHtml(strip.notesCounter) : '<span class="bad">' + esc(tr("review.notes.missing")) + "</span>") + "</dd>"
       + "<dt>" + esc(tr("review.strip.payload")) + "</dt><dd>" + esc(tr(rv.listingFull ? "review.payload.full" : "review.payload.notes_only")) + "</dd>"
       + "</dl>";
+    h += storeCheckHtml(r, profile);
     // 두 스토어 절 — 같은 그룹 순서
     var listing = state.store.listing, listingState = null;
     if (state.store.listingStatus === 404) listingState = tr("review.listing.na");
@@ -6407,6 +6849,31 @@
       + '<p class="sub">' + esc(tr("review.submit_hint", { n: isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30 })) + "</p>"
       + (rp ? '<p class="sub" data-review-plan-line>' + esc(tr("review.plan_running", { id: rp.job_id, state: stateWord(rp.state, lang) })) + "</p>" : "");
     h += '<p class="sub policy">' + esc(tr("review.policy")) + "</p></div></details>";
+    return h;
+  }
+  /** 스토어 심사 상태(M5s §4.4) — 읽기 전용 두 줄과 「새로 조회」. status 역할이 없으면 빈 글. */
+  function storeCheckHtml(r, profile) {
+    var lang = L(), m = storeCheckModel(r, profile, lang);
+    if (!m) return "";
+    var maxAge = isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30;
+    var h = '<div class="store-check" data-store-check data-stale="' + (m.stale ? "1" : "0") + '"><b>' + esc(tr("store_check.title")) + "</b> ";
+    if (m.present) h += '<span class="sub" data-store-check-age>' + esc(tr("store_check.checked", { age: m.age, id: m.jobId != null ? m.jobId : DASH })) + "</span>"
+      + (m.jobStateOk ? "" : ' <span class="bad" data-store-check-job-state="' + esc(m.jobState || "") + '">' + esc(m.jobStateText) + "</span>");
+    if (m.lastFailed) h += '<p class="bad" data-store-check-failed="' + esc(m.lastFailed.state) + '">' + esc(tr("store_check.last_failed", { id: m.lastFailed.id, state: m.lastFailed.text, older: m.present })) + "</p>";
+    h += '<ul class="plain">' + m.platforms.map(function (p) {
+      var glyph = { ok: "✓", na: "·", running: "▶", bad: "✗", none: "·" }[p.tone] || "·";
+      return '<li data-store-check-platform="' + esc(p.platform) + '" data-state="' + esc(p.state) + '"><span>' + esc(tr("review.check." + p.platform)) + "</span> "
+        + '<span class="pill v-' + esc(p.tone) + '"><span class="g" aria-hidden="true">' + glyph + "</span>" + esc(p.text) + "</span> "
+        + '<span class="mono">' + esc(p.version) + " (" + esc(p.build) + ")</span>"
+        + (p.raw ? ' <span class="sub mono" data-store-check-raw>' + esc(p.raw) + "</span>" : "") + "</li>";
+    }).join("") + "</ul>";
+    if (!m.present) h += '<p class="sub" data-store-check-none>' + esc(tr("store_check.none")) + "</p>";
+    else if (m.docError) h += '<p class="sub bad">' + esc(tr("store_check.doc_error", { detail: m.docError })) + "</p>";
+    else if (m.stale) h += '<p class="sub" data-store-check-stale>' + esc(tr("store_check.stale", { n: maxAge })) + "</p>";
+    if (m.checking) h += '<p class="sub" data-store-check-running>' + esc(tr("store_check.checking", { id: m.checking.id, state: stateWord(m.checking.state, lang) })) + "</p>";
+    var busy = state.store.busy;
+    h += '<div class="actions"><button type="button" class="btn" data-store-check-refresh' + (state.token && !busy ? "" : " disabled") + ">"
+      + esc(tr(busy === "status" ? "store_check.refreshing" : "store_check.refresh")) + "</button></div></div>";
     return h;
   }
   function unsafeBannerHtml() {
@@ -6706,6 +7173,14 @@
       state.store.validate = { ok: b.ok === true, lines: Array.isArray(b.lines) ? b.lines : [], exit: isNum(b.exit) ? b.exit : null };
     });
   }
+  /** 「새로 조회」 — status 역할의 잡 하나(`POST …/release/status`). 이 회차의 버전을 알면 그 이름을 싣는다. */
+  function checkStoreStatus() {
+    var name = knownPlanVersion();
+    var body = name ? { build_name: name } : {};
+    jobCall("status", function (api, repo) { return api.checkStatus(repo, body); }, function (res) {
+      toast(tr("review.job_started", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
   function planReview() {
     var body = reviewBody("plan", reviewChoicesCtx());
     jobCall("review-plan", function (api, repo) { return api.review(repo, body); }, function (res) {
@@ -6830,9 +7305,21 @@
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-sheet-submit],[data-sheet-toggle],[data-sheet-fix],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode],[data-version-new],[data-version-discard],[data-version-retry],[data-field-revert],[data-listing-retry]");
+      var t = ev.target.closest("[data-golive],[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-sheet-submit],[data-sheet-toggle],[data-sheet-fix],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode],[data-version-new],[data-version-discard],[data-version-retry],[data-field-revert],[data-listing-retry]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
+      // ── 출시 예약(M5s §4.5) — 영역 밖의 `data-golive` 는 아무 일도 하지 않는다 ──
+      if (t.hasAttribute("data-golive")) {
+        // 영역은 부모 쪽에서 찾는다 — `closest` 는 자기 자신을 포함해, 영역 표시를 단 버튼이
+        // 스스로를 영역 안으로 칠 수 있었다(#255 검증 P2)
+        if (t.disabled || !t.parentElement || !t.parentElement.closest("[data-golive-sheet]")) return;
+        var act = t.getAttribute("data-golive");
+        if (act === "open") goliveOpen();
+        else if (act === "close") { var gf = goliveForm(); gf.open = false; gf.typed = ""; gf.at = ""; renderStore(); }
+        else if (act === "go") goliveGo();
+        else if (act === "cancel") goliveCancel(parseInt(t.getAttribute("data-golive-job"), 10));
+        return;
+      }
       // ── 바텀시트(§4.2) ──
       if (t.hasAttribute("data-sheet-toggle")) { setSheetOpen(!sheetOpen()); renderStore(); return; }
       if (t.hasAttribute("data-sheet-submit")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
@@ -6865,12 +7352,22 @@
       if (t.hasAttribute("data-upload-rehearsal")) { if (!t.disabled) rehearseUpload(); return; }
       if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
     });
+    st.addEventListener("click", function (ev) {
+      var t = ev.target.closest("[data-store-check-refresh]");
+      if (t && !t.disabled) checkStoreStatus();
+    });
     st.addEventListener("input", function (ev) {
       // 문안 칸 — 800 ms 디바운스로 그 키만 보낸다(§3.2 · AC-C6)
       var fieldId = ev.target.getAttribute && ev.target.getAttribute("data-listing-field");
       if (fieldId) { if (!ev.target.readOnly) listingFieldTyped(fieldId, ev.target.value); return; }
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-version")) { state.store.driverForm.version = ev.target.value; renderDriverState(); return; }
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-track")) { state.store.driverForm.track = ev.target.value; return; }
+      if (ev.target.id === "golive-n" || ev.target.id === "golive-at") {
+        var gform = goliveForm();
+        if (ev.target.id === "golive-n") gform.typed = ev.target.value; else gform.at = ev.target.value;
+        renderGoliveState();
+        return;
+      }
       if (ev.target.id !== "sheet-n") return;
       state.store.review.typedN = ev.target.value;   // 기억하지 않는다 — state 에만, 새 플랜이 오면 지워진다
       renderSheetState();
@@ -6880,6 +7377,13 @@
     });
     st.addEventListener("change", function (ev) {
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-dry")) { state.store.driverForm.dryRun = !!ev.target.checked; return; }
+      if (ev.target.hasAttribute && (ev.target.hasAttribute("data-golive-platform") || ev.target.hasAttribute("data-golive-when"))) {
+        var gfm = goliveForm();
+        if (ev.target.hasAttribute("data-golive-platform")) gfm.platform = ev.target.getAttribute("data-golive-platform");
+        else { gfm.when = ev.target.getAttribute("data-golive-when"); if (gfm.when === "now") gfm.at = ""; }
+        renderStore();
+        return;
+      }
       var check = ev.target.getAttribute && ev.target.getAttribute("data-review-check");
       if (check) {
         var rv = state.store.review, on = !!ev.target.checked;

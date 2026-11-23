@@ -777,9 +777,10 @@ class Janitor:
         return len(purged)
 
     def _referenced_blob_keys(self) -> set[str]:
-        """활성 잡의 manifest 가 참조하는 blob 키 — 이것들은 GC 대상이 아니다."""
+        """활성 잡과 예약 잡(M5s 결정 206)의 manifest 가 참조하는 blob 키 — 이것들은 GC 대상이
+        아니다. 예약 잡은 활성 집합 밖이지만 그 시각에 이 blob 으로 자재화한다(S9)."""
         keys: set[str] = set()
-        for job in self.store.list_active():
+        for job in [*self.store.list_active(), *self.store.list_scheduled()]:
             path = self.config.data_dir / "jobs" / str(job.id) / "manifest.json"
             if not path.is_file():
                 continue

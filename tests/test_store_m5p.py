@@ -292,10 +292,30 @@ def interleave(store: Store, after_sql: str, other: Callable[[], Any], call: Cal
     return result, box.get("value"), seen["blocked"]
 
 
+#: v25(M5s)가 jobs 에 붙인 열 — v23 · v24 DB 에는 없다
+V25_COLUMNS = [
+    "not_before",
+    "start_deadline",
+    "no_supersede",
+    "chain_id",
+    "retry_of",
+    "attempt",
+    "retry_on_exit",
+    "retry_interval_seconds",
+    "retry_max_attempts",
+    "retry_disabled",
+]
+
+
 def downgrade_to_v23(path: Path) -> None:
-    """v23 DB 를 흉내 낸다 — M5p 가 더한 것 중 **있는 것만** 지운다."""
+    """v23 DB 를 흉내 낸다 — M5p 가 더한 것과 그 뒤 판(v25)이 더한 것 중 **있는 것만** 지운다."""
     c = sqlite3.connect(path)
     try:
+        c.execute("DROP INDEX IF EXISTS jobs_chain")
+        have = [r[1] for r in c.execute("PRAGMA table_info(jobs)")]
+        for col in reversed(V25_COLUMNS):
+            if col in have:
+                c.execute(f"ALTER TABLE jobs DROP COLUMN {col}")
         c.execute("DROP INDEX IF EXISTS shelf_items_state")
         c.execute("DROP INDEX IF EXISTS shelf_items_latest")
         c.execute("DROP TABLE IF EXISTS shelf_items")
@@ -325,15 +345,16 @@ def keep_info(path: Path) -> tuple[Any, ...]:
         info = c.execute("PRAGMA table_info(jobs)").fetchall()
     finally:
         c.close()
-    last = info[-1]
-    return last[1], last[2], last[3], str(last[4])
+    # 맨 끝이던 `keep` 뒤에 v25(M5s) 열이 붙었다 — 이름으로 찾는다
+    row = next(r for r in info if r[1] == "keep")
+    return row[1], row[2], row[3], str(row[4])
 
 
 # ══ DB v24 (§5.1) ═══════════════════════════════════════════════════════════
 
 
 def test_this_build_is_database_version_24():
-    assert DB_VERSION == 24
+    assert DB_VERSION == 25  # v25 는 M5s(tests/test_schedule_m5s.py) — v24 는 그 아래에 있다
 
 
 def test_a18_v23_migrates_to_v24_after_a_v23_backup(data_dir):
@@ -345,7 +366,7 @@ def test_a18_v23_migrates_to_v24_after_a_v23_backup(data_dir):
     assert "keep" not in columns(path, "jobs")
     s = Store(path)
     try:
-        assert s.user_version() == 24
+        assert s.user_version() == DB_VERSION
         assert s.get_job(old.id).keep is False
         with raw(s) as conn:
             assert conn.execute("SELECT keep FROM jobs WHERE id=?", (old.id,)).fetchone()[0] == 0
@@ -355,7 +376,8 @@ def test_a18_v23_migrates_to_v24_after_a_v23_backup(data_dir):
     assert bak.exists() and file_version(bak) == 23
     assert "keep" not in columns(bak, "jobs")
     assert columns(path, "shelf_items") == SHELF_COLUMNS
-    assert columns(path, "jobs")[-1] == "keep"
+    assert columns(path, "jobs")[-1 - len(V25_COLUMNS)] == "keep"  # 그 뒤는 v25(M5s) 열이다
+    assert columns(path, "jobs")[-len(V25_COLUMNS) :] == V25_COLUMNS
     assert index_columns(path, "shelf_items_state") == ["state", "last_used_at"]
     assert index_columns(path, "shelf_items_latest") == ["preset", "branch", "shelved_at"]
 
@@ -386,7 +408,7 @@ def test_a83_columns_and_tables_already_there(data_dir):
     c.close()
     s = Store(path)
     try:
-        assert s.user_version() == 24
+        assert s.user_version() == DB_VERSION
     finally:
         s.close()
 
@@ -398,7 +420,7 @@ def test_a129_a_v22_database_goes_to_24_in_one_open(data_dir):
     downgrade_to_v22(path)
     s = Store(path)
     try:
-        assert s.user_version() == 24
+        assert s.user_version() == DB_VERSION
     finally:
         s.close()
     baks = sorted(p.name for p in (path.parent / "backup").iterdir())

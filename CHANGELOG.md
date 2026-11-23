@@ -7,6 +7,217 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-23
+
+A job can now wait for a time you name (`rcm run --at` / `--in`, the new states `scheduled` and
+`expired`), and a preset can ask rcm to run a script that exits 75 ("not yet") again later (the
+new states `retried` and `exhausted`). A job can say that a person has to act
+(`::rcm::action::<code>::<note>`), and `rcm wait --return-on-action` comes back with exit 4 while
+the job keeps running. The Store tab gains two optional roles: `status` reads both stores' review
+state, and `golive` releases an approved build only when a person asks for it with the version,
+the build number and a time. The fixed sentence about going live now says exactly that,
+everywhere it appears.
+
+### Breaking changes
+- **Database schema v25 — schedules and retry chains.** `jobs` gains `not_before`,
+  `start_deadline`, `no_supersede`, `chain_id`, `retry_of`, `attempt` and the retry policy frozen
+  at submission (`retry_on_exit`, `retry_interval_seconds`, `retry_max_attempts`,
+  `retry_disabled`). A v24 file is backed up (`backup/rcm.sqlite3.v24.bak`) and migrated on
+  start; an older build refuses a v25 file and points at that backup. Restore the backup to go
+  back. ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- **A server with a preset that retries raises `min_client_version` to `0.10.0`** in
+  `/api/health`. An older client does not know `retried` and its `rcm wait` would wait forever, so
+  its `rcm check` now shows the client row as FAIL. Upgrade the clients to 0.10.0 before you add
+  `[presets.retry]` to a preset. ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+
+### Added
+- **`rcm run --at TIME` and `--in DURATION` run a job later.** The server reads the time
+  (`HH:MM` today, `YYYY-MM-DDTHH:MM`, or ISO-8601 with an offset) in `[display] timezone`, or its
+  own zone when that is empty, and the job waits as the new state `scheduled` until then; a past
+  time is refused (400 `start_at_past`, never moved to tomorrow), as is one more than
+  `[server] schedule_max_ahead_days` (14) ahead or one a daylight saving change skips or repeats.
+  A lane must pick it up within `[server] schedule_start_deadline_seconds` (900) of its time — a
+  preset's `start_deadline_seconds` overrides it, a submission may only shorten it — or it ends in
+  the new final state `expired` (`rcm wait` exit 2). A schedule never joins another job and no
+  job joins it; the same preset, inputs and source scheduled twice is 409 `schedule_exists`.
+  Schedules survive `rcm reload` and a restart; on start-up the server closes the ones whose
+  deadline passed while it was down and queues the ones that are due. HTTP: `start_at` /
+  `start_in_seconds` on `POST /jobs`; `/api/health` says `schedule: true`, and `rcm run` refuses
+  `--at` / `--in` with exit 2 on a server that does not. `rcm jobs --state scheduled`,
+  `rcm cancel`, `rcm bump` and `rcm eta --job` work on them.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- `/api/status` lists schedules under `pools[].scheduled[]` (with `scheduled_error` and
+  `scheduled_error_code`), and queue and recent rows carry `not_before` and `start_deadline`.
+  Keys added only — `schema_version` stays 1.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- **Two optional Store-tab roles, `status` and `golive`.** A release profile may now name a
+  `status` preset (both stores' review state, read-only, written to `status.json`) and a `golive`
+  preset (`mode = plan|release`: `golive-plan.json` says which platform is approved, `golive.json`
+  what the release did). `GET /api/repos/<repo>/release` carries `status` and
+  `golive {plan, result}` (null until a job writes the file); #254 and #255 add the routes and
+  the screen. `rcm check` fails a `golive` preset whose `mode` defaults to
+  `release`, a `status` or `golive` preset that lacks the inputs rcm sends, and warns when either
+  role is unset or `golive` has no `build_name_android`. `rcm_contract.py` validates the three new
+  kinds `status`, `golive-plan` and `golive`, and `rcm-store-connect` ships two skeletons,
+  `release_status.sh` and `release_golive.sh`, whose `--selftest` locks the exit codes: a plan
+  that read the stores exits 0 whatever they said, and a release for a build that is not approved
+  exits 2, never 75.
+  ([#252](https://github.com/monocsp/remote_ci_monitor/pull/252))
+- **The review panel shows both stores' review state and can check again.** With a `status`
+  preset, the Store tab's review panel draws the App Store and Google Play state from
+  `status.json` — one of eight words, `unknown` for any other, the store's own word beside it, how
+  long ago it was checked and a note when that is older than `plan_max_age_minutes` — and
+  **Check again** submits the preset through the new `POST /api/repos/<repo>/release/status`
+  (any client token; `build_name` is optional). When the newest check failed, timed out or was
+  lost, the panel says so above the older state, and a state written by a job that did not
+  succeed carries that job's state word. `GET …/release` now reads each role preset
+  through its own window of 500 jobs, so frequent `status` jobs no longer push the last plan or
+  review out of the view, and they take at most 3 rows of their own in `jobs[]`; a running
+  `status` job is not the Build · upload row's current step.
+  ([#254](https://github.com/monocsp/remote_ci_monitor/pull/254))
+- **A job can say that a person has to act: `::rcm::action::<code>::<note>`.** `code` is
+  `[a-z0-9_-]{1,32}`, `note` up to 200 characters with control, bidirectional and zero-width
+  characters removed — and never personal details, since it is readable without a token. The
+  last one is the job's `action {code, note, at}` on `GET /jobs/<id>`, the `rcm wait` / `rcm run`
+  JSON and the queue and recent rows of `/api/status` (added keys; `schema_version` stays 1), and
+  stays after the job ends. A running job with an action has the new reason `needs_action`, first
+  among the actionable reasons. `rcm wait` prints `#N needs action · <code> · <note>` on stderr;
+  **`rcm wait --return-on-action`** returns with **exit 4** as soon as the job has an action, while
+  the job keeps running (4 never appears without the flag, nor for a job being cancelled). Hooks
+  get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- **`rcm check` warns when notification hooks failed** (`warn  notify  N hook deliveries
+  failed…`). The count is the server's in-memory `notify_failures`, so a restart sets it back to 0.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- **The web queue shows scheduled jobs.** Below the queue, **Scheduled (N)** lists
+  `pools[].scheduled[]` in time order — the preset, its inputs, who asked, the time and the start
+  deadline in the display time zone, and **Cancel** on your own — with no ETA. When the server
+  could not read them the section is a red band, never an empty list, and «Needs a look» says
+  `unknown — scheduled jobs unavailable` rather than `Nothing needs a look`. `rcm top` adds one line per
+  pool, `scheduled — N · next HH:MM <preset>` (`scheduled — unavailable: …` on a read error). The
+  web page draws the new states `scheduled`, `expired`, `retried` and `exhausted` with a glyph and
+  colour of their own (an `exhausted` recent row opens like a failed one, with its rerun command), and `rcm top` gives `expired` and `exhausted` their own glyph in the recent
+  list. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- **The web page shows a job's action.** `needs_action` leads «Needs a look», and the status
+  column reads `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean) with the job's note
+  untranslated. The header shows a `notify failures N` badge while notification hooks have failed
+  since the server started (hidden at 0). ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- **Going live when a person asks for it: `POST /api/repos/<repo>/release/golive`,
+  `rcm release golive` and the version page's «Schedule go-live».** `mode = plan` (any client
+  token) reads approval and the approved build into `golive-plan.json`; `mode = release` (admin)
+  goes live now or at `start_at` / `start_in_seconds` (`--at` / `--in`) with the approved build
+  number a person typed — `auto` is not accepted. The server checks the gate once, when the
+  release is asked for: 409 `golive_plan_required` (no succeeded plan for that `build_name`, or
+  one that did not read a chosen platform), `golive_plan_stale` (older than
+  `plan_max_age_minutes`), `golive_plan_blocked` (a chosen platform is not approved — only the
+  chosen ones count, so iOS goes while Android is in review), `build_number_mismatch` (both
+  platforms must share the typed number) and `golive_running` (a go-live job of that build is
+  booked or running). A booked release is not refused later because its plan aged. A plan with a
+  time is 400 `golive_plan_now_only`. A submitted draft takes `golive`; a discarded one is still
+  409 `version_closed`. The web area opens only when `status.json` says that store approved this
+  version, runs the plan first, lists what is booked with a cancel button, and draws the last
+  `golive.json` — a platform the script never tried is «not attempted», not «failed».
+  `GET …/release` carries `golive.live[]`, the booked and running go-live jobs.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- `rcm release status [REPO] [--build-name X]` runs the `status` role, waits, and prints both
+  stores' version, build, state and the store's own word.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- `rcm-store-connect` installs `release_status.sh` and `release_golive.sh` and adds the presets
+  `release-status` and `release-golive` (`priority = "high"`, `start_deadline_seconds = 3600`,
+  `concurrency_group = "store-browser-<repo>"` shared with the project's Play Console sign-in
+  preset, and `[presets.retry]` with exit 75 every 600 s, 12 attempts) and the two roles to
+  `profile.release.toml`. The go-live selftest now proves the script
+  never sleeps when a sign-in is lost (a recording `sleep` stub), and it now runs
+  in under two seconds: the script starts Python a few times per run instead of once per field.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **A preset can run its script again later: `[presets.retry]`.** With `on_exit = 75`,
+  `interval_seconds = 600` and `max_attempts = 12` (the defaults), an attempt that exits 75 ends
+  in the new final state `retried` and, in the same transaction, the next attempt waits as
+  `scheduled` for the interval — with no start deadline, so a busy lane or a held concurrency
+  group never turns it `expired`. The last attempt that still exits 75 ends in the new final state
+  `exhausted` (`rcm wait` exit 1). Only a preset that declares the table retries, and it must take
+  `git_ref` sources only; the policy is frozen on the job at submission, and `"retry": false` in a
+  submission turns it off for that job (a submission joins only a job with the same frozen policy,
+  and a retry attempt supersedes nothing when it enters the queue). `rcm wait` and `rcm run`
+  follow `retried_as` to the end of the chain (`--timeout` covers the chain, `--fetch-artifacts`
+  takes the last attempt's files) and the final JSON carries `chain_id` and `attempts[]`;
+  `rcm cancel` with any id of the chain stops the live attempt, with the first submission's
+  cancel token. A cancel that lands as an attempt exits 75 wins and no next attempt is made. Job rows in
+  `GET /jobs/<id>` and `/api/status` carry `chain_id`, `attempt`, `retry_of`, `retried_as` and
+  `max_attempts`, presets carry `retry`, and `/api/health` carries `retry_min_client_version`
+  (keys added only — `schema_version` stays 1).
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- **An `::rcm::action::` marker lasts across the attempts of a chain.** The chain shows the last
+  marker of its most recent attempt that ran until an attempt runs to its end without one, so the
+  next attempt keeps `reason: "needs_action"` and its `action` while it waits — as a schedule, in
+  the queue, or running. `pools[].scheduled[]` rows gain `reason` and `action` (null without a
+  marker). ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+
+### Changed
+- The usage guide shows the new screens in annotated screenshots: the Scheduled section with a
+  job that needs a person and the `notify failures` badge, the Store tab's store review state, and
+  the version page's «Schedule go-live» with the rule that nothing goes live on approval by itself.
+  The README's Store tab section shows the go-live area, and every other screenshot is retaken
+  from the current page and CLI. ([#261](https://github.com/monocsp/remote_ci_monitor/pull/261))
+- A `[[notify]]` rule without `on` fires for `exhausted` but not for `retried`, so a two-hour chain
+  is one notification; `on = ["retried"]` asks for each attempt.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- `retried` attempts stay out of the recent list, the estimate samples and the failure counts;
+  the chain shows as its last attempt. Only the last attempt collects artifacts and goes on the
+  shelf, and a `retried` attempt keeps no workspace even with `keep_workspace_on_failure`.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- No job joins a job that came from a schedule any more, before or after it enters the queue,
+  whether or not it has a start deadline (a retry attempt has none).
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- The `rcm-ci-connect` and `rcm-release-driver` templates know the two new states: the watcher
+  follows a `retried` job to its next attempt and posts `unavailable · #N · gave up after retries`
+  for `exhausted`, and `release_check.py` maps both to exit 3. Copy the new
+  `rcm_ci_watch.py`, `rcm_ci_config.py` and `release_check.py` into repositories that use them.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- **The fixed sentence about going live changed everywhere** — the Store tab, the version page,
+  the bottom sheet, the review panel, the submit dialog, the docs and the skill templates. It
+  read «Approval does not release …»; it now reads «Nothing goes live on approval by itself. A
+  release runs only when a person asks for it with the version, the build number and a time.»
+  The review panel adds «Play has no API to publish a held release, so the project's go-live
+  script publishes through a browser or asks a person.» Release after approval was never
+  automatic and still is not; a person can now ask for it from rcm instead of the store consoles.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **`POST /jobs` refuses the `golive` role's preset with `mode = release`** for every token,
+  admin included: 409 `release_route_required` (`rcm run` exits 2). Going live takes the golive
+  route, which runs the gate. `review` and `upload` are unchanged.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **A plan whose `measured_at` is later than now is stale** — the plan, the review plan and the
+  golive plan alike. Its age used to be cut to 0, so a script with a wrong clock kept an
+  irreversible button open for ever; `age_seconds` still never goes below 0.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- The release routes' answers (`plan`, `review`, `upload`, `golive`) carry `submission`, the cancel secret `POST /jobs` gives, and a scheduled golive answers 201
+  with `not_before`, `start_deadline` and `timezone`; immediate ones stay 202.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
+  every final state. Give the rule an `on` list to keep the old set.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- `rcm top` says `idle lane did not pick it up` where it said `not scheduled`;
+  the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The Store tab's status panel no longer drops `Last check #N …` when a scheduled check follows
+  the failed one, counts a check that ended `exhausted` or `expired` as failed, and the line now
+  reads `Last check #N did not succeed (lost).`
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- `rcm run` exits 2 instead of 3 when the server refuses the submission with 409
+  `schedule_exists` (as it already did for `release_route_required`): no job was made. Any other
+  409 stays 3.
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
+  `not scheduled`, as `rcm top` does. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- `rcm wait` no longer prints `#N needs action · …` for a job that has already ended (succeeded,
+  failed, timed out, lost, expired), as it already did not for a cancelled one; the action is still
+  in the final JSON. `rcm top` cleans the note's control characters once more, as `rcm wait` does.
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- The `rcm-ci-connect` templates treat `expired` as finished: the watcher no longer waits on it
+  and the commit status is `error` · `unavailable · #N · did not start`, so the GitHub side runs
+  the checks. Copy the new `rcm_ci_watch.py` and `rcm_ci_config.py` into repositories that use
+  the skill. ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+
 ## [0.9.0] - 2026-11-22
 
 ### Added
@@ -1986,7 +2197,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0

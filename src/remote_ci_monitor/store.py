@@ -40,14 +40,19 @@ from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
     CANCELLING,
+    CHAIN_LINK_STATES,
     DEFAULT_POOL,
+    EXPIRED,
     FAILED,
     LOST,
     PHASE_MATERIALIZING,
     PLACEMENT_CAPABLE,
     PLACEMENT_POOL,
     QUEUED,
+    RETRIED,
     RUNNING,
+    SCHEDULED,
+    SCHEDULED_STATES,
     SCOPE_GLOBAL,
     SCOPE_HOST,
     SCOPE_POOL,
@@ -59,18 +64,20 @@ from remote_ci_monitor.core.model import (
     TOKEN_KINDS,
     UPLOADING,
     WAITING_STATES,
+    Action,
     CancelInfo,
     Job,
     JobLink,
     Joiner,
     Paused,
     Requester,
+    RetryPolicy,
     ShelfItem,
     Source,
     Transition,
 )
 from remote_ci_monitor.core.outcome import dump_args, load_args
-from remote_ci_monitor.core.progress import Marker
+from remote_ci_monitor.core.progress import KIND_ACTION, Marker, action_of, chain_action
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, superseded_by
 
@@ -78,7 +85,7 @@ from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, sup
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 24
+DB_VERSION = 25
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -227,7 +234,19 @@ CREATE TABLE IF NOT EXISTS jobs (
   fingerprint_hash TEXT,
   sample INTEGER NOT NULL DEFAULT 1,
   -- v24(M5p): 끝나면 보관함에 넣나. 제출 때 얼린다. 마이그레이션이 뒤에 붙이므로 여기서도 맨 끝이다
-  keep INTEGER NOT NULL DEFAULT 0
+  keep INTEGER NOT NULL DEFAULT 0,
+  -- v25(M5s): 예약(승격 시각 · 시작 마감) · 얼린 supersede 끄기 · 반복 사슬과 얼린 반복 정책.
+  -- 마이그레이션과 같은 차례로 맨 끝이다
+  not_before REAL,
+  start_deadline REAL,
+  no_supersede INTEGER NOT NULL DEFAULT 0,
+  chain_id INTEGER,
+  retry_of INTEGER,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  retry_on_exit INTEGER,
+  retry_interval_seconds INTEGER,
+  retry_max_attempts INTEGER,
+  retry_disabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -237,6 +256,7 @@ CREATE INDEX IF NOT EXISTS jobs_recent ON jobs(state, finished_at DESC, id DESC)
 CREATE INDEX IF NOT EXISTS jobs_join ON jobs(join_key, state);
 CREATE INDEX IF NOT EXISTS jobs_finished ON jobs(finished_at);
 CREATE INDEX IF NOT EXISTS jobs_key_finished ON jobs(key, finished_at DESC);
+CREATE INDEX IF NOT EXISTS jobs_chain ON jobs(chain_id);
 -- 잡이 `::rcm::fail::<이름>` 으로 지목한 것들. 이름 하나가 한 번(같은 잡에서 두 번 찍어도
 -- 한 가지 사실이다). `seq` 는 잡이 찍은 순서 — 첫 줄이 대개 진짜 원인이다 (M5h)
 CREATE TABLE IF NOT EXISTS job_failures (
@@ -633,6 +653,24 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _SHELF_STATE_INDEX_SQL,
         _SHELF_LATEST_INDEX_SQL,
     ),
+    # v24 → v25(M5s · docs/m5s-workplan.md §4.1 · §4.2 · 결정 237): 이 마일스톤의 열을 한 번에
+    # 붙인다. 예약은 승격 시각(`not_before`)과 시작 마감(`start_deadline`)이고, 옛 잡은 NULL =
+    # 즉시 실행이다. `no_supersede` 는 제출의 `"supersede": false` 를 얼린 값이다 — 재시작해도
+    # 잊지 않는다. 반복 사슬(`chain_id` · `retry_of` · `attempt`)과 얼린 반복 정책(`retry_*`)은
+    # 여기서 만들기만 하고 쓰는 것은 반복(PR D)이다. v24 백업은 `migrate()` 경계에서 먼저 남는다.
+    25: (
+        "ALTER TABLE jobs ADD COLUMN not_before REAL",
+        "ALTER TABLE jobs ADD COLUMN start_deadline REAL",
+        "ALTER TABLE jobs ADD COLUMN no_supersede INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE jobs ADD COLUMN chain_id INTEGER",
+        "ALTER TABLE jobs ADD COLUMN retry_of INTEGER",
+        "ALTER TABLE jobs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE jobs ADD COLUMN retry_on_exit INTEGER",
+        "ALTER TABLE jobs ADD COLUMN retry_interval_seconds INTEGER",
+        "ALTER TABLE jobs ADD COLUMN retry_max_attempts INTEGER",
+        "ALTER TABLE jobs ADD COLUMN retry_disabled INTEGER NOT NULL DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS jobs_chain ON jobs(chain_id)",
+    ),
 }
 
 
@@ -763,6 +801,17 @@ class StoreError(RuntimeError):
     pass
 
 
+class ScheduleExists(StoreError):
+    """같은 합류 키(프리셋 · 입력 · 소스 신원)의 예약이 이미 있다 — 서버의 409 `schedule_exists`
+    (M5s 결정 209 · 227). `job_id` 는 그 예약이다."""
+
+    def __init__(self, job_id: int):
+        super().__init__(
+            f"job #{job_id} is already scheduled with the same preset, inputs and source"
+        )
+        self.job_id = job_id
+
+
 @dataclass(frozen=True)
 class SampleRow:
     """중앙값 계산에 필요한 것만 담은 가벼운 행(`Store.list_sample_rows`).
@@ -782,6 +831,15 @@ class SampleRow:
     worker_name: str | None = None
     #: 점검 · 예열 잡은 False — `medians_from` 이 건너뛴다(결정 103)
     sample: bool = True
+    #: 예약 잡(M5s)은 대기를 승격 시각(`queued_at`)부터 잰다 — `wait_origin`
+    queued_at: datetime | None = None
+    not_before: datetime | None = None
+
+    @property
+    def wait_origin(self) -> datetime:
+        if self.not_before is not None and self.queued_at is not None:
+            return self.queued_at
+        return self.created_at
 
 
 @dataclass(frozen=True)
@@ -989,6 +1047,30 @@ _NOT_SHELVING = (
 )
 
 
+#: 합류가 비교하는 얼린 반복 정책의 열(#256 검증) — 세 칸과 끄기가 모두 같아야 붙는다
+_RETRY_JOIN_SQL = (
+    "AND retry_on_exit IS ? AND retry_interval_seconds IS ? AND retry_max_attempts IS ? "
+    "AND retry_disabled=? "
+)
+
+
+def _frozen_retry(
+    retry: RetryPolicy | None, disabled: bool
+) -> tuple[int | None, int | None, int | None, int]:
+    """제출이 얼릴 반복 정책의 합류 비교값 — `_RETRY_JOIN_SQL` 의 차례, 잡 열과 같은 모양.
+
+    정책이 다른 잡에 붙으면 합류자는 그 잡의 정책을 받는다 — 간격이나 상한만 달라도 사용자가
+    기대한 반복이 아니다(reload 로 `max_attempts` 만 바꾼 뒤의 제출)."""
+    if retry is None:
+        return None, None, None, 0
+    return (
+        int(retry.on_exit),
+        int(retry.interval_seconds),
+        int(retry.max_attempts),
+        1 if disabled else 0,
+    )
+
+
 def _job_keeps(conn: sqlite3.Connection, job_id: int) -> bool:
     row = conn.execute("SELECT keep FROM jobs WHERE id=?", (job_id,)).fetchone()
     return row is not None and bool(row["keep"])
@@ -1088,6 +1170,8 @@ class Store:
         self.shelf_enabled = False
         #: 보관함 폴더를 쓸 수 있나 — 기동 화해(`reconcile_shelf_on_start`)가 정한다(§5.3).
         self.shelf_available = True
+        #: 마지막 `recover_on_start` 가 정리한 예약 — `(expired, promoted)`(M5s)
+        self.schedule_recovered: tuple[list[int], list[int]] = ([], [])
         # 경고 한 줄을 어디에 쓰나(백업 정리 실패 같은, 멈출 일은 아닌 것). 기본은 stderr.
         self._log = log or (lambda msg: print(msg, file=sys.stderr))
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1288,7 +1372,30 @@ class Store:
             fingerprint_hash=row["fingerprint_hash"],
             sample=bool(row["sample"]) if row["sample"] is not None else True,
             keep=bool(row["keep"]),
+            not_before=_dt(row["not_before"]),
+            start_deadline=_dt(row["start_deadline"]),
+            no_supersede=bool(row["no_supersede"]),
+            chain_id=row["chain_id"],
+            retry_of=row["retry_of"],
+            attempt=int(row["attempt"] or 1),
+            retried_as=self._retried_as(conn, row),
+            retry_on_exit=row["retry_on_exit"],
+            retry_interval_seconds=row["retry_interval_seconds"],
+            retry_max_attempts=row["retry_max_attempts"],
+            retry_disabled=bool(row["retry_disabled"]),
         )
+
+    @staticmethod
+    def _retried_as(conn: sqlite3.Connection, row: sqlite3.Row) -> int | None:
+        """`retried` 로 끝난 시도의 다음 시도 id(M5s). 다른 상태면 묻지도 않는다 — 행마다 질의를
+        붙이지 않으려는 것이다. 사슬 인덱스(`jobs_chain`)로 찾는다."""
+        if row["state"] != RETRIED or row["chain_id"] is None:
+            return None
+        found = conn.execute(
+            "SELECT id FROM jobs WHERE chain_id=? AND retry_of=? ORDER BY id LIMIT 1",
+            (row["chain_id"], row["id"]),
+        ).fetchone()
+        return int(found["id"]) if found is not None else None
 
     def get_job(self, job_id: int) -> Job | None:
         conn = self._conn()
@@ -1305,6 +1412,10 @@ class Store:
             f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY id", tuple(sorted(ACTIVE_STATES))
         )
 
+    def list_scheduled(self) -> list[Job]:
+        """예약 잡(M5s) — 승격 시각 순, 같으면 id 순. 활성 집합 밖이라 `list_active` 에 없다."""
+        return self._jobs("SELECT * FROM jobs WHERE state=? ORDER BY not_before, id", (SCHEDULED,))
+
     def list_recent(self, limit: int) -> list[Job]:
         """최근 완료 잡 `limit` 개, 새것부터.
 
@@ -1314,13 +1425,16 @@ class Store:
         """
         if limit <= 0:
             return []
-        marks = ",".join("?" * len(TERMINAL_STATES))
+        # 사슬의 중간 시도(`retried`)는 넣지 않는다(M5s §4.2) — 12번 반복이 다른 결과 8개를
+        # 밀어낸다. 사슬은 마지막 시도 한 행이다
+        shown = sorted(TERMINAL_STATES - CHAIN_LINK_STATES)
+        marks = ",".join("?" * len(shown))
         ids = [
             int(r["id"])
             for r in self._conn().execute(
                 f"SELECT id FROM jobs WHERE state IN ({marks}) "
                 "ORDER BY finished_at DESC, id DESC LIMIT ?",
-                (*sorted(TERMINAL_STATES), limit),
+                (*shown, limit),
             )
         ]
         if not ids:
@@ -1374,15 +1488,17 @@ class Store:
         그런데 `medians_from` 이 보는 것은 `key · pool · state · created_at · started_at ·
         finished_at` 여섯 개뿐이다(M5f 결정 49).
         """
-        marks = ",".join("?" * len(TERMINAL_STATES))
+        # `retried` 시도는 표본이 아니다(M5s §4.2) — 스크립트가 「아직」이라며 일찍 끝난 시간이다
+        sampled = sorted(TERMINAL_STATES - CHAIN_LINK_STATES)
+        marks = ",".join("?" * len(sampled))
         rows = (
             self._conn()
             .execute(
                 f"SELECT key, pool, state, created_at, started_at, finished_at, host_key, "
-                f"worker_name, sample FROM jobs "
+                f"worker_name, sample, queued_at, not_before FROM jobs "
                 f"WHERE state IN ({marks}) AND started_at >= ? AND finished_at IS NOT NULL "
                 "AND sample != 0 ORDER BY id",
-                (*sorted(TERMINAL_STATES), _ts(since)),
+                (*sampled, _ts(since)),
             )
             .fetchall()
         )
@@ -1397,6 +1513,8 @@ class Store:
                 host_key=r["host_key"],
                 worker_name=r["worker_name"],
                 sample=bool(r["sample"]) if r["sample"] is not None else True,
+                queued_at=_dt(r["queued_at"]),
+                not_before=_dt(r["not_before"]),
             )
             for r in rows
         ]
@@ -1468,12 +1586,14 @@ class Store:
         return {int(r["id"]): at for r in rows if (at := _dt(r["finished_at"])) is not None}
 
     def list_samples(self, since: datetime) -> list[Job]:
-        """표본 후보: 시작·종료 시각이 있는 종료 잡. 정책 필터는 순수 계층이 한다."""
-        marks = ",".join("?" * len(TERMINAL_STATES))
+        """표본 후보: 시작·종료 시각이 있는 종료 잡. 정책 필터는 순수 계층이 한다.
+        사슬의 중간 시도(`retried`)는 빠진다(M5s §4.2)."""
+        sampled = sorted(TERMINAL_STATES - CHAIN_LINK_STATES)
+        marks = ",".join("?" * len(sampled))
         return self._jobs(
             f"SELECT * FROM jobs WHERE state IN ({marks}) AND started_at >= ? "
             "AND finished_at IS NOT NULL ORDER BY id",
-            (*sorted(TERMINAL_STATES), _ts(since)),
+            (*sampled, _ts(since)),
         )
 
     def list_unpurged_finished(self, limit: int = 1000) -> list[Job]:
@@ -1614,8 +1734,12 @@ class Store:
                     # M5e: 묶음 파일도 예약도 없어야 지운다 — 삭제에 실패한 번들이 소유 기록과
                     # 회계를 잃으면 안 된다(§8). 번들 행이 아예 없는 옛 잡은 예전 규칙 그대로.
                     "AND id NOT IN (SELECT job_id FROM job_artifacts "
-                    "WHERE purged_at IS NULL OR reserved_bytes > 0)",
-                    (*sorted(TERMINAL_STATES), _ts(cutoff)),
+                    "WHERE purged_at IS NULL OR reserved_bytes > 0) "
+                    # M5s: 사슬이 살아 있으면 뿌리를 남긴다 — 취소 capability 가 뿌리에
+                    # 있다(결정 228)
+                    f"AND id NOT IN (SELECT chain_id FROM jobs WHERE chain_id IS NOT NULL "
+                    f"AND state NOT IN ({marks}))",
+                    (*sorted(TERMINAL_STATES), _ts(cutoff), *sorted(TERMINAL_STATES)),
                 ).fetchall()
             ]
             if ids:
@@ -2494,8 +2618,13 @@ class Store:
         sample: bool = True,
         fingerprint_hash: str | None = None,
         keep: bool = False,
+        not_before: datetime | None = None,
+        start_deadline: datetime | None = None,
+        no_supersede: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> Job:
-        """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued` 로 만든다.
+        """새 잡. tree 는 `uploading`, git_ref 는 바로 `queued`(예약이면 `scheduled`)로 만든다.
 
         `keep` 은 제출 때 얼린 값이다(프리셋 keep OR 제출 keep, M5p 결정 127)."""
         job, _ = self._create_job_tx(
@@ -2520,6 +2649,11 @@ class Store:
             sample=sample,
             fingerprint_hash=fingerprint_hash,
             keep=keep,
+            not_before=not_before,
+            start_deadline=start_deadline,
+            no_supersede=no_supersede,
+            retry=retry,
+            retry_disabled=retry_disabled,
         )
         return job
 
@@ -2557,9 +2691,19 @@ class Store:
         sample: bool = True,
         fingerprint_hash: str | None = None,
         keep: bool = False,
+        not_before: datetime | None = None,
+        start_deadline: datetime | None = None,
+        no_supersede: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> tuple[Job, tuple[str, str] | None]:
-        if state not in (UPLOADING, QUEUED):
+        if state not in (UPLOADING, QUEUED, SCHEDULED):
             raise StoreError(f"new job cannot start in state {state}")
+        if (state == SCHEDULED or not_before is not None) and (
+            not_before is None or state == QUEUED
+        ):
+            # 예약은 시각이 있어야 하고(SCHEDULED), 시각이 있으면 곧장 queued 로 들어가지 않는다
+            raise StoreError(f"a scheduled job needs not_before and cannot start {state}")
         conn = self._conn()
         src = {
             "mode": source.mode,
@@ -2576,12 +2720,27 @@ class Store:
         issued: tuple[str, str] | None = None
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if not_before is not None and join_key is not None:
+                # 같은 합류 키의 예약이 이미 있나 — 판정과 삽입이 같은 트랜잭션이다(결정 209 ·
+                # `_join_tx` 와 같은 방식). 업로드 중인 tree 예약도 센다: 두 세션이 같은 트리를 같이
+                # 예약하면 둘째가 막혀야 한다. 도는 곳(풀 · 지정 머신)이 다르면 다른 예약이다 —
+                # `--machine A` 와 `--machine B` 에 같은 sha 의 야간 gate 를 거는 것은 중복이
+                # 아니다.
+                dup = conn.execute(
+                    "SELECT id FROM jobs WHERE join_key=? AND not_before IS NOT NULL "
+                    "AND state IN (?, ?) AND pool=? AND target_worker IS ? ORDER BY id LIMIT 1",
+                    (join_key, SCHEDULED, UPLOADING, pool, target_worker),
+                ).fetchone()
+                if dup is not None:
+                    conn.execute("ROLLBACK")
+                    raise ScheduleExists(int(dup["id"]))
             cur = conn.execute(
                 "INSERT INTO jobs (preset, inputs_json, key, concurrency_group, source_json, "
                 "requester_name, requester_label, state, created_at, queued_at, tree_hash, sha, "
                 "timeout_seconds, join_key, priority, pool, link_url, link_label, placement, "
-                "display_pool, target_worker, concurrency_scope, sample, fingerprint_hash, keep) "
-                f"VALUES ({', '.join('?' * 25)})",
+                "display_pool, target_worker, concurrency_scope, sample, fingerprint_hash, keep, "
+                "not_before, start_deadline, no_supersede) "
+                f"VALUES ({', '.join('?' * 28)})",
                 (
                     preset,
                     json.dumps(inputs, sort_keys=True, separators=(",", ":")),
@@ -2608,13 +2767,35 @@ class Store:
                     1 if sample else 0,
                     fingerprint_hash,
                     1 if keep else 0,
+                    _ts(not_before),
+                    _ts(start_deadline),
+                    1 if no_supersede else 0,
                 ),
             )
             job_id = int(cur.lastrowid)
+            if retry is not None:
+                # 반복 정책을 얼린다(M5s 결정 229) — 끝날 때 프리셋을 다시 읽지 않는다. 사슬의
+                # 뿌리는 자기 자신이다(결정 228). 같은 트랜잭션이라 정책 없는 반복 잡은 생기지
+                # 않는다
+                # 반복을 끈 잡(`retry: false`)은 사슬이 아니다 — 정책은 얼리되 뿌리는 없다
+                conn.execute(
+                    "UPDATE jobs SET chain_id=?, retry_on_exit=?, retry_interval_seconds=?, "
+                    "retry_max_attempts=?, retry_disabled=? WHERE id=?",
+                    (
+                        None if retry_disabled else job_id,
+                        int(retry.on_exit),
+                        int(retry.interval_seconds),
+                        int(retry.max_attempts),
+                        1 if retry_disabled else 0,
+                        job_id,
+                    ),
+                )
             self._event(conn, job_id, EVENT_STATE, {"state": state}, ts)
             if participant is not None:
                 issued = self._insert_submission(conn, job_id, ROLE_CANCEL_JOB, participant, now)
             conn.execute("COMMIT")
+        except ScheduleExists:
+            raise
         except Exception:
             conn.execute("ROLLBACK")
             raise
@@ -2622,11 +2803,15 @@ class Store:
         assert job is not None
         return job, issued
 
-    def find_joinable(self, join_key: str) -> Job | None:
+    def find_joinable(
+        self, join_key: str, *, retry: RetryPolicy | None = None, retry_disabled: bool = False
+    ) -> Job | None:
         marks = ",".join("?" * len(JOINABLE_STATES))
         rows = self._jobs(
-            f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) ORDER BY id LIMIT 1",
-            (join_key, *sorted(JOINABLE_STATES)),
+            f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) "
+            + _RETRY_JOIN_SQL
+            + "AND not_before IS NULL ORDER BY id LIMIT 1",
+            (join_key, *sorted(JOINABLE_STATES), *_frozen_retry(retry, retry_disabled)),
         )
         return rows[0] if rows else None
 
@@ -2638,13 +2823,25 @@ class Store:
         priority: int,
         now: datetime,
         keep: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> Job | None:
         """합류 판정 + 합류자 기록 + 우선순위 상향을 **한 트랜잭션**으로(M5).
 
         요청자 본인이면 합류자를 안 넣는다. 우선순위는 `max(기존, 요청)` 로만 올라간다. `keep` 도
         같다 — 켤 수만 있고 끄지 않는다(M5p 결정 128).
         """
-        got = self._join_tx(join_key, name, label, priority, now, with_submission=False, keep=keep)
+        got = self._join_tx(
+            join_key,
+            name,
+            label,
+            priority,
+            now,
+            with_submission=False,
+            keep=keep,
+            retry=retry,
+            retry_disabled=retry_disabled,
+        )
         return None if got is None else got[0]
 
     def join_or_bump_with_submission(
@@ -2655,11 +2852,23 @@ class Store:
         priority: int,
         now: datetime,
         keep: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> tuple[Job, str, str] | None:
         """`join_or_bump` + 그 참여자의 `leave_submission` capability 를 같은 트랜잭션에(M5l S8)
         — `(job, submission_id, cancel_token)`, 합류할 잡이 없으면 None. 삽입이 실패하면
         joiner 행도 `join_count` 도 그대로다."""
-        got = self._join_tx(join_key, name, label, priority, now, with_submission=True, keep=keep)
+        got = self._join_tx(
+            join_key,
+            name,
+            label,
+            priority,
+            now,
+            with_submission=True,
+            keep=keep,
+            retry=retry,
+            retry_disabled=retry_disabled,
+        )
         if got is None:
             return None
         job, issued = got
@@ -2676,18 +2885,27 @@ class Store:
         *,
         with_submission: bool,
         keep: bool = False,
+        retry: RetryPolicy | None = None,
+        retry_disabled: bool = False,
     ) -> tuple[Job, tuple[str, str] | None] | None:
         # 취소 중인 잡에는 합류하지 않는다 — 결과를 줄 수 없는 잡이다. 거기 합류하면 합류자의
-        # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반)
+        # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반).
+        # 예약에서 온 잡(`not_before` 가 있다)에도 합류하지 않는다(M5s 결정 226) — 승격한 뒤에도
+        # 그렇다. 붙으면 합류자가 그 마감을 물려받아 레인이 늦으면 `expired` 로 끝난다. 시작 마감이
+        # 없는 예약도 같다: 반복의 다음 시도(결정 231)에 붙으면 합류자의 즉시 실행이 `interval`
+        # 뒤로 밀리고, 그 사슬이 `exhausted` 로 끝나면 합류자도 1 을 받는다.
+        # 얼린 반복 정책이 같은 잡에만 합류한다(#256 검증 P2) — 합류자는 그 잡의 정책을 받는다.
+        # 반복을 원하는 제출이 `retry: false` 잡(또는 선언 전의 잡)에 붙으면 반복을 잃는다
         marks = ",".join("?" * len(JOINABLE_STATES))
         conn = self._conn()
         issued: tuple[str, str] | None = None
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                f"SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
-                f"AND state IN ({marks}) ORDER BY id LIMIT 1",
-                (join_key, *sorted(JOINABLE_STATES)),
+                "SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
+                + _RETRY_JOIN_SQL
+                + f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",
+                (join_key, *_frozen_retry(retry, retry_disabled), *sorted(JOINABLE_STATES)),
             ).fetchone()
             if row is None:
                 conn.execute("COMMIT")
@@ -2717,14 +2935,15 @@ class Store:
         return job, issued
 
     def set_priority(self, job_id: int, priority: int, now: datetime) -> bool:
-        """대기 잡(uploading · queued)의 우선순위를 바꾼다. 아니면 False."""
-        marks = ",".join("?" * len(WAITING_STATES))
+        """대기 잡(uploading · queued)과 예약 잡(M5s)의 우선순위를 바꾼다. 아니면 False."""
+        states = sorted(WAITING_STATES | SCHEDULED_STATES)
+        marks = ",".join("?" * len(states))
         conn = self._conn()
         conn.execute("BEGIN IMMEDIATE")
         try:
             cur = conn.execute(
                 f"UPDATE jobs SET priority=? WHERE id=? AND state IN ({marks})",
-                (int(priority), job_id, *sorted(WAITING_STATES)),
+                (int(priority), job_id, *states),
             )
             conn.execute("COMMIT")
         except Exception:
@@ -2943,7 +3162,13 @@ class Store:
         return None
 
     def consume_leave(
-        self, job_id: int, submission_id: str, participant: str, *, drop_joiner: bool
+        self,
+        job_id: int,
+        submission_id: str,
+        participant: str,
+        *,
+        drop_joiner: bool,
+        joiner_job_id: int | None = None,
     ) -> bool:
         """`leave_submission` 을 **한 번** 쓴다(M5l S6): 그 행이 아직 있고 · 그 잡의 것이고 ·
         `leave_submission` 이고 · 참여자 이름이 맞을 때만 지우고, 같은 트랜잭션에서 joiner 행
@@ -2961,7 +3186,11 @@ class Store:
                 conn.execute("COMMIT")
                 return False
             if drop_joiner:
-                conn.execute("DELETE FROM joiners WHERE job_id=? AND name=?", (job_id, participant))
+                # 반복 사슬(M5s)이면 capability 는 뿌리에, 합류자 행은 머리 시도에 있다
+                conn.execute(
+                    "DELETE FROM joiners WHERE job_id=? AND name=?",
+                    (joiner_job_id if joiner_job_id is not None else job_id, participant),
+                )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -3001,13 +3230,14 @@ class Store:
         )
 
     def mark_uploaded(self, job_id: int, total_bytes: int, now: datetime) -> bool:
-        """uploading → queued. 이미 취소됐으면 False."""
+        """uploading → queued. 예약 잡(`not_before` 가 있다)은 → scheduled 이고 `queued_at` 은
+        승격할 때 정한다(M5s §4.1). 이미 취소됐으면 False."""
         conn = self._conn()
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                "SELECT state, source_json FROM jobs WHERE id=?", (job_id,)
+                "SELECT state, source_json, not_before FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
             if row is None or row["state"] != UPLOADING:
                 conn.execute("ROLLBACK")
@@ -3018,7 +3248,10 @@ class Store:
                 "UPDATE jobs SET source_json=?, received_bytes=?, last_received_at=? WHERE id=?",
                 (json.dumps(src, separators=(",", ":")), total_bytes, ts, job_id),
             )
-            self._set_state(conn, job_id, QUEUED, ts, queued_at=ts)
+            if row["not_before"] is not None:
+                self._set_state(conn, job_id, SCHEDULED, ts)
+            else:
+                self._set_state(conn, job_id, QUEUED, ts, queued_at=ts)
             conn.execute("COMMIT")
             return True
         except Exception:
@@ -3033,8 +3266,14 @@ class Store:
         worker_name: str | None = None,
         *,
         claimant: Claimant | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> Job | None:
         """대기 잡 하나를 원자적으로 running 으로.
+
+        시작 마감(`start_deadline`, M5s 결정 208)이 지난 잡은 집지 않는다 — 두 SQL 갈래 모두. 그
+        잡을 `expired` 로 닫는 것은 주기 판정(`expire_overdue`)의 몫이다. `now_fn` 을 주면 마감과
+        시작 시각을 **트랜잭션 안에서** 다시 읽는다. 호출자의 `now` 는 admit(부하 판정) 전에 받은
+        것이라 그 사이에 마감이 지났을 수 있다.
 
         `claimant` 가 없으면 옛 규칙 그대로 — 그 풀의 잡, 그룹 배제는 **풀 안에서**(M5b).
         있으면 세 갈래(M5n §5.2): 그 워커를 지정한 잡 · 그 풀의 `pool` 잡(`gated` 제외) · 그 워커가
@@ -3054,9 +3293,9 @@ class Store:
             pool = claimant.pool
             worker_name = None if claimant.worker == LOCAL_WORKER_ID else claimant.worker
         conn = self._conn()
-        ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
+            ts = _ts(now_fn() if now_fn is not None else now)
             if conn.execute(_PAUSED_SQL).fetchone() is not None:
                 conn.execute("COMMIT")
                 return None
@@ -3073,14 +3312,16 @@ class Store:
                     raise LaneBusy(f"lane {lane} already has job #{int(taken['id'])}")
             if claimant is None:
                 row = conn.execute(
-                    "SELECT id FROM jobs WHERE state=? AND pool=? AND (concurrency_group IS NULL "
+                    "SELECT id FROM jobs WHERE state=? AND pool=? "
+                    "AND (start_deadline IS NULL OR start_deadline >= ?) "
+                    "AND (concurrency_group IS NULL "
                     "OR concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
                     f"WHERE state IN ({busy}) AND pool=? "
                     "AND concurrency_group IS NOT NULL)) ORDER BY priority DESC, id LIMIT 1",
-                    (QUEUED, pool, *busy_states, pool),
+                    (QUEUED, pool, ts, *busy_states, pool),
                 ).fetchone()
             else:
-                row = self._claimable(conn, claimant, busy, busy_states)
+                row = self._claimable(conn, claimant, busy, busy_states, ts)
             if row is None:
                 conn.execute("COMMIT")
                 return None
@@ -3128,7 +3369,7 @@ class Store:
 
     @staticmethod
     def _claimable(
-        conn: sqlite3.Connection, c: Claimant, busy: str, busy_states: list[str]
+        conn: sqlite3.Connection, c: Claimant, busy: str, busy_states: list[str], ts: float
     ) -> sqlite3.Row | None:
         """M5n 의 후보 잡 하나 — 세 갈래 · (우선순위, id) · 후보 잡의 범위로 그룹 배제.
 
@@ -3173,11 +3414,12 @@ class Store:
             c.pool,
         ]
         sql = (
-            "SELECT c.id, c.placement FROM jobs c WHERE c.state = ? AND ("
+            "SELECT c.id, c.placement FROM jobs c WHERE c.state = ? "
+            "AND (c.start_deadline IS NULL OR c.start_deadline >= ?) AND ("
             + " OR ".join(clauses)
             + f") AND {group_sql} ORDER BY c.priority DESC, c.id LIMIT 1"
         )
-        return conn.execute(sql, (QUEUED, *params, *params_group)).fetchone()
+        return conn.execute(sql, (QUEUED, ts, *params, *params_group)).fetchone()
 
     def concurrent_at_start(self, job_id: int) -> int | None:
         """그 잡이 시작할 때 같은 풀에서 돌던 잡 수(자기 포함). **모르면 None** — 0 이 아니다.
@@ -3202,7 +3444,8 @@ class Store:
     def request_cancel(
         self, job_id: int, by: str, now: datetime, grace_seconds: float
     ) -> str | None:
-        """취소 요청. 대기 잡은 즉시 cancelled, 실행 중이면 cancelling. 종료 잡이면 None."""
+        """취소 요청. 대기 잡과 예약 잡은 즉시 cancelled, 실행 중이면 cancelling.
+        종료 잡이면 None."""
         conn = self._conn()
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
@@ -3212,7 +3455,7 @@ class Store:
                 conn.execute("ROLLBACK")
                 return None
             state = row["state"]
-            if state in (UPLOADING, QUEUED):
+            if state in (UPLOADING, QUEUED, SCHEDULED):
                 self._set_state(
                     conn,
                     job_id,
@@ -3356,9 +3599,18 @@ class Store:
         `bundle`(`collect.CollectResult`)을 주면 산출물 묶음을 **같은 트랜잭션**에 쓴다 — 거절된
         finish 는 묶음도 안 남긴다(§5). 잡의 요약은 건드리지 않는다: 「테스트가 깨졌다」와
         「산출물을 못 올렸다」는 다른 사실이다(§3).
+
+        `retried`(M5s 결정 225)는 **`running` 에서만** 간다 — 부르는 쪽이 무엇을 주든 여기서
+        `only_from=(RUNNING,)` 이다. 그 사이 취소가 들어와 `cancelling` 이면 False 이고 다음 시도도
+        없다(부르는 쪽이 `cancelled` 로 닫는다). 다음 시도는 **같은 트랜잭션**에서 `scheduled` 로
+        만든다 — `retried_as` 없는 `retried` 는 생기지 않는다. 묶음은 받지 않는다: 보관은 사슬의
+        마지막 시도에서만 한다(결정 228).
         """
         if state not in TERMINAL_STATES:
             raise StoreError(f"{state} is not a terminal state")
+        if state == RETRIED:
+            only_from = (RUNNING,)
+            bundle = None
         conn = self._conn()
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
@@ -3370,6 +3622,17 @@ class Store:
             if only_from is not None and row["state"] not in set(only_from):
                 conn.execute("ROLLBACK")
                 return False
+            if state == RETRIED:
+                next_id, attempt, limit, at = self._next_attempt_tx(conn, job_id, ts)
+                if summary is None:
+                    summary, summary_code, summary_args = outcome.summary(
+                        "retrying",
+                        code=exit_code,
+                        attempt=attempt,
+                        max=limit,
+                        by=next_id,
+                        at=at.strftime("%Y-%m-%d %H:%MZ"),
+                    )
             self._set_state(
                 conn,
                 job_id,
@@ -3411,11 +3674,210 @@ class Store:
             conn.execute("ROLLBACK")
             raise
 
+    # ── 반복 사슬 (M5s §4.2) ────────────────────────────────────────────────
+
+    #: 다음 시도로 넘기는 열(결정 228). 입력 · sha(소스) · 우선순위(합류로 오른 값 포함) · 링크 ·
+    #: 배치 · 얼린 반복 정책 · supersede 끄기 · 사슬. 시각 · 레인 · 결과 · 취소 칸은 넘기지 않는다
+    _CARRIED_COLUMNS = (
+        "preset",
+        "inputs_json",
+        "key",
+        "concurrency_group",
+        "source_json",
+        "requester_name",
+        "requester_label",
+        "tree_hash",
+        "sha",
+        "timeout_seconds",
+        "join_key",
+        "priority",
+        "link_url",
+        "link_label",
+        "placement",
+        "target_worker",
+        "concurrency_scope",
+        "sample",
+        "keep",
+        "no_supersede",
+        "chain_id",
+        "retry_on_exit",
+        "retry_interval_seconds",
+        "retry_max_attempts",
+        "retry_disabled",
+        "join_count",
+    )
+
+    def _next_attempt_tx(
+        self, conn: sqlite3.Connection, job_id: int, ts: float
+    ) -> tuple[int, int, int, datetime]:
+        """열린 트랜잭션 안에서 — `job_id` 의 다음 시도를 `scheduled` 로 만든다(M5s 결정 211 · 228).
+
+        `not_before = now + interval` 이고 **시작 마감은 없다**(결정 231) — 레인이나 그룹을 오래
+        기다려도 `expired` 가 되지 않는다. 합류자 행은 다음 시도로 옮긴다(그들의 `rcm wait` 가
+        사슬을 따라간다). 제출 capability 는 뿌리에 그대로 둔다 — 취소는 뿌리 id 로 검사한다.
+        `(다음 id, 이 시도 번호, 상한, 다음 시각)` 을 돌려준다. 반복 정책이 없거나 상한에 닿았으면
+        던진다 — 부르는 쪽(`outcome_for`)이 `exhausted` 로 골랐어야 할 잡이다.
+        """
+        cols = ", ".join(self._CARRIED_COLUMNS)
+        row = conn.execute(
+            f"SELECT {cols}, attempt, pool, display_pool, fingerprint_hash FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None or row["retry_on_exit"] is None or row["chain_id"] is None:
+            raise StoreError(f"job #{job_id} has no retry policy — it cannot be retried")
+        attempt = int(row["attempt"] or 1)
+        limit = int(row["retry_max_attempts"] or 0)
+        if attempt >= limit:
+            raise StoreError(f"job #{job_id} is attempt {attempt} of {limit} — nothing to retry")
+        at = ts + int(row["retry_interval_seconds"] or 0)
+        values = [row[c] for c in self._CARRIED_COLUMNS]
+        # 어디서든 도는 잡(`capable`)은 claim 이 실제로 돈 풀로 옮겨 둔다 — 다음 시도는 제출 때의
+        # 풀(`display_pool`)에서 다시 기다린다. 집은 워커의 지문은 지정 머신 잡만 넘긴다(제출 때
+        # 박힌 값이다)
+        pool = row["display_pool"] if row["placement"] == PLACEMENT_CAPABLE else row["pool"]
+        fingerprint = row["fingerprint_hash"] if row["target_worker"] is not None else None
+        cur = conn.execute(
+            f"INSERT INTO jobs ({cols}, state, created_at, not_before, retry_of, attempt, pool, "
+            "display_pool, fingerprint_hash) "
+            f"VALUES ({', '.join('?' * (len(values) + 8))})",
+            (
+                *values,
+                SCHEDULED,
+                ts,
+                at,
+                job_id,
+                attempt + 1,
+                pool or DEFAULT_POOL,
+                row["display_pool"],
+                fingerprint,
+            ),
+        )
+        next_id = int(cur.lastrowid)
+        conn.execute("UPDATE joiners SET job_id=? WHERE job_id=?", (next_id, job_id))
+        # 이 시도의 보관 요청(원격 잡은 묶음이 ready 일 때 섰다)은 접는다 — 보관은 마지막 시도만
+        # 한다(결정 228). 이미 복사를 시작했으면 그대로 둔다
+        # 보관함이 꺼져 곧장 `failed`(disabled · unavailable)로 선 행도 접는다 — 시도마다 실패
+        # 항목이 쌓인다. 마지막 시도가 자기 행을 세운다
+        conn.execute(
+            "DELETE FROM shelf_items WHERE job_id=? AND state IN ('pending', 'failed')", (job_id,)
+        )
+        # 원격 워커는 끝을 알리기 전에 묶음을 올린다(프로토콜은 그대로다, §4.2 「판정 자리」) — 그
+        # 묶음은 바로 만료시켜 청소기가 다음 판에 치운다. 로컬 레인은 아예 모으지 않는다
+        conn.execute(
+            "UPDATE job_artifacts SET expires_at=? WHERE job_id=? AND state=? AND expires_at > ?",
+            (ts, job_id, artifacts.READY, ts),
+        )
+        self._event(conn, next_id, EVENT_STATE, {"state": SCHEDULED}, ts)
+        return next_id, attempt, limit, datetime.fromtimestamp(at, UTC)
+
+    def chain_jobs(self, chain_id: int) -> list[Job]:
+        """사슬의 시도 전부 — 시도 순(M5s). 사슬이 없는 잡이면 그 잡 하나(없으면 빈 목록)."""
+        jobs = self._jobs(
+            "SELECT * FROM jobs WHERE chain_id=? ORDER BY attempt, id", (int(chain_id),)
+        )
+        if jobs:
+            return jobs
+        one = self.get_job(int(chain_id))
+        return [one] if one is not None else []
+
+    def chain_head(self, job: Job) -> Job:
+        """`job` 이 속한 사슬의 머리 — 끝에서 아직 안 끝난 시도, 다 끝났으면 마지막 시도(M5s 결정
+        228). 사슬이 없는 잡은 자기 자신이다."""
+        if job.chain_id is None:
+            return job
+        attempts = self.chain_jobs(job.chain_id)
+        return attempts[-1] if attempts else job
+
+    # ── 예약 (M5s §4.1 · §4.7) ─────────────────────────────────────────────
+
+    def _expire_tx(self, conn: sqlite3.Connection, ts: float) -> list[int]:
+        """열린 트랜잭션 안에서 — 시작 마감이 지난 예약 · 대기 잡을 `expired` 로. 닫은 id.
+
+        조건부 UPDATE 다: 상태와 마감을 같은 문장이 본다. 도는 잡은 대상이 아니다(이미 시작했다).
+        """
+        rows = conn.execute(
+            "SELECT id, start_deadline FROM jobs WHERE state IN (?, ?) "
+            "AND start_deadline IS NOT NULL AND start_deadline < ? ORDER BY id",
+            (SCHEDULED, QUEUED, ts),
+        ).fetchall()
+        out: list[int] = []
+        for row in rows:
+            deadline = datetime.fromtimestamp(float(row["start_deadline"]), UTC)
+            text, code, args = outcome.summary(
+                "start_deadline_passed", at=deadline.strftime("%Y-%m-%d %H:%MZ")
+            )
+            # `BEGIN IMMEDIATE` 가 쓰는 쪽을 줄 세우므로 위의 SELECT 가 본 상태 그대로다
+            self._set_state(
+                conn,
+                int(row["id"]),
+                EXPIRED,
+                ts,
+                finished_at=ts,
+                summary=text,
+                summary_code=code,
+                summary_args=dump_args(args),
+                lane=None,
+                phase=None,
+            )
+            out.append(int(row["id"]))
+        return out
+
+    def _promote_tx(self, conn: sqlite3.Connection, ts: float) -> list[int]:
+        """열린 트랜잭션 안에서 — 시각이 된 예약을 `queued` 로, `queued_at = now`. 올린 id.
+
+        마감이 지난 예약은 올리지 않는다(같은 트랜잭션에서 `_expire_tx` 가 먼저 닫는다). 우선순위는
+        제출 때 정해진 값 그대로다(결정 208).
+        """
+        ids = [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM jobs WHERE state=? AND not_before IS NOT NULL AND not_before <= ? "
+                "AND (start_deadline IS NULL OR start_deadline >= ?) ORDER BY not_before, id",
+                (SCHEDULED, ts, ts),
+            ).fetchall()
+        ]
+        out: list[int] = []
+        for job_id in ids:
+            cur = conn.execute(
+                "UPDATE jobs SET queued_at=? WHERE id=? AND state=?", (ts, job_id, SCHEDULED)
+            )
+            if cur.rowcount != 1:
+                continue
+            self._set_state(conn, job_id, QUEUED, ts)
+            out.append(job_id)
+        return out
+
+    def expire_overdue(self, now: datetime) -> list[int]:
+        """시작 마감이 지난 예약 · 대기 잡을 `expired` 로 닫는다(5초 주기 판정). 닫은 id."""
+        return self._schedule_tx(lambda conn, ts: self._expire_tx(conn, ts), now)
+
+    def promote_due(self, now: datetime) -> list[int]:
+        """시각이 된 예약을 `queued` 로 올린다(5초 주기 판정). 한 번만 오른다. 올린 id."""
+        return self._schedule_tx(lambda conn, ts: self._promote_tx(conn, ts), now)
+
+    def _schedule_tx(
+        self, body: Callable[[sqlite3.Connection, float], list[int]], now: datetime
+    ) -> list[int]:
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            out = body(conn, _ts(now))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return out
+
     def recover_on_start(self, now: datetime) -> tuple[list[int], list[int]]:
         """서버 시작 정리. 로컬 레인의 running·cancelling → lost, uploading → cancelled.
 
         원격 워커(`worker_name`)의 잡은 건드리지 않는다 — 워커는 살아 있을 수 있고, 아니면
         `mark_lost_for_worker` 가 heartbeat 시각으로 닫는다(M5b-2).
+
+        예약(M5s §4.1)도 같은 트랜잭션에서 정리한다 — 워커가 뜨기 **전**이다. 서버가 꺼진 동안
+        시작 마감을 넘긴 예약 · 대기 잡은 `expired` 로 닫고, 시각은 지났지만 마감 안인 예약은
+        승격한다. 그 둘의 id 는 반환 모양을 바꾸지 않으려고 `schedule_recovered`
+        (`(expired, promoted)`)에 남긴다.
         """
         conn = self._conn()
         ts = _ts(now)
@@ -3453,10 +3915,13 @@ class Store:
                     cancelled_by="server",
                 )
                 cancelled.append(int(row["id"]))
+            expired = self._expire_tx(conn, ts)
+            promoted = self._promote_tx(conn, ts)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
+        self.schedule_recovered = (expired, promoted)
         return lost, cancelled
 
     # ── 이벤트 ──────────────────────────────────────────────────────────────
@@ -3514,6 +3979,59 @@ class Store:
             p = json.loads(e["payload"])
             out[e["job_id"]].append(Marker(at=_dt(e["at"]), kind=p["kind"], value=p["value"]))
         return out
+
+    def actions_for(self, job_ids: Iterable[int]) -> dict[int, Action]:
+        """잡마다 마지막 「사람이 할 일」 표식(M5s). 표식이 없는 잡은 결과에 없다.
+
+        표식은 마커 이벤트라 잡이 끝나도 남는다 — 끝난 잡의 행(`/api/status` 의 최근 행 ·
+        `GET /jobs/{id}` · 알림)이 이 길로 읽는다. 마커 전부를 읽지 않으려고 payload 머리로
+        거른다. 두 쓰기 길(`_event` · `add_markers`)이 같은 `json.dumps(…, separators)` 를 쓴다.
+        """
+        ids = tuple(job_ids)
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        head = json.dumps({"kind": KIND_ACTION}, separators=(",", ":"))[:-1] + ",%"
+        out: dict[int, Action] = {}
+        for e in self._conn().execute(
+            "SELECT job_id, at, payload FROM events "
+            f"WHERE kind=? AND job_id IN ({marks}) AND payload LIKE ? ORDER BY id",
+            (EVENT_MARKER, *ids, head),
+        ):
+            p = json.loads(e["payload"])
+            found = action_of(Marker(at=_dt(e["at"]), kind=p["kind"], value=p["value"]))
+            if found is not None:
+                out[e["job_id"]] = found
+        return out
+
+    def chain_actions(self, jobs: Iterable[Job]) -> dict[int, Action]:
+        """반복 사슬에 든 잡마다 사슬 전체의 표식(M5s 결정 233 · `progress.chain_action`).
+
+        사슬이 없는 잡과 표식이 없는 사슬은 결과에 없다. 시도는 사슬마다 한 번에 읽고(사슬
+        인덱스), 표식은 돈 시도들의 것만 한 번에 읽는다."""
+        wanted = {j.id: j.chain_id for j in jobs if j.chain_id is not None}
+        if not wanted:
+            return {}
+        chains = sorted(set(wanted.values()))
+        marks = ",".join("?" * len(chains))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT id, chain_id, state, started_at FROM jobs WHERE chain_id IN ({marks}) "
+                "ORDER BY chain_id, attempt, id",
+                tuple(chains),
+            )
+            .fetchall()
+        )
+        attempts: dict[int, list[tuple[int, bool, bool]]] = {}
+        for r in rows:
+            attempts.setdefault(int(r["chain_id"]), []).append(
+                (int(r["id"]), r["started_at"] is not None, r["state"] in TERMINAL_STATES)
+            )
+        ran = [a[0] for seq in attempts.values() for a in seq if a[1]]
+        actions = self.actions_for(ran)
+        per_chain = {c: chain_action(seq, actions) for c, seq in attempts.items()}
+        return {jid: a for jid, c in wanted.items() if (a := per_chain.get(c)) is not None}
 
     # ── 토큰 ────────────────────────────────────────────────────────────────
 
@@ -4142,7 +4660,10 @@ class Store:
         conn = self._conn()
         conn.execute("BEGIN IMMEDIATE")
         try:
-            waiting = ",".join("?" * len(WAITING_STATES))
+            # 예약 잡도 「기다리는 잡」이다(M5s) — 14일 뒤 예약이 있는 풀의 워커를 잊으면
+            # 경보가 꺼진다
+            pending = sorted(WAITING_STATES | SCHEDULED_STATES)
+            waiting = ",".join("?" * len(pending))
             rows = conn.execute(
                 f"SELECT name FROM workers WHERE last_seen_at < ? AND name NOT IN "
                 f"(SELECT worker_name FROM jobs WHERE worker_name IS NOT NULL "
@@ -4152,7 +4673,7 @@ class Store:
                 # 잡은 그대로 멈춰 있는데.
                 f"AND pool NOT IN (SELECT DISTINCT pool FROM jobs WHERE state IN ({waiting})) "
                 "ORDER BY name",
-                (_ts(cutoff), *sorted(BUSY_STATES), *sorted(WAITING_STATES)),
+                (_ts(cutoff), *sorted(BUSY_STATES), *pending),
             ).fetchall()
             gone = [r["name"] for r in rows]
             if gone:

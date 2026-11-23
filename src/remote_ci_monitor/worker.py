@@ -30,9 +30,11 @@ from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
+    EXHAUSTED,
     FAILED,
     LOST,
     MODE_TREE,
+    RETRIED,
     RUNNING,
     SUCCEEDED,
     TIMED_OUT,
@@ -185,6 +187,23 @@ def outcome_for(
         )
     elif rc == 0:
         state, summary = SUCCEEDED, progress.summary  # 잡이 찍은 문장 — 코드 없음
+    elif job.retries_on(rc):
+        # 반복(M5s 결정 210 · 211) — 제출 때 얼린 정책만 본다. 선언이 없으면 이 갈래에 오지 않고
+        # 75 도 아래의 여느 `failed` 다(rcm-ci 의 75 = 인프라 실패). 취소가 이미 들어온 잡은
+        # 반복하지 않는다(결정 225) — 사람이 멈춘 것을 다음 시도가 덮으면 안 된다
+        if job.state == CANCELLING:
+            state = CANCELLED
+            summary, code, args = cancel_outcome(job)
+        elif job.attempt < (job.retry_max_attempts or 0):
+            # 요약은 잡이 찍은 문장이 있으면 그것, 없으면 저장소가 다음 시도를 만들며 단다
+            state, summary = RETRIED, progress.summary
+        else:
+            state = EXHAUSTED
+            summary = progress.summary
+            if not summary:
+                summary, code, args = outcome.summary(
+                    "retries_exhausted", code=rc, attempts=job.attempt
+                )
     else:
         state = FAILED
         if progress.summary:
@@ -292,9 +311,11 @@ class Worker(threading.Thread):
             self._error = error
 
     def _claim(self, now: datetime) -> Job | None:
+        # 시작 마감(M5s)은 claim 트랜잭션 안에서 다시 읽은 시각으로 본다 — admit 이 걸린 동안
+        # 마감이 지났을 수 있다
         if self.claimant is None:
-            return self.store.claim(self.lane, now)
-        return self.store.claim(self.lane, now, claimant=self.claimant(now))
+            return self.store.claim(self.lane, now, now_fn=self.now_fn)
+        return self.store.claim(self.lane, now, claimant=self.claimant(now), now_fn=self.now_fn)
 
     def _set_hold(self, hold: Any) -> None:
         """부하로 막혔으면 `held`, 아니면 `idle`. `_set` 이 상태가 바뀔 때만 `_since` 를 되감으므로
@@ -329,7 +350,7 @@ class Worker(threading.Thread):
                     continue
                 now = self.now_fn()
                 if self.admit is None:
-                    current, hold = self.store.claim(self.lane, now), None
+                    current, hold = self.store.claim(self.lane, now, now_fn=self.now_fn), None
                 else:
                     current, hold = self.admit(self.lane, now, partial(self._claim, now))
                 if current is None:
@@ -579,7 +600,13 @@ class Worker(threading.Thread):
             self._fail_before_start(job, e.code, **e.args_public)
             return
         # 워크스페이스를 지우기 **전에**, 그리고 종료를 커밋하기 **전에** 모은다(명세 §5).
-        bundle = self._collect_artifacts(job, preset, workspace, result)
+        # 다음 시도가 있을 시도(M5s)는 모으지 않는다 — 보관과 묶음은 사슬의 마지막 시도에서만
+        # 만든다(결정 228). 12번 반복이 묶음 12개가 되지 않게
+        forced = result.cancelled or result.timed_out or result.lost
+        retrying = (
+            not forced and job.retries_on(result.rc) and job.attempt < (job.retry_max_attempts or 0)
+        )
+        bundle = None if retrying else self._collect_artifacts(job, preset, workspace, result)
         markers = self.store.markers(job.id)
         job_now = self.store.get_job(job.id) or job
         # 수집하는 동안 수용된 취소가 이긴다 — `outcome_for` 도 `finish` 도 자동으로 안 해 준다.
@@ -594,7 +621,7 @@ class Worker(threading.Thread):
             timed_out=result.timed_out,
             lost=result.lost,
         )
-        self.store.finish(
+        closed = self.store.finish(
             job.id,
             oc.state,
             now=result.finished,
@@ -609,8 +636,13 @@ class Worker(threading.Thread):
             bundle=bundle,
             ttl_hours=self.config.server.artifact_retention_hours,
         )
+        if not closed and oc.state == RETRIED:
+            # `retried` 는 `running` 에서만 간다(M5s 결정 225) — 그 사이 취소가 들어왔다. 취소가
+            # 이기고 다음 시도는 없다. 프로세스는 이미 끝났으니 여느 취소처럼 요청자 이름으로 닫는다
+            self._close_cancelled_before_start(job)
         # ── 정리 ──
-        keep = oc.state != SUCCEEDED and self.config.server.keep_workspace_on_failure
+        # 반복할 시도의 워크스페이스는 남기지 않는다(M5s §4.2) — 실패가 아니고, 12번이면 12개다
+        keep = oc.state not in (SUCCEEDED, RETRIED) and self.config.server.keep_workspace_on_failure
         if not keep:
             shutil.rmtree(workspace, ignore_errors=True)
 

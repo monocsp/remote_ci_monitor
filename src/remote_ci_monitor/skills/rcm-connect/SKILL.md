@@ -162,9 +162,11 @@ web UI after the profile exists (`rcm-store-connect` lists which ones).
 
 - Never run `upload` with `mode=upload` or `review` with `mode=submit` — verification is
   `--selftest`, `rcm check`, and the read-only `plan` at most.
-- Never generate an input that releases after store approval (no `automatic_release`, `rollout`,
-  `release_status` inputs); the generated review preset pins manual release and the driver's
-  irreversible calls require a build number typed by a human.
+- Never generate an input that goes live on approval by itself (no `automatic_release`, `rollout`,
+  `release_status` inputs). Nothing goes live on approval by itself: a release runs only when a
+  person asks for it with the version, the build number and a time (the `golive` role's
+  `mode = release`, sent by rcm's go-live route only). The generated review preset pins manual
+  release, and every irreversible call requires a build number typed by a human.
 - Never ask for or write a secret value; only names and kinds go into the profile.
 - Never put the project's name, paths or key names into rcm itself — they live in this project's
   `server.toml` profile and scripts. rcm stays generic.

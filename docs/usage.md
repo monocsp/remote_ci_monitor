@@ -158,8 +158,31 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
    ends when the job does. Ctrl-C detaches again without stopping anything.
 5. The exit code is the job's, exactly as if you had waited from the start.
 
+**Later instead of now.** `rcm run deploy --ref main --at 15:00` (or `--in 90m`) hands the server
+a time. The job waits as `scheduled` and enters the queue at that time: `rcm jobs` lists it as
+`at 15:00`, and `rcm wait --job N` prints `scheduled for 15:00 · start by 15:15` and keeps
+waiting. If no lane picks it up within its start deadline (15 minutes unless the preset sets
+another) it ends `expired`, exit 2 — it did not run. The rules are in
+[running a job later](configuration.md#running-a-job-later---at-and---in).
+
+**Again later.** A preset with a `[presets.retry]` table runs its script again when it exits 75
+("not yet"), every `interval_seconds`, up to `max_attempts`. Each attempt is a job of its own:
+`rcm wait --job N` prints `#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it` and
+follows the chain to its end; the last attempt's `exhausted` is exit 1. `rcm cancel` with any id
+of the chain stops it. The rules are in
+[trying again later](configuration.md#trying-again-later-presetsretry).
+
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
+
+**When the job needs a person.** A script that cannot go on by itself — a sign-in expired —
+prints `::rcm::action::<code>::<note>`. `rcm wait` then prints
+`#412 needs action · login · Sign in on the build machine` on stderr, and the job's row says
+`needs action`. `rcm wait --job N --return-on-action` returns at that moment with exit 4 and the
+JSON, `action` included, while the job keeps running — a session that waits for the result gets
+its turn back and can ask the person. Once the person has acted, wait again **without** the flag:
+the action stays on the job, so the flag would return at once
+([details](configuration.md#when-a-person-has-to-act)).
 
 `rcm cancel N` sends the cancel token that came back with the submission — `rcm run` saved it in
 `~/.local/state/rcm/submissions.json` (`$XDG_STATE_HOME/rcm/submissions.json` if set, mode
@@ -215,7 +238,9 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
    treats 3 as red, it will be red for the wrong reason. Exit 5 is a **delivery** failure and only
    appears with `--fetch-artifacts`: the job's own result is in `wait_exit_code`, and the files
-   are what did not arrive ([Getting the files back](#8-getting-the-files-back)).
+   are what did not arrive ([Getting the files back](#8-getting-the-files-back)). Exit 4 only
+   appears with `rcm wait --return-on-action`: the job asked a person to act and is still running
+   ([Not waiting](#5-not-waiting)).
 
 5. **A job that never started says so.** Some failures happen before your script runs, and the
    summary names which: the workspace could not be built (`snapshot_missing`,
@@ -369,6 +394,8 @@ where the job made them. `rcm shelf get` checks every file's sha256 and writes n
 5. **Other pools** get their own section, so a second build machine is visible from the same
    screen.
 
+A pool with scheduled jobs adds one line, `scheduled — 2 · next 15:00 golive`.
+
 `rcm top --watch 5` refreshes every five seconds; `rcm top --json` is for scripts.
 
 ## 10. The web page
@@ -421,6 +448,26 @@ A name longer than its column is cut in the middle (`android-integration-test-s�
 so names that start the same still differ at the end. Tap or click a cut name — or Tab to it and
 press Enter — to read it in full, with a **Copy** button. Tap again, tap elsewhere or press Escape
 to close it. It needs no hover, so it works on a phone too.
+
+### Scheduled jobs, and a job that needs a person
+
+![the header's notify failures badge, Needs a look naming a job that needs a person, and the Scheduled section: a retry attempt waiting for a sign-in, two jobs booked for later, and Cancel on your own](images/ui/web-scheduled.png)
+
+1. **`notify failures N`** in the header: a notification hook has failed since the server started.
+   The count lives in the server's memory, so a restart sets it back to 0; the server log keeps
+   each failure.
+2. **Needs a look** names a job that said it needs a person:
+   `needs action · login · Sign in on the build machine`. It comes before anything rcm inferred
+   ([details](configuration.md#when-a-person-has-to-act)).
+3. **Scheduled (N)**: jobs started with `rcm run --at` or `--in`, below the queue, in time order.
+   If the server could not read them, this section is a red band, never an empty list.
+4. **A retry attempt** waiting for its turn, `attempt 2/12`, still carrying the action the last
+   attempt printed, so the chain keeps asking for the person between attempts
+   ([trying again later](configuration.md#trying-again-later-presetsretry)).
+5. **When it starts, and its start deadline.** A scheduled job has no ETA until it enters the
+   queue; if no lane picks it up by the deadline it ends `expired`. A retry attempt has no deadline
+   (`start by —`) ([details](configuration.md#running-a-job-later---at-and---in)).
+6. **Cancel** on your own schedules.
 
 ### Your jobs
 
@@ -489,6 +536,41 @@ yours to do. Open or close it yourself and that choice is remembered.
 
 1. Workers, 2. the summary, 3. a job as a card, 4. its steps and 5. the buttons — one column, same
    information, no horizontal scrolling.
+
+### The Store tab: review state and going live
+
+A repository with a release profile gets a **Store** tab next to **Queue**. What it is and how a
+project connects to it are in the [README](../README.md#store-tab--connecting-a-projects-release-flow)
+and the [release contract](release-contract.md). Two places in it matter once a build is in review.
+The pictures below are drawn from sample data (an app called `app`, version 1.0.x).
+
+![the review panel: each store's review state with the version, the build and the store's own word, the Check again button, and the go-live rule below](images/ui/store-review-status.png)
+
+1. **Store review state**, read-only: each store's state in one of eight words (`unknown` for
+   anything else), the version and build, and the store's own word beside it. The line above says
+   how long ago it was read; once that is older than `plan_max_age_minutes` it asks you to check
+   again before you act on it.
+2. **Check again** runs the project's `status` preset once more.
+3. **The rule**, in the panel: nothing goes live on approval by itself. A release runs only when a
+   person asks for it with the version, the build number and a time. Google Play has no API to
+   publish a held release, so the project's go-live script publishes through a browser or asks a
+   person.
+4. The same rule closes every Store screen.
+
+![the version page's Schedule go-live area: both stores' state, the plan, the platform, the time, the typed build number, the Book go-live button, the booked list, and the rule below](images/ui/store-golive.png)
+
+1. **Schedule go-live**, on the version page, opens only once a store says this version is approved,
+   and only with an admin token. Its head repeats both stores' state.
+2. Opening it runs a read-only **plan** first: which store approved which build. Nothing goes live
+   from a plan.
+3. **Platform**: only an approved store can be chosen, and **Both** only when both are.
+4. **Now, or at a time** read in the server's timezone. A booked time waits for a lane up to its
+   start deadline, then expires.
+5. **The approved build number, typed by you.** It is never filled in, and it has to match the plan.
+6. **Book go-live** (**Go live now** for Now) sends the request. The server checks the plan, its age
+   and the number again ([going live](configuration.md#going-live-golive)).
+7. **Booked and running** lists what is booked for this version, with **Cancel**.
+8. The rule again, under the area.
 
 ## 11. A second machine
 

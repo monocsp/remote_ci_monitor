@@ -192,7 +192,7 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--link` shows an http(s) page — its pull request, say — next to the job's name in the web UI ([job links](docs/configuration.md#linking-a-job-to-a-page)); `--no-join` never joins an identical job; `--no-supersede` keeps your older job of the same branch when the preset would clear it ([superseding](docs/configuration.md#superseding-older-jobs-of-the-same-branch)); `--keep` puts the job's artifacts on the [shelf](docs/configuration.md#keeping-a-jobs-files-the-shelf) and prints a link any browser on the network opens; `--no-wait` returns as soon as the job is queued and prints its position and ETA; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory; `--machine ID` pins the job to one machine (a check preset with any token, anything else admin) |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--at TIME \| --in DURATION] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--link` shows an http(s) page — its pull request, say — next to the job's name in the web UI ([job links](docs/configuration.md#linking-a-job-to-a-page)); `--no-join` never joins an identical job; `--no-supersede` keeps your older job of the same branch when the preset would clear it ([superseding](docs/configuration.md#superseding-older-jobs-of-the-same-branch)); `--keep` puts the job's artifacts on the [shelf](docs/configuration.md#keeping-a-jobs-files-the-shelf) and prints a link any browser on the network opens; `--at 15:00` or `--in 90m` hands the server a time instead and the job waits as `scheduled` ([running a job later](docs/configuration.md#running-a-job-later---at-and---in)); `--no-wait` returns as soon as the job is queued and prints its position and ETA; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory; `--machine ID` pins the job to one machine (a check preset with any token, anything else admin) |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · disk · GPU · top processes) |
@@ -209,6 +209,8 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 | `rcm reload [--dry-run]` | re-read the config file and its `include` files — presets and repos only, no restart (admin); `--dry-run` names what would change and applies nothing |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | store version drafts (admin). With no version arguments `new` asks only for the names, offering the server's hints: enter takes the hint, `-` skips that store, `--yes` takes both. `open` prints the address of the version page |
+| `rcm release status [REPO] [--build-name X]` | both stores' review state: runs the repository's `status` role, waits, and prints each store's version, build, state and the store's own word (any client token) |
+| `rcm release golive [REPO] --build-name X --platform ios\|android\|both --plan` · `… --confirm-build-number N [--at TIME \| --in DURATION]` | going live with an approved build ([going live](docs/configuration.md#going-live-golive)). `--plan` reads approval and the approved build and waits; without it you ask for the release now or at a time, with the approved build number you typed (admin). Nothing goes live on approval by itself |
 
 Every estimate carries a `confidence`: `high` (median of ≥ 5 real runs), `med` (fewer), `low`
 (a preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown
@@ -242,11 +244,19 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
+::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
 `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
 parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
 it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
+
+`::rcm::action::<code>::<note>` says the job cannot go on without a person — a sign-in expired,
+say. `code` is `[a-z0-9_-]{1,32}`, `note` at most 200 characters and never personal details. The
+last one becomes the job's `action` and the running row's reason `needs_action`; `rcm wait`
+prints it on stderr, `rcm wait --return-on-action` returns with exit 4 while the job keeps running,
+and hooks get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. Details in
+[Configuration](docs/configuration.md#when-a-person-has-to-act).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
@@ -259,7 +269,9 @@ Open `http://<build-machine>:8787/` in any browser, phone included: three static
 `rcm serve`, no build step and no third-party assets. The first screen answers three questions at
 a glance — **Your jobs** (paste your token with the key button), **Needs a look** (only actionable
 causes, worst first) and **Host pressure** — and below them sit the queue with its status column
-and ETA confidence, the host card, recent results and how the estimates were computed. A job that
+and ETA confidence, the jobs scheduled for later, the host card, recent results and how the
+estimates were computed. A job that says it needs a person (`needs action · login · …`) is first
+under **Needs a look**; the header counts failed notification hooks. A job that
 has merely gone quiet is not listed as needing a look; see
 [Configuration](docs/configuration.md#estimates-and-when-a-job-is-called-not-responding).
 
@@ -279,7 +291,10 @@ Past the gate the tab is a **list of versions**. A one-line status strip answers
 up at all» — credentials, source, store, blockers — and turns red as soon as one of them is;
 clicking it opens `#/store/<name>/status`, which still carries the four collapsible rows (Setup,
 Source, Build · upload, Store) and the review panel, now read-only apart from **Validate listing**
-and **Plan review**. Under the strip: **+ New version**, then every open draft with its state, its
+and **Plan review**. With a `status` preset the panel also shows each store's review state — one
+of eight words, `unknown` for anything else, the store's own word beside it, how long ago it was
+checked and whether that is older than `plan_max_age_minutes` — and **Check again** runs the
+preset once more. Under the strip: **+ New version**, then every open draft with its state, its
 age, how many fields you changed, whether a build exists and whether it has expired, then the live
 version and the last 20 submitted ones.
 
@@ -311,9 +326,14 @@ jobs when it does not), the basis in words, and two columns — **Left before re
 it and goes there when clicked. The submit conditions live here too: the store checkboxes, the
 managed-publishing box ticked for this submission and never remembered, and the build number,
 **Auto** (the plan's own) or typed to match it exactly. A percentage appears only against a
-denominator declared in advance; otherwise the bar is hatched and says so. There is no Release,
-Publish or Rollout button in any state, and an `unsafe_release_type` verdict raises a red banner
-that cannot be dismissed.
+denominator declared in advance; otherwise the bar is hatched and says so. Nothing goes live on
+approval by itself: a release runs only when a person asks for it with the version, the build
+number and a time — the version page's «Schedule go-live», open only once that store says
+approved. An `unsafe_release_type` verdict raises a red banner that cannot be dismissed.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/store-golive.png" alt="The version page's Schedule go-live area: iOS approved and Android in review, the read-only plan, the platform, a time, the approved build number typed by hand, the Book go-live button, and the rule that nothing goes live on approval by itself" width="820">
+</p>
 
 Drafts neither pile up nor vanish under you. One nobody edited is discarded after
 `version_ttl_hours` (default 24) — through the store when the profile has a `version` preset,
@@ -335,8 +355,9 @@ no upload button), and the Source row shows the mirror's last five commits, its 
 
 Beyond the queue, a repository can get a **Store tab**: fetch, store snapshot, gate, QA, upload,
 submit for review, each a button over the project's *own* release scripts. rcm draws the JSON
-those scripts write and runs the presets they declare; it never computes a build number, judges
-QA, or releases anything after store approval. What a project must provide is written down in
+those scripts write and runs the presets they declare; it never computes a build number or judges
+QA, and nothing goes live on approval by itself — a release runs only when a person asks for it
+with the version, the build number and a time. What a project must provide is written down in
 [docs/release-contract.md](docs/release-contract.md); the fastest way to provide it is the skills
 rcm ships for a Claude Code session in that project:
 
@@ -365,14 +386,20 @@ with GitHub Actions as an optional fallback. How it works and what the owner set
 | `rcm wait` exit | meaning |
 |---|---|
 | 0 | job succeeded |
-| 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise) |
-| 2 | cancelled or timed out |
+| 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise), or a preset that [retries](docs/configuration.md#trying-again-later-presetsretry) still said "not yet" on its last attempt (`exhausted`) |
+| 2 | cancelled, timed out, or a schedule that never started (`expired`) |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
+| 4 | only with `--return-on-action`: the job asked a person to act (`::rcm::action::`) and **keeps running**. Resume with `rcm wait --job N`. |
+
+A `retried` attempt is not an end: `rcm wait` follows its `retried_as` to the next attempt and
+exits with the last one's code ([trying again later](docs/configuration.md#trying-again-later-presetsretry)).
 
 Usage errors and validation failures that never reach the server also exit 2, including `rcm run`
-when the server cannot be reached before submit. `rcm wait` gives an unreachable server 60 s to
-come back (printing `reconnecting…`) before exiting 3; `rcm eta`, `rcm jobs` and `rcm top` fail
-fast with `cannot reach <url>` and exit 3.
+when the server cannot be reached before submit. So does a submission the server refuses for
+certain without making a job — 400, 401, 403, 413, and a 409 whose code is `schedule_exists`
+or `release_route_required`; any other 409 is 3, since rcm cannot tell whether a job was made.
+`rcm wait` gives an unreachable server 60 s to come back (printing `reconnecting…`) before
+exiting 3; `rcm eta`, `rcm jobs` and `rcm top` fail fast with `cannot reach <url>` and exit 3.
 
 ## Security notes
 

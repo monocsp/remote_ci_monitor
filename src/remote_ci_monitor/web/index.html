@@ -31,6 +31,7 @@
       <button type="button" class="wk-more" id="wk-more" data-wkmore hidden></button>
     </span>
     <span class="errchip" data-errchip hidden></span>
+    <span class="notifychip" data-notify-failures hidden></span>
     <span class="skew" data-skew hidden></span>
     <span class="spacer"></span>
     <button id="live-btn" class="livebtn" type="button" title="갱신 멈추기" data-i18n-attr="title:conn.pause_hint" aria-pressed="false">
@@ -134,12 +135,12 @@
 </dialog>
 
 <!-- 심사 제출 확인 (스토어 목업 항목 23 · 28). N 은 본체 안에서 이미 타이핑했다 — 여기는 «되돌릴 수 없다» 와 플랫폼 이름뿐.
-     Release · Publish · Rollout 버튼은 어디에도 없다. -->
+     승인됐다고 저절로 출시되지 않는다 — 출시는 버전 페이지의 「출시 예약」에서 사람이 요청한다(M5s 결정 217). -->
 <dialog id="submit-dialog" aria-labelledby="submit-title">
   <form method="dialog" class="dlg">
     <h2 id="submit-title" data-submit-title data-i18n="review.title">심사 제출</h2>
     <p data-submit-body></p>
-    <p class="sub" data-i18n="store.policy">승인은 출시가 아닙니다. 이 화면에는 release · publish · rollout 버튼이 없습니다.</p>
+    <p class="sub" data-i18n="store.policy">승인됐다고 저절로 출시되지 않습니다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돕니다.</p>
     <div class="dlg-actions">
       <button type="button" class="btn" data-submit-cancel autofocus data-i18n="dialog.close">닫기</button>
       <button type="submit" class="btn primary" data-submit-go data-i18n="review.dialog_go">심사 제출</button>

@@ -117,7 +117,8 @@ no waiting workflow (remote_ci_monitor's own setup, `docs/m5r-workplan.md` §13)
 - Only the watcher is needed on the build machine; the job script may post its own `pending` and
   result instead of the `[[notify]]` hook. The watcher never posts `pending` over a result that is
   already there, nor `running` over a `pending` it did not post; it still covers a job that ended
-  without a status (cancelled, superseded, timed out, lost) after 120 seconds.
+  without a status (cancelled, superseded, timed out, lost, expired, exhausted) after 120 seconds.
+  A `retried` attempt is not the end: the watcher follows its `retried_as` to the next attempt.
 - A job held by `worker_down` or `paused` is left to wait — nobody would take it over, and a queue
   paused for a deploy must not turn pull requests into errors. The log says so once.
 - The tokens can come from where they already are: `rcm_client_config` reads the rcm client's own

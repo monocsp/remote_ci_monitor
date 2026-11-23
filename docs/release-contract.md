@@ -5,9 +5,11 @@
 > scripts already emit every file below — its names appear only as examples.
 
 The Store tab turns a project's own release scripts into buttons: fetch, plan, gate, QA, upload,
-submit for review. rcm **draws files and runs presets**. It does not compute build numbers, judge
-QA, decide what is releasable, or release anything after store approval. Every verdict on the page
-comes from a JSON file your script wrote; every action is a preset you declared.
+submit for review, go live. rcm **draws files and runs presets**. It does not compute build numbers,
+judge QA or decide what is releasable. **Nothing goes live on approval by itself. A release runs
+only when a person asks for it with the version, the build number and a time** (the `golive` role,
+§2 and §6). Every verdict on the page comes from a JSON file your script wrote; every action is a
+preset you declared.
 
 The quickest way to provide all of it is the skills rcm ships: `rcm skills install --into <project>`
 copies them into the project's `.claude/skills/`, and `/rcm-connect` there asks for the project and
@@ -51,6 +53,8 @@ review = "release-review"                 # required — submit for review → r
 gate   = "gate-smoke"                     # optional — your CI gate on the release ref
 qa     = "scenario-qa"                    # optional — device / scenario QA → report.json
 version = "release-version"               # optional — «new version» from the web: prefill / create / delete
+# status = "release-status"               # optional — both stores' review state → status.json (read-only)
+# golive = "release-golive"               # optional — a release a person asked for → golive-plan.json / golive.json
 # dev  = "deploy-dev"                     # optional — dev distribution card (phase 2)
 
 # Secrets the Settings screen asks for. rcm keeps them under <config_dir>/secrets/<repo>/
@@ -136,6 +140,8 @@ artifact retention). It sets these inputs; declare them on the preset or the sub
 | `upload` | **required** | `build_name`, `build_name_android`, `confirm_build_number`, `mode = rehearsal\|upload`, `platform`, `android_track`, `listing_json` | `upload.json` | 0 · 1 · 2 env · 3 confirmation mismatch · 4 store drift | `rcm-store-connect` |
 | `review` | **required** | `build_name`, `build_name_android`, `confirm_build_number` (empty for plan), `mode = plan\|submit`, `platform`, `play_managed_publishing = not-checked\|confirmed-on`, `listing = notes-only\|full`, `phased = 1\|0`, `listing_json` | `review-plan.json` / `review.json` | 0 · 1 failed · 2 blocked · 3/4 confirmation mismatch · 5 noop · 6 partial | `rcm-store-connect` |
 | `version` | optional | `mode = prefill\|create\|delete` (default **prefill**; rcm itself only ever sends `create` and `delete`), `ios_version`, `android_version` (empty = that store is not touched), `asc_version_id` (delete only) | `version.json` (create · delete) / `prefill.json` (prefill · create) | 0 · 1 failed · 2 environment · 3 already exists (an editable App Store version of that name) · 4 not deletable (the version was submitted) | `rcm-store-connect` |
+| `status` | optional | `build_name` (empty = the newest versions the stores have) | `status.json` | 0 read · 1 a store could not be read (nothing written) · 2 environment | `rcm-store-connect` |
+| `golive` | optional | `build_name`, `build_name_android`, `confirm_build_number` (release only: the number a person typed), `platform = ios\|android\|both`, `mode = plan\|release` (default **plan**) | `golive-plan.json` (plan) / `golive.json` (release) | plan: 0 read (approved or not — that is in the file) · 1 a store could not be read · 2 environment. release: 0 live · 75 not yet, only for work left after approval · 1 failed · 2 blocked (a chosen platform is not approved; never 75) or environment / usage · 3 build number mismatch | `rcm-store-connect` |
 | `gate` | optional | *(none — ref only)* | commit status is yours; rcm shows steps/log | 0 · non-zero | `rcm-gate-connect` |
 | `qa` | optional | project-defined (`order`, `android_mode`, …); rcm passes the profile defaults | `report.json` (+ optional `step-captures.html`) | 0 PASS · 1 FAIL · 2 / 10 BLOCKED (environment, shown amber not red) | `rcm-qa-connect` |
 | `driver` | optional | `--build-name`, `--version-id`, `--confirm-build-number` (§5) | stage from remote truth | 0 · 1 · 2 · 3 · 4 | `rcm-release-driver` |
@@ -145,6 +151,15 @@ and verified. **Optional** roles that are unset show a grey row saying which ski
 review flow works without them. Without a `version` preset, «new version» in the web UI creates
 the draft in rcm only (state `editing` at once) and the listing starts from the repository's
 `store/` files instead of a prefill.
+
+**Exit 75 is "not yet" only where the preset says so.** rcm runs a script that exits 75 again
+later only when its preset declares `[presets.retry]` (`on_exit`, `interval_seconds`,
+`max_attempts` — [trying again later](configuration.md#trying-again-later-presetsretry)); every
+attempt is a job of its own, the last one that still exits 75 ends `exhausted`, and the preset
+takes `git_ref` sources only. Without the table 75 is an ordinary failure, as it is for
+`rcm-ci-connect`. A `golive` release script that waits for a login or for the store prints its
+`::rcm::action::` marker, exits 75, and lets the next attempt check again; it must be safe to run
+again.
 
 **The `version` preset's three modes are not three things rcm does.** rcm sends `create` when
 somebody opens a draft — that one run also writes the `prefill.json` the version page fills its
@@ -165,7 +180,8 @@ rcm. A preset without the input still works; `rcm check` warns and the edited co
 
 Three invariants rcm checks on the preset definitions, because they are the last line of safety:
 
-- the irreversible mode is never the default (`mode` defaults to `rehearsal` / `plan`);
+- the irreversible mode is never the default (`mode` defaults to `rehearsal` / `plan`, and the
+  `golive` preset's to `plan`);
 - the `version` preset's `mode` defaults to `prefill` — `create` makes a store draft and
   `delete` cannot be undone, so both are choices;
 - `play_managed_publishing` has exactly one confirming value, and rcm sends it only when the
@@ -238,6 +254,29 @@ Extra fields are kept and shown raw where the page has room. Missing fields rend
            "marketing_url": "…", "whats_new": "…", "screenshots": [ { "path": "store/screenshots/ios/ko/0.png" } ] } | null,
   "android": { "title": "…", "short_description": "…", "full_description": "…", "whats_new": "…", "graphics": [] } | null }
 
+// status.json — both stores' review state, read-only. `state` is one of eight words the script maps the store's
+// own word onto (kept in raw_state): preparing · waiting_for_review · in_review · approved · rejected · releasing ·
+// released · unknown. rcm draws a word it does not know as unknown. null = that store was not read.
+{ "schema": 1, "checked_at": "2026-11-23T01:00:00Z",
+  "ios": { "version": "1.2.0", "build": 185, "state": "approved", "raw_state": "PENDING_DEVELOPER_RELEASE",
+           "release_type": "MANUAL", "phased": { "state": "ACTIVE", "day": 3 } | null } | null,
+  "android": { "version": "1.2.0", "version_code": 185, "state": "in_review",
+               "raw_state": "RELEASE_LIFECYCLE_STATE_IN_REVIEW", "user_fraction": 0.1 | null } | null }
+
+// golive-plan.json — mode=plan, read-only. Whether a platform is approved lives here, never in the exit code:
+// plan_verdict ok requires every listed platform approved; blocked requires a non-empty reasons[].
+{ "schema": 1, "build_name": "1.2.0", "measured_at": "…", "plan_verdict": "ok|blocked", "reasons": ["android_not_approved"],
+  "platforms": { "ios": { "approved": true, "approved_build": 185, "raw_state": "PENDING_DEVELOPER_RELEASE" },
+                 "android": { "approved": false, "approved_build": null, "raw_state": "…" } } }
+
+// golive.json — mode=release, however the run ends. `reason` says why a platform is failed; not_attempted
+// means the script never touched it (the other chosen platform blocked the run) and the page draws it as
+// «not attempted», not as a failure.
+{ "schema": 1, "build_name": "1.2.0", "finished_at": "…",
+  "platforms": { "ios": { "result": "requested|released|pending|failed", "raw_state": "…",
+                          "reason": "not_approved|build_number_mismatch|unreadable|not_attempted|…" },
+                 "android": { "result": "published|pending|needs_login|failed", "raw_state": "…" } } }
+
 // report.json — QA verdict; verdict == FAIL requires failures[] to be non-empty
 { "schema": 1, "verdict": "PASS|FAIL|BLOCKED",
   "platforms": { "ios": { "verdict": "PASS", "chunks": 34, "failed": 0 }, "android": "not_run" },
@@ -299,6 +338,31 @@ line. Judges must never parse it — it is display only.
 
 How the page builds a bar, in order of preference: `progress` marker → declared `steps::N` →
 measured median duration for this preset (`by time · median 21m`) → hatched, no percentage.
+
+One more line says that **a person has to act** — the store session expired, a console needs a
+sign-in — so the job cannot finish on its own:
+
+```
+::rcm::action::<code>::<note>
+::rcm::action::login::Sign in to the console in the build machine's browser profile
+```
+
+- `code` — `[a-z0-9_-]{1,32}`. Anything else makes the line not a marker. A skill branches on it
+  (`login` → ask the person which way to sign in).
+- `note` — optional, up to 200 characters; control, bidirectional and zero-width characters are
+  removed. It is shown without a
+  token (`/api/status`), passed to notification hooks and printed in terminals, so **never put an
+  account name, an e-mail address or any other personal detail in it**.
+
+The server keeps the **last** one as the job's `action {code, note, at}` (`at` is when the server
+received the line). It is stored with the job, so it is still there after the job ends:
+`GET /jobs/<id>`, the `rcm wait` / `rcm run` JSON, the queue and recent rows of `/api/status`. A
+running job with an action has the reason `needs_action`, first in «Needs a look».
+`rcm wait` prints `#<id> needs action · <code> · <note>` on stderr when it sees one, and
+`rcm wait --return-on-action` returns with exit 4 at once while the job keeps running. Hooks get
+`RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. rcm sends nothing of its own in the middle of a job — a
+script that wants a chat message sends it itself. The usual pattern is: print the action, exit
+75, and let the preset's retry run the check again later.
 
 ---
 
@@ -371,9 +435,13 @@ that have run instead of a declared list of stages — so it shows no percentage
 
 ## 6. Rules the page enforces regardless of project
 
-- **No release after approval.** There is no Release, Publish or Rollout button in any state.
-  The page says so in a fixed sentence: on the version list, on the version page, beside the
-  submit button in the bottom sheet, and under the review panel.
+- **Nothing goes live on approval by itself. A release runs only when a person asks for it with the version, the build number and a time.** Nothing watches for an approval in order to go live. The one way to go live is the
+  version page's «Schedule go-live» area (`golive`, `mode = release`, admin token): it opens only
+  for a platform whose `status.json` says `approved`, runs the read-only golive plan first, and
+  takes now or a time plus the approved build number a person types. `POST /jobs` refuses that mode
+  (409 `release_route_required`). Play has no API to publish a held release, so the project's go-live script publishes through a browser or asks a person. The page says the first two sentences in a fixed line: on
+  the version list, on the version page, beside the submit button in the bottom sheet, and under the
+  review panel (which adds the Play sentence). No other Release, Publish or Rollout button exists.
 - **Submitting for review is one button in one place** — the bottom sheet of a version page. The
   review panel shows the two stores read-only and runs the two read-only commands
   («Validate listing», «Plan review»); it has no submit button, no checkboxes and no
@@ -419,12 +487,12 @@ unless `--force`). In that project a session then runs:
 | skill | tier | produces |
 |---|---|---|
 | `/rcm-connect` | entry point | asks project · repo name · platforms · which optional tiers; runs the rest in order; writes `docs/rcm-connect.md` |
-| `/rcm-store-connect` | required | profile block, secrets list, presets `plan`/`upload`/`review` (+ the optional `version`), four script skeletons (`release_version.sh` for prefill / create / delete) + a JSON helper, each with `--selftest`; `listing_json` on review / upload |
+| `/rcm-store-connect` | required | profile block, secrets list, presets `plan`/`upload`/`review` (+ the optional `version`, `status` and `golive`), six script skeletons (`release_version.sh` for prefill / create / delete, `release_status.sh` read-only, `release_golive.sh` plan / release) + a JSON helper, each with `--selftest`; `listing_json` on review / upload; the `golive` preset books with `priority = "high"`, `start_deadline_seconds = 3600`, a browser `concurrency_group` shared with the project's sign-in preset and `[presets.retry]` (exit 75 runs again after 600 s, 12 attempts) |
 | `/rcm-gate-connect` | optional | `gate` preset, step markers in the existing CI script, progress markers in its silent stretches |
 | `/rcm-qa-connect` | optional | `qa` preset, `report.json` writer, per-unit progress markers, optional capture table |
 | `/rcm-release-driver` | optional | `V S0`–`S8` driver skeleton with typed-N gates, `--status` (including its `stages:` line), retry/abort, and its judge with `--selftest` |
 
 Skills generate skeletons with a working contract (inputs, markers, JSON, exit codes, selftests)
-and leave the store calls as `TODO(project)` blocks; they never run upload or submit, and they never
-write a project name into rcm.
+and leave the store calls as `TODO(project)` blocks; they never run upload, submit or a go-live
+release, and they never write a project name into rcm.
 

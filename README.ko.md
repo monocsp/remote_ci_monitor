@@ -178,7 +178,7 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 
 | 명령 | 무엇을 보여 주나 |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-supersede` 는 프리셋이 치우는 같은 브랜치의 내 옛 작업을 이번엔 남겨 두기([옛 작업 치우기](docs/configuration.md#superseding-older-jobs-of-the-same-branch)), `--keep` 은 작업의 결과 파일을 [보관함](docs/configuration.md#keeping-a-jobs-files-the-shelf)에 넣고 같은 네트워크의 브라우저가 여는 링크를 찍기, `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--at TIME \| --in DURATION] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | 스냅샷 → 제출(같은 작업이 이미 돌면 합류) → 업로드(캐시가 켜져 있으면 바뀐 파일만) → 대기. `--ref` 는 `git_ref` 프리셋용이다. 스냅샷 없이 서버가 ref 를 받아 온다. `--priority low\|normal\|high`, `--no-cache` 는 전체 tarball, `--link` 는 웹 화면의 작업 이름 옆에 http(s) 페이지(예: 그 PR) 링크를 단다([작업 링크](docs/configuration.md#linking-a-job-to-a-page)), `--no-join` 은 절대 합류하지 않기, `--no-supersede` 는 프리셋이 치우는 같은 브랜치의 내 옛 작업을 이번엔 남겨 두기([옛 작업 치우기](docs/configuration.md#superseding-older-jobs-of-the-same-branch)), `--keep` 은 작업의 결과 파일을 [보관함](docs/configuration.md#keeping-a-jobs-files-the-shelf)에 넣고 같은 네트워크의 브라우저가 여는 링크를 찍기, `--at 15:00` · `--in 90m` 은 지금 대신 시각을 서버에 넘기고 작업은 `scheduled` 로 기다리기([나중에 돌리기](docs/configuration.md#running-a-job-later---at-and---in)), `--no-wait` 는 큐에 들어가자마자 순번과 ETA 를 찍고 돌아오기, `--exclude` 는 `.rcmignore` 패턴 하나 추가, `--dir` 은 다른 디렉터리 스냅샷, `--machine ID` 는 잡을 한 머신에 고정(점검 프리셋은 아무 토큰, 그 밖은 관리자) |
 | `rcm wait --job N [--timeout S] [--poll]` | 이벤트 스트림으로 따라간다. 스트림이 막히면 2초 폴링 |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | 대기 순번 · 앞 작업 수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 confidence. 이미 도는 작업은 대기 대신 상태와 경과 |
 | `rcm top [--watch N] [--json]` | 한 화면: 이유와 ETA 가 붙은 큐 · 최근 결과 · 중앙값 · 호스트 부하(CPU · 메모리 · 디스크 · GPU · top 프로세스) |
@@ -195,6 +195,8 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 | `rcm reload [--dry-run]` | 설정 파일과 `include` 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자). `--dry-run` 은 바뀔 것의 이름만 보이고 아무것도 안 바꾼다 |
 | `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | 스토어 버전 드래프트(관리자). 버전 인자가 없으면 `new` 는 **이름만** 묻고 서버의 힌트를 기본값으로 준다 — 엔터는 힌트, `-` 는 그 스토어를 건너뛴다, `--yes` 는 둘 다 힌트로. `open` 은 버전 페이지의 주소를 찍는다 |
+| `rcm release status [REPO] [--build-name X]` | 두 스토어의 심사 상태. 저장소의 `status` 역할을 돌리고 기다린 뒤 스토어마다 버전 · 빌드 · 상태 · 스토어의 원래 낱말을 찍는다(클라이언트 토큰) |
+| `rcm release golive [REPO] --build-name X --platform ios\|android\|both --plan` · `… --confirm-build-number N [--at TIME \| --in DURATION]` | 승인된 빌드의 출시([출시하기](docs/configuration.md#going-live-golive)). `--plan` 은 승인 여부와 승인된 빌드를 읽고 기다린다. 없으면 직접 친 승인 빌드 번호로 지금이나 정한 시각에 출시를 요청한다(관리자). 승인됐다고 저절로 출시되지 않는다 |
 
 모든 추정에는 `confidence` 가 붙는다. `high`(실제 5회 이상의 중앙값) · `med`(그보다 적음) ·
 `low`(프리셋이나 기본 추측) · `group wait`(동시성 그룹에 막힘) · `overdue`. 모르는 값은 `0` 이
@@ -228,11 +230,19 @@ default = "full"
 ::rcm::step-end::ok        # 선택: "ok" 또는 "fail"
 ::rcm::summary::all green  # 선택: 큐에 보이는 한 줄 결과
 ::rcm::progress::41/68::inquiry_photo/android::run   # 선택: 지금 단계 안의 세부 진행
+::rcm::action::login::Sign in on the build machine   # 선택: 사람이 손대야 한다
 ```
 
 `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` 는 긴 단계 — 청크 루프 · 병렬
 묶음 · 락 대기 — 를 위한 것이다. 스크립트가 **아는** 분모만 찍는다. 큐는 그 값으로 막대를 그리고
 본 단위들을 격자로 보여 준다. 자세한 건 [설정 문서](docs/configuration.md#progress-inside-a-step)에.
+
+`::rcm::action::<code>::<note>` 는 사람이 손대지 않으면 잡이 더 나아가지 못한다는 표식이다.
+로그인이 풀린 때가 그런 경우다. `code` 는 `[a-z0-9_-]{1,32}` 이고 `note` 는 200자까지이며
+개인정보를 넣지 않는다. 마지막 표식이 잡의 `action` 이 되고 도는 행의 이유는 `needs_action` 이
+된다. `rcm wait` 는 표식을 stderr 에 찍는다. `rcm wait --return-on-action` 은 종료코드 4 로
+돌아오고 잡은 계속 돈다. 알림 훅은 `RCM_ACTION_CODE` 와 `RCM_ACTION_NOTE` 를 받는다. 자세한 건
+[설정 문서](docs/configuration.md#when-a-person-has-to-act)에 있다.
 
 세션은 `--pool` 로 다른 풀에 보낼 수 있지만, 프리셋의 `pools` 에 적힌 풀만 고를 수 있다. 설정으로
 할 수 있는 나머지는 — 푸시된 ref 를 받는 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 원격 워커 · 알림 ·
@@ -243,7 +253,9 @@ default = "full"
 `http://<빌드머신>:8787/` 을 브라우저로 연다(폰 포함). `rcm serve` 가 내주는 정적 파일 셋이고,
 빌드 단계도 외부 자산도 없다. 첫 화면이 세 가지를 한눈에 답한다. **내 작업**(열쇠 버튼으로 토큰을
 넣는다), **확인이 필요한 작업**(손쓸 수 있는 원인만, 나쁜 것부터), **호스트 부하**. 그 아래에
-상태와 ETA confidence 가 붙은 큐, 호스트 카드, 최근 결과, 추정 근거가 있다. 출력만 조용해진 작업은
+상태와 ETA confidence 가 붙은 큐, 나중에 돌 예약, 호스트 카드, 최근 결과, 추정 근거가 있다. 사람이
+손대야 한다고 알린 작업(`사람이 할 일 · login · …`)은 **확인이 필요한 작업**의 맨 앞에 서고, 알림
+훅이 실패하면 머리에 그 수가 보인다. 출력만 조용해진 작업은
 「확인이 필요한 작업」에 오르지 않는다 — 판정 규칙은
 [설정 문서](docs/configuration.md#estimates-and-when-a-job-is-called-not-responding)에 있다.
 
@@ -262,7 +274,10 @@ password 칸에 한 번 입력), **Verify all**, 비활성 **Enter Store** — �
 답하고(자격 증명 · 소스 · 스토어 · 막힘) 하나라도 빨가면 띠가 빨개진다. 띠를 누르면
 `#/store/<name>/status` 가 열리는데, 접히는 행 넷(Setup, Source, Build · upload, Store)과 심사
 패널이 거기 그대로 있다 — 패널은 이제 **Validate listing** 과 **Plan review** 만 누를 수 있는
-읽기 전용이다. 띠 아래에는 **+ 새 버전 만들기**, 그리고 열려 있는 드래프트마다 상태 · 만든 지 ·
+읽기 전용이다. `status` 프리셋이 있으면 패널에 두 스토어의 심사 상태도 나온다. 상태는 여덟 낱말
+가운데 하나이고 그 밖의 값은 `unknown` 으로 그린다. 스토어의 원래 낱말을 옆에 두고 몇 분 전에
+조회했는지와 그것이 `plan_max_age_minutes` 보다 오래됐는지를 보인다. **새로 조회**는 그 프리셋을
+한 번 더 돌린다. 띠 아래에는 **+ 새 버전 만들기**, 그리고 열려 있는 드래프트마다 상태 · 만든 지 ·
 바꾼 필드 수 · 빌드 유무 · 만료 여부가 한 행씩, 그 아래 라이브 버전과 제출한 지난 버전 20개가 있다.
 
 **+ 새 버전 만들기**는 **이름만** 묻는다. 스토어마다 체크박스와 칸이 있고 칸에는 다음 이름이
@@ -290,8 +305,14 @@ QA · 10단계 중 7번째 · 66% · 경과 38m · 예상 21:40», «제출 준�
 — 이 붙는다. 앞 열의 각 줄은 고치는 곳의 이름이고, 누르면 그리로 간다. 제출 조건도 여기 있다:
 스토어 체크박스, 제출마다 새로 체크하고 기억하지 않는 관리형 게시 칸, 그리고 빌드 번호(**자동**
 이면 플랜의 번호, **직접 입력**이면 그 번호와 정확히 같아야 한다). 퍼센트는 분모를 미리 선언한
-경우에만 나오고, 아니면 막대에 빗금이 그어지고 그 사실을 적는다. 어떤 상태에도 Release · Publish
-· Rollout 버튼은 없고, `unsafe_release_type` 판정은 닫을 수 없는 빨간 띠가 된다.
+경우에만 나오고, 아니면 막대에 빗금이 그어지고 그 사실을 적는다. 승인됐다고 저절로 출시되지
+않는다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돈다. 그 자리는 버전 페이지의
+「출시 예약」이고, 그 스토어가 승인했다고 말한 뒤에만 열린다. `unsafe_release_type` 판정은 닫을 수
+없는 빨간 띠가 된다.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/store-golive.png" alt="버전 페이지의 출시 예약 영역. iOS 승인 · Android 심사 중, 읽기만 하는 plan, 플랫폼, 시각, 직접 친 승인 빌드 번호, 출시 예약 버튼, 승인됐다고 저절로 출시되지 않는다는 원칙 문장" width="820">
+</p>
 
 드래프트는 쌓이지도, 모르는 새 사라지지도 않는다. 아무도 손대지 않은 것은 `version_ttl_hours`
 (기본 24)가 지나면 버려진다 — 프로파일에 `version` 프리셋이 있으면 스토어까지, 없으면 rcm 안에서만.
@@ -311,8 +332,8 @@ Source 행에는 미러의 최근 커밋 다섯 · 태그 · «PR list: next» �
 
 큐 화면 옆에 저장소별 **스토어 탭**이 붙는다: fetch · 스토어 현황 · 게이트 · QA · 업로드 · 심사
 제출 — 전부 프로젝트 *자신의* 릴리스 스크립트 위에 얹힌 버튼이다. rcm 은 그 스크립트가 쓴 JSON 을
-그리고 선언된 프리셋을 돌릴 뿐, 빌드번호를 계산하거나 QA 를 판정하거나 승인 뒤 출시하는 일은 하지
-않는다. 프로젝트가 줘야 하는 것은 [docs/release-contract.md](docs/release-contract.md)에 있고, 가장
+그리고 선언된 프리셋을 돌릴 뿐, 빌드번호를 계산하거나 QA 를 판정하지 않는다. 승인됐다고 저절로
+출시되지도 않는다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돈다. 프로젝트가 줘야 하는 것은 [docs/release-contract.md](docs/release-contract.md)에 있고, 가장
 빠른 길은 rcm 이 같이 싣는 Claude Code 스킬이다:
 
 ```sh
@@ -340,11 +361,18 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 | `rcm wait` 종료 코드 | 뜻 |
 |---|---|
 | 0 | 성공 |
-| 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`) |
-| 2 | 취소되었거나 시간 초과 |
+| 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`). [반복](docs/configuration.md#trying-again-later-presetsretry)하는 프리셋이 마지막 시도에서도 「아직」이라고 답한 경우(`exhausted`)도 1 이다 |
+| 2 | 취소되었거나 시간 초과, 또는 예약이 시작하지 못함(`expired`) |
 | 3 | **모름**: 서버 재시작으로 작업을 잃음 · 서버에 못 닿음 · `--timeout` 경과. 절대 실패로 치지 않는다 |
+| 4 | `--return-on-action` 을 줄 때만: 잡이 사람에게 할 일을 알렸다(`::rcm::action::`). 잡은 **계속 돈다**. 다시 기다리려면 `rcm wait --job N` |
+
+`retried` 로 끝난 시도에서는 기다림이 끝나지 않는다. `rcm wait` 은 `retried_as` 가 가리키는 다음
+시도를 따라가고 마지막 시도의 종료 코드로 끝난다([나중에 다시 돌리기](docs/configuration.md#trying-again-later-presetsretry)).
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
+서버가 작업을 만들지 않았다고 확실히 말한 제출 거절도 2 다. 400 · 401 · 403 · 413 과, 코드가
+`schedule_exists` · `release_route_required` 인 409 가 그렇다. 그 밖의 409 는
+작업이 생겼는지 알 수 없으므로 3 이다.
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·
 `rcm jobs` · `rcm top` 은 곧바로 `cannot reach <url>` 과 함께 3 이다.
 

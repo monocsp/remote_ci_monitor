@@ -55,6 +55,12 @@ def sh(*argv: str, env: dict[str, str] | None = None, cwd: Path = ROOT):
         ("bash", str(STORE / "release_review.sh"), "--selftest"),
         ("bash", str(STORE / "release_upload.sh"), "--selftest"),
         ("bash", str(STORE / "release_plan.sh"), "--selftest"),
+        ("bash", str(STORE / "release_status.sh"), "--selftest"),
+        # 스물두 경우를 차례로 돌리는 셀프테스트다. 한가할 때 2초 아래로 줄였지만 rcm-ci 의
+        # 부하 속에서는 여덟 배까지 늘었다(#3999 에서 8초 → 65초). 이것 하나만 slow 로 둔다.
+        pytest.param(
+            ("bash", str(STORE / "release_golive.sh"), "--selftest"), marks=pytest.mark.slow
+        ),
         (sys.executable, str(STORE / "rcm_contract.py"), "--selftest"),
         ("bash", str(DRIVER / "release_driver.sh"), "--selftest"),
         (sys.executable, str(DRIVER / "release_check.py"), "--selftest"),
@@ -70,7 +76,14 @@ def test_each_template_selftest_passes_from_the_repo_root(argv):
 
 @pytest.mark.parametrize(
     "name",
-    ["release_plan.sh", "release_upload.sh", "release_review.sh", "release_version.sh"],
+    [
+        "release_plan.sh",
+        "release_upload.sh",
+        "release_review.sh",
+        "release_version.sh",
+        "release_status.sh",
+        "release_golive.sh",
+    ],
 )
 def test_an_unfilled_template_never_indirects_through_an_invalid_name(name):
     """안 채워진 템플릿(`{{secrets_env}}` 그대로)도 저장소 루트에서 셀프테스트로 돌아야 한다.
@@ -98,6 +111,84 @@ def test_version_selftest_names_its_four_cases():
         "bad name -> usage exit 2",
     ):
         assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
+
+
+def test_golive_selftest_locks_the_two_exit_code_rules():
+    """M5s S18 · 결정 224 · 236: plan 모드는 스토어를 읽었으면 0 이고 승인 여부는 문서에만 적는다.
+    release 모드에서 고른 플랫폼이 승인 상태가 아니면 언제나 2 다 — 75 로 승인을 기다리면
+    승인을 감시하는 자동 출시가 된다. 출시 훅은 그때 한 번도 불리지 않는다."""
+    rc, out = sh("bash", str(STORE / "release_golive.sh"), "--selftest")
+    assert rc == 0, out
+    for needle in (
+        "plan, Android not approved -> exit 0, android.approved = false",
+        "plan, store unreadable -> exit 1",
+        "release, not approved -> exit 2 (never 75), no release call",
+        "release, build number mismatch -> exit 3, no release call",
+        "release, login lost -> action marker + exit 75",
+        "release ios, approved -> release requested, exit 75 until the store says live",
+        "release ios, already live -> exit 0, no release call",
+        "release both, Android not approved -> exit 2, iOS untouched too",
+        "release android, publish pressed, not live yet -> exit 75, no second publish",
+        # #252 재검증: 「기다리지 않는다」는 가짜 sleep 기록 0건이 잠근다. 시간 상한은 부하에
+        # 흔들리지 않게 10초로 둔다(#255 검증 P2 — 3초는 rcm-ci 부하에서 흔들린다)
+        "release, login lost -> exits 75 at once: one read, one publish, no sleep, under 10 s",
+    ):
+        assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
+
+
+def test_golive_selftest_records_every_sleep_and_fails_on_one(tmp_path):
+    """잠금이 진짜 잡는지 본다 — 로그인 표식 자리에 `sleep 1` 을 넣은 사본은 selftest 가 빨갛다."""
+    copy = tmp_path / "release_golive.sh"
+    text = (STORE / "release_golive.sh").read_text()
+    marker = '      echo "::rcm::action::login::'
+    assert text.count(marker) == 1
+    copy.write_text(text.replace(marker, '      sleep 1; echo "::rcm::action::login::'))
+    (tmp_path / "rcm_contract.py").write_text((STORE / "rcm_contract.py").read_text())
+    rc, out = sh("bash", str(copy), "--selftest")
+    assert rc != 0, out
+    assert "the script slept: sleep 1" in out, out
+
+
+def test_the_golive_template_states_android_idempotency_and_no_wait_on_login():
+    """격리 검증 지적(#252): Android 는 게시를 누른 뒤 `PUBLISHED` 가 되기 전까지 `in_progress` 로
+    답해야 다음 시도가 버튼을 또 누르지 않는다. 로그인 표식을 찍었으면 그 자리에서 기다리지 않고
+    바로 75 로 끝낸다 — 기다리면 서버의 `needs_action` 이 stuck · overdue 를 가린다."""
+    text = (STORE / "release_golive.sh").read_text()
+    head = text[: text.index("store_approval() {")]
+    flat = re.sub(r"[\s#]+", " ", head)
+    for needle in (
+        "after publish was pressed, answer in_progress until the API says PUBLISHED",
+        "remember that it pressed publish, or make the hook idempotent",
+        "never wait for the sign-in",
+        "exit 75 at once",
+    ):
+        assert needle in flat, (needle, "release_golive.sh header")
+    # #252 재검증: Android TODO — 화면이 게시 시작을 확인한 뒤에만 그 버전 코드로 기록한다
+    hook = re.sub(r"[\s#]+", " ", text[text.index("store_android_publish() {") :])
+    assert "only after the screen confirms that publishing started" in hook
+
+
+def test_status_selftest_reads_both_stores_and_never_writes_one():
+    rc, out = sh("bash", str(STORE / "release_status.sh"), "--selftest")
+    assert rc == 0, out
+    for needle in (
+        "both stores read -> status.json, exit 0",
+        "store unreadable -> exit 1, no status.json",
+        "a state outside the eight -> contract refuses, exit 1",
+    ):
+        assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
+
+
+def test_the_golive_and_status_templates_hold_no_word_the_preset_grep_refuses():
+    """§3 #13: 스킬의 grep 이 `rollout`·`promote`·`auto_release` 를 찾고 서버의 `unsafe_preset`
+    은 입력 이름 `automatic_release`·`rollout`·`release_status` 를 막는다. 두 뼈대의 입력
+    이름(RCM_INPUT_*)에 그 낱말이 없어야 프리셋을 그대로 옮겨 써도 막히지 않는다."""
+    for name in ("release_status.sh", "release_golive.sh"):
+        text = (STORE / name).read_text()
+        inputs = set(re.findall(r"RCM_INPUT_([A-Z0-9_]+)", text))
+        assert inputs, name
+        for word in ("ROLLOUT", "PROMOTE", "AUTO_RELEASE", "AUTOMATIC_RELEASE", "RELEASE_STATUS"):
+            assert not any(word in i for i in inputs), (name, word, inputs)
 
 
 def test_plan_selftest_proves_the_live_version_names_travel():
@@ -184,6 +275,107 @@ def test_contract_names_the_bad_field_of_version_and_prefill(tmp_path, kind, pat
     doc = {**good, **patch}
     f = tmp_path / f"{kind}.json"
     f.write_text(json.dumps(doc))
+    rc, out = validate(kind, f)
+    assert rc == 1 and needle in out, out
+
+
+# ── rcm_contract.py — status · golive-plan · golive (M5s §4.4 · §4.5) ─────────
+
+GOOD_STATUS = {
+    "schema": 1,
+    "checked_at": "2026-11-23T01:00:00Z",
+    "ios": {
+        "version": "1.2.0",
+        "build": 185,
+        "state": "approved",
+        "raw_state": "PENDING_DEVELOPER_RELEASE",
+        "release_type": "MANUAL",
+        "phased": None,
+    },
+    "android": {
+        "version": "1.2.0",
+        "version_code": 185,
+        "state": "in_review",
+        "raw_state": "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+        "user_fraction": None,
+    },
+}
+GOOD_GOLIVE_PLAN = {
+    "schema": 1,
+    "build_name": "1.2.0",
+    "measured_at": "2026-11-23T01:00:00Z",
+    "platforms": {
+        "ios": {"approved": True, "approved_build": 185, "raw_state": "PENDING_DEVELOPER_RELEASE"},
+        "android": {"approved": False, "approved_build": None, "raw_state": "IN_REVIEW"},
+    },
+    "plan_verdict": "blocked",
+    "reasons": ["android_not_approved"],
+}
+GOOD_GOLIVE = {
+    "schema": 1,
+    "build_name": "1.2.0",
+    "platforms": {
+        "ios": {"result": "requested", "raw_state": "PENDING_DEVELOPER_RELEASE"},
+        "android": {"result": "needs_login", "raw_state": "APPROVED_NOT_PUBLISHED"},
+    },
+    "finished_at": "2026-11-23T06:00:00Z",
+}
+
+
+@pytest.mark.parametrize(
+    "kind, good",
+    [("status", GOOD_STATUS), ("golive-plan", GOOD_GOLIVE_PLAN), ("golive", GOOD_GOLIVE)],
+)
+def test_contract_accepts_the_minimum_status_and_golive_documents(tmp_path, kind, good):
+    f = tmp_path / f"{kind}.json"
+    f.write_text(json.dumps(good))
+    rc, out = validate(kind, f)
+    assert rc == 0, out
+
+
+@pytest.mark.parametrize(
+    "kind, patch, needle",
+    [
+        ("status", {"checked_at": None}, "checked_at"),
+        ("status", {"ios": None, "android": None}, "both null"),
+        (
+            "status",
+            {"ios": {**GOOD_STATUS["ios"], "state": "PENDING_DEVELOPER_RELEASE"}},
+            "ios.state",
+        ),
+        ("status", {"ios": {**GOOD_STATUS["ios"], "phased": {"day": 3}}}, "ios.phased"),
+        (
+            "status",
+            {"android": {**GOOD_STATUS["android"], "version_code": "185"}},
+            "android.version_code",
+        ),
+        ("golive-plan", {"plan_verdict": "maybe"}, "plan_verdict"),
+        ("golive-plan", {"build_name": ""}, "build_name"),
+        ("golive-plan", {"platforms": {}}, "platforms"),
+        (
+            "golive-plan",
+            {"platforms": {"ios": {"approved": "yes", "approved_build": 185, "raw_state": "x"}}},
+            "platforms.ios.approved",
+        ),
+        ("golive-plan", {"plan_verdict": "ok"}, "android"),  # ok 인데 승인 안 된 플랫폼이 있다
+        ("golive-plan", {"reasons": []}, "reasons"),  # blocked 인데 이유가 없다
+        (
+            "golive",
+            {"platforms": {"android": {"result": "released", "raw_state": None}}},
+            "android.result",
+        ),
+        (
+            "golive",
+            {"platforms": {"ios": {"result": "published", "raw_state": None}}},
+            "ios.result",
+        ),
+        ("golive", {"finished_at": 3}, "finished_at"),
+    ],
+)
+def test_contract_names_the_bad_field_of_status_and_golive(tmp_path, kind, patch, needle):
+    good = {"status": GOOD_STATUS, "golive-plan": GOOD_GOLIVE_PLAN, "golive": GOOD_GOLIVE}[kind]
+    f = tmp_path / f"{kind}.json"
+    f.write_text(json.dumps({**good, **patch}))
     rc, out = validate(kind, f)
     assert rc == 1 and needle in out, out
 
@@ -394,6 +586,98 @@ def test_filled_presets_and_profile_templates_pass_the_release_check_row(tmp_pat
     assert "version=release-version" in detail, detail
 
 
+def test_filled_templates_carry_the_status_and_golive_roles(tmp_path):
+    """M5s §4.6 · F — 템플릿이 두 선택 역할을 채운다. golive 프리셋은 git_ref · 높은 우선순위 ·
+    시작 마감 3600초 · 로그인 프리셋과 나눌 공용 그룹 · 산출물 항상이고, 기본 모드는 plan 이다.
+    두 역할이 차 있으니 `release app` 행에 그 둘의 「not configured」 경고가 없다."""
+    toml = (
+        f'[server]\ndata_dir = "{tmp_path / "data"}"\n\n[[repos]]\nname = "app"\n'
+        'url = "git@example.com:org/app.git"\n\n'
+        + fill((STORE / "profile.toml").read_text())
+        + "\n"
+        + fill((STORE / "presets.release.toml").read_text())
+    )
+    cfg_path = tmp_path / "server.toml"
+    cfg_path.write_text(toml)
+    cfg = load_server_config(cfg_path, environ={}, check_tools=False)
+    profile = cfg.repos[0].release
+    assert profile is not None
+    assert profile.preset_for("status") == "release-status"
+    assert profile.preset_for("golive") == "release-golive"
+    status = cfg.preset("release-status")
+    assert [i.name for i in status.inputs] == ["build_name"]
+    assert status.input_spec("build_name").default == ""
+    assert status.source_modes == ("git_ref",) and status.artifacts_on == "always"
+    golive = cfg.preset("release-golive")
+    assert golive.source_modes == ("git_ref",)
+    assert golive.priority == 1  # "high"
+    assert golive.start_deadline_seconds == 3600
+    assert golive.concurrency_group == "store-browser-app"
+    assert golive.artifacts_on == "always"
+    assert [i.name for i in golive.inputs] == [
+        "build_name",
+        "build_name_android",
+        "confirm_build_number",
+        "mode",
+        "platform",
+    ]
+    assert golive.input_spec("mode").default == "plan"
+    assert golive.input_spec("mode").choices == ("plan", "release")
+    # D(#256) — 75 는 승인 뒤 남은 일에만 쓰고(결정 236), 반복은 프리셋이 선언한다(결정 210)
+    assert golive.retry is not None
+    assert (golive.retry.on_exit, golive.retry.interval_seconds, golive.retry.max_attempts) == (
+        75,
+        600,
+        12,
+    )
+    assert status.retry is None  # 읽기만 하는 역할은 반복하지 않는다
+    row, ok, detail = _release_row(cfg, "app", profile)
+    assert ok is not False, detail
+    for role in ("status", "golive"):
+        assert f"{role} not configured" not in detail, detail
+    assert "status=release-status" in detail and "golive=release-golive" in detail, detail
+    # 스킬의 grep(§3 #13)이 막는 낱말이 프리셋 파일 어디에도 없다
+    text = (STORE / "presets.release.toml").read_text()
+    assert not re.search(r"automatic_release|rollout|auto_release|promote", text, re.I)
+
+
+@pytest.mark.parametrize(("default", "fails"), [("release", True), ("plan", False)])
+def test_a_golive_preset_defaulting_to_release_fails_the_release_row(tmp_path, default, fails):
+    """M5s §4.6: golive 의 되돌릴 수 없는 모드는 `release` 다. 기본값이면 손으로 한 번 돌린 잡이
+    출시가 되므로 `release <repo>` 행이 FAIL 이다(mutcheck 가 이 시험을 쓴다 — `examples/` 를
+    읽지 않는다)."""
+    toml = (
+        f'[server]\ndata_dir = "{tmp_path / "data"}"\n\n[[repos]]\nname = "app"\n'
+        'url = "git@example.com:org/app.git"\n\n'
+        '[repos.app.release.presets]\nplan = "p"\nupload = "u"\nreview = "r"\n'
+        'golive = "release-golive"\n\n'
+        + "".join(
+            f'[[presets]]\nname = "{n}"\nargv = ["true"]\nsource_modes = ["git_ref"]\n'
+            'repo = "app"\n\n'
+            for n in ("p", "u", "r")
+        )
+        + '[[presets]]\nname = "release-golive"\nargv = ["true"]\nsource_modes = ["git_ref"]\n'
+        'repo = "app"\ninputs = [\n  { name = "build_name" },\n'
+        '  { name = "build_name_android", default = "" },\n'
+        '  { name = "confirm_build_number", default = "" },\n'
+        '  { name = "platform", type = "choice", choices = ["ios", "android", "both"], '
+        'default = "ios" },\n'
+        '  { name = "mode", type = "choice", choices = ["plan", "release"], '
+        f'default = "{default}" }},\n]\n'
+    )
+    cfg_path = tmp_path / "server.toml"
+    cfg_path.write_text(toml)
+    cfg = load_server_config(cfg_path, environ={}, check_tools=False)
+    profile = cfg.repos[0].release
+    assert profile is not None
+    _row, ok, detail = _release_row(cfg, "app", profile)
+    # 필수 역할의 가짜 프리셋은 입력이 없어 따로 FAIL 이다 — 여기서 보는 것은 golive 의 한 줄뿐
+    assert ok is False
+    needle = "preset 'release-golive' input 'mode' defaults to 'release'"
+    assert (needle in detail) is fails, detail
+    assert ("'release-golive'" in detail) is fails, detail
+
+
 def test_the_build_name_android_input_accepts_its_own_empty_default(tmp_path):
     """워크플랜 §11: `build_name_android` 는 기본값이 `""` 다. `pattern` 은 **기본값에도** 걸리므로
     (`core/inputs.validate_inputs` 가 기본값까지 `_coerce` 한다) 빈 값을 허용해야 한다 — 아니면
@@ -514,7 +798,7 @@ def test_contract_doc_states_the_version_role(pattern):
         ("docs/configuration.md", r"no `build_name_android` input"),
         ("docs/configuration.md", r"`prod/1\.1\.1-181` or `prod/1\.1\.1\+1\.0\.1-181`"),
         ("CHANGELOG.md", r"`build_name_android`"),
-        ("docs/configuration.md", r"gate, qa,\ndev, version\)"),
+        ("docs/configuration.md", r"gate, qa,\s+dev, version, status, golive\)"),
         ("examples/server.toml", r"^# version_ttl_hours = 24"),
         ("examples/server.toml", r'^# version = "release-version"'),
         ("CHANGELOG.md", r"`version` role"),

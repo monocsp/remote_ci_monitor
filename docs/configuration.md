@@ -58,6 +58,7 @@ Your script can report progress by printing markers at the start of a line:
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::fail::flaky_test    # optional: names something that failed (a step, a test, a file)
 ::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
+::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
 ### Progress inside a step
@@ -98,6 +99,45 @@ job is `null` unless the script declared it failed (`::rcm::fail::<name>` or
 `::rcm::step-end::fail`), in which case it is `false` — a failure is never inferred, and the stored
 `failed_step` and `last_step` are not changed by the timeline. Running jobs keep `progress`;
 `/api/status` rows never carry `step_timeline`.
+
+### When a person has to act
+
+`::rcm::action::<code>::<note>` tells rcm that the job cannot go on without a person — a store
+console asks for a sign-in again, a device needs unlocking. `code` is `[a-z0-9_-]{1,32}`
+(anything else makes the line not a marker) and is what a skill branches on; `note` is optional,
+up to 200 characters, with control, bidirectional and zero-width characters removed (the same
+rule as the failure names hooks get). The note is readable without a token, goes into
+hook environments and is printed in terminals: **never put an account name, an e-mail address or
+any other personal detail in it.**
+
+The last line becomes the job's `action`: `{code, note, at}` (`at` is when the server received
+it), `null` when the job printed none. It is stored like the other markers, so it stays after the
+job ends — on `GET /jobs/<id>`, the JSON `rcm run` and `rcm wait` print, and the queue and recent
+rows of `/api/status` (an added key; `schema_version` stays 1). Lines from a remote worker are
+parsed by the server like every other marker.
+
+- A **running** job with an action has the reason `needs_action`. It is first in the actionable
+  reasons («Needs a look»): every other reason is something rcm inferred, this one the job said
+  itself, with what to do. It outranks `stuck` and `overdue` — a job waiting for a person is
+  usually quiet — and a job being cancelled stays `cancelling`. The action stays until the job
+  ends; there is no marker that clears it. The web page's status column and «Needs a look» read
+  `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean); the code and the note are the
+  job's own words and are not translated.
+- **`rcm wait`** prints `#<id> needs action · <code> · <note>` on stderr once for each action it
+  sees. With **`--return-on-action`** it prints the JSON (with `action`) and exits **4** as soon as
+  the job has an action — also one that was already there when the wait started, since a session
+  that attaches later must not miss it. The job keeps running. Exit 4 only ever comes with that
+  flag. After the person has acted, wait again **without** the flag (`rcm wait --job N`): the
+  action is still the job's last one, so the flag would return at once. A job that is being
+  cancelled, or was cancelled, prints no such line and never returns 4: it will not run on.
+  Neither does a job that ended any other way (succeeded, failed, timed out, lost, expired); its
+  action is still in the final JSON.
+- **Hooks** get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (both empty without an action); a `url`
+  rule finds `action` in `job`. rcm sends nothing in the middle of a job — a script that wants a
+  chat message at that moment sends it itself.
+
+The usual pattern is a script that checks the sign-in first, prints the action and exits 75, with
+a preset that runs it again a few minutes later.
 
 ### Saying what failed
 
@@ -263,8 +303,10 @@ that power. Preview what a reload would apply with `rcm reload --dry-run` before
 
 A repository can carry a **release profile**: which presets play which release role, which
 secrets the Settings screen asks for, and how the store copy is previewed. It is the contract the
-Store tab reads (`docs/release-contract.md`); rcm itself computes no build number and releases
-nothing. A repository without a profile has no Store tab and everything else works as before.
+Store tab reads (`docs/release-contract.md`); rcm itself computes no build number, and nothing goes
+live on approval by itself: a release runs only when a person asks for it with the version, the
+build number and a time (`golive`, below). A repository without a profile has no Store tab and
+everything else works as before.
 
 The profile is a sub-table right after its `[[repos]]` entry (TOML puts `[repos.app.release]`
 inside the **last** `[[repos]]` element, so keep the two together):
@@ -291,6 +333,8 @@ gate   = "gate-smoke"                            # optional
 qa     = "scenario-qa"                           # optional
 dev    = "deploy-dev"                            # optional
 version = "release-version"                      # optional — «new version» from the web (prefill / create / delete)
+status = "release-status"                        # optional — both stores' review state (read-only)
+golive = "release-golive"                        # optional — a release a person asked for (plan / release)
 
 [[repos.app.release.secrets]]                    # zero or more — names and shapes, never values
 name     = "AuthKey.p8"                          # file name or env name; unique in the profile
@@ -318,8 +362,8 @@ must contain both placeholders, `build_number_policy`, `kind` and `verify` take 
 above, `files` is only valid for `kind = "dir"` and `max_kb` only for `kind = "file"`, `driver`
 is a relative path, and every error names the section and key
 (`[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review, gate, qa,
-dev, version)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
-degrades the Store tab without stopping the server.
+dev, version, status, golive)`). Whether the presets exist and behave is a `rcm check` matter, so a
+half-written profile degrades the Store tab without stopping the server.
 
 `{version}` in `tag` (and in `listing.validate` and `listing.release_notes`) is the round's version
 name: the one name when both stores get the same one, and the iOS name, a `+` and the Android name
@@ -332,13 +376,14 @@ when they differ — `prod/1.1.1-181` or `prod/1.1.1+1.0.1-181`
 |---|---|
 | `FAIL` | a required role (`plan`, `upload`, `review`) is empty or names a preset that is not in `[[presets]]` |
 | `FAIL` | the `plan` preset lacks the `build_name` input; `upload` lacks `build_name confirm_build_number mode platform`; `review` lacks `build_name confirm_build_number mode platform play_managed_publishing listing phased` |
-| `FAIL` | the `upload` preset's `mode` input defaults to `upload`, or the `review` preset's `mode` defaults to `submit` — the irreversible mode is never the default |
+| `FAIL` | the `upload` preset's `mode` input defaults to `upload`, the `review` preset's `mode` defaults to `submit`, or the `golive` preset's `mode` defaults to `release` — the irreversible mode is never the default |
 | `FAIL` | a `version` preset lacks `mode ios_version android_version asc_version_id`, or its `mode` does not default to `prefill` (`create` makes a store draft, `delete` is irreversible) |
+| `FAIL` | a `status` preset lacks the `build_name` input, or a `golive` preset lacks `build_name confirm_build_number platform mode` |
 | `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
-| `warn` | an optional role (`gate`, `qa`, `dev`, `version`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | an optional role (`gate`, `qa`, `dev`, `version`, `status`, `golive`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
 | `warn` | the `version` preset's `mode` input lists the values it takes and `create` or `delete` is missing — those are the two rcm sends, so «new version» and «discard» would be refused when the job is submitted |
 | `warn` | the `review` or `upload` preset has no `listing_json` input — the listing copy edited in the web UI cannot reach the script (re-run `/rcm-store-connect`, which adds the input) |
-| `warn` | the `review` or `upload` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
+| `warn` | the `review`, `upload` or `golive` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
 
 The detail lists each role with its preset, the driver when one is set, and the number of secrets:
 `ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke
@@ -423,10 +468,12 @@ keeps its default. Writes take a Bearer token only.
 
 | route | token | what |
 |---|---|---|
-| `GET …/release` | read rule, always | `setup`, then the latest job per role: `plan` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `build_name`, `doc`), `review.plan` (same shape) and `review.result`, `upload` (`job_id`, `state`, `doc`), and `jobs[]` — the role presets' jobs, newest first, at most 50, each with `id preset role state sha ref started_at finished_at artifacts[]`. "Latest per role" is the newest job of that preset whose artifact bundle contains the role's file (`plan.json`, `upload.json`, `review-plan.json` / `review.json`, matched by base name anywhere in the bundle); `doc` is that file parsed (256 KB at most; unreadable or invalid gives `doc: null` plus `doc_error`). `measured_at` is the document's own or, failing that, the job's end; `stale` is `age_seconds > plan_max_age_minutes × 60`. Computed from the database and the artifact store only |
-| `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
+| `GET …/release` | read rule, always | `setup`, then the latest job per role: `plan` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `build_name`, `doc`), `review.plan` (same shape) and `review.result`, `upload` (`job_id`, `state`, `doc`), `status` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `doc` — aged from the document's `checked_at`, no `build_name`), `golive` (`plan` in the shape of `plan`, `result`, and `live[]` — the go-live jobs that are booked or running: `job_id state build_name platform confirm_build_number not_before start_deadline`), and `jobs[]` — the role presets' jobs, newest first, at most 50, each with `id preset role state sha ref started_at finished_at artifacts[]`. `status` jobs run often, so they get at most 3 rows of their own in `jobs[]` and never take one of the 50. Each role preset is read through its own window of its newest 500 jobs (50 for `gate`, `qa` and `dev`, which only have rows), so a `status` job every few minutes does not push the last plan or review out of sight. "Latest per role" is the newest job of that preset whose artifact bundle contains the role's file (`plan.json`, `upload.json`, `review-plan.json` / `review.json`, matched by base name anywhere in the bundle); `doc` is that file parsed (256 KB at most; unreadable or invalid gives `doc: null` plus `doc_error`). `measured_at` is the document's own or, failing that, the job's end; `stale` is `age_seconds > plan_max_age_minutes × 60`, or a `measured_at` later than now (a clock that is wrong never makes a plan fresh). Computed from the database and the artifact store only |
+| `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha, submission}` (an identical running job is joined; `submission` is the cancel secret, as `POST /jobs` gives it) |
 | `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
 | `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
+| `POST …/release/status` | client token | `{build_name?, ref?}` → submits `presets.status`, with `build_name` only when the body has one (empty: the script reads the newest versions the stores have) → `202 {job_id, joined, state, sha, submission}`. Read-only for the stores, so any client token will do; 409 `role_not_configured` when the profile has no `status` preset. The review panel's **Check again** sends this route the round's version |
+| `POST …/release/golive` | client token; **admin for `mode = release`** | `{build_name or version_id, ref?, mode: plan\|release, platform: ios\|android\|both, confirm_build_number?, start_at? \| start_in_seconds?}` → submits `presets.golive`. `plan` (the default) reads the stores now → `202`; a time is 400 `golive_plan_now_only`. `release` runs the go-live gate below and goes now → `202`, or at `start_at` / after `start_in_seconds` (read as for `rcm run --at`) → `201` with `not_before`, `start_deadline` and `timezone`. Every answer carries `submission` |
 | `GET …/release/versions` | read rule, always | the store version drafts of this repository: `{live: {ios, android, from_plan_job}, hints: {ios, android}, ttl_hours, drafts[], history[]}`. `live` comes from the latest succeeded plan's `store.asc_live` and `store.play.production_name`; `hints` is that document's `next_version_hint` or, failing that, each live name with its last integer + 1 (unknown stays `null`). `drafts[]` is every open draft, newest first; `history[]` the last 20 submitted ones (`{id, ios, android, submitted_at, review_job_id}`). A draft row is `{id, repo, ios_version, android_version, build_name, state, created_by, created_at, last_edit_at, expires_at, expired, expiry_warned, asc_version_id, error, create_job_id, delete_job_id, release_id, review_job_id, upload_job_id, has_prefill, has_edits, changed}` — `state` is `creating`, `editing`, `running`, `submitted`, `discarded` or `failed`; `build_name` is the iOS name, or the Android one when there is no iOS name; `changed` counts the edited listing fields |
 | `POST …/release/versions` | admin | `{ios_version?, android_version?, ref?}` → opens a draft. At least one name, each `major.minor.patch` and greater than that store's live name when the plan knows it. With a `version` preset it submits that preset with `mode = create` → `202 {id, job_id, state: "creating", build_name}`; without one the draft is `editing` at once → `201 {id, job_id: null, state, build_name}`. The job's `version.json` and `prefill.json` then fill `asc_version_id` and the prefilled listing; a failure leaves the row `failed` with an `error` sentence |
 | `GET …/release/versions/<id>` | read rule, always | one draft — the row above plus `prefill`, `edited`, `diff` (the shape of `…/diff`) and `release` (the `GET …/release` document with this version's `build_name`). It runs **no** subprocess, because the version page polls it every five seconds: the driver's `--status` and the two listing commands stay behind `GET …/release/driver` and `GET …/release/listing`, which the page calls at its own pace |
@@ -474,19 +521,24 @@ restart makes the same judgement again.
 | `managed_publishing_unconfirmed` | `mode = submit` with `platform` `both` or `android` and `play_managed_publishing` other than `confirmed-on` **in this body** — the value is never remembered |
 | `plan_required` | `mode = upload` / `mode = submit` without a succeeded plan (`plan.json`) for the same `build_name` |
 | `plan_stale` | that plan is older than `plan_max_age_minutes` |
-| `build_number_mismatch` | `confirm_build_number` (review submit, upload) or `build_number` (driver confirm) is empty or does not equal the plan's `n` as an integer — the server compares, it never fills the number in |
+| `build_number_mismatch` | `confirm_build_number` (review submit, upload) or `build_number` (driver confirm) is empty or does not equal the plan's `n` as an integer — the server compares, it never fills the number in. For `golive` it is compared with each chosen platform's `approved_build`; `auto` is not accepted there, and with `platform = both` the two approved builds must be the same number (when they differ, go live per platform; `approved_build` in the body) |
 | `mirror_missing` | the driver or listing needs a checkout and the mirror has no `default_branch` yet — `POST …/fetch` first |
 | `no_driver` | a driver route on a profile without `driver` |
 | `driver_missing` | `driver` is not an executable file in the checkout |
 | `release_running` | a driver process for this repository is still alive (`release_id` in the body) |
 | `release_required` | `confirm` / `abort` / `retry` with no earlier run for that build |
 | `version_exists` | a new version name that an open draft already carries (`id` and `state` in the body). A draft whose create job **failed** does not count — nothing was made in the store under that name, so the same name can be typed again |
-| `version_closed` | a submitted or discarded draft — it cannot be edited, submitted or discarded again |
+| `version_closed` | a submitted or discarded draft — it cannot be edited, submitted or discarded again. `golive` is the exception: it takes a **submitted** draft (going live comes after the review), never a discarded one |
 | `version_running` | discarding a draft whose review job, `mode = upload` job or driver round is still running (`review_job_id`, `upload_job_id` and `release_id` in the body) |
 | `listing_json_unsupported` | the draft has an edited listing but the `review` / `upload` preset has no `listing_json` input |
 | `split_version_unsupported` | the draft's two store version names differ but that preset has no `build_name_android` input |
+| `golive_plan_required` | `golive` `mode = release` without a **succeeded** golive plan (`golive-plan.json`) for the same `build_name`, or one that did not read a chosen platform |
+| `golive_plan_stale` | that golive plan is older than `plan_max_age_minutes` (`age_seconds` in the body). Checked when the release is asked for, never again when a booked one runs — the script reads the stores again then |
+| `golive_plan_blocked` | a chosen platform's `approved` is not `true` in that plan (`platforms[]` names it). Only the chosen platforms count: iOS alone goes through while Android is still in review |
+| `golive_running` | a `golive` `mode = release` job for the same `build_name` is booked (`scheduled`) or alive — now or later, one at a time (`job_id`, `state` in the body). Cancel it first |
+| `release_route_required` | `POST /jobs` with the `golive` role's preset and `mode = release`, from any token, admin included: going live takes `POST …/release/golive` (or `rcm release golive`), which runs the gate. `review` and `upload` are not refused there — the driver submits `upload` with `rcm run` |
 
-`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`), as do every
+`mode = submit`, `mode = upload` and the `golive` `mode = release` also need an admin token (403 `admin_required`), as do every
 `POST`, `PUT` and `DELETE` under `…/release/versions`. The version routes also answer 404
 `version_not_found` (no such draft in this repository — another repository's number included) and
 400 `empty` (neither version name), `pattern` (not `major.minor.patch`), `not_greater` (not above
@@ -510,6 +562,44 @@ gone, records the code (or `null` when it is unknown) and revokes their tokens. 
 with the same environment but without a token — it is read-only by contract. Confirm follows the
 contract: the driver prints `plan: N = <n>` and exits 2, the page shows the number, a person
 types it, and the server forwards it only when the two agree.
+
+### Going live (`golive`)
+
+Nothing goes live on approval by itself. A release runs only when a person asks for it with the
+version, the build number and a time. The `golive` role is that request, and it has two modes:
+
+- `plan` (the default, any client token) reads both stores and writes `golive-plan.json`: for each
+  platform whether it is `approved` and the `approved_build`. It exits 0 whenever it could read the
+  stores, approved or not — the answer is in the file.
+- `release` (admin) asks the stores to go live. It takes the approved build number a person typed —
+  never `auto` — for now, or for `start_at` / `start_in_seconds` like `rcm run --at` / `--in`. The
+  gate is checked once, when the release is asked for: a succeeded golive plan for that
+  `build_name` no older than `plan_max_age_minutes`, every chosen platform `approved` in it, the
+  typed number equal to their `approved_build`, and no other go-live job of that build booked or
+  running. A booked release is not checked again when its time comes; the script reads the stores
+  again then, and a platform that is not approved ends the job with exit 2, never 75.
+
+The same gate stands behind the web page — the version page's «Schedule go-live» area, which opens
+only once `status.json` says that store approved this version and runs the plan first — and behind
+`rcm release golive`:
+
+```sh
+rcm release status app                                     # both stores' review state (waits)
+rcm release golive app --build-name 1.2.0 --platform both --plan
+#   iOS      approved      build 185    PENDING_DEVELOPER_RELEASE
+#   Android  not approved  build —      RELEASE_LIFECYCLE_STATE_IN_REVIEW
+#   next: rcm release golive app --build-name 1.2.0 --platform ios --confirm-build-number 185 …
+rcm release golive app --build-name 1.2.0 --platform ios --confirm-build-number 185 --at 15:00
+#   golive #412 scheduled for 15:00 · start by 16:00 · build 1.2.0 · ios 185
+#   follow: rcm wait --job 412 · cancel: rcm cancel 412
+```
+
+`POST /jobs` (and so `rcm run`) refuses the `golive` preset's `mode = release` from every token
+with 409 `release_route_required` — that path would skip the gate. A submitted draft takes
+`golive` (going live comes after the review); a discarded one does not. Play has no API to publish
+a held release, so the project's go-live script publishes through a browser or asks a person; when
+its Play Console sign-in is gone it prints an `action` marker and exits 75, and the next attempt
+checks again ([release contract](release-contract.md) §2 and §6).
 
 ## Getting files back out of a job
 
@@ -979,7 +1069,7 @@ byte rules catch it before any date does.
 | key | default | meaning |
 |---|---|---|
 | `retention_days_success` | `14` | logs of succeeded jobs. Their workspace is deleted the moment the job ends |
-| `retention_days_failure` | `30` | logs of failed, cancelled, timed-out and lost jobs |
+| `retention_days_failure` | `30` | logs of failed, cancelled, timed-out, lost and expired jobs |
 | `workspace_retention_days` | `1` | a kept workspace and the job's uploaded snapshot. Cannot outlive the shorter of the two day counts above — set it higher and the server says so at start-up and uses the lower number |
 | `workspace_storage_max_bytes` | `107374182400` (100 GiB) | when the workspaces plus snapshots weigh more than this, the oldest finished jobs give theirs up regardless of age. `0` means no limit |
 | `min_free_bytes` | `10737418240` (10 GiB) | when the filesystem holding the data directory drops below this, the same thing happens. `0` turns it off |
@@ -1079,7 +1169,7 @@ Git mirrors are never pruned.
   default). `rcm run` sends a manifest first and then only the files the server does not have:
   the second upload of a mostly unchanged tree transfers a few percent of it. Blobs unused for
   `snapshot_cache_days` (30) or beyond `snapshot_cache_max_bytes` (4 GiB) are purged; blobs
-  referenced by active jobs never are. Set `snapshot_cache_scope = "token"` to keep each client's
+  referenced by active or scheduled jobs never are. Set `snapshot_cache_scope = "token"` to keep each client's
   blobs separate (by default identical content is shared between clients, which also means a
   client can learn whether a given file already exists on the server). `--no-cache` sends a full
   tarball; combine it with `--no-join` to force a fresh job for an unchanged tree.
@@ -1098,7 +1188,9 @@ Git mirrors are never pruned.
   remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
   process itself (`rcm worker`) ships in the next release step (M5b-3).
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
-  when jobs finish, filtered by state (`on`) and preset (`presets`). The command gets
+  when jobs finish, filtered by state (`on`; without it every final state but `retried`, `expired`
+  and `exhausted` included) and
+  preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
   `RCM_FAILED_STEP` (declared failures only) and `RCM_LAST_STEP`, `RCM_EXIT_CODE`,
   `RCM_JOB_SECONDS`, `RCM_URL`, `RCM_NOTIFY` (rule name), the
@@ -1107,13 +1199,19 @@ Git mirrors are never pruned.
   `RCM_FAILURES` (the names the job reported with `::rcm::fail::` and failed steps, in the order it
   printed them, one per line, at most 20) and `RCM_FAILURE_COUNT` (how many there are in all —
   `100+` when the job reported more than the ledger keeps; both empty when nothing was named),
-  `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise);
+  `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise),
+  `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (the job's last
+  [action](#when-a-person-has-to-act), empty without one);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
   rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
   "failures_truncated": false}` with the same 20-name cap, plus `"shelf_url"` for a kept job. Each (job, rule) fires exactly once,
   including jobs that finished while the server was down. Failures are logged and counted
-  (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
+  (`server.notify_failures`) but never retried, and never mark the queue unhealthy. `rcm check`
+  shows a `warn  notify` row with the count while it is above 0, and the web header a
+  `notify failures N` badge (hidden at 0). The count lives in the server's
+  memory, so a restart sets it back to 0 — the server log keeps each failure
+  (`notify <rule> #<job>: exit 1`).
 - **Job links** — `RCM_URL`, the `url` in the webhook body and the job URL `rcm run` prints start
   with `[server] public_url` when it is set. Without it the server picks an address another
   computer can open, never `0.0.0.0`:
@@ -1730,6 +1828,161 @@ instead.
 **Opting out for one submission.** `rcm run gate --no-supersede` (API: `"supersede": false` in the
 `POST /jobs` body) clears nothing — for running a flaky test twice side by side. There is no way to
 turn it on from the submitting side: a preset set to `off` stays off.
+
+## Running a job later: `--at` and `--in`
+
+`rcm run` can hand the server a time instead of running now. The job waits on the server as
+`scheduled` and enters the queue at that time:
+
+```sh
+rcm run deploy --ref main --at 15:00            # today, 15:00 on the server's clock
+rcm run deploy --ref main --at 2026-11-24T09:30
+rcm run gate --in 90m                           # 90s · 5m · 2h · 1h30m · 1d
+```
+
+The server reads the time, not your machine: `--at` is sent as written and `--in` as a number of
+seconds. A time without an offset is read in `[display] timezone`, or in the server's local zone
+when that is empty. Three shapes are accepted — `HH:MM` (today), `YYYY-MM-DDTHH:MM`, and ISO-8601
+with an offset (`2026-11-24T09:30+09:00`, `…Z`). A time that has passed is refused with 400
+`start_at_past`; it is never moved to tomorrow. So is a time more than `schedule_max_ahead_days`
+(14) ahead (`start_at_too_far`), and a wall-clock time that a daylight saving change skips or
+repeats (`start_at_ambiguous` — give an offset). The submission answer carries the UTC time it
+settled on (`not_before`), the start deadline (`start_deadline`) and the zone it used
+(`timezone`). Over HTTP the same keys are `start_at` (string) or `start_in_seconds` (integer) on
+`POST /jobs`.
+
+An older server ignores body keys it does not know, so it would run the job **now**. `rcm run`
+only sends `--at` or `--in` to a server whose `/api/health` says `schedule: true`; anything else
+ends with `server does not support scheduling — upgrade it` and exit 2, before a snapshot is made.
+
+**The start deadline.** A scheduled job must be picked up by a lane within
+`[server] schedule_start_deadline_seconds` (900) of its time. A preset can set its own
+(`start_deadline_seconds = 3600`, applied on `rcm reload`); a submission may only shorten it
+(`start_deadline_seconds` in the body, 400 `start_deadline_too_long` otherwise). A job that misses
+it — because the lanes were busy, or because the server was down at the time — becomes
+`expired`: it did not run, `rcm wait` exits 2 (the same as `cancelled`), and its summary says
+`did not start by its start deadline 2026-11-24 09:45Z`. On start-up the server closes the
+schedules that passed their deadline while it was down and queues the ones whose time came but
+whose deadline did not, all before a lane starts. The deadline clock keeps running while the queue
+is paused.
+
+| state | means | `rcm wait` |
+|---|---|---|
+| `scheduled` | waiting for its time; no lane, no process | keeps waiting, prints `scheduled for 15:00 · start by 15:15` |
+| `queued` (from a schedule) | its time came; waits for a lane like any job, with its submission's priority | keeps waiting |
+| `expired` | no lane picked it up before the deadline | 2 |
+
+**What a schedule does not do.** It never joins another job, and no job joins it: a schedule
+next to a running job with the same preset, inputs and source is a new job, and `rcm run` of the
+same thing now does not wait for the schedule. A second schedule with the same preset, inputs and
+source (the commit for `git_ref`, the tree for an upload) is refused with 409 `schedule_exists`
+and the first job's `job_id` (`rcm run` exits 2: no job was made); cancel it or pick another time. A `git_ref` schedule resolves its
+ref when you submit, as every `git_ref` job does; a tree is uploaded when you submit and kept until
+the job runs — its snapshot blobs are protected from the cache sweep the same way an active job's
+are. [Supersede](#superseding-older-jobs-of-the-same-branch) happens when the schedule enters the
+queue, not when it is made, and never cancels a schedule; `--no-supersede` is stored with the job
+and survives a restart.
+
+**Seeing and changing it.** `rcm jobs --state scheduled` lists them, `/api/status` has them under
+`pools[].scheduled[]` in time order (apart from `queue`, with `scheduled_error` and
+`scheduled_error_code` when they cannot be read), and queue and recent rows carry `not_before`
+and `start_deadline` (`null` for a job that was never scheduled). `rcm cancel N` cancels a
+schedule at once, `rcm bump N` changes its priority, and `rcm eta --job N` answers
+`scheduled for 15:00` without inventing a number. The ETA of a new submission does not count
+schedules about to enter the queue. Schedules live in the database: `rcm reload` and a restart
+keep them; one whose preset was removed fails at claim with `preset_missing`. A `[[notify]]` rule
+without `on` also fires for `expired`, and `on = ["expired"]` picks only those. Finished schedules
+follow the ordinary [retention](#retention-what-is-kept-and-for-how-long).
+
+**On screen.** The web page lists schedules below the queue under **Scheduled (N)**, in time
+order: the preset, its inputs, who asked, the time and the start deadline in the display time
+zone, and **Cancel** on your own. A schedule has no ETA; the page does not invent one. When the
+server could not read them the section is a red **Scheduled jobs unavailable** band, never an
+empty list, and «Needs a look» says `unknown — scheduled jobs unavailable` instead of
+`Nothing needs a look` (a schedule waiting for a person may be among them). `rcm top` adds one line per pool, `scheduled — 2 · next 15:00 golive`, or
+`scheduled — unavailable: <error>`; with no schedules it adds nothing. A job that missed its
+deadline is `expired · exit 2` in the recent list. The queue reason `not_scheduled` (a lane sat
+idle and did not pick the job up) reads `idle lane did not pick it up` on both, so it is not
+mistaken for this state.
+
+## Trying again later: `[presets.retry]`
+
+Some scripts can only say "not yet": the store has not finished the release, the browser session
+needs a person to log in again. A preset can ask rcm to run such a script again later. The script
+exits with the agreed code (75, `EX_TEMPFAIL`) and rcm runs it again after an interval, up to a
+limit:
+
+```toml
+[[presets]]
+name = "release-golive"
+argv = ["bash", "scripts/release_golive.sh"]
+source_modes = ["git_ref"]   # required: each attempt fetches the same commit again
+repo = "app"
+
+[presets.retry]
+on_exit = 75             # the exit code that means "not yet" (1–255, default 75)
+interval_seconds = 600   # wait this long before the next attempt (default 600)
+max_attempts = 12        # attempts in all, the first one included (2–100, default 12)
+```
+
+**Only a preset that declares it retries.** Without `[presets.retry]` an exit 75 is an ordinary
+`failed` job, as before; `rcm-ci-connect` uses 75 for an infrastructure failure, and that must
+not loop. A preset that retries takes `git_ref` sources only (`source_modes = ["git_ref"]`, a
+configuration error otherwise): every attempt runs the commit the first one resolved. The policy
+is stored with the job when it is submitted, so `rcm reload` or removing the preset does not change
+a chain already running. A submission can only turn it off for that job: `"retry": false` in the
+`POST /jobs` body; such a job is not a chain (no `chain_id`, no `attempts[]`). A submission
+only joins a job whose frozen policy is the same (`on_exit`, `interval_seconds`, `max_attempts`
+and whether `retry: false` turned it off), so a submission made after a reload changed the limit
+starts a job of its own, and a submission that wants retries never joins a
+`retry: false` job or one submitted before the preset declared the table, and the other way round.
+
+**Each attempt is a job of its own.** An attempt that exits with `on_exit` ends as `retried` and,
+in the same database transaction, the next attempt is created as `scheduled` for
+`now + interval_seconds`. It keeps the inputs, the commit, the priority (raised by joins too), the
+link, the machine or pool, `keep`, `--no-supersede`, and the joiners. The last attempt that still
+exits with `on_exit` ends as `exhausted`: rcm never found out, and a person has to look.
+
+| state | means | `rcm wait` |
+|---|---|---|
+| `retried` | this attempt said "not yet"; `retried_as` names the next one | keeps waiting, on the next attempt |
+| `exhausted` | the last attempt said "not yet" too | 1 |
+
+A retry attempt has **no start deadline**: when the lanes are busy, or a concurrency group is held
+(a login preset sharing the group while a person signs in), it waits as `blocked_by_group` without
+ending `expired`. The chain ends only at `max_attempts`. A retry attempt is not a new
+submission: entering the queue it [supersedes](#superseding-older-jobs-of-the-same-branch)
+nothing — it runs the older commit, and a newer job of the same branch must not be cleared for it.
+
+**The chain.** Every attempt carries `chain_id` (the first job's id), `attempt` (1, 2, …),
+`retry_of`, `retried_as` (on a `retried` attempt) and `max_attempts`, in `GET /jobs/<id>` and in
+`/api/status` rows; `presets[].retry` shows the declared policy. `rcm wait` and `rcm run` follow
+`retried_as` to the end of the chain: `--timeout` counts for the whole chain, `--fetch-artifacts`
+fetches the last attempt's files, and the final JSON's `job_id` is the last attempt, with
+`chain_id` and `attempts[]` (`job_id`, `attempt`, `state`, `exit_code` for each). Each step prints
+`#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it`. A `retried` attempt without a
+next one would be a server bug; `rcm wait` exits 3 then, never 1.
+
+**A person's task across attempts.** A script that needs a person (a login, say) prints an
+`::rcm::action::` marker and exits 75. The marker belongs to the whole chain: the chain shows the
+last marker of the most recent attempt that ran, while the next attempt waits as `scheduled`,
+waits in the queue, or runs without a marker of its own. An attempt that runs to its end without a
+marker clears it. So `/api/status` gives the waiting attempt `reason: "needs_action"` and its
+`action` (on `pools[].scheduled[]` rows too, which carry `reason` and `action`, both `null`
+without a marker), and `rcm wait --return-on-action` returns 4 between attempts as well.
+
+`rcm cancel` takes any id of the chain and stops the attempt that is still alive; the cancel token
+from the first submission works for every attempt. A cancel that lands while an attempt is
+exiting 75 wins: the attempt ends `cancelled` and no next attempt is made. Only the last attempt
+collects artifacts and goes on the [shelf](#keeping-a-jobs-files-the-shelf); a `retried` attempt
+keeps no workspace even with `keep_workspace_on_failure`. `retried` attempts stay out of the recent
+list (the chain shows as its last attempt, with its `attempt` number), out of the estimate samples
+and out of the default `[[notify]]` set (`on = ["retried"]` asks for them); `exhausted` is in it.
+
+**Older clients.** A client before 0.10.0 does not know `retried` and would wait on it forever. A
+server with at least one preset that retries raises `min_client_version` in `/api/health` to
+`0.10.0` (and says `retry_min_client_version: "0.10.0"`), so the old `rcm check` shows the client
+row as FAIL. Making a script safe to run again is the script's job.
 
 ## Client and worker files
 

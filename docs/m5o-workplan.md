@@ -166,7 +166,7 @@ M5o :  test: home_dudi_bubble_gap_golden_test.dart +1 more (exit 1)
 
 한 함수 `server_base_url(section, *, hostname)` 를 `notify.py` 와 `server.py` 가 같이 쓴다(요청이 있는
 `server.py` 의 Host 우선 규칙은 그 위에 그대로 남는다). `rcm check` 에 행 하나:
-`public url  warn  empty — links use http://epeuem-ui-Macmini.local:8787 (set [server] public_url)`.
+`public url  warn  empty — links use http://build-mac.local:8787 (set [server] public_url)`.
 
 ## 4. C — 프리셋을 파일에서 읽는다
 

@@ -207,9 +207,10 @@ describe("reasonText — actionable", () => {
     assert.deepEqual(r.links, []);
   });
 
-  test("not_scheduled → 'not scheduled'", () => {
+  // 결정 238 — 코드는 그대로, 글은 새 상태 `scheduled` 와 헷갈리지 않게
+  test("not_scheduled → 'idle lane did not pick it up'", () => {
     const r = rcm.reasonText(variant(414, { reason: "not_scheduled" }), NOW, status);
-    assert.equal(r.text, "not scheduled");
+    assert.equal(r.text, "idle lane did not pick it up");
     assert.equal(r.actionable, true);
   });
 
@@ -244,7 +245,7 @@ describe("reasonText — unknown and null", () => {
 
   test("actionable is exactly the Not-moving set; links is always an array", () => {
     const expect = {
-      worker_down: true, stuck: true, upload_stalled: true, not_scheduled: true,
+      needs_action: true, worker_down: true, stuck: true, upload_stalled: true, not_scheduled: true,
       blocked_by_group: true, overdue: true, paused: true,
       running: false, waiting_for_lane: false, uploading: false, materializing: false, cancelling: false,
     };

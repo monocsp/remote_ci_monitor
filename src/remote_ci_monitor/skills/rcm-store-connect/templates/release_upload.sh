@@ -227,7 +227,7 @@ main() {
   EXIT_CODE=$rc write_upload "$expected" "$status" upload "" ${uploaded[@]+"${uploaded[@]}"}
   step_end ok
   case "$status" in
-    success) finish "uploaded — $shown N=$expected ${uploaded[*]-} (no release, no rollout: those are human steps)" 0;;
+    success) finish "uploaded — $shown N=$expected ${uploaded[*]-} (nothing goes live: a person asks for that later, rcm release golive)" 0;;
     partial) finish "partial — uploaded ${uploaded[*]-}, failed ${failed[*]-} (exit 1)" 1;;
     *)       finish "failed — nothing uploaded (${failed[*]-})" 1;;
   esac

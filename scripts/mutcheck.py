@@ -6,6 +6,9 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
+     안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
+     남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
   M5p P2 — `shelf-*` 넷: 파일 응답에서 `sandbox` CSP 를 뺌 · 퍼센트 디코딩 뒤의 경로 검사를 뺌 ·
      보관함 zip 이 M5e 전송 슬롯을 같이 씀 · Host 허용 목록을 건너뜀
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-b.md`)
@@ -19,6 +22,16 @@
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
   M5p 뒤 — `shelf-expand-keeps-apple-double`: 펼침이 macOS 메타데이터 멤버(`._*`)를 거르지 않음
      (`shelf_copier.py`, 2026-11-20 운영 잡 #3821 — 깨진 그림 23개)
+  M5s A — `m5s-*` 넷: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 합류 쿼리가
+     예약에서 온 잡을 거르지 않음(즉시 실행이 예약에 합류함) · 시각을 준 제출이 합류함
+     (`docs/m5s-workplan.md` §4.1 · §7)
+  M5s D — `m5s-retry-*` 둘: 반복 선언 없이 75 를 반복함 · 취소 뒤에도 retried 로 닫고 다음
+     시도를 만듦 (`docs/m5s-workplan.md` §4.2 · §7) + #256 격리 검증의 셋: 다음 시도가 더 새
+     커밋을 supersede 함(판정 · 승격 두 자리) · 합류가 얼린 반복 정책을 안 봄 + 시험 구멍 넷
+     (로컬 취소 경주 · 로컬 묶음 · finish 의 묶음 · 원격 묶음 만료)
+  M5s F — `m5s-golive-release-without-admin`: golive release 의 admin 검사를 뺌 ·
+     `m5s-golive-retries-not-approved`: 2(미승인)에도 반복함
+     (`docs/m5s-workplan.md` §4.5 · §7)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -139,6 +152,10 @@
      서비스 venv 의 rcm 을 못 알아봄 · 닫힌 PR 의 합류한 잡을 취소함 · `guard_merge` 가 붙여 쓴
      `-Ro/r` 를 못 봄 · `-n` 에서 `--dist` 를 loadgroup 으로 안 정함 · timeout 이 하네스의 새 세션
      자식을 남김 (`docs/m5r-workplan.md` §13.8)
+  M5s E — `m5s-*` 여덟: 역할 프리셋을 다시 한 창으로 읽음 · status 행이 jobs[] 의 50 자리를 같이
+     씀 · 필요 없는 묶음 목록까지 읽음 · 도는 status 잡이 「지금 하는 일」이 됨 · 목록에 없는
+     상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
+     모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -476,12 +493,18 @@ MUTANTS = (
         path="src/remote_ci_monitor/remote_workers.py",
         old="""                with self._fresh_claims_lock:
                     job = self.store.claim(
-                        lane, now, pool=pool, worker_name=name, claimant=claimant
+                        lane,
+                        now,
+                        pool=pool,
+                        worker_name=name,
+                        claimant=claimant,
+                        now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
                     )
 """,
         new=(
             "                job = self.store.claim(\n"
-            "                    lane, now, pool=pool, worker_name=name, claimant=claimant\n"
+            "                    lane, now, pool=pool, worker_name=name, claimant=claimant,\n"
+            "                    now_fn=self.now_fn,\n"
             "                )\n"
             "                with self._fresh_claims_lock:\n"
         ),
@@ -1077,6 +1100,139 @@ MUTANTS = (
             "test_a_round_that_ends_first_waits_for_the_job_that_is_still_running",
         ),
     ),
+    # ── M5s PR B — status · golive 역할 (docs/m5s-workplan.md §4.4 · §4.6) ──
+    Mutant(
+        # golive 의 release 를 되돌릴 수 없는 모드에서 뺀다 — 기본값이 release 인 프리셋을
+        # rcm check 가 통과시켜, 손으로 한 번 돌린 golive 가 출시가 된다
+        name="m5s-golive-release-not-irreversible",
+        path="src/remote_ci_monitor/cli.py",
+        old='"review": "submit", "golive": "release"}',
+        new='"review": "submit"}',
+        # test_config_release_profile 은 사본에 없는 examples/ 를 읽는다 — 이 시험만 쓴다
+        tests=(
+            "tests/test_skills_templates.py::"
+            "test_a_golive_preset_defaulting_to_release_fails_the_release_row",
+        ),
+    ),
+    Mutant(
+        # status.json 을 checked_at 이 아니라 measured_at 으로 잰다 — 늘 잡이 끝난 시각이 되어
+        # 오래된 상태가 새것처럼 보인다
+        name="m5s-status-age-ignores-checked-at",
+        path="src/remote_ci_monitor/release_state.py",
+        old='MEASURED_KEY: dict[str, str] = {"status.json": "checked_at"}',
+        new="MEASURED_KEY: dict[str, str] = {}",
+        tests=(
+            "tests/test_release_state.py::"
+            "test_status_is_the_latest_status_json_aged_from_checked_at",
+        ),
+    ),
+    # ── M5s PR F — golive 라우트 (docs/m5s-workplan.md §4.5 · §7) ──
+    Mutant(
+        # golive release 의 admin 검사를 없앤다 — 클라이언트 토큰 하나로 출시를 걸 수 있다
+        name="m5s-golive-release-without-admin",
+        path="src/remote_ci_monitor/server.py",
+        old='        if not token.admin:\n            raise ApiError(403, "going live',
+        new='        if False:\n            raise ApiError(403, "going live',
+        tests=("tests/test_release_golive.py::test_release_needs_an_admin_token",),
+    ),
+    Mutant(
+        # 2(미승인)에도 반복한다 — golive 가 75 대신 2 로 승인을 기다리게 되고, 승인을 감시하는
+        # 자동 출시가 된다(결정 201 · 236, #255 재검증 P2)
+        name="m5s-golive-retries-not-approved",
+        path="src/remote_ci_monitor/core/model.py",
+        old="            and rc == self.retry_on_exit\n",
+        new="            and rc in (self.retry_on_exit, 2)\n",
+        tests=(
+            "tests/test_release_golive.py::test_a_golive_release_that_ends_1_2_or_3_is_never_retried",
+        ),
+    ),
+    # ── M5s PR E — status 라우트 · 역할별 창 · 검토 패널 (docs/m5s-workplan.md §4.4 · §3 #11) ──
+    Mutant(
+        # 역할 프리셋 잡 500개를 다시 한 창으로 읽는다 — 자주 도는 status 잡이 그 창을 채우면
+        # plan · review 의 최신 문서가 null 이 되고 되돌릴 수 없는 문이 닫힌다
+        name="m5s-release-view-one-shared-window",
+        path="src/remote_ci_monitor/server.py",
+        old="self.store.list_jobs_by_preset([preset_name], window)",
+        new="self.store.list_jobs_by_preset([n for n in presets.values() if n], 500)",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_frequent_status_jobs_do_not_push_the_plan_out",
+        ),
+    ),
+    Mutant(
+        # status 행이 jobs[] 의 50 자리를 같이 쓴다 — 다른 역할의 행과 그 끝난 시각이 사라진다
+        name="m5s-status-rows-crowd-jobs",
+        path="src/remote_ci_monitor/release_state.py",
+        old="            wants_row = status_rows < STATUS_ROWS_LIMIT\n",
+        new="            wants_row = len(rows) < JOBS_LIMIT\n",
+        tests=(
+            "tests/test_release_status_panel.py::test_release_status_panel_status_rows_do_not_crowd_jobs",
+        ),
+    ),
+    Mutant(
+        # 필요 없는 잡의 묶음 목록까지 읽는다 — 5분마다 도는 status 잡 500개를 매 조회마다 다 연다
+        name="m5s-release-view-reads-every-bundle",
+        path="src/remote_ci_monitor/release_state.py",
+        old="        if not wants_row and not missing:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_unneeded_status_bundles_are_not_read",
+        ),
+    ),
+    Mutant(
+        # 도는 status 잡이 Build·upload 행의 「지금 하는 일」이 된다
+        name="m5s-web-status-job-is-what-runs-now",
+        path="src/remote_ci_monitor/web/app.js",
+        old='return j && isNum(j.id) && j.role !== "status"; })',
+        new="return j && isNum(j.id); })",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 목록에 없는 상태 값을 그대로 믿는다 — `APPROVED` 같은 원문이 승인처럼 그려질 수 있다
+        name="m5s-web-store-state-outside-the-list",
+        path="src/remote_ci_monitor/web/app.js",
+        old='var st = d && STORE_CHECK_STATES.indexOf(d.state) >= 0 ? d.state : "unknown";',
+        new='var st = d && d.state ? String(d.state).toLowerCase() : "unknown";',
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 행이 찼으면 문서 찾기까지 건너뛴다 — 묶음 없는 status 잡 셋이나 새 다른 역할 잡 50개
+        # 뒤의 status.json · plan.json 을 잃는다(#254 격리 검증 P1)
+        name="m5s-release-view-skips-documents-when-rows-are-full",
+        path="src/remote_ci_monitor/release_state.py",
+        old="        if not wants_row and not missing:\n",
+        new="        if not wants_row:\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_full_status_rows_still_find_an_older_status_document",
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_full_rows_still_find_an_older_plan_document",
+        ),
+    ),
+    Mutant(
+        # 프리셋마다 읽은 잡을 합친 뒤 새것부터 다시 세우지 않는다 — jobs[] 가 프리셋 순서가 되고
+        # 「역할의 최신」이 옛 잡이 된다(#254 격리 검증 P2)
+        name="m5s-release-view-merged-jobs-unsorted",
+        path="src/remote_ci_monitor/server.py",
+        old="        jobs = [by_id[i] for i in sorted(by_id, reverse=True)]\n",
+        new="        jobs = list(by_id.values())\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_jobs_from_several_presets_are_newest_first",
+        ),
+    ),
+    Mutant(
+        # 실패한 「새로 조회」를 모른 척한다 — 예전 상태가 아무 말 없이 그려진다
+        name="m5s-web-failed-check-silent",
+        path="src/remote_ci_monitor/web/app.js",
+        old="var lastFailed = newest && STORE_CHECK_FAILED[newest.state] &&",
+        new="var lastFailed = false && newest && STORE_CHECK_FAILED[newest.state] &&",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
     # ── M5q PR A — 클라이언트가 서버 버전을 따라간다 (docs/m5q-workplan.md §6) ──
     Mutant(
         # 받은 바이트의 해시를 안 본다 — 깨지거나 바뀐 wheel 이 캐시에 들어가 실행된다(결정 157)
@@ -1620,6 +1776,335 @@ MUTANTS = (
         old="        _kill_sessions(env)\n",
         new="        pass\n",
         tests=("tests/test_mutcheck_parallel.py",),
+    ),
+    Mutant(
+        # M5s C — 도는 잡의 「사람이 할 일」 표식을 이유가 무시한다: 로그인을 기다리는 출시 잡이
+        # 「Needs a look」에 안 오르고 그냥 running(또는 stuck)으로 보인다(결정 213)
+        name="action-needs-action-dropped",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="    if progress is not None and progress.action is not None:\n",
+        new="    if False:\n",
+        tests=("tests/test_action_marker_m5s.py",),
+    ),
+    Mutant(
+        # M5s C — code 어휘 검사를 뺀다: ESC 가 든 code 가 마커로 저장돼 stderr · 알림 env 로 흐른다
+        name="action-code-any",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="    if not ACTION_CODE_RE.fullmatch(code):\n",
+        new="    if not code:\n",
+        tests=("tests/test_action_marker_m5s.py",),
+    ),
+    Mutant(
+        # M5s C — note 의 제어문자를 안 지운다: `\\r` 하나로 `rcm wait` 의 앞 줄을 지운다
+        name="action-note-raw",
+        path="src/remote_ci_monitor/core/progress.py",
+        old='    text = clean_line(note)[:MAX_ACTION_NOTE].strip() if sep else ""\n',
+        new='    text = note[:MAX_ACTION_NOTE].strip() if sep else ""\n',
+        tests=("tests/test_action_marker_m5s.py",),
+    ),
+    Mutant(
+        # M5s C — 플래그 없이도 4 로 돌아온다: 결정 234 는 4 를 `--return-on-action` 에만 묶었다.
+        # 지금 `rcm wait` 를 쓰는 CI 가 표식 하나로 「끝났다」고 읽는다
+        name="action-exit-4-without-flag",
+        path="src/remote_ci_monitor/cli.py",
+        old="        if not self.return_on_action or self._stopped(job):\n",
+        new="        if self._stopped(job):\n",
+        tests=("tests/test_action_marker_m5s.py",),
+    ),
+    Mutant(
+        # M5s C(#251 격리 검증 P2) — 취소 중인 잡에서도 4 와 「needs action」 줄이 나온다. 그 잡은
+        # 더 돌지 않으므로 「잡은 계속 돈다」는 약속이 거짓이 된다
+        name="action-4-while-cancelling",
+        path="src/remote_ci_monitor/cli.py",
+        old="        return state in TERMINAL_STATES or state == CANCELLING\n",
+        new="        return state in TERMINAL_STATES\n",
+        tests=("tests/test_action_marker_m5s.py", "tests/test_web_schedule_m5s.py"),
+    ),
+    Mutant(
+        # M5s G(#251 재검증 P3) — 실패 · 성공 · 만료로 끝난 잡에도 「needs action」 줄을 찍는다.
+        # 받을 잡이 없는데 사람에게 할 일을 시킨다
+        name="action-line-on-a-finished-job",
+        path="src/remote_ci_monitor/cli.py",
+        old="        return state in TERMINAL_STATES or state == CANCELLING\n",
+        new="        return state in (CANCELLING, CANCELLED)\n",
+        tests=("tests/test_web_schedule_m5s.py",),
+    ),
+    Mutant(
+        # M5s C(#251 격리 검증 P2) — 한 줄 정리가 bidi 덮어쓰기를 남긴다: note 와 훅의 실패 이름이
+        # 터미널 · 알림에서 거꾸로 보인다
+        name="clean-line-keeps-bidi",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="        and not 0x2028 <= cp <= 0x202E  # ",
+        new="        and not 0x2028 <= cp <= 0x2029  # ",
+        tests=("tests/test_action_marker_m5s.py", "tests/test_failure_summaries_m5o.py"),
+    ),
+    # ── M5s A — 예약 실행 (`docs/m5s-workplan.md` §4.1 · §7) ──
+    Mutant(
+        # 승격이 `not_before` 를 보지 않는다 — 15:00 예약이 건 즉시 돈다
+        name="m5s-promote-ignores-not-before",
+        path="src/remote_ci_monitor/store.py",
+        old='"SELECT id FROM jobs WHERE state=? AND not_before IS NOT NULL AND not_before <= ? "',
+        new='"SELECT id FROM jobs WHERE state=? AND not_before IS NOT NULL AND ? IS NOT NULL "',
+        tests=(
+            "tests/test_schedule_m5s.py::test_s1_promotion_waits_for_not_before_then_sets_queued_at",
+            "tests/test_server_schedule_m5s.py::test_s1_the_tick_promotes_at_the_time_and_not_before",
+        ),
+    ),
+    Mutant(
+        # 만료가 시작 마감을 보지 않는다 — 마감이 있는 예약 · 대기 잡이 다음 주기에 전부 닫힌다
+        name="m5s-expire-ignores-deadline",
+        path="src/remote_ci_monitor/store.py",
+        old='"AND start_deadline IS NOT NULL AND start_deadline < ? ORDER BY id",',
+        new='"AND start_deadline IS NOT NULL AND ? IS NOT NULL ORDER BY id",',
+        tests=(
+            "tests/test_schedule_m5s.py::test_expiry_closes_a_promoted_job_only_after_its_deadline",
+            "tests/test_server_schedule_m5s.py::"
+            "test_s4_a_promoted_job_no_lane_takes_expires_at_the_deadline",
+        ),
+    ),
+    # `m5s-immediate-run-joins-a-schedule`(`JOINABLE_STATES` 에 `scheduled` 를 넣는다)는 PR D 에서
+    # 뺐다 — 합류 쿼리가 `not_before IS NULL` 로 예약에서 온 잡을 전부 거르므로(넘어온 P2) 그
+    # 변이는 같은 동작의 변이가 됐다. 예약 행은 언제나 `not_before` 가 있다(`_create_job_tx` 가
+    # 막는다). 「예약에 즉시 실행이 합류한다」는 아래 변이가 지킨다.
+    Mutant(
+        # 합류 쿼리가 예약에서 온 잡을 거르지 않는다 — 즉시 실행이 승격된 예약에 붙어 그 마감을
+        # 물려받고 레인이 늦으면 `expired` 로 끝난다(#253 격리 검증 P1). 마감 없는 예약(반복의
+        # 다음 시도, 결정 231)에 붙으면 `interval` 뒤로 밀린다 — 그래서 필터는 `not_before` 다(PR D)
+        name="m5s-join-ignores-not-before",
+        path="src/remote_ci_monitor/store.py",
+        old='+ f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",',
+        new='+ f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
+        tests=(
+            "tests/test_server_schedule_m5s.py::"
+            "test_s8_an_immediate_run_does_not_join_a_promoted_schedule",
+            "tests/test_retry_m5s.py::test_nothing_joins_a_promoted_retry_attempt",
+        ),
+    ),
+    Mutant(
+        # 시각을 준 제출이 합류한다 — 지금 도는 같은 입력의 잡에 붙어 「그 시각에」가 사라진다
+        # (결정 226 · S19)
+        name="m5s-scheduled-submission-joins",
+        path="src/remote_ci_monitor/server.py",
+        old="        want_join = want_join and schedule is None  # 예약은 합류 안 함(결정 226)\n",
+        new="",
+        tests=(
+            "tests/test_server_schedule_m5s.py::"
+            "test_s19_a_schedule_does_not_join_an_active_identical_job",
+        ),
+    ),
+    # ── M5s G — 화면의 예약 · 표식 (`docs/m5s-workplan.md` §4.1 「표시」 · §4.3 · §4.7) ──
+    Mutant(
+        # 웹이 `needs_action` 을 모른다 — 로그인을 기다리는 출시 잡이 「Needs a look」에 안 오른다
+        name="m5s-web-needs-action-not-actionable",
+        path="src/remote_ci_monitor/web/app.js",
+        old='var ACTIONABLE = ["needs_action", "worker_down",',
+        new='var ACTIONABLE = ["worker_down",',
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 예약을 못 읽은 풀을 건너뛴다 — 조회 실패가 「예약 없음」으로 그려진다(fail-open)
+        name="m5s-web-scheduled-error-reads-as-empty",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            'return { kind: "error", rows: [], pools: {}, error: pl.scheduled_error || null, '
+            "code: pl.scheduled_error_code || null };"
+        ),
+        new="continue;",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # `rcm top` 이 예약 조회 실패를 빈 목록처럼 그린다(줄이 사라진다)
+        name="m5s-top-scheduled-error-reads-as-empty",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old='    if not isinstance(rows, list) or pool.get("scheduled_error"):\n',
+        new="    if not isinstance(rows, list):\n        return []\n    if False:\n",
+        tests=("tests/test_web_schedule_m5s.py",),
+    ),
+    Mutant(
+        # 알림 실패가 0 이어도 배지를 그린다 — 늘 떠 있는 경고는 아무도 안 본다
+        name="m5s-web-notify-badge-at-zero",
+        path="src/remote_ci_monitor/web/app.js",
+        old="if (!isNum(n) || n <= 0) return null;",
+        new="if (!isNum(n)) return null;",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # #257 검증 P1 — 예약을 못 읽었는데 「Nothing needs a look」(초록)을 그린다(fail-open)
+        name="m5s-web-needs-a-look-ok-without-schedules",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "if (schedUnknown && !lines.length) "
+            'return { kind: "unknown", lines: [], why: "scheduled" };'
+        ),
+        new="",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 예약 행 이유 칸이 note 를 escape 하지 않는다 — 잡이 찍은 `<img onerror>` 가 페이지에서
+        # 돈다
+        name="m5s-web-scheduled-note-unescaped",
+        path="src/remote_ci_monitor/web/app.js",
+        old="""title="' + esc(m.reason.text) + '">' + esc(m.reason.text) + "</span>\"""",
+        new="""title="' + esc(m.reason.text) + '">' + m.reason.text + "</span>\"""",
+        tests=(
+            "tests/test_web_browser.py::"
+            "test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_notify_failures",
+        ),
+        needs_chrome=True,
+    ),
+    Mutant(
+        # #254 검증 P3 — 예약된 status 조회를 「가장 새 조회」로 친다: 앞선 실패 줄이 사라진다
+        name="m5s-web-store-check-scheduled-hides-failure",
+        path="src/remote_ci_monitor/web/app.js",
+        old="if (!STORE_CHECK_NOT_A_RESULT[j.state] && (!newest || j.id > newest.id)) newest = j;",
+        new="if (!newest || j.id > newest.id) newest = j;",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # #257 재검증 P2 — 반복을 다 쓴 조회를 실패로 보지 않는다: 예전 문서를 아무 말 없이 그린다
+        name="m5s-web-store-check-exhausted-not-failed",
+        path="src/remote_ci_monitor/web/app.js",
+        old="lost: 1, exhausted: 1, expired: 1 };",
+        new="lost: 1, expired: 1 };",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # H 실기 — 409 `schedule_exists` 가 「결과 모름」(3)이 된다: 같은 예약을 두 번 건 세션이
+        # 잡이 생겼는지 몰라 다시 묻거나 기다린다
+        name="m5s-cli-schedule-exists-is-unknown",
+        path="src/remote_ci_monitor/cli.py",
+        old='_REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")',
+        new='_REFUSED_CODES = ("release_route_required",)',
+        tests=("tests/test_cli_schedule_m5s.py",),
+    ),
+    # ── M5s D — 종료코드 반복 (`docs/m5s-workplan.md` §4.2 · §7) ──
+    Mutant(
+        # 반복 선언이 없어도 75 를 반복한다 — rcm-ci 의 75(인프라 실패)가 10분마다 다시 돌아
+        # 커밋 상태가 늦는다(§3 #1 · 결정 210 · S7)
+        name="m5s-retry-without-declaration",
+        path="src/remote_ci_monitor/core/model.py",
+        old=(
+            "            and self.retry_on_exit is not None\n"
+            "            and not self.retry_disabled\n"
+            "            and rc == self.retry_on_exit\n"
+        ),
+        new=(
+            "            and not self.retry_disabled\n"
+            "            and rc == (self.retry_on_exit or 75)\n"
+        ),
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_s7_exit_75_without_a_retry_declaration_is_a_plain_failure",
+        ),
+    ),
+    Mutant(
+        # `retried` 가 `running` 에서만 가지 않는다 — 75 로 끝난 순간 들어온 사람의 취소를 덮고
+        # 다음 시도까지 만든다(결정 225 · S20)
+        name="m5s-retry-overrides-cancel",
+        path="src/remote_ci_monitor/store.py",
+        old="        if state == RETRIED:\n            only_from = (RUNNING,)\n",
+        new="        if state == RETRIED:\n            only_from = None\n",
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_retried_only_leaves_running_and_a_cancel_in_between_makes_no_next_attempt",
+            "tests/test_retry_m5s.py::"
+            "test_s20_a_remote_75_after_a_cancel_closes_cancelled_with_no_next_attempt",
+        ),
+    ),
+    Mutant(
+        # 다음 시도를 supersede 의 「새 잡」으로 본다 — 옛 sha 를 물려받은 시도가 그 사이 같은
+        # 브랜치에 들어온 더 새 커밋의 잡을 치운다(#256 격리 검증 P1)
+        name="m5s-retry-attempt-supersedes-newer",
+        path="src/remote_ci_monitor/core/supersede.py",
+        old="    if new.retry_of is not None:\n        return []\n",
+        new="",
+        tests=(
+            "tests/test_retry_m5s.py::test_a_retry_attempt_is_never_the_new_job_of_a_supersede",
+        ),
+    ),
+    Mutant(
+        # 승격된 다음 시도가 supersede 판정에 간다 — 위 변이의 방어가 없으면 더 새 커밋을 치운다
+        name="m5s-promoted-retry-runs-supersede",
+        path="src/remote_ci_monitor/server.py",
+        old="            if job is not None and job.retry_of is not None:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_a_promoted_retry_attempt_does_not_supersede_a_newer_commit",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 `retried` 판정과 finish 사이의 취소를 닫지 않는다 — 잡이 `cancelling` 으로
+        # 영영 남는다(#256 격리 검증 P2a)
+        name="m5s-local-retry-race-left-cancelling",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "        if not closed and oc.state == RETRIED:\n"
+            "            # `retried` 는 `running` 에서만 간다"
+        ),
+        new="        if False:\n            # `retried` 는 `running` 에서만 간다",
+        tests=(
+            "tests/test_e2e_retry_m5s.py::"
+            "test_a_cancel_between_the_verdict_and_the_finish_closes_cancelled",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 반복할 시도의 묶음도 모은다 — 시도마다 묶음 파일이 쌓인다(#256 P2b)
+        name="m5s-local-retry-collects-artifacts",
+        path="src/remote_ci_monitor/worker.py",
+        old="        bundle = None if retrying else self._collect_artifacts(",
+        new="        bundle = None if False else self._collect_artifacts(",
+        tests=(
+            "tests/test_e2e_retry_m5s.py::"
+            "test_a_local_keep_attempt_that_exits_75_leaves_no_bundle_and_no_shelf_row",
+        ),
+    ),
+    Mutant(
+        # `retried` finish 가 받은 묶음을 쓴다 — 중간 시도가 묶음 행과 보관 행을 남긴다(#256 P2b)
+        name="m5s-retried-finish-writes-bundle",
+        path="src/remote_ci_monitor/store.py",
+        old="            only_from = (RUNNING,)\n            bundle = None\n",
+        new="            only_from = (RUNNING,)\n",
+        tests=(
+            "tests/test_retry_m5s.py::test_a_retried_finish_writes_no_bundle_even_when_given_one",
+        ),
+    ),
+    Mutant(
+        # 원격 시도의 묶음을 `retried` 에서 만료시키지 않는다 — TTL 내내 남는다(#256 P2c)
+        name="m5s-retried-remote-bundle-kept",
+        path="src/remote_ci_monitor/store.py",
+        old='WHERE job_id=? AND state=? AND expires_at > ?",',
+        new='WHERE job_id=? AND state=? AND expires_at < ?",',
+        tests=(
+            "tests/test_retry_m5s.py::test_a_remote_bundle_of_a_retried_attempt_expires_at_once",
+        ),
+    ),
+    Mutant(
+        # 합류가 얼린 반복 정책을 보지 않는다 — 반복을 원하는 제출이 `retry: false` 잡에 붙어
+        # 반복을 잃는다(#256 격리 검증 P2)
+        name="m5s-join-ignores-retry-policy",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '    "AND retry_on_exit IS ? AND retry_interval_seconds IS ? '
+            'AND retry_max_attempts IS ? "\n'
+            '    "AND retry_disabled=? "\n'
+        ),
+        new=(
+            '    "AND (retry_on_exit IS ? OR 1) AND (retry_interval_seconds IS ? OR 1) "\n'
+            '    "AND (retry_max_attempts IS ? OR 1) AND (retry_disabled=? OR 1) "\n'
+        ),
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_a_retry_wanting_submission_does_not_join_a_retry_false_job",
+            "tests/test_retry_m5s.py::"
+            "test_a_submission_after_a_reload_changed_max_attempts_does_not_join",
+        ),
     ),
 )
 

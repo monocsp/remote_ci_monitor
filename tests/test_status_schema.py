@@ -56,6 +56,17 @@ ROW_KEYS = {
     # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
     "keep",
     "shelf",
+    # M5s — 마지막 「사람이 할 일」 표식 `{code, note, at}` | null(키 추가만)
+    "action",
+    # M5s — 예약에서 온 잡의 시각과 시작 마감. 즉시 실행이면 null(키 추가만)
+    "not_before",
+    "start_deadline",
+    # M5s — 반복 사슬(결정 211 · 228). 사슬이 없으면 chain_id 가 null(키 추가만)
+    "chain_id",
+    "attempt",
+    "retry_of",
+    "retried_as",
+    "max_attempts",
 }
 ESTIMATE_KEYS = {
     "confidence",
@@ -115,6 +126,17 @@ RECENT_KEYS = {
     # M5p — 제출 때 얼린 keep 과 보관 상태 `{state, url, reason_code}` | null(키 추가만)
     "keep",
     "shelf",
+    # M5s — 마지막 「사람이 할 일」 표식 `{code, note, at}` | null(키 추가만)
+    "action",
+    # M5s — 예약에서 온 잡의 시각과 시작 마감. 즉시 실행이면 null(키 추가만)
+    "not_before",
+    "start_deadline",
+    # M5s — 반복 사슬(결정 211 · 228). 사슬이 없으면 chain_id 가 null(키 추가만)
+    "chain_id",
+    "attempt",
+    "retry_of",
+    "retried_as",
+    "max_attempts",
 }
 POOL_KEYS = {
     "name",
@@ -133,6 +155,10 @@ POOL_KEYS = {
     "recent_error_code",
     "medians_error_code",
     "hosts_error_code",
+    # M5s — 예약 잡(시각순, 큐 표와 따로)과 그 조회 실패(관례대로 `*_error` · `*_error_code`)
+    "scheduled",
+    "scheduled_error",
+    "scheduled_error_code",
 }
 
 
@@ -294,6 +320,8 @@ def test_status_is_json_serializable_with_expected_shape():
         # M5p — 글롭이 있나(`--keep` 을 걸 수 있나)와 늘 보관하나(키 추가만)
         "has_artifacts",
         "keep",
+        # M5s — `[presets.retry]` 또는 null(키 추가만)
+        "retry",
     }
     assert pool["medians"]["gate:full"] == {"seconds": 400, "wait_seconds": 80, "sample_count": 7}
     h = pool["hosts"][0]
@@ -392,3 +420,49 @@ def test_quiet_does_not_lower_the_eta_confidence():
     quiet = replace(row, estimate=replace(row.estimate, quiet=True))
     out = queue_row_json(quiet)["estimate"]
     assert out["quiet"] is True and out["confidence"] == "high"
+
+
+#: 예약 행(M5s `pools[].scheduled[]` · 예약 잡의 `GET /jobs/<id>`). 순번 · ETA 는 없다(지어내지
+#: 않는다). `reason` · `action` 은 반복 사슬의 표식이다(결정 233 — 서버가 채운다, 키 추가만)
+SCHEDULED_KEYS = {
+    "id",
+    "pool",
+    "preset",
+    "key",
+    "inputs",
+    "priority",
+    "concurrency_group",
+    "requester",
+    "joiners",
+    "link",
+    "state",
+    "source",
+    "created_at",
+    "not_before",
+    "start_deadline",
+    "started_at",
+    "finished_at",
+    "url",
+    "placement",
+    "display_pool",
+    "target_worker",
+    "keep",
+    "shelf",
+    "chain_id",
+    "attempt",
+    "retry_of",
+    "retried_as",
+    "max_attempts",
+    "reason",
+    "action",
+}
+
+
+def test_a_scheduled_row_has_exactly_the_locked_keys():
+    from remote_ci_monitor.core.model import SCHEDULED
+    from remote_ci_monitor.core.status import scheduled_json
+
+    doc = scheduled_json(job(7, state=SCHEDULED, created_min=1))
+    assert set(doc) == SCHEDULED_KEYS
+    assert doc["reason"] is None and doc["action"] is None  # 순수 층은 표식을 모른다
+    json.dumps(doc)

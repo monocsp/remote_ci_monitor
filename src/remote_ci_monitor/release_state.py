@@ -22,20 +22,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor.core.model import Job
+from remote_ci_monitor.core.model import ACTIVE_STATES, SCHEDULED_STATES, Job
 from remote_ci_monitor.core.status import iso
 
 #: 역할 → 묶음에서 찾는 파일. review 는 모드에 따라 둘
 #: (plan → review-plan.json · submit → review.json), version 도 둘
-#: (create · delete → version.json · prefill · create → prefill.json).
+#: (create · delete → version.json · prefill · create → prefill.json). golive 도 둘이다
+#: (plan → golive-plan.json · release → golive.json, M5s §4.5).
 ROLE_FILES: dict[str, tuple[str, ...]] = {
     "plan": ("plan.json",),
     "upload": ("upload.json",),
     "review": ("review-plan.json", "review.json"),
     "version": ("version.json", "prefill.json"),
+    "status": ("status.json",),
+    "golive": ("golive-plan.json", "golive.json"),
 }
-#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 넷에 더해 gate · qa · dev 도 행으로는 보인다.
-LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
+#: `jobs[]` 에 싣는 역할 — 산출물 파일이 있는 역할에 더해 gate · qa · dev 도 행으로는 보인다.
+LISTED_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version", "status", "golive")
+#: 문서마다 「잰 시각」을 담은 키. 기본은 `measured_at` 이고 status.json 만 `checked_at` 이다
+#: (M5s §4.4 의 최소 필드).
+MEASURED_KEY: dict[str, str] = {"status.json": "checked_at"}
 #: `prefill.json` · 편집본의 플랫폼별 문안 키(계약 §2 review 의 listing 필드 이름과 같다).
 #: 스크린샷은 보기만이라 편집본에 없다.
 PREFILL_KEYS: dict[str, tuple[str, ...]] = {
@@ -55,6 +61,17 @@ _VERSION_NAME_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _TRAILING_INT_RE = re.compile(r"^((?:\d+\.)*)(\d+)$")
 MAX_DOC_BYTES = 256 * 1024
 JOBS_LIMIT = 50
+#: 역할 프리셋 하나가 여는 창(잡 수) — 산출물 파일이 있는 역할의 「최신」을 이 안에서 찾는다.
+#: 예전에는 모든 역할 프리셋이 잡 500개를 **한 창**으로 나눠 썼고, 5분마다 도는 status 잡이 그
+#: 창을 채우면 plan · review 의 문서가 사라졌다(M5s §3 #11). 이제 프리셋마다 따로 연다.
+ROLE_WINDOW = 500
+#: `jobs[]` 에서 status 행이 차지하는 자리. 자주 도는 역할이라 다른 역할의 행 50개를 밀어내지
+#: 않게 따로 센다 — 화면은 가장 새 조회 잡 하나만 본다(「조회 중」).
+STATUS_ROWS_LIMIT = 3
+#: golive 의 「살아 있는」 출시 — 예약이거나 큐 · 실행 중인 `mode = release` 잡(M5s 결정 232).
+#: 반복 시도 사이의 다음 시도도 `scheduled` 라 여기에 든다.
+GOLIVE_LIVE_STATES = ACTIVE_STATES | SCHEDULED_STATES
+GOLIVE_RELEASE_MODE = "release"
 
 #: `(job_id, 묶음 안 경로)` → 바이트. 실패는 예외로.
 ReadFile = Callable[[int, str], bytes]
@@ -141,6 +158,31 @@ def job_row(job: Job, role: str, names: list[str]) -> dict[str, Any]:
     }
 
 
+def golive_live(jobs: Iterable[Job], preset: str | None) -> list[dict[str, Any]]:
+    """golive 프리셋의 살아 있는 출시 잡 — 오래된 것부터. 서버의 409 `golive_running` 과 화면의
+    「출시 예약」 목록이 같은 규칙을 쓴다. plan 모드 잡은 스토어를 읽기만 하므로 넣지 않는다."""
+    if not preset:
+        return []
+    rows = []
+    for job in jobs:
+        if job.preset != preset or job.state not in GOLIVE_LIVE_STATES:
+            continue
+        if str(job.inputs.get("mode", "")) != GOLIVE_RELEASE_MODE:
+            continue
+        rows.append(
+            {
+                "job_id": job.id,
+                "state": job.state,
+                "build_name": job.inputs.get("build_name"),
+                "platform": job.inputs.get("platform"),
+                "confirm_build_number": job.inputs.get("confirm_build_number"),
+                "not_before": iso(job.not_before),
+                "start_deadline": iso(job.start_deadline),
+            }
+        )
+    return sorted(rows, key=lambda r: r["job_id"])
+
+
 def role_entry(
     job: Job,
     member: str,
@@ -148,9 +190,13 @@ def role_entry(
     *,
     now: datetime | None = None,
     max_age_minutes: int | None = None,
+    measured_key: str = "measured_at",
+    with_build_name: bool = True,
 ) -> dict[str, Any]:
     """역할의 최신 항목. `now` 와 `max_age_minutes` 를 주면 나이와 stale 도 잰다
-    (plan · review plan)."""
+    (plan · review plan · golive plan · status). 잰 시각은 문서의 `measured_key` 에서 읽고 없으면
+    잡이 끝난 시각이다. `with_build_name` 이 거짓이면 `build_name` 칸을 싣지 않는다(status 는
+    한 회차의 문서가 아니다)."""
     doc: Any = None
     error: str | None = None
     try:
@@ -159,21 +205,33 @@ def role_entry(
         error = f"cannot read {_basename(member)}: {type(e).__name__}"
     out: dict[str, Any] = {"job_id": job.id, "state": job.state}
     if now is not None and max_age_minutes is not None:
-        measured = parse_iso(doc.get("measured_at")) if isinstance(doc, dict) else None
+        measured = parse_iso(doc.get(measured_key)) if isinstance(doc, dict) else None
         if measured is None:
             measured = job.finished_at
-        age = max(0, int((now - measured).total_seconds())) if measured is not None else None
+        raw = int((now - measured).total_seconds()) if measured is not None else None
         out["measured_at"] = iso(measured)
-        out["age_seconds"] = age
-        out["stale"] = age is None or age > max_age_minutes * 60
-        if isinstance(doc, dict):
-            name = doc.get("build_name")
+        out["age_seconds"] = max(0, raw) if raw is not None else None
+        # 지금보다 뒤에 잰 문서(시계가 틀린 스크립트)는 신선하지 않다 — 나이를 0 으로 자르면 그
+        # 계획이 영원히 되돌릴 수 없는 버튼을 열어 둔다(#255 검증 P2). 모르면 낡은 것이다.
+        out["stale"] = raw is None or raw < 0 or raw > max_age_minutes * 60
+        if with_build_name:
+            name = doc.get("build_name") if isinstance(doc, dict) else None
             out["build_name"] = name if isinstance(name, str) else None
-        else:
-            out["build_name"] = None
     out["doc"] = doc
     if error is not None:
         out["doc_error"] = error
+    return out
+
+
+def role_windows(presets: dict[str, str | None]) -> dict[str, int]:
+    """프리셋 이름 → 읽을 잡 수. 산출물 파일이 있는 역할은 `ROLE_WINDOW`, 행만 있는 역할(gate ·
+    qa · dev)은 `jobs[]` 에 필요한 `JOBS_LIMIT` 이다. 한 프리셋이 여러 역할을 맡으면 큰 쪽."""
+    out: dict[str, int] = {}
+    for role, name in presets.items():
+        if not name:
+            continue
+        limit = ROLE_WINDOW if ROLE_FILES.get(role) else JOBS_LIMIT
+        out[name] = max(out.get(name, 0), limit)
     return out
 
 
@@ -186,32 +244,54 @@ def release_view(
     now: datetime,
     max_age_minutes: int,
 ) -> dict[str, Any]:
-    """`GET …/release` 의 `plan` · `review` · `upload` · `jobs`. `jobs` 는 새것부터 ≤ 50 이고
-    역할 프리셋의 잡만이다. `names_of(job_id)` 는 묶음 매니페스트의 파일 항목들(없으면 빈 목록)."""
+    """`GET …/release` 의 `plan` · `review` · `upload` · `status` · `golive` · `jobs`. `jobs` 는
+    새것부터 역할 프리셋의 잡만이고, status 가 아닌 행 ≤ 50 에 status 행 ≤ `STATUS_ROWS_LIMIT`
+    이다. 넘기는 `jobs` 도 새것부터여야 한다(서버는 `role_windows` 로 프리셋마다 읽어 합친다).
+    `names_of(job_id)` 는 묶음 매니페스트의 파일 항목들(없으면 빈 목록). status 와 golive plan
+    도 plan 처럼 나이와 stale 을 잰다."""
     role_of = {name: role for role, name in presets.items() if name}
+    jobs = list(jobs)
     rows: list[dict[str, Any]] = []
+    status_rows = 0
     latest: dict[str, tuple[Job, str]] = {}  # 파일 basename → (잡, 묶음 안 경로)
     for job in jobs:
         role = role_of.get(job.preset)
         if role is None:
             continue
+        # status 행은 따로 센다 — 다른 역할의 행 50개를 밀어내지 않는다(§3 #11)
+        if role == "status":
+            wants_row = status_rows < STATUS_ROWS_LIMIT
+        else:
+            wants_row = len(rows) - status_rows < JOBS_LIMIT
+        missing = [b for b in ROLE_FILES.get(role, ()) if b not in latest]
+        if not wants_row and not missing:
+            # 묶음 목록을 읽을 까닭이 없다 — 자주 도는 역할의 잡 500개를 매번 다 읽지 않는다
+            continue
         files = names_of(job.id)
-        if len(rows) < JOBS_LIMIT:
+        if wants_row:
             rows.append(job_row(job, role, artifact_names(files)))
-        for basename in ROLE_FILES.get(role, ()):
-            if basename in latest:
-                continue
+            if role == "status":
+                status_rows += 1
+        for basename in missing:
             member = _find_member(files, basename)
             if member is not None:
                 latest[basename] = (job, member)
 
-    def entry(basename: str, *, aged: bool) -> dict[str, Any] | None:
+    def entry(basename: str, *, aged: bool, with_build_name: bool = True) -> dict[str, Any] | None:
         found = latest.get(basename)
         if found is None:
             return None
         job, member = found
         if aged:
-            return role_entry(job, member, read_file, now=now, max_age_minutes=max_age_minutes)
+            return role_entry(
+                job,
+                member,
+                read_file,
+                now=now,
+                max_age_minutes=max_age_minutes,
+                measured_key=MEASURED_KEY.get(basename, "measured_at"),
+                with_build_name=with_build_name,
+            )
         return role_entry(job, member, read_file)
 
     return {
@@ -221,6 +301,13 @@ def release_view(
             "result": entry("review.json", aged=False),
         },
         "upload": entry("upload.json", aged=False),
+        "status": entry("status.json", aged=True, with_build_name=False),
+        "golive": {
+            "plan": entry("golive-plan.json", aged=True),
+            "result": entry("golive.json", aged=False),
+            # 「출시 예약」 목록 — 예약이거나 도는 release 잡(결정 232)
+            "live": golive_live(jobs, presets.get("golive")),
+        },
         "jobs": rows,
     }
 
@@ -377,15 +464,21 @@ def merged_listing(prefill: Any, edited: Any) -> dict[str, dict[str, str]]:
 
 __all__ = [
     "AUTO_BUILD_NUMBER",
+    "GOLIVE_LIVE_STATES",
+    "GOLIVE_RELEASE_MODE",
     "JOBS_LIMIT",
     "LISTED_ROLES",
     "MAX_DOC_BYTES",
+    "MEASURED_KEY",
     "PLATFORMS",
     "PREFILL_KEYS",
     "ROLE_FILES",
+    "ROLE_WINDOW",
+    "STATUS_ROWS_LIMIT",
     "artifact_member",
     "artifact_names",
     "bump_last_number",
+    "golive_live",
     "job_row",
     "listing_diff",
     "live_versions",
@@ -399,5 +492,6 @@ __all__ = [
     "read_bundle_member",
     "release_view",
     "role_entry",
+    "role_windows",
     "version_name_check",
 ]

@@ -116,6 +116,8 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:foc
 .tokbtn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--surface); font: 12px var(--sans); color: var(--ink); cursor: pointer; }
 .tokbtn.bad { border-color: var(--bad); color: var(--bad); }
 .errchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font: 500 12px var(--sans); cursor: pointer; border: 0; }
+/* 알림 훅 실패 수(M5s) — 경보가 아니라 경고다. 0 이면 숨는다 */
+.notifychip { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .skew { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); font: 500 12px var(--sans); font-variant-numeric: tabular-nums; }
 
 /* ── 요약 ── */
@@ -262,6 +264,12 @@ table.q td.reason .step-now .sn-t { flex: 0 0 auto; white-space: nowrap; }
 .pill.cancelled { background: var(--queued-soft); color: var(--queued); }
 .pill.lost { background: var(--lost-soft); color: var(--lost); }
 .pill.cancelling { background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn); }
+/* M5s — 예약은 아직 큐에 없다(점선 · 대기 색), 만료는 돌지 않았다(취소와 같은 색 · 점선),
+   다시 시도함은 사슬의 중간(대기 색), 시도를 다 씀은 실패와 같은 줄이다(종료 코드 1) */
+.pill.scheduled { background: var(--surface); color: var(--accent); border: 1px dashed var(--accent); }
+.pill.expired { background: var(--queued-soft); color: var(--queued); border: 1px dashed var(--queued); }
+.pill.retried { background: var(--queued-soft); color: var(--queued); }
+.pill.exhausted { background: var(--bad-soft); color: var(--bad); }
 .key { font-family: var(--mono); font-weight: 500; }
 /* 잡 링크 칩(v22) — 잡 이름 바로 뒤의 `<a class="job-link">`(호출자가 붙인 PR 같은 페이지).
    **한 줄이다**: 이름과 칩이 한 줄 상자(`.key-line`) 안에서 함께 줄고, 넘치면 둘 다 말줄임한다(전체
@@ -321,6 +329,8 @@ table.q td.key .key-line > .key, .rrow .k .key-line > .kn { max-width: calc(100%
 .reason.over { color: var(--warn); font-weight: 600; }
 .reason.stalled { color: var(--warn); font-weight: 600; }
 .reason.stuck { color: var(--bad); font-weight: 600; }
+/* 잡이 직접 「사람이 할 일」을 말했다(M5s) — 막힌 것과 같은 경고 색이다 */
+.reason.action { color: var(--warn); font-weight: 600; }
 /* 조용함은 **경보가 아니다** — 회색 본문 글자다. 그래도 아무 표시도 아닌 것과는 달라야 해서
    왼쪽 레인(`tr.quiet`)이 자리를 잡는다. */
 .reason.quiet { color: var(--muted); font-weight: 500; }
@@ -445,6 +455,9 @@ td.elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rrow.failed, .rrow.timed_out { box-shadow: inset 3px 0 0 var(--bad); }
 .rrow.cancelled { box-shadow: inset 3px 0 0 var(--queued); }
 .rrow.lost { box-shadow: inset 3px 0 0 var(--lost); }
+.rrow.expired, .rrow.retried { box-shadow: inset 3px 0 0 var(--queued); }
+.rrow.exhausted { box-shadow: inset 3px 0 0 var(--bad); }
+.rrow.scheduled { box-shadow: inset 3px 0 0 var(--accent); }
 /* 필은 글자만큼만 — 격자 칸을 채우면 결과 색이 행의 배경처럼 번진다 */
 .rrow > .pill { justify-self: start; }
 /* 번호는 큐 행과 같은 모양 — 로그·재실행·문의가 전부 이 번호로 이뤄진다 */
@@ -603,6 +616,21 @@ table.q td.source .uncommitted { display: flex; width: max-content; max-width: 1
 .prog .head .ph-b { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; }
 .step .sn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #queue .empty, #queue .pool-h { overflow-wrap: anywhere; }
+/* 오류 띠의 문장은 서버가 준 그대로라 띄어쓰기 없이 길 수 있다 — 폰 폭에서 옆으로 새지 않게 */
+#queue .banner { overflow-wrap: anywhere; }
+/* 예약 절(M5s) — 큐 표 아래. 행은 한 줄로 흐르다 좁으면 접힌다(폰에서 옆으로 밀지 않는다).
+   ETA 칸이 없다 — 승격 전의 잡에 끝나는 시각을 지어내지 않는다 */
+.sched { margin-top: 10px; }
+.schedrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 6px 0 6px 9px; border-bottom: 1px solid var(--line-2); box-shadow: inset 3px 0 0 var(--accent); font-variant-numeric: tabular-nums; min-width: 0; }
+.schedrow.hl { background: var(--accent-soft); }
+.schedrow.dim { opacity: 0.55; }
+.schedrow > * { min-width: 0; max-width: 100%; }
+.schedrow .id { font-family: var(--mono); font-weight: 500; color: var(--muted); }
+.schedrow .k { display: inline-flex; flex-wrap: wrap; align-items: baseline; column-gap: 4px; font-family: var(--mono); font-weight: 500; overflow: hidden; }
+.schedrow .k .kn, .schedrow .rq { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.schedrow .k > .chip { margin-left: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schedrow .rq, .schedrow .when .muted { color: var(--muted); }
+.schedrow .reason { overflow-wrap: anywhere; }
 .rrow { grid-template-columns: 72px 150px 118px 130px 66px 52px minmax(0, 1fr); }
 .rrow > * { min-width: 0; }
 /* 이름 칸 — 이름 뒤 다른 풀의 칩(「실행 그룹 mac2」)이 같은 줄에 안 들어가면 **다음 줄로** 간다.
@@ -814,6 +842,11 @@ ul.plain { margin: 0; padding-left: 18px; }
 .result.stale { border-left-color: var(--warn); background: var(--warn-soft); }
 .result.na { border-left-color: var(--queued); background: var(--queued-soft); }
 .kv.strip { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface-2); margin-bottom: 10px; }
+/* 스토어 심사 상태(M5s §4.4) — 읽기 전용 두 줄. 스토어 원문은 길어서 폰 폭에서 줄을 바꾼다 */
+.store-check { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 6px; margin-bottom: 10px; }
+.store-check[data-stale="1"] { border-left: 4px solid var(--warn); }
+.store-check li { margin: 4px 0; overflow-wrap: anywhere; }
+.store-check .actions { margin-top: 6px; }
 .stores { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 .ssec { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); min-width: 0; }
 .ssec h3 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font: var(--t-subtitle); }
@@ -1130,3 +1163,14 @@ table.gh td.subj, table.gh td.meta { white-space: nowrap; overflow: hidden; text
   table.gh td.sha, table.gh td.meta { width: auto; }
   table.gh td.meta { grid-column: 2; }
 }
+/* 출시 예약(M5s §4.5) — 버전 페이지의 한 영역. 출시를 요청하는 버튼은 이 안에만 있다 */
+.golive { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.golive[data-open="1"] { border-color: var(--muted); }
+.golive-body { display: grid; gap: 8px; margin-top: 8px; }
+.golive-f { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.golive-f legend { float: left; margin-right: 8px; font: var(--t-label); color: var(--muted); }
+.golive-f input[type="text"] { width: 10ch; font-family: var(--mono); }
+.golive-go { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.golive-live, .golive-result { margin-top: 8px; }
+.golive-live .t, .golive-result .t { font: var(--t-label); color: var(--muted); }
+.golive-live ul.plain { margin: 4px 0 0; }

@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 
 from remote_ci_monitor.config import parse_preset
-from test_server import PRESETS, Server, sh
+from test_server import PRESETS, TAR, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
@@ -1443,7 +1443,9 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             assert fetch_disabled is True, "no token → fetch disabled with a reason"
             assert c.eval(_q("#store [data-gate]")) is None, "no gate banner on the store screen"
             body = c.eval("document.body.innerText")
-            assert "Approval does not release" in body, body[:800]
+            # M5s 결정 217 — 새 원칙 문장(옛 「Approval does not release」 는 어디에도 없다)
+            assert "Nothing goes live on approval by itself." in body, body[:800]
+            assert "Approval does not release" not in body
             assert "ghp_" not in body.replace("ghp_…", ""), "a value shows 4 chars + … at most"
             # 사람이 연 행은 기억된다(큐 화면 규칙) — 렌더가 정한 열림은 기억이 아니다
             assert c.eval("localStorage.getItem('rcm.store.rows')") is None
@@ -1684,9 +1686,15 @@ GROUPS_JS = """
 #   - `[data-inputs]` — 대기열 행의 작업 입력 칩. 계약 입력 **이름**(`play_managed_publishing=…`)
 #     을 글자로 보일 뿐이고, 누르면 그 JSON 을 토스트로 띄운다.
 # 낱말 목록에는 한국어도 있다 — 없으면 한국어로 붙인 버튼은 한 번도 검사받지 않는다.
+# 면제는 신원으로만 한다(§17-2). M5s 결정 218 로 하나가 늘었다 — 「출시 예약」 영역
+# (`[data-golive-sheet]`) **안의** `[data-golive]` 버튼만. 같은 속성을 영역 밖에 붙이면
+# 그대로 걸린다. 영역은 부모 쪽에서 찾는다 — `closest` 는 자기 자신을 포함하므로 버튼에 영역
+# 표시를 함께 달면 스스로를 면제했다(#255 검증 P2).
 FORBIDDEN_BUTTONS_JS = """
 [...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
   .filter(b => !b.hasAttribute('data-sheet-fix') && !b.hasAttribute('data-inputs'))
+  .filter(b => !(b.hasAttribute('data-golive') && b.parentElement
+                 && b.parentElement.closest('[data-golive-sheet]')))
   .map(b => (b.textContent || b.value || '').trim())
   .filter(t => /release this version|publish|rollout|게시|출시|배포|롤아웃/i.test(t))
 """
@@ -1808,7 +1816,9 @@ def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
             assert "Play has no such field" in body, body[:1500]
             assert "Promotional text" in body and "Short description" in body, body[:1500]
             assert "ready" in body and "judged 4m ago" in body, body[:1500]
-            assert "Approval does not release" in body
+            assert "Nothing goes live on approval by itself." in body
+            assert "Play has no API to publish a held release" in body, body[:1500]
+            assert "Approval does not release" not in body
             assert "console-only — not touched by rcm" in body
             assert "unknown to the API" in body, "the managed-publishing pill never turns green"
             assert "undefined" not in body and "NaN" not in body
@@ -1873,6 +1883,141 @@ def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
             ko = c.eval("document.getElementById('review-panel').textContent")
             assert "App Store · iOS" in ko and "버전 정보" in ko, ko[:800]
             assert "unsafe_release_type" in ko, ko[:800]
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 스토어 심사 상태(M5s PR E · §4.4 · §7 S15) ─────────────────────────────────────────────
+#
+# RELEASE_STUB_JS 위에 status 역할을 덧씌운다: 프로파일에 `presets.status`, 릴리스 보기에 `status`
+# 항목(iOS 승인 · Android 는 목록에 없는 값)과 도는 status 잡 하나, 그리고 `checkStatus` 호출.
+# `?stale=1` 이면 오래된 상태다. `?checkfail=1` 이면 그 뒤의 조회 #690 이 실패했다.
+# `?checksched=1` 이면 실패한 #690 뒤에 예약된 조회 #695 가 있다(M5s G — 예약은 결과가 아니다).
+# `?docfailed=1` 이면 문서를 쓴 #680 이 실패로 끝났다(문서는 남았지만 그 잡의 상태를 같이 그린다).
+STORE_CHECK_STUB_JS = r"""
+(() => {
+  const stale = /[?&]stale=1(&|$)/.test(location.search);
+  const checkSched = /[?&]checksched=1(&|$)/.test(location.search);
+  const checkFailed = checkSched || /[?&]checkfail=1(&|$)/.test(location.search);
+  const docFailed = /[?&]docfailed=1(&|$)/.test(location.search);
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  const api = window.rcmStoreApi, repo = api.repo, release = api.release;
+  const statusDoc = { schema: 1, checked_at: new Date(Date.now() - 120000).toISOString(),
+    ios: { version: "1.0.1", build: 181, state: "approved", raw_state: "PENDING_DEVELOPER_RELEASE",
+           release_type: "MANUAL", phased: null },
+    android: { version: "1.0.1", version_code: 181, state: "APPROVED_NOT_PUBLISHED",
+               raw_state: "RELEASE_LIFECYCLE_STATE_APPROVED_NOT_PUBLISHED", user_fraction: null } };
+  api.repo = (name) => repo(name).then((r) => {
+    const body = JSON.parse(JSON.stringify(r.body));
+    body.profile.presets.status = "release-status";
+    return Object.assign({}, r, { body });
+  });
+  api.release = (name) => release(name).then((r) => {
+    const body = Object.assign({}, r.body, {
+      status: { job_id: 680, state: docFailed ? "failed" : "succeeded",
+                measured_at: statusDoc.checked_at,
+                age_seconds: stale ? 3000 : 120, stale: stale, doc: statusDoc },
+      jobs: [{ id: 690, preset: "release-status", role: "status",
+               state: checkFailed ? "failed" : "running",
+               sha: "9e1c4d2f" + "0".repeat(32), ref: "main",
+               started_at: new Date(Date.now() - 5000).toISOString(), finished_at: null,
+               artifacts: [] }].concat(checkSched ? [{ id: 695, preset: "release-status",
+               role: "status", state: "scheduled", sha: "9e1c4d2f" + "0".repeat(32), ref: "main",
+               started_at: null, finished_at: null, artifacts: [] }] : [], r.body.jobs) });
+    return Object.assign({}, r, { body });
+  });
+  api.checkStatus = (name, body) => {
+    window.rcmStoreCalls.push(["checkStatus", body]); return ok({ job_id: 691 }, 202); };
+})();
+"""
+CHECK = "#review-panel [data-store-check]"
+
+
+def test_store_review_panel_draws_both_stores_state_and_checks_again(tmp_path):
+    """S15 — 검토 패널은 두 스토어의 심사 상태를 읽기 전용으로 그린다. 목록에 없는 값은
+    unknown 이고 스토어 원문(`raw_state`)은 보조로 남는다. 나이와 stale 을 보이고, 「새로 조회」는
+    `POST …/release/status` 하나다. 도는 status 잡은 Build·upload 행의 「지금 하는 일」이 아니다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = _q(CHECK) + " !== null"
+        with Chrome(tmp_path / "chrome-store-check", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": STORE_CHECK_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
+            c.open(base + "&t=1#/store/app/status", ready_js=ready)
+            rows = c.eval(
+                "[...document.querySelectorAll('" + CHECK + " [data-store-check-platform]')]"
+                ".map(li => [li.getAttribute('data-store-check-platform'),"
+                " li.getAttribute('data-state'), li.textContent.replace(/\\s+/g, ' ').trim()])"
+            )
+            assert [r[:2] for r in rows] == [["ios", "approved"], ["android", "unknown"]], rows
+            assert "approved" in rows[0][2] and "1.0.1 (181)" in rows[0][2], rows
+            assert "PENDING_DEVELOPER_RELEASE" in rows[0][2], rows
+            assert "unknown" in rows[1][2], rows
+            assert "RELEASE_LIFECYCLE_STATE_APPROVED_NOT_PUBLISHED" in rows[1][2], rows
+            age = c.eval(_q(CHECK + " [data-store-check-age]", ".textContent"))
+            assert age == "checked 2m ago · job #680", age
+            assert c.eval(_q(CHECK, ".getAttribute('data-stale')")) == "0"
+            assert c.eval(_q(CHECK + " [data-store-check-stale]")) is None
+            running = c.eval(_q(CHECK + " [data-store-check-running]", ".textContent"))
+            assert "#690" in running, running
+            # 도는 status 잡은 Build·upload 행의 「지금 하는 일」이 아니다(§3 #11)
+            by = {r["row"]: r for r in c.eval(STORE_ROWS_JS)}
+            assert "release-status" not in by["build"]["head"], by["build"]
+            assert by["build"]["state"] != "running", by["build"]
+            build_items = c.eval(
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row=\"build\"] .checklist .ci')]"
+                ".map(li => li.textContent)"
+            )
+            assert not any("#690" in t for t in build_items), build_items
+            # 「새로 조회」 — 이 회차의 버전을 싣는다
+            button = CHECK + " [data-store-check-refresh]"
+            assert c.eval(_q(button, ".textContent")) == "Check again"
+            assert c.eval(_q(button, ".disabled")) is False
+            c.eval(_q(button, ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'checkStatus')")
+            calls = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "checkStatus"]
+            assert calls == [["checkStatus", {"build_name": "1.0.1"}]], calls
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+            # 폰 폭: 긴 스토어 원문이 옆으로 새지 않는다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            c.viewport(1240)
+            # 한국어
+            c.eval("document.getElementById('lang-btn').click()")
+            _wait(c, _q(CHECK, ".textContent.indexOf('스토어 심사 상태') >= 0"))
+            ko = c.eval(_q(CHECK, ".textContent"))
+            assert "승인됨" in ko and "알 수 없음" in ko, ko
+            assert c.eval(_q(button, ".textContent")) == "새로 조회"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 오래된 상태 — 판단하기 전에 새로 조회하라고 말한다
+            c.open(base + "&stale=1#/store/app/status", ready_js=ready)
+            assert c.eval(_q(CHECK, ".getAttribute('data-stale')")) == "1"
+            note = c.eval(_q(CHECK + " [data-store-check-stale]", ".textContent"))
+            assert "older than 30 minutes" in note, note
+            assert c.eval(_q(CHECK + " [data-store-check-age]", ".textContent")).startswith(
+                "checked 50m ago"
+            )
+            # 새로 조회가 실패했다 — 예전 상태를 아무 말 없이 그리지 않는다
+            c.open(base + "&checkfail=1#/store/app/status", ready_js=ready)
+            failed = c.eval(_q(CHECK + " [data-store-check-failed]", ".textContent"))
+            assert failed.startswith("Last check #690 did not succeed (failed)."), failed
+            assert c.eval(_q(CHECK + " [data-store-check-running]")) is None
+            assert c.eval(_q(CHECK + " [data-store-check-job-state]")) is None
+            # 실패 뒤에 예약된 조회가 있어도 실패 줄은 남는다 — 예약은 결과가 아니다(M5s G)
+            c.open(base + "&checksched=1#/store/app/status", ready_js=ready)
+            failed = c.eval(_q(CHECK + " [data-store-check-failed]", ".textContent"))
+            assert failed.startswith("Last check #690 did not succeed (failed)."), failed
+            # 문서를 쓴 잡이 실패로 끝났다 — 문서 옆에 그 잡의 상태 낱말을 그린다
+            c.open(base + "&docfailed=1#/store/app/status", ready_js=ready)
+            span = CHECK + " [data-store-check-job-state]"
+            assert c.eval(_q(span, ".getAttribute('data-store-check-job-state')")) == "failed"
+            assert c.eval(_q(span, ".textContent")) == "failed"
             assert c.page_errors() == []
     finally:
         srv.close()
@@ -2294,7 +2439,11 @@ def test_store_tab_opens_on_the_version_list_and_the_four_rows_are_on_status(tmp
             assert c.eval(_q("#review-panel")) is None
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             body = c.eval("document.body.innerText")
-            assert "Approval does not release" in body, body[:400]
+            assert (
+                "Nothing goes live on approval by itself. A release runs only when a person asks "
+                "for it with the version, the build number and a time." in body
+            ), body[:400]
+            assert "Approval does not release" not in body
             assert "discarded after 24 hours" in body, body[:400]
             # 드라이버도 소개 자료도 안 불렀다(그 둘은 서버에서 명령을 돌린다)
             called = c.eval("window.rcmStoreCalls.map(x => x[0])")
@@ -2913,7 +3062,8 @@ def test_version_page_sheet_carries_progress_what_is_left_and_the_submit(tmp_pat
             body = c.eval("document.getElementById('release-sheet').innerText")
             assert "Left before review" in body and "Different from the previous" in body, body
             assert "Submit conditions" in body and "What is sent" in body, body
-            assert "Approval does not release" in body, body
+            assert "Nothing goes live on approval by itself." in body, body
+            assert "Approval does not release" not in body
             sending = c.eval(_q("#release-sheet [data-sheet-sending]", ".textContent"))
             assert "build 181" in sending and "App Store + Google Play" in sending, sending
             assert "release notes + uploaded build" in sending, sending
@@ -3206,13 +3356,14 @@ GUARD_PROBE_JS = r"""
 (() => {
   window.rcmGuardProbe = (rows) => {
     [...document.querySelectorAll('[data-guard-probe]')].forEach((b) => b.remove());
-    rows.forEach(([text, attrs]) => {
+    rows.forEach(([text, attrs, parent]) => {
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = text;
       b.setAttribute('data-guard-probe', '1');
       Object.keys(attrs || {}).forEach((k) => b.setAttribute(k, attrs[k]));
-      document.body.appendChild(b);
+      // 셋째 칸은 심을 자리(선택자) — 없으면 본문 끝이다
+      (parent ? document.querySelector(parent) : document.body).appendChild(b);
     });
     return true;
   };
@@ -3285,6 +3436,228 @@ def test_the_forbidden_button_guard_catches_publish_controls_and_exempts_by_iden
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             c.eval("window.rcmGuardProbe([])")
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 출시 예약(M5s §4.5 · 결정 216 · 218) ─────────────────────────────────────────────
+GOLIVE_STUB_JS = r"""
+(() => {
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  window.rcmGoliveCalls = [];
+  window.rcmRelease.status = { job_id: 660, state: "succeeded", stale: false, age_seconds: 60,
+    measured_at: ago(60),
+    doc: { schema: 1, checked_at: ago(60),
+      ios: { version: "1.0.2", build: 185, state: "approved",
+             raw_state: "PENDING_DEVELOPER_RELEASE" },
+      android: { version: "1.0.2", version_code: 185, state: "in_review",
+                 raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW" } } };
+  window.rcmRelease.golive = { plan: null, live: [],
+    result: { job_id: 655, state: "failed",
+      doc: { schema: 1, build_name: "1.0.2", platforms: {
+        ios: { result: "failed", raw_state: null, reason: "not_attempted" },
+        android: { result: "failed", raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+                   reason: "not_approved" } } } } };
+  const baseRepo = window.rcmStoreApi.repo;
+  window.rcmStoreApi.repo = (name) => baseRepo(name).then((r) => {
+    const doc = JSON.parse(JSON.stringify(r.body));
+    doc.profile.presets = Object.assign({}, doc.profile.presets,
+      { status: "release-status", golive: "release-golive" });
+    return { ok: r.ok, status: r.status, body: doc };
+  });
+  let next = 700;
+  window.rcmStoreApi.golive = (name, body) => {
+    window.rcmGoliveCalls.push(body);
+    const id = next++;
+    if (body.mode === "plan") {
+      window.rcmRelease.golive.plan = { job_id: id, state: "succeeded", stale: false,
+        age_seconds: 1, build_name: "1.0.2",
+        doc: { schema: 1, build_name: "1.0.2", plan_verdict: "blocked",
+          reasons: ["android_not_approved"],
+          platforms: {
+            ios: { approved: true, approved_build: 185, raw_state: "PENDING_DEVELOPER_RELEASE" },
+            android: { approved: false, approved_build: null,
+                       raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW" } } } };
+      return Promise.resolve({ ok: true, status: 202, body: { job_id: id, state: "queued" } });
+    }
+    const booked = !!body.start_at;
+    window.rcmRelease.golive.live = [{ job_id: id, state: booked ? "scheduled" : "queued",
+      build_name: "1.0.2", platform: body.platform,
+      confirm_build_number: body.confirm_build_number,
+      not_before: booked ? ago(-3600) : null, start_deadline: null }];
+    return Promise.resolve({ ok: true, status: booked ? 201 : 202,
+      body: { job_id: id, state: booked ? "scheduled" : "queued" } });
+  };
+  window.rcmStoreApi.cancelJob = (id) => {
+    window.rcmGoliveCalls.push({ cancel: id });
+    window.rcmRelease.golive.live = [];
+    return Promise.resolve({ ok: true, status: 200, body: { job_id: id, state: "cancelled" } });
+  };
+})();
+"""
+GOLIVE = "[data-golive-sheet]"
+
+
+def _open_golive_page(c: Chrome, base: str, srv) -> None:
+    for stub in (RELEASE_STUB_JS, SHEET_STUB_JS, GOLIVE_STUB_JS, GUARD_PROBE_JS):
+        c.call("Page.addScriptToEvaluateOnNewDocument", {"source": stub})
+    c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+    c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+    c.open(base + "&admin=1#/store/app/v/7", ready_js=_q(GOLIVE) + " !== null")
+
+
+def _golive_type(c: Chrome, element_id: str, value: str) -> None:
+    c.eval(
+        f"(() => {{ const i = document.getElementById({json.dumps(element_id)}); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def test_the_golive_area_opens_on_approval_plans_first_and_books_with_a_typed_number(tmp_path):
+    """S16 · 결정 216 — 버전 페이지의 「출시 예약」 영역은 status 가 그 플랫폼을 approved 라고
+    말할 때만 열린다. 열면 읽기 전용 plan 을 먼저 돌리고, 승인된 플랫폼만 고를 수 있고(both 는 둘
+    다 승인됐을 때만), 사람이 친 번호가 승인 빌드와 같아야 보낸다. 예약은 목록에 나오고 거기서
+    취소한다. 시도하지 않은 플랫폼은 「시도 안 함」 으로 그린다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-golive", window="1240,900") as c:
+            _open_golive_page(c, base, srv)
+            area = c.eval(_q(GOLIVE, ".innerText"))
+            assert "Schedule go-live" in area and "iOS approved · Android in review" in area, area
+            # 마지막 결과 — 시도하지 않은 iOS 는 실패가 아니다
+            words = c.eval(
+                f"[...document.querySelectorAll('{GOLIVE} [data-golive-result-platform]')]"
+                ".map(e => [e.getAttribute('data-golive-result-platform'), "
+                "e.getAttribute('data-golive-word'), e.textContent.trim()])"
+            )
+            assert words == [
+                ["ios", "not_attempted", "iOS not attempted"],
+                ["android", "failed", "Android failed"],
+            ], words
+            assert c.eval(_q(f"{GOLIVE} [data-golive='open']", ".disabled")) is False
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 열면 plan 을 먼저 — 버전의 플랫폼 전부를 읽는다
+            c.eval(_q(f"{GOLIVE} [data-golive='open']", ".click()"))
+            _wait(c, "window.rcmGoliveCalls.length === 1")
+            assert c.eval("window.rcmGoliveCalls[0]") == {
+                "version_id": 7,
+                "mode": "plan",
+                "platform": "both",
+            }
+            _wait(c, _q(f"{GOLIVE} [data-golive-plan='ok']") + " !== null")
+            plan = c.eval(_q(f"{GOLIVE} [data-golive-plan]", ".textContent"))
+            assert "iOS approved · build 185" in plan and "Android not approved" in plan, plan
+            # Android 와 both 는 고를 수 없다
+            radios = c.eval(
+                f"[...document.querySelectorAll('{GOLIVE} [data-golive-platform]')]"
+                ".map(r => [r.getAttribute('data-golive-platform'), r.disabled, r.checked])"
+            )
+            assert radios == [["ios", False, True], ["android", True, False], ["both", True, False]]
+            go = _q(f"{GOLIVE} [data-golive='go']")
+            assert c.eval(go + ".disabled") is True
+            assert "Type the approved build number" in c.eval(
+                _q(f"{GOLIVE} [data-golive-why]", ".textContent")
+            )
+            _golive_type(c, "golive-n", "184")
+            assert c.eval(go + ".disabled") is True
+            _golive_type(c, "golive-n", "185")
+            assert c.eval(go + ".disabled") is False
+            assert c.eval(go + ".textContent") == "Go live now"
+            # 시각을 정한다
+            c.eval(_q(f"{GOLIVE} [data-golive-when='at']", ".click()"))
+            _wait(c, _q("#golive-at", ".disabled") + " === false")
+            assert c.eval(_q("#golive-n", ".value")) == "185", "다시 그려도 친 번호가 남는다"
+            assert c.eval(go + ".disabled") is True
+            _golive_type(c, "golive-at", "2026-11-23T15:00")
+            assert c.eval(go + ".disabled") is False and c.eval(go + ".textContent") == (
+                "Book go-live"
+            )
+            c.eval(go + ".click()")
+            _wait(c, "window.rcmGoliveCalls.length === 2")
+            assert c.eval("window.rcmGoliveCalls[1]") == {
+                "version_id": 7,
+                "mode": "release",
+                "platform": "ios",
+                "confirm_build_number": "185",
+                "start_at": "2026-11-23T15:00",
+            }
+            # 예약 목록에 나오고, 거기서 취소한다
+            _wait(c, _q(f"{GOLIVE} [data-golive-row]") + " !== null")
+            row = c.eval(_q(f"{GOLIVE} [data-golive-row]", ".textContent"))
+            assert row.startswith("#701 ") and "iOS 185" in row, row
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            c.eval(_q(f"{GOLIVE} [data-golive='cancel']", ".click()"))
+            _wait(c, "window.rcmGoliveCalls.length === 3")
+            assert c.eval("window.rcmGoliveCalls[2]") == {"cancel": 701}
+            _wait(c, _q(f"{GOLIVE} [data-golive-row]") + " === null")
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_the_golive_exemption_holds_only_inside_the_golive_area(tmp_path):
+    """결정 218 — 금지 버튼 가드의 새 면제는 `[data-golive]` 이면서 「출시 예약」 영역 안일
+    때뿐이다. 한국어 화면의 「출시 예약…」 버튼은 그 영역 안이라 안 걸리고, **같은 속성과
+    같은 글자**를 영역 밖에 붙인 버튼은 그대로 걸린다. 영역 밖의 `data-golive` 는 눌러도
+    아무것도 보내지 않는다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=ko"
+        with Chrome(tmp_path / "chrome-golive-guard", window="1240,900") as c:
+            _open_golive_page(c, base, srv)
+            label = c.eval(_q(f"{GOLIVE} [data-golive='open']", ".textContent"))
+            assert "출시" in label, "면제가 일하는지 보려면 걸릴 글자를 단 버튼이어야 한다"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 영역 밖 — 같은 속성, 같은 글자: 걸린다
+            c.eval(
+                "window.rcmGuardProbe("
+                + json.dumps(
+                    [
+                        ["출시 예약…", {"data-golive": "open"}, None],
+                        ["Publish now", {"data-golive": "go"}, "[data-version-main]"],
+                        ["지금 출시", {"data-golive-sheet": ""}, None],
+                        # 버튼 **자신**이 영역 표시를 달아도 영역 안이 아니다(`closest` 는 자기
+                        # 자신을 포함한다 — #255 검증 P2)
+                        ["게시하기", {"data-golive": "go", "data-golive-sheet": ""}, None],
+                    ]
+                )
+                + ")"
+            )
+            assert sorted(c.eval(FORBIDDEN_BUTTONS_JS)) == sorted(
+                ["출시 예약…", "Publish now", "지금 출시", "게시하기"]
+            )
+            # 영역 밖의 `data-golive` 를 눌러도 아무 호출이 없다. 클릭 탐침은 `#store` 안
+            # (`[data-version-main]`)에 심는다 — 본문 끝에 심으면 `#store` 의 리스너가 아예 돌지
+            # 않아 이 단언은 아무것도 시험하지 못한다(#255 검증 P2).
+            for attrs in (
+                {"data-golive": "open"},
+                {"data-golive": "open", "data-golive-sheet": ""},
+            ):
+                c.eval(
+                    "window.rcmGuardProbe("
+                    + json.dumps([["출시 예약…", attrs, "[data-version-main]"]])
+                    + ")"
+                )
+                assert c.eval(
+                    "document.querySelector('[data-guard-probe]').closest('#store') !== null"
+                )
+                c.eval("document.querySelector('[data-guard-probe]').click()")
+                time.sleep(0.3)
+                assert c.eval("window.rcmGoliveCalls") == [], attrs
+            # 영역 안 — 면제된다
+            c.eval(
+                "window.rcmGuardProbe("
+                + json.dumps([["지금 출시", {"data-golive": "go"}, GOLIVE]])
+                + ")"
+            )
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 영역 안이어도 `data-golive` 가 없으면 걸린다
+            c.eval("window.rcmGuardProbe(" + json.dumps([["게시", None, GOLIVE]]) + ")")
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == ["게시"]
+            c.eval("window.rcmGuardProbe([])")
             assert c.page_errors() == []
     finally:
         srv.close()
@@ -3363,3 +3736,264 @@ def test_version_list_names_what_holds_a_draft_and_says_it_is_being_deleted(tmp_
             assert c.page_errors() == []
     finally:
         srv.close()
+
+
+# ── M5s G — 큐 아래의 예약 절 · 알림 실패 배지 (`docs/m5s-workplan.md` §4.1 · §4.7) ──
+
+
+class _FailedNotifier:
+    """`server.notify_failures` 만 내는 가짜 — 진짜 훅을 돌리지 않고 배지를 그리게 한다."""
+
+    failures = 2
+
+    def stop(self) -> None:
+        pass
+
+
+# 진짜 서버의 `/api/status` 를 받아서 고친다. `?evil=1` 이면 예약 행과 대기 행에 HTML 이 든 note 의
+# 「사람이 할 일」 표식을 단다(예약 행의 표식은 D 가 채우는 키다). `?schederr=1` 이면 예약 조회가
+# 실패한 문서다 — 오류 문장은 띄어쓰기 없이 길다(폰 폭에서 옆으로 새는지 본다). `?stuck=1` 이면
+# 대기 행 하나가 `stuck` 이다(Needs a look 에 줄이 있다). `?exhausted=1` 이면 최근 목록 맨 앞에
+# 반복을 다 쓴 잡 #9901 이 있다.
+SCHED_STUB_JS = r"""
+(() => {
+  const evil = /[?&]evil=1(&|$)/.test(location.search);
+  const broken = /[?&]schederr=1(&|$)/.test(location.search);
+  const stuck = /[?&]stuck=1(&|$)/.test(location.search);
+  const exhausted = /[?&]exhausted=1(&|$)/.test(location.search);
+  if (!evil && !broken && !stuck && !exhausted) return;
+  const NOTE = '<img src=x onerror="window.__pwned=1">sign in';
+  const real = window.fetch.bind(window);
+  window.fetch = (url, opts) => real(url, opts).then((r) => {
+    if (String(url).indexOf('/api/status') !== 0 || !r.ok) return r;
+    return r.json().then((doc) => {
+      const pool = doc.pools[0];
+      if (broken) {
+        pool.scheduled = null;
+        pool.scheduled_error = 'sqlite3.OperationalError:' + 'database_is_locked_'.repeat(12);
+        pool.scheduled_error_code = null;
+      }
+      if (stuck) {
+        const row = (pool.queue || []).find((r) => r.state === 'queued');
+        if (row) {
+          row.reason = 'stuck';
+          row.estimate = Object.assign({}, row.estimate, { stuck: true });
+        }
+      }
+      if (exhausted && Array.isArray(pool.recent)) {
+        pool.recent.unshift({ id: 9901, preset: 'ok', key: 'ok', inputs: {}, state: 'exhausted',
+          exit_code: 75, requester: { name: 'alice-laptop', label: 'alice@host' }, joiners: [],
+          source: { mode: 'git_ref', repo: 'app', ref: 'main', sha: '1'.repeat(40) },
+          created_at: doc.generated_at, started_at: doc.generated_at, finished_at: doc.generated_at,
+          job_seconds: 5, summary: null, link: null, artifacts: null, keep: false, shelf: null });
+      }
+      if (evil) {
+        const act = { code: 'login', note: NOTE, at: doc.generated_at };
+        (pool.scheduled || []).forEach((row) => { row.reason = 'needs_action'; row.action = act; });
+        (pool.queue || []).forEach((row) => {
+          if (row.state === 'queued') { row.reason = 'needs_action'; row.action = act; }
+        });
+      }
+      return new Response(JSON.stringify(doc), { status: r.status, headers: r.headers });
+    });
+  });
+})();
+"""
+
+SCHED_JS = """
+(() => {
+  const sec = document.querySelector('#queue [data-scheduled-section]');
+  const row = (id) => document.querySelector('#queue [data-scheduled="' + id + '"]');
+  const chip = document.querySelector('[data-notify-failures]');
+  return {
+    title: sec ? sec.querySelector('.pool-h').textContent : null,
+    order: [...document.querySelectorAll('#queue [data-scheduled]')]
+      .map((el) => Number(el.getAttribute('data-scheduled'))),
+    row: row(%(mine)d) ? row(%(mine)d).textContent : null,
+    cancelMine: row(%(mine)d) ? row(%(mine)d).querySelectorAll('[data-cancel]').length : null,
+    cancelOther: row(%(other)d) ? row(%(other)d).querySelectorAll('[data-cancel]').length : null,
+    eta: row(%(mine)d) ? row(%(mine)d).querySelectorAll('.eta, .conf').length : null,
+    inQueueTable: document.querySelectorAll(
+      '#queue tr[data-job="%(mine)d"], #queue tr[data-job="%(other)d"]').length,
+    chip: chip && !chip.hidden ? chip.textContent : null,
+    chipTitle: chip ? chip.title : null,
+    stuck: document.querySelector('[data-stuck]').textContent,
+    overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
+})()
+"""
+
+EVIL_JS = """
+(() => {
+  const text = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? el.textContent : null;
+  };
+  return {
+    imgs: document.querySelectorAll('#queue img, [data-stuck] img').length,
+    pwned: window.__pwned === 1,
+    sched: text('#queue [data-scheduled="%(mine)d"] .reason'),
+    queue: text('#queue tr[data-job="%(queued)d"] td.reason .reason'),
+    stuck: text('[data-stuck]'),
+  };
+})()
+"""
+
+EXHAUSTED_ROW_JS = """
+(() => {
+  const r = document.querySelector(%s);
+  const copy = r.querySelector('[data-copy]');
+  return { clickable: r.classList.contains('clickable'), toggle: r.getAttribute('data-rtoggle'),
+           rerun: copy ? copy.getAttribute('data-copy') : null };
+})()
+"""
+
+
+def _submit_tree(srv, token: str, tree_hash: str, **extra: Any) -> int:
+    body = {
+        "preset": "ok",
+        "inputs": {},
+        "source": {
+            "mode": "tree",
+            "repo": "org/app",
+            "base_sha": "abc123f",
+            "dirty": False,
+            "tree_hash": tree_hash,
+            "bytes": len(TAR),
+        },
+        "requester_label": f"{token}@host",
+        **extra,
+    }
+    code, doc = srv.req("POST", "/jobs", token=token, json_body=body)
+    assert code == 201, doc
+    assert srv.upload(doc["job_id"], token=token)[0] == 200
+    return doc["job_id"]
+
+
+def test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_notify_failures(
+    tmp_path,
+):
+    """예약 절(M5s §4.1) — 시각순 · 내 예약에만 취소 · ETA 없음 · 큐 표에 섞이지 않음. 표식
+    note 의 HTML 은 예약 행 · 큐 행 · Needs a look 어디서도 태그가 되지 않는다. 예약 조회가
+    실패하면 빨간 띠와 「모른다」 요약이고(#257 검증 P1), 긴 오류 문장이 폰 폭에서 옆으로 새지
+    않는다."""
+    srv = Server(tmp_path, workers=False)
+    jobs: list[tuple[int, str]] = []
+    try:
+        mine = _submit_tree(srv, "alice", OTHER_TREE, start_in_seconds=3600)
+        jobs.append((mine, "alice"))
+        other = _submit_tree(srv, "bob", "cd" * 32, start_in_seconds=7200)
+        jobs.append((other, "bob"))
+        queued = _submit_tree(srv, "alice", "ef" * 32)
+        jobs.append((queued, "alice"))
+        assert srv.store.get_job(mine).state == "scheduled"
+        assert srv.store.get_job(other).state == "scheduled"
+        srv.app.notifier = _FailedNotifier()
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = f"document.querySelector('#queue [data-scheduled=\"{mine}\"]') !== null"
+        ids = {"mine": mine, "other": other, "queued": queued}
+        with Chrome(tmp_path / "chrome-sched", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": SCHED_STUB_JS})
+            c.open(base, ready_js=ready)
+            anon = c.eval(SCHED_JS % ids)
+            # 토큰이 있어야 내 예약의 취소 버튼이 열린다 — 남의 예약에는 없다
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
+            c.open(
+                base,
+                ready_js=ready + f' && document.querySelector(\'[data-scheduled="{mine}"]'
+                " [data-cancel]') !== null",
+            )
+            withtoken = c.eval(SCHED_JS % ids)
+            c.viewport(390, 844, mobile=True)
+            time.sleep(0.3)
+            narrow = c.eval(SCHED_JS % ids)
+            c.call("Emulation.clearDeviceMetricsOverride")
+            # note 의 HTML — 세 자리 모두 글자로만 그린다
+            c.open(
+                base + "&evil=1",
+                ready_js=f"document.querySelector('#queue [data-scheduled=\"{mine}\"] .reason')"
+                " !== null",
+            )
+            time.sleep(0.3)
+            evil = c.eval(EVIL_JS % ids)
+            # Needs a look 의 예약 줄을 누르면 그 예약 행으로 간다
+            c.eval(f"document.querySelector('[data-stuck] [data-goto=\"{mine}\"]').click()")
+            _wait(c, f"document.querySelector('.schedrow.hl[data-scheduled=\"{mine}\"]') !== null")
+            # 예약 조회 실패 — 빈 목록이 아니라 빨간 띠, 요약은 「모른다」
+            c.open(
+                base + "&schederr=1",
+                ready_js="document.querySelector('#queue [data-error=\"scheduled\"]') !== null",
+            )
+            band = c.eval("document.querySelector('#queue [data-error=\"scheduled\"]').textContent")
+            broken = c.eval(SCHED_JS % ids)
+            c.viewport(390, 844, mobile=True)
+            time.sleep(0.3)
+            broken_narrow = c.eval(SCHED_JS % ids)
+            c.call("Emulation.clearDeviceMetricsOverride")
+            # 예약 조회 실패 + 큐에 확인할 줄 하나 — 그 줄은 그리되 「그 밖에 없다」고 하지 않는다
+            c.open(
+                base + "&schederr=1&stuck=1",
+                ready_js=f"document.querySelector('[data-stuck] [data-goto=\"{queued}\"]')"
+                " !== null",
+            )
+            partial = c.eval("document.querySelector('[data-stuck]').textContent")
+            # 반복을 다 쓴 최근 행 — 실패처럼 펼치고 재실행 명령이 있다
+            c.open(
+                base + "&exhausted=1",
+                ready_js="document.querySelector('#recent [data-job=\"9901\"]') !== null",
+            )
+            ex_row = '#recent .rrow[data-job="9901"]'
+            exhausted = c.eval(EXHAUSTED_ROW_JS % json.dumps(ex_row))
+            c.eval(f"document.querySelector('{ex_row}').click()")
+            _wait(c, f"document.querySelector('{ex_row}').getAttribute('aria-expanded') === 'true'")
+            # 내 예약을 취소한다
+            c.open(base, ready_js=ready)
+            c.eval(f"document.querySelector('[data-scheduled=\"{mine}\"] [data-cancel]').click()")
+            _wait(c, "document.getElementById('cancel-dialog').open === true")
+            dialog = c.eval("document.querySelector('[data-cancel-body]').textContent")
+            c.eval("document.querySelector('[data-cancel-go]').click()")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and srv.store.get_job(mine).state == "scheduled":
+                time.sleep(0.1)
+            final = srv.store.get_job(mine).state
+            assert c.page_errors() == []
+    finally:
+        for jid, token in jobs:
+            srv.req("POST", f"/jobs/{jid}/cancel", token=token, json_body={})
+        srv.close()
+
+    assert anon["title"] == "Scheduled (2)", anon
+    assert anon["order"] == [mine, other], "시각순이다"
+    assert anon["inQueueTable"] == 0, "예약은 큐 표의 행이 아니다"
+    assert anon["cancelMine"] == 0, "토큰 없는 페이지에는 취소 버튼이 없다"
+    assert withtoken["cancelMine"] == 1, withtoken
+    assert withtoken["cancelOther"] == 0, "남의 예약에는 취소 버튼이 없다"
+    for word in (f"#{mine}", "scheduled", "ok", "alice@host", "at ", "start by "):
+        assert word in withtoken["row"], (word, withtoken["row"])
+    assert withtoken["eta"] == 0, "예약 행에 ETA 를 지어내지 않는다"
+    assert withtoken["chip"] == "notify failures 2", withtoken
+    assert "server log" in withtoken["chipTitle"], withtoken
+    assert narrow["overflow"] <= 0, f"phone width scrolls sideways by {narrow['overflow']}px"
+    assert evil["imgs"] == 0 and not evil["pwned"], evil
+    for where in ("sched", "queue", "stuck"):
+        assert evil[where] and '<img src=x onerror="window.__pwned=1">sign in' in evil[where], (
+            where,
+            evil,
+        )
+    assert band.startswith("Scheduled jobs unavailable — sqlite3.OperationalError:"), band
+    assert broken["order"] == [], broken
+    assert "Nothing needs a look" not in broken["stuck"], broken["stuck"]
+    assert "scheduled jobs unavailable" in broken["stuck"], broken["stuck"]
+    assert "nothing else needs a look" not in broken["stuck"], broken["stuck"]
+    assert f"#{queued}" in partial and "Not responding" in partial, partial
+    assert "nothing else needs a look" not in partial, partial
+    assert "Nothing needs a look" not in partial, partial
+    assert "scheduled jobs unavailable" in partial, partial
+    assert exhausted == {"clickable": True, "toggle": "9901", "rerun": "rcm run ok --ref main"}, (
+        exhausted
+    )
+    assert broken_narrow["overflow"] <= 0, (
+        f"a long error sentence scrolls the phone sideways by {broken_narrow['overflow']}px"
+    )
+    assert "will not run at its time" in dialog, dialog
+    assert final == "cancelled", final

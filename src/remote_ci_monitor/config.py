@@ -13,6 +13,7 @@ import shutil
 import stat
 import tomllib
 import zoneinfo
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
     INPUT_TYPES,
+    MODE_GIT_REF,
+    NOTIFY_DEFAULT_STATES,
     PLACEMENT_CAPABLE,
     PLACEMENT_POOL,
     PRIORITY_NAMES,
@@ -36,6 +39,7 @@ from remote_ci_monitor.core.model import (
     TERMINAL_STATES,
     InputSpec,
     Preset,
+    RetryPolicy,
 )
 from remote_ci_monitor.core.notify import NotifyRule
 from remote_ci_monitor.core.supersede import SUPERSEDE_MODES, SUPERSEDE_OFF
@@ -152,6 +156,9 @@ class ServerSection:
     shelf_max_bytes: int = 50 * 1024**3  # 보관함 전체 상한(50 GiB). 넘으면 새 보관을 거절. 0 = 꺼짐
     shelf_stale_days: int = 182  # 마지막으로 쓴 지 이만큼이면 「정리 대기」
     shelf_delete_days: int = 365  # 마지막으로 쓴 지 이만큼이면 삭제. stale 보다 커야 한다
+    # M5s — 예약 실행(§4.1 · 결정 207 · 208). 재시작해야 바뀐다(`[server]` 는 reload 되지 않는다)
+    schedule_start_deadline_seconds: int = 900  # 정한 시각 + 이만큼 안에 못 집히면 expired
+    schedule_max_ahead_days: int = 14  # 이보다 먼 시각은 400 — 잊힌 예약이 쌓이지 않게
 
 
 @dataclass(frozen=True)
@@ -196,7 +203,9 @@ class DisplaySection:
 
 # ── 릴리스 프로파일(스토어 탭) — docs/release-contract.md §1 ─────────────────
 
-RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
+#: 역할 이름. 앞 셋만 필수이고 나머지는 선택이다. `status`(두 스토어의 심사 상태)와 `golive`
+#: (사람이 요청한 출시)는 M5s §4.4 · §4.5 에서 더했다.
+RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version", "status", "golive")
 RELEASE_REQUIRED_ROLES = ("plan", "upload", "review")
 RELEASE_SECRET_KINDS = ("value", "file", "dir")
 RELEASE_VERIFY_KINDS = ("asc", "play", "github", "keystore", "none")
@@ -646,7 +655,13 @@ _PRESET_KEYS = {
     "sample",
     "supersede",
     "keep",
+    "start_deadline_seconds",
+    "retry",
 }
+#: `[presets.retry]` 의 키(M5s 결정 210). 값을 안 적으면 요청서의 기본값이다(75 · 600 · 12)
+_RETRY_KEYS = {"on_exit", "interval_seconds", "max_attempts"}
+#: 시도 수 상한 — 실수로 큰 수를 적으면 사슬이 며칠을 돈다
+MAX_RETRY_ATTEMPTS = 100
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
@@ -757,7 +772,7 @@ def parse_notify(raw: Any) -> NotifyRule:
         raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
     on_raw = raw.get("on")
     if on_raw is None:
-        on = frozenset(TERMINAL_STATES)
+        on = frozenset(NOTIFY_DEFAULT_STATES)
     else:
         on_list = _str_list(f"{where} on", on_raw, allow_empty=False)
         bad = [st for st in on_list if st not in TERMINAL_STATES]
@@ -903,6 +918,14 @@ def parse_preset(raw: Any) -> Preset:
         raise ConfigError(
             f'{where}: supersede must be "off", "waiting" or "all", got {supersede!r}'
         )
+    start_deadline = raw.get("start_deadline_seconds")
+    if start_deadline is not None and (
+        isinstance(start_deadline, bool)
+        or not isinstance(start_deadline, int)
+        or start_deadline < 1
+    ):
+        raise ConfigError(f"{where}: start_deadline_seconds must be a positive integer")
+    retry = _parse_retry(where, raw.get("retry"), modes)
     return Preset(
         name=name,
         argv=argv,
@@ -929,6 +952,40 @@ def parse_preset(raw: Any) -> Preset:
         sample=sample,
         supersede=supersede,
         keep=keep,
+        start_deadline_seconds=start_deadline,
+        retry=retry,
+    )
+
+
+def _parse_retry(where: str, raw: Any, modes: Sequence[str]) -> RetryPolicy | None:
+    """`[presets.retry]` → 얼릴 반복 정책(M5s 결정 210 · 211). 표가 없으면 None — 반복하지 않는다.
+
+    git_ref 만 받는 프리셋에만 허용한다. tree 스냅샷을 시도마다 복사하지 않으려는 것이다(결정
+    211) — 다음 시도는 같은 sha 를 다시 받는다."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: retry must be a table ([presets.retry])")
+    unknown = sorted(set(raw) - _RETRY_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: retry: unknown key(s): {', '.join(unknown)}")
+    if list(modes) != [MODE_GIT_REF]:
+        raise ConfigError(
+            f'{where}: retry needs source_modes = ["git_ref"] — a retried attempt fetches the '
+            "same commit again; a tree snapshot is not kept for it"
+        )
+    defaults = RetryPolicy()
+
+    def whole(key: str, low: int, high: int) -> int:
+        value = raw.get(key, getattr(defaults, key))
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ConfigError(f"{where}: retry.{key} must be an integer from {low} to {high}")
+        return value
+
+    return RetryPolicy(
+        on_exit=whole("on_exit", 1, 255),
+        interval_seconds=whole("interval_seconds", 1, 7 * 24 * 3600),
+        max_attempts=whole("max_attempts", 2, MAX_RETRY_ATTEMPTS),
     )
 
 
@@ -1285,6 +1342,10 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[server] probe_interval_seconds must be at least 60")
     if s.check_sweep_seconds < 1:
         raise ConfigError("[server] check_sweep_seconds must be >= 1")
+    if s.schedule_start_deadline_seconds < 1:
+        raise ConfigError("[server] schedule_start_deadline_seconds must be >= 1")
+    if not 1 <= s.schedule_max_ahead_days <= 366:
+        raise ConfigError("[server] schedule_max_ahead_days must be between 1 and 366")
     if s.advertise_name and not _NAME_RE.match(s.advertise_name):
         raise ConfigError(
             "[server] advertise_name must be a short identifier (letters, digits, . _ -)"

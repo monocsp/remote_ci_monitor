@@ -16,11 +16,14 @@ from pathlib import Path
 import pytest
 
 from jobfactory import NOW, ago, job
-from remote_ci_monitor.core.model import FAILED, RUNNING, SUCCEEDED, Source
+from remote_ci_monitor.core.model import FAILED, QUEUED, RUNNING, SCHEDULED, SUCCEEDED, Source
 from remote_ci_monitor.release_state import (
     JOBS_LIMIT,
+    LISTED_ROLES,
     MAX_DOC_BYTES,
+    ROLE_FILES,
     artifact_names,
+    golive_live,
     numbers_match,
     parse_iso,
     plan_number,
@@ -37,6 +40,8 @@ PRESETS = {
     "qa": None,
     "dev": None,
     "version": None,
+    "status": "release-status",
+    "golive": "release-golive",
 }
 
 
@@ -156,6 +161,138 @@ def test_jobs_are_newest_first_and_capped_at_50_roles_only():
     assert v["jobs"][0]["id"] == 80 and 99 not in {r["id"] for r in v["jobs"]}
 
 
+# ── status · golive 역할 (M5s §4.4 · §4.5) ─────────────────────────────────────
+
+STATUS = {
+    "schema": 1,
+    "checked_at": "2026-09-04T00:50:12Z",
+    "ios": {
+        "version": "1.2.0",
+        "build": 185,
+        "state": "approved",
+        "raw_state": "PENDING_DEVELOPER_RELEASE",
+        "release_type": "MANUAL",
+        "phased": None,
+    },
+    "android": {
+        "version": "1.2.0",
+        "version_code": 185,
+        "state": "in_review",
+        "raw_state": "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+        "user_fraction": None,
+    },
+}
+GOLIVE_PLAN = {
+    "schema": 1,
+    "build_name": "1.2.0",
+    "measured_at": "2026-09-04T00:44:12Z",
+    "platforms": {
+        "ios": {"approved": True, "approved_build": 185, "raw_state": "PENDING_DEVELOPER_RELEASE"},
+        "android": {"approved": False, "approved_build": None, "raw_state": "IN_REVIEW"},
+    },
+    "plan_verdict": "ok",
+    "reasons": [],
+}
+GOLIVE = {
+    "schema": 1,
+    "build_name": "1.2.0",
+    "platforms": {"ios": {"result": "requested", "raw_state": "PENDING_DEVELOPER_RELEASE"}},
+    "finished_at": "2026-09-04T00:51:12Z",
+}
+
+
+def test_status_and_golive_are_listed_roles_with_their_files():
+    """두 역할은 선택 역할로 등록된다 — 산출물 파일은 status 하나, golive 둘(plan · release)."""
+    assert ROLE_FILES["status"] == ("status.json",)
+    assert ROLE_FILES["golive"] == ("golive-plan.json", "golive.json")
+    assert "status" in LISTED_ROLES and "golive" in LISTED_ROLES
+
+
+def test_an_empty_view_has_status_null_and_golive_plan_and_result_null():
+    v = view([], {}, {})
+    assert v["status"] is None
+    # `live` 는 「출시 예약」 목록이다(M5s §4.5 · 결정 232) — 잡이 없으면 빈 목록
+    assert v["golive"] == {"plan": None, "result": None, "live": []}
+
+
+def test_golive_live_lists_scheduled_and_active_release_jobs_only():
+    """「출시 예약」 목록과 409 `golive_running` 이 같은 규칙을 쓴다 — 예약 · 큐 · 실행 중인
+    `mode = release` 잡만, 오래된 것부터. plan 잡과 끝난 잡은 들지 않는다."""
+
+    def golive_job(jid, state, mode="release", **inputs):
+        j = git_job(jid, "release-golive", RUNNING if state == RUNNING else SUCCEEDED)
+        return dataclasses.replace(
+            j,
+            state=state,
+            inputs={"build_name": "1.0.1", "mode": mode, "platform": "ios", **inputs},
+            not_before=NOW if state == SCHEDULED else None,
+        )
+
+    jobs = [
+        golive_job(6, SCHEDULED, confirm_build_number="185"),
+        golive_job(5, QUEUED),
+        golive_job(4, RUNNING),
+        golive_job(3, SCHEDULED, mode="plan"),
+        golive_job(2, SUCCEEDED),
+        golive_job(1, "cancelled"),
+    ]
+    live = view(jobs, {}, {})["golive"]["live"]
+    assert [(r["job_id"], r["state"]) for r in live] == [(4, RUNNING), (5, QUEUED), (6, SCHEDULED)]
+    assert live[2] == {
+        "job_id": 6,
+        "state": SCHEDULED,
+        "build_name": "1.0.1",
+        "platform": "ios",
+        "confirm_build_number": "185",
+        "not_before": "2026-09-04T00:52:12Z",
+        "start_deadline": None,
+    }
+    assert golive_live(jobs, None) == []
+
+
+def test_status_is_the_latest_status_json_aged_from_checked_at():
+    """status.json 은 `measured_at` 이 아니라 `checked_at` 으로 잰다(§4.4 의 최소 필드)."""
+    jobs = [git_job(2, "release-status", RUNNING), git_job(1, "release-status")]
+    v = view(
+        jobs, {1: files("out/status.json")}, {(1, "out/status.json"): json.dumps(STATUS).encode()}
+    )
+    assert v["status"] == {
+        "job_id": 1,
+        "state": "succeeded",
+        "measured_at": "2026-09-04T00:50:12Z",
+        "age_seconds": 120,
+        "stale": False,
+        "doc": STATUS,
+    }
+    assert [(r["id"], r["role"]) for r in v["jobs"]] == [(2, "status"), (1, "status")]
+
+
+def test_a_status_without_checked_at_is_aged_from_the_job_and_goes_stale():
+    doc = {k: v for k, v in STATUS.items() if k != "checked_at"}
+    jobs = [git_job(1, "release-status", finished_min=45)]
+    v = view(jobs, {1: files("status.json")}, {(1, "status.json"): json.dumps(doc).encode()})
+    assert v["status"]["measured_at"] == ago(minutes=45).isoformat().replace("+00:00", "Z")
+    assert v["status"]["age_seconds"] == 45 * 60 and v["status"]["stale"] is True
+
+
+def test_golive_has_a_plan_and_a_result_from_two_files():
+    jobs = [git_job(2, "release-golive"), git_job(1, "release-golive", finished_min=8)]
+    bundles = {2: files("golive.json"), 1: files("golive-plan.json")}
+    docs = {
+        (2, "golive.json"): json.dumps(GOLIVE).encode(),
+        (1, "golive-plan.json"): json.dumps(GOLIVE_PLAN).encode(),
+    }
+    v = view(jobs, bundles, docs)
+    assert v["golive"]["result"] == {"job_id": 2, "state": "succeeded", "doc": GOLIVE}
+    plan = v["golive"]["plan"]
+    assert plan["job_id"] == 1 and plan["build_name"] == "1.2.0" and plan["doc"] == GOLIVE_PLAN
+    assert plan["measured_at"] == "2026-09-04T00:44:12Z"
+    assert plan["age_seconds"] == 480 and plan["stale"] is False
+    # 다른 역할의 칸은 건드리지 않는다
+    assert v["plan"] is None and v["review"] == {"plan": None, "result": None}
+    assert v["status"] is None
+
+
 # ── 문서 읽기 ────────────────────────────────────────────────────────────────
 
 
@@ -201,6 +338,26 @@ def test_stale_is_age_over_plan_max_age_minutes(age_min, max_age, stale):
         max_age=max_age,
     )
     assert v["plan"]["stale"] is stale and v["plan"]["age_seconds"] == age_min * 60
+
+
+@pytest.mark.parametrize(
+    ("role", "preset_name", "member"),
+    [
+        ("plan", "release-plan", "plan.json"),
+        ("review", "release-review", "review-plan.json"),
+        ("golive", "release-golive", "golive-plan.json"),
+    ],
+)
+def test_a_measured_at_in_the_future_is_stale_not_fresh_for_ever(role, preset_name, member):
+    """#255 검증 P2 — 문서의 `measured_at` 이 지금보다 뒤면 그 계획은 신선하지 않다. 예전에는
+    나이가 0 으로 잘려 시계가 틀린 계획이 영원히 되돌릴 수 없는 버튼을 열어 두었다. 셋(plan ·
+    review plan · golive plan)이 같은 규칙을 쓴다."""
+    future = (NOW + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    doc = json.dumps({**PLAN, "measured_at": future}).encode()
+    v = view([git_job(1, preset_name)], {1: files(member)}, {(1, member): doc})
+    entry = v[role] if role == "plan" else v[role]["plan"]
+    assert entry["stale"] is True, entry
+    assert entry["age_seconds"] == 0
 
 
 def test_a_bad_measured_at_is_not_a_date_and_the_job_time_is_used():

@@ -17,6 +17,7 @@ from remote_ci_monitor.core import shelf as _shelf
 from remote_ci_monitor.core.hostparse import stale as _stale
 from remote_ci_monitor.core.model import (
     REASON_BLOCKED_BY_GROUP,
+    Action,
     Estimate,
     HostSample,
     Job,
@@ -181,6 +182,13 @@ def step_timeline_json(p: Progress | None) -> dict[str, Any]:
     }
 
 
+def action_json(a: Action | None) -> dict[str, Any] | None:
+    """「사람이 할 일」 표식 `{code, note, at}` 또는 null(M5s 결정 213). 마지막 표식 하나다."""
+    if a is None:
+        return None
+    return {"code": a.code, "note": a.note, "at": iso(a.at)}
+
+
 def _requester(job: Job) -> dict[str, str]:
     return {"name": job.requester.name, "label": job.requester.label}
 
@@ -204,6 +212,25 @@ def _cancel(job: Job) -> dict[str, Any] | None:
         "requested_at": iso(job.cancel.requested_at),
         "by": job.cancel.by,
         "kill_at": iso(job.cancel.kill_at),
+    }
+
+
+def chain_json(job: Job) -> dict[str, Any]:
+    """반복 사슬의 칸(M5s 결정 211 · 228) — 잡 행에 **더한다**. 사슬이 없으면 `chain_id` 가
+    null 이다.
+
+    `retried_as` 는 `retried` 로 끝난 시도의 다음 시도다 — `rcm wait` 가 이 키를 따라간다.
+    `max_attempts` 는 제출 때 얼린 상한이다(반복을 안 켠 잡은 null)."""
+    return {
+        "chain_id": job.chain_id,
+        "attempt": job.attempt,
+        "retry_of": job.retry_of,
+        "retried_as": job.retried_as,
+        "max_attempts": (
+            job.retry_max_attempts
+            if job.retry_on_exit is not None and not job.retry_disabled
+            else None
+        ),
     }
 
 
@@ -267,6 +294,13 @@ def queue_row_json(
         # 키 추가만 — schema_version 그대로
         "keep": job.keep,
         "shelf": None,
+        # M5s — 잡이 찍은 마지막 「사람이 할 일」 표식(`::rcm::action::`). 키 추가만
+        "action": action_json(row.action),
+        # M5s — 예약에서 온 잡이면 그 시각과 시작 마감. 즉시 실행이면 둘 다 null. 키 추가만
+        "not_before": iso(job.not_before),
+        "start_deadline": iso(job.start_deadline),
+        # M5s — 반복 사슬(결정 211). 키 추가만
+        **chain_json(job),
     }
 
 
@@ -281,11 +315,14 @@ def placement_note_json(n: Any) -> dict[str, Any]:
     }
 
 
-def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
+def recent_json(
+    job: Job, *, base_url: str | None = None, action: Action | None = None
+) -> dict[str, Any]:
+    """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다."""
     started = job.started_at
     finished = job.finished_at
     job_seconds = (finished - started).total_seconds() if started and finished else None
-    waited = (started - job.created_at).total_seconds() if started else None
+    waited = (started - job.wait_origin).total_seconds() if started else None
     return {
         "pool": job.pool,
         "id": job.id,
@@ -324,6 +361,51 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         # M5p — 제출 때 얼린 keep 과 보관 상태(서버가 채운다). 키 추가만
         "keep": job.keep,
         "shelf": None,
+        # M5s — 마지막 「사람이 할 일」 표식. 잡이 끝나도 남는다(이벤트로 저장). 키 추가만
+        "action": action_json(action),
+        # M5s — 예약에서 온 잡이면 그 시각과 시작 마감(`expired` 는 언제까지였나). 키 추가만
+        "not_before": iso(job.not_before),
+        "start_deadline": iso(job.start_deadline),
+        # M5s — 반복 사슬(결정 211). 사슬은 마지막 시도 한 행으로 보이고 `attempt` 가 시도 수다
+        **chain_json(job),
+    }
+
+
+def scheduled_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
+    """예약 행 하나(M5s §4.1 · `pools[].scheduled[]` · 예약 잡의 `GET /jobs/<id>`).
+
+    큐 행이 아니다 — 순번 · 이유 · ETA 가 없다. 승격되기 전의 잡에 그 숫자를 지어내지 않는다.
+    """
+    return {
+        "id": job.id,
+        "pool": job.pool,
+        "preset": job.preset,
+        "key": job.key,
+        "inputs": dict(job.inputs),
+        "priority": job.priority,
+        "concurrency_group": job.concurrency_group,
+        "requester": _requester(job),
+        "joiners": _joiners(job),
+        "link": _link(job),
+        "state": job.state,
+        "source": source_json(job.source),
+        "created_at": iso(job.created_at),
+        "not_before": iso(job.not_before),
+        "start_deadline": iso(job.start_deadline),
+        "started_at": None,
+        "finished_at": None,
+        "url": job_url(base_url, job.id),
+        "placement": job.placement,
+        "display_pool": job.display_pool or job.pool,
+        "target_worker": job.target_worker,
+        "keep": job.keep,
+        "shelf": None,
+        # M5s — 반복 사슬(결정 211). 다음 시도는 시작 마감 없이 이 행으로 기다린다(결정 231)
+        **chain_json(job),
+        # M5s — 사슬의 「사람이 할 일」 표식과 그 이유(결정 233). 순수 층은 마커를 모른다 — 서버가
+        # 채운다. 표식이 있으면 `reason` 은 `needs_action`, 없으면 둘 다 null
+        "reason": None,
+        "action": None,
     }
 
 
@@ -347,6 +429,16 @@ def preset_json(p: Preset) -> dict[str, Any]:
         # M5p — `--keep` 을 걸 수 있나(글롭이 있나)와 늘 보관하나(§15.6). CLI 가 제출 전에 거른다
         "has_artifacts": bool(p.artifacts),
         "keep": bool(p.keep),
+        # M5s — `[presets.retry]`(결정 210). 선언이 없으면 null 이다. 키 추가만
+        "retry": (
+            {
+                "on_exit": p.retry.on_exit,
+                "interval_seconds": p.retry.interval_seconds,
+                "max_attempts": p.retry.max_attempts,
+            }
+            if p.retry is not None
+            else None
+        ),
         "inputs": [
             {
                 "name": i.name,
@@ -442,6 +534,14 @@ def pool_json(
         ),
         "queue_error": pool.queue_error,
         "queue_error_code": pool.queue_error_code,
+        # M5s — 예약(시각순). 큐 표와 따로 간다. 조회 실패는 null + `scheduled_error*`(관례)
+        "scheduled": (
+            [scheduled_json(j, base_url=base_url) for j in pool.scheduled]
+            if pool.scheduled is not None
+            else None
+        ),
+        "scheduled_error": pool.scheduled_error,
+        "scheduled_error_code": pool.scheduled_error_code,
         "recent": (
             [recent_json(j, base_url=base_url) for j in pool.recent]
             if pool.recent is not None

@@ -1,4 +1,4 @@
-# remote_ci_monitor — 계획서 (v2.11, 2026-09-09)
+# remote_ci_monitor — 계획서 (v2.12, 2026-11-23)
 
 > 정본이다. 세션을 시작하면 끝까지 읽는다. 웹 큐 화면의 배치·상태·문구는 `docs/wireframes/web-queue.html` 이 정본이다(「웹 UI (M2)」).
 > **v2 는 방향 전환이다.** v1(오전)은 GitHub Actions 를 컨트롤 플레인으로 쓰는 관찰+디스패치 도구였다. 오너 검토에서 「GitHub 에 의존하지 않으면 좋겠다」가 나왔고, Codex 크로스리뷰(`docs/reviews/2026-09-04-codex-github-dependency.md`)를 거쳐 **도구가 큐와 실행을 직접 소유하는 로컬 잡 서버**로 바꿨다. GitHub 경로 설계는 커밋 `15e8220`(v1.1)에 남아 있고 M5 의 GitHub 백엔드를 만들 때 참고한다.
@@ -10,6 +10,7 @@
 > **v2.9** 는 웹 화면 손질(2026-09-09 오너 요청): 도는 잡의 **전체 진행 막대** · 상세는 **기본 접힘**(결정 13 개정) · 최근 완료 행에도 잡 번호. 「웹 UI (M2)」 절과 목업(`docs/wireframes/web-queue.html`)이 정본이다.
 > **v2.10** 은 마일스톤이 끝난 뒤의 운영 개선 둘 — M5f(부하를 보는 병렬 레인, 결정 39~50)와 **M5g(증거를 얼마나·얼마나 오래 들고 있을지, 결정 51~62)**. 명세 `docs/m5f-workplan.md` · `docs/m5g-workplan.md`.
 > **v2.11** 은 M5h(끝난 잡이 무엇이 왜 깨졌는지 말하게 한다, 결정 63~72) — 다른 머신의 세션이 운영 인스턴스를 쓰며 남긴 사용기 여섯 개에서 나왔다. 명세 `docs/m5h-workplan.md`, 구현 `docs/m5h-implementation.md`.
+> **v2.12** 는 M5s(스토어 심사 확인 · 승인 뒤 출시 · 예약 실행, 결정 201~238)를 반영한다. 잡 상태에 `scheduled` · `expired` · `retried` · `exhausted` 가 생겼고 `rcm wait` 에 종료 코드 4 가 생겼다. 명세 `docs/m5s-workplan.md`, v0.10.0 · DB v25.
 > ⛔ 는 사람이 정해야 하는 항목이다. 현재 열린 ⛔ 는 없다(「결정 항목」 17~29 · 31 · 32 · 39~50 · 51~62 · 63~72 · **73~83** 은 추천값으로 구현하거나 구현 예정, 오너 확인 대기; 30 은 확정).
 
 ## 한 줄
@@ -86,7 +87,19 @@ uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 
    │                          └─ cancelled(대기 중 취소)            ├─ cancelling ──(SIGTERM → grace → SIGKILL)──▶ cancelled
    ├─ cancelled(업로드 포기 · 413 · 업로드 중 취소)                  └─ lost(서버 재시작 중 죽음)
    └─ failed(tar 거부 · 프리셋 소멸 — exit_code null + summary)
+
+M5s 가 더한 길(결정 206 · 211 · 212):
+
+제출(--at · --in) · 업로드 끝 ──▶ scheduled ──(not_before 가 됨)──▶ queued ──▶ (위와 같다)
+                                  │                                  │
+                                  ├─ cancelled(예약 취소)             └─ expired(start_deadline 까지 레인이 못 집음)
+                                  └─ expired(서버가 멈춘 사이 start_deadline 이 지남)
+
+running ──(종료 코드 75 · [presets.retry] · 시도가 남음)──▶ retried ──▶ 다음 시도가 scheduled 로 생긴다(retried_as · chain_id)
+running ──(종료 코드 75 · 마지막 시도)───────────────────▶ exhausted
 ```
+
+`scheduled` 는 활성 집합 밖의 대기 상태다. 레인이 집지 않고 아무 잡도 거기에 합류하지 않는다. `expired` 와 `exhausted` 는 종료 상태다. `retried` 도 종료 상태지만 사슬의 중간 시도라서 대기가 거기서 끝나지 않는다.
 
 | 필드 | 뜻 |
 |---|---|
@@ -101,7 +114,7 @@ uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 
 | `state` · `created_at` · `queued_at` · `started_at` · `finished_at` · `exit_code` · `summary` · `failed_step` · `cancelled_by` · `timeout_seconds` | 서버 시계 기준. `queued_at` 은 트리를 다 받아 `queued` 가 된 시각(`git_ref` 면 `created_at`). `exit_code` 는 프로세스가 돌지 못한 실패(자재화 실패 등)면 null |
 | `transitions[]` | 상태 전이 이력 `[{state, at}]`(events 테이블에서 만든다). 최근 완료 서랍의 `uploading 09:50:40 → queued → running 09:51:13 → failed 09:52:15` |
 
-- **`rcm wait` 종료 코드**: `succeeded` 0 · `failed` 1 · `cancelled`/`timed_out` 2 · `lost`/조회 실패/`--timeout` 초과 3. 세션 스크립트는 이 코드로 바로 분기한다. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지). `cancelling` 은 종료 상태가 아니라 `wait` 는 계속 기다린다.
+- **`rcm wait` 종료 코드**: `succeeded` 0 · `failed`/`exhausted` 1 · `cancelled`/`timed_out`/`expired` 2 · `lost`/조회 실패/`--timeout` 초과 3 · 4 는 `--return-on-action` 을 준 대기에서만 나온다. 잡이 「사람이 할 일」 표식(`::rcm::action::`)을 찍었다는 뜻이고 잡은 계속 돈다. 세션 스크립트는 이 코드로 바로 분기한다. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지). `cancelling` 과 `scheduled` 는 종료 상태가 아니라서 `wait` 는 계속 기다린다. `retried` 에서 `wait` 는 `retried_as` 를 따라 다음 시도로 가고 마지막 시도의 코드로 끝난다(M5s 결정 211 · 212 · 234).
 - **큐에서 조용히 사라지는 잡은 없다.** 업로드 포기(`upload_abandon_seconds`)·413(즉시)·업로드 중 취소·**부분 수신 중 연결 끊김(즉시)**·**서버 재시작 때 `uploading` 이던 잡(즉시)**은 `cancelled` + `summary`(`upload abandoned after 5m` · `snapshot 600 MB exceeds 512 MB` · `upload interrupted after 30 MB` · `server restarted during upload`). 부분 업로드 재개는 M0 범위 밖이다 — 새 `rcm run` 으로 다시 제출한다. tar 거부·claim 시 프리셋 소멸·입력이 새 설정에서 무효는 `failed` + `exit_code: null` + `summary`. 전부 최근 완료에 남고 SSE `job_finished` 로 알린다.
 - **취소 전파**: 원 요청자(또는 admin)의 취소는 잡을 죽이고, 합류자의 `rcm wait` 는 2 로 끝난다. 합류자가 취소하면 **자기 대기만 빠진다**(`rcm wait` 중단, 잡은 원 요청자 것으로 유지 — 2026-09-04 오너 결정 16).
 - 잡은 서버 재시작을 넘어 살아남는다(`queued` 는 그대로, `running`·`cancelling` 이던 것은 `lost`). 워크스페이스·로그·스냅샷은 보존 기간 뒤 정리한다.
@@ -112,7 +125,7 @@ uploading ──(트리 수신)──▶ queued ──(레인 비고 그룹 안 
 - **순번 `position`**: **대기 잡(`uploading`·`queued`)에만 1부터** 매긴다. `running`·`cancelling` 은 null. `#` 는 언제나 잡 id 이고 순번은 `2nd in line` 으로 따로 쓴다(둘을 섞지 않는다).
 - **레인**: `server.lanes`(기본 1). 레인이 비어 있어도 **concurrency 그룹**이 겹치면 못 올라간다 — 프리셋에 `concurrency_group = "devices"` 를 주면 같은 그룹의 잡은 동시에 하나만 돈다(시뮬레이터·에뮬레이터를 공유하는 QA·배포용). 막고 있는 잡을 `blocked_by: {job_id, group, remaining_seconds}` 로 보여준다. 그룹은 제출 시점에 잡에 박힌 `concurrency_group` 을 쓴다. 레인 1 이면 `blocked_by` 는 자연히 안 나온다(오너 결정 12). **레인 2 부터는 호스트 CPU 가 `cpu_max_percent`(기본 80) 아래일 때만 잡을 집는다**(M5f) — 레인 1 은 게이트를 안 지나므로 큐는 어떤 부하에서도 계속 움직인다.
 - **살아 있는 레인**: 대기 계산은 `server.lanes` 가 아니라 **`state ≠ down` 인 워커 수**로 한다. 그 수가 0 이거나 `server.paused` 면 대기 잡의 `wait_seconds`·`finish_at` 은 **null**(ETA `—`) — 시작할 수 없는 잡에 시각을 주지 않는다. **부하로 보류된(`held`) 레인은 ETA 그리디에서 뺀다**(M5f) — 언제 열릴지 모르는 레인에 기대면 「자신있는 틀린 시각」이 된다. 레인 배정은 레인 **번호**가 아니라 `(worker, lane)` 로 센다(로컬 레인 2 와 `build-02/2` 가 뭉개지지 않게).
-- **이유 `reason`**: 잡이 지금 왜 이 상태인지 서버가 계산해 싣는 **단일 표시 사유**다(`estimate.overdue`·`estimate.stuck`·`estimate.quiet` 은 근거 플래그로 따로 싣는다). `running` · `waiting_for_lane`(`ahead_job_id` = 가장 먼저 비는 레인의 잡) · `blocked_by_group` · `uploading` · `upload_stalled`(`upload_stall_seconds` 동안 바이트가 안 옴) · `materializing` · `overdue` · `stuck` · `quiet`(출력만 조용하다 — 아래 「stuck」 참조) · `cancelling` · `paused` · `not_scheduled`(대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 있는 채로 `max(워커 since, 잡 queued_at)` 부터 10초가 넘음 — 스케줄러 이상) · `worker_down`(모든 레인 다운) · `held_by_load`(집었을 레인이 호스트 부하로 보류 중 — M5f). 행동 가능한 이유(`worker_down` → `stuck` → `upload_stalled` → `not_scheduled` → `blocked_by_group` → `overdue` → `paused`)는 화면 요약 「Not moving」에 이 순서로 오른다. **`held_by_load` 와 `quiet` 은 여기 안 올린다** — `held_by_load` 는 의도된·자가 치유되는 상태라 `paused` 와 같은 종류이고(오너 결정 45), `quiet` 은 사람이 손쓸 것이 없는 **관찰**이다(출력이 조용한 것뿐이고, 죽었다는 주장이 아니다 — 올리면 오늘의 빨간 소음이 이름만 바꿔 남는다). 오래 닫혀 있으면 `rcm check` 가 경고한다.
+- **이유 `reason`**: 잡이 지금 왜 이 상태인지 서버가 계산해 싣는 **단일 표시 사유**다(`estimate.overdue`·`estimate.stuck`·`estimate.quiet` 은 근거 플래그로 따로 싣는다). `running` · `waiting_for_lane`(`ahead_job_id` = 가장 먼저 비는 레인의 잡) · `blocked_by_group` · `uploading` · `upload_stalled`(`upload_stall_seconds` 동안 바이트가 안 옴) · `materializing` · `overdue` · `stuck` · `quiet`(출력만 조용하다 — 아래 「stuck」 참조) · `cancelling` · `paused` · `not_scheduled`(대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 있는 채로 `max(워커 since, 잡 queued_at)` 부터 10초가 넘음 — 스케줄러 이상) · `worker_down`(모든 레인 다운) · `held_by_load`(집었을 레인이 호스트 부하로 보류 중 — M5f) · `needs_action`(잡이 「사람이 할 일」 표식을 찍었다 — M5s 결정 213). 행동 가능한 이유(`needs_action` → `worker_down` → `no_capable_machine` → `check_failed` → `stuck` → `upload_stalled` → `not_scheduled` → `blocked_by_group` → `overdue` → `paused`, 모델의 `ACTIONABLE_REASONS` 와 웹의 `ACTIONABLE` 이 같은 목록이다)는 화면 요약 「Not moving」에 이 순서로 오른다. **`held_by_load` 와 `quiet` 은 여기 안 올린다** — `held_by_load` 는 의도된·자가 치유되는 상태라 `paused` 와 같은 종류이고(오너 결정 45), `quiet` 은 사람이 손쓸 것이 없는 **관찰**이다(출력이 조용한 것뿐이고, 죽었다는 주장이 아니다 — 올리면 오늘의 빨간 소음이 이름만 바꿔 남는다). 오래 닫혀 있으면 `rcm check` 가 경고한다.
 - **합류**(`join_duplicates`): 활성 잡(`uploading`·`queued`·`running`) 중 같은 `preset` · 같은 `inputs` · 같은 소스 신원(`tree` 면 `tree_hash`, `git_ref` 면 `sha`)이 있으면 새 잡을 만들지 않고 그 잡 id 를 돌려준다(`joined: true`). 두 세션이 같은 코드를 확인하려는 것뿐이라 두 번 돌릴 이유가 없다. 스냅샷 업로드도 생략된다. `--no-join` 으로 끈다. (v1 의 GitHub 경로에선 inputs 를 비교할 수 없어 run 이름 규약에 기대야 했다 — 이제 정확히 비교한다.) 합류한 세션은 `joiners[]` 에 `{name, label, joined_at}` 으로 남고, 요청자와 합류자 모두 「내 잡」이다.
 - **취소**: 자기 토큰의 잡(요청자)만, `admin` 토큰은 전부. `uploading`·`queued` 면 즉시 `cancelled`(진행 중이던 `PUT` 은 409), `running` 이면 `cancelling` 으로 바꾸고 SIGTERM → `grace_seconds` → SIGKILL → `cancelled`. `cancel.{requested_at, by, kill_at}` 을 싣는다. 원 요청자의 취소는 합류자의 `rcm wait` 에 종료 코드 2 로 전파된다. 합류자의 취소는 잡을 건드리지 않고 자기 `joiners[]` 항목만 지운다(오너 결정 16).
 - **표본**: 같은 `key` 의 완료 잡 중 `sample_policy`(기본 `success`) · `min_job_seconds`(30) 이상 · `sample_days`(45) 안. 소요는 `started_at`~`finished_at`(큐 대기는 안 섞인다 — 우리가 시각을 찍으니 v1 의 「run 시각 vs 잡 시각」 함정이 없다). 대기 중앙값(`medians[key].wait_seconds`)은 같은 표본의 `created_at`~`started_at`.
@@ -488,7 +501,7 @@ host  macmini (4s ago)  load 3.48 / 10 cores · CPU 21% (user 17 · sys 4) · me
 
 빌드 도구 없이 `index.html` + `app.js` + `style.css`. 문자열은 영어. `pools[]` 를 순회한다.
 
-**배치·상태·문구·표기 규칙은 `docs/wireframes/web-queue.html` 이 정본이다**(기획 항목 35개 + 「4. 이 화면이 정한 규칙」). 요지: 큐 표 **위에** 요약 세 칸 — **Your jobs**(요청자·합류자 기준 내 잡의 순번·ETA) · **Needs a look**(행동 가능한 이유만, `worker_down → stuck → upload_stalled → not_scheduled → blocked_by_group → overdue → paused` 순 — 2026-09-15 이전 이름은 「Not moving」) · **Host pressure**(CPU·Mem·GPU·load 한 줄) — 를 먼저 보이고, 그 아래 큐 표(Job · Job name · Requested by · **Status** · Elapsed · Finishes+신뢰도 · Source), 호스트 카드(구간 막대 + 5분 sparkline), 최근 완료 `recent_count` 건, Estimates(접힘). 변형 상태 19개(빈 큐 ≠ 조회 실패, 연결 끊김, stale, 초과, stuck, 워커 다운, 정지, 토큰 거부, 취소 중, 업로드 멈춤, 워크스페이스 준비, …)는 목업의 2절.
+**배치·상태·문구·표기 규칙은 `docs/wireframes/web-queue.html` 이 정본이다**(기획 항목 35개 + 「4. 이 화면이 정한 규칙」). 요지: 큐 표 **위에** 요약 세 칸 — **Your jobs**(요청자·합류자 기준 내 잡의 순번·ETA) · **Needs a look**(행동 가능한 이유만, `needs_action → worker_down → no_capable_machine → check_failed → stuck → upload_stalled → not_scheduled → blocked_by_group → overdue → paused` 순 — 2026-09-15 이전 이름은 「Not moving」. `not_scheduled` 의 화면 문구는 「idle lane did not pick it up」이다(M5s 결정 238)) · **Host pressure**(CPU·Mem·GPU·load 한 줄) — 를 먼저 보이고, 그 아래 큐 표(Job · Job name · Requested by · **Status** · Elapsed · Finishes+신뢰도 · Source), 호스트 카드(구간 막대 + 5분 sparkline), 최근 완료 `recent_count` 건, Estimates(접힘). 변형 상태 19개(빈 큐 ≠ 조회 실패, 연결 끊김, stale, 초과, stuck, 워커 다운, 정지, 토큰 거부, 취소 중, 업로드 멈춤, 워크스페이스 준비, …)는 목업의 2절.
 
 - **갱신 규칙**: 처음 `GET /api/status`, 이후 `GET /events` SSE 부분 갱신. SSE 재연결은 **2s → 30s 지수 백오프**, 그 사이 **폴링 10s 고정**, 둘 다 **30s 무응답이면 `Lost connection` 띠**(마지막 상태를 dim 으로 유지). 경과·대기·나이는 `generated_at` 으로 보정한 클라이언트 시계로 1초마다 올리고(30s 넘게 어긋나면 `clock +2m` 칩), 서버 값이 오면 덮어쓴다. 재조회에서 `server.uptime_seconds` 가 줄면 `Server restarted — running jobs were marked lost` 띠. **`schema_version` 이나 `server.version` 이 바뀌면 `UI out of date — reload`(자동 새로고침 1회)**. 탭이 60초 넘게 숨겨지면 정지, 돌아오면 재조회. live 토글로 수동 정지.
 - **권한**: 보기는 토큰 없이. 내 잡 강조·로그 tail·로그·취소만 토큰(`localStorage` 의 `rcm.token`, URL 금지, `GET /api/whoami` 로 확인, 401/403 만 저장값 삭제). 토큰 입력은 M2 에 포함한다(오너 결정 15).
@@ -609,6 +622,7 @@ docs/reviews/
 - **M5n — 잡을 해낼 수 있다고 증명한 머신이 가져간다**(2026-11-16 오너 요청 「같은 내부망의 다른 컴퓨터에서 Flutter·Dart 빌드와 테스트를 돌리게」, 명세 `docs/m5n-workplan.md` · 결정 88~104 · DB v23): 워커(로컬 = 서버 자신 · 원격 = `rcm worker`)가 `[[probes]]` 지문과 프리셋별 도구 판정을 재서 보고하고, 서버는 (워커, 프리셋)마다 판정한다 — 보고가 없거나 낡으면 받지 않는다(fail-closed). 프리셋 `placement = "any-capable"` 은 판정이 eligible 인 워커 아무 데서나 돌고, `checks` 는 그 워커에서 **현재 지문으로** 점검 프리셋을 통과해야 받게 한다(지문이 바뀌면 rcm 이 그 머신에 점검을 한 번 건다 — 2026-11-06 Xcode 자동 업데이트를 열흘 동안 몰랐던 scenario-qa #3631 이 증인). 그룹 범위 `concurrency_scope`(pool · host · global), 호스트별 추정(큐 계산을 풀별에서 전역 한 번으로 — 동치성 골든 200개로 잠금), `rcm machines` · `rcm recheck` · `rcm init worker`(+ 서비스 파일) · 워커의 서버 자동 찾기. **운영의 `mac2-worker` 는 같은 Mac mini 위의 둘째 워커**라 워커와 호스트(`host_key`)를 가른다. 격리 검증 셋이 23건을 고쳤다(§19).
 - **M5p — 보관함: 표시한 잡의 산출물을 공유기 안에서 링크로 연다** (**완료 2026-11-19**, PR #215(명세) · #217 · #221 · #220, 릴리스 #223 v0.7.0 · DB v24, 명세 `docs/m5p-workplan.md` · 결정 125~148): 오너 요청 「골든 테스트한 산출물을 저장하고, 접근 가능한 곳 링크로 달라는 스크립트가 오면 에이전트 없이 산출물이 특정 폴더에 저장되고, 거기는 공유기 안에서 접근 가능하게. 6개월 뒤 정리될 항목에 넣어 두고 1년 뒤 알아서 삭제, 되살리거나 가져오면 6개월 또 유예.」 프리셋 `keep = true` · `rcm run --keep` · `rcm keep N` 으로 표시한 잡의 묶음을 서버가 스스로 `shelf_dir` 에 풀어 두고(안의 tar 는 한 단계 펼친다), `/shelf/` 링크로 토큰 없이 보고 받게 한다. 마지막으로 쓴 지 182일이면 정리 대기, 365일이면 삭제이고 쓰면 시계가 다시 돈다. 지금까지 묶음(M5e)은 24시간 뒤 사라지고 받으려면 토큰이 있어야 했다. 실측(2026-11-19)으로 데이터 디스크 여유는 199 GiB(9월에는 628 GiB)라 모든 묶음을 1년 두면 build-dev 혼자 한 해 약 18 GB 를 쓴다. 그래서 **표시한 잡만** 보관하고 상한(50 GiB)을 둔다. 묶음이 가져가는 통로라는 결정 58 은 그대로다. 잡이 만든 파일을 웹 UI 와 같은 출처에서 내보내므로 sandbox CSP · Host 허용 목록 · 전용 전송 슬롯이 서버 PR 의 절반이다. 첫 실제 사용처는 dolomood 의 `app-map-shots` 이고 그 요구로 `/api/shelf/latest` JSON · 파일 항목의 `sha256` · `rcm shelf get` 을 더했다(명세 §16). 격리 검증이 결함 일곱을 찾아 고쳤다(P1 셋 · P2 둘 · P3 둘, 명세 §13). 가장 큰 둘은 **정리 회차가 도중에 되살린 항목을 지우던 것**과 **건너뛴 멤버에 상한이 없어 12 MB tar.gz 하나가 187 MB manifest 와 서버 RSS 1.2 GB 를 만든 것**이다. 시험은 P1 353 · P2 206 · P3 끝단 8, mutcheck 79. 같은 기간에 #222 가 오래 흔들리던 `test_pause_resume` 의 진짜 원인(정지 중 집기)을 고쳤다. 스트레스 실행의 실패가 고치기 전 301건, 고친 뒤 0건이다. 고치지 않고 남긴 기존 문제 둘(기동 때 M5e 묶음 화해를 부르지 않음 · 역슬래시 이름 하나로 묶음 전체를 버림)은 명세 §13.4 에 있다.
 - **M5q — 클라이언트가 서버 버전을 따라간다** (진행 중 — 명세 #214 · #218, `docs/m5q-workplan.md` · 결정 149~174).
+- **M5s — 스토어 심사 확인 · 승인 뒤 출시 · 예약 실행** (**완료 2026-11-23**, PR #250(명세) · #252(역할 등록) · #253(예약) · #251(표식) · #256(반복) · #254(심사 상태 패널) · #255(golive 라우트) · #257(화면) · #258(실기), 릴리스 v0.10.0 · DB v25, 명세 `docs/m5s-workplan.md` · 결정 201~238, 실기 보고서 `docs/acceptance/reports/2026-11-23-m5s-acceptance.md`): 출처는 2026-11-23 앱 레포 세션이 오너 지시로 쓴 기능 요청서와, 같은 날 오너가 다시 정리한 두 요구다. 첫째 요구는 심사를 올린 뒤 Android 와 iOS 두 스토어의 심사가 끝났는지 다른 컴퓨터에서도 확인하는 것이다. 둘째 요구는 승인된 빌드의 출시도 스킬로 부르는 것이다. Android 는 관리형 게시라서 Chrome 으로 게시하고, 로그인이 풀리면 요청한 세션이 다른 방법으로 로그인할 수 있어야 한다. rcm 은 일반 기능만 만들고 스토어를 부르는 코드는 앱 레포의 스크립트에 둔다. 예약 실행(`rcm run --at` · `--in`)은 잡을 `scheduled` 로 두었다가 그 시각에 큐에 넣고, 시작 마감까지 레인이 못 집으면 `expired` 로 닫는다. 반복(`[presets.retry]`)은 프리셋이 선언한 경우에만 종료 코드 75(「아직」)를 간격을 두고 다시 돌린다. 중간 시도는 `retried`, 마지막 시도까지 75 면 `exhausted` 다. 잡은 `::rcm::action::<code>::<note>` 표식으로 사람이 할 일을 알리고, `rcm wait --return-on-action` 은 그때 4 로 돌아온다. 스토어 탭에는 선택 역할 둘이 생겼다. `status` 는 두 스토어의 심사 상태를 읽고, `golive` 는 사람이 버전과 빌드 번호와 시각을 적어 요청한 출시만 돌린다. 원칙 문장은 「승인됐다고 저절로 출시되지 않는다」로 바꿨다. 반복 프리셋이 하나라도 있으면 서버가 클라이언트 하한(`min_client_version`)을 0.10.0 으로 올린다. 옛 클라이언트의 `rcm wait` 는 `retried` 를 몰라 끝없이 기다리기 때문이다(결정 230).
 - ~~M6 — GitHub 백엔드~~ **폐기(오너 결정 30, 2026-09-07)**: Actions run 관찰·dispatch 는 만들지 않는다. GitHub 은 커밋·푸시·PR 머지용이다. 계획서의 마일스톤은 **M5 로 끝**이며, 이후는 오너 실기 결과에 따른 수정과 운영 개선만 남는다.
 
 ## 결정 항목 (2026-09-04, 전부 확정)
@@ -732,7 +746,7 @@ docs/reviews/
 
 ⚠️ **결정 번호 39~42 가 두 번 나온다** — M5e(산출물)와 M5f(부하 게이트)가 같은 번호를 각각 붙인 채 머지 `d26b3f4` 에서 합쳐졌다. `docs/m5e-*.md` 와 `docs/m5f-*.md` 가 이미 각자의 번호로 서로를 가리키고 있어 여기서 한쪽을 옮기면 그 문서들의 상호 참조가 깨진다. 고칠 때 한 PR 에서 문서까지 같이 바꾼다. 새 결정은 **51번부터**다.
 
-결정 84~124 는 이 표에 옮기지 않았다. 그 번호는 각 마일스톤의 명세에 있다(M5n 의 88~104 는 `docs/m5n-workplan.md`, M5o 의 109~124 는 `docs/m5o-workplan.md`). 125~148 은 M5p 명세 §12 를 그 명세의 §13~§16 이 바꾼 대로 옮겼다. 149~174 는 M5q 명세 `docs/m5q-workplan.md` §11 에 있다.
+결정 84~124 는 이 표에 옮기지 않았다. 그 번호는 각 마일스톤의 명세에 있다(M5n 의 88~104 는 `docs/m5n-workplan.md`, M5o 의 109~124 는 `docs/m5o-workplan.md`). 125~148 은 M5p 명세 §12 를 그 명세의 §13~§16 이 바꾼 대로 옮겼다. 149~174 는 M5q 명세 `docs/m5q-workplan.md` §11 에 있다. 201~238 은 M5s 명세 `docs/m5s-workplan.md` §11 에 있다.
 
 12~16 은 `docs/wireframes/web-queue.html` 「6. 오너에게 묻는 것」의 5개를 2026-09-04 오너가 확정한 것이다. 17~18 은 `docs/reviews/2026-09-04-codex-m0-design.md` 가 사람 결정이라고 본 것을 추천값으로 구현한 것이다. 바꾸려면 여기서 고친다.
 

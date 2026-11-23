@@ -62,7 +62,9 @@ PROBE_LINES = 2
 # C0 제어문자(탭·줄바꿈 포함) · DEL · C1. ANSI 색의 ESC 도 여기서 빠진다.
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-_ACTIVE_JOB_STATES = frozenset({"uploading", "queued", "running", "cancelling"})
+#: 「점검 중」으로 세는 잡 상태. 예약한 점검(M5s `scheduled`)도 센다 — 아니면 그 시각을 기다리는
+#: 동안 자동 점검이 하나 더 걸린다
+_ACTIVE_JOB_STATES = frozenset({"uploading", "queued", "running", "cancelling", "scheduled"})
 _FAILED_JOB_STATES = frozenset({"failed", "timed_out"})
 
 

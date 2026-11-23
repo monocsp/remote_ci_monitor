@@ -150,8 +150,31 @@ chmod 600 ~/.config/rcm/client.toml
    Ctrl-C 로 다시 떼어 놔도 작업은 계속 돈다.
 5. 종료 코드는 처음부터 기다린 것과 똑같이 그 작업의 것이다.
 
+**지금 대신 나중에.** `rcm run deploy --ref main --at 15:00` 은 서버에 시각을 넘긴다. 길이로
+주려면 `--in 90m` 을 쓴다. 작업은 `scheduled` 상태로 기다리다가 그 시각에 큐에 들어간다.
+`rcm jobs` 는 그 작업을 `at 15:00` 으로 보여 주고, `rcm wait --job N` 은
+`scheduled for 15:00 · start by 15:15` 를 찍고 계속 기다린다. 그 시각부터 시작 마감까지 어느
+레인도 그 작업을 집지 않으면 작업은 `expired` 로 끝나고 종료 코드는 2 다. 작업이 돌지 않았다는
+뜻이다. 시작 마감은 프리셋이 따로 정하지 않으면 15분이다. 자세한 규칙은
+[나중에 돌리기](configuration.md#running-a-job-later---at-and---in)에 있다.
+
+**나중에 다시.** 프리셋에 `[presets.retry]` 표가 있으면 스크립트가 75(「아직」)로 끝날 때 rcm 이
+`interval_seconds` 마다 다시 돌린다. 횟수는 `max_attempts` 까지다. 시도마다 새 작업이 생긴다.
+`rcm wait --job N` 은 `#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it` 을
+찍고 사슬의 끝까지 따라간다. 마지막 시도도 75 로 끝나면 `exhausted` 이고 종료 코드는 1 이다.
+사슬에 속한 아무 작업 번호로 `rcm cancel` 을 보내도 사슬이 멈춘다. 자세한 규칙은
+[나중에 다시 돌리기](configuration.md#trying-again-later-presetsretry)에 있다.
+
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
+
+**사람이 손대야 할 때.** 로그인이 풀린 것처럼 스크립트 혼자 더 나아갈 수 없으면 스크립트가
+`::rcm::action::<code>::<note>` 를 찍는다. 그러면 `rcm wait` 는 stderr 에
+`#412 needs action · login · Sign in on the build machine` 을 찍고 작업 행의 이유는
+`needs action` 이 된다. `rcm wait --job N --return-on-action` 은 그 순간 `action` 이 든 JSON 을
+찍고 종료 코드 4 로 돌아온다. 작업은 계속 돈다. 그래서 결과를 기다리던 세션이 차례를 돌려받아
+사람에게 물을 수 있다. 사람이 손을 쓴 뒤에는 플래그 **없이** 다시 기다린다. 표식은 작업에 그대로
+남아 있어서 플래그를 주면 곧바로 또 돌아오기 때문이다([자세히](configuration.md#when-a-person-has-to-act)).
 
 `rcm cancel N` 은 제출할 때 함께 받은 cancel token 을 보낸다 — `rcm run` 이
 `~/.local/state/rcm/submissions.json`(`$XDG_STATE_HOME` 이 있으면 그 아래 `rcm/submissions.json`,
@@ -203,6 +226,8 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    못 닿았거나 — 이고 절대 실패로 보고되지 않는다. CI 가 3 을 빨강으로 치면 엉뚱한 이유로
    빨개진다. 5 는 **전달** 실패고 `--fetch-artifacts` 에서만 나온다 — 작업 자체의 결과는
    `wait_exit_code` 에 그대로 있고, 못 온 것은 파일이다([파일을 돌려받기](#8-파일을-돌려받기)).
+   4 는 `rcm wait --return-on-action` 에서만 나온다. 작업이 사람에게 할 일을 알렸고 아직 돌고
+   있다는 뜻이다([기다리지 않기](#5-기다리지-않기)).
 
 5. **시작조차 못 한 작업은 그렇다고 말한다.** 스크립트가 돌기 전에 끝나는 실패들이 있고, 요약이
    그중 어느 것인지 말한다. 워크스페이스를 못 만들었다(`snapshot_missing` ·
@@ -349,6 +374,8 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
    바쁜 것」을 구분하는 자리다.
 5. **다른 풀**은 자기 구역을 갖는다. 두 번째 빌드 머신도 같은 화면에서 보인다.
 
+예약이 있는 풀에는 `scheduled — 2 · next 15:00 golive` 한 줄이 더 붙는다.
+
 `rcm top --watch 5` 는 5초마다 새로 그리고, `rcm top --json` 은 기계용이다.
 
 ## 10. 웹 화면
@@ -395,6 +422,26 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
 칸보다 긴 이름은 가운데를 줄인다(`android-integration-test-s… name-that-goes`) — 앞이 같은 이름들도
 끝에서 갈린다. 잘린 이름을 누르면(키보드로는 Tab 으로 가서 Enter) 전문과 **복사** 단추가 뜬다. 다시
 누르거나 바깥을 누르거나 Escape 면 닫힌다. hover 가 없는 폰에서도 된다.
+
+### 예약한 작업과 사람이 할 일
+
+![머리의 알림 실패 배지, 사람이 할 일을 알린 작업을 짚는 확인 필요 카드, 그리고 예약 절. 로그인을 기다리는 반복 시도 하나와 나중으로 잡아 둔 작업 둘이 있고 내 예약에는 취소 버튼이 있다](images/ui/web-scheduled.png)
+
+1. 머리의 **`notify failures N`**(한국어 화면에서는 `알림 실패 N`)은 서버가 켜진 뒤 알림 훅이
+   실패한 횟수다. 이 수는 서버 메모리에 있어서 재시작하면 0 이 된다. 실패 하나하나는 서버 로그에
+   남는다.
+2. **확인 필요** 카드는 사람이 손대야 한다고 스스로 알린 작업을 짚는다.
+   `needs action · login · Sign in on the build machine` 처럼 읽힌다. rcm 이 추론한 다른 이유보다
+   앞에 선다([자세히](configuration.md#when-a-person-has-to-act)).
+3. **예약 (N)**: `rcm run --at` 이나 `--in` 으로 낸 작업이 큐 아래에 시각순으로 선다. 서버가 예약을
+   읽지 못했으면 이 절은 빈 목록이 아니라 빨간 띠로 그려진다.
+4. 차례를 기다리는 **반복 시도**다. `attempt 2/12` 와 함께, 앞 시도가 찍은 사람이 할 일을 그대로
+   달고 있다. 그래서 시도와 시도 사이에도 사슬은 사람을 계속 찾는다
+   ([나중에 다시 돌리기](configuration.md#trying-again-later-presetsretry)).
+5. **시작 시각과 시작 마감.** 예약한 작업은 큐에 들어가기 전까지 ETA 가 없다. 마감까지 어느 lane
+   도 집지 않으면 `expired` 로 끝난다. 반복 시도에는 마감이 없다(`start by —`)
+   ([자세히](configuration.md#running-a-job-later---at-and---in)).
+6. 내 예약에는 **취소** 버튼이 있다.
 
 ### 내 작업
 
@@ -459,6 +506,39 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
 ![폰 화면 — 한 열로 쌓인 워커 · 요약 · 작업 카드 · 단계 · 버튼](images/ui/web-phone.png)
 
 1. 워커, 2. 요약, 3. 카드가 된 작업, 4. 그 단계, 5. 버튼. 한 열에, 같은 정보를, 가로 스크롤 없이.
+
+### 스토어 탭: 심사 상태와 출시
+
+릴리스 프로파일이 있는 저장소는 **Queue** 옆에 **Store** 탭(스토어 탭)이 생긴다. 이 탭이 무엇이고 프로젝트를
+어떻게 잇는지는 [README](../README.ko.md#스토어-탭--프로젝트의-릴리스-흐름-연결)와
+[릴리스 계약](release-contract.md)에 있다. 빌드가 심사에 들어간 뒤에는 두 곳을 보면 된다. 아래
+그림은 예시 데이터(앱 이름 `app`, 버전 1.0.x)로 그렸다.
+
+![검토 패널. 스토어마다 심사 상태와 버전 · 빌드 · 스토어 원문, 새로 조회 버튼, 그 아래의 출시 원칙 문장](images/ui/store-review-status.png)
+
+1. **스토어 심사 상태**는 읽기만 한다. 스토어마다 상태를 여덟 낱말 가운데 하나로 보이고(그 밖의
+   값은 `unknown`), 버전과 빌드, 스토어가 쓴 원래 낱말을 옆에 둔다. 윗줄은 언제 읽었는지 말한다.
+   그 나이가 `plan_max_age_minutes` 를 넘으면 움직이기 전에 다시 조회하라고 적는다.
+2. **새로 조회**(Check again)는 프로젝트의 `status` 프리셋을 한 번 더 돌린다.
+3. 패널 안의 **원칙 문장**이다. 승인됐다고 저절로 출시되지 않는다. 출시는 사람이 버전과 빌드
+   번호와 시각을 적어 요청할 때만 돈다. Google Play 에는 보류한 출시를 게시하는 API 가 없어서,
+   프로젝트의 출시 스크립트가 브라우저로 게시하거나 사람에게 맡긴다.
+4. 같은 원칙 문장이 스토어 탭의 화면마다 맨 아래에 있다.
+
+![버전 페이지의 출시 예약 영역. 두 스토어의 상태, plan, 플랫폼, 시각, 직접 친 빌드 번호, 출시 예약 버튼, 예약 목록, 그 아래의 원칙 문장](images/ui/store-golive.png)
+
+1. 버전 페이지의 **출시 예약**(Schedule go-live)은 스토어가 이 버전을 승인했다고 말한 뒤에만,
+   그리고 admin 토큰이 있을 때만 열린다. 머리에 두 스토어의 상태가 한 번 더 나온다.
+2. 열면 읽기만 하는 **plan** 이 먼저 돈다. 어느 스토어가 어느 빌드를 승인했는지 읽는다. plan 으로는
+   아무것도 출시되지 않는다.
+3. **플랫폼**은 승인된 스토어만 고를 수 있다. **Both** 는 둘 다 승인됐을 때만 고른다.
+4. **지금, 또는 정한 시각.** 시각은 서버 시간대로 읽는다. 예약한 시각이 되면 lane 을 시작 마감까지
+   기다리고, 그때까지 못 집히면 만료된다.
+5. **승인된 빌드 번호는 사람이 직접 친다.** 자동으로 채워지지 않고, plan 의 번호와 같아야 한다.
+6. **출시 예약**(Book go-live, 지금이면 Go live now) 버튼이 요청을 보낸다. 서버가 plan 과 그 나이와
+   번호를 다시 확인한다([출시](configuration.md#going-live-golive)).
+7. **예약과 실행 중**(Booked and running)에 이 버전에 걸린 예약이 **취소** 버튼과 함께 나온다.
+8. 영역 아래에 원칙 문장이 한 번 더 있다.
 
 ## 11. 두 번째 컴퓨터
 

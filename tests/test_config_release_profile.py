@@ -203,7 +203,7 @@ def test_other_extra_keys_on_a_repo_are_still_refused(tmp_path, text, needle):
         (
             {"presets": {"deploy": "x"}},
             "[repos.app.release.presets]: unknown key(s): deploy "
-            "(roles are plan, upload, review, gate, qa, dev, version)",
+            "(roles are plan, upload, review, gate, qa, dev, version, status, golive)",
         ),
         ({"presets": {"plan": ""}}, "[repos.app.release.presets]: plan must be a preset name"),
         ({"presets": {"upload": 3}}, "[repos.app.release.presets]: upload must be a preset name"),
@@ -314,6 +314,24 @@ def version_inputs(mode_default: str = "prefill", modes: list[str] | None = None
     )
 
 
+#: `status` 프리셋 — rcm 이 보내는 입력은 `build_name` 하나(비면 최근 버전들, M5s §4.4).
+#: `PLAN_INPUTS` 와 글자가 달라야 그 치환 시험이 이 프리셋을 건드리지 않는다.
+STATUS_INPUTS = 'inputs = [{ name = "build_name", default = "" }]\n'
+
+
+def golive_inputs(mode_default: str = "plan", android: bool = True) -> str:
+    """`golive` 프리셋의 입력 — rcm 이 보내는 넷과 `build_name_android`(M5s §4.5 · §4.6)."""
+    return (
+        "inputs = [\n"
+        '  { name = "build_name" },\n'
+        + (BUILD_NAME_ANDROID if android else "")
+        + '  { name = "confirm_build_number", default = "" },\n'
+        + choice("platform", ["ios", "android", "both"], "ios")
+        + choice("mode", ["plan", "release"], mode_default)
+        + "]\n"
+    )
+
+
 def presets(
     upload_mode: str = "rehearsal",
     review_mode: str = "plan",
@@ -321,6 +339,9 @@ def presets(
     version_mode: str | None = "prefill",
     build_name_android: bool = True,
     version_modes: list[str] | None = None,
+    status_inputs: str | None = STATUS_INPUTS,
+    golive_mode: str | None = "plan",
+    golive_android: bool = True,
 ) -> str:
     listing = LISTING_JSON if listing_json else ""
     android = BUILD_NAME_ANDROID if build_name_android else ""
@@ -360,6 +381,18 @@ def presets(
         + preset_block("release-review", "release/review.sh", review)
         + preset_block("gate-smoke", "gate.sh")
         + version
+        + (
+            ""
+            if status_inputs is None
+            else preset_block("release-status", "release/status.sh", status_inputs)
+        )
+        + (
+            ""
+            if golive_mode is None
+            else preset_block(
+                "release-golive", "release/golive.sh", golive_inputs(golive_mode, golive_android)
+            )
+        )
     )
 
 
@@ -390,6 +423,8 @@ gate = "gate-smoke"
 qa = "scenario-qa"
 dev = "deploy-dev"
 version = "release-version"
+status = "release-status"
+golive = "release-golive"
 [[repos.app.release.secrets]]
 name = "AuthKey.p8"
 kind = "file"
@@ -420,6 +455,7 @@ def test_check_row_is_ok_when_every_role_and_secret_is_in_place(srv, env, tmp_pa
     assert detail.startswith(
         "plan=release-plan upload=release-upload review=release-review gate=gate-smoke "
         "qa=scenario-qa dev=deploy-dev version=release-version "
+        "status=release-status golive=release-golive "
         "· driver=scripts/release/product_release.sh · 1 secret(s)"
     ), detail
 
@@ -446,6 +482,8 @@ def test_check_row_warns_about_unset_optional_roles_and_a_missing_secrets_dir(
     )
     assert "dev not configured" in detail
     assert "version not configured" in detail  # 선택 역할 — 없으면 새 버전 만들기가 즉시 editing
+    assert "status not configured" in detail  # 선택 역할 — M5s §4.6, 결정 219
+    assert "golive not configured" in detail
     assert f"secrets dir {tmp_path / 'secrets' / 'app'} does not exist yet" in detail, detail
 
 
@@ -673,6 +711,72 @@ def test_check_row_says_nothing_when_the_version_mode_can_take_them(
     assert code == 0, out + err
     status, detail = release_row(out)
     assert status == "ok" and "cannot take" not in detail, detail
+
+
+# ── M5s S17 — status · golive 의 rcm check 규칙(§4.6) ─────────────────────────
+
+
+def test_check_row_fails_when_the_golive_preset_defaults_to_release(srv, env, tmp_path, capsys):
+    """golive 의 되돌릴 수 없는 모드는 `release` 다 — 기본값이면 손으로 돌린 한 번이 출시가 된다."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(golive_mode="release"))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 1, out + err
+    status, detail = release_row(out)
+    assert status == "FAIL"
+    assert (
+        "preset 'release-golive' input 'mode' defaults to 'release' — "
+        "the irreversible mode must not be the default"
+    ) in detail, detail
+
+
+def test_check_row_fails_when_status_or_golive_lack_the_inputs_rcm_sends(
+    srv, env, tmp_path, capsys
+):
+    env(srv)
+    text = (
+        presets()
+        .replace(STATUS_INPUTS, "")
+        .replace(golive_inputs(), 'inputs = [{ name = "build_name" }]\n')
+    )
+    cfg = write_config(tmp_path, GOOD_PROFILE, text)
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 1, out + err
+    status, detail = release_row(out)
+    assert status == "FAIL"
+    assert "preset 'release-status' lacks inputs rcm sends: build_name" in detail, detail
+    assert (
+        "preset 'release-golive' lacks inputs rcm sends: confirm_build_number, platform, mode"
+    ) in detail, detail
+
+
+def test_check_row_warns_when_golive_has_no_build_name_android(srv, env, tmp_path, capsys):
+    """두 스토어가 다른 버전 이름을 쓰면 golive 는 Android 이름을 따로 받아야 한다 — 없으면 warn."""
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets(golive_android=False))
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "warn"
+    assert (
+        "preset 'release-golive' has no build_name_android input — the two stores must then "
+        "share one version name (re-run /rcm-store-connect)"
+    ) in detail, detail
+    assert detail.count("build_name_android") == 1, detail
+
+
+def test_check_row_is_ok_when_status_and_golive_are_set_and_well_formed(srv, env, tmp_path, capsys):
+    env(srv)
+    cfg = write_config(tmp_path, GOOD_PROFILE, presets())
+    (tmp_path / "secrets" / "app").mkdir(parents=True)
+    code, out, err = run(capsys, ["check", "--config", str(cfg)])
+    assert code == 0, out + err
+    status, detail = release_row(out)
+    assert status == "ok", detail
+    assert "status=release-status golive=release-golive" in detail, detail
 
 
 def test_check_prints_no_release_row_for_a_repo_without_a_profile(srv, env, tmp_path, capsys):

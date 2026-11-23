@@ -24,7 +24,7 @@ OUT = ROOT / "docs" / "images" / "ui"
 
 sys.path.insert(0, str(CAP))
 from annotate import annotate_file, save_png  # noqa: E402
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
 from term import render  # noqa: E402
 
 Rect = tuple[float, float, float, float]
@@ -73,6 +73,40 @@ def on_row(d: dict, sel: str, r: Rect) -> Rect:
     assert items, f"{sel} on the row at y={r[1]} not found"
     e = min(items, key=lambda e: e["x"])
     return (e["x"], e["y"], e["w"], e["h"])
+
+
+def stitch(src: str, bands: list[tuple[int, int]], *, gap: int = 18):
+    """한 원본에서 세로 띠 여럿을 잘라 위아래로 잇는다 — 사이의 긴 본문을 건너뛴다.
+
+    띠 사이에는 점선 한 줄을 그어 「여기 무엇이 빠졌다」를 숨기지 않는다. 결과는 `RAW` 에
+    `<src>-stitched.png` 로 쓰고, 원본 좌표의 상자를 잇은 그림의 좌표로 옮기는 함수를 돌려준다.
+    """
+    img = Image.open(RAW / f"{src}.png").convert("RGB")
+    h = sum(b - a for a, b in bands) + gap * (len(bands) - 1)
+    bg = img.getpixel((5, bands[0][0]))
+    canvas = Image.new("RGB", (img.width, h), bg)
+    draw = ImageDraw.Draw(canvas)
+    offsets: list[tuple[int, int, int]] = []  # (원본 위, 원본 아래, 잇은 그림의 위)
+    y = 0
+    for i, (a, b) in enumerate(bands):
+        canvas.paste(img.crop((0, a, img.width, b)), (0, y))
+        offsets.append((a, b, y))
+        y += b - a
+        if i < len(bands) - 1:
+            mid = y + gap // 2
+            for x in range(40, img.width - 40, 14):
+                draw.line((x, mid, x + 7, mid), fill=(120, 128, 140), width=2)
+            y += gap
+    name = f"{src}-stitched"
+    canvas.save(RAW / f"{name}.png")
+
+    def move(r: Rect) -> Rect:
+        for a, b, top in offsets:
+            if a <= r[1] < b:
+                return (r[0], r[1] - a + top, r[2], r[3])
+        raise AssertionError(f"box at y={r[1]} is outside every band {bands}")
+
+    return name, move
 
 
 def out(name: str, src: str, boxes, crop=None, **kw) -> None:
@@ -254,6 +288,77 @@ def main() -> int:
         ],
     )
 
+    # ── M5s: 예약 · 사람이 할 일 · 알림 실패 ────────────────────────────────
+    sc = rects("schedule")
+    g_row = pick(sc, "[data-scheduled]", idx=0)
+    out(
+        "web-scheduled.png",
+        "schedule",
+        [
+            (1, pick(sc, "[data-notify-failures]"), "l"),
+            (2, pick(sc, ".sum-stuck"), "tr"),
+            (3, sub(pick(sc, "[data-scheduled-section] .pool-h"), w=110), "l"),
+            (4, on_row(sc, "[data-scheduled] .reason", g_row), "t"),
+            # 시각 칸 하나 · 취소 버튼 하나만 두른다. 세 행을 한 상자로 묶으면 옆 칸(요청자 ·
+            # 이유)의 글자까지 덮는다. 시각은 셋째 행 것 — 그 오른쪽만 비어 번호가 들어간다
+            (5, pick(sc, "[data-scheduled] .when", idx=2), "r"),
+            (6, pick(sc, "[data-scheduled] .cancel", idx=1), "r"),
+        ],
+        crop=(0, 0, 1280, int(sum(pick(sc, "[data-scheduled-section]")[1::2])) + 12),
+    )
+
+    # ── M5s: Store 탭 — 검토 패널의 심사 상태 · 버전 페이지의 출시 예약 ─────────
+    ss = rects("store-status")
+    panel = pick(ss, "#review-panel > summary")
+    check = pick(ss, "[data-store-check]")
+    pol = [e for e in ss[".policy"] if e["w"] > 0]
+    pol_r = [(e["x"], e["y"], e["w"], e["h"]) for e in pol]
+    name, move = stitch(
+        "store-status",
+        [
+            (int(panel[1]) - 14, int(check[1] + check[3]) + 14),
+            (int(pol_r[0][1]) - 14, int(pol_r[-1][1] + pol_r[-1][3]) + 14),
+        ],
+    )
+    rows = union(*[pick(ss, "[data-store-check-platform]", idx=i) for i in range(2)])
+    out(
+        "store-review-status.png",
+        name,
+        [
+            (1, move(rows), "l"),
+            (2, move(pick(ss, "[data-store-check-refresh]")), "r"),
+            (3, move(pol_r[0]), "l"),
+            (4, move(pol_r[-1]), "l"),
+        ],
+    )
+
+    gl = rects("store-golive")
+    sheet = pick(gl, "[data-golive-sheet]")
+    labels = [pick(gl, ".golive-body label", idx=i) for i in range(6)]
+    left = pick(gl, "[data-golive-plan]")[0]
+
+    def wide(r: Rect) -> Rect:
+        return (left, r[1], r[0] + r[2] - left, r[3])
+
+    g_pol = next((e["x"], e["y"], e["w"], e["h"]) for e in gl[".policy"] if e["w"] > 0)
+    out(
+        "store-golive.png",
+        "store-golive",
+        [
+            (1, pick(gl, "[data-golive-sheet] .s-h"), "l"),
+            (2, pick(gl, "[data-golive-plan]"), "l"),
+            # 번호는 상자 왼쪽에 — 오른쪽에는 칸마다 안내 문장이 붙어 있다. 줄 머리(Platform ·
+            # When)까지 상자에 넣어 번호가 그 글자를 덮지 않게 한다
+            (3, wide(union(*labels[0:3])), "l"),
+            (4, wide(union(labels[3], labels[4], pick(gl, "[data-golive-at]"))), "l"),
+            (5, union(labels[5], pick(gl, "[data-golive-n]")), "l"),
+            (6, pick(gl, '[data-golive="go"]'), "l"),
+            (7, pick(gl, "[data-golive-live]"), "l"),
+            (8, g_pol, "l"),
+        ],
+        crop=(0, int(sheet[1]) - 14, 1280, int(g_pol[1] + g_pol[3]) + 14),
+    )
+
     # ── 터미널 ──────────────────────────────────────────────────────────────
     ls = lines("x-setup")
     i_init, i_add, i_list = (
@@ -350,7 +455,8 @@ def main() -> int:
         "cli-join.png",
         ls,
         [(1, 0, i_second - 1), (2, i_joined, at(ls, "fetch its artifacts", after=i_joined) - 1)],
-        title="같은 트리를 두 세션이 낸다",
+        # 터미널 글꼴에 한글이 없다 — 제목과 주석은 영어로 둔다(한글은 네모로 그려졌다)
+        title="two sessions, one tree",
     )
 
     ls = lines("x-top")
