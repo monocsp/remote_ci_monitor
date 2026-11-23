@@ -55,14 +55,17 @@ of a key bumps that number and is listed here.
   version, runs the plan first, lists what is booked with a cancel button, and draws the last
   `golive.json` — a platform the script never tried is «not attempted», not «failed».
   `GET …/release` carries `golive.live[]`, the booked and running go-live jobs.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - `rcm release status [REPO] [--build-name X]` runs the `status` role, waits, and prints both
   stores' version, build, state and the store's own word.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - `rcm-store-connect` installs `release_status.sh` and `release_golive.sh` and adds the presets
   `release-status` and `release-golive` (`priority = "high"`, `start_deadline_seconds = 3600`,
   `concurrency_group = "store-browser-<repo>"` shared with the project's Play Console sign-in
   preset) and the two roles to `profile.release.toml`. The go-live selftest now proves the script
   never sleeps when a sign-in is lost (a recording `sleep` stub, under 3 seconds), and it now runs
   in under two seconds: the script starts Python a few times per run instead of once per field.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 
 ### Changed
 - **The fixed sentence about going live changed everywhere** — the Store tab, the version page,
@@ -72,11 +75,14 @@ of a key bumps that number and is listed here.
   The review panel adds «Play has no API to publish a held release, so the project's go-live
   script publishes through a browser or asks a person.» Release after approval was never
   automatic and still is not; a person can now ask for it from rcm instead of the store consoles.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - **`POST /jobs` refuses the `golive` role's preset with `mode = release`** for every token,
   admin included: 409 `release_route_required` (`rcm run` exits 2). Going live takes the golive
   route, which runs the gate. `review` and `upload` are unchanged.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - The release routes' answers (`plan`, `review`, `upload`, `golive`) carry `submission`, the cancel secret `POST /jobs` gives, and a scheduled golive answers 201
   with `not_before`, `start_deadline` and `timezone`; immediate ones stay 202.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
   every final state. Give the rule an `on` list to keep the old set.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
