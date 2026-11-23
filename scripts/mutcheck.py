@@ -145,6 +145,10 @@
      서비스 venv 의 rcm 을 못 알아봄 · 닫힌 PR 의 합류한 잡을 취소함 · `guard_merge` 가 붙여 쓴
      `-Ro/r` 를 못 봄 · `-n` 에서 `--dist` 를 loadgroup 으로 안 정함 · timeout 이 하네스의 새 세션
      자식을 남김 (`docs/m5r-workplan.md` §13.8)
+  M5s E — `m5s-*` 여덟: 역할 프리셋을 다시 한 창으로 읽음 · status 행이 jobs[] 의 50 자리를 같이
+     씀 · 필요 없는 묶음 목록까지 읽음 · 도는 status 잡이 「지금 하는 일」이 됨 · 목록에 없는
+     상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
+     모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -1114,6 +1118,93 @@ MUTANTS = (
             "tests/test_release_state.py::"
             "test_status_is_the_latest_status_json_aged_from_checked_at",
         ),
+    ),
+    # ── M5s PR E — status 라우트 · 역할별 창 · 검토 패널 (docs/m5s-workplan.md §4.4 · §3 #11) ──
+    Mutant(
+        # 역할 프리셋 잡 500개를 다시 한 창으로 읽는다 — 자주 도는 status 잡이 그 창을 채우면
+        # plan · review 의 최신 문서가 null 이 되고 되돌릴 수 없는 문이 닫힌다
+        name="m5s-release-view-one-shared-window",
+        path="src/remote_ci_monitor/server.py",
+        old="self.store.list_jobs_by_preset([preset_name], window)",
+        new="self.store.list_jobs_by_preset([n for n in presets.values() if n], 500)",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_frequent_status_jobs_do_not_push_the_plan_out",
+        ),
+    ),
+    Mutant(
+        # status 행이 jobs[] 의 50 자리를 같이 쓴다 — 다른 역할의 행과 그 끝난 시각이 사라진다
+        name="m5s-status-rows-crowd-jobs",
+        path="src/remote_ci_monitor/release_state.py",
+        old="            wants_row = status_rows < STATUS_ROWS_LIMIT\n",
+        new="            wants_row = len(rows) < JOBS_LIMIT\n",
+        tests=(
+            "tests/test_release_status_panel.py::test_release_status_panel_status_rows_do_not_crowd_jobs",
+        ),
+    ),
+    Mutant(
+        # 필요 없는 잡의 묶음 목록까지 읽는다 — 5분마다 도는 status 잡 500개를 매 조회마다 다 연다
+        name="m5s-release-view-reads-every-bundle",
+        path="src/remote_ci_monitor/release_state.py",
+        old="        if not wants_row and not missing:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_unneeded_status_bundles_are_not_read",
+        ),
+    ),
+    Mutant(
+        # 도는 status 잡이 Build·upload 행의 「지금 하는 일」이 된다
+        name="m5s-web-status-job-is-what-runs-now",
+        path="src/remote_ci_monitor/web/app.js",
+        old='return j && isNum(j.id) && j.role !== "status"; })',
+        new="return j && isNum(j.id); })",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 목록에 없는 상태 값을 그대로 믿는다 — `APPROVED` 같은 원문이 승인처럼 그려질 수 있다
+        name="m5s-web-store-state-outside-the-list",
+        path="src/remote_ci_monitor/web/app.js",
+        old='var st = d && STORE_CHECK_STATES.indexOf(d.state) >= 0 ? d.state : "unknown";',
+        new='var st = d && d.state ? String(d.state).toLowerCase() : "unknown";',
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 행이 찼으면 문서 찾기까지 건너뛴다 — 묶음 없는 status 잡 셋이나 새 다른 역할 잡 50개
+        # 뒤의 status.json · plan.json 을 잃는다(#254 격리 검증 P1)
+        name="m5s-release-view-skips-documents-when-rows-are-full",
+        path="src/remote_ci_monitor/release_state.py",
+        old="        if not wants_row and not missing:\n",
+        new="        if not wants_row:\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_full_status_rows_still_find_an_older_status_document",
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_full_rows_still_find_an_older_plan_document",
+        ),
+    ),
+    Mutant(
+        # 프리셋마다 읽은 잡을 합친 뒤 새것부터 다시 세우지 않는다 — jobs[] 가 프리셋 순서가 되고
+        # 「역할의 최신」이 옛 잡이 된다(#254 격리 검증 P2)
+        name="m5s-release-view-merged-jobs-unsorted",
+        path="src/remote_ci_monitor/server.py",
+        old="        jobs = [by_id[i] for i in sorted(by_id, reverse=True)]\n",
+        new="        jobs = list(by_id.values())\n",
+        tests=(
+            "tests/test_release_status_panel.py::"
+            "test_release_status_panel_jobs_from_several_presets_are_newest_first",
+        ),
+    ),
+    Mutant(
+        # 실패한 「새로 조회」를 모른 척한다 — 예전 상태가 아무 말 없이 그려진다
+        name="m5s-web-failed-check-silent",
+        path="src/remote_ci_monitor/web/app.js",
+        old="var lastFailed = newest && STORE_CHECK_FAILED[newest.state] &&",
+        new="var lastFailed = false && newest && STORE_CHECK_FAILED[newest.state] &&",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
     ),
     # ── M5q PR A — 클라이언트가 서버 버전을 따라간다 (docs/m5q-workplan.md §6) ──
     Mutant(

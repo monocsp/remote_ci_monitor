@@ -203,6 +203,7 @@ from remote_ci_monitor.release_state import (
     read_bundle_member,
     release_view,
     resolve_build_number,
+    role_windows,
     version_name_check,
 )
 from remote_ci_monitor.release_verify import run_verify
@@ -261,7 +262,8 @@ MAX_SECRET_BODY = 4 * 1024 * 1024
 #: 스토어 탭 API 계약 v2 — `/api/repos/<repo>/release[/<action>[/validate|/file]]`.
 _RELEASE_RE = re.compile(
     r"^/api/repos/([^/]+)/release"
-    r"(?:/(plan|review|upload|listing|github|driver|start|confirm|abort|retry)(?:/(validate|file))?)?$"
+    r"(?:/(plan|review|upload|status|listing|github|driver|start|confirm|abort|retry)"
+    r"(?:/(validate|file))?)?$"
 )
 #: 버전 페이지(docs/version-page-workplan.md §2.2) —
 #: `/api/repos/<repo>/release/versions[/<id>[/listing|/diff]]`.
@@ -1348,7 +1350,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         profile = repo.release
         assert profile is not None
         presets = {role: profile.preset_for(role) for role in RELEASE_ROLES}
-        jobs = self.store.list_jobs_by_preset([n for n in presets.values() if n], 500)
+        # 프리셋마다 자기 창 — 자주 도는 status 잡이 plan · review 잡을 창 밖으로 밀어내지 않는다
+        # (M5s §3 #11). 합친 목록은 새것부터다(`release_view` 의 전제).
+        by_id: dict[int, Job] = {}
+        for preset_name, window in role_windows(presets).items():
+            for job in self.store.list_jobs_by_preset([preset_name], window):
+                by_id[job.id] = job
+        jobs = [by_id[i] for i in sorted(by_id, reverse=True)]
 
         def names_of(job_id: int) -> list[Any]:
             row = self.store.get_bundle(job_id)
@@ -1446,6 +1454,22 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         build_name = self._version_build_name(body, row)
         ref = self._release_ref(body, repo)
         return self._release_submit(repo, preset, {"build_name": build_name}, ref, token, host)
+
+    def release_status(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/status` — `presets.status` 에 `build_name`(선택)만 보낸다. 스토어를
+        읽기만 하는 역할이라 아무 클라이언트 토큰이면 된다. 비우면 스크립트가 최근 버전들을
+        읽는다(M5s §4.4)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        preset = self._role_preset(repo, "status")
+        inputs: dict[str, Any] = {}
+        if self._body_str(body, "build_name"):
+            inputs["build_name"] = self._build_name(body)
+        ref = self._release_ref(body, repo)
+        return self._release_submit(repo, preset, inputs, ref, token, host)
 
     def release_review(
         self, name: str, body: Any, token: TokenInfo, host: str | None
@@ -5692,8 +5716,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         self, method: str, name: str, action: str | None, sub: str | None, query: dict[str, Any]
     ) -> None:
         """`/api/repos/<name>/release/…`(계약 v2) — GET 은 읽기 규칙(워커 토큰 거부), plan ·
-        review · upload · listing/validate 는 클라이언트 토큰(되돌릴 수 없는 모드는 App 이 admin
-        을 본다), 드라이버의 start · confirm · abort · retry 는 admin. 쓰기는 Bearer 만(CSRF)."""
+        review · upload · status · listing/validate 는 클라이언트 토큰(되돌릴 수 없는 모드는
+        App 이 admin 을 본다), 드라이버의 start · confirm · abort · retry 는 admin. 쓰기는
+        Bearer 만(CSRF)."""
         host = self.headers.get("Host")
         is_get = action is None or action in ("github", "driver")
         if is_get or (action == "listing" and sub != "validate"):
@@ -5728,12 +5753,13 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self.app.require_client_token(self._token())
             self._send_json(200, self.app.release_listing_validate(name, self._json_body()))
             return
-        if action in ("plan", "review", "upload"):
+        if action in ("plan", "review", "upload", "status"):
             t = self.app.require_client_token(self._token())
             fn = {
                 "plan": self.app.release_plan,
                 "review": self.app.release_review,
                 "upload": self.app.release_upload,
+                "status": self.app.release_status,
             }[action]
             status, body = fn(name, self._json_body(), t, host)
             self._send_json(status, body)
