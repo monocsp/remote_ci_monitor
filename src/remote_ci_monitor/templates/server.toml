@@ -67,6 +67,9 @@ max_concurrent_artifact_transfers = 2       # over this, the server answers 503 
 # auto_checks = true                # a changed fingerprint runs that machine's check presets once
 # local_accept_any = true           # this server's own lanes take placement = "any-capable" jobs
 # check_sweep_seconds = 30          # how often the automatic checks are looked for
+# schedule_start_deadline_seconds = 900   # rcm run --at/--in: a lane must pick the job up this soon
+#                                   # after its time, or it ends expired (a preset's start_deadline_seconds wins)
+# schedule_max_ahead_days = 14      # --at/--in further ahead than this is refused
 
 [estimate]
 sample_days = 45
@@ -122,6 +125,8 @@ timezone = ""               # IANA zone, e.g. "Asia/Seoul". Empty = server local
 # qa = "scenario-qa"                             # optional
 # dev = "deploy-dev"                             # optional
 # version = "release-version"                    # optional — «new version» from the web; mode must default to "prefill"
+# status = "release-status"                      # optional — both stores' review state → status.json (read-only)
+# golive = "release-golive"                      # optional — a release a person asked for; mode must default to "plan"
 # [[repos.app.release.secrets]]                  # zero or more; only names and shapes, never values
 # name = "AuthKey.p8"                            # file name or env name; unique in the profile
 # kind = "file"                                  # "value" | "file" | "dir"

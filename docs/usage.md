@@ -158,6 +158,13 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
    ends when the job does. Ctrl-C detaches again without stopping anything.
 5. The exit code is the job's, exactly as if you had waited from the start.
 
+**Later instead of now.** `rcm run deploy --ref main --at 15:00` (or `--in 90m`) hands the server
+a time. The job waits as `scheduled` and enters the queue at that time: `rcm jobs` lists it as
+`at 15:00`, and `rcm wait --job N` prints `scheduled for 15:00 · start by 15:15` and keeps
+waiting. If no lane picks it up within its start deadline (15 minutes unless the preset sets
+another) it ends `expired`, exit 2 — it did not run. The rules are in
+[running a job later](configuration.md#running-a-job-later---at-and---in).
+
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
 

@@ -277,6 +277,9 @@ def queue_row_json(
         "shelf": None,
         # M5s — 잡이 찍은 마지막 「사람이 할 일」 표식(`::rcm::action::`). 키 추가만
         "action": action_json(row.action),
+        # M5s — 예약에서 온 잡이면 그 시각과 시작 마감. 즉시 실행이면 둘 다 null. 키 추가만
+        "not_before": iso(job.not_before),
+        "start_deadline": iso(job.start_deadline),
     }
 
 
@@ -298,7 +301,7 @@ def recent_json(
     started = job.started_at
     finished = job.finished_at
     job_seconds = (finished - started).total_seconds() if started and finished else None
-    waited = (started - job.created_at).total_seconds() if started else None
+    waited = (started - job.wait_origin).total_seconds() if started else None
     return {
         "pool": job.pool,
         "id": job.id,
@@ -339,6 +342,41 @@ def recent_json(
         "shelf": None,
         # M5s — 마지막 「사람이 할 일」 표식. 잡이 끝나도 남는다(이벤트로 저장). 키 추가만
         "action": action_json(action),
+        # M5s — 예약에서 온 잡이면 그 시각과 시작 마감(`expired` 는 언제까지였나). 키 추가만
+        "not_before": iso(job.not_before),
+        "start_deadline": iso(job.start_deadline),
+    }
+
+
+def scheduled_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
+    """예약 행 하나(M5s §4.1 · `pools[].scheduled[]` · 예약 잡의 `GET /jobs/<id>`).
+
+    큐 행이 아니다 — 순번 · 이유 · ETA 가 없다. 승격되기 전의 잡에 그 숫자를 지어내지 않는다.
+    """
+    return {
+        "id": job.id,
+        "pool": job.pool,
+        "preset": job.preset,
+        "key": job.key,
+        "inputs": dict(job.inputs),
+        "priority": job.priority,
+        "concurrency_group": job.concurrency_group,
+        "requester": _requester(job),
+        "joiners": _joiners(job),
+        "link": _link(job),
+        "state": job.state,
+        "source": source_json(job.source),
+        "created_at": iso(job.created_at),
+        "not_before": iso(job.not_before),
+        "start_deadline": iso(job.start_deadline),
+        "started_at": None,
+        "finished_at": None,
+        "url": job_url(base_url, job.id),
+        "placement": job.placement,
+        "display_pool": job.display_pool or job.pool,
+        "target_worker": job.target_worker,
+        "keep": job.keep,
+        "shelf": None,
     }
 
 
@@ -457,6 +495,14 @@ def pool_json(
         ),
         "queue_error": pool.queue_error,
         "queue_error_code": pool.queue_error_code,
+        # M5s — 예약(시각순). 큐 표와 따로 간다. 조회 실패는 null + `scheduled_error*`(관례)
+        "scheduled": (
+            [scheduled_json(j, base_url=base_url) for j in pool.scheduled]
+            if pool.scheduled is not None
+            else None
+        ),
+        "scheduled_error": pool.scheduled_error,
+        "scheduled_error_code": pool.scheduled_error_code,
         "recent": (
             [recent_json(j, base_url=base_url) for j in pool.recent]
             if pool.recent is not None

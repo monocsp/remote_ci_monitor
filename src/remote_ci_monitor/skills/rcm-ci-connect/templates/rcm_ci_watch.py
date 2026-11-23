@@ -61,7 +61,7 @@ OVERRIDE_CACHE_SECONDS = 300
 HOOK_GRACE_SECONDS = 120  # 끝난 잡의 상태가 이만큼 pending 이면 훅이 놓친 것이다
 STUCK_REASONS = {"worker_down": 120, "paused": 300}
 KEEP_SECONDS = 14 * 86400
-TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost")
+TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost", "expired")
 #: 감시가 올리는 pending 낱말. 가장 새 pending 이 이것이 아니면 잡 스크립트가 올린 것이다
 OWN_PENDING = ("queued", "running")
 #: 다시 내 볼 만한 제출 실패 — 서버 재시작 순간이다. 설정 · 인증 실패는 다시 내도 같다

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from remote_ci_monitor.core import artifacts as art
-from remote_ci_monitor.core.model import TERMINAL_STATES
+from remote_ci_monitor.core.model import NOTIFY_DEFAULT_STATES
 from remote_ci_monitor.core.progress import clean_line
 
 ENV_TEXT_LIMIT = 4096
@@ -26,7 +26,7 @@ class NotifyRule:
     """`[[notify]]` 하나. argv 와 url 중 정확히 하나."""
 
     name: str
-    on: frozenset[str] = frozenset(TERMINAL_STATES)
+    on: frozenset[str] = frozenset(NOTIFY_DEFAULT_STATES)
     presets: frozenset[str] | None = None
     argv: tuple[str, ...] | None = None
     url: str | None = None

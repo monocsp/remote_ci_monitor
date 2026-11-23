@@ -52,6 +52,7 @@ PLAUSIBLE: dict[str, dict[str, Any]] = {
     "server_restarted": {"at": "2026-09-08 01:02:03Z"},
     "server_restarted_during_upload": {},
     "server_stopped_while_running": {},
+    "start_deadline_passed": {"at": "2026-11-23 06:15Z"},  # M5s
     "upload_abandoned": {"seconds": 300},
     "upload_interrupted": {"bytes": 30_000_000},
     "snapshot_too_big": {"bytes": 700_000_000, "limit": 512_000_000},
@@ -93,6 +94,11 @@ PINNED: list[tuple[str, dict[str, Any], str]] = [
     ),
     ("server_restarted_during_upload", {}, "server restarted during upload"),
     ("server_stopped_while_running", {}, "server stopped while running"),
+    (
+        "start_deadline_passed",
+        {"at": "2026-11-23 06:15Z"},
+        "did not start by its start deadline 2026-11-23 06:15Z",
+    ),
     ("upload_abandoned", {"seconds": 300}, "upload abandoned after 5m"),
     ("upload_abandoned", {"seconds": 45}, "upload abandoned after 45s"),
     ("upload_interrupted", {"bytes": 30_000_000}, "upload interrupted after 30 MB"),

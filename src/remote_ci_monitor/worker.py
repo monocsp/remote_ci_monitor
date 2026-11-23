@@ -292,9 +292,11 @@ class Worker(threading.Thread):
             self._error = error
 
     def _claim(self, now: datetime) -> Job | None:
+        # 시작 마감(M5s)은 claim 트랜잭션 안에서 다시 읽은 시각으로 본다 — admit 이 걸린 동안
+        # 마감이 지났을 수 있다
         if self.claimant is None:
-            return self.store.claim(self.lane, now)
-        return self.store.claim(self.lane, now, claimant=self.claimant(now))
+            return self.store.claim(self.lane, now, now_fn=self.now_fn)
+        return self.store.claim(self.lane, now, claimant=self.claimant(now), now_fn=self.now_fn)
 
     def _set_hold(self, hold: Any) -> None:
         """부하로 막혔으면 `held`, 아니면 `idle`. `_set` 이 상태가 바뀔 때만 `_since` 를 되감으므로
@@ -329,7 +331,7 @@ class Worker(threading.Thread):
                     continue
                 now = self.now_fn()
                 if self.admit is None:
-                    current, hold = self.store.claim(self.lane, now), None
+                    current, hold = self.store.claim(self.lane, now, now_fn=self.now_fn), None
                 else:
                     current, hold = self.admit(self.lane, now, partial(self._claim, now))
                 if current is None:

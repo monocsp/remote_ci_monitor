@@ -1192,3 +1192,11 @@ def test_a_missing_rcm_executable_is_named_rcm_missing(rig):
     posts = [(p["state"], p["description"]) for p in rig.posts(S1)]
     assert posts[0] == ("pending", "queued · retrying submit (1/3)")
     assert posts[-1] == ("error", "unavailable · rcm_missing"), posts
+
+
+def test_an_expired_job_is_terminal_for_the_watcher():
+    """M5s — 옛 표에 `expired` 가 없으면 감시자가 끝난 잡을 도는 잡으로 보고 pending 에 멈춘다."""
+    from ci_fakes import load_templates
+
+    _cfg, _wait, watchmod, _status = load_templates()
+    assert "expired" in watchmod.TERMINAL

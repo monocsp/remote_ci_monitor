@@ -702,7 +702,8 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
     if reason == "worker_down":
         return "worker down"
     if reason == "not_scheduled":
-        return "not scheduled"
+        # 코드는 그대로, 글은 새 상태 `scheduled`(M5s)와 헷갈리지 않게(결정 238)
+        return "idle lane did not pick it up"
     if reason == "running":
         lane = row.get("lane")
         return f"running · lane {lane}" if lane else "running"
