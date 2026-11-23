@@ -189,13 +189,17 @@ from remote_ci_monitor.release_driver import (
 from remote_ci_monitor.release_secrets import SecretError, SecretStore, masker, store_for
 from remote_ci_monitor.release_state import (
     AUTO_BUILD_NUMBER,
+    GOLIVE_LIVE_STATES,
+    GOLIVE_RELEASE_MODE,
     PLATFORMS,
     PREFILL_KEYS,
     artifact_member,
+    golive_live,
     listing_diff,
     live_versions,
     merged_listing,
     next_version_hint,
+    numbers_match,
     parse_doc,
     plan_number,
     read_bundle_member,
@@ -259,7 +263,8 @@ MAX_SECRET_BODY = 4 * 1024 * 1024
 #: 스토어 탭 API 계약 v2 — `/api/repos/<repo>/release[/<action>[/validate|/file]]`.
 _RELEASE_RE = re.compile(
     r"^/api/repos/([^/]+)/release"
-    r"(?:/(plan|review|upload|listing|github|driver|start|confirm|abort|retry)(?:/(validate|file))?)?$"
+    r"(?:/(plan|review|upload|golive|listing|github|driver|start|confirm|abort|retry)"
+    r"(?:/(validate|file))?)?$"
 )
 #: 버전 페이지(docs/version-page-workplan.md §2.2) —
 #: `/api/repos/<repo>/release/versions[/<id>[/listing|/diff]]`.
@@ -270,7 +275,11 @@ LISTING_VALUE_MAX_BYTES = 16 * 1024
 LISTING_BODY_MAX_BYTES = 256 * 1024
 VERSION_HISTORY_LIMIT = 20
 #: 계약 §2 — 역할별로 rcm 이 보내는 입력. 프리셋이 그 밖에 선언한 입력은 기본값 그대로다.
-RELEASE_MODES = {"upload": ("rehearsal", "upload"), "review": ("plan", "submit")}
+RELEASE_MODES = {
+    "upload": ("rehearsal", "upload"),
+    "review": ("plan", "submit"),
+    "golive": ("plan", GOLIVE_RELEASE_MODE),
+}
 RELEASE_PLATFORMS = ("both", "ios", "android")
 MANAGED_PUBLISHING_VALUES = ("not-checked", "confirmed-on")
 MANAGED_PUBLISHING_CONFIRMED = "confirmed-on"
@@ -506,6 +515,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         #: 프로세스 안에만 둔다: 재시작은 업로드 중인 잡을 어차피 `cancelled` 로 닫는다.
         self._no_supersede: set[int] = set()
         self._no_supersede_lock = threading.Lock()
+        # golive 출시의 「살아 있는 사슬 확인 → 제출」을 한 줄로 세운다(409 `golive_running`,
+        # M5s 결정 232). 둘이 동시에 확인을 지나 같은 build 를 두 번 거는 일을 막는다.
+        self._golive_lock = threading.Lock()
         self.manifest_slots = threading.BoundedSemaphore(MANIFEST_CONCURRENCY)
         self.transfer_slots = threading.BoundedSemaphore(
             max(1, config.server.max_concurrent_artifact_transfers)
@@ -1374,21 +1386,35 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         ref: str,
         token: TokenInfo,
         host: str | None,
+        *,
+        schedule: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        """정규 제출 경로(`submit`)로 — 같은 검증 · 합류 · 우선순위 · 풀. 응답은 202 로 통일."""
-        body = {
+        """정규 제출 경로(`submit`)로 — 같은 검증 · 합류 · 우선순위 · 풀 · 예약.
+
+        `schedule` 은 본문의 `start_at`·`start_in_seconds` 그대로다(M5s §4.5 「제출 전달」). 지금
+        돌리는 제출은 오늘처럼 202, 시각을 정한 제출은 잡을 만들었다는 뜻으로 201 이고 정해진 시각과
+        시간대를 싣는다. `submit` 의 409(`schedule_exists` 같은)는 그대로 올라간다. 응답에는
+        `submission`(취소 비밀)을 싣는다 — `rcm cancel` 과 같은 권한으로 그 잡을 취소할 수 있다."""
+        body: dict[str, Any] = {
             "preset": preset.name,
             "inputs": inputs,
             "source": {"mode": MODE_GIT_REF, "ref": ref},
             "requester_label": f"store:{token.name}",
+            **(schedule or {}),
         }
-        _status, doc = self.submit(body, token, host)
-        return 202, {
+        _status, doc = self.submit(body, token, host, via_release_route=True)
+        out = {
             "job_id": doc["job_id"],
             "joined": doc.get("joined", False),
             "state": doc.get("state"),
             "sha": doc.get("sha"),
+            "submission": doc.get("submission"),
         }
+        if schedule:
+            for key in ("not_before", "start_deadline", "timezone"):
+                out[key] = doc.get(key)
+            return 201, out
+        return 202, out
 
     def _check_plan(
         self, view: dict[str, Any], build_name: str, typed: Any, *, prefix: str = "plan"
@@ -1577,6 +1603,144 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if row is not None and mode == "upload":
             self._version_link_job(row, doc["job_id"], "upload_job_id")
         return status, doc
+
+    def release_golive(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/golive`(M5s §4.5) — 승인된 빌드를 사람이 요청한 때에 출시한다.
+
+        `mode = plan`(기본)은 아무 클라이언트 토큰으로 스토어를 읽기만 하는 잡을 낸다. 시각은 받지
+        않는다(400). `mode = release` 는 admin 이고, 거는 **이 순간에** 같은 build_name 의 성공한
+        golive plan 이 있고 낡지 않았고, 고른 플랫폼이 모두 승인 상태이고, 사람이 친 번호가 그
+        플랫폼들의 `approved_build` 와 같아야 한다. `auto` 는 받지 않는다(결정 215). 같은
+        build_name 의 출시 사슬이 예약이거나 살아 있으면 409 `golive_running`(결정 232). 예약한
+        잡은 실행할 때 plan 의 나이를 다시 보지 않는다 — 스크립트가 그때 스토어를 다시 읽는다."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        preset = self._role_preset(repo, "golive")
+        row = self._version_for_body(repo, body, allow_submitted=True)
+        build_name = self._version_build_name(body, row)
+        ref = self._release_ref(body, repo)
+        mode = self._choice(body, "mode", RELEASE_MODES["golive"], "plan")
+        platform = self._choice(body, "platform", RELEASE_PLATFORMS, "both")
+        inputs: dict[str, Any] = {"build_name": build_name, "mode": mode, "platform": platform}
+        android = self._build_name_android_input(preset, row)
+        if android is not None:
+            inputs["build_name_android"] = android
+        schedule = {
+            key: body[key] for key in ("start_at", "start_in_seconds") if body.get(key) is not None
+        }
+        if mode != GOLIVE_RELEASE_MODE:
+            if schedule:
+                raise ApiError(
+                    400,
+                    "a golive plan runs now — start_at and start_in_seconds are for mode=release",
+                    code="golive_plan_now_only",
+                    error_code="golive_plan_now_only",
+                )
+            inputs["confirm_build_number"] = ""
+            return self._release_submit(repo, preset, inputs, ref, token, host)
+        if not token.admin:
+            raise ApiError(403, "going live needs an admin token", code="admin_required")
+        chosen = PLATFORMS if platform == "both" else (platform,)
+        typed = self._body_str(body, "confirm_build_number", default="") or ""
+        inputs["confirm_build_number"] = str(
+            self._check_golive_plan(self._release_view(repo), build_name, chosen, typed)
+        )
+        with self._golive_lock:
+            live = [
+                r
+                for r in golive_live(self.store.list_jobs_by_state(GOLIVE_LIVE_STATES), preset.name)
+                if r["build_name"] == build_name
+            ]
+            if live:
+                raise ApiError(
+                    409,
+                    f"build {build_name} already has a go-live job #{live[0]['job_id']} "
+                    f"({live[0]['state']}) — cancel it first (rcm cancel {live[0]['job_id']})",
+                    code="golive_running",
+                    error_code="golive_running",
+                    job_id=live[0]["job_id"],
+                    state=live[0]["state"],
+                )
+            return self._release_submit(
+                repo, preset, inputs, ref, token, host, schedule=schedule or None
+            )
+
+    @staticmethod
+    def _check_golive_plan(
+        view: dict[str, Any], build_name: str, chosen: tuple[str, ...], typed: str
+    ) -> int:
+        """golive release 의 문(409 표). 고른 플랫폼의 `approved` · `approved_build` 만 본다 —
+        Android 가 심사 중이어도 iOS 만 고른 출시는 통과한다(결정 224 · S21). 번호는 사람이 친
+        숫자만 받고, 고른 플랫폼 모두의 `approved_build` 와 같아야 한다."""
+        plan = (view.get("golive") or {}).get("plan")
+        doc = plan.get("doc") if plan else None
+        if plan is None or not isinstance(doc, dict) or plan.get("build_name") != build_name:
+            raise ApiError(
+                409,
+                f"no golive plan for build {build_name} — run golive in plan mode first",
+                code="golive_plan_required",
+                error_code="golive_plan_required",
+            )
+        if plan.get("state") != "succeeded":
+            raise ApiError(
+                409,
+                f"the golive plan (job {plan['job_id']}) is {plan.get('state')}, not succeeded",
+                code="golive_plan_required",
+                error_code="golive_plan_required",
+            )
+        if plan.get("stale"):
+            raise ApiError(
+                409,
+                "the golive plan is older than plan_max_age_minutes — plan again",
+                code="golive_plan_stale",
+                error_code="golive_plan_stale",
+                age_seconds=plan.get("age_seconds"),
+            )
+        platforms = doc.get("platforms") if isinstance(doc.get("platforms"), dict) else {}
+        unread = [p for p in chosen if not isinstance(platforms.get(p), dict)]
+        if unread:
+            raise ApiError(
+                409,
+                f"the golive plan (job {plan['job_id']}) did not read {', '.join(unread)} — "
+                "plan again with that platform",
+                code="golive_plan_required",
+                error_code="golive_plan_required",
+                platforms=unread,
+            )
+        blocked = [p for p in chosen if platforms[p].get("approved") is not True]
+        if blocked:
+            raise ApiError(
+                409,
+                f"not approved: {', '.join(blocked)} — nothing goes live before approval",
+                code="golive_plan_blocked",
+                error_code="golive_plan_blocked",
+                platforms=blocked,
+            )
+        approved = {p: platforms[p].get("approved_build") for p in chosen}
+        numbers = {n for n in approved.values() if isinstance(n, int) and not isinstance(n, bool)}
+        if len(chosen) > 1 and len(set(approved.values())) > 1:
+            raise ApiError(
+                409,
+                "the two stores approved different builds ("
+                + ", ".join(f"{p} {approved[p]}" for p in chosen)
+                + ") — go live with each platform separately",
+                code="build_number_mismatch",
+                error_code="build_number_mismatch",
+                approved_build=approved,
+            )
+        if len(numbers) != 1 or not numbers_match(typed, next(iter(numbers))):
+            raise ApiError(
+                409,
+                "confirm_build_number must be the approved build number the plan shows, typed "
+                "by a person (auto is not accepted here)",
+                code="build_number_mismatch",
+                error_code="build_number_mismatch",
+                approved_build=approved,
+            )
+        return next(iter(numbers))
 
     # ── 버전 드래프트 (버전 페이지 · docs/version-page-workplan.md §2.2) ──────
 
@@ -1993,16 +2157,20 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
 
     # ── 버전 ↔ plan · review · upload · start 의 `version_id` ────────────────
 
-    def _version_for_body(self, repo: RepoConfig, body: dict[str, Any]) -> dict[str, Any] | None:
+    def _version_for_body(
+        self, repo: RepoConfig, body: dict[str, Any], *, allow_submitted: bool = False
+    ) -> dict[str, Any] | None:
         """본문의 `version_id`(선택) → 행. 닫힌(submitted · discarded) 버전은 409
-        `version_closed`."""
+        `version_closed`. golive 만 `allow_submitted` 로 심사를 제출한 버전을 받는다 — 출시는
+        제출 **뒤의** 일이다(M5s 결정 216). 버린 버전은 그래도 닫혀 있다."""
         vid = body.get("version_id")
         if vid is None:
             return None
         if isinstance(vid, bool) or not isinstance(vid, int) or vid < 1:
             raise ApiError(400, "version_id must be a positive integer")
         row = self._version_row(repo, vid)
-        self._version_open(row)
+        if not (allow_submitted and row["state"] == VERSION_SUBMITTED):
+            self._version_open(row)
         return row
 
     def _version_build_name(self, body: dict[str, Any], row: dict[str, Any] | None) -> str:
@@ -3765,8 +3933,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
     # ── 제출 ────────────────────────────────────────────────────────────────
 
     def submit(
-        self, body: dict[str, Any], token: TokenInfo, host: str | None = None
+        self,
+        body: dict[str, Any],
+        token: TokenInfo,
+        host: str | None = None,
+        *,
+        via_release_route: bool = False,
     ) -> tuple[int, dict[str, Any]]:
+        """`POST /jobs`. 스토어 탭 라우트도 이 길로 잡을 낸다(`via_release_route`)."""
         if not isinstance(body, dict):
             raise ApiError(400, "body must be a JSON object")
         name = body.get("preset")
@@ -3777,6 +3951,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             inputs = validate_inputs(preset, body.get("inputs") or {})
         except InputError as e:
             raise ApiError(400, str(e)) from e
+        if not via_release_route:
+            self._refuse_golive_release(preset, inputs)
         src = body.get("source") or {}
         if not isinstance(src, dict):
             raise ApiError(400, "source must be an object")
@@ -3919,6 +4095,27 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             "placement": self.submission_placement(preset, job),
             **self._keep_fields(job, host),
         }
+
+    def _refuse_golive_release(self, preset: Preset, inputs: dict[str, Any]) -> None:
+        """일반 경로 막기(M5s 결정 235) — 프로파일이 golive 역할로 부르는 프리셋의 `mode = release`
+        는 `POST /jobs` 로 낼 수 없다. 누가 보내든(admin 도) 409 `release_route_required` 다.
+        그 길로는 admin · plan · 번호 · `golive_running` 검사를 모두 건너뛰기 때문이다. 기본값으로
+        release 가 된 입력도 막는다(검증을 지난 입력을 본다). review · upload 는 막지 않는다 —
+        드라이버 템플릿이 upload 를 `rcm run` 으로 낸다(후속으로 남긴 틈)."""
+        if str(inputs.get("mode", "")) != GOLIVE_RELEASE_MODE:
+            return
+        for repo in self.config.repos:
+            profile = repo.release
+            if profile is not None and profile.preset_for("golive") == preset.name:
+                raise ApiError(
+                    409,
+                    f"preset '{preset.name}' is the golive role of repo '{repo.name}': "
+                    f"mode=release goes through POST /api/repos/{repo.name}/release/golive "
+                    f"(rcm release golive {repo.name}), which checks the plan and the build number",
+                    code="release_route_required",
+                    error_code="release_route_required",
+                    repo=repo.name,
+                )
 
     def _schedule_of(
         self, body: dict[str, Any], preset: Preset
@@ -5675,8 +5872,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         self, method: str, name: str, action: str | None, sub: str | None, query: dict[str, Any]
     ) -> None:
         """`/api/repos/<name>/release/…`(계약 v2) — GET 은 읽기 규칙(워커 토큰 거부), plan ·
-        review · upload · listing/validate 는 클라이언트 토큰(되돌릴 수 없는 모드는 App 이 admin
-        을 본다), 드라이버의 start · confirm · abort · retry 는 admin. 쓰기는 Bearer 만(CSRF)."""
+        review · upload · golive · listing/validate 는 클라이언트 토큰(되돌릴 수 없는 모드는 App
+        이 admin 을 본다), 드라이버의 start · confirm · abort · retry 는 admin. 쓰기는 Bearer
+        만(CSRF)."""
         host = self.headers.get("Host")
         is_get = action is None or action in ("github", "driver")
         if is_get or (action == "listing" and sub != "validate"):
@@ -5711,12 +5909,13 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self.app.require_client_token(self._token())
             self._send_json(200, self.app.release_listing_validate(name, self._json_body()))
             return
-        if action in ("plan", "review", "upload"):
+        if action in ("plan", "review", "upload", "golive"):
             t = self.app.require_client_token(self._token())
             fn = {
                 "plan": self.app.release_plan,
                 "review": self.app.release_review,
                 "upload": self.app.release_upload,
+                "golive": self.app.release_golive,
             }[action]
             status, body = fn(name, self._json_body(), t, host)
             self._send_json(status, body)

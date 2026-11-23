@@ -22,6 +22,8 @@
   M5s A — `m5s-*` 다섯: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 즉시 실행이
      예약에 합류함 · 합류 쿼리가 시작 마감을 무시함 · 시각을 준 제출이 합류함
      (`docs/m5s-workplan.md` §4.1 · §7)
+  M5s F — `m5s-golive-release-without-admin`: golive release 의 admin 검사를 뺌
+     (`docs/m5s-workplan.md` §4.5 · §7)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -1111,6 +1113,15 @@ MUTANTS = (
             "tests/test_release_state.py::"
             "test_status_is_the_latest_status_json_aged_from_checked_at",
         ),
+    ),
+    # ── M5s PR F — golive 라우트 (docs/m5s-workplan.md §4.5 · §7) ──
+    Mutant(
+        # golive release 의 admin 검사를 없앤다 — 클라이언트 토큰 하나로 출시를 걸 수 있다
+        name="m5s-golive-release-without-admin",
+        path="src/remote_ci_monitor/server.py",
+        old='        if not token.admin:\n            raise ApiError(403, "going live',
+        new='        if False:\n            raise ApiError(403, "going live',
+        tests=("tests/test_release_golive.py::test_release_needs_an_admin_token",),
     ),
     # ── M5q PR A — 클라이언트가 서버 버전을 따라간다 (docs/m5q-workplan.md §6) ──
     Mutant(

@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from remote_ci_monitor.core.model import Job
+from remote_ci_monitor.core.model import ACTIVE_STATES, SCHEDULED_STATES, Job
 from remote_ci_monitor.core.status import iso
 
 #: 역할 → 묶음에서 찾는 파일. review 는 모드에 따라 둘
@@ -61,6 +61,10 @@ _VERSION_NAME_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _TRAILING_INT_RE = re.compile(r"^((?:\d+\.)*)(\d+)$")
 MAX_DOC_BYTES = 256 * 1024
 JOBS_LIMIT = 50
+#: golive 의 「살아 있는」 출시 — 예약이거나 큐 · 실행 중인 `mode = release` 잡(M5s 결정 232).
+#: 반복 시도 사이의 다음 시도도 `scheduled` 라 여기에 든다.
+GOLIVE_LIVE_STATES = ACTIVE_STATES | SCHEDULED_STATES
+GOLIVE_RELEASE_MODE = "release"
 
 #: `(job_id, 묶음 안 경로)` → 바이트. 실패는 예외로.
 ReadFile = Callable[[int, str], bytes]
@@ -147,6 +151,31 @@ def job_row(job: Job, role: str, names: list[str]) -> dict[str, Any]:
     }
 
 
+def golive_live(jobs: Iterable[Job], preset: str | None) -> list[dict[str, Any]]:
+    """golive 프리셋의 살아 있는 출시 잡 — 오래된 것부터. 서버의 409 `golive_running` 과 화면의
+    「출시 예약」 목록이 같은 규칙을 쓴다. plan 모드 잡은 스토어를 읽기만 하므로 넣지 않는다."""
+    if not preset:
+        return []
+    rows = []
+    for job in jobs:
+        if job.preset != preset or job.state not in GOLIVE_LIVE_STATES:
+            continue
+        if str(job.inputs.get("mode", "")) != GOLIVE_RELEASE_MODE:
+            continue
+        rows.append(
+            {
+                "job_id": job.id,
+                "state": job.state,
+                "build_name": job.inputs.get("build_name"),
+                "platform": job.inputs.get("platform"),
+                "confirm_build_number": job.inputs.get("confirm_build_number"),
+                "not_before": iso(job.not_before),
+                "start_deadline": iso(job.start_deadline),
+            }
+        )
+    return sorted(rows, key=lambda r: r["job_id"])
+
+
 def role_entry(
     job: Job,
     member: str,
@@ -198,6 +227,7 @@ def release_view(
     새것부터 ≤ 50 이고 역할 프리셋의 잡만이다. `names_of(job_id)` 는 묶음 매니페스트의 파일
     항목들(없으면 빈 목록). status 와 golive plan 도 plan 처럼 나이와 stale 을 잰다."""
     role_of = {name: role for role, name in presets.items() if name}
+    jobs = list(jobs)
     rows: list[dict[str, Any]] = []
     latest: dict[str, tuple[Job, str]] = {}  # 파일 basename → (잡, 묶음 안 경로)
     for job in jobs:
@@ -242,6 +272,8 @@ def release_view(
         "golive": {
             "plan": entry("golive-plan.json", aged=True),
             "result": entry("golive.json", aged=False),
+            # 「출시 예약」 목록 — 예약이거나 도는 release 잡(결정 232)
+            "live": golive_live(jobs, presets.get("golive")),
         },
         "jobs": rows,
     }
@@ -399,6 +431,8 @@ def merged_listing(prefill: Any, edited: Any) -> dict[str, dict[str, str]]:
 
 __all__ = [
     "AUTO_BUILD_NUMBER",
+    "GOLIVE_LIVE_STATES",
+    "GOLIVE_RELEASE_MODE",
     "JOBS_LIMIT",
     "LISTED_ROLES",
     "MAX_DOC_BYTES",
@@ -409,6 +443,7 @@ __all__ = [
     "artifact_member",
     "artifact_names",
     "bump_last_number",
+    "golive_live",
     "job_row",
     "listing_diff",
     "live_versions",

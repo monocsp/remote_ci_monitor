@@ -2941,7 +2941,7 @@
    *   token, admin, busy, refusal, repo, lang, nowMs, tzName}`.
    *
    * 되돌려 주는 것은 접힌 머리 한 줄 · 막대와 그 근거 · 단계 칩 · 남은 것 · 이전 버전과 달라진 것 ·
-   * 제출 가능 여부와 이유 · 보낼 본문이다. 출시·게시·롤아웃은 어떤 상태에서도 없다.
+   * 제출 가능 여부와 이유 · 보낼 본문이다. 심사 제출만 다룬다 — 출시는 「출시 예약」 영역의 일이다.
    */
   function sheetModel(ctx) {
     ctx = ctx || {};
@@ -3205,8 +3205,132 @@
       versionListing: function (name, id, body) {
         return call("PUT", base(name) + "/release/versions/" + enc(String(id)) + "/listing", JSON.stringify(body || {}), "application/json");
       },
-      versionDiscard: function (name, id) { return call("DELETE", base(name) + "/release/versions/" + enc(String(id))); }
+      versionDiscard: function (name, id) { return call("DELETE", base(name) + "/release/versions/" + enc(String(id))); },
+      // ── 출시 예약(M5s §4.5) — 출시로 가는 **유일한** 호출이다. plan 은 읽기만, release 는 admin ·
+      //    사람이 친 번호 · 지금이나 정한 시각. 문은 전부 서버가 지킨다 ──
+      golive: function (name, body) { return call("POST", base(name) + "/release/golive", JSON.stringify(body || {}), "application/json"); },
+      cancelJob: function (id) { return call("POST", "/jobs/" + enc(String(id)) + "/cancel", "{}", "application/json"); }
     };
+  }
+  // ── 출시 예약(M5s §4.5 · 결정 216 · 218) ─────────────────────────────────────
+  // 버전 페이지의 한 영역(`[data-golive-sheet]`)이다. `status.json` 이 그 플랫폼을 `approved` 라고
+  // 말할 때만 열리고, 열면 읽기 전용 plan 을 먼저 돌린다. 출시는 사람이 고른 플랫폼 · 지금이나
+  // 시각 · 친 빌드 번호로만 요청한다 — 번호를 대신 채우지 않는다.
+  var GOLIVE_PLATFORMS = ["ios", "android"];
+  /** golive.json 의 결과 낱말 → 색. 시도하지 않은 플랫폼(`reason: not_attempted`)은 실패가 아니다. */
+  var GOLIVE_RESULT_TONE = { requested: "running", released: "ok", published: "ok", pending: "running", needs_login: "stale", failed: "bad", not_attempted: "na" };
+  function goliveNames(version) {
+    var v = version || {}, out = {};
+    GOLIVE_PLATFORMS.forEach(function (p) { var n = v[p + "_version"]; if (n) out[p] = String(n); });
+    return out;
+  }
+  /** 이 버전의 이름으로 `status.json` 이 그 플랫폼을 승인했다고 말하나. 다른 버전의 상태는 세지
+      않는다(실패 쪽으로 닫힌다 — 이름이 없거나 다르면 승인이 아니다). */
+  function goliveStatusApproved(release, version) {
+    var names = goliveNames(version), entry = release && release.status, doc = planEntryDoc(entry), out = {};
+    Object.keys(names).forEach(function (p) {
+      var part = doc && doc[p] && typeof doc[p] === "object" ? doc[p] : null;
+      out[p] = { state: part && typeof part.state === "string" ? part.state : null,
+        approved: !!part && part.state === "approved" && String(part.version || "") === names[p] };
+    });
+    return out;
+  }
+  function goliveJobState(release, id) {
+    var rows = release && Array.isArray(release.jobs) ? release.jobs : [];
+    for (var i = 0; i < rows.length; i++) if (rows[i] && rows[i].id === id) return rows[i].state;
+    return null;
+  }
+  /**
+   * 출시 예약 영역의 모든 것 — 열 수 있나 · plan 의 형편 · 고를 수 있는 플랫폼 · 보낼 수 있나와 그
+   * 이유 · 보낼 본문 · 예약 목록 · 마지막 결과. `ctx` = `{version, release, profile, form, admin,
+   * token, maxAge}`. `form` = `{open, planJob, platform, when, at, typed}`(이 브라우저의 state).
+   */
+  function goliveModel(ctx, lang) {
+    var c = ctx || {}, v = c.version || {}, rel = c.release || {}, form = c.form || {};
+    var names = goliveNames(v), plats = Object.keys(names);
+    var build = v.build_name || names.ios || names.android || null;
+    var presets = (c.profile && c.profile.presets) || {};
+    var status = goliveStatusApproved(rel, v);
+    var approvedNow = plats.filter(function (p) { return status[p].approved; });
+    var m = { configured: !!presets.golive, build: build, platforms: plats, status: status, canOpen: false, openWhy: null };
+    m.stateText = plats.map(function (p) {
+      return T(lang, "golive.platform." + p) + " " + (status[p].state ? T(lang, I18N.has("golive.status." + status[p].state) ? "golive.status." + status[p].state : "golive.status.unknown") : DASH);
+    }).join(" · ");
+    if (!m.configured) m.openWhy = T(lang, "golive.na.role");
+    else if (!rel.status) m.openWhy = T(lang, "golive.na.status");
+    else if (!approvedNow.length) m.openWhy = T(lang, "golive.na.approved");
+    else if (!c.token) m.openWhy = T(lang, "store.gate.no_token");
+    else if (v.state === "discarded") m.openWhy = T(lang, "golive.na.discarded");
+    m.canOpen = m.openWhy == null;
+    // 고를 수 있는 것 — 승인된 플랫폼 하나씩, 둘 다 승인됐을 때만 both
+    m.choices = plats.map(function (p) { return { value: p, enabled: status[p].approved }; });
+    if (plats.length === 2) m.choices.push({ value: "both", enabled: approvedNow.length === 2 });
+    var firstOk = m.choices.filter(function (x) { return x.enabled; })[0];
+    m.platform = form.platform && m.choices.some(function (x) { return x.value === form.platform && x.enabled; }) ? form.platform : (firstOk ? firstOk.value : null);
+    m.planBody = { version_id: v.id, mode: "plan", platform: plats.length === 2 ? "both" : (plats[0] || "both") };
+    // plan — 이 버전 이름의 가장 최근 golive-plan.json. 보낸 plan 이 아직 문서를 안 남겼으면 «읽는 중»
+    var gl = rel.golive || {}, entry = gl.plan || null, pdoc = planEntryDoc(entry);
+    var mine = entry && entry.build_name === build ? entry : null;
+    var waiting = form.planJob != null && (!entry || entry.job_id < form.planJob);
+    var planJobState = waiting ? goliveJobState(rel, form.planJob) : null;
+    var plan = { state: "none", text: T(lang, "golive.plan.none"), approved: {}, builds: {} };
+    if (waiting && planJobState && TERMINAL[planJobState]) plan = { state: "failed", text: T(lang, "golive.plan.no_doc", { id: form.planJob, state: planJobState }), approved: {}, builds: {} };
+    else if (waiting) plan = { state: "running", text: T(lang, "golive.plan.running", { id: form.planJob }), approved: {}, builds: {} };
+    else if (mine && pdoc) {
+      var parts = pdoc.platforms && typeof pdoc.platforms === "object" ? pdoc.platforms : {};
+      plats.forEach(function (p) {
+        var part = parts[p] && typeof parts[p] === "object" ? parts[p] : null;
+        plan.approved[p] = !!part && part.approved === true;
+        plan.builds[p] = part && typeof part.approved_build === "number" ? part.approved_build : null;
+      });
+      var detail = plats.map(function (p) {
+        return T(lang, "golive.platform." + p) + " " + T(lang, plan.approved[p] ? "golive.plan.approved" : "golive.plan.not_approved")
+          + (plan.builds[p] != null ? " · " + T(lang, "golive.plan.build", { n: plan.builds[p] }) : "");
+      }).join(" · ");
+      if (mine.state !== "succeeded") plan.state = "failed";
+      else plan.state = mine.stale ? "stale" : "ok";
+      plan.text = T(lang, "golive.plan." + plan.state, { id: mine.job_id, detail: detail, n: c.maxAge != null ? c.maxAge : DASH, state: mine.state });
+    }
+    m.plan = plan;
+    // 예약 목록 — 이 버전 이름의 살아 있는 출시 잡(서버의 `golive_running` 과 같은 규칙)
+    m.live = (Array.isArray(gl.live) ? gl.live : []).filter(function (r) { return r && r.build_name === build; });
+    // 마지막 결과 — 이 버전 이름의 golive.json
+    var res = gl.result || null, rdoc = planEntryDoc(res);
+    m.result = null;
+    if (res && rdoc && rdoc.build_name === build) {
+      var rp = rdoc.platforms && typeof rdoc.platforms === "object" ? rdoc.platforms : {};
+      m.result = { jobId: res.job_id, rows: Object.keys(rp).filter(function (p) { return GOLIVE_PLATFORMS.indexOf(p) >= 0; }).map(function (p) {
+        var part = rp[p] && typeof rp[p] === "object" ? rp[p] : {};
+        // 시도하지 않은 플랫폼은 「실패」가 아니라 「시도 안 함」이다(#252 검증 P2)
+        var word = part.reason === "not_attempted" ? "not_attempted" : String(part.result || "");
+        return { platform: p, word: word, tone: GOLIVE_RESULT_TONE[word] || "bad", reason: part.reason || null, raw: part.raw_state || null,
+          text: T(lang, "golive.platform." + p) + " " + (I18N.has("golive.result." + word) ? T(lang, "golive.result." + word) : word || DASH) };
+      }) };
+      m.result.login = m.result.rows.some(function (r) { return r.word === "needs_login"; });
+    }
+    // 보낼 수 있나 — 이유는 하나만, 먼저 막히는 것부터
+    var chosen = m.platform === "both" ? plats.slice() : (m.platform ? [m.platform] : []);
+    var typed = typeof form.typed === "string" ? form.typed.trim() : "";
+    var builds = chosen.map(function (p) { return plan.builds[p]; });
+    var why = null;
+    if (!c.admin) why = T(lang, "golive.why.admin");
+    else if (!m.platform) why = T(lang, "golive.na.approved");
+    else if (m.live.length) why = T(lang, "golive.why.running", { id: m.live[0].job_id });
+    else if (plan.state !== "ok") why = T(lang, plan.state === "stale" ? "golive.why.stale" : "golive.why.plan");
+    else if (chosen.some(function (p) { return !plan.approved[p]; })) why = T(lang, "golive.why.blocked", { names: chosen.filter(function (p) { return !plan.approved[p]; }).map(function (p) { return T(lang, "golive.platform." + p); }).join(", ") });
+    else if (chosen.length > 1 && builds[0] !== builds[1]) why = T(lang, "golive.why.split");
+    else if (!/^[0-9]+$/.test(typed)) why = T(lang, "golive.why.n");
+    else if (builds[0] == null || parseInt(typed, 10) !== builds[0]) why = T(lang, "golive.why.n_mismatch");
+    else if (form.when === "at" && !form.at) why = T(lang, "golive.why.at");
+    m.why = why;
+    m.can = why == null;
+    m.body = null;
+    if (m.can) {
+      m.body = { version_id: v.id, mode: "release", platform: m.platform, confirm_build_number: typed };
+      if (form.when === "at") m.body.start_at = String(form.at);
+    }
+    m.goLabel = T(lang, form.when === "at" ? "golive.go.at" : "golive.go.now");
+    return m;
   }
   var storePure = {
     parseRoute: parseRoute, releaseRepos: releaseRepos, setupSummary: setupSummary, fingerprintText: fingerprintText,
@@ -3239,7 +3363,9 @@
     PREFILL_KEYS: PREFILL_KEYS, VERSION_GROUPS: VERSION_GROUPS, VERSION_SAVE_DEBOUNCE_MS: VERSION_SAVE_DEBOUNCE_MS,
     fieldLimit: fieldLimit, listingNorm: listingNorm, listingDiff: listingDiff, fieldLabelKey: fieldLabelKey,
     versionFieldModel: versionFieldModel, versionPageModel: versionPageModel, listingPutBody: listingPutBody,
-    remoteListingEdits: remoteListingEdits, saveBadge: saveBadge
+    remoteListingEdits: remoteListingEdits, saveBadge: saveBadge,
+    // 출시 예약(M5s §4.5)
+    goliveModel: goliveModel, goliveStatusApproved: goliveStatusApproved, GOLIVE_RESULT_TONE: GOLIVE_RESULT_TONE
   };
 
   var rcm = {
@@ -5383,7 +5509,8 @@
       + '<span class="va">' + open + retry + discard + "</span></div>";
   }
   /** W3 버전 페이지 — 이름 · 상태 · **이전 버전 값으로 채워진 편집 칸** 두 절(§3.2 · R6) ·
-      본문 끝의 바텀시트(§4 · R10). 출시 · 게시 · 롤아웃 버튼은 여기에도 없다. */
+      「출시 예약」 영역(M5s §4.5) · 본문 끝의 바텀시트(§4 · R10). 출시를 요청하는 버튼은 그
+      영역(`[data-golive-sheet]`) 안에만 있다(결정 216 · 218). 롤아웃 버튼은 어디에도 없다. */
   function versionPageHtml() {
     var v = state.store.version, lang = L(), n = now();
     var back = '<a class="btn" href="' + esc(storeHash(state.store.repo, "versions")) + '" data-version-back>' + esc(tr("version.page.back")) + "</a>";
@@ -5412,12 +5539,129 @@
       + "<dt>" + esc(tr("version.page.created")) + "</dt><dd>" + esc(v.created_at ? fmtClock(v.created_at, tz(), n) : DASH) + "</dd>"
       + "<dt>" + esc(tr("version.page.expires")) + "</dt><dd>" + esc(v.expires_at ? fmtClock(v.expires_at, tz(), n) : DASH) + "</dd>"
       + "</dl>";
+    h += goliveSheetHtml(v, n);
     h += '<p class="sub policy">' + esc(tr("store.policy")) + "</p>";
     h += "</div>";   // /.vmain — 아래 여백은 여기서 끝난다
     // 바텀시트는 본문의 **마지막 자식**이다 — sticky 의 담는 상자가 본문 전체여야 스크롤 내내
     // 화면 아래에 붙어 있는다(§4.2). 시트를 감싸는 div 를 두면 그 div 안에서만 붙는다.
     h += sheetHtml(m);
     return h;
+  }
+  // ── 출시 예약 영역(M5s §4.5) ──
+  /** 이 버전의 출시 예약 폼 — 버전이 바뀌면 새로 만든다. 친 번호와 시각은 state 에만 산다. */
+  function goliveForm() {
+    var g = state.store.golive;
+    if (!g || g.versionId !== state.store.versionId) {
+      g = state.store.golive = { versionId: state.store.versionId, open: false, planJob: null,
+        platform: null, when: "now", at: "", typed: "", sending: false };
+    }
+    return g;
+  }
+  function goliveCtx(v) {
+    var profile = currentProfile();
+    return { version: v, release: v && v.release && typeof v.release === "object" ? v.release : {}, profile: profile,
+      form: goliveForm(), admin: state.admin, token: !!state.token, maxAge: profile.plan_max_age_minutes };
+  }
+  /**
+   * 「출시 예약」 영역 — 버전 페이지의 한 절이다(시트를 덮는 대화상자가 아니다). 출시를 요청하는
+   * 버튼은 여기 안에만 있고 모두 `data-golive` 를 단다 — 금지 버튼 가드는 `[data-golive]` 이면서
+   * 이 영역 안에 있을 때만 봐준다(결정 218).
+   */
+  function goliveSheetHtml(v, nowMs) {
+    var m = goliveModel(goliveCtx(v), L()), form = goliveForm();
+    var h = '<section class="golive" data-golive-sheet data-open="' + (form.open ? "1" : "0") + '" aria-label="' + esc(tr("golive.title")) + '">';
+    h += '<div class="s-h"><span class="t">' + esc(tr("golive.title")) + '</span><span class="n" data-golive-state>' + esc(m.stateText) + "</span>"
+      + '<span class="spacer"></span>';
+    if (form.open) h += '<button type="button" class="btn" data-golive="close">' + esc(tr("golive.close")) + "</button>";
+    else h += '<button type="button" class="btn" data-golive="open"' + (m.canOpen ? "" : " disabled") + ">" + esc(tr("golive.open")) + "</button>";
+    h += "</div>";
+    if (!form.open && m.openWhy) h += '<p class="sub" data-golive-why-closed>' + esc(m.openWhy) + "</p>";
+    if (form.open) {
+      h += '<div class="golive-body" data-golive-body>';
+      h += '<p class="sub" data-golive-plan="' + esc(m.plan.state) + '">' + esc(m.plan.text) + "</p>";
+      h += '<fieldset class="golive-f"><legend>' + esc(tr("golive.field.platform")) + "</legend>"
+        + m.choices.map(function (x) {
+          return '<label class="ck"><input type="radio" name="golive-platform" id="golive-platform-' + x.value + '" data-golive-platform="' + x.value + '"'
+            + (m.platform === x.value ? " checked" : "") + (x.enabled ? "" : " disabled") + "> " + esc(tr("golive.platform." + x.value)) + "</label>";
+        }).join("") + "</fieldset>";
+      h += '<fieldset class="golive-f"><legend>' + esc(tr("golive.field.when")) + "</legend>"
+        + ["now", "at"].map(function (w) {
+          return '<label class="ck"><input type="radio" name="golive-when" id="golive-when-' + w + '" data-golive-when="' + w + '"' + (form.when === w ? " checked" : "") + "> " + esc(tr("golive.when." + w)) + "</label>";
+        }).join("")
+        + ' <input type="datetime-local" id="golive-at" data-golive-at value="' + esc(form.at || "") + '"' + (form.when === "at" ? "" : " disabled") + ' aria-label="' + esc(tr("golive.when.at")) + '">'
+        + '<span class="sub">' + esc(tr("golive.at_hint")) + "</span></fieldset>";
+      h += '<div class="golive-f"><label for="golive-n">' + esc(tr("golive.field.n")) + "</label> "
+        + '<input type="text" id="golive-n" data-golive-n inputmode="numeric" autocomplete="off" spellcheck="false" value="' + esc(form.typed || "") + '">'
+        + '<span class="sub">' + esc(tr("golive.n_hint")) + "</span></div>";
+      h += '<div class="golive-go"><button type="button" class="btn primary" data-golive="go"' + (m.can && !form.sending ? "" : " disabled") + ">" + esc(m.goLabel) + "</button>"
+        + '<span class="sub" data-golive-why>' + esc(m.why || "") + "</span></div>";
+      h += "</div>";
+    }
+    // 예약 목록과 마지막 결과는 접혀 있어도 보인다 — 걸어 둔 것은 늘 눈에 띄어야 한다
+    h += '<div class="golive-live" data-golive-live><span class="t">' + esc(tr("golive.live.title")) + "</span>";
+    if (!m.live.length) h += '<p class="sub">' + esc(tr("golive.live.none")) + "</p>";
+    else h += "<ul class=\"plain\">" + m.live.map(function (r) {
+      var when = r.not_before ? fmtClock(r.not_before, tz(), nowMs) : tr("golive.when.now");
+      return '<li data-golive-row="' + esc(String(r.job_id)) + '">' + esc(tr("golive.live.row", { id: r.job_id, state: stateWord(r.state, L()), clock: when,
+          names: tr("golive.platform." + (r.platform || "both")), n: r.confirm_build_number || DASH }))
+        + ' <button type="button" class="btn" data-golive="cancel" data-golive-job="' + esc(String(r.job_id)) + '"' + (state.token ? "" : " disabled") + ">" + esc(tr("golive.live.cancel")) + "</button></li>";
+    }).join("") + "</ul>";
+    h += "</div>";
+    if (m.result) {
+      h += '<div class="golive-result" data-golive-result><span class="t">' + esc(tr("golive.result.title", { id: m.result.jobId })) + "</span> "
+        + m.result.rows.map(function (r) {
+          return '<span class="pill v-' + esc(r.tone) + '" data-golive-result-platform="' + esc(r.platform) + '" data-golive-word="' + esc(r.word) + '"'
+            + (r.raw ? ' title="' + esc(r.raw) + '"' : "") + ">" + esc(r.text) + "</span>";
+        }).join(" ");
+      if (m.result.login) h += '<p class="banner warn" data-golive-login>' + esc(tr("golive.login")) + "</p>";
+      h += "</div>";
+    }
+    return h + "</section>";
+  }
+  /** 영역을 열면 읽기 전용 plan 을 먼저 돌린다(M5s §4.5). 닫으면 친 번호와 시각을 잊는다. */
+  function goliveOpen() {
+    var form = goliveForm(), v = state.store.version, api = storeApi();
+    if (!v || typeof api.golive !== "function") return;
+    var m = goliveModel(goliveCtx(v), L());
+    if (!m.canOpen) return;
+    form.open = true; form.typed = ""; form.at = ""; form.when = "now"; form.planJob = null;
+    renderStore();
+    api.golive(state.store.repo, m.planBody).then(function (res) {
+      if (!res.ok) { toast(storeErrorDetail(res)); return; }
+      form.planJob = res.body && res.body.job_id != null ? res.body.job_id : null;
+      return loadVersion().then(function () { renderStore(); });
+    }).catch(function () { toast(tr("store.load_failed", { repo: state.store.repo, detail: "golive" })); });
+  }
+  function goliveGo() {
+    var form = goliveForm(), v = state.store.version, api = storeApi();
+    var m = goliveModel(goliveCtx(v), L());
+    if (!m.can || form.sending) return;
+    form.sending = true;
+    renderStore();
+    api.golive(state.store.repo, m.body).then(function (res) {
+      form.sending = false;
+      if (!res.ok) { toast(storeErrorDetail(res)); if (res.status === 401 || res.status === 403) tokenRejected(); return loadVersion().then(function () { renderStore(); }); }
+      toast(tr("golive.sent", { id: res.body.job_id, state: stateWord(res.body.state, L()) }));
+      form.typed = ""; form.open = false;
+      return loadVersion().then(function () { renderStore(); });
+    }).catch(function () { form.sending = false; renderStore(); });
+  }
+  /** 치는 동안에는 영역을 다시 그리지 않는다 — 보내기 버튼과 이유 한 줄만 제자리에서 고친다. */
+  function renderGoliveState() {
+    var v = state.store.version, sec = $("[data-golive-sheet]");
+    if (!v || !sec) return;
+    var m = goliveModel(goliveCtx(v), L()), go = sec.querySelector('[data-golive="go"]'), why = sec.querySelector("[data-golive-why]");
+    if (go) { go.disabled = !(m.can && !goliveForm().sending); go.textContent = m.goLabel; }
+    if (why) why.textContent = m.why || "";
+  }
+  function goliveCancel(id) {
+    var api = storeApi();
+    if (typeof api.cancelJob !== "function") return;
+    api.cancelJob(id).then(function (res) {
+      if (!res.ok) { toast(storeErrorDetail(res)); return; }
+      toast(tr("golive.cancelled", { id: id }));
+      return loadVersion().then(function () { renderStore(); });
+    });
   }
   /** 파일 폴백 — 프리필이 그 칸을 모를 때 쓰는 `store/` 값(«파일에서» · AC-C5). 릴리스 노트는
       미리보기 줄이 아니라 파일 하나라, 두 스토어에 같은 원문을 넣는다(항목 12·18). */
@@ -5740,7 +5984,8 @@
       + '<ul class="plain">' + m.result.platforms.map(function (p) { return "<li>" + esc(p.text) + "</li>"; }).join("") + "</ul>"
       + (m.result.extras.length ? '<p class="sub">' + esc(m.result.extras.join(" · ")) + "</p>" : "") + "</div>";
   }
-  /** 시트 하나(W3 머리 · W4 · W5). 출시 · 게시 · 롤아웃 버튼은 어떤 상태에도 없다. */
+  /** 시트 하나(W3 머리 · W4 · W5). 심사 제출만 한다 — 출시는 버전 페이지의 「출시 예약」
+      영역에서 따로 요청하고, 롤아웃 버튼은 어떤 상태에도 없다. */
   function sheetHtml(page) {
     var m = sheetNow(page), open = sheetOpen();
     var busy = state.store.busy;
@@ -6830,9 +7075,19 @@
     var st = $("#store");
     if (!st) return;
     st.addEventListener("click", function (ev) {
-      var t = ev.target.closest("[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-sheet-submit],[data-sheet-toggle],[data-sheet-fix],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode],[data-version-new],[data-version-discard],[data-version-retry],[data-field-revert],[data-listing-retry]");
+      var t = ev.target.closest("[data-golive],[data-enter-store],[data-goto-settings],[data-verify-all],[data-fetch-remote],[data-set-value],[data-store-refresh],[data-plan-refresh],[data-plan-other],[data-validate-listing],[data-plan-review],[data-sheet-submit],[data-sheet-toggle],[data-sheet-fix],[data-driver-abort],[data-driver-retry],[data-driver-confirm-open],[data-upload-rehearsal],[data-n-mode],[data-version-new],[data-version-discard],[data-version-retry],[data-field-revert],[data-listing-retry]");
       if (!t) return;
       if (t.closest("summary")) ev.preventDefault();  // 머리의 버튼은 행을 여닫지 않는다
+      // ── 출시 예약(M5s §4.5) — 영역 밖의 `data-golive` 는 아무 일도 하지 않는다 ──
+      if (t.hasAttribute("data-golive")) {
+        if (t.disabled || !t.closest("[data-golive-sheet]")) return;
+        var act = t.getAttribute("data-golive");
+        if (act === "open") goliveOpen();
+        else if (act === "close") { var gf = goliveForm(); gf.open = false; gf.typed = ""; gf.at = ""; renderStore(); }
+        else if (act === "go") goliveGo();
+        else if (act === "cancel") goliveCancel(parseInt(t.getAttribute("data-golive-job"), 10));
+        return;
+      }
       // ── 바텀시트(§4.2) ──
       if (t.hasAttribute("data-sheet-toggle")) { setSheetOpen(!sheetOpen()); renderStore(); return; }
       if (t.hasAttribute("data-sheet-submit")) { if (!t.disabled) { state.lastTrigger = t; openSubmitDialog(); } return; }
@@ -6871,6 +7126,12 @@
       if (fieldId) { if (!ev.target.readOnly) listingFieldTyped(fieldId, ev.target.value); return; }
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-version")) { state.store.driverForm.version = ev.target.value; renderDriverState(); return; }
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-track")) { state.store.driverForm.track = ev.target.value; return; }
+      if (ev.target.id === "golive-n" || ev.target.id === "golive-at") {
+        var gform = goliveForm();
+        if (ev.target.id === "golive-n") gform.typed = ev.target.value; else gform.at = ev.target.value;
+        renderGoliveState();
+        return;
+      }
       if (ev.target.id !== "sheet-n") return;
       state.store.review.typedN = ev.target.value;   // 기억하지 않는다 — state 에만, 새 플랜이 오면 지워진다
       renderSheetState();
@@ -6880,6 +7141,13 @@
     });
     st.addEventListener("change", function (ev) {
       if (ev.target.hasAttribute && ev.target.hasAttribute("data-driver-dry")) { state.store.driverForm.dryRun = !!ev.target.checked; return; }
+      if (ev.target.hasAttribute && (ev.target.hasAttribute("data-golive-platform") || ev.target.hasAttribute("data-golive-when"))) {
+        var gfm = goliveForm();
+        if (ev.target.hasAttribute("data-golive-platform")) gfm.platform = ev.target.getAttribute("data-golive-platform");
+        else { gfm.when = ev.target.getAttribute("data-golive-when"); if (gfm.when === "now") gfm.at = ""; }
+        renderStore();
+        return;
+      }
       var check = ev.target.getAttribute && ev.target.getAttribute("data-review-check");
       if (check) {
         var rv = state.store.review, on = !!ev.target.checked;

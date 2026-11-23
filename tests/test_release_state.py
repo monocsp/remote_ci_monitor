@@ -16,13 +16,14 @@ from pathlib import Path
 import pytest
 
 from jobfactory import NOW, ago, job
-from remote_ci_monitor.core.model import FAILED, RUNNING, SUCCEEDED, Source
+from remote_ci_monitor.core.model import FAILED, QUEUED, RUNNING, SCHEDULED, SUCCEEDED, Source
 from remote_ci_monitor.release_state import (
     JOBS_LIMIT,
     LISTED_ROLES,
     MAX_DOC_BYTES,
     ROLE_FILES,
     artifact_names,
+    golive_live,
     numbers_match,
     parse_iso,
     plan_number,
@@ -210,7 +211,43 @@ def test_status_and_golive_are_listed_roles_with_their_files():
 def test_an_empty_view_has_status_null_and_golive_plan_and_result_null():
     v = view([], {}, {})
     assert v["status"] is None
-    assert v["golive"] == {"plan": None, "result": None}
+    # `live` 는 「출시 예약」 목록이다(M5s §4.5 · 결정 232) — 잡이 없으면 빈 목록
+    assert v["golive"] == {"plan": None, "result": None, "live": []}
+
+
+def test_golive_live_lists_scheduled_and_active_release_jobs_only():
+    """「출시 예약」 목록과 409 `golive_running` 이 같은 규칙을 쓴다 — 예약 · 큐 · 실행 중인
+    `mode = release` 잡만, 오래된 것부터. plan 잡과 끝난 잡은 들지 않는다."""
+
+    def golive_job(jid, state, mode="release", **inputs):
+        j = git_job(jid, "release-golive", RUNNING if state == RUNNING else SUCCEEDED)
+        return dataclasses.replace(
+            j,
+            state=state,
+            inputs={"build_name": "1.0.1", "mode": mode, "platform": "ios", **inputs},
+            not_before=NOW if state == SCHEDULED else None,
+        )
+
+    jobs = [
+        golive_job(6, SCHEDULED, confirm_build_number="185"),
+        golive_job(5, QUEUED),
+        golive_job(4, RUNNING),
+        golive_job(3, SCHEDULED, mode="plan"),
+        golive_job(2, SUCCEEDED),
+        golive_job(1, "cancelled"),
+    ]
+    live = view(jobs, {}, {})["golive"]["live"]
+    assert [(r["job_id"], r["state"]) for r in live] == [(4, RUNNING), (5, QUEUED), (6, SCHEDULED)]
+    assert live[2] == {
+        "job_id": 6,
+        "state": SCHEDULED,
+        "build_name": "1.0.1",
+        "platform": "ios",
+        "confirm_build_number": "185",
+        "not_before": "2026-09-04T00:52:12Z",
+        "start_deadline": None,
+    }
+    assert golive_live(jobs, None) == []
 
 
 def test_status_is_the_latest_status_json_aged_from_checked_at():

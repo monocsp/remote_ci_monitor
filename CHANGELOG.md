@@ -39,8 +39,44 @@ of a key bumps that number and is listed here.
   `release_status.sh` and `release_golive.sh`, whose `--selftest` locks the exit codes: a plan
   that read the stores exits 0 whatever they said, and a release for a build that is not approved
   exits 2, never 75.
+- **Going live when a person asks for it: `POST /api/repos/<repo>/release/golive`,
+  `rcm release golive` and the version page's «Schedule go-live».** `mode = plan` (any client
+  token) reads approval and the approved build into `golive-plan.json`; `mode = release` (admin)
+  goes live now or at `start_at` / `start_in_seconds` (`--at` / `--in`) with the approved build
+  number a person typed — `auto` is not accepted. The server checks the gate once, when the
+  release is asked for: 409 `golive_plan_required` (no succeeded plan for that `build_name`, or
+  one that did not read a chosen platform), `golive_plan_stale` (older than
+  `plan_max_age_minutes`), `golive_plan_blocked` (a chosen platform is not approved — only the
+  chosen ones count, so iOS goes while Android is in review), `build_number_mismatch` (both
+  platforms must share the typed number) and `golive_running` (a go-live job of that build is
+  booked or running). A booked release is not refused later because its plan aged. A plan with a
+  time is 400 `golive_plan_now_only`. A submitted draft takes `golive`; a discarded one is still
+  409 `version_closed`. The web area opens only when `status.json` says that store approved this
+  version, runs the plan first, lists what is booked with a cancel button, and draws the last
+  `golive.json` — a platform the script never tried is «not attempted», not «failed».
+  `GET …/release` carries `golive.live[]`, the booked and running go-live jobs.
+- `rcm release status [REPO] [--build-name X]` runs the `status` role, waits, and prints both
+  stores' version, build, state and the store's own word.
+- `rcm-store-connect` installs `release_status.sh` and `release_golive.sh` and adds the presets
+  `release-status` and `release-golive` (`priority = "high"`, `start_deadline_seconds = 3600`,
+  `concurrency_group = "store-browser-<repo>"` shared with the project's Play Console sign-in
+  preset) and the two roles to `profile.release.toml`. The go-live selftest now proves the script
+  never sleeps when a sign-in is lost (a recording `sleep` stub, under 3 seconds), and it now runs
+  in under two seconds: the script starts Python a few times per run instead of once per field.
 
 ### Changed
+- **The fixed sentence about going live changed everywhere** — the Store tab, the version page,
+  the bottom sheet, the review panel, the submit dialog, the docs and the skill templates. It
+  read «Approval does not release …»; it now reads «Nothing goes live on approval by itself. A
+  release runs only when a person asks for it with the version, the build number and a time.»
+  The review panel adds «Play has no API to publish a held release, so the project's go-live
+  script publishes through a browser or asks a person.» Release after approval was never
+  automatic and still is not; a person can now ask for it from rcm instead of the store consoles.
+- **`POST /jobs` refuses the `golive` role's preset with `mode = release`** for every token,
+  admin included: 409 `release_route_required` (`rcm run` exits 2). Going live takes the golive
+  route, which runs the gate. `review` and `upload` are unchanged.
+- The release routes' answers (`plan`, `review`, `upload`, `golive`) carry `submission`, the cancel secret `POST /jobs` gives, and a scheduled golive answers 201
+  with `not_before`, `start_deadline` and `timezone`; immediate ones stay 202.
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
   every final state. Give the rule an `on` list to keep the old set.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
