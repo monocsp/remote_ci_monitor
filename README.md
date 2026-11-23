@@ -365,9 +365,12 @@ with GitHub Actions as an optional fallback. How it works and what the owner set
 | `rcm wait` exit | meaning |
 |---|---|
 | 0 | job succeeded |
-| 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise) |
-| 2 | cancelled or timed out |
+| 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise), or a preset that [retries](docs/configuration.md#trying-again-later-presetsretry) still said "not yet" on its last attempt (`exhausted`) |
+| 2 | cancelled, timed out, or a schedule that never started (`expired`) |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
+
+A `retried` attempt is not an end: `rcm wait` follows its `retried_as` to the next attempt and
+exits with the last one's code ([trying again later](docs/configuration.md#trying-again-later-presetsretry)).
 
 Usage errors and validation failures that never reach the server also exit 2, including `rcm run`
 when the server cannot be reached before submit. `rcm wait` gives an unreachable server 60 s to

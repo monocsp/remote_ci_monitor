@@ -207,6 +207,21 @@ def _cancel(job: Job) -> dict[str, Any] | None:
     }
 
 
+def chain_json(job: Job) -> dict[str, Any]:
+    """반복 사슬의 칸(M5s 결정 211 · 228) — 잡 행에 **더한다**. 사슬이 없으면 `chain_id` 가
+    null 이다.
+
+    `retried_as` 는 `retried` 로 끝난 시도의 다음 시도다 — `rcm wait` 가 이 키를 따라간다.
+    `max_attempts` 는 제출 때 얼린 상한이다(반복을 안 켠 잡은 null)."""
+    return {
+        "chain_id": job.chain_id,
+        "attempt": job.attempt,
+        "retry_of": job.retry_of,
+        "retried_as": job.retried_as,
+        "max_attempts": job.retry_max_attempts if job.retry_on_exit is not None else None,
+    }
+
+
 def queue_row_json(
     row: QueueRow, *, base_url: str | None = None, log_tail: list[str] | None = None
 ) -> dict[str, Any]:
@@ -270,6 +285,8 @@ def queue_row_json(
         # M5s — 예약에서 온 잡이면 그 시각과 시작 마감. 즉시 실행이면 둘 다 null. 키 추가만
         "not_before": iso(job.not_before),
         "start_deadline": iso(job.start_deadline),
+        # M5s — 반복 사슬(결정 211). 키 추가만
+        **chain_json(job),
     }
 
 
@@ -330,6 +347,8 @@ def recent_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         # M5s — 예약에서 온 잡이면 그 시각과 시작 마감(`expired` 는 언제까지였나). 키 추가만
         "not_before": iso(job.not_before),
         "start_deadline": iso(job.start_deadline),
+        # M5s — 반복 사슬(결정 211). 사슬은 마지막 시도 한 행으로 보이고 `attempt` 가 시도 수다
+        **chain_json(job),
     }
 
 
@@ -362,6 +381,8 @@ def scheduled_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "target_worker": job.target_worker,
         "keep": job.keep,
         "shelf": None,
+        # M5s — 반복 사슬(결정 211). 다음 시도는 시작 마감 없이 이 행으로 기다린다(결정 231)
+        **chain_json(job),
     }
 
 
@@ -385,6 +406,16 @@ def preset_json(p: Preset) -> dict[str, Any]:
         # M5p — `--keep` 을 걸 수 있나(글롭이 있나)와 늘 보관하나(§15.6). CLI 가 제출 전에 거른다
         "has_artifacts": bool(p.artifacts),
         "keep": bool(p.keep),
+        # M5s — `[presets.retry]`(결정 210). 선언이 없으면 null 이다. 키 추가만
+        "retry": (
+            {
+                "on_exit": p.retry.on_exit,
+                "interval_seconds": p.retry.interval_seconds,
+                "max_attempts": p.retry.max_attempts,
+            }
+            if p.retry is not None
+            else None
+        ),
         "inputs": [
             {
                 "name": i.name,

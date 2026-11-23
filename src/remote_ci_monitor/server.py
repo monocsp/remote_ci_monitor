@@ -56,6 +56,7 @@ from remote_ci_monitor.capabilities import (
 from remote_ci_monitor.clientwheel import (
     CANCEL_MIN_CLIENT_VERSION,
     MIN_CLIENT_VERSION,
+    RETRY_MIN_CLIENT_VERSION,
     WheelBuildError,
     build_wheel,
     wheel_filename,
@@ -957,6 +958,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
             )
             self._version_job_finished(job)
+            if job.retried_as is not None:
+                # 반복의 다음 시도(M5s)는 같은 트랜잭션에서 `scheduled` 로 섰다 — 따로 알린다
+                self.publish(KIND_JOB_CHANGED, {"job_id": job.retried_as, "state": SCHEDULED})
         else:
             self.publish(KIND_JOB_CHANGED, {"job_id": job.id, "state": job.state})
 
@@ -3815,6 +3819,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         keep = asked or preset.keep
         # 예약(M5s §4.1) — 시각은 여기서 정한다(잡을 만들기 전, 다른 검사와 같은 줄에서 400)
         schedule = self._schedule_of(body, preset)
+        # 반복(M5s 결정 210 · 229) — 켜는 것은 프리셋만이고 제출은 `"retry": false` 로 끄기만 한다.
+        # 정책은 잡 열로 얼린다
+        retry_asked = body.get("retry", True)
+        if not isinstance(retry_asked, bool):
+            raise ApiError(400, "retry must be true or false")
+        retry = {"retry": preset.retry, "retry_disabled": not retry_asked}
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
                 preset,
@@ -3831,6 +3841,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 supersede=supersede,
                 keep=keep,
                 schedule=schedule,
+                retry=retry,
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3862,6 +3873,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         want_join = want_join and placed["target_worker"] is None
         # 예약은 합류하지 않는다(M5s 결정 226) — 지금 도는 잡에 붙으면 「그 시각에」가 사라진다
         want_join = want_join and schedule is None
+        # 반복을 끈 제출은 반복하는 잡에 붙지 않는다(M5s) — 붙으면 그 잡의 정책을 받는다
+        want_join = want_join and not (preset.retry is not None and retry["retry_disabled"])
         if want_join:
             joined = self.store.join_or_bump_with_submission(
                 jk, token.name, label, priority, now, keep=keep
@@ -3897,6 +3910,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             link=link,
             keep=keep,
             no_supersede=not supersede,
+            **retry,
             **placed,
         )
         if not supersede:
@@ -4413,6 +4427,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         supersede: bool = True,
         keep: bool = False,
         schedule: tuple[datetime, datetime, str] | None = None,
+        retry: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued.
 
@@ -4452,6 +4467,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         want_join = want_join and placed.get("target_worker") is None
         want_join = want_join and schedule is None  # 예약은 합류 안 함(결정 226)
+        retry = retry or {}
+        # 반복을 끈 제출은 반복하는 잡에 붙지 않는다(M5s) — 붙으면 그 잡의 정책을 받는다
+        want_join = want_join and not (preset.retry is not None and retry.get("retry_disabled"))
         if want_join:
             joined = self.store.join_or_bump_with_submission(
                 jk, token.name, label, priority, now, keep=keep
@@ -4488,6 +4506,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             link=link,
             keep=keep,
             no_supersede=not supersede,
+            **retry,
             **placed,
         )
         if supersede and schedule is None:
@@ -4675,12 +4694,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         job = self.store.get_job(job_id)
         if job is None:
             raise ApiError(404, "no such job")
+        # 반복 사슬(M5s 결정 228) — 사슬의 어느 id 로 와도 살아 있는 머리 시도로 돌린다. 제출
+        # capability 는 뿌리에 있으므로 비밀은 뿌리 id 로 맞춘다. 합류자 행은 머리에 있다
+        root = job.chain_root
+        job = self.store.chain_head(job)
+        job_id = job.id
         cancel_token = (body or {}).get("cancel_token") if isinstance(body, dict) else None
         if cancel_token is not None and (
             not isinstance(cancel_token, str) or len(cancel_token) > 200
         ):
             raise ApiError(400, "cancel_token must be a string")
-        capability = self.store.submission_role(job_id, cancel_token) if cancel_token else None
+        capability = self.store.submission_role(root, cancel_token) if cancel_token else None
         if capability is not None:
             submission_id, role, participant = capability
             if role == ROLE_LEAVE_SUBMISSION:
@@ -4695,10 +4719,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                         error_code="cancel_token_mismatch",
                     )
                 consumed = self.store.consume_leave(
-                    job_id,
+                    root,
                     submission_id,
                     participant,
                     drop_joiner=job.requester.name != participant,
+                    joiner_job_id=job_id,
                 )
                 if not consumed:
                     raise ApiError(
@@ -4736,13 +4761,21 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         return self._cancel_job(job, token)
 
     def _cancel_job(self, job: Job, token: TokenInfo) -> dict[str, Any]:
-        """권한 판정이 끝난 뒤의 취소 — 대기 잡은 즉시, 도는 잡은 `cancelling`(SIGTERM → grace)."""
-        job_id = job.id
-        if job.is_terminal:
-            raise ApiError(409, f"job already finished ({job.state})", state=job.state)
-        new_state = self.store.request_cancel(
-            job_id, token.name, self.now_fn(), self.config.server.grace_seconds
-        )
+        """권한 판정이 끝난 뒤의 취소 — 대기 잡은 즉시, 도는 잡은 `cancelling`(SIGTERM → grace).
+
+        반복 사슬(M5s)의 머리가 바로 그 순간 `retried` 로 닫히면 새 머리가 생긴다 — 그 머리를 다시
+        읽어 한 번 더 보낸다. 사람의 취소가 반복 사이에 떨어져 409 로 사라지면 안 된다."""
+        new_state: str | None = None
+        for _ in range(3):
+            job_id = job.id
+            if job.is_terminal:
+                raise ApiError(409, f"job already finished ({job.state})", state=job.state)
+            new_state = self.store.request_cancel(
+                job_id, token.name, self.now_fn(), self.config.server.grace_seconds
+            )
+            if new_state is not None or job.chain_id is None:
+                break
+            job = self.store.chain_head(self.store.get_job(job_id) or job)
         self._publish_job(None, job_id)
         self.wake.set()
         return {"job_id": job_id, "state": new_state or job.state}
@@ -5042,6 +5075,20 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             return f"{len(self.preset_env)} preset(s) · all tools and passthrough present"
         return f"{len(self.preset_env)} preset(s) · " + " · ".join(bad)
 
+    def _has_retry_preset(self) -> bool:
+        """반복(`[presets.retry]`)을 선언한 프리셋이 하나라도 있나 — 지금 설정(reload 포함)."""
+        return any(p.retry is not None for p in self.config.presets)
+
+    def _min_client_version(self, strict_cancel: bool) -> str:
+        """설정의 **유효** 최소 클라이언트 버전 — 바닥들 가운데 가장 높은 것(결정 83 · 87 · 230)."""
+        floors = [MIN_CLIENT_VERSION]
+        if strict_cancel:
+            floors.append(CANCEL_MIN_CLIENT_VERSION)
+        if self._has_retry_preset():
+            floors.append(RETRY_MIN_CLIENT_VERSION)
+        # 바닥은 모두 `X.Y.Z` 상수다 — 숫자 마디로만 견준다
+        return max(floors, key=lambda v: tuple(int(x) for x in v.split(".")))
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -5078,11 +5125,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # 요구하면 그 전 클라이언트의 `rcm cancel` 이 403 이라, 상수 바닥(결정 83)이 아니라
             # 그것을 보낼 줄 아는 버전을 알린다 — 옛 클라이언트의 `rcm check` 는 이 키로만 자기
             # FAIL 을 그린다. 제출은 그대로 받는다(서버는 버전으로 막지 않는다).
-            "min_client_version": (
-                CANCEL_MIN_CLIENT_VERSION if strict_cancel else MIN_CLIENT_VERSION
-            ),
+            "min_client_version": self._min_client_version(strict_cancel),
             # 왜 올랐는지 — 키가 켜져 있을 때만, 꺼져 있으면 null(어느 0.2.x 도 취소할 수 있다)
             "cancel_min_client_version": CANCEL_MIN_CLIENT_VERSION if strict_cancel else None,
+            # 반복을 켠 프리셋이 있으면(M5s 결정 230) — 그 전 클라이언트의 `rcm wait` 는
+            # `retried` 를 몰라 끝없이 기다린다. 없으면 null
+            "retry_min_client_version": (
+                RETRY_MIN_CLIENT_VERSION if self._has_retry_preset() else None
+            ),
             # 잡이 보게 될 환경을 **서버가 자기 환경으로** 잰 것(M5m, 정보 — 503 조건은 아니다).
             # `rcm check` 의 셸 검사와 달리 launchd·systemd 의 환경을 본다.
             "preset_env": self.preset_env,

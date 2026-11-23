@@ -158,6 +158,13 @@ chmod 600 ~/.config/rcm/client.toml
 뜻이다. 시작 마감은 프리셋이 따로 정하지 않으면 15분이다. 자세한 규칙은
 [나중에 돌리기](configuration.md#running-a-job-later---at-and---in)에 있다.
 
+**나중에 다시.** 프리셋에 `[presets.retry]` 표가 있으면 스크립트가 75(「아직」)로 끝날 때 rcm 이
+`interval_seconds` 마다 다시 돌린다. 횟수는 `max_attempts` 까지다. 시도마다 새 작업이 생긴다.
+`rcm wait --job N` 은 `#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it` 을
+찍고 사슬의 끝까지 따라간다. 마지막 시도도 75 로 끝나면 `exhausted` 이고 종료 코드는 1 이다.
+사슬에 속한 아무 작업 번호로 `rcm cancel` 을 보내도 사슬이 멈춘다. 자세한 규칙은
+[나중에 다시 돌리기](configuration.md#trying-again-later-presetsretry)에 있다.
+
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
 

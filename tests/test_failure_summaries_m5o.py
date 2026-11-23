@@ -57,6 +57,9 @@ class _Job:
     summary_args: dict = {}
     timeout_seconds = 60
 
+    def retries_on(self, rc):  # 반복 정책이 없는 잡(M5s) — 75 도 여느 실패다
+        return False
+
 
 def finish(ms: list[Marker], rc: int | None = 1, **kw):
     return outcome_for(_Job(), ms, started=T0, finished=T0 + timedelta(minutes=5), rc=rc, **kw)

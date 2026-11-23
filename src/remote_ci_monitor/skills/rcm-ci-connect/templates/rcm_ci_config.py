@@ -322,6 +322,10 @@ def terminal_status(
     if state == "expired":
         # rcm 0.10.0 의 예약 잡이 시작 마감 안에 레인을 못 받았다 — 돌지 않았다(결과가 아니다)
         return "error", describe("unavailable", job, "did not start")
+    if state == "exhausted":
+        # rcm 0.10.0 의 반복 프리셋이 마지막 시도까지 「아직」(75)이었다 — 결과를 못 냈다
+        return "error", describe("unavailable", job, "gave up after retries")
+    # `retried` 는 끝이 아니다(rcm 0.10.0) — 다음 시도(`retried_as`)가 결과를 낸다. 아래 None
     if state == "cancelled":
         if cancelled_by == "superseded":
             text = f"by #{successor}" if successor is not None else "by a newer commit"

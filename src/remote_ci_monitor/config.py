@@ -13,6 +13,7 @@ import shutil
 import stat
 import tomllib
 import zoneinfo
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from remote_ci_monitor.core.gitref import validate_repo_url
 from remote_ci_monitor.core.model import (
     DEFAULT_POOL,
     INPUT_TYPES,
+    MODE_GIT_REF,
     NOTIFY_DEFAULT_STATES,
     PLACEMENT_CAPABLE,
     PLACEMENT_POOL,
@@ -37,6 +39,7 @@ from remote_ci_monitor.core.model import (
     TERMINAL_STATES,
     InputSpec,
     Preset,
+    RetryPolicy,
 )
 from remote_ci_monitor.core.notify import NotifyRule
 from remote_ci_monitor.core.supersede import SUPERSEDE_MODES, SUPERSEDE_OFF
@@ -653,7 +656,12 @@ _PRESET_KEYS = {
     "supersede",
     "keep",
     "start_deadline_seconds",
+    "retry",
 }
+#: `[presets.retry]` 의 키(M5s 결정 210). 값을 안 적으면 요청서의 기본값이다(75 · 600 · 12)
+_RETRY_KEYS = {"on_exit", "interval_seconds", "max_attempts"}
+#: 시도 수 상한 — 실수로 큰 수를 적으면 사슬이 며칠을 돈다
+MAX_RETRY_ATTEMPTS = 100
 #: 설정 문자열 → DB 값(M5n 결정 97). DB 값 `"capable"` 을 설정에 쓰면 오타로 본다.
 _PLACEMENT_VALUES = {"pool": PLACEMENT_POOL, "any-capable": PLACEMENT_CAPABLE}
 _INPUT_KEYS = {"name", "type", "choices", "default", "pattern", "description"}
@@ -917,6 +925,7 @@ def parse_preset(raw: Any) -> Preset:
         or start_deadline < 1
     ):
         raise ConfigError(f"{where}: start_deadline_seconds must be a positive integer")
+    retry = _parse_retry(where, raw.get("retry"), modes)
     return Preset(
         name=name,
         argv=argv,
@@ -944,6 +953,39 @@ def parse_preset(raw: Any) -> Preset:
         supersede=supersede,
         keep=keep,
         start_deadline_seconds=start_deadline,
+        retry=retry,
+    )
+
+
+def _parse_retry(where: str, raw: Any, modes: Sequence[str]) -> RetryPolicy | None:
+    """`[presets.retry]` → 얼릴 반복 정책(M5s 결정 210 · 211). 표가 없으면 None — 반복하지 않는다.
+
+    git_ref 만 받는 프리셋에만 허용한다. tree 스냅샷을 시도마다 복사하지 않으려는 것이다(결정
+    211) — 다음 시도는 같은 sha 를 다시 받는다."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: retry must be a table ([presets.retry])")
+    unknown = sorted(set(raw) - _RETRY_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: retry: unknown key(s): {', '.join(unknown)}")
+    if list(modes) != [MODE_GIT_REF]:
+        raise ConfigError(
+            f'{where}: retry needs source_modes = ["git_ref"] — a retried attempt fetches the '
+            "same commit again; a tree snapshot is not kept for it"
+        )
+    defaults = RetryPolicy()
+
+    def whole(key: str, low: int, high: int) -> int:
+        value = raw.get(key, getattr(defaults, key))
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ConfigError(f"{where}: retry.{key} must be an integer from {low} to {high}")
+        return value
+
+    return RetryPolicy(
+        on_exit=whole("on_exit", 1, 255),
+        interval_seconds=whole("interval_seconds", 1, 7 * 24 * 3600),
+        max_attempts=whole("max_attempts", 2, MAX_RETRY_ATTEMPTS),
     )
 
 

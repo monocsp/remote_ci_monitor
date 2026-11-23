@@ -59,6 +59,12 @@ ROW_KEYS = {
     # M5s — 예약에서 온 잡의 시각과 시작 마감. 즉시 실행이면 null(키 추가만)
     "not_before",
     "start_deadline",
+    # M5s — 반복 사슬(결정 211 · 228). 사슬이 없으면 chain_id 가 null(키 추가만)
+    "chain_id",
+    "attempt",
+    "retry_of",
+    "retried_as",
+    "max_attempts",
 }
 ESTIMATE_KEYS = {
     "confidence",
@@ -121,6 +127,12 @@ RECENT_KEYS = {
     # M5s — 예약에서 온 잡의 시각과 시작 마감. 즉시 실행이면 null(키 추가만)
     "not_before",
     "start_deadline",
+    # M5s — 반복 사슬(결정 211 · 228). 사슬이 없으면 chain_id 가 null(키 추가만)
+    "chain_id",
+    "attempt",
+    "retry_of",
+    "retried_as",
+    "max_attempts",
 }
 POOL_KEYS = {
     "name",
@@ -304,6 +316,8 @@ def test_status_is_json_serializable_with_expected_shape():
         # M5p — 글롭이 있나(`--keep` 을 걸 수 있나)와 늘 보관하나(키 추가만)
         "has_artifacts",
         "keep",
+        # M5s — `[presets.retry]` 또는 null(키 추가만)
+        "retry",
     }
     assert pool["medians"]["gate:full"] == {"seconds": 400, "wait_seconds": 80, "sample_count": 7}
     h = pool["hosts"][0]

@@ -697,6 +697,12 @@
     "outcome.start_deadline_passed": function (a) {
       return "did not start by its start deadline " + a.at;
     },
+    "outcome.retrying": function (a) {
+      return "exit " + a.code + " on attempt " + a.attempt + " of " + a.max + "; retry #" + a.by + " at " + a.at;
+    },
+    "outcome.retries_exhausted": function (a) {
+      return "exit " + a.code + " on all " + a.attempts + " attempts";
+    },
     "outcome.server_restarted_during_upload": "server restarted during upload",
     "outcome.server_stopped_while_running": "server stopped while running",
     "outcome.upload_abandoned": function (a) { return "upload abandoned after " + a.seconds; },
@@ -1793,6 +1799,12 @@
     "outcome.server_restarted": function (a) { return a.at + " 서버 재시작"; },
     "outcome.start_deadline_passed": function (a) {
       return "시작 마감 " + a.at + " 까지 시작하지 못함";
+    },
+    "outcome.retrying": function (a) {
+      return a.max + "번 중 " + a.attempt + "번째 시도가 exit " + a.code + " — " + a.at + " 에 #" + a.by + " 로 다시 돎";
+    },
+    "outcome.retries_exhausted": function (a) {
+      return a.attempts + "번 시도 모두 exit " + a.code;
     },
     "outcome.server_restarted_during_upload": "업로드 중 서버 재시작",
     "outcome.server_stopped_while_running": "실행 중 서버가 멈춤",

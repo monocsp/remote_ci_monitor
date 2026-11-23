@@ -37,6 +37,10 @@ MIN_CLIENT_VERSION = "0.2.0"
 #: 되는 가장 오래된 클라이언트(M5j G5 · 결정 87). 그 전 버전은 비밀을 보낼 줄 몰라 403 을 받는다.
 #: 제출 계약(`MIN_CLIENT_VERSION`)은 그대로다 — health 는 이 값을 따로 알린다.
 CANCEL_MIN_CLIENT_VERSION = "0.2.7"
+#: 반복(`[presets.retry]`)을 켠 프리셋이 있는 서버에서 `rcm wait` 가 끝나는 가장 오래된 클라이언트
+#: (M5s 결정 230). 그 전 버전은 `retried` 를 몰라 끝없이 기다린다 — health 가 바닥을 이 값으로
+#: 올린다.
+RETRY_MIN_CLIENT_VERSION = "0.10.0"
 #: 패키지 파일 중 wheel 에 싣는 것 — `.py` 는 어디든, 이 디렉터리들은 통째로. 0.6.1 까지는
 #: `skills` 가 빠져 서버 wheel 로 깐 클라이언트의 `rcm skills` 가 `SKILL.md` 와 셸 템플릿을 못
 #: 썼다(M5q A0 · 결정 167). 새 자산 폴더를 두면 여기에 더한다 — 시험이 패키지 폴더와 대조한다.
