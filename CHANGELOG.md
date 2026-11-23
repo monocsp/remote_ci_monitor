@@ -54,8 +54,8 @@ everywhere it appears.
   `status` preset (both stores' review state, read-only, written to `status.json`) and a `golive`
   preset (`mode = plan|release`: `golive-plan.json` says which platform is approved, `golive.json`
   what the release did). `GET /api/repos/<repo>/release` carries `status` and
-  `golive {plan, result}` (null until a job writes the file); the routes and the screen come
-  later in this milestone. `rcm check` fails a `golive` preset whose `mode` defaults to
+  `golive {plan, result}` (null until a job writes the file); #254 and #255 add the routes and
+  the screen. `rcm check` fails a `golive` preset whose `mode` defaults to
   `release`, a `status` or `golive` preset that lacks the inputs rcm sends, and warns when either
   role is unset or `golive` has no `build_name_android`. `rcm_contract.py` validates the three new
   kinds `status`, `golive-plan` and `golive`, and `rcm-store-connect` ships two skeletons,
@@ -130,7 +130,6 @@ everywhere it appears.
   never sleeps when a sign-in is lost (a recording `sleep` stub), and it now runs
   in under two seconds: the script starts Python a few times per run instead of once per field.
   ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
-
 - **A preset can run its script again later: `[presets.retry]`.** With `on_exit = 75`,
   `interval_seconds = 600` and `max_attempts = 12` (the defaults), an attempt that exits 75 ends
   in the new final state `retried` and, in the same transaction, the next attempt waits as

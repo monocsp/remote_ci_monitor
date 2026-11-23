@@ -1041,9 +1041,8 @@ def _submit_refused(args: argparse.Namespace) -> tuple[int, ...]:
 #: 잡을 만들지 않은 것이 확실한 409 코드 — 상태 코드만으로는 모르니(3) 코드로 2 를 고른다.
 #: `release_route_required` 는 golive 출시를 `POST /jobs` 로 낸 것이다(M5s 결정 235).
 #: `schedule_exists` 는 같은 예약이 이미 있다(결정 209). 서버가 새 잡을 만들지 않았다고 말한
-#: 것이다(H 실기). `golive_running` 은 같은 빌드의 출시 사슬이 살아 있다는 뜻이고(결정 232)
-#: `rcm release golive` 가 받는 코드다. golive 라우트만 이 코드를 낸다. `POST /jobs` 에서는 그
-#: 앞에서 `release_route_required` 로 막혀 나오지 않는다. 그래도 같은 거절이라 목록에 둔다.
+#: 것이다(H 실기). `golive_running`(결정 232)은 `rcm run` 에는 나오지 않지만(`POST /jobs` 가
+#: 먼저 `release_route_required` 로 막는다) 같은 뜻의 거절이라 둔다.
 _REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")
 
 
