@@ -31,6 +31,9 @@
 #     · mode=release reads the stores first and calls nothing unless EVERY chosen platform is approved and the
 #       typed number equals its approved build. A build that is not approved exits 2, never 75: waiting for an
 #       approval with 75 would turn this role into the release-on-approval that rcm forbids.
+#     · A lost sign-in: print the ::rcm::action::login:: marker and exit 75 at once — never wait for the sign-in
+#       here. The next attempt checks again; a job that sits waiting hides behind the server's needs_action
+#       reason, which then masks a stuck or overdue job.
 #     · Nothing here runs on its own. rcm runs mode=release only when a person asked for it with the version,
 #       the build number and a time.
 #
@@ -71,11 +74,16 @@ usage() {
 #     "stage": "waiting|in_progress|live" }       approved only: nothing done yet · release requested or
 #                                                 publishing, not live yet · live (read from the store API)
 #   Exit non-zero when the store cannot be read.
+#   Android has no API state between «approved, held» and PUBLISHED, so after publish was pressed, answer
+#   in_progress until the API says PUBLISHED. The project must remember that it pressed publish, or make the
+#   hook idempotent; otherwise the next attempt sees «waiting», presses publish again, finds no button and
+#   exits 1, which ends the retry chain.
 store_approval() {
   if [ -n "$SHIM" ]; then shim_store_approval "$@"; return $?; fi
   # TODO(project): iOS — the App Store version $2: appStoreState (PENDING_DEVELOPER_RELEASE = approved, waiting;
   #   PROCESSING_FOR_DISTRIBUTION = in_progress; READY_FOR_DISTRIBUTION = live) and its build. Android — the
-  #   production track: RELEASE_LIFECYCLE_STATE_APPROVED_NOT_PUBLISHED = approved, waiting; PUBLISHED = live.
+  #   production track: RELEASE_LIFECYCLE_STATE_APPROVED_NOT_PUBLISHED = approved, waiting (in_progress once this
+  #   project pressed publish for that version code — remember it next to the secrets); PUBLISHED = live.
   #   Credentials in "$SECRETS_DIR". Read-only. Delete the two lines below when done.
   echo "store_approval() is not implemented — fill the TODO(project) block in scripts/release/release_golive.sh" >&2
   return 1
@@ -97,7 +105,8 @@ store_ios_release() {
 store_android_publish() {
   if [ -n "$SHIM" ]; then shim_store_android_publish "$@"; return $?; fi
   # TODO(project): open the dedicated Chrome profile, confirm Play Console is signed in (else print
-  #   {"result": "needs_login", …} and exit 0), press publish for version code $2, then read the track back.
+  #   {"result": "needs_login", …} and exit 0 at once — do not wait for a person), press publish for version
+  #   code $2, record that it was pressed, then read the track back.
   #   Delete the two lines below when done.
   echo "store_android_publish() is not implemented — fill the TODO(project) block in scripts/release/release_golive.sh" >&2
   return 1
@@ -351,8 +360,18 @@ selftest() {
   check "release ios, release processing -> exit 75, no second call" 75 "$rc" golive.json "d['platforms']['ios']['result']=='pending'" 0
   run RCM_INPUT_MODE=release RCM_INPUT_PLATFORM=ios RCM_INPUT_CONFIRM_BUILD_NUMBER=185 RELEASE_SHIM_IOS=live
   check "release ios, already live -> exit 0, no release call" 0 "$rc" golive.json "d['platforms']['ios']['result']=='released'" 0
+  run RCM_INPUT_MODE=release RCM_INPUT_PLATFORM=android RCM_INPUT_CONFIRM_BUILD_NUMBER=185 RELEASE_SHIM_ANDROID=in_progress
+  check "release android, publish pressed, not live yet -> exit 75, no second publish" 75 "$rc" golive.json "d['platforms']['android']['result']=='pending'" 0
+  local t0=$SECONDS
   run RCM_INPUT_MODE=release RCM_INPUT_PLATFORM=android RCM_INPUT_CONFIRM_BUILD_NUMBER=185 RCM_INPUT_BUILD_NAME_ANDROID=1.0.9 RELEASE_SHIM_ANDROID_ACTION=needs_login
   check "release, login lost -> action marker + exit 75" 75 "$rc" golive.json "d['platforms']['android']['result']=='needs_login'" 1
+  # 표식을 찍으면 그 자리에서 끝난다 — 승인을 다시 읽거나 게시를 다시 누르며 기다리지 않는다
+  if [ "$(grep -c '^store_approval ' "$t/calls")" = 1 ] && [ "$(grep -c '^store_android_publish ' "$t/calls")" = 1 ] \
+     && [ $((SECONDS - t0)) -lt 10 ] && [[ "$(tail -n 1 "$t/out")" == "::rcm::summary::not yet"* ]]; then
+    echo "  ok  release, login lost -> exits 75 at once: one read, one publish, no wait"
+  else
+    echo "FAIL login lost: the script read or pressed again, or waited ($((SECONDS - t0))s)"; cat "$t/calls"; fails=$((fails+1))
+  fi
   grep -q '^::rcm::action::login::' "$t/out" || { echo "FAIL no ::rcm::action::login:: marker"; fails=$((fails+1)); }
   grep -q "^store_android_publish '1.0.9' '185'" "$t/calls" || { echo "FAIL the Android hook did not get the Android name"; fails=$((fails+1)); }
   run RCM_INPUT_MODE=release RCM_INPUT_PLATFORM=android RCM_INPUT_CONFIRM_BUILD_NUMBER=185 RELEASE_SHIM_ANDROID_ACTION=published

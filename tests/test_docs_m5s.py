@@ -49,7 +49,7 @@ def test_release_roles_contract_table_has_the_status_and_golive_rows():
         "`mode = plan\\|release` (default **plan**)",
         "`golive-plan.json` (plan) / `golive.json` (release)",
         "0 read (approved or not — that is in the file)",
-        "2 blocked (a chosen platform is not approved; never 75)",
+        "2 blocked (a chosen platform is not approved; never 75) · also environment / usage",
         "3 build number mismatch",
     ):
         assert needle in row, f"the `golive` row lacks {needle!r}"

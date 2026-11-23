@@ -124,8 +124,26 @@ def test_golive_selftest_locks_the_two_exit_code_rules():
         "release ios, approved -> release requested, exit 75 until the store says live",
         "release ios, already live -> exit 0, no release call",
         "release both, Android not approved -> exit 2, iOS untouched too",
+        "release android, publish pressed, not live yet -> exit 75, no second publish",
+        "release, login lost -> exits 75 at once: one read, one publish, no wait",
     ):
         assert re.search(rf"^  ok  .*{re.escape(needle)}", out, re.M), (needle, out)
+
+
+def test_the_golive_template_states_android_idempotency_and_no_wait_on_login():
+    """격리 검증 지적(#252): Android 는 게시를 누른 뒤 `PUBLISHED` 가 되기 전까지 `in_progress` 로
+    답해야 다음 시도가 버튼을 또 누르지 않는다. 로그인 표식을 찍었으면 그 자리에서 기다리지 않고
+    바로 75 로 끝낸다 — 기다리면 서버의 `needs_action` 이 stuck · overdue 를 가린다."""
+    text = (STORE / "release_golive.sh").read_text()
+    head = text[: text.index("store_approval() {")]
+    flat = re.sub(r"[\s#]+", " ", head)
+    for needle in (
+        "after publish was pressed, answer in_progress until the API says PUBLISHED",
+        "remember that it pressed publish, or make the hook idempotent",
+        "never wait for the sign-in",
+        "exit 75 at once",
+    ):
+        assert needle in flat, (needle, "release_golive.sh header")
 
 
 def test_status_selftest_reads_both_stores_and_never_writes_one():
