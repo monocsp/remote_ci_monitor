@@ -16,13 +16,16 @@ CONFIGURATION = ROOT / "docs" / "configuration.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
 
-def unreleased_only(text: str) -> str:
-    """`## [Unreleased]` 부터 다음 `## [` 절 앞까지."""
+def m5s_changelog(text: str) -> str:
+    """M5s 항목이 있는 곳 — `## [Unreleased]` 부터 직전 릴리스 `## [0.9.0]` 앞까지. M5s 는
+    0.10.0 으로 나갔으므로 그 절과 그 위의 미릴리스 절을 함께 본다(다른 문서 잠금의
+    `unreleased()` 처럼)."""
     m = re.search(r"^## \[Unreleased\][^\n]*$", text, re.M)
     assert m, "no `## [Unreleased]`"
     rest = text[m.end() :]
-    nxt = re.search(r"^## \[", rest, re.M)
-    return rest[: nxt.start()] if nxt else rest
+    prev = re.search(r"^## \[0\.9\.0\]", rest, re.M)
+    assert prev, "no `## [0.9.0]` — the M5s entries have nowhere to end"
+    return rest[: prev.start()]
 
 
 def contract_roles_table() -> str:
@@ -82,7 +85,7 @@ def test_release_roles_configuration_names_the_check_rules():
 
 
 def test_release_roles_changelog_has_the_entry():
-    text = re.sub(r"\s+", " ", unreleased_only(CHANGELOG.read_text()))
+    text = re.sub(r"\s+", " ", m5s_changelog(CHANGELOG.read_text()))
     for needle in (
         "`status` and `golive`",
         "`release_status.sh`",
@@ -90,7 +93,7 @@ def test_release_roles_changelog_has_the_entry():
         "`golive-plan`",
         "`rcm check`",
     ):
-        assert needle in text, f"CHANGELOG.md [Unreleased] lacks {needle!r}"
+        assert needle in text, f"CHANGELOG.md [0.10.0] lacks {needle!r}"
 
 
 # ── PR A: 예약 실행 (§4.1) ────────────────────────────────────────────────────
@@ -137,9 +140,9 @@ def test_scheduled_jobs_are_documented():
     for rel in ("examples/server.toml", "src/remote_ci_monitor/templates/server.toml"):
         text = read(rel)
         assert "schedule_start_deadline_seconds" in text and "schedule_max_ahead_days" in text
-    unreleased = read("CHANGELOG.md").split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    unreleased = m5s_changelog(read("CHANGELOG.md"))
     for word in ("--at", "`scheduled`", "`expired`", "schedule_exists", "schedule: true"):
-        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+        assert word in unreleased, f"CHANGELOG [0.10.0] does not mention {word}"
 
 
 # ── PR D: 종료코드 반복 (§4.2) ────────────────────────────────────────────────
@@ -186,7 +189,7 @@ def test_retry_on_exit_is_documented():
         assert anchor in read(rel), f"{rel} does not link to the retry section"
     for rel in ("README.md", "README.ko.md"):
         assert "`exhausted`" in read(rel), f"{rel} exit codes do not name `exhausted`"
-    unreleased = read("CHANGELOG.md").split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    unreleased = m5s_changelog(read("CHANGELOG.md"))
     for word in (
         "[presets.retry]",
         "`retried`",
@@ -196,7 +199,7 @@ def test_retry_on_exit_is_documented():
         "attempts[]",
         "lasts across the attempts of a chain",
     ):
-        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+        assert word in unreleased, f"CHANGELOG [0.10.0] does not mention {word}"
 
 
 # ── PR C: 「사람이 할 일」 표식 (§4.3 · 결정 213 · 234) ───────────────────────
@@ -308,14 +311,14 @@ def test_release_status_panel_readmes_and_changelog_name_the_panel():
         "README.ko.md lacks the review panel's store state"
     )
     assert "**새로 조회**는 그 프리셋을 한 번 더 돌린다" in ko, "README.ko.md lacks **새로 조회**"
-    text = re.sub(r"\s+", " ", unreleased_only(CHANGELOG.read_text()))
+    text = re.sub(r"\s+", " ", m5s_changelog(CHANGELOG.read_text()))
     for needle in (
         "`POST /api/repos/<repo>/release/status`",
         "**Check again**",
         "own window of 500 jobs",
         "`unknown` for any other",
     ):
-        assert needle in text, f"CHANGELOG.md [Unreleased] lacks {needle!r}"
+        assert needle in text, f"CHANGELOG.md [0.10.0] lacks {needle!r}"
 
 
 # ── PR G: 화면의 예약 · 표식 · 알림 실패 배지 (§4.1 「표시」 · §4.3 · §4.7) ─────
@@ -345,7 +348,7 @@ def test_web_schedule_and_action_are_documented_on_screen():
         assert "scheduled — 2 · next 15:00 golive" in text
     assert "needs action · login" in read("README.md")
     assert "사람이 할 일 · login" in read("README.ko.md")
-    unreleased = unreleased_only(read("CHANGELOG.md"))
+    unreleased = m5s_changelog(read("CHANGELOG.md"))
     for word in (
         "**Scheduled (N)**",
         "scheduled — N · next HH:MM <preset>",
@@ -355,7 +358,7 @@ def test_web_schedule_and_action_are_documented_on_screen():
         "`retried`",
         "`exhausted`",
     ):
-        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word!r}"
+        assert word in unreleased, f"CHANGELOG [0.10.0] does not mention {word!r}"
 
 
 # ── PR F: golive 라우트와 원칙 문장 (§4.5 · §3 #8 · 결정 217 · 235) ─────────────────
@@ -474,7 +477,7 @@ def test_golive_route_409s_and_the_cli_are_documented():
     skills = contract[contract.index("## 8. Skills") :]
     assert "`status` and `golive`" in skills and "release_golive.sh" in skills
     assert "not_attempted" in contract  # golive.json 의 reason — 화면은 「시도 안 함」 으로 그린다
-    unreleased = unreleased_only(read("CHANGELOG.md"))
+    unreleased = m5s_changelog(read("CHANGELOG.md"))
     for word in (
         "release/golive",
         "rcm release golive",
@@ -483,7 +486,7 @@ def test_golive_route_409s_and_the_cli_are_documented():
         "golive_running",
         "Nothing goes live on approval by itself",
     ):
-        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+        assert word in unreleased, f"CHANGELOG [0.10.0] does not mention {word}"
 
 
 def test_golive_route_a_plan_measured_in_the_future_is_documented_as_stale():
@@ -493,18 +496,23 @@ def test_golive_route_a_plan_measured_in_the_future_is_documented_as_stale():
     row = next(ln for ln in config.splitlines() if ln.startswith("| `GET …/release` |"))
     phrase = "or a `measured_at` later than now (a clock that is wrong never makes a plan fresh)"
     assert phrase in row, "the GET …/release row lost the future-measured_at rule"
-    unreleased = unreleased_only(read("CHANGELOG.md"))
+    unreleased = m5s_changelog(read("CHANGELOG.md"))
     assert "`measured_at` is later than now is stale" in unreleased
 
 
 def test_web_schedule_and_action_docs_say_a_known_409_refusal_exits_2():
-    """H 실기 — `schedule_exists` · `golive_running` 거절은 결과 모름(3)이 아니라 2 다."""
+    """H 실기 — `schedule_exists` 거절은 결과 모름(3)이 아니라 2 다. `golive_running` 은
+    `POST /jobs` 로는 나오지 않는다(그 앞에서 `release_route_required` 로 막힌다 — #257 검증 P3).
+    그래서 `rcm run` 의 2 를 말하는 문장에 그 이름이 있으면 거짓이다."""
     for rel in ("README.md", "README.ko.md"):
         text = action_flat(read(rel))
-        for code in ("`schedule_exists`", "`golive_running`", "`release_route_required`"):
+        for code in ("`schedule_exists`", "`release_route_required`"):
             assert code in text, (rel, code)
-    assert "409 whose code is" in action_flat(read("README.md"))
+    en = action_flat(read("README.md"))
+    assert "409 whose code is `schedule_exists` or `release_route_required`" in en
+    ko = action_flat(read("README.ko.md"))
+    assert "`schedule_exists` · `release_route_required` 인 409" in ko
     assert "(`rcm run` exits 2: no job was made)" in action_flat(read("docs/configuration.md"))
-    assert "`schedule_exists` or `golive_running`" in action_flat(
-        unreleased_only(read("CHANGELOG.md"))
-    )
+    changelog = action_flat(m5s_changelog(read("CHANGELOG.md")))
+    assert "409 `schedule_exists` (as it already did for `release_route_required`)" in changelog
+    assert "`schedule_exists` or `golive_running`" not in changelog

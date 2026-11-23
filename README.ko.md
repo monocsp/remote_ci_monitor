@@ -371,7 +371,7 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
 서버가 작업을 만들지 않았다고 확실히 말한 제출 거절도 2 다. 400 · 401 · 403 · 413 과, 코드가
-`schedule_exists` · `golive_running` · `release_route_required` 인 409 가 그렇다. 그 밖의 409 는
+`schedule_exists` · `release_route_required` 인 409 가 그렇다. 그 밖의 409 는
 작업이 생겼는지 알 수 없으므로 3 이다.
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·
 `rcm jobs` · `rcm top` 은 곧바로 `cannot reach <url>` 과 함께 3 이다.
