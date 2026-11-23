@@ -70,6 +70,10 @@ def superseded_by(new: Job, active: Iterable[Job], mode: str) -> list[int]:
     `cancelling` 은 언제나 뺀다 — 이미 누가 멈추는 중이다. 다시 요청하면 `kill_at` 이 밀리고
     요약이 사람의 취소를 덮는다(A18).
     """
+    # 반복의 다음 시도(M5s)는 새 제출이 아니다 — 옛 sha 를 물려받고 id 만 새로 받았다. 그것을
+    # 「새 잡」으로 보면 같은 브랜치에 그 사이 들어온 더 새 커밋의 잡을 치운다(#256 검증 P1)
+    if new.retry_of is not None:
+        return []
     states = _states(mode)
     branch = branch_of(new.source)
     repo = repo_of(new.source)

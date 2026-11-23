@@ -561,6 +561,8 @@ argv = ["bash", "scripts/deploy.sh"]
 
 # 종료 상태 다섯 — `[[notify]] on` 의 기본값이자 허용 집합
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost", "expired"}  # expired: M5s
+#: `on` 이 없는 규칙의 기본(M5s) — 종료 상태에 `exhausted` 가 들고 `retried` 는 빠진다(결정 211)
+NOTIFY_DEFAULT = TERMINAL | {"exhausted"}
 
 
 def notify_toml(**fields: object) -> str:
@@ -696,7 +698,7 @@ def test_notify_argv_rule_defaults(tmp_path):
     assert rule.name == "slack-fail"
     assert tuple(rule.argv) == ("bash", "/opt/rcm/notify.sh")
     assert not rule.url  # argv 규칙엔 url 이 없다
-    assert set(rule.on) == TERMINAL  # 기본 = 종료 상태 전부
+    assert set(rule.on) == NOTIFY_DEFAULT  # 기본 = 종료 상태 전부(시도 사이의 `retried` 만 뺀다)
     assert not rule.presets  # 비면 전부
     assert rule.timeout_seconds == 30
 

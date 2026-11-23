@@ -24,7 +24,7 @@ bash 는 명령을 부르고, 판단은 여기서 한다.
     --selftest                                  → 오염 입력이 실제로 빨개지는지
 
 종료코드(드라이버 계약): 0 완료 · 1 빨강/계약 위반/N 불일치/이미 릴리스됨 · 2 전제 조건/N 없음 ·
-3 결과 불명(잡 lost/timed_out — 업로드는 절대 재제출하지 않는다) · 4 스토어 드리프트.
+3 결과 불명(잡 lost/timed_out/exhausted — 업로드는 절대 재제출하지 않는다) · 4 스토어 드리프트.
 """
 
 from __future__ import annotations
@@ -250,6 +250,12 @@ def map_exit(job: Any) -> tuple[int, str]:
         return EXIT_RED, f"failed (job exit {code}, step {step})"
     if state in ("lost", "timed_out"):
         return EXIT_UNKNOWN, f"result unknown ({state})"
+    if state == "exhausted":
+        # rcm 0.10.0 — 반복 프리셋이 마지막 시도까지 「아직」(75)이었다. 끝내 확인하지 못했다
+        return EXIT_UNKNOWN, f"result unknown (still exit {code} after every attempt)"
+    if state == "retried":
+        # 끝이 아니다 — `rcm wait` 는 `retried_as` 를 따라간다. 이 JSON 이 왔다면 그 사슬을 잃었다
+        return EXIT_UNKNOWN, "result unknown (retried; the next attempt was not followed)"
     if state == "cancelled":
         return EXIT_PREREQ, "cancelled"
     return EXIT_UNKNOWN, f"not finished ({state})"
@@ -599,6 +605,8 @@ def selftest() -> int:
     check("failed exit 4 → 4 (drift)", map_exit({"state": "failed", "exit_code": 4})[0], 4)
     check("lost → 3", map_exit({"state": "lost"})[0], 3)
     check("timed_out → 3", map_exit({"state": "timed_out"})[0], 3)
+    check("exhausted → 3", map_exit({"state": "exhausted", "exit_code": 75})[0], 3)
+    check("retried → 3 (not the end)", map_exit({"state": "retried", "exit_code": 75})[0], 3)
     check("empty JSON → 3", map_exit({})[0], 3)
     check("running → 3", map_exit({"state": "running"})[0], 3)
 

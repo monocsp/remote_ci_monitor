@@ -1138,7 +1138,8 @@ Git mirrors are never pruned.
   remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
   process itself (`rcm worker`) ships in the next release step (M5b-3).
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
-  when jobs finish, filtered by state (`on`; without it every final state, `expired` included) and
+  when jobs finish, filtered by state (`on`; without it every final state but `retried`, `expired`
+  and `exhausted` included) and
   preset (`presets`). The command gets
   `RCM_JOB_ID`, `RCM_STATE`, `RCM_PRESET`, `RCM_KEY`, `RCM_REQUESTER`, `RCM_SUMMARY`,
   `RCM_FAILED_STEP` (declared failures only) and `RCM_LAST_STEP`, `RCM_EXIT_CODE`,
@@ -1841,6 +1842,85 @@ schedules about to enter the queue. Schedules live in the database: `rcm reload`
 keep them; one whose preset was removed fails at claim with `preset_missing`. A `[[notify]]` rule
 without `on` also fires for `expired`, and `on = ["expired"]` picks only those. Finished schedules
 follow the ordinary [retention](#retention-what-is-kept-and-for-how-long).
+
+## Trying again later: `[presets.retry]`
+
+Some scripts can only say "not yet": the store has not finished the release, the browser session
+needs a person to log in again. A preset can ask rcm to run such a script again later. The script
+exits with the agreed code (75, `EX_TEMPFAIL`) and rcm runs it again after an interval, up to a
+limit:
+
+```toml
+[[presets]]
+name = "release-golive"
+argv = ["bash", "scripts/release_golive.sh"]
+source_modes = ["git_ref"]   # required: each attempt fetches the same commit again
+repo = "app"
+
+[presets.retry]
+on_exit = 75             # the exit code that means "not yet" (1–255, default 75)
+interval_seconds = 600   # wait this long before the next attempt (default 600)
+max_attempts = 12        # attempts in all, the first one included (2–100, default 12)
+```
+
+**Only a preset that declares it retries.** Without `[presets.retry]` an exit 75 is an ordinary
+`failed` job, as before; `rcm-ci-connect` uses 75 for an infrastructure failure, and that must
+not loop. A preset that retries takes `git_ref` sources only (`source_modes = ["git_ref"]`, a
+configuration error otherwise): every attempt runs the commit the first one resolved. The policy
+is stored with the job when it is submitted, so `rcm reload` or removing the preset does not change
+a chain already running. A submission can only turn it off for that job: `"retry": false` in the
+`POST /jobs` body; such a job is not a chain (no `chain_id`, no `attempts[]`). A submission
+only joins a job whose frozen policy is the same (`on_exit`, `interval_seconds`, `max_attempts`
+and whether `retry: false` turned it off), so a submission made after a reload changed the limit
+starts a job of its own, and a submission that wants retries never joins a
+`retry: false` job or one submitted before the preset declared the table, and the other way round.
+
+**Each attempt is a job of its own.** An attempt that exits with `on_exit` ends as `retried` and,
+in the same database transaction, the next attempt is created as `scheduled` for
+`now + interval_seconds`. It keeps the inputs, the commit, the priority (raised by joins too), the
+link, the machine or pool, `keep`, `--no-supersede`, and the joiners. The last attempt that still
+exits with `on_exit` ends as `exhausted`: rcm never found out, and a person has to look.
+
+| state | means | `rcm wait` |
+|---|---|---|
+| `retried` | this attempt said "not yet"; `retried_as` names the next one | keeps waiting, on the next attempt |
+| `exhausted` | the last attempt said "not yet" too | 1 |
+
+A retry attempt has **no start deadline**: when the lanes are busy, or a concurrency group is held
+(a login preset sharing the group while a person signs in), it waits as `blocked_by_group` without
+ending `expired`. The chain ends only at `max_attempts`. A retry attempt is not a new
+submission: entering the queue it [supersedes](#superseding-older-jobs-of-the-same-branch)
+nothing — it runs the older commit, and a newer job of the same branch must not be cleared for it.
+
+**The chain.** Every attempt carries `chain_id` (the first job's id), `attempt` (1, 2, …),
+`retry_of`, `retried_as` (on a `retried` attempt) and `max_attempts`, in `GET /jobs/<id>` and in
+`/api/status` rows; `presets[].retry` shows the declared policy. `rcm wait` and `rcm run` follow
+`retried_as` to the end of the chain: `--timeout` counts for the whole chain, `--fetch-artifacts`
+fetches the last attempt's files, and the final JSON's `job_id` is the last attempt, with
+`chain_id` and `attempts[]` (`job_id`, `attempt`, `state`, `exit_code` for each). Each step prints
+`#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it`. A `retried` attempt without a
+next one would be a server bug; `rcm wait` exits 3 then, never 1.
+
+**A person's task across attempts.** A script that needs a person (a login, say) prints an
+`::rcm::action::` marker and exits 75. The marker belongs to the whole chain: the chain shows the
+last marker of the most recent attempt that ran, while the next attempt waits as `scheduled`,
+waits in the queue, or runs without a marker of its own. An attempt that runs to its end without a
+marker clears it. So `/api/status` gives the waiting attempt `reason: "needs_action"` and its
+`action` (on `pools[].scheduled[]` rows too, which carry `reason` and `action`, both `null`
+without a marker), and `rcm wait --return-on-action` returns 4 between attempts as well.
+
+`rcm cancel` takes any id of the chain and stops the attempt that is still alive; the cancel token
+from the first submission works for every attempt. A cancel that lands while an attempt is
+exiting 75 wins: the attempt ends `cancelled` and no next attempt is made. Only the last attempt
+collects artifacts and goes on the [shelf](#keeping-a-jobs-files-the-shelf); a `retried` attempt
+keeps no workspace even with `keep_workspace_on_failure`. `retried` attempts stay out of the recent
+list (the chain shows as its last attempt, with its `attempt` number), out of the estimate samples
+and out of the default `[[notify]]` set (`on = ["retried"]` asks for them); `exhausted` is in it.
+
+**Older clients.** A client before 0.10.0 does not know `retried` and would wait on it forever. A
+server with at least one preset that retries raises `min_client_version` in `/api/health` to
+`0.10.0` (and says `retry_min_client_version: "0.10.0"`), so the old `rcm check` shows the client
+row as FAIL. Making a script safe to run again is the script's job.
 
 ## Client and worker files
 

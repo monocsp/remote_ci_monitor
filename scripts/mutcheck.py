@@ -22,9 +22,13 @@
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
   M5p 뒤 — `shelf-expand-keeps-apple-double`: 펼침이 macOS 메타데이터 멤버(`._*`)를 거르지 않음
      (`shelf_copier.py`, 2026-11-20 운영 잡 #3821 — 깨진 그림 23개)
-  M5s A — `m5s-*` 다섯: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 즉시 실행이
-     예약에 합류함 · 합류 쿼리가 시작 마감을 무시함 · 시각을 준 제출이 합류함
+  M5s A — `m5s-*` 넷: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 합류 쿼리가
+     예약에서 온 잡을 거르지 않음(즉시 실행이 예약에 합류함) · 시각을 준 제출이 합류함
      (`docs/m5s-workplan.md` §4.1 · §7)
+  M5s D — `m5s-retry-*` 둘: 반복 선언 없이 75 를 반복함 · 취소 뒤에도 retried 로 닫고 다음
+     시도를 만듦 (`docs/m5s-workplan.md` §4.2 · §7) + #256 격리 검증의 셋: 다음 시도가 더 새
+     커밋을 supersede 함(판정 · 승격 두 자리) · 합류가 얼린 반복 정책을 안 봄 + 시험 구멍 넷
+     (로컬 취소 경주 · 로컬 묶음 · finish 의 묶음 · 원격 묶음 만료)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -1826,29 +1830,22 @@ MUTANTS = (
             "test_s4_a_promoted_job_no_lane_takes_expires_at_the_deadline",
         ),
     ),
+    # `m5s-immediate-run-joins-a-schedule`(`JOINABLE_STATES` 에 `scheduled` 를 넣는다)는 PR D 에서
+    # 뺐다 — 합류 쿼리가 `not_before IS NULL` 로 예약에서 온 잡을 전부 거르므로(넘어온 P2) 그
+    # 변이는 같은 동작의 변이가 됐다. 예약 행은 언제나 `not_before` 가 있다(`_create_job_tx` 가
+    # 막는다). 「예약에 즉시 실행이 합류한다」는 아래 변이가 지킨다.
     Mutant(
-        # 예약을 합류 대상에 넣는다 — 같은 입력의 즉시 실행이 15:00 예약에 붙어 그때까지 기다린다
-        # (결정 206 · S8)
-        name="m5s-immediate-run-joins-a-schedule",
+        # 합류 쿼리가 예약에서 온 잡을 거르지 않는다 — 즉시 실행이 승격된 예약에 붙어 그 마감을
+        # 물려받고 레인이 늦으면 `expired` 로 끝난다(#253 격리 검증 P1). 마감 없는 예약(반복의
+        # 다음 시도, 결정 231)에 붙으면 `interval` 뒤로 밀린다 — 그래서 필터는 `not_before` 다(PR D)
+        name="m5s-join-ignores-not-before",
         path="src/remote_ci_monitor/store.py",
-        old="JOINABLE_STATES = ACTIVE_STATES - {CANCELLING}\n",
-        new="JOINABLE_STATES = (ACTIVE_STATES | SCHEDULED_STATES) - {CANCELLING}\n",
-        # 시작 마감 필터(아래 변이)만으로는 못 막는다 — 반복 시도는 마감 없는 예약이다(결정 231)
-        tests=(
-            "tests/test_schedule_m5s.py::test_nothing_joins_a_schedule_that_has_no_start_deadline",
-            "tests/test_server_schedule_m5s.py::test_s8_an_immediate_run_does_not_join_a_schedule",
-        ),
-    ),
-    Mutant(
-        # 합류 쿼리가 시작 마감을 보지 않는다 — 즉시 실행이 승격된 예약에 붙어 그 마감을 물려받고
-        # 레인이 늦으면 `expired` 로 끝난다(#253 격리 검증 P1)
-        name="m5s-join-ignores-start-deadline",
-        path="src/remote_ci_monitor/store.py",
-        old='f"AND state IN ({marks}) AND start_deadline IS NULL ORDER BY id LIMIT 1",',
-        new='f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
+        old='+ f"AND state IN ({marks}) AND not_before IS NULL ORDER BY id LIMIT 1",',
+        new='+ f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
         tests=(
             "tests/test_server_schedule_m5s.py::"
             "test_s8_an_immediate_run_does_not_join_a_promoted_schedule",
+            "tests/test_retry_m5s.py::test_nothing_joins_a_promoted_retry_attempt",
         ),
     ),
     Mutant(
@@ -1861,6 +1858,129 @@ MUTANTS = (
         tests=(
             "tests/test_server_schedule_m5s.py::"
             "test_s19_a_schedule_does_not_join_an_active_identical_job",
+        ),
+    ),
+    # ── M5s D — 종료코드 반복 (`docs/m5s-workplan.md` §4.2 · §7) ──
+    Mutant(
+        # 반복 선언이 없어도 75 를 반복한다 — rcm-ci 의 75(인프라 실패)가 10분마다 다시 돌아
+        # 커밋 상태가 늦는다(§3 #1 · 결정 210 · S7)
+        name="m5s-retry-without-declaration",
+        path="src/remote_ci_monitor/core/model.py",
+        old=(
+            "            and self.retry_on_exit is not None\n"
+            "            and not self.retry_disabled\n"
+            "            and rc == self.retry_on_exit\n"
+        ),
+        new=(
+            "            and not self.retry_disabled\n"
+            "            and rc == (self.retry_on_exit or 75)\n"
+        ),
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_s7_exit_75_without_a_retry_declaration_is_a_plain_failure",
+        ),
+    ),
+    Mutant(
+        # `retried` 가 `running` 에서만 가지 않는다 — 75 로 끝난 순간 들어온 사람의 취소를 덮고
+        # 다음 시도까지 만든다(결정 225 · S20)
+        name="m5s-retry-overrides-cancel",
+        path="src/remote_ci_monitor/store.py",
+        old="        if state == RETRIED:\n            only_from = (RUNNING,)\n",
+        new="        if state == RETRIED:\n            only_from = None\n",
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_retried_only_leaves_running_and_a_cancel_in_between_makes_no_next_attempt",
+            "tests/test_retry_m5s.py::"
+            "test_s20_a_remote_75_after_a_cancel_closes_cancelled_with_no_next_attempt",
+        ),
+    ),
+    Mutant(
+        # 다음 시도를 supersede 의 「새 잡」으로 본다 — 옛 sha 를 물려받은 시도가 그 사이 같은
+        # 브랜치에 들어온 더 새 커밋의 잡을 치운다(#256 격리 검증 P1)
+        name="m5s-retry-attempt-supersedes-newer",
+        path="src/remote_ci_monitor/core/supersede.py",
+        old="    if new.retry_of is not None:\n        return []\n",
+        new="",
+        tests=(
+            "tests/test_retry_m5s.py::test_a_retry_attempt_is_never_the_new_job_of_a_supersede",
+        ),
+    ),
+    Mutant(
+        # 승격된 다음 시도가 supersede 판정에 간다 — 위 변이의 방어가 없으면 더 새 커밋을 치운다
+        name="m5s-promoted-retry-runs-supersede",
+        path="src/remote_ci_monitor/server.py",
+        old="            if job is not None and job.retry_of is not None:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_a_promoted_retry_attempt_does_not_supersede_a_newer_commit",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 `retried` 판정과 finish 사이의 취소를 닫지 않는다 — 잡이 `cancelling` 으로
+        # 영영 남는다(#256 격리 검증 P2a)
+        name="m5s-local-retry-race-left-cancelling",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "        if not closed and oc.state == RETRIED:\n"
+            "            # `retried` 는 `running` 에서만 간다"
+        ),
+        new="        if False:\n            # `retried` 는 `running` 에서만 간다",
+        tests=(
+            "tests/test_e2e_retry_m5s.py::"
+            "test_a_cancel_between_the_verdict_and_the_finish_closes_cancelled",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 반복할 시도의 묶음도 모은다 — 시도마다 묶음 파일이 쌓인다(#256 P2b)
+        name="m5s-local-retry-collects-artifacts",
+        path="src/remote_ci_monitor/worker.py",
+        old="        bundle = None if retrying else self._collect_artifacts(",
+        new="        bundle = None if False else self._collect_artifacts(",
+        tests=(
+            "tests/test_e2e_retry_m5s.py::"
+            "test_a_local_keep_attempt_that_exits_75_leaves_no_bundle_and_no_shelf_row",
+        ),
+    ),
+    Mutant(
+        # `retried` finish 가 받은 묶음을 쓴다 — 중간 시도가 묶음 행과 보관 행을 남긴다(#256 P2b)
+        name="m5s-retried-finish-writes-bundle",
+        path="src/remote_ci_monitor/store.py",
+        old="            only_from = (RUNNING,)\n            bundle = None\n",
+        new="            only_from = (RUNNING,)\n",
+        tests=(
+            "tests/test_retry_m5s.py::test_a_retried_finish_writes_no_bundle_even_when_given_one",
+        ),
+    ),
+    Mutant(
+        # 원격 시도의 묶음을 `retried` 에서 만료시키지 않는다 — TTL 내내 남는다(#256 P2c)
+        name="m5s-retried-remote-bundle-kept",
+        path="src/remote_ci_monitor/store.py",
+        old='WHERE job_id=? AND state=? AND expires_at > ?",',
+        new='WHERE job_id=? AND state=? AND expires_at < ?",',
+        tests=(
+            "tests/test_retry_m5s.py::test_a_remote_bundle_of_a_retried_attempt_expires_at_once",
+        ),
+    ),
+    Mutant(
+        # 합류가 얼린 반복 정책을 보지 않는다 — 반복을 원하는 제출이 `retry: false` 잡에 붙어
+        # 반복을 잃는다(#256 격리 검증 P2)
+        name="m5s-join-ignores-retry-policy",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '    "AND retry_on_exit IS ? AND retry_interval_seconds IS ? '
+            'AND retry_max_attempts IS ? "\n'
+            '    "AND retry_disabled=? "\n'
+        ),
+        new=(
+            '    "AND (retry_on_exit IS ? OR 1) AND (retry_interval_seconds IS ? OR 1) "\n'
+            '    "AND (retry_max_attempts IS ? OR 1) AND (retry_disabled=? OR 1) "\n'
+        ),
+        tests=(
+            "tests/test_retry_m5s.py::"
+            "test_a_retry_wanting_submission_does_not_join_a_retry_false_job",
+            "tests/test_retry_m5s.py::"
+            "test_a_submission_after_a_reload_changed_max_attempts_does_not_join",
         ),
     ),
 )

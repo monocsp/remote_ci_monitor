@@ -165,6 +165,13 @@ waiting. If no lane picks it up within its start deadline (15 minutes unless the
 another) it ends `expired`, exit 2 — it did not run. The rules are in
 [running a job later](configuration.md#running-a-job-later---at-and---in).
 
+**Again later.** A preset with a `[presets.retry]` table runs its script again when it exits 75
+("not yet"), every `interval_seconds`, up to `max_attempts`. Each attempt is a job of its own:
+`rcm wait --job N` prints `#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it` and
+follows the chain to its end; the last attempt's `exhausted` is exit 1. `rcm cancel` with any id
+of the chain stops it. The rules are in
+[trying again later](configuration.md#trying-again-later-presetsretry).
+
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
 

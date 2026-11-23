@@ -66,7 +66,49 @@ of a key bumps that number and is listed here.
   failed…`). The count is the server's in-memory `notify_failures`, so a restart sets it back to 0.
   ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
 
+- **A preset can run its script again later: `[presets.retry]`.** With `on_exit = 75`,
+  `interval_seconds = 600` and `max_attempts = 12` (the defaults), an attempt that exits 75 ends
+  in the new final state `retried` and, in the same transaction, the next attempt waits as
+  `scheduled` for the interval — with no start deadline, so a busy lane or a held concurrency
+  group never turns it `expired`. The last attempt that still exits 75 ends in the new final state
+  `exhausted` (`rcm wait` exit 1). Only a preset that declares the table retries, and it must take
+  `git_ref` sources only; the policy is frozen on the job at submission, and `"retry": false` in a
+  submission turns it off for that job (a submission joins only a job with the same frozen policy,
+  and a retry attempt supersedes nothing when it enters the queue). `rcm wait` and `rcm run`
+  follow `retried_as` to the end of the chain (`--timeout` covers the chain, `--fetch-artifacts`
+  takes the last attempt's files) and the final JSON carries `chain_id` and `attempts[]`;
+  `rcm cancel` with any id of the chain stops the live attempt, with the first submission's
+  cancel token. A cancel that lands as an attempt exits 75 wins and no next attempt is made. Job rows in
+  `GET /jobs/<id>` and `/api/status` carry `chain_id`, `attempt`, `retry_of`, `retried_as` and
+  `max_attempts`, presets carry `retry`, and `/api/health` carries `retry_min_client_version`
+  (keys added only — `schema_version` stays 1).
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- **An `::rcm::action::` marker lasts across the attempts of a chain.** The chain shows the last
+  marker of its most recent attempt that ran until an attempt runs to its end without one, so the
+  next attempt keeps `reason: "needs_action"` and its `action` while it waits — as a schedule, in
+  the queue, or running. `pools[].scheduled[]` rows gain `reason` and `action` (null without a
+  marker). ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+
 ### Changed
+- **A server with a preset that retries raises `min_client_version` to `0.10.0`** in
+  `/api/health`. An older client does not know `retried` and its `rcm wait` would wait forever, so
+  its `rcm check` now shows the client row as FAIL. Upgrade the clients.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- A `[[notify]]` rule without `on` fires for `exhausted` but not for `retried`, so a two-hour chain
+  is one notification; `on = ["retried"]` asks for each attempt.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- `retried` attempts stay out of the recent list, the estimate samples and the failure counts;
+  the chain shows as its last attempt. Only the last attempt collects artifacts and goes on the
+  shelf, and a `retried` attempt keeps no workspace even with `keep_workspace_on_failure`.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- No job joins a job that came from a schedule any more, before or after it enters the queue,
+  whether or not it has a start deadline (a retry attempt has none).
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- The `rcm-ci-connect` and `rcm-release-driver` templates know the two new states: the watcher
+  follows a `retried` job to its next attempt and posts `unavailable · #N · gave up after retries`
+  for `exhausted`, and `release_check.py` maps both to exit 3. Copy the new
+  `rcm_ci_watch.py`, `rcm_ci_config.py` and `release_check.py` into repositories that use them.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
   every final state. Give the rule an `on` list to keep the old set.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))

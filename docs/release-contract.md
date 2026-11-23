@@ -150,6 +150,15 @@ review flow works without them. Without a `version` preset, «new version» in t
 the draft in rcm only (state `editing` at once) and the listing starts from the repository's
 `store/` files instead of a prefill.
 
+**Exit 75 is "not yet" only where the preset says so.** rcm runs a script that exits 75 again
+later only when its preset declares `[presets.retry]` (`on_exit`, `interval_seconds`,
+`max_attempts` — [trying again later](configuration.md#trying-again-later-presetsretry)); every
+attempt is a job of its own, the last one that still exits 75 ends `exhausted`, and the preset
+takes `git_ref` sources only. Without the table 75 is an ordinary failure, as it is for
+`rcm-ci-connect`. A `golive` release script that waits for a login or for the store prints its
+`::rcm::action::` marker, exits 75, and lets the next attempt check again; it must be safe to run
+again.
+
 **The `version` preset's three modes are not three things rcm does.** rcm sends `create` when
 somebody opens a draft — that one run also writes the `prefill.json` the version page fills its
 fields from — and `delete` when a draft with an App Store version is discarded, by hand or by the

@@ -142,6 +142,63 @@ def test_scheduled_jobs_are_documented():
         assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
 
 
+# ── PR D: 종료코드 반복 (§4.2) ────────────────────────────────────────────────
+
+
+def test_retry_on_exit_is_documented():
+    """PR D — `[presets.retry]`(§4.2). 설정 문서가 규칙의 정본이고 README 의 종료 코드 표 · 사용
+    안내(영 · 한) · 계약 문서가 그곳을 가리킨다. 옛 클라이언트 대비(결정 230)와 반복 시도에는
+    시작 마감이 없다는 것(결정 231)을 말한다."""
+    config = read("docs/configuration.md")
+    assert "## Trying again later: `[presets.retry]`" in config
+    for word in (
+        "[presets.retry]",
+        "on_exit = 75",
+        "interval_seconds = 600",
+        "max_attempts = 12",
+        'source_modes = ["git_ref"]',
+        "`retried`",
+        "`exhausted`",
+        "retried_as",
+        "chain_id",
+        "attempts[]",
+        '"retry": false',
+        "**no start deadline**",
+        "keep_workspace_on_failure",
+        'on = ["retried"]',
+        "retry_min_client_version",
+        "`0.10.0`",
+        "every final state but `retried`",
+        # 결정 233 — 사슬 기준 표식
+        "**A person's task across attempts.**",
+        'reason: "needs_action"',
+        "clears it",
+    ):
+        assert word in config, f"docs/configuration.md does not mention {word}"
+    anchor = "configuration.md#trying-again-later-presetsretry"
+    for rel in (
+        "README.md",
+        "README.ko.md",
+        "docs/usage.md",
+        "docs/usage.ko.md",
+        "docs/release-contract.md",
+    ):
+        assert anchor in read(rel), f"{rel} does not link to the retry section"
+    for rel in ("README.md", "README.ko.md"):
+        assert "`exhausted`" in read(rel), f"{rel} exit codes do not name `exhausted`"
+    unreleased = read("CHANGELOG.md").split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    for word in (
+        "[presets.retry]",
+        "`retried`",
+        "`exhausted`",
+        "`min_client_version` to `0.10.0`",
+        "retried_as",
+        "attempts[]",
+        "lasts across the attempts of a chain",
+    ):
+        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+
+
 # ── PR C: 「사람이 할 일」 표식 (§4.3 · 결정 213 · 234) ───────────────────────
 
 

@@ -56,6 +56,7 @@ from remote_ci_monitor.capabilities import (
 from remote_ci_monitor.clientwheel import (
     CANCEL_MIN_CLIENT_VERSION,
     MIN_CLIENT_VERSION,
+    RETRY_MIN_CLIENT_VERSION,
     WheelBuildError,
     build_wheel,
     wheel_filename,
@@ -88,6 +89,7 @@ from remote_ci_monitor.core.mdns import instance_name
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
+    CANCELLING,
     DEFAULT_POOL,
     FAILED,
     MODE_GIT_REF,
@@ -96,6 +98,7 @@ from remote_ci_monitor.core.model import (
     PLACEMENT_POOL,
     PRIORITY_HIGH,
     QUEUED,
+    REASON_NEEDS_ACTION,
     SCHEDULED,
     SUCCEEDED,
     TIMED_OUT,
@@ -467,10 +470,29 @@ class _DbSnapshot:
     step_medians_error_code: str | None = None
     #: 최근 행의 마지막 「사람이 할 일」 표식(M5s) — 잡 id → Action. 표식 없는 잡은 없다
     recent_actions: dict[int, Action] = field(default_factory=dict)
+    #: 반복 사슬에 든 대기 · 실행 · 예약 잡의 사슬 표식(M5s 결정 233) — 잡 id → Action
+    chain_actions: dict[int, Action] = field(default_factory=dict)
     #: 예약 잡(M5s) — 승격 시각 순. 큐 계산에는 들어가지 않는다(결정 206)
     scheduled: list[Job] | None = field(default_factory=list)
     scheduled_error: str | None = None
     scheduled_error_code: str | None = None
+
+
+def with_chain_action(row: QueueRow, action: Action | None) -> QueueRow:
+    """큐 행에 사슬 표식을 단다(M5s 결정 233). 그 시도가 스스로 찍은 표식이 있으면 그대로다.
+
+    표식이 있으면 이유는 `needs_action` 이다 — 시도 사이에 그룹이나 레인을 기다리는 행도
+    「Needs a look」에 남는다. 취소 중인 행은 이제 할 일이 없으므로 `cancelling` 그대로다."""
+    if action is None or row.action is not None or row.job.state == CANCELLING:
+        return row
+    return replace(row, action=action, reason=REASON_NEEDS_ACTION)
+
+
+def scheduled_action(doc: dict[str, Any], action: Action | None) -> dict[str, Any]:
+    """예약 행 문서에 사슬 표식과 이유를 채운다(M5s 결정 233). 없으면 둘 다 null 이다."""
+    doc["action"] = action_json(action)
+    doc["reason"] = REASON_NEEDS_ACTION if action is not None else None
+    return doc
 
 
 def shown_pool(job: Job) -> str:
@@ -963,6 +985,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 {"job_id": job.id, "state": job.state, "exit_code": job.exit_code},
             )
             self._version_job_finished(job)
+            if job.retried_as is not None:
+                # 반복의 다음 시도(M5s)는 같은 트랜잭션에서 `scheduled` 로 섰다 — 따로 알린다
+                self.publish(KIND_JOB_CHANGED, {"job_id": job.retried_as, "state": SCHEDULED})
         else:
             self.publish(KIND_JOB_CHANGED, {"job_id": job.id, "state": job.state})
 
@@ -3195,9 +3220,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         markers: dict[int, list[Marker]] = {}
         queue_error = None
         queue_error_code: str | None = None
+        chain_actions: dict[int, Action] = {}
         try:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
+            # 사슬 표식(M5s 결정 233)은 큐 행의 일부다 — 못 읽으면 큐 절 전체가 실패다
+            chain_actions = self.store.chain_actions(jobs)
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
@@ -3230,6 +3258,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         scheduled_error = scheduled_error_code = None
         try:
             scheduled = self.store.list_scheduled()
+            # 시도 사이를 기다리는 예약 행에도 사슬 표식을 단다(결정 233)
+            chain_actions.update(self.store.chain_actions(scheduled))
         except Exception as e:  # noqa: BLE001
             scheduled, scheduled_error, scheduled_error_code = None, _error_text(e), _error_code(e)
         return _DbSnapshot(
@@ -3255,6 +3285,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             host_medians=self._host_medians or {},
             host_step_medians=host_step_medians,
             recent_actions=recent_actions,
+            chain_actions=chain_actions,
         )
 
     def _host_step_view(
@@ -3461,6 +3492,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
         )
+        rows = [with_chain_action(r, snap.chain_actions.get(r.job.id)) for r in rows]
         if pool is None:
             return rows
         return [r for r in rows if shown_pool(r.job) == pool]
@@ -3587,6 +3619,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # 최근 행의 표식(M5s) — 순수 층은 마커를 모른다. 큐 행은 진행(마커)에서 이미 왔다
             for row in pool.get("recent") or []:
                 row["action"] = action_json(snap.recent_actions.get(row.get("id")))
+            # 예약 행(M5s 결정 233) — 반복의 다음 시도가 사슬의 표식을 이어받는다
+            for row in pool.get("scheduled") or []:
+                scheduled_action(row, snap.chain_actions.get(row.get("id")))
         return doc
 
     def _inject_artifacts(self, doc: dict[str, Any], model: StatusModel) -> None:
@@ -3626,7 +3661,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             return self._terminal_view(job, host)
         if job.is_scheduled:
             # 예약 잡(M5s)은 큐 행이 아니다 — 「방금 끝났다」로 읽으면 끝난 잡처럼 보인다
-            return scheduled_json(job, base_url=self.base_url(host))
+            doc = scheduled_json(job, base_url=self.base_url(host))
+            return scheduled_action(doc, self.store.chain_actions([job]).get(job.id))
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)
@@ -3856,6 +3892,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         keep = asked or preset.keep
         # 예약(M5s §4.1) — 시각은 여기서 정한다(잡을 만들기 전, 다른 검사와 같은 줄에서 400)
         schedule = self._schedule_of(body, preset)
+        # 반복(M5s 결정 210 · 229) — 켜는 것은 프리셋만이고 제출은 `"retry": false` 로 끄기만 한다.
+        # 정책은 잡 열로 얼린다
+        retry_asked = body.get("retry", True)
+        if not isinstance(retry_asked, bool):
+            raise ApiError(400, "retry must be true or false")
+        retry = {"retry": preset.retry, "retry_disabled": not retry_asked}
         if mode == MODE_GIT_REF:
             return self._submit_git_ref(
                 preset,
@@ -3872,6 +3914,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 supersede=supersede,
                 keep=keep,
                 schedule=schedule,
+                retry=retry,
             )
         if mode != MODE_TREE:
             raise ApiError(400, f"unknown source mode {mode!r}")
@@ -3904,8 +3947,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 예약은 합류하지 않는다(M5s 결정 226) — 지금 도는 잡에 붙으면 「그 시각에」가 사라진다
         want_join = want_join and schedule is None
         if want_join:
+            # 얼린 반복 정책이 같은 잡에만 붙는다(M5s · #256 검증) — 합류자는 그 잡의 정책을 받는다
             joined = self.store.join_or_bump_with_submission(
-                jk, token.name, label, priority, now, keep=keep
+                jk, token.name, label, priority, now, keep=keep, **retry
             )
             if joined is not None:
                 existing, sid, cancel_token = joined
@@ -3938,6 +3982,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             link=link,
             keep=keep,
             no_supersede=not supersede,
+            **retry,
             **placed,
         )
         if not supersede:
@@ -4454,6 +4499,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         supersede: bool = True,
         keep: bool = False,
         schedule: tuple[datetime, datetime, str] | None = None,
+        retry: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """git_ref 제출: ref 검증 → 원격에서 sha 확정(DB 락 밖) → 합류 판정 → 바로 queued.
 
@@ -4493,9 +4539,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         want_join = self.config.server.join_duplicates and body.get("join", True) is not False
         want_join = want_join and placed.get("target_worker") is None
         want_join = want_join and schedule is None  # 예약은 합류 안 함(결정 226)
+        retry = retry or {}
         if want_join:
+            # 얼린 반복 정책이 같은 잡에만 붙는다(M5s · #256 검증) — 합류자는 그 잡의 정책을 받는다
             joined = self.store.join_or_bump_with_submission(
-                jk, token.name, label, priority, now, keep=keep
+                jk, token.name, label, priority, now, keep=keep, **retry
             )
             if joined is not None:
                 existing, sid, cancel_token = joined
@@ -4529,6 +4577,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             link=link,
             keep=keep,
             no_supersede=not supersede,
+            **retry,
             **placed,
         )
         if supersede and schedule is None:
@@ -4575,6 +4624,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             job = self.store.get_job(job_id)
             if job is not None and job.no_supersede:
                 return []  # 제출이 끈 것을 잡 행에 얼렸다(M5s 결정 237) — 재시작해도 잊지 않는다
+            if job is not None and job.retry_of is not None:
+                # 반복의 다음 시도(M5s)는 새 제출이 아니라 이어서 도는 것이다 — 승격할 때 치울
+                # 옛 잡이 없다. 옛 sha 를 물려받았으므로 판정에 넣으면 더 새 커밋을 치운다(#256 P1)
+                return []
             preset = self.config.preset(job.preset) if job is not None else None
             mode = preset.supersede if preset is not None else SUPERSEDE_OFF
             if job is None or mode == SUPERSEDE_OFF:
@@ -4716,12 +4769,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         job = self.store.get_job(job_id)
         if job is None:
             raise ApiError(404, "no such job")
+        # 반복 사슬(M5s 결정 228) — 사슬의 어느 id 로 와도 살아 있는 머리 시도로 돌린다. 제출
+        # capability 는 뿌리에 있으므로 비밀은 뿌리 id 로 맞춘다. 합류자 행은 머리에 있다
+        root = job.chain_root
+        job = self.store.chain_head(job)
+        job_id = job.id
         cancel_token = (body or {}).get("cancel_token") if isinstance(body, dict) else None
         if cancel_token is not None and (
             not isinstance(cancel_token, str) or len(cancel_token) > 200
         ):
             raise ApiError(400, "cancel_token must be a string")
-        capability = self.store.submission_role(job_id, cancel_token) if cancel_token else None
+        capability = self.store.submission_role(root, cancel_token) if cancel_token else None
         if capability is not None:
             submission_id, role, participant = capability
             if role == ROLE_LEAVE_SUBMISSION:
@@ -4736,10 +4794,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                         error_code="cancel_token_mismatch",
                     )
                 consumed = self.store.consume_leave(
-                    job_id,
+                    root,
                     submission_id,
                     participant,
                     drop_joiner=job.requester.name != participant,
+                    joiner_job_id=job_id,
                 )
                 if not consumed:
                     raise ApiError(
@@ -4777,13 +4836,21 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         return self._cancel_job(job, token)
 
     def _cancel_job(self, job: Job, token: TokenInfo) -> dict[str, Any]:
-        """권한 판정이 끝난 뒤의 취소 — 대기 잡은 즉시, 도는 잡은 `cancelling`(SIGTERM → grace)."""
-        job_id = job.id
-        if job.is_terminal:
-            raise ApiError(409, f"job already finished ({job.state})", state=job.state)
-        new_state = self.store.request_cancel(
-            job_id, token.name, self.now_fn(), self.config.server.grace_seconds
-        )
+        """권한 판정이 끝난 뒤의 취소 — 대기 잡은 즉시, 도는 잡은 `cancelling`(SIGTERM → grace).
+
+        반복 사슬(M5s)의 머리가 바로 그 순간 `retried` 로 닫히면 새 머리가 생긴다 — 그 머리를 다시
+        읽어 한 번 더 보낸다. 사람의 취소가 반복 사이에 떨어져 409 로 사라지면 안 된다."""
+        new_state: str | None = None
+        for _ in range(3):
+            job_id = job.id
+            if job.is_terminal:
+                raise ApiError(409, f"job already finished ({job.state})", state=job.state)
+            new_state = self.store.request_cancel(
+                job_id, token.name, self.now_fn(), self.config.server.grace_seconds
+            )
+            if new_state is not None or job.chain_id is None:
+                break
+            job = self.store.chain_head(self.store.get_job(job_id) or job)
         self._publish_job(None, job_id)
         self.wake.set()
         return {"job_id": job_id, "state": new_state or job.state}
@@ -5083,6 +5150,20 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             return f"{len(self.preset_env)} preset(s) · all tools and passthrough present"
         return f"{len(self.preset_env)} preset(s) · " + " · ".join(bad)
 
+    def _has_retry_preset(self) -> bool:
+        """반복(`[presets.retry]`)을 선언한 프리셋이 하나라도 있나 — 지금 설정(reload 포함)."""
+        return any(p.retry is not None for p in self.config.presets)
+
+    def _min_client_version(self, strict_cancel: bool) -> str:
+        """설정의 **유효** 최소 클라이언트 버전 — 바닥들 가운데 가장 높은 것(결정 83 · 87 · 230)."""
+        floors = [MIN_CLIENT_VERSION]
+        if strict_cancel:
+            floors.append(CANCEL_MIN_CLIENT_VERSION)
+        if self._has_retry_preset():
+            floors.append(RETRY_MIN_CLIENT_VERSION)
+        # 바닥은 모두 `X.Y.Z` 상수다 — 숫자 마디로만 견준다
+        return max(floors, key=lambda v: tuple(int(x) for x in v.split(".")))
+
     def health(self) -> tuple[int, dict[str, Any]]:
         db_ok = self.store.healthy()
         infos = self.worker_infos()
@@ -5119,11 +5200,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # 요구하면 그 전 클라이언트의 `rcm cancel` 이 403 이라, 상수 바닥(결정 83)이 아니라
             # 그것을 보낼 줄 아는 버전을 알린다 — 옛 클라이언트의 `rcm check` 는 이 키로만 자기
             # FAIL 을 그린다. 제출은 그대로 받는다(서버는 버전으로 막지 않는다).
-            "min_client_version": (
-                CANCEL_MIN_CLIENT_VERSION if strict_cancel else MIN_CLIENT_VERSION
-            ),
+            "min_client_version": self._min_client_version(strict_cancel),
             # 왜 올랐는지 — 키가 켜져 있을 때만, 꺼져 있으면 null(어느 0.2.x 도 취소할 수 있다)
             "cancel_min_client_version": CANCEL_MIN_CLIENT_VERSION if strict_cancel else None,
+            # 반복을 켠 프리셋이 있으면(M5s 결정 230) — 그 전 클라이언트의 `rcm wait` 는
+            # `retried` 를 몰라 끝없이 기다린다. 없으면 null
+            "retry_min_client_version": (
+                RETRY_MIN_CLIENT_VERSION if self._has_retry_preset() else None
+            ),
             # 잡이 보게 될 환경을 **서버가 자기 환경으로** 잰 것(M5m, 정보 — 503 조건은 아니다).
             # `rcm check` 의 셸 검사와 달리 launchd·systemd 의 환경을 본다.
             "preset_env": self.preset_env,

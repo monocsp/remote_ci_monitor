@@ -176,6 +176,12 @@ NEW_RECENT = frozenset(
         "action",  # M5s — 마지막 「사람이 할 일」 표식 `{code, note, at}` | null
         "not_before",  # M5s — 예약 시각 | null
         "start_deadline",  # M5s — 시작 마감 | null
+        # M5s — 반복 사슬(결정 211 · 228). 사슬이 없으면 chain_id 가 null
+        "chain_id",
+        "attempt",
+        "retry_of",
+        "retried_as",
+        "max_attempts",
     }
 )
 NEW_ROW = frozenset(
@@ -196,6 +202,12 @@ NEW_ROW = frozenset(
         "action",  # M5s — 마지막 「사람이 할 일」 표식 `{code, note, at}` | null
         "not_before",  # M5s — 예약 시각 | null
         "start_deadline",  # M5s — 시작 마감 | null
+        # M5s — 반복 사슬(결정 211 · 228). 사슬이 없으면 chain_id 가 null
+        "chain_id",
+        "attempt",
+        "retry_of",
+        "retried_as",
+        "max_attempts",
     }
 )
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)

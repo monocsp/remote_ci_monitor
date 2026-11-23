@@ -61,7 +61,9 @@ OVERRIDE_CACHE_SECONDS = 300
 HOOK_GRACE_SECONDS = 120  # 끝난 잡의 상태가 이만큼 pending 이면 훅이 놓친 것이다
 STUCK_REASONS = {"worker_down": 120, "paused": 300}
 KEEP_SECONDS = 14 * 86400
-TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost", "expired")
+#: 끝난 잡. `retried`(rcm 0.10.0)는 없다 — 그 시도는 끝났지만 다음 시도(`retried_as`)가 이어
+#: 간다. 감시는 그 id 로 옮겨 따라간다(`follow`)
+TERMINAL = ("succeeded", "failed", "cancelled", "timed_out", "lost", "expired", "exhausted")
 #: 감시가 올리는 pending 낱말. 가장 새 pending 이 이것이 아니면 잡 스크립트가 올린 것이다
 OWN_PENDING = ("queued", "running")
 #: 다시 내 볼 만한 제출 실패 — 서버 재시작 순간이다. 설정 · 인증 실패는 다시 내도 같다
@@ -697,6 +699,12 @@ class Round:
         top = cc.latest(listed.data, context, entry.get("creators") or ())
         word = cc.read_word(top.get("description"))[0] if top else None
         state = doc.get("state")
+        nxt = doc.get("retried_as")
+        if state == "retried" and isinstance(nxt, int) and not isinstance(nxt, bool):
+            # 반복 프리셋의 한 시도가 끝나고 다음 시도가 걸렸다(rcm 0.10.0) — 그 잡을 따라간다.
+            # 결과는 사슬의 마지막 시도가 낸다
+            entry["job"] = nxt
+            return
         if word == "taken-over":
             if state not in TERMINAL:
                 self.cancel(job, "taken-over")
