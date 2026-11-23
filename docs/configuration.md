@@ -105,7 +105,8 @@ job is `null` unless the script declared it failed (`::rcm::fail::<name>` or
 `::rcm::action::<code>::<note>` tells rcm that the job cannot go on without a person — a store
 console asks for a sign-in again, a device needs unlocking. `code` is `[a-z0-9_-]{1,32}`
 (anything else makes the line not a marker) and is what a skill branches on; `note` is optional,
-up to 200 characters, control characters removed. The note is readable without a token, goes into
+up to 200 characters, with control, bidirectional and zero-width characters removed (the same
+rule as the failure names hooks get). The note is readable without a token, goes into
 hook environments and is printed in terminals: **never put an account name, an e-mail address or
 any other personal detail in it.**
 
@@ -125,7 +126,8 @@ parsed by the server like every other marker.
   the job has an action — also one that was already there when the wait started, since a session
   that attaches later must not miss it. The job keeps running. Exit 4 only ever comes with that
   flag. After the person has acted, wait again **without** the flag (`rcm wait --job N`): the
-  action is still the job's last one, so the flag would return at once.
+  action is still the job's last one, so the flag would return at once. A job that is being
+  cancelled, or was cancelled, prints no such line and never returns 4: it will not run on.
 - **Hooks** get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (both empty without an action); a `url`
   rule finds `action` in `job`. rcm sends nothing in the middle of a job — a script that wants a
   chat message at that moment sends it itself.

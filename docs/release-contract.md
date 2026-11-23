@@ -310,7 +310,8 @@ sign-in — so the job cannot finish on its own:
 
 - `code` — `[a-z0-9_-]{1,32}`. Anything else makes the line not a marker. A skill branches on it
   (`login` → ask the person which way to sign in).
-- `note` — optional, up to 200 characters; control characters are removed. It is shown without a
+- `note` — optional, up to 200 characters; control, bidirectional and zero-width characters are
+  removed. It is shown without a
   token (`/api/status`), passed to notification hooks and printed in terminals, so **never put an
   account name, an e-mail address or any other personal detail in it**.
 

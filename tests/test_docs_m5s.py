@@ -84,3 +84,12 @@ def test_action_marker_cli_help_names_the_flag():
     sub = next(a for a in build_parser()._actions if a.__class__.__name__ == "_SubParsersAction")
     wait_help = sub.choices["wait"].format_help()
     assert "--return-on-action" in wait_help and "exit 4" in wait_help
+
+
+def test_action_marker_docs_say_cancelled_jobs_never_return_4_and_the_wider_cleanup():
+    """#251 격리 검증 P2 — 취소 중인 잡은 4 도, 알림 줄도 없다 · note 는 bidi 까지 지운다."""
+    config = flat(read("docs/configuration.md"))
+    assert "being cancelled, or was cancelled, prints no such line and never returns 4" in config
+    assert "control, bidirectional and zero-width characters removed" in config
+    contract = flat(read("docs/release-contract.md"))
+    assert "control, bidirectional and zero-width characters are removed" in contract

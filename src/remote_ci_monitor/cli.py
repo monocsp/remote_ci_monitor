@@ -65,13 +65,14 @@ from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
 from remote_ci_monitor.core.model import (
     CANCELLED,
+    CANCELLING,
     EXIT_CODE_BY_STATE,
     EXIT_UNKNOWN,
     PLACEMENT_CAPABLE,
     TERMINAL_STATES,
     Preset,
 )
-from remote_ci_monitor.core.progress import ACTION_CODE_RE, clean_name
+from remote_ci_monitor.core.progress import ACTION_CODE_RE, clean_line
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     CAUSE_NOT_FOUND,
@@ -1085,14 +1086,15 @@ def action_line(job_id: Any, action: Any) -> str | None:
     """`#N needs action · <code> · <note>` — 「사람이 할 일」 표식 한 줄(M5s). 표식이 없으면 None.
 
     code 는 서버가 어휘로 거른 값이지만 여기서도 어휘 밖이면 말하지 않는다 — 터미널에 그대로
-    흐르는 문자열이다. note 는 서버가 제어문자를 지웠다(`progress.parse_action_value`)."""
+    흐르는 문자열이다. note 는 서버가 이미 지웠지만(`progress.parse_action_value`) 옛 서버나 가짜
+    서버의 문서일 수 있어 같은 `clean_line` 을 한 번 더 지난다."""
     if not isinstance(action, dict):
         return None
     code = action.get("code")
     if not isinstance(code, str) or not ACTION_CODE_RE.fullmatch(code):
         return None
-    note = action.get("note")
-    tail = f" · {clean_name(note)}" if isinstance(note, str) and clean_name(note) else ""
+    note = clean_line(action.get("note")) if isinstance(action.get("note"), str) else ""
+    tail = f" · {note}" if note else ""
     return f"#{job_id} needs action · {code}{tail}"
 
 
@@ -1104,6 +1106,9 @@ class _ActionWatch:
     건너뛰면 사람에게 알릴 순간을 통째로 놓친다(S25 가 그 장면이다). 그래서 사람이 손을 쓴 뒤
     다시 기다릴 때는 플래그 없이 `rcm wait --job N` 이다 — 표식은 그 잡의 마지막 표식으로 남아
     있으므로 플래그를 다시 주면 곧바로 또 돌아온다.
+
+    취소 중이거나 취소된 잡의 표식은 알리지도, 4 로 돌아오지도 않는다. 그 잡은 더 돌지 않으므로
+    「잡은 계속 돈다」는 4 의 약속이 거짓이 되고, 사람에게 할 일을 시켜도 받을 잡이 없다.
     """
 
     def __init__(self, job_id: int, *, return_on_action: bool) -> None:
@@ -1117,8 +1122,14 @@ class _ActionWatch:
             return None
         return (action.get("code"), action.get("note"), action.get("at"))
 
+    @staticmethod
+    def _stopped(job: dict[str, Any]) -> bool:
+        return job.get("state") in (CANCELLING, CANCELLED)
+
     def observe(self, job: dict[str, Any]) -> str | None:
         """잡 문서 하나를 본다. 알릴 줄이 있으면 돌려준다(같은 표식은 한 번만)."""
+        if self._stopped(job):
+            return None
         ident = self._ident(job.get("action"))
         if ident is None or ident == self.printed:
             return None
@@ -1126,7 +1137,9 @@ class _ActionWatch:
         return action_line(job.get("id", self.job_id), job.get("action"))
 
     def stop_when(self, job: dict[str, Any]) -> int | None:
-        if not self.return_on_action or action_line(self.job_id, job.get("action")) is None:
+        if not self.return_on_action or self._stopped(job):
+            return None
+        if action_line(self.job_id, job.get("action")) is None:
             return None
         return EXIT_ACTION
 

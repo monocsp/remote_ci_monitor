@@ -6,8 +6,9 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
-  M5s C — `action-*` 넷: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
-     안 지움 · 플래그 없이 4 (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234)
+  M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
+     안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
+     남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
   M5p P2 — `shelf-*` 넷: 파일 응답에서 `sandbox` CSP 를 뺌 · 퍼센트 디코딩 뒤의 경로 검사를 뺌 ·
      보관함 zip 이 M5e 전송 슬롯을 같이 씀 · Host 허용 목록을 건너뜀
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-b.md`)
@@ -1644,7 +1645,7 @@ MUTANTS = (
         # M5s C — note 의 제어문자를 안 지운다: `\\r` 하나로 `rcm wait` 의 앞 줄을 지운다
         name="action-note-raw",
         path="src/remote_ci_monitor/core/progress.py",
-        old='    text = clean_name(note)[:MAX_ACTION_NOTE] if sep else ""\n',
+        old='    text = clean_line(note)[:MAX_ACTION_NOTE].strip() if sep else ""\n',
         new='    text = note[:MAX_ACTION_NOTE].strip() if sep else ""\n',
         tests=("tests/test_action_marker_m5s.py",),
     ),
@@ -1653,9 +1654,27 @@ MUTANTS = (
         # 지금 `rcm wait` 를 쓰는 CI 가 표식 하나로 「끝났다」고 읽는다
         name="action-exit-4-without-flag",
         path="src/remote_ci_monitor/cli.py",
-        old="        if not self.return_on_action or action_line(",
-        new="        if action_line(",
+        old="        if not self.return_on_action or self._stopped(job):\n",
+        new="        if self._stopped(job):\n",
         tests=("tests/test_action_marker_m5s.py",),
+    ),
+    Mutant(
+        # M5s C(#251 격리 검증 P2) — 취소 중인 잡에서도 4 와 「needs action」 줄이 나온다. 그 잡은
+        # 더 돌지 않으므로 「잡은 계속 돈다」는 약속이 거짓이 된다
+        name="action-4-while-cancelling",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return job.get("state") in (CANCELLING, CANCELLED)\n',
+        new="        return False\n",
+        tests=("tests/test_action_marker_m5s.py",),
+    ),
+    Mutant(
+        # M5s C(#251 격리 검증 P2) — 한 줄 정리가 bidi 덮어쓰기를 남긴다: note 와 훅의 실패 이름이
+        # 터미널 · 알림에서 거꾸로 보인다
+        name="clean-line-keeps-bidi",
+        path="src/remote_ci_monitor/core/progress.py",
+        old="        and not 0x2028 <= cp <= 0x202E  # ",
+        new="        and not 0x2028 <= cp <= 0x2029  # ",
+        tests=("tests/test_action_marker_m5s.py", "tests/test_failure_summaries_m5o.py"),
     ),
 )
 

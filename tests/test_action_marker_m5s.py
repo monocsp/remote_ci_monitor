@@ -593,3 +593,116 @@ def test_check_has_no_notify_row_on_an_old_server(fake, capsys, monkeypatch):
 def test_status_doc_json_is_serialisable_with_actions():
     doc = recent_json(busy(5), action=Action(code="login", note=None, at=T0))
     json.dumps(doc)
+
+
+# ── 격리 검증 P2 (#251) ──────────────────────────────────────────────────────
+
+
+def test_a_cancelling_job_never_returns_4_and_prints_no_action_line(fake, capsys):
+    """취소 중인 잡은 더 돌지 않는다 — 「잡은 계속 돈다」는 4 의 약속과 어긋난다."""
+    fake.docs = [
+        job_doc("cancelling", LOGIN),
+        job_doc("cancelling", LOGIN),
+        job_doc("cancelled", LOGIN),
+    ]
+    code, out, err = run(capsys, ["wait", "--job", str(JOB), "--poll", "--return-on-action"])
+    assert code == 2, err
+    assert last_json(out)["wait_exit_code"] == 2
+    assert "needs action" not in err
+
+
+def test_a_job_that_turns_cancelling_stops_announcing_its_action(fake, capsys):
+    fake.docs = [job_doc(), job_doc("cancelling", LOGIN), job_doc("cancelled", LOGIN)]
+    code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 2
+    assert "needs action" not in err
+
+
+INVISIBLE = [
+    "​",  # 폭 없는 공백
+    "‌",
+    "‍",
+    "‎",  # LRM
+    "‏",  # RLM
+    "‪",  # bidi 덮어쓰기 · 끼워 넣기
+    "‫",
+    "‬",
+    "‭",
+    "‮",
+    "⁠",  # 단어 결합자
+    "⁦",  # bidi 격리
+    "⁧",
+    "⁨",
+    "⁩",
+    "﻿",  # BOM
+    "؜",  # 아랍 글자 표시
+]
+
+
+@pytest.mark.parametrize("ch", INVISIBLE, ids=[f"U+{ord(c):04X}" for c in INVISIBLE])
+def test_the_note_drops_bidi_and_zero_width_characters(ch):
+    assert parse_marker(f"::rcm::action::login::sign{ch}in") == (KIND_ACTION, "login::signin")
+
+
+def test_the_note_is_cleaned_exactly_like_hook_failure_lines():
+    """note 와 `RCM_FAILURES` 는 같은 입구 규칙이다 — 한 집합을 같이 쓴다(어긋나면 빨갛다)."""
+    from remote_ci_monitor.core.notify import failure_lines
+    from remote_ci_monitor.core.progress import parse_action_value
+
+    for cp in [*range(0, 0x3000), 0xFEFF, 0xFFFD]:
+        text = f"a{chr(cp)}b"
+        want = failure_lines([text])
+        got = parse_action_value(f"login::{text}")
+        assert got is not None
+        assert (got[1] or "") == (want[0] if want else ""), f"U+{cp:04X}"
+
+
+@pytest.mark.parametrize(
+    ("action", "want"),
+    [
+        ({"code": "login", "note": "Sign in", "at": None}, "needs action · login · Sign in"),
+        ({"code": "login", "note": None, "at": None}, "needs action · login"),
+        (None, "needs action"),
+    ],
+)
+def test_rcm_top_reason_text_for_needs_action(action, want):
+    from remote_ci_monitor.core.render_text import _reason_text
+
+    row = {"id": 7, "state": "running", "reason": "needs_action", "action": action, "lane": 1}
+    assert _reason_text(row) == want
+
+
+def test_a_hook_still_runs_when_the_action_cannot_be_read(tmp_path, monkeypatch):
+    """표식을 못 읽어도 알림은 간다 — `RCM_ACTION_CODE` 는 빈 값이고 서버 로그에 한 줄이 남는다."""
+    import sqlite3
+
+    from remote_ci_monitor.core.notify import NotifyRule
+
+    srv = action_server(tmp_path, monkeypatch, start=False)
+    try:
+        srv.app.config.notify = (NotifyRule(name="file", argv=("true",)),)
+        srv.app.start()
+        seen: list[dict[str, str]] = []
+        logged: list[str] = []
+
+        class Done:
+            returncode = 0
+
+        def hook(argv, **kw):
+            seen.append(dict(kw["env"]))
+            return Done()
+
+        def broken(_ids):
+            raise sqlite3.OperationalError("database is locked")
+
+        srv.app.notifier.run = hook
+        srv.app.notifier.log = logged.append
+        monkeypatch.setattr(srv.app.notifier.store, "actions_for", broken)
+        jid = submitted(srv, "asked")
+        srv.wait_terminal(jid)
+        wait_for(lambda: seen)
+        assert seen[0]["RCM_JOB_ID"] == str(jid)
+        assert seen[0]["RCM_ACTION_CODE"] == "" and seen[0]["RCM_ACTION_NOTE"] == ""
+        assert any(f"action of #{jid}" in line for line in logged), logged
+    finally:
+        srv.close()

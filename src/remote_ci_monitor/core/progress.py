@@ -98,6 +98,31 @@ def clean_name(text: str) -> str:
     ).strip()
 
 
+def _line_char(cp: int) -> bool:
+    """한 줄 문장에 남겨도 되는 글자인가 — `clean_line` 의 규칙(note · 훅의 실패 이름)."""
+    return (
+        cp >= 0x20
+        and not 0x7F <= cp <= 0x9F  # DEL · C1 — NEL 은 `splitlines()` 가 줄로 나눈다
+        and cp != 0x061C  # 아랍 글자 표시
+        and not 0xD800 <= cp <= 0xDFFF  # 홀로 남은 서로게이트
+        and not 0x200B <= cp <= 0x200F  # 폭 없는 글자 · LRM · RLM
+        and not 0x2028 <= cp <= 0x202E  # 줄 · 문단 구분자와 bidi 끼워 넣기 · 덮어쓰기
+        and not 0x2060 <= cp <= 0x2069  # 단어 결합자 · 보이지 않는 연산자 · bidi 격리
+        and cp != 0xFEFF  # BOM
+    )
+
+
+def clean_line(text: str) -> str:
+    """사람에게 보이는 한 줄에서 제어문자 · bidi · 보이지 않는 글자를 지운다.
+
+    `clean_name` 보다 넓다. bidi 덮어쓰기 하나면 터미널과 알림에서 글자 순서가 뒤집혀 보이고
+    폭 없는 글자는 같아 보이는 두 줄을 다르게 만든다. 「사람이 할 일」 note(M5s)와 훅에 넘기는
+    실패 이름(`core/notify.failure_lines`)이 이 함수 하나를 쓴다 — 두 입구의 규칙이 어긋나지
+    않게 한다.
+    """
+    return "".join(ch for ch in text if _line_char(ord(ch))).strip()
+
+
 @dataclass(frozen=True)
 class Marker:
     """수신 시각이 붙은 마커 하나. `at` 은 서버가 그 줄을 받은 시각."""
@@ -158,15 +183,15 @@ def parse_progress_value(value: str) -> ProgressMark | None:
 def parse_action_value(value: str) -> tuple[str, str | None] | None:
     """`<code>[::<note>]` 를 읽는다. code 가 어휘 밖이면 None(마커가 아니다).
 
-    note 는 `clean_name` 으로 제어문자 · 줄 구분자를 지우고 200자에서 자른다 — `\r` 하나로
-    앞 줄을 지우거나 ESC 로 색을 바꾸는 안내가 `rcm wait` 의 stderr 에 닿지 않게 한다. 첫 `::`
-    에서만 자르므로 note 안의 `::` 는 note 의 일부다. 비면 None.
+    note 는 `clean_line` 으로 제어문자 · 줄 구분자 · bidi · 폭 없는 글자를 지우고 200자에서
+    자른다 — `\r` 하나로 앞 줄을 지우거나 ESC 로 색을 바꾸는 안내가 `rcm wait` 의 stderr 에
+    닿지 않게 한다. 첫 `::` 에서만 자르므로 note 안의 `::` 는 note 의 일부다. 비면 None.
     """
     code, sep, note = value.partition("::")
     code = code.strip()
     if not ACTION_CODE_RE.fullmatch(code):
         return None
-    text = clean_name(note)[:MAX_ACTION_NOTE] if sep else ""
+    text = clean_line(note)[:MAX_ACTION_NOTE].strip() if sep else ""
     return code, (text or None)
 
 
