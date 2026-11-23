@@ -568,7 +568,7 @@ def test_the_cli_join_anchors_still_find_the_joined_block(srv, env, tree, capsys
     assert code == 0, err
     assert last_json(out)["joined"] is True
     joined = submitted_line(err)
-    text += block("rcm run demo --no-wait -f speed=fast   # 다른 세션, 같은 트리", err, out)
+    text += block("rcm run demo --no-wait -f speed=fast   # another session", err, out)
 
     raw = tree.parent / "raw"
     write_capture(raw, "x-join", tidy(text, srv))
