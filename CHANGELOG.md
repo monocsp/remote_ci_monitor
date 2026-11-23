@@ -39,6 +39,7 @@ of a key bumps that number and is listed here.
   `release_status.sh` and `release_golive.sh`, whose `--selftest` locks the exit codes: a plan
   that read the stores exits 0 whatever they said, and a release for a build that is not approved
   exits 2, never 75.
+  ([#252](https://github.com/monocsp/remote_ci_monitor/pull/252))
 - **The review panel shows both stores' review state and can check again.** With a `status`
   preset, the Store tab's review panel draws the App Store and Google Play state from
   `status.json` — one of eight words, `unknown` for any other, the store's own word beside it, how
