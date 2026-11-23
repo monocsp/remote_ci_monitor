@@ -150,8 +150,24 @@ chmod 600 ~/.config/rcm/client.toml
    Ctrl-C 로 다시 떼어 놔도 작업은 계속 돈다.
 5. 종료 코드는 처음부터 기다린 것과 똑같이 그 작업의 것이다.
 
+**지금 대신 나중에.** `rcm run deploy --ref main --at 15:00` 은 서버에 시각을 넘긴다. 길이로
+주려면 `--in 90m` 을 쓴다. 작업은 `scheduled` 상태로 기다리다가 그 시각에 큐에 들어간다.
+`rcm jobs` 는 그 작업을 `at 15:00` 으로 보여 주고, `rcm wait --job N` 은
+`scheduled for 15:00 · start by 15:15` 를 찍고 계속 기다린다. 그 시각부터 시작 마감까지 어느
+레인도 그 작업을 집지 않으면 작업은 `expired` 로 끝나고 종료 코드는 2 다. 작업이 돌지 않았다는
+뜻이다. 시작 마감은 프리셋이 따로 정하지 않으면 15분이다. 자세한 규칙은
+[나중에 돌리기](configuration.md#running-a-job-later---at-and---in)에 있다.
+
 `rcm logs N` 은 로그를 찍고, `rcm logs N --follow` 는 끝날 때까지 계속 찍고, `rcm cancel N` 은
 멈춘다.
+
+**사람이 손대야 할 때.** 로그인이 풀린 것처럼 스크립트 혼자 더 나아갈 수 없으면 스크립트가
+`::rcm::action::<code>::<note>` 를 찍는다. 그러면 `rcm wait` 는 stderr 에
+`#412 needs action · login · Sign in on the build machine` 을 찍고 작업 행의 이유는
+`needs action` 이 된다. `rcm wait --job N --return-on-action` 은 그 순간 `action` 이 든 JSON 을
+찍고 종료 코드 4 로 돌아온다. 작업은 계속 돈다. 그래서 결과를 기다리던 세션이 차례를 돌려받아
+사람에게 물을 수 있다. 사람이 손을 쓴 뒤에는 플래그 **없이** 다시 기다린다. 표식은 작업에 그대로
+남아 있어서 플래그를 주면 곧바로 또 돌아오기 때문이다([자세히](configuration.md#when-a-person-has-to-act)).
 
 `rcm cancel N` 은 제출할 때 함께 받은 cancel token 을 보낸다 — `rcm run` 이
 `~/.local/state/rcm/submissions.json`(`$XDG_STATE_HOME` 이 있으면 그 아래 `rcm/submissions.json`,
@@ -203,6 +219,8 @@ JSON(`submission.cancel_token` 이 들어 있다)을 간직한 래퍼에서는 `
    못 닿았거나 — 이고 절대 실패로 보고되지 않는다. CI 가 3 을 빨강으로 치면 엉뚱한 이유로
    빨개진다. 5 는 **전달** 실패고 `--fetch-artifacts` 에서만 나온다 — 작업 자체의 결과는
    `wait_exit_code` 에 그대로 있고, 못 온 것은 파일이다([파일을 돌려받기](#8-파일을-돌려받기)).
+   4 는 `rcm wait --return-on-action` 에서만 나온다. 작업이 사람에게 할 일을 알렸고 아직 돌고
+   있다는 뜻이다([기다리지 않기](#5-기다리지-않기)).
 
 5. **시작조차 못 한 작업은 그렇다고 말한다.** 스크립트가 돌기 전에 끝나는 실패들이 있고, 요약이
    그중 어느 것인지 말한다. 워크스페이스를 못 만들었다(`snapshot_missing` ·

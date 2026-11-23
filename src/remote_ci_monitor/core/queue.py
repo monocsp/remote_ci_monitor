@@ -32,6 +32,7 @@ from remote_ci_monitor.core.model import (
     REASON_CANCELLING,
     REASON_HELD_BY_LOAD,
     REASON_MATERIALIZING,
+    REASON_NEEDS_ACTION,
     REASON_NOT_SCHEDULED,
     REASON_OVERDUE,
     REASON_PAUSED,
@@ -136,7 +137,8 @@ def medians_from(jobs: Sequence[Job], now: datetime, cfg: QueueConfig) -> dict[s
         if dur < cfg.min_job_seconds:
             continue
         durations.setdefault(job.key, []).append(dur)
-        waits.setdefault(job.key, []).append(_seconds(job.created_at, job.started_at))
+        # 예약 잡은 승격부터 잰다(M5s S10) — 정한 시각까지 기다린 것은 큐가 밀린 것이 아니다
+        waits.setdefault(job.key, []).append(_seconds(job.wait_origin, job.started_at))
     out: dict[str, Median] = {}
     for key, ds in durations.items():
         out[key] = Median(
@@ -265,7 +267,7 @@ def _busy_estimate(
     """
     started = job.started_at or now
     elapsed = _seconds(started, now)
-    waited = _seconds(job.created_at, started)
+    waited = _seconds(job.wait_origin, started)
     remaining = remaining_seconds(expected, elapsed, cfg)
     overdue = elapsed > expected
     last_output = job.last_output_at or started
@@ -331,16 +333,21 @@ def _busy_estimate(
     )
 
 
-def _busy_reason(job: Job, est: Estimate) -> str:
-    """표시 사유 하나. `cancelling → materializing → stuck → overdue → quiet → running`.
+def _busy_reason(job: Job, est: Estimate, progress: Progress | None = None) -> str:
+    """표시 사유 하나.
+    `cancelling → materializing → needs_action → stuck → overdue → quiet → running`.
 
     초과 실행이면서 조용한 잡은 `overdue` 로 낸다 — 더 행동 가능한 사실이 이긴다. 뒤집으면
-    초과 실행이 회색 「조용함」 뒤에 숨는다.
+    초과 실행이 회색 「조용함」 뒤에 숨는다. 같은 까닭으로 「사람이 할 일」 표식(M5s)이 멈춤보다
+    앞이다 — 사람을 기다리는 잡은 조용하고, 그 침묵의 이유를 잡이 직접 말했다. 취소 중인 잡은
+    표식이 있어도 `cancelling` 이다(이제 할 일이 없다).
     """
     if job.state == CANCELLING:
         return REASON_CANCELLING
     if job.phase == PHASE_MATERIALIZING:
         return REASON_MATERIALIZING
+    if progress is not None and progress.action is not None:
+        return REASON_NEEDS_ACTION
     if est.stuck:
         return REASON_STUCK
     if est.overdue:
@@ -508,16 +515,18 @@ def compute_queue(
             holds.append(
                 _GroupHold(job.concurrency_group, job.pool, host, free_at, job=job, est=est)
             )
+        prog = progress.get(job.id)
         rows.append(
             QueueRow(
                 job=job,
                 position=None,
-                reason=_busy_reason(job, est),
+                reason=_busy_reason(job, est, prog),
                 lane=job.lane,
                 ahead_job_id=None,
                 blocked_by=None,
                 estimate=est,
-                progress=progress.get(job.id),
+                progress=prog,
+                action=prog.action if prog is not None else None,
             )
         )
     # running 먼저, cancelling 그 다음 (각각 id 순)
@@ -564,7 +573,7 @@ def compute_queue(
                         found = h
             return found
 
-        waited = _seconds(job.created_at, now)
+        waited = _seconds(job.wait_origin, now)
         wait: float | None = None
         finish: datetime | None = None
         ahead: int | None = None

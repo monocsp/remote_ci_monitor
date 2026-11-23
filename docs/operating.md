@@ -73,6 +73,10 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
 - **Hooks have no keychain.** A `[[notify]]` command that calls `gh`, `aws` or similar must read
   its token from a file (mode 600) via an environment variable; the interactive keyring is not
   available and the call blocks until the hook times out.
+- **A failed hook is not sent again.** `rcm check` shows `warn  notify  N hook deliveries
+  failed…` while the server's failure count is above 0. The count is kept in memory: restarting
+  the server (a deploy, a reboot) sets it to 0 and the row goes away, so look in the server log
+  (`notify <rule> #<job>: …`) for failures from before the restart.
 - **macOS blocks local-network traffic for services you have not allowed.** On macOS 15 and later
   a process without Local Network permission cannot send to the LAN at all — multicast *and*
   ordinary unicast fail with `EHOSTUNREACH` — and launchd services are denied by default. Incoming
@@ -193,7 +197,11 @@ differs.
    removed afterwards, the command also exits 3 and names the directory that was left behind.
 3. `rcm pause` (admin token), then confirm nothing is `running`, `cancelling` or `uploading`
    (`rcm top`). Pausing stops the queue, not submissions: stop the service right after the check,
-   or a job that starts uploading in between is cancelled by the stop.
+   or a job that starts uploading in between is cancelled by the stop. Pausing does not stop the
+   clock of a [scheduled job](configuration.md#running-a-job-later---at-and---in): one whose time
+   falls inside the pause, the stop and the start, plus its start deadline (15 minutes by
+   default), ends `expired` instead of running. Look at `rcm jobs --state scheduled` first and
+   pick a window that misses them.
 4. Stop the service (`launchctl bootout gui/$(id -u)/com.remote-ci-monitor.server` ·
    `systemctl stop rcm-server`).
 5. Keep your own copy of the database at this moment (see below), so there is one that predates

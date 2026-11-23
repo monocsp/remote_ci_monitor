@@ -153,6 +153,8 @@ CODES: dict[str, Renderer] = {
     "server_restarted": lambda a: f"server restarted {_s(a, 'at')}",
     "server_restarted_during_upload": lambda a: "server restarted during upload",
     "server_stopped_while_running": lambda a: "server stopped while running",
+    # 예약 잡이 시작 마감 안에 레인을 못 받았다(M5s 결정 208) — `at` 은 마감 `YYYY-MM-DD HH:MMZ`
+    "start_deadline_passed": lambda a: f"did not start by its start deadline {_s(a, 'at')}",
     # ── 업로드 · 스냅샷 ────────────────────────────────────────────────────
     "upload_abandoned": lambda a: f"upload abandoned after {_secs(a.get('seconds'))}",
     "upload_interrupted": lambda a: f"upload interrupted after {_mb(a.get('bytes'))}",

@@ -560,7 +560,7 @@ argv = ["bash", "scripts/deploy.sh"]
 """
 
 # 종료 상태 다섯 — `[[notify]] on` 의 기본값이자 허용 집합
-TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost"}
+TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost", "expired"}  # expired: M5s
 
 
 def notify_toml(**fields: object) -> str:

@@ -544,7 +544,12 @@ class RemoteWorkersMixin:
             def claim_and_remember():
                 with self._fresh_claims_lock:
                     job = self.store.claim(
-                        lane, now, pool=pool, worker_name=name, claimant=claimant
+                        lane,
+                        now,
+                        pool=pool,
+                        worker_name=name,
+                        claimant=claimant,
+                        now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
                     )
                     if job is not None:
                         self._fresh_claims.setdefault(name, set()).add(job.id)

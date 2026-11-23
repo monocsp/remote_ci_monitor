@@ -158,8 +158,24 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
    ends when the job does. Ctrl-C detaches again without stopping anything.
 5. The exit code is the job's, exactly as if you had waited from the start.
 
+**Later instead of now.** `rcm run deploy --ref main --at 15:00` (or `--in 90m`) hands the server
+a time. The job waits as `scheduled` and enters the queue at that time: `rcm jobs` lists it as
+`at 15:00`, and `rcm wait --job N` prints `scheduled for 15:00 · start by 15:15` and keeps
+waiting. If no lane picks it up within its start deadline (15 minutes unless the preset sets
+another) it ends `expired`, exit 2 — it did not run. The rules are in
+[running a job later](configuration.md#running-a-job-later---at-and---in).
+
 `rcm logs N` prints the log, `rcm logs N --follow` keeps printing until the job ends, and
 `rcm cancel N` stops it.
+
+**When the job needs a person.** A script that cannot go on by itself — a sign-in expired —
+prints `::rcm::action::<code>::<note>`. `rcm wait` then prints
+`#412 needs action · login · Sign in on the build machine` on stderr, and the job's row says
+`needs action`. `rcm wait --job N --return-on-action` returns at that moment with exit 4 and the
+JSON, `action` included, while the job keeps running — a session that waits for the result gets
+its turn back and can ask the person. Once the person has acted, wait again **without** the flag:
+the action stays on the job, so the flag would return at once
+([details](configuration.md#when-a-person-has-to-act)).
 
 `rcm cancel N` sends the cancel token that came back with the submission — `rcm run` saved it in
 `~/.local/state/rcm/submissions.json` (`$XDG_STATE_HOME/rcm/submissions.json` if set, mode
@@ -215,7 +231,9 @@ A failed job is not an error in the tool, so the output stays calm and specific.
    server restarted, or you could not reach it — and it is never reported as a failure. If your CI
    treats 3 as red, it will be red for the wrong reason. Exit 5 is a **delivery** failure and only
    appears with `--fetch-artifacts`: the job's own result is in `wait_exit_code`, and the files
-   are what did not arrive ([Getting the files back](#8-getting-the-files-back)).
+   are what did not arrive ([Getting the files back](#8-getting-the-files-back)). Exit 4 only
+   appears with `rcm wait --return-on-action`: the job asked a person to act and is still running
+   ([Not waiting](#5-not-waiting)).
 
 5. **A job that never started says so.** Some failures happen before your script runs, and the
    summary names which: the workspace could not be built (`snapshot_missing`,

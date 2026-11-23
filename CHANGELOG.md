@@ -8,6 +8,25 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **`rcm run --at TIME` and `--in DURATION` run a job later.** The server reads the time
+  (`HH:MM` today, `YYYY-MM-DDTHH:MM`, or ISO-8601 with an offset) in `[display] timezone`, or its
+  own zone when that is empty, and the job waits as the new state `scheduled` until then; a past
+  time is refused (400 `start_at_past`, never moved to tomorrow), as is one more than
+  `[server] schedule_max_ahead_days` (14) ahead or one a daylight saving change skips or repeats.
+  A lane must pick it up within `[server] schedule_start_deadline_seconds` (900) of its time — a
+  preset's `start_deadline_seconds` overrides it, a submission may only shorten it — or it ends in
+  the new final state `expired` (`rcm wait` exit 2). A schedule never joins another job and no
+  job joins it; the same preset, inputs and source scheduled twice is 409 `schedule_exists`.
+  Schedules survive `rcm reload` and a restart; on start-up the server closes the ones whose
+  deadline passed while it was down and queues the ones that are due. HTTP: `start_at` /
+  `start_in_seconds` on `POST /jobs`; `/api/health` says `schedule: true`, and `rcm run` refuses
+  `--at` / `--in` with exit 2 on a server that does not. `rcm jobs --state scheduled`,
+  `rcm cancel`, `rcm bump` and `rcm eta --job` work on them.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- `/api/status` lists schedules under `pools[].scheduled[]` (with `scheduled_error` and
+  `scheduled_error_code`), and queue and recent rows carry `not_before` and `start_deadline`.
+  Keys added only — `schema_version` stays 1.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
 - **Two optional Store-tab roles, `status` and `golive`.** A release profile may now name a
   `status` preset (both stores' review state, read-only, written to `status.json`) and a `golive`
   preset (`mode = plan|release`: `golive-plan.json` says which platform is approved, `golive.json`
@@ -32,6 +51,35 @@ of a key bumps that number and is listed here.
   review out of the view, and they take at most 3 rows of their own in `jobs[]`; a running
   `status` job is not the Build · upload row's current step.
   ([#254](https://github.com/monocsp/remote_ci_monitor/pull/254))
+- **A job can say that a person has to act: `::rcm::action::<code>::<note>`.** `code` is
+  `[a-z0-9_-]{1,32}`, `note` up to 200 characters with control, bidirectional and zero-width
+  characters removed — and never personal details, since it is readable without a token. The
+  last one is the job's `action {code, note, at}` on `GET /jobs/<id>`, the `rcm wait` / `rcm run`
+  JSON and the queue and recent rows of `/api/status` (added keys; `schema_version` stays 1), and
+  stays after the job ends. A running job with an action has the new reason `needs_action`, first
+  among the actionable reasons. `rcm wait` prints `#N needs action · <code> · <note>` on stderr;
+  **`rcm wait --return-on-action`** returns with **exit 4** as soon as the job has an action, while
+  the job keeps running (4 never appears without the flag, nor for a job being cancelled). Hooks
+  get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- **`rcm check` warns when notification hooks failed** (`warn  notify  N hook deliveries
+  failed…`). The count is the server's in-memory `notify_failures`, so a restart sets it back to 0.
+  ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+
+### Changed
+- **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
+  every final state. Give the rule an `on` list to keep the old set.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- `rcm top` says `idle lane did not pick it up` where it said `not scheduled`;
+  the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The `rcm-ci-connect` templates treat `expired` as finished: the watcher no longer waits on it
+  and the commit status is `error` · `unavailable · #N · did not start`, so the GitHub side runs
+  the checks. Copy the new `rcm_ci_watch.py` and `rcm_ci_config.py` into repositories that use
+  the skill. ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The database moves to version 25 (a backup of v24 is written first). An older build refuses the
+  migrated database; restore the backup to go back.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
 
 ## [0.9.0] - 2026-11-22
 

@@ -192,7 +192,7 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 
 | command | what it shows |
 |---|---|
-| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--link` shows an http(s) page — its pull request, say — next to the job's name in the web UI ([job links](docs/configuration.md#linking-a-job-to-a-page)); `--no-join` never joins an identical job; `--no-supersede` keeps your older job of the same branch when the preset would clear it ([superseding](docs/configuration.md#superseding-older-jobs-of-the-same-branch)); `--keep` puts the job's artifacts on the [shelf](docs/configuration.md#keeping-a-jobs-files-the-shelf) and prints a link any browser on the network opens; `--no-wait` returns as soon as the job is queued and prints its position and ETA; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory; `--machine ID` pins the job to one machine (a check preset with any token, anything else admin) |
+| `rcm run PRESET [-f k=v] [--ref REF] [--priority P] [--pool NAME] [--machine ID] [--no-cache] [--by LABEL] [--link URL [--link-label TEXT]] [--no-join] [--no-supersede] [--keep] [--at TIME \| --in DURATION] [--no-wait] [--exclude PATTERN] [--dir DIR] [--timeout S] [--poll]` | snapshot → submit (joins an identical active job) → upload (only changed files when the server caches) → wait. `--ref` for `git_ref` presets: no snapshot, the server fetches the ref. `--priority low\|normal\|high`; `--no-cache` uploads a full tarball; `--link` shows an http(s) page — its pull request, say — next to the job's name in the web UI ([job links](docs/configuration.md#linking-a-job-to-a-page)); `--no-join` never joins an identical job; `--no-supersede` keeps your older job of the same branch when the preset would clear it ([superseding](docs/configuration.md#superseding-older-jobs-of-the-same-branch)); `--keep` puts the job's artifacts on the [shelf](docs/configuration.md#keeping-a-jobs-files-the-shelf) and prints a link any browser on the network opens; `--at 15:00` or `--in 90m` hands the server a time instead and the job waits as `scheduled` ([running a job later](docs/configuration.md#running-a-job-later---at-and---in)); `--no-wait` returns as soon as the job is queued and prints its position and ETA; `--exclude` adds an `.rcmignore` pattern; `--dir` snapshots another directory; `--machine ID` pins the job to one machine (a check preset with any token, anything else admin) |
 | `rcm wait --job N [--timeout S] [--poll]` | follows the job over the event stream, polls every 2 s if the stream is refused |
 | `rcm eta PRESET [-f k=v] [--priority P] [--pool NAME] [--json]` / `rcm eta --job N` | queue position, jobs ahead, wait, expected duration, finish time and the confidence of that estimate; a job that is already running shows its state and elapsed time instead of a wait |
 | `rcm top [--watch N] [--json]` | one screen: queue with reasons and ETAs, recent results, medians, host load (CPU · memory · disk · GPU · top processes) |
@@ -242,11 +242,19 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
+::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
 `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
 parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
 it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
+
+`::rcm::action::<code>::<note>` says the job cannot go on without a person — a sign-in expired,
+say. `code` is `[a-z0-9_-]{1,32}`, `note` at most 200 characters and never personal details. The
+last one becomes the job's `action` and the running row's reason `needs_action`; `rcm wait`
+prints it on stderr, `rcm wait --return-on-action` returns with exit 4 while the job keeps running,
+and hooks get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. Details in
+[Configuration](docs/configuration.md#when-a-person-has-to-act).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
@@ -371,6 +379,7 @@ with GitHub Actions as an optional fallback. How it works and what the owner set
 | 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise) |
 | 2 | cancelled or timed out |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
+| 4 | only with `--return-on-action`: the job asked a person to act (`::rcm::action::`) and **keeps running**. Resume with `rcm wait --job N`. |
 
 Usage errors and validation failures that never reach the server also exit 2, including `rcm run`
 when the server cannot be reached before submit. `rcm wait` gives an unreachable server 60 s to

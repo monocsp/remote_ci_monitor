@@ -21,6 +21,10 @@ FAILED = "failed"
 TIMED_OUT = "timed_out"
 CANCELLED = "cancelled"
 LOST = "lost"
+#: 정한 시각을 기다리는 예약 잡(M5s 결정 206). 프로세스도 레인도 없이 DB 행만 있다.
+SCHEDULED = "scheduled"
+#: 시작 마감 안에 레인이 집지 못한 예약 잡(M5s 결정 208). 돌지 않았다 — `cancelled` 와 같은 줄이다.
+EXPIRED = "expired"
 
 #: 대기 잡 — position 은 이 상태에만 1부터 매긴다.
 WAITING_STATES = frozenset({UPLOADING, QUEUED})
@@ -28,9 +32,16 @@ WAITING_STATES = frozenset({UPLOADING, QUEUED})
 BUSY_STATES = frozenset({RUNNING, CANCELLING})
 #: 큐에 보이는 잡 전부. 합류 판정도 이 집합에서 한다.
 ACTIVE_STATES = WAITING_STATES | BUSY_STATES
+#: 예약 잡(M5s 결정 206). **활성 집합 밖**이다 — 넣으면 같은 입력의 즉시 실행이 예약에 합류하고
+#: (`store.JOINABLE_STATES`), 큐 계산이 대기도 실행도 아닌 행을 말없이 빠뜨린다. 대신 blob 보호 ·
+#: 취소 · 잡 문서 · `rcm wait` · `rcm jobs` · 워커 잊기가 이 집합을 **명시적으로** 본다.
+SCHEDULED_STATES = frozenset({SCHEDULED})
 #: 종료 상태 — 최근 완료에 남는다. 큐에서 조용히 사라지는 잡은 없다.
-TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST})
-ALL_STATES = ACTIVE_STATES | TERMINAL_STATES
+TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST, EXPIRED})
+ALL_STATES = ACTIVE_STATES | SCHEDULED_STATES | TERMINAL_STATES
+#: `[[notify]]` 에 `on` 이 없을 때 울리는 상태(`config.parse_notify` · `core/notify.NotifyRule`
+#: 두 곳이 이것을 쓴다). 지금은 종료 상태 전부다 — 새 종료 상태가 기본에서 빠져야 하면 여기서 뺀다.
+NOTIFY_DEFAULT_STATES = TERMINAL_STATES
 
 #: `rcm wait` 종료 코드. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지).
 EXIT_CODE_BY_STATE = {
@@ -38,6 +49,7 @@ EXIT_CODE_BY_STATE = {
     FAILED: 1,
     CANCELLED: 2,
     TIMED_OUT: 2,
+    EXPIRED: 2,  # M5s 결정 212 — 돌지 않았다
     LOST: 3,
 }
 EXIT_UNKNOWN = 3
@@ -111,6 +123,9 @@ REASON_NO_CAPABLE_MACHINE = "no_capable_machine"
 REASON_CHECK_FAILED = "check_failed"
 #: 후보 중 점검이 돌고 있거나 기다리는 것뿐이다. 스스로 풀린다 — `held_by_load` 와 같은 종류.
 REASON_CHECK_PENDING = "check_pending"
+#: 도는 잡이 「사람이 할 일」 표식(`::rcm::action::`)을 찍었다(M5s 결정 213). 행동 가능 — 잡이
+#: 직접 무엇을 해 달라고 말했다. 사람을 기다리는 잡은 대개 조용해서 `stuck` 보다 앞에 둔다.
+REASON_NEEDS_ACTION = "needs_action"
 
 #: M5n 배치 · 그룹 범위 (DB 에 그대로 들어가는 값)
 PLACEMENT_POOL = "pool"
@@ -129,7 +144,12 @@ STUCK_STEP = "over_step"  # 현재 단계가 자기 실측 중앙값의 배수�
 STUCK_NO_OUTPUT = "no_output"  # 단계 이야기를 안 하는 잡이 `no_output_seconds` 동안 조용하다
 
 #: 「Not moving」 요약에 오르는 행동 가능한 이유. 순서가 우선순위다.
+#:
+#: `needs_action` 이 맨 앞이다(M5s). 다른 이유는 rcm 이 관측해 짐작한 것이고, 이것만 잡이 스스로
+#: 「사람이 이것을 해 달라」고 말한 것이다. 무엇을 할지(`action.note`)까지 정해져 있고, 하지
+#: 않으면 잡이 나아가지 못한다(로그인이 풀린 출시 잡).
 ACTIONABLE_REASONS = (
+    REASON_NEEDS_ACTION,
     REASON_WORKER_DOWN,
     REASON_NO_CAPABLE_MACHINE,
     REASON_CHECK_FAILED,
@@ -194,6 +214,8 @@ class Preset:
     supersede: str = "off"
     #: 끝나면 산출물을 보관함에 넣나(M5p 결정 126). 제출 때 잡에 얼린다 — `artifacts` 가 있어야 한다
     keep: bool = False
+    #: 예약 잡의 시작 마감(초, M5s 결정 208). None 이면 서버의 `schedule_start_deadline_seconds`
+    start_deadline_seconds: int | None = None
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -316,6 +338,24 @@ class Job:
     #: M5p(v24) — 끝나면 산출물을 보관함에 넣나. 제출 때 얼린다(프리셋 keep OR 제출 keep).
     #: reload · 재시작에 바뀌지 않고, 합류와 supersede 로 켜질 수만 있다(결정 127 · 128)
     keep: bool = False
+    #: M5s(v25) — 예약. `not_before` 는 승격할 시각, `start_deadline` 은 그때까지 레인이 집지 못하면
+    #: `expired` 로 닫는 시각이다. 즉시 실행한 잡은 둘 다 None 이다. 제출 때 정하고 바꾸지 않는다
+    not_before: datetime | None = None
+    start_deadline: datetime | None = None
+    #: 제출의 `"supersede": false` 를 얼린 값(결정 237). 재시작해도 잊지 않는다
+    no_supersede: bool = False
+
+    @property
+    def wait_origin(self) -> datetime:
+        """대기를 재는 기준 시각. 예약 잡은 승격한 시각(`queued_at`)이고 나머지는 만든 시각이다
+        (M5s §3 #3) — 예약까지 기다린 시간은 「큐가 밀렸다」가 아니다."""
+        if self.not_before is not None and self.queued_at is not None:
+            return self.queued_at
+        return self.created_at
+
+    @property
+    def is_scheduled(self) -> bool:
+        return self.state in SCHEDULED_STATES
 
     @property
     def is_waiting(self) -> bool:
@@ -409,6 +449,20 @@ class ProgressUnit:
 
 
 @dataclass(frozen=True)
+class Action:
+    """「사람이 할 일」 표식 하나 — 마지막 `::rcm::action::<code>::<note>` 마커(M5s 결정 213).
+
+    `code` 는 `[a-z0-9_-]{1,32}`, `note` 는 제어문자를 지운 200자까지의 안내(없으면 None).
+    `at` 은 서버가 그 줄을 받은 시각이다. note 는 토큰 없이 읽히는 `/api/status` 와 알림 env 로
+    흐르므로 스크립트는 개인정보를 넣지 않는다(템플릿 머리말의 규칙).
+    """
+
+    code: str
+    note: str | None = None
+    at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Progress:
     """스텝 마커로 만든 진행 상태. `timing` 은 항상 `as_received`."""
 
@@ -439,6 +493,8 @@ class Progress:
     units: tuple[ProgressUnit, ...] = ()
     #: 단위 상한을 넘겨 격자에 못 올린 단위가 있다 — `done/total` 은 그래도 계속 센다
     units_truncated: bool = False
+    #: 잡이 찍은 마지막 「사람이 할 일」 표식(M5s). 없으면 None
+    action: Action | None = None
 
 
 @dataclass(frozen=True)
@@ -486,6 +542,8 @@ class QueueRow:
     progress: Progress | None
     #: 대기 잡이 들어갈 수 있는 머신과 못 들어가는 이유(M5n §7.3) — 최대 8개
     placement_detail: tuple[PlacementNote, ...] = ()
+    #: 이 행의 「사람이 할 일」 표식(M5s). 도는 행은 그 잡의 마지막 표식이다
+    action: Action | None = None
 
 
 @dataclass(frozen=True)
@@ -612,6 +670,10 @@ class Pool:
     recent_error_code: str | None = None
     medians_error_code: str | None = None
     hosts_error_code: str | None = None
+    #: 예약 잡(M5s) — 승격 시각 순. 큐 표와 따로 간다. 실패는 None + `scheduled_error*`
+    scheduled: tuple[Job, ...] | None = ()
+    scheduled_error: str | None = None
+    scheduled_error_code: str | None = None
 
 
 @dataclass(frozen=True)

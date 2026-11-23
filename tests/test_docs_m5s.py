@@ -93,6 +93,136 @@ def test_release_roles_changelog_has_the_entry():
         assert needle in text, f"CHANGELOG.md [Unreleased] lacks {needle!r}"
 
 
+# ── PR A: 예약 실행 (§4.1) ────────────────────────────────────────────────────
+
+
+def read(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8")
+
+
+def test_scheduled_jobs_are_documented():
+    """PR A — 예약 실행(§4.1). 설정 문서가 규칙의 정본이고 README · 사용 안내(영 · 한)가 그곳을
+    가리킨다. 운영 문서는 정지 중에도 마감 시계가 흐른다고 말한다."""
+    config = read("docs/configuration.md")
+    assert "## Running a job later: `--at` and `--in`" in config
+    for word in (
+        "--at",
+        "--in",
+        "start_at",
+        "start_in_seconds",
+        "`scheduled`",
+        "`expired`",
+        "schedule_start_deadline_seconds",
+        "schedule_max_ahead_days",
+        "start_deadline_seconds",
+        "start_at_past",
+        "start_at_too_far",
+        "start_at_ambiguous",
+        "start_deadline_too_long",
+        "schedule_exists",
+        "schedule: true",
+        "server does not support scheduling — upgrade it",
+        "pools[].scheduled[]",
+        "rcm jobs --state scheduled",
+        "[display] timezone",
+    ):
+        assert word in config, f"docs/configuration.md does not mention {word}"
+    anchor = "configuration.md#running-a-job-later---at-and---in"
+    for rel in ("README.md", "README.ko.md", "docs/usage.md", "docs/usage.ko.md"):
+        text = read(rel)
+        assert anchor in text, f"{rel} does not link to the scheduling section"
+        assert "--at" in text and "--in" in text, rel
+    operating = read("docs/operating.md")
+    assert "rcm jobs --state scheduled" in operating and "`expired`" in operating
+    for rel in ("examples/server.toml", "src/remote_ci_monitor/templates/server.toml"):
+        text = read(rel)
+        assert "schedule_start_deadline_seconds" in text and "schedule_max_ahead_days" in text
+    unreleased = read("CHANGELOG.md").split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    for word in ("--at", "`scheduled`", "`expired`", "schedule_exists", "schedule: true"):
+        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+
+
+# ── PR C: 「사람이 할 일」 표식 (§4.3 · 결정 213 · 234) ───────────────────────
+
+
+def action_flat(text: str) -> str:
+    """줄바꿈 · 연속 공백을 하나로 — 문단 안의 줄 나눔에 시험이 매이지 않게. `read` 는 PR A 의
+    것을 그대로 쓴다."""
+    return re.sub(r"\s+", " ", text)
+
+
+def test_action_marker_contract_section_3_names_the_marker_and_the_privacy_rule():
+    text = read("docs/release-contract.md")
+    sec = text[text.index("## 3. Markers") : text.index("## 4. Secrets")]
+    assert "::rcm::action::<code>::<note>" in sec
+    assert "[a-z0-9_-]{1,32}" in sec
+    assert "200 characters" in sec
+    assert "personal detail" in action_flat(sec)
+    for word in ("needs_action", "--return-on-action", "RCM_ACTION_CODE", "RCM_ACTION_NOTE"):
+        assert word in sec, word
+
+
+def test_action_marker_readme_lists_the_marker_and_exit_4_in_both_languages():
+    for rel in ("README.md", "README.ko.md"):
+        text = read(rel)
+        assert "::rcm::action::login::" in text, rel
+        assert "configuration.md#when-a-person-has-to-act" in text, rel
+        rows = [ln for ln in text.splitlines() if ln.startswith("| 4 |")]
+        assert len(rows) == 1 and "--return-on-action" in rows[0], (rel, rows)
+
+
+def test_action_marker_configuration_has_the_section_and_the_hook_env():
+    text = read("docs/configuration.md")
+    assert "### When a person has to act" in text
+    sec = text[text.index("### When a person has to act") : text.index("### Saying what failed")]
+    body = action_flat(sec)
+    for word in ("{code, note, at}", "needs_action", "--return-on-action", "exit", "**4**"):
+        assert word in body, word
+    # 이미 있던 표식에서도 돌아오고, 다시 기다릴 때는 플래그 없이다 — 고리를 막는 문장
+    assert "already there when the wait started" in body
+    assert "**without** the flag" in body
+    hooks = action_flat(text[text.index("- **Notifications**") :])
+    assert "`RCM_ACTION_CODE` and `RCM_ACTION_NOTE`" in hooks
+
+
+def test_action_marker_notify_failures_limit_is_written_down():
+    """`rcm check` 의 warn 행과 「재시작하면 0」 한계(명세 §4.7)."""
+    config = action_flat(read("docs/configuration.md"))
+    assert "`warn notify` row" in config
+    assert "a restart sets it back to 0" in config
+    operating = action_flat(read("docs/operating.md"))
+    assert "warn notify N hook deliveries failed" in operating
+    assert "sets it to 0" in operating
+
+
+def test_action_marker_usage_guides_mirror_the_return_on_action_paragraph():
+    en = action_flat(read("docs/usage.md"))
+    ko = action_flat(read("docs/usage.ko.md"))
+    for text in (en, ko):
+        assert "rcm wait --job N --return-on-action" in text
+        assert "rcm wait --return-on-action" in text  # 종료 코드 4 문단
+        assert "#412 needs action · login · Sign in on the build machine" in text
+    assert "When the job needs a person." in en
+    assert "사람이 손대야 할 때." in ko
+
+
+def test_action_marker_cli_help_names_the_flag():
+    from remote_ci_monitor.cli import build_parser
+
+    sub = next(a for a in build_parser()._actions if a.__class__.__name__ == "_SubParsersAction")
+    wait_help = sub.choices["wait"].format_help()
+    assert "--return-on-action" in wait_help and "exit 4" in wait_help
+
+
+def test_action_marker_docs_say_cancelled_jobs_never_return_4_and_the_wider_cleanup():
+    """#251 격리 검증 P2 — 취소 중인 잡은 4 도, 알림 줄도 없다 · note 는 bidi 까지 지운다."""
+    config = action_flat(read("docs/configuration.md"))
+    assert "being cancelled, or was cancelled, prints no such line and never returns 4" in config
+    assert "control, bidirectional and zero-width characters removed" in config
+    contract = action_flat(read("docs/release-contract.md"))
+    assert "control, bidirectional and zero-width characters are removed" in contract
+
+
 # ── PR E: status 라우트 · 역할별 창 · 검토 패널 (§4.4 · §3 #11) ──────────────
 
 
