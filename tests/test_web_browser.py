@@ -1878,6 +1878,124 @@ def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
         srv.close()
 
 
+# ── 스토어 심사 상태(M5s PR E · §4.4 · §7 S15) ─────────────────────────────────────────────
+#
+# RELEASE_STUB_JS 위에 status 역할을 덧씌운다: 프로파일에 `presets.status`, 릴리스 보기에 `status`
+# 항목(iOS 승인 · Android 는 목록에 없는 값)과 도는 status 잡 하나, 그리고 `checkStatus` 호출.
+# `?stale=1` 이면 오래된 상태다. `?checkfail=1` 이면 그 뒤의 조회 #690 이 실패했다.
+STORE_CHECK_STUB_JS = r"""
+(() => {
+  const stale = /[?&]stale=1(&|$)/.test(location.search);
+  const checkFailed = /[?&]checkfail=1(&|$)/.test(location.search);
+  const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
+  const api = window.rcmStoreApi, repo = api.repo, release = api.release;
+  const statusDoc = { schema: 1, checked_at: new Date(Date.now() - 120000).toISOString(),
+    ios: { version: "1.0.1", build: 181, state: "approved", raw_state: "PENDING_DEVELOPER_RELEASE",
+           release_type: "MANUAL", phased: null },
+    android: { version: "1.0.1", version_code: 181, state: "APPROVED_NOT_PUBLISHED",
+               raw_state: "RELEASE_LIFECYCLE_STATE_APPROVED_NOT_PUBLISHED", user_fraction: null } };
+  api.repo = (name) => repo(name).then((r) => {
+    const body = JSON.parse(JSON.stringify(r.body));
+    body.profile.presets.status = "release-status";
+    return Object.assign({}, r, { body });
+  });
+  api.release = (name) => release(name).then((r) => {
+    const body = Object.assign({}, r.body, {
+      status: { job_id: 680, state: "succeeded", measured_at: statusDoc.checked_at,
+                age_seconds: stale ? 3000 : 120, stale: stale, doc: statusDoc },
+      jobs: [{ id: 690, preset: "release-status", role: "status",
+               state: checkFailed ? "failed" : "running",
+               sha: "9e1c4d2f" + "0".repeat(32), ref: "main",
+               started_at: new Date(Date.now() - 5000).toISOString(), finished_at: null,
+               artifacts: [] }].concat(r.body.jobs) });
+    return Object.assign({}, r, { body });
+  });
+  api.checkStatus = (name, body) => {
+    window.rcmStoreCalls.push(["checkStatus", body]); return ok({ job_id: 691 }, 202); };
+})();
+"""
+CHECK = "#review-panel [data-store-check]"
+
+
+def test_store_review_panel_draws_both_stores_state_and_checks_again(tmp_path):
+    """S15 — 검토 패널은 두 스토어의 심사 상태를 읽기 전용으로 그린다. 목록에 없는 값은
+    unknown 이고 스토어 원문(`raw_state`)은 보조로 남는다. 나이와 stale 을 보이고, 「새로 조회」는
+    `POST …/release/status` 하나다. 도는 status 잡은 Build·upload 행의 「지금 하는 일」이 아니다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = _q(CHECK) + " !== null"
+        with Chrome(tmp_path / "chrome-store-check", window="1240,900") as c:
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": RELEASE_STUB_JS})
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": STORE_CHECK_STUB_JS})
+            c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
+            c.open(base + "&t=1#/store/app/status", ready_js=ready)
+            rows = c.eval(
+                "[...document.querySelectorAll('" + CHECK + " [data-store-check-platform]')]"
+                ".map(li => [li.getAttribute('data-store-check-platform'),"
+                " li.getAttribute('data-state'), li.textContent.replace(/\\s+/g, ' ').trim()])"
+            )
+            assert [r[:2] for r in rows] == [["ios", "approved"], ["android", "unknown"]], rows
+            assert "approved" in rows[0][2] and "1.0.1 (181)" in rows[0][2], rows
+            assert "PENDING_DEVELOPER_RELEASE" in rows[0][2], rows
+            assert "unknown" in rows[1][2], rows
+            assert "RELEASE_LIFECYCLE_STATE_APPROVED_NOT_PUBLISHED" in rows[1][2], rows
+            age = c.eval(_q(CHECK + " [data-store-check-age]", ".textContent"))
+            assert age == "checked 2m ago · job #680", age
+            assert c.eval(_q(CHECK, ".getAttribute('data-stale')")) == "0"
+            assert c.eval(_q(CHECK + " [data-store-check-stale]")) is None
+            running = c.eval(_q(CHECK + " [data-store-check-running]", ".textContent"))
+            assert "#690" in running, running
+            # 도는 status 잡은 Build·upload 행의 「지금 하는 일」이 아니다(§3 #11)
+            by = {r["row"]: r for r in c.eval(STORE_ROWS_JS)}
+            assert "release-status" not in by["build"]["head"], by["build"]
+            assert by["build"]["state"] != "running", by["build"]
+            build_items = c.eval(
+                "[...document.querySelectorAll("
+                "'#store details.srow[data-row=\"build\"] .checklist .ci')]"
+                ".map(li => li.textContent)"
+            )
+            assert not any("#690" in t for t in build_items), build_items
+            # 「새로 조회」 — 이 회차의 버전을 싣는다
+            button = CHECK + " [data-store-check-refresh]"
+            assert c.eval(_q(button, ".textContent")) == "Check again"
+            assert c.eval(_q(button, ".disabled")) is False
+            c.eval(_q(button, ".click()"))
+            _wait(c, "window.rcmStoreCalls.some(x => x[0] === 'checkStatus')")
+            calls = [x for x in c.eval("window.rcmStoreCalls") if x[0] == "checkStatus"]
+            assert calls == [["checkStatus", {"build_name": "1.0.1"}]], calls
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+            # 폰 폭: 긴 스토어 원문이 옆으로 새지 않는다
+            c.viewport(390, mobile=True)
+            assert c.eval("document.documentElement.scrollWidth") <= 390
+            c.viewport(1240)
+            # 한국어
+            c.eval("document.getElementById('lang-btn').click()")
+            _wait(c, _q(CHECK, ".textContent.indexOf('스토어 심사 상태') >= 0"))
+            ko = c.eval(_q(CHECK, ".textContent"))
+            assert "승인됨" in ko and "알 수 없음" in ko, ko
+            assert c.eval(_q(button, ".textContent")) == "새로 조회"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 오래된 상태 — 판단하기 전에 새로 조회하라고 말한다
+            c.open(base + "&stale=1#/store/app/status", ready_js=ready)
+            assert c.eval(_q(CHECK, ".getAttribute('data-stale')")) == "1"
+            note = c.eval(_q(CHECK + " [data-store-check-stale]", ".textContent"))
+            assert "older than 30 minutes" in note, note
+            assert c.eval(_q(CHECK + " [data-store-check-age]", ".textContent")).startswith(
+                "checked 50m ago"
+            )
+            # 새로 조회가 실패했다 — 예전 상태를 아무 말 없이 그리지 않는다
+            c.open(base + "&checkfail=1#/store/app/status", ready_js=ready)
+            failed = c.eval(_q(CHECK + " [data-store-check-failed]", ".textContent"))
+            assert failed.startswith("Last check #690 failed."), failed
+            assert c.eval(_q(CHECK + " [data-store-check-running]")) is None
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
 # ── 릴리스 드라이버 스테퍼 · N 대화상자 · GitHub 카드 · 예행 (항목 25 · 26 · 28 · 37~39) ──────
 #
 # RELEASE_STUB_JS 위에 `driver` · `github` 와 드라이버 네 호출을 덧씌운다. `?driver=s2` 는 exit 2 +

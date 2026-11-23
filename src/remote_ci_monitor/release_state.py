@@ -61,6 +61,13 @@ _VERSION_NAME_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _TRAILING_INT_RE = re.compile(r"^((?:\d+\.)*)(\d+)$")
 MAX_DOC_BYTES = 256 * 1024
 JOBS_LIMIT = 50
+#: 역할 프리셋 하나가 여는 창(잡 수) — 산출물 파일이 있는 역할의 「최신」을 이 안에서 찾는다.
+#: 예전에는 모든 역할 프리셋이 잡 500개를 **한 창**으로 나눠 썼고, 5분마다 도는 status 잡이 그
+#: 창을 채우면 plan · review 의 문서가 사라졌다(M5s §3 #11). 이제 프리셋마다 따로 연다.
+ROLE_WINDOW = 500
+#: `jobs[]` 에서 status 행이 차지하는 자리. 자주 도는 역할이라 다른 역할의 행 50개를 밀어내지
+#: 않게 따로 센다 — 화면은 가장 새 조회 잡 하나만 본다(「조회 중」).
+STATUS_ROWS_LIMIT = 3
 
 #: `(job_id, 묶음 안 경로)` → 바이트. 실패는 예외로.
 ReadFile = Callable[[int, str], bytes]
@@ -185,6 +192,18 @@ def role_entry(
     return out
 
 
+def role_windows(presets: dict[str, str | None]) -> dict[str, int]:
+    """프리셋 이름 → 읽을 잡 수. 산출물 파일이 있는 역할은 `ROLE_WINDOW`, 행만 있는 역할(gate ·
+    qa · dev)은 `jobs[]` 에 필요한 `JOBS_LIMIT` 이다. 한 프리셋이 여러 역할을 맡으면 큰 쪽."""
+    out: dict[str, int] = {}
+    for role, name in presets.items():
+        if not name:
+            continue
+        limit = ROLE_WINDOW if ROLE_FILES.get(role) else JOBS_LIMIT
+        out[name] = max(out.get(name, 0), limit)
+    return out
+
+
 def release_view(
     jobs: Iterable[Job],
     presets: dict[str, str | None],
@@ -195,21 +214,33 @@ def release_view(
     max_age_minutes: int,
 ) -> dict[str, Any]:
     """`GET …/release` 의 `plan` · `review` · `upload` · `status` · `golive` · `jobs`. `jobs` 는
-    새것부터 ≤ 50 이고 역할 프리셋의 잡만이다. `names_of(job_id)` 는 묶음 매니페스트의 파일
-    항목들(없으면 빈 목록). status 와 golive plan 도 plan 처럼 나이와 stale 을 잰다."""
+    새것부터 역할 프리셋의 잡만이고, status 가 아닌 행 ≤ 50 에 status 행 ≤ `STATUS_ROWS_LIMIT`
+    이다. 넘기는 `jobs` 도 새것부터여야 한다(서버는 `role_windows` 로 프리셋마다 읽어 합친다).
+    `names_of(job_id)` 는 묶음 매니페스트의 파일 항목들(없으면 빈 목록). status 와 golive plan
+    도 plan 처럼 나이와 stale 을 잰다."""
     role_of = {name: role for role, name in presets.items() if name}
     rows: list[dict[str, Any]] = []
+    status_rows = 0
     latest: dict[str, tuple[Job, str]] = {}  # 파일 basename → (잡, 묶음 안 경로)
     for job in jobs:
         role = role_of.get(job.preset)
         if role is None:
             continue
+        # status 행은 따로 센다 — 다른 역할의 행 50개를 밀어내지 않는다(§3 #11)
+        if role == "status":
+            wants_row = status_rows < STATUS_ROWS_LIMIT
+        else:
+            wants_row = len(rows) - status_rows < JOBS_LIMIT
+        missing = [b for b in ROLE_FILES.get(role, ()) if b not in latest]
+        if not wants_row and not missing:
+            # 묶음 목록을 읽을 까닭이 없다 — 자주 도는 역할의 잡 500개를 매번 다 읽지 않는다
+            continue
         files = names_of(job.id)
-        if len(rows) < JOBS_LIMIT:
+        if wants_row:
             rows.append(job_row(job, role, artifact_names(files)))
-        for basename in ROLE_FILES.get(role, ()):
-            if basename in latest:
-                continue
+            if role == "status":
+                status_rows += 1
+        for basename in missing:
             member = _find_member(files, basename)
             if member is not None:
                 latest[basename] = (job, member)
@@ -406,6 +437,8 @@ __all__ = [
     "PLATFORMS",
     "PREFILL_KEYS",
     "ROLE_FILES",
+    "ROLE_WINDOW",
+    "STATUS_ROWS_LIMIT",
     "artifact_member",
     "artifact_names",
     "bump_last_number",
@@ -422,5 +455,6 @@ __all__ = [
     "read_bundle_member",
     "release_view",
     "role_entry",
+    "role_windows",
     "version_name_check",
 ]

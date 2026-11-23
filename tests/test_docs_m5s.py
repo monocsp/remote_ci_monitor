@@ -223,6 +223,44 @@ def test_action_marker_docs_say_cancelled_jobs_never_return_4_and_the_wider_clea
     assert "control, bidirectional and zero-width characters are removed" in contract
 
 
+# ── PR E: status 라우트 · 역할별 창 · 검토 패널 (§4.4 · §3 #11) ──────────────
+
+
+def test_release_status_panel_configuration_names_the_route_and_the_window():
+    text = CONFIGURATION.read_text()
+    for needle in (
+        "| `POST …/release/status` | client token | `{build_name?, ref?}` → submits "
+        "`presets.status`",
+        "409 `role_not_configured` when the profile has no `status` preset",
+        "`status` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `doc` — aged from the "
+        "document's `checked_at`, no `build_name`)",
+        "its own window of its newest 500 jobs",
+        "at most 3 rows of their own in `jobs[]`",
+    ):
+        assert needle in text, f"docs/configuration.md lacks {needle!r}"
+
+
+def test_release_status_panel_readmes_and_changelog_name_the_panel():
+    en = re.sub(r"\s+", " ", (ROOT / "README.md").read_text())
+    ko = re.sub(r"\s+", " ", (ROOT / "README.ko.md").read_text())
+    assert "With a `status` preset the panel also shows each store's review state" in en, (
+        "README.md lacks the review panel's store state"
+    )
+    assert "**Check again** runs the preset once more" in en, "README.md lacks **Check again**"
+    assert "`status` 프리셋이 있으면 패널에 두 스토어의 심사 상태도 나온다" in ko, (
+        "README.ko.md lacks the review panel's store state"
+    )
+    assert "**새로 조회**는 그 프리셋을 한 번 더 돌린다" in ko, "README.ko.md lacks **새로 조회**"
+    text = re.sub(r"\s+", " ", unreleased_only(CHANGELOG.read_text()))
+    for needle in (
+        "`POST /api/repos/<repo>/release/status`",
+        "**Check again**",
+        "own window of 500 jobs",
+        "`unknown` for any other",
+    ):
+        assert needle in text, f"CHANGELOG.md [Unreleased] lacks {needle!r}"
+
+
 # ── PR G: 화면의 예약 · 표식 · 알림 실패 배지 (§4.1 「표시」 · §4.3 · §4.7) ─────
 
 
