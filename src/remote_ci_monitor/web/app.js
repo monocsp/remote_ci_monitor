@@ -2712,9 +2712,10 @@
    * 검토 패널의 「스토어 심사 상태」 모형. 프로파일에 `presets.status` 가 없으면 null(절이 없다).
    * `stale` 은 서버의 판정이고(`plan_max_age_minutes`), 판정이 없으면 낡은 것으로 본다. 나이는 서버가
    * `checked_at` 으로 잰 `age_seconds` 다. `checking` 은 아직 끝나지 않은 가장 새 status 잡이다.
-   * `lastFailed` 는 가장 새 status 잡이 실패 · 시간 초과 · 유실로 끝났고 그 잡이 지금 그리는 문서보다
-   * 새것일 때다 — 「새로 조회」가 실패해도 화면이 예전 상태를 아무 말 없이 그리지 않게 한다. 문서를
-   * 쓴 잡이 성공하지 않았으면 `jobStateOk` 가 거짓이고 `jobStateText` 가 그 상태 낱말이다.
+   * `lastFailed` 는 가장 새 status 잡이 실패 · 시간 초과 · 유실 · 반복을 다 씀 · 만료로 끝났고
+   * 그 잡이 지금 그리는 문서보다 새것일 때다 — 「새로 조회」가 실패해도 화면이 예전 상태를 아무 말
+   * 없이 그리지 않게 한다. 문서를 쓴 잡이 성공하지 않았으면 `jobStateOk` 가 거짓이고
+   * `jobStateText` 가 그 상태 낱말이다.
    */
   function storeCheckModel(release, profile, lang) {
     var presets = profile && profile.presets ? profile.presets : {};

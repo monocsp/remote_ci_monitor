@@ -7,6 +7,29 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-23
+
+A job can now wait for a time you name (`rcm run --at` / `--in`, the new states `scheduled` and
+`expired`), and a preset can ask rcm to run a script that exits 75 ("not yet") again later (the
+new states `retried` and `exhausted`). A job can say that a person has to act
+(`::rcm::action::<code>::<note>`), and `rcm wait --return-on-action` comes back with exit 4 while
+the job keeps running. The Store tab gains two optional roles: `status` reads both stores' review
+state, and `golive` releases an approved build only when a person asks for it with the version,
+the build number and a time. The fixed sentence about going live now says exactly that,
+everywhere it appears.
+
+### Breaking changes
+- **Database schema v25 — schedules and retry chains.** `jobs` gains `not_before`,
+  `start_deadline`, `no_supersede`, `chain_id`, `retry_of`, `attempt` and the retry policy frozen
+  at submission (`retry_on_exit`, `retry_interval_seconds`, `retry_max_attempts`,
+  `retry_disabled`). A v24 file is backed up (`backup/rcm.sqlite3.v24.bak`) and migrated on
+  start; an older build refuses a v25 file and points at that backup. Restore the backup to go
+  back. ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- **A server with a preset that retries raises `min_client_version` to `0.10.0`** in
+  `/api/health`. An older client does not know `retried` and its `rcm wait` would wait forever, so
+  its `rcm check` now shows the client row as FAIL. Upgrade the clients to 0.10.0 before you add
+  `[presets.retry]` to a preset. ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+
 ### Added
 - **`rcm run --at TIME` and `--in DURATION` run a job later.** The server reads the time
   (`HH:MM` today, `YYYY-MM-DDTHH:MM`, or ISO-8601 with an offset) in `[display] timezone`, or its
@@ -132,10 +155,6 @@ of a key bumps that number and is listed here.
   marker). ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
 
 ### Changed
-- **A server with a preset that retries raises `min_client_version` to `0.10.0`** in
-  `/api/health`. An older client does not know `retried` and its `rcm wait` would wait forever, so
-  its `rcm check` now shows the client row as FAIL. Upgrade the clients.
-  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
 - A `[[notify]]` rule without `on` fires for `exhausted` but not for `retried`, so a two-hour chain
   is one notification; `on = ["retried"]` asks for each attempt.
   ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
@@ -181,8 +200,8 @@ of a key bumps that number and is listed here.
   reads `Last check #N did not succeed (lost).`
   ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - `rcm run` exits 2 instead of 3 when the server refuses the submission with 409
-  `schedule_exists` or `golive_running` (as it already did for `release_route_required`): no job
-  was made. Any other 409 stays 3.
+  `schedule_exists` (as it already did for `release_route_required`): no job was made. Any other
+  409 stays 3.
   ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
   `not scheduled`, as `rcm top` does. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
@@ -194,9 +213,6 @@ of a key bumps that number and is listed here.
   and the commit status is `error` · `unavailable · #N · did not start`, so the GitHub side runs
   the checks. Copy the new `rcm_ci_watch.py` and `rcm_ci_config.py` into repositories that use
   the skill. ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
-- The database moves to version 25 (a backup of v24 is written first). An older build refuses the
-  migrated database; restore the backup to go back.
-  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
 
 ## [0.9.0] - 2026-11-22
 
@@ -2177,7 +2193,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.6.1...v0.7.0

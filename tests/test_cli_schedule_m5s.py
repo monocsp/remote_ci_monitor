@@ -280,6 +280,15 @@ def test_a_known_409_refusal_on_the_tree_path_exits_2(srv, capsys, monkeypatch, 
     assert rc == 2, err
 
 
+@pytest.mark.parametrize("code", REFUSED_409)
+def test_a_known_409_refusal_named_only_by_error_code_exits_2(srv, capsys, code):
+    """본문에 `code` 가 없고 `error_code` 만 있어도 같은 거절이다 — 그 갈래만 따로 잠근다."""
+    srv.fake.route("POST", "/jobs", {"error": f"refused: {code}", "error_code": code}, status=409)
+    rc, _out, err = run(capsys, ["run", "deploy", "--ref", "main", "--no-wait"])
+    assert rc == 2, err
+    assert "submit failed" in err
+
+
 def test_an_unknown_409_still_exits_3(srv, capsys):
     """모르는 409 는 여전히 「결과 모름」이다 — 아는 코드만 확실한 거절로 친다."""
     srv.fake.route("POST", "/jobs", {"error": "conflict", "code": "something_else"}, status=409)
