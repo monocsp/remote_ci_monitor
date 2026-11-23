@@ -85,7 +85,7 @@ PATH `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`(venv 가 �
 ```text
 $ rcm machines
 machine            host                      pool     lanes  fingerprint  presets
-epeuem-ui-Macmini  epeuem-ui-Macmini (1e2c)  default  1      xcode 26.5   5/7 ok · 1 ftool missing · 1 nosuchtool-xyz missing
+build-mac          build-mac (1e2c)          default  1      xcode 26.5   5/7 ok · 1 ftool missing · 1 nosuchtool-xyz missing
 mbp                mbp (1e2c)                mbp      1      xcode 26.5   6/7 ok · 1 nosuchtool-xyz missing
 w2                 w2 (1e2c)                 w2pool   1      xcode 26.5   5/7 ok · 1 ftool missing · 1 nosuchtool-xyz missing
 w3                 w3                        w3pool   1      xcode 26.4   6/7 ok · 1 nosuchtool-xyz missing
@@ -106,7 +106,7 @@ $ rcm top                                  (대기 행)
    1. · queued     #12 capgate  …  eta 19:16 · in 38s  (low · preset)
         waiting for lane · behind #10 · any machine
    3. · queued     #14 nocap    …  eta —  (low · default)
-        no capable machine — epeuem-ui-Macmini: nosuchtool-xyz missing · mbp: … · w2: … · w3: …
+        no capable machine — build-mac: nosuchtool-xyz missing · mbp: … · w2: … · w3: …
 $ rcm jobs
 #12    queued     capgate  …  1st in line · waiting 6s       19:16  any machine
 ```
@@ -223,7 +223,7 @@ down 판정과 함께 `lost · worker stopped`.
 | F5 | 낮음 | `rcm eta` 가 「eta —」일 때 새 이유 셋을 안 말한다 | §2 S4 | `f2c3cee` |
 | F6 | 중간 | `rcm check` 의 `local preset tools` · `service preset tools` 가 any-capable 프리셋의 도구가 **서버에** 없다고 FAIL — any-capable 설정이면 늘 빨강 | `FAIL local preset tools capgate (ftool missing)` | `18b2ad6` — `any machine` 표시, 판정에서 뺌 |
 | F7 | 낮음 | 실패한 점검 잡의 「⧉ 다시 실행」 명령이 `rcm run sim-check --ref HEAD` — 그 머신에 안 묶여 다른 곳에서 돈다. `rcm recheck mbp sim-check` 가 맞다 | 웹 최근 #31 | 안 고침 — 웹 복사 명령 규칙을 바꾸는 일이라 오너 판단 |
-| F8 | 낮음 | `rcm machines` 의 `machine` 열이 로컬을 `epeuem-ui-Macmini` 로 찍는데 `--machine`/`recheck` 는 `@local` 만 받는다(오류 메시지가 `@local` 을 알려 주긴 한다) | `unknown machine 'epeuem-ui-Macmini' — server has: @local, …` | 안 고침 — 웹처럼 `@local` 을 곁에 찍는 안 |
+| F8 | 낮음 | `rcm machines` 의 `machine` 열이 로컬을 `build-mac` 로 찍는데 `--machine`/`recheck` 는 `@local` 만 받는다(오류 메시지가 `@local` 을 알려 주긴 한다) | `unknown machine 'build-mac' — server has: @local, …` | 안 고침 — 웹처럼 `@local` 을 곁에 찍는 안 |
 | F9 | 정보 | 프로브만 바꾼 `rcm reload` 가 「nothing changed」라고 하지만 세대가 오르고 모든 워커가 다시 잰다 | §2 S3 | 안 고침 — 「machines re-measure」 한 마디가 있으면 좋다 |
 | F10 | 정보 | 사람이 지정한 점검이 유실되면(워커가 내려가는 중에 받음) 이미 **통과**했던 머신도 `check_needed` 로 내려간다 — 명세 §4.4 「가장 최근 잡」 규칙 그대로. F2 덕에 이제는 보이지만, 통과 기록이 있으면 유실 · 취소를 건너뛰는 편이 맞을 수 있다 | w3 #35 | 오너 결정 거리(결정 95 · §4.4) |
 | F11 | 정보 | `rcm worker --check` 의 `repos` 가 `none` 이어도 ok — 서버에 점검 프리셋(언제나 git_ref)이 있으면 이 워커로 오는 자동 점검은 `repo_missing` 으로 실패한다 | §2 S1 | 안 고침 — 서버 명세에 점검이 있으면 warn 하는 안 |
