@@ -133,6 +133,7 @@ def test_new_reason_and_source_constants():
 def test_actionable_reasons_order():
     """`worker_down` 바로 뒤에 새 둘. `check_pending` 은 스스로 풀려서 안 올린다."""
     assert m.ACTIONABLE_REASONS == (
+        "needs_action",  # M5s — 잡이 직접 「사람이 할 일」을 말했다(맨 앞)
         "worker_down",
         "no_capable_machine",
         "check_failed",

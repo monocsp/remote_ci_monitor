@@ -197,6 +197,7 @@ def test_a_targeted_check_job_names_its_machine():
 
 def test_actionable_order_puts_the_new_reasons_right_after_worker_down():
     assert model.ACTIONABLE_REASONS == (
+        "needs_action",  # M5s — 잡이 직접 「사람이 할 일」을 말했다(맨 앞)
         "worker_down",
         "no_capable_machine",
         "check_failed",

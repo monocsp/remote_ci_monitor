@@ -2552,7 +2552,8 @@
    */
   function buildLayers(jobs, rows, lang, tzName, nowMs) {
     rows = rows || {};
-    var list = (Array.isArray(jobs) ? jobs : []).filter(function (j) { return j && isNum(j.id); }).slice().sort(function (a, b) { return a.id - b.id; });
+    // status 잡(M5s §4.4)은 스토어를 읽기만 하고 자주 돈다 — 「지금 하는 일」도 작업 목록도 아니다
+    var list = (Array.isArray(jobs) ? jobs : []).filter(function (j) { return j && isNum(j.id) && j.role !== "status"; }).slice().sort(function (a, b) { return a.id - b.id; });
     var running = list.filter(function (j) { return j.state === "running" || j.state === "cancelling"; });
     var cur = running.length ? running[running.length - 1] : null;
     var row = cur ? rows[cur.id] || null : null;
@@ -2603,6 +2604,50 @@
       if (rows[i] && rows[i].id === id && rows[i].finished_at) return rows[i].finished_at;
     }
     return null;
+  }
+  // ── 스토어 심사 상태(M5s §4.4) — status 역할의 `status.json`. rcm 은 그리기만 한다: 8값으로
+  //    맞추는 일은 프로젝트 스크립트가 하고, 목록에 없는 값은 unknown 으로 그린다. ──
+  var STORE_CHECK_STATES = ["preparing", "waiting_for_review", "in_review", "approved", "rejected", "releasing", "released", "unknown"];
+  var STORE_CHECK_TONE = { preparing: "na", waiting_for_review: "running", in_review: "running", approved: "ok", rejected: "bad",
+    releasing: "running", released: "ok", unknown: "none" };
+  var STORE_CHECK_WAITING = { queued: 1, uploading: 1, running: 1, cancelling: 1 };
+  var STORE_CHECK_FAILED = { failed: 1, timed_out: 1, lost: 1 };
+  function storeCheckText(v) { return typeof v === "string" && v ? v : isNum(v) ? String(v) : DASH; }
+  /**
+   * 검토 패널의 「스토어 심사 상태」 모형. 프로파일에 `presets.status` 가 없으면 null(절이 없다).
+   * `stale` 은 서버의 판정이고(`plan_max_age_minutes`), 판정이 없으면 낡은 것으로 본다. 나이는 서버가
+   * `checked_at` 으로 잰 `age_seconds` 다. `checking` 은 아직 끝나지 않은 가장 새 status 잡이다.
+   * `lastFailed` 는 가장 새 status 잡이 실패 · 시간 초과 · 유실로 끝났고 그 잡이 지금 그리는 문서보다
+   * 새것일 때다 — 「새로 조회」가 실패해도 화면이 예전 상태를 아무 말 없이 그리지 않게 한다. 문서를
+   * 쓴 잡이 성공하지 않았으면 `jobStateOk` 가 거짓이고 `jobStateText` 가 그 상태 낱말이다.
+   */
+  function storeCheckModel(release, profile, lang) {
+    var presets = profile && profile.presets ? profile.presets : {};
+    if (!presets.status) return null;
+    var e = release && release.status && typeof release.status === "object" ? release.status : null;
+    var doc = planEntryDoc(e);
+    var platforms = ["ios", "android"].map(function (p) {
+      var d = doc && doc[p] && typeof doc[p] === "object" ? doc[p] : null;
+      var st = d && STORE_CHECK_STATES.indexOf(d.state) >= 0 ? d.state : "unknown";
+      return { platform: p, state: st, tone: STORE_CHECK_TONE[st], text: T(lang, "store_check.state." + st),
+        raw: d && typeof d.raw_state === "string" && d.raw_state ? d.raw_state : null,
+        version: storeCheckText(d && d.version), build: storeCheckText(d && (p === "ios" ? d.build : d.version_code)) };
+    });
+    var checking = null, newest = null;
+    (release && Array.isArray(release.jobs) ? release.jobs : []).forEach(function (j) {
+      if (!j || j.role !== "status" || !isNum(j.id)) return;
+      if (!newest || j.id > newest.id) newest = j;
+      if (STORE_CHECK_WAITING[j.state] && (!checking || j.id > checking.id)) checking = { id: j.id, state: j.state };
+    });
+    var docJob = e && isNum(e.job_id) ? e.job_id : null;
+    var lastFailed = newest && STORE_CHECK_FAILED[newest.state] && (docJob == null || newest.id > docJob)
+      ? { id: newest.id, state: newest.state, text: stateWord(newest.state, lang) } : null;
+    var jobStateOk = !e || e.state === "succeeded";
+    return { present: !!e, jobId: docJob, jobState: e && e.state ? e.state : null,
+      jobStateOk: jobStateOk, jobStateText: jobStateOk ? null : stateWord(e.state, lang), lastFailed: lastFailed,
+      checkedAt: e && e.measured_at ? e.measured_at : null, age: e && isNum(e.age_seconds) ? fmtAgo(e.age_seconds, lang) : DASH,
+      stale: !e || e.stale !== false, docError: e && typeof e.doc_error === "string" ? e.doc_error : null,
+      platforms: platforms, checking: checking };
   }
   /** Build·upload 행(항목 5 · 26 · 38 · 49) — 색 · 머리 조각 · 세 층. */
   function buildRowModel(release, releaseStatus, profile, rows, lang, tzName, nowMs) {
@@ -3183,6 +3228,8 @@
       plan: function (name, body) { return call("POST", base(name) + "/release/plan", JSON.stringify(body || {}), "application/json"); },
       review: function (name, body) { return call("POST", base(name) + "/release/review", JSON.stringify(body || {}), "application/json"); },
       upload: function (name, body) { return call("POST", base(name) + "/release/upload", JSON.stringify(body || {}), "application/json"); },
+      // 스토어 심사 상태 조회(M5s §4.4) — status 역할의 잡 하나. 스토어를 읽기만 한다
+      checkStatus: function (name, body) { return call("POST", base(name) + "/release/status", JSON.stringify(body || {}), "application/json"); },
       // `build_name` 은 **이 화면이 보고 있는 버전**의 이름이다 — 안 주면 서버가 플랜의 이름으로
       // 릴리스 노트를 찾아, 1.2.0 드래프트에 1.1.1 의 노트가 «파일에서» 라는 꼬리표를 달고 뜬다(§17-14).
       listing: function (name, buildName) {
@@ -3344,6 +3391,7 @@
     screenshotGroups: screenshotGroups, reviewInfoModel: reviewInfoModel, versionStrip: versionStrip, resultModel: resultModel,
     refusalText: refusalText, storeRowModel: storeRowModel, rowsById: rowsById, basisText: basisText, buildLayers: buildLayers,
     roleFinishedAt: roleFinishedAt,
+    storeCheckModel: storeCheckModel, STORE_CHECK_STATES: STORE_CHECK_STATES,
     buildRowModel: buildRowModel, FIELD_LIMITS: FIELD_LIMITS, NOTES_LIMIT: NOTES_LIMIT, IOS_FIELDS: IOS_FIELDS, PLAY_FIELDS: PLAY_FIELDS,
     // 릴리스 드라이버 스테퍼 · GitHub 카드
     driverStage: driverStage, stepperModel: stepperModel, driverRow: driverRow, driverActions: driverActions, rehearsalBody: rehearsalBody,
@@ -6615,6 +6663,7 @@
       + "<dt>" + esc(tr("review.strip.notes")) + "</dt><dd>" + (strip.notesPath ? '<span class="mono">' + esc(strip.notesPath) + "</span> " + counterHtml(strip.notesCounter) : '<span class="bad">' + esc(tr("review.notes.missing")) + "</span>") + "</dd>"
       + "<dt>" + esc(tr("review.strip.payload")) + "</dt><dd>" + esc(tr(rv.listingFull ? "review.payload.full" : "review.payload.notes_only")) + "</dd>"
       + "</dl>";
+    h += storeCheckHtml(r, profile);
     // 두 스토어 절 — 같은 그룹 순서
     var listing = state.store.listing, listingState = null;
     if (state.store.listingStatus === 404) listingState = tr("review.listing.na");
@@ -6652,6 +6701,31 @@
       + '<p class="sub">' + esc(tr("review.submit_hint", { n: isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30 })) + "</p>"
       + (rp ? '<p class="sub" data-review-plan-line>' + esc(tr("review.plan_running", { id: rp.job_id, state: stateWord(rp.state, lang) })) + "</p>" : "");
     h += '<p class="sub policy">' + esc(tr("review.policy")) + "</p></div></details>";
+    return h;
+  }
+  /** 스토어 심사 상태(M5s §4.4) — 읽기 전용 두 줄과 「새로 조회」. status 역할이 없으면 빈 글. */
+  function storeCheckHtml(r, profile) {
+    var lang = L(), m = storeCheckModel(r, profile, lang);
+    if (!m) return "";
+    var maxAge = isNum(profile.plan_max_age_minutes) ? profile.plan_max_age_minutes : 30;
+    var h = '<div class="store-check" data-store-check data-stale="' + (m.stale ? "1" : "0") + '"><b>' + esc(tr("store_check.title")) + "</b> ";
+    if (m.present) h += '<span class="sub" data-store-check-age>' + esc(tr("store_check.checked", { age: m.age, id: m.jobId != null ? m.jobId : DASH })) + "</span>"
+      + (m.jobStateOk ? "" : ' <span class="bad" data-store-check-job-state="' + esc(m.jobState || "") + '">' + esc(m.jobStateText) + "</span>");
+    if (m.lastFailed) h += '<p class="bad" data-store-check-failed="' + esc(m.lastFailed.state) + '">' + esc(tr("store_check.last_failed", { id: m.lastFailed.id, state: m.lastFailed.text, older: m.present })) + "</p>";
+    h += '<ul class="plain">' + m.platforms.map(function (p) {
+      var glyph = { ok: "✓", na: "·", running: "▶", bad: "✗", none: "·" }[p.tone] || "·";
+      return '<li data-store-check-platform="' + esc(p.platform) + '" data-state="' + esc(p.state) + '"><span>' + esc(tr("review.check." + p.platform)) + "</span> "
+        + '<span class="pill v-' + esc(p.tone) + '"><span class="g" aria-hidden="true">' + glyph + "</span>" + esc(p.text) + "</span> "
+        + '<span class="mono">' + esc(p.version) + " (" + esc(p.build) + ")</span>"
+        + (p.raw ? ' <span class="sub mono" data-store-check-raw>' + esc(p.raw) + "</span>" : "") + "</li>";
+    }).join("") + "</ul>";
+    if (!m.present) h += '<p class="sub" data-store-check-none>' + esc(tr("store_check.none")) + "</p>";
+    else if (m.docError) h += '<p class="sub bad">' + esc(tr("store_check.doc_error", { detail: m.docError })) + "</p>";
+    else if (m.stale) h += '<p class="sub" data-store-check-stale>' + esc(tr("store_check.stale", { n: maxAge })) + "</p>";
+    if (m.checking) h += '<p class="sub" data-store-check-running>' + esc(tr("store_check.checking", { id: m.checking.id, state: stateWord(m.checking.state, lang) })) + "</p>";
+    var busy = state.store.busy;
+    h += '<div class="actions"><button type="button" class="btn" data-store-check-refresh' + (state.token && !busy ? "" : " disabled") + ">"
+      + esc(tr(busy === "status" ? "store_check.refreshing" : "store_check.refresh")) + "</button></div></div>";
     return h;
   }
   function unsafeBannerHtml() {
@@ -6951,6 +7025,14 @@
       state.store.validate = { ok: b.ok === true, lines: Array.isArray(b.lines) ? b.lines : [], exit: isNum(b.exit) ? b.exit : null };
     });
   }
+  /** 「새로 조회」 — status 역할의 잡 하나(`POST …/release/status`). 이 회차의 버전을 알면 그 이름을 싣는다. */
+  function checkStoreStatus() {
+    var name = knownPlanVersion();
+    var body = name ? { build_name: name } : {};
+    jobCall("status", function (api, repo) { return api.checkStatus(repo, body); }, function (res) {
+      toast(tr("review.job_started", { id: res.body && res.body.job_id != null ? res.body.job_id : DASH }));
+    });
+  }
   function planReview() {
     var body = reviewBody("plan", reviewChoicesCtx());
     jobCall("review-plan", function (api, repo) { return api.review(repo, body); }, function (res) {
@@ -7121,6 +7203,10 @@
       if (t.hasAttribute("data-n-mode")) { state.store.nMode = t.getAttribute("data-n-mode"); state.store.review.typedN = ""; state.store.driverN = ""; renderStore(); return; }
       if (t.hasAttribute("data-upload-rehearsal")) { if (!t.disabled) rehearseUpload(); return; }
       if (t.hasAttribute("data-set-value")) { state.lastTrigger = t; openSecretDialog(t.getAttribute("data-set-value")); }
+    });
+    st.addEventListener("click", function (ev) {
+      var t = ev.target.closest("[data-store-check-refresh]");
+      if (t && !t.disabled) checkStoreStatus();
     });
     st.addEventListener("input", function (ev) {
       // 문안 칸 — 800 ms 디바운스로 그 키만 보낸다(§3.2 · AC-C6)

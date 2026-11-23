@@ -18,19 +18,38 @@ from pathlib import Path
 import pytest
 
 import remote_ci_monitor.cli as cli
+from remote_ci_monitor.config import RepoConfig, parse_preset, parse_release_profile
 from remote_ci_monitor.core.model import SCHEDULED
 from test_cli_m4 import run
 from test_cli_release import cli_home, use  # noqa: F401 — 픽스처
 from test_release_golive import BOTH_APPROVED, GOLIVE, GOLIVE_PLAN, GoliveServer
-from test_server_release_routes import NOW
+from test_release_state import STATUS
+from test_release_status_panel import STATUS_PRESET
+from test_server_release_routes import NOW, PROFILE
 from test_server_release_routes import remote as _remote
 from test_server_release_versions import VersionServer
+
+STATUS_NAME = "release-status"
 
 remote = _remote
 
 
 class CliGoliveServer(GoliveServer):
+    """golive 에 더해 E(#254)의 `status` 역할도 있는 `app` — `rcm release status` 를 진짜
+    라우트로 돌린다."""
+
     finish_job = VersionServer.finish_job
+
+    def __init__(self, tmp_path, remote, **overrides):
+        super().__init__(tmp_path, remote, **overrides)
+        raw = {
+            **PROFILE,
+            "presets": {**PROFILE["presets"], "golive": GOLIVE, "status": STATUS_NAME},
+        }
+        self.cfg.repos = (
+            RepoConfig(name="app", url=remote.url, release=parse_release_profile("app", raw)),
+        )
+        self.cfg.presets = (parse_preset(STATUS_PRESET), *self.cfg.presets)
 
 
 @pytest.fixture
@@ -202,3 +221,61 @@ def test_post_jobs_refusal_reaches_rcm_run_with_the_route_name(csrv, capsys):
     )
     assert code == 2, out + err
     assert "release/golive" in err and "rcm release golive app" in err
+
+
+# ── rcm release status (E 의 `POST …/release/status` 위에서) ──────────────────
+
+
+def test_status_runs_the_status_role_waits_and_prints_both_stores(csrv, monkeypatch, capsys):
+    """E(#254)의 라우트로 status 잡을 내고, 끝나기를 기다린 뒤 두 스토어를 한 줄씩 그린다.
+    목록 밖의 state 는 그대로가 아니라 unknown 으로 그린다(§4.4)."""
+    doc = {
+        **STATUS,
+        "checked_at": NOW.isoformat().replace("+00:00", "Z"),
+        "android": {**STATUS["android"], "state": "SOMETHING_NEW"},
+    }
+    seen = finish_on_wait(
+        monkeypatch, csrv, {"build/.rcm-release/status.json": json.dumps(doc).encode()}
+    )
+    code, out, err = run(capsys, ["release", "status", "app", "--build-name", "1.2.0"])
+    assert code == 0, out + err
+    job = csrv.store.get_job(seen[0])
+    assert job.preset == STATUS_NAME and job.inputs.get("build_name") == "1.2.0"
+    lines = out.strip().splitlines()
+    assert lines[0].startswith(f"status #{seen[0]} succeeded · checked 2026-09-17T12:00:00Z")
+    assert lines[1].split() == [
+        "iOS",
+        "1.2.0",
+        "build",
+        "185",
+        "approved",
+        "PENDING_DEVELOPER_RELEASE",
+    ]
+    assert lines[2].split() == [
+        "Android",
+        "1.2.0",
+        "build",
+        "185",
+        "unknown",
+        "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+    ]
+    assert "reading the stores" in err
+
+
+def test_status_json_and_an_empty_build_name(csrv, monkeypatch, capsys):
+    seen = finish_on_wait(monkeypatch, csrv, {"status.json": json.dumps(STATUS).encode()})
+    code, out, err = run(capsys, ["release", "status", "--repo", "app", "--json"])
+    assert code == 0, out + err
+    assert csrv.store.get_job(seen[0]).inputs.get("build_name", "") == ""
+    doc = json.loads(out)
+    assert doc["job_id"] == seen[0] and doc["status"]["doc"]["ios"]["state"] == "approved"
+
+
+def test_status_with_a_client_token_works_and_a_failed_read_says_so(csrv, monkeypatch, capsys):
+    """읽기만 하는 역할이라 클라이언트 토큰이면 된다. 스크립트가 아무것도 못 쓰고 실패하면
+    없는 문서를 지어내지 않고 그 사실과 잡의 종료 코드를 돌려준다."""
+    use(monkeypatch, csrv, "alice")
+    finish_on_wait(monkeypatch, csrv, None, code=1)
+    code, out, err = run(capsys, ["release", "status", "app"])
+    assert code == 1, out + err
+    assert "left no status.json" in err

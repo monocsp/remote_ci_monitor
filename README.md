@@ -244,11 +244,19 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::step-end::ok        # optional: "ok" or "fail"
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
+::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
 `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
 parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
 it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
+
+`::rcm::action::<code>::<note>` says the job cannot go on without a person — a sign-in expired,
+say. `code` is `[a-z0-9_-]{1,32}`, `note` at most 200 characters and never personal details. The
+last one becomes the job's `action` and the running row's reason `needs_action`; `rcm wait`
+prints it on stderr, `rcm wait --return-on-action` returns with exit 4 while the job keeps running,
+and hooks get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. Details in
+[Configuration](docs/configuration.md#when-a-person-has-to-act).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
@@ -281,7 +289,10 @@ Past the gate the tab is a **list of versions**. A one-line status strip answers
 up at all» — credentials, source, store, blockers — and turns red as soon as one of them is;
 clicking it opens `#/store/<name>/status`, which still carries the four collapsible rows (Setup,
 Source, Build · upload, Store) and the review panel, now read-only apart from **Validate listing**
-and **Plan review**. Under the strip: **+ New version**, then every open draft with its state, its
+and **Plan review**. With a `status` preset the panel also shows each store's review state — one
+of eight words, `unknown` for anything else, the store's own word beside it, how long ago it was
+checked and whether that is older than `plan_max_age_minutes` — and **Check again** runs the
+preset once more. Under the strip: **+ New version**, then every open draft with its state, its
 age, how many fields you changed, whether a build exists and whether it has expired, then the live
 version and the last 20 submitted ones.
 
@@ -372,6 +383,7 @@ with GitHub Actions as an optional fallback. How it works and what the owner set
 | 1 | job failed (see `summary`, plus `failed_step` when the script declared one and `last_step` otherwise) |
 | 2 | cancelled or timed out |
 | 3 | **unknown**: lost after a server restart, server unreachable, or `--timeout` elapsed. Never treated as a failure. |
+| 4 | only with `--return-on-action`: the job asked a person to act (`::rcm::action::`) and **keeps running**. Resume with `rcm wait --job N`. |
 
 Usage errors and validation failures that never reach the server also exit 2, including `rcm run`
 when the server cannot be reached before submit. `rcm wait` gives an unreachable server 60 s to

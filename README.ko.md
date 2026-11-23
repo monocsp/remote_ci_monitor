@@ -230,11 +230,19 @@ default = "full"
 ::rcm::step-end::ok        # 선택: "ok" 또는 "fail"
 ::rcm::summary::all green  # 선택: 큐에 보이는 한 줄 결과
 ::rcm::progress::41/68::inquiry_photo/android::run   # 선택: 지금 단계 안의 세부 진행
+::rcm::action::login::Sign in on the build machine   # 선택: 사람이 손대야 한다
 ```
 
 `::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` 는 긴 단계 — 청크 루프 · 병렬
 묶음 · 락 대기 — 를 위한 것이다. 스크립트가 **아는** 분모만 찍는다. 큐는 그 값으로 막대를 그리고
 본 단위들을 격자로 보여 준다. 자세한 건 [설정 문서](docs/configuration.md#progress-inside-a-step)에.
+
+`::rcm::action::<code>::<note>` 는 사람이 손대지 않으면 잡이 더 나아가지 못한다는 표식이다.
+로그인이 풀린 때가 그런 경우다. `code` 는 `[a-z0-9_-]{1,32}` 이고 `note` 는 200자까지이며
+개인정보를 넣지 않는다. 마지막 표식이 잡의 `action` 이 되고 도는 행의 이유는 `needs_action` 이
+된다. `rcm wait` 는 표식을 stderr 에 찍는다. `rcm wait --return-on-action` 은 종료코드 4 로
+돌아오고 잡은 계속 돈다. 알림 훅은 `RCM_ACTION_CODE` 와 `RCM_ACTION_NOTE` 를 받는다. 자세한 건
+[설정 문서](docs/configuration.md#when-a-person-has-to-act)에 있다.
 
 세션은 `--pool` 로 다른 풀에 보낼 수 있지만, 프리셋의 `pools` 에 적힌 풀만 고를 수 있다. 설정으로
 할 수 있는 나머지는 — 푸시된 ref 를 받는 배포 프리셋 · 우선순위 · 스냅샷 캐시 · 원격 워커 · 알림 ·
@@ -264,7 +272,10 @@ password 칸에 한 번 입력), **Verify all**, 비활성 **Enter Store** — �
 답하고(자격 증명 · 소스 · 스토어 · 막힘) 하나라도 빨가면 띠가 빨개진다. 띠를 누르면
 `#/store/<name>/status` 가 열리는데, 접히는 행 넷(Setup, Source, Build · upload, Store)과 심사
 패널이 거기 그대로 있다 — 패널은 이제 **Validate listing** 과 **Plan review** 만 누를 수 있는
-읽기 전용이다. 띠 아래에는 **+ 새 버전 만들기**, 그리고 열려 있는 드래프트마다 상태 · 만든 지 ·
+읽기 전용이다. `status` 프리셋이 있으면 패널에 두 스토어의 심사 상태도 나온다. 상태는 여덟 낱말
+가운데 하나이고 그 밖의 값은 `unknown` 으로 그린다. 스토어의 원래 낱말을 옆에 두고 몇 분 전에
+조회했는지와 그것이 `plan_max_age_minutes` 보다 오래됐는지를 보인다. **새로 조회**는 그 프리셋을
+한 번 더 돌린다. 띠 아래에는 **+ 새 버전 만들기**, 그리고 열려 있는 드래프트마다 상태 · 만든 지 ·
 바꾼 필드 수 · 빌드 유무 · 만료 여부가 한 행씩, 그 아래 라이브 버전과 제출한 지난 버전 20개가 있다.
 
 **+ 새 버전 만들기**는 **이름만** 묻는다. 스토어마다 체크박스와 칸이 있고 칸에는 다음 이름이
@@ -347,6 +358,7 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 | 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`) |
 | 2 | 취소되었거나 시간 초과 |
 | 3 | **모름**: 서버 재시작으로 작업을 잃음 · 서버에 못 닿음 · `--timeout` 경과. 절대 실패로 치지 않는다 |
+| 4 | `--return-on-action` 을 줄 때만: 잡이 사람에게 할 일을 알렸다(`::rcm::action::`). 잡은 **계속 돈다**. 다시 기다리려면 `rcm wait --job N` |
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·

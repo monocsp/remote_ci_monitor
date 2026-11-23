@@ -330,6 +330,31 @@ line. Judges must never parse it — it is display only.
 How the page builds a bar, in order of preference: `progress` marker → declared `steps::N` →
 measured median duration for this preset (`by time · median 21m`) → hatched, no percentage.
 
+One more line says that **a person has to act** — the store session expired, a console needs a
+sign-in — so the job cannot finish on its own:
+
+```
+::rcm::action::<code>::<note>
+::rcm::action::login::Sign in to the console in the build machine's browser profile
+```
+
+- `code` — `[a-z0-9_-]{1,32}`. Anything else makes the line not a marker. A skill branches on it
+  (`login` → ask the person which way to sign in).
+- `note` — optional, up to 200 characters; control, bidirectional and zero-width characters are
+  removed. It is shown without a
+  token (`/api/status`), passed to notification hooks and printed in terminals, so **never put an
+  account name, an e-mail address or any other personal detail in it**.
+
+The server keeps the **last** one as the job's `action {code, note, at}` (`at` is when the server
+received the line). It is stored with the job, so it is still there after the job ends:
+`GET /jobs/<id>`, the `rcm wait` / `rcm run` JSON, the queue and recent rows of `/api/status`. A
+running job with an action has the reason `needs_action`, first in «Needs a look».
+`rcm wait` prints `#<id> needs action · <code> · <note>` on stderr when it sees one, and
+`rcm wait --return-on-action` returns with exit 4 at once while the job keeps running. Hooks get
+`RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. rcm sends nothing of its own in the middle of a job — a
+script that wants a chat message sends it itself. The usual pattern is: print the action, exit
+75, and let the preset's retry run the check again later.
+
 ---
 
 ## 4. Secrets

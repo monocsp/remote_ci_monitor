@@ -73,6 +73,10 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
 - **Hooks have no keychain.** A `[[notify]]` command that calls `gh`, `aws` or similar must read
   its token from a file (mode 600) via an environment variable; the interactive keyring is not
   available and the call blocks until the hook times out.
+- **A failed hook is not sent again.** `rcm check` shows `warn  notify  N hook deliveries
+  failed…` while the server's failure count is above 0. The count is kept in memory: restarting
+  the server (a deploy, a reboot) sets it to 0 and the row goes away, so look in the server log
+  (`notify <rule> #<job>: …`) for failures from before the restart.
 - **macOS blocks local-network traffic for services you have not allowed.** On macOS 15 and later
   a process without Local Network permission cannot send to the LAN at all — multicast *and*
   ordinary unicast fail with `EHOSTUNREACH` — and launchd services are denied by default. Incoming

@@ -814,6 +814,11 @@ ul.plain { margin: 0; padding-left: 18px; }
 .result.stale { border-left-color: var(--warn); background: var(--warn-soft); }
 .result.na { border-left-color: var(--queued); background: var(--queued-soft); }
 .kv.strip { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface-2); margin-bottom: 10px; }
+/* 스토어 심사 상태(M5s §4.4) — 읽기 전용 두 줄. 스토어 원문은 길어서 폰 폭에서 줄을 바꾼다 */
+.store-check { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 6px; margin-bottom: 10px; }
+.store-check[data-stale="1"] { border-left: 4px solid var(--warn); }
+.store-check li { margin: 4px 0; overflow-wrap: anywhere; }
+.store-check .actions { margin-top: 6px; }
 .stores { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 .ssec { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); min-width: 0; }
 .ssec h3 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font: var(--t-subtitle); }

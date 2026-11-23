@@ -101,6 +101,7 @@ from remote_ci_monitor.core.model import (
     TIMED_OUT,
     TOKEN_WORKER,
     UPLOADING,
+    Action,
     HostSample,
     Job,
     JobLink,
@@ -137,6 +138,7 @@ from remote_ci_monitor.core.schedule import (
 )
 from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
+    action_json,
     artifacts_json,
     iso,
     queue_row_json,
@@ -205,6 +207,7 @@ from remote_ci_monitor.release_state import (
     read_bundle_member,
     release_view,
     resolve_build_number,
+    role_windows,
     version_name_check,
 )
 from remote_ci_monitor.release_verify import run_verify
@@ -263,7 +266,7 @@ MAX_SECRET_BODY = 4 * 1024 * 1024
 #: 스토어 탭 API 계약 v2 — `/api/repos/<repo>/release[/<action>[/validate|/file]]`.
 _RELEASE_RE = re.compile(
     r"^/api/repos/([^/]+)/release"
-    r"(?:/(plan|review|upload|golive|listing|github|driver|start|confirm|abort|retry)"
+    r"(?:/(plan|review|upload|status|golive|listing|github|driver|start|confirm|abort|retry)"
     r"(?:/(validate|file))?)?$"
 )
 #: 버전 페이지(docs/version-page-workplan.md §2.2) —
@@ -470,6 +473,8 @@ class _DbSnapshot:
     host_step_medians: dict[tuple[str, str], dict[str, StepMedian]] = field(default_factory=dict)
     step_medians_error: str | None = None
     step_medians_error_code: str | None = None
+    #: 최근 행의 마지막 「사람이 할 일」 표식(M5s) — 잡 id → Action. 표식 없는 잡은 없다
+    recent_actions: dict[int, Action] = field(default_factory=dict)
     #: 예약 잡(M5s) — 승격 시각 순. 큐 계산에는 들어가지 않는다(결정 206)
     scheduled: list[Job] | None = field(default_factory=list)
     scheduled_error: str | None = None
@@ -1356,7 +1361,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         profile = repo.release
         assert profile is not None
         presets = {role: profile.preset_for(role) for role in RELEASE_ROLES}
-        jobs = self.store.list_jobs_by_preset([n for n in presets.values() if n], 500)
+        # 프리셋마다 자기 창 — 자주 도는 status 잡이 plan · review 잡을 창 밖으로 밀어내지 않는다
+        # (M5s §3 #11). 합친 목록은 새것부터다(`release_view` 의 전제).
+        by_id: dict[int, Job] = {}
+        for preset_name, window in role_windows(presets).items():
+            for job in self.store.list_jobs_by_preset([preset_name], window):
+                by_id[job.id] = job
+        jobs = [by_id[i] for i in sorted(by_id, reverse=True)]
 
         def names_of(job_id: int) -> list[Any]:
             row = self.store.get_bundle(job_id)
@@ -1468,6 +1479,22 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         build_name = self._version_build_name(body, row)
         ref = self._release_ref(body, repo)
         return self._release_submit(repo, preset, {"build_name": build_name}, ref, token, host)
+
+    def release_status(
+        self, name: str, body: Any, token: TokenInfo, host: str | None
+    ) -> tuple[int, dict[str, Any]]:
+        """`POST …/release/status` — `presets.status` 에 `build_name`(선택)만 보낸다. 스토어를
+        읽기만 하는 역할이라 아무 클라이언트 토큰이면 된다. 비우면 스크립트가 최근 버전들을
+        읽는다(M5s §4.4)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        repo, _store = self._release_gate(name)
+        preset = self._role_preset(repo, "status")
+        inputs: dict[str, Any] = {}
+        if self._body_str(body, "build_name"):
+            inputs["build_name"] = self._build_name(body)
+        ref = self._release_ref(body, repo)
+        return self._release_submit(repo, preset, inputs, ref, token, host)
 
     def release_review(
         self, name: str, body: Any, token: TokenInfo, host: str | None
@@ -3353,8 +3380,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         recent: list[Job] | None
         recent_error = None
         recent_error_code: str | None = None
+        recent_actions: dict[int, Action] = {}
         try:
             recent = self.store.list_recent(self.config.server.recent_count)
+            # 표식은 최근 행의 일부다 — 못 읽으면 최근 절 전체가 실패다(`action: null` 은
+            # 「표식이 없다」는 뜻이라 「못 읽었다」를 그렇게 뭉개지 않는다)
+            recent_actions = self.store.actions_for(j.id for j in recent)
         except Exception as e:  # noqa: BLE001
             recent, recent_error = None, _error_text(e)
             recent_error_code = _error_code(e)
@@ -3390,6 +3421,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             paused=paused,
             host_medians=self._host_medians or {},
             host_step_medians=host_step_medians,
+            recent_actions=recent_actions,
         )
 
     def _host_step_view(
@@ -3718,6 +3750,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                         tails[row.job.id] = t
         doc = status_json(model, log_tails=tails)
         self._inject_artifacts(doc, model)
+        for pool in doc.get("pools", []):
+            # 최근 행의 표식(M5s) — 순수 층은 마커를 모른다. 큐 행은 진행(마커)에서 이미 왔다
+            for row in pool.get("recent") or []:
+                row["action"] = action_json(snap.recent_actions.get(row.get("id")))
         return doc
 
     def _inject_artifacts(self, doc: dict[str, Any], model: StatusModel) -> None:
@@ -3774,9 +3810,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
-        doc = recent_json(job, base_url=self.base_url(host))
+        doc = recent_json(job, base_url=self.base_url(host), action=self._last_action(job.id))
         step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
+
+    def _last_action(self, job_id: int) -> Action | None:
+        """끝난 잡의 마지막 「사람이 할 일」 표식(M5s). 표식은 마커 이벤트라 잡이 끝나도 남는다."""
+        return self.store.actions_for((job_id,)).get(job_id)
 
     def _with_artifacts(
         self, doc: dict[str, Any], job: Job, host: str | None = None
@@ -5872,9 +5912,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         self, method: str, name: str, action: str | None, sub: str | None, query: dict[str, Any]
     ) -> None:
         """`/api/repos/<name>/release/…`(계약 v2) — GET 은 읽기 규칙(워커 토큰 거부), plan ·
-        review · upload · golive · listing/validate 는 클라이언트 토큰(되돌릴 수 없는 모드는 App
-        이 admin 을 본다), 드라이버의 start · confirm · abort · retry 는 admin. 쓰기는 Bearer
-        만(CSRF)."""
+        review · upload · status · golive · listing/validate 는 클라이언트 토큰(되돌릴 수
+        없는 모드는 App 이 admin 을 본다), 드라이버의 start · confirm · abort · retry 는
+        admin. 쓰기는 Bearer 만(CSRF)."""
         host = self.headers.get("Host")
         is_get = action is None or action in ("github", "driver")
         if is_get or (action == "listing" and sub != "validate"):
@@ -5909,12 +5949,13 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self.app.require_client_token(self._token())
             self._send_json(200, self.app.release_listing_validate(name, self._json_body()))
             return
-        if action in ("plan", "review", "upload", "golive"):
+        if action in ("plan", "review", "upload", "status", "golive"):
             t = self.app.require_client_token(self._token())
             fn = {
                 "plan": self.app.release_plan,
                 "review": self.app.release_review,
                 "upload": self.app.release_upload,
+                "status": self.app.release_status,
                 "golive": self.app.release_golive,
             }[action]
             status, body = fn(name, self._json_body(), t, host)

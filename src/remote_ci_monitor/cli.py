@@ -65,12 +65,14 @@ from remote_ci_monitor.core.inputs import InputError, parse_kv, validate_inputs
 from remote_ci_monitor.core.joblink import LinkError, parse_link
 from remote_ci_monitor.core.model import (
     CANCELLED,
+    CANCELLING,
     EXIT_CODE_BY_STATE,
     EXIT_UNKNOWN,
     PLACEMENT_CAPABLE,
     TERMINAL_STATES,
     Preset,
 )
+from remote_ci_monitor.core.progress import ACTION_CODE_RE, clean_line
 from remote_ci_monitor.core.reload import reload_summary
 from remote_ci_monitor.core.render_text import (
     CAUSE_NOT_FOUND,
@@ -101,6 +103,9 @@ from remote_ci_monitor.mdns import discover
 from remote_ci_monitor.release_secrets import secrets_dir
 
 USAGE_EXIT = 2
+#: 「사람이 할 일」 표식에서 돌아왔다 — 잡은 계속 돈다(M5s 결정 234). `rcm wait
+#: --return-on-action` 을 줄 때만 나온다. 실패도 「모른다」도 아니다.
+EXIT_ACTION = 4
 #: 전달 실패 전용 종료 코드 — 실행 결과(`wait_exit_code`)는 건드리지 않는다(M5e §12).
 EXIT_DELIVERY = 5
 
@@ -1155,6 +1160,68 @@ class _FetchSpec:
     dry_run: bool = False
 
 
+def action_line(job_id: Any, action: Any) -> str | None:
+    """`#N needs action · <code> · <note>` — 「사람이 할 일」 표식 한 줄(M5s). 표식이 없으면 None.
+
+    code 는 서버가 어휘로 거른 값이지만 여기서도 어휘 밖이면 말하지 않는다 — 터미널에 그대로
+    흐르는 문자열이다. note 는 서버가 이미 지웠지만(`progress.parse_action_value`) 옛 서버나 가짜
+    서버의 문서일 수 있어 같은 `clean_line` 을 한 번 더 지난다."""
+    if not isinstance(action, dict):
+        return None
+    code = action.get("code")
+    if not isinstance(code, str) or not ACTION_CODE_RE.fullmatch(code):
+        return None
+    note = clean_line(action.get("note")) if isinstance(action.get("note"), str) else ""
+    tail = f" · {note}" if note else ""
+    return f"#{job_id} needs action · {code}{tail}"
+
+
+class _ActionWatch:
+    """기다리는 동안 본 「사람이 할 일」 표식. 새로 본 표식마다 stderr 한 줄, 플래그가 있으면 4.
+
+    기다리기 시작할 때 **이미 있던** 표식에서도 4 로 돌아온다. `rcm run --no-wait` 뒤에 붙은
+    세션이나 다른 컴퓨터의 세션은 표식이 찍힌 뒤에 붙는 것이 보통이다 — 그 표식을 「옛것」으로
+    건너뛰면 사람에게 알릴 순간을 통째로 놓친다(S25 가 그 장면이다). 그래서 사람이 손을 쓴 뒤
+    다시 기다릴 때는 플래그 없이 `rcm wait --job N` 이다 — 표식은 그 잡의 마지막 표식으로 남아
+    있으므로 플래그를 다시 주면 곧바로 또 돌아온다.
+
+    취소 중이거나 취소된 잡의 표식은 알리지도, 4 로 돌아오지도 않는다. 그 잡은 더 돌지 않으므로
+    「잡은 계속 돈다」는 4 의 약속이 거짓이 되고, 사람에게 할 일을 시켜도 받을 잡이 없다.
+    """
+
+    def __init__(self, job_id: int, *, return_on_action: bool) -> None:
+        self.job_id = job_id
+        self.return_on_action = return_on_action
+        self.printed: tuple[Any, ...] | None = None
+
+    @staticmethod
+    def _ident(action: Any) -> tuple[Any, ...] | None:
+        if not isinstance(action, dict) or not action.get("code"):
+            return None
+        return (action.get("code"), action.get("note"), action.get("at"))
+
+    @staticmethod
+    def _stopped(job: dict[str, Any]) -> bool:
+        return job.get("state") in (CANCELLING, CANCELLED)
+
+    def observe(self, job: dict[str, Any]) -> str | None:
+        """잡 문서 하나를 본다. 알릴 줄이 있으면 돌려준다(같은 표식은 한 번만)."""
+        if self._stopped(job):
+            return None
+        ident = self._ident(job.get("action"))
+        if ident is None or ident == self.printed:
+            return None
+        self.printed = ident
+        return action_line(job.get("id", self.job_id), job.get("action"))
+
+    def stop_when(self, job: dict[str, Any]) -> int | None:
+        if not self.return_on_action or self._stopped(job):
+            return None
+        if action_line(self.job_id, job.get("action")) is None:
+            return None
+        return EXIT_ACTION
+
+
 def _wait(
     client: Client,
     job_id: int,
@@ -1165,19 +1232,29 @@ def _wait(
     fetch: _FetchSpec | None = None,
     cancel_token: str | None = None,
     shelf_url: str | None = None,
+    return_on_action: bool = False,
 ) -> int:
     """잡을 따라가다 종료 코드를 낸다. Ctrl-C 는 detach — 요청자는 아무것도 보내지 않고, 합류자는
     자기 `leave_submission` capability(`cancel_token`)로 합류만 뺀다(PLAN 계약 · M5j G5).
 
     keep 인 잡(잡 문서의 `keep`)이면 끝에 보관 줄을 찍는다(M5p 결정 143) — 받기(`--fetch-artifacts`)
     가 먼저이고 보관 줄이 마지막이다. `shelf_url` 은 제출 응답의 링크로, 잡 문서를 한 번도 못 본 채
-    끝났을 때(detach · 연결 끊김) 쓴다."""
+    끝났을 때(detach · 연결 끊김) 쓴다.
+
+    잡이 「사람이 할 일」 표식을 찍으면 stderr 에 한 줄을 남긴다(M5s). `return_on_action` 이면 새
+    표식에서 4 로 돌아온다 — 잡은 계속 돈다(결정 234)."""
     line = _StatusLine()
     last: dict[str, Any] | None = None
+    watch = _ActionWatch(job_id, return_on_action=return_on_action)
 
     def on_update(job: dict[str, Any]) -> None:
         nonlocal last
         last = job
+        said = watch.observe(job)
+        if said:
+            line.done()  # 진행 줄을 덮어쓰지 않게 — 표식은 남아야 하는 줄이다
+            _info(said)
+            line.last = ""
         line.update(describe(job))
 
     try:
@@ -1188,6 +1265,7 @@ def _wait(
             on_update=on_update,
             use_sse=use_sse,
             on_info=line.update,
+            stop_when=watch.stop_when,
         )
     except KeyboardInterrupt:
         line.done()
@@ -1217,7 +1295,13 @@ def _wait(
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
     # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
-    if code != 0:
+    # 표식에서 돌아온 4 는 실패가 아니다 — 로그 길 대신 다시 기다리는 길을 말한다(M5s).
+    if code == EXIT_ACTION:
+        _info(
+            f"job #{job_id} keeps running — after the person acts, resume with "
+            f"`rcm wait --job {job_id}`"
+        )
+    elif code != 0:
         cause = getattr(reason, "cause", None)
         for text in failure_lines(
             job or {}, job_id=job_id, url=(job or {}).get("url"), cause=cause
@@ -1319,7 +1403,14 @@ def superseded_line(job: dict[str, Any], job_id: int) -> str | None:
 
 def cmd_wait(args: argparse.Namespace) -> int:
     client = _client(args, need_token=False)
-    return _wait(client, args.job, timeout=args.timeout, joined=False, use_sse=not args.poll)
+    return _wait(
+        client,
+        args.job,
+        timeout=args.timeout,
+        joined=False,
+        use_sse=not args.poll,
+        return_on_action=bool(getattr(args, "return_on_action", False)),
+    )
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
@@ -3980,6 +4071,26 @@ def local_shelf_row(cfg: ServerConfig) -> tuple[str, bool | None, str]:
     return ("local shelf", ok, " · ".join([head, *notes]))
 
 
+def notify_failures_row(server: Any) -> tuple[str, bool | None, str] | None:
+    """`server.notify_failures` 가 0 이 아니면 warn 행 하나(M5s §4.7). 0 · 옛 서버면 None.
+
+    알림 훅은 실패해도 다시 보내지 않는다 — 이 수가 「아무도 모르는 실패」를 드러내는 유일한
+    자리다. 서버 메모리의 수라 재시작하면 0 이 된다(행이 말한다). 서버 로그에 규칙 이름과 원인
+    (`notify <규칙> #<잡>: exit 1`)이 있다."""
+    if not isinstance(server, dict):
+        return None
+    n = server.get("notify_failures")
+    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+        return None
+    what = "delivery" if n == 1 else "deliveries"
+    return (
+        "notify",
+        None,
+        f"{n} hook {what} failed since the server started (not retried; a restart "
+        "resets the count) — see the server log",
+    )
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     # ok 는 True(ok) · False(FAIL, 종료 코드 1) · None(warn — 알려는 주되 실패는 아니다)
     rows: list[tuple[str, bool | None, str]] = [python_row()]
@@ -4058,6 +4169,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             row = storage_row(storage, now=doc.get("generated_at")) if storage else None
             if row is not None:  # 옛 서버엔 키가 없고, 갓 뜬 서버는 아직 잰 게 없다
                 rows.append(row)
+            hook_row = notify_failures_row(doc.get("server"))
+            if hook_row is not None:
+                rows.append(hook_row)
             # 보관함(M5p §4.8) — status 의 `shelf_storage`, 없으면 health 의 같은 요약. 둘 다
             # 없으면 옛 서버다(행 없음). 링크는 이 클라이언트가 부른 주소다(§15.6)
             shelf_doc = (doc.get("server") or {}).get("shelf_storage")
@@ -5029,6 +5143,12 @@ def build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--timeout", type=float, help="give up waiting after N seconds (exit 3)")
     wait.add_argument(
         "--poll", action="store_true", help="poll every 2s instead of the event stream"
+    )
+    wait.add_argument(
+        "--return-on-action",
+        action="store_true",
+        help="return with exit 4 when the job asks a person to act (::rcm::action::); "
+        "the job keeps running",
     )
     client_opts(wait)
     wait.set_defaults(func=cmd_wait)
