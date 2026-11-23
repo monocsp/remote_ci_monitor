@@ -19,8 +19,9 @@
      (`docs/m5p-workplan.md` §10 · `docs/m5p-test-scenarios-c.md`)
   M5p 뒤 — `shelf-expand-keeps-apple-double`: 펼침이 macOS 메타데이터 멤버(`._*`)를 거르지 않음
      (`shelf_copier.py`, 2026-11-20 운영 잡 #3821 — 깨진 그림 23개)
-  M5s A — `m5s-*` 넷: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 즉시 실행이
-     예약에 합류함 · 시각을 준 제출이 합류함 (`docs/m5s-workplan.md` §4.1 · §7)
+  M5s A — `m5s-*` 다섯: 승격이 `not_before` 를 무시함 · 만료가 시작 마감을 무시함 · 즉시 실행이
+     예약에 합류함 · 합류 쿼리가 시작 마감을 무시함 · 시각을 준 제출이 합류함
+     (`docs/m5s-workplan.md` §4.1 · §7)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -1660,8 +1661,22 @@ MUTANTS = (
         path="src/remote_ci_monitor/store.py",
         old="JOINABLE_STATES = ACTIVE_STATES - {CANCELLING}\n",
         new="JOINABLE_STATES = (ACTIVE_STATES | SCHEDULED_STATES) - {CANCELLING}\n",
+        # 시작 마감 필터(아래 변이)만으로는 못 막는다 — 반복 시도는 마감 없는 예약이다(결정 231)
         tests=(
+            "tests/test_schedule_m5s.py::test_nothing_joins_a_schedule_that_has_no_start_deadline",
             "tests/test_server_schedule_m5s.py::test_s8_an_immediate_run_does_not_join_a_schedule",
+        ),
+    ),
+    Mutant(
+        # 합류 쿼리가 시작 마감을 보지 않는다 — 즉시 실행이 승격된 예약에 붙어 그 마감을 물려받고
+        # 레인이 늦으면 `expired` 로 끝난다(#253 격리 검증 P1)
+        name="m5s-join-ignores-start-deadline",
+        path="src/remote_ci_monitor/store.py",
+        old='f"AND state IN ({marks}) AND start_deadline IS NULL ORDER BY id LIMIT 1",',
+        new='f"AND state IN ({marks}) ORDER BY id LIMIT 1",',
+        tests=(
+            "tests/test_server_schedule_m5s.py::"
+            "test_s8_an_immediate_run_does_not_join_a_promoted_schedule",
         ),
     ),
     Mutant(

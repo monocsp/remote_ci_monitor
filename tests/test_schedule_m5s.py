@@ -419,3 +419,98 @@ def test_s9_blobs_of_a_scheduled_tree_job_survive_the_sweep(tmp_path):
         assert rec.errors == []
     finally:
         s.close()
+
+
+# ── 격리 검증 뒤 보탬(#253) ─────────────────────────────────────────────────
+
+
+def test_the_same_schedule_on_another_machine_or_pool_is_not_a_duplicate(store):
+    """`--machine A` 와 `--machine B` 에 같은 sha 의 야간 gate 를 걸면 둘 다 선다. 풀도 같다."""
+    a = store.create_job(
+        preset="gate",
+        inputs={"scope": "full"},
+        key="gate:full",
+        concurrency_group=None,
+        source=git_src(),
+        requester=ALICE,
+        timeout_seconds=1200,
+        join_key=join_key("gate", {"scope": "full"}, git_src().identity),
+        now=UTC_T,
+        state=SCHEDULED,
+        not_before=at(600),
+        start_deadline=at(1500),
+        target_worker="build-02",
+    )
+    common = dict(
+        preset="gate",
+        inputs={"scope": "full"},
+        key="gate:full",
+        concurrency_group=None,
+        source=git_src(),
+        requester=ALICE,
+        timeout_seconds=1200,
+        join_key=join_key("gate", {"scope": "full"}, git_src().identity),
+        now=UTC_T,
+        state=SCHEDULED,
+        not_before=at(600),
+        start_deadline=at(1500),
+    )
+    b = store.create_job(**common, target_worker="build-03")
+    c = store.create_job(**common, pool="linux")
+    assert len({a.id, b.id, c.id}) == 3
+    with pytest.raises(ScheduleExists) as e:
+        store.create_job(**common, target_worker="build-02")
+    assert e.value.job_id == a.id
+
+
+def test_a_local_lane_does_not_claim_a_job_whose_deadline_passed_during_admission(tmp_path):
+    """로컬 Worker 도 claim 에 자기 시계를 넘긴다 — admit 전에 받은 시각은 마감 안이어도
+    트랜잭션 안의 시각이 마감 뒤면 집지 않는다."""
+    from remote_ci_monitor.worker import Worker
+
+    cfg = make_config(tmp_path)
+    s = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        j = make(s)
+        s.promote_due(at(600))
+        clock = {"now": at(1600)}
+        w = Worker(1, s, cfg, now_fn=lambda: clock["now"])
+        assert w._claim(at(1000)) is None
+        assert s.get_job(j.id).state == QUEUED
+        clock["now"] = at(1400)
+        got = w._claim(at(1000))
+        assert got is not None and got.id == j.id
+    finally:
+        s.close()
+
+
+def test_a_scheduled_check_counts_as_a_check_in_progress():
+    """점검 프리셋을 예약해 두면 그 점검은 「도는 중」이다 — 자동 점검이 하나 더 걸리지 않는다."""
+    from remote_ci_monitor.core.capability import CHECK_RUNNING, CheckRecord, check_state
+
+    records = [
+        CheckRecord(preset="xcode-check", job_id=1, job_state="succeeded", fingerprint_hash="f"),
+        CheckRecord(preset="xcode-check", job_id=2, job_state=SCHEDULED, fingerprint_hash="f"),
+    ]
+    assert check_state(records, "f")[0] == CHECK_RUNNING
+
+
+def test_the_cli_names_not_scheduled_by_what_happened():
+    """결정 238 — 이유 코드 `not_scheduled` 는 그대로, 글은 새 상태 `scheduled` 와 헷갈리지 않게."""
+    from remote_ci_monitor.core.render_text import _plain_reason_text
+
+    text = _plain_reason_text({"reason": "not_scheduled", "state": "queued"})
+    assert text == "idle lane did not pick it up"
+
+
+def test_nothing_joins_a_schedule_that_has_no_start_deadline(store):
+    """반복 시도(PR D)는 시작 마감 없는 예약이다(결정 231). 그래서 「마감이 있는 잡에는 합류하지
+    않는다」만으로는 모자라다 — 예약 상태 자체가 합류 대상 밖이어야 한다(결정 206)."""
+    j = make(store, deadline=None)
+    assert j.state == SCHEDULED and j.start_deadline is None
+    assert store.join_or_bump(j_key(j), "bob-desk", "bob@desk", 0, at(1)) is None
+    assert store.find_joinable(j_key(j)) is None
+
+
+def j_key(job) -> str:
+    return join_key(job.preset, job.inputs, job.source.identity)

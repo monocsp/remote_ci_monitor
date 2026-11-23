@@ -2658,11 +2658,13 @@ class Store:
             if not_before is not None and join_key is not None:
                 # 같은 합류 키의 예약이 이미 있나 — 판정과 삽입이 같은 트랜잭션이다(결정 209 ·
                 # `_join_tx` 와 같은 방식). 업로드 중인 tree 예약도 센다: 두 세션이 같은 트리를 같이
-                # 예약하면 둘째가 막혀야 한다.
+                # 예약하면 둘째가 막혀야 한다. 도는 곳(풀 · 지정 머신)이 다르면 다른 예약이다 —
+                # `--machine A` 와 `--machine B` 에 같은 sha 의 야간 gate 를 거는 것은 중복이
+                # 아니다.
                 dup = conn.execute(
                     "SELECT id FROM jobs WHERE join_key=? AND not_before IS NOT NULL "
-                    "AND state IN (?, ?) ORDER BY id LIMIT 1",
-                    (join_key, SCHEDULED, UPLOADING),
+                    "AND state IN (?, ?) AND pool=? AND target_worker IS ? ORDER BY id LIMIT 1",
+                    (join_key, SCHEDULED, UPLOADING, pool, target_worker),
                 ).fetchone()
                 if dup is not None:
                     conn.execute("ROLLBACK")
@@ -2722,7 +2724,8 @@ class Store:
     def find_joinable(self, join_key: str) -> Job | None:
         marks = ",".join("?" * len(JOINABLE_STATES))
         rows = self._jobs(
-            f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) ORDER BY id LIMIT 1",
+            f"SELECT * FROM jobs WHERE join_key=? AND state IN ({marks}) "
+            "AND start_deadline IS NULL ORDER BY id LIMIT 1",
             (join_key, *sorted(JOINABLE_STATES)),
         )
         return rows[0] if rows else None
@@ -2775,7 +2778,9 @@ class Store:
         keep: bool = False,
     ) -> tuple[Job, tuple[str, str] | None] | None:
         # 취소 중인 잡에는 합류하지 않는다 — 결과를 줄 수 없는 잡이다. 거기 합류하면 합류자의
-        # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반)
+        # 대기가 남의 취소(또는 남의 새 잡에 밀린 것, M5o)로 종료 2 를 받는다(결정 113 위반).
+        # 예약에서 온 잡(시작 마감이 있다)에도 합류하지 않는다(M5s 결정 226) — 승격한 뒤에도
+        # 그렇다. 붙으면 합류자가 그 마감을 물려받아 레인이 늦으면 `expired` 로 끝난다
         marks = ",".join("?" * len(JOINABLE_STATES))
         conn = self._conn()
         issued: tuple[str, str] | None = None
@@ -2783,7 +2788,7 @@ class Store:
         try:
             row = conn.execute(
                 f"SELECT id, requester_name, priority, keep FROM jobs WHERE join_key=? "
-                f"AND state IN ({marks}) ORDER BY id LIMIT 1",
+                f"AND state IN ({marks}) AND start_deadline IS NULL ORDER BY id LIMIT 1",
                 (join_key, *sorted(JOINABLE_STATES)),
             ).fetchone()
             if row is None:

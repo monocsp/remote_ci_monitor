@@ -32,6 +32,13 @@ of a key bumps that number and is listed here.
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
   every final state. Give the rule an `on` list to keep the old set.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- `rcm top` says `idle lane did not pick it up` where it said `not scheduled`;
+  the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
+  ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The `rcm-ci-connect` templates treat `expired` as finished: the watcher no longer waits on it
+  and the commit status is `error` · `unavailable · #N · did not start`, so the GitHub side runs
+  the checks. Copy the new `rcm_ci_watch.py` and `rcm_ci_config.py` into repositories that use
+  the skill. ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
 - The database moves to version 25 (a backup of v24 is written first). An older build refuses the
   migrated database; restore the backup to go back.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))

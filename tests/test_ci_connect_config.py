@@ -252,3 +252,12 @@ def test_c13_a_non_terminal_state_maps_to_nothing():
             cfgmod.terminal_status(s, None, None, job=1, summary="", step=None, successor=None)
             is None
         )
+
+
+def test_an_expired_job_maps_to_unavailable_not_pending():
+    """M5s — 시작 마감을 넘겨 돌지 않은 잡(`expired`)도 끝난 잡이다. 옛 표에 없으면 pending 으로
+    멈춘다. 돌지 않았으니 결과가 아니라 `unavailable`(GitHub 이 대신 돈다)이다."""
+    got = cfgmod.terminal_status(
+        "expired", None, None, job=12, summary="did not start", step=None, successor=None
+    )
+    assert got is not None and got[0] == "error" and "unavailable" in got[1]

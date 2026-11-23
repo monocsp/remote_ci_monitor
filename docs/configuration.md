@@ -979,7 +979,7 @@ byte rules catch it before any date does.
 | key | default | meaning |
 |---|---|---|
 | `retention_days_success` | `14` | logs of succeeded jobs. Their workspace is deleted the moment the job ends |
-| `retention_days_failure` | `30` | logs of failed, cancelled, timed-out and lost jobs |
+| `retention_days_failure` | `30` | logs of failed, cancelled, timed-out, lost and expired jobs |
 | `workspace_retention_days` | `1` | a kept workspace and the job's uploaded snapshot. Cannot outlive the shorter of the two day counts above — set it higher and the server says so at start-up and uses the lower number |
 | `workspace_storage_max_bytes` | `107374182400` (100 GiB) | when the workspaces plus snapshots weigh more than this, the oldest finished jobs give theirs up regardless of age. `0` means no limit |
 | `min_free_bytes` | `10737418240` (10 GiB) | when the filesystem holding the data directory drops below this, the same thing happens. `0` turns it off |

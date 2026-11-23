@@ -417,3 +417,59 @@ def test_a_running_job_is_left_alone_by_the_deadline(srv):
     srv.clock.advance(5000)
     srv.app.tick_schedule()
     assert state(srv, jid) == RUNNING
+
+
+# ── 격리 검증 뒤 보탬(#253) ─────────────────────────────────────────────────
+
+
+def test_s8_an_immediate_run_does_not_join_a_promoted_schedule(srv):
+    """승격된 예약도 예약에서 온 잡이다 — 합류하면 시작 마감을 물려받아 `expired` 로 끝난다."""
+    _s, sched = git(srv, start_in_seconds=60)
+    srv.clock.advance(60)
+    srv.app.tick_schedule()
+    assert state(srv, sched["job_id"]) == QUEUED
+    s2, now = git(srv, "bob")
+    assert s2 == 201, now
+    assert now["joined"] is False and now["job_id"] != sched["job_id"]
+    srv.clock.advance(901)
+    srv.app.tick_schedule()
+    assert state(srv, sched["job_id"]) == EXPIRED
+    assert state(srv, now["job_id"]) == QUEUED  # 즉시 실행에는 마감이 없다
+
+
+def test_a_promoted_schedule_does_not_join_anything_either(srv):
+    """예약에서 온 잡이 큐에 있을 때 같은 입력의 즉시 실행이 와도 거꾸로 붙지 않는다(join_key 는
+    같다). 즉시 실행 잡이 먼저 있으면 예약 제출이 합류하지 않는 것은 S19 가 본다."""
+    _s, sched = git(srv, start_in_seconds=60)
+    srv.clock.advance(60)
+    srv.app.tick_schedule()
+    _s, first = git(srv, "bob")
+    _s, second = git(srv, "admin")
+    assert first["joined"] is False
+    assert second["joined"] is True and second["job_id"] == first["job_id"]
+
+
+def test_job_view_of_a_schedule_is_not_shaped_like_a_finished_job(srv):
+    _s, resp = git(srv, start_in_seconds=300)
+    status, view = srv.req("GET", f"/jobs/{resp['job_id']}", token="alice")
+    assert status == 200
+    # 끝난 잡 모양(`recent_json`)에는 종료 코드 · 전이 · 소요가 있다. 예약 행에는 없다
+    for key in ("exit_code", "transitions", "job_seconds", "summary"):
+        assert key not in view, key
+    assert view["start_deadline"] == iso(T0 + timedelta(seconds=1200))
+
+
+def test_waited_seconds_of_a_promoted_schedule_start_at_promotion(srv):
+    _s, resp = git(srv, start_in_seconds=600)
+    jid = resp["job_id"]
+    srv.clock.advance(600)
+    srv.app.tick_schedule()
+    srv.clock.advance(30)
+    _s, doc = srv.req("GET", "/api/status")
+    row = next(r for r in doc["pools"][0]["queue"] if r["id"] == jid)
+    assert row["estimate"]["waited_seconds"] == 30  # 630 초가 아니다
+    assert srv.store.claim(1, srv.clock()) is not None
+    srv.clock.advance(10)
+    srv.store.finish(jid, "succeeded", now=srv.clock(), exit_code=0)
+    _s, done = srv.req("GET", f"/jobs/{jid}", token="alice")
+    assert done["waited_seconds"] == 30
