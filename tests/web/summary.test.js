@@ -56,7 +56,7 @@ describe("notMoving", () => {
     assert.ok(text.worker_down.includes("no worker"), text.worker_down);
     assert.ok(text.stuck.includes("3× longer than usual"), text.stuck);
     assert.ok(text.upload_stalled.includes("upload stalled 2m"), text.upload_stalled);
-    assert.ok(text.not_scheduled.includes("not scheduled"), text.not_scheduled);
+    assert.ok(text.not_scheduled.includes("idle lane did not pick it up"), text.not_scheduled);
     assert.ok(text.overdue.includes("over by 3m 31s"), text.overdue);
     assert.ok(text.paused.includes("paused"), text.paused);
   });

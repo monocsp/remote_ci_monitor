@@ -120,7 +120,9 @@ parsed by the server like every other marker.
   reasons («Needs a look»): every other reason is something rcm inferred, this one the job said
   itself, with what to do. It outranks `stuck` and `overdue` — a job waiting for a person is
   usually quiet — and a job being cancelled stays `cancelling`. The action stays until the job
-  ends; there is no marker that clears it.
+  ends; there is no marker that clears it. The web page's status column and «Needs a look» read
+  `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean); the code and the note are the
+  job's own words and are not translated.
 - **`rcm wait`** prints `#<id> needs action · <code> · <note>` on stderr once for each action it
   sees. With **`--return-on-action`** it prints the JSON (with `action`) and exits **4** as soon as
   the job has an action — also one that was already there when the wait started, since a session
@@ -128,6 +130,8 @@ parsed by the server like every other marker.
   flag. After the person has acted, wait again **without** the flag (`rcm wait --job N`): the
   action is still the job's last one, so the flag would return at once. A job that is being
   cancelled, or was cancelled, prints no such line and never returns 4: it will not run on.
+  Neither does a job that ended any other way (succeeded, failed, timed out, lost, expired); its
+  action is still in the final JSON.
 - **Hooks** get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (both empty without an action); a `url`
   rule finds `action` in `job`. rcm sends nothing in the middle of a job — a script that wants a
   chat message at that moment sends it itself.
@@ -1204,7 +1208,8 @@ Git mirrors are never pruned.
   "failures_truncated": false}` with the same 20-name cap, plus `"shelf_url"` for a kept job. Each (job, rule) fires exactly once,
   including jobs that finished while the server was down. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy. `rcm check`
-  shows a `warn  notify` row with the count while it is above 0. The count lives in the server's
+  shows a `warn  notify` row with the count while it is above 0, and the web header a
+  `notify failures N` badge (hidden at 0). The count lives in the server's
   memory, so a restart sets it back to 0 — the server log keeps each failure
   (`notify <rule> #<job>: exit 1`).
 - **Job links** — `RCM_URL`, the `url` in the webhook body and the job URL `rcm run` prints start
@@ -1871,7 +1876,7 @@ is paused.
 next to a running job with the same preset, inputs and source is a new job, and `rcm run` of the
 same thing now does not wait for the schedule. A second schedule with the same preset, inputs and
 source (the commit for `git_ref`, the tree for an upload) is refused with 409 `schedule_exists`
-and the first job's `job_id`; cancel it or pick another time. A `git_ref` schedule resolves its
+and the first job's `job_id` (`rcm run` exits 2: no job was made); cancel it or pick another time. A `git_ref` schedule resolves its
 ref when you submit, as every `git_ref` job does; a tree is uploaded when you submit and kept until
 the job runs — its snapshot blobs are protected from the cache sweep the same way an active job's
 are. [Supersede](#superseding-older-jobs-of-the-same-branch) happens when the schedule enters the
@@ -1888,6 +1893,17 @@ schedules about to enter the queue. Schedules live in the database: `rcm reload`
 keep them; one whose preset was removed fails at claim with `preset_missing`. A `[[notify]]` rule
 without `on` also fires for `expired`, and `on = ["expired"]` picks only those. Finished schedules
 follow the ordinary [retention](#retention-what-is-kept-and-for-how-long).
+
+**On screen.** The web page lists schedules below the queue under **Scheduled (N)**, in time
+order: the preset, its inputs, who asked, the time and the start deadline in the display time
+zone, and **Cancel** on your own. A schedule has no ETA; the page does not invent one. When the
+server could not read them the section is a red **Scheduled jobs unavailable** band, never an
+empty list, and «Needs a look» says `unknown — scheduled jobs unavailable` instead of
+`Nothing needs a look` (a schedule waiting for a person may be among them). `rcm top` adds one line per pool, `scheduled — 2 · next 15:00 golive`, or
+`scheduled — unavailable: <error>`; with no schedules it adds nothing. A job that missed its
+deadline is `expired · exit 2` in the recent list. The queue reason `not_scheduled` (a lane sat
+idle and did not pick the job up) reads `idle lane did not pick it up` on both, so it is not
+mistaken for this state.
 
 ## Trying again later: `[presets.retry]`
 

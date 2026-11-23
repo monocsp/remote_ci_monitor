@@ -247,11 +247,16 @@
     "header.not_scheduled": function (a) {
       return "Lane is idle but #" + a.id + " has not started for " + a.dur + " — check the server log";
     },
+    "header.notify_failures": function (a) { return "notify failures " + a.n; },
+    "header.notify_failures_title": function (a) {
+      return a.n + " notification hook deliveries failed since the server started (a restart resets the count) — see the server log";
+    },
     "footer.server": function (a) {
       return "rcm " + a.version + " · up " + a.uptime + " · schema v" + a.schema;
     },
     "summary.add_token": "Add a token to highlight your jobs",
     "summary.queue_unknown": "unknown — queue unavailable",
+    "summary.scheduled_unknown": "unknown — scheduled jobs unavailable",
     "summary.no_jobs": "No jobs of yours in the queue",
     "summary.and_more": function (a) { return "and " + a.n + " more"; },
     "summary.last_known": "last known: ",
@@ -289,6 +294,13 @@
     "queue.col_eta": "Finishes",
     "queue.col_source": "Source",
     "queue.pool_jobs": function (a) { return a.head + " · " + a.n + " job" + (a.n === 1 ? "" : "s"); },
+    // M5s — 큐 아래의 예약 절. ETA 는 없다(승격 전의 잡에 끝나는 시각을 지어내지 않는다)
+    "sched.title": function (a) { return "Scheduled (" + a.n + ")"; },
+    "sched.unavailable": function (a) { return "Scheduled jobs unavailable — " + a.error; },
+    "sched.at": function (a) { return "at " + a.clock; },
+    "sched.start_by": function (a) { return "start by " + a.clock; },
+    "sched.attempt": function (a) { return "attempt " + a.n; },
+    "sched.attempt_of": function (a) { return "attempt " + a.n + "/" + a.total; },
     "row.group": function (a) { return "group " + a.name; },
     "row.you": "you",
     "row.you_joined": "you joined",
@@ -361,6 +373,7 @@
     },
     "cancel.running_body": "SIGTERM now, SIGKILL after the grace period.",
     "cancel.queued_body": "Removed from the queue; sessions waiting on it get exit 2. Run rcm run again to resubmit.",
+    "cancel.scheduled_body": "It will not run at its time; sessions waiting on it get exit 2. Run rcm run --at again to schedule it anew.",
     "cancel.cannot_undo": "Cannot be undone.",
     "cancel.others_waiting": function (a) {
       return a.n + " other session" + (a.n > 1 ? "s are" : " is") + " waiting on it.";
@@ -408,6 +421,10 @@
     "state.timed_out": "timed out",
     "state.cancelled": "cancelled",
     "state.lost": "lost",
+    "state.scheduled": "scheduled",
+    "state.expired": "expired",
+    "state.retried": "retried",
+    "state.exhausted": "out of retries",
     "state.unknown": "unknown",
     "state.busy": "busy",
     "state.idle": "idle",
@@ -445,7 +462,8 @@
     "reason.sigterm": function (a) { return "SIGTERM sent by " + a.by + " · kill " + a.kill; },
     "reason.superseded": function (a) { return "superseded by #" + a.id + " · kill " + a.kill; },
     "reason.paused": "paused",
-    "reason.not_scheduled": "not scheduled",
+    "reason.not_scheduled": "idle lane did not pick it up",
+    "reason.needs_action": "needs action",
     "reason.no_worker": "no worker",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
     "reason.no_capable_machine": "no capable machine",
@@ -590,6 +608,9 @@
     "recent.cancelled": "cancelled · exit 2",
     "recent.timed_out": "timed out · exit 2",
     "recent.lost": "lost · exit 3",
+    "recent.expired": "expired · exit 2",
+    "recent.exhausted": "out of retries · exit 1",
+    "recent.retried": "retried",
     "recent.before_start": "before start",
     "recent.by": function (a) { return "by " + a.who; },
     "recent.step": function (a) { return "step " + a.step; },
@@ -1016,7 +1037,7 @@
     "store_check.stale": function (a) { return "This state is older than " + a.n + " minutes. Check again before you act on it."; },
     "store_check.doc_error": function (a) { return "status.json could not be read: " + a.detail; },
     "store_check.checking": function (a) { return "checking · job #" + a.id + " " + a.state; },
-    "store_check.last_failed": function (a) { return "Last check #" + a.id + " " + a.state + "." + (a.older ? " What follows is from an earlier check." : ""); },
+    "store_check.last_failed": function (a) { return "Last check #" + a.id + " did not succeed (" + a.state + ")." + (a.older ? " What follows is from an earlier check." : ""); },
     "store_check.refresh": "Check again",
     "store_check.refreshing": "Checking…",
     "store.head.live": function (a) { return "App Store live " + a.version + " (" + a.build + ")"; },
@@ -1446,11 +1467,16 @@
     "header.not_scheduled": function (a) {
       return "레인이 비어 있는데 #" + a.id + " 가 " + a.dur + " 동안 시작되지 않았습니다 — 서버 로그를 보세요";
     },
+    "header.notify_failures": function (a) { return "알림 실패 " + a.n; },
+    "header.notify_failures_title": function (a) {
+      return "서버가 켜진 뒤 알림 훅 " + a.n + "건이 실패했습니다. 재시작하면 0 으로 돌아갑니다. 서버 로그를 보세요";
+    },
     "footer.server": function (a) {
       return "rcm " + a.version + " · 가동 " + a.uptime + " · 스키마 v" + a.schema;
     },
     "summary.add_token": "토큰을 넣으면 내 작업이 표시됩니다",
     "summary.queue_unknown": "알 수 없음 — 큐를 읽지 못했습니다",
+    "summary.scheduled_unknown": "알 수 없음 — 예약을 읽지 못했습니다",
     "summary.no_jobs": "큐에 내 작업이 없습니다",
     "summary.and_more": function (a) { return a.n + "개 더"; },
     "summary.last_known": "마지막으로 알던 값: ",
@@ -1488,6 +1514,12 @@
     "queue.col_eta": "완료 예상",
     "queue.col_source": "코드 출처",
     "queue.pool_jobs": function (a) { return a.head + " · 작업 " + a.n + "개"; },
+    "sched.title": function (a) { return "예약 (" + a.n + ")"; },
+    "sched.unavailable": function (a) { return "예약을 읽지 못했습니다 — " + a.error; },
+    "sched.at": function (a) { return a.clock + " 시작"; },
+    "sched.start_by": function (a) { return "시작 마감 " + a.clock; },
+    "sched.attempt": function (a) { return a.n + "번째 시도"; },
+    "sched.attempt_of": function (a) { return a.total + "번 중 " + a.n + "번째 시도"; },
     "row.group": function (a) { return "그룹 " + a.name; },
     "row.you": "나",
     "row.you_joined": "내가 합류함",
@@ -1561,6 +1593,7 @@
     },
     "cancel.running_body": "정상 종료를 먼저 요청하고, 그래도 끝나지 않으면 강제로 종료합니다.",
     "cancel.queued_body": "큐에서 뺍니다. 기다리던 세션은 종료 코드 2를 받습니다. 다시 내려면 rcm run 을 다시 실행하세요.",
+    "cancel.scheduled_body": "정한 시각에 돌지 않습니다. 기다리던 세션은 종료 코드 2를 받습니다. 다시 예약하려면 rcm run --at 을 다시 실행하세요.",
     "cancel.cannot_undo": "되돌릴 수 없습니다.",
     "cancel.others_waiting": function (a) { return "다른 세션 " + a.n + "개가 이 작업을 기다립니다."; },
     "cancel.leave": "합류 빠지기",
@@ -1606,6 +1639,10 @@
     "state.timed_out": "시간 초과",
     "state.cancelled": "취소됨",
     "state.lost": "결과를 잃음",
+    "state.scheduled": "예약됨",
+    "state.expired": "만료됨",
+    "state.retried": "다시 시도함",
+    "state.exhausted": "시도를 다 씀",
     "state.unknown": "알 수 없음",
     "state.busy": "진행 중",
     "state.idle": "대기",
@@ -1642,7 +1679,8 @@
     "reason.sigterm": function (a) { return withJosa(a.by, "이/가") + " 종료를 요청함 · " + a.kill + " 뒤 강제 종료"; },
     "reason.superseded": function (a) { return "새 작업 #" + a.id + " 에 밀려 종료 중 · " + a.kill + " 뒤 강제 종료"; },
     "reason.paused": "일시정지",
-    "reason.not_scheduled": "시작되지 않음",
+    "reason.not_scheduled": "빈 레인이 집지 않음",
+    "reason.needs_action": "사람이 할 일",
     "reason.no_worker": "워커 없음",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
     "reason.no_capable_machine": "실행 가능한 머신 없음",
@@ -1773,6 +1811,9 @@
     "recent.cancelled": "취소됨 · 종료 코드 2",
     "recent.timed_out": "시간 초과 · 종료 코드 2",
     "recent.lost": "결과를 잃음 · 종료 코드 3",
+    "recent.expired": "만료됨 · 종료 코드 2",
+    "recent.exhausted": "시도를 다 씀 · 종료 코드 1",
+    "recent.retried": "다시 시도함",
     "recent.before_start": "시작 전",
     "recent.by": function (a) { return withJosa(a.who, "이/가") + " 취소"; },
     "recent.step": function (a) { return "단계 " + a.step; },
@@ -2195,7 +2236,7 @@
     "store_check.stale": function (a) { return "이 상태는 " + a.n + "분보다 오래됐습니다. 판단하기 전에 새로 조회하십시오."; },
     "store_check.doc_error": function (a) { return "status.json 을 읽지 못했습니다: " + a.detail; },
     "store_check.checking": function (a) { return "조회하고 있습니다 · 작업 #" + a.id + " " + a.state; },
-    "store_check.last_failed": function (a) { return "마지막 조회 #" + a.id + " " + a.state + "." + (a.older ? " 아래 상태는 그 전 조회의 것입니다." : ""); },
+    "store_check.last_failed": function (a) { return "마지막 조회 " + withJosa("#" + a.id, "이/가") + " 성공하지 못했습니다(" + a.state + ")." + (a.older ? " 아래 상태는 그 전 조회의 것입니다." : ""); },
     "store_check.refresh": "새로 조회",
     "store_check.refreshing": "조회하는 중…",
     "store.head.live": function (a) { return "App Store 라이브 " + a.version + " (" + a.build + ")"; },

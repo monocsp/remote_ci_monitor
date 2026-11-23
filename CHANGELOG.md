@@ -66,6 +66,19 @@ of a key bumps that number and is listed here.
 - **`rcm check` warns when notification hooks failed** (`warn  notify  N hook deliveries
   failed…`). The count is the server's in-memory `notify_failures`, so a restart sets it back to 0.
   ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- **The web queue shows scheduled jobs.** Below the queue, **Scheduled (N)** lists
+  `pools[].scheduled[]` in time order — the preset, its inputs, who asked, the time and the start
+  deadline in the display time zone, and **Cancel** on your own — with no ETA. When the server
+  could not read them the section is a red band, never an empty list, and «Needs a look» says
+  `unknown — scheduled jobs unavailable` rather than `Nothing needs a look`. `rcm top` adds one line per
+  pool, `scheduled — N · next HH:MM <preset>` (`scheduled — unavailable: …` on a read error). The
+  web page draws the new states `scheduled`, `expired`, `retried` and `exhausted` with a glyph and
+  colour of their own (an `exhausted` recent row opens like a failed one, with its rerun command), and `rcm top` gives `expired` and `exhausted` their own glyph in the recent
+  list. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- **The web page shows a job's action.** `needs_action` leads «Needs a look», and the status
+  column reads `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean) with the job's note
+  untranslated. The header shows a `notify failures N` badge while notification hooks have failed
+  since the server started (hidden at 0). ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - **Going live when a person asks for it: `POST /api/repos/<repo>/release/golive`,
   `rcm release golive` and the version page's «Schedule go-live».** `mode = plan` (any client
   token) reads approval and the approved build into `golive-plan.json`; `mode = release` (admin)
@@ -163,6 +176,20 @@ of a key bumps that number and is listed here.
 - `rcm top` says `idle lane did not pick it up` where it said `not scheduled`;
   the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The Store tab's status panel no longer drops `Last check #N …` when a scheduled check follows
+  the failed one, counts a check that ended `exhausted` or `expired` as failed, and the line now
+  reads `Last check #N did not succeed (lost).`
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- `rcm run` exits 2 instead of 3 when the server refuses the submission with 409
+  `schedule_exists` or `golive_running` (as it already did for `release_route_required`): no job
+  was made. Any other 409 stays 3.
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
+  `not scheduled`, as `rcm top` does. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- `rcm wait` no longer prints `#N needs action · …` for a job that has already ended (succeeded,
+  failed, timed out, lost, expired), as it already did not for a cancelled one; the action is still
+  in the final JSON. `rcm top` cleans the note's control characters once more, as `rcm wait` does.
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - The `rcm-ci-connect` templates treat `expired` as finished: the watcher no longer waits on it
   and the commit status is `error` · `unavailable · #N · did not start`, so the GitHub side runs
   the checks. Copy the new `rcm_ci_watch.py` and `rcm_ci_config.py` into repositories that use

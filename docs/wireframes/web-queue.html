@@ -472,7 +472,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       <div class="variant"><div class="vt">Idle lane but nothing starts</div>
         <div data-c="35"><span class="wk"><i></i>lane 2 · idle</span>
           <div class="banner" style="margin-top:8px">Lane 2 is idle but #413 has not started for 40s — check the server log</div>
-          <div class="sub" style="margin-top:6px">Reason <span class="mono">not scheduled</span> · shows in Not moving</div></div>
+          <div class="sub" style="margin-top:6px">Reason <span class="mono">idle lane did not pick it up</span> · shows in Not moving</div></div>
       </div>
     </div>
     <div class="gutter"></div>
@@ -553,7 +553,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       <dt>규칙</dt><dd>강조·<code>you</code> 는 항상 <code>name</code>(토큰 이름) 기준 — <code>--by</code> 라벨은 남을 흉내 낼 수 있다. 라벨은 화면 어디서나 40자에서 자르고 <code>…</code> + 툴팁.</dd></dl></div></article>
 
     <article class="spec" id="c11" data-for="11"><div class="num">11</div><div><div class="area">queue · row</div><h3>Reason 열 <span class="tag">v1.3</span></h3>
-      <dl><dt>보여주는 것</dt><dd>이 잡이 지금 왜 이 상태인지, 근거 숫자와 함께 <span class="src">ref</span>(Airflow Dependency/Reason · Jenkins 큐 문구): <code>running · lane 1</code> · <code>waiting for lane · 2/2 busy · behind #412 · frees in 5m 10s</code> · <code>⛓ blocked by #409 · devices · frees in 2m 40s</code> · <code>uploading · 30 / 48 MB</code> · <code>upload stalled 2m</code>(빗금, 31) · <code>preparing workspace · unpacking 48 MB</code>(33) · <code>over by 3m 31s · expected 6m 09s · delays #414</code>(20) · <code>⚠ likely stuck · 3× expected · no output for 4m</code>(34) · <code>paused</code>(28) · <code>not scheduled</code>(35) · <code>no worker</code>(27, 모든 레인 다운).</dd>
+      <dl><dt>보여주는 것</dt><dd>이 잡이 지금 왜 이 상태인지, 근거 숫자와 함께 <span class="src">ref</span>(Airflow Dependency/Reason · Jenkins 큐 문구): <code>running · lane 1</code> · <code>waiting for lane · 2/2 busy · behind #412 · frees in 5m 10s</code> · <code>⛓ blocked by #409 · devices · frees in 2m 40s</code> · <code>uploading · 30 / 48 MB</code> · <code>upload stalled 2m</code>(빗금, 31) · <code>preparing workspace · unpacking 48 MB</code>(33) · <code>over by 3m 31s · expected 6m 09s · delays #414</code>(20) · <code>⚠ likely stuck · 3× expected · no output for 4m</code>(34) · <code>paused</code>(28) · <code>idle lane did not pick it up</code>(35) · <code>no worker</code>(27, 모든 레인 다운).</dd>
       <dt>데이터</dt><dd><code>reason ∈ {running, waiting_for_lane, blocked_by_group, uploading, upload_stalled, materializing, overdue, stuck, paused, not_scheduled, worker_down}</code> · <code>lane</code> · <code>ahead_job_id</code> · <code>blocked_by.{job_id, group, remaining_seconds}</code> · <code>server.workers[]</code>(busy 수).</dd>
       <dt>상태</dt><dd>행동 가능한 이유는 진한 글자와 모양, 정상(running·waiting)은 회색. 레인 1 이면 <code>blocked</code> 는 안 나온다.</dd>
       <dt>상호작용</dt><dd>잡 id 는 링크 — 막고 있는 잡·앞선 잡 행으로.</dd></dl></div></article>
@@ -643,7 +643,7 @@ details.est .row { padding: 6px 0 0 14px; display: flex; flex-wrap: wrap; gap: 6
       <dl><dt>보여주는 것</dt><dd>셋 중 하나면 <code>Not responding</code>(빨강)이고, 화면은 <b>발동한 근거만</b> 적는다(2026-09-15): 지금 도는 <b>단계</b>가 자기 실측 중앙값의 <code>step_stuck_multiplier</code>(기본 3)배를 넘으면 <code>over_step</code> → <code>step build web is 3× its usual time</code> · 경과가 예상의 <code>stuck_multiplier</code>(기본 3)배를 넘으면 <code>over_elapsed</code> → <code>3× longer than usual</code> · <b>단계를 아예 안 찍는 잡</b>이 <code>no_output_seconds</code>(기본 240) 동안 조용하면 <code>no_output</code>. 단계 임계의 하한은 <code>no_output_seconds</code> 다(중앙값 0.5초짜리 단계를 1.5초 만에 죽었다고 부르지 않는다). 단계는 넘어가는데 출력만 조용한 잡은 <code>quiet</code>(회색, 경보 아님)이고 <b>24 에 오르지 않는다</b>. 24 에서 overdue 보다 위 <span class="src">ref</span>(Jenkins isLikelyStuck).</dd>
       <dt>데이터</dt><dd><code>estimate.stuck</code> · <code>estimate.stuck_code</code>(<code>over_step</code>·<code>over_elapsed</code>·<code>no_output</code>) · <code>estimate.quiet</code> · <code>estimate.step_expected_seconds</code> · <code>progress.last_output_at</code> · 설정 <code>[estimate] stuck_multiplier = 3</code>, <code>no_output_seconds = 240</code>, <code>step_stuck_multiplier = 3</code>, <code>step_min_samples = 3</code>. 키만 더했으므로 <code>schema_version</code> 은 1 그대로.</dd></dl></div></article>
     <article class="spec" id="c35" data-for="35"><div class="num">35</div><div><div class="area">variant</div><h3>Idle lane but nothing starts <span class="tag">v1.3</span></h3>
-      <dl><dt>보여주는 것</dt><dd>대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 10초 넘게 있으면 황토 띠 <code>Lane 2 is idle but #413 has not started for 40s — check the server log</code>, Reason <code>not scheduled</code> <span class="src">gap</span>(Codex 「all workers idle but queue blocked」).</dd></dl></div></article>
+      <dl><dt>보여주는 것</dt><dd>대기 잡이 있고 정지 아니고 그룹에 안 막혔는데 idle 레인이 10초 넘게 있으면 황토 띠 <code>Lane 2 is idle but #413 has not started for 40s — check the server log</code>, Reason <code>idle lane did not pick it up</code> <span class="src">gap</span>(Codex 「all workers idle but queue blocked」).</dd></dl></div></article>
   </div>
 
   <h2>4. 이 화면이 정한 규칙</h2>

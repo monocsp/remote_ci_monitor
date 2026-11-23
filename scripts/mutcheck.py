@@ -1816,9 +1816,18 @@ MUTANTS = (
         # 더 돌지 않으므로 「잡은 계속 돈다」는 약속이 거짓이 된다
         name="action-4-while-cancelling",
         path="src/remote_ci_monitor/cli.py",
-        old='        return job.get("state") in (CANCELLING, CANCELLED)\n',
-        new="        return False\n",
-        tests=("tests/test_action_marker_m5s.py",),
+        old="        return state in TERMINAL_STATES or state == CANCELLING\n",
+        new="        return state in TERMINAL_STATES\n",
+        tests=("tests/test_action_marker_m5s.py", "tests/test_web_schedule_m5s.py"),
+    ),
+    Mutant(
+        # M5s G(#251 재검증 P3) — 실패 · 성공 · 만료로 끝난 잡에도 「needs action」 줄을 찍는다.
+        # 받을 잡이 없는데 사람에게 할 일을 시킨다
+        name="action-line-on-a-finished-job",
+        path="src/remote_ci_monitor/cli.py",
+        old="        return state in TERMINAL_STATES or state == CANCELLING\n",
+        new="        return state in (CANCELLING, CANCELLED)\n",
+        tests=("tests/test_web_schedule_m5s.py",),
     ),
     Mutant(
         # M5s C(#251 격리 검증 P2) — 한 줄 정리가 bidi 덮어쓰기를 남긴다: note 와 훅의 실패 이름이
@@ -1882,6 +1891,97 @@ MUTANTS = (
             "tests/test_server_schedule_m5s.py::"
             "test_s19_a_schedule_does_not_join_an_active_identical_job",
         ),
+    ),
+    # ── M5s G — 화면의 예약 · 표식 (`docs/m5s-workplan.md` §4.1 「표시」 · §4.3 · §4.7) ──
+    Mutant(
+        # 웹이 `needs_action` 을 모른다 — 로그인을 기다리는 출시 잡이 「Needs a look」에 안 오른다
+        name="m5s-web-needs-action-not-actionable",
+        path="src/remote_ci_monitor/web/app.js",
+        old='var ACTIONABLE = ["needs_action", "worker_down",',
+        new='var ACTIONABLE = ["worker_down",',
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 예약을 못 읽은 풀을 건너뛴다 — 조회 실패가 「예약 없음」으로 그려진다(fail-open)
+        name="m5s-web-scheduled-error-reads-as-empty",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            'return { kind: "error", rows: [], pools: {}, error: pl.scheduled_error || null, '
+            "code: pl.scheduled_error_code || null };"
+        ),
+        new="continue;",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # `rcm top` 이 예약 조회 실패를 빈 목록처럼 그린다(줄이 사라진다)
+        name="m5s-top-scheduled-error-reads-as-empty",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old='    if not isinstance(rows, list) or pool.get("scheduled_error"):\n',
+        new="    if not isinstance(rows, list):\n        return []\n    if False:\n",
+        tests=("tests/test_web_schedule_m5s.py",),
+    ),
+    Mutant(
+        # 알림 실패가 0 이어도 배지를 그린다 — 늘 떠 있는 경고는 아무도 안 본다
+        name="m5s-web-notify-badge-at-zero",
+        path="src/remote_ci_monitor/web/app.js",
+        old="if (!isNum(n) || n <= 0) return null;",
+        new="if (!isNum(n)) return null;",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # #257 검증 P1 — 예약을 못 읽었는데 「Nothing needs a look」(초록)을 그린다(fail-open)
+        name="m5s-web-needs-a-look-ok-without-schedules",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "if (schedUnknown && !lines.length) "
+            'return { kind: "unknown", lines: [], why: "scheduled" };'
+        ),
+        new="",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 예약 행 이유 칸이 note 를 escape 하지 않는다 — 잡이 찍은 `<img onerror>` 가 페이지에서
+        # 돈다
+        name="m5s-web-scheduled-note-unescaped",
+        path="src/remote_ci_monitor/web/app.js",
+        old="""title="' + esc(m.reason.text) + '">' + esc(m.reason.text) + "</span>\"""",
+        new="""title="' + esc(m.reason.text) + '">' + m.reason.text + "</span>\"""",
+        tests=(
+            "tests/test_web_browser.py::"
+            "test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_notify_failures",
+        ),
+        needs_chrome=True,
+    ),
+    Mutant(
+        # #254 검증 P3 — 예약된 status 조회를 「가장 새 조회」로 친다: 앞선 실패 줄이 사라진다
+        name="m5s-web-store-check-scheduled-hides-failure",
+        path="src/remote_ci_monitor/web/app.js",
+        old="if (!STORE_CHECK_NOT_A_RESULT[j.state] && (!newest || j.id > newest.id)) newest = j;",
+        new="if (!newest || j.id > newest.id) newest = j;",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # #257 재검증 P2 — 반복을 다 쓴 조회를 실패로 보지 않는다: 예전 문서를 아무 말 없이 그린다
+        name="m5s-web-store-check-exhausted-not-failed",
+        path="src/remote_ci_monitor/web/app.js",
+        old="lost: 1, exhausted: 1, expired: 1 };",
+        new="lost: 1, expired: 1 };",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # H 실기 — 409 `schedule_exists` 가 「결과 모름」(3)이 된다: 같은 예약을 두 번 건 세션이
+        # 잡이 생겼는지 몰라 다시 묻거나 기다린다
+        name="m5s-cli-schedule-exists-is-unknown",
+        path="src/remote_ci_monitor/cli.py",
+        old='_REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")',
+        new='_REFUSED_CODES = ("release_route_required",)',
+        tests=("tests/test_cli_schedule_m5s.py",),
     ),
     # ── M5s D — 종료코드 반복 (`docs/m5s-workplan.md` §4.2 · §7) ──
     Mutant(

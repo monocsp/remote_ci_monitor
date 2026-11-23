@@ -139,6 +139,35 @@ describe("storeCheckModel — a failed check and a document from a failed job sa
     assert.equal(running.lastFailed, null);
     assert.deepEqual(running.checking, { id: 74, state: "running" });
   });
+  // #254 검증 P3(G 몫) — 예약된 조회나 반복 사슬의 중간 시도는 결과가 아니다. 실패한 조회 뒤에
+  // 그런 잡이 있어도 실패 줄이 사라지지 않는다
+  test("a scheduled or retried status job after a failed check does not hide the failure", () => {
+    ["scheduled", "retried"].forEach((st) => {
+      const m = S.storeCheckModel(release(entry(statusDoc()), [row(74, st), row(72, "failed"), row(70, "succeeded")]), PROFILE, "en");
+      assert.deepEqual(m.lastFailed, { id: 72, state: "failed", text: rcm.stateWord("failed", "en") }, st);
+      assert.equal(m.checking, null, st);
+    });
+  });
+  // #257 재검증 P2 — 반복을 다 쓴 조회(exhausted)와 시작 마감을 놓친 조회(expired)도 결과를 못 냈다.
+  // 그것이 가장 새 조회면 예전 문서를 아무 말 없이 그리지 않는다
+  test("an exhausted or expired newest check is a failed check", () => {
+    ["exhausted", "expired"].forEach((st) => {
+      const m = S.storeCheckModel(release(entry(statusDoc()), [row(72, st), row(70, "succeeded")]), PROFILE, "en");
+      assert.deepEqual(m.lastFailed, { id: 72, state: st, text: rcm.stateWord(st, "en") }, st);
+    });
+  });
+  test("the Korean failed-check line pairs with the English one, in 합쇼체", () => {
+    assert.equal(I18N.t("ko", "store_check.last_failed", { id: 690, state: rcm.stateWord("lost", "ko") }),
+      "마지막 조회 #690이 성공하지 못했습니다(결과를 잃음).");
+    assert.equal(I18N.t("ko", "store_check.last_failed", { id: 72, state: rcm.stateWord("failed", "ko"), older: true }),
+      "마지막 조회 #72가 성공하지 못했습니다(실패). 아래 상태는 그 전 조회의 것입니다.");
+  });
+  test("the failed-check line reads naturally for every failed state", () => {
+    assert.equal(I18N.t("en", "store_check.last_failed", { id: 690, state: rcm.stateWord("lost", "en") }),
+      "Last check #690 did not succeed (lost).");
+    assert.equal(I18N.t("en", "store_check.last_failed", { id: 690, state: rcm.stateWord("timed_out", "en"), older: true }),
+      "Last check #690 did not succeed (timed out). What follows is from an earlier check.");
+  });
   test("no document yet and the only check was lost: it says so", () => {
     const m = S.storeCheckModel(release(null, [row(9, "lost")]), PROFILE, "en");
     assert.deepEqual(m.lastFailed, { id: 9, state: "lost", text: rcm.stateWord("lost", "en") });

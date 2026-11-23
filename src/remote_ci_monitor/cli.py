@@ -1040,11 +1040,15 @@ def _submit_refused(args: argparse.Namespace) -> tuple[int, ...]:
 
 #: 잡을 만들지 않은 것이 확실한 409 코드 — 상태 코드만으로는 모르니(3) 코드로 2 를 고른다.
 #: `release_route_required` 는 golive 출시를 `POST /jobs` 로 낸 것이다(M5s 결정 235).
-_REFUSED_CODES = ("release_route_required",)
+#: `schedule_exists` 는 같은 예약이 이미 있고(결정 209), `golive_running` 은 같은 빌드의 출시
+#: 사슬이 살아 있다(결정 232). 둘 다 서버가 새 잡을 만들지 않았다고 말한 것이다(H 실기).
+_REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")
 
 
 def _refused_by_code(e: ClientError) -> bool:
-    return isinstance(e.body, dict) and e.body.get("code") in _REFUSED_CODES
+    if not isinstance(e.body, dict):
+        return False
+    return e.body.get("code") in _REFUSED_CODES or e.body.get("error_code") in _REFUSED_CODES
 
 
 def _run_git_ref(
@@ -1197,8 +1201,9 @@ class _ActionWatch:
     다시 기다릴 때는 플래그 없이 `rcm wait --job N` 이다 — 표식은 그 잡의 마지막 표식으로 남아
     있으므로 플래그를 다시 주면 곧바로 또 돌아온다.
 
-    취소 중이거나 취소된 잡의 표식은 알리지도, 4 로 돌아오지도 않는다. 그 잡은 더 돌지 않으므로
-    「잡은 계속 돈다」는 4 의 약속이 거짓이 되고, 사람에게 할 일을 시켜도 받을 잡이 없다.
+    취소 중이거나 끝난 잡(성공 · 실패 · 시간 초과 · 취소 · 유실 · 만료 …)의 표식은 알리지도,
+    4 로 돌아오지도 않는다. 그 잡은 더 돌지 않으므로 「잡은 계속 돈다」는 4 의 약속이 거짓이
+    되고, 사람에게 할 일을 시켜도 받을 잡이 없다. 표식은 최종 JSON 의 `action` 에 그대로 남는다.
     """
 
     def __init__(self, job_id: int, *, return_on_action: bool) -> None:
@@ -1214,7 +1219,8 @@ class _ActionWatch:
 
     @staticmethod
     def _stopped(job: dict[str, Any]) -> bool:
-        return job.get("state") in (CANCELLING, CANCELLED)
+        state = job.get("state")
+        return state in TERMINAL_STATES or state == CANCELLING
 
     def observe(self, job: dict[str, Any]) -> str | None:
         """잡 문서 하나를 본다. 알릴 줄이 있으면 돌려준다(같은 표식은 한 번만)."""

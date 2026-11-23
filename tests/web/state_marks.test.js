@@ -7,7 +7,7 @@
 // 움직임(`prefers-reduced-motion`)은 브라우저 시험(`tests/test_web_layout.py`)이 본다.
 //
 // 잠그는 것:
-// - 잡 상태 아홉 가지 전부에 **제 모양**이 있다 — `stateGlyph` 가 대체값 `·` 를 주지 않는다.
+// - 잡 상태 열세 가지(§4.2 의 아홉 + M5s 의 넷) 전부에 **제 모양**이 있다 — `stateGlyph` 가 대체값 `·` 를 주지 않는다.
 //   (`·` 는 「모르는 상태」 자리다. 아는 상태가 그 값을 받으면 모양 채널이 통째로 없는 것이다.)
 // - 두 언어 모두에서 상태 글자가 비어 있지 않고, 영어 식별자가 한국어 화면에 새지 않는다.
 // - 실행 중과 대기가 같은 모양을 쓰지 않는다 — 큐에서 늘 나란히 보이는 한 쌍이다(§4.2 채운 원/빈 원).
@@ -31,10 +31,11 @@ const JOB_STATES = Object.keys(I18N.MESSAGES.en)
   .map((k) => k.slice("state.".length))
   .filter((s) => !NOT_A_JOB_STATE.has(s));
 
-test("§4.2 의 잡 상태 아홉 가지가 카탈로그에 있다", () => {
+test("§4.2 의 잡 상태 아홉 가지와 M5s 의 넷이 카탈로그에 있다", () => {
+  // M5s — `scheduled`·`expired`(예약 실행)와 `retried`·`exhausted`(종료코드 반복)를 더했다
   assert.deepEqual(JOB_STATES.slice().sort(), [
-    "cancelled", "cancelling", "failed", "lost", "queued",
-    "running", "succeeded", "timed_out", "uploading"
+    "cancelled", "cancelling", "exhausted", "expired", "failed", "lost", "queued",
+    "retried", "running", "scheduled", "succeeded", "timed_out", "uploading"
   ]);
 });
 

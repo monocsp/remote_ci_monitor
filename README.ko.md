@@ -253,7 +253,9 @@ default = "full"
 `http://<빌드머신>:8787/` 을 브라우저로 연다(폰 포함). `rcm serve` 가 내주는 정적 파일 셋이고,
 빌드 단계도 외부 자산도 없다. 첫 화면이 세 가지를 한눈에 답한다. **내 작업**(열쇠 버튼으로 토큰을
 넣는다), **확인이 필요한 작업**(손쓸 수 있는 원인만, 나쁜 것부터), **호스트 부하**. 그 아래에
-상태와 ETA confidence 가 붙은 큐, 호스트 카드, 최근 결과, 추정 근거가 있다. 출력만 조용해진 작업은
+상태와 ETA confidence 가 붙은 큐, 나중에 돌 예약, 호스트 카드, 최근 결과, 추정 근거가 있다. 사람이
+손대야 한다고 알린 작업(`사람이 할 일 · login · …`)은 **확인이 필요한 작업**의 맨 앞에 서고, 알림
+훅이 실패하면 머리에 그 수가 보인다. 출력만 조용해진 작업은
 「확인이 필요한 작업」에 오르지 않는다 — 판정 규칙은
 [설정 문서](docs/configuration.md#estimates-and-when-a-job-is-called-not-responding)에 있다.
 
@@ -364,6 +366,9 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 시도를 따라가고 마지막 시도의 종료 코드로 끝난다([나중에 다시 돌리기](docs/configuration.md#trying-again-later-presetsretry)).
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
+서버가 작업을 만들지 않았다고 확실히 말한 제출 거절도 2 다. 400 · 401 · 403 · 413 과, 코드가
+`schedule_exists` · `golive_running` · `release_route_required` 인 409 가 그렇다. 그 밖의 409 는
+작업이 생겼는지 알 수 없으므로 3 이다.
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·
 `rcm jobs` · `rcm top` 은 곧바로 `cannot reach <url>` 과 함께 3 이다.
 

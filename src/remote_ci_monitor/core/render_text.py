@@ -15,16 +15,20 @@ from zoneinfo import ZoneInfo
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
+    EXHAUSTED,
+    EXPIRED,
     FAILED,
     LOST,
     MODE_GIT_REF,
     QUEUED,
+    RETRIED,
     RUNNING,
     SUCCEEDED,
     TIMED_OUT,
     UPLOADING,
 )
 from remote_ci_monitor.core.outcome import label_text
+from remote_ci_monitor.core.progress import clean_line
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
 
@@ -40,6 +44,10 @@ _GLYPH = {
     TIMED_OUT: "⏱",
     CANCELLED: "■",
     LOST: "?",
+    # M5s — 만료는 돌지 않았다(모래시계), 시도를 다 씀은 실패와 같은 줄(종료 코드 1)
+    EXPIRED: "⌛",
+    EXHAUSTED: "❌",
+    RETRIED: "↻",
 }
 _STATE_WORD = {TIMED_OUT: "timed out"}
 
@@ -677,9 +685,11 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
             f"over by {fmt_duration(over)} · expected {fmt_duration(est.get('expected_seconds'))}"
         )
     if reason == "needs_action":
-        # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이다
+        # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이지만 옛 서버나
+        # 가짜 서버의 문서일 수 있어 `rcm wait` 의 `action_line` 처럼 한 번 더 씻는다
         act = row.get("action") if isinstance(row.get("action"), dict) else {}
-        code, note = act.get("code"), act.get("note")
+        code = act.get("code")
+        note = clean_line(act["note"]) if isinstance(act.get("note"), str) else None
         head = f"needs action · {code}" if code else "needs action"
         return f"{head} · {note}" if note else head
     if reason == "stuck":
@@ -1065,6 +1075,33 @@ def summary_names_step(r: dict[str, Any]) -> bool:
     return last is not None and args.get("last_step") == last
 
 
+def scheduled_line(
+    pool: Mapping[str, Any], *, tz: tzinfo | None, now: datetime | None, label: str = ""
+) -> list[str]:
+    """`scheduled — 2 · next 15:00 golive` — 그 풀의 예약 한 줄(M5s §4.1 「표시」).
+
+    예약이 없거나 키가 없는 옛 서버면 줄을 늘리지 않는다. 읽지 못했으면(`scheduled` 가 null 이거나
+    `scheduled_error` 가 왔으면) `unavailable` 이다 — 빈 목록과 같은 모양으로 그리지 않는다.
+    ETA 는 없다. 승격되기 전의 잡이 언제 끝날지는 지어내지 않는다.
+    """
+    if "scheduled" not in pool:
+        return []
+    rows = pool.get("scheduled")
+    if not isinstance(rows, list) or pool.get("scheduled_error"):
+        return [f"scheduled — unavailable: {pool.get('scheduled_error') or 'unknown error'}{label}"]
+    if not rows:
+        return []
+
+    def when(r: Mapping[str, Any]) -> tuple[float, int]:
+        at = parse_iso(r.get("not_before"))
+        return (at.timestamp() if at else float("inf"), r.get("id") or 0)
+
+    first = min(rows, key=when)
+    clock = fmt_clock(first.get("not_before"), tz, now=now)
+    name = first.get("preset") or first.get("key") or DASH
+    return [f"scheduled — {len(rows)} · next {clock} {name}{label}"]
+
+
 def render_pool(
     pool: dict[str, Any],
     *,
@@ -1103,6 +1140,7 @@ def render_pool(
             out.append(f"queue — {len(queue)} jobs · {running} running · {waiting} waiting")
         for row in queue:
             out.extend(render_queue_row(row, tz, now, workers))
+    out.extend(scheduled_line(pool, tz=tz, now=now, label=label))
 
     recent = pool.get("recent")
     if recent is None:

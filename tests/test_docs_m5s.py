@@ -318,6 +318,46 @@ def test_release_status_panel_readmes_and_changelog_name_the_panel():
         assert needle in text, f"CHANGELOG.md [Unreleased] lacks {needle!r}"
 
 
+# ── PR G: 화면의 예약 · 표식 · 알림 실패 배지 (§4.1 「표시」 · §4.3 · §4.7) ─────
+
+
+def test_web_schedule_and_action_are_documented_on_screen():
+    """예약 절 · `rcm top` 한 줄 · 웹의 「사람이 할 일」 · 알림 실패 배지 · `not_scheduled` 문구 ·
+    끝난 잡은 「needs action」 줄을 찍지 않는다는 것을 설정 문서 · 사용 안내(영 · 한) · README
+    (영 · 한) · CHANGELOG 가 말한다."""
+    config = action_flat(read("docs/configuration.md"))
+    for word in (
+        "**Scheduled (N)**",
+        "Scheduled jobs unavailable",
+        "scheduled — 2 · next 15:00 golive",
+        "scheduled — unavailable: <error>",
+        "idle lane did not pick it up",
+        "needs action · <code> · <note>",
+        "(succeeded, failed, timed out, lost, expired)",
+        "`notify failures N` badge",
+    ):
+        assert word in config, f"docs/configuration.md does not mention {word!r}"
+    en = action_flat(read("docs/usage.md"))
+    ko = action_flat(read("docs/usage.ko.md"))
+    assert "**Scheduled (N)**" in en and "`notify failures N`" in en
+    assert "**예약 (N)**" in ko and "`알림 실패 N`" in ko
+    for text in (en, ko):
+        assert "scheduled — 2 · next 15:00 golive" in text
+    assert "needs action · login" in read("README.md")
+    assert "사람이 할 일 · login" in read("README.ko.md")
+    unreleased = unreleased_only(read("CHANGELOG.md"))
+    for word in (
+        "**Scheduled (N)**",
+        "scheduled — N · next HH:MM <preset>",
+        "`needs action · <code> · <note>`",
+        "`notify failures N`",
+        "idle lane did not pick it up",
+        "`retried`",
+        "`exhausted`",
+    ):
+        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word!r}"
+
+
 # ── PR F: golive 라우트와 원칙 문장 (§4.5 · §3 #8 · 결정 217 · 235) ─────────────────
 
 PRINCIPLE_EN = (
@@ -455,3 +495,16 @@ def test_golive_route_a_plan_measured_in_the_future_is_documented_as_stale():
     assert phrase in row, "the GET …/release row lost the future-measured_at rule"
     unreleased = unreleased_only(read("CHANGELOG.md"))
     assert "`measured_at` is later than now is stale" in unreleased
+
+
+def test_web_schedule_and_action_docs_say_a_known_409_refusal_exits_2():
+    """H 실기 — `schedule_exists` · `golive_running` 거절은 결과 모름(3)이 아니라 2 다."""
+    for rel in ("README.md", "README.ko.md"):
+        text = action_flat(read(rel))
+        for code in ("`schedule_exists`", "`golive_running`", "`release_route_required`"):
+            assert code in text, (rel, code)
+    assert "409 whose code is" in action_flat(read("README.md"))
+    assert "(`rcm run` exits 2: no job was made)" in action_flat(read("docs/configuration.md"))
+    assert "`schedule_exists` or `golive_running`" in action_flat(
+        unreleased_only(read("CHANGELOG.md"))
+    )
