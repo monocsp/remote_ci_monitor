@@ -68,10 +68,11 @@ of a key bumps that number and is listed here.
 - **The web queue shows scheduled jobs.** Below the queue, **Scheduled (N)** lists
   `pools[].scheduled[]` in time order — the preset, its inputs, who asked, the time and the start
   deadline in the display time zone, and **Cancel** on your own — with no ETA. When the server
-  could not read them the section is a red band, never an empty list. `rcm top` adds one line per
+  could not read them the section is a red band, never an empty list, and «Needs a look» says
+  `unknown — scheduled jobs unavailable` rather than `Nothing needs a look`. `rcm top` adds one line per
   pool, `scheduled — N · next HH:MM <preset>` (`scheduled — unavailable: …` on a read error). The
   web page draws the new states `scheduled`, `expired`, `retried` and `exhausted` with a glyph and
-  colour of their own, and `rcm top` gives `expired` and `exhausted` their own glyph in the recent
+  colour of their own (an `exhausted` recent row opens like a failed one, with its rerun command), and `rcm top` gives `expired` and `exhausted` their own glyph in the recent
   list. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - **The web page shows a job's action.** `needs_action` leads «Needs a look», and the status
   column reads `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean) with the job's note
@@ -85,6 +86,9 @@ of a key bumps that number and is listed here.
 - `rcm top` says `idle lane did not pick it up` where it said `not scheduled`;
   the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The Store tab's status panel no longer drops `Last check #N …` when a scheduled check follows
+  the failed one, and the line now reads `Last check #N did not succeed (lost).`
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
   `not scheduled`, as `rcm top` does. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - `rcm wait` no longer prints `#N needs action · …` for a job that has already ended (succeeded,

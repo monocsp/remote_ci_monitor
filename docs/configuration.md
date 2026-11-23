@@ -1851,7 +1851,8 @@ follow the ordinary [retention](#retention-what-is-kept-and-for-how-long).
 order: the preset, its inputs, who asked, the time and the start deadline in the display time
 zone, and **Cancel** on your own. A schedule has no ETA; the page does not invent one. When the
 server could not read them the section is a red **Scheduled jobs unavailable** band, never an
-empty list. `rcm top` adds one line per pool, `scheduled — 2 · next 15:00 golive`, or
+empty list, and «Needs a look» says `unknown — scheduled jobs unavailable` instead of
+`Nothing needs a look` (a schedule waiting for a person may be among them). `rcm top` adds one line per pool, `scheduled — 2 · next 15:00 golive`, or
 `scheduled — unavailable: <error>`; with no schedules it adds nothing. A job that missed its
 deadline is `expired · exit 2` in the recent list. The queue reason `not_scheduled` (a lane sat
 idle and did not pick the job up) reads `idle lane did not pick it up` on both, so it is not

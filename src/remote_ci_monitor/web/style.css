@@ -616,6 +616,8 @@ table.q td.source .uncommitted { display: flex; width: max-content; max-width: 1
 .prog .head .ph-b { flex: 0 0 auto; min-width: 0; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; }
 .step .sn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #queue .empty, #queue .pool-h { overflow-wrap: anywhere; }
+/* 오류 띠의 문장은 서버가 준 그대로라 띄어쓰기 없이 길 수 있다 — 폰 폭에서 옆으로 새지 않게 */
+#queue .banner { overflow-wrap: anywhere; }
 /* 예약 절(M5s) — 큐 표 아래. 행은 한 줄로 흐르다 좁으면 접힌다(폰에서 옆으로 밀지 않는다).
    ETA 칸이 없다 — 승격 전의 잡에 끝나는 시각을 지어내지 않는다 */
 .sched { margin-top: 10px; }

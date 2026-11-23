@@ -1883,10 +1883,14 @@ def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
 # RELEASE_STUB_JS 위에 status 역할을 덧씌운다: 프로파일에 `presets.status`, 릴리스 보기에 `status`
 # 항목(iOS 승인 · Android 는 목록에 없는 값)과 도는 status 잡 하나, 그리고 `checkStatus` 호출.
 # `?stale=1` 이면 오래된 상태다. `?checkfail=1` 이면 그 뒤의 조회 #690 이 실패했다.
+# `?checksched=1` 이면 실패한 #690 뒤에 예약된 조회 #695 가 있다(M5s G — 예약은 결과가 아니다).
+# `?docfailed=1` 이면 문서를 쓴 #680 이 실패로 끝났다(문서는 남았지만 그 잡의 상태를 같이 그린다).
 STORE_CHECK_STUB_JS = r"""
 (() => {
   const stale = /[?&]stale=1(&|$)/.test(location.search);
-  const checkFailed = /[?&]checkfail=1(&|$)/.test(location.search);
+  const checkSched = /[?&]checksched=1(&|$)/.test(location.search);
+  const checkFailed = checkSched || /[?&]checkfail=1(&|$)/.test(location.search);
+  const docFailed = /[?&]docfailed=1(&|$)/.test(location.search);
   const ok = (body, status) => Promise.resolve({ ok: true, status: status || 200, body });
   const api = window.rcmStoreApi, repo = api.repo, release = api.release;
   const statusDoc = { schema: 1, checked_at: new Date(Date.now() - 120000).toISOString(),
@@ -1901,13 +1905,16 @@ STORE_CHECK_STUB_JS = r"""
   });
   api.release = (name) => release(name).then((r) => {
     const body = Object.assign({}, r.body, {
-      status: { job_id: 680, state: "succeeded", measured_at: statusDoc.checked_at,
+      status: { job_id: 680, state: docFailed ? "failed" : "succeeded",
+                measured_at: statusDoc.checked_at,
                 age_seconds: stale ? 3000 : 120, stale: stale, doc: statusDoc },
       jobs: [{ id: 690, preset: "release-status", role: "status",
                state: checkFailed ? "failed" : "running",
                sha: "9e1c4d2f" + "0".repeat(32), ref: "main",
                started_at: new Date(Date.now() - 5000).toISOString(), finished_at: null,
-               artifacts: [] }].concat(r.body.jobs) });
+               artifacts: [] }].concat(checkSched ? [{ id: 695, preset: "release-status",
+               role: "status", state: "scheduled", sha: "9e1c4d2f" + "0".repeat(32), ref: "main",
+               started_at: null, finished_at: null, artifacts: [] }] : [], r.body.jobs) });
     return Object.assign({}, r, { body });
   });
   api.checkStatus = (name, body) => {
@@ -1989,8 +1996,18 @@ def test_store_review_panel_draws_both_stores_state_and_checks_again(tmp_path):
             # 새로 조회가 실패했다 — 예전 상태를 아무 말 없이 그리지 않는다
             c.open(base + "&checkfail=1#/store/app/status", ready_js=ready)
             failed = c.eval(_q(CHECK + " [data-store-check-failed]", ".textContent"))
-            assert failed.startswith("Last check #690 failed."), failed
+            assert failed.startswith("Last check #690 did not succeed (failed)."), failed
             assert c.eval(_q(CHECK + " [data-store-check-running]")) is None
+            assert c.eval(_q(CHECK + " [data-store-check-job-state]")) is None
+            # 실패 뒤에 예약된 조회가 있어도 실패 줄은 남는다 — 예약은 결과가 아니다(M5s G)
+            c.open(base + "&checksched=1#/store/app/status", ready_js=ready)
+            failed = c.eval(_q(CHECK + " [data-store-check-failed]", ".textContent"))
+            assert failed.startswith("Last check #690 did not succeed (failed)."), failed
+            # 문서를 쓴 잡이 실패로 끝났다 — 문서 옆에 그 잡의 상태 낱말을 그린다
+            c.open(base + "&docfailed=1#/store/app/status", ready_js=ready)
+            span = CHECK + " [data-store-check-job-state]"
+            assert c.eval(_q(span, ".getAttribute('data-store-check-job-state')")) == "failed"
+            assert c.eval(_q(span, ".textContent")) == "failed"
             assert c.page_errors() == []
     finally:
         srv.close()
@@ -3495,89 +3512,199 @@ class _FailedNotifier:
         pass
 
 
+# 진짜 서버의 `/api/status` 를 받아서 고친다. `?evil=1` 이면 예약 행과 대기 행에 HTML 이 든 note 의
+# 「사람이 할 일」 표식을 단다(예약 행의 표식은 D 가 채우는 키다). `?schederr=1` 이면 예약 조회가
+# 실패한 문서다 — 오류 문장은 띄어쓰기 없이 길다(폰 폭에서 옆으로 새는지 본다).
+SCHED_STUB_JS = r"""
+(() => {
+  const evil = /[?&]evil=1(&|$)/.test(location.search);
+  const broken = /[?&]schederr=1(&|$)/.test(location.search);
+  if (!evil && !broken) return;
+  const NOTE = '<img src=x onerror="window.__pwned=1">sign in';
+  const real = window.fetch.bind(window);
+  window.fetch = (url, opts) => real(url, opts).then((r) => {
+    if (String(url).indexOf('/api/status') !== 0 || !r.ok) return r;
+    return r.json().then((doc) => {
+      const pool = doc.pools[0];
+      if (broken) {
+        pool.scheduled = null;
+        pool.scheduled_error = 'sqlite3.OperationalError:' + 'database_is_locked_'.repeat(12);
+        pool.scheduled_error_code = null;
+      }
+      if (evil) {
+        const act = { code: 'login', note: NOTE, at: doc.generated_at };
+        (pool.scheduled || []).forEach((row) => { row.reason = 'needs_action'; row.action = act; });
+        (pool.queue || []).forEach((row) => {
+          if (row.state === 'queued') { row.reason = 'needs_action'; row.action = act; }
+        });
+      }
+      return new Response(JSON.stringify(doc), { status: r.status, headers: r.headers });
+    });
+  });
+})();
+"""
+
 SCHED_JS = """
 (() => {
   const sec = document.querySelector('#queue [data-scheduled-section]');
-  const row = document.querySelector('#queue [data-scheduled="%d"]');
+  const row = (id) => document.querySelector('#queue [data-scheduled="' + id + '"]');
   const chip = document.querySelector('[data-notify-failures]');
   return {
     title: sec ? sec.querySelector('.pool-h').textContent : null,
-    row: row ? row.textContent : null,
-    cancel: row ? row.querySelectorAll('[data-cancel]').length : null,
-    eta: row ? row.querySelectorAll('.eta, .conf').length : null,
+    order: [...document.querySelectorAll('#queue [data-scheduled]')]
+      .map((el) => Number(el.getAttribute('data-scheduled'))),
+    row: row(%(mine)d) ? row(%(mine)d).textContent : null,
+    cancelMine: row(%(mine)d) ? row(%(mine)d).querySelectorAll('[data-cancel]').length : null,
+    cancelOther: row(%(other)d) ? row(%(other)d).querySelectorAll('[data-cancel]').length : null,
+    eta: row(%(mine)d) ? row(%(mine)d).querySelectorAll('.eta, .conf').length : null,
+    inQueueTable: document.querySelectorAll(
+      '#queue tr[data-job="%(mine)d"], #queue tr[data-job="%(other)d"]').length,
     chip: chip && !chip.hidden ? chip.textContent : null,
     chipTitle: chip ? chip.title : null,
+    stuck: document.querySelector('[data-stuck]').textContent,
     overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
   };
 })()
 """
 
+EVIL_JS = """
+(() => {
+  const text = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? el.textContent : null;
+  };
+  return {
+    imgs: document.querySelectorAll('#queue img, [data-stuck] img').length,
+    pwned: window.__pwned === 1,
+    sched: text('#queue [data-scheduled="%(mine)d"] .reason'),
+    queue: text('#queue tr[data-job="%(queued)d"] td.reason .reason'),
+    stuck: text('[data-stuck]'),
+  };
+})()
+"""
+
+
+def _submit_tree(srv, token: str, tree_hash: str, **extra: Any) -> int:
+    body = {
+        "preset": "ok",
+        "inputs": {},
+        "source": {
+            "mode": "tree",
+            "repo": "org/app",
+            "base_sha": "abc123f",
+            "dirty": False,
+            "tree_hash": tree_hash,
+            "bytes": len(TAR),
+        },
+        "requester_label": f"{token}@host",
+        **extra,
+    }
+    code, doc = srv.req("POST", "/jobs", token=token, json_body=body)
+    assert code == 201, doc
+    assert srv.upload(doc["job_id"], token=token)[0] == 200
+    return doc["job_id"]
+
 
 def test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_notify_failures(
     tmp_path,
 ):
+    """예약 절(M5s §4.1) — 시각순 · 내 예약에만 취소 · ETA 없음 · 큐 표에 섞이지 않음. 표식
+    note 의 HTML 은 예약 행 · 큐 행 · Needs a look 어디서도 태그가 되지 않는다. 예약 조회가
+    실패하면 빨간 띠와 「모른다」 요약이고(#257 검증 P1), 긴 오류 문장이 폰 폭에서 옆으로 새지
+    않는다."""
     srv = Server(tmp_path, workers=False)
-    jid = None
+    jobs: list[tuple[int, str]] = []
     try:
-        body = {
-            "preset": "ok",
-            "inputs": {},
-            "source": {
-                "mode": "tree",
-                "repo": "org/app",
-                "base_sha": "abc123f",
-                "dirty": False,
-                "tree_hash": OTHER_TREE,
-                "bytes": len(TAR),
-            },
-            "requester_label": "alice@host",
-            "start_in_seconds": 3600,
-        }
-        code, doc = srv.req("POST", "/jobs", token="alice", json_body=body)
-        assert code == 201, doc
-        jid = doc["job_id"]
-        assert srv.upload(jid)[0] == 200
-        assert srv.store.get_job(jid).state == "scheduled"
+        mine = _submit_tree(srv, "alice", OTHER_TREE, start_in_seconds=3600)
+        jobs.append((mine, "alice"))
+        other = _submit_tree(srv, "bob", "cd" * 32, start_in_seconds=7200)
+        jobs.append((other, "bob"))
+        queued = _submit_tree(srv, "alice", "ef" * 32)
+        jobs.append((queued, "alice"))
+        assert srv.store.get_job(mine).state == "scheduled"
+        assert srv.store.get_job(other).state == "scheduled"
         srv.app.notifier = _FailedNotifier()
-        url = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
-        ready = f"document.querySelector('#queue [data-scheduled=\"{jid}\"]') !== null"
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = f"document.querySelector('#queue [data-scheduled=\"{mine}\"]') !== null"
+        ids = {"mine": mine, "other": other, "queued": queued}
         with Chrome(tmp_path / "chrome-sched", window="1240,900") as c:
-            c.open(url, ready_js=ready)
-            anon = c.eval(SCHED_JS % jid)
-            # 토큰이 있어야 내 예약의 취소 버튼이 열린다
+            c.call("Page.addScriptToEvaluateOnNewDocument", {"source": SCHED_STUB_JS})
+            c.open(base, ready_js=ready)
+            anon = c.eval(SCHED_JS % ids)
+            # 토큰이 있어야 내 예약의 취소 버튼이 열린다 — 남의 예약에는 없다
             c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
             c.open(
-                url,
-                ready_js=ready + f' && document.querySelector(\'[data-scheduled="{jid}"]'
+                base,
+                ready_js=ready + f' && document.querySelector(\'[data-scheduled="{mine}"]'
                 " [data-cancel]') !== null",
             )
-            mine = c.eval(SCHED_JS % jid)
+            withtoken = c.eval(SCHED_JS % ids)
             c.viewport(390, 844, mobile=True)
             time.sleep(0.3)
-            narrow = c.eval(SCHED_JS % jid)
+            narrow = c.eval(SCHED_JS % ids)
             c.call("Emulation.clearDeviceMetricsOverride")
-            c.eval(f"document.querySelector('[data-scheduled=\"{jid}\"] [data-cancel]').click()")
+            # note 의 HTML — 세 자리 모두 글자로만 그린다
+            c.open(
+                base + "&evil=1",
+                ready_js=f"document.querySelector('#queue [data-scheduled=\"{mine}\"] .reason')"
+                " !== null",
+            )
+            time.sleep(0.3)
+            evil = c.eval(EVIL_JS % ids)
+            # Needs a look 의 예약 줄을 누르면 그 예약 행으로 간다
+            c.eval(f"document.querySelector('[data-stuck] [data-goto=\"{mine}\"]').click()")
+            _wait(c, f"document.querySelector('.schedrow.hl[data-scheduled=\"{mine}\"]') !== null")
+            # 예약 조회 실패 — 빈 목록이 아니라 빨간 띠, 요약은 「모른다」
+            c.open(
+                base + "&schederr=1",
+                ready_js="document.querySelector('#queue [data-error=\"scheduled\"]') !== null",
+            )
+            band = c.eval("document.querySelector('#queue [data-error=\"scheduled\"]').textContent")
+            broken = c.eval(SCHED_JS % ids)
+            c.viewport(390, 844, mobile=True)
+            time.sleep(0.3)
+            broken_narrow = c.eval(SCHED_JS % ids)
+            c.call("Emulation.clearDeviceMetricsOverride")
+            # 내 예약을 취소한다
+            c.open(base, ready_js=ready)
+            c.eval(f"document.querySelector('[data-scheduled=\"{mine}\"] [data-cancel]').click()")
             _wait(c, "document.getElementById('cancel-dialog').open === true")
             dialog = c.eval("document.querySelector('[data-cancel-body]').textContent")
             c.eval("document.querySelector('[data-cancel-go]').click()")
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and srv.store.get_job(jid).state == "scheduled":
+            while time.monotonic() < deadline and srv.store.get_job(mine).state == "scheduled":
                 time.sleep(0.1)
-            final = srv.store.get_job(jid).state
+            final = srv.store.get_job(mine).state
             assert c.page_errors() == []
     finally:
-        if jid is not None:
-            srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})
+        for jid, token in jobs:
+            srv.req("POST", f"/jobs/{jid}/cancel", token=token, json_body={})
         srv.close()
 
-    assert anon["title"] == "Scheduled (1)", anon
-    assert anon["cancel"] == 0, "토큰 없는 페이지에는 취소 버튼이 없다"
-    assert mine["cancel"] == 1, mine
-    for word in (f"#{jid}", "scheduled", "ok", "alice@host", "at ", "start by "):
-        assert word in mine["row"], (word, mine["row"])
-    assert mine["eta"] == 0, "예약 행에 ETA 를 지어내지 않는다"
-    assert mine["chip"] == "notify failures 2", mine
-    assert "server log" in mine["chipTitle"], mine
+    assert anon["title"] == "Scheduled (2)", anon
+    assert anon["order"] == [mine, other], "시각순이다"
+    assert anon["inQueueTable"] == 0, "예약은 큐 표의 행이 아니다"
+    assert anon["cancelMine"] == 0, "토큰 없는 페이지에는 취소 버튼이 없다"
+    assert withtoken["cancelMine"] == 1, withtoken
+    assert withtoken["cancelOther"] == 0, "남의 예약에는 취소 버튼이 없다"
+    for word in (f"#{mine}", "scheduled", "ok", "alice@host", "at ", "start by "):
+        assert word in withtoken["row"], (word, withtoken["row"])
+    assert withtoken["eta"] == 0, "예약 행에 ETA 를 지어내지 않는다"
+    assert withtoken["chip"] == "notify failures 2", withtoken
+    assert "server log" in withtoken["chipTitle"], withtoken
     assert narrow["overflow"] <= 0, f"phone width scrolls sideways by {narrow['overflow']}px"
+    assert evil["imgs"] == 0 and not evil["pwned"], evil
+    for where in ("sched", "queue", "stuck"):
+        assert evil[where] and '<img src=x onerror="window.__pwned=1">sign in' in evil[where], (
+            where,
+            evil,
+        )
+    assert band.startswith("Scheduled jobs unavailable — sqlite3.OperationalError:"), band
+    assert broken["order"] == [], broken
+    assert "Nothing needs a look" not in broken["stuck"], broken["stuck"]
+    assert "scheduled jobs unavailable" in broken["stuck"], broken["stuck"]
+    assert broken_narrow["overflow"] <= 0, (
+        f"a long error sentence scrolls the phone sideways by {broken_narrow['overflow']}px"
+    )
     assert "will not run at its time" in dialog, dialog
     assert final == "cancelled", final

@@ -1911,6 +1911,40 @@ MUTANTS = (
         tests=("tests/web/schedule_m5s.test.js",),
         runner="node",
     ),
+    Mutant(
+        # #257 검증 P1 — 예약을 못 읽었는데 「Nothing needs a look」(초록)을 그린다(fail-open)
+        name="m5s-web-needs-a-look-ok-without-schedules",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "if (schedUnknown && !lines.length) "
+            'return { kind: "unknown", lines: [], why: "scheduled" };'
+        ),
+        new="",
+        tests=("tests/web/schedule_m5s.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 예약 행 이유 칸이 note 를 escape 하지 않는다 — 잡이 찍은 `<img onerror>` 가 페이지에서
+        # 돈다
+        name="m5s-web-scheduled-note-unescaped",
+        path="src/remote_ci_monitor/web/app.js",
+        old="""title="' + esc(m.reason.text) + '">' + esc(m.reason.text) + "</span>\"""",
+        new="""title="' + esc(m.reason.text) + '">' + m.reason.text + "</span>\"""",
+        tests=(
+            "tests/test_web_browser.py::"
+            "test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_notify_failures",
+        ),
+        needs_chrome=True,
+    ),
+    Mutant(
+        # #254 검증 P3 — 예약된 status 조회를 「가장 새 조회」로 친다: 앞선 실패 줄이 사라진다
+        name="m5s-web-store-check-scheduled-hides-failure",
+        path="src/remote_ci_monitor/web/app.js",
+        old="if (!STORE_CHECK_NOT_A_RESULT[j.state] && (!newest || j.id > newest.id)) newest = j;",
+        new="if (!newest || j.id > newest.id) newest = j;",
+        tests=("tests/web/store_status.test.js",),
+        runner="node",
+    ),
 )
 
 

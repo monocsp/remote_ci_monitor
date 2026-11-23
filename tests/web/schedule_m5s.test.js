@@ -207,10 +207,48 @@ describe("「사람이 할 일」 — needs_action", () => {
     assert.equal(r.lines[0].reason, "needs_action");
   });
 
-  test("예약을 읽지 못해도 큐의 판단은 그대로다 — 큐가 깨끗하면 ok", () => {
+  // #257 격리 검증 P1 — 예약을 못 읽었는데 「Nothing needs a look」(초록)을 그리면 fail-open 이다.
+  // 예약 행의 표식(결정 233)이 거기 있었을 수 있다
+  test("예약을 읽지 못했고 큐가 깨끗하면 ok 가 아니라 unknown 이다 — 예약 쪽 이유를 단다", () => {
     const s = withScheduled(null, { scheduled_error: "boom" });
     s.pools[0].queue = [];
-    assert.equal(rcm.notMoving(s, null).kind, "ok");
+    const r = rcm.notMoving(s, null);
+    assert.equal(r.kind, "unknown");
+    assert.equal(r.why, "scheduled");
+    assert.deepEqual(r.lines, []);
+    // 큐를 못 읽은 것과는 다른 이유다
+    const q = fixture("main");
+    q.pools[0].queue = null;
+    assert.notEqual(rcm.notMoving(q, null).why, "scheduled");
+  });
+
+  test("예약을 읽지 못해도 큐의 줄은 그린다 — 다만 「나머지 없음」은 말하지 않는다(partial)", () => {
+    const s = withScheduled(null, { scheduled_error: "boom" });
+    s.pools[0].queue = [Object.assign(structuredClone(job(fixture("main"), 412)), { id: 700, reason: "stuck" })];
+    const r = rcm.notMoving(s, null);
+    assert.equal(r.kind, "list");
+    assert.deepEqual(r.lines.map((l) => l.jobId), [700]);
+    assert.equal(r.partial, true);
+    // 예약을 읽었으면 partial 이 아니다
+    const ok = withScheduled([]);
+    ok.pools[0].queue = s.pools[0].queue;
+    assert.ok(!rcm.notMoving(ok, null).partial);
+  });
+
+  test("예약은 큐가 아니다 — 큐 머리의 개수에 섞이지 않는다", () => {
+    const s = withScheduled([sched(800), sched(801)]);
+    s.pools[0].queue = [];
+    assert.ok(rcm.queueHeader(s, NOW, "en").startsWith("0 jobs"), rcm.queueHeader(s, NOW, "en"));
+    assert.equal(rcm.yourJobs(s, "alice-laptop", "en").kind, "none");
+  });
+});
+
+describe("exhausted 최근 행 — failed 처럼 재실행 명령이 있다", () => {
+  test("rerun 이 있다 (끝내 확인하지 못했다 — 사람이 다시 돌린다)", () => {
+    const row = { id: 9, state: "exhausted", preset: "golive", inputs: { platform: "ios" },
+      source: { mode: "git_ref", ref: "main" } };
+    assert.equal(rcm.recentLine(row, TZ, NOW, "en").rerun, "rcm run golive -f platform=ios --ref main");
+    assert.equal(rcm.recentLine(Object.assign({}, row, { state: "expired" }), TZ, NOW, "en").rerun, null);
   });
 });
 

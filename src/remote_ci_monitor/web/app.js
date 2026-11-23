@@ -523,7 +523,7 @@
       lines.push({ jobId: row.id, reason: row.reason, text: r.text, rank: ACTIONABLE.indexOf(row.reason) });
     });
     // 예약 행(M5s 결정 233) — 반복 사슬이 시도 사이를 기다리는 동안에도 표식이 남는다. 이유가 없는
-    // 예약은 아무것도 아니다(「모른다」가 아니다). 예약을 못 읽었으면 큐의 판단만 쓴다
+    // 예약은 아무것도 아니다(「모른다」가 아니다).
     var sc = scheduledOf(status);
     sc.rows.forEach(function (row) {
       if (!row || ACTIONABLE.indexOf(row.reason) === -1) return;
@@ -531,8 +531,13 @@
       lines.push({ jobId: row.id, reason: row.reason, text: r.text, rank: ACTIONABLE.indexOf(row.reason) });
     });
     if (unknown && !lines.length) return { kind: "unknown", lines: [] };
+    // 예약을 못 읽었으면 「확인할 것 없음」이라고 말할 수 없다(fail-open 금지, #257 검증 P1) — 거기
+    // 표식이 있었을 수 있다. 줄이 없으면 「모른다」, 있으면 그 줄만 그리고 「나머지 없음」은 빼게 한다
+    var schedUnknown = sc.kind === "error";
+    if (schedUnknown && !lines.length) return { kind: "unknown", lines: [], why: "scheduled" };
     lines.sort(function (a, b) { return a.rank - b.rank || (a.jobId || 0) - (b.jobId || 0); });
-    return lines.length ? { kind: "list", lines: lines } : { kind: "ok", lines: [] };
+    if (lines.length) return schedUnknown ? { kind: "list", lines: lines, partial: true } : { kind: "list", lines: lines };
+    return { kind: "ok", lines: [] };
   }
 
   function isMine(row, me) {
@@ -1499,7 +1504,7 @@
       when: fmtClock(job.finished_at, tz, nowMs),
       summary: summary,
       supersededBy: supersededBy,
-      rerun: (state === "failed" || state === "timed_out") ? rerunCommand(job) : null
+      rerun: (state === "failed" || state === "timed_out" || state === "exhausted") ? rerunCommand(job) : null
     };
   }
   /** 요약 글에서 `#N`(그 번호 그대로, 뒤에 숫자가 더 붙지 않은 것) 하나를 그 잡으로 가는 버튼으로 —
@@ -2699,6 +2704,7 @@
     releasing: "running", released: "ok", unknown: "none" };
   var STORE_CHECK_WAITING = { queued: 1, uploading: 1, running: 1, cancelling: 1 };
   var STORE_CHECK_FAILED = { failed: 1, timed_out: 1, lost: 1 };
+  var STORE_CHECK_NOT_A_RESULT = { scheduled: 1, retried: 1 };
   function storeCheckText(v) { return typeof v === "string" && v ? v : isNum(v) ? String(v) : DASH; }
   /**
    * 검토 패널의 「스토어 심사 상태」 모형. 프로파일에 `presets.status` 가 없으면 null(절이 없다).
@@ -2723,7 +2729,9 @@
     var checking = null, newest = null;
     (release && Array.isArray(release.jobs) ? release.jobs : []).forEach(function (j) {
       if (!j || j.role !== "status" || !isNum(j.id)) return;
-      if (!newest || j.id > newest.id) newest = j;
+      // 예약된 조회와 반복 사슬의 중간 시도(M5s)는 결과가 아니다 — 「가장 새 조회」로 치면 앞선
+      // 실패 줄이 사라진다
+      if (!STORE_CHECK_NOT_A_RESULT[j.state] && (!newest || j.id > newest.id)) newest = j;
       if (STORE_CHECK_WAITING[j.state] && (!checking || j.id > checking.id)) checking = { id: j.id, state: j.state };
     });
     var docJob = e && isNum(e.job_id) ? e.job_id : null;
@@ -3822,11 +3830,13 @@
     // 24
     var nm = notMoving(st, state.me, L());
     var s;
-    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr("summary.queue_unknown")) + "</span>";
+    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr(nm.why === "scheduled" ? "summary.scheduled_unknown" : "summary.queue_unknown")) + "</span>";
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
-    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("") + '<span class="sl muted">' + esc(tr("summary.nothing_else_stuck")) + "</span>";
+    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
+      // 예약을 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
+      + '<span class="sl muted">' + esc(tr(nm.partial ? "summary.scheduled_unknown" : "summary.nothing_else_stuck")) + "</span>";
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
@@ -4621,7 +4631,7 @@
     shown.forEach(function (job) {
       var l = recentLine(job, tz(), now(), L());
       var open = !!state.expandedRecent[job.id];
-      var failedish = job.state === "failed" || job.state === "timed_out";
+      var failedish = job.state === "failed" || job.state === "timed_out" || job.state === "exhausted";
       // 결과마다 왼쪽 3px 레인 — 큐 표와 같은 채널이다(성공 · 실패 · 취소 · 결과를 잃음)
       html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
@@ -4822,10 +4832,10 @@
     if (q && (q.state === "running" || q.state === "cancelling") && !state.expanded[id]) {
       state.expanded[id] = true; saveExpanded();
     }
-    var row = $('tr[data-job="' + id + '"]') || $('.rrow[data-job="' + id + '"]');
+    var row = $('tr[data-job="' + id + '"]') || $('.rrow[data-job="' + id + '"]') || $('[data-scheduled="' + id + '"]');
     if (row) {
       renderQueue(); renderRecent();
-      var el = $('[data-job="' + id + '"]');
+      var el = $('[data-job="' + id + '"]') || $('[data-scheduled="' + id + '"]');
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
       setTimeout(function () { if (state.hl === id) { state.hl = null; renderQueue(); renderRecent(); } }, 2500);
       return;
