@@ -2,13 +2,16 @@
 # M5s 실기 — 진짜 `rcm serve` 프로세스로 docs/m5s-workplan.md §7 의 S1~S6(실기 칸)과
 # 덧붙인 둘(action 표식 · 웹 `/`)을 돌린다. 테스트 스위트가 아니다(pytest 가 부르지 않는다).
 #
-#   scripts/acceptance/m5s_live.sh            # 포트 8796, 약 7분(S1 이 진짜 5분을 기다린다)
+#   scripts/acceptance/m5s_live.sh            # 포트 8796, 약 5분 10초(S1 이 진짜 5분을 기다린다)
 #   M5S_PORT=8797 scripts/acceptance/m5s_live.sh
 #
 # 지키는 것:
 #   - 이 체크아웃의 .venv/bin/rcm 만 쓴다. 운영(8787 · ~/.config/rcm · ~/.local/share/rcm ·
 #     서비스 venv)은 건드리지 않는다. HOME 을 시험 폴더로 바꿔 운영 client.toml 을 안 읽는다.
 #   - data_dir 은 ~/.local/share/rcm-devtest-m5s/data(/tmp 아래 금지 — 시작할 때 비운다).
+#   - 시작할 때 지우는 폴더(M5S_BASE)는 허용 목록으로만 받는다: ~/.local/share/rcm-devtest-<이름>
+#     한 단계. 설정 폴더(M5S_CONF_DIR)는 지우지 않지만 두 파일을 덮어쓰므로 M5S_BASE 안이거나
+#     비어 있는(또는 없는) 절대 경로만 받는다.
 #   - 프리셋은 sh -c 로 종료코드와 마커만 찍는 가짜, 알림 훅은 받은 env 를 파일에 쓰는 가짜다.
 #   - 끝나면(실패해도) 서버와 백그라운드 rcm wait 를 모두 멈춘다.
 #
@@ -20,20 +23,49 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RCM="$ROOT/.venv/bin/rcm"
 PY="$ROOT/.venv/bin/python"
 PORT=${M5S_PORT:-8796}
-B=${M5S_BASE:-$HOME/.local/share/rcm-devtest-m5s}
-CONF=${M5S_CONF_DIR:-$B/conf}
+REAL_HOME=${HOME:-}
+B=${M5S_BASE-$REAL_HOME/.local/share/rcm-devtest-m5s}
+CONF=${M5S_CONF_DIR-$B/conf}
 OUT="$B/out"
 URL="http://127.0.0.1:$PORT"
-REAL_HOME=$HOME
 
 die() { echo "m5s_live: $*" >&2; exit 2; }
 
+# 절대 경로이고 `.`·`..` 조각이 없는가 — 아니면 die
+plain_abs() { # plain_abs <이름> <경로>
+  [ -n "$2" ] || die "$1 is empty"
+  case "$2" in /*) ;; *) die "$1 must be an absolute path ($2)" ;; esac
+  case "/$2/" in */../* | */./*) die "$1 must not contain . or .. ($2)" ;; esac
+}
+
+# 시작할 때 `rm -rf "$B"` 를 하므로 B 는 허용 목록으로만 받는다:
+# $HOME/.local/share/rcm-devtest-<이름>, 이름은 한 단계(슬래시 없음)이고 비어 있지 않다.
+# 그 밖(HOME, /, 운영 ~/.local/share/rcm, /tmp, 상대 경로)은 모두 거절한다.
+case "$REAL_HOME" in /?*) ;; *) die "HOME must be an absolute path other than / ($REAL_HOME)" ;; esac
+plain_abs M5S_BASE "$B"
+DEVTEST_PREFIX="$REAL_HOME/.local/share/rcm-devtest-"
+case "$B" in
+  "$DEVTEST_PREFIX"?*) ;;
+  *) die "M5S_BASE must be ${DEVTEST_PREFIX}<name> ($B)" ;;
+esac
+case "${B#"$DEVTEST_PREFIX"}" in
+  */*) die "M5S_BASE must be one level: ${DEVTEST_PREFIX}<name> without / ($B)" ;;
+esac
+
+# 설정 폴더는 지우지 않지만 server.toml · hook.sh 를 덮어쓴다. 운영 ~/.config/rcm 같은 곳을
+# 덮지 않게, B 안이거나 비어 있는(없는) 폴더만 받는다.
+plain_abs M5S_CONF_DIR "$CONF"
+case "$CONF" in
+  "$B" | "$B/"*) ;;
+  *)
+    if [ -e "$CONF" ] && [ -n "$(ls -A "$CONF" 2>/dev/null)" ]; then
+      die "M5S_CONF_DIR must be inside M5S_BASE or an empty directory ($CONF)"
+    fi
+    ;;
+esac
+
 [ -x "$RCM" ] || die "no $RCM — make the worktree's .venv first"
 [ "$PORT" != 8787 ] || die "8787 is the production port"
-case "$B" in
-  /tmp/* | /private/tmp/*) die "data must not live under /tmp ($B)" ;;
-  "$REAL_HOME/.local/share/rcm" | "$REAL_HOME/.local/share/rcm/"*) die "$B is production data" ;;
-esac
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then die "port $PORT is in use"; fi
 
 rm -rf "$B"
