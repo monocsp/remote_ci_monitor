@@ -27,6 +27,18 @@ of a key bumps that number and is listed here.
   `scheduled_error_code`), and queue and recent rows carry `not_before` and `start_deadline`.
   Keys added only — `schema_version` stays 1.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- **Two optional Store-tab roles, `status` and `golive`.** A release profile may now name a
+  `status` preset (both stores' review state, read-only, written to `status.json`) and a `golive`
+  preset (`mode = plan|release`: `golive-plan.json` says which platform is approved, `golive.json`
+  what the release did). `GET /api/repos/<repo>/release` carries `status` and
+  `golive {plan, result}` (null until a job writes the file); the routes and the screen come
+  later in this milestone. `rcm check` fails a `golive` preset whose `mode` defaults to
+  `release`, a `status` or `golive` preset that lacks the inputs rcm sends, and warns when either
+  role is unset or `golive` has no `build_name_android`. `rcm_contract.py` validates the three new
+  kinds `status`, `golive-plan` and `golive`, and `rcm-store-connect` ships two skeletons,
+  `release_status.sh` and `release_golive.sh`, whose `--selftest` locks the exit codes: a plan
+  that read the stores exits 0 whatever they said, and a release for a build that is not approved
+  exits 2, never 75.
 
 ### Changed
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for

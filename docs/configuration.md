@@ -291,6 +291,8 @@ gate   = "gate-smoke"                            # optional
 qa     = "scenario-qa"                           # optional
 dev    = "deploy-dev"                            # optional
 version = "release-version"                      # optional — «new version» from the web (prefill / create / delete)
+status = "release-status"                        # optional — both stores' review state (read-only)
+golive = "release-golive"                        # optional — a release a person asked for (plan / release)
 
 [[repos.app.release.secrets]]                    # zero or more — names and shapes, never values
 name     = "AuthKey.p8"                          # file name or env name; unique in the profile
@@ -318,8 +320,8 @@ must contain both placeholders, `build_number_policy`, `kind` and `verify` take 
 above, `files` is only valid for `kind = "dir"` and `max_kb` only for `kind = "file"`, `driver`
 is a relative path, and every error names the section and key
 (`[repos.app.release.presets]: unknown key(s): deploy (roles are plan, upload, review, gate, qa,
-dev, version)`). Whether the presets exist and behave is a `rcm check` matter, so a half-written profile
-degrades the Store tab without stopping the server.
+dev, version, status, golive)`). Whether the presets exist and behave is a `rcm check` matter, so a
+half-written profile degrades the Store tab without stopping the server.
 
 `{version}` in `tag` (and in `listing.validate` and `listing.release_notes`) is the round's version
 name: the one name when both stores get the same one, and the iOS name, a `+` and the Android name
@@ -332,13 +334,14 @@ when they differ — `prod/1.1.1-181` or `prod/1.1.1+1.0.1-181`
 |---|---|
 | `FAIL` | a required role (`plan`, `upload`, `review`) is empty or names a preset that is not in `[[presets]]` |
 | `FAIL` | the `plan` preset lacks the `build_name` input; `upload` lacks `build_name confirm_build_number mode platform`; `review` lacks `build_name confirm_build_number mode platform play_managed_publishing listing phased` |
-| `FAIL` | the `upload` preset's `mode` input defaults to `upload`, or the `review` preset's `mode` defaults to `submit` — the irreversible mode is never the default |
+| `FAIL` | the `upload` preset's `mode` input defaults to `upload`, the `review` preset's `mode` defaults to `submit`, or the `golive` preset's `mode` defaults to `release` — the irreversible mode is never the default |
 | `FAIL` | a `version` preset lacks `mode ios_version android_version asc_version_id`, or its `mode` does not default to `prefill` (`create` makes a store draft, `delete` is irreversible) |
+| `FAIL` | a `status` preset lacks the `build_name` input, or a `golive` preset lacks `build_name confirm_build_number platform mode` |
 | `FAIL` | secrets are listed but `secrets_dir_env` is not set, or a secret name repeats |
-| `warn` | an optional role (`gate`, `qa`, `dev`, `version`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
+| `warn` | an optional role (`gate`, `qa`, `dev`, `version`, `status`, `golive`) is unset, or the secrets folder `<config dir>/secrets/<repo>/` does not exist yet (the Settings screen creates it) |
 | `warn` | the `version` preset's `mode` input lists the values it takes and `create` or `delete` is missing — those are the two rcm sends, so «new version» and «discard» would be refused when the job is submitted |
 | `warn` | the `review` or `upload` preset has no `listing_json` input — the listing copy edited in the web UI cannot reach the script (re-run `/rcm-store-connect`, which adds the input) |
-| `warn` | the `review` or `upload` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
+| `warn` | the `review`, `upload` or `golive` preset has no `build_name_android` input — the two stores must then share one version name (a round that gives them different names is refused) |
 
 The detail lists each role with its preset, the driver when one is set, and the number of secrets:
 `ok   release app   plan=release-plan upload=release-upload review=release-review gate=gate-smoke

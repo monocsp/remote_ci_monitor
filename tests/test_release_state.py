@@ -19,7 +19,9 @@ from jobfactory import NOW, ago, job
 from remote_ci_monitor.core.model import FAILED, RUNNING, SUCCEEDED, Source
 from remote_ci_monitor.release_state import (
     JOBS_LIMIT,
+    LISTED_ROLES,
     MAX_DOC_BYTES,
+    ROLE_FILES,
     artifact_names,
     numbers_match,
     parse_iso,
@@ -37,6 +39,8 @@ PRESETS = {
     "qa": None,
     "dev": None,
     "version": None,
+    "status": "release-status",
+    "golive": "release-golive",
 }
 
 
@@ -154,6 +158,102 @@ def test_jobs_are_newest_first_and_capped_at_50_roles_only():
     v = view(jobs, {}, {})
     assert len(v["jobs"]) == JOBS_LIMIT == 50
     assert v["jobs"][0]["id"] == 80 and 99 not in {r["id"] for r in v["jobs"]}
+
+
+# ── status · golive 역할 (M5s §4.4 · §4.5) ─────────────────────────────────────
+
+STATUS = {
+    "schema": 1,
+    "checked_at": "2026-09-04T00:50:12Z",
+    "ios": {
+        "version": "1.2.0",
+        "build": 185,
+        "state": "approved",
+        "raw_state": "PENDING_DEVELOPER_RELEASE",
+        "release_type": "MANUAL",
+        "phased": None,
+    },
+    "android": {
+        "version": "1.2.0",
+        "version_code": 185,
+        "state": "in_review",
+        "raw_state": "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+        "user_fraction": None,
+    },
+}
+GOLIVE_PLAN = {
+    "schema": 1,
+    "build_name": "1.2.0",
+    "measured_at": "2026-09-04T00:44:12Z",
+    "platforms": {
+        "ios": {"approved": True, "approved_build": 185, "raw_state": "PENDING_DEVELOPER_RELEASE"},
+        "android": {"approved": False, "approved_build": None, "raw_state": "IN_REVIEW"},
+    },
+    "plan_verdict": "ok",
+    "reasons": [],
+}
+GOLIVE = {
+    "schema": 1,
+    "build_name": "1.2.0",
+    "platforms": {"ios": {"result": "requested", "raw_state": "PENDING_DEVELOPER_RELEASE"}},
+    "finished_at": "2026-09-04T00:51:12Z",
+}
+
+
+def test_status_and_golive_are_listed_roles_with_their_files():
+    """두 역할은 선택 역할로 등록된다 — 산출물 파일은 status 하나, golive 둘(plan · release)."""
+    assert ROLE_FILES["status"] == ("status.json",)
+    assert ROLE_FILES["golive"] == ("golive-plan.json", "golive.json")
+    assert "status" in LISTED_ROLES and "golive" in LISTED_ROLES
+
+
+def test_an_empty_view_has_status_null_and_golive_plan_and_result_null():
+    v = view([], {}, {})
+    assert v["status"] is None
+    assert v["golive"] == {"plan": None, "result": None}
+
+
+def test_status_is_the_latest_status_json_aged_from_checked_at():
+    """status.json 은 `measured_at` 이 아니라 `checked_at` 으로 잰다(§4.4 의 최소 필드)."""
+    jobs = [git_job(2, "release-status", RUNNING), git_job(1, "release-status")]
+    v = view(
+        jobs, {1: files("out/status.json")}, {(1, "out/status.json"): json.dumps(STATUS).encode()}
+    )
+    assert v["status"] == {
+        "job_id": 1,
+        "state": "succeeded",
+        "measured_at": "2026-09-04T00:50:12Z",
+        "age_seconds": 120,
+        "stale": False,
+        "doc": STATUS,
+    }
+    assert [(r["id"], r["role"]) for r in v["jobs"]] == [(2, "status"), (1, "status")]
+
+
+def test_a_status_without_checked_at_is_aged_from_the_job_and_goes_stale():
+    doc = {k: v for k, v in STATUS.items() if k != "checked_at"}
+    jobs = [git_job(1, "release-status", finished_min=45)]
+    v = view(jobs, {1: files("status.json")}, {(1, "status.json"): json.dumps(doc).encode()})
+    assert v["status"]["measured_at"] == ago(minutes=45).isoformat().replace("+00:00", "Z")
+    assert v["status"]["age_seconds"] == 45 * 60 and v["status"]["stale"] is True
+
+
+def test_golive_has_a_plan_and_a_result_from_two_files():
+    jobs = [git_job(2, "release-golive"), git_job(1, "release-golive", finished_min=8)]
+    bundles = {2: files("golive.json"), 1: files("golive-plan.json")}
+    docs = {
+        (2, "golive.json"): json.dumps(GOLIVE).encode(),
+        (1, "golive-plan.json"): json.dumps(GOLIVE_PLAN).encode(),
+    }
+    v = view(jobs, bundles, docs)
+    assert v["golive"]["result"] == {"job_id": 2, "state": "succeeded", "doc": GOLIVE}
+    plan = v["golive"]["plan"]
+    assert plan["job_id"] == 1 and plan["build_name"] == "1.2.0" and plan["doc"] == GOLIVE_PLAN
+    assert plan["measured_at"] == "2026-09-04T00:44:12Z"
+    assert plan["age_seconds"] == 480 and plan["stale"] is False
+    # 다른 역할의 칸은 건드리지 않는다
+    assert v["plan"] is None and v["review"] == {"plan": None, "result": None}
+    assert v["status"] is None
 
 
 # ── 문서 읽기 ────────────────────────────────────────────────────────────────

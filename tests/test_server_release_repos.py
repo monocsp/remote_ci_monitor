@@ -157,6 +157,8 @@ def test_the_repo_document_has_the_profile_without_values_and_a_null_mirror(srv,
                 "qa": None,
                 "dev": None,
                 "version": None,  # 선택 역할 — 새 버전 만들기(버전 페이지 계획 §1)
+                "status": None,  # 선택 역할 — 두 스토어의 심사 상태(M5s §4.4)
+                "golive": None,  # 선택 역할 — 사람이 요청한 출시(M5s §4.5)
             },
             "listing": None,
             "secrets_dir_env": "APP_SECRETS",
