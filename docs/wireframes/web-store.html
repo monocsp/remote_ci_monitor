@@ -470,7 +470,7 @@ table.q.compact td { padding: 4px 8px; }
         <nav class="tabs" data-c="1" aria-label="Views"><a class="tab" href="#/">Queue</a><a class="tab on" href="#/store/dolomood" aria-current="page">Store</a><span class="tab-repo"><span class="sub">repo</span> <b class="mono">dolomood</b> ▾</span></nav>
         <span class="spacer"></span>
         <button class="livebtn" type="button"><span class="live"></span>live · updated 3s ago</button>
-        <button class="tokbtn" type="button">🔑 pcs@macbook · admin</button>
+        <button class="tokbtn" type="button">🔑 &lt;owner&gt;@macbook · admin</button>
         <button class="tokbtn" type="button" data-c="2">⚙ Settings</button>
       </div>
 
@@ -666,10 +666,10 @@ table.q.compact td { padding: 4px 8px; }
       <div class="s-section" data-c="30">
         <div class="s-h"><span class="t">Add secrets</span><span class="n">drop files · pick files · or type a path on the build machine (the file is <b>copied</b> into the secrets folder, never linked)</span></div>
         <div class="drops">
-          <div class="drop on"><div class="dt">AuthKey.p8</div><div class="sub">App Store Connect API key · drop the .p8 here</div><div class="dz">⤓ Drop file or <u>choose</u></div><div class="path"><span class="sub">or path</span><input type="text" value="~/dolomood-secrets/AuthKey.p8" aria-label="Path to AuthKey.p8"></div></div>
+          <div class="drop on"><div class="dt">AuthKey.p8</div><div class="sub">App Store Connect API key · drop the .p8 here</div><div class="dz">⤓ Drop file or <u>choose</u></div><div class="path"><span class="sub">or path</span><input type="text" value="~/app-secrets/AuthKey.p8" aria-label="Path to AuthKey.p8"></div></div>
           <div class="drop"><div class="dt">play-service-account.json</div><div class="sub">Google Play service account</div><div class="dz ok">✓ received · 2.3 KB · sha256 9f1c…</div><div class="path"><span class="sub">or path</span><input type="text" placeholder="/path/on/macmini" aria-label="Path"></div></div>
           <div class="drop"><div class="dt">upload-keystore.jks</div><div class="sub">Android upload keystore</div><div class="dz ok">✓ received · SHA-1 A4:9C:…</div><div class="path"><span class="sub">or path</span><input type="text" placeholder="/path/on/macmini" aria-label="Path"></div></div>
-          <div class="drop wide"><div class="dt">Import a whole secrets folder</div><div class="sub">Drop a folder (or zip) that already follows <code>secrets.env + files</code>, or type the folder path — e.g. today's <code>~/dolomood-secrets</code>. Known names are matched to the rows below; unknown files are listed and skipped.</div><div class="dz">⤓ Drop folder / zip or <u>choose</u> · <span class="mono">~/dolomood-secrets</span></div></div>
+          <div class="drop wide"><div class="dt">Import a whole secrets folder</div><div class="sub">Drop a folder (or zip) that already follows <code>secrets.env + files</code>, or type the folder path — e.g. today's <code>~/app-secrets</code>. Known names are matched to the rows below; unknown files are listed and skipped.</div><div class="dz">⤓ Drop folder / zip or <u>choose</u> · <span class="mono">~/app-secrets</span></div></div>
         </div>
         <div class="kvform">
           <label><span>ASC_KEY_ID</span><input type="password" value="••••••••" aria-label="ASC_KEY_ID"></label>
@@ -687,10 +687,10 @@ table.q.compact td { padding: 4px 8px; }
         <table class="q compact">
           <thead><tr><th>Secret</th><th>Kind</th><th>State</th><th>Verified</th><th></th></tr></thead>
           <tbody>
-            <tr><td class="key">ASC_KEY_ID · ASC_ISSUER_ID · AuthKey.p8</td><td class="sub">App Store Connect API</td><td><span class="pill ok">present</span> <span class="mono sub">7K3Q… · 2.1 KB</span></td><td class="sub">✓ 21:03 · app com.dolomood readable</td><td><button class="btn" type="button">Replace…</button></td></tr>
+            <tr><td class="key">ASC_KEY_ID · ASC_ISSUER_ID · AuthKey.p8</td><td class="sub">App Store Connect API</td><td><span class="pill ok">present</span> <span class="mono sub">7K3Q… · 2.1 KB</span></td><td class="sub">✓ 21:03 · app com.example.app readable</td><td><button class="btn" type="button">Replace…</button></td></tr>
             <tr><td class="key">play-service-account.json</td><td class="sub">Google Play</td><td><span class="pill ok">present</span> <span class="mono sub">dolo-…@…iam</span></td><td class="sub">✓ 21:03 · tracks readable</td><td><button class="btn" type="button">Replace…</button></td></tr>
             <tr><td class="key">upload-keystore.jks · passwords · alias</td><td class="sub">Android signing</td><td><span class="pill ok">present</span> <span class="mono sub">SHA-1 A4:9C:…</span></td><td class="sub">✓ 21:03 · matches Play upload key</td><td><button class="btn" type="button">Replace…</button></td></tr>
-            <tr><td class="key">GH_TOKEN</td><td class="sub">GitHub · repo write, PR, statuses</td><td><span class="pill ok">present</span> <span class="mono sub">ghp_…c2f1</span></td><td class="sub">✓ 21:03 · login pcs-fmmc</td><td><button class="btn" type="button">Replace…</button></td></tr>
+            <tr><td class="key">GH_TOKEN</td><td class="sub">GitHub · repo write, PR, statuses</td><td><span class="pill ok">present</span> <span class="mono sub">ghp_…c2f1</span></td><td class="sub">✓ 21:03 · login &lt;login&gt;</td><td><button class="btn" type="button">Replace…</button></td></tr>
             <tr><td class="key">store_review_information/*</td><td class="sub">Reviewer contact + demo account (7 fields)</td><td><span class="pill bad">missing: demo_password</span></td><td class="sub">✗ iOS review is blocked without it</td><td><button class="btn" type="button">Add…</button></td></tr>
             <tr><td class="key">TEAMS_WEBHOOK</td><td class="sub">optional</td><td><span class="pill ok">present</span> <span class="mono sub">https://…/ab12</span></td><td class="sub">✓ 21:03 · test card sent</td><td><button class="btn" type="button">Replace…</button></td></tr>
           </tbody>
@@ -806,7 +806,7 @@ table.q.compact td { padding: 4px 8px; }
     <article class="spec" id="c29" data-for="29"><div class="num">29</div><div><div class="area">settings · gate</div><h3>관문 띠 · Enter Store</h3>
       <dl><dt>보여주는 것</dt><dd>«n of m secrets set · k verified» 와 <b>Enter Store</b>. 필수 비밀 전부 present+verified 일 때만 열린다(Teams·Firebase 는 선택). 안 됐으면 띠가 빨강, 다 됐으면 초록.</dd><dt>데이터</dt><dd><code>GET /api/repos/&lt;name&gt;</code> 의 <code>setup: {required, present, verified, complete}</code>. <code>complete=false</code> 면 스토어 라우트가 설정으로(클라이언트 + 서버 <code>409 setup incomplete</code>).</dd><dt>규칙</dt><dd>토큰 · 서명 키 · 지문 같은 민감 값은 CD 화면에 들어가기 <b>전에</b> 다 넣는다. 스토어 화면 안에는 비밀을 묻는 대화상자가 없다.</dd></dl></div></article>
     <article class="spec" id="c30" data-for="30"><div class="num">30</div><div><div class="area">settings · input</div><h3>드롭존 · 파일 선택 · 경로 입력</h3>
-      <dl><dt>상호작용</dt><dd>파일 비밀마다 드롭존: 드래그앤드롭 · «choose» · <b>빌드 머신의 경로</b>(서버가 secrets 폴더로 <b>복사</b>, 링크 아님). 폴더째 가져오기: <code>secrets.env + files</code> 규약을 따르는 폴더/zip(오늘의 <code>~/dolomood-secrets</code>)을 떨어뜨리면 이름을 맞춰 한 번에. 값 비밀은 password 칸에 한 번 타이핑.</dd><dt>규칙</dt><dd>받자마자 크기·MIME·이름 검사(p8 은 PEM · json 파싱 · jks 는 keytool SHA-1). 화면은 <code>✓ received · 크기 · 지문</code> 만. 저장하면 칸이 비워진다. 경로는 서버 홈 밑으로 제한, admin 만. 드롭 파일은 메모리에서 바로 multipart — 브라우저 저장소를 거치지 않는다.</dd></dl></div></article>
+      <dl><dt>상호작용</dt><dd>파일 비밀마다 드롭존: 드래그앤드롭 · «choose» · <b>빌드 머신의 경로</b>(서버가 secrets 폴더로 <b>복사</b>, 링크 아님). 폴더째 가져오기: <code>secrets.env + files</code> 규약을 따르는 폴더/zip(오늘의 <code>~/app-secrets</code>)을 떨어뜨리면 이름을 맞춰 한 번에. 값 비밀은 password 칸에 한 번 타이핑.</dd><dt>규칙</dt><dd>받자마자 크기·MIME·이름 검사(p8 은 PEM · json 파싱 · jks 는 keytool SHA-1). 화면은 <code>✓ received · 크기 · 지문</code> 만. 저장하면 칸이 비워진다. 경로는 서버 홈 밑으로 제한, admin 만. 드롭 파일은 메모리에서 바로 multipart — 브라우저 저장소를 거치지 않는다.</dd></dl></div></article>
     <article class="spec" id="c31" data-for="31"><div class="num">31</div><div><div class="area">settings · secrets</div><h3>저장된 비밀 표</h3>
       <dl><dt>데이터</dt><dd><code>GET /api/repos/&lt;name&gt;/secrets</code> → <code>[{name, kind, present, fingerprint, size, verified_at, verify_error}]</code>. 값은 절대 안 돌아온다. <code>PUT</code> 은 admin · multipart · 이름 강제 · 상한 · 0600. 잡 stdout 의 비밀 값(≥ 8자)은 서버가 마스킹.</dd><dt>규칙</dt><dd>표의 행은 프로파일(<code>[repos.&lt;name&gt;.release].secrets</code>)이 선언한 이름만 — rcm 코드는 dolomood 를 모른다. GH 토큰도 이 폴더로 통일(결정 2).</dd></dl></div></article>
     <article class="spec" id="c32" data-for="32"><div class="num">32</div><div><div class="area">settings · action</div><h3>Verify all</h3><dl><dt>상호작용</dt><dd>읽기 전용 확인만: ASC 앱 조회 · Play 트랙 읽기 · GH 레포 읽기 + 로그인 · keystore SHA-1 대조 · Teams 테스트 카드. 항목별 ✓/✗ 와 시각.</dd></dl></div></article>
