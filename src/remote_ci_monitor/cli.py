@@ -1040,11 +1040,15 @@ def _submit_refused(args: argparse.Namespace) -> tuple[int, ...]:
 
 #: 잡을 만들지 않은 것이 확실한 409 코드 — 상태 코드만으로는 모르니(3) 코드로 2 를 고른다.
 #: `release_route_required` 는 golive 출시를 `POST /jobs` 로 낸 것이다(M5s 결정 235).
-_REFUSED_CODES = ("release_route_required",)
+#: `schedule_exists` 는 같은 예약이 이미 있고(결정 209), `golive_running` 은 같은 빌드의 출시
+#: 사슬이 살아 있다(결정 232). 둘 다 서버가 새 잡을 만들지 않았다고 말한 것이다(H 실기).
+_REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")
 
 
 def _refused_by_code(e: ClientError) -> bool:
-    return isinstance(e.body, dict) and e.body.get("code") in _REFUSED_CODES
+    if not isinstance(e.body, dict):
+        return False
+    return e.body.get("code") in _REFUSED_CODES or e.body.get("error_code") in _REFUSED_CODES
 
 
 def _run_git_ref(

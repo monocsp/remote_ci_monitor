@@ -391,7 +391,10 @@ A `retried` attempt is not an end: `rcm wait` follows its `retried_as` to the ne
 exits with the last one's code ([trying again later](docs/configuration.md#trying-again-later-presetsretry)).
 
 Usage errors and validation failures that never reach the server also exit 2, including `rcm run`
-when the server cannot be reached before submit. `rcm wait` gives an unreachable server 60 s to
+when the server cannot be reached before submit. So does a submission the server refuses for
+certain without making a job — 400, 401, 403, 413, and a 409 whose code is `schedule_exists`,
+`golive_running` or `release_route_required`; any other 409 is 3, since rcm cannot tell whether
+a job was made. `rcm wait` gives an unreachable server 60 s to
 come back (printing `reconnecting…`) before exiting 3; `rcm eta`, `rcm jobs` and `rcm top` fail
 fast with `cannot reach <url>` and exit 3.
 

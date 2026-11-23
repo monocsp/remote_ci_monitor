@@ -1974,6 +1974,15 @@ MUTANTS = (
         tests=("tests/web/store_status.test.js",),
         runner="node",
     ),
+    Mutant(
+        # H 실기 — 409 `schedule_exists` 가 「결과 모름」(3)이 된다: 같은 예약을 두 번 건 세션이
+        # 잡이 생겼는지 몰라 다시 묻거나 기다린다
+        name="m5s-cli-schedule-exists-is-unknown",
+        path="src/remote_ci_monitor/cli.py",
+        old='_REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")',
+        new='_REFUSED_CODES = ("release_route_required",)',
+        tests=("tests/test_cli_schedule_m5s.py",),
+    ),
     # ── M5s D — 종료코드 반복 (`docs/m5s-workplan.md` §4.2 · §7) ──
     Mutant(
         # 반복 선언이 없어도 75 를 반복한다 — rcm-ci 의 75(인프라 실패)가 10분마다 다시 돌아

@@ -179,6 +179,10 @@ of a key bumps that number and is listed here.
   the failed one, counts a check that ended `exhausted` or `expired` as failed, and the line now
   reads `Last check #N did not succeed (lost).`
   ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- `rcm run` exits 2 instead of 3 when the server refuses the submission with 409
+  `schedule_exists` or `golive_running` (as it already did for `release_route_required`): no job
+  was made. Any other 409 stays 3.
+  ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
   `not scheduled`, as `rcm top` does. ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
 - `rcm wait` no longer prints `#N needs action · …` for a job that has already ended (succeeded,

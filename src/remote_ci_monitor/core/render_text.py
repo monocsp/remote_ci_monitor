@@ -15,11 +15,13 @@ from zoneinfo import ZoneInfo
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
+    EXHAUSTED,
     EXPIRED,
     FAILED,
     LOST,
     MODE_GIT_REF,
     QUEUED,
+    RETRIED,
     RUNNING,
     SUCCEEDED,
     TIMED_OUT,
@@ -42,11 +44,10 @@ _GLYPH = {
     TIMED_OUT: "⏱",
     CANCELLED: "■",
     LOST: "?",
-    # M5s — 만료는 돌지 않았다(모래시계), 시도를 다 씀은 실패와 같은 줄(종료 코드 1). 반복 상태는
-    # D 가 상수를 들이기 전이라 이름으로 둔다
+    # M5s — 만료는 돌지 않았다(모래시계), 시도를 다 씀은 실패와 같은 줄(종료 코드 1)
     EXPIRED: "⌛",
-    "exhausted": "❌",
-    "retried": "↻",
+    EXHAUSTED: "❌",
+    RETRIED: "↻",
 }
 _STATE_WORD = {TIMED_OUT: "timed out"}
 

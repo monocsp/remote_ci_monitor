@@ -2705,6 +2705,7 @@
   var STORE_CHECK_WAITING = { queued: 1, uploading: 1, running: 1, cancelling: 1 };
   // 결과를 못 낸 조회. `exhausted`(반복을 다 씀)와 `expired`(시작 마감을 놓침)도 그렇다(M5s)
   var STORE_CHECK_FAILED = { failed: 1, timed_out: 1, lost: 1, exhausted: 1, expired: 1 };
+  // 결과가 아닌 조회 — 모델의 `SCHEDULED_STATES | CHAIN_LINK_STATES` 와 같다(시험이 잠근다)
   var STORE_CHECK_NOT_A_RESULT = { scheduled: 1, retried: 1 };
   function storeCheckText(v) { return typeof v === "string" && v ? v : isNum(v) ? String(v) : DASH; }
   /**

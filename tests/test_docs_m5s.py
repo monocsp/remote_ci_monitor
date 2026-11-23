@@ -495,3 +495,16 @@ def test_golive_route_a_plan_measured_in_the_future_is_documented_as_stale():
     assert phrase in row, "the GET …/release row lost the future-measured_at rule"
     unreleased = unreleased_only(read("CHANGELOG.md"))
     assert "`measured_at` is later than now is stale" in unreleased
+
+
+def test_web_schedule_and_action_docs_say_a_known_409_refusal_exits_2():
+    """H 실기 — `schedule_exists` · `golive_running` 거절은 결과 모름(3)이 아니라 2 다."""
+    for rel in ("README.md", "README.ko.md"):
+        text = action_flat(read(rel))
+        for code in ("`schedule_exists`", "`golive_running`", "`release_route_required`"):
+            assert code in text, (rel, code)
+    assert "409 whose code is" in action_flat(read("README.md"))
+    assert "(`rcm run` exits 2: no job was made)" in action_flat(read("docs/configuration.md"))
+    assert "`schedule_exists` or `golive_running`" in action_flat(
+        unreleased_only(read("CHANGELOG.md"))
+    )

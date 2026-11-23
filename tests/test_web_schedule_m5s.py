@@ -17,9 +17,12 @@ from typing import Any
 
 import pytest
 
+from fake_rcm_http import FakeRcm
+from remote_ci_monitor import __version__
 from remote_ci_monitor import cli as cli_mod
 from remote_ci_monitor.core import model
 from remote_ci_monitor.core.render_text import _reason_text, render
+from test_cli_m1 import last_json
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JS = ROOT / "src" / "remote_ci_monitor" / "web" / "app.js"
@@ -39,6 +42,21 @@ def web_actionable() -> tuple[str, ...]:
 def test_web_actionable_is_the_models_actionable_reasons_in_the_same_order():
     assert web_actionable() == model.ACTIONABLE_REASONS
     assert web_actionable()[0] == model.REASON_NEEDS_ACTION
+
+
+def web_set(name: str) -> frozenset[str]:
+    m = re.search(r"var " + name + r" = \{([^}]*)\};", APP_JS.read_text())
+    assert m, f"app.js has no `var {name} = {{...}}`"
+    return frozenset(re.findall(r"([a-z_]+): 1", m.group(1)))
+
+
+def test_web_store_check_skips_the_models_not_yet_a_result_states():
+    """Store 탭의 「가장 새 조회」는 예약과 사슬의 중간 시도를 건너뛴다 — 모델의 두 집합과 같다."""
+    assert web_set("STORE_CHECK_NOT_A_RESULT") == model.SCHEDULED_STATES | model.CHAIN_LINK_STATES
+
+
+def test_web_terminal_is_the_models_terminal_states():
+    assert web_set("TERMINAL") == model.TERMINAL_STATES
 
 
 # ── rcm top 의 예약 한 줄 ────────────────────────────────────────────────────
@@ -170,3 +188,62 @@ def test_a_job_that_can_still_move_is_announced(state):
 def test_every_terminal_state_and_cancelling_count_as_stopped():
     for state in (*model.TERMINAL_STATES, model.CANCELLING):
         assert cli_mod._ActionWatch._stopped({"state": state}), state
+
+
+# ── 반복 사슬: 다음 시도가 표식을 이어받아 4 (M5s 결정 233 · 234, D 와 합친 뒤) ──
+
+
+@pytest.fixture
+def chain_fake(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("XDG_CONFIG_HOME", "RCM_LABEL", "RCM_CONFIG"):
+        monkeypatch.delenv(var, raising=False)
+    f = FakeRcm()
+    monkeypatch.setenv("RCM_SERVER", f.url)
+    monkeypatch.setenv("RCM_TOKEN", "alice-token")
+    f.route("GET", "/api/health", {"ok": True, "version": __version__})
+    yield f
+    f.close()
+
+
+def _attempt(jid: int, state: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "id": jid,
+        "state": state,
+        "preset": "golive",
+        "key": "golive",
+        "requester": {"name": "alice", "label": "alice@laptop"},
+        "source": {"mode": "git_ref", "ref": "main", "sha": "0" * 40},
+        "chain_id": 57,
+        "max_attempts": 12,
+        **extra,
+    }
+
+
+def test_return_on_action_returns_4_on_the_next_attempt_that_carries_the_chain_action(
+    chain_fake, capsys
+):
+    """75 로 끝난 시도(`retried`)는 종료 상태라 거기서는 4 가 나오지 않는다. 표식은 사슬의 것이라
+    다음 시도(예약으로 기다리는 중)가 `needs_action` 과 그 `action` 을 이어받고, 거기서 4 다."""
+    chain_fake.route(
+        "GET",
+        "/jobs/57",
+        _attempt(57, "retried", attempt=1, exit_code=75, retried_as=58, action=LOGIN),
+    )
+    chain_fake.route(
+        "GET",
+        "/jobs/58",
+        _attempt(58, "scheduled", attempt=2, retry_of=57, reason="needs_action", action=LOGIN),
+    )
+    try:
+        code = cli_mod.main(["wait", "--job", "57", "--poll", "--return-on-action"])
+    except SystemExit as e:
+        code = e.code
+    cap = capsys.readouterr()
+    assert code == 4, cap.err
+    body = last_json(cap.out)
+    assert body["job_id"] == 58 and body["action"] == LOGIN and body["wait_exit_code"] == 4
+    lines = [ln for ln in cap.err.splitlines() if "needs action" in ln]
+    assert lines == ["#58 needs action · login · Sign in on the build machine"], cap.err

@@ -228,3 +228,60 @@ def test_eta_on_a_schedule_does_not_invent_a_number(srv, capsys):
     assert code == 0, err
     assert "scheduled for" in out
     assert "eta" not in out.replace("scheduled for", "")
+
+
+# ── 확실한 409 거절은 종료 2 (H 실기 · #257) ─────────────────────────────────
+#
+# 409 는 상태 코드만으로는 잡이 생겼는지 모른다(3). 그러나 `schedule_exists` · `golive_running` ·
+# `release_route_required` 는 서버가 잡을 만들지 않았다고 확실히 말한 것이다 — 2 다.
+
+
+class _Snap:
+    """tree 경로의 제출까지만 가는 가짜 스냅샷(업로드 전에 409 를 받는다)."""
+
+    repo = "org/app"
+    branch = "feat/x"
+    base_sha = "0" * 40
+    dirty = False
+    tree_hash = "ab" * 32
+    bytes = 10
+
+    def __init__(self, tar_path) -> None:
+        self.tar_path = tar_path
+
+
+REFUSED_409 = ("schedule_exists", "golive_running", "release_route_required")
+
+
+@pytest.mark.parametrize("code", REFUSED_409)
+def test_a_known_409_refusal_on_the_git_ref_path_exits_2(srv, capsys, code):
+    srv.fake.route(
+        "POST",
+        "/jobs",
+        {"error": f"refused: {code}", "code": code, "error_code": code, "job_id": 12},
+        status=409,
+    )
+    rc, _out, err = run(capsys, ["run", "deploy", "--ref", "main", "--at", "15:00", "--no-wait"])
+    assert rc == 2, err
+    assert "submit failed" in err
+
+
+@pytest.mark.parametrize("code", REFUSED_409)
+def test_a_known_409_refusal_on_the_tree_path_exits_2(srv, capsys, monkeypatch, tmp_path, code):
+    monkeypatch.setattr(cli_mod, "make_snapshot", lambda *_a, **_k: _Snap(tmp_path / "snap.tar"))
+    srv.fake.route(
+        "POST",
+        "/jobs",
+        {"error": f"refused: {code}", "code": code, "error_code": code, "job_id": 12},
+        status=409,
+    )
+    (tmp_path / "t").mkdir()
+    rc, _out, err = run(capsys, ["run", "ok", "--in", "5m", "--dir", str(tmp_path / "t")])
+    assert rc == 2, err
+
+
+def test_an_unknown_409_still_exits_3(srv, capsys):
+    """모르는 409 는 여전히 「결과 모름」이다 — 아는 코드만 확실한 거절로 친다."""
+    srv.fake.route("POST", "/jobs", {"error": "conflict", "code": "something_else"}, status=409)
+    rc, _out, err = run(capsys, ["run", "deploy", "--ref", "main", "--no-wait"])
+    assert rc == 3, err

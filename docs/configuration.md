@@ -1876,7 +1876,7 @@ is paused.
 next to a running job with the same preset, inputs and source is a new job, and `rcm run` of the
 same thing now does not wait for the schedule. A second schedule with the same preset, inputs and
 source (the commit for `git_ref`, the tree for an upload) is refused with 409 `schedule_exists`
-and the first job's `job_id`; cancel it or pick another time. A `git_ref` schedule resolves its
+and the first job's `job_id` (`rcm run` exits 2: no job was made); cancel it or pick another time. A `git_ref` schedule resolves its
 ref when you submit, as every `git_ref` job does; a tree is uploaded when you submit and kept until
 the job runs — its snapshot blobs are protected from the cache sweep the same way an active job's
 are. [Supersede](#superseding-older-jobs-of-the-same-branch) happens when the schedule enters the
