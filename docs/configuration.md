@@ -299,8 +299,10 @@ that power. Preview what a reload would apply with `rcm reload --dry-run` before
 
 A repository can carry a **release profile**: which presets play which release role, which
 secrets the Settings screen asks for, and how the store copy is previewed. It is the contract the
-Store tab reads (`docs/release-contract.md`); rcm itself computes no build number and releases
-nothing. A repository without a profile has no Store tab and everything else works as before.
+Store tab reads (`docs/release-contract.md`); rcm itself computes no build number, and nothing goes
+live on approval by itself: a release runs only when a person asks for it with the version, the
+build number and a time (`golive`, below). A repository without a profile has no Store tab and
+everything else works as before.
 
 The profile is a sub-table right after its `[[repos]]` entry (TOML puts `[repos.app.release]`
 inside the **last** `[[repos]]` element, so keep the two together):
@@ -462,11 +464,12 @@ keeps its default. Writes take a Bearer token only.
 
 | route | token | what |
 |---|---|---|
-| `GET …/release` | read rule, always | `setup`, then the latest job per role: `plan` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `build_name`, `doc`), `review.plan` (same shape) and `review.result`, `upload` (`job_id`, `state`, `doc`), `status` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `doc` — aged from the document's `checked_at`, no `build_name`), and `jobs[]` — the role presets' jobs, newest first, at most 50, each with `id preset role state sha ref started_at finished_at artifacts[]`. `status` jobs run often, so they get at most 3 rows of their own in `jobs[]` and never take one of the 50. Each role preset is read through its own window of its newest 500 jobs (50 for `gate`, `qa` and `dev`, which only have rows), so a `status` job every few minutes does not push the last plan or review out of sight. "Latest per role" is the newest job of that preset whose artifact bundle contains the role's file (`plan.json`, `upload.json`, `review-plan.json` / `review.json`, matched by base name anywhere in the bundle); `doc` is that file parsed (256 KB at most; unreadable or invalid gives `doc: null` plus `doc_error`). `measured_at` is the document's own or, failing that, the job's end; `stale` is `age_seconds > plan_max_age_minutes × 60`. Computed from the database and the artifact store only |
-| `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha}` (an identical running job is joined) |
+| `GET …/release` | read rule, always | `setup`, then the latest job per role: `plan` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `build_name`, `doc`), `review.plan` (same shape) and `review.result`, `upload` (`job_id`, `state`, `doc`), `status` (`job_id`, `state`, `measured_at`, `age_seconds`, `stale`, `doc` — aged from the document's `checked_at`, no `build_name`), `golive` (`plan` in the shape of `plan`, `result`, and `live[]` — the go-live jobs that are booked or running: `job_id state build_name platform confirm_build_number not_before start_deadline`), and `jobs[]` — the role presets' jobs, newest first, at most 50, each with `id preset role state sha ref started_at finished_at artifacts[]`. `status` jobs run often, so they get at most 3 rows of their own in `jobs[]` and never take one of the 50. Each role preset is read through its own window of its newest 500 jobs (50 for `gate`, `qa` and `dev`, which only have rows), so a `status` job every few minutes does not push the last plan or review out of sight. "Latest per role" is the newest job of that preset whose artifact bundle contains the role's file (`plan.json`, `upload.json`, `review-plan.json` / `review.json`, matched by base name anywhere in the bundle); `doc` is that file parsed (256 KB at most; unreadable or invalid gives `doc: null` plus `doc_error`). `measured_at` is the document's own or, failing that, the job's end; `stale` is `age_seconds > plan_max_age_minutes × 60`, or a `measured_at` later than now (a clock that is wrong never makes a plan fresh). Computed from the database and the artifact store only |
+| `POST …/release/plan` | client token | `{build_name, ref?}` (`ref` defaults to `default_branch`) → submits `presets.plan` with `build_name` → `202 {job_id, joined, state, sha, submission}` (an identical running job is joined; `submission` is the cancel secret, as `POST /jobs` gives it) |
 | `POST …/release/review` | client token; **admin for `mode = submit`** | `{build_name, ref?, mode: plan\|submit, platform?, confirm_build_number?, play_managed_publishing?, listing?, phased?}` → submits `presets.review`. In `plan` mode `confirm_build_number` is sent empty and `play_managed_publishing` as `not-checked` unless this body says `confirmed-on` |
 | `POST …/release/upload` | client token; **admin for `mode = upload`** | `{build_name, ref?, mode: rehearsal\|upload, platform?, confirm_build_number?, android_track?}` → submits `presets.upload` |
-| `POST …/release/status` | client token | `{build_name?, ref?}` → submits `presets.status`, with `build_name` only when the body has one (empty: the script reads the newest versions the stores have) → `202 {job_id, joined, state, sha}`. Read-only for the stores, so any client token will do; 409 `role_not_configured` when the profile has no `status` preset. The review panel's **Check again** sends this route the round's version |
+| `POST …/release/status` | client token | `{build_name?, ref?}` → submits `presets.status`, with `build_name` only when the body has one (empty: the script reads the newest versions the stores have) → `202 {job_id, joined, state, sha, submission}`. Read-only for the stores, so any client token will do; 409 `role_not_configured` when the profile has no `status` preset. The review panel's **Check again** sends this route the round's version |
+| `POST …/release/golive` | client token; **admin for `mode = release`** | `{build_name or version_id, ref?, mode: plan\|release, platform: ios\|android\|both, confirm_build_number?, start_at? \| start_in_seconds?}` → submits `presets.golive`. `plan` (the default) reads the stores now → `202`; a time is 400 `golive_plan_now_only`. `release` runs the go-live gate below and goes now → `202`, or at `start_at` / after `start_in_seconds` (read as for `rcm run --at`) → `201` with `not_before`, `start_deadline` and `timezone`. Every answer carries `submission` |
 | `GET …/release/versions` | read rule, always | the store version drafts of this repository: `{live: {ios, android, from_plan_job}, hints: {ios, android}, ttl_hours, drafts[], history[]}`. `live` comes from the latest succeeded plan's `store.asc_live` and `store.play.production_name`; `hints` is that document's `next_version_hint` or, failing that, each live name with its last integer + 1 (unknown stays `null`). `drafts[]` is every open draft, newest first; `history[]` the last 20 submitted ones (`{id, ios, android, submitted_at, review_job_id}`). A draft row is `{id, repo, ios_version, android_version, build_name, state, created_by, created_at, last_edit_at, expires_at, expired, expiry_warned, asc_version_id, error, create_job_id, delete_job_id, release_id, review_job_id, upload_job_id, has_prefill, has_edits, changed}` — `state` is `creating`, `editing`, `running`, `submitted`, `discarded` or `failed`; `build_name` is the iOS name, or the Android one when there is no iOS name; `changed` counts the edited listing fields |
 | `POST …/release/versions` | admin | `{ios_version?, android_version?, ref?}` → opens a draft. At least one name, each `major.minor.patch` and greater than that store's live name when the plan knows it. With a `version` preset it submits that preset with `mode = create` → `202 {id, job_id, state: "creating", build_name}`; without one the draft is `editing` at once → `201 {id, job_id: null, state, build_name}`. The job's `version.json` and `prefill.json` then fill `asc_version_id` and the prefilled listing; a failure leaves the row `failed` with an `error` sentence |
 | `GET …/release/versions/<id>` | read rule, always | one draft — the row above plus `prefill`, `edited`, `diff` (the shape of `…/diff`) and `release` (the `GET …/release` document with this version's `build_name`). It runs **no** subprocess, because the version page polls it every five seconds: the driver's `--status` and the two listing commands stay behind `GET …/release/driver` and `GET …/release/listing`, which the page calls at its own pace |
@@ -514,19 +517,24 @@ restart makes the same judgement again.
 | `managed_publishing_unconfirmed` | `mode = submit` with `platform` `both` or `android` and `play_managed_publishing` other than `confirmed-on` **in this body** — the value is never remembered |
 | `plan_required` | `mode = upload` / `mode = submit` without a succeeded plan (`plan.json`) for the same `build_name` |
 | `plan_stale` | that plan is older than `plan_max_age_minutes` |
-| `build_number_mismatch` | `confirm_build_number` (review submit, upload) or `build_number` (driver confirm) is empty or does not equal the plan's `n` as an integer — the server compares, it never fills the number in |
+| `build_number_mismatch` | `confirm_build_number` (review submit, upload) or `build_number` (driver confirm) is empty or does not equal the plan's `n` as an integer — the server compares, it never fills the number in. For `golive` it is compared with each chosen platform's `approved_build`; `auto` is not accepted there, and with `platform = both` the two approved builds must be the same number (when they differ, go live per platform; `approved_build` in the body) |
 | `mirror_missing` | the driver or listing needs a checkout and the mirror has no `default_branch` yet — `POST …/fetch` first |
 | `no_driver` | a driver route on a profile without `driver` |
 | `driver_missing` | `driver` is not an executable file in the checkout |
 | `release_running` | a driver process for this repository is still alive (`release_id` in the body) |
 | `release_required` | `confirm` / `abort` / `retry` with no earlier run for that build |
 | `version_exists` | a new version name that an open draft already carries (`id` and `state` in the body). A draft whose create job **failed** does not count — nothing was made in the store under that name, so the same name can be typed again |
-| `version_closed` | a submitted or discarded draft — it cannot be edited, submitted or discarded again |
+| `version_closed` | a submitted or discarded draft — it cannot be edited, submitted or discarded again. `golive` is the exception: it takes a **submitted** draft (going live comes after the review), never a discarded one |
 | `version_running` | discarding a draft whose review job, `mode = upload` job or driver round is still running (`review_job_id`, `upload_job_id` and `release_id` in the body) |
 | `listing_json_unsupported` | the draft has an edited listing but the `review` / `upload` preset has no `listing_json` input |
 | `split_version_unsupported` | the draft's two store version names differ but that preset has no `build_name_android` input |
+| `golive_plan_required` | `golive` `mode = release` without a **succeeded** golive plan (`golive-plan.json`) for the same `build_name`, or one that did not read a chosen platform |
+| `golive_plan_stale` | that golive plan is older than `plan_max_age_minutes` (`age_seconds` in the body). Checked when the release is asked for, never again when a booked one runs — the script reads the stores again then |
+| `golive_plan_blocked` | a chosen platform's `approved` is not `true` in that plan (`platforms[]` names it). Only the chosen platforms count: iOS alone goes through while Android is still in review |
+| `golive_running` | a `golive` `mode = release` job for the same `build_name` is booked (`scheduled`) or alive — now or later, one at a time (`job_id`, `state` in the body). Cancel it first |
+| `release_route_required` | `POST /jobs` with the `golive` role's preset and `mode = release`, from any token, admin included: going live takes `POST …/release/golive` (or `rcm release golive`), which runs the gate. `review` and `upload` are not refused there — the driver submits `upload` with `rcm run` |
 
-`mode = submit` and `mode = upload` also need an admin token (403 `admin_required`), as do every
+`mode = submit`, `mode = upload` and the `golive` `mode = release` also need an admin token (403 `admin_required`), as do every
 `POST`, `PUT` and `DELETE` under `…/release/versions`. The version routes also answer 404
 `version_not_found` (no such draft in this repository — another repository's number included) and
 400 `empty` (neither version name), `pattern` (not `major.minor.patch`), `not_greater` (not above
@@ -550,6 +558,44 @@ gone, records the code (or `null` when it is unknown) and revokes their tokens. 
 with the same environment but without a token — it is read-only by contract. Confirm follows the
 contract: the driver prints `plan: N = <n>` and exits 2, the page shows the number, a person
 types it, and the server forwards it only when the two agree.
+
+### Going live (`golive`)
+
+Nothing goes live on approval by itself. A release runs only when a person asks for it with the
+version, the build number and a time. The `golive` role is that request, and it has two modes:
+
+- `plan` (the default, any client token) reads both stores and writes `golive-plan.json`: for each
+  platform whether it is `approved` and the `approved_build`. It exits 0 whenever it could read the
+  stores, approved or not — the answer is in the file.
+- `release` (admin) asks the stores to go live. It takes the approved build number a person typed —
+  never `auto` — for now, or for `start_at` / `start_in_seconds` like `rcm run --at` / `--in`. The
+  gate is checked once, when the release is asked for: a succeeded golive plan for that
+  `build_name` no older than `plan_max_age_minutes`, every chosen platform `approved` in it, the
+  typed number equal to their `approved_build`, and no other go-live job of that build booked or
+  running. A booked release is not checked again when its time comes; the script reads the stores
+  again then, and a platform that is not approved ends the job with exit 2, never 75.
+
+The same gate stands behind the web page — the version page's «Schedule go-live» area, which opens
+only once `status.json` says that store approved this version and runs the plan first — and behind
+`rcm release golive`:
+
+```sh
+rcm release status app                                     # both stores' review state (waits)
+rcm release golive app --build-name 1.2.0 --platform both --plan
+#   iOS      approved      build 185    PENDING_DEVELOPER_RELEASE
+#   Android  not approved  build —      RELEASE_LIFECYCLE_STATE_IN_REVIEW
+#   next: rcm release golive app --build-name 1.2.0 --platform ios --confirm-build-number 185 …
+rcm release golive app --build-name 1.2.0 --platform ios --confirm-build-number 185 --at 15:00
+#   golive #412 scheduled for 15:00 · start by 16:00 · build 1.2.0 · ios 185
+#   follow: rcm wait --job 412 · cancel: rcm cancel 412
+```
+
+`POST /jobs` (and so `rcm run`) refuses the `golive` preset's `mode = release` from every token
+with 409 `release_route_required` — that path would skip the gate. A submitted draft takes
+`golive` (going live comes after the review); a discarded one does not. Play has no API to publish
+a held release, so the project's go-live script publishes through a browser or asks a person; when
+its Play Console sign-in is gone it prints an `action` marker and exits 75, and the next attempt
+checks again ([release contract](release-contract.md) §2 and §6).
 
 ## Getting files back out of a job
 

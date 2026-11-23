@@ -347,7 +347,7 @@ def test_the_release_view_is_empty_but_answers_before_the_gate_opens(srv):
         "upload": None,
         # M5s §4.4 · §4.5 — 선택 역할 둘. 산출물이 없으면 null
         "status": None,
-        "golive": {"plan": None, "result": None},
+        "golive": {"plan": None, "result": None, "live": []},
         "jobs": [],
     }
     assert srv.req("GET", "/api/repos/nope/release")[0] == 404
@@ -466,6 +466,8 @@ def test_plan_submits_the_plan_preset_through_the_job_path_with_build_name_only(
     srv = open_srv
     status, body = srv.post("plan", {"build_name": "1.0.1"})
     assert status == 202, body
+    submission = body.pop("submission")  # 취소 비밀(M5s §4.5 「제출 전달」) — 값은 매번 다르다
+    assert sorted(submission) == ["cancel_token", "id"] and submission["cancel_token"]
     assert body == {"job_id": 1, "joined": False, "state": "queued", "sha": remote.main}
     job = srv.store.get_job(1)
     assert job.preset == "release-plan" and job.inputs == {"build_name": "1.0.1"}

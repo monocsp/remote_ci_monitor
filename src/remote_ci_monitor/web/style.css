@@ -1135,3 +1135,14 @@ table.gh td.subj, table.gh td.meta { white-space: nowrap; overflow: hidden; text
   table.gh td.sha, table.gh td.meta { width: auto; }
   table.gh td.meta { grid-column: 2; }
 }
+/* 출시 예약(M5s §4.5) — 버전 페이지의 한 영역. 출시를 요청하는 버튼은 이 안에만 있다 */
+.golive { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.golive[data-open="1"] { border-color: var(--muted); }
+.golive-body { display: grid; gap: 8px; margin-top: 8px; }
+.golive-f { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.golive-f legend { float: left; margin-right: 8px; font: var(--t-label); color: var(--muted); }
+.golive-f input[type="text"] { width: 10ch; font-family: var(--mono); }
+.golive-go { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.golive-live, .golive-result { margin-top: 8px; }
+.golive-live .t, .golive-result .t { font: var(--t-label); color: var(--muted); }
+.golive-live ul.plain { margin: 4px 0 0; }

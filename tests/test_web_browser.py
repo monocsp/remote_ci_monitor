@@ -1443,7 +1443,9 @@ def test_store_tab_gate_shows_settings_until_every_secret_is_set(tmp_path):
             assert fetch_disabled is True, "no token → fetch disabled with a reason"
             assert c.eval(_q("#store [data-gate]")) is None, "no gate banner on the store screen"
             body = c.eval("document.body.innerText")
-            assert "Approval does not release" in body, body[:800]
+            # M5s 결정 217 — 새 원칙 문장(옛 「Approval does not release」 는 어디에도 없다)
+            assert "Nothing goes live on approval by itself." in body, body[:800]
+            assert "Approval does not release" not in body
             assert "ghp_" not in body.replace("ghp_…", ""), "a value shows 4 chars + … at most"
             # 사람이 연 행은 기억된다(큐 화면 규칙) — 렌더가 정한 열림은 기억이 아니다
             assert c.eval("localStorage.getItem('rcm.store.rows')") is None
@@ -1684,9 +1686,15 @@ GROUPS_JS = """
 #   - `[data-inputs]` — 대기열 행의 작업 입력 칩. 계약 입력 **이름**(`play_managed_publishing=…`)
 #     을 글자로 보일 뿐이고, 누르면 그 JSON 을 토스트로 띄운다.
 # 낱말 목록에는 한국어도 있다 — 없으면 한국어로 붙인 버튼은 한 번도 검사받지 않는다.
+# 면제는 신원으로만 한다(§17-2). M5s 결정 218 로 하나가 늘었다 — 「출시 예약」 영역
+# (`[data-golive-sheet]`) **안의** `[data-golive]` 버튼만. 같은 속성을 영역 밖에 붙이면
+# 그대로 걸린다. 영역은 부모 쪽에서 찾는다 — `closest` 는 자기 자신을 포함하므로 버튼에 영역
+# 표시를 함께 달면 스스로를 면제했다(#255 검증 P2).
 FORBIDDEN_BUTTONS_JS = """
 [...document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn')]
   .filter(b => !b.hasAttribute('data-sheet-fix') && !b.hasAttribute('data-inputs'))
+  .filter(b => !(b.hasAttribute('data-golive') && b.parentElement
+                 && b.parentElement.closest('[data-golive-sheet]')))
   .map(b => (b.textContent || b.value || '').trim())
   .filter(t => /release this version|publish|rollout|게시|출시|배포|롤아웃/i.test(t))
 """
@@ -1808,7 +1816,9 @@ def test_store_status_screen_keeps_the_review_panel_read_only(tmp_path):
             assert "Play has no such field" in body, body[:1500]
             assert "Promotional text" in body and "Short description" in body, body[:1500]
             assert "ready" in body and "judged 4m ago" in body, body[:1500]
-            assert "Approval does not release" in body
+            assert "Nothing goes live on approval by itself." in body
+            assert "Play has no API to publish a held release" in body, body[:1500]
+            assert "Approval does not release" not in body
             assert "console-only — not touched by rcm" in body
             assert "unknown to the API" in body, "the managed-publishing pill never turns green"
             assert "undefined" not in body and "NaN" not in body
@@ -2412,7 +2422,11 @@ def test_store_tab_opens_on_the_version_list_and_the_four_rows_are_on_status(tmp
             assert c.eval(_q("#review-panel")) is None
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             body = c.eval("document.body.innerText")
-            assert "Approval does not release" in body, body[:400]
+            assert (
+                "Nothing goes live on approval by itself. A release runs only when a person asks "
+                "for it with the version, the build number and a time." in body
+            ), body[:400]
+            assert "Approval does not release" not in body
             assert "discarded after 24 hours" in body, body[:400]
             # 드라이버도 소개 자료도 안 불렀다(그 둘은 서버에서 명령을 돌린다)
             called = c.eval("window.rcmStoreCalls.map(x => x[0])")
@@ -3031,7 +3045,8 @@ def test_version_page_sheet_carries_progress_what_is_left_and_the_submit(tmp_pat
             body = c.eval("document.getElementById('release-sheet').innerText")
             assert "Left before review" in body and "Different from the previous" in body, body
             assert "Submit conditions" in body and "What is sent" in body, body
-            assert "Approval does not release" in body, body
+            assert "Nothing goes live on approval by itself." in body, body
+            assert "Approval does not release" not in body
             sending = c.eval(_q("#release-sheet [data-sheet-sending]", ".textContent"))
             assert "build 181" in sending and "App Store + Google Play" in sending, sending
             assert "release notes + uploaded build" in sending, sending
@@ -3324,13 +3339,14 @@ GUARD_PROBE_JS = r"""
 (() => {
   window.rcmGuardProbe = (rows) => {
     [...document.querySelectorAll('[data-guard-probe]')].forEach((b) => b.remove());
-    rows.forEach(([text, attrs]) => {
+    rows.forEach(([text, attrs, parent]) => {
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = text;
       b.setAttribute('data-guard-probe', '1');
       Object.keys(attrs || {}).forEach((k) => b.setAttribute(k, attrs[k]));
-      document.body.appendChild(b);
+      // 셋째 칸은 심을 자리(선택자) — 없으면 본문 끝이다
+      (parent ? document.querySelector(parent) : document.body).appendChild(b);
     });
     return true;
   };
@@ -3403,6 +3419,228 @@ def test_the_forbidden_button_guard_catches_publish_controls_and_exempts_by_iden
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
             c.eval("window.rcmGuardProbe([])")
             assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+# ── 출시 예약(M5s §4.5 · 결정 216 · 218) ─────────────────────────────────────────────
+GOLIVE_STUB_JS = r"""
+(() => {
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  window.rcmGoliveCalls = [];
+  window.rcmRelease.status = { job_id: 660, state: "succeeded", stale: false, age_seconds: 60,
+    measured_at: ago(60),
+    doc: { schema: 1, checked_at: ago(60),
+      ios: { version: "1.0.2", build: 185, state: "approved",
+             raw_state: "PENDING_DEVELOPER_RELEASE" },
+      android: { version: "1.0.2", version_code: 185, state: "in_review",
+                 raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW" } } };
+  window.rcmRelease.golive = { plan: null, live: [],
+    result: { job_id: 655, state: "failed",
+      doc: { schema: 1, build_name: "1.0.2", platforms: {
+        ios: { result: "failed", raw_state: null, reason: "not_attempted" },
+        android: { result: "failed", raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW",
+                   reason: "not_approved" } } } } };
+  const baseRepo = window.rcmStoreApi.repo;
+  window.rcmStoreApi.repo = (name) => baseRepo(name).then((r) => {
+    const doc = JSON.parse(JSON.stringify(r.body));
+    doc.profile.presets = Object.assign({}, doc.profile.presets,
+      { status: "release-status", golive: "release-golive" });
+    return { ok: r.ok, status: r.status, body: doc };
+  });
+  let next = 700;
+  window.rcmStoreApi.golive = (name, body) => {
+    window.rcmGoliveCalls.push(body);
+    const id = next++;
+    if (body.mode === "plan") {
+      window.rcmRelease.golive.plan = { job_id: id, state: "succeeded", stale: false,
+        age_seconds: 1, build_name: "1.0.2",
+        doc: { schema: 1, build_name: "1.0.2", plan_verdict: "blocked",
+          reasons: ["android_not_approved"],
+          platforms: {
+            ios: { approved: true, approved_build: 185, raw_state: "PENDING_DEVELOPER_RELEASE" },
+            android: { approved: false, approved_build: null,
+                       raw_state: "RELEASE_LIFECYCLE_STATE_IN_REVIEW" } } } };
+      return Promise.resolve({ ok: true, status: 202, body: { job_id: id, state: "queued" } });
+    }
+    const booked = !!body.start_at;
+    window.rcmRelease.golive.live = [{ job_id: id, state: booked ? "scheduled" : "queued",
+      build_name: "1.0.2", platform: body.platform,
+      confirm_build_number: body.confirm_build_number,
+      not_before: booked ? ago(-3600) : null, start_deadline: null }];
+    return Promise.resolve({ ok: true, status: booked ? 201 : 202,
+      body: { job_id: id, state: booked ? "scheduled" : "queued" } });
+  };
+  window.rcmStoreApi.cancelJob = (id) => {
+    window.rcmGoliveCalls.push({ cancel: id });
+    window.rcmRelease.golive.live = [];
+    return Promise.resolve({ ok: true, status: 200, body: { job_id: id, state: "cancelled" } });
+  };
+})();
+"""
+GOLIVE = "[data-golive-sheet]"
+
+
+def _open_golive_page(c: Chrome, base: str, srv) -> None:
+    for stub in (RELEASE_STUB_JS, SHEET_STUB_JS, GOLIVE_STUB_JS, GUARD_PROBE_JS):
+        c.call("Page.addScriptToEvaluateOnNewDocument", {"source": stub})
+    c.open(base, ready_js=_q('#view-nav a[data-nav="store"]') + " !== null")
+    c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['admin'])})")
+    c.open(base + "&admin=1#/store/app/v/7", ready_js=_q(GOLIVE) + " !== null")
+
+
+def _golive_type(c: Chrome, element_id: str, value: str) -> None:
+    c.eval(
+        f"(() => {{ const i = document.getElementById({json.dumps(element_id)}); i.value = "
+        + json.dumps(value)
+        + "; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()"
+    )
+
+
+def test_the_golive_area_opens_on_approval_plans_first_and_books_with_a_typed_number(tmp_path):
+    """S16 · 결정 216 — 버전 페이지의 「출시 예약」 영역은 status 가 그 플랫폼을 approved 라고
+    말할 때만 열린다. 열면 읽기 전용 plan 을 먼저 돌리고, 승인된 플랫폼만 고를 수 있고(both 는 둘
+    다 승인됐을 때만), 사람이 친 번호가 승인 빌드와 같아야 보낸다. 예약은 목록에 나오고 거기서
+    취소한다. 시도하지 않은 플랫폼은 「시도 안 함」 으로 그린다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        with Chrome(tmp_path / "chrome-golive", window="1240,900") as c:
+            _open_golive_page(c, base, srv)
+            area = c.eval(_q(GOLIVE, ".innerText"))
+            assert "Schedule go-live" in area and "iOS approved · Android in review" in area, area
+            # 마지막 결과 — 시도하지 않은 iOS 는 실패가 아니다
+            words = c.eval(
+                f"[...document.querySelectorAll('{GOLIVE} [data-golive-result-platform]')]"
+                ".map(e => [e.getAttribute('data-golive-result-platform'), "
+                "e.getAttribute('data-golive-word'), e.textContent.trim()])"
+            )
+            assert words == [
+                ["ios", "not_attempted", "iOS not attempted"],
+                ["android", "failed", "Android failed"],
+            ], words
+            assert c.eval(_q(f"{GOLIVE} [data-golive='open']", ".disabled")) is False
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 열면 plan 을 먼저 — 버전의 플랫폼 전부를 읽는다
+            c.eval(_q(f"{GOLIVE} [data-golive='open']", ".click()"))
+            _wait(c, "window.rcmGoliveCalls.length === 1")
+            assert c.eval("window.rcmGoliveCalls[0]") == {
+                "version_id": 7,
+                "mode": "plan",
+                "platform": "both",
+            }
+            _wait(c, _q(f"{GOLIVE} [data-golive-plan='ok']") + " !== null")
+            plan = c.eval(_q(f"{GOLIVE} [data-golive-plan]", ".textContent"))
+            assert "iOS approved · build 185" in plan and "Android not approved" in plan, plan
+            # Android 와 both 는 고를 수 없다
+            radios = c.eval(
+                f"[...document.querySelectorAll('{GOLIVE} [data-golive-platform]')]"
+                ".map(r => [r.getAttribute('data-golive-platform'), r.disabled, r.checked])"
+            )
+            assert radios == [["ios", False, True], ["android", True, False], ["both", True, False]]
+            go = _q(f"{GOLIVE} [data-golive='go']")
+            assert c.eval(go + ".disabled") is True
+            assert "Type the approved build number" in c.eval(
+                _q(f"{GOLIVE} [data-golive-why]", ".textContent")
+            )
+            _golive_type(c, "golive-n", "184")
+            assert c.eval(go + ".disabled") is True
+            _golive_type(c, "golive-n", "185")
+            assert c.eval(go + ".disabled") is False
+            assert c.eval(go + ".textContent") == "Go live now"
+            # 시각을 정한다
+            c.eval(_q(f"{GOLIVE} [data-golive-when='at']", ".click()"))
+            _wait(c, _q("#golive-at", ".disabled") + " === false")
+            assert c.eval(_q("#golive-n", ".value")) == "185", "다시 그려도 친 번호가 남는다"
+            assert c.eval(go + ".disabled") is True
+            _golive_type(c, "golive-at", "2026-11-23T15:00")
+            assert c.eval(go + ".disabled") is False and c.eval(go + ".textContent") == (
+                "Book go-live"
+            )
+            c.eval(go + ".click()")
+            _wait(c, "window.rcmGoliveCalls.length === 2")
+            assert c.eval("window.rcmGoliveCalls[1]") == {
+                "version_id": 7,
+                "mode": "release",
+                "platform": "ios",
+                "confirm_build_number": "185",
+                "start_at": "2026-11-23T15:00",
+            }
+            # 예약 목록에 나오고, 거기서 취소한다
+            _wait(c, _q(f"{GOLIVE} [data-golive-row]") + " !== null")
+            row = c.eval(_q(f"{GOLIVE} [data-golive-row]", ".textContent"))
+            assert row.startswith("#701 ") and "iOS 185" in row, row
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            c.eval(_q(f"{GOLIVE} [data-golive='cancel']", ".click()"))
+            _wait(c, "window.rcmGoliveCalls.length === 3")
+            assert c.eval("window.rcmGoliveCalls[2]") == {"cancel": 701}
+            _wait(c, _q(f"{GOLIVE} [data-golive-row]") + " === null")
+            assert c.page_errors() == []
+    finally:
+        srv.close()
+
+
+def test_the_golive_exemption_holds_only_inside_the_golive_area(tmp_path):
+    """결정 218 — 금지 버튼 가드의 새 면제는 `[data-golive]` 이면서 「출시 예약」 영역 안일
+    때뿐이다. 한국어 화면의 「출시 예약…」 버튼은 그 영역 안이라 안 걸리고, **같은 속성과
+    같은 글자**를 영역 밖에 붙인 버튼은 그대로 걸린다. 영역 밖의 `data-golive` 는 눌러도
+    아무것도 보내지 않는다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        base = f"http://127.0.0.1:{srv.port}/?poll=1&lang=ko"
+        with Chrome(tmp_path / "chrome-golive-guard", window="1240,900") as c:
+            _open_golive_page(c, base, srv)
+            label = c.eval(_q(f"{GOLIVE} [data-golive='open']", ".textContent"))
+            assert "출시" in label, "면제가 일하는지 보려면 걸릴 글자를 단 버튼이어야 한다"
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 영역 밖 — 같은 속성, 같은 글자: 걸린다
+            c.eval(
+                "window.rcmGuardProbe("
+                + json.dumps(
+                    [
+                        ["출시 예약…", {"data-golive": "open"}, None],
+                        ["Publish now", {"data-golive": "go"}, "[data-version-main]"],
+                        ["지금 출시", {"data-golive-sheet": ""}, None],
+                        # 버튼 **자신**이 영역 표시를 달아도 영역 안이 아니다(`closest` 는 자기
+                        # 자신을 포함한다 — #255 검증 P2)
+                        ["게시하기", {"data-golive": "go", "data-golive-sheet": ""}, None],
+                    ]
+                )
+                + ")"
+            )
+            assert sorted(c.eval(FORBIDDEN_BUTTONS_JS)) == sorted(
+                ["출시 예약…", "Publish now", "지금 출시", "게시하기"]
+            )
+            # 영역 밖의 `data-golive` 를 눌러도 아무 호출이 없다. 클릭 탐침은 `#store` 안
+            # (`[data-version-main]`)에 심는다 — 본문 끝에 심으면 `#store` 의 리스너가 아예 돌지
+            # 않아 이 단언은 아무것도 시험하지 못한다(#255 검증 P2).
+            for attrs in (
+                {"data-golive": "open"},
+                {"data-golive": "open", "data-golive-sheet": ""},
+            ):
+                c.eval(
+                    "window.rcmGuardProbe("
+                    + json.dumps([["출시 예약…", attrs, "[data-version-main]"]])
+                    + ")"
+                )
+                assert c.eval(
+                    "document.querySelector('[data-guard-probe]').closest('#store') !== null"
+                )
+                c.eval("document.querySelector('[data-guard-probe]').click()")
+                time.sleep(0.3)
+                assert c.eval("window.rcmGoliveCalls") == [], attrs
+            # 영역 안 — 면제된다
+            c.eval(
+                "window.rcmGuardProbe("
+                + json.dumps([["지금 출시", {"data-golive": "go"}, GOLIVE]])
+                + ")"
+            )
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == []
+            # 영역 안이어도 `data-golive` 가 없으면 걸린다
+            c.eval("window.rcmGuardProbe(" + json.dumps([["게시", None, GOLIVE]]) + ")")
+            assert c.eval(FORBIDDEN_BUTTONS_JS) == ["게시"]
+            c.eval("window.rcmGuardProbe([])")
             assert c.page_errors() == []
     finally:
         srv.close()

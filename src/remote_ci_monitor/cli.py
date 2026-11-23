@@ -930,7 +930,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
         except ClientError as e:
             _err(f"submit failed: {e.message}")
-            return USAGE_EXIT if e.status in _submit_refused(args) else EXIT_UNKNOWN
+            refused = e.status in _submit_refused(args) or _refused_by_code(e)
+            return USAGE_EXIT if refused else EXIT_UNKNOWN
         job_id = int(resp["job_id"])
         _no_capable_line(preset.name, resp)
         joined = bool(resp.get("joined"))
@@ -1037,6 +1038,15 @@ def _submit_refused(args: argparse.Namespace) -> tuple[int, ...]:
     return (*base, 404, 409) if getattr(args, "machine", None) is not None else base
 
 
+#: 잡을 만들지 않은 것이 확실한 409 코드 — 상태 코드만으로는 모르니(3) 코드로 2 를 고른다.
+#: `release_route_required` 는 golive 출시를 `POST /jobs` 로 낸 것이다(M5s 결정 235).
+_REFUSED_CODES = ("release_route_required",)
+
+
+def _refused_by_code(e: ClientError) -> bool:
+    return isinstance(e.body, dict) and e.body.get("code") in _REFUSED_CODES
+
+
 def _run_git_ref(
     client: Client,
     args: argparse.Namespace,
@@ -1070,7 +1080,8 @@ def _run_git_ref(
         _err(f"submit failed: {e.message}")
         # 502 「cannot resolve」 는 ref 가 틀렸다는 확정 거절(잡 없음) — 400 과 같은 usage 2.
         # 504 (해석 타임아웃) · 503 · 연결 오류는 결과를 모르는 것이라 3.
-        return USAGE_EXIT if e.status in (*_submit_refused(args), 502) else EXIT_UNKNOWN
+        refused = e.status in (*_submit_refused(args), 502) or _refused_by_code(e)
+        return USAGE_EXIT if refused else EXIT_UNKNOWN
     job_id = int(resp["job_id"])
     _no_capable_line(preset.name, resp)
     joined = bool(resp.get("joined"))
@@ -3103,10 +3114,215 @@ def _release_delete(client: Client, repo: str, args: argparse.Namespace) -> int:
     return 0
 
 
+#: golive 의 플랫폼 선택지(서버 `RELEASE_PLATFORMS` 와 같다).
+GOLIVE_PLATFORMS = ("ios", "android", "both")
+#: plan 을 먼저 돌리라고 말할 409 코드들(M5s §4.5).
+_GOLIVE_PLAN_FIRST = ("golive_plan_required", "golive_plan_stale")
+
+
+def _role_wait(client: Client, job_id: int, what: str) -> tuple[int, dict[str, Any] | None]:
+    """읽기 전용 역할 잡(golive plan · status)을 끝날 때까지 기다린다 — 상태 줄은 stderr."""
+    line = _StatusLine()
+    try:
+        code, job, reason = wait_for_job(
+            client, job_id, on_update=lambda j: line.update(describe(j)), on_info=line.update
+        )
+    except KeyboardInterrupt:
+        line.done()
+        _info(f"detached from {what} job #{job_id} — it keeps running (rcm wait --job {job_id})")
+        raise
+    line.done()
+    if reason:
+        _err(reason)
+    return code, job
+
+
+def _role_entry(client: Client, repo: str, *path: str) -> dict[str, Any] | None:
+    """`GET …/release` 에서 역할의 최신 항목 하나(`("golive", "plan")` · `("status",)`)."""
+    doc: Any = client.get_json(f"/api/repos/{repo}/release") or {}
+    for key in path:
+        doc = doc.get(key) if isinstance(doc, dict) else None
+    return doc if isinstance(doc, dict) else None
+
+
+def _cell(value: Any) -> str:
+    return "—" if value is None or value == "" else str(value)
+
+
+def _golive_plan_lines(repo: str, entry: dict[str, Any], build_name: str) -> list[str]:
+    """golive plan 문서를 사람이 읽는 줄로 — 승인 여부 · 승인된 빌드 · 스토어의 말. 번호를 지어내지
+    않는다: 문서에 없으면 —. 승인된 플랫폼이 있으면 다음에 칠 명령을 한 줄 보여 준다."""
+    doc = entry.get("doc") if isinstance(entry.get("doc"), dict) else {}
+    platforms = doc.get("platforms") if isinstance(doc.get("platforms"), dict) else {}
+    head = f"golive plan #{entry.get('job_id')} {entry.get('state')}"
+    lines = [
+        f"{head} · build {_cell(doc.get('build_name'))} · verdict {_cell(doc.get('plan_verdict'))}"
+    ]
+    approved: dict[str, Any] = {}
+    for p in RELEASE_PLATFORMS:
+        part = platforms.get(p)
+        if not isinstance(part, dict):
+            continue
+        ok = part.get("approved") is True
+        if ok:
+            approved[p] = part.get("approved_build")
+        word = "approved" if ok else "not approved"
+        build = _cell(part.get("approved_build"))
+        label = RELEASE_PLATFORM_LABEL[p]
+        lines.append(f"{label:<8} {word:<13} build {build:<6} {_cell(part.get('raw_state'))}")
+    builds = {b for b in approved.values() if b is not None}
+    if approved and len(builds) == 1:
+        which = "both" if len(approved) == 2 else next(iter(approved))
+        lines.append(
+            f"next: rcm release golive {repo} --build-name {build_name} --platform {which} "
+            f"--confirm-build-number {next(iter(builds))} [--at HH:MM | --in 30m]"
+        )
+    return lines
+
+
+def _release_golive(client: Client, repo: str, args: argparse.Namespace) -> int:
+    """`rcm release golive` — plan(`--plan`, 읽기만 · 끝날 때까지 기다린다) 또는 출시 요청(admin ·
+    사람이 친 번호 · 지금이나 정한 시각). 검사는 모두 서버가 한다 — 여기서는 보내고 찍는다."""
+    build_name = args.build_name
+    if args.plan:
+        if args.confirm_build_number is not None or args.at or args.start_in:
+            raise ReleaseUsage(
+                "--plan only reads the stores now: it takes no --confirm-build-number, --at or --in"
+            )
+        resp = client.post_json(
+            f"/api/repos/{repo}/release/golive",
+            {"mode": "plan", "build_name": build_name, "platform": args.platform},
+        )
+        job_id = int(resp["job_id"])
+        _info(f"golive plan job #{job_id} {resp.get('state')} — reading the stores (no release)")
+        code, job = _role_wait(client, job_id, "golive plan")
+        entry = _role_entry(client, repo, "golive", "plan")
+        if entry is None or entry.get("job_id") != job_id:
+            _err(f"golive plan job #{job_id} left no golive-plan.json")
+            if args.json:
+                _print_json({"job_id": job_id, "state": (job or {}).get("state"), "plan": None})
+            return code if code else 1
+        if args.json:
+            _print_json({"job_id": job_id, "state": entry.get("state"), "plan": entry})
+        else:
+            for text in _golive_plan_lines(repo, entry, build_name):
+                print(text)
+        return code
+    if args.confirm_build_number is None:
+        raise ReleaseUsage(
+            "--confirm-build-number N is required to go live — the approved build the plan "
+            f"shows (rcm release golive {repo} --build-name {build_name} --plan)"
+        )
+    body: dict[str, Any] = {
+        "mode": "release",
+        "build_name": build_name,
+        "platform": args.platform,
+        "confirm_build_number": str(args.confirm_build_number),
+    }
+    if args.at or args.start_in:
+        refusal = _schedule_refusal(client.health())
+        if refusal:
+            raise ReleaseUsage(refusal)
+        if args.at:
+            body["start_at"] = args.at
+        else:
+            try:
+                body["start_in_seconds"] = parse_duration(args.start_in)
+            except ValueError as e:
+                raise ReleaseUsage(f"--in: {e}") from None
+    try:
+        resp = client.post_json(f"/api/repos/{repo}/release/golive", body) or {}
+    except ClientError as e:
+        if isinstance(e.body, dict) and e.body.get("code") in _GOLIVE_PLAN_FIRST:
+            _err(
+                f"hint: rcm release golive {repo} --build-name {build_name} "
+                f"--platform {args.platform} --plan"
+            )
+        raise
+    job_id = int(resp["job_id"])
+    _keep_submission(client, job_id, resp)
+    if args.json:
+        _print_json(resp)
+        return 0
+    when = _scheduled_for(resp) if resp.get("not_before") else str(resp.get("state"))
+    print(
+        f"golive #{job_id} {when} · build {build_name} · {args.platform} "
+        f"{args.confirm_build_number}"
+    )
+    print(f"follow: rcm wait --job {job_id} · cancel: rcm cancel {job_id}")
+    return 0
+
+
+def _status_lines(entry: dict[str, Any]) -> list[str]:
+    """status 문서 → 두 스토어 한 줄씩. 모르는 `state` 는 그대로가 아니라 unknown 으로(§4.4)."""
+    doc = entry.get("doc") if isinstance(entry.get("doc"), dict) else {}
+    lines = [
+        f"status #{entry.get('job_id')} {entry.get('state')} · checked "
+        f"{_cell(entry.get('measured_at'))}" + (" · stale" if entry.get("stale") else "")
+    ]
+    for p in RELEASE_PLATFORMS:
+        part = doc.get(p)
+        if not isinstance(part, dict):
+            continue
+        state = part.get("state")
+        if state not in STORE_STATUS_STATES:
+            state = "unknown"
+        build = _cell(part.get("build") if p == "ios" else part.get("version_code"))
+        version = _cell(part.get("version"))
+        lines.append(
+            f"{RELEASE_PLATFORM_LABEL[p]:<8} {version:<9} build {build:<6} "
+            f"{state:<17} {_cell(part.get('raw_state'))}"
+        )
+    return lines
+
+
+#: status 문서의 `state` 8값(M5s §4.4) — 정규화는 프로젝트 스크립트가 한다.
+STORE_STATUS_STATES = (
+    "preparing",
+    "waiting_for_review",
+    "in_review",
+    "approved",
+    "rejected",
+    "releasing",
+    "released",
+    "unknown",
+)
+
+
+def _release_status(client: Client, repo: str, args: argparse.Namespace) -> int:
+    """`rcm release status` — 두 스토어의 심사 상태를 읽는 잡을 내고 끝날 때까지 기다린 뒤 그린다.
+    읽기만 하는 역할이라 아무 클라이언트 토큰이면 된다."""
+    body: dict[str, Any] = {"build_name": args.build_name} if args.build_name else {}
+    resp = client.post_json(f"/api/repos/{repo}/release/status", body) or {}
+    job_id = int(resp["job_id"])
+    _info(f"status job #{job_id} {resp.get('state')} — reading the stores")
+    code, job = _role_wait(client, job_id, "status")
+    entry = _role_entry(client, repo, "status")
+    if entry is None or entry.get("job_id") != job_id:
+        _err(f"status job #{job_id} left no status.json")
+        if args.json:
+            _print_json({"job_id": job_id, "state": (job or {}).get("state"), "status": None})
+        return code if code else 1
+    if args.json:
+        _print_json({"job_id": job_id, "state": entry.get("state"), "status": entry})
+    else:
+        for text in _status_lines(entry):
+            print(text)
+    return code
+
+
+def _release_repo_arg(args: argparse.Namespace) -> str | None:
+    """`rcm release golive <repo>` 의 자리 인자와 `--repo` — 둘이 다르면 사용 오류."""
+    positional = getattr(args, "repo_arg", None)
+    if positional and args.repo and positional != args.repo:
+        raise ReleaseUsage(f"two repositories given: {positional} and --repo {args.repo}")
+    return positional or args.repo
+
+
 def cmd_release(args: argparse.Namespace) -> int:
     client = _client(args)
     try:
-        repo = _release_repo(client, args.repo)
+        repo = _release_repo(client, _release_repo_arg(args))
         if args.release_command == "open":
             url = _release_url(client, repo, args.id)
             if args.json:
@@ -3118,6 +3334,10 @@ def cmd_release(args: argparse.Namespace) -> int:
             return _release_new(client, repo, args)
         if args.release_command == "list":
             return _release_list(client, repo, args)
+        if args.release_command == "golive":
+            return _release_golive(client, repo, args)
+        if args.release_command == "status":
+            return _release_status(client, repo, args)
         return _release_delete(client, repo, args)
     except ReleaseUsage as e:
         return _usage(str(e))
@@ -5111,7 +5331,9 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(presets)
     presets.set_defaults(func=cmd_presets)
 
-    release = sub.add_parser("release", help="store version drafts: new, list, delete, open")
+    release = sub.add_parser(
+        "release", help="store version drafts (new, list, delete, open), status and golive"
+    )
     rsub = release.add_subparsers(dest="release_command", required=True)
 
     def release_opts(sp: argparse.ArgumentParser) -> None:
@@ -5134,6 +5356,39 @@ def build_parser() -> argparse.ArgumentParser:
     ropen = rsub.add_parser("open", help="print the web address of a version page")
     ropen.add_argument("id", type=int)
     release_opts(ropen)
+    rgolive = rsub.add_parser(
+        "golive",
+        help="go live with an approved build: --plan reads the stores; otherwise asks for a "
+        "release now or at a time (admin token, the build number a person typed)",
+    )
+    rgolive.add_argument("repo_arg", nargs="?", metavar="repo", help="repository name")
+    rgolive.add_argument("--build-name", required=True, metavar="X.Y.Z", help="version name")
+    rgolive.add_argument("--platform", choices=GOLIVE_PLATFORMS, default="both")
+    rgolive.add_argument(
+        "--confirm-build-number",
+        type=int,
+        metavar="N",
+        help="the approved build number the plan shows, typed by you (required to go live)",
+    )
+    rgolive_when = rgolive.add_mutually_exclusive_group()
+    rgolive_when.add_argument(
+        "--at", metavar="TIME", help="go live at this time: HH:MM (today), YYYY-MM-DDTHH:MM"
+    )
+    rgolive_when.add_argument(
+        "--in", dest="start_in", metavar="DURATION", help="go live after this long: 30m, 2h"
+    )
+    rgolive.add_argument(
+        "--plan",
+        action="store_true",
+        help="only read the stores: approved or not, and the approved build (waits)",
+    )
+    release_opts(rgolive)
+    rstatus = rsub.add_parser(
+        "status", help="read the review state of both stores (runs the status role and waits)"
+    )
+    rstatus.add_argument("repo_arg", nargs="?", metavar="repo", help="repository name")
+    rstatus.add_argument("--build-name", metavar="X.Y.Z", help="empty = the newest versions")
+    release_opts(rstatus)
     release.set_defaults(func=cmd_release)
 
     def server_opts(sp: argparse.ArgumentParser) -> None:

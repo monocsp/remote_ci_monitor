@@ -6,8 +6,8 @@
 # from the web) are here; /rcm-gate-connect and /rcm-qa-connect append theirs. scripts/rcm/rcm_candidate.py merges this file into a candidate
 # server.toml for `rcm check`; the server owner copies the result into place.
 #
-# Inputs are exactly the ones rcm sends per role (docs/release-contract.md §2). Do not add an input that
-# releases, publishes or rolls out anything: rcm must never be able to release after store approval.
+# Inputs are exactly the ones rcm sends per role (docs/release-contract.md §2). Nothing goes live on approval
+# by itself: a release runs only when a person asks for it with the version, the build number and a time.
 # The irreversible values (mode = upload / submit / create / delete) are choices, never defaults — `rcm check`
 # fails otherwise. `listing_json` on upload / review carries the copy edited in the web UI (version page);
 # without it `rcm check` warns and the edited copy never reaches the scripts. `build_name_android` carries the

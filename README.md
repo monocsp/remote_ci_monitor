@@ -209,6 +209,8 @@ The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
 | `rcm reload [--dry-run]` | re-read the config file and its `include` files — presets and repos only, no restart (admin); `--dry-run` names what would change and applies nothing |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | store version drafts (admin). With no version arguments `new` asks only for the names, offering the server's hints: enter takes the hint, `-` skips that store, `--yes` takes both. `open` prints the address of the version page |
+| `rcm release status [REPO] [--build-name X]` | both stores' review state: runs the repository's `status` role, waits, and prints each store's version, build, state and the store's own word (any client token) |
+| `rcm release golive [REPO] --build-name X --platform ios\|android\|both --plan` · `… --confirm-build-number N [--at TIME \| --in DURATION]` | going live with an approved build ([going live](docs/configuration.md#going-live-golive)). `--plan` reads approval and the approved build and waits; without it you ask for the release now or at a time, with the approved build number you typed (admin). Nothing goes live on approval by itself |
 
 Every estimate carries a `confidence`: `high` (median of ≥ 5 real runs), `med` (fewer), `low`
 (a preset or default guess), `group wait` (blocked by a concurrency group) or `overdue`. Unknown
@@ -322,9 +324,10 @@ jobs when it does not), the basis in words, and two columns — **Left before re
 it and goes there when clicked. The submit conditions live here too: the store checkboxes, the
 managed-publishing box ticked for this submission and never remembered, and the build number,
 **Auto** (the plan's own) or typed to match it exactly. A percentage appears only against a
-denominator declared in advance; otherwise the bar is hatched and says so. There is no Release,
-Publish or Rollout button in any state, and an `unsafe_release_type` verdict raises a red banner
-that cannot be dismissed.
+denominator declared in advance; otherwise the bar is hatched and says so. Nothing goes live on
+approval by itself: a release runs only when a person asks for it with the version, the build
+number and a time — the version page's «Schedule go-live», open only once that store says
+approved. An `unsafe_release_type` verdict raises a red banner that cannot be dismissed.
 
 Drafts neither pile up nor vanish under you. One nobody edited is discarded after
 `version_ttl_hours` (default 24) — through the store when the profile has a `version` preset,
@@ -346,8 +349,9 @@ no upload button), and the Source row shows the mirror's last five commits, its 
 
 Beyond the queue, a repository can get a **Store tab**: fetch, store snapshot, gate, QA, upload,
 submit for review, each a button over the project's *own* release scripts. rcm draws the JSON
-those scripts write and runs the presets they declare; it never computes a build number, judges
-QA, or releases anything after store approval. What a project must provide is written down in
+those scripts write and runs the presets they declare; it never computes a build number or judges
+QA, and nothing goes live on approval by itself — a release runs only when a person asks for it
+with the version, the build number and a time. What a project must provide is written down in
 [docs/release-contract.md](docs/release-contract.md); the fastest way to provide it is the skills
 rcm ships for a Claude Code session in that project:
 

@@ -1,6 +1,6 @@
 ---
 name: rcm-store-connect
-description: Connect a project to the rcm Store tab at the required tier — the release profile block for server.toml, the secrets list, the presets (plan / upload / review, plus version for «new version» from the web) and four script skeletons that honour the artifact contract, each with a --selftest. Use it inside the project that ships to the stores, once per repository, before /rcm-gate-connect, /rcm-qa-connect or /rcm-release-driver; re-run it to verify (it never overwrites an owner-edited file without --force).
+description: Connect a project to the rcm Store tab at the required tier — the release profile block for server.toml, the secrets list, the presets (plan / upload / review, plus version for «new version» from the web, status for both stores' review state and golive for going live when a person asks) and six script skeletons that honour the artifact contract, each with a --selftest. Use it inside the project that ships to the stores, once per repository, before /rcm-gate-connect, /rcm-qa-connect or /rcm-release-driver; re-run it to verify (it never overwrites an owner-edited file without --force).
 ---
 
 # rcm-store-connect
@@ -52,8 +52,10 @@ store credentials are never inputs of this skill.
 | `scripts/release/release_upload.sh` | role `upload`: rehearsal by default; real upload only with the N a human typed; `platform_build_name` gives each store its own version name when `RCM_INPUT_BUILD_NAME_ANDROID` differs |
 | `scripts/release/release_review.sh` | role `review`: review plan by default; submit only with the typed N; Android only with the per-submission managed-publishing statement; `RCM_INPUT_LISTING_JSON` (the copy edited in the web UI) → `listing.json`, handed to the hook, echoed in the preview; `platform_build_name` gives each store its own version name |
 | `scripts/release/release_version.sh` | role `version` (optional, «new version» from the web): `mode=prefill` by default reads the live listing into `prefill.json` (falls back to the `store/` files); `create` makes the App Store version and records the Android name → `version.json`; `delete` drops an editable version (submitted → exit 4) |
-| `scripts/rcm/presets.release.toml` | the presets `release-plan`, `release-upload`, `release-review`, `release-version` with exactly the inputs rcm sends (`listing_json` and `build_name_android` on upload / review), `source_modes = ["git_ref"]`, `repo`, `artifacts`, `artifacts_on = "always"` |
-| `scripts/rcm/profile.release.toml` | the `[repos.<repo>.release]` block: roles → presets (`version` included), `version_ttl_hours`, `secrets_dir_env`, the secrets list (names and kinds only) |
+| `scripts/release/release_status.sh` | role `status` (optional): reads both stores' review state into `status.json` (eight `state` words, the store's own word in `raw_state`); read-only, any client token may run it from any machine |
+| `scripts/release/release_golive.sh` | role `golive` (optional): `mode=plan` by default reads approval and the approved build into `golive-plan.json` and exits 0 whatever the answer; `mode=release` — sent only by rcm's go-live route, for the build a person typed — asks App Store Connect to release and publishes on Play through the project's browser automation → `golive.json`. Not approved → 2 (never 75); a lost Play sign-in → `::rcm::action::login::` and 75 at once |
+| `scripts/rcm/presets.release.toml` | the presets `release-plan`, `release-upload`, `release-review`, `release-version`, `release-status`, `release-golive` with exactly the inputs rcm sends (`listing_json` and `build_name_android` on upload / review, `build_name_android` on golive), `source_modes = ["git_ref"]`, `repo`, `artifacts`, `artifacts_on = "always"`; `release-golive` also `priority = "high"`, `start_deadline_seconds = 3600`, `concurrency_group = "store-browser-<repo>"` and `[presets.retry]` (exit 75 again every 600 s, 12 attempts) |
+| `scripts/rcm/profile.release.toml` | the `[repos.<repo>.release]` block: roles → presets (`version`, `status` and `golive` included), `version_ttl_hours`, `secrets_dir_env`, the secrets list (names and kinds only) |
 | `scripts/rcm/rcm_candidate.py` | stdlib-only merger: writes a candidate `server.toml` (profile block after the right `[[repos]]` entry, presets appended, same-name presets replaced) and, with `--check`, runs `rcm check` on it; when the server's `server.toml` has `include = [...]` and an included file has the presets file's name (or `--into` names one), the presets go into a copy of that file and the candidate is a folder (`server.toml` + that file); reads its defaults from the `docs/rcm-connect.md` header; `--selftest` |
 | `docs/rcm-connect.md` (created or section appended) | the answers in its header and, per skill, what was created / still to fill in / verified — `/rcm-connect` and the other skills read it |
 | `.gitignore` (two lines, if missing) | `build/.rcm-release/` and `__pycache__/` — artifacts, store snapshots and bytecode never enter git |
@@ -63,7 +65,7 @@ that marker is how a re-run tells its own output from an owner's file.
 
 Two project-side files are shared by every `rcm-*-connect` skill and exist once:
 `scripts/rcm/presets.release.toml` holds **all** rcm presets of the project in one file (this skill
-adds the three store roles; gate / qa / driver skills append theirs), and
+adds the store roles; gate / qa / driver skills append theirs), and
 `scripts/rcm/profile.release.toml` holds the **whole** `[repos.<repo>.release]` block, including the
 optional roles other skills add later. If the project already keeps rcm presets in another TOML file
 (Step 1 finds it), that file plays the presets role — its path goes into the header's
@@ -111,16 +113,29 @@ result (`B-TODO`, `not_implemented`), never a fake number or a fake `ready`:
    IOS_VERSION ANDROID_VERSION` (create the App Store version; exit 3 when an editable one of that
    name exists; Android is a name only) and `store_version_delete ASC_VERSION_ID` (editable
    versions only; submitted → exit 4). Skip the file when the header says `version: no`.
-5. `profile.release.toml` → the secrets list: keep the names the scripts really read; delete the
+5. `release_status.sh` → `store_status BUILD_NAME`: both stores' review state as one JSON object,
+   the store's own word mapped onto the eight `state` words (`approved` once review approved it).
+   Read-only.
+6. `release_golive.sh` → `store_approval PLATFORM VERSION_NAME` (read-only: approved, the approved
+   build, `stage` waiting / in_progress / live), `store_ios_release VERSION_NAME BUILD` (App Store
+   Connect release request) and `store_android_publish VERSION_NAME VERSION_CODE` (Play has no API
+   for a held release: open the dedicated Chrome profile kept next to the secrets, check the
+   sign-in — answer `needs_login` at once when it is gone, never wait — press publish, and record
+   the press only after the screen confirms publishing started). Whether it went live is read back
+   through the store API. The project also needs a **sign-in preset** that opens that Chrome
+   profile on the build machine for a person (screen sharing) and uses the same
+   `concurrency_group` as `release-golive` (`store-browser-<repo>`), so two Chromes never open one
+   profile.
+7. `profile.release.toml` → the secrets list: keep the names the scripts really read; delete the
    group of a platform the project does not ship; add `GH_TOKEN` / `review_information` only if used.
-6. `server.toml` on the rcm server → put the profile block directly under the project's
+8. `server.toml` on the rcm server → put the profile block directly under the project's
    `[[repos]]` entry and the presets among `[[presets]]` (`rcm_candidate.py --out` produces the
    exact file); restart the server; open the Store tab Settings and enter the secrets there (they
    never go into git or the profile). When `server.toml` brings the presets in with `include`
    (rcm 0.6.0+), the presets belong in that included file instead: `rcm_candidate.py --out
    <folder>` writes both files, and copying them into place then `rcm reload --dry-run` →
    `rcm reload` applies them without a restart.
-7. The `[[repos]]` entry itself, if the server does not have one yet (`name`, `url`).
+9. The `[[repos]]` entry itself, if the server does not have one yet (`name`, `url`).
 
 Where an existing lane or script already does a store read or upload (Step 1 lists them), the
 TODO body is usually one call to it.
@@ -194,7 +209,7 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
      mkdir -p "$(dirname "$2")"; fill "$1" > "$2"; echo "written   $2"
    }
    VERSION_ROLE="$(grep -m1 '^version: ' docs/rcm-connect.md 2>/dev/null | cut -d' ' -f2)"; VERSION_ROLE="${VERSION_ROLE:-yes}"   # header line; missing = yes
-   for f in rcm_contract.py release_plan.sh release_upload.sh release_review.sh; do install_file "$SKILL_DIR/templates/$f" "$scripts_dir/$f"; done
+   for f in rcm_contract.py release_plan.sh release_upload.sh release_review.sh release_status.sh release_golive.sh; do install_file "$SKILL_DIR/templates/$f" "$scripts_dir/$f"; done
    [ "$VERSION_ROLE" = no ] || install_file "$SKILL_DIR/templates/release_version.sh" "$scripts_dir/release_version.sh"
    install_file "$SKILL_DIR/templates/rcm_candidate.py" scripts/rcm/rcm_candidate.py
    chmod +x "$scripts_dir"/release_*.sh "$scripts_dir/rcm_contract.py" scripts/rcm/rcm_candidate.py
@@ -202,8 +217,8 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    Placeholders: `{{repo}}` = answer 1 · `{{secrets_env}}` = answer 3 · `{{scripts_dir}}` = the
    folder chosen in Step 1 · `{{platform_default}}` = answer 2 mapped as above (`ios,android` →
    `both`, the preset's `platform` choice). Check: `grep -l '{{' "$scripts_dir"/release_*.sh
-   "$scripts_dir"/*.py scripts/rcm/rcm_candidate.py` prints nothing; `bash -n` passes on the four
-   scripts; `python3 -m py_compile` passes on `rcm_contract.py` and `scripts/rcm/rcm_candidate.py`;
+   "$scripts_dir"/*.py scripts/rcm/rcm_candidate.py` prints nothing; `bash -n` passes on the six
+   scripts (five with `version: no`); `python3 -m py_compile` passes on `rcm_contract.py` and `scripts/rcm/rcm_candidate.py`;
    no line says `differs` (or the owner has decided about each one).
 4. **Run the selftests** — they need no store, no secrets and no network. A stub that merely exits
    0 must not pass, so test the exit code **and** the PASS line:
@@ -211,27 +226,33 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    fails=0
    for cmd in "python3 $scripts_dir/rcm_contract.py" "python3 scripts/rcm/rcm_candidate.py" \
               "bash $scripts_dir/release_plan.sh" "bash $scripts_dir/release_upload.sh" "bash $scripts_dir/release_review.sh" \
+              "bash $scripts_dir/release_status.sh" "bash $scripts_dir/release_golive.sh" \
               $([ "$VERSION_ROLE" = no ] || echo "bash $scripts_dir/release_version.sh"); do
      out="$($cmd --selftest 2>&1)"; rc=$?
      if [ "$rc" = 0 ] && printf '%s\n' "$out" | tail -1 | grep -Eq 'selftest (PASS|ok)'; then echo "PASS  $cmd"; else echo "FAIL  $cmd (rc=$rc)"; printf '%s\n' "$out" | tail -5; fails=$((fails+1)); fi
    done; echo "selftests failed: $fails"
    ```
-   Check: `selftests failed: 0` and six `PASS` lines (five with `version: no`). They prove: a
+   Check: `selftests failed: 0` and eight `PASS` lines (seven with `version: no`). They prove: a
    poisoned store answer ends red with `n = null` (never a fake number), the default modes call no
    store, `mode=upload` / `mode=submit` without a typed N exit 2 before any store call, a mismatch
    exits 3, drift 4, an unconfirmed Android submission is skipped and the run is partial (6), an
    observed `auto_release` blocks everything, `listing_json` becomes `listing.json` and reaches the
    hook (and the preview), `release_version.sh` prefills from `store/` files when the store is not
-   readable, creates only by name, exits 3 on an existing version and 4 on a submitted one, and the
-   merger shows `FAIL server config` rows.
+   readable, creates only by name, exits 3 on an existing version and 4 on a submitted one,
+   `release_status.sh` writes nothing when a store cannot be read, `release_golive.sh` plan exits 0
+   with Android not approved (the answer is in the file), release exits 2 — never 75 — for a build
+   that is not approved and 3 for a wrong number without calling a release hook, and a lost sign-in
+   prints the action marker and exits 75 at once without a sleep, and the merger shows `FAIL
+   server config` rows.
 5. **Write the presets** from `$SKILL_DIR/templates/presets.release.toml` through `fill` into
    `$presets_file`:
    - new file → `install_file`;
-   - existing presets file → for each of the four `[[presets]]` groups (three with `version: no` —
+   - existing presets file → for each of the six `[[presets]]` groups (five with `version: no` —
      drop the `release-version` group from the filled template first): append it when no preset
      of that name exists; when one exists and **passes the invariants below** (the inputs rcm
-     sends are declared, the irreversible `mode` is not the default, no release-after-approval
-     input) it is the project's real preset — record `kept — real implementation` and continue.
+     sends are declared, the irreversible `mode` is not the default, no input that goes live on
+     approval by itself) it is the project's real preset — record `kept — real implementation` and
+     continue.
      A kept `release-review` / `release-upload` preset that lacks the `listing_json` or the
      `build_name_android` input gets that `[[presets.inputs]]` entry appended (string, default
      `""`) — `rcm check` warns until it is there;
@@ -269,13 +290,20 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
        if p["name"] == "release-version":
            assert inputs["mode"]["default"] == "prefill", inputs["mode"]
            assert {"ios_version", "android_version", "asc_version_id"} <= set(inputs), inputs.keys()
+       if p["name"] == "release-status":
+           assert "build_name" in inputs, inputs.keys()
+       if p["name"] == "release-golive":
+           assert inputs["mode"]["default"] == "plan", inputs["mode"]
+           assert {"build_name", "build_name_android", "confirm_build_number", "platform"} <= set(inputs), inputs.keys()
+           assert p.get("concurrency_group"), "release-golive needs the browser concurrency_group"
    print("presets ok:", names)
    PY
-   grep -nEi 'automatic_release|rollout|auto_release|promote' "$presets_file" && echo "FAIL: release-after-approval input" || echo ok
+   grep -nEi 'automatic_release|rollout|auto_release|promote' "$presets_file" && echo "FAIL: an input that goes live on approval" || echo ok
    ```
    The first prints `presets ok` (every `platform` default is inside its choices, irreversible
    modes are not defaults, `listing_json` and `build_name_android` are declared, `release-version`
-   defaults to `prefill`); the second prints `ok`.
+   defaults to `prefill`, `release-golive` defaults to `plan` and has its group); the second prints
+   `ok`.
 6. **Write the profile** from `$SKILL_DIR/templates/profile.toml` through `fill` into
    `scripts/rcm/profile.release.toml` (`install_file`). Then edit the secrets list: delete the iOS
    group when `PLATFORMS = android`, the Android group when `PLATFORMS = ios`; rename entries to
@@ -294,6 +322,8 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    for role, want in (("plan", "release-plan"), ("upload", "release-upload"), ("review", "release-review")):
        assert d["presets"].get(role) == want, (role, d["presets"])
    assert d["presets"].get("version") in (None, "release-version"), d["presets"]
+   assert d["presets"].get("status") in (None, "release-status"), d["presets"]
+   assert d["presets"].get("golive") in (None, "release-golive"), d["presets"]
    assert isinstance(d.get("version_ttl_hours", 24), int) and d.get("version_ttl_hours", 24) >= 1, d.get("version_ttl_hours")
    assert names and d.get("secrets_dir_env"), "secrets listed but secrets_dir_env empty (or no secrets at all)"
    print("profile ok:", len(names), "secrets, secrets_dir_env =", d["secrets_dir_env"], "version =", d["presets"].get("version"))
@@ -350,7 +380,7 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
    to `prefill`) — fix the file it names and repeat. When
    `SERVER_TOML = skip`, record "not verified — server.toml not reachable from here" instead and
    hand `scripts/rcm/profile.release.toml` + `$presets_file` to the server owner with the
-   instructions from «What the human still fills in» 5 (they run the same command on the server
+   instructions from «What the human still fills in» 7 (they run the same command on the server
    with `--out` to produce the file to move into place).
 9. **Read-only plan run**, twice. Skip the run (and say so in the report) when the script's own
    preflight needs a network identity before it reads the secrets folder — a `gh api` or store
@@ -374,7 +404,8 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
      not `None`). A missing `play.production_name` is the whole Android side of the version page
      going blank — go back to Step «What the human still fills in» 1. `next_version_hint` may be
      `None`: rcm then bumps the last number of each name itself. Never run `release-upload`
-     with `mode=upload` or `release-review` with `mode=submit` from this skill.
+     with `mode=upload`, `release-review` with `mode=submit` or `release-golive` with
+     `mode=release` from this skill (rcm refuses the last one outside its go-live route anyway).
 10. **Record** in `docs/rcm-connect.md`. If the file is missing, create it with the header shown
     under «What it creates» — all six lines, `tiers: none` — filled from Step 2 and Step 1
     (`presets_file`). If it exists with that header, keep every line but fix the presets line:
@@ -394,7 +425,7 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
     ## rcm-store-connect — <YYYY-MM-DD>
     Created: <one line per file: written / rewritten / kept / differs>
     You must fill in: <the numbered items of «What the human still fills in» that still apply>
-    Verified: <selftests PASS ×6 (×5 with version: no)> · <rcm check release <repo>: ok|warn (<warnings>)|not verified> · <local plan run: exit 1, B-TODO> · <rcm plan run: n=<N>, live names <asc_live>/<play.production_name> | pending>
+    Verified: <selftests PASS ×8 (×7 with version: no)> · <rcm check release <repo>: ok|warn (<warnings>)|not verified> · <local plan run: exit 1, B-TODO> · <rcm plan run: n=<N>, live names <asc_live>/<play.production_name> | pending>
     ```
     Check: `head -1 docs/rcm-connect.md` is `# rcm connect — <repo>`; the six `repo:` /
     `platforms:` / `server_toml:` / `secrets_env:` / `presets_file:` / `tiers:` lines are present;
@@ -407,8 +438,8 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
 - `rcm_candidate.py … --check` exits 0 and shows `release <repo>` as `ok` or `warn` with only the
   "secrets dir does not exist yet" / "not configured" warnings (or the report says exactly why it
   could not be run here).
-- `rcm_contract.py --selftest`, `rcm_candidate.py --selftest` and the four script `--selftest`
-  runs (three with `version: no`) all exit 0 **and** print their PASS line in this project.
+- `rcm_contract.py --selftest`, `rcm_candidate.py --selftest` and the six script `--selftest`
+  runs (five with `version: no`) all exit 0 **and** print their PASS line in this project.
 - The local read-only plan run left a `plan.json` that `validate plan` accepts, with `n: null`
   and a `B-TODO` blocker (or, after the owner filled the TODO, an integer `n` via `rcm run`).
 - `docs/rcm-connect.md` has the `# rcm connect — <repo>` header with the six answer lines and
@@ -418,9 +449,13 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
 
 ## Never
 
-- **No release after approval.** The presets have no `automatic_release`, `rollout`, `promote`
-  or `auto_release` input, and the scripts have no such call; the skill does not add one even when
-  asked "to save a step". `review.json.auto_release` is always `false` from these scripts.
+- **Nothing goes live on approval by itself. A release runs only when a person asks for it with
+  the version, the build number and a time.** The presets have no `automatic_release`, `rollout`,
+  `promote` or `auto_release` input; the only go-live path is `release-golive` with
+  `mode=release`, which rcm sends from its go-live route after a person typed the approved build
+  number. No script watches for an approval in order to go live — `release_golive.sh` exits 2,
+  never 75, for a build that is not approved. The skill does not add another path even when asked
+  "to save a step". `review.json.auto_release` is always `false` from these scripts.
 - **The irreversible mode is never the default**: `release-upload` `mode` defaults to
   `rehearsal`, `release-review` `mode` defaults to `plan`, `release-version` `mode` defaults to
   `prefill` (`create` makes a store draft, `delete` cannot be undone). `rcm check` fails
@@ -434,6 +469,6 @@ failed check; do not paper over it. Run the snippets in **bash** (zsh aborts on 
 - **Nothing project-specific goes into rcm.** App names, script paths, key names and verdict words
   stay in this project's profile and scripts; the skill templates carry only placeholders.
 - **The skill runs no irreversible path**: never `mode=upload`, never `mode=submit`, never
-  `mode=create` or `mode=delete` (a real App Store draft is the owner's call, made from the web
-  UI), never `--force` on a file the owner has edited without saying so. Verification is
+  `mode=release`, never `mode=create` or `mode=delete` (a real App Store draft is the owner's call,
+  made from the web UI), never `--force` on a file the owner has edited without saying so. Verification is
   `rcm check`, `--selftest` and read-only runs only.

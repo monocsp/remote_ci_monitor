@@ -29,6 +29,9 @@
      시도를 만듦 (`docs/m5s-workplan.md` §4.2 · §7) + #256 격리 검증의 셋: 다음 시도가 더 새
      커밋을 supersede 함(판정 · 승격 두 자리) · 합류가 얼린 반복 정책을 안 봄 + 시험 구멍 넷
      (로컬 취소 경주 · 로컬 묶음 · finish 의 묶음 · 원격 묶음 만료)
+  M5s F — `m5s-golive-release-without-admin`: golive release 의 admin 검사를 뺌 ·
+     `m5s-golive-retries-not-approved`: 2(미승인)에도 반복함
+     (`docs/m5s-workplan.md` §4.5 · §7)
   M5o A — `m5o-*` 셋: 합류자 이름 검사 제거 · 업로드 중 치움 · 취소를 닫는 길이 새 잡 번호를
      잊음 (`docs/m5o-workplan.md` §7.2 · `docs/m5o-test-scenarios-a.md`)
   M5o B — `failure-summary-remote-old-text`(원격 finish 만 옛 `exit 1`) ·
@@ -1121,6 +1124,26 @@ MUTANTS = (
         tests=(
             "tests/test_release_state.py::"
             "test_status_is_the_latest_status_json_aged_from_checked_at",
+        ),
+    ),
+    # ── M5s PR F — golive 라우트 (docs/m5s-workplan.md §4.5 · §7) ──
+    Mutant(
+        # golive release 의 admin 검사를 없앤다 — 클라이언트 토큰 하나로 출시를 걸 수 있다
+        name="m5s-golive-release-without-admin",
+        path="src/remote_ci_monitor/server.py",
+        old='        if not token.admin:\n            raise ApiError(403, "going live',
+        new='        if False:\n            raise ApiError(403, "going live',
+        tests=("tests/test_release_golive.py::test_release_needs_an_admin_token",),
+    ),
+    Mutant(
+        # 2(미승인)에도 반복한다 — golive 가 75 대신 2 로 승인을 기다리게 되고, 승인을 감시하는
+        # 자동 출시가 된다(결정 201 · 236, #255 재검증 P2)
+        name="m5s-golive-retries-not-approved",
+        path="src/remote_ci_monitor/core/model.py",
+        old="            and rc == self.retry_on_exit\n",
+        new="            and rc in (self.retry_on_exit, 2)\n",
+        tests=(
+            "tests/test_release_golive.py::test_a_golive_release_that_ends_1_2_or_3_is_never_retried",
         ),
     ),
     # ── M5s PR E — status 라우트 · 역할별 창 · 검토 패널 (docs/m5s-workplan.md §4.4 · §3 #11) ──

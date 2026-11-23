@@ -306,7 +306,7 @@ except Exception: print("{}")' "$obs")"
   EXIT_CODE=$rc write_review "$overall" "$observed" "$phased" ${submitted[@]+"${submitted[@]}"} ${skipped[@]+"${skipped[@]}"} ${failed[@]+"${failed[@]}"}
   step_end ok
   case "$overall" in
-    submitted) finish "submitted for review — $shown N=$n ${submitted[*]-}. Release after approval is a human step in the console" 0;;
+    submitted) finish "submitted for review — $shown N=$n ${submitted[*]-}. Nothing goes live on approval by itself — a person asks for it (rcm release golive)" 0;;
     noop)      finish "noop — nothing to submit (${skipped[*]-})" 5;;
     partial)   finish "partial — ${submitted[*]-} · ${skipped[*]-} ${failed[*]-} (not a success, exit 6)" 6;;
     *)         finish "failed — ${failed[*]-}" 1;;

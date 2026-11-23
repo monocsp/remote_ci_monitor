@@ -194,7 +194,7 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line
     <tr><td>드래프트 수명</td><td>없음</td><td>rcm DB 의 <code>versions</code> 행 + 만료 청소(스토어 draft 삭제는 스크립트)</td><td><span class="tag new">신규</span></td></tr>
     <tr><td>CLI · 스킬</td><td><code>rcm</code> 에 릴리스 명령 없음, 드라이버 스킬은 S0 부터</td><td><code>rcm release new|list|delete</code>, 드라이버 S0 앞에 «V 버전 만들기» 단계</td><td><span class="tag new">신규</span></td></tr>
     <tr><td>설정 관문 · 비밀 · 검증</td><td>그대로</td><td>그대로</td><td><span class="tag keep">유지</span></td></tr>
-    <tr><td>안전 규칙(출시 버튼 없음 · 관리형 게시 매번 · 번호 지어내지 않음)</td><td>그대로</td><td>그대로 + 드래프트 삭제 규칙 추가</td><td><span class="tag keep">유지</span></td></tr>
+    <tr><td>안전 규칙(승인만으로는 출시되지 않음 · 출시는 사람이 요청할 때만 · 관리형 게시 매번 · 번호 지어내지 않음)</td><td>그대로</td><td>그대로 + 드래프트 삭제 규칙 추가</td><td><span class="tag keep">유지</span></td></tr>
     <tr><td>빌드 번호 자동/직접 토글</td><td>심사 패널 · 시작 폼</td><td>바텀시트 펼침 안</td><td><span class="tag chg">위치만</span></td></tr>
   </table></div>
 
@@ -214,7 +214,7 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line
     <div><span><b>프리필</b> — 같은 잡이 이전 버전(라이브)의 문안을 읽어 <code>prefill.json</code> 으로 낸다. rcm 은 그것을 편집 가능한 필드로 그린다. 스크립트가 못 읽으면 store/ 파일(<code>listing.preview</code>)로 대신 채우고 «파일에서» 라고 표시한다.</span></div>
     <div><span><b>편집</b> — 사람이 웹에서 고친다. rcm 은 <code>versions.edited_json</code> 에 저장하고 «바뀜» 칩을 단다. 저장은 즉시(자동), 스토어에는 아직 아무것도 쓰지 않는다.</span></div>
     <div><span><b>빌드 · 업로드 · 심사</b> — 기존 흐름 그대로. 다만 review/upload 잡에 <code>listing.json</code>(편집본)을 파일 입력으로 넘긴다. 스크립트가 그것을 ASC 버전 문안 / Play edit 에 쓴다.</span></div>
-    <div><span><b>끝</b> — 심사 제출 성공(<code>review.json overall_status=submitted</code>)이면 드래프트는 «제출됨»으로 닫힌다. 스토어 승인 뒤 출시는 여전히 사람이 콘솔에서.</span></div>
+    <div><span><b>끝</b> — 심사 제출 성공(<code>review.json overall_status=submitted</code>)이면 드래프트는 «제출됨»으로 닫힌다. 승인됐다고 저절로 출시되지 않는다 — 출시는 이 페이지의 「출시 예약」에서 사람이 버전과 빌드 번호와 시각을 적어 요청한다(제출된 드래프트에서도 열린다, M5s 결정 216).</span></div>
     <div><span><b>폐기</b> — 편집도 잡도 없이 TTL(기본 24시간, 9절 Q1)이 지나면 청소기가 <code>version</code> 프리셋을 <code>mode=delete</code> 로 돌려 ASC draft 를 지우고 행을 «폐기됨»으로 둔다. 사람이 «버리기»를 눌러도 같다. 편집한 흔적이 있으면 자동 삭제하지 않고 만료 경고만 낸다(Q2).</span></div>
   </div>
 
@@ -261,7 +261,7 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line
       <div class="vrow draft"><span class="g">✎</span><span><b>iOS 1.1.1 · Android 1.0.1</b> <span class="pill new">편집 중</span> · 만든 지 40m · 필드 3개 바뀜 · 빌드 아직 없음</span><span><span class="btn">열기</span> <span class="btn">버리기</span></span></div>
       <div class="vrow live"><span class="g">✓</span><span><b>iOS 1.1.0 (180) · Android 1.0.0 (180)</b> <span class="pill ok">라이브</span> · 2026-09-10 출시 · 심사 #612</span><span class="btn">보기</span></div>
       <div class="vrow old"><span class="g">·</span><span><b>iOS 1.0.9 (172) · Android 0.13.1 (175)</b> · 2026-08-21</span><span class="btn">보기</span></div>
-      <p class="mk-sub">드래프트는 편집도 제출도 없이 24시간이 지나면 지워집니다. 승인은 출시가 아닙니다 — 이 화면에는 release · publish · rollout 버튼이 없습니다.</p>
+      <p class="mk-sub">드래프트는 편집도 제출도 없이 24시간이 지나면 지워집니다. 승인됐다고 저절로 출시되지 않습니다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돕니다.</p>
     </div>
   </div>
   <p>행 넷은 «상태 띠» 한 줄(설정 · 소스 · 미러)로 접히고, «상태 자세히»를 누르면 지금의 네 행이 그대로 나온다. 빨간 것이 있으면 띠가 빨갛고 자동으로 펼쳐진다(현 규칙 유지).</p>
@@ -338,7 +338,7 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line
           <div>스크린샷 iOS: 변화 없음 · Android 그래픽: 없음(이전에도 없음)</div>
         </div></div>
       </div>
-      <div class="mk-sub">고정: 승인은 출시가 아닙니다. iOS 는 App Store Connect 의 Release this version 을, Android 는 Play Console 의 Publish 를 사람이 누릅니다.</div>
+      <div class="mk-sub">고정: 승인됐다고 저절로 출시되지 않습니다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돕니다. Play 에는 보류한 출시를 게시하는 API 가 없습니다. 그래서 프로젝트의 출시 스크립트가 브라우저로 게시하거나 사람에게 요청합니다.</div>
     </div></div>
   </div>
 
@@ -410,7 +410,7 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--line
   </table></div>
 
   <h2 id="s">8. 안전 규칙 — 유지되는 것과 새로 생기는 것</h2>
-  <div class="rule ok"><b>유지:</b> release · publish · rollout 버튼 없음 · 관리형 게시는 제출마다 사람이 체크 · 빌드 번호는 플랜의 n 만(자동/직접 토글) · 비밀은 서버에만 · unsafe_release_type 빨간 띠.</div>
+  <div class="rule ok"><b>유지:</b> 승인됐다고 저절로 출시되지 않음(출시는 「출시 예약」에서 사람이 요청할 때만) · rollout 버튼 없음 · 관리형 게시는 제출마다 사람이 체크 · 빌드 번호는 플랜의 n 만(자동/직접 토글) · 비밀은 서버에만 · unsafe_release_type 빨간 띠.</div>
   <div class="rule"><b>새로:</b> 드래프트 자동 삭제는 되돌릴 수 없는 일이다(ASC draft 삭제). 그래서 (1) 편집이 있으면 자동 삭제하지 않는다 (2) 삭제 잡의 로그가 남는다 (3) 제출된 버전은 절대 삭제 대상이 아니다 (4) 이름이 라이브보다 작은 버전은 만들지 않는다.</div>
   <div class="rule bad"><b>주의:</b> 편집 가능한 필드가 생기면 «웹에서 고친 값이 store/ 파일과 달라지는» 상태가 생긴다. 이 문서의 답은 <b>파일이 원본이 아니라 드래프트가 원본</b>(제출 때 스크립트가 store/ 로 되쓰고 커밋할지는 Q4)이다.</div>
 

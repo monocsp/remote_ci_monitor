@@ -49,7 +49,7 @@ def test_release_roles_contract_table_has_the_status_and_golive_rows():
         "`mode = plan\\|release` (default **plan**)",
         "`golive-plan.json` (plan) / `golive.json` (release)",
         "0 read (approved or not — that is in the file)",
-        "2 blocked (a chosen platform is not approved; never 75) · also environment / usage",
+        "2 blocked (a chosen platform is not approved; never 75) or environment / usage",
         "3 build number mismatch",
     ):
         assert needle in row, f"the `golive` row lacks {needle!r}"
@@ -316,3 +316,142 @@ def test_release_status_panel_readmes_and_changelog_name_the_panel():
         "`unknown` for any other",
     ):
         assert needle in text, f"CHANGELOG.md [Unreleased] lacks {needle!r}"
+
+
+# ── PR F: golive 라우트와 원칙 문장 (§4.5 · §3 #8 · 결정 217 · 235) ─────────────────
+
+PRINCIPLE_EN = (
+    "Nothing goes live on approval by itself. A release runs only when a person asks for it "
+    "with the version, the build number and a time."
+)
+PRINCIPLE_KO = (
+    "승인됐다고 저절로 출시되지 않습니다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 "
+    "때만 돕니다."
+)
+ANDROID_EN = (
+    "Play has no API to publish a held release, so the project's go-live script publishes "
+    "through a browser or asks a person."
+)
+ANDROID_KO = (
+    "Play 에는 보류한 출시를 게시하는 API 가 없습니다. 그래서 프로젝트의 출시 스크립트가 "
+    "브라우저로 게시하거나 사람에게 요청합니다."
+)
+#: 옛 원칙 문장의 꼴들 — §3 #8 의 자리 어디에도 남으면 안 된다
+OLD_PRINCIPLE = re.compile(
+    r"Approval does not release|승인은 출시가 아닙니다|No release after approval|"
+    r"rcm never releases after approval|must never be able to release after store approval|"
+    r"release anything after store approval|releases anything after store approval|"
+    r"Release after approval is a human step|publish stays in the console|게시는 콘솔에서|"
+    r"승인 뒤 출시는 여전히 사람이 콘솔에서|releases\s+nothing\.|승인 뒤 출시하는 일은 하지|"
+    r"출시 버튼 없음"
+)
+#: §3 #8 의 자리 — 코드 · 문서 · 템플릿 · 와이어프레임 · 골든 픽스처
+PRINCIPLE_PLACES = (
+    "src/remote_ci_monitor/web/i18n.js",
+    "src/remote_ci_monitor/web/index.html",
+    "src/remote_ci_monitor/web/app.js",
+    "docs/release-contract.md",
+    "docs/configuration.md",
+    "README.md",
+    "README.ko.md",
+    "src/remote_ci_monitor/skills/rcm-store-connect/SKILL.md",
+    "src/remote_ci_monitor/skills/rcm-connect/SKILL.md",
+    "src/remote_ci_monitor/skills/rcm-store-connect/templates/profile.toml",
+    "src/remote_ci_monitor/skills/rcm-store-connect/templates/presets.release.toml",
+    "src/remote_ci_monitor/skills/rcm-store-connect/templates/release_review.sh",
+    "src/remote_ci_monitor/skills/rcm-store-connect/templates/release_upload.sh",
+    "tests/fixtures/rcm_candidate/profile.release.toml",
+    "tests/fixtures/rcm_candidate/presets.release.toml",
+    "tests/fixtures/rcm_candidate/golden.full.toml",
+    "tests/fixtures/rcm_candidate/golden.new-repo.toml",
+    "tests/fixtures/rcm_candidate/golden.empty-server.toml",
+    "docs/wireframes/web-store.html",
+    "docs/wireframes/web-version-page.html",
+)
+
+
+def flat(text: str) -> str:
+    """줄바꿈 · 주석 기호 · 들여쓰기를 한 칸으로 — 문장이 줄을 넘어가도 찾는다."""
+    return re.sub(r"[\s#]+", " ", text)
+
+
+def test_golive_route_principle_sentence_replaces_the_old_one_everywhere():
+    """S16 · 결정 217 — §3 #8 의 자리 어디에도 옛 원칙 문장이 없고, 새 문장이 있다."""
+    for rel in PRINCIPLE_PLACES:
+        old = OLD_PRINCIPLE.search(read(rel))
+        assert old is None, f"{rel} still says {old.group(0)!r}"
+    i18n = read("src/remote_ci_monitor/web/i18n.js")
+    for sentence in (PRINCIPLE_EN, PRINCIPLE_KO, ANDROID_EN, ANDROID_KO):
+        assert sentence in i18n, f"i18n.js lacks {sentence!r}"
+    assert PRINCIPLE_KO in read("src/remote_ci_monitor/web/index.html")
+    for rel in (
+        "docs/release-contract.md",
+        "docs/configuration.md",
+        "README.md",
+        "src/remote_ci_monitor/skills/rcm-store-connect/SKILL.md",
+        "src/remote_ci_monitor/skills/rcm-connect/SKILL.md",
+    ):
+        assert "Nothing goes live on approval by itself" in flat(read(rel)), rel
+    contract = flat(read("docs/release-contract.md"))
+    assert PRINCIPLE_EN in contract and ANDROID_EN in contract
+    section6 = contract[contract.index(" 6. Rules the page enforces") :]
+    assert section6.index(PRINCIPLE_EN) < section6.index("Submitting for review is one button")
+    assert "승인됐다고 저절로" in read("README.ko.md")
+    for rel in (
+        "docs/wireframes/web-store.html",
+        "docs/wireframes/web-version-page.html",
+    ):
+        assert PRINCIPLE_KO in read(rel), rel
+
+
+def test_golive_route_409s_and_the_cli_are_documented():
+    """§4.5 · 결정 215 · 232 · 235 — 설정 문서가 라우트 · 409 · 일반 경로 막기의 정본이고
+    README(영 · 한)가 두 CLI 명령을 싣는다. 계약 §2 의 2 설명과 §8 스킬 표도 맞춘다."""
+    config = read("docs/configuration.md")
+    assert "### Going live (`golive`)" in config
+    for word in (
+        "`POST …/release/golive`",
+        "golive_plan_required",
+        "golive_plan_stale",
+        "golive_plan_blocked",
+        "golive_running",
+        "release_route_required",
+        "golive_plan_now_only",
+        "`auto` is not accepted",
+        "rcm release golive",
+        "rcm release status",
+        "start_in_seconds",
+    ):
+        assert word in config, f"docs/configuration.md does not mention {word}"
+    for rel in ("README.md", "README.ko.md"):
+        text = read(rel)
+        assert "rcm release golive" in text and "rcm release status" in text, rel
+        assert "configuration.md#going-live-golive" in text, rel
+    table = contract_roles_table()
+    assert "2 blocked (a chosen platform is not approved; never 75) or environment / usage" in table
+    assert "· also environment / usage" not in table
+    contract = read("docs/release-contract.md")
+    skills = contract[contract.index("## 8. Skills") :]
+    assert "`status` and `golive`" in skills and "release_golive.sh" in skills
+    assert "not_attempted" in contract  # golive.json 의 reason — 화면은 「시도 안 함」 으로 그린다
+    unreleased = unreleased_only(read("CHANGELOG.md"))
+    for word in (
+        "release/golive",
+        "rcm release golive",
+        "rcm release status",
+        "release_route_required",
+        "golive_running",
+        "Nothing goes live on approval by itself",
+    ):
+        assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
+
+
+def test_golive_route_a_plan_measured_in_the_future_is_documented_as_stale():
+    """#255 재검증 P2 — 미래에 잰 계획은 stale 이다(동작 변경). 라우트 표의 `stale` 정의와
+    CHANGELOG 가 그렇게 말한다. 합치기에서 한 번 사라졌던 문장이다."""
+    config = read("docs/configuration.md")
+    row = next(ln for ln in config.splitlines() if ln.startswith("| `GET …/release` |"))
+    phrase = "or a `measured_at` later than now (a clock that is wrong never makes a plan fresh)"
+    assert phrase in row, "the GET …/release row lost the future-measured_at rule"
+    unreleased = unreleased_only(read("CHANGELOG.md"))
+    assert "`measured_at` is later than now is stale" in unreleased
