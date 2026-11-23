@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 
 from remote_ci_monitor.config import parse_preset
-from test_server import PRESETS, Server, sh
+from test_server import PRESETS, TAR, Server, sh
 from test_server_m1 import StubSampler, host_sample, status_until
 
 CHROME_PATHS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",)
@@ -3363,3 +3363,103 @@ def test_version_list_names_what_holds_a_draft_and_says_it_is_being_deleted(tmp_
             assert c.page_errors() == []
     finally:
         srv.close()
+
+
+# ── M5s G — 큐 아래의 예약 절 · 알림 실패 배지 (`docs/m5s-workplan.md` §4.1 · §4.7) ──
+
+
+class _FailedNotifier:
+    """`server.notify_failures` 만 내는 가짜 — 진짜 훅을 돌리지 않고 배지를 그리게 한다."""
+
+    failures = 2
+
+    def stop(self) -> None:
+        pass
+
+
+SCHED_JS = """
+(() => {
+  const sec = document.querySelector('#queue [data-scheduled-section]');
+  const row = document.querySelector('#queue [data-scheduled="%d"]');
+  const chip = document.querySelector('[data-notify-failures]');
+  return {
+    title: sec ? sec.querySelector('.pool-h').textContent : null,
+    row: row ? row.textContent : null,
+    cancel: row ? row.querySelectorAll('[data-cancel]').length : null,
+    eta: row ? row.querySelectorAll('.eta, .conf').length : null,
+    chip: chip && !chip.hidden ? chip.textContent : null,
+    chipTitle: chip ? chip.title : null,
+    overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
+})()
+"""
+
+
+def test_scheduled_section_lists_my_schedule_with_cancel_and_the_header_counts_notify_failures(
+    tmp_path,
+):
+    srv = Server(tmp_path, workers=False)
+    jid = None
+    try:
+        body = {
+            "preset": "ok",
+            "inputs": {},
+            "source": {
+                "mode": "tree",
+                "repo": "org/app",
+                "base_sha": "abc123f",
+                "dirty": False,
+                "tree_hash": OTHER_TREE,
+                "bytes": len(TAR),
+            },
+            "requester_label": "alice@host",
+            "start_in_seconds": 3600,
+        }
+        code, doc = srv.req("POST", "/jobs", token="alice", json_body=body)
+        assert code == 201, doc
+        jid = doc["job_id"]
+        assert srv.upload(jid)[0] == 200
+        assert srv.store.get_job(jid).state == "scheduled"
+        srv.app.notifier = _FailedNotifier()
+        url = f"http://127.0.0.1:{srv.port}/?poll=1&lang=en"
+        ready = f"document.querySelector('#queue [data-scheduled=\"{jid}\"]') !== null"
+        with Chrome(tmp_path / "chrome-sched", window="1240,900") as c:
+            c.open(url, ready_js=ready)
+            anon = c.eval(SCHED_JS % jid)
+            # 토큰이 있어야 내 예약의 취소 버튼이 열린다
+            c.eval(f"localStorage.setItem('rcm.token', {json.dumps(srv.tokens['alice'])})")
+            c.open(
+                url,
+                ready_js=ready + f' && document.querySelector(\'[data-scheduled="{jid}"]'
+                " [data-cancel]') !== null",
+            )
+            mine = c.eval(SCHED_JS % jid)
+            c.viewport(390, 844, mobile=True)
+            time.sleep(0.3)
+            narrow = c.eval(SCHED_JS % jid)
+            c.call("Emulation.clearDeviceMetricsOverride")
+            c.eval(f"document.querySelector('[data-scheduled=\"{jid}\"] [data-cancel]').click()")
+            _wait(c, "document.getElementById('cancel-dialog').open === true")
+            dialog = c.eval("document.querySelector('[data-cancel-body]').textContent")
+            c.eval("document.querySelector('[data-cancel-go]').click()")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and srv.store.get_job(jid).state == "scheduled":
+                time.sleep(0.1)
+            final = srv.store.get_job(jid).state
+            assert c.page_errors() == []
+    finally:
+        if jid is not None:
+            srv.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})
+        srv.close()
+
+    assert anon["title"] == "Scheduled (1)", anon
+    assert anon["cancel"] == 0, "토큰 없는 페이지에는 취소 버튼이 없다"
+    assert mine["cancel"] == 1, mine
+    for word in (f"#{jid}", "scheduled", "ok", "alice@host", "at ", "start by "):
+        assert word in mine["row"], (word, mine["row"])
+    assert mine["eta"] == 0, "예약 행에 ETA 를 지어내지 않는다"
+    assert mine["chip"] == "notify failures 2", mine
+    assert "server log" in mine["chipTitle"], mine
+    assert narrow["overflow"] <= 0, f"phone width scrolls sideways by {narrow['overflow']}px"
+    assert "will not run at its time" in dialog, dialog
+    assert final == "cancelled", final

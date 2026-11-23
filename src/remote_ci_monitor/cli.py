@@ -1174,8 +1174,9 @@ class _ActionWatch:
     다시 기다릴 때는 플래그 없이 `rcm wait --job N` 이다 — 표식은 그 잡의 마지막 표식으로 남아
     있으므로 플래그를 다시 주면 곧바로 또 돌아온다.
 
-    취소 중이거나 취소된 잡의 표식은 알리지도, 4 로 돌아오지도 않는다. 그 잡은 더 돌지 않으므로
-    「잡은 계속 돈다」는 4 의 약속이 거짓이 되고, 사람에게 할 일을 시켜도 받을 잡이 없다.
+    취소 중이거나 끝난 잡(성공 · 실패 · 시간 초과 · 취소 · 유실 · 만료 …)의 표식은 알리지도,
+    4 로 돌아오지도 않는다. 그 잡은 더 돌지 않으므로 「잡은 계속 돈다」는 4 의 약속이 거짓이
+    되고, 사람에게 할 일을 시켜도 받을 잡이 없다. 표식은 최종 JSON 의 `action` 에 그대로 남는다.
     """
 
     def __init__(self, job_id: int, *, return_on_action: bool) -> None:
@@ -1191,7 +1192,8 @@ class _ActionWatch:
 
     @staticmethod
     def _stopped(job: dict[str, Any]) -> bool:
-        return job.get("state") in (CANCELLING, CANCELLED)
+        state = job.get("state")
+        return state in TERMINAL_STATES or state == CANCELLING
 
     def observe(self, job: dict[str, Any]) -> str | None:
         """잡 문서 하나를 본다. 알릴 줄이 있으면 돌려준다(같은 표식은 한 번만)."""

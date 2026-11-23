@@ -267,7 +267,9 @@ Open `http://<build-machine>:8787/` in any browser, phone included: three static
 `rcm serve`, no build step and no third-party assets. The first screen answers three questions at
 a glance — **Your jobs** (paste your token with the key button), **Needs a look** (only actionable
 causes, worst first) and **Host pressure** — and below them sit the queue with its status column
-and ETA confidence, the host card, recent results and how the estimates were computed. A job that
+and ETA confidence, the jobs scheduled for later, the host card, recent results and how the
+estimates were computed. A job that says it needs a person (`needs action · login · …`) is first
+under **Needs a look**; the header counts failed notification hooks. A job that
 has merely gone quiet is not listed as needing a look; see
 [Configuration](docs/configuration.md#estimates-and-when-a-job-is-called-not-responding).
 

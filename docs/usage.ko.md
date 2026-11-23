@@ -367,6 +367,8 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
    바쁜 것」을 구분하는 자리다.
 5. **다른 풀**은 자기 구역을 갖는다. 두 번째 빌드 머신도 같은 화면에서 보인다.
 
+예약이 있는 풀에는 `scheduled — 2 · next 15:00 golive` 한 줄이 더 붙는다.
+
 `rcm top --watch 5` 는 5초마다 새로 그리고, `rcm top --json` 은 기계용이다.
 
 ## 10. 웹 화면
@@ -409,6 +411,12 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
    않는다.
 8. **다른 풀.** 자기 워커와 자기 큐를 갖는다. **코드 출처** 칸에는 커밋만 남는다 — 저장소 주소는
    행마다 같은 값이 되풀이되므로 펼친 블록에 있다.
+
+`rcm run --at` 이나 `--in` 으로 낸 작업은 큐 아래 **예약 (N)** 에 시각순으로 선다. 행마다 시작
+시각과 시작 마감이 보이고 내 예약에는 **취소** 버튼이 있다. 큐에 들어가기 전까지는 ETA 가
+없다([자세히](configuration.md#running-a-job-later---at-and---in)). 서버가 예약을 읽지 못했으면 이
+절은 빈 목록이 아니라 빨간 띠로 그려진다. 서버가 켜진 뒤 알림 훅이 실패했으면 머리에
+`알림 실패 N` 배지가 뜬다.
 
 칸보다 긴 이름은 가운데를 줄인다(`android-integration-test-s… name-that-goes`) — 앞이 같은 이름들도
 끝에서 갈린다. 잘린 이름을 누르면(키보드로는 Tab 으로 가서 Enter) 전문과 **복사** 단추가 뜬다. 다시

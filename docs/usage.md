@@ -387,6 +387,8 @@ where the job made them. `rcm shelf get` checks every file's sha256 and writes n
 5. **Other pools** get their own section, so a second build machine is visible from the same
    screen.
 
+A pool with scheduled jobs adds one line, `scheduled — 2 · next 15:00 golive`.
+
 `rcm top --watch 5` refreshes every five seconds; `rcm top --json` is for scripts.
 
 ## 10. The web page
@@ -434,6 +436,12 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
    it will not pretend to know.
 8. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
    the repository it came from is in the expanded block, since every row usually repeats it.
+
+Jobs started with `rcm run --at` or `--in` wait under **Scheduled (N)** below the queue, in time
+order, with their time and start deadline and a **Cancel** button on your own; they have no ETA
+until they enter the queue ([details](configuration.md#running-a-job-later---at-and---in)). If the
+server could not read them, that section is a red band, never an empty list. The header shows a
+`notify failures N` badge when notification hooks have failed since the server started.
 
 A name longer than its column is cut in the middle (`android-integration-test-s… name-that-goes`),
 so names that start the same still differ at the end. Tap or click a cut name — or Tab to it and

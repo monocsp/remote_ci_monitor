@@ -53,6 +53,18 @@ of a key bumps that number and is listed here.
 - **`rcm check` warns when notification hooks failed** (`warn  notify  N hook deliveries
   failed…`). The count is the server's in-memory `notify_failures`, so a restart sets it back to 0.
   ([#251](https://github.com/monocsp/remote_ci_monitor/pull/251))
+- **The web queue shows scheduled jobs.** Below the queue, **Scheduled (N)** lists
+  `pools[].scheduled[]` in time order — the preset, its inputs, who asked, the time and the start
+  deadline in the display time zone, and **Cancel** on your own — with no ETA. When the server
+  could not read them the section is a red band, never an empty list. `rcm top` adds one line per
+  pool, `scheduled — N · next HH:MM <preset>` (`scheduled — unavailable: …` on a read error). The
+  web page draws the new states `scheduled`, `expired`, `retried` and `exhausted` with a glyph and
+  colour of their own, and `rcm top` gives `expired` and `exhausted` their own glyph in the recent
+  list. ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+- **The web page shows a job's action.** `needs_action` leads «Needs a look», and the status
+  column reads `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean) with the job's note
+  untranslated. The header shows a `notify failures N` badge while notification hooks have failed
+  since the server started (hidden at 0). ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
 
 ### Changed
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
@@ -61,6 +73,12 @@ of a key bumps that number and is listed here.
 - `rcm top` says `idle lane did not pick it up` where it said `not scheduled`;
   the reason code `not_scheduled` is unchanged. The old words read like the new `scheduled` state.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
+- The web page now says `idle lane did not pick it up` (`빈 레인이 집지 않음`) where it said
+  `not scheduled`, as `rcm top` does. ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
+- `rcm wait` no longer prints `#N needs action · …` for a job that has already ended (succeeded,
+  failed, timed out, lost, expired), as it already did not for a cancelled one; the action is still
+  in the final JSON. `rcm top` cleans the note's control characters once more, as `rcm wait` does.
+  ([#PRNUM](https://github.com/monocsp/remote_ci_monitor/pull/PRNUM))
 - The `rcm-ci-connect` templates treat `expired` as finished: the watcher no longer waits on it
   and the commit status is `error` · `unavailable · #N · did not start`, so the GitHub side runs
   the checks. Copy the new `rcm_ci_watch.py` and `rcm_ci_config.py` into repositories that use
