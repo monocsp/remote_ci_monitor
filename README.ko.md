@@ -310,6 +310,10 @@ QA · 10단계 중 7번째 · 66% · 경과 38m · 예상 21:40», «제출 준�
 「출시 예약」이고, 그 스토어가 승인했다고 말한 뒤에만 열린다. `unsafe_release_type` 판정은 닫을 수
 없는 빨간 띠가 된다.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/store-golive.png" alt="버전 페이지의 출시 예약 영역. iOS 승인 · Android 심사 중, 읽기만 하는 plan, 플랫폼, 시각, 직접 친 승인 빌드 번호, 출시 예약 버튼, 승인됐다고 저절로 출시되지 않는다는 원칙 문장" width="820">
+</p>
+
 드래프트는 쌓이지도, 모르는 새 사라지지도 않는다. 아무도 손대지 않은 것은 `version_ttl_hours`
 (기본 24)가 지나면 버려진다 — 프로파일에 `version` 프리셋이 있으면 스토어까지, 없으면 rcm 안에서만.
 반대로 **고친 적이 있는** 드래프트는 «만료»로 표시만 하고 사람이 정리할 때까지 기다린다. 그리고

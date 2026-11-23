@@ -444,16 +444,30 @@ Open `http://<build-machine>:8787/` — nothing to install, and it works on a ph
 8. **Another pool**, with its own workers and queue. The **Source** column shows the commit only;
    the repository it came from is in the expanded block, since every row usually repeats it.
 
-Jobs started with `rcm run --at` or `--in` wait under **Scheduled (N)** below the queue, in time
-order, with their time and start deadline and a **Cancel** button on your own; they have no ETA
-until they enter the queue ([details](configuration.md#running-a-job-later---at-and---in)). If the
-server could not read them, that section is a red band, never an empty list. The header shows a
-`notify failures N` badge when notification hooks have failed since the server started.
-
 A name longer than its column is cut in the middle (`android-integration-test-s… name-that-goes`),
 so names that start the same still differ at the end. Tap or click a cut name — or Tab to it and
 press Enter — to read it in full, with a **Copy** button. Tap again, tap elsewhere or press Escape
 to close it. It needs no hover, so it works on a phone too.
+
+### Scheduled jobs, and a job that needs a person
+
+![the header's notify failures badge, Needs a look naming a job that needs a person, and the Scheduled section: a retry attempt waiting for a sign-in, two jobs booked for later, and Cancel on your own](images/ui/web-scheduled.png)
+
+1. **`notify failures N`** in the header: a notification hook has failed since the server started.
+   The count lives in the server's memory, so a restart sets it back to 0; the server log keeps
+   each failure.
+2. **Needs a look** names a job that said it needs a person:
+   `needs action · login · Sign in on the build machine`. It comes before anything rcm inferred
+   ([details](configuration.md#when-a-person-has-to-act)).
+3. **Scheduled (N)**: jobs started with `rcm run --at` or `--in`, below the queue, in time order.
+   If the server could not read them, this section is a red band, never an empty list.
+4. **A retry attempt** waiting for its turn, `attempt 2/12`, still carrying the action the last
+   attempt printed, so the chain keeps asking for the person between attempts
+   ([trying again later](configuration.md#trying-again-later-presetsretry)).
+5. **When it starts, and its start deadline.** A scheduled job has no ETA until it enters the
+   queue; if no lane picks it up by the deadline it ends `expired`. A retry attempt has no deadline
+   (`start by —`) ([details](configuration.md#running-a-job-later---at-and---in)).
+6. **Cancel** on your own schedules.
 
 ### Your jobs
 
@@ -522,6 +536,41 @@ yours to do. Open or close it yourself and that choice is remembered.
 
 1. Workers, 2. the summary, 3. a job as a card, 4. its steps and 5. the buttons — one column, same
    information, no horizontal scrolling.
+
+### The Store tab: review state and going live
+
+A repository with a release profile gets a **Store** tab next to **Queue**. What it is and how a
+project connects to it are in the [README](../README.md#store-tab--connecting-a-projects-release-flow)
+and the [release contract](release-contract.md). Two places in it matter once a build is in review.
+The pictures below are drawn from sample data (an app called `app`, version 1.0.x).
+
+![the review panel: each store's review state with the version, the build and the store's own word, the Check again button, and the go-live rule below](images/ui/store-review-status.png)
+
+1. **Store review state**, read-only: each store's state in one of eight words (`unknown` for
+   anything else), the version and build, and the store's own word beside it. The line above says
+   how long ago it was read; once that is older than `plan_max_age_minutes` it asks you to check
+   again before you act on it.
+2. **Check again** runs the project's `status` preset once more.
+3. **The rule**, in the panel: nothing goes live on approval by itself. A release runs only when a
+   person asks for it with the version, the build number and a time. Google Play has no API to
+   publish a held release, so the project's go-live script publishes through a browser or asks a
+   person.
+4. The same rule closes every Store screen.
+
+![the version page's Schedule go-live area: both stores' state, the plan, the platform, the time, the typed build number, the Book go-live button, the booked list, and the rule below](images/ui/store-golive.png)
+
+1. **Schedule go-live**, on the version page, opens only once a store says this version is approved,
+   and only with an admin token. Its head repeats both stores' state.
+2. Opening it runs a read-only **plan** first: which store approved which build. Nothing goes live
+   from a plan.
+3. **Platform**: only an approved store can be chosen, and **Both** only when both are.
+4. **Now, or at a time** read in the server's timezone. A booked time waits for a lane up to its
+   start deadline, then expires.
+5. **The approved build number, typed by you.** It is never filled in, and it has to match the plan.
+6. **Book go-live** (**Go live now** for Now) sends the request. The server checks the plan, its age
+   and the number again ([going live](configuration.md#going-live-golive)).
+7. **Booked and running** lists what is booked for this version, with **Cancel**.
+8. The rule again, under the area.
 
 ## 11. A second machine
 

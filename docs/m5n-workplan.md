@@ -20,7 +20,7 @@
 
 | 사실 | 값 |
 |---|---|
-| 서버 | `epeuem-ui-Macmini`, 로컬 레인 2 |
+| 서버 | `build-mac`, 로컬 레인 2 |
 | 원격 워커 | `mac2-worker` (풀 `mac2`, 레인 1) |
 | 프리셋 | 24개 중 23개가 `pool = "default"`, `mac2` 풀에는 `remote-demo` 하나 |
 | `requires` | 다수가 `["fvm", …]` — 도구를 요구한다 |

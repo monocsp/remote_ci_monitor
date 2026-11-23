@@ -154,6 +154,11 @@ everywhere it appears.
   marker). ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
 
 ### Changed
+- The usage guide shows the new screens in annotated screenshots: the Scheduled section with a
+  job that needs a person and the `notify failures` badge, the Store tab's store review state, and
+  the version page's «Schedule go-live» with the rule that nothing goes live on approval by itself.
+  The README's Store tab section shows the go-live area, and every other screenshot is retaken
+  from the current page and CLI. ([#261](https://github.com/monocsp/remote_ci_monitor/pull/261))
 - A `[[notify]]` rule without `on` fires for `exhausted` but not for `retried`, so a two-hour chain
   is one notification; `on = ["retried"]` asks for each attempt.
   ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
