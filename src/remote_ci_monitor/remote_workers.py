@@ -47,6 +47,7 @@ from remote_ci_monitor.core.model import (
     MODE_GIT_REF,
     PHASE_EXECUTING,
     PHASE_MATERIALIZING,
+    RETRIED,
     RUNNING,
     SUCCEEDED,
     TIMED_OUT,
@@ -833,10 +834,13 @@ class RemoteWorkersMixin:
         # 로컬 레인은 `only_from=(RUNNING,)` 으로 이 틈을 닫았다(M5l S4); 원격도 같아야 한다.
         # 시작 전 실패일 때만 건다: 실행까지 간 잡의 보고는 `cancelling` 에서도 그대로 받는다.
         only_from = (RUNNING,) if preflight is not None else None
+        # 반복(M5s 결정 225)의 `retried` 는 `store.finish` 가 스스로 `running` 에서만 받는다 — 그
+        # 사이 취소가 들어왔으면 거절되고, 아래 대체 경로가 `cancelled` 로 닫는다(다음 시도 없음)
         if not self.store.finish(job.id, now=ended, only_from=only_from, **fields):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"
-            if preflight is None or current is None or st != CANCELLING:
+            racing = preflight is not None or state == RETRIED
+            if not racing or current is None or st != CANCELLING:
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
             # 취소가 이겼다 — 프로세스는 없었으니 여느 취소처럼 요청자 이름으로 닫는다. 이
             # 대체 경로가 없으면 잡은 종료 상태에 못 가고 heartbeat 시한까지 `running` 이다.

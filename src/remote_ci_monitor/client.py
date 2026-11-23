@@ -29,6 +29,7 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.core.model import (
     EXIT_CODE_BY_STATE,
     EXIT_UNKNOWN,
+    RETRIED,
     TERMINAL_STATES,
     InputSpec,
     Preset,
@@ -1159,6 +1160,88 @@ def wait_for_job(
     )
 
 
+#: 사슬을 거슬러 올라가는 상한 — `max_attempts` 의 설정 상한(100)보다 넉넉하다. 고리를 막는다
+MAX_CHAIN_STEPS = 200
+
+
+def attempt_json(job: dict[str, Any]) -> dict[str, Any]:
+    """`attempts[]` 의 한 칸 — 시도 id · 상태 · 종료코드(M5s 결정 211). 서버 문서에서 그대로."""
+    return {
+        "job_id": job.get("id", job.get("job_id")),
+        "attempt": job.get("attempt"),
+        "state": job.get("state"),
+        "exit_code": job.get("exit_code"),
+    }
+
+
+def wait_for_chain(
+    client: Client,
+    job_id: int,
+    *,
+    timeout: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
+    wait: Callable[..., tuple[int, dict[str, Any] | None, str | None]] | None = None,
+    **kwargs: Any,
+) -> tuple[int, dict[str, Any] | None, str | None, list[dict[str, Any]] | None]:
+    """`wait_for_job` + 반복 사슬 따라가기(M5s 결정 211 · 228). 반환 끝에 `attempts` 가 붙는다.
+
+    `retried` 는 끝이 아니다 — 그 문서의 `retried_as` 로 옮겨 계속 기다린다. 이것은 supersede 와
+    다른 새 동작이다(supersede 는 따라가지 않는다, 결정 114). `--timeout` 은 **사슬 전체**에 건다.
+    `retried_as` 가 없는 `retried` 는 서버가 지킨 불변식(결정 225)이 깨진 것이라 3(모른다)이다.
+
+    `attempts` 는 사슬이 있는 잡에서만 목록이다 — 기다리기 전의 시도들도 `retry_of` 를 거슬러
+    올라가 채운다(시도 순). 사슬이 없으면 None 이고 호출자는 키를 싣지 않는다. `wait` 는 한 시도를
+    기다리는 함수다(기본 `wait_for_job` — 시험이 바꿔 끼운다).
+    """
+    wait = wait or wait_for_job
+    started = clock()
+    current = job_id
+    followed: list[dict[str, Any]] = []
+    seen = {job_id}
+    while True:
+        remaining = None if timeout is None else max(0.0, timeout - (clock() - started))
+        code, job, reason = wait(client, current, timeout=remaining, clock=clock, **kwargs)
+        if job is None or job.get("state") != RETRIED or reason is not None:
+            break
+        followed.append(job)
+        nxt = job.get("retried_as")
+        if not isinstance(nxt, int) or isinstance(nxt, bool) or nxt in seen:
+            return (
+                EXIT_UNKNOWN,
+                job,
+                WaitReason(
+                    CAUSE_SERVER_ERROR,
+                    f"job {current} was retried but the server names no next attempt",
+                ),
+                _attempts(client, followed),
+            )
+        if on_retry is not None:
+            on_retry(job)
+        seen.add(nxt)
+        current = nxt
+    if job is not None and job.get("chain_id") is not None:
+        followed.append(job)
+    return code, job, reason, _attempts(client, followed) if followed else None
+
+
+def _attempts(client: Client, followed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """따라온 시도들 앞에 그 전 시도들을 붙인다(`retry_of` 를 거슬러). 못 읽으면 거기서 멈춘다 —
+    번호를 지어내지 않는다."""
+    earlier: list[dict[str, Any]] = []
+    prev = followed[0].get("retry_of") if followed else None
+    for _ in range(MAX_CHAIN_STEPS):
+        if not isinstance(prev, int) or isinstance(prev, bool):
+            break
+        try:
+            doc = client.job(prev)
+        except ClientError:
+            break
+        earlier.append(doc)
+        prev = doc.get("retry_of")
+    return [attempt_json(j) for j in [*reversed(earlier), *followed]]
+
+
 def _poll_for_job(
     client: Client,
     job_id: int,
@@ -1249,6 +1332,7 @@ __all__ = [
     "Snapshot",
     "make_snapshot",
     "wait_for_job",
+    "wait_for_chain",
     "SseEvent",
     "exit_code_for",
     "preset_from_json",

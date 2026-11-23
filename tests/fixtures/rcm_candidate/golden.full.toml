@@ -24,7 +24,8 @@ url = "git@example.invalid:o/app.git"
 # Schema: docs/release-contract.md §1 and docs/configuration.md «Release profile».
 #
 # What is NOT here, on purpose: secret values (they live under <config_dir>/secrets/app/, entered in the
-# Store tab Settings screen), an `automatic_release` or `rollout` switch (rcm never releases after approval),
+# Store tab Settings screen), an `automatic_release` or `rollout` switch (nothing goes live on approval by
+# itself: a release runs only when a person asks for it with the version, the build number and a time),
 # and a build number (a human types it in every submission).
 
 [repos.app.release]

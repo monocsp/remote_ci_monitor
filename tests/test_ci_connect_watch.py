@@ -1200,3 +1200,22 @@ def test_an_expired_job_is_terminal_for_the_watcher():
 
     _cfg, _wait, watchmod, _status = load_templates()
     assert "expired" in watchmod.TERMINAL
+
+
+def test_the_watcher_follows_a_retried_job_to_the_attempt_that_ends_the_chain(rig):
+    """M5s — `retried` 는 끝이 아니다. 감시자는 `retried_as` 로 옮겨 그 시도의 결과를 올린다
+    (옛 표처럼 끝난 잡으로 보면 `unavailable` 을, 모르는 상태로 보면 영영 pending 을 올린다)."""
+    rig.add_pr(7, S1, "feat/x")
+    rig.exe.set(run={"stdout": submitted(12, S1)})
+    rig.job(12, state="queued", reason=None)
+    rig.run()
+    rig.clock.advance(600)
+    rig.job(12, state="retried", exit_code=75, retried_as=13, finished_at=iso(rig.clock.now))
+    rig.job(
+        13, state="succeeded", exit_code=0, summary="live", cancelled_by=None,
+        superseded_by=None, finished_at=iso(rig.clock.now - 200),
+    )  # fmt: skip
+    rig.run()
+    rig.run()
+    last = rig.posts(S1)[-1]
+    assert last["state"] == "success" and "#13" in last["description"], last

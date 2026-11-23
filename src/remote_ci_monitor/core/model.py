@@ -25,6 +25,11 @@ LOST = "lost"
 SCHEDULED = "scheduled"
 #: 시작 마감 안에 레인이 집지 못한 예약 잡(M5s 결정 208). 돌지 않았다 — `cancelled` 와 같은 줄이다.
 EXPIRED = "expired"
+#: 반복을 선언한 프리셋(`[presets.retry]`)의 시도가 그 종료코드(기본 75)로 끝났고 다음 시도를 걸었다
+#: (M5s 결정 211). **종료 상태지만 실패가 아니다** — 기다림은 `retried_as` 를 따라 계속된다.
+RETRIED = "retried"
+#: 반복의 마지막 시도도 그 종료코드로 끝났다(M5s 결정 212). 끝내 확인하지 못했다 — `rcm wait` 1.
+EXHAUSTED = "exhausted"
 
 #: 대기 잡 — position 은 이 상태에만 1부터 매긴다.
 WAITING_STATES = frozenset({UPLOADING, QUEUED})
@@ -37,11 +42,17 @@ ACTIVE_STATES = WAITING_STATES | BUSY_STATES
 #: 취소 · 잡 문서 · `rcm wait` · `rcm jobs` · 워커 잊기가 이 집합을 **명시적으로** 본다.
 SCHEDULED_STATES = frozenset({SCHEDULED})
 #: 종료 상태 — 최근 완료에 남는다. 큐에서 조용히 사라지는 잡은 없다.
-TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST, EXPIRED})
+TERMINAL_STATES = frozenset(
+    {SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST, EXPIRED, RETRIED, EXHAUSTED}
+)
 ALL_STATES = ACTIVE_STATES | SCHEDULED_STATES | TERMINAL_STATES
 #: `[[notify]]` 에 `on` 이 없을 때 울리는 상태(`config.parse_notify` · `core/notify.NotifyRule`
-#: 두 곳이 이것을 쓴다). 지금은 종료 상태 전부다 — 새 종료 상태가 기본에서 빠져야 하면 여기서 뺀다.
-NOTIFY_DEFAULT_STATES = TERMINAL_STATES
+#: 두 곳이 이것을 쓴다). 종료 상태에서 `retried` 를 뺀 것이다(M5s 결정 211) — 시도마다 울리면
+#: 2시간짜리 사슬이 알림 12개가 된다. `on = ["retried"]` 로 적으면 받는다.
+NOTIFY_DEFAULT_STATES = TERMINAL_STATES - {RETRIED}
+#: 사슬의 끝이 아닌 종료 — 최근 목록 · 소요 표본 · 실패 통계에 넣지 않는다(M5s §4.2 「목록」).
+#: 사슬은 마지막 시도 한 행으로 보인다.
+CHAIN_LINK_STATES = frozenset({RETRIED})
 
 #: `rcm wait` 종료 코드. 3 은 「모른다」이지 「실패」가 아니다(fail-open 금지).
 EXIT_CODE_BY_STATE = {
@@ -50,7 +61,10 @@ EXIT_CODE_BY_STATE = {
     CANCELLED: 2,
     TIMED_OUT: 2,
     EXPIRED: 2,  # M5s 결정 212 — 돌지 않았다
+    EXHAUSTED: 1,  # M5s 결정 212 — 끝내 확인하지 못했다. 사람이 봐야 한다
     LOST: 3,
+    # `retried` 는 없다 — 기다림이 끝나지 않고 `retried_as` 를 따라간다(결정 211). 그 상태로
+    # 끝난 대기는 「모른다」(3)다(`retried_as` 가 없는 사슬, 결정 225)
 }
 EXIT_UNKNOWN = 3
 
@@ -216,6 +230,9 @@ class Preset:
     keep: bool = False
     #: 예약 잡의 시작 마감(초, M5s 결정 208). None 이면 서버의 `schedule_start_deadline_seconds`
     start_deadline_seconds: int | None = None
+    #: 종료코드 반복(M5s 결정 210). `[presets.retry]` 를 선언한 프리셋만 — None 이면 그 종료코드도
+    #: 여느 실패다(rcm-ci 의 75 = 인프라 실패를 지킨다). 제출할 때 잡 열로 얼린다(결정 229)
+    retry: RetryPolicy | None = None
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -288,6 +305,17 @@ class Transition:
 
 
 @dataclass(frozen=True)
+class RetryPolicy:
+    """`[presets.retry]` — 이 종료코드로 끝나면 `interval_seconds` 뒤에 다시 돈다(M5s §4.2).
+
+    `max_attempts` 는 첫 시도를 포함한 시도 수다. 마지막 시도도 그 코드면 `exhausted` 다."""
+
+    on_exit: int = 75
+    interval_seconds: int = 600
+    max_attempts: int = 12
+
+
+@dataclass(frozen=True)
 class Job:
     """서버 DB 의 잡 한 행. 계산에 필요한 것만 담고 로그 본문은 담지 않는다."""
 
@@ -344,6 +372,33 @@ class Job:
     start_deadline: datetime | None = None
     #: 제출의 `"supersede": false` 를 얼린 값(결정 237). 재시작해도 잊지 않는다
     no_supersede: bool = False
+    #: M5s(v25) — 반복 사슬(결정 211 · 228). `chain_id` 는 뿌리 잡 id 이고 반복을 켠 잡에만 있다.
+    #: `retry_of` 는 바로 앞 시도, `attempt` 는 1부터. `retried_as` 는 `retried` 로 끝난 시도의 다음
+    #: 시도 id(저장소가 읽을 때 채운다 — 열이 아니다)
+    chain_id: int | None = None
+    retry_of: int | None = None
+    attempt: int = 1
+    retried_as: int | None = None
+    #: 제출할 때 얼린 반복 정책(결정 229). `retry_on_exit` 가 None 이면 반복하지 않는다.
+    #: `retry_disabled` 는 제출의 `"retry": false` 다
+    retry_on_exit: int | None = None
+    retry_interval_seconds: int | None = None
+    retry_max_attempts: int | None = None
+    retry_disabled: bool = False
+
+    @property
+    def chain_root(self) -> int:
+        """사슬의 뿌리 잡 id — 사슬이 없으면 자기 id 다."""
+        return self.chain_id if self.chain_id is not None else self.id
+
+    def retries_on(self, rc: int | None) -> bool:
+        """이 종료코드가 얼린 반복 정책에 걸리나. 선언이 없거나 제출이 껐으면 언제나 False."""
+        return (
+            rc is not None
+            and self.retry_on_exit is not None
+            and not self.retry_disabled
+            and rc == self.retry_on_exit
+        )
 
     @property
     def wait_origin(self) -> datetime:

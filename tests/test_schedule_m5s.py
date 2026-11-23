@@ -505,7 +505,8 @@ def test_the_cli_names_not_scheduled_by_what_happened():
 
 def test_nothing_joins_a_schedule_that_has_no_start_deadline(store):
     """반복 시도(PR D)는 시작 마감 없는 예약이다(결정 231). 그래서 「마감이 있는 잡에는 합류하지
-    않는다」만으로는 모자라다 — 예약 상태 자체가 합류 대상 밖이어야 한다(결정 206)."""
+    않는다」만으로는 모자라다 — 예약 상태 자체가 합류 대상 밖이고(결정 206), 합류 쿼리는
+    예약에서 온 잡 전부(`not_before` 가 있다)를 거른다(PR D, 승격된 반복 시도까지)."""
     j = make(store, deadline=None)
     assert j.state == SCHEDULED and j.start_deadline is None
     assert store.join_or_bump(j_key(j), "bob-desk", "bob@desk", 0, at(1)) is None

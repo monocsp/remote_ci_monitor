@@ -195,6 +195,8 @@ stderr 로 간다. Ctrl-C 는 떼어 놓기다. 작업은 계속 돈다. `rcm wa
 | `rcm reload [--dry-run]` | 설정 파일과 `include` 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자). `--dry-run` 은 바뀔 것의 이름만 보이고 아무것도 안 바꾼다 |
 | `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | 스토어 버전 드래프트(관리자). 버전 인자가 없으면 `new` 는 **이름만** 묻고 서버의 힌트를 기본값으로 준다 — 엔터는 힌트, `-` 는 그 스토어를 건너뛴다, `--yes` 는 둘 다 힌트로. `open` 은 버전 페이지의 주소를 찍는다 |
+| `rcm release status [REPO] [--build-name X]` | 두 스토어의 심사 상태. 저장소의 `status` 역할을 돌리고 기다린 뒤 스토어마다 버전 · 빌드 · 상태 · 스토어의 원래 낱말을 찍는다(클라이언트 토큰) |
+| `rcm release golive [REPO] --build-name X --platform ios\|android\|both --plan` · `… --confirm-build-number N [--at TIME \| --in DURATION]` | 승인된 빌드의 출시([출시하기](docs/configuration.md#going-live-golive)). `--plan` 은 승인 여부와 승인된 빌드를 읽고 기다린다. 없으면 직접 친 승인 빌드 번호로 지금이나 정한 시각에 출시를 요청한다(관리자). 승인됐다고 저절로 출시되지 않는다 |
 
 모든 추정에는 `confidence` 가 붙는다. `high`(실제 5회 이상의 중앙값) · `med`(그보다 적음) ·
 `low`(프리셋이나 기본 추측) · `group wait`(동시성 그룹에 막힘) · `overdue`. 모르는 값은 `0` 이
@@ -303,8 +305,10 @@ QA · 10단계 중 7번째 · 66% · 경과 38m · 예상 21:40», «제출 준�
 — 이 붙는다. 앞 열의 각 줄은 고치는 곳의 이름이고, 누르면 그리로 간다. 제출 조건도 여기 있다:
 스토어 체크박스, 제출마다 새로 체크하고 기억하지 않는 관리형 게시 칸, 그리고 빌드 번호(**자동**
 이면 플랜의 번호, **직접 입력**이면 그 번호와 정확히 같아야 한다). 퍼센트는 분모를 미리 선언한
-경우에만 나오고, 아니면 막대에 빗금이 그어지고 그 사실을 적는다. 어떤 상태에도 Release · Publish
-· Rollout 버튼은 없고, `unsafe_release_type` 판정은 닫을 수 없는 빨간 띠가 된다.
+경우에만 나오고, 아니면 막대에 빗금이 그어지고 그 사실을 적는다. 승인됐다고 저절로 출시되지
+않는다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돈다. 그 자리는 버전 페이지의
+「출시 예약」이고, 그 스토어가 승인했다고 말한 뒤에만 열린다. `unsafe_release_type` 판정은 닫을 수
+없는 빨간 띠가 된다.
 
 드래프트는 쌓이지도, 모르는 새 사라지지도 않는다. 아무도 손대지 않은 것은 `version_ttl_hours`
 (기본 24)가 지나면 버려진다 — 프로파일에 `version` 프리셋이 있으면 스토어까지, 없으면 rcm 안에서만.
@@ -324,8 +328,8 @@ Source 행에는 미러의 최근 커밋 다섯 · 태그 · «PR list: next» �
 
 큐 화면 옆에 저장소별 **스토어 탭**이 붙는다: fetch · 스토어 현황 · 게이트 · QA · 업로드 · 심사
 제출 — 전부 프로젝트 *자신의* 릴리스 스크립트 위에 얹힌 버튼이다. rcm 은 그 스크립트가 쓴 JSON 을
-그리고 선언된 프리셋을 돌릴 뿐, 빌드번호를 계산하거나 QA 를 판정하거나 승인 뒤 출시하는 일은 하지
-않는다. 프로젝트가 줘야 하는 것은 [docs/release-contract.md](docs/release-contract.md)에 있고, 가장
+그리고 선언된 프리셋을 돌릴 뿐, 빌드번호를 계산하거나 QA 를 판정하지 않는다. 승인됐다고 저절로
+출시되지도 않는다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돈다. 프로젝트가 줘야 하는 것은 [docs/release-contract.md](docs/release-contract.md)에 있고, 가장
 빠른 길은 rcm 이 같이 싣는 Claude Code 스킬이다:
 
 ```sh
@@ -353,10 +357,13 @@ rcm skills install --into ~/src/app               # ~/src/app/.claude/skills/ �
 | `rcm wait` 종료 코드 | 뜻 |
 |---|---|
 | 0 | 성공 |
-| 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`) |
-| 2 | 취소되었거나 시간 초과 |
+| 1 | 실패(JSON 의 `summary`, 그리고 스크립트가 선언했으면 `failed_step` · 아니면 `last_step`). [반복](docs/configuration.md#trying-again-later-presetsretry)하는 프리셋이 마지막 시도에서도 「아직」이라고 답한 경우(`exhausted`)도 1 이다 |
+| 2 | 취소되었거나 시간 초과, 또는 예약이 시작하지 못함(`expired`) |
 | 3 | **모름**: 서버 재시작으로 작업을 잃음 · 서버에 못 닿음 · `--timeout` 경과. 절대 실패로 치지 않는다 |
 | 4 | `--return-on-action` 을 줄 때만: 잡이 사람에게 할 일을 알렸다(`::rcm::action::`). 잡은 **계속 돈다**. 다시 기다리려면 `rcm wait --job N` |
+
+`retried` 로 끝난 시도에서는 기다림이 끝나지 않는다. `rcm wait` 은 `retried_as` 가 가리키는 다음
+시도를 따라가고 마지막 시도의 종료 코드로 끝난다([나중에 다시 돌리기](docs/configuration.md#trying-again-later-presetsretry)).
 
 서버까지 가지도 못한 사용법 오류·검증 실패도 2 다(제출 전에 서버에 못 닿은 `rcm run` 포함).
 `rcm wait` 은 서버가 안 닿으면 60초 동안 기다렸다가(`reconnecting…`) 3 으로 나간다. `rcm eta` ·

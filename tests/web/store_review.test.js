@@ -103,14 +103,18 @@ describe("module contract", () => {
     await api.validateListing("app", { build_name: "1.0.1", build: "181" });
     await api.github("app");
     await api.driver("app");
+    await api.golive("app", { mode: "plan", version_id: 7 });
+    await api.cancelJob(12);
     assert.deepEqual(log.map((c) => [c[0], c[1]]), [
       ["GET", "/api/repos/app/release"], ["POST", "/api/repos/app/release/plan"], ["POST", "/api/repos/app/release/review"],
       ["POST", "/api/repos/app/release/upload"], ["GET", "/api/repos/app/release/listing"], ["POST", "/api/repos/app/release/listing/validate"],
       ["GET", "/api/repos/app/release/github"], ["GET", "/api/repos/app/release/driver"],
+      ["POST", "/api/repos/app/release/golive"], ["POST", "/jobs/12/cancel"],
     ]);
     assert.equal(log[1][2], JSON.stringify({ build_name: "1.0.1", ref: "main" }));
     assert.equal(api.listingFileUrl("my app", "store/a b.png"), "/api/repos/my%20app/release/listing/file?path=store%2Fa%20b.png");
-    Object.keys(api).forEach((k) => assert.ok(!/release$|publish|rollout/i.test(k) || k === "release", k + " — no release/publish/rollout call"));
+    // 출시로 가는 호출은 `golive` 하나뿐이다(M5s 결정 218) — 그 밖의 이름은 release/publish/rollout/golive 를 못 쓴다
+    Object.keys(api).forEach((k) => assert.ok(!/release$|publish|rollout|golive/i.test(k) || k === "release" || k === "golive", k + " — no release/publish/rollout call but golive"));
   });
 });
 
@@ -714,8 +718,14 @@ describe("catalogue — no release/publish/rollout button label, fixed sentences
     ["review.validate", "review.plan", "review.submit", "review.dialog_go", "store.refresh_plan", "source.fetch", "store.refresh"].forEach((k) => {
       ["en", "ko"].forEach((lang) => assert.ok(!/release this version|publish|rollout/i.test(I18N.t(lang, k)), lang + "/" + k));
     });
-    assert.match(I18N.t("en", "review.policy"), /^Approval does not release\./);
-    assert.match(I18N.t("ko", "review.policy"), /^승인은 출시가 아닙니다\./);
+    // M5s 결정 217 — 원칙 문장이 바뀌었다. 승인은 저절로 출시되지 않고, 출시는 사람이 요청할 때만 돈다
+    assert.match(I18N.t("en", "review.policy"), /^Nothing goes live on approval by itself\. A release runs only when a person asks for it with the version, the build number and a time\. Play has no API to publish a held release, so the project's go-live script publishes through a browser or asks a person\.$/);
+    assert.match(I18N.t("ko", "review.policy"), /^승인됐다고 저절로 출시되지 않습니다\. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돕니다\. Play 에는 보류한 출시를 게시하는 API 가 없습니다\. 그래서 프로젝트의 출시 스크립트가 브라우저로 게시하거나 사람에게 요청합니다\.$/);
+    assert.equal(I18N.t("en", "store.policy"), "Nothing goes live on approval by itself. A release runs only when a person asks for it with the version, the build number and a time.");
+    assert.equal(I18N.t("ko", "store.policy"), "승인됐다고 저절로 출시되지 않습니다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돕니다.");
+    assert.match(I18N.t("en", "review.dialog_body", { targets: "iOS" }), /Nothing goes live on approval by itself\./);
+    assert.match(I18N.t("ko", "review.dialog_body", { targets: "iOS" }), /승인됐다고 저절로 출시되지 않습니다\./);
+    ["en", "ko"].forEach((lang) => ["store.policy", "review.policy"].forEach((k) => assert.ok(!/Approval does not release|승인은 출시가 아닙니다/.test(I18N.t(lang, k)), lang + "/" + k)));
     assert.match(I18N.t("en", "review.check.managed"), /no API can check this/);
   });
 });

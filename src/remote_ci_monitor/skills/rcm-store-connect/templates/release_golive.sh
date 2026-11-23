@@ -39,7 +39,9 @@
 #
 #   --selftest   shims replace the store; proves: plan exits 0 with Android not approved (approved=false in the
 #                file), plan with a store unreadable -> 1, release not approved -> 2 with no release call, a wrong
-#                number -> 3, a lost sign-in -> action marker + 75, a live build -> 0 without a call.
+#                number -> 3, a lost sign-in -> action marker + 75, a live build -> 0 without a call, a publish
+#                already pressed but not live yet -> 75 without pressing again, and a lost sign-in exits 75 at
+#                once (one read, one publish, no sleep at all, under 10 seconds).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"; ROOT="$(cd "$HERE/../.." && pwd)"; cd "$ROOT"
 
@@ -106,7 +108,8 @@ store_android_publish() {
   if [ -n "$SHIM" ]; then shim_store_android_publish "$@"; return $?; fi
   # TODO(project): open the dedicated Chrome profile, confirm Play Console is signed in (else print
   #   {"result": "needs_login", …} and exit 0 at once — do not wait for a person), press publish for version
-  #   code $2, record that it was pressed, then read the track back.
+  #   code $2, then read the track back. Record «pressed for version code $2» only after the screen confirms
+  #   that publishing started — a press that did not take must not turn the next attempt into «in_progress».
   #   Delete the two lines below when done.
   echo "store_android_publish() is not implemented — fill the TODO(project) block in scripts/release/release_golive.sh" >&2
   return 1
@@ -143,37 +146,41 @@ shim_store_android_publish() {
 }
 
 # ── contract plumbing ────────────────────────────────────────────────────────────────────────────────
+# 파이썬은 한 번 실행에 몇 번만 부른다 — 승인 답 전부를 한 번에 읽고(read_approvals), 훅 답 하나에
+# 한 번, 문서를 쓸 때 한 번. 칸마다 python3 를 띄우면 selftest 가 부하 속에서 1분을 넘겼다(rcm-ci #3999).
 step()     { echo "::rcm::step::$1"; }
 step_end() { echo "::rcm::step-end::$1"; }
 finish()   { echo "::rcm::summary::$1"; exit "$2"; }
-jget() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else (json.dumps(v) if isinstance(v,(bool,dict,list)) else v))' "$1" "$2"; }
 name_for() { if [ "$1" = android ] && [ -n "$BUILD_NAME_ANDROID" ]; then echo "$BUILD_NAME_ANDROID"; else echo "$BUILD_NAME"; fi; }
 platforms() { case "$PLATFORM" in both) echo "ios android";; *) echo "$PLATFORM";; esac; }
+# -I -S: 표준 라이브러리만 쓰므로 사용자 site 와 .pth 를 읽지 않는다 — 한 번에 수십 ms 가 준다.
+PY="python3 -I -S"
+US=$'\x1f'   # 칸 구분자 — 탭은 IFS 공백이라 빈 칸이 사라진다
 
-# 플랫폼마다 $WORK/golive-<p>.part.json 하나 — 마지막에 한 문서로 합친다.
-part() {  # $1 platform · $2 JSON object
+# 플랫폼마다 문서 조각 하나 — 변수(PART_<p> · RESULT_<p>)와 $WORK/golive-<p>.part.json 에 둔다.
+part() {  # $1 platform · $2 JSON object (one line)
+  printf -v "PART_$1" '%s' "$2"
   printf '%s\n' "$2" >"$WORK/golive-$1.part.json"
+  if [[ "$2" =~ \"result\":\ \"([a-z_]+)\" ]]; then printf -v "RESULT_$1" '%s' "${BASH_REMATCH[1]}"; fi
 }
-merged_parts() {  # prints {"ios": …, "android": …} for the parts that exist
-  python3 - "$WORK" $(platforms) <<'PY'
-import json, os, sys
-work, plats = sys.argv[1], sys.argv[2:]
-out = {}
-for p in plats:
-    path = os.path.join(work, f"golive-{p}.part.json")
-    if os.path.isfile(path):
-        out[p] = json.load(open(path))
-print(json.dumps(out))
-PY
+has_part() { [ -f "$WORK/golive-$1.part.json" ]; }
+var() { local v="$1_$2"; printf '%s' "${!v:-}"; }   # var APPROVED ios
+merged_parts() {  # prints {"ios": …, "android": …} for the parts that exist — no subprocess
+  local p out="" sep=""
+  for p in $(platforms); do
+    has_part "$p" || continue
+    out="$out$sep\"$p\": $(var PART "$p")"; sep=", "
+  done
+  printf '{%s}\n' "$out"
 }
 write_plan_doc() {  # $1 verdict · rest reasons
   local verdict="$1"; shift
   local args=(write golive-plan --out "$WORK/golive-plan.json" --build-name "$BUILD_NAME" --platforms-json "$(merged_parts)" --plan-verdict "$verdict")
   local r; for r in "$@"; do args+=(--reason "$r"); done
-  python3 "$CONTRACT" "${args[@]}" && WRITTEN=1
+  $PY "$CONTRACT" "${args[@]}" && WRITTEN=1
 }
 write_golive_doc() {  # $1 exit code
-  python3 "$CONTRACT" write golive --out "$WORK/golive.json" --build-name "$BUILD_NAME" \
+  $PY "$CONTRACT" write golive --out "$WORK/golive.json" --build-name "$BUILD_NAME" \
     --platforms-json "$(merged_parts)" --extra-json "{\"exit_code\": $1, \"platform\": \"$PLATFORM\"}" && WRITTEN=1
 }
 on_exit() {  # 마지막 안전망 — release 는 어떤 경로로 끝나든 golive.json 이 남는다
@@ -181,56 +188,95 @@ on_exit() {  # 마지막 안전망 — release 는 어떤 경로로 끝나든 go
   [ "$WRITTEN" = 1 ] && return 0
   [ "$MODE" = release ] && [ "$STARTED" = 1 ] || return 0
   for p in $(platforms); do
-    [ -f "$WORK/golive-$p.part.json" ] || part "$p" '{"result": "failed", "raw_state": null, "reason": "aborted"}'
+    has_part "$p" || part "$p" '{"result": "failed", "raw_state": null, "reason": "aborted"}'
   done
   write_golive_doc "$rc" >/dev/null 2>&1 || true
 }
 trap on_exit EXIT
 
-read_approvals() {  # 고른 플랫폼마다 승인을 읽어 $WORK/approval-<p>.json. 못 읽은 플랫폼 이름을 출력한다
-  local p rc
+# 고른 플랫폼마다 승인을 읽는다. 답이 계약대로면 APPROVED_<p> · BUILD_<p>(글자) · BUILDJ_<p>(JSON) ·
+# RAW_<p>(JSON) · STAGE_<p> 에 두고, 못 읽은 플랫폼 이름은 UNREADABLE 에 둔다.
+read_approvals() {
+  local p rc f a b bj r st
   for p in $(platforms); do
     rc=0; store_approval "$p" "$(name_for "$p")" >"$WORK/approval-$p.json" 2>"$WORK/approval-$p.err" || rc=$?
-    if [ "$rc" != 0 ] || ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d.get("approved"), bool)' "$WORK/approval-$p.json" 2>/dev/null; then
-      rm -f "$WORK/approval-$p.json"; echo "$p"
-    fi
+    [ "$rc" = 0 ] || rm -f "$WORK/approval-$p.json"
   done
+  UNREADABLE=""
+  $PY - "$WORK" $(platforms) >"$WORK/approvals.tsv" <<'PY'
+import json, os, sys
+work, plats = sys.argv[1], sys.argv[2:]
+def text(v):
+    return "" if v is None else (json.dumps(v) if isinstance(v, (bool, dict, list)) else str(v))
+for p in plats:
+    path = os.path.join(work, f"approval-{p}.json")
+    try:
+        d = json.load(open(path))
+        ok = isinstance(d, dict) and isinstance(d.get("approved"), bool)
+    except Exception:
+        ok = False
+    if not ok:
+        print(p)
+        continue
+    b = d.get("approved_build")
+    fields = [p, json.dumps(d["approved"]), text(b), json.dumps(b), json.dumps(d.get("raw_state")),
+              text(d.get("stage"))]
+    print("\x1f".join(fields))
+PY
+  while IFS="$US" read -r p a b bj r st; do
+    if [ -z "$a" ]; then   # 계약을 어긴 답 — 플랫폼 이름만 있는 줄
+      rm -f "$WORK/approval-$p.json"; UNREADABLE="$UNREADABLE $p"; continue
+    fi
+    printf -v "APPROVED_$p" '%s' "$a"; printf -v "BUILD_$p" '%s' "$b"; printf -v "BUILDJ_$p" '%s' "$bj"
+    printf -v "RAW_$p" '%s' "$r"; printf -v "STAGE_$p" '%s' "$st"
+  done <"$WORK/approvals.tsv"
+  UNREADABLE="${UNREADABLE# }"
 }
 
 do_plan() {
-  local p unreadable reasons=() approved
+  local p reasons=()
   step "read stores"
-  unreadable="$(read_approvals)"
+  read_approvals
   step_end ok
   step "golive-plan.json"
   for p in $(platforms); do
-    if [ ! -f "$WORK/approval-$p.json" ]; then
+    case " $UNREADABLE " in *" $p "*)
       part "$p" '{"approved": false, "approved_build": null, "raw_state": null}'
-      reasons+=("${p}_unreadable"); continue
-    fi
-    part "$p" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({"approved": d["approved"], "approved_build": d.get("approved_build"), "raw_state": d.get("raw_state")}))' "$WORK/approval-$p.json")"
-    approved="$(jget "$WORK/approval-$p.json" approved)"
-    [ "$approved" = true ] || reasons+=("${p}_not_approved")
+      reasons+=("${p}_unreadable"); continue;;
+    esac
+    part "$p" "{\"approved\": $(var APPROVED "$p"), \"approved_build\": $(var BUILDJ "$p"), \"raw_state\": $(var RAW "$p")}"
+    [ "$(var APPROVED "$p")" = true ] || reasons+=("${p}_not_approved")
   done
   if [ "${#reasons[@]}" = 0 ]; then write_plan_doc ok; else write_plan_doc blocked "${reasons[@]}"; fi || {
     step_end fail; finish "failed — store_approval() output violates the contract (see log)" 1; }
   step_end ok
   step "done"; step_end ok
-  if [ -n "$unreadable" ]; then
-    finish "plan — could not read: $(echo $unreadable) (golive-plan.json written; nothing released)" 1
+  if [ -n "$UNREADABLE" ]; then
+    finish "plan — could not read: $UNREADABLE (golive-plan.json written; nothing released)" 1
   fi
   finish "plan — $([ "${#reasons[@]}" = 0 ] && echo "approved: $(platforms | tr ' ' '+')" || echo "${reasons[*]}") (read-only; nothing released)" 0
 }
 
+# 훅 답 하나 → 첫 줄 결과 낱말, 둘째 줄 문서 조각. 계약을 어기면 non-zero.
+action_part() {
+  $PY -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    assert isinstance(d, dict) and isinstance(d.get("result"), str)
+except Exception:
+    sys.exit(1)
+print(d["result"]); print(json.dumps({"result": d["result"], "raw_state": d.get("raw_state")}))' "$1"
+}
+
 do_release() {
-  local p unreadable state build approved stage rc res results=() overall=0
+  local p rc res out word results=() overall=0
   step "read stores"
-  unreadable="$(read_approvals)"
-  if [ -n "$unreadable" ]; then
-    for p in $unreadable; do part "$p" '{"result": "failed", "raw_state": null, "reason": "unreadable"}'; done
-    for p in $(platforms); do [ -f "$WORK/golive-$p.part.json" ] || part "$p" '{"result": "failed", "raw_state": null, "reason": "not_attempted"}'; done
+  read_approvals
+  if [ -n "$UNREADABLE" ]; then
+    for p in $UNREADABLE; do part "$p" '{"result": "failed", "raw_state": null, "reason": "unreadable"}'; done
+    for p in $(platforms); do has_part "$p" || part "$p" '{"result": "failed", "raw_state": null, "reason": "not_attempted"}'; done
     step_end fail; write_golive_doc 1
-    finish "failed — could not read: $(echo $unreadable); nothing released" 1
+    finish "failed — could not read: $UNREADABLE; nothing released" 1
   fi
   step_end ok
 
@@ -238,14 +284,12 @@ do_release() {
   step "check approval + build number"
   local blocked="" mismatch=""
   for p in $(platforms); do
-    approved="$(jget "$WORK/approval-$p.json" approved)"; build="$(jget "$WORK/approval-$p.json" approved_build)"
-    state="$(jget "$WORK/approval-$p.json" raw_state)"
-    if [ "$approved" != true ]; then blocked="$blocked $p"; part "$p" "{\"result\": \"failed\", \"raw_state\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1] or None))' "$state"), \"reason\": \"not_approved\"}"
-    elif [ "$build" != "$CONFIRM" ]; then mismatch="$mismatch $p"; part "$p" "{\"result\": \"failed\", \"raw_state\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1] or None))' "$state"), \"reason\": \"build_number_mismatch\", \"approved_build\": ${build:-null}}"
+    if [ "$(var APPROVED "$p")" != true ]; then blocked="$blocked $p"; part "$p" "{\"result\": \"failed\", \"raw_state\": $(var RAW "$p"), \"reason\": \"not_approved\"}"
+    elif [ "$(var BUILD "$p")" != "$CONFIRM" ]; then mismatch="$mismatch $p"; part "$p" "{\"result\": \"failed\", \"raw_state\": $(var RAW "$p"), \"reason\": \"build_number_mismatch\", \"approved_build\": $(var BUILDJ "$p")}"
     fi
   done
   if [ -n "$blocked" ] || [ -n "$mismatch" ]; then
-    for p in $(platforms); do [ -f "$WORK/golive-$p.part.json" ] || part "$p" '{"result": "failed", "raw_state": null, "reason": "not_attempted"}'; done
+    for p in $(platforms); do has_part "$p" || part "$p" '{"result": "failed", "raw_state": null, "reason": "not_attempted"}'; done
     step_end fail
     if [ -n "$blocked" ]; then
       write_golive_doc 2
@@ -258,26 +302,28 @@ do_release() {
 
   step "release"
   for p in $(platforms); do
-    stage="$(jget "$WORK/approval-$p.json" stage)"; state="$(jget "$WORK/approval-$p.json" raw_state)"
-    case "$stage" in
-      live) part "$p" "{\"result\": \"$([ "$p" = ios ] && echo released || echo published)\", \"raw_state\": \"$state\"}"; continue;;
-      in_progress) part "$p" "{\"result\": \"pending\", \"raw_state\": \"$state\"}"; continue;;
+    case "$(var STAGE "$p")" in
+      live) part "$p" "{\"result\": \"$([ "$p" = ios ] && echo released || echo published)\", \"raw_state\": $(var RAW "$p")}"; continue;;
+      in_progress) part "$p" "{\"result\": \"pending\", \"raw_state\": $(var RAW "$p")}"; continue;;
     esac
     res="$WORK/action-$p.json"; rc=0
     if [ "$p" = ios ]; then store_ios_release "$(name_for ios)" "$CONFIRM" >"$res" || rc=$?
     else store_android_publish "$(name_for android)" "$CONFIRM" >"$res" || rc=$?; fi
-    if [ "$rc" != 0 ] || ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d.get("result"), str)' "$res" 2>/dev/null; then
+    if [ "$rc" != 0 ] || ! out="$(action_part "$res" 2>/dev/null)"; then
       part "$p" "{\"result\": \"failed\", \"raw_state\": null, \"reason\": \"hook_exit_$rc\"}"; continue
     fi
-    part "$p" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({"result": d["result"], "raw_state": d.get("raw_state")}))' "$res")"
-    if [ "$(jget "$res" result)" = needs_login ]; then
+    word="${out%%$'\n'*}"
+    part "$p" "${out#*$'\n'}"
+    printf -v "RESULT_$p" '%s' "$word"
+    if [ "$word" = needs_login ]; then
       # 사람이 할 일 — rcm 이 요청한 세션과 화면에 알린다. 다음 시도가 다시 확인한다.
       echo "::rcm::action::login::Play Console sign-in expired on the build machine - sign in to its Chrome profile by screen sharing, or publish from your own Chrome"
     fi
   done
   for p in $(platforms); do
-    results+=("$p=$(jget "$WORK/golive-$p.part.json" result)")
-    case "$(jget "$WORK/golive-$p.part.json" result)" in
+    word="$(var RESULT "$p")"
+    results+=("$p=$word")
+    case "$word" in
       failed) overall=1;;
       released|published) ;;
       *) [ "$overall" = 1 ] || overall=75;;
@@ -299,7 +345,7 @@ main() {
   [ -z "$BUILD_NAME_ANDROID" ] || [[ "$BUILD_NAME_ANDROID" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "RCM_INPUT_BUILD_NAME_ANDROID must be X.Y.Z, got '$BUILD_NAME_ANDROID'" >&2; usage; }
   if [ "$MODE" = release ] && ! [[ "$CONFIRM" =~ ^[0-9]+$ ]]; then echo "mode=release needs RCM_INPUT_CONFIRM_BUILD_NUMBER (the number a person typed)" >&2; usage; fi
   [ -f "$CONTRACT" ] || { echo "missing $CONTRACT — reinstall with /rcm-store-connect" >&2; exit 2; }
-  mkdir -p "$WORK"; rm -f "$WORK"/golive-*.part.json "$WORK"/approval-*.json
+  mkdir -p "$WORK"; rm -f "$WORK"/golive-*.part.json "$WORK"/approval-*.json "$WORK"/approvals.tsv
   echo "::rcm::steps::4"
 
   step "preflight"
@@ -315,19 +361,39 @@ main() {
 # ── selftest ─────────────────────────────────────────────────────────────────────────────────────────
 selftest() {
   local t rc fails=0
-  t="$(mktemp -d)"; mkdir -p "$t/secrets"
+  t="$(mktemp -d)"; mkdir -p "$t/secrets" "$t/bin"
+  # 기다리지 않는다는 규칙의 잠금 — PATH 맨 앞의 가짜 sleep 이 부를 때마다 한 줄씩 적는다. 어떤
+  # 경우에도 0줄이어야 한다(표식을 찍고 그 자리에서 로그인을 기다리면 needs_action 이 멈춘 잡을 가린다).
+  printf '#!/bin/sh\necho "sleep $*" >>"%s"\n' "$t/sleeps" >"$t/bin/sleep"; chmod +x "$t/bin/sleep"
+  local n=0; mkdir -p "$t/a"; : >"$t/asserts"
   check() {  # $1 label · $2 expected rc · $3 actual · $4 file · $5 assertion ('' = skip) · $6 expected release-call count
     if [ "$2" != "$3" ]; then echo "FAIL $1: exit $3, expected $2"; cat "$t/out"; fails=$((fails+1)); return; fi
-    if [ -n "$5" ] && ! python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert $5, d" "$t/work/$4"; then
-      echo "FAIL $1: $4 assertion failed: $5"; fails=$((fails+1)); return
-    fi
     local calls; calls="$(grep -cE '^store_(ios_release|android_publish)' "$t/calls" 2>/dev/null || true)"; calls="${calls:-0}"
     if [ "$6" != "$calls" ]; then echo "FAIL $1: release hooks called $calls times, expected $6"; fails=$((fails+1)); return; fi
+    if [ -s "$t/sleeps" ]; then echo "FAIL $1: the script slept: $(tr '\n' ' ' <"$t/sleeps")"; fails=$((fails+1)); return; fi
+    if [ -n "$5" ]; then  # 문서 단언은 끝에 파이썬 한 번으로 모아 본다(경우마다 python3 를 띄우지 않는다)
+      n=$((n+1)); cp "$t/work/$4" "$t/a/$n.json" 2>/dev/null || true
+      printf '%s\037%s\037%s\037%s\n' "$n" "$1" "$4" "$5" >>"$t/asserts"; return
+    fi
     echo "  ok  $1"
   }
+  verdicts() {  # 모은 문서 단언을 한 번에 — ok 줄 또는 FAIL 줄
+    $PY - "$t/a" "$t/asserts" <<'PY'
+import json, os, sys
+folder, listing = sys.argv[1], sys.argv[2]
+for line in open(listing, encoding="utf-8"):
+    n, label, name, expr = line.rstrip("\n").split("\x1f")
+    try:
+        d = json.load(open(os.path.join(folder, n + ".json")))
+        ok = bool(eval(expr, {}, {"d": d}))
+    except Exception:
+        ok = False
+    print(f"  ok  {label}" if ok else f"FAIL {label}: {name} assertion failed: {expr}")
+PY
+  }
   run() {  # env assignments
-    rm -rf "$t/work" "$t/calls"; mkdir -p "$t/work"; rc=0
-    env RELEASE_SHIM=1 RELEASE_SHIM_CALLS="$t/calls" RELEASE_WORK="$t/work" RCM_INPUT_BUILD_NAME=1.2.0 \
+    rm -rf "$t/work" "$t/calls" "$t/sleeps"; mkdir -p "$t/work"; rc=0
+    env PATH="$t/bin:$PATH" RELEASE_SHIM=1 RELEASE_SHIM_CALLS="$t/calls" RELEASE_WORK="$t/work" RCM_INPUT_BUILD_NAME=1.2.0 \
         "$SECRETS_ENV=$t/secrets" "$@" bash "$SELF" >"$t/out" 2>&1 || rc=$?
   }
   echo "[release_golive] selftest ($SECRETS_ENV)"
@@ -367,8 +433,8 @@ selftest() {
   check "release, login lost -> action marker + exit 75" 75 "$rc" golive.json "d['platforms']['android']['result']=='needs_login'" 1
   # 표식을 찍으면 그 자리에서 끝난다 — 승인을 다시 읽거나 게시를 다시 누르며 기다리지 않는다
   if [ "$(grep -c '^store_approval ' "$t/calls")" = 1 ] && [ "$(grep -c '^store_android_publish ' "$t/calls")" = 1 ] \
-     && [ $((SECONDS - t0)) -lt 10 ] && [[ "$(tail -n 1 "$t/out")" == "::rcm::summary::not yet"* ]]; then
-    echo "  ok  release, login lost -> exits 75 at once: one read, one publish, no wait"
+     && [ ! -s "$t/sleeps" ] && [ $((SECONDS - t0)) -lt 10 ] && [[ "$(tail -n 1 "$t/out")" == "::rcm::summary::not yet"* ]]; then
+    echo "  ok  release, login lost -> exits 75 at once: one read, one publish, no sleep, under 10 s"
   else
     echo "FAIL login lost: the script read or pressed again, or waited ($((SECONDS - t0))s)"; cat "$t/calls"; fails=$((fails+1))
   fi
@@ -387,6 +453,8 @@ selftest() {
   check "release without secrets -> exit 2, store untouched" 2 "$rc" "" "" 0
   run RCM_INPUT_MODE=publish;     check "unknown mode -> usage exit 2" 2 "$rc" "" "" 0
   run RCM_INPUT_BUILD_NAME=1.2;   check "bad build name -> usage exit 2" 2 "$rc" "" "" 0
+  verdicts >"$t/verdicts"; cat "$t/verdicts"
+  fails=$((fails + $(grep -c '^FAIL' "$t/verdicts" || true)))
   rm -rf "$t"
   [ "$fails" = 0 ] && { echo "[release_golive] selftest PASS — plan reads and exits 0, release never waits for an approval, the typed number must match"; return 0; }
   echo "[release_golive] selftest FAIL ($fails)"; return 1

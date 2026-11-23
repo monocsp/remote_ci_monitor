@@ -78,8 +78,97 @@ of a key bumps that number and is listed here.
   column reads `needs action · <code> · <note>` (`사람이 할 일 · …` in Korean) with the job's note
   untranslated. The header shows a `notify failures N` badge while notification hooks have failed
   since the server started (hidden at 0). ([#257](https://github.com/monocsp/remote_ci_monitor/pull/257))
+- **Going live when a person asks for it: `POST /api/repos/<repo>/release/golive`,
+  `rcm release golive` and the version page's «Schedule go-live».** `mode = plan` (any client
+  token) reads approval and the approved build into `golive-plan.json`; `mode = release` (admin)
+  goes live now or at `start_at` / `start_in_seconds` (`--at` / `--in`) with the approved build
+  number a person typed — `auto` is not accepted. The server checks the gate once, when the
+  release is asked for: 409 `golive_plan_required` (no succeeded plan for that `build_name`, or
+  one that did not read a chosen platform), `golive_plan_stale` (older than
+  `plan_max_age_minutes`), `golive_plan_blocked` (a chosen platform is not approved — only the
+  chosen ones count, so iOS goes while Android is in review), `build_number_mismatch` (both
+  platforms must share the typed number) and `golive_running` (a go-live job of that build is
+  booked or running). A booked release is not refused later because its plan aged. A plan with a
+  time is 400 `golive_plan_now_only`. A submitted draft takes `golive`; a discarded one is still
+  409 `version_closed`. The web area opens only when `status.json` says that store approved this
+  version, runs the plan first, lists what is booked with a cancel button, and draws the last
+  `golive.json` — a platform the script never tried is «not attempted», not «failed».
+  `GET …/release` carries `golive.live[]`, the booked and running go-live jobs.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- `rcm release status [REPO] [--build-name X]` runs the `status` role, waits, and prints both
+  stores' version, build, state and the store's own word.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- `rcm-store-connect` installs `release_status.sh` and `release_golive.sh` and adds the presets
+  `release-status` and `release-golive` (`priority = "high"`, `start_deadline_seconds = 3600`,
+  `concurrency_group = "store-browser-<repo>"` shared with the project's Play Console sign-in
+  preset, and `[presets.retry]` with exit 75 every 600 s, 12 attempts) and the two roles to
+  `profile.release.toml`. The go-live selftest now proves the script
+  never sleeps when a sign-in is lost (a recording `sleep` stub), and it now runs
+  in under two seconds: the script starts Python a few times per run instead of once per field.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+
+- **A preset can run its script again later: `[presets.retry]`.** With `on_exit = 75`,
+  `interval_seconds = 600` and `max_attempts = 12` (the defaults), an attempt that exits 75 ends
+  in the new final state `retried` and, in the same transaction, the next attempt waits as
+  `scheduled` for the interval — with no start deadline, so a busy lane or a held concurrency
+  group never turns it `expired`. The last attempt that still exits 75 ends in the new final state
+  `exhausted` (`rcm wait` exit 1). Only a preset that declares the table retries, and it must take
+  `git_ref` sources only; the policy is frozen on the job at submission, and `"retry": false` in a
+  submission turns it off for that job (a submission joins only a job with the same frozen policy,
+  and a retry attempt supersedes nothing when it enters the queue). `rcm wait` and `rcm run`
+  follow `retried_as` to the end of the chain (`--timeout` covers the chain, `--fetch-artifacts`
+  takes the last attempt's files) and the final JSON carries `chain_id` and `attempts[]`;
+  `rcm cancel` with any id of the chain stops the live attempt, with the first submission's
+  cancel token. A cancel that lands as an attempt exits 75 wins and no next attempt is made. Job rows in
+  `GET /jobs/<id>` and `/api/status` carry `chain_id`, `attempt`, `retry_of`, `retried_as` and
+  `max_attempts`, presets carry `retry`, and `/api/health` carries `retry_min_client_version`
+  (keys added only — `schema_version` stays 1).
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- **An `::rcm::action::` marker lasts across the attempts of a chain.** The chain shows the last
+  marker of its most recent attempt that ran until an attempt runs to its end without one, so the
+  next attempt keeps `reason: "needs_action"` and its `action` while it waits — as a schedule, in
+  the queue, or running. `pools[].scheduled[]` rows gain `reason` and `action` (null without a
+  marker). ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
 
 ### Changed
+- **A server with a preset that retries raises `min_client_version` to `0.10.0`** in
+  `/api/health`. An older client does not know `retried` and its `rcm wait` would wait forever, so
+  its `rcm check` now shows the client row as FAIL. Upgrade the clients.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- A `[[notify]]` rule without `on` fires for `exhausted` but not for `retried`, so a two-hour chain
+  is one notification; `on = ["retried"]` asks for each attempt.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- `retried` attempts stay out of the recent list, the estimate samples and the failure counts;
+  the chain shows as its last attempt. Only the last attempt collects artifacts and goes on the
+  shelf, and a `retried` attempt keeps no workspace even with `keep_workspace_on_failure`.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- No job joins a job that came from a schedule any more, before or after it enters the queue,
+  whether or not it has a start deadline (a retry attempt has none).
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- The `rcm-ci-connect` and `rcm-release-driver` templates know the two new states: the watcher
+  follows a `retried` job to its next attempt and posts `unavailable · #N · gave up after retries`
+  for `exhausted`, and `release_check.py` maps both to exit 3. Copy the new
+  `rcm_ci_watch.py`, `rcm_ci_config.py` and `release_check.py` into repositories that use them.
+  ([#256](https://github.com/monocsp/remote_ci_monitor/pull/256))
+- **The fixed sentence about going live changed everywhere** — the Store tab, the version page,
+  the bottom sheet, the review panel, the submit dialog, the docs and the skill templates. It
+  read «Approval does not release …»; it now reads «Nothing goes live on approval by itself. A
+  release runs only when a person asks for it with the version, the build number and a time.»
+  The review panel adds «Play has no API to publish a held release, so the project's go-live
+  script publishes through a browser or asks a person.» Release after approval was never
+  automatic and still is not; a person can now ask for it from rcm instead of the store consoles.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **`POST /jobs` refuses the `golive` role's preset with `mode = release`** for every token,
+  admin included: 409 `release_route_required` (`rcm run` exits 2). Going live takes the golive
+  route, which runs the gate. `review` and `upload` are unchanged.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- **A plan whose `measured_at` is later than now is stale** — the plan, the review plan and the
+  golive plan alike. Its age used to be cut to 0, so a script with a wrong clock kept an
+  irreversible button open for ever; `age_seconds` still never goes below 0.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
+- The release routes' answers (`plan`, `review`, `upload`, `golive`) carry `submission`, the cancel secret `POST /jobs` gives, and a scheduled golive answers 201
+  with `not_before`, `start_deadline` and `timezone`; immediate ones stay 202.
+  ([#255](https://github.com/monocsp/remote_ci_monitor/pull/255))
 - **A `[[notify]]` rule without `on` now also fires for `expired` jobs**, because it fires for
   every final state. Give the rule an `on` list to keep the old set.
   ([#253](https://github.com/monocsp/remote_ci_monitor/pull/253))
