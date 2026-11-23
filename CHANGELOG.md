@@ -69,6 +69,11 @@ of a key bumps that number and is listed here.
   `chain_id`, `attempt`, `retry_of`, `retried_as` and `max_attempts`, presets carry `retry`, and
   `/api/health` carries `retry_min_client_version` (keys added only — `schema_version` stays 1).
   ([#PR_D](https://github.com/monocsp/remote_ci_monitor/pull/PR_D))
+- **An `::rcm::action::` marker lasts across the attempts of a chain.** The chain shows the last
+  marker of its most recent attempt that ran until an attempt runs to its end without one, so the
+  next attempt keeps `reason: "needs_action"` and its `action` while it waits — as a schedule, in
+  the queue, or running. `pools[].scheduled[]` rows gain `reason` and `action` (null without a
+  marker). ([#PR_D](https://github.com/monocsp/remote_ci_monitor/pull/PR_D))
 
 ### Changed
 - **A server with a preset that retries raises `min_client_version` to `0.10.0`** in

@@ -169,6 +169,10 @@ def test_retry_on_exit_is_documented():
         "retry_min_client_version",
         "`0.10.0`",
         "every final state but `retried`",
+        # 결정 233 — 사슬 기준 표식
+        "**A person's task across attempts.**",
+        'reason: "needs_action"',
+        "clears it",
     ):
         assert word in config, f"docs/configuration.md does not mention {word}"
     anchor = "configuration.md#trying-again-later-presetsretry"
@@ -190,6 +194,7 @@ def test_retry_on_exit_is_documented():
         "`min_client_version` to `0.10.0`",
         "retried_as",
         "attempts[]",
+        "lasts across the attempts of a chain",
     ):
         assert word in unreleased, f"CHANGELOG [Unreleased] does not mention {word}"
 

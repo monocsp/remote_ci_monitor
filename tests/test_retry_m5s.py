@@ -502,3 +502,77 @@ def test_a_retry_false_submission_does_not_join_a_retrying_job(srv):
     assert status == 201 and second["job_id"] != first["job_id"]
     _, third = submit(srv, token="bob")
     assert third["joined"] is True and third["job_id"] == first["job_id"]
+
+
+# ── 사슬 기준 표식 (결정 233) ────────────────────────────────────────────────
+
+LOGIN = "login::Sign in on the build machine"
+
+
+def test_chain_action_takes_the_last_mark_of_the_most_recent_attempt_that_ran():
+    from remote_ci_monitor.core.model import Action
+    from remote_ci_monitor.core.progress import chain_action
+
+    a1, a2 = Action("login", "first", T), Action("login", "second", at(5))
+    # 돈 시도의 표식 → 다음 시도가 예약으로 기다리는 동안에도 남는다
+    assert chain_action([(1, True, True), (2, False, False)], {1: a1}) == a1
+    # 다음 시도가 돌기 시작했지만 아직 표식이 없다 → 앞 시도의 표식이 남는다
+    assert chain_action([(1, True, True), (2, True, False)], {1: a1}) == a1
+    # 다음 시도가 자기 표식을 찍었다 → 그것
+    assert chain_action([(1, True, True), (2, True, False)], {1: a1, 2: a2}) == a2
+    # 표식 없이 끝까지 돈 시도가 나왔다 → 지운다
+    assert chain_action([(1, True, True), (2, True, True), (3, False, False)], {1: a1}) is None
+    # 돌지 않고 끝난 시도(시작 전 취소)는 건너뛴다
+    assert chain_action([(1, True, True), (2, False, True)], {1: a1}) == a1
+    assert chain_action([], {}) is None
+
+
+def test_the_store_gives_the_chain_mark_to_the_waiting_and_running_attempts(store):
+    j = make(store)
+    run(store, j.id)
+    store.add_marker(j.id, "action", LOGIN, at(3))
+    second = retry_once(store, j.id, at(5))
+    got = store.chain_actions([store.get_job(second)])
+    assert got[second].code == "login" and got[second].note == "Sign in on the build machine"
+    store.promote_due(at(700))
+    run(store, second, at(700))
+    assert store.chain_actions([store.get_job(second)])[second].code == "login"
+    # 둘째 시도가 표식 없이 75 로 끝났다 → 셋째 시도에는 표식이 없다
+    third = retry_once(store, second, at(760))
+    assert store.chain_actions([store.get_job(third)]) == {}
+    plain = make(store, retry=None, inputs={"build_name": "9"})
+    assert store.chain_actions([plain]) == {}
+
+
+def test_the_status_document_keeps_needs_action_between_attempts(srv):
+    _, resp = submit(srv)
+    root = resp["job_id"]
+    srv.registered("build-02")
+    assert srv.claimed("build-02") == root
+    srv.store.add_marker(root, "action", LOGIN, srv.clock())
+    status, body = srv.finish("build-02", root, "failed", exit_code=75)
+    assert status == 200, body
+    second = srv.store.get_job(root).retried_as
+    status, doc = srv.req("GET", "/api/status", token="alice")
+    row = next(r for p in doc["pools"] for r in p["scheduled"] if r["id"] == second)
+    assert row["reason"] == "needs_action"
+    assert row["action"]["code"] == "login"
+    _, one = srv.req("GET", f"/jobs/{second}", token="alice")
+    assert one["reason"] == "needs_action" and one["action"]["code"] == "login"
+    # 승격된 뒤 큐에서 기다리는 행에도 남는다
+    srv.clock.advance(61)
+    srv.app.tick_schedule()
+    srv.app._mark_dirty()
+    _, doc = srv.req("GET", "/api/status", token="alice")
+    row = next(r for p in doc["pools"] for r in p["queue"] if r["id"] == second)
+    assert row["reason"] == "needs_action" and row["action"]["code"] == "login"
+
+
+def test_a_scheduled_row_without_a_chain_mark_has_null_reason_and_action(srv):
+    _, resp = submit(srv)
+    root = resp["job_id"]
+    remote_attempt(srv, root, 75)
+    second = srv.store.get_job(root).retried_as
+    _, doc = srv.req("GET", "/api/status", token="alice")
+    row = next(r for p in doc["pools"] for r in p["scheduled"] if r["id"] == second)
+    assert row["reason"] is None and row["action"] is None

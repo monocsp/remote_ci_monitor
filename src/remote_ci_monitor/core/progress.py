@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -216,6 +216,28 @@ def last_action(markers: Sequence[Marker]) -> Action | None:
         found = action_of(m)
         if found is not None:
             return found
+    return None
+
+
+def chain_action(
+    attempts: Sequence[tuple[int, bool, bool]], actions: Mapping[int, Action]
+) -> Action | None:
+    """반복 사슬 전체의 「사람이 할 일」 표식(M5s 결정 233).
+
+    `attempts` 는 시도 순의 `(잡 id, 돌았나, 끝났나)` 이고 `actions` 는 잡마다 마지막 표식이다.
+    사슬에서 가장 최근에 돈 시도의 마지막 표식을 쓴다. 표식 없이 끝까지 돈 시도가 나오면 표식은
+    지워진다(None). 아직 도는 시도가 표식을 찍지 않았으면 그 앞 시도의 표식이 남는다 — 로그인을
+    기다리는 동안 다음 시도가 다시 확인하는 사이에도 「Needs a look」이 꺼지지 않게. 돌지 않은
+    시도(예약 · 대기 · 시작 전 취소)는 건너뛴다.
+    """
+    for job_id, ran, ended in reversed(attempts):
+        if not ran:
+            continue
+        found = actions.get(job_id)
+        if found is not None:
+            return found
+        if ended:
+            return None
     return None
 
 

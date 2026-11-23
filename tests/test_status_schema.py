@@ -420,3 +420,49 @@ def test_quiet_does_not_lower_the_eta_confidence():
     quiet = replace(row, estimate=replace(row.estimate, quiet=True))
     out = queue_row_json(quiet)["estimate"]
     assert out["quiet"] is True and out["confidence"] == "high"
+
+
+#: 예약 행(M5s `pools[].scheduled[]` · 예약 잡의 `GET /jobs/<id>`). 순번 · ETA 는 없다(지어내지
+#: 않는다). `reason` · `action` 은 반복 사슬의 표식이다(결정 233 — 서버가 채운다, 키 추가만)
+SCHEDULED_KEYS = {
+    "id",
+    "pool",
+    "preset",
+    "key",
+    "inputs",
+    "priority",
+    "concurrency_group",
+    "requester",
+    "joiners",
+    "link",
+    "state",
+    "source",
+    "created_at",
+    "not_before",
+    "start_deadline",
+    "started_at",
+    "finished_at",
+    "url",
+    "placement",
+    "display_pool",
+    "target_worker",
+    "keep",
+    "shelf",
+    "chain_id",
+    "attempt",
+    "retry_of",
+    "retried_as",
+    "max_attempts",
+    "reason",
+    "action",
+}
+
+
+def test_a_scheduled_row_has_exactly_the_locked_keys():
+    from remote_ci_monitor.core.model import SCHEDULED
+    from remote_ci_monitor.core.status import scheduled_json
+
+    doc = scheduled_json(job(7, state=SCHEDULED, created_min=1))
+    assert set(doc) == SCHEDULED_KEYS
+    assert doc["reason"] is None and doc["action"] is None  # 순수 층은 표식을 모른다
+    json.dumps(doc)

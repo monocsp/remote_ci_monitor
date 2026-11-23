@@ -1894,6 +1894,14 @@ fetches the last attempt's files, and the final JSON's `job_id` is the last atte
 `#57 exit 75 · attempt 1 of 12 · retrying as #58 — waiting for it`. A `retried` attempt without a
 next one would be a server bug; `rcm wait` exits 3 then, never 1.
 
+**A person's task across attempts.** A script that needs a person (a login, say) prints an
+`::rcm::action::` marker and exits 75. The marker belongs to the whole chain: the chain shows the
+last marker of the most recent attempt that ran, while the next attempt waits as `scheduled`,
+waits in the queue, or runs without a marker of its own. An attempt that runs to its end without a
+marker clears it. So `/api/status` gives the waiting attempt `reason: "needs_action"` and its
+`action` (on `pools[].scheduled[]` rows too, which carry `reason` and `action`, both `null`
+without a marker), and `rcm wait --return-on-action` returns 4 between attempts as well.
+
 `rcm cancel` takes any id of the chain and stops the attempt that is still alive; the cancel token
 from the first submission works for every attempt. A cancel that lands while an attempt is
 exiting 75 wins: the attempt ends `cancelled` and no next attempt is made. Only the last attempt

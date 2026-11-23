@@ -398,6 +398,10 @@ def scheduled_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         "shelf": None,
         # M5s — 반복 사슬(결정 211). 다음 시도는 시작 마감 없이 이 행으로 기다린다(결정 231)
         **chain_json(job),
+        # M5s — 사슬의 「사람이 할 일」 표식과 그 이유(결정 233). 순수 층은 마커를 모른다 — 서버가
+        # 채운다. 표식이 있으면 `reason` 은 `needs_action`, 없으면 둘 다 null
+        "reason": None,
+        "action": None,
     }
 
 

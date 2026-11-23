@@ -89,6 +89,7 @@ from remote_ci_monitor.core.mdns import instance_name
 from remote_ci_monitor.core.model import (
     BUSY_STATES,
     CANCELLED,
+    CANCELLING,
     DEFAULT_POOL,
     FAILED,
     MODE_GIT_REF,
@@ -97,6 +98,7 @@ from remote_ci_monitor.core.model import (
     PLACEMENT_POOL,
     PRIORITY_HIGH,
     QUEUED,
+    REASON_NEEDS_ACTION,
     SCHEDULED,
     SUCCEEDED,
     TIMED_OUT,
@@ -466,10 +468,29 @@ class _DbSnapshot:
     step_medians_error_code: str | None = None
     #: 최근 행의 마지막 「사람이 할 일」 표식(M5s) — 잡 id → Action. 표식 없는 잡은 없다
     recent_actions: dict[int, Action] = field(default_factory=dict)
+    #: 반복 사슬에 든 대기 · 실행 · 예약 잡의 사슬 표식(M5s 결정 233) — 잡 id → Action
+    chain_actions: dict[int, Action] = field(default_factory=dict)
     #: 예약 잡(M5s) — 승격 시각 순. 큐 계산에는 들어가지 않는다(결정 206)
     scheduled: list[Job] | None = field(default_factory=list)
     scheduled_error: str | None = None
     scheduled_error_code: str | None = None
+
+
+def with_chain_action(row: QueueRow, action: Action | None) -> QueueRow:
+    """큐 행에 사슬 표식을 단다(M5s 결정 233). 그 시도가 스스로 찍은 표식이 있으면 그대로다.
+
+    표식이 있으면 이유는 `needs_action` 이다 — 시도 사이에 그룹이나 레인을 기다리는 행도
+    「Needs a look」에 남는다. 취소 중인 행은 이제 할 일이 없으므로 `cancelling` 그대로다."""
+    if action is None or row.action is not None or row.job.state == CANCELLING:
+        return row
+    return replace(row, action=action, reason=REASON_NEEDS_ACTION)
+
+
+def scheduled_action(doc: dict[str, Any], action: Action | None) -> dict[str, Any]:
+    """예약 행 문서에 사슬 표식과 이유를 채운다(M5s 결정 233). 없으면 둘 다 null 이다."""
+    doc["action"] = action_json(action)
+    doc["reason"] = REASON_NEEDS_ACTION if action is not None else None
+    return doc
 
 
 def shown_pool(job: Job) -> str:
@@ -3175,9 +3196,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         markers: dict[int, list[Marker]] = {}
         queue_error = None
         queue_error_code: str | None = None
+        chain_actions: dict[int, Action] = {}
         try:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
+            # 사슬 표식(M5s 결정 233)은 큐 행의 일부다 — 못 읽으면 큐 절 전체가 실패다
+            chain_actions = self.store.chain_actions(jobs)
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
@@ -3210,6 +3234,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         scheduled_error = scheduled_error_code = None
         try:
             scheduled = self.store.list_scheduled()
+            # 시도 사이를 기다리는 예약 행에도 사슬 표식을 단다(결정 233)
+            chain_actions.update(self.store.chain_actions(scheduled))
         except Exception as e:  # noqa: BLE001
             scheduled, scheduled_error, scheduled_error_code = None, _error_text(e), _error_code(e)
         return _DbSnapshot(
@@ -3235,6 +3261,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             host_medians=self._host_medians or {},
             host_step_medians=host_step_medians,
             recent_actions=recent_actions,
+            chain_actions=chain_actions,
         )
 
     def _host_step_view(
@@ -3441,6 +3468,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
         )
+        rows = [with_chain_action(r, snap.chain_actions.get(r.job.id)) for r in rows]
         if pool is None:
             return rows
         return [r for r in rows if shown_pool(r.job) == pool]
@@ -3567,6 +3595,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # 최근 행의 표식(M5s) — 순수 층은 마커를 모른다. 큐 행은 진행(마커)에서 이미 왔다
             for row in pool.get("recent") or []:
                 row["action"] = action_json(snap.recent_actions.get(row.get("id")))
+            # 예약 행(M5s 결정 233) — 반복의 다음 시도가 사슬의 표식을 이어받는다
+            for row in pool.get("scheduled") or []:
+                scheduled_action(row, snap.chain_actions.get(row.get("id")))
         return doc
 
     def _inject_artifacts(self, doc: dict[str, Any], model: StatusModel) -> None:
@@ -3606,7 +3637,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             return self._terminal_view(job, host)
         if job.is_scheduled:
             # 예약 잡(M5s)은 큐 행이 아니다 — 「방금 끝났다」로 읽으면 끝난 잡처럼 보인다
-            return scheduled_json(job, base_url=self.base_url(host))
+            doc = scheduled_json(job, base_url=self.base_url(host))
+            return scheduled_action(doc, self.store.chain_actions([job]).get(job.id))
         self._mark_dirty()  # 방금 읽은 잡이 캐시보다 새로울 수 있다
         rows = self._queue_rows(now, self._snapshot())
         row = next((r for r in rows if r.job.id == job_id), None)

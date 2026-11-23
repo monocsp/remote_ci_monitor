@@ -77,7 +77,7 @@ from remote_ci_monitor.core.model import (
     Transition,
 )
 from remote_ci_monitor.core.outcome import dump_args, load_args
-from remote_ci_monitor.core.progress import KIND_ACTION, Marker, action_of
+from remote_ci_monitor.core.progress import KIND_ACTION, Marker, action_of, chain_action
 from remote_ci_monitor.core.retention import BlobInfo, BundleInfo
 from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, superseded_by
 
@@ -3942,6 +3942,35 @@ class Store:
             if found is not None:
                 out[e["job_id"]] = found
         return out
+
+    def chain_actions(self, jobs: Iterable[Job]) -> dict[int, Action]:
+        """반복 사슬에 든 잡마다 사슬 전체의 표식(M5s 결정 233 · `progress.chain_action`).
+
+        사슬이 없는 잡과 표식이 없는 사슬은 결과에 없다. 시도는 사슬마다 한 번에 읽고(사슬
+        인덱스), 표식은 돈 시도들의 것만 한 번에 읽는다."""
+        wanted = {j.id: j.chain_id for j in jobs if j.chain_id is not None}
+        if not wanted:
+            return {}
+        chains = sorted(set(wanted.values()))
+        marks = ",".join("?" * len(chains))
+        rows = (
+            self._conn()
+            .execute(
+                f"SELECT id, chain_id, state, started_at FROM jobs WHERE chain_id IN ({marks}) "
+                "ORDER BY chain_id, attempt, id",
+                tuple(chains),
+            )
+            .fetchall()
+        )
+        attempts: dict[int, list[tuple[int, bool, bool]]] = {}
+        for r in rows:
+            attempts.setdefault(int(r["chain_id"]), []).append(
+                (int(r["id"]), r["started_at"] is not None, r["state"] in TERMINAL_STATES)
+            )
+        ran = [a[0] for seq in attempts.values() for a in seq if a[1]]
+        actions = self.actions_for(ran)
+        per_chain = {c: chain_action(seq, actions) for c, seq in attempts.items()}
+        return {jid: a for jid, c in wanted.items() if (a := per_chain.get(c)) is not None}
 
     # ── 토큰 ────────────────────────────────────────────────────────────────
 
