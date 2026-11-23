@@ -123,6 +123,9 @@ REASON_NO_CAPABLE_MACHINE = "no_capable_machine"
 REASON_CHECK_FAILED = "check_failed"
 #: 후보 중 점검이 돌고 있거나 기다리는 것뿐이다. 스스로 풀린다 — `held_by_load` 와 같은 종류.
 REASON_CHECK_PENDING = "check_pending"
+#: 도는 잡이 「사람이 할 일」 표식(`::rcm::action::`)을 찍었다(M5s 결정 213). 행동 가능 — 잡이
+#: 직접 무엇을 해 달라고 말했다. 사람을 기다리는 잡은 대개 조용해서 `stuck` 보다 앞에 둔다.
+REASON_NEEDS_ACTION = "needs_action"
 
 #: M5n 배치 · 그룹 범위 (DB 에 그대로 들어가는 값)
 PLACEMENT_POOL = "pool"
@@ -141,7 +144,12 @@ STUCK_STEP = "over_step"  # 현재 단계가 자기 실측 중앙값의 배수�
 STUCK_NO_OUTPUT = "no_output"  # 단계 이야기를 안 하는 잡이 `no_output_seconds` 동안 조용하다
 
 #: 「Not moving」 요약에 오르는 행동 가능한 이유. 순서가 우선순위다.
+#:
+#: `needs_action` 이 맨 앞이다(M5s). 다른 이유는 rcm 이 관측해 짐작한 것이고, 이것만 잡이 스스로
+#: 「사람이 이것을 해 달라」고 말한 것이다. 무엇을 할지(`action.note`)까지 정해져 있고, 하지
+#: 않으면 잡이 나아가지 못한다(로그인이 풀린 출시 잡).
 ACTIONABLE_REASONS = (
+    REASON_NEEDS_ACTION,
     REASON_WORKER_DOWN,
     REASON_NO_CAPABLE_MACHINE,
     REASON_CHECK_FAILED,
@@ -441,6 +449,20 @@ class ProgressUnit:
 
 
 @dataclass(frozen=True)
+class Action:
+    """「사람이 할 일」 표식 하나 — 마지막 `::rcm::action::<code>::<note>` 마커(M5s 결정 213).
+
+    `code` 는 `[a-z0-9_-]{1,32}`, `note` 는 제어문자를 지운 200자까지의 안내(없으면 None).
+    `at` 은 서버가 그 줄을 받은 시각이다. note 는 토큰 없이 읽히는 `/api/status` 와 알림 env 로
+    흐르므로 스크립트는 개인정보를 넣지 않는다(템플릿 머리말의 규칙).
+    """
+
+    code: str
+    note: str | None = None
+    at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Progress:
     """스텝 마커로 만든 진행 상태. `timing` 은 항상 `as_received`."""
 
@@ -471,6 +493,8 @@ class Progress:
     units: tuple[ProgressUnit, ...] = ()
     #: 단위 상한을 넘겨 격자에 못 올린 단위가 있다 — `done/total` 은 그래도 계속 센다
     units_truncated: bool = False
+    #: 잡이 찍은 마지막 「사람이 할 일」 표식(M5s). 없으면 None
+    action: Action | None = None
 
 
 @dataclass(frozen=True)
@@ -518,6 +542,8 @@ class QueueRow:
     progress: Progress | None
     #: 대기 잡이 들어갈 수 있는 머신과 못 들어가는 이유(M5n §7.3) — 최대 8개
     placement_detail: tuple[PlacementNote, ...] = ()
+    #: 이 행의 「사람이 할 일」 표식(M5s). 도는 행은 그 잡의 마지막 표식이다
+    action: Action | None = None
 
 
 @dataclass(frozen=True)

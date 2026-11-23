@@ -82,6 +82,9 @@ ENV_KEYS = {
     "RCM_FAILURE_COUNT",
     # M5p 결정 144 — keep 인 잡의 보관함 링크(아니면 빈 값)
     "RCM_SHELF_URL",
+    # M5s 결정 213 — 마지막 「사람이 할 일」 표식(없으면 빈 값)
+    "RCM_ACTION_CODE",
+    "RCM_ACTION_NOTE",
 }
 
 

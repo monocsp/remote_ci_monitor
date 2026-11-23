@@ -58,6 +58,7 @@ Your script can report progress by printing markers at the start of a line:
 ::rcm::summary::all green  # optional: one-line result shown in the queue
 ::rcm::fail::flaky_test    # optional: names something that failed (a step, a test, a file)
 ::rcm::progress::41/68::inquiry_photo/android::run   # optional: progress inside the current step
+::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
 ### Progress inside a step
@@ -98,6 +99,41 @@ job is `null` unless the script declared it failed (`::rcm::fail::<name>` or
 `::rcm::step-end::fail`), in which case it is `false` — a failure is never inferred, and the stored
 `failed_step` and `last_step` are not changed by the timeline. Running jobs keep `progress`;
 `/api/status` rows never carry `step_timeline`.
+
+### When a person has to act
+
+`::rcm::action::<code>::<note>` tells rcm that the job cannot go on without a person — a store
+console asks for a sign-in again, a device needs unlocking. `code` is `[a-z0-9_-]{1,32}`
+(anything else makes the line not a marker) and is what a skill branches on; `note` is optional,
+up to 200 characters, with control, bidirectional and zero-width characters removed (the same
+rule as the failure names hooks get). The note is readable without a token, goes into
+hook environments and is printed in terminals: **never put an account name, an e-mail address or
+any other personal detail in it.**
+
+The last line becomes the job's `action`: `{code, note, at}` (`at` is when the server received
+it), `null` when the job printed none. It is stored like the other markers, so it stays after the
+job ends — on `GET /jobs/<id>`, the JSON `rcm run` and `rcm wait` print, and the queue and recent
+rows of `/api/status` (an added key; `schema_version` stays 1). Lines from a remote worker are
+parsed by the server like every other marker.
+
+- A **running** job with an action has the reason `needs_action`. It is first in the actionable
+  reasons («Needs a look»): every other reason is something rcm inferred, this one the job said
+  itself, with what to do. It outranks `stuck` and `overdue` — a job waiting for a person is
+  usually quiet — and a job being cancelled stays `cancelling`. The action stays until the job
+  ends; there is no marker that clears it.
+- **`rcm wait`** prints `#<id> needs action · <code> · <note>` on stderr once for each action it
+  sees. With **`--return-on-action`** it prints the JSON (with `action`) and exits **4** as soon as
+  the job has an action — also one that was already there when the wait started, since a session
+  that attaches later must not miss it. The job keeps running. Exit 4 only ever comes with that
+  flag. After the person has acted, wait again **without** the flag (`rcm wait --job N`): the
+  action is still the job's last one, so the flag would return at once. A job that is being
+  cancelled, or was cancelled, prints no such line and never returns 4: it will not run on.
+- **Hooks** get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (both empty without an action); a `url`
+  rule finds `action` in `job`. rcm sends nothing in the middle of a job — a script that wants a
+  chat message at that moment sends it itself.
+
+The usual pattern is a script that checks the sign-in first, prints the action and exits 75, with
+a preset that runs it again a few minutes later.
 
 ### Saying what failed
 
@@ -1111,13 +1147,18 @@ Git mirrors are never pruned.
   `RCM_FAILURES` (the names the job reported with `::rcm::fail::` and failed steps, in the order it
   printed them, one per line, at most 20) and `RCM_FAILURE_COUNT` (how many there are in all —
   `100+` when the job reported more than the ledger keeps; both empty when nothing was named),
-  `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise);
+  `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise),
+  `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (the job's last
+  [action](#when-a-person-has-to-act), empty without one);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
   rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
   "failures_truncated": false}` with the same 20-name cap, plus `"shelf_url"` for a kept job. Each (job, rule) fires exactly once,
   including jobs that finished while the server was down. Failures are logged and counted
-  (`server.notify_failures`) but never retried, and never mark the queue unhealthy.
+  (`server.notify_failures`) but never retried, and never mark the queue unhealthy. `rcm check`
+  shows a `warn  notify` row with the count while it is above 0. The count lives in the server's
+  memory, so a restart sets it back to 0 — the server log keeps each failure
+  (`notify <rule> #<job>: exit 1`).
 - **Job links** — `RCM_URL`, the `url` in the webhook body and the job URL `rcm run` prints start
   with `[server] public_url` when it is set. Without it the server picks an address another
   computer can open, never `0.0.0.0`:
