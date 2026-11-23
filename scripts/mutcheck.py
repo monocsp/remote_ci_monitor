@@ -1077,6 +1077,32 @@ MUTANTS = (
             "test_a_round_that_ends_first_waits_for_the_job_that_is_still_running",
         ),
     ),
+    # ── M5s PR B — status · golive 역할 (docs/m5s-workplan.md §4.4 · §4.6) ──
+    Mutant(
+        # golive 의 release 를 되돌릴 수 없는 모드에서 뺀다 — 기본값이 release 인 프리셋을
+        # rcm check 가 통과시켜, 손으로 한 번 돌린 golive 가 출시가 된다
+        name="m5s-golive-release-not-irreversible",
+        path="src/remote_ci_monitor/cli.py",
+        old='"review": "submit", "golive": "release"}',
+        new='"review": "submit"}',
+        # test_config_release_profile 은 사본에 없는 examples/ 를 읽는다 — 이 시험만 쓴다
+        tests=(
+            "tests/test_skills_templates.py::"
+            "test_a_golive_preset_defaulting_to_release_fails_the_release_row",
+        ),
+    ),
+    Mutant(
+        # status.json 을 checked_at 이 아니라 measured_at 으로 잰다 — 늘 잡이 끝난 시각이 되어
+        # 오래된 상태가 새것처럼 보인다
+        name="m5s-status-age-ignores-checked-at",
+        path="src/remote_ci_monitor/release_state.py",
+        old='MEASURED_KEY: dict[str, str] = {"status.json": "checked_at"}',
+        new="MEASURED_KEY: dict[str, str] = {}",
+        tests=(
+            "tests/test_release_state.py::"
+            "test_status_is_the_latest_status_json_aged_from_checked_at",
+        ),
+    ),
     # ── M5q PR A — 클라이언트가 서버 버전을 따라간다 (docs/m5q-workplan.md §6) ──
     Mutant(
         # 받은 바이트의 해시를 안 본다 — 깨지거나 바뀐 wheel 이 캐시에 들어가 실행된다(결정 157)

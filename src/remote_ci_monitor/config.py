@@ -196,7 +196,9 @@ class DisplaySection:
 
 # ── 릴리스 프로파일(스토어 탭) — docs/release-contract.md §1 ─────────────────
 
-RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version")
+#: 역할 이름. 앞 셋만 필수이고 나머지는 선택이다. `status`(두 스토어의 심사 상태)와 `golive`
+#: (사람이 요청한 출시)는 M5s §4.4 · §4.5 에서 더했다.
+RELEASE_ROLES = ("plan", "upload", "review", "gate", "qa", "dev", "version", "status", "golive")
 RELEASE_REQUIRED_ROLES = ("plan", "upload", "review")
 RELEASE_SECRET_KINDS = ("value", "file", "dir")
 RELEASE_VERIFY_KINDS = ("asc", "play", "github", "keystore", "none")
