@@ -1336,6 +1336,16 @@ def test_s3_on_linux_linger_comes_before_the_start(cfg, tmp_path):
     assert "user manager" in lines[linger] and lines[linger].startswith("first")
 
 
+def test_s5_a_worker_puts_the_token_in_before_starting_the_service(cfg, tmp_path):
+    # B-E9: 워커는 토큰을 넣고 → 서비스를 시작한다
+    fake = Fake()
+    assert go(fake, *WORKER_ARGV) == 0
+    err = fake.err.getvalue()
+    assert err.index("token:") < err.index("next — install and start")
+    last = _lines(fake)[-1]
+    assert last.index("token") < last.index("start the service"), last
+
+
 def test_s6_the_systemd_worker_unit_logs_to_its_label_and_sets_home(cfg, home, tmp_path):
     # B-E13 · A-E9: 서버 유닛과 같은 방식 — 라벨 로그 · HOME · setup 이 썼다는 머리 주석
     assert go(Fake(platform="linux"), *WORKER_ARGV) == 0

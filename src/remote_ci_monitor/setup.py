@@ -931,6 +931,11 @@ def _report(plan: Plan, world: World) -> None:
     out.flush()
     for w in plan.warnings:
         err.write(f"warning: {w}\n")
+    # 워커는 토큰을 넣은 뒤에 시작한다 — 토큰 없이 시작한 워커는 거절당하며 재시작을 되풀이한다
+    # (P5 B-E9). 코디네이터의 토큰은 서버가 돈 뒤에 만든다
+    token_first = plan.role == dc.ROLE_WORKER
+    if plan.tokens and token_first:
+        _tokens(plan, err)
     if plan.service is not None and plan.installed is not None and plan.manager is not None:
         err.write("next — install and start the service yourself (setup registers nothing):\n")
         if plan.manager == core.SYSTEMD:
@@ -955,23 +960,32 @@ def _report(plan: Plan, world: World) -> None:
                 plan.manager, staged=plan.service, installed=plan.installed, label=plan.label or ""
             ):
                 err.write(f"  {line}\n")
-    if plan.tokens:
-        if plan.role in core.SERVER_ROLES:
-            err.write("tokens — once the server runs, with the same build as the service:\n")
-        else:
-            err.write("token:\n")
-        for line in plan.tokens:
-            err.write(f"  {line}\n")
+    if plan.tokens and not token_first:
+        _tokens(plan, err)
     err.write("advice — checks that need no server (they do not change the exit code):\n")
     for line in advice(plan, world):
         err.write(f"{line}\n")
     if plan.role == dc.ROLE_CLIENT:
         err.write(f"then: add your token and run `{core.doctor_command(plan.role)}`\n")
+    elif token_first:
+        err.write(
+            "then: put the worker token in, start the service, and run "
+            f"`{core.doctor_command(plan.role)}`\n"
+        )
     else:
         err.write(
             f"then: start the service, add a token, and run `{core.doctor_command(plan.role)}`\n"
         )
     err.flush()
+
+
+def _tokens(plan: Plan, err: TextIO) -> None:
+    if plan.role in core.SERVER_ROLES:
+        err.write("tokens — once the server runs, with the same build as the service:\n")
+    else:
+        err.write("token:\n")
+    for line in plan.tokens:
+        err.write(f"  {line}\n")
 
 
 # ── 진입점 ───────────────────────────────────────────────────────────────────
