@@ -4531,3 +4531,48 @@ def test_x_ctrlc_interrupting_doctor_stops_the_running_probes(
     code, out, err = worker.text(capsys)
     assert gone(pidfile), "the probe outlived Ctrl-C"
     assert code == 130 and "Traceback" not in err, (code, err)
+
+
+# ── P6 GAP X-linger: linger 행은 사용자 유닛에만, 사용자를 모르면 모름 ─────────────────
+
+
+def systemd_worker_unit(where: Path, cfg: Path, svcbin: Path) -> Path:
+    where.mkdir(parents=True, exist_ok=True)
+    p = where / "rcm-worker.service"
+    p.write_text(
+        f"[Service]\nExecStart=/x/rcm worker --config {cfg}\n"
+        f"Environment=PATH={svcbin}:/usr/bin:/bin\n"
+    )
+    return p
+
+
+@pytest.mark.parametrize("place", ["user-unit", "system-unit"])
+def test_x_linger_row_is_for_user_units_only(worker, env, srv, svcbin, monkeypatch, capsys, place):
+    """linger 는 systemd **사용자** 유닛이 로그아웃 뒤에도 돌기 위한 것이다 — 시스템 유닛에는 그
+    행이 없다(P6 GAP X-linger)."""
+    monkeypatch.setattr(doctor, "PLATFORM", "linux")
+    cfg = worker_toml(env, srv.url)
+    home = env / "home"
+    where = home / ".config" / "systemd" / "user" if place == "user-unit" else env / "etc-units"
+    sf = systemd_worker_unit(where, cfg, svcbin)
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    names = [r["name"] for r in doc["rcm_requirements"]]
+    assert ("linger" in names) == (place == "user-unit"), names
+
+
+def test_x_linger_without_a_known_user_is_unknown(worker, env, srv, svcbin, monkeypatch, capsys):
+    """사용자 유닛인데 셸에 USER(와 LOGNAME)가 없으면 linger 를 잴 사용자를 모른다 — 행을 빼지
+    않고 모름(종료 3)이다."""
+    monkeypatch.setattr(doctor, "PLATFORM", "linux")
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    cfg = worker_toml(env, srv.url)
+    sf = systemd_worker_unit(env / "home" / ".config" / "systemd" / "user", cfg, svcbin)
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    linger = [r for r in doc["rcm_requirements"] if r["name"] == "linger"]
+    assert linger and linger[0]["state"] == "unknown", doc["rcm_requirements"]
+    assert code == 3, doc

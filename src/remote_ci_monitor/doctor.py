@@ -303,10 +303,17 @@ def sqlite_requirement() -> dict[str, Any]:
     return requirement("sqlite", "ok", shown, "the coordinator")
 
 
-def linger_requirement(user: str | None) -> dict[str, Any] | None:
-    """Linux 사용자 유닛은 로그아웃 뒤에도 돌려면 linger 가 켜져 있어야 한다."""
+def linger_requirement(user: str | None) -> dict[str, Any]:
+    """Linux 사용자 유닛은 로그아웃 뒤에도 돌려면 linger 가 켜져 있어야 한다. 사용자를 모르면 행을
+    빼지 않고 모름이다(P6 GAP X-linger)."""
     if not user:
-        return None
+        return requirement(
+            "linger",
+            "unknown",
+            "cannot tell which user runs the service (USER is not set) — run rcm doctor as that "
+            "user",
+            "a systemd user service",
+        )
     if Path(f"/var/lib/systemd/linger/{user}").exists():
         return requirement("linger", "ok", "enabled", "a systemd user service")
     return requirement(
@@ -1902,10 +1909,10 @@ class _Run:
         if PLATFORM.startswith("darwin"):
             self.requirements.append(local_network_requirement())
             self.requirements.append(sleep_requirement())
-        elif self._service_file is not None and self._service_file.manager == dc.SYSTEMD:
-            linger = linger_requirement(self.ctx.environ.get("USER"))
-            if linger is not None:
-                self.requirements.append(linger)
+        elif self._service_file is not None and self._service_file.user_unit:
+            # linger 는 사용자 유닛의 것이다 — 시스템 유닛에는 없다(P6 GAP X-linger)
+            user = self.ctx.environ.get("USER") or self.ctx.environ.get("LOGNAME")
+            self.requirements.append(linger_requirement(user or None))
 
     def repo_reach(
         self, repo: Any, git: str | None, env: Mapping[str, str]
