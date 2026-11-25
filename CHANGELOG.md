@@ -130,6 +130,17 @@ of a key bumps that number and is listed here.
   server text and `[[tools]]` lose (or refuse) line separators and bidirectional controls as well
   as control characters.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`rcm doctor` never runs a service Python that is a Command Line Tools shim, and Ctrl-C leaves
+  no `git` behind.** A service started with `/usr/bin/python3` on a Mac without the tools fails
+  the `service python` row (`missing (needs Command Line Tools)`) instead of opening the install
+  dialog. Ctrl-C during `git ls-remote`, `git --version` or the service Python's measurement stops
+  them with their helpers and exits 130. A systemd `--service-file` that is neither in a user
+  unit place nor in `/etc/systemd/system` gets an `unknown` `linger` row instead of none, and a
+  closed stderr no longer turns the exit code into 120. `[[tools]]` text with a control character at its start or
+  end (`\r`, a newline, a tab) now stops the server from starting, as one in the middle already
+  did. The `server: found …` line and the "several rcm servers" messages of every command clean
+  the name and address found on the network to one line.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ## [0.10.0] - 2026-11-23
 

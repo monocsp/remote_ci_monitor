@@ -201,9 +201,11 @@ once more in your shell and marks the presets whose result differs.
 rcm's own needs are rows of their own: Python 3.11.4+ (the `python` row is the Python that ran
 `rcm doctor`; when the service file starts rcm with another Python — a `python3.x -m
 remote_ci_monitor.cli` command, or the `#!` line of its `rcm` script — a `service python` row
-measures that one in the service environment, and is `unknown` when it cannot be run); git, when a `git_ref` preset comes to this
-machine (2.31+ with `token_file`); every `[[repos]]` entry reachable with `git ls-remote` (a FAIL,
-since `git_ref` jobs cannot run without it); for a worker, the repository of each `git_ref` preset
+measures that one in the service environment, and is `unknown` when it cannot be run; a macOS
+Command Line Tools shim such as `/usr/bin/python3` without the tools installed is not run, as it
+would open the install dialog, and the row fails with `missing (needs Command Line Tools)`);
+git, when a `git_ref` preset comes to this machine (2.31+ with `token_file`); every `[[repos]]`
+entry reachable with `git ls-remote` (a FAIL, since `git_ref` jobs cannot run without it); for a worker, the repository of each `git_ref` preset
 in its `[[repos]]` (a FAIL naming the repository, else the job fails with `repo_missing`); the host
 sampler's commands on the service `PATH`; and a warning when the rcm install's own `bin` folder
 is on that `PATH`. A `[[repos]]` entry with `token_file` is checked the way the worker calls git,
@@ -215,7 +217,8 @@ that runs past its time limit is stopped with its whole process group, so no cre
 `git-remote-https` is left behind. On macOS it also reminds you of Local Network permission and
 of keeping the machine awake; rcm checks neither. On Linux a systemd user unit gets a `linger`
 row (`loginctl enable-linger`); a system unit does not, and when neither `USER` nor `LOGNAME` is
-set the row is `unknown`.
+set the row is `unknown`. A `--service-file` outside both the user unit places and
+`/etc/systemd/system` may or may not be a user unit, so its `linger` row is `unknown` too.
 
 | exit | meaning |
 |---|---|
@@ -231,7 +234,8 @@ reloaded the config on disk, no service file for a server role, a system service
 does not know, and a service Python rcm cannot run. The exit code stays the verdict when the
 output cannot be written: `rcm doctor | head -1` ends quietly, and on a terminal that is not
 UTF-8 the text report replaces the characters it cannot print while `--json` writes them as
-`\uXXXX`. Ctrl-C stops the probes that are running and exits 130.
+`\uXXXX`; a closed stderr drops the usage and could-not-decide lines quietly. Ctrl-C stops the
+probes, the `git` and the service Python that are running, with their helpers, and exits 130.
 
 What it never does: it sends the server only read requests (no registration, no capability
 report — the server's judgement stays the server's), opens no database, runs no install hint and never uses
