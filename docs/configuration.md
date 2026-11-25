@@ -1518,10 +1518,11 @@ The verdict, worker by worker — the first row that applies is the answer:
 | `fingerprint_unknown` | unknown | the preset has `checks` and the fingerprint is unknown |
 | `ok` | eligible | — |
 
-Two more codes come from `local_only` (below) and are shown before any of these: `local_only`
-(ineligible) on a remote worker for a `local_only` preset, and `check_local_only` (ineligible,
-with the check's name) on a remote worker for a preset whose `checks` names a `local_only` check
-that has not passed there — that check can never run there, so the preset is not "pending".
+Two more codes come from `local_only` (below). `local_only` (ineligible) is shown first, before
+any row of this table, on a remote worker for a `local_only` preset. `check_local_only`
+(ineligible, with the check's name) replaces `check_needed` on a remote worker for a preset whose
+`checks` names a `local_only` check that has not passed there — that check can never run there, so
+the preset is not "pending".
 
 `env_passthrough` names the worker's environment lacks are shown but do not block: an empty value
 can be intended.
@@ -1634,6 +1635,7 @@ local lanes (local_only) — machine mbp cannot take it`), `--pool` names a pool
 `no_capable_machine`, or `tool_missing` for the last case. This check runs before joining an
 identical job and before superseding older ones. A preset whose check has not passed (or failed)
 on `@local` is not refused: the job waits with `check pending` or `check failed`, as any other.
+Nor is one submitted while `@local` has no report yet, or a stale one.
 
 **Adding the mark later.** After `rcm reload` or a restart that adds `local_only`, jobs already
 waiting are placed again: one pinned to a remote worker, or queued in another pool, shows
