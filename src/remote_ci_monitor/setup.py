@@ -397,6 +397,14 @@ def _where(args: argparse.Namespace, world: World, role: str, **given: Any) -> c
         )
     except core.SetupValueError as e:
         raise SetupUsage(str(e)) from None
+    place = core.install_place_of(found.config, home, fold_case=fold)
+    if place is not None:
+        # 설정 파일도 서비스 파일과 같은 규칙이다 — 서비스 관리자가 읽는 자리에 쓰지 않는다(P3 3라운드
+        # v1-1). 그 자리의 운영 서비스 파일을 `--config --force config` 로 덮을 수 있었다
+        raise SetupUsage(
+            f"--config {found.config} is inside {place}, an install place the service manager "
+            "reads — setup writes no config there; pick a config path outside it"
+        )
     return found
 
 
