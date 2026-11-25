@@ -504,11 +504,9 @@ class CapabilitiesMixin:
         placement: str | None = None,
     ) -> str | None:
         """`local_only` 프리셋의 잡을 로컬 레인이 **설정 때문에** 못 받는 이유(사람용 문장).
-        받을 수 있으면 None. 판정(도구 · 점검)과 살아 있음은 보지 않는다."""
-        name = preset.name
-        head = f"preset '{name}' runs only on this server's local lanes (local_only)"
-        if target is not None and target != LOCAL:
-            return f"{head} — machine {target} cannot take it"
+        받을 수 있으면 None. 판정(도구 · 점검)과 살아 있음은 보지 않는다. 원격 워커를 지정한
+        잡은 여기서 보지 않는다 — 원격 제외 한 줄(`machines_for`)이 그 후보를 비운다."""
+        head = _local_only_head(preset)
         if int(self.config.server.lanes) < 1:
             return f"{head} — this server has no local lanes (lanes = 0)"
         if target is not None:
@@ -545,8 +543,12 @@ class CapabilitiesMixin:
         views = self.machine_views(now)
         found = self.machines_for(preset, views, target=target, pool=pool, placement=placement)
         if not found:
-            why = self._local_gap(preset, target=target, pool=pool, placement=placement)
-            return REASON_NO_CAPABLE_MACHINE, why or f"preset '{preset.name}' has no machine"
+            if target is not None and target != LOCAL:
+                why = f"{_local_only_head(preset)} — machine {target} cannot take it"
+            else:
+                gap = self._local_gap(preset, target=target, pool=pool, placement=placement)
+                why = gap or f"{_local_only_head(preset)} — no local lane can take it"
+            return REASON_NO_CAPABLE_MACHINE, why
         if placement != PLACEMENT_CAPABLE or target is not None:
             return None
         local = found[0]
@@ -556,8 +558,7 @@ class CapabilitiesMixin:
             tools = ", ".join(str(t) for t in v.detail.get("tools") or [])
             return (
                 cap.CODE_TOOL_MISSING,
-                f"preset '{preset.name}' runs only on this server's local lanes (local_only) — "
-                f"they miss the required tool(s): {tools}",
+                f"{_local_only_head(preset)} — they miss the required tool(s): {tools}",
             )
         return None
 
@@ -1188,6 +1189,11 @@ class CapabilitiesMixin:
                 from remote_ci_monitor.server import _safe
 
                 self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
+
+
+def _local_only_head(preset: Preset) -> str:
+    """`local_only` 거절 문장의 앞머리 — 409 의 사람용 문장이 모두 이것으로 시작한다."""
+    return f"preset '{preset.name}' runs only on this server's local lanes (local_only)"
 
 
 def _previous_value(
