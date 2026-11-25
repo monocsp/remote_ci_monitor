@@ -2418,7 +2418,7 @@ MUTANTS = (
         # 부른다(P3 1라운드 MED, 검증자 1 #3)
         name="doctor-local-lane-unmeasured-ready",
         path="src/remote_ci_monitor/doctor.py",
-        old="            if not isinstance(got, dict) and p.requires and row.counts:\n",
+        old="            if got is None and p.requires and row.counts:\n",
         new="            if False:\n",
         tests=(
             "tests/test_doctor_cli.py::"
@@ -2456,6 +2456,41 @@ MUTANTS = (
         tests=(
             "tests/test_doctor_cli.py::"
             "test_a_server_answer_of_the_wrong_shape_is_named_and_exits_3",
+        ),
+    ),
+    Mutant(
+        # 필수 칸 검사를 끈다 — `{}` · 남의 서비스의 `{"status":"ok"}` · `version` 없는 health 를
+        # rcm 서버의 답으로 믿고 0 이나 1 로 끝낸다. 생성형 표가 빨개진다(P3 3라운드 근본 원인)
+        name="doctor-required-key-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="                if sub.required:\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_required_fact_the_server_did_not_give_is_never_exit_0_or_1",
+        ),
+    ),
+    Mutant(
+        # 서비스 파일 후보를 못 읽어 고른 파일이 없는데도 기본 PATH 를 짐작해 잰다 — 빠진 도구가
+        # 종료 1 이 된다. 순서 표가 빨개진다(P3 3라운드 HIGH)
+        name="doctor-unreadable-candidate-path-guessed",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        elif skipped:\n",
+        new="        elif False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_service_file_leaves_the_path_unknown_in_every_order",
+        ),
+    ),
+    Mutant(
+        # `placement` 없는 옛 서버의 프리셋을 `pool` 로 짐작한다 — 빠진 도구가 종료 1 이 된다(TD5,
+        # 메인 세션 결정: 모름 · 종료 3)
+        name="doctor-older-server-read-as-pool",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if placement is None:\n",
+        new='    if placement is None:\n        placement = "pool"\n    if False:\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_td5_an_older_server_with_a_missing_tool_exits_3_not_1",
         ),
     ),
     Mutant(
