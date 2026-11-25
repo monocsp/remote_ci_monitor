@@ -70,8 +70,10 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **macOS Command Line Tools shims are no longer run when the tools are not installed.** A file
   directly in `/usr/bin/` that links `libxcselect` counts as missing (`needs Command Line Tools`)
-  in the job's `requires` check, the server's tool measurements, `rcm check` and worker probes,
-  instead of opening the install dialog on a headless service.
+  in the job's `requires` check, the server's tool measurements, `rcm check` (its `git` row too),
+  `rcm worker --check` and worker probes, instead of opening the install dialog on a headless
+  service. `rcm doctor` runs `git ls-remote` with the service `PATH`'s git in the service
+  environment.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ## [0.10.0] - 2026-11-23

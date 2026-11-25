@@ -30,6 +30,7 @@ import tempfile
 import time
 import urllib.parse
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -4318,8 +4319,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             if service_row is not None:
                 rows.append(service_row)
             if cfg.repos:
-                git = shutil.which("git")
-                rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+                rows.append(_git_tool_row()[0])
             for repo in cfg.repos:
                 if repo.release is not None:
                     rows.append(_release_row(cfg, repo.name, repo.release))
@@ -4674,17 +4674,49 @@ def _confirm_found_server(url: str) -> bool:
     return True
 
 
-def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
-    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None."""
+def _git_tool_row() -> tuple[tuple[str, bool | None, str], str | None]:
+    """`rcm check` · `rcm worker --check` 의 git 행과 찾은 git(없으면 None).
+
+    `shutil.which` 가 아니라 `runner.find_tool` 이다 — CLT 없는 Mac 의 `/usr/bin/git` shim 은
+    실행하면 설치 대화상자를 띄우므로 「없음(CLT 필요)」으로 센다(doctor · 서버 판정과 같은 규칙).
+    """
+    from remote_ci_monitor import runner
+
+    path = os.environ.get("PATH", "")
+    git = runner.find_tool("git", path)
+    if git is not None:
+        return ("git", True, git), git
+    note = runner.missing_note("git", {"PATH": path})
+    return (
+        "git",
+        False,
+        f"{note} (git_ref presets)" if note else "not on PATH (git_ref presets)",
+    ), None
+
+
+def _ls_remote_problem(
+    url: str,
+    timeout: float = 10.0,
+    *,
+    git: str = "git",
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None.
+
+    `git` 은 부를 실행 파일, `env` 는 그 환경이다. doctor 는 서비스 PATH 에서 찾은 git 과 서비스
+    환경을 넘긴다 — 셸의 git · 셸의 변수로 재면 서비스에서는 다른 답이 나온다. 주지 않으면 이
+    프로세스의 것이다(`rcm worker --check`). 부르는 쪽이 shim 을 이미 걸렀다(`runner.find_tool`).
+    """
     import subprocess
 
+    base = os.environ if env is None else env
     try:
         proc = subprocess.run(
-            ["git", "ls-remote", "--exit-code", url, "HEAD"],
+            [git, "ls-remote", "--exit-code", url, "HEAD"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={**base, "GIT_TERMINAL_PROMPT": "0"},
         )
     except subprocess.TimeoutExpired:
         return f"unreachable: timed out after {int(timeout)}s"
@@ -4733,12 +4765,12 @@ def _worker_check(cfg: Any, client: Any) -> int:
         rows.append(("token", False, e.message if e.status else f"cannot reach {client.server}"))
     rows.append(("pool", True, f"{cfg.pool} · lanes {cfg.lanes}"))
     if cfg.repos:
-        git = shutil.which("git")
-        rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+        git_row, git = _git_tool_row()
+        rows.append(git_row)
         details: list[str] = []
         all_ok = git is not None
         for r in cfg.repos:
-            problem = _ls_remote_problem(r.url) if git else "git missing"
+            problem = _ls_remote_problem(r.url, git=git) if git else "git missing"
             all_ok = all_ok and problem is None
             details.append(f"{r.name} ({'ok' if problem is None else problem})")
         rows.append(("repos", all_ok, " · ".join(details)))
@@ -4848,7 +4880,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ctx = doctor.Context(
         environ=os.environ,
         discover=lambda timeout: discover(timeout=timeout),
-        ls_remote=lambda url: _ls_remote_problem(url),
+        ls_remote=lambda url, git, env: _ls_remote_problem(url, git=git, env=env),
         worker_service_path=WORKER_SERVICE_PATH,
     )
     return doctor.main(args, ctx)

@@ -185,8 +185,10 @@ macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other to
 forward to the Command Line Tools open an install dialog when the tools are not installed. rcm
 treats a file directly in `/usr/bin/` that links `libxcselect` as such a shim and, when
 `xcode-select -p` fails, reports it as `missing (needs Command Line Tools)` without running it —
-in `rcm doctor`, in the job's `requires` check, in the server's tool rows and in worker probes
-alike. `/usr/bin/java` and the other Java stubs are not detected this way.
+in `rcm doctor`, in the job's `requires` check, in the server's tool rows, in worker probes and
+in the `git` row of `rcm check` and `rcm worker --check` alike; `git ls-remote` for `[[repos]]` is
+then not run. `rcm doctor` runs `git ls-remote` with the git on the service `PATH`, in the service
+environment, not your shell's. `/usr/bin/java` and the other Java stubs are not detected this way.
 
 A worker sends the same host facts (OS version, real arch and Rosetta, container, root, package
 manager, Python) when it registers and with each capability report. The server keeps them in

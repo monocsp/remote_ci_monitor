@@ -525,7 +525,8 @@ class Context:
 
     environ: Mapping[str, str]
     discover: Callable[[float], list[Any]]
-    ls_remote: Callable[[str], str | None]
+    #: (저장소 URL, git 실행 파일, 환경) → 문제 사유 또는 None — 서비스 PATH 의 git, 서비스 환경
+    ls_remote: Callable[[str, str, Mapping[str, str]], str | None]
     worker_service_path: str
     out: Callable[[str], None] = print
     err: Callable[[str], None] = lambda m: print(m, file=sys.stderr)
@@ -843,10 +844,17 @@ class _Run:
                     requirement("repos", "info", "not checked (--offline)", "git_ref presets")
                 )
             else:
-                # 닿지 못하는 저장소의 git_ref 일은 받을 수 없다 — FAIL, 종료 1(위임 결정 4)
+                # 닿지 못하는 저장소의 git_ref 일은 받을 수 없다 — FAIL, 종료 1(위임 결정 4).
+                # 서비스 PATH 의 git 을 서비스 환경으로 돌린다. 막힌 shim 이면 돌리지 않는다
+                # (실행하면 CLT 설치 창이 뜬다) — git 행이 그 사연을 보인다
+                git = runner.find_tool("git", env.get("PATH", "")) if self.path_known else None
                 details, bad = [], False
                 for r in cfg.repos:
-                    problem = self.ctx.ls_remote(r.url)
+                    if git is None:
+                        why = "git missing" if self.path_known else "the service PATH is unknown"
+                        problem: str | None = why
+                    else:
+                        problem = self.ctx.ls_remote(r.url, git, env)
                     bad = bad or problem is not None
                     details.append(f"{r.name} ({'ok' if problem is None else problem})")
                 state = "fail" if bad else "ok"
