@@ -5442,7 +5442,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             idle_pools = []
         try:
             capacity: dict[str, Any] | None = self.capacity()
-        except Exception:  # noqa: BLE001 — 정보 칸이다. 못 세면 null(모름)이지 0 이 아니다
+        except Exception as e:  # noqa: BLE001 — 정보 칸이다. 못 세면 null(모름)이지 0 이 아니다
+            # 왜 못 셌는지는 서버 로그에 남긴다 — `rcm check` 는 null 을 「못 셌다」로 그린다
+            self.record_error(f"capacity: {type(e).__name__}", detail=_safe(str(e)))
             capacity = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {

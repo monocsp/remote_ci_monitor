@@ -3927,13 +3927,27 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
 NO_LOCAL_LANES_TEXT = "this machine runs no jobs (lanes = 0 — dispatch only)"
 
 
-def _capacity_row(health: Any) -> tuple[str, bool | None, str] | None:
+#: 서버가 `capacity` 를 싣되 null 로 보냈다 — 세다가 실패했다(모름)
+CAPACITY_UNKNOWN_TEXT = "server could not count capacity"
+
+
+def _capacity_row(health: Any, *, has_presets: bool) -> tuple[str, bool | None, str] | None:
     """`capacity` — 지금 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(`/api/health`).
 
     하나도 없으면 FAIL, 일부만 없으면 warn 으로 그 프리셋을 댄다 — 어느 머신도 못 돌리는 배포
     프리셋은 정상일 수 있다. 프리셋이 0개이거나 옛 서버(키 없음)면 행을 그리지 않는다(M5t-a
-    결정 243 · §4.2)."""
-    cap = health.get("capacity") if isinstance(health, dict) else None
+    결정 243 · §4.2).
+
+    키가 있는데 null 이면 서버가 세다가 실패한 것이다. 못 모은 칸은 실패로 그린다(PLAN.md
+    「rcm check」) — 분배 전용(`lanes = 0`)이면 이 칸이 「갈 곳이 있나」의 유일한 답이라 FAIL,
+    레인이 있는 서버는 로컬 레인이 받으므로 warn 이다. 키 없음(옛 서버)과는 구별한다."""
+    if not isinstance(health, dict) or "capacity" not in health:
+        return None
+    cap = health.get("capacity")
+    if cap is None:
+        if not has_presets:
+            return None
+        return ("capacity", False if health.get("lanes") == 0 else None, CAPACITY_UNKNOWN_TEXT)
     if not isinstance(cap, dict):
         return None
     total, reachable = cap.get("total"), cap.get("reachable")
@@ -4331,7 +4345,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
-            capacity_row = _capacity_row(health_body)
+            capacity_row = _capacity_row(health_body, has_presets=bool(doc.get("presets")))
             if capacity_row is not None:
                 rows.append(capacity_row)
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))

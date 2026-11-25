@@ -478,6 +478,48 @@ def test_tl14_rcm_check_lists_the_presets_no_machine_can_take_as_a_warning(
     assert "gate," not in detail and not detail.endswith("gate"), detail
 
 
+def _capacity_breaks(s: M5nServer, monkeypatch) -> None:
+    """서버가 `capacity` 를 못 센다 — `/api/health` 는 키를 싣되 null 이다(모름)."""
+
+    def broken() -> dict[str, Any]:
+        raise RuntimeError("test: cannot count")
+
+    monkeypatch.setattr(s.app, "capacity", broken)
+
+
+@pytest.mark.parametrize("lanes", [0, 1])
+def test_tl3_rcm_check_draws_capacity_unknown_when_the_server_could_not_count(
+    tmp_path, home, monkeypatch, capsys, lanes
+):
+    """못 모은 칸은 실패로 그린다 — 빼거나 0 으로 하지 않는다(PLAN.md 「rcm check」). 분배 전용
+    서버는 capacity 가 유일한 「갈 곳이 있나」 신호라 FAIL, 레인이 있는 서버는 warn 이다."""
+    s = zero(tmp_path / f"lanes{lanes}", lanes=lanes)
+    try:
+        _capacity_breaks(s, monkeypatch)
+        assert health(s)[1]["capacity"] is None
+        code, found = check(s, monkeypatch, capsys)
+        assert "capacity" in found, found
+        grade, detail = found["capacity"]
+        assert detail == "server could not count capacity", detail
+        assert grade == ("FAIL" if lanes == 0 else "warn"), found["capacity"]
+        if lanes == 0:
+            assert code == 1
+        # 서버 로그에 한 줄 남긴다 — 왜 못 셌는지는 로그에서 찾는다
+        assert "capacity" in (s.app.last_error or ""), s.app.last_error
+    finally:
+        s.close()
+
+
+def test_tl3_an_old_server_without_the_capacity_key_draws_no_row():
+    from remote_ci_monitor.cli import _capacity_row
+
+    # 키가 아예 없으면 옛 서버다 — 행이 없다. 키가 null 이면 서버가 못 센 것이다
+    assert _capacity_row({"lanes": 0}, has_presets=True) is None
+    assert _capacity_row({"lanes": 0, "capacity": None}, has_presets=False) is None
+    row = _capacity_row({"lanes": 0, "capacity": None}, has_presets=True)
+    assert row == ("capacity", False, "server could not count capacity"), row
+
+
 def test_tl17_rcm_check_draws_no_capacity_row_without_presets(tmp_path, home, monkeypatch, capsys):
     s = zero(tmp_path / "none", presets="")
     try:
