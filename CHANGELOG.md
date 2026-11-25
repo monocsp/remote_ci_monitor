@@ -54,7 +54,9 @@ of a key bumps that number and is listed here.
 - **Workers report host facts, and `rcm machines --machine ID` shows them.** OS version, real
   arch and Rosetta, container, root, package manager and Python come with registration and every
   capability report, are kept in memory only, and appear in `GET /api/machines` (new `host` key)
-  only for a request with a token.
+  only for a request with a token. The server keeps only true or false for Rosetta, container
+  and root, and a string of at most 64 characters without control characters for the rest;
+  anything else, and what the worker could not tell, is `null`.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`rcm worker --check` shows a `version` row and a last line with the number of missing
   tools.** A different server version is a warning when registering will follow it and FAIL when

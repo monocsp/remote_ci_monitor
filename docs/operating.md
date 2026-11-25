@@ -170,8 +170,8 @@ ones you do not know.
 |---|---|
 | `doctor_version` · `role` · `exit` | `1`, the role measured, the exit code |
 | `measured_in` | `clean_service_env` (worker), `server_service_env` (coordinator-worker: the server's own measurement), `none` |
-| `host` | `os` `os_release` `os_like` `arch` `machine` `rosetta` `container` `root` `package_manager` `python` `rcm` |
-| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` `generation` `version` |
+| `host` | `os` `os_release` `os_like` `arch` `machine` `rosetta` `container` `root` `package_manager` `python` `rcm`; `rosetta` and `container` are `null` when rcm could not tell |
+| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` (`ok`, `not ok` when the server answers `ok: false`, `unreachable`, `token refused`, `not confirmed`, `—`) `generation` `version` |
 | `service` | `file` `manager` `path` `env_names` (names only); `null` for `client` |
 | `shell` | `{"path"}` with `--shell-path`, else `null` |
 | `rcm_requirements` | rows of `name` `state` (`ok` `warn` `fail` `info`) `detail` `needed_for` `install` |
