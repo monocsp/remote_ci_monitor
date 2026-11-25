@@ -330,14 +330,22 @@ class _Ask:
 
     def number(self, question: str, default: int, low: int, high: int) -> int:
         while True:
-            answer = self.line(question, str(default))
-            if answer.isdigit() and low <= int(answer) <= high:
-                return int(answer)
+            value = _whole_number(self.line(question, str(default)))
+            if value is not None and low <= value <= high:
+                return value
             self.say(f"a number from {low} to {high}")
 
     def say(self, text: str) -> None:
         self.err.write(f"  {text}\n")
         self.err.flush()
+
+
+def _whole_number(answer: str) -> int | None:
+    """ASCII 숫자만으로 된 답의 값. `"²".isdigit()` 은 참인데 `int("²")` 는 ValueError 이고,
+    `int("١")` 은 1 이다 — 사람이 친 숫자는 0-9 만 받는다(P3 v2-3)."""
+    if answer.isascii() and answer.isdecimal():
+        return int(answer)
+    return None
 
 
 def _ask_role(ask: _Ask) -> str:
@@ -346,8 +354,9 @@ def _ask_role(ask: _Ask) -> str:
         ask.say(f"{i}) {role} — {ROLE_HELP[role]}")
     while True:
         answer = ask.line("role")
-        if answer.isdigit() and 1 <= int(answer) <= len(dc.ROLES):
-            return dc.ROLES[int(answer) - 1]
+        index = _whole_number(answer)
+        if index is not None and 1 <= index <= len(dc.ROLES):
+            return dc.ROLES[index - 1]
         if answer in dc.ROLES:
             return answer
         ask.say(f"one of 1-{len(dc.ROLES)} or a role name")
@@ -362,8 +371,9 @@ def _ask_bind(ask: _Ask, world: World) -> str:
     ask.say("or type an address of this machine")
     while True:
         answer = ask.line("bind", choices[0][0] if choices else None)
-        if answer.isdigit() and 1 <= int(answer) <= len(choices):
-            return choices[int(answer) - 1][0]
+        index = _whole_number(answer)
+        if index is not None and 1 <= index <= len(choices):
+            return choices[index - 1][0]
         if answer and world.is_local_address(answer):
             return answer
         ask.say(f"{answer or '(empty)'} is not an address of this machine")
@@ -422,9 +432,40 @@ def _abs(raw: str) -> Path:
     return Path(os.path.abspath(os.path.expanduser(raw)))
 
 
+#: 글자로 받는 옵션 — 설정 · 서비스 파일에 UTF-8 로 들어간다
+_TEXT_OPTIONS = (
+    "role",
+    "server",
+    "by",
+    "config",
+    "pool",
+    "label",
+    "service_file",
+    "data_dir",
+    "bind",
+)
+
+
+def _check_text(args: argparse.Namespace) -> None:
+    """UTF-8 이 아닌 인자(파이썬이 surrogate 로 받은 바이트)는 파일에 쓸 수 없다 — 쓰기 전에
+    사용법 오류로 멈춘다(P3 v2-10)."""
+    for name in _TEXT_OPTIONS:
+        value = getattr(args, name, None)
+        if not isinstance(value, str):
+            continue
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise SetupUsage(
+                f"--{name.replace('_', '-')} is not valid UTF-8 text — setup writes its files "
+                "in UTF-8"
+            ) from None
+
+
 def _plan(args: argparse.Namespace, world: World) -> Plan:
     from remote_ci_monitor.config import user_config_dir
 
+    _check_text(args)
     roles_here = existing_roles(os.environ)
     asking = not args.yes and world.interactive()
     ask = _Ask(world)
@@ -575,7 +616,14 @@ def _server(
     plan = Plan(role=role, config=path, label=label, warnings=warnings)
     plan.files.append(Planned(path, text.encode("utf-8"), 0o644, "config"))
     db = data_dir / DB_FILE
-    if db.exists():
+    try:
+        present = db.exists()
+    except OSError as e:  # 읽을 수 없는 폴더 — 있는지 모르면 쓰지 않는다(P3 v1-10)
+        raise SetupFailed(
+            f"cannot look into {data_dir}: {e.strerror or e} — choose a data_dir this user can "
+            "read (nothing was written)"
+        ) from e
+    if present:
         if not args.reuse_data_dir:
             raise SetupFailed(
                 f"{data_dir} already holds an rcm database ({DB_FILE}) — choose a new data_dir, "
@@ -817,21 +865,49 @@ def _report(plan: Plan, world: World) -> None:
 # ── 진입점 ───────────────────────────────────────────────────────────────────
 
 
+def _say(world: World, line: str) -> None:
+    """경계의 한 줄. 이 줄을 쓰다 또 터지면(닫힌 파이프) 조용히 넘어간다 — 종료 코드가 남는다."""
+    try:
+        world.stderr.write(f"{line}\n")
+        world.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _after(plan: Plan | None, written: bool) -> str:
+    """경계에서 멈췄을 때 디스크에 남은 것."""
+    if not written or plan is None:
+        return "nothing was written"
+    return "these files were written: " + ", ".join(str(f.path) for f in plan.files)
+
+
 def run(args: argparse.Namespace, world: World) -> int:
+    """setup 의 맨 바깥 경계. 예상 못 한 예외도 traceback 이 아니라 한 줄 · 종료 1 이고, Ctrl-C 는
+    어디서든 130 이다. 그 한 줄은 디스크에 남은 것을 말한다(P3 v2-3 · v2-11)."""
+    plan: Plan | None = None
+    written = False
     try:
         plan = _plan(args, world)
         _check_free(args, plan)
         _write(plan)
+        written = True
+        _report(plan, world)
     except SetupUsage as e:
-        world.stderr.write(f"rcm: {e}\n")
+        _say(world, f"rcm: {e}")
         return EXIT_USAGE
     except SetupFailed as e:
-        world.stderr.write(f"rcm: {e}\n")
+        _say(world, f"rcm: {e}")
         return EXIT_FAILED
     except KeyboardInterrupt:
-        world.stderr.write("\nrcm: interrupted — nothing was written\n")
+        _say(world, f"\nrcm: interrupted — {_after(plan, written)}")
         return EXIT_INTERRUPTED
-    _report(plan, world)
+    except Exception as e:  # noqa: BLE001 — setup 의 맨 바깥 경계
+        first = dc.clean_text((str(e).splitlines() or [""])[0], 200)
+        detail = f"{type(e).__name__}: {first}" if first else type(e).__name__
+        _say(
+            world, f"rcm: setup stopped on an unexpected error ({detail}) — {_after(plan, written)}"
+        )
+        return EXIT_FAILED
     return EXIT_OK
 
 
