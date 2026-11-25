@@ -390,6 +390,7 @@ itself.
 
 Some commands never follow, because they are the server or work without one: `rcm serve`,
 `rcm token`, `rcm init`, `rcm discover`, `rcm version`, `rcm skills` and `rcm gc --config …`.
+`rcm doctor` does not follow either: it measures what this install can do.
 `rcm worker` follows at its own moments, described in [remote workers](#remote-workers) below. A call with `--help` or `--version` always shows the installed rcm's help
 and version. The help of a command that only the server's version has appears once the installed
 rcm is upgraded.
