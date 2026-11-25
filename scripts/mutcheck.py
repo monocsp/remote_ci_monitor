@@ -2809,6 +2809,35 @@ MUTANTS = (
             "test_x_python_a_service_python_that_is_a_clt_shim_is_never_run",
         ),
     ),
+    Mutant(
+        # 시험의 운영 보호 가드가 루프백 이름으로 가는 8787 만 막는다(옛 규칙) — 운영 서버는
+        # 0.0.0.0 에 묶여 LAN 주소 · `.local` 이름으로도 닿는다(P6 GAP E7, batch 10 재확인 5)
+        name="test-guard-port-on-loopback-only",
+        path="tests/conftest.py",
+        old="    return isinstance(address, tuple) and len(address) >= 2 and address[1] == "
+        "PRODUCTION_PORT\n",
+        new="    return (\n"
+        "        isinstance(address, tuple)\n"
+        "        and len(address) >= 2\n"
+        "        and address[1] == PRODUCTION_PORT\n"
+        '        and address[0] in ("127.0.0.1", "::1", "localhost")\n'
+        "    )\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_production_guard_blocks_port_8787_on_any_address[192.168.0.10]",
+        ),
+    ),
+    Mutant(
+        # `rcm serve` 의 기동 점검이 git 을 `shutil.which` 로 찾는다 — CLT 없는 Mac 의 shim 을
+        # 있음으로 센다(P6 GAP R2, batch 10 재확인 6)
+        name="config-startup-git-shim-counted",
+        path="src/remote_ci_monitor/config.py",
+        old='        if runner.find_tool("git", path) is None:\n',
+        new='        if __import__("shutil").which("git", path=path) is None:\n',
+        tests=(
+            "tests/test_tool_shim.py::test_r2_server_startup_counts_a_blocked_git_shim_as_missing",
+        ),
+    ),
 )
 
 
