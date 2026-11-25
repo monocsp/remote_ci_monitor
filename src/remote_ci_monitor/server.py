@@ -101,6 +101,7 @@ from remote_ci_monitor.core.model import (
     PRIORITY_HIGH,
     QUEUED,
     REASON_NEEDS_ACTION,
+    REASON_NO_CAPABLE_MACHINE,
     SCHEDULED,
     SUCCEEDED,
     TIMED_OUT,
@@ -4325,6 +4326,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 raise ApiError(400, f"unknown machine {machine!r} — see rcm machines") from e
             except AmbiguousMachine as e:
                 raise ApiError(400, str(e)) from e
+            if view.id == LOCAL_WORKER and not self._has_local_lanes():
+                # 분배 전용(`lanes = 0`) — 「down」이 아니다. 기다려도 오지 않는다(결정 243)
+                raise ApiError(
+                    409,
+                    "this server has no local lanes (lanes = 0) — @local runs no jobs; "
+                    "send it to a worker or leave --machine out",
+                    error_code=REASON_NO_CAPABLE_MACHINE,
+                    machine=view.id,
+                )
             if not view.alive:
                 raise ApiError(
                     409,

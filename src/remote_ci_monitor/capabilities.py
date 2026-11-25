@@ -387,7 +387,12 @@ class CapabilitiesMixin:
         threading.Thread(target=run, name="rcm-measure", daemon=True).start()
 
     def measure_capabilities(self, environ: Mapping[str, str] | None = None) -> None:
-        """로컬 워커(`@local`)를 **이 프로세스의 환경**으로 잰다 — 기동 · reload · 주기(§4.2)."""
+        """로컬 워커(`@local`)를 **이 프로세스의 환경**으로 잰다 — 기동 · reload · 주기(§4.2).
+
+        로컬 레인이 없으면(`lanes = 0`) 재지 않는다 — 아무 잡도 돌리지 않는 머신의 도구를 잴
+        까닭이 없고, 잰 보고가 있으면 `@local` 이 「받을 수 있다」로 보인다(M5t-a §3 C6)."""
+        if not self._has_local_lanes():
+            return
         with self._measure_lock:
             self._measure_capabilities(environ)
 
@@ -578,11 +583,13 @@ class CapabilitiesMixin:
         """그 프리셋(그 잡)의 후보 머신. 배치 · ETA · 제출 · 점검 · `/worker/spec` · claim ·
         `/api/machines` 가 모두 이 결과를 쓰고 따로 거르지 않는다(docs/m5t-workplan.md §4.3).
 
-        정적인 조건만 본다 — `local_only`, 대상 머신, 풀, `local_accept_any`. `[server] lanes`
-        는 설정이 1 이상으로 막으므로 아직 보지 않는다(`lanes = 0` 은 M5t-a PR3 이 더한다).
-        살아 있음과 도구 판정은 보지 않는다(그것은 지금처럼 갈래 안에서 본다). `local_only` 가
+        정적인 조건만 본다 — `local_only`, 대상 머신, 풀, `[server] lanes`, `local_accept_any`.
+        살아 있음과 도구 판정은 보지 않는다(그것은 지금처럼 갈래 안에서 본다). 로컬 레인이 없으면
+        (`lanes = 0`) `@local` 은 어느 프리셋의 후보도 아니다(결정 243). 그 밖에 `local_only` 가
         아닌 프리셋은 받은 머신을 그대로 돌려준다. `target` · `pool` · `placement` 를 안 주면
         프리셋의 기본값이다(잡이 있으면 그 잡의 값을 준다)."""
+        if not self._has_local_lanes():
+            views = [v for v in views if v.kind != "local"]  # 분배 전용 — 로컬 레인이 없다
         if preset is None or not preset.local_only:
             return list(views)
         if target is not None:
@@ -591,6 +598,10 @@ class CapabilitiesMixin:
         if self._local_gap(preset, target=target, pool=pool, placement=placement) is not None:
             return []
         return views
+
+    def _has_local_lanes(self) -> bool:
+        """이 서버에 로컬 레인이 있나 — `lanes = 0` 은 분배 전용 코디네이터다(결정 243)."""
+        return int(self.config.server.lanes) > 0
 
     def _local_gap(
         self,
@@ -604,6 +615,8 @@ class CapabilitiesMixin:
         받을 수 있으면 None. 판정(도구 · 점검)과 살아 있음은 보지 않는다. 원격 워커를 지정한
         잡은 여기서 보지 않는다 — 원격 제외 한 줄(`machines_for`)이 그 후보를 비운다."""
         head = _local_only_head(preset)
+        if not self._has_local_lanes():
+            return f"{head} — this server has no local lanes (lanes = 0)"
         if target is not None:
             return None
         placement = preset.placement if placement is None else placement
@@ -629,8 +642,8 @@ class CapabilitiesMixin:
     ) -> tuple[str, str] | None:
         """`local_only` 제출을 거절할 이유 `(코드, 문장)` — 없으면 None(§4.3, TO16).
 
-        정적인 셋(원격 지정 · `local_accept_any = false` 인데 any-capable · 기본 풀이 아닌 풀)과
-        capable 갈래에서 `@local` 의 `tool_missing` 에만 409 다(넷째인 `lanes = 0` 은 PR3). 점검
+        정적인 넷(원격 지정 · `local_accept_any = false` 인데 any-capable · 기본 풀이 아닌 풀 ·
+        `lanes = 0`)과 capable 갈래에서 `@local` 의 `tool_missing` 에만 409 다. 점검
         판정 때문에 비거나 `@local` 의 보고가 없거나 낡은 경우는 큐에 든다(`_why_none` 이 이유를
         보인다). `local_only` 가 아니면 언제나 None."""
         if not preset.local_only:
@@ -729,7 +742,8 @@ class CapabilitiesMixin:
                 display_name=self.local_display_name(),
                 kind="local",
                 pool=DEFAULT_POOL,
-                alive=True,
+                # 로컬 레인이 없으면 잡을 받을 자리가 없다 — 살아 있지 않다(M5t-a §3 C5)
+                alive=self._has_local_lanes(),
                 report=self.report_of(LOCAL),
                 row=rows.get(LOCAL),
                 lanes=self.config.server.lanes,
@@ -778,7 +792,8 @@ class CapabilitiesMixin:
                     ),
                     "error_code": self._check_errors.get((view.id, name))
                     if reachable
-                    else CODE_LOCAL_ONLY,
+                    # 로컬 머신이 못 돌리는 것은 `local_only` 때문이 아니라 레인이 없어서다
+                    else (None if view.kind == "local" else CODE_LOCAL_ONLY),
                     # 「점검 필요」인데 스스로 안 걸린다 — 사람이 `rcm recheck` 해야 풀린다.
                     # 돌 수 없는 점검은 다시 걸어도 409 라 사람에게 시키지 않는다
                     "recheck_needed": reachable
@@ -988,13 +1003,16 @@ class CapabilitiesMixin:
             return None if view.id == LOCAL else view.id
 
         preset = self.config.preset(job.preset)
-        if preset is not None and preset.local_only:
+        views = self.machines_for(
+            preset, views, target=job.target_worker, pool=job.pool, placement=job.placement
+        )
+        if (preset is not None and preset.local_only) or job.target_worker == LOCAL:
             # 후보 함수가 머신을 뺐다 — 세 갈래 모두 「갈 곳 없음」이고 ETA 는 없다(§4.3 의 새
-            # 분기). 이 분기는 `local_only` 프리셋에만 있다. 다른 프리셋의 빈 풀은 지금처럼
+            # 분기). 이 분기는 `local_only` 프리셋과 `@local` 을 지정한 잡(`lanes = 0` 이면
+            # 후보가 빈다, §4.2 기동 · reload)에만 있다. 다른 프리셋의 빈 풀은 지금처럼
             # `worker_down` 이다(C3)
-            views = self.machines_for(
-                preset, views, target=job.target_worker, pool=job.pool, placement=job.placement
-            )
+            if job.target_worker == LOCAL:
+                views = [v for v in views if v.id == LOCAL]
             if not views:
                 return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE)
         if job.target_worker is not None:
@@ -1343,6 +1361,9 @@ class _ConfigOnly:
 
     def check_reachable(self, *args: Any, **kwargs: Any) -> bool:
         return CapabilitiesMixin.check_reachable(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def _has_local_lanes(self) -> bool:
+        return CapabilitiesMixin._has_local_lanes(self)  # type: ignore[arg-type]
 
 
 def remote_can_take(config: Any, preset: Preset) -> bool:
