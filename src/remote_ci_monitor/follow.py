@@ -79,9 +79,10 @@ MAX_UNPACKED_BYTES = 256 * 1024 * 1024
 HEALTH_BODY_MAX = 1024 * 1024
 #: `doctor` 는 이 설치본이 무엇을 할 수 있는지 잰다 — 서버 버전으로 갈아타면 잴 대상이 바뀐다
 #: (M5t-a 결정 171 행 · TR17). `setup` 은 이 머신에 설정을 쓴다 — 설정이 아직 없으니 따라갈 서버도
-#: 없고, `--server` 를 받아도 그 서버의 판으로 갈아타지 않는다(TR14)
+#: 없고, `--server` 를 받아도 그 서버의 판으로 갈아타지 않는다(TR14). `setup` 을 따로 더하는
+#: 까닭: 아래 집합 줄은 scripts/mutcheck.py 의 변이 `m5q-follow-serve-follows` 가 글자 그대로 찾는다
 NO_FOLLOW_COMMANDS = frozenset(
-    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor", "setup"}
+    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor"} | {"setup"}
 )
 MARKER, LOCK, BAD = ".rcm-client.json", ".lock", ".bad"
 RECORD = "follow.json"

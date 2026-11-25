@@ -801,15 +801,15 @@ def pick_service_file(
     # `rcm setup --label` 로 쓴 서비스는 표준 라벨의 글롭에 걸리지 않는다. setup 자리의 파일마다
     # setup 이 찍은 복사 명령의 목적지를 같은 규칙(`core.setup.install_path`, 6-B-V1)으로 풀어 설치
     # 자리 후보에 더한다 — 설치한 뒤에는 서비스 관리자가 읽는 그 파일을 잰다
-    installed = launch_agents + user_units
     for p in staged:
         named = setup_core.label_of_file(p.name)
         if named is None:
             continue
         there = setup_core.install_path(named[0], named[1], home)
-        if there.is_file() and there not in installed:
-            installed.append(there)
-    for stage in (installed + system_files, staged):
+        place = launch_agents if named[1] == setup_core.LAUNCHD else user_units
+        if there.is_file() and there not in place:
+            place.append(there)
+    for stage in (launch_agents + user_units + system_files, staged):
         before = len(skipped)
         found = _matching(stage, role, skipped, user_home)
         if len(skipped) > before:

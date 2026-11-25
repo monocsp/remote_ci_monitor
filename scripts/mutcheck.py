@@ -2863,6 +2863,31 @@ MUTANTS = (
             "test_tr33_the_template_default_resolves_with_the_commands_home",
         ),
     ),
+    Mutant(
+        # 인자 없는 `rcm` 이 설정이 있는 머신에서도 첫 실행 질문을 띄운다 — 이미 설정한
+        # 머신(환경변수만 쓰는 클라이언트 · 워커 포함)에 setup 을 다시 권한다(TR2 · TR19 · TR29)
+        name="setup-first-run-asks-with-config",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if roles:\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_setup_cli.py::test_tr2_a_terminal_with_any_config_does_not_ask",
+            "tests/test_setup_cli.py::test_tr19_an_env_only_client_counts_as_configured",
+            "tests/test_setup_cli.py::test_tr29_an_env_only_worker_counts_as_configured",
+        ),
+    ),
+    Mutant(
+        # doctor 가 `rcm setup --label` 로 설치한 서비스의 설치 자리를 보지 않는다 — 서비스 관리자가
+        # 읽는 파일 대신 setup 자리의 사본을 잰다(6-B-V1 · 6-B-V2)
+        name="doctor-custom-label-install-place-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if there.is_file() and there not in place:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_tr24_doctor_finds_the_installed_copy_of_a_custom_label_service",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
