@@ -19,13 +19,14 @@
 >
 > 결정 번호는 239 부터다. M5q 가 149~174, M5r 이 175~200, M5s 가 201~238 을 쓴다(`docs/m5s-workplan.md`).
 >
-> 이 판은 다섯째 판이고 범위를 줄인 M5t-a 명세다. 첫째 판부터 셋째 판까지는 M5t 전체를 한 문서에 담았다. 격리 반박 두 명이
+> 이 판은 여섯째 판이고 범위를 줄인 M5t-a 명세다. 첫째 판부터 셋째 판까지는 M5t 전체를 한 문서에 담았다. 격리 반박 두 명이
 > 세 라운드에 걸쳐 그 판들을 읽었다. 반박 A 는 프로토콜과 정확성을, 반박 B 는 설치와 보안과 오너 의도를 봤다. 3라운드 뒤의
 > 근본 원인 분석은 한 문서에 하위 시스템 일곱이 들어 있고 같은 사실이 5~7곳에 되풀이된다고 지적했다. 오너는 2026-11-25
 > M5t 를 셋으로 나누라고 답했다. 이 문서는 그 가운데 M5t-a 만 담는다. 결과 고리 프로토콜(M5t-b)과 짝짓기 · 서버 신원
 > 보안(M5t-c)은 따로 쓰는 명세이고 거기로 넘기는 것은 §12 에 모았다. 셋째 판 전문은 레포 밖에 보관했다. 라운드마다 고친
-> 것은 §13 에 반박 id 별로 모았다. 넷째 판은 M5t-a 만 담은 첫 판이고 4라운드 반박을 받았다. 이 판은 그 반박을
-> 반영했고 오너의 답에 따라 5라운드 반박을 한 번 더 받는다. 오너가 정한 것은 §1 에 적었고 나머지 결정은 추천값이다. 오너가 정해야 진행되는 것은
+> 것은 §13 에 반박 id 별로 모았다. 넷째 판은 M5t-a 만 담은 첫 판이고 4라운드 반박을 받았다. 다섯째 판은 그 반박을
+> 반영했고 5라운드 반박을 받았다. 5라운드에서도 `local_only` 를 거르는 경로가 또 빠졌다. 그래서 이 판은 오너의 답에 따라
+> 그 거르기를 한 곳으로 모아 다시 세웠고, 고친 diff 만 검증자 둘이 본다(§13). 오너가 정한 것은 §1 에 적었고 나머지 결정은 추천값이다. 오너가 정해야 진행되는 것은
 > §11 에 ⛔ 와 Q 번호로 표시했다.
 
 ## 0. 한 줄
@@ -92,7 +93,7 @@ SSE, 종료 코드 0~4 와 5, 산출물 업로드, finish 의 403·409 가 그�
 |---|---|---|
 | 역할과 첫 실행 | 역할 넷, 있는 설정 파일에서 역할을 읽어 내기, 인자 없는 `rcm` 의 첫 실행 질문, `rcm setup` · `rcm setup --role <r> --yes`, 서버용 서비스 파일 생성, 역할마다 토큰을 얻는 길 안내 | 239~242 |
 | 분배 전용 코디네이터 | `lanes = 0` 허용과 거기 따라오는 `@local` · 헬스 · 화면 손질 | 243 |
-| 원격 금지 표식 | 프리셋 키 `local_only`, 원격 claim 에서 빼기, 대기 계산 · 제출 판정 · 자동 점검에서 원격 머신 빼기, `/worker/spec` 에서 빼기, 원격 워커 지정 · 기본 풀이 아닌 `--pool` · `lanes = 0` 서버의 제출 409, 설정 검증, coordinator 진단의 「로컬 레인 필요」 | 254 |
+| 원격 금지 표식 | 프리셋 키 `local_only`, 그 프리셋의 후보 머신을 `@local` 하나로 두는 후보 함수와 그 결과를 쓰는 경로들(4.3), 후보가 빈 제출과 원격 recheck 의 409, 설정 검증, coordinator 진단의 「로컬 레인 필요」 | 254 |
 | 환경 진단 | `rcm doctor`(역할 넷), `[[tools]]` 설치 안내, 호스트 사실 더 모으기, `rcm worker --check` 두 줄, 이 머신에 올 프리셋 수 알리기, 서버 설정 템플릿의 툴체인 카탈로그 | 246·247 |
 | 요청자 알림 | `rcm wait` 사람용 마지막 줄과 `ran_on`, 이미 있는 산출물 상태의 경고 줄, `[[notify]]` 의 `RCM_MACHINE`, `rcm wait --notify` | 248 e·f |
 | 범위 나누기 | M5t 를 M5t-a · M5t-b · M5t-c 로 나누고 뒤의 둘에 넘길 것을 적는다 | 252 |
@@ -173,7 +174,7 @@ M5t-a 는 가능하면 DB 를 바꾸지 않는다. 지금 설계에는 DB 판을
 | C6 | 레인이 없어도 로컬 프로브를 잰다 | `server.py:657-660`, `capabilities.py:294-330` | 고칠 것 | 생략한다 |
 | C7 | `local_accept_any` 기본이 true 라서 제출 응답의 `eligible_now` 에 `@local` 이 찍힌다. 틀린 정보다 | `capabilities.py:740-770, 840-870`, `config.py:152` | 고칠 것 | `@local` 을 뺀다 |
 | C8 | 자동 점검이 `@local` 을 겨냥하면 아무도 못 집는 점검 잡이 큐에 남는다 | `capabilities.py:872-915` | 고칠 것 | `@local` 을 겨냥하지 않는다 |
-| C9 | 부하 게이트와 결정 39 에 「서버 레인 1」 문장이 있다 | `server.py:726` | 고칠 것 | 결정 39 문장을 고친다 |
+| C9 | 부하 게이트와 결정 39(M5f)에 「서버 레인 1」 문장이 있다 | `server.py:726` | 고칠 것 | 결정 39(M5f)의 문장을 고친다 |
 | C10 | 화면이 `lanes 0/0 busy` 처럼 어색하게 그린다 | `core/render_text.py:1003-1009`, `web/app.js:185-194, 768` | 고칠 것 | 표기를 손본다 |
 | C11 | 샘플러는 언제나 돌아서 코디네이터의 부하가 기본 풀 압력처럼 보인다 | — | 고칠 것 | 샘플러는 계속 돌고 호스트 카드에 「잡을 돌리지 않는 머신」을 표시한다 |
 | C12 | `pools_without_workers` 는 lanes 와 상관없이 기본 풀을 늘 건너뛴다 | `remote_workers.py:366-374` | 고칠 것 | `lanes ≥ 1` 일 때만 기본 풀을 뺀다. TL13 이 이 수정을 잠근다. `capacity` 는 풀이 아니라 프리셋 단위로 센다(결정 243) |
@@ -191,7 +192,7 @@ M5t-a 는 가능하면 DB 를 바꾸지 않는다. 지금 설계에는 DB 판을
 | D7 | 결정 97 로 배치 기본은 `pool` 이다. 붙은 워커에 `pool` 프리셋은 가지 않는다. `any-capable` 도 보고가 새롭고 도구 판정과 `checks` 를 지나야 간다 | `cli.py:3605`, `examples/server.toml:286`, `capabilities.py:758-760` | 이미 있음 | 결정 97 은 유지한다. 진단이 이 머신에 올 프리셋과 후보를 알린다(결정 246) |
 | D8 | `git_ref` 잡은 워커 자신의 `[[repos]]` 가 있어야 한다. 없으면 `repo_missing` 이다 | `remote_worker.py:863-890` | 이미 있음 | 진단이 git 요구를 본다(결정 246). `[[repos]]` 는 자동으로 채우지 않는다. 원격 주소와 자격 증명은 그 머신 주인이 정할 일이라, doctor 가 `repo_missing` 이 날 프리셋과 넣어야 할 저장소 이름을 알려 주기만 한다 |
 | D9 | `/worker/*` 라우트는 인증을 먼저 본다 | `server.py:6153-6155` | 이미 있음 | 그대로 둔다. M5t-a 는 인증 예외 라우트를 만들지 않는다 |
-| D10 | 프리셋을 원격에서 빼는 방법이 없다. 원격 워커의 claim 은 `_claimable` 의 후보 조건으로 잡을 고르는데 그 조건 어디에도 프리셋을 원격에서 빼는 것이 없다. 릴리스 프로파일의 비밀은 로컬 레인에서만 주입되고 원격 워커 쪽에는 그 호출이 없다. 그래서 기본 풀에 붙인 원격 워커가 릴리스 프리셋을 집을 수 있다. 이때 비밀이 새지는 않는다. 그 잡이 비밀 없이, 또는 그 머신의 자격 증명으로 도는 배치 오류다 | `remote_workers.py:543-553`, `store.py:3371-3422`(후보 조건 `:3379-3398`), `worker.py:548-550` | 고칠 것 | 프리셋 표식 `local_only` 로 원격 claim 에서 뺀다(결정 254, PR1) |
+| D10 | 프리셋을 원격에서 빼는 방법이 없다. 원격 워커의 claim 은 `_claimable` 의 후보 조건으로 잡을 고르는데 그 조건 어디에도 프리셋을 원격에서 빼는 것이 없다. 릴리스 프로파일의 비밀은 로컬 레인에서만 주입되고 원격 워커 쪽에는 그 호출이 없다. 그래서 기본 풀에 붙인 원격 워커가 릴리스 프리셋을 집을 수 있다. 이때 비밀이 새지는 않는다. 그 잡이 비밀 없이, 또는 그 머신의 자격 증명으로 도는 배치 오류다 | `remote_workers.py:543-553`, `store.py:3371-3422`(후보 조건 `:3379-3398`), `worker.py:548-550` | 고칠 것 | 프리셋 표식 `local_only` 를 단 프리셋의 후보 머신을 `@local` 하나로 둔다. 원격 claim 도 그 후보 함수의 결과를 쓴다(결정 254, 4.3, PR1) |
 
 ### 3.5 결과가 요청자에게 가는 길
 
@@ -216,7 +217,7 @@ doctor 가 그대로 읽을 서버 쪽 측정값(G7)이다.
 | # | 지금 | 근거 | 분류 | 이 명세 |
 |---|---|---|---|---|
 | G1 | 설치 안내 칸이 없다. 잡 로그는 `required tool fvm: missing` 까지만 찍고 판정 문구도 `fvm missing` 까지다 | `src/runner.py:177-183`, `src/core/render_text.py:534-560` | 새로 만들 것 | `[[tools]]`(결정 246) |
-| G2 | `/worker/spec` 의 프리셋 항목에 `placement` · `pool` · `checks` · `description` 이 없다. 워커는 자기에게 올 프리셋을 모르고 다른 풀 전용까지 「n/24 ok」로 센다. 프리셋 env 도 통째로 준다 | `src/capabilities.py:254-272`, `src/server.py:5774-5778, 4324-4326`, `src/cli.py:4696-4728` | 고칠 것 | 키를 더한다. 옛 워커는 무시한다. `local_only` 프리셋은 원격 워커에 보내지 않는다(결정 254). 토큰에 묶인 풀로 거르는 일은 M5t-c 다(결정 246) |
+| G2 | `/worker/spec` 의 프리셋 항목에 `placement` · `pool` · `checks` · `description` 이 없다. 워커는 자기에게 올 프리셋을 모르고 다른 풀 전용까지 「n/24 ok」로 센다. 프리셋 env 도 통째로 준다 | `src/capabilities.py:254-272`, `src/server.py:5774-5778, 4324-4326`, `src/cli.py:4696-4728` | 고칠 것 | 키를 더한다. 옛 워커는 무시한다. 후보 함수가 원격 워커를 빼므로 `local_only` 프리셋은 원격 워커에 보내지 않는다(결정 254, 4.3). 토큰에 묶인 풀로 거르는 일은 M5t-c 다(결정 246) |
 | G3 | `worker --check` 는 이 셸 환경으로 잰다. 서비스 PATH(`WORKER_SERVICE_PATH`)와 다를 수 있다. 서버 쪽에는 `service preset tools` 가 있지만 워커 쪽 짝은 없다 | `src/remote_worker.py:672`, `src/cli.py:3436`, `docs/configuration.md:1378`, `docs/configuration.md:949-952`, `src/core/capability.py:276`, `src/cli.py:3546` | 고칠 것 | 깨끗한 환경에 서비스 파일의 환경 변수만 더해 잰다(결정 246) |
 | G4 | 버전 요구를 적을 방법이 없다. `requires` 는 이름이나 절대 경로뿐이고 버전 문법이 없다. 지금은 `checks` 점검 프리셋이 유일한 길이다 | `src/config.py:670-690` | 이미 있음 | 코어에 버전 문법을 넣지 않고 `checks` 로 지킨다(결정 246) |
 | G5 | OS 버전과 arch 를 모으지 않는다. 서버로 보내는 호스트 사실은 OS 계열(darwin·linux) · 코어 수 · 부하 · GPU · 디스크 · `hardware_id` 다. Python 버전과 arch 는 로컬 `rcm version` 에만 있다. rcm 자신의 의존성(샘플러 명령, linger, Local Network, fd, git 버전)도 검사하지 않는다. `read_auth = none` 이면 `/api/machines` 가 토큰 없이 읽힌다 | `src/hostsample.py:339-345, 322, 85-101`, `src/cli.py:3665-3672`, `src/server.py:5781-5785`, `src/config.py:100` | 고칠 것 | 호스트 사실을 더 모은다. 새 호스트 사실은 토큰 있는 응답에만 싣는다(결정 246) |
@@ -273,6 +274,7 @@ M5t-b, 뒤의 것은 M5t-c 다.
 역할을 읽어 낼 때 설정은 아래 순서로 찾는다. `$RCM_CONFIG` 와 `./rcm.toml` 은 지금 코드에서 서버 설정을 찾는
 후보다(`config.py:49, 611-627`). 그래서 역할을 읽을 때도 그 둘은 서버 설정으로 읽고 `lanes` 로 역할 2 와 4 를 가른다.
 환경변수만 있는 클라이언트와 워커도 「설정 있음」으로 본다. 그런 머신에서는 첫 실행 질문을 띄우지 않는다.
+`$RCM_CONFIG` 가 가리키는 파일이 없으면 역할을 읽지 않고 usage 오류로 종료 2 다.
 
 첫 실행 판정은 탐색을 새로 짜지 않고 기존 탐색 함수를 그대로 부른다. 서버 설정은 `find_server_config`
 (`config.py:610-627`), 클라이언트 설정은 `find_client_config`(`config.py:1485-1494`)를 부른다. 워커 설정은 `rcm worker`
@@ -296,14 +298,22 @@ M5t-b, 뒤의 것은 M5t-c 다.
 | 단계 | 정한 것 |
 |---|---|
 | 역할 고르기 | 넷 가운데 하나. `--role` 이면 묻지 않는다 |
-| 포트 · 데이터 폴더 · 광고 · 라벨 | `--port`, `--data-dir`, `--advertise`/`--no-advertise`, `--label` 을 받는다. 대화형에서도 묻는다. 기본값은 템플릿대로이고 라벨의 기본은 표준 라벨이다. `data_dir` 은 절대 경로로 쓴다 |
+| 포트 · 데이터 폴더 · 광고 · 라벨 | `--port`, `--data-dir`, `--advertise`/`--no-advertise`, `--label` 을 받는다. 대화형에서도 묻는다. 기본값은 템플릿대로이고 라벨의 기본은 표준 라벨이다. `data_dir` 은 절대 경로로 쓴다. 고른 `data_dir` 에 `rcm.sqlite3` 가 이미 있으면 거절하고 종료 1 이다. 그때는 이미 있는 데이터 폴더라고 알리고, 새 폴더를 고르거나 그대로 쓰려면 `--reuse-data-dir` 를 주라고 안내한다. 고른 포트를 지금 쓰고 있으면 경고한다 |
 | 설정 파일 쓰기 | 기존 `init` 을 부른다. 있는 파일은 덮지 않고 파일마다 `--force` 를 받는다. 중간에 실패하면 반쪽 설정을 남기지 않는다 |
 | bind(역할 2·4) | 아래 bind 표대로 고른다(⛔ Q10). `--yes` 로 역할 2·4 를 고르면 `--bind` 가 필수이고 없으면 usage 오류로 종료 2 다. `0.0.0.0` 이 저절로 고르는 값이 되지 않게 하려는 것이다. 설치하자마자 LAN 에 열리지 않는다는 결정 33 의 뜻을 그대로 지킨다 |
 | 토큰 | 역할마다 아래 토큰 표의 길을 안내한다 |
-| 서비스 파일 | 서버용 서비스 파일 생성을 새로 더한다. 지금은 워커용만 있다(A6). 서버용 파일에 반드시 넣는 키는 아래 서비스 파일 표에 있다. setup 은 서비스 파일을 `~/Library/LaunchAgents/` 에 바로 쓰지 않는다. 거기 쓰면 다음 로그인 때 launchd 가 `RunAtLoad` 로 저절로 올려서 Q9(등록과 시작은 사람이 한다)와 부딪힌다. 그래서 설정 폴더 아래 `<config dir>/service/<label>.plist`(systemd 는 `.service`)에 쓰고, 설치할 자리로 복사하는 명령과 bootstrap 명령을 출력한다. `--service-file <경로>` 를 주면 그 경로가 먼저다. 라벨은 표준 라벨(`com.remote-ci-monitor.server` · `com.remote-ci-monitor.worker`)이 기본이고 `--label` 로 바꿀 수 있다. 있는 파일은 덮지 않는다. 같은 라벨이 이미 로드돼 있으면 경고만 한다. 운영 라벨을 거절하는 일은 제품이 하지 않고 실기 하네스와 `tools/guard_production.py` 가 한다 |
+| 서비스 파일 | 서버용 서비스 파일 생성을 새로 더한다. 지금은 워커용만 있다(A6). 서버용 파일에 반드시 넣는 키는 아래 서비스 파일 표에 있다. setup 은 서비스 파일을 `~/Library/LaunchAgents/` 에 바로 쓰지 않는다. 거기 쓰면 다음 로그인 때 launchd 가 `RunAtLoad` 로 저절로 올려서 Q9(등록과 시작은 사람이 한다)와 부딪힌다. 그래서 설정 폴더 아래 `<config dir>/service/<label>.plist`(systemd 는 `.service`)에 쓰고, 설치할 자리로 복사하는 명령과 bootstrap 명령을 출력한다. `--service-file <경로>` 를 주면 그 경로가 먼저다. 라벨은 표준 라벨(`com.remote-ci-monitor.server` · `com.remote-ci-monitor.worker`)이 기본이고 `--label` 로 바꿀 수 있다. 있는 파일은 덮지 않는다. 같은 라벨이 이미 로드돼 있으면 경고만 한다. 로드됐는지는 읽기 전용 조회(`launchctl print`, `systemctl --user is-enabled`)로만 본다. 출력하는 복사 명령은 있는 파일을 덮지 않는 꼴(`cp -n`)이다. 운영 라벨을 거절하는 일은 제품이 하지 않고 실기 하네스와 `tools/guard_production.py` 가 한다 |
 | 서비스 등록 | 하지 않는다. 등록하고 시작하는 명령만 출력한다(M5n §9 유지, ⛔ Q9). 사람이 실행해야 하는 까닭이 셋 있다. launchd 의 `bootstrap gui/<uid>` 는 로그인 세션이 있어야 한다. macOS 의 Local Network 권한 창은 사람이 눌러야 한다. systemd 의 `enable-linger` 는 sudo 가 필요하다 |
 | 마지막 | setup 은 서비스를 시작하지 않고 토큰도 만들지 않는다. 그래서 진단 가운데 서버 없이 도는 부분만 돌린다. rcm 자신의 요구, 호스트 사실, 설정 파일 검증이다. 그 결과는 조언으로 보인다. 끝에 「서비스를 띄우고 토큰을 넣은 뒤 `rcm doctor --role <r>`」을 출력한다 |
 | 종료 코드 | 설정을 썼으면 0, 쓰지 못했으면 1, 사용법 오류는 2 다 |
+
+역할마다 `--yes` 일 때 꼭 줘야 하는 인자는 아래와 같다. 역할 2·4 의 `--bind` 처럼 빠지면 usage 오류로 종료 2 다.
+
+| 역할 | `--yes` 일 때 꼭 줄 인자 | 선택 인자 |
+|---|---|---|
+| `client` | `--server` | `--by`(요청자 이름), `--config`(쓸 자리) |
+| `worker` | `--server`, `--pool`, `--lanes` | `--label`, `--service-file`, `--config` |
+| `coordinator` · `coordinator-worker` | `--bind` | `--port` · `--data-dir` · `--label` · `--advertise`/`--no-advertise` |
 
 서버 서비스 파일에는 아래 키를 반드시 넣는다.
 
@@ -312,7 +322,7 @@ M5t-b, 뒤의 것은 M5t-c 다.
 | 파일 디스크립터 상한 | launchd 는 `SoftResourceLimits` 의 `NumberOfFiles` 4096, systemd 는 `LimitNOFILE=4096` 이다. `examples/` 의 서버 서비스 파일과 같은 값이다 |
 | `HOME` | 넣는다 |
 | `WorkingDirectory` | 넣는다 |
-| 로그 경로 | 넣는다 |
+| 로그 경로 | 넣는다. 로그 파일 이름은 라벨에서 만든다 |
 | PATH | 워커용과 같은 규칙이다. `/usr/sbin` 을 넣고 venv 의 bin 을 앞에 두지 않는다 |
 
 역할 2·4 의 bind 는 아래에서 고른다. 결정 33 은 템플릿의 기본값만 정했다. PLAN 「보안」과 `README.md:83` 은 이미
@@ -340,14 +350,18 @@ M5t-b, 뒤의 것은 M5t-c 다.
 
 setup 은 어떤 Store 도 열지 않는다. 다른 빌드가 운영 DB 를 열면 그 자리에서 마이그레이션하기 때문이다. 그래서
 coordinator 역할의 토큰도 setup 이 만들지 않는다. setup 은 서버 설정과 서비스 파일까지만 쓰고 마지막에 위 표의 명령을
-출력한다. Store 를 여는 일은 서비스와 같은 빌드가 하므로 다른 빌드가 DB 를 마이그레이션하지 않는다.
+출력한다. 그런데 setup 이 쓰는 서비스 파일은 setup 을 실행한 빌드를 가리킨다. 지금 워커용 서비스 파일도
+`_this_rcm()`(`cli.py:3477`)으로 지금 도는 `rcm` 을 찾아 적는다(`cli.py:3561`). 그래서 워크트리 빌드로 setup 을 돌리면
+그 서비스도 워크트리 빌드다. 운영 DB 를 막는 장치는 둘이다. 하나는 고른 `data_dir` 에 `rcm.sqlite3` 가 이미 있으면
+setup 이 거절하는 규칙(위 단계 표)이고, 다른 하나는 아래 guard 의 운영 `data_dir` 규칙이다.
 
 `tools/guard_production.py` 는 새 빌드가 운영의 옛 DB 를 열어 마이그레이션하는 것을 막는 훅이다. setup 과 doctor 는
-DB 를 열지 않으므로 그 훅의 DB 를 여는 명령 목록(`DB_OPENING` · `MIGRATING`)에 넣지 않는다. 대신 그 훅에 규칙 둘을
-더한다(PR4). 하나는 setup 이 운영 설정 경로에 쓰려 하면 거절하는 규칙이다. 훅은 setup 이 쓸 경로를 setup 과 같은 규칙
+DB 를 열지 않으므로 그 훅의 DB 를 여는 명령 목록(`DB_OPENING` · `MIGRATING`)에 넣지 않는다. 대신 그 훅에 규칙 셋을
+더한다(PR4). 첫째는 setup 이 운영 설정 경로에 쓰려 하면 거절하는 규칙이다. 훅은 setup 이 쓸 경로를 setup 과 같은 규칙
 (`XDG_CONFIG_HOME` 과 `HOME`, `config.py:54-58`)으로 계산해서 운영 설정 경로와 비교한다. 훅이 아는 운영 설정 경로는
-`~/.config/rcm` 이다(`tools/guard_production.py:869-877`). 다른 하나는 setup 이 운영 라벨의 서비스 파일을 쓰려 하면
-거절하는 규칙이다.
+`~/.config/rcm` 이다(`tools/guard_production.py:869-877`). 둘째는 setup 이 운영 라벨의 서비스 파일을 쓰려 하면
+거절하는 규칙이다. 셋째는 플래그로 준 `data_dir`, 또는 그 명령의 `HOME` 으로 푼 템플릿 기본값이 운영 `data_dir` 이면
+`rcm setup` 을 거절하는 규칙이다.
 
 setup 이 지킬 것이 둘 더 있다. 우선 토큰을 stdout 과 stderr 에 되풀이해 찍지 않는다. 다음으로 setup 과 doctor 를 버전
 따라가기 대상에서 뺀다(`NO_FOLLOW_COMMANDS`, `follow.py:80-82`). 설정이 없을 때 따라가기는 의미가 없다. doctor 는 PR2,
@@ -362,8 +376,9 @@ setup 은 PR4 에서 그 목록에 넣는다.
 `lanes = 0` 을 허용한다. 그러면 따라오는 일이 여럿이다.
 
 `capacity` 는 「어느 풀이든 살아 있는 레인이 있는가」가 아니다. 「지금 갈 수 있는 머신이 하나라도 있는 프리셋 수 / 전체
-프리셋 수」다. 갈 수 있는 머신은 살아 있고 그 프리셋의 판정이 eligible 인 머신이다. `pool` 프리셋이면 그 풀에 살아 있는
-레인이 있어야 한다. 프리셋이 0개면 `capacity` 행을 그리지 않는다. `pools_without_workers` 는 지금 lanes 와 상관없이 기본
+프리셋 수」다. 갈 수 있는 머신은 그 프리셋의 후보 함수 결과(4.3) 가운데 살아 있는 머신이다. `checks` 가 없는 `pool`
+프리셋은 판정과 상관없이 그 풀의 살아 있는 레인을 센다. 지금 `placement_for` 의 pool 갈래가 그렇게 고른다
+(`capabilities.py:771-772`). 프리셋이 0개면 `capacity` 행을 그리지 않는다. `pools_without_workers` 는 지금 lanes 와 상관없이 기본
 풀을 늘 건너뛴다. `lanes ≥ 1` 일 때만 건너뛰도록 고친다(C12).
 
 | 위치 | 바꾸는 것 | 근거 |
@@ -371,18 +386,18 @@ setup 은 PR4 에서 그 목록에 넣는다.
 | 설정 | `lanes = 0` 을 받는다 | C1 |
 | `@local` 머신 | lanes 0 이면 살아 있지 않다 | C5 |
 | `--machine @local` 제출 | 409 와 「이 서버에는 로컬 레인이 없다」 | C5 |
-| `local_only` 프리셋 제출 | 409 와 사람용 이유 문장(4.3) | C5 |
+| `local_only` 프리셋 제출 | 후보가 `@local` 하나인데 그 `@local` 이 살아 있지 않으므로 후보가 빈다. 409 와 사람용 이유 문장(4.3) | C5 |
 | 로컬 프로브 | 생략한다 | C6 |
 | `eligible_now` | `@local` 을 뺀다 | C7 |
-| 자동 점검 | `@local` 을 겨냥하지 않는다. `local_only` 점검 프리셋은 `@local` 만 겨냥하므로(4.3) 「갈 곳 없음」으로 보이고 잡을 만들지 않는다 | C8 |
-| 기동 · reload | `lanes = 0` 이면 이미 대기 중인 `local_only` 잡과 `@local` 지정 잡이 갈 곳을 잃는다. lanes 를 1 이상에서 0 으로 바꿔 재시작했거나 reload 로 `local_only` 를 새로 단 경우다. 서버는 기동과 reload 때 그런 잡에 reason `no_capable_machine` 과 ETA null 을 단다. 실패로 닫지 않는다 | C5 |
+| 자동 점검 | `@local` 을 겨냥하지 않는다. `local_only` 점검 프리셋은 후보가 비므로(4.3) 「갈 곳 없음」으로 보이고 잡을 만들지 않는다 | C8 |
+| 기동 · reload | `lanes = 0` 이면 이미 대기 중인 `local_only` 잡과 `@local` 지정 잡이 갈 곳을 잃는다. lanes 를 1 이상에서 0 으로 바꿔 재시작했거나 reload 로 `local_only` 를 새로 단 경우다. 서버는 기동과 reload 때 그런 잡에 reason `no_capable_machine` 과 ETA null 을 단다. 실패로 닫지 않는다. `local_only` 잡은 후보 함수로 다시 계산되므로 따로 분기하지 않는다(4.3) | C5 |
 | `/api/health` | 프리셋 단위의 `capacity` 정보를 싣는다. HTTP 상태는 바꾸지 않는다. 다른 정보 항목처럼 503 조건이 아니다(⛔ Q5) | C4 |
 | `rcm check` | 갈 수 있는 프리셋이 하나도 없으면 FAIL 줄 `capacity` 를 낸다. `capacity` 가 0 인 프리셋 목록을 보인다. 일부 프리셋만 0 이면 FAIL 이 아니라 warn 으로 그 목록을 보인다(어느 머신도 못 돌리는 배포 프리셋은 정상일 수 있다). 프리셋이 0개면 `capacity` 행을 그리지 않는다 | C4 |
 | `rcm check` 의 `local preset tools` · `service preset tools` | 「이 머신은 잡을 돌리지 않는다」로 그린다. FAIL 이 아니다 | — |
 | `rcm doctor --role coordinator` | `capacity` 가 0 인 프리셋 목록을 보인다 | C4 |
 | `pools_without_workers` | `lanes ≥ 1` 일 때만 기본 풀을 뺀다. `lanes = 0` 이면 기본 풀도 센다 | C12 |
 | mDNS TXT | `lanes=0` 을 싣는다 | B2 |
-| 결정 39 | 「서버 레인 1」 문장을 PR3 이 고친다 | C9 |
+| 결정 39(M5f) | 「서버 레인 1」 문장을 PR3 이 고친다 | C9 |
 | 화면 | `lanes 0/0` 표기를 손본다 | C10 |
 | 샘플러 | 계속 돈다. 호스트 카드에 「잡을 돌리지 않는 머신」을 표시한다 | C11 |
 
@@ -398,27 +413,53 @@ setup 은 PR4 에서 그 목록에 넣는다.
 지금 무엇이 문제인지는 §3 D10 에 적었다. 기본 풀에 붙인 원격 워커가 릴리스 프리셋을 집을 수 있다. 비밀은 로컬 레인에만
 주입되므로 비밀이 새는 문제가 아니다. 그 잡이 비밀 없이, 또는 그 머신의 자격 증명으로 도는 배치 오류다.
 
+다섯째 판까지는 `local_only` 를 경로마다 따로 거르는 문장을 적었다. 원격 claim, 대기 계산, 제출 판정, 자동 점검,
+`/worker/spec` 에 하나씩이다. 그랬더니 라운드마다 빠진 경로가 나왔다. 4라운드 HIGH 2건과 5라운드 HIGH 3건이 모두 그런
+경우다(§13). 그래서 이 판은 거르는 곳을 한 곳으로 모은다.
+
+정의는 한 문장이다(결정 254). `local_only = true` 인 프리셋에게 이 서버의 머신 목록은 `@local` 하나뿐이다. 서버는
+프리셋마다 후보 머신 목록을 만드는 함수 하나를 둔다. 이름은 이를테면 `machines_for(preset)` 이다. 이 후보 함수는 그
+프리셋이 `local_only` 면 원격 머신을 모두 뺀다. 아래 경로는 모두 이 후보 함수의 결과를 쓰고 따로 거르지 않는다.
+
+| 경로 | 지금 코드 |
+|---|---|
+| 배치. `placement_for` 의 지정 · capable · pool 세 갈래 전부 | `capabilities.py:729-789` |
+| 제출 판정. `submission_placement` 와 제출 응답의 `eligible_now` | `capabilities.py:841-868` |
+| 수신 가능 판정 `_could_receive` | `capabilities.py:940-947` |
+| `capacity` 집계(4.2) | 새로 만든다 |
+| 점검 정체 판정 `_stalled_checks` · `_why_none` | `capabilities.py:791-839` |
+| 자동 점검과 recheck 의 대상 | `capabilities.py:872-917, 949-970` |
+| `/worker/spec` 의 프리셋 목록 | `capabilities.py:254-272` |
+| 원격 claim 의 WHERE. 네 갈래(지정 · `pool` · `capable` · `known`) 전체에 건다 | `store.py:3371-3422`(갈래 `:3379-3398`, WHERE `:3416-3420`) |
+
+새 경로가 생겨도 이 후보 함수를 거치지 않으면 시험이 빨개져야 한다. 그래서 시험 하나가 여러 진입점(배치 · ETA ·
+`capacity` · 점검 · `/worker/spec` · claim)에 걸쳐 「원격 머신이 `local_only` 프리셋의 후보에 나타나는 곳이 없다」를
+확인한다. 경로마다 흩어져 있던 TO 행은 이 시험 하나로 묶었다(§7). `capacity` 는 PR3 이 넣으므로 그 진입점은 PR3 이 같은
+시험에 더한다. 변이 검사는 이 후보 함수에서 원격 제외를 지운다. 그러면 그 시험이 빨개져야 한다.
+
+`@local` 이 그 프리셋을 받을 수 없으면 후보가 빈다. `lanes = 0` 일 때, `local_accept_any = false` 인데 프리셋이
+`any-capable` 일 때, `@local` 판정이 ineligible 일 때, 프리셋이 기본 풀이 아닌 풀을 쓸 때가 그렇다. 후보가 빈 잡은
+지금의 「갈 곳 없음」 규칙(reason `no_capable_machine`, ETA null)을 그대로 따르고 새 분기를 만들지 않는다. 제출 때
+후보가 비면 409 와 사람용 문장으로 거절하고 이유 코드는 기존 꼴을 쓴다. `--machine` 으로 원격 워커를 지정하면 그 워커가
+후보에 없으므로 409 다. 기동이나 reload 때 이미 대기 중인 잡도 같은 후보 함수로 다시 계산된다. 그래서 원격 워커를 지정한
+잡, 기본 풀이 아닌 풀의 잡, 예약 잡이 모두 `no_capable_machine` 으로 보인다.
+
+`local_only` 가 아닌 프리셋도 이 후보 함수의 영향을 받는다. 프리셋 P 의 `checks` 에 `local_only` 점검 프리셋 C 가 있으면
+원격 머신에서는 C 의 후보가 빈다. 그래서 P 는 그 원격 머신에서 「오지 않음(점검이 로컬 전용)」이고 check_pending 이
+아니다. doctor 도 같은 후보 함수로 판정하므로 「점검 필요」 문장을 찍지 않는다. `rcm recheck <원격 머신> <C>` 는 409 다.
+
+후보 함수 밖에 남는 규칙은 아래 표뿐이다.
+
 | 위치 | 정한 것 | 근거 |
 |---|---|---|
 | 설정 | 프리셋 키 `local_only`(참 거짓, 기본 false)를 받는다. 프리셋 키가 `_PRESET_KEYS`(`config.py:632`)에 없으면 기동 실패라서(`config.py:818`) 그 목록에 더한다 | — |
-| 설정 검증 | `local_only` 이면서 placement 가 `pool` 인 프리셋은 풀이 기본 풀이 아니거나 `pools` 에 기본 풀이 없으면 기동 실패다. 로컬 레인은 기본 풀만 집기 때문이다(`worker.py:317-318`, `store.py:3265`, `capabilities.py:475-476`) | — |
-| 원격 claim | 서버는 원격 워커의 claim 에서 `local_only` 프리셋의 잡을 주지 않는다(fail-closed). `_claimable` 의 후보 조건은 갈래가 넷이다. 그 워커를 지정한 잡, 그 풀의 `pool` 잡, eligible 인 `capable` 잡, 그리고 `known` 갈래다(`store.py:3379-3398`). 갈래마다 거르지 않고 WHERE 전체에서 거른다(`store.py:3416-3420`) | D10 |
-| 대기 계산과 제출 판정 | claim 과 `/worker/spec` 만이 아니라 대기 계산과 제출 판정에서도 원격 머신을 뺀다. `placement_for` 의 pool 갈래(`capabilities.py:770-789`), `submission_placement`(`capabilities.py:841-868`), `_could_receive`(`capabilities.py:940-947`), 제출 응답의 `eligible_now` 가 해당한다 | C7 |
+| 설정 검증 | 하나만 남긴다. `local_only` 이고 placement 가 `pool` 이면 `pool` 이 기본 풀이어야 하고 아니면 기동 실패다. 로컬 레인은 기본 풀만 집기 때문이다(`worker.py:317-318`, `store.py:3265`, `capabilities.py:475-476`). `pools` 에 든 기본 풀이 아닌 항목은 기동 실패가 아니다. 후보 함수가 그 풀의 후보를 비우므로 그 풀로 낸 제출이 409 로 막힌다 | — |
 | 로컬 레인 | 지금처럼 집는다 | — |
-| 원격 워커를 지정한 제출 | `--machine <원격 워커>` 로 내면 제출 때 409 로 거절하고 「이 프리셋은 로컬 레인에서만 돈다」를 사람용 문장으로 준다. 받아 두면 잡이 영원히 대기한다. 지정한 잡은 그 워커만 집을 수 있는데(`store.py:3379-3380`, `capabilities.py:743-745`) 그 워커는 `local_only` 잡을 집지 못한다. 제출 경로는 `server.py:4283-4318` 이다 | D10 |
-| 기본 풀이 아닌 `--pool` 제출 | 409 로 거절한다 | — |
-| `lanes = 0` 서버의 제출 | 갈 곳이 없으므로 제출을 409 로 거절하고 이유를 사람용 문장으로 준다 | C5 |
 | 409 검사 순서 | 제출의 409 검사는 supersede 와 합류보다 먼저 한다 | — |
-| 자동 점검과 recheck | `checks` 에 쓰인 점검 프리셋이 `local_only` 면 자동 점검과 recheck 는 `@local` 만 겨냥한다(`capabilities.py:872-917, 949-960`). `lanes = 0` 이면 그런 점검은 「갈 곳 없음」으로 보이고 잡을 만들지 않는다 | C8 |
-| `/worker/spec` | `local_only` 프리셋을 원격 워커에 보내지 않는다. 그만큼 프리셋 env 노출도 줄어든다 | G2 |
 | `rcm doctor --role coordinator` | `local_only` 프리셋을 「로컬 레인 필요」로 표시한다 | — |
 
-`lanes = 0` 서버에 `local_only` 프리셋이 제출될 때 결정 파일은 두 길을 두었다. 제출을 409 로 거절하는 길과, 받아 두고
-`no_capable_machine` reason 과 ETA null 로 보이는 길이다. 결정 파일은 409 를 추천했고 이 판은 그대로 정했다. 앞의
-`--machine @local` 409 와 같은 모양이다.
-
-원격 워커를 지정한 제출도 같은 모양의 409 다. 넷째 판은 이 경우의 제출 응답을 정하지 못했고 4라운드 결정 파일이 409 로
-정했다. TO2 가 이 규칙을 잠근다.
+`lanes = 0` 서버에 낸 `local_only` 제출의 409 는 넷째 판이 정했고, 원격 워커를 지정한 제출의 409 는 4라운드 결정 파일이
+정했다. 이 판에서는 둘 다 「후보가 빈 제출은 409」라는 같은 규칙에서 나온다.
 
 ### 4.4 붙은 워커가 받는 일
 
@@ -442,29 +483,29 @@ TL12 실기는 분배 전용 코디네이터에 일회용 워커를 붙여서 �
 알려 준다.
 
 ```sh
-rcm doctor [--role client|worker|coordinator|coordinator-worker] [--json] [--offline] [--shell-path] [--service-file <path>]
+rcm doctor [--role client|worker|coordinator|coordinator-worker] [--server <url>] [--config <path>] [--json] [--offline] [--shell-path] [--service-file <path>]
 ```
 
 | 항목 | 정한 것 |
 |---|---|
 | 역할 | 넷이다. `--role` 을 생략하면 설정에서 읽어 낸 역할이 하나일 때 그 역할을 쓰고, 여럿이면 usage 오류 2 로 끝내고 고르게 한다. `coordinator-worker` 는 로컬 레인 쪽을 서버가 자기 서비스 환경에서 잰 값(`/api/health` 의 `preset_env`, `@local` 판정, G7)으로 읽고 원격 워커가 있으면 그쪽도 함께 보인다 |
 | 서버 쪽 값 | `coordinator` 와 `coordinator-worker` 진단은 로컬 `server.toml` 을 읽는다. DB 는 열지 않는다. 서버에는 그 설정의 bind 와 port 로 `/api/health` 와 `/api/machines` 를 읽는다. bind 가 `0.0.0.0` 이면 127.0.0.1 로 묻는다. 토큰은 client 토큰(client.toml 이나 `RCM_TOKEN`)을 쓴다. 토큰이 없으면 서버 쪽 칸은 `—` 로 두고 종료 3 이다 |
-| 측정 환경 | PATH 만 바꾸지 않는다. 깨끗한 환경에서 잰다. 깨끗한 환경은 `env -i` 에 서비스 관리자가 넣는 기본 변수(`HOME` · `USER` · `LOGNAME` · `SHELL` · `TMPDIR`)와 서비스 파일의 환경 변수만 더한 것이다. 그래서 셸의 `JAVA_HOME` 같은 값이 측정에 새지 않는다. `env_passthrough` 에서 빠진 변수는 warn 이다. `--shell-path` 결과와 다르면 다르다고 표시한다. PATH 를 찍을 때 홈은 `~` 로 가린다 |
-| 서비스 파일 찾기 | `--service-file` 로 명시한 파일을 먼저 본다. 없으면 setup 이 쓴 자리(`<config dir>/service/<label>.plist` 나 `.service`)를 본다. 그것도 없으면 `WORKER_SERVICE_PATH` 로 재고 「서비스 파일 없음」을 표시한다 |
-| 대상 프리셋 | 이 머신에 올 수 있는 것만 본다. 그러려고 `/worker/spec` 에 `pool` · `pools` · `placement` · `checks` · `tools` 를 더한다. 더하기만 하므로 옛 워커는 무시한다. `pools` 는 프리셋의 `pools` 키를 그대로 싣는다. `local_only` 프리셋은 원격 워커의 `/worker/spec` 에 실리지 않는다(4.3) |
-| 프리셋 상태 | `ready` · `needs_check` · `missing` · `unknown` 넷이다. `needs_check` 는 도구는 다 있고 `checks` 가 남은 상태이며 ok 라 부르지 않는다. `unknown` 은 명세를 못 받음, 프로브 시한 초과다. 워크스페이스 안 도구는 `pool` 프리셋이면 `unknown` 이 아니라 warn 으로 적고 종료 0 을 지킨다. `any-capable` 프리셋이면 서버 판정이 unknown 이라 그 잡이 이 머신에 오지 않으므로 「오지 않음」으로 센다(§3.6). 도구가 빠진 `any-capable` 프리셋은 「이 머신에는 오지 않음」과 설치 안내를 warn 으로 적고 종료 코드에 넣지 않는다 |
+| 측정 환경 | PATH 만 바꾸지 않는다. 깨끗한 환경에서 잰다. 깨끗한 환경은 `env -i` 에 서비스 관리자가 넣는 기본 변수와 서비스 파일의 환경 변수만 더한 것이다. 기본 변수 목록은 launchd 와 systemd 를 따로 적는다. launchd 는 `HOME` · `USER` · `LOGNAME` · `SHELL` · `TMPDIR` · `PATH` 를 넣고, systemd 사용자 유닛은 `HOME` · `USER` · `LOGNAME` · `SHELL` · `XDG_RUNTIME_DIR` · `PATH` 를 넣는다(`TMPDIR` 없음). 이 목록은 두 관리자의 기본 동작에서 가져온 것이고 PR2 가 이 머신과 Linux 에서 한 번 재어 확인한다. 그래서 셸의 `JAVA_HOME` 같은 값이 측정에 새지 않는다. `env_passthrough` 에서 빠진 변수는 warn 이다. `--shell-path` 결과와 다르면 다르다고 표시한다. 서비스 PATH 와 셸 PATH 를 찍을 때 둘 다 홈을 `~` 로 가린다. 서비스 파일의 환경 변수는 이름만 찍고 값은 찍지 않는다 |
+| 서비스 파일 찾기 | `--service-file` 로 명시한 파일을 먼저 본다. 없으면 setup 이 쓰는 자리 `<config dir>/service/*` 를 본다. 그다음 표준 라벨의 설치 자리(`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`)를 본다. 그것도 없으면 `WORKER_SERVICE_PATH` 로 재고 「서비스 파일 없음」을 표시한다. 찾은 파일이 둘 이상이면 사람이 고르게 하고 비TTY 면 종료 2 다 |
+| 대상 프리셋 | 이 머신에 올 수 있는 것만 본다. 그러려고 `/worker/spec` 에 `pool` · `pools` · `placement` · `checks` · `tools` 를 더한다. 더하기만 하므로 옛 워커는 무시한다. `pools` 는 프리셋의 `pools` 키를 그대로 싣는다. `/worker/spec` 의 프리셋 목록은 후보 함수의 결과를 쓰므로 원격 워커에게 `local_only` 프리셋이 실리지 않는다(4.3) |
+| 프리셋 상태 | `ready` · `needs_check` · `missing` · `unknown` 넷이다. `needs_check` 는 도구는 다 있고 `checks` 가 남은 상태이며 ok 라 부르지 않는다. `unknown` 은 명세를 못 받음, 프로브 시한 초과다. 워크스페이스 안 도구는 `pool` 프리셋이면 `unknown` 이 아니라 warn 으로 적고 종료 0 을 지킨다. `any-capable` 프리셋이면 서버 판정이 unknown 이라 그 잡이 이 머신에 오지 않으므로 「오지 않음」으로 센다(§3.6). 도구가 빠진 `any-capable` 프리셋은 「이 머신에는 오지 않음」과 설치 안내를 warn 으로 적고 종료 코드에 넣지 않는다. `checks` 에 `local_only` 점검이 걸린 프리셋은 원격 머신에서 「오지 않음(점검이 로컬 전용)」이고 `needs_check` 가 아니다(4.3) |
 | 도구 상태 | `ok` · `missing` · `broken` · `unknown` 넷이다. `broken` 은 있지만 실행이 실패한 경우다. 코어는 프리셋 도구의 버전을 비교하지 않으므로 `outdated` 는 두지 않는다. 버전 요구는 `checks` 점검 프리셋이 지키고, 진단에서는 그 프리셋이 `needs_check` 로 보인다. rcm 자신의 요구(Python 3.11.4, token_file 일 때 git 2.31)만 코어가 버전을 보고 미달이면 FAIL 로 낸다 |
 | 설치 안내 | 코디네이터 설정 최상위 `[[tools]]` 에서 온다(아래) |
 | 호스트 사실 | OS 버전(`sw_vers` · `/etc/os-release`), arch, Rosetta 여부, 컨테이너 여부, root 여부, 패키지 관리자(brew · apt · dnf · pacman), Python 버전을 더 모은다. 워커 등록 본문에 더하고(더하기만) `rcm machines` 에 보인다. 서버는 등록 본문을 `remote_workers.py` 의 메모리에 두고 DB 에는 넣지 않는다. 서버를 재시작해도 사라지지 않도록 주기적인 `/worker/capabilities` 보고에도 싣는다. 받지 못한 동안은 `—` 다. 새 호스트 사실은 토큰 있는 응답에만 싣는다. `read_auth = none` 일 때 `/api/machines` 의 익명 응답에는 싣지 않는다. 구현은 `machines_doc()`(`capabilities.py:605`)에 토큰이 있는지를 넘기는 방식이고 `read_auth = basic` 일 때도 토큰이 있는 쪽에만 싣는다. root 면 sudo 를 빼는데 이것은 rcm 자신의 안내에만 한다 |
 | rcm 자신의 요구 | rcm 이 직접 안다(아래 표, ⛔ Q7) |
-| macOS shim | 도구 이름 목록으로 판별하지 않는다. macOS 에서 실행 파일이 `/usr/bin/` 아래에 있고 그 바이트에 `libxcselect` 가 들어 있으면 Command Line Tools shim 으로 본다. 파일은 표준 라이브러리로 읽는다. 그때 `xcode-select -p` 가 실패하면 실행하지 않고 `missing (needs Command Line Tools)` 로 적는다. 헤드리스 서비스에서 설치 대화상자가 되풀이되는 것을 막는다. Java 스텁은 이 방법으로 판별되지 않는다. Apple Silicon Mac 한 대의 실측에서 `/usr/bin/java` · `javac` · `ruby` · `perl` 에는 `libxcselect` 가 없었고 `xcode-select` · `xcrun` 에는 있었다. 이 한계는 문서에 적는다. 이 규칙은 doctor 와 프로브만이 아니라 서버가 `requires` 를 판정할 때 쓰는 `measure_tools`(`runner.py:150`)에도 건다. 그래야 doctor 와 서버 판정이 갈리지 않는다 |
-| 프로브 공통 | 시한을 둔다. `LANG=C` 로 돌린다(예외는 프리셋이 env 로 준다). stderr 로 출력하는 도구와 배너가 섞인 JSON 을 다룬다. shim 규칙은 doctor 만이 아니라 워커의 프로브 실행에도 건다 |
+| macOS shim | 도구 이름 목록으로 판별하지 않는다. macOS 에서 실행 파일이 `/usr/bin/` 아래에 있고 그 바이트에 `libxcselect` 가 들어 있으면 Command Line Tools shim 으로 본다. 파일은 표준 라이브러리로 읽는다. 그때 `xcode-select -p` 가 실패하면 실행하지 않고 `missing (needs Command Line Tools)` 로 적는다. 헤드리스 서비스에서 설치 대화상자가 되풀이되는 것을 막는다. Java 스텁은 이 방법으로 판별되지 않는다. Apple Silicon Mac 한 대의 실측에서 `/usr/bin/java` · `javac` · `ruby` · `perl` 에는 `libxcselect` 가 없었고 `xcode-select` · `xcrun` 에는 있었다. 이 한계는 문서에 적는다. 판별은 함수 하나로 둔다. doctor 와 프로브만이 아니라 서버가 `requires` 를 판정할 때 쓰는 `measure_tools`(`runner.py:150`), 잡 직전의 `missing_tools`(`runner.py:129`), 서버의 `preset_env` 측정(`server.py:5300`), `rcm check` 의 도구 행이 모두 그 함수를 쓴다. 그래야 doctor 와 서버 판정이 갈리지 않는다. `xcode-select` 자신은 판별 대상에서 뺀다 |
+| 프로브 공통 | 시한을 둔다. `LANG=C` 는 doctor 자신이 호스트 사실을 재는 명령에만 걸고 서버 · 워커의 `[[probes]]` 에는 걸지 않는다. stderr 로 출력하는 도구와 배너가 섞인 JSON 을 다룬다. shim 규칙은 doctor 만이 아니라 워커의 프로브 실행에도 건다 |
 | 첫 실행 안전 | mDNS 로 찾은 서버는 이름과 주소를 먼저 보이고 인증된 요청과 프로브를 보내기 전에 사람의 확인을 받는다. URL 을 명시한 서버(`--server` 나 설정 파일의 URL)는 mDNS 로 찾은 것이 아니므로 이 확인이 없다. 비TTY 이고 확인을 받지 못했으면 종료 3 이다. `rcm worker --check` 에도 같은 규칙을 건다. 프로브 argv 는 코디네이터 설정에서 오므로 확인하지 않은 서버의 명령을 돌리지 않으려는 것이다. doctor 는 worker.toml 의 `server = "auto"` 를 warn 한다(§9) |
 | 비밀 | 프리셋 env 값을 찍지 않는다. `/worker/spec` 은 프리셋 env 를 워커에 준다(`src/capabilities.py:254-272`). `local_only` 프리셋은 원격 워커에 보내지 않는다(4.3). 토큰에 묶인 풀로 거르는 일은 M5t-c 다 |
 | 원격 접속 | `--offline` 은 `git ls-remote` 같은 원격 git 접속만 끈다. 코디네이터 접속은 끄지 않는다. 토큰이 없거나 401 이면 종료 3 과 「토큰이 필요하다」를 낸다 |
 | 출력 경로 | 홈 경로를 찍지 않는다. 경로는 basename 규칙을 따른다(`src/runner.py:177-179`) |
 | 조언 | 진단 결과는 서버에 보내지 않는다. `/worker/capabilities` 도 부르지 않는다. 자격은 지금처럼 서버의 판정이 정한다 |
-| 문구 | 「준비됨(서비스가 보고하면 받기 시작)」, 「점검 필요(등록 뒤 rcm 이 점검을 한 번 겁니다)」, 「로컬 레인 필요」, 대상이 0개면 「이 머신에는 잡이 오지 않는다」와 이유 |
+| 문구 | 「준비됨(서비스가 보고하면 받기 시작)」, 「점검 필요(등록 뒤 rcm 이 점검을 한 번 겁니다)」, 「로컬 레인 필요」, 「오지 않음(점검이 로컬 전용)」, 대상이 0개면 「이 머신에는 잡이 오지 않는다」와 이유 |
 
 종료 코드는 아래와 같다(⛔ Q8). `rcm check` 의 종료 코드는 바꾸지 않는다. `rcm check` 는 서버가 불통이면 1 이다.
 
@@ -481,7 +522,7 @@ rcm doctor [--role client|worker|coordinator|coordinator-worker] [--json] [--off
 
 | 역할 | 규칙 |
 |---|---|
-| `worker` · `coordinator-worker` | 이 머신에 올 프리셋이 0개면 1 이다 |
+| `worker` · `coordinator-worker` | 이 머신에 올 프리셋이 0개면 1 이다. 도구가 빠진 `any-capable` 프리셋의 warn 과 올 프리셋 0개가 함께 있어도 1 이다 |
 | `coordinator`(`lanes = 0`) | 위 규칙 대신 `capacity` 로 본다. 모든 프리셋에 갈 수 있는 머신이 없으면 1 이고, 일부 프리셋만 그렇다면 warn 으로 그 목록을 보인다 |
 | `client` | 서버 도달, 버전, 토큰만 본다. 서버에 닿지 못하면 3 이다 |
 
@@ -509,8 +550,8 @@ darwin = "brew install …"
 linux  = "see docs"
 ```
 
-검증 규칙은 이렇다. 같은 이름은 두 번 쓸 수 없다. 모르는 OS 키와 제어문자는 기동 실패다. `requires` 에 없는 이름은
-warn 이다. `/api/status` 와 `/api/machines` 에는 싣지 않는다. 토큰 없이 읽히는 범위를 넓히지 않으려는 것이다.
+검증 규칙은 이렇다. 같은 이름은 두 번 쓸 수 없다. 모르는 OS 키와 제어문자는 기동 실패다. `requires` 항목에도 프로브
+argv[0] 에도 없는 이름은 warn 이다. `/api/status` 와 `/api/machines` 에는 싣지 않는다. 토큰 없이 읽히는 범위를 넓히지 않으려는 것이다.
 패키지 관리자별 키는 지금 만들지 않는다. rcm 은 이 문구를 실행하지 않고 sudo 로 설치하지도 않는다. 문구를 믿을지는
 코디네이터 관리자의 책임이다. 워커는 서버가 보낸 설치 문구를 찍기 전에 제어문자를 한 번 더 정리한다. 방식은 `follow.clean`
 과 같다(`cli.py:4649`).
@@ -594,10 +635,10 @@ Buildkite · GitLab · Xcode Cloud 세부, python.org 3.11 의 마지막 바이�
 
 | 항목 | 정한 것 |
 |---|---|
-| `rcm wait` 사람용 마지막 줄 | 실행 머신을 적는다. 예: `#381 succeeded on build-02 · 6m 31s`. 실패면 실패 스텝을 적는다. 로컬 레인도 머신 이름을 적는다. 잡 JSON 의 `worker` 칸은 바꾸지 않고(null 이 로컬이라는 관례 유지) 새 키 `ran_on` 에 적는다. `ran_on` 은 저장 칸 없이 서버가 잡 문서를 만들 때 계산한다. 원격 워커면 `worker` 이고 로컬 레인이면 로컬 머신의 `display_name` 이다. 그 이름은 machines 표나 `gethostname` 에서 온다(`capabilities.py:480-481`). 모르면 null 이다. `host_key` 는 sha256 앞 16자라서 그것만으로는 이름을 계산할 수 없다. `machine` 은 제출 본문의 대상 머신과 이름이 겹치므로 쓰지 않는다 |
+| `rcm wait` 사람용 마지막 줄 | 실행 머신을 적는다. 예: `#381 succeeded on build-02 · 6m 31s`. 실패면 실패 스텝을 적는다. 로컬 레인도 머신 이름을 적는다. 잡 JSON 의 `worker` 칸은 바꾸지 않고(null 이 로컬이라는 관례 유지) 새 키 `ran_on` 에 적는다. `ran_on` 은 저장 칸 없이 서버가 잡 문서를 만들 때 계산한다. 원격 워커면 `worker` 이고 로컬 레인이면 로컬 머신의 `display_name` 이다. 그 이름은 machines 표나 `gethostname` 에서 온다(`capabilities.py:480-481`). 모르면 null 이다. `ran_on` 은 잡에 `started_at` 이 있을 때만 계산하고 시작하지 못한 잡은 null 이다. `host_key` 는 sha256 앞 16자라서 그것만으로는 이름을 계산할 수 없다. `machine` 은 제출 본문의 대상 머신과 이름이 겹치므로 쓰지 않는다 |
 | 산출물 | 새 칸을 만들지 않는다. 이미 있는 `artifacts.state` 를 사람용 줄에 적는다. wait JSON 에는 이미 실린다 |
 | 산출물 경고 | `--fetch-artifacts` 없는 `rcm wait` 도 같은 상태를 읽어 산출물 실패를 경고 줄로 말한다. 경고로 보는 값은 `failed` · `dropped` · `unavailable` · `unknown` 이다. wait 가 끝날 때 아직 `collecting` 이나 `uploading` 이면 「수집 중」이라고 안내한다. 종료 코드는 바꾸지 않는다 |
-| `[[notify]]` 환경변수 | `RCM_MACHINE` 하나를 더한다. `RCM_REQUESTER` 는 이미 있다(E13) |
+| `[[notify]]` 환경변수 | `RCM_MACHINE` 하나를 더한다. `ran_on` 과 같이 `started_at` 이 있을 때만 계산하고 시작하지 못한 잡이면 null 이다. `RCM_REQUESTER` 는 이미 있다(E13) |
 | 요청 머신의 OS 알림 | 클라이언트 쪽 `rcm wait --notify` 다. macOS 는 osascript, Linux 는 notify-send 를 쓴다. 도구가 없으면 조용히 건너뛰고 경고 한 줄을 찍는다. 기본은 꺼져 있다(⛔ Q3). `rcm run` 에는 더하지 않는다(§1) |
 | 결정 6 | 서버 webhook 이 아니므로 결정 6 과 부딪히지 않는다. 결정 6 행은 M5a 의 notify url 과 M5r 의 `rcm/ci` 로 이미 비켜 갔으므로 문장을 PR5 가 사실대로 고친다 |
 
@@ -607,14 +648,15 @@ M5t-a 는 워커 프로토콜을 바꾸지 않는다. `/worker/spec` 에 키를 
 하므로 옛 워커와 옛 서버는 새 키를 무시한다. 옛 서버에 붙은 새 doctor 는 새 키가 없으면 종료 3 이다(4.5).
 
 종료 코드가 바뀌는 명령이 하나 있다. `rcm worker --check` 는 비TTY 에서 `server = "auto"` 로 찾은 서버를 확인받지 못하면
-종료 3 으로 끝난다. 지금까지 이 명령에는 종료 3 이 없었다. 이 변화는 CHANGELOG 에도 적는다.
+종료 3 으로 끝난다. 지금까지 이 명령에는 종료 3 이 없었다. 이 변화는 CHANGELOG 에도 적는다. `rcm worker --check` 에는
+FAIL 이 될 수 있는 버전 비교 행도 새로 생긴다. 서버와 버전이 다른데 따라갈 수 없는 설치면 그 행이 FAIL 이다(4.5).
 
 | 기존 결정 | 이 명세 |
 |---|---|
 | 결정 3(프리셋만 실행) | 유지한다. 설치 안내 문구는 보여 주기만 하고 실행하지 않는다 |
 | 결정 4·5·33·34(클라이언트별 토큰, TLS 없음, 기본 127.0.0.1, TXT 에 비밀 금지) | 결정 4·5·34 는 유지한다. 결정 33 은 템플릿의 기본값만 정했으므로 템플릿은 그대로 두고 setup 은 역할 2·4 에서 Tailscale 주소를 먼저 권한다(⛔ Q10). TXT 는 바꾸지 않는다. `lanes=0` 은 이미 싣는다. LAN 이나 `0.0.0.0` 을 고르면 읽기가 열려 있다고 경고한다(⛔ Q14). `--yes` 로 역할 2·4 를 고를 때 `--bind` 를 필수로 두어 설치하자마자 LAN 에 열리지 않는다는 결정 33 의 뜻을 지킨다. TLS 없이 남는 위험은 M5t-c 의 위협 모델에서 다룬다 |
 | 결정 6(webhook · 커밋 status · PR 댓글은 범위 밖) | PR5 가 문장을 사실대로 고친다. `rcm wait --notify` 는 클라이언트 쪽이다 |
-| 결정 39(「서버 레인 1」) | PR3 이 문장을 고친다 |
+| 결정 39(M5f, 「서버 레인 1」) | PR3 이 문장을 고친다 |
 | 결정 214(잡 중간의 알림은 rcm 이 아니라 프로젝트 스크립트) | 유지한다. 이 명세가 더하는 것은 잡이 끝난 뒤의 알림뿐이다(`[[notify]]` 의 `RCM_MACHINE`, 클라이언트 쪽 `rcm wait --notify`) |
 | 결정 91~93(측정 전에는 일을 받지 않음, `checks` 없는 프리셋) | 유지한다(⛔ Q6) |
 | 결정 97(배치 기본 `pool`) | 유지한다. 원격 금지는 배치가 아니라 프리셋 표식으로 한다(결정 254) |
@@ -636,13 +678,13 @@ PR 번호는 4판에서 다시 매겼다. 3판의 PR1(결과 고리)과 PR5(짝�
 | PR | 내용 | 결정 | 물결 | 같은 물결에서 겹치는 파일 | 머지 순서 |
 |---|---|---|---|---|---|
 | PR0 | 이 명세와 PLAN.md 반영(v2.13 머리, M5t-a 항목과 M5t-b · M5t-c 예정 줄, M5q 를 「완료, v0.8.0」으로, 결정 색인). 브랜치 `docs/m5t-machine-role-setup-plan`. 문서만이라 `--no-verify` 를 쓸 수 있다. 그래도 격리 반박 2명은 받는다 | 전부 | 0 | — | 먼저 |
-| PR1 | 원격 금지 표식. 프리셋 키 `local_only` 와 설정 검증, 원격 claim 에서 빼기, 대기 계산 · 제출 판정 · 자동 점검에서 원격 빼기, 원격 워커 지정과 기본 풀이 아닌 `--pool` 의 제출 409, `/worker/spec` 에서 빼기. DB 를 바꾸지 않는다 | 254 | 1 | PR2 와 `config.py`(프리셋 키 / `[[tools]]`), `capabilities.py`(`/worker/spec`) | PR1 먼저 |
-| PR2 | 환경 진단. 새 모듈 `doctor.py` 와 순수 `core/doctor.py`, cli `doctor`, `hostsample` 의 호스트 사실과 그 서버 저장(등록 본문을 `remote_workers.py` 메모리에, DB 아님), config `[[tools]]`, `/worker/spec` 에 키 더하기, `worker --check` 두 줄, coordinator 진단의 「로컬 레인 필요」. `NO_FOLLOW_COMMANDS` 에 `doctor` 를 넣는다 | 246, 247 | 1 | PR1 과 같다 | PR1 뒤. dev 를 합친 뒤 머지 |
-| PR3 | 분배 전용 `lanes = 0`. config · capabilities(`@local`) · server health · `rcm check` 의 `capacity` 와 도구 행 표기 · 기동과 reload 때 갈 곳 잃은 잡의 reason · `local_only` 제출 409 · coordinator 진단의 `capacity`(TD20 · TD38) · 결정 39 문장 · render · web 표기 | 243, 254 | 2 | PR4 와 `cli.py`(check capacity / setup), doctor 모듈 | PR3 먼저 |
-| PR4 | 첫 실행과 setup. cli setup · 첫 실행 질문 · 설정 탐색 순서 · 포트 · `data_dir` · 광고 · 라벨 인자 · bind 선택과 `--yes` 의 `--bind` 필수 · 읽기 공개 경고 · 역할별 토큰 안내 · 서버 서비스 파일(필수 키, 설정 폴더 아래 자리, 표준 라벨) · `NO_FOLLOW_COMMANDS` 에 `setup` · 서버 없이 도는 진단 부르기 · `tools/guard_production.py` 의 두 규칙(운영 설정 경로, 운영 라벨) | 239~242 | 2 | PR3 과 같다 | PR3 뒤 |
+| PR1 | 원격 금지 표식. 프리셋 키 `local_only` 와 설정 검증, 후보 머신 함수 하나와 그 결과를 쓰는 경로들(4.3), 후보가 빈 제출과 원격 recheck 의 409, 여러 진입점을 한 번에 보는 시험(TO15)과 그 변이. DB 를 바꾸지 않는다 | 254 | 1 | PR2 와 `config.py`(프리셋 키 / `[[tools]]`), `capabilities.py`(`/worker/spec`) | PR1 먼저 |
+| PR2 | 환경 진단. 새 모듈 `doctor.py` 와 순수 `core/doctor.py`, cli `doctor`, `hostsample` 의 호스트 사실과 그 서버 저장(등록 본문을 `remote_workers.py` 메모리에, DB 아님), config `[[tools]]`, `/worker/spec` 에 키 더하기, `worker --check` 두 줄, coordinator 진단의 「로컬 레인 필요」, shim 판별 함수 하나(`measure_tools` · `missing_tools` · `preset_env` · `rcm check` 도구 행이 함께 쓴다), doctor 의 `--server` · `--config`. `NO_FOLLOW_COMMANDS` 에 `doctor` 를 넣는다 | 246, 247 | 1 | PR1 과 같다 | PR1 뒤. dev 를 합친 뒤 머지 |
+| PR3 | 분배 전용 `lanes = 0`. config · capabilities(`@local`) · server health · `rcm check` 의 `capacity` 와 도구 행 표기 · 기동과 reload 때 갈 곳 잃은 잡의 reason · `local_only` 제출 409 · 후보 함수 결과로 세는 `capacity` 와 TO15 의 `capacity` 진입점 · coordinator 진단의 `capacity`(TD20 · TD38) · 결정 39(M5f)의 문장 · render · web 표기 | 243, 254 | 2 | PR4 와 `cli.py`(check capacity / setup), doctor 모듈 | PR3 먼저 |
+| PR4 | 첫 실행과 setup. cli setup · 첫 실행 질문 · 설정 탐색 순서 · 포트 · `data_dir` · 광고 · 라벨 인자 · bind 선택과 `--yes` 의 `--bind` 필수 · 읽기 공개 경고 · 역할별 토큰 안내 · 서버 서비스 파일(필수 키, 설정 폴더 아래 자리, 표준 라벨) · `NO_FOLLOW_COMMANDS` 에 `setup` · 서버 없이 도는 진단 부르기 · 이미 있는 `data_dir` 거절과 `--reuse-data-dir` · 쓰는 중인 포트 경고 · 역할별 `--yes` 필수 인자 · `tools/guard_production.py` 의 세 규칙(운영 설정 경로, 운영 라벨, 운영 `data_dir`) | 239~242 | 2 | PR3 과 같다 | PR3 뒤 |
 | PR5 | 요청자 알림. wait 사람용 줄과 `ran_on` 키 · 이미 있는 `artifacts.state` 의 사람용 줄과 경고 · `RCM_MACHINE` · `wait --notify` · 결정 6 문장 | 248 e·f | 3 | — | — |
 | PR6 | 문서와 스크린샷(docs 스킬). README · Java 스텁이 shim 규칙으로 판별되지 않는다는 한계 · `local_only` · `docs/configuration.md` · `docs/operating.md` · `docs/usage.ko.md` · 서버 설정 템플릿의 툴체인 카탈로그 · 설치 스모크 | 246, 254 | 3 뒤 | — | — |
-| PR7 | 실기 수용. §7 의 실기 행 전부, 보고서 `docs/acceptance/reports/` | — | PR6 뒤 | — | — |
+| PR7 | 실기 수용. 실기 하네스 `scripts/acceptance/m5t_live.sh`, §7 의 실기 행 전부, 보고서 `docs/acceptance/reports/` | — | PR6 뒤 | — | — |
 | 릴리스 | v0.11.0 → dev → main(§8 개인정보 점검) → 태그 | — | PR7 뒤 | — | — |
 | 운영 반영 | 오너 승인 뒤. 현행 규칙대로 | — | 릴리스 뒤 | — | — |
 
@@ -672,8 +714,8 @@ DB 판을 올리는 PR 은 없다.
 
 | # | 할 일 | PR | 의존 | 상태 |
 |---|---|---|---|---|
-| 0 | 이 명세 작성(4판, 5판) | PR0 | — | [ ] |
-| 1 | 4라운드 격리 반박 2명 받기와 반영(§13), 5라운드 격리 반박 2명 받기 | PR0 | 0 | [ ] |
+| 0 | 이 명세 작성(4판, 5판, 6판) | PR0 | — | [ ] |
+| 1 | 4라운드 격리 반박 2명 받기와 반영(§13), 5라운드 격리 반박 2명 받기와 반영, 6판 diff 검증 2명 받기 | PR0 | 0 | [ ] |
 | 2 | 오너 질문 Q3 · Q5~Q10 · Q14 답 받기(§11) | — | 0 | [ ] |
 | 3 | PR0 머지 | PR0 | 1 | [ ] |
 | 4 | PR1 원격 금지 표식 | PR1 | 3 | [ ] |
@@ -682,16 +724,18 @@ DB 판을 올리는 PR 은 없다.
 | 7 | PR4 첫 실행과 setup | PR4 | 5·6, Q9 · Q10 · Q14 | [ ] |
 | 8 | PR5 요청자 알림 | PR5 | 6·7, Q3 | [ ] |
 | 9 | mutcheck 새 변이 셋(§7)이 들어갔는지 확인 | PR1 · PR2 · PR3 | — | [ ] |
-| 10 | 이 레포를 쓰는 앱 프로젝트의 release-* · deploy-* 프리셋에 `local_only` 달기(결정 254) | — | 16 | [ ] |
+| 10 | 이 레포를 쓰는 앱 프로젝트의 release-* · deploy-* 프리셋에 `local_only` 달기(결정 254) | — | 16, 17 | [ ] |
 | 11 | PR6 문서 · 스크린샷 · 서버 설정 템플릿의 툴체인 카탈로그 | PR6 | 8 | [ ] |
 | 12 | PR7 실기 수용과 보고서 | PR7 | 11 | [ ] |
 | 13 | CHANGELOG `[Unreleased]` 정리 | PR7 · 릴리스 | — | [ ] |
 | 14 | 릴리스 PR dev→main 개인정보 점검(§8) | 릴리스 | 12·13 | [ ] |
 | 15 | 태그 v0.11.0 · 릴리스 확인 | 릴리스 | 14 | [ ] |
 | 16 | 운영 반영 오너 승인 · 큐가 빌 때 재시작 | 운영 반영 | 15 | [ ] |
+| 17 | `local_only` 를 달기 전에 그 프리셋을 읽는 서버 목록 확인 | — | 16 | [ ] |
 
 10 번은 운영 반영 뒤에 한다. 모르는 프리셋 키는 기동 실패이고(`config.py:818-820`) include 로 들인 파일도 프리셋을
-싣는다(`config.py:1076`). 그래서 `local_only` 를 단 프리셋을 읽는 서버는 모두 v0.11.0 이상이어야 한다.
+싣는다(`config.py:1076`). 그래서 `local_only` 를 단 프리셋을 읽는 서버는 모두 v0.11.0 이상이어야 한다. 그 서버 목록은
+표식을 달기 전에 17 번에서 확인한다.
 
 ## 7. 시험 계획
 
@@ -702,11 +746,13 @@ DB 판을 올리는 PR 은 없다.
 
 실기를 운영 머신에서 하므로 아래를 지킨다. TR16 은 인자 없는 `rcm` 이 아니라
 `rcm setup --role … --port <시험 포트> --data-dir <시험 경로> --label <시험 라벨> --bind 127.0.0.1 --no-advertise --yes` 로 설정한다. 같은 Mac 의 일회용 워커는 루프백으로 붙는다. Linux 컨테이너 워커를 붙일 때만 `--bind` 를 이 Mac 의 구체 LAN 주소로 바꾸고, 운영 서버의 포트와 겹치지 않는 시험 포트를 쓴다.
-하네스는 bootstrap 하기 전에 쓰인 server.toml 의 `port` · `advertise` · `data_dir` 이 시험 값인지 확인한다. 시험 서버는
+실기 하네스는 PR7 이 `scripts/acceptance/m5t_live.sh` 로 만든다. 하네스는 bootstrap 하기 전에 쓰인 server.toml 의
+`port` · `advertise` · `data_dir` 이 시험 값인지 확인한다. bootstrap 할 plist 의 `--config` 경로 · `HOME` · 로그 경로 ·
+라벨도 확인한다. 시험 서버는
 `advertise = false` 로 띄운다. 시험 워커와 클라이언트는
 `--server <URL>` 로 서버를 명시한다. 시작하기 전에 셸의 `RCM_*` 환경 변수를 모두 지운다. `HOME` 과 `XDG_CONFIG_HOME` ·
 `XDG_DATA_HOME` · `XDG_STATE_HOME` · `XDG_CACHE_HOME` 넷을 모두 운영과 따로 둔다. 서비스 파일 라벨은 `--label` 로 시험 전용
-값을 주고 운영 라벨이면 실기 하네스가 거절한다. 실기가 끝나면 시험 라벨의 launchd 에이전트만 내리고 지운다. M5s 처럼 `data_dir`
+값을 주고 운영 라벨이면 실기 하네스가 거절한다. 하네스가 운영 라벨로 보는 것은 설치된 유닛의 라벨과 표준 라벨 둘이다. 실기가 끝나면 시험 라벨의 launchd 에이전트만 내리고 지운다. M5s 처럼 `data_dir`
 을 `/tmp` 아래에 두지 않고 알림 훅은 가짜만 쓴다. 보고서는 `docs/acceptance/reports/` 에 둔다.
 
 운영 서버가 `0.0.0.0` 에 bind 한 포트와 같은 포트로 시험 서버가 구체 주소에 bind 하면 macOS 가 연결을 가로채는지는 확인하지
@@ -715,7 +761,8 @@ DB 판을 올리는 PR 은 없다.
 표의 「어디서」 칸은 단위 · e2e · 브라우저 · 실기를 가른다. 시나리오 끝의 `(live)` 는 실기로만 증명하는 행이다. 시험
 이름에는 ID 를 넣는다(결정 251). 어느 행을 단위로, 어느 행을 실기로 증명할지는 첫째 판이 나누고 뒤의 판들이 격리 반박에
 맞춰 고쳤다. PR 에서 바뀔 수 있다. 4판은 M5t-a 범위 밖의 행을 지웠고 남은 행의 번호는 바꾸지 않았다. 새 행은 표마다
-이어지는 번호를 쓴다. 짝짓기 표(TJ)와 결과 고리 표(TF)는 이 문서에서 뺐다.
+이어지는 번호를 쓴다. 짝짓기 표(TJ)와 결과 고리 표(TF)는 이 문서에서 뺐다. 6판은 경로마다 흩어져 있던 원격 금지 행을
+TO15 하나로 묶었다. 묶인 행은 지우지 않고 「TO15 로 묶었다」로 남겼다.
 
 ### TR 역할 · 첫 실행 · setup
 
@@ -737,7 +784,7 @@ DB 판을 올리는 PR 은 없다.
 | TR13 | setup 의 마지막 단계 | 서버 없이 도는 진단(rcm 자신의 요구, 호스트 사실, 설정 파일 검증)만 돌려 조언으로 보인다. 끝에 「서비스를 띄우고 토큰을 넣은 뒤 `rcm doctor --role <r>`」을 출력한다 | 단위 | PR4 |
 | TR14 | setup 과 버전 따라가기 | setup 은 따라가지 않는다(`NO_FOLLOW_COMMANDS`) | 단위 | PR4 |
 | TR15 | 같은 머신에 `worker.toml` 이 이미 있는 상태에서 `coordinator-worker` setup | 막지 않고 경고만 한다 | 단위 | PR4 |
-| TR16 | 새 `data_dir` 의 빈 환경에서 `rcm setup --role coordinator-worker --port <시험 포트> --data-dir <시험 경로> --label <시험 라벨> --bind 127.0.0.1 --no-advertise --yes` 로 설정하고 출력된 명령으로 띄운 뒤 `rcm check` (live) | bootstrap 전에 하네스가 server.toml 의 `port` · `advertise` · `data_dir` 이 시험 값인지 확인한다. 서버가 뜨고 `rcm check` 가 FAIL 없이 끝난다. 정리할 때는 시험 라벨만 내린다 | 실기 | PR7 |
+| TR16 | 새 `data_dir` 의 빈 환경에서 `rcm setup --role coordinator-worker --port <시험 포트> --data-dir <시험 경로> --label <시험 라벨> --bind 127.0.0.1 --no-advertise --yes` 로 설정하고 출력된 명령으로 띄운다. 출력된 `rcm token --config <시험 server.toml> add` 를 시험 빌드로 실행하고, 셸의 `RCM_*` 를 지운 뒤 시험 토큰과 `--server` 로 `rcm check` (live) | bootstrap 전에 하네스가 server.toml 의 `port` · `advertise` · `data_dir` 과 plist 의 `--config` 경로 · `HOME` · 로그 경로 · 라벨이 시험 값인지 확인한다. 서버가 뜨고 `rcm check` 가 FAIL 없이 끝난다. 정리할 때는 시험 라벨만 내린다 | 실기 | PR7 |
 | TR17 | doctor 와 버전 따라가기 | doctor 는 따라가지 않는다(`NO_FOLLOW_COMMANDS`) | 단위 | PR2 |
 | TR18 | `--label` 없는 setup 의 서비스 파일, 같은 라벨의 파일이 이미 있음, 같은 라벨이 이미 로드돼 있음 | 표준 라벨을 쓴다. 있는 파일은 `--force` 없이 덮지 않는다. 로드돼 있으면 경고만 한다. 제품은 운영 라벨이라는 이유로 거절하지 않는다 | 단위 | PR4 |
 | TR19 | 설정 파일 없이 환경변수(`RCM_SERVER` · `RCM_TOKEN`)만 있는 TTY 에서 인자 없는 `rcm` | 「설정 있음」으로 보고 묻지 않는다 | 단위 | PR4 |
@@ -752,6 +799,14 @@ DB 판을 올리는 PR 은 없다.
 | TR28 | setup 의 종료 코드 | 설정을 썼으면 0, 쓰지 못했으면 1, 사용법 오류는 2 | 단위 | PR4 |
 | TR29 | 설정 파일 없이 `RCM_WORKER_TOKEN` 만 있고 서버는 `--server` 로 주는 워커 환경의 TTY 에서 인자 없는 `rcm` | 「설정 있음」으로 보고 묻지 않는다 | 단위 | PR4 |
 | TR30 | `XDG_CONFIG_HOME` 이 있을 때 첫 실행 판정 | 기존 탐색 함수를 그대로 부른다. `server.toml` 과 `client.toml` 은 XDG 쪽과 `~/.config/rcm` 을 둘 다 보고 `worker.toml` 은 `user_config_dir()` 하나만 본다 | 단위 | PR4 |
+| TR31 | 고른 `data_dir` 에 `rcm.sqlite3` 가 이미 있는 setup, 그리고 같은 상황에 `--reuse-data-dir` 를 준 setup | 앞의 것은 거절하고 종료 1 이며 새 폴더를 고르거나 `--reuse-data-dir` 를 주라고 안내한다. 뒤의 것은 그 폴더를 그대로 쓴다 | 단위 | PR4 |
+| TR32 | 고른 포트를 지금 쓰고 있는 setup | 경고한다 | 단위 | PR4 |
+| TR33 | 플래그로 준 `data_dir`, 또는 그 명령의 `HOME` 으로 푼 템플릿 기본값이 운영 `data_dir` 인 `rcm setup` | `tools/guard_production.py` 가 거절한다 | 단위 | PR4 |
+| TR34 | 워크트리 빌드로 돌린 setup 이 쓴 서버 서비스 파일 | setup 을 실행한 빌드(`_this_rcm()`)를 가리킨다 | 단위 | PR4 |
+| TR35 | `--yes` 로 `client` 를 고르고 `--server` 를 주지 않음, `worker` 를 고르고 `--server` · `--pool` · `--lanes` 가운데 하나를 주지 않음 | usage 오류로 종료 2 | 단위 | PR4 |
+| TR36 | 같은 라벨이 로드돼 있는지 보는 setup 과 setup 이 출력하는 복사 명령 | 로드 여부는 `launchctl print` 나 `systemctl --user is-enabled` 같은 읽기 전용 조회로만 본다. 복사 명령은 있는 파일을 덮지 않는 `cp -n` 꼴이다 | 단위 | PR4 |
+| TR37 | 서버 서비스 파일의 로그 경로 | 로그 파일 이름이 라벨에서 만들어진다 | 단위 | PR4 |
+| TR38 | `$RCM_CONFIG` 가 없는 파일을 가리킬 때 역할 읽어 내기 | usage 오류로 종료 2 | 단위 | PR4 |
 
 ### TD 환경 진단
 
@@ -768,7 +823,7 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | TD6 | Rosetta 아래에서 실행 | 실제 arch 를 바로 안다 | 단위 | PR2 |
 | TD7 | 컨테이너 안의 root | rcm 자신의 설치 안내에서 sudo 를 뺀다. `[[tools]]` 에서 온 문구에서는 빼지 않는다 | 단위 | PR2 |
 | TD8 | env 가 있는 프리셋 | 사람용 출력과 JSON 어디에도 env 값이 없다 | 단위 | PR2 |
-| TD9 | `[[tools]]` 문구에 제어문자, 300자 초과, 모르는 OS 키, 같은 이름 두 번 | 기동 실패. `requires` 에 없는 이름은 warn | 단위 | PR2 |
+| TD9 | `[[tools]]` 문구에 제어문자, 300자 초과, 모르는 OS 키, 같은 이름 두 번 | 기동 실패. `requires` 항목에도 프로브 argv[0] 에도 없는 이름은 warn. 프로브 argv[0] 과 맞는 이름은 warn 이 아니다 | 단위 | PR2 |
 | TD10 | mDNS 로 찾은 서버 | 사람이 확인하기 전에는 인증된 요청도 프로브도 보내지 않는다. URL 을 명시한 서버는 이 확인이 없다 | 단위 | PR2 |
 | TD11 | 도구는 다 있고 `checks` 가 남은 프리셋 | `needs_check` 로 적고 ok 라 부르지 않는다 | 단위 | PR2 |
 | TD12 | 진단을 돌린 뒤 서버의 판정 | 진단은 서버에 아무것도 보내지 않고 판정이 바뀌지 않는다 | 단위 | PR2 |
@@ -795,7 +850,7 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | TD33 | `/usr/bin/` 아래이고 바이트에 `libxcselect` 가 있는 실행 파일 | CLT shim 으로 판별한다. 도구 이름 목록을 쓰지 않는다. 같은 규칙이 워커의 프로브 실행에도 걸린다 | 단위 | PR2 |
 | TD34 | `missing` 과 판정 못 함이 함께 있음 | 종료 1(우선순위 1, 3, 0) | 단위 | PR2 |
 | TD35 | 토큰이 없거나 401 | 종료 3 과 「토큰이 필요하다」. 출력 경로에 홈 경로가 없다 | 단위 | PR2 |
-| TD37 | 깨끗한 환경에서 도는 프로브가 보는 환경 변수 | `HOME` · `USER` · `LOGNAME` · `SHELL` · `TMPDIR` 와 서비스 파일의 환경 변수만 있다 | 단위 | PR2 |
+| TD37 | 깨끗한 환경에서 도는 프로브가 보는 환경 변수, launchd 와 systemd 각각 | 그 서비스 관리자의 기본 변수 목록과 서비스 파일의 환경 변수만 있다 | 단위 | PR2 |
 | TD38 | `lanes = 0` 인 `coordinator` 의 doctor | 「올 프리셋이 0개면 1」 대신 `capacity` 규칙으로 끝난다. 모든 프리셋에 갈 수 있는 머신이 없으면 1, 일부 프리셋만 그렇다면 warn | 단위 | PR3 |
 | TD39 | `client` 의 doctor | 서버 도달 · 버전 · 토큰만 본다. 서버에 닿지 못하면 종료 3 | 단위 | PR2 |
 | TD40 | 도구가 빠진 `any-capable` 프리셋 | 「이 머신에는 오지 않음」과 설치 안내를 warn 으로 찍고 종료 코드에 넣지 않는다 | 단위 | PR2 |
@@ -803,13 +858,17 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | TD42 | 서버를 재시작한 뒤 원격 워커의 새 호스트 사실 | 주기적인 `/worker/capabilities` 보고로 다시 채워진다. 받기 전에는 `—` | e2e | PR2 |
 | TD43 | CLT 없는 macOS 에서 `requires` 에 `/usr/bin` shim 도구가 있는 프리셋의 서버 판정 | 서버의 `measure_tools` 에도 shim 규칙이 걸려 doctor 와 판정이 같다 | 단위 | PR2 |
 | TD44 | `read_auth = basic` 인 서버의 `/api/machines` | 새 호스트 사실은 토큰이 있는 쪽에만 실린다 | 단위 | PR2 |
-| TD45 | 서비스 파일 찾는 순서 | `--service-file` 로 명시한 파일, setup 이 쓴 자리, 「서비스 파일 없음」 표시 순이다 | 단위 | PR2 |
-| TD46 | 측정 PATH 를 찍음 | 홈 경로가 `~` 로 가려진다 | 단위 | PR2 |
+| TD45 | 서비스 파일 찾는 순서, 찾은 파일이 둘 이상 | `--service-file` 로 명시한 파일, `<config dir>/service/*`, 표준 라벨의 설치 자리, 「서비스 파일 없음」 표시 순이다. 둘 이상이면 고르게 하고 비TTY 면 종료 2 | 단위 | PR2 |
+| TD46 | 서비스 PATH 와 셸 PATH 를 찍음 | 둘 다 홈 경로가 `~` 로 가려진다 | 단위 | PR2 |
 | TD47 | `--role` 없이 doctor | 설정에서 읽어 낸 역할이 하나면 그 역할로 돈다. 여럿이면 usage 오류로 종료 2 | 단위 | PR2 |
 | TD48 | worker.toml 에 `server = "auto"` | doctor 가 warn 한다 | 단위 | PR2 |
 | TD49 | 설정 파일 없이 `RCM_WORKER_TOKEN` 과 `--server` 만 쓰는 워커의 doctor | 「설정 있음」으로 본다 | 단위 | PR2 |
 | TD50 | macOS 의 Local Network 권한 | 판정하지 않고 안내만 한다 | 단위 | PR2 |
 | TD51 | `/worker/spec` 의 `pools` | 프리셋의 `pools` 키가 그대로 실린다 | 단위 | PR2 |
+| TD52 | CLT 없는 macOS 에서 `/usr/bin` shim 도구를 `measure_tools`, 잡 직전의 `missing_tools`, `preset_env` 측정, `rcm check` 의 도구 행이 각각 판정 | 넷이 같은 판별 함수를 써서 같은 결과를 낸다. `xcode-select` 자신은 shim 으로 판별하지 않는다 | 단위 | PR2 |
+| TD53 | `worker` 역할에서 도구가 빠진 `any-capable` 프리셋이 있고 이 머신에 올 프리셋이 0개 | 종료 1 | 단위 | PR2 |
+| TD54 | doctor 의 호스트 사실 명령과 서버 · 워커의 `[[probes]]` | 앞의 것은 `LANG=C` 로 돌고 뒤의 것에는 `LANG=C` 가 걸리지 않는다 | 단위 | PR2 |
+| TD55 | 서비스 파일에 환경 변수가 있음 | doctor 가 변수 이름만 찍고 값은 찍지 않는다 | 단위 | PR2 |
 
 ### TL 분배 전용 `lanes = 0`
 
@@ -832,27 +891,32 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | TL14 | `capacity` 가 0 인 프리셋이 있음 | 그 프리셋 목록이 `rcm check` 와 `rcm doctor --role coordinator` 에 보인다 | 단위 | PR3 |
 | TL15 | lanes 를 1 이상에서 0 으로 바꿔 재시작하거나 `lanes = 0` 서버에서 reload 로 `local_only` 를 새로 담. 대기 중인 `local_only` 잡과 `@local` 지정 잡이 있음 | 기동이나 reload 때 그 잡에 reason `no_capable_machine` 과 ETA null 이 달린다. 실패로 닫히지 않는다 | 단위 | PR3 |
 | TL16 | `lanes = 0` 서버의 `rcm check` | `local preset tools` · `service preset tools` 행이 FAIL 이 아니라 「이 머신은 잡을 돌리지 않는다」로 그려진다 | 단위 | PR3 |
-| TL17 | `capacity` 를 세는 법, 프리셋이 0개인 설정 | 살아 있고 판정이 eligible 인 머신만 센다. `pool` 프리셋은 그 풀에 살아 있는 레인이 있어야 한다. 프리셋이 0개면 `capacity` 행을 그리지 않는다 | 단위 | PR3 |
+| TL17 | `capacity` 를 세는 법, 프리셋이 0개인 설정 | 후보 함수 결과 가운데 살아 있는 머신만 센다. `checks` 가 없는 `pool` 프리셋은 판정과 상관없이 그 풀의 살아 있는 레인을 센다. 프리셋이 0개면 `capacity` 행을 그리지 않는다 | 단위 | PR3 |
 
 ### TO 원격 금지 표식 `local_only`
 
 <!-- scenario-prefix: TO -->
 | ID | 시나리오 | 확인할 결과 | 어디서 | PR |
 |---|---|---|---|---|
-| TO1 | 프리셋에 `local_only = true`, 그리고 키가 없는 프리셋 | 설정이 받는다. 키가 없으면 false 다 | 단위 | PR1 |
-| TO2 | `local_only` 프리셋의 대기 잡과 그 풀의 원격 워커 | 원격 워커의 claim 에서 빠진다. `capable` 잡도 같다. `--machine` 으로 원격 워커를 지정해 제출하면 제출 때 409 로 거절하고 「이 프리셋은 로컬 레인에서만 돈다」를 사람용 문장으로 돌려준다 | 단위 | PR1 |
-| TO3 | 같은 잡과 로컬 레인 | 로컬 레인이 집는다 | 단위 | PR1 |
+| TO1 | 프리셋에 `local_only = true`, `local_only = true` 이고 `pools = []` 인 프리셋, 그리고 키가 없는 프리셋 | 셋 다 설정이 받는다. 키가 없으면 false 다 | 단위 | PR1 |
+| TO2 | TO15 · TO16 으로 묶었다 | — | — | — |
+| TO3 | `local_only` 프리셋의 대기 잡과 로컬 레인 | 로컬 레인이 집는다 | 단위 | PR1 |
 | TO4 | `lanes = 0` 서버에 `local_only` 프리셋 제출 | 409 와 사람용 이유 문장. 잡이 큐에 들지 않는다 | 단위 | PR3 |
-| TO5 | 원격 워커가 받은 `/worker/spec` | `local_only` 프리셋이 env 와 함께 빠진다 | 단위 | PR1 |
+| TO5 | TO15 로 묶었다 | — | — | — |
 | TO6 | `rcm doctor --role coordinator` | `local_only` 프리셋을 「로컬 레인 필요」로 보인다 | 단위 | PR2 |
 | TO7 | `local_only` 가 없는 프리셋의 대기 잡과 그 풀의 원격 워커 | 지금처럼 원격 워커가 집는다 | 단위 | PR1 |
-| TO8 | `local_only` 프리셋의 대기 계산과 제출 판정 | `placement_for` 의 pool 갈래, `submission_placement`, `_could_receive`, 제출 응답의 `eligible_now` 어디에도 원격 머신이 없다 | 단위 | PR1 |
-| TO9 | `local_only` 이면서 placement 가 `pool` 이고, 풀이 기본 풀이 아니거나 `pools` 에 기본 풀이 없는 프리셋 | 기동 실패 | 단위 | PR1 |
+| TO8 | TO15 로 묶었다 | — | — | — |
+| TO9 | `local_only` 이면서 placement 가 `pool` 이고 `pool` 이 기본 풀이 아닌 프리셋, 그리고 `pool` 은 기본 풀이고 `pools` 에 기본 풀이 아닌 항목이 있는 프리셋 | 앞의 것은 기동 실패다. 뒤의 것은 기동하고 그 풀로 낸 제출이 409 다(TO10) | 단위 | PR1 |
 | TO10 | `local_only` 프리셋을 기본 풀이 아닌 `--pool` 로 제출 | 409 | 단위 | PR1 |
-| TO11 | `checks` 에 쓰인 점검 프리셋이 `local_only` | 자동 점검과 recheck 가 `@local` 만 겨냥한다 | 단위 | PR1 |
-| TO12 | 같은 점검 프리셋과 `lanes = 0` 서버 | 「갈 곳 없음」으로 보이고 점검 잡을 만들지 않는다 | 단위 | PR3 |
+| TO11 | TO15 로 묶었다 | — | — | — |
+| TO12 | `checks` 에 쓰인 `local_only` 점검 프리셋과 `lanes = 0` 서버 | 「갈 곳 없음」으로 보이고 점검 잡을 만들지 않는다 | 단위 | PR3 |
 | TO13 | supersede 나 합류할 대상이 있는데 409 가 날 `local_only` 제출 | 409 검사가 supersede 와 합류보다 먼저 돈다 | 단위 | PR1 |
-| TO14 | 원격 claim 의 네 갈래(지정 · `pool` · `capable` · `known`) | 어느 갈래로도 `local_only` 잡이 원격 워커에 가지 않는다. 거르기는 WHERE 전체에 걸린다 | 단위 | PR1 |
+| TO14 | TO15 로 묶었다 | — | — | — |
+| TO15 | `local_only` 프리셋과 그 풀의 살아 있는 원격 워커를 두고 한 시험에서 여러 진입점을 부른다. 배치(`placement_for` 의 지정 · capable · pool 갈래)와 ETA, 제출 응답의 `eligible_now`, `capacity`, 자동 점검과 recheck 의 대상과 점검 정체 판정, `/worker/spec`, 원격 claim 의 네 갈래(지정 · `pool` · `capable` · `known`) | 어느 진입점에서도 원격 머신이 그 프리셋의 후보에 나타나지 않는다. `/worker/spec` 에서는 프리셋이 env 와 함께 빠진다. 로컬 레인은 지금처럼 집는다. 후보 함수의 원격 제외를 지운 변이에서는 이 시험이 빨개진다 | 단위 | PR1(`capacity` 진입점은 PR3) |
+| TO16 | 후보가 빈 `local_only` 제출. `--machine` 으로 원격 워커를 지정, `local_accept_any = false` 인데 `any-capable`, `@local` 판정이 ineligible | 제출 때 409 와 사람용 문장으로 거절하고 이유 코드는 기존 꼴이다. 원격 워커를 지정한 제출의 문장은 「이 프리셋은 로컬 레인에서만 돈다」다. 잡이 큐에 들지 않는다 | 단위 | PR1 |
+| TO17 | 원격 워커를 지정한 잡, 기본 풀이 아닌 풀의 잡, 예약 잡이 대기 중일 때 reload 로 그 프리셋에 `local_only` 를 새로 달거나 서버를 재시작 | 같은 후보 함수로 다시 계산되어 모두 reason `no_capable_machine` 과 ETA null 로 보인다. 실패로 닫히지 않는다 | 단위 | PR1 |
+| TO18 | `local_only` 가 아닌 프리셋 P 의 `checks` 에 `local_only` 점검 프리셋 C 가 있고 원격 머신이 P 를 받을 자리에 있음 | 그 원격 머신에서 P 는 「오지 않음(점검이 로컬 전용)」이고 check_pending 이 아니다. doctor 는 「점검 필요」를 찍지 않는다 | 단위 | PR1 · PR2 |
+| TO19 | `rcm recheck <원격 머신> <C>`, C 는 `local_only` 점검 프리셋 | 409 | 단위 | PR1 |
 
 ### TN 요청자에게 알리기
 
@@ -869,6 +933,7 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | TN8 | macOS 에서 `rcm wait --notify` (live) | OS 알림이 뜬다 | 실기 | PR7 |
 | TN9 | `ran_on` 계산 | 원격이면 `worker`, 로컬 레인이면 로컬 머신의 `display_name` 이다. 이름을 모르면 null 이고 `host_key` 로 이름을 만들지 않는다 | 단위 | PR5 |
 | TN10 | 산출물 상태가 `failed` · `dropped` · `unavailable` · `unknown` 인 잡, wait 가 끝날 때 아직 `collecting` · `uploading` 인 잡 | 앞의 넷은 경고 줄이 나오고 뒤의 둘은 「수집 중」 안내가 나온다. 종료 코드는 그대로다 | 단위 | PR5 |
+| TN11 | 시작하지 못한 잡(`started_at` 없음)의 `rcm wait` 와 `[[notify]]` 훅 | `ran_on` 과 `RCM_MACHINE` 이 null 이다. 둘 다 `started_at` 이 있는 잡에서만 계산된다 | 단위 | PR5 |
 
 ### 변이 검사
 
@@ -877,7 +942,7 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 
 - doctor 가 `unknown` 을 0 으로 끝낸다
 - `lanes = 0` 에서 `@local` 을 살아 있다고 본다
-- 원격 claim 에서 `local_only` 거르기를 뺀다(PR1)
+- 후보 머신 함수에서 `local_only` 의 원격 제외를 지운다(PR1, TO15)
 
 ## 8. 개인정보 점검
 
@@ -900,14 +965,15 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 
 | 위험 | 막는 법 |
 |---|---|
-| 원격 워커가 되돌릴 수 없는 프리셋(배포 · 스토어)의 잡을 집는다. 기본 풀에 붙인 원격 워커라면 지금도 그렇다(D10) | `local_only` 표식을 단 프리셋은 서버가 원격 claim 에서 뺀다(254, TO2). 표식이 없는 프리셋은 지금처럼 원격에서 돌 수 있으므로 앱 프로젝트의 release-* · deploy-* 프리셋에 표식을 단다(§6 의 10) |
-| 원격 워커를 지정한 `local_only` 제출이 영원히 대기한다 | 제출 때 409 로 거절한다(254, TO2) |
+| 원격 워커가 되돌릴 수 없는 프리셋(배포 · 스토어)의 잡을 집는다. 기본 풀에 붙인 원격 워커라면 지금도 그렇다(D10) | `local_only` 표식을 단 프리셋은 후보 함수가 원격 머신을 빼고 원격 claim 도 그 결과를 쓴다(254, TO15). 표식이 없는 프리셋은 지금처럼 원격에서 돌 수 있으므로 앱 프로젝트의 release-* · deploy-* 프리셋에 표식을 단다(§6 의 10) |
+| 원격 워커를 지정한 `local_only` 제출이 영원히 대기한다 | 후보가 비므로 제출 때 409 로 거절한다(254, TO16) |
+| 새로 생긴 경로가 후보 함수를 거치지 않아 `local_only` 잡이 원격 머신에 간다 | 한 시험이 여러 진입점에서 후보를 확인하고, 후보 함수의 원격 제외를 지운 변이에서 그 시험이 빨개진다(254, TO15) |
 | setup 이 `~/Library/LaunchAgents/` 에 쓴 서비스 파일이 다음 로그인 때 저절로 올라온다 | 설정 폴더 아래에 쓰고 복사와 bootstrap 명령만 출력한다(241, TR24) |
 | `--yes` 로 고른 역할 2·4 가 설치하자마자 LAN 에 열린다 | `--bind` 를 필수로 둔다(241, TR23) |
 | mDNS 로 찾은 위장 서버가 doctor 나 `worker --check` 에 프로브 argv 로 임의 명령을 돌리게 한다 | 진단은 찾은 서버에 인증된 요청과 프로브를 보내기 전에 사람의 확인을 받는다(246, TD10 · TD28) |
 | `rcm token add` 의 stdout 이 서비스 로그에 남는다 | setup 은 토큰을 만들지 않고 되풀이해 찍지 않는다(TR8 · TR21) |
 | 토큰을 인자로 넘겨 `ps` 에 보인다 | setup 은 토큰을 받지 않고 얻는 길만 안내한다. 워커 토큰은 지금도 플래그로 줄 수 없다(`config.py:1794-1795`) |
-| 마법사가 운영 DB 를 열어 마이그레이션하거나 운영 설정을 덮는다 | setup 은 Store 를 열지 않는다(TR9). setup · doctor 는 DB 를 열지 않으므로 guard 의 DB 명령 목록에 넣지 않는다. 대신 setup 이 운영 설정 경로에 쓰거나 운영 라벨의 서비스 파일을 쓰려 하면 guard 가 거절한다(PR4, TR20) |
+| 마법사가 운영 DB 를 열어 마이그레이션하거나 운영 설정을 덮는다. setup 이 쓴 서비스 파일은 setup 을 실행한 빌드를 가리키므로 워크트리 빌드로 돌린 setup 이 운영 `data_dir` 을 고르면 그 빌드가 운영 DB 를 연다 | setup 은 Store 를 열지 않는다(TR9). 고른 `data_dir` 에 DB 가 이미 있으면 setup 이 거절한다(TR31). setup · doctor 는 DB 를 열지 않으므로 guard 의 DB 명령 목록에 넣지 않는다. 대신 setup 이 운영 설정 경로에 쓰거나 운영 라벨의 서비스 파일을 쓰거나 운영 `data_dir` 을 고르면 guard 가 거절한다(PR4, TR20 · TR33 · TR34) |
 | 실기를 운영 머신에서 한다 | 시험 서버는 `advertise = false` 로 띄우고 시험 워커와 클라이언트는 URL 을 명시한다. 셸의 `RCM_*` 환경 변수를 모두 지우고 `HOME` 과 XDG 폴더 넷을 따로 둔다. 운영 라벨과 같은 `--label` 은 실기 하네스가 거절하고 실기 뒤에는 시험 라벨의 launchd 에이전트만 내리고 지운다. setup 은 시험 포트 · 데이터 폴더 · 라벨을 명시하고 `--no-advertise` 로 돌린다. 하네스는 bootstrap 전에 server.toml 의 값이 시험 값인지 확인한다(§7, TR16) |
 | macOS 로컬 네트워크 권한 때문에 「다 됐다」 뒤에도 서버를 못 찾는다 | doctor 는 이 권한을 판정할 수 없으므로 rcm 자신의 요구에서 안내만 한다(246, TD50) |
 | 비TTY 에서 질문을 띄워 멈춘다 | 첫 실행 질문은 TTY 에서만(240, TR1) |
@@ -915,7 +981,7 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | 서버가 보낸 설치 문구에 제어문자가 섞여 있다 | 워커가 찍기 전에 제어문자를 정리한다(TD32) |
 | 헤드리스 서비스에서 CLT 설치 대화상자가 되풀이된다 | `libxcselect` 로 판별하는 macOS shim 규칙(246, TD1 · TD33). Java 스텁은 이 방법으로 판별되지 않는다(§4.5) |
 | 셸에서는 ok 인데 서비스에서는 도구가 없다 | `env -i` 와 서비스 관리자의 기본 변수에 서비스 파일의 환경 변수만 더해 잰다. 셸 결과와 다르면 표시한다(246, TD2 · TD29 · TD37) |
-| `/worker/spec` 이 프리셋 env 를 워커에 준다 | `local_only` 프리셋은 보내지 않는다(254, TO5). 진단은 env 값을 찍지 않고 결과를 올리지 않는다(TD8 · TD12) |
+| `/worker/spec` 이 프리셋 env 를 워커에 준다 | `local_only` 프리셋은 후보 함수가 원격 워커를 빼므로 보내지 않는다(254, TO15). 진단은 env 값을 찍지 않고 결과를 올리지 않는다(TD8 · TD12) |
 | `git ls-remote` 가 자격 증명으로 실제 접속한다 | `--offline`(TD17) |
 
 아래는 이 명세로 막지 못하고 남는 위험이다.
@@ -926,6 +992,8 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | 망이 60초 넘게 끊기면 원격 잡이 `lost` 가 되고 돌아온 워커가 프로세스를 죽인다(E10) | 바꾸지 않는다. M5t-b 가 결정 253 으로 구현한다 |
 | `server = "auto"` 인 `rcm worker` 가 mDNS 로 찾은 위장 서버에 붙는다. 토큰이 새는 데서 그치지 않는다. claim 으로 받은 프리셋 argv 와 프로브로 그 머신에서 임의 명령이 돈다 | `rcm worker` 의 찾기는 바꾸지 않는다. setup 의 워커 경로는 `auto` 를 쓰지 않고 명시 URL 을 쓴다(TR26). doctor 는 worker.toml 의 `server = "auto"` 를 warn 하고(TD48) 찾은 서버에 요청과 프로브를 보내기 전에 확인을 받는다. 서버 신원 확인은 M5t-c 의 위협 모델에서 다룬다 |
 | 같은 망에서 평문으로 오가는 토큰 엿보기(TLS 없음, 결정 5) | 바꾸지 않는다. M5t-c 의 위협 모델에서 다룬다 |
+| `local_only` 를 단 프리셋이 있는 채로 운영을 v0.11.0 미만으로 되돌리면 그 키를 모르는 서버가 기동하지 못한다(§6 의 10 아래 문단) | 롤백 함정이다. 운영을 v0.11.0 아래로 되돌리기 전에 앱 프로젝트 프리셋의 `local_only` 줄을 먼저 빼고, 그 프리셋을 읽는 모든 서버가 옛 판으로 기동하는지 확인한다(§6 의 17) |
+| `lanes = 0` 서버에서 원격 claim 의 롱폴이 0.5초마다 DB 를 묻는 폴링이 된다 | 위험으로 적어 둔다. M5t-a 에서는 고치지 않는다. 롱폴이 DB 를 묻는 간격을 어떻게 할지는 결과 고리를 다시 짜는 M5t-b 가 정한다 |
 
 ## 10. Codex 초안과 달라진 점
 
@@ -939,10 +1007,10 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | 워커 연결이 끊기면 실행 중 잡은 `lost` | M5t-a 는 바꾸지 않는다. M5t-b 는 되돌릴 수 없는 프리셋만 유예 뒤 워커가 스스로 멈추게 하고 나머지는 계속 돌게 한다 | 253 |
 | 산출물 전송이 실패하면 단순 성공으로 보고하지 않는다 | 잡 결과는 그대로 두고 이미 있는 `artifacts.state` 를 사람용 줄과 경고 줄로 알린다 | 248 e |
 | 서버가 최종 상태를 확정한 뒤 OS 알림이나 webhook 을 보낼 수 있다 | 요청 머신 알림은 클라이언트 쪽 `rcm wait --notify` 다. 서버 webhook 은 만들지 않는다 | 248 f, ⛔ Q3 |
-| `coordinator` 의 `lanes = 0` 은 로컬 워커 스레드를 안 띄우고 원격이 없으면 대기 | 같다. `@local` · `eligible_now` · 자동 점검 · 헬스 `capacity` · TXT · 결정 39 · 화면까지 따라오는 일을 모두 적었다 | 243, ⛔ Q5 |
+| `coordinator` 의 `lanes = 0` 은 로컬 워커 스레드를 안 띄우고 원격이 없으면 대기 | 같다. `@local` · `eligible_now` · 자동 점검 · 헬스 `capacity` · TXT · 결정 39(M5f) · 화면까지 따라오는 일을 모두 적었다 | 243, ⛔ Q5 |
 | 역할 4 에서는 `rcm worker` 를 띄우지 않는다 | 기본은 같다. 이미 둘째 워커를 쓰는 운영 구성은 허용하고 경고만 한다 | 242 |
 | 환경 진단이 없다. 워커 setup 이 도구와 probe 를 검사한다고만 적었다 | `rcm doctor`, `[[tools]]`, rcm 자신의 요구, 서버 설정 템플릿의 툴체인 카탈로그 | 246·247 |
-| 원격 금지 표식이 없다 | 프리셋 `local_only` | 254 |
+| 원격 금지 표식이 없다 | 프리셋 `local_only` 와 그 프리셋의 후보를 `@local` 하나로 두는 후보 함수 | 254 |
 | PR 다섯 | 명세 PR 과 PR 일곱을 물결로 나눴다 | §5 |
 
 ## 11. 결정 표
@@ -951,18 +1019,18 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 
 | # | 항목 | 정한 것 | 오너 확인 | Codex 초안과 다른 점 |
 |---|---|---|---|---|
-| 239 | 역할 | `client` · `coordinator` · `worker` · `coordinator-worker`. 새 파일에 적지 않고 있는 설정 파일에서 읽어 낸다. 설정 탐색 순서는 `$RCM_CONFIG`, `./rcm.toml`, 사용자 설정 폴더, 환경변수만 쓰는 클라이언트와 워커이고 환경변수만 있어도 「설정 있음」이다. `$RCM_CONFIG` 와 `./rcm.toml` 은 서버 설정으로 읽는다. 첫 실행 판정은 기존 탐색 함수를 그대로 부른다. server · client 는 XDG 를 먼저 보고 둘 다 보며 worker 는 `user_config_dir()` 하나다 | 추천 | — |
+| 239 | 역할 | `client` · `coordinator` · `worker` · `coordinator-worker`. 새 파일에 적지 않고 있는 설정 파일에서 읽어 낸다. 설정 탐색 순서는 `$RCM_CONFIG`, `./rcm.toml`, 사용자 설정 폴더, 환경변수만 쓰는 클라이언트와 워커이고 환경변수만 있어도 「설정 있음」이다. `$RCM_CONFIG` 가 없는 파일이면 종료 2. `$RCM_CONFIG` 와 `./rcm.toml` 은 서버 설정으로 읽는다. 첫 실행 판정은 기존 탐색 함수를 그대로 부른다. server · client 는 XDG 를 먼저 보고 둘 다 보며 worker 는 `user_config_dir()` 하나다 | 추천 | — |
 | 240 | 첫 실행 | 인자 없는 `rcm` 은 stdin · stderr 가 TTY 이고 설정이 하나도 없을 때만 묻는다. 그 밖에는 종료 2. `rcm setup`, `rcm setup --role <r> --yes` | 추천 | stdin 과 stderr 가 모두 TTY 일 때로 명시 |
-| 241 | setup | 기존 `init` 조립, 덮지 않음(`--force`), `--port` · `--data-dir`(절대 경로) · `--advertise`/`--no-advertise` · `--label` 을 받고 대화형에서도 묻기, 서버 서비스 파일 추가(필수 키는 fd 상한 4096 · `HOME` · `WorkingDirectory` · 로그 경로 · PATH 규칙, `<config dir>/service/<label>` 에 쓰고 복사와 bootstrap 명령을 출력, `--service-file` 이 먼저, 표준 라벨이 기본, `--label`, 있는 파일은 덮지 않음, 같은 라벨이 로드돼 있으면 경고만), 등록·시작은 안 하고 명령만, 역할 2·4 의 bind 는 Tailscale 추천(고르면 `advertise = false` 와 tailnet 읽기 공개 경고) · 없으면 LAN 주소(DHCP 예약 권고)나 `0.0.0.0` · 그때 읽기 공개 경고 · 직접 입력은 이 머신의 인터페이스 주소만 · `--yes` 면 `--bind` 필수(없으면 종료 2, 결정 33 의 뜻 유지), 역할별 토큰 안내(coordinator 는 client 권한 토큰 명령과 `--worker` 토큰 명령을 출력, client 는 `RCM_TOKEN`, worker 는 `rcm token add --worker` 와 명시 URL 이고 `auto` 는 쓰지 않음, 서비스로 띄운 워커는 파일의 `token` 만 씀, `init client` 의 `auto` 거절 유지), 마지막에는 서버 없이 도는 진단만 조언으로 보이고 `rcm doctor --role <r>` 를 안내, 종료 0(썼음) · 1(못 씀) · 2(사용법), 어떤 Store 도 열지 않음, 운영 설정 경로와 운영 라벨은 guard 가 거절(guard 는 setup 과 같은 규칙으로 경로를 계산), `NO_FOLLOW_COMMANDS` 에 setup(PR4) · doctor(PR2) | ⛔ Q9 · Q10 · Q14 | 서비스 시작 안 함 |
+| 241 | setup | 기존 `init` 조립, 덮지 않음(`--force`), `--port` · `--data-dir`(절대 경로) · `--advertise`/`--no-advertise` · `--label` 을 받고 대화형에서도 묻기, 고른 `data_dir` 에 `rcm.sqlite3` 가 있으면 거절(종료 1, 그대로 쓰려면 `--reuse-data-dir`), 쓰는 중인 포트는 경고, 역할별 `--yes` 필수 인자(client `--server`, worker `--server` · `--pool` · `--lanes`, coordinator 계열 `--bind`), 서버 서비스 파일 추가(필수 키는 fd 상한 4096 · `HOME` · `WorkingDirectory` · 로그 경로 · PATH 규칙, `<config dir>/service/<label>` 에 쓰고 복사와 bootstrap 명령을 출력, `--service-file` 이 먼저, 표준 라벨이 기본, `--label`, 있는 파일은 덮지 않음, 같은 라벨이 로드돼 있으면 경고만이고 로드 여부는 읽기 전용 조회로만, 복사 명령은 `cp -n` 꼴, 로그 파일 이름은 라벨에서, 서비스 파일은 setup 을 실행한 빌드를 가리킴), 등록·시작은 안 하고 명령만, 역할 2·4 의 bind 는 Tailscale 추천(고르면 `advertise = false` 와 tailnet 읽기 공개 경고) · 없으면 LAN 주소(DHCP 예약 권고)나 `0.0.0.0` · 그때 읽기 공개 경고 · 직접 입력은 이 머신의 인터페이스 주소만 · `--yes` 면 `--bind` 필수(없으면 종료 2, 결정 33 의 뜻 유지), 역할별 토큰 안내(coordinator 는 client 권한 토큰 명령과 `--worker` 토큰 명령을 출력, client 는 `RCM_TOKEN`, worker 는 `rcm token add --worker` 와 명시 URL 이고 `auto` 는 쓰지 않음, 서비스로 띄운 워커는 파일의 `token` 만 씀, `init client` 의 `auto` 거절 유지), 마지막에는 서버 없이 도는 진단만 조언으로 보이고 `rcm doctor --role <r>` 를 안내, 종료 0(썼음) · 1(못 씀) · 2(사용법), 어떤 Store 도 열지 않음, 운영 설정 경로 · 운영 라벨 · 운영 `data_dir`(플래그로 준 값이나 그 명령의 `HOME` 으로 푼 템플릿 기본값)은 guard 가 거절(guard 는 setup 과 같은 규칙으로 경로를 계산), `NO_FOLLOW_COMMANDS` 에 setup(PR4) · doctor(PR2) | ⛔ Q9 · Q10 · Q14 | 서비스 시작 안 함 |
 | 242 | `coordinator-worker` | 지금의 `rcm serve`(`lanes ≥ 1`). 같은 머신의 `rcm worker` 는 기본이 아니며 있으면 경고만 | 추천(운영 빌드 머신을 역할 4 로 쓰는 것은 오너가 2026-11-24 에 정했다) | 둘째 워커 허용 |
-| 243 | 분배 전용 `lanes = 0` | 허용. `@local` 살아 있지 않음 · `--machine @local` 은 409 와 「이 서버에는 로컬 레인이 없다」 · 로컬 프로브 생략 · `eligible_now` 제외 · 자동 점검 제외 · 헬스 `capacity` 는 「갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수」(HTTP 상태 그대로) · `rcm check` FAIL 과 0 인 프리셋 목록 · TXT `lanes=0` · 결정 39 개정(PR3) · 화면 손질 · 호스트 카드 표시 · 기동과 reload 때 갈 곳 잃은 `local_only` · `@local` 지정 잡에 `no_capable_machine` 과 ETA null(실패로 닫지 않음) · `lanes = 0` 이면 `rcm check` 의 local · service preset tools 행은 「이 머신은 잡을 돌리지 않는다」 · 갈 수 있는 머신은 살아 있고 판정이 eligible 인 머신(pool 프리셋은 그 풀의 살아 있는 레인) · 프리셋 0개면 `capacity` 행 없음 | ⛔ Q5 | 따라오는 일 목록 |
-| 246 | 환경 진단 | `rcm doctor`(역할 넷), 깨끗한 환경(`env -i` + 서비스 관리자의 기본 변수 + 서비스 파일의 환경 변수)으로 측정, 서비스 파일 찾는 순서(`--service-file`, setup 이 쓴 자리, 없음 표시), `--role` 생략 규칙(읽어 낸 역할이 하나면 그것, 여럿이면 종료 2), coordinator 계열의 서버 쪽 값은 로컬 server.toml 과 client 토큰으로 `/api/health` · `/api/machines` 를 읽어 얻음(DB 안 엶, 토큰 없으면 `—` 와 종료 3), 측정 PATH 의 홈은 `~` 로, `/worker/spec` 키 추가(`pools` 는 프리셋 키 그대로), 상태 넷과 넷, `[[tools]]`, 호스트 사실(토큰 있는 응답에만, `read_auth = basic` 에서도 같음, 주기 보고에도 실음), rcm 자신의 요구(sudo 빼기는 이 안내에만, Local Network 는 안내만), `libxcselect` 로 판별하는 shim 규칙(워커 프로브와 서버의 `measure_tools` 에도, Java 스텁은 판별 안 됨), 종료 0·1·2·3 과 우선순위 1 > 3 > 0, 종료 1 은 이 머신이 든 풀의 `pool` 프리셋에 빠진 도구 · rcm 자신의 요구 FAIL · 역할별 규칙에만, 도구가 빠진 `any-capable` 프리셋은 warn, 역할별 종료 규칙(worker 계열은 대상 0개면 1, coordinator 는 `capacity`, client 는 도달 · 버전 · 토큰만), 워크스페이스 안 도구는 `pool` 프리셋이면 warn 이고 `any-capable` 이면 「오지 않음」, coordinator 진단은 못 가는 프리셋과 `local_only` 프리셋(「로컬 레인 필요」)을 알림, 조언일 뿐, mDNS 로 찾은 서버는 인증된 요청과 프로브 전에 확인, worker.toml 의 `server = "auto"` 는 warn, `worker --check` 두 줄(버전 행은 따라갈 수 있으면 warn 이고 없으면 FAIL, 비TTY `auto` 에서 새 종료 3), 서버 설정 템플릿 주석 블록의 카탈로그, 코어의 도구 이름은 호스트 사실용 허용 목록만. 3판 결정 245 의 진단 부분을 여기에 합쳤다 | ⛔ Q7 · Q8 | 신설 |
+| 243 | 분배 전용 `lanes = 0` | 허용. `@local` 살아 있지 않음 · `--machine @local` 은 409 와 「이 서버에는 로컬 레인이 없다」 · 로컬 프로브 생략 · `eligible_now` 제외 · 자동 점검 제외 · 헬스 `capacity` 는 「갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수」(HTTP 상태 그대로) · `rcm check` FAIL 과 0 인 프리셋 목록 · TXT `lanes=0` · 결정 39(M5f) 개정(PR3) · 화면 손질 · 호스트 카드 표시 · 기동과 reload 때 갈 곳 잃은 `local_only` · `@local` 지정 잡에 `no_capable_machine` 과 ETA null(실패로 닫지 않음) · `lanes = 0` 이면 `rcm check` 의 local · service preset tools 행은 「이 머신은 잡을 돌리지 않는다」 · 갈 수 있는 머신은 후보 함수(254) 결과 가운데 살아 있는 머신(`checks` 없는 pool 프리셋은 판정과 상관없이 그 풀의 살아 있는 레인) · 프리셋 0개면 `capacity` 행 없음 | ⛔ Q5 | 따라오는 일 목록 |
+| 246 | 환경 진단 | `rcm doctor`(역할 넷, `--server` · `--config`), 깨끗한 환경(`env -i` + launchd · systemd 별 기본 변수 + 서비스 파일의 환경 변수)으로 측정, 서비스 파일 찾는 순서(`--service-file`, `<config dir>/service/*`, 표준 라벨의 설치 자리, 없음 표시. 둘 이상이면 고르게 하고 비TTY 면 종료 2), `--role` 생략 규칙(읽어 낸 역할이 하나면 그것, 여럿이면 종료 2), coordinator 계열의 서버 쪽 값은 로컬 server.toml 과 client 토큰으로 `/api/health` · `/api/machines` 를 읽어 얻음(DB 안 엶, 토큰 없으면 `—` 와 종료 3), 서비스 PATH 와 셸 PATH 의 홈은 모두 `~` 로, 서비스 파일 env 는 이름만, `/worker/spec` 키 추가(`pools` 는 프리셋 키 그대로), 상태 넷과 넷, `[[tools]]`(이름은 `requires` 나 프로브 argv[0] 과 맞춤), 호스트 사실(토큰 있는 응답에만, `read_auth = basic` 에서도 같음, 주기 보고에도 실음), rcm 자신의 요구(sudo 빼기는 이 안내에만, Local Network 는 안내만), `libxcselect` 로 판별하는 shim 규칙(판별 함수 하나를 워커 프로브와 `measure_tools` · `missing_tools` · `preset_env` · `rcm check` 도구 행이 함께 씀, `xcode-select` 자신은 판별에서 뺌, Java 스텁은 판별 안 됨), `LANG=C` 는 doctor 의 호스트 사실 명령에만, 종료 0·1·2·3 과 우선순위 1 > 3 > 0, 종료 1 은 이 머신이 든 풀의 `pool` 프리셋에 빠진 도구 · rcm 자신의 요구 FAIL · 역할별 규칙에만, 도구가 빠진 `any-capable` 프리셋은 warn, 역할별 종료 규칙(worker 계열은 대상 0개면 1 이고 도구 빠진 `any-capable` warn 과 함께여도 1, coordinator 는 `capacity`, client 는 도달 · 버전 · 토큰만), 워크스페이스 안 도구는 `pool` 프리셋이면 warn 이고 `any-capable` 이면 「오지 않음」, coordinator 진단은 못 가는 프리셋과 `local_only` 프리셋(「로컬 레인 필요」)을 알림, `local_only` 점검이 걸린 프리셋은 원격 머신에서 「점검 필요」가 아니라 「오지 않음(점검이 로컬 전용)」, 조언일 뿐, mDNS 로 찾은 서버는 인증된 요청과 프로브 전에 확인, worker.toml 의 `server = "auto"` 는 warn, `worker --check` 두 줄(버전 행은 따라갈 수 있으면 warn 이고 없으면 FAIL, 비TTY `auto` 에서 새 종료 3), 서버 설정 템플릿 주석 블록의 카탈로그, 코어의 도구 이름은 호스트 사실용 허용 목록만. 3판 결정 245 의 진단 부분을 여기에 합쳤다 | ⛔ Q7 · Q8 | 신설 |
 | 247 | `checks` 없는 프리셋 | 지금처럼 도구가 있으면 eligible | ⛔ Q6 | — |
-| 248 e · f | 요청자 알림 | e 이미 있는 `artifacts.state` 를 사람용 줄과 경고에(경고는 failed · dropped · unavailable · unknown, 끝날 때 collecting · uploading 이면 「수집 중」) · f 사람용 줄과 `ran_on` 키(저장 칸 없이 서버가 원격은 `worker`, 로컬은 `display_name` 으로 계산하고 모르면 null), `RCM_MACHINE`, `rcm wait --notify`(`rcm run` 에는 없음), 결정 6 문장 정정(PR5) | ⛔ Q3 | 클라이언트 쪽 알림 |
+| 248 e · f | 요청자 알림 | e 이미 있는 `artifacts.state` 를 사람용 줄과 경고에(경고는 failed · dropped · unavailable · unknown, 끝날 때 collecting · uploading 이면 「수집 중」) · f 사람용 줄과 `ran_on` 키(저장 칸 없이 서버가 원격은 `worker`, 로컬은 `display_name` 으로 계산하고 모르면 null, `started_at` 이 없으면 null), `RCM_MACHINE`(`started_at` 이 있을 때만), `rcm wait --notify`(`rcm run` 에는 없음), 결정 6 문장 정정(PR5) | ⛔ Q3 | 클라이언트 쪽 알림 |
 | 251 | 개발 방식 | 개발 루프 스킬로 돈다. 시나리오 표마다 `scenario-prefix` 표지(접두어 TR · TD · TL · TN · TO), 시험 이름에 ID, `tools/scenario_trace.py` 대조, PR 마다 라운드당 격리 검증 2명, `verify-round:` 댓글. 스킬 PR 이 먼저 머지된다는 전제이고 아니면 손으로 | 추천 | — |
 | 252 | 범위 나누기 | M5t 를 셋으로 나눈다. 이번 명세 PR 은 M5t-a(역할 · 첫 실행 setup · `lanes = 0` 분배 전용 · `rcm doctor` OS 진단 · 요청자 알림)만 담고 4라운드 검증을 받는다. M5t-b(결과 고리 프로토콜: 세션 · 로그 오프셋 · 끊김 유예)와 M5t-c(짝짓기 · 서버 신원 보안)는 상태 전이 표와 위협 모델부터 쓰는 별도 명세로 한다 | 오너가 정함(2026-11-25, 「셋으로 나눈다」) | — |
 | 253 | 끊김 정책 | 배포 · 스토어처럼 두 번 돌면 안 되는 프리셋에만 표식을 두고, 그 잡은 유예(약 10분)가 지나면 워커가 스스로 멈춘다. 결과는 「모름」(종료 3)이다. 게이트 · 시험 같은 나머지는 계속 돈다. M5t-b 가 구현한다 | 오너가 정함(2026-11-25, 「되돌릴 수 없는 것만 멈춤」) | — |
-| 254 | 원격 금지 표식 | 프리셋 설정에 `local_only = true` 를 두고 기본은 지금처럼 원격 허용. 이 레포를 쓰는 앱 프로젝트의 release-* · deploy-* 프리셋에 표식을 단다. DB 변경 없음. 서버는 원격 claim 에서 그 잡을 주지 않는다(fail-closed). `/worker/spec` 은 그 프리셋을 원격 워커에 보내지 않는다. `lanes = 0` 서버에 제출하면 409 와 사람용 이유 문장. `--machine <원격 워커>` 와 기본 풀이 아닌 `--pool` 제출도 409 이고 이 409 검사는 supersede · 합류보다 먼저 한다. 대기 계산(`placement_for`) · 제출 판정(`submission_placement`, `eligible_now`) · `_could_receive` 에서도 원격 머신을 뺀다. claim 거르기는 `_claimable` 의 WHERE 전체에 건다. `local_only` 이면서 기본 풀이 아닌 `pool` 프리셋은 기동 실패. `local_only` 점검 프리셋의 자동 점검과 recheck 는 `@local` 만 겨냥한다. coordinator 진단은 「로컬 레인 필요」로 표시. M5t-a 의 PR1 이 구현하고 `lanes = 0` 쪽은 PR3 이 구현한다. 이 표식을 단 프리셋을 읽는 서버는 모두 v0.11.0 이상이어야 하므로 앱 프로젝트에 다는 일은 운영 반영 뒤다 | 오너가 정함(2026-11-25, 「프리셋에 명시 표식」). `lanes = 0` 제출의 409 는 결정 파일의 추천을 넷째 판이 정했다. 원격 워커 지정 제출의 409 와 나머지 세부는 4라운드 결정 파일이 정했다 | 신설 |
+| 254 | 원격 금지 표식 | 프리셋 설정에 `local_only = true` 를 두고 기본은 지금처럼 원격 허용. 이 레포를 쓰는 앱 프로젝트의 release-* · deploy-* 프리셋에 표식을 단다. DB 변경 없음. 정의는 한 문장이다. 「`local_only = true` 인 프리셋에게 이 서버의 머신 목록은 `@local` 하나뿐이다.」 서버는 프리셋별 후보 머신 함수 하나(예: `machines_for(preset)`)를 두고, 배치(`placement_for` 의 지정 · capable · pool 세 갈래) · 제출 판정(`submission_placement`, `eligible_now`) · `_could_receive` · `capacity` · 점검 정체 판정(`_stalled_checks` · `_why_none`) · 자동 점검과 recheck 의 대상 · `/worker/spec` 의 프리셋 목록 · 원격 claim 의 WHERE 가 모두 그 결과를 쓴다. 한 시험이 여러 진입점에서 이를 확인하고(TO15) 원격 제외를 지운 변이에서 빨개진다. `@local` 이 받을 수 없으면 후보가 비고, 후보가 빈 잡은 기존 「갈 곳 없음」(`no_capable_machine`, ETA null)을 따른다(새 분기 없음). 제출 때 후보가 비면 409 와 사람용 문장(이유 코드는 기존 꼴)이고 원격 워커 지정도 409. 기동 · reload 때 대기 잡도 같은 함수로 다시 계산. 설정 검증은 하나만 남긴다. `local_only` 인 `pool` 프리셋의 `pool` 은 기본 풀이어야 하고 `pools` 의 기본 풀이 아닌 항목은 제출 409 로 막는다. `local_only` 점검이 걸린 프리셋은 원격 머신에서 「오지 않음(점검이 로컬 전용)」이고 원격 recheck 는 409. 제출의 409 검사는 supersede · 합류보다 먼저. coordinator 진단은 「로컬 레인 필요」로 표시. M5t-a 의 PR1 이 구현하고 `lanes = 0` 쪽은 PR3 이 구현한다. 이 표식을 단 프리셋을 읽는 서버는 모두 v0.11.0 이상이어야 하므로 앱 프로젝트에 다는 일은 운영 반영 뒤이고, 달기 전에 그 서버 목록을 확인한다 | 오너가 정함(2026-11-25, 「프리셋에 명시 표식」). `lanes = 0` 제출의 409 는 결정 파일의 추천을 넷째 판이 정했다. 원격 워커 지정 제출의 409 와 나머지 세부는 4라운드 결정 파일이 정했다. 후보 함수 하나로 다시 세운 것은 5라운드 뒤 오너 답(「한 곳 필터로 재설계 후 diff 검증」)에 따른 6판의 결정이다 | 신설 |
 | 255 | 동시 세션 | 워커 이름당 살아 있는 세션은 하나다. 새 세션이 등록하면 옛 세션은 409 를 받고 잡을 멈춘 뒤 끝난다. M5t-b 가 구현한다 | 오너가 정함(2026-11-25, 「지원 안 함」) | — |
 | 244 · 245 · 248 a~d · g · 249 · 250 | 옮긴 결정 | 244(짝짓기 창과 서버 신원)와 245 의 풀 묶기(`tokens.pool`)는 M5t-c 로 간다. 248 a~d · g(결과 고리)와 250(프로토콜 호환)은 M5t-b 로 간다. 249(DB v26 · v27)는 세션 · 로그 칸은 M5t-b, 신원 비밀과 짝짓기 창과 `tokens.pool` 은 M5t-c 로 나뉜다. 245 의 「비밀이 필요한 프리셋은 원격에 주지 않는다」는 254 가 대신하고 245 의 진단 부분은 246 에 합쳤다 | — | — |
 
@@ -1028,7 +1096,7 @@ M5t-b 가 반드시 다룰 지적이다. 3라운드 id 는 결정 파일이 적�
 
 | 항목 | 내용 |
 |---|---|
-| 다루는 것 | 짝짓기 창, `POST /worker/hello` 와 신원 비밀, `tokens.pool`, `POST /pair/exchange`, PLAN 「보안」 절의 인증 예외 문장. 그 문장은 이 판에서 지웠고 M5t-c 가 다시 넣는다. 3판의 결정 244, 245 의 풀 묶기, 249 의 `worker_identity` 와 v27 이 여기로 간다 |
+| 다루는 것 | 짝짓기 창, `POST /worker/hello` 와 신원 비밀, `tokens.pool`, `POST /pair/exchange`, PLAN 「보안」 절의 인증 예외 문장. 그 문장은 넷째 판에서 지웠고 M5t-c 가 다시 넣는다. 3판의 결정 244, 245 의 풀 묶기, 249 의 `worker_identity` 와 v27 이 여기로 간다 |
 | 먼저 쓸 것 | 위협 모델. 공격자의 위치, 지킬 자산, 남는 위험 |
 | 오너가 정할 것 | 3판의 Q1(짝짓기 창으로 M5n §13 의 자동 발급 · 자동 가입 금지를 개정하나), Q12(신원 비밀을 서버 DB 에 원값으로 두나), Q13(TLS 없는 LAN 에서 남는 위험을 받아들이고 Tailscale 을 권하는 데 그치나, 요청마다 서명을 넣나) |
 | 3판의 재료 | 3판 §4.3 의 짝짓기 창과 서버 신원, §9 의 남는 위험 표 |
@@ -1151,7 +1219,7 @@ id 는 라운드마다 새로 매겼으므로 1라운드의 같은 id 와는 다
 | 원격 금지 | 「프리셋에 명시 표식」. 프리셋 설정에 `local_only = true` 같은 표식을 두고 기본은 지금처럼 원격 허용. 앱 레포의 release-* · deploy-* 프리셋에 표식을 단다 | 254 |
 | 동시 세션 | 「지원 안 함」. 워커 이름당 살아 있는 세션은 하나. 새 세션이 등록하면 옛 세션은 409 를 받고 잡을 멈춘 뒤 끝난다 | 255 |
 
-R1 이 든 다섯 예 가운데 셋은 이 판에서 정리했다. 저장소 단위 비밀 판정은 결정 254 의 명시 표식이 대신한다. 운영 라벨
+R1 이 든 다섯 예 가운데 셋은 넷째 판에서 정리했다. 저장소 단위 비밀 판정은 결정 254 의 명시 표식이 대신한다. 운영 라벨
 거절은 아래 B-H3 로 고쳤다. 보관함 Host 허용 목록 재사용은 M5t-c 로 넘겼다. 나머지 둘(`grace_seconds` 이름 충돌, 「연속
 실패 20번」)은 M5t-b 로 넘겼다(§12).
 
@@ -1170,14 +1238,14 @@ R1 이 든 다섯 예 가운데 셋은 이 판에서 정리했다. 저장소 단
 | B-L9 | 역할 판별에서 `$RCM_CONFIG` 와 `./rcm.toml` | 둘은 서버 설정으로 읽는다(`config.py:49, 611-627`) | §4.1, TR4 |
 | A-M12 | 워크스페이스 안 도구의 warn/0 | `pool` 프리셋에서만 warn/0 이고 `any-capable` 프리셋은 「오지 않음」으로 센다 | §4.5, TD27 |
 | A-L2 | `artifacts.state` 의 값 수 | 12 를 13 으로 고쳤다(`core/artifacts.py:37-49`) | §3 E6 |
-| A-L3 | 틀린 인용 | 결정 파일은 「인용 고침」만 적었다. 이 판은 D10 근거를 고쳤다. 3판의 `store.py:3285-3288` 은 `LaneBusy` 를 설명하는 docstring 이라서 claim SQL 의 실제 줄(`store.py:3379-3398`)로 바꿨다. 다른 인용의 대상은 재료에 없음 | §3 D10 |
+| A-L3 | 틀린 인용 | 결정 파일은 「인용 고침」만 적었다. 넷째 판은 D10 근거를 고쳤다. 3판의 `store.py:3285-3288` 은 `LaneBusy` 를 설명하는 docstring 이라서 claim SQL 의 실제 줄(`store.py:3379-3398`)로 바꿨다. 다른 인용의 대상은 재료에 없음 | §3 D10 |
 
-결정 파일은 「그 밖에 M5t-a 절에 걸린 MED · LOW」도 반영하라고 적었지만 그 목록은 이 판의 재료에 들어 있지 않다(재료에 없음).
+결정 파일은 「그 밖에 M5t-a 절에 걸린 MED · LOW」도 반영하라고 적었지만 그 목록은 넷째 판의 재료에 들어 있지 않다(재료에 없음).
 
 ### 4라운드: 넷째 판에서 다섯째 판으로
 
 4라운드에서 반박 두 명이 넷째 판을 읽었다. 반박 A 는 HIGH 3 · MED 10 · LOW 12 를 냈다. 반박 B 는 HIGH 2 · MED 10 · LOW 10
-과 등급을 정하지 못한 것(unknown) 1 을 냈다. 메인 세션이 지적마다 결정을 정했고 이 판은 그 결정대로 고쳤다. 두 반박이 같은
+과 등급을 정하지 못한 것(unknown) 1 을 냈다. 메인 세션이 지적마다 결정을 정했고 다섯째 판은 그 결정대로 고쳤다. 두 반박이 같은
 곳을 다룬 것은 결정 파일이 묶은 대로 한 행에 묶었다. 넷째 판 §4.3 이 「재료에 없음」으로 비워 둔 원격 워커 지정 제출의 응답은
 A-H1 · B-M2 로 정해졌다.
 
@@ -1223,5 +1291,43 @@ A-H1 · B-M2 로 정해졌다.
 | B-L10 | Local Network 권한은 판정하지 않고 안내만 한다 | §4.5, §9, TD50 |
 | B-U1 | 운영 서버와 같은 포트로 시험 서버가 구체 주소에 bind 할 때 macOS 가 가로채는지는 확인하지 못했다. B-H1 의 포트 명시와 확인으로 해소된다고 적었다 | §7 |
 
-오너는 4라운드 뒤 「고치고 5라운드 한 번 더」라고 답했다. 이번 한 번만의 예외다. 그래서 이 판은 5라운드 격리 반박을 한 번
-더 받는다(§6 의 1).
+오너는 4라운드 뒤 「고치고 5라운드 한 번 더」라고 답했다. 이번 한 번만의 예외다. 그래서 다섯째 판은 5라운드 격리 반박을
+한 번 더 받았다(§6 의 1).
+
+### 5라운드와 재설계
+
+5라운드에서 반박 두 명이 다섯째 판을 읽었다. 반박 A 는 HIGH 3 · MED 5 · LOW 7 과 등급을 정하지 못한 것(unknown) 1 을 냈다.
+반박 B 는 HIGH 2 · MED 4 · LOW 8 과 unknown 1 을 냈다. 메인 세션은 원인을 하나로 봤다. `local_only` 를 경로마다 따로
+거르게 설계해서 라운드마다 빠진 경로가 나왔다는 것이다. 4라운드 HIGH 2건과 5라운드 HIGH 3건이 모두 그런 경우였다.
+
+오너는 5라운드 뒤 「한 곳 필터로 재설계 후 diff 검증」이라고 답했다. 그래서 이 판은 `local_only` 를 후보 머신 함수
+하나로 다시 세웠다(§4.3). 6라운드 전체 반박은 하지 않고 고친 diff 만 검증자 둘이 본다(§6 의 1). 아래 표의 반박 id 는 메인
+세션의 결정 파일이 묶은 대로 옮겼다.
+
+| 반박 | 바뀐 것 | 절 |
+|---|---|---|
+| A-H1 · A-H2 | `local_only` 를 「그 프리셋에게 머신 목록은 `@local` 하나뿐」이라는 후보 머신 함수 하나로 다시 세웠다. 배치 · 제출 판정 · 수신 가능 판정 · `capacity` · 점검 정체 판정 · 자동 점검과 recheck · `/worker/spec` · 원격 claim 이 모두 그 결과를 쓴다. 경로별 TO 행을 TO15 하나로 묶고 변이를 그 함수에 걸었다. 후보가 빈 잡은 기존 「갈 곳 없음」 규칙을 따르고 후보가 빈 제출은 409 다 | §2, §3 D10 · G2, §4.2, §4.3, §4.5, §5, §7, §9, §11 254, TO2 · TO5 · TO8 · TO11 · TO14 · TO15 · TO16 |
+| A-H3 | `local_only` 가 아닌 프리셋의 `checks` 에 `local_only` 점검이 있으면 원격 머신에서 그 프리셋은 「오지 않음(점검이 로컬 전용)」이고 check_pending 이 아니다. doctor 도 「점검 필요」를 찍지 않는다 | §4.3, §4.5, §11 246 · 254, TO18 |
+| A-L1 | 원격 머신에 `local_only` 점검을 recheck 하면 409 다 | §4.3, TO19 |
+| A-M3 | `capacity` 는 후보 함수 결과 가운데 살아 있는 머신으로 센다. `checks` 없는 `pool` 프리셋은 판정과 상관없이 그 풀의 살아 있는 레인을 센다 | §4.2, §11 243, TL17 |
+| B-H2 · A-L3 | 설정 검증을 하나로 줄였다. `local_only` 인 `pool` 프리셋은 `pool` 이 기본 풀이어야 한다. `pools` 의 기본 풀이 아닌 항목은 제출 409 로 막고, 「OR/AND」가 모호하던 문장은 지웠다 | §4.3, TO1 · TO9 |
+| B-M1 | 기동 · reload 때 대기 잡도 후보 함수로 다시 계산되어 원격 지정 잡 · 기본 풀이 아닌 풀의 잡 · 예약 잡이 `no_capable_machine` 으로 보인다 | §4.2, §4.3, TO17 |
+| B-H1 | setup 은 고른 `data_dir` 에 DB 가 있으면 거절하고(`--reuse-data-dir`) 쓰는 중인 포트를 경고한다. guard 는 운영 `data_dir` 을 거절한다. 「Store 를 여는 일은 서비스와 같은 빌드가 한다」는 문장은 서비스 파일이 setup 을 실행한 빌드를 가리킨다는 사실로 고쳤다 | §4.1, §5 PR4, §9, §11 241, TR31~TR34 |
+| A-M1 · B-L2 · A-U1 | shim 판별을 함수 하나로 두고 `measure_tools` · `missing_tools` · `preset_env` · `rcm check` 도구 행이 함께 쓴다. `xcode-select` 자신은 판별에서 뺀다 | §4.5, §5 PR2, §11 246, TD52 |
+| A-M2 · B-L5 | `ran_on` 과 `RCM_MACHINE` 은 `started_at` 이 있을 때만 계산하고 시작하지 못한 잡은 null 이다 | §4.6, §11 248, TN11 |
+| A-M4 | `worker` 역할에서 도구 빠진 `any-capable` 의 warn 과 대상 0개가 함께면 1 이다 | §4.5, §11 246, TD53 |
+| A-M5 | `LANG=C` 는 doctor 자신의 호스트 사실 명령에만 걸고 `[[probes]]` 에는 걸지 않는다 | §4.5, §11 246, TD54 |
+| B-M2 | 역할마다 `--yes` 필수 인자 표를 더했다. doctor 에 `--server` · `--config` 를 더했다 | §4.1, §4.5, §11 241 · 246, TR35 |
+| B-M3 | 서비스 파일 찾는 순서에 `<config dir>/service/*` 와 표준 라벨의 설치 자리를 넣었다. 둘 이상이면 고르게 하고 비TTY 면 종료 2 다 | §4.5, §11 246, TD45 |
+| B-M4 | 실기 하네스 `scripts/acceptance/m5t_live.sh` 는 PR7 이 만든다. 운영 라벨은 설치된 유닛의 라벨과 표준 라벨 둘이다. 하네스는 bootstrap 할 plist 의 `--config` 경로 · `HOME` · 로그 경로 · 라벨도 확인한다 | §5 PR7, §7, TR16 |
+| B-L1 | TR16 에 토큰 단계를 넣었다 | §7, TR16 |
+| B-L3 | 같은 라벨의 로드 여부는 읽기 전용 조회로만 보고 복사 명령은 `cp -n` 꼴이다 | §4.1, §11 241, TR36 |
+| B-L4 | 로그 파일 이름은 라벨에서 만든다 | §4.1, §11 241, TR37 |
+| B-L6 | 운영을 v0.11.0 미만으로 되돌리는 롤백 함정을 적었다 | §9 |
+| B-L7 | 서비스 파일 env 는 이름만 찍고 두 PATH 모두 홈을 `~` 로 가린다. 기본 변수 목록은 launchd · systemd 별로 적는다 | §4.5, §11 246, TD37 · TD46 · TD55 |
+| B-L8 · A-L6 | PLAN 색인에 248 a~d · g(M5t-b)를 더했다. 머리 인용의 「세 라운드」를 「다섯 라운드와 6판 diff 검증」으로 바꿨다. 결정 39 는 「결정 39(M5f)」로 적었다 | PLAN.md, §3 C9, §4.2, §4.7, §5, §10, §11 243 |
+| B-U1 | `local_only` 를 달기 전에 그 프리셋을 읽는 서버 목록을 확인하는 단계를 더했다 | §6 의 17 |
+| A-L2 | `lanes = 0` 에서 원격 claim 롱폴이 0.5초 DB 폴링이 되는 것을 위험에 적었다 | §9 |
+| A-L4 | `[[tools]]` 의 이름은 프로브 argv[0] 과 맞춰도 된다 | §4.5, §11 246, TD9 |
+| A-L5 | 호환 문장에 `worker --check` 버전 행의 FAIL 을 적었다 | §4.7 |
+| A-L7 | `$RCM_CONFIG` 가 없는 파일이면 usage 오류로 종료 2 다 | §4.1, §11 239, TR38 |
