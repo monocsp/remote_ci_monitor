@@ -438,3 +438,22 @@ def test_td9_a_tool_nobody_uses_is_a_warning_but_a_probe_argv0_is_not(tmp_path):
     cfg = config.load_server_config(_server_toml(tmp_path, tools, probes=probes), check_tools=False)
     warnings = config.tool_warnings(cfg)
     assert len(warnings) == 1 and "rcm-td-orphan" in warnings[0], warnings
+
+
+# ── 모름은 모름으로 (P3 3라운드 근본 원인) ─────────────────────────────────────
+
+
+def test_clean_text_of_unknown_is_empty_not_the_word_none():
+    assert dc.clean_text(None) == ""
+
+
+def test_no_jobs_reason_does_not_fire_while_a_preset_may_come():
+    """오는지 모르는 프리셋이 있으면 「아무것도 오지 않는다」(종료 1)로 단정하지 않는다."""
+    unknown = dc.PresetRow("build", "unknown", "unknown")
+    assert dc.no_jobs_reason([unknown], "mbp") is None
+
+
+def test_an_unreachable_checks_item_without_a_name_or_code_is_unknown_not_dropped():
+    """이름이나 이유 코드가 없는 항목을 조용히 버리면 그 점검이 「닿는다」로 읽힌다."""
+    assert dc.unreachable_checks({"unreachable_checks": [{"code": "check_local_only"}]}) is None
+    assert dc.unreachable_checks({"unreachable_checks": [{"name": "qa"}]}) is None

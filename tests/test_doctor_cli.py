@@ -88,6 +88,9 @@ def preset(
         "pools": list(pools),
         "placement": placement,
         "checks": list(checks),
+        # 진짜 서버(`capabilities.worker_spec`)는 모든 프리셋에 `source_modes` 와 `repo` 를 싣는다
+        "source_modes": ["tree"],
+        "repo": None,
         "unreachable_checks": [{"name": c, "code": "check_local_only"} for c in unreachable],
     }
 
@@ -1766,7 +1769,9 @@ def test_rcm_check_git_row_follows_the_shim_rule(env, clt_shim, monkeypatch, cap
 
 
 @pytest.mark.parametrize(
-    "measured", [None, {"unit": {"missing_tools": []}}], ids=["no-key", "no-entry"]
+    "measured",
+    [None, {"unit": {"missing_tools": [], "missing_passthrough": []}}],
+    ids=["no-key", "no-entry"],
 )
 def test_a_local_lane_preset_the_server_did_not_measure_is_unknown(
     env, coordinator, monkeypatch, capsys, measured
@@ -2167,7 +2172,11 @@ def broken_server(role: str) -> FakeRcm:
     s.route(
         "GET",
         "/api/health",
-        {"ok": True, "version": __version__, "preset_env": {"unit": {"missing_tools": []}}},
+        {
+            "ok": True,
+            "version": __version__,
+            "preset_env": {"unit": {"missing_tools": [], "missing_passthrough": []}},
+        },
     )
     kind = "worker" if role == "worker" else "client"
     s.route("GET", "/api/whoami", {"name": "mbp", "admin": False, "kind": kind})
@@ -2384,7 +2393,8 @@ ANY = "any"  # 빈 그릇이 다른 확정 답인 칸 — 종료는 따지지 �
 REQUIRED = {"drop": 3, "null": 3, "wrong": 3}  # 없으면 이 답을 알아볼 수 없거나 판정할 수 없다
 OPTIONAL = {"drop": B, "null": B, "wrong": 3}  # 없으면 모르는 값으로 null — 판정은 그대로
 FREE = {"drop": B, "null": B, "wrong": B}  # doctor 가 읽지 않는 칸
-ITEM = {"null": 3, "wrong": 3}  # 목록의 항목 — 빼는 것은 다른 확정 답이라 보지 않는다
+#: 목록의 항목 — 빼는 것은 다른 확정 답이라 보지 않는다. 빈 객체는 필수 칸이 없는 항목이다
+ITEM = {"null": 3, "wrong": 3, "empty": 3}
 ENTRY = {"drop": B, "null": 3, "wrong": 3}  # 이름이 서버가 정한 객체의 값
 
 
@@ -2535,7 +2545,7 @@ GEN_LANE_HEALTH = {
 GEN_LANE_HEALTH_RULES = {
     **GEN_HEALTH_RULES,
     "preset_env": {**REQUIRED, "empty": 3},
-    "preset_env.unit": REQUIRED,
+    "preset_env.unit": {**REQUIRED, "empty": 3},
     "preset_env.unit.missing_tools": REQUIRED,
     "preset_env.unit.missing_passthrough": REQUIRED,
 }
@@ -2543,7 +2553,7 @@ GEN_LANE_HEALTH_RULES = {
 GEN_COORD_HEALTH_RULES = {
     **GEN_HEALTH_RULES,
     "preset_env": OPTIONAL,
-    "preset_env.unit": ENTRY,
+    "preset_env.unit": {**ENTRY, "empty": 3},
     "preset_env.unit.missing_tools": REQUIRED,
     "preset_env.unit.missing_passthrough": REQUIRED,
 }
@@ -2760,3 +2770,87 @@ def test_an_unreadable_service_file_leaves_the_path_unknown_in_every_order(
         assert code == (1 if tool == "missing" else 3 if seen_unreadable else 0), doc
     else:
         assert doc["service"]["file"] is None and doc["service"]["path"], doc["service"]
+
+
+# ── 같은 원인의 다른 자리 (P3 3라운드 근본 원인 분석 (a)~(g) · TD5) ───────────
+
+
+def test_td5_an_older_server_with_a_missing_tool_exits_3_not_1(worker, srv, capsys):
+    """TD5(메인 세션 결정): `placement` 가 없는 옛 서버의 프리셋은 모름이다. `pool` 로 짐작해
+    빠진 도구를 문제(종료 1)로 만들지 않는다 — 종료 3, 행은 「오는지 모름」이다."""
+    old = {"name": "build", "requires": [LACK], "env_passthrough": ["PATH"], "env": {}}
+    srv.route("GET", "/worker/spec", {"generation": "1:0", "probes": [], "presets": [old]})
+    code, doc = worker(capsys)
+    got = row(doc, "build")
+    assert (got["applies"], got["state"]) == ("unknown", "unknown"), got
+    assert doc["problems"] == [], doc["problems"]
+    assert any("build" in u and "older rcm" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+
+
+def test_f_a_placement_rcm_does_not_know_is_not_read_as_pool(worker, srv, capsys):
+    """(f) 모르는 `placement` 값을 `pool` 로 읽지 않는다 — 빠진 도구가 종료 1 이 되지 않는다."""
+    srv.route("GET", "/worker/spec", spec_doc(preset("build", requires=(LACK,), placement="near")))
+    code, doc = worker(capsys)
+    assert row(doc, "build")["state"] == "unknown" and doc["problems"] == [], doc
+    assert any("near" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+
+
+def test_d_presets_without_a_name_are_not_the_server_has_no_presets(worker, srv, capsys):
+    """(d) 이름 없는 프리셋을 조용히 버리면 「서버에 프리셋이 없다」(종료 1)가 된다 — 그 답은
+    rcm 서버의 답이 아니다(종료 3)."""
+    nameless = {k: v for k, v in preset("build").items() if k != "name"}
+    srv.route("GET", "/worker/spec", spec_doc(nameless))
+    code, doc = worker(capsys)
+    assert not any("no presets" in p for p in doc["problems"]), doc["problems"]
+    assert any("presets[0].name is missing" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+
+
+def test_g_a_git_ref_preset_without_a_repo_is_unknown_not_skipped(worker, srv, capsys):
+    """(g) git_ref 프리셋인데 서버가 `repo` 를 말하지 않으면 `repo_missing` 검사를 조용히
+    건너뛰지 않는다 — 모름, 종료 3."""
+    srv.route("GET", "/worker/spec", spec_doc({**preset("build"), "source_modes": ["git_ref"]}))
+    code, doc = worker(capsys)
+    assert any("build" in u and "repository" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+
+
+def test_e_a_preset_env_entry_without_measurements_is_not_ready(
+    env, coordinator, monkeypatch, capsys
+):
+    """(e) `preset_env` 의 항목이 빈 객체면 서버가 무엇을 쟀는지 모른다 — ready 가 아니다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    health = {"ok": True, "version": __version__, "preset_env": {"unit": {}, "lint": {}}}
+    coordinator.route("GET", "/api/health", health)
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert not any(p["state"] == "ready" for p in doc["presets"]), doc["presets"]
+    assert code == 3, doc
+
+
+def test_abc_unknown_server_values_are_null_never_none_or_down(
+    env, coordinator, monkeypatch, capsys
+):
+    """(a) `version` 없는 health 는 「server vNone」이 아니다. (b) `generation` · `pool` 이 없으면
+    null 이다. (c) `alive` 가 없는 머신은 down 이 아니라 모름이다. 사람용 표에도 `None` 이 없다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    machines = machines_doc()
+    del machines["generation"]
+    for m in machines["machines"]:
+        del m["pool"], m["alive"]
+    coordinator.route("GET", "/api/machines", machines)
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    mbp = doc["remote_machines"][0]
+    assert (mbp["pool"], mbp["alive"]) == (None, None), mbp
+    assert doc["server"]["generation"] is None, doc["server"]
+    code, out, err = run(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert "None" not in out + err, out
+    line = next(ln for ln in out.splitlines() if "mbp" in ln and "eligible" in ln)
+    assert "down" not in line and "unknown" in line, line
+    coordinator.route("GET", "/api/health", {"ok": True})
+    code, out, err = run(capsys, "--role", "client", "--server", coordinator.url)
+    assert "None" not in out + err and code == 3, (code, out, err)
+    assert "version is missing" in out, out
