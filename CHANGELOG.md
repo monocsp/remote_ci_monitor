@@ -16,6 +16,7 @@ of a key bumps that number and is listed here.
   waiting when the mark is added show `no capable machine` with no ETA instead of being failed. A
   `local_only` pool preset must use the default pool, or the server does not start; an older
   server does not know the key, so upgrade every server that reads the preset first.
+  ([#266](https://github.com/monocsp/remote_ci_monitor/pull/266))
 
 ## [0.10.0] - 2026-11-23
 
