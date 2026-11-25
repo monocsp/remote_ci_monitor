@@ -13,6 +13,7 @@ of a key bumps that number and is listed here.
   without a terminal it exits 3 and sends nothing, where it used to go on with exit 0. Pass
   `--server URL` in scripts. The package now needs Python 3.11.4 or newer (`requires-python`),
   as 3.11.0–3.11.3 lack the safe `tarfile` filter rcm already required at run time.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Added
 - **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
@@ -44,28 +45,34 @@ of a key bumps that number and is listed here.
   version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
   `checks`, `source_modes`, repository name (no URL) and `unreachable_checks` (the checks a remote
   worker cannot run, with a reason code), and the `[[tools]]` table; older workers ignore them.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`[[tools]]` in `server.toml` gives a tool an install hint.** `name`, `docs` and
   `[tools.install]` lines for `darwin`, `linux` or `any`; shown by `rcm doctor` next to a missing
   tool, never run. Control characters, lines over 300 characters, an unknown key or a name given
   twice stop the server from starting; a name no preset or probe uses is a warning.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **Workers report host facts, and `rcm machines --machine ID` shows them.** OS version, real
   arch and Rosetta, container, root, package manager and Python come with registration and every
   capability report, are kept in memory only, and appear in `GET /api/machines` (new `host` key)
   only for a request with a token.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`rcm worker --check` shows a `version` row and a last line with the number of missing
   tools.** A different server version is a warning when registering will follow it and FAIL when
   this install cannot follow; the missing line is ok only when nothing is missing and never fails
   the check; the existing rows are unchanged.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
 - **`rcm recheck` names the checks it skipped, and `rcm eta --job` no longer counts a line for a
   job no machine can take.** A `local_only` check a remote worker cannot run prints
   `<check> skipped on <machine> [local_only]` and is not a failure; a `no capable machine` job
   shows no `ahead` count, as `POST /api/eta` already did.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **macOS Command Line Tools shims are no longer run when the tools are not installed.** A file
   directly in `/usr/bin/` that links `libxcselect` counts as missing (`needs Command Line Tools`)
   in the job's `requires` check, the server's tool measurements, `rcm check` and worker probes,
   instead of opening the install dialog on a headless service.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ## [0.10.0] - 2026-11-23
 
