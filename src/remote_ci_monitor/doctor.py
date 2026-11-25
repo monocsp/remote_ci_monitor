@@ -663,7 +663,8 @@ def read_service_file(
                         "in ExecStart"
                     )
                 else:
-                    argv = [a for a in expanded_argv if a is not None]
+                    # `$$` 는 글자 `$` 다(systemd.service 「Command lines」 — `$NAME` 은 환경변수)
+                    argv = [a.replace("$$", "$") for a in expanded_argv if a is not None]
                 program = argv[0].lstrip("@-:+!") if argv else None
                 launch = rcm_launch(program, argv)
                 command = None if launch is None else launch["command"]

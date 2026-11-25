@@ -212,8 +212,47 @@ def server_plist(*, rcm: Path, config: Path, home: Path, label: str, log: Path, 
     return plistlib.dumps(doc)
 
 
+class UnitValueError(ValueError):
+    """systemd 유닛에 쓸 수 없는 값 — 줄바꿈 · 제어 문자. setup 은 사용법 오류(종료 2)로 본다."""
+
+
+def _unit_text(value: str) -> str:
+    """유닛의 한 값. 줄바꿈 · 제어 문자는 유닛의 줄을 끊거나 바꾸므로 거절하고, `%` 는 지정자라
+    `%%` 로 쓴다(systemd.unit 「Specifiers」)."""
+    bad = next((c for c in value if ord(c) < 32 or ord(c) == 127), None)
+    if bad is not None:
+        raise UnitValueError(
+            f"{value!r} holds a line break or control character, which a systemd unit cannot hold"
+        )
+    return value.replace("%", "%%")
+
+
+def unit_path(value: str | Path) -> str:
+    """경로 하나를 받는 키(`WorkingDirectory=` · `StandardOutput=append:`)의 값 — 따옴표를 풀지
+    않는 키라 공백은 그대로 둔다."""
+    return _unit_text(str(value))
+
+
+def unit_word(value: str | Path, *, exec_line: bool = False) -> str:
+    """`ExecStart=` 의 인자 하나 또는 `Environment=` 의 할당 하나(systemd.syntax 「Quoting」).
+    공백 · 따옴표 · 백슬래시가 있으면 큰따옴표로 감싸고 안의 `\\` · `"` 를 escape 한다.
+    `ExecStart=` 에서는 `$` 가 환경변수라 `$$` 로 쓴다(systemd.service 「Command lines」)."""
+    text = _unit_text(str(value))
+    if exec_line:
+        text = text.replace("$", "$$")
+    if text == "" or any(c.isspace() or c in "\"'\\;" for c in text):
+        text = '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return text
+
+
+def exec_start(argv: Sequence[str | Path]) -> str:
+    """`ExecStart=` 의 값 — 인자마다 `unit_word`."""
+    return " ".join(unit_word(a, exec_line=True) for a in argv)
+
+
 def server_unit(*, rcm: Path, config: Path, home: Path, label: str, log: Path, path: str) -> bytes:
-    """systemd 사용자 유닛(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다."""
+    """systemd 사용자 유닛(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다. 경로는
+    `unit_path` · `unit_word` 로 쓴다 — 공백 · `%` · `$` 가 든 홈과 venv 도 그대로 읽힌다."""
     text = f"""# remote_ci_monitor server ({label}) — written by `rcm setup`.
 [Unit]
 Description=remote_ci_monitor job server ({label})
@@ -222,8 +261,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory={home}
-ExecStart={rcm} serve --config {config}
+WorkingDirectory={unit_path(home)}
+ExecStart={exec_start([rcm, "serve", "--config", config])}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -232,10 +271,10 @@ TimeoutStopSec=30
 LimitNOFILE={NOFILE}
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=en_US.UTF-8
-Environment=HOME={home}
-Environment=PATH={path}
-StandardOutput=append:{log}
-StandardError=append:{log}
+Environment={unit_word(f"HOME={home}")}
+Environment={unit_word(f"PATH={path}")}
+StandardOutput=append:{unit_path(log)}
+StandardError=append:{unit_path(log)}
 
 [Install]
 WantedBy=default.target

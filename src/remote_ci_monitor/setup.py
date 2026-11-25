@@ -647,9 +647,31 @@ def _server(
     return plan
 
 
+def _render_service(
+    plan: Plan, manager: str, *, rcm: Path, home: Path, label: str, log: Path
+) -> bytes:
+    from remote_ci_monitor import cli
+
+    if plan.role in core.SERVER_ROLES:
+        render = core.server_plist if manager == core.LAUNCHD else core.server_unit
+        return render(
+            rcm=rcm,
+            config=plan.config,
+            home=home,
+            label=label,
+            log=log,
+            path=cli.WORKER_SERVICE_PATH,
+        )
+    if manager == core.LAUNCHD:
+        doc = plistlib.loads(cli.worker_plist(rcm, plan.config, home))
+        doc["Label"] = label
+        doc["StandardOutPath"] = doc["StandardErrorPath"] = str(log)
+        return plistlib.dumps(doc)
+    return cli.worker_unit(rcm, plan.config, home)
+
+
 def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Plan) -> None:
     """서비스 파일 하나를 계획에 더한다 — 설정 폴더 아래 `service/` 에, 등록하지 않는다."""
-    from remote_ci_monitor import cli
 
     if plan.label is None:
         plan.label = _label(args, ask, plan.role)
@@ -686,24 +708,14 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
             "you want the service to run"
         )
     log = core.log_dir(manager, home) / core.log_file_name(label)
+    try:
+        data = _render_service(plan, manager, rcm=rcm, home=home, label=label, log=log)
+    except ValueError as e:
+        # 줄바꿈 · 제어 문자가 든 경로는 유닛 · plist 에 쓸 수 없다 — 아무것도 쓰지 않는다(P3 v2-4)
+        kind = "systemd unit" if manager == core.SYSTEMD else "launchd plist"
+        raise SetupUsage(f"cannot write the {kind}: {e}") from None
     if plan.role in core.SERVER_ROLES:
-        render = core.server_plist if manager == core.LAUNCHD else core.server_unit
-        data = render(
-            rcm=rcm,
-            config=plan.config,
-            home=home,
-            label=label,
-            log=log,
-            path=cli.WORKER_SERVICE_PATH,
-        )
         plan.tokens = core.token_commands(rcm, plan.config)
-    elif manager == core.LAUNCHD:
-        doc = plistlib.loads(cli.worker_plist(rcm, plan.config, home))
-        doc["Label"] = label
-        doc["StandardOutPath"] = doc["StandardErrorPath"] = str(log)
-        data = plistlib.dumps(doc)
-    else:
-        data = cli.worker_unit(rcm, plan.config, home)
     plan.files.append(Planned(staged, data, 0o644, "service"))
     plan.manager, plan.service, plan.rcm, plan.log = manager, staged, rcm, log
     plan.installed = core.install_path(label, manager, home)

@@ -3578,9 +3578,13 @@ def worker_plist(rcm: Path, config: Path, home: Path) -> bytes:
 
 
 def worker_unit(rcm: Path, config: Path, home: Path) -> bytes:
-    """systemd user unit(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다."""
+    """systemd user unit(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다. 경로는
+    `rcm setup` 의 서버 유닛과 같은 함수로 쓴다 — 공백 · `%` · `$` 는 systemd 규칙대로 쓰고,
+    줄바꿈 · 제어 문자는 `UnitValueError`(ValueError)다(P3 v2-4)."""
+    from remote_ci_monitor.core import setup as setup_core
+
     text = f"""# remote_ci_monitor worker — written by `rcm init worker --service-file`.
-# The token is not in this file: put `token = "…"` in {config} (mode 600).
+# The token is not in this file: put `token = "…"` in {setup_core.unit_path(config)} (mode 600).
 [Unit]
 Description=remote_ci_monitor worker
 After=network-online.target
@@ -3588,8 +3592,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory={home}
-ExecStart={rcm} worker --config {config}
+WorkingDirectory={setup_core.unit_path(home)}
+ExecStart={setup_core.exec_start([rcm, "worker", "--config", config])}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -3624,7 +3628,12 @@ def _init_worker_service(args: argparse.Namespace, config: Path) -> int:
     if rcm is None:
         return _usage("cannot find the rcm executable this command runs from")
     home = Path.home()
-    data = worker_plist(rcm, config, home) if kind == "launchd" else worker_unit(rcm, config, home)
+    try:
+        data = (
+            worker_plist(rcm, config, home) if kind == "launchd" else worker_unit(rcm, config, home)
+        )
+    except ValueError as e:  # 유닛 · plist 에 쓸 수 없는 글자(줄바꿈 · 제어 문자)
+        return _usage(f"cannot write a {kind} service file: {e}")
     try:
         write_private(target, data, 0o644)
     except OSError as e:
