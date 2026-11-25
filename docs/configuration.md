@@ -1490,7 +1490,10 @@ silent wait.
 `any-capable` is for presets that need no secrets. The release profile's secret files live on the
 server under `<config dir>/secrets/<repo>/` and are never shipped to a worker, so a deploy, upload
 or release preset stays `placement = "pool"` on the machine that holds them. Gates, tests and
-checks that read nothing secret are what `any-capable` is for.
+checks that read nothing secret are what `any-capable` is for. A `pool` preset in the default pool
+is still picked up by any remote worker you register in that pool; mark such a preset
+`local_only = true` ([below](#keeping-a-preset-on-the-server-local_only)) to keep it on the
+server's own lanes.
 
 A `git_ref` job is fetched by whichever worker takes it, so every worker that may take an
 `any-capable` `git_ref` preset — and every worker that runs checks, which are always `git_ref` —
@@ -1514,6 +1517,14 @@ The verdict, worker by worker — the first row that applies is the answer:
 | `check_needed` | unknown | no check has passed on this worker with its current fingerprint |
 | `fingerprint_unknown` | unknown | the preset has `checks` and the fingerprint is unknown |
 | `ok` | eligible | — |
+
+Two more codes come from `local_only` (below). `local_only` (ineligible) is shown first, before
+any row of this table, on a remote worker for a `local_only` preset. `check_local_only`
+(ineligible, with the check's name) replaces `check_needed` on a remote worker for a preset whose
+`checks` names a `local_only` check that has not passed there — that check can never run there, so
+the preset is not "pending". It also replaces `check_failed`, and `check_running` while the
+check's job is only waiting: no machine can take that job, and a recheck there is refused. A check
+job the remote worker has already claimed runs to its end and counts.
 
 `env_passthrough` names the worker's environment lacks are shown but do not block: an empty value
 can be intended.
@@ -1588,7 +1599,70 @@ that worker's lanes take it, ignoring pool, placement and verdict, so a check ca
 itself. A token may pin a check preset; pinning any other preset needs an admin token (403
 otherwise). An unknown machine is 400, a machine that is down 409 — no job is created and
 `rcm run` exits 2. A pinned job whose tool is missing is picked up and fails with `tool_missing`,
-which for a check is the failed check.
+which for a check is the failed check. Pinning a `local_only` preset to a remote worker is 409
+(next section).
+
+### Keeping a preset on the server: `local_only`
+
+```toml
+[[presets]]
+name = "release-ios"
+argv = ["bash", "scripts/release_ios.sh"]
+local_only = true                # only the server's own lanes run it, never a remote worker
+```
+
+`local_only = true` (default `false`) gives the preset one machine: `@local`, the server's own
+lanes. Mark the presets that need what only the server has — the release profile's secrets, a
+signing identity, a store login. Without it, a remote worker registered in the default pool picks
+up a default-pool release job and runs it without those secrets, or with its own.
+
+Everything that chooses a machine uses that one list, so a remote worker never sees the preset:
+
+- it is not in the remote workers' `GET /worker/spec`, its `env` included, and no remote claim
+  hands it out — pinned, pool or `any-capable`;
+- `rcm machines` and `/api/machines` show it as `local_only` on every remote worker, and it is not
+  counted in their `eligible` number;
+- the waiting row, `rcm eta` and the `POST /jobs` answer (`placement.eligible_now`) count only
+  `@local`. When no local lane can take the job, `POST /api/eta` answers `ahead: null` with no
+  estimate. `ahead` was always a number before, so a script that reads it must accept `null`.
+  Otherwise `ahead` counts only the jobs that compete for the server's lanes.
+
+The server's lanes take the job exactly as before. A `local_only` `pool` preset must use the
+default pool — the server's lanes serve no other — or the server does not start. Extra `pools` are
+allowed, but a submission to one of them is refused.
+
+**Submissions that cannot run are refused.** `POST /jobs` answers 409 and creates no job when the
+server's lanes cannot take it: `--machine` names a remote worker (`… runs only on this server's
+local lanes (local_only) — machine mbp cannot take it`), `--pool` names a pool other than
+`default`, the preset is `any-capable` while `[server] local_accept_any = false`, or it is
+`any-capable` and the server's lanes miss a `requires` tool. The reason code is
+`no_capable_machine`, or `tool_missing` for the last case. This check runs before joining an
+identical job and before superseding older ones. `rcm run` prints the server's reason and exits 2,
+since no job was made. A preset whose check has not passed (or failed)
+on `@local` is not refused: the job waits with `check pending` or `check failed`, as any other.
+Nor is one submitted while `@local` has no report yet, or a stale one.
+
+**Adding the mark later.** After `rcm reload` or a restart that adds `local_only`, jobs already
+waiting are placed again: one pinned to a remote worker, or queued in another pool, shows
+`no capable machine` with no ETA. It is not failed — cancel it or move the mark back. A scheduled
+job follows the same rule once its time comes. A job already running on a remote worker is not
+stopped: it finishes and reports its result as usual. Its retry (`[presets.retry]`) is a new
+attempt and follows the mark: one pinned to that worker waits with `no capable machine` and no
+ETA, one in the default pool goes to the server's lanes. An older server does not know the key
+and refuses to start, so upgrade every server that reads the preset first, `include` files
+included. Before rolling back below 0.11.0, remove the presets' `local_only` lines first: an older
+server does not know the key and does not start.
+
+**Checks.** A `local_only` check preset runs only on `@local`. On a remote worker, a preset that
+needs it shows `check_local_only`, the check's row in `rcm machines` shows `local_only` and asks
+for no recheck, the sweeper does not submit it there, and `rcm recheck <remote> <check>` is 409.
+Its state follows the same rule as the verdict: unless the check passed there or that machine is
+running it, the row shows `needed` with the last job's number, so a check job nobody can take does
+not read as running, and a failure there is not counted among that machine's problems.
+`rcm recheck <remote>` without names submits the other checks and answers 200; the skipped one is
+listed apart from `jobs`, as `skipped: [{"preset": "<check>", "code": "local_only"}]`, and is not a
+failure. A check that already passed on a remote worker before the mark was added keeps counting
+there until that machine's fingerprint changes; after that it cannot be run there again.
 
 ### Concurrency groups across machines: `concurrency_scope`
 
@@ -1657,6 +1731,7 @@ pinned one `on <machine>`.
 | `[[probes]]` | `name` · `argv` · `timeout_seconds` | — · — · `10` |
 | `[server]` | `probe_interval_seconds` · `auto_checks` · `local_accept_any` · `check_sweep_seconds` | `600` · `true` · `true` · `30` |
 | `[[presets]]` | `placement` · `concurrency_scope` · `checks` · `check_ref` · `sample` | `"pool"` · `"pool"` · `[]` · `"HEAD"` · `true` (`false` for a check preset) |
+| `[[presets]]` | `local_only` | `false` |
 | `worker.toml` | `server = "auto"` · `server_name` · `accept_any` | — · `""` · `true` |
 
 `rcm reload` picks up `[[probes]]` and the preset keys. The `[server]` keys need a restart, like

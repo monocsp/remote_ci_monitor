@@ -396,8 +396,10 @@ exits with the last one's code ([trying again later](docs/configuration.md#tryin
 
 Usage errors and validation failures that never reach the server also exit 2, including `rcm run`
 when the server cannot be reached before submit. So does a submission the server refuses for
-certain without making a job — 400, 401, 403, 413, and a 409 whose code is `schedule_exists`
-or `release_route_required`; any other 409 is 3, since rcm cannot tell whether a job was made.
+certain without making a job — 400, 401, 403, 413, a 409 whose code is `schedule_exists`
+or `release_route_required`, and a 409 `no_capable_machine` or `tool_missing` for a
+[`local_only`](docs/configuration.md#keeping-a-preset-on-the-server-local_only) preset the
+server's lanes cannot take; any other 409 is 3, since rcm cannot tell whether a job was made.
 `rcm wait` gives an unreachable server 60 s to come back (printing `reconnecting…`) before
 exiting 3; `rcm eta`, `rcm jobs` and `rcm top` fail fast with `cannot reach <url>` and exit 3.
 

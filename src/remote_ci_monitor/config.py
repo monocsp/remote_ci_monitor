@@ -657,6 +657,7 @@ _PRESET_KEYS = {
     "keep",
     "start_deadline_seconds",
     "retry",
+    "local_only",
 }
 #: `[presets.retry]` 의 키(M5s 결정 210). 값을 안 적으면 요청서의 기본값이다(75 · 600 · 12)
 _RETRY_KEYS = {"on_exit", "interval_seconds", "max_attempts"}
@@ -926,6 +927,16 @@ def parse_preset(raw: Any) -> Preset:
     ):
         raise ConfigError(f"{where}: start_deadline_seconds must be a positive integer")
     retry = _parse_retry(where, raw.get("retry"), modes)
+    local_only = raw.get("local_only", False)
+    if not isinstance(local_only, bool):
+        raise ConfigError(f"{where}: local_only must be true or false")
+    if local_only and _PLACEMENT_VALUES[placement_raw] == PLACEMENT_POOL and pool != DEFAULT_POOL:
+        # 로컬 레인은 기본 풀만 집는다 — 다른 풀에 묶인 로컬 전용 프리셋은 아무도 못 돌린다
+        # (M5t-a 결정 254). `pools` 의 다른 풀은 막지 않는다 — 그 풀로 낸 제출이 409 다
+        raise ConfigError(
+            f'{where}: local_only needs pool = "{DEFAULT_POOL}" — the server\'s local lanes take '
+            f"only the {DEFAULT_POOL} pool, not {pool!r}"
+        )
     return Preset(
         name=name,
         argv=argv,
@@ -954,6 +965,7 @@ def parse_preset(raw: Any) -> Preset:
         keep=keep,
         start_deadline_seconds=start_deadline,
         retry=retry,
+        local_only=local_only,
     )
 
 

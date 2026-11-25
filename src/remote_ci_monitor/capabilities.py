@@ -33,11 +33,13 @@ from remote_ci_monitor.core.capability import (
     Verdict,
 )
 from remote_ci_monitor.core.model import (
+    CANCELLING,
     DEFAULT_POOL,
     PLACEMENT_CAPABLE,
     REASON_CHECK_FAILED,
     REASON_CHECK_PENDING,
     REASON_NO_CAPABLE_MACHINE,
+    RUNNING,
     Job,
     Placement,
     PlacementNote,
@@ -54,6 +56,10 @@ PROBE_VALUE_MAX = cap.PROBE_VALUE_MAX
 #: 판정에서 「도구 문제」— pool 잡은 이것으로 막지 않는다(결정 98: 집어서 즉시 tool_missing)
 _TOOL_CODES = frozenset({cap.CODE_TOOL_MISSING, cap.CODE_WORKSPACE_TOOL})
 _CHECK_CODES_PENDING = frozenset({cap.CODE_CHECK_RUNNING, cap.CODE_CHECK_NEEDED})
+#: 점검 때문에 막힌 판정 — 그 점검이 그 머신에서 돌 수 없으면 `check_local_only` 로 바뀐다(P6 X1)
+_CHECK_CODES_GATED = frozenset({*_CHECK_CODES_PENDING, cap.CODE_CHECK_FAILED})
+#: 워커가 집은 잡의 상태 — 대기(`queued` · `scheduled` · `uploading`)와 달리 끝까지 돈다
+_CLAIMED_JOB_STATES = frozenset({RUNNING, CANCELLING})
 #: 자동 점검의 하루 상한 — (워커, 점검)마다(결정 105). 워커는 자기 지문을 스스로 말하므로, 지문을
 #: 매번 바꿔 보내는 워커가 점검을 끝없이 돌리게 할 수 없다. 사람의 다시 점검은 세지 않는다
 AUTO_CHECKS_PER_DAY = 3
@@ -61,6 +67,10 @@ AUTO_CHECK_WINDOW = timedelta(days=1)
 #: 원격이 보낸 host_key 가 가질 수 있는 꼴 — 해시(16 hex) 또는 `worker:<이름>`. 그 밖은 버리고
 #: `worker:<이름>` 으로(화면 · 로그 · 잡 행에 실리는 값이다)
 _HOST_KEY_RE = re.compile(r"[A-Za-z0-9:._-]{1,80}")
+#: 원격 머신에서 본 `local_only` 프리셋의 판정 코드(M5t-a 결정 254) — 그 머신은 후보가 아니다
+CODE_LOCAL_ONLY = "local_only"
+#: `checks` 의 점검이 그 머신에서는 돌 수 없다(점검 프리셋이 `local_only`) — 점검 대기가 아니다
+CODE_CHECK_LOCAL_ONLY = "check_local_only"
 
 
 class MachineDown(Exception):
@@ -69,6 +79,10 @@ class MachineDown(Exception):
 
 class AmbiguousMachine(ValueError):
     """표시 이름이 여러 머신에 맞는다 — 워커 id 로 골라야 한다(결정 108)."""
+
+
+class NotACandidate(Exception):
+    """그 머신은 이 프리셋의 후보가 아니다(`local_only`, M5t-a 결정 254) — 409 로 거절한다."""
 
 
 class CapabilityError(Exception):
@@ -93,6 +107,12 @@ class _MachineView:
     report: CapabilityReport | None
     row: MachineRow | None
     lanes: int | None = None  # 로컬은 `[server] lanes`, 원격은 등록한 레인 수(`rcm machines` 의 칸)
+
+
+def _bare_view(worker: str, pool: str = DEFAULT_POOL) -> _MachineView:
+    """이름만 아는 머신 — 후보 함수에 넘길 자리. 후보 함수는 종류(로컬 · 원격)와 id 만 본다."""
+    kind = "local" if worker == LOCAL else "remote"
+    return _MachineView(worker, worker, kind, pool, True, None, None)
 
 
 def _probe_from_json(name: str, raw: Any) -> ProbeResult:
@@ -260,6 +280,8 @@ class CapabilitiesMixin:
                 {"name": p.name, "argv": list(p.argv), "timeout_seconds": p.timeout_seconds}
                 for p in self.config.probes
             ],
+            # 원격 워커가 받는 명세다 — 후보 함수가 원격을 빼는 프리셋(`local_only`)은 env 와 함께
+            # 싣지 않는다(결정 254)
             "presets": [
                 {
                     "name": p.name,
@@ -268,6 +290,7 @@ class CapabilitiesMixin:
                     "env": dict(p.env),
                 }
                 for p in self.config.presets
+                if self.machines_for(p, [_bare_view("")])
             ],
         }
 
@@ -414,17 +437,141 @@ class CapabilitiesMixin:
     def verdicts_for(self, worker: str, now: datetime) -> dict[str, Verdict]:
         report = self.report_of(worker)
         records = self._records(worker, report)
-        return {
-            p.name: cap.verdict(
-                p,
-                report,
-                generation=self.generation,
-                now=now,
-                max_age_seconds=self._max_age(),
-                check_records=records,
+        view = _bare_view(worker)
+        return {p.name: self._verdict(p, view, report, records, now) for p in self.config.presets}
+
+    def _verdict(
+        self,
+        preset: Preset,
+        view: _MachineView,
+        report: CapabilityReport | None,
+        records: list[Any],
+        now: datetime,
+    ) -> Verdict:
+        """(프리셋, 머신) 판정 — `cap.verdict` 에 후보 함수의 답을 얹는다(결정 254).
+
+        원격 머신이 그 프리셋의 후보가 아니면 `local_only` 다. 보고가 「다 있다」고 해도 그 머신은
+        받지 않는다. 판정이 점검 때문에 막혔는데(`check_needed` · `check_running` ·
+        `check_failed`) 그 점검이 그 머신에서는 다시 돌 수 없으면(점검 프리셋이 `local_only`)
+        `check_local_only` 다. 그 점검의 기록을 따르는 것은 둘뿐이다: 통과(지문이 같은 동안
+        유효)와 그 머신이 이미 집어 돌리는 잡(끝까지 돌고 결과를 센다). 대기 중인 점검 잡은
+        아무도 못 집어 「점검 중」이 영영 안 끝나고, 실패는 다시 점검하라는 말이 409 로 끝난다(P6
+        X1). 영영 안 오는 점검을 「점검 중」으로 부르면 잡이 조용히 기다린다."""
+        if view.kind != "local" and not self.machines_for(preset, [view]):
+            return Verdict(cap.INELIGIBLE, CODE_LOCAL_ONLY)
+        v = cap.verdict(
+            preset,
+            report,
+            generation=self.generation,
+            now=now,
+            max_age_seconds=self._max_age(),
+            check_records=records,
+        )
+        if v.code not in _CHECK_CODES_GATED or report is None:
+            return v
+        fp = report.fingerprint.hash
+        for name in preset.checks:
+            if self.check_reachable(view, name):
+                continue
+            state, record = cap.check_state([r for r in records if r.preset == name], fp)
+            if _record_holds(state, record):
+                continue
+            return Verdict(cap.INELIGIBLE, CODE_CHECK_LOCAL_ONLY, {"check": name})
+        return v
+
+    # ── 후보 머신 (M5t-a 결정 254) ─────────────────────────────────────────
+
+    def machines_for(
+        self,
+        preset: Preset | None,
+        views: list[_MachineView],
+        *,
+        target: str | None = None,
+        pool: str | None = None,
+        placement: str | None = None,
+    ) -> list[_MachineView]:
+        """그 프리셋(그 잡)의 후보 머신. 배치 · ETA · 제출 · 점검 · `/worker/spec` · claim ·
+        `/api/machines` 가 모두 이 결과를 쓰고 따로 거르지 않는다(docs/m5t-workplan.md §4.3).
+
+        정적인 조건만 본다 — `local_only`, 대상 머신, 풀, `local_accept_any`. `[server] lanes`
+        는 설정이 1 이상으로 막으므로 아직 보지 않는다(`lanes = 0` 은 M5t-a PR3 이 더한다).
+        살아 있음과 도구 판정은 보지 않는다(그것은 지금처럼 갈래 안에서 본다). `local_only` 가
+        아닌 프리셋은 받은 머신을 그대로 돌려준다. `target` · `pool` · `placement` 를 안 주면
+        프리셋의 기본값이다(잡이 있으면 그 잡의 값을 준다)."""
+        if preset is None or not preset.local_only:
+            return list(views)
+        if target is not None:
+            views = [v for v in views if v.id == target]
+        views = [v for v in views if v.kind == "local"]  # 원격 제외 — local_only 의 정의
+        if self._local_gap(preset, target=target, pool=pool, placement=placement) is not None:
+            return []
+        return views
+
+    def _local_gap(
+        self,
+        preset: Preset,
+        *,
+        target: str | None = None,
+        pool: str | None = None,
+        placement: str | None = None,
+    ) -> str | None:
+        """`local_only` 프리셋의 잡을 로컬 레인이 **설정 때문에** 못 받는 이유(사람용 문장).
+        받을 수 있으면 None. 판정(도구 · 점검)과 살아 있음은 보지 않는다. 원격 워커를 지정한
+        잡은 여기서 보지 않는다 — 원격 제외 한 줄(`machines_for`)이 그 후보를 비운다."""
+        head = _local_only_head(preset)
+        if target is not None:
+            return None
+        placement = preset.placement if placement is None else placement
+        if placement == PLACEMENT_CAPABLE:
+            if not self.config.server.local_accept_any:
+                return f"{head} — they take no any-capable job (local_accept_any = false)"
+            return None
+        pool = preset.pool if pool is None else pool
+        if pool != DEFAULT_POOL:
+            return f"{head} — they take only the {DEFAULT_POOL} pool, not pool {pool!r}"
+        return None
+
+    def check_reachable(self, view: _MachineView, check: str) -> bool:
+        """그 머신에서 점검 프리셋을 돌릴 수 있나 — 점검은 그 머신을 지정한 잡이다. 설정에 없는
+        이름은 막지 않는다(지금처럼 걸려다 `preset` 없음으로 끝난다)."""
+        preset = self.config.preset(check)
+        if preset is None:
+            return True
+        return bool(self.machines_for(preset, [view], target=view.id))
+
+    def local_only_refusal(
+        self, preset: Preset, *, target: str | None, pool: str, placement: str
+    ) -> tuple[str, str] | None:
+        """`local_only` 제출을 거절할 이유 `(코드, 문장)` — 없으면 None(§4.3, TO16).
+
+        정적인 셋(원격 지정 · `local_accept_any = false` 인데 any-capable · 기본 풀이 아닌 풀)과
+        capable 갈래에서 `@local` 의 `tool_missing` 에만 409 다(넷째인 `lanes = 0` 은 PR3). 점검
+        판정 때문에 비거나 `@local` 의 보고가 없거나 낡은 경우는 큐에 든다(`_why_none` 이 이유를
+        보인다). `local_only` 가 아니면 언제나 None."""
+        if not preset.local_only:
+            return None
+        now = self.now_fn()
+        views = self.machine_views(now)
+        found = self.machines_for(preset, views, target=target, pool=pool, placement=placement)
+        if not found:
+            if target is not None and target != LOCAL:
+                why = f"{_local_only_head(preset)} — machine {target} cannot take it"
+            else:
+                gap = self._local_gap(preset, target=target, pool=pool, placement=placement)
+                why = gap or f"{_local_only_head(preset)} — no local lane can take it"
+            return REASON_NO_CAPABLE_MACHINE, why
+        if placement != PLACEMENT_CAPABLE or target is not None:
+            return None
+        local = found[0]
+        records = self._records(local.id, local.report) if preset.checks else []
+        v = self._verdict(preset, local, local.report, records, now)
+        if v.code == cap.CODE_TOOL_MISSING:
+            tools = ", ".join(str(t) for t in v.detail.get("tools") or [])
+            return (
+                cap.CODE_TOOL_MISSING,
+                f"{_local_only_head(preset)} — they miss the required tool(s): {tools}",
             )
-            for p in self.config.presets
-        }
+        return None
 
     def claimant_for(self, worker: str, pool: str, now: datetime) -> Claimant:
         """claim 직전의 신원과 받을 수 있는 것(§5.2). 보고가 없으면 capable 은 비어 있다."""
@@ -440,6 +587,14 @@ class CapabilitiesMixin:
             for name, v in verdicts.items()
             if presets[name].checks and v.state != cap.ELIGIBLE and v.code not in _TOOL_CODES
         )
+        # 후보 함수가 이 워커를 뺀 프리셋 — 지정 · pool · capable · known 어느 갈래로도 안 집는다.
+        # 로컬 레인은 빼지 않는다(로컬 레인의 규칙은 지금 그대로다, TO3)
+        view = _bare_view(worker, pool)
+        excluded = (
+            ()
+            if worker == LOCAL
+            else tuple(name for name, p in presets.items() if not self.machines_for(p, [view]))
+        )
         return Claimant(
             worker=worker,
             pool=pool,
@@ -449,6 +604,7 @@ class CapabilitiesMixin:
             gated=gated,
             accept_any=report.accept_any if report else False,
             known=tuple(presets),
+            excluded=excluded,
         )
 
     def host_of(self, worker: str, report: CapabilityReport | None = None) -> str | None:
@@ -520,6 +676,12 @@ class CapabilitiesMixin:
         out = []
         for name in self.check_preset_names():
             state, record = cap.check_state([r for r in records if r.preset == name], fp)
+            # 그 머신에서는 돌 수 없는 점검(`local_only`) — 스스로도, 다시 걸어도 안 온다(6-A-L5)
+            reachable = self.check_reachable(view, name)
+            if not reachable and not _record_holds(state, record):
+                # 판정과 같은 규칙이다(batch 7 T1). 아무도 못 집는 대기 잡을 「점검 중」으로,
+                # 그 머신에서 고칠 수 없는 실패를 「실패」로 보이지 않는다. job_id 는 이력이다
+                state = cap.CHECK_NEEDED
             out.append(
                 {
                     "preset": name,
@@ -529,9 +691,13 @@ class CapabilitiesMixin:
                     "auto_submitted": bool(
                         record is not None and self.store.check_was_automatic(record.job_id)
                     ),
-                    "error_code": self._check_errors.get((view.id, name)),
-                    # 「점검 필요」인데 스스로 안 걸린다 — 사람이 `rcm recheck` 해야 풀린다
-                    "recheck_needed": state == cap.CHECK_NEEDED
+                    "error_code": self._check_errors.get((view.id, name))
+                    if reachable
+                    else CODE_LOCAL_ONLY,
+                    # 「점검 필요」인데 스스로 안 걸린다 — 사람이 `rcm recheck` 해야 풀린다.
+                    # 돌 수 없는 점검은 다시 걸어도 409 라 사람에게 시키지 않는다
+                    "recheck_needed": reachable
+                    and state == cap.CHECK_NEEDED
                     and not self.check_comes_by_itself(view, name),
                 }
             )
@@ -570,15 +736,7 @@ class CapabilitiesMixin:
             }
         records = self._records(view.id, report)
         verdicts = {
-            p.name: cap.verdict(
-                p,
-                report,
-                generation=self.generation,
-                now=now,
-                max_age_seconds=self._max_age(),
-                check_records=records,
-            )
-            for p in self.config.presets
+            p.name: self._verdict(p, view, report, records, now) for p in self.config.presets
         }
         host_key = report.host_key if report else (row.host_key if row else None)
         if view.kind == "local":
@@ -663,7 +821,7 @@ class CapabilitiesMixin:
         다시 안 건다) 사람이 다시 걸기 전까지 영영 안 풀린다. 그것을 「점검 중」(스스로 풀림)으로
         부르면 잡이 조용히 영원히 기다린다(실측 2026-11-16: 점검 도중 워커를 재시작했다).
         """
-        if not self.config.server.auto_checks:
+        if not self.config.server.auto_checks or not self.check_reachable(view, check):
             return False
         fp = view.report.fingerprint.hash if view.report is not None else None
         if fp is None:
@@ -704,14 +862,7 @@ class CapabilitiesMixin:
                     if rkey not in memo:
                         memo[rkey] = self._records(view.id, view.report)
                     records = memo[rkey]
-                v = cap.verdict(
-                    preset,
-                    view.report,
-                    generation=self.generation,
-                    now=now,
-                    max_age_seconds=self._max_age(),
-                    check_records=records,
-                )
+                v = self._verdict(preset, view, view.report, records, now)
                 # 스스로 안 풀리는 점검이면 표시를 단다 — (프리셋, 머신)마다 한 번(캐시 안에서)
                 v = self._flag_recheck(view, v)
                 memo[vkey] = v
@@ -740,10 +891,19 @@ class CapabilitiesMixin:
         def key(view: _MachineView) -> str | None:
             return None if view.id == LOCAL else view.id
 
+        preset = self.config.preset(job.preset)
+        if preset is not None and preset.local_only:
+            # 후보 함수가 머신을 뺐다 — 세 갈래 모두 「갈 곳 없음」이고 ETA 는 없다(§4.3 의 새
+            # 분기). 이 분기는 `local_only` 프리셋에만 있다. 다른 프리셋의 빈 풀은 지금처럼
+            # `worker_down` 이다(C3)
+            views = self.machines_for(
+                preset, views, target=job.target_worker, pool=job.pool, placement=job.placement
+            )
+            if not views:
+                return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE)
         if job.target_worker is not None:
             target = None if job.target_worker == LOCAL else job.target_worker
             return Placement(workers=frozenset({target}))
-        preset = self.config.preset(job.preset)
         if job.placement == PLACEMENT_CAPABLE and preset is None:
             # reload 로 프리셋이 사라졌다 — claim 의 capable 목록에 그 이름이 없으니 아무도
             # 안 집는다. pool 갈래로 떨어뜨리면 표시 풀의 레인에 시각을 지어낸다(fail-open)
@@ -848,6 +1008,12 @@ class CapabilitiesMixin:
         elif preset.placement != PLACEMENT_CAPABLE:
             pool = job.pool if job is not None else preset.pool
             views = [v for v in views if v.pool == pool]
+        if job is not None:
+            views = self.machines_for(
+                preset, views, target=job.target_worker, pool=job.pool, placement=job.placement
+            )
+        else:
+            views = self.machines_for(preset, views)
         eligible: list[str] = []
         blocked: list[dict[str, Any]] = []
         for view, v in self._placement_notes(preset, views, now):
@@ -939,16 +1105,24 @@ class CapabilitiesMixin:
 
     def _could_receive(self, view: _MachineView, preset: Preset) -> bool:
         """이 워커가 이 프리셋의 잡을 받을 수 있는 자리인가 — any-capable 이면 any-capable 을 받는
-        워커, pool 이면 그 풀(또는 `--pool` 로 고를 수 있는 풀)의 워커. 판정은 따로다."""
+        워커, pool 이면 그 풀(또는 `--pool` 로 고를 수 있는 풀)의 워커. 판정은 따로다. 후보
+        함수가 뺀 머신(`local_only`)은 받을 자리가 아니다."""
+        if not self.machines_for(preset, [view]):
+            return False
         if preset.placement == PLACEMENT_CAPABLE:
             if view.kind == "local":
                 return bool(self.config.server.local_accept_any)
             return view.report.accept_any if view.report is not None else False
         return view.pool in (preset.pool, *preset.pools)
 
-    def recheck(self, worker: str, names: list[str] | None) -> list[dict[str, Any]]:
+    def recheck(self, worker: str, names: list[str] | None) -> dict[str, list[dict[str, Any]]]:
         """`POST /machines/{id}/recheck` — 사람이 다시 건다(한 번 제한과 무관). 없는 머신은
-        `KeyError`, 점검 프리셋이 아닌 이름은 `ValueError`."""
+        `KeyError`, 점검 프리셋이 아닌 이름은 `ValueError`.
+
+        답은 `{"jobs": [...], "skipped": [...]}` 다. 이름 없이 걸 때 그 머신에서는 돌 수 없는
+        점검(`local_only`)은 `jobs` 의 번호 없는 항목이 아니라 `skipped` 에 정책 코드로 싣는다.
+        CLI 와 웹은 번호 없는 `jobs` 항목을 실패로 부르는데, 건너뛴 것은 실패가 아니다(위임 결정
+        4). 걸 것이 없고 건너뛴 것만 있어도 200 이고 `jobs` 는 빈 목록이다."""
         now = self.now_fn()
         view = self.resolve_machine(worker, self.machine_views(now))  # KeyError · Ambiguous
         if not view.alive:
@@ -958,22 +1132,42 @@ class CapabilitiesMixin:
         bad = [n for n in targets if n not in checks]
         if bad:
             raise ValueError(f"not a check preset: {', '.join(bad)}")
+        if names is not None:
+            # 이름을 댄 점검이 그 머신에서는 돌 수 없다(`local_only`) — 하나도 걸지 않고 409
+            far = [n for n in targets if not self.check_reachable(view, n)]
+            if far:
+                raise NotACandidate(
+                    f"check preset(s) {', '.join(far)} run only on this server's local lanes "
+                    f"(local_only) — machine {view.id} cannot take them"
+                )
         fp = view.report.fingerprint.hash if view.report else None
-        out = []
+        out: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
         for name in targets:
+            if not self.check_reachable(view, name):
+                # 돌 수 없는 점검(`local_only`) — 지금 설정으로 셈한다(`_check_rows` 와 같다).
+                # 이름을 댄 경우는 위에서 409 로 끝났으니 여기는 이름 없는 일괄 요청뿐이다
+                skipped.append({"preset": name, "code": CODE_LOCAL_ONLY})
+                continue
             job_id = self._submit_check(view, name, fp, auto=False)
             item: dict[str, Any] = {"preset": name, "job_id": job_id}
             if job_id is None:
                 # 못 걸었다 — 번호 없는 성공처럼 보이지 않게 이유를 싣는다(점검 칸과 같은 코드)
                 item["error_code"] = self._check_errors.get((view.id, name), "not_submitted")
             out.append(item)
-        return out
+        return {"jobs": out, "skipped": skipped}
 
     def _submit_check(
         self, view: _MachineView, name: str, fp: str | None, *, auto: bool
     ) -> int | None:
         preset = self.config.preset(name)
         if preset is None:
+            return None
+        if not self.check_reachable(view, name):
+            # 점검 잡을 만들기 전에 후보를 본다(6-A-L3) — 아무도 못 집는 지정 잡을 남기지 않는다.
+            # `_check_errors` 에 적지 않는다: 설정에서 나온 사실이라 reload 로 표식을 떼면 바로
+            # 사라져야 한다. 적어 두면 다음 성공까지 거짓 `local_only` 가 남고, 그 성공은
+            # 「after ref_unresolved」로 틀린 원인을 로그에 남긴다(P3 1라운드)
             return None
         try:
             job = self.submit_internal_check(preset, view, fingerprint_hash=fp)
@@ -1025,6 +1219,23 @@ class CapabilitiesMixin:
                 self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
 
 
+def _record_holds(state: str, record: cap.CheckRecord | None) -> bool:
+    """그 머신에서 다시 돌 수 없는 점검(`local_only`)의 기록을 그대로 셀까 — 판정(`_verdict`)과
+    점검 칸(`_check_rows`)이 같이 쓴다(batch 7 T1, 둘이 다시 갈라지지 않게).
+
+    둘뿐이다: 통과(지문이 같은 동안 유효)와 그 머신이 이미 집어 돌리는 잡(끝까지 돌고 결과를
+    센다). 대기 중인 점검 잡은 아무도 못 집고, 실패는 그 머신에서 다시 점검해 고칠 수 없다."""
+    if state == cap.CHECK_PASSED:
+        return True
+    claimed = record is not None and record.job_state in _CLAIMED_JOB_STATES
+    return state == cap.CHECK_RUNNING and claimed
+
+
+def _local_only_head(preset: Preset) -> str:
+    """`local_only` 거절 문장의 앞머리 — 409 의 사람용 문장이 모두 이것으로 시작한다."""
+    return f"preset '{preset.name}' runs only on this server's local lanes (local_only)"
+
+
 def _previous_value(
     previous: Mapping[str, ProbeResult] | None, name: str, now: ProbeResult
 ) -> str | None:
@@ -1042,6 +1253,9 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 __all__ = [
+    "CODE_CHECK_LOCAL_ONLY",
+    "CODE_LOCAL_ONLY",
+    "NotACandidate",
     "CHECK_LABEL",
     "CHECK_REQUESTER",
     "CapabilitiesMixin",

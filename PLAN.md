@@ -262,7 +262,7 @@ default = "full"
 | `POST /pause` · `POST /resume` | admin | 큐 정지·재개. 실행 중 잡은 끝까지 돌고 새 잡만 안 올라간다. `server.paused: {by, at}` 또는 null |
 | `GET /api/status` | `read_auth` | 전체 `StatusModel`. `ETag` 지원. `log_tail` 은 토큰 조건(위) |
 | `GET /events` | `read_auth` | SSE: `hello` → `job_changed`·`job_finished`·`marker`·`host_sample`·`server`(+ `reset`·`lag` = 전체 재조회). `Last-Event-ID` 재생, 15초 keep-alive. 동시 연결 `sse_max_connections`(16) 초과는 503 + `Retry-After` + `{fallback: "poll", poll_seconds: 10}` — 웹은 백오프로 재시도하며 10초 폴링, CLI `wait` 는 2초 폴링 |
-| `POST /api/eta` | `read_auth` | `{preset, inputs}` → 가상 잡의 큐 행(`id` null, `position` = 대기 수 + 1) + `ahead`. `rcm eta` 용 |
+| `POST /api/eta` | `read_auth` | `{preset, inputs}` → 가상 잡의 큐 행(`id` null, `position` = 대기 수 + 1) + `ahead`(갈 로컬 레인이 없는 `local_only` 프리셋은 null). `rcm eta` 용 |
 | `GET /api/health` | 없음 | 워커 스레드 살아 있고 DB 열리면 200, 아니면 503 + 사유 |
 | `GET /api/repos` · `GET /api/repos/{repo}` | `read_auth` | 스토어 탭(릴리스 프로파일). 목록은 `release` 유무와 `setup` 셈, 보기는 프로파일(값 없이) · `setup{required,present,verified,complete,missing[]}` · 미러(`path`·`fetched_at`·`age_seconds`) · `branches{main,dev,main_in_dev}` — 미러만 읽는다. 프로파일 없는 저장소는 404 |
 | `POST /api/repos/{repo}/fetch` | 토큰 | 미러 갱신(heads·tags 전체 · prune · 레인과 같은 락) → `mirror` + `branches`. 502 `fetch_failed`(stderr 끝 60자) · 504 타임아웃 |

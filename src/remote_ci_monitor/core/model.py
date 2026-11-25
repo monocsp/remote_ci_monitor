@@ -233,6 +233,9 @@ class Preset:
     #: 종료코드 반복(M5s 결정 210). `[presets.retry]` 를 선언한 프리셋만 — None 이면 그 종료코드도
     #: 여느 실패다(rcm-ci 의 75 = 인프라 실패를 지킨다). 제출할 때 잡 열로 얼린다(결정 229)
     retry: RetryPolicy | None = None
+    #: 원격 금지(M5t-a 결정 254). 참이면 이 프리셋에게 서버의 머신 목록은 `@local` 하나뿐이다 —
+    #: 원격 워커는 집지도, 후보로 보이지도 않는다. 비밀을 쓰는 release · deploy 프리셋에 단다
+    local_only: bool = False
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:

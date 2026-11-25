@@ -1044,6 +1044,10 @@ def _submit_refused(args: argparse.Namespace) -> tuple[int, ...]:
 #: 것이다(H 실기). `golive_running`(결정 232)은 `rcm run` 에는 나오지 않지만(`POST /jobs` 가
 #: 먼저 `release_route_required` 로 막는다) 같은 뜻의 거절이라 둔다.
 _REFUSED_CODES = ("release_route_required", "schedule_exists", "golive_running")
+#: `no_capable_machine` · `tool_missing` 은 `local_only` 제출을 받을 로컬 레인이 없다는 거절이다
+#: (M5t-a 결정 254). 서버가 합류 · supersede 와 잡 생성 전에 거절하니 `--machine` 이 없어도 2 다.
+#: 위 줄과 나눠 둔 것은 그 줄을 잡는 변이(`m5s-cli-schedule-exists-is-unknown`)를 지키려는 것이다.
+_REFUSED_CODES += ("no_capable_machine", "tool_missing")
 
 
 def _refused_by_code(e: ClientError) -> bool:

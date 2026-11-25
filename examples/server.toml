@@ -184,6 +184,7 @@ source_modes = ["tree"]
 priority = "normal"         # "low" | "normal" | "high" — default for this preset and the ceiling for non-admin sessions
 pool = "default"            # worker pool for this preset's jobs
 # pools = ["linux"]         # extra pools a session may pick with --pool (remote workers, M5b)
+# local_only = true         # only the server's own lanes run it, never a remote worker (0.11.0+)
 expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back

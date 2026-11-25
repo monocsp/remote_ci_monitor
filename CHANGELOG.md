@@ -8,6 +8,20 @@ of a key bumps that number and is listed here.
 ## [Unreleased]
 
 ### Added
+- **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
+  it is left out of `GET /worker/spec`, no remote claim hands it out, and `rcm machines` shows it
+  as `local_only` on every remote worker. A submission the server's lanes cannot take — pinned to
+  a remote worker, sent to another pool, `any-capable` with `local_accept_any = false`, or missing
+  a required tool there — is refused with 409 before it joins or supersedes anything. Jobs already
+  waiting when the mark is added show `no capable machine` with no ETA instead of being failed. A
+  `local_only` pool preset must use the default pool, or the server does not start; an older
+  server does not know the key, so upgrade every server that reads the preset first, and remove
+  the `local_only` lines before rolling back below 0.11.0.
+  `POST /machines/{id}/recheck` without names lists a check a remote worker cannot run under a
+  new `skipped` key instead of as a failed job. `rcm run` exits 2 on these refusals, as no job
+  was made. For a `local_only` preset no local lane can take, `POST /api/eta` now answers
+  `ahead: null`; `ahead` was always a number before.
+  ([#266](https://github.com/monocsp/remote_ci_monitor/pull/266))
 - **`rcm doctor` says what this machine can build and test, and what to install first.** It
   measures in the service's environment (the service manager's defaults plus the service file's
   variables, not your shell), lists every preset that would come to this machine as `ready`,
