@@ -477,7 +477,7 @@ def test_tr20_the_net_lets_plain_setup_help_and_unrelated_commands_through():
     for command in (
         "cd /home/op/src/remote_ci_monitor-setup-x && ./.venv/bin/python -m pytest -q",
         "./.venv/bin/ruff check src/remote_ci_monitor/setup.py tests/test_setup.py",
-        "python -c 'import remote_ci_monitor' && git log --grep setup",
+        "python -c 'import remote_ci_monitor' && git log -1 -- tests/test_setup.py",
         "rcm status && echo done",
     ):
         assert judge(command, environ=TEST_XDG) is None, command
