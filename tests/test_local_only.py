@@ -1,0 +1,1377 @@
+"""M5t-a PR1 — 원격 금지 표식 `local_only`(결정 254 · `docs/m5t-workplan.md` §4.3 · §7 TO 표).
+
+`local_only = true` 인 프리셋에게 서버의 머신 목록은 `@local` 하나뿐이다. 거르는 곳은 후보 함수
+하나(`machines_for`)이고 배치 · ETA · 제출 · 점검 · `/worker/spec` · claim · `/api/machines` 는 모두
+그 결과를 쓴다. TO15 는 진입점마다 한 경우로 나눠, 후보 함수의 원격 제외를 지운 변이 하나가
+진입점마다 빨개지는지 본다(6-A-M3).
+
+서버는 `tests/test_server_m5n.py` 의 `M5nServer` 다(in-process HTTP · 주입 시계 · 로컬 레인
+스레드 없음). 원격 워커 `build-02` 는 기본 풀에, `mbp` 는 `mac2` 풀에 붙는다. 원격 워커는 설정의
+**모든** 프리셋에 사실을 보낸다 — 이 PR 이전의 워커는 `/worker/spec` 에서 `local_only` 프리셋도
+받았으므로 그것을 잰 보고가 그대로 온다. 서버는 그 보고가 있어도 원격을 후보로 삼지 않아야 한다.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from remote_ci_monitor import server as server_module
+from remote_ci_monitor.config import ConfigError, load_server_config
+from remote_ci_monitor.core.model import (
+    PLACEMENT_CAPABLE,
+    PLACEMENT_POOL,
+    QUEUED,
+    RETRIED,
+    SCHEDULED,
+    Requester,
+    Source,
+)
+from remote_ci_monitor.store import Claimant, Store
+from test_server import TAR, TREE_HASH
+from test_server_m5n import GIT_SHA, HOST_B, HOST_C, PROBES, M5nServer, ok_probe
+from test_worker_api import T0
+
+LOCAL = "@local"
+REMOTE = "build-02"  # 기본 풀의 원격 워커
+OTHER = "mbp"  # mac2 풀의 원격 워커
+FAKE_TOOL = "rcm-m5t-faketool"  # 어느 PATH 에도 없는 이름
+REL_ENV = "kept-on-the-server"  # `rel` 의 env 값 — 원격 워커의 명세 어디에도 없어야 한다
+
+
+def block(name: str, *lines: str) -> str:
+    body = "\n".join(lines)
+    return f'\n[[presets]]\nname = "{name}"\nargv = ["sh", "-c", "echo {name}"]\n{body}\n'
+
+
+GIT = 'source_modes = ["git_ref"]\nrepo = "app"'
+
+#: gate · gateany 는 표식 없음. rel* · localcheck 는 `local_only`.
+#: qa(mac2 풀) · qadef(기본 풀)는 표식 없이 로컬 전용 점검을 쓴다
+PRESETS = "".join(
+    [
+        block("gate", "expected_seconds = 600"),
+        block("gateany", 'placement = "any-capable"', "expected_seconds = 600"),
+        block(
+            "rel",
+            "local_only = true",
+            'pools = ["mac2"]',
+            "expected_seconds = 600",
+            f'env = {{ RCM_LO_MARK = "{REL_ENV}" }}',
+        ),
+        block("relany", "local_only = true", 'placement = "any-capable"'),
+        block(
+            "relneed",
+            "local_only = true",
+            'placement = "any-capable"',
+            f'requires = ["{FAKE_TOOL}"]',
+        ),
+        block("relq", "local_only = true", 'checks = ["simcheck"]'),
+        block(
+            "relgated", "local_only = true", 'placement = "any-capable"', 'checks = ["simcheck"]'
+        ),
+        block("simcheck", GIT),
+        block("localcheck", "local_only = true", GIT),
+        block("qa", 'pool = "mac2"', 'checks = ["localcheck"]'),
+        block("qadef", 'checks = ["localcheck"]'),
+        block("relgit", GIT, 'pools = ["mac2"]'),
+    ]
+)
+NAMES = [
+    "gate",
+    "gateany",
+    "rel",
+    "relany",
+    "relneed",
+    "relq",
+    "relgated",
+    "simcheck",
+    "localcheck",
+    "qa",
+    "qadef",
+    "relgit",
+]
+LOCAL_ONLY = {"rel", "relany", "relneed", "relq", "relgated", "localcheck"}
+
+
+# ── 도우미 ───────────────────────────────────────────────────────────────────
+
+
+def report(
+    s: M5nServer,
+    worker: str,
+    *,
+    host_key: str = HOST_B,
+    accept_any: bool = True,
+    xcode: str = "Xc 1",
+    again: bool = False,
+):
+    """등록한 워커의 보고 — 모든 프리셋에 「전부 있음」(옛 워커가 보내던 꼴). `again` 이면 다시
+    등록하지 않고 서버의 지금 세대로만 보낸다 — 다시 등록하면 그 워커가 돌던 잡을 잃는다."""
+    if again:
+        gen = s.app.generation
+    else:
+        gen = s.registered(worker, pool=s.pools_of[worker])["generation"]
+    body = {
+        "generation": gen,
+        "host_key": host_key,
+        "accept_any": accept_any,
+        "fingerprint": {"xc": ok_probe(xcode)},
+        "presets": {
+            n: {"missing_tools": [], "workspace_tools": [], "missing_passthrough": []}
+            for n in NAMES
+        },
+    }
+    status, resp = s.req("POST", "/worker/capabilities", token=worker, json_body=body)
+    assert status == 200, resp
+
+
+def server(tmp_path: Path, *, presets: str = PRESETS, **kw: Any) -> M5nServer:
+    s = M5nServer(tmp_path, presets=presets, **kw)
+    s.pools_of = {REMOTE: "default", OTHER: "mac2", "mac2-worker": "mac2"}
+    return s
+
+
+def ready(s: M5nServer) -> M5nServer:
+    """로컬은 이 프로세스로 재고, 기본 풀 원격 `build-02` 가 붙어 보고한 서버."""
+    s.app.measure_capabilities()
+    report(s, REMOTE)
+    return s
+
+
+@pytest.fixture
+def lo(tmp_path):
+    s = server(tmp_path)
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def lo_ready(lo):
+    return ready(lo)
+
+
+def post(
+    s: M5nServer,
+    preset: str,
+    *,
+    token: str = "alice",
+    machine: str | None = None,
+    pool: str | None = None,
+    join: bool = False,
+    extra: dict[str, Any] | None = None,
+):
+    source: dict[str, Any]
+    if preset in ("simcheck", "localcheck") or preset.startswith("relgit"):
+        source = {"mode": "git_ref", "ref": GIT_SHA}
+    else:
+        source = {
+            "mode": "tree",
+            "repo": "org/app",
+            "branch": "main",
+            "base_sha": "abc123f",
+            "dirty": True,
+            "tree_hash": TREE_HASH,
+            "bytes": len(TAR),
+        }
+    body: dict[str, Any] = {
+        "preset": preset,
+        "inputs": {},
+        "source": source,
+        "requester_label": f"{token}@host",
+        "join": join,
+        **(extra or {}),
+    }
+    if machine is not None:
+        body["machine"] = machine
+    if pool is not None:
+        body["pool"] = pool
+    return s.req("POST", "/jobs", token=token, json_body=body)
+
+
+def queued(s: M5nServer, preset: str, **kw: Any) -> int:
+    status, body = post(s, preset, **kw)
+    assert status == 201, body
+    jid = int(body["job_id"])
+    if body["state"] not in (QUEUED, "scheduled"):
+        token = kw.get("token", "alice")
+        status, resp = s.req("PUT", f"/jobs/{jid}/tree", token=token, body=TAR)
+        assert status == 200, resp
+    return jid
+
+
+def job_count(s: M5nServer) -> int:
+    return int(s.store._conn().execute("SELECT count(*) AS n FROM jobs").fetchone()["n"])
+
+
+def stored_job(s: M5nServer, preset: str, *, target: str | None = None, pool: str = "default"):
+    """제출 검사를 거치지 않은 대기 잡 — 표식을 달기 전부터 있던 잡을 흉내 낸다."""
+    return s.store.create_job(
+        preset=preset,
+        inputs={},
+        key=preset,
+        concurrency_group=None,
+        source=Source(mode="tree", tree_hash=f"stored-{preset}-{target}-{pool}"),
+        requester=Requester(name="alice-laptop", label="alice@host"),
+        timeout_seconds=600,
+        join_key=None,
+        now=s.clock(),
+        state=QUEUED,
+        pool=pool,
+        placement=PLACEMENT_POOL,
+        target_worker=target,
+    )
+
+
+def placement(s: M5nServer, jid: int):
+    now = s.clock()
+    return s.app.placement_for(s.store.get_job(jid), now, s.app.machine_views(now))
+
+
+def busy_local_lane(s: M5nServer) -> int:
+    """로컬 레인 하나를 600초짜리 잡으로 채운다 — 원격이 후보면 ETA 가 0 이 된다."""
+    jid = queued(s, "gate")
+    now = s.clock()
+    job = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+    assert job is not None and job.id == jid and job.worker_name is None
+    return jid
+
+
+def eta(s: M5nServer, preset: str) -> dict[str, Any]:
+    status, body = s.req("POST", "/api/eta", token="alice", json_body={"preset": preset})
+    assert status == 200, body
+    return body["job"]
+
+
+def record_checks(s: M5nServer, monkeypatch) -> list[tuple[str, str]]:
+    """점검 잡을 만드는 자리를 가로챈다 — 누가 어디에 걸려 했는지만 남기고 만들지 않는다."""
+    calls: list[tuple[str, str]] = []
+
+    def fake(preset, view, *, fingerprint_hash):
+        calls.append((preset.name, view.id))
+        raise RuntimeError("test: not submitted")
+
+    monkeypatch.setattr(s.app, "submit_internal_check", fake)
+    return calls
+
+
+def write_config(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "rcm.toml"
+    p.write_text(f'[server]\ndata_dir = "{tmp_path / "data"}"\n{text}', encoding="utf-8")
+    return p
+
+
+# ── TO1 · TO9 설정 ───────────────────────────────────────────────────────────
+
+
+def test_to1_local_only_is_read_and_defaults_to_false(tmp_path):
+    p = write_config(
+        tmp_path,
+        block("a", "local_only = true")
+        + block("b", "local_only = true", "pools = []")
+        + block("c"),
+    )
+    cfg = load_server_config(p, environ={}, check_tools=False)
+    assert cfg.preset("a").local_only is True
+    assert cfg.preset("b").local_only is True
+    assert cfg.preset("c").local_only is False
+
+
+def test_to1_local_only_must_be_true_or_false(tmp_path):
+    p = write_config(tmp_path, block("a", 'local_only = "yes"'))
+    with pytest.raises(ConfigError) as e:
+        load_server_config(p, environ={}, check_tools=False)
+    assert "local_only" in str(e.value) and "unknown key" not in str(e.value)
+
+
+def test_to9_local_only_on_a_pool_other_than_the_default_stops_the_server(tmp_path):
+    p = write_config(tmp_path, block("a", "local_only = true", 'pool = "mac2"'))
+    with pytest.raises(ConfigError) as e:
+        load_server_config(p, environ={}, check_tools=False)
+    msg = str(e.value)
+    assert "'a'" in msg, msg
+    assert "local_only" in msg and "default" in msg and "unknown key" not in msg, msg
+
+
+def test_to9_extra_pools_load_and_their_submission_is_409(lo):
+    """`pools` 에 기본 풀이 아닌 항목이 있어도 기동한다 — 그 풀로 낸 제출이 409 다(TO10)."""
+    assert lo.cfg.preset("rel").pools == ("mac2",)
+    status, body = post(lo, "rel", pool="mac2")
+    assert status == 409, body
+
+
+# ── TO10 · TO13 · TO16 제출 ──────────────────────────────────────────────────
+
+
+def test_to10_a_local_only_submission_to_another_pool_is_409(lo_ready):
+    before = job_count(lo_ready)
+    status, body = post(lo_ready, "rel", pool="mac2")
+    assert status == 409, body
+    assert body["error_code"] == "no_capable_machine"
+    assert "local lanes" in body["error"] and "mac2" in body["error"]
+    assert job_count(lo_ready) == before  # 잡이 큐에 들지 않는다
+
+
+SHA_A, SHA_B, SHA_C = ("a" * 40, "b" * 40, "c" * 40)
+
+
+def submissions(s: M5nServer) -> int:
+    return int(s.store._conn().execute("SELECT count(*) AS n FROM submissions").fetchone()["n"])
+
+
+@pytest.mark.parametrize("marked", [False, True], ids=["control", "marked"])
+def test_to13_the_409_comes_before_joining_and_superseding(tmp_path, monkeypatch, marked):
+    """합류할 잡과 치울 잡을 둘 다 세워 두고 같은 두 제출을 낸다. 표식이 없으면(control) 앞의
+    제출은 합류하고 뒤의 제출은 옛 잡을 치운다 — 대상이 진짜다. 표식이 있으면 둘 다 409 이고
+    기존 잡은 그대로다. git_ref 잡은 제출하는 순간 supersede 하므로 그 순서가 보인다."""
+    sha = {"now": SHA_A}
+    monkeypatch.setattr(server_module, "resolve_ref", lambda *a, **k: sha["now"])
+    unmarked = PRESETS + block("relsup", GIT, 'pools = ["mac2"]', 'supersede = "all"')
+    s = ready(server(tmp_path, presets=unmarked))
+
+    def submit(at: str, **extra: Any):
+        sha["now"] = at
+        body = {
+            "preset": "relsup",
+            "inputs": {},
+            "source": {"mode": "git_ref", "ref": "main"},
+            "requester_label": "alice@host",
+            "pool": "mac2",
+            **extra,
+        }
+        return s.req("POST", "/jobs", token="alice", json_body=body)
+
+    try:
+        status, a = submit(SHA_A)
+        assert status == 201, a
+        status, b = submit(SHA_B, supersede=False)  # 옛 잡 A 를 남긴다 — 치울 대상이다
+        assert status == 201, b
+        old, target = int(a["job_id"]), int(b["job_id"])
+        assert s.store.get_job(old).state == QUEUED
+        if marked:
+            s.write(
+                PROBES
+                + unmarked.replace('supersede = "all"', 'supersede = "all"\nlocal_only = true')
+            )
+            status, body = s.req("POST", "/reload", token="admin", json_body={})
+            assert status == 200, body
+            assert s.app.config.preset("relsup").local_only is True
+        jobs, subs = job_count(s), submissions(s)
+        # 합류: 같은 sha 는 B 와 같은 잡이다(합류 키는 풀을 보지 않는다)
+        status, joined = submit(SHA_B, join=True)
+        # supersede: 같은 브랜치의 새 sha 는 A · B 를 치운다
+        status2, newer = submit(SHA_C)
+        if not marked:
+            assert status == 200 and joined["joined"] is True, joined
+            assert joined["job_id"] == target
+            assert status2 == 201, newer
+            assert s.store.get_job(old).state == "cancelled"
+            assert s.store.get_job(target).state == "cancelled"
+            return
+        assert (status, status2) == (409, 409), (joined, newer)
+        assert joined["error_code"] == newer["error_code"] == "no_capable_machine"
+        assert job_count(s) == jobs and submissions(s) == subs  # 합류도 새 잡도 없다
+        assert s.store.get_job(old).state == QUEUED  # 치워지지 않았다
+        assert s.store.get_job(target).state == QUEUED
+    finally:
+        s.close()
+
+
+def test_to16_pinning_a_local_only_preset_to_a_remote_worker_is_409(lo_ready):
+    before = job_count(lo_ready)
+    status, body = post(lo_ready, "rel", token="admin", machine=REMOTE)
+    assert status == 409, body
+    assert "runs only on this server's local lanes" in body["error"], body
+    assert body["error_code"] == "no_capable_machine"
+    # 점검 프리셋도 같다 — 아무 토큰이나 지정할 수 있는 점검이어도 원격에는 안 간다
+    status, body = post(lo_ready, "localcheck", machine=REMOTE)
+    assert status == 409, body
+    assert "runs only on this server's local lanes" in body["error"], body
+    assert job_count(lo_ready) == before
+
+
+def test_to16_an_any_capable_local_only_preset_without_local_accept_any_is_409(tmp_path):
+    s = ready(server(tmp_path, extra="local_accept_any = false\n"))
+    try:
+        before = job_count(s)
+        status, body = post(s, "relany")
+        assert status == 409, body
+        assert body["error_code"] == "no_capable_machine"
+        assert "local_accept_any" in body["error"], body
+        assert job_count(s) == before
+    finally:
+        s.close()
+
+
+def test_to16_a_local_only_preset_whose_tool_is_missing_on_the_local_lanes_is_409(lo_ready):
+    before = job_count(lo_ready)
+    status, body = post(lo_ready, "relneed")
+    assert status == 409, body
+    assert body["error_code"] == "tool_missing"
+    assert FAKE_TOOL in body["error"], body
+    assert job_count(lo_ready) == before
+
+
+def test_to16_a_pool_placed_local_only_preset_whose_tool_is_missing_locally_queues(tmp_path):
+    """`tool_missing` 409 는 capable 갈래에만 있다 — pool 배치의 `local_only` 프리셋은 도구가
+    빠져도 지금처럼 큐에 들고 `_why_none` 이 이유를 보인다(`local_only_refusal` 의 이른 return)."""
+    presets = PRESETS + block("relpoolneed", "local_only = true", f'requires = ["{FAKE_TOOL}"]')
+    s = ready(server(tmp_path, presets=presets))
+    try:
+        before = job_count(s)
+        status, body = post(s, "relpoolneed")
+        assert status == 201, body
+        assert job_count(s) == before + 1
+    finally:
+        s.close()
+
+
+def test_to10_an_any_capable_local_only_preset_sent_to_another_pool_is_409(tmp_path):
+    """any-capable 프리셋도 `--pool` 을 주면 그 풀의 잡이다 — 기본 풀이 아니면 로컬 레인이 못
+    받으니 409 다(`rel` 은 pool 배치로만 그 경우를 본다)."""
+    presets = PRESETS + block(
+        "relanypool", "local_only = true", 'placement = "any-capable"', 'pools = ["mac2"]'
+    )
+    s = ready(server(tmp_path, presets=presets))
+    try:
+        report(s, OTHER, host_key=HOST_C)  # mac2 풀에 산 원격이 있어도 후보가 아니다
+        before = job_count(s)
+        status, body = post(s, "relanypool", pool="mac2")
+        assert status == 409, body
+        assert body["error_code"] == "no_capable_machine", body
+        assert "mac2" in body["error"], body
+        assert job_count(s) == before
+        status, body = post(s, "relanypool")  # 비교 행: 풀을 안 주면 any-capable 로 큐에 든다
+        assert status == 201, body
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("report_state", ["unmeasured", "stale"])
+@pytest.mark.parametrize("preset", ["relany", "relneed"])
+def test_to16_an_unmeasured_or_stale_local_report_is_not_a_409(lo, preset, report_state):
+    """6-A-M5 — 409 는 정적인 넷과 `@local` 의 `tool_missing` 뿐이다. `@local` 의 보고가 없거나
+    낡아 `eligible_now` 가 비어도 거절하지 않는다(§4.3). 도구가 빠진 `relneed` 도 보고가 낡은
+    동안에는 모른다 — 「eligible 이 아니면 409」로 바꾸면 빨개진다."""
+    if report_state == "stale":
+        lo.app.measure_capabilities()
+        lo.clock.advance(3 * lo.app.config.server.probe_interval_seconds + 60)
+    before = job_count(lo)
+    status, body = post(lo, preset)
+    assert status == 201, body
+    assert LOCAL not in body["placement"]["eligible_now"], body["placement"]
+    codes = {b["worker"]: b["code"] for b in body["placement"]["blocked"]}
+    assert codes.get(LOCAL) in ("report_missing", "report_stale"), body["placement"]
+    assert job_count(lo) == before + 1
+
+
+def test_to16_a_local_only_preset_waiting_for_a_local_check_queues_with_the_check_reason(
+    lo_ready,
+):
+    """비교 행 — 점검 판정으로 ineligible 이면 409 가 아니라 큐에 들고 `_why_none` 의 이유다."""
+    jid = queued(lo_ready, "relgated")
+    assert lo_ready.store.get_job(jid).state == QUEUED
+    assert lo_ready.row(jid)["reason"] == "check_pending"
+    # 로컬에서 그 점검이 실패하면 check_failed
+    status, body = post(lo_ready, "simcheck", machine=LOCAL)
+    assert status == 201, body
+    lo_ready.store._conn().execute(
+        "UPDATE jobs SET state='failed' WHERE id=?", (int(body["job_id"]),)
+    )
+    lo_ready.app._mark_dirty()
+    assert lo_ready.row(jid)["reason"] == "check_failed"
+    status, again = post(lo_ready, "relgated")
+    assert status == 201, again  # 점검 실패도 409 가 아니다
+
+
+@pytest.mark.parametrize("case", ["other-pool", "no-local-accept-any"])
+def test_to10_to16_rcm_eta_has_no_estimate_when_no_local_lane_can_take_it(tmp_path, case):
+    """후보가 빈 `local_only` 프리셋의 `/api/eta` — 원격 레인으로 시각을 지어내지 않고
+    `no_capable_machine` 과 ETA null 이다(§4.3 의 새 분기). 비교 행은 같은 자리의 표식 없는
+    프리셋이고, 살아 있는 원격이 받으므로 0초다."""
+    extra = "local_accept_any = false\n" if case == "no-local-accept-any" else ""
+    s = ready(server(tmp_path, extra=extra))
+    try:
+        report(s, OTHER, host_key=HOST_C)  # mac2 풀에도 살아 있는 원격이 있다
+        if case == "other-pool":
+            marked, control = (
+                {"preset": "rel", "pool": "mac2"},
+                {"preset": "relgit", "pool": "mac2"},
+            )
+        else:
+            marked, control = {"preset": "relany"}, {"preset": "gateany"}
+        status, doc = s.req("POST", "/api/eta", token="alice", json_body=control)
+        assert status == 200, doc
+        assert doc["job"]["estimate"]["wait_seconds"] == 0, doc["job"]
+        status, doc = s.req("POST", "/api/eta", token="alice", json_body=marked)
+        assert status == 200, doc
+        # 갈 레인이 없으면 앞선 잡 수도 없다 — 0 은 「바로 선다」로 읽힌다(위임 결정 7)
+        assert doc["ahead"] is None, doc
+        job = doc["job"]
+        assert job["reason"] == "no_capable_machine", job
+        assert job["estimate"]["wait_seconds"] is None, job
+        assert job["estimate"]["finish_at"] is None, job
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("preset", ["rel", "relany"])
+def test_to10_rcm_eta_ahead_counts_only_jobs_that_contend_for_the_local_lanes(lo_ready, preset):
+    """`local_only` 프리셋의 `ahead` 는 후보 로컬 레인을 실제로 다투는 잡만 센다(위임 결정 7).
+    원격 워커를 지정한 대기 잡과 산 머신이 없는 다른 풀의 대기 잡은 그 레인에 오지 않으므로
+    세지 않는다. 로컬 레인에서 도는 잡과, 로컬 레인도 집을 수 있는 기본 풀 대기 잡은 센다."""
+    s = lo_ready
+    busy_local_lane(s)  # 셈: 로컬 레인에서 돈다
+    stored_job(s, "gate")  # 셈: 기본 풀 — 로컬 레인도 집는다
+    stored_job(s, "gate", target=REMOTE)  # 빼기: 원격 지정
+    stored_job(s, "gate", pool="mac2")  # 빼기: mac2 풀에는 산 머신이 없다
+    status, doc = s.req("POST", "/api/eta", token="alice", json_body={"preset": preset})
+    assert status == 200, doc
+    assert doc["ahead"] == 2, doc
+
+
+# ── TO3 · TO7 로컬 레인과 표식 없는 프리셋 ───────────────────────────────────
+
+
+@pytest.mark.parametrize("preset", ["rel", "relany"])
+def test_to3_the_local_lane_takes_a_local_only_job(lo_ready, preset):
+    jid = queued(lo_ready, preset)
+    assert lo_ready.claim(REMOTE)[0] == 204
+    now = lo_ready.clock()
+    job = lo_ready.store.claim(1, now, claimant=lo_ready.app.local_claimant(now))
+    assert job is not None and job.id == jid
+    assert job.worker_name is None
+
+
+@pytest.mark.parametrize("preset", ["gate", "gateany"])
+def test_to7_a_preset_without_local_only_still_goes_to_the_remote_worker(lo_ready, preset):
+    jid = queued(lo_ready, preset)
+    assert lo_ready.claimed(REMOTE) == jid
+    excluded = lo_ready.app.claimant_for(REMOTE, "default", lo_ready.clock()).excluded
+    assert preset not in excluded
+    spec = {p["name"] for p in lo_ready.spec(REMOTE)[1]["presets"]}
+    assert preset in spec
+
+
+# ── TO15 여러 진입점 ─────────────────────────────────────────────────────────
+
+
+def _placement_pool(s: M5nServer) -> None:
+    place = placement(s, queued(s, "rel"))
+    assert REMOTE not in place.workers and None in place.workers
+
+
+def _placement_capable(s: M5nServer) -> None:
+    place = placement(s, queued(s, "relany"))
+    assert REMOTE not in place.workers and None in place.workers
+    assert REMOTE not in {n.worker for n in place.notes}
+
+
+def _placement_target(s: M5nServer) -> None:
+    place = placement(s, stored_job(s, "rel", target=REMOTE).id)
+    assert REMOTE not in place.workers
+    assert place.reason == "no_capable_machine"
+
+
+def _eta_pool(s: M5nServer) -> None:
+    busy_local_lane(s)
+    assert eta(s, "gate")["estimate"]["wait_seconds"] == 0  # 비교: 표식 없으면 원격이 바로 받는다
+    assert eta(s, "rel")["estimate"]["wait_seconds"] > 0
+
+
+def _eta_capable(s: M5nServer) -> None:
+    busy_local_lane(s)
+    assert eta(s, "gateany")["estimate"]["wait_seconds"] == 0
+    job = eta(s, "relany")
+    assert job["estimate"]["wait_seconds"] > 0
+    assert REMOTE not in {n["worker"] for n in job["placement_detail"]}
+
+
+def _eligible_now(s: M5nServer) -> None:
+    for preset in ("rel", "relany"):
+        status, body = post(s, preset)
+        assert status == 201, body
+        seen = [
+            *body["placement"]["eligible_now"],
+            *(b["worker"] for b in body["placement"]["blocked"]),
+        ]
+        assert REMOTE not in seen, (preset, body["placement"])
+        assert LOCAL in body["placement"]["eligible_now"], (preset, body["placement"])
+
+
+def _auto_check(s: M5nServer, monkeypatch) -> None:
+    calls = record_checks(s, monkeypatch)
+    s.app.sweep_checks()
+    assert ("simcheck", LOCAL) in calls  # 스위퍼는 돈다 — 로컬의 relq 가 simcheck 를 원한다
+    assert ("simcheck", REMOTE) not in calls
+
+
+def _auto_local_only_check(s: M5nServer, monkeypatch) -> None:
+    """`checks` 의 점검이 `local_only` 면(qadef → localcheck) 스위퍼는 그 점검을 `@local` 에만 건다.
+    원격 `build-02` 는 qadef 를 받을 자리(기본 풀)에 있고 보고도 「다 있음」이다."""
+    calls = record_checks(s, monkeypatch)
+    s.app.sweep_checks()
+    assert ("localcheck", LOCAL) in calls
+    assert ("localcheck", REMOTE) not in calls
+
+
+def _stalled_checks(s: M5nServer) -> None:
+    """점검 정체 판정(`_stalled_checks` · `_why_none`) — `checks` 가 있는 `local_only` 잡의 이유와
+    `placement_detail` 은 `@local` 만으로 정한다. 원격의 「점검 필요」가 끼어들지 않는다."""
+    for preset in ("relq", "relgated"):
+        row = s.row(queued(s, preset))
+        workers = {n["worker"] for n in row["placement_detail"]}
+        assert REMOTE not in workers, (preset, row["placement_detail"])
+        assert LOCAL in workers, (preset, row["placement_detail"])
+        assert row["reason"] == "check_pending", (preset, row["reason"])
+
+
+def _could_receive(s: M5nServer) -> None:
+    """수신 가능 판정 `_could_receive` — 원격은 `local_only` 프리셋을 받을 자리가 아니다."""
+    views = {v.id: v for v in s.app.machine_views(s.clock())}
+    for name in sorted(LOCAL_ONLY):
+        assert not s.app._could_receive(views[REMOTE], s.app.config.preset(name)), name
+    assert s.app._could_receive(views[REMOTE], s.app.config.preset("gate"))  # 비교: 표식 없음
+
+
+def _recheck(s: M5nServer, monkeypatch) -> None:
+    calls = record_checks(s, monkeypatch)
+    status, body = s.req(
+        "POST", f"/machines/{REMOTE}/recheck", token="admin", json_body={"checks": ["localcheck"]}
+    )
+    assert status == 409, body
+    assert calls == []
+
+
+def _worker_spec(s: M5nServer) -> None:
+    status, spec = s.spec(REMOTE)
+    assert status == 200, spec
+    names = [p["name"] for p in spec["presets"]]
+    assert LOCAL_ONLY.isdisjoint(names), names
+    assert {"gate", "gateany", "simcheck", "qa", "qadef", "relgit"} <= set(names)
+    # env 도 함께 빠진다 — 값도 이름도 명세 어디에도 없다
+    text = json.dumps(spec)
+    assert REL_ENV not in text and "RCM_LO_MARK" not in text
+
+
+def _claim_pool(s: M5nServer) -> None:
+    jid = queued(s, "rel")
+    assert s.claim(REMOTE)[0] == 204
+    assert s.store.get_job(jid).state == QUEUED
+
+
+def _claim_capable(s: M5nServer) -> None:
+    jid = queued(s, "relany")
+    assert s.claim(REMOTE)[0] == 204
+    assert s.store.get_job(jid).state == QUEUED
+
+
+def _claim_target(s: M5nServer) -> None:
+    jid = stored_job(s, "rel", target=REMOTE).id
+    assert s.claim(REMOTE)[0] == 204
+    assert s.store.get_job(jid).state == QUEUED
+
+
+def _claim_excluded(s: M5nServer) -> None:
+    now = s.clock()
+    assert set(s.app.claimant_for(REMOTE, "default", now).excluded) == LOCAL_ONLY
+    assert s.app.local_claimant(now).excluded == ()
+
+
+def _machines(s: M5nServer) -> None:
+    got = s.machines()[REMOTE]["presets"]
+    for name in LOCAL_ONLY:
+        assert got[name]["state"] != "eligible", (name, got[name])
+        assert got[name]["code"] == "local_only", (name, got[name])
+    summary = {m["id"]: m for m in s.status()["server"]["machines"]}[REMOTE]
+    eligible = {n for n, v in got.items() if v["state"] == "eligible"}
+    assert summary["eligible_count"] == len(eligible)
+    assert eligible.isdisjoint(LOCAL_ONLY)
+
+
+ENTRIES: dict[str, Callable[..., None]] = {
+    "placement-pool": _placement_pool,
+    "placement-capable": _placement_capable,
+    "placement-target": _placement_target,
+    "eta-pool": _eta_pool,
+    "eta-capable": _eta_capable,
+    "eligible-now": _eligible_now,
+    "auto-check": _auto_check,
+    "auto-local-only-check": _auto_local_only_check,
+    "stalled-checks": _stalled_checks,
+    "could-receive": _could_receive,
+    "recheck": _recheck,
+    "worker-spec": _worker_spec,
+    "claim-pool": _claim_pool,
+    "claim-capable": _claim_capable,
+    "claim-target": _claim_target,
+    "claim-excluded": _claim_excluded,
+    "machines": _machines,
+}
+
+
+@pytest.mark.parametrize("entry", list(ENTRIES))
+def test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine(
+    lo_ready, monkeypatch, entry
+):
+    # 명세가 이 시험 하나로 묶은 행들(§7 TO 표 「TO15 로 묶었다」). 각 행의 내용은 넷째 판의
+    # TO 표(§13 4라운드 · 5라운드 표가 묶은 이유를 적었다)이고, 아래가 그 행을 맡은 진입점이다.
+    # TO2 원격 claim 에서 빠진다, capable 잡도 — claim-pool · claim-capable
+    #     (`--machine` 원격 지정의 409 는 test_to16_pinning_… 이 맡는다)
+    # TO5 `/worker/spec` 에서 env 와 함께 빠진다 — worker-spec(env 값과 이름이 명세에 없다)
+    # TO8 대기 계산과 제출 판정 — placement-pool(pool 갈래) · eligible-now(`submission_placement`
+    #     와 `eligible_now`) · could-receive(`_could_receive`)
+    # TO11 `local_only` 점검은 `@local` 만 겨냥한다 — auto-local-only-check(스위퍼) · recheck(409)
+    # TO14 원격 claim 의 네 갈래 — claim-target · claim-pool · claim-capable · claim-excluded,
+    #     `known` 갈래와 WHERE 전체는 test_to15_the_claim_sql_… 이 맡는다
+    fn = ENTRIES[entry]
+    if fn in (_auto_check, _auto_local_only_check, _recheck):
+        fn(lo_ready, monkeypatch)
+    else:
+        fn(lo_ready)
+
+
+@pytest.mark.parametrize("branch", ["target", "pool", "capable", "known"])
+def test_to15_the_claim_sql_drops_excluded_presets_on_every_branch(tmp_path, branch):
+    """claim 에 넘기는 제외 목록은 네 갈래 모두에 걸린다 — 제외가 없으면 같은 잡을 집는다."""
+    # TO14 네 갈래(지정 · pool · capable · known) 모두, 거르기는 WHERE 전체에 걸린다
+    store = Store(tmp_path / "rcm.sqlite3")
+    try:
+        cols: dict[str, Any] = {
+            "target": {"placement": PLACEMENT_POOL, "pool": "p", "target_worker": "w"},
+            "pool": {"placement": PLACEMENT_POOL, "pool": "p"},
+            "capable": {"placement": PLACEMENT_CAPABLE, "pool": "default"},
+            "known": {"placement": PLACEMENT_CAPABLE, "pool": "default"},
+        }[branch]
+        preset = "gone" if branch == "known" else "rel"
+        job = store.create_job(
+            preset=preset,
+            inputs={},
+            key=preset,
+            concurrency_group=None,
+            source=Source(mode="tree", tree_hash="t"),
+            requester=Requester(name="a", label="a"),
+            timeout_seconds=60,
+            join_key=None,
+            now=T0,
+            state=QUEUED,
+            **cols,
+        )
+        base = {
+            "worker": "w",
+            "pool": "p",
+            "host_key": None,
+            "fingerprint_hash": None,
+            "capable": ("rel",),
+            "known": ("rel",),
+        }
+        blocked = Claimant(**base, excluded=(preset,))
+        assert store.claim(1, T0, claimant=blocked) is None
+        got = store.claim(1, T0, claimant=Claimant(**base))
+        assert got is not None and got.id == job.id
+    finally:
+        store.close()
+
+
+# ── TO17 reload · 재시작 ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("how", ["reload", "restart"])
+def test_to17_waiting_jobs_have_no_capable_machine_once_the_preset_is_local_only(tmp_path, how):
+    s = ready(server(tmp_path))
+    report(s, OTHER, host_key=HOST_C)
+    pinned = queued(s, "relgit", token="admin", machine=REMOTE)
+    other_pool = queued(s, "relgit", pool="mac2")
+    later = queued(s, "relgit", pool="mac2", extra={"start_in_seconds": 600})
+    assert s.store.get_job(later).state == "scheduled"
+    assert s.row(pinned)["reason"] != "no_capable_machine"  # 표식 전에는 갈 곳이 있다
+    marked = PRESETS.replace(
+        'name = "relgit"\nargv = ["sh", "-c", "echo relgit"]\n',
+        'name = "relgit"\nargv = ["sh", "-c", "echo relgit"]\nlocal_only = true\n',
+    )
+    assert marked != PRESETS
+    if how == "reload":
+        s.write(PROBES + marked)
+        status, body = s.req("POST", "/reload", token="admin", json_body={})
+        assert status == 200, body
+    else:
+        tokens, clock = s.tokens, s.clock
+        s.close()
+        s = server(tmp_path, presets=marked, tokens=tokens, clock=clock)
+    try:
+        for jid in (pinned, other_pool):
+            row = s.row(jid)
+            assert row["reason"] == "no_capable_machine", row
+            assert row["estimate"]["finish_at"] is None, row
+            assert row["estimate"]["wait_seconds"] is None, row
+            assert s.store.get_job(jid).state == QUEUED  # 실패로 닫지 않는다
+        assert s.store.get_job(later).state == "scheduled"
+        s.clock.advance(601)
+        s.app.tick_schedule()
+        assert s.store.get_job(later).state == QUEUED
+        assert s.row(later)["reason"] == "no_capable_machine"
+    finally:
+        s.close()
+
+
+#: 반복 정책이 있는 기본 풀 git_ref 프리셋 — 표식 없음. `[presets.retry]` 는 블록의 맨 끝이다
+_RETRY_HEAD = 'name = "relgitretry"\nargv = ["sh", "-c", "echo relgitretry"]\n'
+RETRY = block(
+    "relgitretry",
+    GIT,
+    "[presets.retry]\non_exit = 75\ninterval_seconds = 60\nmax_attempts = 3",
+)
+RETRY_MARKED = RETRY.replace(_RETRY_HEAD, _RETRY_HEAD + "local_only = true\n")
+
+
+def _next_attempt(s: M5nServer, jid: int) -> int:
+    """`jid` 가 `retried` 로 닫혀 만든 다음 시도 — 간격이 지나 `queued` 가 된 뒤의 번호."""
+    done = s.store.get_job(jid)
+    assert done.state == RETRIED and done.exit_code == 75, done
+    nxt = int(done.retried_as)
+    assert s.store.get_job(nxt).state == SCHEDULED
+    s.clock.advance(61)
+    s.app.tick_schedule()
+    assert s.store.get_job(nxt).state == QUEUED
+    return nxt
+
+
+@pytest.mark.parametrize("where", ["pinned", "pool"])
+def test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote(tmp_path, where):
+    """# E1 — 원격 워커가 돌던 잡은 표식을 단 뒤에도 그대로 끝나 결과를 보고한다(claim 이 이미
+    RUNNING 으로 바꿨고 heartbeat · finish 는 `local_only` 를 보지 않는다). 그 잡의 재시도는 새
+    시도라 표식을 따른다: 그 워커를 지정한 시도는 `no_capable_machine` · ETA null 로 기다리고,
+    기본 풀의 시도는 원격이 아니라 로컬 레인이 집는다."""
+    assert RETRY_MARKED != RETRY
+    s = ready(server(tmp_path, presets=PRESETS + RETRY))
+    try:
+        jid = queued(s, "relgitretry", token="admin", machine=REMOTE if where == "pinned" else None)
+        assert s.claimed(REMOTE) == jid
+        _mark_by_reload(s, PRESETS + RETRY_MARKED)
+        assert s.app.config.preset("relgitretry").local_only is True
+        status, body = s.heartbeat(REMOTE, jobs=[jid])
+        assert status == 200 and body["cancel"] == [], body
+        status, body = s.finish(REMOTE, jid, "failed", exit_code=75)
+        assert status == 200, body
+        nxt = _next_attempt(s, jid)
+        assert s.claim(REMOTE)[0] == 204  # 다음 시도는 원격에 가지 않는다
+        if where == "pinned":
+            row = s.row(nxt)
+            assert row["reason"] == "no_capable_machine", row
+            assert row["estimate"]["finish_at"] is None, row
+            assert row["estimate"]["wait_seconds"] is None, row
+            assert s.store.get_job(nxt).state == QUEUED  # 실패로 닫지 않는다
+        else:
+            now = s.clock()
+            got = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+            assert got is not None and got.id == nxt and got.worker_name is None
+    finally:
+        s.close()
+
+
+def test_e3_a_local_only_retry_chain_is_never_claimed_remotely(tmp_path):
+    """# E3 — 표식이 있는 프리셋의 재시도 사슬. 첫 시도가 `@local` 에서 75 로 끝나면 다음 시도도
+    원격 claim 에 걸리지 않고 `@local` 이 집는다."""
+    s = ready(server(tmp_path, presets=PRESETS + RETRY_MARKED))
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        jid = queued(s, "relgitretry")
+        now = s.clock()
+        first = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+        assert first is not None and first.id == jid and first.worker_name is None
+        assert s.store.finish(jid, RETRIED, now=s.clock(), exit_code=75)
+        nxt = _next_attempt(s, jid)
+        assert s.row(nxt)["reason"] != "no_capable_machine"  # 로컬 레인이 받을 자리다
+        for worker in (REMOTE, OTHER):
+            assert s.claim(worker)[0] == 204, worker
+        now = s.clock()
+        got = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+        assert got is not None and got.id == nxt and got.worker_name is None
+    finally:
+        s.close()
+
+
+# ── TO18 · TO19 로컬 전용 점검 ───────────────────────────────────────────────
+
+
+def test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally(lo, monkeypatch):
+    report(lo, OTHER, host_key=HOST_C)
+    m = lo.machines()[OTHER]
+    assert m["presets"]["qa"] == {
+        "state": "ineligible",
+        "code": "check_local_only",
+        "detail": {"check": "localcheck"},
+    }
+    row = {c["preset"]: c for c in m["checks"]}["localcheck"]
+    assert row["error_code"] == "local_only"
+    assert row["recheck_needed"] is False  # 다시 걸어도 409 다 — 사람에게 시키지 않는다
+    jid = queued(lo, "qa")
+    got = lo.row(jid)
+    assert got["reason"] == "no_capable_machine", got  # check_pending 이 아니다
+    notes = {n["worker"]: n for n in got["placement_detail"]}
+    assert notes[OTHER]["code"] == "check_local_only"
+    calls = record_checks(lo, monkeypatch)
+    lo.app.sweep_checks()
+    assert ("localcheck", OTHER) not in calls
+    assert lo.claim(OTHER)[0] == 204
+
+
+def test_to18_a_local_only_check_that_passed_on_a_remote_machine_holds_for_that_fingerprint(
+    tmp_path,
+):
+    """표식을 달기 전에 원격 워커에서 통과한 점검은 지문이 같은 동안 그대로 유효하다 — 그
+    머신의 `qa` 는 계속 eligible 이다. 지문이 바뀌면 다시 걸 수 없으니 `check_local_only` 다
+    (위임 결정 4 의 추가 문장, `docs/configuration.md` 의 local_only 절)."""
+    head = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
+    unmarked = PRESETS.replace(head + "local_only = true\n", head)
+    assert unmarked != PRESETS
+    s = server(tmp_path, presets=unmarked)
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        check = queued(s, "localcheck", machine=OTHER)
+        assert s.claimed(OTHER) == check
+        assert s.finish(OTHER, check, "succeeded", exit_code=0)[0] == 200
+        assert s.machines()[OTHER]["presets"]["qa"]["code"] == "ok"
+        s.write(PROBES + PRESETS)  # 표식을 단다
+        status, body = s.req("POST", "/reload", token="admin", json_body={})
+        assert status == 200, body
+        assert s.app.config.preset("localcheck").local_only is True
+        report(s, OTHER, host_key=HOST_C)  # 같은 지문
+        m = s.machines()[OTHER]
+        assert (m["presets"]["qa"]["state"], m["presets"]["qa"]["code"]) == ("eligible", "ok")
+        row = {c["preset"]: c for c in m["checks"]}["localcheck"]
+        assert (row["state"], row["job_id"]) == ("passed", check), row
+        report(s, OTHER, host_key=HOST_C, xcode="Xc 2")  # 지문이 바뀌었다
+        assert s.machines()[OTHER]["presets"]["qa"] == {
+            "state": "ineligible",
+            "code": "check_local_only",
+            "detail": {"check": "localcheck"},
+        }
+    finally:
+        s.close()
+
+
+#: `localcheck` 에서 표식을 뺀 설정 — 표식을 달기 전의 원격 점검 기록을 만들 때 쓴다
+_LOCALCHECK_HEAD = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
+UNMARKED_CHECK = PRESETS.replace(_LOCALCHECK_HEAD + "local_only = true\n", _LOCALCHECK_HEAD)
+
+
+def _mark_by_reload(s: M5nServer, text: str = PRESETS) -> None:
+    s.write(PROBES + text)
+    status, body = s.req("POST", "/reload", token="admin", json_body={})
+    assert status == 200, body
+
+
+def _check_cell(s: M5nServer, worker: str, check: str = "localcheck") -> tuple[Any, ...]:
+    """`/api/machines` 의 그 머신 점검 칸 — (state, job_id, error_code, recheck_needed)."""
+    c = {c["preset"]: c for c in s.machines()[worker]["checks"]}[check]
+    return (c["state"], c["job_id"], c["error_code"], c["recheck_needed"])
+
+
+def _summary_problems(s: M5nServer, worker: str) -> list[dict[str, Any]]:
+    """`/api/status` 의 머신 요약에 실린 그 머신의 문제 — 지문 바뀜은 빼고 본다."""
+    m = {m["id"]: m for m in s.status()["server"]["machines"]}[worker]
+    return [p for p in m["problems"] if p["code"] != "environment_changed"]
+
+
+@pytest.mark.parametrize("case", ["queued", "failed", "running"])
+def test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it(
+    tmp_path, case
+):
+    """# X1 — 표식을 단 순간 원격 머신에 남은 그 점검의 기록. 그 머신에서는 점검을 다시 돌릴 수
+    없으니 판정이 그 기록을 따르는 것은 통과(지문이 같은 동안)와 그 머신이 **실제로 집어 돌리는**
+    잡뿐이다. 대기 중인 점검 잡은 아무도 못 집어(`no_capable_machine`, TO17) 「점검 중」이 영영
+    안 끝나고, 실패는 다시 점검하라는 말이 409 로 끝난다 — 둘 다 `check_local_only` 다."""
+    s = server(tmp_path, presets=UNMARKED_CHECK)
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        check = queued(s, "localcheck", machine=OTHER)
+        if case != "queued":
+            assert s.claimed(OTHER) == check
+        if case == "failed":
+            assert s.finish(OTHER, check, "failed", exit_code=1)[0] == 200
+        _mark_by_reload(s)
+        assert s.app.config.preset("localcheck").local_only is True
+        report(s, OTHER, host_key=HOST_C, again=True)  # 새 세대에 같은 지문
+        qa = queued(s, "qa")
+        got = s.machines()[OTHER]["presets"]["qa"]
+        row = s.row(qa)
+        if case == "running":
+            # 그 머신이 집은 점검은 끝까지 돌고 그 결과를 센다 — 그때까지는 「점검 중」이다
+            assert got == {
+                "state": "unknown",
+                "code": "check_running",
+                "detail": {"check": "localcheck", "job_id": check},
+            }
+            assert _check_cell(s, OTHER) == ("running", check, "local_only", False)
+            assert row["reason"] == "check_pending", row
+            assert s.finish(OTHER, check, "succeeded", exit_code=0)[0] == 200
+            done = s.machines()[OTHER]["presets"]["qa"]
+            assert (done["state"], done["code"]) == ("eligible", "ok")
+            assert _check_cell(s, OTHER) == ("passed", check, "local_only", False)
+            return
+        assert got == {
+            "state": "ineligible",
+            "code": "check_local_only",
+            "detail": {"check": "localcheck"},
+        }
+        # T1 — 점검 칸도 판정과 같은 규칙이다. 그 기록은 이력으로 job_id 만 남고, 「점검 중」 ·
+        # 「실패」로 읽히지 않는다. 그 머신에서 고칠 수 없는 실패는 그 머신의 문제가 아니다
+        assert _check_cell(s, OTHER) == ("needed", check, "local_only", False)
+        assert _summary_problems(s, OTHER) == []
+        assert row["reason"] == "no_capable_machine", row  # check_pending · check_failed 가 아니다
+        notes = {n["worker"]: n for n in row["placement_detail"]}
+        assert notes[OTHER]["code"] == "check_local_only"
+        if case == "queued":
+            # 대기 중인 그 점검 잡은 TO17 규칙대로 갈 곳이 없다 — 실패로 닫지 않는다
+            assert s.row(check)["reason"] == "no_capable_machine"
+            assert s.store.get_job(check).state == QUEUED
+        assert s.claim(OTHER)[0] == 204
+    finally:
+        s.close()
+
+
+def test_t4_a_remote_check_being_cancelled_stays_running_until_it_ends(tmp_path):
+    """# T4 — 그 머신이 집은 점검을 취소하는 중(`cancelling`)이면 아직 그 머신이 돌리는 잡이다.
+    끝날 때까지 판정은 `check_running` 이고 칸도 running 이다. 취소로 끝나면 판정 없이 끝난
+    잡이라 아무것도 증명하지 않고, 그 머신에서 다시 돌 수 없으니 `check_local_only` 다."""
+    s = server(tmp_path, presets=UNMARKED_CHECK)
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        check = queued(s, "localcheck", machine=OTHER)
+        assert s.claimed(OTHER) == check
+        _mark_by_reload(s)
+        assert s.app.config.preset("localcheck").local_only is True
+        report(s, OTHER, host_key=HOST_C, again=True)
+        assert s.cancel(check, token="admin")[1] == {"job_id": check, "state": "cancelling"}
+        assert s.machines()[OTHER]["presets"]["qa"] == {
+            "state": "unknown",
+            "code": "check_running",
+            "detail": {"check": "localcheck", "job_id": check},
+        }
+        assert _check_cell(s, OTHER) == ("running", check, "local_only", False)
+        assert s.heartbeat(OTHER, jobs=[check])[1]["cancel"] == [check]
+        assert s.finish(OTHER, check, "cancelled", exit_code=-15)[0] == 200
+        assert s.machines()[OTHER]["presets"]["qa"] == {
+            "state": "ineligible",
+            "code": "check_local_only",
+            "detail": {"check": "localcheck"},
+        }
+        assert _check_cell(s, OTHER) == ("needed", check, "local_only", False)
+    finally:
+        s.close()
+
+
+def test_to19_rechecking_a_local_only_check_on_a_remote_machine_is_409(lo, monkeypatch):
+    report(lo, OTHER, host_key=HOST_C)
+    calls = record_checks(lo, monkeypatch)
+    status, body = lo.req(
+        "POST", f"/machines/{OTHER}/recheck", token="admin", json_body={"checks": ["localcheck"]}
+    )
+    assert status == 409, body
+    assert "localcheck" in body["error"] and "local lanes" in body["error"], body
+    assert calls == []
+
+
+def test_to19_rechecking_every_check_skips_the_local_only_one(lo, monkeypatch):
+    """이름 없이 다시 걸면 걸 수 있는 점검만 건다. 로컬 전용 점검은 실패 항목(`jobs` 의 번호 없는
+    항목)이 아니라 `skipped` 에 정책 코드로 남는다 — CLI 와 웹은 번호 없는 `jobs` 항목을 실패로
+    부른다(위임 결정 4)."""
+    report(lo, OTHER, host_key=HOST_C)
+    calls = record_checks(lo, monkeypatch)
+    status, body = lo.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
+    assert status == 200, body
+    assert [j["preset"] for j in body["jobs"]] == ["simcheck"], body
+    assert body["skipped"] == [{"preset": "localcheck", "code": "local_only"}], body
+    assert ("simcheck", OTHER) in calls and ("localcheck", OTHER) not in calls
+    # `@local` 에서는 건너뛸 것이 없다 — 키는 늘 있고 비어 있다
+    lo.app.measure_capabilities()
+    status, body = lo.req("POST", f"/machines/{LOCAL}/recheck", token="admin", json_body={})
+    assert status == 200, body
+    assert sorted(j["preset"] for j in body["jobs"]) == ["localcheck", "simcheck"], body
+    assert body["skipped"] == [], body
+
+
+def test_to19_rechecking_a_machine_whose_only_check_is_local_only_submits_nothing(
+    tmp_path, monkeypatch
+):
+    """건너뛴 것만 있고 낸 것이 없을 때의 모양 — 200, `jobs: []`, `skipped` 에 그 점검(위임 결정
+    4). 실패가 아니다: 「걸 수 있는 것을 다 걸었다」가 맞는 답이다."""
+    only_local = PRESETS.replace('checks = ["simcheck"]', "expected_seconds = 60")
+    assert only_local != PRESETS
+    s = server(tmp_path, presets=only_local)
+    try:
+        assert s.app.check_preset_names() == ["localcheck"]
+        report(s, OTHER, host_key=HOST_C)
+        calls = record_checks(s, monkeypatch)
+        before = job_count(s)
+        status, body = s.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
+        assert status == 200, body
+        assert body == {"jobs": [], "skipped": [{"preset": "localcheck", "code": "local_only"}]}
+        assert calls == [] and job_count(s) == before
+    finally:
+        s.close()
+
+
+def test_to19_removing_the_mark_leaves_no_local_only_code_on_the_check(lo, monkeypatch):
+    """표식을 뗀 뒤의 점검 칸에 옛 `local_only` 가 남지 않는다. 다음에 걸 때 로그도 옛 원인
+    (「after ref_unresolved」)을 지어내지 않는다(P3 1라운드 두 검증자의 LOW)."""
+    report(lo, OTHER, host_key=HOST_C)
+    record_checks(lo, monkeypatch)
+    status, body = lo.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
+    assert status == 200, body
+    assert body.get("skipped") == [{"preset": "localcheck", "code": "local_only"}], body
+    head = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
+    unmarked = PRESETS.replace(head + "local_only = true\n", head)
+    assert unmarked != PRESETS
+    lo.write(PROBES + unmarked)
+    status, body = lo.req("POST", "/reload", token="admin", json_body={})
+    assert status == 200, body
+    assert lo.app.config.preset("localcheck").local_only is False
+    row = {c["preset"]: c for c in lo.machines()[OTHER]["checks"]}["localcheck"]
+    assert row["error_code"] is None, row
+    # 이제 걸린다 — 걸린 점검은 옛 원인을 로그에 남기지 않는다
+    logs: list[str] = []
+    monkeypatch.setattr(lo.app, "log", logs.append)
+    monkeypatch.setattr(
+        lo.app,
+        "submit_internal_check",
+        lambda preset, view, *, fingerprint_hash: stored_job(lo, preset.name, target=view.id),
+    )
+    status, body = lo.req(
+        "POST", f"/machines/{OTHER}/recheck", token="admin", json_body={"checks": ["localcheck"]}
+    )
+    assert status == 200, body
+    assert body["jobs"][0]["job_id"] is not None, body
+    assert body["skipped"] == [], body  # 표식을 뗐다 — 이제 건너뛰지 않는다
+    assert not [m for m in logs if "ref_unresolved" in m], logs
+
+
+# ── TO10 · TO16 `rcm run` 의 종료 코드 ───────────────────────────────────────
+#
+# 원격 금지 409 는 서버가 잡을 만들지 않았다고 말한 것이다 — `--machine` 이 없어도 「결과 모름」(3)
+# 이 아니라 거절(2)이다(P3 2라운드 검증자 지적). 진짜 서버에 진짜 CLI 를 붙여 두 경로를 다 본다.
+
+#: CLI 시험용 git_ref 짝 — `rel` · `relany` · `relneed` 와 같은 자리에 선 git_ref 프리셋
+CLI_PRESETS = PRESETS + "".join(
+    [
+        block("relgitpool", "local_only = true", GIT, 'pools = ["mac2"]'),
+        block("relgitany", "local_only = true", GIT, 'placement = "any-capable"'),
+        block(
+            "relgitneed",
+            "local_only = true",
+            GIT,
+            'placement = "any-capable"',
+            f'requires = ["{FAKE_TOOL}"]',
+        ),
+    ]
+)
+
+
+class _CliSnap:
+    """tree 경로의 제출까지만 가는 가짜 스냅샷 — 409 는 업로드 전에 온다."""
+
+    repo = "org/app"
+    branch = "main"
+    base_sha = "abc123f"
+    dirty = True
+    tree_hash = TREE_HASH
+    bytes = len(TAR)
+    entries: tuple[Any, ...] = ()
+
+    def __init__(self, tar_path: Path) -> None:
+        self.tar_path = tar_path
+
+
+@pytest.mark.parametrize("path", ["tree", "git_ref"])
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("other-pool", "no_capable_machine"),
+        ("no-local-accept-any", "no_capable_machine"),
+        ("tool-missing", "tool_missing"),
+    ],
+)
+def test_to10_to16_rcm_run_exits_2_on_a_local_only_refusal(
+    tmp_path, monkeypatch, capsys, path, case, code
+):
+    from remote_ci_monitor import cli as cli_mod
+
+    monkeypatch.setattr(server_module, "resolve_ref", lambda *a, **k: GIT_SHA)
+    extra = "local_accept_any = false\n" if case == "no-local-accept-any" else ""
+    s = ready(server(tmp_path, presets=CLI_PRESETS, extra=extra))
+    try:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        for var in ("XDG_CONFIG_HOME", "RCM_LABEL", "RCM_CONFIG"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("RCM_SERVER", f"http://127.0.0.1:{s.port}")
+        monkeypatch.setenv("RCM_TOKEN", s.tokens["alice"])
+        names = {
+            "tree": {"other-pool": "rel", "no-local-accept-any": "relany"},
+            "git_ref": {"other-pool": "relgitpool", "no-local-accept-any": "relgitany"},
+        }[path]
+        tool = {"tree": "relneed", "git_ref": "relgitneed"}[path]
+        preset = names.get(case, tool)
+        argv = ["run", preset, "--no-wait"]
+        if case == "other-pool":
+            argv += ["--pool", "mac2"]
+        if path == "git_ref":
+            argv += ["--ref", GIT_SHA]
+        else:
+            monkeypatch.setattr(
+                cli_mod, "make_snapshot", lambda *_a, **_k: _CliSnap(tmp_path / "snap.tar")
+            )
+            (tmp_path / "t").mkdir()
+            argv += ["--dir", str(tmp_path / "t")]
+        before = job_count(s)
+        try:
+            rc = cli_mod.main(argv)
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else 2
+        err = capsys.readouterr().err
+        # 서버의 409 를 그대로 보인다 — 진짜 서버가 이 코드로 거절했는지도 확인한다
+        assert "submit failed" in err, err
+        assert "runs only on this server's local lanes" in err, err
+        status, body = post(s, preset, pool="mac2" if case == "other-pool" else None)
+        assert (status, body["error_code"]) == (409, code), body
+        assert job_count(s) == before
+        assert rc == 2, err  # 잡이 안 생긴 확실한 거절 — 결과 모름(3)이 아니다
+    finally:
+        s.close()
+
+
+# ── 문서 ─────────────────────────────────────────────────────────────────────
+
+
+def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
+    """사용자가 보는 키다 — 설정 문서의 절과 키 표, CHANGELOG 에 있어야 한다(docs 스킬)."""
+    from test_docs_m5 import CHANGELOG, CONFIGURATION, read, unreleased
+
+    text = read(CONFIGURATION)
+    assert "### Keeping a preset on the server: `local_only`" in text
+    assert "| `[[presets]]` | `local_only` | `false` |" in text
+    for code in ("`local_only`", "`check_local_only`", "409"):
+        assert code in text, code
+    # 판정 표 밑의 문장은 코드대로다 — local_only 는 표보다 먼저, check_local_only 는
+    # check_needed 자리에만 선다(`capabilities.py` 의 `_verdict`, P3 1라운드 검증자 2)
+    flat = " ".join(text.split())
+    assert "`local_only` (ineligible) is shown first, before any row of this table" in flat
+    assert "replaces `check_needed` on a remote worker" in flat
+    assert "shown before any of these" not in flat
+    # 원격에서 이미 통과한 로컬 전용 점검은 지문이 같은 동안 유효하다(위임 결정 4 의 추가)
+    assert "keeps counting there until that machine's fingerprint changes" in flat
+    # 원격 금지 409 는 `rcm run` 의 2 다 · `/api/eta` 의 `ahead` 가 null 일 수 있다(P3 2라운드)
+    assert "`rcm run` prints the server's reason and exits 2, since no job was made" in flat
+    assert "`POST /api/eta` answers `ahead: null`" in flat
+    changelog = " ".join(unreleased(read(CHANGELOG)).split())
+    assert "local_only = true" in changelog
+    assert "`rcm run` exits 2 on these refusals" in changelog
+    assert "`ahead: null`" in changelog
+
+
+def test_x1_the_configuration_guide_says_which_remote_check_records_still_count():
+    """# X1 — 판정 표 밑의 `check_local_only` 문장이 코드대로다: `check_needed` 만이 아니라
+    `check_failed` 와 대기 중인 점검 잡의 `check_running` 도 바꾸고, 그 머신이 이미 집은 점검은
+    끝까지 돌아 센다(`capabilities.py` 의 `_verdict`)."""
+    from test_docs_m5 import CONFIGURATION, read
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "It also replaces `check_failed`, and `check_running` while the check's job is only "
+        "waiting: no machine can take that job, and a recheck there is refused. A check job "
+        "the remote worker has already claimed runs to its end and counts."
+    ) in flat
+
+
+def test_e1_adding_the_mark_later_says_what_happens_to_a_running_remote_job():
+    """# E1 — 「Adding the mark later」 가 원격에서 돌던 잡과 그 재시도를 적는다(시험
+    `test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote` 의 두 사실)."""
+    from test_docs_m5 import CONFIGURATION, read
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "A job already running on a remote worker is not stopped: it finishes and reports its "
+        "result as usual."
+    ) in flat
+    assert (
+        "Its retry (`[presets.retry]`) is a new attempt and follows the mark: one pinned to that "
+        "worker waits with `no capable machine` and no ETA, one in the default pool goes to the "
+        "server's lanes."
+    ) in flat
+
+
+def test_r5_the_guide_and_the_changelog_say_to_drop_the_mark_before_rolling_back():
+    """# R5 — 되돌리기 방향의 함정. v0.11.0 아래의 서버는 `local_only` 를 몰라 기동하지 않으므로
+    되돌리기 전에 프리셋의 그 줄을 먼저 뺀다(`docs/m5t-workplan.md` §9 의 남는 위험)."""
+    from test_docs_m5 import CHANGELOG, CONFIGURATION, read, unreleased
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "Before rolling back below 0.11.0, remove the presets' `local_only` lines first: an older "
+        "server does not know the key and does not start."
+    ) in flat
+    changelog = " ".join(unreleased(read(CHANGELOG)).split())
+    assert "remove the `local_only` lines before rolling back below 0.11.0" in changelog
+
+
+def test_to10_to16_the_readme_exit_code_paragraph_names_the_local_only_409s():
+    """README 두 판의 종료 코드 문단이 `rcm run` 의 2 를 고르는 409 를 다 적는다. `local_only`
+    거절의 `no_capable_machine` · `tool_missing` 은 `cli.py` 의 `_REFUSED_CODES` 에 있어 2 다(P3
+    2라운드). M5s 가 잠근 구절(`tests/test_docs_m5s.py`)은 그대로 남는다."""
+    from test_docs_m5 import README, README_KO, read
+
+    en = " ".join(read(README).split())
+    assert (
+        "a 409 whose code is `schedule_exists` or `release_route_required`, and a 409 "
+        "`no_capable_machine` or `tool_missing` for a "
+        "[`local_only`](docs/configuration.md#keeping-a-preset-on-the-server-local_only) preset"
+    ) in en
+    assert "any other 409 is 3" in en
+    ko = " ".join(read(README_KO).split())
+    assert (
+        "`schedule_exists` · `release_route_required` 인 409 와, "
+        "[`local_only`](docs/configuration.md#keeping-a-preset-on-the-server-local_only) "
+        "프리셋을 서버 레인이 받을 수 없을 때의 409 `no_capable_machine` · `tool_missing` 이 그렇다"
+    ) in ko
+    assert "그 밖의 409 는 작업이 생겼는지 알 수 없으므로 3 이다" in ko
+
+
+def test_t6_the_example_server_config_shows_local_only_on_a_preset():
+    """# T6 — 설정 키는 `examples/server.toml` 에도 (주석으로라도)있다(docs 스킬 체크리스트 3).
+    `gate` 프리셋 안, `[presets.env]` 앞의 주석 줄이다."""
+    text = (Path(__file__).resolve().parents[1] / "examples" / "server.toml").read_text()
+    start = text.index('name = "gate"\n')
+    gate = text[start : text.index("[presets.env]", start)]
+    line = next((ln for ln in gate.splitlines() if ln.lstrip("# ").startswith("local_only")), None)
+    assert line is not None, gate
+    assert line.startswith("# local_only = true"), line
+    assert "remote worker" in line, line
+
+
+def test_t7_plan_says_rcm_eta_ahead_is_null_without_a_local_lane():
+    """# T7 — PLAN 「서버 API」 표의 `POST /api/eta` 행이 `ahead` 를 늘 숫자로 적지 않는다.
+    갈 로컬 레인이 없는 `local_only` 프리셋은 null 이다(설정 문서의 local_only 절)."""
+    text = (Path(__file__).resolve().parents[1] / "PLAN.md").read_text()
+    row = next(ln for ln in text.splitlines() if ln.startswith("| `POST /api/eta` |"))
+    assert "갈 로컬 레인이 없는 `local_only` 프리셋은 null" in row, row
+
+
+def test_t1_the_configuration_guide_says_the_check_row_follows_the_verdict():
+    """# T1 — 「Checks」 문단이 점검 칸도 판정과 같은 규칙이라고 적는다: 통과했거나 그 머신이
+    돌리는 점검이 아니면 칸은 `needed` 이고, 그 실패는 그 머신의 문제로 세지 않는다
+    (`capabilities.py` 의 `_record_holds`)."""
+    from test_docs_m5 import CONFIGURATION, read
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "Its state follows the same rule as the verdict: unless the check passed there or that "
+        "machine is running it, the row shows `needed` with the last job's number, so a check job "
+        "nobody can take does not read as running, and a failure there is not counted among that "
+        "machine's problems."
+    ) in flat

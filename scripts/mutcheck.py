@@ -6,6 +6,14 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-a PR1 — `m5t-local-only-remote-kept`: 후보 함수가 `local_only` 프리셋의 원격 머신을 안 뺌
+     (`capabilities.py`, `docs/m5t-workplan.md` §4.3 · TO15 — 진입점 17 경우가 모두 빨개진다)
+     + `m5t-cli-local-only-refusal-is-unknown`: `rcm run` 이 원격 금지 409 를 3 으로 끝냄(`cli.py`)
+     + `m5t-check-local-only-needed-only`: 원격에서 못 도는 점검의 대기 · 실패 기록이 판정에 남음
+     (`capabilities.py`, P6 GAP X1)
+     + `m5t-check-local-only-claimed-ignored`: 그 머신이 집은 점검도 check_local_only 로 냄
+     (`capabilities.py`, batch 7 T3)
+     + `m5t-claim-excluded-sql-dropped`: claim SQL 이 제외 목록을 안 씀(`store.py`, batch 7 T5)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2321,6 +2329,76 @@ MUTANTS = (
         old="        fcntl.flock(handle, fcntl.LOCK_EX)\n",
         new="        pass\n",
         tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
+    ),
+    Mutant(
+        # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
+        # `/worker/spec` · claim · `/api/machines` 가 모두 원격을 후보로 본다(M5t-a 결정 254, TO15)
+        name="m5t-local-only-remote-kept",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='        views = [v for v in views if v.kind == "local"]  # 원격 제외',
+        new="        pass  # 원격 제외",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine",
+            "tests/test_local_only.py::"
+            "test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally",
+            "tests/test_local_only.py::"
+            "test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote",
+            "tests/test_local_only.py::test_e3_a_local_only_retry_chain_is_never_claimed_remotely",
+        ),
+    ),
+    Mutant(
+        # `local_only` 거절 409(`no_capable_machine` · `tool_missing`)가 `rcm run` 에서
+        # 「결과 모름」(3)이 된다 — 잡이 안 생긴 확실한 거절인데 세션이 다시 묻거나 기다린다
+        # (M5t-a P3 2라운드 HIGH)
+        name="m5t-cli-local-only-refusal-is-unknown",
+        path="src/remote_ci_monitor/cli.py",
+        old='_REFUSED_CODES += ("no_capable_machine", "tool_missing")',
+        new="_REFUSED_CODES += ()",
+        tests=("tests/test_local_only.py::test_to10_to16_rcm_run_exits_2_on_a_local_only_refusal",),
+    ),
+    Mutant(
+        # 원격에서 다시 못 도는 점검(`local_only`)의 재매핑이 `check_needed` 에만 걸린다 — 표식을 단
+        # 순간 그 머신을 겨눈 대기 점검 잡은 「점검 중」으로 끝없이 기다리고, 실패 기록은 409 로
+        # 끝나는 다시 점검을 권한다(M5t-a P6 GAP X1)
+        name="m5t-check-local-only-needed-only",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if v.code not in _CHECK_CODES_GATED or report is None:",
+        new="        if v.code != cap.CODE_CHECK_NEEDED or report is None:",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+        ),
+    ),
+    Mutant(
+        # 원격에서 다시 못 도는 점검(`local_only`)의 기록 가운데 그 머신이 이미 집은 잡의 예외를
+        # 지운다 — 돌고 있는 점검이 끝나기도 전에 check_local_only 로 보이고, 그 결과가 오면 다시
+        # 통과로 돌아온다(M5t-a P6 재확인, batch 7 T3)
+        name="m5t-check-local-only-claimed-ignored",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="    return state == cap.CHECK_RUNNING and claimed\n",
+        new="    return False\n",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+            "tests/test_local_only.py::"
+            "test_t4_a_remote_check_being_cancelled_stays_running_until_it_ends",
+        ),
+    ),
+    Mutant(
+        # claim SQL 의 제외 조건만 지운다(바인딩 값도 함께 빼 SQL 은 그대로 돈다) — 후보 함수가
+        # 뺀 `local_only` 프리셋을 원격 claim 이 네 갈래 어디서든 집는다(M5t-a P3, batch 7 T5)
+        name="m5t-claim-excluded-sql-dropped",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            """        excluded_sql = f" AND c.preset NOT IN ({','.join('?' * len(excluded))})" """
+            """if excluded else ""\n"""
+        ),
+        new='        excluded, excluded_sql = (), ""\n',
+        tests=(
+            "tests/test_local_only.py::"
+            "test_to15_the_claim_sql_drops_excluded_presets_on_every_branch",
+        ),
     ),
 )
 
