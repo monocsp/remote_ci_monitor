@@ -241,9 +241,16 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
     )
 
 
+#: 줄인 옵션(`--conf` · `--data`)을 받지 않는다. guard(tools/guard_production.py)는 정확한 이름만
+#: 읽는다 — argparse 가 줄인 이름을 받으면 guard 가 못 본 경로에 쓴다(P3 v1-1 · v2-2)
+PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": False}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="rcm setup", description="Set this machine up for one role: config and service file."
+        prog="rcm setup",
+        description="Set this machine up for one role: config and service file.",
+        **PARSER_OPTIONS,
     )
     _add_arguments(p)
     return p
@@ -252,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
 def register(subparsers: Any) -> argparse.ArgumentParser:
     """cli 의 하위 명령 목록에 `setup` 을 단다(`cli.build_parser` 가 부른다)."""
     p = subparsers.add_parser(
-        "setup", help="set this machine up as a client, worker or coordinator"
+        "setup", help="set this machine up as a client, worker or coordinator", **PARSER_OPTIONS
     )
     _add_arguments(p)
     p.set_defaults(func=cmd_setup)
