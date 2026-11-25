@@ -79,6 +79,11 @@ class DoctorUsage(Exception):
     """사용법 오류 — 종료 2."""
 
 
+class ConfigUnknown(Exception):
+    """서비스가 어느 설정으로 도는지 모른다 — 사용법 오류가 아니라 「판정 못 함」(종료 3)이다.
+    서비스 파일을 못 읽었거나, 그 파일이 가리키는 설정을 doctor 가 못 읽었다(P3 4라운드 HIGH)."""
+
+
 class ServiceFileUnreadable(Exception):
     """서비스 파일을 읽지 못했다 — 사용법 오류가 아니라 「판정 못 함」(종료 3)이다. `reason` 에는
     파일의 값이 들지 않는다(TD55)."""
@@ -302,6 +307,9 @@ class ServiceFile:
     unfollowed: list[str] = field(default_factory=list)
     #: 그 줄 때문에 서비스의 PATH 를 모른다
     path_unknown: bool = False
+    #: 서비스가 rcm 을 띄우는 인자를 rcm 자신의 파서로 읽은 것(`command` · `config` · `port` …).
+    #: rcm 을 띄우는지, 어느 하위 명령인지 풀지 못했으면 None
+    launch: dict[str, Any] | None = None
 
     @property
     def env_names(self) -> list[str]:
@@ -309,12 +317,33 @@ class ServiceFile:
         return sorted(self.env)
 
 
-def _rcm_command(argv: list[str]) -> str | None:
-    """`rcm worker --config …` → `worker`. 첫 인자(실행 파일) 뒤의 첫 비옵션 인자."""
-    for arg in argv[1:]:
-        if not arg.startswith("-"):
-            return arg
-    return None
+def rcm_launch(program: str | None, argv: list[str]) -> dict[str, Any] | None:
+    """서비스가 띄우는 명령 → rcm 이 그 인자를 읽은 결과(`{"command": "worker", "config": …}`).
+
+    실행 파일이 `rcm`(또는 `python -m remote_ci_monitor.cli`)이고 rcm 자신의 파서가 그 인자를
+    받을 때만 푼다 — `--config=X` · 줄여 쓴 옵션도 서비스가 뜰 때와 똑같이 읽는다. `env rcm …` ·
+    `sh -c` 처럼 rcm 을 바로 띄우지 않거나 rcm 이 받지 않을 인자면 None(풀지 못함)이다."""
+    import contextlib
+    import io
+
+    if not program:
+        return None
+    exe = os.path.basename(program)
+    if exe == "rcm":
+        rest = argv[1:]
+    elif exe.startswith("python") and argv[1:3] == ["-m", "remote_ci_monitor.cli"]:
+        rest = argv[3:]
+    else:
+        return None
+    from remote_ci_monitor import cli
+
+    try:
+        # 파서는 틀린 인자에 사용법을 찍고 SystemExit 을 낸다 — doctor 의 출력에 섞이지 않게 막는다
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            args = cli.build_parser().parse_args(rest)
+    except SystemExit:
+        return None
+    return {k: v for k, v in vars(args).items() if k != "func"}
 
 
 def _plist_reason(e: Exception) -> str:
@@ -351,13 +380,16 @@ def _read_plist(p: Path) -> ServiceFile:
         raise ServiceFileUnreadable(p, "Program is not a string")
     args = [str(a) for a in raw_args]
     env = {str(k): str(v) for k, v in raw_env.items()}
+    exe = str(program or (args[0] if args else "")) or None
+    launch = rcm_launch(exe, args)
     return ServiceFile(
         p,
         dc.LAUNCHD,
-        _rcm_command(args),
+        None if launch is None else launch["command"],
         env,
         nofile or None,
-        str(program or (args[0] if args else "")) or None,
+        exe,
+        launch=launch,
     )
 
 
@@ -385,6 +417,7 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
     env: dict[str, str] = {}
     command: str | None = None
     program: str | None = None
+    launch: dict[str, Any] | None = None
     nofile_unit: int | None = None
     unreadable: list[str] = []
     unfollowed: list[str] = []
@@ -413,15 +446,25 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
                     env[k] = v.replace("%%", "%")
             elif key == "ExecStart":
                 argv = shlex.split(value)
-                command = _rcm_command(argv)
                 program = argv[0].lstrip("@-:+!") if argv else None
+                launch = rcm_launch(program, argv)
+                command = None if launch is None else launch["command"]
             elif key == "LimitNOFILE":
                 first = value.split(":", 1)[0].strip()
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
         except ValueError:
             unreadable.append(f"line {number} ({key}=)")
     return ServiceFile(
-        p, dc.SYSTEMD, command, env, nofile_unit, program, unreadable, unfollowed, path_unknown
+        p,
+        dc.SYSTEMD,
+        command,
+        env,
+        nofile_unit,
+        program,
+        unreadable,
+        unfollowed,
+        path_unknown,
+        launch,
     )
 
 
@@ -944,6 +987,9 @@ class _Run:
         self.judged = False  # 프리셋 판정까지 갔나 — 못 갔으면 「올 프리셋 0개」 규칙을 걸지 않는다
         self.pool = dc.DEFAULT_POOL
         self._service_file: ServiceFile | None = None
+        #: 서비스 파일 후보나 사람이 준 서비스 파일을 못 읽었다 — 서비스가 어느 설정으로 도는지
+        #: 모른다
+        self.service_unread = False
         self.path_known = True  # 서비스 PATH 를 아나 — 모르면 PATH 로 찾는 것은 재지 않는다
         #: 이 머신에 오는 git_ref 프리셋 → 저장소 이름(명세를 받았을 때만 안다)
         self.git_presets: dict[str, str] | None = None
@@ -1177,6 +1223,7 @@ class _Run:
                 manager, self.ctx.environ, {}, default_path=self.ctx.worker_service_path
             )
         self.path_known = "PATH" in env
+        self.service_unread = bool(skipped) or broken is not None
         shown = sf.path if sf is not None else (broken.path if broken is not None else None)
         self.service = {
             "file": self.mask(str(shown)) if shown else None,
@@ -1210,24 +1257,147 @@ class _Run:
             self.shell = {"path": self.mask(self.ctx.environ.get("PATH", ""))}
         return env
 
-    # ── 역할: worker ──
+    # ── 설정: 서비스가 읽는 것 ──
 
-    def worker(self) -> None:
+    def service_launch(self) -> dict[str, Any] | None:
+        """서비스가 rcm 을 띄우는 인자(`rcm_launch`). 서비스 파일이 하나도 없으면 None — 표준 자리의
+        설정을 쓴다. 후보나 사람이 준 파일을 못 읽어 고른 파일이 없으면 그 서비스가 어느 설정으로
+        도는지 모른다(`ConfigUnknown`). 다른 역할의 파일을 사람이 줬으면(E1) 그 인자는 쓰지 않는다.
+        """
+        sf = self._service_file
+        if sf is None:
+            if self.service_unread:
+                raise ConfigUnknown(
+                    "cannot tell which config the service starts with — its service file could "
+                    "not be read (pass --config PATH)"
+                )
+            return None
+        if sf.launch is None or sf.command != ROLE_COMMANDS.get(self.role):
+            return None
+        return sf.launch
+
+    def service_config_path(self, raw: str) -> Path:
+        """서비스 인자의 `--config` — rcm 은 `~` 를 그 서비스의 홈으로 푼다. 상대 경로는 서비스의
+        작업 폴더에 달렸으므로 모른다."""
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            raise ConfigUnknown(
+                f"the service starts rcm with a relative --config ({self.mask(raw)}) — rcm cannot "
+                "tell its working directory (write the absolute path in the service file)"
+            )
+        return p
+
+    def config_unknown(self, error: Exception) -> ConfigUnknown:
+        return ConfigUnknown(
+            f"cannot read the config the service starts with: {dc.hide_home(str(error), self.home)}"
+            " — fix it or pass --config PATH"
+        )
+
+    def compare_config(self) -> None:
+        """사람이 준 `--config` 로 잰다. 서비스가 다른 파일로 뜨면 알린다 — 그 서비스가 읽는 것은
+        그 파일이다."""
+        try:
+            launch = self.service_launch()
+        except ConfigUnknown:
+            return
+        theirs = None if launch is None else launch.get("config")
+        if not theirs or self.opts.config is None:
+            return
+        mine = Path(self.opts.config).expanduser()
+        if Path(theirs).expanduser().resolve() != mine.resolve():
+            self.warnings.append(
+                f"the service starts rcm with --config {self.mask(theirs)}, not "
+                f"{self.mask(str(mine))} — measured with the file given"
+            )
+
+    def worker_config(self) -> Any:
+        """워커의 설정 — `rcm worker` 가 고르는 것과 같은 것(`cli._worker_config`). `--config` 가
+        먼저, 없으면 서비스 인자의 `--config` · `--server` · `--pool` · `--lanes`, 그것도 없으면
+        표준 자리. 서비스가 가리키는 파일을 못 읽은 것은 사용법 오류가 아니라 모름이다."""
         from remote_ci_monitor.config import ConfigError, load_worker_config, user_config_dir
 
         path: Path | str | None = self.opts.config
+        overrides: dict[str, Any] = {}
+        from_service = False
         if path is None:
+            launch = self.service_launch()
             default = user_config_dir() / "worker.toml"
-            path = default if default.is_file() else None
+            if launch is not None:
+                overrides = {k: launch.get(k) for k in ("server", "pool", "lanes")}
+                if launch.get("config"):
+                    path, from_service = self.service_config_path(launch["config"]), True
+                elif launch.get("server") is None and default.is_file():
+                    path = default  # `rcm worker` 도 `--server` 없이 뜨면 이 파일을 읽는다
+            elif default.is_file():
+                path = default
+        else:
+            self.compare_config()
+        if self.opts.server:
+            overrides["server"] = self.opts.server
         try:
-            cfg = load_worker_config(path, overrides={"server": self.opts.server})
+            return load_worker_config(path, overrides=overrides)
         except ConfigError as e:
+            if from_service:
+                raise self.config_unknown(e) from e
             raise DoctorUsage(str(e)) from e
-        self.pool = cfg.pool
+
+    def server_config(self, env: Mapping[str, str]) -> Any:
+        """서버의 설정 — `rcm serve` 가 읽는 것. `--config` 가 먼저, 없으면 서비스 인자의
+        `--config` · `--bind` · `--port` 와 서비스 환경(`RCM_CONFIG` · `RCM_SERVER_*`), 그것도
+        없으면 표준 자리. 어디에도 설정 파일이 없으면 doctor 는 무엇을 잴지(프리셋 · 포트)
+        모른다 — 기본값(프리셋 없음 · 8787)으로 그 포트의 아무 서버에 묻지 않고 사용법 오류다
+        (P3 4라운드 HIGH)."""
+        from remote_ci_monitor.config import ConfigError, load_server_config
+
+        path: Path | str | None = self.opts.config
+        overrides: dict[str, dict[str, Any]] = {}
+        environ: dict[str, str] | None = None
+        from_service = False
+        if path is None:
+            launch = self.service_launch()
+            sf = self._service_file
+            if launch is not None and sf is not None:
+                if sf.unfollowed or sf.unreadable_lines:
+                    # 따라가지 않는 줄(`EnvironmentFile=`)이 `RCM_CONFIG` · `RCM_SERVER_PORT` 를 줄
+                    # 수 있다 — 그 서버가 어느 설정 · 포트로 도는지 모른다
+                    raise ConfigUnknown(
+                        "cannot tell which config and port the server's service uses — its service "
+                        "file has lines rcm does not read (see above)"
+                    )
+                overrides = {"server": {"bind": launch.get("bind"), "port": launch.get("port")}}
+                environ = dict(env)  # 서비스가 받는 환경 — 셸의 `RCM_SERVER_PORT` 가 아니다
+                raw = launch.get("config") or environ.get("RCM_CONFIG")
+                if raw:
+                    path, from_service = self.service_config_path(raw), True
+        else:
+            self.compare_config()
+        try:
+            cfg = load_server_config(path, check_tools=False, overrides=overrides, environ=environ)
+        except ConfigError as e:
+            if from_service:
+                raise self.config_unknown(e) from e
+            raise DoctorUsage(str(e)) from e
+        if cfg.path is None:
+            raise DoctorUsage(
+                "no server config found — pass --config PATH (without one, rcm serve starts with "
+                "no presets and doctor would only be guessing the port)"
+            )
+        return cfg
+
+    # ── 역할: worker ──
+
+    def worker(self) -> None:
         env = self.service_env()
         self.measured_in = "clean_service_env"
         self.host_facts(env.get("PATH"))
         self.base_requirements()
+        try:
+            cfg = self.worker_config()
+        except ConfigUnknown as e:
+            # 설정을 모르면 그 설정에 달린 것(서버 · 토큰 · 풀 · 저장소)은 재지 않는다
+            self.undecided.append(str(e))
+            return
+        self.pool = cfg.pool
         self.worker_requirements(cfg, env)
         self.worker_server(cfg, env)
         # 명세를 받았든 못 받았든 git 행은 그 뒤에 정한다(오는 git_ref 프리셋을 알아야 한다)
@@ -1441,17 +1611,8 @@ class _Run:
 
     def coordinator(self) -> None:
         from remote_ci_monitor.client import Client
-        from remote_ci_monitor.config import (
-            ConfigError,
-            advertise_enabled,
-            load_client_config,
-            load_server_config,
-        )
+        from remote_ci_monitor.config import ConfigError, advertise_enabled, load_client_config
 
-        try:
-            cfg = load_server_config(self.opts.config, check_tools=False)
-        except ConfigError as e:
-            raise DoctorUsage(str(e)) from e
         env = self.service_env()
         self.measured_in = (
             "server_service_env" if self.role == dc.ROLE_COORDINATOR_WORKER else "none"
@@ -1460,6 +1621,12 @@ class _Run:
         self.base_requirements()
         self.requirements.append(sqlite_requirement())
         self.requirements.append(fd_requirement(self._service_file))
+        try:
+            cfg = self.server_config(env)
+        except ConfigUnknown as e:
+            # 설정을 모르면 프리셋 · 포트를 모른다 — 서버에 묻지 않고 프리셋도 판정하지 않는다
+            self.undecided.append(str(e))
+            return
         # 서버는 git_ref 제출의 ref 를 풀고 점검을 건다 — git_ref 프리셋이 있으면 git 을 잰다(위임
         # 결정 6). 프리셋의 저장소가 `[[repos]]` 에 있는지는 설정 검증이 이미 본다
         if any("git_ref" in p.source_modes for p in cfg.presets):
