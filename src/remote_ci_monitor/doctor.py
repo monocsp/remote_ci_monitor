@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import tarfile
 import tomllib
+import xml.parsers.expat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +74,15 @@ INSTALL: dict[str, dict[str, str]] = {
 
 class DoctorUsage(Exception):
     """사용법 오류 — 종료 2."""
+
+
+class ServiceFileUnreadable(Exception):
+    """서비스 파일을 읽지 못했다 — 사용법 오류가 아니라 「판정 못 함」(종료 3)이다. `reason` 에는
+    파일의 값이 들지 않는다(TD55)."""
+
+    def __init__(self, path: Path, reason: str):
+        super().__init__(f"{path.name}: {reason}")
+        self.path, self.reason = path, reason
 
 
 def is_tty() -> bool:
@@ -273,6 +283,8 @@ class ServiceFile:
     env: dict[str, str] = field(default_factory=dict)
     nofile: int | None = None
     program: str | None = None  # 띄우는 실행 파일(argv[0]) — venv 의 bin 이 PATH 에 있는지 본다
+    #: 읽지 못한 줄(systemd) — `line 3 (Environment=)` 처럼 줄 번호와 키만. 값은 담지 않는다
+    unreadable_lines: list[str] = field(default_factory=list)
 
     @property
     def env_names(self) -> list[str]:
@@ -288,32 +300,71 @@ def _rcm_command(argv: list[str]) -> str | None:
     return None
 
 
-def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
-    """launchd plist 나 systemd 유닛을 읽는다. 못 읽으면 `DoctorUsage`."""
-    p = Path(path)
+def _plist_reason(e: Exception) -> str:
+    """plist 를 못 읽은 이유 — 형식 이름과 위치만. 메시지에는 파일의 값이 섞일 수 있다."""
+    if isinstance(e, xml.parsers.expat.ExpatError):
+        return f"not valid XML (line {e.lineno}, column {e.offset})"
+    return f"not a valid plist ({type(e).__name__})"
+
+
+def _read_plist(p: Path) -> ServiceFile:
     try:
-        if p.suffix == ".plist":
-            doc = plistlib.loads(p.read_bytes())
-            args = [str(a) for a in doc.get("ProgramArguments") or []]
-            env = {str(k): str(v) for k, v in (doc.get("EnvironmentVariables") or {}).items()}
-            limits = doc.get("SoftResourceLimits") or {}
-            nofile = limits.get("NumberOfFiles")
-            return ServiceFile(
-                p,
-                dc.LAUNCHD,
-                _rcm_command(args),
-                env,
-                int(nofile) if nofile else None,
-                str(doc.get("Program") or (args[0] if args else "")) or None,
-            )
+        doc = plistlib.loads(p.read_bytes())
+    except OSError as e:
+        raise ServiceFileUnreadable(p, type(e).__name__) from e
+    except (ValueError, plistlib.InvalidFileException, xml.parsers.expat.ExpatError) as e:
+        # ExpatError(잘린 XML)는 ValueError 가 아니다 — 따로 잡지 않으면 traceback 이 난다
+        raise ServiceFileUnreadable(p, _plist_reason(e)) from e
+    if not isinstance(doc, dict):
+        raise ServiceFileUnreadable(p, f"the top level is a {type(doc).__name__}, not a dict")
+    raw_args = doc.get("ProgramArguments") or []
+    raw_env = doc.get("EnvironmentVariables") or {}
+    limits = doc.get("SoftResourceLimits") or {}
+    program = doc.get("Program")
+    if not isinstance(raw_args, list):
+        raise ServiceFileUnreadable(p, "ProgramArguments is not an array")
+    if not isinstance(raw_env, dict):
+        raise ServiceFileUnreadable(p, "EnvironmentVariables is not a dict")
+    if not isinstance(limits, dict):
+        raise ServiceFileUnreadable(p, "SoftResourceLimits is not a dict")
+    nofile = limits.get("NumberOfFiles")
+    if nofile is not None and (isinstance(nofile, bool) or not isinstance(nofile, int)):
+        raise ServiceFileUnreadable(p, "SoftResourceLimits.NumberOfFiles is not an integer")
+    if program is not None and not isinstance(program, str):
+        raise ServiceFileUnreadable(p, "Program is not a string")
+    args = [str(a) for a in raw_args]
+    env = {str(k): str(v) for k, v in raw_env.items()}
+    return ServiceFile(
+        p,
+        dc.LAUNCHD,
+        _rcm_command(args),
+        env,
+        nofile or None,
+        str(program or (args[0] if args else "")) or None,
+    )
+
+
+def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
+    """launchd plist 나 systemd 유닛을 읽는다. 파일을 못 읽으면 `ServiceFileUnreadable`.
+
+    systemd 유닛의 줄 하나를 못 읽으면(닫히지 않은 따옴표 · 숫자가 아닌 한도) 그 줄을 건너뛰되
+    `unreadable_lines` 에 남긴다 — 조용히 버리면 「PATH 를 주지 않았다」 같은 틀린 안내가 나간다.
+    """
+    p = Path(path)
+    if p.suffix == ".plist":
+        return _read_plist(p)
+    try:
         text = p.read_text(encoding="utf-8")
-    except (OSError, ValueError, plistlib.InvalidFileException) as e:
-        raise DoctorUsage(f"cannot read the service file {p.name}: {type(e).__name__}") from e
+    except OSError as e:
+        raise ServiceFileUnreadable(p, type(e).__name__) from e
+    except ValueError as e:  # UnicodeDecodeError
+        raise ServiceFileUnreadable(p, "not UTF-8") from e
     env: dict[str, str] = {}
     command: str | None = None
     program: str | None = None
     nofile_unit: int | None = None
-    for raw in text.splitlines():
+    unreadable: list[str] = []
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         key, _, value = line.partition("=")
         try:
@@ -330,17 +381,26 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
                 first = value.split(":", 1)[0].strip()
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
         except ValueError:
-            continue
-    return ServiceFile(p, dc.SYSTEMD, command, env, nofile_unit, program)
+            unreadable.append(f"line {number} ({key}=)")
+    return ServiceFile(p, dc.SYSTEMD, command, env, nofile_unit, program, unreadable)
 
 
-def _matching(paths: list[Path], role: str) -> list[ServiceFile]:
+def _matching(
+    paths: list[Path], role: str, unreadable: list[ServiceFileUnreadable]
+) -> list[ServiceFile]:
+    """그 역할의 `rcm` 하위 명령을 띄우는 파일만. 못 읽은 파일은 버리지 않고 `unreadable` 에
+    모은다 — 그 파일이 이 역할의 것이었는지 모르기 때문이다."""
     want = ROLE_COMMANDS.get(role)
     out: list[ServiceFile] = []
     for p in paths:
         try:
             sf = read_service_file(p)
-        except DoctorUsage:
+        except ServiceFileUnreadable as e:
+            unreadable.append(e)
+            continue
+        if sf.command is None and any("ExecStart" in u for u in sf.unreadable_lines):
+            # 띄우는 명령 줄을 못 읽었다 — 이 역할의 파일인지 모른다
+            unreadable.append(ServiceFileUnreadable(p, f"cannot read {sf.unreadable_lines[0]}"))
             continue
         if want is None or sf.command == want:
             out.append(sf)
@@ -348,14 +408,23 @@ def _matching(paths: list[Path], role: str) -> list[ServiceFile]:
 
 
 def pick_service_file(
-    explicit: str | None, role: str, *, home: Path, config_dir: Path
+    explicit: str | None,
+    role: str,
+    *,
+    home: Path,
+    config_dir: Path,
+    unreadable: list[ServiceFileUnreadable] | None = None,
 ) -> ServiceFile | None:
     """찾는 순서: `--service-file`, 표준 라벨의 설치 자리, setup 의 자리 `<config dir>/service/*`.
 
     설치 자리를 setup 자리보다 먼저 본다 — 서비스 관리자가 실제로 읽는 파일이다(6-B-V2). 후보는
     그 역할의 `rcm` 하위 명령을 띄우는 파일로 거른다. 같은 자리에 둘 이상이면 사람이 고르고,
     비TTY 면 사용법 오류다. 없으면 None(「서비스 파일 없음」).
+
+    읽지 못한 파일은 `unreadable` 에 모은다. 자동으로 찾은 후보면 빼고 나머지로 계속 찾는다.
+    `--service-file` 로 준 파일이면 `ServiceFileUnreadable` 를 그대로 던진다.
     """
+    skipped: list[ServiceFileUnreadable] = [] if unreadable is None else unreadable
     if explicit:
         p = Path(explicit).expanduser()
         if not p.is_file():
@@ -368,7 +437,7 @@ def pick_service_file(
         p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
     )
     for stage in (installed, staged):
-        found = _matching(stage, role)
+        found = _matching(stage, role, skipped)
         if len(found) == 1:
             return found[0]
         if len(found) > 1:
@@ -605,28 +674,52 @@ class _Run:
     def service_env(self) -> dict[str, str]:
         from remote_ci_monitor.config import user_config_dir
 
-        sf = pick_service_file(
-            self.opts.service_file,
-            self.role,
-            home=Path(self.home),
-            config_dir=user_config_dir(),
-        )
-        manager = sf.manager if sf else (dc.LAUNCHD if PLATFORM == "darwin" else dc.SYSTEMD)
+        skipped: list[ServiceFileUnreadable] = []
+        broken: ServiceFileUnreadable | None = None
+        try:
+            sf = pick_service_file(
+                self.opts.service_file,
+                self.role,
+                home=Path(self.home),
+                config_dir=user_config_dir(),
+                unreadable=skipped,
+            )
+        except ServiceFileUnreadable as e:
+            sf, broken = None, e
+        for e in [*skipped, *([broken] if broken else [])]:
+            # 못 읽은 파일은 「판정 못 함」이다 — traceback 도 조용한 무시도 아니다(P3 HIGH)
+            self.undecided.append(
+                f"cannot read the service file {self.mask(str(e.path))}: {e.reason} — fix it "
+                "or pass --service-file PATH"
+            )
         if sf is not None:
+            for where in sf.unreadable_lines:
+                self.undecided.append(
+                    f"cannot read {where} of the service file "
+                    f"{self.mask(str(sf.path))} — fix that line"
+                )
+        manager = sf.manager if sf else (dc.LAUNCHD if PLATFORM == "darwin" else dc.SYSTEMD)
+        if broken is not None:
+            # 사람이 준 파일을 못 읽었다 — 그 PATH 를 모르므로 기본 PATH 로 재지 않는다
+            manager = dc.LAUNCHD if broken.path.suffix == ".plist" else dc.SYSTEMD
+            env = dc.clean_env(manager, self.ctx.environ, {})
+            env.pop("PATH", None)
+        elif sf is not None:
             env = dc.clean_env(manager, self.ctx.environ, sf.env)
         else:
             env = dc.clean_env(
                 manager, self.ctx.environ, {}, default_path=self.ctx.worker_service_path
             )
         self.path_known = "PATH" in env
+        shown = sf.path if sf is not None else (broken.path if broken is not None else None)
         self.service = {
-            "file": self.mask(str(sf.path)) if sf and sf.path else None,
+            "file": self.mask(str(shown)) if shown else None,
             "manager": manager,
             "path": self.mask(env["PATH"]) if self.path_known else None,
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
-        if not self.path_known:
+        if not self.path_known and broken is None:
             # systemd 의 기본 PATH 는 배포판마다 다르다 — 추정해서 재면 없는 「빠짐」을 지어낸다
             self.undecided.append(
                 "the service file sets no PATH and systemd's default differs between "

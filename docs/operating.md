@@ -130,7 +130,11 @@ the report warns. Two in the same place need `--service-file` (exit 2 without a 
 worker's default service `PATH` is used and the report says so. A launchd plist without `PATH`
 gets launchd's default, `/usr/bin:/bin:/usr/sbin:/sbin`. A systemd unit without
 `Environment=PATH=…` is not guessed — the default differs between distributions — so the report
-shows no `PATH`, measures no tool and exits 3 until the unit sets one. `--shell-path` measures
+shows no `PATH`, measures no tool and exits 3 until the unit sets one. A service file rcm cannot
+read (XML cut short, a plist whose top level is not a dictionary, a unit line it cannot parse) is
+named with the reason, never its values, and the report exits 3; one found in the standard places
+is left out and the search goes on, one given with `--service-file` leaves the service `PATH`
+unknown. `--shell-path` measures
 once more in your shell and marks the presets whose result differs.
 
 rcm's own needs are rows of their own: Python 3.11.4+; git, when a `git_ref` preset comes to this
@@ -146,7 +150,7 @@ machine awake; rcm checks neither.
 | 0 | every preset that comes to this machine is `ready` or `needs check`, and rcm's own needs are met; warnings allowed |
 | 1 | a tool is missing, rcm's own needs fail (Python 3.11.4+, git 2.31+ for `token_file`, an unreachable or missing repository), or nothing would come to this machine |
 | 2 | usage: a bad flag, a config file that does not exist, several roles or service files to choose from |
-| 3 | could not decide: the server is down or older, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` |
+| 3 | could not decide: the server is down or older, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH`, a service file it cannot read |
 
 1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes.
 

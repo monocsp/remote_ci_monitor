@@ -1566,6 +1566,8 @@ def test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3(
     traceback 을 내지 않는다 — 그 파일 이름과 이유를 「판정 못 함」에 적고 종료 3 이다. 함께 있는
     읽히는 파일로는 그대로 잰다(그 파일이 이 역할의 것이었는지 모르므로 0 으로 끝내지 않는다)."""
     monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    # 도구가 없는 프리셋 — 서비스 파일 없이 기본 PATH 로 재도 빠짐(종료 1)이 생기지 않게
+    srv.route("GET", "/worker/spec", spec_doc(preset("build", requires=())))
     cfg = worker_toml(env, srv.url)
     agents = env / "home" / "Library" / "LaunchAgents"
     agents.mkdir(parents=True)

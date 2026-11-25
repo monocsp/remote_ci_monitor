@@ -39,7 +39,7 @@ of a key bumps that number and is listed here.
   `coordinator-worker`, `coordinator` and `client`; `--json`, `--shell-path`, `--offline`,
   `--service-file`. It sends the server only read requests and opens no database. `--json` always
   carries every key (`null` when unknown) under `doctor_version: 1`. A systemd unit without
-  `PATH` is not guessed (exit 3), an unreachable `[[repos]]` entry or a `git_ref` preset whose
+  `PATH` is not guessed (exit 3), a service file it cannot read is named (exit 3), an unreachable `[[repos]]` entry or a `git_ref` preset whose
   repository is missing from the worker's `[[repos]]` is a failure, and `--role coordinator`
   lists `local_only` presets as needing a local lane. `rcm doctor` never follows the server's
   version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
