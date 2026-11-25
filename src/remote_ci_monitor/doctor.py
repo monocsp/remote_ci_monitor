@@ -42,6 +42,10 @@ FD_WANTED = 4096
 #: 표준 라벨의 설치 자리(launchd · systemd 사용자 유닛)
 LAUNCH_AGENTS_GLOB = "com.remote-ci-monitor.*.plist"
 SYSTEMD_GLOB = "rcm-*.service"
+#: 시스템 자리 — 서비스 관리자가 root 로 읽는다. 문서의 Linux 서버 설치는 `examples/systemd/
+#: rcm-server.service` 를 `/etc/systemd/system/` 에 넣는다(`User=rcm`). 시험이 바꿔 끼운다
+SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+LAUNCH_DAEMONS_DIR = Path("/Library/LaunchDaemons")
 #: 서비스의 환경을 바꾸지만 rcm 이 따라가지 않는 systemd 줄(P3 2라운드 MED). `EnvironmentFile=` 의
 #: 값은 `Environment=` 를 덮으므로 PATH 도 모른다
 SYSTEMD_UNFOLLOWED = ("EnvironmentFile", "PassEnvironment", "UnsetEnvironment")
@@ -119,6 +123,18 @@ def choose(paths: list[Path], home: str) -> Path | None:
     if answer.isdigit() and 1 <= int(answer) <= len(paths):
         return paths[int(answer) - 1]
     return None
+
+
+def lookup_user(name: str) -> tuple[str, str, str] | None:
+    """(이름, 홈, 셸) — 시스템 서비스가 도는 사용자(`User=` · `UserName`). 이 머신이 모르는
+    사용자면 None. 숫자는 uid 다. 시험이 바꿔 끼운다."""
+    import pwd
+
+    try:
+        pw = pwd.getpwuid(int(name)) if name.isdigit() else pwd.getpwnam(name)
+    except (KeyError, ValueError, OverflowError):
+        return None
+    return pw.pw_name, pw.pw_dir, pw.pw_shell
 
 
 def python_version() -> tuple[int, ...]:
@@ -328,6 +344,11 @@ class ServiceFile:
     workdir_unknown: bool = False
     #: 사용자 유닛인 것을 안다(`~/.config/systemd/user/` · setup 자리) — `%h` 가 그 홈이다
     user_unit: bool = False
+    #: 시스템 자리(`/etc/systemd/system` · `/Library/LaunchDaemons`)의 파일 — 관리자가 root 로
+    #: 읽고 `run_user`(없으면 root)로 띄운다
+    system: bool = False
+    #: `User=` · `UserName` 의 값(적혀 있지 않으면 None)
+    run_user: str | None = None
 
     @property
     def env_names(self) -> list[str]:
@@ -444,6 +465,9 @@ def _read_plist(p: Path) -> ServiceFile:
     if workdir is not None and not isinstance(workdir, str):
         raise ServiceFileUnreadable(p, "WorkingDirectory is not a string")
     label = doc.get("Label")
+    user = doc.get("UserName")
+    if user is not None and not isinstance(user, str):
+        raise ServiceFileUnreadable(p, "UserName is not a string")
     # launchd 는 인자와 환경 변수 값을 문자열로만 받는다 — `str()` 로 바꿔 「PATH 가 7」로 재지
     # 않는다(P3 4라운드 LOW). 이유에는 이름만 넣고 값은 넣지 않는다
     if not all(isinstance(a, str) for a in raw_args):
@@ -470,10 +494,13 @@ def _read_plist(p: Path) -> ServiceFile:
         workdir=workdir or None,
         # launchd 는 `~` 를 풀지 않는다 — 절대 경로가 아니면 그 폴더를 모른다
         workdir_unknown=bool(workdir) and not os.path.isabs(str(workdir)),
+        run_user=user or None,
     )
 
 
-def read_service_file(path: str | os.PathLike[str], *, user_home: str | None = None) -> ServiceFile:
+def read_service_file(
+    path: str | os.PathLike[str], *, user_home: str | None = None, system: bool = False
+) -> ServiceFile:
     """launchd plist 나 systemd 유닛을 읽는다. 파일을 못 읽으면 `ServiceFileUnreadable`.
 
     `user_home` 은 그 유닛이 사용자 유닛인 것을 알 때(`~/.config/systemd/user/` · setup 자리)의
@@ -492,8 +519,8 @@ def read_service_file(path: str | os.PathLike[str], *, user_home: str | None = N
     """
     p = Path(path)
     if p.suffix == ".plist":
-        return _read_plist(p)
-    home = user_home or None
+        return replace(_read_plist(p), system=system)
+    home = None if system else (user_home or None)
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as e:
@@ -512,6 +539,7 @@ def read_service_file(path: str | os.PathLike[str], *, user_home: str | None = N
     unexpanded = False
     workdir: str | None = None
     workdir_unknown = False
+    user: str | None = None
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         key, _, value = line.partition("=")
@@ -560,6 +588,8 @@ def read_service_file(path: str | os.PathLike[str], *, user_home: str | None = N
                 resolved = expand_specifiers(wd, home) if wd else None
                 workdir = resolved
                 workdir_unknown = resolved is None or not os.path.isabs(resolved)
+            elif key == "User":
+                user = value.strip() or None
             elif key == "LimitNOFILE":
                 first = value.split(":", 1)[0].strip()
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
@@ -582,7 +612,14 @@ def read_service_file(path: str | os.PathLike[str], *, user_home: str | None = N
         workdir=None if workdir_unknown else workdir,
         workdir_unknown=workdir_unknown,
         user_unit=home is not None,
+        system=system,
+        run_user=user,
     )
+
+
+def system_place(p: Path) -> bool:
+    """시스템 자리의 파일인가 — 관리자가 root 로 읽고 `User=` 로 띄운다."""
+    return p.absolute().parent in (SYSTEM_UNIT_DIR, LAUNCH_DAEMONS_DIR)
 
 
 def _matching(
@@ -598,7 +635,7 @@ def _matching(
     out: list[ServiceFile] = []
     for p in paths:
         try:
-            sf = read_service_file(p, user_home=user_home)
+            sf = read_service_file(p, user_home=user_home, system=system_place(p))
         except ServiceFileUnreadable as e:
             unreadable.append(e)
             continue
@@ -636,7 +673,8 @@ def pick_service_file(
     config_dir: Path,
     unreadable: list[ServiceFileUnreadable] | None = None,
 ) -> ServiceFile | None:
-    """찾는 순서: `--service-file`, 표준 라벨의 설치 자리, setup 의 자리 `<config dir>/service/*`.
+    """찾는 순서: `--service-file`, 표준 라벨의 설치 자리(사용자 자리와 시스템 자리
+    `/etc/systemd/system` · `/Library/LaunchDaemons`), setup 의 자리 `<config dir>/service/*`.
 
     설치 자리를 setup 자리보다 먼저 본다 — 서비스 관리자가 실제로 읽는 파일이다(6-B-V2). 후보는
     그 역할의 `rcm` 하위 명령을 띄우는 파일로 거른다. 같은 자리에 둘 이상이면 사람이 고르고,
@@ -659,13 +697,20 @@ def pick_service_file(
         if not p.is_file():
             raise DoctorUsage(f"service file not found: {p.name}")
         known_user = p.absolute().parent in user_places
-        return read_service_file(p, user_home=user_home if known_user else None)
+        return read_service_file(
+            p, user_home=user_home if known_user else None, system=system_place(p)
+        )
     launch_agents = sorted((home / "Library" / "LaunchAgents").glob(LAUNCH_AGENTS_GLOB))
     user_units = sorted(user_dir.glob(SYSTEMD_GLOB))
+    # 시스템 자리도 설치 자리다 — 문서의 Linux 서버 설치가 `/etc/systemd/system/rcm-server.service`
+    # 다(P3 사이클 2 r2 검증자 1 #1)
+    system_files = sorted(LAUNCH_DAEMONS_DIR.glob(LAUNCH_AGENTS_GLOB)) + sorted(
+        SYSTEM_UNIT_DIR.glob(SYSTEMD_GLOB)
+    )
     staged = sorted(
         p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
     )
-    for stage in (launch_agents + user_units, staged):
+    for stage in (launch_agents + user_units + system_files, staged):
         before = len(skipped)
         found = _matching(stage, role, skipped, user_home)
         if len(skipped) > before:
@@ -679,7 +724,7 @@ def pick_service_file(
             if is_tty():
                 picked = choose([sf.path for sf in found if sf.path], str(home))
                 if picked is not None:
-                    return read_service_file(picked, user_home=user_home)
+                    return next(sf for sf in found if sf.path == picked)
             raise DoctorUsage(f"several service files match: {names} — pass --service-file PATH")
     return None
 
@@ -1163,6 +1208,8 @@ class _Run:
         self.probe_why: dict[str, str] = {}
         #: 어느 프리셋이 git_ref 인지 서버가 다 말하지 않았다(옛 서버 · 모르는 배치)
         self.unsure_git = False
+        #: 시스템 서비스의 `User=` 를 이 머신이 모른다 — 그 이유 줄(모르면 None)
+        self.service_user_unknown: str | None = None
 
     # ── 공통 ──
 
@@ -1380,18 +1427,30 @@ class _Run:
                     "itself with arguments rcm accepts"
                 )
         manager = sf.manager if sf else (dc.LAUNCHD if PLATFORM == "darwin" else dc.SYSTEMD)
+        #: 서버 역할인데 서비스 파일이 하나도 없다 — 서버가 어느 PATH 로 도는지 모른다
+        no_server_file = (
+            sf is None
+            and broken is None
+            and not skipped
+            and self.role in (dc.ROLE_COORDINATOR, dc.ROLE_COORDINATOR_WORKER)
+        )
         if broken is not None:
             # 사람이 준 파일을 못 읽었다 — 그 PATH 를 모르므로 기본 PATH 로 재지 않는다
             manager = dc.LAUNCHD if broken.path.suffix == ".plist" else dc.SYSTEMD
             env = dc.clean_env(manager, self.ctx.environ, {})
             env.pop("PATH", None)
         elif sf is not None:
-            env = dc.clean_env(manager, self.ctx.environ, sf.env)
+            env = dc.clean_env(manager, self.run_user_env(sf), sf.env)
             if sf.path_unknown or unresolved:
                 env.pop("PATH", None)
         elif skipped:
             # 후보를 못 읽어 고른 파일이 없다 — 그 파일의 PATH 를 모른다. 기본 PATH 를 짐작하는
             # 것은 후보가 하나도 없을 때뿐이다(P3 3라운드 HIGH)
+            env = dc.clean_env(manager, self.ctx.environ, {})
+            env.pop("PATH", None)
+        elif no_server_file:
+            # 워커의 서비스 PATH(`WORKER_SERVICE_PATH`)는 `rcm init worker` 가 쓰는 워커의 것이다 —
+            # 서버의 PATH 로 짐작하지 않는다(P3 사이클 2 r2 검증자 1 #1)
             env = dc.clean_env(manager, self.ctx.environ, {})
             env.pop("PATH", None)
         else:
@@ -1408,7 +1467,15 @@ class _Run:
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
-        if (
+        if self.service_user_unknown is not None:
+            self.undecided.append(self.service_user_unknown)
+        if no_server_file:
+            self.undecided.append(
+                "no service file for the rcm server was found (the user and system places for "
+                "launchd and systemd) — rcm cannot tell the PATH the server runs with; pass "
+                "--service-file PATH"
+            )
+        elif (
             not self.path_known
             and broken is None
             and not skipped
@@ -1444,6 +1511,25 @@ class _Run:
         if self.opts.shell_path:
             self.shell = {"path": self.mask(self.ctx.environ.get("PATH", ""))}
         return env
+
+    def run_user_env(self, sf: ServiceFile) -> Mapping[str, str]:
+        """서비스 관리자가 그 프로세스에 주는 사용자 변수(HOME · USER · LOGNAME · SHELL)의 출처.
+        사용자 자리의 파일이면 이 사용자(doctor 의 환경)다. 시스템 자리의 파일이면 `User=` ·
+        `UserName`(없으면 root)의 것이다 — 이 머신이 그 사용자를 모르면 그 변수는 없고 홈을
+        모른다(P3 사이클 2 r2 검증자 1 #1)."""
+        if not sf.system:
+            return self.ctx.environ
+        name = sf.run_user or "root"
+        found = None if "%" in name else lookup_user(name)
+        if found is None:
+            self.service_user_unknown = (
+                f"the service file {self.mask(str(sf.path))} runs rcm as user "
+                f"{dc.clean_text(name, 64)}, whom this machine does not know — rcm cannot tell "
+                "its home folder"
+            )
+            return {}
+        user, home, shell = found
+        return {"HOME": home, "USER": user, "LOGNAME": user, "SHELL": shell}
 
     # ── 설정: 서비스가 읽는 것 ──
 
@@ -1528,7 +1614,15 @@ class _Run:
             first = user_config_dir()
             legacy = Path(self.home) / ".config" / "rcm"
         else:
-            home = env.get("HOME") or self.home
+            home = env.get("HOME") or ""
+            if not home:
+                if self._service_file.system:
+                    # 시스템 서비스가 도는 사용자의 홈을 모른다 — doctor 의 홈으로 찾지 않는다
+                    raise ConfigUnknown(
+                        "cannot tell where the service looks for its config — rcm does not know "
+                        "the home folder of the user it runs as (pass --config PATH)"
+                    )
+                home = self.home
             xdg = env.get("XDG_CONFIG_HOME") or ""
             if xdg.startswith("~"):
                 xdg = home + xdg[1:]
@@ -1554,7 +1648,8 @@ class _Run:
             )
         if sf.workdir:
             return [sf.workdir]
-        if sf.manager == dc.LAUNCHD:
+        if sf.manager == dc.LAUNCHD or sf.system:
+            # launchd 와 시스템 유닛의 기본 작업 폴더는 `/` 다(systemd.exec 「WorkingDirectory=」)
             return [LAUNCHD_DEFAULT_WORKDIR]
         home = self.home
         return [home] if sf.user_unit else ["/", home]
@@ -1899,9 +1994,8 @@ class _Run:
         from remote_ci_monitor.config import ConfigError, advertise_enabled, load_client_config
 
         env = self.service_env()
-        self.measured_in = (
-            "server_service_env" if self.role == dc.ROLE_COORDINATOR_WORKER else "none"
-        )
+        # 서버의 측정을 실제로 읽었을 때만 `server_service_env` 다(`local_lane`)
+        self.measured_in = "none"
         self.host_facts(env.get("PATH"))
         self.base_requirements()
         self.requirements.append(sqlite_requirement())
@@ -2011,6 +2105,8 @@ class _Run:
         프리셋은 모름이다(P6 GAP E4).
         """
         measured = health.preset_env
+        if measured is not None:
+            self.measured_in = "server_service_env"
         # 서버의 판정 코드는 표시만 한다 — 없으면 doctor 가 정한 코드를 둔다
         verdicts = {} if local is None or local.presets is None else local.presets
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"

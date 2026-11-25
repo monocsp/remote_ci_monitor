@@ -2749,6 +2749,19 @@ MUTANTS = (
             "tests/test_doctor_cli.py::test_e4_a_server_that_has_not_reloaded_the_config_is_unknown",
         ),
     ),
+    Mutant(
+        # 시스템 자리(`/etc/systemd/system` · `/Library/LaunchDaemons`)를 보지 않는다 — 문서의
+        # Linux 서버 설치를 못 찾고 워커의 PATH 로 짐작한다(P3 사이클 2 r2 검증자 1 #1)
+        name="doctor-system-service-place-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    for stage in (launch_agents + user_units + system_files, staged):\n",
+        new="    for stage in (launch_agents + user_units, staged):\n",
+        # `examples/` 는 변이 사본에 없다 — 그 파일을 읽지 않는 LaunchDaemons 칸으로 본다
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_p3_the_documented_system_server_service_is_found[LaunchDaemons]",
+        ),
+    ),
 )
 
 

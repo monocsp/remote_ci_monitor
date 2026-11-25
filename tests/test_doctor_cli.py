@@ -3081,6 +3081,10 @@ def unread_inputs(role: str, config: str, service: str, server: str, token: str)
         out.append("config")
     if config == "absent" and role in ("coordinator", "coordinator-worker"):
         out.append("config")
+    if service == "absent" and role in ("coordinator", "coordinator-worker"):
+        # 서비스 파일이 없으면 서버가 도는 PATH 를 모른다 — 워커의 PATH 로 짐작하지 않는다(P3
+        # 사이클 2 r2 검증자 1 #1)
+        out.append("the server's service file")
     if service == "unreadable":
         out.append("service file")
     if server == "silent":
@@ -3531,6 +3535,10 @@ def ci_watch_plist(env: Path) -> Path:
     return p
 
 
+#: 서버의 서비스 파일이 없을 때의 판정 못 함 줄의 머리
+NO_SERVER_FILE = "no service file for the rcm server was found"
+
+
 def run_input(env, svcbin, monkeypatch, capsys, role, config, service, after=None, extra=()):
     """열거 시험의 셋업(모두 읽히는 칸)을 깔고 `after(env)` 로 하나를 더한 뒤 doctor 를 부른다."""
     monkeypatch.setattr(doctor, "PLATFORM", "darwin")
@@ -3562,8 +3570,13 @@ def test_the_ci_watch_plist_next_to_the_service_is_not_a_candidate(
     )
     assert "Traceback" not in err, err
     doc = json.loads(out)
-    assert doc["undecided"] == [] and doc["problems"] == [], doc
-    assert code == 0, doc
+    if service == "absent" and role != "worker":
+        # 서버의 서비스 파일이 없으면 그 PATH 만 모른다 — ci-watch 파일 때문이 아니다
+        assert [u[: len(NO_SERVER_FILE)] for u in doc["undecided"]] == [NO_SERVER_FILE], doc
+        assert doc["problems"] == [] and code == 3, doc
+    else:
+        assert doc["undecided"] == [] and doc["problems"] == [], doc
+        assert code == 0, doc
     shown = doc["service"]["file"] or ""
     assert "ci-watch" not in shown, doc["service"]
 
@@ -3689,7 +3702,12 @@ def test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config
     assert "Traceback" not in err, err
     doc = json.loads(out)
     assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}", (doc["server"], err)
-    assert code == 0, doc
+    if service == "none":
+        # 서비스 파일이 없으면 서버의 PATH 만 모른다(P3 사이클 2 r2 검증자 1 #1)
+        assert [u[: len(NO_SERVER_FILE)] for u in doc["undecided"]] == [NO_SERVER_FILE], doc
+        assert code == 3, doc
+    else:
+        assert code == 0, doc
 
 
 def test_the_services_working_directory_rcm_toml_is_the_servers_config(
@@ -4167,3 +4185,110 @@ def test_e4_an_entry_that_cannot_say_which_config_it_measured_is_unknown(
     code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
     assert row(doc, "unit")["state"] == "unknown" and row(doc, "lint")["state"] == "unknown", doc
     assert code == 3, doc
+
+
+# ── P3 사이클 2 r2 의 MED: 시스템 자리의 서비스 파일 · 서비스 파일 없는 coordinator ──────
+
+
+@pytest.fixture
+def system_places(env, monkeypatch) -> tuple[Path, Path]:
+    """가짜 `/etc/systemd/system` 과 `/Library/LaunchDaemons`, 그리고 이 머신이 아는 사용자 `rcm`
+    (홈은 시험의 홈). 진짜 시스템 폴더와 passwd 는 보지 않는다."""
+    units, daemons = env / "etc-systemd-system", env / "Library-LaunchDaemons"
+    units.mkdir()
+    daemons.mkdir()
+    monkeypatch.setattr(doctor, "SYSTEM_UNIT_DIR", units)
+    monkeypatch.setattr(doctor, "LAUNCH_DAEMONS_DIR", daemons)
+    home = str(env / "home")
+    monkeypatch.setattr(
+        doctor, "lookup_user", lambda name: (name, home, "/bin/sh") if name == "rcm" else None
+    )
+    return units, daemons
+
+
+@pytest.mark.parametrize("place", ["etc-systemd-system", "LaunchDaemons"])
+def test_p3_the_documented_system_server_service_is_found(
+    env, svcbin, system_places, monkeypatch, capsys, place
+):
+    """문서의 Linux 서버 설치는 `examples/systemd/rcm-server.service` 를 `/etc/systemd/system/` 에
+    넣는다(`User=rcm`). macOS 의 시스템 데몬은 `/Library/LaunchDaemons` 다. doctor 는 그 자리도
+    찾고 `User=` · `UserName` 의 홈으로 잰다 — 못 찾고 워커의 PATH 로 짐작하지 않는다(P3 사이클 2
+    r2 검증자 1 #1)."""
+    units, daemons = system_places
+    home = env / "home"
+
+    def service(_env: Path) -> None:
+        if place == "etc-systemd-system":
+            monkeypatch.setattr(doctor, "PLATFORM", "linux")
+            src = EXAMPLES / "systemd" / "rcm-server.service"
+            text = src.read_text().replace("/home/rcm", str(home))
+            text = text.replace("Environment=PATH=", f"Environment=PATH={svcbin}:")
+            (units / src.name).write_text(text)
+        else:
+            conf = home / ".config" / "rcm" / "server.toml"
+            (daemons / "com.remote-ci-monitor.server.plist").write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": "com.remote-ci-monitor.server",
+                        "ProgramArguments": ["/opt/rcm/bin/rcm", "serve", "--config", str(conf)],
+                        "UserName": "rcm",
+                        "EnvironmentVariables": {"PATH": f"{svcbin}:/usr/bin:/bin"},
+                        "SoftResourceLimits": {"NumberOfFiles": 4096},
+                    }
+                )
+            )
+
+    code, out, err, s = run_input(
+        env, svcbin, monkeypatch, capsys, "coordinator-worker", "standard", "absent", after=service
+    )
+    doc = json.loads(out)
+    assert doc["service"]["file"] is not None, (doc["service"], err)
+    assert doc["service"]["path"] and str(svcbin.name) in doc["service"]["path"], doc["service"]
+    assert doc["undecided"] == [] and doc["problems"] == [], doc
+    assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}" and code == 0, doc
+
+
+def test_p3_a_system_unit_whose_user_is_unknown_leaves_its_config_unknown(
+    env, svcbin, system_places, monkeypatch, capsys
+):
+    """시스템 유닛의 `User=` 를 이 머신이 모르면 그 서비스의 홈 · 설정 폴더를 모른다. `--config`
+    없이 `rcm serve` 를 띄우는 유닛이면 어느 설정인지 모름이다(종료 3) — doctor 의 홈으로 재지
+    않는다."""
+    units, _daemons = system_places
+
+    def service(_env: Path) -> None:
+        monkeypatch.setattr(doctor, "PLATFORM", "linux")
+        (units / "rcm-server.service").write_text(
+            "[Service]\nUser=td-nobody\nExecStart=/opt/rcm/bin/rcm serve\n"
+            f"Environment=PATH={svcbin}:/usr/bin:/bin\n"
+        )
+
+    code, out, err, _s = run_input(
+        env, svcbin, monkeypatch, capsys, "coordinator-worker", "standard", "absent", after=service
+    )
+    doc = json.loads(out)
+    assert doc["service"]["file"] is not None, (doc["service"], err)
+    assert any("td-nobody" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+
+
+@pytest.mark.parametrize("role", ["coordinator", "coordinator-worker"])
+def test_p3_a_coordinator_without_a_service_file_does_not_borrow_the_workers_path(
+    env, svcbin, system_places, monkeypatch, capsys, role
+):
+    """서비스 파일이 하나도 없으면 서버가 어느 PATH 로 도는지 모른다 — 워커의 서비스 PATH
+    (`WORKER_SERVICE_PATH`)로 짐작하지 않는다. PATH 는 null, 종료 3, 이유를 말한다."""
+    code, out, err, _s = run_input(env, svcbin, monkeypatch, capsys, role, "standard", "absent")
+    doc = json.loads(out)
+    assert doc["service"]["file"] is None and doc["service"]["path"] is None, doc["service"]
+    assert any("service file" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+
+
+def test_p3_measured_in_says_server_service_env_only_when_the_server_measured(
+    env, coordinator, monkeypatch, capsys
+):
+    """`measured_in` 은 사실대로다 — 토큰이 없어 서버의 측정을 읽지 못했으면 `none` 이다."""
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert code == 3 and doc["measured_in"] == "none", doc["measured_in"]
