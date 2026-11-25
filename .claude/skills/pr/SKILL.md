@@ -81,6 +81,9 @@ documents that stay in the repository are written in 평어체.
    gh pr create --base dev --title "<title>" \
      --body-file <abs worktree>/.verify/handoff/<branch with / as ->/pr-body-<branch with / as ->.md
    ```
+   A title naming both `rcm` and `setup` is refused by `tools/guard_production.py` on a machine
+   with a production rcm install; write it to a file and pass `--title "$(cat <file>)"` (and
+   `python3 tools/guard_naming.py pr "$(cat <file>)"`), whose command text holds neither word.
 2. After every push, wait for the commit status `rcm/ci` — the ruleset's required check on `dev`
    and `main` (`main` also needs `main-from-dev-only`). The build machine's watcher submits the
    `rcm-ci` job within a minute and posts `queued · #<N>` on the head; the job posts its result.

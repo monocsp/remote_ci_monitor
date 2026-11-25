@@ -616,18 +616,25 @@ install, refuses edits to it and to the server's config and data, refuses a comm
 open the production database with a build other than the service's own (`rcm token …`, `rcm
 serve`, `rcm worker` — a different build migrates the database on open), and asks before a
 deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A machine with no
-such install sees nothing. For `rcm setup` the hook expands the command line the way the shell
-does (quotes, `$VAR`, `~`) and then asks setup's own resolver where it would write; it refuses a
-setup that would write its config or service file anywhere an edit is refused (the production
-checkout, the service virtualenv, the server's config folder or data directory) or into a folder
-the service manager reads, use a production label, or point a server at the production
-`data_dir`. A value it cannot expand (an unset variable, `${VAR:-x}`, `$(…)`), a relative path
-after a `cd` it cannot follow (`cd -P`, `cd -`, `cd $UNSET`, `pushd`), a command line setup would
-reject, or a failure of the hook itself is refused too. When a command names rcm and the word
-`setup` but the hook cannot read that part as a plain `rcm setup …` call (`sudo -u`, `env -C`,
-`if …; then`, a lone `&`), it is refused with "write it as a plain `rcm setup …` command"; that
-includes text that only mentions it, such as `git commit -m "… rcm setup …"` — use
-`git commit -F <file>`.
+such install sees nothing. For `rcm setup` the hook does not try to read arbitrary shell. On a
+machine with a production install it lets setup through only as **one plain command**: optional
+`NAME=value` words, then `rcm` (any path ending in `/rcm`, or `python3 -m remote_ci_monitor`),
+then `setup` and its arguments — no `;` `&` `|` `$` `` ` `` `(` `)` `<` `>`, backslash, glob or
+line break anywhere, quotes only around a whole value, and `--config`, `--service-file`,
+`--data-dir`, `HOME` and `XDG_CONFIG_HOME` given as absolute or `~` paths (a relative path is
+refused wherever the session stands). `rcm setup --help` passes in that shape only. For such a
+command it asks setup's own resolver where it would write, and refuses a setup that would write
+its config or service file anywhere an edit is refused (the production checkout, the service
+virtualenv, the server's config folder or data directory) or into a folder the service manager
+reads, use a production label, or point a server at the production `data_dir`; paths are
+compared as written and with symbolic links resolved. Anything else that could reach setup — a
+command naming rcm (or with a variable where the command goes) that holds the word `setup`
+anywhere, or where the word after rcm is something the shell builds (`${S}tup`, `` `…` ``,
+`s{e,}tup`) — is refused with "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or
+backslash, absolute or ~ paths only". So are `cd /x && rcm setup …`, `env rcm setup …`, a
+command line setup would reject, and a failure of the hook itself. Text that only mentions it,
+such as `git commit -m "… rcm setup …"`, is refused too: put the text in a file
+(`git commit -F <file>`, `gh pr create --title "$(cat <file>)"`).
 
 The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
 primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's
