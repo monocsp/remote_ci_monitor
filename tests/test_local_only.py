@@ -1346,7 +1346,8 @@ def test_t6_the_example_server_config_shows_local_only_on_a_preset():
     """# T6 — 설정 키는 `examples/server.toml` 에도 (주석으로라도)있다(docs 스킬 체크리스트 3).
     `gate` 프리셋 안, `[presets.env]` 앞의 주석 줄이다."""
     text = (Path(__file__).resolve().parents[1] / "examples" / "server.toml").read_text()
-    gate = text[text.index('name = "gate"\n') : text.index("[presets.env]")]
+    start = text.index('name = "gate"\n')
+    gate = text[start : text.index("[presets.env]", start)]
     line = next((ln for ln in gate.splitlines() if ln.lstrip("# ").startswith("local_only")), None)
     assert line is not None, gate
     assert line.startswith("# local_only = true"), line
