@@ -16,6 +16,16 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Added
+- **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
+  alive and never a candidate, its probes do not run, `--machine @local` and `local_only`
+  submissions are refused with 409, and jobs that lost their place wait with `no capable machine`
+  instead of failing. `/api/health` gains `capacity` (presets with a live machine to run on now,
+  out of all, and the names of the rest) without changing its status code; `rcm check` draws it
+  as a `capacity` row (FAIL when no preset has a machine, warn when some have none), and
+  `rcm doctor --role coordinator` ends on it and names `pool` presets a capable worker in another
+  pool could take. `pools_without_workers` counts the default pool on such a server. `rcm top`,
+  `rcm machines` and the web page say `no local lanes` / `runs no jobs` instead of `lanes 0/0 busy`
+  and `down`.
 - **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
   it is left out of `GET /worker/spec`, no remote claim hands it out, and `rcm machines` shows it
   as `local_only` on every remote worker. A submission the server's lanes cannot take — pinned to
