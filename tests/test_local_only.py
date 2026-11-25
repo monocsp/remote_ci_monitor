@@ -1035,6 +1035,37 @@ def test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_runnin
         s.close()
 
 
+def test_t4_a_remote_check_being_cancelled_stays_running_until_it_ends(tmp_path):
+    """# T4 — 그 머신이 집은 점검을 취소하는 중(`cancelling`)이면 아직 그 머신이 돌리는 잡이다.
+    끝날 때까지 판정은 `check_running` 이고 칸도 running 이다. 취소로 끝나면 판정 없이 끝난
+    잡이라 아무것도 증명하지 않고, 그 머신에서 다시 돌 수 없으니 `check_local_only` 다."""
+    s = server(tmp_path, presets=UNMARKED_CHECK)
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        check = queued(s, "localcheck", machine=OTHER)
+        assert s.claimed(OTHER) == check
+        _mark_by_reload(s)
+        assert s.app.config.preset("localcheck").local_only is True
+        report(s, OTHER, host_key=HOST_C, again=True)
+        assert s.cancel(check, token="admin")[1] == {"job_id": check, "state": "cancelling"}
+        assert s.machines()[OTHER]["presets"]["qa"] == {
+            "state": "unknown",
+            "code": "check_running",
+            "detail": {"check": "localcheck", "job_id": check},
+        }
+        assert _check_cell(s, OTHER) == ("running", check, "local_only", False)
+        assert s.heartbeat(OTHER, jobs=[check])[1]["cancel"] == [check]
+        assert s.finish(OTHER, check, "cancelled", exit_code=-15)[0] == 200
+        assert s.machines()[OTHER]["presets"]["qa"] == {
+            "state": "ineligible",
+            "code": "check_local_only",
+            "detail": {"check": "localcheck"},
+        }
+        assert _check_cell(s, OTHER) == ("needed", check, "local_only", False)
+    finally:
+        s.close()
+
+
 def test_to19_rechecking_a_local_only_check_on_a_remote_machine_is_409(lo, monkeypatch):
     report(lo, OTHER, host_key=HOST_C)
     calls = record_checks(lo, monkeypatch)
