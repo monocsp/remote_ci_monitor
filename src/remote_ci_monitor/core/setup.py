@@ -520,8 +520,23 @@ def token_commands(rcm: Path, config: Path) -> list[str]:
     return [f"{head} CLIENT_NAME", f"{head} WORKER_NAME --worker"]
 
 
-def doctor_command(role: str) -> str:
-    return f"rcm doctor --role {role}"
+def doctor_command(
+    role: str,
+    *,
+    rcm: Path | None = None,
+    config: Path | None = None,
+    service_file: Path | None = None,
+) -> str:
+    """마지막에 칠 `rcm doctor` — setup 이 쓴 rcm 의 절대 경로로, 사용자가 준 `--config` ·
+    `--service-file` 을 그대로 붙인다(P5 B-E7). 그래야 PATH 의 다른 빌드나 기본 자리의 다른
+    설정을 보지 않는다."""
+    q = shlex.quote
+    words = [q(str(rcm)) if rcm is not None else "rcm", "doctor", "--role", role]
+    if config is not None:
+        words += ["--config", q(str(config))]
+    if service_file is not None:
+        words += ["--service-file", q(str(service_file))]
+    return " ".join(words)
 
 
 def db_version_note(have: int | None, want: int) -> str | None:

@@ -1359,6 +1359,21 @@ def test_s3_on_linux_linger_comes_before_the_start(cfg, tmp_path):
     assert "user manager" in lines[linger] and lines[linger].startswith("first")
 
 
+def test_s4_the_last_doctor_line_names_the_rcm_and_the_paths_given(cfg, tmp_path):
+    # B-E7: setup 이 쓴 rcm 의 절대 경로, 사용자가 준 --config · --service-file
+    config, sf = tmp_path / "w" / "server.toml", tmp_path / "w" / "test.rcm.server.plist"
+    fake = Fake()
+    argv = coordinator_args(tmp_path / "data", "--config", str(config), "--service-file", str(sf))
+    assert go(fake, *argv) == 0
+    last = _lines(fake)[-1]
+    want = f"{RCM} doctor --role coordinator-worker --config {config} --service-file {sf}"
+    assert want in last, last
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data2")) == 0
+    last = _lines(fake)[-1]
+    assert f"`{RCM} doctor --role coordinator-worker`" in last and "--config" not in last
+
+
 def test_s5_a_worker_puts_the_token_in_before_starting_the_service(cfg, tmp_path):
     # B-E9: 워커는 토큰을 넣고 → 서비스를 시작한다
     fake = Fake()

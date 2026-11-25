@@ -3542,6 +3542,27 @@ MUTANTS = (
             "tests/test_setup.py::test_s2_a_client_is_told_which_file_to_remove",
         ),
     ),
+    Mutant(
+        # 마지막 doctor 줄이 맨 이름 rcm 이다 — PATH 의 다른 빌드가 그 머신을 잰다(P5 B-E7)
+        name="setup-doctor-line-bare-rcm",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    words = [q(str(rcm)) if rcm is not None else "rcm", "doctor", "--role", role]\n',
+        new='    words = ["rcm", "doctor", "--role", role]\n',
+        tests=(
+            "tests/test_setup.py::test_s4_the_last_doctor_line_names_the_rcm_and_the_paths_given",
+        ),
+    ),
+    Mutant(
+        # 사용자가 준 `--config` 를 마지막 doctor 줄에 붙이지 않는다 — doctor 가 기본 자리의 다른
+        # 설정을 잰다(P5 B-E7)
+        name="setup-doctor-line-drops-the-config",
+        path="src/remote_ci_monitor/setup.py",
+        old="    plan.doctor_config = plan.config if args.config is not None else None\n",
+        new="    plan.doctor_config = None\n",
+        tests=(
+            "tests/test_setup.py::test_s4_the_last_doctor_line_names_the_rcm_and_the_paths_given",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

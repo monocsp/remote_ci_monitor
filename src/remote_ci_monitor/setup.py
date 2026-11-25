@@ -407,6 +407,9 @@ class Plan:
     #: 올라간 서비스를 바꿔 끼우는 순서를 찍나 — 같은 라벨이 올라가 있거나 `--force service` 로
     #: 있던 서비스 파일을 다시 쓸 때(P5 B-E2)
     replacing: bool = False
+    #: 마지막 `rcm doctor` 줄에 붙일 경로 — 사용자가 `--config` · `--service-file` 을 줬을 때만
+    doctor_config: Path | None = None
+    doctor_service: Path | None = None
 
 
 def _url(raw: str) -> str:
@@ -552,6 +555,10 @@ def _plan(args: argparse.Namespace, world: World) -> Plan:
         plan.warnings.insert(0, f"{' '.join(unused)}: not used by --role {role} (ignored)")
     if unread:
         plan.warnings.insert(0, unread)
+    if plan.rcm is None:  # 서비스 파일이 없는 역할도 마지막 doctor 줄은 이 빌드로 찍는다(P5 B-E7)
+        plan.rcm, _ = world.find_rcm()
+    plan.doctor_config = plan.config if args.config is not None else None
+    plan.doctor_service = plan.service if args.service_file is not None else None
     return plan
 
 
@@ -748,6 +755,7 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
     if manager is None:
         # 서비스 파일은 없어도 토큰 명령(TR21 · TR27)은 찍는다 — 서버를 띄우는 빌드로(P5 A-E3)
         rcm, _ = world.find_rcm()
+        plan.rcm = rcm
         if plan.role in core.SERVER_ROLES:
             plan.tokens = core.token_commands(rcm or Path("rcm"), plan.config)
         plan.warnings.append(
@@ -972,17 +980,15 @@ def _report(plan: Plan, world: World) -> None:
         files=[f.path for f in plan.files],
     )
     err.write(f"{removal}\n")
+    doctor = core.doctor_command(
+        plan.role, rcm=plan.rcm, config=plan.doctor_config, service_file=plan.doctor_service
+    )
     if plan.role == dc.ROLE_CLIENT:
-        err.write(f"then: add your token and run `{core.doctor_command(plan.role)}`\n")
+        err.write(f"then: add your token and run `{doctor}`\n")
     elif token_first:
-        err.write(
-            "then: put the worker token in, start the service, and run "
-            f"`{core.doctor_command(plan.role)}`\n"
-        )
+        err.write(f"then: put the worker token in, start the service, and run `{doctor}`\n")
     else:
-        err.write(
-            f"then: start the service, add a token, and run `{core.doctor_command(plan.role)}`\n"
-        )
+        err.write(f"then: start the service, add a token, and run `{doctor}`\n")
     err.flush()
 
 
