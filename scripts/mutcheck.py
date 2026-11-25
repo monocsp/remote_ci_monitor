@@ -8,6 +8,7 @@
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5t-a PR1 — `m5t-local-only-remote-kept`: 후보 함수가 `local_only` 프리셋의 원격 머신을 안 뺌
      (`capabilities.py`, `docs/m5t-workplan.md` §4.3 · TO15 — 진입점 17 경우가 모두 빨개진다)
+     + `m5t-cli-local-only-refusal-is-unknown`: `rcm run` 이 원격 금지 409 를 3 으로 끝냄(`cli.py`)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2337,6 +2338,16 @@ MUTANTS = (
             "tests/test_local_only.py::"
             "test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally",
         ),
+    ),
+    Mutant(
+        # `local_only` 거절 409(`no_capable_machine` · `tool_missing`)가 `rcm run` 에서
+        # 「결과 모름」(3)이 된다 — 잡이 안 생긴 확실한 거절인데 세션이 다시 묻거나 기다린다
+        # (M5t-a P3 2라운드 HIGH)
+        name="m5t-cli-local-only-refusal-is-unknown",
+        path="src/remote_ci_monitor/cli.py",
+        old='_REFUSED_CODES += ("no_capable_machine", "tool_missing")',
+        new="_REFUSED_CODES += ()",
+        tests=("tests/test_local_only.py::test_to10_to16_rcm_run_exits_2_on_a_local_only_refusal",),
     ),
 )
 
