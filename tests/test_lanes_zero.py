@@ -478,3 +478,107 @@ def test_tl11_rcm_check_pools_row_names_the_default_pool_once(lz, home, monkeypa
     report(lz, REMOTE)
     code, found = check(lz, monkeypatch, capsys)
     assert found["pools"][1] == "default (build-02/1 idle)", found["pools"]
+
+
+# ── TD20 · TD38 · TL14 `rcm doctor --role coordinator` ──────────────────────
+
+
+@pytest.fixture
+def doctor_env(tmp_path, monkeypatch) -> Path:
+    """`tests/test_doctor_cli.py` 의 `env` 와 같은 자리 — HOME 을 tmp 로, 셸의 RCM_* 은 없이."""
+    from remote_ci_monitor import doctor
+
+    home = tmp_path / "dhome"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("XDG_CONFIG_HOME", "RCM_CONFIG", "RCM_SERVER", "RCM_TOKEN", "RCM_WORKER_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(doctor, "is_tty", lambda: False)
+    return home
+
+
+def doctor_json(s: M5nServer, monkeypatch, capsys) -> tuple[int, dict[str, Any]]:
+    """진짜 서버(`M5nServer`)에 `rcm doctor --role coordinator --json`. 서버의 답을 만드는 쪽과
+    읽는 쪽을 그대로 잇는다 — 키 모양만 흉내 낸 가짜 서버로는 안 보이는 어긋남이 있다."""
+    import json
+
+    from remote_ci_monitor.cli import main
+
+    monkeypatch.setenv("RCM_TOKEN", s.tokens["alice"])
+    code = main(
+        [
+            "doctor",
+            "--role",
+            "coordinator",
+            "--config",
+            str(s.config_path),
+            "--server",
+            f"http://127.0.0.1:{s.port}",
+            "--json",
+        ]
+    )
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["exit"] == code, doc
+    return code, doc
+
+
+def test_td38_a_coordinator_without_lanes_exits_1_when_no_preset_has_a_machine(
+    lz, doctor_env, monkeypatch, capsys
+):
+    code, doc = doctor_json(lz, monkeypatch, capsys)
+    capacity = [p for p in doc["problems"] if "capacity 0/" in p]
+    assert capacity, doc["problems"]
+    assert "gate" in capacity[0], capacity
+    assert code == 1, doc
+
+
+def test_td38_tl14_a_coordinator_with_some_presets_unplaced_warns_and_lists_them(
+    lz, doctor_env, monkeypatch, capsys
+):
+    report(lz, REMOTE)
+    code, doc = doctor_json(lz, monkeypatch, capsys)
+    assert not [p for p in doc["problems"] if "capacity" in p], doc["problems"]
+    lines = [w for w in doc["warnings"] if w.startswith("capacity ")]
+    assert len(lines) == 1, doc["warnings"]
+    for name in ("rel", "relany", "qa"):
+        assert name in lines[0], lines
+    assert code != 1, doc  # 일부만 0 이면 1 이 아니다(판정 못 한 것이 있으면 3 일 수 있다)
+
+
+def test_td20_the_coordinator_names_pool_only_presets_a_capable_worker_could_take(
+    tmp_path, doctor_env, monkeypatch, capsys
+):
+    """`macbuild` 는 mac2 풀 전용인데 mac2 에는 워커가 없다. 기본 풀의 `build-02` 는 macbuild 를
+    eligible 로 판정받았다 — any-capable 이면 받을 수 있다. doctor 는 그것을 알리고 설정은
+    바꾸지 않는다."""
+    s = zero(tmp_path, presets=PRESETS + block("macbuild", 'pool = "mac2"'))
+    try:
+        report_all(s, REMOTE)
+        before = s.config_path.read_bytes()
+        code, doc = doctor_json(s, monkeypatch, capsys)
+        hints = [w for w in doc["warnings"] if w.startswith("macbuild:") and "any-capable" in w]
+        assert hints and REMOTE in hints[0], doc["warnings"]
+        # 어느 머신도 못 돌리는 프리셋은 capacity 줄에 든다
+        assert any(w.startswith("capacity ") and "macbuild" in w for w in doc["warnings"])
+        # local_only 프리셋은 배치를 바꿔도 원격에 가지 않는다 — 그 안내를 하지 않는다
+        assert not [w for w in doc["warnings"] if w.startswith("rel:") and "any-capable" in w]
+        assert s.config_path.read_bytes() == before  # 프리셋 설정을 스스로 바꾸지 않는다
+    finally:
+        s.close()
+
+
+def test_td38_without_a_capacity_answer_a_lanes_zero_coordinator_is_undecided(
+    lz, doctor_env, monkeypatch, capsys
+):
+    """서버가 capacity 를 못 셌거나(null) 옛 서버면 분배 전용 코디네이터의 판정은 모름(3)이다 —
+    「문제 없음」(0)으로 적지 않는다."""
+
+    def broken() -> dict[str, Any]:
+        raise RuntimeError("test: cannot count")
+
+    monkeypatch.setattr(lz.app, "capacity", broken)
+    status, body = health(lz)
+    assert status == 200 and body["capacity"] is None, body
+    code, doc = doctor_json(lz, monkeypatch, capsys)
+    assert any("does not report capacity" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
