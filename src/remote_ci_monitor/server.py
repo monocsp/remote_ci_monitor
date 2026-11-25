@@ -3976,7 +3976,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
     ) -> dict[str, Any]:
         """가상 잡을 모든 레인 위에 세우고 `placement_for` 로 들어갈 머신을 고른다. any-capable
         프리셋(M5n §7.2)과 `local_only` 프리셋(M5t-a 결정 254)이 이 길로 온다. 앞선 잡은 그 잡이
-        들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다. pool 배치면 같은 풀의 대기 잡만 센다."""
+        들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다. pool 배치면 같은 풀의 대기 잡만 센다.
+
+        `local_only` 프리셋은 다르게 센다(위임 결정 7). 후보 레인이 없으면 `ahead` 는 null 이다 —
+        0 은 「바로 선다」로 읽힌다. 있으면 그 레인을 실제로 다투는 대기 잡, 곧 `placement_for` 의
+        워커가 후보와 겹치는 잡만 센다. 원격 지정 잡처럼 그 레인에 오지 않는 잡을 세면 없는 순서를
+        지어낸다."""
         capable = placement == PLACEMENT_CAPABLE
         ghost = Job(
             id=max((j.id for j in snap.jobs), default=0) + 1,
@@ -3998,20 +4003,25 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         rows = self._queue_rows(now, replace(snap, jobs=[*snap.jobs, ghost]))
         row = next(r for r in rows if r.job.id == ghost.id)
         views = self.machine_views(now)
-        mine = self.placement_for(ghost, now, views).workers
-        ahead = sum(
-            1
-            for r in rows
-            if r.job.id != ghost.id
-            and (
-                (r.job.is_busy and r.job.worker_name in mine)
-                or (
-                    r.job.is_waiting
-                    and r.job.priority >= priority
-                    and (capable or r.job.pool == pool)
+        memo: dict[Any, Any] = {}
+        mine = self.placement_for(ghost, now, views, memo).workers
+
+        def contends(job: Job) -> bool:
+            if preset.local_only:
+                return bool(self.placement_for(job, now, views, memo).workers & mine)
+            return capable or job.pool == pool
+
+        ahead: int | None = None
+        if mine or not preset.local_only:
+            ahead = sum(
+                1
+                for r in rows
+                if r.job.id != ghost.id
+                and (
+                    (r.job.is_busy and r.job.worker_name in mine)
+                    or (r.job.is_waiting and r.job.priority >= priority and contends(r.job))
                 )
             )
-        )
         doc = queue_row_json(row, base_url=None)
         doc["id"] = None
         doc["url"] = None
