@@ -185,67 +185,8 @@ def _is_tty() -> bool:
 # ── 명령줄 ───────────────────────────────────────────────────────────────────
 
 
-def _add_arguments(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--role", choices=dc.ROLES, help="the role this machine takes")
-    p.add_argument(
-        "--yes",
-        "-y",
-        action="store_true",
-        help="ask nothing; flags the role needs must be given",
-    )
-    p.add_argument("--server", metavar="URL", help="the coordinator's URL (client, worker)")
-    p.add_argument("--by", metavar="LABEL", help="requester label in client.toml (client)")
-    p.add_argument("--config", metavar="PATH", help="where to write the config file")
-    p.add_argument("--pool", metavar="NAME", help="the worker's pool (worker)")
-    p.add_argument("--lanes", type=int, metavar="N", help="parallel job lanes, 1-64 (worker)")
-    p.add_argument(
-        "--label",
-        metavar="LABEL",
-        help="service label (default: com.remote-ci-monitor.server or .worker)",
-    )
-    p.add_argument(
-        "--service-file",
-        dest="service_file",
-        metavar="PATH",
-        help="where to write the service file (default: <config dir>/service/)",
-    )
-    p.add_argument("--port", type=int, metavar="N", help="server port (coordinator roles)")
-    p.add_argument(
-        "--data-dir", dest="data_dir", metavar="PATH", help="server data_dir (coordinator roles)"
-    )
-    p.add_argument(
-        "--advertise",
-        dest="advertise",
-        action="store_true",
-        default=None,
-        help="advertise the server over mDNS",
-    )
-    p.add_argument("--no-advertise", dest="advertise", action="store_false")
-    p.add_argument(
-        "--bind",
-        metavar="ADDRESS",
-        help="address the server listens on — an address of this machine or 0.0.0.0 "
-        "(coordinator roles; required with --yes)",
-    )
-    p.add_argument(
-        "--force",
-        action="append",
-        nargs="?",
-        const="all",
-        choices=("config", "service", "all"),
-        help="replace an existing config file, service file, or both (no value)",
-    )
-    p.add_argument(
-        "--reuse-data-dir",
-        dest="reuse_data_dir",
-        action="store_true",
-        help="use a data_dir that already holds rcm.sqlite3",
-    )
-
-
-#: 줄인 옵션(`--conf` · `--data`)을 받지 않는다. guard(tools/guard_production.py)는 정확한 이름만
-#: 읽는다 — argparse 가 줄인 이름을 받으면 guard 가 못 본 경로에 쓴다(P3 v1-1 · v2-2)
-PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": False}
+#: 줄인 옵션을 받지 않는다 — 정의는 core 에 있다(훅도 같은 정의로 읽는다)
+PARSER_OPTIONS = core.PARSER_OPTIONS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -254,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Set this machine up for one role: config and service file.",
         **PARSER_OPTIONS,
     )
-    _add_arguments(p)
+    core.add_arguments(p)
     return p
 
 
@@ -263,7 +204,7 @@ def register(subparsers: Any) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "setup", help="set this machine up as a client, worker or coordinator", **PARSER_OPTIONS
     )
-    _add_arguments(p)
+    core.add_arguments(p)
     p.set_defaults(func=cmd_setup)
     return p
 
@@ -409,14 +350,6 @@ class Plan:
     unrestored: list[Path] = field(default_factory=list)
 
 
-def _manager(platform: str) -> str | None:
-    if platform.startswith("darwin"):
-        return core.LAUNCHD
-    if platform.startswith("linux"):
-        return core.SYSTEMD
-    return None
-
-
 def _url(raw: str) -> str:
     """코디네이터 URL — `init client` · `init worker` 와 같은 규칙. setup 은 `auto` 를 쓰지 않는다
     (§9: 같은 네트워크에서 답하는 아무 서버나 집는다)."""
@@ -438,8 +371,28 @@ def _url(raw: str) -> str:
     return url
 
 
-def _abs(raw: str) -> Path:
-    return Path(os.path.abspath(os.path.expanduser(raw)))
+def _where(args: argparse.Namespace, world: World, role: str, **given: Any) -> core.Where:
+    """setup 이 어디에 쓸지 — `core.where` 하나로 정한다. 훅(tools/guard_production.py)도 같은
+    함수를 부르므로 둘이 다른 자리를 볼 수 없다(P3 2라운드). `given` 은 물어서 받은 값(라벨 ·
+    data_dir)과 템플릿의 기본 data_dir 이다."""
+    values: dict[str, Any] = {
+        "config": args.config,
+        "label": args.label,
+        "service_file": args.service_file,
+        "data_dir": args.data_dir,
+    }
+    values.update(given)
+    try:
+        return core.where(
+            role,
+            environ=os.environ,
+            cwd=Path.cwd(),
+            home=Path.home(),
+            manager=core.manager_of(world.platform),
+            **values,
+        )
+    except core.SetupValueError as e:
+        raise SetupUsage(str(e)) from None
 
 
 #: 글자로 받는 옵션 — 설정 · 서비스 파일에 UTF-8 로 들어간다
@@ -489,9 +442,10 @@ _FLAG_NAMES = (
 
 
 def _plan(args: argparse.Namespace, world: World) -> Plan:
-    from remote_ci_monitor.config import user_config_dir
-
     _check_text(args)
+    blank = core.blank_flags(vars(args))
+    if blank:  # 빈 `--config` 는 기본 자리로 떨어졌다 — 묻기 전에 멈춘다(P3 2라운드 v2-1)
+        raise SetupUsage(f"{' '.join(blank)} must not be empty")
     roles_here = existing_roles(os.environ)
     asking = not args.yes and world.interactive()
     ask = _Ask(world)
@@ -511,13 +465,12 @@ def _plan(args: argparse.Namespace, world: World) -> Plan:
         raise SetupUsage(f"--lanes must be 1-64 (got {args.lanes})")
     if args.label is not None and (problem := core.label_problem(args.label)):
         raise SetupUsage(problem)
-    config_dir = user_config_dir().absolute()
     if role == dc.ROLE_CLIENT:
-        plan = _client(args, ask if asking else None, config_dir)
+        plan = _client(args, ask if asking else None, world)
     elif role == dc.ROLE_WORKER:
-        plan = _worker(args, ask if asking else None, config_dir)
+        plan = _worker(args, ask if asking else None, world)
     else:
-        plan = _server(args, ask if asking else None, world, role, config_dir, roles_here)
+        plan = _server(args, ask if asking else None, world, role, roles_here)
     if role != dc.ROLE_CLIENT:
         _service(args, ask if asking else None, world, plan)
     given = {name: getattr(args, name, None) for name in _FLAG_NAMES}
@@ -541,7 +494,7 @@ def _label(args: argparse.Namespace, ask: _Ask | None, role: str) -> str:
         ask.say(problem)
 
 
-def _client(args: argparse.Namespace, ask: _Ask | None, config_dir: Path) -> Plan:
+def _client(args: argparse.Namespace, ask: _Ask | None, world: World) -> Plan:
     from remote_ci_monitor import cli
 
     raw = args.server if args.server is not None else ask.line("coordinator URL") if ask else ""
@@ -554,7 +507,7 @@ def _client(args: argparse.Namespace, ask: _Ask | None, config_dir: Path) -> Pla
     text = cli.client_template(url).decode("utf-8")
     if by:
         text = core.set_value(text, "label", core.toml_str(by))
-    path = _abs(args.config) if args.config else config_dir / "client.toml"
+    path = _where(args, world, dc.ROLE_CLIENT).config
     plan = Plan(role=dc.ROLE_CLIENT, config=path)
     # 토큰이 들어갈 수 있는 파일이라 600 이다(`init client` 와 같다)
     plan.files.append(Planned(path, text.encode("utf-8"), 0o600, "config"))
@@ -565,7 +518,7 @@ def _client(args: argparse.Namespace, ask: _Ask | None, config_dir: Path) -> Pla
     return plan
 
 
-def _worker(args: argparse.Namespace, ask: _Ask | None, config_dir: Path) -> Plan:
+def _worker(args: argparse.Namespace, ask: _Ask | None, world: World) -> Plan:
     from remote_ci_monitor import cli
 
     raw = args.server if args.server is not None else ask.line("coordinator URL") if ask else ""
@@ -579,7 +532,7 @@ def _worker(args: argparse.Namespace, ask: _Ask | None, config_dir: Path) -> Pla
     lanes = args.lanes
     if lanes is None:
         lanes = ask.number("lanes", 1, 1, 64) if ask is not None else 1
-    path = _abs(args.config) if args.config else config_dir / "worker.toml"
+    path = _where(args, world, dc.ROLE_WORKER).config
     plan = Plan(role=dc.ROLE_WORKER, config=path)
     plan.files.append(Planned(path, cli.worker_template(url, pool, lanes, None), 0o600, "config"))
     plan.tokens = [
@@ -595,7 +548,6 @@ def _server(
     ask: _Ask | None,
     world: World,
     role: str,
-    config_dir: Path,
     roles_here: list[str],
 ) -> Plan:
     from remote_ci_monitor import cli
@@ -618,11 +570,13 @@ def _server(
     port = args.port
     if port is None:
         port = ask.number("port", default_port, 1, 65535) if ask is not None else default_port
-    default_data = str(_abs(core.template_value(template, "data_dir") or "~/.local/share/rcm"))
+    template_data = core.template_value(template, "data_dir") or core.DEFAULT_DATA_DIR
     raw = args.data_dir
-    if raw is None:
-        raw = ask.line("data_dir", default_data) if ask is not None else default_data
-    data_dir = _abs(raw)
+    if raw is None and ask is not None:
+        shown = _where(args, world, role, default_data_dir=template_data).data_dir
+        raw = ask.line("data_dir", str(shown))
+    data_dir = _where(args, world, role, data_dir=raw, default_data_dir=template_data).data_dir
+    assert data_dir is not None  # 서버 역할은 늘 data_dir 이 있다
     warnings: list[str] = []
     advertise: bool | None
     if kind == core.TAILSCALE:
@@ -640,7 +594,7 @@ def _server(
         advertise = None  # 템플릿의 기본 규칙(루프백이 아니면 켬)
     label = _label(args, ask, role)
     lanes = 0 if role == dc.ROLE_COORDINATOR else int(core.template_value(template, "lanes") or 1)
-    path = _abs(args.config) if args.config else config_dir / "server.toml"
+    path = _where(args, world, role).config
     text = core.server_toml(
         template, bind=bind, port=port, data_dir=str(data_dir), lanes=lanes, advertise=advertise
     )
@@ -711,7 +665,7 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
 
     if plan.label is None:
         plan.label = _label(args, ask, plan.role)
-    manager = _manager(world.platform)
+    manager = core.manager_of(world.platform)
     if manager is None:
         plan.warnings.append(
             f"no launchd or systemd on {world.platform} — no service file; start "
@@ -721,9 +675,9 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
         return
     home = Path.home()
     label = plan.label
-    name = core.service_file_name(label, manager)
-    staged = _abs(args.service_file) if args.service_file else plan.config.parent / "service" / name
-    place = core.install_place_of(staged, home)
+    found = _where(args, world, plan.role, label=label)
+    staged, place = found.service_file, found.install_place
+    assert staged is not None  # 서비스가 있는 역할 · 서비스 관리자가 있는 플랫폼
     if place is not None:
         # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9) — 그 자리의 파일은 서비스 관리자가 읽는 것이고,
         # 운영 서비스의 파일도 거기 있다(P3 v1-2)

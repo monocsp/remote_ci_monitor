@@ -2,16 +2,27 @@
 
 역할별 결정 · 검증 · 서비스 파일 내용 · 출력할 명령을 만든다. 시계도 I/O 도 없다 — 묻고 쓰고
 조회하는 쪽은 `remote_ci_monitor/setup.py` 다. 질문과 안내는 CLI 문구라 영어다(AGENTS.md).
+
+**setup 이 어디에 쓰는지는 `where` 하나가 정한다.** setup 의 명령줄 정의(`add_arguments`)와
+경로 해석기(`where`)가 여기 있고, setup 과 운영 보호 훅(`tools/guard_production.py`)이 둘 다
+이것을 쓴다. 훅은 셸이 하는 일(변수 펼치기 · `~` · 따옴표)만 하고 나머지는 이 함수에 맡긴다.
+P3 1 · 2라운드의 HIGH 는 모두 훅이 setup 의 계산을 따로 다시 하다 어긋난 것이었다. 그래서 이
+모듈과 이것이 들여오는 모듈(`core.doctor` · `core.mdns` · `core.progress` · `core.model`)은
+표준 라이브러리만 쓴다 — 훅은 패키지를 설치하지 않은 python3 로 돈다.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import plistlib
 import re
 import shlex
+import sys
+import unicodedata
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +30,7 @@ from remote_ci_monitor.core import doctor as dc
 from remote_ci_monitor.core.mdns import ipv4_rank
 
 LAUNCHD, SYSTEMD = dc.LAUNCHD, dc.SYSTEMD
+ROLES = dc.ROLES
 SERVER_ROLES = (dc.ROLE_COORDINATOR, dc.ROLE_COORDINATOR_WORKER)
 #: 표준 라벨 — `examples/` 의 서비스 파일과 `rcm init worker --service-file` 이 쓰는 이름
 STANDARD_LABELS = {
@@ -326,12 +338,29 @@ def install_places(home: Path) -> tuple[Path, ...]:
     return (install_dir(LAUNCHD, home), install_dir(SYSTEMD, home), *SYSTEM_SERVICE_DIRS)
 
 
+#: 대소문자를 가리지 않는 파일시스템으로 보나. macOS 의 기본 볼륨(APFS · HFS+)은 가리지 않는다 —
+#: `~/library/launchagents` 가 `~/Library/LaunchAgents` 다. 볼륨마다 재는 길(pathconf
+#: `_PC_CASE_SENSITIVE`)은 파이썬이 내주지 않으므로 darwin 이면 늘 접는다(막는 쪽).
+#: 시험이 바꿔 끼운다. 훅(`tools/guard_production.py`)의 `FOLD_CASE` 와 같은 규칙이다
+FOLD_CASE = sys.platform == "darwin"
+
+
+def place_key(path: str | Path) -> str:
+    """경로를 견줄 때 쓰는 글자 — `normpath` 하고, 대소문자를 가리지 않는 디스크면 접는다
+    (유니코드 정규화도 같이 한다. macOS 는 정규화 형태도 가리지 않는다)."""
+    text = os.path.normpath(str(path))
+    if FOLD_CASE:
+        text = unicodedata.normalize("NFC", text).casefold()
+    return text
+
+
 def install_place_of(path: Path, home: Path) -> Path | None:
     """`path` 가 설치 자리 안이면 그 자리. 바로 아래만이 아니라 그 안 전부다 — systemd 는
-    `<유닛>.d/` 의 drop-in 도 읽는다. 경로는 글자로만 비교한다(심링크는 풀지 않는다)."""
-    text = os.path.normpath(str(path))
+    `<유닛>.d/` 의 drop-in 도 읽는다. 경로는 글자로만 비교한다(심링크는 풀지 않는다). 대소문자는
+    `place_key` 가 디스크대로 다룬다."""
+    text = place_key(path)
     for place in install_places(home):
-        root = os.path.normpath(str(place))
+        root = place_key(place)
         if text == root or text.startswith(root.rstrip("/") + "/"):
             return place
     return None
@@ -422,3 +451,221 @@ def db_version_note(have: int | None, want: int) -> str | None:
             "refuses to start on it"
         )
     return None
+
+
+# ── 명령줄과 경로 해석 — setup 과 훅이 같이 쓴다 ─────────────────────────────
+
+
+def add_arguments(p: argparse.ArgumentParser) -> None:
+    """`rcm setup` 의 인자. setup 의 파서(`setup.build_parser` · `setup.register`)와 훅의 파서
+    (`parse_args`)가 이것 하나로 만든다."""
+    p.add_argument("--role", choices=ROLES, help="the role this machine takes")
+    p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="ask nothing; flags the role needs must be given",
+    )
+    p.add_argument("--server", metavar="URL", help="the coordinator's URL (client, worker)")
+    p.add_argument("--by", metavar="LABEL", help="requester label in client.toml (client)")
+    p.add_argument("--config", metavar="PATH", help="where to write the config file")
+    p.add_argument("--pool", metavar="NAME", help="the worker's pool (worker)")
+    p.add_argument("--lanes", type=int, metavar="N", help="parallel job lanes, 1-64 (worker)")
+    p.add_argument(
+        "--label",
+        metavar="LABEL",
+        help="service label (default: com.remote-ci-monitor.server or .worker)",
+    )
+    p.add_argument(
+        "--service-file",
+        dest="service_file",
+        metavar="PATH",
+        help="where to write the service file (default: <config dir>/service/)",
+    )
+    p.add_argument("--port", type=int, metavar="N", help="server port (coordinator roles)")
+    p.add_argument(
+        "--data-dir", dest="data_dir", metavar="PATH", help="server data_dir (coordinator roles)"
+    )
+    p.add_argument(
+        "--advertise",
+        dest="advertise",
+        action="store_true",
+        default=None,
+        help="advertise the server over mDNS",
+    )
+    p.add_argument("--no-advertise", dest="advertise", action="store_false")
+    p.add_argument(
+        "--bind",
+        metavar="ADDRESS",
+        help="address the server listens on — an address of this machine or 0.0.0.0 "
+        "(coordinator roles; required with --yes)",
+    )
+    p.add_argument(
+        "--force",
+        action="append",
+        nargs="?",
+        const="all",
+        choices=("config", "service", "all"),
+        help="replace an existing config file, service file, or both (no value)",
+    )
+    p.add_argument(
+        "--reuse-data-dir",
+        dest="reuse_data_dir",
+        action="store_true",
+        help="use a data_dir that already holds rcm.sqlite3",
+    )
+
+
+#: 줄인 옵션(`--conf` · `--data`)을 받지 않는다 — 훅과 setup 이 같은 이름만 읽는다(P3 v1-1 · v2-2)
+PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": False}
+
+
+class SetupArgError(ValueError):
+    """setup 의 파서가 거절할 명령줄 — setup 은 사용법 오류(종료 2)로 끝난다."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """종료하지 않고 예외를 내는 파서 — 훅이 명령줄을 setup 과 같은 규칙으로 읽을 때 쓴다."""
+
+    def error(self, message: str) -> Any:
+        raise SetupArgError(message)
+
+    def exit(self, status: int = 0, message: str | None = None) -> Any:
+        raise SetupArgError(message or f"argparse exit {status}")
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """`rcm setup` 뒤의 인자를 setup 과 같은 정의로 읽는다. 거절할 명령줄이면 `SetupArgError`."""
+    p = _Parser(prog="rcm setup", add_help=False, **PARSER_OPTIONS)
+    add_arguments(p)
+    return p.parse_args(list(argv))
+
+
+def manager_of(platform: str) -> str | None:
+    """그 플랫폼의 서비스 관리자 — launchd(macOS) · systemd(Linux) · 없음."""
+    if platform.startswith("darwin"):
+        return LAUNCHD
+    if platform.startswith("linux"):
+        return SYSTEMD
+    return None
+
+
+#: 서버 템플릿(`examples/rcm.toml`)의 `data_dir` — setup 은 템플릿에서 읽고, 훅은 이 값을 쓴다.
+#: tests/test_setup.py 가 둘을 맞춘다
+DEFAULT_DATA_DIR = "~/.local/share/rcm"
+#: 역할마다 `--config` 가 없을 때 쓰는 설정 파일 이름
+CONFIG_NAMES = {
+    dc.ROLE_CLIENT: "client.toml",
+    dc.ROLE_WORKER: "worker.toml",
+    dc.ROLE_COORDINATOR: "server.toml",
+    dc.ROLE_COORDINATOR_WORKER: "server.toml",
+}
+#: 빈 값을 받지 않는 플래그 — 빈 `--config` 는 기본 자리로 떨어졌다(P3 2라운드 v2-1)
+NONEMPTY_FLAGS = ("config", "service_file", "data_dir", "label")
+
+
+class SetupValueError(ValueError):
+    """`where` 가 풀 수 없는 값 — 빈 경로 · 맞지 않는 라벨 · 모르는 역할. setup 은 종료 2 다."""
+
+
+def blank_flags(values: Mapping[str, Any]) -> list[str]:
+    """빈 값이나 공백뿐인 값을 받은 플래그(`--config` 처럼 플래그 이름으로)."""
+    return [
+        "--" + name.replace("_", "-")
+        for name in NONEMPTY_FLAGS
+        if isinstance(values.get(name), str) and not values[name].strip()
+    ]
+
+
+def abs_path(raw: str, *, home: Path, cwd: Path) -> Path:
+    """setup 이 받은 경로 글자 하나를 절대 경로로 — `os.path.abspath(os.path.expanduser(raw))`
+    와 같은데 HOME 과 작업 폴더를 인자로 받는다. `~` · `~/…` 는 `home`, `~user` 는 그 사용자의
+    홈(passwd), 상대 경로는 `cwd` 기준이다. 심링크는 풀지 않는다."""
+    if raw == "~" or raw.startswith("~/"):
+        root = str(home).rstrip("/")
+        text = (root + raw[1:]) or "/"
+    elif raw.startswith("~"):
+        text = os.path.expanduser(raw)
+    else:
+        text = raw
+    return Path(os.path.normpath(os.path.join(str(cwd), text)))
+
+
+def home_of(environ: Mapping[str, str], fallback: Path) -> Path:
+    """`Path.home()` 이 그 환경에서 낼 값 — `HOME` 이 있으면 그것(빈 값은 `/`), 없으면
+    `fallback`(passwd 의 홈)."""
+    if "HOME" not in environ:
+        return fallback
+    return Path(environ["HOME"].rstrip("/") or "/")
+
+
+def config_dir(environ: Mapping[str, str], *, home: Path, cwd: Path) -> Path:
+    """설정 폴더 — `$XDG_CONFIG_HOME/rcm`, 없으면 `~/.config/rcm`(config.py `user_config_dir`)."""
+    xdg = environ.get("XDG_CONFIG_HOME")
+    base = abs_path(xdg, home=home, cwd=cwd) if xdg else abs_path("~/.config", home=home, cwd=cwd)
+    return base / "rcm"
+
+
+@dataclass(frozen=True)
+class Where:
+    """setup 이 그 역할로 쓸 자리 — 설정 파일, 서비스 파일, 서버의 data_dir."""
+
+    role: str
+    config_dir: Path
+    config: Path
+    #: 서비스 라벨 — 서비스가 없는 역할(client)은 None
+    label: str | None
+    #: 쓸 서비스 파일 — client 나 서비스 관리자가 없는 플랫폼은 None
+    service_file: Path | None
+    #: 서비스 파일이 서비스 관리자가 읽는 자리 안이면 그 자리 — setup 은 거절한다
+    install_place: Path | None
+    #: 서버 역할(2 · 4)의 data_dir — 다른 역할은 None
+    data_dir: Path | None
+
+
+def where(
+    role: str,
+    *,
+    environ: Mapping[str, str],
+    cwd: Path,
+    home: Path,
+    manager: str | None,
+    config: str | None = None,
+    label: str | None = None,
+    service_file: str | None = None,
+    data_dir: str | None = None,
+    default_data_dir: str = DEFAULT_DATA_DIR,
+) -> Where:
+    """setup 이 어디에 쓸지 — setup 의 경로 결정은 모두 이 함수를 거친다.
+
+    값은 setup 이 받은 글자 그대로다(셸이 펼친 뒤). `--config` 가 없으면 설정 폴더의 역할 파일,
+    `--service-file` 이 없으면 설정 파일 옆 `service/` 의 라벨 파일, `--data-dir` 이 없으면
+    `default_data_dir`(템플릿의 기본값)을 `home` 으로 푼 것이다. 빈 값 · 맞지 않는 라벨 · 모르는
+    역할은 `SetupValueError` 다 — 빈 `--config` 를 기본 자리로 읽지 않는다."""
+    if role not in CONFIG_NAMES:
+        raise SetupValueError(f"--role must be one of {', '.join(ROLES)} (got {role!r})")
+    given = {"config": config, "service_file": service_file, "data_dir": data_dir, "label": label}
+    blank = blank_flags(given)
+    if blank:
+        raise SetupValueError(f"{' '.join(blank)} must not be empty")
+    if label is not None and (problem := label_problem(label)):
+        raise SetupValueError(problem)
+    folder = config_dir(environ, home=home, cwd=cwd)
+    conf = (
+        abs_path(config, home=home, cwd=cwd) if config is not None else folder / CONFIG_NAMES[role]
+    )
+    kind = service_kind(role)
+    chosen = (label if label is not None else default_label(role)) if kind else None
+    service: Path | None = None
+    place: Path | None = None
+    if chosen is not None and manager is not None:
+        if service_file is not None:
+            service = abs_path(service_file, home=home, cwd=cwd)
+        else:
+            service = conf.parent / "service" / service_file_name(chosen, manager)
+        place = install_place_of(service, home)
+    data: Path | None = None
+    if role in SERVER_ROLES:
+        raw = data_dir if data_dir is not None else default_data_dir
+        data = abs_path(raw, home=home, cwd=cwd)
+    return Where(role, folder, conf, chosen, service, place, data)

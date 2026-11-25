@@ -1153,3 +1153,16 @@ def test_tr28_a_report_that_fails_after_writing_is_exit_zero(cfg, tmp_path):
     assert "files written; the report failed: RuntimeError: facts" in err
     assert "second line" not in err and "Traceback" not in err
     assert (cfg / "server.toml").is_file()
+
+
+def test_tr20_the_hook_reads_setup_with_the_same_parser_and_default(cfg):
+    # P3 2라운드: 훅이 쓰는 파서와 기본 data_dir 이 setup 의 것과 같다 — 사본이 아니라 같은 정의다
+    from remote_ci_monitor import cli
+
+    template = cli.read_template("server.toml").decode("utf-8")
+    assert core.template_value(template, "data_dir") == core.DEFAULT_DATA_DIR
+    argv = ["--role", "worker", "--config", "x.toml", "--data-dir=d", "--force", "--yes"]
+    assert vars(core.parse_args(argv)) == vars(setup.build_parser().parse_args(argv))
+    for bad in (["--conf", "x"], ["--role", "bogus"], ["--port", "x"], ["--nope"]):
+        with pytest.raises(core.SetupArgError):
+            core.parse_args(bad)
