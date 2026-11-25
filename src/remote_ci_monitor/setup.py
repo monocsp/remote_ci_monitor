@@ -945,17 +945,23 @@ def _after(plan: Plan | None, written: bool) -> str:
     return "these files were written: " + ", ".join(str(f.path) for f in plan.files)
 
 
+def _one_line(e: BaseException) -> str:
+    """예외 하나를 한 줄로 — 이름과 첫 줄(제어 문자를 걷어 낸 것)."""
+    first = dc.clean_text((str(e).splitlines() or [""])[0], 200)
+    return f"{type(e).__name__}: {first}" if first else type(e).__name__
+
+
 def run(args: argparse.Namespace, world: World) -> int:
-    """setup 의 맨 바깥 경계. 예상 못 한 예외도 traceback 이 아니라 한 줄 · 종료 1 이고, Ctrl-C 는
-    어디서든 130 이다. 그 한 줄은 디스크에 남은 것을 말한다(P3 v2-3 · v2-11)."""
+    """setup 의 맨 바깥 경계. 예상 못 한 예외도 traceback 이 아니라 한 줄이고, Ctrl-C 는 어디서든
+    130 이다. 그 한 줄은 디스크에 남은 것을 말한다(P3 v2-3 · v2-11).
+
+    종료 코드는 파일을 썼는지로 정한다(§4.1 「설정을 썼으면 0」). 쓰기 전 · 쓰는 중의 예외는
+    종료 1 이고, 다 쓴 뒤 보고(`_report`)에서 난 예외는 종료 0 에 그 한 줄을 붙인다(P3 2라운드)."""
     plan: Plan | None = None
-    written = False
     try:
         plan = _plan(args, world)
         _check_free(args, plan)
         _write(plan)
-        written = True
-        _report(plan, world)
     except SetupUsage as e:
         _say(world, f"rcm: {e}")
         return EXIT_USAGE
@@ -963,15 +969,22 @@ def run(args: argparse.Namespace, world: World) -> int:
         _say(world, f"rcm: {e}")
         return EXIT_FAILED
     except KeyboardInterrupt:
-        _say(world, f"\nrcm: interrupted — {_after(plan, written)}")
+        _say(world, f"\nrcm: interrupted — {_after(plan, False)}")
         return EXIT_INTERRUPTED
     except Exception as e:  # noqa: BLE001 — setup 의 맨 바깥 경계
-        first = dc.clean_text((str(e).splitlines() or [""])[0], 200)
-        detail = f"{type(e).__name__}: {first}" if first else type(e).__name__
         _say(
-            world, f"rcm: setup stopped on an unexpected error ({detail}) — {_after(plan, written)}"
+            world,
+            f"rcm: setup stopped on an unexpected error ({_one_line(e)}) — {_after(plan, False)}",
         )
         return EXIT_FAILED
+    try:
+        _report(plan, world)
+    except KeyboardInterrupt:
+        _say(world, f"\nrcm: interrupted — {_after(plan, True)}")
+        return EXIT_INTERRUPTED
+    except Exception as e:  # noqa: BLE001 — 파일은 이미 다 썼다
+        _say(world, f"rcm: files written; the report failed: {_one_line(e)}")
+        return EXIT_OK
     return EXIT_OK
 
 
