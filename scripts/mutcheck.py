@@ -156,6 +156,8 @@
      씀 · 필요 없는 묶음 목록까지 읽음 · 도는 status 잡이 「지금 하는 일」이 됨 · 목록에 없는
      상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
      모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
+  개발 루프 도구 — `scenario-trace-zero-ids-pass`: 표지는 있고 ID 가 없는 표를 통과시킴
+     (`tools/scenario_trace.py`, 2026-11-25)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2105,6 +2107,16 @@ MUTANTS = (
             "tests/test_retry_m5s.py::"
             "test_a_submission_after_a_reload_changed_max_attempts_does_not_join",
         ),
+    ),
+    # ── 개발 루프 도구 (2026-11-25) ──
+    Mutant(
+        # 시나리오 표지가 있는데 ID 가 하나도 없는 표를 통과시킨다 — 대조할 것이 없는데 「ok」라서
+        # 검사하지 않은 명세가 검사한 것처럼 보인다(fail-open)
+        name="scenario-trace-zero-ids-pass",
+        path="tools/scenario_trace.py",
+        old='        if not group["ids"]:\n',
+        new="        if False:\n",
+        tests=("tests/test_scenario_trace.py",),
     ),
 )
 

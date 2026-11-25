@@ -1,0 +1,78 @@
+---
+name: dev-lite
+description: Build a small change to remote_ci_monitor without a workplan — a request card in the PR body, a red test first, the fix, `rcm/ci`, one isolated verifier (two when core server code changes), `verified:` and `tools/merge_pr.py`. Use it for "just fix this", "a quick change", when none of the five lane conditions applies and about five files or fewer under `src/` change. Not when the change touches the database, the wire, concurrency or restart, the web UI or security, or changes a frozen contract — that is `dev-loop`.
+---
+
+# Small change (dev-lite)
+
+The full loop costs a workplan, review rounds, a live run and an edge audit. A wording fix, a
+missing `—`, one flag's default, one wrong branch in one function do not earn that. This skill takes
+them from request to merge with a test that was red and one isolated look — and moves them to the full
+loop the moment they stop being small.
+
+## 0. Is it small?
+
+Both must hold; write the answer on the card.
+
+1. None of the five lane conditions in [`workplan`](../workplan/SKILL.md) «Lane» applies. Go through
+   that table row by row; do not copy it here.
+2. About five files or fewer change under `src/` (provisional — never measured in rcm).
+
+Also not lite: a change to a frozen contract (schema_version, DB version, wire, exit codes, CLI) or a
+question the owner has not answered. Either one fails → say which, and go to
+[`dev-loop`](../dev-loop/SKILL.md). When in doubt, the full loop.
+
+Before asking the owner anything, look for the answer in `PLAN.md`, the workplans and the code. More
+than one question, or a question about a screen, goes on a [decision page](../_shared/decision-page.md).
+
+## 1. The request card
+
+Kept as a working note, then pasted into the PR body under `## 요청 카드`, right after `## 한 줄`.
+It lives **only in the PR body**: a commit would move the head and send `rcm/ci` round again.
+
+- the owner's request and decisions, verbatim;
+- 3–6 acceptance lines (Given / When / Then), each with an ID (`L1`, `L2`…) that the tests carry;
+- the files that will change, and the §0 answer;
+- each item of the request: done · needs-decision · ⛔;
+- after verification: verified head, verifier count, findings, `rcm/ci` job number.
+
+## 2. Build
+
+1. Branch with the `branch` skill; its own worktree and `.venv`.
+2. A test per acceptance line first, named with its ID (`test_l1_…`); run it and keep the failure
+   it printed. It must fail in the assertion, not on import.
+3. The fix. Changed tests + `ruff check . && ruff format --check .`; `node --test
+   tests/web/*.test.js` if `web/` changed.
+4. A fix to a defect gets a permanent mutant in `scripts/mutcheck.py`, proven with
+   `python scripts/mutcheck.py --only <name>`. A plain addition (a new message, a flag) does not need
+   one.
+5. User-visible → the `docs` skill (`CHANGELOG.md` `[Unreleased]` and the owning document).
+6. Commit with the `commit` skill. When output changed, run the command once from the worktree's
+   `.venv` and paste what it printed under `## 검사`.
+
+## 3. PR and verification
+
+1. Push and open the PR with the `pr` skill, card included. Wait for `rcm/ci` on the head
+   ([`dev-loop`](../dev-loop/SKILL.md) «long waits»).
+2. Isolated verification on the green head: the count is the one
+   [`isolated-verifier`](../../agents/isolated-verifier.md) gives for `dev-lite` — one verifier, two
+   when the change touches `core/`, `store.py`, `server.py`, `remote_workers.py` or `worker.py`. Each
+   gets the diff, the card and the claims to check (each acceptance line, plus "the test fails without
+   the fix"), and marks every finding with a severity.
+3. HIGH → fix it, `rcm/ci` green again, **one** more look on the new head with the same count.
+   Still HIGH → stop and tell the owner: it was not small.
+4. MED/LOW are not fixed here; they go into the PR body under `## Remaining findings`.
+5. Post `verify-round:` and `verified: <head sha>` as the canon gives, merge with
+   `python3 tools/merge_pr.py <N> --wait --delete-branch`, remove the worktree (`pr` skill).
+
+## Switching to the full loop
+
+Stop as soon as the work meets a lane condition (it needs a migration, a new key in `/api/status`, a
+second process) or grows past about five `src/` files. Tell the owner which condition, then start
+[`workplan`](../workplan/SKILL.md) with the card and the commits as material. The open PR becomes a
+draft with `WIP:` and stays on its branch; no more code until the workplan is merged.
+
+## Left out, compared with the full loop
+
+The workplan and its decision table, plan review, P4 live run, P5 edge audit, P6 gap fix, review
+rounds beyond the one retry, and MED/LOW triage.

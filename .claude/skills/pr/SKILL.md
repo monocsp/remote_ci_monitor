@@ -40,6 +40,10 @@ CHANGELOG [Unreleased] · docs/… · README 미러 — 또는 「사용자에�
 Refs: #80
 ```
 
+Two more sections when the development loop produced them (`.claude/skills/dev-loop/SKILL.md`):
+`## Differs from the spec` (`.claude/skills/_shared/workplan-diff.md`) and `## Remaining findings`
+(the MED/LOW the final triage reported rather than fixed, `.claude/agents/isolated-verifier.md`).
+
 End the body with the attribution block given at session start.
 
 Write a body that goes through a file into a file named after the branch,
@@ -107,6 +111,10 @@ documents that stay in the repository are written in 평어체.
    ```sh
    gh pr comment <N> --body "verified: $(gh pr view <N> --json headRefOid -q .headRefOid)"
    ```
+   Each verification round leaves its own line before that, so the rounds can be counted later:
+   `verify-round: <40-char sha> r<N> verifiers=<n> high=<n> medium=<n> low=<n>` (and, after a
+   round-3 HIGH, `verify-analysis: <sha> r3 cause=<file:line…> policy-conflict=no|yes`).
+   `tools/merge_pr.py` reads only the `verified:` line.
    The line stands alone (no quote, no short sha, lowercase). A push after it makes it stale:
    verify the new head and post a new line. A PR with nothing to verify (documentation only,
    tests only) merges with `--no-verify "<reason>"`; the reason is posted on the PR.

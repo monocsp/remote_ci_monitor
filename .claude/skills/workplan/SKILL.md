@@ -1,0 +1,155 @@
+---
+name: workplan
+description: P1 of the development loop for remote_ci_monitor — a plan-lead writes `docs/<code>-workplan.md` in the house section structure with a scenario table carrying a `scenario-prefix`, isolated verifiers review it in rounds, the owner answers one decision page, and merging the spec PR approves the plan and freezes its contracts. Use it before any code for a milestone or a feature that meets one of the five lane conditions, and to resume a plan waiting for approval. Not for a change small enough for `dev-lite`, and not for implementing an approved plan (`build-pr`).
+---
+
+# Workplan (P1)
+
+A workplan is written before code so that the people who build, review and run it all work from
+the same sentences. In this repository the plan is a document in `docs/`, its approval is the merge
+of its own pull request, and from that merge its contracts are frozen. Nothing in this stage writes
+code.
+
+The main session does not write the plan. It writes the in-file, starts
+[`plan-lead`](../../agents/plan-lead.md) (handoff format and lead rules:
+[`_shared/stage-lead.md`](../_shared/stage-lead.md), stage name `P1`), runs the plan review and the
+decision page, opens the spec PR and merges it after the owner.
+
+## 0. Before writing — check what is already decided
+
+```sh
+git fetch origin
+git log origin/dev --oneline -30
+git show origin/dev:CHANGELOG.md | sed -n '/^## \[Unreleased\]/,/^## \[/p'
+gh pr list --state open --json number,title,headRefName
+```
+
+Read `PLAN.md` 「마일스톤과 완료 기준」 and 「결정 항목」, the newest workplans and the migrations in
+`store.py`. A sibling session may already have shipped the opposite answer to the same request
+(rcm, 2026-09: two sessions designed against one incident and one had already merged). Take the next
+milestone code and the next free decision number from the newest workplan's §11.
+
+The in-file carries the owner's words **verbatim** — a summary loses the clue that decides the
+design. A request written by another project's session is quoted only as far as it is free of names,
+paths and identifiers of that project (this repository is public); the rest stays in a file outside
+the repository and the workplan says so.
+
+## 1. Sections
+
+`plan-lead` writes `docs/<code>-workplan.md` (Korean, by the `korean-writing` skill) in a worktree
+whose branch the main session named with the `branch` skill (`docs/<code>-<what-it-does>-workplan`);
+`plan-lead` does not commit, the main session does (`commit` skill). `docs/m5s-workplan.md` is the
+model; keep its order.
+
+| section | what goes in |
+|---|---|
+| header quote | source, the owner's words verbatim, the first decision number, which edition this is |
+| §0 한 줄 | one paragraph a stranger can act on |
+| §1 출처와 오너 결정 | each wanted thing: what the request says, what this plan decides; decisions already confirmed |
+| §2 범위 | who does what — rcm, a downstream project, the owner |
+| §3 실측과 코드 제약 | numbered facts with `file:line` at a pinned HEAD sha, measured values with how they were measured, and what each fact does to the design |
+| §4 설계 | the design, one subsection per feature, naming the decisions it rests on |
+| §5 작업 분할과 병렬 | PR table: PR, branch, content, start condition, wave, runs with, shared files and merge order, **lane** |
+| §6 진행 체크리스트 | `#`, task, PR, depends, state — the loop reads this table |
+| §7 시험 계획 | the scenario table (below) and the `scripts/mutcheck.py` mutants to add |
+| §8 개인정보 점검 | when the milestone ends in a release to `main` |
+| §9 위험 | risk → how it is stopped |
+| §10 (when asked) | what goes back to a requester's document, from which section, when |
+| §11 결정 표 | `#`, item, decided, 오너 확인 (확정 with date · 추천 · ⛔), differs from the request |
+| §12 격리 반박에서 바뀐 것 | rebuttal id, grade, first edition, this edition, decision |
+
+Facts in §3 are measured, never estimated. A number that was not measured is `—` with what would
+measure it. The production database is read only with the owner's OK and only as
+[`_shared/test-server.md`](../_shared/test-server.md) describes.
+
+Implementation that later departs from the plan is recorded as
+[`_shared/workplan-diff.md`](../_shared/workplan-diff.md) says, not by editing §4.
+
+## 2. Scenario table
+
+§7 holds the scenario table, with the marker on the line directly above it and one prefix for the
+whole workplan:
+
+```
+<!-- scenario-prefix: S -->
+| ID | 시나리오 | 확인할 결과 | 어디서 | PR |
+|---|---|---|---|---|
+| S1 | … | an observable result, not "works" | 단위 · e2e · 브라우저 · (live) | A |
+```
+
+The ID is the first column; the prefix clashes with no other workplan. `(live)` marks a row that
+only a live run proves ([`live-verify`](../live-verify/SKILL.md)). The format, test tagging and the
+tool are in [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). Before review, check the table
+alone:
+
+```sh
+python3 tools/scenario_trace.py docs/<code>-workplan.md
+```
+
+Edge rows are chosen by reach condition, and irreversible results always get a row —
+[`_shared/edge-scope.md`](../_shared/edge-scope.md) decides which. A table of every conceivable edge
+is not thoroughness: it buries the few rows that matter.
+
+## 3. Lane
+
+For every PR in §5, `plan-lead` recommends **full** (P2–P7 with live run and edge audit) or
+**short** (P2 → P3 → P7). Recommend full when any of these applies to that PR:
+
+| condition | what the full lane catches that short misses |
+|---|---|
+| DB schema or migration (`DB_VERSION` moves) | a build that migrates a database it should not open, data loss on upgrade (`AGENTS.md`: a worktree build sent a v7 database to v24) |
+| wire format: `/api/status`, job JSON, worker protocol, health feature keys | the other side of the wire left on the old shape (M5d-0 added host keys and the remote parser silently dropped every new worker's samples, #48) |
+| concurrency, restart or signals: claim, heartbeat, janitor, `lost`, SIGTERM/KILL | races and recovery paths no unit test orders by itself (M5f: without a lock a cooldown let 20 of 20 bursts through) |
+| web UI | layout and wording only a browser shows (M5d: the phone test had been running at 500 px, #52) |
+| security: tokens, auth, tar or path handling, guard hooks, anything shown to an unauthenticated reader | the attack path, which only an edge audit reads for |
+
+None applies and at most about five files under `src/` change → recommend short. The five-file
+figure is provisional: it was never measured in rcm. When in doubt, recommend full. The lane is the
+owner's answer, recorded as a §11 row; the plan never picks it alone.
+
+## 4. Plan review
+
+Two [`isolated-verifier`](../../agents/isolated-verifier.md)s per round, one after the other, each
+given the workplan file and the repository at the pinned sha — not the chat, not the in-file, not the
+other's verdict. Ask each to check:
+
+- every `file:line` in §3 against the code, and every new identifier (state, error code, config key,
+  CLI flag) with `grep`, so a name already used elsewhere is caught (M5s §3 #7: `expired` already
+  meant something in two other places);
+- §4 against `PLAN.md` and earlier decision numbers — a silent reversal is a defect;
+- each §7 row: observable, placed in the right PR, reachable by the stated test kind;
+- §5: overlapping files without a merge order, a wave that depends on an unmerged PR;
+- the owner's verbatim request: every item covered, none quietly narrowed.
+
+Severity, rounds, escalation and the PR comment records are the canon's. Fix HIGH between rounds.
+Each finding and what changed goes into §12; MED/LOW not fixed are listed there too.
+
+## 5. Ask the owner — one page
+
+All open questions go on one [decision page](../_shared/decision-page.md): each with its options, the
+result of each, one default. The lane question is always on it, even when nothing else is open.
+Answers go into §11 verbatim with their decision numbers; an answer that differs from the default is
+marked. Before asking, look for an answer that already exists in `PLAN.md`, a merged workplan or the
+code — asking what is already decided is not neutral, it costs the owner's time.
+
+No answer is not approval. A ⛔ row without an answer blocks the merge. 추천 rows are approved as
+written by the merge, so a row the owner should look at is ⛔, not 추천.
+
+## 6. Merge = approval
+
+1. Open the spec PR with the `pr` skill; `rcm/ci` runs on it like any other.
+2. Fold the owner's answers into §11 and wherever they change §4–§7. That moves the head, so run one
+   more plan round on the diff since the last verified head (it counts as the next round).
+3. Post `verified: <head sha>` for the head that round passed, and merge with
+   `python3 tools/merge_pr.py <N> --wait` once the owner has said to proceed.
+
+From the merge, these are frozen: `schema_version` of `/api/status`, the DB version and its columns,
+the wire (request and response bodies, worker protocol, health feature keys), exit codes, and the CLI
+(commands, flags, documented output). Changing one later is a new spec PR the owner approves; a
+`build-lead` that needs it stops with a `POLICY` question.
+
+## 7. Meta loop
+
+When a plan round finds the same kind of mistake as a previous plan (a stale `file:line`, an
+unchecked state set, a missing irreversible edge), add the check to §4 of this skill or to the
+verifier's prompt so the next plan is asked about it.

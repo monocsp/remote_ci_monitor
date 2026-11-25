@@ -26,6 +26,12 @@ which stays on `main` and is never edited; your work happens in a `git worktree`
 above, and a test server gets its own config, `port` and `data_dir`. See [running from a git
 checkout](docs/operating.md#from-a-git-checkout).
 
+Agents working in this repository follow the development loop described in `AGENTS.md`
+(Development loop) and the skills under `.claude/skills/`; humans are welcome to use the same
+tools: `python3 tools/scenario_trace.py docs/<workplan>.md` checks a plan's scenario IDs against
+the tests, and `python3 tools/redgreen.py --fix <sha> --test <node id>` proves a regression test
+was red before a fix.
+
 ## House rules
 
 - **Runtime dependencies stay at zero.** The standard library only, on the server and the client.
