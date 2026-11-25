@@ -18,7 +18,8 @@
      `doctor-spec-unreachable-checks-empty`: `/worker/spec` 의 `unreachable_checks` 가 늘 빔
      (`capabilities.py`, TO18) + P3 1라운드의 넷: 잘린 XML plist 를 안 잡음(`doctor.py`) ·
      `rcm check` 의 git 행이 shim 규칙을 건너뜀(`cli.py`) · 서버가 재지 않은 로컬 레인 프리셋이
-     ready(`doctor.py`) · 호스트 사실의 제어문자를 안 지움(`capabilities.py`)
+     ready(`doctor.py`) · 호스트 사실의 제어문자를 안 지움(`capabilities.py`) + P3 2라운드의 둘:
+     doctor 의 맨 바깥 경계가 없음 · 서버 답의 모양을 안 봄(`doctor.py`)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2432,6 +2433,30 @@ MUTANTS = (
         old='            out[key] = _HOST_CONTROL_RE.sub("", value)[:HOST_FACT_MAX] or None\n',
         new="            out[key] = value[:HOST_FACT_MAX] or None\n",
         tests=("tests/test_doctor_cli.py::test_host_facts_lose_control_characters_and_stop_at_64",),
+    ),
+    Mutant(
+        # doctor 의 맨 바깥 경계가 없다 — 읽는 자리가 모르는 예외가 「판정 못 함」(종료 3)이 아니라
+        # traceback 과 종료 1 로 끝난다(P3 2라운드 HIGH)
+        name="doctor-boundary-removed",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    except Exception as e:  # noqa: BLE001 — doctor 의 맨 바깥 경계\n",
+        new="    except ZeroDivisionError as e:  # 변이: 경계가 없다\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unexpected_error_is_could_not_decide_not_a_traceback",
+        ),
+    ),
+    Mutant(
+        # `reach` 가 서버 답의 모양을 보지 않는다 — HTML 200 · 빈 200 · [] · null · 칸 타입이 틀린
+        # 답을 dict 로 믿고 쓰다 경계에 닿는다. 경계가 있어도 망가진 입력 표가 빨개진다(P3 2라운드)
+        name="doctor-answer-shape-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            why = shape_problem(answer, ANSWER_SHAPES[route])\n",
+        new="            why = None\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_server_answer_of_the_wrong_shape_is_named_and_exits_3",
+        ),
     ),
     Mutant(
         # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
