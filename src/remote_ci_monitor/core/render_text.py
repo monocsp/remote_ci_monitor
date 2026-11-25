@@ -983,6 +983,11 @@ def render_queue_row(
     return lines
 
 
+#: `lanes = 0` 인 서버의 표기(M5t-a §3 C10 · C11) — 머리줄과 호스트 줄, `rcm machines`
+NO_LOCAL_LANES = "no local lanes"
+RUNS_NO_JOBS = "runs no jobs"
+
+
 def render(
     status: dict[str, Any], *, tz: tzinfo | None = None, host_name: str | None = None
 ) -> str:
@@ -1001,7 +1006,10 @@ def render(
     busy = sum(1 for w in workers if w.get("state") == "busy")
     down = [w for w in workers if w.get("state") == "down"]
     lanes = server.get("lanes") or len(workers) or 0
-    if lanes == 1 and workers:
+    if server.get("lanes") == 0 and not workers:
+        # 분배 전용(M5t-a 결정 243) — `lanes 0/0 busy` 는 「다 놀고 있다」로 읽힌다
+        wtxt = NO_LOCAL_LANES
+    elif lanes == 1 and workers:
         w = workers[0]
         wtxt = f"worker {w.get('state')}" + (f" #{w['job_id']}" if w.get("job_id") else "")
     else:
@@ -1200,11 +1208,17 @@ def render_pool(
             gpu = h.get("gpu") or {}
             load = h.get("load") or [None]
             cores = h.get("cores") if h.get("cores") is not None else DASH
+            # 서버 자신의 표본인데 로컬 레인이 없다 — 샘플러는 돌지만 이 머신은 잡을 돌리지 않는다
+            idle_role = (
+                f" · {RUNS_NO_JOBS}"
+                if h.get("source") == "local" and server.get("lanes") == 0
+                else ""
+            )
             out.append(
                 f"host  {h.get('name')} ({age} ago{stale})  load {_load(load[0])}"
                 f" / {cores} cores · CPU {_pct(cpu)}"
                 f" · mem {_gb(mem.get('used_bytes'))} / {_gb(mem.get('total_bytes'))}"
-                f" · GPU {_pct(gpu.get('util_pct')) if gpu else DASH}"
+                f" · GPU {_pct(gpu.get('util_pct')) if gpu else DASH}{idle_role}"
             )
             if h.get("disk"):
                 out.append(f"      disk: {_disk(h.get('disk'))}")

@@ -582,3 +582,49 @@ def test_td38_without_a_capacity_answer_a_lanes_zero_coordinator_is_undecided(
     code, doc = doctor_json(lz, monkeypatch, capsys)
     assert any("does not report capacity" in u for u in doc["undecided"]), doc["undecided"]
     assert code == 3, doc
+
+
+# ── TL11 터미널 표기 ────────────────────────────────────────────────────────
+
+
+def test_tl11_rcm_top_says_no_local_lanes_and_marks_the_servers_host(lz):
+    """`lanes 0/0 busy` 대신 「로컬 레인 없음」, 서버 자신의 호스트 줄에 「잡을 돌리지 않는
+    머신」. 표본은 서버가 실제로 만드는 꼴(`source: "local"`)을 쓴다."""
+    from remote_ci_monitor.core.render_text import render
+
+    lz.app.sampler = None
+    doc = lz.status()
+    host = {
+        "name": "coord",
+        "source": "local",
+        "sampled_at": doc["generated_at"],
+        "age_seconds": 1,
+        "interval_seconds": 5,
+        "cores": 8,
+        "load": [0.5],
+        "cpu": {"busy": 3.0},
+        "memory": {"used_bytes": 1, "total_bytes": 2},
+    }
+    doc["pools"][0]["hosts"] = [host]
+    out = render(doc)
+    head = out.splitlines()[0]
+    assert "lanes 0/0" not in head, head
+    assert "no local lanes" in head, head
+    line = next(ln for ln in out.splitlines() if ln.startswith("host  coord"))
+    assert "runs no jobs" in line, line
+    # 레인이 있는 서버의 머리줄은 그대로다(비교 행)
+    doc["server"]["lanes"] = 2
+    assert "lanes 0/2 busy" in render(doc).splitlines()[0]
+    assert "runs no jobs" not in render(doc)
+
+
+def test_tl11_rcm_machines_marks_at_local_as_running_no_jobs(lz, home, monkeypatch, capsys):
+    from remote_ci_monitor.cli import main
+
+    monkeypatch.setenv("RCM_SERVER", f"http://127.0.0.1:{lz.port}")
+    monkeypatch.setenv("RCM_TOKEN", lz.tokens["alice"])
+    assert main(["machines"]) == 0
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "(runs no jobs)" in ln or "(down)" in ln)
+    assert "(runs no jobs)" in line and "(down)" not in line, out
+    assert "no report" not in line, line  # 재지 않는 머신의 판정을 「보고 없음」으로 세지 않는다

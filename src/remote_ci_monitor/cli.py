@@ -83,6 +83,7 @@ from remote_ci_monitor.core.render_text import (
     CAUSE_NOT_FOUND,
     DASH,
     MAX_IDENT,
+    RUNS_NO_JOBS,
     blocked_notes_text,
     failure_lines,
     fingerprint_summary,
@@ -2774,16 +2775,19 @@ def cmd_machines(args: argparse.Namespace) -> int:
         return 0
     rows = [list(MACHINES_HEADER)]
     for m in machines:
-        name = _machine_label(m) + ("" if m.get("alive", True) else " (down)")
         lanes = m.get("lanes")
+        # 레인 0 인 로컬 머신(분배 전용 서버)은 down 이 아니라 잡을 돌리지 않는 머신이다. 재지
+        # 않으니 판정 칸도 비운다 — 「보고 없음」은 기다리면 올 것처럼 읽힌다(M5t-a §3 C10)
+        idle = m.get("kind") == "local" and lanes == 0
+        tag = f" ({RUNS_NO_JOBS})" if idle else ("" if m.get("alive", True) else " (down)")
         rows.append(
             [
-                name,
+                _machine_label(m) + tag,
                 str(m.get("host_label") or DASH),
                 str(m.get("pool") or DASH),
                 str(lanes) if isinstance(lanes, int) else DASH,
                 fingerprint_summary(m.get("fingerprint")),
-                presets_summary(m.get("presets")),
+                DASH if idle else presets_summary(m.get("presets")),
             ]
         )
     print("\n".join(_table(rows)))
