@@ -378,8 +378,17 @@ def _read_plist(p: Path) -> ServiceFile:
         raise ServiceFileUnreadable(p, "SoftResourceLimits.NumberOfFiles is not an integer")
     if program is not None and not isinstance(program, str):
         raise ServiceFileUnreadable(p, "Program is not a string")
-    args = [str(a) for a in raw_args]
-    env = {str(k): str(v) for k, v in raw_env.items()}
+    # launchd 는 인자와 환경 변수 값을 문자열로만 받는다 — `str()` 로 바꿔 「PATH 가 7」로 재지
+    # 않는다(P3 4라운드 LOW). 이유에는 이름만 넣고 값은 넣지 않는다
+    if not all(isinstance(a, str) for a in raw_args):
+        raise ServiceFileUnreadable(p, "ProgramArguments has an item that is not a string")
+    for k, v in raw_env.items():
+        if not isinstance(v, str):
+            raise ServiceFileUnreadable(
+                p, f"EnvironmentVariables.{dc.clean_text(k, 64)} is not a string"
+            )
+    args = list(raw_args)
+    env = dict(raw_env)
     exe = str(program or (args[0] if args else "")) or None
     launch = rcm_launch(exe, args)
     return ServiceFile(
@@ -485,6 +494,18 @@ def _matching(
             # 띄우는 명령 줄을 못 읽었다 — 이 역할의 파일인지 모른다
             unreadable.append(ServiceFileUnreadable(p, f"cannot read {sf.unreadable_lines[0]}"))
             continue
+        if sf.launch is None:
+            # rcm 의 표준 자리에 있는데 띄우는 명령을 rcm 의 하위 명령으로 풀지 못했다(`env rcm …` ·
+            # `sh -c` · rcm 이 받지 않을 인자) — 조용히 빼면 이 역할의 서비스를 놓친다
+            # (P3 4라운드 LOW)
+            unreadable.append(
+                ServiceFileUnreadable(
+                    p,
+                    "cannot tell which rcm command it starts — start the rcm executable itself "
+                    "with arguments rcm accepts",
+                )
+            )
+            continue
         if want is None or sf.command == want:
             out.append(sf)
     return out
@@ -524,6 +545,10 @@ def pick_service_file(
     for stage in (installed, staged):
         before = len(skipped)
         found = _matching(stage, role, skipped)
+        if len(skipped) > before:
+            # 못 읽은 파일이 이 역할의 서비스였는지 모른다 — 같은 자리의 읽히는 파일로도 재지 않고
+            # 다음 자리로도 넘어가지 않는다(P3 3라운드 HIGH · 4라운드 LOW)
+            return None
         if len(found) == 1:
             return found[0]
         if len(found) > 1:
@@ -533,8 +558,6 @@ def pick_service_file(
                 if picked is not None:
                     return read_service_file(picked)
             raise DoctorUsage(f"several service files match: {names} — pass --service-file PATH")
-        if len(skipped) > before:
-            return None
     return None
 
 
@@ -635,6 +658,9 @@ class Shape:
     items: Shape | None = None  # 배열의 항목
     values: Shape | None = None  # 객체의 값(이름이 서버가 정한 것일 때)
     required: bool = False
+    #: 이름 · 버전 · 종류처럼 비면 없는 것과 같은 문자열 — rcm 서버는 빈 문자열을 보내지 않는다
+    #: (P3 4라운드 LOW)
+    nonempty: bool = False
 
 
 def _req(shape: Shape) -> Shape:
@@ -642,37 +668,40 @@ def _req(shape: Shape) -> Shape:
 
 
 _STR = Shape((str,))
+_NAME = Shape((str,), nonempty=True)
 _NUMBER = Shape((int, float))
 _BOOL = Shape((bool,))
 _STRS = Shape((list,), items=_STR)
+_NAMES = Shape((list,), items=_NAME)
 _GENERATION = Shape((str, int))
 _PRESET = Shape(
     (dict,),
     {
-        "name": _req(_STR),
-        "requires": _req(_STRS),
-        "env_passthrough": _req(_STRS),
-        "env": _req(Shape((dict,), values=_STR)),
-        "pool": _STR,
-        "pools": _STRS,
-        "placement": _STR,
-        "checks": _STRS,
-        "source_modes": _STRS,
-        "repo": _STR,
+        "name": _req(_NAME),
+        "requires": _req(_NAMES),
+        "env_passthrough": _req(_NAMES),
+        "env": _req(Shape((dict,), values=_STR)),  # 환경 변수 값은 비어도 된다
+        "pool": _NAME,
+        "pools": _NAMES,
+        "placement": _NAME,
+        "checks": _NAMES,
+        "source_modes": _NAMES,
+        "repo": _NAME,
         "unreachable_checks": Shape(
-            (list,), items=Shape((dict,), {"name": _req(_STR), "code": _req(_STR)})
+            (list,), items=Shape((dict,), {"name": _req(_NAME), "code": _req(_NAME)})
         ),
     },
 )
-_PROBE = Shape((dict,), {"name": _req(_STR), "argv": _req(_STRS), "timeout_seconds": _NUMBER})
-_TOOL = Shape((dict,), {"name": _req(_STR), "docs": _STR, "install": Shape((dict,), values=_STR)})
+# argv 의 뒤 인자는 빈 문자열일 수 있다 — 실행 파일(첫 항목)만 `parse_spec` 이 본다
+_PROBE = Shape((dict,), {"name": _req(_NAME), "argv": _req(_STRS), "timeout_seconds": _NUMBER})
+_TOOL = Shape((dict,), {"name": _req(_NAME), "docs": _STR, "install": Shape((dict,), values=_STR)})
 _MACHINE = Shape(
     (dict,),
     {
-        "id": _req(_STR),
+        "id": _req(_NAME),
         "display_name": _STR,
-        "kind": _req(_STR),
-        "pool": _STR,
+        "kind": _req(_NAME),
+        "pool": _NAME,
         "alive": _BOOL,
         "presets": Shape((dict,), values=Shape((dict,), {"state": _STR, "code": _STR})),
     },
@@ -683,7 +712,7 @@ ANSWER_SHAPES: dict[str, Shape] = {
         (dict,),
         {
             "ok": _req(_BOOL),
-            "version": _req(_STR),
+            "version": _req(_NAME),
             "error": _STR,
             "preset_env": Shape(
                 (dict,),
@@ -694,7 +723,7 @@ ANSWER_SHAPES: dict[str, Shape] = {
             ),
         },
     ),
-    "/api/whoami": Shape((dict,), {"name": _STR, "kind": _req(_STR), "admin": _BOOL}),
+    "/api/whoami": Shape((dict,), {"name": _STR, "kind": _req(_NAME), "admin": _BOOL}),
     "/worker/spec": Shape(
         (dict,),
         {
@@ -731,6 +760,8 @@ def shape_problem(value: Any, shape: Shape, where: str = "") -> str | None:
         got = "null or empty" if value is None else _json_kind(type(value))
         want = " or ".join(dict.fromkeys(_json_kind(t) for t in shape.types))
         return f"{where or 'the answer'} is {got}, not {want}"
+    if shape.nonempty and isinstance(value, str) and not value.strip():
+        return f"{where or 'the answer'} is empty"
     dot = f"{where}." if where else ""
     if isinstance(value, dict):
         for key, sub in shape.keys.items():
@@ -874,7 +905,7 @@ def parse_spec(answer: dict[str, Any]) -> Spec:
             raise AnswerUnreadable(
                 f"probes[{i}].timeout_seconds is not an integer from 1 to {PROBE_TIMEOUT_MAX}"
             )
-        if not p["argv"]:
+        if not p["argv"] or not p["argv"][0].strip():
             raise AnswerUnreadable(f"probes[{i}].argv is empty")
         probes.append(Probe(name=p["name"], argv=tuple(p["argv"]), timeout_seconds=timeout))
     presets = []

@@ -238,26 +238,6 @@ def _names(items: Any) -> list[str]:
     return [clean_text(os.path.basename(str(x)), 64) for x in items or ()]
 
 
-def unreachable_checks(entry: Mapping[str, Any]) -> dict[str, str] | None:
-    """`/worker/spec` 프리셋 항목의 `unreachable_checks` → 점검 이름 → 이유 코드. 서버가 칸을
-    싣지 않았으면(또는 목록이 아니면) None — 모른다. 목록에 무엇이 빠졌는지로 짐작하지 않는다
-    (TO18, 위임 결정 2)."""
-    raw = entry.get("unreachable_checks")
-    if not isinstance(raw, list):
-        return None
-    out: dict[str, str] = {}
-    for item in raw:
-        # 이름이나 이유가 없는 항목을 조용히 버리면 「닿는다」로 읽힌다 — 칸 전체를 모름으로 둔다
-        if not (
-            isinstance(item, dict)
-            and isinstance(item.get("name"), str)
-            and isinstance(item.get("code"), str)
-        ):
-            return None
-        out[clean_text(item["name"], 64)] = clean_text(item["code"], 64)
-    return out
-
-
 def classify_preset(
     entry: Mapping[str, Any],
     facts: Mapping[str, Any],
@@ -401,11 +381,14 @@ def classify_preset(
 
 
 def summary(rows: Sequence[PresetRow]) -> dict[str, int]:
-    """이 머신에 오는 프리셋만 센다 — 다른 풀 전용과 「오지 않음」은 빠진다."""
+    """이 머신에 오는 프리셋만 상태별로 센다 — 다른 풀 전용과 「오지 않음」은 빠진다. 오는지
+    모르는 프리셋(`applies: unknown`)은 `applies_unknown` 에 따로 센다 — 빼면 「0 unknown」인데
+    종료 3 이 된다(P3 4라운드 LOW)."""
     out = dict.fromkeys(STATES, 0)
     for r in rows:
         if r.counts and r.state in out:
             out[r.state] += 1
+    out["applies_unknown"] = sum(1 for r in rows if r.applies == APPLIES_UNKNOWN)
     return out
 
 
@@ -471,12 +454,7 @@ def _preset_detail(p: Mapping[str, Any]) -> str:
         if m.get("docs"):
             bit += f" · docs: {m['docs']}"
         parts.append(bit)
-    if p["applies"] in (
-        APPLIES_OTHER_POOL,
-        APPLIES_NOT_COMING,
-        APPLIES_LOCAL_LANE,
-        APPLIES_UNKNOWN,
-    ):
+    if p["applies"] in NOTE_ONLY:
         parts.append(p.get("note") or "")
     elif p["state"] == READY:
         parts.append(READY_NOTE)
@@ -585,9 +563,11 @@ def render(doc: Mapping[str, Any]) -> list[str]:
         )
     s = doc.get("summary")
     if s and presets:
+        maybe = s.get("applies_unknown") or 0
         lines.append(
             f"summary  {s['ready']} ready · {s['needs_check']} needs check · "
             f"{s['missing']} missing · {s['unknown']} unknown"
+            + (f" · {maybe} may come (unknown)" if maybe else "")
         )
     for w in doc.get("warnings") or []:
         lines.append(f"warn  {w}")
