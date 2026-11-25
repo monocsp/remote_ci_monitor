@@ -4367,7 +4367,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         ):
             raise ApiError(400, "checks must be a list of check preset names")
         try:
-            jobs = self.recheck(machine, names)
+            answer = self.recheck(machine, names)
         except KeyError as e:
             raise ApiError(404, f"no such machine {machine!r}") from e
         except MachineDown as e:
@@ -4383,7 +4383,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         except ValueError as e:
             raise ApiError(400, str(e)) from e
         self._publish_server()
-        return {"jobs": jobs}
+        return answer  # {"jobs": [...], "skipped": [...]} — 건너뛴 점검은 실패가 아니다
 
     def submit_internal_check(self, preset: Preset, view: Any, *, fingerprint_hash: str | None):
         """rcm 이 스스로 거는 점검 잡 — 그 워커를 지정한 git_ref 잡(§4.4). 해석 실패는 예외."""

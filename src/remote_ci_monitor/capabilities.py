@@ -1100,9 +1100,14 @@ class CapabilitiesMixin:
             return view.report.accept_any if view.report is not None else False
         return view.pool in (preset.pool, *preset.pools)
 
-    def recheck(self, worker: str, names: list[str] | None) -> list[dict[str, Any]]:
+    def recheck(self, worker: str, names: list[str] | None) -> dict[str, list[dict[str, Any]]]:
         """`POST /machines/{id}/recheck` — 사람이 다시 건다(한 번 제한과 무관). 없는 머신은
-        `KeyError`, 점검 프리셋이 아닌 이름은 `ValueError`."""
+        `KeyError`, 점검 프리셋이 아닌 이름은 `ValueError`.
+
+        답은 `{"jobs": [...], "skipped": [...]}` 다. 이름 없이 걸 때 그 머신에서는 돌 수 없는
+        점검(`local_only`)은 `jobs` 의 번호 없는 항목이 아니라 `skipped` 에 정책 코드로 싣는다.
+        CLI 와 웹은 번호 없는 `jobs` 항목을 실패로 부르는데, 건너뛴 것은 실패가 아니다(위임 결정
+        4). 걸 것이 없고 건너뛴 것만 있어도 200 이고 `jobs` 는 빈 목록이다."""
         now = self.now_fn()
         view = self.resolve_machine(worker, self.machine_views(now))  # KeyError · Ambiguous
         if not view.alive:
@@ -1121,20 +1126,21 @@ class CapabilitiesMixin:
                     f"(local_only) — machine {view.id} cannot take them"
                 )
         fp = view.report.fingerprint.hash if view.report else None
-        out = []
+        out: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
         for name in targets:
+            if not self.check_reachable(view, name):
+                # 돌 수 없는 점검(`local_only`) — 지금 설정으로 셈한다(`_check_rows` 와 같다).
+                # 이름을 댄 경우는 위에서 409 로 끝났으니 여기는 이름 없는 일괄 요청뿐이다
+                skipped.append({"preset": name, "code": CODE_LOCAL_ONLY})
+                continue
             job_id = self._submit_check(view, name, fp, auto=False)
             item: dict[str, Any] = {"preset": name, "job_id": job_id}
             if job_id is None:
-                # 못 걸었다 — 번호 없는 성공처럼 보이지 않게 이유를 싣는다(점검 칸과 같은 코드).
-                # 돌 수 없는 점검(`local_only`)은 지금 설정으로 셈한다(`_check_rows` 와 같다)
-                item["error_code"] = (
-                    self._check_errors.get((view.id, name), "not_submitted")
-                    if self.check_reachable(view, name)
-                    else CODE_LOCAL_ONLY
-                )
+                # 못 걸었다 — 번호 없는 성공처럼 보이지 않게 이유를 싣는다(점검 칸과 같은 코드)
+                item["error_code"] = self._check_errors.get((view.id, name), "not_submitted")
             out.append(item)
-        return out
+        return {"jobs": out, "skipped": skipped}
 
     def _submit_check(
         self, view: _MachineView, name: str, fp: str | None, *, auto: bool
