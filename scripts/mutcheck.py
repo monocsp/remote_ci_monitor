@@ -2322,6 +2322,21 @@ MUTANTS = (
         new="        pass\n",
         tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
     ),
+    # ── M5t-a PR2 — 환경 진단 rcm doctor (docs/m5t-workplan.md §7 「변이 검사」) ──
+    Mutant(
+        # doctor 가 판정 못 함(서버 불통 · 시한 초과 · 옛 서버)을 0 으로 끝낸다 — 「다 갖춤」과
+        # 「알 수 없음」이 같은 0 이 되어 자동화가 모르는 머신을 준비됐다고 읽는다(결정 246)
+        name="doctor-unknown-exits-0",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if undecided:\n        return EXIT_UNKNOWN\n",
+        new="    if undecided:\n        return EXIT_OK\n",
+        tests=(
+            "tests/test_doctor.py::test_td34_exit_priority_is_problem_then_unknown_then_ok",
+            "tests/test_doctor_cli.py::test_td3_a_probe_timeout_is_unknown_and_exits_3",
+            "tests/test_doctor_cli.py::test_td4_an_unreachable_server_exits_3_not_0",
+            "tests/test_doctor_cli.py::test_td5_an_older_server_without_the_new_keys_exits_3",
+        ),
+    ),
 )
 
 
