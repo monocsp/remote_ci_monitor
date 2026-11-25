@@ -34,8 +34,9 @@ _STANDARD_UNITS = {
 }
 #: 서버 서비스의 파일 디스크립터 상한 — `examples/` 의 서버 서비스 파일과 같은 값
 NOFILE = 4096
-#: 라벨 — launchd 의 `Label` 이자 파일 이름이다. 경로 구분자나 공백이 들어가면 안 된다
-_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+#: 라벨 — launchd 의 `Label` 이자 파일 이름이다. 경로 구분자나 공백이 들어가면 안 된다.
+#: `fullmatch` 로 본다 — `$` 는 끝 줄바꿈 앞에서도 맞는다(P3 2라운드 v1-5)
+_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 #: `--yes`(또는 물을 사람이 없을 때) 역할마다 꼭 줘야 하는 인자(§4.1 표)
 YES_REQUIRED: dict[str, tuple[str, ...]] = {
@@ -133,7 +134,7 @@ def log_file_name(label: str) -> str:
 
 
 def label_problem(label: str) -> str | None:
-    if _LABEL_RE.match(label):
+    if _LABEL_RE.fullmatch(label):
         return None
     return f"--label must be letters, digits, '.', '_' or '-' (got {label!r})"
 
