@@ -4493,3 +4493,41 @@ def test_x_mdns_worker_check_cleans_the_name_too(env, srv, monkeypatch, capsys, 
     assert any("evil" in s for s in said), said
     for line in said:
         assert not any(c in line for c in "\x1b\r\n‮"), repr(line)
+
+
+# ── P6 GAP X-ctrlc: Ctrl-C 면 프로브를 내리고 130 ─────────────────────────────────────
+
+
+def test_x_ctrlc_interrupting_doctor_stops_the_running_probes(
+    worker, srv, svcbin, monkeypatch, capsys
+):
+    """프로브가 도는 중에 Ctrl-C(KeyboardInterrupt)가 오면 doctor 는 도는 프로브를 그룹째 내리고
+    종료 130 으로 끝난다 — 프로브가 시한까지 남지 않는다(P6 GAP X-ctrlc)."""
+    import threading
+    import time
+
+    from remote_ci_monitor import hostsample
+
+    pidfile = svcbin.parent / "probe.pid"
+    slow = script(svcbin / "rcm-td-hang", f"echo $$ > {pidfile}\nexec /bin/sleep 30")
+    srv.route(
+        "GET",
+        "/worker/spec",
+        spec_doc(
+            preset("build"), probes=[{"name": "hang", "argv": [str(slow)], "timeout_seconds": 60}]
+        ),
+    )
+    real = hostsample.run_probes
+
+    def interrupted(probes, env):
+        threading.Thread(target=real, args=(probes, env), daemon=True).start()
+        deadline = time.monotonic() + 10
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            assert time.monotonic() < deadline, "the probe never started"
+            time.sleep(0.02)
+        raise KeyboardInterrupt  # 사람이 Ctrl-C 를 눌렀다
+
+    monkeypatch.setattr(hostsample, "run_probes", interrupted)
+    code, out, err = worker.text(capsys)
+    assert gone(pidfile), "the probe outlived Ctrl-C"
+    assert code == 130 and "Traceback" not in err, (code, err)

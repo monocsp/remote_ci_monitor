@@ -2246,6 +2246,9 @@ def known_home(environ: Mapping[str, str]) -> str | None:
         return None
 
 
+#: Ctrl-C 로 멈춘 실행의 종료 코드(다른 rcm 명령과 같다)
+EXIT_INTERRUPTED = 130
+
 #: 홈 폴더를 모를 때의 판정 못 함 줄
 NO_HOME = (
     "HOME is not set and this user has no home folder — rcm cannot find its config and service "
@@ -2328,6 +2331,11 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
         else:
             r.client()
         doc = r.document()
+    except KeyboardInterrupt:
+        # Ctrl-C — 도는 프로브를 그룹째 내린다. 두면 시한(최대 60초)까지 남는다(P6 GAP X-ctrlc)
+        hostsample.kill_probes()
+        ctx.err("rcm: interrupted")
+        return EXIT_INTERRUPTED, None
     except DoctorUsage as e:
         # 설정 파일의 절대 경로가 문장에 든다 — 홈 폴더는 가린다(검증자 1 #5)
         ctx.err(f"rcm: {dc.hide_home(str(e), home)}")
