@@ -101,6 +101,14 @@ def hardware_id() -> str | None:
     return None
 
 
+HOST_FACT_COMMANDS: dict[str, list[str]] = {}
+
+
+def host_facts(**_kw: Any) -> dict[str, Any]:
+    keys = ("os", "os_release", "os_like", "arch", "machine", "rosetta", "container", "root")
+    return dict.fromkeys(keys + ("package_manager", "python"))
+
+
 def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
     """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 돌린다 → 이름 → ProbeResult(설정 순서).
 

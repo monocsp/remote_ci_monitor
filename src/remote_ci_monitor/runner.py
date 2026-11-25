@@ -126,6 +126,15 @@ class RunSpec:
     mask: Callable[[bytes], bytes] | None = None
 
 
+SHIM_DIR = "/usr/bin/"
+SHIM_PLATFORM = ""
+XCODE_SELECT = "/usr/bin/xcode-select"
+
+
+def missing_note(name: str, env: Mapping[str, str]) -> str | None:
+    return None
+
+
 def missing_tools(
     requires: tuple[str, ...], env: Mapping[str, str], cwd: str | os.PathLike[str] | None = None
 ) -> list[str]:

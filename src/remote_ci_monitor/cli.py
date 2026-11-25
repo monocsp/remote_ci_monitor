@@ -4729,6 +4729,12 @@ def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | Non
     return [("fingerprint", True, fp or "no probes configured"), ("presets", True, detail)]
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from remote_ci_monitor import doctor
+
+    return doctor.main(args)
+
+
 def cmd_token(args: argparse.Namespace) -> int:
     from remote_ci_monitor.store import Store, StoreError
 
@@ -5511,6 +5517,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="overwrite files whose content differs"
     )
     skills.set_defaults(func=cmd_skills)
+
+    doc = sub.add_parser("doctor", help="what this machine can build and test, and what to install")
+    doc.add_argument("--role", choices=("client", "worker", "coordinator", "coordinator-worker"))
+    doc.add_argument("--server")
+    doc.add_argument("--config")
+    doc.add_argument("--json", action="store_true")
+    doc.add_argument("--offline", action="store_true")
+    doc.add_argument("--shell-path", action="store_true")
+    doc.add_argument("--service-file")
+    doc.set_defaults(func=cmd_doctor)
 
     version = sub.add_parser("version", help="print the version (and Python/OS with --json)")
     version.add_argument("--json", action="store_true")
