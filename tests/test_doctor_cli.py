@@ -2078,3 +2078,16 @@ def test_a_503_not_ok_health_is_not_shown_as_server_ok(worker, srv, env, coordin
     coordinator.route("GET", "/api/health", sick, status=503)
     code, doc = run_json(capsys, "--role", "client", "--server", coordinator.url)
     assert doc["server"]["state"] == "not ok", doc["server"]
+
+
+def test_d5_probes_are_not_run_when_the_service_path_is_unknown(worker, env, srv, svcbin, capsys):
+    """서비스 PATH 를 모르면(PATH 없는 systemd 유닛) 프로브도 돌리지 않는다 — 빈 PATH 로 돌려
+    「missing」을 지어내지 않고 「unknown」으로 둔다(검증자 1 #6)."""
+    (env / "svc").mkdir()
+    sf = env / "svc" / "rcm-worker.service"
+    sf.write_text("[Service]\nExecStart=/x/rcm worker\n")
+    probe = {"name": "td-ver", "argv": ["rcm-td-version"], "timeout_seconds": 5}
+    srv.route("GET", "/worker/spec", spec_doc(preset("build"), probes=[probe]))
+    code, doc = run_worker(capsys, env, srv, sf)
+    assert doc["probes"]["td-ver"]["state"] == "unknown", doc["probes"]
+    assert code == 3, doc

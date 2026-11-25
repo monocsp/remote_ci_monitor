@@ -900,6 +900,12 @@ class _Run:
                 timeout = int(p.get("timeout_seconds") or 10)
                 argv = tuple(str(a) for a in p["argv"])
                 probes.append(Probe(name=p["name"], argv=argv, timeout_seconds=timeout))
+        if not self.path_known:
+            # 서비스 PATH 를 모르면 프로브도 돌리지 않는다 — 빈 PATH 로 돌리면 「missing」을
+            # 지어낸다. 프리셋도 재지 않는다. 판정 못 함은 service_env 가 이미 적었다
+            for probe in probes:
+                self.probes[probe.name] = {"state": dc.TOOL_UNKNOWN, "value": None}
+            return
         for name, r in hostsample.run_probes(probes, env).items():
             state = {
                 "ok": dc.TOOL_OK,
@@ -912,8 +918,6 @@ class _Run:
                 self.undecided.append(f"probe {name} timed out")
         hints = dc.tool_hints(spec.get("tools"))
         entries = [p for p in spec.get("presets") or [] if isinstance(p, dict) and p.get("name")]
-        if not self.path_known:
-            return  # 모르는 PATH 로 재지 않는다 — 판정 못 함은 service_env 가 이미 적었다
         if entries and not all("placement" in p for p in entries):
             self.undecided.append(
                 "the server does not say which pool each preset runs in (older rcm) — presets "
