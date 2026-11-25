@@ -41,6 +41,7 @@ APPLIES_CAPABLE = "any-capable"  # 판정이 eligible 이면 오는 프리셋
 APPLIES_NOT_COMING = "not_coming"  # `any-capable` 인데 이 머신에는 오지 않는다(warn)
 APPLIES_OTHER_POOL = "other_pool"  # 다른 풀 전용 — 대상이 아니다
 APPLIES_LOCAL_LANE = "local_lane_only"  # coordinator 진단: 원격 머신은 후보가 아니다(TO6)
+APPLIES_UNKNOWN = "unknown"  # 서버가 판정에 쓸 칸(배치 · 풀 · 점검)을 말하지 않아 오는지 모른다
 COMING = (APPLIES_POOL, APPLIES_CAPABLE)
 
 #: 설정 문자열(`any-capable`)과 내부 값(`capable`) 둘 다 받는다
@@ -152,7 +153,10 @@ def could_not_decide(error: BaseException, home: str) -> str:
 
 
 def clean_text(value: Any, limit: int = TEXT_MAX) -> str:
-    """서버가 보낸 문자열 — 제어문자를 지우고 자른다. 찍기 전에 한 번 더 정리한다(TD32)."""
+    """서버가 보낸 문자열 — 제어문자를 지우고 자른다. 찍기 전에 한 번 더 정리한다(TD32).
+    None(모름)은 빈 문자열이다 — `"None"` 이라는 글자를 지어내지 않는다(P3 3라운드)."""
+    if value is None:
+        return ""
     return _CONTROL.sub("", str(value)).strip()[:limit]
 
 
@@ -161,16 +165,18 @@ def without_sudo(text: str) -> str:
     return _SUDO.sub(r"\1", text)
 
 
-def tool_hints(raw: Any) -> dict[str, dict[str, Any]]:
-    """`/worker/spec` 의 `tools`(`[[tools]]`) → 이름 → {install(OS 별), docs}. 문구는 정리한다."""
+def tool_hints(raw: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """`/worker/spec` 의 `tools`(`[[tools]]`) → 이름 → {install(OS 별), docs}. 문구는 정리한다.
+    모양은 읽는 자리(`doctor.reach`)가 이미 봤다 — 항목마다 `name` 이 있다. 안내는 표시만 하므로
+    `docs` · `install` 이 없으면 안내가 없을 뿐이다."""
     out: dict[str, dict[str, Any]] = {}
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-            continue
-        install = item.get("install") if isinstance(item.get("install"), dict) else {}
+    for item in raw:
+        install = item.get("install")
+        docs = item.get("docs")
+        texts = {} if install is None else {str(k): clean_text(v) for k, v in install.items()}
         out[clean_text(item["name"], 64)] = {
-            "install": {str(k): clean_text(v) for k, v in install.items() if isinstance(v, str)},
-            "docs": clean_text(item["docs"]) if isinstance(item.get("docs"), str) else "",
+            "install": texts,
+            "docs": "" if docs is None else clean_text(docs),
         }
     return out
 
@@ -234,9 +240,14 @@ def unreachable_checks(entry: Mapping[str, Any]) -> dict[str, str] | None:
         return None
     out: dict[str, str] = {}
     for item in raw:
-        if isinstance(item, dict) and isinstance(item.get("name"), str):
-            code = item.get("code")
-            out[clean_text(item["name"], 64)] = clean_text(code, 64) if code else CHECK_LOCAL_ONLY
+        # 이름이나 이유가 없는 항목을 조용히 버리면 「닿는다」로 읽힌다 — 칸 전체를 모름으로 둔다
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("code"), str)
+        ):
+            return None
+        out[clean_text(item["name"], 64)] = clean_text(item["code"], 64)
     return out
 
 
@@ -263,19 +274,37 @@ def classify_preset(
     `{}` 는 「모두 닿는다」이다 — 서버의 로컬 레인처럼 칸이 필요 없는 자리는 `{}` 를 준다.
     """
     # 이름은 서버가 보낸 것이다 — 사람용 표에 그대로 찍히므로 제어문자를 지운다(검증자 1 #7)
-    name = clean_text(entry.get("name"), 64)
-    tools = _names(entry.get("requires"))
-    checks = [clean_text(c, 64) for c in entry.get("checks") or ()]
-    missing = _names(facts.get("missing_tools"))
-    workspace = _names(facts.get("workspace_tools"))
+    name = clean_text(entry["name"], 64)
+    tools = _names(entry["requires"])
+    raw_checks = entry["checks"]
+    checks = [] if raw_checks is None else [clean_text(c, 64) for c in raw_checks]
+    missing = _names(facts["missing_tools"])
+    workspace = _names(facts["workspace_tools"])
     missing_rows = []
     for tool in missing:
         install, docs = hint_for(tool, hints, os_name)
         missing_rows.append({"tool": tool, "install": install, "docs": docs})
-    capable = str(entry.get("placement") or "pool") in CAPABLE_PLACEMENTS
+    placement = entry["placement"]
 
     def row(applies: str, state: str | None, code: str | None, **kw: Any) -> PresetRow:
         return PresetRow(name, applies, state, missing_rows, checks, code, tools=tools, **kw)
+
+    def unknown(code: str, note: str) -> PresetRow:
+        # 판정에 쓸 칸을 서버가 말하지 않았다 — 오는지도 모르므로 「오지 않음」도 「빠짐」도 아니다
+        return row(APPLIES_UNKNOWN, UNKNOWN, code, note=note)
+
+    if placement is None:
+        return unknown(
+            "placement_unknown",
+            "the server does not say which pool this preset runs in (older rcm) — presets for "
+            "other pools cannot be counted",
+        )
+    if placement != "pool" and placement not in CAPABLE_PLACEMENTS:
+        return unknown(
+            "placement_unknown",
+            f"the server names a placement rcm does not know ({clean_text(placement, 64)})",
+        )
+    capable = placement in CAPABLE_PLACEMENTS
 
     far = [c for c in checks if unreachable is not None and c in unreachable]
     blind = bool(checks) and unreachable is None
@@ -305,14 +334,18 @@ def classify_preset(
         )
 
     if not capable:
-        pools = {
-            str(entry.get("pool") or DEFAULT_POOL),
-            *(str(p) for p in entry.get("pools") or ()),
-        }
-        if pool not in pools:
+        home, also = entry["pool"], entry["pools"]
+        if home != pool and (also is None or pool not in also):
+            if home is None or also is None:
+                return unknown(
+                    "pool_unknown", "the server does not say which pools this preset runs in"
+                )
+            pools = {home, *also}
             return row(
                 APPLIES_OTHER_POOL, None, None, note=f"runs in pool {', '.join(sorted(pools))}"
             )
+        if raw_checks is None:
+            return unknown("checks_unknown", "the server does not say which checks it needs")
         if far:
             return check_far()
         if blind:
@@ -334,6 +367,8 @@ def classify_preset(
             None,
             note="this machine does not take any-capable jobs (accept_any = false)",
         )
+    if raw_checks is None:
+        return unknown("checks_unknown", "the server does not say which checks it needs")
     if far:
         return check_far()
     if blind:
@@ -376,9 +411,20 @@ def preset_problems(rows: Sequence[PresetRow]) -> list[str]:
     return out
 
 
+def unknown_rows(rows: Sequence[PresetRow]) -> list[str]:
+    """이 머신에 올 수도 있는 프리셋 가운데 모름인 행 → 「판정 못 함」 줄. 종료 3 은 행의 상태에서
+    나온다 — 모름을 만든 자리가 따로 줄을 적어야 하는 것이 아니다."""
+    return [
+        f"{r.name}: {r.note or 'unknown'}"
+        for r in rows
+        if r.state == UNKNOWN and r.applies in (*COMING, APPLIES_UNKNOWN)
+    ]
+
+
 def no_jobs_reason(rows: Sequence[PresetRow], pool: str) -> str | None:
-    """올 프리셋이 0개면 그 이유 한 줄(TD26 · TD53). 하나라도 오면 None."""
-    if any(r.counts for r in rows):
+    """올 프리셋이 0개면 그 이유 한 줄(TD26 · TD53). 하나라도 오거나, 오는지 모르는 프리셋이
+    있으면 None — 모르는 것을 「아무것도 오지 않는다」로 단정하지 않는다."""
+    if any(r.counts or r.applies == APPLIES_UNKNOWN for r in rows):
         return None
     if not rows:
         return f"{NO_JOBS}: the server has no presets"
@@ -405,6 +451,10 @@ def _cells(rows: Sequence[Sequence[str]]) -> list[str]:
     return out
 
 
+#: 상태 대신 메모를 보이는 행
+NOTE_ONLY = (APPLIES_OTHER_POOL, APPLIES_NOT_COMING, APPLIES_LOCAL_LANE, APPLIES_UNKNOWN)
+
+
 def _preset_detail(p: Mapping[str, Any]) -> str:
     parts: list[str] = []
     for m in p.get("missing") or []:
@@ -414,7 +464,12 @@ def _preset_detail(p: Mapping[str, Any]) -> str:
         if m.get("docs"):
             bit += f" · docs: {m['docs']}"
         parts.append(bit)
-    if p["applies"] in (APPLIES_OTHER_POOL, APPLIES_NOT_COMING, APPLIES_LOCAL_LANE):
+    if p["applies"] in (
+        APPLIES_OTHER_POOL,
+        APPLIES_NOT_COMING,
+        APPLIES_LOCAL_LANE,
+        APPLIES_UNKNOWN,
+    ):
         parts.append(p.get("note") or "")
     elif p["state"] == READY:
         parts.append(READY_NOTE)
@@ -434,10 +489,15 @@ def _preset_state(p: Mapping[str, Any]) -> str:
         return "not coming"
     if p["applies"] == APPLIES_LOCAL_LANE:
         return "local lane"
-    return STATE_TEXT.get(p.get("state") or "", "—")
+    return STATE_TEXT.get(p["state"], "—") if p["state"] is not None else "—"
 
 
-REQ_MARK = {"ok": "ok", "fail": "FAIL", "warn": "warn", "info": "info"}
+def _shown(value: Any) -> str:
+    """사람용 칸 — 모름(None)은 `—` 이다."""
+    return "—" if value is None else str(value)
+
+
+REQ_MARK = {"ok": "ok", "fail": "FAIL", "warn": "warn", "info": "info", "unknown": "?"}
 
 
 def render(doc: Mapping[str, Any]) -> list[str]:
@@ -472,8 +532,10 @@ def render(doc: Mapping[str, Any]) -> list[str]:
         if service.get("file"):
             env = ", ".join(service.get("env_names") or []) or "none"
             lines.append(f"service  {service['file']} ({service.get('manager')}) · env {env}")
-        else:
+        elif service.get("path"):
             lines.append("service  no service file found — measured with the default worker PATH")
+        else:
+            lines.append("service  no service file rcm could read — PATH unknown")
         lines.append(f"PATH     {service.get('path') or 'unknown'}")
     shell = doc.get("shell")
     if shell:
@@ -505,9 +567,10 @@ def render(doc: Mapping[str, Any]) -> list[str]:
             _cells(
                 [
                     [
-                        "alive" if m.get("alive") else "down",
-                        str(m.get("name")),
-                        f"pool {m.get('pool')} · {m.get('eligible')}/{m.get('presets')} eligible",
+                        {True: "alive", False: "down"}.get(m["alive"], "unknown"),
+                        str(m["name"]),
+                        f"pool {_shown(m['pool'])} · {_shown(m['eligible'])}/"
+                        f"{_shown(m['presets'])} eligible",
                     ]
                     for m in machines
                 ]

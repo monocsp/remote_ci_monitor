@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import plistlib
 import re
@@ -24,7 +25,7 @@ import sys
 import tarfile
 import xml.parsers.expat
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -456,8 +457,10 @@ def pick_service_file(
     그 역할의 `rcm` 하위 명령을 띄우는 파일로 거른다. 같은 자리에 둘 이상이면 사람이 고르고,
     비TTY 면 사용법 오류다. 없으면 None(「서비스 파일 없음」).
 
-    읽지 못한 파일은 `unreadable` 에 모은다. 자동으로 찾은 후보면 빼고 나머지로 계속 찾는다.
-    `--service-file` 로 준 파일이면 `ServiceFileUnreadable` 를 그대로 던진다.
+    읽지 못한 파일은 `unreadable` 에 모은다. 자동으로 찾은 후보면 빼고 같은 자리의 나머지로
+    찾지만, 그 자리에서 고른 파일이 없으면 다음 자리로 넘어가지 않고 None 이다 — 설치 자리의 못
+    읽은 파일이 서비스 관리자가 읽는 파일일 수 있어서, setup 자리의 사본으로 재면 짐작이다(P3
+    3라운드 HIGH). `--service-file` 로 준 파일이면 `ServiceFileUnreadable` 를 그대로 던진다.
     """
     skipped: list[ServiceFileUnreadable] = [] if unreadable is None else unreadable
     if explicit:
@@ -472,6 +475,7 @@ def pick_service_file(
         p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
     )
     for stage in (installed, staged):
+        before = len(skipped)
         found = _matching(stage, role, skipped)
         if len(found) == 1:
             return found[0]
@@ -482,6 +486,8 @@ def pick_service_file(
                 if picked is not None:
                     return read_service_file(picked)
             raise DoctorUsage(f"several service files match: {names} — pass --service-file PATH")
+        if len(skipped) > before:
+            return None
     return None
 
 
@@ -524,36 +530,68 @@ def infer_roles(environ: Mapping[str, str]) -> list[str]:
     return roles
 
 
-def git_ref_presets(entries: list[Mapping[str, Any]], rows: list[dc.PresetRow]) -> dict[str, str]:
-    """이 머신에 오는 git_ref 프리셋 → 저장소 이름. 오는 프리셋의 `checks` 에 이름이 오른 점검
-    프리셋도 든다 — 점검은 그 머신을 지정한 git_ref 잡이다(결정 94)."""
-    by_name = {dc.clean_text(p["name"], 64): p for p in entries}
+def git_ref_presets(
+    presets: tuple[SpecPreset, ...], rows: list[dc.PresetRow]
+) -> tuple[dict[str, str], list[str]]:
+    """이 머신에 오는 git_ref 프리셋 → 저장소 이름, 그리고 모르는 것의 줄. 오는 프리셋의 `checks`
+    에 이름이 오른 점검 프리셋도 든다 — 점검은 그 머신을 지정한 git_ref 잡이다(결정 94).
+
+    서버가 `source_modes` 를 말하지 않은 프리셋, git_ref 인데 `repo` 를 말하지 않은 프리셋은
+    「git_ref 아님」 · 「저장소 없음」으로 읽지 않고 모름으로 둔다(P3 3라운드 (g))."""
+    by_name = {dc.clean_text(p.name, 64): p for p in presets}
     coming = {r.name for r in rows if r.counts}
     names = set(coming)
     for r in rows:
         if r.name in coming:
             names.update(c for c in r.checks if c in by_name)
-    out: dict[str, str] = {}
-    for name in names:
-        p = by_name.get(name) or {}
-        if "git_ref" in [str(m) for m in p.get("source_modes") or ()]:
-            out[name] = dc.clean_text(p.get("repo") or "", 64)
-    return out
+    known: dict[str, str] = {}
+    unknown: list[str] = []
+    for name in sorted(names):
+        p = by_name.get(name)
+        if p is None:
+            continue
+        if p.source_modes is None:
+            unknown.append(
+                f"{name}: the server does not say whether it takes git_ref jobs (older rcm) — "
+                "cannot check git and [[repos]] for it"
+            )
+        elif "git_ref" in p.source_modes:
+            if p.repo is None:
+                unknown.append(
+                    f"{name}: the server does not say which repository its git_ref jobs use — "
+                    "cannot check [[repos]] for it"
+                )
+            else:
+                known[name] = dc.clean_text(p.repo, 64)
+    return known, unknown
 
 
-# ── 서버 답의 모양 ───────────────────────────────────────────────────────────
+# ── 서버 답의 모양과 파싱 ────────────────────────────────────────────────────
+#
+# 서버 답이 사실이 되는 자리는 여기 한 곳이다(P3 3라운드 근본 원인). 답은 먼저 모양(`Shape`)을
+# 보고 — 필수 칸이 없거나 null 이면 rcm 서버의 답이 아니다 — 그다음 타입이 정해진 사실(`Health` ·
+# `Spec` · `Machines`)로 바꾼다. 뒤에서 판정하는 자리는 이 사실만 받는다. 사실 칸의 `None` 은
+# 「서버가 말하지 않았다 = 모름」이고, 확정값으로 바꾸지 않는다 — 기본값을 넣는 것은 그 칸이
+# 판정에 들지 않을 때뿐이고 그 자리에 이유를 적는다.
 
 
 @dataclass(frozen=True)
 class Shape:
-    """서버 답에서 doctor 가 쓰는 칸의 모양. 칸이 없거나 null 이면 괜찮다(옛 서버 · 모름). 있는데
-    타입이 틀리면 그 답 전체를 알아볼 수 없는 답으로 둔다 — 쓰다가 터지거나, 문자열을 목록처럼
-    한 글자씩 돌거나, `"yes"` 를 참으로 읽지 않게(P3 2라운드 HIGH)."""
+    """서버 답에서 doctor 가 쓰는 칸의 모양. `required` 칸이 없거나 null 이면 그 답 전체가 rcm
+    서버의 답이 아니다(남의 서비스의 `{"status":"ok"}`, `{}`). 필수가 아닌 칸이 없거나 null 이면
+    모름이다 — 파싱이 `None` 으로 옮기고, 판정이 그 `None` 을 모름으로 다룬다. 있는데 타입이
+    틀리면 답 전체를 알아볼 수 없는 답으로 둔다 — 쓰다가 터지거나, 문자열을 목록처럼 한 글자씩
+    돌거나, `"yes"` 를 참으로 읽지 않게(P3 2라운드 HIGH)."""
 
     types: tuple[type, ...]
     keys: Mapping[str, Shape] = field(default_factory=dict)
     items: Shape | None = None  # 배열의 항목
     values: Shape | None = None  # 객체의 값(이름이 서버가 정한 것일 때)
+    required: bool = False
+
+
+def _req(shape: Shape) -> Shape:
+    return replace(shape, required=True)
 
 
 _STR = Shape((str,))
@@ -564,26 +602,29 @@ _GENERATION = Shape((str, int))
 _PRESET = Shape(
     (dict,),
     {
-        "name": _STR,
-        "requires": _STRS,
-        "env_passthrough": _STRS,
-        "env": Shape((dict,), values=_STR),
+        "name": _req(_STR),
+        "requires": _req(_STRS),
+        "env_passthrough": _req(_STRS),
+        "env": _req(Shape((dict,), values=_STR)),
         "pool": _STR,
         "pools": _STRS,
         "placement": _STR,
         "checks": _STRS,
         "source_modes": _STRS,
         "repo": _STR,
-        "unreachable_checks": Shape((list,), items=Shape((dict,), {"name": _STR, "code": _STR})),
+        "unreachable_checks": Shape(
+            (list,), items=Shape((dict,), {"name": _req(_STR), "code": _req(_STR)})
+        ),
     },
 )
-_PROBE = Shape((dict,), {"name": _STR, "argv": _STRS, "timeout_seconds": _NUMBER})
+_PROBE = Shape((dict,), {"name": _req(_STR), "argv": _req(_STRS), "timeout_seconds": _NUMBER})
+_TOOL = Shape((dict,), {"name": _req(_STR), "docs": _STR, "install": Shape((dict,), values=_STR)})
 _MACHINE = Shape(
     (dict,),
     {
-        "id": _STR,
+        "id": _req(_STR),
         "display_name": _STR,
-        "kind": _STR,
+        "kind": _req(_STR),
         "pool": _STR,
         "alive": _BOOL,
         "presets": Shape((dict,), values=Shape((dict,), {"state": _STR, "code": _STR})),
@@ -594,27 +635,31 @@ ANSWER_SHAPES: dict[str, Shape] = {
     "/api/health": Shape(
         (dict,),
         {
-            "ok": _BOOL,
-            "version": _STR,
+            "ok": _req(_BOOL),
+            "version": _req(_STR),
             "error": _STR,
             "preset_env": Shape(
                 (dict,),
-                values=Shape((dict,), {"missing_tools": _STRS, "missing_passthrough": _STRS}),
+                values=Shape(
+                    (dict,),
+                    {"missing_tools": _req(_STRS), "missing_passthrough": _req(_STRS)},
+                ),
             ),
         },
     ),
-    "/api/whoami": Shape((dict,), {"name": _STR, "kind": _STR, "admin": _BOOL}),
+    "/api/whoami": Shape((dict,), {"name": _STR, "kind": _req(_STR), "admin": _BOOL}),
     "/worker/spec": Shape(
         (dict,),
         {
             "generation": _GENERATION,
             "probes": Shape((list,), items=_PROBE),
-            "presets": Shape((list,), items=_PRESET),
-            "tools": Shape((list,)),
+            "presets": _req(Shape((list,), items=_PRESET)),
+            "tools": Shape((list,), items=_TOOL),
         },
     ),
     "/api/machines": Shape(
-        (dict,), {"generation": _GENERATION, "machines": Shape((list,), items=_MACHINE)}
+        (dict,),
+        {"generation": _GENERATION, "machines": _req(Shape((list,), items=_MACHINE))},
     ),
 }
 _JSON_KIND = {dict: "an object", list: "an array", str: "a string", bool: "a boolean"}
@@ -627,12 +672,14 @@ def _json_kind(t: type) -> str:
 def _fits(value: Any, types: tuple[type, ...]) -> bool:
     if isinstance(value, bool):  # bool 은 int 의 하위 형이다 — 숫자 칸에 참거짓을 받지 않는다
         return bool in types
+    if isinstance(value, float) and not math.isfinite(value):  # JSON 의 NaN · Infinity
+        return False
     return isinstance(value, types)
 
 
 def shape_problem(value: Any, shape: Shape, where: str = "") -> str | None:
     """`value` 가 `shape` 에 맞지 않으면 어디가 어떻게 틀렸는지 한 줄(`presets[0].env is an
-    array, not an object`). 값은 넣지 않는다."""
+    array, not an object` · `version is missing`). 값은 넣지 않는다."""
     if not _fits(value, shape.types):
         got = "null or empty" if value is None else _json_kind(type(value))
         want = " or ".join(dict.fromkeys(_json_kind(t) for t in shape.types))
@@ -640,10 +687,13 @@ def shape_problem(value: Any, shape: Shape, where: str = "") -> str | None:
     dot = f"{where}." if where else ""
     if isinstance(value, dict):
         for key, sub in shape.keys.items():
-            if value.get(key) is not None:
-                problem = shape_problem(value[key], sub, f"{dot}{key}")
-                if problem:
-                    return problem
+            if value.get(key) is None:
+                if sub.required:
+                    return f"{dot}{key} is missing"
+                continue
+            problem = shape_problem(value[key], sub, f"{dot}{key}")
+            if problem:
+                return problem
         if shape.values is not None:
             for key, item in value.items():
                 problem = shape_problem(item, shape.values, f"{dot}{dc.clean_text(key, 64)}")
@@ -655,6 +705,191 @@ def shape_problem(value: Any, shape: Shape, where: str = "") -> str | None:
             if problem:
                 return problem
     return None
+
+
+class AnswerUnreadable(Exception):
+    """모양은 맞는데 값이 rcm 서버가 보낼 수 없는 것이다(빈 argv · 범위 밖 시한) — 답 전체를
+    알아볼 수 없는 답으로 둔다. `ValueError` 가 아니다: `reach` 는 그것을 「JSON 아님」으로
+    읽는다."""
+
+
+@dataclass(frozen=True)
+class Health:
+    """`/api/health` 의 사실. `preset_env` 가 None 이면 서버가 자기 측정을 싣지 않았다(옛 서버)."""
+
+    ok: bool
+    version: str
+    error: str | None
+    preset_env: dict[str, PresetEnv] | None
+
+
+@dataclass(frozen=True)
+class PresetEnv:
+    missing_tools: tuple[str, ...]
+    missing_passthrough: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Whoami:
+    kind: str
+
+
+@dataclass(frozen=True)
+class SpecPreset:
+    """`/worker/spec` 프리셋 하나. 판정에 쓰는 칸의 `None` 은 「서버가 말하지 않았다」이다 —
+    `placement` 가 None 이면 옛 서버(TD5)라 `pool` 로 짐작하지 않는다."""
+
+    name: str
+    requires: tuple[str, ...]
+    env_passthrough: tuple[str, ...]
+    env: dict[str, str]
+    placement: str | None
+    pool: str | None
+    pools: tuple[str, ...] | None
+    checks: tuple[str, ...] | None
+    unreachable: dict[str, str] | None
+    source_modes: tuple[str, ...] | None
+    repo: str | None
+
+    def entry(self) -> dict[str, Any]:
+        """`dc.classify_preset` 가 읽는 칸 — 모르는 칸은 null 그대로다."""
+        return {
+            "name": self.name,
+            "requires": list(self.requires),
+            "placement": self.placement,
+            "pool": self.pool,
+            "pools": None if self.pools is None else list(self.pools),
+            "checks": None if self.checks is None else list(self.checks),
+        }
+
+
+@dataclass(frozen=True)
+class Spec:
+    generation: str | None
+    probes: tuple[Any, ...]  # config.Probe
+    presets: tuple[SpecPreset, ...]
+    hints: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class Machine:
+    """`/api/machines` 의 머신 하나. `pool` · `alive` · `presets` 의 None 은 모름(표시만 한다)."""
+
+    id: str
+    name: str
+    kind: str
+    pool: str | None
+    alive: bool | None
+    presets: dict[str, dict[str, str | None]] | None
+
+
+@dataclass(frozen=True)
+class Machines:
+    generation: str | None
+    machines: tuple[Machine, ...]
+
+
+def _strs(value: list[Any] | None) -> tuple[str, ...] | None:
+    return None if value is None else tuple(value)
+
+
+def _generation(value: str | int | None) -> str | None:
+    return None if value is None else dc.clean_text(value, 64) or None
+
+
+def parse_health(answer: dict[str, Any]) -> Health:
+    raw = answer.get("preset_env")
+    preset_env = (
+        None
+        if raw is None
+        else {
+            name: PresetEnv(tuple(v["missing_tools"]), tuple(v["missing_passthrough"]))
+            for name, v in raw.items()
+        }
+    )
+    return Health(answer["ok"], answer["version"], answer.get("error"), preset_env)
+
+
+def parse_whoami(answer: dict[str, Any]) -> Whoami:
+    return Whoami(answer["kind"])
+
+
+def parse_spec(answer: dict[str, Any]) -> Spec:
+    from remote_ci_monitor.config import PROBE_TIMEOUT_MAX, Probe
+
+    probes = []
+    # 프로브는 판정에 들지 않는다(시한 초과만 모름이다) — 칸이 없으면 잴 것이 없다
+    raw_probes = answer.get("probes")
+    for i, p in enumerate([] if raw_probes is None else raw_probes):
+        timeout = p.get("timeout_seconds")
+        timeout = 10 if timeout is None else timeout  # config.Probe 의 기본값
+        if isinstance(timeout, float) or not 1 <= timeout <= PROBE_TIMEOUT_MAX:
+            raise AnswerUnreadable(
+                f"probes[{i}].timeout_seconds is not an integer from 1 to {PROBE_TIMEOUT_MAX}"
+            )
+        if not p["argv"]:
+            raise AnswerUnreadable(f"probes[{i}].argv is empty")
+        probes.append(Probe(name=p["name"], argv=tuple(p["argv"]), timeout_seconds=timeout))
+    presets = []
+    for p in answer["presets"]:
+        far = p.get("unreachable_checks")
+        presets.append(
+            SpecPreset(
+                name=p["name"],
+                requires=tuple(p["requires"]),
+                env_passthrough=tuple(p["env_passthrough"]),
+                env=dict(p["env"]),
+                placement=p.get("placement"),
+                pool=p.get("pool"),
+                pools=_strs(p.get("pools")),
+                checks=_strs(p.get("checks")),
+                unreachable=None
+                if far is None
+                else {dc.clean_text(c["name"], 64): dc.clean_text(c["code"], 64) for c in far},
+                source_modes=_strs(p.get("source_modes")),
+                repo=p.get("repo"),
+            )
+        )
+    tools = answer.get("tools")
+    return Spec(
+        generation=_generation(answer.get("generation")),
+        probes=tuple(probes),
+        presets=tuple(presets),
+        # 설치 안내는 표시만 한다 — 칸이 없으면 안내가 없을 뿐이다
+        hints=dc.tool_hints([] if tools is None else tools),
+    )
+
+
+def parse_machines(answer: dict[str, Any]) -> Machines:
+    out = []
+    for m in answer["machines"]:
+        raw = m.get("presets")
+        verdicts = (
+            None
+            if raw is None
+            else {name: {"state": v.get("state"), "code": v.get("code")} for name, v in raw.items()}
+        )
+        shown = m.get("display_name")
+        out.append(
+            Machine(
+                id=m["id"],
+                name=shown if shown is not None else m["id"],
+                kind=m["kind"],
+                pool=m.get("pool"),
+                alive=m.get("alive"),
+                presets=verdicts,
+            )
+        )
+    return Machines(_generation(answer.get("generation")), tuple(out))
+
+
+#: 라우트 → 모양이 맞은 답을 사실로 바꾸는 함수
+ANSWER_PARSERS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "/api/health": parse_health,
+    "/api/whoami": parse_whoami,
+    "/worker/spec": parse_spec,
+    "/api/machines": parse_machines,
+}
 
 
 # ── 실행 ─────────────────────────────────────────────────────────────────────
@@ -706,8 +941,15 @@ class _Run:
         self.pool = dc.DEFAULT_POOL
         self._service_file: ServiceFile | None = None
         self.path_known = True  # 서비스 PATH 를 아나 — 모르면 PATH 로 찾는 것은 재지 않는다
-        #: 이 머신에 오는 git_ref 프리셋 → 저장소 이름(명세가 `source_modes` 를 실을 때만 안다)
+        #: 이 머신에 오는 git_ref 프리셋 → 저장소 이름(명세를 받았을 때만 안다)
         self.git_presets: dict[str, str] | None = None
+        #: 판정에 쓰는 사실 가운데 서버가 말하지 않은 것 — `document` 가 「판정 못 함」 줄로 옮긴다.
+        #: 행 · 프로브 · rcm 자신의 요구의 모름은 각자의 상태에서 따로 끌어낸다
+        self.unknown: list[str] = []
+        #: 모름(unknown)인 프로브 → 그 이유
+        self.probe_why: dict[str, str] = {}
+        #: 어느 프리셋이 git_ref 인지 서버가 다 말하지 않았다(옛 서버 · 모르는 배치)
+        self.unsure_git = False
 
     # ── 공통 ──
 
@@ -773,15 +1015,15 @@ class _Run:
         }
         return self.server
 
-    def answered(self, health: Mapping[str, Any]) -> None:
+    def answered(self, health: Health) -> None:
         """`/api/health` 가 왔다. 503 `ok: false`(janitor 멈춤 · 워커 down)에도 본문은 오지만
         서버가 성한 것은 아니다 — `state` 를 ok 로 적지 않고 이유를 경고로 보인다. 이 머신의
         판정은 그대로다."""
         assert self.server is not None
-        version = dc.clean_text(health.get("version"), 64)
-        if health.get("ok") is False:
+        version = dc.clean_text(health.version, 64) or None
+        if not health.ok:
             self.server.update(state="not ok", version=version)
-            why = dc.clean_text(health.get("error") or "no reason given", 120)
+            why = "no reason given" if health.error is None else dc.clean_text(health.error, 120)
             self.warnings.append(f"the server answers but reports a problem: {why}")
         else:
             self.server.update(state="ok", version=version)
@@ -790,8 +1032,9 @@ class _Run:
         """GET 하나. 닿지 않거나 401 · 옛 서버면 판정 못 함(종료 3)으로 적고 (False, None).
 
         답이 JSON 이 아니거나(틀린 포트의 HTML · 빈 본문) 그 라우트의 모양(`ANSWER_SHAPES`)에
-        맞지 않아도 판정 못 함이다. 모양을 여기 한 곳에서 보므로 뒤에서 쓰는 자리는 답이 dict 이고
-        칸의 타입이 맞다고 믿어도 된다."""
+        맞지 않으면 — 필수 칸이 없거나 null 이어도 — 판정 못 함이다. 맞으면 그 라우트의 파서
+        (`ANSWER_PARSERS`)가 타입이 정해진 사실로 바꿔 돌려준다. 서버 답이 사실이 되는 자리는
+        여기 한 곳이다 — 뒤에서 판정하는 자리는 날 dict 를 읽지 않는다."""
         from remote_ci_monitor.client import ClientError
 
         assert self.server is not None
@@ -814,7 +1057,10 @@ class _Run:
         else:
             why = shape_problem(answer, ANSWER_SHAPES[route])
             if why is None:
-                return True, answer
+                try:
+                    return True, ANSWER_PARSERS[route](answer)
+                except AnswerUnreadable as e:
+                    why = str(e)
         self.undecided.append(
             f"{self.server['url']} gave {route} an answer rcm cannot read ({why}) — check that "
             "the URL and port are the rcm server's"
@@ -823,11 +1069,23 @@ class _Run:
         return False, None
 
     def document(self) -> dict[str, Any]:
+        """종료 코드는 사실에서 끌어낸다. 「판정 못 함」은 손으로 적은 줄(닿지 않음 · 토큰 ·
+        서비스 파일)에 더해, 모름인 행 · 프로브 · rcm 자신의 요구와 서버가 말하지 않은 사실에서
+        나온다 — 읽는 자리마다 종료 3 을 기억해 넣지 않아도 된다. 「문제」는 확정된 사실(빠진 도구 ·
+        FAIL 요구 · 아무 프리셋도 오지 않음)에서만 나온다."""
         rows = self.rows
         if self.judged and self.role in (dc.ROLE_WORKER, dc.ROLE_COORDINATOR_WORKER):
             reason = dc.no_jobs_reason(rows, self.pool)
             if reason:
                 self.problems.append(reason)
+        undecided = list(self.undecided)
+        undecided += dc.unknown_rows(rows)
+        undecided += [f"probe {name}: {why}" for name, why in self.probe_why.items()]
+        undecided += [
+            f"{r['name']}: {r['detail']}" for r in self.requirements if r["state"] == "unknown"
+        ]
+        undecided += self.unknown
+        undecided = list(dict.fromkeys(undecided))
         problems = dc.preset_problems(rows) + self.problems
         problems += [
             f"{r['name']}: {r['detail']}" for r in self.requirements if r["state"] == "fail"
@@ -837,7 +1095,7 @@ class _Run:
         warnings += [
             f"{r['name']}: {r['detail']}" for r in self.requirements if r["state"] == "warn"
         ]
-        code = dc.decide_exit(problems, self.undecided)
+        code = dc.decide_exit(problems, undecided)
         # 키는 늘 있다 — 모르는 값은 키를 빼지 않고 null 이다(위임 결정 J). 읽는 쪽은 모르는 키를
         # 무시한다(docs/operating.md)
         doc: dict[str, Any] = {
@@ -854,7 +1112,7 @@ class _Run:
             "remote_machines": self.remote,
             "summary": dc.summary(rows),
             "problems": problems,
-            "undecided": list(self.undecided),
+            "undecided": undecided,
             "warnings": warnings,
             "exit": code,
         }
@@ -905,6 +1163,11 @@ class _Run:
             env = dc.clean_env(manager, self.ctx.environ, sf.env)
             if sf.path_unknown:
                 env.pop("PATH", None)
+        elif skipped:
+            # 후보를 못 읽어 고른 파일이 없다 — 그 파일의 PATH 를 모른다. 기본 PATH 를 짐작하는
+            # 것은 후보가 하나도 없을 때뿐이다(P3 3라운드 HIGH)
+            env = dc.clean_env(manager, self.ctx.environ, {})
+            env.pop("PATH", None)
         else:
             env = dc.clean_env(
                 manager, self.ctx.environ, {}, default_path=self.ctx.worker_service_path
@@ -918,7 +1181,7 @@ class _Run:
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
-        if not self.path_known and broken is None and not (sf and sf.path_unknown):
+        if not self.path_known and broken is None and not skipped and not (sf and sf.path_unknown):
             # systemd 의 기본 PATH 는 배포판마다 다르다 — 추정해서 재면 없는 「빠짐」을 지어낸다
             self.undecided.append(
                 "the service file sets no PATH and systemd's default differs between "
@@ -998,16 +1261,16 @@ class _Run:
         ok, me = self.reach(client.whoami, "/api/whoami", WORKER_TOKEN_HINT)
         if not ok:
             return
-        if (me.get("kind") or "client") != "worker":
+        if me.kind != "worker":
             self.undecided.append(
-                f"a worker token is needed — this one is a {dc.clean_text(me.get('kind'))} "
+                f"a worker token is needed — this one is a {dc.clean_text(me.kind, 64)} "
                 "token (rcm token add NAME --worker)"
             )
             return
         ok, spec = self.reach(client.spec_answer, "/worker/spec", WORKER_TOKEN_HINT)
         if not ok:
             return
-        self.server["generation"] = dc.clean_text(spec.get("generation"), 64) or None
+        self.server["generation"] = spec.generation
         self.measure(spec, env, pool=cfg.pool, accept_any=bool(cfg.accept_any))
 
     def git_requirements(self, cfg: Any, env: Mapping[str, str]) -> None:
@@ -1015,7 +1278,12 @@ class _Run:
         를 싣지 않으면(옛 서버, 명세를 못 받음) 지금처럼 `[[repos]]` 가 있을 때 잰다. 오는
         git_ref 프리셋의 저장소가 이 워커의 `[[repos]]` 에 없으면 `repo_missing` 이다(E4, §3.6
         D8) — 넣어야 할 이름을 알려 줄 뿐 채우지 않는다."""
-        needed = bool(cfg.repos) if self.git_presets is None else bool(self.git_presets)
+        if self.git_presets is None or self.unsure_git:
+            # 명세를 못 받았거나 서버가 어느 프리셋이 git_ref 인지 다 말하지 않았다 — 지금처럼
+            # `[[repos]]` 가 있으면 잰다
+            needed = bool(cfg.repos) or bool(self.git_presets)
+        else:
+            needed = bool(self.git_presets)
         if needed:
             self.requirements.append(self.git_row(env, cfg.repos))
         have = {r.name for r in cfg.repos}
@@ -1075,28 +1343,17 @@ class _Run:
             if linger is not None:
                 self.requirements.append(linger)
 
-    def measure(
-        self, spec: Mapping[str, Any], env: dict[str, str], *, pool: str, accept_any: bool
-    ) -> None:
+    def measure(self, spec: Spec, env: dict[str, str], *, pool: str, accept_any: bool) -> None:
         """명세대로 깨끗한 환경에서 잰다 — 잰 것을 서버에 보내지 않는다(TD12)."""
-        from remote_ci_monitor.config import Probe
-
-        probes = []
-        for p in spec.get("probes") or []:
-            if isinstance(p, dict) and p.get("argv") and isinstance(p.get("name"), str):
-                timeout = int(p.get("timeout_seconds") or 10)
-                argv = tuple(str(a) for a in p["argv"])
-                probes.append(Probe(name=p["name"], argv=argv, timeout_seconds=timeout))
         if not self.path_known:
             # 서비스 PATH 를 모르면 프로브도 돌리지 않는다 — 빈 PATH 로 돌리면 「missing」을
             # 지어낸다. 프리셋도 재지 않는다. 판정 못 함은 service_env 가 이미 적었다
-            for probe in probes:
-                self.probes[dc.clean_text(probe.name, 64)] = {
-                    "state": dc.TOOL_UNKNOWN,
-                    "value": None,
-                }
+            for probe in spec.probes:
+                name = dc.clean_text(probe.name, 64)
+                self.probes[name] = {"state": dc.TOOL_UNKNOWN, "value": None}
+                self.probe_why[name] = "not run — the service PATH is unknown"
             return
-        for raw_name, r in hostsample.run_probes(probes, env).items():
+        for raw_name, r in hostsample.run_probes(list(spec.probes), env).items():
             name = dc.clean_text(raw_name, 64)  # 서버가 보낸 이름 — 찍기 전에 정리한다
             state = {
                 "ok": dc.TOOL_OK,
@@ -1104,42 +1361,31 @@ class _Run:
                 "error": dc.TOOL_BROKEN,
                 "timeout": dc.TOOL_UNKNOWN,
             }.get(r.state, dc.TOOL_UNKNOWN)
-            self.probes[name] = {"state": state, "value": r.value}
+            # 프로브 값에 이 머신의 경로가 섞일 수 있다 — 홈은 가린다
+            value = None if r.value is None else dc.hide_home(dc.clean_text(r.value), self.home)
+            self.probes[name] = {"state": state, "value": value}
             if state == dc.TOOL_UNKNOWN:
-                self.undecided.append(f"probe {name} timed out")
-        hints = dc.tool_hints(spec.get("tools"))
-        entries = [p for p in spec.get("presets") or [] if isinstance(p, dict) and p.get("name")]
-        if entries and not all("placement" in p for p in entries):
-            self.undecided.append(
-                "the server does not say which pool each preset runs in (older rcm) — presets "
-                "for other pools cannot be counted"
-            )
+                self.probe_why[name] = "timed out" if r.state == "timeout" else "no answer"
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"
-        # 이 머신에서 돌 수 없는 점검은 서버가 `unreachable_checks` 에 적는다(TO18, 위임 결정 2).
-        # 명세 목록에 무엇이 빠졌는지로 짐작하지 않는다. 칸이 없으면 그 점검은 「모름」이다
-        blind: list[str] = []
-        for p in entries:
-            far = dc.unreachable_checks(p)
-            if far is None and p.get("checks"):
-                blind.append(dc.clean_text(p["name"], 64))
-            passthrough = tuple(str(x) for x in p.get("env_passthrough") or ())
-            fixed = {str(k): str(v) for k, v in (p.get("env") or {}).items()}
-            requires = tuple(str(x) for x in p.get("requires") or ())
-            job_env = jobenv.job_env(passthrough, fixed, env)
-            missing, workspace = runner.measure_tools(requires, job_env)
+        for p in spec.presets:
+            job_env = jobenv.job_env(p.env_passthrough, p.env, env)
+            missing, workspace = runner.measure_tools(p.requires, job_env)
             unset = [
                 dc.clean_text(u, 64)
-                for u in jobenv.missing_passthrough(passthrough, env, preset_env=fixed)
+                for u in jobenv.missing_passthrough(p.env_passthrough, env, preset_env=p.env)
             ]
-            entry = dict(p) if "placement" in p else {**p, "pool": pool}
+            # 이 머신에서 돌 수 없는 점검은 서버가 `unreachable_checks` 에 적는다(TO18, 위임 결정
+            # 2). 칸이 없으면(None) 그 점검은 「모름」이다 — 목록에 무엇이 빠졌는지로 짐작하지
+            # 않는다. `placement` 가 없으면(옛 서버) 그 프리셋은 모름이다 — `pool` 로 짐작하지
+            # 않는다(TD5)
             row = dc.classify_preset(
-                entry,
+                p.entry(),
                 {"missing_tools": missing, "workspace_tools": workspace},
                 pool=pool,
                 accept_any=accept_any,
-                hints=hints,
+                hints=spec.hints,
                 os_name=os_name,
-                unreachable=far,
+                unreachable=p.unreachable,
             )
             for m in row.missing:
                 note = runner.missing_note(m["tool"], job_env)
@@ -1151,20 +1397,16 @@ class _Run:
                     "(env_passthrough)"
                 )
             if self.opts.shell_path and row.applies != dc.APPLIES_OTHER_POOL:
-                shell_env = jobenv.job_env(passthrough, fixed, self.ctx.environ)
-                row.shell_differs = runner.measure_tools(requires, shell_env) != (
+                shell_env = jobenv.job_env(p.env_passthrough, p.env, self.ctx.environ)
+                row.shell_differs = runner.measure_tools(p.requires, shell_env) != (
                     missing,
                     workspace,
                 )
             self.rows.append(row)
         self.judged = True
-        if blind:
-            self.undecided.append(
-                "the server does not say which checks can run on this machine (older rcm) — "
-                f"cannot judge {', '.join(blind)}"
-            )
-        if any("source_modes" in p for p in entries):
-            self.git_presets = git_ref_presets(entries, self.rows)
+        self.git_presets, unsure = git_ref_presets(spec.presets, self.rows)
+        self.unknown += unsure
+        self.unsure_git = bool(unsure) or any(r.applies == dc.APPLIES_UNKNOWN for r in self.rows)
 
     # ── 역할: coordinator · coordinator-worker ──
 
@@ -1234,25 +1476,24 @@ class _Run:
         )
         if not ok:
             return
-        self.server["generation"] = dc.clean_text(machines.get("generation"), 64) or None
-        listed = [m for m in machines.get("machines") or [] if isinstance(m, dict)]
+        self.server["generation"] = machines.generation
+        # 원격 머신 목록은 표시만 한다(종료 코드에 들지 않는다). 서버가 말하지 않은 칸은 null 이다 —
+        # `pool` 이 없는 머신을 "None" 풀로, `alive` 가 없는 머신을 down 으로 적지 않는다
         self.remote = [
             {
-                "name": dc.clean_text(m.get("display_name") or m.get("id"), 64),
-                "pool": dc.clean_text(m.get("pool"), 64),
-                "alive": bool(m.get("alive")),
-                "eligible": sum(
-                    1
-                    for v in (m.get("presets") or {}).values()
-                    if isinstance(v, dict) and v.get("state") == "eligible"
-                ),
-                "presets": len(m.get("presets") or {}),
+                "name": dc.clean_text(m.name, 64),
+                "pool": None if m.pool is None else dc.clean_text(m.pool, 64),
+                "alive": m.alive,
+                "eligible": None
+                if m.presets is None
+                else sum(1 for v in m.presets.values() if v["state"] == "eligible"),
+                "presets": None if m.presets is None else len(m.presets),
             }
-            for m in listed
-            if m.get("kind") != "local"
+            for m in machines.machines
+            if m.kind != "local"
         ]
         if self.role == dc.ROLE_COORDINATOR_WORKER:
-            local = next((m for m in listed if m.get("kind") == "local"), {})
+            local = next((m for m in machines.machines if m.kind == "local"), None)
             self.local_lane(cfg, health, local)
 
     def local_lane_only(self, cfg: Any) -> None:
@@ -1276,25 +1517,23 @@ class _Run:
                 )
             )
 
-    def local_lane(self, cfg: Any, health: Mapping[str, Any], local: Mapping[str, Any]) -> None:
+    def local_lane(self, cfg: Any, health: Health, local: Machine | None) -> None:
         """로컬 레인은 서버가 자기 서비스 환경에서 잰 값으로 본다(`preset_env`, G7 · TD30).
 
         서버가 그 프리셋을 재지 않았으면(키가 없는 옛 서버, 항목이 없음) `requires` 가 있는
         프리셋은 「모름」이다 — 빈 「빠진 도구」로 읽어 ready 라 부르지 않는다. 서버는 `requires` 와
         `env_passthrough` 가 둘 다 없는 프리셋은 재지 않으므로 그 프리셋은 항목이 없어도 된다.
         """
-        raw = health.get("preset_env")
-        measured: dict[str, Any] | None = raw if isinstance(raw, dict) else None
-        blind: list[str] = []
-        verdicts = local.get("presets") if isinstance(local.get("presets"), dict) else {}
+        measured = health.preset_env
+        # 서버의 판정 코드는 표시만 한다 — 없으면 doctor 가 정한 코드를 둔다
+        verdicts = {} if local is None or local.presets is None else local.presets
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"
         # 로컬 레인 행도 워커와 같은 `[[tools]]` 안내를 쓴다(위임 결정 E3)
         hints = dc.tool_hints(
             [{"name": t.name, "docs": t.docs, "install": dict(t.install)} for t in cfg.tools]
         )
         for p in cfg.presets:
-            got = (measured or {}).get(p.name)
-            facts = got if isinstance(got, dict) else {}
+            got = None if measured is None else measured.get(p.name)
             entry = {
                 "name": p.name,
                 "requires": list(p.requires),
@@ -1305,7 +1544,11 @@ class _Run:
             }
             row = dc.classify_preset(
                 entry,
-                {"missing_tools": facts.get("missing_tools") or []},
+                {
+                    "missing_tools": [] if got is None else list(got.missing_tools),
+                    # 서버는 워크스페이스 도구를 따로 세지 않는다 — 빠진 도구에 든다
+                    "workspace_tools": [],
+                },
                 pool=dc.DEFAULT_POOL,
                 accept_any=bool(cfg.server.local_accept_any),
                 hints=hints,
@@ -1313,25 +1556,19 @@ class _Run:
                 unreachable={},  # 서버의 로컬 레인은 모든 점검을 돌린다(local_only 도)
             )
             verdict = verdicts.get(p.name)
-            if isinstance(verdict, dict) and isinstance(verdict.get("code"), str):
+            if verdict is not None and verdict["code"] is not None:
                 row.code = dc.clean_text(verdict["code"], 64)
-            if not isinstance(got, dict) and p.requires and row.counts:
+            if got is None and p.requires and row.counts:
+                why = "older rcm" if measured is None else "no preset_env entry"
                 row.state, row.code = dc.UNKNOWN, "tools_unknown"
-                row.note = "the server did not say what it measured for this preset"
-                blind.append(p.name)
-            unset = [dc.clean_text(v, 64) for v in facts.get("missing_passthrough") or []]
+                row.note = f"the server did not report its own tool measurements ({why})"
+            unset = [] if got is None else [dc.clean_text(v, 64) for v in got.missing_passthrough]
             if unset and row.applies != dc.APPLIES_OTHER_POOL:
                 self.warnings.append(
                     f"{p.name}: {', '.join(unset)} not set in the server's service environment"
                 )
             self.rows.append(row)
         self.judged = True
-        if blind:
-            why = "older rcm" if measured is None else "no preset_env entry"
-            self.undecided.append(
-                f"the server did not report its own tool measurements ({why}) — cannot judge "
-                f"{', '.join(blind)}"
-            )
 
     # ── 역할: client ──
 
@@ -1364,7 +1601,7 @@ class _Run:
             return
         self.answered(health)
         version = self.server["version"]
-        if version and version != __version__:
+        if version is not None and version != __version__:
             self.warnings.append(
                 f"this client runs v{__version__} and the server v{version} — rcm follows the "
                 "server's version on the next command (docs/operating.md)"
