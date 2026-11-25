@@ -2838,6 +2838,16 @@ MUTANTS = (
             "tests/test_tool_shim.py::test_r2_server_startup_counts_a_blocked_git_shim_as_missing",
         ),
     ),
+    # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
+    Mutant(
+        # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
+        # 머신을 받을 수 있는 자리로 보이고 머신 탭 · 점검 스위퍼가 그것을 믿는다(TL7)
+        name="m5t-lanes-zero-local-alive",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                alive=self._has_local_lanes(),\n",
+        new="                alive=True,\n",
+        tests=("tests/test_lanes_zero.py::test_tl7_at_local_is_not_alive",),
+    ),
 )
 
 
