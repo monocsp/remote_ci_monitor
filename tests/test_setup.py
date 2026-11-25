@@ -1501,3 +1501,36 @@ def test_s10_a_typed_name_is_asked_again(cfg, tmp_path):
     assert go(fake, "--data-dir", str(tmp_path / "data"), "--label", "test.rcm.server") == 0
     assert "give an address, not a name" in fake.err.getvalue()
     assert read_toml(cfg / "server.toml")["server"]["bind"] == "127.0.0.1"
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_s11_korean_paths_round_trip(tmp_path, monkeypatch, platform):
+    # A-E8: 한글 HOME · config · data_dir · 서비스 파일 · rcm 경로를 쓰고 되읽는다
+    from remote_ci_monitor import doctor
+    from remote_ci_monitor.config import load_server_config
+
+    h = tmp_path / "집 폴더"
+    h.mkdir()
+    monkeypatch.setenv("HOME", str(h))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "설정"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "자료"))
+    for name in ("RCM_CONFIG", "RCM_SERVER", "RCM_TOKEN", "RCM_WORKER_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("RCM_SERVER_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    rcm = tmp_path / "가상 환경" / "bin" / "rcm"
+    config = tmp_path / "설정" / "서버" / "server.toml"
+    data = tmp_path / "데이터" / "rcm"
+    suffix = "plist" if platform == "darwin" else "service"
+    sf = tmp_path / "서비스" / f"test.rcm.server.{suffix}"
+    fake = Fake(platform=platform, rcm=(rcm, False))
+    argv = coordinator_args(data, "--config", str(config), "--service-file", str(sf))
+    assert go(fake, *argv) == 0, fake.text
+    assert load_server_config(config, environ={}, check_tools=False).data_dir == data
+    read = doctor.read_service_file(sf, user_home=str(h) if platform == "linux" else None)
+    assert read.program == str(rcm) and read.env.get("HOME") == str(h)
+    assert read.launch is not None and read.launch.get("config") == str(config), read.launch
+    if platform == "darwin":
+        doc = plistlib.loads(sf.read_bytes())
+        assert doc["ProgramArguments"] == [str(rcm), "serve", "--config", str(config)]
+        assert doc["StandardOutPath"] == str(h / "Library" / "Logs" / "rcm" / "test.rcm.server.log")
