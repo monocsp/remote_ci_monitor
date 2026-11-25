@@ -955,17 +955,6 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         """로컬 레인 먼저, 원격은 워커 이름순(`server.workers[]`)."""
         return [*self.worker_infos(), *self.remote_worker_infos(None, now)]
 
-    def pools_without_workers(self, now: datetime) -> list[str]:
-        """등록된 워커가 있는데 전부 down 인 풀. 기본 풀은 로컬 레인이 있을 때만 뺀다 — 분배 전용
-        (`lanes = 0`)이면 기본 풀도 원격 워커뿐이라 다른 풀처럼 센다(M5t-a §3 C12, TL13)."""
-        pools = super().pools_without_workers(now)
-        if self._has_local_lanes():
-            return pools
-        rows = [r for r in self._workers() if r.pool == DEFAULT_POOL]
-        if rows and not any(self.worker_alive(r, now) for r in rows):
-            pools = sorted({*pools, DEFAULT_POOL})
-        return pools
-
     def pool_lanes(self, pool: str, now: datetime) -> int:
         local = self.config.server.lanes if pool == DEFAULT_POOL else 0
         return local + self.remote_lanes(pool, now)

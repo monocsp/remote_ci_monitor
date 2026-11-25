@@ -253,6 +253,10 @@ class RemoteWorkersMixin:
     def _on_marker(self, job_id: int, kind: str, value: str) -> None: ...
     def mask_for_preset(self, preset_name: str) -> tuple[bytes, ...]: ...  # type: ignore[empty-body]
 
+    if TYPE_CHECKING:
+        # `CapabilitiesMixin` 이 정의한다 — MRO 에서 이 믹스인이 앞이라 여기 몸통을 두면 가린다
+        def _has_local_lanes(self) -> bool: ...
+
     def _remote_init(self) -> None:
         self._claim_slots = threading.BoundedSemaphore(CLAIM_WAIT_SLOTS)
         self._worker_samples: dict[str, HostSample] = {}
@@ -364,10 +368,13 @@ class RemoteWorkersMixin:
         return tuple(out)
 
     def pools_without_workers(self, now: datetime) -> list[str]:
-        """등록된 워커가 있는데 전부 down 인 풀(기본 풀은 로컬 레인이 있으니 제외)."""
+        """등록된 워커가 있는데 전부 down 인 풀. 기본 풀은 로컬 레인이 있을 때만 뺀다 — 그때는
+        원격 워커가 다 죽어도 로컬 레인이 받는다. 분배 전용(`lanes = 0`)이면 기본 풀도 원격
+        워커뿐이라 다른 풀처럼 센다(M5t-a §3 C12, TL13)."""
+        local_lanes = self._has_local_lanes()
         seen: dict[str, bool] = {}
         for row in self._workers():
-            if row.pool == DEFAULT_POOL:
+            if row.pool == DEFAULT_POOL and local_lanes:
                 continue
             seen[row.pool] = seen.get(row.pool, False) or self.worker_alive(row, now)
         return sorted(name for name, alive in seen.items() if not alive)

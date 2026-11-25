@@ -2848,6 +2848,18 @@ MUTANTS = (
         new="                alive=True,\n",
         tests=("tests/test_lanes_zero.py::test_tl7_at_local_is_not_alive",),
     ),
+    Mutant(
+        # 기본 풀을 늘 뺀다 — 분배 전용 서버에서 기본 풀 워커가 다 죽어도 `pools_without_workers`
+        # 가 비어 `rcm check` 의 pools 경보가 꺼진다(TL13, batch 2 항목 3)
+        name="m5t-lanes-zero-default-pool-skipped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            if row.pool == DEFAULT_POOL and local_lanes:\n",
+        new="            if row.pool == DEFAULT_POOL:\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl13_pools_without_workers_counts_the_default_pool_only_without_local_lanes",
+        ),
+    ),
 )
 
 
