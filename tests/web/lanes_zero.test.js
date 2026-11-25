@@ -9,7 +9,7 @@ const assert = require("node:assert");
 const { load } = require("./helpers.js");
 
 const rcm = load();
-const { queueHeader, reasonText, hostRunsNoJobs, machineRows } = rcm;
+const { queueHeader, reasonText, hostRunsNoJobs, hostFacts, machineRows } = rcm;
 
 const NOW = Date.parse("2026-11-26T12:00:00Z");
 
@@ -37,7 +37,12 @@ test("TL11 a waiting row does not count 0/0 local lanes", () => {
   for (const lang of ["en", "ko"]) {
     const out = reasonText(s.pools[0].queue[0], s, NOW, lang);
     assert.ok(!/0\/0/.test(out.text), lang + ": " + out.text);
+    // 무엇을 말하나도 본다 — 비어 있어도 「0/0 없음」은 초록이다
+    assert.equal(out.text, lang === "en" ? "waiting for lane" : "대기 중", lang);
   }
+  // 비교 행: 레인이 있는 서버는 오늘처럼 `0/2` 를 단다
+  const two = status(2);
+  assert.ok(/0\/2/.test(reasonText(two.pools[0].queue[0], two, NOW, "en").text));
 });
 
 test("TL11 the server's own host card says it runs no jobs", () => {
@@ -48,6 +53,18 @@ test("TL11 the server's own host card says it runs no jobs", () => {
   assert.equal(hostRunsNoJobs(status(0), worker), false);
   assert.equal(hostRunsNoJobs(status(1), local), false);
   assert.equal(hostRunsNoJobs(null, local), false);
+});
+
+test("TL11 the host card's facts line renders runs no jobs in both languages", () => {
+  // 카드가 실제로 그리는 줄(`hostCardHtml` 의 facts) — 술어만이 아니라 문구까지
+  assert.equal(typeof hostFacts, "function");
+  const local = { name: "coord", source: "local", os: "macOS 26", cores: 8, load: [0.5] };
+  const worker = { name: "build-02", source: "worker", os: "macOS 26", cores: 8, load: [0.5] };
+  assert.equal(hostFacts(status(0), local, "en"), "macOS 26 · 8 cores · load 0.5 · runs no jobs");
+  assert.equal(hostFacts(status(0), local, "ko"), "macOS 26 · 시스템 부하 0.5 · 코어 8개 · 작업을 돌리지 않는 머신");
+  // 비교 행: 원격 워커의 카드 · 레인이 있는 서버의 카드에는 붙지 않는다
+  assert.equal(hostFacts(status(0), worker, "en"), "macOS 26 · 8 cores · load 0.5");
+  assert.equal(hostFacts(status(1), local, "ko"), "macOS 26 · 시스템 부하 0.5 · 코어 8개");
 });
 
 test("TL11 the machines tab shows @local without lanes as running no jobs, not down", () => {

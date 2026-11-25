@@ -470,6 +470,13 @@
     var s = status && status.server;
     return !!(host && host.source === "local" && s && s.lanes === 0);
   }
+  /** 호스트 카드 이름 줄의 사실(`hostCardHtml`) — OS · 코어 · 부하, 서버 자신인데 로컬 레인이
+   * 없으면 「잡을 돌리지 않는 머신」을 끝에 단다(M5t-a §3 C11). */
+  function hostFacts(status, h, lang) {
+    h = h || {};
+    return (h.os || DASH) + " · " + T(lang, "host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })
+      + (hostRunsNoJobs(status, h) ? " · " + T(lang, "host.runs_no_jobs") : "");
+  }
   function hostCards(status, lang) {
     var pools = poolsOf(status);
     var out = [];
@@ -3534,7 +3541,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
-    jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs,
+    jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, shelfLine: shelfLine, shelfDeletable: shelfDeletable, shelfDeleteOutcome: shelfDeleteOutcome, navModel: navModel, SSE_REFETCH_KINDS: SSE_REFETCH_KINDS, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
@@ -4719,8 +4726,7 @@
         (spark ? '<div class="spark">' + spark + "<span>" + esc(tr("host.window")) + "</span></div>" : "") + "</div>";
     };
     var name = title || h.name || DASH;
-    var facts = (h.os || DASH) + " · " + tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })
-      + (hostRunsNoJobs(state.status, h) ? " · " + tr("host.runs_no_jobs") : "");
+    var facts = hostFacts(state.status, h, L());
     // 이름 · 나이 줄은 **한 줄**이다(말줄임 · 전문은 title) — 처리 대기 숫자의 자릿수가 5초마다 바뀌어도
     // 줄 수가 그대로여야 그 아래 카드가 뛰지 않는다
     var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn"><span class="hname" data-cut="hname" title="' + esc(name) + '">' + midHtml(name) + '</span><span class="age" data-cut="age" title="' + esc(facts) + '">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(facts) + "</span></div>";
