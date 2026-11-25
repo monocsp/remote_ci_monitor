@@ -159,7 +159,7 @@ def post(
     extra: dict[str, Any] | None = None,
 ):
     source: dict[str, Any]
-    if preset in ("simcheck", "localcheck", "relgit"):
+    if preset in ("simcheck", "localcheck") or preset.startswith("relgit"):
         source = {"mode": "git_ref", "ref": GIT_SHA}
     else:
         source = {
@@ -407,6 +407,41 @@ def test_to16_a_local_only_preset_whose_tool_is_missing_on_the_local_lanes_is_40
     assert body["error_code"] == "tool_missing"
     assert FAKE_TOOL in body["error"], body
     assert job_count(lo_ready) == before
+
+
+def test_to16_a_pool_placed_local_only_preset_whose_tool_is_missing_locally_queues(tmp_path):
+    """`tool_missing` 409 는 capable 갈래에만 있다 — pool 배치의 `local_only` 프리셋은 도구가
+    빠져도 지금처럼 큐에 들고 `_why_none` 이 이유를 보인다(`local_only_refusal` 의 이른 return)."""
+    presets = PRESETS + block("relpoolneed", "local_only = true", f'requires = ["{FAKE_TOOL}"]')
+    s = ready(server(tmp_path, presets=presets))
+    try:
+        before = job_count(s)
+        status, body = post(s, "relpoolneed")
+        assert status == 201, body
+        assert job_count(s) == before + 1
+    finally:
+        s.close()
+
+
+def test_to10_an_any_capable_local_only_preset_sent_to_another_pool_is_409(tmp_path):
+    """any-capable 프리셋도 `--pool` 을 주면 그 풀의 잡이다 — 기본 풀이 아니면 로컬 레인이 못
+    받으니 409 다(`rel` 은 pool 배치로만 그 경우를 본다)."""
+    presets = PRESETS + block(
+        "relanypool", "local_only = true", 'placement = "any-capable"', 'pools = ["mac2"]'
+    )
+    s = ready(server(tmp_path, presets=presets))
+    try:
+        report(s, OTHER, host_key=HOST_C)  # mac2 풀에 산 원격이 있어도 후보가 아니다
+        before = job_count(s)
+        status, body = post(s, "relanypool", pool="mac2")
+        assert status == 409, body
+        assert body["error_code"] == "no_capable_machine", body
+        assert "mac2" in body["error"], body
+        assert job_count(s) == before
+        status, body = post(s, "relanypool")  # 비교 행: 풀을 안 주면 any-capable 로 큐에 든다
+        assert status == 201, body
+    finally:
+        s.close()
 
 
 @pytest.mark.parametrize("report_state", ["unmeasured", "stale"])
@@ -921,6 +956,101 @@ def test_to19_removing_the_mark_leaves_no_local_only_code_on_the_check(lo, monke
     assert not [m for m in logs if "ref_unresolved" in m], logs
 
 
+# ── TO10 · TO16 `rcm run` 의 종료 코드 ───────────────────────────────────────
+#
+# 원격 금지 409 는 서버가 잡을 만들지 않았다고 말한 것이다 — `--machine` 이 없어도 「결과 모름」(3)
+# 이 아니라 거절(2)이다(P3 2라운드 검증자 지적). 진짜 서버에 진짜 CLI 를 붙여 두 경로를 다 본다.
+
+#: CLI 시험용 git_ref 짝 — `rel` · `relany` · `relneed` 와 같은 자리에 선 git_ref 프리셋
+CLI_PRESETS = PRESETS + "".join(
+    [
+        block("relgitpool", "local_only = true", GIT, 'pools = ["mac2"]'),
+        block("relgitany", "local_only = true", GIT, 'placement = "any-capable"'),
+        block(
+            "relgitneed",
+            "local_only = true",
+            GIT,
+            'placement = "any-capable"',
+            f'requires = ["{FAKE_TOOL}"]',
+        ),
+    ]
+)
+
+
+class _CliSnap:
+    """tree 경로의 제출까지만 가는 가짜 스냅샷 — 409 는 업로드 전에 온다."""
+
+    repo = "org/app"
+    branch = "main"
+    base_sha = "abc123f"
+    dirty = True
+    tree_hash = TREE_HASH
+    bytes = len(TAR)
+    entries: tuple[Any, ...] = ()
+
+    def __init__(self, tar_path: Path) -> None:
+        self.tar_path = tar_path
+
+
+@pytest.mark.parametrize("path", ["tree", "git_ref"])
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("other-pool", "no_capable_machine"),
+        ("no-local-accept-any", "no_capable_machine"),
+        ("tool-missing", "tool_missing"),
+    ],
+)
+def test_to10_to16_rcm_run_exits_2_on_a_local_only_refusal(
+    tmp_path, monkeypatch, capsys, path, case, code
+):
+    from remote_ci_monitor import cli as cli_mod
+
+    monkeypatch.setattr(server_module, "resolve_ref", lambda *a, **k: GIT_SHA)
+    extra = "local_accept_any = false\n" if case == "no-local-accept-any" else ""
+    s = ready(server(tmp_path, presets=CLI_PRESETS, extra=extra))
+    try:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        for var in ("XDG_CONFIG_HOME", "RCM_LABEL", "RCM_CONFIG"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("RCM_SERVER", f"http://127.0.0.1:{s.port}")
+        monkeypatch.setenv("RCM_TOKEN", s.tokens["alice"])
+        names = {
+            "tree": {"other-pool": "rel", "no-local-accept-any": "relany"},
+            "git_ref": {"other-pool": "relgitpool", "no-local-accept-any": "relgitany"},
+        }[path]
+        tool = {"tree": "relneed", "git_ref": "relgitneed"}[path]
+        preset = names.get(case, tool)
+        argv = ["run", preset, "--no-wait"]
+        if case == "other-pool":
+            argv += ["--pool", "mac2"]
+        if path == "git_ref":
+            argv += ["--ref", GIT_SHA]
+        else:
+            monkeypatch.setattr(
+                cli_mod, "make_snapshot", lambda *_a, **_k: _CliSnap(tmp_path / "snap.tar")
+            )
+            (tmp_path / "t").mkdir()
+            argv += ["--dir", str(tmp_path / "t")]
+        before = job_count(s)
+        try:
+            rc = cli_mod.main(argv)
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else 2
+        err = capsys.readouterr().err
+        # 서버의 409 를 그대로 보인다 — 진짜 서버가 이 코드로 거절했는지도 확인한다
+        assert "submit failed" in err, err
+        assert "runs only on this server's local lanes" in err, err
+        status, body = post(s, preset, pool="mac2" if case == "other-pool" else None)
+        assert (status, body["error_code"]) == (409, code), body
+        assert job_count(s) == before
+        assert rc == 2, err  # 잡이 안 생긴 확실한 거절 — 결과 모름(3)이 아니다
+    finally:
+        s.close()
+
+
 # ── 문서 ─────────────────────────────────────────────────────────────────────
 
 
@@ -941,4 +1071,10 @@ def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
     assert "shown before any of these" not in flat
     # 원격에서 이미 통과한 로컬 전용 점검은 지문이 같은 동안 유효하다(위임 결정 4 의 추가)
     assert "keeps counting there until that machine's fingerprint changes" in flat
-    assert "local_only = true" in unreleased(read(CHANGELOG))
+    # 원격 금지 409 는 `rcm run` 의 2 다 · `/api/eta` 의 `ahead` 가 null 일 수 있다(P3 2라운드)
+    assert "`rcm run` prints the server's reason and exits 2, since no job was made" in flat
+    assert "`POST /api/eta` answers `ahead: null`" in flat
+    changelog = " ".join(unreleased(read(CHANGELOG)).split())
+    assert "local_only = true" in changelog
+    assert "`rcm run` exits 2 on these refusals" in changelog
+    assert "`ahead: null`" in changelog
