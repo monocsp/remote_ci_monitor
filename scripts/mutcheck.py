@@ -3489,6 +3489,15 @@ MUTANTS = (
             "tests/test_setup.py::test_s6_the_systemd_worker_unit_logs_to_its_label_and_sets_home",
         ),
     ),
+    Mutant(
+        # 서비스 관리자가 없는 OS 에서 토큰 명령을 찍지 않는다 — 코디네이터를 손으로 띄운 사람이
+        # 같은 빌드로 토큰을 만드는 길을 모른다(P5 A-E3)
+        name="setup-tokens-dropped-without-a-manager",
+        path="src/remote_ci_monitor/setup.py",
+        old='            plan.tokens = core.token_commands(rcm or Path("rcm"), plan.config)\n',
+        new="            pass\n",
+        tests=("tests/test_setup.py::test_s8_tokens_are_printed_without_a_service_manager",),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

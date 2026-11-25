@@ -1354,6 +1354,16 @@ def test_s7_an_unknown_answer_warns_that_the_start_may_fail(cfg, tmp_path):
     assert "could not tell" in err and "start command" in err and "may fail" in err
 
 
+def test_s8_tokens_are_printed_without_a_service_manager(cfg, tmp_path):
+    # A-E3: 서비스 관리자가 없는 OS 에서도 토큰 명령(TR21 · TR27)
+    fake = Fake(platform="freebsd")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    config = cfg / "server.toml"
+    err = fake.err.getvalue()
+    assert f"{RCM} token --config {config} add CLIENT_NAME" in err
+    assert f"{RCM} token --config {config} add WORKER_NAME --worker" in err
+
+
 @pytest.mark.parametrize("raw", [b"[server\nport = 1\n", b"\xff\xfe[server]\n"])
 def test_s9_an_unreadable_existing_config_is_a_warning(cfg, tmp_path, raw):
     # A-E5: 역할 스캔이 setup 을 막지 않는다. 그 파일을 덮는 것은 --force config 일 때만

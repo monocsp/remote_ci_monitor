@@ -738,6 +738,10 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
         plan.label = _label(args, ask, plan.role)
     manager = core.manager_of(world.platform)
     if manager is None:
+        # 서비스 파일은 없어도 토큰 명령(TR21 · TR27)은 찍는다 — 서버를 띄우는 빌드로(P5 A-E3)
+        rcm, _ = world.find_rcm()
+        if plan.role in core.SERVER_ROLES:
+            plan.tokens = core.token_commands(rcm or Path("rcm"), plan.config)
         plan.warnings.append(
             f"no launchd or systemd on {world.platform} — no service file; start "
             f"`rcm {'serve' if plan.role in core.SERVER_ROLES else 'worker'} --config "
