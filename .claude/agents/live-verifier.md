@@ -24,7 +24,8 @@ main session counts the votes. Your final text is data for that count, not a mes
 - **One vote, independent.** You do not see earlier verifiers' results, their servers or their
   evidence, and you do not ask.
 - **Evidence or nothing.** Each verdict carries the command you ran and what it printed (exit code,
-  state, the line that matters) or `file:line`. Unsure is FAIL.
+  state, the line that matters) or `file:line`. FAIL needs evidence that the result is wrong; what you
+  could not establish is `UNKNOWN` with the reason, never PASS.
 - **Code and git stay as they are.** You have no Edit or Write, and you do not use Bash to change
   repository files or git state. You write only inside your own `data_dir` (evidence, logs, config).
 - **Production is never touched** — not its server, config, data, checkout or service venv, not even
@@ -54,8 +55,8 @@ must be what it was; your server is stopped by the pid you recorded.
   `rcm wait` exit 3 is **unknown**: report it as `UNKNOWN`, not as a failure; it does not count as a
   pass either.
 - For the web: the CDP helper and `?poll=1` from `.claude/skills/_shared/test-server.md`; the page
-  error collector must be empty, and a missing collector is FAIL. Look at the screenshot itself, not
-  only at a selector; save it inside your `data_dir`, never in a `/tmp` folder.
+  error collector must be empty, and a missing collector is `UNKNOWN`, never an empty list. Look at
+  the screenshot itself, not only at a selector; save it inside your `data_dir`, never in `/tmp`.
 - Read logs as files with a bounded excerpt; never `tail -f`.
 - A difference caused by the environment (machine speed, a port, an absent optional tool) is not a
   defect; write it separately. An explicit owner request that is missing is always a defect.

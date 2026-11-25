@@ -12,13 +12,20 @@
 - 시험 서버 규칙(포트 8790–8899, `rcm-devtest` data_dir)은 `.claude/skills/_shared/test-server.md`
   에만 있다. `.claude/` 밖(AGENTS.md 등)은 이 잠금의 범위가 아니다.
 - 그 파일의 첫 ```` ```toml ```` 블록은 그대로 서버 설정으로 읽힌다(`load_server_config`).
+- 스킬 · 에이전트 문서와 `CONTRIBUTING.md` 가 예로 든 커밋 제목 · PR 제목(`gh pr create --title`,
+  `git commit -m` 과 그 heredoc 첫 줄, `guard_naming.py commit|pr` 의 인자, 백틱으로 적은
+  `<type>(<scope>): …` 꼴, 제목 앞에 붙이라는 접두어)은 `tools/guard_naming.py` 의 `check_subject`
+  를 통과한다. 2026-11-25 3라운드 — 스킬이 `WIP: ` 접두어를 시켰는데 같은 커밋이 들인 훅은 그
+  제목을 거부했다. 자리표시(`<title>` · `…`)는 건너뛴다.
 - 스킬 · 에이전트가 시키는 명령은 워크트리의 `.venv` 것이다 — `python3 tools/redgreen.py` 는 pytest
   가 없는 인터프리터로 돌고, 맨 `ruff` · `python scripts/mutcheck.py` 는 PATH 의 남의 것을 쓴다.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -77,6 +84,29 @@ BARE_COMMANDS = {
     "python scripts/mutcheck.py": re.compile(r"(?<![\w/.-])python3?\s+scripts/mutcheck\.py"),
     "ruff …": re.compile(r"(?<![\w/.-])ruff\s+(check|format)\b"),
 }
+
+
+#: 예로 든 커밋 · PR 제목을 찾는 꼴. 값은 두 번째 그룹이다.
+TITLE_EXAMPLE_RES = (
+    re.compile(r"""gh pr (?:create|edit)\b[^\n]*?--title[ =](["'])(.+?)\1"""),
+    re.compile(r"""git commit\b[^\n]*?\s-m\s+(["'])(?!\$\()(.+?)\1"""),
+    re.compile(r"""git commit\b[^\n]*?-m\s+"\$\(cat <<-?\s*'?(\w+)'?\n[ \t]*(.+)"""),
+    re.compile(r"""guard_naming\.py\s+(?:commit|pr)\s+(["'])(.+?)\1"""),
+)
+#: 백틱 안의 `type(scope): 요약` 꼴과, 제목을 말하는 줄의 맨 접두어(`WIP: `).
+TITLE_PREFIX_RE = re.compile(r"(?<!`)`([A-Za-z][\w-]*:) ?`(?!`)")
+TITLE_CONTEXT_RE = re.compile(r"\b(title|draft|header)|제목", re.I)
+PLACEHOLDER_RE = re.compile(r"<[^>\n]*>|…|\.\.\.|\$")
+
+
+def _load_guard_naming():
+    path = ROOT / "tools" / "guard_naming.py"
+    spec = importlib.util.spec_from_file_location("guard_naming", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _docs() -> list[Path]:
@@ -191,3 +221,55 @@ def test_commands_run_from_the_worktree_venv(doc: Path) -> None:
         for m in pattern.finditer(text)
     ]
     assert not bare, f"{_rel(doc)}: use ./.venv/bin/python or ./.venv/bin/ruff — {bare}"
+
+
+def _title_examples(text: str, types: tuple[str, ...]) -> list[tuple[int, str, str]]:
+    """(줄 번호, 찾은 글, 검사할 제목). 자리표시가 든 예는 뺀다."""
+
+    def line(pos: int) -> int:
+        return text.count("\n", 0, pos) + 1
+
+    out = []
+    for pattern in TITLE_EXAMPLE_RES:
+        for m in pattern.finditer(text):
+            out.append((line(m.start()), m.group(2), m.group(2).strip()))
+    header = re.compile(rf"(?<!`)`((?:{'|'.join(types)})(?:\([^)`]*\))?!?: [^`\n]+)`")
+    for m in header.finditer(text):
+        out.append((line(m.start()), m.group(1), m.group(1)))
+    for m in TITLE_PREFIX_RE.finditer(text):
+        # 제목 · draft 를 말하는 40자 안의 접두어만 친다(`verified:` 같은 댓글 표식은 뺀다).
+        # 맞는 제목 앞에 붙여 본다 — 붙인 결과가 훅을 통과해야 한다.
+        near = text[max(0, m.start() - 40) : m.end() + 40]
+        if TITLE_CONTEXT_RE.search(near):
+            out.append((line(m.start()), m.group(0), f"{m.group(1)} docs(skills): 예시 제목"))
+    return [(n, seen, title) for n, seen, title in out if not PLACEHOLDER_RE.search(title)]
+
+
+def test_example_titles_pass_the_naming_guard() -> None:
+    guard = _load_guard_naming()
+    checked, wrong = 0, []
+    for doc in (*_docs(), ROOT / "CONTRIBUTING.md"):
+        for number, seen, title in _title_examples(doc.read_text(encoding="utf-8"), guard.TYPES):
+            checked += 1
+            if (reason := guard.check_subject(title)) is not None:
+                wrong.append(f"{_rel(doc)}:{number}: {seen!r} — {reason}")
+    assert checked >= 5, f"the title scan found only {checked} examples — the patterns broke"
+    assert not wrong, "examples tools/guard_naming.py refuses:\n" + "\n".join(wrong)
+
+
+@pytest.mark.parametrize(
+    ("text", "refused"),
+    [
+        ("open it as a draft (`WIP: `, `--draft`)", True),
+        ('gh pr create --base dev --title "WIP: docs(x): 초안"', True),
+        ('git commit -m "Fix bug"', True),
+        ("the header `fix web: 요약` is wrong", False),  # 타입 꼴이 아니면 예로 안 친다
+        ('gh pr create --base dev --title "<title>" --draft', False),
+        ('git commit -m "fix(web): 카드가 local 을 읽던 것"', False),
+        ("header `<type>(<scope>): …`", False),
+    ],
+)
+def test_the_title_scan_reads_each_form(text: str, refused: bool) -> None:
+    guard = _load_guard_naming()
+    found = _title_examples(text, guard.TYPES)
+    assert any(guard.check_subject(t) for _, _, t in found) is refused, found

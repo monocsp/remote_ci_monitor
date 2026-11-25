@@ -43,7 +43,8 @@ Expected behaviour and its source:
 <statement> — <user | plan | workplan | doc | code>: <ref>
 
 A fix for this was just made. You did not make it. Look for what is still wrong.
-If you cannot confirm something, it is FAIL. You will not see other verifiers' results; do not look for them.
+FAIL needs evidence; what you cannot confirm is UNKNOWN with the reason, never PASS.
+You will not see other verifiers' results; do not look for them.
 
 Read:
 - the scenario table: <abs path>
@@ -58,7 +59,7 @@ scenario row; keep each command, exit code and output as files inside your data_
 
 Do:
 1. Core: is the reported symptom gone? Judge from what you ran or read, never from "the code looks fixed".
-2. Every scenario row: action → observed → PASS / FAIL, with evidence.
+2. Every scenario row: action → observed → PASS / FAIL / UNKNOWN, with evidence.
 3. Non-regression: the other paths that use the changed code still behave as before.
 4. The regression test: would it go red if the defect came back? A test that stays green when its target is
    removed is FAIL.

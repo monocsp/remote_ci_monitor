@@ -140,14 +140,16 @@ def test_a_longer_prefix_is_not_read_as_a_shorter_one(tmp_path, capsys):
     assert code == 0, report
 
 
-def test_documents_without_the_marker_are_ignored_but_nothing_checked_is_not_ok(tmp_path, capsys):
+def test_a_document_without_the_marker_is_reported_as_nothing_checked(tmp_path, capsys):
     old = tmp_path / "old.md"
     old.write_text("| S1 | 옛 명세 |\n|---|---|\n", encoding="utf-8")
     code, out = _run(tmp_path, capsys, docs=[str(old)], extra=())
     assert code == 1
     assert out["documents"] == [] and _kinds(out) == [("nothing", "")]
+    # 여러 문서 가운데 하나만 표지가 없어도 그 문서는 검사하지 않았다 — 문서마다 적는다(3라운드)
     code, report = _run(tmp_path, capsys, docs=[str(old), str(tmp_path / "plan.md")])
-    assert code == 0 and [d["prefix"] for d in report["documents"]] == ["X"]
+    assert code == 1 and [d["prefix"] for d in report["documents"]] == ["X"]
+    assert [(p["kind"], p["where"]) for p in report["problems"]] == [("nothing", str(old))]
 
 
 def test_text_output_names_the_problem_and_the_place(tmp_path, capsys):
@@ -302,3 +304,98 @@ def test_the_same_document_given_twice_is_read_once(tmp_path, capsys):
     code, report = _run(tmp_path, capsys, docs=docs)
     assert code == 0, report
     assert len(report["documents"]) == 1
+
+
+# ── 3라운드: 「못 본 것」을 「없는 것」으로 세지 않는다 ──
+
+
+def test_an_unclosed_fence_is_a_format_problem_at_the_line_it_opened(tmp_path, capsys):
+    # 닫히지 않은 펜스는 문서 끝까지 코드다 — 그 뒤의 표지를 조용히 못 읽고 통과했다(H3)
+    plan = PLAN + "\n```text\n<!-- scenario-prefix: Y -->\n| ID |\n|---|\n| Y1 |\n"
+    code, report = _run(tmp_path, capsys, plan=plan)
+    assert code == 1 and _kinds(report) == [("format", "")]
+    opened = PLAN.count("\n") + 2
+    [problem] = report["problems"]
+    assert problem["where"].endswith(f"plan.md:{opened}") and "never closes" in problem["message"]
+
+
+def test_a_backtick_fence_whose_info_string_has_a_backtick_is_not_a_fence(tmp_path, capsys):
+    # CommonMark: 백틱 펜스의 정보 문자열에는 백틱이 올 수 없다 — 그 줄은 펜스가 아니라 본문이다(H3)
+    code, report = _run(tmp_path, capsys, plan="``` a`b\n\n" + PLAN)
+    assert code == 0, report
+    assert report["documents"][0]["ids"] == ["X1", "X2", "X3"]
+    tilde = "~~~ a`b\n<!-- scenario-prefix: Y -->\n| ID |\n|---|\n| Y1 |\n~~~\n\n"
+    code, report = _run(tmp_path, capsys, plan=tilde + PLAN)  # 물결 펜스는 백틱이 와도 펜스다
+    assert code == 0 and [d["prefix"] for d in report["documents"]] == ["X"], report
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["<!-- scenario_prefix: Y -->", "<!-- scenario-prefix Y -->", "<!--scenario-prefix: Y -->",
+     "<!-- scenario-prefix:Y -->", "<!-- Scenario-Prefix: Y -->", "<!-- scenario-prefix: Y ->",
+     "<!-- scenario prefix: Y -->"],
+)  # fmt: skip
+def test_a_line_that_looks_like_a_marker_but_is_not_exact_is_a_format_problem(
+    tmp_path, capsys, line
+):
+    # 표지를 잘못 적으면 그 표는 대조되지 않는다 — 조용히 건너뛰지 않고 format 으로 적는다
+    plan = PLAN + f"\n{line}\n| ID |\n|---|\n| Y1 |\n"
+    code, report = _run(tmp_path, capsys, plan=plan)
+    assert code == 1 and _kinds(report) == [("format", "")], report
+    assert report["problems"][0]["where"].endswith(f"plan.md:{PLAN.count(chr(10)) + 2}")
+
+
+@pytest.mark.parametrize("gap", ["\n", "\n메모 한 줄\n", "\n```\n| X9 |\n```\n"])
+def test_a_table_broken_by_a_gap_is_a_format_problem_not_silently_short(tmp_path, capsys, gap):
+    # 빈 줄 · 본문 줄이 표를 끊으면 뒤의 행을 안 읽었다 — 줄은 있는데 대조하지 않은 행이다
+    plan = "<!-- scenario-prefix: X -->\n| ID | a |\n|---|---|\n| X1 | a |\n" + gap + "| X2 | b |\n"
+    tests = "def test_x1_a():\n    pass\n"
+    code, report = _run(tmp_path, capsys, plan=plan, tests=tests)
+    assert code == 1 and _kinds(report) == [("format", "")], report
+    assert "interrupted" in report["problems"][0]["message"]
+    assert report["problems"][0]["where"].endswith(f"plan.md:{plan.count(chr(10))}")
+
+
+def test_a_table_after_the_next_heading_belongs_to_no_marker(tmp_path, capsys):
+    code, report = _run(tmp_path, capsys, plan=PLAN + "\n## 다음 절\n\n| a | b |\n|---|---|\n")
+    assert code == 0, report
+
+
+def test_a_tag_comment_in_a_helper_nested_in_a_test_tags_nothing(tmp_path, capsys):
+    # 주석의 주인은 그 줄을 품은 가장 안쪽 함수다 — 시험 안의 도우미 함수는 시험이 아니다
+    tests = "def test_x1_a():\n    def helper():\n        # X2\n        pass\n    helper()\n"
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 1 and _kinds(report) == [("missing", "X2")]
+
+
+def test_prefix_usage_counts_a_tag_anywhere_in_the_tests(tmp_path, capsys):
+    # 모듈 주석 · 도우미 안의 주석도 그 접두어를 쓴 것이다 — 「free」라고 하면 새 명세가 부딪힌다
+    tdir = tmp_path / "tests"
+    tdir.mkdir()
+    (tdir / "test_old.py").write_text(
+        "# Q5 is about retries\n\n\ndef helper():\n    # Q6\n    pass\n"
+    )
+    assert st.main(["--prefix-usage", "Q", "--tests", str(tdir), "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["count"] == 2 and "free" not in json.dumps(report)
+    assert any("test_old.py:1" in p and "(Q5)" in p for p in report["places"])
+
+
+def test_a_byte_order_mark_does_not_hide_the_first_marker(tmp_path, capsys):
+    code, report = _run(tmp_path, capsys, plan="\ufeff" + PLAN.split("\n\n", 2)[2])
+    assert code == 0, report
+    assert report["documents"][0]["ids"] == ["X1", "X2", "X3"]
+
+
+def test_an_indented_code_block_is_not_read(tmp_path, capsys):
+    sample = "예시:\n\n    <!-- scenario-prefix: Y -->\n    | ID |\n    |---|\n    | Y1 |\n\n"
+    code, report = _run(tmp_path, capsys, plan=sample + PLAN)
+    assert code == 0 and [d["prefix"] for d in report["documents"]] == ["X"], report
+
+
+def test_prefix_usage_with_documents_is_a_usage_error(tmp_path, capsys):
+    (tmp_path / "plan.md").write_text(PLAN, encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    argv = [str(tmp_path / "plan.md"), "--prefix-usage", "Q", "--tests", str(tmp_path / "tests")]
+    assert st.main(argv) == 2
+    assert "--prefix-usage" in capsys.readouterr().err

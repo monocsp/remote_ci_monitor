@@ -36,8 +36,9 @@ the defect is the parent's job.
 
 ## Stage `prove`, after the parent committed the fix
 
-1. `git -C <wt> status --porcelain` must be empty. If not, stop and return it: mutating on top of
-   uncommitted work loses that work when you revert.
+1. `git -C <wt> status --porcelain -- src tools scripts` must be empty. If not, stop and return it:
+   mutating on top of uncommitted work loses that work when you revert. Your own uncommitted test
+   change under `tests/` (a restart from step 4) is allowed; reverts never touch `tests/`.
 2. The test is green at the fix's sha.
 3. Three mutations, each on the fixed code only, each reverted with `git -C <wt> checkout -- <file>`
    and followed by `git -C <wt> status --porcelain -- src tools scripts` being empty before the next:

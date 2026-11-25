@@ -7,25 +7,31 @@
 왜 있나(2026-11-25): 명세의 시험 행과 실제 시험을 사람이 눈으로 맞췄다. 행이 빠지거나 시험이 없는
 행을 가리켜도 아무것도 빨개지지 않는다. 표지 하나와 이름 규칙 하나로 기계가 대조하게 한다.
 
-명세 쪽: 시험 표 **바로 위 줄**에 `<!-- scenario-prefix: X -->`(대문자 접두어) — 그 줄에 표지만
-있어야 한다(본문 속에 인용한 표지는 세지 않는다). 표의 첫 칸이 ID(`X1`, `X2` …). 어느 칸이
+명세 쪽: 시험 표 **바로 위 줄**에 정확히 `<!-- scenario-prefix: X -->`(대문자 접두어) — 그 줄에
+표지만 있어야 한다(본문 속에 인용한 표지는 세지 않는다). 표지처럼 보이는데 꼴이 다른 줄
+(`scenario_prefix` · 쌍점이나 띄어쓰기 빠짐 · 대문자)은 format 이다 — 건너뛰면 그 표는 대조되지
+않는다. 표의 첫 칸이 ID(`X1`, `X2` …). 표는 빈 줄 · 본문 줄에서 끝난다. 다음 제목 · 표지 전에 같은
+표지 아래 `|` 줄이 또 나오면 끊긴 표라서 format 이다(뒤의 행을 읽지 않았다). 어느 칸이
 `(live)` 이거나 ` (live)` 로 끝나면(시나리오 칸 끝에 붙이는 꼴, `docs/m5t-workplan.md`) pytest 가
 아니라 실기(live run)로 증명하는 행이라 누락으로 세지 않는다. 설명 가운데의 `(live)` 는 아니다.
-표지가 없는 문서는 건드리지 않는다(옛 명세). 펜스 코드 블록(```` ``` ```` · `~~~`) 안의 표지와
-표는 예시라서 읽지 않는다. 펜스는 펜스 글자만 있는 줄(정보 문자열 없이)에서만 닫힌다. 같은 문서를
-두 번 주면(다른 철자라도) 한 번만 읽는다.
+펜스 코드 블록(```` ``` ```` · `~~~`)과 4칸 들여쓴 코드 블록 안의 표지와 표는 예시라서 읽지 않는다.
+펜스는 펜스 글자만 있는 줄(정보 문자열 없이)에서만 닫힌다. 백틱 펜스의 정보 문자열에 백틱이 있으면
+그 줄은 펜스가 아니다(CommonMark). 문서 끝까지 안 닫힌 펜스는 연 줄을 적은 format 이다. 맨 앞의
+BOM 은 떼고 읽는다. 같은 문서를 두 번 주면(다른 철자라도) 한 번만 읽는다.
 시험 쪽: 이름 `test_x3_…`(앞에서부터 `test_x1_x2_…` 처럼 여럿) 또는 시험 함수 **안**의 주석 `# X3`.
+주석의 주인은 그 줄을 품은 가장 안쪽 함수다 — 시험 안에 둔 도우미 함수의 주석은 태그가 아니다.
 
-문제의 종류: format(표지 · 표 · ID 꼴) · empty(ID 가 하나도 없는 표 — 검사한 것이 없다) ·
-duplicate · missing(시험이 없는 행) · orphan(명세에 없는 ID 를 단 시험) · clash(두 문서가 같은
-접두어) · nothing(넘긴 문서 어디에도 표지가 없다 — 검사하지 않은 것을 통과로 세지 않는다) ·
-unreadable(시험 파일을 못 읽음). UTF-8 이 아닌 명세는 format 이다.
+문제의 종류: format(표지 · 표 · ID 꼴, 안 닫힌 펜스, 끊긴 표) · empty(ID 가 하나도 없는 표 — 검사한
+것이 없다) · duplicate · missing(시험이 없는 행) · orphan(명세에 없는 ID 를 단 시험) · clash(두
+문서가 같은 접두어) · nothing(표지가 하나도 없는 문서 — 문서마다 적는다. 검사하지 않은 것을 통과로
+세지 않는다) · unreadable(시험 파일을 못 읽음). UTF-8 이 아닌 명세는 format 이다.
 
 접두어는 새 명세마다 **아무 시험도 쓰지 않는 것**을 고른다(`--prefix-usage`). 기존 시험이 이미
 `test_s1_` · `test_a10_` · `# P2` 꼴을 쓰므로 흔한 한 글자는 고아로 쏟아진다. `TR` 같은 여러 글자도
-된다.
+된다. `--prefix-usage` 는 대조보다 넓게 센다 — 시험 밖(모듈 · 도우미)의 `# P2` 주석과 어디에 있든
+`test_p2_…` 이름도 쓴 것이다. 쓰는 접두어를 「free」라고 하지 않으려고.
 
-종료 코드: 0 문제 없음 · 1 문제 있음 · 2 사용법(파일 · 폴더 없음).
+종료 코드: 0 문제 없음 · 1 문제 있음 · 2 사용법(파일 · 폴더 없음, `--prefix-usage` 에 문서를 줌).
 """
 
 from __future__ import annotations
@@ -44,12 +50,16 @@ EXIT_OK = 0
 EXIT_PROBLEMS = 1
 EXIT_USAGE = 2
 
-MARKER_RE = re.compile(r"<!--\s*scenario-prefix:\s*(\S*?)\s*-->")
+#: 표지의 꼴은 하나다 — 띄어쓰기까지 이대로. 다르게 적은 줄은 LOOKALIKE_RE 가 format 으로 잡는다
+MARKER_RE = re.compile(r"<!-- scenario-prefix: (\S*) -->")
+LOOKALIKE_RE = re.compile(r"^<!.*scenario[\W_]*prefix|scenario[\W_]*prefix.*>$", re.I)
 PREFIX_RE = re.compile(r"^[A-Z]+$")
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+$")
 NAME_TOKEN_RE = re.compile(r"^([a-z]+)([1-9]\d*)$")
-FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-CLOSE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")  # 닫는 펜스 — 정보 문자열이 없다
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")  # 닫는 펜스 — 정보 문자열이 없다
+#: 표 아래에서 표지의 영역을 끝내는 줄 — ATX 제목, setext 밑줄 · 가로줄
+SECTION_RE = re.compile(r"^ {0,3}(#{1,6}(\s|$)|=+[ \t]*$|-{3,}[ \t]*$)")
 LIVE = "(live)"
 SHOWN = 5  # --prefix-usage 가 보여 주는 자리 수
 
@@ -58,26 +68,59 @@ def _problem(kind: str, where: str, message: str, ident: str = "") -> dict[str, 
     return {"kind": kind, "where": where, "id": ident, "message": message}
 
 
-def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
-    """문서 하나의 표들 → {접두어: {"ids": {ID: 줄}, "live": set, "line": 표지 줄}}."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError) as error:
-        problems.append(_problem("format", str(path), f"cannot read as UTF-8: {error}"))
-        return {}
-    groups: dict[str, dict[str, Any]] = {}
-    fence = ""
+def _code_lines(lines: list[str], path: Path, problems: list[dict[str, str]]) -> set[int]:
+    """코드 블록(펜스 · 4칸 들여쓰기) 안의 줄 번호(0부터). 안 닫힌 펜스는 연 줄을 적은 format."""
+    code: set[int] = set()
+    fence, opened, indented, after_blank = "", 0, False, True
     for index, line in enumerate(lines):
-        if fence:  # 펜스 안의 표지는 예시다. 같은 글자로 같거나 더 길게, 그 글자만 있는 줄이 닫는다
+        if fence:  # 같은 글자로 같거나 더 길게, 그 글자만 있는 줄이 닫는다
+            code.add(index)
             close = CLOSE_RE.match(line)
             fence = "" if close and close.group(1).startswith(fence) else fence
             continue
-        if opener := FENCE_RE.match(line):
-            fence = opener.group(1)
+        blank = not line.strip()
+        wide = line.expandtabs(4)
+        # 들여쓴 코드 블록은 문단을 끊지 못한다 — 빈 줄 뒤(또는 문서 첫 줄)에서만 시작한다
+        if not blank and (indented or after_blank) and len(wide) - len(wide.lstrip()) >= 4:
+            code.add(index)
+            indented, after_blank = True, False
             continue
-        if (marker := MARKER_RE.fullmatch(line.strip())) is None:
+        indented = indented and blank  # 빈 줄은 들여쓴 블록을 끝내지 않는다
+        opener = FENCE_RE.match(line)
+        if opener and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
+            code.add(index)
+            fence, opened, after_blank = opener.group(1), index + 1, False
+            continue
+        after_blank = blank
+    if fence:
+        message = f"the {fence} fence opened here never closes — nothing after it was read"
+        problems.append(_problem("format", f"{path}:{opened}", message))
+    return code
+
+
+def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+    """문서 하나의 표들 → {접두어: {"ids": {ID: 줄}, "live": set, "line": 표지 줄}}.
+
+    표지가 하나도 없으면(꼴이 틀린 표지도 없으면) `nothing` 을 그 문서 이름으로 적는다."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()  # -sig: 맨 앞 BOM 을 뗀다
+    except (OSError, UnicodeDecodeError) as error:
+        problems.append(_problem("format", str(path), f"cannot read as UTF-8: {error}"))
+        return {}
+    code = _code_lines(lines, path, problems)
+    groups: dict[str, dict[str, Any]] = {}
+    seen = False
+    for index, line in enumerate(lines):
+        if index in code:
             continue
         where = f"{path}:{index + 1}"
+        if (marker := MARKER_RE.fullmatch(line.strip())) is None:
+            if LOOKALIKE_RE.search(line.strip()):
+                seen = True
+                message = "looks like a marker but is not exactly <!-- scenario-prefix: X -->"
+                problems.append(_problem("format", where, message))
+            continue
+        seen = True
         prefix = marker.group(1)
         if not PREFIX_RE.match(prefix):
             problems.append(_problem("format", where, f"prefix {prefix!r} is not A-Z letters"))
@@ -85,12 +128,13 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
         group = groups.setdefault(prefix, {"ids": {}, "live": set(), "line": index + 1})
         table: list[tuple[int, str]] = []
         for number in range(index + 1, len(lines)):
-            if not lines[number].lstrip().startswith("|"):
+            if number in code or not lines[number].lstrip().startswith("|"):
                 break
             table.append((number + 1, lines[number].strip()))
         if len(table) < 2 or not SEPARATOR_RE.match(table[1][1]):
             problems.append(_problem("format", where, "the marker is not right above a table"))
             continue
+        _interrupted(lines, code, index + 1 + len(table), index + 1, path, problems)
         id_re = re.compile(rf"^{prefix}([1-9]\d*)$")
         for number, row in table[2:]:
             cell = row.strip("|").split("|", 1)[0].strip().strip("*`")
@@ -109,7 +153,40 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
         if not group["ids"]:
             where = f"{path}:{group['line']}"
             problems.append(_problem("empty", where, f"prefix {prefix}: no scenario IDs"))
+    if not seen:
+        message = (
+            "no <!-- scenario-prefix: X --> marker in this document — nothing in it was checked"
+        )
+        problems.append(_problem("nothing", str(path), message))
     return groups
+
+
+def _interrupted(
+    lines: list[str],
+    code: set[int],
+    start: int,
+    marker_line: int,
+    path: Path,
+    problems: list[dict[str, str]],
+) -> None:
+    """표가 끝난 뒤 다음 제목 · 표지 전에 `|` 줄이 또 오면 끊긴 표다 — 뒤의 행을 읽지 않았다."""
+    for number in range(start, len(lines)):
+        text = lines[number].strip()
+        if number in code:
+            continue
+        if (
+            SECTION_RE.match(lines[number])
+            or MARKER_RE.fullmatch(text)
+            or LOOKALIKE_RE.search(text)
+        ):
+            return
+        if text.startswith("|"):
+            message = (
+                f"the table under the marker on line {marker_line} is interrupted by a "
+                "blank or text line — rows after the break were not read"
+            )
+            problems.append(_problem("format", f"{path}:{number + 1}", message))
+            return
 
 
 def _comments(text: str) -> list[tuple[int, str]]:
@@ -120,10 +197,18 @@ def _comments(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _owner(funcs: list[Any], line: int) -> Any:
+    """그 줄을 품은 가장 안쪽 함수(없으면 None) — 안쪽 함수가 늘 더 뒤에서 시작한다."""
+    around = [f for f in funcs if f.lineno <= line <= (f.end_lineno or f.lineno)]
+    return max(around, key=lambda f: f.lineno, default=None)
+
+
 def scan_tests(
-    tests_dir: Path, prefixes: set[str], problems: list[dict[str, str]]
+    tests_dir: Path, prefixes: set[str], problems: list[dict[str, str]], anywhere: bool = False
 ) -> dict[str, list[str]]:
-    """시험 폴더의 `*.py` → {ID: [「파일:줄 함수」 …]}. 주석은 시험 함수 안의 것만 센다."""
+    """시험 폴더의 `*.py` → {ID: [「파일:줄 함수」 …]}. 주석은 그 줄을 품은 가장 안쪽 함수가 시험
+    함수일 때만 센다. `anywhere`(--prefix-usage)는 어디에 있는 주석이든 센다 — 「안 쓴다」고 말하기
+    전에 그 접두어의 흔적을 모두 본다."""
     tags: dict[str, list[str]] = {}
     if not prefixes:
         return tags
@@ -135,13 +220,13 @@ def scan_tests(
         try:
             text = path.read_text(encoding="utf-8")
             tree = ast.parse(text)
-            comments = _comments(text)
+            comments = [(line, c) for line, c in _comments(text) if comment_re.search(c)]
         except (OSError, UnicodeDecodeError, SyntaxError, tokenize.TokenError) as error:
             problems.append(_problem("unreadable", str(path), f"cannot read: {error}"))
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
+        funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
+        owners = {line: _owner(funcs, line) for line, _ in comments}
+        for node in funcs:
             if not node.name.startswith("test_"):
                 continue
             found: set[str] = set()
@@ -150,12 +235,16 @@ def scan_tests(
                 if m is None or m.group(1).upper() not in prefixes:
                     break
                 found.add(f"{m.group(1).upper()}{m.group(2)}")
-            end = node.end_lineno or node.lineno
             for line, comment in comments:
-                if node.lineno <= line <= end:
+                if owners[line] is node:
                     found.update(a + b for a, b in comment_re.findall(comment))
             for ident in found:
                 tags.setdefault(ident, []).append(f"{path}:{node.lineno} {node.name}")
+        if anywhere:  # 시험 함수 밖의 주석 — 대조에서는 태그가 아니지만 접두어는 쓴 것이다
+            for line, comment in comments:
+                if owners[line] is None or not owners[line].name.startswith("test_"):
+                    for ident in sorted({a + b for a, b in comment_re.findall(comment)}):
+                        tags.setdefault(ident, []).append(f"{path}:{line} comment")
     return tags
 
 
@@ -177,9 +266,6 @@ def check(docs: list[Path], tests_dir: Path) -> dict[str, Any]:
                 problems.append(_problem("clash", where, message))
             owners.setdefault(prefix, doc)
             parsed.append((doc, prefix, group))
-    if not parsed:
-        message = "no document carries a <!-- scenario-prefix: X --> marker — nothing was checked"
-        problems.append(_problem("nothing", ", ".join(map(str, docs)), message))
     tags = scan_tests(tests_dir, {prefix for _, prefix, _ in parsed}, problems)
     known: set[str] = set()
     documents = []
@@ -215,7 +301,7 @@ def _print_text(report: dict[str, Any]) -> None:
 def prefix_usage(prefix: str, tests_dir: Path, as_json: bool) -> int:
     """접두어 하나를 이미 쓰는 시험 태그 수. 0 이면 새 명세가 써도 된다(종료 0), 아니면 1."""
     problems: list[dict[str, str]] = []
-    tags = scan_tests(tests_dir, {prefix}, problems)
+    tags = scan_tests(tests_dir, {prefix}, problems, anywhere=True)
     places = sorted(f"{place} ({ident})" for ident, found in tags.items() for place in found)
     if as_json:
         print(json.dumps({"prefix": prefix, "count": len(places), "places": places,
@@ -242,11 +328,16 @@ def main(argv: list[str] | None = None) -> int:
         epilog="A new workplan must pick a prefix with zero usage: run --prefix-usage first. "
         "Existing tests already carry tags such as test_s1_, test_a10_ and # P2, so a common "
         "one-letter prefix turns them into orphans. Multi-letter prefixes such as TR are "
-        "allowed. The marker must be alone on its line. A row is live (proved by a live run, "
+        "allowed and --prefix-usage counts a tag anywhere under the test folder (module or helper "
+        "comments too). The marker must be alone on its line and written exactly as "
+        "<!-- scenario-prefix: X -->; a line that looks like one but differs is a format problem, "
+        "as are a table broken by a blank or text line and a fence that never closes. "
+        "A row is live (proved by a live run, "
         "never counted missing) when one of its cells is (live) or ends with (live) after a "
         "space, as at the end of the scenario cell; (live) in the middle of a cell does not "
-        "count. Markers and tables inside fenced code blocks are not read; a fence closes "
-        "only on a line of bare fence characters. "
+        "count. Markers and tables inside fenced or four-space indented code blocks are not "
+        "read; a fence closes only on a line of bare fence characters. Every document given "
+        "must carry a marker. "
         "exit codes: 0 ok (--prefix-usage: unused) · 1 problems (including a table with no IDs "
         "and no marked document at all; --prefix-usage: already used) · 2 usage",
     )
@@ -264,6 +355,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE if stop.code else EXIT_OK
     if args.prefix_usage is not None and not PREFIX_RE.match(args.prefix_usage):
         print(f"--prefix-usage {args.prefix_usage!r}: A-Z letters only", file=sys.stderr)
+        return EXIT_USAGE
+    if args.prefix_usage is not None and args.docs:
+        print("--prefix-usage takes no workplan — run it alone", file=sys.stderr)
         return EXIT_USAGE
     if args.prefix_usage is None and not args.docs:
         print("give at least one workplan, or --prefix-usage P", file=sys.stderr)

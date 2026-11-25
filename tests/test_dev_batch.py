@@ -100,7 +100,10 @@ def test_init_pins_the_fetched_base_and_never_overwrites(batch):
 @pytest.mark.parametrize(
     "owns",
     ["src/*.py", "/etc/passwd", "docs/../src/x.py", "src/", "src/remote_ci_monitor", "tests",
-     ".claude/", "tools/", ""],
+     ".claude/", "tools/", "", "DOCS", "Src/Remote_CI_Monitor",
+     # 3라운드: 역슬래시는 git 경로에서 구분자가 아니다 — 겹침 검사를 비켜 간다. 제어 · 보이지
+     # 않는 글자는 출력에서 다른 경로처럼 보인다
+     "docs\\a.md", "docs/a\tb.md", "docs/\u202eevil.md"],
 )  # fmt: skip
 def test_add_refuses_paths_that_are_not_a_narrow_claim(batch, owns):
     wt = batch.worktree("wt-a", A_BRANCH)
@@ -160,16 +163,25 @@ def test_scope_names_each_stray_path_with_its_commit(batch, capsys):
 class FakeGitHub:
     """status 가 읽는 자리만: 브랜치 head · PR 목록 · rcm/ci 상태 · 댓글."""
 
-    def __init__(self, heads, prs=(), statuses=None, comments=None, down=False):
+    def __init__(self, heads, prs=(), statuses=None, comments=None, down=False, broken=None):
         self.heads, self.prs = heads, list(prs)
         self.statuses, self.comments = statuses or {}, comments or {}
         self.down = down
+        #: 자리 하나(branches · pulls · issues · statuses · check-runs)의 답을 망가뜨린다 —
+        #: 예외면 던지고, 아니면 그 값을 답으로 준다(None · 목록 아닌 것 · 모르는 상태 값)
+        self.broken = broken or {}
 
     def request(self, method, path, fields=None):
         assert method == "GET" and path.startswith("repos/o/r/"), (method, path)
         if self.down:
             raise ApiError("HTTP 502", 502)
         rest = path[len("repos/o/r/") :]
+        kind = next((k for k in ("branches/", "pulls?", "issues/") if rest.startswith(k)), None)
+        kind = kind or rest.split("?", 1)[0].rsplit("/", 1)[-1]  # statuses · check-runs
+        if kind in self.broken:
+            if isinstance(self.broken[kind], Exception):
+                raise self.broken[kind]
+            return self.broken[kind]
         if rest.startswith("branches/"):
             branch = rest[len("branches/") :]
             if branch not in self.heads:
@@ -372,7 +384,7 @@ def test_add_refuses_a_taken_merge_order_a_taken_branch_and_a_branch_behind_the_
     assert set(batch.read()["bundles"]) == {"A"}
 
 
-@pytest.mark.parametrize("name", ["@src-config.py", "\ndocs/a.md"])
+@pytest.mark.parametrize("name", ["@src-config.py", "\ndocs/a.md", "docs/\u202ea.md"])
 def test_scope_sees_a_committed_path_that_looks_like_a_log_header(batch, capsys, name):
     # `git log --format=@%H` 를 나누던 때는 `@` 로 시작하는 경로를 커밋 머리로, 앞의 줄바꿈을
     # 구분자로 읽어 범위 밖 경로를 놓쳤다(2라운드 F1)
@@ -382,11 +394,15 @@ def test_scope_sees_a_committed_path_that_looks_like_a_log_header(batch, capsys,
     capsys.readouterr()
     assert batch.run("scope", "--bundle", "A") == 1
     out = capsys.readouterr().out
-    assert f"{sha[:12]}  {name}  (outside" in out and "1 commits since" in out
+    # 제어 · 보이지 않는 글자가 든 경로는 repr 로 찍는다 — 줄바꿈이 가짜 줄을 만들지 않게(L8)
+    shown = name if name.isprintable() else repr(name)
+    assert f"{sha[:12]}  {shown}  (outside" in out and "1 commits since" in out
 
 
 def _corrupt(batch, **fields) -> None:
     state = batch.read()
+    if "_B_after" in fields:
+        state["bundles"]["B"]["after"] = fields.pop("_B_after")
     state["bundles"]["A"].update(fields)
     batch.state.write_text(json.dumps(state))
 
@@ -394,7 +410,11 @@ def _corrupt(batch, **fields) -> None:
 @pytest.mark.parametrize(
     "fields",
     [{"owns": "docs/a.md"}, {"shared": "CHANGELOG.md"}, {"after": "B"}, {"owns": [1]},
-     {"after": ["Z"]}, {"merge_order": "1"}, {"branch": None}],
+     {"after": ["Z"]}, {"merge_order": "1"}, {"branch": None},
+     # 3라운드: merged 는 None 이나 40자리 sha 뿐이다 — "no" 가 참으로 읽혀 「done」이 됐다.
+     # 자기 · 서로를 가리키는 after 는 영원히 「wait for」다
+     {"merged": "no"}, {"merged": "yes"}, {"merged": "c" * 39}, {"merged": 1},
+     {"after": ["A"]}, {"after": ["B"], "_B_after": ["A"]}],
 )  # fmt: skip
 @pytest.mark.parametrize("cmd", [["status"], ["scope", "--bundle", "A"]])
 def test_a_state_file_with_a_wrong_shape_is_corrupt(batch, capsys, fields, cmd):
@@ -410,3 +430,119 @@ def test_a_state_file_with_a_wrong_shape_is_corrupt(batch, capsys, fields, cmd):
     capsys.readouterr()
     assert batch.run(*cmd, api=api) == 3
     assert "corrupt" in capsys.readouterr().err
+
+
+# ── 3라운드: 읽기 전에 아는 값을 두지 않는다 · 「못 봤다」를 「없다」로 세지 않는다 ──
+
+
+def _one_green_bundle(batch) -> tuple[str, dict]:
+    a = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+    head = _commit(a, "docs/a.md")
+    pr, _ = _green_api({A_BRANCH: head}, 41, A_BRANCH, head)
+    return head, pr
+
+
+@pytest.mark.parametrize(
+    "broken, cell",
+    [({"issues/": ApiError("HTTP 502", 502)}, "verified"), ({"issues/": None}, "verified"),
+     ({"issues/": {"message": "x"}}, "verified"), ({"issues/": ["not a comment"]}, "verified"),
+     ({"pulls?": None}, "pr"), ({"pulls?": {"message": "x"}}, "pr"),
+     ({"statuses": None}, "rcm_ci"), ({"statuses": {"state": "success"}}, "rcm_ci"),
+     ({"statuses": [{"context": "rcm/ci", "state": "weird"}]}, "rcm_ci"),
+     ({"check-runs": None}, "rcm_ci"), ({"check-runs": {"check_runs": None}}, "rcm_ci"),
+     ({"branches/": {"commit": {"sha": "nope"}}}, "remote")],
+)  # fmt: skip
+def test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value(batch, capsys, broken, cell):
+    # 표식을 읽기 전에 verified 를 "no" 로 두어, 댓글 읽기가 실패해도 「no · verify · 종료 0」
+    # 이었다(H2). 빈 답(None) · 목록 아닌 답 · 모르는 상태 값도 「없음」이 아니라 모름이다
+    head, pr = _one_green_bundle(batch)
+    api = FakeGitHub({A_BRANCH: head}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                     {41: [{"body": f"verified: {head}"}]}, broken=broken)  # fmt: skip
+    code, row = _status_row(batch, capsys, api)
+    assert code == 3, row
+    assert row[cell] == "—" and row["next"] == "—"
+    assert batch.read()["bundles"]["A"]["merged"] is None
+
+
+@pytest.mark.parametrize("drop", ["state", "merged_at", "number"])
+def test_a_pr_missing_a_field_is_unknown_not_closed(batch, capsys, drop):
+    head, pr = _one_green_bundle(batch)
+    del pr[drop]
+    api = FakeGitHub({A_BRANCH: head}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                     {41: [{"body": f"verified: {head}"}]})  # fmt: skip
+    code, row = _status_row(batch, capsys, api)
+    assert code == 3 and row["pr"] == "—" and row["next"] == "—", row
+
+
+def test_a_merged_pr_without_a_merge_sha_is_unknown_and_not_saved(batch, capsys):
+    head, pr = _one_green_bundle(batch)
+    pr.update(merged_at="2026-11-25T00:00:00Z", state="closed", merge_commit_sha=None)
+    api = FakeGitHub({A_BRANCH: head}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                     {41: [{"body": f"verified: {head}"}]})  # fmt: skip
+    code, row = _status_row(batch, capsys, api)
+    assert code == 3 and row["merged"] == "—"
+    assert batch.read()["bundles"]["A"]["merged"] is None  # "yes" 를 장부에 남기지 않는다
+
+
+def test_status_local_is_the_bundle_branch_even_if_the_worktree_moved(batch, capsys):
+    head, pr = _one_green_bundle(batch)
+    wt = batch.tmp / "wt-a"
+    git("switch", "-q", "-c", "feat/web-other-thing", cwd=wt)
+    _commit(wt, "docs/elsewhere.md")
+    api = FakeGitHub({A_BRANCH: head}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                     {41: [{"body": f"verified: {head}"}]})  # fmt: skip
+    code, row = _status_row(batch, capsys, api)
+    assert code == 0 and row["local"] == head and row["next"] == "merge", row
+
+
+def test_scope_sees_a_path_a_merge_commit_changed_itself(batch, capsys):
+    # 충돌 해결 · 「악한 병합」은 병합 커밋 자신이 경로를 바꾼다 — --no-merges 만 보면 놓쳤다(M1)
+    wt = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, wt, "docs/a.md") == 0
+    _commit(wt, "docs/a.md")
+    git("checkout", "-q", "dev", cwd=batch.remote.work)
+    git("pull", "-q", "origin", "dev", cwd=batch.remote.work)
+    _commit(batch.remote.work, "web/app.js")
+    git("push", "-q", "origin", "dev", cwd=batch.remote.work)
+    git("fetch", "-q", "origin", cwd=wt)
+    git("merge", "-q", "--no-commit", "origin/dev", cwd=wt)
+    (wt / "docs" / "sub").mkdir()
+    (wt / "docs" / "sub" / "evil.md").write_text("slipped in by the merge\n")
+    git("add", "-A", cwd=wt)
+    git("commit", "-q", "--no-edit", cwd=wt)
+    merge = git("rev-parse", "HEAD", cwd=wt)
+    capsys.readouterr()
+    assert batch.run("scope", "--bundle", "A") == 1
+    out = capsys.readouterr().out
+    assert f"{merge[:12]}  docs/sub/evil.md  (outside" in out and "web/app.js" not in out
+
+
+@pytest.mark.parametrize("move", ["switch", "detach"])
+def test_scope_refuses_a_worktree_that_is_not_on_the_bundle_branch(batch, capsys, move):
+    # scope 는 워크트리의 HEAD 와 파일을 읽는다 — 다른 브랜치면 남의 답이다(M2)
+    wt = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, wt, "docs/a.md") == 0
+    git(*(["switch", "-q", "-c", "feat/web-other-thing"] if move == "switch" else
+          ["switch", "-q", "--detach"]), cwd=wt)  # fmt: skip
+    _commit(wt, "README.md")
+    capsys.readouterr()
+    assert batch.run("scope", "--bundle", "A") == 3
+    err = capsys.readouterr().err
+    assert A_BRANCH in err and ("feat/web-other-thing" in err or "detached" in err)
+
+
+def test_a_state_file_that_cannot_be_written_is_a_usage_error(tmp_path, monkeypatch, capsys):
+    Batch(tmp_path, monkeypatch)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    argv = ["--batch", str(blocker / "batch.json"), "init", "--id", "m5x", "--repo", "o/r"]
+    assert db.main(argv) == 2
+    assert "cannot write" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("base", ["origin/no-such-branch", "no-such-ref"])
+def test_init_with_an_unknown_base_is_a_usage_error(tmp_path, monkeypatch, capsys, base):
+    b = Batch(tmp_path, monkeypatch)
+    assert b.run("init", "--id", "m5x", "--repo", "o/r", "--base", base) == 2
+    assert base in capsys.readouterr().err and not b.state.exists()

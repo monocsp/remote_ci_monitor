@@ -10,7 +10,7 @@ rows to tests is the implementer's own, which nothing else reads. Two devices ca
 | machine trace | a row with no test, a test tagged with an ID the table does not have (typo, deleted row), a malformed ID or tag, a duplicate, two workplans with the same prefix | `tools/scenario_trace.py`, also run by `rcm/ci` through `tests/test_scenario_trace.py` |
 | plan-to-test verifier | a tagged test that does not assert the row's result; a `(live)` row pytest could have locked | one `isolated-verifier` that never sees the implementation |
 
-Only workplans that carry the marker are traced; older ones without it are left alone.
+Only workplans that carry the marker are traced. A document passed to the tool without any marker is reported as `nothing`, so name only marked workplans.
 
 ## Format
 
@@ -41,7 +41,8 @@ Only workplans that carry the marker are traced; older ones without it are left 
 ```sh
 ./.venv/bin/python tools/scenario_trace.py docs/m5x-workplan.md [more.md …] [--tests tests/] [--json]
 # problems: format · empty (a table with no IDs) · duplicate · missing (a row with no test) ·
-#   orphan (a tag the table lacks) · clash (two documents, one prefix) · nothing (no marker at all)
+#   orphan (a tag the table lacks) · clash (two documents, one prefix) · nothing (a document with no marker)
+#   format also covers a marker that is not exactly `<!-- scenario-prefix: X -->`, an interrupted table, an unclosed fence
 # exit 0 ok · 1 problems (listed) · 2 usage
 ```
 

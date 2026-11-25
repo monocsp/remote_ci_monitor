@@ -73,7 +73,7 @@ It lives **only in the PR body**: a commit would move the head and send `rcm/ci`
 Stop as soon as the work meets a lane condition (it needs a migration, a new key in `/api/status`, a
 second process) or grows past about five `src/` files. Tell the owner which condition, then start
 [`workplan`](../workplan/SKILL.md) with the card and the commits as material. The open PR becomes a
-draft with `WIP:` and stays on its branch; no more code until the workplan is merged.
+draft (`gh pr ready <N> --undo`) and stays on its branch; no more code until the workplan is merged.
 
 ## Left out, compared with the full loop
 

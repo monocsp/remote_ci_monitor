@@ -22,8 +22,8 @@ long Korean document is its job (`korean-writing` §5 rule 6) and a lead cannot 
 3. `korean-writer` writes `docs/<code>-workplan.md` from the material and the in file's verbatim owner
    words: tables copied as they are, no fact the material lacks (it answers 「재료에 없음」 instead).
    The main session reads it against `korean-writing` §6 and runs `tools/scenario_trace.py` on it.
-4. The main session commits it (`commit` skill), pushes, and opens the spec PR as a draft (`WIP: `,
-   `--draft`, `pr` skill); `rcm/ci` runs on it like any other.
+4. The main session commits it (`commit` skill), pushes, and opens the spec PR as a draft (`--draft`,
+   `pr` skill; the title stays a plain header); `rcm/ci` runs on it like any other.
 5. Plan rounds (§4) on that PR's head, each leaving its `verify-round:` comment on it. A HIGH goes to a
    new `plan-lead` (corrected material for the sections it touches) and `korean-writer` (only those
    sections), then a commit, `rcm/ci` and the next round.
@@ -165,7 +165,7 @@ written by the merge, so a row the owner should look at is ⛔, not 추천.
 
 ## 6. Merge = approval
 
-Once the owner has said to proceed and «Order» 6's last round passed: drop `WIP: ` and the draft
+Once the owner has said to proceed and «Order» 6's last round passed: mark the draft ready
 (`gh pr ready <N>`), post `verified: <head sha>` for that head, and merge with
 `python3 tools/merge_pr.py <N> --wait`.
 

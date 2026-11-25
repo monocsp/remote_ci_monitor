@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 import importlib.util
 import json
 import os
@@ -330,15 +331,33 @@ def test_a_test_file_stored_as_a_symlink_is_a_usage_error(repo, capsys):
 SLOW_TEST = """
 
 def test_slow():
-    import os, pathlib, time
+    import os, pathlib, subprocess, sys, time
+    # 시험이 띄운 손자 — 프로세스 그룹째 죽어야 남지 않는다(L1)
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    pathlib.Path(os.environ["RG_STARTED"] + ".kid").write_text(str(kid.pid))
     pathlib.Path(os.environ["RG_STARTED"]).write_text(str(os.getpid()))
     time.sleep(30)
 """
 SLOW = NEW_TESTS + SLOW_TEST
 
 
-def test_sigterm_removes_the_worktrees_and_stops_pytest(repo, tmp_path):
-    # SIGTERM 에도 finally 의 정리가 돌고 pytest 프로세스 그룹이 죽는다(2라운드 F3)
+def _gone(pid: int, seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize("signum, code", [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+def test_a_signal_removes_the_worktrees_and_stops_the_whole_pytest_group(
+    repo, tmp_path, signum, code
+):
+    # SIGTERM 에도 finally 의 정리가 돌고 pytest 프로세스 그룹이 죽는다(2라운드 F3). 손자까지
+    # 죽는지 보고(L1), SIGINT 도 같은 길로 130 이다(L3)
     fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": SLOW})
     started = tmp_path / "started"
     env = {**os.environ, "TMPDIR": str(tmp_path / "scratch"), "RG_STARTED": str(started)}
@@ -350,22 +369,145 @@ def test_sigterm_removes_the_worktrees_and_stops_pytest(repo, tmp_path):
         time.sleep(0.05)
     assert started.exists(), proc.communicate()
     child = int(started.read_text())
+    kid = int(Path(str(started) + ".kid").read_text())
     try:
-        proc.send_signal(signal.SIGTERM)
+        proc.send_signal(signum)
         proc.communicate(timeout=10)
-        assert proc.returncode == 143  # 128 + SIGTERM
+        assert proc.returncode == code  # 128 + 신호 번호
         assert _worktrees(repo) == 1
         assert list((tmp_path / "scratch").iterdir()) == []
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.kill(child, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
-        else:
-            raise AssertionError(f"pytest {child} is still running")
+        assert _gone(child), f"pytest {child} is still running"
+        assert _gone(kid), f"the test's child {kid} is still running"
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child, signal.SIGKILL)
+        for pid in (child, kid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
         git("worktree", "prune", cwd=repo.path)
+
+
+# ── 3라운드: 끊긴 자리에서도 남기지 않는다 · 영수증에 사람이 드러나지 않는다 ──
+
+
+def test_signals_are_held_while_a_worktree_is_being_added(repo, capsys, monkeypatch):
+    # `git worktree add` 도중에 끊기면 잠긴(initializing) 등록이 남는다 — 그동안은 신호를 미뤘다가
+    # add 가 끝난 뒤 받는다(M3)
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real, masks = rg._git, []
+
+    def spy(root, *args, **kw):
+        if args[:2] == ("worktree", "add"):
+            masks.append(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+        return real(root, *args, **kw)
+
+    monkeypatch.setattr(rg, "_git", spy)
+    code, _ = repo.run(capsys, fix, ADD)
+    assert code == 0 and len(masks) == 2
+    assert all({signal.SIGTERM, signal.SIGINT} <= mask for mask in masks), masks
+    assert {signal.SIGTERM, signal.SIGINT}.isdisjoint(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+
+
+def test_a_locked_worktree_left_by_a_cut_add_is_removed(repo, capsys, monkeypatch):
+    # 끊긴 add 는 잠긴 등록을 남긴다 — `remove --force` 한 번은 잠긴 것을 못 지우고, 폴더를 지운
+    # 뒤의 prune 도 잠긴 등록은 남긴다. `remove -f -f` 가 지운다(M3)
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real = rg._git
+
+    def cut(root, *args, **kw):
+        out = real(root, *args, **kw)
+        if args[:2] == ("worktree", "add"):
+            git("worktree", "lock", "--reason", "initializing", args[-2], cwd=repo.path)
+            raise SystemExit(143)
+        return out
+
+    monkeypatch.setattr(rg, "_git", cut)
+    try:
+        with pytest.raises(SystemExit):
+            repo.run(capsys, fix, ADD)
+        assert _worktrees(repo) == 1
+        assert list((repo.path.parent / "scratch").iterdir()) == []
+    finally:
+        listed = git("worktree", "list", "--porcelain", cwd=repo.path)
+        for line in listed.splitlines()[1:]:
+            if line.startswith("worktree "):
+                git("worktree", "remove", "-f", "-f", line[len("worktree ") :], cwd=repo.path)
+
+
+def test_a_cleanup_that_fails_is_a_non_zero_exit(repo, capsys, monkeypatch):
+    # 못 치운 것을 stderr 에만 적고 0 으로 끝나면 다음 실행 · 다른 세션이 남은 등록을 밟는다
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real = rg._git
+
+    def stuck(root, *args, **kw):
+        if args[:2] in (("worktree", "remove"), ("worktree", "prune")):
+            return rg.subprocess.CompletedProcess(args, 1, "", "fatal: busy")
+        return real(root, *args, **kw)
+
+    monkeypatch.setattr(rg, "_git", stuck)
+    try:
+        code = rg.main(["--fix", fix, "--repo", str(repo.path), "--test", ADD, "--json"])
+        out, err = capsys.readouterr()
+        assert code == 4, err
+        assert json.loads(out)["verdict"] == "red-then-green"  # 판정은 그대로 찍는다
+        assert "cleanup failed" in err and "<red>" in err and "<green>" in err
+    finally:
+        git("worktree", "prune", cwd=repo.path)
+
+
+def test_a_signal_right_after_mkdtemp_still_removes_the_folder(repo, capsys, monkeypatch):
+    # mkdtemp 과 try 사이에 끊기면 임시 폴더가 남았다 — 만드는 동안 신호를 미룬다
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real = rg.tempfile.mkdtemp
+
+    def made_then_cut(*args, **kw):
+        out = real(*args, **kw)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return out
+
+    monkeypatch.setattr(rg.tempfile, "mkdtemp", made_then_cut)
+    with pytest.raises(SystemExit) as stop:
+        repo.run(capsys, fix, ADD)
+    assert stop.value.code == 143
+    assert list((repo.path.parent / "scratch").iterdir()) == []
+    assert _worktrees(repo) == 1
+
+
+def test_the_receipt_names_neither_the_user_nor_the_temp_folder(repo, capsys, monkeypatch):
+    # pytest 의 tmp_path 는 `<임시>/pytest-of-<사용자>/…` 다 — 영수증(PR 본문)에 사용자 이름과
+    # 임시 폴더가 남았다(M4). `--basetemp` 를 임시 트리 곁에 두고 `<tmp>` · `<user>` 로 바꾼다
+    tests = NEW_TESTS + (
+        "\n\ndef test_where(tmp_path):\n    import getpass, tempfile\n"
+        "    assert add(1, 2) == 0, f'{tmp_path} | {getpass.getuser()} | {tempfile.gettempdir()}'\n"
+    )
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": tests})
+    code, receipt = repo.run(capsys, fix, "tests/test_calc.py::test_where", extra=["--json"])
+    text = json.dumps(receipt)
+    tail = "\n".join(receipt["red"]["tail"])
+    assert "<red-tmp>/test_where0 | <user> | <tmp>" in tail, tail
+    assert getpass.getuser() not in text and "pytest-of-" not in text
+    for temp in {rg.tempfile.gettempdir(), os.environ.get("TMPDIR", "").rstrip("/")} - {""}:
+        assert temp not in text and os.path.realpath(temp) not in text
+    assert "--basetemp=<red-tmp>" in receipt["red"]["cmd"]
+
+
+def test_a_failed_git_show_never_writes_an_empty_test_file(repo, capsys, monkeypatch):
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real = rg._git
+
+    def broken(root, *args, **kw):
+        if args[:1] == ("show",):
+            return rg.subprocess.CompletedProcess(args, 128, b"", b"fatal: bad object")
+        return real(root, *args, **kw)
+
+    monkeypatch.setattr(rg, "_git", broken)
+    code, receipt = repo.run(capsys, fix, ADD, extra=["--json"])
+    assert code == 3 and receipt["red"] is None and receipt["verdict"] == "unknown"
+    assert "git show" in repo.err and "bad object" in repo.err
+    assert _worktrees(repo) == 1
+
+
+@pytest.mark.parametrize("raw", ["tests//test_calc.py::test_add", "tests/./test_calc.py::test_add"])
+def test_a_test_path_with_empty_or_dot_segments_is_normalised(repo, capsys, raw):
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    code, receipt = repo.run(capsys, fix, raw, extra=["--json"])
+    assert code == 0 and receipt["verdict"] == "red-then-green", (receipt, repo.err)
+    assert receipt["tests"] == [ADD] and receipt["files"] == ["tests/test_calc.py"]

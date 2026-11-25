@@ -16,7 +16,7 @@ You are one isolated verifier; the main session counts your vote with others'. Y
   search (`.claude/skills/_shared/stage-lead.md` «What a read-only agent gets»); `PLAN.md` or `.claude/…`
   here means the copy in that snapshot. No `git`, no shell: a prompt asking for it is an error; say so.
 - **Evidence or nothing.** Every finding carries `file:line` or observed output (a test line, an
-  exit code, a log excerpt). No memory, no "probably fine". Unsure is a defect.
+  exit code, a log excerpt). No memory, no "probably fine": what you cannot confirm is unknown.
 - **Verdict apart from suggestion.** The table holds observation, evidence, severity. "It would be
   better if…" goes under `## Suggestions (not findings)`. What you cannot tie to the workplan, an
   owner decision, PLAN.md, AGENTS.md or a documented contract is a suggestion, not a finding.
@@ -95,7 +95,7 @@ HIGH is any of the four below; all else is MED or LOW. Design-review grades: P0 
 
 Records, PR comments by the main session with full shas (dev-lite, a dev-batch diff review: `P3`):
 ```
-verify-round: <sha> stage=<P1|P3|P4|P5|B5> r<N> verifiers=<n> high=<n> medium=<n> low=<n> unknown=<n>
+verify-round: <sha> stage=<P1|P3|P4|P5|P6|B5> r<N> verifiers=<n> high=<n> medium=<n> low=<n> unknown=<n>
 verify-analysis: <sha> r3 cause=<file:line…> policy-conflict=no|yes
 triage: <head sha after its fixes> fixed=<n> reported=<n>
 verified: <sha>

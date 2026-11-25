@@ -22,7 +22,7 @@ list to run:
 - install or upgrade: a wheel, `scripts/smoke_install.sh`, a client following the server's version.
 
 Not required: pure functions in `core/`, docs-only and tests-only PRs, a refactor with no output
-change. A `(live)` row that is not run is reported as `—` with the reason, never as PASS.
+change. A `(live)` row that is not run is `UNKNOWN` with the reason, never PASS.
 
 ## 1. The script
 
@@ -63,8 +63,10 @@ this PR. The prompt asks each to:
    `data_dir`, redacted by hand before they leave it (`tools/screenshots` runs only its own demo
    server and cannot capture this one).
 5. For workers: the two-process helpers in `tests/test_e2e_worker.py` — a real `rcm worker` process,
-   `kill -9`, SIGTERM, a server restart while a job runs.
-6. Report per ID: command, job number, observed result, verdict, severity — severity as
+   `kill -9`, SIGTERM, a server restart while a job runs; submitted to the worker-only preset, as
+   [`_shared/test-server.md`](../_shared/test-server.md) says, or the local lane answers instead.
+6. Report per ID: command, job number, observed result, verdict (FAIL only with evidence that the
+   result is wrong; what could not be established is `UNKNOWN`, never PASS), severity — severity as
    [`isolated-verifier`](../../agents/isolated-verifier.md) defines it. A difference in environment
    (machine, timing that the scenario allows) is not a defect; an explicit owner request that is not
    met always is.
@@ -83,8 +85,10 @@ verifiers — the fix changed the code the earlier steps ran on. MED/LOW wait fo
 
 ## 4. Report
 
-The main session writes `docs/acceptance/reports/<YYYY-MM-DD>-<topic>.md` (Korean, `korean-writing`)
-with images in `docs/acceptance/reports/shots/`, committed in the PR:
+The report is `docs/acceptance/reports/<YYYY-MM-DD>-<topic>.md` (Korean), with images in
+`docs/acceptance/reports/shots/`, committed in the PR. A report over about 800 characters is written by
+[`korean-writer`](../../agents/korean-writer.md) from the verifiers' tables (`korean-writing` §5 rule 6);
+the main session gives it the material and reads the result against §6. It holds:
 
 - date, target branch and sha, the PRs it contains and the ones it does not yet;
 - the workplan rows it covers and how to run it again (script, variables, duration);

@@ -161,6 +161,9 @@
      낡은 `verified:` 를 yes 로 · porcelain 첫 줄의 앞 공백을 잃음 (`tools/dev_batch.py`, 격리 검증)
      + 2라운드 셋: `@` 로 시작하는 커밋 경로를 버림 · 상태 파일의 꼴 검사를 건너뜀
      (`tools/dev_batch.py`) · 영수증에 집 경로를 남김 (`tools/redgreen.py`)
+     + 3라운드 넷: 댓글을 읽기 전에 verified 를 "no" 로 둠(`tools/dev_batch.py`) · 안 닫힌 펜스를
+     문제로 안 셈(`tools/scenario_trace.py`) · pytest 만 죽이고 그 그룹은 남김 · 잠긴 워크트리를
+     `--force` 하나로 지우려 함(`tools/redgreen.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2136,8 +2139,8 @@ MUTANTS = (
         # 다른 sha 에 단 `verified:` 표식을 지금 head 의 검증으로 센다(격리 검증 F2)
         name="dev-batch-stale-verified-yes",
         path="tools/dev_batch.py",
-        old='row["verified"] = "yes" if sha in marks else "stale" if marks else "no"',
-        new='row["verified"] = "yes" if marks else "no"',
+        old='    return "yes" if sha in marks else "stale" if marks else "no"',
+        new='    return "yes" if marks else "no"',
         tests=(
             "tests/test_dev_batch.py::"
             "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
@@ -2179,9 +2182,53 @@ MUTANTS = (
         # 남는다(2라운드 F13)
         name="redgreen-home-path-kept",
         path="tools/redgreen.py",
-        old='    text = text.replace(str(Path.home()), "~")\n',
-        new="    pass\n",
+        old='[(Path(p), "<tmp>") for p in _temp_dirs()] + [(Path.home(), "~")]',
+        new='[(Path(p), "<tmp>") for p in _temp_dirs()]',
         tests=("tests/test_redgreen.py::test_the_receipt_hides_a_path_under_the_home_folder",),
+    ),
+    Mutant(
+        # 댓글을 읽기 **전에** verified 를 "no" 로 둔다 — 댓글 읽기가 실패해도 「no · verify ·
+        # 종료 0」이 된다. 모르는 것을 아는 값으로 남기는 꼴(3라운드 H2)
+        name="dev-batch-verified-default-before-read",
+        path="tools/dev_batch.py",
+        old="    cells: dict[str, str] = {}\n",
+        new='    cells: dict[str, str] = {}\n    row["verified"] = "no"\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # 문서 끝까지 안 닫힌 펜스를 문제로 세지 않는다 — 펜스 뒤의 표지를 조용히 못 읽고
+        # 통과한다(3라운드 H3)
+        name="scenario-trace-unclosed-fence-ignored",
+        path="tools/scenario_trace.py",
+        old='    if fence:\n        message = f"the {fence} fence opened here never closes',
+        new='    if False:\n        message = f"the {fence} fence opened here never closes',
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_an_unclosed_fence_is_a_format_problem_at_the_line_it_opened",
+        ),
+    ),
+    Mutant(
+        # 끊길 때 pytest 하나만 죽인다 — 시험이 띄운 자식이 남는다(3라운드 L1)
+        name="redgreen-kills-only-pytest",
+        path="tools/redgreen.py",
+        old="                os.killpg(proc.pid, signal.SIGKILL)\n",
+        new="                os.kill(proc.pid, signal.SIGKILL)\n",
+        tests=(
+            "tests/test_redgreen.py::"
+            "test_a_signal_removes_the_worktrees_and_stops_the_whole_pytest_group",
+        ),
+    ),
+    Mutant(
+        # 잠긴(끊긴 add 의 initializing) 워크트리를 `--force` 하나로 지우려 한다 — 못 지우고,
+        # 폴더를 지운 뒤의 prune 도 잠긴 등록은 남긴다(3라운드 M3)
+        name="redgreen-locked-worktree-single-force",
+        path="tools/redgreen.py",
+        old='_git(root, "worktree", "remove", "-f", "-f", str(path))',
+        new='_git(root, "worktree", "remove", "--force", str(path))',
+        tests=("tests/test_redgreen.py::test_a_locked_worktree_left_by_a_cut_add_is_removed",),
     ),
 )
 

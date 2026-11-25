@@ -18,7 +18,9 @@ The rules for every lead (handoff files, the out.json contract, what leads never
    command is `cd <wt> && …` in one Bash call.
 2. Read the in file and what it points to (table below). Do not reread what an earlier lead already
    read unless you need a specific line. If a previous lead stopped, apply its patch first, or clean
-   up what `git status --short` lists, and say which in `notes`.
+   up what `git status --short` lists, and say which in `notes`. Cleanup is `git restore <file>` (a
+   tracked change) or `git apply -R <patch>` (a patch you applied) only; an untracked file you do not
+   keep is named in `notes`, not deleted. Never `git clean`, `git checkout`, `rm` or `rm -rf` for it.
 3. **Scope.** Write only inside the in file's `owns`; touch `shared` paths add-only (your own
    CHANGELOG line, your own mutant, your own doc-lock assertion; never reorder or edit others'). If you
    must write elsewhere, stop and return it in `scope_corrections` with the reason. A defect you see

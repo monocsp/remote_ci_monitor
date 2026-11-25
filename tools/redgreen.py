@@ -17,22 +17,30 @@ pytest 는 이 도구를 돌린 인터프리터(`sys.executable`)로 돈다 — 
 `kinds` 에 적는다. 건너뛴(skip) 시험은 통과가 아니다 — 모르는 값을 성공으로 세지 않는다. 파일
 하나처럼 여러 시험으로 펼쳐지는 nodeid 에서 고치기 전에 통과한 것이 섞이면 `mixed` 이고 빨강이
 아니다(어느 것이 통과했는지 `note` 에 적는다). 영수증에는 임시 경로 대신 `<red>` · `<green>` 을,
-인터프리터는 이름(`python3`)이나 `.venv/bin/python` 만 적는다. 경로 치환은 긴 것부터 한다(풀린
-경로 `/private/var/…` 가 안 풀린 `/var/…` 를 품는다). `--test` 의 앞 `./` 는 떼고 읽는다.
+pytest 의 `--basetemp`(임시 트리 곁의 `<red-tmp>` · `<green-tmp>` — 기본 `pytest-of-<사용자>` 를
+쓰지 않는다) · 임시 폴더는 `<tmp>`, 집은 `~`, 사용자 이름은 `<user>` 로 적고, 인터프리터는
+이름(`python3`)이나 `.venv/bin/python` 만 적는다. 경로 치환은 긴 것부터 한다(풀린 경로
+`/private/var/…` 가 안 풀린 `/var/…` 를 품는다). `--test` 의 파일 부분은 앞 `./` · 빈 마디(`//`) ·
+`.` 마디를 떼고 읽는다(pytest 가 찍는 nodeid 와 같은 꼴).
 
-SIGTERM 을 받아도 임시 워크트리를 치우고 끝난다(종료 143). pytest 는 자기 세션에서 돌고, 끊기면
-그 프로세스 그룹째 죽인다 — 시험이 띄운 자식이 남지 않게.
+SIGTERM · SIGINT 를 받아도 임시 워크트리와 임시 폴더를 치우고 끝난다(종료 143 · 130). 임시 폴더를
+만드는 동안과 `git worktree add` 동안은 두 신호를 미뤘다가(pthread_sigmask) 끝난 뒤 받는다 — add
+가 도중에 끊기면 잠긴(initializing) 등록이 남는다. 치울 때는 `git worktree remove -f -f`(잠긴 것도)
+뒤에 남은 등록을 prune 하고, 그래도 남으면 stderr 에 적고 종료 4 다. 치우는 동안의 신호는 무시한다.
+pytest 는 자기 세션에서 돌고, 끊기면 그 프로세스 그룹째 죽인다 — 시험이 띄운 자식이 남지 않게.
 
 종료 코드: 0 빨강→초록 · 1 아님(not red · not green · mixed) · 2 사용법(sha · 부모 · 시험 파일
 없음, 폴더 · 심볼릭 링크를 줌, pytest 없는 인터프리터) · 3 판정 못 함(pytest 가 시험을 못 찾음 ·
-시간 초과 · 워크트리를 못 만듦 · 결과 줄 없음 · 시험 파일 경로가 임시 트리 밖으로 풀림) ·
-143 SIGTERM.
+시간 초과 · 워크트리를 못 만듦 · 결과 줄 없음 · 시험 파일 경로가 임시 트리 밖으로 풀림 · 고친
+커밋에서 시험 파일을 못 꺼냄) · 4 정리 실패(임시 워크트리 등록이나 임시 폴더가 남았다 — 판정은
+그대로 찍는다) · 130 SIGINT · 143 SIGTERM.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import getpass
 import json
 import os
 import re
@@ -45,7 +53,9 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-EXIT_RED_GREEN, EXIT_NOT, EXIT_USAGE, EXIT_UNKNOWN = 0, 1, 2, 3
+EXIT_RED_GREEN, EXIT_NOT, EXIT_USAGE, EXIT_UNKNOWN, EXIT_CLEANUP = 0, 1, 2, 3, 4
+#: 끊기면 치우고 끝내는 신호 — 만드는 동안(mkdtemp · worktree add)은 미룬다
+HELD = (signal.SIGTERM, signal.SIGINT)
 PYTEST_TIMEOUT = 900
 TAIL = 15
 #: `-rA` 의 짧은 요약 줄 — `FAILED tests/x.py::test_a - assert …`
@@ -63,10 +73,26 @@ def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedPr
 
 
 def node_id(raw: str) -> str:
-    """`./tests/x.py::t` → `tests/x.py::t` — pytest 는 앞 `./` 없이 nodeid 를 찍는다."""
-    while raw.startswith("./"):
-        raw = raw[2:]
-    return raw
+    """`./tests//x.py::t` → `tests/x.py::t` — pytest 는 빈 · `.` 마디 없이 nodeid 를 찍는다.
+    절대 경로와 `..` 는 그대로 둔다(resolve 가 사용법 오류로 막는다)."""
+    file, sep, rest = raw.partition("::")
+    if file.startswith("/") or ".." in file.split("/"):
+        return raw
+    return "/".join(part for part in file.split("/") if part not in ("", ".")) + sep + rest
+
+
+@contextlib.contextmanager
+def _held() -> Any:
+    """SIGTERM · SIGINT 를 잠시 미룬다 — 그 사이에 온 신호는 블록이 끝나면 받는다(처리기가
+    SystemExit 를 던져 main 의 finally 가 치운다). 자식(git)도 이 마스크를 물려받는다."""
+    if not hasattr(signal, "pthread_sigmask"):
+        yield
+        return
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, HELD)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
 
 
 def resolve(repo: Path, fix: str, tests: list[str]) -> tuple[Path, str, str, list[str]]:
@@ -138,12 +164,40 @@ def kinds(output: str, tests: list[str]) -> dict[str, str]:
     return out
 
 
+def _temp_dirs() -> set[str]:
+    """시험 출력에 찍힐 수 있는 임시 폴더 — 이 프로세스의 것과 TMPDIR(자식이 쓴다)."""
+    raw = {tempfile.gettempdir(), os.environ.get("TMPDIR", "")}
+    return {p.rstrip("/") for p in raw} - {""}
+
+
+def redact(text: str, tree: Path, label: str) -> str:
+    """영수증 글에서 사람 · 기계가 드러나는 것을 지운다 — 임시 트리 · basetemp · 임시 폴더 · 집 ·
+    사용자 이름. 긴 경로부터 바꾼다(풀린 경로가 안 풀린 경로를 품는다)."""
+    swaps: dict[str, str] = {}
+    places = [(tree.parent / f"{label}-tmp", f"<{label}-tmp>"), (tree, f"<{label}>")]
+    places += [(Path(p), "<tmp>") for p in _temp_dirs()] + [(Path.home(), "~")]
+    for place, word in places:
+        for spelled in (str(place), str(place.resolve())):
+            if len(spelled) > 1:  # `/` 하나를 바꾸면 글 전체가 깨진다
+                swaps.setdefault(spelled, word)
+    for old in sorted(swaps, key=len, reverse=True):
+        text = text.replace(old, swaps[old])
+    with contextlib.suppress(Exception):  # 사용자 이름을 모르는 환경 — 바꿀 것도 없다
+        user = getpass.getuser()
+        if user:
+            text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(user)}(?![A-Za-z0-9_])", "<user>", text)
+    return text
+
+
 def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
-    cmd = [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider", *tests]
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    # basetemp 를 임시 트리 곁에 둔다 — 기본 `<임시>/pytest-of-<사용자>` 는 이름을 영수증에 남긴다
+    basetemp = tree.parent / f"{label}-tmp"
+    flags = ["-q", "-rA", "-p", "no:cacheprovider"]
+    cmd = [sys.executable, "-m", "pytest", *flags, f"--basetemp={basetemp}", *tests]
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": tempfile.gettempdir()}
     src = [str(tree / "src")] if (tree / "src").is_dir() else []  # editable 설치의 src 를 이긴다
     env["PYTHONPATH"] = os.pathsep.join([*src, *filter(None, [env.get("PYTHONPATH")])])
-    shown = shlex.join([interpreter(), *cmd[1:]])
+    shown = shlex.join([interpreter(), "-m", "pytest", *flags, f"--basetemp=<{label}-tmp>", *tests])
     # 자기 세션 — 끊기면(시간 초과 · SIGTERM) 시험이 띄운 자식까지 그룹째 죽인다
     proc = subprocess.Popen(cmd, cwd=tree, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, start_new_session=True)  # fmt: skip
@@ -157,11 +211,7 @@ def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate()
-    text = out + err
-    # 긴 것부터 — 풀린 경로가 안 풀린 경로를 품으면 짧은 것을 먼저 바꿔 앞이 남는다
-    for real in sorted({str(tree), str(tree.resolve())}, key=len, reverse=True):
-        text = text.replace(real, f"<{label}>")  # 영수증에 개인 경로를 남기지 않는다
-    text = text.replace(str(Path.home()), "~")
+    text = redact(out + err, tree, label)  # 영수증에 개인 경로 · 이름을 남기지 않는다
     tail = text.strip().splitlines()[-TAIL:]
     passed = [nid for s, nid in (m.groups() for m in map(SUMMARY_RE.match, text.splitlines()) if m)
               if s == "PASSED"]  # fmt: skip
@@ -205,24 +255,62 @@ def _print_text(receipt: dict[str, Any]) -> None:
             print(f"  | {line}")
 
 
-def _cleanup(root: Path, tmp: Path, created: list[Path]) -> None:
-    """자기가 만든(만들려던) 워크트리만 치운다. 못 치운 것은 stderr 에 적고 등록을 prune 한다."""
+def _registered(root: Path) -> set[str] | None:
+    """등록된 워크트리 경로들(못 읽으면 None)."""
+    listed = _git(root, "worktree", "list", "--porcelain")
+    if listed.returncode != 0:
+        return None
+    return {
+        line[len("worktree ") :]
+        for line in listed.stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+
+
+def _cleanup(root: Path, tmp: Path | None, created: list[Path]) -> bool:
+    """자기가 만든(만들려던) 워크트리와 임시 폴더만 치운다. 다 치웠으면 True — 못 치운 것은 stderr.
+
+    `remove -f -f` 는 끊긴 add 가 남긴 잠긴 등록도 지운다(`--force` 하나는 못 지운다). 그래도 남은
+    등록은 prune 하고(폴더 없는 등록만 지운다 — 잠긴 것은 못 지운다) 다시 세어 본다."""
+    names = {path: {str(path), str(path.resolve())} for path in created}
+    hide = [str(tmp.resolve()), str(tmp)] if tmp is not None else []
+
+    def tell(what: str, why: str) -> None:
+        for spelled in hide:
+            why = why.replace(spelled, "")
+        print(f"cleanup: {what}: {why}", file=sys.stderr)
+
+    listed = _registered(root) or set()
     for path in created:
-        if not path.exists():
-            continue  # add 가 폴더를 만들기 전에 끊겼다
-        gone = _git(root, "worktree", "remove", "--force", str(path))
+        if not path.exists() and not names[path] & listed:
+            continue  # add 가 폴더도 등록도 만들기 전에 끊겼다
+        gone = _git(root, "worktree", "remove", "-f", "-f", str(path))
         if gone.returncode != 0:
-            why = gone.stderr.strip().replace(str(tmp.resolve()), "").replace(str(tmp), "")
-            print(f"could not remove worktree <{path.name}>: {why}", file=sys.stderr)
-    shutil.rmtree(tmp, ignore_errors=True)
-    if created:  # 폴더는 지웠는데 등록이 남은 것 — prune 은 폴더 없는 등록만 지운다
-        listed = _git(root, "worktree", "list", "--porcelain").stdout
-        if any(str(p) in listed or str(p.resolve()) in listed for p in created):
-            _git(root, "worktree", "prune")
+            tell(f"could not remove worktree <{path.name}>", gone.stderr.strip())
+    if tmp is not None:
+        shutil.rmtree(tmp, ignore_errors=True)
+    ok = tmp is None or not tmp.exists()
+    if not ok:
+        tell("temporary folder left", "<tmp>/" + tmp.name)
+    if not created:
+        return ok
+    listed = _registered(root)
+    if listed is not None and any(names[p] & listed for p in created):
+        pruned = _git(root, "worktree", "prune")  # 폴더는 지웠는데 등록이 남은 것
+        if pruned.returncode != 0:
+            tell("git worktree prune failed", pruned.stderr.strip())
+        listed = _registered(root)
+    if listed is None:
+        tell("could not list worktrees", "git worktree list failed — cannot tell what is left")
+        return False
+    if left := [p for p in created if names[p] & listed]:
+        tell("cleanup failed", f"still registered: {', '.join(f'<{p.name}>' for p in left)}")
+        return False
+    return ok
 
 
 def _terminated(signum: int, _frame: object) -> None:
-    """SIGTERM 을 예외로 바꾼다 — main 의 finally 가 임시 워크트리를 치우고 143 으로 끝난다."""
+    """SIGTERM · SIGINT 를 예외로 바꾼다 — main 의 finally 가 치우고 128 + 신호 번호로 끝난다."""
     raise SystemExit(128 + signum)
 
 
@@ -233,7 +321,8 @@ def main(argv: list[str] | None = None) -> int:
         "laid on top) and pass on the fix. Prints a receipt.",
         epilog="exit codes: 0 red-then-green · 1 not (not red, or not green) · 2 usage · "
         "3 could not decide (pytest found no such test, timed out, no result line) · "
-        "143 SIGTERM (temporary worktrees removed first)",
+        "4 cleanup failed (a temporary worktree or folder is left; the verdict still prints) · "
+        "130 SIGINT · 143 SIGTERM (temporary worktrees removed first)",
     )
     ap.add_argument("--fix", required=True, help="the fix commit")
     ap.add_argument("--test", action="append", required=True, help="pytest node id (repeat)")
@@ -253,16 +342,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"usage: {sys.executable} cannot import pytest — run it with the worktree's .venv "
               "python (./.venv/bin/python tools/redgreen.py …)", file=sys.stderr)  # fmt: skip
         return EXIT_USAGE
-    previous = signal.signal(signal.SIGTERM, _terminated)  # mkdtemp 보다 먼저 — 만든 것은 치운다
-    tmp = Path(tempfile.mkdtemp(prefix="redgreen-"))
+    previous = {signum: signal.signal(signum, _terminated) for signum in HELD}
+    tmp: Path | None = None
     created: list[Path] = []
     receipt: dict[str, Any] = {"fix": sha, "parent": parent, "tests": args.test, "files": files}
     receipt.update(interpreter=interpreter(), red=None, green=None, verdict="unknown")
-    code = EXIT_UNKNOWN
+    code, cleaned = EXIT_UNKNOWN, False
     try:
+        with _held():  # 만든 바로 뒤에 끊겨도 tmp 를 안다 — finally 가 치운다
+            tmp = Path(tempfile.mkdtemp(prefix="redgreen-"))
         for side, at in (("red", parent), ("green", sha)):
-            created.append(tmp / side)  # add 보다 먼저 적는다 — 중간에 끊겨도 치운다
-            made = _git(root, "worktree", "add", "--quiet", "--detach", str(tmp / side), at)
+            with _held():  # add 도중에 끊기면 잠긴 등록이 남는다 — 끝난 뒤 신호를 받는다
+                created.append(tmp / side)  # add 보다 먼저 적는다 — 중간에 끊겨도 치운다
+                made = _git(root, "worktree", "add", "--quiet", "--detach", str(tmp / side), at)
             if made.returncode != 0:
                 raise OSError(f"git worktree add failed: {made.stderr.strip()}")
         red_root = (tmp / "red").resolve()
@@ -270,8 +362,12 @@ def main(argv: list[str] | None = None) -> int:
             target = tmp / "red" / rel
             if not target.resolve().is_relative_to(red_root):  # 부모 트리의 심볼릭 링크
                 raise OSError(f"{rel} resolves outside the red tree on the parent — not written")
+            shown = _git(root, "show", f"{sha}:{rel}", binary=True)
+            if shown.returncode != 0:  # 빈 파일을 얹으면 「시험 없음」이 빨강처럼 보인다
+                why = shown.stderr.decode(errors="replace").strip()
+                raise OSError(f"git show {sha[:12]}:{rel} failed — not written: {why}")
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(_git(root, "show", f"{sha}:{rel}", binary=True).stdout)
+            target.write_bytes(shown.stdout)
         receipt["red"] = run_side(tmp / "red", args.test, "red")
         receipt["green"] = run_side(tmp / "green", args.test, "green")
         receipt["verdict"], code = verdict(receipt["red"], receipt["green"], args.import_red_ok)
@@ -281,11 +377,15 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, subprocess.SubprocessError) as error:
         print(f"unknown: {error}", file=sys.stderr)
     finally:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # 치우는 도중에 또 끊기지 않게
+        for signum in HELD:  # 치우는 도중에 또 끊기지 않게
+            signal.signal(signum, signal.SIG_IGN)
         try:
-            _cleanup(root, tmp, created)
+            cleaned = _cleanup(root, tmp, created)
         finally:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
+            for signum, handler in previous.items():
+                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+    if not cleaned:
+        code = EXIT_CLEANUP
     if args.json:
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
     else:

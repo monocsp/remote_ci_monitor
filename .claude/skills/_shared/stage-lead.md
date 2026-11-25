@@ -1,9 +1,8 @@
 # Stage leads — the heavy stages go to a fresh agent, by file
 
-The main session talks to the owner, spawns verifiers, pushes, waits for `rcm/ci`, writes the
-decision page and merges. Heavy stages go to **one fresh lead per stage**, which returns a result file
-and is closed: every later call re-reads the main session's context, most of a stage's cost (provisional,
-measured elsewhere, like the models below; the owner confirms; a call's `effort` wins).
+The main session talks to the owner, spawns verifiers, pushes, waits for `rcm/ci`, writes the decision
+page and merges. Heavy stages go to **one fresh lead per stage**, which returns a result file and is
+closed: every later call re-reads the main session's context (models provisional; a call's `effort` wins).
 
 | stage | agent | mode | model |
 |---|---|---|---|
@@ -39,6 +38,7 @@ each other's scratchpad files (#220, #233). Workplans, code and tests go where t
    session first commits its own changes and, as it is, any test `regression-test-author` left.
 5. **Already verified** — tests and mutants already run, so they are not run again.
 6. **`gap-fix` only** — the confirmed GAP table (`file:line`) and the redesign target, or "none".
+7. **Attribution** — the commit trailer lines given at the main session's start, verbatim.
 
 ## What a read-only agent gets
 
@@ -62,8 +62,8 @@ agent started, which may be another checkout.
  "scope_corrections": {"owns_add": [], "why": ""}, "workplan_diff": [], "notes": ""}
 ```
 
-- `complete` needs a non-empty `red` for P2, P6 and qa-fix. A POLICY question, or an EXTERNAL one that
-  blocks, means `blocked`. RESOLVED is not asked: its `why` carries the `file:line` that answers it.
+- `complete` needs a non-empty `red` for P2, P6, batch and qa-fix. A POLICY question, or an EXTERNAL
+  one that blocks, means `blocked`. RESOLVED is not asked: its `why` carries the `file:line` that answers it.
 - Every sha is 40 characters; unknown is `—`, never a guess. `workplan_diff` lines use the six columns
   of `workplan-diff.md`; the main session says each in chat.
 - "Done" is `rcm/ci` and isolated verification, never the lead. The main session reads this JSON and
@@ -75,15 +75,16 @@ agent started, which may be another checkout.
 lead; the main session runs it after the fix is committed, in every flow that cites a receipt:
 
 ```sh
-cd <abs worktree> && ./.venv/bin/python tools/redgreen.py --fix <40-char fix sha> \
-  --test <pytest node id>… --json > .verify/handoff/<branch with / as ->/<stage>-<n>-redgreen.json
+cd <abs worktree> && ./.venv/bin/python tools/redgreen.py --fix <40-char fix sha> --json \
+  --test <node id> [--test <node id> …] > .verify/handoff/<branch with / as ->/<stage>-<n>-redgreen.json
 ```
 
 `--fix` is the first commit on which the red tests pass: the fix right after its test commit, or one
 commit holding both (the tool lays the fix's test files on its parent). Nothing is squashed (rule 5):
 a lead keeps each fix in one commit after its test; a fix that still spans commits gets one receipt
 per row, against the commit that makes that row pass. Exit 0 is red-then-green, 1 is not (the stage
-is not done), 3 is "could not decide" (not a pass). PRs and reports cite the receipt, not `red`.
+is not done), 3 is "could not decide" (not a pass), 4 is a verdict whose cleanup failed (remove the
+leftover worktree it names). PRs and reports cite the receipt, not `red`.
 
 ## Rules for every lead
 

@@ -30,7 +30,7 @@ PRs this way by hand; the tool below adds what that run had to check by eye.
 | owner | answers the one decision page; approves anything that changes the spec | — |
 
 Judgement-free hand work (captures, collecting files) goes to a general agent with `model: "sonnet"`,
-`effort: "high"` on the Agent call; without them it inherits the main session's model and effort.
+`effort: "high"` on the Agent call (otherwise it inherits the main session's).
 
 ## Invariants
 
@@ -54,16 +54,17 @@ export RCM_DEV_BATCH=~/.local/state/rcm-dev-batch/<batch-id>.json
 ./.venv/bin/python tools/dev_batch.py init --id <batch-id> --base origin/dev   # prints the base sha
 ```
 
-The state file lives outside every worktree: a scratchpad dies on restart and a file in a worktree dies with
-it. The tool reads its path only from `--batch` or `RCM_DEV_BATCH` — export it in every Bash call, shell
+The state file lives outside every worktree (a scratchpad dies on restart, a worktree file with it). The
+tool reads it only from `--batch` or `RCM_DEV_BATCH`: every block below exports it again, because shell
 state does not carry over. Run the tool from the main session's own worktree and its `.venv`.
 
 Per bundle: name the branch with the `branch` skill, then cut it from the pinned sha (not `origin/dev`, which
 may have moved) and give it its own `.venv`:
 
 ```sh
+export RCM_DEV_BATCH=~/.local/state/rcm-dev-batch/<batch-id>.json
 git worktree add -b <type>/<scope>-<what> ../remote_ci_monitor-<what> <base sha>
-cd ../remote_ci_monitor-<what> && python3.11 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]'
+(cd ../remote_ci_monitor-<what> && python3.11 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]')
 ./.venv/bin/python tools/dev_batch.py add --bundle <A> --branch <type>/<scope>-<what> \
   --worktree <absolute path> --owns <path>... [--shared <path>...] [--after <bundle>...] --merge-order <n>
 ```
@@ -72,9 +73,8 @@ cd ../remote_ci_monitor-<what> && python3.11 -m venv .venv && ./.venv/bin/python
 `docs/`, `tools/`, `scripts/`, `.claude/`, `src/remote_ci_monitor/`). An overlap means the split is wrong:
 fix the table (merge the two bundles or move the file to one of them), never widen `shared` to get past it.
 
-A later wave starts when every PR it depends on has merged: `git fetch origin` once for that wave, cut its
-worktrees from the new `origin/dev` sha, and `add` them to the same batch so overlaps with bundles still
-open from the earlier wave are refused.
+A later wave starts when every PR it depends on has merged: one `git fetch origin`, worktrees cut from the
+new `origin/dev` sha and `add`ed to the same batch, so overlaps with earlier open bundles are refused.
 
 ## 1 Dispatch
 
@@ -98,6 +98,7 @@ build machine: `rcm-ci` runs on the same CPUs, and a loaded machine turns time-t
 in file, then check it against the tree:
 
 ```sh
+export RCM_DEV_BATCH=~/.local/state/rcm-dev-batch/<batch-id>.json
 git -C <wt> rev-parse HEAD            # equals out.json "head"
 git -C <wt> status --porcelain        # empty
 ./.venv/bin/python tools/dev_batch.py scope --bundle <A>   # every touched path inside owns ∪ shared
@@ -133,9 +134,10 @@ overwrote a shared name, #220 and #233). The body carries the `## Differs from t
 [workplan-diff.md](../_shared/workplan-diff.md) from `out.json`'s `workplan_diff`.
 
 The watcher posts `rcm/ci` `queued · #<N>` within a minute. Wait for job `N` with `rcm wait --job <N>` as a
-background Bash call. No status after two minutes: submit by hand,
-`rcm run rcm-ci --source git_ref --ref <branch> --no-wait`, and say so in the PR. `rcm wait` exit 3 is
-unknown, not red — look at the commit status again before deciding anything.
+background Bash call. No status after two minutes: submit by hand as the `pr` skill does,
+`cd ~ && rcm run rcm-ci --source git_ref --ref <branch> --no-wait`, and say so in the PR. These `rcm` calls
+are the `rcm` on `PATH`, the build machine's own client, never the worktree's `./.venv/bin/rcm`.
+`rcm wait` exit 3 is unknown, not red — look at the commit status again before deciding anything.
 
 Red: read `rcm logs <N>`, paste the failing excerpt (not the whole log) into round `n+1`'s in file and spawn a
 fresh `build-lead` on the same worktree. The main session does not patch it.
@@ -162,6 +164,7 @@ calls for them. Severity, rounds, convergence, escalation and triage are
 ## 5 Merge in order
 
 ```sh
+export RCM_DEV_BATCH=~/.local/state/rcm-dev-batch/<batch-id>.json
 ./.venv/bin/python tools/dev_batch.py status   # local and remote head, PR, rcm/ci on that head, verified, merged
 export GH_TOKEN=...                        # as the pr skill pins it
 python3 tools/merge_pr.py <N> --wait --delete-branch
@@ -202,8 +205,7 @@ extra `rcm-ci` runs caused by re-syncs, scope violations. A number you did not m
   `n+1`, gets the commits that exist and both paths.
 - **Scope violation.** A new round for the same lead to revert or move the change; never hand-fix it, and
   never re-cut the branch. If the path really belongs to the bundle, it is a scope correction (step 2).
-- **No `rcm/ci` after two minutes.** The watcher missed it: submit by hand (step 3); if it happens on every
-  push, its log is named in the `pr` skill.
+- **No `rcm/ci` after two minutes.** Submit by hand (step 3); on every push, read the watcher log (`pr` skill).
 - **`merge_pr.py` exit 3.** GitHub did not answer; the merge may have happened. Look first —
   `gh pr view <N> --json state,mergeCommit,headRefOid` — and retry only if it is still open.
   Exit 1 is a refusal: read the reason (pending check, `verified:` for another sha, conflict).

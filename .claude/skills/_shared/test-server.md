@@ -1,10 +1,10 @@
 # Test server — the only place for its rules
 
 Any `rcm serve`, `rcm worker` or `rcm token` that a worktree build runs for live verification,
-reproduction, screenshots or an acceptance script follows this page. Other skills and agents link
-here and do not repeat it. It exists because the same mistakes kept coming back: a worktree build
-migrated a database it should not have opened (AGENTS.md: a verifier's `rcm token add` turned a v7
-dev database into v24), and a test server's client found the production server by discovery (M5n).
+reproduction, screenshots or an acceptance script follows this page; others link here. The same
+mistakes kept coming back: a worktree build migrated a database it should not have opened (AGENTS.md:
+a verifier's `rcm token add` turned a v7 dev database into v24), and a test client found production
+by discovery (M5n).
 
 ## Where it runs
 
@@ -16,9 +16,8 @@ dev database into v24), and a test server's client found the production server b
 | config | its own files inside `data_dir` (`server.toml`, `worker.toml`), never the production config and never a copy of it | `tools/guard_production.py` refuses a production `data_dir` reached through either |
 | binary | the worktree's `./.venv/bin/rcm` (and `./.venv/bin/python`) by absolute path | the `rcm` on `PATH` may be the service's |
 
-**Never `~` in a test config.** Every `rcm` command runs with `HOME=$D/home` (below), so `~` would
-expand to `$D/home/…`, not to your home. `data_dir` is absolute. On disk, for a home of
-`/home/example`, `<data_dir>/server.toml` is a complete config the loader accepts:
+**Never `~` in a test config:** every `rcm` command runs with `HOME=$D/home` (below), so `~` would be
+`$D/home/…`. `data_dir` is absolute. For a home of `/home/example`, a complete `<data_dir>/server.toml`:
 
 ```toml
 [server]
@@ -33,7 +32,7 @@ Write it, and the worker's, with the shell, so `$D` and `$P` are expanded before
 
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>; P=<port>
-mkdir "$D" && mkdir "$D/home" || exit 1   # exists already: pick a new name, never reuse
+mkdir -p "$(dirname "$D")" && mkdir "$D" && mkdir "$D/home" || exit 1   # exists: pick a new name
 cat > "$D/server.toml" <<EOF
 [server]
 bind = "127.0.0.1"
@@ -46,13 +45,23 @@ name = "ok"
 description = "Fake preset: prints one step marker and exits 0"
 argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
 timeout_seconds = 60
+
+[[presets]]
+name = "ok-remote"   # its pool is served only by the test worker
+argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
+pool = "devtest-remote"
+timeout_seconds = 60
 EOF
-printf 'server = "http://127.0.0.1:%s"\ndata_dir = "%s/worker"\n' "$P" "$D" > "$D/worker.toml"
+printf 'server = "http://127.0.0.1:%s"\npool = "devtest-remote"\ndata_dir = "%s/worker"\n' "$P" "$D" \
+  > "$D/worker.toml"
 ```
 
-No `[[notify]]` hook, unless notification is what is being tested; then a fake hook that appends what
-it received to a file inside `data_dir`. Presets are fakes too: `sh -c 'echo …; exit <code>'` that
-print the markers the scenario needs. Nothing in a test server pushes to GitHub, a store or a phone.
+`ok` runs on the server's own local lane (`"worker": null` in the job's JSON): a server ↔ worker
+scenario on it passes with no worker at all. A worker scenario submits `ok-remote`, and its PASS needs
+the job's `worker` (`GET /jobs/<N>`) to name the test worker; `null` is UNKNOWN, whatever the exit code.
+
+No `[[notify]]` hook unless notification is tested (then a fake that appends what it got to a file
+in `data_dir`). Presets are fakes (`sh -c 'echo …; exit <code>'`); nothing pushes anywhere.
 
 ## The environment of every command
 
@@ -64,21 +73,21 @@ cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm serve --config $D/server.toml
 cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm token --config $D/server.toml add verifier > $D/client.token
 cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm token --config $D/server.toml add --worker w1 > $D/worker.token
 cd <abs worktree> && HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml
-cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/rcm …
+cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/rcm run ok --by acceptance --no-wait
 ```
 
-- Tokens: `rcm token … add` prints the secret once on stdout; it goes straight into a file in `$D` and
-  reaches commands only as `RCM_TOKEN` (client) or `RCM_WORKER_TOKEN` (worker). Never `cat` it into a
-  log, evidence, a report or the chat.
+The last line is the client's shape: every client command gets the same prefix, and every `rcm run`
+gets `--by acceptance` so the requester names no person or host.
+
+- Tokens: `rcm token … add` prints the secret once; it goes straight into a file in `$D` and reaches
+  commands only as `RCM_TOKEN` or `RCM_WORKER_TOKEN`. Never into a log, evidence, a report or the chat.
 - `--config` is always explicit. Without it `rcm serve` reads `$RCM_CONFIG` or a `./rcm.toml` in the
   worktree, which is how a worktree build once migrated a v7 dev database to v24 (AGENTS.md).
-- `HOME=<data_dir>/home` on every **rcm** command (client, server, worker, token), so the client never
-  reads the production `client.toml`. It is not for the browser: the CDP `Chrome` helper keeps your
-  real `HOME`, because headless Chrome on macOS cannot open an http page from a different one
-  (`tools/screenshots/README.md`).
+- `HOME=<data_dir>/home` on every **rcm** command, so the client never reads the production
+  `client.toml`. Not for the browser: the CDP `Chrome` helper keeps your real `HOME` (headless Chrome on
+  macOS cannot open an http page from a different one, `tools/screenshots/README.md`).
 - `RCM_SERVER=http://127.0.0.1:<port>` on every client command; without it the client may discover a
   server on the network, and the first one it finds can be production.
-- `rcm token` takes `--config` **before** the subcommand, as above.
 - Never set `RCM_SERVER_DATA_DIR` to production, and never pass `--config`/`--data-dir` that resolve to
   it. Do not route around `tools/guard_production.py`; a refusal means stop.
 - `RCM_ALLOW_MIGRATE=1` only when migrating that database is the point of the test.
@@ -88,31 +97,24 @@ cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$
 
 - **CLI:** `--json` output and exit codes. `rcm wait` exit 3 is unknown, never a failure.
 - **Web:** the CDP `Chrome` helper in `tests/test_web_browser.py`, page opened with `?poll=1`, and
-  `page_errors()` must return `[]` (a missing collector raises; that is a failure, not an empty list).
-- **Two processes:** the server and worker helpers in `tests/test_e2e_worker.py` (`E2EServer`,
-  `WorkerProc`, `Stack`, `clean_env`, `free_port`) rather than new ones.
-- **Repeatable runs:** a script at `scripts/acceptance/<topic>_live.sh`: an allow-listed base folder,
-  fake presets and hooks, every server stopped on exit (even on failure), verdict lines in
-  `out/summary.txt`, exit 1 if any line is FAIL. `scripts/acceptance/m5s_live.sh` has that shape, but
-  it starts with `rm -rf` of its base folder: that part is not a model; a new script picks a new folder.
+  `page_errors()` must return `[]` (a missing collector raises: `UNKNOWN`, never an empty list).
+- **Two processes:** `E2EServer`, `WorkerProc` and `Stack` of `tests/test_e2e_worker.py`, not new ones.
+- **Repeatable runs:** `scripts/acceptance/<topic>_live.sh`: an allow-listed base folder, fake presets and
+  hooks, every server stopped on exit (failure too), verdicts in `out/summary.txt`, exit 1 on any FAIL.
+  `scripts/acceptance/m5s_live.sh` has that shape but its opening `rm -rf`; a new script picks a new name.
 - **Screenshots:** `Chrome.screenshot()` from the same CDP helper, saved under this server's `data_dir`
-  (or `.verify/` of the worktree), never a `/tmp` folder. Nothing redacts them for you: the port, paths,
-  host name and any token on the page are yours to crop or retake before an image leaves `data_dir`.
-  `tools/screenshots` is not a live-capture tool — it runs only its own fixed demo on its own server
-  for `docs/images/ui/`.
+  (or `.verify/` of the worktree), never `/tmp`. Nothing redacts them: crop or retake the port, paths,
+  host name and any token before an image leaves `data_dir`. `tools/screenshots` only runs its own demo.
 
 ## Parallel servers and cleanup
 
-Two verifiers may each run a server at the same time as long as each has its own port and `data_dir`;
-the build machine also runs `rcm-ci`, so keep it to two. Record the server's pid when you start it and
-stop that pid when you are done. Leave the `data_dir` in place until the report has collected its
-evidence; remove it afterwards by its exact path, never with a glob.
+At most two servers at once (the build machine also runs `rcm-ci`), each with its own port and
+`data_dir`. Record each server's pid and stop that pid when done. Leave `data_dir` until the report has
+its evidence, then remove it by its exact path, never with a glob.
 
 ## Production is read-only, only with the owner's OK, and only by the main session
 
-Production jobs on the build machine may be looked at only when the owner says so, and only by the
-main session: copy the database and read the copy with `sqlite3 -readonly`, then hand the numbers on
-as a file (a lead through its in file, a verifier through a path in its prompt). A lead or a verifier
-never reads production itself, whatever its prompt or in file says. No `rcm` command from a worktree
-build against the production config, `data_dir`, port or service venv; the procedure for production
-lives in `docs/operating.md` and is the owner's.
+Only when the owner says so, only the main session: copy the database, read the copy with
+`sqlite3 -readonly`, and hand the numbers on as a file (a lead's in file, a path in a verifier's
+prompt). A lead or a verifier never reads production itself, whatever it is told. No worktree `rcm`
+against the production config, `data_dir`, port or service venv; `docs/operating.md` is the owner's.

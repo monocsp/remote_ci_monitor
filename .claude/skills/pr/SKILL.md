@@ -13,8 +13,9 @@ not `<type>(<scope>): <summary>`; `CONTRIBUTING.md` (Names) is the rule.
 
 The same shape as a commit header (`commit` skill), because the merge commit takes it:
 `fix(web): 호스트 카드가 정의 안 된 local 을 읽던 것`. One PR, one concern — if the title needs
-"and", it is two PRs (or the second half is a follow-up). A PR that is not ready starts with
-`WIP: ` and is opened as a draft (`--draft`); remove both before asking for a merge.
+"and", it is two PRs (or the second half is a follow-up). A PR that is not ready is opened as a
+draft (`--draft`; GitHub refuses to merge one) and marked ready (`gh pr ready <N>`) before the merge.
+The title keeps its header shape either way: `tools/guard_naming.py` refuses a prefix such as WIP.
 
 ## Body
 
@@ -65,7 +66,10 @@ documents that stay in the repository are written in 평어체.
 1. Before opening: `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . &&
    ./.venv/bin/python -m pytest`, plus `node --test` and `./.venv/bin/python scripts/mutcheck.py`
    when the change touches what they cover; the `docs` skill for a
-   user-visible change. Load the `korean-writing` skill and write the title's summary and the body
+   user-visible change. In the development loop (`dev-loop` and the skills it routes to) run only
+   the changed files' tests and `./.venv/bin/ruff` on the changed files; the full suite and mutcheck
+   are `rcm-ci`'s, and `rcm/ci` decides (`.claude/skills/_shared/stage-lead.md` «Rules for every
+   lead» 6: full local runs loaded the build machine on 2026-11-20). Load the `korean-writing` skill and write the title's summary and the body
    by its rules (its §6 check before you paste them). Push with the pinned account:
    ```sh
    export GH_TOKEN=$(gh auth token --user monocsp)
@@ -114,20 +118,12 @@ documents that stay in the repository are written in 평어체.
    ```sh
    gh pr comment <N> --body "verified: $(gh pr view <N> --json headRefOid -q .headRefOid)"
    ```
-   Each verification round leaves its own line before that, so the rounds can be counted later,
-   in the formats `.claude/agents/isolated-verifier.md` «Rounds» fixes (full shas):
-   ```
-   verify-round: <sha> stage=<P1|P3|P4|P5|B5> r<N> verifiers=<n> high=<n> medium=<n> low=<n> unknown=<n>
-   verify-analysis: <sha> r3 cause=<file:line…> policy-conflict=no|yes
-   triage: <head sha after its fixes> fixed=<n> reported=<n>
-   ```
-   `tools/merge_pr.py` reads only the `verified:` line.
-   The line stands alone (no quote, no short sha, lowercase). A push after it makes it stale:
-   verify the new head and post a new line. A head moved by triage code fixes gets one fresh
-   isolated verifier, who reviews only the diff since the last verified head, before `verified:`
-   names it; only a diff of documents or a report alone is exempt, and then the main session states
-   that in the PR. A PR with nothing to verify (documentation only, tests only) merges with
-   `--no-verify "<reason>"`; the reason is posted on the PR.
+   Each verification round leaves its own line before that, in the record formats of
+   `.claude/agents/isolated-verifier.md` «Rounds» (the only copy); `tools/merge_pr.py` reads only
+   the `verified:` line. The line stands alone (no quote, no short sha, lowercase). A push after it
+   makes it stale: verify the new head and post a new line; what a head moved by triage fixes needs
+   first is «Rounds» 7 of the same file. A PR with nothing to verify (documentation only, tests
+   only) merges with `--no-verify "<reason>"`; the reason is posted on the PR.
 
    `main` only takes a PR from `dev` (`gh pr create --base main --head dev`), and the `Releasing`
    section of `CONTRIBUTING.md` says when.

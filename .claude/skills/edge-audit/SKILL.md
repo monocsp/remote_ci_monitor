@@ -16,10 +16,10 @@ have no `git`; [`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read
 
 1. The edge list: the workplan's edge rows for this PR (§7 IDs), its §9 risks, and the irreversible
    results that [`_shared/edge-scope.md`](../_shared/edge-scope.md) always keeps.
-2. A `git archive` snapshot of the head (`snap-<n>/`) and the diff
-   (`git -C <wt> diff origin/dev...<head> > diff-<n>.patch`).
+2. A `git archive` snapshot of the head (`<h>/snap-<n>/`) and the diff
+   (`git -C <wt> diff origin/dev...<head> > <h>/diff-<n>.patch`), `<h>` the absolute handoff folder.
 3. The history search for the edges' keywords (`git log --grep`, `CHANGELOG.md`,
-   `docs/acceptance/reports/`), which edge-scope asks for, as `search-<n>.txt`.
+   `docs/acceptance/reports/`), which edge-scope asks for, as `<h>/search-<n>.txt`.
 4. What P3 and P4 already settled on this head, marked as such, so it is not judged twice.
 
 ## Run
