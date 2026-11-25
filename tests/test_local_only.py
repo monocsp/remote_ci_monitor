@@ -655,3 +655,18 @@ def test_to19_rechecking_every_check_skips_the_local_only_one(lo, monkeypatch):
         "error_code": "local_only",
     }
     assert ("simcheck", OTHER) in calls and ("localcheck", OTHER) not in calls
+
+
+# ── 문서 ─────────────────────────────────────────────────────────────────────
+
+
+def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
+    """사용자가 보는 키다 — 설정 문서의 절과 키 표, CHANGELOG 에 있어야 한다(docs 스킬)."""
+    from test_docs_m5 import CHANGELOG, CONFIGURATION, read, unreleased
+
+    text = read(CONFIGURATION)
+    assert "### Keeping a preset on the server: `local_only`" in text
+    assert "| `[[presets]]` | `local_only` | `false` |" in text
+    for code in ("`local_only`", "`check_local_only`", "409"):
+        assert code in text, code
+    assert "local_only = true" in unreleased(read(CHANGELOG))
