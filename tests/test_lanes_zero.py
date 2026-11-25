@@ -20,7 +20,7 @@ import pytest
 
 import test_server_m5n
 from remote_ci_monitor.config import ConfigError, load_server_config
-from remote_ci_monitor.core.model import QUEUED
+from remote_ci_monitor.core.model import QUEUED, Requester, Source
 from test_local_only import (
     FAKE_TOOL,
     LOCAL,
@@ -320,6 +320,116 @@ def test_tl15_jobs_that_lost_their_place_wait_with_no_capable_machine(tmp_path, 
             assert row["estimate"]["wait_seconds"] is None, row
             assert row["estimate"]["finish_at"] is None, row
             assert s.store.get_job(jid).state == QUEUED  # 실패로 닫지 않는다
+    finally:
+        s.close()
+
+
+#: alice 가 낸 tree 잡의 출처 — 같은 레포 · 같은 브랜치(supersede 규칙 2 · 3)
+def _tree(tree_hash: str) -> Source:
+    return Source(mode="tree", repo="org/app", branch="main", tree_hash=tree_hash)
+
+
+def _waiting(s: M5nServer, *, target: str | None, tree_hash: str) -> int:
+    """제출 검사를 거치지 않은 alice 의 대기 `gate` 잡(재시작 전부터 있던 잡)."""
+    return s.store.create_job(
+        preset="gate",
+        inputs={},
+        key="gate",
+        concurrency_group=None,
+        source=_tree(tree_hash),
+        requester=Requester(name="alice-laptop", label="alice@host"),
+        timeout_seconds=600,
+        join_key=None,
+        now=s.clock(),
+        state=QUEUED,
+        pool="default",
+        placement="pool",
+        target_worker=target,
+    ).id
+
+
+def _lost_at_local(tmp_path: Path, presets: str = PRESETS) -> tuple[M5nServer, int]:
+    """레인 1 서버에 `@local` 을 지정해 둔 대기 잡 → lanes 0 으로 다시 띄운 서버와 그 잡."""
+    s = zero(tmp_path, lanes=1, presets=presets)
+    jid = _waiting(s, target=LOCAL, tree_hash="pinned-tree")
+    tokens, clock = s.tokens, s.clock
+    s.close()
+    s = zero(tmp_path, presets=presets, tokens=tokens, clock=clock)
+    assert s.row(jid)["reason"] == "no_capable_machine"
+    return s, jid
+
+
+def test_tl15_a_job_that_lost_its_place_can_be_cancelled(tmp_path):
+    """# TL15 · P5 G2 — 갈 곳을 잃은 `@local` 잡은 실패로 닫히지 않고 기다린다. 사람이 취소하면
+    도는 잡이 없으니 곧장 cancelled 다(cancelling 에 남지 않는다)."""
+    s, jid = _lost_at_local(tmp_path)
+    try:
+        status, body = s.req("POST", f"/jobs/{jid}/cancel", token="admin", json_body={})
+        assert status == 200, body
+        assert s.store.get_job(jid).state == "cancelled", s.store.get_job(jid)
+        assert all(r["id"] != jid for p in s.status()["pools"] for r in p["queue"])
+    finally:
+        s.close()
+
+
+#: 반복 정책이 있는 기본 풀 git_ref 프리셋(`tests/test_local_only.py` 의 RETRY 와 같은 꼴)
+RETRYING = block(
+    "relgitretry",
+    'source_modes = ["git_ref"]\nrepo = "app"',
+    "[presets.retry]\non_exit = 75\ninterval_seconds = 60\nmax_attempts = 3",
+)
+
+
+def test_tl15_the_retry_of_a_job_pinned_to_at_local_waits_with_no_capable_machine(tmp_path):
+    """# TL15 · P5 G3 — 반복의 다음 시도는 제출을 거치지 않고(409 는 제출 경로뿐) 지정 머신을
+    물려받는다. lanes 를 0 으로 바꿔 다시 띄우면 그 시도도 TL15 와 같은 규칙이다: 실패로 닫지
+    않고 `no_capable_machine` · ETA null 로 기다린다."""
+    s = zero(tmp_path, lanes=1, presets=PRESETS + RETRYING)
+    jid = queued(s, "relgitretry", token="admin", machine=LOCAL)
+    now = s.clock()
+    first = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+    assert first is not None and first.id == jid
+    assert s.store.finish(jid, "retried", now=s.clock(), exit_code=75)
+    nxt = int(s.store.get_job(jid).retried_as)
+    assert s.store.get_job(nxt).target_worker == LOCAL
+    tokens, clock = s.tokens, s.clock
+    s.close()
+    s = zero(tmp_path, presets=PRESETS + RETRYING, tokens=tokens, clock=clock)
+    try:
+        s.clock.advance(61)
+        s.app.tick_schedule()
+        assert s.store.get_job(nxt).state == QUEUED  # 실패로 닫지 않는다
+        row = s.row(nxt)
+        assert row["reason"] == "no_capable_machine", row
+        assert row["estimate"]["wait_seconds"] is None, row
+        assert row["estimate"]["finish_at"] is None, row
+        report(s, REMOTE)  # 원격이 붙어도 `@local` 지정 잡은 가져가지 않는다
+        assert s.claim(REMOTE)[0] == 204
+    finally:
+        s.close()
+
+
+#: tree 출처 · 같은 브랜치의 새 제출이 옛 잡을 치우는 프리셋
+SUPERSEDING = PRESETS.replace(
+    'name = "gate"\nargv = ["sh", "-c", "echo gate"]\n',
+    'name = "gate"\nargv = ["sh", "-c", "echo gate"]\nsupersede = "all"\n',
+)
+
+
+def test_tl15_supersede_leaves_a_job_pinned_to_at_local_alone(tmp_path):
+    """# TL15 · P5 G3 — 갈 곳을 잃은 `@local` 지정 잡은 같은 브랜치의 새 제출이 치우지 않는다
+    (supersede 규칙 8: 사람이 고른 머신). 새 잡은 지정 머신이 없어 기본 풀에서 기다린다.
+    비교 행: 같은 꼴인데 지정 머신이 없는 옛 잡은 치운다 — supersede 는 돈다."""
+    assert SUPERSEDING != PRESETS
+    s, pinned = _lost_at_local(tmp_path, presets=SUPERSEDING)
+    try:
+        loose = _waiting(s, target=None, tree_hash="loose-tree")
+        fresh = queued(s, "gate")
+        assert s.store.get_job(loose).state == "cancelled"  # 지정 없는 옛 잡은 치운다
+        assert s.store.get_job(pinned).state == QUEUED  # 지정 잡은 그대로 기다린다
+        assert s.row(pinned)["reason"] == "no_capable_machine"
+        assert s.store.get_job(fresh).target_worker is None
+        assert s.row(fresh)["reason"] == "worker_down", s.row(fresh)  # 워커를 기다린다
     finally:
         s.close()
 
