@@ -3498,6 +3498,18 @@ MUTANTS = (
         new="            pass\n",
         tests=("tests/test_setup.py::test_s8_tokens_are_printed_without_a_service_manager",),
     ),
+    Mutant(
+        # 바꿔 끼우는 순서를 찍지 않는다 — `--force service` 로 다시 쓴 파일이나 이미 올라간 라벨을
+        # `cp -n` 과 bootstrap 만으로는 바꿀 수 없다(P5 B-E2)
+        name="setup-swap-order-not-printed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    plan.replacing = bool(loaded) or (bool(forced) and staged.exists())\n",
+        new="    plan.replacing = False\n",
+        tests=(
+            "tests/test_setup.py::test_s1_a_loaded_label_prints_the_launchd_swap_order",
+            "tests/test_setup.py::test_s1_force_service_prints_the_systemd_swap_order",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

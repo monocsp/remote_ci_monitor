@@ -399,6 +399,9 @@ class Plan:
     tokens: list[str] = field(default_factory=list)
     #: 쓰다 멈춘 뒤 되돌리지 못한 파일
     unrestored: list[Path] = field(default_factory=list)
+    #: 올라간 서비스를 바꿔 끼우는 순서를 찍나 — 같은 라벨이 올라가 있거나 `--force service` 로
+    #: 있던 서비스 파일을 다시 쓸 때(P5 B-E2)
+    replacing: bool = False
 
 
 def _url(raw: str) -> str:
@@ -785,10 +788,13 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
     plan.manager, plan.service, plan.rcm, plan.log = manager, staged, rcm, log
     plan.installed = core.install_path(label, manager, home)
     loaded = world.service_loaded(manager, label)
+    forced = set(args.force or ()) & {"service", "all"}
+    plan.replacing = bool(loaded) or (bool(forced) and staged.exists())
     if loaded:
         plan.warnings.append(
             f"a service labelled {label} is already loaded — setup leaves it alone; the copy "
-            "below does not replace it (pass --label to set up another one)"
+            "below does not replace it (the lines under 'to replace' do, or pass --label to set "
+            "up another one)"
         )
     elif loaded is None:  # 서비스 관리자가 답하지 않았다(P3 v1-5 · P5 A-E2)
         tool = "launchctl" if manager == core.LAUNCHD else "systemctl --user"
@@ -934,6 +940,12 @@ def _report(plan: Plan, world: World) -> None:
             "  (cp -n keeps a file already there; the start command runs only when the "
             "installed file is the one setup wrote)\n"
         )
+        if plan.replacing:
+            err.write("to replace the service already installed or loaded, in this order:\n")
+            for line in core.replace_commands(
+                plan.manager, staged=plan.service, installed=plan.installed, label=plan.label or ""
+            ):
+                err.write(f"  {line}\n")
         if plan.manager == core.SYSTEMD:
             err.write("  to keep it running after you log out: sudo loginctl enable-linger $USER\n")
     if plan.tokens:

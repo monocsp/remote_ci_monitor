@@ -1287,6 +1287,44 @@ def _at(lines: list[str], text: str) -> int:
     return found[0]
 
 
+def test_s1_a_loaded_label_prints_the_launchd_swap_order(cfg, home, tmp_path):
+    # B-E2: 이미 올라간 라벨이면 bootout → cp(-n 없이) → bootstrap 순서를 찍는다
+    fake = Fake(loaded=True)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    staged = cfg / "service" / "test.rcm.server.plist"
+    installed = home / "Library" / "LaunchAgents" / "test.rcm.server.plist"
+    lines = _lines(fake)
+    out = _at(lines, "launchctl bootout gui/$(id -u)/test.rcm.server")
+    copy = _at(lines, f"cp {staged} {installed}")
+    start = _at(lines, f"launchctl bootstrap gui/$(id -u) {installed}")
+    assert out < copy < start
+    # 「not started」 줄도 그 길을 가리킨다
+    said = next(line for line in lines if "not started" in line)
+    assert "bootout" in said and "cp without -n" in said
+
+
+def test_s1_force_service_prints_the_systemd_swap_order(cfg, home, tmp_path):
+    argv = coordinator_args(tmp_path / "data")
+    assert go(Fake(platform="linux"), *argv) == 0
+    fake = Fake(platform="linux")
+    assert go(fake, *argv, "--force") == 0, fake.text
+    unit = "test.rcm.server.service"
+    staged = cfg / "service" / unit
+    installed = home / ".config" / "systemd" / "user" / unit
+    lines = _lines(fake)
+    off = _at(lines, f"systemctl --user disable --now {unit}")
+    copy = _at(lines, f"cp {staged} {installed}")
+    reload = _at(lines, "systemctl --user daemon-reload")
+    on = _at(lines, f"systemctl --user enable --now {unit}")
+    assert off < copy < reload < on
+
+
+def test_s1_a_first_setup_prints_no_swap(cfg, tmp_path):
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    assert not any(line.startswith("launchctl bootout") for line in _lines(fake))
+
+
 def test_s6_the_systemd_worker_unit_logs_to_its_label_and_sets_home(cfg, home, tmp_path):
     # B-E13 · A-E9: 서버 유닛과 같은 방식 — 라벨 로그 · HOME · setup 이 썼다는 머리 주석
     assert go(Fake(platform="linux"), *WORKER_ARGV) == 0

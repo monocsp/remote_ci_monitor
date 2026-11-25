@@ -457,18 +457,41 @@ def install_commands(
     copy = f"cp -n {q(str(staged))} {q(str(installed))}"
     same = f"cmp -s {q(str(staged))} {q(str(installed))} && "
     # 시작하지 않았으면 조용히 끝나지 않는다(P3 v1-9). `a && b || c` 라 시작이 실패해도 이 줄이
-    # 나온다 — 그래서 문장이 둘 다 말한다
-    said = (
-        ' || echo "not started: the installed file differs from the one setup wrote,'
-        ' or the start failed"'
-    )
-    folders = f"mkdir -p {q(str(log.parent))} {q(str(installed.parent))}"
+    # 나온다 — 그래서 문장이 둘 다 말하고, 바꿔 끼우는 길도 가리킨다(P5 B-E2)
     if manager == LAUNCHD:
         start = f"launchctl bootstrap gui/$(id -u) {q(str(installed))}"
+        swap = "launchctl bootout, cp without -n, launchctl bootstrap"
     else:
         unit = installed.name
         start = f"systemctl --user daemon-reload && systemctl --user enable --now {q(unit)}"
+        swap = "systemctl --user disable --now, cp without -n, daemon-reload, enable --now"
+    said = (
+        ' || echo "not started: the installed file differs from the one setup wrote,'
+        f' or the start failed; to replace an installed one: {swap}"'
+    )
+    folders = f"mkdir -p {q(str(log.parent))} {q(str(installed.parent))}"
     return [folders, copy, same + start + said]
+
+
+def replace_commands(manager: str, *, staged: Path, installed: Path, label: str) -> list[str]:
+    """이미 올라간 서비스를 setup 이 쓴 파일로 바꿔 끼우는 순서(P5 B-E2) — 내리고, 덮어
+    쓰고(`cp`, `-n` 없이), 다시 올린다. `--force service` 로 다시 썼을 때와 같은 라벨이 이미
+    올라가 있을 때 찍는다."""
+    q = shlex.quote
+    copy = f"cp {q(str(staged))} {q(str(installed))}"
+    if manager == LAUNCHD:
+        return [
+            f"launchctl bootout gui/$(id -u)/{q(label)}",
+            copy,
+            f"launchctl bootstrap gui/$(id -u) {q(str(installed))}",
+        ]
+    unit = q(installed.name)
+    return [
+        f"systemctl --user disable --now {unit}",
+        copy,
+        "systemctl --user daemon-reload",
+        f"systemctl --user enable --now {unit}",
+    ]
 
 
 def token_commands(rcm: Path, config: Path) -> list[str]:
