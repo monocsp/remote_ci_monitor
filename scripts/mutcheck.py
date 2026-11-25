@@ -3478,6 +3478,17 @@ MUTANTS = (
         new="    roles_here, unread = existing_roles(os.environ), None\n",
         tests=("tests/test_setup.py::test_s9_an_unreadable_existing_config_is_a_warning",),
     ),
+    Mutant(
+        # setup 의 systemd 워커 유닛이 `init worker` 의 것으로 돌아간다 — 라벨 로그 · HOME 이 없고
+        # 머리 주석이 `rcm init worker` 를 말한다(P5 B-E13 · A-E9)
+        name="setup-worker-unit-without-log-and-home",
+        path="src/remote_ci_monitor/setup.py",
+        old="    return core.worker_unit(\n",
+        new="    return cli.worker_unit(rcm, plan.config, home)\n    return core.worker_unit(\n",
+        tests=(
+            "tests/test_setup.py::test_s6_the_systemd_worker_unit_logs_to_its_label_and_sets_home",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

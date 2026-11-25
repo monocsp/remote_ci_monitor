@@ -1287,6 +1287,22 @@ def _at(lines: list[str], text: str) -> int:
     return found[0]
 
 
+def test_s6_the_systemd_worker_unit_logs_to_its_label_and_sets_home(cfg, home, tmp_path):
+    # B-E13 · A-E9: 서버 유닛과 같은 방식 — 라벨 로그 · HOME · setup 이 썼다는 머리 주석
+    assert go(Fake(platform="linux"), *WORKER_ARGV) == 0
+    text = (cfg / "service" / "test.rcm.worker.service").read_text(encoding="utf-8")
+    log = home / ".local" / "state" / "rcm" / "test.rcm.worker.log"
+    assert f"StandardOutput=append:{log}\n" in text
+    assert f"StandardError=append:{log}\n" in text
+    assert f"Environment=HOME={home}\n" in text
+    assert "written by `rcm setup`" in text.splitlines()[0]
+    # `rcm init worker --service-file` 이 쓰는 유닛은 그대로다
+    from remote_ci_monitor import cli
+
+    init = cli.worker_unit(RCM, cfg / "worker.toml", home).decode("utf-8")
+    assert "written by `rcm init worker --service-file`" in init.splitlines()[0]
+
+
 def _manager_stub(bin_dir: Path, name: str, script: str) -> None:
     bin_dir.mkdir(exist_ok=True)
     stub = bin_dir / name

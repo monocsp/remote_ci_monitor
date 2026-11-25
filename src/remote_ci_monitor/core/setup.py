@@ -336,6 +336,39 @@ WantedBy=default.target
     return text.encode("utf-8")
 
 
+def worker_unit(*, rcm: Path, config: Path, home: Path, label: str, log: Path, path: str) -> bytes:
+    """setup 이 쓰는 워커의 systemd 사용자 유닛 — 서버 유닛(`server_unit`)과 같은 방식으로 라벨의
+    로그(`StandardOutput=append:`)와 `HOME` 을 싣는다(P5 B-E13 · A-E9). 토큰은 싣지 않는다.
+    `rcm init worker --service-file` 은 지금처럼 `cli.worker_unit` 을 쓴다."""
+    text = f"""# remote_ci_monitor worker ({label}) — written by `rcm setup`.
+# The token is not in this file: put `token = "…"` in {unit_path(config)} (mode 600).
+[Unit]
+Description=remote_ci_monitor worker ({label})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={unit_path(home)}
+ExecStart={exec_start([rcm, "worker", "--config", config])}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=en_US.UTF-8
+Environment={unit_word(f"HOME={home}")}
+Environment={unit_word(f"PATH={path}")}
+StandardOutput=append:{unit_path(log)}
+StandardError=append:{unit_path(log)}
+
+[Install]
+WantedBy=default.target
+"""
+    return text.encode("utf-8")
+
+
 #: 서비스 관리자가 서비스 파일을 읽는 시스템 자리 — 사용자 자리(`install_dir`)와 함께 setup 이
 #: 쓰지 않는 곳이다(§4.1 「설치 자리에 쓰지 않는다」). guard 의 `SETUP_SERVICE_PLACES` 와 같다
 SYSTEM_SERVICE_DIRS = (

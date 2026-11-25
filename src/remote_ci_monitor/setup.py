@@ -726,7 +726,9 @@ def _render_service(
         doc["Label"] = label
         doc["StandardOutPath"] = doc["StandardErrorPath"] = str(log)
         return plistlib.dumps(doc)
-    return cli.worker_unit(rcm, plan.config, home)
+    return core.worker_unit(
+        rcm=rcm, config=plan.config, home=home, label=label, log=log, path=cli.WORKER_SERVICE_PATH
+    )
 
 
 def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Plan) -> None:
