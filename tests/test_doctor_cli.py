@@ -1550,3 +1550,101 @@ def test_to18_doctor_reads_the_real_servers_unreachable_checks(tmp_path, monkeyp
         assert not any("check" in u for u in doc["undecided"]), doc["undecided"]
     finally:
         srv.close()
+
+
+# ── 읽지 못하는 서비스 파일 (P3 1라운드 HIGH · 검증자 2 #1) ───────────────────
+
+TRUNCATED_PLIST = b'<?xml version="1.0"?><plist><dict><key>Label</key>'
+NOT_A_DICT_PLIST = b'<?xml version="1.0"?><plist version="1.0"><array></array></plist>'
+
+
+@pytest.mark.parametrize("body", [TRUNCATED_PLIST, NOT_A_DICT_PLIST], ids=["truncated", "array"])
+def test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3(
+    env, srv, svcbin, monkeypatch, capsys, body
+):
+    """`--service-file` 없는 doctor 도 설치 자리의 plist 를 모두 읽는다. 깨진 파일 하나가
+    traceback 을 내지 않는다 — 그 파일 이름과 이유를 「판정 못 함」에 적고 종료 3 이다. 함께 있는
+    읽히는 파일로는 그대로 잰다(그 파일이 이 역할의 것이었는지 모르므로 0 으로 끝내지 않는다)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    cfg = worker_toml(env, srv.url)
+    agents = env / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "com.remote-ci-monitor.broken.plist").write_bytes(body)
+    code, out, err = run(capsys, "--role", "worker", "--config", str(cfg), "--json")
+    assert "Traceback" not in err, err
+    doc = json.loads(out)
+    assert code == 3, doc
+    said = [u for u in doc["undecided"] if "com.remote-ci-monitor.broken.plist" in u]
+    assert said and "cannot read" in said[0], doc["undecided"]
+    assert str(env / "home") not in out + err
+    good = plist(agents, f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_json(capsys, "--role", "worker", "--config", str(cfg))
+    assert doc["service"]["file"] == "~/Library/LaunchAgents/" + good.name, doc["service"]
+    assert row(doc, "build")["state"] == "ready", doc
+    assert code == 3 and any("broken.plist" in u for u in doc["undecided"]), doc
+
+
+@pytest.mark.parametrize("body", [TRUNCATED_PLIST, NOT_A_DICT_PLIST], ids=["truncated", "array"])
+def test_an_unreadable_explicit_service_file_is_unknown_not_a_crash(
+    env, srv, monkeypatch, capsys, body
+):
+    """`--service-file` 로 준 파일을 못 읽으면 그 PATH 를 모른다 — 기본 PATH 로 재지 않고
+    종료 3 이다. 파일이 아예 없는 것은 지금처럼 사용법 오류(2)다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "com.remote-ci-monitor.worker.plist"
+    sf.write_bytes(body)
+    cfg = worker_toml(env, srv.url)
+    code, out, err = run(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"
+    )
+    assert "Traceback" not in err, err
+    doc = json.loads(out)
+    assert code == 3, doc
+    assert doc["service"]["path"] is None and doc["presets"] == [], doc
+    assert any("cannot read" in u and sf.name in u for u in doc["undecided"]), doc["undecided"]
+
+
+def test_a_plist_with_wrong_value_types_is_unreadable_not_a_crash(env, srv, monkeypatch, capsys):
+    """dict 안의 값이 틀린 모양(환경 변수가 목록, 한도가 dict)이어도 traceback 이 아니다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "com.remote-ci-monitor.worker.plist"
+    sf.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "x",
+                "ProgramArguments": ["/x/rcm", "worker"],
+                "EnvironmentVariables": ["PATH=/usr/bin"],
+                "SoftResourceLimits": {"NumberOfFiles": {"soft": 1}},
+            }
+        )
+    )
+    cfg = worker_toml(env, srv.url)
+    code, out, err = run(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"
+    )
+    assert "Traceback" not in err, err
+    doc = json.loads(out)
+    assert code == 3 and any("cannot read" in u for u in doc["undecided"]), doc
+
+
+def test_a_broken_systemd_line_is_named_not_silently_dropped(env, srv, monkeypatch, capsys):
+    """닫히지 않은 따옴표의 `Environment=` 줄을 조용히 건너뛰면 「PATH 를 주지 않았다」는 틀린
+    안내가 나간다. 그 줄을 이름으로 보이고(값은 찍지 않는다) 종료 3 이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "rcm-worker.service"
+    sf.write_text(
+        '[Service]\nExecStart=/x/rcm worker\nEnvironment="PATH=/usr/bin:/bin TD_SECRET=td-v\n'
+    )
+    cfg = worker_toml(env, srv.url)
+    code, out, err = run(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"
+    )
+    assert "Traceback" not in err, err
+    doc = json.loads(out)
+    assert code == 3, doc
+    said = [u for u in doc["undecided"] if "line 3" in u and "Environment" in u]
+    assert said and sf.name in said[0], doc["undecided"]
+    assert "td-v" not in out + err
