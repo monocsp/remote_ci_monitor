@@ -4275,6 +4275,64 @@ def test_p3_a_system_unit_whose_user_is_unknown_leaves_its_config_unknown(
     assert code == 3, doc
 
 
+@pytest.mark.parametrize("unit", ["etc-systemd-system", "LaunchDaemons"])
+def test_p3_a_system_service_reads_the_config_in_its_users_home_not_doctors(
+    env, svcbin, system_places, monkeypatch, capsys, unit
+):
+    """시스템 서비스의 설정 폴더는 `User=` · `UserName` 사용자의 홈 아래다 — doctor 를 실행한
+    사람의 HOME 이 아니다. 조회한 홈(`rcm-home`)에 진짜 설정이 있고 doctor 의 홈에는 다른 포트의
+    미끼 설정이 있다. doctor 는 조회한 홈의 설정으로 그 포트의 서버에 묻는다(batch 10 재확인
+    P3-1 b — 픽스처의 조회 홈이 doctor 의 홈과 같아 이것을 가리지 못했다)."""
+    import socket
+
+    units, daemons = system_places
+    rcm_home = env / "rcm-home"
+    monkeypatch.setattr(
+        doctor,
+        "lookup_user",
+        lambda name: (name, str(rcm_home), "/bin/sh") if name == "rcm" else None,
+    )
+
+    def service(_env: Path) -> None:
+        mine = env / "home" / ".config" / "rcm" / "server.toml"
+        theirs = rcm_home / ".config" / "rcm" / "server.toml"
+        theirs.parent.mkdir(parents=True)
+        mine.rename(theirs)
+        decoy = socket.socket()
+        decoy.bind(("127.0.0.1", 0))
+        port = decoy.getsockname()[1]
+        decoy.close()  # 아무도 듣지 않는 포트 — 미끼 설정을 읽으면 서버에 닿지 않는다
+        mine.write_text(theirs.read_text().replace("port = ", f"port = {port}\n# was "))
+        mine.chmod(0o600)
+        if unit == "etc-systemd-system":
+            monkeypatch.setattr(doctor, "PLATFORM", "linux")
+            (units / "rcm-server.service").write_text(
+                "[Service]\nUser=rcm\nExecStart=/opt/rcm/bin/rcm serve\n"
+                f"Environment=PATH={svcbin}:/usr/bin:/bin\n"
+            )
+        else:
+            (daemons / "com.remote-ci-monitor.server.plist").write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": "com.remote-ci-monitor.server",
+                        "ProgramArguments": ["/opt/rcm/bin/rcm", "serve"],
+                        "UserName": "rcm",
+                        "EnvironmentVariables": {"PATH": f"{svcbin}:/usr/bin:/bin"},
+                        "SoftResourceLimits": {"NumberOfFiles": 4096},
+                    }
+                )
+            )
+
+    code, out, err, s = run_input(
+        env, svcbin, monkeypatch, capsys, "coordinator-worker", "standard", "absent", after=service
+    )
+    doc = json.loads(out)
+    assert doc["service"]["file"] is not None, (doc["service"], err)
+    assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}", (doc["server"], err)
+    assert doc["undecided"] == [] and doc["problems"] == [], doc
+    assert code == 0, doc
+
+
 @pytest.mark.parametrize("role", ["coordinator", "coordinator-worker"])
 def test_p3_a_coordinator_without_a_service_file_does_not_borrow_the_workers_path(
     env, svcbin, system_places, monkeypatch, capsys, role
@@ -4295,6 +4353,27 @@ def test_p3_measured_in_says_server_service_env_only_when_the_server_measured(
     cfg = server_toml(env, coordinator.port)
     code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
     assert code == 3 and doc["measured_in"] == "none", doc["measured_in"]
+
+
+def test_p3_measured_in_without_a_service_file_is_the_servers_when_it_was_read(
+    env, coordinator, svcbin, monkeypatch, capsys
+):
+    """서비스 파일이 없어도 서버의 측정(`preset_env`)을 읽었으면 로컬 레인은 서버가 자기 서비스
+    환경에서 잰 값이다 — `measured_in` 은 `server_service_env` 다. 서비스 PATH 는 모르므로 null
+    이고 「서비스 파일 없음」은 그대로 판정 못 함 줄에 남는다(문서 「`none` unless the server's own
+    measurement was read」, batch 10 재확인 P3-1 a)."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = server_toml(env, coordinator.port)
+    measured = served_preset_env(cfg, f"{svcbin}:/usr/bin:/bin")
+    coordinator.route(
+        "GET", "/api/health", {"ok": True, "version": __version__, "preset_env": measured}
+    )
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert doc["service"]["file"] is None and doc["service"]["path"] is None, doc["service"]
+    assert doc["measured_in"] == "server_service_env", doc["measured_in"]
+    assert any("service file" in u for u in doc["undecided"]), doc["undecided"]
+    assert row(doc, "unit")["state"] == "ready", row(doc, "unit")
+    assert code == 1, doc  # `lint` 의 빠진 도구(FAIL)가 판정 못 함보다 앞선다
 
 
 # ── 운영 보호 가드의 자기 시험 (P3 사이클 2 r2 두 명 · P6 GAP E7) ─────────────────────
