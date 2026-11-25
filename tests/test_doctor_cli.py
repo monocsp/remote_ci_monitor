@@ -1787,3 +1787,73 @@ def test_a_local_lane_preset_the_server_did_not_measure_is_unknown(
         assert row(doc, "unit")["state"] == "ready", row(doc, "unit")
     assert any("lint" in u for u in doc["undecided"]), doc["undecided"]
     assert code == 3, doc
+
+
+# ── 서버가 받는 호스트 사실의 정리 (P3 1라운드 MED · 검증자 2 #3 · #7) ───────
+
+
+def register_host(srv: Any, worker: str, host: Any = None) -> None:
+    body: dict[str, Any] = {"pool": "mac2", "lanes": 1, "host_name": "b2", "version": __version__}
+    if host is not None:
+        body["host"] = host
+    status, got = srv.req("POST", "/worker/register", token=worker, json_body=body)
+    assert status == 200, got
+
+
+def test_host_facts_lose_control_characters_and_stop_at_64(tmp_path):
+    """값은 `rcm machines` 의 터미널과 웹에 그대로 나간다 — 제어문자(ESC · BEL · C1)를 지우고
+    64자에서 자른다."""
+    srv = m5n(tmp_path)
+    try:
+        register_host(
+            srv,
+            "build-02",
+            {**HOST, "os_release": "ubuntu\x1b[2J 24.04\x07\x9b", "package_manager": "a" * 200},
+        )
+        host = machine(srv, "build-02")["host"]
+        assert host["os_release"] == "ubuntu[2J 24.04", host
+        assert host["package_manager"] == "a" * 64, host
+    finally:
+        srv.close()
+
+
+def test_host_facts_with_the_wrong_type_are_unknown(tmp_path):
+    """`rosetta` · `container` · `root` 는 참 · 거짓 · null 만 받는다 — 문자열 `"false"` 를
+    참으로 읽지 않는다. 문자열 칸에 온 숫자 · 목록 · 참거짓도 「모름」(null)이다."""
+    srv = m5n(tmp_path)
+    try:
+        register_host(
+            srv,
+            "build-02",
+            {
+                **HOST,
+                "rosetta": "false",
+                "container": 1,
+                "root": "true",
+                "python": 3.12,
+                "os": ["linux"],
+                "arch": True,
+            },
+        )
+        host = machine(srv, "build-02")["host"]
+        for key in ("rosetta", "container", "root", "python", "os", "arch"):
+            assert host[key] is None, (key, host)
+        assert host["os_release"] == HOST["os_release"], host
+    finally:
+        srv.close()
+
+
+def test_a_registration_without_host_forgets_the_old_facts_but_a_report_does_not(tmp_path):
+    """등록은 새 프로세스다 — `host` 없는 등록(옛 워커)은 앞 프로세스의 사실을 물려받지 않는다.
+    능력 보고에 `host` 가 없으면 지금 사실을 그대로 둔다."""
+    srv = m5n(tmp_path)
+    try:
+        register_host(srv, "build-02", HOST)
+        assert machine(srv, "build-02")["host"] == HOST
+        status, body = srv.report("build-02", srv.app.generation)
+        assert status == 200, body
+        assert machine(srv, "build-02")["host"] == HOST  # 보고에 host 가 없어도 그대로
+        register_host(srv, "build-02")  # host 없는 등록
+        assert machine(srv, "build-02").get("host") is None
+    finally:
+        srv.close()
