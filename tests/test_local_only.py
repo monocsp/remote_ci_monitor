@@ -873,6 +873,28 @@ def test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote(
         s.close()
 
 
+def test_e3_a_local_only_retry_chain_is_never_claimed_remotely(tmp_path):
+    """# E3 — 표식이 있는 프리셋의 재시도 사슬. 첫 시도가 `@local` 에서 75 로 끝나면 다음 시도도
+    원격 claim 에 걸리지 않고 `@local` 이 집는다."""
+    s = ready(server(tmp_path, presets=PRESETS + RETRY_MARKED))
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        jid = queued(s, "relgitretry")
+        now = s.clock()
+        first = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+        assert first is not None and first.id == jid and first.worker_name is None
+        assert s.store.finish(jid, RETRIED, now=s.clock(), exit_code=75)
+        nxt = _next_attempt(s, jid)
+        assert s.row(nxt)["reason"] != "no_capable_machine"  # 로컬 레인이 받을 자리다
+        for worker in (REMOTE, OTHER):
+            assert s.claim(worker)[0] == 204, worker
+        now = s.clock()
+        got = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+        assert got is not None and got.id == nxt and got.worker_name is None
+    finally:
+        s.close()
+
+
 # ── TO18 · TO19 로컬 전용 점검 ───────────────────────────────────────────────
 
 
