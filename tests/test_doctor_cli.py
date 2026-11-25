@@ -1333,6 +1333,8 @@ def test_td21_the_workers_registration_carries_host_facts_into_rcm_machines(
         w.register()
         host = machine(srv, "build-02").get("host")
         assert host == HOST, host  # 허용 목록 밖의 키(machine)는 서버가 버린다
+        # `rcm machines` 는 HOME 의 client.toml 도 찾는다 — 실제 홈(운영 설정)을 읽지 않게
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("RCM_SERVER", url)
         monkeypatch.setenv("RCM_TOKEN", srv.tokens["alice"])
         code = cli.main(["machines", "--machine", "build-02"])
@@ -1932,6 +1934,8 @@ def test_td21_rosetta_from_a_real_registration_shows_in_rcm_machines(tmp_path, m
         monkeypatch.setattr(doctor.hostsample, "host_facts", lambda **_kw: dict(MAC_HOST))
         w.register()
         assert machine(srv, "build-02").get("host") == MAC_HOST
+        # `rcm machines` 는 HOME 의 client.toml 도 찾는다 — 실제 홈(운영 설정)을 읽지 않게
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("RCM_SERVER", url)
         monkeypatch.setenv("RCM_TOKEN", srv.tokens["alice"])
         code = cli.main(["machines", "--machine", "build-02"])

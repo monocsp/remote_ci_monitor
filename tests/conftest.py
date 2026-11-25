@@ -28,6 +28,14 @@ Chrome 을 띄우는 시험(`test_web_browser.py` 와 그 `Chrome` 하네스를 
 그것만으로는 안 묶인다: xdist 3.8.0 은 그룹 이름을 `item._nodeid` 에 붙이는데 pytest 9 의
 nodeid 는 `_id` 를 읽는다. 모듈마다 표시를 다는 대신 파일을 보고 정하므로 새 Chrome 시험 모듈이
 표시를 잊어도 같은 워커로 간다.
+
+운영 보호(2026-11-25 — `rcm doctor` 시험 하나가 이 Mac 의 운영 서버 127.0.0.1:8787 에 읽기 요청을
+보냈다): 시험이 도는 동안 루프백의 8787 로의 연결과, 실제 홈의 `~/.config/rcm` ·
+`~/.local/share/rcm` 아래 파일 열기(`open` · `os.open` · `sqlite3.connect`)를 막고 그 시험을
+실패로 만든다. 감사 훅(`sys.addaudithook`)이라 `socket.create_connection` · `http.client` · `Path`
+읽기가 모두 걸린다. 실제 홈은 이 파일을 들여올 때 한 번 읽는다(시험이 HOME 을 바꾸기 전).
+rcm-ci 잡은 그 데이터 폴더 안(`workspaces/<id>`)에서 돌 수 있으므로 이 레포 · 파이썬 설치
+(`sys.prefix`) · 임시 폴더 · 시작 폴더 아래는 막지 않는다. 자식 프로세스는 이 훅 밖이다.
 """
 
 from __future__ import annotations
@@ -36,6 +44,8 @@ import functools
 import os
 import re
 import socket
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -254,3 +264,101 @@ def _follow_isolation(monkeypatch, tmp_path_factory):
     if hasattr(hostsample, "_PROBES_CLOSED"):
         monkeypatch.setattr(hostsample, "_PROBES_CLOSED", False)
     yield
+
+
+# ── 운영 보호: 시험이 운영 서버 · 운영 설정 · 운영 데이터에 닿지 않는다 ───────────────────
+
+PRODUCTION_PORT = 8787
+_LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"})
+#: 실제 홈 — 시험이 HOME 을 바꾸기 전에 한 번 읽는다
+_REAL_HOME = os.path.expanduser("~")
+PRODUCTION_DIRS = tuple(
+    os.path.join(_REAL_HOME, *part.split("/")) for part in (".config/rcm", ".local/share/rcm")
+)
+#: 운영 데이터 폴더 안에서 돌아도 막지 않는 자리 — rcm-ci 잡의 체크아웃 · venv · 임시 폴더
+_ALLOWED_ROOTS = tuple(
+    {
+        os.path.abspath(p)
+        for p in (
+            str(Path(__file__).resolve().parent.parent),
+            sys.prefix,
+            sys.base_prefix,
+            sys.exec_prefix,
+            tempfile.gettempdir(),
+            os.path.realpath(tempfile.gettempdir()),
+            os.getcwd(),
+        )
+    }
+)
+#: 가드가 처음 돈 날(2026-11-26) 실제 `~/.config/rcm/client.toml` 을 읽던 시험 — 이 가드를 더한
+#: PR(#268) 밖의 파일이라 고치지 않고 이름만 둔다. 그 시험의 HOME 을 임시 폴더로 돌리면 여기서
+#: 뺀다. 이 목록은 설정 폴더 읽기만 봐준다 — 8787 연결과 데이터 폴더는 그대로 막는다
+KNOWN_CONFIG_READERS = frozenset(
+    {
+        "tests/test_ci_connect_watch.py::test_h6_an_unreachable_server_is_retried_for_three_rounds"
+        "_then_error",
+        "tests/test_ci_connect_watch.py::test_h7_h23_a_failed_submit_posts_unavailable_with_a_code",
+        "tests/test_cli_m5g.py::test_a_timeout_exits_three_and_says_the_server_may_still_be_deleting",
+        "tests/test_client_wheel.py::test_version_json_stays_server_free",
+    }
+)
+_GUARD_ON = [False]
+_CONFIG_READ_OK = [False]
+_GUARD_HITS: list[str] = []
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def production_path(raw: object, config_ok: bool = False) -> bool:
+    """운영 설정 · 데이터 폴더 아래이고 허용된 자리 밖인 경로인가. `config_ok` 면 설정 폴더는
+    본다(`KNOWN_CONFIG_READERS`)."""
+    if isinstance(raw, int) or not isinstance(raw, (str, bytes, os.PathLike)):
+        return False
+    path = os.path.abspath(os.fsdecode(os.fspath(raw)))
+    dirs = PRODUCTION_DIRS[1:] if config_ok else PRODUCTION_DIRS
+    if not any(_under(path, d) for d in dirs):
+        return False
+    return not any(_under(path, root) for root in _ALLOWED_ROOTS)
+
+
+def production_address(address: object) -> bool:
+    return (
+        isinstance(address, tuple)
+        and len(address) >= 2
+        and address[1] == PRODUCTION_PORT
+        and str(address[0]).lower() in _LOOPBACK
+    )
+
+
+def _production_audit(event: str, args: tuple) -> None:
+    if not _GUARD_ON[0]:
+        return
+    if event == "socket.connect":
+        if production_address(args[1]):
+            _GUARD_HITS.append(f"connect {args[1][0]}:{args[1][1]}")
+            raise ConnectionRefusedError(111, "tests must not reach the production server")
+    elif event in ("open", "sqlite3.connect"):
+        if args and production_path(args[0], _CONFIG_READ_OK[0]):
+            shown = os.fsdecode(os.fspath(args[0])).replace(_REAL_HOME, "~", 1)
+            _GUARD_HITS.append(f"{event} {shown}")
+            raise PermissionError(13, "tests must not open production config or data", shown)
+
+
+sys.addaudithook(_production_audit)
+
+
+@pytest.fixture(autouse=True)
+def _production_guard(request):
+    del _GUARD_HITS[:]
+    _CONFIG_READ_OK[0] = request.node.nodeid.split("[", 1)[0] in KNOWN_CONFIG_READERS
+    _GUARD_ON[0] = True
+    try:
+        yield
+    finally:
+        _GUARD_ON[0] = False
+    if _GUARD_HITS:
+        hits = list(_GUARD_HITS)
+        del _GUARD_HITS[:]
+        pytest.fail(f"the test reached production: {', '.join(hits)} (tests/conftest.py)")
