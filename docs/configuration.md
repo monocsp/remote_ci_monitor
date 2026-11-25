@@ -981,8 +981,9 @@ the text is right is up to whoever runs the coordinator. Each string is one line
 characters without control characters, the install keys are `darwin`, `linux` and `any`, and a
 name appears once, has no spaces around it and is at most 64 characters (the length `rcm doctor`
 matches names at). Anything else is a config error at start. An older server does not know the
-table and refuses to start, so remove it before rolling back below 0.11.0. A name that no preset `requires` and
-no probe runs is a warning at start and at `rcm reload`, because its hint would never show.
+table and refuses to start, so remove it before rolling back below 0.11.0. A name that no preset
+`requires` and no probe runs is a warning at start and at `rcm reload`, because its hint would
+never show.
 
 Workers get the table with the rest of the spec (`GET /worker/spec`, a worker token). It is not in
 `/api/status` or `/api/machines`, which may be readable without a token. A worker strips control

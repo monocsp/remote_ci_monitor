@@ -50,9 +50,16 @@ of a key bumps that number and is listed here.
   needs (`ok` or `version` from `/api/health`, a preset's `name`), a preset the server does not
   place (an older server without `placement` is not read as `pool`), a service file it cannot read
   (the default `PATH` is used only when there is no candidate file at all), a `token_file` or a
-  git version it cannot read. A `token_file` repository is checked with the worker's own
-  credential helper. Unknown values are `null` in `--json`, never the word `None`. `rcm doctor`
-  never follows the server's
+  git version it cannot read, a `git ls-remote` that timed out or could not run, a config the
+  service starts with that it cannot read, a missing home folder. Without `--config` it measures
+  with the config the service reads: the service file's `--config`, `--pool`, `--port` and its
+  `RCM_SERVER_*` variables count; a coordinator role with no server config anywhere is a usage
+  error (exit 2) instead of asking port 8787 with the built-in defaults. A file in a standard
+  service place that it cannot read, or whose command it cannot resolve to rcm, leaves that place
+  unknown. `--json` `summary` counts presets that may come under `applies_unknown`. A
+  `token_file` repository is checked with the worker's own credential helper. Unknown values are
+  `null` in `--json`, never the word `None`, and `rcm worker --check` shows a `/worker/spec` that
+  is not rcm's as a FAIL line instead of a traceback. `rcm doctor` never follows the server's
   version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
   `checks`, `source_modes`, repository name (no URL) and `unreachable_checks` (the checks a remote
   worker cannot run, with a reason code), and the `[[tools]]` table; older workers ignore them.

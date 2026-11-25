@@ -108,6 +108,19 @@ rcm doctor --role coordinator-worker --json   # the server's own service measure
 | `coordinator` | the same files and routes | rcm's own needs (the lane-free rules come with `lanes = 0`) |
 | `client` | `client.toml` or `RCM_SERVER` / `RCM_TOKEN` | the server answers and the token works |
 
+Without `--config`, `rcm doctor` reads the config the service reads. When a service file is found,
+its command line is read with rcm's own parser: `--config` there names the file (`--config=X` and
+shortened options too), and its `--server`, `--pool` and `--lanes` (worker) or `--bind` and
+`--port` (server) apply as they do for the service; for a server, `RCM_CONFIG` and `RCM_SERVER_*`
+in the service file's environment count, your shell's do not. Without a service file, the
+standard places are used (`~/.config/rcm/worker.toml`; `$RCM_CONFIG`, `./rcm.toml`,
+`~/.config/rcm/server.toml`). `--config` and `--server` given to `rcm doctor` win, with a warning
+when the service starts with another `--config`. A `coordinator` or `coordinator-worker` report
+with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
+8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
+or the config the service names cannot be read, rcm does not know what the service runs with: the
+report names it, asks the server nothing, and exits 3.
+
 Each preset shows one state: `ready` (it starts taking jobs once the service reports), `needs
 check` (its tools are there and rcm runs its check presets once after the worker registers — not
 "ok" yet), `missing` (with the install hint and docs link from the coordinator's `[[tools]]` when
@@ -128,7 +141,9 @@ The coordinator's `[[tools]]` hints show for the server's own lane too.
 The service file is found in this order: `--service-file`; the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`);
 `~/.config/rcm/service/`. Only files that start the role's command (`rcm worker` or `rcm serve`)
-count. A file given with `--service-file` is used as given; if it starts another role's command
+count; a file in those places whose command rcm cannot resolve to one of its own (`env rcm
+worker`, `sh -c`, arguments rcm would refuse) is named as unreadable, since it may be this role's
+service. A file given with `--service-file` is used as given; if it starts another role's command
 the report warns. Two in the same place need `--service-file` (exit 2 without a terminal). With none, the
 worker's default service `PATH` is used and the report says so. A launchd plist without `PATH`
 gets launchd's default, `/usr/bin:/bin:/usr/sbin:/sbin`. A systemd unit without
@@ -139,12 +154,13 @@ a systemd specifier such as `%h` are named by line and key, and the report exits
 can change `PATH` (`EnvironmentFile=` always can), the service `PATH` is unknown and no tool is
 measured. Write `PATH` out in full in an `Environment=` line. A `$` is kept as written: systemd does
 not expand variables in `Environment=`. A service file rcm cannot
-read (XML cut short, a plist whose top level is not a dictionary, a unit line it cannot parse) is
-named with the reason, never its values, and the report exits 3. One found in the standard places
-is left out and the other files in that place are tried; if none of them can be read, the search
-stops there rather than going on to `~/.config/rcm/service/`, since the service manager reads the
-installed file, not that copy. The service `PATH` is then unknown and no tool is measured, as it is
-for a file given with `--service-file` that cannot be read. The worker's default `PATH` is used
+read (XML cut short, a plist whose top level is not a dictionary, an argument or environment value
+that is not a string, a unit line it cannot parse) is named with the reason, never its values, and
+the report exits 3. When one in a standard place cannot be read, that whole place is unknown: rcm
+does not measure with another file next to it, since the broken one may be this role's service,
+and it does not go on to `~/.config/rcm/service/`, since the service manager reads the installed
+file, not that copy. The service `PATH` is then unknown and no tool is measured, as it is for a
+file given with `--service-file` that cannot be read. The worker's default `PATH` is used
 only when no candidate file was found at all. `--shell-path` measures
 once more in your shell and marks the presets whose result differs.
 
@@ -157,15 +173,15 @@ is on that `PATH`. A `[[repos]]` entry with `token_file` is checked the way the 
 with a credential helper that reads only that file. A row rcm cannot measure is `unknown`, not a
 FAIL, and the report exits 3: a git version it cannot read, a `token_file` the user running
 `rcm doctor` cannot read (run it as the service's user), repositories when the service `PATH` is
-unknown. On macOS it also reminds you of Local Network permission and of keeping the
-machine awake; rcm checks neither.
+unknown, a `git ls-remote` that timed out or could not run. On macOS it also reminds you of Local
+Network permission and of keeping the machine awake; rcm checks neither.
 
 | exit | meaning |
 |---|---|
 | 0 | every preset that comes to this machine is `ready` or `needs check`, and rcm's own needs are met; warnings allowed |
 | 1 | a tool is missing, rcm's own needs fail (Python 3.11.4+, git 2.31+ for `token_file`, an unreachable or missing repository), or nothing would come to this machine |
-| 2 | usage: a bad flag, a config file that does not exist, is not UTF-8 or TOML, or whose `[server]` is not a table, a server URL that does not start with `http://` or `https://`, several roles or service files to choose from |
-| 3 | could not decide: the server is down or older, an answer from it that is not the JSON rcm expects (an HTML page from the wrong port or a proxy, an empty body, a field of the wrong type, a field rcm needs that is missing or `null`, such as `ok` and `version` in `/api/health`, `kind` in `/api/whoami`, `presets` and each preset's `name` in `/worker/spec`, `machines` in `/api/machines`), a preset the server does not place, a row rcm cannot measure, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` or with a line rcm does not follow, a service file it cannot read |
+| 2 | usage: a bad flag, a config file you gave or that sits in a standard place that does not exist, is not UTF-8 or TOML, or whose `[server]` is not a table, no server config at all for a coordinator role, a server URL that does not start with `http://` or `https://`, several roles or service files to choose from |
+| 3 | could not decide: the server is down or older, an answer from it that is not the JSON rcm expects (an HTML page from the wrong port or a proxy, an empty body, a field of the wrong type, a field rcm needs that is missing, `null` or, for a name, empty, such as `ok` and `version` in `/api/health`, `kind` in `/api/whoami`, `presets` and each preset's `name` in `/worker/spec`, `machines` in `/api/machines`), a preset the server does not place, a row rcm cannot measure, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` or with a line rcm does not follow, a service file it cannot read, a config the service starts with that it cannot read, no home folder |
 
 1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes. An error rcm did not expect
 ends the report with exit 3 and one line, `could not decide: <kind>: <message>` (home folder as
@@ -195,7 +211,7 @@ ones you do not know.
 | `presets` | rows of `name` `applies` (`pool` `any-capable` `not_coming` `other_pool` `local_lane_only` `unknown`) `state` `missing` (`tool` `install` `docs`) `checks` `code` `tools` `warn` `note` `shell_differs` |
 | `probes` | probe name → `state` `value` |
 | `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`, each `null` when the server does not say; else `null` |
-| `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine |
+| `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine, and `applies_unknown`: presets the server does not say whether they come here |
 | `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings; every `unknown` preset that might come, `unknown` probe and `unknown` row of rcm's own needs has its line in `undecided` |
 
 macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
@@ -218,7 +234,11 @@ rest; a worker token sent with Basic under `read_auth = "basic"` does not get th
 warning when registering will follow the server's version; FAIL when this install cannot follow,
 such as an editable or pinned one) and a last line with the number of missing tools that points
 at `rcm doctor --role worker`. That line is ok only when nothing is missing, and a warning when
-something is or when the server sent no spec to count from (`—`); it never fails the check.
+something is or when the server sent no spec to count from (`—`); it never fails the check. A
+`/worker/spec` answer that is not rcm's (a list, a string, an HTML page, a probe timeout that is
+not a number) is a FAIL on the `presets` row, as a health or whoami answer of the wrong shape is
+on the `server` and `token` rows, never a traceback. A server version or token name the server
+does not send is left out of the line, not printed as `None`.
 
 With `server = "auto"`, `rcm worker --check` now asks before it talks to the server it found on
 the network, as `rcm doctor` does. Without a terminal there is nobody to ask, so it exits 3 and
