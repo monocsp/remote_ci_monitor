@@ -52,6 +52,7 @@ from remote_ci_monitor.capabilities import (
     CapabilitiesMixin,
     CapabilityError,
     MachineDown,
+    NotACandidate,
 )
 from remote_ci_monitor.clientwheel import (
     CANCEL_MIN_CLIENT_VERSION,
@@ -3940,7 +3941,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         priority = self._parse_priority(body.get("priority"), preset.priority)
         pool = self._requested_pool(body, preset)
         if preset.placement == PLACEMENT_CAPABLE and body.get("pool") is None:
-            return self._eta_capable(snap, preset, inputs, priority, pool, now)
+            return self._eta_placed(snap, preset, inputs, priority, pool, now, PLACEMENT_CAPABLE)
+        if preset.local_only:
+            # 풀의 레인 전부로 세면 원격 레인이 끼어든다 — 후보 함수를 거치는 배치로 센다(결정 254)
+            return self._eta_placed(snap, preset, inputs, priority, pool, now, PLACEMENT_POOL)
         row, ahead = eta_for_new(
             snap.jobs,
             preset=preset,
@@ -3960,7 +3964,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         doc["url"] = None
         return {"job": doc, "ahead": ahead, "generated_at": iso(now)}
 
-    def _eta_capable(
+    def _eta_placed(
         self,
         snap: _DbSnapshot,
         preset: Preset,
@@ -3968,9 +3972,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         priority: int,
         pool: str,
         now: datetime,
+        placement: str,
     ) -> dict[str, Any]:
-        """any-capable 프리셋의 가상 잡 — 모든 레인 위에서, 맞는 머신 중 가장 일찍 끝날 곳으로
-        (M5n §7.2). 앞선 잡은 그 잡이 들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다."""
+        """가상 잡을 모든 레인 위에 세우고 `placement_for` 로 들어갈 머신을 고른다. any-capable
+        프리셋(M5n §7.2)과 `local_only` 프리셋(M5t-a 결정 254)이 이 길로 온다. 앞선 잡은 그 잡이
+        들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다. pool 배치면 같은 풀의 대기 잡만 센다."""
+        capable = placement == PLACEMENT_CAPABLE
         ghost = Job(
             id=max((j.id for j in snap.jobs), default=0) + 1,
             preset=preset.name,
@@ -3984,8 +3991,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             queued_at=now,
             priority=priority,
             pool=pool,
-            placement=PLACEMENT_CAPABLE,
-            display_pool=pool,
+            placement=placement,
+            display_pool=pool if capable else None,
             concurrency_scope=preset.concurrency_scope,
         )
         rows = self._queue_rows(now, replace(snap, jobs=[*snap.jobs, ghost]))
@@ -3998,7 +4005,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             if r.job.id != ghost.id
             and (
                 (r.job.is_busy and r.job.worker_name in mine)
-                or (r.job.is_waiting and r.job.priority >= priority)
+                or (
+                    r.job.is_waiting
+                    and r.job.priority >= priority
+                    and (capable or r.job.pool == pool)
+                )
             )
         )
         doc = queue_row_json(row, base_url=None)
@@ -4049,6 +4060,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         pool = self._requested_pool(body, preset)
         placed = self._placement_fields(body, preset, token, pool)
         pool = placed.pop("pool")
+        # 원격 금지(M5t-a 결정 254) — 후보가 빈 `local_only` 제출은 잡을 만들기 전에, 합류와
+        # supersede 보다 먼저 거절한다(TO13). 합류하면 거절해야 할 제출이 남의 잡에 붙는다
+        refused = self.local_only_refusal(
+            preset, target=placed["target_worker"], pool=pool, placement=placed["placement"]
+        )
+        if refused is not None:
+            code, why = refused
+            raise ApiError(409, why, code=code, error_code=code, preset=preset.name)
         # 이번 제출은 아무것도 치우지 않는다(M5o 결정 116). 켜기는 없다 — 프리셋 주인이 정한다
         supersede = body.get("supersede", True)
         if not isinstance(supersede, bool):
@@ -4358,6 +4377,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 f"machine {e} is down — start rcm worker there, then recheck",
                 machine=str(e),
             ) from e
+        except NotACandidate as e:
+            # 그 머신은 이 점검의 후보가 아니다(`local_only`) — 걸어 봐야 아무도 못 집는다
+            raise ApiError(409, str(e), code="local_only", error_code="local_only") from e
         except ValueError as e:
             raise ApiError(400, str(e)) from e
         self._publish_server()

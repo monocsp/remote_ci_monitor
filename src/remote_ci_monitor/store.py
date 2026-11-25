@@ -3416,13 +3416,17 @@ class Store:
             SCOPE_HOST,
             c.pool,
         ]
+        # 후보 함수가 이 워커를 뺀 프리셋(`local_only`, M5t-a 결정 254) — 갈래 넷 모두에 건다.
+        # 갈래마다 따로 달면 새 갈래가 생길 때 빠진다(5라운드의 HIGH 셋이 그런 경우였다)
+        excluded = tuple(c.excluded)
+        excluded_sql = f" AND c.preset NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
         sql = (
             "SELECT c.id, c.placement FROM jobs c WHERE c.state = ? "
             "AND (c.start_deadline IS NULL OR c.start_deadline >= ?) AND ("
             + " OR ".join(clauses)
-            + f") AND {group_sql} ORDER BY c.priority DESC, c.id LIMIT 1"
+            + f"){excluded_sql} AND {group_sql} ORDER BY c.priority DESC, c.id LIMIT 1"
         )
-        return conn.execute(sql, (QUEUED, ts, *params, *params_group)).fetchone()
+        return conn.execute(sql, (QUEUED, ts, *params, *excluded, *params_group)).fetchone()
 
     def concurrent_at_start(self, job_id: int) -> int | None:
         """그 잡이 시작할 때 같은 풀에서 돌던 잡 수(자기 포함). **모르면 None** — 0 이 아니다.
