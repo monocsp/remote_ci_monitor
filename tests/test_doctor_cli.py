@@ -1857,3 +1857,208 @@ def test_a_registration_without_host_forgets_the_old_facts_but_a_report_does_not
         assert machine(srv, "build-02").get("host") is None
     finally:
         srv.close()
+
+
+# ── 시험 대조 WEAK 여덟 (P3 1라운드) ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("where", ["env", "file"])
+def test_td18_worker_check_version_row_fails_for_a_pinned_install(
+    env, srv, monkeypatch, capsys, where
+):
+    """고정 설치(`RCM_CLIENT_VERSION` 이나 한 줄 파일의 버전)는 서버 버전을 따라가지 않는다 —
+    설치 종류가 따라갈 수 있는 wheel 이어도 버전이 다르면 FAIL 이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.delenv("RCM_CLIENT_VERSION", raising=False)
+    srv.route("GET", "/api/health", {"ok": True, "version": "99.0.0"})
+    monkeypatch.setattr(follow, "install_kind", lambda: "wheel")
+    if where == "env":
+        monkeypatch.setenv("RCM_CLIENT_VERSION", "0.9.0")
+    else:
+        pin = env / "home" / ".config" / "rcm" / "client-version"
+        pin.parent.mkdir(parents=True)
+        pin.write_text("0.9.0\n")
+    code, lines = worker_check(capsys, env, srv)
+    version = check_line(lines, "version")
+    assert version is not None and version.startswith("FAIL"), lines
+    assert "pinned" in version and "cannot follow" in version, version
+    assert code == 1, lines
+
+
+MAC_HOST = {
+    "os": "darwin",
+    "os_release": "15.6",
+    "os_like": None,
+    "arch": "arm64",
+    "rosetta": True,
+    "container": False,
+    "root": False,
+    "package_manager": "brew",
+    "python": "3.12.1",
+}
+
+
+def test_td21_rosetta_from_a_real_registration_shows_in_rcm_machines(tmp_path, monkeypatch, capsys):
+    """macOS 모양의 호스트 사실 — Rosetta 가 참이면 진짜 등록 본문을 거쳐 `rcm machines` 의
+    host 줄에 `(Rosetta)` 로 보인다."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.client import WorkerClient
+    from remote_ci_monitor.config import WorkerConfig
+
+    srv = m5n(tmp_path)
+    try:
+        url = f"http://127.0.0.1:{srv.port}"
+        cfg = WorkerConfig(server=url, token=srv.tokens["build-02"], pool="mac2", lanes=1)
+        w = rw.RemoteWorker(cfg, client=WorkerClient(url, cfg.token), log=lambda _m: None)
+        monkeypatch.setattr(doctor.hostsample, "host_facts", lambda **_kw: dict(MAC_HOST))
+        w.register()
+        assert machine(srv, "build-02").get("host") == MAC_HOST
+        monkeypatch.setenv("RCM_SERVER", url)
+        monkeypatch.setenv("RCM_TOKEN", srv.tokens["alice"])
+        code = cli.main(["machines", "--machine", "build-02"])
+        out = capsys.readouterr().out
+        assert code == 0, out
+        line = next((ln for ln in out.splitlines() if ln.startswith("host ")), "")
+        assert "arm64 (Rosetta)" in line and "15.6" in line and "brew" in line, line
+    finally:
+        srv.close()
+
+
+def test_td26_coordinator_worker_with_no_preset_coming_exits_1(
+    env, coordinator, monkeypatch, capsys
+):
+    """서버 자신의 레인(`default` 풀)에 올 프리셋이 하나도 없으면 coordinator-worker 도 워커처럼
+    종료 1 이고 이유를 적는다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = env / "server.toml"
+    cfg.write_text(
+        f"""[server]
+bind = "127.0.0.1"
+port = {coordinator.port}
+data_dir = "{env / "data"}"
+
+[[presets]]
+name = "ios"
+argv = ["true"]
+pool = "mac2"
+"""
+    )
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert row(doc, "ios")["applies"] == "other_pool", doc["presets"]
+    assert any("no jobs will come to this machine" in p for p in doc["problems"]), doc
+    assert code == 1, doc
+
+
+def test_td39_client_version_mismatch_warns_and_a_missing_token_is_undecided(
+    env, coordinator, monkeypatch, capsys
+):
+    """client 역할: 서버와 버전이 다르면 경고(종료 그대로), 토큰이 없으면 판정 못 함(3)이다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    coordinator.route("GET", "/api/health", {"ok": True, "version": "99.0.0"})
+    code, doc = run_json(capsys, "--role", "client", "--server", coordinator.url)
+    assert any("v99.0.0" in w and __version__ in w for w in doc["warnings"]), doc["warnings"]
+    assert code == 0, doc
+    monkeypatch.delenv("RCM_TOKEN")
+    coordinator.requests.clear()
+    code, doc = run_json(capsys, "--role", "client", "--server", coordinator.url)
+    assert any("client token is needed" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
+    assert not coordinator.calls("GET", "/api/whoami"), "asked whoami without a token"
+
+
+def test_td41_td35_td39_reads_carry_the_right_bearer_token(
+    env, coordinator, srv, svcbin, monkeypatch, capsys
+):
+    """coordinator 진단은 client 토큰으로, worker 진단은 worker 토큰으로 읽는다 — 요청마다
+    `Authorization: Bearer <그 토큰>` 이 실린다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = server_toml(env, coordinator.port)
+    run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    paths = {r.path for r in coordinator.requests}
+    assert {"/api/health", "/api/whoami", "/api/machines"} <= paths, paths
+    for r in coordinator.requests:
+        assert r.headers.get("authorization") == f"Bearer {CLIENT_TOKEN}", (r.path, r.headers)
+    run_json(capsys, "--role", "client", "--server", coordinator.url)
+    who = coordinator.calls("GET", "/api/whoami")[-1]
+    assert who.headers.get("authorization") == f"Bearer {CLIENT_TOKEN}", who.headers
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    wcfg = worker_toml(env, srv.url)
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    run_json(capsys, "--role", "worker", "--config", str(wcfg), "--service-file", str(sf))
+    for path in ("/api/whoami", "/worker/spec"):
+        got = srv.calls("GET", path)[-1]
+        assert got.headers.get("authorization") == f"Bearer {TOKEN}", (path, got.headers)
+
+
+def test_td42_the_real_workers_periodic_report_carries_host_facts(tmp_path, monkeypatch):
+    """e2e: 서버가 재시작해 메모리의 사실을 잃은 뒤, 진짜 `RemoteWorker.measure_and_report` 가 만든
+    주기 보고 본문이 `host` 를 다시 채운다 — 손으로 쓴 본문이 아니라 생산자가 보낸 것이다."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.client import WorkerClient
+    from remote_ci_monitor.config import WorkerConfig
+
+    monkeypatch.setattr(doctor.hostsample, "host_facts", lambda **_kw: dict(HOST))
+    srv = m5n(tmp_path)
+    tokens = srv.tokens
+    try:
+        url = f"http://127.0.0.1:{srv.port}"
+        cfg = WorkerConfig(server=url, token=tokens["build-02"], pool="mac2", lanes=1)
+        w = rw.RemoteWorker(cfg, client=WorkerClient(url, cfg.token), log=lambda _m: None)
+        w.register()
+    finally:
+        srv.close()
+    srv = m5n(tmp_path, tokens=tokens)  # 같은 data_dir — 메모리의 호스트 사실은 사라진다
+    try:
+        url = f"http://127.0.0.1:{srv.port}"
+        assert machine(srv, "build-02").get("host") is None
+        w.client = WorkerClient(url, cfg.token)
+        assert w.measure_and_report(), "the report was refused"
+        assert machine(srv, "build-02").get("host") == HOST
+    finally:
+        srv.close()
+
+
+def test_td45_two_candidates_in_a_terminal_let_the_person_choose(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """같은 자리에 후보가 둘이고 TTY 면 사람이 고른다 — 고른 파일로 잰다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    cfg = worker_toml(env, srv.url)
+    agents = env / "home" / "Library" / "LaunchAgents"
+    plist(agents, "/bin", name="com.remote-ci-monitor.worker-a.plist")
+    picked = plist(agents, f"{svcbin}:/usr/bin:/bin", name="com.remote-ci-monitor.worker-b.plist")
+    offered: list[list[str]] = []
+
+    def choose(paths: list[Path], _home: str) -> Path:
+        offered.append([p.name for p in paths])
+        return next(p for p in paths if p.name == picked.name)
+
+    monkeypatch.setattr(doctor, "is_tty", lambda: True)
+    monkeypatch.setattr(doctor, "choose", choose)
+    code, doc = run_json(capsys, "--role", "worker", "--config", str(cfg))
+    assert offered == [[f"com.remote-ci-monitor.worker-{x}.plist" for x in "ab"]], offered
+    assert doc["service"]["file"] == "~/Library/LaunchAgents/" + picked.name, doc["service"]
+    assert row(doc, "build")["state"] == "ready" and code == 0, doc
+
+
+def test_td54_the_servers_local_probes_use_the_shared_run_probes_without_lang_c(
+    tmp_path, monkeypatch
+):
+    """서버가 자기 레인을 잴 때도 워커 · doctor 와 같은 `hostsample.run_probes` 를 쓴다. 그래서
+    프로브는 `LANG=C` 를 받지 않는다(호스트 사실 명령만 받는다)."""
+    from remote_ci_monitor import hostsample
+
+    show = tmp_path / "show-lang"
+    script(show, 'echo "lang=$LANG"')
+    probes = f'\n[[probes]]\nname = "lang"\nargv = ["{show}"]\n'
+    srv = m5n(tmp_path, probes=probes)
+    calls: list[Any] = []
+    real = hostsample.run_probes
+    monkeypatch.setattr(hostsample, "run_probes", lambda p, e: calls.append(list(p)) or real(p, e))
+    try:
+        srv.app.measure_capabilities(environ={"PATH": "/usr/bin:/bin"})
+        assert calls and [p.name for p in calls[-1]] == ["lang"], calls
+        probe = machine(srv, "@local")["fingerprint"]["probes"]["lang"]
+        assert (probe["state"], probe["value"]) == ("ok", "lang="), probe
+    finally:
+        srv.close()
