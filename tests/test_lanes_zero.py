@@ -358,16 +358,32 @@ def test_tl17_capacity_counts_live_candidates_and_pool_presets_ignore_the_verdic
         s.close()
 
 
-def test_to15_capacity_never_counts_a_remote_machine_for_a_local_only_preset(lz):
-    # TO15 의 `capacity` 진입점(PR3). 「pool 프리셋은 판정을 보지 않는다」는 후보 함수 결과
-    # 안에서만이다(6-A-L2 · 6-B-V14) — 표식 없는 gate 와 같은 풀 · 같은 판정인 rel 이 원격으로
-    # 세지면 안 된다
-    report(lz, REMOTE)
-    cap = capacity(lz)
-    assert "gate" not in cap["unreachable"], cap  # 비교 행: 원격이 받는다
-    assert "gateany" not in cap["unreachable"], cap
-    for name in ("rel", "relany", "relq", "relgated", "localcheck"):
-        assert name in cap["unreachable"], (name, cap)
+def test_to15_capacity_never_counts_a_remote_machine_for_a_local_only_preset(tmp_path):
+    # TO15 의 `capacity` 진입점(PR3). 레인이 있는 서버에서 `@local` 은 아직 재지 않아(보고 없음)
+    # any-capable 을 받지 못한다. 그러면 relany 가 갈 곳은 원격 `build-02` 뿐인데, 후보 함수가
+    # 원격을 빼므로 세지 않는다. 표식 없는 gateany 는 같은 원격으로 센다(비교 행). `lanes = 0`
+    # 이면 로컬 레인이 없다는 이유가 먼저 후보를 비워 원격 제외를 가리므로 여기서는 레인 1 이다
+    s = zero(tmp_path, lanes=1)
+    try:
+        report(s, REMOTE)
+        assert s.app.report_of(LOCAL) is None
+        cap = capacity(s)
+        assert "gateany" not in cap["unreachable"], cap
+        assert "relany" in cap["unreachable"], cap
+        assert "relgated" in cap["unreachable"], cap
+    finally:
+        s.close()
+    # 「pool 프리셋은 판정을 보지 않는다」는 후보 함수 결과 안에서만이다(6-A-L2 · 6-B-V14) —
+    # 분배 전용 서버에서 표식 없는 gate 는 원격으로 세고 같은 풀 · 같은 판정인 rel 은 세지 않는다
+    s = zero(tmp_path / "zero")
+    try:
+        report(s, REMOTE)
+        cap = capacity(s)
+        assert "gate" not in cap["unreachable"], cap
+        for name in ("rel", "relany", "relq", "relgated", "localcheck"):
+            assert name in cap["unreachable"], (name, cap)
+    finally:
+        s.close()
 
 
 # ── TL3 · TL14 · TL16 · TL17 `rcm check` ────────────────────────────────────
