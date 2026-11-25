@@ -1360,8 +1360,9 @@ def _validate_shelf(cfg: ServerConfig) -> None:
 
 def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
-    if s.lanes < 1:
-        raise ConfigError("[server] lanes must be >= 1")
+    # 0 은 분배 전용 코디네이터다 — 로컬 레인 없이 잡을 받아 원격 워커에 나눠 준다(M5t-a 결정 243)
+    if s.lanes < 0:
+        raise ConfigError("[server] lanes must be >= 0 (0 = dispatch only, no local lanes)")
     if s.admission not in ("load", "always"):
         raise ConfigError("[server] admission must be 'load' or 'always'")
     if not 0 < s.cpu_max_percent <= 100:
