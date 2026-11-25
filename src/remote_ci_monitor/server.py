@@ -5820,8 +5820,11 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self._only(method, "GET")
             self._read_only_ok()
             self._no_worker_token()
-            # 새 호스트 사실은 토큰이 있는 응답에만(Bearer 나 basic 의 자격, M5t-a TD31 · TD44)
-            authenticated = self._read_token() is not None
+            # 새 호스트 사실은 토큰이 있는 응답에만(Bearer 나 basic 의 자격, M5t-a TD31 · TD44).
+            # 워커 토큰은 `_no_worker_token` 이 Bearer 만 막으므로 Basic 으로 올 수 있다 — 사람의
+            # 읽기가 아니므로 싣지 않는다(P3 2라운드 검증자 2 #2)
+            reader = self._read_token()
+            authenticated = reader is not None and reader.kind != TOKEN_WORKER
             self._send_json(200, self.app.machines_doc(authenticated=authenticated))
             return
         m = _RECHECK_RE.match(path)
