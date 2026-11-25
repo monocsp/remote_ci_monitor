@@ -3513,7 +3513,7 @@ def ci_watch_plist(env: Path) -> Path:
     return p
 
 
-def run_input(env, svcbin, monkeypatch, capsys, role, config, service, after=None):
+def run_input(env, svcbin, monkeypatch, capsys, role, config, service, after=None, extra=()):
     """열거 시험의 셋업(모두 읽히는 칸)을 깔고 `after(env)` 로 하나를 더한 뒤 doctor 를 부른다."""
     monkeypatch.setattr(doctor, "PLATFORM", "darwin")
     monkeypatch.setattr(cli, "discover", FakeDiscover(()))
@@ -3525,7 +3525,7 @@ def run_input(env, svcbin, monkeypatch, capsys, role, config, service, after=Non
         argv = input_setup(env, svcbin, monkeypatch, role, config, service, s.port)
         if after is not None:
             after(env)
-        code, out, err = run_guarded(capsys, *argv, "--json")
+        code, out, err = run_guarded(capsys, *argv, *extra, "--json")
         return code, out, err, s
     finally:
         s.close()
@@ -3701,6 +3701,43 @@ def test_the_services_working_directory_rcm_toml_is_the_servers_config(
     doc = json.loads(out)
     assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}", (doc["server"], err)
     assert code == 0, doc
+
+
+@pytest.mark.parametrize("home_rcm_toml", [True, False])
+def test_a_units_unknown_working_directory_is_unknown_only_when_rcm_toml_may_be_there(
+    env, svcbin, monkeypatch, capsys, home_rcm_toml
+):
+    """사용자 유닛인지 모르는 systemd 유닛(다른 자리에서 준 파일)이 `WorkingDirectory=` 없이
+    `--config` 없는 `rcm serve` 를 띄우면 시스템 유닛이면 `/`, 사용자 유닛이면 홈에서 뜬다. 홈에
+    `rcm.toml` 이 있으면 서버가 그것을 읽는지 모른다 — 종료 3. 없으면 모를 것이 없다: 표준
+    자리로 재고 0 이다(과잉 교정 잠금)."""
+    sf = env / "svc" / "rcm-server.service"
+
+    def unit(_env: Path) -> None:
+        sf.parent.mkdir()
+        sf.write_text(
+            f"[Service]\nExecStart=/x/rcm serve\nEnvironment=PATH={svcbin}:/usr/bin:/bin\n"
+        )
+        if home_rcm_toml:
+            (env / "home" / "rcm.toml").write_text(server_body(env, free_port()))
+
+    code, out, err, s = run_input(
+        env,
+        svcbin,
+        monkeypatch,
+        capsys,
+        "coordinator-worker",
+        "standard",
+        "absent",
+        after=unit,
+        extra=("--service-file", str(sf)),
+    )
+    if home_rcm_toml:
+        assert_handled(code, out, err, "may be the server's config", codes=(3,))
+        assert s.requests == [], s.requests
+    else:
+        doc = json.loads(out)
+        assert doc["undecided"] == [] and code == 0, doc
 
 
 def test_the_doctor_shells_config_home_does_not_choose_the_workers_config(
