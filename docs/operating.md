@@ -139,8 +139,9 @@ systemd unit of a standard label is `rcm-server.service` or `rcm-worker.service`
 other label `<label>.service`. The server service file has the file-descriptor limit of 4096,
 `HOME`, `WorkingDirectory`, a `PATH` with `/usr/sbin` and without the venv's `bin`, and a log
 named from the label: `server.log` and `worker.log` for the standard labels, `<label>.log`
-otherwise, under `~/Library/Logs/rcm` (launchd) or `~/.local/state/rcm` (systemd). It runs the
-`rcm` that ran setup by its absolute path; setup warns when it could only find an `rcm` on `PATH`.
+otherwise, under `~/Library/Logs/rcm` (launchd) or `~/.local/state/rcm` (systemd); the worker's
+systemd unit gets the same `HOME` and label log. It runs the `rcm` that ran setup by its absolute
+path; setup warns when it could only find an `rcm` on `PATH`.
 In a systemd unit a path with a space, `%` or `$` is written the way systemd reads it (quoted,
 `%%`, `$$`); a path with a line break or another control character is refused with exit 2.
 
@@ -149,15 +150,23 @@ In a systemd unit a path with a space, `%` or `$` is written the way systemd rea
 ```sh
 mkdir -p <log folder> <LaunchAgents folder>
 cp -n <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist
-cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed"
+cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed; to replace an installed one: launchctl bootout, cp without -n, launchctl bootstrap"
 ```
 
 On Linux the start is `systemctl --user daemon-reload && systemctl --user enable --now
-<unit>`, followed by `sudo loginctl enable-linger $USER` to keep the service running after you log
-out. `cp -n` never replaces a file already installed, and the start runs only when the installed
-file is the one setup just wrote. When a service with the same label is already loaded (setup only
-asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so and leaves
-it alone. Once the file is installed, `rcm doctor` reads the installed copy, `--label` or not.
+<unit>`, and before it setup prints `sudo loginctl enable-linger $USER`: on a machine nobody logs
+in to there is no user manager to start the service otherwise, and without it the service stops
+when you log out. `cp -n` never replaces a file already installed, and the start runs only when the
+installed file is the one setup just wrote. When a service with the same label is already loaded
+(setup only asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so
+and leaves it alone. Then, and when `--force service` rewrote a service file that was there, it
+also prints the order that replaces the installed one: `launchctl bootout gui/$(id -u)/<label>`,
+`cp` without `-n`, `launchctl bootstrap gui/$(id -u) <file>`, or `systemctl --user disable --now
+<unit>`, `cp`, `systemctl --user daemon-reload`, `systemctl --user enable --now <unit>`. Only
+launchd's `Could not find service` and systemd's `is-active` exit 3 count as not loaded; any other
+answer (no user session, `Failed to connect to bus`) is "could not tell", with a warning that the
+printed start may fail on that machine. Once the file is installed, `rcm doctor` reads the
+installed copy, `--label` or not.
 
 **To remove it.** Unload the service, then delete the installed file and the files setup wrote.
 On macOS: `launchctl bootout gui/$(id -u)/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
@@ -170,14 +179,18 @@ way; a `data_dir` and its database stay until you delete them. setup prints this
 
 - An existing config or service file is kept: the run stops with exit 1 and writes nothing.
   `--force config`, `--force service` or `--force` (both) replace them. When a write fails part
-  way, what was already written is undone.
+  way, what was already written is undone. An existing `server.toml` that is not TOML or not
+  UTF-8 does not stop setup: it warns `could not read <path>` and goes on, and only
+  `--force config` replaces that file.
 - A `data_dir` that already holds `rcm.sqlite3` is refused with exit 1. `--reuse-data-dir` keeps
   using it; setup then reads the schema version from the file's header, without opening the
   database, and warns when it differs from this build's (the service migrates an older one when it
   starts). `--data-dir` is written as an absolute path.
 - A port something already listens on gets a warning. setup binds the port once to check and
   connects to nothing.
-- `--bind` must be an address of this machine or `0.0.0.0`. A Tailscale address is the
+- `--bind` must be an address of this machine or `0.0.0.0`, written as an address: a name
+  (`localhost`, `macmini.local`) is refused with exit 2, `give an address, not a name`, because
+  setup looks no name up. A Tailscale address is the
   recommended choice: setup writes `advertise = false` (mDNS would hand LAN workers an address
   they cannot reach, so give workers the URL) and warns that everyone on the tailnet can read the
   queue. A LAN address or `0.0.0.0` gets the warning that anyone on the network can read the queue,
@@ -196,13 +209,17 @@ way; a `data_dir` and its database stay until you delete them. setup prints this
 two commands to run once its service is up, with the same `rcm` the service runs, so that no other
 build opens (and migrates) its database: `<rcm> token --config <server.toml> add CLIENT_NAME` (a
 client token, never `--admin`) and `<rcm> token --config <server.toml> add WORKER_NAME --worker`.
-A client is told to get a token from the coordinator and set `RCM_TOKEN`; a worker to put the
-worker token in `worker.toml` as `token = "…"`, because a service does not see the
-`RCM_WORKER_TOKEN` of your shell.
+It prints them on a machine without launchd or systemd too. A client is told to get a token from
+the coordinator and set `RCM_TOKEN`; a worker to put the worker token in `worker.toml` as
+`token = "…"`, because a service does not see the `RCM_WORKER_TOKEN` of your shell, and it gets
+that line before the lines that start its service: a worker without a token is refused and
+restarted over and over.
 
 **At the end** it runs the checks that need no server (Python, SQLite, the open-files limit of the
 service file it wrote, whether the config file reads, and the host) as advice that does not change
-the exit code, then says to start the service, add the token and run `rcm doctor --role <role>`.
+the exit code, then the `to remove: …` line, and last says to start the service and add the
+token (a worker: the token first) and run `<rcm> doctor --role <role>`, with the `rcm` the service
+runs and any `--config` or `--service-file` you gave.
 Exit codes: 0 written (also when the closing report fails or is interrupted after every file is
 written: the last line is `files written; the report failed: …` or `files written; report
 interrupted`), 1 not written (an unexpected error is one line, without a traceback, that says what

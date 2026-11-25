@@ -31,7 +31,13 @@ of a key bumps that number and is listed here.
   writes systemd unit paths with spaces, `%` or `$` the way systemd reads them. An empty
   `--config`, `--service-file`, `--data-dir` or `--label` is a usage error, a `--config` inside a
   folder the service manager reads is refused like a `--service-file` there, and a run whose files
-  are all written exits 0 even when the closing report fails or is interrupted.
+  are all written exits 0 even when the closing report fails or is interrupted. It prints the
+  order that replaces a service already loaded or rewritten with `--force service`, a
+  `to remove: …` line, the `loginctl enable-linger` line before the start on Linux and a worker's
+  token line before its start, and its last `rcm doctor` line names the `rcm` the service runs.
+  `--bind` takes an address, not a name; a `server.toml` setup cannot read is a warning that
+  `--force config` fixes; a service manager that does not answer is "could not tell", not "not
+  loaded".
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
