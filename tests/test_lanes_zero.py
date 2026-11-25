@@ -242,6 +242,36 @@ def test_tl7_at_local_is_not_alive(lz):
     assert views[LOCAL].alive is False
 
 
+def test_tl7_recheck_on_at_local_says_this_server_has_no_local_lanes(tmp_path):
+    """`@local` 다시 점검은 제출과 같은 409 다 — 「start rcm worker there」는 엉뚱한 조언이다
+    (`@local` 은 워커를 띄워 살릴 머신이 아니다). 레인이 있는 서버에서 꺼진 원격 워커는 오늘처럼
+    「start rcm worker there」(비교 행)."""
+    s = zero(tmp_path, presets=CHECKED)
+    try:
+        status, body = s.req("POST", f"/machines/{LOCAL}/recheck", token="admin", json_body={})
+        assert status == 409, body
+        assert "no local lanes (lanes = 0)" in body["error"], body
+        assert "start rcm worker" not in body["error"], body
+        assert body.get("error_code") == "no_capable_machine", body
+        report_all(s, REMOTE)
+        s.clock.advance(s.app.config.server.worker_timeout_seconds + 5)
+        status, body = s.req("POST", f"/machines/{REMOTE}/recheck", token="admin", json_body={})
+        assert status == 409 and "start rcm worker there" in body["error"], body
+    finally:
+        s.close()
+
+
+def test_tl7_rcm_check_does_not_count_at_local_as_a_machine(lz, home, monkeypatch, capsys):
+    """`machines` 행의 「N machines」는 잡을 받을 수 있는 머신이다 — 분배 전용 서버의 `@local`
+    은 세지 않는다. 원격 워커가 붙으면 그 하나만 센다."""
+    code, found = check(lz, monkeypatch, capsys)
+    assert found["machines"][1].startswith("0 machines"), found["machines"]
+    report(lz, REMOTE)
+    code, found = check(lz, monkeypatch, capsys)
+    assert found["machines"][1].startswith("1 machine"), found["machines"]
+    assert not found["machines"][1].startswith("1 machines"), found["machines"]
+
+
 def test_tl8_the_local_probes_do_not_run(lz, monkeypatch):
     from remote_ci_monitor import hostsample
 
@@ -435,6 +465,7 @@ def home(monkeypatch, tmp_path) -> Path:
 ROW_RE = re.compile(r"^(ok |warn|FAIL)  (.*)$")
 ROW_NAMES = (
     "capacity",
+    "machines",
     "presets",
     "pools",
     "server",

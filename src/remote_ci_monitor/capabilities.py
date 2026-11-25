@@ -78,6 +78,15 @@ class MachineDown(Exception):
     """그 머신이 down 이다 — 거기에 점검을 걸어도 기다리기만 한다(결정 106)."""
 
 
+class NoLocalLanes(MachineDown):
+    """분배 전용 서버(`lanes = 0`)의 `@local` — 꺼진 것이 아니라 잡을 돌리지 않는 머신이다(결정
+    243). 워커를 띄워도 살아나지 않으므로 「start rcm worker」 조언과 갈라 409 로 거절한다."""
+
+
+#: 분배 전용 서버에서 `@local` 을 고른 요청의 409 문장 머리 — 제출 · 다시 점검이 같이 쓴다
+NO_LOCAL_LANES_MESSAGE = "this server has no local lanes (lanes = 0) — @local runs no jobs"
+
+
 class AmbiguousMachine(ValueError):
     """표시 이름이 여러 머신에 맞는다 — 워커 id 로 골라야 한다(결정 108)."""
 
@@ -1287,6 +1296,8 @@ class CapabilitiesMixin:
         4). 걸 것이 없고 건너뛴 것만 있어도 200 이고 `jobs` 는 빈 목록이다."""
         now = self.now_fn()
         view = self.resolve_machine(worker, self.machine_views(now))  # KeyError · Ambiguous
+        if view.id == LOCAL and not self._has_local_lanes():
+            raise NoLocalLanes(view.id)
         if not view.alive:
             raise MachineDown(view.id)
         checks = self.check_preset_names()

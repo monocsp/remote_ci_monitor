@@ -1097,7 +1097,8 @@
         checks: checks.length ? checks.map(function (c) { return checkText(c, lang); }).join(" · ") : DASH,
         checkHead: sum.head,
         checkRest: sum.rest,
-        recheck: admin === true && checks.length > 0
+        // 레인 없는 `@local` 을 다시 점검하면 409 「no local lanes」다 — 버튼을 그리지 않는다
+        recheck: admin === true && checks.length > 0 && !noJobs
       };
     });
   }

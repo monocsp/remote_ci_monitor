@@ -82,3 +82,19 @@ test("TL11 the machines tab shows @local without lanes as running no jobs, not d
     assert.equal(rows[1].alive, false, lang); // 비교 행: 원격 워커의 down 은 그대로
   }
 });
+
+test("TL7 the machines tab draws no Recheck button on @local without lanes", () => {
+  // 누르면 409 「this server has no local lanes」다 — 누를 수 없는 버튼은 그리지 않는다
+  const checks = [{ preset: "simcheck", state: "passed", job_id: 3 }];
+  const doc = {
+    machines: [
+      { id: "@local", display_name: "coord", kind: "local", pool: "default", lanes: 0, alive: false, presets: {}, checks: checks },
+      { id: "build-02", display_name: "build-02", kind: "remote", pool: "default", lanes: 1, alive: true, presets: {}, checks: checks },
+      { id: "@local", display_name: "mini", kind: "local", pool: "default", lanes: 2, alive: true, presets: {}, checks: checks },
+    ],
+  };
+  const rows = machineRows(doc, true, "en");
+  assert.equal(rows[0].recheck, false);
+  assert.equal(rows[1].recheck, true); // 비교 행: 원격 워커는 그대로
+  assert.equal(rows[2].recheck, true); // 비교 행: 레인이 있는 서버의 @local 도 그대로
+});

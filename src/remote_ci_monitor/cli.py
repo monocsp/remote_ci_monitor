@@ -2813,8 +2813,12 @@ def _probe_change(name: str, probe: dict[str, Any]) -> str:
 
 
 def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]:
-    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검."""
+    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검.
+
+    분배 전용 서버(`lanes = 0`)의 `@local` 은 잡을 받는 머신이 아니라 세지 않는다(M5t-a 결정
+    243) — 「1 machine」이 워커가 하나 붙은 것으로 읽힌다."""
     now = datetime.now(UTC)
+    machines = [m for m in machines if not (m.get("kind") == "local" and m.get("lanes") == 0)]
     changed: list[str] = []
     failed: list[str] = []
     n_failed = 0

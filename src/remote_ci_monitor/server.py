@@ -48,10 +48,12 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.capabilities import (
     CHECK_LABEL,
     CHECK_REQUESTER,
+    NO_LOCAL_LANES_MESSAGE,
     AmbiguousMachine,
     CapabilitiesMixin,
     CapabilityError,
     MachineDown,
+    NoLocalLanes,
     NotACandidate,
 )
 from remote_ci_monitor.clientwheel import (
@@ -4330,8 +4332,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 # 분배 전용(`lanes = 0`) — 「down」이 아니다. 기다려도 오지 않는다(결정 243)
                 raise ApiError(
                     409,
-                    "this server has no local lanes (lanes = 0) — @local runs no jobs; "
-                    "send it to a worker or leave --machine out",
+                    f"{NO_LOCAL_LANES_MESSAGE}; send it to a worker or leave --machine out",
                     error_code=REASON_NO_CAPABLE_MACHINE,
                     machine=view.id,
                 )
@@ -4393,6 +4394,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             answer = self.recheck(machine, names)
         except KeyError as e:
             raise ApiError(404, f"no such machine {machine!r}") from e
+        except NoLocalLanes as e:
+            # 분배 전용 서버의 `@local` — 제출(`--machine @local`)과 같은 409 다(결정 243)
+            raise ApiError(
+                409,
+                f"{NO_LOCAL_LANES_MESSAGE}; there is nothing to recheck on it",
+                error_code=REASON_NO_CAPABLE_MACHINE,
+                machine=str(e),
+            ) from e
         except MachineDown as e:
             # `rcm run --machine` 과 같은 규칙(결정 106) — 걸어 봐야 기다리기만 한다
             raise ApiError(
