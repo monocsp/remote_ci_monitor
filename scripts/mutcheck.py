@@ -11,6 +11,8 @@
      + `m5t-cli-local-only-refusal-is-unknown`: `rcm run` 이 원격 금지 409 를 3 으로 끝냄(`cli.py`)
      + `m5t-check-local-only-needed-only`: 원격에서 못 도는 점검의 대기 · 실패 기록이 판정에 남음
      (`capabilities.py`, P6 GAP X1)
+     + `m5t-check-local-only-claimed-ignored`: 그 머신이 집은 점검도 check_local_only 로 냄
+     (`capabilities.py`, batch 7 T3)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2365,6 +2367,21 @@ MUTANTS = (
         tests=(
             "tests/test_local_only.py::"
             "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+        ),
+    ),
+    Mutant(
+        # 원격에서 다시 못 도는 점검(`local_only`)의 기록 가운데 그 머신이 이미 집은 잡의 예외를
+        # 지운다 — 돌고 있는 점검이 끝나기도 전에 check_local_only 로 보이고, 그 결과가 오면 다시
+        # 통과로 돌아온다(M5t-a P6 재확인, batch 7 T3)
+        name="m5t-check-local-only-claimed-ignored",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="    return state == cap.CHECK_RUNNING and claimed\n",
+        new="    return False\n",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+            "tests/test_local_only.py::"
+            "test_t4_a_remote_check_being_cancelled_stays_running_until_it_ends",
         ),
     ),
 )
