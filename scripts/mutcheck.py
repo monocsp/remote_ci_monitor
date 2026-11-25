@@ -2860,6 +2860,95 @@ MUTANTS = (
             "test_tl13_pools_without_workers_counts_the_default_pool_only_without_local_lanes",
         ),
     ),
+    Mutant(
+        # 후보 함수가 `lanes = 0` 에서도 `@local` 을 남긴다 — 대기 잡이 로컬 레인을 기다리고
+        # 재시작 뒤에도 그렇다(TL4 · TL9, P5 G7)
+        name="m5t-lanes-zero-candidates-keep-local",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='            views = [v for v in views if v.kind != "local"]  # 분배 전용',
+        new="            views = list(views)  # 분배 전용",
+        tests=(
+            "tests/test_lanes_zero.py::test_tl4_a_waiting_job_goes_to_the_worker_that_attaches",
+            "tests/test_lanes_zero.py::test_tl9_the_queue_survives_a_restart",
+        ),
+    ),
+    Mutant(
+        # `--machine @local` 을 분배 전용 서버에서도 받는다 — 409 대신 「machine @local is down
+        # — start rcm worker there」라는 엉뚱한 조언이 간다(TL2, P5 G7)
+        name="m5t-lanes-zero-machine-local-accepted",
+        path="src/remote_ci_monitor/server.py",
+        old="            if view.id == LOCAL_WORKER and not self._has_local_lanes():\n",
+        new="            if view.id == LOCAL_WORKER and False:\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl2_without_workers_a_job_waits_without_an_eta_and_at_local_is_409",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 없어도 `@local` 의 프로브를 잰다 — 잰 보고가 있으면 `@local` 이 「받을 수
+        # 있다」로 보인다(TL8, P5 G7)
+        name="m5t-lanes-zero-local-probes-run",
+        path="src/remote_ci_monitor/capabilities.py",
+        old=(
+            "        if not self._has_local_lanes():\n"
+            "            return\n"
+            "        with self._measure_lock:\n"
+        ),
+        new="        with self._measure_lock:\n",
+        tests=("tests/test_lanes_zero.py::test_tl8_the_local_probes_do_not_run",),
+    ),
+    Mutant(
+        # 서버가 capacity 를 못 센(null) 답을 옛 서버처럼 읽어 행을 빼다 — 분배 전용 서버에서
+        # 갈 곳을 셀 수 없는데 `rcm check` 가 0 으로 끝난다(batch 2 항목 1, PLAN.md 「rcm check」)
+        name="m5t-lanes-zero-capacity-null-hidden",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            '        return ("capacity", False if health.get("lanes") == 0 else None, '
+            "CAPACITY_UNKNOWN_TEXT)\n"
+        ),
+        new="        return None\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_rcm_check_draws_capacity_unknown_when_the_server_could_not_count",
+        ),
+    ),
+    Mutant(
+        # 분배 전용 서버의 `@local` 다시 점검이 MachineDown 으로 떨어진다 — 「start rcm worker
+        # there」라는 엉뚱한 조언(batch 2 항목 6 · P5 G6)
+        name="m5t-lanes-zero-recheck-local-down",
+        path="src/remote_ci_monitor/capabilities.py",
+        old=(
+            "        if view.id == LOCAL and not self._has_local_lanes():\n"
+            "            raise NoLocalLanes(view.id)\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl7_recheck_on_at_local_says_this_server_has_no_local_lanes",
+        ),
+    ),
+    Mutant(
+        # `rcm check` 의 machines 행이 레인 없는 `@local` 을 센다 — 워커가 없는데 「1 machine」
+        # (batch 2 항목 6)
+        name="m5t-lanes-zero-machines-row-counts-local",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "    machines = [m for m in machines "
+            'if not (m.get("kind") == "local" and m.get("lanes") == 0)]\n'
+        ),
+        new="",
+        tests=(
+            "tests/test_lanes_zero.py::test_tl7_rcm_check_does_not_count_at_local_as_a_machine",
+        ),
+    ),
+    Mutant(
+        # 갈 곳 잃은 잡이 이유 메모 없이 돌아간다 — 화면이 「no capable machine · unknown」(P5 G5)
+        name="m5t-lanes-zero-no-local-lanes-note-dropped",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                if local is not None and not self._has_local_lanes():\n",
+        new="                if False:\n",
+        tests=("tests/test_lanes_zero.py::test_tl15_a_job_with_nowhere_to_go_says_no_local_lanes",),
+    ),
 )
 
 
