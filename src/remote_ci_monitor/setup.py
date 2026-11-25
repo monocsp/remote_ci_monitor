@@ -47,6 +47,11 @@ from remote_ci_monitor.core import setup as core
 #: sqlite 파일의 첫 16바이트 — 헤더만 읽고 연결하지 않는다
 SQLITE_MAGIC = b"SQLite format 3\x00"
 DB_FILE = "rcm.sqlite3"
+#: systemd 사용자 서비스의 선행 조건 — 로그인 없이도 user manager 가 돌게 한다
+LINGER_LINE = (
+    "first, if no user manager runs for you here (a headless machine, or once you log out): "
+    "sudo loginctl enable-linger $USER"
+)
 #: 서비스 관리자 조회의 시한(초)
 QUERY_TIMEOUT = 5.0
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
@@ -928,6 +933,10 @@ def _report(plan: Plan, world: World) -> None:
         err.write(f"warning: {w}\n")
     if plan.service is not None and plan.installed is not None and plan.manager is not None:
         err.write("next — install and start the service yourself (setup registers nothing):\n")
+        if plan.manager == core.SYSTEMD:
+            # 헤드리스 머신에는 로그인 세션이 없어 user manager 도 없다 — 시작 명령보다 먼저다
+            # (P5 B-E5)
+            err.write(f"  {LINGER_LINE}\n")
         for line in core.install_commands(
             plan.manager,
             staged=plan.service,
@@ -946,8 +955,6 @@ def _report(plan: Plan, world: World) -> None:
                 plan.manager, staged=plan.service, installed=plan.installed, label=plan.label or ""
             ):
                 err.write(f"  {line}\n")
-        if plan.manager == core.SYSTEMD:
-            err.write("  to keep it running after you log out: sudo loginctl enable-linger $USER\n")
     if plan.tokens:
         if plan.role in core.SERVER_ROLES:
             err.write("tokens — once the server runs, with the same build as the service:\n")

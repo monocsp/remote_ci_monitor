@@ -3510,6 +3510,15 @@ MUTANTS = (
             "tests/test_setup.py::test_s1_force_service_prints_the_systemd_swap_order",
         ),
     ),
+    Mutant(
+        # linger 줄을 시작 명령 뒤로 돌린다 — 헤드리스 Linux 에서 user manager 없이 시작 명령이 먼저
+        # 실패한다(P5 B-E5)
+        name="setup-linger-after-the-start",
+        path="src/remote_ci_monitor/setup.py",
+        old='            err.write(f"  {LINGER_LINE}\\n")\n',
+        new="            pass\n",
+        tests=("tests/test_setup.py::test_s3_on_linux_linger_comes_before_the_start",),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
