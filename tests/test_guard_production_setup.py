@@ -142,10 +142,12 @@ def test_tr33_the_template_default_resolves_with_the_commands_home():
     assert denied("rcm setup --label test.rcm.server", environ=TEST_XDG)
 
 
-def test_tr33_a_relative_data_dir_is_read_against_the_working_folder():
+def test_tr33_a_relative_data_dir_is_denied_in_any_working_folder():
+    # P3 4라운드: 훅은 cwd 를 믿지 않는다 — 시험 폴더에 서 있어도 상대 경로는 막는다(전에는
+    # 시험 폴더에서 허용했다)
     command = f"{SERVER} --data-dir . --label test.rcm.server"
     assert denied(command, environ=TEST_XDG, cwd=HOME / ".local" / "share" / "rcm")
-    assert judge(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest/data")) is None
+    assert denied(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest/data"))
 
 
 def test_tr33_worker_and_client_roles_have_no_server_data_dir():
@@ -177,12 +179,13 @@ def test_tr33_a_data_dir_written_with_a_shell_variable_is_denied(flag):
     assert "data" in verdict.reason
 
 
-def test_tr33_pwd_is_the_working_folder_of_that_segment():
-    # P3 v2-1: `$PWD` 는 그 조각의 작업 폴더다(`cd` 뒤에는 그 폴더)
+def test_tr33_pwd_in_a_setup_command_is_denied():
+    # P3 v2-1 에서는 `$PWD` 를 그 조각의 작업 폴더로 펼쳤다. P3 4라운드부터 `$` 가 든 setup 은
+    # 허용 모양이 아니다 — 시험 폴더에서도 막는다
     command = f"{SERVER} --data-dir $PWD/rcm --label test.rcm.server"
     assert denied(command, environ=TEST_XDG, cwd=HOME / ".local" / "share")
     assert denied(f"cd /home/op/.local/share && {command}", environ=TEST_XDG)
-    assert judge(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest")) is None
+    assert denied(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest"))
 
 
 def test_tr20_a_config_written_with_a_shell_variable_is_denied():
@@ -197,9 +200,12 @@ def test_tr20_a_config_written_with_a_shell_variable_is_denied():
     )
     assert denied(f"XDG_CONFIG_HOME=$HOME/.config {WORKER} --label test.rcm.worker")
     assert denied(f"XDG_CONFIG_HOME=${{HOME}}/.config {WORKER} --label test.rcm.worker")
-    # 시험 자리를 가리키는 변수는 막지 않는다
+    # P3 4라운드: 시험 자리를 가리키는 변수도 막는다 — `$` 가 든 setup 은 허용 모양이 아니다.
+    # 같은 자리를 글자로 쓰면 지나간다
+    assert denied(f"XDG_CONFIG_HOME=$HOME/rcm-devtest/config {WORKER} --label test.rcm.worker")
     assert (
-        judge(f"XDG_CONFIG_HOME=$HOME/rcm-devtest/config {WORKER} --label test.rcm.worker") is None
+        judge(f"XDG_CONFIG_HOME=/home/op/rcm-devtest/config {WORKER} --label test.rcm.worker")
+        is None
     )
 
 
@@ -328,7 +334,6 @@ def test_tr20_a_production_path_in_another_case_is_denied_on_a_case_insensitive_
     # P3 2라운드: macOS 의 기본 파일시스템은 대소문자를 가리지 않는다 — `~/.config/RCM` 은 운영
     # 설정 폴더이고 `~/library/launchagents` 는 서비스 관리자가 읽는 자리다
     monkeypatch.setattr(guard, "FOLD_CASE", True, raising=False)
-    monkeypatch.setattr(core, "FOLD_CASE", True, raising=False)
     worker = f"{WORKER} --label test.rcm.worker"
     assert denied(f"{worker} --config ~/.config/RCM/worker.toml", environ=TEST_XDG)
     server = f"{SERVER} --label test.rcm.server"
@@ -337,7 +342,6 @@ def test_tr20_a_production_path_in_another_case_is_denied_on_a_case_insensitive_
     assert denied(f"{server} --data-dir /tmp/d --service-file {target}", environ=TEST_XDG)
     # 대소문자를 가리는 디스크(Linux)에서는 다른 폴더다
     monkeypatch.setattr(guard, "FOLD_CASE", False)
-    monkeypatch.setattr(core, "FOLD_CASE", False)
     assert judge(f"{worker} --config ~/.config/RCM/worker.toml", environ=TEST_XDG) is None
 
 
@@ -380,13 +384,15 @@ def test_tr20_a_client_writes_no_service_file_so_its_service_file_flag_is_free()
     assert judge(f"{client} --service-file {target}", environ=TEST_XDG) is None
 
 
-def test_tr20_redirections_comments_and_quoting_read_as_the_shell_reads_them():
-    # 셸 단계의 잠금: 리다이렉션 · 주석은 setup 의 인자가 아니고, 작은따옴표 안의 `$` 는 글자다
+def test_tr20_redirections_comments_and_quoted_dollars_are_not_the_plain_shape():
+    # P3 2라운드에서는 훅이 리다이렉션 · 주석 · 작은따옴표를 셸처럼 읽어 허용했다. P3 4라운드부터
+    # 그런 글자가 든 setup 은 허용 모양이 아니다 — 막는다. 따옴표로 감싼 평범한 값은 그대로다
     free = f"{SERVER} --data-dir /tmp/d --label test.rcm.server"
     for tail in ("> /tmp/log 2>&1", "2> /tmp/err # a note", "</dev/null &>/tmp/x", "&"):
-        assert judge(f"{free} {tail}", environ=TEST_XDG) is None, tail
+        assert denied(f"{free} {tail}", environ=TEST_XDG), tail
     quoted = f"{SERVER} --data-dir '/tmp/$HOME' --label test.rcm.server"
-    assert judge(quoted, environ=TEST_XDG) is None
+    assert denied(quoted, environ=TEST_XDG)
+    assert judge(f"{SERVER} --data-dir '/tmp/d' --label test.rcm.server", environ=TEST_XDG) is None
     # 반복한 옵션: setup 은 마지막 값을 쓰지만 guard 는 앞의 값도 본다(막는 쪽)
     command = f"{SERVER} --data-dir /home/op/.local/share/rcm --data-dir /tmp/d --label t.s"
     assert denied(command, environ=TEST_XDG)
@@ -438,6 +444,11 @@ def test_tr20_the_setup_rule_and_the_edit_rule_share_one_production_list():
 # ── P3 3라운드: 닫는 쪽의 그물 — 풀어내지 못한 setup 은 막는다 ──
 
 PROD_SETUP = f"setup --role coordinator --bind 127.0.0.1 --label t.s --data-dir {PROD_DATA} --yes"
+#: 그물의 거절이 말하는 허용 모양(P3 4라운드)
+PLAIN_MESSAGE = (
+    "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or backslash, "
+    "absolute or ~ paths only"
+)
 
 
 @pytest.mark.parametrize(
@@ -472,7 +483,8 @@ def test_tr20_a_setup_the_hook_cannot_read_as_a_plain_call_is_denied(command):
 def test_tr20_the_net_lets_plain_setup_help_and_unrelated_commands_through():
     # 과잉 차단의 경계: 평범한 setup · 도움말 · setup 이 낱말로 나오지 않는 명령은 그대로다
     assert judge("rcm setup --help", environ=TEST_XDG) is None
-    assert judge("rcm setup -h && rcm setup --help", environ=TEST_XDG) is None
+    # P3 4라운드: 도움말도 평범한 명령 하나일 때만이다(`&&` 뒤에 무엇이든 붙일 수 있었다)
+    assert denied("rcm setup -h && rcm setup --help", environ=TEST_XDG)
     assert judge(f"HOME=/home/op/rcm-devtest/home {WORKER} --label test.rcm.worker") is None
     for command in (
         "cd /home/op/src/remote_ci_monitor-setup-x && ./.venv/bin/python -m pytest -q",
@@ -492,18 +504,19 @@ def test_tr20_the_net_lets_plain_setup_help_and_unrelated_commands_through():
 @pytest.mark.parametrize(
     "head",
     [
-        "/usr/bin/env rcm",
-        "/usr/bin/nohup rcm",
         "python -u -m remote_ci_monitor",
         "python3 -X dev -W ignore -m remote_ci_monitor.cli",
+        "/srv/x/.venv/bin/python3.11 -I -mremote_ci_monitor",
     ],
 )
-def test_tr20_a_wrapper_path_with_a_test_home_is_read_not_caught_by_the_net(head):
-    # 그물이 생긴 뒤에도 감싸기 경로 · python 플래그는 세그먼트 파서가 풀어야 한다 — 시험 HOME 의
-    # setup 은 막지 않는다(그물에 걸리면 과잉 차단이다)
+def test_tr20_python_flags_with_a_test_home_are_read_not_caught_by_the_net(head):
+    # python 의 인터프리터 플래그는 허용 모양 안이다 — 시험 HOME 의 setup 은 막지 않는다. P3
+    # 4라운드부터 감싸기(`/usr/bin/env rcm` · `/usr/bin/nohup rcm`)는 허용 모양 밖이라 막는다
     tail = "setup --role worker --server http://10.0.0.5:18790 --pool p --lanes 1 --yes"
     command = f"HOME=/home/op/rcm-devtest/home {head} {tail} --label test.rcm.worker"
     assert judge(command) is None, head
+    for wrapper in ("/usr/bin/env rcm", "/usr/bin/nohup rcm"):
+        assert denied(f"HOME=/home/op/rcm-devtest/home {wrapper} {tail} --label t.w"), wrapper
 
 
 # ── P3 3라운드: 따라가지 못한 `cd` 뒤의 상대 경로 ──
@@ -518,18 +531,20 @@ def test_tr33_a_relative_path_after_a_cd_the_hook_cannot_follow_is_denied(cd):
     command = f"{cd} && {SERVER} --data-dir rcm --label test.rcm.server"
     verdict = judge(command, environ=TEST_XDG)
     assert verdict is not None and verdict.decision == "deny", cd
-    assert "cd" in verdict.reason, cd
+    assert PLAIN_MESSAGE in verdict.reason, cd
 
 
-def test_tr33_a_cd_the_hook_follows_keeps_working():
-    # 펼칠 수 있는 `cd` 는 그대로 따라간다. 모르는 `cd` 뒤라도 절대 경로뿐인 setup 은 막지 않는다
+def test_tr33_any_cd_in_front_of_setup_is_denied():
+    # P3 3라운드에서는 펼칠 수 있는 `cd` 를 따라가 그 뒤의 setup 을 허용했다. P3 4라운드부터
+    # setup 은 평범한 명령 하나여야 한다 — 따라갈 수 있는 `cd` 도, 절대 경로뿐인 setup 도 막는다
     rel = f"{SERVER} --data-dir data --label test.rcm.server"
-    assert judge(f"cd /home/op/rcm-devtest && {rel}", environ=TEST_XDG) is None
-    assert judge(f"cd $HOME/rcm-devtest && {rel}", environ=TEST_XDG) is None
+    assert denied(f"cd /home/op/rcm-devtest && {rel}", environ=TEST_XDG)
+    assert denied(f"cd $HOME/rcm-devtest && {rel}", environ=TEST_XDG)
     assert denied(f"cd $HOME/.local/share && {SERVER} --data-dir rcm --label t.s", environ=TEST_XDG)
     absolute = f"{SERVER} --data-dir /tmp/d --label test.rcm.server"
-    assert judge(f"cd - && {absolute}", environ=TEST_XDG) is None
-    assert judge(f"cd -P /x && {absolute}", environ=TEST_XDG) is None
+    assert denied(f"cd - && {absolute}", environ=TEST_XDG)
+    assert denied(f"cd -P /x && {absolute}", environ=TEST_XDG)
+    assert denied(f"cd /home/op/rcm-devtest && {absolute}", environ=TEST_XDG)
 
 
 # ── P3 3라운드: 훅이 터져도 setup 은 허용으로 새지 않는다 ──
@@ -545,7 +560,7 @@ def test_tr20_a_crash_while_judging_setup_is_a_deny(monkeypatch, capsys):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(guard, "find_production", lambda: PROD)
-    monkeypatch.setattr(guard, "_setup_calls", boom)
+    monkeypatch.setattr(guard, "_plain_setup", boom)
     monkeypatch.setattr(guard, "_hit", boom)
 
     def hook(command: str) -> dict:
@@ -560,6 +575,199 @@ def test_tr20_a_crash_while_judging_setup_is_a_deny(monkeypatch, capsys):
     assert "boom" in out["hookSpecificOutput"]["permissionDecisionReason"]
     out = hook("rm /tmp/scratch-file")
     assert "hookSpecificOutput" not in out and "boom" in out.get("systemMessage", ""), out
+
+
+# ── P3 4라운드: setup 판정은 허용 목록이다 — 평범한 명령 하나만 해석기에 묻는다 ──
+
+FREE_SERVER = f"{SERVER} --label test.rcm.server"
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd"),
+    [
+        # 줄 잇기(`\`+줄바꿈)는 셸이 지운다 — `se\<NL>tup` 은 setup 이다
+        (f"rcm se\\\ntup {PROD_SETUP[6:]}", WORKTREE),
+        (f"{WORKER} --label t.w {FREE_SERVICE} --config /home/op/.con\\\nfig/rcm/x.toml", WORKTREE),
+        # 도움말 뒤에 숨긴 setup
+        (f"rcm setup --help & rcm {PROD_SETUP}", WORKTREE),
+        (f"rcm setup -h $(rcm {PROD_SETUP})", WORKTREE),
+        (f"rcm setup -h `rcm {PROD_SETUP}`", WORKTREE),
+        # 실행되지 않거나 새지 않는 `cd` — 훅이 짐작한 cwd 는 셸의 cwd 가 아니다
+        (
+            f"cd /nonexistent; {SERVER} --label t.s --data-dir ../../home/op/.local/share/rcm",
+            Path("/home/op/rcm-devtest/a"),
+        ),
+        (f"(cd /tmp); {SERVER} --label t.s --data-dir rcm", HOME / ".local" / "share"),
+        (f"false && cd /tmp; {SERVER} --label t.s --data-dir rcm", HOME / ".local" / "share"),
+        # 앞 세그먼트의 변수 · export
+        (f"TMPDIR={PROD_DATA}; {SERVER} --label t.s --data-dir $TMPDIR", WORKTREE),
+        (f"export XDG_CONFIG_HOME=/home/op/.config && {WORKER} --label t.w", WORKTREE),
+        # 하위 명령 자리를 셸이 만든다
+        (f"S=se; rcm ${{S}}tup {PROD_SETUP[6:]}", WORKTREE),
+    ],
+)
+def test_tr20_round4_shell_tricks_around_setup_are_denied(command, cwd):
+    # P3 4라운드 HIGH: 거부 목록으로는 셸 문법을 다 막지 못했다. 평범한 명령 하나가 아니면 막는다
+    verdict = judge(command, environ=TEST_XDG, cwd=cwd)
+    assert verdict is not None and verdict.decision == "deny", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"rcm ${{S}}tup {PROD_SETUP[6:]}",
+        f"rcm s{{e,}}tup {PROD_SETUP[6:]}",
+        f"rcm${{IFS}}${{S}}tup {PROD_SETUP[6:]}",
+        'rcm "$SUB" --role coordinator',
+        "rcm --no-follow $SUB",
+        "python -m remote_ci_monitor $SUB",
+        f"R=rcm; caffeinate -i $R ${{S}}tup {PROD_SETUP[6:]}",
+        "$R --no-follow ${S}tup",
+        "rc? ${S}tup",
+    ],
+)
+def test_tr20_a_subcommand_the_shell_makes_after_rcm_is_denied(command):
+    # rcm(또는 명령 자리의 변수) 다음 하위 명령 자리가 글자 그대로가 아니면 setup 일 수 있다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert PLAIN_MESSAGE in verdict.reason, command
+
+
+def test_tr20_the_net_says_how_to_write_it():
+    # 그물의 거절은 허용 모양을 그대로 말하고, 글에만 있는 경우의 길(파일)도 알려 준다
+    for command in ('git commit -m "fix rcm setup"', f"sudo -u op rcm {PROD_SETUP}"):
+        verdict = judge(command, environ=TEST_XDG)
+        assert verdict is not None and verdict.decision == "deny", command
+        assert PLAIN_MESSAGE in verdict.reason and "-F" in verdict.reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rcm wait --job $N",
+        "cd $W && rcm status",
+        '"$PY" -m pytest -q tests/test_guard_production.py',
+        "grep -n rcm docs/operating.md",
+        "for f in $A; do echo $f; done",
+        'if [[ -n $X ]]; then echo "$X"; fi',
+    ],
+)
+def test_tr20_variables_around_rcm_without_setup_pass(command):
+    # 과잉 차단의 경계: 하위 명령 자리가 글자 그대로이고 setup 이 없으면 그물은 조용하다
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "--data-dir data",
+        "--data-dir ./data",
+        "--data-dir=../rcm",
+        "--config w.toml",
+        "--service-file svc/x.plist",
+        "--data-dir ~op/data",  # `~user` 는 passwd 를 읽는다 — `~` · `~/…` 만
+    ],
+)
+def test_tr33_a_relative_path_is_denied_wherever_the_session_stands(flags):
+    # P3 4라운드: cwd 를 믿지 않는다 — 시험 폴더에 서 있어도 상대 경로는 막는다
+    command = f"{FREE_SERVER} {flags}"
+    verdict = judge(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest/data"))
+    assert verdict is not None and verdict.decision == "deny", flags
+    assert "absolute or ~ paths only" in verdict.reason, flags
+
+
+@pytest.mark.parametrize("prefix", ["HOME=h", "XDG_CONFIG_HOME=cfg", "HOME=~op"])
+def test_tr33_a_relative_home_or_config_home_in_front_is_denied(prefix):
+    command = f"{prefix} {FREE_SERVER} --data-dir /tmp/d"
+    verdict = judge(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest"))
+    assert verdict is not None and verdict.decision == "deny", prefix
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "HOME=/tmp/h rcm setup --role worker --yes --server http://h:1 --pool default "
+        "--lanes 1 --label test.rcm.worker",
+        "rcm setup --help",
+        "rcm setup -h",
+        f"/abs/.venv/bin/rcm setup {FREE_SERVER[10:]} --data-dir /tmp/d",
+        f"./.venv/bin/rcm setup {FREE_SERVER[10:]} --data-dir /tmp/d",
+        f"python3 -m remote_ci_monitor setup {FREE_SERVER[10:]} --data-dir /tmp/d",
+        f"python3.11 -u -m remote_ci_monitor.cli setup {FREE_SERVER[10:]} --data-dir /tmp/d",
+        f"{FREE_SERVER} --data-dir '/tmp/a b/d' --config \"/tmp/a b/s.toml\"",
+        f"{FREE_SERVER} --data-dir='/tmp/d' --config=/tmp/s.toml",
+        f"{FREE_SERVER} --data-dir ~/rcm-devtest/data",
+        f"XDG_CONFIG_HOME=~/rcm-devtest/cfg {FREE_SERVER} --data-dir /tmp/d",
+    ],
+)
+def test_tr20_the_plain_shapes_reach_the_resolver_and_pass(command):
+    # 허용 모양: `NAME=value` 접두 → rcm 낱말 → setup → 인자들, 메타 문자 없음, 절대 · ~ 경로
+    assert judge(command, environ=TEST_XDG) is None, command
+    # 시험 HOME 하나로도 지나간다(설정 폴더가 그 HOME 아래)
+    test_home = (
+        "HOME=/tmp/h rcm setup --role worker --yes --server http://h:1 --pool default "
+        "--lanes 1 --label test.rcm.worker"
+    )
+    assert judge(test_home) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rcm setup --help && echo ok",
+        "rcm setup --help > /tmp/help.txt",
+        "rcm setup -h; rcm status",
+        "rcm --no-follow setup --help",
+        "env rcm setup --help",
+    ],
+)
+def test_tr20_setup_help_passes_only_in_the_plain_shape(command):
+    # `--help` 로 다른 것을 밀반입하지 못한다 — 도움말도 허용 모양일 때만 통과한다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+
+
+def _prod_with_links(tmp_path):
+    real = tmp_path / "prod"
+    for sub in ("config", "data", "checkout", "venv"):
+        (real / sub).mkdir(parents=True)
+    (tmp_path / "link").symlink_to(real, target_is_directory=True)
+    (tmp_path / "free").mkdir()
+    (tmp_path / "freelink").symlink_to(tmp_path / "free", target_is_directory=True)
+    prod = guard.Production(
+        checkout=real / "checkout",
+        venv=real / "venv",
+        config_dir=real / "config",
+        data_dir=real / "data",
+    )
+    return prod, tmp_path / "link", tmp_path / "freelink"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "--data-dir {link}/data",
+        "--data-dir {link}/data/inner/new",
+        "--config {link}/config/server.toml --data-dir {free}/d",
+        "--config {link}/checkout/x.toml --data-dir {free}/d",
+        "--service-file {link}/venv/x.plist --data-dir {free}/d",
+    ],
+)
+def test_tr20_a_symlink_into_a_production_root_is_denied(tmp_path, flags):
+    # P3 4라운드 LOW 6: 경로는 존재하는 가장 깊은 조상까지 심볼릭 링크를 푼 뒤 견준다
+    prod, link, free = _prod_with_links(tmp_path)
+    base = f"{FREE_SERVER} --config {free}/s.toml --service-file {free}/s.plist"
+    command = f"{base} {flags.format(link=link, free=free)}"
+    verdict = judge(command, environ=TEST_XDG, prod=prod)
+    assert verdict is not None and verdict.decision == "deny", flags
+
+
+def test_tr20_a_symlink_to_a_free_folder_passes(tmp_path):
+    prod, _link, free = _prod_with_links(tmp_path)
+    command = (
+        f"{FREE_SERVER} --config {free}/s.toml --service-file {free}/s.plist --data-dir {free}/d"
+    )
+    assert judge(command, environ=TEST_XDG, prod=prod) is None
 
 
 # ── P3 3라운드 v2-1: 변이는 파이썬으로 읽히는 꼴이어야 한다 ──
