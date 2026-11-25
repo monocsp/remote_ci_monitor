@@ -431,18 +431,26 @@ setup 은 PR4 에서 그 목록에 넣는다.
 | 자동 점검과 recheck 의 대상 | `capabilities.py:872-917, 949-970` |
 | `/worker/spec` 의 프리셋 목록 | `capabilities.py:254-272` |
 | 원격 claim 의 WHERE. 네 갈래(지정 · `pool` · `capable` · `known`) 전체에 건다 | `store.py:3371-3422`(갈래 `:3379-3398`, WHERE `:3416-3420`) |
+| 새 잡의 ETA `/api/eta`(`rcm eta`). pool 프리셋은 지금 `placement_for` 를 거치지 않고 풀의 전체 레인으로 센다. 이 경로도 후보 함수의 결과로 레인을 고른다 | `server.py:3943-3956`, `core/queue.py:719-727` |
+| 머신 판정 문서 `/api/machines`(`machine_json`, `machines_summary` 의 `eligible_count`) — 웹 머신 탭과 `rcm check` 의 `placement` 행이 읽는다 | `capabilities.py:572-582, 646-648` |
+| 원격 claim 에 넘기는 값. SQL 은 Python 함수를 부를 수 없으므로 `Claimant` 에 후보 함수로 계산한 「이 워커가 집지 못할 프리셋」 목록을 싣고 네 갈래에 `preset NOT IN` 으로 건다 | `store.py:846-863`, `capabilities.py:429-452` |
 
 새 경로가 생겨도 이 후보 함수를 거치지 않으면 시험이 빨개져야 한다. 그래서 시험 하나가 여러 진입점(배치 · ETA ·
 `capacity` · 점검 · `/worker/spec` · claim)에 걸쳐 「원격 머신이 `local_only` 프리셋의 후보에 나타나는 곳이 없다」를
 확인한다. 경로마다 흩어져 있던 TO 행은 이 시험 하나로 묶었다(§7). `capacity` 는 PR3 이 넣으므로 그 진입점은 PR3 이 같은
 시험에 더한다. 변이 검사는 이 후보 함수에서 원격 제외를 지운다. 그러면 그 시험이 빨개져야 한다.
 
-`@local` 이 그 프리셋을 받을 수 없으면 후보가 빈다. `lanes = 0` 일 때, `local_accept_any = false` 인데 프리셋이
-`any-capable` 일 때, `@local` 판정이 ineligible 일 때, 프리셋이 기본 풀이 아닌 풀을 쓸 때가 그렇다. 후보가 빈 잡은
-지금의 「갈 곳 없음」 규칙(reason `no_capable_machine`, ETA null)을 그대로 따르고 새 분기를 만들지 않는다. 제출 때
-후보가 비면 409 와 사람용 문장으로 거절하고 이유 코드는 기존 꼴을 쓴다. `--machine` 으로 원격 워커를 지정하면 그 워커가
+후보 함수는 정적인 조건만 본다. `local_only`, 프리셋의 풀, 서버의 `lanes`, `local_accept_any` 다. 살아 있음과 도구 판정은
+보지 않는다(그것은 지금처럼 갈래 안에서 본다). 후보가 비는 경우는 넷이다. `lanes = 0` 일 때, `local_accept_any = false`
+인데 프리셋이 `any-capable` 일 때, 프리셋이 기본 풀이 아닌 풀을 쓸 때, 원격 워커를 지정했을 때다. 지금 코드에서
+`no_capable_machine` 을 내는 곳은 capable 갈래뿐이고(`capabilities.py:783-784`) 지정 · pool 갈래는 빈 결과를 reason 없이
+돌려줘 큐가 `worker_down` 으로 그린다(`core/model.py:619-622`). 그래서 **새 분기를 둔다**. 세 갈래 모두 후보와 갈래 조건이
+겹치는 머신이 없으면 `Placement.reason = no_capable_machine` 이고 ETA 는 null 이다. 판정 때문에 비는 경우(`@local` 이 도구
+부족이나 점검 실패로 ineligible)는 지금의 `_why_none`(`check_failed` · `check_pending`)을 그대로 둔다. 제출 409 는 위의
+정적인 넷과 capable 갈래의 `tool_missing` 에만 건다. `eligible_now` 가 비었다는 것만으로는 409 가 아니다(reload 직후 보고가
+낡은 동안에도 비기 때문이다). 409 는 사람용 문장과 기존 꼴의 이유 코드를 쓴다. `--machine` 으로 원격 워커를 지정하면 그 워커가
 후보에 없으므로 409 다. 기동이나 reload 때 이미 대기 중인 잡도 같은 후보 함수로 다시 계산된다. 그래서 원격 워커를 지정한
-잡, 기본 풀이 아닌 풀의 잡, 예약 잡이 모두 `no_capable_machine` 으로 보인다.
+잡, 기본 풀이 아닌 풀의 잡이 `no_capable_machine` 으로 보인다. 예약(`scheduled`) 잡은 큐 계산에 들지 않으므로(`core/model.py:35-45`) 시각이 되어 queued 가 된 뒤에 같은 규칙을 탄다.
 
 `local_only` 가 아닌 프리셋도 이 후보 함수의 영향을 받는다. 프리셋 P 의 `checks` 에 `local_only` 점검 프리셋 C 가 있으면
 원격 머신에서는 C 의 후보가 빈다. 그래서 P 는 그 원격 머신에서 「오지 않음(점검이 로컬 전용)」이고 check_pending 이
@@ -1331,3 +1339,30 @@ A-H1 · B-M2 로 정해졌다.
 | A-L4 | `[[tools]]` 의 이름은 프로브 argv[0] 과 맞춰도 된다 | §4.5, §11 246, TD9 |
 | A-L5 | 호환 문장에 `worker --check` 버전 행의 FAIL 을 적었다 | §4.7 |
 | A-L7 | `$RCM_CONFIG` 가 없는 파일이면 usage 오류로 종료 2 다 | §4.1, §11 239, TR38 |
+
+### 6판 diff 검증과 구현 PR 에 넘기는 것
+
+오너가 고른 대로 6판은 바뀐 diff 만 검증자 둘이 봤다. 검증자 B 는 HIGH 0(MED 4 · LOW 11 · unknown 2)이었고, 검증자 A 는
+HIGH 2(MED 5 · LOW 5 · unknown 1)였다. A 의 HIGH 둘은 이 판에서 고쳤다. 하나는 후보가 비는 경우의 새 분기를 명시한 것이고
+(§4.3), 다른 하나는 `/api/eta` 의 pool 경로와 `/api/machines`, claim 에 넘기는 값을 후보 함수 표에 더한 것이다(§4.3 표).
+오너는 「두 건 고치고 PR 올림」을 골랐다. 남은 MED · LOW 는 코드를 보면서 판정해야 하는 것이라 아래 PR 이 시험과 함께 다룬다.
+각 PR 의 격리 검증이 이 목록을 확인한다.
+
+| 지적 | 다룰 PR | 요지 |
+|---|---|---|
+| A-M1 | PR1 | `check_comes_by_itself` · `_flag_recheck` · `_check_rows` 도 후보 함수를 거친다. 로컬 전용 점검에 걸린 원격 프리셋의 이유 코드를 정한다 |
+| A-M3 | PR1 | TO15 를 진입점별로 파라미터화해 변이 하나에 진입점마다 빨개지는지 본다 |
+| A-M5 | PR1 | 409 조건은 위 §4.3 의 정적인 넷과 `tool_missing` 뿐이다 — 시험으로 잠근다 |
+| A-L2 · B-V14 | PR3 | `capacity` 의 「pool 프리셋은 판정을 보지 않는다」는 후보 함수 결과 안에서만이다 |
+| A-L3 | PR1 | 점검 잡 생성(`submit_internal_check`) 앞에서 후보를 확인한다(`recheck()` · `sweep_checks`) |
+| A-L4 · B-V5 | PR4 | guard 규칙 셋째는 `_effective_data_dir` 과 같은 순서로 경로를 풀고, 역할 2 · 4 와 「그 안」까지 본다 |
+| A-L5 | PR1 | 점검 프리셋의 「갈 곳 없음」을 그릴 자리와 값을 정한다 |
+| B-V1 | PR4 | systemd 유닛 이름 규칙 하나(표준 라벨은 `rcm-server` · `rcm-worker`, 다른 라벨은 `<label>.service`)를 setup · doctor · guard 에 같이 쓴다 |
+| B-V2 | PR2 | doctor 는 설치 자리를 먼저 보고, 후보를 역할의 라벨로 거른다 |
+| B-V3 | PR4 | `--reuse-data-dir` 이면 DB 헤더의 `user_version` 과 이 빌드의 `DB_VERSION` 을 비교해 경고한다 |
+| B-V4 | PR7 | 롤백 순서: 원격 워커를 pause 한 뒤 `local_only` 를 빼고 옛 판으로 기동을 확인한다 |
+| B-V6 · V7 · V8 · V9 · V10 | PR4 | `_this_rcm()` 이 PATH 로 떨어진 경우의 표시, 표준 라벨의 로그 이름 유지, `is-active` 확인과 덮지 않는 복사, 포트 사용 판정법, `--yes` 표의 빠진 플래그 |
+| B-V11 · V12 · V13 | PR2 | doctor `--server` 우선순위와 역할별 `--config`, PATH 만 값을 가려 찍기, `LANG=C` 범위 |
+| B-V15 · A-L1 | 이 판 | PLAN 문장을 맞췄다 |
+| B-U1 · U2 · A-U1 | PR2 · PR4 · PR1 | 서비스 관리자별 기본 변수 실측, `cp -n` 종료 코드, doctor 가 같은 후보 함수로 판정하는지 |
+
