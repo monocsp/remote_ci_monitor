@@ -1226,6 +1226,20 @@ def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
     assert "`ahead: null`" in changelog
 
 
+def test_x1_the_configuration_guide_says_which_remote_check_records_still_count():
+    """# X1 — 판정 표 밑의 `check_local_only` 문장이 코드대로다: `check_needed` 만이 아니라
+    `check_failed` 와 대기 중인 점검 잡의 `check_running` 도 바꾸고, 그 머신이 이미 집은 점검은
+    끝까지 돌아 센다(`capabilities.py` 의 `_verdict`)."""
+    from test_docs_m5 import CONFIGURATION, read
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "It also replaces `check_failed`, and `check_running` while the check's job is only "
+        "waiting: no machine can take that job, and a recheck there is refused. A check job "
+        "the remote worker has already claimed runs to its end and counts."
+    ) in flat
+
+
 def test_to10_to16_the_readme_exit_code_paragraph_names_the_local_only_409s():
     """README 두 판의 종료 코드 문단이 `rcm run` 의 2 를 고르는 409 를 다 적는다. `local_only`
     거절의 `no_capable_machine` · `tool_missing` 은 `cli.py` 의 `_REFUSED_CODES` 에 있어 2 다(P3

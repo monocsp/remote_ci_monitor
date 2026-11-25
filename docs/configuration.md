@@ -1522,7 +1522,9 @@ Two more codes come from `local_only` (below). `local_only` (ineligible) is show
 any row of this table, on a remote worker for a `local_only` preset. `check_local_only`
 (ineligible, with the check's name) replaces `check_needed` on a remote worker for a preset whose
 `checks` names a `local_only` check that has not passed there — that check can never run there, so
-the preset is not "pending".
+the preset is not "pending". It also replaces `check_failed`, and `check_running` while the
+check's job is only waiting: no machine can take that job, and a recheck there is refused. A check
+job the remote worker has already claimed runs to its end and counts.
 
 `env_passthrough` names the worker's environment lacks are shown but do not block: an empty value
 can be intended.
