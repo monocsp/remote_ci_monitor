@@ -45,6 +45,34 @@ YES_REQUIRED: dict[str, tuple[str, ...]] = {
     dc.ROLE_COORDINATOR_WORKER: ("bind",),
 }
 
+#: 역할마다 쓰는 플래그(§4.1 `--yes` 표의 꼭 줄 인자와 선택 인자, 그리고 모든 역할의 `--config` ·
+#: `--force`). 이 밖의 플래그는 그 역할에 쓰이지 않는다 — 조용히 버리지 않고 알린다(P3 v1-7)
+_COMMON_FLAGS = frozenset({"config", "force"})
+_SERVER_FLAGS = frozenset(
+    {"bind", "port", "data_dir", "label", "advertise", "service_file", "reuse_data_dir"}
+)
+ROLE_FLAGS: dict[str, frozenset[str]] = {
+    dc.ROLE_CLIENT: _COMMON_FLAGS | {"server", "by"},
+    dc.ROLE_WORKER: _COMMON_FLAGS | {"server", "pool", "lanes", "label", "service_file"},
+    dc.ROLE_COORDINATOR: _COMMON_FLAGS | _SERVER_FLAGS,
+    dc.ROLE_COORDINATOR_WORKER: _COMMON_FLAGS | _SERVER_FLAGS,
+}
+
+
+def unused_flags(role: str, given: Mapping[str, Any]) -> list[str]:
+    """준 플래그 가운데 그 역할이 쓰지 않는 것(`--lanes` 처럼 플래그 이름으로). 값이 None 이나
+    False 인 것은 주지 않은 것이다. `advertise` 는 False 도 준 것이다(`--no-advertise`)."""
+    out: list[str] = []
+    for name, value in given.items():
+        if name in ROLE_FLAGS.get(role, frozenset()) or value is None:
+            continue
+        if name == "advertise":
+            out.append("--advertise" if value else "--no-advertise")
+        elif value is not False:
+            out.append("--" + name.replace("_", "-"))
+    return out
+
+
 #: bind 의 종류
 TAILSCALE, LAN, ALL, LOOPBACK = "tailscale", "lan", "all", "loopback"
 ALL_ADDRESS = "0.0.0.0"
@@ -350,15 +378,19 @@ def install_commands(
     q = shlex.quote
     copy = f"cp -n {q(str(staged))} {q(str(installed))}"
     same = f"cmp -s {q(str(staged))} {q(str(installed))} && "
+    # 시작하지 않았으면 조용히 끝나지 않는다(P3 v1-9). `a && b || c` 라 시작이 실패해도 이 줄이
+    # 나온다 — 그래서 문장이 둘 다 말한다
+    said = (
+        ' || echo "not started: the installed file differs from the one setup wrote,'
+        ' or the start failed"'
+    )
     folders = f"mkdir -p {q(str(log.parent))} {q(str(installed.parent))}"
     if manager == LAUNCHD:
-        return [folders, copy, same + f"launchctl bootstrap gui/$(id -u) {q(str(installed))}"]
-    unit = installed.name
-    return [
-        folders,
-        copy,
-        same + f"systemctl --user daemon-reload && systemctl --user enable --now {q(unit)}",
-    ]
+        start = f"launchctl bootstrap gui/$(id -u) {q(str(installed))}"
+    else:
+        unit = installed.name
+        start = f"systemctl --user daemon-reload && systemctl --user enable --now {q(unit)}"
+    return [folders, copy, same + start + said]
 
 
 def token_commands(rcm: Path, config: Path) -> list[str]:

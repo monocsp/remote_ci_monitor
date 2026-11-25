@@ -28,11 +28,13 @@ import argparse
 import errno
 import os
 import plistlib
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tarfile
+import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -403,6 +405,8 @@ class Plan:
     rcm: Path | None = None
     warnings: list[str] = field(default_factory=list)
     tokens: list[str] = field(default_factory=list)
+    #: 쓰다 멈춘 뒤 되돌리지 못한 파일
+    unrestored: list[Path] = field(default_factory=list)
 
 
 def _manager(platform: str) -> str | None:
@@ -425,6 +429,12 @@ def _url(raw: str) -> str:
         raise SetupUsage("--server must be a URL starting with http:// or https://")
     if any(c in '"\\' or c.isspace() for c in url):
         raise SetupUsage("--server must not contain quotes, backslashes or whitespace")
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        host = None
+    if not host:  # `http://` · `http:///x` · `http://:8787` — 갈 곳이 없다(P3 v2-12)
+        raise SetupUsage(f"--server must name the coordinator's host (got {url!r})")
     return url
 
 
@@ -462,6 +472,22 @@ def _check_text(args: argparse.Namespace) -> None:
             ) from None
 
 
+#: 역할에 따라 쓰이지 않을 수 있는 플래그 — `core.unused_flags` 가 본다
+_FLAG_NAMES = (
+    "server",
+    "by",
+    "pool",
+    "lanes",
+    "label",
+    "service_file",
+    "port",
+    "data_dir",
+    "advertise",
+    "bind",
+    "reuse_data_dir",
+)
+
+
 def _plan(args: argparse.Namespace, world: World) -> Plan:
     from remote_ci_monitor.config import user_config_dir
 
@@ -487,12 +513,17 @@ def _plan(args: argparse.Namespace, world: World) -> Plan:
         raise SetupUsage(problem)
     config_dir = user_config_dir().absolute()
     if role == dc.ROLE_CLIENT:
-        return _client(args, ask if asking else None, config_dir)
-    if role == dc.ROLE_WORKER:
+        plan = _client(args, ask if asking else None, config_dir)
+    elif role == dc.ROLE_WORKER:
         plan = _worker(args, ask if asking else None, config_dir)
     else:
         plan = _server(args, ask if asking else None, world, role, config_dir, roles_here)
-    _service(args, ask if asking else None, world, plan)
+    if role != dc.ROLE_CLIENT:
+        _service(args, ask if asking else None, world, plan)
+    given = {name: getattr(args, name, None) for name in _FLAG_NAMES}
+    unused = core.unused_flags(role, given)
+    if unused:
+        plan.warnings.insert(0, f"{' '.join(unused)}: not used by --role {role} (ignored)")
     return plan
 
 
@@ -638,6 +669,11 @@ def _server(
             f"port {port} is in use on this machine — the server does not start while "
             "something else holds it"
         )
+    elif held is None:  # 모름은 모름이라고 쓴다(P3 v1-5)
+        warnings.append(
+            f"could not tell whether port {port} is free on {bind} — check it before you start "
+            "the service"
+        )
     warnings.extend(core.bind_warnings(kind))
     if role == dc.ROLE_COORDINATOR_WORKER and dc.ROLE_WORKER in roles_here:
         warnings.append(
@@ -680,7 +716,7 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
         plan.warnings.append(
             f"no launchd or systemd on {world.platform} — no service file; start "
             f"`rcm {'serve' if plan.role in core.SERVER_ROLES else 'worker'} --config "
-            f"{plan.config}` yourself"
+            f"{shlex.quote(str(plan.config))}` yourself"
         )
         return
     home = Path.home()
@@ -719,10 +755,16 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
     plan.files.append(Planned(staged, data, 0o644, "service"))
     plan.manager, plan.service, plan.rcm, plan.log = manager, staged, rcm, log
     plan.installed = core.install_path(label, manager, home)
-    if world.service_loaded(manager, label):
+    loaded = world.service_loaded(manager, label)
+    if loaded:
         plan.warnings.append(
             f"a service labelled {label} is already loaded — setup leaves it alone; the copy "
             "below does not replace it (pass --label to set up another one)"
+        )
+    elif loaded is None:  # 서비스 관리자가 답하지 않았다(P3 v1-5)
+        plan.warnings.append(
+            f"could not tell whether a service labelled {label} is already loaded — "
+            f"{'launchctl' if manager == core.LAUNCHD else 'systemctl'} did not answer"
         )
 
 
@@ -752,7 +794,8 @@ def _write(plan: Plan) -> None:
             cli.write_private(current.path, current.data, current.mode)
             done.append((current, old, mode))
     except BaseException as e:
-        # Ctrl-C 도 되돌린다 — 반쪽 설정을 남기지 않는다
+        # Ctrl-C 도 되돌린다 — 반쪽 설정을 남기지 않는다. 되돌리지 못한 파일은 삼키지 않고
+        # 이름을 댄다(P3 v1-6)
         for written, old, mode in reversed(done):
             try:
                 if old is None:
@@ -760,11 +803,18 @@ def _write(plan: Plan) -> None:
                 else:
                     cli.write_private(written.path, old, mode)
             except OSError:
-                pass
+                plan.unrestored.append(written.path)
         if not isinstance(e, OSError):
             raise
         where = current.path if current is not None else "?"
-        raise SetupFailed(f"cannot write {where}: {e.strerror or e} — nothing was written") from e
+        raise SetupFailed(f"cannot write {where}: {e.strerror or e} — {_left(plan)}") from e
+
+
+def _left(plan: Plan) -> str:
+    """되돌린 뒤 디스크에 남은 것."""
+    if not plan.unrestored:
+        return "nothing was written"
+    return "could not restore " + ", ".join(str(p) for p in plan.unrestored)
 
 
 # ── 마지막: 서버 없이 도는 진단 ──────────────────────────────────────────────
@@ -888,8 +938,10 @@ def _say(world: World, line: str) -> None:
 
 def _after(plan: Plan | None, written: bool) -> str:
     """경계에서 멈췄을 때 디스크에 남은 것."""
-    if not written or plan is None:
+    if plan is None:
         return "nothing was written"
+    if not written:
+        return _left(plan)
     return "these files were written: " + ", ".join(str(f.path) for f in plan.files)
 
 
