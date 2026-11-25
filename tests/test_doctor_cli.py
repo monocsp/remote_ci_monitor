@@ -1210,3 +1210,128 @@ def test_e3_the_local_lane_rows_use_the_coordinators_tools_hints(
     lint = row(doc, "lint")
     assert lint["missing"][0]["install"] == "install td-lack from the docs", lint
     assert lint["missing"][0]["docs"] == "https://example.invalid/td-lack", lint
+
+
+# ── 호스트 사실의 서버 저장과 노출 (TD21 · TD42 · TD31 · TD44 · TD19) ─────────
+
+HOST = {
+    "os": "linux",
+    "os_release": "ubuntu 24.04",
+    "os_like": "debian",
+    "arch": "aarch64",
+    "rosetta": None,
+    "container": True,
+    "root": True,
+    "package_manager": "apt-get",
+    "python": "3.12.3",
+}
+
+
+def m5n(tmp_path: Path, **kw: Any):
+    from test_server_m5n import M5nServer
+
+    return M5nServer(tmp_path, **kw)
+
+
+def machine(srv: Any, worker: str, token: str | None = "alice") -> dict[str, Any]:
+    status, doc = srv.req("GET", "/api/machines", token=token)
+    assert status == 200, doc
+    return {m["id"]: m for m in doc["machines"]}[worker]
+
+
+def test_td21_the_workers_registration_carries_host_facts_into_rcm_machines(
+    tmp_path, monkeypatch, capsys
+):
+    """e2e: 진짜 `RemoteWorker.register` → 진짜 서버 → `/api/machines` → `rcm machines`. 키 집합을
+    손으로 맞춘 본문이 아니라 생산자가 실제로 보낸 것을 소비자가 읽는다."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.client import WorkerClient
+    from remote_ci_monitor.config import WorkerConfig
+
+    srv = m5n(tmp_path)
+    try:
+        url = f"http://127.0.0.1:{srv.port}"
+        cfg = WorkerConfig(server=url, token=srv.tokens["build-02"], pool="mac2", lanes=1)
+        w = rw.RemoteWorker(cfg, client=WorkerClient(url, cfg.token), log=lambda _m: None)
+        monkeypatch.setattr(doctor.hostsample, "host_facts", lambda **_kw: dict(HOST, machine="x"))
+        w.register()
+        host = machine(srv, "build-02").get("host")
+        assert host == HOST, host  # 허용 목록 밖의 키(machine)는 서버가 버린다
+        monkeypatch.setenv("RCM_SERVER", url)
+        monkeypatch.setenv("RCM_TOKEN", srv.tokens["alice"])
+        code = cli.main(["machines", "--machine", "build-02"])
+        out = capsys.readouterr().out
+        assert code == 0, out
+        line = next((ln for ln in out.splitlines() if ln.startswith("host ")), "")
+        assert "ubuntu 24.04" in line and "aarch64" in line and "apt-get" in line, out
+        assert "container" in line and "root" in line and "Python 3.12.3" in line, line
+    finally:
+        srv.close()
+
+
+def test_td42_after_a_restart_host_facts_come_back_with_the_next_capability_report(tmp_path):
+    srv = m5n(tmp_path)
+    tokens = srv.tokens
+    try:
+        status, body = srv.register("build-02", pool="mac2")
+        assert status == 200, body
+        # 등록 본문의 host — 시험 도우미는 옛 워커처럼 host 를 안 싣는다. 진짜 본문을 보낸다
+        reg = {"pool": "mac2", "lanes": 1, "host_name": "b2", "version": __version__, "host": HOST}
+        status, body = srv.req("POST", "/worker/register", token="build-02", json_body=reg)
+        assert status == 200, body
+        assert machine(srv, "build-02").get("host") == HOST
+    finally:
+        srv.close()
+    srv = m5n(tmp_path, tokens=tokens)  # 같은 data_dir — 메모리의 호스트 사실은 사라진다
+    try:
+        assert machine(srv, "build-02").get("host") is None  # 받기 전에는 모른다(—)
+        status, body = srv.report("build-02", srv.app.generation, extra={"host": HOST})
+        assert status == 200, body
+        assert machine(srv, "build-02").get("host") == HOST
+    finally:
+        srv.close()
+
+
+def test_td31_anonymous_machines_reads_carry_no_host_facts(tmp_path):
+    srv = m5n(tmp_path)
+    try:
+        srv.reported("build-02", pool="mac2", extra={"host": HOST})
+        assert machine(srv, "build-02").get("host") == HOST  # 토큰 있는 응답에는 있다
+        anon = machine(srv, "build-02", token=None)  # read_auth = none — 토큰 없이 읽힌다
+        assert "host" not in anon, anon
+    finally:
+        srv.close()
+
+
+def test_td44_with_basic_read_auth_host_facts_need_a_token(tmp_path):
+    import base64
+
+    srv = m5n(tmp_path, extra='read_auth = "basic"')
+    try:
+        srv.reported("build-02", pool="mac2", extra={"host": HOST})
+        assert srv.req("GET", "/api/machines")[0] == 401
+        assert machine(srv, "build-02").get("host") == HOST  # Bearer
+        basic = base64.b64encode(f"alice-laptop:{srv.tokens['alice']}".encode()).decode()
+        status, doc = srv.req("GET", "/api/machines", headers={"Authorization": f"Basic {basic}"})
+        assert status == 200, doc
+        got = {m["id"]: m for m in doc["machines"]}["build-02"]
+        assert got.get("host") == HOST, got
+    finally:
+        srv.close()
+
+
+def test_td19_tools_hints_are_not_in_status_or_machines(tmp_path):
+    """`[[tools]]` 는 `/worker/spec`(워커 토큰)으로만 나간다. `/api/status` · `/api/machines` 는
+    토큰 없이 읽힐 수 있어 싣지 않는다 — 처음부터 초록인 성질을 잠근다."""
+    hint = '\n[[tools]]\nname = "rcm-m5n-faketool"\n[tools.install]\nany = "td19-install-text"\n'
+    srv = m5n(tmp_path, extra=hint)
+    try:
+        srv.reported("build-02", pool="mac2")
+        for path in ("/api/status", "/api/machines"):
+            for token in (None, "alice"):
+                status, doc = srv.req("GET", path, token=token)
+                assert status == 200, doc
+                text = json.dumps(doc)
+                assert "td19-install-text" not in text and '"tools"' not in text, path
+    finally:
+        srv.close()

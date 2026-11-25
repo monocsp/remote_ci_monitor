@@ -2657,6 +2657,29 @@ def _table(rows: list[list[str]]) -> list[str]:
     ]
 
 
+def _host_facts_text(host: Any) -> str:
+    """워커가 보낸 호스트 사실 한 줄(M5t-a §4.5 · TD21). 받지 못했거나 토큰 없는 응답이면 —."""
+    if not isinstance(host, dict):
+        return DASH
+
+    def text(key: str) -> str:
+        value = host.get(key)
+        return follow.clean(value) if isinstance(value, str) and value else ""
+
+    release = text("os_release") or text("os")
+    if text("os_like"):
+        release += f" (like {text('os_like')})"
+    bits = [
+        release,
+        text("arch") + (" (Rosetta)" if host.get("rosetta") else ""),
+        "container" if host.get("container") else "",
+        "root" if host.get("root") else "",
+        text("package_manager"),
+        f"Python {text('python')}" if text("python") else "",
+    ]
+    return " · ".join(b for b in bits if b) or DASH
+
+
 def _machine_detail(m: dict[str, Any]) -> list[str]:
     """`rcm machines --machine ID` — 판정 전부 · 프로브 값 전부(앞 값과 함께) · 점검."""
     out = [
@@ -2664,6 +2687,7 @@ def _machine_detail(m: dict[str, Any]) -> list[str]:
         f"{m.get('pool') or DASH} · {m.get('host_label') or DASH}"
         f"{'' if m.get('alive', True) else ' · down'})"
     ]
+    out.append(f"host     {_host_facts_text(m.get('host'))}")
     presets = m.get("presets") if isinstance(m.get("presets"), dict) else {}
     out.append("presets")
     rows = [["preset", "state", "code", "detail"]]

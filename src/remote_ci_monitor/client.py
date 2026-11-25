@@ -93,9 +93,22 @@ class WorkerClient:
         return json.loads(raw)
 
     def register(
-        self, *, pool: str, lanes: int, host_name: str | None, version: str
+        self,
+        *,
+        pool: str,
+        lanes: int,
+        host_name: str | None,
+        version: str,
+        host: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body = {"pool": pool, "lanes": lanes, "host_name": host_name, "version": version}
+        body: dict[str, Any] = {
+            "pool": pool,
+            "lanes": lanes,
+            "host_name": host_name,
+            "version": version,
+        }
+        if host is not None:
+            body["host"] = host  # 호스트 사실(M5t-a §4.5) — 더하기만, 옛 서버는 무시한다
         return self._post("/worker/register", body)
 
     def spec(self) -> dict[str, Any]:

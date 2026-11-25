@@ -180,6 +180,12 @@ treats a file directly in `/usr/bin/` that links `libxcselect` as such a shim an
 in `rcm doctor`, in the job's `requires` check, in the server's tool rows and in worker probes
 alike. `/usr/bin/java` and the other Java stubs are not detected this way.
 
+A worker sends the same host facts (OS version, real arch and Rosetta, container, root, package
+manager, Python) when it registers and with each capability report. The server keeps them in
+memory only, never in the database, so after a server restart they show `—` until the next
+report. `rcm machines --machine ID` prints them on its `host` line. `GET /api/machines` carries
+them only to a request with a token, even when `read_auth = "none"` lets anyone read the rest.
+
 `rcm worker --check` keeps its rows and adds two: `version` (ok when it matches the server; a
 warning when registering will follow the server's version; FAIL when this install cannot follow,
 such as an editable or pinned one) and a last line with the number of missing tools that points

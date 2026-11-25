@@ -5820,7 +5820,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self._only(method, "GET")
             self._read_only_ok()
             self._no_worker_token()
-            self._send_json(200, self.app.machines_doc())
+            # 새 호스트 사실은 토큰이 있는 응답에만(Bearer 나 basic 의 자격, M5t-a TD31 · TD44)
+            authenticated = self._read_token() is not None
+            self._send_json(200, self.app.machines_doc(authenticated=authenticated))
             return
         m = _RECHECK_RE.match(path)
         if m:

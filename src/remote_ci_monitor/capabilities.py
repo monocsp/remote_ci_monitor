@@ -109,6 +109,40 @@ class _MachineView:
     lanes: int | None = None  # 로컬은 `[server] lanes`, 원격은 등록한 레인 수(`rcm machines` 의 칸)
 
 
+#: 워커가 등록 · 능력 보고 본문의 `host` 로 보내는 호스트 사실 — 이 키만 받는다(M5t-a §4.5). 서버는
+#: 메모리에만 두고 DB 에 넣지 않는다. 토큰 있는 `/api/machines` 응답에만 싣는다(TD31 · TD44)
+HOST_FACT_KEYS = (
+    "os",
+    "os_release",
+    "os_like",
+    "arch",
+    "rosetta",
+    "container",
+    "root",
+    "package_manager",
+    "python",
+)
+HOST_FACT_MAX = 64
+_HOST_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def clean_host_facts(raw: Any) -> dict[str, Any] | None:
+    """워커가 보낸 `host` → 허용 키만, 문자열은 제어문자를 지우고 64자로. 참 · 거짓 · null 은
+    그대로다. 객체가 아니면 None(모름). 값은 `rcm machines` 의 터미널과 웹에 그대로 나간다."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in HOST_FACT_KEYS:
+        value = raw.get(key)
+        if isinstance(value, bool) or value is None:
+            out[key] = value
+        elif isinstance(value, str):
+            out[key] = _HOST_CONTROL_RE.sub("", value)[:HOST_FACT_MAX] or None
+        else:
+            out[key] = None
+    return out
+
+
 def _bare_view(worker: str, pool: str = DEFAULT_POOL) -> _MachineView:
     """이름만 아는 머신 — 후보 함수에 넘길 자리. 후보 함수는 종류(로컬 · 원격)와 id 만 본다."""
     kind = "local" if worker == LOCAL else "remote"
@@ -256,6 +290,9 @@ class CapabilitiesMixin:
         # 읽는다 — 상태 요청마다 워커 수만큼 질의하지 않게)
         self._known_hosts: dict[str, str] | None = None
         self._check_errors: dict[tuple[str, str], str] = {}
+        # 워커 → 등록 · 능력 보고가 보낸 호스트 사실(M5t-a §4.5). 메모리에만 — 재시작하면 다음
+        # 보고가 다시 채운다(TD42)
+        self._host_facts: dict[str, dict[str, Any]] = {}
         self._cap_thread: threading.Thread | None = None
         # 로컬 측정은 한 번에 하나 — 기동 · reload(뒤에서) · 주기가 겹쳐도 앞 지문을 같이 읽지 않게
         self._measure_lock = threading.Lock()
@@ -356,6 +393,21 @@ class CapabilitiesMixin:
             display_name=self.local_display_name(),
         )
 
+    def remember_host(self, worker: str, raw: Any, *, replace: bool = False) -> None:
+        """워커가 보낸 호스트 사실을 메모리에 둔다. `replace` 면(등록 = 새 프로세스) 안 보낸 것도
+        「모름」으로 바꾼다 — 옛 워커의 등록이 앞 프로세스의 사실을 물려받지 않게."""
+        facts = clean_host_facts(raw)
+        with self._cap_lock:
+            if facts is not None:
+                self._host_facts[worker] = facts
+            elif replace:
+                self._host_facts.pop(worker, None)
+
+    def host_facts_of(self, worker: str) -> dict[str, Any] | None:
+        with self._cap_lock:
+            facts = self._host_facts.get(worker)
+        return dict(facts) if facts is not None else None
+
     def receive_capabilities(self, worker: str, host_name: str | None, body: Any) -> None:
         """`POST /worker/capabilities` — 거절은 `CapabilityError`."""
         preset_names = {p.name for p in self.config.presets}
@@ -373,6 +425,8 @@ class CapabilitiesMixin:
             ),
             display_name=host_name or worker,
         )
+        if isinstance(body, dict) and "host" in body:
+            self.remember_host(worker, body["host"])
 
     def _accept_report(self, worker: str, build: Any, *, display_name: str) -> None:
         row = self.store.get_machine(worker)
@@ -703,7 +757,11 @@ class CapabilitiesMixin:
             )
         return out
 
-    def machine_json(self, view: _MachineView, now: datetime) -> dict[str, Any]:
+    def machine_json(
+        self, view: _MachineView, now: datetime, *, authenticated: bool = False
+    ) -> dict[str, Any]:
+        """머신 하나. `authenticated`(토큰이 있는 요청)일 때만, 그리고 그 워커가 보낸 적이 있을
+        때만 `host` 를 싣는다 — 익명 읽기의 범위를 넓히지 않는다(TD31 · TD44)."""
         report = view.report
         row = view.row
         previous = probes_from_json(row.previous_json) if row else None
@@ -743,7 +801,7 @@ class CapabilitiesMixin:
             accept_any = bool(self.config.server.local_accept_any)
         else:
             accept_any = report.accept_any if report else (row.accept_any if row else True)
-        return {
+        doc: dict[str, Any] = {
             "id": view.id,
             "display_name": view.display_name,
             "kind": view.kind,
@@ -759,12 +817,19 @@ class CapabilitiesMixin:
             },
             "checks": self._check_rows(view, records),
         }
+        host = self.host_facts_of(view.id) if authenticated else None
+        if host is not None:
+            doc["host"] = host
+        return doc
 
-    def machines_doc(self) -> dict[str, Any]:
+    def machines_doc(self, *, authenticated: bool = False) -> dict[str, Any]:
         now = self.now_fn()
         return {
             "generation": self.generation,
-            "machines": [self.machine_json(v, now) for v in self.machine_views(now)],
+            "machines": [
+                self.machine_json(v, now, authenticated=authenticated)
+                for v in self.machine_views(now)
+            ],
         }
 
     def machines_summary(self, now: datetime) -> list[dict[str, Any]]:
