@@ -1645,8 +1645,12 @@ Nor is one submitted while `@local` has no report yet, or a stale one.
 **Adding the mark later.** After `rcm reload` or a restart that adds `local_only`, jobs already
 waiting are placed again: one pinned to a remote worker, or queued in another pool, shows
 `no capable machine` with no ETA. It is not failed — cancel it or move the mark back. A scheduled
-job follows the same rule once its time comes. An older server does not know the key and refuses
-to start, so upgrade every server that reads the preset first, `include` files included.
+job follows the same rule once its time comes. A job already running on a remote worker is not
+stopped: it finishes and reports its result as usual. Its retry (`[presets.retry]`) is a new
+attempt and follows the mark: one pinned to that worker waits with `no capable machine` and no
+ETA, one in the default pool goes to the server's lanes. An older server does not know the key
+and refuses to start, so upgrade every server that reads the preset first, `include` files
+included.
 
 **Checks.** A `local_only` check preset runs only on `@local`. On a remote worker, a preset that
 needs it shows `check_local_only`, the check's row in `rcm machines` shows `local_only` and asks

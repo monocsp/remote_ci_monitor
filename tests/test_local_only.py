@@ -1240,6 +1240,23 @@ def test_x1_the_configuration_guide_says_which_remote_check_records_still_count(
     ) in flat
 
 
+def test_e1_adding_the_mark_later_says_what_happens_to_a_running_remote_job():
+    """# E1 — 「Adding the mark later」 가 원격에서 돌던 잡과 그 재시도를 적는다(시험
+    `test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote` 의 두 사실)."""
+    from test_docs_m5 import CONFIGURATION, read
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "A job already running on a remote worker is not stopped: it finishes and reports its "
+        "result as usual."
+    ) in flat
+    assert (
+        "Its retry (`[presets.retry]`) is a new attempt and follows the mark: one pinned to that "
+        "worker waits with `no capable machine` and no ETA, one in the default pool goes to the "
+        "server's lanes."
+    ) in flat
+
+
 def test_to10_to16_the_readme_exit_code_paragraph_names_the_local_only_409s():
     """README 두 판의 종료 코드 문단이 `rcm run` 의 2 를 고르는 409 를 다 적는다. `local_only`
     거절의 `no_capable_machine` · `tool_missing` 은 `cli.py` 의 `_REFUSED_CODES` 에 있어 2 다(P3
