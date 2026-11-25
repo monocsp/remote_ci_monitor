@@ -156,3 +156,120 @@ def test_tr33_worker_and_client_roles_have_no_server_data_dir():
 def test_tr33_help_and_machines_without_a_production_install_are_free():
     assert judge("rcm setup --help") is None
     assert judge(f"{SERVER} --data-dir /home/op/.local/share/rcm", prod=guard.Production()) is None
+
+
+# ── P3 1라운드: 셸이 펼치는 값 · 반복한 옵션 · 운영 서비스 파일 자리 ──────────
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--data-dir $HOME/.local/share/rcm",
+        "--data-dir ${HOME}/.local/share/rcm",
+        "--data-dir=$HOME/.local/share/rcm/inner",
+        '--data-dir "$HOME/.local/share/rcm"',
+    ],
+)
+def test_tr33_a_data_dir_written_with_a_shell_variable_is_denied(flag):
+    # P3 v2-1: 셸이 `$HOME` 을 펼친 뒤 setup 이 받는다 — 훅도 펼쳐서 본다
+    verdict = judge(f"{SERVER} {flag} --label test.rcm.server", environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", flag
+    assert "data" in verdict.reason
+
+
+def test_tr33_pwd_is_the_working_folder_of_that_segment():
+    # P3 v2-1: `$PWD` 는 그 조각의 작업 폴더다(`cd` 뒤에는 그 폴더)
+    command = f"{SERVER} --data-dir $PWD/rcm --label test.rcm.server"
+    assert denied(command, environ=TEST_XDG, cwd=HOME / ".local" / "share")
+    assert denied(f"cd /home/op/.local/share && {command}", environ=TEST_XDG)
+    assert judge(command, environ=TEST_XDG, cwd=Path("/home/op/rcm-devtest")) is None
+
+
+def test_tr20_a_config_written_with_a_shell_variable_is_denied():
+    # P3 v2-1: `--config $HOME/...` 과 `XDG_CONFIG_HOME=$HOME/.config` 은 운영 설정 폴더다
+    assert denied(
+        f"{WORKER} --label test.rcm.worker --config $HOME/.config/rcm/worker.toml",
+        environ=TEST_XDG,
+    )
+    assert denied(
+        f"{WORKER} --label test.rcm.worker --config ${{HOME}}/.config/rcm/worker.toml",
+        environ=TEST_XDG,
+    )
+    assert denied(f"XDG_CONFIG_HOME=$HOME/.config {WORKER} --label test.rcm.worker")
+    assert denied(f"XDG_CONFIG_HOME=${{HOME}}/.config {WORKER} --label test.rcm.worker")
+    # 시험 자리를 가리키는 변수는 막지 않는다
+    assert (
+        judge(f"XDG_CONFIG_HOME=$HOME/rcm-devtest/config {WORKER} --label test.rcm.worker") is None
+    )
+
+
+def test_tr33_the_shell_expands_tilde_and_variables_with_its_own_home_not_the_prefix():
+    # P3 v2-1: `HOME=… rcm setup --data-dir ~/…` 의 `~` 와 `$HOME` 은 셸이 제 HOME 으로 펼친다 —
+    # 앞의 `HOME=` 은 명령에만 간다
+    prefix = "HOME=/home/op/rcm-devtest/home"
+    for value in ("~/.local/share/rcm", "$HOME/.local/share/rcm"):
+        command = f"{prefix} {SERVER} --data-dir {value} --label test.rcm.server"
+        assert denied(command, environ=TEST_XDG), value
+
+
+def test_tr20_a_label_written_with_a_shell_variable_is_denied():
+    # P3 v2-1: 라벨도 셸이 펼친 값이 setup 에 간다
+    environ = {**TEST_XDG, "PROD_LABEL": "com.remote-ci-monitor.server"}
+    command = f"{SERVER} --data-dir /tmp/d --label $PROD_LABEL"
+    verdict = judge(command, environ=environ)
+    assert verdict is not None and verdict.decision == "deny"
+    assert "label" in verdict.reason
+
+
+def test_tr33_a_repeated_option_is_read_as_argparse_reads_it():
+    # P3 v2-1 · v1-1: argparse 는 같은 옵션을 두 번 주면 마지막 것을 쓴다 — 훅은 모두 본다
+    command = (
+        f"{SERVER} --data-dir /tmp/d --data-dir /home/op/.local/share/rcm --label test.rcm.server"
+    )
+    assert denied(command, environ=TEST_XDG)
+    command = f"{SERVER} --data-dir /tmp/d --label test.rcm.server --label rcm-server"
+    assert denied(command, environ=TEST_XDG)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/home/op/Library/LaunchAgents/com.remote-ci-monitor.server.plist",
+        "~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist",
+        "$HOME/.config/systemd/user/rcm-worker.service",
+        "/home/op/.config/systemd/user/rcm-server.service.d/override.conf",
+        "/etc/systemd/system/rcm-server.service",
+        "/Library/LaunchDaemons/com.remote-ci-monitor.server.plist",
+    ],
+)
+def test_tr20_a_service_file_on_a_production_service_place_is_denied(target):
+    # P3 v1-2: `--service-file` 이 운영 서비스 파일 자리면 라벨이 달라도 운영 서비스를 덮는다
+    command = f"{SERVER} --data-dir /tmp/d --label test.rcm.server --service-file {target}"
+    verdict = judge(f"{command} --force service", environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", target
+    assert "service" in verdict.reason
+
+
+def test_tr20_a_service_file_of_its_own_is_free():
+    command = (
+        f"{SERVER} --data-dir /tmp/d --label test.rcm.server "
+        "--service-file /home/op/rcm-devtest/service/test.rcm.server.plist"
+    )
+    assert judge(command, environ=TEST_XDG) is None
+
+
+def test_tr20_every_production_service_unit_is_a_place_setup_may_not_write():
+    # P3 v1-2: 훅이 운영 venv 를 찾는 서비스 유닛(SERVICE_UNITS)은 모두 그 자리 안이다
+    for unit in guard.SERVICE_UNITS:
+        command = f"{SERVER} --data-dir /tmp/d --label test.rcm.server --service-file {unit}"
+        assert denied(command, environ=TEST_XDG), unit
+
+
+def test_tr20_guard_constants_match_the_setup_module():
+    # P3 v2-9: 훅은 패키지를 들여오지 않아 사본을 든다 — 사본이 core 와 같아야 한다
+    assert set(guard.SETUP_STANDARD_LABELS) == set(core.STANDARD_LABELS.values())
+    assert guard._STANDARD_UNITS == core._STANDARD_UNITS
+    for role, label in guard.SETUP_ROLE_LABELS.items():
+        assert core.default_label(role) == label, role
+    assert core.default_label("client") is None and "client" not in guard.SETUP_ROLE_LABELS
+    assert set(guard.SETUP_SERVER_ROLES) == set(core.SERVER_ROLES)

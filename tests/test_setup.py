@@ -763,3 +763,274 @@ def test_tr24_doctor_finds_the_installed_copy_of_a_custom_label_service(
         for manager in ("launchd", "systemd"):
             assert core.label_of_file(core.service_file_name(label, manager)) == (label, manager)
     assert core.label_of_file("notes.txt") is None
+
+
+# ── P3 1라운드 ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "abbreviated",
+    [["--conf", "x"], ["--data", "x"], ["--service", "x"], ["--lab", "x"], ["--for", "config"]]
+    + [["--reuse"]],
+)
+def test_tr20_setup_takes_no_abbreviated_option(cfg, tmp_path, abbreviated):
+    # P3 v1-1 · v2-2: 줄인 옵션은 guard 가 보는 이름과 다르다 — setup 이 받지 않는다(종료 2)
+    from remote_ci_monitor import cli
+
+    full = {"--conf": "--config", "--data": "--data-dir", "--service": "--service-file"}
+    full |= {"--lab": "--label", "--for": "--force", "--reuse": "--reuse-data-dir"}
+    whole = [full[abbreviated[0]], *abbreviated[1:]]
+    # 대조: 온전한 이름은 받는다
+    setup.build_parser().parse_args(["--role", "coordinator", *whole])
+    with pytest.raises(SystemExit) as raised:
+        setup.build_parser().parse_args(["--role", "coordinator", *abbreviated])
+    assert raised.value.code == 2
+    with pytest.raises(SystemExit) as raised:
+        cli.build_parser().parse_args(["setup", "--role", "coordinator", *abbreviated])
+    assert raised.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("platform", "where"),
+    [
+        ("darwin", "Library/LaunchAgents/test.rcm.server.plist"),
+        ("linux", ".config/systemd/user/test.rcm.server.service"),
+        ("linux", ".config/systemd/user/rcm-server.service.d/override.conf"),
+        ("darwin", "/Library/LaunchDaemons/test.rcm.server.plist"),
+        ("linux", "/etc/systemd/system/test.rcm.server.service"),
+    ],
+)
+def test_tr24_setup_refuses_a_service_file_on_an_install_place(
+    cfg, home, tmp_path, platform, where
+):
+    # P3 v1-2: 서비스 파일은 설치 자리에 쓰지 않는다(§4.1) — `--service-file` 로 가리켜도 같다
+    target = Path(where) if where.startswith("/") else home / where
+    fake = Fake(platform=platform)
+    argv = coordinator_args(tmp_path / "data", "--service-file", str(target), "--force")
+    assert go(fake, *argv) == 2, fake.text
+    assert "install" in fake.err.getvalue()
+    assert not target.exists()
+    assert not (cfg / "server.toml").exists()
+
+
+@pytest.mark.parametrize("odd", ["²", "١", "٣"])
+def test_tr22_a_digit_that_is_not_ascii_is_asked_again(cfg, home, tmp_path, odd):
+    # P3 v2-3: `"²".isdigit()` 은 참인데 `int("²")` 는 ValueError 다 — 다시 묻는다
+    answers = [odd, "coordinator-worker", odd, "1", odd, "", "", "", ""]
+    fake = Fake(answers=answers)
+    assert go(fake) == 0, fake.text
+    assert "Traceback" not in fake.text
+    assert read_toml(cfg / "server.toml")["server"]["port"] == 8787
+    fake = Fake(answers=["http://10.0.0.5:18790", "p1", odd, "2", ""])
+    assert go(fake, "--role", "worker", "--force") == 0, fake.text
+    assert read_toml(cfg / "worker.toml")["lanes"] == 2
+
+
+def test_tr28_an_unexpected_error_is_one_line_and_exit_one(cfg, tmp_path):
+    # P3 v2-3: 예상 못 한 예외는 traceback 이 아니라 한 줄 · 종료 1 이다
+    def broken():
+        raise RuntimeError("interfaces\nsecond line")
+
+    fake = Fake(answers=["", "", "", ""], addresses=broken)
+    assert go(fake, "--role", "coordinator-worker") == 1
+    err = fake.err.getvalue()
+    assert "RuntimeError" in err and "interfaces" in err
+    assert "second line" not in err
+    assert not (cfg / "server.toml").exists()
+
+
+def test_tr28_a_data_dir_that_cannot_be_read_is_exit_one(cfg, tmp_path):
+    # P3 v1-10: `rcm.sqlite3` 이 있는지 볼 수 없는 data_dir — PermissionError 는 종료 1 한 줄이다
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        fake = Fake()
+        assert go(fake, *coordinator_args(locked / "data")) == 1
+    finally:
+        locked.chmod(0o755)
+    assert str(locked / "data") in fake.err.getvalue()
+    assert not (cfg / "server.toml").exists()
+
+
+def test_tr28_a_path_that_is_not_utf8_is_a_usage_error(cfg, tmp_path):
+    # P3 v2-10: UTF-8 이 아닌 argv(`os.fsdecode` 의 surrogate)는 설정 파일에 쓸 수 없다 — 종료 2
+    odd = os.fsdecode(str(tmp_path).encode() + b"/d\xff")
+    fake = Fake()
+    assert go(fake, *coordinator_args(Path(odd))) == 2
+    assert "UTF-8" in fake.err.getvalue()
+    assert not (cfg / "server.toml").exists()
+
+
+def test_tr28_ctrl_c_while_reporting_is_130_without_a_traceback(cfg, tmp_path):
+    # P3 v2-11 b: 파일을 쓴 뒤 보고 중의 Ctrl-C — 130, 쓴 파일이 있다고 말한다
+    def interrupted():
+        raise KeyboardInterrupt
+
+    fake = Fake(host_facts=interrupted)
+    try:
+        code: int | str = go(fake, *coordinator_args(tmp_path / "data"))
+    except KeyboardInterrupt:
+        code = "KeyboardInterrupt escaped setup.run"  # 빨간 시험이 pytest 를 멈추지 않게
+    assert code == 130
+    err = fake.err.getvalue()
+    assert "interrupted" in err and "nothing was written" not in err
+    assert (cfg / "server.toml").exists()
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "with space/home",
+        "pct%h/home",
+        "dollar$HOME/home",
+        'quote"and\\back/home',
+    ],
+)
+def test_tr11_a_systemd_unit_keeps_odd_paths_whole(tmp_path, where):
+    # P3 v2-4 · v1-8: systemd 유닛의 경로는 공백 · `%` · `$` · 따옴표를 systemd 규칙대로 쓴다
+    from remote_ci_monitor import cli, doctor
+
+    home = tmp_path / where
+    rcm = home / "venv dir" / "bin" / "rcm"
+    config = home / ".config" / "rcm" / "server.toml"
+    log = home / ".local" / "state" / "rcm" / "x.log"
+    for text in (
+        core.server_unit(
+            rcm=rcm, config=config, home=home, label="t.s", log=log, path="/usr/bin:/bin"
+        ),
+        cli.worker_unit(rcm, config, home),
+    ):
+        unit = tmp_path / "x.service"
+        unit.write_bytes(text)
+        sf = doctor.read_service_file(unit, user_home=str(home))
+        assert sf.argv[0] == str(rcm) and sf.argv[2:] == ["--config", str(config)], text.decode()
+        assert sf.env.get("HOME", str(home)) == str(home)
+        assert not sf.unfollowed, sf.unfollowed
+        line = next(x for x in text.decode().splitlines() if x.startswith("WorkingDirectory="))
+        assert line.removeprefix("WorkingDirectory=").replace("%%", "%") == str(home)
+
+
+def test_tr11_a_line_break_in_a_unit_path_is_a_usage_error(cfg, home, tmp_path):
+    # P3 v2-4: 줄바꿈 · 제어 문자는 유닛에 쓸 수 없다 — 쓰지 않고 종료 2
+    fake = Fake(platform="linux")
+    config = tmp_path / "odd\nname" / "server.toml"
+    argv = coordinator_args(tmp_path / "data", "--config", str(config))
+    assert go(fake, *argv) == 2, fake.text
+    assert "systemd" in fake.err.getvalue()
+    assert not config.exists()
+    from remote_ci_monitor import cli
+
+    with pytest.raises(ValueError):
+        cli.worker_unit(RCM, config, home)
+
+
+def test_tr10_the_interactive_run_never_offers_a_read_auth_mode(cfg, tmp_path):
+    # P3 TR10 WEAK: 실제 대화형 stderr 에 없는 읽기 인증 모드(`read_auth`)가 나오지 않는다(Q14)
+    for answer in ("1", "2"):
+        fake = Fake(answers=[answer, "", "", "", ""])
+        assert go(fake, "--role", "coordinator-worker", "--force") == 0, fake.text
+        err = fake.err.getvalue()
+        assert "anyone on this network can read" in err
+        assert "read_auth" not in err and "auth =" not in err
+
+
+def test_tr11_the_written_service_file_path_does_not_start_with_the_venv(cfg, home, tmp_path):
+    # P3 TR11 WEAK: setup.run 이 실제로 쓴 파일 — rcm 이 venv bin 에 있어도 PATH 맨 앞은 아니다
+    venv_rcm = tmp_path / "venv" / "bin" / "rcm"
+    for platform in ("darwin", "linux"):
+        fake = Fake(platform=platform, rcm=(venv_rcm, False))
+        assert go(fake, *coordinator_args(tmp_path / "data", "--force")) == 0, fake.text
+        if platform == "darwin":
+            doc = plistlib.loads((cfg / "service" / "test.rcm.server.plist").read_bytes())
+            path = doc["EnvironmentVariables"]["PATH"]
+        else:
+            text = (cfg / "service" / "test.rcm.server.service").read_text()
+            line = next(x for x in text.splitlines() if x.startswith("Environment=PATH="))
+            path = line.removeprefix("Environment=PATH=")
+        entries = path.split(":")
+        assert entries[0] != str(venv_rcm.parent), path
+        assert str(venv_rcm.parent) not in entries
+        assert "/usr/sbin" in entries
+
+
+def test_tr22_an_unknown_answer_from_the_system_is_said(cfg, tmp_path):
+    # P3 v1-5: 포트 · 서비스 조회가 모른다(None)면 그렇다고 한 줄 쓴다
+    fake = Fake(port_in_use=lambda host, port: None, loaded=None)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    err = fake.err.getvalue()
+    assert "could not tell whether port 18790" in err
+    assert "could not tell whether a service labelled test.rcm.server" in err
+
+
+def test_tr7_a_rollback_that_fails_is_named(cfg, tmp_path, monkeypatch):
+    # P3 v1-6: 되돌리기가 실패하면 삼키지 않고 「could not restore <path>」라고 쓴다
+    from remote_ci_monitor import cli
+
+    cfg.mkdir(parents=True)
+    (cfg / "server.toml").write_text("old = 1\n", encoding="utf-8")
+    real = cli.write_private
+    calls: list[Path] = []
+
+    def flaky(path, data, mode):
+        calls.append(path)
+        if len(calls) >= 2:  # 서비스 파일에서, 그리고 되돌리기에서 실패한다
+            raise OSError(13, "Permission denied")
+        return real(path, data, mode)
+
+    monkeypatch.setattr(cli, "write_private", flaky)
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data", "--force")) == 1
+    err = fake.err.getvalue()
+    assert f"could not restore {cfg / 'server.toml'}" in err
+    assert "nothing was written" not in err
+
+
+@pytest.mark.parametrize(
+    ("argv", "flags"),
+    [
+        (["--lanes", "3"], ["--lanes"]),
+        (["--pool", "p", "--server", "http://10.0.0.5:1"], ["--pool", "--server"]),
+    ],
+)
+def test_tr22_a_flag_the_role_does_not_use_is_a_warning(cfg, tmp_path, argv, flags):
+    # P3 v1-7: 역할이 쓰지 않는 플래그는 조용히 버리지 않는다
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data", *argv, role="coordinator")) == 0
+    warned = [x for x in fake.err.getvalue().splitlines() if "not used by --role" in x]
+    assert len(warned) == 1, fake.err.getvalue()
+    assert all(flag in warned[0] for flag in flags)
+    fake = Fake()
+    argv = ["--role", "client", "--server", "http://10.0.0.5:1", "--advertise", "--yes"]
+    assert go(fake, *argv) == 0
+    err = fake.err.getvalue()
+    assert "--advertise" in err and "not used by --role client" in err
+
+
+def test_tr36_the_start_line_says_when_it_did_not_start(tmp_path):
+    # P3 v1-9: 설치 자리의 파일이 다르면 조용히 끝나지 않고 그렇다고 말한다
+    staged, installed = tmp_path / "s.plist", tmp_path / "LaunchAgents" / "s.plist"
+    for manager in ("launchd", "systemd"):
+        lines = core.install_commands(
+            manager, staged=staged, installed=installed, label="s", log=tmp_path / "s.log"
+        )
+        start = lines[-1]
+        assert start.startswith(f"cmp -s {staged} {installed} && ")
+        assert '|| echo "' in start and "not started" in start
+
+
+def test_tr28_the_no_manager_warning_quotes_the_config_path(cfg, tmp_path):
+    # P3 v2-12: 경고 속 명령도 붙여 넣을 수 있게 따옴표를 친다
+    config = tmp_path / "with space" / "server.toml"
+    fake = Fake(platform="freebsd")
+    assert go(fake, *coordinator_args(tmp_path / "data", "--config", str(config))) == 0
+    assert f"rcm serve --config '{config}'" in fake.err.getvalue()
+
+
+@pytest.mark.parametrize("url", ["http://", "https://", "http:///x", "http://:8787"])
+def test_tr26_a_url_without_a_host_is_a_usage_error(cfg, tmp_path, url):
+    # P3 v2-12: 호스트 없는 URL 은 설정에 쓰지 않는다
+    fake = Fake()
+    assert go(fake, "--role", "client", "--server", url, "--yes") == 2
+    assert "--server" in fake.err.getvalue()
+    assert not (cfg / "client.toml").exists()
