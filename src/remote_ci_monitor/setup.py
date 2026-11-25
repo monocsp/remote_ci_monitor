@@ -243,6 +243,34 @@ def existing_roles(environ: Mapping[str, str]) -> list[str]:
         raise SetupUsage(str(e)) from e
 
 
+def scan_roles(environ: Mapping[str, str]) -> tuple[list[str], str | None]:
+    """setup 이 쓰는 역할 스캔 — (역할들, 경고). 있는 서버 설정이 TOML · UTF-8 이 아니어서 읽지
+    못해도 setup 을 막지 않는다(P5 A-E5): 그 파일은 `--force config` 로 고칠 수 있고, 덮는 것은
+    여전히 `--force config` 일 때만이다(`_check_free`). 그때는 워커 설정만 본다. `$RCM_CONFIG` 가
+    없는 파일을 가리키는 것은 그대로 사용법 오류다(TR38)."""
+    try:
+        return existing_roles(environ), None
+    except SetupUsage as e:
+        from remote_ci_monitor.config import ConfigError, find_server_config, user_config_dir
+
+        named = environ.get("RCM_CONFIG")
+        if named and not Path(named).expanduser().is_file():
+            raise
+        try:
+            server = find_server_config(None)
+        except ConfigError:
+            raise e from None
+        roles = []
+        if (user_config_dir() / "worker.toml").is_file() or environ.get("RCM_WORKER_TOKEN"):
+            roles.append(dc.ROLE_WORKER)
+        reason = str(e).removeprefix(f"{server}: ") if server is not None else str(e)
+        where = server if server is not None else "the existing config"
+        return roles, (
+            f"could not read {where} ({reason}) — its role is not known; setup goes on, and "
+            "--force config replaces that file"
+        )
+
+
 def db_header_version(db: Path) -> int | None:
     """sqlite 헤더의 user_version(오프셋 60, 4바이트 big-endian). 연결하지 않는다 — 연결은 그
     자체로 `-wal` · `-shm` 을 만든다. 없거나 sqlite 가 아니거나 `-wal` 에 새 판이 있을 수 있으면
@@ -483,7 +511,7 @@ def _plan(args: argparse.Namespace, world: World) -> Plan:
     blank = core.blank_flags(vars(args))
     if blank:  # 빈 `--config` 는 기본 자리로 떨어졌다 — 묻기 전에 멈춘다(P3 2라운드 v2-1)
         raise SetupUsage(f"{' '.join(blank)} must not be empty")
-    roles_here = existing_roles(os.environ)
+    roles_here, unread = scan_roles(os.environ)
     asking = not args.yes and world.interactive()
     ask = _Ask(world)
     role = args.role
@@ -514,6 +542,8 @@ def _plan(args: argparse.Namespace, world: World) -> Plan:
     unused = core.unused_flags(role, given)
     if unused:
         plan.warnings.insert(0, f"{' '.join(unused)}: not used by --role {role} (ignored)")
+    if unread:
+        plan.warnings.insert(0, unread)
     return plan
 
 

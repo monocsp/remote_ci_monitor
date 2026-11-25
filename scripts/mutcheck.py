@@ -3469,6 +3469,15 @@ MUTANTS = (
         new="        if False:\n",
         tests=("tests/test_setup.py::test_s10_bind_takes_an_address_not_a_name",),
     ),
+    Mutant(
+        # 역할 스캔이 읽지 못한 설정으로 setup 을 멈춘다 — TOML · UTF-8 이 아닌 server.toml 하나가
+        # 워커 setup 도, `--force config` 로 고치는 길도 막는다(P5 A-E5)
+        name="setup-unreadable-config-blocks",
+        path="src/remote_ci_monitor/setup.py",
+        old="    roles_here, unread = scan_roles(os.environ)\n",
+        new="    roles_here, unread = existing_roles(os.environ), None\n",
+        tests=("tests/test_setup.py::test_s9_an_unreadable_existing_config_is_a_warning",),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

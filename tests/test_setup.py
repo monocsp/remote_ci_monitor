@@ -1338,6 +1338,22 @@ def test_s7_an_unknown_answer_warns_that_the_start_may_fail(cfg, tmp_path):
     assert "could not tell" in err and "start command" in err and "may fail" in err
 
 
+@pytest.mark.parametrize("raw", [b"[server\nport = 1\n", b"\xff\xfe[server]\n"])
+def test_s9_an_unreadable_existing_config_is_a_warning(cfg, tmp_path, raw):
+    # A-E5: 역할 스캔이 setup 을 막지 않는다. 그 파일을 덮는 것은 --force config 일 때만
+    cfg.mkdir(parents=True)
+    (cfg / "server.toml").write_bytes(raw)
+    fake = Fake()
+    assert go(fake, *WORKER_ARGV) == 0, fake.text
+    assert f"could not read {cfg / 'server.toml'}" in fake.err.getvalue()
+    assert (cfg / "server.toml").read_bytes() == raw
+    assert go(Fake(), *coordinator_args(tmp_path / "data")) == 1
+    assert (cfg / "server.toml").read_bytes() == raw
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data"), "--force", "config") == 0, fake.text
+    assert read_toml(cfg / "server.toml")["server"]["port"] == 18790
+
+
 @pytest.mark.parametrize("name", ["localhost", "macmini.local", "my-host"])
 def test_s10_bind_takes_an_address_not_a_name(cfg, tmp_path, name):
     # A-E7: 이름은 거절하고 풀지 않는다(DNS · mDNS 를 묻지 않는다)
