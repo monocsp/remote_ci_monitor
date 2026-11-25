@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ import test_server_m5n
 from remote_ci_monitor.config import ConfigError, load_server_config
 from remote_ci_monitor.core.model import QUEUED
 from test_local_only import (
+    FAKE_TOOL,
     LOCAL,
     OTHER,
     PRESETS,
@@ -366,3 +368,113 @@ def test_to15_capacity_never_counts_a_remote_machine_for_a_local_only_preset(lz)
     assert "gateany" not in cap["unreachable"], cap
     for name in ("rel", "relany", "relq", "relgated", "localcheck"):
         assert name in cap["unreachable"], (name, cap)
+
+
+# ── TL3 · TL14 · TL16 · TL17 `rcm check` ────────────────────────────────────
+
+#: 기본 풀(pool 배치)인데 도구가 어디에도 없는 프리셋 — 레인이 있는 서버의 도구 행이 FAIL 이 된다
+POOLNEED = PRESETS + block("poolneed", f'requires = ["{FAKE_TOOL}"]')
+
+
+@pytest.fixture
+def home(monkeypatch, tmp_path) -> Path:
+    h = tmp_path / "home"
+    h.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(h))
+    for var in ("XDG_CONFIG_HOME", "RCM_CONFIG", "RCM_SERVER", "RCM_TOKEN", "RCM_LABEL"):
+        monkeypatch.delenv(var, raising=False)
+    return h
+
+
+#: `cmd_check` 의 행 — `{등급}  {이름:<13} {상세}`. 이름이 13자를 넘으면(`local preset tools`)
+#: 칸을 넘친다. 그래서 행은 알려진 이름으로 찾는다(`ROW_NAMES`)
+ROW_RE = re.compile(r"^(ok |warn|FAIL)  (.*)$")
+ROW_NAMES = (
+    "capacity",
+    "presets",
+    "pools",
+    "server",
+    "local preset tools",
+    "service preset tools",
+)
+
+
+def check(s: M5nServer, monkeypatch, capsys, *, config: bool = False) -> tuple[int, dict[str, Any]]:
+    """`rcm check` — (종료 코드, {행 이름: (등급, 상세)}). `config` 면 그 서버의 설정 파일도
+    로컬 설정으로 읽힌다(`local preset tools` 행)."""
+    from remote_ci_monitor.cli import main
+
+    monkeypatch.setenv("RCM_SERVER", f"http://127.0.0.1:{s.port}")
+    monkeypatch.setenv("RCM_TOKEN", s.tokens["alice"])
+    argv = ["check", "--config", str(s.config_path)] if config else ["check"]
+    code = main(argv)
+    out = capsys.readouterr().out
+    found: dict[str, tuple[str, str]] = {}
+    for line in out.splitlines():
+        m = ROW_RE.match(line)
+        assert m, line
+        grade, rest = m.group(1).strip(), m.group(2)
+        for name in ROW_NAMES:
+            if rest.startswith(name + " "):
+                found[name] = (grade, rest[len(name) :].strip())
+    return code, found
+
+
+def test_tl3_rcm_check_fails_the_capacity_row_when_no_preset_has_a_machine(
+    lz, home, monkeypatch, capsys
+):
+    code, found = check(lz, monkeypatch, capsys)
+    assert "capacity" in found, found
+    grade, detail = found["capacity"]
+    total = len(lz.app.config.presets)
+    assert grade == "FAIL", found["capacity"]
+    assert detail.startswith(f"0/{total} presets"), detail
+    assert "gate" in detail and "rel" in detail, detail
+    assert code == 1
+
+
+def test_tl14_rcm_check_lists_the_presets_no_machine_can_take_as_a_warning(
+    lz, home, monkeypatch, capsys
+):
+    report(lz, REMOTE)
+    code, found = check(lz, monkeypatch, capsys)
+    assert "capacity" in found, found
+    grade, detail = found["capacity"]
+    assert grade == "warn", found["capacity"]  # 일부만 0 이면 FAIL 이 아니다
+    for name in ("rel", "relany", "qa"):  # local_only 둘과 다른 풀 전용 하나
+        assert name in detail, detail
+    assert "gate," not in detail and not detail.endswith("gate"), detail
+
+
+def test_tl17_rcm_check_draws_no_capacity_row_without_presets(tmp_path, home, monkeypatch, capsys):
+    s = zero(tmp_path / "none", presets="")
+    try:
+        code, found = check(s, monkeypatch, capsys)
+        assert "presets" in found and "capacity" not in found, found
+    finally:
+        s.close()
+
+
+def test_tl16_preset_tool_rows_say_this_machine_runs_no_jobs(tmp_path, home, monkeypatch, capsys):
+    s = zero(tmp_path / "srv", presets=POOLNEED)
+    try:
+        s.app.measure_preset_env()
+        code, found = check(s, monkeypatch, capsys, config=True)
+        for name in ("local preset tools", "service preset tools"):
+            row = found.get(name)
+            assert row is not None, (name, found)
+            assert row[0] != "FAIL", (name, row)
+            assert "runs no jobs" in row[1], (name, row)
+    finally:
+        s.close()
+
+
+def test_tl11_rcm_check_pools_row_names_the_default_pool_once(lz, home, monkeypatch, capsys):
+    code, found = check(lz, monkeypatch, capsys)
+    assert found["pools"][1] == "default (no local lanes, no workers)", found["pools"]
+    report(lz, REMOTE)
+    code, found = check(lz, monkeypatch, capsys)
+    assert found["pools"][1] == "default (build-02/1 idle)", found["pools"]

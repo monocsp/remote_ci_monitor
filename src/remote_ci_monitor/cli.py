@@ -3881,11 +3881,15 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     local_held = [w for w in all_workers if not w.get("worker") and w.get("state") == "held"]
     head = f"default ({lanes} lane{'s' if lanes != 1 else ''}"
     head += f" · {len(local_held)} held)" if local_held else ")"
-    parts = [head]
     by_pool: dict[str, list[dict[str, Any]]] = {}
     for w in server.get("workers") or []:
         if w.get("worker"):
             by_pool.setdefault(w.get("pool") or "default", []).append(w)
+    # 분배 전용(`lanes = 0`) — 기본 풀은 원격 워커뿐이다. `default (0 lanes) · default (…)` 로
+    # 두 번 쓰지 않는다(M5t-a §3 C10)
+    parts = [] if server.get("lanes") == 0 and "default" in by_pool else [head]
+    if server.get("lanes") == 0 and "default" not in by_pool:
+        parts = ["default (no local lanes, no workers)"]
     for name in sorted(by_pool):
         pills: list[str] = []
         for w in sorted(by_pool[name], key=lambda x: (str(x.get("worker")), x.get("lane") or 0)):
@@ -3915,6 +3919,30 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     return ("pools", True, text)
 
 
+#: 로컬 레인이 없는 서버(`lanes = 0`)의 도구 행 — FAIL 이 아니다(M5t-a §4.2)
+NO_LOCAL_LANES_TEXT = "this machine runs no jobs (lanes = 0 — dispatch only)"
+
+
+def _capacity_row(health: Any) -> tuple[str, bool | None, str] | None:
+    """`capacity` — 지금 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(`/api/health`).
+
+    하나도 없으면 FAIL, 일부만 없으면 warn 으로 그 프리셋을 댄다 — 어느 머신도 못 돌리는 배포
+    프리셋은 정상일 수 있다. 프리셋이 0개이거나 옛 서버(키 없음)면 행을 그리지 않는다(M5t-a
+    결정 243 · §4.2)."""
+    cap = health.get("capacity") if isinstance(health, dict) else None
+    if not isinstance(cap, dict):
+        return None
+    total, reachable = cap.get("total"), cap.get("reachable")
+    if not isinstance(total, int) or not isinstance(reachable, int) or total <= 0:
+        return None
+    none = [str(n) for n in cap.get("unreachable") or []]
+    head = f"{reachable}/{total} presets have a machine to run on"
+    if not none:
+        return ("capacity", True, head)
+    detail = f"{head} — none for: {', '.join(none)}"
+    return ("capacity", False if reachable == 0 else None, detail)
+
+
 def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """`local preset tools` — `requires` 를 선언한 프리셋마다 **이 셸**에서 도구를 찾아 본다.
 
@@ -3925,6 +3953,9 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """
     from remote_ci_monitor.runner import missing_tools, public_tool_name
 
+    if cfg.server.lanes == 0 and any(p.requires for p in cfg.presets):
+        # 분배 전용(M5t-a 결정 243) — 이 머신에서 돌 잡이 없으니 빠진 도구는 문제가 아니다
+        return ("local preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
     all_ok = True
     for preset in cfg.presets:
@@ -3964,6 +3995,9 @@ def _service_preset_env_row(
     facts = health.get("preset_env") if isinstance(health, dict) else None
     if not isinstance(facts, dict) or not facts:
         return None
+    if health.get("lanes") == 0:
+        # 분배 전용 서버(M5t-a 결정 243) — 서버의 환경에서 돌 잡이 없다
+        return ("service preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
     all_ok = True
     for name, entry in sorted(facts.items()):
@@ -4292,6 +4326,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
+            capacity_row = _capacity_row(health_body)
+            if capacity_row is not None:
+                rows.append(capacity_row)
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
             rows.extend(_machine_check_rows(client, doc))
             storage = (doc.get("server") or {}).get("job_storage")
