@@ -108,7 +108,27 @@ of a key bumps that number and is listed here.
   in the job's `requires` check, the server's tool measurements, `rcm check` (its `git` row too),
   `rcm worker --check` and worker probes, instead of opening the install dialog on a headless
   service. `rcm doctor` runs `git ls-remote` with the service `PATH`'s git in the service
-  environment.
+  environment. `rcm serve` with `[[repos]]` refuses to start on such a shim
+  (`git is missing (needs Command Line Tools)`), and `git_ref` jobs fail with
+  `git is not installed on the build machine (needs Command Line Tools)` instead of running it.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`rcm doctor` finds system service files and no longer reads a server measurement of an older
+  config.** `/etc/systemd/system/rcm-*.service` (where the documented Linux server install puts
+  its unit) and `/Library/LaunchDaemons/com.remote-ci-monitor.*.plist` are searched too, measured
+  as the user in `User=` or `UserName`; a user this machine does not know is exit 3. A server
+  role with no service file at all no longer borrows the worker's `PATH`: its `PATH` is unknown
+  (exit 3), and `measured_in` is `server_service_env` only when the server's measurement was read.
+  Each `preset_env` entry in `GET /api/health` now carries a `digest` of the preset definition the
+  server measured; `rcm doctor --role coordinator-worker` reads a preset's measurement only when
+  it matches the `server.toml` on disk, and shows `unknown` (`not_reloaded`, exit 3) until the
+  server reloads it. The `python` row says it is the Python that ran `rcm doctor`, and a
+  `service python` row measures the one the service starts rcm with when that differs. The
+  `linger` row is only for systemd user units (`unknown` without `USER`). `rcm doctor | head` and a
+  terminal that is not UTF-8 keep the exit code instead of a traceback; Ctrl-C stops running probes
+  and exits 130; a `git ls-remote` or `git --version` past its time limit is stopped with its
+  helpers. A server name found on the network is cleaned to one line before the question, and
+  server text and `[[tools]]` lose (or refuse) line separators and bidirectional controls as well
+  as control characters.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ## [0.10.0] - 2026-11-23
