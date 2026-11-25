@@ -1034,7 +1034,7 @@ MUTANTS = (
     Mutant(
         name="requires-check-skipped",
         path="src/remote_ci_monitor/runner.py",
-        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        old="    return [name for name in requires if find_tool(name, path) is None]\n",
         new="    return []  # noqa: mutant\n",
         tests=("tests/test_requires.py",),
     ),
@@ -1292,8 +1292,8 @@ MUTANTS = (
         # `rcm serve` 가 따라간다 — 서버가 정본이다(§2.3)
         name="m5q-follow-serve-follows",
         path="src/remote_ci_monitor/follow.py",
-        old='    {"serve", "worker", "token", "init", "discover", "version", "skills"}',
-        new='    {"worker", "token", "init", "discover", "version", "skills"}',
+        old='    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor"}',
+        new='    {"worker", "token", "init", "discover", "version", "skills", "doctor"}',
         tests=("tests/test_follow_rules.py",),
     ),
     Mutant(
@@ -1332,8 +1332,14 @@ MUTANTS = (
         # `rcm check` 의 client 행이 서버가 보낸 version 을 그대로 찍는다(#226 D3)
         name="m5q-check-row-unclean-version",
         path="src/remote_ci_monitor/cli.py",
-        old="    server_v = follow.clean(raw)\n",
-        new="    server_v = raw\n",
+        old=(
+            "    server_v = follow.clean(raw)\n"
+            "    mine, theirs = _version_key(__version__), _version_key(server_v)\n"
+        ),
+        new=(
+            "    server_v = raw\n"
+            "    mine, theirs = _version_key(__version__), _version_key(server_v)\n"
+        ),
         tests=("tests/test_follow_cli.py",),
     ),
     Mutant(
