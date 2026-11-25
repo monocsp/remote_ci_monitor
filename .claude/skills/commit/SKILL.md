@@ -84,3 +84,7 @@ given.
    ```
 5. Fixing review feedback: `git commit --fixup <sha>` and squash before merge, or a new
    `fix(...)` commit when it is a separate change. Never rewrite a commit that is already merged.
+   In the development loop (`dev-loop`, `dev-lite`, `dev-batch`, the QA skills) every review fix
+   is a new `fix(...)` commit — no fixup, no squash, no rebase: a `verified:` comment and a
+   `tools/redgreen.py` receipt name shas, and `tools/merge_pr.py` merges with a merge commit
+   (`.claude/skills/_shared/stage-lead.md` «Rules for every lead» 5).

@@ -94,10 +94,10 @@ migrates the database in place, and the build that made it refuses it afterwards
 ## Checks before a pull request
 
 ```sh
-ruff check . && ruff format --check . && pytest
-node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for every mutant in scripts/mutcheck.py (--list)
-scripts/smoke_install.sh             # the README's own commands on a fresh venv
+./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . && ./.venv/bin/python -m pytest
+node --test tests/web/*.test.js           # web UI pure functions
+./.venv/bin/python scripts/mutcheck.py    # the tests must go red for every mutant in scripts/mutcheck.py (--list)
+scripts/smoke_install.sh                  # the README's own commands on a fresh venv
 ```
 
 ## Documentation
@@ -105,6 +105,22 @@ scripts/smoke_install.sh             # the README's own commands on a fresh venv
 Every user-visible change updates the docs in the same pull request. The rules are in
 [`docs/documentation.md`](docs/documentation.md); the working checklist is the `docs` skill
 (`.claude/skills/docs/SKILL.md`), which also covers regenerating the annotated screenshots.
+
+## Development loop
+
+Work that `dev-lite` does not admit (one of the five lane conditions applies, or more than about
+five files under `src/` change) goes through the loop in `.claude/skills/dev-loop/SKILL.md`:
+a workplan with traced scenario IDs (`workplan`), test-first PRs by a fresh lead per stage
+(`build-pr`), two isolated verifiers per round (`.claude/agents/isolated-verifier.md` holds the
+severity, round and triage rules), a live run on a test server when the change is visible or crosses
+processes (`live-verify`, rules in `.claude/skills/_shared/test-server.md`), an edge audit
+(`edge-audit`), then the `pr` skill. Small changes use `dev-lite`; several PRs of one milestone at
+once use `dev-batch`; defects found after the fact use `qa-batch` / `qa-defect-loop`. The tools
+behind them run from the worktree's `.venv`, never a bare `python3`, which has no pytest:
+`./.venv/bin/python tools/scenario_trace.py` (scenario IDs against tests),
+`./.venv/bin/python tools/dev_batch.py` (bundle paths must not overlap) and
+`./.venv/bin/python tools/redgreen.py` (a test red before the fix, green after; the main session
+runs it, since it adds worktrees outside a lead's).
 
 ## Traps that have already cost a session
 

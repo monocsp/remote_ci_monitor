@@ -13,8 +13,9 @@ not `<type>(<scope>): <summary>`; `CONTRIBUTING.md` (Names) is the rule.
 
 The same shape as a commit header (`commit` skill), because the merge commit takes it:
 `fix(web): 호스트 카드가 정의 안 된 local 을 읽던 것`. One PR, one concern — if the title needs
-"and", it is two PRs (or the second half is a follow-up). A PR that is not ready starts with
-`WIP: ` and is opened as a draft (`--draft`); remove both before asking for a merge.
+"and", it is two PRs (or the second half is a follow-up). A PR that is not ready is opened as a
+draft (`--draft`; GitHub refuses to merge one) and marked ready (`gh pr ready <N>`) before the merge.
+The title keeps its header shape either way: `tools/guard_naming.py` refuses a prefix such as WIP.
 
 ## Body
 
@@ -30,8 +31,8 @@ The same shape as a commit header (`commit` skill), because the merge commit tak
 - 스키마·설정·종료 코드가 바뀌면 여기에 **Breaking** 으로.
 
 ## 검사
-- `ruff check . && ruff format --check . && pytest` — 3150 passed
-- `node --test tests/web/*.test.js` · `python scripts/mutcheck.py` (N/N)
+- `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . && ./.venv/bin/python -m pytest` — 3150 passed
+- `node --test tests/web/*.test.js` · `./.venv/bin/python scripts/mutcheck.py` (N/N)
 - 실기: 무엇을 어디서 돌려 봤나(포트 · data_dir · 잡 번호)
 
 ## 문서
@@ -40,13 +41,21 @@ CHANGELOG [Unreleased] · docs/… · README 미러 — 또는 「사용자에�
 Refs: #80
 ```
 
+More sections when the development loop produced them (`.claude/skills/dev-loop/SKILL.md`), in this
+order right after `## 한 줄`: `## 요청 카드` (`dev-lite`), `## Differs from the spec`
+(`.claude/skills/_shared/workplan-diff.md`), `## Edge audit` (the confirmed GAP table, `edge-audit`),
+`## Remaining findings` (the MED/LOW the final triage reported rather than fixed,
+`.claude/agents/isolated-verifier.md`).
+
 End the body with the attribution block given at session start.
 
 Write a body that goes through a file into a file named after the branch,
 `pr-body-<branch with / as ->.md` (`pr-body-feat-guard-merge.md`), never `pr.md`, `pr_body.md` or
-`body.md`: parallel sessions share a scratchpad and overwrote each other's body there (#220 and
-#233 went up with another PR's body). `tools/guard_naming.py` refuses `--body-file` with a shared
-name.
+`body.md`, kept in `<abs worktree>/.verify/handoff/<branch with / as ->/` (git-ignored, so
+`tools/dev_batch.py scope` and `git status --porcelain` stay clean) and passed as
+`--body-file <that path>`; never the scratchpad: parallel sessions share it and overwrote each
+other's body there (#220 and #233 went up with another PR's body). `tools/guard_naming.py` refuses
+`--body-file` with a shared name.
 
 The Korean in the title's summary and in the body is written with the `korean-writing` skill
 (`.claude/skills/korean-writing/SKILL.md`). Load it before you write them. The template's headings,
@@ -56,18 +65,21 @@ documents that stay in the repository are written in 평어체.
 
 ## Steps
 
-1. Before opening: `ruff check . && ruff format --check . && pytest`, plus `node --test` and
-   `python scripts/mutcheck.py` when the change touches what they cover; the `docs` skill for a
-   user-visible change. Load the `korean-writing` skill and write the title's summary and the body
+1. Before opening: `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . &&
+   ./.venv/bin/python -m pytest`, plus `node --test` and `./.venv/bin/python scripts/mutcheck.py`
+   when the change touches what they cover; the `docs` skill for a
+   user-visible change. In the development loop (`dev-loop` and the skills it routes to) run only
+   the changed files' tests and `./.venv/bin/ruff` on the changed files; the full suite and mutcheck
+   are `rcm-ci`'s, and `rcm/ci` decides (`.claude/skills/_shared/stage-lead.md` «Rules for every
+   lead» 6: full local runs loaded the build machine on 2026-11-20). Load the `korean-writing` skill and write the title's summary and the body
    by its rules (its §6 check before you paste them). Push with the pinned account:
    ```sh
    export GH_TOKEN=$(gh auth token --user monocsp)
    git push -u origin <branch>
    python3 tools/guard_naming.py pr "<title>"
-   gh pr create --base dev --title "<title>" --body "$(cat <<'EOF'
-   …
-   EOF
-   )"
+   mkdir -p <abs worktree>/.verify/handoff/<branch with / as ->   # where the body file lives
+   gh pr create --base dev --title "<title>" \
+     --body-file <abs worktree>/.verify/handoff/<branch with / as ->/pr-body-<branch with / as ->.md
    ```
 2. After every push, wait for the commit status `rcm/ci` — the ruleset's required check on `dev`
    and `main` (`main` also needs `main-from-dev-only`). The build machine's watcher submits the
@@ -107,9 +119,12 @@ documents that stay in the repository are written in 평어체.
    ```sh
    gh pr comment <N> --body "verified: $(gh pr view <N> --json headRefOid -q .headRefOid)"
    ```
-   The line stands alone (no quote, no short sha, lowercase). A push after it makes it stale:
-   verify the new head and post a new line. A PR with nothing to verify (documentation only,
-   tests only) merges with `--no-verify "<reason>"`; the reason is posted on the PR.
+   Each verification round leaves its own line before that, in the record formats of
+   `.claude/agents/isolated-verifier.md` «Rounds» (the only copy); `tools/merge_pr.py` reads only
+   the `verified:` line. The line stands alone (no quote, no short sha, lowercase). A push after it
+   makes it stale: verify the new head and post a new line; what a head moved by triage fixes needs
+   first is «Rounds» 7 of the same file. A PR with nothing to verify (documentation only, tests
+   only) merges with `--no-verify "<reason>"`; the reason is posted on the PR.
 
    `main` only takes a PR from `dev` (`gh pr create --base main --head dev`), and the `Releasing`
    section of `CONTRIBUTING.md` says when.

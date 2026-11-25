@@ -156,6 +156,20 @@
      씀 · 필요 없는 묶음 목록까지 읽음 · 도는 status 잡이 「지금 하는 일」이 됨 · 목록에 없는
      상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
      모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
+  개발 루프 도구 — `scenario-trace-zero-ids-pass`: 표지는 있고 ID 가 없는 표를 통과시킴
+     (`tools/scenario_trace.py`, 2026-11-25) + `dev-batch-*` 셋: 보고 없는 rcm/ci 를 초록으로 ·
+     낡은 `verified:` 를 yes 로 · porcelain 첫 줄의 앞 공백을 잃음 (`tools/dev_batch.py`, 격리 검증)
+     + 2라운드 셋: `@` 로 시작하는 커밋 경로를 버림 · 상태 파일의 꼴 검사를 건너뜀
+     (`tools/dev_batch.py`) · 영수증에 집 경로를 남김 (`tools/redgreen.py`)
+     + 3라운드 넷: 댓글을 읽기 전에 verified 를 "no" 로 둠(`tools/dev_batch.py`) · 안 닫힌 펜스를
+     문제로 안 셈(`tools/scenario_trace.py`) · pytest 만 죽이고 그 그룹은 남김 · 잠긴 워크트리를
+     `--force` 하나로 지우려 함(`tools/redgreen.py`)
+     + 4라운드 여섯: 404 아닌 브랜치 읽기 실패를 「not pushed」로 · 끝난 check-run 의 모르는 결론을
+     통과로 · PR diff 를 안 봄(`merge -s ours`)(`tools/dev_batch.py`) · xfail 을 돈 시험으로 셈 ·
+     건너뛴 시험의 요약 줄을 안 읽음(`tools/redgreen.py`) · 앞 `|` 없는 행을 안 봄
+     (`tools/scenario_trace.py`)
+     + 5라운드 둘: xfail 시험의 태그를 증명으로 셈(`tools/scenario_trace.py`) · add 의 잠금을 뺌
+     (`tools/dev_batch.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2105,6 +2119,208 @@ MUTANTS = (
             "tests/test_retry_m5s.py::"
             "test_a_submission_after_a_reload_changed_max_attempts_does_not_join",
         ),
+    ),
+    # ── 개발 루프 도구 (2026-11-25) ──
+    Mutant(
+        # 시나리오 표지가 있는데 ID 가 하나도 없는 표를 통과시킨다 — 대조할 것이 없는데 「ok」라서
+        # 검사하지 않은 명세가 검사한 것처럼 보인다(fail-open)
+        name="scenario-trace-zero-ids-pass",
+        path="tools/scenario_trace.py",
+        old='        if not group["ids"]:\n',
+        new="        if False:\n",
+        tests=("tests/test_scenario_trace.py",),
+    ),
+    Mutant(
+        # 아직 보고가 없는 rcm/ci 를 초록으로 읽는다 — status 가 「merge」를 권한다(격리 검증 F2)
+        name="dev-batch-unreported-ci-success",
+        path="tools/dev_batch.py",
+        old='    found = ((c.pending, "pending"), (c.missing, "not reported"))\n',
+        new='    found = ((c.pending, "pending"),)\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
+        ),
+    ),
+    Mutant(
+        # 다른 sha 에 단 `verified:` 표식을 지금 head 의 검증으로 센다(격리 검증 F2)
+        name="dev-batch-stale-verified-yes",
+        path="tools/dev_batch.py",
+        old='    return "yes" if sha in marks else "stale" if marks else "no"',
+        new='    return "yes" if marks else "no"',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
+        ),
+    ),
+    Mutant(
+        # porcelain 출력을 strip 한다 — 첫 줄 ` M docs/a.md` 가 `ocs/a.md` 가 되어 범위 밖으로
+        # 보인다(격리 검증 F1)
+        name="dev-batch-porcelain-first-line",
+        path="tools/dev_batch.py",
+        old="for entry in _git(*status, cwd=wt, strip=False).split",
+        new="for entry in _git(*status, cwd=wt, strip=True).split",
+        tests=(
+            "tests/test_dev_batch.py::test_scope_reads_the_worktree_status_without_losing_characters",
+        ),
+    ),
+    Mutant(
+        # `@` 로 시작하는 커밋 경로를 버린다 — `git log --format=@%H` 를 한 줄기로 나누던 때의
+        # 버그 꼴: `@src-config.py` 를 커밋 머리로 읽어 범위 밖인데 「scope ok」(2라운드 F1)
+        name="dev-batch-scope-drops-at-paths",
+        path="tools/dev_batch.py",
+        old="touched += [(sha[:12], name) for name in names if name]",
+        new='touched += [(sha[:12], name) for name in names if name and name[0] != "@"]',
+        tests=(
+            "tests/test_dev_batch.py::test_scope_sees_a_committed_path_that_looks_like_a_log_header",
+        ),
+    ),
+    Mutant(
+        # 상태 파일의 꼴 검사를 건너뛴다 — 문자열 owns · 없는 묶음을 가리키는 after 가 종료 3 이
+        # 아니라 트레이스백 · 엉뚱한 범위가 된다(2라운드 F2 · F12)
+        name="dev-batch-shape-check-skipped",
+        path="tools/dev_batch.py",
+        old="        if not all(shapes):\n",
+        new="        if False:\n",
+        tests=("tests/test_dev_batch.py::test_a_state_file_with_a_wrong_shape_is_corrupt",),
+    ),
+    Mutant(
+        # 시험 출력의 집 경로를 `~` 로 바꾸지 않는다 — 영수증(PR 본문에 붙는다)에 개인 경로가
+        # 남는다(2라운드 F13)
+        name="redgreen-home-path-kept",
+        path="tools/redgreen.py",
+        old='[(Path(p), "<tmp>") for p in _temp_dirs()] + [(Path.home(), "~")]',
+        new='[(Path(p), "<tmp>") for p in _temp_dirs()]',
+        tests=("tests/test_redgreen.py::test_the_receipt_hides_a_path_under_the_home_folder",),
+    ),
+    Mutant(
+        # 댓글을 읽기 **전에** verified 를 "no" 로 둔다 — 댓글 읽기가 실패해도 「no · verify ·
+        # 종료 0」이 된다. 모르는 것을 아는 값으로 남기는 꼴(3라운드 H2)
+        name="dev-batch-verified-default-before-read",
+        path="tools/dev_batch.py",
+        old="    cells: dict[str, str] = {}\n",
+        new='    cells: dict[str, str] = {}\n    row["verified"] = "no"\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # 문서 끝까지 안 닫힌 펜스를 문제로 세지 않는다 — 펜스 뒤의 표지를 조용히 못 읽고
+        # 통과한다(3라운드 H3)
+        name="scenario-trace-unclosed-fence-ignored",
+        path="tools/scenario_trace.py",
+        old='    if fence:\n        message = f"the {fence} fence opened here never closes',
+        new='    if False:\n        message = f"the {fence} fence opened here never closes',
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_an_unclosed_fence_is_a_format_problem_at_the_line_it_opened",
+        ),
+    ),
+    Mutant(
+        # 끊길 때 pytest 하나만 죽인다 — 시험이 띄운 자식이 남는다(3라운드 L1)
+        name="redgreen-kills-only-pytest",
+        path="tools/redgreen.py",
+        old="                os.killpg(proc.pid, signal.SIGKILL)\n",
+        new="                os.kill(proc.pid, signal.SIGKILL)\n",
+        tests=(
+            "tests/test_redgreen.py::"
+            "test_a_signal_removes_the_worktrees_and_stops_the_whole_pytest_group",
+        ),
+    ),
+    Mutant(
+        # 잠긴(끊긴 add 의 initializing) 워크트리를 `--force` 하나로 지우려 한다 — 못 지우고,
+        # 폴더를 지운 뒤의 prune 도 잠긴 등록은 남긴다(3라운드 M3)
+        name="redgreen-locked-worktree-single-force",
+        path="tools/redgreen.py",
+        old='_git(root, "worktree", "remove", "-f", "-f", str(path))',
+        new='_git(root, "worktree", "remove", "--force", str(path))',
+        tests=("tests/test_redgreen.py::test_a_locked_worktree_left_by_a_cut_add_is_removed",),
+    ),
+    Mutant(
+        # 404 가 아닌 브랜치 읽기 실패(502 …)도 「not pushed」로 읽는다 — 못 읽은 것을 「없다」로
+        # 센다(4라운드 M4)
+        name="dev-batch-branch-error-not-pushed",
+        path="tools/dev_batch.py",
+        old="            if error.status != 404:\n                raise\n",
+        new="            if False:\n                raise\n",
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # 끝난 check-run 의 모르는 결론(`weird`)을 거르지 않는다 — merge_pr 는 그것을 「ok」로
+        # 센다(4라운드 M4)
+        name="dev-batch-unknown-conclusion-ok",
+        path="tools/dev_batch.py",
+        old='                _need(done, path, f"unknown check-run conclusion {end!r}")\n',
+        new='                _need(True, path, f"unknown check-run conclusion {end!r}")\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # scope 가 PR 의 diff 를 안 본다 — `merge -s ours` 가 dev 의 변경을 버려도 `--cc` 에는
+        # 아무것도 없어 「scope ok」(4라운드 H2)
+        name="dev-batch-scope-skips-pr-diff",
+        path="tools/dev_batch.py",
+        old='    touched += [("merge-result", name)',
+        new='    touched += [] and [("merge-result", name)',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_scope_sees_paths_a_merge_that_kept_only_our_side_carries",
+        ),
+    ),
+    Mutant(
+        # xfail 을 돈 시험으로 센다 — 통과 하나와 xfail 하나인 파일 nodeid 가 「passed」(4라운드 M4)
+        name="redgreen-xfail-counts-as-run",
+        path="tools/redgreen.py",
+        old='NOT_RUN = frozenset({"SKIPPED", "XFAIL", "XPASS"})',
+        new='NOT_RUN = frozenset({"SKIPPED", "XPASS"})',
+        tests=("tests/test_redgreen.py::test_an_xfail_next_to_a_passing_test_is_not_passed",),
+    ),
+    Mutant(
+        # 건너뛴 시험의 요약 줄을 읽지 않는다 — 파일 · 클래스 · 매개변수 nodeid 의 건너뛴 시험이
+        # 안 보여 영수증이 red-then-green(4라운드 H3)
+        name="redgreen-skipped-lines-unread",
+        path="tools/redgreen.py",
+        old="(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED)",
+        new="(PASSED|FAILED|ERROR|XPASS|XFAIL)",
+        tests=("tests/test_redgreen.py::test_a_skipped_test_inside_a_requested_node_is_undecided",),
+    ),
+    Mutant(
+        # 표 바로 뒤의 앞 `|` 없는 행을 보지 않는다 — GFM 은 행으로 그리는데 대조하지 않고
+        # 통과한다(4라운드 H1)
+        name="scenario-trace-unpiped-row-ignored",
+        path="tools/scenario_trace.py",
+        old="        if after < len(lines) and after not in code and _row_like(lines[after]):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_a_row_without_a_leading_pipe_right_after_the_table_is_a_format_problem",
+        ),
+    ),
+    Mutant(
+        # xfail 을 단 시험의 태그를 행의 증명으로 센다 — 실패해도 초록인 시험이 행을 채운다
+        # (5라운드 H1)
+        name="scenario-trace-xfail-counts-as-proof",
+        path="tools/scenario_trace.py",
+        old='    kind = "xfail" if name in ("xfail", "expectedfailure") else kind\n',
+        new="    kind = kind\n",
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_a_tag_on_an_xfail_test_is_reported_like_a_skipped_one",
+        ),
+    ),
+    Mutant(
+        # add 의 잠금을 뺀다 — 동시에 add 한 세션들이 서로의 묶음을 덮어 하나만 남는다
+        # (5라운드 M4)
+        name="dev-batch-no-lock",
+        path="tools/dev_batch.py",
+        old="        fcntl.flock(handle, fcntl.LOCK_EX)\n",
+        new="        pass\n",
+        tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
     ),
 )
 
