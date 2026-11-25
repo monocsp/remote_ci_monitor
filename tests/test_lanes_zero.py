@@ -348,6 +348,23 @@ def _waiting(s: M5nServer, *, target: str | None, tree_hash: str) -> int:
     ).id
 
 
+def test_tl15_a_job_with_nowhere_to_go_says_no_local_lanes(lz):
+    """# TL15 · P5 G5 — 분배 전용 서버에서 갈 곳 잃은 `@local` 지정 잡 · `local_only` 잡의 이유는
+    「no capable machine · unknown」이 아니라 왜 없는지(로컬 레인 없음)를 머신 메모로 싣는다.
+    터미널(`rcm status`)도 그 메모를 읽는다."""
+    from remote_ci_monitor.core.render_text import placement_reason_text
+
+    jobs = [stored_job(lz, "gate", target=LOCAL).id, stored_job(lz, "relany").id]
+    for jid in jobs:
+        row = lz.row(jid)
+        assert row["reason"] == "no_capable_machine", row
+        notes = row["placement_detail"]
+        assert [n["code"] for n in notes] == ["no_local_lanes"], notes
+        assert notes[0]["worker"] == LOCAL, notes
+        text = placement_reason_text(row) or ""
+        assert "unknown" not in text and "no local lanes" in text, text
+
+
 def _lost_at_local(tmp_path: Path, presets: str = PRESETS) -> tuple[M5nServer, int]:
     """레인 1 서버에 `@local` 을 지정해 둔 대기 잡 → lanes 0 으로 다시 띄운 서버와 그 잡."""
     s = zero(tmp_path, lanes=1, presets=presets)

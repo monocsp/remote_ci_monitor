@@ -72,6 +72,8 @@ _HOST_KEY_RE = re.compile(r"[A-Za-z0-9:._-]{1,80}")
 CODE_LOCAL_ONLY = "local_only"
 #: `checks` 의 점검이 그 머신에서는 돌 수 없다(점검 프리셋이 `local_only`) — 점검 대기가 아니다
 CODE_CHECK_LOCAL_ONLY = "check_local_only"
+#: 분배 전용 서버(`lanes = 0`)의 `@local` — 갈 곳 잃은 잡의 이유 메모(M5t-a 결정 243)
+CODE_NO_LOCAL_LANES = "no_local_lanes"
 
 
 class MachineDown(Exception):
@@ -1012,6 +1014,7 @@ class CapabilitiesMixin:
             return None if view.id == LOCAL else view.id
 
         preset = self.config.preset(job.preset)
+        local = next((v for v in views if v.id == LOCAL), None)
         views = self.machines_for(
             preset, views, target=job.target_worker, pool=job.pool, placement=job.placement
         )
@@ -1023,7 +1026,16 @@ class CapabilitiesMixin:
             if job.target_worker == LOCAL:
                 views = [v for v in views if v.id == LOCAL]
             if not views:
-                return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE)
+                # 분배 전용 서버면 왜 없는지를 `@local` 메모로 싣는다 — 메모가 없으면 화면은
+                # 「unknown」이다(P5 G5)
+                notes: tuple[PlacementNote, ...] = ()
+                if local is not None and not self._has_local_lanes():
+                    notes = (
+                        PlacementNote(
+                            local.id, local.display_name, cap.INELIGIBLE, CODE_NO_LOCAL_LANES
+                        ),
+                    )
+                return Placement(workers=frozenset(), reason=REASON_NO_CAPABLE_MACHINE, notes=notes)
         if job.target_worker is not None:
             target = None if job.target_worker == LOCAL else job.target_worker
             return Placement(workers=frozenset({target}))

@@ -905,6 +905,8 @@
       case "report_missing": return T(lang, "place.report_missing");
       case "report_stale": return T(lang, "place.report_stale");
       case "fingerprint_unknown": return T(lang, "place.fingerprint_unknown");
+      // 분배 전용 서버(`lanes = 0`)의 `@local` — 갈 곳 잃은 잡의 이유(M5t-a 결정 243)
+      case "no_local_lanes": return T(lang, "place.no_local_lanes");
       default: return code || state || DASH;
     }
   }

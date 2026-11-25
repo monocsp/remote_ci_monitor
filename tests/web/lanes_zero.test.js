@@ -98,3 +98,16 @@ test("TL7 the machines tab draws no Recheck button on @local without lanes", () 
   assert.equal(rows[1].recheck, true); // 비교 행: 원격 워커는 그대로
   assert.equal(rows[2].recheck, true); // 비교 행: 레인이 있는 서버의 @local 도 그대로
 });
+
+test("TL15 a job with nowhere to go says no local lanes, not unknown", () => {
+  // 분배 전용 서버에서 `@local` 을 지정한 잡 · `local_only` 잡 — 서버가 싣는 메모(code no_local_lanes)
+  const s = status(0);
+  const row = {
+    id: 9, state: "queued", reason: "no_capable_machine", estimate: {},
+    placement_detail: [{ worker: "@local", display_name: "coord", state: "ineligible", code: "no_local_lanes", detail: {} }],
+  };
+  const en = reasonText(row, s, NOW, "en").text;
+  const ko = reasonText(row, s, NOW, "ko").text;
+  assert.equal(en, "no capable machine · coord: no local lanes (lanes = 0)");
+  assert.equal(ko, "실행 가능한 머신 없음 · coord: 로컬 레인 없음(lanes = 0)");
+});

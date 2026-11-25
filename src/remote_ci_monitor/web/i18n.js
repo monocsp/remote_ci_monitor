@@ -482,6 +482,7 @@
     "place.report_missing": "no report",
     "place.report_stale": "stale report",
     "place.fingerprint_unknown": "fingerprint unknown",
+    "place.no_local_lanes": "no local lanes (lanes = 0)",
     // 펼친 배치 블록(Codex 가독성 검토 2번) — 판정별 집계 한 토막씩, 그리고 나머지 머신 토글
     "place.n.down": function (a) { return a.n + " down"; },
     "place.n.eligible": function (a) { return a.n + " eligible"; },
@@ -1702,6 +1703,7 @@
     "place.report_missing": "환경 보고 없음",
     "place.report_stale": "환경 보고 낡음",
     "place.fingerprint_unknown": "지문 모름",
+    "place.no_local_lanes": "로컬 레인 없음(lanes = 0)",
     "place.n.down": function (a) { return "꺼짐 " + a.n + "대"; },
     "place.n.eligible": function (a) { return "가능 " + a.n + "대"; },
     "place.n.tool_missing": function (a) { return "도구 없음 " + a.n + "대"; },

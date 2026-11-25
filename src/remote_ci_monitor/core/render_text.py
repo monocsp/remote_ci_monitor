@@ -565,6 +565,8 @@ def verdict_text(code: Any, detail: Any = None, state: Any = None) -> str:
         return "stale report"
     if code == "fingerprint_unknown":
         return "fingerprint unknown"
+    if code == "no_local_lanes":  # 분배 전용 서버의 `@local`(M5t-a 결정 243)
+        return "no local lanes (lanes = 0)"
     return str(code) if code else DASH
 
 
