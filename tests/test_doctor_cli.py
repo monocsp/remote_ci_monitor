@@ -4292,3 +4292,104 @@ def test_p3_measured_in_says_server_service_env_only_when_the_server_measured(
     cfg = server_toml(env, coordinator.port)
     code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
     assert code == 3 and doc["measured_in"] == "none", doc["measured_in"]
+
+
+# ── 운영 보호 가드의 자기 시험 (P3 사이클 2 r2 두 명 · P6 GAP E7) ─────────────────────
+
+GUARD_INNER = """
+import os
+import socket
+
+import conftest
+
+
+def test_inner_connect():
+    listener = socket.create_server(("127.0.0.1", 0))
+    old = conftest.PRODUCTION_PORT
+    # 운영 포트 대신 이 시험이 연 포트 — 가드가 없으면 연결이 된다(운영 서버에는 닿지 않는다)
+    conftest.PRODUCTION_PORT = listener.getsockname()[1]
+    try:
+        socket.create_connection(("127.0.0.1", conftest.PRODUCTION_PORT), timeout=2).close()
+    finally:
+        conftest.PRODUCTION_PORT = old
+        listener.close()
+
+
+def test_inner_open_config():
+    path = os.path.join(os.path.expanduser("~"), ".config", "rcm", "server.toml")
+    with open(path) as fh:
+        fh.read()
+"""
+
+
+def run_guard_inner(tmp_path: Path, cwd: Path) -> str:
+    """`tests/conftest.py` 를 플러그인으로 들인 하위 pytest 로 안쪽 시험 둘을 돌린다. HOME 은 가짜
+    홈이다 — 가드가 「실제 홈」으로 읽는 것도 그 폴더라, 가드가 없어도 진짜 운영 폴더는 열지 않는다.
+    임시 폴더 · 시작 폴더는 가짜 홈 밖이다(허용 뿌리가 가짜 홈을 덮지 않게)."""
+    home = tmp_path / "fakehome"
+    (home / ".config" / "rcm").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "rcm" / "server.toml").write_text("# td\n")
+    inner = tmp_path / "inner" / "test_guard_inner.py"
+    inner.parent.mkdir(exist_ok=True)
+    inner.write_text(GUARD_INNER)
+    tmp = tmp_path / "innertmp"
+    tmp.mkdir(exist_ok=True)
+    tests_dir = Path(__file__).resolve().parent
+    src = Path(doctor.__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            os.devnull,
+            "--rootdir",
+            str(inner.parent),
+            "-p",
+            "conftest",
+            "-p",
+            "no:randomly",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            str(inner),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home),
+            "TMPDIR": str(tmp),
+            "PYTHONPATH": f"{tests_dir}{os.pathsep}{src}",
+        },
+        stdin=subprocess.DEVNULL,
+        timeout=120,
+    )
+    return proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("start", ["elsewhere", "home"])
+def test_the_production_guard_fails_a_test_that_reaches_production(tmp_path, start):
+    """가드 자체의 시험. 운영 포트로의 연결과 운영 설정 폴더 열기가 그 시험을 실패로 만든다. pytest
+    를 홈에서 시작해도(시작 폴더가 운영 폴더의 조상) 가드는 꺼지지 않는다 — 조상인 허용 뿌리는
+    버린다(P3 사이클 2 r2 두 명)."""
+    cwd = tmp_path / "fakehome" if start == "home" else tmp_path / "elsewhere"
+    cwd.mkdir(parents=True, exist_ok=True)
+    out = run_guard_inner(tmp_path, cwd)
+    assert "the test reached production: connect 127.0.0.1:" in out, out
+    assert "the test reached production: open ~/.config/rcm/server.toml" in out, out
+    assert "2 failed" in out, out
+
+
+@pytest.mark.parametrize(
+    "address", ["127.0.0.1", "::ffff:127.0.0.1", "192.168.0.10", "10.0.0.2", "build.local", "::1"]
+)
+def test_the_production_guard_blocks_port_8787_on_any_address(address):
+    """운영 서버는 0.0.0.0:8787 에 묶인다 — LAN 주소 · `.local` 이름 · IPv4 대응 IPv6 로도 닿는다.
+    가드는 주소와 상관없이 8787 로 가는 연결을 막는다(P6 GAP E7)."""
+    import conftest
+
+    assert conftest.production_address((address, 8787)), address
+    assert conftest.production_address((address, 8787, 0, 0)), address
+    assert not conftest.production_address((address, 8788)), address

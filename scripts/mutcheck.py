@@ -2762,6 +2762,19 @@ MUTANTS = (
             "test_p3_the_documented_system_server_service_is_found[LaunchDaemons]",
         ),
     ),
+    Mutant(
+        # 시험의 운영 보호 가드가 운영 폴더의 조상인 허용 뿌리(홈에서 시작한 pytest 의 cwd)를 그대로
+        # 둔다 — 그 실행에서는 가드가 아무것도 막지 않는다(P3 사이클 2 r2 두 명)
+        name="test-guard-ancestor-root-kept",
+        path="tests/conftest.py",
+        old="    return tuple(sorted(r for r in roots if not any(_under(d, r) for d in "
+        "PRODUCTION_DIRS)))\n",
+        new="    return tuple(sorted(roots))\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_production_guard_fails_a_test_that_reaches_production[home]",
+        ),
+    ),
 )
 
 
