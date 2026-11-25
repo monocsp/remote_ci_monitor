@@ -42,7 +42,8 @@
 > 시작된다는 지적이다. 3판(head `572bd1d`)은 3라운드에서 HIGH 1건과 MED 6건, LOW 7건을 받았다. HIGH 는 두 반박자가 함께 짚었다. T5
 > 의 「heartbeat `jobs` 에 없음 = 띄운 적 없음」이 순서가 보장되지 않는 메시지를 인증된 확인으로 썼다는 지적이다. 결정 335 가
 > 버려진 heartbeat 도우미 스레드를 허용하면서 「heartbeat 는 한 스레드에서 차례로 간다」는 가정(`remote_workers.py:933-935`)이
-> 깨졌다. 4판은 3라운드 지적을 반영했고 고친 것을 §12.5 에 적었다.
+> 깨졌다. 4판은 3라운드 지적을 반영했고 고친 것을 §12.5 에 적었다. 4라운드(4판 head `0971462`)는 HIGH 0 이었고 MED 1건과
+> LOW 9건을 이 판 안에서 고쳤다(§12.6).
 >
 > 부모 명세의 셋째 판은 M5t 전체를 한 문서에 담았다가 거절됐고 그 판의 결과 고리 설계는 재료로만 썼다. 이 명세에도 3판이 있어
 > 이름이 겹친다. 이 명세의 3판에서 바뀐 곳은 「3판:」, 「3판에서 더한」처럼 적었다. 「3판 r1 A-H4」, 「3판 M7」, 「3판의
@@ -170,8 +171,9 @@ PR3 이 그 뒤에 병렬로 가며 PR4 가 실기 수용이다. 구현 PR1 은 
     배치: 홀드 표시와 알림이 홀드를 만드는 PR 과 같은 릴리스에 들어가게 §6 을 고친다.」 6차에서 이 결정을 바꿨다. Codex 는 새
     사건을 기본으로 켜면 기존 훅이 같은 잡에 두 번 불려 호출과 부작용이 겹친다고 했다. 그래서 `[[notify]]` 에 새 기본 사건을
     더하지 않는다. `irreversible_hold` 는 규칙이 `on` 에 적을 때만 부르는 opt-in 값이다. 대신 홀드를 만든 잡의 잡 끝 알림(이미
-    가는 것)에 환경 변수 `RCM_HOLD=1` 과 `RCM_HOLD_GROUP=<그룹>`, 본문 한 줄 「group held — run rcm release-hold <job>」을 싣는다.
-    그러면 기존 규칙도 호출이 늘지 않은 채 홀드를 안다. `RCM_EVENT` 는 모든 알림에 싣는다(§4.12).
+    가는 것)에 환경 변수 `RCM_HOLD=1` 과 `RCM_HOLD_GROUP=<그룹>`, 한 줄 「group held — run rcm release-hold <job>」(`RCM_HOLD_NOTE`)을
+    싣는다. 그러면 기존 규칙도 호출이 늘지 않은 채 홀드를 안다. 이 세 키와 `RCM_EVENT` 는 모든 알림에 늘 있다. 홀드가 없으면
+    `RCM_HOLD=0` 이고 나머지 둘은 빈 값이다. URL 본문에도 늘 `event` 와 객체 `hold`(`held` · `group` · `note`)가 있다(§4.12).
   - 339-f: 「로그 읽는 쪽(rcm logs, SSE, 웹)은 커밋된 log_file_bytes 까지만 읽는다.」
   - 339-g: 「`_heard_lock` 은 잡 단위(또는 짧은 판정만, 커밋은 밖) — 한 틱에 닫는 잡 수 상한, 증명 2 에 서버 잠금 대기를 넣거나
     잠금이 커밋을 감싸지 않게.」
@@ -506,18 +508,19 @@ rcm 이 이 명세의 PR1~PR4 로 대부분을 만든다. 이 레포를 쓰는 �
 | F83 | (실측) 파이썬 `-I` 로 **파일 경로**를 실행하면 `sys.path` 에 그 파일의 폴더 · `PYTHONPATH` · 현재 폴더가 없다: 워크스페이스에 가짜 `signal.py` 를 두고 `PYTHONPATH` 로 가리켰을 때 `-I` 는 표준 `signal` 을 읽고 종료 0, `-I` 없이는 가짜를 읽어 종료 1. `-I -m <모듈>` 은 `PYTHONPATH` 를 버리므로 설치되지 않은 소스 트리의 모듈을 못 찾는다(같은 셸에서 `No module named …`). `-I <경로>` 기동은 `/usr/bin/time` 실측 0.02초(5회 모두) | 측정: 이 워크트리 `.venv`(Python 3.11.15, macOS 27.2.1), 스크래치 폴더의 표준 라이브러리만 쓰는 스크립트 | 감독자는 `-I` 를 지키고 `-m` 대신 모듈 파일의 경로로 띄운다 — 잡 env · 워크스페이스가 감독자를 바꿀 수 없고 소스 트리 실행도 된다. 감독자 파일은 표준 라이브러리만 import 해야 한다(시험이 잠금)(결정 339-c (4)) |
 | F84 | (실측) `LC_ALL=C ps -A -o pid= -o pgid=` 한 번 0.0125~0.0131초(중앙값), 최대 0.0148초(20회 × 3). 출력에는 부른 `ps` 자신이 같은 그룹으로 나온다. macOS `pgrep -g <pgid>` 는 부른 프로세스의 조상을 빼고 낸다(같은 그룹의 감독자 자신이 안 나옴 — Linux procps 는 자신만 뺀다, 이 머신에서 재지 않음 `—`) | 측정: 위와 같은 `.venv`, setsid 그룹 + SIGTERM 무시 자식 | 감독자의 「그룹에 남은 멤버」는 `ps -A -o pid= -o pgid=` 를 읽고 자기 pid 와 그 `ps` 의 pid 를 뺀 것 — 두 OS 가 같은 꼴. `ps` 를 못 돌리면 「남았다」로 본다(닫힌 쪽)(결정 339-c (2)) |
 | F85 | 로그를 읽는 쪽은 파일 길이까지 읽는다: `App.log_bytes` 는 `offset` 부터 4 MiB 를 읽고 `fh.tell()` 을 다음 오프셋으로(`server.py:5237-5256`, 라우트 `:5973-5987` — `rcm logs` 와 웹 로그 보기가 쓴다), 상태 · 잡 문서의 로그 꼬리는 `tail_lines`(`worker.py:90`)를 `server.py:3789, 3851` 에서. SSE(`:6440-`)는 버스 사건만 흘리고 마커 사건은 로그 커밋 뒤에 나간다(§4.5 step 9) | 각 줄 | 쓰기와 커밋 사이 · 커밋 실패 뒤 되자르기 전의 바이트를 읽는 쪽이 본다 → `log_file_bytes` 가 있으면 그 길이까지만(결정 339-f) |
-| F86 | `[[notify]]` 는 잡 끝 사건만 안다: 규칙 `on` 은 종료 상태만 받고(`config.py:793-795`), 알림 스레드는 `KIND_JOB_FINISHED` 만 본다(`notify.py:305`). 중복 막기는 `(job_id, notify_name)` 행 선점(`store.py:3049-3063`), 기동 스캔은 알림 행이 **하나도 없는** 종료 잡만(`store.py:3081-3088`). 규칙 이름은 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`(`config.py:78`) — `:` 가 없다. 훅 env 의 키 집합을 시험이 정확히 잠근다(`tests/test_notify_rules.py:59-88`, 대조 `:154, :207`) | 각 줄 | 홀드 알림은 opt-in 사건 종류 · `on` 의 새 값 `irreversible_hold`(규칙이 적을 때만, 6차), 중복 막기 키 `hold:<규칙 이름>`(규칙 이름과 겹칠 수 없다), 기동 스캔은 `hold:` 행을 잡 끝 알림 행으로 세지 않는다(결정 339-e) |
+| F86 | `[[notify]]` 는 잡 끝 사건만 안다: 규칙 `on` 은 종료 상태만 받고(`config.py:793-795`), 알림 스레드는 `KIND_JOB_FINISHED` 만 본다(`notify.py:305`). 중복 막기는 `(job_id, notify_name)` 행 선점(`store.py:3049-3063`), 기동 스캔은 알림 행이 **하나도 없는** 종료 잡만(`store.py:3081-3088`). 규칙 이름은 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`(`config.py:78`) — `:` 가 없다. 훅 env 의 키 집합을 시험이 정확히 잠근다(`tests/test_notify_rules.py:59-88`, 대조 `:154, :207`) | 각 줄 | 홀드 알림은 opt-in 사건 종류 · `on` 의 새 값 `irreversible_hold`(규칙이 적을 때만, 6차), 중복 막기 키 `hold:<규칙 이름>`(규칙 이름과 겹칠 수 없다), 기동 스캔은 `hold:` 행을 잡 끝 알림 행으로 세지 않는다(결정 339-e). 훅 env 키 집합이 정확히 잠겨 있으므로 `RCM_EVENT` · `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 는 모든 알림에 늘 싣고(홀드가 없으면 `0` 과 빈 값) `ENV_KEYS` 에 넷을 더한다. opt-in 알림에만 있는 `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER` 는 그 사건의 키 집합 시험이 따로 잠근다 |
 | F87 | `tools/dev_batch.py` 는 한 묶음의 owns 가 아직 머지 안 된 다른 묶음의 owns · shared 와 겹치면 거절한다(shared 끼리는 허용) | `tools/dev_batch.py:229-233` | 3판 §5 의 PR2 · PR3 은 둘 다 `core/status.py` 를 owns 로 가져 같은 물결에 못 든다(V1-4) → 홀드의 JSON 을 PR1 로(결정 350) |
 | F88 | 러너의 펌프는 stdout 파이프가 EOF 일 때까지 돌고 SIGTERM→SIGKILL 타이머는 그 루프 안에서만 간다(`runner.py:430-471`). 파이프를 쥔 멤버가 남으면 러너의 SIGKILL 이 닿고, 파이프를 닫은 멤버는 루프가 끝난 뒤 남는다 | `runner.py:430-471` | 3판 S7 의 「리더 끝 뒤 새 grace」는 파이프를 닫은 멤버에만 일하고, 그 시계가 리더 끝부터라 상한이 2·grace_J + 4 였다(V1-2 · V2-3) → S7 의 SIGKILL 시한은 첫 SIGTERM + grace_J(결정 339-c (2)) |
 | F89 | 잡 행에 제출 때의 `concurrency_group`(NULL 가능) · `concurrency_scope`(NOT NULL, 기본 `pool`) · `pool` · `host_key` 가 있다 | `store.py:186, 214, 232-233` | 홀드 행은 이 칸을 닫는 때 복사한다 — 3판의 「그룹 NULL 이면 프리셋의 지금 그룹」(WP3:1101-1102, :1214-1215)은 닫는 때의 설정을 읽어 프리셋이 사라지면 열리는 쪽이 된다(V1-3) → claim 때 유효 그룹을 잡 행에 적고 홀드는 잡 행만 읽는다(결정 339-d) |
 | F90 | claim 응답의 프리셋이 사라졌으면(`null`) 워커는 프로세스 없이 `preset_missing` 으로 끝낸다 | `remote_worker.py:942-946` | 그때의 X 는 claim 때 0 으로 얼어도 아무것도 돌지 않았다 — 홀드가 필요 없다(V2-8) |
 | F91 | 오류 응답 본문은 `_send_error` 가 `{"error": …, **e.extra}` 로 쓴다 | `server.py:5624-5640` | M5t-c 343 의 `pair_reject_mac` 은 이 자리에서 붙는다 → M5t-b 의 409 는 모두 `ApiError` 로 내고 따로 응답을 쓰지 않는다 |
+| F92 | (실측) 감독자 쪽 `subprocess.Popen(["/bin/sleep", "0.01"])` 호출 하나(fork 에서 반환까지)는 중앙값 0.0021~0.0026초, 최대 0.0034초다(30회 × 3) | 측정: 이 워크트리 `.venv`(Python 3.11.15, macOS 27.2.1)에서 `python -I` 스크래치 스크립트(레포 밖) | 감독자가 받은 SIGTERM 이 명령에 두 번 닿을 수 있는 창은 이 호출 길이다 → 첫 SIGTERM 의 도착이 Popen 반환보다 이를 때만 전달하고, 두 번은 그 창에 닿은 경우로 좁힌다(§4.13 step 3) |
 
 ## 4. 설계
 
 > 읽는 법(4판): 「3판 그대로」 로 옮긴 절에 남은 전역 `_heard_lock` 은 4판에서 세션별 잠금 `_session_locks[S]`(결정 339-g)로
 > 읽는다. 레거시 잡의 X 를 「닫는 때의 프리셋 값」 이라고 적은 곳은 4판 규칙 「표식이거나 설정에 없음」(결정 339-d)으로 읽는다.
-> 두 규칙의 정본은 §4.1 의 `heard` 불릿과 §4.12 다.
+> 두 규칙의 정본은 §4.1 의 `heard` 불릿과 §4.12 다. 같은 읽는 법을 §11 의 결정 행(266 · 328 의 `_heard_lock` 등)에도 적용한다.
 
 첫 절은 상태 전이 표다(결정 252). 뒤의 절들은 이 표의 칸을 장치별로 풀어 쓴다. 3판에서 더한 단계 × 죽음 표와 증명은
 §4.1.4 · §4.1.5 에 있고 2판과 3판의 두 단계 점검표는 §4.1.6 에 있다. 그룹 홀드와 감독자는 §4.12 · §4.13 에 새로 두었다.
@@ -572,7 +575,7 @@ rcm 이 이 명세의 PR1~PR4 로 대부분을 만든다. 이 레포를 쓰는 �
 |---|---|---|---|---|---|---|
 | T1 | 현재 · 들림(gap ≤ T) | running(executing) | heartbeat · phase · log · finish 받음. finish 가 상태를 정함(첫 보고가 이김). heartbeat 응답에 그 세션의 닫힌 잡 `closed_jobs`(결정 321) | 판정 없음(서버가 없다). 워커는 보고를 큐에 쌓고 잡은 계속. 서버가 뜨면 `heard` 바닥 = 기동 시각 | 서버: `heard` 가 멈춤 → T 뒤 T2 | RL6 RL7 RL16 |
 | T2 | 현재 · 조용함(T < gap ≤ G_J) | running | (다시 들리면 T1, 같은 세션 · 같은 lease 로 이어 보고, 프로세스 안 죽음) | 기동 뒤 T 안에 heartbeat 가 오면 T1 | 잡은 `running` 유지, 사유 `worker_unreachable_grace`, ETA null, 레인 `down`(헬스 503 그대로). 서버는 닫지 않는다 | RL1 RL5 RL6 RL26 RL28 |
-| T3 | 현재 · 조용함(gap > G_J) | running | — | 서버가 꺼져 있던 시간은 세지 않는다(바닥 = 기동, 2차 Q-C). 기동 + G_J 에 판정 | `_heard_lock` 안에서 판정 · 조건부 닫기 → `lost`(`worker_unreachable`, `seconds` = int(gap)), `job_finished` 1회. 일반 잡은 그룹 자리가 풀린다. **X_J 면 같은 트랜잭션에서 그룹 홀드(T18, 결정 330)** — 확인 없는 닫힘이다. 그 뒤 같은 세션의 finish → `late_result` 만(결정 256). 다시 붙으면 heartbeat `closed_jobs` 로 알림 | RL1 RL2 RL3 RL4 RL5 RL7 RL35 |
+| T3 | 현재 · 조용함(gap > G_J) | running | — | 서버가 꺼져 있던 시간은 세지 않는다(바닥 = 기동, 2차 Q-C). 기동 + G_J 에 판정 | 세션별 잠금 `_session_locks[S]` 안에서 판정 · 조건부 닫기 → `lost`(`worker_unreachable`, `seconds` = int(gap)), `job_finished` 1회. 일반 잡은 그룹 자리가 풀린다. **X_J 면 같은 트랜잭션에서 그룹 홀드(T18, 결정 330)** — 확인 없는 닫힘이다. 그 뒤 같은 세션의 finish → `late_result` 만(결정 256). 다시 붙으면 heartbeat `closed_jobs` 로 알림 | RL1 RL2 RL3 RL4 RL5 RL7 RL35 |
 | T4 | 현재 · 들림 | cancelling | heartbeat `cancel` → 워커가 끝냄 → `cancelled`(supersede 면 `superseded by #N` 유지). 워커가 확인 안 하면 `kill_at + 2H` 에 `cancelled`(`cancel_unconfirmed`) — 현재 · 들리는 세션의 잡에만. 3판: X_J 면 그 닫힘에 그룹 홀드(확인 없는 닫힘, 결정 330) | 기동 뒤 heartbeat 가 오면 `cancel` 전달 | 조용해지면 `kill_at` 규칙 멈춤. gap > G_J 면 `lost`(`worker_unreachable`). `cancelled`(2)로 위장하지 않는다. 다시 붙은 워커는 `closed_jobs` 의 `had_cancel: true` 로 그 잡을 멈춘다(결정 322) | RL8 RL33 |
 | T5 | 현재 · 들림 | running · cancelling, 워커가 모름(claim 응답 유실) | 현재 세션의 heartbeat 가 `seq` > 받아들인 seq 이고 `claims_settled ≥ J.claim_seq` 인데 `jobs` 에 J 가 없으면 `lost`(`worker_restarted_without_job`) — busy 잡 전부. 둘 중 하나라도 아니면 그 heartbeat 의 목록으로는 J 를 판정하지 않는다(`heard` 는 오른다). 4판: 이 닫힘은 **확인이 아니다** — X_J 면 같은 트랜잭션에서 홀드(`cause = worker_restarted_without_job`, 결정 339-b). 그 홀드는 §4.12 표의 확인 1~4 가 뒤에 오면 풀린다. 레거시 잡(T11)은 오늘의 `_fresh_claims` 규칙 그대로(옛 워커는 heartbeat 를 차례로 보낸다) | 해당 없음 | 재연결 뒤 같은 규칙. 끝내 안 오면 T3 | RL9 · RL50 |
 | T6 | 현재 | running(materializing) | 정상 진행 | 워커: 스냅샷 내려받기 연결 실패 → finish `lost`(`snapshot_unreachable`) 큐 → 서버가 뜨면 전달 | 같음. 전달 전 gap > G_J 면 T3, 늦은 finish 는 `late_result` | RL23 |
@@ -700,16 +703,19 @@ W4 의 반응은 서버가 알린 끝 상태마다 아래 표로 정한다(3판,
    `group_gone: true` 를 보낸다(§9).
 6. `T_req` 항은 `ok_at` 을 보낸 시각으로 재는 한 3 에 필요하지 않다. 그래도 넣는다(D-a). 구현이 `ok_at` 을 응답 받은
    시각으로 잘못 재도 heartbeat 는 기한(15초) 안에 응답하거나 실패하므로 여전히 안전하다. 두 머신 단조 시계의 속도 차와
-   서버가 `_heard_lock` 을 기다린 시간도 이 항이 덮는다.
+   서버가 세션별 잠금 `_session_locks[S]` 를 기다린 시간도 이 항이 덮는다.
 
 정리 2(연결된 동안 멈추지 않음, V2-6 · V1-3 · V2-11): heartbeat 는 앞 heartbeat 가 끝나고 H 뒤에 간다(F68). 하나가 걸리는 시간은
 전체 기한 `T_req` 이하다(결정 335). 마지막 2xx 를 보낸 뒤 다음 2xx 직전까지의 나이는 `d₁ + H + d₂ ≤ 2·T_req + H` 다. 그 사이에 2xx
 하나를 잃으면 `3·T_req + 2H` 이하다. 깨어남 지연과 감시 틱을 5초로 덮으면 `2H + 3·T_req + 5 ≤ L ≤ G_J − m_J` 다. 문턱에 닿으려면
 heartbeat 2xx 를 둘 이상 잇달아 잃어야 한다. 그때의 멈춤은 연결된 채 멈춘 것으로 볼 수 없다. 서버가 그 워커를 못 들은 경우와
 구별할 수 없는 경우다. 결과는 `lost`(3)이고 두 번 돌지 않는 쪽이다. 4판: 서버 쪽 대기도 센다(결정 339-g). heartbeat 처리가
-기다리는 잠금은 자기 세션의 잠금 하나다. 그 안에는 메모리 갱신과, 그 세션이 조용할 때만 생기는 닫기 트랜잭션 하나가 있다. 닫기는
-보통 ms 이고 상한은 `busy_timeout` 5초다. 다른 세션의 닫기는 기다리지 않는다. 이 대기와 DB 쓰기 대기는 `d` 안에 든다. `d` 가 전체
-기한 `T_req` 를 넘으면 그 회차는 실패로 세고(「잃은 2xx」) 정리 2 의 문장 그대로다.
+기다리는 잠금은 자기 세션의 잠금 하나다. 그 잠금을 쥐는 일은 셋이다(§4.2). 요청마다의 메모리 갱신, 그 세션이 조용할 때만 생기는
+janitor 의 유예 닫기, 그리고 연결된 세션에서도 생기는 두 커밋이다. 하나는 그 세션 자신의 heartbeat 가 T5 의 「없음」으로 잡을 닫고
+표식 잡이면 홀드 행을 넣는 커밋이고(그 heartbeat 가 닫는 잡 전부를 한 트랜잭션에서), 다른 하나는 janitor 의 취소 미확인 닫기(T4)다.
+커밋 하나는 보통 ms 이고 상한은 `busy_timeout` 5초다. 같은 세션의 다른 요청(레인의 claim · phase · log · finish, 다른 heartbeat)은 그
+커밋을 기다린다. 다른 세션의 닫기는 기다리지 않는다. 이 대기와 DB 쓰기 대기는 `d` 안에 든다. `d` 가 전체
+기한 `T_req` 를 넘으면 그 회차는 실패로 세고(「잃은 2xx」) 정리 2 의 문장 그대로다. 연속 둘을 잃어야 문턱에 닿는다.
 
 정리 3(e2e 수치, §7.5): T 10 · H 1 이면 L = max(10, 2 + 45 + 5) = 52, m = 35 이고 G 의 하한은 87 이다. §7.5 의 e2e 서버는
 G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 경우에 나이는 14 + 1 + 14 + 1 + 15 = 45 이하이고 55 보다
@@ -789,7 +795,7 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
        닫힘이라 홀드가 없다.
      - 그 세션들의 이미 닫힌 잡에 열린 홀드가 있으면 푼다(`release_kind = worker`, `released_by = <토큰 이름>`, 결정 330).
      - 3판: 그 이름의 `worker_session_id IS NULL` 인 레거시 busy 잡을 오늘처럼 `lost`(`worker_restarted_without_job`)로
-       닫는다. X(닫는 때의 프리셋 값)면 홀드를 건다(T17, 결정 336).
+       닫는다. X(닫는 때 그 프리셋이 표식이거나 설정에 없음, 결정 339-d)면 홀드를 건다(T17, 결정 336).
      - `unverified_sessions` 가운데 같은 이름인 세션 행에 `orphan_unverified = 1` 을 적는다.
      - 그 세션들과 다른 현재 세션을 펜싱한다(`fenced_at`, `fenced_by = S`).
      - S 행을 넣고 워커 행을 upsert 한다.
@@ -799,7 +805,7 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
 - 오늘의 등록은 그 이름의 활성 잡을 전부 닫는다(F5). 이 동작을 없앤다. 닫는 것은 `previous_sessions` 로 명시한 세션의
   잡(3판 r1 A-H4)과 세션 NULL 레거시 busy 잡뿐이다. 레거시 잡을 닫는 것은 3판에서 더했다(F69). 2판은 레거시 잡을 프로세스
   없이 `running` 으로 남겨 두었다. 그래서 새 세션의 claim 이 `heard(이름) + G` 까지 `LaneBusy` 409 를 받았다(V1-5 · V2-14).
-- spec 을 뺀 모든 `/worker/*` 요청이 세션을 싣는다(§4.10). 서버는 `_heard_lock` 안에서 판정한다. S 가 표에 없으면 409
+- spec 을 뺀 모든 `/worker/*` 요청이 세션을 싣는다(§4.10). 서버는 세션별 잠금 `_session_locks[S]`(레거시는 `legacy:<이름>`) 안에서 판정한다. S 가 표에 없으면 409
   `not_registered` 이고 워커는 같은 S 로 재등록한다(T10). 3판: S 행의 `worker_name` 이 토큰 이름과 다르면 403 이고 본문에는
   `error` 만 싣는다(T19). 남의 현재 세션 id 로 `heard` 를 올려 표식 잡이 닫히지 않게 하는 길을 막는다(V1-8). S 가
   펜싱됐으면 409 `session_fenced` 다. S 가 현재 세션이면 `heard(S)` 를 갱신하고 잠금을 놓은 뒤 요청을 처리한다. 세션 없는
@@ -808,7 +814,8 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
   janitor 의 유예 판정 · 조건부 닫기를 함께 지켰다(결정 328). 4판의 판정 잠금은 세션마다 하나인 `_session_locks[S]` 이고 레거시
   요청은 `legacy:<이름>` 키를 쓴다. 전역 `_heard_lock` 은 이 사전에 접근할 때만 짧게 쥐는 메모리 잠금이고 그 안에서 DB I/O 를 하지
   않는다.
-- 세션별 잠금이 지키는 것은 둘이다. 하나는 요청이 `heard(S)` 와 받아들인 `seq` 를 고치는 일이다. 다른 하나는 janitor 가 S 의 잡
+- 세션별 잠금이 지키는 것은 셋이다. 하나는 요청이 `heard(S)` 와 받아들인 `seq` 를 고치는 일이다. 또 하나는 heartbeat 가 받아들인
+  `seq` 의 목록으로 T5 의 「없음」을 판정하고 닫을 잡 전부와 표식 잡의 홀드 행을 한 트랜잭션에서 커밋하는 일이다. 나머지 하나는 janitor 가 S 의 잡
   하나를 닫을 때 `heard(S)` 를 다시 보고 조건부 닫기 트랜잭션(홀드 행 포함)을 커밋하는 일이다. 세션 판정에 쓰는 DB
   읽기(`worker_sessions` 행)는 잠금 밖에서 한다. WAL 이라 읽기는 쓰기를 기다리지 않는다(`store.py:1190`). 로그 요청 전체는 감싸지
   않는다. 로그는 잡별 잠금 `_job_log_locks` 가 맡는다(§4.5).
@@ -834,6 +841,15 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
   않게 하려는 것이다(F10). 자기 세션의 잡과 겹치면 오늘처럼 409 다.
 - 세션 행은 `forget_workers`(F21)가 워커 행을 지울 때 그 이름의 것을 함께 지운다. 그 밖에는 지우지 않는다. 빨리 지우면 늦게
   돌아온 펜싱된 프로세스가 `not_registered` 를 받고 재등록해 살아 있는 세션을 펜싱하는 핑퐁이 생긴다.
+- 메모리의 세션별 값, 곧 `heard(S)`, 받아들인 `seq`, 잠금 `_session_locks[S]` 는 아래 때 지운다. 지우기는 사전 접근 잠금
+  `_heard_lock` 아래에서 한다.
+  - S 가 펜싱되면 받아들인 `seq` 를 지운다. 펜싱된 세션의 heartbeat 는 409 라 더 쓰지 않는다.
+  - 펜싱된 S 의 busy 잡이 모두 닫히면 janitor 틱이 `heard(S)` 와 `_session_locks[S]` 를 지운다. 그 전에는 지우지 않는다. janitor 가
+    `heard(S) + G_J` 로 그 잡들을 닫아야 하기 때문이다(T8). busy 잡이 없는 세션은 잠금이 다시 만들어져도 지킬 닫기가 없다.
+  - `forget_workers` 가 그 이름의 세션 행을 지우면 그 세션들의 값을 모두 지운다. `legacy:<이름>` 의 값은 그 이름에 레거시 busy 잡이
+    없을 때 janitor 틱이 지운다.
+  - 서버가 재시작하면 모두 비고 `heard` 의 바닥은 기동 시각이다(결정 266).
+  - 펜싱되지 않은 현재 세션의 값은 지우지 않는다. 이름마다 현재 세션은 하나라 남는 값의 수는 워커 이름 수를 넘지 않는다.
 - 「잊힌 잡」(F6)과 heartbeat 의 `cancel` 목록은 세션 단위, 곧 그 세션의 busy 잡으로 센다. heartbeat 응답에는
   `closed_jobs` 를 더한다(결정 321). 요청의 `jobs` 목록에 있는 잡 가운데 서버에서 이미 terminal 이고 잡의 세션이 S 인 것마다
   `{id, state, had_cancel}` 을 싣는다. `had_cancel` 은 잡 행에 `cancel_requested_at` 이 있다는 뜻이다(F61).
@@ -850,7 +866,9 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
     없다(F82).
   - `_fresh_claims` 의 「봐주기」(`remote_workers.py:565, 935`)는 세션 없는 레거시 요청에만 남긴다.
   - 워커는 응답의 `cancel` 과 `paused` 를 그 요청의 `seq` 가 이미 적용한 seq 보다 클 때만 적용한다. 늦게 온 도우미 응답이 새
-    취소를 지우지 않게 하려는 것이다. `closed_jobs` 는 늘 적용한다.
+    취소를 지우지 않게 하려는 것이다. `closed_jobs` 는 늘 적용한다. 버려진 늦은 응답에만 실린 새 취소는 다음 heartbeat 응답에
+    다시 온다. 서버의 `cancel` 목록은 응답마다 잡 상태(`cancelling`)로 다시 만들기 때문이다(`remote_workers.py:961`). 한 주기(H) 늦을
+    뿐 사라지지 않는다.
   - 「없음」 닫기(T5)는 X_J 면 홀드를 건다(결정 339-b). 홀드는 §4.12 표의 확인으로만 풀린다. 살아 있는 워커가 그 잡을 정말 못
     받았으면 그 세션은 J 의 finish 를 보내지 않는다. 그래서 그 홀드는 다음 프로세스의 `previous_sessions` 나 admin 의 `rcm
     release-hold` 로 풀린다(§9).
@@ -891,7 +909,7 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
   벽시계에 기동 바닥만 더하는 안도 점프를 막지 못한다.
 - 레인 down(T)은 그대로 벽시계 `workers.last_seen_at`(F1)으로 정한다. 유예와 레인 표시는 다른 질문에 답한다. 레인은 지금
   일을 받는지를 말하고 유예는 잡을 버릴지를 정한다.
-- 취소 미확인 닫기(F7)는 그 잡의 세션이 현재 세션이고 들릴 때만 하며 판정은 `_heard_lock` 안에서 한다(RL33). 3판: X_J 면 그
+- 취소 미확인 닫기(F7)는 그 잡의 세션이 현재 세션이고 들릴 때만 하며 판정은 그 세션의 잠금 `_session_locks[S]` 안에서 한다(RL33). 3판: X_J 면 그
   닫힘에 홀드를 건다(결정 330). 들리는 워커가 취소를 확인하지 않았다면 프로세스가 아직 돌 수 있기 때문이다. 조용하거나
   펜싱된 세션의 cancelling 잡은 G_J 뒤 `lost`(`worker_unreachable`)가 된다. 부모 명세 3판의 새 코드 `cancel_unreachable` 은
   만들지 않는다(결정 278).
@@ -905,12 +923,13 @@ G = 90 을 쓰므로 문턱은 55 다. RL34(c) 의 「heartbeat 마다 14초」 
   에는 서버 설정값을 적는다. claim 응답의 `job` 안에 둘 다 싣고 최상위 키는 늘리지 않는다(F58 의 claim 키 잠금). 워커는
   응답의 값만 쓴다. 3판: 로컬 레인 claim 도 `irreversible` 을 얼린다. 감독자와 재기동 홀드에 쓰기 때문이다(F76 · 결정 330 ·
   331). 로컬 잡의 `disconnect_grace_seconds` 는 유예가 없으므로 NULL 그대로다.
-- 레거시 잡(세션 NULL, `irreversible` NULL)의 X 는 닫는 때의 프리셋 값이다(T11 · T17). 얼린 값이 없을 때는 이쪽이 안전하다.
+- 레거시 잡(세션 NULL, `irreversible` NULL)의 X 는 닫는 때 그 프리셋이 표식이거나 설정에 없으면 참이다(T11 · T17, 결정 339-d). 얼린
+  값이 없으니 모름을 닫힌 쪽으로 본다.
 - `store.claim` 은 프리셋을 고른 뒤에야 그 프리셋을 안다. 그래서 호출자가 두 가지를 넘기고 store 가 같은 트랜잭션에서
   적는다. 하나는 「표식 프리셋 이름에서 유효 그룹과 범위로 가는 표」다(3판, 결정 330, 그룹 NULL 인 옛 대기 잡용). 다른
   하나는 기본 G 다.
 - 4판(결정 339-a): 레인의 claim 요청은 `claim_seq` 를 싣는다(§4.2). 서버는 claim 트랜잭션에서 잡 행에 `claim_seq` 를 적는다.
-  세션이 있는 claim 에 `claim_seq` 가 없거나 1 이상의 정수가 아니면 400 이고 본문에는 `error` 만 싣는다.
+  세션이 있는 claim 에 `claim_seq` 가 없거나 범위 밖이면 400 이고 본문에는 `error` 만 싣는다. 범위는 §4.10 의 4판 표와 같다.
 
 설정 검증(결정 263 고침 · 320):
 
@@ -1142,7 +1161,7 @@ PR 경계는 3판에서 다시 정했다(V1-4). 2판은 PR1 을 「세션 헤더
    있는데 오프셋이 없어도 400 이고 이 검사는 PR2 가 한다. 세션 헤더가 없으면 그 이름에 레거시 busy 잡이 있는지 본다. 있으면
    오프셋 없이 오늘처럼 덧붙이는 레거시 길로 가고(T11), 없으면 409 `protocol_required` 다. 400 과 409 는 아무것도 반영하지
    않는다.
-2. 세션을 판정하고(`_heard_lock`, §4.2) 잡의 소유와 상태를 본다(403 · 404 · 409 `job_closed` · `session_fenced`).
+2. 세션을 판정하고(`_session_locks[S]`, §4.2) 잡의 소유와 상태를 본다(403 · 404 · 409 `job_closed` · `session_fenced`).
 3. 잡별 로그 잠금 `_job_log_locks[job_id]` 를 잡는다. 새 잠금이고 `RemoteWorkersMixin` 이 가진다. 사전 접근은
    `_remote_lock` 아래에서 한다. 잡이 끝나면 `_drop_log_partial` 과 같은 곳에서 지운다. 같은 잡에 동시에 온 요청은 여기서
    줄을 선다. 서버에서 아직 도는 시한 초과 요청과 워커의 재시도가 겹치는 경우가 그렇다.
@@ -1385,7 +1404,8 @@ PR 경계는 3판에서 다시 정했다(V1-4). 2판은 PR1 을 「세션 헤더
   가 열린 홀드 목록을 받는다), `/api/status` 와 `/api/health` 의 `irreversible_holds`, 잡 문서 `hold`, `rcm release-hold` 다.
 - 사람이 보는 것은 PR3 이 만든다. 웹 「Needs a look」 항목과 칩, `rcm check` 경고 줄, `rcm doctor` 줄과 `--json` 키, `rcm wait`
   stderr 줄과 `--return-on-action` 의 4 다.
-- 알림도 PR1 이 만든다(§4.12). 홀드를 만든 잡의 잡 끝 알림에 `RCM_HOLD` · `RCM_HOLD_GROUP` 과 본문 한 줄을 싣는다. 규칙이 `on` 에
+- 알림도 PR1 이 만든다(§4.12). 모든 알림이 env `RCM_EVENT` · `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 와 URL 본문 `event` · `hold` 를
+  늘 싣고, 홀드를 만든 잡의 잡 끝 알림이면 `RCM_HOLD=1` 과 그룹 · 한 줄이 찬다. 규칙이 `on` 에
   `irreversible_hold` 를 적었으면 그 규칙은 홀드마다 따로 한 번 부른다.
 
 ### 4.9 DB v26 (결정 265 · 271 · 273 · 327 · 339-a · 339-d, PR1 이 올린다)
@@ -1468,13 +1488,13 @@ PR1 의 로그 라우트는 `X-RCM-Log-Offset` 을 읽지 않는다(§4.5 PR 경
 
 | 계약 | 4판에서 더한 것 |
 |---|---|
-| 워커 프로토콜 2 · `POST /worker/heartbeat` 요청 | `seq`(정수 ≥ 1, 세션이 있으면 필수), `claims_settled`(정수 ≥ 0, 세션이 있으면 필수). 형식이 틀리면 400(`error` 만) |
-| 워커 프로토콜 2 · `POST /worker/claim` 요청 | `claim_seq`(정수 ≥ 1, 세션이 있으면 필수) |
+| 워커 프로토콜 2 · `POST /worker/heartbeat` 요청 | `seq`(1 ≤ 값 ≤ 2^53 − 1), `claims_settled`(0 ≤ 값 ≤ 2^53 − 1), 세션이 있으면 둘 다 필수. 둘 다 JSON 정수여야 하고 `true` · `false` 는 정수로 치지 않는다(오늘 `jobs` 목록 검사와 같은 `isinstance(x, bool)` 거절, `remote_workers.py:938-941`). 어기면 400(`error` 만), 반영 0 · `heard` 안 올림. `claims_settled ≤ 그 세션이 낸 가장 큰 claim_seq` 는 워커 쪽 불변식이고 워커 시험이 잠근다. 서버는 이 관계를 400 으로 검사하지 않는다 — 가다 끊겨 서버에 닿지 못한 claim 도 워커에서는 끝난 claim 이라, 서버가 본 가장 큰 `claim_seq` 와 견주면 맞는 heartbeat 를 거절한다. 서버가 본 것보다 큰 값은 「없음」 판정을 넓히지 않는다(판정은 서버가 받은 `J.claim_seq` 가 `claims_settled` 이하인 J 만) |
+| 워커 프로토콜 2 · `POST /worker/claim` 요청 | `claim_seq`(JSON 정수, bool 아님, 1 ≤ 값 ≤ 2^53 − 1, 세션이 있으면 필수). 어기면 400(`error` 만) |
 | DB | `jobs.claim_seq` |
 | 설정 키 | `[[notify]] on` 이 종료 상태와 함께 `irreversible_hold` 를 받는다(opt-in). `on` 을 안 적은 규칙의 기본은 그대로다 — `irreversible_hold` 는 기본에 들지 않는다(6차) |
-| 알림 훅 env | 모든 알림에 `RCM_EVENT`(`job_finished` · `irreversible_hold`). 홀드를 만든 잡의 잡 끝 알림에 `RCM_HOLD=1` · `RCM_HOLD_GROUP=<그룹>`. `irreversible_hold` 알림(opt-in)에 `RCM_HOLD_GROUP` · `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`(로컬 레인이면 빈 값) |
-| 알림 URL 본문 | 모든 알림에 `event`. 홀드를 만든 잡의 잡 끝 알림 본문에 한 줄 `group held — run rcm release-hold <job>`. `irreversible_hold` 알림에 `hold {group, scope, cause, worker, since, release_command}` |
-| 감독자(내부, 얼리지 않음) | 실행 꼴 `[sys.executable, "-I", <job_supervisor.py 경로>, …]`, 종료 `SUPERVISOR_NOT_STARTED_EXIT` 125 와 첫 줄 표지 `[rcm] supervisor: not started: <code>` — 같은 판의 러너만 읽는다 |
+| 알림 훅 env | 모든 알림(잡 끝 · opt-in `irreversible_hold`)에 늘 넷: `RCM_EVENT`(`job_finished` · `irreversible_hold`), `RCM_HOLD`(알림을 만들 때 그 잡의 홀드가 열려 있으면 `1`, 아니면 `0`), `RCM_HOLD_GROUP`(그 홀드의 그룹, 아니면 빈 값), `RCM_HOLD_NOTE`(`group held — run rcm release-hold <job>`, 아니면 빈 값) — 키 집합은 홀드와 상관없이 같다. opt-in `irreversible_hold` 알림에만 둘을 더한다: `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`(로컬 레인이면 빈 값) |
+| 알림 URL 본문 | 모든 알림에 늘 `event` 와 객체 `hold {held, group, note}`(뜻은 위 세 키와 같다. 홀드가 없으면 `{held: false, group: "", note: ""}`). opt-in `irreversible_hold` 알림의 `hold` 에만 `scope` · `cause` · `worker` · `since` · `release_command` 를 더한다 |
+| 감독자(내부, 얼리지 않음) | 실행 꼴 `[sys.executable, "-I", <job_supervisor.py 경로>, …]`, 종료 `SUPERVISOR_NOT_STARTED_EXIT` 125 와 파이프 첫 바이트부터의 표지 `[rcm] supervisor: not started: <code>` — 같은 판의 러너만 읽는다 |
 | M5t-c 343 | 짝지은 토큰의 `session_fenced` · `protocol_required` 에 `pair_reject_mac`(M5t-c 가 정의 · 얼림). 짝지은 워커의 종료 코드는 검증된 펜싱 0 · 검증된 `protocol_required` 3, 검증 안 된 것은 프로세스 안 재시도(§4.7) |
 
 ### 4.11 기존 결정과의 관계
@@ -1493,7 +1513,7 @@ PR1 의 로그 라우트는 `X-RCM-Log-Offset` 을 읽지 않는다(§4.5 PR 경
 | M5e 산출물 「결과와 무관」 | 그대로. `ready` 조건만 좁힘(결정 275) |
 | PLAN 「fail-open 금지」 「순수 계산 모듈은 … `scripts/mutcheck.py` 로 확인」(`PLAN.md:528`) | 2판이 더한 규칙마다 변이(§7.4, V1-10) |
 | 부모 명세 3판 M8 「서비스가 되살리지 않는 종료 코드」 | M5t-c 결정 303 이 「펜싱 · 확실한 신원 거절」로, 317 이 「펜싱 · 인증된 두 경우」로 좁혔다(F52). 틀린 MAC hello · 421 · 인증 안 된 응답은 종료 0 이 아니다. 이 명세의 0 은 펜싱 |
-| M5o 「알림」(결정 119 · 120, `[[notify]]` 는 잡 끝 상태) | 4판: 기본 사건은 그대로 잡 끝 하나다. 홀드를 만든 잡의 잡 끝 알림에 `RCM_HOLD` · `RCM_HOLD_GROUP` · 본문 한 줄을 싣고, 규칙이 `on` 에 적을 때만 부르는 opt-in 사건 `irreversible_hold` 를 더한다(결정 339-e, 6차). 잡 끝 알림의 조건 · 중복 막기는 그대로 |
+| M5o 「알림」(결정 119 · 120, `[[notify]]` 는 잡 끝 상태) | 4판: 기본 사건은 그대로 잡 끝 하나다. 모든 알림이 env `RCM_EVENT` · `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 와 본문 `event` · `hold` 를 늘 싣고(홀드를 만든 잡의 잡 끝 알림이면 `RCM_HOLD=1` · 그룹 · 한 줄), 규칙이 `on` 에 적을 때만 부르는 opt-in 사건 `irreversible_hold` 를 더한다(결정 339-e, 6차). 잡 끝 알림의 조건 · 중복 막기는 그대로 |
 
 ### 4.12 되돌릴 수 없는 잡의 그룹 홀드 (결정 330 · 339, 3판에서 327 을 바꿈)
 
@@ -1574,21 +1594,26 @@ PR1 의 로그 라우트는 `X-RCM-Log-Offset` 을 읽지 않는다(§4.5 PR 경
   released_by, reason}` 이고 잡 문서가 읽는다(§4.8). 서버 로그에도 한 줄을 남긴다. 4판: 홀드를 만든 커밋 뒤에, 잠금 밖에서 버스
   사건 `irreversible_hold`(새 kind, `{job_id}`)를 낸다.
 - 알림(4판, 결정 339-e): 3판의 「`[[notify]]` 는 부르지 않는다」를 바꿨다. 6차에서 Codex 와 논의해 기본 사건은 늘리지 않는다.
-  - 홀드를 만든 잡의 잡 끝 알림은 이미 간다. 그 알림의 env 에 `RCM_HOLD=1` 과 `RCM_HOLD_GROUP=<그룹>` 을 싣고 본문에 한 줄 `group
-    held — run rcm release-hold <job>` 을 싣는다. 이 한 줄은 훅 env `RCM_HOLD_NOTE` 와 URL 본문의 객체 `hold`(`group` · `note`)에 싣는다. `RCM_HOLD` 는 모든
-    알림에 늘 있다(홀드가 없으면 `0`, `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 는 빈 값 — `ENV_KEYS` 의 정확한 키 집합이 늘 같다).
-    opt-in `irreversible_hold` 알림도 같은 세 키를 싣는다(`RCM_HOLD=1`). 메인 세션이 정했다. 기존 규칙도 이것으로 호출이 늘지 않은 채 홀드를 안다.
-  - 모든 알림의 env 에 `RCM_EVENT`(`job_finished` 또는 `irreversible_hold`)를, URL 본문에 `event` 를 싣는다. 훅이 두 사건을 가를
-    수 있게 하려는 것이다.
+  - 모든 알림, 곧 잡 끝 알림과 opt-in `irreversible_hold` 알림의 훅 env 에 네 키가 늘 있다. 그래서 `ENV_KEYS` 의 정확한 키 집합은 홀드가
+    있든 없든 같고 넷만큼 커진다(`tests/test_notify_rules.py:59-88`).
+    - `RCM_EVENT`: `job_finished` 또는 `irreversible_hold`. 훅이 두 사건을 가를 수 있게 하려는 것이다.
+    - `RCM_HOLD`: 알림 env 를 만들 때 그 잡의 홀드가 열려 있으면 `1`, 아니면 `0` 이다.
+    - `RCM_HOLD_GROUP`: 그 홀드의 그룹이다. `RCM_HOLD=0` 이면 빈 값이다.
+    - `RCM_HOLD_NOTE`: 한 줄 `group held — run rcm release-hold <job>` 이다. `RCM_HOLD=0` 이면 빈 값이다.
+  - URL 본문에는 늘 `event` 와 객체 `hold` 가 있다. `hold` 는 `{held, group, note}` 이고 뜻은 위 세 키와 같다. 홀드가 없으면
+    `{held: false, group: "", note: ""}` 다.
+  - 홀드를 만든 잡의 잡 끝 알림은 이미 간다. 그 알림이 `RCM_HOLD=1`, 그룹, 한 줄을 싣는다. 기존 규칙도 이것으로 호출이 늘지 않은 채
+    홀드를 안다. 메인 세션이 정했다.
   - `irreversible_hold` 는 opt-in `on` 값이다. 규칙이 `on` 에 이 값을 적었고 `presets` 가 맞을 때만 그 규칙을 홀드마다 한 번
     부른다. 중복 막기 행은 `(job_id, "hold:" + 규칙 이름)` 이다. 규칙 이름에 `:` 가 없으므로 잡 끝 행과 겹치지 않는다(F86). 기동
     스캔에서 잡 끝 알림은 `hold:` 행을 세지 않는다(`list_unnotified_finished` 의 하위 질의에 `notify_name NOT LIKE 'hold:%'`).
     열린 홀드 가운데 그 규칙의 `hold:` 행이 없는 것은 보존 기간 안이면 보낸다.
-  - opt-in 알림의 env 는 그 잡의 알림 env(잡 상태, 요약 등 오늘 키)에 `RCM_EVENT=irreversible_hold`, `RCM_HOLD_GROUP`,
-    `RCM_HOLD_CAUSE`, `RCM_HOLD_WORKER` 를 더한 것이다. `RCM_HOLD_WORKER` 는 로컬 레인이면 빈 값이다. `RCM_SUMMARY` 는 「group G
-    is held: job #N (preset) on W closed without a stop confirmation — check W, then rcm release-hold N」이다. 영어이고 경로가
-    없다. URL 본문은 `{notify, event: "irreversible_hold", job, hold: {group, scope, cause, worker, since, release_command: "rcm
-    release-hold N"}}` 다.
+  - opt-in 알림의 env 는 그 잡의 알림 env(오늘 키와 위 네 키, `RCM_EVENT=irreversible_hold`)에 `RCM_HOLD_CAUSE` 와 `RCM_HOLD_WORKER` 를
+    더한 것이다. 이 둘은 이 사건에만 있고, 그 키 집합(`ENV_KEYS` 와 이 둘)은 새 시험 `tests/test_hold_notify_m5tb.py` 가 따로 잠근다.
+    `RCM_HOLD_WORKER` 는 로컬 레인이면 빈 값이다. `RCM_SUMMARY` 는 「group G is held: job #N (preset) on W closed without a stop
+    confirmation — check W, then rcm release-hold N」이다. 영어이고 경로가 없다. URL 본문은 `{notify, event: "irreversible_hold", job,
+    hold: {held: true, group, note, scope, cause, worker, since, release_command: "rcm release-hold N"}}` 다. `hold` 의 앞 세 칸은 모든
+    알림과 같고 뒤 다섯 칸이 이 사건에만 있다.
   - `on` 을 적지 않은 규칙의 기본은 그대로이고 `irreversible_hold` 는 기본에 들지 않는다. `on` 값 검증은 종료 상태와
     `irreversible_hold` 를 받는다.
   - 풀 때는 알리지 않는다. 사람이 풀었거나 워커가 확인한 것이고 사건과 감사 이력으로 남는다.
@@ -1642,21 +1667,41 @@ admin 이 푸는 길은 다음과 같다.
      supervisor: not started: parent_gone`(또는 `terminated`)을 쓰고 종료 `SUPERVISOR_NOT_STARTED_EXIT` = 125 로 끝난다(결정 339-c
      (3)). 닫힌 쪽이다. `Popen` 이 `OSError` 를 내면 같은 꼴로 `launch_executable_missing`, `launch_permission_denied`,
      `launch_failed` 가운데 하나를 쓰고 125 로 끝난다. 이 분류는 러너의 `_launch_error` 와 같다(`runner.py:71-82`).
-     - 러너는 리더가 125 로 끝났고 **그리고** 리더의 첫 출력 줄이 그 표지일 때만 감독자가 명령을 띄우지 않았다고 읽는다. 그때 러너
+     - 러너는 리더가 125 로 끝났고 **그리고** 파이프의 첫 바이트(오프셋 0)부터 그 표지가 나올 때만 감독자가 명령을 띄우지 않았다고 읽는다. 그때 러너
        플래그(lost, cancelled, timed_out)가 있으면 그 결과다. 표지가 `launch_*` 면 그 코드의 `RunnerError` 로 끝나 감독자가 없을
        때와 같은 요약 코드가 된다. `parent_gone` 이나 `terminated` 인데 플래그가 없으면 `RunnerError("launch_failed",
        error="SupervisorNotStarted")` 다.
      - 명령이 스스로 125 로 끝나면 첫 줄이 표지가 아니므로 명령의 125 그대로다. 명령이 뜨지 않았을 때만 표지 줄이 나오므로 표지
        줄이 명령 출력보다 먼저 나올 수는 없다.
+     - 표지를 위조할 수 있는 것은 자기 첫 출력으로 그 표지를 내고 125 로 끝나는 명령뿐이다. 이 감독자를 다시 부르는 래퍼(중첩
+       감독)가 그 예다. 그때 러너는 명령이 돌았는데도 미시작으로 읽어 결과 이름이 틀릴 수 있다. 그룹은 그래도 열리지 않는다. 표식
+       잡의 `group_gone` 은 늘 S7 의 ESRCH 로만 정하고 표지를 읽지 않는다. 감독자는 프로세스로 떴으므로 §4.6 의 「띄운 적 없음」에
+       들지 않는다. 남은 멤버는 S7 이 거둔다. 문서에 「`irreversible` 프리셋의 명령에서 감독자를 다시 부르지 않는다」를 적는다(§9).
+     - 감독자 자신의 시작 실패도 명령을 띄우기 전이면 같은 표지로 낸다. 감독자는 `os` · `sys` 밖의 import(`signal` · `subprocess` ·
+       `threading`), 처리기 걸기, 시작 확인, Popen 까지를 `try` 하나로 감싸고 그 안의 예외를 표지 `[rcm] supervisor: not started:
+       launch_failed` 와 125 로 바꾼다. Popen 이 돌아온 뒤에는 표지를 쓰지 않는다. 명령이 떴기 때문이다.
+     - 감독자 코드가 돌기 전의 실패, 곧 인터프리터가 파일을 못 열거나(종료 2, `can't open file`) 파일이 컴파일되지 않는 경우(종료 1,
+       `SyntaxError`)는 표지를 낼 수 없다. 러너가 띄우기 전에 파일이 있는지 보고(`SupervisorMissing`), `tests/test_job_supervisor_m5tb.py`
+       가 그 파일을 `-I` 로 띄워 보며 `scripts/smoke_install.sh` 가 설치본에서 같은 것을 본다. 그래도 일어나면 결과는 리더의 종료 1 · 2
+       그대로 `failed` 이고 잡 로그에 traceback 이 남는다. 돌지 않은 잡을 실패로 보일 뿐 돈 잡을 안 돈 것으로 보이지 않는다. 출력 모양으로
+       가르는 규칙(「traceback 으로 시작하면 `launch_failed`」)은 두지 않는다. 명령 자신의 traceback 과 가를 수 없고 돈 잡을 안 돈 것으로
+       읽는 쪽으로 틀리기 때문이다.
      - 125 를 고른 근거는 POSIX `env` 와 `nohup` 이 도구 자체의 실패에 쓰는 값이라는 점이다. 명령이 고르는 일이 드물고, 드물게
        겹쳐도 표지 줄이 가른다.
      - 버린 안은 둘이다. 종료 1(3판)은 명령의 실패와 같다. 별도 파이프 핸드셰이크(`pass_fds` 로 준비 바이트를 보냄)는 더
        정확하지만 러너가 다룰 fd 가 하나 더 생긴다. 표지 줄로 같은 것을 가를 수 있다.
   3. `Popen(argv)` 로 명령을 띄우고 표준 입출력을 상속한다. 4판: `Popen` 이 돌아오면, 곧 명령의 exec 가 성공하면 SIGTERM 이 이미
-     적혀 있는지 본다(결정 339-c (1), V2-2). 적혀 있으면 그룹에 SIGTERM 을 한 번 보낸다. 감독자 자신은 처리기를 걸어 두었으므로
+     적혀 있는지 본다(결정 339-c (1), V2-2). 적혀 있으면 아래 규칙대로 그룹에 SIGTERM 을 한 번 보낸다. 감독자 자신은 처리기를 걸어 두었으므로
      적기만 한다. 그래서 시작 확인 뒤, Popen 전의 창에 온 SIGTERM 도 명령에 닿는다. 그 창의 SIGTERM 은 fork 와 exec 사이의
      자식에게 가면 사라지므로 Popen 뒤에 다시 보내는 것이 유일한 길이다. 처리기를 걸기 전, 곧 인터프리터가 뜨는 중에 온 SIGTERM 은
      기본 동작으로 감독자를 끝낸다. 명령이 없으니 안전하다.
+     - 전달은 첫 SIGTERM 의 도착 시각(처리기가 적은 단조 시각)이 Popen 이 돌아온 시각보다 이를 때만 한다. 그 뒤에 온 SIGTERM 은 이미
+       exec 한 명령도 그룹의 한 멤버로 직접 받았다. Popen 호출 안, 곧 fork 에서 반환까지 온 SIGTERM 은 명령이 받았는지(exec 뒤)
+       잃었는지(exec 전) 가를 수 없으므로 전달한다. 그래서 명령은 그 SIGTERM 을 적어도 한 번, 많아야 두 번 받는다. 두 번은 SIGTERM 이
+       Popen 호출 안에 닿은 때뿐이고 이 Mac 에서 그 창은 최대 0.0034초다(F92). 두 번째 SIGTERM 은 멈춤 쪽으로만 가고 SIGKILL 시한(첫
+       SIGTERM + `grace_J`)은 바뀌지 않는다.
+     - 버린 안: Popen 동안 SIGTERM 을 막기(`signal.pthread_sigmask`). 막힌 신호 마스크는 fork 와 exec 를 넘어 명령에 상속되므로 명령이
+       SIGTERM 을 받지 못한다.
   4. 막는 `waitpid` 를 도는 스레드를 둔다. 자식이 끝나면 곧바로 깨운다. 폴링 sleep 으로 기다리면 잡 끝이 폴링만큼
      늦는다(F78).
   5. 본 루프는 `Event.wait(SUPERVISOR_POLL_SECONDS)` 마다 `getppid()` 를 본다. 부모가 죽으면 launchd, init, subreaper 아래로
@@ -1705,7 +1750,7 @@ PR 하나에 브랜치 하나, 워크트리 하나다. 같은 물결의 PR 은 �
 
 | PR | 브랜치 | 내용 | 시작 조건 | 물결 | 같이 도는 것 | owns | shared | 겹치는 파일과 머지 순서 | lane |
 |---|---|---|---|---|---|---|---|---|---|
-| PR0 | `docs/m5tb-result-loop-workplan` | 이 명세 + PLAN.md 편집 열 자리: ① `PLAN.md:1` 머리 판 `(v2.13, 2026-11-25)` → `(v2.14, <머지 날짜>)` ② `PLAN.md:14` 뒤에 `> **v2.14**` 문단(M5t-b 결과 고리 · 결정 256~279 · 320~339 · 350 · DB v26 · 워커 프로토콜 2 · 그룹 홀드 · 감독자 · 명세 `docs/m5tb-workplan.md`) ③ `PLAN.md:89` 잡 모델 그림 `lost(서버 재시작 중 죽음)` 에 원격 잡의 `lost` 원인(유예 만료 · 자기 멈춤 · 펜싱 · 재시작 이어받기) ④ `PLAN.md:121` 「잡은 서버 재시작을 넘어 살아남는다(… `running`·`cancelling` 이던 것은 `lost`)」 를 로컬 레인 잡으로 한정, 원격 잡은 끊김 유예. 표식 로컬 잡은 그 `lost` 에 그룹 홀드 ⑤ `PLAN.md:293` 시작 정리 문장에 같은 한정 ⑥ `PLAN.md:600` M5b-2 줄의 「timeout → down · 잡 lost · 재등록 = 옛 잡 lost」 에 「M5t-b 가 바꿈: timeout → down 만 · 잡은 유예 · 재등록은 명시한 이전 세션과 레거시 잡만」 ⑦ `PLAN.md:628` M5t-b 항목 「(명세 예정)」 → 명세 경로 · 결정 번호 · DB v26 · 한 문장, `PLAN.md:753` 결정 색인 「248 a~d · g 와 250 은 M5t-b 명세에 … 249 는 두 명세에 나눠 실을 예정」 → 「256~279 · 320~339 · 350 은 `docs/m5tb-workplan.md` §11 에 있다. 248 a~d · g · 249 의 v26 부분 · 250 은 그 §11 대응표가 이어받았다」(M5t-c 몫 문장은 M5t-c PR 이 고침) ⑧ 3판 `PLAN.md:129` 이유 목록에 `worker_unreachable_grace`(원격 잡의 워커와 연락이 끊겨 유예 중 — M5t-b 결정 276)를 더하고, 행동 가능 순서를 `needs_action → worker_down → worker_unreachable_grace → no_capable_machine → …` 로, `needs_action` 뜻에 「또는 그 잡의 그룹이 되돌릴 수 없는 잡의 확인 없는 닫힘으로 잡혀 있다(M5t-b 결정 330)」 ⑨ 3판 `PLAN.md:505` 웹 「Needs a look」 순서에 같은 자리(F70, V1-6) ⑩ 3판 `PLAN.md:127` 레인 · 그룹 줄에 「표식 잡이 확인 없이 닫히면 그 그룹은 `rcm release-hold` 까지 막힌다(M5t-b 결정 330)」 | — | 0 | M5t-c 명세 PR #269 | `docs/m5tb-workplan.md` | `PLAN.md`(위 열 자리. M5t-c 명세 PR 도 `:1` · `:629` · `:753` 를 고친다) | M5t-c 명세와 PLAN 머리 · 색인 줄이 겹침 → 먼저 머지한 쪽 뒤에 다른 쪽이 dev 를 합쳐 다시 맞춤(판 번호는 뒤에 머지하는 쪽이 v2.15) | short — 문서만, `src/` 변경 0 |
+| PR0 | `docs/m5tb-result-loop-workplan` | 이 명세 + PLAN.md 편집 열 자리: ① `PLAN.md:1` 머리 판 `(v2.14, 2026-11-26)` → `(v2.15, <머지 날짜>)` ② `PLAN.md:15`(M5t-c 의 `> **v2.14**` 문단) 뒤에 `> **v2.15**` 문단(M5t-b 결과 고리 · 결정 256~279 · 320~339 · 350 · DB v26 · 워커 프로토콜 2 · 그룹 홀드 · 감독자 · 명세 `docs/m5tb-workplan.md`) (아래 줄 번호는 M5t-c 명세 #269 가 머지된 dev `c675794` 기준) ③ `PLAN.md:90` 잡 모델 그림 `lost(서버 재시작 중 죽음)` 에 원격 잡의 `lost` 원인(유예 만료 · 자기 멈춤 · 펜싱 · 재시작 이어받기) ④ `PLAN.md:122` 「잡은 서버 재시작을 넘어 살아남는다(… `running`·`cancelling` 이던 것은 `lost`)」 를 로컬 레인 잡으로 한정, 원격 잡은 끊김 유예. 표식 로컬 잡은 그 `lost` 에 그룹 홀드 ⑤ `PLAN.md:294` 시작 정리 문장에 같은 한정 ⑥ `PLAN.md:601` M5b-2 줄의 「timeout → down · 잡 lost · 재등록 = 옛 잡 lost」 에 「M5t-b 가 바꿈: timeout → down 만 · 잡은 유예 · 재등록은 명시한 이전 세션과 레거시 잡만」 ⑦ `PLAN.md:629` M5t-b 항목 「(명세 예정)」 → 명세 경로 · 결정 번호 · DB v26 · 한 문장, `PLAN.md:754` 결정 색인 「248 a~d · g 와 250 은 M5t-b 명세에 실을 예정이고 249 의 M5t-b 부분도 그렇다」 → 「256~279 · 320~339 · 350 은 `docs/m5tb-workplan.md` §11 에 있다. 248 a~d · g · 250 과 249 의 M5t-b 부분(v26)은 그 §11.1 대응표가 이어받았다」(M5t-c 몫 문장은 #269 가 이미 고침) ⑧ 3판 `PLAN.md:130` 이유 목록에 `worker_unreachable_grace`(원격 잡의 워커와 연락이 끊겨 유예 중 — M5t-b 결정 276)를 더하고, 행동 가능 순서를 `needs_action → worker_down → worker_unreachable_grace → no_capable_machine → …` 로, `needs_action` 뜻에 「또는 그 잡의 그룹이 되돌릴 수 없는 잡의 확인 없는 닫힘으로 잡혀 있다(M5t-b 결정 330)」 ⑨ 3판 `PLAN.md:506` 웹 「Needs a look」 순서에 같은 자리(F70, V1-6) ⑩ 3판 `PLAN.md:128` 레인 · 그룹 줄에 「표식 잡이 확인 없이 닫히면 그 그룹은 `rcm release-hold` 까지 막힌다(M5t-b 결정 330)」 | — | 0 | M5t-c 명세 PR #269 | `docs/m5tb-workplan.md` | `PLAN.md`(위 열 자리) | M5t-c 명세 PR #269 가 먼저 머지됐다(`c675794`, PLAN v2.14 · 머리 · M5t-c 항목 · 색인). 이 PR 은 dev 를 합친 뒤 v2.15 로 고친다 | short — 문서만, `src/` 변경 0 |
 | PR1 | `feat/worker-session-fencing-grace` | §4.1~§4.4(7 의 큐 보내기 빼고) · §4.7 · §4.12(서버 쪽) · §4.13: DB v26 전부(`orphan_unverified` 칸 · `irreversible_holds` 표 포함), 세션 · 펜싱 · 좁은 확인 · 이름 대조 403 · register 순서(`pair_proof` 자리 비워 둠) · 첫 등록의 레거시 닫기, `_heard_lock` · `heard` · `heard_legacy` · 서버 유예(단조) · 취소 미확인 범위, 얼림(로컬 레인 `irreversible` 포함), heartbeat `closed_jobs`(`had_cancel`) · 전체 기한, 감시 스레드 · m · L(3판 공식) · G 하한 · 기본 G = max(600, L + 35) · 표식 잡 grace 상한, 관찰자 `self_stop` · `closed_stop` · `spawning` · `spawned`, 러너의 Popen 직전 확인 · 단조 시계 · 감독자 감싸기 · 표식 잡 거두기 · `group_gone`, 감독자 모듈, 세션 폴더(`lock` · `owner.json` · `ok_at.json` · `claim.json` · `proc.json` 두 번 쓰기), Linux `/proc` · `LC_ALL=C TZ=UTC ps` 신원, 고아 정리 · 재확인 · `previous_sessions` · `unverified_sessions` · `orphan_unverified`, 그룹 홀드(만들기 · 확인으로 풀기 · claim 배제 · 오래된 잡 지우기 제외 · 사건 · 합성 그룹 · `POST /jobs/{id}/release-hold` · `rcm release-hold`), 로컬 `recover_on_start` 홀드, 프로토콜 2 · 등록 전 확인(폴더는 검사 뒤) · 종료 0/3 · `protocol_required` 문구, 레거시 호환, `LOST_CODES` · `orphan_unverified` 와 그 번역, 설정 키 둘, 문서(`docs/configuration.md` 1185 · 1386 근처, `docs/operating.md:1004` · 홀드 풀기 절, 템플릿 둘), 오늘 계약 시험 고쳐 쓰기(§7.3). 로그 라우트는 세션 헤더만 검사하고 오늘처럼 덧붙임(오프셋 헤더는 읽지 않음, §4.5 PR 경계), 못 보낸 보고는 오늘처럼 메모리. 4판: heartbeat `seq` · `claims_settled` · claim `claim_seq`(워커 · 서버 · `jobs.claim_seq`), T5 의 새 규칙과 표식 잡 홀드, `_fresh_claims` 는 레거시만, 세션별 잠금 · janitor 틱 상한, 감독자 (1)~(4)(Popen 창 전달 · 명령 끝 뒤 쓸기 · S7 시계 · 종료 125 + 표지 · `-I` 파일 경로), 홀드 그룹은 잡 행에서 · 레거시 규칙, 홀드 알림(`[[notify]] on` 값 · 사건 · env · 본문 · 기동 스캔), 홀드의 기계 판독 표면(`compute_queue` 의 `needs_action` · `action.code` `irreversible_hold` · `blocked_by`, `/api/status` · `/api/health` `irreversible_holds`, 잡 문서 `hold`) | PR0 머지 **그리고** M5t-a PR1~PR7 전부 dev 머지(= v0.11.0 에 들 내용 전부, F54 — PR3 · PR4 · PR6 이 `config.py` · `capabilities.py` · `server.py` · `cli.py` · `docs/configuration.md` · `docs/operating.md` 를 고친다) | 1 | — | `store.py` `remote_workers.py` `server.py` `capabilities.py` `config.py` `core/model.py` `core/outcome.py` `client.py` `remote_worker.py` `runner.py`(Popen 직전 확인 · `mono_fn` · 감독자 · `spawning` · `spawned` · 거두기) `worker.py`(로컬 관찰자의 두 갈래 · 로컬 claim 얼림) `job_supervisor.py`(새) `cli.py`(cmd_worker · `release-hold`) `web/i18n.js`(outcome 항목) `templates/server.toml` `examples/server.toml` `docs/configuration.md` `docs/operating.md` `tests/tcp_relay.py`(새) `tests/test_worker_session_m5tb.py`(새) `tests/test_worker_selfstop_m5tb.py`(새) `tests/test_job_supervisor_m5tb.py`(새) `tests/test_irreversible_hold_m5tb.py`(새) `tests/test_e2e_worker_grace_m5tb.py`(새) `tests/test_worker_lost.py` `tests/test_e2e_worker.py` + 세션을 싣게 고치는 워커 시험 도우미 `core/queue.py`(홀드 사유) `core/status.py`(최상위 키 · 대기 행 `action`) `notify.py` `core/notify.py` `events.py` `tests/test_hold_notify_m5tb.py`(새) `tests/test_hb_order_m5tb.py`(새) | `CHANGELOG.md` `scripts/mutcheck.py` `tests/test_docs_m5tb.py`(새, PR1 이 만들고 뒤 PR 이 더함) `tests/test_examples.py` `tests/test_worker_api.py`(register `:542-549` · heartbeat `:1204` 잠금에 키 더하기) `tests/test_worker_client.py`(`:183-190`) `tests/test_config.py`(`:905`) `tests/test_outcome.py`(`PLAUSIBLE` `:48-85` · `PINNED` `:88-214` · 전수 잠금 `:220-231` · 필수 인자 `:511` · 번역 `:553`, F72) `tests/test_runner.py`(시험 도우미 `group_gone` `:241` 을 같이 씀) `tests/test_status_schema.py`(최상위 키 `:261-268`) `tests/test_notify_rules.py`(ENV_KEYS `:59-88`) | M5t-a 는 시작 전에 다 머지돼 있어 겹침 없음. M5t-c 의 register(`pair_proof`) · DB v27 은 이 PR 뒤(M5t-c 결정 299) | full — DB v26 · 워커 프로토콜 · 동시성(heartbeat · claim · janitor · 신호 · 감독자) · 새 admin 라우트 · 알림 · 상태 키 |
 | PR2 | `feat/worker-log-offset-outbox` | §4.4 의 7(죽은 세션 D 의 큐 · 응답 표 · 등록 대기 300초) · §4.5 · §4.6: 스트림 스풀 · `outbox.json`(`acked`) · **잡마다** 보내는 스레드 · 순서 있는 큐 · 빈 본문 질의 · 응답표 · finish 상한 · 재전송 창, 서버 로그 쓰기 절차(잡별 잠금 · 자리 쓰기 · 되자르기 · 짧은 파일 · 「세션이 아직 현재」 커밋 조건 · 오프셋 헤더 400) · 기동 자르기 · 끝난 잡의 짧은 파일 점검, `log_complete` · `late_result`(트랜잭션 + 홀드 풀기) · `finished_at` 자르기 · 산출물 재업로드와 `ready` 조건(파일까지), 준비 단계 `snapshot_unreachable`, M5q exec 뒤 큐 이어 보내기, 문서(`docs/configuration.md` 의 원격 워커 로그 절). 4판: 로그 읽는 쪽 `log_file_bytes` 상한(`log_bytes` · `tail_lines` 끝 길이 인자) | PR1 머지 | 2 | PR3 | `store.py` `remote_workers.py` `remote_worker.py` `client.py` `server.py`(log 라우트 · `_terminal_view` · 기동 자르기 · 끝난 잡 점검) `core/status.py`(`recent_json`) `docs/configuration.md` `tests/test_worker_log_offset_m5tb.py`(새) `tests/test_worker_outbox_m5tb.py`(새) `tests/test_e2e_worker_outbox_m5tb.py`(새) `worker.py`(`tail_lines` 끝 길이 인자) `tests/test_log_read_cap_m5tb.py`(새) | `CHANGELOG.md` `scripts/mutcheck.py` `tests/test_docs_m5tb.py` `tests/test_status_schema.py`(`RECENT_KEYS` `:91`) `tests/test_status_outcome.py`(`NEW_RECENT` `:162`) | PR3 와 owns 겹침 0(F87 · `tools/dev_batch.py` 로 확인). 머지 순서 PR2 → PR3(RL28 · RL29 의 e2e 가 PR2 키를 읽는다) | full |
 | PR3 | `feat/queue-show-unreachable-worker` | §4.8 의 사람용 화면: 사유 `worker_unreachable_grace` · ETA null · `ACTIONABLE` 두 목록과 잠근 시험(F58), 문구(웹 · `rcm top` · `rcm wait`), `log_complete`=false · `late_result` 사람용 줄, 홀드의 사람용 화면(웹 「Needs a look」 · 칩, `rcm check` 경고 줄, `rcm doctor` 줄 · `--json` 키, `rcm wait` 줄), 문서(`docs/operating.md` 두 절) | PR1 머지 | 2 | PR2 | `core/model.py` `core/queue.py`(`worker_unreachable_grace`) `core/render_text.py` `cli.py`(wait · logs · `rcm check` 줄) `doctor.py` `core/doctor.py` `src/remote_ci_monitor/web/app.js` `web/i18n.js` `docs/operating.md` `tests/test_queue_unreachable_m5tb.py`(새) `tests/test_hold_display_m5tb.py`(새) `tests/web/unreachable_m5tb.test.js`(새) `tests/test_action_marker_m5s.py`(`:139-141`) | `CHANGELOG.md` `scripts/mutcheck.py` `tests/test_docs_m5tb.py` `tests/test_queue_m5n.py`(`:135`) `tests/test_render_m5n.py`(`:199`) `tests/web/stall.test.js`(`:192-194`) `tests/web/m5n.test.js`(`:38-41`) `tests/test_doctor_cli.py`(`TOP_KEYS` `:993-1017`) | PR2 뒤 머지 | full — 웹 UI |
@@ -1826,7 +1871,7 @@ PR 하나에 브랜치 하나, 워크트리 하나다. 같은 물결의 PR 은 �
 | RL51 | [감독자 창 · 쓸기 S6 · S7 · 339-c] 표식 잡에서 (a) 감독자가 시작 확인을 지난 뒤 명령 Popen 전에 SIGTERM 을 받는다(주입 훅) (b) 명령이 SIGTERM 에 곧 끝나고 SIGTERM 을 무시하는 자식이 남는다 — 워커가 산 채 · 워커가 `kill -9` 된 채 각각 (c) 명령이 SIGTERM 을 받고 `grace_J` 를 거의 다 쓴 뒤 끝나고 무시하는 자식이 남는다 | (a) 명령이 뜬 직후 SIGTERM 을 한 번 받는다(명령의 TERM 처리기가 쓰는 표지 파일 1개). (b)(c) 남은 자식이 첫 SIGTERM + `grace_J` + 0.5초 안에 사라진다 — 워커가 죽은 경우는 감독자가 쓸고(감독자도 −9 로 끝남), 산 경우는 러너 S7 의 SIGKILL 시한이 리더 끝이 아니라 첫 SIGTERM 부터다(2·`grace_J` 가 나오지 않는다). 셋 다 플래그 → 그룹 소멸 ≤ `grace_J` + 4초. 근거: 결정 331 · 339-c · F56 · F84 · F88 · 되돌릴 수 없는 결과(아무도 끊지 않는 고아) | e2e: 실제 러너 · 감독자, pid 생존 시각, 표지 파일 + 단위: 감독자 모듈(훅 · 부모 pid 주입) | PR1 |
 | RL52 | [감독자 시작 실패 · 환경 · 339-c] (a) 감독자가 시작할 때 부모가 기대한 pid 가 아니다 · 이미 SIGTERM 을 받았다 (b) 명령의 argv[0] 이 없다 · 실행 권한이 없다 (c) 명령이 스스로 종료 코드 125 로 끝난다 (d) 잡 env 의 `PYTHONPATH` 와 워크스페이스 맨 위에 가짜 `signal.py` 가 있다 (e) rcm 을 설치하지 않고 소스 트리에서 `PYTHONPATH` 로 띄운 워커 | (a) 명령 0회, 감독자 종료 125 + 잡 로그 첫 줄 `[rcm] supervisor: not started: parent_gone`(또는 `terminated`), 결과는 러너 플래그대로(lost · cancelled) (b) 잡은 감독자 없을 때와 같은 요약 코드(`launch_executable_missing` · `launch_permission_denied`, `failed`) — 감독자의 실패가 명령의 종료 1 로 보이지 않는다 (c) 잡은 `failed`, 종료 코드 125(명령의 것) — 감독자 실패로 바뀌지 않는다 (d) 감독자는 가짜 모듈을 읽지 않고 명령은 받은 env 그대로 (e) 감독자가 뜨고 명령이 돈다. 근거: 결정 331 · 339-c · F83 · `runner.py:71-82` | 단위: 감독자 모듈(부모 pid · 신호 주입), 실제 러너 + 가짜 argv, env · 워크스페이스 표지 | PR1 |
 | RL53 | [홀드 그룹 · 339-d] 표식 잡이 도는 중 (a) 그 프리셋을 설정에서 지우고 reload (b) 표식만 지우고 reload (c) 사용자 그룹 이름을 바꾸고 reload — 그 뒤 잡이 확인 없이 닫힌다. 별도로 v26 이전에 claim 된 레거시 잡(세션 · 저장값 없음, 그룹 NULL)이 닫히고 그 프리셋이 (d) 지금 표식 (e) 설정에 없음 (f) 표식 없이 있음 | (a)(b)(c) 홀드 1, 홀드의 그룹 · 범위 · 풀은 claim 때 잡 행에 남은 값(합성이면 `irreversible:<이름>` · `global`) — 지금 설정 값이 아니다. 같은 그룹의 대기 잡 claim 0건. (d)(e) 홀드 1, 그룹 `irreversible:<프리셋>` · `global`. (f) 홀드 0(일반 잡). 아무 잡도 막지 않는 그룹(`unknown:<job>` 류)이 생기지 않는다. 근거: 결정 330 · 339-d · F73 · F89 · 되돌릴 수 없는 결과(두 번 실행) | 단위: 설정 reload · store claim · 닫기, DB `irreversible_holds` | PR1 |
-| RL54 | [홀드 알림 · 339-e] 표식 잡이 확인 없이 닫혀 홀드가 생긴다. `[[notify]]` 규칙 셋: `on` 을 안 적은 것 · `on = ["lost"]` · `on = ["irreversible_hold"]`. 알림을 보내기 전에 서버를 강제로 죽이고 다시 띄운다. 별도로 보낸 뒤 다시 띄운다 | `on` 을 안 적은 규칙과 `on = ["lost"]` 규칙은 그 잡의 잡 끝 알림을 한 번 받고(`RCM_EVENT=job_finished`) 그 알림에 `RCM_HOLD=1` · `RCM_HOLD_GROUP` 과 본문 한 줄 `group held — run rcm release-hold <job>` 이 실린다 — 훅 호출은 규칙마다 1회이고 홀드 알림이 따로 오지 않는다(6차). `irreversible_hold` 규칙은 홀드 알림을 정확히 한 번 받는다(`RCM_EVENT=irreversible_hold`, `RCM_HOLD_GROUP` · `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`, URL 본문 `event` · `hold`). 못 보낸 알림은 기동 스캔이 보내고, 보낸 것은 다시 보내지 않는다. 홀드 알림 행이 잡 끝 알림의 기동 스캔을 막지 않는다. 근거: 결정 339-e(6차) · `store.py:3049-3063, 3081-3088` · `notify.py:305` | 단위: 가짜 훅 호출 수 · env · 본문, store 다시 열기 | PR1 |
+| RL54 | [홀드 알림 · 339-e] 표식 잡이 확인 없이 닫혀 홀드가 생긴다. `[[notify]]` 규칙 셋: `on` 을 안 적은 것 · `on = ["lost"]` · `on = ["irreversible_hold"]`. 알림을 보내기 전에 서버를 강제로 죽이고 다시 띄운다. 별도로 보낸 뒤 다시 띄운다 | `on` 을 안 적은 규칙과 `on = ["lost"]` 규칙은 그 잡의 잡 끝 알림을 한 번 받고(`RCM_EVENT=job_finished`) 그 알림에 `RCM_HOLD=1` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE`(`group held — run rcm release-hold <job>`)와 URL 본문 `hold {held: true, group, note}` 가 실린다. 홀드가 없는 다른 잡의 잡 끝 알림도 키 집합이 같다(`RCM_HOLD=0` · 빈 값 · `held: false`) — 훅 호출은 규칙마다 1회이고 홀드 알림이 따로 오지 않는다(6차). `irreversible_hold` 규칙은 홀드 알림을 정확히 한 번 받는다(`RCM_EVENT=irreversible_hold`, 모든 알림의 네 키에 `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER` 를 더한 키 집합, URL 본문 `event` · `hold` 의 `held` · `group` · `note` · `scope` · `cause` · `worker` · `since` · `release_command`). 못 보낸 알림은 기동 스캔이 보내고, 보낸 것은 다시 보내지 않는다. 홀드 알림 행이 잡 끝 알림의 기동 스캔을 막지 않는다. 근거: 결정 339-e(6차) · `store.py:3049-3063, 3081-3088` · `notify.py:305` | 단위: 가짜 훅 호출 수 · env · 본문, store 다시 열기 | PR1 |
 | RL55 | [로그 읽기 · 339-f] 원격 잡의 로그 조각이 서버 파일에 써졌지만 커밋 전이다(쓰기와 커밋 사이 멈춤 주입) · 커밋이 실패해 되자르기 전이다. 그동안 `rcm logs N` · 웹 로그 보기(`GET /jobs/N/log?offset=`) · 상태의 로그 꼬리 · 잡 문서 꼬리를 읽는다 | 읽는 쪽은 `log_file_bytes` 까지만 받는다 — `X-RCM-Next-Offset` ≤ `log_file_bytes`, 꼬리에 커밋 안 된 줄 0. 커밋 뒤 다음 읽기에 그 바이트가 온다(빠짐 · 중복 0). 마커 사건(SSE)은 커밋 뒤에만 나간다. 로컬 레인 잡 · 레거시 잡(`log_file_bytes` NULL)은 오늘처럼 파일 길이까지. 근거: 결정 323 · 339-f · `server.py:5237-5256, 3789, 3851` | 단위(HTTP): 멈춤 주입, 응답 바이트 · 헤더 | PR2 |
 | RL56 | [유예 닫기와 잠금 · 339-g] 죽은 세션 하나의 busy 잡 30개가 같은 틱에 유예를 넘는다. 그 닫기 트랜잭션 하나를 멈춰 둔 동안(주입) 다른 세션의 heartbeat 가 온다. 별도로 그 세션의 heartbeat 가 닫기 판정 뒤 · 커밋 전에 온다 | 다른 세션의 heartbeat 는 멈춘 닫기가 풀리기 전에 2xx 를 받는다. 한 틱에 닫히는 잡은 많아야 20개, 나머지는 다음 틱. 그 세션의 heartbeat 는 그 잡 하나의 닫기가 끝난 뒤 처리되고, 닫기 직전 다시 본 `heard` 가 판정 뒤에 올랐으면 그 잡은 닫히지 않는다. 닫힌 잡마다 상태 하나, 홀드 행은 표식 잡에만. 근거: 결정 328 · 339-g | 단위: store 트랜잭션 멈춤 주입, 두 스레드, 주입 시계 | PR1 |
 
@@ -1961,7 +2006,7 @@ Excluded (rare): 감독자가 명령 끝 뒤 쓸기를 하려는데 `ps` 가 없
 | `tests/test_config.py:905` `WORKER_KEYS` | 워커 키 셋 | `disconnect_grace_seconds` 를 더하고 하한 검증 시험 | PR1 |
 | `tests/test_outcome.py:543-569`(코드 ↔ 번역) | 오늘 코드 | `LOST_CODES` 셋 + `orphan_unverified` 의 번역이 있어야 초록 | PR1 |
 | 3판(V1-13, F72): `tests/test_outcome.py` `PLAUSIBLE`(`:48-85`) · `PINNED`(`:88-214`) 와 그 전수 잠금(`:220-222` · `:225-231`), 필수 인자 표 시험(`:511`) | 오늘 코드 전수 | 새 코드 넷(`worker_self_stopped {seconds}` · `worker_replaced {name}` · `snapshot_unreachable {}` · `orphan_unverified {name, seconds}`)의 그럴듯한 인자와 박힌 문장을 더함 — 문장은 PR1 이 정하고 그 뒤 바꾸면 사용자 글자가 바뀐다는 뜻 | PR1 |
-| `tests/test_notify_rules.py:59-88` `ENV_KEYS`(대조 `:154, :207`) | 잡 알림 env 키 집합 | `RCM_EVENT` 를 더함. 홀드를 만든 잡의 잡 끝 알림(+`RCM_HOLD` · `RCM_HOLD_GROUP`)과 `irreversible_hold` 알림(+`RCM_HOLD_GROUP` · `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`)의 키 집합은 새 시험이 따로 잠근다 | PR1 |
+| `tests/test_notify_rules.py:59-88` `ENV_KEYS`(대조 `:154, :207`) | 잡 알림 env 키 집합 | `RCM_EVENT` · `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 를 더함 — 홀드가 있든 없든 모든 알림의 정확한 키 집합이다. opt-in `irreversible_hold` 알림의 키 집합(`ENV_KEYS` 와 `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`)은 새 시험 `tests/test_hold_notify_m5tb.py` 가 따로 잠근다. `tests/test_notify.py:43` 의 부분 집합 검사는 그대로 | PR1 |
 | `tests/test_status_schema.py:261-268`(최상위 키) | 키 여섯 | `irreversible_holds` 를 더함 | PR1(3판은 PR3) |
 | 3판: dev `tests/test_doctor_cli.py:993-1017`(`TOP_KEYS`) | doctor JSON 최상위 키 | `irreversible_holds` 를 더함(`doctor_version` 1) | PR3 |
 | 3판: `tests/test_runner.py`(러너 계약 — 취소 · 시한 · 정지가 1초 점검 박자 · 벽시계 `now_fn` 을 가정한 시험이 있으면) | 벽시계 주입 | 점검 박자 · grace 는 `mono_fn` 주입으로 같은 결론(잡 시한은 그대로 `now_fn`). 시험 도우미 `group_gone`(`:241`)은 그대로 쓴다 | PR1 |
@@ -2055,7 +2100,7 @@ Excluded (rare): 감독자가 명령 끝 뒤 쓸기를 하려는데 `ps` 가 없
 | `hold-notify-missing` | 홀드 사건을 버스에 안 냄 | RL54 | PR1 |
 | `hold-notify-blocks-job-scan` | 기동 스캔이 `hold:` 행을 잡 끝 알림 행으로 셈 | RL54 | PR1 |
 | `hold-notify-default-on` | `config.py` `on` 을 안 적은 규칙의 기본에 `irreversible_hold` 를 넣음(4판 재료 꼴 — 6차에서 버림) | RL54 | PR1 |
-| `job-end-hold-env-missing` | 홀드를 만든 잡의 잡 끝 알림에 `RCM_HOLD` · `RCM_HOLD_GROUP` · 본문 한 줄을 싣지 않음 | RL54 | PR1 |
+| `job-end-hold-env-missing` | `core/notify.py` `notify_env` 가 그 잡의 열린 홀드를 보지 않음 — 홀드를 만든 잡의 잡 끝 알림에도 `RCM_HOLD=0` · 빈 `RCM_HOLD_GROUP` · 빈 `RCM_HOLD_NOTE` 와 본문 `held: false`(키는 늘 있으나 값이 홀드를 모름) | RL54 | PR1 |
 | `log-read-past-committed` | `log_bytes` 가 `log_file_bytes` 를 안 봄 | RL55 | PR2 |
 | `grace-close-global-lock` | 유예 닫기를 전역 잠금 하나로(3판 꼴) | RL56 | PR1 |
 
@@ -2108,7 +2153,7 @@ Excluded (rare): 감독자가 명령 끝 뒤 쓸기를 하려는데 `ps` 가 없
   있어야 읽는 잡 문서에만 싣는다.
 - 3판: F71 의 실측 줄 가운데 호스트 이름이 든 `uname` 출력은 옮기지 않았다. 명세에는 OS 판만 적는다.
 - 4판: 홀드 알림에는 잡 번호, 프리셋, 그룹, 원인 코드, 워커 이름, 명령 이름 `rcm release-hold N` 만 싣는다. 잡 끝 알림에 더하는
-  `RCM_HOLD` · `RCM_HOLD_GROUP` · 본문 한 줄과 opt-in `irreversible_hold` 알림의 env · URL 본문이 모두 그렇다.
+  `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` · URL 본문 `hold` 와 opt-in `irreversible_hold` 알림의 env · URL 본문이 모두 그렇다.
   `release_reason`(admin 이 쓴 글), 경로, 서버 URL 의 자격 정보는 싣지 않는다. `RCM_URL` 은 오늘 키 그대로다.
 
 ## 9. 위험
@@ -2146,10 +2191,11 @@ Excluded (rare): 감독자가 명령 끝 뒤 쓸기를 하려는데 `ps` 가 없
 | 옛 워커가 섞인 dev(같은 버전 문자열)에서 옛 워커가 2~4초마다 claim 409 로그를 찍는다 | 잡은 안 집는다(RL24). 출시 뒤에는 M5q 따라가기가 버전을 맞춘다 |
 | (새) claim 응답을 잃은 표식 잡은 T5 로 닫히며 홀드가 걸리고, 살아 있는 워커는 그 잡의 finish 를 보내지 않으므로 사람이 풀거나 워커를 다시 띄워야 풀린다 | 결정 339-b 가 받아들인 값 — 「없음」은 확인이 아니다. claim 응답을 잃는 일은 claim 요청 하나의 응답만 사라지는 경우라 드물고, 홀드는 대기열 · 웹 · `rcm check` · 알림(339-e)으로 바로 보인다. 4판의 `claims_settled` 로 「없음」 자체는 순서와 상관없이 참이 됐다(F82) — 홀드를 더 줄이는 것은 다음 명세의 몫(§12.5 노트) |
 | (새) 감독자가 명령 끝 뒤 쓸기로 그룹을 SIGKILL 하면 리더 종료가 −9 라 명령 자신의 종료 코드가 잡 결과에 남지 않는다 | 쓸기는 SIGTERM 을 받았거나 부모가 바뀐 뒤에만 — 그때 결과는 러너 플래그(취소 · 정지 · 자기 멈춤 · 시한)가 정하고 종료 코드는 정보일 뿐이다. 부모가 바뀐 경우는 결과를 받을 러너가 없다 |
-| (새) 레거시 잡이 닫힐 때 그 프리셋이 설정에서 사라졌으면 홀드가 걸린다(업그레이드 직후의 드문 겹침) | 모름은 닫힌 쪽(결정 339-d). 그룹이 사용자 그룹이면 같은 그룹의 다른 프리셋이 막히고, 합성 그룹이면 같은 이름의 프리셋이 다시 들어올 때만 막힌다. 화면 · 알림에 보이고 admin 이 푼다 |
-| (새) 홀드를 알림으로 아는 기본 길은 그 잡의 잡 끝 알림에 실린 `RCM_HOLD` · `RCM_HOLD_GROUP` · 본문 한 줄뿐이다 — 그 잡의 끝 상태를 `on` 에 고르지 않은 규칙은 홀드를 알림으로 모른다 | 홀드를 따로 받으려면 규칙의 `on` 에 `irreversible_hold` 를 적는다(opt-in). 새 사건을 기본으로 켜지 않은 것은 기존 훅이 같은 잡에 두 번 불려 호출 · 부작용이 겹치기 때문이다(6차, 결정 339-e). 홀드는 대기열 · 웹 · `rcm check` 에도 보인다. CHANGELOG 에 `RCM_EVENT` · `RCM_HOLD` 와 opt-in 값을 적는다 |
+| (새) 레거시 잡이 닫힐 때 그 프리셋이 설정에서 사라졌으면 홀드가 걸린다(업그레이드 직후의 드문 겹침) | 모름은 닫힌 쪽(결정 339-d). 그룹이 사용자 그룹이면 같은 그룹의 다른 프리셋이 막히고, 합성 그룹이면 같은 이름의 프리셋이 다시 들어올 때만 막힌다. 화면 · 알림에 보이고 admin 이 푼다. 기대되는 부작용: 프리셋이 사라진 합성 그룹 `irreversible:<프리셋>` 에는 새 잡이 들어오지 않으므로 이 홀드는 아무 잡도 막지 않는 필요 없는 홀드일 수 있다. 그래도 `irreversible_holds` · 「Needs a look」 · `rcm check` 경고 줄 · 알림에 남아 admin 이 `rcm release-hold` 로 풀 때까지 사람을 부른다. 모름을 열린 쪽으로 보는 대신 이 비용을 골랐다(339-d) |
+| (새) 홀드를 알림으로 아는 기본 길은 그 잡의 잡 끝 알림에 실린 `RCM_HOLD=1` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 와 URL 본문 `hold` 뿐이다 — 그 잡의 끝 상태를 `on` 에 고르지 않은 규칙은 홀드를 알림으로 모른다 | 홀드를 따로 받으려면 규칙의 `on` 에 `irreversible_hold` 를 적는다(opt-in). 새 사건을 기본으로 켜지 않은 것은 기존 훅이 같은 잡에 두 번 불려 호출 · 부작용이 겹치기 때문이다(6차, 결정 339-e). 홀드는 대기열 · 웹 · `rcm check` 에도 보인다. CHANGELOG 에 모든 알림에 늘 생기는 env 네 키(`RCM_EVENT` · `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE`)와 본문 `event` · `hold`, opt-in 값을 적는다 |
 | (새) M5t-c 343: 짝지은 워커의 펜싱 409 가 MAC 없이(위장 · 경로 위 변조) 오면 워커는 끝나지 않고 다시 시도한다 — 진짜 펜싱이었다면 옛 프로세스가 그만큼 더 산다 | 진짜 서버는 짝지은 토큰에 늘 MAC 을 단다(M5t-c PR1 `_send_error`) — 검증 실패는 위장 · 변조뿐이다. 그동안 옛 세션은 서버에서 펜싱돼 있어 아무것도 반영되지 않고(§4.2), 표식 잡은 그 세션의 자기 멈춤 · 서버 홀드가 지킨다. 교차 명세 의존: M5t-b 의 409 가 `_send_error` 를 우회하면 MAC 이 안 붙어 짝지은 워커가 펜싱에 끝나지 않는다 → M5t-b 의 모든 오류는 `ApiError` 길(§4.2, §6 #20). 검증 안 된 `protocol_required` 도 짝지은 워커는 종료 3 대신 프로세스 안에서 다시 시도한다(M5t-c J13) — 재시작 되풀이를 만들지 않는다(§4.7) |
 | (새) 감독자를 `-I` 파일 경로로 띄우므로 zip 으로만 깔린 rcm 은 감독자를 못 띄운다 | 러너가 파일이 없으면 `launch_failed`(`SupervisorMissing`)로 표식 잡을 띄우지 않는다(닫힌 쪽). rcm 설치(wheel · editable)는 파일이 있다(`scripts/smoke_install.sh` 가 감독자 파일 존재를 본다 — PR1) |
+| (새) 명령이 자기 첫 출력으로 감독자 표지를 내고 125 로 끝나면(중첩 감독) 러너가 돈 잡을 미시작으로 읽는다 | 결과 이름만 틀린다. 그룹 · 홀드는 표지를 읽지 않는다 — `group_gone` 은 S7 의 ESRCH 로만 정하고 남은 멤버는 S7 이 거둔다(§4.13 step 2). 문서에 「`irreversible` 프리셋의 명령에서 감독자를 다시 부르지 않는다」. 감독자 코드가 돌기 전의 시작 실패(파일 못 엶 · 컴파일 실패)는 `launch_failed` 가 아니라 `failed`(종료 1 · 2)로 보인다 — 돌지 않은 잡이 실패로 보이는 쪽이라 받아들였다 |
 
 ## 10. 요청서에 돌려줄 것
 
@@ -2211,14 +2257,14 @@ Codex 의견으로 바꿨다. 351~359 는 비워 둔다. 1판 행 가운데 2판
 | 333 | Popen 직전 확인 · 러너 단조 시계 · `proc.json` 두 번 쓰기(V2-1 HIGH · V2-3) | 러너가 requires 와 상관없이 phase 뒤 · Popen 바로 앞에서 `should_stop` · `should_cancel` 을 본다(사이에 네트워크 없음). 관찰자 `spawning()` 이 `{pgid: null}`, `spawned(pid)` 가 `{pgid, start}` 를 적는다. 펌프의 첫 점검은 Popen 직후 곧바로. 점검 박자 · SIGTERM→SIGKILL 은 `mono_fn`, 잡 시한은 벽 그대로 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 V2-1 · V1-1 · V2-3 을 고치며 재료가 정함 | — |
 | 334 | 멈춤의 길 이름(V1-2 · V2-2 · V2-6) | 자기 멈춤 = 관찰자 `self_stop` → `should_stop` → `lost` + `worker_self_stopped`. W4 의 멈춤 = `closed_stop` → `should_cancel`. `closed_by_server` 는 `should_cancel` 을 세우지 않는다. W4 는 모든 끝 상태의 표(§4.1.2) | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 지적을 고치며 재료가 정함 | — |
 | 335 | 연결된 워커의 `ok_at` 나이 · heartbeat 전체 기한 · 기본 G(V1-3 · V2-11 · V1-9) | heartbeat 요청에 전체 기한 `HEARTBEAT_DEADLINE_SECONDS` 15(도우미 스레드 + 기다림, 매달린 도우미 많아야 `HEARTBEAT_INFLIGHT_MAX` 4). `L = max(T, 2H + 3·T_req + 5)`. `disconnect_grace_seconds` 를 안 적으면 `max(600, L + 35)`. e2e 는 T 10 · H 1 · G 90. 4판: 버려진 도우미의 늦은 heartbeat 는 `seq` 로 거른다(339-a). | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 지적을 고치며 재료가 정함 | — |
-| 336 | 세션 이름 대조 · 첫 등록의 레거시 잡 · 레거시 들음(V1-8 · V1-5 · V2-14) | 세션 행의 이름 ≠ 토큰 이름이면 403(`heard` 안 올림, `previous_sessions` 도 같음). 새 세션의 첫 등록이 그 이름의 세션 NULL busy 잡을 `worker_restarted_without_job` 으로 닫음(표식이면 홀드). 레거시 요청은 `heard_legacy(이름)`, 레거시 잡의 X 는 닫는 때의 프리셋 값 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 지적을 고치며 재료가 정함 | 결정 255 의 「새 세션이 옛 세션을 펜싱」 을 세션 없는 옛 프로세스의 잡까지 넓힘 |
+| 336 | 세션 이름 대조 · 첫 등록의 레거시 잡 · 레거시 들음(V1-8 · V1-5 · V2-14) | 세션 행의 이름 ≠ 토큰 이름이면 403(`heard` 안 올림, `previous_sessions` 도 같음). 새 세션의 첫 등록이 그 이름의 세션 NULL busy 잡을 `worker_restarted_without_job` 으로 닫음(표식이면 홀드). 레거시 요청은 `heard_legacy(이름)`, 레거시 잡의 X 는 「닫는 때 그 프리셋이 표식이거나 설정에 없음」(4판, 결정 339-d) | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 지적을 고치며 재료가 정함 | 결정 255 의 「새 세션이 옛 세션을 펜싱」 을 세션 없는 옛 프로세스의 잡까지 넓힘 |
 | 337 | 보내는 스레드 · 죽은 세션 큐 대기(V1-10 · V2-9) | 보내는 스레드 · 백오프는 잡마다 하나(죽은 세션 D 의 잡도). 등록은 D 의 큐를 서버가 응답하는 시간으로 `DEAD_SESSION_WAIT_SECONDS` 300 까지만 기다리고, 넘으면 워커 로그 한 줄과 함께 등록(그 잡은 `worker_restarted_without_job`) | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 지적을 고치며 재료가 정함 | — |
 | 338 | 로그 경계 · 커밋 조건 · 끝난 잡 점검(V1-4 · V2-7 · V2-10 · V2-12) | PR1 로그 라우트는 세션 헤더만, 오프셋 규칙은 PR2. 커밋 UPDATE 에 `EXISTS (… worker_sessions … fenced_at IS NULL)`. 서버 기동 정리가 끝난 원격 잡의 `log.txt` 가 짧으면 `log_complete = 0`. step 9 문구 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(5차 (f)). 2라운드 지적을 고치며 재료가 정함 | — |
 | 339-a | heartbeat 순서와 T5 의 「없음」 | heartbeat 에 세션별 `seq` 와 `claims_settled`, claim 에 `claim_seq`(잡 행 `jobs.claim_seq`). 서버는 `seq` 가 받아들인 것보다 크고 `claims_settled ≥ J.claim_seq` 일 때만 「없음」을 센다(`heard` 는 늘 올림). 워커는 `running` 넣기와 claim 번호 닫기를 한 잠금 구간에서, 목록 · `seq` · `claims_settled` 를 한 잠금 구간에서 찍는다. 늦은 응답의 `cancel` · `paused` 는 적용하지 않는다. `_fresh_claims` 는 레거시만 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-a. 「claim 커밋 뒤에 찍힌 목록」의 방법(`claims_settled`)은 재료가 고름(339-a 가 맡김) | 메인 세션 결정의 예시 `claimed_seen` · 「마지막 claim id」 대신 `claims_settled` — claim 응답을 잃은 경우(T5 자체)에 워커가 그 잡 id 를 모르기 때문 |
 | 339-b | T5 와 표식 잡 | T5 닫기는 확인이 아니다 — 표식 잡이면 같은 트랜잭션에서 홀드. 풀림은 §4.12 확인 1~4 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-b | — |
-| 339-c | 감독자 네 가지 | (1) Popen 뒤 적힌 SIGTERM 을 그룹에 한 번 (2) 명령 끝 뒤, SIGTERM 을 받았거나 부모가 바뀌었으면 남은 멤버(`ps -A -o pid= -o pgid=`)를 첫 SIGTERM + `grace_J` 에 그룹 SIGKILL · 러너 S7 도 첫 SIGTERM 시계 (3) 미시작은 종료 125 + 첫 줄 `[rcm] supervisor: not started: <code>`, 러너는 둘 다 맞을 때만 미시작으로 읽고 `launch_*` 는 감독자 없을 때와 같은 코드 (4) `-I` 유지 + 모듈 파일 경로 실행(감독자는 표준 라이브러리만) | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-c. 125 · 표지 줄 · 파일 경로 · `ps` 는 재료가 정함(F83 · F84 실측) | — |
+| 339-c | 감독자 네 가지 | (1) Popen 뒤 적힌 SIGTERM 을 그룹에 한 번(도착이 Popen 반환보다 이를 때만 — 명령은 적어도 한 번, 많아야 두 번 받는다, F92) (2) 명령 끝 뒤, SIGTERM 을 받았거나 부모가 바뀌었으면 남은 멤버(`ps -A -o pid= -o pgid=`)를 첫 SIGTERM + `grace_J` 에 그룹 SIGKILL · 러너 S7 도 첫 SIGTERM 시계 (3) 미시작은 종료 125 + 파이프 첫 바이트부터 `[rcm] supervisor: not started: <code>`(Popen 전 감독자 예외도 `launch_failed` 표지), 러너는 둘 다 맞을 때만 미시작으로 읽고(표지는 `group_gone` 에 쓰지 않는다) `launch_*` 는 감독자 없을 때와 같은 코드 (4) `-I` 유지 + 모듈 파일 경로 실행(감독자는 표준 라이브러리만) | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-c. 125 · 표지 줄 · 파일 경로 · `ps` 는 재료가 정함(F83 · F84 실측) | — |
 | 339-d | 홀드의 그룹 | 홀드 행은 잡 행의 그룹 · 범위 · 풀 · `host_key` 를 복사(지금 설정을 읽지 않음). 레거시 잡: X = 프리셋이 표식이거나 설정에 없음, 그룹 NULL 이면 `irreversible:<프리셋>` · `global` | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-d. 레거시의 「설정에 없음 → X」는 재료가 정한 닫힌 쪽 규칙 | — |
-| 339-e | 홀드 알림 | `[[notify]]` 에 새 기본 사건을 더하지 않는다. 홀드를 만든 잡의 잡 끝 알림(이미 가는 것)에 env `RCM_HOLD=1` · `RCM_HOLD_GROUP=<그룹>` 과 본문 한 줄 `group held — run rcm release-hold <job>`. `irreversible_hold` 는 규칙이 `on` 에 적을 때만 부르는 opt-in 값(사건 kind `irreversible_hold`, 중복 막기 `hold:<규칙>`, env `RCM_HOLD_GROUP` · `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`, 본문 `event` · `hold`). `RCM_EVENT` 는 모든 알림에(`job_finished` · `irreversible_hold`), URL 본문 `event`. 홀드 · 알림 · 기계 판독 표면은 PR1, 사람용 화면 PR3, 릴리스는 셋이 다 머지된 뒤(§6 #13) | 확정(위임, 2026-11-26) · Codex 의견으로 바꿈(6차). 4판 재료는 `irreversible_hold` 를 `on` 을 안 적은 규칙의 기본에 넣었으나 Codex 가 「기존 훅이 두 번 불려 호출 · 부작용이 겹친다」고 해 메인 세션이 opt-in 과 잡 끝 알림의 env · 한 줄로 바꿈 | 메인 세션 결정 원문의 「홀드가 생기면 `[[notify]]` 를 한 번 부른다(잡 끝 알림과 별개의 사건 종류)」를 6차에서 바꿈 — 기본 규칙은 별개 사건 대신 잡 끝 알림으로 홀드를 안다. 잡 끝 알림의 env 에 `RCM_EVENT` 가 늘고, 홀드를 만든 잡이면 `RCM_HOLD` · `RCM_HOLD_GROUP` 도 는다 |
+| 339-e | 홀드 알림 | `[[notify]]` 에 새 기본 사건을 더하지 않는다. 모든 알림의 env 에 늘 `RCM_EVENT`(`job_finished` · `irreversible_hold`) · `RCM_HOLD`(`0`/`1`) · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE`(홀드가 없으면 `0` 과 빈 값 — `ENV_KEYS` 가 넷만큼 커짐), URL 본문에 늘 `event` 와 `hold {held, group, note}`. 홀드를 만든 잡의 잡 끝 알림(이미 가는 것)이면 `RCM_HOLD=1`, 그룹, 한 줄 `group held — run rcm release-hold <job>`. `irreversible_hold` 는 규칙이 `on` 에 적을 때만 부르는 opt-in 값(사건 kind `irreversible_hold`, 중복 막기 `hold:<규칙>`, 이 사건에만 env `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER` 와 본문 `hold` 의 `scope` · `cause` · `worker` · `since` · `release_command` — 그 키 집합은 따로 잠금). 홀드 · 알림 · 기계 판독 표면은 PR1, 사람용 화면 PR3, 릴리스는 셋이 다 머지된 뒤(§6 #13) | 확정(위임, 2026-11-26) · Codex 의견으로 바꿈(6차). 4판 재료는 `irreversible_hold` 를 `on` 을 안 적은 규칙의 기본에 넣었으나 Codex 가 「기존 훅이 두 번 불려 호출 · 부작용이 겹친다」고 해 메인 세션이 opt-in 과 잡 끝 알림의 env · 한 줄로 바꿈 | 메인 세션 결정 원문의 「홀드가 생기면 `[[notify]]` 를 한 번 부른다(잡 끝 알림과 별개의 사건 종류)」를 6차에서 바꿈 — 기본 규칙은 별개 사건 대신 잡 끝 알림으로 홀드를 안다. 모든 알림의 env 에 `RCM_EVENT` · `RCM_HOLD` · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 가 늘 늘고, 본문에 `event` · `hold` 가 는다 |
 | 339-f | 로그 읽는 쪽 상한 | `log_file_bytes` 가 있으면 `GET /jobs/{id}/log` · 로그 꼬리는 그 길이까지. 마커 SSE 는 이미 커밋 뒤 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-f | — |
 | 339-g | 유예 판정 잠금 | 세션별 잠금 `_session_locks[S]`: heard · seq 갱신, 그 세션 잡 하나의 다시 보기 + 닫기 커밋. 전역 `_heard_lock` 은 사전 접근만. 틱 상한 `GRACE_CLOSES_PER_TICK` 20, 바쁨이면 다음 틱. 증명 2 에 잠금 대기를 넣음 | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 메인 세션 결정 339-g(「잡 단위」 대신 세션 단위는 재료 — heard 가 세션 값) | — |
 | 350 | PR 나눔(V1-4) | 홀드의 기계 판독 표면(store 질의 · server 연결 · 상태/헬스 키 · 대기 사유 · 잡 문서)을 PR1 로, PR3 는 사람용 그리기만 — PR2 · PR3 owns 겹침 0(F87) | 확정(위임, 2026-11-26) · Codex 와 논의해 선 조치(6차). 3라운드 V1-4 를 고치며 재료가 정함 | 3판 §5 의 PR 배치를 바꿈 |
@@ -2411,5 +2457,23 @@ V1 은 반박자 1, V2 는 반박자 2 다. 「3판」 열의 줄은 WP3 이다.
 워커에서 claim 응답을 잃은 표식 잡은 사람이나 재시작이 풀어야 한다(§9). 이를 줄이려면 다음 명세가 「그 세션이 그 잡을 받지
 않았다」는 명시 확인을 정할 수 있다. 그 잡 번호를 단 좁은 확인이 한 예다. 라운드 중에 새 설계를 넣지 않는다는 규칙에 따라 이번
 판에는 넣지 않았다.
+
+### 12.6 4라운드 격리 반박 (4판 head `0971462`, HIGH 0)
+
+4라운드는 HIGH 0 이었다. MED 1건과 LOW 9건을 이 판 안에서 고쳤다. 새 결정 번호는 없고 결정 339 의 세부를 맞췄다. id 는 메인 세션이
+넘긴 번호다.
+
+| id | 등급 | 4판 | 고친 뒤 | 결정 |
+|---|---|---|---|---|
+| 4R-1 | MED | 홀드 알림의 env · 본문이 절마다 달랐다 — 어디는 홀드를 만든 잡에만 `RCM_HOLD`, 어디는 모든 알림에 늘(§1.2 · F86 · §4.10 · §4.12 · §7.3 · §7.4 · §9 · §11) | 한 계약: `RCM_EVENT` · `RCM_HOLD`(`0`/`1`) · `RCM_HOLD_GROUP` · `RCM_HOLD_NOTE` 는 모든 알림에 늘(홀드 없으면 `0` · 빈 값, `ENV_KEYS` 가 넷만큼), opt-in 알림만 `RCM_HOLD_CAUSE` · `RCM_HOLD_WORKER`(따로 잠금), URL 본문은 늘 `event` · `hold {held, group, note}`. RL54 · 변이 `job-end-hold-env-missing` 설명도 맞춤 | 고침 — 339-e |
+| 4R-2 | LOW | 결정 336 행에 「닫는 때의 프리셋 값」이 남음, 「읽는 법」이 §11 을 덮지 않음 | 336 행 · §4.2 · §4.3 을 339-d 규칙으로, 읽는 법에 §11 한 문장 | 고침 — 339-d |
+| 4R-3 | LOW | Popen 창의 SIGTERM 을 「한 번」 전달한다고 적었으나 명령이 exec 뒤 직접 받은 것과 겹칠 수 있음 | 도착이 Popen 반환보다 이를 때만 전달, 명령은 적어도 한 번 · 많아야 두 번(창은 최대 0.0034초, F92) | 고침 — 339-c (1) |
+| 4R-4 | LOW | 레거시 「프리셋 사라짐 → 홀드」가 새 잡이 들어오지 않는 `irreversible:<프리셋>` 에 걸 수 있음 | §9 에 기대되는 부작용으로 | 고침 — 339-d |
+| 4R-5 | LOW | 운영 문장에 전역 `_heard_lock` 이 남음(T3 · §4.2 · §4.3 · §4.5 의 2 · 정리 1 의 6) | `_session_locks[S]` 로 | 고침 — 339-g |
+| 4R-6 | LOW | 정리 2 가 연결된 세션 자신의 T5 닫기 · 홀드 커밋이 세션 잠금 안이라는 경우를 세지 않음 | §4.2 의 잠금 범위를 셋으로, 정리 2 에 T5 커밋 · 취소 미확인 닫기(각 `busy_timeout` 5초) | 고침 — 339-g |
+| 4R-7 | LOW | `seq` · `claims_settled` · `claim_seq` 의 범위가 없음 | JSON 정수(bool 아님), 2^53 − 1 상한, 어기면 400. `claims_settled ≤ 낸 가장 큰 claim_seq` 는 워커 불변식으로 — 서버 400 으로 두면 서버에 닿지 못한 claim 때문에 맞는 heartbeat 를 거절한다(반박의 제안과 다름) | 고침 — 339-a |
+| 4R-8 | LOW | `_session_locks` 와 받아들인 seq 가 지워지지 않음 | 펜싱 때 seq, 펜싱된 세션의 busy 잡이 다 닫히면 `heard` · 잠금, `forget_workers` 때 전부, 레거시 키는 레거시 잡이 없을 때 | 고침 — 339-g |
+| 4R-9 | LOW | 감독자 125 규칙: 표지 자리 · 위조 · 인터프리터 시작 실패가 정해지지 않음 | 표지는 파이프 첫 바이트부터, 위조는 결과 이름만 틀리고 그룹은 S7 이 지킴(§9), Popen 전 감독자 예외는 `launch_failed` 표지, 감독자 코드 전의 실패(파일 못 엶 · 컴파일)는 `failed` 로 남기고 출력 모양 규칙은 두지 않음(반박의 「`launch_failed` 로」 를 Popen 전 예외까지로 좁힘) | 고침 — 339-c (3) |
+| 4R-10 | LOW | 버려진 늦은 heartbeat 응답에만 실린 취소의 행방이 없음 | 다음 응답에 다시 온다(목록은 잡 상태로 만든다, 한 주기 늦음) | 고침 |
 
 ## 13. 구현하며 바뀐 것 (Changed while implementing)
