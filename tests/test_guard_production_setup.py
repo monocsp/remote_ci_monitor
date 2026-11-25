@@ -390,3 +390,212 @@ def test_tr20_redirections_comments_and_quoting_read_as_the_shell_reads_them():
     # 반복한 옵션: setup 은 마지막 값을 쓰지만 guard 는 앞의 값도 본다(막는 쪽)
     command = f"{SERVER} --data-dir /home/op/.local/share/rcm --data-dir /tmp/d --label t.s"
     assert denied(command, environ=TEST_XDG)
+
+
+# ── P3 3라운드: setup 규칙의 「운영」은 집의 정의 하나다(`_edit_verdict` 와 같은 운영 뿌리 넷) ──
+
+PROD_DATA = "/home/op/.local/share/rcm"
+FREE_SERVICE = "--service-file /home/op/rcm-devtest/svc/test.rcm.worker.plist"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        f"--config {PROD_DATA}/rcm.sqlite3 --force config",  # 운영 data_dir 의 DB 를 덮는다
+        "--config /srv/rcm/checkout/x.toml",  # 운영 체크아웃
+        "--config /srv/rcm/venv/x.toml",  # 서비스 venv
+        # 서비스 관리자가 읽는 자리 — 설정 파일도 서비스 파일과 같은 규칙이다
+        "--config ~/Library/LaunchAgents/com.remote-ci-monitor.server.plist",
+    ],
+)
+def test_tr20_setup_may_not_write_its_config_into_any_production_root(flags):
+    # P3 3라운드 v1-1(HIGH): setup 규칙이 운영 설정 폴더 하나만 「운영」으로 보았다. 편집 규칙
+    # (`_edit_verdict`)이 막는 뿌리 넷과 서비스 관리자 자리를 설정 파일에도 댄다
+    command = f"{WORKER} --label test.rcm.worker {FREE_SERVICE} {flags}"
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", flags
+
+
+def test_tr20_setup_may_not_write_its_service_file_into_any_production_root():
+    # P3 3라운드 v1-1: 서비스 파일도 운영 뿌리 넷 안에는 쓰지 않는다
+    for root in (PROD_DATA, "/srv/rcm/checkout", "/srv/rcm/venv"):
+        command = (
+            f"{SERVER} --data-dir /tmp/d --label test.rcm.server --service-file {root}/x.plist"
+        )
+        assert denied(command, environ=TEST_XDG), root
+
+
+def test_tr20_the_setup_rule_and_the_edit_rule_share_one_production_list():
+    # P3 3라운드 근본 원인: setup 규칙이 편집 규칙보다 좁은 「운영」 목록을 따로 들었다. 둘이 같은
+    # 함수를 부르는지, 편집 규칙이 막는 자리마다 setup 도 막는지 본다
+    for _name, root in PROD.labelled():
+        target = root / "x.toml"
+        assert guard.decide("Write", {"file_path": str(target)}, PROD, WORKTREE) is not None
+        command = f"{WORKER} --label test.rcm.worker {FREE_SERVICE} --config {target}"
+        assert denied(command, environ=TEST_XDG), root
+
+
+# ── P3 3라운드: 닫는 쪽의 그물 — 풀어내지 못한 setup 은 막는다 ──
+
+PROD_SETUP = f"setup --role coordinator --bind 127.0.0.1 --label t.s --data-dir {PROD_DATA} --yes"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"env -C /tmp rcm {PROD_SETUP}",
+        f"env -S 'rcm {PROD_SETUP}'",
+        f"sudo -u op rcm {PROD_SETUP}",
+        f"sudo -E rcm {PROD_SETUP}",
+        f"command -p rcm {PROD_SETUP}",
+        f"exec -a x rcm {PROD_SETUP}",
+        f"time -p rcm {PROD_SETUP}",
+        f"if rcm {PROD_SETUP}; then :; fi",
+        f"for i in 1; do rcm {PROD_SETUP}; done",
+        f"! rcm {PROD_SETUP}",
+        f"true & rcm {PROD_SETUP}",
+        f'echo \\" ; rcm {PROD_SETUP} ; echo \\"',
+        f"python -Im remote_ci_monitor {PROD_SETUP}",
+        f"R=rcm; $R {PROD_SETUP}",
+        f"python -c 'from remote_ci_monitor.setup import main; main()' {PROD_SETUP[6:]}",
+    ],
+)
+def test_tr20_a_setup_the_hook_cannot_read_as_a_plain_call_is_denied(command):
+    # P3 3라운드 v1-2 · v1-3 · v2-3: 세그먼트 파서가 모르는 감싸기 플래그 · 셸 키워드 · 단일 `&` ·
+    # 어긋난 따옴표 · 묶인 짧은 플래그 뒤의 setup 은 setup 규칙을 지났다. 명령 글에 rcm(또는 이
+    # 패키지)과 낱말 setup 이 함께 있는데 평범한 setup 호출로 풀지 못하면 막는다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert "plain `rcm setup" in verdict.reason, command
+
+
+def test_tr20_the_net_lets_plain_setup_help_and_unrelated_commands_through():
+    # 과잉 차단의 경계: 평범한 setup · 도움말 · setup 이 낱말로 나오지 않는 명령은 그대로다
+    assert judge("rcm setup --help", environ=TEST_XDG) is None
+    assert judge("rcm setup -h && rcm setup --help", environ=TEST_XDG) is None
+    assert judge(f"HOME=/home/op/rcm-devtest/home {WORKER} --label test.rcm.worker") is None
+    for command in (
+        "cd /home/op/src/remote_ci_monitor-setup-x && ./.venv/bin/python -m pytest -q",
+        "./.venv/bin/ruff check src/remote_ci_monitor/setup.py tests/test_setup.py",
+        "python -c 'import remote_ci_monitor' && git log --grep setup",
+        "rcm status && echo done",
+    ):
+        assert judge(command, environ=TEST_XDG) is None, command
+    # 글에만 있어도 막힌다(받아들인 과잉 차단) — 메시지가 파일로 쓰는 길을 알려 준다
+    verdict = judge('git commit -m "fix rcm setup"', environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny"
+    assert "-F" in verdict.reason
+    # 운영 설치가 없는 컴퓨터에서는 그물도 없다
+    assert judge(f"sudo -u op rcm {PROD_SETUP}", prod=guard.Production()) is None
+
+
+# ── P3 3라운드: 따라가지 못한 `cd` 뒤의 상대 경로 ──
+
+
+@pytest.mark.parametrize(
+    "cd",
+    ["cd -P /home/op/.local/share", "cd -- /home/op/.local/share", "cd -", "cd $UNSET_RCM_D"],
+)
+def test_tr33_a_relative_path_after_a_cd_the_hook_cannot_follow_is_denied(cd):
+    # P3 3라운드 v1-4: 훅이 cwd 를 모르면 setup 의 상대 경로가 어디인지 모른다 — 막는 쪽
+    command = f"{cd} && {SERVER} --data-dir rcm --label test.rcm.server"
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", cd
+    assert "cd" in verdict.reason, cd
+
+
+def test_tr33_a_cd_the_hook_follows_keeps_working():
+    # 펼칠 수 있는 `cd` 는 그대로 따라간다. 모르는 `cd` 뒤라도 절대 경로뿐인 setup 은 막지 않는다
+    rel = f"{SERVER} --data-dir data --label test.rcm.server"
+    assert judge(f"cd /home/op/rcm-devtest && {rel}", environ=TEST_XDG) is None
+    assert judge(f"cd $HOME/rcm-devtest && {rel}", environ=TEST_XDG) is None
+    assert denied(f"cd $HOME/.local/share && {SERVER} --data-dir rcm --label t.s", environ=TEST_XDG)
+    absolute = f"{SERVER} --data-dir /tmp/d --label test.rcm.server"
+    assert judge(f"cd - && {absolute}", environ=TEST_XDG) is None
+    assert judge(f"cd -P /x && {absolute}", environ=TEST_XDG) is None
+
+
+# ── P3 3라운드: 훅이 터져도 setup 은 허용으로 새지 않는다 ──
+
+
+def test_tr20_a_crash_while_judging_setup_is_a_deny(monkeypatch, capsys):
+    # P3 3라운드 LOW: main() 의 catch-all 은 「훅이 터지면 막지 않는다」였다 — setup 판정 중의
+    # 예외는 거절이다. setup 이 아닌 명령은 그대로 경고만 남긴다
+    import io
+    import json
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(guard, "find_production", lambda: PROD)
+    monkeypatch.setattr(guard, "_setup_calls", boom)
+    monkeypatch.setattr(guard, "_hit", boom)
+
+    def hook(command: str) -> dict:
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/tmp"}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        assert guard.main() == 0
+        return json.loads(capsys.readouterr().out or "{}")
+
+    out = hook(f"HOME=/home/op/rcm-devtest/home {WORKER} --label test.rcm.worker")
+    decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+    assert decision == "deny", out
+    assert "boom" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    out = hook("rm /tmp/scratch-file")
+    assert "hookSpecificOutput" not in out and "boom" in out.get("systemMessage", ""), out
+
+
+# ── P3 3라운드 v2-1: 변이는 파이썬으로 읽히는 꼴이어야 한다 ──
+
+
+def _mutcheck():
+    path = ROOT / "scripts" / "mutcheck.py"
+    spec = importlib.util.spec_from_file_location("mutcheck_for_setup", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_python_mutant_applies_as_code_that_parses():
+    # `guard-setup-service-place-allowed` 의 new 가 들여쓰기를 4칸 잃어 IndentationError 를 냈고,
+    # mutcheck 는 그것도 「잡혔다」로 셌다. 모든 .py 변이를 적용해 ast.parse 한다
+    import ast
+
+    mc = _mutcheck()
+    broken = []
+    for m in mc.MUTANTS:
+        if not m.path.endswith(".py"):
+            continue
+        text = (ROOT / m.path).read_text(encoding="utf-8")
+        if text.count(m.old) != 1:
+            continue  # 앵커 검사는 따로 있다
+        try:
+            ast.parse(text.replace(m.old, m.new))
+        except SyntaxError as e:
+            broken.append(f"{m.name}: {e.msg} (line {e.lineno})")
+    assert broken == []
+
+
+def test_mutcheck_reports_a_mutant_that_does_not_parse_as_a_failure(tmp_path, monkeypatch):
+    # 문법 오류인 변이는 시험이 빨개져도 감지가 아니다 — 대조군을 돌리기 전에 실패로 보고한다
+    mc = _mutcheck()
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "mod.py").write_text("def f():\n    if True:\n        return 1\n")
+    monkeypatch.setattr(mc, "ROOT", root)
+    ran = []
+    monkeypatch.setattr(mc, "_pytest", lambda cmd, cwd, env=None: ran.append(cmd) or (1, 0.0, ""))
+    bad = mc.Mutant(
+        name="bad-indent",
+        path="src/mod.py",
+        old="    if True:\n        return 1\n",
+        new="    if True:\n    return 1\n",
+        tests=("tests/test_x.py",),
+    )
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    ok, info = mc._run_in_copy(bad, copy, {})
+    assert ok is False and "does not parse" in info, info
+    assert ran == []

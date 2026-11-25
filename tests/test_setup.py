@@ -862,8 +862,9 @@ def test_tr28_a_path_that_is_not_utf8_is_a_usage_error(cfg, tmp_path):
     assert not (cfg / "server.toml").exists()
 
 
-def test_tr28_ctrl_c_while_reporting_is_130_without_a_traceback(cfg, tmp_path):
-    # P3 v2-11 b: 파일을 쓴 뒤 보고 중의 Ctrl-C — 130, 쓴 파일이 있다고 말한다
+def test_tr28_ctrl_c_while_reporting_after_writing_is_exit_zero(cfg, tmp_path):
+    # P3 v2-11 b: 파일을 쓴 뒤 보고 중의 Ctrl-C — traceback 없이 쓴 파일이 있다고 말한다.
+    # P3 3라운드 v2-2: 그때는 파일을 다 썼으니 종료 0 이다(§4.1 「설정을 썼으면 0」, 이전 130)
     def interrupted():
         raise KeyboardInterrupt
 
@@ -872,9 +873,10 @@ def test_tr28_ctrl_c_while_reporting_is_130_without_a_traceback(cfg, tmp_path):
         code: int | str = go(fake, *coordinator_args(tmp_path / "data"))
     except KeyboardInterrupt:
         code = "KeyboardInterrupt escaped setup.run"  # 빨간 시험이 pytest 를 멈추지 않게
-    assert code == 130
+    assert code == 0
     err = fake.err.getvalue()
-    assert "interrupted" in err and "nothing was written" not in err
+    assert "files written; report interrupted" in err and "nothing was written" not in err
+    assert "Traceback" not in err
     assert (cfg / "server.toml").exists()
 
 
@@ -1173,3 +1175,79 @@ def test_tr11_execstart_writes_a_dollar_twice():
     # 도구가 읽는 쪽(doctor)이 `$$` 를 `$` 로 돌리는 것은 test_tr11_a_systemd_unit_keeps_… 가 본다
     assert core.exec_start(["/x/a$HOME/rcm", "serve"]) == "/x/a$$HOME/rcm serve"
     assert core.unit_word("PATH=/a$b") == "PATH=/a$b"  # Environment= 에서는 그대로다
+
+
+# ── P3 3라운드 ──
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_tr24_setup_refuses_a_config_inside_an_install_place(cfg, home, tmp_path, platform):
+    # P3 3라운드 v1-1: 설정 파일도 서비스 파일과 같은 규칙이다 — 서비스 관리자가 읽는 자리(사용자
+    # LaunchAgents · systemd 사용자 유닛 폴더) 안의 `--config` 는 사용법 오류다
+    for place in ("Library/LaunchAgents", ".config/systemd/user"):
+        target = home / place / "com.remote-ci-monitor.server.plist"
+        fake = Fake(platform=platform)
+        service = tmp_path / "svc" / "test.rcm.server.plist"
+        argv = coordinator_args(tmp_path / "data", "--config", str(target))
+        argv += ["--service-file", str(service), "--force", "all"]
+        assert go(fake, *argv) == 2, (place, fake.text)
+        assert "install" in fake.err.getvalue(), place
+        assert not target.exists() and not service.exists(), place
+
+
+def test_tr28_ctrl_c_before_anything_is_written_is_130(cfg, tmp_path):
+    # 쓰기 전의 Ctrl-C 는 130 이고 아무것도 쓰지 않았다고 말한다(§4.1)
+    def interrupted():
+        raise KeyboardInterrupt
+
+    fake = Fake(find_rcm=interrupted)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 130
+    assert "nothing was written" in fake.err.getvalue()
+    assert not cfg.exists()
+
+
+def test_tr20_the_resolver_reads_nothing_from_the_machine():
+    # P3 3라운드 v1-5: `core/setup.py` 는 I/O 가 없다 — `~user` 의 passwd 조회(`expanduser`)와
+    # `sys.platform` 은 호출자가 준다
+    import ast
+
+    tree = ast.parse(Path(core.__file__).read_text(encoding="utf-8"))
+    reads = sorted(
+        {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr in ("expanduser", "platform", "environ", "home", "getcwd", "cwd")
+        }
+    )
+    assert reads == []
+
+
+def test_tr20_where_takes_the_user_lookup_and_the_case_rule_from_its_caller(tmp_path):
+    # P3 3라운드 v1-5: 해석기는 `~user` 를 푸는 함수와 대소문자 규칙을 인자로 받는다
+    import inspect
+
+    assert {"fold_case", "expand_user"} <= set(inspect.signature(core.where).parameters)
+    seen: list[str] = []
+
+    def users(raw: str) -> str:
+        seen.append(raw)
+        return "/users/bob" + raw[len("~bob") :]
+
+    folded = tmp_path / "library" / "launchagents" / "x.plist"
+    for fold, placed in ((True, True), (False, False)):
+        found = core.where(
+            "worker",
+            environ={},
+            cwd=tmp_path,
+            home=tmp_path,
+            manager=core.LAUNCHD,
+            config="~bob/w.toml",
+            label="test.rcm.worker",
+            service_file=str(folded),
+            fold_case=fold,
+            expand_user=users,
+        )
+        assert found.config == Path("/users/bob/w.toml")
+        assert (found.install_place is not None) is placed, fold
+    assert seen == ["~bob/w.toml", "~bob/w.toml"]
