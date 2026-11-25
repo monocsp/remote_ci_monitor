@@ -1166,3 +1166,10 @@ def test_tr20_the_hook_reads_setup_with_the_same_parser_and_default(cfg):
     for bad in (["--conf", "x"], ["--role", "bogus"], ["--port", "x"], ["--nope"]):
         with pytest.raises(core.SetupArgError):
             core.parse_args(bad)
+
+
+def test_tr11_execstart_writes_a_dollar_twice():
+    # P3 2라운드 v2-2: ExecStart 의 `$` 는 systemd 가 환경변수로 펼친다 — `$$` 로 써야 글자다.
+    # 도구가 읽는 쪽(doctor)이 `$$` 를 `$` 로 돌리는 것은 test_tr11_a_systemd_unit_keeps_… 가 본다
+    assert core.exec_start(["/x/a$HOME/rcm", "serve"]) == "/x/a$$HOME/rcm serve"
+    assert core.unit_word("PATH=/a$b") == "PATH=/a$b"  # Environment= 에서는 그대로다

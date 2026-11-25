@@ -2915,12 +2915,13 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        # guard 가 셸 변수를 펼치지 않는다 — `--data-dir $HOME/.local/share/rcm` 이 운영으로
-        # 간다(P3 v2-1)
+        # guard 가 셸 변수를 제 값으로 펼치지 않는다 — `--data-dir $HOME/.local/share/rcm` 이
+        # 운영으로 간다(P3 v2-1). 2라운드부터는 펼치지 못한 `$` 가 남으면 막으므로 값을 빈 글자로
+        # 바꾸는 꼴로 잰다
         name="guard-setup-shell-variables-unexpanded",
         path="tools/guard_production.py",
-        old="    words = [raw, _expand_variables(raw, shell), _expand_variables(raw, segment)]\n",
-        new="    words = [raw]\n",
+        old="        value = lookup.get(name)\n",
+        new='        value = lookup.get(name) and ""\n',
         tests=(
             "tests/test_guard_production_setup.py::test_tr33_a_data_dir_written_with_a_shell_variable_is_denied",
             "tests/test_guard_production_setup.py::test_tr20_a_config_written_with_a_shell_variable_is_denied",
@@ -2930,7 +2931,7 @@ MUTANTS = (
         # guard 가 운영 서비스 파일 자리를 가리키는 `--service-file` 을 막지 않는다(P3 v1-2)
         name="guard-setup-service-place-allowed",
         path="tools/guard_production.py",
-        old="        place = _service_place(target, env)\n",
+        old="            place = _service_place(target, session_home)\n",
         new="        place = None\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr20_a_service_file_on_a_production_service_place_is_denied",
@@ -2940,7 +2941,7 @@ MUTANTS = (
     Mutant(
         # setup 이 줄인 옵션을 받는다 — guard 가 못 본 경로에 쓴다(P3 v1-1 · v2-2)
         name="setup-abbreviated-options-accepted",
-        path="src/remote_ci_monitor/setup.py",
+        path="src/remote_ci_monitor/core/setup.py",
         old='PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": False}\n',
         new='PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": True}\n',
         tests=("tests/test_setup.py::test_tr20_setup_takes_no_abbreviated_option",),
@@ -2948,9 +2949,9 @@ MUTANTS = (
     Mutant(
         # setup 이 설치 자리(~/Library/LaunchAgents …)에 서비스 파일을 쓴다(§4.1, P3 v1-2)
         name="setup-install-place-written",
-        path="src/remote_ci_monitor/setup.py",
-        old="    place = core.install_place_of(staged, home)\n",
-        new="    place = None\n",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        place = install_place_of(service, home)\n",
+        new="        place = None\n",
         tests=("tests/test_setup.py::test_tr24_setup_refuses_a_service_file_on_an_install_place",),
     ),
     Mutant(
@@ -3022,6 +3023,190 @@ MUTANTS = (
         old="        return [READ_OPEN, DHCP_NOTE]\n",
         new='        return [READ_OPEN, DHCP_NOTE, "set read_auth = token to close reads"]\n',
         tests=("tests/test_setup.py::test_tr10_the_interactive_run_never_offers_a_read_auth_mode",),
+    ),
+    # ── M5t-a PR4 P3 2라운드 — guard 와 setup 이 같은 해석기를 쓴다(batch-4) ──
+    Mutant(
+        # 빈 `--config` · `--data-dir` 을 받는다 — 빈 `--config` 는 기본 자리(운영 설정 폴더일 수
+        # 있다)로 떨어진다(P3 2라운드 v2-1). setup 과 guard 가 같은 `blank_flags` 를 쓴다
+        name="setup-blank-value-accepted",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if isinstance(values.get(name), str) and not values[name].strip()\n",
+        new="        if False\n",
+        tests=(
+            "tests/test_setup.py::test_tr20_an_empty_path_or_label_is_a_usage_error",
+            "tests/test_guard_production_setup.py::test_tr20_an_empty_value_is_denied",
+        ),
+    ),
+    Mutant(
+        # client 에도 서비스 파일 자리를 준다 — guard 가 client 가 쓰지 않는 `--service-file` 을
+        # 막고, 해석기의 답이 setup 이 쓴 자리와 달라진다(P3 2라운드 LOW)
+        name="setup-client-gets-a-service-file",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if chosen is not None and manager is not None:\n",
+        new="    if manager is not None:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_client_writes_no_service_file_so_its_service_file_flag_is_free",
+            "tests/test_setup.py::test_tr20_setup_writes_exactly_where_the_shared_resolver_says",
+        ),
+    ),
+    Mutant(
+        # setup 이 설치 자리를 대소문자를 가려 견준다 — macOS 에서 `~/library/launchagents` 에
+        # 쓴다(P3 2라운드)
+        name="setup-install-place-case-not-folded",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if FOLD_CASE:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_tr24_an_install_place_in_another_case_is_refused",),
+    ),
+    Mutant(
+        # 라벨 정규식을 앞에서만 맞춘다 — 끝 줄바꿈이 든 라벨이 plist 에 들어간다(P3 2라운드 v1-5)
+        name="setup-label-trailing-newline-accepted",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if _LABEL_RE.fullmatch(label):\n",
+        new="    if _LABEL_RE.match(label):\n",
+        tests=(
+            "tests/test_setup.py::test_tr20_a_label_with_a_trailing_line_break_is_a_usage_error",
+        ),
+    ),
+    Mutant(
+        # 파일을 다 쓴 뒤 보고가 터지면 종료 1 이다 — 쓴 설정을 실패로 알린다(§4.1, P3 2라운드)
+        name="setup-report-failure-exit-one",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '        _say(world, f"rcm: files written; the report failed: {_one_line(e)}")\n'
+            "        return EXIT_OK\n"
+        ),
+        new=(
+            '        _say(world, f"rcm: files written; the report failed: {_one_line(e)}")\n'
+            "        return EXIT_FAILED\n"
+        ),
+        tests=("tests/test_setup.py::test_tr28_a_report_that_fails_after_writing_is_exit_zero",),
+    ),
+    Mutant(
+        # guard 가 셸 단계를 다 한 뒤 남은 `$` 를 글자로 둔다 — `$1/…` · `${X:-y}` 를 setup 이
+        # 받을 값으로 본다(P3 2라운드 v2-1)
+        name="guard-setup-leftover-dollar-allowed",
+        path="tools/guard_production.py",
+        old='    if "$" in rest or "`" in rest:\n',
+        new="    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr33_a_value_the_hook_cannot_expand_is_denied",
+        ),
+    ),
+    Mutant(
+        # guard 가 경로를 대소문자를 가려 견준다 — macOS 에서 `~/.config/RCM` 이 운영 설정 폴더인데
+        # 지나간다(P3 2라운드)
+        name="guard-setup-case-not-folded",
+        path="tools/guard_production.py",
+        old="    if FOLD_CASE:\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_production_path_in_another_case_is_denied_on_a_case_insensitive_disk",
+        ),
+    ),
+    Mutant(
+        # guard 가 setup 의 해석기를 못 들여오면 setup 을 허용한다(fail open, P3 2라운드)
+        name="guard-setup-resolver-import-fails-open",
+        path="tools/guard_production.py",
+        old=(
+            "    except Exception as e:  # noqa: BLE001 — 해석기를 못 들여오면 setup 을 막는다"
+            "(fail closed)\n"
+        ),
+        new=(
+            "    except Exception as e:  # noqa: BLE001 — 해석기를 못 들여오면 setup 을 막는다"
+            "(fail closed)\n        return None\n"
+        ),
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_the_hook_refuses_setup_when_the_resolver_does_not_load",
+        ),
+    ),
+    Mutant(
+        # guard 가 감싸기를 글자 그대로 본다 — `/usr/bin/env rcm setup` 이 setup 규칙을 지난다
+        # (P3 2라운드)
+        name="guard-wrapper-path-missed",
+        path="tools/guard_production.py",
+        old='        if _name(head) in WRAPPERS:\n            in_env = _name(head) == "env"\n',
+        new='        if head in WRAPPERS:\n            in_env = head == "env"\n',
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup",
+        ),
+    ),
+    Mutant(
+        # guard 가 python 의 인터프리터 플래그를 건너뛰지 않는다 — `python -u -m remote_ci_monitor
+        # setup` 이 setup 규칙을 지난다(P3 2라운드)
+        name="guard-python-flags-not-skipped",
+        path="tools/guard_production.py",
+        old=(
+            '        elif token.startswith("-") and token not in ("-", "--") and not '
+            'token.startswith("-c"):\n'
+        ),
+        new="        elif False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup",
+        ),
+    ),
+    # P3 2라운드 v2-2 가 짚은, 변이가 없던 규칙 가운데 싼 것
+    Mutant(
+        # 역할이 쓰지 않는 플래그를 조용히 버린다(P3 v1-7)
+        name="setup-unused-flag-silent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if unused:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_tr22_a_flag_the_role_does_not_use_is_a_warning",),
+    ),
+    Mutant(
+        # 포트가 비었는지 모를 때 아무 말도 하지 않는다(P3 v1-5)
+        name="setup-unknown-port-silent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    elif held is None:  # 모름은 모름이라고 쓴다(P3 v1-5)\n",
+        new="    elif False:  # 모름은 모름이라고 쓴다(P3 v1-5)\n",
+        tests=("tests/test_setup.py::test_tr22_an_unknown_answer_from_the_system_is_said",),
+    ),
+    Mutant(
+        # 호스트 없는 URL(`http://`)을 설정에 쓴다(P3 v2-12)
+        name="setup-url-without-host-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if not host:  # `http://` · `http:///x` · `http://:8787`",
+        new="    if False:  # `http://` · `http:///x` · `http://:8787`",
+        tests=("tests/test_setup.py::test_tr26_a_url_without_a_host_is_a_usage_error",),
+    ),
+    Mutant(
+        # UTF-8 이 아닌 인자를 쓰기 전에 거르지 않는다(P3 v2-10)
+        name="setup-not-utf8-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old='            value.encode("utf-8")\n',
+        new='            value.encode("utf-8", "surrogateescape")\n',
+        tests=("tests/test_setup.py::test_tr28_a_path_that_is_not_utf8_is_a_usage_error",),
+    ),
+    Mutant(
+        # 되돌리지 못한 파일을 삼킨다 — 「nothing was written」이라고 거짓말한다(P3 v1-6)
+        name="setup-rollback-failure-swallowed",
+        path="src/remote_ci_monitor/setup.py",
+        old="                plan.unrestored.append(written.path)\n",
+        new="                pass\n",
+        tests=("tests/test_setup.py::test_tr7_a_rollback_that_fails_is_named",),
+    ),
+    Mutant(
+        # 시작하지 않았을 때 조용히 끝난다 — `|| echo "not started …"` 가 없다(P3 v1-9)
+        name="setup-not-started-silent",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    return [folders, copy, same + start + said]\n",
+        new="    return [folders, copy, same + start]\n",
+        tests=("tests/test_setup.py::test_tr36_the_start_line_says_when_it_did_not_start",),
+    ),
+    Mutant(
+        # systemd ExecStart 의 `$` 를 `$$` 로 쓰지 않는다 — `$HOME` 이 든 경로를 systemd 가
+        # 펼친다(P3 v2-4)
+        name="setup-unit-dollar-unescaped",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='        text = text.replace("$", "$$")\n',
+        new="        text = text\n",
+        tests=("tests/test_setup.py::test_tr11_execstart_writes_a_dollar_twice",),
     ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
