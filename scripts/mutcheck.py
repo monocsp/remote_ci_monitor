@@ -2339,6 +2339,9 @@ MUTANTS = (
             "test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine",
             "tests/test_local_only.py::"
             "test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally",
+            "tests/test_local_only.py::"
+            "test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote",
+            "tests/test_local_only.py::test_e3_a_local_only_retry_chain_is_never_claimed_remotely",
         ),
     ),
     Mutant(
