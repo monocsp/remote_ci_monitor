@@ -102,7 +102,8 @@ The role is not stored anywhere: rcm reads it back from the config files that ex
 `rcm doctor` does. In a terminal `rcm setup` asks for the role and for each value, with the
 template's defaults. `rcm setup --role ROLE --yes` asks nothing, and neither does a run without a
 terminal. Then these flags must be given, or it stops with exit 2 before writing anything
-(options are taken by their whole name only: `--data-dir`, never `--data`):
+(options are taken by their whole name only: `--data-dir`, never `--data`; an empty or blank
+`--config`, `--service-file`, `--data-dir` or `--label` is a usage error too):
 
 | role | needed with `--yes` | optional |
 |---|---|---|
@@ -131,7 +132,8 @@ macOS or `<config dir>/service/<unit>` on Linux, or to `--service-file PATH`. It
 `~/Library/LaunchAgents`: launchd would start anything there at the next login. A `--service-file`
 inside a folder the service manager reads (`~/Library/LaunchAgents`, `/Library/LaunchAgents`,
 `/Library/LaunchDaemons`, `~/.config/systemd/user`, `/etc/systemd/user`, `/etc/systemd/system`)
-is refused with exit 2. The label is
+is refused with exit 2; on macOS the match ignores case, as the disk does
+(`~/library/launchagents` is the same folder). The label is
 `com.remote-ci-monitor.server` or `com.remote-ci-monitor.worker` unless you pass `--label`; the
 systemd unit of a standard label is `rcm-server.service` or `rcm-worker.service`, and of any
 other label `<label>.service`. The server service file has the file-descriptor limit of 4096,
@@ -194,8 +196,9 @@ worker token in `worker.toml` as `token = "…"`, because a service does not see
 **At the end** it runs the checks that need no server (Python, SQLite, the open-files limit of the
 service file it wrote, whether the config file reads, and the host) as advice that does not change
 the exit code, then says to start the service, add the token and run `rcm doctor --role <role>`.
-Exit codes: 0 written, 1 not written (an unexpected error is one line, without a traceback, that
-says what is on disk), 2 usage, 130 interrupted. `rcm setup` does not follow the server's version.
+Exit codes: 0 written (also when the closing report fails after every file is written: the last
+line is `files written; the report failed: …`), 1 not written (an unexpected error is one line,
+without a traceback, that says what is on disk), 2 usage, 130 interrupted. `rcm setup` does not follow the server's version.
 
 ## Check a machine before you use it: `rcm doctor`
 
@@ -611,7 +614,11 @@ install, refuses edits to it and to the server's config and data, refuses a comm
 open the production database with a build other than the service's own (`rcm token …`, `rcm
 serve`, `rcm worker` — a different build migrates the database on open), and asks before a
 deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A machine with no
-such install sees nothing.
+such install sees nothing. For `rcm setup` the hook expands the command line the way the shell
+does (quotes, `$VAR`, `~`) and then asks setup's own resolver where it would write; it refuses a
+setup that would write into the server's config folder or a folder the service manager reads, use
+a production label, or point a server at the production `data_dir`. A value it cannot expand (an
+unset variable, `${VAR:-x}`, `$(…)`) or a command line setup would reject is refused too.
 
 The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
 primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's

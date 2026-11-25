@@ -27,8 +27,10 @@ of a key bumps that number and is listed here.
   at all, asks whether to set it up; everywhere else it is the usage error (exit 2) it was.
   `rcm setup` does not follow the server's version, and `rcm doctor` finds a service installed
   under a `--label` of your own. It takes options by their whole name only, refuses a
-  `--service-file` inside a folder the service manager reads, and writes systemd unit paths with
-  spaces, `%` or `$` the way systemd reads them.
+  `--service-file` inside a folder the service manager reads (on macOS whatever the case), and
+  writes systemd unit paths with spaces, `%` or `$` the way systemd reads them. An empty
+  `--config`, `--service-file`, `--data-dir` or `--label` is a usage error, and a run whose files
+  are all written exits 0 even when the closing report fails.
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
@@ -120,6 +122,10 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
+- **`rcm init worker --service-file` writes a systemd unit whose paths hold a space, `%` or `$`
+  the way systemd reads them**, quoted, `%%` and `$$`, and refuses a path with a line break or
+  another control character with exit 2 instead of writing a broken unit.
+  ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **A config file that is not UTF-8 stops `rcm serve`, `rcm worker` and the other commands with one
   line naming the file and the byte, instead of a traceback.** An included preset file is read the
   same way. `rcm doctor` reports it as a usage error (exit 2), as it does a `server.toml` whose
