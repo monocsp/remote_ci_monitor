@@ -4730,9 +4730,18 @@ def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | Non
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    """`rcm doctor` — 이 머신에서 무엇을 빌드 · 시험할 수 있고 무엇을 깔아야 하는지(M5t-a 결정
+    246). 판정과 출력은 `doctor` 모듈이 한다. 여기서는 바깥 세계를 넘긴다 — mDNS 찾기와
+    `git ls-remote` 는 부를 때 이 모듈의 이름으로 찾는다(시험이 바꿔 끼우는 자리)."""
     from remote_ci_monitor import doctor
 
-    return doctor.main(args)
+    ctx = doctor.Context(
+        environ=os.environ,
+        discover=lambda timeout: discover(timeout=timeout),
+        ls_remote=lambda url: _ls_remote_problem(url),
+        worker_service_path=WORKER_SERVICE_PATH,
+    )
+    return doctor.main(args, ctx)
 
 
 def cmd_token(args: argparse.Namespace) -> int:

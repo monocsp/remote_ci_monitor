@@ -405,3 +405,35 @@ def sample_from_json(doc: Any, *, name: str, source: str, sampled_at: datetime) 
         top=top,
         history=history,
     )
+
+
+# ── 호스트 사실 (M5t-a 결정 246 · rcm doctor) ─────────────────────────────────
+
+
+def parse_os_release(text: str) -> dict[str, str]:
+    """`/etc/os-release` — `KEY=value` 줄(값의 따옴표는 벗긴다). 모르는 줄은 건너뛴다."""
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key.strip()] = value
+    return out
+
+
+def real_arch(
+    machine: str | None, arm64: str | None, translated: str | None
+) -> tuple[str | None, bool]:
+    """(실제 arch, Rosetta 아래인가). Rosetta 아래서는 `uname -m` 이 x86_64 라서
+    `sysctl.proc_translated` 를 본다 — 1 이면 이 프로세스는 번역 중이고 기계는 arm64 다."""
+    if (translated or "").strip() == "1":
+        return "arm64", True
+    m = (machine or "").strip() or None
+    if m == "x86_64" and (arm64 or "").strip() == "1":
+        # 번역 중이 아닌데 arm64 기계라고 답했다 — 실제 arch 는 arm64 다
+        return "arm64", False
+    return m, False
