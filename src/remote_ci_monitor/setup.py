@@ -16,7 +16,8 @@ docs/m5t-workplan.md §4.1).
 - **묻는 것은** stdin 과 stderr 가 모두 TTY 이고 `--yes` 가 없을 때뿐이다(결정 240). 물을 사람이
   없으면 역할마다 꼭 줘야 하는 인자가 빠졌을 때 사용법 오류(종료 2)다.
 
-종료 코드: 설정을 썼으면 0, 쓰지 못했으면 1, 사용법 오류 2, Ctrl-C 130.
+종료 코드: 설정을 썼으면 0(다 쓴 뒤 보고 중의 Ctrl-C 도), 쓰지 못했으면 1, 사용법 오류 2, 쓰기 전 ·
+쓰는 중의 Ctrl-C 130.
 
 cli 는 `register(subparsers)` 로 `rcm setup` 을 달고, 인자 없는 `rcm` 에서 `first_run()` 을
 부른다(첫 실행 질문). `setup` 은 버전 따라가기를 하지 않는다(`follow.NO_FOLLOW_COMMANDS`).
@@ -919,11 +920,12 @@ def _one_line(e: BaseException) -> str:
 
 
 def run(args: argparse.Namespace, world: World) -> int:
-    """setup 의 맨 바깥 경계. 예상 못 한 예외도 traceback 이 아니라 한 줄이고, Ctrl-C 는 어디서든
-    130 이다. 그 한 줄은 디스크에 남은 것을 말한다(P3 v2-3 · v2-11).
+    """setup 의 맨 바깥 경계. 예상 못 한 예외도 traceback 이 아니라 한 줄이고, 그 한 줄은 디스크에
+    남은 것을 말한다(P3 v2-3 · v2-11).
 
     종료 코드는 파일을 썼는지로 정한다(§4.1 「설정을 썼으면 0」). 쓰기 전 · 쓰는 중의 예외는
-    종료 1 이고, 다 쓴 뒤 보고(`_report`)에서 난 예외는 종료 0 에 그 한 줄을 붙인다(P3 2라운드)."""
+    종료 1, Ctrl-C 는 130 이다. 다 쓴 뒤 보고(`_report`)에서 난 예외와 Ctrl-C 는 종료 0 에 그 한
+    줄을 붙인다(P3 2 · 3라운드)."""
     plan: Plan | None = None
     try:
         plan = _plan(args, world)
@@ -946,9 +948,9 @@ def run(args: argparse.Namespace, world: World) -> int:
         return EXIT_FAILED
     try:
         _report(plan, world)
-    except KeyboardInterrupt:
-        _say(world, f"\nrcm: interrupted — {_after(plan, True)}")
-        return EXIT_INTERRUPTED
+    except KeyboardInterrupt:  # 파일은 이미 다 썼다 — 설정을 썼으면 0 이다(P3 3라운드 v2-2)
+        _say(world, f"\nrcm: files written; report interrupted — {_after(plan, True)}")
+        return EXIT_OK
     except Exception as e:  # noqa: BLE001 — 파일은 이미 다 썼다
         _say(world, f"rcm: files written; the report failed: {_one_line(e)}")
         return EXIT_OK
