@@ -2838,6 +2838,31 @@ MUTANTS = (
             "tests/test_tool_shim.py::test_r2_server_startup_counts_a_blocked_git_shim_as_missing",
         ),
     ),
+    # ── M5t-a PR4 — rcm setup (docs/m5t-workplan.md §4.1, TR31 · TR33) ──
+    Mutant(
+        # `rcm setup` 이 rcm.sqlite3 가 이미 있는 data_dir 을 거절하지 않는다 — 그 서비스가
+        # setup 을 돌린 빌드로 남의 DB 를 열어 마이그레이션한다(TR31)
+        name="setup-existing-data-dir-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if not args.reuse_data_dir:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_tr31_a_data_dir_that_already_holds_a_database_is_refused_unless_reused",
+        ),
+    ),
+    Mutant(
+        # guard 가 운영 data_dir(그 안 포함)을 고르는 `rcm setup` 을 막지 않는다(TR33)
+        name="guard-setup-production-data-dir-allowed",
+        path="tools/guard_production.py",
+        old="        if inside(data, prod.data_dir):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr33_setup_on_the_production_data_dir_is_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_the_template_default_resolves_with_the_commands_home",
+        ),
+    ),
 )
 
 
