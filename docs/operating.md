@@ -86,6 +86,105 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
   service. Until then sessions reach the server by address — `server = "http://<host>.local:8787"`
   in `client.toml` works on the same Wi-Fi without any permission.
 
+## Set a machine up: `rcm setup`
+
+`rcm setup` writes the config file and the service file for one of four roles, from the same
+templates `rcm init` uses:
+
+| role | what the machine does | what setup writes |
+|---|---|---|
+| `client` | sends jobs and reads their results | `client.toml` (mode 600) |
+| `worker` | runs the jobs a coordinator hands it | `worker.toml` (mode 600) and a worker service file |
+| `coordinator` | queues jobs and hands them to other machines; runs none itself | `server.toml` with [`lanes = 0`](configuration.md#a-server-that-only-hands-out-jobs-lanes--0) and a server service file |
+| `coordinator-worker` | a coordinator that also runs jobs here (today's `rcm serve`) | `server.toml` with `lanes = 1` and a server service file |
+
+The role is not stored anywhere: rcm reads it back from the config files that exist, the same way
+`rcm doctor` does. In a terminal `rcm setup` asks for the role and for each value, with the
+template's defaults. `rcm setup --role ROLE --yes` asks nothing, and neither does a run without a
+terminal. Then these flags must be given, or it stops with exit 2 before writing anything:
+
+| role | needed with `--yes` | optional |
+|---|---|---|
+| `client` | `--server URL` | `--by LABEL`, `--config PATH` |
+| `worker` | `--server URL`, `--pool NAME`, `--lanes N` | `--label`, `--service-file PATH`, `--config PATH` |
+| `coordinator`, `coordinator-worker` | `--bind ADDRESS` | `--port`, `--data-dir`, `--label`, `--advertise` / `--no-advertise`, `--service-file`, `--config` |
+
+```sh
+rcm setup                                                   # asks
+rcm setup --role worker --server http://macmini:8787 --pool linux --lanes 2 --yes
+rcm setup --role coordinator --bind 100.101.102.103 --yes   # a Tailscale address
+```
+
+**`rcm` with no arguments.** In a terminal (stdin and stderr both), on a machine with no config at
+all, `rcm` asks `No rcm config on this machine yet. Set it up now?` and runs `rcm setup` on yes.
+Everywhere else it prints the usage and exits 2, as before: without a terminal, after a no, and
+when any config is there. A config is `$RCM_CONFIG`, `./rcm.toml`, `server.toml` or `client.toml`
+under `$XDG_CONFIG_HOME/rcm` or `~/.config/rcm`, `worker.toml` in `$XDG_CONFIG_HOME/rcm` (or
+`~/.config/rcm` without `XDG_CONFIG_HOME`), or only environment variables: `RCM_SERVER` or
+`RCM_TOKEN` for a client, `RCM_WORKER_TOKEN` for a worker. An `$RCM_CONFIG` that names a missing
+file is a usage error, and nothing is asked.
+
+**Where it writes.** Config files go to `$XDG_CONFIG_HOME/rcm` (or `~/.config/rcm`), or to
+`--config PATH`. The service file goes next to them, in `<config dir>/service/<label>.plist` on
+macOS or `<config dir>/service/<unit>` on Linux, or to `--service-file PATH`. It does not go to
+`~/Library/LaunchAgents`: launchd would start anything there at the next login. The label is
+`com.remote-ci-monitor.server` or `com.remote-ci-monitor.worker` unless you pass `--label`; the
+systemd unit of a standard label is `rcm-server.service` or `rcm-worker.service`, and of any
+other label `<label>.service`. The server service file has the file-descriptor limit of 4096,
+`HOME`, `WorkingDirectory`, a `PATH` with `/usr/sbin` and without the venv's `bin`, and a log
+named from the label: `server.log` and `worker.log` for the standard labels, `<label>.log`
+otherwise, under `~/Library/Logs/rcm` (launchd) or `~/.local/state/rcm` (systemd). It runs the
+`rcm` that ran setup by its absolute path; setup warns when it could only find an `rcm` on `PATH`.
+
+**It registers and starts nothing.** It prints the lines to run yourself, with absolute paths:
+
+```sh
+mkdir -p <log folder> <LaunchAgents folder>
+cp -n <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist
+cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist
+```
+
+On Linux the last line ends in `systemctl --user daemon-reload && systemctl --user enable --now
+<unit>`, followed by `sudo loginctl enable-linger $USER` to keep the service running after you log
+out. `cp -n` never replaces a file already installed, and the start runs only when the installed
+file is the one setup just wrote. When a service with the same label is already loaded (setup only
+asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so and leaves
+it alone. Once the file is installed, `rcm doctor` reads the installed copy, `--label` or not.
+
+**What it refuses or warns about.**
+
+- An existing config or service file is kept: the run stops with exit 1 and writes nothing.
+  `--force config`, `--force service` or `--force` (both) replace them. When a write fails part
+  way, what was already written is undone.
+- A `data_dir` that already holds `rcm.sqlite3` is refused with exit 1. `--reuse-data-dir` keeps
+  using it; setup then reads the schema version from the file's header, without opening the
+  database, and warns when it differs from this build's (the service migrates an older one when it
+  starts). `--data-dir` is written as an absolute path.
+- A port something already listens on gets a warning. setup binds the port once to check and
+  connects to nothing.
+- `--bind` must be an address of this machine or `0.0.0.0`. A Tailscale address is the
+  recommended choice: setup writes `advertise = false` (mDNS would hand LAN workers an address
+  they cannot reach, so give workers the URL) and warns that everyone on the tailnet can read the
+  queue. A LAN address or `0.0.0.0` gets the warning that anyone on the network can read the queue,
+  the shelf and the machine list, and a LAN address also the advice to reserve it in your router.
+  `127.0.0.1` gets a warning that no other machine can connect.
+- A `coordinator-worker` on a machine that already has `worker.toml` gets a warning: the two run
+  two sets of lanes on one host.
+
+**Tokens.** setup creates none, opens no database and prints no token. A coordinator prints the
+two commands to run once its service is up, with the same `rcm` the service runs, so that no other
+build opens (and migrates) its database: `<rcm> token --config <server.toml> add CLIENT_NAME` (a
+client token, never `--admin`) and `<rcm> token --config <server.toml> add WORKER_NAME --worker`.
+A client is told to get a token from the coordinator and set `RCM_TOKEN`; a worker to put the
+worker token in `worker.toml` as `token = "…"`, because a service does not see the
+`RCM_WORKER_TOKEN` of your shell.
+
+**At the end** it runs the checks that need no server (Python, SQLite, the open-files limit of the
+service file it wrote, whether the config file reads, and the host) as advice that does not change
+the exit code, then says to start the service, add the token and run `rcm doctor --role <role>`.
+Exit codes: 0 written, 1 not written, 2 usage, 130 interrupted. `rcm setup` does not follow the
+server's version.
+
 ## Check a machine before you use it: `rcm doctor`
 
 `rcm doctor` says what this machine can build and test, and what to install first. It measures the
@@ -543,7 +642,8 @@ itself.
 
 Some commands never follow, because they are the server or work without one: `rcm serve`,
 `rcm token`, `rcm init`, `rcm discover`, `rcm version`, `rcm skills` and `rcm gc --config …`.
-`rcm doctor` does not follow either: it measures what this install can do.
+`rcm doctor` does not follow either: it measures what this install can do. Nor does `rcm setup`,
+which writes this machine's own config.
 `rcm worker` follows at its own moments, described in [remote workers](#remote-workers) below. A call with `--help` or `--version` always shows the installed rcm's help
 and version. The help of a command that only the server's version has appears once the installed
 rcm is upgraded.

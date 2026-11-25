@@ -16,6 +16,17 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Added
+- **`rcm setup` sets a machine up as a client, worker, coordinator or coordinator-worker.** It
+  writes the config file and, for the last three, a launchd plist or systemd user unit under the
+  config folder's `service/`; it registers and starts nothing and prints the `cp -n` and start
+  lines instead. `--role ROLE --yes` asks nothing and needs `--server` (client), `--server`,
+  `--pool` and `--lanes` (worker) or `--bind` (coordinators), or it exits 2. Existing files are
+  kept unless `--force`; a `data_dir` that already holds `rcm.sqlite3` is refused unless
+  `--reuse-data-dir`, and setup never opens a database or creates a token; it prints the
+  `rcm token` commands to run. `rcm` with no arguments, in a terminal on a machine with no config
+  at all, asks whether to set it up; everywhere else it is the usage error (exit 2) it was.
+  `rcm setup` does not follow the server's version, and `rcm doctor` finds a service installed
+  under a `--label` of your own.
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
   and `local_only` submissions are refused with 409, and jobs that lost their place wait with
