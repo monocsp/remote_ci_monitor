@@ -538,6 +538,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self.stop = threading.Event()
         self.workers: list[Worker] = []
         self._last_error: str | None = None
+        #: `/api/health` 의 capacity 예외 중 마지막으로 남긴 것 — 같은 예외는 다시 안 남긴다
+        self._capacity_error: tuple[str, str] | None = None
         self._lock = threading.Lock()
         self._janitor: threading.Thread | None = None
         self.retention: Janitor | None = None
@@ -5441,9 +5443,18 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         try:
             capacity: dict[str, Any] | None = self.capacity()
         except Exception as e:  # noqa: BLE001 — 정보 칸이다. 못 세면 null(모름)이지 0 이 아니다
-            # 왜 못 셌는지는 서버 로그에 남긴다 — `rcm check` 는 null 을 「못 셌다」로 그린다
-            self.record_error(f"capacity: {type(e).__name__}", detail=_safe(str(e)))
+            # 왜 못 셌는지는 서버 로그에 남긴다 — `rcm check` 는 null 을 「못 셌다」로 그린다.
+            # health 는 자주 불린다. 같은 예외를 부를 때마다 남기면 `last_error` 의 다른 오류를
+            # 덮고 로그가 찬다 — 바뀔 때만(처음 · 다른 예외 · 나았다가 다시) 남긴다
+            err = (f"capacity: {type(e).__name__}", _safe(str(e)))
+            with self._lock:
+                fresh, self._capacity_error = err != self._capacity_error, err
+            if fresh:
+                self.record_error(err[0], detail=err[1])
             capacity = None
+        else:
+            with self._lock:
+                self._capacity_error = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,

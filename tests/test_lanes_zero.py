@@ -736,6 +736,29 @@ def test_tl3_rcm_check_fails_on_a_malformed_capacity_from_a_dispatch_only_server
     assert code == 1
 
 
+def test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call(lz, monkeypatch):
+    """# TL3 · P6 재확인 — `/api/health` 는 자주 불린다. 같은 capacity 예외를 부를 때마다
+    `last_error` 에 덮고 로그에 한 줄씩 쓰면 다른 오류가 가려지고 로그가 찬다. 바뀔 때만 남긴다:
+    같은 예외는 한 줄, 나은 뒤 다시 깨지면(또는 다른 예외면) 새 줄."""
+    lines: list[str] = []
+    monkeypatch.setattr(lz.app, "log", lines.append)
+    _capacity_breaks(lz, monkeypatch)
+    assert health(lz)[1]["capacity"] is None
+    assert "capacity" in (lz.app.last_error or ""), lz.app.last_error
+    lz.app.record_error("janitor: OtherError")
+    assert health(lz)[1]["capacity"] is None
+    assert health(lz)[1]["capacity"] is None
+    said = [ln for ln in lines if "capacity" in ln]
+    assert len(said) == 1, lines
+    assert lz.app.last_error == "janitor: OtherError"  # 다른 오류를 덮지 않는다
+    monkeypatch.delattr(lz.app, "capacity")  # 낫는다
+    assert isinstance(health(lz)[1]["capacity"], dict)
+    _capacity_breaks(lz, monkeypatch)  # 다시 깨진다 — 새 일이다
+    assert health(lz)[1]["capacity"] is None
+    said = [ln for ln in lines if "capacity" in ln]
+    assert len(said) == 2, lines
+
+
 def test_tl17_rcm_check_draws_no_capacity_row_without_presets(tmp_path, home, monkeypatch, capsys):
     s = zero(tmp_path / "none", presets="")
     try:

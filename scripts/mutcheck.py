@@ -2962,6 +2962,18 @@ MUTANTS = (
             "tests/test_lanes_zero.py::test_tl3_a_malformed_capacity_draws_the_same_unknown_row_as_null",
         ),
     ),
+    Mutant(
+        # `/api/health` 가 불릴 때마다 같은 capacity 예외를 다시 남긴다 — `last_error` 의 다른
+        # 오류를 덮고 로그가 찬다(batch 3 항목 2)
+        name="m5t-lanes-zero-capacity-error-every-call",
+        path="src/remote_ci_monitor/server.py",
+        old="            if fresh:\n                self.record_error(err[0], detail=err[1])\n",
+        new="            if True:\n                self.record_error(err[0], detail=err[1])\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
+        ),
+    ),
 )
 
 
