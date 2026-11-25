@@ -47,6 +47,7 @@ def classify(e: dict[str, Any], f: dict[str, Any], **kw: Any) -> dc.PresetRow:
     kw.setdefault("accept_any", True)
     kw.setdefault("hints", {})
     kw.setdefault("os_name", "darwin")
+    kw.setdefault("unreachable", {})  # 새 서버처럼 「닿지 않는 점검 없음」(TO18 의 칸)
     return dc.classify_preset(e, f, **kw)
 
 
@@ -144,6 +145,19 @@ def test_td11_tools_present_with_checks_left_is_needs_check_not_ok():
     row = classify(entry(checks=("sim-check",)), facts())
     assert row.state == dc.NEEDS_CHECK and row.checks == ["sim-check"]
     assert row.state != dc.READY
+
+
+def test_to18_unreachable_checks_decide_before_tools_and_keep_their_code():
+    """서버가 적은 점검은 도구보다 먼저 「오지 않음」이다. 이유 코드가 `check_local_only` 가 아니면
+    그 코드를 그대로 두고 「로컬 전용」이라 부르지 않는다. 칸이 없으면(None) 「모름」이다."""
+    gated = entry(checks=("sim-check",))
+    row = classify(gated, facts(missing=("t",)), unreachable={"sim-check": "check_local_only"})
+    assert (row.applies, row.code, row.problem) == ("not_coming", "check_local_only", False), row
+    row = classify(gated, facts(), unreachable={"sim-check": "check_other_pool"})
+    assert row.code == "check_other_pool" and "local-only" not in (row.note or ""), row
+    row = classify(gated, facts(), unreachable=None)
+    assert (row.state, row.code) == ("unknown", "check_unknown"), row
+    assert classify(entry(), facts(), unreachable=None).state == "ready"
 
 
 def test_td16_a_preset_for_another_pool_is_not_this_workers_target():

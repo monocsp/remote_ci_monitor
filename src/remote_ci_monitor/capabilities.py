@@ -309,7 +309,17 @@ class CapabilitiesMixin:
             self._reloads += 1
 
     def worker_spec(self) -> dict[str, Any]:
-        """`GET /worker/spec` — 프로브와 프리셋 요구 사항. claim payload 와 같은 범위만 싣는다."""
+        """`GET /worker/spec` — 프로브와 프리셋 요구 사항. claim payload 와 같은 범위만 싣는다.
+
+        M5t-a(§4.5 「대상 프리셋」 · TD15 · TD51)가 프리셋마다 `pool` · `pools` · `placement` ·
+        `checks` 와 `source_modes` · `repo`(git_ref 프리셋의 git 요구와 `repo_missing`, 위임 결정
+        6)를, 최상위에 `tools`(`[[tools]]`)를 더했다. 더하기만 하므로 옛 워커는 무시한다. doctor 는
+        `placement` 가 없는 명세를 옛 서버로 본다(TD5) — 키는 모든 항목에 싣는다.
+
+        `unreachable_checks` 는 그 프리셋의 `checks` 가운데 원격 워커에서 돌 수 없는 점검과 이유
+        코드다(TO18, 위임 결정 2). 서버의 후보 함수(`check_reachable`)가 채운다. 목록에 무엇이
+        빠졌는지로 짐작하게 두지 않는다 — 명세를 풀로 거르게 되면(M5t-c) 빠진 것의 뜻이 바뀐다."""
+        remote = _bare_view("")
         return {
             "generation": self.generation,
             "probe_interval_seconds": self.config.server.probe_interval_seconds,
@@ -325,9 +335,24 @@ class CapabilitiesMixin:
                     "requires": list(p.requires),
                     "env_passthrough": list(p.env_passthrough),
                     "env": dict(p.env),
+                    "pool": p.pool,
+                    "pools": list(p.pools),
+                    "placement": "any-capable" if p.placement == PLACEMENT_CAPABLE else "pool",
+                    "checks": list(p.checks),
+                    "source_modes": list(p.source_modes),
+                    "repo": p.repo or None,
+                    "unreachable_checks": [
+                        {"name": c, "code": CODE_CHECK_LOCAL_ONLY}
+                        for c in p.checks
+                        if not self.check_reachable(remote, c)
+                    ],
                 }
                 for p in self.config.presets
-                if self.machines_for(p, [_bare_view("")])
+                if self.machines_for(p, [remote])
+            ],
+            "tools": [
+                {"name": t.name, "docs": t.docs, "install": dict(t.install)}
+                for t in self.config.tools
             ],
         }
 

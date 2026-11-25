@@ -79,6 +79,9 @@ LOCAL_LANE_NOTE = "needs a local lane (local_only)"
 CHECK_LOCAL_ONLY = (
     "check_local_only"  # 서버 판정 코드와 같은 이름(capabilities.CODE_CHECK_LOCAL_ONLY)
 )
+#: 서버가 그 점검이 이 머신에 닿는지 말하지 않았다(`unreachable_checks` 가 없는 명세) — doctor 만의
+#: 코드다. 서버 판정 코드가 아니다
+CHECK_UNKNOWN = "check_unknown"
 NEEDS_CHECK_NOTE = "rcm runs the check once after it registers"
 NO_JOBS = "no jobs will come to this machine"
 
@@ -202,6 +205,21 @@ def _names(items: Any) -> list[str]:
     return [os.path.basename(str(x)) for x in items or ()]
 
 
+def unreachable_checks(entry: Mapping[str, Any]) -> dict[str, str] | None:
+    """`/worker/spec` 프리셋 항목의 `unreachable_checks` → 점검 이름 → 이유 코드. 서버가 칸을
+    싣지 않았으면(또는 목록이 아니면) None — 모른다. 목록에 무엇이 빠졌는지로 짐작하지 않는다
+    (TO18, 위임 결정 2)."""
+    raw = entry.get("unreachable_checks")
+    if not isinstance(raw, list):
+        return None
+    out: dict[str, str] = {}
+    for item in raw:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            code = item.get("code")
+            out[clean_text(item["name"], 64)] = clean_text(code, 64) if code else CHECK_LOCAL_ONLY
+    return out
+
+
 def classify_preset(
     entry: Mapping[str, Any],
     facts: Mapping[str, Any],
@@ -210,7 +228,7 @@ def classify_preset(
     accept_any: bool,
     hints: Mapping[str, Any],
     os_name: str,
-    local_only_checks: Sequence[str] = (),
+    unreachable: Mapping[str, str] | None,
 ) -> PresetRow:
     """`/worker/spec` 의 프리셋 하나와 이 머신에서 잰 사실 → 행(명세 §4.5 「프리셋 상태」).
 
@@ -218,9 +236,11 @@ def classify_preset(
     도구는 `missing`(종료 1), 워크스페이스에만 있을 수 있는 도구는 `ready` + warn 이다.
     `any-capable` 프리셋은 도구가 빠졌거나 워크스페이스 안 도구면 서버 판정이 eligible 이 아니라
     이 머신에 오지 않는다. 그때는 「오지 않음」과 설치 안내를 warn 으로만 적는다. `checks` 가
-    남으면 `needs_check` 다. `checks` 의 점검이 이 머신에서 돌 수 없으면(`local_only_checks`,
-    점검 프리셋이 `local_only`) 도구와 상관없이 「오지 않음(점검이 로컬 전용)」이다 — 점검이 영영
-    안 오므로 「점검 필요」라 부르지 않는다(TO18).
+    남으면 `needs_check` 다. 서버가 `unreachable` 에 적은 점검(이름 → 이유 코드, 점검 프리셋이
+    `local_only`)이 `checks` 에 있으면 도구와 상관없이 「오지 않음(점검이 로컬 전용)」이다 — 점검이
+    영영 안 오므로 「점검 필요」라 부르지 않는다(TO18). `unreachable` 이 None(서버가 말하지 않음)
+    인데 `checks` 가 있으면 그 점검이 이 머신에 닿는지 모르므로 「모름」(`check_unknown`)이다.
+    `{}` 는 「모두 닿는다」이다 — 서버의 로컬 레인처럼 칸이 필요 없는 자리는 `{}` 를 준다.
     """
     name = str(entry.get("name"))
     tools = _names(entry.get("requires"))
@@ -236,14 +256,31 @@ def classify_preset(
     def row(applies: str, state: str | None, code: str | None, **kw: Any) -> PresetRow:
         return PresetRow(name, applies, state, missing_rows, checks, code, tools=tools, **kw)
 
-    far = [c for c in checks if c in set(local_only_checks)]
+    far = [c for c in checks if unreachable is not None and c in unreachable]
+    blind = bool(checks) and unreachable is None
 
     def check_far() -> PresetRow:
+        codes = {unreachable[c] for c in far} if unreachable else set()
+        if codes <= {CHECK_LOCAL_ONLY}:
+            return row(
+                APPLIES_NOT_COMING,
+                None,
+                CHECK_LOCAL_ONLY,
+                note=f"not coming (check is local-only: {', '.join(far)})",
+            )
         return row(
             APPLIES_NOT_COMING,
             None,
-            CHECK_LOCAL_ONLY,
-            note=f"not coming (check is local-only: {', '.join(far)})",
+            sorted(codes)[0],
+            note=f"not coming (check cannot run on this machine: {', '.join(far)})",
+        )
+
+    def check_blind(applies: str) -> PresetRow:
+        return row(
+            applies,
+            UNKNOWN,
+            CHECK_UNKNOWN,
+            note=f"the server does not say whether {', '.join(checks)} can run here",
         )
 
     if not capable:
@@ -257,6 +294,8 @@ def classify_preset(
             )
         if far:
             return check_far()
+        if blind:
+            return check_blind(APPLIES_POOL)
         if missing:
             return row(APPLIES_POOL, MISSING, "tool_missing")
         if workspace:
@@ -276,6 +315,8 @@ def classify_preset(
         )
     if far:
         return check_far()
+    if blind:
+        return check_blind(APPLIES_CAPABLE)
     if missing:
         hint = "; ".join(f"{m['tool']}: {m['install']}" for m in missing_rows if m["install"])
         warn = f"not coming to this machine: {', '.join(missing)} missing"

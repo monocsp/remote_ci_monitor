@@ -806,15 +806,13 @@ class _Run:
                 "for other pools cannot be counted"
             )
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"
-        # 서버는 이 머신이 후보가 아닌 프리셋(`local_only`)을 명세에서 뺀다 — 후보 함수의 답이다
-        # (PR1). `checks` 의 이름은 설정이 아는 프리셋뿐이므로, 명세에 없는 점검은 이 머신에서
-        # 돌 수 없는 점검이다(TO18). 옛 서버의 명세는 판정할 키가 없어 보지 않는다
-        listed = {str(p["name"]) for p in entries}
-        new_spec = bool(entries) and all("placement" in p for p in entries)
+        # 이 머신에서 돌 수 없는 점검은 서버가 `unreachable_checks` 에 적는다(TO18, 위임 결정 2).
+        # 명세 목록에 무엇이 빠졌는지로 짐작하지 않는다. 칸이 없으면 그 점검은 「모름」이다
+        blind: list[str] = []
         for p in entries:
-            far = (
-                [str(c) for c in p.get("checks") or () if str(c) not in listed] if new_spec else []
-            )
+            far = dc.unreachable_checks(p)
+            if far is None and p.get("checks"):
+                blind.append(dc.clean_text(p["name"], 64))
             passthrough = tuple(str(x) for x in p.get("env_passthrough") or ())
             fixed = {str(k): str(v) for k, v in (p.get("env") or {}).items()}
             requires = tuple(str(x) for x in p.get("requires") or ())
@@ -829,7 +827,7 @@ class _Run:
                 accept_any=accept_any,
                 hints=hints,
                 os_name=os_name,
-                local_only_checks=far,
+                unreachable=far,
             )
             for m in row.missing:
                 note = runner.missing_note(m["tool"], job_env)
@@ -848,6 +846,11 @@ class _Run:
                 )
             self.rows.append(row)
         self.judged = True
+        if blind:
+            self.undecided.append(
+                "the server does not say which checks can run on this machine (older rcm) — "
+                f"cannot judge {', '.join(blind)}"
+            )
         if any("source_modes" in p for p in entries):
             self.git_presets = git_ref_presets(entries, self.rows)
 
@@ -986,6 +989,7 @@ class _Run:
                 accept_any=bool(cfg.server.local_accept_any),
                 hints=hints,
                 os_name=os_name,
+                unreachable={},  # 서버의 로컬 레인은 모든 점검을 돌린다(local_only 도)
             )
             verdict = verdicts.get(p.name)
             if isinstance(verdict, dict) and isinstance(verdict.get("code"), str):
