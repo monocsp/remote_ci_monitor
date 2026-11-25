@@ -22,7 +22,6 @@ import shlex
 import sqlite3
 import sys
 import tarfile
-import tomllib
 import xml.parsers.expat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -458,6 +457,7 @@ def infer_roles(environ: Mapping[str, str]) -> list[str]:
     「설정 있음」이다(TD49)."""
     from remote_ci_monitor.config import (
         ConfigError,
+        _read_toml,
         find_client_config,
         find_server_config,
         user_config_dir,
@@ -466,15 +466,15 @@ def infer_roles(environ: Mapping[str, str]) -> list[str]:
     roles: list[str] = []
     try:
         server = find_server_config(None)
+        # `rcm serve` 와 같은 읽기 — UTF-8 이 아니거나 TOML 이 아니면 사용법 오류다
+        raw = _read_toml(server) if server is not None else {}
     except ConfigError as e:
         raise DoctorUsage(str(e)) from e
     if server is not None:
-        lanes: Any = 1
-        try:
-            with server.open("rb") as fh:
-                lanes = (tomllib.load(fh).get("server") or {}).get("lanes", 1)
-        except (OSError, tomllib.TOMLDecodeError):
-            pass
+        section = raw.get("server", {})
+        if not isinstance(section, dict):
+            raise DoctorUsage(f"{server}: [server] must be a table")
+        lanes = section.get("lanes", 1)
         coordinator_only = isinstance(lanes, int) and lanes == 0
         roles.append(dc.ROLE_COORDINATOR if coordinator_only else dc.ROLE_COORDINATOR_WORKER)
     if (user_config_dir() / "worker.toml").is_file() or environ.get("RCM_WORKER_TOKEN"):
@@ -601,6 +601,15 @@ class _Run:
             names = ", ".join(f"{f.name} ({f.address})" for f in picks)
             raise DoctorUsage(f"several rcm servers on this network: {names} — pass --server URL")
         return picks[0] if self.confirm(picks[0]) else None
+
+    def check_url(self, url: str, origin: Path | None) -> None:
+        """설정이나 플래그로 받은 서버 주소는 http(s) 여야 한다 — 아니면 urllib 이 요청을 만들다
+        터진다. 어디서 온 값인지(파일 이름 · 플래그)를 보이는 사용법 오류다."""
+        if not url or url.startswith(("http://", "https://")):
+            return
+        where = "--server" if self.opts.server else (self.mask(str(origin)) if origin else "")
+        where = where or "the environment"
+        raise DoctorUsage(f"{where}: server must start with http:// or https://")
 
     def server_doc(self, url: str, found_by: str, state: str) -> dict[str, Any]:
         self.server = {
@@ -790,6 +799,8 @@ class _Run:
                 "on this network — write the server's URL instead"
             )
         url, found_by = cfg.server, "flag" if self.opts.server else "config"
+        if not cfg.wants_discovery:
+            self.check_url(url, cfg.path)
         if cfg.wants_discovery:
             found = self.discover(cfg.server_name)
             if found is None:
@@ -1014,6 +1025,7 @@ class _Run:
         bind = cfg.server.bind
         host = "127.0.0.1" if bind in ("0.0.0.0", "::", "") else bind
         host = f"[{host}]" if ":" in host else host
+        self.check_url(self.opts.server or "", None)
         url = self.opts.server or f"http://{host}:{cfg.server.port}"
         self.server_doc(url.rstrip("/"), "flag" if self.opts.server else "config", "—")
         try:
@@ -1151,6 +1163,8 @@ class _Run:
         self.host_facts(None)
         self.base_requirements()
         url, found_by = cfg.server, "flag" if self.opts.server else "config"
+        if not cfg.wants_discovery:
+            self.check_url(url, cfg.path)
         if cfg.wants_discovery:
             found = self.discover()
             if found is None:
@@ -1182,6 +1196,7 @@ class _Run:
 
 def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
     """(종료 코드, 문서). 사용법 오류면 (2, None) — 이유는 ctx.err 로 이미 나갔다."""
+    home = str(ctx.environ.get("HOME") or Path.home())
     try:
         role = opts.role
         if role is None:
@@ -1204,7 +1219,8 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
             r.client()
         doc = r.document()
     except DoctorUsage as e:
-        ctx.err(f"rcm: {e}")
+        # 설정 파일의 절대 경로가 문장에 든다 — 홈 폴더는 가린다(검증자 1 #5)
+        ctx.err(f"rcm: {dc.hide_home(str(e), home)}")
         return dc.EXIT_USAGE, None
     if opts.json:
         ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))

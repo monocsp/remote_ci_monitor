@@ -132,6 +132,15 @@ def mask_home(text: str, home: str) -> str:
     return ":".join(out)
 
 
+def hide_home(text: str, home: str) -> str:
+    """문장 안 어디에 있든 홈 폴더 경로를 `~` 로 가린다(사용법 오류 · 예외 문장). 경로 하나나
+    PATH 처럼 `:` 로 나뉜 값은 `mask_home` 이다."""
+    home = home.rstrip("/")
+    if not home:
+        return text
+    return re.sub(re.escape(home) + r"(?![\w.-])", "~", text)
+
+
 def clean_text(value: Any, limit: int = TEXT_MAX) -> str:
     """서버가 보낸 문자열 — 제어문자를 지우고 자른다. 찍기 전에 한 번 더 정리한다(TD32)."""
     return _CONTROL.sub("", str(value)).strip()[:limit]

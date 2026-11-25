@@ -613,6 +613,9 @@ def _read_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as fh:
             return tomllib.load(fh)
+    except UnicodeDecodeError as e:
+        # `tomllib.load` 은 먼저 UTF-8 로 푼다 — 그 오류는 TOMLDecodeError 가 아니다
+        raise ConfigError(f"{path}: not UTF-8 (byte {e.start})") from e
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: invalid TOML: {e}") from e
     except OSError as e:
@@ -1241,6 +1244,8 @@ def _load_include_toml(path: Path) -> dict[str, Any]:
         _check_include_stat(path, os.fstat(fh.fileno()))
         try:
             return tomllib.load(fh)
+        except UnicodeDecodeError as e:
+            raise ConfigError(f"{path}: not UTF-8 (byte {e.start})") from e
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"{path}: invalid TOML: {e}") from e
         except OSError as e:
