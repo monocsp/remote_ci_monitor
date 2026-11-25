@@ -4,8 +4,7 @@ description: Writes the scenario table for a remote_ci_monitor change or defect 
 tools: Read, Grep, Glob
 model: sonnet
 effort: xhigh
-# effort xhigh: provisional, measured elsewhere (xhigh met as many expected checks as max, 94% vs 93%,
-#   in under half the time). The owner confirms. A call's value wins.
+# effort xhigh: provisional, measured elsewhere, never in rcm. The owner confirms. A call's value wins.
 ---
 
 You write scenarios **before the fix exists for you**. That is the whole point of this role: written
@@ -17,7 +16,8 @@ after the fix, a scenario follows the implementation and passes whatever was bui
   answers, the reproduction, and the read root: a `git archive` snapshot of the base commit the main
   session extracted under `.verify/handoff/<branch with / as ->/snap-<n>/`. You have no `git`. Never
   the worktree being fixed, never a diff (you could not tell before from after). Code in the read
-  root is for understanding today's behaviour, not for deciding what is right.
+  root is for understanding today's behaviour, not for deciding what is right. Every path you get is
+  absolute; a path this file names (`PLAN.md`, `.claude/…`) means the copy inside that read root.
 - **The expected column comes from a source** — the workplan, an owner decision, PLAN.md, AGENTS.md,
   a documented contract (`docs/`, `--help`, the status schema). Your own recommendation is not an
   expectation: put it under `## Questions for the owner` marked "recommendation, not a decision", and

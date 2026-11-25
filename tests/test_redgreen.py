@@ -9,10 +9,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -275,3 +279,93 @@ def test_usage_errors_exit_2(repo, capsys, case):
     code, _ = repo.run(capsys, sha, *tests)
     assert code == 2
     assert git("worktree", "list", "--porcelain", cwd=repo.path).count("worktree ") == 1
+
+
+def test_the_receipt_hides_a_path_under_the_home_folder(repo, capsys, monkeypatch):
+    # 시험 출력에 집 폴더 아래 경로가 찍혀도 영수증에는 `~` 로 남는다(2라운드 F13)
+    probe = Path(os.environ["HOME"]) / "private-notes"
+    monkeypatch.setenv("RG_PROBE", str(probe))
+    tests = NEW_TESTS + "\n\ndef test_probe():\n    import os\n"
+    tests += "    assert os.environ['RG_PROBE'] == add(1, 2)\n"
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": tests})
+    code, receipt = repo.run(capsys, fix, "tests/test_calc.py::test_probe", extra=["--json"])
+    text = json.dumps(receipt)
+    assert "~/private-notes" in text and str(probe) not in text and os.environ["HOME"] not in text
+
+
+def test_a_resolved_temp_path_never_leaves_a_prefix_behind(repo, capsys, monkeypatch):
+    # 풀린 경로가 안 풀린 경로를 품으면(`/private/var` ⊃ `/var`) 짧은 것을 먼저 바꿔
+    # `/private<red>` 가 남았다(2라운드 F7). 그 꼴을 심볼릭 링크로 만든다
+    base = repo.path.parent
+    link = base / "s"
+    real = base / "p" / str(link).lstrip("/")
+    real.mkdir(parents=True)
+    link.symlink_to(real)
+    monkeypatch.setattr(rg.tempfile, "tempdir", str(link))
+    tests = NEW_TESTS + "\n\ndef test_where():\n    assert __file__ == ''\n"
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": tests})
+    code, receipt = repo.run(capsys, fix, "tests/test_calc.py::test_where", extra=["--json"])
+    tail = "\n".join(receipt["red"]["tail"])
+    assert "<red>/tests/test_calc.py" in tail
+    assert str(base / "p") not in json.dumps(receipt) and "/private<" not in tail
+    assert "p<red>" not in tail
+
+
+def test_a_node_id_with_a_leading_dot_slash_is_the_same_test(repo, capsys):
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    code, receipt = repo.run(capsys, fix, "./" + ADD, extra=["--json"])
+    assert code == 0 and receipt["verdict"] == "red-then-green", receipt
+    assert receipt["tests"] == [ADD] and receipt["files"] == ["tests/test_calc.py"]
+
+
+def test_a_test_file_stored_as_a_symlink_is_a_usage_error(repo, capsys):
+    # 링크(모드 120000)는 blob 이지만 그 내용은 경로 문자열이다 — 얹으면 시험이 아니다(2라운드 F8)
+    (repo.path / "tests" / "test_link.py").symlink_to("test_calc.py")
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    code, _ = repo.run(capsys, fix, "tests/test_link.py::test_add")
+    assert code == 2 and "symbolic link" in repo.err
+    assert _worktrees(repo) == 1
+
+
+SLOW_TEST = """
+
+def test_slow():
+    import os, pathlib, time
+    pathlib.Path(os.environ["RG_STARTED"]).write_text(str(os.getpid()))
+    time.sleep(30)
+"""
+SLOW = NEW_TESTS + SLOW_TEST
+
+
+def test_sigterm_removes_the_worktrees_and_stops_pytest(repo, tmp_path):
+    # SIGTERM 에도 finally 의 정리가 돌고 pytest 프로세스 그룹이 죽는다(2라운드 F3)
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": SLOW})
+    started = tmp_path / "started"
+    env = {**os.environ, "TMPDIR": str(tmp_path / "scratch"), "RG_STARTED": str(started)}
+    cmd = [sys.executable, str(ROOT / "tools" / "redgreen.py"), "--fix", fix,
+           "--repo", str(repo.path), "--test", "tests/test_calc.py::test_slow"]  # fmt: skip
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 15
+    while not started.exists() and time.monotonic() < deadline and proc.poll() is None:
+        time.sleep(0.05)
+    assert started.exists(), proc.communicate()
+    child = int(started.read_text())
+    try:
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=10)
+        assert proc.returncode == 143  # 128 + SIGTERM
+        assert _worktrees(repo) == 1
+        assert list((tmp_path / "scratch").iterdir()) == []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"pytest {child} is still running")
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+        git("worktree", "prune", cwd=repo.path)

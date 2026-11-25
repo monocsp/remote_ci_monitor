@@ -159,6 +159,8 @@
   개발 루프 도구 — `scenario-trace-zero-ids-pass`: 표지는 있고 ID 가 없는 표를 통과시킴
      (`tools/scenario_trace.py`, 2026-11-25) + `dev-batch-*` 셋: 보고 없는 rcm/ci 를 초록으로 ·
      낡은 `verified:` 를 yes 로 · porcelain 첫 줄의 앞 공백을 잃음 (`tools/dev_batch.py`, 격리 검증)
+     + 2라운드 셋: `@` 로 시작하는 커밋 경로를 버림 · 상태 파일의 꼴 검사를 건너뜀
+     (`tools/dev_batch.py`) · 영수증에 집 경로를 남김 (`tools/redgreen.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2151,6 +2153,35 @@ MUTANTS = (
         tests=(
             "tests/test_dev_batch.py::test_scope_reads_the_worktree_status_without_losing_characters",
         ),
+    ),
+    Mutant(
+        # `@` 로 시작하는 커밋 경로를 버린다 — `git log --format=@%H` 를 한 줄기로 나누던 때의
+        # 버그 꼴: `@src-config.py` 를 커밋 머리로 읽어 범위 밖인데 「scope ok」(2라운드 F1)
+        name="dev-batch-scope-drops-at-paths",
+        path="tools/dev_batch.py",
+        old="touched += [(sha[:12], name) for name in names if name]",
+        new='touched += [(sha[:12], name) for name in names if name and name[0] != "@"]',
+        tests=(
+            "tests/test_dev_batch.py::test_scope_sees_a_committed_path_that_looks_like_a_log_header",
+        ),
+    ),
+    Mutant(
+        # 상태 파일의 꼴 검사를 건너뛴다 — 문자열 owns · 없는 묶음을 가리키는 after 가 종료 3 이
+        # 아니라 트레이스백 · 엉뚱한 범위가 된다(2라운드 F2 · F12)
+        name="dev-batch-shape-check-skipped",
+        path="tools/dev_batch.py",
+        old="        if not all(shapes):\n",
+        new="        if False:\n",
+        tests=("tests/test_dev_batch.py::test_a_state_file_with_a_wrong_shape_is_corrupt",),
+    ),
+    Mutant(
+        # 시험 출력의 집 경로를 `~` 로 바꾸지 않는다 — 영수증(PR 본문에 붙는다)에 개인 경로가
+        # 남는다(2라운드 F13)
+        name="redgreen-home-path-kept",
+        path="tools/redgreen.py",
+        old='    text = text.replace(str(Path.home()), "~")\n',
+        new="    pass\n",
+        tests=("tests/test_redgreen.py::test_the_receipt_hides_a_path_under_the_home_folder",),
     ),
 )
 

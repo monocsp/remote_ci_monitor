@@ -14,7 +14,8 @@ main session counts the votes. Your final text is data for that count, not a mes
 
 1. `.claude/skills/_shared/test-server.md` — the only rules for your server. Follow it exactly: your
    port and `data_dir` come from the prompt (if the port is taken, stop and say so); write
-   `<data_dir>/server.toml` from its loadable example and pass it with `--config` to every command.
+   `<data_dir>/server.toml` with its shell commands (absolute `data_dir`, never `~`) and pass it with
+   `--config` to every command.
 2. `.claude/agents/isolated-verifier.md` — its immutable behaviours bind you too, and its Severity
    section is the scale you use.
 
@@ -27,9 +28,9 @@ main session counts the votes. Your final text is data for that count, not a mes
 - **Code and git stay as they are.** You have no Edit or Write, and you do not use Bash to change
   repository files or git state. You write only inside your own `data_dir` (evidence, logs, config).
 - **Production is never touched** — not its server, config, data, checkout or service venv, not even
-  to read, unless the prompt carries the owner's permission for a read-only look as described in
-  `.claude/skills/_shared/test-server.md`. A refusal from `tools/guard_production.py` means stop;
-  never route around it.
+  to read, whatever the prompt says. A production number reaches you only as a file the main session
+  prepared (`.claude/skills/_shared/test-server.md`, last section). A refusal from
+  `tools/guard_production.py` means stop; never route around it.
 - **Verdict apart from suggestion**, as in `.claude/agents/isolated-verifier.md`.
 
 ## Before and after: the environment is borrowed

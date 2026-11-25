@@ -24,13 +24,15 @@ have no `git`; [`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read
 
 ## Run
 
-Two [`isolated-verifier`](../../agents/isolated-verifier.md)s **in parallel** (one message, two
-calls — they only read, so they cannot disturb each other), each with the prompt below and nothing
-else: not your expectation, not the other's output.
+The canon's P5 quorum of [`isolated-verifier`](../../agents/isolated-verifier.md)s, **in parallel**
+(one message — they only read, so they cannot disturb each other), each with the prompt below and
+nothing else: not your expectation, not the other's output. Every path in it is absolute, inside the
+snapshot or the handoff folder ([`_shared/stage-lead.md`](../_shared/stage-lead.md)).
 
 ```
 You audit edge cases of remote_ci_monitor at <40-char head sha>. Read only (Read, Grep, Glob) the
-snapshot <abs snap-<n>/>; change nothing. Rules of the house: its AGENTS.md, PLAN.md 「fail-open 금지」.
+snapshot <abs snap-<n>/>; change nothing. Rules of the house: <abs snap-<n>/>AGENTS.md and
+<abs snap-<n>/>PLAN.md 「fail-open 금지」.
 This is the edge audit (P5) of your agent file: its verdicts and its JSON shape.
 Workplan: <abs snap-<n>/>docs/<code>-workplan.md (§7 rows, §9 risks). Diff: <abs diff-<n>.patch>.
 History search already run for you: <abs search-<n>.txt>.
@@ -39,7 +41,7 @@ Edges (id · Given/When/Then):
 Causes that recur in this code base; look for them first:
 <the rows of the table below that the diff is near, pasted>.
 Also add edges this code misses that are not in the list, filtered by
-.claude/skills/_shared/edge-scope.md.
+<abs snap-<n>/>.claude/skills/_shared/edge-scope.md.
 Evidence is file:line you opened. No "probably". Unsure means GAP.
 For a GAP, `note` gives the failure path: input → wrong result.
 `root_cause_theme`: a short name for the cause, the same name for the same cause.
@@ -66,15 +68,12 @@ Do not read the agents' raw transcripts; take only the JSON.
 
 ## Merge the verdicts (main session)
 
-Per edge, by the canon's P5 vote rule ([`isolated-verifier`](../../agents/isolated-verifier.md)
-«Quorum»):
+Per edge, by the vote merge row of [`isolated-verifier`](../../agents/isolated-verifier.md)
+«Quorum» (ties, RARE, a finding only one raised). What is edge-audit's own:
 
-- Both agree → confirmed.
-- Disagree, or either is unsure → **GAP**. GAP against HANDLED: open the `file:line` both cite and
-  confirm which is true before writing it down.
-- **RARE only when both say RARE.** One RARE and one GAP is GAP.
-- A finding only one verifier raised (including new edges): the main session opens that `file:line`
-  itself. True → kept; false → dropped with one line saying why.
+- GAP against HANDLED: open the `file:line` both cite and confirm which is true before writing it
+  down. A finding only one raised (new edges included) that its evidence does not bear out is dropped
+  with one line saying why.
 - NEEDS_RUN is not a resting state: it is settled by a test in P6 or a row in
   [`live-verify`](../live-verify/SKILL.md) before the PR closes.
 

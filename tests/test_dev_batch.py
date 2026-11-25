@@ -370,3 +370,43 @@ def test_add_refuses_a_taken_merge_order_a_taken_branch_and_a_branch_behind_the_
     git("worktree", "add", "-q", "-b", branch, str(old), "origin/main", cwd=batch.clone)
     assert batch.add("C", branch, old, "docs/c.md") == 1
     assert set(batch.read()["bundles"]) == {"A"}
+
+
+@pytest.mark.parametrize("name", ["@src-config.py", "\ndocs/a.md"])
+def test_scope_sees_a_committed_path_that_looks_like_a_log_header(batch, capsys, name):
+    # `git log --format=@%H` 를 나누던 때는 `@` 로 시작하는 경로를 커밋 머리로, 앞의 줄바꿈을
+    # 구분자로 읽어 범위 밖 경로를 놓쳤다(2라운드 F1)
+    wt = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, wt, "docs/a.md") == 0
+    sha = _commit(wt, name)
+    capsys.readouterr()
+    assert batch.run("scope", "--bundle", "A") == 1
+    out = capsys.readouterr().out
+    assert f"{sha[:12]}  {name}  (outside" in out and "1 commits since" in out
+
+
+def _corrupt(batch, **fields) -> None:
+    state = batch.read()
+    state["bundles"]["A"].update(fields)
+    batch.state.write_text(json.dumps(state))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"owns": "docs/a.md"}, {"shared": "CHANGELOG.md"}, {"after": "B"}, {"owns": [1]},
+     {"after": ["Z"]}, {"merge_order": "1"}, {"branch": None}],
+)  # fmt: skip
+@pytest.mark.parametrize("cmd", [["status"], ["scope", "--bundle", "A"]])
+def test_a_state_file_with_a_wrong_shape_is_corrupt(batch, capsys, fields, cmd):
+    # 꼴 검사가 없으면 문자열 owns 는 글자마다 경로가 되고, 없는 묶음을 가리키는 after 는
+    # status 에서 KeyError 트레이스백이 된다(2라운드 F2 · F12)
+    a = batch.worktree("wt-a", A_BRANCH)
+    b = batch.worktree("wt-b", B_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+    assert batch.add("B", B_BRANCH, b, "docs/b.md") == 0
+    head = _commit(a, "docs/a.md")
+    _corrupt(batch, **fields)
+    _, api = _green_api({A_BRANCH: head}, 41, A_BRANCH, head)
+    capsys.readouterr()
+    assert batch.run(*cmd, api=api) == 3
+    assert "corrupt" in capsys.readouterr().err

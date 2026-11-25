@@ -61,8 +61,11 @@ def _load(path: Path) -> dict[str, Any]:
         shapes = [isinstance(bundles, dict), *(isinstance(state[k], str) for k in KEYS)]
         for b in bundles.values():
             shapes += [isinstance(b[k], t) for k, t in BUNDLE_KEYS.items()]
+            # 경로 · 이름 목록의 칸은 문자열이고, after 는 이 장부에 있는 묶음만 가리킨다
+            shapes += [isinstance(x, str) for k in ("owns", "shared", "after") for x in b[k]]
+            shapes += [a in bundles for a in b["after"]]
         if not all(shapes):
-            raise TypeError("a field has the wrong type")
+            raise TypeError("a field has the wrong type or names a bundle that is not there")
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         raise Stop(EXIT_UNKNOWN, f"{path} is corrupt ({type(error).__name__}: {error})") from None
     return state
@@ -165,17 +168,15 @@ def cmd_scope(path: Path, args: argparse.Namespace) -> int:
     allowed = b["owns"] + b["shared"]
     # base 브랜치(origin/dev)에 이미 있는 커밋은 뺀다 — 들여온 병합으로 따라온 남의 묶음이다
     tip = _git("rev-parse", "--verify", f"{state['base_ref']}^{{commit}}", cwd=wt)
-    # `-z` — 경로를 따옴표 · 8진수로 싸지 않는다(공백 · 한글 이름)
-    log = ("log", "-z", "--no-merges", "--no-renames", "--format=@%H", "--name-only", "HEAD")
-    out = _git(*log, f"^{state['base']}", f"^{tip}", cwd=wt, strip=False)
+    shas = _git("rev-list", "--no-merges", "HEAD", f"^{state['base']}", f"^{tip}", cwd=wt).split()
     touched: list[tuple[str, str]] = []
-    sha, commits = "", 0
-    for item in out.split("\0"):
-        item = item.removeprefix("\n")
-        if item.startswith("@"):
-            sha, commits = item[1:], commits + 1
-        elif item:
-            touched.append((sha[:12], item))
+    # 커밋마다 따로 읽는다 — log 한 줄기에 머리와 경로를 섞으면 `@` 로 시작하는 경로가 머리로
+    # 읽혔다. `-z` 는 경로를 따옴표 · 8진수로 싸지 않는다(공백 · 한글 · 줄바꿈 이름)
+    tree = ("diff-tree", "-z", "-r", "--no-commit-id", "--name-only", "--no-renames", "--root")
+    for sha in shas:
+        names = _git(*tree, sha, cwd=wt, strip=False).split("\0")
+        touched += [(sha[:12], name) for name in names if name]
+    commits = len(shas)
     status = ("status", "--porcelain", "-z", "--untracked-files=all", "--no-renames")
     for entry in _git(*status, cwd=wt, strip=False).split("\0"):
         if entry:  # `XY path` — 앞 두 칸은 상태(공백일 수 있다), 셋째는 띄어쓰기

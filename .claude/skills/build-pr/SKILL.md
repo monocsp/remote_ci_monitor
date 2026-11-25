@@ -35,7 +35,7 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
 ## 2. P2 — what the lead does, in order
 
 1. **Rows → red tests.** Each scenario row this PR owns becomes one or more tests named with its ID
-   (`test_s3_…`) or tagged `# S3` inside the test — format in
+   (`test_xs3_…`) or tagged `# XS3` inside the test — format in
    [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). `(live)` rows are not pytest's; they
    go to [`live-verify`](../live-verify/SKILL.md).
 2. **Prove them red** before writing the code. The evidence is the command and the failure it
@@ -44,10 +44,10 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
    The command and its first failing line go in out.json `red`. The `tools/redgreen.py` receipt is
    not the lead's: the main session makes it (§3).
 3. **Implement.** Standard library only, Korean comments, English identifiers and output, pure
-   computation in `core/` with `now` as an argument. Run the changed tests and `./.venv/bin/ruff
-   check . && ./.venv/bin/ruff format --check .`; `node --test tests/web/*.test.js` when `web/`
-   changed. The full suite,
-   the full `mutcheck` and `smoke_install.sh` are `rcm-ci`'s — not repeated locally.
+   computation in `core/` with `now` as an argument. Run the changed tests and, on the changed files
+   only, `./.venv/bin/ruff check <files> && ./.venv/bin/ruff format --check <files>`; `node --test`
+   on a changed web file. The full suite, the full `mutcheck` and `smoke_install.sh` are `rcm-ci`'s —
+   not repeated locally.
 4. **Trace.** `./.venv/bin/python tools/scenario_trace.py docs/<code>-workplan.md --tests tests/`
    exits 0: no row without a test, no tag without a row.
 5. **Mutants.** Every defect this PR fixes, and every check it adds that a silent deletion would
@@ -55,7 +55,9 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
    `./.venv/bin/python scripts/mutcheck.py --only <name>` must go red. It works on a copy in a
    temporary folder, so the worktree is safe.
 6. **Docs** with the `docs` skill for anything a user sees; the doc-lock test names missing wording.
-7. **Commits** with the `commit` skill (Korean by `korean-writing`), small, on the branch. No push.
+7. **Commits** with the `commit` skill (Korean by `korean-writing`), small, on the branch, each fix in
+   one commit right after its red test's commit — the receipt names that commit
+   ([`_shared/stage-lead.md`](../_shared/stage-lead.md) «The red-then-green receipt»). No push.
 8. **out.json** `complete` only with a non-empty `red`. A departure from the workplan goes in
    `workplan_diff` ([`_shared/workplan-diff.md`](../_shared/workplan-diff.md)) and is never silent;
    a frozen contract that has to change is a `POLICY` question and status `blocked`.

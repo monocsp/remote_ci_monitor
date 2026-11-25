@@ -48,11 +48,11 @@ If you cannot confirm something, it is FAIL. You will not see other verifiers' r
 Read:
 - the scenario table: <abs path>
 - the diff: <abs path of `git diff <base>...<head>` output> (files: <list>)
-- the head as files: <abs .verify/handoff/<branch with / as ->/snap-<n>/> (you are not asked to run git)
+- the head as files: <abs worktree>/.verify/handoff/<branch with / as ->/snap-<n>/ (you are not asked to run git)
 - the B2 recipe and the control: <abs paths>
-- .claude/agents/isolated-verifier.md — severity, output shape
+- severity and output shape: <abs snap-<n>>/.claude/agents/isolated-verifier.md
 
-Run (live-verifier only): your test server per .claude/skills/_shared/test-server.md, port <port>,
+Run (live-verifier only): your test server per <abs snap-<n>>/.claude/skills/_shared/test-server.md, port <port>,
 data_dir <abs data_dir>, built from <abs worktree>/.venv at <head>. Run the B2 recipe first, then every
 scenario row; keep each command, exit code and output as files inside your data_dir.
 
@@ -70,25 +70,18 @@ Output: env-before and env-after as your agent file says (live-verifier), the ta
 path of your data_dir. No raw logs: excerpts only, tokens cut to 4 characters, home paths as <HOME>.
 ```
 
-Unsure on the core line counts as no; an `UNKNOWN` row is not a pass. Collect each verifier's evidence from
-its data folder into the round folder before that folder is removed.
+Collect each verifier's evidence from its data folder into the round folder before that folder is removed.
 
 ## After each round
 
-- Count per the canon: a finding raised by either verifier counts; a tie is a defect; `core` must be `yes`
-  from both for the round to pass.
-- MED and LOW are carried, not fixed during rounds. A MED or LOW from an earlier round that nobody fixed is
-  counted again in this round's numbers; it leaves the count only when it is resolved with a reason (fixed —
-  commit or test; withdrawn — why; moved to a new finding — its id). Writing it as 0 makes it vanish.
-- Post the round on the PR, exactly as the canon writes it:
-  `verify-round: <40-char sha> r<N> verifiers=<n> high=<n> medium=<n> low=<n>`.
-- HIGH: back to [qa-defect-fix](../qa-defect-fix/SKILL.md) B4 with the findings verbatim in a new lead round;
-  new head, `rcm/ci`, next round.
-- Round 3 still HIGH: the canon's cause analysis by one fresh verifier, `verify-analysis:` comment, ⛔ if it is
-  a policy conflict. Round 4 still HIGH: report to the owner, no round 5.
-- Passed: the canon's triage of the last round's MED and LOW (fix the 3–4 point ones, `rcm/ci` green again,
-  list the rest in the PR body's `## Remaining findings`), then
-  `gh pr comment <N> --body "verified: <40-char head>"`. A push after it makes it stale.
+Counting (the `core` line and `UNKNOWN` rows included), the carried MED/LOW, the round records with
+`stage=B5`, escalation, triage and what a moved head needs before `verified:` are all the canon's
+«Rounds», «Triage» and «Quorum» in [isolated-verifier.md](../../agents/isolated-verifier.md). What is QA's:
+
+- HIGH, or a triage fix: back to [qa-defect-fix](../qa-defect-fix/SKILL.md) B4 with the findings verbatim
+  in a new lead round; new head, `rcm/ci`, then the next round (for a triage fix, the canon's one-verifier
+  look at its diff, «Rounds» 7).
+- Passed and triaged: `gh pr comment <N> --body "verified: <40-char head>"`.
 
 Keep every verifier's full answer as `verify-r<N>-<id>.md` in the round folder; the report quotes the counts
 and the core lines from them.

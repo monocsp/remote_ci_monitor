@@ -5,15 +5,30 @@ description: P1 of the development loop for remote_ci_monitor — a plan-lead wr
 
 # Workplan (P1)
 
-A workplan is written before code so that the people who build, review and run it all work from
-the same sentences. In this repository the plan is a document in `docs/`, its approval is the merge
-of its own pull request, and from that merge its contracts are frozen. Nothing in this stage writes
-code.
+A workplan is written before code so that whoever builds, reviews and runs it works from the same
+sentences. It is a document in `docs/`; the merge of its own PR approves it and freezes its
+contracts. Nothing in this stage writes code.
 
-The main session does not write the plan. It writes the in-file, starts
-[`plan-lead`](../../agents/plan-lead.md) (handoff format and lead rules:
-[`_shared/stage-lead.md`](../_shared/stage-lead.md), stage name `P1`), runs the plan review and the
-decision page, opens the spec PR and merges it after the owner.
+The main session does not write the plan. [`plan-lead`](../../agents/plan-lead.md) gathers its
+material (handoff format and lead rules: [`_shared/stage-lead.md`](../_shared/stage-lead.md), stage
+name `P1`); [`korean-writer`](../../agents/korean-writer.md) writes the Korean text from it, because a
+long Korean document is its job (`korean-writing` §5 rule 6) and a lead cannot spawn it.
+
+## Order (the only statement of it; `plan-lead` and `dev-loop` link here)
+
+1. §0 below; the branch (`branch` skill, `docs/<code>-<what-it-does>-workplan`) and its worktree.
+2. The `scenario-author` table (§2), the in file, then `plan-lead`, which returns
+   `P1-<n>-material.md` (the section skeleton with facts, decisions, tables, rows) and its out.json.
+3. `korean-writer` writes `docs/<code>-workplan.md` from the material and the in file's verbatim owner
+   words: tables copied as they are, no fact the material lacks (it answers 「재료에 없음」 instead).
+   The main session reads it against `korean-writing` §6 and runs `tools/scenario_trace.py` on it.
+4. The main session commits it (`commit` skill), pushes, and opens the spec PR as a draft (`WIP: `,
+   `--draft`, `pr` skill); `rcm/ci` runs on it like any other.
+5. Plan rounds (§4) on that PR's head, each leaving its `verify-round:` comment on it. A HIGH goes to a
+   new `plan-lead` (corrected material for the sections it touches) and `korean-writer` (only those
+   sections), then a commit, `rcm/ci` and the next round.
+6. The decision page (§5) once a round has no HIGH; the answers folded into §11 and wherever they
+   change §4–§7; then the last round, on the diff since the last verified head; then the merge (§6).
 
 ## 0. Before writing — check what is already decided
 
@@ -36,10 +51,8 @@ the repository and the workplan says so.
 
 ## 1. Sections
 
-`plan-lead` writes `docs/<code>-workplan.md` (Korean, by the `korean-writing` skill) in a worktree
-whose branch the main session named with the `branch` skill (`docs/<code>-<what-it-does>-workplan`);
-`plan-lead` does not commit, the main session does (`commit` skill). `docs/m5s-workplan.md` is the
-model; keep its order.
+`docs/<code>-workplan.md` is Korean, in the house sections below, in this order; `docs/m5s-workplan.md`
+is the model. `plan-lead`'s material file has the same skeleton.
 
 | section | what goes in |
 |---|---|
@@ -136,8 +149,8 @@ that absolute path — not the chat, not the in-file, not the other's verdict. A
 - §5: overlapping files without a merge order, a wave that depends on an unmerged PR;
 - the owner's verbatim request: every item covered, none quietly narrowed.
 
-Severity, rounds, escalation and the PR comment records are the canon's. Fix HIGH between rounds.
-Each finding and what changed goes into §12; MED/LOW not fixed are listed there too.
+Severity, rounds, escalation and the PR comment records are the canon's. Fix HIGH between rounds as
+«Order» 5 says. Each finding and what changed goes into §12; MED/LOW not fixed are listed there too.
 
 ## 5. Ask the owner — one page
 
@@ -152,11 +165,9 @@ written by the merge, so a row the owner should look at is ⛔, not 추천.
 
 ## 6. Merge = approval
 
-1. Open the spec PR with the `pr` skill; `rcm/ci` runs on it like any other.
-2. Fold the owner's answers into §11 and wherever they change §4–§7. That moves the head, so run one
-   more plan round on the diff since the last verified head (it counts as the next round).
-3. Post `verified: <head sha>` for the head that round passed, and merge with
-   `python3 tools/merge_pr.py <N> --wait` once the owner has said to proceed.
+Once the owner has said to proceed and «Order» 6's last round passed: drop `WIP: ` and the draft
+(`gh pr ready <N>`), post `verified: <head sha>` for that head, and merge with
+`python3 tools/merge_pr.py <N> --wait`.
 
 From the merge, these are frozen: `schema_version` of `/api/status`, the DB version and its columns,
 the wire (request and response bodies, worker protocol, health feature keys), exit codes, and the CLI
@@ -165,6 +176,5 @@ the wire (request and response bodies, worker protocol, health feature keys), ex
 
 ## 7. Meta loop
 
-When a plan round finds the same kind of mistake as a previous plan (a stale `file:line`, an
-unchecked state set, a missing irreversible edge), add the check to §4 of this skill or to the
-verifier's prompt so the next plan is asked about it.
+A plan round that finds the same kind of mistake as a previous plan (a stale `file:line`, an unchecked
+state set, a missing irreversible edge) adds the check to §4 or to the verifier's prompt.

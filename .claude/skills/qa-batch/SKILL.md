@@ -14,7 +14,8 @@ merges, the report) and keeps the findings table.
 - **Only the main session records, submits and merges.** It alone writes the findings table, posts PR comments,
   pushes, submits `rcm-ci` and runs `tools/merge_pr.py`. Leads and verifiers return text or files.
 - **Production is untouched.** Test servers only, set up by [test-server.md](../_shared/test-server.md).
-  Looking at a real job on the build machine needs the owner's OK and is read-only.
+  Looking at a real job on the build machine needs the owner's OK, is read-only and is the main session's;
+  a verifier gets its numbers only as a file (test-server.md, last section).
 - **An item the owner asked for explicitly is never closed alone.** Disagreeing with it ("this is intended",
   "not a defect") is a ⛔ on the decision page, never a closing.
 - A side defect seen on the way becomes a new finding; it is never folded into the one at hand.
@@ -52,9 +53,12 @@ moves the redacted copies into the repository. Only the main session writes it.
 | 10 | clean up | main session | servers down, data removed, worktrees removed |
 
 **0 Preflight.** The build under test is a worktree at a named sha with its own `.venv`
-(`git worktree list` first — never borrow a folder another session holds). `./.venv/bin/rcm version` matches
-that sha. `env | grep -E 'RCM_|XDG_'` is empty in the shell that will start servers. Plan one test server per
-runner from [test-server.md](../_shared/test-server.md); nothing here restates its rules.
+(`git worktree list` first — never borrow a folder another session holds). `git -C <wt> rev-parse HEAD`
+equals the pinned sha, and `./.venv/bin/rcm --version` prints the `__version__` of
+`src/remote_ci_monitor/__init__.py` at that sha (pyproject takes its version from there); a mismatch is a
+stale editable install, so reinstall before any run. `env | grep -E 'RCM_|XDG_'` is empty in the shell
+that will start servers. Plan one test server per runner from [test-server.md](../_shared/test-server.md);
+nothing here restates its rules.
 
 **1 Run.** Split the rows among `live-verifier`s, as many at once as the parallel limit of
 [test-server.md](../_shared/test-server.md) allows (this machine also runs `rcm-ci`). Each gets its rows
@@ -97,8 +101,9 @@ background, hand submission after two minutes, `rcm logs <N>` into the next lead
 
 **8 Merge.** `verified: <40-char head>` posted by the main session, then
 `python3 tools/merge_pr.py <N> --wait --delete-branch`, in `merge-order` if the branches are registered with
-`dev_batch.py`, otherwise highest severity first. After each merge, branches sharing files re-sync and
-re-verify as in `dev-batch` §5; a red `dev` stops merging.
+`dev_batch.py`, otherwise highest severity first. Skip the `pr` skill's step 4 (worktree removal) here: the
+worktrees stay until step 10, after step 9 has collected their evidence. After each merge, branches sharing
+files re-sync and re-verify as in `dev-batch` §5; a red `dev` stops merging.
 
 **9 Evidence and report.** `qa-defect-report`: collect evidence from the worktrees into the round folder
 **before** any worktree is removed, redact, hash, write the report, privacy check, report PR (docs only:
@@ -114,7 +119,7 @@ Remove the worktrees this round created, `git fetch --prune`. Report to the owne
 - The received words are never summarised in the table or the report: a summary drops the clue that
   decides the cause first.
 - Evidence files are never overwritten once their hash is listed; a re-run writes a new name.
-- During verification only HIGH findings are fixed; MED and LOW are carried, triaged at the end
+- What is fixed during verification, and when MED and LOW are triaged: the canon's «Rounds» and «Triage»
   ([isolated-verifier.md](../../agents/isolated-verifier.md)).
 
 ## STOP
@@ -123,11 +128,9 @@ Remove the worktrees this round created, `git fetch --prune`. Report to the owne
 |---|---|
 | A finding did not reproduce in three attempts | Stop that finding. Ask the owner for the conditions: version, config, machine, what ran just before, every time or sometimes. Closing as `cannot_reproduce` needs the three attempts in the report |
 | An unresolved ⛔ | That branch waits; no B4 or later for its findings |
-| Round 3 still HIGH | One `isolated-verifier` analyses the cause (file:line) — not the one who fixed. Policy conflict → ⛔; otherwise fix and run round 4. Post `verify-analysis:` |
-| Round 4 still HIGH | Report to the owner what happened, why it matters and what was tried. No round 5 |
+| Round 3 or 4 still HIGH, or too many verify→fix cycles | The canon's escalation ([isolated-verifier.md](../../agents/isolated-verifier.md) «Rounds» 3 and 4) |
 | `rcm wait` exit 3 | Unknown, not a failure. Read the commit status and `rcm jobs` again; never record it as red |
 | Evidence missing at stage 9 | Write "missing" with where it was expected. Never recreate it after the fact, never search another session's worktree |
-| More than three verify→fix cycles moved a head since the owner last looked | Stop and ask |
 
 ## Meta loop
 

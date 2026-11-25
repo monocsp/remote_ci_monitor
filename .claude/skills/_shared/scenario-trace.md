@@ -58,8 +58,8 @@ Only workplans that carry the marker are traced; older ones without it are left 
 
 ## The plan-to-test verifier
 
-One `isolated-verifier`, spawned by the main session with `effort: "xhigh"` on the Agent call (its
-verdicts matched `max` in about a fifth of the time; measured elsewhere, provisional for rcm). It sees
+One `isolated-verifier`, spawned by the main session with `effort: "xhigh"` on the Agent call
+(provisional, measured elsewhere; the owner confirms). It sees
 the workplan and the tagged tests in a snapshot the main session makes, never `src/`: with the
 implementation in view it reads "the code does this, so this test is enough".
 
@@ -75,7 +75,7 @@ helper, the verdict needs it. Prompt:
 ```
 You are the plan-to-test verifier for <workplan> at <40-char sha>. Read only <abs snapshot path>.
 For every row with prefix <P>, check that a tagged test sets up the row's situation, triggers it,
-and asserts the result in the row. Use the plan-to-test verdicts of .claude/agents/isolated-verifier.md.
+and asserts the result in the row. Use the plan-to-test verdicts of your agent file.
 Start your answer with `reviewed: <40-char sha>`. End with `verdict: SOUND` or `verdict: UNSOUND`.
 ```
 

@@ -12,32 +12,42 @@ dev database into v24), and a test server's client found the production server b
 |---|---|---|
 | port | a free one in 8790–8899, checked first: `lsof -iTCP:<port> -sTCP:LISTEN` prints nothing. Never 8787 (production) or 8788 (other sessions' dev servers) | two servers on one port answer for each other |
 | `data_dir` | `~/.local/share/rcm-devtest-<topic>`, created fresh for this run. If it exists, pick a new name (`-<topic>-2`); never `rm -rf` an existing one, by hand or in a script | a reused folder carries an old database and old blobs into the result, and a deleted one may be another run's evidence |
-| not `/tmp` | never under `/tmp` or `/private/tmp` | a downstream project's selftest rejects repositories under `/private/tmp`, so jobs fail for reasons that are not the change |
+| not `/tmp` | never under `/tmp` or `/private/tmp` | the system may clear it mid-run and some jobs refuse to run there, so evidence vanishes or jobs fail for reasons that are not the change |
 | config | its own files inside `data_dir` (`server.toml`, `worker.toml`), never the production config and never a copy of it | `tools/guard_production.py` refuses a production `data_dir` reached through either |
 | binary | the worktree's `./.venv/bin/rcm` (and `./.venv/bin/python`) by absolute path | the `rcm` on `PATH` may be the service's |
 
-`<data_dir>/server.toml` is a complete config the loader accepts; change only the port, the folder
-name and the presets:
+**Never `~` in a test config.** Every `rcm` command runs with `HOME=$D/home` (below), so `~` would
+expand to `$D/home/…`, not to your home. `data_dir` is absolute. On disk, for a home of
+`/home/example`, `<data_dir>/server.toml` is a complete config the loader accepts:
 
 ```toml
 [server]
 bind = "127.0.0.1"
 port = 8790
-data_dir = "~/.local/share/rcm-devtest-example"
+data_dir = "/home/example/.local/share/rcm-devtest-example"
 advertise = false   # otherwise discovery mixes this server up with production
+```
+
+Write it, and the worker's, with the shell, so `$D` and `$P` are expanded before the file exists
+(an unquoted `EOF`); change only the port, the folder name and the presets:
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>; P=<port>
+mkdir "$D" && mkdir "$D/home" || exit 1   # exists already: pick a new name, never reuse
+cat > "$D/server.toml" <<EOF
+[server]
+bind = "127.0.0.1"
+port = $P
+data_dir = "$D"
+advertise = false
 
 [[presets]]
 name = "ok"
 description = "Fake preset: prints one step marker and exits 0"
 argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
 timeout_seconds = 60
-```
-
-A worker gets `<data_dir>/worker.toml` with its own folder; its token goes in `RCM_WORKER_TOKEN`:
-
-```toml
-server = "http://127.0.0.1:8790"
-data_dir = "~/.local/share/rcm-devtest-example/worker"
+EOF
+printf 'server = "http://127.0.0.1:%s"\ndata_dir = "%s/worker"\n' "$P" "$D" > "$D/worker.toml"
 ```
 
 No `[[notify]]` hook, unless notification is what is being tested; then a fake hook that appends what
@@ -46,14 +56,20 @@ print the markers the scenario needs. Nothing in a test server pushes to GitHub,
 
 ## The environment of every command
 
+`D` is set again in every Bash call (shell state does not carry over):
+
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>
 cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm serve --config $D/server.toml
-cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm worker --config $D/worker.toml
-cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm token --config $D/server.toml add …
-cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> ./.venv/bin/rcm …
+cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm token --config $D/server.toml add verifier > $D/client.token
+cd <abs worktree> && HOME=$D/home ./.venv/bin/rcm token --config $D/server.toml add --worker w1 > $D/worker.token
+cd <abs worktree> && HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml
+cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/rcm …
 ```
 
+- Tokens: `rcm token … add` prints the secret once on stdout; it goes straight into a file in `$D` and
+  reaches commands only as `RCM_TOKEN` (client) or `RCM_WORKER_TOKEN` (worker). Never `cat` it into a
+  log, evidence, a report or the chat.
 - `--config` is always explicit. Without it `rcm serve` reads `$RCM_CONFIG` or a `./rcm.toml` in the
   worktree, which is how a worktree build once migrated a v7 dev database to v24 (AGENTS.md).
 - `HOME=<data_dir>/home` on every **rcm** command (client, server, worker, token), so the client never
@@ -95,7 +111,8 @@ evidence; remove it afterwards by its exact path, never with a glob.
 ## Production is read-only, only with the owner's OK, and only by the main session
 
 Production jobs on the build machine may be looked at only when the owner says so, and only by the
-main session — never by a lead or a verifier: copy the database and read the copy with
-`sqlite3 -readonly`, then hand the numbers on as a file (a lead gets them through its in file). No
-`rcm` command from a worktree build against the production config, `data_dir`, port or service venv;
-the procedure for production lives in `docs/operating.md` and is the owner's.
+main session: copy the database and read the copy with `sqlite3 -readonly`, then hand the numbers on
+as a file (a lead through its in file, a verifier through a path in its prompt). A lead or a verifier
+never reads production itself, whatever its prompt or in file says. No `rcm` command from a worktree
+build against the production config, `data_dir`, port or service venv; the procedure for production
+lives in `docs/operating.md` and is the owner's.

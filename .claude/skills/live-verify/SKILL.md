@@ -70,8 +70,9 @@ this PR. The prompt asks each to:
    met always is.
 
 Tokens appear as their first four characters, home paths as `<HOME>`, the requester as
-`--by acceptance`. Production jobs on the build machine are looked at only read-only and only with the
-owner's OK ([`_shared/test-server.md`](../_shared/test-server.md)).
+`--by acceptance`. Production jobs on the build machine are looked at only by the main session,
+read-only, with the owner's OK; a verifier gets the numbers as a file
+([`_shared/test-server.md`](../_shared/test-server.md)).
 
 ## 3. Rounds and fixes
 

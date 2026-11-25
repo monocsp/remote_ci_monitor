@@ -91,7 +91,9 @@ will), following the existing script in that folder.
 
 Reproduced → [qa-defect-fix](../qa-defect-fix/SKILL.md) (B3–B4) → PR and `rcm/ci` (`pr` skill) →
 [qa-defect-verify](../qa-defect-verify/SKILL.md) (B5) → `verified:` and `tools/merge_pr.py` →
-[qa-defect-report](../qa-defect-report/SKILL.md) (B6).
+[qa-defect-report](../qa-defect-report/SKILL.md) (B6). At the merge skip the `pr` skill's step 4
+(worktree removal): the worktree holds evidence B6 collects, and it is removed only afterwards, as
+`qa-batch` step 10 does.
 
 ## Closing without a fix
 

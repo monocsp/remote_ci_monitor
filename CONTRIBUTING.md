@@ -6,7 +6,7 @@ being small and honest about what it knows.
 ## Development
 
 ```sh
-python3.11 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]"
+python3 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]"   # Python 3.11 or newer
 ./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . && ./.venv/bin/python -m pytest
 node --test tests/web/*.test.js         # web UI pure functions
 ./.venv/bin/python scripts/mutcheck.py  # proves the tests go red for every mutant in scripts/mutcheck.py (--list)

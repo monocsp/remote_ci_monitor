@@ -17,21 +17,28 @@ pytest 는 이 도구를 돌린 인터프리터(`sys.executable`)로 돈다 — 
 `kinds` 에 적는다. 건너뛴(skip) 시험은 통과가 아니다 — 모르는 값을 성공으로 세지 않는다. 파일
 하나처럼 여러 시험으로 펼쳐지는 nodeid 에서 고치기 전에 통과한 것이 섞이면 `mixed` 이고 빨강이
 아니다(어느 것이 통과했는지 `note` 에 적는다). 영수증에는 임시 경로 대신 `<red>` · `<green>` 을,
-인터프리터는 이름(`python3`)이나 `.venv/bin/python` 만 적는다.
+인터프리터는 이름(`python3`)이나 `.venv/bin/python` 만 적는다. 경로 치환은 긴 것부터 한다(풀린
+경로 `/private/var/…` 가 안 풀린 `/var/…` 를 품는다). `--test` 의 앞 `./` 는 떼고 읽는다.
+
+SIGTERM 을 받아도 임시 워크트리를 치우고 끝난다(종료 143). pytest 는 자기 세션에서 돌고, 끊기면
+그 프로세스 그룹째 죽인다 — 시험이 띄운 자식이 남지 않게.
 
 종료 코드: 0 빨강→초록 · 1 아님(not red · not green · mixed) · 2 사용법(sha · 부모 · 시험 파일
-없음, 폴더를 줌, pytest 없는 인터프리터) · 3 판정 못 함(pytest 가 시험을 못 찾음 · 시간 초과 ·
-워크트리를 못 만듦 · 결과 줄 없음 · 시험 파일 경로가 임시 트리 밖으로 풀림).
+없음, 폴더 · 심볼릭 링크를 줌, pytest 없는 인터프리터) · 3 판정 못 함(pytest 가 시험을 못 찾음 ·
+시간 초과 · 워크트리를 못 만듦 · 결과 줄 없음 · 시험 파일 경로가 임시 트리 밖으로 풀림) ·
+143 SIGTERM.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -55,6 +62,13 @@ def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedPr
     return subprocess.run(cmd, capture_output=True, text=not binary, env=env, timeout=120)
 
 
+def node_id(raw: str) -> str:
+    """`./tests/x.py::t` → `tests/x.py::t` — pytest 는 앞 `./` 없이 nodeid 를 찍는다."""
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return raw
+
+
 def resolve(repo: Path, fix: str, tests: list[str]) -> tuple[Path, str, str, list[str]]:
     """(레포 뿌리, fix sha, 부모 sha, 얹을 시험 파일들). 틀리면 Usage."""
     top = _git(repo, "rev-parse", "--show-toplevel")
@@ -71,11 +85,18 @@ def resolve(repo: Path, fix: str, tests: list[str]) -> tuple[Path, str, str, lis
     for rel in files:
         if PurePosixPath(rel).is_absolute() or ".." in PurePosixPath(rel).parts:
             raise Usage(f"{rel}: the test path must be inside the repository")
-        kind = _git(root, "cat-file", "-t", f"{sha}:{rel}")
-        if kind.returncode != 0:
+        # 모드까지 본다 — 심볼릭 링크(120000)도 blob 이지만 내용은 경로 문자열이다
+        listed = _git(root, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", sha, "--", rel)
+        entries = [e.split("\t", 1) for e in listed.stdout.split("\0") if "\t" in e]
+        if listed.returncode != 0 or not entries:
             raise Usage(f"{rel} does not exist at {sha[:12]}")
-        if kind.stdout.strip() != "blob":
+        mode, kind = next((head.split()[:2] for head, path in entries if path == rel), ("", "tree"))
+        if kind == "tree":
             raise Usage(f"{rel} is a directory at {sha[:12]} — name a test file or node id")
+        if mode == "120000":
+            raise Usage(f"{rel} is a symbolic link at {sha[:12]} — name the file it points to")
+        if kind != "blob":
+            raise Usage(f"{rel} is not a file at {sha[:12]} ({kind})")
     return root, sha, parent, files
 
 
@@ -123,14 +144,22 @@ def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
     src = [str(tree / "src")] if (tree / "src").is_dir() else []  # editable 설치의 src 를 이긴다
     env["PYTHONPATH"] = os.pathsep.join([*src, *filter(None, [env.get("PYTHONPATH")])])
     shown = shlex.join([interpreter(), *cmd[1:]])
+    # 자기 세션 — 끊기면(시간 초과 · SIGTERM) 시험이 띄운 자식까지 그룹째 죽인다
+    proc = subprocess.Popen(cmd, cwd=tree, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)  # fmt: skip
     try:
-        proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True,
-                              timeout=PYTEST_TIMEOUT)  # fmt: skip
+        out, err = proc.communicate(timeout=PYTEST_TIMEOUT)
     except subprocess.TimeoutExpired:
         return {"tree": f"<{label}>", "cmd": shown, "exit": None, "passed": [],
                 "kinds": dict.fromkeys(tests, "none"), "tail": ["timed out"]}  # fmt: skip
-    text = proc.stdout + proc.stderr
-    for real in {str(tree), str(tree.resolve())}:
+    finally:
+        if proc.returncode is None:  # 다 돌지 못했다 — 거두기 전이라 그룹 번호가 아직 그의 것
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    text = out + err
+    # 긴 것부터 — 풀린 경로가 안 풀린 경로를 품으면 짧은 것을 먼저 바꿔 앞이 남는다
+    for real in sorted({str(tree), str(tree.resolve())}, key=len, reverse=True):
         text = text.replace(real, f"<{label}>")  # 영수증에 개인 경로를 남기지 않는다
     text = text.replace(str(Path.home()), "~")
     tail = text.strip().splitlines()[-TAIL:]
@@ -192,13 +221,19 @@ def _cleanup(root: Path, tmp: Path, created: list[Path]) -> None:
             _git(root, "worktree", "prune")
 
 
+def _terminated(signum: int, _frame: object) -> None:
+    """SIGTERM 을 예외로 바꾼다 — main 의 finally 가 임시 워크트리를 치우고 143 으로 끝난다."""
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="redgreen.py",
         description="Prove a fix commit's tests fail on its parent (with the fix's test files "
         "laid on top) and pass on the fix. Prints a receipt.",
         epilog="exit codes: 0 red-then-green · 1 not (not red, or not green) · 2 usage · "
-        "3 could not decide (pytest found no such test, timed out, no result line)",
+        "3 could not decide (pytest found no such test, timed out, no result line) · "
+        "143 SIGTERM (temporary worktrees removed first)",
     )
     ap.add_argument("--fix", required=True, help="the fix commit")
     ap.add_argument("--test", action="append", required=True, help="pytest node id (repeat)")
@@ -207,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--import-red-ok", action="store_true", help="import/fixture error = red")
     try:
         args = ap.parse_args(argv)
+        args.test = [node_id(t) for t in args.test]
         root, sha, parent, files = resolve(args.repo, args.fix, args.test)
     except SystemExit as stop:
         return EXIT_USAGE if stop.code else EXIT_RED_GREEN
@@ -217,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"usage: {sys.executable} cannot import pytest — run it with the worktree's .venv "
               "python (./.venv/bin/python tools/redgreen.py …)", file=sys.stderr)  # fmt: skip
         return EXIT_USAGE
+    previous = signal.signal(signal.SIGTERM, _terminated)  # mkdtemp 보다 먼저 — 만든 것은 치운다
     tmp = Path(tempfile.mkdtemp(prefix="redgreen-"))
     created: list[Path] = []
     receipt: dict[str, Any] = {"fix": sha, "parent": parent, "tests": args.test, "files": files}
@@ -244,7 +281,11 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, subprocess.SubprocessError) as error:
         print(f"unknown: {error}", file=sys.stderr)
     finally:
-        _cleanup(root, tmp, created)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # 치우는 도중에 또 끊기지 않게
+        try:
+            _cleanup(root, tmp, created)
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
     if args.json:
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
     else:

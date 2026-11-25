@@ -19,11 +19,11 @@ and P6 itself; why is in [`_shared/stage-lead.md`](../_shared/stage-lead.md).
 |---|---|---|
 | P1 workplan | [`workplan`](../workplan/SKILL.md) | the spec PR is merged (merge = owner approval, contracts frozen) |
 | P2 build | [`build-pr`](../build-pr/SKILL.md) (implement) | lead's out.json `complete`, plan↔test check SOUND, `rcm/ci` green on the head |
-| P3 review | this file, «P3 review» | a round with HIGH 0 on the head |
-| P4 live | [`live-verify`](../live-verify/SKILL.md) | only when required; a round with HIGH 0 and the report committed |
-| P5 edges | [`edge-audit`](../edge-audit/SKILL.md) | a round with HIGH 0; confirmed GAPs handed to P6 |
+| P3 review | this file, «P3 review» | a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1) on the head |
+| P4 live | [`live-verify`](../live-verify/SKILL.md) | only when required; a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1) and the report committed |
+| P5 edges | [`edge-audit`](../edge-audit/SKILL.md) | a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1); confirmed GAPs handed to P6 |
 | P6 gap fix | [`build-pr`](../build-pr/SKILL.md) (gap-fix) | every confirmed GAP closed (HANDLED + a test that locks the path) |
-| triage | [`isolated-verifier`](../../agents/isolated-verifier.md) «triage» | last-round MED/LOW scored; 3–4 points fixed, the rest in `## Remaining findings` |
+| triage | [`isolated-verifier`](../../agents/isolated-verifier.md) «Triage» | the canon's scoring done, `triage:` posted, a moved head looked at as «Rounds» 7 says |
 | P7 merge | [`pr`](../pr/SKILL.md) | `verified: <head sha>` posted, `tools/merge_pr.py` merged, worktree removed |
 
 A workplan's §5 gives each PR a lane, **full** or **short**; which stages each lane runs, and when a
@@ -58,9 +58,9 @@ refuses a merge without `rcm/ci` and `verified:` on the pinned head. Read it fre
 git fetch origin
 git show origin/dev:docs/<code>-workplan.md | sed -n '/^## 6\./,/^## 7\./p'   # §6 checklist
 gh pr list --state all --search "<code>" --json number,title,state,headRefName,headRefOid
-gh pr view <N> --json headRefOid,comments --jq '.comments[].body' | grep -E '^(verify-round|verify-analysis|verified):'
+gh pr view <N> --json headRefOid,comments --jq '.comments[].body' | grep -E '^(verify-round|verify-analysis|triage|verified):'
 gh api repos/{owner}/{repo}/commits/<head sha>/status --jq '.statuses[] | [.context, .state, .description]'
-ls .verify/handoff/<branch with / as ->/        # last <stage>-<n>-out.json of a lead
+ls <abs wt>/.verify/handoff/<branch with / as ->/   # last <stage>-<n>-out.json of a lead
 ```
 
 A workplan that is not on `origin/dev` yet is on its spec PR's branch. After a session break, read
@@ -87,8 +87,9 @@ Take the first row that matches, per PR in §5 order.
 | triage done, `rcm/ci` green on the final head | P7 |
 | merged | tick the §6 row (next PR that touches the workplan), next PR |
 
-A head that moves after P3–P5 closed: triage fixes keep the verdicts (gate green again, no new
-rounds — canon); any other code change reopens review on the new head as the next round.
+A head that moves after P3–P5 closed: triage code fixes get the one-verifier look of
+[`isolated-verifier`](../../agents/isolated-verifier.md) «Rounds» 7 before `verified:`; any other code
+change reopens review on the new head as the next round.
 
 ## 3. Stop points — the owner decides, never the loop
 
@@ -96,10 +97,8 @@ rounds — canon); any other code change reopens review on the new head as the n
   question. No answer is not approval, and the loop never approves its own plan.
 - A change to a frozen contract (schema_version, DB version, wire, exit codes, CLI) after approval.
 - An explicit owner request missing or contradicted (always ⛔ — canon).
-- Round 3 still HIGH with a policy conflict; round 4 still HIGH; more than three verify→fix cycles
-  that moved the head since the owner last looked (canon).
-- The plan↔test check UNSOUND three times; the same gate failure three times; the same gap not
-  closed three times.
+- The escalation stops of [`isolated-verifier`](../../agents/isolated-verifier.md) «Rounds» 3, 4
+  and 6, and the same gate failure three times ([`build-pr`](../build-pr/SKILL.md) §3).
 - A release to `main` and anything that touches the production install (`AGENTS.md`).
 
 Every question goes on one [decision page](../_shared/decision-page.md). A stop is reported with
@@ -107,15 +106,17 @@ what was tried, what is known, and the default you would pick — then the loop 
 
 ## 4. Who does what
 
-| stage | lead (writes, commits) | verifiers | main session |
+Verifier counts are the canon's «Quorum»; this table says only who.
+
+| stage | lead (writes) | verifiers | main session |
 |---|---|---|---|
-| P1 | [`plan-lead`](../../agents/plan-lead.md) | [`isolated-verifier`](../../agents/isolated-verifier.md) ×2 per round on the plan | [`scenario-author`](../../agents/scenario-author.md)'s table first, in-file with the owner's words verbatim, decision page, push, spec PR, round records, merge after the owner |
-| P2 | [`build-lead`](../../agents/build-lead.md), new | `isolated-verifier` ×1, plan↔tests without the code | worktree, in-file, push, PR, wait for `rcm/ci` |
-| P3 | — | `isolated-verifier` ×2 per round on the diff | spawn, tally, fix HIGH (small) or a new lead |
-| P4 | — | [`live-verifier`](../../agents/live-verifier.md) ×2, each on its own test server | spawn, tally, report |
-| P5 | — | `isolated-verifier` ×2 in parallel | merge verdicts, open single-verifier findings |
-| P6 | `build-lead`, new (not P2's) | `isolated-verifier` ×2 re-check | in-file with the GAP table, push, `rcm/ci` |
-| triage, P7 | — | — | score, fix, PR body, `verified:`, merge, clean up |
+| P1 | [`plan-lead`](../../agents/plan-lead.md): the plan's material, no Korean text, no commit | [`isolated-verifier`](../../agents/isolated-verifier.md) on the plan | [`scenario-author`](../../agents/scenario-author.md)'s table first, in-file with the owner's words verbatim, [`korean-writer`](../../agents/korean-writer.md) for the text, commit, draft spec PR, rounds, decision page, merge after the owner — in the order of [`workplan`](../workplan/SKILL.md) «Order» |
+| P2 | [`build-lead`](../../agents/build-lead.md), new | `isolated-verifier`, plan↔tests without the code | worktree, in-file, push, PR, wait for `rcm/ci` |
+| P3 | — | `isolated-verifier` on the diff | spawn, tally, fix HIGH (small) or a new lead |
+| P4 | — | [`live-verifier`](../../agents/live-verifier.md), each on its own test server | spawn, tally, report |
+| P5 | — | `isolated-verifier`, in parallel | merge verdicts, open single-verifier findings |
+| P6 | `build-lead`, new (not P2's) | `isolated-verifier` re-check | in-file with the GAP table, push, `rcm/ci` |
+| triage, P7 | a new lead when the flow's leads commit | «Rounds» 7's look at the triage diff | score, fix, PR body, `triage:`, `verified:`, merge, clean up |
 
 A lead is fresh for every stage and every retry. A small follow-up (a comment, a doc line, one more
 assertion) goes to a new agent given only the files it needs, not to the previous lead resumed: a
@@ -147,14 +148,14 @@ main session does not touch that worktree's git state.
 
 ## 5. P3 review
 
-On the head that `rcm/ci` passed: two [`isolated-verifier`](../../agents/isolated-verifier.md)s, one
-after the other. The main session first writes, in the handoff folder, the diff
-(`git -C <wt> diff origin/dev...<head> > diff-<n>.patch`) and a `git archive` snapshot of the head
-(`snap-<n>/`, [`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»); each
-verifier gets those absolute paths, the workplan sections the PR implements and the PR body — never
-your conclusion or the other's verdict. Each looks at all three axes the agent file names. After
-each round post the record line the canon gives (`verify-round: <sha> r<N> …`). During rounds fix
-HIGH only; MED/LOW wait for triage.
+On the head that `rcm/ci` passed, the [`isolated-verifier`](../../agents/isolated-verifier.md)s the
+canon's «Quorum» gives for P3. The main session first writes the diff
+(`git -C <wt> diff origin/dev...<head> > <abs wt>/.verify/handoff/<branch with / as ->/diff-<n>.patch`)
+and a `git archive` snapshot of the head (`snap-<n>/` in the same folder,
+[`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»); each verifier gets
+those absolute paths, the workplan sections the PR implements (inside the snapshot) and the PR body —
+never your conclusion or the other's verdict. Each looks at all three axes the agent file names.
+Records, closing and what is fixed during rounds: the canon's «Rounds».
 
 ## 6. Loop summary
 

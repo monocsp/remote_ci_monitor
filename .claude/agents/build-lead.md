@@ -41,7 +41,9 @@ The rules for every lead (handoff files, the out.json contract, what leads never
 8. **Commits** through the commit skill: read `.claude/skills/commit/SKILL.md` and the
    `.claude/skills/korean-writing/SKILL.md` it loads, check the header with
    `python3 tools/guard_naming.py commit "<header>"`, `git add <paths>` (never `-A`, never `-f`), small
-   commits on your own branch, the attribution lines the in file gives. No high-entropy literals
+   commits on your own branch, the attribution lines the in file gives. Each fix is one commit right
+   after its red test's commit (or one commit holding both): the receipt names it
+   (`.claude/skills/_shared/stage-lead.md` «The red-then-green receipt»). No high-entropy literals
    (gitleaks reads every commit of the branch).
 9. **Return.** `git status --porcelain` empty (or every leftover named in `notes`), then
    `<stage>-<n>-out.json` in the handoff folder and the same JSON as your final text. Shas are 40

@@ -44,8 +44,8 @@ It lives **only in the PR body**: a commit would move the head and send `rcm/ci`
 1. Branch with the `branch` skill; its own worktree and `.venv`.
 2. A test per acceptance line first, named with its ID (`test_xl1_…`); run it and keep the failure
    it printed. It must fail in the assertion, not on import.
-3. The fix. Changed tests + `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check .`;
-   `node --test tests/web/*.test.js` if `web/` changed.
+3. The fix. Changed tests, and on the changed files only `./.venv/bin/ruff check <files> &&
+   ./.venv/bin/ruff format --check <files>`; `node --test` on a changed web file.
 4. A fix to a defect gets a permanent mutant in `scripts/mutcheck.py`, proven with
    `./.venv/bin/python scripts/mutcheck.py --only <name>`. A plain addition (a new message, a flag)
    does not need one.
@@ -57,17 +57,15 @@ It lives **only in the PR body**: a commit would move the head and send `rcm/ci`
 
 1. Push and open the PR with the `pr` skill, card included. Wait for `rcm/ci` on the head
    ([`dev-loop`](../dev-loop/SKILL.md) «long waits»).
-2. Isolated verification on the green head: the count is the one
-   [`isolated-verifier`](../../agents/isolated-verifier.md) gives for `dev-lite` — one verifier, two
-   when the change touches `core/`, `store.py`, `server.py`, `remote_workers.py` or `worker.py`. Each
-   gets, as absolute paths, the diff file and a snapshot of the head
+2. Isolated verification on the green head, with the count, the HIGH retry and the MED/LOW handling
+   of the `dev-lite` row in [`isolated-verifier`](../../agents/isolated-verifier.md) «Quorum». Each
+   verifier gets, as absolute paths, the diff file and a snapshot of the head
    ([`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»), the card and
    the claims to check (each acceptance line, plus "the test fails without the fix", with the
    `tools/redgreen.py` receipt made as that file says), and marks every finding with a severity.
-3. HIGH → fix it, `rcm/ci` green again, **one** more look on the new head with the same count.
-   Still HIGH → stop and tell the owner: it was not small.
-4. MED/LOW are not fixed here; they go into the PR body under `## Remaining findings`.
-5. Post `verify-round:` and `verified: <head sha>` as the canon gives, merge with
+3. A HIGH that is still there after the canon's one retry means it was not small: stop and tell the
+   owner. MED/LOW go into the PR body under `## Remaining findings`.
+4. Post `verify-round:` (`stage=P3`) and `verified: <head sha>` as the canon gives, merge with
    `python3 tools/merge_pr.py <N> --wait --delete-branch`, remove the worktree (`pr` skill).
 
 ## Switching to the full loop

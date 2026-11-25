@@ -7,10 +7,13 @@
 왜 있나(2026-11-25): 명세의 시험 행과 실제 시험을 사람이 눈으로 맞췄다. 행이 빠지거나 시험이 없는
 행을 가리켜도 아무것도 빨개지지 않는다. 표지 하나와 이름 규칙 하나로 기계가 대조하게 한다.
 
-명세 쪽: 시험 표 **바로 위 줄**에 `<!-- scenario-prefix: X -->`(대문자 접두어). 표의 첫 칸이 ID
-(`X1`, `X2` …). 행에 `(live)` 가 있으면 pytest 가 아니라 실기(live run)로 증명하는 행이라 누락으로
-세지 않는다. 표지가 없는 문서는 건드리지 않는다(옛 명세). 펜스 코드 블록(```` ``` ```` · `~~~`)
-안의 표지와 표는 예시라서 읽지 않는다.
+명세 쪽: 시험 표 **바로 위 줄**에 `<!-- scenario-prefix: X -->`(대문자 접두어) — 그 줄에 표지만
+있어야 한다(본문 속에 인용한 표지는 세지 않는다). 표의 첫 칸이 ID(`X1`, `X2` …). 어느 칸이
+`(live)` 이거나 ` (live)` 로 끝나면(시나리오 칸 끝에 붙이는 꼴, `docs/m5t-workplan.md`) pytest 가
+아니라 실기(live run)로 증명하는 행이라 누락으로 세지 않는다. 설명 가운데의 `(live)` 는 아니다.
+표지가 없는 문서는 건드리지 않는다(옛 명세). 펜스 코드 블록(```` ``` ```` · `~~~`) 안의 표지와
+표는 예시라서 읽지 않는다. 펜스는 펜스 글자만 있는 줄(정보 문자열 없이)에서만 닫힌다. 같은 문서를
+두 번 주면(다른 철자라도) 한 번만 읽는다.
 시험 쪽: 이름 `test_x3_…`(앞에서부터 `test_x1_x2_…` 처럼 여럿) 또는 시험 함수 **안**의 주석 `# X3`.
 
 문제의 종류: format(표지 · 표 · ID 꼴) · empty(ID 가 하나도 없는 표 — 검사한 것이 없다) ·
@@ -46,6 +49,8 @@ PREFIX_RE = re.compile(r"^[A-Z]+$")
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+$")
 NAME_TOKEN_RE = re.compile(r"^([a-z]+)([1-9]\d*)$")
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+CLOSE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")  # 닫는 펜스 — 정보 문자열이 없다
+LIVE = "(live)"
 SHOWN = 5  # --prefix-usage 가 보여 주는 자리 수
 
 
@@ -63,12 +68,14 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
     groups: dict[str, dict[str, Any]] = {}
     fence = ""
     for index, line in enumerate(lines):
-        opener = FENCE_RE.match(line)
-        if opener and (not fence or opener.group(1).startswith(fence)):
-            fence = "" if fence else opener.group(1)  # 펜스 안의 표지는 예시다
+        if fence:  # 펜스 안의 표지는 예시다. 같은 글자로 같거나 더 길게, 그 글자만 있는 줄이 닫는다
+            close = CLOSE_RE.match(line)
+            fence = "" if close and close.group(1).startswith(fence) else fence
             continue
-        marker = None if fence else MARKER_RE.search(line)
-        if marker is None:
+        if opener := FENCE_RE.match(line):
+            fence = opener.group(1)
+            continue
+        if (marker := MARKER_RE.fullmatch(line.strip())) is None:
             continue
         where = f"{path}:{index + 1}"
         prefix = marker.group(1)
@@ -95,7 +102,8 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
                 problems.append(_problem("duplicate", at, f"{cell} also on line {line_no}", cell))
             else:
                 group["ids"][cell] = number
-                if "(live)" in row:
+                cells = [c.strip() for c in row.strip("|").split("|")]
+                if any(c == LIVE or c.endswith(" " + LIVE) for c in cells):
                     group["live"].add(cell)
     for prefix, group in groups.items():
         if not group["ids"]:
@@ -156,6 +164,11 @@ def check(docs: list[Path], tests_dir: Path) -> dict[str, Any]:
     problems: list[dict[str, str]] = []
     owners: dict[str, Path] = {}
     parsed: list[tuple[Path, str, dict[str, Any]]] = []
+    # 같은 파일을 다른 철자로 두 번 주면 제 접두어와 부딪힌다 — 풀린 경로로 한 번만 읽는다
+    unique: dict[Path, Path] = {}
+    for doc in docs:
+        unique.setdefault(doc.resolve(), doc)
+    docs = list(unique.values())
     for doc in docs:
         for prefix, group in parse_doc(doc, problems).items():
             if prefix in owners and owners[prefix] != doc:
@@ -229,7 +242,11 @@ def main(argv: list[str] | None = None) -> int:
         epilog="A new workplan must pick a prefix with zero usage: run --prefix-usage first. "
         "Existing tests already carry tags such as test_s1_, test_a10_ and # P2, so a common "
         "one-letter prefix turns them into orphans. Multi-letter prefixes such as TR are "
-        "allowed. Markers and tables inside fenced code blocks are not read. "
+        "allowed. The marker must be alone on its line. A row is live (proved by a live run, "
+        "never counted missing) when one of its cells is (live) or ends with (live) after a "
+        "space, as at the end of the scenario cell; (live) in the middle of a cell does not "
+        "count. Markers and tables inside fenced code blocks are not read; a fence closes "
+        "only on a line of bare fence characters. "
         "exit codes: 0 ok (--prefix-usage: unused) · 1 problems (including a table with no IDs "
         "and no marked document at all; --prefix-usage: already used) · 2 usage",
     )

@@ -155,6 +155,9 @@ calls for them. Severity, rounds, convergence, escalation and triage are
 - Post one `verify-round:` comment per round and `verified: <40-char head>` when it passes, in the formats
   of isolated-verifier.md. A HIGH goes back to the lead as a new round with the finding verbatim; the new
   head needs `rcm/ci` and the next round.
+- Triage fixes (what the canon's triage fixes now) are a new lead round `n+1` of the same bundle, never a hand fix;
+  the moved head then gets `rcm/ci` and the one-verifier look of isolated-verifier.md «Rounds» 7 before
+  `verified:`.
 
 ## 5 Merge in order
 

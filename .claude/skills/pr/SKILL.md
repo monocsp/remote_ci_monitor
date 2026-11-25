@@ -114,13 +114,20 @@ documents that stay in the repository are written in 평어체.
    ```sh
    gh pr comment <N> --body "verified: $(gh pr view <N> --json headRefOid -q .headRefOid)"
    ```
-   Each verification round leaves its own line before that, so the rounds can be counted later:
-   `verify-round: <40-char sha> r<N> verifiers=<n> high=<n> medium=<n> low=<n>` (and, after a
-   round-3 HIGH, `verify-analysis: <sha> r3 cause=<file:line…> policy-conflict=no|yes`).
+   Each verification round leaves its own line before that, so the rounds can be counted later,
+   in the formats `.claude/agents/isolated-verifier.md` «Rounds» fixes (full shas):
+   ```
+   verify-round: <sha> stage=<P1|P3|P4|P5|B5> r<N> verifiers=<n> high=<n> medium=<n> low=<n> unknown=<n>
+   verify-analysis: <sha> r3 cause=<file:line…> policy-conflict=no|yes
+   triage: <head sha after its fixes> fixed=<n> reported=<n>
+   ```
    `tools/merge_pr.py` reads only the `verified:` line.
    The line stands alone (no quote, no short sha, lowercase). A push after it makes it stale:
-   verify the new head and post a new line. A PR with nothing to verify (documentation only,
-   tests only) merges with `--no-verify "<reason>"`; the reason is posted on the PR.
+   verify the new head and post a new line. A head moved by triage code fixes gets one fresh
+   isolated verifier, who reviews only the diff since the last verified head, before `verified:`
+   names it; only a diff of documents or a report alone is exempt, and then the main session states
+   that in the PR. A PR with nothing to verify (documentation only, tests only) merges with
+   `--no-verify "<reason>"`; the reason is posted on the PR.
 
    `main` only takes a PR from `dev` (`gh pr create --base main --head dev`), and the `Releasing`
    section of `CONTRIBUTING.md` says when.

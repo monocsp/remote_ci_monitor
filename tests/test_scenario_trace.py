@@ -256,3 +256,49 @@ def test_an_unreadable_test_file_is_a_problem(tmp_path, capsys, body):
     code = st.main([str(tmp_path / "plan.md"), "--tests", str(tmp_path / "tests"), "--json"])
     report = json.loads(capsys.readouterr().out)
     assert code == 1 and _kinds(report) == [("unreadable", "")]
+
+
+@pytest.mark.parametrize(
+    "row, live",
+    [("| X3 | 서버를 다시 띄운다 (live) | 남는다 |", True),
+     ("| X3 | 서버를 다시 띄운다 | 남는다 | (live) |", True),
+     ("| X3 | `(live)` 표시를 고친다 | 남는다 |", False),
+     ("| X3 | 서버를 (live) 로 띄운다 | 남는다 |", False),
+     ("| X3 | 서버를 다시 띄운다(live) | 남는다 |", False)],
+)  # fmt: skip
+def test_only_a_cell_ending_with_live_marks_a_live_row(tmp_path, capsys, row, live):
+    # 설명 가운데의 `(live)` 는 실기 행 표시가 아니다 — 시험 없는 행이 누락에서 빠졌다(2라운드 F4)
+    plan = PLAN.replace("| X3 | 서버를 다시 띄운다 (live) | 남는다 |", row)
+    code, report = _run(tmp_path, capsys, plan=plan)
+    assert report["documents"][0]["live"] == (["X3"] if live else [])
+    assert (code, _kinds(report)) == ((0, []) if live else (1, [("missing", "X3")]))
+
+
+def test_the_help_says_how_a_live_row_is_marked(capsys):
+    assert st.main(["--help"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "ends with (live)" in out
+
+
+def test_a_fence_closes_only_on_a_bare_fence_line(tmp_path, capsys):
+    # 정보 문자열이 붙은 줄(```text)은 닫는 줄이 아니다 — 그 뒤의 예시 표지를 읽었다(2라운드 F9)
+    fenced = "```markdown\n```text\n<!-- scenario-prefix: X -->\n| ID |\n|---|\n| X9 |\n```\n\n"
+    code, report = _run(tmp_path, capsys, plan=fenced + PLAN)
+    assert code == 0, report
+    assert report["documents"][0]["ids"] == ["X1", "X2", "X3"]
+
+
+def test_a_marker_counts_only_on_a_line_of_its_own(tmp_path, capsys):
+    # 본문 속에 인용한 표지는 표지가 아니다(2라운드 F10)
+    plan = "표마다 `<!-- scenario-prefix: Y -->` 를 단다.\n\n" + PLAN
+    code, report = _run(tmp_path, capsys, plan=plan)
+    assert code == 0, report
+    assert [d["prefix"] for d in report["documents"]] == ["X"]
+
+
+def test_the_same_document_given_twice_is_read_once(tmp_path, capsys):
+    (tmp_path / "sub").mkdir()
+    docs = [str(tmp_path / "plan.md"), str(tmp_path / "sub" / ".." / "plan.md")]
+    code, report = _run(tmp_path, capsys, docs=docs)
+    assert code == 0, report
+    assert len(report["documents"]) == 1

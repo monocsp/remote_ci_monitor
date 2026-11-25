@@ -3,8 +3,8 @@
 An edge enters a workplan's test table, a scenario author's table or an edge audit by **what has to
 come together for it to happen**, not by a guess at how often it happens (nobody can measure that).
 Why a rule at all: without one, every audit adds every edge it can think of, every confirmed gap must
-be closed, and the loop drowns (measured elsewhere: one audit stood at 10 HIGH findings next to 124
-confirmed MED/LOW gaps; provisional for rcm, the owner confirms).
+be closed, and the loop drowns in low-value gaps (provisional, measured elsewhere; the owner
+confirms).
 
 ## Common or rare
 
@@ -57,7 +57,7 @@ and returns any match to the author as a row to write.
 | place | what it does |
 |---|---|
 | P1 workplan (`plan-lead`) | filters edges when writing the test table; exclusion lines under it |
-| P5 edge audit (`isolated-verifier`) | a rare, reversible edge is `RARE`, not `GAP`, with its condition; `RARE` has no severity, is not counted, and is not fixed by P6 or triage; it is `RARE` only if every verifier says so |
+| P5 edge audit (`isolated-verifier`) | a rare, reversible edge is `RARE`, not `GAP`, with its condition; `RARE` has no severity, is not counted, and is not fixed by P6 or triage; how votes on it merge is the canon's «Quorum» |
 | scenario author (`scenario-author`) | filters before a row goes in; "do not pick only what will pass" still holds: the filter is reach, not outcome |
 | QA fix (`qa-defect-fix`) | the same filter for the scenario rows of a defect |
 
