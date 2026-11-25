@@ -632,8 +632,11 @@ command naming rcm (or with a variable where the command goes) that holds the wo
 anywhere, or where the word after rcm is something the shell builds (`${S}tup`, `` `…` ``,
 `s{e,}tup`) — is refused with "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or
 backslash, absolute or ~ paths only". So are `cd /x && rcm setup …`, `env rcm setup …`, a
-command line setup would reject, and a failure of the hook itself. Text that only mentions it,
-such as `git commit -m "… rcm setup …"`, is refused too: put the text in a file
+command line setup would reject, and a failure of the hook itself. So is `xargs` or `parallel`
+running rcm (`… | xargs rcm`, `xargs -a FILE rcm`), whose arguments come from input the hook
+cannot read, and `rcm` with no subcommand under a launcher that gives it a terminal (`script`,
+`unbuffer`, `expect`, `socat … pty`), where the first-run question would start setup. Text that
+only mentions it, such as `git commit -m "… rcm setup …"`, is refused too: put the text in a file
 (`git commit -F <file>`, `gh pr create --title "$(cat <file>)"`).
 
 The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the

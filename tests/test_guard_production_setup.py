@@ -824,3 +824,89 @@ def test_mutcheck_reports_a_mutant_that_does_not_parse_as_a_failure(tmp_path, mo
     ok, info = mc._run_in_copy(bad, copy, {})
     assert ok is False and "does not parse" in info, info
     assert ran == []
+
+
+# ── P3 5라운드 G1: 인자를 만들어 넘기는 런처(xargs · parallel) 아래의 rcm ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xargs rcm < /tmp/args.txt",
+        "xargs -a /tmp/args.txt rcm",
+        "cat /tmp/args.txt | xargs rcm",
+        "cat /tmp/args.txt | xargs -n 1 rcm",
+        "xargs -0 /abs/.venv/bin/rcm < /tmp/args.txt",
+        "xargs --max-args=3 python3 -m remote_ci_monitor < /tmp/args.txt",
+        "nice xargs rcm < /tmp/args.txt",
+        "xargs env rcm < /tmp/args.txt",
+        "xargs sh -c 'rcm --no-follow' _ < /tmp/args.txt",
+        "xargs --weird-flag x rcm < /tmp/args.txt",
+        "parallel rcm ::: a b",
+        "parallel -j 2 /abs/bin/rcm :::: /tmp/args.txt",
+    ],
+)
+def test_g1_rcm_fed_its_arguments_by_xargs_or_parallel_is_denied(command):
+    # P3 5라운드 v1-1: 인자를 stdin · 파일 · 파이프가 주면 낱말 setup 이 글에 없어도 setup 에
+    # 닿는다 — 운영 머신에서 rcm 을 부를 수 있는 xargs · parallel 은 막는다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert PLAIN_MESSAGE in verdict.reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git ls-files | xargs grep -n rcm",
+        "cat /tmp/a | xargs -n 1 echo rcm",
+        "find . -name '*.py' | xargs ./.venv/bin/ruff check",
+        "xargs rm -f < /tmp/list",
+    ],
+)
+def test_g1_xargs_that_runs_something_else_passes(command):
+    # 과잉 차단의 경계: xargs 가 rcm 이 아닌 명령을 돌리면(rcm 은 그 명령의 인자) 조용하다
+    assert judge(command, environ=TEST_XDG) is None, command
+    # 운영 설치가 없는 컴퓨터에서는 그물도 없다
+    assert judge("xargs rcm < /tmp/a", prod=guard.Production()) is None
+
+
+# ── P3 5라운드 G2: pty 런처 아래 하위 명령 없는 rcm(첫 실행 질문) ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "script -q /dev/null rcm",
+        "script -q /tmp/log rcm --no-follow",
+        "/usr/bin/script -q /dev/null /abs/.venv/bin/rcm",
+        "script -c rcm /dev/null",
+        "script -c 'rcm' /tmp/log",
+        "script -c rcm status",
+        "unbuffer rcm",
+        "unbuffer python3 -m remote_ci_monitor",
+        "expect -c 'spawn rcm; interact'",
+        "socat - EXEC:rcm,pty,stderr",
+        "nice script -q /dev/null rcm",
+    ],
+)
+def test_g2_bare_rcm_under_a_pty_launcher_is_denied(command):
+    # P3 5라운드 v1-2: 인자 없는 rcm 이 터미널을 받으면 첫 실행 질문이 setup 을 돌린다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert PLAIN_MESSAGE in verdict.reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "script -q /dev/null rcm status",
+        "unbuffer rcm wait --job 5 --timeout 60",
+        "script -c 'rcm status' /tmp/log",
+        "expect -c 'spawn rcm status; interact'",
+        "script -q /tmp/log ls",
+        "rcm",
+    ],
+)
+def test_g2_rcm_with_a_subcommand_or_without_a_pty_passes(command):
+    # 하위 명령이 글자 그대로 있거나 pty 런처가 없으면(이 세션의 Bash 는 터미널이 아니다) 조용하다
+    assert judge(command, environ=TEST_XDG) is None, command

@@ -3326,6 +3326,33 @@ MUTANTS = (
             "test_tr20_round4_shell_tricks_around_setup_are_denied",
         ),
     ),
+    # ── M5t-a PR4 P3 5라운드 · P6 (batch 7) — guard 의 남은 길과 변이 없던 규칙 ──
+    Mutant(
+        # xargs · parallel 이 rcm 에 인자를 넘기는 꼴을 그물이 보지 않는다 — `… | xargs rcm` 이
+        # 낱말 setup 없이 setup 에 닿는다(P3 5라운드 v1-1)
+        name="guard-setup-xargs-feeder-allowed",
+        path="tools/guard_production.py",
+        old="        if at_command and _name(word) in _FEEDERS and _fed_rcm(tokens, index):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g1_rcm_fed_its_arguments_by_xargs_or_parallel_is_denied",
+        ),
+    ),
+    Mutant(
+        # pty 런처 아래 하위 명령 없는 rcm 을 그물이 보지 않는다 — `script -q /dev/null rcm` 의 첫
+        # 실행 질문이 setup 을 돌린다(P3 5라운드 v1-2)
+        name="guard-setup-pty-bare-rcm-allowed",
+        path="tools/guard_production.py",
+        old=(
+            "        if at_command and _name(word) in _PTY_LAUNCHERS and "
+            "_bare_rcm_on_a_pty(tokens, index):\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_g2_bare_rcm_under_a_pty_launcher_is_denied",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
