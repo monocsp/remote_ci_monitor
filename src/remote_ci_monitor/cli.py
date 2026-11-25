@@ -38,6 +38,7 @@ from typing import Any
 
 from remote_ci_monitor import SCHEMA_VERSION, __version__, follow, submissions
 from remote_ci_monitor import apply as apply_mod
+from remote_ci_monitor import setup as setup_cmd
 from remote_ci_monitor.client import (
     MAX_CHAIN_STEPS,
     Client,
@@ -5792,6 +5793,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills.set_defaults(func=cmd_skills)
 
+    setup_cmd.register(sub)
+
     doc = sub.add_parser("doctor", help="what this machine can build and test, and what to install")
     doc.add_argument("--role", choices=("client", "worker", "coordinator", "coordinator-worker"))
     doc.add_argument("--server")
@@ -5896,6 +5899,12 @@ def _main(argv: list[str] | None, *, follow_enabled: bool, execve: Any = os.exec
         except KeyboardInterrupt:
             _err("interrupted")
             return 130
+        if code is not None:
+            return code
+    if not (sys.argv[1:] if argv is None else argv):
+        # 인자 없는 `rcm`: 물을 사람이 있고 설정이 하나도 없으면 설정을 시작할지 묻는다(결정 240).
+        # 그 밖에는 아래 argparse 가 지금처럼 사용법 오류(종료 2)를 낸다
+        code = setup_cmd.first_run()
         if code is not None:
             return code
     parser = build_parser()

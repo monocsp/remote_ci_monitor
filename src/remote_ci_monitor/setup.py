@@ -18,8 +18,8 @@ docs/m5t-workplan.md §4.1).
 
 종료 코드: 설정을 썼으면 0, 쓰지 못했으면 1, 사용법 오류 2, Ctrl-C 130.
 
-명령줄 연결(`rcm setup` 하위 명령 · `NO_FOLLOW_COMMANDS` · 첫 실행 질문)은 cli 쪽 일이다 —
-`register(subparsers)` 와 `cmd_setup(args)` 가 그 자리를 위해 있다.
+cli 는 `register(subparsers)` 로 `rcm setup` 을 달고, 인자 없는 `rcm` 에서 `first_run()` 을
+부른다(첫 실행 질문). `setup` 은 버전 따라가기를 하지 않는다(`follow.NO_FOLLOW_COMMANDS`).
 """
 
 from __future__ import annotations
@@ -250,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def register(subparsers: Any) -> argparse.ArgumentParser:
-    """cli 의 하위 명령 목록에 `setup` 을 단다(2라운드에서 cli.build_parser 가 부른다)."""
+    """cli 의 하위 명령 목록에 `setup` 을 단다(`cli.build_parser` 가 부른다)."""
     p = subparsers.add_parser(
         "setup", help="set this machine up as a client, worker or coordinator"
     )
@@ -817,6 +817,44 @@ def run(args: argparse.Namespace, world: World) -> int:
         return EXIT_INTERRUPTED
     _report(plan, world)
     return EXIT_OK
+
+
+#: 인자 없는 `rcm` 이 설정 없는 터미널에서 묻는 말(결정 240)
+FIRST_RUN_QUESTION = "No rcm config on this machine yet. Set it up now?"
+
+
+def first_run(world: World | None = None, environ: Mapping[str, str] | None = None) -> int | None:
+    """인자 없는 `rcm`(결정 240, §4.1 「첫 실행」). stdin 과 stderr 가 모두 TTY 이고 역할을 읽어 낼
+    설정이 하나도 없을 때만 설정을 시작할지 묻는다. 예면 대화형 setup 을 돌려 그 종료 코드를
+    돌려준다. None 이면 지금처럼 사용법 오류(종료 2)로 간다 — 물을 사람이 없을 때, 설정이 있을
+    때(환경변수만 쓰는 클라이언트 · 워커 포함), `$RCM_CONFIG` 가 없는 파일을 가리킬 때, 아니오나
+    답이 없을 때다.
+
+    설정은 새로 찾지 않고 `existing_roles`(doctor 와 같은 `infer_roles` → `find_server_config` ·
+    `find_client_config` · `user_config_dir()/worker.toml`)로 본다. TTY 가 아니면 설정 파일도 읽지
+    않는다."""
+    world = World() if world is None else world
+    environ = os.environ if environ is None else environ
+    if not world.interactive():
+        return None
+    try:
+        roles = existing_roles(environ)
+    except SetupUsage as e:
+        world.stderr.write(f"rcm: {e}\n")
+        return None
+    if roles:
+        return None
+    ask = _Ask(world)
+    try:
+        wanted = ask.yes_no(FIRST_RUN_QUESTION, True)
+    except SetupUsage:
+        return None
+    except KeyboardInterrupt:
+        world.stderr.write("\nrcm: interrupted\n")
+        return EXIT_INTERRUPTED
+    if not wanted:
+        return None
+    return run(build_parser().parse_args([]), world)
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
