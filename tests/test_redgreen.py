@@ -656,3 +656,74 @@ def test_the_pytest_version_gate_reads_the_interpreter_and_stays_quiet(
     assert rg.has_pytest() is ok
     out, err = capfd.readouterr()
     assert (out, err) == ("", "")
+
+
+# ── 신호 마스크가 새지 않는다 (2026-11-25 dev rcm/ci #4136 · #4137 · #4165) ──
+#
+# 막기(SIG_BLOCK)가 걸린 바로 뒤 CPython 이 미뤄 둔 처리기를 돌린다. 그 사이에 이미 와 있던
+# SIGTERM 의 처리기가 SystemExit 를 던지면 `try` 에 들어가기 전이라 막힘이 영영 남았다. pytest
+# 워커가 그 마스크를 지닌 채 다음 시험의 자식을 띄우면 자식도 SIGTERM 을 막은 채 태어난다
+# (tests/test_runner.py 의 should_stop · cancel 시험이 rc -9 로 실패했다).
+
+HELD_SET = {signal.SIGTERM, signal.SIGINT}
+
+
+def _blocked() -> set[int]:
+    return set(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+
+
+def test_sm1_a_handler_that_fires_as_the_block_lands_leaves_no_mask(monkeypatch):
+    # SM1 막기 호출 안에서 처리기가 SystemExit 를 던져도 신호 마스크는 들어오기 전 그대로다
+    real = signal.pthread_sigmask
+
+    def block_then_handler_fires(how, mask):
+        out = real(how, mask)
+        if how == signal.SIG_BLOCK and set(mask) == HELD_SET:
+            raise SystemExit(143)  # 막은 뒤 PyErr_CheckSignals 가 _terminated 를 돌린 것과 같다
+        return out
+
+    before = _blocked()
+    monkeypatch.setattr(rg.signal, "pthread_sigmask", block_then_handler_fires)
+    try:
+        with pytest.raises(SystemExit) as stop, rg._held():
+            pytest.fail("the body must not run once the handler has fired")
+        assert stop.value.code == 143
+    finally:
+        monkeypatch.undo()
+        leaked = _blocked() - before
+        real(signal.SIG_UNBLOCK, list(leaked))  # 빨간 동안 다음 시험에 새지 않게
+    assert not leaked, f"{sorted(int(s) for s in leaked)} stay blocked"
+
+
+def test_sm2_a_mask_that_already_held_the_signals_is_kept(monkeypatch):
+    # SM2 들어오기 전부터 막혀 있던 신호는 처리기가 터져도 막힌 채로 둔다
+    real = signal.pthread_sigmask
+
+    def block_then_handler_fires(how, mask):
+        out = real(how, mask)
+        if how == signal.SIG_BLOCK and set(mask) == HELD_SET:
+            raise SystemExit(130)
+        return out
+
+    real(signal.SIG_BLOCK, [signal.SIGINT])
+    try:
+        monkeypatch.setattr(rg.signal, "pthread_sigmask", block_then_handler_fires)
+        with pytest.raises(SystemExit), rg._held():
+            pass
+        monkeypatch.undo()
+        assert signal.SIGINT in _blocked() and signal.SIGTERM not in _blocked()
+    finally:
+        monkeypatch.undo()
+        real(signal.SIG_UNBLOCK, [signal.SIGINT, signal.SIGTERM])
+
+
+@pytest.fixture(autouse=True)
+def _sm3_no_test_here_leaves_a_signal_blocked():
+    # SM3 이 파일의 어느 시험도 SIGTERM · SIGINT 를 막은 채 끝나지 않는다 — 새면 여기서 빨갛다
+    # (같은 xdist 워커의 다음 파일이 아니라)
+    before = _blocked()
+    yield
+    leaked = (_blocked() - before) & HELD_SET
+    if leaked:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, list(leaked))
+        pytest.fail(f"this test left {sorted(int(s) for s in leaked)} blocked")
