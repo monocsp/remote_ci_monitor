@@ -273,3 +273,6 @@ def test_tr20_guard_constants_match_the_setup_module():
         assert core.default_label(role) == label, role
     assert core.default_label("client") is None and "client" not in guard.SETUP_ROLE_LABELS
     assert set(guard.SETUP_SERVER_ROLES) == set(core.SERVER_ROLES)
+    # 서비스 관리자가 읽는 자리 — guard 가 막는 자리와 setup 이 거절하는 자리가 같다
+    places = {str(p).replace(str(HOME), "~", 1) for p in core.install_places(HOME)}
+    assert set(guard.SETUP_SERVICE_PLACES) == places

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import re
 import shlex
@@ -240,6 +241,32 @@ StandardError=append:{log}
 WantedBy=default.target
 """
     return text.encode("utf-8")
+
+
+#: 서비스 관리자가 서비스 파일을 읽는 시스템 자리 — 사용자 자리(`install_dir`)와 함께 setup 이
+#: 쓰지 않는 곳이다(§4.1 「설치 자리에 쓰지 않는다」). guard 의 `SETUP_SERVICE_PLACES` 와 같다
+SYSTEM_SERVICE_DIRS = (
+    Path("/Library/LaunchAgents"),
+    Path("/Library/LaunchDaemons"),
+    Path("/etc/systemd/user"),
+    Path("/etc/systemd/system"),
+)
+
+
+def install_places(home: Path) -> tuple[Path, ...]:
+    """서비스 관리자가 읽는 자리 전부 — launchd · systemd 의 사용자 자리와 시스템 자리."""
+    return (install_dir(LAUNCHD, home), install_dir(SYSTEMD, home), *SYSTEM_SERVICE_DIRS)
+
+
+def install_place_of(path: Path, home: Path) -> Path | None:
+    """`path` 가 설치 자리 안이면 그 자리. 바로 아래만이 아니라 그 안 전부다 — systemd 는
+    `<유닛>.d/` 의 drop-in 도 읽는다. 경로는 글자로만 비교한다(심링크는 풀지 않는다)."""
+    text = os.path.normpath(str(path))
+    for place in install_places(home):
+        root = os.path.normpath(str(place))
+        if text == root or text.startswith(root.rstrip("/") + "/"):
+            return place
+    return None
 
 
 def install_dir(manager: str, home: Path) -> Path:

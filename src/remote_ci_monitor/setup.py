@@ -613,6 +613,19 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
             f"{plan.config}` yourself"
         )
         return
+    home = Path.home()
+    label = plan.label
+    name = core.service_file_name(label, manager)
+    staged = _abs(args.service_file) if args.service_file else plan.config.parent / "service" / name
+    place = core.install_place_of(staged, home)
+    if place is not None:
+        # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9) — 그 자리의 파일은 서비스 관리자가 읽는 것이고,
+        # 운영 서비스의 파일도 거기 있다(P3 v1-2)
+        raise SetupUsage(
+            f"--service-file {staged} is inside {place}, an install place the service manager "
+            "reads — setup does not install; let it write the file elsewhere and copy it with "
+            "the printed command"
+        )
     rcm, via_path = world.find_rcm()
     if rcm is None:
         raise SetupFailed(
@@ -624,10 +637,6 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
             f"the service file runs {rcm}, the rcm found on PATH — check that it is the build "
             "you want the service to run"
         )
-    home = Path.home()
-    label = plan.label
-    name = core.service_file_name(label, manager)
-    staged = _abs(args.service_file) if args.service_file else plan.config.parent / "service" / name
     log = core.log_dir(manager, home) / core.log_file_name(label)
     if plan.role in core.SERVER_ROLES:
         render = core.server_plist if manager == core.LAUNCHD else core.server_unit
