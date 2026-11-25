@@ -457,3 +457,16 @@ def test_an_unreachable_checks_item_without_a_name_or_code_is_unknown_not_droppe
     """이름이나 이유 코드가 없는 항목을 조용히 버리면 그 점검이 「닿는다」로 읽힌다."""
     assert dc.unreachable_checks({"unreachable_checks": [{"code": "check_local_only"}]}) is None
     assert dc.unreachable_checks({"unreachable_checks": [{"name": "qa"}]}) is None
+
+
+@pytest.mark.parametrize("name", [" rcm-td-fvm", "rcm-td-fvm ", "x" * 65])
+def test_a_tool_name_doctor_would_change_refuses_to_start(tmp_path, name):
+    """doctor 는 서버가 준 도구 이름을 strip 하고 64자로 자른다. 그러면 `requires` 의 이름과 맞지
+    않아 안내가 사라진다 — 설정을 읽을 때 거절한다(P3 3라운드 LOW)."""
+    from remote_ci_monitor.config import ConfigError, load_server_config
+
+    with pytest.raises(ConfigError) as e:
+        load_server_config(
+            _server_toml(tmp_path, f'[[tools]]\nname = "{name}"\n'), check_tools=False
+        )
+    assert "[[tools]]" in str(e.value) and "name" in str(e.value), e.value

@@ -627,6 +627,9 @@ def test_td28_non_tty_with_a_discovered_server_exits_3(env, srv, svcbin, monkeyp
     )
     assert code == 3, (out, err)
     assert srv.requests == []
+    # 종료 3 의 이유까지 — 다른 모름(토큰 · 서비스 파일)으로 3 이 난 것이 아니다
+    said = [ln for ln in out.splitlines() if ln.startswith("?")]
+    assert said and all("nobody confirmed" in ln for ln in said), out
 
 
 # ── 원격 git · Local Network · Python (TD17 · TD50 · TD14) ─────────────────────
@@ -770,8 +773,11 @@ def test_td41_without_a_client_token_the_server_cells_are_dashes_and_exit_3(
     assert doc["server"]["state"] == "—", doc["server"]
     assert not (env / "data" / "rcm.sqlite3").exists()  # DB 를 열지 않는다
     assert not (env / "data").exists()
+    token_line = [u for u in doc["undecided"] if u.startswith("a client token is needed")]
+    assert token_line and doc["problems"] == [], doc
     code, doc = run_json(capsys, "--role", "coordinator", "--config", str(cfg))
     assert code == 3 and doc["role"] == "coordinator", doc
+    assert any(u.startswith("a client token is needed") for u in doc["undecided"]), doc
 
 
 def test_td39_client_checks_reach_version_and_token_only(env, coordinator, monkeypatch, capsys):
@@ -2934,3 +2940,53 @@ def test_repos_with_an_unknown_service_path_are_unknown_not_unreachable(
     code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
     assert req(doc, "repos")["state"] == "unknown", doc["rcm_requirements"]
     assert doc["problems"] == [] and code == 3, doc
+
+
+# ── 싸게 고친 LOW (P3 3라운드) ────────────────────────────────────────────────
+
+
+def test_a_probe_value_with_the_home_folder_is_masked(worker, srv, svcbin, monkeypatch, capsys):
+    """프로브 값에 이 머신의 홈 경로가 섞일 수 있다(SDK 경로를 찍는 프로브) — `~` 로 가린다.
+    프로브 값은 길이가 잘리므로 짧은 HOME 으로 본다(값만 찍을 뿐 그 폴더를 쓰지 않는다)."""
+    script(svcbin / "rcm-td-where", 'echo "$HOME/sdk"')
+    monkeypatch.setenv("HOME", "/rcm-td-home")
+    probe = {"name": "where", "argv": ["rcm-td-where"], "timeout_seconds": 5}
+    srv.route("GET", "/worker/spec", spec_doc(preset("build"), probes=[probe]))
+    code, doc = worker(capsys)
+    assert doc["probes"]["where"]["value"] == "~/sdk", doc["probes"]
+    assert code == 0, doc
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), 0, 600, 2.5], ids=["inf", "0", "600", "2.5"])
+def test_a_probe_timeout_rcm_would_never_send_is_an_unreadable_answer(
+    env, srv, svcbin, monkeypatch, capsys, timeout
+):
+    """서버의 프로브 시한은 1~60 의 정수다. JSON 의 `Infinity` 나 범위 밖 값은 rcm 서버의 답이
+    아니다 — 맨 바깥 경계(`OverflowError`)가 아니라 읽는 자리가 그 칸을 말하고 종료 3 이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    probe = {"name": "p", "argv": ["rcm-td-version"], "timeout_seconds": timeout}
+    srv.route("GET", "/worker/spec", spec_doc(preset("build"), probes=[probe]))
+    cfg = worker_toml(env, srv.url)
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    argv = ["--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"]
+    code, out, err = run_guarded(capsys, *argv)
+    assert_handled(code, out, err, "probes[0].timeout_seconds", codes=(3,))
+
+
+@pytest.mark.parametrize("route", ["/api/health", "/api/whoami"])
+def test_worker_check_with_an_answer_that_is_not_an_object_does_not_crash(
+    env, srv, svcbin, monkeypatch, capsys, route
+):
+    """`rcm worker --check` 도 health · whoami 가 객체가 아니면(틀린 포트) traceback 이 아니라
+    FAIL 줄이다."""
+    import traceback
+
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    srv.route("GET", route, [])
+    try:
+        code, lines = worker_check(capsys, env, srv)
+    except Exception:  # noqa: BLE001 — traceback 을 단언으로 보인다
+        raise AssertionError(traceback.format_exc()) from None
+    row_ = check_line(lines, "server" if route == "/api/health" else "token")
+    assert row_ is not None and row_.startswith("FAIL") and "not rcm's" in row_, lines
+    assert code == 1, lines
