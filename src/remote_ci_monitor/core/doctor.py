@@ -168,7 +168,7 @@ def tool_hints(raw: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str):
             continue
         install = item.get("install") if isinstance(item.get("install"), dict) else {}
-        out[item["name"]] = {
+        out[clean_text(item["name"], 64)] = {
             "install": {str(k): clean_text(v) for k, v in install.items() if isinstance(v, str)},
             "docs": clean_text(item["docs"]) if isinstance(item.get("docs"), str) else "",
         }
@@ -221,7 +221,8 @@ class PresetRow:
 
 
 def _names(items: Any) -> list[str]:
-    return [os.path.basename(str(x)) for x in items or ()]
+    """도구 이름들 — 경로면 끝 이름만, 제어문자는 지운다(서버가 보낸 이름이라 그대로 찍힌다)."""
+    return [clean_text(os.path.basename(str(x)), 64) for x in items or ()]
 
 
 def unreachable_checks(entry: Mapping[str, Any]) -> dict[str, str] | None:
@@ -261,9 +262,10 @@ def classify_preset(
     인데 `checks` 가 있으면 그 점검이 이 머신에 닿는지 모르므로 「모름」(`check_unknown`)이다.
     `{}` 는 「모두 닿는다」이다 — 서버의 로컬 레인처럼 칸이 필요 없는 자리는 `{}` 를 준다.
     """
-    name = str(entry.get("name"))
+    # 이름은 서버가 보낸 것이다 — 사람용 표에 그대로 찍히므로 제어문자를 지운다(검증자 1 #7)
+    name = clean_text(entry.get("name"), 64)
     tools = _names(entry.get("requires"))
-    checks = [str(c) for c in entry.get("checks") or ()]
+    checks = [clean_text(c, 64) for c in entry.get("checks") or ()]
     missing = _names(facts.get("missing_tools"))
     workspace = _names(facts.get("workspace_tools"))
     missing_rows = []

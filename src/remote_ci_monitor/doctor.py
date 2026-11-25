@@ -527,7 +527,7 @@ def infer_roles(environ: Mapping[str, str]) -> list[str]:
 def git_ref_presets(entries: list[Mapping[str, Any]], rows: list[dc.PresetRow]) -> dict[str, str]:
     """이 머신에 오는 git_ref 프리셋 → 저장소 이름. 오는 프리셋의 `checks` 에 이름이 오른 점검
     프리셋도 든다 — 점검은 그 머신을 지정한 git_ref 잡이다(결정 94)."""
-    by_name = {str(p["name"]): p for p in entries}
+    by_name = {dc.clean_text(p["name"], 64): p for p in entries}
     coming = {r.name for r in rows if r.counts}
     names = set(coming)
     for r in rows:
@@ -1091,9 +1091,13 @@ class _Run:
             # 서비스 PATH 를 모르면 프로브도 돌리지 않는다 — 빈 PATH 로 돌리면 「missing」을
             # 지어낸다. 프리셋도 재지 않는다. 판정 못 함은 service_env 가 이미 적었다
             for probe in probes:
-                self.probes[probe.name] = {"state": dc.TOOL_UNKNOWN, "value": None}
+                self.probes[dc.clean_text(probe.name, 64)] = {
+                    "state": dc.TOOL_UNKNOWN,
+                    "value": None,
+                }
             return
-        for name, r in hostsample.run_probes(probes, env).items():
+        for raw_name, r in hostsample.run_probes(probes, env).items():
+            name = dc.clean_text(raw_name, 64)  # 서버가 보낸 이름 — 찍기 전에 정리한다
             state = {
                 "ok": dc.TOOL_OK,
                 "missing": dc.TOOL_MISSING,
@@ -1123,7 +1127,10 @@ class _Run:
             requires = tuple(str(x) for x in p.get("requires") or ())
             job_env = jobenv.job_env(passthrough, fixed, env)
             missing, workspace = runner.measure_tools(requires, job_env)
-            unset = jobenv.missing_passthrough(passthrough, env, preset_env=fixed)
+            unset = [
+                dc.clean_text(u, 64)
+                for u in jobenv.missing_passthrough(passthrough, env, preset_env=fixed)
+            ]
             entry = dict(p) if "placement" in p else {**p, "pool": pool}
             row = dc.classify_preset(
                 entry,
@@ -1312,7 +1319,7 @@ class _Run:
                 row.state, row.code = dc.UNKNOWN, "tools_unknown"
                 row.note = "the server did not say what it measured for this preset"
                 blind.append(p.name)
-            unset = [str(v) for v in facts.get("missing_passthrough") or []]
+            unset = [dc.clean_text(v, 64) for v in facts.get("missing_passthrough") or []]
             if unset and row.applies != dc.APPLIES_OTHER_POOL:
                 self.warnings.append(
                     f"{p.name}: {', '.join(unset)} not set in the server's service environment"
